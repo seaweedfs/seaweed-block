@@ -102,6 +102,10 @@ Seaweed Block can already demonstrate a narrow Kubernetes block-storage loop:
   live cross-node writer/reader gate against a routable NVMe/TCP target. This
   is still not a RoCE, performance/SLO, broad compatibility, or production HA
   claim.
+- Kubernetes NVMe/TCP mounted reconnect is source-gated through changed
+  desired path-set evidence: CSI-node can connect a newly published desired
+  NVMe path without pod remount and keep mounted I/O working. Stale host-path
+  pruning after replacement remains the next correctness gap.
 - Install drift status for current versus desired chart/app/image identity
   without upgrade execution.
 - CRD/RBAC status-writer conformance coverage for the failures that previously

@@ -33,6 +33,8 @@ The supported-lab claim is intentionally narrow:
 - two mounted volumes remain isolated through path loss and restore;
 - bounded multi-volume churn passes across three alternating loss/restore
   cycles;
+- changed control-plane desired path sets cause CSI-node to connect the new
+  desired NVMe/TCP path for a mounted pod without remounting;
 - uninstall/cleanup leaves zero Seaweed Block Kubernetes, iSCSI, process,
   multipath, and hostPath residue.
 
@@ -69,6 +71,7 @@ The supported-lab claim is intentionally narrow:
 | 129 | CSI mounted NVMe restage contract | PASS |
 | 130 | CSI-node reconnect owner/trigger contract | PASS |
 | 131 | Live Kubernetes host-path reconnect through CSI-node owner | PASS |
+| 132 | Live Kubernetes desired path-set change through CSI-node owner | PASS |
 
 Key QA sign-offs:
 
@@ -84,6 +87,7 @@ Key QA sign-offs:
 - `internal/docs/qa-assignments/phase129-nvme-k8s-mounted-restage-qa-signoff.md`
 - `internal/docs/qa-assignments/phase130-nvme-reconnect-owner-qa-signoff.md`
 - `internal/docs/qa-assignments/phase131-nvme-k8s-reconnect-live-qa-signoff.md`
+- `internal/docs/qa-assignments/phase132-nvme-k8s-desired-path-change-qa-signoff.md`
 
 ## Performance Baseline
 

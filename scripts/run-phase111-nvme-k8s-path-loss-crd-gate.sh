@@ -19,6 +19,7 @@ RECONNECT_OWNER="${SW_BLOCK_NVME_RECONNECT_OWNER:-0}"
 RECONNECT_INTERVAL="${SW_BLOCK_NVME_RECONNECT_INTERVAL:-5s}"
 HOST_PATH_DISCONNECT="${SW_BLOCK_NVME_HOST_PATH_DISCONNECT:-0}"
 FORCE_STAGE2_MULTIPATH="${SW_BLOCK_NVME_FORCE_STAGE2_MULTIPATH:-0}"
+DESIRED_PATH_CHANGE="${SW_BLOCK_NVME_DESIRED_PATH_CHANGE:-0}"
 
 mkdir -p "${ARTIFACT_DIR}"/{bin,build,values,install,multi-volume,inject,surfaces,cleanup}
 : >"${SUMMARY}"
@@ -235,6 +236,7 @@ for sub in walk(doc):
     paths.extend(sub.get("Paths") or [])
 
 print(f"path_count={len(paths)}")
+print("addrs=" + ",".join(a for a in [addr(p.get("Address")) for p in paths] if a))
 if paths:
     first = paths[0]
     name = first.get("Name") or first.get("Controller") or first.get("Device") or ""
@@ -268,12 +270,47 @@ wait_for_host_nvme_path_count() {
   return 1
 }
 
+wait_for_host_nvme_addr() {
+  local label="$1"
+  local nqn="$2"
+  local want_addr="$3"
+  for _ in $(seq 1 90); do
+    write_host_nvme_path_info "${label}" "${nqn}" || true
+    local addrs
+    addrs="$(read_env_value "${ARTIFACT_DIR}/inject/nvme-path-info.${label}.env" addrs)"
+    if python3 - "${addrs}" "${want_addr}" <<'PY'
+import sys
+addrs = [a for a in sys.argv[1].split(",") if a]
+raise SystemExit(0 if sys.argv[2] in addrs else 1)
+PY
+    then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "NVMe host path ${want_addr} did not appear for ${nqn}" >&2
+  return 1
+}
+
 wait_for_reconnect_owner_log() {
   local out="$1"
   for _ in $(seq 1 90); do
     kubectl -n "${HELM_NAMESPACE}" logs -l app=sw-block-csi-node -c block-csi --since=10m --prefix=true >"${out}" 2>&1 || true
     if grep -q 'MountedNVMeReconnectOwner: iteration .*reconnected=1' "${out}" || \
        grep -q 'reconciled mounted NVMe paths' "${out}"; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+wait_for_reconnect_owner_log_for_addr() {
+  local out="$1"
+  local addr="$2"
+  for _ in $(seq 1 90); do
+    kubectl -n "${HELM_NAMESPACE}" logs -l app=sw-block-csi-node -c block-csi --since=10m --prefix=true >"${out}" 2>&1 || true
+    if grep -q 'reconciled mounted NVMe paths' "${out}" && grep -Fq "${addr}" "${out}"; then
       return 0
     fi
     sleep 1
@@ -294,6 +331,42 @@ for part in expr:
     value = value.get(part, {}) if isinstance(value, dict) else {}
 print(value if isinstance(value, (str, int, float, bool)) else "")
 PY
+}
+
+wait_for_crd_nvme_addr_set_changed() {
+  local phase="$1"
+  local old_addr="$2"
+  local new_addr="$3"
+  local out_json="${ARTIFACT_DIR}/surfaces/swblockvolumes.${phase}.json"
+  for _ in $(seq 1 120); do
+    kubectl -n "${HELM_NAMESPACE}" get swblockvolumes -o json >"${out_json}" 2>/dev/null || true
+    python3 - "${out_json}" "${old_addr}" "${new_addr}" <<'PY' && return 0 || true
+import json
+import sys
+
+path, old_addr, new_addr = sys.argv[1:]
+try:
+    doc = json.load(open(path))
+except Exception:
+    raise SystemExit(1)
+items = doc.get("items") or []
+if len(items) != 1:
+    raise SystemExit(1)
+st = items[0].get("status") or {}
+nv = st.get("nvme") or {}
+addrs = nv.get("nvmeAddrs") or []
+if st.get("status") != "ready" or st.get("reasonCode") != "first_volume_verified":
+    raise SystemExit(1)
+if nv.get("pathCount") != 2:
+    raise SystemExit(1)
+if new_addr not in addrs or old_addr in addrs:
+    raise SystemExit(1)
+PY
+    sleep 2
+  done
+  echo "SwBlockVolume desired NVMe path set did not replace ${old_addr} with ${new_addr}" >&2
+  kubectl -n "${HELM_NAMESPACE}" get swblockvolumes -o yaml >&2 || true
+  return 1
 }
 
 write_summary "${PHASE_STATUS_KEY}=running"
@@ -407,6 +480,233 @@ YAML
   MOUNTED_POD_UID_BEFORE="$(kubectl -n "${APP_NAMESPACE}" get pod "${MOUNTED_POD}" -o jsonpath='{.metadata.uid}')"
   kubectl -n "${APP_NAMESPACE}" exec "${MOUNTED_POD}" -- sh -c 'set -eu; echo before-path-loss > /data/phase112-mounted.txt; sync; grep before-path-loss /data/phase112-mounted.txt' >"${ARTIFACT_DIR}/inject/mounted-before.log"
   write_summary "mounted_pod_uid_before=${MOUNTED_POD_UID_BEFORE}"
+fi
+
+if [[ "${DESIRED_PATH_CHANGE}" == "1" || "${DESIRED_PATH_CHANGE}" == "true" ]]; then
+  echo "[phase111] replace one desired NVMe frontend path and wait for mounted reconnect"
+  kubectl -n "${APP_NAMESPACE}" get deploy -l app=sw-blockvolume -o json >"${ARTIFACT_DIR}/inject/blockvolume-deployments.before-desired-change.json"
+  python3 - "${ARTIFACT_DIR}" <<'PY' >"${ARTIFACT_DIR}/inject/desired-path-change.env"
+import json
+import sys
+from pathlib import Path
+
+base = Path(sys.argv[1])
+crd = json.load(open(base/"surfaces/swblockvolumes.healthy.json"))
+deploys = json.load(open(base/"inject/blockvolume-deployments.before-desired-change.json"))
+items = crd.get("items") or []
+if len(items) != 1:
+    raise SystemExit(f"need one SwBlockVolume, got {len(items)}")
+st = items[0].get("status") or {}
+nv = st.get("nvme") or {}
+desired = nv.get("nvmeAddrs") or []
+if len(desired) != 2:
+    raise SystemExit(f"need two desired NVMe paths, got {desired}")
+primary = st.get("primaryReplicaID") or ""
+volume_id = st.get("volumeID") or ""
+nqn = nv.get("nqn") or ""
+if not volume_id or not nqn:
+    raise SystemExit(f"missing volume_id/nqn in status: {st}")
+
+current_addrs = set(desired)
+candidates = []
+for item in deploys.get("items") or []:
+    meta = item.get("metadata") or {}
+    labels = meta.get("labels") or {}
+    replica = labels.get("sw-block.seaweedfs.com/replica") or ""
+    namespace = meta.get("namespace") or "default"
+    name = meta.get("name") or ""
+    containers = ((item.get("spec") or {}).get("template") or {}).get("spec", {}).get("containers") or []
+    for ci, container in enumerate(containers):
+        if container.get("name") != "blockvolume":
+            continue
+        for ai, arg in enumerate(container.get("args") or []):
+            if not str(arg).startswith("--nvme-listen="):
+                continue
+            old_addr = str(arg).split("=", 1)[1]
+            if old_addr in current_addrs:
+                candidates.append((replica == primary, replica, namespace, name, ci, ai, old_addr))
+
+if not candidates:
+    raise SystemExit(f"no deployment --nvme-listen matched desired addrs {desired}")
+candidates.sort(key=lambda x: (x[0], x[1], x[3]))
+_, replica, namespace, name, ci, ai, old_addr = candidates[0]
+host, port_text = old_addr.rsplit(":", 1)
+port = int(port_text)
+used = {int(a.rsplit(":", 1)[1]) for a in current_addrs if a.startswith(host + ":")}
+new_port = None
+for offset in (100, 101, 102, 103, 104, 105, 200):
+    candidate = port + offset
+    if candidate not in used and candidate < 65535:
+        new_port = candidate
+        break
+if new_port is None:
+    raise SystemExit(f"no replacement port for {old_addr}")
+new_addr = f"{host}:{new_port}"
+patch = [{"op": "replace", "path": f"/spec/template/spec/containers/{ci}/args/{ai}", "value": "--nvme-listen=" + new_addr}]
+(base/"inject/desired-path-change-patch.json").write_text(json.dumps(patch))
+for key, value in {
+    "volume_id": volume_id,
+    "nvme_nqn": nqn,
+    "target_namespace": namespace,
+    "target_deployment": name,
+    "target_replica": replica,
+    "old_desired_path": old_addr,
+    "new_desired_path": new_addr,
+    "initial_desired_paths": ",".join(desired),
+    "initial_path_count": str(len(desired)),
+}.items():
+    print(f"{key}={value}")
+PY
+  TARGET_NAMESPACE="$(read_env_value "${ARTIFACT_DIR}/inject/desired-path-change.env" target_namespace)"
+  TARGET_DEPLOY="$(read_env_value "${ARTIFACT_DIR}/inject/desired-path-change.env" target_deployment)"
+  VOLUME_ID="$(read_env_value "${ARTIFACT_DIR}/inject/desired-path-change.env" volume_id)"
+  NQN="$(read_env_value "${ARTIFACT_DIR}/inject/desired-path-change.env" nvme_nqn)"
+  OLD_DESIRED_PATH="$(read_env_value "${ARTIFACT_DIR}/inject/desired-path-change.env" old_desired_path)"
+  NEW_DESIRED_PATH="$(read_env_value "${ARTIFACT_DIR}/inject/desired-path-change.env" new_desired_path)"
+  INITIAL_PATH_COUNT="$(read_env_value "${ARTIFACT_DIR}/inject/desired-path-change.env" initial_path_count)"
+  INITIAL_DESIRED_PATHS="$(read_env_value "${ARTIFACT_DIR}/inject/desired-path-change.env" initial_desired_paths)"
+  TARGET_REPLICA="$(read_env_value "${ARTIFACT_DIR}/inject/desired-path-change.env" target_replica)"
+  write_summary "volume_id=${VOLUME_ID}"
+  write_summary "nvme_nqn=${NQN}"
+  write_summary "initial_path_count=${INITIAL_PATH_COUNT}"
+  write_summary "initial_desired_paths=${INITIAL_DESIRED_PATHS}"
+  write_summary "target_deployment=${TARGET_NAMESPACE}/${TARGET_DEPLOY}"
+  write_summary "target_replica=${TARGET_REPLICA}"
+  write_summary "old_desired_path=${OLD_DESIRED_PATH}"
+  write_summary "new_desired_path=${NEW_DESIRED_PATH}"
+
+  kubectl -n "${TARGET_NAMESPACE}" patch "deploy/${TARGET_DEPLOY}" --type=json --patch-file "${ARTIFACT_DIR}/inject/desired-path-change-patch.json" \
+    >"${ARTIFACT_DIR}/inject/patch-desired-path.txt" 2>&1
+  kubectl -n "${TARGET_NAMESPACE}" rollout status "deploy/${TARGET_DEPLOY}" --timeout=240s \
+    >"${ARTIFACT_DIR}/inject/rollout-desired-path-change.txt" 2>&1
+  kubectl -n "${TARGET_NAMESPACE}" get deploy,pod -l app=sw-blockvolume -o wide >"${ARTIFACT_DIR}/inject/blockvolume.after-desired-change.txt"
+
+  wait_for_crd_nvme_addr_set_changed "desired-change" "${OLD_DESIRED_PATH}" "${NEW_DESIRED_PATH}"
+  write_summary "desired_path_set_changed=true"
+  write_summary "path_loss_or_replacement_detected=true"
+  write_summary "reconnect_owner=csi-node"
+
+  if ! wait_for_reconnect_owner_log_for_addr "${ARTIFACT_DIR}/inject/csi-node-desired-path-change-owner.log" "${NEW_DESIRED_PATH}"; then
+    echo "CSI-node reconnect owner did not report new desired path ${NEW_DESIRED_PATH}" >&2
+    exit 1
+  fi
+  wait_for_host_nvme_addr "after-desired-path-change" "${NQN}" "${NEW_DESIRED_PATH}"
+  write_summary "reconnect_invoked=true"
+  write_summary "new_desired_path_connected=true"
+  HOST_PATH_COUNT_AFTER_DESIRED_CHANGE="$(read_env_value "${ARTIFACT_DIR}/inject/nvme-path-info.after-desired-path-change.env" path_count)"
+  HOST_PATHS_AFTER_DESIRED_CHANGE="$(read_env_value "${ARTIFACT_DIR}/inject/nvme-path-info.after-desired-path-change.env" addrs)"
+  write_summary "host_path_count_after_desired_change=${HOST_PATH_COUNT_AFTER_DESIRED_CHANGE}"
+  write_summary "host_paths_after_desired_change=${HOST_PATHS_AFTER_DESIRED_CHANGE}"
+  if python3 - "${HOST_PATHS_AFTER_DESIRED_CHANGE}" "${OLD_DESIRED_PATH}" <<'PY'
+import sys
+addrs = [a for a in sys.argv[1].split(",") if a]
+raise SystemExit(0 if sys.argv[2] in addrs else 1)
+PY
+  then
+    write_summary "stale_old_host_path_after_desired_change=true"
+  else
+    write_summary "stale_old_host_path_after_desired_change=false"
+  fi
+
+  if [[ "${MOUNTED_IO}" == "1" || "${MOUNTED_IO}" == "true" ]]; then
+    MOUNTED_POD_UID_CHANGED="$(kubectl -n "${APP_NAMESPACE}" get pod "${MOUNTED_POD}" -o jsonpath='{.metadata.uid}')"
+    if [[ "${MOUNTED_POD_UID_CHANGED}" != "${MOUNTED_POD_UID_BEFORE}" ]]; then
+      echo "mounted pod UID changed after desired path replacement: before=${MOUNTED_POD_UID_BEFORE} changed=${MOUNTED_POD_UID_CHANGED}" >&2
+      exit 1
+    fi
+    kubectl -n "${APP_NAMESPACE}" exec "${MOUNTED_POD}" -- sh -c 'set -eu; echo after-desired-path-change >> /data/phase132-mounted.txt; sync; grep after-desired-path-change /data/phase132-mounted.txt' >"${ARTIFACT_DIR}/inject/mounted-after-desired-path-change.log"
+    write_summary "pod_uid_preserved=true"
+    write_summary "mounted_io_after_reconnect=ok"
+  fi
+
+  with_master_port_forward "${ARTIFACT_DIR}/surfaces/desired-change-blockmaster-port-forward.log" \
+    "${ARTIFACT_DIR}/bin/sw-block" ops report \
+      --master-api "127.0.0.1:${STATUS_PORT}" \
+      --namespace "${APP_NAMESPACE}" \
+      --out "${ARTIFACT_DIR}/surfaces/desired-change-report" \
+      --timeout 30s >"${ARTIFACT_DIR}/surfaces/desired-change-report.stdout.txt" 2>"${ARTIFACT_DIR}/surfaces/desired-change-report.stderr.txt"
+  DASHBOARD_PORT="$(python3 - <<'PY'
+import socket
+s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()
+PY
+)"
+  "${ARTIFACT_DIR}/bin/sw-block" ops dashboard \
+    --from-bundle "${ARTIFACT_DIR}/surfaces/desired-change-report" \
+    --listen "127.0.0.1:${DASHBOARD_PORT}" >"${ARTIFACT_DIR}/surfaces/desired-change-dashboard.stdout.txt" 2>"${ARTIFACT_DIR}/surfaces/desired-change-dashboard.stderr.txt" &
+  DASH_PID=$!
+  for _ in $(seq 1 50); do
+    code="$(curl -s -o "${ARTIFACT_DIR}/surfaces/desired-change-dashboard-operator-snapshot.json" -w '%{http_code}' "http://127.0.0.1:${DASHBOARD_PORT}/operator-snapshot.json" || true)"
+    [[ "${code}" == "200" ]] && break
+    sleep 0.2
+  done
+  kill "${DASH_PID}" >/dev/null 2>&1 || true
+  wait "${DASH_PID}" >/dev/null 2>&1 || true
+
+  python3 - "${ARTIFACT_DIR}" "${VOLUME_ID}" "${OLD_DESIRED_PATH}" "${NEW_DESIRED_PATH}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+base = Path(sys.argv[1])
+volume_id, old_addr, new_addr = sys.argv[2:]
+crd = json.load(open(base/"surfaces/swblockvolumes.desired-change.json"))
+status = crd["items"][0]["status"]
+nvme = status.get("nvme") or {}
+summary = (base/"surfaces/desired-change-report/summary.txt").read_text()
+snapshot = json.load(open(base/"surfaces/desired-change-report/operator-snapshot.json"))
+dashboard = json.load(open(base/"surfaces/desired-change-dashboard-operator-snapshot.json"))
+
+def assert_status(name, st):
+    nv = st.get("nvme") or {}
+    addrs = nv.get("nvme_addrs") or nv.get("nvmeAddrs") or []
+    if st.get("status") != "ready" or (st.get("reason_code") or st.get("reasonCode")) != "first_volume_verified":
+        raise SystemExit(f"{name} status mismatch: {st}")
+    if nv.get("path_count") != 2 and nv.get("pathCount") != 2:
+        raise SystemExit(f"{name} path count mismatch: {nv}")
+    if new_addr not in addrs or old_addr in addrs:
+        raise SystemExit(f"{name} desired addrs mismatch: {addrs}")
+
+if status.get("status") != "ready" or status.get("reasonCode") != "first_volume_verified":
+    raise SystemExit(f"CRD status mismatch: {status}")
+if nvme.get("pathCount") != 2:
+    raise SystemExit(f"CRD path count mismatch: {nvme}")
+if new_addr not in (nvme.get("nvmeAddrs") or []) or old_addr in (nvme.get("nvmeAddrs") or []):
+    raise SystemExit(f"CRD desired addrs mismatch: {nvme}")
+if f"managed_volume={volume_id} status=ready reason=first_volume_verified" not in summary:
+    raise SystemExit("report missing ready/first_volume_verified")
+nvme_lines = [line for line in summary.splitlines() if line.startswith(f"managed_volume_nvme={volume_id} ")]
+if len(nvme_lines) != 1:
+    raise SystemExit("report missing managed_volume_nvme line")
+if new_addr not in nvme_lines[0] or old_addr in nvme_lines[0] or "path_count=2" not in nvme_lines[0]:
+    raise SystemExit("report did not reflect desired path replacement")
+for name, doc in (("operator_snapshot", snapshot), ("dashboard", dashboard)):
+    vols = doc.get("volumes") or []
+    if len(vols) != 1:
+        raise SystemExit(f"{name} volume count={len(vols)}")
+    assert_status(name, vols[0].get("status") or {})
+(base/"nvme-k8s-desired-path-change-asserts.txt").write_text("\n".join([
+    "crd_status_agrees=true",
+    "report_dashboard_agree=true",
+    "surface_ready_reason=first_volume_verified",
+]) + "\n")
+PY
+  cat "${ARTIFACT_DIR}/nvme-k8s-desired-path-change-asserts.txt" >>"${SUMMARY}"
+  write_summary "${PHASE_STATUS_KEY}=ok"
+  cleanup
+  verify_rc=0
+  (
+    cd "${ROOT}"
+    SW_BLOCK_CLEANUP_WAIT_SECONDS=180 \
+    SW_BLOCK_ARTIFACT_DIR="${ARTIFACT_DIR}/cleanup/verify" bash scripts/verify-helm-cleanup.sh "${ROOT}" \
+      >"${ARTIFACT_DIR}/cleanup/verify.stdout.txt" 2>"${ARTIFACT_DIR}/cleanup/verify.stderr.txt"
+  ) || verify_rc=$?
+  cat "${ARTIFACT_DIR}/cleanup/verify/cleanup-summary.txt" >>"${SUMMARY}"
+  grep -q '^cleanup_status=ok$' "${ARTIFACT_DIR}/cleanup/verify/cleanup-summary.txt"
+  if [[ "${verify_rc}" -ne 0 ]]; then
+    exit "${verify_rc}"
+  fi
+  echo "[phase111] PASS"
+  exit 0
 fi
 
 if [[ "${HOST_PATH_DISCONNECT}" == "1" || "${HOST_PATH_DISCONNECT}" == "true" ]]; then
