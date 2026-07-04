@@ -77,6 +77,7 @@ The supported-lab claim is intentionally narrow:
 | 133 | Live Kubernetes stale host-path pruning after desired path replacement | PASS |
 | 134 | Durable backend full-block write batching with product-owned counters | PASS |
 | 135 | Post-batch write-path retriage and next-bottleneck classification | PASS |
+| 136 | WAL append/copy/checksum profile and backend-internal bottleneck classification | PASS |
 
 Key QA sign-offs:
 
@@ -96,6 +97,7 @@ Key QA sign-offs:
 - `internal/docs/qa-assignments/phase133-nvme-k8s-stale-path-prune-qa-signoff.md`
 - `internal/docs/qa-assignments/phase134-durable-backend-write-batching-qa-signoff.md`
 - `internal/docs/qa-assignments/phase135-nvme-tcp-post-batch-retriage-qa-signoff.md`
+- `internal/docs/qa-assignments/phase136-wal-append-copy-checksum-profile-qa-signoff.md`
 
 ## Performance Baseline
 
@@ -258,6 +260,40 @@ cleanup_status=ok
 The result keeps NVMe/RDMA deferred: batching is active, network and sync are
 not dominant, and the next evidence-backed step is to split WAL
 append/copy/checksum/dirty-map cost inside the durable backend.
+
+Phase 136 added those backend-internal counters and reran the same mounted
+NVMe/TCP profile:
+
+```text
+phase136_wal_append_copy_checksum_profile_status=ok
+target_write_observed=true
+target_write_bytes=588075008
+backend_write_bytes=588075008
+backend_storage_batching_effective=true
+backend_storage_batch_calls=17952
+backend_storage_batch_blocks=143552
+wal_copy_ops=143573
+wal_copy_bytes=588075008
+wal_copy_duration_ms=593
+wal_encode_ops=143573
+wal_encode_bytes=593530782
+wal_encode_duration_ms=753
+wal_checksum_ops=143573
+wal_checksum_bytes=592382198
+wal_checksum_duration_ms=100
+wal_append_ops=17981
+wal_append_bytes=593543918
+wal_append_duration_ms=338
+dirty_map_update_ops=143573
+dirty_map_update_duration_ms=67
+post_phase136_bottleneck=wal_encode
+next_recommendation=phase137_reduce_wal_record_encode_copy
+cleanup_status=ok
+```
+
+The named backend-internal cost is WAL record encode/copy. This keeps the next
+work item inside the durable backend; it still does not create an NVMe/RDMA,
+RoCE, throughput, latency, or production SLO claim.
 
 Phase 127 closes the source/component side of the ANA Change Notice gap:
 

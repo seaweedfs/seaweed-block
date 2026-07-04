@@ -760,6 +760,15 @@ Recommended order from here:
     local-path write was `1075.63 MiB/s`. The live gate classified the
     post-batch bottleneck as `backend_write` and recommends Phase 136
     `wal_append_copy_checksum_profile`.
+94. Phase 136: WAL Append / Copy / Checksum Profile. **Closed 2026-07-04,
+    runner PASS**
+    Added product-owned `/status/durable` counters for WAL copy, record encode,
+    checksum, append/write-at, and dirty-map update. The comparable 512MiB
+    mounted NVMe/TCP gate kept backend batching active
+    (`backend_storage_batch_calls=17952`) and named `wal_encode` as the largest
+    backend-internal cost (`753ms`), with copy close behind (`593ms`). The next
+    evidence-backed phase is reducing WAL record encode/copy cost, not NVMe/RDMA
+    or a performance/SLO claim.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close

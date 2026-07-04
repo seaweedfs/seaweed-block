@@ -422,6 +422,23 @@ func TestDurableProvider_DurableStatuses_ReportWriteBatchProfile(t *testing.T) {
 			if prof.BackendStorageBatchCalls != 1 || prof.BackendStorageBatchBlocks != 2 {
 				t.Fatalf("backend batch profile mismatch: %+v", prof)
 			}
+			if impl == durable.ImplWALStore {
+				if prof.WALCopyOps == 0 || prof.WALCopyBytes == 0 || prof.WALCopyDurationNanos == 0 {
+					t.Fatalf("WAL copy profile missing: %+v", prof)
+				}
+				if prof.WALEncodeOps == 0 || prof.WALEncodeBytes == 0 || prof.WALEncodeDurationNanos == 0 {
+					t.Fatalf("WAL encode profile missing: %+v", prof)
+				}
+				if prof.WALChecksumOps == 0 || prof.WALChecksumBytes == 0 || prof.WALChecksumDurationNanos == 0 {
+					t.Fatalf("WAL checksum profile missing: %+v", prof)
+				}
+				if prof.WALAppendOps == 0 || prof.WALAppendBytes == 0 || prof.WALAppendDurationNanos == 0 {
+					t.Fatalf("WAL append profile missing: %+v", prof)
+				}
+				if prof.DirtyMapUpdateOps == 0 || prof.DirtyMapUpdateDurationNanos == 0 {
+					t.Fatalf("dirty-map profile missing: %+v", prof)
+				}
+			}
 		})
 	}
 }

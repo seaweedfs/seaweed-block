@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"time"
 )
 
 // WAL entry kinds.
@@ -61,6 +62,11 @@ type walEntry struct {
 // bytes are CRC32 + EntrySize so a reader can detect torn writes by
 // verifying both fields.
 func (e *walEntry) encode() ([]byte, error) {
+	return e.encodeWithInstrumentation(nil)
+}
+
+func (e *walEntry) encodeWithInstrumentation(instr *writeInstrumentation) ([]byte, error) {
+	start := time.Now()
 	switch e.Type {
 	case walEntryWrite:
 		if len(e.Data) == 0 {
@@ -100,10 +106,17 @@ func (e *walEntry) encode() ([]byte, error) {
 		copy(buf[off:], e.Data)
 		off += len(e.Data)
 	}
+	checksumStart := time.Now()
 	checksum := crc32.ChecksumIEEE(buf[:off])
+	if instr != nil {
+		instr.recordWALChecksum(off, time.Since(checksumStart))
+	}
 	le.PutUint32(buf[off:], checksum)
 	off += 4
 	le.PutUint32(buf[off:], totalSize)
+	if instr != nil {
+		instr.recordWALEncode(len(buf), time.Since(start))
+	}
 	return buf, nil
 }
 

@@ -9,18 +9,32 @@ import (
 // It is not a performance API; callers use it to prove which product-owned
 // path observed the write and roughly where time accumulated.
 type WriteProfileStatus struct {
-	TargetWriteOps            uint64
-	TargetWriteBytes          uint64
-	TargetWriteDurationNanos  uint64
-	BackendWriteOps           uint64
-	BackendWriteBytes         uint64
-	BackendWriteDurationNanos uint64
-	BackendStorageWriteCalls  uint64
-	BackendStorageWriteBlocks uint64
-	BackendStorageBatchCalls  uint64
-	BackendStorageBatchBlocks uint64
-	BackendSyncOps            uint64
-	BackendSyncDurationNanos  uint64
+	TargetWriteOps              uint64
+	TargetWriteBytes            uint64
+	TargetWriteDurationNanos    uint64
+	BackendWriteOps             uint64
+	BackendWriteBytes           uint64
+	BackendWriteDurationNanos   uint64
+	BackendStorageWriteCalls    uint64
+	BackendStorageWriteBlocks   uint64
+	BackendStorageBatchCalls    uint64
+	BackendStorageBatchBlocks   uint64
+	WALCopyOps                  uint64
+	WALCopyBytes                uint64
+	WALCopyDurationNanos        uint64
+	WALEncodeOps                uint64
+	WALEncodeBytes              uint64
+	WALEncodeDurationNanos      uint64
+	WALChecksumOps              uint64
+	WALChecksumBytes            uint64
+	WALChecksumDurationNanos    uint64
+	WALAppendOps                uint64
+	WALAppendBytes              uint64
+	WALAppendDurationNanos      uint64
+	DirtyMapUpdateOps           uint64
+	DirtyMapUpdateDurationNanos uint64
+	BackendSyncOps              uint64
+	BackendSyncDurationNanos    uint64
 }
 
 type writeProfile struct {

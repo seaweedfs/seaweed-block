@@ -236,6 +236,24 @@ func (b *StorageBackend) durableStatus(volumeID, path, impl string) VolumeStatus
 	b.mu.Unlock()
 	durableLSN, retainedLSN, headLSN := b.storage.Boundaries()
 	evidence, _ := b.opEvidence.Load().(string)
+	writeProfile := b.profile.snapshot()
+	if instrumented, ok := b.storage.(storage.WriteInstrumented); ok {
+		storageProfile := instrumented.WriteInstrumentation()
+		writeProfile.WALCopyOps = storageProfile.WALCopyOps
+		writeProfile.WALCopyBytes = storageProfile.WALCopyBytes
+		writeProfile.WALCopyDurationNanos = storageProfile.WALCopyDurationNanos
+		writeProfile.WALEncodeOps = storageProfile.WALEncodeOps
+		writeProfile.WALEncodeBytes = storageProfile.WALEncodeBytes
+		writeProfile.WALEncodeDurationNanos = storageProfile.WALEncodeDurationNanos
+		writeProfile.WALChecksumOps = storageProfile.WALChecksumOps
+		writeProfile.WALChecksumBytes = storageProfile.WALChecksumBytes
+		writeProfile.WALChecksumDurationNanos = storageProfile.WALChecksumDurationNanos
+		writeProfile.WALAppendOps = storageProfile.WALAppendOps
+		writeProfile.WALAppendBytes = storageProfile.WALAppendBytes
+		writeProfile.WALAppendDurationNanos = storageProfile.WALAppendDurationNanos
+		writeProfile.DirtyMapUpdateOps = storageProfile.DirtyMapUpdateOps
+		writeProfile.DirtyMapUpdateDurationNanos = storageProfile.DirtyMapUpdateDurationNanos
+	}
 	return VolumeStatus{
 		VolumeID:        volumeID,
 		Path:            path,
@@ -251,7 +269,7 @@ func (b *StorageBackend) durableStatus(volumeID, path, impl string) VolumeStatus
 		HeadLSN:         headLSN,
 		Evidence:        evidence,
 		Closed:          closed,
-		WriteProfile:    b.profile.snapshot(),
+		WriteProfile:    writeProfile,
 	}
 }
 

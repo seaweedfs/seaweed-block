@@ -102,6 +102,7 @@ type WALStore struct {
 	recycleFloorSrc RecycleFloorSource
 
 	syncs atomic.Uint64 // total fsync operations performed (test/diagnostic)
+	instr writeInstrumentation
 }
 
 // CreateWALStore initializes a new store file at path. Fails if path
@@ -183,14 +184,12 @@ func OpenWALStore(path string) (*WALStore, error) {
 // the dirty map, and the group committer; it does NOT replay the WAL
 // (that is Recover's job).
 func openInitialized(path string, f *os.File, sb *superblock) (*WALStore, error) {
-	wal := newWALWriter(f, sb.WALOffset, sb.WALSize, sb.WALHead, sb.WALTail)
 	dm := newDirtyMap(64) // 64 shards is plenty for Phase 07 demo workloads
 
 	s := &WALStore{
 		path:          path,
 		fd:            f,
 		sb:            sb,
-		wal:           wal,
 		dm:            dm,
 		extentBase:    sb.WALOffset + sb.WALSize,
 		nextLSN:       sb.WALCheckpointLSN + 1,
@@ -199,6 +198,8 @@ func openInitialized(path string, f *os.File, sb *superblock) (*WALStore, error)
 		walHead:       sb.WALHead,
 		checkpointLSN: sb.WALCheckpointLSN,
 	}
+	wal := newWALWriter(f, sb.WALOffset, sb.WALSize, sb.WALHead, sb.WALTail, &s.instr)
+	s.wal = wal
 	if s.nextLSN < 1 {
 		s.nextLSN = 1
 	}
@@ -392,8 +393,10 @@ func (s *WALStore) Write(lba uint32, data []byte) (uint64, error) {
 	s.nextLSN++
 	s.mu.Unlock()
 
+	copyStart := time.Now()
 	dataCopy := make([]byte, len(data))
 	copy(dataCopy, data)
+	s.instr.recordWALCopy(len(dataCopy), time.Since(copyStart))
 
 	entry := &walEntry{
 		LSN:    lsn,
@@ -406,7 +409,9 @@ func (s *WALStore) Write(lba uint32, data []byte) (uint64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("storage: WAL append: %w", err)
 	}
+	dirtyStart := time.Now()
 	s.dm.put(uint64(lba), walRelOff, lsn, uint32(len(dataCopy)))
+	s.instr.recordDirtyMapUpdate(1, time.Since(dirtyStart))
 
 	s.mu.Lock()
 	if lsn > s.walHead {
@@ -452,8 +457,10 @@ func (s *WALStore) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error
 	entries := make([]*walEntry, len(blocks))
 	lsns := make([]uint64, len(blocks))
 	for i, data := range blocks {
+		copyStart := time.Now()
 		dataCopy := make([]byte, len(data))
 		copy(dataCopy, data)
+		s.instr.recordWALCopy(len(dataCopy), time.Since(copyStart))
 		lsn := firstLSN + uint64(i)
 		lsns[i] = lsn
 		entries[i] = &walEntry{
@@ -468,9 +475,11 @@ func (s *WALStore) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error
 	if err != nil {
 		return nil, fmt.Errorf("storage: WAL batch append: %w", err)
 	}
+	dirtyStart := time.Now()
 	for i, walRelOff := range offsets {
 		s.dm.put(uint64(startLBA+uint32(i)), walRelOff, lsns[i], uint32(len(blocks[i])))
 	}
+	s.instr.recordDirtyMapUpdate(len(offsets), time.Since(dirtyStart))
 
 	s.mu.Lock()
 	lastLSN := lsns[len(lsns)-1]
@@ -482,6 +491,10 @@ func (s *WALStore) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error
 	}
 	s.mu.Unlock()
 	return lsns, nil
+}
+
+func (s *WALStore) WriteInstrumentation() WriteInstrumentationStatus {
+	return s.instr.snapshot()
 }
 
 // Read returns the current bytes at lba. Dirty entries are served

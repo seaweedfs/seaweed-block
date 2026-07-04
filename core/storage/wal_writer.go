@@ -7,6 +7,7 @@ import (
 	"hash/crc32"
 	"os"
 	"sync"
+	"time"
 )
 
 var (
@@ -30,18 +31,20 @@ type walWriter struct {
 	walSize     uint64 // size of the WAL region in bytes
 	logicalHead uint64 // monotonic write position
 	logicalTail uint64 // monotonic flush position
+	instr       *writeInstrumentation
 }
 
 // newWALWriter constructs a writer over an open file. logicalHead and
 // logicalTail come from the superblock when reopening; both 0 for a
 // fresh store.
-func newWALWriter(fd *os.File, walOffset, walSize, head, tail uint64) *walWriter {
+func newWALWriter(fd *os.File, walOffset, walSize, head, tail uint64, instr *writeInstrumentation) *walWriter {
 	return &walWriter{
 		fd:          fd,
 		walOffset:   walOffset,
 		walSize:     walSize,
 		logicalHead: head,
 		logicalTail: tail,
+		instr:       instr,
 	}
 }
 
@@ -56,7 +59,7 @@ func (w *walWriter) used() uint64 { return w.logicalHead - w.logicalTail }
 //
 // Returns errWALFull when even the padding+entry would not fit.
 func (w *walWriter) append(entry *walEntry) (walRelOffset uint64, err error) {
-	buf, err := entry.encode()
+	buf, err := entry.encodeWithInstrumentation(w.instr)
 	if err != nil {
 		return 0, fmt.Errorf("walWriter.append: encode: %w", err)
 	}
@@ -86,8 +89,12 @@ func (w *walWriter) append(entry *walEntry) (walRelOffset uint64, err error) {
 		return 0, errWALFull
 	}
 	absOffset := int64(w.walOffset + physHead)
+	writeStart := time.Now()
 	if _, err := w.fd.WriteAt(buf, absOffset); err != nil {
 		return 0, fmt.Errorf("walWriter.append: pwrite at %d: %w", absOffset, err)
+	}
+	if w.instr != nil {
+		w.instr.recordWALAppend(len(buf), time.Since(writeStart))
 	}
 	writeOffset := physHead
 	w.logicalHead += entryLen
@@ -103,7 +110,7 @@ func (w *walWriter) appendBatch(entries []*walEntry) ([]uint64, error) {
 	}
 	bufs := make([][]byte, len(entries))
 	for i, entry := range entries {
-		buf, err := entry.encode()
+		buf, err := entry.encodeWithInstrumentation(w.instr)
 		if err != nil {
 			return nil, fmt.Errorf("walWriter.appendBatch: encode entry %d: %w", i, err)
 		}
@@ -128,8 +135,12 @@ func (w *walWriter) appendBatch(entries []*walEntry) ([]uint64, error) {
 		if len(pending) == 0 {
 			return nil
 		}
+		writeStart := time.Now()
 		if _, err := w.fd.WriteAt(pending, int64(w.walOffset+pendingStart)); err != nil {
 			return fmt.Errorf("walWriter.appendBatch: pwrite at %d: %w", w.walOffset+pendingStart, err)
+		}
+		if w.instr != nil {
+			w.instr.recordWALAppend(len(pending), time.Since(writeStart))
 		}
 		pending = nil
 		return nil

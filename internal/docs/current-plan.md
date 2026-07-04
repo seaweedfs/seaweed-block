@@ -1,45 +1,46 @@
-# Current Plan: Phase 136 WAL Append / Copy / Checksum Profile
+# Current Plan: Phase 137 Reduce WAL Record Encode / Copy Cost
 
 Status: planning.
 
-Phase 135 reran the 512MiB supported-lab NVMe/TCP write profile after Phase 134
-batching. The batch path was active, but wall-clock write behavior remained in
-the same range as Phase 126:
+Phase 136 split the durable backend write path below the batch seam with
+product-owned `/status/durable` counters:
 
 ```text
-phase135_nvme_tcp_post_batch_retriage_status=ok
-block_nvme_seq_write_mibps=172.80
-local_path_seq_write_mibps=1075.63
-block_vs_local_write_ratio=0.161
-backend_write_duration_ms=25953
-backend_storage_write_calls=17971
-backend_storage_write_blocks=143573
-backend_storage_batch_calls=17953
-backend_storage_batch_blocks=143555
-backend_sync_duration_ms=42
-post_batch_bottleneck=backend_write
-next_recommendation=phase136_wal_append_copy_checksum_profile
+phase136_wal_append_copy_checksum_profile_status=ok
+target_write_observed=true
+backend_write_bytes=588075008
+backend_storage_batch_calls=17952
+backend_storage_batch_blocks=143552
+backend_storage_batching_effective=true
+wal_copy_duration_ms=593
+wal_encode_duration_ms=753
+wal_checksum_duration_ms=100
+wal_append_duration_ms=338
+dirty_map_update_duration_ms=67
+post_phase136_bottleneck=wal_encode
+next_recommendation=phase137_reduce_wal_record_encode_copy
+cleanup_status=ok
 ```
 
-This means the next useful work is not NVMe/RDMA. It is to split backend write
-cost below the batch seam.
+This means the next useful work is still not NVMe/RDMA. It is to reduce the WAL
+record encode/copy cost while preserving WAL recovery semantics and the current
+one-record-per-block durability model.
 
 ## Goal
 
 ```text
 mounted NVMe/TCP write still reaches durable backend
--> backend write time is split into named internal costs
--> WAL record encode/copy/checksum cost is visible
--> WAL append/write-at cost is visible
--> dirty-map/update/bookkeeping cost is visible
--> next bottleneck is named from counters
+-> backend batching remains active
+-> WAL record encode/copy cost is reduced or isolated further
+-> no WAL recovery semantics are weakened
+-> next bottleneck is named from counters after the change
 -> cleanup remains clean
 ```
 
 ## Required Evidence
 
 ```text
-phase136_wal_append_copy_checksum_profile_status=ok
+phase137_reduce_wal_record_encode_copy_status=ok
 frontend_transport=tcp
 roce_claim_allowed=false
 nvme_rdma_claim_allowed=false
@@ -49,45 +50,45 @@ backend_storage_batching_effective=true
 wal_encode_ops=<count>
 wal_encode_bytes=<bytes>
 wal_encode_duration_ms=<duration>
-wal_append_ops=<count>
-wal_append_bytes=<bytes>
-wal_append_duration_ms=<duration>
-wal_checksum_ops=<count>
-wal_checksum_bytes=<bytes>
-wal_checksum_duration_ms=<duration>
-dirty_map_update_ops=<count>
-dirty_map_update_duration_ms=<duration>
-post_phase136_bottleneck=<wal_encode|wal_append|checksum|dirty_map|other|unknown>
+wal_copy_ops=<count>
+wal_copy_bytes=<bytes>
+wal_copy_duration_ms=<duration>
+phase136_wal_encode_duration_ms=753
+phase136_wal_copy_duration_ms=593
+post_phase137_bottleneck=<wal_encode|wal_copy|wal_append|wal_checksum|dirty_map|unknown>
 next_recommendation=<specific next phase>
 cleanup_status=ok
 ```
 
 ## Boundaries
 
-- Do not optimize in this phase unless the counter insertion itself exposes a
-  trivial bug.
-- Do not add broad tracing frameworks or logging in the data path.
+- Do not change frontend protocol behavior, CSI semantics, authority behavior,
+  failover, or reconnect logic.
+- Do not add broad tracing frameworks or data-path logging.
 - Do not claim performance improvement, SLO, RoCE, NVMe/RDMA, GPU Direct,
   cuFile/cuObject, or NIXL.
 - Do not weaken WAL recovery semantics: every write still needs an LSN and a
   recoverable record.
+- Keep the change inside WAL record construction/copy shape unless evidence
+  proves the bottleneck moved.
 
 ## Candidate Work
 
-1. Add low-overhead atomic duration/byte/op counters around `walEntry.encode`,
-   checksum work, `walWriter.append/appendBatch`, and dirty-map updates.
-2. Expose those counters through `/status/durable` under `WriteProfile`.
-3. Extend the Phase 135 wrapper or add a Phase 136 wrapper that asserts the new
-   fields are populated during a mounted NVMe/TCP write.
-4. Classify the next bottleneck:
-   - WAL encode/copy/checksum dominates -> reduce record copy/checksum work;
-   - WAL append/write-at dominates -> inspect pwrite shape/write amplification;
-   - dirty-map dominates -> inspect map/shard/update path;
+1. Reduce avoidable record-buffer copying in the WAL encode path.
+2. Preserve the record format and recovery behavior unless a separate migration
+   plan is written.
+3. Add a local regression proving encoded records still decode/recover.
+4. Add a Phase 137 wrapper/scenario that reruns the Phase 136 profile and
+   compares against the Phase 136 encode/copy baseline.
+5. Classify the next bottleneck after the change:
+   - encode/copy still dominates -> split encode allocation/copy further;
+   - append dominates -> inspect pwrite/coalescing shape;
+   - checksum dominates -> inspect checksum strategy;
    - unknown -> add the missing counter instead of guessing.
 
 ## Exit Criteria
 
-Phase 136 can close when the live supported-lab gate names the backend-internal
-dominant cost from product-owned counters and cleanup is clean. If no single
-cost dominates, close with the measured distribution and a concrete next
-experiment.
+Phase 137 can close when the live supported-lab gate either reduces the
+Phase 136 WAL encode/copy cost or proves the cost is not reducible without a
+larger WAL format change. The close report must name the next bottleneck from
+product-owned counters and keep cleanup clean.
