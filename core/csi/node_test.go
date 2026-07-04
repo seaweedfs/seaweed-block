@@ -971,6 +971,137 @@ func TestNodeStage_IdempotentWhenAlreadyMounted(t *testing.T) {
 	}
 }
 
+func TestNodeStage_MountedNVMeReconnectsMissingPublishedPath(t *testing.T) {
+	_, mn, mm := newMockISCSIUtil(), newMockNVMeUtil(), newMockMountUtil()
+	nqn := "nqn.2026-05.io.seaweedfs:v1"
+	oldAddr := "127.0.0.1:4420"
+	newAddr := "127.0.0.1:4421"
+	mn.connected[nqn] = true
+	mn.connectedPaths[nqn+"|"+oldAddr] = true
+	lookup := &sequenceLookup{targets: []PublishTarget{{
+		VolumeID:  "v1",
+		ReplicaID: "r1",
+		Protocol:  ProtocolNVMe,
+		NVMeAddr:  oldAddr,
+		NVMeAddrs: []string{oldAddr, newAddr},
+		NQN:       nqn,
+		NSID:      1,
+		Multipath: true,
+	}}}
+	reporter := &recordingEventReporter{}
+	ns := NewNodeServer(NodeConfig{
+		NodeID:        "node-a",
+		IQNPrefix:     "iqn.2026-05.example.v3",
+		NVMeUtil:      mn,
+		MountUtil:     mm,
+		Lookup:        lookup,
+		EventReporter: reporter,
+	})
+	staging := t.TempDir()
+	mm.mounted[staging] = true
+	if err := writeTransportFile(staging, transportNVMe); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeVolumeFile(staging, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeTargetFile(staging, nqn); err != nil {
+		t.Fatal(err)
+	}
+	ns.staged["v1"] = &stagedVolumeInfo{
+		nqn:         nqn,
+		nvmeAddr:    oldAddr,
+		nvmeAddrs:   []string{oldAddr},
+		transport:   transportNVMe,
+		stagingPath: staging,
+	}
+
+	_, err := ns.NodeStageVolume(context.Background(), &csipb.NodeStageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: staging,
+		VolumeCapability:  testVolumeCapability(),
+		PublishContext: map[string]string{
+			"protocol":         "nvme",
+			"nvmeAddr":         oldAddr,
+			"nqn":              nqn,
+			"stage2_multipath": "true",
+		},
+		VolumeContext: map[string]string{
+			"stage2_multipath": "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NodeStageVolume: %v", err)
+	}
+	for _, want := range []string{
+		"ispathconnected:" + oldAddr + ":" + nqn,
+		"ispathconnected:" + newAddr + ":" + nqn,
+		"connect:" + newAddr + ":" + nqn,
+	} {
+		found := false
+		for _, call := range mn.calls {
+			if call == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing %q in nvme calls=%v", want, mn.calls)
+		}
+	}
+	for _, call := range mm.calls {
+		if strings.HasPrefix(call, "formatandmount:") {
+			t.Fatalf("mounted restage must not format/mount, mount calls=%v", mm.calls)
+		}
+	}
+	info := ns.staged["v1"]
+	if info == nil || !info.multipath || len(info.nvmeAddrs) != 2 || info.nvmeAddrs[1] != newAddr {
+		t.Fatalf("staged info=%+v", info)
+	}
+	if len(reporter.events) != 1 || reporter.events[0].Type != EventTypeCSIReattachObserved {
+		t.Fatalf("events=%+v", reporter.events)
+	}
+}
+
+func TestNodeStage_MountedNVMeRejectsTargetMismatch(t *testing.T) {
+	_, mn, mm := newMockISCSIUtil(), newMockNVMeUtil(), newMockMountUtil()
+	ns := newTestNodeWithNVMe(newMockISCSIUtil(), mn, mm)
+	staging := t.TempDir()
+	mm.mounted[staging] = true
+	if err := writeTransportFile(staging, transportNVMe); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeVolumeFile(staging, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeTargetFile(staging, "nqn.2026-05.io.seaweedfs:v1"); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ns.NodeStageVolume(context.Background(), &csipb.NodeStageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: staging,
+		VolumeCapability:  testVolumeCapability(),
+		PublishContext: map[string]string{
+			"protocol": "nvme",
+			"nvmeAddr": "127.0.0.1:4420",
+			"nqn":      "nqn.2026-05.io.seaweedfs:other",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected mounted NVMe target mismatch to fail")
+	}
+	st, _ := status.FromError(err)
+	if st.Code() != codes.FailedPrecondition {
+		t.Fatalf("code=%v want FailedPrecondition err=%v", st.Code(), err)
+	}
+	for _, call := range mn.calls {
+		if strings.HasPrefix(call, "connect:") {
+			t.Fatalf("must fail before connecting mismatched target, calls=%v", mn.calls)
+		}
+	}
+}
+
 func TestNodeStage_FailsClosedWhenStagingPathMountedForAnotherVolume(t *testing.T) {
 	mi, mm := newMockISCSIUtil(), newMockMountUtil()
 	ns := newTestNode(mi, mm)

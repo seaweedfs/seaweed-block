@@ -706,12 +706,18 @@ Recommended order from here:
     Notice / ANA Change / ANA log page; OAES ANA Change Notice was advertised,
     the ANA log change count advanced from `4294967297` to `8589934593`, host
     path state refreshed, mounted I/O remained correct, and cleanup was clean.
-87. Phase 129: Kubernetes NVMe Dynamic Reconnect / Restage. **Active**
-    Prove the Kubernetes CSI path can safely react when a mounted PVC's
-    published NVMe path set changes: stale host paths removed, replacement
-    paths connected, CRD/report/dashboard evidence agrees, and mounted I/O
-    remains correct. NVMe/RDMA, performance SLOs, and backend write
-    optimization remain separate non-claims.
+87. Phase 129: Kubernetes NVMe Mounted Restage Contract. **Closed 2026-07-03,
+    runner PASS**
+    Closed the necessary CSI node-side restage contract: if `NodeStageVolume`
+    is invoked again for an already-mounted NVMe staging path, the node plugin
+    refreshes publish context, connects missing NVMe paths for the same NQN,
+    rejects mounted NQN mismatch, and does not remount or reformat. This phase
+    deliberately does not claim an automatic Kubernetes reconnect trigger.
+88. Phase 130: Kubernetes NVMe Reconnect Owner / Trigger Gate. **Active**
+    Prove the live owner/trigger that notices a mounted PVC's desired NVMe path
+    set changed and invokes the bounded reconnect/restage path. This must name
+    the owner, prove replacement path connection, keep pod identity and mounted
+    I/O correct, and keep stale-path disconnect claims honest.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close

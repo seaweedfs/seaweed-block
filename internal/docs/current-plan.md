@@ -1,67 +1,72 @@
-# Current Plan: Phase 129 Kubernetes NVMe Dynamic Reconnect / Restage
+# Current Plan: Phase 130 Kubernetes NVMe Reconnect Owner / Trigger Gate
 
 Status: planning.
 
-Phase 128 closed the live Linux host ANA Change Notice gate. A real NVMe/TCP
-initiator observed `NVME_AEN=0x0c0302` (Notice / ANA Change / ANA log page),
-the ANA change count advanced, host path state refreshed, and mounted I/O
-remained honest through standalone r1->r2 failover.
+Phase 129 closed the mounted restage contract: if NodeStage is invoked again
+for an already-mounted NVMe staging path, the CSI node plugin refreshes the
+publish context, connects missing NVMe paths, rejects NQN mismatch, and does
+not remount or reformat. It deliberately did not claim an automatic Kubernetes
+trigger.
 
-The remaining NVMe completion gap is Kubernetes behavior after a frontend
-target address changes or a replacement path appears.
+Phase 130 should close the remaining ownership gap: who notices a mounted PVC's
+published NVMe path set changed, and who safely calls the reconnect/restage
+path.
 
 ## Goal
 
-Prove the Kubernetes CSI path can recover a mounted NVMe PVC when the published
-NVMe path set changes:
+Prove a live Kubernetes path for mounted NVMe PVC reconnect after path set
+change:
 
 ```text
-PVC mounted in app pod
--> active NVMe path/target changes
--> CSI/controller/operator surfaces publish updated path evidence
--> node-side reconciler disconnects stale path and connects replacement path
--> app pod keeps identity when possible
--> mounted I/O remains correct
+mounted NVMe PVC starts with two paths
+-> one path is removed
+-> replacement path appears in publish evidence
+-> explicit owner detects changed desired path set
+-> owner invokes bounded reconnect/restage
+-> missing replacement path is connected without remount
+-> mounted pod keeps identity and I/O remains correct
 ```
 
 ## Required Evidence
 
 ```text
-phase129_nvme_k8s_dynamic_reconnect_status=ok
+phase130_nvme_k8s_reconnect_owner_status=ok
 initial_path_count=2
-stale_path_removed=true
+path_loss_detected=true
+desired_path_set_changed=true
+reconnect_owner=<csi-node|node-reconciler|other-explicit-owner>
+reconnect_invoked=true
 replacement_path_connected=true
-host_path_state_refreshed=true
-pod_uid_preserved=<true|documented_false>
+stale_path_disconnect_claim=<true|false-with-reason>
+pod_uid_preserved=true
 mounted_io_after_reconnect=ok
 crd_status_agrees=true
 report_dashboard_agree=true
 cleanup_status=ok
 ```
 
-If current CSI ownership cannot safely mutate host NVMe sessions after initial
-NodeStage, Phase 129 may close as a design-blocked gate only with concrete
-evidence naming the missing owner, trigger, and bounded mutation policy.
+## Boundaries
 
-## Non-Claims
+- Do not claim automatic reconnect if the gate manually calls NodeStage without
+  a product owner/trigger.
+- Do not use `nvme disconnect-all`; mutation must be scoped to the affected
+  NQN/path.
+- Do not claim NVMe/RDMA/RoCE or performance/SLO.
+- Do not hide a missing owner behind TestOps helper logic.
 
-Phase 129 still does not claim NVMe/RDMA/RoCE, performance/SLOs, broad distro
-compatibility, or backend write optimization.
+## Candidate Implementation
 
-## Candidate Implementation Shape
+1. Add an explicit node-side reconnect owner or controller loop, disabled by
+   default if needed.
+2. Feed it desired NVMe path-set evidence from the control plane.
+3. Reuse the Phase 129 mounted NodeStage reconnect code for the actual bounded
+   `nvme connect` operation.
+4. Add a live gate that proves the owner invocation, not just the final path
+   state.
 
-1. Add a read-only detector for stale/replacement NVMe paths in the node-side
-   status surface.
-2. Define the owner for reconnect/restage. It must be explicit whether CSI
-   NodeStage, a node reconciler, or a future lifecycle controller owns host
-   `nvme connect/disconnect`.
-3. Add a dry-run action contract first: desired disconnect/connect operations,
-   preconditions, and evidence.
-4. Only then enable the bounded mutating path in a lab gate.
+## Next After Phase 130
 
-## Next After Phase 129
-
-If Phase 129 passes, the NVMe Kubernetes correctness loop is complete enough to
-return to performance work: durable backend write batching and write-path
-optimization from Phase 126. If Phase 129 blocks, fix the reconnect ownership
-model before starting backend optimization.
+If Phase 130 passes, the NVMe Kubernetes correctness loop is complete enough to
+return to Phase 126's performance direction: durable backend write batching and
+write-path optimization. If Phase 130 blocks, document the owner model before
+adding backend/performance work.

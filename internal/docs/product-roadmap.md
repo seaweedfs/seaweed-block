@@ -377,9 +377,14 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   `NVME_AEN=0x0c0302` during standalone r1->r2 failover, the ANA log change
   count advanced, host path state refreshed, mounted I/O remained correct, and
   cleanup was clean.
-- Phase 129 is active for Kubernetes NVMe dynamic reconnect/restage. Durable
-  backend batching is deferred until the mounted-PVC reconnect owner, trigger,
-  and bounded mutation contract are explicit.
+- Phase 129 is closed for the Kubernetes NVMe mounted restage contract. A
+  repeated `NodeStageVolume` call on an already-mounted NVMe staging path now
+  refreshes publish context, connects missing paths for the same NQN, rejects
+  NQN mismatch, and does not remount or reformat. It deliberately does not
+  claim an automatic Kubernetes reconnect trigger.
+- Phase 130 is active for the live Kubernetes NVMe reconnect owner/trigger
+  gate. Durable backend batching is deferred until the mounted-PVC reconnect
+  owner and trigger are proven, not just the restage primitive.
 - Later protocol candidates: complete a real NVMe/RDMA target, characterize
   NVMe/TCP performance, or bridge to object/NIXL acceleration where the product
   surface is object/storage rather than block PVC. Keep these separate so

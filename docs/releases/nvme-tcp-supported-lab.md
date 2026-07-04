@@ -66,6 +66,7 @@ The supported-lab claim is intentionally narrow:
 | 126 | Block NVMe/TCP backend write instrumentation with product-owned counters | PASS |
 | 127 | OAES ANA Change Notice source/component gate | PASS |
 | 128 | Live Linux host ANA Change Notice AER gate | PASS |
+| 129 | CSI mounted NVMe restage contract | PASS |
 
 Key QA sign-offs:
 
@@ -78,6 +79,7 @@ Key QA sign-offs:
 - `internal/docs/qa-assignments/phase126-block-nvme-tcp-backend-write-instrumentation-qa-signoff.md`
 - `internal/docs/qa-assignments/phase127-nvme-ana-change-notice-qa-signoff.md`
 - `internal/docs/qa-assignments/phase128-nvme-ana-change-notice-host-qa-signoff.md`
+- `internal/docs/qa-assignments/phase129-nvme-k8s-mounted-restage-qa-signoff.md`
 
 ## Performance Baseline
 
@@ -230,7 +232,24 @@ cleanup_status=ok
 
 This proves the standalone Linux NVMe/TCP initiator sees the ANA Change Notice
 through the kernel `nvme_async_event` tracepoint during r1->r2 failover. It is
-still not a Kubernetes dynamic reconnect/restage claim; Phase 129 owns that.
+still not a Kubernetes dynamic reconnect/restage claim.
+
+Phase 129 closes the mounted restage primitive, not the automatic trigger:
+
+```text
+mounted_nodestage_reconnects_missing_path=true
+mounted_nodestage_rejects_nqn_mismatch=true
+mounted_nodestage_does_not_remount=true
+restage_owner=node_stage
+host_mutation_scope=nvme_connect_missing_paths_only
+automatic_k8s_reconnect_claim=false
+automatic_trigger_required_next=true
+cleanup_status=ok
+```
+
+The remaining gap is now narrower: Phase 130 must prove the owner/trigger that
+detects desired NVMe path-set changes for an already-mounted PVC and invokes
+the bounded restage path.
 
 ## Representative Release Smoke
 
