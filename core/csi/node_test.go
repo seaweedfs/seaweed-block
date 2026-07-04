@@ -3,6 +3,7 @@ package csi
 import (
 	"context"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -230,6 +231,18 @@ type recordingEventReporter struct {
 func (r *recordingEventReporter) ReportEvent(_ context.Context, event ClusterEvent) error {
 	r.events = append(r.events, event)
 	return r.err
+}
+
+type channelEventReporter struct {
+	events chan ClusterEvent
+}
+
+func (r *channelEventReporter) ReportEvent(_ context.Context, event ClusterEvent) error {
+	select {
+	case r.events <- event:
+	default:
+	}
+	return nil
 }
 
 type sequenceLookup struct {
@@ -1099,6 +1112,134 @@ func TestNodeStage_MountedNVMeRejectsTargetMismatch(t *testing.T) {
 		if strings.HasPrefix(call, "connect:") {
 			t.Fatalf("must fail before connecting mismatched target, calls=%v", mn.calls)
 		}
+	}
+}
+
+func TestMountedNVMeReconnectOwner_ReconcilesMissingPublishedPath(t *testing.T) {
+	_, mn, mm := newMockISCSIUtil(), newMockNVMeUtil(), newMockMountUtil()
+	nqn := "nqn.2026-05.io.seaweedfs:v1"
+	oldAddr := "127.0.0.1:4420"
+	newAddr := "127.0.0.1:4421"
+	mn.connected[nqn] = true
+	mn.connectedPaths[nqn+"|"+oldAddr] = true
+	lookup := &sequenceLookup{targets: []PublishTarget{{
+		VolumeID:  "v1",
+		ReplicaID: "r1",
+		Protocol:  ProtocolNVMe,
+		NVMeAddr:  oldAddr,
+		NVMeAddrs: []string{oldAddr, newAddr},
+		NQN:       nqn,
+		NSID:      1,
+		Multipath: true,
+	}}}
+	reporter := &recordingEventReporter{}
+	ns := NewNodeServer(NodeConfig{
+		NodeID:        "node-a",
+		NVMeUtil:      mn,
+		MountUtil:     mm,
+		Lookup:        lookup,
+		EventReporter: reporter,
+	})
+	staging := t.TempDir()
+	mm.mounted[staging] = true
+	if err := writeTransportFile(staging, transportNVMe); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeVolumeFile(staging, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeTargetFile(staging, nqn); err != nil {
+		t.Fatal(err)
+	}
+	ns.staged["v1"] = &stagedVolumeInfo{
+		nqn:         nqn,
+		nvmeAddr:    oldAddr,
+		nvmeAddrs:   []string{oldAddr},
+		multipath:   true,
+		transport:   transportNVMe,
+		stagingPath: staging,
+	}
+
+	result, err := ns.ReconcileMountedNVMeVolumes(context.Background())
+	if err != nil {
+		t.Fatalf("ReconcileMountedNVMeVolumes: %v", err)
+	}
+	if result.Checked != 1 || result.Reconnected != 1 || result.Failed != 0 {
+		t.Fatalf("result=%+v", result)
+	}
+	if !containsString(mn.calls, "connect:"+newAddr+":"+nqn) {
+		t.Fatalf("missing replacement path connect in calls=%v", mn.calls)
+	}
+	for _, call := range mm.calls {
+		if strings.HasPrefix(call, "formatandmount:") || strings.HasPrefix(call, "unmount:") {
+			t.Fatalf("owner must not remount mounted volume, mount calls=%v", mm.calls)
+		}
+	}
+	info := ns.staged["v1"]
+	if info == nil || !info.multipath || len(info.nvmeAddrs) != 2 || info.nvmeAddrs[1] != newAddr {
+		t.Fatalf("staged info=%+v", info)
+	}
+	if len(reporter.events) != 1 || reporter.events[0].Type != EventTypeCSIReattachObserved {
+		t.Fatalf("events=%+v", reporter.events)
+	}
+}
+
+func TestMountedNVMeReconnectOwnerLoop_InvokesReconnect(t *testing.T) {
+	_, mn, mm := newMockISCSIUtil(), newMockNVMeUtil(), newMockMountUtil()
+	nqn := "nqn.2026-05.io.seaweedfs:v1"
+	oldAddr := "127.0.0.1:4420"
+	newAddr := "127.0.0.1:4421"
+	mn.connected[nqn] = true
+	mn.connectedPaths[nqn+"|"+oldAddr] = true
+	lookup := &sequenceLookup{targets: []PublishTarget{{
+		VolumeID:  "v1",
+		ReplicaID: "r1",
+		Protocol:  ProtocolNVMe,
+		NVMeAddr:  oldAddr,
+		NVMeAddrs: []string{oldAddr, newAddr},
+		NQN:       nqn,
+		NSID:      1,
+		Multipath: true,
+	}}}
+	reporter := &channelEventReporter{events: make(chan ClusterEvent, 1)}
+	ns := NewNodeServer(NodeConfig{
+		NodeID:        "node-a",
+		NVMeUtil:      mn,
+		MountUtil:     mm,
+		Lookup:        lookup,
+		EventReporter: reporter,
+		Logger:        log.New(os.Stderr, "", 0),
+	})
+	staging := t.TempDir()
+	mm.mounted[staging] = true
+	if err := writeTransportFile(staging, transportNVMe); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeVolumeFile(staging, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeTargetFile(staging, nqn); err != nil {
+		t.Fatal(err)
+	}
+	ns.staged["v1"] = &stagedVolumeInfo{
+		nqn:         nqn,
+		nvmeAddr:    oldAddr,
+		nvmeAddrs:   []string{oldAddr},
+		multipath:   true,
+		transport:   transportNVMe,
+		stagingPath: staging,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ns.StartMountedNVMeReconnectOwner(ctx, time.Millisecond)
+	select {
+	case event := <-reporter.events:
+		if event.Type != EventTypeCSIReattachObserved || event.VolumeID != "v1" {
+			t.Fatalf("event=%+v", event)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("timed out waiting for reconnect owner event")
 	}
 }
 

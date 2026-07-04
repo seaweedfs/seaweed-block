@@ -382,9 +382,13 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   refreshes publish context, connects missing paths for the same NQN, rejects
   NQN mismatch, and does not remount or reformat. It deliberately does not
   claim an automatic Kubernetes reconnect trigger.
-- Phase 130 is active for the live Kubernetes NVMe reconnect owner/trigger
-  gate. Durable backend batching is deferred until the mounted-PVC reconnect
-  owner and trigger are proven, not just the restage primitive.
+- Phase 130 is closed for the CSI-node NVMe reconnect owner/trigger contract.
+  The product now has an opt-in CSI node loop that invokes mounted NVMe
+  reconnect from refreshed publish evidence and is disabled by default. This is
+  a source/component gate, not the full live Kubernetes pod UID/I/O close gate.
+- Phase 131 is active for the live Kubernetes NVMe reconnect close gate.
+  Durable backend batching is deferred until mounted-PVC reconnect is proven in
+  the live K8s path, not just by the owner primitive.
 - Later protocol candidates: complete a real NVMe/RDMA target, characterize
   NVMe/TCP performance, or bridge to object/NIXL acceleration where the product
   surface is object/storage rather than block PVC. Keep these separate so
@@ -986,7 +990,10 @@ Approximate engineering effort if scope remains tight:
   Product-owned `/status/durable` evidence localized the remaining write-side
   gap to backend writes, but Phase 127 intentionally closed the NVMe ANA
   Change Notice source/component gap before performance optimization.
-- Phase 128 is active for live Linux host AER/ANA notification evidence.
+- Phase 128 is closed for live Linux host AER/ANA notification evidence.
+- Phase 129 is closed for the mounted NVMe restage primitive.
+- Phase 130 is closed for the CSI-node NVMe reconnect owner/trigger contract.
+- Phase 131 is active for the live Kubernetes NVMe reconnect close gate.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.

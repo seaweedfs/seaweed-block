@@ -250,3 +250,6 @@ csiNode:
   pluginPath: /var/lib/kubelet/plugins/block.csi.seaweedfs.com
   registrationPath: /var/lib/kubelet/plugins_registry
   loadKernelModules: true
+  nvmeReconnect:
+    enabled: false
+    interval: 5s

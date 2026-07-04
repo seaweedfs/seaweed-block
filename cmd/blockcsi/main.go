@@ -32,6 +32,8 @@ type flags struct {
 	pvcUIDLookup                 bool
 	swBlockVolumeCRNamespace     string
 	stage2Multipath              bool
+	nvmeReconnectOwner           bool
+	nvmeReconnectInterval        time.Duration
 	rejectLoopbackPublishTargets bool
 	version                      bool
 	printReadyLine               bool
@@ -47,6 +49,8 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.pvcUIDLookup, "kubernetes-pvc-uid-lookup", false, "opt-in: resolve PVC UID through the in-cluster Kubernetes API before CreateVolume is sent to blockmaster")
 	fs.StringVar(&f.swBlockVolumeCRNamespace, "swblockvolume-cr-namespace", "", "opt-in: create or update SwBlockVolume CR identity objects in this namespace after successful CreateVolume")
 	fs.BoolVar(&f.stage2Multipath, "stage2-multipath", false, "opt-in: consume multiple iSCSI frontend targets as one host multipath device")
+	fs.BoolVar(&f.nvmeReconnectOwner, "nvme-reconnect-owner", false, "opt-in: CSI node periodically reconnects missing mounted NVMe paths from refreshed publish evidence")
+	fs.DurationVar(&f.nvmeReconnectInterval, "nvme-reconnect-interval", 5*time.Second, "interval for --nvme-reconnect-owner")
 	fs.BoolVar(&f.rejectLoopbackPublishTargets, "reject-loopback-publish-targets", false, "opt-in: reject loopback publish targets for node-loss recovery gates")
 	fs.BoolVar(&f.version, "version", false, "print build provenance and exit")
 	fs.BoolVar(&f.printReadyLine, "t0-print-ready", false, "internal test-only: emit one structured JSON ready line after listener bind")
@@ -60,8 +64,8 @@ func parseFlags(args []string) (flags, error) {
 	if f.endpoint == "" {
 		return flags{}, fmt.Errorf("--endpoint is required")
 	}
-	if f.masterAddr == "" && (f.stage2Multipath || f.rejectLoopbackPublishTargets || f.pvcUIDLookup || f.swBlockVolumeCRNamespace != "") {
-		return flags{}, fmt.Errorf("--stage2-multipath, --reject-loopback-publish-targets, --kubernetes-pvc-uid-lookup, and --swblockvolume-cr-namespace require --master")
+	if f.masterAddr == "" && (f.stage2Multipath || f.nvmeReconnectOwner || f.rejectLoopbackPublishTargets || f.pvcUIDLookup || f.swBlockVolumeCRNamespace != "") {
+		return flags{}, fmt.Errorf("--stage2-multipath, --nvme-reconnect-owner, --reject-loopback-publish-targets, --kubernetes-pvc-uid-lookup, and --swblockvolume-cr-namespace require --master")
 	}
 	if f.nodeID == "" {
 		host, err := os.Hostname()
@@ -156,10 +160,17 @@ func run(f flags) int {
 		}
 	}
 
+	nodeSrv := blockcsi.NewDefaultNodeServerWithLookupAndEventReporter(f.nodeID, f.iqnPrefix, lookup, reporter)
+	if f.nvmeReconnectOwner {
+		reconnectCtx, cancelReconnect := context.WithCancel(context.Background())
+		defer cancelReconnect()
+		nodeSrv.StartMountedNVMeReconnectOwner(reconnectCtx, f.nvmeReconnectInterval)
+	}
+
 	srv := grpc.NewServer()
 	csipb.RegisterIdentityServer(srv, blockcsi.NewIdentityServer())
 	csipb.RegisterControllerServer(srv, blockcsi.NewControllerServerWithProvisionerMetadataAndRegistrar(lookup, provisioner, resolver, registrar))
-	csipb.RegisterNodeServer(srv, blockcsi.NewDefaultNodeServerWithLookupAndEventReporter(f.nodeID, f.iqnPrefix, lookup, reporter))
+	csipb.RegisterNodeServer(srv, nodeSrv)
 
 	if f.printReadyLine {
 		_ = json.NewEncoder(os.Stdout).Encode(readyLine{

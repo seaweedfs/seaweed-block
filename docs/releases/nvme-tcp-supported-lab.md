@@ -67,6 +67,7 @@ The supported-lab claim is intentionally narrow:
 | 127 | OAES ANA Change Notice source/component gate | PASS |
 | 128 | Live Linux host ANA Change Notice AER gate | PASS |
 | 129 | CSI mounted NVMe restage contract | PASS |
+| 130 | CSI-node reconnect owner/trigger contract | PASS |
 
 Key QA sign-offs:
 
@@ -80,6 +81,7 @@ Key QA sign-offs:
 - `internal/docs/qa-assignments/phase127-nvme-ana-change-notice-qa-signoff.md`
 - `internal/docs/qa-assignments/phase128-nvme-ana-change-notice-host-qa-signoff.md`
 - `internal/docs/qa-assignments/phase129-nvme-k8s-mounted-restage-qa-signoff.md`
+- `internal/docs/qa-assignments/phase130-nvme-reconnect-owner-qa-signoff.md`
 
 ## Performance Baseline
 
@@ -247,9 +249,27 @@ automatic_trigger_required_next=true
 cleanup_status=ok
 ```
 
-The remaining gap is now narrower: Phase 130 must prove the owner/trigger that
-detects desired NVMe path-set changes for an already-mounted PVC and invokes
-the bounded restage path.
+Phase 130 closes the product owner/trigger contract, still without claiming the
+full live Kubernetes failover close gate:
+
+```text
+scope=csi_node_owner_trigger_contract
+live_k8s_failover_claim=false
+desired_path_set_changed=true
+reconnect_owner=csi-node
+reconnect_invoked=true
+replacement_path_connected=true
+owner_loop_invokes_reconnect=true
+default_enabled=false
+host_mutation_scope=nvme_connect_missing_paths_only
+stale_path_disconnect_claim=false-with-reason=no_stale_path_disconnect_primitive
+live_k8s_gate_required_next=true
+cleanup_status=ok
+```
+
+The remaining gap is now specifically Phase 131: prove the same owner invocation
+in a live Kubernetes mounted PVC run with pod UID preservation, mounted I/O
+after reconnect, and CRD/report/dashboard agreement.
 
 ## Representative Release Smoke
 
@@ -310,8 +330,10 @@ This evidence does not claim:
 - Performance, throughput, latency, or production SLO.
 - Broad Linux distro, kernel, initiator, or cloud compatibility.
 - Production HA, node-loss survival, or arbitrary unbounded path churn.
-- Live Linux host AER/ANA notification behavior.
-- Kubernetes dynamic NVMe reconnect/restage after primary/node failover.
+- Broad Linux host AER/ANA notification compatibility beyond the m02 supported
+  lab gate.
+- Kubernetes dynamic NVMe reconnect/restage after primary/node failover until
+  the Phase 131 live close gate passes.
 - Backup, snapshot, restore, disaster recovery, or data migration.
 - Automatic cleanup or host repair.
 - Hosted production UI.
