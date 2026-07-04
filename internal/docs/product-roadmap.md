@@ -411,6 +411,13 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   `backend_storage_batch_calls=3613` with cleanup clean. The next NVMe work can
   measure wall-clock improvement and identify the next bottleneck; it should
   still avoid SLO, RoCE, or NVMe/RDMA claims.
+- Phase 135 is closed for post-batch retriage. The comparable 512MiB profile
+  proved batching stayed active at scale
+  (`backend_storage_batch_calls=17953`,
+  `backend_storage_batch_blocks=143555`), but write throughput remained around
+  the Phase 126 range (`172.80 MiB/s` versus `177.72 MiB/s`) while local-path
+  write was `1075.63 MiB/s`. The next backend work should split WAL
+  append/copy/checksum/dirty-map costs before any NVMe/RDMA work.
 - Later protocol candidates: complete a real NVMe/RDMA target, characterize
   NVMe/TCP performance, or bridge to object/NIXL acceleration where the product
   surface is object/storage rather than block PVC. Keep these separate so
@@ -1022,6 +1029,8 @@ Approximate engineering effort if scope remains tight:
   path replacement.
 - Phase 134 is closed for durable backend write batching and product-owned
   `backend_storage_*` counters.
+- Phase 135 is closed for post-batch NVMe/TCP write-path retriage and names
+  WAL append/copy/checksum profiling as the next backend step.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.

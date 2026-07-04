@@ -750,6 +750,16 @@ Recommended order from here:
     `backend_storage_write_calls=3634`,
     `backend_storage_batch_calls=3613`, and clean cleanup. This is not a
     performance/SLO or NVMe/RDMA claim.
+93. Phase 135: Post-Batch NVMe/TCP Write-Path Retriage. **Closed
+    2026-07-04, runner PASS**
+    Reran the comparable 512MiB mounted NVMe/TCP profile after batching.
+    Batch counters were active at scale
+    (`backend_storage_batch_calls=17953`,
+    `backend_storage_batch_blocks=143555`), but write throughput remained in
+    the same range as Phase 126 (`172.80 MiB/s` versus `177.72 MiB/s`) while
+    local-path write was `1075.63 MiB/s`. The live gate classified the
+    post-batch bottleneck as `backend_write` and recommends Phase 136
+    `wal_append_copy_checksum_profile`.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close

@@ -76,6 +76,7 @@ The supported-lab claim is intentionally narrow:
 | 132 | Live Kubernetes desired path-set change through CSI-node owner | PASS |
 | 133 | Live Kubernetes stale host-path pruning after desired path replacement | PASS |
 | 134 | Durable backend full-block write batching with product-owned counters | PASS |
+| 135 | Post-batch write-path retriage and next-bottleneck classification | PASS |
 
 Key QA sign-offs:
 
@@ -94,6 +95,7 @@ Key QA sign-offs:
 - `internal/docs/qa-assignments/phase132-nvme-k8s-desired-path-change-qa-signoff.md`
 - `internal/docs/qa-assignments/phase133-nvme-k8s-stale-path-prune-qa-signoff.md`
 - `internal/docs/qa-assignments/phase134-durable-backend-write-batching-qa-signoff.md`
+- `internal/docs/qa-assignments/phase135-nvme-tcp-post-batch-retriage-qa-signoff.md`
 
 ## Performance Baseline
 
@@ -233,6 +235,29 @@ This proves the supported-lab NVMe/TCP write path exercises durable backend
 batching and still cleans up. It is not a performance/SLO claim; the next
 performance step is to compare wall-clock write behavior after batching and
 identify the next dominant cost.
+
+Phase 135 ran that comparable 512MiB post-batch profile:
+
+```text
+phase135_nvme_tcp_post_batch_retriage_status=ok
+profile_comparable_with_phase126=true
+network_baseline_mibps=4099.38
+block_nvme_seq_write_mibps=172.80
+block_nvme_seq_read_mibps=531.67
+local_path_seq_write_mibps=1075.63
+block_vs_local_write_ratio=0.161
+backend_storage_batching_effective=true
+backend_storage_batch_calls=17953
+backend_storage_batch_blocks=143555
+backend_sync_duration_ms=42
+post_batch_bottleneck=backend_write
+next_recommendation=phase136_wal_append_copy_checksum_profile
+cleanup_status=ok
+```
+
+The result keeps NVMe/RDMA deferred: batching is active, network and sync are
+not dominant, and the next evidence-backed step is to split WAL
+append/copy/checksum/dirty-map cost inside the durable backend.
 
 Phase 127 closes the source/component side of the ANA Change Notice gap:
 
