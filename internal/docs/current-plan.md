@@ -1,37 +1,42 @@
-# Current Plan: Phase 137 Reduce WAL Record Encode / Copy Cost
+# Current Plan: Phase 138 WAL WriteAt Shape Profile
 
 Status: planning.
 
-Phase 136 split the durable backend write path below the batch seam with
-product-owned `/status/durable` counters:
+Phase 137 reduced the WAL encode/copy seam and moved the backend-internal
+bottleneck to append/write-at:
 
 ```text
-phase136_wal_append_copy_checksum_profile_status=ok
+phase137_reduce_wal_record_encode_copy_status=ok
 target_write_observed=true
 backend_write_bytes=588075008
-backend_storage_batch_calls=17952
-backend_storage_batch_blocks=143552
+backend_storage_batch_calls=17953
+backend_storage_batch_blocks=143555
 backend_storage_batching_effective=true
-wal_copy_duration_ms=593
-wal_encode_duration_ms=753
-wal_checksum_duration_ms=100
-wal_append_duration_ms=338
-dirty_map_update_duration_ms=67
-post_phase136_bottleneck=wal_encode
-next_recommendation=phase137_reduce_wal_record_encode_copy
+phase136_wal_encode_copy_duration_ms=1346
+wal_encode_copy_duration_ms=363
+wal_copy_duration_ms=93
+wal_encode_duration_ms=270
+wal_checksum_duration_ms=110
+wal_append_duration_ms=375
+dirty_map_update_duration_ms=74
+post_phase137_bottleneck=wal_append
+next_recommendation=phase138_wal_writeat_shape_profile
 cleanup_status=ok
 ```
 
-This means the next useful work is still not NVMe/RDMA. It is to reduce the WAL
-record encode/copy cost while preserving WAL recovery semantics and the current
-one-record-per-block durability model.
+This means the next useful work is still not NVMe/RDMA. It is to split WAL
+append/write-at cost into pwrite count, coalesced write size, wrap/padding
+behavior, and syscall/write latency.
 
 ## Goal
 
 ```text
 mounted NVMe/TCP write still reaches durable backend
 -> backend batching remains active
--> WAL record encode/copy cost is reduced or isolated further
+-> WAL append/write-at shape is visible
+-> pwrite count and bytes are visible
+-> coalesced write size distribution is visible
+-> wrap/padding behavior is visible
 -> no WAL recovery semantics are weakened
 -> next bottleneck is named from counters after the change
 -> cleanup remains clean
@@ -40,22 +45,24 @@ mounted NVMe/TCP write still reaches durable backend
 ## Required Evidence
 
 ```text
-phase137_reduce_wal_record_encode_copy_status=ok
+phase138_wal_writeat_shape_profile_status=ok
 frontend_transport=tcp
 roce_claim_allowed=false
 nvme_rdma_claim_allowed=false
 performance_slo_claim_allowed=false
 target_write_observed=true
 backend_storage_batching_effective=true
-wal_encode_ops=<count>
-wal_encode_bytes=<bytes>
-wal_encode_duration_ms=<duration>
-wal_copy_ops=<count>
-wal_copy_bytes=<bytes>
-wal_copy_duration_ms=<duration>
-phase136_wal_encode_duration_ms=753
-phase136_wal_copy_duration_ms=593
-post_phase137_bottleneck=<wal_encode|wal_copy|wal_append|wal_checksum|dirty_map|unknown>
+wal_append_ops=<count>
+wal_append_bytes=<bytes>
+wal_append_duration_ms=<duration>
+wal_append_writeat_calls=<count>
+wal_append_writeat_bytes=<bytes>
+wal_append_writeat_max_bytes=<bytes>
+wal_append_writeat_avg_bytes=<bytes>
+wal_append_wrap_count=<count>
+wal_append_padding_bytes=<bytes>
+phase137_wal_append_duration_ms=375
+post_phase138_bottleneck=<wal_append_syscall|wal_append_small_writes|wal_wrap_padding|wal_encode|wal_checksum|dirty_map|unknown>
 next_recommendation=<specific next phase>
 cleanup_status=ok
 ```
@@ -69,26 +76,25 @@ cleanup_status=ok
   cuFile/cuObject, or NIXL.
 - Do not weaken WAL recovery semantics: every write still needs an LSN and a
   recoverable record.
-- Keep the change inside WAL record construction/copy shape unless evidence
-  proves the bottleneck moved.
+- Keep this phase to append/write-at observation unless the instrumentation
+  itself exposes a trivial bug.
 
 ## Candidate Work
 
-1. Reduce avoidable record-buffer copying in the WAL encode path.
-2. Preserve the record format and recovery behavior unless a separate migration
-   plan is written.
-3. Add a local regression proving encoded records still decode/recover.
-4. Add a Phase 137 wrapper/scenario that reruns the Phase 136 profile and
-   compares against the Phase 136 encode/copy baseline.
-5. Classify the next bottleneck after the change:
-   - encode/copy still dominates -> split encode allocation/copy further;
-   - append dominates -> inspect pwrite/coalescing shape;
-   - checksum dominates -> inspect checksum strategy;
-   - unknown -> add the missing counter instead of guessing.
+1. Add product counters around WAL append write-at shape:
+   write-at call count, total bytes, max bytes, average bytes.
+2. Count circular-WAL wrap/padding events and padding bytes.
+3. Keep the existing Phase 137 encode/copy counters so the new shape is
+   comparable.
+4. Add a Phase 138 wrapper/scenario that reruns the Phase 137 profile and
+   classifies whether append cost is syscall count, small-write shape, wrap
+   behavior, or something else.
+5. Do not optimize pwrite shape in this phase unless the counter insertion
+   exposes a one-line bug.
 
 ## Exit Criteria
 
-Phase 137 can close when the live supported-lab gate either reduces the
-Phase 136 WAL encode/copy cost or proves the cost is not reducible without a
-larger WAL format change. The close report must name the next bottleneck from
-product-owned counters and keep cleanup clean.
+Phase 138 can close when the live supported-lab gate names the append/write-at
+shape from product-owned counters and cleanup is clean. If pwrite shape is not
+the reason append dominates, close with the measured distribution and a concrete
+next experiment.

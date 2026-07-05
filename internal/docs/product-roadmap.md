@@ -424,6 +424,11 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   active and named `wal_encode` as the largest backend-internal cost
   (`753ms`), with WAL copy close behind (`593ms`). The next backend work
   should reduce WAL record encode/copy cost.
+- Phase 137 is closed for reducing WAL record encode/copy cost. The WAL format
+  and recovery semantics stayed unchanged, but the extra pre-encode block copy
+  was removed and batch append now encodes directly into the coalesced pending
+  buffer. The live gate reduced `wal_encode + wal_copy` from `1346ms` to
+  `363ms`; the next backend work should inspect WAL append/write-at shape.
 - Later protocol candidates: complete a real NVMe/RDMA target, characterize
   NVMe/TCP performance, or bridge to object/NIXL acceleration where the product
   surface is object/storage rather than block PVC. Keep these separate so
@@ -1039,6 +1044,8 @@ Approximate engineering effort if scope remains tight:
   WAL append/copy/checksum profiling as the next backend step.
 - Phase 136 is closed for WAL append/copy/checksum profiling and names
   `wal_encode` / record-copy cost as the next backend step.
+- Phase 137 is closed for WAL record encode/copy reduction and names
+  `wal_append` / write-at shape as the next backend step.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.

@@ -769,6 +769,14 @@ Recommended order from here:
     backend-internal cost (`753ms`), with copy close behind (`593ms`). The next
     evidence-backed phase is reducing WAL record encode/copy cost, not NVMe/RDMA
     or a performance/SLO claim.
+95. Phase 137: Reduce WAL Record Encode / Copy Cost. **Closed 2026-07-05,
+    runner PASS**
+    Removed the extra pre-encode block copy and changed batch append to encode
+    records directly into the coalesced pending write buffer, while keeping the
+    WAL format and one-record-per-block LSN semantics unchanged. The live
+    512MiB gate reduced `wal_encode + wal_copy` from the Phase 136 baseline
+    `1346ms` to `363ms`; the next named bottleneck is `wal_append`, so Phase
+    138 should inspect WAL pwrite shape/coalescing.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close

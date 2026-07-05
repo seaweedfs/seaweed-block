@@ -108,22 +108,23 @@ func (w *walWriter) appendBatch(entries []*walEntry) ([]uint64, error) {
 	if len(entries) == 0 {
 		return nil, nil
 	}
-	bufs := make([][]byte, len(entries))
+	lengths := make([]uint64, len(entries))
 	for i, entry := range entries {
-		buf, err := entry.encodeWithInstrumentation(w.instr)
+		entryLen, err := entry.encodedSize()
 		if err != nil {
-			return nil, fmt.Errorf("walWriter.appendBatch: encode entry %d: %w", i, err)
+			return nil, fmt.Errorf("walWriter.appendBatch: validate entry %d: %w", i, err)
 		}
-		if uint64(len(buf)) > w.walSize {
-			return nil, fmt.Errorf("%w: entry size %d exceeds WAL size %d", errWALFull, len(buf), w.walSize)
+		if uint64(entryLen) > w.walSize {
+			return nil, fmt.Errorf("%w: entry size %d exceeds WAL size %d", errWALFull, entryLen, w.walSize)
 		}
-		bufs[i] = buf
+		lengths[i] = uint64(entryLen)
 	}
+	pendingCapacity := boundedPendingCapacity(lengths)
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	offsets, finalHead, err := w.planAppendBatch(bufs)
+	offsets, finalHead, err := w.planAppendBatchLengths(lengths)
 	if err != nil {
 		return offsets, err
 	}
@@ -145,7 +146,7 @@ func (w *walWriter) appendBatch(entries []*walEntry) ([]uint64, error) {
 		pending = nil
 		return nil
 	}
-	appendPending := func(phys uint64, buf []byte) error {
+	appendPendingBytes := func(phys uint64, buf []byte) error {
 		if len(buf) == 0 {
 			return nil
 		}
@@ -163,9 +164,27 @@ func (w *walWriter) appendBatch(entries []*walEntry) ([]uint64, error) {
 		pending = append(pending, buf...)
 		return nil
 	}
+	appendPendingEntry := func(phys uint64, entry *walEntry, entryLen uint64) error {
+		if len(pending) == 0 {
+			pendingStart = phys
+			pending = make([]byte, 0, pendingCapacity)
+		} else if pendingStart+uint64(len(pending)) != phys {
+			if err := flushPending(); err != nil {
+				return err
+			}
+			pendingStart = phys
+			pending = make([]byte, 0, pendingCapacity)
+		}
+		next, err := entry.appendEncoded(pending, w.instr)
+		if err != nil {
+			return err
+		}
+		pending = next
+		return nil
+	}
 
-	for _, buf := range bufs {
-		entryLen := uint64(len(buf))
+	for i, entry := range entries {
+		entryLen := lengths[i]
 		physHead := w.physicalPos(localHead)
 		remaining := w.walSize - physHead
 		if remaining < entryLen {
@@ -173,13 +192,13 @@ func (w *walWriter) appendBatch(entries []*walEntry) ([]uint64, error) {
 			if err != nil {
 				return offsets, fmt.Errorf("walWriter.appendBatch: padding: %w", err)
 			}
-			if err := appendPending(physHead, padding); err != nil {
+			if err := appendPendingBytes(physHead, padding); err != nil {
 				return offsets, err
 			}
 			localHead += remaining
 			physHead = 0
 		}
-		if err := appendPending(physHead, buf); err != nil {
+		if err := appendPendingEntry(physHead, entry, entryLen); err != nil {
 			return offsets, err
 		}
 		localHead += entryLen
@@ -191,12 +210,29 @@ func (w *walWriter) appendBatch(entries []*walEntry) ([]uint64, error) {
 	return offsets, nil
 }
 
-func (w *walWriter) planAppendBatch(bufs [][]byte) ([]uint64, uint64, error) {
+func boundedPendingCapacity(lengths []uint64) int {
+	const maxPendingCapacity = 1 << 20
+	total := 0
+	for _, length := range lengths {
+		if length > uint64(maxPendingCapacity) {
+			return maxPendingCapacity
+		}
+		total += int(length)
+		if total >= maxPendingCapacity {
+			return maxPendingCapacity
+		}
+	}
+	if total == 0 {
+		return 0
+	}
+	return total
+}
+
+func (w *walWriter) planAppendBatchLengths(lengths []uint64) ([]uint64, uint64, error) {
 	localHead := w.logicalHead
-	offsets := make([]uint64, 0, len(bufs))
+	offsets := make([]uint64, 0, len(lengths))
 	used := func() uint64 { return localHead - w.logicalTail }
-	for _, buf := range bufs {
-		entryLen := uint64(len(buf))
+	for _, entryLen := range lengths {
 		physHead := w.physicalPos(localHead)
 		remaining := w.walSize - physHead
 		if remaining < entryLen {

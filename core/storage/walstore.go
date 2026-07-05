@@ -393,24 +393,19 @@ func (s *WALStore) Write(lba uint32, data []byte) (uint64, error) {
 	s.nextLSN++
 	s.mu.Unlock()
 
-	copyStart := time.Now()
-	dataCopy := make([]byte, len(data))
-	copy(dataCopy, data)
-	s.instr.recordWALCopy(len(dataCopy), time.Since(copyStart))
-
 	entry := &walEntry{
 		LSN:    lsn,
 		Type:   walEntryWrite,
 		LBA:    uint64(lba),
-		Length: uint32(len(dataCopy)),
-		Data:   dataCopy,
+		Length: uint32(len(data)),
+		Data:   data,
 	}
 	walRelOff, err := s.wal.append(entry)
 	if err != nil {
 		return 0, fmt.Errorf("storage: WAL append: %w", err)
 	}
 	dirtyStart := time.Now()
-	s.dm.put(uint64(lba), walRelOff, lsn, uint32(len(dataCopy)))
+	s.dm.put(uint64(lba), walRelOff, lsn, uint32(len(data)))
 	s.instr.recordDirtyMapUpdate(1, time.Since(dirtyStart))
 
 	s.mu.Lock()
@@ -457,18 +452,14 @@ func (s *WALStore) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error
 	entries := make([]*walEntry, len(blocks))
 	lsns := make([]uint64, len(blocks))
 	for i, data := range blocks {
-		copyStart := time.Now()
-		dataCopy := make([]byte, len(data))
-		copy(dataCopy, data)
-		s.instr.recordWALCopy(len(dataCopy), time.Since(copyStart))
 		lsn := firstLSN + uint64(i)
 		lsns[i] = lsn
 		entries[i] = &walEntry{
 			LSN:    lsn,
 			Type:   walEntryWrite,
 			LBA:    uint64(startLBA + uint32(i)),
-			Length: uint32(len(dataCopy)),
-			Data:   dataCopy,
+			Length: uint32(len(data)),
+			Data:   data,
 		}
 	}
 	offsets, err := s.wal.appendBatch(entries)

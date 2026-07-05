@@ -114,20 +114,127 @@ func TestWALStore_WriteBatchSyncCloseReopenRead(t *testing.T) {
 	}
 }
 
+func TestWALStore_WriteCopiesCallerBufferIntoWALRecord(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "store.bin")
+
+	s, err := CreateWALStore(path, 16, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := makeBlock(4096, 0xC1)
+	caller := append([]byte(nil), original...)
+	if _, err := s.Write(3, caller); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	for i := range caller {
+		caller[i] = 0x7E
+	}
+	got, err := s.Read(3)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatal("WALStore retained caller buffer instead of encoded WAL bytes")
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	reopened, err := OpenWALStore(path)
+	if err != nil {
+		t.Fatalf("OpenWALStore: %v", err)
+	}
+	defer reopened.Close()
+	if _, err := reopened.Recover(); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	got, err = reopened.Read(3)
+	if err != nil {
+		t.Fatalf("Read after recover: %v", err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatal("recovered WAL bytes changed after caller buffer mutation")
+	}
+}
+
+func TestWALStore_WriteBatchCopiesCallerBuffersIntoWALRecords(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "store.bin")
+
+	s, err := CreateWALStore(path, 16, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originals := [][]byte{
+		makeBlock(4096, 0xD1),
+		makeBlock(4096, 0xD2),
+		makeBlock(4096, 0xD3),
+	}
+	blocks := make([][]byte, len(originals))
+	for i := range originals {
+		blocks[i] = append([]byte(nil), originals[i]...)
+	}
+	if _, err := s.WriteBatch(4, blocks); err != nil {
+		t.Fatalf("WriteBatch: %v", err)
+	}
+	for _, block := range blocks {
+		for i := range block {
+			block[i] = 0x7F
+		}
+	}
+	for i, want := range originals {
+		got, err := s.Read(uint32(4 + i))
+		if err != nil {
+			t.Fatalf("Read LBA %d: %v", 4+i, err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("LBA %d retained caller buffer instead of encoded WAL bytes", 4+i)
+		}
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	reopened, err := OpenWALStore(path)
+	if err != nil {
+		t.Fatalf("OpenWALStore: %v", err)
+	}
+	defer reopened.Close()
+	if _, err := reopened.Recover(); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	for i, want := range originals {
+		got, err := reopened.Read(uint32(4 + i))
+		if err != nil {
+			t.Fatalf("Read after recover LBA %d: %v", 4+i, err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("recovered LBA %d changed after caller buffer mutation", 4+i)
+		}
+	}
+}
+
 // TestWALStore_AckedWritesSurviveSimulatedCrash is the real
 // crash-consistency proof. A clean Close persists superblock state,
 // which would mask any per-write durability bug. This test bypasses
 // Close entirely, simulating a kill -9.
 //
 // Pattern:
-//   1. Write blocks 0,1,2 + Sync (acked, must survive)
-//   2. Write blocks 3,4   (NOT followed by Sync — may or may not survive)
-//   3. Bypass Close — drop the file handle without finalizing
-//      anything (no superblock update, no fsync, no group-committer drain)
-//   4. Reopen + Recover
-//   5. Acked blocks 0,1,2 MUST be present and intact
-//   6. Post-Sync blocks 3,4 may be present OR absent — never corrupt
-//      versions of acked data
+//  1. Write blocks 0,1,2 + Sync (acked, must survive)
+//  2. Write blocks 3,4   (NOT followed by Sync — may or may not survive)
+//  3. Bypass Close — drop the file handle without finalizing
+//     anything (no superblock update, no fsync, no group-committer drain)
+//  4. Reopen + Recover
+//  5. Acked blocks 0,1,2 MUST be present and intact
+//  6. Post-Sync blocks 3,4 may be present OR absent — never corrupt
+//     versions of acked data
 func TestWALStore_AckedWritesSurviveSimulatedCrash(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "store.bin")

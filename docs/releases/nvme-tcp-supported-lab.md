@@ -78,6 +78,7 @@ The supported-lab claim is intentionally narrow:
 | 134 | Durable backend full-block write batching with product-owned counters | PASS |
 | 135 | Post-batch write-path retriage and next-bottleneck classification | PASS |
 | 136 | WAL append/copy/checksum profile and backend-internal bottleneck classification | PASS |
+| 137 | WAL record encode/copy reduction and next append-shape bottleneck classification | PASS |
 
 Key QA sign-offs:
 
@@ -98,6 +99,7 @@ Key QA sign-offs:
 - `internal/docs/qa-assignments/phase134-durable-backend-write-batching-qa-signoff.md`
 - `internal/docs/qa-assignments/phase135-nvme-tcp-post-batch-retriage-qa-signoff.md`
 - `internal/docs/qa-assignments/phase136-wal-append-copy-checksum-profile-qa-signoff.md`
+- `internal/docs/qa-assignments/phase137-reduce-wal-record-encode-copy-qa-signoff.md`
 
 ## Performance Baseline
 
@@ -294,6 +296,27 @@ cleanup_status=ok
 The named backend-internal cost is WAL record encode/copy. This keeps the next
 work item inside the durable backend; it still does not create an NVMe/RDMA,
 RoCE, throughput, latency, or production SLO claim.
+
+Phase 137 reduced that encode/copy seam while preserving the WAL record format:
+
+```text
+phase137_reduce_wal_record_encode_copy_status=ok
+phase136_wal_encode_copy_duration_ms=1346
+preencode_data_copy_removed=true
+batch_append_encodes_direct_to_pending=true
+wal_copy_duration_ms=93
+wal_encode_duration_ms=270
+wal_encode_copy_duration_ms=363
+wal_encode_copy_reduced_vs_phase136=true
+wal_append_duration_ms=375
+post_phase137_bottleneck=wal_append
+next_recommendation=phase138_wal_writeat_shape_profile
+cleanup_status=ok
+```
+
+The next measured cost is WAL append/write-at shape. The product still makes no
+published performance/SLO, RoCE, or NVMe/RDMA claim from this source-gated lab
+evidence.
 
 Phase 127 closes the source/component side of the ANA Change Notice gap:
 
