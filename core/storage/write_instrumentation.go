@@ -20,6 +20,11 @@ type WriteInstrumentationStatus struct {
 	WALAppendOps                uint64
 	WALAppendBytes              uint64
 	WALAppendDurationNanos      uint64
+	WALAppendWriteAtCalls       uint64
+	WALAppendWriteAtBytes       uint64
+	WALAppendWriteAtMaxBytes    uint64
+	WALAppendWrapCount          uint64
+	WALAppendPaddingBytes       uint64
 	DirtyMapUpdateOps           uint64
 	DirtyMapUpdateDurationNanos uint64
 }
@@ -43,6 +48,11 @@ type writeInstrumentation struct {
 	walAppendOps                atomic.Uint64
 	walAppendBytes              atomic.Uint64
 	walAppendDurationNanos      atomic.Uint64
+	walAppendWriteAtCalls       atomic.Uint64
+	walAppendWriteAtBytes       atomic.Uint64
+	walAppendWriteAtMaxBytes    atomic.Uint64
+	walAppendWrapCount          atomic.Uint64
+	walAppendPaddingBytes       atomic.Uint64
 	dirtyMapUpdateOps           atomic.Uint64
 	dirtyMapUpdateDurationNanos atomic.Uint64
 }
@@ -88,6 +98,30 @@ func (i *writeInstrumentation) recordWALAppend(bytes int, d time.Duration) {
 	i.walAppendOps.Add(1)
 	i.walAppendBytes.Add(uint64(bytes))
 	i.walAppendDurationNanos.Add(storageDurationNanos(d))
+	i.recordWALAppendWriteAt(bytes)
+}
+
+func (i *writeInstrumentation) recordWALAppendWriteAt(bytes int) {
+	if i == nil || bytes <= 0 {
+		return
+	}
+	v := uint64(bytes)
+	i.walAppendWriteAtCalls.Add(1)
+	i.walAppendWriteAtBytes.Add(v)
+	for {
+		old := i.walAppendWriteAtMaxBytes.Load()
+		if v <= old || i.walAppendWriteAtMaxBytes.CompareAndSwap(old, v) {
+			return
+		}
+	}
+}
+
+func (i *writeInstrumentation) recordWALAppendWrap(paddingBytes uint64) {
+	if i == nil || paddingBytes == 0 {
+		return
+	}
+	i.walAppendWrapCount.Add(1)
+	i.walAppendPaddingBytes.Add(paddingBytes)
 }
 
 func (i *writeInstrumentation) recordDirtyMapUpdate(ops int, d time.Duration) {
@@ -115,6 +149,11 @@ func (i *writeInstrumentation) snapshot() WriteInstrumentationStatus {
 		WALAppendOps:                i.walAppendOps.Load(),
 		WALAppendBytes:              i.walAppendBytes.Load(),
 		WALAppendDurationNanos:      i.walAppendDurationNanos.Load(),
+		WALAppendWriteAtCalls:       i.walAppendWriteAtCalls.Load(),
+		WALAppendWriteAtBytes:       i.walAppendWriteAtBytes.Load(),
+		WALAppendWriteAtMaxBytes:    i.walAppendWriteAtMaxBytes.Load(),
+		WALAppendWrapCount:          i.walAppendWrapCount.Load(),
+		WALAppendPaddingBytes:       i.walAppendPaddingBytes.Load(),
 		DirtyMapUpdateOps:           i.dirtyMapUpdateOps.Load(),
 		DirtyMapUpdateDurationNanos: i.dirtyMapUpdateDurationNanos.Load(),
 	}

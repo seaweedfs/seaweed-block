@@ -435,6 +435,9 @@ func TestDurableProvider_DurableStatuses_ReportWriteBatchProfile(t *testing.T) {
 				if prof.WALAppendOps == 0 || prof.WALAppendBytes == 0 || prof.WALAppendDurationNanos == 0 {
 					t.Fatalf("WAL append profile missing: %+v", prof)
 				}
+				if prof.WALAppendWriteAtCalls == 0 || prof.WALAppendWriteAtBytes == 0 || prof.WALAppendWriteAtMaxBytes == 0 {
+					t.Fatalf("WAL append write-at shape profile missing: %+v", prof)
+				}
 				if prof.DirtyMapUpdateOps == 0 || prof.DirtyMapUpdateDurationNanos == 0 {
 					t.Fatalf("dirty-map profile missing: %+v", prof)
 				}

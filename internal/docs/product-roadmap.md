@@ -429,6 +429,12 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   was removed and batch append now encodes directly into the coalesced pending
   buffer. The live gate reduced `wal_encode + wal_copy` from `1346ms` to
   `363ms`; the next backend work should inspect WAL append/write-at shape.
+- Phase 138 is closed for WAL append/write-at shape profiling. The live gate
+  showed the append path is issuing many small pwrite calls:
+  `wal_append_writeat_calls=17979`,
+  `wal_append_writeat_avg_bytes=33013`, and
+  `wal_append_writeat_max_bytes=33072`, while wrap/padding was negligible. The
+  next backend work should inspect batch/coalescing shape.
 - Later protocol candidates: complete a real NVMe/RDMA target, characterize
   NVMe/TCP performance, or bridge to object/NIXL acceleration where the product
   surface is object/storage rather than block PVC. Keep these separate so
@@ -1046,6 +1052,8 @@ Approximate engineering effort if scope remains tight:
   `wal_encode` / record-copy cost as the next backend step.
 - Phase 137 is closed for WAL record encode/copy reduction and names
   `wal_append` / write-at shape as the next backend step.
+- Phase 138 is closed for WAL write-at shape profiling and names small
+  write/coalescing shape as the next backend step.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.

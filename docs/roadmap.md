@@ -777,6 +777,15 @@ Recommended order from here:
     512MiB gate reduced `wal_encode + wal_copy` from the Phase 136 baseline
     `1346ms` to `363ms`; the next named bottleneck is `wal_append`, so Phase
     138 should inspect WAL pwrite shape/coalescing.
+96. Phase 138: WAL WriteAt Shape Profile. **Closed 2026-07-05,
+    runner PASS**
+    Added product-owned append write-at shape counters:
+    calls/bytes/max/avg plus wrap count and padding bytes. The live 512MiB gate
+    showed `wal_append_writeat_calls=17979`,
+    `wal_append_writeat_avg_bytes=33013`, and
+    `wal_append_writeat_max_bytes=33072`, with only 8 wraps and 13KB padding.
+    The append bottleneck is therefore small-write/coalescing shape, not
+    wrap/padding or NVMe/RDMA.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close

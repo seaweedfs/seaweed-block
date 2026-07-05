@@ -79,6 +79,7 @@ The supported-lab claim is intentionally narrow:
 | 135 | Post-batch write-path retriage and next-bottleneck classification | PASS |
 | 136 | WAL append/copy/checksum profile and backend-internal bottleneck classification | PASS |
 | 137 | WAL record encode/copy reduction and next append-shape bottleneck classification | PASS |
+| 138 | WAL append write-at shape profile and small-write classification | PASS |
 
 Key QA sign-offs:
 
@@ -100,6 +101,7 @@ Key QA sign-offs:
 - `internal/docs/qa-assignments/phase135-nvme-tcp-post-batch-retriage-qa-signoff.md`
 - `internal/docs/qa-assignments/phase136-wal-append-copy-checksum-profile-qa-signoff.md`
 - `internal/docs/qa-assignments/phase137-reduce-wal-record-encode-copy-qa-signoff.md`
+- `internal/docs/qa-assignments/phase138-wal-writeat-shape-profile-qa-signoff.md`
 
 ## Performance Baseline
 
@@ -317,6 +319,26 @@ cleanup_status=ok
 The next measured cost is WAL append/write-at shape. The product still makes no
 published performance/SLO, RoCE, or NVMe/RDMA claim from this source-gated lab
 evidence.
+
+Phase 138 split that append/write-at shape:
+
+```text
+phase138_wal_writeat_shape_profile_status=ok
+wal_append_duration_ms=380
+wal_append_writeat_calls=17979
+wal_append_writeat_bytes=593543918
+wal_append_writeat_max_bytes=33072
+wal_append_writeat_avg_bytes=33013
+wal_append_wrap_count=8
+wal_append_padding_bytes=13136
+post_phase138_bottleneck=wal_append_small_writes
+next_recommendation=phase139_wal_append_batch_shape_coalescing
+cleanup_status=ok
+```
+
+The write-at shape is many small writes of about 33KB, with negligible
+wrap/padding. This keeps the next work inside WAL batching/coalescing rather
+than transport work.
 
 Phase 127 closes the source/component side of the ANA Change Notice gap:
 

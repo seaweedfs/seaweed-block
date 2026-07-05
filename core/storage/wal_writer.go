@@ -82,6 +82,9 @@ func (w *walWriter) append(entry *walEntry) (walRelOffset uint64, err error) {
 		if err := w.writePadding(remaining, physHead); err != nil {
 			return 0, fmt.Errorf("walWriter.append: padding: %w", err)
 		}
+		if w.instr != nil {
+			w.instr.recordWALAppendWrap(remaining)
+		}
 		w.logicalHead += remaining
 		physHead = 0
 	}
@@ -195,6 +198,9 @@ func (w *walWriter) appendBatch(entries []*walEntry) ([]uint64, error) {
 			if err := appendPendingBytes(physHead, padding); err != nil {
 				return offsets, err
 			}
+			if w.instr != nil {
+				w.instr.recordWALAppendWrap(remaining)
+			}
 			localHead += remaining
 			physHead = 0
 		}
@@ -263,8 +269,13 @@ func (w *walWriter) writePadding(size, physPos uint64) error {
 	if len(buf) == 0 {
 		return nil
 	}
-	_, err = w.fd.WriteAt(buf, int64(w.walOffset+physPos))
-	return err
+	if _, err := w.fd.WriteAt(buf, int64(w.walOffset+physPos)); err != nil {
+		return err
+	}
+	if w.instr != nil {
+		w.instr.recordWALAppendWriteAt(len(buf))
+	}
+	return nil
 }
 
 func encodeWALPadding(size uint64) ([]byte, error) {
