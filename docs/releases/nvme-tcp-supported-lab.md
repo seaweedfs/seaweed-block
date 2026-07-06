@@ -88,6 +88,7 @@ The supported-lab claim is intentionally narrow:
 | 144 | 64KiB NVMe/TCP WAL encode/append pair profile | PASS |
 | 145 | WAL record materialization allocation reduction | PASS |
 | 146 | WAL materialization effectiveness profile | PASS |
+| 147 | WAL multi-block record design gate | PASS |
 
 Key QA sign-offs:
 
@@ -118,6 +119,7 @@ Key QA sign-offs:
 - `internal/docs/qa-assignments/phase144-wal-encode-append-pair-profile-qa-signoff.md`
 - `internal/docs/qa-assignments/phase145-wal-record-materialization-reduction-qa-signoff.md`
 - `internal/docs/qa-assignments/phase146-wal-record-materialization-effectiveness-qa-signoff.md`
+- `internal/docs/qa-assignments/phase147-wal-multiblock-record-design-qa-signoff.md`
 
 ## Performance Baseline
 
@@ -517,6 +519,26 @@ cleanup_status=ok
 This keeps the Phase 145 allocation reduction, but it remains lab evidence and
 not a throughput/SLO claim. The next backend gate should select a deeper WAL
 design path, such as multi-block WAL records or vectored write-at.
+
+Phase 147 selected that deeper path:
+
+```text
+phase147_wal_multiblock_record_design_status=ok
+current_wal_format_unchanged=true
+current_recovery_compatibility=pass
+candidate_design=multi_block_record
+candidate_reduces_record_count=true
+candidate_reduces_write_calls=false
+durability_invariant_documented=true
+recovery_invariant_documented=true
+phase147_decision=prototype_next
+next_recommendation=phase148_wal_multiblock_record_local_prototype
+cleanup_status=ok
+```
+
+The design gate keeps the current WAL format unchanged and documents the
+required format-version, CRC, dirty-map, recovery, flusher, checkpoint, and
+dirty-read invariants before any prototype writes a new record shape.
 
 Phase 127 closes the source/component side of the ANA Change Notice gap:
 

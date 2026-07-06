@@ -478,6 +478,11 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   non-claim that this is not a throughput/SLO release statement. The next
   backend gate should select a deeper WAL path: multi-block WAL records or
   vectored write-at, with durability/recovery invariants documented first.
+- Phase 147 is closed for that design gate. It selected `multi_block_record`
+  over vectored write-at because the current append path already coalesces
+  encoded records into fewer `WriteAt` calls, while record count remains the
+  structural encode/recovery cost. The current WAL format stays unchanged; the
+  next phase may prototype a disabled-by-default multi-block record locally.
 - Later protocol candidates: complete a real NVMe/RDMA target, characterize
   NVMe/TCP performance, or bridge to object/NIXL acceleration where the product
   surface is object/storage rather than block PVC. Keep these separate so

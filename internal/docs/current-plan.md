@@ -1,73 +1,69 @@
-# Current Plan: Phase 147 WAL Multi-Block Record Design Gate
+# Current Plan: Phase 148 WAL Multi-Block Record Local Prototype
 
 Status: planning.
 
-Phase 146 closed the WAL materialization effectiveness profile:
+Phase 147 closed the WAL multi-block record design gate:
 
 ```text
-phase146_wal_record_materialization_effectiveness_status=ok
-wal_record_materialization_change=writebatch_value_entries
-candidate_max_h2c_bytes=65536
-target_write_request_max_bytes=65536
-backend_write_request_max_bytes=65536
-wal_encode_duration_ms=281
-wal_append_duration_ms=280
-phase146_pair_improvement_pct=5.24
-phase146_effectiveness=visible
-phase146_decision=keep_change
-next_recommendation=phase147_wal_multiblock_record_design_gate
+phase147_wal_multiblock_record_design_status=ok
+current_wal_format_unchanged=true
+current_recovery_compatibility=pass
+candidate_design=multi_block_record
+candidate_reduces_record_count=true
+candidate_reduces_write_calls=false
+durability_invariant_documented=true
+recovery_invariant_documented=true
+phase147_decision=prototype_next
+next_recommendation=phase148_wal_multiblock_record_local_prototype
 cleanup_status=ok
 ```
 
 ## Goal
 
-Decide the next deeper WAL optimization path without changing durability
-semantics by accident. The candidate designs are:
-
-- multi-block WAL records: encode multiple contiguous block writes into one WAL
-  record;
-- vectored write-at: keep the current record format but reduce materialization
-  or syscall/copy shape with a platform-gated write path.
+Prototype a multi-block WAL record locally behind an explicit feature gate. The
+prototype must prove encode/decode, dirty read, recovery split, and flusher split
+semantics without changing the default WAL format or Kubernetes behavior.
 
 ## Required Evidence
 
 ```text
-phase147_wal_multiblock_record_design_status=ok
+phase148_wal_multiblock_record_local_prototype_status=ok
 frontend_transport=tcp
 roce_claim_allowed=false
 nvme_rdma_claim_allowed=false
 performance_slo_claim_allowed=false
-current_wal_format_unchanged=true
+default_wal_format_unchanged=true
+feature_gate_default=false
+multiblock_encode_decode=pass
+multiblock_dirty_read=pass
+multiblock_recovery_split=pass
+multiblock_flusher_split=pass
+single_block_compatibility=pass
 current_recovery_compatibility=pass
-candidate_design=<multi_block_record|vectored_writeat|defer>
-candidate_reduces_record_count=<true|false>
-candidate_reduces_write_calls=<true|false>
-durability_invariant_documented=true
-recovery_invariant_documented=true
-phase147_decision=<prototype_next|defer|blocked>
+phase148_decision=<profile_next|defer|blocked>
 next_recommendation=<specific next phase>
 cleanup_status=ok
 ```
 
 ## Boundaries
 
-- Do not change the WAL on-disk format in Phase 147.
-- Do not add Linux-specific writev/pwritev behavior without an explicit
-  fallback contract.
+- Do not enable the new record shape by default.
+- Do not use the new record shape from Kubernetes/blockvolume in this phase.
 - Do not raise the default H2C size.
 - Do not claim throughput/SLO from this design gate.
+- Keep old single-block WAL recovery compatibility green.
 
 ## Candidate Work
 
-1. Document the current WAL record/recovery invariants and the exact point where
-   contiguous writes could be grouped safely.
-2. Add a local design gate that proves current WAL format/recovery tests still
-   pass unchanged.
-3. Produce an explicit prototype recommendation:
-   `multi_block_record`, `vectored_writeat`, or `defer`.
+1. Add a disabled-by-default local option for multi-block WAL records.
+2. Encode/decode one batch record as `firstLSN + blockIndex` and
+   `firstLBA + blockIndex`.
+3. Extend only the local test path enough to prove dirty reads, recovery split,
+   and flusher split.
+4. Keep current single-block format as default and compatibility path.
 
 ## Exit Criteria
 
-Phase 147 can close when the next WAL optimization is selected with durability
-and recovery invariants written down, or when the work is explicitly deferred as
-too risky for the current NVMe/TCP supported-lab track.
+Phase 148 can close when the prototype proves correctness locally or is
+explicitly deferred with a concrete blocker. A later phase must run the mounted
+NVMe/TCP profile before any user-facing performance statement.
