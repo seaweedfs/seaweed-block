@@ -60,6 +60,10 @@ type TargetConfig struct {
 	// Zero values pick T2 defaults.
 	Handler HandlerConfig
 
+	// MaxH2CDataLength is the NVMe/TCP H2C data cap advertised in ICResp and
+	// mirrored by Identify IOCCSZ/MDTS. Zero preserves the 32KiB default.
+	MaxH2CDataLength uint32
+
 	// Logger (nil → log.Default).
 	Logger *log.Logger
 
@@ -92,6 +96,9 @@ type Target struct {
 func NewTarget(cfg TargetConfig) *Target {
 	if cfg.Provider == nil {
 		panic("nvme: NewTarget: Provider required")
+	}
+	if err := ValidateMaxH2CDataLength(cfg.MaxH2CDataLength); err != nil {
+		panic("nvme: NewTarget: invalid MaxH2CDataLength: " + err.Error())
 	}
 	lg := cfg.Logger
 	if lg == nil {

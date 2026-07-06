@@ -14,20 +14,21 @@ import (
 const stateMountPath = "/var/lib/sw-block"
 
 type K8sRenderConfig struct {
-	Namespace           string
-	Image               string
-	MasterAddr          string
-	DurableRootBase     string
-	DurableImpl         string
-	StateHostPathBase   string
-	RecoveryMode        string
-	ReplicationAck      string
-	OwnerReferenceToPVC bool
-	EnableStatus        bool
-	ExternalISCSI       bool
-	ExternalNVMe        bool
-	ExternalStatus      bool
-	ISCSICHAP           CHAPSecretRef
+	Namespace            string
+	Image                string
+	MasterAddr           string
+	DurableRootBase      string
+	DurableImpl          string
+	StateHostPathBase    string
+	RecoveryMode         string
+	ReplicationAck       string
+	OwnerReferenceToPVC  bool
+	EnableStatus         bool
+	ExternalISCSI        bool
+	ExternalNVMe         bool
+	ExternalStatus       bool
+	NVMeMaxH2CDataLength uint32
+	ISCSICHAP            CHAPSecretRef
 }
 
 type CHAPSecretRef struct {
@@ -223,6 +224,9 @@ func blockVolumeArgs(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.B
 			"--nvme-subsysnqn="+replica.NVMeSubsystemNQN,
 			fmt.Sprintf("--nvme-ns=%d", replica.NVMeNSID),
 		)
+		if cfg.NVMeMaxH2CDataLength != 0 {
+			args = append(args, fmt.Sprintf("--nvme-max-h2c-data-length=%d", cfg.NVMeMaxH2CDataLength))
+		}
 	default:
 		iscsiListen := fmt.Sprintf("127.0.0.1:%d", replica.ISCSIListenPort)
 		if cfg.ExternalISCSI {

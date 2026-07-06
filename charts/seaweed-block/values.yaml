@@ -103,6 +103,9 @@ ports:
   nvmeBase: 4420
   statusBase: 23260
 
+nvme:
+  maxH2CDataLength: 32768
+
 # Initial block-capable nodes. D2 will add a generator that derives this from
 # `kubectl get nodes` so node names and InternalIPs are verified against the
 # live cluster.

@@ -292,10 +292,27 @@ func TestG15d_K8sRenderer_RendersNVMeBlockVolumeArgs(t *testing.T) {
 	for _, forbidden := range []string{
 		"--iscsi-listen=",
 		"--iscsi-iqn=",
+		"--nvme-max-h2c-data-length=",
 	} {
 		if strings.Contains(raw, forbidden) {
 			t.Fatalf("nvme manifest must not contain %q:\n%s", forbidden, raw)
 		}
+	}
+}
+
+func TestPhase141_K8sRenderer_RendersNVMeMaxH2CCandidate(t *testing.T) {
+	plan := sampleWorkloadPlan()
+	plan.Protocol = "nvme"
+	manifests, err := RenderBlockVolumeDeployments(plan, K8sRenderConfig{
+		MasterAddr:           "m:9333",
+		NVMeMaxH2CDataLength: 65536,
+	})
+	if err != nil {
+		t.Fatalf("RenderBlockVolumeDeployments: %v", err)
+	}
+	raw := string(manifests[0].YAML)
+	if !strings.Contains(raw, "--nvme-max-h2c-data-length=65536") {
+		t.Fatalf("manifest missing NVMe H2C candidate:\n%s", raw)
 	}
 }
 

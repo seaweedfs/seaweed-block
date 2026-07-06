@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/authority"
+	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
 	"github.com/seaweedfs/seaweed-block/core/host/master"
 	"github.com/seaweedfs/seaweed-block/core/launcher"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
@@ -41,6 +42,7 @@ type flags struct {
 	launcherReplicationAck           string
 	launcherISCSIPortBase            int
 	launcherNVMePortBase             int
+	launcherNVMeMaxH2CDataLength     uint
 	launcherPVCOwnerRef              bool
 	launcherStatus                   bool
 	launcherKubernetesApply          bool
@@ -85,6 +87,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.launcherReplicationAck, "launcher-replication-ack", "best-effort", "G15d rendered blockvolume replication ACK profile: best-effort, sync-quorum, or sync-all")
 	fs.IntVar(&f.launcherISCSIPortBase, "launcher-iscsi-port-base", 3260, "G15d iSCSI port base for generated blockvolume workloads")
 	fs.IntVar(&f.launcherNVMePortBase, "launcher-nvme-port-base", 4420, "G15d NVMe/TCP port base for generated blockvolume workloads")
+	fs.UintVar(&f.launcherNVMeMaxH2CDataLength, "launcher-nvme-max-h2c-data-length", 0, "G15d NVMe/TCP MaxH2CDataLength passed to generated blockvolume workloads. 0 preserves target default")
 	fs.BoolVar(&f.launcherPVCOwnerRef, "launcher-pvc-owner-ref", false, "render generated blockvolume Deployments in the source PVC namespace with a PVC ownerReference; disabled by default for alpha harness compatibility")
 	fs.BoolVar(&f.launcherStatus, "launcher-status", false, "render loopback-only blockvolume status endpoints in generated workload manifests; intended for TestOps/diagnostics")
 	fs.BoolVar(&f.launcherKubernetesApply, "launcher-kubernetes-apply", false, "apply/delete generated blockvolume Deployments through the in-cluster Kubernetes API; scoped to app=sw-blockvolume and generated volume/replica labels")
@@ -105,6 +108,12 @@ func parseFlags(args []string) (flags, error) {
 	}
 	if f.version {
 		return f, nil
+	}
+	if f.launcherNVMeMaxH2CDataLength > uint(^uint32(0)) {
+		return flags{}, fmt.Errorf("--launcher-nvme-max-h2c-data-length=%d exceeds uint32", f.launcherNVMeMaxH2CDataLength)
+	}
+	if err := nvme.ValidateMaxH2CDataLength(uint32(f.launcherNVMeMaxH2CDataLength)); err != nil {
+		return flags{}, fmt.Errorf("--launcher-nvme-max-h2c-data-length=%d invalid: %w", f.launcherNVMeMaxH2CDataLength, err)
 	}
 	if f.authorityStore == "" {
 		return flags{}, fmt.Errorf("--authority-store is required")
@@ -337,18 +346,19 @@ func runLifecycleLauncherTick(h *master.Host, f flags) error {
 	var rendered []launcher.RenderedManifest
 	for _, plan := range result.Plans {
 		manifests, err := launcher.RenderBlockVolumeDeployments(plan, launcher.K8sRenderConfig{
-			Namespace:           f.launcherNamespace,
-			Image:               f.launcherImage,
-			MasterAddr:          masterAddr,
-			DurableRootBase:     f.launcherDurableRoot,
-			DurableImpl:         f.launcherDurableImpl,
-			StateHostPathBase:   f.launcherStateHostPath,
-			ReplicationAck:      f.launcherReplicationAck,
-			OwnerReferenceToPVC: f.launcherPVCOwnerRef,
-			EnableStatus:        f.launcherStatus,
-			ExternalISCSI:       f.launcherExternalISCSI,
-			ExternalNVMe:        f.launcherExternalNVMe,
-			ExternalStatus:      f.launcherExternalStatus,
+			Namespace:            f.launcherNamespace,
+			Image:                f.launcherImage,
+			MasterAddr:           masterAddr,
+			DurableRootBase:      f.launcherDurableRoot,
+			DurableImpl:          f.launcherDurableImpl,
+			StateHostPathBase:    f.launcherStateHostPath,
+			ReplicationAck:       f.launcherReplicationAck,
+			OwnerReferenceToPVC:  f.launcherPVCOwnerRef,
+			EnableStatus:         f.launcherStatus,
+			ExternalISCSI:        f.launcherExternalISCSI,
+			ExternalNVMe:         f.launcherExternalNVMe,
+			ExternalStatus:       f.launcherExternalStatus,
+			NVMeMaxH2CDataLength: uint32(f.launcherNVMeMaxH2CDataLength),
 			ISCSICHAP: launcher.CHAPSecretRef{
 				Name:        f.launcherCHAPSecretName,
 				UsernameKey: f.launcherCHAPUserKey,

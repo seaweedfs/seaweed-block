@@ -194,9 +194,16 @@ func (s *Session) handleICReq() error {
 		PDUFormatVersion: req.PDUFormatVersion,
 		PDUDataAlignment: 0,
 		PDUDataDigest:    0,
-		MaxH2CDataLength: 0x8000,
+		MaxH2CDataLength: s.maxH2CDataLength(),
 	}
 	return s.w.SendHeaderOnly(pduICResp, &resp, icBodySize)
+}
+
+func (s *Session) maxH2CDataLength() uint32 {
+	if s == nil || s.target == nil {
+		return DefaultMaxH2CDataLength
+	}
+	return normalizeMaxH2CDataLength(s.target.cfg.MaxH2CDataLength)
 }
 
 // ---------- Phase 2: rxLoop ----------

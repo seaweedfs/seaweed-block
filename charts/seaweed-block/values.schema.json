@@ -73,6 +73,12 @@
         "statusBase": { "type": "integer", "minimum": 1, "maximum": 65535 }
       }
     },
+    "nvme": {
+      "type": "object",
+      "properties": {
+        "maxH2CDataLength": { "type": "integer", "minimum": 32768, "maximum": 1048576 }
+      }
+    },
     "compat": {
       "type": "object",
       "properties": {

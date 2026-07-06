@@ -82,6 +82,7 @@ The supported-lab claim is intentionally narrow:
 | 138 | WAL append write-at shape profile and small-write classification | PASS |
 | 139 | WAL append batch-shape analysis and frontend-request-limited classification | PASS |
 | 140 | Frontend request-size owner classification: NVMe/TCP target MaxH2C limit | PASS |
+| 141 | 64KiB NVMe/TCP MaxH2C opt-in boundary and live request-size movement | PASS |
 
 Key QA sign-offs:
 
@@ -106,6 +107,7 @@ Key QA sign-offs:
 - `internal/docs/qa-assignments/phase138-wal-writeat-shape-profile-qa-signoff.md`
 - `internal/docs/qa-assignments/phase139-wal-append-batch-shape-coalescing-qa-signoff.md`
 - `internal/docs/qa-assignments/phase140-frontend-request-size-profile-qa-signoff.md`
+- `internal/docs/qa-assignments/phase141-nvme-tcp-max-h2c-boundary-qa-signoff.md`
 
 ## Performance Baseline
 
@@ -383,6 +385,26 @@ The current 32KiB request shape is therefore an NVMe/TCP target advertised H2C
 limit, not a WAL coalescing limit or a host-only choice. The next gate should
 test any larger `MaxH2CDataLength` as an explicit protocol boundary before
 changing defaults.
+
+Phase 141 proved a 64KiB `MaxH2CDataLength` candidate as an explicit opt-in:
+
+```text
+phase141_nvme_tcp_max_h2c_boundary_status=ok
+candidate_max_h2c_bytes=65536
+host_connects_candidate=true
+writer_verified=true
+reader_verified=true
+target_write_request_max_bytes=65536
+backend_write_request_max_bytes=65536
+request_size_increase_observed=true
+phase141_decision=add_opt_in
+next_recommendation=phase142_nvme_tcp_large_h2c_retriage
+cleanup_status=ok
+```
+
+This is source-gated lab evidence that the option can be wired and used by the
+Linux host. It is not a default change, production compatibility claim, or
+performance/SLO claim.
 
 Phase 127 closes the source/component side of the ANA Change Notice gap:
 

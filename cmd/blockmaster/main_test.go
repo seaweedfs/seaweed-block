@@ -158,6 +158,30 @@ func TestParseFlags_LauncherExternalNVMeOptional(t *testing.T) {
 	}
 }
 
+func TestParseFlags_LauncherNVMeMaxH2CDataLength(t *testing.T) {
+	f, err := parseFlags([]string{
+		"--authority-store", "authority-dir",
+		"--launcher-nvme-max-h2c-data-length", "65536",
+	})
+	if err != nil {
+		t.Fatalf("parseFlags with launcher NVMe H2C candidate: %v", err)
+	}
+	if f.launcherNVMeMaxH2CDataLength != 65536 {
+		t.Fatalf("launcherNVMeMaxH2CDataLength=%d want 65536", f.launcherNVMeMaxH2CDataLength)
+	}
+
+	_, err = parseFlags([]string{
+		"--authority-store", "authority-dir",
+		"--launcher-nvme-max-h2c-data-length", "49152",
+	})
+	if err == nil {
+		t.Fatal("parseFlags succeeded; want invalid launcher NVMe H2C rejected")
+	}
+	if !strings.Contains(err.Error(), "--launcher-nvme-max-h2c-data-length=49152 invalid") {
+		t.Fatalf("error=%v, want invalid launcher NVMe H2C", err)
+	}
+}
+
 func TestBlockmasterBareTopologyRegistersVolumeControlServices(t *testing.T) {
 	h, err := master.New(master.Config{
 		AuthorityStoreDir: t.TempDir(),

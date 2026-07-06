@@ -74,6 +74,9 @@ spec:
             {{- end }}
             - "--launcher-iscsi-port-base={{ .Values.ports.iscsiBase }}"
             - "--launcher-nvme-port-base={{ .Values.ports.nvmeBase }}"
+            {{- if ne (int .Values.nvme.maxH2CDataLength) 32768 }}
+            - "--launcher-nvme-max-h2c-data-length={{ .Values.nvme.maxH2CDataLength }}"
+            {{- end }}
             {{- if .Values.blockmaster.launcherPVCOwnerRef }}
             - "--launcher-pvc-owner-ref"
             {{- end }}

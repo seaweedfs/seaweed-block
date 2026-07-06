@@ -22,6 +22,7 @@ FRONTEND_NETWORK_CLASS="${SW_BLOCK_FRONTEND_NETWORK_CLASS:-}"
 EXPECTED_FRONTEND_ROUTE_DEV="${SW_BLOCK_EXPECTED_FRONTEND_ROUTE_DEV:-}"
 PROFILE_WRITE="${SW_BLOCK_PHASE120_PROFILE_WRITE:-false}"
 PROFILE_INTERVAL_SECONDS="${SW_BLOCK_PHASE120_PROFILE_INTERVAL_SECONDS:-1}"
+NVME_MAX_H2C_DATA_LENGTH="${SW_BLOCK_NVME_MAX_H2C_DATA_LENGTH:-32768}"
 
 mkdir -p "${ARTIFACT_DIR}"/{bin,build,values,install,pvc,perf,status,cleanup,profile}
 : >"${SUMMARY}"
@@ -367,6 +368,7 @@ write_summary "nvme_rdma_claim_allowed=false"
 write_summary "performance_claim_allowed=false"
 write_summary "performance_slo_claim_allowed=false"
 write_summary "perf_gate_type=baseline_no_slo"
+write_summary "nvme_max_h2c_data_length=${NVME_MAX_H2C_DATA_LENGTH}"
 
 cd "${ROOT}"
 go test ./cmd/blockvolume ./cmd/sw-block >"${ARTIFACT_DIR}/go-test.log" 2>&1
@@ -405,6 +407,12 @@ fi
   2>"${ARTIFACT_DIR}/values/generate.stderr.txt"
 grep -q '^network_mode=external-nvme$' "${ARTIFACT_DIR}/values/generate.stdout.txt"
 write_summary "generated_external_nvme=true"
+if [[ "${NVME_MAX_H2C_DATA_LENGTH}" != "32768" ]]; then
+  cat >>"${ARTIFACT_DIR}/values/values.nvme.yaml" <<YAML
+nvme:
+  maxH2CDataLength: ${NVME_MAX_H2C_DATA_LENGTH}
+YAML
+fi
 
 python3 - "${ARTIFACT_DIR}/values/values.nvme.yaml" "${ARTIFACT_DIR}/values" <<'PY'
 from pathlib import Path
@@ -442,6 +450,9 @@ helm template "${HELM_RELEASE}" charts/seaweed-block --namespace "${HELM_NAMESPA
   >"${ARTIFACT_DIR}/install/helm-template.yaml" \
   2>"${ARTIFACT_DIR}/install/helm-template.stderr.txt"
 grep -q -- '--launcher-external-nvme' "${ARTIFACT_DIR}/install/helm-template.yaml"
+if [[ "${NVME_MAX_H2C_DATA_LENGTH}" != "32768" ]]; then
+  grep -q -- "--launcher-nvme-max-h2c-data-length=${NVME_MAX_H2C_DATA_LENGTH}" "${ARTIFACT_DIR}/install/helm-template.yaml"
+fi
 if grep -q -- '--launcher-external-iscsi' "${ARTIFACT_DIR}/install/helm-template.yaml"; then
   echo "unexpected iSCSI launcher flag in NVMe render" >&2
   exit 1

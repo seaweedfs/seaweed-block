@@ -447,6 +447,13 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   `target_write_request_max_bytes=32768`, and
   `backend_write_request_max_bytes=32768`. The next work should test a bounded
   `MaxH2CDataLength` candidate before changing defaults.
+- Phase 141 is closed for the NVMe/TCP MaxH2C boundary. A 64KiB candidate is
+  now wired as an explicit opt-in from Helm through blockmaster launcher to
+  blockvolume/NVMe target, with ICResp/Identify consistency tests and a live
+  Linux mounted writer/reader gate. The live request max moved to 65536 bytes
+  and cleanup was clean. The default remains 32KiB; the next work should
+  retriage the 64KiB opt-in write path before considering broader
+  compatibility or default changes.
 - Later protocol candidates: complete a real NVMe/RDMA target, characterize
   NVMe/TCP performance, or bridge to object/NIXL acceleration where the product
   surface is object/storage rather than block PVC. Keep these separate so

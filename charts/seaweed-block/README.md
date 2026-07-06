@@ -95,6 +95,11 @@ support the corresponding flag. The default durable implementation is still
 `walstore` because that is the blockmaster binary default when the
 `--launcher-durable-impl` flag is omitted.
 
+For source-gated NVMe/TCP write-path experiments, `nvme.maxH2CDataLength` can
+be set explicitly. The chart default is `32768`; `65536` has a supported-lab
+gate as an opt-in candidate. This is not a default change, NVMe/RDMA/RoCE
+claim, or performance SLO.
+
 ## RF=3 Sync-Quorum Profile
 
 For the gated RF=3 recovery shape:
