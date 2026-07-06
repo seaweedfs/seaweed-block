@@ -107,13 +107,13 @@ func (w *walWriter) append(entry *walEntry) (walRelOffset uint64, err error) {
 // appendBatch writes entries under one WAL-writer critical section. Each entry
 // remains independently encoded/recoverable; the batch only coalesces adjacent
 // bytes into fewer pwrite calls when the circular WAL layout allows it.
-func (w *walWriter) appendBatch(entries []*walEntry) ([]uint64, error) {
+func (w *walWriter) appendBatch(entries []walEntry) ([]uint64, error) {
 	if len(entries) == 0 {
 		return nil, nil
 	}
 	lengths := make([]uint64, len(entries))
-	for i, entry := range entries {
-		entryLen, err := entry.encodedSize()
+	for i := range entries {
+		entryLen, err := entries[i].encodedSize()
 		if err != nil {
 			return nil, fmt.Errorf("walWriter.appendBatch: validate entry %d: %w", i, err)
 		}
@@ -186,7 +186,8 @@ func (w *walWriter) appendBatch(entries []*walEntry) ([]uint64, error) {
 		return nil
 	}
 
-	for i, entry := range entries {
+	for i := range entries {
+		entry := &entries[i]
 		entryLen := lengths[i]
 		physHead := w.physicalPos(localHead)
 		remaining := w.walSize - physHead

@@ -86,6 +86,7 @@ The supported-lab claim is intentionally narrow:
 | 142 | 64KiB NVMe/TCP post-H2C backend bottleneck retriage | PASS |
 | 143 | 64KiB NVMe/TCP WAL append shape profile | PASS |
 | 144 | 64KiB NVMe/TCP WAL encode/append pair profile | PASS |
+| 145 | WAL record materialization allocation reduction | PASS |
 
 Key QA sign-offs:
 
@@ -114,6 +115,7 @@ Key QA sign-offs:
 - `internal/docs/qa-assignments/phase142-nvme-tcp-large-h2c-retriage-qa-signoff.md`
 - `internal/docs/qa-assignments/phase143-wal-append-large-h2c-profile-qa-signoff.md`
 - `internal/docs/qa-assignments/phase144-wal-encode-append-pair-profile-qa-signoff.md`
+- `internal/docs/qa-assignments/phase145-wal-record-materialization-reduction-qa-signoff.md`
 
 ## Performance Baseline
 
@@ -472,6 +474,24 @@ cleanup_status=ok
 
 The next backend work is a narrow WAL record materialization reduction, still
 behind source-gated lab evidence.
+
+Phase 145 made the first narrow materialization reduction:
+
+```text
+phase145_wal_record_materialization_reduction_status=ok
+wal_record_materialization_change=writebatch_value_entries
+unit_record_compatibility=pass
+candidate_max_h2c_bytes=65536
+target_write_request_max_bytes=65536
+backend_write_request_max_bytes=65536
+writer_verified=true
+reader_verified=true
+phase145_decision=keep_change
+cleanup_status=ok
+```
+
+The change removes per-record pointer allocation in `WALStore.WriteBatch`.
+It preserves WAL format/recovery semantics and is not yet a performance claim.
 
 Phase 127 closes the source/component side of the ANA Change Notice gap:
 

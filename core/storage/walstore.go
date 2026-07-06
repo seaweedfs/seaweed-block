@@ -449,12 +449,12 @@ func (s *WALStore) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error
 	s.nextLSN += uint64(len(blocks))
 	s.mu.Unlock()
 
-	entries := make([]*walEntry, len(blocks))
+	entries := make([]walEntry, len(blocks))
 	lsns := make([]uint64, len(blocks))
 	for i, data := range blocks {
 		lsn := firstLSN + uint64(i)
 		lsns[i] = lsn
-		entries[i] = &walEntry{
+		entries[i] = walEntry{
 			LSN:    lsn,
 			Type:   walEntryWrite,
 			LBA:    uint64(startLBA + uint32(i)),

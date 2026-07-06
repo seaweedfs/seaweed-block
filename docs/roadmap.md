@@ -110,7 +110,8 @@ Seaweed Block can already demonstrate a narrow Kubernetes block-storage loop:
   bottleneck is WAL append, not frontend request size. The append bucket is
   paired with near-equal WAL encode cost; Phase 144 names
   `wal_record_materialization_reduction` as the next narrow backend target.
-  This is still not a default or performance/SLO claim.
+  Phase 145 removes one local batch-allocation seam without changing WAL format
+  or recovery semantics. This is still not a default or performance/SLO claim.
 - Kubernetes NVMe/TCP mounted reconnect is source-gated through changed
   desired path-set evidence: CSI-node can connect a newly published desired
   NVMe path, prune the stale old host path for the same NQN, preserve pod
