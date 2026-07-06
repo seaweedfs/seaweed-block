@@ -66,6 +66,9 @@ spec:
             {{- if .Values.compat.launcherDurableImplFlag }}
             - "--launcher-durable-impl={{ .Values.blockmaster.durableImpl }}"
             {{- end }}
+            {{- if .Values.blockmaster.durableWALMultiBlockRecords }}
+            - "--launcher-durable-wal-multiblock-records"
+            {{- end }}
             {{- if .Values.blockmaster.launcherStatus }}
             - "--launcher-status"
             {{- end }}

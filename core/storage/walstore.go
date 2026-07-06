@@ -599,10 +599,17 @@ func (s *WALStore) readFromWAL(walRelOff uint64, dataOffset uint32) ([]byte, err
 	return data, nil
 }
 
-func (s *WALStore) enableMultiBlockRecordsForTest(enabled bool) {
+// SetMultiBlockRecords toggles the Phase 150 disabled-by-default multi-block
+// WAL record prototype. Callers must keep this behind an explicit operator/test
+// opt-in until mounted NVMe/TCP profiling and format-compatibility gates pass.
+func (s *WALStore) SetMultiBlockRecords(enabled bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.multiBlockRecords = enabled
+}
+
+func (s *WALStore) enableMultiBlockRecordsForTest(enabled bool) {
+	s.SetMultiBlockRecords(enabled)
 }
 
 func (s *WALStore) readFromExtent(lba uint32) ([]byte, error) {

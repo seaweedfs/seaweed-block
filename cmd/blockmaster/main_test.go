@@ -182,6 +182,20 @@ func TestParseFlags_LauncherNVMeMaxH2CDataLength(t *testing.T) {
 	}
 }
 
+func TestPhase150_ParseFlagsLauncherWALMultiBlockRecords(t *testing.T) {
+	f, err := parseFlags([]string{
+		"--authority-store", "/tmp/a",
+		"--topology", "topology.yaml",
+		"--launcher-durable-wal-multiblock-records",
+	})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if !f.launcherWALMultiBlockRecords {
+		t.Fatal("launcherWALMultiBlockRecords=false, want true")
+	}
+}
+
 func TestBlockmasterBareTopologyRegistersVolumeControlServices(t *testing.T) {
 	h, err := master.New(master.Config{
 		AuthorityStoreDir: t.TempDir(),

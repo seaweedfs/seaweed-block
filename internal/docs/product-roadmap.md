@@ -492,6 +492,11 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   WAL encode ops from `2048` to `128`, while append/write-at calls remain `128`.
   This justifies wiring a disabled-by-default runtime opt-in for mounted NVMe/TCP
   profiling, but it is still not a performance/SLO claim.
+- Phase 150 is closed for runtime opt-in wiring. The flag
+  `--durable-wal-multiblock-records` reaches walstore only when explicitly set;
+  Helm defaults omit it and explicit
+  `blockmaster.durableWALMultiBlockRecords=true` renders it. The next gate must
+  run mounted NVMe/TCP before keeping or dropping the opt-in.
 - Later protocol candidates: complete a real NVMe/RDMA target, characterize
   NVMe/TCP performance, or bridge to object/NIXL acceleration where the product
   surface is object/storage rather than block PVC. Keep these separate so

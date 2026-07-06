@@ -16,10 +16,62 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 func implMatrix() []durable.ImplName {
 	return []durable.ImplName{durable.ImplSmartWAL, durable.ImplWALStore}
+}
+
+func TestPhase150_DurableProviderWALMultiBlockOptIn(t *testing.T) {
+	run := func(t *testing.T, enabled bool) uint64 {
+		t.Helper()
+		root := t.TempDir()
+		id := frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1}
+		view := newStubView(healthyProj(id))
+		p, err := durable.NewDurableProvider(durable.ProviderConfig{
+			Impl:                 durable.ImplWALStore,
+			StorageRoot:          root,
+			BlockSize:            4096,
+			NumBlocks:            128,
+			WALMultiBlockRecords: enabled,
+		}, view)
+		if err != nil {
+			t.Fatalf("NewDurableProvider: %v", err)
+		}
+		defer p.Close()
+		raw, err := p.EnsureStorage("v1")
+		if err != nil {
+			t.Fatalf("EnsureStorage: %v", err)
+		}
+		batcher, ok := raw.(storage.WriteBatcher)
+		if !ok {
+			t.Fatalf("storage %T does not implement WriteBatcher", raw)
+		}
+		instr, ok := raw.(storage.WriteInstrumented)
+		if !ok {
+			t.Fatalf("storage %T does not implement WriteInstrumented", raw)
+		}
+		for batch := 0; batch < 4; batch++ {
+			blocks := make([][]byte, 4)
+			for i := range blocks {
+				blocks[i] = bytes.Repeat([]byte{byte(batch*4 + i + 1)}, 4096)
+			}
+			if _, err := batcher.WriteBatch(uint32(batch*4), blocks); err != nil {
+				t.Fatalf("WriteBatch enabled=%v batch=%d: %v", enabled, batch, err)
+			}
+		}
+		return instr.WriteInstrumentation().WALEncodeOps
+	}
+
+	single := run(t, false)
+	multi := run(t, true)
+	if single != 16 {
+		t.Fatalf("single encode ops=%d want 16", single)
+	}
+	if multi != 4 {
+		t.Fatalf("multi encode ops=%d want 4", multi)
+	}
 }
 
 func newProvider(t *testing.T, impl durable.ImplName) (*durable.DurableProvider, *stubView, string) {

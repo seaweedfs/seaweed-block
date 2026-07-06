@@ -19,6 +19,7 @@ type K8sRenderConfig struct {
 	MasterAddr           string
 	DurableRootBase      string
 	DurableImpl          string
+	WALMultiBlockRecords bool
 	StateHostPathBase    string
 	RecoveryMode         string
 	ReplicationAck       string
@@ -189,6 +190,9 @@ func blockVolumeArgs(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.B
 		"--durable-blocksize=4096",
 		"--recovery-mode=" + cfg.RecoveryMode,
 		"--replication-ack=" + cfg.ReplicationAck,
+	}
+	if cfg.WALMultiBlockRecords {
+		args = append(args, "--durable-wal-multiblock-records")
 	}
 	if cfg.EnableStatus {
 		port, err := blockVolumeStatusPort(plan, replica)

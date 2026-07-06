@@ -96,6 +96,12 @@ type ProviderConfig struct {
 	//
 	// Pinned by: INV-G6-RETENTION-POLICY-OPERATOR-VISIBLE.
 	WALRetentionLSNs uint64
+
+	// WALMultiBlockRecords enables the Phase 150 multi-block WAL record
+	// prototype for ImplWALStore only. Default false preserves the current
+	// single-block WAL record format. Do not enable for release claims until a
+	// mounted NVMe/TCP profile gate passes.
+	WALMultiBlockRecords bool
 }
 
 // DurableProvider is the production frontend.Provider implementation.
@@ -473,6 +479,9 @@ func (p *DurableProvider) openExisting(volumeID, path string) (*volHandle, error
 		if p.cfg.WALRetentionLSNs > 0 {
 			ws.SetRecoveryRetentionLSNs(p.cfg.WALRetentionLSNs)
 		}
+		if p.cfg.WALMultiBlockRecords {
+			ws.SetMultiBlockRecords(true)
+		}
 		s = ws
 	case ImplSmartWAL:
 		sw, err := smartwal.OpenStore(path)
@@ -504,6 +513,9 @@ func (p *DurableProvider) createFresh(volumeID, path string) (*volHandle, error)
 		// G6 §1.A α (see openExisting comment for semantics).
 		if p.cfg.WALRetentionLSNs > 0 {
 			ws.SetRecoveryRetentionLSNs(p.cfg.WALRetentionLSNs)
+		}
+		if p.cfg.WALMultiBlockRecords {
+			ws.SetMultiBlockRecords(true)
 		}
 		s = ws
 	case ImplSmartWAL:

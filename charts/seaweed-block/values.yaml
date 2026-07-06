@@ -44,6 +44,7 @@ blockmaster:
   launcherStatus: true
   launcherPVCOwnerRef: true
   durableImpl: walstore
+  durableWALMultiBlockRecords: false
   stateHostPath: ""
   stateHostPathType: DirectoryOrCreate
   statePermissionsImage:

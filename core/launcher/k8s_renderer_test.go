@@ -51,6 +51,7 @@ func TestG15d_K8sRenderer_RendersBlockVolumeDeploymentArgs(t *testing.T) {
 		"--nvme-listen=",
 		"--nvme-subsysnqn=",
 		"--nvme-ns=",
+		"--durable-wal-multiblock-records",
 	} {
 		if strings.Contains(raw, forbidden) {
 			t.Fatalf("iscsi manifest must not contain %q:\n%s", forbidden, raw)
@@ -58,6 +59,20 @@ func TestG15d_K8sRenderer_RendersBlockVolumeDeploymentArgs(t *testing.T) {
 	}
 	if strings.Contains(raw, "--status-addr=") {
 		t.Fatalf("status endpoint must be opt-in for generated manifests:\n%s", raw)
+	}
+}
+
+func TestPhase150_K8sRenderer_RendersWALMultiBlockOptIn(t *testing.T) {
+	manifests, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{
+		MasterAddr:           "m:9333",
+		WALMultiBlockRecords: true,
+	})
+	if err != nil {
+		t.Fatalf("RenderBlockVolumeDeployments: %v", err)
+	}
+	raw := string(manifests[0].YAML)
+	if !strings.Contains(raw, "--durable-wal-multiblock-records") {
+		t.Fatalf("manifest missing wal multiblock opt-in:\n%s", raw)
 	}
 }
 

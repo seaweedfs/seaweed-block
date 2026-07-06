@@ -91,6 +91,7 @@ The supported-lab claim is intentionally narrow:
 | 147 | WAL multi-block record design gate | PASS |
 | 148 | WAL multi-block record local prototype | PASS |
 | 149 | WAL multi-block record local profile | PASS |
+| 150 | WAL multi-block runtime opt-in | PASS |
 
 Key QA sign-offs:
 
@@ -124,6 +125,7 @@ Key QA sign-offs:
 - `internal/docs/qa-assignments/phase147-wal-multiblock-record-design-qa-signoff.md`
 - `internal/docs/qa-assignments/phase148-wal-multiblock-record-local-prototype-qa-signoff.md`
 - `internal/docs/qa-assignments/phase149-wal-multiblock-record-profile-qa-signoff.md`
+- `internal/docs/qa-assignments/phase150-wal-multiblock-runtime-opt-in-qa-signoff.md`
 
 ## Performance Baseline
 
@@ -584,6 +586,22 @@ cleanup_status=ok
 This confirms the prototype reduces record/encode count in local storage, while
 write-at call count is unchanged. A mounted NVMe/TCP profile is still required
 before any user-facing performance statement.
+
+Phase 150 wires the prototype as an explicit default-off runtime opt-in:
+
+```text
+phase150_wal_multiblock_runtime_opt_in_status=ok
+runtime_opt_in_name=durable-wal-multiblock-records
+runtime_opt_in_default=false
+explicit_opt_in_reaches_walstore=true
+helm_default_omits_opt_in=true
+helm_explicit_renders_opt_in=true
+phase150_decision=mounted_profile_next
+next_recommendation=phase151_wal_multiblock_mounted_nvme_profile
+cleanup_status=ok
+```
+
+The opt-in is not release-supported until the mounted NVMe/TCP profile passes.
 
 Phase 127 closes the source/component side of the ANA Change Notice gap:
 
