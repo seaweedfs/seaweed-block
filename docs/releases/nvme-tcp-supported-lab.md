@@ -90,6 +90,7 @@ The supported-lab claim is intentionally narrow:
 | 146 | WAL materialization effectiveness profile | PASS |
 | 147 | WAL multi-block record design gate | PASS |
 | 148 | WAL multi-block record local prototype | PASS |
+| 149 | WAL multi-block record local profile | PASS |
 
 Key QA sign-offs:
 
@@ -122,6 +123,7 @@ Key QA sign-offs:
 - `internal/docs/qa-assignments/phase146-wal-record-materialization-effectiveness-qa-signoff.md`
 - `internal/docs/qa-assignments/phase147-wal-multiblock-record-design-qa-signoff.md`
 - `internal/docs/qa-assignments/phase148-wal-multiblock-record-local-prototype-qa-signoff.md`
+- `internal/docs/qa-assignments/phase149-wal-multiblock-record-profile-qa-signoff.md`
 
 ## Performance Baseline
 
@@ -561,6 +563,27 @@ cleanup_status=ok
 ```
 
 This is not wired to Kubernetes and not enabled by default.
+
+Phase 149 profiled the local prototype:
+
+```text
+phase149_wal_multiblock_record_profile_status=ok
+profile_scope=local_storage
+single_block_wal_encode_ops=2048
+multiblock_wal_encode_ops=128
+single_block_wal_append_ops=128
+multiblock_wal_append_ops=128
+single_block_wal_writeat_calls=128
+multiblock_wal_writeat_calls=128
+record_count_reduction_visible=true
+phase149_decision=wire_runtime_opt_in
+next_recommendation=phase150_wal_multiblock_runtime_opt_in
+cleanup_status=ok
+```
+
+This confirms the prototype reduces record/encode count in local storage, while
+write-at call count is unchanged. A mounted NVMe/TCP profile is still required
+before any user-facing performance statement.
 
 Phase 127 closes the source/component side of the ANA Change Notice gap:
 

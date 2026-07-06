@@ -488,6 +488,10 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   flusher-split, and `ScanLBAs` coverage. It is not wired into Kubernetes or the
   default blockvolume path; Phase 149 must profile record-count reduction before
   runtime opt-in wiring.
+- Phase 149 is closed for the local profile. The same WriteBatch workload drops
+  WAL encode ops from `2048` to `128`, while append/write-at calls remain `128`.
+  This justifies wiring a disabled-by-default runtime opt-in for mounted NVMe/TCP
+  profiling, but it is still not a performance/SLO claim.
 - Later protocol candidates: complete a real NVMe/RDMA target, characterize
   NVMe/TCP performance, or bridge to object/NIXL acceleration where the product
   surface is object/storage rather than block PVC. Keep these separate so

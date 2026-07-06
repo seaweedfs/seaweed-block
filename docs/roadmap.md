@@ -117,7 +117,9 @@ Seaweed Block can already demonstrate a narrow Kubernetes block-storage loop:
   record prototype. The current WAL format remains unchanged until local
   encode/decode, dirty-read, recovery-split, and flusher-split tests pass.
   Phase 148 closes that local correctness gate; the next step is profiling
-  record-count reduction before any runtime or Kubernetes opt-in.
+  record-count reduction before any runtime or Kubernetes opt-in. Phase 149
+  proves that reduction locally (`2048` encode ops to `128`) and keeps the next
+  step bounded to a disabled-by-default runtime opt-in.
 - Kubernetes NVMe/TCP mounted reconnect is source-gated through changed
   desired path-set evidence: CSI-node can connect a newly published desired
   NVMe path, prune the stale old host path for the same NQN, preserve pod
