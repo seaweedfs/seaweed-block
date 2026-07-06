@@ -460,6 +460,12 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   append (`wal_append_duration_ms=300`), with WAL encode close behind
   (`wal_encode_duration_ms=289`). The next backend work should profile WAL
   append under the 64KiB shape before changing append semantics.
+- Phase 143 is closed for large-H2C WAL append shape profiling. The live gate
+  showed full-size write-at records (`wal_append_writeat_avg_bytes=65883`) and
+  negligible wrap/padding (`wal_append_padding_bytes=13136` over ~566MiB), while
+  WAL encode is nearly tied with append (`wal_encode_duration_ms=285` vs
+  `wal_append_duration_ms=290`). The next work should profile the encode+append
+  pair before optimizing either side.
 - Later protocol candidates: complete a real NVMe/RDMA target, characterize
   NVMe/TCP performance, or bridge to object/NIXL acceleration where the product
   surface is object/storage rather than block PVC. Keep these separate so

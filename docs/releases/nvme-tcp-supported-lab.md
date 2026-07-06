@@ -84,6 +84,7 @@ The supported-lab claim is intentionally narrow:
 | 140 | Frontend request-size owner classification: NVMe/TCP target MaxH2C limit | PASS |
 | 141 | 64KiB NVMe/TCP MaxH2C opt-in boundary and live request-size movement | PASS |
 | 142 | 64KiB NVMe/TCP post-H2C backend bottleneck retriage | PASS |
+| 143 | 64KiB NVMe/TCP WAL append shape profile | PASS |
 
 Key QA sign-offs:
 
@@ -110,6 +111,7 @@ Key QA sign-offs:
 - `internal/docs/qa-assignments/phase140-frontend-request-size-profile-qa-signoff.md`
 - `internal/docs/qa-assignments/phase141-nvme-tcp-max-h2c-boundary-qa-signoff.md`
 - `internal/docs/qa-assignments/phase142-nvme-tcp-large-h2c-retriage-qa-signoff.md`
+- `internal/docs/qa-assignments/phase143-wal-append-large-h2c-profile-qa-signoff.md`
 
 ## Performance Baseline
 
@@ -428,6 +430,29 @@ cleanup_status=ok
 This confirms the next bottleneck is no longer the NVMe/TCP request-size
 boundary. The 64KiB path remains opt-in; the next work is backend WAL append
 profiling, not a default change or performance/SLO claim.
+
+Phase 143 decomposed that WAL append bucket:
+
+```text
+phase143_wal_append_large_h2c_profile_status=ok
+candidate_max_h2c_bytes=65536
+target_write_request_max_bytes=65536
+backend_write_request_max_bytes=65536
+backend_full_block_batch_max=16
+wal_append_duration_ms=290
+wal_append_writeat_calls=9009
+wal_append_writeat_avg_bytes=65883
+wal_append_wrap_count=8
+wal_append_padding_bytes=13136
+wal_encode_duration_ms=285
+phase143_append_shape=encode_close_second
+next_recommendation=phase144_wal_encode_append_pair_profile
+cleanup_status=ok
+```
+
+The append bucket is not primarily wrap/padding. WAL encode is nearly tied with
+append duration, so the next backend work should profile encode+append as a
+pair before changing WAL append semantics.
 
 Phase 127 closes the source/component side of the ANA Change Notice gap:
 
