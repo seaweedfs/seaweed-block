@@ -111,7 +111,10 @@ Seaweed Block can already demonstrate a narrow Kubernetes block-storage loop:
   paired with near-equal WAL encode cost; Phase 144 names
   `wal_record_materialization_reduction` as the next narrow backend target.
   Phase 145 removes one local batch-allocation seam without changing WAL format
-  or recovery semantics. This is still not a default or performance/SLO claim.
+  or recovery semantics. Phase 146 measured that change as visible in the lab
+  profile, but it is still not a default or performance/SLO claim. The next
+  backend step is a WAL multi-block-record or vectored-write design gate, not a
+  public performance claim.
 - Kubernetes NVMe/TCP mounted reconnect is source-gated through changed
   desired path-set evidence: CSI-node can connect a newly published desired
   NVMe path, prune the stale old host path for the same NQN, preserve pod

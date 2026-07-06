@@ -87,6 +87,7 @@ The supported-lab claim is intentionally narrow:
 | 143 | 64KiB NVMe/TCP WAL append shape profile | PASS |
 | 144 | 64KiB NVMe/TCP WAL encode/append pair profile | PASS |
 | 145 | WAL record materialization allocation reduction | PASS |
+| 146 | WAL materialization effectiveness profile | PASS |
 
 Key QA sign-offs:
 
@@ -116,6 +117,7 @@ Key QA sign-offs:
 - `internal/docs/qa-assignments/phase143-wal-append-large-h2c-profile-qa-signoff.md`
 - `internal/docs/qa-assignments/phase144-wal-encode-append-pair-profile-qa-signoff.md`
 - `internal/docs/qa-assignments/phase145-wal-record-materialization-reduction-qa-signoff.md`
+- `internal/docs/qa-assignments/phase146-wal-record-materialization-effectiveness-qa-signoff.md`
 
 ## Performance Baseline
 
@@ -492,6 +494,29 @@ cleanup_status=ok
 
 The change removes per-record pointer allocation in `WALStore.WriteBatch`.
 It preserves WAL format/recovery semantics and is not yet a performance claim.
+
+Phase 146 measured that local change against the Phase 144 encode+append
+baseline:
+
+```text
+phase146_wal_record_materialization_effectiveness_status=ok
+candidate_max_h2c_bytes=65536
+target_write_request_max_bytes=65536
+backend_write_request_max_bytes=65536
+wal_encode_duration_ms=281
+wal_append_duration_ms=280
+phase146_baseline_pair_ms=592
+phase146_current_pair_ms=561
+phase146_pair_improvement_pct=5.24
+phase146_effectiveness=visible
+phase146_decision=keep_change
+next_recommendation=phase147_wal_multiblock_record_design_gate
+cleanup_status=ok
+```
+
+This keeps the Phase 145 allocation reduction, but it remains lab evidence and
+not a throughput/SLO claim. The next backend gate should select a deeper WAL
+design path, such as multi-block WAL records or vectored write-at.
 
 Phase 127 closes the source/component side of the ANA Change Notice gap:
 

@@ -473,8 +473,11 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
 - Phase 145 is closed for the first WAL materialization reduction. The batch
   path now uses `[]walEntry` values instead of allocating one `*walEntry` per
   block, preserving WAL bytes/recovery while removing a local allocation seam.
-  The next phase should measure whether this is visible or whether deeper WAL
-  format/vectored-I/O work is required.
+  Phase 146 measured that change as visible in the lab profile
+  (`phase146_pair_improvement_pct=5.24`) and kept it, while preserving the
+  non-claim that this is not a throughput/SLO release statement. The next
+  backend gate should select a deeper WAL path: multi-block WAL records or
+  vectored write-at, with durability/recovery invariants documented first.
 - Later protocol candidates: complete a real NVMe/RDMA target, characterize
   NVMe/TCP performance, or bridge to object/NIXL acceleration where the product
   surface is object/storage rather than block PVC. Keep these separate so
