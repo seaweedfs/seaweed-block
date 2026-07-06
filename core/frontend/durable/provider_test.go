@@ -355,7 +355,7 @@ func TestDurableProvider_DurableStatuses_ReportWriteProfile(t *testing.T) {
 				t.Fatalf("status count=%d want 1: %+v", len(statuses), statuses)
 			}
 			prof := statuses[0].WriteProfile
-			if prof.TargetWriteOps != 1 || prof.TargetWriteBytes != 4096 {
+			if prof.TargetWriteOps != 1 || prof.TargetWriteBytes != 4096 || prof.TargetWriteRequestMaxBytes != 4096 {
 				t.Fatalf("target write profile mismatch: %+v", prof)
 			}
 			if prof.TargetWriteDurationNanos == 0 {

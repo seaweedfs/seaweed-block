@@ -81,6 +81,7 @@ The supported-lab claim is intentionally narrow:
 | 137 | WAL record encode/copy reduction and next append-shape bottleneck classification | PASS |
 | 138 | WAL append write-at shape profile and small-write classification | PASS |
 | 139 | WAL append batch-shape analysis and frontend-request-limited classification | PASS |
+| 140 | Frontend request-size owner classification: NVMe/TCP target MaxH2C limit | PASS |
 
 Key QA sign-offs:
 
@@ -104,6 +105,7 @@ Key QA sign-offs:
 - `internal/docs/qa-assignments/phase137-reduce-wal-record-encode-copy-qa-signoff.md`
 - `internal/docs/qa-assignments/phase138-wal-writeat-shape-profile-qa-signoff.md`
 - `internal/docs/qa-assignments/phase139-wal-append-batch-shape-coalescing-qa-signoff.md`
+- `internal/docs/qa-assignments/phase140-frontend-request-size-profile-qa-signoff.md`
 
 ## Performance Baseline
 
@@ -360,6 +362,27 @@ cleanup_status=ok
 
 This keeps the next experiment at the frontend/NVMe request-size seam. It is
 still not a transport, RoCE, NVMe/RDMA, or production throughput/SLO claim.
+
+Phase 140 named the owner of that request-size seam:
+
+```text
+phase140_frontend_request_size_profile_status=ok
+nvme_tcp_max_h2c_data_length_bytes=32768
+nvme_tcp_ioccsz_units=2052
+target_write_request_max_bytes=32768
+backend_write_request_max_bytes=32768
+backend_full_block_batch_max=8
+frontend_request_size_owner=target_limit
+phase140_shape_result=target_limited
+post_phase140_bottleneck=frontend_request_size
+next_recommendation=phase141_nvme_tcp_max_h2c_boundary
+cleanup_status=ok
+```
+
+The current 32KiB request shape is therefore an NVMe/TCP target advertised H2C
+limit, not a WAL coalescing limit or a host-only choice. The next gate should
+test any larger `MaxH2CDataLength` as an explicit protocol boundary before
+changing defaults.
 
 Phase 127 closes the source/component side of the ANA Change Notice gap:
 

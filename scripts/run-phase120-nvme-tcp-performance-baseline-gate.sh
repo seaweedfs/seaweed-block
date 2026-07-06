@@ -188,6 +188,8 @@ if len(vols) != 1:
 profile = field(vols[0], "WriteProfile", "writeProfile", default={}) or {}
 target_ops = int(field(profile, "TargetWriteOps", "targetWriteOps", default=0) or 0)
 target_bytes = int(field(profile, "TargetWriteBytes", "targetWriteBytes", default=0) or 0)
+target_request_max_bytes = int(field(profile, "TargetWriteRequestMaxBytes", "targetWriteRequestMaxBytes", default=0) or 0)
+target_request_avg_bytes = int(target_bytes / target_ops) if target_ops else 0
 target_ns = int(field(profile, "TargetWriteDurationNanos", "targetWriteDurationNanos", default=0) or 0)
 backend_write_request_ops = int(field(profile, "BackendWriteRequestOps", "backendWriteRequestOps", default=0) or 0)
 backend_write_request_bytes = int(field(profile, "BackendWriteRequestBytes", "backendWriteRequestBytes", default=0) or 0)
@@ -235,6 +237,8 @@ with open(summary_out, "w") as f:
     f.write(f"target_write_observed={str(target_ops > 0 and target_bytes > 0).lower()}\n")
     f.write(f"target_write_ops={target_ops}\n")
     f.write(f"target_write_bytes={target_bytes}\n")
+    f.write(f"target_write_request_max_bytes={target_request_max_bytes}\n")
+    f.write(f"target_write_request_avg_bytes={target_request_avg_bytes}\n")
     f.write(f"target_write_duration_ms={ms(target_ns)}\n")
     f.write(f"backend_write_request_ops={backend_write_request_ops}\n")
     f.write(f"backend_write_request_bytes={backend_write_request_bytes}\n")

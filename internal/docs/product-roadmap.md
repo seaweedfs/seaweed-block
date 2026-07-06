@@ -441,6 +441,12 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   `backend_full_block_batch_max=8`, and
   `wal_append_writeat_max_bytes=33072`. The next work should inspect frontend
   request size before changing WAL append semantics.
+- Phase 140 is closed for frontend request-size profiling. The live gate proved
+  the 32KiB shape is the NVMe/TCP target's advertised H2C limit, not a WAL
+  coalescing limit: `nvme_tcp_max_h2c_data_length_bytes=32768`,
+  `target_write_request_max_bytes=32768`, and
+  `backend_write_request_max_bytes=32768`. The next work should test a bounded
+  `MaxH2CDataLength` candidate before changing defaults.
 - Later protocol candidates: complete a real NVMe/RDMA target, characterize
   NVMe/TCP performance, or bridge to object/NIXL acceleration where the product
   surface is object/storage rather than block PVC. Keep these separate so

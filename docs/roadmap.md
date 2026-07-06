@@ -102,6 +102,9 @@ Seaweed Block can already demonstrate a narrow Kubernetes block-storage loop:
   live cross-node writer/reader gate against a routable NVMe/TCP target. This
   is still not a RoCE, performance/SLO, broad compatibility, or production HA
   claim.
+- NVMe/TCP write-path profiling is source-gated through target/backend/WAL
+  counters. The current 32KiB request shape is traced to the target-advertised
+  `MaxH2CDataLength`, not to WAL coalescing or a RoCE/RDMA path.
 - Kubernetes NVMe/TCP mounted reconnect is source-gated through changed
   desired path-set evidence: CSI-node can connect a newly published desired
   NVMe path, prune the stale old host path for the same NQN, preserve pod

@@ -11,6 +11,7 @@ import (
 type WriteProfileStatus struct {
 	TargetWriteOps              uint64
 	TargetWriteBytes            uint64
+	TargetWriteRequestMaxBytes  uint64
 	TargetWriteDurationNanos    uint64
 	BackendWriteRequestOps      uint64
 	BackendWriteRequestBytes    uint64
@@ -51,6 +52,7 @@ type WriteProfileStatus struct {
 type writeProfile struct {
 	targetWriteOps            atomic.Uint64
 	targetWriteBytes          atomic.Uint64
+	targetWriteRequestMax     atomic.Uint64
 	targetWriteDurationNanos  atomic.Uint64
 	backendWriteRequestOps    atomic.Uint64
 	backendWriteRequestBytes  atomic.Uint64
@@ -74,7 +76,9 @@ func (p *writeProfile) recordTargetWrite(bytes int, d time.Duration) {
 		return
 	}
 	p.targetWriteOps.Add(1)
-	p.targetWriteBytes.Add(uint64(bytes))
+	v := uint64(bytes)
+	p.targetWriteBytes.Add(v)
+	updateMax(&p.targetWriteRequestMax, v)
 	p.targetWriteDurationNanos.Add(durationNanos(d))
 }
 
@@ -147,6 +151,7 @@ func (p *writeProfile) snapshot() WriteProfileStatus {
 	return WriteProfileStatus{
 		TargetWriteOps:              p.targetWriteOps.Load(),
 		TargetWriteBytes:            p.targetWriteBytes.Load(),
+		TargetWriteRequestMaxBytes:  p.targetWriteRequestMax.Load(),
 		TargetWriteDurationNanos:    p.targetWriteDurationNanos.Load(),
 		BackendWriteRequestOps:      p.backendWriteRequestOps.Load(),
 		BackendWriteRequestBytes:    p.backendWriteRequestBytes.Load(),
