@@ -83,6 +83,7 @@ The supported-lab claim is intentionally narrow:
 | 139 | WAL append batch-shape analysis and frontend-request-limited classification | PASS |
 | 140 | Frontend request-size owner classification: NVMe/TCP target MaxH2C limit | PASS |
 | 141 | 64KiB NVMe/TCP MaxH2C opt-in boundary and live request-size movement | PASS |
+| 142 | 64KiB NVMe/TCP post-H2C backend bottleneck retriage | PASS |
 
 Key QA sign-offs:
 
@@ -108,6 +109,7 @@ Key QA sign-offs:
 - `internal/docs/qa-assignments/phase139-wal-append-batch-shape-coalescing-qa-signoff.md`
 - `internal/docs/qa-assignments/phase140-frontend-request-size-profile-qa-signoff.md`
 - `internal/docs/qa-assignments/phase141-nvme-tcp-max-h2c-boundary-qa-signoff.md`
+- `internal/docs/qa-assignments/phase142-nvme-tcp-large-h2c-retriage-qa-signoff.md`
 
 ## Performance Baseline
 
@@ -405,6 +407,27 @@ cleanup_status=ok
 This is source-gated lab evidence that the option can be wired and used by the
 Linux host. It is not a default change, production compatibility claim, or
 performance/SLO claim.
+
+Phase 142 retriaged the write path under that 64KiB opt-in:
+
+```text
+phase142_nvme_tcp_large_h2c_retriage_status=ok
+candidate_max_h2c_bytes=65536
+target_write_request_max_bytes=65536
+backend_write_request_max_bytes=65536
+backend_full_block_batch_max=16
+wal_append_writeat_max_bytes=66144
+wal_append_duration_ms=300
+wal_encode_duration_ms=289
+phase142_bottleneck=wal_append
+phase142_decision=continue_backend_work
+next_recommendation=phase143_wal_append_large_h2c_profile
+cleanup_status=ok
+```
+
+This confirms the next bottleneck is no longer the NVMe/TCP request-size
+boundary. The 64KiB path remains opt-in; the next work is backend WAL append
+profiling, not a default change or performance/SLO claim.
 
 Phase 127 closes the source/component side of the ANA Change Notice gap:
 

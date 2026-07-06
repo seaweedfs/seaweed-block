@@ -105,7 +105,9 @@ Seaweed Block can already demonstrate a narrow Kubernetes block-storage loop:
 - NVMe/TCP write-path profiling is source-gated through target/backend/WAL
   counters. The current 32KiB request shape is traced to the target-advertised
   `MaxH2CDataLength`, not to WAL coalescing or a RoCE/RDMA path. A 64KiB
-  `MaxH2CDataLength` candidate is gated as explicit opt-in lab evidence, not a
+  `MaxH2CDataLength` candidate is gated as explicit opt-in lab evidence. Under
+  that opt-in the target/backend request max stays at 64KiB and the next named
+  bottleneck is WAL append, not frontend request size. This is still not a
   default or performance/SLO claim.
 - Kubernetes NVMe/TCP mounted reconnect is source-gated through changed
   desired path-set evidence: CSI-node can connect a newly published desired

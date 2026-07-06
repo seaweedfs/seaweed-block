@@ -454,6 +454,12 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   and cleanup was clean. The default remains 32KiB; the next work should
   retriage the 64KiB opt-in write path before considering broader
   compatibility or default changes.
+- Phase 142 is closed for large-H2C retriage. With the 64KiB opt-in enabled,
+  the live target/backend request max stayed at 65536 bytes and full-block
+  batch max rose to 16 blocks. The top remaining product-owned cost is now WAL
+  append (`wal_append_duration_ms=300`), with WAL encode close behind
+  (`wal_encode_duration_ms=289`). The next backend work should profile WAL
+  append under the 64KiB shape before changing append semantics.
 - Later protocol candidates: complete a real NVMe/RDMA target, characterize
   NVMe/TCP performance, or bridge to object/NIXL acceleration where the product
   surface is object/storage rather than block PVC. Keep these separate so
