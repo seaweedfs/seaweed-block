@@ -80,6 +80,7 @@ The supported-lab claim is intentionally narrow:
 | 136 | WAL append/copy/checksum profile and backend-internal bottleneck classification | PASS |
 | 137 | WAL record encode/copy reduction and next append-shape bottleneck classification | PASS |
 | 138 | WAL append write-at shape profile and small-write classification | PASS |
+| 139 | WAL append batch-shape analysis and frontend-request-limited classification | PASS |
 
 Key QA sign-offs:
 
@@ -102,6 +103,7 @@ Key QA sign-offs:
 - `internal/docs/qa-assignments/phase136-wal-append-copy-checksum-profile-qa-signoff.md`
 - `internal/docs/qa-assignments/phase137-reduce-wal-record-encode-copy-qa-signoff.md`
 - `internal/docs/qa-assignments/phase138-wal-writeat-shape-profile-qa-signoff.md`
+- `internal/docs/qa-assignments/phase139-wal-append-batch-shape-coalescing-qa-signoff.md`
 
 ## Performance Baseline
 
@@ -339,6 +341,25 @@ cleanup_status=ok
 The write-at shape is many small writes of about 33KB, with negligible
 wrap/padding. This keeps the next work inside WAL batching/coalescing rather
 than transport work.
+
+Phase 139 proved that the 33KB shape is coming from the frontend request path:
+
+```text
+phase139_wal_append_batch_shape_coalescing_status=ok
+backend_write_request_max_bytes=32768
+backend_write_request_avg_bytes=32723
+backend_full_block_batch_max=8
+backend_full_block_batch_avg=7
+wal_append_writeat_max_bytes=33072
+wal_append_writeat_avg_bytes=33012
+phase139_shape_result=frontend_request_limited
+post_phase139_bottleneck=wal_append_small_writes
+next_recommendation=phase140_frontend_request_size_profile
+cleanup_status=ok
+```
+
+This keeps the next experiment at the frontend/NVMe request-size seam. It is
+still not a transport, RoCE, NVMe/RDMA, or production throughput/SLO claim.
 
 Phase 127 closes the source/component side of the ANA Change Notice gap:
 

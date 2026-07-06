@@ -435,6 +435,12 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   `wal_append_writeat_avg_bytes=33013`, and
   `wal_append_writeat_max_bytes=33072`, while wrap/padding was negligible. The
   next backend work should inspect batch/coalescing shape.
+- Phase 139 is closed for WAL append batch-shape coalescing analysis. The live
+  gate proved the 33KB write-at shape is imposed upstream:
+  `backend_write_request_max_bytes=32768`,
+  `backend_full_block_batch_max=8`, and
+  `wal_append_writeat_max_bytes=33072`. The next work should inspect frontend
+  request size before changing WAL append semantics.
 - Later protocol candidates: complete a real NVMe/RDMA target, characterize
   NVMe/TCP performance, or bridge to object/NIXL acceleration where the product
   surface is object/storage rather than block PVC. Keep these separate so
@@ -1054,6 +1060,8 @@ Approximate engineering effort if scope remains tight:
   `wal_append` / write-at shape as the next backend step.
 - Phase 138 is closed for WAL write-at shape profiling and names small
   write/coalescing shape as the next backend step.
+- Phase 139 is closed for WAL append batch-shape analysis and names frontend
+  request size as the next backend/frontend seam to inspect.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.

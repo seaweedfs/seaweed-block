@@ -1,39 +1,40 @@
-# Current Plan: Phase 139 WAL Append Batch Shape Coalescing
+# Current Plan: Phase 140 Frontend Request Size Profile
 
 Status: planning.
 
-Phase 138 split the WAL append/write-at shape:
+Phase 139 proved the WAL append small-write shape is imposed by the frontend
+request size:
 
 ```text
-phase138_wal_writeat_shape_profile_status=ok
+phase139_wal_append_batch_shape_coalescing_status=ok
 target_write_observed=true
-backend_write_bytes=588075008
-backend_storage_batch_calls=17953
-backend_storage_batch_blocks=143555
+backend_write_request_max_bytes=32768
+backend_write_request_avg_bytes=32723
+backend_full_block_batch_max=8
+backend_full_block_batch_avg=7
 backend_storage_batching_effective=true
-wal_append_duration_ms=380
-wal_append_writeat_calls=17979
-wal_append_writeat_bytes=593543918
 wal_append_writeat_max_bytes=33072
-wal_append_writeat_avg_bytes=33013
-wal_append_wrap_count=8
-wal_append_padding_bytes=13136
-post_phase138_bottleneck=wal_append_small_writes
-next_recommendation=phase139_wal_append_batch_shape_coalescing
+wal_append_writeat_avg_bytes=33012
+phase139_shape_result=frontend_request_limited
+post_phase139_bottleneck=wal_append_small_writes
+next_recommendation=phase140_frontend_request_size_profile
 cleanup_status=ok
 ```
 
 This means the next useful work is still not NVMe/RDMA. The WAL writer is
-issuing many small pwrite calls around 33KB; the next phase should explain or
-improve the batch/coalescing shape feeding `walWriter.appendBatch`.
+coalescing the 8-block batch it receives; the next phase should inspect why the
+frontend/NVMe path is delivering 32KB requests and whether that request size is
+configurable, host-driven, or product-limited.
 
 ## Goal
 
 ```text
 mounted NVMe/TCP write still reaches durable backend
 -> backend batching remains active
--> WAL append write-at average/max size improves or the upstream request shape is named
--> write-at calls per MiB decrease or are explained by frontend request shape
+-> frontend target write request size is visible
+-> StorageBackend write request size is visible
+-> NVMe command / host request shape is visible or explicitly unavailable
+-> request-size owner is named
 -> no WAL recovery semantics are weakened
 -> next bottleneck is named from counters after the change
 -> cleanup remains clean
@@ -42,25 +43,20 @@ mounted NVMe/TCP write still reaches durable backend
 ## Required Evidence
 
 ```text
-phase139_wal_append_batch_shape_coalescing_status=ok
+phase140_frontend_request_size_profile_status=ok
 frontend_transport=tcp
 roce_claim_allowed=false
 nvme_rdma_claim_allowed=false
 performance_slo_claim_allowed=false
 target_write_observed=true
 backend_storage_batching_effective=true
-wal_append_ops=<count>
-wal_append_bytes=<bytes>
-wal_append_duration_ms=<duration>
-wal_append_writeat_calls=<count>
-wal_append_writeat_bytes=<bytes>
-wal_append_writeat_max_bytes=<bytes>
-wal_append_writeat_avg_bytes=<bytes>
-phase138_wal_append_writeat_avg_bytes=33013
-phase138_wal_append_writeat_max_bytes=33072
-phase138_wal_append_writeat_calls=17979
-phase139_shape_result=<improved|frontend_request_limited|blocked>
-post_phase139_bottleneck=<wal_append_small_writes|wal_append_syscall|wal_encode|wal_checksum|dirty_map|unknown>
+target_write_request_max_bytes=<bytes>
+target_write_request_avg_bytes=<bytes>
+backend_write_request_max_bytes=32768
+backend_full_block_batch_max=8
+frontend_request_size_owner=<host_nvme|target_limit|backend_limit|unknown>
+phase140_shape_result=<host_limited|target_limited|backend_limited|tunable|unknown>
+post_phase140_bottleneck=<frontend_request_size|wal_append_small_writes|wal_append_syscall|wal_encode|unknown>
 next_recommendation=<specific next phase>
 cleanup_status=ok
 ```
@@ -74,26 +70,23 @@ cleanup_status=ok
   cuFile/cuObject, or NIXL.
 - Do not weaken WAL recovery semantics: every write still needs an LSN and a
   recoverable record.
-- Keep the scope inside WAL batch/coalescing shape and the upstream full-block
-  write run shape.
+- Keep the scope to request-size evidence unless a one-line product limit is
+  found.
 
 ## Candidate Work
 
-1. Inspect the upstream write request size reaching `StorageBackend.writeBytes`
-   and `WriteBatch`.
-2. If the frontend/request shape only feeds 8 full blocks at a time, surface
-   that as the limiting shape instead of guessing in `walWriter`.
-3. If the backend can safely coalesce multiple adjacent batches without
-   changing ack/recovery semantics, implement the smallest bounded coalescing
-   step and gate it.
-4. Add a Phase 139 wrapper/scenario that compares write-at average/max size and
-   calls against Phase 138.
-5. If coalescing is blocked by frontend request shape, close with an explicit
-   `frontend_request_limited` result and a concrete next phase.
+1. Add target-side request-size counters if they are missing before
+   `StorageBackend.Write`.
+2. Compare target request size with backend request size.
+3. Inspect the NVMe command/request shape the target receives, if available.
+4. If a product-side cap causes 32KB requests, make it explicit and gate any
+   safe increase.
+5. If the host/NVMe initiator chooses 32KB, close with `host_limited` and stop
+   optimizing WAL coalescing for this benchmark shape.
 
 ## Exit Criteria
 
-Phase 139 can close when the live supported-lab gate either improves the
-write-at shape or proves the current 33KB shape is imposed by frontend request
-size. The close report must name the next bottleneck from product-owned
-counters and keep cleanup clean.
+Phase 140 can close when the live supported-lab gate names the owner of the
+32KB frontend request shape and cleanup is clean. If the shape is host-driven,
+the close report should stop this WAL coalescing thread and recommend either a
+host/request-size experiment or a different backend bottleneck.

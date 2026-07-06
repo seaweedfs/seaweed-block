@@ -786,6 +786,14 @@ Recommended order from here:
     `wal_append_writeat_max_bytes=33072`, with only 8 wraps and 13KB padding.
     The append bottleneck is therefore small-write/coalescing shape, not
     wrap/padding or NVMe/RDMA.
+97. Phase 139: WAL Append Batch Shape Coalescing. **Closed 2026-07-06,
+    runner PASS**
+    Added upstream write-shape counters and proved the 33KB WAL write-at shape
+    is frontend-request-limited: `backend_write_request_max_bytes=32768`,
+    `backend_full_block_batch_max=8`, and
+    `wal_append_writeat_max_bytes=33072`. The WAL writer is coalescing the
+    batch it receives; the next evidence-backed phase is frontend/NVMe request
+    size profiling rather than speculative cross-request WAL buffering.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close

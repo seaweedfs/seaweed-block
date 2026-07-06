@@ -422,6 +422,12 @@ func TestDurableProvider_DurableStatuses_ReportWriteBatchProfile(t *testing.T) {
 			if prof.BackendStorageBatchCalls != 1 || prof.BackendStorageBatchBlocks != 2 {
 				t.Fatalf("backend batch profile mismatch: %+v", prof)
 			}
+			if prof.BackendWriteRequestOps == 0 || prof.BackendWriteRequestMaxBytes == 0 {
+				t.Fatalf("backend write request profile missing: %+v", prof)
+			}
+			if prof.BackendFullBlockBatchCalls != 1 || prof.BackendFullBlockBatchBlocks != 2 || prof.BackendFullBlockBatchMax != 2 {
+				t.Fatalf("backend full-block batch shape profile mismatch: %+v", prof)
+			}
 			if impl == durable.ImplWALStore {
 				if prof.WALCopyOps == 0 || prof.WALCopyBytes == 0 || prof.WALCopyDurationNanos == 0 {
 					t.Fatalf("WAL copy profile missing: %+v", prof)

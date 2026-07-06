@@ -12,6 +12,9 @@ type WriteProfileStatus struct {
 	TargetWriteOps              uint64
 	TargetWriteBytes            uint64
 	TargetWriteDurationNanos    uint64
+	BackendWriteRequestOps      uint64
+	BackendWriteRequestBytes    uint64
+	BackendWriteRequestMaxBytes uint64
 	BackendWriteOps             uint64
 	BackendWriteBytes           uint64
 	BackendWriteDurationNanos   uint64
@@ -19,6 +22,9 @@ type WriteProfileStatus struct {
 	BackendStorageWriteBlocks   uint64
 	BackendStorageBatchCalls    uint64
 	BackendStorageBatchBlocks   uint64
+	BackendFullBlockBatchCalls  uint64
+	BackendFullBlockBatchBlocks uint64
+	BackendFullBlockBatchMax    uint64
 	WALCopyOps                  uint64
 	WALCopyBytes                uint64
 	WALCopyDurationNanos        uint64
@@ -46,6 +52,9 @@ type writeProfile struct {
 	targetWriteOps            atomic.Uint64
 	targetWriteBytes          atomic.Uint64
 	targetWriteDurationNanos  atomic.Uint64
+	backendWriteRequestOps    atomic.Uint64
+	backendWriteRequestBytes  atomic.Uint64
+	backendWriteRequestMax    atomic.Uint64
 	backendWriteOps           atomic.Uint64
 	backendWriteBytes         atomic.Uint64
 	backendWriteDurationNanos atomic.Uint64
@@ -53,6 +62,9 @@ type writeProfile struct {
 	backendStorageWriteBlocks atomic.Uint64
 	backendStorageBatchCalls  atomic.Uint64
 	backendStorageBatchBlocks atomic.Uint64
+	backendFullBatchCalls     atomic.Uint64
+	backendFullBatchBlocks    atomic.Uint64
+	backendFullBatchMax       atomic.Uint64
 	backendSyncOps            atomic.Uint64
 	backendSyncDurationNanos  atomic.Uint64
 }
@@ -75,6 +87,16 @@ func (p *writeProfile) recordBackendWrite(bytes int, d time.Duration) {
 	p.backendWriteDurationNanos.Add(durationNanos(d))
 }
 
+func (p *writeProfile) recordBackendWriteRequest(bytes int) {
+	if bytes <= 0 {
+		return
+	}
+	v := uint64(bytes)
+	p.backendWriteRequestOps.Add(1)
+	p.backendWriteRequestBytes.Add(v)
+	updateMax(&p.backendWriteRequestMax, v)
+}
+
 func (p *writeProfile) recordBackendStorageWrite(blocks int, batched bool) {
 	if blocks <= 0 {
 		return
@@ -87,9 +109,28 @@ func (p *writeProfile) recordBackendStorageWrite(blocks int, batched bool) {
 	}
 }
 
+func (p *writeProfile) recordBackendFullBlockBatch(blocks int) {
+	if blocks <= 0 {
+		return
+	}
+	v := uint64(blocks)
+	p.backendFullBatchCalls.Add(1)
+	p.backendFullBatchBlocks.Add(v)
+	updateMax(&p.backendFullBatchMax, v)
+}
+
 func (p *writeProfile) recordBackendSync(d time.Duration) {
 	p.backendSyncOps.Add(1)
 	p.backendSyncDurationNanos.Add(durationNanos(d))
+}
+
+func updateMax(dst *atomic.Uint64, v uint64) {
+	for {
+		old := dst.Load()
+		if v <= old || dst.CompareAndSwap(old, v) {
+			return
+		}
+	}
 }
 
 func durationNanos(d time.Duration) uint64 {
@@ -104,17 +145,23 @@ func (p *writeProfile) snapshot() WriteProfileStatus {
 		return WriteProfileStatus{}
 	}
 	return WriteProfileStatus{
-		TargetWriteOps:            p.targetWriteOps.Load(),
-		TargetWriteBytes:          p.targetWriteBytes.Load(),
-		TargetWriteDurationNanos:  p.targetWriteDurationNanos.Load(),
-		BackendWriteOps:           p.backendWriteOps.Load(),
-		BackendWriteBytes:         p.backendWriteBytes.Load(),
-		BackendWriteDurationNanos: p.backendWriteDurationNanos.Load(),
-		BackendStorageWriteCalls:  p.backendStorageWriteCalls.Load(),
-		BackendStorageWriteBlocks: p.backendStorageWriteBlocks.Load(),
-		BackendStorageBatchCalls:  p.backendStorageBatchCalls.Load(),
-		BackendStorageBatchBlocks: p.backendStorageBatchBlocks.Load(),
-		BackendSyncOps:            p.backendSyncOps.Load(),
-		BackendSyncDurationNanos:  p.backendSyncDurationNanos.Load(),
+		TargetWriteOps:              p.targetWriteOps.Load(),
+		TargetWriteBytes:            p.targetWriteBytes.Load(),
+		TargetWriteDurationNanos:    p.targetWriteDurationNanos.Load(),
+		BackendWriteRequestOps:      p.backendWriteRequestOps.Load(),
+		BackendWriteRequestBytes:    p.backendWriteRequestBytes.Load(),
+		BackendWriteRequestMaxBytes: p.backendWriteRequestMax.Load(),
+		BackendWriteOps:             p.backendWriteOps.Load(),
+		BackendWriteBytes:           p.backendWriteBytes.Load(),
+		BackendWriteDurationNanos:   p.backendWriteDurationNanos.Load(),
+		BackendStorageWriteCalls:    p.backendStorageWriteCalls.Load(),
+		BackendStorageWriteBlocks:   p.backendStorageWriteBlocks.Load(),
+		BackendStorageBatchCalls:    p.backendStorageBatchCalls.Load(),
+		BackendStorageBatchBlocks:   p.backendStorageBatchBlocks.Load(),
+		BackendFullBlockBatchCalls:  p.backendFullBatchCalls.Load(),
+		BackendFullBlockBatchBlocks: p.backendFullBatchBlocks.Load(),
+		BackendFullBlockBatchMax:    p.backendFullBatchMax.Load(),
+		BackendSyncOps:              p.backendSyncOps.Load(),
+		BackendSyncDurationNanos:    p.backendSyncDurationNanos.Load(),
 	}
 }

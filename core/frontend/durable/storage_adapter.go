@@ -405,6 +405,7 @@ func (b *StorageBackend) Write(ctx context.Context, offset int64, p []byte) (int
 	if len(p) == 0 {
 		return 0, nil
 	}
+	b.profile.recordBackendWriteRequest(len(p))
 	start := time.Now()
 	n, err := b.writeBytes(ctx, offset, p)
 	if n > 0 {
@@ -594,6 +595,7 @@ func (b *StorageBackend) writeFullBlockBatch(ctx context.Context, startLBA uint3
 	lsns, err := batcher.WriteBatch(startLBA, blocks)
 	if len(lsns) > 0 {
 		b.profile.recordBackendStorageWrite(len(lsns), true)
+		b.profile.recordBackendFullBlockBatch(len(lsns))
 	}
 	for i, lsn := range lsns {
 		block := blocks[i]
