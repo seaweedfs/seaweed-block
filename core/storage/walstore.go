@@ -103,6 +103,11 @@ type WALStore struct {
 
 	syncs atomic.Uint64 // total fsync operations performed (test/diagnostic)
 	instr writeInstrumentation
+
+	// multiBlockRecords is a disabled-by-default Phase 148 local prototype.
+	// It must not be wired into production paths before version/compatibility
+	// gates and mounted NVMe/TCP profiling pass.
+	multiBlockRecords bool
 }
 
 // CreateWALStore initializes a new store file at path. Fails if path
@@ -447,7 +452,12 @@ func (s *WALStore) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error
 	}
 	firstLSN := s.nextLSN
 	s.nextLSN += uint64(len(blocks))
+	useMultiBlock := s.multiBlockRecords && len(blocks) > 1
 	s.mu.Unlock()
+
+	if useMultiBlock {
+		return s.writeBatchMultiBlock(startLBA, blocks, firstLSN)
+	}
 
 	entries := make([]walEntry, len(blocks))
 	lsns := make([]uint64, len(blocks))
@@ -484,6 +494,55 @@ func (s *WALStore) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error
 	return lsns, nil
 }
 
+func (s *WALStore) writeBatchMultiBlock(startLBA uint32, blocks [][]byte, firstLSN uint64) ([]uint64, error) {
+	totalLen := 0
+	for _, data := range blocks {
+		totalLen += len(data)
+	}
+	payload := make([]byte, 0, totalLen)
+	for _, data := range blocks {
+		payload = append(payload, data...)
+	}
+	entry := &walEntry{
+		LSN:      firstLSN,
+		Reserved: uint64(len(blocks)),
+		Type:     walEntryWriteBatch,
+		LBA:      uint64(startLBA),
+		Length:   uint32(len(payload)),
+		Data:     payload,
+	}
+	walRelOff, err := s.wal.append(entry)
+	if err != nil {
+		return nil, fmt.Errorf("storage: WAL multiblock append: %w", err)
+	}
+
+	lsns := make([]uint64, len(blocks))
+	dirtyStart := time.Now()
+	for i, data := range blocks {
+		lsn := firstLSN + uint64(i)
+		lsns[i] = lsn
+		s.dm.putAt(
+			uint64(startLBA+uint32(i)),
+			walRelOff,
+			uint32(i*int(s.sb.BlockSize)),
+			lsn,
+			uint32(len(data)),
+		)
+	}
+	s.instr.recordDirtyMapUpdate(len(blocks), time.Since(dirtyStart))
+
+	s.mu.Lock()
+	lastLSN := lsns[len(lsns)-1]
+	if lastLSN > s.walHead {
+		s.walHead = lastLSN
+	}
+	if s.walTail == 0 {
+		s.walTail = firstLSN
+	}
+	s.mu.Unlock()
+	return lsns, nil
+}
+
 func (s *WALStore) WriteInstrumentation() WriteInstrumentationStatus {
 	return s.instr.snapshot()
 }
@@ -502,8 +561,8 @@ func (s *WALStore) Read(lba uint32) ([]byte, error) {
 	}
 	s.mu.RUnlock()
 
-	if walRelOff, _, _, ok := s.dm.get(uint64(lba)); ok {
-		return s.readFromWAL(walRelOff)
+	if walRelOff, dataOffset, _, _, ok := s.dm.get(uint64(lba)); ok {
+		return s.readFromWAL(walRelOff, dataOffset)
 	}
 	return s.readFromExtent(lba)
 }
@@ -511,7 +570,7 @@ func (s *WALStore) Read(lba uint32) ([]byte, error) {
 // readFromWAL pulls a single block out of a WAL Write/Trim entry
 // previously deposited by Append. The walRelOff points at the start
 // of the entry; data starts at walEntryHeaderSize bytes into it.
-func (s *WALStore) readFromWAL(walRelOff uint64) ([]byte, error) {
+func (s *WALStore) readFromWAL(walRelOff uint64, dataOffset uint32) ([]byte, error) {
 	headerBuf := make([]byte, walEntryHeaderSize)
 	absOff := int64(s.sb.WALOffset + walRelOff)
 	if _, err := s.fd.ReadAt(headerBuf, absOff); err != nil {
@@ -522,8 +581,15 @@ func (s *WALStore) readFromWAL(walRelOff uint64) ([]byte, error) {
 		// Trim entry — return zeros, same as a never-written LBA.
 		return make([]byte, s.sb.BlockSize), nil
 	}
-	data := make([]byte, length)
-	if _, err := s.fd.ReadAt(data, absOff+int64(walEntryPrefixSize)); err != nil {
+	if dataOffset >= length {
+		return nil, fmt.Errorf("storage: WAL read data offset %d >= length %d", dataOffset, length)
+	}
+	readLen := s.sb.BlockSize
+	if remaining := length - dataOffset; remaining < readLen {
+		readLen = remaining
+	}
+	data := make([]byte, readLen)
+	if _, err := s.fd.ReadAt(data, absOff+int64(walEntryPrefixSize)+int64(dataOffset)); err != nil {
 		return nil, fmt.Errorf("storage: WAL read data: %w", err)
 	}
 	// In the simple "one block per WAL write" case, length == blockSize.
@@ -531,6 +597,12 @@ func (s *WALStore) readFromWAL(walRelOff uint64) ([]byte, error) {
 		data = data[:s.sb.BlockSize]
 	}
 	return data, nil
+}
+
+func (s *WALStore) enableMultiBlockRecordsForTest(enabled bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.multiBlockRecords = enabled
 }
 
 func (s *WALStore) readFromExtent(lba uint32) ([]byte, error) {

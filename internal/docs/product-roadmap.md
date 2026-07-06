@@ -483,6 +483,11 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   encoded records into fewer `WriteAt` calls, while record count remains the
   structural encode/recovery cost. The current WAL format stays unchanged; the
   next phase may prototype a disabled-by-default multi-block record locally.
+- Phase 148 is closed for the local prototype. Multi-block WAL records now have
+  a disabled-by-default test gate with encode/decode, dirty-read, recovery-split,
+  flusher-split, and `ScanLBAs` coverage. It is not wired into Kubernetes or the
+  default blockvolume path; Phase 149 must profile record-count reduction before
+  runtime opt-in wiring.
 - Later protocol candidates: complete a real NVMe/RDMA target, characterize
   NVMe/TCP performance, or bridge to object/NIXL acceleration where the product
   surface is object/storage rather than block PVC. Keep these separate so

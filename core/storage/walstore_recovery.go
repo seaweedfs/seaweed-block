@@ -128,7 +128,7 @@ func (s *WALStore) ScanLBAs(fromLSN uint64, fn func(RecoveryEntry) error) error 
 				continue
 			}
 			var payloadLen uint64
-			if entryType == walEntryWrite {
+			if entryType == walEntryWrite || entryType == walEntryWriteBatch {
 				payloadLen = uint64(lengthField)
 			}
 			entrySize := uint64(walEntryHeaderSize) + payloadLen
@@ -153,7 +153,11 @@ func (s *WALStore) ScanLBAs(fromLSN uint64, fn func(RecoveryEntry) error) error 
 			// monotonic only WITHIN A RANGE — we may need to keep
 			// scanning past entries below fromLSN in the wraparound
 			// case. Filter inline rather than break.
-			if entry.LSN < fromLSN {
+			highestEntryLSN := entry.LSN
+			if entry.Type == walEntryWriteBatch && entry.Reserved > 0 {
+				highestEntryLSN = entry.LSN + entry.Reserved - 1
+			}
+			if highestEntryLSN < fromLSN {
 				continue
 			}
 			if entry.LSN >= headLSN {
@@ -177,6 +181,27 @@ func (s *WALStore) ScanLBAs(fromLSN uint64, fn func(RecoveryEntry) error) error 
 					blockData := entry.Data[i*blockSize : (i+1)*blockSize]
 					emit := RecoveryEntry{
 						LSN:   entry.LSN,
+						LBA:   uint32(entry.LBA) + i,
+						Flags: walEntryWrite,
+						Data:  blockData,
+					}
+					if err := fn(emit); err != nil {
+						return err
+					}
+				}
+			case walEntryWriteBatch:
+				blocks := uint32(entry.Reserved)
+				if blocks == 0 || entry.Length != blocks*blockSize {
+					return fmt.Errorf("storage: walstore ScanLBAs invalid batch record at %d", pos-entrySize)
+				}
+				for i := uint32(0); i < blocks; i++ {
+					lsn := entry.LSN + uint64(i)
+					if lsn < fromLSN || lsn >= headLSN {
+						continue
+					}
+					blockData := entry.Data[i*blockSize : (i+1)*blockSize]
+					emit := RecoveryEntry{
+						LSN:   lsn,
 						LBA:   uint32(entry.LBA) + i,
 						Flags: walEntryWrite,
 						Data:  blockData,

@@ -10,10 +10,11 @@ import (
 
 // WAL entry kinds.
 const (
-	walEntryWrite   = 0x01
-	walEntryTrim    = 0x02
-	walEntryBarrier = 0x03
-	walEntryPadding = 0xFF
+	walEntryWrite      = 0x01
+	walEntryTrim       = 0x02
+	walEntryBarrier    = 0x03
+	walEntryWriteBatch = 0x04
+	walEntryPadding    = 0xFF
 
 	// walEntryHeaderSize is the TOTAL fixed overhead per record. Layout:
 	//   prefix (30 bytes):
@@ -113,6 +114,16 @@ func (e *walEntry) encodedSize() (int, error) {
 		if uint32(len(e.Data)) != e.Length {
 			return 0, fmt.Errorf("%w: data len %d != Length %d", errInvalidEntry, len(e.Data), e.Length)
 		}
+	case walEntryWriteBatch:
+		if e.Reserved == 0 {
+			return 0, fmt.Errorf("%w: batch write entry with zero block count", errInvalidEntry)
+		}
+		if len(e.Data) == 0 {
+			return 0, fmt.Errorf("%w: batch write entry with no data", errInvalidEntry)
+		}
+		if uint32(len(e.Data)) != e.Length {
+			return 0, fmt.Errorf("%w: batch data len %d != Length %d", errInvalidEntry, len(e.Data), e.Length)
+		}
 	case walEntryTrim:
 		if len(e.Data) != 0 {
 			return 0, fmt.Errorf("%w: trim entry must have no data payload", errInvalidEntry)
@@ -197,7 +208,7 @@ func decodeWALEntry(buf []byte) (walEntry, error) {
 	off += 4
 
 	var dataLen int
-	if e.Type == walEntryWrite || e.Type == walEntryPadding {
+	if e.Type == walEntryWrite || e.Type == walEntryWriteBatch || e.Type == walEntryPadding {
 		dataLen = int(e.Length)
 	}
 	dataEnd := off + dataLen

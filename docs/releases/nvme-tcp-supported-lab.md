@@ -89,6 +89,7 @@ The supported-lab claim is intentionally narrow:
 | 145 | WAL record materialization allocation reduction | PASS |
 | 146 | WAL materialization effectiveness profile | PASS |
 | 147 | WAL multi-block record design gate | PASS |
+| 148 | WAL multi-block record local prototype | PASS |
 
 Key QA sign-offs:
 
@@ -120,6 +121,7 @@ Key QA sign-offs:
 - `internal/docs/qa-assignments/phase145-wal-record-materialization-reduction-qa-signoff.md`
 - `internal/docs/qa-assignments/phase146-wal-record-materialization-effectiveness-qa-signoff.md`
 - `internal/docs/qa-assignments/phase147-wal-multiblock-record-design-qa-signoff.md`
+- `internal/docs/qa-assignments/phase148-wal-multiblock-record-local-prototype-qa-signoff.md`
 
 ## Performance Baseline
 
@@ -539,6 +541,26 @@ cleanup_status=ok
 The design gate keeps the current WAL format unchanged and documents the
 required format-version, CRC, dirty-map, recovery, flusher, checkpoint, and
 dirty-read invariants before any prototype writes a new record shape.
+
+Phase 148 implemented that prototype locally behind a disabled-by-default test
+gate:
+
+```text
+phase148_wal_multiblock_record_local_prototype_status=ok
+default_wal_format_unchanged=true
+feature_gate_default=false
+multiblock_encode_decode=pass
+multiblock_dirty_read=pass
+multiblock_recovery_split=pass
+multiblock_flusher_split=pass
+single_block_compatibility=pass
+current_recovery_compatibility=pass
+phase148_decision=profile_next
+next_recommendation=phase149_wal_multiblock_record_profile_gate
+cleanup_status=ok
+```
+
+This is not wired to Kubernetes and not enabled by default.
 
 Phase 127 closes the source/component side of the ANA Change Notice gap:
 
