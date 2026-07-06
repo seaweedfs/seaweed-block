@@ -23,6 +23,7 @@ EXPECTED_FRONTEND_ROUTE_DEV="${SW_BLOCK_EXPECTED_FRONTEND_ROUTE_DEV:-}"
 PROFILE_WRITE="${SW_BLOCK_PHASE120_PROFILE_WRITE:-false}"
 PROFILE_INTERVAL_SECONDS="${SW_BLOCK_PHASE120_PROFILE_INTERVAL_SECONDS:-1}"
 NVME_MAX_H2C_DATA_LENGTH="${SW_BLOCK_NVME_MAX_H2C_DATA_LENGTH:-32768}"
+EXTRA_VALUES_YAML="${SW_BLOCK_PHASE120_EXTRA_VALUES_YAML:-}"
 
 mkdir -p "${ARTIFACT_DIR}"/{bin,build,values,install,pvc,perf,status,cleanup,profile}
 : >"${SUMMARY}"
@@ -413,6 +414,14 @@ nvme:
   maxH2CDataLength: ${NVME_MAX_H2C_DATA_LENGTH}
 YAML
 fi
+helm_values_args=(-f "${ARTIFACT_DIR}/values/values.nvme.yaml")
+if [[ -n "${EXTRA_VALUES_YAML}" ]]; then
+  printf '%s\n' "${EXTRA_VALUES_YAML}" >"${ARTIFACT_DIR}/values/values.extra.yaml"
+  helm_values_args+=(-f "${ARTIFACT_DIR}/values/values.extra.yaml")
+  write_summary "helm_extra_values=true"
+else
+  write_summary "helm_extra_values=false"
+fi
 
 python3 - "${ARTIFACT_DIR}/values/values.nvme.yaml" "${ARTIFACT_DIR}/values" <<'PY'
 from pathlib import Path
@@ -444,9 +453,9 @@ APP_NODE="$(cat "${ARTIFACT_DIR}/values/app-node.txt")"
 write_summary "blockvolume_node=${BLOCK_NODE}"
 write_summary "app_node=${APP_NODE}"
 
-helm lint charts/seaweed-block -f "${ARTIFACT_DIR}/values/values.nvme.yaml" >"${ARTIFACT_DIR}/install/helm-lint.txt" 2>&1
+helm lint charts/seaweed-block "${helm_values_args[@]}" >"${ARTIFACT_DIR}/install/helm-lint.txt" 2>&1
 helm template "${HELM_RELEASE}" charts/seaweed-block --namespace "${HELM_NAMESPACE}" \
-  -f "${ARTIFACT_DIR}/values/values.nvme.yaml" \
+  "${helm_values_args[@]}" \
   >"${ARTIFACT_DIR}/install/helm-template.yaml" \
   2>"${ARTIFACT_DIR}/install/helm-template.stderr.txt"
 grep -q -- '--launcher-external-nvme' "${ARTIFACT_DIR}/install/helm-template.yaml"
@@ -462,7 +471,7 @@ write_summary "helm_template_external_nvme=true"
 helm install "${HELM_RELEASE}" charts/seaweed-block \
   --namespace "${HELM_NAMESPACE}" \
   --create-namespace \
-  -f "${ARTIFACT_DIR}/values/values.nvme.yaml" \
+  "${helm_values_args[@]}" \
   --wait --timeout 10m \
   >"${ARTIFACT_DIR}/install/helm-install.txt" \
   2>"${ARTIFACT_DIR}/install/helm-install.stderr.txt"

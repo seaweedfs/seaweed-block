@@ -1,35 +1,37 @@
-# Current Plan: Phase 151 WAL Multi-Block Mounted NVMe Profile
+# Current Plan: Phase 152 WAL Multi-Block Recovery Compatibility Gate
 
 Status: planning.
 
-Phase 150 closed the runtime opt-in:
+Phase 151 closed the mounted NVMe/TCP opt-in profile:
 
 ```text
-phase150_wal_multiblock_runtime_opt_in_status=ok
-default_wal_format_unchanged=true
-feature_gate_default=false
+phase151_wal_multiblock_mounted_nvme_profile_status=ok
 runtime_opt_in_name=durable-wal-multiblock-records
-runtime_opt_in_default=false
-explicit_opt_in_reaches_walstore=true
-helm_default_omits_opt_in=true
-helm_explicit_renders_opt_in=true
-single_block_compatibility=pass
-current_recovery_compatibility=pass
-phase150_decision=mounted_profile_next
-next_recommendation=phase151_wal_multiblock_mounted_nvme_profile
+runtime_opt_in_enabled=true
+candidate_max_h2c_bytes=65536
+target_write_request_max_bytes=65536
+backend_write_request_max_bytes=65536
+wal_encode_ops=9002
+backend_storage_write_calls=9002
+backend_storage_write_blocks=143570
+multiblock_record_shape_observed=true
+writer_verified=true
+reader_verified=true
 cleanup_status=ok
+phase151_decision=keep_opt_in
+next_recommendation=phase152_wal_multiblock_recovery_compatibility_gate
 ```
 
 ## Goal
 
-Run a mounted NVMe/TCP profile with the multi-block WAL runtime opt-in enabled
-and compare it to the current 64KiB H2C baseline. This is still lab evidence,
-not a public performance/SLO claim.
+Prove that actual multi-block WAL records can be recovered after a mounted
+NVMe/TCP write path restart. This is the safety gate that should come before
+any release claim or default change for the new WAL entry type.
 
 ## Required Evidence
 
 ```text
-phase151_wal_multiblock_mounted_nvme_profile_status=ok
+phase152_wal_multiblock_recovery_compatibility_status=ok
 frontend_transport=tcp
 roce_claim_allowed=false
 nvme_rdma_claim_allowed=false
@@ -38,17 +40,15 @@ default_wal_format_unchanged=true
 feature_gate_default=false
 runtime_opt_in_name=durable-wal-multiblock-records
 runtime_opt_in_enabled=true
-candidate_max_h2c_bytes=65536
-target_write_request_max_bytes=65536
-backend_write_request_max_bytes=65536
-wal_encode_ops=<n>
-wal_append_ops=<n>
-seq_write_mibps=<value>
-seq_read_mibps=<value>
-writer_verified=true
-reader_verified=true
+multiblock_record_shape_observed=true
+writer_verified_before_restart=true
+blockvolume_restarted=true
+recovery_completed=true
+wal_integrity_fault_observed=false
+reader_verified_after_restart=true
+ready_after_restart=true
 cleanup_status=ok
-phase151_decision=<keep_opt_in|defer|blocked>
+phase152_decision=<keep_opt_in|defer|blocked>
 next_recommendation=<specific next phase>
 ```
 
@@ -56,20 +56,22 @@ next_recommendation=<specific next phase>
 
 - Do not enable multi-block records by default.
 - Do not claim throughput/SLO from this phase.
-- Do not raise the default H2C size.
 - Do not claim RoCE/NVMe-RDMA.
+- Do not hide recovery warnings behind a PASS; any WAL integrity fault, false
+  Ready, or post-restart read mismatch blocks the phase.
 
 ## Candidate Work
 
-1. Extend the Phase 126/146 profile wrapper to set
-   `blockmaster.durableWALMultiBlockRecords=true`.
-2. Confirm the rendered blockvolume args include
-   `--durable-wal-multiblock-records`.
-3. Run the mounted writer/reader NVMe/TCP profile.
-4. Compare WAL encode/append counters and record whether the opt-in is worth
-   keeping.
+1. Extend the Phase 151 mounted profile into a restart/recovery gate.
+2. Write data through the mounted NVMe/TCP PVC with the opt-in enabled.
+3. Restart the owning `blockvolume` pod without deleting durable state.
+4. Wait for recovery and Ready status.
+5. Verify the reader sees the pre-restart data and no WAL integrity fault was
+   surfaced.
 
 ## Exit Criteria
 
-Phase 151 can close when the mounted opt-in profile passes or is explicitly
-blocked by live evidence. Default must remain off either way.
+Phase 152 can close when a mounted opt-in volume restarts and recovers with
+data intact, no false Ready during recovery, and zero cleanup residue. If the
+runtime cannot prove those facts, keep the feature default-off and file the
+blocking evidence.

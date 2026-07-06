@@ -495,8 +495,13 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
 - Phase 150 is closed for runtime opt-in wiring. The flag
   `--durable-wal-multiblock-records` reaches walstore only when explicitly set;
   Helm defaults omit it and explicit
-  `blockmaster.durableWALMultiBlockRecords=true` renders it. The next gate must
-  run mounted NVMe/TCP before keeping or dropping the opt-in.
+  `blockmaster.durableWALMultiBlockRecords=true` renders it.
+- Phase 151 is closed for the mounted NVMe/TCP opt-in profile. The live gate
+  verifies writer/reader I/O, 64KiB target/backend request shape, and mounted
+  multi-block record shape (`wal_encode_ops=9002` for `143570` written storage
+  blocks). The opt-in stays default-off and is not a performance/SLO claim. The
+  next gate must prove mounted restart/recovery compatibility for the new WAL
+  entry type.
 - Later protocol candidates: complete a real NVMe/RDMA target, characterize
   NVMe/TCP performance, or bridge to object/NIXL acceleration where the product
   surface is object/storage rather than block PVC. Keep these separate so
