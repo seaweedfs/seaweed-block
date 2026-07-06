@@ -85,6 +85,7 @@ The supported-lab claim is intentionally narrow:
 | 141 | 64KiB NVMe/TCP MaxH2C opt-in boundary and live request-size movement | PASS |
 | 142 | 64KiB NVMe/TCP post-H2C backend bottleneck retriage | PASS |
 | 143 | 64KiB NVMe/TCP WAL append shape profile | PASS |
+| 144 | 64KiB NVMe/TCP WAL encode/append pair profile | PASS |
 
 Key QA sign-offs:
 
@@ -112,6 +113,7 @@ Key QA sign-offs:
 - `internal/docs/qa-assignments/phase141-nvme-tcp-max-h2c-boundary-qa-signoff.md`
 - `internal/docs/qa-assignments/phase142-nvme-tcp-large-h2c-retriage-qa-signoff.md`
 - `internal/docs/qa-assignments/phase143-wal-append-large-h2c-profile-qa-signoff.md`
+- `internal/docs/qa-assignments/phase144-wal-encode-append-pair-profile-qa-signoff.md`
 
 ## Performance Baseline
 
@@ -453,6 +455,23 @@ cleanup_status=ok
 The append bucket is not primarily wrap/padding. WAL encode is nearly tied with
 append duration, so the next backend work should profile encode+append as a
 pair before changing WAL append semantics.
+
+Phase 144 confirmed encode and append are tied:
+
+```text
+phase144_wal_encode_append_pair_profile_status=ok
+candidate_max_h2c_bytes=65536
+target_write_request_max_bytes=65536
+backend_write_request_max_bytes=65536
+wal_encode_duration_ms=297
+wal_append_duration_ms=295
+phase144_pair_shape=encode_append_tied
+next_recommendation=phase145_wal_record_materialization_reduction
+cleanup_status=ok
+```
+
+The next backend work is a narrow WAL record materialization reduction, still
+behind source-gated lab evidence.
 
 Phase 127 closes the source/component side of the ANA Change Notice gap:
 

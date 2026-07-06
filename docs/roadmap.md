@@ -108,9 +108,9 @@ Seaweed Block can already demonstrate a narrow Kubernetes block-storage loop:
   `MaxH2CDataLength` candidate is gated as explicit opt-in lab evidence. Under
   that opt-in the target/backend request max stays at 64KiB and the next named
   bottleneck is WAL append, not frontend request size. The append bucket is
-  currently paired with near-equal WAL encode cost, so backend work must split
-  encode-vs-append before changing WAL semantics. This is still not a default
-  or performance/SLO claim.
+  paired with near-equal WAL encode cost; Phase 144 names
+  `wal_record_materialization_reduction` as the next narrow backend target.
+  This is still not a default or performance/SLO claim.
 - Kubernetes NVMe/TCP mounted reconnect is source-gated through changed
   desired path-set evidence: CSI-node can connect a newly published desired
   NVMe path, prune the stale old host path for the same NQN, preserve pod
