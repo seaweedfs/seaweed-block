@@ -102,6 +102,12 @@ type ProviderConfig struct {
 	// single-block WAL record format. Do not enable for release claims until a
 	// mounted NVMe/TCP profile gate passes.
 	WALMultiBlockRecords bool
+
+	// WALRecoveryTestDisableFlusher stops walstore's background checkpoint
+	// flusher before test writes are issued. It exists only for recovery gates
+	// that need synced-but-uncheckpointed WAL records to survive a process
+	// restart and prove real replay. Default false.
+	WALRecoveryTestDisableFlusher bool
 }
 
 // DurableProvider is the production frontend.Provider implementation.
@@ -482,6 +488,9 @@ func (p *DurableProvider) openExisting(volumeID, path string) (*volHandle, error
 		if p.cfg.WALMultiBlockRecords {
 			ws.SetMultiBlockRecords(true)
 		}
+		if p.cfg.WALRecoveryTestDisableFlusher {
+			ws.DisableAutoFlushForRecoveryTest()
+		}
 		s = ws
 	case ImplSmartWAL:
 		sw, err := smartwal.OpenStore(path)
@@ -516,6 +525,9 @@ func (p *DurableProvider) createFresh(volumeID, path string) (*volHandle, error)
 		}
 		if p.cfg.WALMultiBlockRecords {
 			ws.SetMultiBlockRecords(true)
+		}
+		if p.cfg.WALRecoveryTestDisableFlusher {
+			ws.DisableAutoFlushForRecoveryTest()
 		}
 		s = ws
 	case ImplSmartWAL:

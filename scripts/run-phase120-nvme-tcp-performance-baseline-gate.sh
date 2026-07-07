@@ -24,6 +24,8 @@ PROFILE_WRITE="${SW_BLOCK_PHASE120_PROFILE_WRITE:-false}"
 PROFILE_INTERVAL_SECONDS="${SW_BLOCK_PHASE120_PROFILE_INTERVAL_SECONDS:-1}"
 NVME_MAX_H2C_DATA_LENGTH="${SW_BLOCK_NVME_MAX_H2C_DATA_LENGTH:-32768}"
 EXTRA_VALUES_YAML="${SW_BLOCK_PHASE120_EXTRA_VALUES_YAML:-}"
+RESTART_BLOCKVOLUME_AFTER_WRITE_PROFILE="${SW_BLOCK_PHASE120_RESTART_BLOCKVOLUME_AFTER_WRITE_PROFILE:-false}"
+RESTART_VERIFY_MIB="${SW_BLOCK_PHASE120_RESTART_VERIFY_MIB:-16}"
 
 mkdir -p "${ARTIFACT_DIR}"/{bin,build,values,install,pvc,perf,status,cleanup,profile}
 : >"${SUMMARY}"
@@ -129,6 +131,180 @@ collect_cluster_evidence() {
     --out "${ARTIFACT_DIR}/status/inventory" \
     >"${ARTIFACT_DIR}/status/inventory.stdout.txt" \
     2>"${ARTIFACT_DIR}/status/inventory.stderr.txt"
+}
+
+collect_cluster_evidence_after_restart() {
+  "${ARTIFACT_DIR}/bin/sw-block" ops cluster \
+    --master-api "127.0.0.1:${STATUS_PORT}" \
+    --timeout 30s -o json \
+    >"${ARTIFACT_DIR}/status/cluster-evidence-after-restart.json" \
+    2>"${ARTIFACT_DIR}/status/cluster-evidence-after-restart.stderr.txt"
+}
+
+managed_volume_ready() {
+  local path="$1"
+  python3 - "$path" <<'PY'
+import json
+import sys
+
+doc = json.load(open(sys.argv[1]))
+managed = doc.get("managed_volumes") or []
+if len(managed) != 1:
+    raise SystemExit(1)
+vol = managed[0]
+status = vol.get("status")
+reason = vol.get("reason_code") or vol.get("reasonCode") or ""
+if status == "ready" and reason == "first_volume_verified":
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+wait_managed_volume_ready_after_restart() {
+  for _ in $(seq 1 90); do
+    if with_master_port_forward "${ARTIFACT_DIR}/status/blockmaster-port-forward-after-restart.log" collect_cluster_evidence_after_restart; then
+      if managed_volume_ready "${ARTIFACT_DIR}/status/cluster-evidence-after-restart.json"; then
+        return 0
+      fi
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+wait_durable_status_after_restart() {
+  local volume_id="$1"
+  local status_addr="$2"
+  local out="${ARTIFACT_DIR}/status/status-durable-after-blockvolume-restart.json"
+  local tmp="${out}.tmp"
+  for _ in $(seq 1 90); do
+    rm -f "${tmp}"
+    if python3 - "$volume_id" "http://${status_addr}/status/durable?volume=${volume_id}" "${tmp}" <<'PY'
+import json
+import sys
+import urllib.request
+
+volume_id, url, out = sys.argv[1:4]
+try:
+    with urllib.request.urlopen(url, timeout=2) as resp:
+        raw = resp.read()
+except Exception as exc:
+    print(f"status query failed: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+open(out, "wb").write(raw)
+body = json.loads(raw.decode("utf-8"))
+volumes = body.get("Volumes") or body.get("volumes") or []
+for vol in volumes:
+    if (
+        (vol.get("VolumeID") or vol.get("volumeID") or vol.get("volume_id")) == volume_id
+        and (vol.get("Latched") if "Latched" in vol else vol.get("latched")) is True
+        and (vol.get("Operational") if "Operational" in vol else vol.get("operational")) is True
+        and int(vol.get("Epoch") or vol.get("epoch") or 0) >= 1
+    ):
+        raise SystemExit(0)
+print(f"durable status not recovered: {body}", file=sys.stderr)
+raise SystemExit(2)
+PY
+    then
+      mv "${tmp}" "${out}"
+      return 0
+    fi
+    sleep 2
+  done
+  [[ -s "${tmp}" ]] && mv "${tmp}" "${out}"
+  return 1
+}
+
+restart_blockvolume_and_verify_recovery() {
+  local profile_summary="${ARTIFACT_DIR}/status/write-profile-summary.txt"
+  local volume_id status_addr deploy_line deploy_namespace deploy pod_before before_uid after_uid pod_after
+
+  volume_id="$(awk -F= '$1=="write_profile_volume_id" {print $2; exit}' "${profile_summary}")"
+  status_addr="$(awk -F= '$1=="write_profile_status_addr" {print $2; exit}' "${profile_summary}")"
+  if [[ -z "${volume_id}" || -z "${status_addr}" ]]; then
+    echo "missing write profile volume/status address for restart verification" >&2
+    exit 1
+  fi
+
+  timeout 180s kubectl -n "${APP_NAMESPACE}" exec "${PERF_POD}" -- sh -c \
+    "set -eu; rm -f /data/phase120-recovery.bin; blocks=\$(( ${RESTART_VERIFY_MIB} * 256 )); if dd if=/dev/urandom of=/data/phase120-recovery.bin bs=4096 count=\${blocks} oflag=direct; then :; else dd if=/dev/urandom of=/data/phase120-recovery.bin bs=1M count=${RESTART_VERIFY_MIB}; fi; sha256sum /data/phase120-recovery.bin > /data/phase120-recovery.sha256; sha256sum -c /data/phase120-recovery.sha256" \
+    >"${ARTIFACT_DIR}/perf/recovery-writer-before-restart.log" 2>&1
+  write_summary "writer_verified_before_restart=true"
+
+  deploy_line="$(kubectl get deploy -A -l "sw-block.seaweedfs.com/volume=${volume_id}" --no-headers 2>/dev/null | head -n 1 || true)"
+  deploy_namespace="$(awk 'NF >= 2 {print $1; exit}' <<<"${deploy_line}")"
+  deploy="$(awk 'NF >= 2 {print $2; exit}' <<<"${deploy_line}")"
+  if [[ -z "${deploy_namespace}" || -z "${deploy}" ]]; then
+    echo "blockvolume deployment not found for restart" >&2
+    kubectl get deploy -A -l "sw-block.seaweedfs.com/volume=${volume_id}" -o wide \
+      >"${ARTIFACT_DIR}/status/blockvolume-deployment.lookup-failed.txt" 2>&1 || true
+    exit 1
+  fi
+  kubectl -n "${deploy_namespace}" get "deploy/${deploy}" >"${ARTIFACT_DIR}/status/blockvolume-deployment.before-restart.txt" 2>&1
+  printf '%s/%s\n' "${deploy_namespace}" "${deploy}" >"${ARTIFACT_DIR}/status/blockvolume-deployment.txt"
+  kubectl -n "${deploy_namespace}" get pods -l "sw-block.seaweedfs.com/volume=${volume_id}" \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.uid}{"\n"}{end}' \
+    >"${ARTIFACT_DIR}/status/blockvolume-pod-ids.before-restart.tsv"
+  pod_before="$(awk 'NF >= 2 {print $1; exit}' "${ARTIFACT_DIR}/status/blockvolume-pod-ids.before-restart.tsv")"
+  before_uid="$(awk 'NF >= 2 {print $2; exit}' "${ARTIFACT_DIR}/status/blockvolume-pod-ids.before-restart.tsv")"
+  if [[ -z "${pod_before}" || -z "${before_uid}" ]]; then
+    echo "blockvolume pod UID not found before restart" >&2
+    exit 1
+  fi
+
+  kubectl -n "${deploy_namespace}" delete pod "${pod_before}" --grace-period=0 --force --wait=false \
+    >"${ARTIFACT_DIR}/status/restart-blockvolume-force-delete.txt" 2>&1
+  kubectl -n "${deploy_namespace}" rollout status "deploy/${deploy}" --timeout=240s \
+    >"${ARTIFACT_DIR}/status/restart-blockvolume-status.log" 2>&1
+  for _ in $(seq 1 60); do
+    kubectl -n "${deploy_namespace}" get pods -l "sw-block.seaweedfs.com/volume=${volume_id}" \
+      -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.uid}{"\n"}{end}' \
+      >"${ARTIFACT_DIR}/status/blockvolume-pod-ids.after-restart.tsv"
+    after_uid="$(awk 'NF >= 2 {print $2; exit}' "${ARTIFACT_DIR}/status/blockvolume-pod-ids.after-restart.tsv")"
+    if [[ -n "${after_uid}" && "${after_uid}" != "${before_uid}" ]]; then
+      break
+    fi
+    sleep 1
+  done
+  if [[ -z "${after_uid}" || "${after_uid}" == "${before_uid}" ]]; then
+    echo "blockvolume pod UID did not change after rollout restart" >&2
+    exit 1
+  fi
+  write_summary "blockvolume_restart_mode=force_delete_pod"
+  write_summary "blockvolume_restarted=true"
+
+  if ! wait_durable_status_after_restart "${volume_id}" "${status_addr}"; then
+    echo "durable status did not recover after blockvolume restart" >&2
+    exit 1
+  fi
+  if ! wait_managed_volume_ready_after_restart; then
+    echo "managed volume did not return to ready after blockvolume restart" >&2
+    exit 1
+  fi
+
+  pod_after="$(awk 'NF >= 2 {print $1; exit}' "${ARTIFACT_DIR}/status/blockvolume-pod-ids.after-restart.tsv")"
+  kubectl -n "${deploy_namespace}" logs "${pod_after}" -c blockvolume --tail=-1 \
+    >"${ARTIFACT_DIR}/status/blockvolume-after-restart.log" 2>&1 || true
+  if grep -Eiq 'wal_integrity|WALIntegrity|WAL integrity|CRC mismatch|durable recovery failed' "${ARTIFACT_DIR}/status/blockvolume-after-restart.log"; then
+    write_summary "wal_integrity_fault_observed=true"
+    echo "WAL integrity fault observed after blockvolume restart" >&2
+    exit 1
+  fi
+  grep -Eq 'durable recovered: recovered LSN=' "${ARTIFACT_DIR}/status/blockvolume-after-restart.log"
+  recovered_lsn="$(sed -n 's/.*durable recovered: recovered LSN=\([0-9][0-9]*\).*/\1/p' "${ARTIFACT_DIR}/status/blockvolume-after-restart.log" | tail -n 1)"
+  if [[ -z "${recovered_lsn}" || "${recovered_lsn}" -le 0 ]]; then
+    echo "recovered_lsn_after_restart=${recovered_lsn:-<missing>}, want > 0" >&2
+    exit 1
+  fi
+  write_summary "recovered_lsn_after_restart=${recovered_lsn}"
+  write_summary "recovery_completed=true"
+  write_summary "wal_integrity_fault_observed=false"
+  write_summary "ready_after_restart=true"
+
+  timeout 180s kubectl -n "${APP_NAMESPACE}" exec "${PERF_POD}" -- sh -c \
+    "set -eu; want=\$(awk '{print \$1}' /data/phase120-recovery.sha256); rm -f /tmp/phase120-recovery-after.bin; if dd if=/data/phase120-recovery.bin of=/tmp/phase120-recovery-after.bin bs=4096 iflag=direct; then got=\$(sha256sum /tmp/phase120-recovery-after.bin | awk '{print \$1}'); test \"\$got\" = \"\$want\"; else sha256sum -c /data/phase120-recovery.sha256; fi; dd if=/data/phase120-seq.bin of=/dev/null bs=1M; test \$(wc -c < /data/phase120-seq.bin) -eq ${SEQ_BYTES}" \
+    >"${ARTIFACT_DIR}/perf/recovery-reader-after-restart.log" 2>&1
+  write_summary "reader_verified_after_restart=true"
 }
 
 collect_durable_write_profile() {
@@ -625,6 +801,11 @@ write_summary "seq_read_duration_ms=${SEQ_READ_MS}"
 write_summary "seq_read_mibps=${SEQ_READ_MIBPS}"
 if [[ "${PROFILE_WRITE}" == "true" ]]; then
   collect_durable_write_profile
+fi
+if [[ "${RESTART_BLOCKVOLUME_AFTER_WRITE_PROFILE}" == "true" ]]; then
+  restart_blockvolume_and_verify_recovery
+else
+  write_summary "blockvolume_restarted=false"
 fi
 
 SMALL_BYTES=$((SMALL_OPS * SMALL_BLOCK_BYTES))

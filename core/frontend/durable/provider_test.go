@@ -74,6 +74,41 @@ func TestPhase150_DurableProviderWALMultiBlockOptIn(t *testing.T) {
 	}
 }
 
+func TestPhase152_DurableProviderCanDisableWALStoreAutoFlushForRecoveryTest(t *testing.T) {
+	root := t.TempDir()
+	id := frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1}
+	view := newStubView(healthyProj(id))
+	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+		Impl:                          durable.ImplWALStore,
+		StorageRoot:                   root,
+		BlockSize:                     4096,
+		NumBlocks:                     128,
+		WALRecoveryTestDisableFlusher: true,
+	}, view)
+	if err != nil {
+		t.Fatalf("NewDurableProvider: %v", err)
+	}
+	defer p.Close()
+	raw, err := p.EnsureStorage("v1")
+	if err != nil {
+		t.Fatalf("EnsureStorage: %v", err)
+	}
+	if _, err := raw.Write(1, bytes.Repeat([]byte{0x52}, 4096)); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if stable, err := raw.Sync(); err != nil || stable != 1 {
+		t.Fatalf("Sync stable=%d err=%v, want stable=1", stable, err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	checkpointed, ok := raw.(interface{ CheckpointLSN() uint64 })
+	if !ok {
+		t.Fatalf("storage %T does not expose CheckpointLSN", raw)
+	}
+	if got := checkpointed.CheckpointLSN(); got != 0 {
+		t.Fatalf("checkpoint=%d want 0 with recovery-test flusher disabled", got)
+	}
+}
+
 func newProvider(t *testing.T, impl durable.ImplName) (*durable.DurableProvider, *stubView, string) {
 	t.Helper()
 	root := t.TempDir()

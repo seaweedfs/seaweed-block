@@ -196,6 +196,20 @@ func TestPhase150_ParseFlagsLauncherWALMultiBlockRecords(t *testing.T) {
 	}
 }
 
+func TestPhase152_ParseFlagsLauncherWALRecoveryTestDisableFlusher(t *testing.T) {
+	f, err := parseFlags([]string{
+		"--authority-store", "/tmp/a",
+		"--topology", "topology.yaml",
+		"--launcher-durable-wal-recovery-test-disable-flusher",
+	})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if !f.launcherWALRecoveryTestDisableFlusher {
+		t.Fatal("launcherWALRecoveryTestDisableFlusher=false, want true")
+	}
+}
+
 func TestBlockmasterBareTopologyRegistersVolumeControlServices(t *testing.T) {
 	h, err := master.New(master.Config{
 		AuthorityStoreDir: t.TempDir(),

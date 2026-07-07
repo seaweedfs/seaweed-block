@@ -21,42 +21,43 @@ import (
 )
 
 type flags struct {
-	authorityStore                   string
-	lifecycleStore                   string
-	lifecyclePlacementSeed           string
-	clusterSpec                      string
-	listen                           string
-	topology                         string
-	expectedSlotsPerVol              int
-	freshnessWindow                  time.Duration
-	pendingGrace                     time.Duration
-	lifecycleLoop                    time.Duration
-	launcherLoop                     time.Duration
-	launcherManifestDir              string
-	launcherNamespace                string
-	launcherImage                    string
-	launcherMasterAddr               string
-	launcherDurableRoot              string
-	launcherDurableImpl              string
-	launcherWALMultiBlockRecords     bool
-	launcherStateHostPath            string
-	launcherReplicationAck           string
-	launcherISCSIPortBase            int
-	launcherNVMePortBase             int
-	launcherNVMeMaxH2CDataLength     uint
-	launcherPVCOwnerRef              bool
-	launcherStatus                   bool
-	launcherKubernetesApply          bool
-	launcherExternalISCSI            bool
-	launcherExternalNVMe             bool
-	launcherExternalStatus           bool
-	launcherCHAPSecretName           string
-	launcherCHAPUserKey              string
-	launcherCHAPSecretKey            string
-	failbackRuntimeRPC               bool
-	frontendPublicationRuntimeHTTP   bool
-	frontendPublicationRuntimeListen string
-	version                          bool
+	authorityStore                        string
+	lifecycleStore                        string
+	lifecyclePlacementSeed                string
+	clusterSpec                           string
+	listen                                string
+	topology                              string
+	expectedSlotsPerVol                   int
+	freshnessWindow                       time.Duration
+	pendingGrace                          time.Duration
+	lifecycleLoop                         time.Duration
+	launcherLoop                          time.Duration
+	launcherManifestDir                   string
+	launcherNamespace                     string
+	launcherImage                         string
+	launcherMasterAddr                    string
+	launcherDurableRoot                   string
+	launcherDurableImpl                   string
+	launcherWALMultiBlockRecords          bool
+	launcherWALRecoveryTestDisableFlusher bool
+	launcherStateHostPath                 string
+	launcherReplicationAck                string
+	launcherISCSIPortBase                 int
+	launcherNVMePortBase                  int
+	launcherNVMeMaxH2CDataLength          uint
+	launcherPVCOwnerRef                   bool
+	launcherStatus                        bool
+	launcherKubernetesApply               bool
+	launcherExternalISCSI                 bool
+	launcherExternalNVMe                  bool
+	launcherExternalStatus                bool
+	launcherCHAPSecretName                string
+	launcherCHAPUserKey                   string
+	launcherCHAPSecretKey                 string
+	failbackRuntimeRPC                    bool
+	frontendPublicationRuntimeHTTP        bool
+	frontendPublicationRuntimeListen      string
+	version                               bool
 	// printReadyLine: test-only flag that emits a single
 	// structured JSON line to stdout after the gRPC listener is
 	// bound, so L2 subprocess tests can parse the ready event.
@@ -85,6 +86,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.launcherDurableRoot, "launcher-durable-root", "/var/lib/sw-block", "G15d rendered blockvolume durable root base")
 	fs.StringVar(&f.launcherDurableImpl, "launcher-durable-impl", "walstore", "G15d rendered blockvolume durable implementation: walstore (default) or smartwal")
 	fs.BoolVar(&f.launcherWALMultiBlockRecords, "launcher-durable-wal-multiblock-records", false, "G15d render opt-in for experimental walstore multi-block WAL records; default false")
+	fs.BoolVar(&f.launcherWALRecoveryTestDisableFlusher, "launcher-durable-wal-recovery-test-disable-flusher", false, "test-only G15d render opt-in for blockvolume --durable-wal-recovery-test-disable-flusher; default false")
 	fs.StringVar(&f.launcherStateHostPath, "launcher-state-hostpath", "", "optional hostPath base mounted at the blockvolume durable root; empty keeps generated blockvolume state on throwaway emptyDir")
 	fs.StringVar(&f.launcherReplicationAck, "launcher-replication-ack", "best-effort", "G15d rendered blockvolume replication ACK profile: best-effort, sync-quorum, or sync-all")
 	fs.IntVar(&f.launcherISCSIPortBase, "launcher-iscsi-port-base", 3260, "G15d iSCSI port base for generated blockvolume workloads")
@@ -348,20 +350,21 @@ func runLifecycleLauncherTick(h *master.Host, f flags) error {
 	var rendered []launcher.RenderedManifest
 	for _, plan := range result.Plans {
 		manifests, err := launcher.RenderBlockVolumeDeployments(plan, launcher.K8sRenderConfig{
-			Namespace:            f.launcherNamespace,
-			Image:                f.launcherImage,
-			MasterAddr:           masterAddr,
-			DurableRootBase:      f.launcherDurableRoot,
-			DurableImpl:          f.launcherDurableImpl,
-			WALMultiBlockRecords: f.launcherWALMultiBlockRecords,
-			StateHostPathBase:    f.launcherStateHostPath,
-			ReplicationAck:       f.launcherReplicationAck,
-			OwnerReferenceToPVC:  f.launcherPVCOwnerRef,
-			EnableStatus:         f.launcherStatus,
-			ExternalISCSI:        f.launcherExternalISCSI,
-			ExternalNVMe:         f.launcherExternalNVMe,
-			ExternalStatus:       f.launcherExternalStatus,
-			NVMeMaxH2CDataLength: uint32(f.launcherNVMeMaxH2CDataLength),
+			Namespace:                     f.launcherNamespace,
+			Image:                         f.launcherImage,
+			MasterAddr:                    masterAddr,
+			DurableRootBase:               f.launcherDurableRoot,
+			DurableImpl:                   f.launcherDurableImpl,
+			WALMultiBlockRecords:          f.launcherWALMultiBlockRecords,
+			WALRecoveryTestDisableFlusher: f.launcherWALRecoveryTestDisableFlusher,
+			StateHostPathBase:             f.launcherStateHostPath,
+			ReplicationAck:                f.launcherReplicationAck,
+			OwnerReferenceToPVC:           f.launcherPVCOwnerRef,
+			EnableStatus:                  f.launcherStatus,
+			ExternalISCSI:                 f.launcherExternalISCSI,
+			ExternalNVMe:                  f.launcherExternalNVMe,
+			ExternalStatus:                f.launcherExternalStatus,
+			NVMeMaxH2CDataLength:          uint32(f.launcherNVMeMaxH2CDataLength),
 			ISCSICHAP: launcher.CHAPSecretRef{
 				Name:        f.launcherCHAPSecretName,
 				UsernameKey: f.launcherCHAPUserKey,

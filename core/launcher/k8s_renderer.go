@@ -14,22 +14,23 @@ import (
 const stateMountPath = "/var/lib/sw-block"
 
 type K8sRenderConfig struct {
-	Namespace            string
-	Image                string
-	MasterAddr           string
-	DurableRootBase      string
-	DurableImpl          string
-	WALMultiBlockRecords bool
-	StateHostPathBase    string
-	RecoveryMode         string
-	ReplicationAck       string
-	OwnerReferenceToPVC  bool
-	EnableStatus         bool
-	ExternalISCSI        bool
-	ExternalNVMe         bool
-	ExternalStatus       bool
-	NVMeMaxH2CDataLength uint32
-	ISCSICHAP            CHAPSecretRef
+	Namespace                     string
+	Image                         string
+	MasterAddr                    string
+	DurableRootBase               string
+	DurableImpl                   string
+	WALMultiBlockRecords          bool
+	WALRecoveryTestDisableFlusher bool
+	StateHostPathBase             string
+	RecoveryMode                  string
+	ReplicationAck                string
+	OwnerReferenceToPVC           bool
+	EnableStatus                  bool
+	ExternalISCSI                 bool
+	ExternalNVMe                  bool
+	ExternalStatus                bool
+	NVMeMaxH2CDataLength          uint32
+	ISCSICHAP                     CHAPSecretRef
 }
 
 type CHAPSecretRef struct {
@@ -193,6 +194,9 @@ func blockVolumeArgs(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.B
 	}
 	if cfg.WALMultiBlockRecords {
 		args = append(args, "--durable-wal-multiblock-records")
+	}
+	if cfg.WALRecoveryTestDisableFlusher {
+		args = append(args, "--durable-wal-recovery-test-disable-flusher")
 	}
 	if cfg.EnableStatus {
 		port, err := blockVolumeStatusPort(plan, replica)

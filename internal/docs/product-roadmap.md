@@ -77,6 +77,13 @@ This is the short internal roadmap. Keep it current and readable.
   expanding operator or broader HA claims. The goal is to prevent Kubernetes,
   CSI, authority, host-path, recovery, and future NVMe logic from becoming
   scattered scripts or unrelated small automata.
+- Current backend optimization slice: Phases 148-152 took multi-block WAL
+  records from local prototype to disabled-by-default runtime opt-in, mounted
+  NVMe/TCP profile evidence, and mounted restart/recovery compatibility. Phase
+  152 recovered `LSN=14545` after a force-deleted `blockvolume` restart with
+  hostPath persistence. This is still default-off and not a performance/SLO,
+  RoCE, or NVMe/RDMA claim; Phase 153 is the release-boundary/documentation
+  review before any user-facing claim.
 
 Do not skip from scripts directly to mutating operator lifecycle. Helm has
 stabilized the installation contract, and Phase 35 added read-only CRD status,

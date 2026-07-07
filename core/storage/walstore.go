@@ -612,6 +612,20 @@ func (s *WALStore) enableMultiBlockRecordsForTest(enabled bool) {
 	s.SetMultiBlockRecords(enabled)
 }
 
+// DisableAutoFlushForRecoveryTest stops the background WAL->extent flusher
+// before test writes are issued. This preserves synced WAL records past a
+// process restart so mounted recovery gates can prove actual WAL replay instead
+// of reading data that was already checkpointed into the extent.
+//
+// This is intentionally not part of LogicalStorage and must stay behind an
+// explicit test/diagnostic flag. Calling it after writes may flush the current
+// dirty set because flusher.Stop performs one final best-effort flush.
+func (s *WALStore) DisableAutoFlushForRecoveryTest() {
+	if s.flusher != nil {
+		s.flusher.Stop()
+	}
+}
+
 func (s *WALStore) readFromExtent(lba uint32) ([]byte, error) {
 	data := make([]byte, s.sb.BlockSize)
 	off := int64(s.extentBase + uint64(lba)*uint64(s.sb.BlockSize))
@@ -919,10 +933,12 @@ func (s *WALStore) Close() error {
 	s.closed = true
 	s.mu.Unlock()
 
-	// Stop the flusher first so it can't race the file close.
-	// flusher.Stop performs one final best-effort flush so any
-	// pending dirty entries get into the extent + checkpoint
-	// before we release the file.
+	// Stop the flusher first so it can't race the file close. In the normal
+	// path, flusher.Stop performs one final best-effort flush so any pending
+	// dirty entries get into the extent + checkpoint before we release the
+	// file. Test gates may have already stopped it via
+	// DisableAutoFlushForRecoveryTest; in that case Stop is idempotent and does
+	// not checkpoint later writes.
 	if s.flusher != nil {
 		s.flusher.Stop()
 	}

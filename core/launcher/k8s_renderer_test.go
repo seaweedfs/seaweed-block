@@ -52,6 +52,7 @@ func TestG15d_K8sRenderer_RendersBlockVolumeDeploymentArgs(t *testing.T) {
 		"--nvme-subsysnqn=",
 		"--nvme-ns=",
 		"--durable-wal-multiblock-records",
+		"--durable-wal-recovery-test-disable-flusher",
 	} {
 		if strings.Contains(raw, forbidden) {
 			t.Fatalf("iscsi manifest must not contain %q:\n%s", forbidden, raw)
@@ -73,6 +74,20 @@ func TestPhase150_K8sRenderer_RendersWALMultiBlockOptIn(t *testing.T) {
 	raw := string(manifests[0].YAML)
 	if !strings.Contains(raw, "--durable-wal-multiblock-records") {
 		t.Fatalf("manifest missing wal multiblock opt-in:\n%s", raw)
+	}
+}
+
+func TestPhase152_K8sRenderer_RendersWALRecoveryTestDisableFlusherOptIn(t *testing.T) {
+	manifests, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{
+		MasterAddr:                    "m:9333",
+		WALRecoveryTestDisableFlusher: true,
+	})
+	if err != nil {
+		t.Fatalf("RenderBlockVolumeDeployments: %v", err)
+	}
+	raw := string(manifests[0].YAML)
+	if !strings.Contains(raw, "--durable-wal-recovery-test-disable-flusher") {
+		t.Fatalf("manifest missing recovery-test disable-flusher opt-in:\n%s", raw)
 	}
 }
 

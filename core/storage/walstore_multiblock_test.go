@@ -166,6 +166,59 @@ func TestWALStore_MultiBlockRecoverSplitsPerBlock(t *testing.T) {
 	}
 }
 
+func TestWALStore_DisableAutoFlushForRecoveryTestPreservesReplayAfterCrash(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "store.bin")
+	blocks := [][]byte{
+		makeBlock(4096, 0xD1),
+		makeBlock(4096, 0xD2),
+		makeBlock(4096, 0xD3),
+		makeBlock(4096, 0xD4),
+	}
+
+	func() {
+		s, err := CreateWALStore(path, 16, 4096)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.DisableAutoFlushForRecoveryTest()
+		s.enableMultiBlockRecordsForTest(true)
+		if _, err := s.WriteBatch(2, blocks); err != nil {
+			t.Fatalf("WriteBatch: %v", err)
+		}
+		if stable, err := s.Sync(); err != nil || stable != 4 {
+			t.Fatalf("Sync stable=%d err=%v, want stable=4", stable, err)
+		}
+		if got := s.CheckpointLSN(); got != 0 {
+			t.Fatalf("checkpoint=%d want 0 before crash", got)
+		}
+		s.committer.Stop()
+		if err := s.fd.Close(); err != nil {
+			t.Fatalf("close fd: %v", err)
+		}
+	}()
+
+	s, err := OpenWALStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if recovered, err := s.Recover(); err != nil || recovered != 4 {
+		t.Fatalf("Recover=%d err=%v, want 4", recovered, err)
+	}
+	if got := s.CheckpointLSN(); got != 0 {
+		t.Fatalf("checkpoint after recovery=%d want 0", got)
+	}
+	for i, want := range blocks {
+		got, err := s.Read(uint32(2 + i))
+		if err != nil {
+			t.Fatalf("Read %d: %v", i, err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("Read %d returned wrong block", i)
+		}
+	}
+}
+
 func TestWALStore_MultiBlockFlusherSplitsPerBlock(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "store.bin")
 	s, err := CreateWALStore(path, 16, 4096)

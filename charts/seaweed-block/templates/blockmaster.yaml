@@ -69,6 +69,9 @@ spec:
             {{- if .Values.blockmaster.durableWALMultiBlockRecords }}
             - "--launcher-durable-wal-multiblock-records"
             {{- end }}
+            {{- if .Values.blockmaster.durableWALRecoveryTestDisableFlusher }}
+            - "--launcher-durable-wal-recovery-test-disable-flusher"
+            {{- end }}
             {{- if .Values.blockmaster.launcherStatus }}
             - "--launcher-status"
             {{- end }}

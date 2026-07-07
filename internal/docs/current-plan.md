@@ -1,37 +1,46 @@
-# Current Plan: Phase 152 WAL Multi-Block Recovery Compatibility Gate
+# Current Plan: Phase 153 WAL Multi-Block Release Boundary
 
 Status: planning.
 
-Phase 151 closed the mounted NVMe/TCP opt-in profile:
+Phase 152 closed the mounted restart/recovery compatibility gate:
 
 ```text
-phase151_wal_multiblock_mounted_nvme_profile_status=ok
+phase152_wal_multiblock_recovery_compatibility_status=ok
 runtime_opt_in_name=durable-wal-multiblock-records
 runtime_opt_in_enabled=true
+recovery_test_disable_flusher_enabled=true
+restart_persistence_mode=hostpath
 candidate_max_h2c_bytes=65536
 target_write_request_max_bytes=65536
 backend_write_request_max_bytes=65536
-wal_encode_ops=9002
-backend_storage_write_calls=9002
-backend_storage_write_blocks=143570
+wal_encode_ops=873
+backend_storage_write_calls=873
+backend_storage_write_blocks=13512
 multiblock_record_shape_observed=true
-writer_verified=true
-reader_verified=true
+writer_verified_before_restart=true
+blockvolume_restart_mode=force_delete_pod
+blockvolume_restarted=true
+recovery_completed=true
+recovered_lsn_after_restart=14545
+wal_integrity_fault_observed=false
+reader_verified_after_restart=true
+ready_after_restart=true
 cleanup_status=ok
-phase151_decision=keep_opt_in
-next_recommendation=phase152_wal_multiblock_recovery_compatibility_gate
+phase152_decision=keep_opt_in
+next_recommendation=phase153_wal_multiblock_release_boundary
 ```
 
 ## Goal
 
-Prove that actual multi-block WAL records can be recovered after a mounted
-NVMe/TCP write path restart. This is the safety gate that should come before
-any release claim or default change for the new WAL entry type.
+Turn the Phase 150-152 evidence into an explicit release boundary for the
+multi-block WAL record opt-in. The release boundary must keep the current WAL
+format default unchanged, document the opt-in accurately, and name any remaining
+diagnostic or compatibility follow-ups before a user-facing release note.
 
 ## Required Evidence
 
 ```text
-phase152_wal_multiblock_recovery_compatibility_status=ok
+phase153_wal_multiblock_release_boundary_status=ok
 frontend_transport=tcp
 roce_claim_allowed=false
 nvme_rdma_claim_allowed=false
@@ -39,39 +48,35 @@ performance_slo_claim_allowed=false
 default_wal_format_unchanged=true
 feature_gate_default=false
 runtime_opt_in_name=durable-wal-multiblock-records
-runtime_opt_in_enabled=true
-multiblock_record_shape_observed=true
-writer_verified_before_restart=true
-blockvolume_restarted=true
-recovery_completed=true
-wal_integrity_fault_observed=false
-reader_verified_after_restart=true
-ready_after_restart=true
-cleanup_status=ok
-phase152_decision=<keep_opt_in|defer|blocked>
+runtime_opt_in_documented=true
+mounted_profile_gate_passed=true
+mounted_recovery_gate_passed=true
+release_note_non_claims_documented=true
+remaining_followups_listed=true
+phase153_decision=<document_opt_in|defer|blocked>
 next_recommendation=<specific next phase>
 ```
 
 ## Boundaries
 
 - Do not enable multi-block records by default.
-- Do not claim throughput/SLO from this phase.
+- Do not claim throughput/SLO from the Phase 151/152 gates.
 - Do not claim RoCE/NVMe-RDMA.
-- Do not hide recovery warnings behind a PASS; any WAL integrity fault, false
-  Ready, or post-restart read mismatch blocks the phase.
+- Do not turn the recovery-test flusher-disable hook into a production feature.
+- Do not hide the diagnostic `HeadLSN` follow-up; document it as a non-blocking
+  status cleanup unless it proves to affect correctness.
 
 ## Candidate Work
 
-1. Extend the Phase 151 mounted profile into a restart/recovery gate.
-2. Write data through the mounted NVMe/TCP PVC with the opt-in enabled.
-3. Restart the owning `blockvolume` pod without deleting durable state.
-4. Wait for recovery and Ready status.
-5. Verify the reader sees the pre-restart data and no WAL integrity fault was
-   surfaced.
+1. Add a release-boundary gate script that reads Phase 150-152 evidence.
+2. Update release/roadmap docs to describe the opt-in and non-claims.
+3. Add a concise user-facing values example for enabling the opt-in in lab-only
+   testing.
+4. List remaining follow-ups, including the post-recovery `HeadLSN` diagnostic
+   cleanup.
 
 ## Exit Criteria
 
-Phase 152 can close when a mounted opt-in volume restarts and recovers with
-data intact, no false Ready during recovery, and zero cleanup residue. If the
-runtime cannot prove those facts, keep the feature default-off and file the
-blocking evidence.
+Phase 153 can close when the project has an accurate release boundary for the
+multi-block WAL opt-in: profile and recovery gates cited, defaults unchanged,
+non-claims explicit, and follow-ups tracked.

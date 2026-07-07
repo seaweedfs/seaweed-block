@@ -121,9 +121,12 @@ Seaweed Block can already demonstrate a narrow Kubernetes block-storage loop:
   proves that reduction locally (`2048` encode ops to `128`) and keeps the next
   step bounded to a disabled-by-default runtime opt-in. Phase 150 wires that
   opt-in without changing defaults. Phase 151 proves the opt-in runs through the
-  mounted NVMe/TCP path and observes the multi-block record shape, but it
-  remains default-off and is not a performance/SLO claim. The next safety gate
-  is mounted restart/recovery compatibility for the new WAL entry type.
+  mounted NVMe/TCP path and observes the multi-block record shape. Phase 152
+  proves mounted restart/recovery compatibility with hostPath persistence,
+  force-delete restart, and `recovered_lsn_after_restart=14545`. The opt-in
+  remains default-off and is not a performance/SLO, RoCE, or NVMe/RDMA claim.
+  The next step is a release-boundary review that documents the opt-in and
+  remaining diagnostic follow-ups without changing the default WAL format.
 - Kubernetes NVMe/TCP mounted reconnect is source-gated through changed
   desired path-set evidence: CSI-node can connect a newly published desired
   NVMe path, prune the stale old host path for the same NQN, preserve pod

@@ -45,6 +45,7 @@ blockmaster:
   launcherPVCOwnerRef: true
   durableImpl: walstore
   durableWALMultiBlockRecords: false
+  durableWALRecoveryTestDisableFlusher: false
   stateHostPath: ""
   stateHostPathType: DirectoryOrCreate
   statePermissionsImage:

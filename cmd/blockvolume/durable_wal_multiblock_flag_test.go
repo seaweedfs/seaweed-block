@@ -48,3 +48,29 @@ func TestPhase150_BlockvolumeDurableWALMultiBlockFlagParsesOptIn(t *testing.T) {
 		t.Fatal("durableWALMultiBlockRecords=false, want true")
 	}
 }
+
+func TestPhase152_BlockvolumeDurableWALRecoveryTestDisableFlusherFlag(t *testing.T) {
+	args := append(phase150RequiredBlockvolumeArgs(),
+		"--durable-root=/tmp/sw-block",
+		"--durable-impl=walstore",
+		"--durable-wal-recovery-test-disable-flusher",
+	)
+	f, err := parseFlags(args)
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if !f.durableWALRecoveryTestDisableFlusher {
+		t.Fatal("durableWALRecoveryTestDisableFlusher=false, want true")
+	}
+}
+
+func TestPhase152_BlockvolumeDurableWALRecoveryTestDisableFlusherRequiresWalstore(t *testing.T) {
+	args := append(phase150RequiredBlockvolumeArgs(),
+		"--durable-root=/tmp/sw-block",
+		"--durable-impl=smartwal",
+		"--durable-wal-recovery-test-disable-flusher",
+	)
+	if _, err := parseFlags(args); err == nil {
+		t.Fatal("parseFlags succeeded; want walstore requirement error")
+	}
+}

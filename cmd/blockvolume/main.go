@@ -92,11 +92,12 @@ type flags struct {
 	// --durable-impl selects walstore or smartwal (default smartwal).
 	// --durable-blocks + --durable-blocksize are used on first-time
 	// storage create.
-	durableRoot                 string
-	durableImpl                 string // "smartwal" | "walstore"
-	durableBlocks               uint
-	durableBlockSize            uint
-	durableWALMultiBlockRecords bool
+	durableRoot                          string
+	durableImpl                          string // "smartwal" | "walstore"
+	durableBlocks                        uint
+	durableBlockSize                     uint
+	durableWALMultiBlockRecords          bool
+	durableWALRecoveryTestDisableFlusher bool
 
 	// WAL retention window past checkpoint LSN. Zero = strict
 	// checkpoint-driven recycle. Non-zero = walstore relaxes the
@@ -166,6 +167,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.UintVar(&f.durableBlocks, "durable-blocks", 2048, "number of blocks per volume on first create (ignored when opening existing)")
 	fs.UintVar(&f.durableBlockSize, "durable-blocksize", 4096, "block size in bytes on first create")
 	fs.BoolVar(&f.durableWALMultiBlockRecords, "durable-wal-multiblock-records", false, "enable experimental walstore multi-block WAL records; default false; requires --durable-impl=walstore")
+	fs.BoolVar(&f.durableWALRecoveryTestDisableFlusher, "durable-wal-recovery-test-disable-flusher", false, "test-only: stop walstore's automatic WAL checkpoint flusher so recovery gates can prove WAL replay; default false; requires --durable-root and --durable-impl=walstore")
 	fs.Uint64Var(&f.walRetentionLSNs, "wal-retention-lsns", 0,
 		"WAL retention window past checkpoint LSN (walstore only). "+
 			"Zero (default) preserves strict checkpoint-driven recycle. "+
@@ -216,6 +218,14 @@ func parseFlags(args []string) (flags, error) {
 		}
 		if f.durableImpl != "walstore" {
 			return flags{}, fmt.Errorf("--durable-wal-multiblock-records requires --durable-impl=walstore")
+		}
+	}
+	if f.durableWALRecoveryTestDisableFlusher {
+		if f.durableRoot == "" {
+			return flags{}, fmt.Errorf("--durable-wal-recovery-test-disable-flusher requires --durable-root")
+		}
+		if f.durableImpl != "walstore" {
+			return flags{}, fmt.Errorf("--durable-wal-recovery-test-disable-flusher requires --durable-impl=walstore")
 		}
 	}
 	if f.iscsiCHAPUser == "" {
@@ -502,12 +512,13 @@ func run(f flags) int {
 	var durableProv *durable.DurableProvider
 	if f.durableRoot != "" {
 		cfg := durable.ProviderConfig{
-			Impl:                 durable.ImplName(f.durableImpl),
-			StorageRoot:          f.durableRoot,
-			BlockSize:            int(f.durableBlockSize),
-			NumBlocks:            uint32(f.durableBlocks),
-			WALRetentionLSNs:     f.walRetentionLSNs,
-			WALMultiBlockRecords: f.durableWALMultiBlockRecords,
+			Impl:                          durable.ImplName(f.durableImpl),
+			StorageRoot:                   f.durableRoot,
+			BlockSize:                     int(f.durableBlockSize),
+			NumBlocks:                     uint32(f.durableBlocks),
+			WALRetentionLSNs:              f.walRetentionLSNs,
+			WALMultiBlockRecords:          f.durableWALMultiBlockRecords,
+			WALRecoveryTestDisableFlusher: f.durableWALRecoveryTestDisableFlusher,
 		}
 		dp, err := durable.NewDurableProvider(cfg, h.ProjectionView())
 		if err != nil {
