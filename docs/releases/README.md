@@ -17,6 +17,7 @@ is still outside the supported boundary.
 - [v0.5 Beta Candidate — Bounded SwBlockVolume Lifecycle Owner](v0.5-beta-candidate.md)
 - [v0.6 Beta Candidate — Returned-Replica ACK Eligibility Executor](v0.6-beta-candidate.md)
 - [NVMe/TCP Supported-Lab Claim](nvme-tcp-supported-lab.md)
+- [WAL Multi-Block Record Opt-In Boundary](wal-multiblock-opt-in.md)
 
 ## Version Boundary
 
@@ -82,3 +83,4 @@ documented separately because it is source-gated until matching
 smoke; it now includes source-gated multipath/reconnect correctness and durable
 backend write-batching evidence, but still no RoCE/NVMe-RDMA or performance
 SLO claim.
+The WAL multi-block record opt-in is documented separately because it is a backend/WAL-format optimization boundary, not a RoCE, NVMe/RDMA, or performance claim. It remains default-off and source-gated.

@@ -125,8 +125,10 @@ Seaweed Block can already demonstrate a narrow Kubernetes block-storage loop:
   proves mounted restart/recovery compatibility with hostPath persistence,
   force-delete restart, and `recovered_lsn_after_restart=14545`. The opt-in
   remains default-off and is not a performance/SLO, RoCE, or NVMe/RDMA claim.
-  The next step is a release-boundary review that documents the opt-in and
-  remaining diagnostic follow-ups without changing the default WAL format.
+  Phase 153 documents the release boundary and lab-only opt-in shape without
+  changing the default WAL format. The next narrow follow-up is diagnostic
+  cleanup for post-recovery durable status where the recovered LSN was correct
+  but `HeadLSN` displayed an unrelated larger value.
 - Kubernetes NVMe/TCP mounted reconnect is source-gated through changed
   desired path-set evidence: CSI-node can connect a newly published desired
   NVMe path, prune the stale old host path for the same NQN, preserve pod

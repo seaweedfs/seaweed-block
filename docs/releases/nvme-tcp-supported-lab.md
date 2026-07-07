@@ -92,6 +92,9 @@ The supported-lab claim is intentionally narrow:
 | 148 | WAL multi-block record local prototype | PASS |
 | 149 | WAL multi-block record local profile | PASS |
 | 150 | WAL multi-block runtime opt-in | PASS |
+| 151 | Mounted NVMe/TCP multi-block WAL opt-in profile | PASS |
+| 152 | Mounted multi-block WAL recovery compatibility | PASS |
+| 153 | WAL multi-block release-boundary documentation | PASS |
 
 Key QA sign-offs:
 
@@ -126,6 +129,9 @@ Key QA sign-offs:
 - `internal/docs/qa-assignments/phase148-wal-multiblock-record-local-prototype-qa-signoff.md`
 - `internal/docs/qa-assignments/phase149-wal-multiblock-record-profile-qa-signoff.md`
 - `internal/docs/qa-assignments/phase150-wal-multiblock-runtime-opt-in-qa-signoff.md`
+- `internal/docs/qa-assignments/phase151-wal-multiblock-mounted-nvme-profile-qa-signoff.md`
+- `internal/docs/qa-assignments/phase152-wal-multiblock-recovery-compatibility-qa-signoff.md`
+- `internal/docs/qa-assignments/phase153-wal-multiblock-release-boundary-qa-signoff.md`
 
 ## Performance Baseline
 

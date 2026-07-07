@@ -37,6 +37,7 @@ This is an **alpha** product path for supported lab clusters, not production.
 | Returned-replica ACK eligibility executor | Beta candidate | Returned-replica failback runtime | Source-gated |
 | Returned-replica rebuild traffic | Planned | Frontend publication after failback | Planned |
 | NVMe/TCP CSI multipath + backend write batching | Source-gated | Backup/snapshot/restore | Planned |
+| WAL multi-block record opt-in | Source-gated | WAL format default change | Not claimed |
 | Production SLO/performance claims | Not claimed | Hosted production UI | Not claimed |
 
 ## What You Can Do Today
@@ -82,7 +83,9 @@ This is an **alpha** product path for supported lab clusters, not production.
   live desired path-set replacement gate where CSI-node connects the new
   desired NVMe path and prunes the stale old host path without remounting the
   pod, and a durable backend full-block write-batching gate with
-  product-owned `/status/durable` counters. This is a
+  product-owned `/status/durable` counters. The source-gated WAL multi-block
+  record opt-in has mounted profile and restart/recovery compatibility evidence,
+  but remains default-off. This is a
   supported-lab source-gated claim, not a broad NVMe
   compatibility, RoCE/NVMe-RDMA, production HA, or performance/SLO claim.
 - Replay support bundles offline.

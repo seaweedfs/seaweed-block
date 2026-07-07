@@ -82,8 +82,10 @@ This is the short internal roadmap. Keep it current and readable.
   NVMe/TCP profile evidence, and mounted restart/recovery compatibility. Phase
   152 recovered `LSN=14545` after a force-deleted `blockvolume` restart with
   hostPath persistence. This is still default-off and not a performance/SLO,
-  RoCE, or NVMe/RDMA claim; Phase 153 is the release-boundary/documentation
-  review before any user-facing claim.
+  RoCE, or NVMe/RDMA claim. Phase 153 closed the release-boundary documentation
+  gate for this source-gated opt-in. Phase 154 should clean up the diagnostic
+  durable-status `HeadLSN` display observed after recovery without changing WAL
+  recovery semantics unless a dedicated test proves that is required.
 
 Do not skip from scripts directly to mutating operator lifecycle. Helm has
 stabilized the installation contract, and Phase 35 added read-only CRD status,

@@ -100,6 +100,20 @@ be set explicitly. The chart default is `32768`; `65536` has a supported-lab
 gate as an opt-in candidate. This is not a default change, NVMe/RDMA/RoCE
 claim, or performance SLO.
 
+For source-gated WAL write-path experiments, multi-block WAL records can be
+enabled explicitly:
+
+```yaml
+blockmaster:
+  durableWALMultiBlockRecords: true
+```
+
+This is a lab-only optimization boundary backed by Phase 151/152 gates. The
+default remains `false`. Do not set
+`durableWALRecoveryTestDisableFlusher` outside recovery-test gates; that flag is
+scaffolding used to force WAL replay evidence and is not a production tuning
+knob.
+
 ## RF=3 Sync-Quorum Profile
 
 For the gated RF=3 recovery shape:

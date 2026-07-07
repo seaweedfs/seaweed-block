@@ -36,6 +36,7 @@
         },
         "failbackRuntimeRPC": { "type": "boolean" },
         "durableImpl": { "type": "string", "enum": ["walstore", "smartwal"] },
+        "durableWALMultiBlockRecords": { "type": "boolean" },
         "durableWALRecoveryTestDisableFlusher": { "type": "boolean" },
         "stateHostPath": { "type": "string" },
         "stateHostPathType": { "type": "string" },
