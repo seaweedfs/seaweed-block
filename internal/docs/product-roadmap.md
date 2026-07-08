@@ -83,9 +83,10 @@ This is the short internal roadmap. Keep it current and readable.
   152 recovered `LSN=14545` after a force-deleted `blockvolume` restart with
   hostPath persistence. This is still default-off and not a performance/SLO,
   RoCE, or NVMe/RDMA claim. Phase 153 closed the release-boundary documentation
-  gate for this source-gated opt-in. Phase 154 should clean up the diagnostic
-  durable-status `HeadLSN` display observed after recovery without changing WAL
-  recovery semantics unless a dedicated test proves that is required.
+  gate for this source-gated opt-in. Phase 154 fixed the local diagnostic
+  durable-status `HeadLSN` display by separating WAL byte-position metadata
+  from LSN boundaries; Phase 155 should confirm the same boundary in the mounted
+  K8s path.
 
 Do not skip from scripts directly to mutating operator lifecycle. Helm has
 stabilized the installation contract, and Phase 35 added read-only CRD status,
@@ -511,6 +512,16 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   blocks). The opt-in stays default-off and is not a performance/SLO claim. The
   next gate must prove mounted restart/recovery compatibility for the new WAL
   entry type.
+- Phase 152 is closed for mounted restart/recovery compatibility. It recovered
+  `LSN=14545` after a force-deleted `blockvolume` restart with hostPath
+  persistence and no WAL integrity fault.
+- Phase 153 is closed for the release-boundary documentation gate. The opt-in
+  remains source-gated, default-off, and explicitly not a performance, RoCE, or
+  NVMe/RDMA claim.
+- Phase 154 is closed for local durable-status `HeadLSN` cleanup. The bug was a
+  diagnostic boundary mismatch: superblock WAL byte-position metadata was being
+  reported as the LSN `HeadLSN` after recovery. Storage and durable-provider
+  regressions now assert recovered `HeadLSN` is bounded by the recovered LSN.
 - Later protocol candidates: complete a real NVMe/RDMA target, characterize
   NVMe/TCP performance, or bridge to object/NIXL acceleration where the product
   surface is object/storage rather than block PVC. Keep these separate so

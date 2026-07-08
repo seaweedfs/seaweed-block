@@ -56,6 +56,8 @@ restart/replay gate and are not a production or user-facing tuning knob.
 | 150 | runtime and Helm opt-in wired default-off | PASS |
 | 151 | mounted NVMe/TCP opt-in profile observes multi-block record shape | PASS |
 | 152 | mounted hostPath restart/recovery replays multi-block WAL records | PASS |
+| 153 | release-boundary documentation keeps the opt-in source-gated | PASS |
+| 154 | local durable-status `HeadLSN` diagnostic cleanup | PASS |
 
 Phase 151 mounted profile evidence:
 
@@ -103,8 +105,11 @@ cleanup_status=ok
 
 ## Remaining Follow-Ups
 
-- Clean up the diagnostic durable status where post-recovery
-  `DurableLSN=14545` was correct but `HeadLSN` displayed a much larger value.
+- Phase 154 fixed the diagnostic durable status where post-recovery `HeadLSN`
+  could display the persisted WAL byte offset instead of the recovered LSN
+  frontier.
+- Rerun a mounted confirmation that live `/status/durable` reports bounded
+  `HeadLSN` after the Phase 152 restart/recovery shape.
 - Decide whether this opt-in should stay source-gated or be included in a future
   published-image release smoke.
 - Keep the recovery-test flusher-disable hook out of user release guidance.

@@ -95,6 +95,7 @@ The supported-lab claim is intentionally narrow:
 | 151 | Mounted NVMe/TCP multi-block WAL opt-in profile | PASS |
 | 152 | Mounted multi-block WAL recovery compatibility | PASS |
 | 153 | WAL multi-block release-boundary documentation | PASS |
+| 154 | Durable-status HeadLSN diagnostic cleanup | PASS |
 
 Key QA sign-offs:
 
@@ -132,6 +133,7 @@ Key QA sign-offs:
 - `internal/docs/qa-assignments/phase151-wal-multiblock-mounted-nvme-profile-qa-signoff.md`
 - `internal/docs/qa-assignments/phase152-wal-multiblock-recovery-compatibility-qa-signoff.md`
 - `internal/docs/qa-assignments/phase153-wal-multiblock-release-boundary-qa-signoff.md`
+- `internal/docs/qa-assignments/phase154-durable-status-head-lsn-cleanup-qa-signoff.md`
 
 ## Performance Baseline
 

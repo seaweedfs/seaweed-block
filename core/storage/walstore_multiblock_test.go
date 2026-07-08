@@ -219,6 +219,63 @@ func TestWALStore_DisableAutoFlushForRecoveryTestPreservesReplayAfterCrash(t *te
 	}
 }
 
+func TestWALStore_MultiBlockRecoveryHeadLSNUsesRecoveredFrontier(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "store.bin")
+	blocks := [][]byte{
+		makeBlock(4096, 0xE1),
+		makeBlock(4096, 0xE2),
+		makeBlock(4096, 0xE3),
+		makeBlock(4096, 0xE4),
+	}
+	var persistedWALHeadBytes uint64
+
+	func() {
+		s, err := CreateWALStore(path, 16, 4096)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.DisableAutoFlushForRecoveryTest()
+		s.enableMultiBlockRecordsForTest(true)
+		if _, err := s.WriteBatch(2, blocks); err != nil {
+			t.Fatalf("WriteBatch: %v", err)
+		}
+		if stable, err := s.Sync(); err != nil || stable != 4 {
+			t.Fatalf("Sync stable=%d err=%v, want stable=4", stable, err)
+		}
+		_, _, headLSN := s.Boundaries()
+		if headLSN != 4 {
+			t.Fatalf("pre-close HeadLSN=%d want 4", headLSN)
+		}
+		persistedWALHeadBytes = s.wal.logicalHeadValue()
+		if persistedWALHeadBytes <= headLSN {
+			t.Fatalf("test setup did not create distinct WAL byte head: walHeadBytes=%d headLSN=%d", persistedWALHeadBytes, headLSN)
+		}
+		if err := s.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	}()
+
+	s, err := OpenWALStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	recovered, err := s.Recover()
+	if err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	if recovered != 4 {
+		t.Fatalf("Recover=%d want 4", recovered)
+	}
+	_, _, headLSN := s.Boundaries()
+	if headLSN != recovered {
+		t.Fatalf("HeadLSN=%d want recovered frontier %d, not WAL byte offset %d", headLSN, recovered, persistedWALHeadBytes)
+	}
+	if next := s.NextLSN(); next != recovered+1 {
+		t.Fatalf("NextLSN=%d want %d", next, recovered+1)
+	}
+}
+
 func TestWALStore_MultiBlockFlusherSplitsPerBlock(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "store.bin")
 	s, err := CreateWALStore(path, 16, 4096)

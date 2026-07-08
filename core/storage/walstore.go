@@ -199,8 +199,8 @@ func openInitialized(path string, f *os.File, sb *superblock) (*WALStore, error)
 		extentBase:    sb.WALOffset + sb.WALSize,
 		nextLSN:       sb.WALCheckpointLSN + 1,
 		syncedLSN:     sb.WALCheckpointLSN,
-		walTail:       sb.WALTail,
-		walHead:       sb.WALHead,
+		walTail:       retainedLSNFromCheckpoint(sb.WALCheckpointLSN),
+		walHead:       sb.WALCheckpointLSN,
 		checkpointLSN: sb.WALCheckpointLSN,
 	}
 	wal := newWALWriter(f, sb.WALOffset, sb.WALSize, sb.WALHead, sb.WALTail, &s.instr)
@@ -252,6 +252,13 @@ func openInitialized(path string, f *os.File, sb *superblock) (*WALStore, error)
 	})
 
 	return s, nil
+}
+
+func retainedLSNFromCheckpoint(checkpointLSN uint64) uint64 {
+	if checkpointLSN == 0 {
+		return 0
+	}
+	return checkpointLSN + 1
 }
 
 // writeExtent pwrites one block into the extent at lba's natural
@@ -349,15 +356,17 @@ func (s *WALStore) Recover() (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if res.HighestLSN >= s.nextLSN {
-		s.nextLSN = res.HighestLSN + 1
+	recoveredHead := s.checkpointLSN
+	if res.HighestLSN > recoveredHead {
+		recoveredHead = res.HighestLSN
 	}
-	if res.HighestLSN > s.syncedLSN {
-		s.syncedLSN = res.HighestLSN
+	if recoveredHead >= s.nextLSN {
+		s.nextLSN = recoveredHead + 1
 	}
-	if res.HighestLSN > s.walHead {
-		s.walHead = res.HighestLSN
+	if recoveredHead > s.syncedLSN {
+		s.syncedLSN = recoveredHead
 	}
+	s.walHead = recoveredHead
 	if s.walTail == 0 && s.syncedLSN > 0 {
 		// First write LSN observed becomes S baseline.
 		s.walTail = 1

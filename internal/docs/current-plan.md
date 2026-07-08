@@ -1,36 +1,8 @@
-# Current Plan: Phase 154 Durable Status HeadLSN Diagnostic Cleanup
+# Current Plan: Phase 155 Mounted Durable Status HeadLSN Confirmation
 
 Status: planning.
 
-Phase 153 closed the multi-block WAL release-boundary gate:
-
-```text
-phase153_wal_multiblock_release_boundary_status=ok
-frontend_transport=tcp
-roce_claim_allowed=false
-nvme_rdma_claim_allowed=false
-performance_slo_claim_allowed=false
-default_wal_format_unchanged=true
-feature_gate_default=false
-runtime_opt_in_name=durable-wal-multiblock-records
-runtime_opt_in_documented=true
-mounted_profile_gate_passed=true
-mounted_recovery_gate_passed=true
-release_note_non_claims_documented=true
-remaining_followups_listed=true
-phase153_decision=document_opt_in
-next_recommendation=phase154_durable_status_head_lsn_cleanup
-```
-
-## Goal
-
-Clean up the diagnostic durable-status mismatch observed in Phase 152 after
-multi-block WAL recovery. The recovery gate showed the mounted reader and
-`DurableLSN=14545` were correct, but `/status/durable` displayed a much larger
-`HeadLSN`. Phase 154 should clarify and fix the status semantics without
-weakening recovery correctness or changing the default WAL format.
-
-## Required Evidence
+Phase 154 closed the local durable-status `HeadLSN` diagnostic cleanup:
 
 ```text
 phase154_durable_status_head_lsn_cleanup_status=ok
@@ -43,33 +15,57 @@ head_lsn_after_recovery_is_bounded=true
 no_recovery_semantics_change_without_test=true
 default_wal_format_unchanged=true
 cleanup_status=ok
-phase154_decision=<fixed|documented_no_code_change|blocked>
+phase154_decision=fixed
+next_recommendation=phase155_mounted_durable_status_head_lsn_confirmation
+```
+
+## Goal
+
+Confirm the Phase 154 local fix on the mounted Kubernetes path that originally
+exposed the issue. Rerun the multi-block WAL restart/recovery shape and assert
+that live `/status/durable` reports a bounded `HeadLSN` that agrees with the
+recovered frontier after restart.
+
+## Required Evidence
+
+```text
+phase155_mounted_durable_status_head_lsn_confirmation_status=ok
+phase152_followup=head_lsn_diagnostic_cleanup
+runtime_opt_in_name=durable-wal-multiblock-records
+runtime_opt_in_enabled=true
+recovery_test_disable_flusher_enabled=true
+restart_persistence_mode=hostpath
+blockvolume_restart_mode=force_delete_pod
+recovery_completed=true
+recovered_lsn_remains_correct=true
+durable_status_head_lsn_after_restart=<number>
+durable_status_head_lsn_equals_recovered_lsn=true
+reader_verified_after_restart=true
+ready_after_restart=true
+default_wal_format_unchanged=true
+cleanup_status=ok
+phase155_decision=<mounted_confirmed|blocked>
 next_recommendation=<specific next phase>
 ```
 
 ## Boundaries
 
 - Do not enable multi-block records by default.
-- Do not change WAL recovery behavior unless a test proves the current behavior
-  is incorrect.
 - Do not weaken the Phase 152 mounted recovery gate.
 - Do not turn this into a performance phase.
-- Keep the work scoped to durable status semantics and diagnostics unless a real
-  correctness issue is found.
+- Do not claim RoCE, NVMe/RDMA, or performance/SLO.
+- Keep the gate scoped to live status confirmation after recovery.
 
 ## Candidate Work
 
-1. Reproduce or isolate the Phase 152 post-recovery status mismatch with the
-   smallest local or mounted gate available.
-2. Define what `HeadLSN`, `DurableLSN`, and recovery evidence should mean after
-   replay.
-3. Fix the status publisher or document the semantics if no code change is
-   needed.
-4. Add a regression that proves recovered LSN remains correct and diagnostic
-   `HeadLSN` no longer shows an unrelated larger value.
+1. Extend the Phase 152 runner/gate to capture `/status/durable` after restart.
+2. Assert `DurableLSN`, `HeadLSN`, and recovery evidence agree after recovery.
+3. Keep the mounted reader/Ready/cleanup checks from Phase 152.
+4. Record whether this is sufficient to keep the opt-in source-gated or whether
+   another release-smoke artifact check is required.
 
 ## Exit Criteria
 
-Phase 154 can close when the durable status after multi-block recovery is
-coherent, documented, and regression-tested without changing defaults or making
-new performance/RDMA claims.
+Phase 155 can close when the live mounted recovery path confirms the Phase 154
+status fix: no inflated `HeadLSN`, data still readable after restart, Ready
+returns, and cleanup is clean.

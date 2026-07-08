@@ -109,6 +109,84 @@ func TestPhase152_DurableProviderCanDisableWALStoreAutoFlushForRecoveryTest(t *t
 	}
 }
 
+func TestPhase154_DurableStatusHeadLSNAfterWALStoreRecovery(t *testing.T) {
+	root := t.TempDir()
+	id := frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1}
+	view := newStubView(healthyProj(id))
+	func() {
+		p, err := durable.NewDurableProvider(durable.ProviderConfig{
+			Impl:                          durable.ImplWALStore,
+			StorageRoot:                   root,
+			BlockSize:                     4096,
+			NumBlocks:                     128,
+			WALMultiBlockRecords:          true,
+			WALRecoveryTestDisableFlusher: true,
+		}, view)
+		if err != nil {
+			t.Fatalf("NewDurableProvider #1: %v", err)
+		}
+		raw, err := p.EnsureStorage("v1")
+		if err != nil {
+			t.Fatalf("EnsureStorage #1: %v", err)
+		}
+		batcher, ok := raw.(storage.WriteBatcher)
+		if !ok {
+			t.Fatalf("storage %T does not implement WriteBatcher", raw)
+		}
+		blocks := [][]byte{
+			bytes.Repeat([]byte{0x41}, 4096),
+			bytes.Repeat([]byte{0x42}, 4096),
+			bytes.Repeat([]byte{0x43}, 4096),
+			bytes.Repeat([]byte{0x44}, 4096),
+		}
+		if _, err := batcher.WriteBatch(2, blocks); err != nil {
+			t.Fatalf("WriteBatch: %v", err)
+		}
+		if stable, err := raw.Sync(); err != nil || stable != 4 {
+			t.Fatalf("Sync stable=%d err=%v, want stable=4", stable, err)
+		}
+		if err := p.Close(); err != nil {
+			t.Fatalf("Close #1: %v", err)
+		}
+	}()
+
+	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+		Impl:                          durable.ImplWALStore,
+		StorageRoot:                   root,
+		BlockSize:                     4096,
+		NumBlocks:                     128,
+		WALMultiBlockRecords:          true,
+		WALRecoveryTestDisableFlusher: true,
+	}, view)
+	if err != nil {
+		t.Fatalf("NewDurableProvider #2: %v", err)
+	}
+	defer p.Close()
+	if _, err := p.EnsureStorage("v1"); err != nil {
+		t.Fatalf("EnsureStorage #2: %v", err)
+	}
+	report, err := p.RecoverVolume(context.Background(), "v1")
+	if err != nil {
+		t.Fatalf("RecoverVolume: %v", err)
+	}
+	if report.RecoveredLSN != 4 {
+		t.Fatalf("RecoveredLSN=%d want 4", report.RecoveredLSN)
+	}
+	statuses := p.DurableStatuses()
+	if len(statuses) != 1 {
+		t.Fatalf("status count=%d want 1: %+v", len(statuses), statuses)
+	}
+	if statuses[0].DurableLSN != report.RecoveredLSN {
+		t.Fatalf("DurableLSN=%d want recovered %d: %+v", statuses[0].DurableLSN, report.RecoveredLSN, statuses[0])
+	}
+	if statuses[0].HeadLSN != report.RecoveredLSN {
+		t.Fatalf("HeadLSN=%d want recovered %d: %+v", statuses[0].HeadLSN, report.RecoveredLSN, statuses[0])
+	}
+	if statuses[0].Evidence != "recovered LSN=4" {
+		t.Fatalf("Evidence=%q want recovered LSN=4", statuses[0].Evidence)
+	}
+}
+
 func newProvider(t *testing.T, impl durable.ImplName) (*durable.DurableProvider, *stubView, string) {
 	t.Helper()
 	root := t.TempDir()
