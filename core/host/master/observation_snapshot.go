@@ -40,14 +40,20 @@ func observationNodes(nodes []lifecycle.NodeRegistration, placements []lifecycle
 	}
 	out := make([]ops.NodeEvidence, 0, len(nodes))
 	for _, node := range nodes {
+		managementIP := node.Labels[lifecycle.ManagementIPLabel]
+		if managementIP == "" {
+			managementIP = hostFromAddr(firstNonEmpty(node.DataAddr, node.Addr))
+		}
 		out = append(out, ops.NodeEvidence{
-			NodeName:        node.ServerID,
-			KubernetesNode:  node.Labels[lifecycle.KubernetesNodeNameLabel],
-			InternalIP:      hostFromAddr(firstNonEmpty(node.DataAddr, node.Addr)),
-			Schedulable:     true,
-			Ready:           true,
-			LastHeartbeatAt: node.SeenAt,
-			ReplicaCount:    replicaCounts[node.ServerID],
+			NodeName:             node.ServerID,
+			KubernetesNode:       node.Labels[lifecycle.KubernetesNodeNameLabel],
+			InternalIP:           managementIP,
+			FrontendIP:           node.Labels[lifecycle.FrontendIPLabel],
+			FrontendNetworkClass: node.Labels[lifecycle.FrontendNetworkClassLabel],
+			Schedulable:          true,
+			Ready:                true,
+			LastHeartbeatAt:      node.SeenAt,
+			ReplicaCount:         replicaCounts[node.ServerID],
 		})
 	}
 	sort.SliceStable(out, func(i, j int) bool {

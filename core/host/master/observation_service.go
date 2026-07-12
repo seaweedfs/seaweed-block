@@ -159,17 +159,19 @@ func clusterEvidenceToWire(cluster ops.ClusterEvidence) *control.ClusterStatusRe
 
 func nodeEvidenceToWire(node ops.NodeEvidence) *control.NodeEvidence {
 	return &control.NodeEvidence{
-		NodeName:        node.NodeName,
-		KubernetesNode:  node.KubernetesNode,
-		PhysicalHost:    node.PhysicalHost,
-		InternalIp:      node.InternalIP,
-		Schedulable:     node.Schedulable,
-		Ready:           node.Ready,
-		LastHeartbeatAt: timestampOrNil(node.LastHeartbeatAt),
-		ReplicaCount:    int32(node.ReplicaCount),
-		RequiredImages:  append([]string(nil), node.RequiredImages...),
-		MissingImages:   append([]string(nil), node.MissingImages...),
-		Conditions:      conditionsToWire(node.Conditions),
+		NodeName:             node.NodeName,
+		KubernetesNode:       node.KubernetesNode,
+		PhysicalHost:         node.PhysicalHost,
+		InternalIp:           node.InternalIP,
+		FrontendIp:           node.FrontendIP,
+		FrontendNetworkClass: node.FrontendNetworkClass,
+		Schedulable:          node.Schedulable,
+		Ready:                node.Ready,
+		LastHeartbeatAt:      timestampOrNil(node.LastHeartbeatAt),
+		ReplicaCount:         int32(node.ReplicaCount),
+		RequiredImages:       append([]string(nil), node.RequiredImages...),
+		MissingImages:        append([]string(nil), node.MissingImages...),
+		Conditions:           conditionsToWire(node.Conditions),
 	}
 }
 

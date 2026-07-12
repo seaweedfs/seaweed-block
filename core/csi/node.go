@@ -42,8 +42,16 @@ type ISCSIUtil interface {
 type NVMeUtil interface {
 	Connect(ctx context.Context, addr, nqn string) error
 	Disconnect(ctx context.Context, nqn string) error
+	DisconnectPath(ctx context.Context, controller string) error
 	GetDeviceByNQN(ctx context.Context, nqn string) (string, error)
 	IsConnected(ctx context.Context, nqn string) (bool, error)
+	IsPathConnected(ctx context.Context, nqn, addr string) (bool, error)
+	ListPaths(ctx context.Context, nqn string) ([]NVMeConnectedPath, error)
+}
+
+type NVMeConnectedPath struct {
+	Addr       string
+	Controller string
 }
 
 type ISCSIAuth struct {
@@ -97,6 +105,18 @@ type NodeConfig struct {
 	Logger        *log.Logger
 }
 
+type MountedNVMeReconnectResult struct {
+	Checked     int
+	Reconnected int
+	Pruned      int
+	Failed      int
+}
+
+type mountedNVMeReconcileOutcome struct {
+	connectedNewPath bool
+	prunedStalePath  bool
+}
+
 func NewNodeServer(cfg NodeConfig) *NodeServer {
 	lg := cfg.Logger
 	if lg == nil {
@@ -137,6 +157,15 @@ func (s *NodeServer) NodeStageVolume(ctx context.Context, req *csipb.NodeStageVo
 	if mounted {
 		if err := s.validateMountedStagingVolume(volumeID, stagingPath); err != nil {
 			return nil, err
+		}
+		transport := transportFromContext(req.GetPublishContext(), req.GetVolumeContext())
+		if transport == "" {
+			transport = readTransportFile(stagingPath)
+		}
+		if transport == transportNVMe || readTransportFile(stagingPath) == transportNVMe {
+			if _, err := s.reconcileMountedNVMePaths(ctx, req, volumeID, stagingPath); err != nil {
+				return nil, err
+			}
 		}
 		s.logger.Printf("NodeStageVolume: %s already mounted at %s", volumeID, stagingPath)
 		return &csipb.NodeStageVolumeResponse{}, nil
@@ -302,21 +331,49 @@ func (s *NodeServer) stageNVMe(ctx context.Context, req *csipb.NodeStageVolumeRe
 	if len(addrs) == 0 {
 		addrs = []string{addr}
 	}
+	if multipathRequested && len(addrs) < 2 {
+		return nil, status.Errorf(codes.FailedPrecondition, "NVMe multipath requires at least two portals, got %d", len(addrs))
+	}
+	connectAllPaths := multipathRequested || len(addrs) > 1
 	connected, err := s.nvmeUtil.IsConnected(ctx, nqn)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "check nvme connect: %v", err)
 	}
 	if connected && !s.hasStagedIdentity(volumeID, stagingPath) {
-		return nil, status.Errorf(codes.FailedPrecondition, "NVMe subsystem %q is already connected without staged volume identity", nqn)
+		s.logger.Printf("NodeStageVolume: %s NVMe subsystem %q already connected without marker at %s; recreating staging identity", volumeID, nqn, stagingPath)
 	}
 	connectStarted := false
-	if !connected {
+	if connectAllPaths {
 		for _, pathAddr := range addrs {
-			if err := s.nvmeUtil.Connect(ctx, pathAddr, nqn); err != nil {
-				return nil, status.Errorf(codes.Internal, "nvme connect: %v", err)
+			pathConnected, err := s.nvmeUtil.IsPathConnected(ctx, nqn, pathAddr)
+			if err != nil {
+				return nil, status.Errorf(codes.Internal, "check nvme path connect: %v", err)
 			}
-			connectStarted = true
+			if !pathConnected {
+				if err := s.nvmeUtil.Connect(ctx, pathAddr, nqn); err != nil {
+					return nil, status.Errorf(codes.Internal, "nvme connect: %v", err)
+				}
+				connectStarted = true
+			}
 		}
+	} else if !connected {
+		if err := s.nvmeUtil.Connect(ctx, addr, nqn); err != nil {
+			return nil, status.Errorf(codes.Internal, "nvme connect: %v", err)
+		}
+		connectStarted = true
+	}
+	if connectAllPaths {
+		for _, pathAddr := range addrs {
+			pathConnected, err := s.nvmeUtil.IsPathConnected(ctx, nqn, pathAddr)
+			if err != nil {
+				return nil, status.Errorf(codes.Internal, "verify nvme path connect: %v", err)
+			}
+			if !pathConnected {
+				return nil, status.Errorf(codes.FailedPrecondition, "NVMe multipath %q missing path %s", nqn, pathAddr)
+			}
+		}
+	} else if !connected {
+		connected = true
 	}
 	success := false
 	defer func() {
@@ -368,6 +425,253 @@ func (s *NodeServer) stageNVMe(ctx context.Context, req *csipb.NodeStageVolumeRe
 	success = true
 	s.reportCSIReattachObserved(ctx, volumeID, transportNVMe, addr, publish)
 	return &csipb.NodeStageVolumeResponse{}, nil
+}
+
+func (s *NodeServer) ReconcileMountedNVMeVolumes(ctx context.Context) (MountedNVMeReconnectResult, error) {
+	if s.mountUtil == nil {
+		return MountedNVMeReconnectResult{}, status.Error(codes.FailedPrecondition, "mount utility is not configured")
+	}
+	type stagedSnapshot struct {
+		volumeID string
+		info     stagedVolumeInfo
+	}
+	var volumes []stagedSnapshot
+	s.stagedMu.Lock()
+	for volumeID, info := range s.staged {
+		if info == nil || info.transport != transportNVMe || info.stagingPath == "" {
+			continue
+		}
+		volumes = append(volumes, stagedSnapshot{volumeID: volumeID, info: *info})
+	}
+	s.stagedMu.Unlock()
+
+	var result MountedNVMeReconnectResult
+	for _, volume := range volumes {
+		mounted, err := s.mountUtil.IsMounted(ctx, volume.info.stagingPath)
+		if err != nil {
+			result.Failed++
+			return result, status.Errorf(codes.Internal, "check mount: %v", err)
+		}
+		if !mounted {
+			continue
+		}
+		if err := s.validateMountedStagingVolume(volume.volumeID, volume.info.stagingPath); err != nil {
+			result.Failed++
+			return result, err
+		}
+		publishContext := map[string]string{
+			"protocol": transportNVMe,
+			"nvmeAddr": volume.info.nvmeAddr,
+			"nqn":      volume.info.nqn,
+		}
+		if len(volume.info.nvmeAddrs) > 0 {
+			publishContext["nvmeAddrs"] = strings.Join(volume.info.nvmeAddrs, ",")
+		}
+		if volume.info.multipath || len(volume.info.nvmeAddrs) > 1 {
+			publishContext["stage2_multipath"] = "true"
+		}
+		outcome, err := s.reconcileMountedNVMePaths(ctx, &csipb.NodeStageVolumeRequest{
+			VolumeId:          volume.volumeID,
+			StagingTargetPath: volume.info.stagingPath,
+			PublishContext:    publishContext,
+		}, volume.volumeID, volume.info.stagingPath)
+		result.Checked++
+		if err != nil {
+			result.Failed++
+			return result, err
+		}
+		if outcome.connectedNewPath {
+			result.Reconnected++
+		}
+		if outcome.prunedStalePath {
+			result.Pruned++
+		}
+	}
+	return result, nil
+}
+
+func (s *NodeServer) StartMountedNVMeReconnectOwner(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				result, err := s.ReconcileMountedNVMeVolumes(ctx)
+				if err != nil {
+					s.logger.Printf("MountedNVMeReconnectOwner: iteration failed checked=%d reconnected=%d pruned=%d failed=%d err=%v", result.Checked, result.Reconnected, result.Pruned, result.Failed, err)
+					continue
+				}
+				if result.Checked > 0 || result.Reconnected > 0 || result.Pruned > 0 {
+					s.logger.Printf("MountedNVMeReconnectOwner: iteration checked=%d reconnected=%d pruned=%d failed=%d", result.Checked, result.Reconnected, result.Pruned, result.Failed)
+				}
+			}
+		}
+	}()
+}
+
+func (s *NodeServer) reconcileMountedNVMePaths(ctx context.Context, req *csipb.NodeStageVolumeRequest, volumeID, stagingPath string) (mountedNVMeReconcileOutcome, error) {
+	if s.nvmeUtil == nil {
+		return mountedNVMeReconcileOutcome{}, status.Error(codes.FailedPrecondition, "NVMe attach utility is not configured")
+	}
+	publish := s.refreshPublishContext(ctx, volumeID, req.GetPublishContext())
+	publishContext := publish.Context
+	multipathRequested := iscsiMultipathFromContext(publishContext) || iscsiMultipathFromContext(req.GetPublishContext()) || iscsiMultipathFromContext(req.GetVolumeContext())
+	if multipathRequested {
+		publish = s.waitForNVMeMultipathPublishContext(ctx, volumeID, publish, 2)
+		publishContext = publish.Context
+	}
+	addr, nqn := nvmeFromContext(publishContext)
+	addrs := nvmeAddrsFromContext(publishContext)
+	if addr == "" || nqn == "" {
+		addr, nqn = nvmeFromContext(req.GetVolumeContext())
+		addrs = nvmeAddrsFromContext(req.GetVolumeContext())
+	}
+	if addr == "" || nqn == "" {
+		return mountedNVMeReconcileOutcome{}, nil
+	}
+	if len(addrs) == 0 {
+		addrs = []string{addr}
+	}
+	existingNQN := readTargetFile(stagingPath)
+	if existingNQN != "" && existingNQN != nqn {
+		return mountedNVMeReconcileOutcome{}, status.Errorf(codes.FailedPrecondition, "mounted NVMe staging target mismatch: got %q want %q", existingNQN, nqn)
+	}
+	if multipathRequested && len(addrs) < 2 {
+		return mountedNVMeReconcileOutcome{}, status.Errorf(codes.FailedPrecondition, "NVMe multipath requires at least two portals, got %d", len(addrs))
+	}
+
+	connectAllPaths := multipathRequested || len(addrs) > 1
+	outcome := mountedNVMeReconcileOutcome{}
+	if connectAllPaths {
+		for _, pathAddr := range addrs {
+			pathConnected, err := s.nvmeUtil.IsPathConnected(ctx, nqn, pathAddr)
+			if err != nil {
+				return mountedNVMeReconcileOutcome{}, status.Errorf(codes.Internal, "check nvme path connect: %v", err)
+			}
+			if pathConnected {
+				continue
+			}
+			if err := s.nvmeUtil.Connect(ctx, pathAddr, nqn); err != nil {
+				return mountedNVMeReconcileOutcome{}, status.Errorf(codes.Internal, "nvme reconnect path: %v", err)
+			}
+			outcome.connectedNewPath = true
+		}
+		if err := s.waitForNVMePathsConnected(ctx, nqn, addrs, 60*time.Second); err != nil {
+			return mountedNVMeReconcileOutcome{}, err
+		}
+		pruned, err := s.pruneStaleMountedNVMePaths(ctx, nqn, addrs)
+		if err != nil {
+			return mountedNVMeReconcileOutcome{}, err
+		}
+		outcome.prunedStalePath = pruned
+	} else {
+		connected, err := s.nvmeUtil.IsConnected(ctx, nqn)
+		if err != nil {
+			return mountedNVMeReconcileOutcome{}, status.Errorf(codes.Internal, "check nvme connect: %v", err)
+		}
+		if !connected {
+			if err := s.nvmeUtil.Connect(ctx, addr, nqn); err != nil {
+				return mountedNVMeReconcileOutcome{}, status.Errorf(codes.Internal, "nvme reconnect: %v", err)
+			}
+			outcome.connectedNewPath = true
+		}
+	}
+
+	if err := writeTransportFile(stagingPath, transportNVMe); err != nil {
+		s.logger.Printf("NodeStageVolume: %s: %v (non-fatal)", volumeID, err)
+	}
+	if err := writeVolumeFile(stagingPath, volumeID); err != nil {
+		s.logger.Printf("NodeStageVolume: %s: %v (non-fatal)", volumeID, err)
+	}
+	if err := writeTargetFile(stagingPath, nqn); err != nil {
+		s.logger.Printf("NodeStageVolume: %s: %v (non-fatal)", volumeID, err)
+	}
+
+	s.stagedMu.Lock()
+	s.staged[volumeID] = &stagedVolumeInfo{
+		nqn:         nqn,
+		nvmeAddr:    addr,
+		nvmeAddrs:   append([]string(nil), addrs...),
+		multipath:   len(addrs) > 1,
+		transport:   transportNVMe,
+		stagingPath: stagingPath,
+	}
+	s.stagedMu.Unlock()
+	if outcome.connectedNewPath || outcome.prunedStalePath {
+		s.logger.Printf("NodeStageVolume: %s reconciled mounted NVMe paths portals=%s target=%s", volumeID, strings.Join(addrs, ","), nqn)
+		s.reportCSIReattachObserved(ctx, volumeID, transportNVMe, addr, publish)
+	}
+	return outcome, nil
+}
+
+func (s *NodeServer) pruneStaleMountedNVMePaths(ctx context.Context, nqn string, desiredAddrs []string) (bool, error) {
+	if s.nvmeUtil == nil || nqn == "" || len(desiredAddrs) == 0 {
+		return false, nil
+	}
+	desired := make(map[string]struct{}, len(desiredAddrs))
+	for _, addr := range desiredAddrs {
+		if addr != "" {
+			desired[addr] = struct{}{}
+		}
+	}
+	paths, err := s.nvmeUtil.ListPaths(ctx, nqn)
+	if err != nil {
+		return false, status.Errorf(codes.Internal, "list nvme paths: %v", err)
+	}
+	pruned := false
+	for _, path := range paths {
+		if path.Addr == "" {
+			continue
+		}
+		if _, ok := desired[path.Addr]; ok {
+			continue
+		}
+		if path.Controller == "" {
+			return pruned, status.Errorf(codes.FailedPrecondition, "stale NVMe path %s for %s has no controller for scoped disconnect", path.Addr, nqn)
+		}
+		if err := s.nvmeUtil.DisconnectPath(ctx, path.Controller); err != nil {
+			return pruned, status.Errorf(codes.Internal, "disconnect stale nvme path %s: %v", path.Addr, err)
+		}
+		pruned = true
+	}
+	return pruned, nil
+}
+
+func (s *NodeServer) waitForNVMePathsConnected(ctx context.Context, nqn string, addrs []string, timeout time.Duration) error {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	var lastMissing string
+	for {
+		lastMissing = ""
+		for _, pathAddr := range addrs {
+			pathConnected, err := s.nvmeUtil.IsPathConnected(ctx, nqn, pathAddr)
+			if err != nil {
+				return status.Errorf(codes.Internal, "verify nvme path connect: %v", err)
+			}
+			if !pathConnected {
+				lastMissing = pathAddr
+				break
+			}
+		}
+		if lastMissing == "" {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return status.Errorf(codes.Internal, "verify nvme path connect: %v", ctx.Err())
+		case <-deadline.C:
+			return status.Errorf(codes.FailedPrecondition, "NVMe multipath %q missing path %s", nqn, lastMissing)
+		case <-ticker.C:
+		}
+	}
 }
 
 func (s *NodeServer) reportCSIReattachObserved(ctx context.Context, volumeID, transport, targetAddr string, publish publishContextResult) {

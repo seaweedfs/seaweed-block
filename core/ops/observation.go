@@ -106,17 +106,19 @@ type CleanupEvidence struct {
 }
 
 type NodeEvidence struct {
-	NodeName        string                 `json:"node_name"`
-	KubernetesNode  string                 `json:"kubernetes_node,omitempty"`
-	PhysicalHost    string                 `json:"physical_host,omitempty"`
-	InternalIP      string                 `json:"internal_ip,omitempty"`
-	Schedulable     bool                   `json:"schedulable"`
-	Ready           bool                   `json:"ready"`
-	LastHeartbeatAt time.Time              `json:"last_heartbeat_at,omitempty"`
-	ReplicaCount    int                    `json:"replica_count"`
-	RequiredImages  []string               `json:"required_images,omitempty"`
-	MissingImages   []string               `json:"missing_images,omitempty"`
-	Conditions      []ObservationCondition `json:"conditions,omitempty"`
+	NodeName             string                 `json:"node_name"`
+	KubernetesNode       string                 `json:"kubernetes_node,omitempty"`
+	PhysicalHost         string                 `json:"physical_host,omitempty"`
+	InternalIP           string                 `json:"internal_ip,omitempty"`
+	FrontendIP           string                 `json:"frontend_ip,omitempty"`
+	FrontendNetworkClass string                 `json:"frontend_network_class,omitempty"`
+	Schedulable          bool                   `json:"schedulable"`
+	Ready                bool                   `json:"ready"`
+	LastHeartbeatAt      time.Time              `json:"last_heartbeat_at,omitempty"`
+	ReplicaCount         int                    `json:"replica_count"`
+	RequiredImages       []string               `json:"required_images,omitempty"`
+	MissingImages        []string               `json:"missing_images,omitempty"`
+	Conditions           []ObservationCondition `json:"conditions,omitempty"`
 }
 
 type VolumeEvidence struct {

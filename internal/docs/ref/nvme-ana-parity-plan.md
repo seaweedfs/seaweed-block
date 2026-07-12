@@ -58,16 +58,15 @@ frontend boundaries.
   - KATO / KeepAlive support,
   - unit and component tests for queue routing, large writes, pipelining, and
     cleanup.
-- Deliberately not advertised yet:
-  - ANA Identify fields are pinned to zero by tests,
-  - ANA Change Notices are not advertised,
+- Deliberately constrained:
+  - ANA Identify fields and OAES ANA Change Notice are advertised only when an
+    ANA provider is wired,
+  - ANA Change Notice has source/component evidence in Phase 127 and live
+    Linux host AER evidence in Phase 128,
   - Dataset Management / Write Zeroes are not advertised.
 - Product gaps:
-  - no current NVMe alpha install path,
-  - no current K8s dynamic PVC path using NVMe,
-  - no current Linux `nvme connect -> mkfs -> mount -> fio -> disconnect`
-    release gate,
-  - no current NVMe multipath mounted failover gate,
+  - Kubernetes dynamic reconnect/restage after a mounted PVC's published NVMe
+    path set changes is not yet proven,
   - no RoCE or 25 GbE claim.
 
 See `nvme-v2-coverage-gap-audit.md` for the P0 classification table. The

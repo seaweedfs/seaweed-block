@@ -259,6 +259,81 @@ wait_grouped_device() {
   exit 1
 }
 
+summarize_ana_log() {
+  local bin="$1"
+  local out="$2"
+  python3 - "$bin" "$NSID" >"$out" <<'PY'
+import struct
+import sys
+path = sys.argv[1]
+want_nsid = int(sys.argv[2], 0)
+data = open(path, "rb").read()
+if len(data) < 40:
+    raise SystemExit(f"ANA log too short: {len(data)} bytes, want at least 40")
+state_names = {
+    0x01: "optimized",
+    0x02: "non_optimized",
+    0x03: "inaccessible",
+    0x04: "persistent_loss",
+    0x0F: "change",
+}
+change_count = struct.unpack_from("<Q", data, 0)[0]
+group_count = struct.unpack_from("<H", data, 8)[0]
+group_id = struct.unpack_from("<I", data, 16)[0]
+nsid_count = struct.unpack_from("<I", data, 20)[0]
+group_change_count = struct.unpack_from("<Q", data, 24)[0]
+state = data[32]
+nsid = struct.unpack_from("<I", data, 36)[0]
+print(f"ana_change_count={change_count}")
+print(f"ana_group_count={group_count}")
+print(f"ana_group_id={group_id}")
+print(f"ana_nsid_count={nsid_count}")
+print(f"ana_group_change_count={group_change_count}")
+print(f"ana_state=0x{state:02x} {state_names.get(state, 'unknown')}")
+print(f"ana_nsid={nsid}")
+if group_count != 1:
+    raise SystemExit(f"ANA group count={group_count}, want 1")
+if group_id != 1:
+    raise SystemExit(f"ANA group id={group_id}, want 1 for current single-group model")
+if nsid_count != 1:
+    raise SystemExit(f"ANA NSID count={nsid_count}, want 1")
+if nsid != want_nsid:
+    raise SystemExit(f"ANA NSID={nsid}, want {want_nsid}")
+if state not in state_names:
+    raise SystemExit(f"ANA state=0x{state:02x} is not recognized")
+PY
+}
+
+summary_value() {
+  local key="$1"
+  local path="$2"
+  awk -F= -v key="$key" '$1 == key {value = substr($0, length(key) + 2)} END {print value}' "$path"
+}
+
+parse_id_ctrl_oaes() {
+  local bin="$1"
+  python3 - "$bin" <<'PY'
+import struct
+import sys
+data = open(sys.argv[1], "rb").read()
+if len(data) < 96:
+    raise SystemExit(f"Identify Controller payload too short: {len(data)} bytes, want at least 96")
+print(struct.unpack_from("<I", data, 92)[0])
+PY
+}
+
+capture_ana_snapshot() {
+  local label="$1"
+  local dev="$2"
+
+  sudo nvme id-ctrl "$dev" -b >"$ARTIFACT_DIR/nvme-id-ctrl.${label}.bin" 2>"$ARTIFACT_DIR/nvme-id-ctrl.${label}.stderr"
+  parse_id_ctrl_oaes "$ARTIFACT_DIR/nvme-id-ctrl.${label}.bin" >"$ARTIFACT_DIR/nvme-id-ctrl.${label}.oaes"
+  sudo nvme get-log "$dev" -i 0x0c -l 40 -b \
+    >"$ARTIFACT_DIR/nvme-ana-log.${label}.bin" \
+    2>"$ARTIFACT_DIR/nvme-ana-log.${label}.stderr"
+  summarize_ana_log "$ARTIFACT_DIR/nvme-ana-log.${label}.bin" "$ARTIFACT_DIR/nvme-ana-log.${label}.summary"
+}
+
 capture_ops_cluster() {
   local label="$1"
   "${BIN_DIR}/sw-block" ops cluster --master-api "$MASTER_ADDR" -o json \
@@ -514,6 +589,18 @@ write_summary "before_nsid=${before_nsid}"
 write_summary "before_addrs=${before_addrs}"
 map_dev="$(wait_grouped_device)"
 log "nvme_namespace_device=${map_dev}"
+capture_ana_snapshot before-failover "$map_dev"
+before_oaes="$(cat "$ARTIFACT_DIR/nvme-id-ctrl.before-failover.oaes")"
+before_ana_change_count="$(summary_value ana_change_count "$ARTIFACT_DIR/nvme-ana-log.before-failover.summary")"
+before_ana_state="$(summary_value ana_state "$ARTIFACT_DIR/nvme-ana-log.before-failover.summary")"
+write_summary "oaes_raw_before=${before_oaes}"
+if (( (before_oaes & 2048) != 0 )); then
+  write_summary "oaes_ana_change_notice_advertised=true"
+else
+  write_summary "oaes_ana_change_notice_advertised=false"
+fi
+write_summary "ana_log_change_count_before=${before_ana_change_count}"
+write_summary "ana_log_state_before=${before_ana_state}"
 
 log "mkfs/mount NVMe multipath namespace"
 sudo mkfs.ext4 -F "$map_dev" >"$ARTIFACT_DIR/mkfs.log" 2>&1
@@ -614,6 +701,16 @@ write_summary "after_ready_true=${after_ready_true}"
 write_summary "after_path_count=${after_path_count}"
 write_summary "after_multipath_observed=${after_multipath_observed}"
 write_summary "after_addrs=${after_addrs}"
+capture_ana_snapshot after-failover "$map_dev"
+after_ana_change_count="$(summary_value ana_change_count "$ARTIFACT_DIR/nvme-ana-log.after-failover.summary")"
+after_ana_state="$(summary_value ana_state "$ARTIFACT_DIR/nvme-ana-log.after-failover.summary")"
+write_summary "ana_log_change_count_after=${after_ana_change_count}"
+write_summary "ana_log_state_after=${after_ana_state}"
+if [[ -n "${before_ana_change_count:-}" && -n "${after_ana_change_count:-}" ]] && (( after_ana_change_count > before_ana_change_count )); then
+  write_summary "ana_log_change_count_advanced=true"
+else
+  write_summary "ana_log_change_count_advanced=false"
+fi
 sleep 3
 
 log "verify mounted workload after failover"
@@ -622,6 +719,7 @@ sudo dd if=/dev/urandom of="$MOUNT_DIR/post.bin" bs=4096 count=64 status=none
 sync
 sudo sha256sum "$MOUNT_DIR/post.bin" | tee "$ARTIFACT_DIR/post.sha256"
 sudo sha256sum -c "$ARTIFACT_DIR/post.sha256" | tee "$ARTIFACT_DIR/post-check.log"
+write_summary "mounted_io_after_notice=ok"
 
 log "unmount"
 sudo umount "$MOUNT_DIR"

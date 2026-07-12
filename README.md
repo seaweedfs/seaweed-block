@@ -36,7 +36,8 @@ This is an **alpha** product path for supported lab clusters, not production.
 | Actionable read-only CRD status + Events | Available | Bounded SwBlockVolume finalizer lifecycle | Beta candidate |
 | Returned-replica ACK eligibility executor | Beta candidate | Returned-replica failback runtime | Source-gated |
 | Returned-replica rebuild traffic | Planned | Frontend publication after failback | Planned |
-| NVMe/TCP CSI multipath + mounted path-loss lab path | Gated | Backup/snapshot/restore | Planned |
+| NVMe/TCP CSI multipath + backend write batching | Source-gated | Backup/snapshot/restore | Planned |
+| WAL multi-block record opt-in | Source-gated | WAL format default change | Not claimed |
 | Production SLO/performance claims | Not claimed | Hosted production UI | Not claimed |
 
 ## What You Can Do Today
@@ -74,9 +75,19 @@ This is an **alpha** product path for supported lab clusters, not production.
   CSI protocol selection, Kubernetes CSI multipath attach for one NQN/NSID with
   multiple NVMe frontend paths, one-path-loss status honesty, mounted pod
   write/read after one observed path loss, mounted pod write/read after the
-  removed path is restored, repeated stage/unstage residue checks, and a
-  bounded writer/reader soak. This is a lab gate, not a broad NVMe
-  compatibility or performance claim.
+  removed path is restored, multi-volume mounted path isolation, bounded
+  multi-volume path churn, repeated stage/unstage residue checks, a bounded
+  writer/reader soak, a baseline over the configured 100GbE TCP frontend
+  address, a source-gated CSI-node reconnect owner contract, and a live
+  host-path reconnect gate for scoped `nvme disconnect -d` path loss, plus a
+  live desired path-set replacement gate where CSI-node connects the new
+  desired NVMe path and prunes the stale old host path without remounting the
+  pod, and a durable backend full-block write-batching gate with
+  product-owned `/status/durable` counters. The source-gated WAL multi-block
+  record opt-in has mounted profile and restart/recovery compatibility evidence,
+  but remains default-off. This is a
+  supported-lab source-gated claim, not a broad NVMe
+  compatibility, RoCE/NVMe-RDMA, production HA, or performance/SLO claim.
 - Replay support bundles offline.
 
 These are narrow alpha claims tied to documented gates. See
@@ -96,7 +107,9 @@ These are narrow alpha claims tied to documented gates. See
   and source-gated until a release smoke validates it on published images.
 - Transparent Kubernetes node-loss failover without pod recreate.
 - Broad NVMe/RoCE compatibility, performance/SLO, or transparent failover
-  parity beyond the documented supported-lab gates.
+  parity beyond the documented supported-lab gates. The CSI-node reconnect
+  owner, host-path reconnect gate, desired path-set replacement gate, and
+  stale path pruning gate exist only as source-gated supported-lab evidence.
 - Broad distro/kernel/initiator compatibility.
 - Upgrade or rollback execution. The status layer can report install drift, but
   it does not run Helm or kubectl mutations.
@@ -148,7 +161,9 @@ The v0.6 returned-replica ACK eligibility executor path likewise requires
 matching images published from the Phase 54 release commit and must be validated
 with the release smoke before it is marked shipped.
 The returned-replica failback runtime added after v0.6 is source-gated and
-requires a future release smoke before it becomes a public image claim.
+requires a future release smoke before it becomes a public image claim. The
+NVMe/TCP supported-lab path is also source-gated until matching `seaweed-block`
+and `seaweed-block-csi` images are published and pass the NVMe release smoke.
 
 Mutable `:alpha` is a smoke/demo tag only; it can drift from the source tree.
 
@@ -208,6 +223,8 @@ hostPath residue.
 - [Kubernetes quickstart](docs/quickstart-kubernetes.md) - first install and PVC.
 - [User capabilities](docs/user-capabilities.md) - detailed current behavior.
 - [Release notes](docs/releases/README.md) - exact validated claims and evidence.
+- [NVMe/TCP supported-lab claim](docs/releases/nvme-tcp-supported-lab.md) -
+  source-gated NVMe evidence, release-smoke boundary, and non-claims.
 - [Roadmap](docs/roadmap.md) - public planning summary.
 - [Architecture](docs/architecture.md), [developer architecture](docs/developer-architecture.md),
   and [runtime state machines](docs/runtime-state-machines.md) - engineering

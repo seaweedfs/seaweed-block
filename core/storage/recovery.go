@@ -93,7 +93,7 @@ func recoverWAL(fd *os.File, sb *superblock, dm *dirtyMap) (recoveryResult, erro
 				continue
 			}
 			var payloadLen uint64
-			if entryType == walEntryWrite {
+			if entryType == walEntryWrite || entryType == walEntryWriteBatch {
 				payloadLen = uint64(lengthField)
 			}
 			entrySize := uint64(walEntryHeaderSize) + payloadLen
@@ -119,7 +119,21 @@ func recoverWAL(fd *os.File, sb *superblock, dm *dirtyMap) (recoveryResult, erro
 			case walEntryWrite:
 				blocks := entry.Length / sb.BlockSize
 				for i := uint32(0); i < blocks; i++ {
-					dm.put(entry.LBA+uint64(i), pos, entry.LSN, sb.BlockSize)
+					dm.putAt(entry.LBA+uint64(i), pos, i*sb.BlockSize, entry.LSN, sb.BlockSize)
+				}
+				result.EntriesReplayed++
+			case walEntryWriteBatch:
+				blocks := uint32(entry.Reserved)
+				if blocks == 0 || entry.Length != blocks*sb.BlockSize {
+					result.TornEntries++
+					break
+				}
+				for i := uint32(0); i < blocks; i++ {
+					lsn := entry.LSN + uint64(i)
+					if lsn <= checkpointLSN {
+						continue
+					}
+					dm.putAt(entry.LBA+uint64(i), pos, i*sb.BlockSize, lsn, sb.BlockSize)
 				}
 				result.EntriesReplayed++
 			case walEntryTrim:
@@ -134,8 +148,12 @@ func recoverWAL(fd *os.File, sb *superblock, dm *dirtyMap) (recoveryResult, erro
 			case walEntryBarrier:
 				// no data; skip
 			}
-			if entry.LSN > result.HighestLSN {
-				result.HighestLSN = entry.LSN
+			highestEntryLSN := entry.LSN
+			if entry.Type == walEntryWriteBatch && entry.Reserved > 0 {
+				highestEntryLSN = entry.LSN + entry.Reserved - 1
+			}
+			if highestEntryLSN > result.HighestLSN {
+				result.HighestLSN = highestEntryLSN
 			}
 			pos += entrySize
 		}

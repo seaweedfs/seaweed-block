@@ -1,0 +1,71 @@
+# Phase 130 CSI-node NVMe reconnect owner/trigger gate.
+#
+# This is a source/component gate. It proves the product has an explicit
+# CSI-node owner loop that invokes the mounted NVMe reconnect primitive from
+# refreshed publish evidence. It deliberately does not claim the full live
+# Kubernetes failover close gate; Phase 131 owns pod UID, mounted I/O, and CRD /
+# report / dashboard agreement under a real path-set change.
+
+name: nvme-k8s-reconnect-owner-chain
+timeout: 10m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "cd {{ product_root }} && bash scripts/run-phase130-nvme-reconnect-owner-gate.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-reconnect-owner"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-reconnect-owner/phase130-nvme-reconnect-owner-summary.txt"
+        pattern: "^phase130_nvme_k8s_reconnect_owner_status=ok$"
+        save_as: phase130_ok_count
+      - action: assert_greater
+        actual: "{{ phase130_ok_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-reconnect-owner/phase130-nvme-reconnect-owner-summary.txt"
+        pattern: "^reconnect_owner=csi-node$"
+        save_as: owner_count
+      - action: assert_greater
+        actual: "{{ owner_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-reconnect-owner/phase130-nvme-reconnect-owner-summary.txt"
+        pattern: "^owner_loop_invokes_reconnect=true$"
+        save_as: loop_count
+      - action: assert_greater
+        actual: "{{ loop_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-reconnect-owner/phase130-nvme-reconnect-owner-summary.txt"
+        pattern: "^live_k8s_failover_claim=false$"
+        save_as: live_nonclaim_count
+      - action: assert_greater
+        actual: "{{ live_nonclaim_count }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-reconnect-owner"
+        name: "remote-phases"
+        ignore_error: true

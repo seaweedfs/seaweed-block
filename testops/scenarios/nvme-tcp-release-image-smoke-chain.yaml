@@ -1,0 +1,139 @@
+name: nvme-tcp-release-image-smoke-chain
+timeout: 45m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+  release_image: ""
+  release_csi_image: ""
+  release_commit: ""
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        timeout: 5m
+        cmd: "helm status sw-block --namespace kube-system >/dev/null 2>&1 && helm uninstall sw-block --namespace kube-system --wait --timeout 240s || true; kubectl -n default delete pod sw-block-multi-reader-1 sw-block-multi-writer-1 --ignore-not-found=true --wait=true --timeout=120s || true; kubectl -n default delete pvc sw-block-multi-pvc-1 --ignore-not-found=true --wait=true --timeout=120s || true; kubectl delete storageclass sw-block-multi --ignore-not-found=true --wait=true --timeout=120s || true; kubectl -n default delete deploy -l app=sw-blockvolume --ignore-not-found=true --wait=false || true; kubectl -n kube-system get swblockvolumes.block.seaweedfs.com -o name 2>/dev/null | xargs -r -n1 kubectl -n kube-system patch --type=merge -p '{\"metadata\":{\"finalizers\":[]}}' >/dev/null 2>&1 || true; kubectl -n kube-system delete swblockvolumes.block.seaweedfs.com --all --ignore-not-found=true --wait=true --timeout=60s || true; kubectl -n kube-system delete swblockclusters.block.seaweedfs.com --all --ignore-not-found=true --wait=true --timeout=60s || true; kubectl delete validatingadmissionpolicy,validatingadmissionpolicybinding -l app.kubernetes.io/instance=sw-block --ignore-not-found=true >/dev/null 2>&1 || true; kubectl delete crd swblockclusters.block.seaweedfs.com swblockvolumes.block.seaweedfs.com swblockreplicaeligibilities.block.seaweedfs.com swblockreplicarebuilds.block.seaweedfs.com swblockreplicafailbacks.block.seaweedfs.com swblockfrontendpublications.block.seaweedfs.com --ignore-not-found=true --wait=true --timeout=60s >/dev/null 2>&1 || true; kubectl get pv --no-headers 2>/dev/null | awk '/sw-block-multi/ {print $1}' | xargs -r -n1 kubectl patch pv --type=merge -p '{\"metadata\":{\"finalizers\":[]}}' >/dev/null 2>&1 || true; kubectl get pv --no-headers 2>/dev/null | awk '/sw-block-multi/ {print $1}' | xargs -r kubectl delete pv --wait=false >/dev/null 2>&1 || true; sudo -n nvme disconnect-all >/dev/null 2>&1 || true; rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase117-nvme-release-image-smoke && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase117-nvme-release-image-smoke/gate"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+
+  - name: run_phase117_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 40m
+        cmd: "cd {{ product_root }} && bash scripts/run-phase117-nvme-release-image-smoke-gate.sh {{ product_root }}"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase117-nvme-release-image-smoke/gate"
+        env.SW_BLOCK_RELEASE_IMAGE: "{{ release_image }}"
+        env.SW_BLOCK_CSI_RELEASE_IMAGE: "{{ release_csi_image }}"
+        env.SW_BLOCK_RELEASE_COMMIT: "{{ release_commit }}"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase117-nvme-release-image-smoke/gate/phase117-nvme-release-image-smoke-summary.txt"
+        pattern: "^phase117_nvme_release_image_smoke_status=ok$"
+        save_as: gate_ok
+      - action: assert_greater
+        actual: "{{ gate_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase117-nvme-release-image-smoke/gate/phase117-nvme-release-image-smoke-summary.txt"
+        pattern: "^image_pair_commit_match=true$"
+        save_as: image_pair_match
+      - action: assert_greater
+        actual: "{{ image_pair_match }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase117-nvme-release-image-smoke/gate/phase117-nvme-release-image-smoke-summary.txt"
+        pattern: "^helm_values_protocol=nvme$"
+        save_as: protocol_ok
+      - action: assert_greater
+        actual: "{{ protocol_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase117-nvme-release-image-smoke/gate/phase117-nvme-release-image-smoke-summary.txt"
+        pattern: "^stage2_multipath_enabled=true$"
+        save_as: stage2_ok
+      - action: assert_greater
+        actual: "{{ stage2_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase117-nvme-release-image-smoke/gate/phase117-nvme-release-image-smoke-summary.txt"
+        pattern: "^writer_verified=true$"
+        save_as: writer_ok
+      - action: assert_greater
+        actual: "{{ writer_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase117-nvme-release-image-smoke/gate/phase117-nvme-release-image-smoke-summary.txt"
+        pattern: "^reader_verified=true$"
+        save_as: reader_ok
+      - action: assert_greater
+        actual: "{{ reader_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase117-nvme-release-image-smoke/gate/phase117-nvme-release-image-smoke-summary.txt"
+        pattern: "^volume_status=ready$"
+        save_as: status_ok
+      - action: assert_greater
+        actual: "{{ status_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase117-nvme-release-image-smoke/gate/phase117-nvme-release-image-smoke-summary.txt"
+        pattern: "^volume_reason=first_volume_verified$"
+        save_as: reason_ok
+      - action: assert_greater
+        actual: "{{ reason_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase117-nvme-release-image-smoke/gate/phase117-nvme-release-image-smoke-summary.txt"
+        pattern: "^nvme_path_count=2$"
+        save_as: path_count_ok
+      - action: assert_greater
+        actual: "{{ path_count_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase117-nvme-release-image-smoke/gate/phase117-nvme-release-image-smoke-summary.txt"
+        pattern: "^cleanup_status=ok$"
+        save_as: cleanup_ok
+      - action: assert_greater
+        actual: "{{ cleanup_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase117-nvme-release-image-smoke/gate/phase117-nvme-release-image-smoke-summary.txt"
+        pattern: "^failure_count=0$"
+        save_as: failure_zero
+      - action: assert_greater
+        actual: "{{ failure_zero }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase117-nvme-release-image-smoke"
+        name: "remote-phases"
+        ignore_error: true

@@ -14,6 +14,7 @@ MASTER_PORT="${SW_BLOCK_MASTER_PORT_FORWARD_PORT:-}"
 CLEANUP_REQUESTED="${SW_BLOCK_MULTI_VOLUME_CLEANUP:-1}"
 MULTI_VOLUME_PROTOCOL="${SW_BLOCK_MULTI_VOLUME_PROTOCOL:-iscsi}"
 MULTI_VOLUME_NODE_SELECTOR="${SW_BLOCK_MULTI_VOLUME_NODE_SELECTOR:-}"
+MULTI_VOLUME_STAGE2_MULTIPATH="${SW_BLOCK_MULTI_VOLUME_STAGE2_MULTIPATH:-0}"
 
 MULTI_VOLUME_STATUS="ok"
 FAILED_PHASE=""
@@ -30,6 +31,13 @@ fi
 
 log() {
   printf '[multi-volume] %s\n' "$*" | tee -a "$ARTIFACT_DIR/run.log"
+}
+
+is_true() {
+  case "${1,,}" in
+    1|true|yes|on) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 require_cmd() {
@@ -128,6 +136,9 @@ render_storageclass() {
     if [[ "$MULTI_VOLUME_PROTOCOL" == "nvme" ]]; then
       echo "  sw-block.seaweedfs.com/protocol: \"nvme\""
       echo "  protocol: \"nvme\""
+    fi
+    if is_true "$MULTI_VOLUME_STAGE2_MULTIPATH"; then
+      echo "  stage2_multipath: \"true\""
     fi
     if kubectl -n "$NAMESPACE" get secret "$CHAP_SECRET_NAME" >/dev/null 2>&1; then
       echo "  csi.storage.k8s.io/node-stage-secret-name: \"$CHAP_SECRET_NAME\""
@@ -409,6 +420,7 @@ write_summary() {
     echo "namespace=$NAMESPACE"
     echo "storageclass=$STORAGECLASS_NAME"
     echo "protocol=$MULTI_VOLUME_PROTOCOL"
+    echo "stage2_multipath=$MULTI_VOLUME_STAGE2_MULTIPATH"
     echo "app_node_selector=${MULTI_VOLUME_NODE_SELECTOR:-none}"
     echo "requested_volume_count=$VOLUME_COUNT"
     echo "replication_factor=$REPLICATION_FACTOR"
@@ -444,6 +456,7 @@ log "artifact_dir=$ARTIFACT_DIR"
 log "namespace=$NAMESPACE"
 log "volume_count=$VOLUME_COUNT"
 log "protocol=$MULTI_VOLUME_PROTOCOL"
+log "stage2_multipath=$MULTI_VOLUME_STAGE2_MULTIPATH"
 log "app_node_selector=${MULTI_VOLUME_NODE_SELECTOR:-none}"
 log "master_port=$MASTER_PORT"
 

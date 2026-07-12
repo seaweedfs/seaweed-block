@@ -19,26 +19,26 @@ package storage
 //
 // What the contract guarantees (single-node):
 //
-//   1. Acked data (covered by a Sync that returned nil) survives
-//      both clean restart AND process kill. The kill case is verified
-//      by a simulated-crash test that drops the underlying file
-//      handle without going through Close — no implicit fsync, no
-//      housekeeping. The clean restart case is the standard
-//      Sync -> Close -> Open -> Recover round trip.
-//   2. Unacked data may disappear after restart but cannot corrupt
-//      acked data: any write whose LSN is > the recovered frontier
-//      is allowed to vanish; any LBA whose write completed before
-//      a successful Sync reads back identical bytes after Recover.
-//   3. Stable frontier (synced LSN) never goes backward across
-//      Sync calls within one process lifetime AND across
-//      Close+Recover.
-//   4. Recover is idempotent: calling it twice on the same on-disk
-//      state yields the same recovered LSN and the same readable
-//      contents.
-//   5. Boundaries() (R, S, H) reports current truth: what's durable,
-//      what WAL still retains, what's the newest write. The engine
-//      uses these to decide recovery class — but the storage must
-//      not interpret them itself.
+//  1. Acked data (covered by a Sync that returned nil) survives
+//     both clean restart AND process kill. The kill case is verified
+//     by a simulated-crash test that drops the underlying file
+//     handle without going through Close — no implicit fsync, no
+//     housekeeping. The clean restart case is the standard
+//     Sync -> Close -> Open -> Recover round trip.
+//  2. Unacked data may disappear after restart but cannot corrupt
+//     acked data: any write whose LSN is > the recovered frontier
+//     is allowed to vanish; any LBA whose write completed before
+//     a successful Sync reads back identical bytes after Recover.
+//  3. Stable frontier (synced LSN) never goes backward across
+//     Sync calls within one process lifetime AND across
+//     Close+Recover.
+//  4. Recover is idempotent: calling it twice on the same on-disk
+//     state yields the same recovered LSN and the same readable
+//     contents.
+//  5. Boundaries() (R, S, H) reports current truth: what's durable,
+//     what WAL still retains, what's the newest write. The engine
+//     uses these to decide recovery class — but the storage must
+//     not interpret them itself.
 //
 // What the contract does NOT cover:
 //
@@ -209,4 +209,12 @@ type LogicalStorage interface {
 	// Close releases any resources (file handles, fsync queues). After
 	// Close, only Recover is valid; Read/Write must error.
 	Close() error
+}
+
+// WriteBatcher is an optional LogicalStorage extension for contiguous
+// full-block write batches. Each block still receives its own LSN and recovery
+// entry; batching is only an execution optimization and must not change
+// per-LBA recovery semantics.
+type WriteBatcher interface {
+	WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error)
 }

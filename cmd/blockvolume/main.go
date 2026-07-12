@@ -81,6 +81,7 @@ type flags struct {
 	nvmeSubsysNQN string
 	nvmeNS        uint
 	nvmeTransport string
+	nvmeMaxH2C    uint
 	// External NVMe/TCP bind is explicit because the current target has no
 	// authentication. Phase 106 uses it for controlled Kubernetes cross-node
 	// gates; default installs remain loopback-only.
@@ -91,10 +92,12 @@ type flags struct {
 	// --durable-impl selects walstore or smartwal (default smartwal).
 	// --durable-blocks + --durable-blocksize are used on first-time
 	// storage create.
-	durableRoot      string
-	durableImpl      string // "smartwal" | "walstore"
-	durableBlocks    uint
-	durableBlockSize uint
+	durableRoot                          string
+	durableImpl                          string // "smartwal" | "walstore"
+	durableBlocks                        uint
+	durableBlockSize                     uint
+	durableWALMultiBlockRecords          bool
+	durableWALRecoveryTestDisableFlusher bool
 
 	// WAL retention window past checkpoint LSN. Zero = strict
 	// checkpoint-driven recycle. Non-zero = walstore relaxes the
@@ -157,11 +160,14 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.nvmeSubsysNQN, "nvme-subsysnqn", "", "NVMe subsystem NQN (required if --nvme-listen is set)")
 	fs.UintVar(&f.nvmeNS, "nvme-ns", 1, "NVMe namespace id (default 1)")
 	fs.StringVar(&f.nvmeTransport, "nvme-transport", "tcp", "NVMe-oF transport. Only \"tcp\" is implemented; \"rdma\"/RoCE is a future gated feature")
+	fs.UintVar(&f.nvmeMaxH2C, "nvme-max-h2c-data-length", 0, "NVMe/TCP MaxH2CDataLength in bytes. 0 preserves the target default")
 	fs.BoolVar(&f.allowExternalNVMeBind, "allow-external-nvme-bind", false, "allow NVMe/TCP to bind a non-loopback address; unauthenticated, intended only for explicit Kubernetes NVMe/TCP gates")
 	fs.StringVar(&f.durableRoot, "durable-root", "", "directory for persistent storage files; empty = memback (non-durable)")
 	fs.StringVar(&f.durableImpl, "durable-impl", "smartwal", "LogicalStorage impl: smartwal (default) or walstore; ignored unless --durable-root is set")
 	fs.UintVar(&f.durableBlocks, "durable-blocks", 2048, "number of blocks per volume on first create (ignored when opening existing)")
 	fs.UintVar(&f.durableBlockSize, "durable-blocksize", 4096, "block size in bytes on first create")
+	fs.BoolVar(&f.durableWALMultiBlockRecords, "durable-wal-multiblock-records", false, "enable experimental walstore multi-block WAL records; default false; requires --durable-impl=walstore")
+	fs.BoolVar(&f.durableWALRecoveryTestDisableFlusher, "durable-wal-recovery-test-disable-flusher", false, "test-only: stop walstore's automatic WAL checkpoint flusher so recovery gates can prove WAL replay; default false; requires --durable-root and --durable-impl=walstore")
 	fs.Uint64Var(&f.walRetentionLSNs, "wal-retention-lsns", 0,
 		"WAL retention window past checkpoint LSN (walstore only). "+
 			"Zero (default) preserves strict checkpoint-driven recycle. "+
@@ -205,6 +211,22 @@ func parseFlags(args []string) (flags, error) {
 	}
 	if _, _, err := parseReplicationAckProfile(f.replicationAck); err != nil {
 		return flags{}, err
+	}
+	if f.durableWALMultiBlockRecords {
+		if f.durableRoot == "" {
+			return flags{}, fmt.Errorf("--durable-wal-multiblock-records requires --durable-root")
+		}
+		if f.durableImpl != "walstore" {
+			return flags{}, fmt.Errorf("--durable-wal-multiblock-records requires --durable-impl=walstore")
+		}
+	}
+	if f.durableWALRecoveryTestDisableFlusher {
+		if f.durableRoot == "" {
+			return flags{}, fmt.Errorf("--durable-wal-recovery-test-disable-flusher requires --durable-root")
+		}
+		if f.durableImpl != "walstore" {
+			return flags{}, fmt.Errorf("--durable-wal-recovery-test-disable-flusher requires --durable-impl=walstore")
+		}
 	}
 	if f.iscsiCHAPUser == "" {
 		f.iscsiCHAPUser = os.Getenv("SW_BLOCK_ISCSI_CHAP_USERNAME")
@@ -262,6 +284,12 @@ func parseFlags(args []string) (flags, error) {
 		if err := enforceNVMeBindPolicy(f); err != nil {
 			return flags{}, err
 		}
+		if f.nvmeMaxH2C > uint(^uint32(0)) {
+			return flags{}, fmt.Errorf("--nvme-max-h2c-data-length=%d exceeds uint32", f.nvmeMaxH2C)
+		}
+		if err := nvme.ValidateMaxH2CDataLength(uint32(f.nvmeMaxH2C)); err != nil {
+			return flags{}, fmt.Errorf("--nvme-max-h2c-data-length=%d invalid: %w", f.nvmeMaxH2C, err)
+		}
 		// Symmetric with iSCSI auto-enable per QA checkpoint-7
 		// note: keep the two protocols' safe-default behavior
 		// identical so the closure report doesn't have to
@@ -270,6 +298,8 @@ func parseFlags(args []string) (flags, error) {
 			fmt.Fprintln(os.Stderr, "blockvolume: nvme enabled: t1-readiness auto-enabled")
 		}
 		f.enableT1Readiness = true
+	} else if f.nvmeMaxH2C != 0 {
+		return flags{}, fmt.Errorf("--nvme-max-h2c-data-length requires --nvme-listen")
 	}
 	return f, nil
 }
@@ -482,11 +512,13 @@ func run(f flags) int {
 	var durableProv *durable.DurableProvider
 	if f.durableRoot != "" {
 		cfg := durable.ProviderConfig{
-			Impl:             durable.ImplName(f.durableImpl),
-			StorageRoot:      f.durableRoot,
-			BlockSize:        int(f.durableBlockSize),
-			NumBlocks:        uint32(f.durableBlocks),
-			WALRetentionLSNs: f.walRetentionLSNs,
+			Impl:                          durable.ImplName(f.durableImpl),
+			StorageRoot:                   f.durableRoot,
+			BlockSize:                     int(f.durableBlockSize),
+			NumBlocks:                     uint32(f.durableBlocks),
+			WALRetentionLSNs:              f.walRetentionLSNs,
+			WALMultiBlockRecords:          f.durableWALMultiBlockRecords,
+			WALRecoveryTestDisableFlusher: f.durableWALRecoveryTestDisableFlusher,
 		}
 		dp, err := durable.NewDurableProvider(cfg, h.ProjectionView())
 		if err != nil {
@@ -878,12 +910,14 @@ func run(f flags) int {
 			probeProvider = &durableProbeProvider{provider: durableProv}
 		}
 		nvmeTarget = nvme.NewTarget(nvme.TargetConfig{
-			Listen:        f.nvmeListen,
-			SubsysNQN:     f.nvmeSubsysNQN,
-			VolumeID:      f.volumeID,
-			Provider:      prov,
-			ProbeProvider: probeProvider,
-			ControllerID:  nvmeControllerIDFromReplicaID(f.replicaID),
+			Transport:        nvme.Transport(f.nvmeTransport),
+			Listen:           f.nvmeListen,
+			SubsysNQN:        f.nvmeSubsysNQN,
+			VolumeID:         f.volumeID,
+			Provider:         prov,
+			ProbeProvider:    probeProvider,
+			ControllerID:     nvmeControllerIDFromReplicaID(f.replicaID),
+			MaxH2CDataLength: uint32(f.nvmeMaxH2C),
 			// Capacity from durable config (see iSCSI block above).
 			// frontendBlockSize / frontendVolumeSize are 0 on memback
 			// path; nvme HandlerConfig zero-value defaulting preserves

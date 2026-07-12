@@ -1,0 +1,62 @@
+# Phase 129 mounted NVMe restage contract gate.
+#
+# This is a source/component gate for the Kubernetes CSI path: when a mounted
+# NVMe staging path receives another NodeStageVolume call with refreshed
+# publish context, the node plugin must connect missing NVMe paths without
+# remounting or changing volume identity.
+
+name: nvme-k8s-mounted-restage-chain
+timeout: 10m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "cd {{ product_root }} && bash scripts/run-phase129-nvme-k8s-mounted-restage-gate.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-mounted-restage"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-mounted-restage/phase129-nvme-k8s-mounted-restage-summary.txt"
+        pattern: "^phase129_nvme_k8s_mounted_restage_status=ok$"
+        save_as: phase129_ok_count
+      - action: assert_greater
+        actual: "{{ phase129_ok_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-mounted-restage/phase129-nvme-k8s-mounted-restage-summary.txt"
+        pattern: "^mounted_nodestage_reconnects_missing_path=true$"
+        save_as: reconnect_contract_count
+      - action: assert_greater
+        actual: "{{ reconnect_contract_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-mounted-restage/phase129-nvme-k8s-mounted-restage-summary.txt"
+        pattern: "^automatic_k8s_reconnect_claim=false$"
+        save_as: automatic_nonclaim_count
+      - action: assert_greater
+        actual: "{{ automatic_nonclaim_count }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-mounted-restage"
+        name: "remote-phases"
+        ignore_error: true

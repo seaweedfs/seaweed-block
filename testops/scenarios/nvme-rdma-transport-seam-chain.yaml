@@ -1,0 +1,79 @@
+name: nvme-rdma-transport-seam-chain
+timeout: 20m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: run_phase118_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 15m
+        cmd: "cd {{ product_root }} && bash scripts/run-phase118-nvme-rdma-transport-seam-gate.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase118-nvme-rdma-transport-seam/gate"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase118-nvme-rdma-transport-seam/gate/phase118-nvme-rdma-transport-seam-summary.txt"
+        pattern: "^phase118_nvme_rdma_transport_seam_status=ok$"
+        save_as: gate_ok
+      - action: assert_greater
+        actual: "{{ gate_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase118-nvme-rdma-transport-seam/gate/phase118-nvme-rdma-transport-seam-summary.txt"
+        pattern: "^target_transport_seam_present=true$"
+        save_as: seam_present
+      - action: assert_greater
+        actual: "{{ seam_present }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase118-nvme-rdma-transport-seam/gate/phase118-nvme-rdma-transport-seam-summary.txt"
+        pattern: "^rdma_target_error_typed=true$"
+        save_as: typed_error
+      - action: assert_greater
+        actual: "{{ typed_error }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase118-nvme-rdma-transport-seam/gate/phase118-nvme-rdma-transport-seam-summary.txt"
+        pattern: "^blockvolume_rdma_public_refusal=true$"
+        save_as: public_refusal
+      - action: assert_greater
+        actual: "{{ public_refusal }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase118-nvme-rdma-transport-seam/gate/phase118-nvme-rdma-transport-seam-summary.txt"
+        pattern: "^rdma_listener_implemented=false$"
+        save_as: rdma_listener_not_claimed
+      - action: assert_greater
+        actual: "{{ rdma_listener_not_claimed }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase118-nvme-rdma-transport-seam/gate/phase118-nvme-rdma-transport-seam-summary.txt"
+        pattern: "^roce_claim_allowed=false$"
+        save_as: no_roce_claim
+      - action: assert_greater
+        actual: "{{ no_roce_claim }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase118-nvme-rdma-transport-seam"
+        name: "remote-phases"
+        ignore_error: true

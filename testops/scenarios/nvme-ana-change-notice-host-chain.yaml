@@ -1,0 +1,94 @@
+# Live host NVMe ANA Change Notice gate.
+#
+# This is the Phase 128 runner entry point. It runs the standalone mounted
+# NVMe/TCP failover gate under the Linux kernel nvme_async_event tracepoint and
+# requires a real host-observed ANA Change Notice AER.
+#
+# Expected invocation from sw-test-runner-standalone:
+#   swblock run \
+#     -env product_root=/tmp/seaweed_block \
+#     -env ssh_key=/path/to/testdev_key \
+#     testops/scenarios/nvme-ana-change-notice-host-chain.yaml
+
+name: nvme-ana-change-notice-host-chain
+timeout: 20m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-ana-host && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-ana-host"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+
+  - name: host_aer_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 15m
+        cmd: "cd {{ product_root }} && bash scripts/run-phase128-nvme-ana-change-notice-host-gate.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-ana-host"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-ana-host/phase128-nvme-ana-change-notice-host-summary.txt"
+        pattern: "^phase128_nvme_ana_change_notice_host_gate_status=ok$"
+        save_as: phase128_ok_count
+      - action: assert_greater
+        actual: "{{ phase128_ok_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-ana-host/phase128-nvme-ana-change-notice-host-summary.txt"
+        pattern: "^host_aer_observed=true$"
+        save_as: host_aer_observed_count
+      - action: assert_greater
+        actual: "{{ host_aer_observed_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-ana-host/phase128-nvme-ana-change-notice-host-summary.txt"
+        pattern: "^ana_log_change_count_advanced=true$"
+        save_as: ana_count_advanced_count
+      - action: assert_greater
+        actual: "{{ ana_count_advanced_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-ana-host/phase128-nvme-ana-change-notice-host-summary.txt"
+        pattern: "^mounted_io_after_notice=ok$"
+        save_as: mounted_io_ok_count
+      - action: assert_greater
+        actual: "{{ mounted_io_ok_count }}"
+        threshold: "0"
+
+  - name: collect_and_cleanup
+    always: true
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-ana-host"
+        name: "remote-phases"
+        ignore_error: true

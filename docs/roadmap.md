@@ -102,6 +102,38 @@ Seaweed Block can already demonstrate a narrow Kubernetes block-storage loop:
   live cross-node writer/reader gate against a routable NVMe/TCP target. This
   is still not a RoCE, performance/SLO, broad compatibility, or production HA
   claim.
+- NVMe/TCP write-path profiling is source-gated through target/backend/WAL
+  counters. The current 32KiB request shape is traced to the target-advertised
+  `MaxH2CDataLength`, not to WAL coalescing or a RoCE/RDMA path. A 64KiB
+  `MaxH2CDataLength` candidate is gated as explicit opt-in lab evidence. Under
+  that opt-in the target/backend request max stays at 64KiB and the next named
+  bottleneck is WAL append, not frontend request size. The append bucket is
+  paired with near-equal WAL encode cost; Phase 144 names
+  `wal_record_materialization_reduction` as the next narrow backend target.
+  Phase 145 removes one local batch-allocation seam without changing WAL format
+  or recovery semantics. Phase 146 measured that change as visible in the lab
+  profile, but it is still not a default or performance/SLO claim. The next
+  backend step selected by Phase 147 is a disabled-by-default multi-block WAL
+  record prototype. The current WAL format remains unchanged until local
+  encode/decode, dirty-read, recovery-split, and flusher-split tests pass.
+  Phase 148 closes that local correctness gate; the next step is profiling
+  record-count reduction before any runtime or Kubernetes opt-in. Phase 149
+  proves that reduction locally (`2048` encode ops to `128`) and keeps the next
+  step bounded to a disabled-by-default runtime opt-in. Phase 150 wires that
+  opt-in without changing defaults. Phase 151 proves the opt-in runs through the
+  mounted NVMe/TCP path and observes the multi-block record shape. Phase 152
+  proves mounted restart/recovery compatibility with hostPath persistence,
+  force-delete restart, and `recovered_lsn_after_restart=14545`. The opt-in
+  remains default-off and is not a performance/SLO, RoCE, or NVMe/RDMA claim.
+  Phase 153 documents the release boundary and lab-only opt-in shape without
+  changing the default WAL format. Phase 154 fixes the local diagnostic
+  `HeadLSN` bug where walstore's WAL byte-position metadata could leak into the
+  LSN boundary after recovery. The next narrow follow-up is mounted
+  confirmation of the same `/status/durable` boundary in the live K8s path.
+- Kubernetes NVMe/TCP mounted reconnect is source-gated through changed
+  desired path-set evidence: CSI-node can connect a newly published desired
+  NVMe path, prune the stale old host path for the same NQN, preserve pod
+  identity, and keep mounted I/O working.
 - Install drift status for current versus desired chart/app/image identity
   without upgrade execution.
 - CRD/RBAC status-writer conformance coverage for the failures that previously
@@ -575,6 +607,221 @@ Recommended order from here:
     reads after restore, and `SwBlockVolume.status`, report,
     operator-snapshot, and explain converge back to two observed NVMe paths and
     `Ready=True/first_volume_verified`, with zero cleanup residue.
+72. Phase 114: NVMe/TCP K8s Multi-Volume Mounted Path Isolation. **Closed
+    2026-06-30, runner PASS**
+    Extends the Phase 112/113 single-volume mounted path-loss/restore proof to
+    two independent RF=2 NVMe/TCP PVCs. When one generated blockvolume
+    deployment is scaled to zero, the affected volume reports
+    `blocked/nvme_multipath_path_missing` with one live host path, the
+    untouched volume remains `ready/first_volume_verified` with two live host
+    paths, both mounted pods keep their UIDs, both continue I/O, and there is
+    no cross-volume reason mix-up. After the removed deployment is restored,
+    both volumes return to `Ready=True/first_volume_verified` with two live
+    host paths and mounted I/O still works, with zero cleanup residue.
+73. Phase 115: NVMe/TCP Mounted Multi-Volume Path Churn Soak. **Closed
+    2026-06-30, runner PASS**
+    Extends Phase 114 from a one-shot multi-volume loss/restore proof to a
+    bounded churn proof: alternate path loss and restore across two mounted
+    RF=2 NVMe/TCP PVCs for multiple cycles, preserving mounted pod identity,
+    writer/reader I/O, volume identity, publish-target isolation, reason-code
+    isolation, two-path restoration, and zero cleanup residue.
+74. Phase 116: NVMe/TCP Supported-Lab Release Claim Packaging. **Closed
+    2026-06-30, docs PASS**
+    Convert the closed Phase 100-115 evidence into a user-facing supported-lab
+    claim: README/docs wording, feature/status matrix, release non-claims, and
+    a concise release-smoke plan that uses matching published
+    `seaweed-block`/`seaweed-block-csi` images when available. This is a
+    packaging and claim-boundary phase, not a new transport feature.
+75. Phase 117: NVMe/TCP Published-Image Release Smoke. **Active, gate
+    implemented; waiting for images**
+    Run the representative NVMe/TCP supported-lab smoke against matching
+    published `seaweed-block` and `seaweed-block-csi` images via
+    `scripts/run-phase117-nvme-release-image-smoke-gate.sh` /
+    `testops/scenarios/nvme-tcp-release-image-smoke-chain.yaml`. If images are
+    not available, this phase blocks as artifact-readiness, not as product
+    failure. Do not mark the NVMe/TCP path as a published-image release claim
+    until this smoke passes.
+76. Phase 118: NVMe/RDMA Transport Seam. **Implemented locally; QA pending**
+    Start the RoCE/NVMe-RDMA implementation track without making a false RoCE
+    claim. The NVMe target now has an explicit transport selector and listener
+    seam: TCP remains the default implemented path, RDMA returns a typed
+    unsupported error at the target layer, and `blockvolume
+    --nvme-transport=rdma` still refuses publicly until a real RDMA listener
+    lands.
+77. Phase 119: Mono RDMA Evidence And NVMe/RDMA Decision. **Closed
+    2026-07-02, evidence decision**
+    Use the current mono RDMA/VFS/RustVolume/NIXL work under
+    `C:\work\rdma\seaweed-mono-rdma-refresh` as read-only evidence before
+    adding more block RDMA code. That work proves real VFS/object acceleration
+    and NIXL-shaped object compatibility, but it is not an NVMe-oF/RDMA target
+    implementation. Phase 119 records the reusable components and performance
+    evidence, keeps RoCE/NVMe-RDMA as a non-claim, and chooses the conservative
+    next step: first run a block NVMe/TCP performance baseline to find the
+    actual bottleneck.
+78. Phase 120: NVMe/TCP Management-LAN Baseline. **Closed 2026-07-02,
+    QA PASS**
+    Add a supported-lab Kubernetes PVC gate that measures the current NVMe/TCP
+    path on the default Kubernetes InternalIP/LAN network. The passing run used
+    `192.168.1.181:4420` and recorded sequential write/read MiB/s plus
+    small-write IOPS. This is a functional/default-network baseline, not the
+    authoritative 100GbE performance baseline. It keeps explicit non-claims for
+    RoCE, NVMe/RDMA, performance SLO, GPU/cuObject, NIXL, broad compatibility,
+    and published-image support.
+79. Phase 121: Data-Plane Address Capability. **Closed 2026-07-02,
+    QA PASS**
+    Mirrors the Rust volume RDMA pattern before rerunning performance gates:
+    data-plane addresses are explicit, queryable, and surfaced as evidence
+    instead of inferred from Kubernetes InternalIP. The product now carries
+    per-node `frontendIP` / `frontendNetworkClass`, renders `data_addr` on the
+    configured data-plane IP while keeping `ctrl_addr` on management/InternalIP,
+    and surfaces the management/frontend distinction in status evidence. The
+    gate proves `192.168.1.x` is not reused as the performance target and keeps
+    RoCE/NVMe-RDMA unsupported.
+80. Phase 122: NVMe/TCP 100GbE Live Baseline. **Closed 2026-07-03,
+    QA PASS**
+    Re-ran the Phase 120 performance shape using the Phase 121 data-plane
+    address model. The live publish target was `10.0.0.1:4420` with
+    `publish_target_network_class=100gbe_tcp`, route device `enp1s0np0`,
+    sequential write `115.11 MiB/s`, sequential read `250.98 MiB/s`, and
+    small-write `606.64 IOPS`. This is a baseline, not a performance/SLO
+    claim. The gate also fixed the ClusterEvidence gRPC wire path so
+    `frontend_ip` and `frontend_network_class` survive `blockmaster ->
+    sw-block ops`.
+81. Phase 123: NVMe/TCP Performance Bottleneck Triage. **Closed 2026-07-03,
+    QA PASS**
+    Added an independent `iperf3` comparator over the same `10.0.0.x`
+    data-plane route and proved the network is not the immediate bottleneck:
+    `network_baseline_mibps=4106.55` while mounted Block NVMe/TCP read/write
+    were `248.06 MiB/s` / `127.74 MiB/s`. The gate names the remaining
+    bottleneck as `unknown` because target/backend/Kubernetes/test-shape are
+    not yet separated, and recommends `phase124_target_backend_shape_split`.
+82. Phase 124: NVMe/TCP Target / Backend / Shape Split. **Closed 2026-07-03,
+    QA PASS**
+    Compared the current Block NVMe/TCP mounted path with a same-shape
+    Kubernetes `local-path` PVC on the same app node. The network baseline was
+    `3769.28 MiB/s`; local-path write/read were `324.87 MiB/s` /
+    `235.29 MiB/s`; Block NVMe/TCP write/read were `118.74 MiB/s` /
+    `273.50 MiB/s`. The read path is not behind local-path, but write is only
+    `0.366x` local-path, so the next bottleneck class is
+    `block_target_or_backend`.
+83. Phase 125: Block NVMe/TCP Write-Path Profile. **Closed 2026-07-03,
+    QA PASS**
+    Profiled a 512MiB write over the configured `10.0.0.x` NVMe/TCP path and a
+    same-node `local-path` comparator. Block write was `174.33 MiB/s` while
+    local-path write was `1147.98 MiB/s` (`0.152x`), but Block read was
+    `544.10 MiB/s` versus local-path read `513.54 MiB/s` (`1.060x`). Coarse
+    pod-level CPU samples did not show target CPU saturation
+    (`blockvolume_cpu_peak_percent=0.80`), so the next direction is backend /
+    sync write instrumentation.
+84. Phase 126: Block NVMe/TCP Backend Write Instrumentation. **Closed
+    2026-07-03, QA PASS**
+    Added product-owned write-path timing/counter evidence on
+    `/status/durable` and the Phase 126 gate. The same 512MiB mounted
+    NVMe/TCP shape measured Block write `177.72 MiB/s` versus local-path write
+    `1115.47 MiB/s` (`0.159x`), with target/backend write bytes matching
+    `588075008`. Cumulative operation timing localized the immediate write
+    cost to backend writes (`backend_write_duration_ms=33186`,
+    `backend_sync_duration_ms=73`), not frontend network or sync/flush.
+85. Phase 127: NVMe ANA Change Notice. **Closed 2026-07-03,
+    source/component PASS**
+    Closed the source/component NVMe protocol gap before write-path
+    optimization: OAES ANA Change Notice is advertised only when an ANA
+    provider exists, and a parked Async Event Request completes as
+    Notice/ANA Change/ANA log page when the provider's ANA change count
+    advances. No-provider OAES remains zero and the single-slot AER limit is
+    still enforced.
+86. Phase 128: NVMe ANA Change Notice Host Gate. **Closed 2026-07-03,
+    runner PASS**
+    Proved that a real Linux NVMe/TCP initiator receives the ANA Change Notice
+    during standalone r1->r2 failover. The m02 host tracepoint
+    `nvme:nvme_async_event` observed `NVME_AEN=0x0c0302`, decoding to
+    Notice / ANA Change / ANA log page; OAES ANA Change Notice was advertised,
+    the ANA log change count advanced from `4294967297` to `8589934593`, host
+    path state refreshed, mounted I/O remained correct, and cleanup was clean.
+87. Phase 129: Kubernetes NVMe Mounted Restage Contract. **Closed 2026-07-03,
+    runner PASS**
+    Closed the necessary CSI node-side restage contract: if `NodeStageVolume`
+    is invoked again for an already-mounted NVMe staging path, the node plugin
+    refreshes publish context, connects missing NVMe paths for the same NQN,
+    rejects mounted NQN mismatch, and does not remount or reformat. This phase
+    deliberately does not claim an automatic Kubernetes reconnect trigger.
+88. Phase 130: Kubernetes NVMe Reconnect Owner / Trigger Gate. **Closed
+    2026-07-04, runner PASS**
+    Added the source/component owner contract: an opt-in CSI-node loop refreshes
+    mounted NVMe publish evidence and invokes the bounded reconnect path. It is
+    disabled by default and does not itself claim live Kubernetes failover.
+89. Phase 131: Kubernetes NVMe Host-Path Reconnect Live Gate. **Closed
+    2026-07-04, runner PASS**
+    Proved a mounted RF=2 NVMe/TCP PVC survives scoped host path loss:
+    `nvme disconnect -d <controller>` removes one path, CSI-node reconnects it,
+    pod UID/I/O are preserved, and CRD/report/dashboard agree.
+90. Phase 132: Kubernetes NVMe Desired Path-Set Change Gate. **Closed
+    2026-07-04, runner PASS**
+    Proved changed control-plane desired path evidence: a generated frontend
+    address is replaced, `SwBlockVolume.status.nvme.nvmeAddrs` changes
+    old-to-new, CSI-node connects the new desired path, and mounted I/O
+    continues. The run exposed stale old host-path residue.
+91. Phase 133: Kubernetes NVMe Stale Path Pruning Close Gate. **Closed
+    2026-07-04, runner PASS**
+    Closed the Phase 132 residue: after desired path replacement, CSI-node
+    connects the new desired path and prunes the stale old host path for the
+    same NQN using scoped controller disconnects, with pod UID/I/O preserved
+    and cleanup clean.
+92. Phase 134: Durable Backend Write Batching. **Closed 2026-07-04,
+    runner PASS**
+    Returned to the Phase 126 backend-write bottleneck with a correctness-first
+    batch seam. Contiguous full-block writes now use bounded storage
+    `WriteBatch` calls, `walstore` performs a real batch WAL append path while
+    keeping one WAL record/LSN per block, and `/status/durable` exposes
+    internal storage-call/batch counters. The live NVMe/TCP gate observed
+    `backend_storage_write_blocks=28872`,
+    `backend_storage_write_calls=3634`,
+    `backend_storage_batch_calls=3613`, and clean cleanup. This is not a
+    performance/SLO or NVMe/RDMA claim.
+93. Phase 135: Post-Batch NVMe/TCP Write-Path Retriage. **Closed
+    2026-07-04, runner PASS**
+    Reran the comparable 512MiB mounted NVMe/TCP profile after batching.
+    Batch counters were active at scale
+    (`backend_storage_batch_calls=17953`,
+    `backend_storage_batch_blocks=143555`), but write throughput remained in
+    the same range as Phase 126 (`172.80 MiB/s` versus `177.72 MiB/s`) while
+    local-path write was `1075.63 MiB/s`. The live gate classified the
+    post-batch bottleneck as `backend_write` and recommends Phase 136
+    `wal_append_copy_checksum_profile`.
+94. Phase 136: WAL Append / Copy / Checksum Profile. **Closed 2026-07-04,
+    runner PASS**
+    Added product-owned `/status/durable` counters for WAL copy, record encode,
+    checksum, append/write-at, and dirty-map update. The comparable 512MiB
+    mounted NVMe/TCP gate kept backend batching active
+    (`backend_storage_batch_calls=17952`) and named `wal_encode` as the largest
+    backend-internal cost (`753ms`), with copy close behind (`593ms`). The next
+    evidence-backed phase is reducing WAL record encode/copy cost, not NVMe/RDMA
+    or a performance/SLO claim.
+95. Phase 137: Reduce WAL Record Encode / Copy Cost. **Closed 2026-07-05,
+    runner PASS**
+    Removed the extra pre-encode block copy and changed batch append to encode
+    records directly into the coalesced pending write buffer, while keeping the
+    WAL format and one-record-per-block LSN semantics unchanged. The live
+    512MiB gate reduced `wal_encode + wal_copy` from the Phase 136 baseline
+    `1346ms` to `363ms`; the next named bottleneck is `wal_append`, so Phase
+    138 should inspect WAL pwrite shape/coalescing.
+96. Phase 138: WAL WriteAt Shape Profile. **Closed 2026-07-05,
+    runner PASS**
+    Added product-owned append write-at shape counters:
+    calls/bytes/max/avg plus wrap count and padding bytes. The live 512MiB gate
+    showed `wal_append_writeat_calls=17979`,
+    `wal_append_writeat_avg_bytes=33013`, and
+    `wal_append_writeat_max_bytes=33072`, with only 8 wraps and 13KB padding.
+    The append bottleneck is therefore small-write/coalescing shape, not
+    wrap/padding or NVMe/RDMA.
+97. Phase 139: WAL Append Batch Shape Coalescing. **Closed 2026-07-06,
+    runner PASS**
+    Added upstream write-shape counters and proved the 33KB WAL write-at shape
+    is frontend-request-limited: `backend_write_request_max_bytes=32768`,
+    `backend_full_block_batch_max=8`, and
+    `wal_append_writeat_max_bytes=33072`. The WAL writer is coalescing the
+    batch it receives; the next evidence-backed phase is frontend/NVMe request
+    size profiling rather than speculative cross-request WAL buffering.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close
@@ -772,7 +1019,9 @@ control-plane path is mature.
    a supported-lab Kubernetes CSI NVMe multipath attach gate, and Phase 101
    path-status/stage-unstage/bounded-soak hardening. Broader host
    compatibility, RoCE, performance/SLO, and long-soak claims remain future
-   work.
+   work. Mono SeaweedFS RDMA/VFS/object evidence is tracked separately from
+   Seaweed Block NVMe/RDMA because RDMA memory movement and NVMe-oF/RDMA host
+   initiator compatibility are different protocol problems.
 
    The runtime should be managed as a cluster of explicit mini-protocols:
    authority/epoch, replication recovery, iSCSI, NVMe, CSI lifecycle, and

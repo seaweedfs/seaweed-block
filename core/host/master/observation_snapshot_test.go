@@ -62,6 +62,42 @@ func TestMasterObservationSnapshot_RF3HealthyReadOnly(t *testing.T) {
 	}
 }
 
+func TestMasterObservationSnapshot_SeparatesManagementAndFrontendNodeAddress(t *testing.T) {
+	h := newTestMaster(t, t.TempDir())
+	defer closeTestMaster(t, h)
+	if _, err := h.Lifecycle().Nodes.RegisterNode(lifecycle.NodeRegistration{
+		ServerID: "m01",
+		DataAddr: "10.0.0.181:19101",
+		CtrlAddr: "192.168.1.181:19102",
+		Labels: map[string]string{
+			lifecycle.KubernetesNodeNameLabel:   "m01",
+			lifecycle.ManagementIPLabel:         "192.168.1.181",
+			lifecycle.FrontendIPLabel:           "10.0.0.181",
+			lifecycle.FrontendNetworkClassLabel: "100gbe_tcp",
+		},
+		Pools: []lifecycle.StoragePool{{
+			PoolID:     "pool-m01",
+			TotalBytes: 1 << 30,
+			FreeBytes:  1 << 30,
+			BlockSize:  4096,
+		}},
+		SeenAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("register node: %v", err)
+	}
+
+	snapshot := h.ObservationSnapshot(time.Now().UTC())
+	if len(snapshot.Nodes) != 1 {
+		t.Fatalf("nodes=%d want 1: %+v", len(snapshot.Nodes), snapshot.Nodes)
+	}
+	node := snapshot.Nodes[0]
+	if node.InternalIP != "192.168.1.181" ||
+		node.FrontendIP != "10.0.0.181" ||
+		node.FrontendNetworkClass != "100gbe_tcp" {
+		t.Fatalf("node address evidence=%+v", node)
+	}
+}
+
 func TestMasterObservationSnapshot_MissingReplicaIsDegraded(t *testing.T) {
 	h := newTestMasterWithControllerConfig(t, t.TempDir(), authority.TopologyControllerConfig{
 		ExpectedSlotsPerVolume: 3,

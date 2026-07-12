@@ -44,6 +44,7 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/storage"
@@ -124,6 +125,8 @@ var errInvalidOffset = errors.New("durable: invalid (negative) offset")
 // "I/O before first-open".
 var errSyncBeforeOpen = errors.New("durable: sync before operational")
 
+const maxFullBlockBatchBlocks = 64
+
 // StorageBackend adapts a LogicalStorage into frontend.Backend.
 type StorageBackend struct {
 	storage   storage.LogicalStorage
@@ -142,6 +145,7 @@ type StorageBackend struct {
 	closed   bool
 	observer WriteObserver // optional; nil = no replication fan-out
 	writeAck WriteAckPolicy
+	profile  writeProfile
 }
 
 // NewStorageBackend constructs a backend. Starts NON-operational
@@ -232,6 +236,29 @@ func (b *StorageBackend) durableStatus(volumeID, path, impl string) VolumeStatus
 	b.mu.Unlock()
 	durableLSN, retainedLSN, headLSN := b.storage.Boundaries()
 	evidence, _ := b.opEvidence.Load().(string)
+	writeProfile := b.profile.snapshot()
+	if instrumented, ok := b.storage.(storage.WriteInstrumented); ok {
+		storageProfile := instrumented.WriteInstrumentation()
+		writeProfile.WALCopyOps = storageProfile.WALCopyOps
+		writeProfile.WALCopyBytes = storageProfile.WALCopyBytes
+		writeProfile.WALCopyDurationNanos = storageProfile.WALCopyDurationNanos
+		writeProfile.WALEncodeOps = storageProfile.WALEncodeOps
+		writeProfile.WALEncodeBytes = storageProfile.WALEncodeBytes
+		writeProfile.WALEncodeDurationNanos = storageProfile.WALEncodeDurationNanos
+		writeProfile.WALChecksumOps = storageProfile.WALChecksumOps
+		writeProfile.WALChecksumBytes = storageProfile.WALChecksumBytes
+		writeProfile.WALChecksumDurationNanos = storageProfile.WALChecksumDurationNanos
+		writeProfile.WALAppendOps = storageProfile.WALAppendOps
+		writeProfile.WALAppendBytes = storageProfile.WALAppendBytes
+		writeProfile.WALAppendDurationNanos = storageProfile.WALAppendDurationNanos
+		writeProfile.WALAppendWriteAtCalls = storageProfile.WALAppendWriteAtCalls
+		writeProfile.WALAppendWriteAtBytes = storageProfile.WALAppendWriteAtBytes
+		writeProfile.WALAppendWriteAtMaxBytes = storageProfile.WALAppendWriteAtMaxBytes
+		writeProfile.WALAppendWrapCount = storageProfile.WALAppendWrapCount
+		writeProfile.WALAppendPaddingBytes = storageProfile.WALAppendPaddingBytes
+		writeProfile.DirtyMapUpdateOps = storageProfile.DirtyMapUpdateOps
+		writeProfile.DirtyMapUpdateDurationNanos = storageProfile.DirtyMapUpdateDurationNanos
+	}
 	return VolumeStatus{
 		VolumeID:        volumeID,
 		Path:            path,
@@ -247,6 +274,7 @@ func (b *StorageBackend) durableStatus(volumeID, path, impl string) VolumeStatus
 		HeadLSN:         headLSN,
 		Evidence:        evidence,
 		Closed:          closed,
+		WriteProfile:    writeProfile,
 	}
 }
 
@@ -313,6 +341,7 @@ func (b *StorageBackend) Sync(ctx context.Context) error {
 	if err := b.gate(); err != nil {
 		return err
 	}
+	start := time.Now()
 	// T4b-5: if an observer is installed, delegate the FULL sync
 	// job — the observer (ReplicationVolume) owns both the local
 	// LogicalStorage.Sync call and the peer barriers fanned out
@@ -331,13 +360,18 @@ func (b *StorageBackend) Sync(ctx context.Context) error {
 	b.mu.Unlock()
 	if obs != nil {
 		_, _, walHead := b.storage.Boundaries()
-		return obs.Sync(ctx, walHead)
+		if err := obs.Sync(ctx, walHead); err != nil {
+			return err
+		}
+		b.profile.recordBackendSync(time.Since(start))
+		return nil
 	}
 	// No observer installed — observer-free path runs local sync only
 	// (T0 / bootstrap / single-replica dev configurations).
 	if _, err := b.storage.Sync(); err != nil {
 		return fmt.Errorf("durable: storage sync: %w", err)
 	}
+	b.profile.recordBackendSync(time.Since(start))
 	return nil
 }
 
@@ -371,7 +405,20 @@ func (b *StorageBackend) Write(ctx context.Context, offset int64, p []byte) (int
 	if len(p) == 0 {
 		return 0, nil
 	}
-	return b.writeBytes(ctx, offset, p)
+	b.profile.recordBackendWriteRequest(len(p))
+	start := time.Now()
+	n, err := b.writeBytes(ctx, offset, p)
+	if n > 0 {
+		b.profile.recordBackendWrite(n, time.Since(start))
+	}
+	return n, err
+}
+
+// RecordTargetWrite records a successful frontend-target write that reached
+// this durable backend. NVMe/TCP uses this to expose target-level write-path
+// evidence without importing durable internals into the transport package.
+func (b *StorageBackend) RecordTargetWrite(bytes int, d time.Duration) {
+	b.profile.recordTargetWrite(bytes, d)
 }
 
 // gate is the per-I/O precondition stack. Order matters:
@@ -471,6 +518,26 @@ func (b *StorageBackend) writeBytes(ctx context.Context, offset int64, p []byte)
 	for len(buf) > 0 {
 		lba := uint32(pos / bs)
 		inBlockOff := int(pos % bs)
+		b.mu.Lock()
+		obs := b.observer
+		policy := b.writeAck
+		b.mu.Unlock()
+		if _, ok := b.storage.(storage.WriteBatcher); ok && inBlockOff == 0 && len(buf) >= int(bs) && canBatchFullBlockRun(policy) {
+			fullBlocks := len(buf) / int(bs)
+			if fullBlocks > maxFullBlockBatchBlocks {
+				fullBlocks = maxFullBlockBatchBlocks
+			}
+			if fullBlocks > 1 {
+				written, err := b.writeFullBlockBatch(ctx, lba, buf[:fullBlocks*int(bs)], obs, policy)
+				total += written
+				buf = buf[written:]
+				pos += int64(written)
+				if err != nil {
+					return total, err
+				}
+				continue
+			}
+		}
 		available := int(bs) - inBlockOff
 		chunkLen := len(buf)
 		if chunkLen > available {
@@ -491,11 +558,6 @@ func (b *StorageBackend) writeBytes(ctx context.Context, offset int64, p []byte)
 			copy(block, existing)
 			copy(block[inBlockOff:], buf[:chunkLen])
 		}
-
-		b.mu.Lock()
-		obs := b.observer
-		policy := b.writeAck
-		b.mu.Unlock()
 		if obs == nil && policy == WriteAckRequireObserverAck {
 			return total, fmt.Errorf("%w: no write observer installed", ErrReplicationAckUnavailable)
 		}
@@ -504,33 +566,70 @@ func (b *StorageBackend) writeBytes(ctx context.Context, offset int64, p []byte)
 		if err != nil {
 			return total, fmt.Errorf("durable: write lba=%d: %w", lba, err)
 		}
-		// Replication fan-out (T4a-6 hook). Snapshot the observer under
-		// b.mu so a concurrent SetWriteObserver doesn't see us reading
-		// a stale pointer. Error is logged best-effort — peer layer
-		// degrades; the Write itself has already succeeded locally.
-		// G5-5 instrumentation: log every write hit to the observer
-		// hook so we can disambiguate "WriteObserver never wired" from
-		// "wired but fan-out fails downstream". obs==nil at write time
-		// indicates SetWriteObserver wasn't called BEFORE the iSCSI
-		// initiator started writing — a timing race in main.go.
-		if obs == nil {
-			log.Printf("durable: write observer NIL — replication fan-out skipped (lba=%d lsn=%d) — SetWriteObserver not yet wired",
-				lba, lsn)
-		} else {
-			log.Printf("durable: write observer dispatch lba=%d lsn=%d", lba, lsn)
-			if werr := obs.Observe(ctx, lba, lsn, block); werr != nil {
-				log.Printf("durable: replication fan-out failed lba=%d lsn=%d: %v",
-					lba, lsn, werr)
-				if policy == WriteAckRequireObserverAck {
-					return total + chunkLen, fmt.Errorf("%w: %w", ErrReplicationAckUnavailable, werr)
-				}
-			}
+		b.profile.recordBackendStorageWrite(1, false)
+		if err := b.observeWrite(ctx, lba, lsn, block, obs, policy); err != nil {
+			return total + chunkLen, err
 		}
 		total += chunkLen
 		buf = buf[chunkLen:]
 		pos += int64(chunkLen)
 	}
 	return total, nil
+}
+
+func canBatchFullBlockRun(policy WriteAckPolicy) bool {
+	return policy != WriteAckRequireObserverAck
+}
+
+func (b *StorageBackend) writeFullBlockBatch(ctx context.Context, startLBA uint32, p []byte, obs WriteObserver, policy WriteAckPolicy) (int, error) {
+	batcher, ok := b.storage.(storage.WriteBatcher)
+	if !ok {
+		return 0, fmt.Errorf("durable: write batch unsupported")
+	}
+	bs := b.blockSize
+	blockCount := len(p) / bs
+	blocks := make([][]byte, blockCount)
+	for i := range blocks {
+		blocks[i] = p[i*bs : (i+1)*bs]
+	}
+	lsns, err := batcher.WriteBatch(startLBA, blocks)
+	if len(lsns) > 0 {
+		b.profile.recordBackendStorageWrite(len(lsns), true)
+		b.profile.recordBackendFullBlockBatch(len(lsns))
+	}
+	for i, lsn := range lsns {
+		block := blocks[i]
+		lba := startLBA + uint32(i)
+		if obsErr := b.observeWrite(ctx, lba, lsn, block, obs, policy); obsErr != nil {
+			return (i + 1) * bs, obsErr
+		}
+	}
+	if err != nil {
+		return len(lsns) * bs, fmt.Errorf("durable: write batch lba=%d blocks=%d: %w", startLBA, blockCount, err)
+	}
+	if len(lsns) != blockCount {
+		return len(lsns) * bs, fmt.Errorf("durable: write batch lba=%d returned %d LSNs for %d blocks", startLBA, len(lsns), blockCount)
+	}
+	return len(p), nil
+}
+
+func (b *StorageBackend) observeWrite(ctx context.Context, lba uint32, lsn uint64, block []byte, obs WriteObserver, policy WriteAckPolicy) error {
+	// Replication fan-out (T4a-6 hook). Error is logged best-effort
+	// unless the ack policy requires observer acknowledgement.
+	if obs == nil {
+		log.Printf("durable: write observer NIL — replication fan-out skipped (lba=%d lsn=%d) — SetWriteObserver not yet wired",
+			lba, lsn)
+		return nil
+	}
+	log.Printf("durable: write observer dispatch lba=%d lsn=%d", lba, lsn)
+	if werr := obs.Observe(ctx, lba, lsn, block); werr != nil {
+		log.Printf("durable: replication fan-out failed lba=%d lsn=%d: %v",
+			lba, lsn, werr)
+		if policy == WriteAckRequireObserverAck {
+			return fmt.Errorf("%w: %w", ErrReplicationAckUnavailable, werr)
+		}
+	}
+	return nil
 }
 
 // Compile-time check that StorageBackend satisfies frontend.Backend.

@@ -103,6 +103,22 @@ func TestParseFlags_Stage2MultipathIsExplicitOptIn(t *testing.T) {
 	}
 }
 
+func TestParseFlags_NVMeReconnectOwnerIsExplicitOptIn(t *testing.T) {
+	f, err := parseFlags([]string{"--endpoint", "unix:///tmp/csi.sock", "--node-id", "node-a", "--master", "blockmaster:9333", "--nvme-reconnect-owner", "--nvme-reconnect-interval", "250ms"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if !f.nvmeReconnectOwner {
+		t.Fatal("nvme reconnect owner flag not set")
+	}
+	if f.nvmeReconnectInterval != 250*time.Millisecond {
+		t.Fatalf("interval=%v", f.nvmeReconnectInterval)
+	}
+	if _, err := parseFlags([]string{"--endpoint", "unix:///tmp/csi.sock", "--node-id", "node-a", "--nvme-reconnect-owner"}); err == nil {
+		t.Fatal("expected --nvme-reconnect-owner without --master to fail")
+	}
+}
+
 func TestParseFlags_RejectLoopbackPublishTargetsIsExplicitOptIn(t *testing.T) {
 	f, err := parseFlags([]string{"--endpoint", "unix:///tmp/csi.sock", "--node-id", "node-a", "--master", "blockmaster:9333", "--reject-loopback-publish-targets"})
 	if err != nil {

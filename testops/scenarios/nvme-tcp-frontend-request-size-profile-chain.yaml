@@ -1,0 +1,143 @@
+name: nvme-tcp-frontend-request-size-profile-chain
+timeout: 90m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        timeout: 5m
+        cmd: "helm status sw-block --namespace kube-system >/dev/null 2>&1 && helm uninstall sw-block --namespace kube-system --wait --timeout 240s || true; kubectl -n default delete pod sw-block-phase126-block-perf sw-block-phase126-local-perf --ignore-not-found=true --wait=true --timeout=60s || true; kubectl -n default delete pvc sw-block-phase126-block-pvc sw-block-phase126-local-pvc --ignore-not-found=true --wait=true --timeout=60s || true; kubectl delete storageclass sw-block-phase126-block --ignore-not-found=true --wait=true --timeout=60s || true; kubectl get pv --no-headers | awk '/sw-block-phase126/ {print $1}' | xargs -r -n1 kubectl patch pv --type=merge -p '{\"metadata\":{\"finalizers\":[]}}' >/dev/null 2>&1 || true; kubectl get pv --no-headers | awk '/sw-block-phase126/ {print $1}' | xargs -r kubectl delete pv --wait=false >/dev/null 2>&1 || true; kubectl -n kube-system get swblockvolumes.block.seaweedfs.com -o name 2>/dev/null | xargs -r -n1 kubectl -n kube-system patch --type=merge -p '{\"metadata\":{\"finalizers\":[]}}' >/dev/null 2>&1 || true; kubectl -n kube-system delete swblockvolumes.block.seaweedfs.com --all --ignore-not-found=true --wait=true --timeout=60s >/dev/null 2>&1 || true; kubectl -n kube-system delete swblockclusters.block.seaweedfs.com --all --ignore-not-found=true --wait=true --timeout=60s >/dev/null 2>&1 || true; kubectl delete validatingadmissionpolicy,validatingadmissionpolicybinding -l app.kubernetes.io/instance=sw-block --ignore-not-found=true >/dev/null 2>&1 || true; kubectl delete crd swblockclusters.block.seaweedfs.com swblockvolumes.block.seaweedfs.com swblockreplicaeligibilities.block.seaweedfs.com swblockreplicarebuilds.block.seaweedfs.com swblockreplicafailbacks.block.seaweedfs.com swblockfrontendpublications.block.seaweedfs.com --ignore-not-found=true --wait=true --timeout=60s >/dev/null 2>&1 || true; sudo -n nvme disconnect-all >/dev/null 2>&1 || true; rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase140-request-size && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase140-request-size"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+
+  - name: run_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 82m
+        cmd: "cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase140-request-size SW_BLOCK_PHASE140_SEQ_MIB=512 SW_BLOCK_PHASE125_FRONTEND_IP_MAP=m01=10.0.0.1,m02=10.0.0.3 SW_BLOCK_PHASE125_EXPECTED_ROUTE_DEV=enp1s0np0 SW_BLOCK_IMPORT_K3S_SSH_KEY=/opt/work/testdev_key bash scripts/run-phase140-frontend-request-size-profile-gate.sh {{ product_root }}"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+
+  - name: assert_summary
+    actions:
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase140-request-size/phase140-frontend-request-size-profile-summary.txt"
+        pattern: "^phase140_frontend_request_size_profile_status=ok$"
+        save_as: phase140_status_ok
+      - action: assert_greater
+        actual: "{{ phase140_status_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase140-request-size/phase140-frontend-request-size-profile-summary.txt"
+        pattern: "^unit_target_request_profile_passed=true$"
+        save_as: unit_passed
+      - action: assert_greater
+        actual: "{{ unit_passed }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase140-request-size/phase140-frontend-request-size-profile-summary.txt"
+        pattern: "^target_write_observed=true$"
+        save_as: target_observed
+      - action: assert_greater
+        actual: "{{ target_observed }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase140-request-size/phase140-frontend-request-size-profile-summary.txt"
+        pattern: "^backend_storage_batching_effective=true$"
+        save_as: batch_effective
+      - action: assert_greater
+        actual: "{{ batch_effective }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase140-request-size/phase140-frontend-request-size-profile-summary.txt"
+        pattern: "^nvme_tcp_max_h2c_data_length_bytes=32768$"
+        save_as: max_h2c
+      - action: assert_greater
+        actual: "{{ max_h2c }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase140-request-size/phase140-frontend-request-size-profile-summary.txt"
+        pattern: "^target_write_request_max_bytes=[1-9][0-9]*$"
+        save_as: target_request_max
+      - action: assert_greater
+        actual: "{{ target_request_max }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase140-request-size/phase140-frontend-request-size-profile-summary.txt"
+        pattern: "^backend_write_request_max_bytes=32768$"
+        save_as: backend_request_max
+      - action: assert_greater
+        actual: "{{ backend_request_max }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase140-request-size/phase140-frontend-request-size-profile-summary.txt"
+        pattern: "^backend_full_block_batch_max=8$"
+        save_as: batch_max
+      - action: assert_greater
+        actual: "{{ batch_max }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase140-request-size/phase140-frontend-request-size-profile-summary.txt"
+        pattern: "^frontend_request_size_owner=\\(host_nvme\\|target_limit\\|backend_limit\\|unknown\\)$"
+        save_as: owner_named
+      - action: assert_greater
+        actual: "{{ owner_named }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase140-request-size/phase140-frontend-request-size-profile-summary.txt"
+        pattern: "^phase140_shape_result=\\(host_limited\\|target_limited\\|backend_limited\\|tunable\\|unknown\\)$"
+        save_as: shape_result
+      - action: assert_greater
+        actual: "{{ shape_result }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase140-request-size/phase140-frontend-request-size-profile-summary.txt"
+        pattern: "^next_recommendation=phase141_"
+        save_as: recommendation_named
+      - action: assert_greater
+        actual: "{{ recommendation_named }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase140-request-size/phase140-frontend-request-size-profile-summary.txt"
+        pattern: "^cleanup_status=ok$"
+        save_as: cleanup_ok
+      - action: assert_greater
+        actual: "{{ cleanup_ok }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase140-request-size"
+        name: "remote-phases"
+        ignore_error: true

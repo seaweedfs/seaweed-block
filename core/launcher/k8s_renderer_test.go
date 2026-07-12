@@ -51,6 +51,8 @@ func TestG15d_K8sRenderer_RendersBlockVolumeDeploymentArgs(t *testing.T) {
 		"--nvme-listen=",
 		"--nvme-subsysnqn=",
 		"--nvme-ns=",
+		"--durable-wal-multiblock-records",
+		"--durable-wal-recovery-test-disable-flusher",
 	} {
 		if strings.Contains(raw, forbidden) {
 			t.Fatalf("iscsi manifest must not contain %q:\n%s", forbidden, raw)
@@ -58,6 +60,34 @@ func TestG15d_K8sRenderer_RendersBlockVolumeDeploymentArgs(t *testing.T) {
 	}
 	if strings.Contains(raw, "--status-addr=") {
 		t.Fatalf("status endpoint must be opt-in for generated manifests:\n%s", raw)
+	}
+}
+
+func TestPhase150_K8sRenderer_RendersWALMultiBlockOptIn(t *testing.T) {
+	manifests, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{
+		MasterAddr:           "m:9333",
+		WALMultiBlockRecords: true,
+	})
+	if err != nil {
+		t.Fatalf("RenderBlockVolumeDeployments: %v", err)
+	}
+	raw := string(manifests[0].YAML)
+	if !strings.Contains(raw, "--durable-wal-multiblock-records") {
+		t.Fatalf("manifest missing wal multiblock opt-in:\n%s", raw)
+	}
+}
+
+func TestPhase152_K8sRenderer_RendersWALRecoveryTestDisableFlusherOptIn(t *testing.T) {
+	manifests, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{
+		MasterAddr:                    "m:9333",
+		WALRecoveryTestDisableFlusher: true,
+	})
+	if err != nil {
+		t.Fatalf("RenderBlockVolumeDeployments: %v", err)
+	}
+	raw := string(manifests[0].YAML)
+	if !strings.Contains(raw, "--durable-wal-recovery-test-disable-flusher") {
+		t.Fatalf("manifest missing recovery-test disable-flusher opt-in:\n%s", raw)
 	}
 }
 
@@ -292,10 +322,27 @@ func TestG15d_K8sRenderer_RendersNVMeBlockVolumeArgs(t *testing.T) {
 	for _, forbidden := range []string{
 		"--iscsi-listen=",
 		"--iscsi-iqn=",
+		"--nvme-max-h2c-data-length=",
 	} {
 		if strings.Contains(raw, forbidden) {
 			t.Fatalf("nvme manifest must not contain %q:\n%s", forbidden, raw)
 		}
+	}
+}
+
+func TestPhase141_K8sRenderer_RendersNVMeMaxH2CCandidate(t *testing.T) {
+	plan := sampleWorkloadPlan()
+	plan.Protocol = "nvme"
+	manifests, err := RenderBlockVolumeDeployments(plan, K8sRenderConfig{
+		MasterAddr:           "m:9333",
+		NVMeMaxH2CDataLength: 65536,
+	})
+	if err != nil {
+		t.Fatalf("RenderBlockVolumeDeployments: %v", err)
+	}
+	raw := string(manifests[0].YAML)
+	if !strings.Contains(raw, "--nvme-max-h2c-data-length=65536") {
+		t.Fatalf("manifest missing NVMe H2C candidate:\n%s", raw)
 	}
 }
 

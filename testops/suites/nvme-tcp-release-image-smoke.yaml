@@ -1,0 +1,17 @@
+name: nvme-tcp-release-image-smoke-suite
+mode: chain
+
+# Phase 117 release-image gate.
+#
+# Required suite env:
+#   release_image=ghcr.io/seaweedfs/seaweed-block:sha-<commit>
+#   release_csi_image=ghcr.io/seaweedfs/seaweed-block-csi:sha-<same-commit>
+# Optional:
+#   release_commit=<commit>
+#
+# The scenario validates the published image pair, not source-built local
+# images, against the representative NVMe/TCP supported-lab path.
+
+scenarios:
+  - id: nvme-tcp-release-image-smoke
+    path: ../scenarios/nvme-tcp-release-image-smoke-chain.yaml

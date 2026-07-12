@@ -30,22 +30,22 @@ const defaultWALSlots = 65536
 // for reads — by construction the extent is current truth.
 //
 // Write path:
-//   1. read existing extent block (kept in memory for rollback)
-//   2. pwrite new data to extent
-//   3. compute dataCRC32
-//   4. append metadata record to ring (slot = LSN % capacity)
-//   5. on append failure: rollback extent to saved old data
+//  1. read existing extent block (kept in memory for rollback)
+//  2. pwrite new data to extent
+//  3. compute dataCRC32
+//  4. append metadata record to ring (slot = LSN % capacity)
+//  5. on append failure: rollback extent to saved old data
 //
 // Sync: one fsync of the file. Covers BOTH the extent pwrite and the
 // ring append since they share a file. After Sync returns, all
 // preceding writes' data + metadata are durable.
 //
 // Recovery:
-//   1. scan ring, decode valid records, sort by LSN
-//   2. compute last-writer-wins map (highest-LSN record per LBA)
-//   3. for each surviving record, verify the extent block's CRC
-//      against the record's dataCRC32; mismatch → skip (torn write)
-//   4. set nextLSN = highest valid LSN + 1
+//  1. scan ring, decode valid records, sort by LSN
+//  2. compute last-writer-wins map (highest-LSN record per LBA)
+//  3. for each surviving record, verify the extent block's CRC
+//     against the record's dataCRC32; mismatch → skip (torn write)
+//  4. set nextLSN = highest valid LSN + 1
 //
 // Concurrency: a single mutex guards bookkeeping (nextLSN, syncedLSN,
 // counters); the ring has its own mutex for slot writes. Writes for
@@ -224,6 +224,39 @@ func (s *Store) Write(lba uint32, data []byte) (uint64, error) {
 	}
 	s.bumpHead(lsn)
 	return lsn, nil
+}
+
+func (s *Store) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error) {
+	if len(blocks) == 0 {
+		return nil, nil
+	}
+	if uint64(startLBA)+uint64(len(blocks)) > uint64(s.hdr.NumBlocks) {
+		return nil, fmt.Errorf("smartwal: batch [%d,%d) out of range (max %d)", startLBA, uint64(startLBA)+uint64(len(blocks)), s.hdr.NumBlocks)
+	}
+	for i, data := range blocks {
+		if len(data) != int(s.hdr.BlockSize) {
+			return nil, fmt.Errorf("smartwal: batch block %d data size %d != block size %d", i, len(data), s.hdr.BlockSize)
+		}
+	}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil, errors.New("smartwal: WriteBatch after Close")
+	}
+	firstLSN := s.nextLSN
+	s.nextLSN += uint64(len(blocks))
+	s.mu.Unlock()
+
+	lsns := make([]uint64, 0, len(blocks))
+	for i, data := range blocks {
+		lsn := firstLSN + uint64(i)
+		if err := s.writeAt(startLBA+uint32(i), lsn, data, flagWrite); err != nil {
+			return lsns, err
+		}
+		s.bumpHead(lsn)
+		lsns = append(lsns, lsn)
+	}
+	return lsns, nil
 }
 
 // writeAt is the shared write path used by Write and ApplyEntry.

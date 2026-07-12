@@ -314,9 +314,16 @@ func (r *realNVMeUtil) Connect(ctx context.Context, addr, nqn string) error {
 	cmd := exec.CommandContext(ctx, "nvme", "connect", "-t", "tcp", "-a", host, "-s", port, "-n", nqn)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		if nvmeConnectAlreadyConnected(string(out)) {
+			return nil
+		}
 		return fmt.Errorf("nvme connect: %s: %w", string(out), err)
 	}
 	return nil
+}
+
+func nvmeConnectAlreadyConnected(out string) bool {
+	return strings.Contains(strings.ToLower(out), "already connected")
 }
 
 func (r *realNVMeUtil) Disconnect(ctx context.Context, nqn string) error {
@@ -332,12 +339,44 @@ func (r *realNVMeUtil) Disconnect(ctx context.Context, nqn string) error {
 	return nil
 }
 
+func (r *realNVMeUtil) DisconnectPath(ctx context.Context, controller string) error {
+	if controller == "" {
+		return fmt.Errorf("nvme controller is required for scoped disconnect")
+	}
+	cmd := exec.CommandContext(ctx, "nvme", "disconnect", "-d", controller)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		outStr := string(out)
+		if strings.Contains(outStr, "No such") || strings.Contains(outStr, "not found") {
+			return nil
+		}
+		return fmt.Errorf("nvme disconnect path: %s: %w", outStr, err)
+	}
+	return nil
+}
+
 func (r *realNVMeUtil) IsConnected(ctx context.Context, nqn string) (bool, error) {
 	doc, err := nvmeListSubsystems(ctx)
 	if err != nil {
 		return false, err
 	}
 	return nvmeSubsystemPathCount(doc, nqn) > 0, nil
+}
+
+func (r *realNVMeUtil) IsPathConnected(ctx context.Context, nqn, addr string) (bool, error) {
+	doc, err := nvmeListSubsystems(ctx)
+	if err != nil {
+		return false, err
+	}
+	return nvmeSubsystemHasPath(doc, nqn, addr), nil
+}
+
+func (r *realNVMeUtil) ListPaths(ctx context.Context, nqn string) ([]NVMeConnectedPath, error) {
+	doc, err := nvmeListSubsystems(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return nvmeSubsystemPaths(doc, nqn), nil
 }
 
 func (r *realNVMeUtil) GetDeviceByNQN(ctx context.Context, nqn string) (string, error) {
@@ -394,6 +433,82 @@ func nvmeSubsystemPathCount(doc any, nqn string) int {
 		}
 	}
 	return total
+}
+
+func nvmeSubsystemHasPath(doc any, nqn, addr string) bool {
+	host, port, err := splitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	for _, sub := range iterNVMeSubsystems(doc) {
+		if got, _ := sub["NQN"].(string); got != nqn {
+			continue
+		}
+		paths, _ := sub["Paths"].([]any)
+		for _, path := range paths {
+			pathMap, _ := path.(map[string]any)
+			rawAddr, _ := pathMap["Address"].(string)
+			if rawAddr == "" {
+				continue
+			}
+			fields := parseNVMeAddressFields(rawAddr)
+			if fields["traddr"] == host && fields["trsvcid"] == port {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func nvmeSubsystemPaths(doc any, nqn string) []NVMeConnectedPath {
+	var out []NVMeConnectedPath
+	for _, sub := range iterNVMeSubsystems(doc) {
+		if got, _ := sub["NQN"].(string); got != nqn {
+			continue
+		}
+		paths, _ := sub["Paths"].([]any)
+		for _, path := range paths {
+			pathMap, _ := path.(map[string]any)
+			rawAddr, _ := pathMap["Address"].(string)
+			fields := parseNVMeAddressFields(rawAddr)
+			addr := ""
+			if fields["traddr"] != "" && fields["trsvcid"] != "" {
+				addr = fields["traddr"] + ":" + fields["trsvcid"]
+			}
+			controller := nvmePathController(pathMap)
+			if addr == "" && controller == "" {
+				continue
+			}
+			out = append(out, NVMeConnectedPath{Addr: addr, Controller: controller})
+		}
+	}
+	return out
+}
+
+func nvmePathController(path map[string]any) string {
+	for _, key := range []string{"Name", "Controller", "Device"} {
+		raw, _ := path[key].(string)
+		if raw == "" {
+			continue
+		}
+		if strings.HasPrefix(raw, "/dev/") {
+			return raw
+		}
+		return "/dev/" + raw
+	}
+	return ""
+}
+
+func parseNVMeAddressFields(raw string) map[string]string {
+	out := map[string]string{}
+	for _, part := range strings.Split(raw, ",") {
+		key, value, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if !ok {
+			continue
+		}
+		out[strings.TrimSpace(key)] = strings.TrimSpace(value)
+	}
+	return out
 }
 
 func iterNVMeSubsystems(node any) []map[string]any {

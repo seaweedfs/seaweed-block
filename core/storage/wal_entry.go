@@ -5,14 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"time"
 )
 
 // WAL entry kinds.
 const (
-	walEntryWrite   = 0x01
-	walEntryTrim    = 0x02
-	walEntryBarrier = 0x03
-	walEntryPadding = 0xFF
+	walEntryWrite      = 0x01
+	walEntryTrim       = 0x02
+	walEntryBarrier    = 0x03
+	walEntryWriteBatch = 0x04
+	walEntryPadding    = 0xFF
 
 	// walEntryHeaderSize is the TOTAL fixed overhead per record. Layout:
 	//   prefix (30 bytes):
@@ -61,27 +63,89 @@ type walEntry struct {
 // bytes are CRC32 + EntrySize so a reader can detect torn writes by
 // verifying both fields.
 func (e *walEntry) encode() ([]byte, error) {
+	return e.encodeWithInstrumentation(nil)
+}
+
+func (e *walEntry) encodeWithInstrumentation(instr *writeInstrumentation) ([]byte, error) {
+	totalSize, err := e.encodedSize()
+	if err != nil {
+		return nil, err
+	}
+	buf := make([]byte, totalSize)
+	if err := e.encodeInto(buf, instr); err != nil {
+		return nil, err
+	}
+	return buf, nil
+}
+
+func (e *walEntry) appendEncoded(dst []byte, instr *writeInstrumentation) ([]byte, error) {
+	totalSize, err := e.encodedSize()
+	if err != nil {
+		return nil, err
+	}
+	start := len(dst)
+	dst = growWALRecordBuffer(dst, totalSize)
+	if err := e.encodeInto(dst[start:], instr); err != nil {
+		return nil, err
+	}
+	return dst, nil
+}
+
+func growWALRecordBuffer(dst []byte, n int) []byte {
+	newLen := len(dst) + n
+	if newLen <= cap(dst) {
+		return dst[:newLen]
+	}
+	newCap := cap(dst) * 2
+	if newCap < newLen {
+		newCap = newLen
+	}
+	next := make([]byte, newLen, newCap)
+	copy(next, dst)
+	return next
+}
+
+func (e *walEntry) encodedSize() (int, error) {
 	switch e.Type {
 	case walEntryWrite:
 		if len(e.Data) == 0 {
-			return nil, fmt.Errorf("%w: write entry with no data", errInvalidEntry)
+			return 0, fmt.Errorf("%w: write entry with no data", errInvalidEntry)
 		}
 		if uint32(len(e.Data)) != e.Length {
-			return nil, fmt.Errorf("%w: data len %d != Length %d", errInvalidEntry, len(e.Data), e.Length)
+			return 0, fmt.Errorf("%w: data len %d != Length %d", errInvalidEntry, len(e.Data), e.Length)
+		}
+	case walEntryWriteBatch:
+		if e.Reserved == 0 {
+			return 0, fmt.Errorf("%w: batch write entry with zero block count", errInvalidEntry)
+		}
+		if len(e.Data) == 0 {
+			return 0, fmt.Errorf("%w: batch write entry with no data", errInvalidEntry)
+		}
+		if uint32(len(e.Data)) != e.Length {
+			return 0, fmt.Errorf("%w: batch data len %d != Length %d", errInvalidEntry, len(e.Data), e.Length)
 		}
 	case walEntryTrim:
 		if len(e.Data) != 0 {
-			return nil, fmt.Errorf("%w: trim entry must have no data payload", errInvalidEntry)
+			return 0, fmt.Errorf("%w: trim entry must have no data payload", errInvalidEntry)
 		}
 	case walEntryBarrier:
 		if e.Length != 0 || len(e.Data) != 0 {
-			return nil, fmt.Errorf("%w: barrier entry must have no data", errInvalidEntry)
+			return 0, fmt.Errorf("%w: barrier entry must have no data", errInvalidEntry)
 		}
 	}
+	return walEntryHeaderSize + len(e.Data), nil
+}
 
-	totalSize := uint32(walEntryHeaderSize + len(e.Data))
-	buf := make([]byte, totalSize)
-
+func (e *walEntry) encodeInto(buf []byte, instr *writeInstrumentation) error {
+	start := time.Now()
+	totalSize, err := e.encodedSize()
+	if err != nil {
+		return err
+	}
+	if len(buf) < totalSize {
+		return fmt.Errorf("%w: encode buffer size %d < entry size %d", errInvalidEntry, len(buf), totalSize)
+	}
+	buf = buf[:totalSize]
 	le := binary.LittleEndian
 	off := 0
 	le.PutUint64(buf[off:], e.LSN)
@@ -97,14 +161,25 @@ func (e *walEntry) encode() ([]byte, error) {
 	le.PutUint32(buf[off:], e.Length)
 	off += 4
 	if len(e.Data) > 0 {
+		copyStart := time.Now()
 		copy(buf[off:], e.Data)
+		if instr != nil {
+			instr.recordWALCopy(len(e.Data), time.Since(copyStart))
+		}
 		off += len(e.Data)
 	}
+	checksumStart := time.Now()
 	checksum := crc32.ChecksumIEEE(buf[:off])
+	if instr != nil {
+		instr.recordWALChecksum(off, time.Since(checksumStart))
+	}
 	le.PutUint32(buf[off:], checksum)
 	off += 4
-	le.PutUint32(buf[off:], totalSize)
-	return buf, nil
+	le.PutUint32(buf[off:], uint32(totalSize))
+	if instr != nil {
+		instr.recordWALEncode(len(buf), time.Since(start))
+	}
+	return nil
 }
 
 // decodeWALEntry parses a record from buf and verifies its CRC and
@@ -133,7 +208,7 @@ func decodeWALEntry(buf []byte) (walEntry, error) {
 	off += 4
 
 	var dataLen int
-	if e.Type == walEntryWrite || e.Type == walEntryPadding {
+	if e.Type == walEntryWrite || e.Type == walEntryWriteBatch || e.Type == walEntryPadding {
 		dataLen = int(e.Length)
 	}
 	dataEnd := off + dataLen

@@ -101,13 +101,13 @@ func (r *WALStoreReader) Read(lba uint32) ([]byte, error) {
 	}
 	// WAL-recent first. Inline the same logic as WALStore.readFromWAL
 	// + readFromExtent, but operating against the read-only fd.
-	if walRelOff, _, _, ok := r.dm.get(uint64(lba)); ok {
-		return r.readFromWAL(walRelOff)
+	if walRelOff, dataOffset, _, _, ok := r.dm.get(uint64(lba)); ok {
+		return r.readFromWAL(walRelOff, dataOffset)
 	}
 	return r.readFromExtent(lba)
 }
 
-func (r *WALStoreReader) readFromWAL(walRelOff uint64) ([]byte, error) {
+func (r *WALStoreReader) readFromWAL(walRelOff uint64, dataOffset uint32) ([]byte, error) {
 	headerBuf := make([]byte, walEntryHeaderSize)
 	absOff := int64(r.sb.WALOffset + walRelOff)
 	if _, err := r.fd.ReadAt(headerBuf, absOff); err != nil {
@@ -117,8 +117,15 @@ func (r *WALStoreReader) readFromWAL(walRelOff uint64) ([]byte, error) {
 	if length == 0 {
 		return make([]byte, r.sb.BlockSize), nil
 	}
-	data := make([]byte, length)
-	if _, err := r.fd.ReadAt(data, absOff+int64(walEntryPrefixSize)); err != nil {
+	if dataOffset >= length {
+		return nil, fmt.Errorf("storage: OpenReadOnly WAL data offset %d >= length %d", dataOffset, length)
+	}
+	readLen := r.sb.BlockSize
+	if remaining := length - dataOffset; remaining < readLen {
+		readLen = remaining
+	}
+	data := make([]byte, readLen)
+	if _, err := r.fd.ReadAt(data, absOff+int64(walEntryPrefixSize)+int64(dataOffset)); err != nil {
 		return nil, fmt.Errorf("storage: OpenReadOnly WAL data: %w", err)
 	}
 	return data, nil

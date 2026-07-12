@@ -4,9 +4,9 @@
 // The serial session loop cannot block; AER handler MUST return
 // without emitting a CapsuleResp for the first AER (single-slot
 // parking). A second AER while the slot is parked returns
-// AsyncEventRequestLimitExceeded. T2 never produces an event,
-// so parked AERs never complete; they're released on admin
-// session close.
+// AsyncEventRequestLimitExceeded. Without an event source, parked AERs remain
+// pending until admin session close. ANA-backed event completion is covered by
+// admin_async_ana_test.go.
 package nvme_test
 
 import (

@@ -6,9 +6,10 @@ import "sync"
 // the WAL — used by readers to fetch unflushed data and by the
 // flusher to apply WAL records to the extent region.
 type dirtyEntry struct {
-	walOffset uint64
-	lsn       uint64
-	length    uint32
+	walOffset  uint64
+	dataOffset uint32
+	lsn        uint64
+	length     uint32
 }
 
 // dirtyShard is one independently-locked partition of the dirtyMap.
@@ -44,21 +45,25 @@ func newDirtyMap(numShards int) *dirtyMap {
 func (d *dirtyMap) shard(lba uint64) *dirtyShard { return &d.shards[lba&d.mask] }
 
 func (d *dirtyMap) put(lba, walOffset, lsn uint64, length uint32) {
+	d.putAt(lba, walOffset, 0, lsn, length)
+}
+
+func (d *dirtyMap) putAt(lba, walOffset uint64, dataOffset uint32, lsn uint64, length uint32) {
 	s := d.shard(lba)
 	s.mu.Lock()
-	s.m[lba] = dirtyEntry{walOffset: walOffset, lsn: lsn, length: length}
+	s.m[lba] = dirtyEntry{walOffset: walOffset, dataOffset: dataOffset, lsn: lsn, length: length}
 	s.mu.Unlock()
 }
 
-func (d *dirtyMap) get(lba uint64) (walOffset, lsn uint64, length uint32, ok bool) {
+func (d *dirtyMap) get(lba uint64) (walOffset uint64, dataOffset uint32, lsn uint64, length uint32, ok bool) {
 	s := d.shard(lba)
 	s.mu.RLock()
 	e, found := s.m[lba]
 	s.mu.RUnlock()
 	if !found {
-		return 0, 0, 0, false
+		return 0, 0, 0, 0, false
 	}
-	return e.walOffset, e.lsn, e.length, true
+	return e.walOffset, e.dataOffset, e.lsn, e.length, true
 }
 
 func (d *dirtyMap) delete(lba uint64) {
@@ -73,13 +78,13 @@ func (d *dirtyMap) delete(lba uint64) {
 //
 // Used by the flusher cleanup path to avoid the race where:
 //
-//   1. Flusher snapshots {LBA, oldLSN}.
-//   2. Concurrent Write() updates the entry to {LBA, newLSN}.
-//   3. Flusher writes oldLSN's data to extent.
-//   4. Flusher tries to clean up — without this guard, an
-//      unconditional delete by LBA would also drop the newer entry,
-//      leaving the new write unflushed AND invisible to subsequent
-//      reads (which would fall back to stale extent bytes).
+//  1. Flusher snapshots {LBA, oldLSN}.
+//  2. Concurrent Write() updates the entry to {LBA, newLSN}.
+//  3. Flusher writes oldLSN's data to extent.
+//  4. Flusher tries to clean up — without this guard, an
+//     unconditional delete by LBA would also drop the newer entry,
+//     leaving the new write unflushed AND invisible to subsequent
+//     reads (which would fall back to stale extent bytes).
 //
 // V2's flusher uses this same compare-then-delete pattern.
 func (d *dirtyMap) compareAndDelete(lba, expectedLSN uint64) bool {
@@ -95,10 +100,11 @@ func (d *dirtyMap) compareAndDelete(lba, expectedLSN uint64) bool {
 
 // snapshotEntry is one entry returned by snapshot().
 type snapshotEntry struct {
-	LBA       uint64
-	WALOffset uint64
-	LSN       uint64
-	Length    uint32
+	LBA        uint64
+	WALOffset  uint64
+	DataOffset uint32
+	LSN        uint64
+	Length     uint32
 }
 
 // snapshot copies all current entries lock-free for the caller. Each
@@ -112,7 +118,7 @@ func (d *dirtyMap) snapshot() []snapshotEntry {
 		s.mu.RLock()
 		for lba, e := range s.m {
 			out = append(out, snapshotEntry{
-				LBA: lba, WALOffset: e.walOffset, LSN: e.lsn, Length: e.length,
+				LBA: lba, WALOffset: e.walOffset, DataOffset: e.dataOffset, LSN: e.lsn, Length: e.length,
 			})
 		}
 		s.mu.RUnlock()

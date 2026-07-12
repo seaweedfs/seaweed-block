@@ -2721,6 +2721,96 @@ func TestOpsGenerateHelmValuesMultiNodeExternalNVMe(t *testing.T) {
 	}
 }
 
+func TestOpsGenerateHelmValuesMultiNodeNVMeFrontendIPMap(t *testing.T) {
+	oldRunCommand := opsGenerateHelmValuesRunCommand
+	opsGenerateHelmValuesRunCommand = fixtureCmdKubectl(map[string]string{
+		"kubectl get nodes -o wide --no-headers": cmdHelmNodeWide,
+	})
+	defer func() { opsGenerateHelmValuesRunCommand = oldRunCommand }()
+
+	outPath := filepath.Join(t.TempDir(), "values.yaml")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"ops", "generate-helm-values",
+		"--out", outPath,
+		"--replication-factor", "3",
+		"--protocol", "nvme",
+		"--frontend-ip-map", "m01=10.0.0.181,m02=10.0.0.184,tp01=10.0.0.188",
+		"--frontend-network-class", "100gbe_tcp",
+	}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	for _, want := range []string{
+		"network_mode=external-nvme",
+		"frontend_ip_map=m01=10.0.0.181,m02=10.0.0.184,tp01=10.0.0.188",
+		"frontend_network_class=100gbe_tcp",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("stdout missing %q:\n%s", want, stdout.String())
+		}
+	}
+	values, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"name: m01",
+		"internalIP: 192.168.1.181",
+		"managementIP: 192.168.1.181",
+		"frontendIP: 10.0.0.181",
+		"frontendNetworkClass: 100gbe_tcp",
+		"name: m02",
+		"internalIP: 192.168.1.184",
+		"managementIP: 192.168.1.184",
+		"frontendIP: 10.0.0.184",
+		"name: tp01",
+		"internalIP: 192.168.1.188",
+		"managementIP: 192.168.1.188",
+		"frontendIP: 10.0.0.188",
+	} {
+		if !strings.Contains(string(values), want) {
+			t.Fatalf("values missing %q:\n%s", want, values)
+		}
+	}
+}
+
+func TestOpsGenerateHelmValuesRejectsIncompleteFrontendIPMap(t *testing.T) {
+	oldRunCommand := opsGenerateHelmValuesRunCommand
+	opsGenerateHelmValuesRunCommand = fixtureCmdKubectl(map[string]string{
+		"kubectl get nodes -o wide --no-headers": cmdHelmNodeWide,
+	})
+	defer func() { opsGenerateHelmValuesRunCommand = oldRunCommand }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"ops", "generate-helm-values",
+		"--out", filepath.Join(t.TempDir(), "values.yaml"),
+		"--replication-factor", "3",
+		"--protocol", "nvme",
+		"--frontend-ip-map", "m01=10.0.0.181,m02=10.0.0.184",
+		"--frontend-network-class", "100gbe_tcp",
+	}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitInvalid {
+		t.Fatalf("exit=%d want invalid stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `--frontend-ip-map missing selected node "tp01"`) {
+		t.Fatalf("stderr=%s", stderr.String())
+	}
+}
+
+func TestNodeEvidenceFromWirePreservesFrontendAddress(t *testing.T) {
+	node := nodeEvidenceFromWire(&control.NodeEvidence{
+		NodeName:             "m01",
+		InternalIp:           "192.168.1.181",
+		FrontendIp:           "10.0.0.1",
+		FrontendNetworkClass: "100gbe_tcp",
+	})
+	if node.FrontendIP != "10.0.0.1" || node.FrontendNetworkClass != "100gbe_tcp" {
+		t.Fatalf("frontend address evidence dropped: %+v", node)
+	}
+}
+
 func TestOpsGenerateHelmValuesRestartPersistenceHostPath(t *testing.T) {
 	oldRunCommand := opsGenerateHelmValuesRunCommand
 	opsGenerateHelmValuesRunCommand = fixtureCmdKubectl(map[string]string{

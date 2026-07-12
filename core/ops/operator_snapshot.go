@@ -37,19 +37,21 @@ type OperatorClusterStatus struct {
 }
 
 type OperatorNodeStatus struct {
-	Name            string                 `json:"name"`
-	KubernetesNode  string                 `json:"kubernetes_node,omitempty"`
-	InternalIP      string                 `json:"internal_ip,omitempty"`
-	Schedulable     bool                   `json:"schedulable"`
-	Ready           bool                   `json:"ready"`
-	Status          string                 `json:"status,omitempty"`
-	ReasonCode      string                 `json:"reason_code,omitempty"`
-	LastHeartbeatAt time.Time              `json:"last_heartbeat_at,omitempty"`
-	ReplicaCount    int                    `json:"replica_count,omitempty"`
-	RequiredImages  []string               `json:"required_images,omitempty"`
-	MissingImages   []string               `json:"missing_images,omitempty"`
-	Conditions      []ObservationCondition `json:"conditions,omitempty"`
-	EvidenceRefs    []string               `json:"evidence_refs,omitempty"`
+	Name                 string                 `json:"name"`
+	KubernetesNode       string                 `json:"kubernetes_node,omitempty"`
+	InternalIP           string                 `json:"internal_ip,omitempty"`
+	FrontendIP           string                 `json:"frontend_ip,omitempty"`
+	FrontendNetworkClass string                 `json:"frontend_network_class,omitempty"`
+	Schedulable          bool                   `json:"schedulable"`
+	Ready                bool                   `json:"ready"`
+	Status               string                 `json:"status,omitempty"`
+	ReasonCode           string                 `json:"reason_code,omitempty"`
+	LastHeartbeatAt      time.Time              `json:"last_heartbeat_at,omitempty"`
+	ReplicaCount         int                    `json:"replica_count,omitempty"`
+	RequiredImages       []string               `json:"required_images,omitempty"`
+	MissingImages        []string               `json:"missing_images,omitempty"`
+	Conditions           []ObservationCondition `json:"conditions,omitempty"`
+	EvidenceRefs         []string               `json:"evidence_refs,omitempty"`
 }
 
 type OperatorSafeNextStep struct {
@@ -157,19 +159,21 @@ func operatorNodeStatuses(nodes []NodeEvidence) []OperatorNodeStatus {
 	for _, node := range nodes {
 		status, reason := classifyNodeReadiness(node)
 		out = append(out, OperatorNodeStatus{
-			Name:            defaultString(node.NodeName, node.KubernetesNode),
-			KubernetesNode:  node.KubernetesNode,
-			InternalIP:      node.InternalIP,
-			Schedulable:     node.Schedulable,
-			Ready:           node.Ready,
-			Status:          status,
-			ReasonCode:      reason,
-			LastHeartbeatAt: node.LastHeartbeatAt,
-			ReplicaCount:    node.ReplicaCount,
-			RequiredImages:  append([]string(nil), node.RequiredImages...),
-			MissingImages:   append([]string(nil), node.MissingImages...),
-			Conditions:      nodeReadinessConditions(node, status, reason),
-			EvidenceRefs:    nodeEvidenceRefs(node),
+			Name:                 defaultString(node.NodeName, node.KubernetesNode),
+			KubernetesNode:       node.KubernetesNode,
+			InternalIP:           node.InternalIP,
+			FrontendIP:           node.FrontendIP,
+			FrontendNetworkClass: node.FrontendNetworkClass,
+			Schedulable:          node.Schedulable,
+			Ready:                node.Ready,
+			Status:               status,
+			ReasonCode:           reason,
+			LastHeartbeatAt:      node.LastHeartbeatAt,
+			ReplicaCount:         node.ReplicaCount,
+			RequiredImages:       append([]string(nil), node.RequiredImages...),
+			MissingImages:        append([]string(nil), node.MissingImages...),
+			Conditions:           nodeReadinessConditions(node, status, reason),
+			EvidenceRefs:         nodeEvidenceRefs(node),
 		})
 	}
 	return out

@@ -19,7 +19,10 @@ var (
 const (
 	// KubernetesNodeNameLabel lets a logical Seaweed Block server identity map
 	// to the Kubernetes node that should host its generated workload.
-	KubernetesNodeNameLabel = "kubernetes.io/hostname"
+	KubernetesNodeNameLabel   = "kubernetes.io/hostname"
+	ManagementIPLabel         = "sw-block.seaweedfs.com/management-ip"
+	FrontendIPLabel           = "sw-block.seaweedfs.com/frontend-ip"
+	FrontendNetworkClassLabel = "sw-block.seaweedfs.com/frontend-network-class"
 )
 
 // StoragePool reports allocatable local capacity. It is placement input,

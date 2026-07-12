@@ -16,6 +16,8 @@ is still outside the supported boundary.
 - [v0.4 Beta — Kubernetes-Native Read-Only Operator Foundation](v0.4-beta-candidate.md)
 - [v0.5 Beta Candidate — Bounded SwBlockVolume Lifecycle Owner](v0.5-beta-candidate.md)
 - [v0.6 Beta Candidate — Returned-Replica ACK Eligibility Executor](v0.6-beta-candidate.md)
+- [NVMe/TCP Supported-Lab Claim](nvme-tcp-supported-lab.md)
+- [WAL Multi-Block Record Opt-In Boundary](wal-multiblock-opt-in.md)
 
 ## Version Boundary
 
@@ -75,4 +77,10 @@ path remains available for development and fallback validation. v0.4 is the
 read-only/status-first operator surface. v0.5 beta candidate adds only a bounded
 `SwBlockVolume` protection-finalizer lifecycle, not broad operator automation.
 v0.6 beta candidate adds only a bounded ACK eligibility executor target, not
-returned-replica rebuild/failback execution.
+returned-replica rebuild/failback execution. The NVMe/TCP supported-lab path is
+documented separately because it is source-gated until matching
+`seaweed-block` and `seaweed-block-csi` images pass a pinned-image release
+smoke; it now includes source-gated multipath/reconnect correctness and durable
+backend write-batching evidence, but still no RoCE/NVMe-RDMA or performance
+SLO claim.
+The WAL multi-block record opt-in is documented separately because it is a backend/WAL-format optimization boundary, not a RoCE, NVMe/RDMA, or performance claim. It remains default-off and source-gated.

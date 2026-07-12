@@ -5,19 +5,186 @@
 package durable_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 func implMatrix() []durable.ImplName {
 	return []durable.ImplName{durable.ImplSmartWAL, durable.ImplWALStore}
+}
+
+func TestPhase150_DurableProviderWALMultiBlockOptIn(t *testing.T) {
+	run := func(t *testing.T, enabled bool) uint64 {
+		t.Helper()
+		root := t.TempDir()
+		id := frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1}
+		view := newStubView(healthyProj(id))
+		p, err := durable.NewDurableProvider(durable.ProviderConfig{
+			Impl:                 durable.ImplWALStore,
+			StorageRoot:          root,
+			BlockSize:            4096,
+			NumBlocks:            128,
+			WALMultiBlockRecords: enabled,
+		}, view)
+		if err != nil {
+			t.Fatalf("NewDurableProvider: %v", err)
+		}
+		defer p.Close()
+		raw, err := p.EnsureStorage("v1")
+		if err != nil {
+			t.Fatalf("EnsureStorage: %v", err)
+		}
+		batcher, ok := raw.(storage.WriteBatcher)
+		if !ok {
+			t.Fatalf("storage %T does not implement WriteBatcher", raw)
+		}
+		instr, ok := raw.(storage.WriteInstrumented)
+		if !ok {
+			t.Fatalf("storage %T does not implement WriteInstrumented", raw)
+		}
+		for batch := 0; batch < 4; batch++ {
+			blocks := make([][]byte, 4)
+			for i := range blocks {
+				blocks[i] = bytes.Repeat([]byte{byte(batch*4 + i + 1)}, 4096)
+			}
+			if _, err := batcher.WriteBatch(uint32(batch*4), blocks); err != nil {
+				t.Fatalf("WriteBatch enabled=%v batch=%d: %v", enabled, batch, err)
+			}
+		}
+		return instr.WriteInstrumentation().WALEncodeOps
+	}
+
+	single := run(t, false)
+	multi := run(t, true)
+	if single != 16 {
+		t.Fatalf("single encode ops=%d want 16", single)
+	}
+	if multi != 4 {
+		t.Fatalf("multi encode ops=%d want 4", multi)
+	}
+}
+
+func TestPhase152_DurableProviderCanDisableWALStoreAutoFlushForRecoveryTest(t *testing.T) {
+	root := t.TempDir()
+	id := frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1}
+	view := newStubView(healthyProj(id))
+	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+		Impl:                          durable.ImplWALStore,
+		StorageRoot:                   root,
+		BlockSize:                     4096,
+		NumBlocks:                     128,
+		WALRecoveryTestDisableFlusher: true,
+	}, view)
+	if err != nil {
+		t.Fatalf("NewDurableProvider: %v", err)
+	}
+	defer p.Close()
+	raw, err := p.EnsureStorage("v1")
+	if err != nil {
+		t.Fatalf("EnsureStorage: %v", err)
+	}
+	if _, err := raw.Write(1, bytes.Repeat([]byte{0x52}, 4096)); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if stable, err := raw.Sync(); err != nil || stable != 1 {
+		t.Fatalf("Sync stable=%d err=%v, want stable=1", stable, err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	checkpointed, ok := raw.(interface{ CheckpointLSN() uint64 })
+	if !ok {
+		t.Fatalf("storage %T does not expose CheckpointLSN", raw)
+	}
+	if got := checkpointed.CheckpointLSN(); got != 0 {
+		t.Fatalf("checkpoint=%d want 0 with recovery-test flusher disabled", got)
+	}
+}
+
+func TestPhase154_DurableStatusHeadLSNAfterWALStoreRecovery(t *testing.T) {
+	root := t.TempDir()
+	id := frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1}
+	view := newStubView(healthyProj(id))
+	func() {
+		p, err := durable.NewDurableProvider(durable.ProviderConfig{
+			Impl:                          durable.ImplWALStore,
+			StorageRoot:                   root,
+			BlockSize:                     4096,
+			NumBlocks:                     128,
+			WALMultiBlockRecords:          true,
+			WALRecoveryTestDisableFlusher: true,
+		}, view)
+		if err != nil {
+			t.Fatalf("NewDurableProvider #1: %v", err)
+		}
+		raw, err := p.EnsureStorage("v1")
+		if err != nil {
+			t.Fatalf("EnsureStorage #1: %v", err)
+		}
+		batcher, ok := raw.(storage.WriteBatcher)
+		if !ok {
+			t.Fatalf("storage %T does not implement WriteBatcher", raw)
+		}
+		blocks := [][]byte{
+			bytes.Repeat([]byte{0x41}, 4096),
+			bytes.Repeat([]byte{0x42}, 4096),
+			bytes.Repeat([]byte{0x43}, 4096),
+			bytes.Repeat([]byte{0x44}, 4096),
+		}
+		if _, err := batcher.WriteBatch(2, blocks); err != nil {
+			t.Fatalf("WriteBatch: %v", err)
+		}
+		if stable, err := raw.Sync(); err != nil || stable != 4 {
+			t.Fatalf("Sync stable=%d err=%v, want stable=4", stable, err)
+		}
+		if err := p.Close(); err != nil {
+			t.Fatalf("Close #1: %v", err)
+		}
+	}()
+
+	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+		Impl:                          durable.ImplWALStore,
+		StorageRoot:                   root,
+		BlockSize:                     4096,
+		NumBlocks:                     128,
+		WALMultiBlockRecords:          true,
+		WALRecoveryTestDisableFlusher: true,
+	}, view)
+	if err != nil {
+		t.Fatalf("NewDurableProvider #2: %v", err)
+	}
+	defer p.Close()
+	if _, err := p.EnsureStorage("v1"); err != nil {
+		t.Fatalf("EnsureStorage #2: %v", err)
+	}
+	report, err := p.RecoverVolume(context.Background(), "v1")
+	if err != nil {
+		t.Fatalf("RecoverVolume: %v", err)
+	}
+	if report.RecoveredLSN != 4 {
+		t.Fatalf("RecoveredLSN=%d want 4", report.RecoveredLSN)
+	}
+	statuses := p.DurableStatuses()
+	if len(statuses) != 1 {
+		t.Fatalf("status count=%d want 1: %+v", len(statuses), statuses)
+	}
+	if statuses[0].DurableLSN != report.RecoveredLSN {
+		t.Fatalf("DurableLSN=%d want recovered %d: %+v", statuses[0].DurableLSN, report.RecoveredLSN, statuses[0])
+	}
+	if statuses[0].HeadLSN != report.RecoveredLSN {
+		t.Fatalf("HeadLSN=%d want recovered %d: %+v", statuses[0].HeadLSN, report.RecoveredLSN, statuses[0])
+	}
+	if statuses[0].Evidence != "recovered LSN=4" {
+		t.Fatalf("Evidence=%q want recovered LSN=4", statuses[0].Evidence)
+	}
 }
 
 func newProvider(t *testing.T, impl durable.ImplName) (*durable.DurableProvider, *stubView, string) {
@@ -318,6 +485,133 @@ func TestDurableProvider_DurableStatuses_ReportLineageAndOperationalState(t *tes
 			}
 			if !after[0].FrontierKnown {
 				t.Fatalf("status should expose storage frontier evidence: %+v", after[0])
+			}
+		})
+	}
+}
+
+func TestDurableProvider_DurableStatuses_ReportWriteProfile(t *testing.T) {
+	for _, impl := range implMatrix() {
+		impl := impl
+		t.Run(string(impl), func(t *testing.T) {
+			p, _, _ := newProvider(t, impl)
+			backend, err := p.Open(context.Background(), "v1")
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			if _, err := p.RecoverVolume(context.Background(), "v1"); err != nil {
+				t.Fatalf("RecoverVolume: %v", err)
+			}
+			sb, ok := backend.(*durable.StorageBackend)
+			if !ok {
+				t.Fatalf("backend type=%T, want *durable.StorageBackend", backend)
+			}
+
+			if _, err := backend.Write(context.Background(), 0, make([]byte, 4096)); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+			sb.RecordTargetWrite(4096, time.Millisecond)
+			if err := backend.Sync(context.Background()); err != nil {
+				t.Fatalf("Sync: %v", err)
+			}
+
+			statuses := p.DurableStatuses()
+			if len(statuses) != 1 {
+				t.Fatalf("status count=%d want 1: %+v", len(statuses), statuses)
+			}
+			prof := statuses[0].WriteProfile
+			if prof.TargetWriteOps != 1 || prof.TargetWriteBytes != 4096 || prof.TargetWriteRequestMaxBytes != 4096 {
+				t.Fatalf("target write profile mismatch: %+v", prof)
+			}
+			if prof.TargetWriteDurationNanos == 0 {
+				t.Fatalf("target duration was not recorded: %+v", prof)
+			}
+			if prof.BackendWriteOps != 1 || prof.BackendWriteBytes != 4096 {
+				t.Fatalf("backend write profile mismatch: %+v", prof)
+			}
+			if prof.BackendWriteDurationNanos == 0 {
+				t.Fatalf("backend write duration was not recorded: %+v", prof)
+			}
+			if prof.BackendStorageWriteCalls != 1 || prof.BackendStorageWriteBlocks != 1 {
+				t.Fatalf("backend storage write profile mismatch: %+v", prof)
+			}
+			if prof.BackendStorageBatchCalls != 0 || prof.BackendStorageBatchBlocks != 0 {
+				t.Fatalf("single-block write must not report batch profile: %+v", prof)
+			}
+			if prof.BackendSyncOps != 1 || prof.BackendSyncDurationNanos == 0 {
+				t.Fatalf("backend sync profile mismatch: %+v", prof)
+			}
+		})
+	}
+}
+
+func TestDurableProvider_DurableStatuses_ReportWriteBatchProfile(t *testing.T) {
+	for _, impl := range implMatrix() {
+		impl := impl
+		t.Run(string(impl), func(t *testing.T) {
+			p, _, _ := newProvider(t, impl)
+			backend, err := p.Open(context.Background(), "v1")
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			if _, err := p.RecoverVolume(context.Background(), "v1"); err != nil {
+				t.Fatalf("RecoverVolume: %v", err)
+			}
+
+			payload := make([]byte, 8192)
+			for i := range payload {
+				payload[i] = byte(i)
+			}
+			if _, err := backend.Write(context.Background(), 0, payload); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+			got := make([]byte, len(payload))
+			if _, err := backend.Read(context.Background(), 0, got); err != nil {
+				t.Fatalf("Read: %v", err)
+			}
+			if !bytes.Equal(got, payload) {
+				t.Fatalf("readback mismatch at %d", firstDiffIdx(got, payload))
+			}
+
+			statuses := p.DurableStatuses()
+			if len(statuses) != 1 {
+				t.Fatalf("status count=%d want 1: %+v", len(statuses), statuses)
+			}
+			prof := statuses[0].WriteProfile
+			if prof.BackendWriteOps != 1 || prof.BackendWriteBytes != uint64(len(payload)) {
+				t.Fatalf("backend write profile mismatch: %+v", prof)
+			}
+			if prof.BackendStorageWriteCalls != 1 || prof.BackendStorageWriteBlocks != 2 {
+				t.Fatalf("backend storage write profile mismatch: %+v", prof)
+			}
+			if prof.BackendStorageBatchCalls != 1 || prof.BackendStorageBatchBlocks != 2 {
+				t.Fatalf("backend batch profile mismatch: %+v", prof)
+			}
+			if prof.BackendWriteRequestOps == 0 || prof.BackendWriteRequestMaxBytes == 0 {
+				t.Fatalf("backend write request profile missing: %+v", prof)
+			}
+			if prof.BackendFullBlockBatchCalls != 1 || prof.BackendFullBlockBatchBlocks != 2 || prof.BackendFullBlockBatchMax != 2 {
+				t.Fatalf("backend full-block batch shape profile mismatch: %+v", prof)
+			}
+			if impl == durable.ImplWALStore {
+				if prof.WALCopyOps == 0 || prof.WALCopyBytes == 0 || prof.WALCopyDurationNanos == 0 {
+					t.Fatalf("WAL copy profile missing: %+v", prof)
+				}
+				if prof.WALEncodeOps == 0 || prof.WALEncodeBytes == 0 || prof.WALEncodeDurationNanos == 0 {
+					t.Fatalf("WAL encode profile missing: %+v", prof)
+				}
+				if prof.WALChecksumOps == 0 || prof.WALChecksumBytes == 0 || prof.WALChecksumDurationNanos == 0 {
+					t.Fatalf("WAL checksum profile missing: %+v", prof)
+				}
+				if prof.WALAppendOps == 0 || prof.WALAppendBytes == 0 || prof.WALAppendDurationNanos == 0 {
+					t.Fatalf("WAL append profile missing: %+v", prof)
+				}
+				if prof.WALAppendWriteAtCalls == 0 || prof.WALAppendWriteAtBytes == 0 || prof.WALAppendWriteAtMaxBytes == 0 {
+					t.Fatalf("WAL append write-at shape profile missing: %+v", prof)
+				}
+				if prof.DirtyMapUpdateOps == 0 || prof.DirtyMapUpdateDurationNanos == 0 {
+					t.Fatalf("dirty-map profile missing: %+v", prof)
+				}
 			}
 		})
 	}

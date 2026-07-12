@@ -65,16 +65,26 @@ blockNodes:
   - name: m01
     kubernetesNode: m01
     internalIP: 192.168.1.181
+    frontendIP: 10.0.0.181
+    frontendNetworkClass: 100gbe_tcp
   - name: m02
     kubernetesNode: m02
     internalIP: 192.168.1.184
+    frontendIP: 10.0.0.184
+    frontendNetworkClass: 100gbe_tcp
   - name: tp01
     kubernetesNode: tp01
     internalIP: 192.168.1.188
+    frontendIP: 10.0.0.188
+    frontendNetworkClass: 100gbe_tcp
 ```
 
 `blockNodes[*].kubernetesNode` must match a real Kubernetes node name. The
-`internalIP` must be reachable by workloads that may mount the PVC.
+`internalIP` is the management/control-plane address. `frontendIP` is optional;
+when set, blockvolume `data_addr` and NVMe/TCP or iSCSI publish targets use
+that address while `ctrl_addr` remains on `internalIP`. Use
+`frontendNetworkClass: 100gbe_tcp` for a TCP frontend on the lab 100GbE data
+network. This is not an NVMe/RDMA or RoCE claim.
 
 `network.rejectLoopbackPublishTargets` records the intended safety boundary.
 Some blockmaster launcher flags are gated by `compat.*` settings because older
@@ -84,6 +94,25 @@ published alpha images do not accept every v0.3 flag. Keep
 support the corresponding flag. The default durable implementation is still
 `walstore` because that is the blockmaster binary default when the
 `--launcher-durable-impl` flag is omitted.
+
+For source-gated NVMe/TCP write-path experiments, `nvme.maxH2CDataLength` can
+be set explicitly. The chart default is `32768`; `65536` has a supported-lab
+gate as an opt-in candidate. This is not a default change, NVMe/RDMA/RoCE
+claim, or performance SLO.
+
+For source-gated WAL write-path experiments, multi-block WAL records can be
+enabled explicitly:
+
+```yaml
+blockmaster:
+  durableWALMultiBlockRecords: true
+```
+
+This is a lab-only optimization boundary backed by Phase 151/152 gates. The
+default remains `false`. Do not set
+`durableWALRecoveryTestDisableFlusher` outside recovery-test gates; that flag is
+scaffolding used to force WAL replay evidence and is not a production tuning
+knob.
 
 ## RF=3 Sync-Quorum Profile
 

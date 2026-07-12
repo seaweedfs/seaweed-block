@@ -1,0 +1,231 @@
+name: nvme-tcp-large-h2c-retriage-chain
+timeout: 90m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        timeout: 5m
+        cmd: "helm status sw-block --namespace kube-system >/dev/null 2>&1 && helm uninstall sw-block --namespace kube-system --wait --timeout 240s || true; kubectl -n default delete pod sw-block-phase126-block-perf sw-block-phase126-local-perf --ignore-not-found=true --wait=true --timeout=60s || true; kubectl -n default delete pvc sw-block-phase126-block-pvc sw-block-phase126-local-pvc --ignore-not-found=true --wait=true --timeout=60s || true; kubectl delete storageclass sw-block-phase126-block --ignore-not-found=true --wait=true --timeout=60s || true; kubectl get pv --no-headers | awk '/sw-block-phase126/ {print $1}' | xargs -r -n1 kubectl patch pv --type=merge -p '{\"metadata\":{\"finalizers\":[]}}' >/dev/null 2>&1 || true; kubectl get pv --no-headers | awk '/sw-block-phase126/ {print $1}' | xargs -r kubectl delete pv --wait=false >/dev/null 2>&1 || true; kubectl -n kube-system get swblockvolumes.block.seaweedfs.com -o name 2>/dev/null | xargs -r -n1 kubectl -n kube-system patch --type=merge -p '{\"metadata\":{\"finalizers\":[]}}' >/dev/null 2>&1 || true; kubectl -n kube-system delete swblockvolumes.block.seaweedfs.com --all --ignore-not-found=true --wait=true --timeout=60s >/dev/null 2>&1 || true; kubectl -n kube-system delete swblockclusters.block.seaweedfs.com --all --ignore-not-found=true --wait=true --timeout=60s >/dev/null 2>&1 || true; kubectl delete validatingadmissionpolicy,validatingadmissionpolicybinding -l app.kubernetes.io/instance=sw-block --ignore-not-found=true >/dev/null 2>&1 || true; kubectl delete crd swblockclusters.block.seaweedfs.com swblockvolumes.block.seaweedfs.com swblockreplicaeligibilities.block.seaweedfs.com swblockreplicarebuilds.block.seaweedfs.com swblockreplicafailbacks.block.seaweedfs.com swblockfrontendpublications.block.seaweedfs.com --ignore-not-found=true --wait=true --timeout=60s >/dev/null 2>&1 || true; sudo -n nvme disconnect-all >/dev/null 2>&1 || true; rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase142-large-h2c && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase142-large-h2c"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+
+  - name: run_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 82m
+        cmd: "cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase142-large-h2c SW_BLOCK_PHASE142_CANDIDATE_MAX_H2C_BYTES=65536 SW_BLOCK_PHASE142_SEQ_MIB=512 SW_BLOCK_PHASE125_FRONTEND_IP_MAP=m01=10.0.0.1,m02=10.0.0.3 SW_BLOCK_PHASE125_EXPECTED_ROUTE_DEV=enp1s0np0 SW_BLOCK_IMPORT_K3S_SSH_KEY=/opt/work/testdev_key bash scripts/run-phase142-nvme-tcp-large-h2c-retriage-gate.sh {{ product_root }}"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+
+  - name: assert_summary
+    actions:
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase142-large-h2c/phase142-nvme-tcp-large-h2c-retriage-summary.txt"
+        pattern: "^phase142_nvme_tcp_large_h2c_retriage_status=ok$"
+        save_as: phase142_status_ok
+      - action: assert_greater
+        actual: "{{ phase142_status_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase142-large-h2c/phase142-nvme-tcp-large-h2c-retriage-summary.txt"
+        pattern: "^phase142_contract_tests=pass$"
+        save_as: contract_tests
+      - action: assert_greater
+        actual: "{{ contract_tests }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase142-large-h2c/phase142-nvme-tcp-large-h2c-retriage-summary.txt"
+        pattern: "^roce_claim_allowed=false$"
+        save_as: no_roce_claim
+      - action: assert_greater
+        actual: "{{ no_roce_claim }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase142-large-h2c/phase142-nvme-tcp-large-h2c-retriage-summary.txt"
+        pattern: "^nvme_rdma_claim_allowed=false$"
+        save_as: no_rdma_claim
+      - action: assert_greater
+        actual: "{{ no_rdma_claim }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase142-large-h2c/phase142-nvme-tcp-large-h2c-retriage-summary.txt"
+        pattern: "^performance_slo_claim_allowed=false$"
+        save_as: no_slo_claim
+      - action: assert_greater
+        actual: "{{ no_slo_claim }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase142-large-h2c/phase142-nvme-tcp-large-h2c-retriage-summary.txt"
+        pattern: "^candidate_max_h2c_bytes=65536$"
+        save_as: candidate_64k
+      - action: assert_greater
+        actual: "{{ candidate_64k }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase142-large-h2c/phase142-nvme-tcp-large-h2c-retriage-summary.txt"
+        pattern: "^helm_candidate_max_h2c_data_length=65536$"
+        save_as: helm_candidate_64k
+      - action: assert_greater
+        actual: "{{ helm_candidate_64k }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase142-large-h2c/phase142-nvme-tcp-large-h2c-retriage-summary.txt"
+        pattern: "^host_connects_candidate=true$"
+        save_as: host_connects
+      - action: assert_greater
+        actual: "{{ host_connects }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase142-large-h2c/phase142-nvme-tcp-large-h2c-retriage-summary.txt"
+        pattern: "^writer_verified=true$"
+        save_as: writer_verified
+      - action: assert_greater
+        actual: "{{ writer_verified }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase142-large-h2c/phase142-nvme-tcp-large-h2c-retriage-summary.txt"
+        pattern: "^reader_verified=true$"
+        save_as: reader_verified
+      - action: assert_greater
+        actual: "{{ reader_verified }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase142-large-h2c/phase142-nvme-tcp-large-h2c-retriage-summary.txt"
+        pattern: "^target_write_request_max_bytes=65536$"
+        save_as: target_h2c
+      - action: assert_greater
+        actual: "{{ target_h2c }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase142-large-h2c/phase142-nvme-tcp-large-h2c-retriage-summary.txt"
+        pattern: "^backend_write_request_max_bytes=65536$"
+        save_as: backend_h2c
+      - action: assert_greater
+        actual: "{{ backend_h2c }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase142-large-h2c/phase142-nvme-tcp-large-h2c-retriage-summary.txt"
+        pattern: "^backend_full_block_batch_max=[1-9][0-9]*$"
+        save_as: full_block_batch
+      - action: assert_greater
+        actual: "{{ full_block_batch }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase142-large-h2c/phase142-nvme-tcp-large-h2c-retriage-summary.txt"
+        pattern: "^wal_append_writeat_max_bytes=[1-9][0-9]*$"
+        save_as: wal_writeat_max
+      - action: assert_greater
+        actual: "{{ wal_writeat_max }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase142-large-h2c/phase142-nvme-tcp-large-h2c-retriage-summary.txt"
+        pattern: "^wal_copy_duration_ms=[0-9][0-9]*$"
+        save_as: wal_copy_counter
+      - action: assert_greater
+        actual: "{{ wal_copy_counter }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase142-large-h2c/phase142-nvme-tcp-large-h2c-retriage-summary.txt"
+        pattern: "^wal_append_duration_ms=[0-9][0-9]*$"
+        save_as: wal_append_counter
+      - action: assert_greater
+        actual: "{{ wal_append_counter }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase142-large-h2c/phase142-nvme-tcp-large-h2c-retriage-summary.txt"
+        pattern: "^wal_encode_duration_ms=[0-9][0-9]*$"
+        save_as: wal_encode_counter
+      - action: assert_greater
+        actual: "{{ wal_encode_counter }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase142-large-h2c/phase142-nvme-tcp-large-h2c-retriage-summary.txt"
+        pattern: "^wal_checksum_duration_ms=[0-9][0-9]*$"
+        save_as: wal_checksum_counter
+      - action: assert_greater
+        actual: "{{ wal_checksum_counter }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase142-large-h2c/phase142-nvme-tcp-large-h2c-retriage-summary.txt"
+        pattern: "^dirty_map_update_duration_ms=[0-9][0-9]*$"
+        save_as: dirty_map_counter
+      - action: assert_greater
+        actual: "{{ dirty_map_counter }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase142-large-h2c/phase142-nvme-tcp-large-h2c-retriage-summary.txt"
+        pattern: "^phase142_bottleneck=\\(wal_copy\\|wal_append\\|wal_encode\\|wal_checksum\\|dirty_map\\|frontend_request_size\\|unknown\\)$"
+        save_as: bottleneck_named
+      - action: assert_greater
+        actual: "{{ bottleneck_named }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase142-large-h2c/phase142-nvme-tcp-large-h2c-retriage-summary.txt"
+        pattern: "^phase142_decision=\\(document_opt_in\\|broader_compat_gate\\|continue_backend_work\\|blocked\\)$"
+        save_as: decision_named
+      - action: assert_greater
+        actual: "{{ decision_named }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase142-large-h2c/phase142-nvme-tcp-large-h2c-retriage-summary.txt"
+        pattern: "^next_recommendation=phase143_.*$"
+        save_as: next_named
+      - action: assert_greater
+        actual: "{{ next_named }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase142-large-h2c/phase142-nvme-tcp-large-h2c-retriage-summary.txt"
+        pattern: "^cleanup_status=ok$"
+        save_as: cleanup_ok
+      - action: assert_greater
+        actual: "{{ cleanup_ok }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase142-large-h2c"
+        name: "remote-phases"
+        ignore_error: true

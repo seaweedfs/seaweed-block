@@ -96,6 +96,18 @@ type ProviderConfig struct {
 	//
 	// Pinned by: INV-G6-RETENTION-POLICY-OPERATOR-VISIBLE.
 	WALRetentionLSNs uint64
+
+	// WALMultiBlockRecords enables the Phase 150 multi-block WAL record
+	// prototype for ImplWALStore only. Default false preserves the current
+	// single-block WAL record format. Do not enable for release claims until a
+	// mounted NVMe/TCP profile gate passes.
+	WALMultiBlockRecords bool
+
+	// WALRecoveryTestDisableFlusher stops walstore's background checkpoint
+	// flusher before test writes are issued. It exists only for recovery gates
+	// that need synced-but-uncheckpointed WAL records to survive a process
+	// restart and prove real replay. Default false.
+	WALRecoveryTestDisableFlusher bool
 }
 
 // DurableProvider is the production frontend.Provider implementation.
@@ -133,6 +145,7 @@ type VolumeStatus struct {
 	HeadLSN         uint64
 	Evidence        string
 	Closed          bool
+	WriteProfile    WriteProfileStatus
 }
 
 // NewDurableProvider constructs a provider. view is the ONLY
@@ -472,6 +485,12 @@ func (p *DurableProvider) openExisting(volumeID, path string) (*volHandle, error
 		if p.cfg.WALRetentionLSNs > 0 {
 			ws.SetRecoveryRetentionLSNs(p.cfg.WALRetentionLSNs)
 		}
+		if p.cfg.WALMultiBlockRecords {
+			ws.SetMultiBlockRecords(true)
+		}
+		if p.cfg.WALRecoveryTestDisableFlusher {
+			ws.DisableAutoFlushForRecoveryTest()
+		}
 		s = ws
 	case ImplSmartWAL:
 		sw, err := smartwal.OpenStore(path)
@@ -503,6 +522,12 @@ func (p *DurableProvider) createFresh(volumeID, path string) (*volHandle, error)
 		// G6 §1.A α (see openExisting comment for semantics).
 		if p.cfg.WALRetentionLSNs > 0 {
 			ws.SetRecoveryRetentionLSNs(p.cfg.WALRetentionLSNs)
+		}
+		if p.cfg.WALMultiBlockRecords {
+			ws.SetMultiBlockRecords(true)
+		}
+		if p.cfg.WALRecoveryTestDisableFlusher {
+			ws.DisableAutoFlushForRecoveryTest()
 		}
 		s = ws
 	case ImplSmartWAL:

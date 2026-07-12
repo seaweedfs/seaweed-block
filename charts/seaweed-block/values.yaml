@@ -44,6 +44,8 @@ blockmaster:
   launcherStatus: true
   launcherPVCOwnerRef: true
   durableImpl: walstore
+  durableWALMultiBlockRecords: false
+  durableWALRecoveryTestDisableFlusher: false
   stateHostPath: ""
   stateHostPathType: DirectoryOrCreate
   statePermissionsImage:
@@ -103,6 +105,9 @@ ports:
   nvmeBase: 4420
   statusBase: 23260
 
+nvme:
+  maxH2CDataLength: 32768
+
 # Initial block-capable nodes. D2 will add a generator that derives this from
 # `kubectl get nodes` so node names and InternalIPs are verified against the
 # live cluster.
@@ -110,6 +115,10 @@ blockNodes:
   - name: m02
     serverID: m02
     internalIP: 127.0.0.1
+    # Optional frontend/data-plane bind address. When set, cluster-spec data_addr
+    # and frontend publish targets use this IP while ctrl_addr keeps internalIP.
+    frontendIP: ""
+    frontendNetworkClass: management_lan
     dataPort: 19101
     ctrlPort: 19102
     poolID: pool-a
@@ -246,3 +255,6 @@ csiNode:
   pluginPath: /var/lib/kubelet/plugins/block.csi.seaweedfs.com
   registrationPath: /var/lib/kubelet/plugins_registry
   loadKernelModules: true
+  nvmeReconnect:
+    enabled: false
+    interval: 5s

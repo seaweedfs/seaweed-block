@@ -272,6 +272,8 @@ message NodeEvidence {
     repeated string required_images = 9;
     repeated string missing_images = 10;
     repeated ObservationCondition conditions = 11;
+    string frontend_ip = 12;
+    string frontend_network_class = 13;
 }
 
 message VolumeEvidence {

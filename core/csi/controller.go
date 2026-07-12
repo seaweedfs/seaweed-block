@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"strconv"
+	"time"
 
 	csipb "github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
@@ -124,6 +125,12 @@ func (s *ControllerServer) ControllerPublishVolume(ctx context.Context, req *csi
 		return nil, status.Errorf(codes.Internal, "lookup publish target: %v", err)
 	}
 	pubCtx := publishContext(target)
+	if iscsiMultipathFromContext(req.GetVolumeContext()) {
+		target, pubCtx, err = s.waitForControllerMultipathPublishContext(ctx, req.GetVolumeId(), req.GetNodeId(), target, pubCtx, 2)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if len(pubCtx) == 0 {
 		return nil, status.Errorf(codes.FailedPrecondition, "volume %q has no attachable frontend target", req.GetVolumeId())
 	}
@@ -131,6 +138,52 @@ func (s *ControllerServer) ControllerPublishVolume(ctx context.Context, req *csi
 		pubCtx["stage2_multipath"] = "true"
 	}
 	return &csipb.ControllerPublishVolumeResponse{PublishContext: pubCtx}, nil
+}
+
+func (s *ControllerServer) waitForControllerMultipathPublishContext(ctx context.Context, volumeID, nodeID string, target PublishTarget, pubCtx map[string]string, minPaths int) (PublishTarget, map[string]string, error) {
+	if hasControllerMultipathPaths(pubCtx, minPaths) {
+		return target, pubCtx, nil
+	}
+	if s.lookup == nil {
+		return target, pubCtx, status.Errorf(codes.FailedPrecondition, "volume %q multipath publish target requires at least %d paths", volumeID, minPaths)
+	}
+	deadline := time.NewTimer(stage2MultipathPublishWait)
+	defer deadline.Stop()
+	ticker := time.NewTicker(stage2MultipathPublishPoll)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return target, pubCtx, status.Errorf(codes.FailedPrecondition, "volume %q multipath publish target did not reach %d paths: %v", volumeID, minPaths, ctx.Err())
+		case <-deadline.C:
+			return target, pubCtx, status.Errorf(codes.FailedPrecondition, "volume %q multipath publish target did not reach %d paths", volumeID, minPaths)
+		case <-ticker.C:
+		}
+
+		refreshedTarget, err := s.lookup.LookupPublishTarget(ctx, volumeID, nodeID)
+		if err != nil {
+			continue
+		}
+		refreshedCtx := publishContext(refreshedTarget)
+		if len(refreshedCtx) == 0 {
+			continue
+		}
+		target, pubCtx = refreshedTarget, refreshedCtx
+		if hasControllerMultipathPaths(pubCtx, minPaths) {
+			return target, pubCtx, nil
+		}
+	}
+}
+
+func hasControllerMultipathPaths(ctx map[string]string, minPaths int) bool {
+	if !iscsiMultipathFromContext(ctx) {
+		return false
+	}
+	if len(iscsiPortalsFromContext(ctx)) >= minPaths {
+		return true
+	}
+	return len(nvmeAddrsFromContext(ctx)) >= minPaths
 }
 
 func (s *ControllerServer) ControllerUnpublishVolume(context.Context, *csipb.ControllerUnpublishVolumeRequest) (*csipb.ControllerUnpublishVolumeResponse, error) {

@@ -58,6 +58,49 @@ func TestParseFlags_NVMeTransportRejectsRDMA(t *testing.T) {
 	}
 }
 
+func TestParseFlags_NVMeMaxH2CDataLengthRequiresNVMeListen(t *testing.T) {
+	args := append(requiredBlockvolumeArgs(),
+		"--nvme-max-h2c-data-length", "65536",
+	)
+	_, err := parseFlags(args)
+	if err == nil {
+		t.Fatal("parseFlags succeeded; want --nvme-max-h2c-data-length without --nvme-listen rejected")
+	}
+	if !strings.Contains(err.Error(), "--nvme-max-h2c-data-length requires --nvme-listen") {
+		t.Fatalf("error = %q, want requires nvme-listen", err)
+	}
+}
+
+func TestParseFlags_NVMeMaxH2CDataLengthAcceptsCandidate(t *testing.T) {
+	args := append(requiredBlockvolumeArgs(),
+		"--nvme-listen", "127.0.0.1:4420",
+		"--nvme-subsysnqn", "nqn.2026-05.io.seaweedfs:test-v1",
+		"--nvme-max-h2c-data-length", "65536",
+	)
+	got, err := parseFlags(args)
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if got.nvmeMaxH2C != 65536 {
+		t.Fatalf("nvmeMaxH2C=%d want 65536", got.nvmeMaxH2C)
+	}
+}
+
+func TestParseFlags_NVMeMaxH2CDataLengthRejectsInvalid(t *testing.T) {
+	args := append(requiredBlockvolumeArgs(),
+		"--nvme-listen", "127.0.0.1:4420",
+		"--nvme-subsysnqn", "nqn.2026-05.io.seaweedfs:test-v1",
+		"--nvme-max-h2c-data-length", "49152",
+	)
+	_, err := parseFlags(args)
+	if err == nil {
+		t.Fatal("parseFlags succeeded; want invalid H2C size rejected")
+	}
+	if !strings.Contains(err.Error(), "--nvme-max-h2c-data-length=49152 invalid") {
+		t.Fatalf("error = %q, want invalid H2C size", err)
+	}
+}
+
 func TestParseFlags_NVMeExternalBindRequiresExplicitOptIn(t *testing.T) {
 	args := append(requiredBlockvolumeArgs(),
 		"--nvme-listen", "203.0.113.10:4420",

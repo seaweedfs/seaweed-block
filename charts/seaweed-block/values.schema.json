@@ -36,6 +36,8 @@
         },
         "failbackRuntimeRPC": { "type": "boolean" },
         "durableImpl": { "type": "string", "enum": ["walstore", "smartwal"] },
+        "durableWALMultiBlockRecords": { "type": "boolean" },
+        "durableWALRecoveryTestDisableFlusher": { "type": "boolean" },
         "stateHostPath": { "type": "string" },
         "stateHostPathType": { "type": "string" },
         "statePermissionsImage": {
@@ -73,6 +75,12 @@
         "statusBase": { "type": "integer", "minimum": 1, "maximum": 65535 }
       }
     },
+    "nvme": {
+      "type": "object",
+      "properties": {
+        "maxH2CDataLength": { "type": "integer", "minimum": 32768, "maximum": 1048576 }
+      }
+    },
     "compat": {
       "type": "object",
       "properties": {
@@ -91,7 +99,11 @@
           "name": { "type": "string", "minLength": 1 },
           "serverID": { "type": "string" },
           "internalIP": { "type": "string", "minLength": 1 },
+          "managementIP": { "type": "string" },
+          "frontendIP": { "type": "string" },
+          "frontendNetworkClass": { "type": "string" },
           "dataPort": { "type": "integer", "minimum": 1 },
+          "controlPort": { "type": "integer", "minimum": 1 },
           "ctrlPort": { "type": "integer", "minimum": 1 },
           "poolID": { "type": "string" }
         }

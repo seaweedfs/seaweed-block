@@ -116,6 +116,38 @@ func (s *Store) Write(lba uint32, data []byte) (uint64, error) {
 	return lsn, nil
 }
 
+func (s *Store) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error) {
+	if len(blocks) == 0 {
+		return nil, nil
+	}
+	if uint64(startLBA)+uint64(len(blocks)) > uint64(s.numBlocks) {
+		return nil, fmt.Errorf("memorywal: batch [%d,%d) out of range (max %d)", startLBA, uint64(startLBA)+uint64(len(blocks)), s.numBlocks)
+	}
+	for i, data := range blocks {
+		if len(data) != s.blockSize {
+			return nil, fmt.Errorf("memorywal: batch block %d data size %d != block size %d", i, len(data), s.blockSize)
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errors.New("memorywal: WriteBatch after Close")
+	}
+	lsns := make([]uint64, len(blocks))
+	for i, data := range blocks {
+		cp := make([]byte, s.blockSize)
+		copy(cp, data)
+		lsn := s.nextLSN
+		s.nextLSN++
+		if s.retainStart == 0 {
+			s.retainStart = lsn
+		}
+		lsns[i] = lsn
+		s.records = append(s.records, walRecord{LSN: lsn, LBA: startLBA + uint32(i), Flags: storage.RecoveryEntryWrite, Data: cp})
+	}
+	return lsns, nil
+}
+
 func (s *Store) Read(lba uint32) ([]byte, error) {
 	if lba >= s.numBlocks {
 		return nil, fmt.Errorf("memorywal: LBA %d out of range", lba)

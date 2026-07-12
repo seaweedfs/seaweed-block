@@ -18,19 +18,19 @@ import (
 // replica-aware retention floor — those are V2 features outside
 // V3 Phase 08 scope). The core algorithm is unchanged:
 //
-//   1. Snapshot the dirty map.
-//   2. For each entry, read the WAL record header at the recorded
-//      offset and compare the on-disk LSN to the snapshot LSN. A
-//      mismatch means the WAL slot was recycled — skip the entry.
-//   3. Read the data section, write it to the extent at the LBA's
-//      natural offset.
-//   4. fsync the file once for the whole batch.
-//   5. Advance the on-disk checkpoint LSN to the highest LSN that
-//      was actually verified-and-flushed.
-//   6. Remove flushed entries from the dirty map using
-//      compare-and-delete: only drop an entry whose LSN still
-//      matches what we flushed. A concurrent Write() that bumped
-//      the entry's LSN must NOT have its newer data lost.
+//  1. Snapshot the dirty map.
+//  2. For each entry, read the WAL record header at the recorded
+//     offset and compare the on-disk LSN to the snapshot LSN. A
+//     mismatch means the WAL slot was recycled — skip the entry.
+//  3. Read the data section, write it to the extent at the LBA's
+//     natural offset.
+//  4. fsync the file once for the whole batch.
+//  5. Advance the on-disk checkpoint LSN to the highest LSN that
+//     was actually verified-and-flushed.
+//  6. Remove flushed entries from the dirty map using
+//     compare-and-delete: only drop an entry whose LSN still
+//     matches what we flushed. A concurrent Write() that bumped
+//     the entry's LSN must NOT have its newer data lost.
 //
 // Note: V2 has no batch-size cutoff. The flusher processes the
 // whole snapshot in one cycle. This was a deliberate V2 choice
@@ -166,17 +166,30 @@ func (f *flusher) flushOnce() error {
 			return fmt.Errorf("flusher: read WAL header at %d: %w", e.WALOffset, err)
 		}
 		entryLSN := binary.LittleEndian.Uint64(hdrBuf[0:8])
+		entryBlockCount := binary.LittleEndian.Uint64(hdrBuf[8:16])
 		if entryLSN != e.LSN {
-			// Stale slot — WAL has been recycled at this offset.
-			// Drop the dirty map entry only if it still matches the
-			// stale snapshot we just observed (compare-and-delete).
-			store.dm.compareAndDelete(e.LBA, e.LSN)
-			continue
+			entryType := hdrBuf[16]
+			if entryType != walEntryWriteBatch {
+				// Stale slot — WAL has been recycled at this offset.
+				// Drop the dirty map entry only if it still matches the
+				// stale snapshot we just observed (compare-and-delete).
+				store.dm.compareAndDelete(e.LBA, e.LSN)
+				continue
+			}
+			if entryBlockCount == 0 || e.DataOffset%store.sb.BlockSize != 0 {
+				store.dm.compareAndDelete(e.LBA, e.LSN)
+				continue
+			}
+			blockIndex := uint64(e.DataOffset / store.sb.BlockSize)
+			if blockIndex >= entryBlockCount || entryLSN+blockIndex != e.LSN {
+				store.dm.compareAndDelete(e.LBA, e.LSN)
+				continue
+			}
 		}
 		entryType := hdrBuf[16]
 		entrySize := uint64(walEntryHeaderSize)
 		switch entryType {
-		case walEntryWrite:
+		case walEntryWrite, walEntryWriteBatch:
 			dataLen := parseLengthFromHeader(hdrBuf)
 			if dataLen == 0 {
 				continue
@@ -202,7 +215,7 @@ func (f *flusher) flushOnce() error {
 		e := entries[p.idx]
 		var data []byte
 		if p.isWrite {
-			d, err := store.readFromWAL(e.WALOffset)
+			d, err := store.readFromWAL(e.WALOffset, e.DataOffset)
 			if err != nil {
 				return fmt.Errorf("flusher: read WAL data for LBA %d: %w", e.LBA, err)
 			}

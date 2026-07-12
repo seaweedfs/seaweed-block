@@ -459,6 +459,24 @@ func TestG9A_StorageBackend_WriteAckPolicy_RequireObserverAckFailsWithoutObserve
 	}
 }
 
+func TestG9A_StorageBackend_WriteAckPolicy_DisablesBatchWithoutObserver(t *testing.T) {
+	for _, f := range logicalStorageFactories() {
+		f := f
+		t.Run(f.name, func(t *testing.T) {
+			b, _, _ := newTestBackend(t, f, 4, 4096)
+			b.SetWriteAckPolicy(durable.WriteAckRequireObserverAck)
+
+			n, err := b.Write(context.Background(), 0, make([]byte, 8192))
+			if !errors.Is(err, durable.ErrReplicationAckUnavailable) {
+				t.Fatalf("strict batch-shaped Write without observer: want ErrReplicationAckUnavailable, got n=%d err=%v", n, err)
+			}
+			if n != 0 {
+				t.Fatalf("strict write must fail before local batch write, n=%d", n)
+			}
+		})
+	}
+}
+
 func TestG9A_StorageBackend_WriteAckPolicy_RequireObserverAckPropagatesObserverError(t *testing.T) {
 	observerErr := errors.New("replica recovering")
 	for _, f := range logicalStorageFactories() {

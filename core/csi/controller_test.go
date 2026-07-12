@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	csipb "github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
@@ -159,8 +160,10 @@ func TestControllerPublish_CarriesStage2MultipathRequestFromVolumeContext(t *tes
 		ReplicaID: "r1",
 		Protocol:  ProtocolNVMe,
 		NVMeAddr:  "127.0.0.1:4420",
+		NVMeAddrs: []string{"127.0.0.1:4420", "127.0.0.1:4421"},
 		NQN:       "nqn.2026-05.io.seaweedfs:v1",
 		NSID:      1,
+		Multipath: true,
 	}}
 	s := NewControllerServer(lookup)
 
@@ -176,6 +179,82 @@ func TestControllerPublish_CarriesStage2MultipathRequestFromVolumeContext(t *tes
 	}
 	if got := resp.GetPublishContext()["stage2_multipath"]; got != "true" {
 		t.Fatalf("stage2_multipath=%q context=%v", got, resp.GetPublishContext())
+	}
+}
+
+func TestControllerPublish_Stage2MultipathWaitsForNVMeAddrsBeforePublishing(t *testing.T) {
+	lookup := &sequenceLookup{targets: []PublishTarget{
+		{
+			VolumeID:  "v1",
+			ReplicaID: "r1",
+			Protocol:  ProtocolNVMe,
+			NVMeAddr:  "127.0.0.1:4420",
+			NQN:       "nqn.2026-05.io.seaweedfs:v1",
+			NSID:      1,
+		},
+		{
+			VolumeID:  "v1",
+			ReplicaID: "r1",
+			Protocol:  ProtocolNVMe,
+			NVMeAddr:  "127.0.0.1:4420",
+			NVMeAddrs: []string{"127.0.0.1:4420", "127.0.0.1:4421"},
+			NQN:       "nqn.2026-05.io.seaweedfs:v1",
+			NSID:      1,
+			Multipath: true,
+		},
+	}}
+	s := NewControllerServer(lookup)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	resp, err := s.ControllerPublishVolume(ctx, &csipb.ControllerPublishVolumeRequest{
+		VolumeId: "v1",
+		NodeId:   "node-a",
+		VolumeContext: map[string]string{
+			"stage2_multipath": "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ControllerPublishVolume: %v", err)
+	}
+	publish := resp.GetPublishContext()
+	if publish["stage2_multipath"] != "true" {
+		t.Fatalf("stage2_multipath=%q context=%v", publish["stage2_multipath"], publish)
+	}
+	if publish["nvmeAddrs"] != "127.0.0.1:4420,127.0.0.1:4421" {
+		t.Fatalf("nvmeAddrs=%q context=%v", publish["nvmeAddrs"], publish)
+	}
+	if len(lookup.calls) < 2 {
+		t.Fatalf("lookup calls=%v, want initial lookup plus multipath wait refresh", lookup.calls)
+	}
+}
+
+func TestControllerPublish_Stage2MultipathFailsClosedWithSingleNVMeAddr(t *testing.T) {
+	lookup := &stubLookup{target: PublishTarget{
+		VolumeID:  "v1",
+		ReplicaID: "r1",
+		Protocol:  ProtocolNVMe,
+		NVMeAddr:  "127.0.0.1:4420",
+		NQN:       "nqn.2026-05.io.seaweedfs:v1",
+		NSID:      1,
+	}}
+	s := NewControllerServer(lookup)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err := s.ControllerPublishVolume(ctx, &csipb.ControllerPublishVolumeRequest{
+		VolumeId: "v1",
+		NodeId:   "node-a",
+		VolumeContext: map[string]string{
+			"stage2_multipath": "true",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected stage2 multipath to fail closed with one NVMe path")
+	}
+	st, _ := status.FromError(err)
+	if st.Code() != codes.FailedPrecondition {
+		t.Fatalf("code=%v want FailedPrecondition err=%v", st.Code(), err)
 	}
 }
 

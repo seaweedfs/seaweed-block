@@ -24,7 +24,7 @@ package nvme
 //   D9  LBAF[0] LBADS = log2(blockSize) = 9 for 512 B → unchanged
 //   D10 IOCCSZ = (64 + MaxH2CDataLength) / 16; load-bearing for
 //        kernel inline-write optimization; we compute from our
-//        actual MaxH2CDataLength (32 KiB)
+//        actual MaxH2CDataLength (32 KiB default, opt-in larger candidates)
 //   D11 VS (Version) = NVMe 1.3 (0x00010300); MNAN = 1
 //        (NVMe ≥1.4 would require MNAN non-zero; we pin 1.3 for
 //        simplicity and set MNAN=1 for forward-compat)
@@ -111,9 +111,10 @@ func (s *Session) buildIdentifyController() []byte {
 	}
 
 	// byte 77: MDTS (Maximum Data Transfer Size, 2^MDTS × min page).
-	// MDTS=3 → 32 KiB with 4 KiB min-page. Matches our
-	// MaxH2CDataLength cap (D10).
-	buf[77] = 3
+	// Keep this in lockstep with the NVMe/TCP H2C cap so Linux does not keep
+	// splitting host requests at an older Identify limit.
+	maxH2CDataLength := s.maxH2CDataLength()
+	buf[77] = mdtsForMaxH2CDataLength(maxH2CDataLength)
 
 	// bytes 78-79: CNTLID (Controller ID) — what this session's
 	// admin Connect allocated. Host reads it from the
@@ -128,6 +129,13 @@ func (s *Session) buildIdentifyController() []byte {
 
 	// bytes 84-259: various optional / derived controller caps
 	// — most are 0 for a minimal software target.
+
+	// bytes 92-95: OAES (Optional Asynchronous Events Supported).
+	// ANA Change Notice is advertised only when an ANA provider exists; the
+	// AER handler then has a concrete event source based on ANA change count.
+	if ana != nil {
+		binary.LittleEndian.PutUint32(buf[92:], optionalAsyncEventANAChange)
+	}
 
 	// bytes 256-257: OACS (Optional Admin Command Support).
 	// Bit table per NVMe 1.3 §5.15.2.2. 11a implements:
@@ -231,10 +239,7 @@ func (s *Session) buildIdentifyController() []byte {
 
 	// bytes 1792-1795: IOCCSZ (IO Capsule Command Supported
 	// Size, 16-byte units). D10: (64 + MaxH2CDataLength) / 16.
-	// We advertise 32 KiB → (64 + 32768) / 16 = 2052.
-	const maxH2CDataLen uint32 = 0x8000 // must match handleICReq
-	ioccsz := (64 + maxH2CDataLen) / 16
-	binary.LittleEndian.PutUint32(buf[1792:], ioccsz)
+	binary.LittleEndian.PutUint32(buf[1792:], ioccszForMaxH2CDataLength(maxH2CDataLength))
 
 	// bytes 1796-1799: IORCSZ (IO Response Capsule Supported
 	// Size, 16-byte units). 16 / 16 = 1.

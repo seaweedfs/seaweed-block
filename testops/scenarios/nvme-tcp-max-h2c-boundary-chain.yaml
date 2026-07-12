@@ -1,0 +1,143 @@
+name: nvme-tcp-max-h2c-boundary-chain
+timeout: 90m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        timeout: 5m
+        cmd: "helm status sw-block --namespace kube-system >/dev/null 2>&1 && helm uninstall sw-block --namespace kube-system --wait --timeout 240s || true; kubectl -n default delete pod sw-block-phase126-block-perf sw-block-phase126-local-perf --ignore-not-found=true --wait=true --timeout=60s || true; kubectl -n default delete pvc sw-block-phase126-block-pvc sw-block-phase126-local-pvc --ignore-not-found=true --wait=true --timeout=60s || true; kubectl delete storageclass sw-block-phase126-block --ignore-not-found=true --wait=true --timeout=60s || true; kubectl get pv --no-headers | awk '/sw-block-phase126/ {print $1}' | xargs -r -n1 kubectl patch pv --type=merge -p '{\"metadata\":{\"finalizers\":[]}}' >/dev/null 2>&1 || true; kubectl get pv --no-headers | awk '/sw-block-phase126/ {print $1}' | xargs -r kubectl delete pv --wait=false >/dev/null 2>&1 || true; kubectl -n kube-system get swblockvolumes.block.seaweedfs.com -o name 2>/dev/null | xargs -r -n1 kubectl -n kube-system patch --type=merge -p '{\"metadata\":{\"finalizers\":[]}}' >/dev/null 2>&1 || true; kubectl -n kube-system delete swblockvolumes.block.seaweedfs.com --all --ignore-not-found=true --wait=true --timeout=60s >/dev/null 2>&1 || true; kubectl -n kube-system delete swblockclusters.block.seaweedfs.com --all --ignore-not-found=true --wait=true --timeout=60s >/dev/null 2>&1 || true; kubectl delete validatingadmissionpolicy,validatingadmissionpolicybinding -l app.kubernetes.io/instance=sw-block --ignore-not-found=true >/dev/null 2>&1 || true; kubectl delete crd swblockclusters.block.seaweedfs.com swblockvolumes.block.seaweedfs.com swblockreplicaeligibilities.block.seaweedfs.com swblockreplicarebuilds.block.seaweedfs.com swblockreplicafailbacks.block.seaweedfs.com swblockfrontendpublications.block.seaweedfs.com --ignore-not-found=true --wait=true --timeout=60s >/dev/null 2>&1 || true; sudo -n nvme disconnect-all >/dev/null 2>&1 || true; rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase141-h2c && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase141-h2c"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+
+  - name: run_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 82m
+        cmd: "cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase141-h2c SW_BLOCK_PHASE141_CANDIDATE_MAX_H2C_BYTES=65536 SW_BLOCK_PHASE141_SEQ_MIB=512 SW_BLOCK_PHASE125_FRONTEND_IP_MAP=m01=10.0.0.1,m02=10.0.0.3 SW_BLOCK_PHASE125_EXPECTED_ROUTE_DEV=enp1s0np0 SW_BLOCK_IMPORT_K3S_SSH_KEY=/opt/work/testdev_key bash scripts/run-phase141-nvme-tcp-max-h2c-boundary-gate.sh {{ product_root }}"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+
+  - name: assert_summary
+    actions:
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase141-h2c/phase141-nvme-tcp-max-h2c-boundary-summary.txt"
+        pattern: "^phase141_nvme_tcp_max_h2c_boundary_status=ok$"
+        save_as: phase141_status_ok
+      - action: assert_greater
+        actual: "{{ phase141_status_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase141-h2c/phase141-nvme-tcp-max-h2c-boundary-summary.txt"
+        pattern: "^h2c_contract_tests=pass$"
+        save_as: contract_tests
+      - action: assert_greater
+        actual: "{{ contract_tests }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase141-h2c/phase141-nvme-tcp-max-h2c-boundary-summary.txt"
+        pattern: "^candidate_max_h2c_bytes=65536$"
+        save_as: candidate_64k
+      - action: assert_greater
+        actual: "{{ candidate_64k }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase141-h2c/phase141-nvme-tcp-max-h2c-boundary-summary.txt"
+        pattern: "^icresp_max_h2c_matches_candidate=true$"
+        save_as: icresp_match
+      - action: assert_greater
+        actual: "{{ icresp_match }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase141-h2c/phase141-nvme-tcp-max-h2c-boundary-summary.txt"
+        pattern: "^identify_ioccsz_matches_candidate=true$"
+        save_as: identify_match
+      - action: assert_greater
+        actual: "{{ identify_match }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase141-h2c/phase141-nvme-tcp-max-h2c-boundary-summary.txt"
+        pattern: "^host_connects_candidate=true$"
+        save_as: host_connects
+      - action: assert_greater
+        actual: "{{ host_connects }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase141-h2c/phase141-nvme-tcp-max-h2c-boundary-summary.txt"
+        pattern: "^writer_verified=true$"
+        save_as: writer_verified
+      - action: assert_greater
+        actual: "{{ writer_verified }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase141-h2c/phase141-nvme-tcp-max-h2c-boundary-summary.txt"
+        pattern: "^reader_verified=true$"
+        save_as: reader_verified
+      - action: assert_greater
+        actual: "{{ reader_verified }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase141-h2c/phase141-nvme-tcp-max-h2c-boundary-summary.txt"
+        pattern: "^target_write_request_max_bytes=[1-9][0-9]*$"
+        save_as: target_request_max
+      - action: assert_greater
+        actual: "{{ target_request_max }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase141-h2c/phase141-nvme-tcp-max-h2c-boundary-summary.txt"
+        pattern: "^request_size_increase_observed=\\(true\\|false\\)$"
+        save_as: request_increase_named
+      - action: assert_greater
+        actual: "{{ request_increase_named }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase141-h2c/phase141-nvme-tcp-max-h2c-boundary-summary.txt"
+        pattern: "^phase141_decision=\\(keep_32k\\|add_opt_in\\|raise_default\\|blocked\\)$"
+        save_as: decision_named
+      - action: assert_greater
+        actual: "{{ decision_named }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase141-h2c/phase141-nvme-tcp-max-h2c-boundary-summary.txt"
+        pattern: "^cleanup_status=ok$"
+        save_as: cleanup_ok
+      - action: assert_greater
+        actual: "{{ cleanup_ok }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase141-h2c"
+        name: "remote-phases"
+        ignore_error: true
