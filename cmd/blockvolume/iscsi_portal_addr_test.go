@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/host/volume"
 )
 
 func TestParseFlags_VersionDoesNotRequireVolumeArgs(t *testing.T) {
@@ -59,7 +61,12 @@ func TestParseFlags_NVMeTransportRejectsRDMA(t *testing.T) {
 }
 
 func TestNVMeFrontendCapabilitiesExposeRDMAUnsupportedNoListener(t *testing.T) {
-	caps := nvmeFrontendCapabilities("127.0.0.1:4420", true)
+	facts := []volume.FrontendTransportPreflightFact{{
+		Name:      "nvme_rdma_module",
+		Available: false,
+		Reason:    "nvme_rdma_module_missing",
+	}}
+	caps := nvmeFrontendCapabilitiesWithRDMAPreflight("127.0.0.1:4420", true, facts)
 	if len(caps) != 2 {
 		t.Fatalf("capabilities=%d want 2", len(caps))
 	}
@@ -73,6 +80,23 @@ func TestNVMeFrontendCapabilitiesExposeRDMAUnsupportedNoListener(t *testing.T) {
 	}
 	if rdma.Reason != "nvme_rdma_transport_unsupported" {
 		t.Fatalf("rdma reason=%q want nvme_rdma_transport_unsupported", rdma.Reason)
+	}
+	if len(rdma.Preflight) != 1 || rdma.Preflight[0].Name != "nvme_rdma_module" || rdma.Preflight[0].Available {
+		t.Fatalf("rdma preflight unexpected: %+v", rdma.Preflight)
+	}
+}
+
+func TestRDMABindAddressFactRejectsLoopback(t *testing.T) {
+	got := rdmaBindAddressFact("127.0.0.1:4420")
+	if got.Name != "rdma_bind_address" || got.Available || got.Reason != "rdma_bind_address_invalid" {
+		t.Fatalf("bind fact=%+v want unavailable rdma_bind_address_invalid", got)
+	}
+}
+
+func TestRDMABindAddressFactAcceptsNonLoopbackCandidate(t *testing.T) {
+	got := rdmaBindAddressFact("192.168.100.10:4420")
+	if got.Name != "rdma_bind_address" || !got.Available || got.Reason != "rdma_bind_address_candidate" || got.Detail != "192.168.100.10" {
+		t.Fatalf("bind fact=%+v want non-loopback candidate", got)
 	}
 }
 

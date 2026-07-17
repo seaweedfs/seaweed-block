@@ -72,6 +72,12 @@ through a `sessionTransport` interface, with the current TCP path implemented by
 unsupported and `/status/frontend-capabilities` still reports
 `nvme_rdma_transport_unsupported`.
 
+Phase 161 extends the same capability surface with read-only RDMA preflight
+facts: `nvme_rdma_module`, `rdma_device`, and `rdma_bind_address`. These facts
+explain why RDMA cannot start on the current host while preserving
+`supported=false`, `listenerStarted=false`, and the stable
+`nvme_rdma_transport_unsupported` reason.
+
 ## Product Gap
 
 The missing product work is a real NVMe-oF/RDMA target path:
@@ -119,6 +125,6 @@ NVMe/TCP: source-gated supported-lab product path.
 NVMe/RDMA/RoCE: host capability and external-library evidence only; product non-claim.
 ```
 
-The next useful product step is standalone RDMA preflight/refusal: keep the
-product unsupported by default, but make missing module/device/bind-address
-evidence explicit before any listener implementation is attempted.
+The next useful product step is a standalone listener skeleton gate: keep the
+implementation disabled by default while defining the exact start path, failure
+mapping, and cleanup proof before live RDMA I/O.
