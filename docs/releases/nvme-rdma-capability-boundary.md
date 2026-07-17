@@ -59,6 +59,13 @@ The current response is intentionally conservative: TCP supported and RDMA unsup
 with `reason=nvme_rdma_transport_unsupported` and no RDMA listener started. This
 is a status/capability surface, not an RDMA data path.
 
+Phase 159 adds the standalone listener design gate. The main conclusion is that
+RDMA must not be implemented as a fake `net.Listener` around the existing
+NVMe/TCP PDU stream. The current `ListenerFactory` is a transport-selection
+seam, but real RDMA needs a transport adapter or dedicated session path that
+reuses command handlers without reusing TCP wire framing. The next implementation
+slice is `phase160_nvme_rdma_transport_adapter_seam`.
+
 ## Product Gap
 
 The missing product work is a real NVMe-oF/RDMA target path:
@@ -106,6 +113,6 @@ NVMe/TCP: source-gated supported-lab product path.
 NVMe/RDMA/RoCE: host capability and external-library evidence only; product non-claim.
 ```
 
-The next useful product step is a read-only capability probe that exposes the
-volume server's current frontend transport support and RDMA refusal/fallback
-facts before any RDMA data path is implemented.
+The next useful product step is the transport adapter seam that separates the
+current NVMe/TCP PDU wire path from reusable command/session handling before any
+RDMA listener is implemented.
