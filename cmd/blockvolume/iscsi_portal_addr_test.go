@@ -71,18 +71,58 @@ func TestNVMeFrontendCapabilitiesExposeRDMAUnsupportedNoListener(t *testing.T) {
 		t.Fatalf("capabilities=%d want 2", len(caps))
 	}
 	tcp := caps[0]
-	if tcp.Protocol != "nvme" || tcp.Transport != "tcp" || !tcp.Supported || !tcp.ListenerImplemented || !tcp.ListenerStarted {
+	if tcp.Protocol != "nvme" || tcp.Transport != "tcp" || !tcp.Supported || !tcp.ListenerImplemented || !tcp.ListenerStarted || !tcp.StartAllowed {
 		t.Fatalf("tcp capability unexpected: %+v", tcp)
 	}
 	rdma := caps[1]
-	if rdma.Protocol != "nvme" || rdma.Transport != "rdma" || rdma.Supported || rdma.ListenerImplemented || rdma.ListenerStarted {
+	if rdma.Protocol != "nvme" || rdma.Transport != "rdma" || rdma.Supported || rdma.ListenerImplemented || rdma.ListenerStarted || rdma.StartAllowed {
 		t.Fatalf("rdma capability must stay unsupported with no listener: %+v", rdma)
 	}
 	if rdma.Reason != "nvme_rdma_transport_unsupported" {
 		t.Fatalf("rdma reason=%q want nvme_rdma_transport_unsupported", rdma.Reason)
 	}
+	if rdma.StartReason != "nvme_rdma_listener_disabled" {
+		t.Fatalf("rdma startReason=%q want nvme_rdma_listener_disabled", rdma.StartReason)
+	}
 	if len(rdma.Preflight) != 1 || rdma.Preflight[0].Name != "nvme_rdma_module" || rdma.Preflight[0].Available {
 		t.Fatalf("rdma preflight unexpected: %+v", rdma.Preflight)
+	}
+}
+
+func TestNVMERDMAListenerStartDecisionDisabledByDefault(t *testing.T) {
+	got := nvmeRDMAListenerStartDecision(false, nil)
+	if got.allowed || got.reason != "nvme_rdma_listener_disabled" {
+		t.Fatalf("start decision=%+v want disabled refusal", got)
+	}
+}
+
+func TestNVMERDMAListenerStartDecisionMapsPreflightFailure(t *testing.T) {
+	got := nvmeRDMAListenerStartDecision(true, []volume.FrontendTransportPreflightFact{{
+		Name:      "rdma_device",
+		Available: false,
+		Reason:    "rdma_device_missing",
+	}})
+	if got.allowed || got.reason != "rdma_device_missing" {
+		t.Fatalf("start decision=%+v want rdma_device_missing", got)
+	}
+}
+
+func TestNVMERDMAListenerStartDecisionStillUnsupportedAfterPreflight(t *testing.T) {
+	got := nvmeRDMAListenerStartDecision(true, []volume.FrontendTransportPreflightFact{{
+		Name:      "nvme_rdma_module",
+		Available: true,
+		Reason:    "nvme_rdma_module_loaded",
+	}, {
+		Name:      "rdma_device",
+		Available: true,
+		Reason:    "rdma_device_present",
+	}, {
+		Name:      "rdma_bind_address",
+		Available: true,
+		Reason:    "rdma_bind_address_candidate",
+	}})
+	if got.allowed || got.reason != "nvme_rdma_transport_unsupported" {
+		t.Fatalf("start decision=%+v want unsupported implementation", got)
 	}
 }
 

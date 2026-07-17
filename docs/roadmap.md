@@ -152,6 +152,9 @@ Seaweed Block can already demonstrate a narrow Kubernetes block-storage loop:
   unsupported reason.
 - Phase 161 adds read-only RDMA preflight facts for module, RDMA device, and
   bind-address evidence while preserving `supported=false` and no RDMA listener.
+- Phase 162 adds a disabled-by-default RDMA listener start decision skeleton:
+  the product can report why start is not allowed, but still does not start an
+  RDMA listener or claim live I/O.
 - Kubernetes NVMe/TCP mounted reconnect is source-gated through changed
   desired path-set evidence: CSI-node can connect a newly published desired
   NVMe path, prune the stale old host path for the same NQN, preserve pod
