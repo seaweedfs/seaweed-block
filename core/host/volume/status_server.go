@@ -98,12 +98,20 @@ type RuntimeRebuildResult struct {
 }
 
 type FrontendTransportCapability struct {
-	Protocol            string `json:"protocol"`
-	Transport           string `json:"transport"`
-	Supported           bool   `json:"supported"`
-	ListenerImplemented bool   `json:"listenerImplemented"`
-	ListenerStarted     bool   `json:"listenerStarted"`
-	Reason              string `json:"reason"`
+	Protocol            string                           `json:"protocol"`
+	Transport           string                           `json:"transport"`
+	Supported           bool                             `json:"supported"`
+	ListenerImplemented bool                             `json:"listenerImplemented"`
+	ListenerStarted     bool                             `json:"listenerStarted"`
+	Reason              string                           `json:"reason"`
+	Preflight           []FrontendTransportPreflightFact `json:"preflight,omitempty"`
+}
+
+type FrontendTransportPreflightFact struct {
+	Name      string `json:"name"`
+	Available bool   `json:"available"`
+	Reason    string `json:"reason"`
+	Detail    string `json:"detail,omitempty"`
 }
 
 type FrontendCapabilitiesStatus struct {

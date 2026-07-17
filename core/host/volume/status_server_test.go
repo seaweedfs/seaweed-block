@@ -80,6 +80,11 @@ func TestStatusServer_FrontendCapabilitiesReportsTransportBoundary(t *testing.T)
 			ListenerImplemented: false,
 			ListenerStarted:     false,
 			Reason:              "nvme_rdma_transport_unsupported",
+			Preflight: []FrontendTransportPreflightFact{{
+				Name:      "nvme_rdma_module",
+				Available: false,
+				Reason:    "nvme_rdma_module_missing",
+			}},
 		},
 	})
 	addr, err := s.Start("127.0.0.1:0")
@@ -116,6 +121,9 @@ func TestStatusServer_FrontendCapabilitiesReportsTransportBoundary(t *testing.T)
 	rdma := body.FrontendTransports[1]
 	if rdma.Protocol != "nvme" || rdma.Transport != "rdma" || rdma.Supported || rdma.ListenerImplemented || rdma.ListenerStarted || rdma.Reason != "nvme_rdma_transport_unsupported" {
 		t.Fatalf("rdma capability unexpected: %+v", rdma)
+	}
+	if len(rdma.Preflight) != 1 || rdma.Preflight[0].Name != "nvme_rdma_module" || rdma.Preflight[0].Available {
+		t.Fatalf("rdma preflight unexpected: %+v", rdma.Preflight)
 	}
 }
 

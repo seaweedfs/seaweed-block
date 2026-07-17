@@ -104,6 +104,8 @@ This is the short internal roadmap. Keep it current and readable.
   before any Kubernetes publish/attach or performance claim.
 - Phase 160 adds the transport adapter seam in code while preserving TCP tests
   and the RDMA unsupported capability surface.
+- Phase 161 adds read-only RDMA preflight/refusal facts for module, device, and
+  bind-address evidence while preserving the unsupported status.
 
 Do not skip from scripts directly to mutating operator lifecycle. Helm has
 stabilized the installation contract, and Phase 35 added read-only CRD status,

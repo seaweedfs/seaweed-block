@@ -102,6 +102,7 @@ The supported-lab claim is intentionally narrow:
 | 158 | NVMe/RDMA volume capability probe reports TCP supported, RDMA unsupported | PASS |
 | 159 | NVMe/RDMA standalone listener design gate rejects fake TCP-over-RDMA path | PASS |
 | 160 | NVMe/RDMA transport adapter seam isolates TCP PDU wire path | PASS |
+| 161 | NVMe/RDMA standalone preflight/refusal facts surface module/device/bind evidence | PASS |
 
 Key QA sign-offs:
 
@@ -146,6 +147,7 @@ Key QA sign-offs:
 - `internal/docs/qa-assignments/phase158-nvme-rdma-volume-capability-probe-qa-signoff.md`
 - `internal/docs/qa-assignments/phase159-nvme-rdma-standalone-listener-design-qa-signoff.md`
 - `internal/docs/qa-assignments/phase160-nvme-rdma-transport-adapter-seam-qa-signoff.md`
+- `internal/docs/qa-assignments/phase161-nvme-rdma-standalone-preflight-refusal-qa-signoff.md`
 
 ## Performance Baseline
 

@@ -150,6 +150,8 @@ Seaweed Block can already demonstrate a narrow Kubernetes block-storage loop:
   interface, with TCP still backed by the existing NVMe/TCP PDU Reader/Writer.
   RDMA remains unsupported and the capability endpoint still reports the stable
   unsupported reason.
+- Phase 161 adds read-only RDMA preflight facts for module, RDMA device, and
+  bind-address evidence while preserving `supported=false` and no RDMA listener.
 - Kubernetes NVMe/TCP mounted reconnect is source-gated through changed
   desired path-set evidence: CSI-node can connect a newly published desired
   NVMe path, prune the stale old host path for the same NQN, preserve pod

@@ -1003,6 +1003,10 @@ func run(f flags) int {
 }
 
 func nvmeFrontendCapabilities(nvmeListen string, listenerStarted bool) []volume.FrontendTransportCapability {
+	return nvmeFrontendCapabilitiesWithRDMAPreflight(nvmeListen, listenerStarted, nvmeRDMAPreflightFacts(nvmeListen))
+}
+
+func nvmeFrontendCapabilitiesWithRDMAPreflight(nvmeListen string, listenerStarted bool, rdmaFacts []volume.FrontendTransportPreflightFact) []volume.FrontendTransportCapability {
 	tcpStarted := listenerStarted && nvmeListen != ""
 	return []volume.FrontendTransportCapability{
 		{
@@ -1020,8 +1024,52 @@ func nvmeFrontendCapabilities(nvmeListen string, listenerStarted bool) []volume.
 			ListenerImplemented: false,
 			ListenerStarted:     false,
 			Reason:              "nvme_rdma_transport_unsupported",
+			Preflight:           append([]volume.FrontendTransportPreflightFact(nil), rdmaFacts...),
 		},
 	}
+}
+
+func nvmeRDMAPreflightFacts(nvmeListen string) []volume.FrontendTransportPreflightFact {
+	return []volume.FrontendTransportPreflightFact{
+		nvmeRDMAModuleFact(),
+		rdmaDeviceFact(),
+		rdmaBindAddressFact(nvmeListen),
+	}
+}
+
+func nvmeRDMAModuleFact() volume.FrontendTransportPreflightFact {
+	if _, err := os.Stat("/sys/module/nvme_rdma"); err == nil {
+		return volume.FrontendTransportPreflightFact{Name: "nvme_rdma_module", Available: true, Reason: "nvme_rdma_module_loaded"}
+	}
+	if data, err := os.ReadFile("/proc/modules"); err == nil && strings.Contains(string(data), "nvme_rdma ") {
+		return volume.FrontendTransportPreflightFact{Name: "nvme_rdma_module", Available: true, Reason: "nvme_rdma_module_loaded"}
+	}
+	return volume.FrontendTransportPreflightFact{Name: "nvme_rdma_module", Available: false, Reason: "nvme_rdma_module_missing"}
+}
+
+func rdmaDeviceFact() volume.FrontendTransportPreflightFact {
+	entries, err := os.ReadDir("/sys/class/infiniband")
+	if err != nil || len(entries) == 0 {
+		return volume.FrontendTransportPreflightFact{Name: "rdma_device", Available: false, Reason: "rdma_device_missing"}
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	return volume.FrontendTransportPreflightFact{Name: "rdma_device", Available: true, Reason: "rdma_device_present", Detail: strings.Join(names, ",")}
+}
+
+func rdmaBindAddressFact(listen string) volume.FrontendTransportPreflightFact {
+	host := listen
+	if h, _, err := net.SplitHostPort(listen); err == nil {
+		host = h
+	}
+	host = strings.Trim(host, "[]")
+	ip := net.ParseIP(host)
+	if ip == nil || ip.IsUnspecified() || ip.IsLoopback() {
+		return volume.FrontendTransportPreflightFact{Name: "rdma_bind_address", Available: false, Reason: "rdma_bind_address_invalid", Detail: host}
+	}
+	return volume.FrontendTransportPreflightFact{Name: "rdma_bind_address", Available: true, Reason: "rdma_bind_address_candidate", Detail: host}
 }
 
 func waitFaultedDurableRecovery(h *volume.Host, status *volume.StatusServer, durableProv *durable.DurableProvider, evidence string) int {
