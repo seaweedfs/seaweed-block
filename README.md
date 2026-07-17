@@ -85,7 +85,9 @@ This is an **alpha** product path for supported lab clusters, not production.
   pod, and a durable backend full-block write-batching gate with
   product-owned `/status/durable` counters. The source-gated WAL multi-block
   record opt-in has mounted profile and restart/recovery compatibility evidence,
-  but remains default-off. This is a
+  plus mounted durable-status `HeadLSN` confirmation, but remains default-off
+  and requires a future matching-image release smoke before it becomes a public
+  image claim. This is a
   supported-lab source-gated claim, not a broad NVMe
   compatibility, RoCE/NVMe-RDMA, production HA, or performance/SLO claim.
 - Replay support bundles offline.

@@ -97,6 +97,7 @@ The supported-lab claim is intentionally narrow:
 | 153 | WAL multi-block release-boundary documentation | PASS |
 | 154 | Durable-status HeadLSN diagnostic cleanup | PASS |
 | 155 | Mounted durable-status HeadLSN confirmation | PASS |
+| 156 | WAL multi-block release-smoke decision keeps opt-in source-gated | PASS |
 
 Key QA sign-offs:
 
@@ -136,6 +137,7 @@ Key QA sign-offs:
 - `internal/docs/qa-assignments/phase153-wal-multiblock-release-boundary-qa-signoff.md`
 - `internal/docs/qa-assignments/phase154-durable-status-head-lsn-cleanup-qa-signoff.md`
 - `internal/docs/qa-assignments/phase155-mounted-durable-status-head-lsn-confirmation-qa-signoff.md`
+- `internal/docs/qa-assignments/phase156-wal-multiblock-release-smoke-decision-qa-signoff.md`
 
 ## Performance Baseline
 

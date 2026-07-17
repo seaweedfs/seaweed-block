@@ -108,8 +108,9 @@ blockmaster:
   durableWALMultiBlockRecords: true
 ```
 
-This is a lab-only optimization boundary backed by Phase 151/152 gates. The
-default remains `false`. Do not set
+This is a lab-only optimization boundary backed by Phase 151/152/155 gates. It
+is not a release-image claim until a matching-image smoke runs the explicit
+opt-in recovery/status path. The default remains `false`. Do not set
 `durableWALRecoveryTestDisableFlusher` outside recovery-test gates; that flag is
 scaffolding used to force WAL replay evidence and is not a production tuning
 knob.
