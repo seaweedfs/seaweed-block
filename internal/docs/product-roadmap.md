@@ -102,6 +102,8 @@ This is the short internal roadmap. Keep it current and readable.
 - Phase 159 defines the standalone NVMe/RDMA listener design gate. It rejects a
   fake TCP-over-RDMA implementation shape and selects a transport adapter seam
   before any Kubernetes publish/attach or performance claim.
+- Phase 160 adds the transport adapter seam in code while preserving TCP tests
+  and the RDMA unsupported capability surface.
 
 Do not skip from scripts directly to mutating operator lifecycle. Helm has
 stabilized the installation contract, and Phase 35 added read-only CRD status,

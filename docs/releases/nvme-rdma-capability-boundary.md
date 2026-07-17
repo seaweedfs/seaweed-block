@@ -66,6 +66,12 @@ seam, but real RDMA needs a transport adapter or dedicated session path that
 reuses command handlers without reusing TCP wire framing. The next implementation
 slice is `phase160_nvme_rdma_transport_adapter_seam`.
 
+Phase 160 adds that first adapter seam in code: `Session` now reads and writes
+through a `sessionTransport` interface, with the current TCP path implemented by
+`tcpPDUTransport` wrapping the existing NVMe/TCP `Reader`/`Writer`. RDMA remains
+unsupported and `/status/frontend-capabilities` still reports
+`nvme_rdma_transport_unsupported`.
+
 ## Product Gap
 
 The missing product work is a real NVMe-oF/RDMA target path:
@@ -113,6 +119,6 @@ NVMe/TCP: source-gated supported-lab product path.
 NVMe/RDMA/RoCE: host capability and external-library evidence only; product non-claim.
 ```
 
-The next useful product step is the transport adapter seam that separates the
-current NVMe/TCP PDU wire path from reusable command/session handling before any
-RDMA listener is implemented.
+The next useful product step is standalone RDMA preflight/refusal: keep the
+product unsupported by default, but make missing module/device/bind-address
+evidence explicit before any listener implementation is attempted.
