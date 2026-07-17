@@ -83,4 +83,7 @@ documented separately because it is source-gated until matching
 smoke; it now includes source-gated multipath/reconnect correctness and durable
 backend write-batching evidence, but still no RoCE/NVMe-RDMA or performance
 SLO claim.
-The WAL multi-block record opt-in is documented separately because it is a backend/WAL-format optimization boundary, not a RoCE, NVMe/RDMA, or performance claim. It remains default-off and source-gated.
+The WAL multi-block record opt-in is documented separately because it is a
+backend/WAL-format optimization boundary, not a RoCE, NVMe/RDMA, or performance
+claim. It remains default-off and source-gated; a future published-image smoke
+is still required before any public release-image claim.

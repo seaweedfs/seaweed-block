@@ -87,6 +87,9 @@ This is the short internal roadmap. Keep it current and readable.
   durable-status `HeadLSN` display by separating WAL byte-position metadata
   from LSN boundaries; Phase 155 confirmed the same boundary in the mounted K8s
   path with `DurableLSN == HeadLSN == recovered_lsn_after_restart=13511`.
+  Phase 156 keeps the opt-in source-gated until a future matching-image release
+  smoke validates the explicit opt-in recovery/status path on published
+  artifacts.
 
 Do not skip from scripts directly to mutating operator lifecycle. Helm has
 stabilized the installation contract, and Phase 35 added read-only CRD status,

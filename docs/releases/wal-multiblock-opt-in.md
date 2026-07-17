@@ -122,12 +122,29 @@ cleanup_status=ok
 - No WAL format migration promise for existing user data.
 - No production HA claim.
 
+## Phase 156 Release-Smoke Decision
+
+Phase 156 release-smoke decision: keep this opt-in source-gated. The project is
+continuing source development rather than cutting a release for this backend
+optimization now.
+
+A future public or published-image claim requires a matching-image smoke with
+this narrow scope:
+
+- explicit opt-in enabled;
+- recovery-test flusher-disable used only inside the recovery gate;
+- mounted restart/recovery with hostPath persistence;
+- durable-status `DurableLSN == HeadLSN == recovered LSN`;
+- reader verification after restart;
+- `Ready` restored after restart;
+- cleanup verified clean.
+
 ## Remaining Follow-Ups
 
 - Phase 154 fixed the diagnostic durable status where post-recovery `HeadLSN`
   could display the persisted WAL byte offset instead of the recovered LSN
   frontier. Phase 155 confirmed that fix in the mounted K8s
   restart/recovery path.
-- Decide whether this opt-in should stay source-gated or be included in a future
-  published-image release smoke.
+- Phase 156 keeps this opt-in source-gated until a future matching-image smoke
+  proves the explicit opt-in recovery/status path on published artifacts.
 - Keep the recovery-test flusher-disable hook out of user release guidance.
