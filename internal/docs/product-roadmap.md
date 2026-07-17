@@ -99,6 +99,9 @@ This is the short internal roadmap. Keep it current and readable.
   `/status/frontend-capabilities` reports NVMe/TCP supported and NVMe/RDMA
   unsupported with a stable reason. It does not start an RDMA listener or claim
   RoCE/NVMe-RDMA attach.
+- Phase 159 defines the standalone NVMe/RDMA listener design gate. It rejects a
+  fake TCP-over-RDMA implementation shape and selects a transport adapter seam
+  before any Kubernetes publish/attach or performance claim.
 
 Do not skip from scripts directly to mutating operator lifecycle. Helm has
 stabilized the installation contract, and Phase 35 added read-only CRD status,

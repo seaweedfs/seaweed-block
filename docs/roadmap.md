@@ -142,6 +142,10 @@ Seaweed Block can already demonstrate a narrow Kubernetes block-storage loop:
   `/status/frontend-capabilities` reports NVMe/TCP supported and NVMe/RDMA
   unsupported with a stable reason. It still does not start an RDMA listener or
   claim RoCE/NVMe-RDMA attach.
+- Phase 159 defines the standalone NVMe/RDMA listener design gate. It explicitly
+  rejects a fake "RDMA listener" that still speaks the NVMe/TCP PDU stream, and
+  selects a transport adapter seam as the next implementation step before any
+  Kubernetes publish/attach or performance claim.
 - Kubernetes NVMe/TCP mounted reconnect is source-gated through changed
   desired path-set evidence: CSI-node can connect a newly published desired
   NVMe path, prune the stale old host path for the same NQN, preserve pod
