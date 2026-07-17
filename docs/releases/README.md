@@ -17,6 +17,7 @@ is still outside the supported boundary.
 - [v0.5 Beta Candidate — Bounded SwBlockVolume Lifecycle Owner](v0.5-beta-candidate.md)
 - [v0.6 Beta Candidate — Returned-Replica ACK Eligibility Executor](v0.6-beta-candidate.md)
 - [NVMe/TCP Supported-Lab Claim](nvme-tcp-supported-lab.md)
+- [NVMe/RDMA Capability Boundary](nvme-rdma-capability-boundary.md)
 - [WAL Multi-Block Record Opt-In Boundary](wal-multiblock-opt-in.md)
 
 ## Version Boundary

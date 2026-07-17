@@ -133,6 +133,11 @@ Seaweed Block can already demonstrate a narrow Kubernetes block-storage loop:
   `DurableLSN`, `HeadLSN`, and recovery evidence all match the recovered LSN.
   Phase 156 keeps the opt-in source-gated: a future public release-image claim
   requires a matching-image smoke of the explicit opt-in recovery/status path.
+- Phase 157 keeps RoCE/NVMe-RDMA as a product non-claim until the product owns a
+  real RDMA transport path and passes standalone live I/O, Kubernetes
+  publish/attach, status-surface, fallback/refusal, and cleanup gates. Host RDMA
+  capability and external VFS/object RDMA evidence remain useful inputs but are
+  not a Seaweed Block NVMe/RDMA claim.
 - Kubernetes NVMe/TCP mounted reconnect is source-gated through changed
   desired path-set evidence: CSI-node can connect a newly published desired
   NVMe path, prune the stale old host path for the same NQN, preserve pod

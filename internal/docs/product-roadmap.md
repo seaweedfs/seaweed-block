@@ -90,6 +90,11 @@ This is the short internal roadmap. Keep it current and readable.
   Phase 156 keeps the opt-in source-gated until a future matching-image release
   smoke validates the explicit opt-in recovery/status path on published
   artifacts.
+- Phase 157 keeps RoCE/NVMe-RDMA as a product non-claim until the product owns a
+  real RDMA transport path and passes standalone live I/O, Kubernetes
+  publish/attach, status-surface, fallback/refusal, and cleanup gates. Host RDMA
+  capability and external VFS/object RDMA evidence are inputs, not Block
+  NVMe/RDMA product evidence.
 
 Do not skip from scripts directly to mutating operator lifecycle. Helm has
 stabilized the installation contract, and Phase 35 added read-only CRD status,
