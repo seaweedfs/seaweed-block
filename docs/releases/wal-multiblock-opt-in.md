@@ -58,6 +58,7 @@ restart/replay gate and are not a production or user-facing tuning knob.
 | 152 | mounted hostPath restart/recovery replays multi-block WAL records | PASS |
 | 153 | release-boundary documentation keeps the opt-in source-gated | PASS |
 | 154 | local durable-status `HeadLSN` diagnostic cleanup | PASS |
+| 155 | mounted durable-status `HeadLSN` confirmation after restart/recovery | PASS |
 
 Phase 151 mounted profile evidence:
 
@@ -92,6 +93,24 @@ ready_after_restart=true
 cleanup_status=ok
 ```
 
+Phase 155 mounted durable-status confirmation:
+
+```text
+phase155_mounted_durable_status_head_lsn_confirmation_status=ok
+runtime_opt_in_enabled=true
+recovery_test_disable_flusher_enabled=true
+restart_persistence_mode=hostpath
+blockvolume_restart_mode=force_delete_pod
+recovery_completed=true
+recovered_lsn_after_restart=13511
+durable_status_durable_lsn_after_restart=13511
+durable_status_head_lsn_after_restart=13511
+durable_status_head_lsn_equals_recovered_lsn=true
+reader_verified_after_restart=true
+ready_after_restart=true
+cleanup_status=ok
+```
+
 ## Explicit Non-Claims
 
 - Not enabled by default.
@@ -107,9 +126,8 @@ cleanup_status=ok
 
 - Phase 154 fixed the diagnostic durable status where post-recovery `HeadLSN`
   could display the persisted WAL byte offset instead of the recovered LSN
-  frontier.
-- Rerun a mounted confirmation that live `/status/durable` reports bounded
-  `HeadLSN` after the Phase 152 restart/recovery shape.
+  frontier. Phase 155 confirmed that fix in the mounted K8s
+  restart/recovery path.
 - Decide whether this opt-in should stay source-gated or be included in a future
   published-image release smoke.
 - Keep the recovery-test flusher-disable hook out of user release guidance.

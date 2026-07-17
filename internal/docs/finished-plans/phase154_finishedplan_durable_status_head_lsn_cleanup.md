@@ -49,5 +49,5 @@ next_recommendation=phase155_mounted_durable_status_head_lsn_confirmation
 ## Conclusion
 
 The local diagnostic bug is fixed without changing the default WAL format or
-the Phase 152 recovery contract. Phase 155 should be a mounted confirmation of
-the same status boundary in the live K8s path.
+the Phase 152 recovery contract. Phase 155 later confirmed the same status
+boundary in the live mounted K8s path.

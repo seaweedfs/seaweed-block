@@ -46,6 +46,5 @@ next_recommendation=phase155_mounted_durable_status_head_lsn_confirmation
 
 ## Conclusion
 
-Phase 154 closes the local diagnostic/status cleanup. The next useful gate is a
-mounted confirmation that reruns the K8s recovery shape and asserts the live
-`/status/durable` output has bounded `HeadLSN` after restart.
+Phase 154 closes the local diagnostic/status cleanup. Phase 155 later confirmed
+the same `HeadLSN` boundary in the mounted K8s restart/recovery path.

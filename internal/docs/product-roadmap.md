@@ -85,8 +85,8 @@ This is the short internal roadmap. Keep it current and readable.
   RoCE, or NVMe/RDMA claim. Phase 153 closed the release-boundary documentation
   gate for this source-gated opt-in. Phase 154 fixed the local diagnostic
   durable-status `HeadLSN` display by separating WAL byte-position metadata
-  from LSN boundaries; Phase 155 should confirm the same boundary in the mounted
-  K8s path.
+  from LSN boundaries; Phase 155 confirmed the same boundary in the mounted K8s
+  path with `DurableLSN == HeadLSN == recovered_lsn_after_restart=13511`.
 
 Do not skip from scripts directly to mutating operator lifecycle. Helm has
 stabilized the installation contract, and Phase 35 added read-only CRD status,

@@ -96,6 +96,7 @@ The supported-lab claim is intentionally narrow:
 | 152 | Mounted multi-block WAL recovery compatibility | PASS |
 | 153 | WAL multi-block release-boundary documentation | PASS |
 | 154 | Durable-status HeadLSN diagnostic cleanup | PASS |
+| 155 | Mounted durable-status HeadLSN confirmation | PASS |
 
 Key QA sign-offs:
 
@@ -134,6 +135,7 @@ Key QA sign-offs:
 - `internal/docs/qa-assignments/phase152-wal-multiblock-recovery-compatibility-qa-signoff.md`
 - `internal/docs/qa-assignments/phase153-wal-multiblock-release-boundary-qa-signoff.md`
 - `internal/docs/qa-assignments/phase154-durable-status-head-lsn-cleanup-qa-signoff.md`
+- `internal/docs/qa-assignments/phase155-mounted-durable-status-head-lsn-confirmation-qa-signoff.md`
 
 ## Performance Baseline
 
