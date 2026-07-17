@@ -138,6 +138,10 @@ Seaweed Block can already demonstrate a narrow Kubernetes block-storage loop:
   publish/attach, status-surface, fallback/refusal, and cleanup gates. Host RDMA
   capability and external VFS/object RDMA evidence remain useful inputs but are
   not a Seaweed Block NVMe/RDMA claim.
+- Phase 158 adds a product-owned read-only capability probe:
+  `/status/frontend-capabilities` reports NVMe/TCP supported and NVMe/RDMA
+  unsupported with a stable reason. It still does not start an RDMA listener or
+  claim RoCE/NVMe-RDMA attach.
 - Kubernetes NVMe/TCP mounted reconnect is source-gated through changed
   desired path-set evidence: CSI-node can connect a newly published desired
   NVMe path, prune the stale old host path for the same NQN, preserve pod

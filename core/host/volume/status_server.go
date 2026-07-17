@@ -55,6 +55,7 @@ type StatusServer struct {
 	peerSource      peerStatusSource
 	durableSource   durableStatusSource
 	runtimeSource   runtimeRecoverySource
+	frontendCaps    []FrontendTransportCapability
 }
 
 type peerStatusSource interface {
@@ -94,6 +95,21 @@ type RuntimeRebuildResult struct {
 	DurableFrontierKnown  bool     `json:"durableFrontierKnown"`
 	DurableFrontierLSN    uint64   `json:"durableFrontierLsn,omitempty"`
 	EvidenceRefs          []string `json:"evidenceRefs,omitempty"`
+}
+
+type FrontendTransportCapability struct {
+	Protocol            string `json:"protocol"`
+	Transport           string `json:"transport"`
+	Supported           bool   `json:"supported"`
+	ListenerImplemented bool   `json:"listenerImplemented"`
+	ListenerStarted     bool   `json:"listenerStarted"`
+	Reason              string `json:"reason"`
+}
+
+type FrontendCapabilitiesStatus struct {
+	VolumeID                     string                        `json:"volumeID"`
+	HostCapabilityIsProductClaim bool                          `json:"hostCapabilityIsProductClaim"`
+	FrontendTransports           []FrontendTransportCapability `json:"frontendTransports"`
 }
 
 const (
@@ -188,6 +204,12 @@ func (s *StatusServer) SetRuntimeRecoverySource(src runtimeRecoverySource) {
 	s.runtimeSource = src
 }
 
+func (s *StatusServer) SetFrontendCapabilities(caps []FrontendTransportCapability) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.frontendCaps = append([]FrontendTransportCapability(nil), caps...)
+}
+
 // Start binds on addr and spawns the HTTP serve goroutine.
 // addr MUST be a loopback host (empty-host is rejected; any
 // non-loopback IP returns an error). Returns the bound addr
@@ -219,6 +241,7 @@ func (s *StatusServer) Start(addr string) (string, error) {
 	mux.HandleFunc("/status", s.handleStatus)
 	mux.HandleFunc("/status/peers", s.handleStatusPeers)
 	mux.HandleFunc("/status/durable", s.handleStatusDurable)
+	mux.HandleFunc("/status/frontend-capabilities", s.handleFrontendCapabilities)
 	if s.recoveryEnabled {
 		mux.HandleFunc("/status/recovery", s.handleStatusRecovery)
 	}
@@ -274,6 +297,32 @@ func (s *StatusServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(p)
+}
+
+func (s *StatusServer) handleFrontendCapabilities(w http.ResponseWriter, r *http.Request) {
+	if !s.externalAccessAllowed() && !isLoopbackRemote(r.RemoteAddr) {
+		http.Error(w, "status endpoint restricted to loopback", http.StatusForbidden)
+		return
+	}
+	vol := r.URL.Query().Get("volume")
+	if vol == "" {
+		http.Error(w, "missing volume query param", http.StatusBadRequest)
+		return
+	}
+	p := s.statusProjection()
+	if p.VolumeID != vol {
+		http.Error(w, fmt.Sprintf("volume %q not served by this host (serves %q)", vol, p.VolumeID), http.StatusNotFound)
+		return
+	}
+	s.mu.Lock()
+	caps := append([]FrontendTransportCapability(nil), s.frontendCaps...)
+	s.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(FrontendCapabilitiesStatus{
+		VolumeID:                     p.VolumeID,
+		HostCapabilityIsProductClaim: false,
+		FrontendTransports:           caps,
+	})
 }
 
 func (s *StatusServer) statusProjection() StatusProjection {

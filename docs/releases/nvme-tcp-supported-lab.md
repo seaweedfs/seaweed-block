@@ -99,6 +99,7 @@ The supported-lab claim is intentionally narrow:
 | 155 | Mounted durable-status HeadLSN confirmation | PASS |
 | 156 | WAL multi-block release-smoke decision keeps opt-in source-gated | PASS |
 | 157 | NVMe/RDMA capability boundary keeps RDMA as non-claim | PASS |
+| 158 | NVMe/RDMA volume capability probe reports TCP supported, RDMA unsupported | PASS |
 
 Key QA sign-offs:
 
@@ -140,6 +141,7 @@ Key QA sign-offs:
 - `internal/docs/qa-assignments/phase155-mounted-durable-status-head-lsn-confirmation-qa-signoff.md`
 - `internal/docs/qa-assignments/phase156-wal-multiblock-release-smoke-decision-qa-signoff.md`
 - `internal/docs/qa-assignments/phase157-nvme-rdma-capability-boundary-qa-signoff.md`
+- `internal/docs/qa-assignments/phase158-nvme-rdma-volume-capability-probe-qa-signoff.md`
 
 ## Performance Baseline
 

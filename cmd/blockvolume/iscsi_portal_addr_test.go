@@ -58,6 +58,24 @@ func TestParseFlags_NVMeTransportRejectsRDMA(t *testing.T) {
 	}
 }
 
+func TestNVMeFrontendCapabilitiesExposeRDMAUnsupportedNoListener(t *testing.T) {
+	caps := nvmeFrontendCapabilities("127.0.0.1:4420", true)
+	if len(caps) != 2 {
+		t.Fatalf("capabilities=%d want 2", len(caps))
+	}
+	tcp := caps[0]
+	if tcp.Protocol != "nvme" || tcp.Transport != "tcp" || !tcp.Supported || !tcp.ListenerImplemented || !tcp.ListenerStarted {
+		t.Fatalf("tcp capability unexpected: %+v", tcp)
+	}
+	rdma := caps[1]
+	if rdma.Protocol != "nvme" || rdma.Transport != "rdma" || rdma.Supported || rdma.ListenerImplemented || rdma.ListenerStarted {
+		t.Fatalf("rdma capability must stay unsupported with no listener: %+v", rdma)
+	}
+	if rdma.Reason != "nvme_rdma_transport_unsupported" {
+		t.Fatalf("rdma reason=%q want nvme_rdma_transport_unsupported", rdma.Reason)
+	}
+}
+
 func TestParseFlags_NVMeMaxH2CDataLengthRequiresNVMeListen(t *testing.T) {
 	args := append(requiredBlockvolumeArgs(),
 		"--nvme-max-h2c-data-length", "65536",
