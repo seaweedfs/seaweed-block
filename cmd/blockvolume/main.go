@@ -488,6 +488,7 @@ func run(f flags) int {
 		if f.allowExternalStatusBind {
 			status.AllowExternalAccess()
 		}
+		status.SetFrontendCapabilities(nvmeFrontendCapabilities(f.nvmeListen, false))
 		bound, err := status.Start(f.statusAddr)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "blockvolume: status server:", err)
@@ -956,6 +957,9 @@ func run(f flags) int {
 			Nsid:     uint32(f.nvmeNS),
 		})
 		h.SetFrontendTargets(frontendTargets)
+		if status != nil {
+			status.SetFrontendCapabilities(nvmeFrontendCapabilities(f.nvmeListen, true))
+		}
 	}
 
 	sig := make(chan os.Signal, 1)
@@ -996,6 +1000,28 @@ func run(f flags) int {
 		return 1
 	}
 	return 0
+}
+
+func nvmeFrontendCapabilities(nvmeListen string, listenerStarted bool) []volume.FrontendTransportCapability {
+	tcpStarted := listenerStarted && nvmeListen != ""
+	return []volume.FrontendTransportCapability{
+		{
+			Protocol:            "nvme",
+			Transport:           "tcp",
+			Supported:           true,
+			ListenerImplemented: true,
+			ListenerStarted:     tcpStarted,
+			Reason:              "implemented",
+		},
+		{
+			Protocol:            "nvme",
+			Transport:           "rdma",
+			Supported:           false,
+			ListenerImplemented: false,
+			ListenerStarted:     false,
+			Reason:              "nvme_rdma_transport_unsupported",
+		},
+	}
 }
 
 func waitFaultedDurableRecovery(h *volume.Host, status *volume.StatusServer, durableProv *durable.DurableProvider, evidence string) int {

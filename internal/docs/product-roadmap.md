@@ -95,6 +95,10 @@ This is the short internal roadmap. Keep it current and readable.
   publish/attach, status-surface, fallback/refusal, and cleanup gates. Host RDMA
   capability and external VFS/object RDMA evidence are inputs, not Block
   NVMe/RDMA product evidence.
+- Phase 158 adds the first read-only product-owned capability probe:
+  `/status/frontend-capabilities` reports NVMe/TCP supported and NVMe/RDMA
+  unsupported with a stable reason. It does not start an RDMA listener or claim
+  RoCE/NVMe-RDMA attach.
 
 Do not skip from scripts directly to mutating operator lifecycle. Helm has
 stabilized the installation contract, and Phase 35 added read-only CRD status,

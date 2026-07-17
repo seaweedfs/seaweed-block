@@ -49,6 +49,16 @@ host facts:
 Today the product boundary is still typed refusal: TCP is implemented and RDMA
 is not.
 
+Phase 158 adds the first read-only product-owned capability probe at:
+
+```text
+GET /status/frontend-capabilities?volume=<id>
+```
+
+The current response is intentionally conservative: TCP supported and RDMA unsupported,
+with `reason=nvme_rdma_transport_unsupported` and no RDMA listener started. This
+is a status/capability surface, not an RDMA data path.
+
 ## Product Gap
 
 The missing product work is a real NVMe-oF/RDMA target path:

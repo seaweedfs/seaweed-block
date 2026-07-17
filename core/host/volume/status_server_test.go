@@ -61,6 +61,64 @@ func TestStatusServer_AcceptsLoopbackBindAndServesJSON(t *testing.T) {
 	}
 }
 
+func TestStatusServer_FrontendCapabilitiesReportsTransportBoundary(t *testing.T) {
+	p := stubProjector{p: engine.ReplicaProjection{Mode: engine.ModeHealthy, Epoch: 5, EndpointVersion: 3}}
+	s := NewStatusServer(NewAdapterProjectionView(p, "v1", "r1", nil))
+	s.SetFrontendCapabilities([]FrontendTransportCapability{
+		{
+			Protocol:            "nvme",
+			Transport:           "tcp",
+			Supported:           true,
+			ListenerImplemented: true,
+			ListenerStarted:     true,
+			Reason:              "implemented",
+		},
+		{
+			Protocol:            "nvme",
+			Transport:           "rdma",
+			Supported:           false,
+			ListenerImplemented: false,
+			ListenerStarted:     false,
+			Reason:              "nvme_rdma_transport_unsupported",
+		},
+	})
+	addr, err := s.Start("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = s.Close(context.Background()) }()
+
+	resp, err := http.Get("http://" + addr + "/status/frontend-capabilities?volume=v1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d want 200", resp.StatusCode)
+	}
+	var body FrontendCapabilitiesStatus
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.VolumeID != "v1" {
+		t.Fatalf("volumeID=%q want v1", body.VolumeID)
+	}
+	if body.HostCapabilityIsProductClaim {
+		t.Fatal("host capability must not be projected as a product claim")
+	}
+	if len(body.FrontendTransports) != 2 {
+		t.Fatalf("frontend transport count=%d want 2", len(body.FrontendTransports))
+	}
+	tcp := body.FrontendTransports[0]
+	if tcp.Protocol != "nvme" || tcp.Transport != "tcp" || !tcp.Supported || !tcp.ListenerImplemented || !tcp.ListenerStarted {
+		t.Fatalf("tcp capability unexpected: %+v", tcp)
+	}
+	rdma := body.FrontendTransports[1]
+	if rdma.Protocol != "nvme" || rdma.Transport != "rdma" || rdma.Supported || rdma.ListenerImplemented || rdma.ListenerStarted || rdma.Reason != "nvme_rdma_transport_unsupported" {
+		t.Fatalf("rdma capability unexpected: %+v", rdma)
+	}
+}
+
 func TestNodeLoss_StatusServer_ExternalBindPolicyRequiresConcreteHost(t *testing.T) {
 	if err := enforceExplicitExternalBind("10.0.0.12:23260"); err != nil {
 		t.Fatalf("concrete node address rejected: %v", err)
