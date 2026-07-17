@@ -71,6 +71,8 @@ func TestStatusServer_FrontendCapabilitiesReportsTransportBoundary(t *testing.T)
 			Supported:           true,
 			ListenerImplemented: true,
 			ListenerStarted:     true,
+			StartAllowed:        true,
+			StartReason:         "implemented",
 			Reason:              "implemented",
 		},
 		{
@@ -79,6 +81,8 @@ func TestStatusServer_FrontendCapabilitiesReportsTransportBoundary(t *testing.T)
 			Supported:           false,
 			ListenerImplemented: false,
 			ListenerStarted:     false,
+			StartAllowed:        false,
+			StartReason:         "nvme_rdma_listener_disabled",
 			Reason:              "nvme_rdma_transport_unsupported",
 			Preflight: []FrontendTransportPreflightFact{{
 				Name:      "nvme_rdma_module",
@@ -115,11 +119,11 @@ func TestStatusServer_FrontendCapabilitiesReportsTransportBoundary(t *testing.T)
 		t.Fatalf("frontend transport count=%d want 2", len(body.FrontendTransports))
 	}
 	tcp := body.FrontendTransports[0]
-	if tcp.Protocol != "nvme" || tcp.Transport != "tcp" || !tcp.Supported || !tcp.ListenerImplemented || !tcp.ListenerStarted {
+	if tcp.Protocol != "nvme" || tcp.Transport != "tcp" || !tcp.Supported || !tcp.ListenerImplemented || !tcp.ListenerStarted || !tcp.StartAllowed {
 		t.Fatalf("tcp capability unexpected: %+v", tcp)
 	}
 	rdma := body.FrontendTransports[1]
-	if rdma.Protocol != "nvme" || rdma.Transport != "rdma" || rdma.Supported || rdma.ListenerImplemented || rdma.ListenerStarted || rdma.Reason != "nvme_rdma_transport_unsupported" {
+	if rdma.Protocol != "nvme" || rdma.Transport != "rdma" || rdma.Supported || rdma.ListenerImplemented || rdma.ListenerStarted || rdma.StartAllowed || rdma.StartReason != "nvme_rdma_listener_disabled" || rdma.Reason != "nvme_rdma_transport_unsupported" {
 		t.Fatalf("rdma capability unexpected: %+v", rdma)
 	}
 	if len(rdma.Preflight) != 1 || rdma.Preflight[0].Name != "nvme_rdma_module" || rdma.Preflight[0].Available {

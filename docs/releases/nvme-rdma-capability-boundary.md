@@ -78,6 +78,12 @@ explain why RDMA cannot start on the current host while preserving
 `supported=false`, `listenerStarted=false`, and the stable
 `nvme_rdma_transport_unsupported` reason.
 
+Phase 162 adds the disabled-by-default listener start decision skeleton. The
+capability surface now carries `startAllowed=false` and a stable `startReason`
+for RDMA: default-disabled first, preflight failures when explicitly evaluated,
+and still `nvme_rdma_transport_unsupported` after preflight passes because no
+listener implementation exists yet.
+
 ## Product Gap
 
 The missing product work is a real NVMe-oF/RDMA target path:
@@ -125,6 +131,6 @@ NVMe/TCP: source-gated supported-lab product path.
 NVMe/RDMA/RoCE: host capability and external-library evidence only; product non-claim.
 ```
 
-The next useful product step is a standalone listener skeleton gate: keep the
-implementation disabled by default while defining the exact start path, failure
-mapping, and cleanup proof before live RDMA I/O.
+The next useful product step is a standalone listener implementation spike that
+can be tested only by the standalone live I/O gate; Kubernetes publish/attach
+and performance claims remain out of scope.

@@ -106,6 +106,9 @@ This is the short internal roadmap. Keep it current and readable.
   and the RDMA unsupported capability surface.
 - Phase 161 adds read-only RDMA preflight/refusal facts for module, device, and
   bind-address evidence while preserving the unsupported status.
+- Phase 162 adds a disabled-by-default listener start decision skeleton. It
+  reports start refusal reasons but still does not start an RDMA listener or
+  claim live I/O.
 
 Do not skip from scripts directly to mutating operator lifecycle. Helm has
 stabilized the installation contract, and Phase 35 added read-only CRD status,

@@ -1008,6 +1008,7 @@ func nvmeFrontendCapabilities(nvmeListen string, listenerStarted bool) []volume.
 
 func nvmeFrontendCapabilitiesWithRDMAPreflight(nvmeListen string, listenerStarted bool, rdmaFacts []volume.FrontendTransportPreflightFact) []volume.FrontendTransportCapability {
 	tcpStarted := listenerStarted && nvmeListen != ""
+	rdmaStart := nvmeRDMAListenerStartDecision(false, rdmaFacts)
 	return []volume.FrontendTransportCapability{
 		{
 			Protocol:            "nvme",
@@ -1015,6 +1016,8 @@ func nvmeFrontendCapabilitiesWithRDMAPreflight(nvmeListen string, listenerStarte
 			Supported:           true,
 			ListenerImplemented: true,
 			ListenerStarted:     tcpStarted,
+			StartAllowed:        true,
+			StartReason:         "implemented",
 			Reason:              "implemented",
 		},
 		{
@@ -1023,10 +1026,29 @@ func nvmeFrontendCapabilitiesWithRDMAPreflight(nvmeListen string, listenerStarte
 			Supported:           false,
 			ListenerImplemented: false,
 			ListenerStarted:     false,
+			StartAllowed:        rdmaStart.allowed,
+			StartReason:         rdmaStart.reason,
 			Reason:              "nvme_rdma_transport_unsupported",
 			Preflight:           append([]volume.FrontendTransportPreflightFact(nil), rdmaFacts...),
 		},
 	}
+}
+
+type nvmeRDMAListenerStart struct {
+	allowed bool
+	reason  string
+}
+
+func nvmeRDMAListenerStartDecision(enabled bool, facts []volume.FrontendTransportPreflightFact) nvmeRDMAListenerStart {
+	if !enabled {
+		return nvmeRDMAListenerStart{allowed: false, reason: "nvme_rdma_listener_disabled"}
+	}
+	for _, fact := range facts {
+		if !fact.Available {
+			return nvmeRDMAListenerStart{allowed: false, reason: fact.Reason}
+		}
+	}
+	return nvmeRDMAListenerStart{allowed: false, reason: "nvme_rdma_transport_unsupported"}
 }
 
 func nvmeRDMAPreflightFacts(nvmeListen string) []volume.FrontendTransportPreflightFact {

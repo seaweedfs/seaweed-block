@@ -103,6 +103,8 @@ type FrontendTransportCapability struct {
 	Supported           bool                             `json:"supported"`
 	ListenerImplemented bool                             `json:"listenerImplemented"`
 	ListenerStarted     bool                             `json:"listenerStarted"`
+	StartAllowed        bool                             `json:"startAllowed"`
+	StartReason         string                           `json:"startReason,omitempty"`
 	Reason              string                           `json:"reason"`
 	Preflight           []FrontendTransportPreflightFact `json:"preflight,omitempty"`
 }
