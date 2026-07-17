@@ -97,8 +97,7 @@ type response struct {
 // Session carries per-connection NVMe/TCP state.
 type Session struct {
 	conn    net.Conn
-	r       *Reader
-	w       *Writer
+	wire    sessionTransport
 	handler *IOHandler
 	logger  Logger
 
@@ -137,8 +136,7 @@ type Logger interface {
 func newSession(conn net.Conn, h *IOHandler, target *Target, expectedSubNQN string, lg Logger) *Session {
 	return &Session{
 		conn:           conn,
-		r:              NewReader(conn),
-		w:              NewWriter(conn),
+		wire:           newTCPPDUTransport(conn),
 		handler:        h,
 		target:         target,
 		expectedSubNQN: expectedSubNQN,
@@ -179,7 +177,7 @@ func (s *Session) serve(ctx context.Context) error {
 // ---------- Phase 1: IC handshake ----------
 
 func (s *Session) handleICReq() error {
-	ch, err := s.r.Dequeue()
+	ch, err := s.wire.Dequeue()
 	if err != nil {
 		return err
 	}
@@ -187,7 +185,7 @@ func (s *Session) handleICReq() error {
 		return fmt.Errorf("expected ICReq (0x%x) got 0x%x", pduICReq, ch.Type)
 	}
 	var req ICRequest
-	if err := s.r.Receive(&req); err != nil {
+	if err := s.wire.Receive(&req); err != nil {
 		return err
 	}
 	resp := ICResponse{
@@ -196,7 +194,7 @@ func (s *Session) handleICReq() error {
 		PDUDataDigest:    0,
 		MaxH2CDataLength: s.maxH2CDataLength(),
 	}
-	return s.w.SendHeaderOnly(pduICResp, &resp, icBodySize)
+	return s.wire.SendHeaderOnly(pduICResp, &resp, icBodySize)
 }
 
 func (s *Session) maxH2CDataLength() uint32 {
@@ -226,7 +224,7 @@ func (s *Session) rxLoop(ctx context.Context) error {
 			}
 		}
 
-		ch, err := s.r.Dequeue()
+		ch, err := s.wire.Dequeue()
 		if err != nil {
 			if err == io.EOF || s.closed.Load() {
 				return nil
@@ -252,13 +250,13 @@ func (s *Session) rxLoop(ctx context.Context) error {
 
 func (s *Session) parseCapsule() (*Request, error) {
 	var capsule CapsuleCommand
-	if err := s.r.Receive(&capsule); err != nil {
+	if err := s.wire.Receive(&capsule); err != nil {
 		return nil, err
 	}
 	var payload []byte
-	if n := s.r.Length(); n > 0 {
+	if n := s.wire.Length(); n > 0 {
 		payload = make([]byte, n)
-		if err := s.r.ReceiveData(payload); err != nil {
+		if err := s.wire.ReceiveData(payload); err != nil {
 			return nil, err
 		}
 	}
@@ -371,7 +369,7 @@ func (s *Session) recvH2CData(totalBytes uint32) ([]byte, error) {
 	buf := make([]byte, totalBytes)
 	received := uint32(0)
 	for received < totalBytes {
-		ch, err := s.r.Dequeue()
+		ch, err := s.wire.Dequeue()
 		if err != nil {
 			return nil, fmt.Errorf("recvH2CData: read header: %w", err)
 		}
@@ -385,10 +383,10 @@ func (s *Session) recvH2CData(totalBytes uint32) ([]byte, error) {
 			return nil, fmt.Errorf("recvH2CData: expected H2CData (0x6), got 0x%x", ch.Type)
 		}
 		var h2c H2CDataHeader
-		if err := s.r.Receive(&h2c); err != nil {
+		if err := s.wire.Receive(&h2c); err != nil {
 			return nil, fmt.Errorf("recvH2CData: receive header: %w", err)
 		}
-		dataLen := s.r.Length()
+		dataLen := s.wire.Length()
 		if dataLen == 0 {
 			return nil, fmt.Errorf("recvH2CData: H2CData PDU has no payload")
 		}
@@ -396,7 +394,7 @@ func (s *Session) recvH2CData(totalBytes uint32) ([]byte, error) {
 			return nil, fmt.Errorf("recvH2CData: data exceeds expected size (%d+%d > %d)",
 				h2c.DATAO, dataLen, totalBytes)
 		}
-		if err := s.r.ReceiveData(buf[h2c.DATAO : h2c.DATAO+dataLen]); err != nil {
+		if err := s.wire.ReceiveData(buf[h2c.DATAO : h2c.DATAO+dataLen]); err != nil {
 			return nil, fmt.Errorf("recvH2CData: receive data: %w", err)
 		}
 		s.recordH2CData(dataLen)
@@ -511,7 +509,7 @@ func completeWaiters(resp *response) {
 
 func (s *Session) writeResponse(resp *response) error {
 	if resp.r2t != nil {
-		err := s.w.SendHeaderOnly(pduR2T, resp.r2t, r2tHdrSize)
+		err := s.wire.SendHeaderOnly(pduR2T, resp.r2t, r2tHdrSize)
 		if resp.r2tDone != nil {
 			close(resp.r2tDone)
 		}
@@ -531,11 +529,11 @@ func (s *Session) writeResponse(resp *response) error {
 			DATAO: 0,
 			DATAL: uint32(len(resp.c2hData)),
 		}
-		if err := s.w.SendWithData(pduC2HData, c2hFlagLast, &hdr, c2hDataHdrSize, resp.c2hData); err != nil {
+		if err := s.wire.SendWithData(pduC2HData, c2hFlagLast, &hdr, c2hDataHdrSize, resp.c2hData); err != nil {
 			return err
 		}
 	}
-	return s.w.SendHeaderOnly(pduCapsuleResp, &resp.resp, capsuleRespSize)
+	return s.wire.SendHeaderOnly(pduCapsuleResp, &resp.resp, capsuleRespSize)
 }
 
 func (s *Session) enqueueResponse(resp *response) {
