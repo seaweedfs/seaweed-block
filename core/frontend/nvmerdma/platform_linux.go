@@ -43,8 +43,8 @@ func startPlatformTarget(cfg TargetConfig, backend nbd.Backend) (platformTarget,
 	if err != nil || port < 1 || port > 65535 {
 		return nil, "", fmt.Errorf("nvmerdma: invalid service port %q", service)
 	}
-	if cfg.SubsysNQN == "" || filepath.Base(cfg.SubsysNQN) != cfg.SubsysNQN {
-		return nil, "", fmt.Errorf("nvmerdma: invalid subsystem NQN %q", cfg.SubsysNQN)
+	if err := validateSubsystemNQN(cfg.SubsysNQN); err != nil {
+		return nil, "", err
 	}
 	if cfg.NSID == 0 {
 		return nil, "", errors.New("nvmerdma: NSID must be non-zero")

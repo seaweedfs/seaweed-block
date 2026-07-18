@@ -40,7 +40,7 @@ RDMA device, and a non-loopback data-plane address.
 
 ## Evidence
 
-Run: `20260718-010533-1ab1`, 16/16 actions PASS.
+Run: `20260718-011316-dc5b`, 16/16 actions PASS.
 
 ```text
 phase163_nvme_rdma_standalone_listener_impl_spike_status=ok

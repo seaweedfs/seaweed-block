@@ -116,21 +116,59 @@ func TestProtocolServerConsumesRejectedWritePayload(t *testing.T) {
 	}
 }
 
+func TestProtocolServerRejectsOversizedReadWithoutAllocation(t *testing.T) {
+	backend := &memoryBackend{data: make([]byte, 1024)}
+	request := new(bytes.Buffer)
+	handle := [8]byte{6}
+	writeRequestHeader(t, request, nbdCmdRead, handle, 0, maxNBDRequestSize+1)
+	writeRequest(t, request, nbdCmdDisc, handle, 0, nil)
+	reply := new(bytes.Buffer)
+	if err := (protocolServer{backend: backend, size: uint64(maxNBDRequestSize) + 1}).serve(context.Background(), struct {
+		io.Reader
+		io.Writer
+	}{Reader: request, Writer: reply}); err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+	header := reply.Next(16)
+	if got := binary.BigEndian.Uint32(header[4:8]); got == 0 {
+		t.Fatal("oversized read unexpectedly succeeded")
+	}
+}
+
+func TestProtocolServerTerminatesOversizedWriteWithoutReadingPayload(t *testing.T) {
+	backend := &memoryBackend{data: make([]byte, 1024)}
+	request := new(bytes.Buffer)
+	writeRequestHeader(t, request, nbdCmdWrite, [8]byte{5}, 0, maxNBDRequestSize+1)
+	reply := new(bytes.Buffer)
+	err := (protocolServer{backend: backend, size: uint64(maxNBDRequestSize) + 1}).serve(context.Background(), struct {
+		io.Reader
+		io.Writer
+	}{Reader: request, Writer: reply})
+	if err == nil {
+		t.Fatal("oversized write unexpectedly kept the connection open")
+	}
+}
+
 func writeRequest(t *testing.T, w io.Writer, command uint32, handle [8]byte, offset uint64, payload []byte) {
+	t.Helper()
+	writeRequestHeader(t, w, command, handle, offset, uint32(len(payload)))
+	if command&nbdCmdMask == nbdCmdWrite {
+		if _, err := w.Write(payload); err != nil {
+			t.Fatalf("write request payload: %v", err)
+		}
+	}
+}
+
+func writeRequestHeader(t *testing.T, w io.Writer, command uint32, handle [8]byte, offset uint64, length uint32) {
 	t.Helper()
 	header := make([]byte, 28)
 	binary.BigEndian.PutUint32(header[0:4], nbdRequestMagic)
 	binary.BigEndian.PutUint32(header[4:8], command)
 	copy(header[8:16], handle[:])
 	binary.BigEndian.PutUint64(header[16:24], offset)
-	binary.BigEndian.PutUint32(header[24:28], uint32(len(payload)))
+	binary.BigEndian.PutUint32(header[24:28], length)
 	if _, err := w.Write(header); err != nil {
 		t.Fatalf("write request header: %v", err)
-	}
-	if command&nbdCmdMask == nbdCmdWrite {
-		if _, err := w.Write(payload); err != nil {
-			t.Fatalf("write request payload: %v", err)
-		}
 	}
 }
 

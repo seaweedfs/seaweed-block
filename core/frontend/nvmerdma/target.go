@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
@@ -35,6 +36,13 @@ func NewTarget(cfg TargetConfig) *Target {
 		panic("nvmerdma: NewTarget: Provider required")
 	}
 	return &Target{cfg: cfg}
+}
+
+func validateSubsystemNQN(nqn string) error {
+	if nqn == "" || nqn == "." || nqn == ".." || strings.ContainsAny(nqn, `/\\`) {
+		return fmt.Errorf("nvmerdma: invalid subsystem NQN %q", nqn)
+	}
+	return nil
 }
 
 func (t *Target) Start() (string, error) {

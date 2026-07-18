@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"syscall"
 )
@@ -18,6 +19,8 @@ const (
 	nbdCmdFlush = uint32(3)
 	nbdCmdMask  = uint32(0xffff)
 	nbdCmdFUA   = uint32(1 << 16)
+
+	maxNBDRequestSize = uint32(64 << 20)
 )
 
 // Backend is the minimum block contract required by the kernel NBD bridge.
@@ -48,6 +51,15 @@ func (s protocolServer) serve(ctx context.Context, rw io.ReadWriter) error {
 		length := binary.BigEndian.Uint32(header[24:28])
 		if command&nbdCmdMask == nbdCmdDisc {
 			return nil
+		}
+		if length > maxNBDRequestSize {
+			if command&nbdCmdMask == nbdCmdWrite {
+				return fmt.Errorf("nbd: write request length %d exceeds limit %d", length, maxNBDRequestSize)
+			}
+			if err := writeReply(rw, handle, syscall.EINVAL, nil); err != nil {
+				return err
+			}
+			continue
 		}
 
 		if offset > s.size || uint64(length) > s.size-offset {

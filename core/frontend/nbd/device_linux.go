@@ -115,6 +115,7 @@ func Start(cfg Config) (*Device, error) {
 		doItDone:   make(chan error, 1),
 		serveDone:  make(chan error, 1),
 	}
+	cleanupFD = false
 	go func() {
 		d.serveDone <- protocolServer{backend: cfg.Backend, size: cfg.Size}.serve(ctx, serverFile)
 	}()
@@ -126,7 +127,6 @@ func Start(cfg Config) (*Device, error) {
 		return nil, err
 	}
 
-	cleanupFD = false
 	return d, nil
 }
 
@@ -193,6 +193,9 @@ func openDevice(requested string) (string, int, error) {
 	}
 	sort.Slice(paths, func(i, j int) bool { return nbdNumber(paths[i]) < nbdNumber(paths[j]) })
 	for _, path := range paths {
+		if nbdNumber(path) == int(^uint(0)>>1) {
+			continue
+		}
 		fd, err := unix.Open(path, unix.O_RDWR|unix.O_EXCL|unix.O_CLOEXEC, 0)
 		if err == nil {
 			return path, fd, nil

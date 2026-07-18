@@ -76,7 +76,7 @@ closed rather than create a false supported/listening state.
 
 ## Phase 163 Live Evidence
 
-TestOps run `20260718-010533-1ab1` passed 16/16 actions:
+TestOps run `20260718-011316-dc5b` passed 16/16 actions:
 
 ```text
 rdma_implementation_path=kernel_nvmet_rdma_nbd_bridge
