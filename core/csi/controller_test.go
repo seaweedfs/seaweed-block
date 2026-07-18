@@ -505,6 +505,45 @@ func TestG15c_ControllerCreateVolume_RecordsProtocolSelection(t *testing.T) {
 	}
 }
 
+func TestPhase165_ControllerCreateVolumeCarriesNVMERDMATransport(t *testing.T) {
+	prov := &stubProvisioner{}
+	s := NewControllerServerWithProvisioner(&stubLookup{}, prov)
+	resp, err := s.CreateVolume(context.Background(), &csipb.CreateVolumeRequest{
+		Name:               "pvc-rdma",
+		CapacityRange:      &csipb.CapacityRange{RequiredBytes: 1 << 30},
+		VolumeCapabilities: []*csipb.VolumeCapability{testVolumeCapability()},
+		Parameters: map[string]string{
+			storageClassProtocolParameter:      "nvme",
+			storageClassNVMeTransportParameter: "rdma",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+	if got := prov.calls[0].FrontendTransport; got != FrontendTransportRDMA {
+		t.Fatalf("provisioned transport=%q want rdma", got)
+	}
+	if got := resp.GetVolume().GetVolumeContext()["nvmeTransport"]; got != "rdma" {
+		t.Fatalf("volume context transport=%q want rdma", got)
+	}
+}
+
+func TestPhase165_ControllerCreateVolumeRejectsInvalidNVMeTransportUse(t *testing.T) {
+	for _, params := range []map[string]string{
+		{storageClassProtocolParameter: "iscsi", storageClassNVMeTransportParameter: "rdma"},
+		{storageClassProtocolParameter: "nvme", storageClassNVMeTransportParameter: "bogus"},
+	} {
+		s := NewControllerServerWithProvisioner(&stubLookup{}, &stubProvisioner{})
+		_, err := s.CreateVolume(context.Background(), &csipb.CreateVolumeRequest{
+			Name: "pvc-invalid", CapacityRange: &csipb.CapacityRange{RequiredBytes: 1 << 30},
+			VolumeCapabilities: []*csipb.VolumeCapability{testVolumeCapability()}, Parameters: params,
+		})
+		if status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("CreateVolume params=%v error=%v want InvalidArgument", params, err)
+		}
+	}
+}
+
 func TestControllerCreateVolume_CarriesStage2MultipathVolumeContext(t *testing.T) {
 	prov := &stubProvisioner{}
 	s := NewControllerServerWithProvisioner(nil, prov)

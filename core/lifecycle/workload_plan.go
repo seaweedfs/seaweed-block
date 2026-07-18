@@ -9,13 +9,14 @@ import (
 // daemons should exist for one desired volume. It is deliberately not
 // authority-shaped: no epoch, endpoint_version, primary, ready, or healthy.
 type BlockVolumeWorkloadPlan struct {
-	VolumeID     string
-	SizeBytes    uint64
-	Protocol     string
-	PVCName      string
-	PVCNamespace string
-	PVCUID       string
-	Replicas     []BlockVolumeReplicaWorkload
+	VolumeID      string
+	SizeBytes     uint64
+	Protocol      string
+	NVMeTransport string
+	PVCName       string
+	PVCNamespace  string
+	PVCUID        string
+	Replicas      []BlockVolumeReplicaWorkload
 }
 
 type BlockVolumeReplicaWorkload struct {
@@ -38,6 +39,7 @@ type BlockVolumeReplicaWorkload struct {
 // intent into blockvolume daemon workload intent. It does not verify
 // observation, choose primary, or publish authority.
 func PlanBlockVolumeWorkloads(volume VolumeRecord, placement PlacementIntent, nodes []NodeRegistration, cfg WorkloadPlanConfig) (BlockVolumeWorkloadPlan, error) {
+	volume.Spec = normalizeVolumeSpec(volume.Spec)
 	if err := validateSpec(volume.Spec); err != nil {
 		return BlockVolumeWorkloadPlan{}, err
 	}
@@ -69,13 +71,14 @@ func PlanBlockVolumeWorkloads(volume VolumeRecord, placement PlacementIntent, no
 	}
 
 	out := BlockVolumeWorkloadPlan{
-		VolumeID:     volume.Spec.VolumeID,
-		SizeBytes:    volume.Spec.SizeBytes,
-		Protocol:     protocol,
-		PVCName:      volume.Spec.PVCName,
-		PVCNamespace: volume.Spec.PVCNamespace,
-		PVCUID:       volume.Spec.PVCUID,
-		Replicas:     make([]BlockVolumeReplicaWorkload, 0, len(placement.Slots)),
+		VolumeID:      volume.Spec.VolumeID,
+		SizeBytes:     volume.Spec.SizeBytes,
+		Protocol:      protocol,
+		NVMeTransport: volume.Spec.FrontendTransport,
+		PVCName:       volume.Spec.PVCName,
+		PVCNamespace:  volume.Spec.PVCNamespace,
+		PVCUID:        volume.Spec.PVCUID,
+		Replicas:      make([]BlockVolumeReplicaWorkload, 0, len(placement.Slots)),
 	}
 	for i, slot := range placement.Slots {
 		node, ok := nodeByID[slot.ServerID]

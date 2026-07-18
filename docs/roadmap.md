@@ -162,8 +162,14 @@ Seaweed Block can already demonstrate a narrow Kubernetes block-storage loop:
   failover, broad compatibility, and performance remain non-claims.
 - Phase 164 hardens that standalone path with startup rollback, 4 KiB and
   larger I/O, FUA/flush, durable restart/reconnect, two-target isolation,
-  bounded churn, stable refusal, and zero-residue cleanup. Phase 165 owns the
-  separate opt-in Kubernetes publish/attach and mounted workload gate.
+  bounded churn, stable refusal, and zero-residue cleanup.
+- Phase 165 closes the separate opt-in Kubernetes NVMe/RDMA publish/attach
+  gate. StorageClass intent is carried explicitly through lifecycle and
+  frontend facts into CSI; a dynamic PVC mounts on m01 through the m02 RoCE
+  address, CRD status and host sysfs both report RDMA, writer/reader pass, and
+  exact controller/configfs/NBD/Kubernetes cleanup returns to zero. NVMe/TCP
+  remains the default. RDMA reconnect/failover, multipath, performance, broad
+  compatibility, and SLOs remain separate future gates.
 - Kubernetes NVMe/TCP mounted reconnect is source-gated through changed
   desired path-set evidence: CSI-node can connect a newly published desired
   NVMe path, prune the stale old host path for the same NQN, preserve pod

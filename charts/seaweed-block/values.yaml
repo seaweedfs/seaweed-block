@@ -68,6 +68,9 @@ storageClass:
   allowVolumeExpansion: false
   replicationFactor: 1
   protocol: iscsi
+  # tcp is the backward-compatible NVMe fabric. Set protocol=nvme and
+  # nvmeTransport=rdma to opt into the kernel NVMe/RDMA path.
+  nvmeTransport: tcp
   nodeStageSecret:
     enabled: true
 

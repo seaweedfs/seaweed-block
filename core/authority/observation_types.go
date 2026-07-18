@@ -74,12 +74,13 @@ type SlotFact struct {
 // NOT an authority, placement, or readiness input; CSI/controller
 // surfaces may use it only to publish an already-running endpoint.
 type FrontendTargetFact struct {
-	Protocol string
-	Addr     string
-	IQN      string
-	NQN      string
-	LUN      uint32
-	NSID     uint32
+	Protocol  string
+	Transport string
+	Addr      string
+	IQN       string
+	NQN       string
+	LUN       uint32
+	NSID      uint32
 }
 
 // LocalRoleClaim is the raw role claim a server makes about

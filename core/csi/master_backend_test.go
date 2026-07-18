@@ -308,17 +308,18 @@ func TestControlStatusLookup_MapsNVMeStatusFrontend(t *testing.T) {
 		ReplicaId: "r1",
 		Assigned:  true,
 		Frontends: []*control.FrontendTarget{{
-			Protocol: "nvme",
-			Addr:     "127.0.0.1:4420",
-			Nqn:      "nqn.2026-05.io.seaweedfs:v1",
-			Nsid:     1,
+			Protocol:  "nvme",
+			Transport: "rdma",
+			Addr:      "127.0.0.1:4420",
+			Nqn:       "nqn.2026-05.io.seaweedfs:v1",
+			Nsid:      1,
 		}},
 	}})
 	got, err := lookup.LookupPublishTarget(context.Background(), "v1", "node-a")
 	if err != nil {
 		t.Fatalf("LookupPublishTarget: %v", err)
 	}
-	if got.Protocol != ProtocolNVMe || got.NVMeAddr != "127.0.0.1:4420" || got.NQN == "" || got.NSID != 1 {
+	if got.Protocol != ProtocolNVMe || got.FrontendTransport != FrontendTransportRDMA || got.NVMeAddr != "127.0.0.1:4420" || got.NQN == "" || got.NSID != 1 {
 		t.Fatalf("target=%+v", got)
 	}
 }
@@ -390,6 +391,7 @@ func (f *fakeLifecycleClient) CreateVolume(_ context.Context, req *control.Creat
 		SizeBytes:         req.GetSizeBytes(),
 		ReplicationFactor: req.GetReplicationFactor(),
 		Protocol:          req.GetProtocol(),
+		FrontendTransport: req.GetFrontendTransport(),
 		PvcName:           req.GetPvcName(),
 		PvcNamespace:      req.GetPvcNamespace(),
 		PvcUid:            req.GetPvcUid(),
@@ -410,6 +412,7 @@ func TestG15c_ControlLifecycleProvisioner_CreateVolumeRoundTrip(t *testing.T) {
 		SizeBytes:         1 << 30,
 		ReplicationFactor: 2,
 		Protocol:          ProtocolNVMe,
+		FrontendTransport: FrontendTransportRDMA,
 		PVCName:           "demo-pvc",
 		PVCNamespace:      "demo-ns",
 		PVCUID:            "uid-123",
@@ -423,6 +426,9 @@ func TestG15c_ControlLifecycleProvisioner_CreateVolumeRoundTrip(t *testing.T) {
 	}
 	if client.createReq.GetProtocol() != "nvme" {
 		t.Fatalf("protocol=%q want nvme", client.createReq.GetProtocol())
+	}
+	if client.createReq.GetFrontendTransport() != "rdma" || got.FrontendTransport != FrontendTransportRDMA {
+		t.Fatalf("transport request=%q response=%q want rdma", client.createReq.GetFrontendTransport(), got.FrontendTransport)
 	}
 	if client.createReq.GetPvcName() != "demo-pvc" || client.createReq.GetPvcNamespace() != "demo-ns" || client.createReq.GetPvcUid() != "uid-123" || client.createReq.GetPvName() != "pvc-a" {
 		t.Fatalf("kubernetes metadata request=%+v", client.createReq)

@@ -287,6 +287,7 @@ type SwBlockVolumeCRDStatus struct {
 
 type SwBlockVolumeCRDNVMeStatus struct {
 	Protocol          string   `json:"protocol,omitempty"`
+	Transport         string   `json:"transport,omitempty"`
 	NQN               string   `json:"nqn,omitempty"`
 	NSID              uint32   `json:"nsid,omitempty"`
 	NVMeAddr          string   `json:"nvmeAddr,omitempty"`
@@ -591,6 +592,7 @@ func swBlockVolumeCRDNVMeStatus(in *ManagedVolumeNVMeStatus) *SwBlockVolumeCRDNV
 	}
 	return &SwBlockVolumeCRDNVMeStatus{
 		Protocol:          in.Protocol,
+		Transport:         in.Transport,
 		NQN:               in.NQN,
 		NSID:              in.NSID,
 		NVMeAddr:          in.NVMeAddr,

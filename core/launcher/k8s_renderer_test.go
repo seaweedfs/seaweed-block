@@ -377,6 +377,58 @@ func TestPhase106_K8sRenderer_ExternalNVMeUsesNodeAddress(t *testing.T) {
 	}
 }
 
+func TestPhase165_K8sRenderer_NVMERDMAUsesExternalPrivilegedKernelTarget(t *testing.T) {
+	plan := sampleWorkloadPlan()
+	plan.Protocol = "nvme"
+	plan.NVMeTransport = "rdma"
+	manifests, err := RenderBlockVolumeDeployments(plan, K8sRenderConfig{
+		MasterAddr: "m:9333", ExternalNVMe: true, NVMeMaxH2CDataLength: 32768,
+	})
+	if err != nil {
+		t.Fatalf("RenderBlockVolumeDeployments: %v", err)
+	}
+	raw := string(manifests[0].YAML)
+	for _, want := range []string{
+		"--nvme-transport=rdma", "--nvme-listen=10.0.0.1:4420", "privileged: true", "runAsUser: 0",
+		"mountPath: /dev", "mountPath: /sys/kernel/config", "mountPath: /lib/modules", "path: /sys/kernel/config",
+	} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("RDMA manifest missing %q:\n%s", want, raw)
+		}
+	}
+	if strings.Contains(raw, "--nvme-max-h2c-data-length") {
+		t.Fatalf("RDMA manifest contains TCP-only H2C tuning:\n%s", raw)
+	}
+}
+
+func TestPhase165_K8sRenderer_NVMERDMARequiresExternalAddressing(t *testing.T) {
+	plan := sampleWorkloadPlan()
+	plan.Protocol = "nvme"
+	plan.NVMeTransport = "rdma"
+	_, err := RenderBlockVolumeDeployments(plan, K8sRenderConfig{MasterAddr: "m:9333"})
+	if err == nil || !strings.Contains(err.Error(), "requires external NVMe") {
+		t.Fatalf("error=%v want external NVMe requirement", err)
+	}
+}
+
+func TestPhase165_K8sRenderer_TCPDoesNotGainRDMAPrivileges(t *testing.T) {
+	plan := sampleWorkloadPlan()
+	plan.Protocol = "nvme"
+	manifests, err := RenderBlockVolumeDeployments(plan, K8sRenderConfig{MasterAddr: "m:9333", ExternalNVMe: true})
+	if err != nil {
+		t.Fatalf("RenderBlockVolumeDeployments: %v", err)
+	}
+	raw := string(manifests[0].YAML)
+	if !strings.Contains(raw, "--nvme-transport=tcp") {
+		t.Fatalf("TCP manifest missing explicit transport:\n%s", raw)
+	}
+	for _, forbidden := range []string{"privileged: true", "mountPath: /sys/kernel/config", "mountPath: /lib/modules"} {
+		if strings.Contains(raw, forbidden) {
+			t.Fatalf("TCP manifest unexpectedly contains %q:\n%s", forbidden, raw)
+		}
+	}
+}
+
 func TestPhase106_K8sRenderer_ExternalNVMeRejectsLoopbackNodeAddress(t *testing.T) {
 	plan := sampleWorkloadPlan()
 	plan.Protocol = "nvme"

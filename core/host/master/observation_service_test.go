@@ -67,6 +67,17 @@ func TestNodeEvidenceToWirePreservesFrontendAddress(t *testing.T) {
 	}
 }
 
+func TestReplicaEvidenceToWirePreservesFrontendTransport(t *testing.T) {
+	wire := replicaEvidenceToWire(ops.ReplicaEvidence{
+		FrontendProtocol:  "nvme",
+		FrontendTransport: "rdma",
+		FrontendAddr:      "10.0.0.3:4420",
+	})
+	if wire.GetFrontendTransport() != "rdma" {
+		t.Fatalf("frontend transport evidence dropped: %+v", wire)
+	}
+}
+
 func TestClusterEvidenceService_GRPCRegistered(t *testing.T) {
 	h := newTestMasterWithControllerConfig(t, t.TempDir(), authority.TopologyControllerConfig{
 		ExpectedSlotsPerVolume: 3,

@@ -84,7 +84,28 @@ blockNodes:
 when set, blockvolume `data_addr` and NVMe/TCP or iSCSI publish targets use
 that address while `ctrl_addr` remains on `internalIP`. Use
 `frontendNetworkClass: 100gbe_tcp` for a TCP frontend on the lab 100GbE data
-network. This is not an NVMe/RDMA or RoCE claim.
+network.
+
+The source-gated NVMe/RDMA path is explicit and remains off by default:
+
+```yaml
+storageClass:
+  protocol: nvme
+  nvmeTransport: rdma
+network:
+  externalNVMe: true
+  frontendNetworkClass: 100gbe_roce
+  blockNodes:
+    - name: m02
+      kubernetesNode: m02
+      internalIP: 192.168.1.184
+      frontendIP: 10.0.0.3
+```
+
+RDMA requires a non-loopback RoCE frontend address and host `nvme-rdma`,
+`nvmet-rdma`, NBD, configfs, and RDMA-device prerequisites. This supported-lab
+path does not claim RDMA multipath, failover, performance improvement, or an
+SLO.
 
 `network.rejectLoopbackPublishTargets` records the intended safety boundary.
 Some blockmaster launcher flags are gated by `compat.*` settings because older

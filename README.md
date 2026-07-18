@@ -36,8 +36,9 @@ This is an **alpha** product path for supported lab clusters, not production.
 | Actionable read-only CRD status + Events | Available | Bounded SwBlockVolume finalizer lifecycle | Beta candidate |
 | Returned-replica ACK eligibility executor | Beta candidate | Returned-replica failback runtime | Source-gated |
 | Returned-replica rebuild traffic | Planned | Frontend publication after failback | Planned |
-| NVMe/TCP CSI multipath + backend write batching | Source-gated | Backup/snapshot/restore | Planned |
+| NVMe/TCP CSI multipath + backend write batching | Source-gated | NVMe/RDMA Kubernetes CSI publish/attach | Source-gated |
 | WAL multi-block record opt-in | Source-gated | WAL format default change | Not claimed |
+| Backup/snapshot/restore | Planned | NVMe/RDMA failover or performance SLO | Not claimed |
 | Production SLO/performance claims | Not claimed | Hosted production UI | Not claimed |
 
 ## What You Can Do Today
@@ -87,9 +88,10 @@ This is an **alpha** product path for supported lab clusters, not production.
   record opt-in has mounted profile and restart/recovery compatibility evidence,
   plus mounted durable-status `HeadLSN` confirmation, but remains default-off
   and requires a future matching-image release smoke before it becomes a public
-  image claim. A separate source-gated standalone Linux gate now proves a
-  standard `nvme connect -t rdma` write/read/flush path through the Seaweed
-  backend on the supported RoCE lab. RDMA is not yet published through CSI.
+  image claim. The opt-in NVMe/RDMA path now carries an explicit transport from
+  StorageClass through blockmaster publication and CSI NodeStage, mounts a
+  dynamic PVC on a second RoCE host, and verifies writer/reader data through a
+  standard Linux `nvme connect -t rdma` controller. It remains source-gated.
   These are supported-lab source-gated claims, not broad NVMe compatibility,
   production HA, or performance/SLO claims.
 - Replay support bundles offline.
@@ -114,8 +116,9 @@ These are narrow alpha claims tied to documented gates. See
   parity beyond the documented supported-lab gates. The CSI-node reconnect
   owner, host-path reconnect gate, desired path-set replacement gate, and
   stale path pruning gate exist only as source-gated NVMe/TCP evidence. The
-  NVMe/RDMA path has passed its standalone lifecycle hardening gate but remains
-  standalone-only until the Kubernetes publish/attach gate passes.
+  NVMe/RDMA path has standalone and Kubernetes single-path publish/attach
+  evidence, but no RDMA multipath, reconnect/failover, performance, or SLO
+  claim.
 - Broad distro/kernel/initiator compatibility.
 - Upgrade or rollback execution. The status layer can report install drift, but
   it does not run Helm or kubectl mutations.

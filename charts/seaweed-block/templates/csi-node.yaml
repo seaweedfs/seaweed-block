@@ -27,7 +27,7 @@ spec:
           imagePullPolicy: {{ .Values.csiImage.pullPolicy }}
           command: ["/bin/sh", "-c"]
           args:
-            - "modprobe iscsi_tcp || true; modprobe nvme_tcp || true; modprobe dm_multipath || true; modprobe scsi_dh_alua || true"
+            - "modprobe iscsi_tcp || true; modprobe nvme_tcp || true; modprobe nvme_rdma || true; modprobe dm_multipath || true; modprobe scsi_dh_alua || true"
           securityContext:
             privileged: true
           volumeMounts:

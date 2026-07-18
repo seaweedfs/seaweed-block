@@ -71,6 +71,9 @@ func TestG15d_WorkloadPlan_NVMeProtocolCreatesNVMeTargets(t *testing.T) {
 	if plan.Protocol != "nvme" {
 		t.Fatalf("protocol=%q want nvme", plan.Protocol)
 	}
+	if plan.NVMeTransport != "tcp" {
+		t.Fatalf("transport=%q want legacy default tcp", plan.NVMeTransport)
+	}
 	if got := plan.Replicas[0].NVMeListenPort; got != 4420 {
 		t.Fatalf("nvme port=%d want 4420", got)
 	}
@@ -79,6 +82,20 @@ func TestG15d_WorkloadPlan_NVMeProtocolCreatesNVMeTargets(t *testing.T) {
 	}
 	if got := plan.Replicas[0].NVMeNSID; got != 1 {
 		t.Fatalf("nsid=%d want 1", got)
+	}
+}
+
+func TestPhase165_WorkloadPlanCarriesNVMERDMATransport(t *testing.T) {
+	volume := VolumeRecord{Spec: VolumeSpec{VolumeID: "pvc-rdma", SizeBytes: 1 << 20, ReplicationFactor: 1, Protocol: "nvme", FrontendTransport: "rdma"}}
+	placement := PlacementIntent{VolumeID: "pvc-rdma", DesiredRF: 1, Slots: []PlacementSlotIntent{{ServerID: "node-a", PoolID: "pool-a", Source: PlacementSourceBlankPool}}}
+	plan, err := PlanBlockVolumeWorkloads(volume, placement, []NodeRegistration{
+		nodeForWorkload("node-a", "10.0.0.1:9201", "10.0.0.1:9101"),
+	}, WorkloadPlanConfig{NVMePortBase: 4420, NQNPrefix: "nqn.test"})
+	if err != nil {
+		t.Fatalf("PlanBlockVolumeWorkloads: %v", err)
+	}
+	if plan.NVMeTransport != "rdma" {
+		t.Fatalf("transport=%q want rdma", plan.NVMeTransport)
 	}
 }
 

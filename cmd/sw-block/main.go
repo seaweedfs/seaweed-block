@@ -1263,6 +1263,7 @@ func replicaEvidenceFromWire(replica *control.ReplicaEvidence) ops.ReplicaEviden
 		CandidateReady:       replica.GetCandidateReady(),
 		CandidateReadyReason: replica.GetCandidateReadyReason(),
 		FrontendProtocol:     replica.GetFrontendProtocol(),
+		FrontendTransport:    replica.GetFrontendTransport(),
 		FrontendAddr:         replica.GetFrontendAddr(),
 		FrontendNQN:          replica.GetFrontendNqn(),
 		FrontendNSID:         replica.GetFrontendNsid(),
@@ -1670,6 +1671,7 @@ type helmValuesStorageClass struct {
 	Name              string `yaml:"name"`
 	ReplicationFactor int    `yaml:"replicationFactor"`
 	Protocol          string `yaml:"protocol"`
+	NVMeTransport     string `yaml:"nvmeTransport"`
 }
 
 type helmValuesReplication struct {
@@ -1731,6 +1733,7 @@ func runOpsGenerateHelmValues(args []string, stdout, stderr io.Writer) int {
 		ackProfile         string
 		storageClass       string
 		protocol           string
+		nvmeTransport      string
 		appNamespace       string
 		targetNode         string
 		nodeLimit          int
@@ -1753,6 +1756,7 @@ func runOpsGenerateHelmValues(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&ackProfile, "ack-profile", "best-effort", "replication ACK profile: best-effort, sync-quorum, or sync-all")
 	fs.StringVar(&storageClass, "storageclass", "sw-block-dynamic", "StorageClass name")
 	fs.StringVar(&protocol, "protocol", "iscsi", "StorageClass frontend protocol: iscsi or nvme")
+	fs.StringVar(&nvmeTransport, "nvme-transport", "tcp", "NVMe fabric transport: tcp or rdma")
 	fs.StringVar(&appNamespace, "app-namespace", "default", "default application namespace")
 	fs.StringVar(&targetNode, "target-node", "", "optional Kubernetes node name to select for single-node values")
 	fs.IntVar(&nodeLimit, "node-limit", 0, "optional maximum selected Ready node count")
@@ -1763,7 +1767,7 @@ func runOpsGenerateHelmValues(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&restartPersistence, "restart-persistence", "ephemeral", "restart persistence mode: ephemeral or hostpath")
 	fs.StringVar(&stateHostPath, "state-hostpath", "/var/lib/sw-block", "hostPath base used when --restart-persistence=hostpath")
 	fs.StringVar(&frontendIPMapRaw, "frontend-ip-map", "", "optional comma-separated Kubernetes node to frontend/data-plane IP map, for example m01=10.0.0.181,m02=10.0.0.184")
-	fs.StringVar(&frontendClass, "frontend-network-class", "", "network class for --frontend-ip-map values: management_lan or 100gbe_tcp")
+	fs.StringVar(&frontendClass, "frontend-network-class", "", "network class for --frontend-ip-map values: management_lan, 100gbe_tcp, or 100gbe_roce")
 	fs.DurationVar(&timeout, "timeout", 10*time.Second, "kubectl discovery timeout")
 	if err := fs.Parse(args); err != nil {
 		return ops.VolumeStatusExitInvalid
@@ -1788,6 +1792,14 @@ func runOpsGenerateHelmValues(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "sw-block ops generate-helm-values: --protocol=%q invalid; want iscsi or nvme\n", protocol)
 		return ops.VolumeStatusExitInvalid
 	}
+	if !helmValuesNVMeTransportAccepted(nvmeTransport) {
+		fmt.Fprintf(stderr, "sw-block ops generate-helm-values: --nvme-transport=%q invalid; want tcp or rdma\n", nvmeTransport)
+		return ops.VolumeStatusExitInvalid
+	}
+	if protocol != "nvme" && nvmeTransport != "tcp" {
+		fmt.Fprintln(stderr, "sw-block ops generate-helm-values: --nvme-transport=rdma requires --protocol=nvme")
+		return ops.VolumeStatusExitInvalid
+	}
 	if !helmValuesRestartPersistenceAccepted(restartPersistence) {
 		fmt.Fprintf(stderr, "sw-block ops generate-helm-values: --restart-persistence=%q invalid; want ephemeral or hostpath\n", restartPersistence)
 		return ops.VolumeStatusExitInvalid
@@ -1807,11 +1819,15 @@ func runOpsGenerateHelmValues(args []string, stdout, stderr io.Writer) int {
 			return ops.VolumeStatusExitInvalid
 		}
 		if !helmValuesFrontendNetworkClassAccepted(frontendClass) {
-			fmt.Fprintf(stderr, "sw-block ops generate-helm-values: --frontend-network-class=%q invalid; want management_lan or 100gbe_tcp\n", frontendClass)
+			fmt.Fprintf(stderr, "sw-block ops generate-helm-values: --frontend-network-class=%q invalid; want management_lan, 100gbe_tcp, or 100gbe_roce\n", frontendClass)
 			return ops.VolumeStatusExitInvalid
 		}
 	} else if strings.TrimSpace(frontendClass) != "" {
 		fmt.Fprintln(stderr, "sw-block ops generate-helm-values: --frontend-network-class requires --frontend-ip-map")
+		return ops.VolumeStatusExitInvalid
+	}
+	if nvmeTransport == "rdma" && (len(frontendIPMap) == 0 || frontendClass != "100gbe_roce") {
+		fmt.Fprintln(stderr, "sw-block ops generate-helm-values: NVMe/RDMA requires --frontend-ip-map and --frontend-network-class=100gbe_roce")
 		return ops.VolumeStatusExitInvalid
 	}
 
@@ -1839,7 +1855,7 @@ func runOpsGenerateHelmValues(args []string, stdout, stderr io.Writer) int {
 
 	multiNode := len(selected) > 1
 	externalISCSI := multiNode && protocol == "iscsi"
-	externalNVMe := multiNode && protocol == "nvme"
+	externalNVMe := protocol == "nvme" && (multiNode || nvmeTransport == "rdma")
 	if externalISCSI && chapSecret == "" {
 		chapSecret = generateHelmValuesSecret()
 	}
@@ -1852,6 +1868,7 @@ func runOpsGenerateHelmValues(args []string, stdout, stderr io.Writer) int {
 			Name:              storageClass,
 			ReplicationFactor: replicationFactor,
 			Protocol:          protocol,
+			NVMeTransport:     nvmeTransport,
 		},
 		Replication: helmValuesReplication{
 			AckProfile:             ackProfile,
@@ -1860,8 +1877,8 @@ func runOpsGenerateHelmValues(args []string, stdout, stderr io.Writer) int {
 		Network: helmValuesNetwork{
 			ExternalISCSI:                externalISCSI,
 			ExternalNVMe:                 externalNVMe,
-			ExternalStatus:               multiNode,
-			RejectLoopbackPublishTargets: multiNode,
+			ExternalStatus:               multiNode || nvmeTransport == "rdma",
+			RejectLoopbackPublishTargets: multiNode || nvmeTransport == "rdma",
 		},
 		Compat: helmValuesCompat{
 			LauncherRejectLoopbackFlag: false,
@@ -1942,6 +1959,7 @@ func runOpsGenerateHelmValues(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "frontend_network_class=%s\n", emptyCLI(frontendClass))
 	fmt.Fprintf(stdout, "chap_enabled=%t\n", externalISCSI)
 	fmt.Fprintf(stdout, "protocol=%s\n", protocol)
+	fmt.Fprintf(stdout, "nvme_transport=%s\n", nvmeTransport)
 	fmt.Fprintf(stdout, "replication_factor=%d\n", replicationFactor)
 	fmt.Fprintf(stdout, "ack_profile=%s\n", ackProfile)
 	fmt.Fprintf(stdout, "restart_persistence_mode=%s\n", restartPersistence)
@@ -1969,6 +1987,10 @@ func helmValuesProtocolAccepted(value string) bool {
 	}
 }
 
+func helmValuesNVMeTransportAccepted(value string) bool {
+	return value == "tcp" || value == "rdma"
+}
+
 func helmValuesRestartPersistenceAccepted(value string) bool {
 	switch value {
 	case "ephemeral", "hostpath":
@@ -1980,7 +2002,7 @@ func helmValuesRestartPersistenceAccepted(value string) bool {
 
 func helmValuesFrontendNetworkClassAccepted(value string) bool {
 	switch value {
-	case "management_lan", "100gbe_tcp":
+	case "management_lan", "100gbe_tcp", "100gbe_roce":
 		return true
 	default:
 		return false
@@ -2253,7 +2275,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  sw-block ops report --master-api <addr> --out <dir>")
 	fmt.Fprintln(w, "  sw-block ops dashboard --from-bundle <dir> [--listen 127.0.0.1:9334]")
 	fmt.Fprintln(w, "  sw-block ops dashboard --master-api <addr> [--listen 127.0.0.1:9334]")
-	fmt.Fprintln(w, "  sw-block ops generate-helm-values --out values.yaml [--target-node <node>] [--replication-factor <n>] [--protocol iscsi|nvme]")
+	fmt.Fprintln(w, "  sw-block ops generate-helm-values --out values.yaml [--target-node <node>] [--replication-factor <n>] [--protocol iscsi|nvme] [--nvme-transport tcp|rdma]")
 	fmt.Fprintln(w, "      [--restart-persistence ephemeral|hostpath] [--state-hostpath /var/lib/sw-block] [--timeout 10s]")
 	fmt.Fprintln(w, "  sw-block ops operator-status --dry-run [--master-api <addr>|--from-bundle <dir>] [--cleanup-summary <file>] [--interval 30s]")
 	fmt.Fprintln(w, "  sw-block ops lifecycle-owner [--dry-run] [--namespace <ns>] [--interval 30s]")

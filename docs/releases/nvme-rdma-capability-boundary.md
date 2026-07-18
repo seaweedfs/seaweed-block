@@ -1,9 +1,9 @@
 # NVMe/RDMA Capability Boundary
 
-Status: **source-gated standalone supported-lab path**. Seaweed Block can serve
-one explicitly configured Linux NVMe/RDMA target in the supported RoCE lab.
-Kubernetes CSI publication/attach, multipath/failover, broad compatibility,
-performance improvement, and production SLOs remain non-claims.
+Status: **source-gated standalone and Kubernetes single-path supported-lab
+path**. Seaweed Block can serve one explicitly selected NVMe/RDMA target and
+mount it through CSI in the supported RoCE lab. Multipath/failover, broad
+compatibility, performance improvement, and production SLOs remain non-claims.
 
 ## Claim Matrix
 
@@ -11,7 +11,7 @@ performance improvement, and production SLOs remain non-claims.
 | --- | --- |
 | NVMe/TCP Kubernetes CSI path | Source-gated supported lab |
 | NVMe/RDMA standalone Linux target | Source-gated supported lab, Phases 163-164 |
-| NVMe/RDMA Kubernetes CSI publish/attach | Not implemented |
+| NVMe/RDMA Kubernetes CSI publish/attach | Source-gated supported lab, Phase 165 |
 | NVMe/RDMA multipath or failover | Not implemented |
 | Broad kernel, NIC, distro, or initiator compatibility | Not claimed |
 | RDMA acceleration or performance SLO | Not claimed |
@@ -121,32 +121,50 @@ negative_preflight_refusal_verified=true
 cleanup_status=ok
 ```
 
-## Why This Is Not Yet A Kubernetes Claim
+## Phase 165 Kubernetes Evidence
 
-The standalone target is deliberately not advertised to blockmaster or CSI.
-The existing publish-target path remains NVMe/TCP-only. Therefore Phases
-163-164 do not prove:
+TestOps run `20260718-025048-9d6a` passed 14/14 actions with fresh matching
+product and CSI images. A dynamic PVC selected `nvmeTransport: rdma`, the target
+published `10.0.0.3:4420`, CSI mounted it on m01, and writer/reader verification
+passed.
+
+```text
+phase165_nvme_rdma_k8s_publish_attach_status=ok
+csi_publish_context_transport=rdma
+active_host_controller_transport=rdma
+active_host_controller_traddr=10.0.0.3
+swblockvolume_status_transport=rdma
+writer_verified=true
+reader_verified=true
+tcp_fallback_observed=false
+target_configfs_residue_count=0
+target_nbd_residue_count=0
+app_nvme_controller_residue_count=0
+kubernetes_product_residue_count=0
+cleanup_status=ok
+```
+
+The transport is explicit in lifecycle RPCs, frontend facts, CSI publish
+context, CRD status, and the host connect command. Empty transport on older
+NVMe records remains TCP for compatibility; RDMA never silently falls back to
+TCP. Only RDMA target Pods receive the required privileged host device,
+configfs, and module mounts.
+
+Phase 165 proves:
 
 - RDMA addresses in CSI publish context;
 - CSI NodeStage/NodeUnstage using `nvme connect -t rdma`;
 - mounted application I/O through a dynamic PVC;
-- reconnect after target or node movement;
-- RDMA multipath, ANA, or failover behavior;
-- CRD/report/dashboard/explain agreement for RDMA target health;
-- Kubernetes delete/uninstall cleanup of RDMA host state.
+- CRD status and live host-controller agreement on RDMA transport;
+- Kubernetes delete/uninstall cleanup of the exact RDMA controller, target,
+  configfs namespace, NBD device, and product resources.
 
-Silently advertising the standalone endpoint as a Kubernetes target before
-those ownership and cleanup paths exist would create an unsafe partial claim.
+It does not prove reconnect after target or node movement, RDMA multipath, ANA
+or failover behavior, performance improvement, or broad compatibility.
 
 ## Next Gates
 
-### Phase 165: Kubernetes Publish/Attach
-
-The next gate carries an explicit RDMA transport through frontend publication,
-connects from CSI-node, mounts an application PVC, exposes status, and proves
-delete/uninstall cleanup while preserving NVMe/TCP as the default.
-
-### Later: Multipath, Failover, And Performance
+### Next: Reconnect, Failover, And Performance
 
 RDMA multipath/failover requires its own authority, ANA, reconnect, and mounted
 I/O gates. Performance comparison must use the same backend, durability,

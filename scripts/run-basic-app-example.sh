@@ -19,6 +19,7 @@ INSTALL_IMAGE="${SW_BLOCK_IMAGE:-}"
 INSTALL_CSI_IMAGE="${SW_BLOCK_CSI_IMAGE:-}"
 BASIC_APP_NODE_SELECTOR="${SW_BLOCK_BASIC_APP_NODE_SELECTOR:-}"
 BASIC_APP_PROTOCOL="${SW_BLOCK_BASIC_APP_PROTOCOL:-iscsi}"
+BASIC_APP_NVME_TRANSPORT="${SW_BLOCK_BASIC_APP_NVME_TRANSPORT:-tcp}"
 FIRST_VOLUME_STATUS="ok"
 FAILED_PHASE=""
 CLEANUP_STATUS="external_to_script"
@@ -99,11 +100,12 @@ render_example_manifest() {
     cp "$input" "$output"
     log "node_stage_secret=none"
   fi
-  if [[ "$BASIC_APP_PROTOCOL" == "nvme" ]]; then
-    awk '
+	if [[ "$BASIC_APP_PROTOCOL" == "nvme" ]]; then
+    awk -v transport="$BASIC_APP_NVME_TRANSPORT" '
       /^parameters:[[:space:]]*$/ {
         print
         print "  sw-block.seaweedfs.com/protocol: \"nvme\""
+        print "  sw-block.seaweedfs.com/nvme-transport: \"" transport "\""
         print "  protocol: \"nvme\""
         next
       }
@@ -278,7 +280,8 @@ write_summary() {
       echo "csi_image_digest=$(summary_value "$(image_digest "$INSTALL_CSI_IMAGE")")"
     fi
     echo "app_node_selector=${BASIC_APP_NODE_SELECTOR:-none}"
-    echo "app_protocol=$BASIC_APP_PROTOCOL"
+		echo "app_protocol=$BASIC_APP_PROTOCOL"
+		echo "app_nvme_transport=$BASIC_APP_NVME_TRANSPORT"
     echo "pvc=$PVC_NAME"
     echo "pvc_phase=${pvc_phase:-unknown}"
     echo "pv=${pv_name:-unknown}"
@@ -304,6 +307,14 @@ if [[ "$BASIC_APP_PROTOCOL" != "iscsi" && "$BASIC_APP_PROTOCOL" != "nvme" ]]; th
   echo "SW_BLOCK_BASIC_APP_PROTOCOL must be iscsi or nvme" >&2
   exit 2
 fi
+if [[ "$BASIC_APP_NVME_TRANSPORT" != "tcp" && "$BASIC_APP_NVME_TRANSPORT" != "rdma" ]]; then
+  echo "SW_BLOCK_BASIC_APP_NVME_TRANSPORT must be tcp or rdma" >&2
+  exit 2
+fi
+if [[ "$BASIC_APP_PROTOCOL" != "nvme" && "$BASIC_APP_NVME_TRANSPORT" != "tcp" ]]; then
+  echo "SW_BLOCK_BASIC_APP_NVME_TRANSPORT=rdma requires SW_BLOCK_BASIC_APP_PROTOCOL=nvme" >&2
+  exit 2
+fi
 if [[ -z "${SW_BLOCK_CLI:-}" ]] && ! command -v sw-block >/dev/null 2>&1; then
   require_cmd go
 fi
@@ -321,6 +332,7 @@ render_pod_manifest "$EXAMPLE_DIR/writer-pod.yaml" "$WRITER_MANIFEST"
 render_pod_manifest "$EXAMPLE_DIR/reader-pod.yaml" "$READER_MANIFEST"
 log "app_node_selector=${BASIC_APP_NODE_SELECTOR:-none}"
 log "app_protocol=$BASIC_APP_PROTOCOL"
+log "app_nvme_transport=$BASIC_APP_NVME_TRANSPORT"
 log "apply StorageClass and PVC"
 kubectl apply -f "$EXAMPLE_MANIFEST" | tee "$ARTIFACT_DIR/apply-storageclass-pvc.log"
 kubectl -n "$NAMESPACE" wait --for=jsonpath='{.status.phase}'=Bound "pvc/${PVC_NAME}" --timeout=180s | tee "$ARTIFACT_DIR/wait-pvc-bound.log"

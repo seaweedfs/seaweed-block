@@ -10,10 +10,13 @@ var ErrPublishTargetNotFound = errors.New("csi: publish target not found")
 var ErrVolumeConflict = errors.New("csi: volume already exists with different spec")
 
 type Protocol string
+type FrontendTransport string
 
 const (
-	ProtocolISCSI Protocol = "iscsi"
-	ProtocolNVMe  Protocol = "nvme"
+	ProtocolISCSI         Protocol          = "iscsi"
+	ProtocolNVMe          Protocol          = "nvme"
+	FrontendTransportTCP  FrontendTransport = "tcp"
+	FrontendTransportRDMA FrontendTransport = "rdma"
 
 	EventTypeCSIReattachObserved = "csi_reattach_observed"
 	EventSeverityInfo            = "info"
@@ -26,16 +29,24 @@ func normalizeProtocol(p Protocol) Protocol {
 	return p
 }
 
+func normalizeFrontendTransport(protocol Protocol, transport FrontendTransport) FrontendTransport {
+	if protocol == ProtocolNVMe && transport == "" {
+		return FrontendTransportTCP
+	}
+	return transport
+}
+
 // PublishTarget is a read-only frontend target fact. Epoch and
 // EndpointVersion are evidence copied from master status so recovery gates can
 // compare before/after target generations. They are not exposed in CSI
 // publish_context and do not give CSI authority mutation capability.
 type PublishTarget struct {
-	VolumeID        string
-	ReplicaID       string
-	Epoch           uint64
-	EndpointVersion uint64
-	Protocol        Protocol
+	VolumeID          string
+	ReplicaID         string
+	Epoch             uint64
+	EndpointVersion   uint64
+	Protocol          Protocol
+	FrontendTransport FrontendTransport
 
 	ISCSIAddr  string
 	ISCSIAddrs []string
@@ -97,6 +108,7 @@ type VolumeSpec struct {
 	SizeBytes         uint64
 	ReplicationFactor int
 	Protocol          Protocol
+	FrontendTransport FrontendTransport
 	PVCName           string
 	PVCNamespace      string
 	PVCUID            string
@@ -108,6 +120,9 @@ func publishContext(t PublishTarget) map[string]string {
 	ctx := map[string]string{}
 	if t.Protocol != "" {
 		ctx["protocol"] = string(t.Protocol)
+	}
+	if t.Protocol == ProtocolNVMe {
+		ctx["nvmeTransport"] = string(normalizeFrontendTransport(t.Protocol, t.FrontendTransport))
 	}
 	if t.ISCSIAddr != "" && t.IQN != "" {
 		ctx["iscsiAddr"] = t.ISCSIAddr

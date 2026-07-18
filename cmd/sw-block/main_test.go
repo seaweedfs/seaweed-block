@@ -2775,6 +2775,55 @@ func TestOpsGenerateHelmValuesMultiNodeNVMeFrontendIPMap(t *testing.T) {
 	}
 }
 
+func TestPhase165_OpsGenerateHelmValuesNVMERDMA(t *testing.T) {
+	oldRunCommand := opsGenerateHelmValuesRunCommand
+	opsGenerateHelmValuesRunCommand = fixtureCmdKubectl(map[string]string{
+		"kubectl get nodes -o wide --no-headers": cmdHelmNodeWide,
+	})
+	defer func() { opsGenerateHelmValuesRunCommand = oldRunCommand }()
+
+	outPath := filepath.Join(t.TempDir(), "values.yaml")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"ops", "generate-helm-values", "--out", outPath, "--replication-factor", "1",
+		"--protocol", "nvme", "--nvme-transport", "rdma",
+		"--frontend-ip-map", "m01=10.0.0.181,m02=10.0.0.184,tp01=10.0.0.188",
+		"--frontend-network-class", "100gbe_roce",
+	}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	for _, want := range []string{"network_mode=external-nvme", "protocol=nvme", "nvme_transport=rdma", "frontend_network_class=100gbe_roce"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("stdout missing %q:\n%s", want, stdout.String())
+		}
+	}
+	values, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"protocol: nvme", "nvmeTransport: rdma", "externalNVMe: true", "frontendIP: 10.0.0.181", "frontendNetworkClass: 100gbe_roce"} {
+		if !strings.Contains(string(values), want) {
+			t.Fatalf("values missing %q:\n%s", want, values)
+		}
+	}
+}
+
+func TestPhase165_OpsGenerateHelmValuesNVMERDMARequiresRoCEMap(t *testing.T) {
+	for _, args := range [][]string{
+		{"--protocol", "iscsi", "--nvme-transport", "rdma"},
+		{"--protocol", "nvme", "--nvme-transport", "rdma"},
+		{"--protocol", "nvme", "--nvme-transport", "rdma", "--frontend-ip-map", "m01=10.0.0.181", "--frontend-network-class", "100gbe_tcp"},
+	} {
+		var stdout, stderr bytes.Buffer
+		base := []string{"ops", "generate-helm-values", "--out", filepath.Join(t.TempDir(), "values.yaml")}
+		code := run(append(base, args...), &stdout, &stderr)
+		if code != ops.VolumeStatusExitInvalid {
+			t.Fatalf("args=%v exit=%d want invalid stdout=%s stderr=%s", args, code, stdout.String(), stderr.String())
+		}
+	}
+}
+
 func TestOpsGenerateHelmValuesRejectsIncompleteFrontendIPMap(t *testing.T) {
 	oldRunCommand := opsGenerateHelmValuesRunCommand
 	opsGenerateHelmValuesRunCommand = fixtureCmdKubectl(map[string]string{
@@ -2808,6 +2857,17 @@ func TestNodeEvidenceFromWirePreservesFrontendAddress(t *testing.T) {
 	})
 	if node.FrontendIP != "10.0.0.1" || node.FrontendNetworkClass != "100gbe_tcp" {
 		t.Fatalf("frontend address evidence dropped: %+v", node)
+	}
+}
+
+func TestReplicaEvidenceFromWirePreservesFrontendTransport(t *testing.T) {
+	replica := replicaEvidenceFromWire(&control.ReplicaEvidence{
+		FrontendProtocol:  "nvme",
+		FrontendTransport: "rdma",
+		FrontendAddr:      "10.0.0.3:4420",
+	})
+	if replica.FrontendTransport != "rdma" {
+		t.Fatalf("frontend transport evidence dropped: %+v", replica)
 	}
 }
 

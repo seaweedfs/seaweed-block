@@ -160,6 +160,11 @@ spec:
                       type: string
                       enum:
                         - nvme
+                    transport:
+                      type: string
+                      enum:
+                        - tcp
+                        - rdma
                     nqn:
                       type: string
                     nsid:

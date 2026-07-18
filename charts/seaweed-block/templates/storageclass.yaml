@@ -1,4 +1,10 @@
 {{- if .Values.storageClass.create }}
+{{- if and (eq .Values.storageClass.nvmeTransport "rdma") (ne .Values.storageClass.protocol "nvme") }}
+{{- fail "storageClass.nvmeTransport=rdma requires storageClass.protocol=nvme" }}
+{{- end }}
+{{- if and (eq .Values.storageClass.nvmeTransport "rdma") (not .Values.network.externalNVMe) }}
+{{- fail "storageClass.nvmeTransport=rdma requires network.externalNVMe=true" }}
+{{- end }}
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
@@ -12,6 +18,9 @@ allowVolumeExpansion: {{ .Values.storageClass.allowVolumeExpansion }}
 parameters:
   replicationFactor: {{ .Values.storageClass.replicationFactor | quote }}
   sw-block.seaweedfs.com/protocol: {{ .Values.storageClass.protocol | quote }}
+  {{- if eq .Values.storageClass.protocol "nvme" }}
+  sw-block.seaweedfs.com/nvme-transport: {{ .Values.storageClass.nvmeTransport | quote }}
+  {{- end }}
   {{- if and .Values.chap.enabled .Values.storageClass.nodeStageSecret.enabled }}
   csi.storage.k8s.io/node-stage-secret-name: {{ .Values.chap.secretName | quote }}
   csi.storage.k8s.io/node-stage-secret-namespace: {{ .Values.appNamespace | quote }}

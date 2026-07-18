@@ -1,11 +1,10 @@
 # Current Plan: Phase 165 NVMe/RDMA Kubernetes Publish And Attach
 
-Status: planning.
+Status: closed on 2026-07-18.
 
 Phase 164 closed the standalone Linux NVMe/RDMA correctness and lifecycle gate.
-The transport remains invisible to Kubernetes: RDMA targets are not published
-by the volume process, the control RPC has no explicit NVMe transport field,
-and CSI node attach assumes NVMe/TCP.
+Phase 165 carries that transport through Kubernetes without changing the
+NVMe/TCP default.
 
 ## Goal
 
@@ -65,3 +64,21 @@ Phase 165 closes only when a normal Kubernetes user can select the opt-in
 NVMe/RDMA class, mount a PVC, read back written data, and delete it with zero
 residue while NVMe/TCP behavior remains unchanged. The next phase may then own
 NVMe/RDMA reconnect/failover; performance work remains later and separate.
+
+## Result
+
+All deliverables are complete. TestOps run `20260718-025048-9d6a` passed 14/14
+actions with fresh matching images. It proved an RDMA StorageClass, dynamic PVC,
+mounted writer/reader, `SwBlockVolume.status.nvme.transport=rdma`, a live m01
+controller with `transport=rdma` and `traddr=10.0.0.3`, no TCP fallback, and zero
+Kubernetes, controller, configfs, and NBD residue.
+
+During the live gate, two contract gaps were fixed rather than hidden:
+
+- the cluster-evidence protobuf initially dropped `frontend_transport`, causing
+  a false TCP CRD projection despite real RDMA I/O;
+- the runtime image lacked `modprobe`, so `nvmet-rdma` startup could not run.
+
+Gate-only namespace, verifier filename, CR cleanup ownership, and PV deletion
+ordering defects were also corrected. The status CR is explicitly test-cleaned
+because CSI does not own CR deletion under the Phase 44 lifecycle contract.

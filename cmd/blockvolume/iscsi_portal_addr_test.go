@@ -77,12 +77,14 @@ func TestParseFlags_NVMERDMARejectsTCPMaxH2COption(t *testing.T) {
 	}
 }
 
-func TestNVMERDMAStandaloneTargetIsNotPublishedToCSI(t *testing.T) {
-	if shouldPublishNVMeFrontendTarget("rdma") {
-		t.Fatal("standalone RDMA target must not enter master/CSI publish context")
+func TestPhase165_NVMeFrontendTargetPublicationRequiresKnownTransport(t *testing.T) {
+	for _, transport := range []string{"tcp", "rdma"} {
+		if !shouldPublishNVMeFrontendTarget(transport) {
+			t.Fatalf("%s target must enter master/CSI publish context", transport)
+		}
 	}
-	if !shouldPublishNVMeFrontendTarget("tcp") {
-		t.Fatal("TCP target publication changed")
+	if shouldPublishNVMeFrontendTarget("bogus") {
+		t.Fatal("unknown transport must not enter master/CSI publish context")
 	}
 }
 
