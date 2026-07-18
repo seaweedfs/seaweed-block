@@ -105,6 +105,7 @@ The supported-lab claim is intentionally narrow:
 | 161 | NVMe/RDMA standalone preflight/refusal facts surface module/device/bind evidence | PASS |
 | 162 | NVMe/RDMA listener start decision skeleton stays disabled by default | PASS |
 | 163 | Standalone NVMe/RDMA live I/O through the Seaweed backend | PASS |
+| 164 | Standalone NVMe/RDMA lifecycle, restart, isolation, refusal, and cleanup hardening | PASS |
 
 Key QA sign-offs:
 
@@ -812,9 +813,10 @@ image-pair smoke passes.
 
 This evidence does not claim:
 
-- Kubernetes RoCE or NVMe/RDMA publish/attach. Phase 163 proves only an
-  explicit, source-gated standalone Linux path; it is not yet part of CSI
-  publish context, NodeStage/NodeUnstage, multipath, or failover.
+- Kubernetes RoCE or NVMe/RDMA publish/attach. Phases 163-164 prove only an
+  explicit, source-gated and lifecycle-hardened standalone Linux path; it is
+  not yet part of CSI publish context, NodeStage/NodeUnstage, multipath, or
+  failover.
 - Performance, throughput, latency, or production SLO.
 - Broad Linux distro, kernel, initiator, or cloud compatibility.
 - Production HA, node-loss survival, or arbitrary unbounded path churn.

@@ -114,8 +114,8 @@ These are narrow alpha claims tied to documented gates. See
   parity beyond the documented supported-lab gates. The CSI-node reconnect
   owner, host-path reconnect gate, desired path-set replacement gate, and
   stale path pruning gate exist only as source-gated NVMe/TCP evidence. The
-  NVMe/RDMA path is standalone-only until its lifecycle hardening and
-  Kubernetes publish/attach gates pass.
+  NVMe/RDMA path has passed its standalone lifecycle hardening gate but remains
+  standalone-only until the Kubernetes publish/attach gate passes.
 - Broad distro/kernel/initiator compatibility.
 - Upgrade or rollback execution. The status layer can report install drift, but
   it does not run Helm or kubectl mutations.

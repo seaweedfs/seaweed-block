@@ -1,0 +1,121 @@
+name: nvme-rdma-standalone-hardening-chain
+timeout: 30m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: run_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 25m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase164-nvme-rdma && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase164-nvme-rdma && cd {{ product_root }} && SW_BLOCK_PHASE164_RUN_ID={{ run_id }} SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase164-nvme-rdma bash scripts/run-phase164-nvme-rdma-standalone-hardening-gate.sh {{ product_root }}"
+
+  - name: assert_summary
+    actions:
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase164-nvme-rdma/phase164-nvme-rdma-standalone-hardening-summary.txt"
+        pattern: "^phase164_nvme_rdma_standalone_hardening_status=ok$"
+        save_as: phase164_ok
+      - action: assert_greater
+        actual: "{{ phase164_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase164-nvme-rdma/phase164-nvme-rdma-standalone-hardening-summary.txt"
+        pattern: "^startup_rollback_verified=true$"
+        save_as: rollback
+      - action: assert_greater
+        actual: "{{ rollback }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase164-nvme-rdma/phase164-nvme-rdma-standalone-hardening-summary.txt"
+        pattern: "^small_and_large_io_verified=true$"
+        save_as: io_shape
+      - action: assert_greater
+        actual: "{{ io_shape }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase164-nvme-rdma/phase164-nvme-rdma-standalone-hardening-summary.txt"
+        pattern: "^flush_and_fua_verified=true$"
+        save_as: flush_fua
+      - action: assert_greater
+        actual: "{{ flush_fua }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase164-nvme-rdma/phase164-nvme-rdma-standalone-hardening-summary.txt"
+        pattern: "^durable_restart_reconnect_verified=true$"
+        save_as: restart
+      - action: assert_greater
+        actual: "{{ restart }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase164-nvme-rdma/phase164-nvme-rdma-standalone-hardening-summary.txt"
+        pattern: "^capability_restart_honesty_verified=true$"
+        save_as: capability_restart
+      - action: assert_greater
+        actual: "{{ capability_restart }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase164-nvme-rdma/phase164-nvme-rdma-standalone-hardening-summary.txt"
+        pattern: "^multi_target_isolation_verified=true$"
+        save_as: isolation
+      - action: assert_greater
+        actual: "{{ isolation }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase164-nvme-rdma/phase164-nvme-rdma-standalone-hardening-summary.txt"
+        pattern: "^bounded_connect_churn_verified=true$"
+        save_as: churn
+      - action: assert_greater
+        actual: "{{ churn }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase164-nvme-rdma/phase164-nvme-rdma-standalone-hardening-summary.txt"
+        pattern: "^negative_preflight_refusal_verified=true$"
+        save_as: refusal
+      - action: assert_greater
+        actual: "{{ refusal }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase164-nvme-rdma/phase164-nvme-rdma-standalone-hardening-summary.txt"
+        pattern: "^port_conflict_refusal_verified=true$"
+        save_as: port_conflict
+      - action: assert_greater
+        actual: "{{ port_conflict }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase164-nvme-rdma/phase164-nvme-rdma-standalone-hardening-summary.txt"
+        pattern: "^cleanup_status=ok$"
+        save_as: cleanup
+      - action: assert_greater
+        actual: "{{ cleanup }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase164-nvme-rdma"
+        name: "remote-phases"
+        ignore_error: true

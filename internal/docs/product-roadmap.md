@@ -114,10 +114,10 @@ This is the short internal roadmap. Keep it current and readable.
   and read back data through kernel `nvmet-rdma`, the product-owned NBD bridge,
   and the Seaweed backend. This source-gated claim excludes Kubernetes
   publication, failover, broad compatibility, and performance/SLOs.
-- Phase 164 is the next coherent gate: productize and harden the standalone
-  path across rollback, flush/FUA, durable restart/reconnect, multi-target
-  isolation, bounded churn, refusal evidence, and zero-residue cleanup before
-  Phase 165 owns Kubernetes RDMA publish/attach.
+- Phase 164 closes standalone hardening across rollback, flush/FUA, durable
+  restart/reconnect, multi-target isolation, bounded churn, refusal evidence,
+  and zero-residue cleanup. Phase 165 now owns an opt-in, explicitly typed
+  Kubernetes RDMA publish/attach path with mounted workload I/O.
 
 Do not skip from scripts directly to mutating operator lifecycle. Helm has
 stabilized the installation contract, and Phase 35 added read-only CRD status,
@@ -553,10 +553,10 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   diagnostic boundary mismatch: superblock WAL byte-position metadata was being
   reported as the LSN `HeadLSN` after recovery. Storage and durable-provider
   regressions now assert recovered `HeadLSN` is bounded by the recovered LSN.
-- The standalone NVMe/RDMA implementation now exists behind a source-gated
-  Linux supported-lab boundary. Next, harden its lifecycle and then add a
-  separate Kubernetes publish/attach gate. Keep transport correctness,
-  Kubernetes lifecycle, performance characterization, and object/NIXL
+- The standalone NVMe/RDMA implementation and hardening gate now pass behind a
+  source-gated Linux supported-lab boundary. Next, add a separate opt-in
+  Kubernetes publish/attach gate. Keep transport correctness, Kubernetes
+  lifecycle, reconnect/failover, performance characterization, and object/NIXL
   acceleration as separate claims.
 
 ### Track E: Protocol / Backend Expansion
@@ -565,9 +565,10 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   the MVP backend. NVMe/TCP has a Kubernetes supported-lab path; NVMe/RDMA has
   a narrower standalone Linux supported-lab path through kernel `nvmet-rdma`
   and a product-owned NBD-to-backend bridge.
-- Next: Phase 164 standalone NVMe/RDMA hardening, then Phase 165 Kubernetes
-  publish/attach. Storage-engine boundary and smartwal/delta experiments remain
-  explicit, separate gates.
+- Next: Phase 165 opt-in Kubernetes NVMe/RDMA publish/attach with an explicit
+  transport contract and mounted workload I/O. Reconnect/failover and
+  performance remain later, separate gates. Storage-engine boundary and
+  smartwal/delta experiments also remain separate.
 - Protocol hardening now has a dedicated working area under
   `internal/docs/protocol/`. New protocol semantics should update the control
   model, invariant ledger, and anti-pattern checklist there before release

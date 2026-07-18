@@ -10,7 +10,7 @@ performance improvement, and production SLOs remain non-claims.
 | Capability | Current status |
 | --- | --- |
 | NVMe/TCP Kubernetes CSI path | Source-gated supported lab |
-| NVMe/RDMA standalone Linux target | Source-gated supported lab, Phase 163 |
+| NVMe/RDMA standalone Linux target | Source-gated supported lab, Phases 163-164 |
 | NVMe/RDMA Kubernetes CSI publish/attach | Not implemented |
 | NVMe/RDMA multipath or failover | Not implemented |
 | Broad kernel, NIC, distro, or initiator compatibility | Not claimed |
@@ -101,11 +101,31 @@ verified the checksum. Independently, the blockvolume log recorded
 the request reached the Seaweed backend rather than stopping at a kernel-only
 control target.
 
+## Phase 164 Hardening Evidence
+
+TestOps run `20260718-015204-af29` passed 24/24 actions. It added partial-start
+rollback, live RDMA-port conflict isolation, aligned 4 KiB and 1 MiB I/O,
+FUA/flush evidence, durable restart/reconnect, two simultaneous targets,
+bounded connect churn, stable refusal, and zero-residue cleanup.
+
+```text
+phase164_nvme_rdma_standalone_hardening_status=ok
+startup_rollback_verified=true
+port_conflict_refusal_verified=true
+small_and_large_io_verified=true
+flush_and_fua_verified=true
+durable_restart_reconnect_verified=true
+multi_target_isolation_verified=true
+bounded_connect_churn_verified=true
+negative_preflight_refusal_verified=true
+cleanup_status=ok
+```
+
 ## Why This Is Not Yet A Kubernetes Claim
 
 The standalone target is deliberately not advertised to blockmaster or CSI.
-The existing publish-target path remains NVMe/TCP-only. Therefore Phase 163
-does not prove:
+The existing publish-target path remains NVMe/TCP-only. Therefore Phases
+163-164 do not prove:
 
 - RDMA addresses in CSI publish context;
 - CSI NodeStage/NodeUnstage using `nvme connect -t rdma`;
@@ -120,17 +140,11 @@ those ownership and cleanup paths exist would create an unsafe partial claim.
 
 ## Next Gates
 
-### Phase 164: Standalone Productization And Hardening
-
-One coherent gate covers startup rollback, flush/FUA correctness, durable
-restart/reconnect, multi-target isolation, bounded connect churn, negative
-preflight/refusal, capability honesty, TCP regression, and zero residue.
-
 ### Phase 165: Kubernetes Publish/Attach
 
-Only after Phase 164 passes should the product publish RDMA frontend context,
-connect from CSI-node, mount an application PVC, expose status, and prove
-delete/uninstall cleanup.
+The next gate carries an explicit RDMA transport through frontend publication,
+connects from CSI-node, mounts an application PVC, exposes status, and proves
+delete/uninstall cleanup while preserving NVMe/TCP as the default.
 
 ### Later: Multipath, Failover, And Performance
 

@@ -914,6 +914,29 @@ func run(f flags) int {
 	}
 	if f.nvmeListen != "" {
 		if f.nvmeTransport == "rdma" {
+			start := nvmeRDMAListenerStartDecision(true, nvmeRDMAPreflightFacts(f.nvmeListen))
+			if !start.allowed {
+				fmt.Fprintf(os.Stderr, "blockvolume: nvme rdma start refused: reason=%s\n", start.reason)
+				if iscsiTarget != nil {
+					_ = iscsiTarget.Close()
+				}
+				if replListen != nil {
+					replListen.Stop()
+				}
+				if replVolume != nil {
+					_ = replVolume.Close()
+				}
+				if durableProv != nil {
+					_ = durableProv.Close()
+				}
+				if status != nil {
+					shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
+					_ = status.Close(shutCtx)
+					shutCancel()
+				}
+				_ = h.Close()
+				return 1
+			}
 			blockSize := frontendBlockSize
 			volumeSize := frontendVolumeSize
 			if blockSize == 0 {
@@ -955,9 +978,22 @@ func run(f flags) int {
 		}
 		nvmeAddr, err := nvmeTarget.Start()
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "blockvolume: nvme target:", err)
+			if f.nvmeTransport == "rdma" {
+				fmt.Fprintf(os.Stderr, "blockvolume: nvme rdma start refused: reason=%s error=%v\n", nvmeRDMATargetStartFailureReason(err), err)
+			} else {
+				fmt.Fprintln(os.Stderr, "blockvolume: nvme target:", err)
+			}
 			if iscsiTarget != nil {
 				_ = iscsiTarget.Close()
+			}
+			if replListen != nil {
+				replListen.Stop()
+			}
+			if replVolume != nil {
+				_ = replVolume.Close()
+			}
+			if durableProv != nil {
+				_ = durableProv.Close()
 			}
 			if status != nil {
 				shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -1029,6 +1065,22 @@ func run(f flags) int {
 
 func shouldPublishNVMeFrontendTarget(transport string) bool {
 	return transport == "tcp"
+}
+
+func nvmeRDMATargetStartFailureReason(err error) string {
+	message := err.Error()
+	switch {
+	case strings.Contains(message, "port ID already exists"):
+		return "rdma_port_conflict"
+	case strings.Contains(message, "subsystem already exists"):
+		return "rdma_subsystem_conflict"
+	case strings.Contains(message, "cannot assign requested address"):
+		return "rdma_bind_address_unassigned"
+	case strings.Contains(message, "permission denied"), strings.Contains(message, "kernel target requires root"):
+		return "rdma_target_permission_denied"
+	default:
+		return "rdma_target_start_failed"
+	}
 }
 
 func nvmeFrontendCapabilities(nvmeListen, selectedTransport string, listenerStarted bool) []volume.FrontendTransportCapability {

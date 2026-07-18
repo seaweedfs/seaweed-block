@@ -1,90 +1,67 @@
-# Current Plan: Phase 164 NVMe/RDMA Standalone Productization And Hardening
+# Current Plan: Phase 165 NVMe/RDMA Kubernetes Publish And Attach
 
 Status: planning.
 
-Phase 163 proved the first real Seaweed Block NVMe/RDMA data path:
-
-```text
-Linux nvme-rdma initiator
--> kernel nvmet-rdma target
--> product-owned NBD bridge
--> Seaweed Block frontend.Backend
-```
-
-The supported-lab gate connected from m01 to the m02 RoCE address, verified
-write/read/flush against the Seaweed backend, and left no target, host, or NBD
-residue. Kubernetes publication, failover, and performance remain non-claims.
+Phase 164 closed the standalone Linux NVMe/RDMA correctness and lifecycle gate.
+The transport remains invisible to Kubernetes: RDMA targets are not published
+by the volume process, the control RPC has no explicit NVMe transport field,
+and CSI node attach assumes NVMe/TCP.
 
 ## Goal
 
-Turn the Phase 163 implementation spike into one hardened standalone product
-slice before any Kubernetes integration. This phase owns correctness, restart,
-isolation, refusal, observability, and cleanup as one close gate rather than as
-separate small phases.
+Add one opt-in Kubernetes NVMe/RDMA path from StorageClass intent through
+launcher publication and CSI node attach to mounted Pod I/O. Keep NVMe/TCP as
+the default and preserve the existing three-way control ownership boundaries.
 
 ## Deliverables
 
-### D1. Lifecycle And Rollback
+### D1. Typed Publish Contract
 
-- Allocate and release NBD devices without cross-run contamination.
-- Roll back NBD/configfs state after partial startup failure.
-- Handle normal termination and repeated start/stop cleanly.
-- Avoid fixed test ports and stale NQNs in the formal gate.
+- Add an explicit NVMe transport value to frontend publication and CSI volume
+  context; do not infer transport from port or address.
+- Accept only `tcp` or `rdma`, defaulting old/empty records to `tcp`.
+- Preserve compatibility for existing iSCSI and NVMe/TCP volumes.
 
-### D2. Data And Flush Correctness
+### D2. Launcher And Chart Wiring
 
-- Verify aligned 4 KiB and larger sequential write/read checksums.
-- Verify NVMe flush and FUA reach the Seaweed backend sync boundary.
-- Reject out-of-range or malformed requests without desynchronizing the bridge.
+- Add an opt-in StorageClass/Helm value for NVMe/RDMA.
+- Select a non-loopback node data-plane address and pass
+  `--nvme-transport=rdma` to the target volume only when requested.
+- Project module, RDMA device, bind-address, NBD, and configfs blockers before
+  claiming a publishable target.
 
-### D3. Durable Restart And Reconnect
+### D3. CSI Node Lifecycle
 
-- Write known data through `nvme connect -t rdma`.
-- Disconnect and restart `blockvolume` with the same durable root.
-- Reconnect and verify the pre-restart checksum.
-- Keep capability status honest while the listener is down or restarting.
+- Use transport-aware `nvme connect -t rdma` for an RDMA publish context.
+- Make NodeStage/NodeUnstage idempotent and preserve foreign NVMe controllers.
+- Refuse missing host prerequisites without falling back silently to TCP.
 
-### D4. Isolation And Bounded Churn
+### D4. Mounted Workload Gate
 
-- Run two standalone targets with distinct NQN, port, namespace, and NBD device.
-- Prove writes do not cross volume boundaries.
-- Run repeated connect/write/read/disconnect cycles and finish with zero residue.
+- Create a PVC from the opt-in RDMA StorageClass.
+- Prove the published target uses the RoCE address and RDMA transport.
+- Mount the volume into a Pod and verify writer/reader checksums through the
+  real CSI node path.
 
-### D5. Refusal And Regression Boundary
+### D5. Negative And Cleanup Boundary
 
-- Fail closed for missing modules, configfs, RDMA device, bind address, port
-  conflict, or insufficient privilege with stable evidence.
-- Keep the existing NVMe/TCP path and tests unchanged.
-- Keep RDMA absent from master/CSI publish context in this phase.
-- Make no throughput, latency, acceleration, HA, or production SLO claim.
+- Verify unsupported nodes surface a stable non-Ready reason with no false
+  `Ready=True` and no TCP fallback.
+- Delete Pod/PVC, uninstall, and return host controllers, configfs, NBD,
+  iSCSI/multipath, CRDs, and product processes to baseline.
+- Keep failover, multipath, performance, broad compatibility, and SLOs as
+  explicit non-claims.
 
 ### D6. Close Gate
 
-- Package D1-D5 as one TestOps scenario with independent host, target, backend,
-  and cleanup evidence.
-- Update the source-gated supported-lab boundary from the same run bundle.
-
-## Required Evidence
-
-```text
-phase164_nvme_rdma_standalone_hardening_status=ok
-startup_rollback_verified=true
-small_and_large_io_verified=true
-flush_and_fua_verified=true
-durable_restart_reconnect_verified=true
-multi_target_isolation_verified=true
-bounded_connect_churn_verified=true
-negative_preflight_refusal_verified=true
-tcp_behavior_unchanged=true
-rdma_not_published_to_csi=true
-performance_slo_claim_allowed=false
-cleanup_status=ok
-next_recommendation=phase165_nvme_rdma_kubernetes_publish_attach
-```
+- Package D1-D5 into one TestOps scenario using fresh matching product and CSI
+  images.
+- Require control-plane status, CSI evidence, mounted I/O, and independent host
+  cleanup evidence in the same run bundle.
 
 ## Exit Criteria
 
-Phase 164 closes only when the complete standalone hardening gate passes from
-one TestOps bundle. Phase 165 may then own Kubernetes publish context,
-NodeStage/NodeUnstage, mounted workload I/O, status agreement, and delete
-cleanup. Performance comparison comes only after those correctness gates.
+Phase 165 closes only when a normal Kubernetes user can select the opt-in
+NVMe/RDMA class, mount a PVC, read back written data, and delete it with zero
+residue while NVMe/TCP behavior remains unchanged. The next phase may then own
+NVMe/RDMA reconnect/failover; performance work remains later and separate.
