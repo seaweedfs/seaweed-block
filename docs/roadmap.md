@@ -160,6 +160,10 @@ Seaweed Block can already demonstrate a narrow Kubernetes block-storage loop:
   through kernel `nvmet-rdma` plus a product-owned NBD bridge; write/read/flush
   and cleanup pass on the 10.0.0.x RoCE lab network. Kubernetes publication,
   failover, broad compatibility, and performance remain non-claims.
+- Phase 164 hardens that standalone path with startup rollback, 4 KiB and
+  larger I/O, FUA/flush, durable restart/reconnect, two-target isolation,
+  bounded churn, stable refusal, and zero-residue cleanup. Phase 165 owns the
+  separate opt-in Kubernetes publish/attach and mounted workload gate.
 - Kubernetes NVMe/TCP mounted reconnect is source-gated through changed
   desired path-set evidence: CSI-node can connect a newly published desired
   NVMe path, prune the stale old host path for the same NQN, preserve pod

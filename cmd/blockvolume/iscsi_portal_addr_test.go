@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -129,6 +130,48 @@ func TestNVMERDMAListenerStartDecisionMapsPreflightFailure(t *testing.T) {
 	}})
 	if got.allowed || got.reason != "rdma_device_missing" {
 		t.Fatalf("start decision=%+v want rdma_device_missing", got)
+	}
+}
+
+func TestNVMERDMAListenerStartDecisionMapsEveryTargetPreflightFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		reason string
+	}{
+		{name: "nvmet_rdma_module", reason: "nvmet_rdma_module_missing"},
+		{name: "nbd_module", reason: "nbd_module_missing"},
+		{name: "rdma_device", reason: "rdma_device_missing"},
+		{name: "rdma_bind_address", reason: "rdma_bind_address_invalid"},
+		{name: "configfs", reason: "configfs_missing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := nvmeRDMAListenerStartDecision(true, []volume.FrontendTransportPreflightFact{{
+				Name:      tc.name,
+				Available: false,
+				Reason:    tc.reason,
+			}})
+			if got.allowed || got.reason != tc.reason {
+				t.Fatalf("start decision=%+v want %s", got, tc.reason)
+			}
+		})
+	}
+}
+
+func TestNVMERDMATargetStartFailureReason(t *testing.T) {
+	for _, tc := range []struct {
+		message string
+		want    string
+	}{
+		{message: "configure kernel target: port ID already exists: 4420", want: "rdma_port_conflict"},
+		{message: "configure kernel target: subsystem already exists: nqn.test", want: "rdma_subsystem_conflict"},
+		{message: "symlink: cannot assign requested address", want: "rdma_bind_address_unassigned"},
+		{message: "open /dev/nbd0: permission denied", want: "rdma_target_permission_denied"},
+		{message: "nvmerdma: kernel target requires root", want: "rdma_target_permission_denied"},
+		{message: "unexpected target error", want: "rdma_target_start_failed"},
+	} {
+		if got := nvmeRDMATargetStartFailureReason(errors.New(tc.message)); got != tc.want {
+			t.Errorf("failure reason for %q = %q, want %q", tc.message, got, tc.want)
+		}
 	}
 }
 
