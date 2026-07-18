@@ -329,7 +329,7 @@ func (s *NodeServer) stageNVMe(ctx context.Context, req *csipb.NodeStageVolumeRe
 	if addr == "" || nqn == "" {
 		return nil, status.Error(codes.FailedPrecondition, "no NVMe publish target")
 	}
-	nvmeTransport, err := nvmeTransportFromContexts(publishContext, req.GetPublishContext(), req.GetVolumeContext())
+	nvmeTransport, err := nvmeTransportFromContexts(publishContext, req.GetVolumeContext())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
