@@ -155,6 +155,11 @@ Seaweed Block can already demonstrate a narrow Kubernetes block-storage loop:
 - Phase 162 adds a disabled-by-default RDMA listener start decision skeleton:
   the product can report why start is not allowed, but still does not start an
   RDMA listener or claim live I/O.
+- Phase 163 implements and live-gates the first source-gated standalone
+  NVMe/RDMA path. Linux `nvme connect -t rdma` reaches the real Seaweed backend
+  through kernel `nvmet-rdma` plus a product-owned NBD bridge; write/read/flush
+  and cleanup pass on the 10.0.0.x RoCE lab network. Kubernetes publication,
+  failover, broad compatibility, and performance remain non-claims.
 - Kubernetes NVMe/TCP mounted reconnect is source-gated through changed
   desired path-set evidence: CSI-node can connect a newly published desired
   NVMe path, prune the stale old host path for the same NQN, preserve pod

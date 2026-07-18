@@ -87,9 +87,11 @@ This is an **alpha** product path for supported lab clusters, not production.
   record opt-in has mounted profile and restart/recovery compatibility evidence,
   plus mounted durable-status `HeadLSN` confirmation, but remains default-off
   and requires a future matching-image release smoke before it becomes a public
-  image claim. This is a
-  supported-lab source-gated claim, not a broad NVMe
-  compatibility, RoCE/NVMe-RDMA, production HA, or performance/SLO claim.
+  image claim. A separate source-gated standalone Linux gate now proves a
+  standard `nvme connect -t rdma` write/read/flush path through the Seaweed
+  backend on the supported RoCE lab. RDMA is not yet published through CSI.
+  These are supported-lab source-gated claims, not broad NVMe compatibility,
+  production HA, or performance/SLO claims.
 - Replay support bundles offline.
 
 These are narrow alpha claims tied to documented gates. See
@@ -111,7 +113,9 @@ These are narrow alpha claims tied to documented gates. See
 - Broad NVMe/RoCE compatibility, performance/SLO, or transparent failover
   parity beyond the documented supported-lab gates. The CSI-node reconnect
   owner, host-path reconnect gate, desired path-set replacement gate, and
-  stale path pruning gate exist only as source-gated supported-lab evidence.
+  stale path pruning gate exist only as source-gated NVMe/TCP evidence. The
+  NVMe/RDMA path is standalone-only until its lifecycle hardening and
+  Kubernetes publish/attach gates pass.
 - Broad distro/kernel/initiator compatibility.
 - Upgrade or rollback execution. The status layer can report install drift, but
   it does not run Helm or kubectl mutations.
