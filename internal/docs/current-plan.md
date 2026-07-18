@@ -1,64 +1,90 @@
-# Current Plan: Phase 163 NVMe/RDMA Standalone Listener Implementation Spike
+# Current Plan: Phase 164 NVMe/RDMA Standalone Productization And Hardening
 
 Status: planning.
 
-Phase 162 closed the disabled-by-default listener skeleton:
+Phase 163 proved the first real Seaweed Block NVMe/RDMA data path:
 
 ```text
-phase162_nvme_rdma_standalone_listener_skeleton_gate_status=ok
-rdma_listener_start_path_defined=true
-rdma_listener_disabled_by_default=true
-preflight_failure_maps_to_stable_reasons=true
-capability_endpoint_reports_listener_started_false=true
-tcp_behavior_unchanged=true
-linux_nvme_connect_live_io_not_claimed=true
-k8s_publish_attach_claim_allowed=false
-performance_slo_claim_allowed=false
-phase162_decision=rdma_start_decision_skeleton_disabled_by_default
-next_recommendation=phase163_nvme_rdma_standalone_listener_impl_spike
+Linux nvme-rdma initiator
+-> kernel nvmet-rdma target
+-> product-owned NBD bridge
+-> Seaweed Block frontend.Backend
 ```
+
+The supported-lab gate connected from m01 to the m02 RoCE address, verified
+write/read/flush against the Seaweed backend, and left no target, host, or NBD
+residue. Kubernetes publication, failover, and performance remain non-claims.
 
 ## Goal
 
-Attempt the smallest standalone NVMe/RDMA listener implementation spike. The
-only acceptable success proof is a standalone live I/O gate using Linux
-`nvme connect -t rdma` against a Seaweed Block target. Kubernetes publish/attach
-and performance claims stay deferred.
+Turn the Phase 163 implementation spike into one hardened standalone product
+slice before any Kubernetes integration. This phase owns correctness, restart,
+isolation, refusal, observability, and cleanup as one close gate rather than as
+separate small phases.
+
+## Deliverables
+
+### D1. Lifecycle And Rollback
+
+- Allocate and release NBD devices without cross-run contamination.
+- Roll back NBD/configfs state after partial startup failure.
+- Handle normal termination and repeated start/stop cleanly.
+- Avoid fixed test ports and stale NQNs in the formal gate.
+
+### D2. Data And Flush Correctness
+
+- Verify aligned 4 KiB and larger sequential write/read checksums.
+- Verify NVMe flush and FUA reach the Seaweed backend sync boundary.
+- Reject out-of-range or malformed requests without desynchronizing the bridge.
+
+### D3. Durable Restart And Reconnect
+
+- Write known data through `nvme connect -t rdma`.
+- Disconnect and restart `blockvolume` with the same durable root.
+- Reconnect and verify the pre-restart checksum.
+- Keep capability status honest while the listener is down or restarting.
+
+### D4. Isolation And Bounded Churn
+
+- Run two standalone targets with distinct NQN, port, namespace, and NBD device.
+- Prove writes do not cross volume boundaries.
+- Run repeated connect/write/read/disconnect cycles and finish with zero residue.
+
+### D5. Refusal And Regression Boundary
+
+- Fail closed for missing modules, configfs, RDMA device, bind address, port
+  conflict, or insufficient privilege with stable evidence.
+- Keep the existing NVMe/TCP path and tests unchanged.
+- Keep RDMA absent from master/CSI publish context in this phase.
+- Make no throughput, latency, acceleration, HA, or production SLO claim.
+
+### D6. Close Gate
+
+- Package D1-D5 as one TestOps scenario with independent host, target, backend,
+  and cleanup evidence.
+- Update the source-gated supported-lab boundary from the same run bundle.
 
 ## Required Evidence
 
 ```text
-phase163_nvme_rdma_standalone_listener_impl_spike_status=<ok|blocked_with_reason>
-rdma_listener_impl_attempted=true
-rdma_bind_ip=<100Gb/RoCE/data-plane IP or blocked>
-rdma_device=<device or blocked>
-linux_nvme_connect_rdma_succeeded=<true|false>
-standalone_write_read_verified=<true|false>
-disconnect_cleanup_status=<ok|not_reached>
-capability_endpoint_reports_rdma_supported=<true|false>
+phase164_nvme_rdma_standalone_hardening_status=ok
+startup_rollback_verified=true
+small_and_large_io_verified=true
+flush_and_fua_verified=true
+durable_restart_reconnect_verified=true
+multi_target_isolation_verified=true
+bounded_connect_churn_verified=true
+negative_preflight_refusal_verified=true
 tcp_behavior_unchanged=true
-k8s_publish_attach_claim_allowed=false
+rdma_not_published_to_csi=true
 performance_slo_claim_allowed=false
-next_recommendation=<specific next phase>
+cleanup_status=ok
+next_recommendation=phase165_nvme_rdma_kubernetes_publish_attach
 ```
-
-## Boundaries
-
-- Do not wire Kubernetes publish/attach in this phase.
-- Do not claim performance or acceleration.
-- If live RDMA I/O cannot pass, keep `supported=false` and report the blocking
-  reason instead of partial success.
-- Preserve TCP behavior and existing refusal tests.
-
-## Candidate Work
-
-1. Select the minimal RDMA implementation library/path.
-2. Bind only to the RDMA/data-plane address, not the management LAN.
-3. Feed real RDMA commands into the existing transport adapter seam.
-4. Use Linux `nvme connect -t rdma` for live proof.
-5. Verify write/read and cleanup, or close as blocked with precise evidence.
 
 ## Exit Criteria
 
-Phase 163 can close only when the standalone gate either passes real RDMA live
-I/O or records a concrete blocker that keeps the product in unsupported state.
+Phase 164 closes only when the complete standalone hardening gate passes from
+one TestOps bundle. Phase 165 may then own Kubernetes publish context,
+NodeStage/NodeUnstage, mounted workload I/O, status agreement, and delete
+cleanup. Performance comparison comes only after those correctness gates.

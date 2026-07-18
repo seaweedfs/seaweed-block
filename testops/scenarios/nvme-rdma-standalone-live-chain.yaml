@@ -1,0 +1,89 @@
+name: nvme-rdma-standalone-live-chain
+timeout: 20m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: run_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 15m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase163-nvme-rdma && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase163-nvme-rdma && cd {{ product_root }} && SW_BLOCK_PHASE163_RUN_ID={{ run_id }} SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase163-nvme-rdma bash scripts/run-phase163-nvme-rdma-standalone-live-gate.sh {{ product_root }}"
+
+  - name: assert_summary
+    actions:
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase163-nvme-rdma/phase163-nvme-rdma-standalone-live-summary.txt"
+        pattern: "^phase163_nvme_rdma_standalone_listener_impl_spike_status=ok$"
+        save_as: phase163_ok
+      - action: assert_greater
+        actual: "{{ phase163_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase163-nvme-rdma/phase163-nvme-rdma-standalone-live-summary.txt"
+        pattern: "^linux_nvme_connect_rdma_succeeded=true$"
+        save_as: rdma_connect
+      - action: assert_greater
+        actual: "{{ rdma_connect }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase163-nvme-rdma/phase163-nvme-rdma-standalone-live-summary.txt"
+        pattern: "^standalone_write_read_verified=true$"
+        save_as: rdma_io
+      - action: assert_greater
+        actual: "{{ rdma_io }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase163-nvme-rdma/phase163-nvme-rdma-standalone-live-summary.txt"
+        pattern: "^seaweed_backend_write_observed=true$"
+        save_as: seaweed_backend
+      - action: assert_greater
+        actual: "{{ seaweed_backend }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase163-nvme-rdma/phase163-nvme-rdma-standalone-live-summary.txt"
+        pattern: "^capability_endpoint_reports_rdma_supported=true$"
+        save_as: capability_supported
+      - action: assert_greater
+        actual: "{{ capability_supported }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase163-nvme-rdma/phase163-nvme-rdma-standalone-live-summary.txt"
+        pattern: "^rdma_not_published_to_csi=true$"
+        save_as: no_csi_publish
+      - action: assert_greater
+        actual: "{{ no_csi_publish }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase163-nvme-rdma/phase163-nvme-rdma-standalone-live-summary.txt"
+        pattern: "^disconnect_cleanup_status=ok$"
+        save_as: cleanup_ok
+      - action: assert_greater
+        actual: "{{ cleanup_ok }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase163-nvme-rdma"
+        name: "remote-phases"
+        ignore_error: true

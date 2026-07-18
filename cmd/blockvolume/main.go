@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strconv"
 	"strings"
@@ -22,6 +23,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend/iscsi"
 	"github.com/seaweedfs/seaweed-block/core/frontend/memback"
 	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
+	"github.com/seaweedfs/seaweed-block/core/frontend/nvmerdma"
 	"github.com/seaweedfs/seaweed-block/core/host/volume"
 	"github.com/seaweedfs/seaweed-block/core/recovery"
 	"github.com/seaweedfs/seaweed-block/core/replication"
@@ -74,7 +76,7 @@ type flags struct {
 	iscsiCHAPSecret        string
 	allowExternalISCSIBind bool
 
-	// NVMe/TCP frontend flags. Symmetric with iSCSI flags: same
+	// NVMe frontend flags. Symmetric with iSCSI flags: same
 	// loopback-only safe-default rule, same auto-enable of
 	// --t1-readiness so the symmetry stays clean.
 	nvmeListen    string
@@ -82,7 +84,7 @@ type flags struct {
 	nvmeNS        uint
 	nvmeTransport string
 	nvmeMaxH2C    uint
-	// External NVMe/TCP bind is explicit because the current target has no
+	// External NVMe bind is explicit because the current target has no
 	// authentication. Phase 106 uses it for controlled Kubernetes cross-node
 	// gates; default installs remain loopback-only.
 	allowExternalNVMeBind bool
@@ -159,9 +161,9 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.nvmeListen, "nvme-listen", "", "NVMe/TCP target bind address (e.g. 127.0.0.1:0); empty disables. Loopback-only (no auth)")
 	fs.StringVar(&f.nvmeSubsysNQN, "nvme-subsysnqn", "", "NVMe subsystem NQN (required if --nvme-listen is set)")
 	fs.UintVar(&f.nvmeNS, "nvme-ns", 1, "NVMe namespace id (default 1)")
-	fs.StringVar(&f.nvmeTransport, "nvme-transport", "tcp", "NVMe-oF transport. Only \"tcp\" is implemented; \"rdma\"/RoCE is a future gated feature")
+	fs.StringVar(&f.nvmeTransport, "nvme-transport", "tcp", "NVMe-oF transport: tcp or the explicit Linux-only standalone rdma target")
 	fs.UintVar(&f.nvmeMaxH2C, "nvme-max-h2c-data-length", 0, "NVMe/TCP MaxH2CDataLength in bytes. 0 preserves the target default")
-	fs.BoolVar(&f.allowExternalNVMeBind, "allow-external-nvme-bind", false, "allow NVMe/TCP to bind a non-loopback address; unauthenticated, intended only for explicit Kubernetes NVMe/TCP gates")
+	fs.BoolVar(&f.allowExternalNVMeBind, "allow-external-nvme-bind", false, "allow NVMe to bind a non-loopback address; unauthenticated, intended only for explicit gates")
 	fs.StringVar(&f.durableRoot, "durable-root", "", "directory for persistent storage files; empty = memback (non-durable)")
 	fs.StringVar(&f.durableImpl, "durable-impl", "smartwal", "LogicalStorage impl: smartwal (default) or walstore; ignored unless --durable-root is set")
 	fs.UintVar(&f.durableBlocks, "durable-blocks", 2048, "number of blocks per volume on first create (ignored when opening existing)")
@@ -275,8 +277,8 @@ func parseFlags(args []string) (flags, error) {
 		return flags{}, fmt.Errorf("--iscsi-chap-username/--iscsi-chap-secret require --iscsi-listen")
 	}
 	if f.nvmeListen != "" {
-		if f.nvmeTransport != "tcp" {
-			return flags{}, fmt.Errorf("--nvme-transport=%q unsupported; only \"tcp\" is implemented", f.nvmeTransport)
+		if f.nvmeTransport != "tcp" && f.nvmeTransport != "rdma" {
+			return flags{}, fmt.Errorf("--nvme-transport=%q unsupported; use \"tcp\" or \"rdma\"", f.nvmeTransport)
 		}
 		if f.nvmeSubsysNQN == "" {
 			return flags{}, fmt.Errorf("--nvme-subsysnqn is required when --nvme-listen is set")
@@ -286,6 +288,9 @@ func parseFlags(args []string) (flags, error) {
 		}
 		if f.nvmeMaxH2C > uint(^uint32(0)) {
 			return flags{}, fmt.Errorf("--nvme-max-h2c-data-length=%d exceeds uint32", f.nvmeMaxH2C)
+		}
+		if f.nvmeTransport == "rdma" && f.nvmeMaxH2C != 0 {
+			return flags{}, fmt.Errorf("--nvme-max-h2c-data-length applies only to --nvme-transport=tcp")
 		}
 		if err := nvme.ValidateMaxH2CDataLength(uint32(f.nvmeMaxH2C)); err != nil {
 			return flags{}, fmt.Errorf("--nvme-max-h2c-data-length=%d invalid: %w", f.nvmeMaxH2C, err)
@@ -488,7 +493,7 @@ func run(f flags) int {
 		if f.allowExternalStatusBind {
 			status.AllowExternalAccess()
 		}
-		status.SetFrontendCapabilities(nvmeFrontendCapabilities(f.nvmeListen, false))
+		status.SetFrontendCapabilities(nvmeFrontendCapabilities(f.nvmeListen, f.nvmeTransport, false))
 		bound, err := status.Start(f.statusAddr)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "blockvolume: status server:", err)
@@ -903,33 +908,51 @@ func run(f flags) int {
 		h.SetFrontendTargets(frontendTargets)
 	}
 
-	var nvmeTarget *nvme.Target
+	var nvmeTarget interface {
+		Start() (string, error)
+		Close() error
+	}
 	if f.nvmeListen != "" {
-		prov := provider
-		var probeProvider nvme.ProbeBackendProvider
-		if durableProv != nil {
-			probeProvider = &durableProbeProvider{provider: durableProv}
-		}
-		nvmeTarget = nvme.NewTarget(nvme.TargetConfig{
-			Transport:        nvme.Transport(f.nvmeTransport),
-			Listen:           f.nvmeListen,
-			SubsysNQN:        f.nvmeSubsysNQN,
-			VolumeID:         f.volumeID,
-			Provider:         prov,
-			ProbeProvider:    probeProvider,
-			ControllerID:     nvmeControllerIDFromReplicaID(f.replicaID),
-			MaxH2CDataLength: uint32(f.nvmeMaxH2C),
-			// Capacity from durable config (see iSCSI block above).
-			// frontendBlockSize / frontendVolumeSize are 0 on memback
-			// path; nvme HandlerConfig zero-value defaulting preserves
-			// the historical 1 MiB / 512 B contract.
-			Handler: nvme.HandlerConfig{
+		if f.nvmeTransport == "rdma" {
+			blockSize := frontendBlockSize
+			volumeSize := frontendVolumeSize
+			if blockSize == 0 {
+				blockSize = nvme.DefaultBlockSize
+			}
+			if volumeSize == 0 {
+				volumeSize = nvme.DefaultVolumeBlocks * uint64(blockSize)
+			}
+			nvmeTarget = nvmerdma.NewTarget(nvmerdma.TargetConfig{
+				Listen:     f.nvmeListen,
+				SubsysNQN:  f.nvmeSubsysNQN,
+				VolumeID:   f.volumeID,
 				NSID:       uint32(f.nvmeNS),
-				BlockSize:  frontendBlockSize,
-				VolumeSize: frontendVolumeSize,
-				ANA:        newProjectionANAProvider(h.ProjectionView(), f.volumeID, f.replicaID, f.nvmeSubsysNQN),
-			},
-		})
+				BlockSize:  blockSize,
+				VolumeSize: volumeSize,
+				Provider:   provider,
+			})
+		} else {
+			var probeProvider nvme.ProbeBackendProvider
+			if durableProv != nil {
+				probeProvider = &durableProbeProvider{provider: durableProv}
+			}
+			nvmeTarget = nvme.NewTarget(nvme.TargetConfig{
+				Transport:        nvme.TransportTCP,
+				Listen:           f.nvmeListen,
+				SubsysNQN:        f.nvmeSubsysNQN,
+				VolumeID:         f.volumeID,
+				Provider:         provider,
+				ProbeProvider:    probeProvider,
+				ControllerID:     nvmeControllerIDFromReplicaID(f.replicaID),
+				MaxH2CDataLength: uint32(f.nvmeMaxH2C),
+				Handler: nvme.HandlerConfig{
+					NSID:       uint32(f.nvmeNS),
+					BlockSize:  frontendBlockSize,
+					VolumeSize: frontendVolumeSize,
+					ANA:        newProjectionANAProvider(h.ProjectionView(), f.volumeID, f.replicaID, f.nvmeSubsysNQN),
+				},
+			})
+		}
 		nvmeAddr, err := nvmeTarget.Start()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "blockvolume: nvme target:", err)
@@ -950,15 +973,17 @@ func run(f flags) int {
 			NvmeAddr:  nvmeAddr,
 			SubsysNQN: f.nvmeSubsysNQN,
 		})
-		frontendTargets = append(frontendTargets, &control.FrontendTarget{
-			Protocol: "nvme",
-			Addr:     nvmeAddr,
-			Nqn:      f.nvmeSubsysNQN,
-			Nsid:     uint32(f.nvmeNS),
-		})
-		h.SetFrontendTargets(frontendTargets)
+		if shouldPublishNVMeFrontendTarget(f.nvmeTransport) {
+			frontendTargets = append(frontendTargets, &control.FrontendTarget{
+				Protocol: "nvme",
+				Addr:     nvmeAddr,
+				Nqn:      f.nvmeSubsysNQN,
+				Nsid:     uint32(f.nvmeNS),
+			})
+			h.SetFrontendTargets(frontendTargets)
+		}
 		if status != nil {
-			status.SetFrontendCapabilities(nvmeFrontendCapabilities(f.nvmeListen, true))
+			status.SetFrontendCapabilities(nvmeFrontendCapabilities(f.nvmeListen, f.nvmeTransport, true))
 		}
 	}
 
@@ -1002,13 +1027,23 @@ func run(f flags) int {
 	return 0
 }
 
-func nvmeFrontendCapabilities(nvmeListen string, listenerStarted bool) []volume.FrontendTransportCapability {
-	return nvmeFrontendCapabilitiesWithRDMAPreflight(nvmeListen, listenerStarted, nvmeRDMAPreflightFacts(nvmeListen))
+func shouldPublishNVMeFrontendTarget(transport string) bool {
+	return transport == "tcp"
 }
 
-func nvmeFrontendCapabilitiesWithRDMAPreflight(nvmeListen string, listenerStarted bool, rdmaFacts []volume.FrontendTransportPreflightFact) []volume.FrontendTransportCapability {
-	tcpStarted := listenerStarted && nvmeListen != ""
-	rdmaStart := nvmeRDMAListenerStartDecision(false, rdmaFacts)
+func nvmeFrontendCapabilities(nvmeListen, selectedTransport string, listenerStarted bool) []volume.FrontendTransportCapability {
+	return nvmeFrontendCapabilitiesWithRDMAPreflight(nvmeListen, selectedTransport, listenerStarted, nvmeRDMAPreflightFacts(nvmeListen))
+}
+
+func nvmeFrontendCapabilitiesWithRDMAPreflight(nvmeListen, selectedTransport string, listenerStarted bool, rdmaFacts []volume.FrontendTransportPreflightFact) []volume.FrontendTransportCapability {
+	tcpStarted := listenerStarted && nvmeListen != "" && selectedTransport == "tcp"
+	rdmaSelected := selectedTransport == "rdma"
+	rdmaStarted := listenerStarted && nvmeListen != "" && rdmaSelected && nvmerdma.Implemented()
+	rdmaStart := nvmeRDMAListenerStartDecision(rdmaSelected, rdmaFacts)
+	rdmaReason := "nvme_rdma_transport_unsupported"
+	if rdmaStarted {
+		rdmaReason = "implemented"
+	}
 	return []volume.FrontendTransportCapability{
 		{
 			Protocol:            "nvme",
@@ -1023,12 +1058,12 @@ func nvmeFrontendCapabilitiesWithRDMAPreflight(nvmeListen string, listenerStarte
 		{
 			Protocol:            "nvme",
 			Transport:           "rdma",
-			Supported:           false,
-			ListenerImplemented: false,
-			ListenerStarted:     false,
+			Supported:           rdmaStarted,
+			ListenerImplemented: nvmerdma.Implemented(),
+			ListenerStarted:     rdmaStarted,
 			StartAllowed:        rdmaStart.allowed,
 			StartReason:         rdmaStart.reason,
-			Reason:              "nvme_rdma_transport_unsupported",
+			Reason:              rdmaReason,
 			Preflight:           append([]volume.FrontendTransportPreflightFact(nil), rdmaFacts...),
 		},
 	}
@@ -1044,29 +1079,55 @@ func nvmeRDMAListenerStartDecision(enabled bool, facts []volume.FrontendTranspor
 		return nvmeRDMAListenerStart{allowed: false, reason: "nvme_rdma_listener_disabled"}
 	}
 	for _, fact := range facts {
+		// nvme-rdma is an initiator module. Keep it visible as a host fact, but
+		// do not require it on a target that serves through nvmet-rdma.
+		if fact.Name == "nvme_rdma_module" {
+			continue
+		}
 		if !fact.Available {
 			return nvmeRDMAListenerStart{allowed: false, reason: fact.Reason}
 		}
 	}
-	return nvmeRDMAListenerStart{allowed: false, reason: "nvme_rdma_transport_unsupported"}
+	if !nvmerdma.Implemented() {
+		return nvmeRDMAListenerStart{allowed: false, reason: "nvme_rdma_transport_unsupported"}
+	}
+	return nvmeRDMAListenerStart{allowed: true, reason: "implemented"}
 }
 
 func nvmeRDMAPreflightFacts(nvmeListen string) []volume.FrontendTransportPreflightFact {
 	return []volume.FrontendTransportPreflightFact{
 		nvmeRDMAModuleFact(),
+		kernelModuleFact("nvmet-rdma", "nvmet_rdma_module"),
+		kernelModuleFact("nbd", "nbd_module"),
 		rdmaDeviceFact(),
 		rdmaBindAddressFact(nvmeListen),
+		configFSFact(),
 	}
 }
 
 func nvmeRDMAModuleFact() volume.FrontendTransportPreflightFact {
-	if _, err := os.Stat("/sys/module/nvme_rdma"); err == nil {
-		return volume.FrontendTransportPreflightFact{Name: "nvme_rdma_module", Available: true, Reason: "nvme_rdma_module_loaded"}
+	return kernelModuleFact("nvme-rdma", "nvme_rdma_module")
+}
+
+func kernelModuleFact(module, factName string) volume.FrontendTransportPreflightFact {
+	sysName := strings.ReplaceAll(module, "-", "_")
+	if _, err := os.Stat("/sys/module/" + sysName); err == nil {
+		return volume.FrontendTransportPreflightFact{Name: factName, Available: true, Reason: factName + "_loaded"}
 	}
-	if data, err := os.ReadFile("/proc/modules"); err == nil && strings.Contains(string(data), "nvme_rdma ") {
-		return volume.FrontendTransportPreflightFact{Name: "nvme_rdma_module", Available: true, Reason: "nvme_rdma_module_loaded"}
+	if data, err := os.ReadFile("/proc/modules"); err == nil && strings.Contains(string(data), sysName+" ") {
+		return volume.FrontendTransportPreflightFact{Name: factName, Available: true, Reason: factName + "_loaded"}
 	}
-	return volume.FrontendTransportPreflightFact{Name: "nvme_rdma_module", Available: false, Reason: "nvme_rdma_module_missing"}
+	if err := exec.Command("modinfo", module).Run(); err == nil {
+		return volume.FrontendTransportPreflightFact{Name: factName, Available: true, Reason: factName + "_available"}
+	}
+	return volume.FrontendTransportPreflightFact{Name: factName, Available: false, Reason: factName + "_missing"}
+}
+
+func configFSFact() volume.FrontendTransportPreflightFact {
+	if _, err := os.Stat("/sys/kernel/config"); err == nil {
+		return volume.FrontendTransportPreflightFact{Name: "configfs", Available: true, Reason: "configfs_available"}
+	}
+	return volume.FrontendTransportPreflightFact{Name: "configfs", Available: false, Reason: "configfs_missing"}
 }
 
 func rdmaDeviceFact() volume.FrontendTransportPreflightFact {

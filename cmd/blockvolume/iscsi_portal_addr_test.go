@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/frontend/nvmerdma"
 	"github.com/seaweedfs/seaweed-block/core/host/volume"
 )
 
@@ -45,18 +46,42 @@ func TestParseFlags_NVMeTransportDefaultsTCP(t *testing.T) {
 	}
 }
 
-func TestParseFlags_NVMeTransportRejectsRDMA(t *testing.T) {
+func TestParseFlags_NVMeTransportAcceptsExplicitRDMA(t *testing.T) {
 	args := append(requiredBlockvolumeArgs(),
-		"--nvme-listen", "127.0.0.1:4420",
+		"--nvme-listen", "10.0.0.3:4420",
 		"--nvme-subsysnqn", "nqn.2026-05.io.seaweedfs:test-v1",
 		"--nvme-transport", "rdma",
+		"--allow-external-nvme-bind",
+	)
+	got, err := parseFlags(args)
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if got.nvmeTransport != "rdma" {
+		t.Fatalf("nvmeTransport=%q want rdma", got.nvmeTransport)
+	}
+}
+
+func TestParseFlags_NVMERDMARejectsTCPMaxH2COption(t *testing.T) {
+	args := append(requiredBlockvolumeArgs(),
+		"--nvme-listen", "10.0.0.3:4420",
+		"--nvme-subsysnqn", "nqn.2026-05.io.seaweedfs:test-v1",
+		"--nvme-transport", "rdma",
+		"--allow-external-nvme-bind",
+		"--nvme-max-h2c-data-length", "65536",
 	)
 	_, err := parseFlags(args)
-	if err == nil {
-		t.Fatal("parseFlags succeeded; want rdma transport rejected")
+	if err == nil || !strings.Contains(err.Error(), "applies only to --nvme-transport=tcp") {
+		t.Fatalf("error=%v want TCP-only MaxH2C refusal", err)
 	}
-	if !strings.Contains(err.Error(), `--nvme-transport="rdma" unsupported`) {
-		t.Fatalf("error = %q, want unsupported transport", err)
+}
+
+func TestNVMERDMAStandaloneTargetIsNotPublishedToCSI(t *testing.T) {
+	if shouldPublishNVMeFrontendTarget("rdma") {
+		t.Fatal("standalone RDMA target must not enter master/CSI publish context")
+	}
+	if !shouldPublishNVMeFrontendTarget("tcp") {
+		t.Fatal("TCP target publication changed")
 	}
 }
 
@@ -66,7 +91,7 @@ func TestNVMeFrontendCapabilitiesExposeRDMAUnsupportedNoListener(t *testing.T) {
 		Available: false,
 		Reason:    "nvme_rdma_module_missing",
 	}}
-	caps := nvmeFrontendCapabilitiesWithRDMAPreflight("127.0.0.1:4420", true, facts)
+	caps := nvmeFrontendCapabilitiesWithRDMAPreflight("127.0.0.1:4420", "tcp", true, facts)
 	if len(caps) != 2 {
 		t.Fatalf("capabilities=%d want 2", len(caps))
 	}
@@ -75,7 +100,7 @@ func TestNVMeFrontendCapabilitiesExposeRDMAUnsupportedNoListener(t *testing.T) {
 		t.Fatalf("tcp capability unexpected: %+v", tcp)
 	}
 	rdma := caps[1]
-	if rdma.Protocol != "nvme" || rdma.Transport != "rdma" || rdma.Supported || rdma.ListenerImplemented || rdma.ListenerStarted || rdma.StartAllowed {
+	if rdma.Protocol != "nvme" || rdma.Transport != "rdma" || rdma.Supported || rdma.ListenerImplemented != nvmerdma.Implemented() || rdma.ListenerStarted || rdma.StartAllowed {
 		t.Fatalf("rdma capability must stay unsupported with no listener: %+v", rdma)
 	}
 	if rdma.Reason != "nvme_rdma_transport_unsupported" {
@@ -107,7 +132,29 @@ func TestNVMERDMAListenerStartDecisionMapsPreflightFailure(t *testing.T) {
 	}
 }
 
-func TestNVMERDMAListenerStartDecisionStillUnsupportedAfterPreflight(t *testing.T) {
+func TestNVMERDMAListenerStartDecisionDoesNotRequireInitiatorModule(t *testing.T) {
+	got := nvmeRDMAListenerStartDecision(true, []volume.FrontendTransportPreflightFact{
+		{
+			Name:      "nvme_rdma_module",
+			Available: false,
+			Reason:    "nvme_rdma_module_missing",
+		},
+		{
+			Name:      "nvmet_rdma_module",
+			Available: true,
+			Reason:    "nvmet_rdma_module_available",
+		},
+	})
+	if nvmerdma.Implemented() {
+		if !got.allowed || got.reason != "implemented" {
+			t.Fatalf("start decision=%+v want target allowed without initiator module", got)
+		}
+	} else if got.allowed || got.reason != "nvme_rdma_transport_unsupported" {
+		t.Fatalf("start decision=%+v want unsupported platform", got)
+	}
+}
+
+func TestNVMERDMAListenerStartDecisionAfterPreflight(t *testing.T) {
 	got := nvmeRDMAListenerStartDecision(true, []volume.FrontendTransportPreflightFact{{
 		Name:      "nvme_rdma_module",
 		Available: true,
@@ -121,8 +168,12 @@ func TestNVMERDMAListenerStartDecisionStillUnsupportedAfterPreflight(t *testing.
 		Available: true,
 		Reason:    "rdma_bind_address_candidate",
 	}})
-	if got.allowed || got.reason != "nvme_rdma_transport_unsupported" {
-		t.Fatalf("start decision=%+v want unsupported implementation", got)
+	if nvmerdma.Implemented() {
+		if !got.allowed || got.reason != "implemented" {
+			t.Fatalf("start decision=%+v want implemented", got)
+		}
+	} else if got.allowed || got.reason != "nvme_rdma_transport_unsupported" {
+		t.Fatalf("start decision=%+v want unsupported platform", got)
 	}
 }
 
