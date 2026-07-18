@@ -40,7 +40,7 @@ type ISCSIUtil interface {
 }
 
 type NVMeUtil interface {
-	Connect(ctx context.Context, addr, nqn string) error
+	Connect(ctx context.Context, transport FrontendTransport, addr, nqn string) error
 	Disconnect(ctx context.Context, nqn string) error
 	DisconnectPath(ctx context.Context, controller string) error
 	GetDeviceByNQN(ctx context.Context, nqn string) (string, error)
@@ -67,16 +67,17 @@ type MountUtil interface {
 }
 
 type stagedVolumeInfo struct {
-	iqn         string
-	iscsiAddr   string
-	iscsiAddrs  []string
-	multipath   bool
-	nqn         string
-	nvmeAddr    string
-	nvmeAddrs   []string
-	transport   string
-	fsType      string
-	stagingPath string
+	iqn           string
+	iscsiAddr     string
+	iscsiAddrs    []string
+	multipath     bool
+	nqn           string
+	nvmeAddr      string
+	nvmeAddrs     []string
+	nvmeTransport FrontendTransport
+	transport     string
+	fsType        string
+	stagingPath   string
 }
 
 type NodeServer struct {
@@ -328,6 +329,10 @@ func (s *NodeServer) stageNVMe(ctx context.Context, req *csipb.NodeStageVolumeRe
 	if addr == "" || nqn == "" {
 		return nil, status.Error(codes.FailedPrecondition, "no NVMe publish target")
 	}
+	nvmeTransport, err := nvmeTransportFromContexts(publishContext, req.GetPublishContext(), req.GetVolumeContext())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
 	if len(addrs) == 0 {
 		addrs = []string{addr}
 	}
@@ -350,14 +355,14 @@ func (s *NodeServer) stageNVMe(ctx context.Context, req *csipb.NodeStageVolumeRe
 				return nil, status.Errorf(codes.Internal, "check nvme path connect: %v", err)
 			}
 			if !pathConnected {
-				if err := s.nvmeUtil.Connect(ctx, pathAddr, nqn); err != nil {
+				if err := s.nvmeUtil.Connect(ctx, nvmeTransport, pathAddr, nqn); err != nil {
 					return nil, status.Errorf(codes.Internal, "nvme connect: %v", err)
 				}
 				connectStarted = true
 			}
 		}
 	} else if !connected {
-		if err := s.nvmeUtil.Connect(ctx, addr, nqn); err != nil {
+		if err := s.nvmeUtil.Connect(ctx, nvmeTransport, addr, nqn); err != nil {
 			return nil, status.Errorf(codes.Internal, "nvme connect: %v", err)
 		}
 		connectStarted = true
@@ -411,17 +416,18 @@ func (s *NodeServer) stageNVMe(ctx context.Context, req *csipb.NodeStageVolumeRe
 
 	s.stagedMu.Lock()
 	s.staged[volumeID] = &stagedVolumeInfo{
-		nqn:         nqn,
-		nvmeAddr:    addr,
-		nvmeAddrs:   append([]string(nil), addrs...),
-		multipath:   len(addrs) > 1,
-		transport:   transportNVMe,
-		fsType:      fsType,
-		stagingPath: stagingPath,
+		nqn:           nqn,
+		nvmeAddr:      addr,
+		nvmeAddrs:     append([]string(nil), addrs...),
+		nvmeTransport: nvmeTransport,
+		multipath:     len(addrs) > 1,
+		transport:     transportNVMe,
+		fsType:        fsType,
+		stagingPath:   stagingPath,
 	}
 	s.stagedMu.Unlock()
 
-	s.logger.Printf("NodeStageVolume: %s staged transport=nvme portal=%s portals=%s target=%s multipath=%v staging=%s", volumeID, addr, strings.Join(addrs, ","), nqn, len(addrs) > 1, stagingPath)
+	s.logger.Printf("NodeStageVolume: %s staged transport=nvme fabric=%s portal=%s portals=%s target=%s multipath=%v staging=%s", volumeID, nvmeTransport, addr, strings.Join(addrs, ","), nqn, len(addrs) > 1, stagingPath)
 	success = true
 	s.reportCSIReattachObserved(ctx, volumeID, transportNVMe, addr, publish)
 	return &csipb.NodeStageVolumeResponse{}, nil
@@ -460,9 +466,10 @@ func (s *NodeServer) ReconcileMountedNVMeVolumes(ctx context.Context) (MountedNV
 			return result, err
 		}
 		publishContext := map[string]string{
-			"protocol": transportNVMe,
-			"nvmeAddr": volume.info.nvmeAddr,
-			"nqn":      volume.info.nqn,
+			"protocol":      transportNVMe,
+			"nvmeTransport": string(normalizeFrontendTransport(ProtocolNVMe, volume.info.nvmeTransport)),
+			"nvmeAddr":      volume.info.nvmeAddr,
+			"nqn":           volume.info.nqn,
 		}
 		if len(volume.info.nvmeAddrs) > 0 {
 			publishContext["nvmeAddrs"] = strings.Join(volume.info.nvmeAddrs, ",")
@@ -535,6 +542,10 @@ func (s *NodeServer) reconcileMountedNVMePaths(ctx context.Context, req *csipb.N
 	if addr == "" || nqn == "" {
 		return mountedNVMeReconcileOutcome{}, nil
 	}
+	nvmeTransport, err := nvmeTransportFromContexts(publishContext, req.GetPublishContext(), req.GetVolumeContext())
+	if err != nil {
+		return mountedNVMeReconcileOutcome{}, status.Error(codes.InvalidArgument, err.Error())
+	}
 	if len(addrs) == 0 {
 		addrs = []string{addr}
 	}
@@ -557,7 +568,7 @@ func (s *NodeServer) reconcileMountedNVMePaths(ctx context.Context, req *csipb.N
 			if pathConnected {
 				continue
 			}
-			if err := s.nvmeUtil.Connect(ctx, pathAddr, nqn); err != nil {
+			if err := s.nvmeUtil.Connect(ctx, nvmeTransport, pathAddr, nqn); err != nil {
 				return mountedNVMeReconcileOutcome{}, status.Errorf(codes.Internal, "nvme reconnect path: %v", err)
 			}
 			outcome.connectedNewPath = true
@@ -576,7 +587,7 @@ func (s *NodeServer) reconcileMountedNVMePaths(ctx context.Context, req *csipb.N
 			return mountedNVMeReconcileOutcome{}, status.Errorf(codes.Internal, "check nvme connect: %v", err)
 		}
 		if !connected {
-			if err := s.nvmeUtil.Connect(ctx, addr, nqn); err != nil {
+			if err := s.nvmeUtil.Connect(ctx, nvmeTransport, addr, nqn); err != nil {
 				return mountedNVMeReconcileOutcome{}, status.Errorf(codes.Internal, "nvme reconnect: %v", err)
 			}
 			outcome.connectedNewPath = true
@@ -595,12 +606,13 @@ func (s *NodeServer) reconcileMountedNVMePaths(ctx context.Context, req *csipb.N
 
 	s.stagedMu.Lock()
 	s.staged[volumeID] = &stagedVolumeInfo{
-		nqn:         nqn,
-		nvmeAddr:    addr,
-		nvmeAddrs:   append([]string(nil), addrs...),
-		multipath:   len(addrs) > 1,
-		transport:   transportNVMe,
-		stagingPath: stagingPath,
+		nqn:           nqn,
+		nvmeAddr:      addr,
+		nvmeAddrs:     append([]string(nil), addrs...),
+		nvmeTransport: nvmeTransport,
+		multipath:     len(addrs) > 1,
+		transport:     transportNVMe,
+		stagingPath:   stagingPath,
 	}
 	s.stagedMu.Unlock()
 	if outcome.connectedNewPath || outcome.prunedStalePath {
@@ -932,6 +944,23 @@ func nvmeAddrsFromContext(ctx map[string]string) []string {
 		out = append(out, addr)
 	}
 	return out
+}
+
+func nvmeTransportFromContexts(contexts ...map[string]string) (FrontendTransport, error) {
+	transport := FrontendTransport("")
+	for _, ctx := range contexts {
+		if ctx != nil && ctx["nvmeTransport"] != "" {
+			transport = FrontendTransport(ctx["nvmeTransport"])
+			break
+		}
+	}
+	transport = normalizeFrontendTransport(ProtocolNVMe, transport)
+	switch transport {
+	case FrontendTransportTCP, FrontendTransportRDMA:
+		return transport, nil
+	default:
+		return "", fmt.Errorf("invalid NVMe transport %q; want tcp or rdma", transport)
+	}
 }
 
 func transportFromContext(contexts ...map[string]string) string {

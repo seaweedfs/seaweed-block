@@ -145,7 +145,7 @@ func renderManagedProjectionSummary(b *strings.Builder, managed ManagedVolumePro
 		managed.AuthorityEpoch,
 		managed.AuthorityEndpointVersion)
 	if managed.NVMe != nil {
-		fmt.Fprintf(b, "managed_volume_nvme=%s nqn=%s nsid=%d addr=%s addrs=%s path_count=%d multipath_observed=%t reason=%s\n",
+		fmt.Fprintf(b, "managed_volume_nvme=%s nqn=%s nsid=%d addr=%s addrs=%s path_count=%d multipath_observed=%t reason=%s transport=%s\n",
 			emptyAsDash(managed.VolumeID),
 			emptyAsDash(managed.NVMe.NQN),
 			managed.NVMe.NSID,
@@ -153,7 +153,8 @@ func renderManagedProjectionSummary(b *strings.Builder, managed ManagedVolumePro
 			emptyAsDash(strings.Join(managed.NVMe.NVMeAddrs, ",")),
 			managed.NVMe.PathCount,
 			managed.NVMe.MultipathObserved,
-			emptyAsDash(managed.NVMe.ReasonCode))
+			emptyAsDash(managed.NVMe.ReasonCode),
+			emptyAsDash(managed.NVMe.Transport))
 	}
 	for _, condition := range managed.Conditions {
 		fmt.Fprintf(b, "managed_volume_condition=%s status=%s reason=%s severity=%s\n",

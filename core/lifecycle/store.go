@@ -34,6 +34,7 @@ type VolumeSpec struct {
 	SizeBytes         uint64 `json:"size_bytes"`
 	ReplicationFactor int    `json:"replication_factor"`
 	Protocol          string `json:"protocol,omitempty"`
+	FrontendTransport string `json:"frontend_transport,omitempty"`
 	PVCName           string `json:"pvc_name,omitempty"`
 	PVCNamespace      string `json:"pvc_namespace,omitempty"`
 	PVCUID            string `json:"pvc_uid,omitempty"`
@@ -109,7 +110,8 @@ func volumeSpecsCompatible(a, b VolumeSpec) bool {
 	return a.VolumeID == b.VolumeID &&
 		a.SizeBytes == b.SizeBytes &&
 		a.ReplicationFactor == b.ReplicationFactor &&
-		a.Protocol == b.Protocol
+		a.Protocol == b.Protocol &&
+		a.FrontendTransport == b.FrontendTransport
 }
 
 func mergeVolumeSpecMetadata(existing, incoming VolumeSpec) VolumeSpec {
@@ -294,7 +296,14 @@ func validateSpec(spec VolumeSpec) error {
 		return fmt.Errorf("%w: replication_factor must be > 0", ErrInvalidVolumeSpec)
 	}
 	switch spec.Protocol {
-	case "iscsi", "nvme":
+	case "iscsi":
+		if spec.FrontendTransport != "" {
+			return fmt.Errorf("%w: frontend_transport is valid only for nvme", ErrInvalidVolumeSpec)
+		}
+	case "nvme":
+		if spec.FrontendTransport != "tcp" && spec.FrontendTransport != "rdma" {
+			return fmt.Errorf("%w: nvme frontend_transport must be tcp or rdma", ErrInvalidVolumeSpec)
+		}
 	default:
 		return fmt.Errorf("%w: protocol must be iscsi or nvme", ErrInvalidVolumeSpec)
 	}
@@ -304,6 +313,9 @@ func validateSpec(spec VolumeSpec) error {
 func normalizeVolumeSpec(spec VolumeSpec) VolumeSpec {
 	if spec.Protocol == "" {
 		spec.Protocol = "iscsi"
+	}
+	if spec.Protocol == "nvme" && spec.FrontendTransport == "" {
+		spec.FrontendTransport = "tcp"
 	}
 	return spec
 }

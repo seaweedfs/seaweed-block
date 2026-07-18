@@ -12,7 +12,10 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-const storageClassProtocolParameter = "sw-block.seaweedfs.com/protocol"
+const (
+	storageClassProtocolParameter      = "sw-block.seaweedfs.com/protocol"
+	storageClassNVMeTransportParameter = "sw-block.seaweedfs.com/nvme-transport"
+)
 
 type ControllerServer struct {
 	csipb.UnimplementedControllerServer
@@ -66,6 +69,9 @@ func (s *ControllerServer) CreateVolume(ctx context.Context, req *csipb.CreateVo
 	volumeContext := map[string]string{
 		"replicationFactor": strconv.Itoa(created.ReplicationFactor),
 		"protocol":          string(protocol),
+	}
+	if protocol == ProtocolNVMe {
+		volumeContext["nvmeTransport"] = string(normalizeFrontendTransport(protocol, created.FrontendTransport))
 	}
 	if iscsiMultipathFromContext(req.GetParameters()) {
 		volumeContext["stage2_multipath"] = "true"
@@ -260,17 +266,41 @@ func volumeSpecFromCreateRequest(req *csipb.CreateVolumeRequest) (VolumeSpec, er
 	if err != nil {
 		return VolumeSpec{}, err
 	}
+	frontendTransport, err := frontendTransportFromParameters(protocol, req.GetParameters())
+	if err != nil {
+		return VolumeSpec{}, err
+	}
 	return VolumeSpec{
 		VolumeID:          req.GetName(),
 		SizeBytes:         uint64(size),
 		ReplicationFactor: rf,
 		Protocol:          protocol,
+		FrontendTransport: frontendTransport,
 		PVCName:           req.GetParameters()["csi.storage.k8s.io/pvc/name"],
 		PVCNamespace:      req.GetParameters()["csi.storage.k8s.io/pvc/namespace"],
 		PVCUID:            req.GetParameters()["csi.storage.k8s.io/pvc/uid"],
 		PVName:            req.GetParameters()["csi.storage.k8s.io/pv/name"],
 		StorageClass:      req.GetParameters()["csi.storage.k8s.io/storageclass/name"],
 	}, nil
+}
+
+func frontendTransportFromParameters(protocol Protocol, params map[string]string) (FrontendTransport, error) {
+	raw := params[storageClassNVMeTransportParameter]
+	if protocol != ProtocolNVMe {
+		if raw != "" {
+			return "", status.Errorf(codes.InvalidArgument, "%s is valid only with protocol=nvme", storageClassNVMeTransportParameter)
+		}
+		return "", nil
+	}
+	if raw == "" {
+		return FrontendTransportTCP, nil
+	}
+	switch FrontendTransport(raw) {
+	case FrontendTransportTCP, FrontendTransportRDMA:
+		return FrontendTransport(raw), nil
+	default:
+		return "", status.Errorf(codes.InvalidArgument, "invalid NVMe frontend transport %q", raw)
+	}
 }
 
 func protocolFromParameters(params map[string]string) (Protocol, error) {

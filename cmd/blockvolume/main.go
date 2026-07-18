@@ -1011,10 +1011,11 @@ func run(f flags) int {
 		})
 		if shouldPublishNVMeFrontendTarget(f.nvmeTransport) {
 			frontendTargets = append(frontendTargets, &control.FrontendTarget{
-				Protocol: "nvme",
-				Addr:     nvmeAddr,
-				Nqn:      f.nvmeSubsysNQN,
-				Nsid:     uint32(f.nvmeNS),
+				Protocol:  "nvme",
+				Transport: f.nvmeTransport,
+				Addr:      nvmeAddr,
+				Nqn:       f.nvmeSubsysNQN,
+				Nsid:      uint32(f.nvmeNS),
 			})
 			h.SetFrontendTargets(frontendTargets)
 		}
@@ -1064,7 +1065,7 @@ func run(f flags) int {
 }
 
 func shouldPublishNVMeFrontendTarget(transport string) bool {
-	return transport == "tcp"
+	return transport == "tcp" || transport == "rdma"
 }
 
 func nvmeRDMATargetStartFailureReason(err error) string {

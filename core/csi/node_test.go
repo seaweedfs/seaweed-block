@@ -94,21 +94,23 @@ type mockMountUtil struct {
 }
 
 type mockNVMeUtil struct {
-	connectErr      error
-	disconnectErr   error
-	getDeviceResult string
-	getDeviceErr    error
-	connected       map[string]bool
-	connectedPaths  map[string]bool
-	calls           []string
+	connectErr        error
+	disconnectErr     error
+	getDeviceResult   string
+	getDeviceErr      error
+	connected         map[string]bool
+	connectedPaths    map[string]bool
+	calls             []string
+	connectTransports []FrontendTransport
 }
 
 func newMockNVMeUtil() *mockNVMeUtil {
 	return &mockNVMeUtil{connected: map[string]bool{}, connectedPaths: map[string]bool{}, getDeviceResult: "/dev/nvme1n1"}
 }
 
-func (m *mockNVMeUtil) Connect(_ context.Context, addr, nqn string) error {
+func (m *mockNVMeUtil) Connect(_ context.Context, transport FrontendTransport, addr, nqn string) error {
 	m.calls = append(m.calls, "connect:"+addr+":"+nqn)
+	m.connectTransports = append(m.connectTransports, transport)
 	if m.connectErr != nil {
 		return m.connectErr
 	}
@@ -686,6 +688,47 @@ func TestNodeStage_NVMeProtocolUsesNVMeTarget(t *testing.T) {
 	info := ns.staged["v1"]
 	if info == nil || info.transport != transportNVMe || info.nqn != "nqn.2026-05.io.seaweedfs:v1" {
 		t.Fatalf("staged info=%+v", info)
+	}
+	if len(mn.connectTransports) != 1 || mn.connectTransports[0] != FrontendTransportTCP {
+		t.Fatalf("legacy connect transports=%v want tcp", mn.connectTransports)
+	}
+}
+
+func TestPhase165_NodeStageUsesExplicitNVMERDMATransport(t *testing.T) {
+	mi, mn, mm := newMockISCSIUtil(), newMockNVMeUtil(), newMockMountUtil()
+	ns := newTestNodeWithNVMe(mi, mn, mm)
+	staging := t.TempDir()
+	_, err := ns.NodeStageVolume(context.Background(), &csipb.NodeStageVolumeRequest{
+		VolumeId: "v1", StagingTargetPath: staging, VolumeCapability: testVolumeCapability(),
+		PublishContext: map[string]string{
+			"protocol": "nvme", "nvmeTransport": "rdma", "nvmeAddr": "10.0.0.3:4420", "nqn": "nqn.2026-05.io.seaweedfs:v1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NodeStageVolume: %v", err)
+	}
+	if len(mn.connectTransports) != 1 || mn.connectTransports[0] != FrontendTransportRDMA {
+		t.Fatalf("connect transports=%v want rdma", mn.connectTransports)
+	}
+	if info := ns.staged["v1"]; info == nil || info.nvmeTransport != FrontendTransportRDMA {
+		t.Fatalf("staged info=%+v", info)
+	}
+}
+
+func TestPhase165_NodeStageRejectsUnknownNVMeTransport(t *testing.T) {
+	mi, mn, mm := newMockISCSIUtil(), newMockNVMeUtil(), newMockMountUtil()
+	ns := newTestNodeWithNVMe(mi, mn, mm)
+	_, err := ns.NodeStageVolume(context.Background(), &csipb.NodeStageVolumeRequest{
+		VolumeId: "v1", StagingTargetPath: t.TempDir(), VolumeCapability: testVolumeCapability(),
+		PublishContext: map[string]string{
+			"protocol": "nvme", "nvmeTransport": "bogus", "nvmeAddr": "10.0.0.3:4420", "nqn": "nqn.2026-05.io.seaweedfs:v1",
+		},
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("NodeStageVolume error=%v want InvalidArgument", err)
+	}
+	if len(mn.connectTransports) != 0 {
+		t.Fatalf("invalid transport attempted connect: %v", mn.connectTransports)
 	}
 }
 

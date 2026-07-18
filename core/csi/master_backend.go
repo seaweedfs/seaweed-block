@@ -94,6 +94,7 @@ func (p *ControlLifecycleProvisioner) CreateVolume(ctx context.Context, spec Vol
 		SizeBytes:         spec.SizeBytes,
 		ReplicationFactor: int32(spec.ReplicationFactor),
 		Protocol:          string(spec.Protocol),
+		FrontendTransport: string(spec.FrontendTransport),
 		PvcName:           spec.PVCName,
 		PvcNamespace:      spec.PVCNamespace,
 		PvcUid:            spec.PVCUID,
@@ -107,6 +108,7 @@ func (p *ControlLifecycleProvisioner) CreateVolume(ctx context.Context, spec Vol
 		SizeBytes:         resp.GetSizeBytes(),
 		ReplicationFactor: int(resp.GetReplicationFactor()),
 		Protocol:          normalizeProtocol(Protocol(resp.GetProtocol())),
+		FrontendTransport: normalizeFrontendTransport(normalizeProtocol(Protocol(resp.GetProtocol())), FrontendTransport(resp.GetFrontendTransport())),
 		PVCName:           resp.GetPvcName(),
 		PVCNamespace:      resp.GetPvcNamespace(),
 		PVCUID:            resp.GetPvcUid(),
@@ -191,7 +193,8 @@ func publishTargetFromStatus(resp *control.StatusResponse, enableMultipath bool,
 			if ft.GetProtocol() != string(ProtocolNVMe) || ft.GetAddr() == "" || ft.GetNqn() == "" || rejectFrontendAddr(ft.GetAddr(), rejectLoopback) {
 				continue
 			}
-			key := ft.GetNqn() + "\x00" + strconv.FormatUint(uint64(ft.GetNsid()), 10)
+			transport := normalizeFrontendTransport(ProtocolNVMe, FrontendTransport(ft.GetTransport()))
+			key := ft.GetNqn() + "\x00" + strconv.FormatUint(uint64(ft.GetNsid()), 10) + "\x00" + string(transport)
 			if _, ok := nvmeByKey[key]; !ok {
 				nvmeOrder = append(nvmeOrder, key)
 			}
@@ -204,6 +207,7 @@ func publishTargetFromStatus(resp *control.StatusResponse, enableMultipath bool,
 			}
 			out := base
 			out.Protocol = ProtocolNVMe
+			out.FrontendTransport = normalizeFrontendTransport(ProtocolNVMe, FrontendTransport(frontends[0].GetTransport()))
 			out.NVMeAddr = frontends[0].GetAddr()
 			out.NQN = frontends[0].GetNqn()
 			out.NSID = frontends[0].GetNsid()
@@ -234,6 +238,7 @@ func publishTargetFromStatus(resp *control.StatusResponse, enableMultipath bool,
 		}
 		out := base
 		out.Protocol = ProtocolNVMe
+		out.FrontendTransport = normalizeFrontendTransport(ProtocolNVMe, FrontendTransport(ft.GetTransport()))
 		out.NVMeAddr = ft.GetAddr()
 		out.NQN = ft.GetNqn()
 		out.NSID = ft.GetNsid()

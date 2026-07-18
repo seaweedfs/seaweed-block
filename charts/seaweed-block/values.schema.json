@@ -24,7 +24,8 @@
       "type": "object",
       "properties": {
         "replicationFactor": { "type": "integer", "minimum": 1 },
-        "protocol": { "type": "string", "enum": ["iscsi", "nvme"] }
+        "protocol": { "type": "string", "enum": ["iscsi", "nvme"] },
+        "nvmeTransport": { "type": "string", "enum": ["tcp", "rdma"] }
       }
     },
     "blockmaster": {

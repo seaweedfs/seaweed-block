@@ -306,12 +306,16 @@ func (r *realISCSIUtil) RescanDevice(ctx context.Context, iqn string) error {
 
 type realNVMeUtil struct{}
 
-func (r *realNVMeUtil) Connect(ctx context.Context, addr, nqn string) error {
+func (r *realNVMeUtil) Connect(ctx context.Context, transport FrontendTransport, addr, nqn string) error {
+	transport = normalizeFrontendTransport(ProtocolNVMe, transport)
+	if transport != FrontendTransportTCP && transport != FrontendTransportRDMA {
+		return fmt.Errorf("invalid NVMe transport %q; want tcp or rdma", transport)
+	}
 	host, port, err := splitHostPort(addr)
 	if err != nil {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, "nvme", "connect", "-t", "tcp", "-a", host, "-s", port, "-n", nqn)
+	cmd := exec.CommandContext(ctx, "nvme", "connect", "-t", string(transport), "-a", host, "-s", port, "-n", nqn)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if nvmeConnectAlreadyConnected(string(out)) {

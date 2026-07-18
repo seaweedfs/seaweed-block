@@ -98,6 +98,37 @@ func TestFileStore_CreateVolumePersistsProtocolSelection(t *testing.T) {
 	}
 }
 
+func TestPhase165_FileStorePersistsNVMeTransportAndDefaultsLegacyToTCP(t *testing.T) {
+	s, err := OpenFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	for _, tc := range []struct {
+		id        string
+		transport string
+		want      string
+	}{
+		{id: "legacy", want: "tcp"},
+		{id: "rdma", transport: "rdma", want: "rdma"},
+	} {
+		rec, err := s.CreateVolume(VolumeSpec{VolumeID: tc.id, SizeBytes: 1 << 20, ReplicationFactor: 1, Protocol: "nvme", FrontendTransport: tc.transport})
+		if err != nil {
+			t.Fatalf("create %s: %v", tc.id, err)
+		}
+		if rec.Spec.FrontendTransport != tc.want {
+			t.Fatalf("%s transport=%q want %q", tc.id, rec.Spec.FrontendTransport, tc.want)
+		}
+	}
+	for _, spec := range []VolumeSpec{
+		{VolumeID: "bad-iscsi", SizeBytes: 1 << 20, ReplicationFactor: 1, Protocol: "iscsi", FrontendTransport: "rdma"},
+		{VolumeID: "bad-nvme", SizeBytes: 1 << 20, ReplicationFactor: 1, Protocol: "nvme", FrontendTransport: "bogus"},
+	} {
+		if _, err := s.CreateVolume(spec); err == nil {
+			t.Fatalf("CreateVolume(%+v) succeeded; want invalid transport rejected", spec)
+		}
+	}
+}
+
 func TestFileStore_CreateVolumeRejectsConflictingSpec(t *testing.T) {
 	s, err := OpenFileStore(t.TempDir())
 	if err != nil {

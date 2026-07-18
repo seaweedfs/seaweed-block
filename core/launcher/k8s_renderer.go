@@ -100,6 +100,22 @@ func RenderBlockVolumeDeployments(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8
 		if err != nil {
 			return nil, err
 		}
+		volumeMounts := []volumeMount{{Name: "state", MountPath: stateMountPath}}
+		volumes := []volume{stateVolume(cfg)}
+		var securityContext *containerSecurityContext
+		if plan.Protocol == "nvme" && plan.NVMeTransport == "rdma" {
+			volumeMounts = append(volumeMounts,
+				volumeMount{Name: "dev", MountPath: "/dev"},
+				volumeMount{Name: "configfs", MountPath: "/sys/kernel/config"},
+				volumeMount{Name: "modules-dir", MountPath: "/lib/modules", ReadOnly: true},
+			)
+			volumes = append(volumes,
+				volume{Name: "dev", HostPath: &hostPath{Path: "/dev", Type: "Directory"}},
+				volume{Name: "configfs", HostPath: &hostPath{Path: "/sys/kernel/config", Type: "Directory"}},
+				volume{Name: "modules-dir", HostPath: &hostPath{Path: "/lib/modules", Type: "Directory"}},
+			)
+			securityContext = &containerSecurityContext{RunAsUser: int64Ptr(0), Privileged: boolPtr(true)}
+		}
 		deploy := blockVolumeDeployment{
 			APIVersion: "apps/v1",
 			Kind:       "Deployment",
@@ -129,14 +145,15 @@ func RenderBlockVolumeDeployments(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8
 						NodeSelector:   map[string]string{"kubernetes.io/hostname": replicaKubernetesNodeName(replica)},
 						InitContainers: blockVolumeInitContainers(plan, replica, cfg),
 						Containers: []container{{
-							Name:         "blockvolume",
-							Image:        cfg.Image,
-							Command:      []string{"/usr/local/bin/blockvolume"},
-							Args:         args,
-							Env:          blockVolumeEnv(cfg),
-							VolumeMounts: []volumeMount{{Name: "state", MountPath: stateMountPath}},
+							Name:            "blockvolume",
+							Image:           cfg.Image,
+							Command:         []string{"/usr/local/bin/blockvolume"},
+							Args:            args,
+							Env:             blockVolumeEnv(cfg),
+							VolumeMounts:    volumeMounts,
+							SecurityContext: securityContext,
 						}},
-						Volumes: []volume{stateVolume(cfg)},
+						Volumes: volumes,
 					},
 				},
 			},
@@ -218,21 +235,35 @@ func blockVolumeArgs(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.B
 	}
 	switch plan.Protocol {
 	case "nvme":
+		nvmeTransport := plan.NVMeTransport
+		if nvmeTransport == "" {
+			nvmeTransport = "tcp"
+		}
+		if nvmeTransport != "tcp" && nvmeTransport != "rdma" {
+			return nil, fmt.Errorf("launcher: NVMe transport %q invalid; want tcp or rdma", nvmeTransport)
+		}
+		if nvmeTransport == "rdma" && !cfg.ExternalNVMe {
+			return nil, fmt.Errorf("launcher: NVMe/RDMA requires external NVMe node addressing")
+		}
 		nvmeListen := fmt.Sprintf("127.0.0.1:%d", replica.NVMeListenPort)
 		if cfg.ExternalNVMe {
 			host, err := hostFromAddr(replica.DataAddr)
 			if err != nil {
-				return nil, fmt.Errorf("launcher: external NVMe/TCP volume=%s replica=%s: %w", plan.VolumeID, replica.ReplicaID, err)
+				return nil, fmt.Errorf("launcher: external NVMe volume=%s replica=%s: %w", plan.VolumeID, replica.ReplicaID, err)
 			}
 			nvmeListen = fmt.Sprintf("%s:%d", host, replica.NVMeListenPort)
 			args = append(args, "--allow-external-nvme-bind")
 		}
 		args = append(args,
 			"--nvme-listen="+nvmeListen,
+			"--nvme-transport="+nvmeTransport,
 			"--nvme-subsysnqn="+replica.NVMeSubsystemNQN,
 			fmt.Sprintf("--nvme-ns=%d", replica.NVMeNSID),
 		)
-		if cfg.NVMeMaxH2CDataLength != 0 {
+		if cfg.NVMeMaxH2CDataLength != 0 && cfg.NVMeMaxH2CDataLength != 32768 && nvmeTransport == "rdma" {
+			return nil, fmt.Errorf("launcher: NVMe MaxH2CDataLength is TCP-only")
+		}
+		if cfg.NVMeMaxH2CDataLength != 0 && nvmeTransport == "tcp" {
 			args = append(args, fmt.Sprintf("--nvme-max-h2c-data-length=%d", cfg.NVMeMaxH2CDataLength))
 		}
 	default:
@@ -437,7 +468,8 @@ type container struct {
 }
 
 type containerSecurityContext struct {
-	RunAsUser *int64 `yaml:"runAsUser,omitempty"`
+	RunAsUser  *int64 `yaml:"runAsUser,omitempty"`
+	Privileged *bool  `yaml:"privileged,omitempty"`
 }
 
 type envVar struct {
@@ -457,6 +489,7 @@ type secretKeySelector struct {
 type volumeMount struct {
 	Name      string `yaml:"name"`
 	MountPath string `yaml:"mountPath"`
+	ReadOnly  bool   `yaml:"readOnly,omitempty"`
 }
 
 type volume struct {

@@ -136,6 +136,7 @@ message FrontendTarget {
     string nqn = 4;
     uint32 lun = 5;
     uint32 nsid = 6;
+    string transport = 7; // NVMe: "tcp" (default) | "rdma"; empty for iSCSI
 }
 
 message HeartbeatAck {
@@ -320,6 +321,7 @@ message ReplicaEvidence {
     string support_bundle_path = 18;
     string frontend_nqn = 19;
     uint32 frontend_nsid = 20;
+    string frontend_transport = 21;
 }
 
 message ClusterEvent {
@@ -362,6 +364,7 @@ message CreateVolumeRequest {
     string pv_name = 6;
     string pvc_uid = 7;
     string protocol = 8; // "iscsi" default | "nvme"
+    string frontend_transport = 9; // NVMe: "tcp" default | "rdma"
 }
 
 message CreateVolumeResponse {
@@ -373,6 +376,7 @@ message CreateVolumeResponse {
     string pv_name = 6;
     string pvc_uid = 7;
     string protocol = 8; // "iscsi" default | "nvme"
+    string frontend_transport = 9; // NVMe: "tcp" default | "rdma"
 }
 
 message DeleteVolumeRequest {

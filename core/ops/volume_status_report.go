@@ -62,12 +62,13 @@ type VolumeReport struct {
 }
 
 type FrontendReport struct {
-	Protocol string `json:"protocol"`
-	Addr     string `json:"addr,omitempty"`
-	IQN      string `json:"iqn,omitempty"`
-	NQN      string `json:"nqn,omitempty"`
-	LUN      uint32 `json:"lun"`
-	NSID     uint32 `json:"nsid"`
+	Protocol  string `json:"protocol"`
+	Transport string `json:"transport,omitempty"`
+	Addr      string `json:"addr,omitempty"`
+	IQN       string `json:"iqn,omitempty"`
+	NQN       string `json:"nqn,omitempty"`
+	LUN       uint32 `json:"lun"`
+	NSID      uint32 `json:"nsid"`
 }
 
 type AuthorityReport struct {
@@ -193,12 +194,13 @@ func frontendSnapshots(targets []*control.FrontendTarget) []FrontendReport {
 			continue
 		}
 		out = append(out, FrontendReport{
-			Protocol: t.GetProtocol(),
-			Addr:     t.GetAddr(),
-			IQN:      t.GetIqn(),
-			NQN:      t.GetNqn(),
-			LUN:      t.GetLun(),
-			NSID:     t.GetNsid(),
+			Protocol:  t.GetProtocol(),
+			Transport: t.GetTransport(),
+			Addr:      t.GetAddr(),
+			IQN:       t.GetIqn(),
+			NQN:       t.GetNqn(),
+			LUN:       t.GetLun(),
+			NSID:      t.GetNsid(),
 		})
 	}
 	return out

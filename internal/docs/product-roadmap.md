@@ -116,8 +116,12 @@ This is the short internal roadmap. Keep it current and readable.
   publication, failover, broad compatibility, and performance/SLOs.
 - Phase 164 closes standalone hardening across rollback, flush/FUA, durable
   restart/reconnect, multi-target isolation, bounded churn, refusal evidence,
-  and zero-residue cleanup. Phase 165 now owns an opt-in, explicitly typed
-  Kubernetes RDMA publish/attach path with mounted workload I/O.
+  and zero-residue cleanup.
+- Phase 165 closes an opt-in, explicitly typed Kubernetes RDMA publish/attach
+  path with mounted workload I/O. A dynamic PVC uses the RoCE target address,
+  CSI and CRD status retain `rdma`, the Linux initiator confirms the active
+  RDMA controller, and exact cleanup returns to baseline. NVMe/TCP remains the
+  default; RDMA reconnect/failover and performance remain non-claims.
 
 Do not skip from scripts directly to mutating operator lifecycle. Helm has
 stabilized the installation contract, and Phase 35 added read-only CRD status,
@@ -553,22 +557,20 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   diagnostic boundary mismatch: superblock WAL byte-position metadata was being
   reported as the LSN `HeadLSN` after recovery. Storage and durable-provider
   regressions now assert recovered `HeadLSN` is bounded by the recovered LSN.
-- The standalone NVMe/RDMA implementation and hardening gate now pass behind a
-  source-gated Linux supported-lab boundary. Next, add a separate opt-in
-  Kubernetes publish/attach gate. Keep transport correctness, Kubernetes
-  lifecycle, reconnect/failover, performance characterization, and object/NIXL
-  acceleration as separate claims.
+- The standalone and opt-in Kubernetes single-path NVMe/RDMA gates now pass
+  behind a source-gated Linux supported-lab boundary. Keep reconnect/failover,
+  multipath, performance characterization, and object/NIXL acceleration as
+  separate claims.
 
 ### Track E: Protocol / Backend Expansion
 
 - Current: iSCSI and NVMe-oF are protocol-gated frontends. `walstore` remains
-  the MVP backend. NVMe/TCP has a Kubernetes supported-lab path; NVMe/RDMA has
-  a narrower standalone Linux supported-lab path through kernel `nvmet-rdma`
-  and a product-owned NBD-to-backend bridge.
-- Next: Phase 165 opt-in Kubernetes NVMe/RDMA publish/attach with an explicit
-  transport contract and mounted workload I/O. Reconnect/failover and
-  performance remain later, separate gates. Storage-engine boundary and
-  smartwal/delta experiments also remain separate.
+  the MVP backend. NVMe/TCP and opt-in NVMe/RDMA have Kubernetes supported-lab
+  paths; RDMA uses kernel `nvmet-rdma` and a product-owned NBD-to-backend
+  bridge.
+- Next: make NVMe/RDMA reconnect/failover ownership explicit before any
+  transparent-HA claim. Multipath and performance remain later, separate gates.
+  Storage-engine boundary and smartwal/delta experiments also remain separate.
 - Protocol hardening now has a dedicated working area under
   `internal/docs/protocol/`. New protocol semantics should update the control
   model, invariant ledger, and anti-pattern checklist there before release

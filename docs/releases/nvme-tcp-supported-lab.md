@@ -106,6 +106,7 @@ The supported-lab claim is intentionally narrow:
 | 162 | NVMe/RDMA listener start decision skeleton stays disabled by default | PASS |
 | 163 | Standalone NVMe/RDMA live I/O through the Seaweed backend | PASS |
 | 164 | Standalone NVMe/RDMA lifecycle, restart, isolation, refusal, and cleanup hardening | PASS |
+| 165 | Opt-in Kubernetes NVMe/RDMA CSI publish/attach and mounted I/O | PASS |
 
 Key QA sign-offs:
 
@@ -152,6 +153,9 @@ Key QA sign-offs:
 - `internal/docs/qa-assignments/phase160-nvme-rdma-transport-adapter-seam-qa-signoff.md`
 - `internal/docs/qa-assignments/phase161-nvme-rdma-standalone-preflight-refusal-qa-signoff.md`
 - `internal/docs/qa-assignments/phase162-nvme-rdma-standalone-listener-skeleton-qa-signoff.md`
+- `internal/docs/qa-assignments/phase163-nvme-rdma-standalone-live-qa-signoff.md`
+- `internal/docs/qa-assignments/phase164-nvme-rdma-standalone-hardening-qa-signoff.md`
+- `internal/docs/qa-assignments/phase165-nvme-rdma-kubernetes-publish-attach-qa-signoff.md`
 
 ## Performance Baseline
 

@@ -64,6 +64,7 @@ func (s *services) CreateVolume(ctx context.Context, req *control.CreateVolumeRe
 		SizeBytes:         rec.Spec.SizeBytes,
 		ReplicationFactor: int32(rec.Spec.ReplicationFactor),
 		Protocol:          rec.Spec.Protocol,
+		FrontendTransport: rec.Spec.FrontendTransport,
 		PvcName:           rec.Spec.PVCName,
 		PvcNamespace:      rec.Spec.PVCNamespace,
 		PvcUid:            rec.Spec.PVCUID,
@@ -146,6 +147,7 @@ func lifecycleSpecFromWire(req *control.CreateVolumeRequest) lifecycle.VolumeSpe
 		SizeBytes:         req.GetSizeBytes(),
 		ReplicationFactor: int(req.GetReplicationFactor()),
 		Protocol:          req.GetProtocol(),
+		FrontendTransport: req.GetFrontendTransport(),
 		PVCName:           req.GetPvcName(),
 		PVCNamespace:      req.GetPvcNamespace(),
 		PVCUID:            req.GetPvcUid(),
@@ -413,7 +415,14 @@ func frontendTargetKey(ft *control.FrontendTarget) string {
 	if ft == nil {
 		return ""
 	}
-	return fmt.Sprintf("%s|%s|%s|%s|%d|%d", ft.GetProtocol(), ft.GetAddr(), ft.GetIqn(), ft.GetNqn(), ft.GetLun(), ft.GetNsid())
+	return fmt.Sprintf("%s|%s|%s|%s|%s|%d|%d", ft.GetProtocol(), normalizedFrontendTransport(ft.GetProtocol(), ft.GetTransport()), ft.GetAddr(), ft.GetIqn(), ft.GetNqn(), ft.GetLun(), ft.GetNsid())
+}
+
+func normalizedFrontendTransport(protocol, transport string) string {
+	if protocol == "nvme" && transport == "" {
+		return "tcp"
+	}
+	return transport
 }
 
 // validateHeartbeat rejects reports that are missing required
@@ -462,10 +471,16 @@ func validateHeartbeat(r *control.HeartbeatReport) error {
 			}
 			switch ft.Protocol {
 			case "iscsi":
+				if ft.Transport != "" {
+					return fmt.Errorf("heartbeat: slot[%d].frontends[%d] iscsi transport must be empty", i, j)
+				}
 				if ft.Iqn == "" {
 					return fmt.Errorf("heartbeat: slot[%d].frontends[%d] iscsi missing iqn", i, j)
 				}
 			case "nvme":
+				if ft.Transport != "" && ft.Transport != "tcp" && ft.Transport != "rdma" {
+					return fmt.Errorf("heartbeat: slot[%d].frontends[%d] invalid nvme transport %q", i, j, ft.Transport)
+				}
 				if ft.Nqn == "" {
 					return fmt.Errorf("heartbeat: slot[%d].frontends[%d] nvme missing nqn", i, j)
 				}
@@ -665,12 +680,13 @@ func frontendTargetsFromWire(in []*control.FrontendTarget) []authority.FrontendT
 			continue
 		}
 		out = append(out, authority.FrontendTargetFact{
-			Protocol: ft.Protocol,
-			Addr:     ft.Addr,
-			IQN:      ft.Iqn,
-			NQN:      ft.Nqn,
-			LUN:      ft.Lun,
-			NSID:     ft.Nsid,
+			Protocol:  ft.Protocol,
+			Transport: normalizedFrontendTransport(ft.Protocol, ft.Transport),
+			Addr:      ft.Addr,
+			IQN:       ft.Iqn,
+			NQN:       ft.Nqn,
+			LUN:       ft.Lun,
+			NSID:      ft.Nsid,
 		})
 	}
 	return out
@@ -683,12 +699,13 @@ func frontendTargetsToWire(in []authority.FrontendTargetFact) []*control.Fronten
 	out := make([]*control.FrontendTarget, 0, len(in))
 	for _, ft := range in {
 		out = append(out, &control.FrontendTarget{
-			Protocol: ft.Protocol,
-			Addr:     ft.Addr,
-			Iqn:      ft.IQN,
-			Nqn:      ft.NQN,
-			Lun:      ft.LUN,
-			Nsid:     ft.NSID,
+			Protocol:  ft.Protocol,
+			Transport: normalizedFrontendTransport(ft.Protocol, ft.Transport),
+			Addr:      ft.Addr,
+			Iqn:       ft.IQN,
+			Nqn:       ft.NQN,
+			Lun:       ft.LUN,
+			Nsid:      ft.NSID,
 		})
 	}
 	return out

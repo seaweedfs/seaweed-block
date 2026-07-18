@@ -164,6 +164,7 @@ type ReplicaEvidence struct {
 	AckEligibilityKnown  bool                   `json:"ack_eligibility_known,omitempty"`
 	AckEligible          bool                   `json:"ack_eligible,omitempty"`
 	FrontendProtocol     string                 `json:"frontend_protocol,omitempty"`
+	FrontendTransport    string                 `json:"frontend_transport,omitempty"`
 	FrontendAddr         string                 `json:"frontend_addr,omitempty"`
 	FrontendNQN          string                 `json:"frontend_nqn,omitempty"`
 	FrontendNSID         uint32                 `json:"frontend_nsid,omitempty"`

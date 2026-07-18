@@ -1,0 +1,85 @@
+name: nvme-rdma-k8s-publish-attach-chain
+timeout: 60m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: run_close_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 55m
+        cmd: "cd {{ product_root }} && bash scripts/run-phase165-nvme-rdma-k8s-publish-attach-gate.sh {{ product_root }}"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase165-nvme-rdma-k8s"
+        env.SW_BLOCK_PHASE165_RUN_ID: "{{ run_id }}"
+        env.SW_BLOCK_PHASE165_APP_SSH_KEY: "/opt/work/testdev_key"
+
+  - name: assert_terminal_evidence
+    actions:
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase165-nvme-rdma-k8s/phase165-nvme-rdma-k8s-publish-attach-summary.txt"
+        pattern: "^phase165_nvme_rdma_k8s_publish_attach_status=ok$"
+        save_as: gate_ok
+      - action: assert_greater
+        actual: "{{ gate_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase165-nvme-rdma-k8s/phase165-nvme-rdma-k8s-publish-attach-summary.txt"
+        pattern: "^active_host_controller_transport=rdma$"
+        save_as: host_rdma
+      - action: assert_greater
+        actual: "{{ host_rdma }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase165-nvme-rdma-k8s/phase165-nvme-rdma-k8s-publish-attach-summary.txt"
+        pattern: "^swblockvolume_status_transport=rdma$"
+        save_as: status_rdma
+      - action: assert_greater
+        actual: "{{ status_rdma }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase165-nvme-rdma-k8s/phase165-nvme-rdma-k8s-publish-attach-summary.txt"
+        pattern: "^writer_verified=true$"
+        save_as: writer_ok
+      - action: assert_greater
+        actual: "{{ writer_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase165-nvme-rdma-k8s/phase165-nvme-rdma-k8s-publish-attach-summary.txt"
+        pattern: "^reader_verified=true$"
+        save_as: reader_ok
+      - action: assert_greater
+        actual: "{{ reader_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase165-nvme-rdma-k8s/phase165-nvme-rdma-k8s-publish-attach-summary.txt"
+        pattern: "^cleanup_status=ok$"
+        save_as: cleanup_ok
+      - action: assert_greater
+        actual: "{{ cleanup_ok }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase165-nvme-rdma-k8s"
+        name: remote-phases
+        ignore_error: true
