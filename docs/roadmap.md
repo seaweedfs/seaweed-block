@@ -170,6 +170,15 @@ Seaweed Block can already demonstrate a narrow Kubernetes block-storage loop:
   exact controller/configfs/NBD/Kubernetes cleanup returns to zero. NVMe/TCP
   remains the default. RDMA reconnect/failover, multipath, performance, broad
   compatibility, and SLOs remain separate future gates.
+- Phase 166 implements the RF2 NVMe/RDMA reconnect and exact path-replacement
+  contract, but the live close gate remains blocked by lab topology. A third
+  remote RoCE-capable Kubernetes initiator is required before the project can
+  claim mounted RDMA multipath survival or reconnect.
+- Phase 167 starts the Parallel Write Engine milestone. Earlier 100GbE and WAL
+  profiling showed the mounted write path remains backend-limited after request
+  sizing and WAL record-count improvements. The new milestone targets ordered
+  asynchronous replication, parallel WAL ownership, RF3 slow-peer behavior,
+  recovery correctness, and mounted scaling as one coherent engine change.
 - Kubernetes NVMe/TCP mounted reconnect is source-gated through changed
   desired path-set evidence: CSI-node can connect a newly published desired
   NVMe path, prune the stale old host path for the same NQN, preserve pod
@@ -1078,10 +1087,14 @@ control-plane path is mature.
    protocol=nvme  -> nvme connect path
    ```
 
-3. `walstore` remains the MVP backend.
+3. `walstore` remains the MVP backend while the parallel engine is developed.
 
-   `smartwal` should be introduced behind an explicit gate with the same K8s
-   scenarios, not silently switched into the MVP.
+   The Phase 167 candidate stays explicit and opt-in until it preserves global
+   LSN/frontier semantics, crash recovery, catch-up/rebuild, RF3 quorum
+   behavior, mounted workload correctness, and cleanup. `io_uring`, direct I/O,
+   and device atomic-write support are adopted only when measurements show they
+   improve the already-parallel path; they are not substitutes for removing
+   software serialization.
 
 ## Contributor-Friendly Work Items
 
