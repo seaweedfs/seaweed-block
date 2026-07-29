@@ -106,10 +106,10 @@ phases:
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase133-nvme-stale-path-prune/gate/phase133-nvme-k8s-stale-path-prune-summary.txt"
-        pattern: "^stale_old_path_detected=true$"
-        save_as: stale_detected
+        pattern: "^stale_old_host_path_after_desired_change=false$"
+        save_as: stale_absent
       - action: assert_greater
-        actual: "{{ stale_detected }}"
+        actual: "{{ stale_absent }}"
         threshold: "0"
       - action: grep_log
         node: m02

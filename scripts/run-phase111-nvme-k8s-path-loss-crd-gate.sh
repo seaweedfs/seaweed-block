@@ -21,6 +21,21 @@ HOST_PATH_DISCONNECT="${SW_BLOCK_NVME_HOST_PATH_DISCONNECT:-0}"
 FORCE_STAGE2_MULTIPATH="${SW_BLOCK_NVME_FORCE_STAGE2_MULTIPATH:-0}"
 DESIRED_PATH_CHANGE="${SW_BLOCK_NVME_DESIRED_PATH_CHANGE:-0}"
 REQUIRE_STALE_PATH_PRUNE="${SW_BLOCK_NVME_REQUIRE_STALE_PATH_PRUNE:-0}"
+NVME_TRANSPORT="${SW_BLOCK_NVME_TRANSPORT:-tcp}"
+FRONTEND_IP_MAP="${SW_BLOCK_NVME_FRONTEND_IP_MAP:-}"
+FRONTEND_NETWORK_CLASS="${SW_BLOCK_NVME_FRONTEND_NETWORK_CLASS:-}"
+RESTART_PERSISTENCE="${SW_BLOCK_NVME_RESTART_PERSISTENCE:-ephemeral}"
+STATE_HOSTPATH="${SW_BLOCK_NVME_STATE_HOSTPATH:-/var/lib/sw-block}"
+CLEANUP_STATE_HOSTPATH="${SW_BLOCK_NVME_CLEANUP_STATE_HOSTPATH:-0}"
+REQUIRE_HOST_TRANSPORT="${SW_BLOCK_NVME_REQUIRE_HOST_TRANSPORT:-}"
+STRICT_CLEANUP_SCOPE="${SW_BLOCK_NVME_STRICT_CLEANUP_SCOPE:-0}"
+APP_NODE_OVERRIDE="${SW_BLOCK_NVME_APP_NODE_SELECTOR:-}"
+APP_HOST_SSH_ADDR="${SW_BLOCK_NVME_APP_HOST_SSH_ADDR:-}"
+APP_HOST_SSH_USER="${SW_BLOCK_NVME_APP_HOST_SSH_USER:-testdev}"
+APP_HOST_SSH_KEY="${SW_BLOCK_NVME_APP_HOST_SSH_KEY:-}"
+VOLUME_ID=""
+NQN=""
+BASELINE_CRDS="${ARTIFACT_DIR}/cleanup/baseline-crds.txt"
 
 mkdir -p "${ARTIFACT_DIR}"/{bin,build,values,install,multi-volume,inject,surfaces,cleanup}
 : >"${SUMMARY}"
@@ -29,10 +44,55 @@ write_summary() {
   echo "$*" | tee -a "${SUMMARY}" >/dev/null
 }
 
+strict_cleanup_scope_enabled() {
+  [[ "${STRICT_CLEANUP_SCOPE}" == "1" || "${STRICT_CLEANUP_SCOPE}" == "true" ]]
+}
+
+record_and_require_clean_baseline() {
+  : >"${BASELINE_CRDS}"
+  kubectl get crd -o name 2>/dev/null | grep -E '^customresourcedefinition\.apiextensions\.k8s\.io/swblock' \
+    | sed 's#^.*/##' >"${BASELINE_CRDS}" || true
+  local residue
+  residue="$({
+    helm status "${HELM_RELEASE}" --namespace "${HELM_NAMESPACE}" 2>/dev/null && echo "helm/${HELM_RELEASE}"
+    kubectl get deploy,daemonset,statefulset,pod,svc,pvc,pv,configmap,secret,serviceaccount -A -o name 2>/dev/null \
+      | grep -E '(sw-block|seaweed-block|block\.csi\.seaweedfs\.com)' || true
+    kubectl get storageclass,csidriver,clusterrole,clusterrolebinding -o name 2>/dev/null \
+      | grep -E '(sw-block|seaweed-block|block\.csi\.seaweedfs\.com)' || true
+    kubectl get volumeattachments.storage.k8s.io \
+      -o custom-columns=NAME:.metadata.name,ATTACHER:.spec.attacher,PV:.spec.source.persistentVolumeName --no-headers 2>/dev/null \
+      | grep 'block\.csi\.seaweedfs\.com' || true
+    kubectl get validatingadmissionpolicy,validatingadmissionpolicybinding -o name 2>/dev/null \
+      | grep -E '(sw-block|seaweed-block|block\.seaweedfs\.com)' || true
+    kubectl get swblockclusters.block.seaweedfs.com,swblockvolumes.block.seaweedfs.com -A -o name 2>/dev/null || true
+    sudo find /sys/kernel/config/nvmet/subsystems -mindepth 1 -maxdepth 1 -type d \
+      -name '*io.seaweedfs*' -printf 'nvmet/%f\n' 2>/dev/null || true
+    for pid_file in /sys/block/nbd*/pid; do
+      [[ -s "${pid_file}" ]] && printf 'active-nbd/%s\n' "$(basename "$(dirname "${pid_file}")")"
+    done
+  } | awk 'NF')"
+  if [[ -n "${residue}" ]]; then
+    printf 'refusing to run NVMe path gate on a non-clean shared lab:\n%s\n' "${residue}" >&2
+    return 1
+  fi
+}
+
 capture() {
   local out="$1"
   shift
   "$@" >"$out" 2>&1 || true
+}
+
+run_on_app_host() {
+  if [[ -z "${APP_HOST_SSH_ADDR}" ]]; then
+    "$@"
+    return
+  fi
+  local -a ssh_opts=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new)
+  if [[ -n "${APP_HOST_SSH_KEY}" ]]; then
+    ssh_opts=(-i "${APP_HOST_SSH_KEY}" "${ssh_opts[@]}")
+  fi
+  ssh "${ssh_opts[@]}" "${APP_HOST_SSH_USER}@${APP_HOST_SSH_ADDR}" "$@"
 }
 
 delete_pod_before_uninstall() {
@@ -61,6 +121,8 @@ wait_for_no_sw_block_k8s() {
       {
         kubectl get deploy,daemonset,statefulset,pod,svc,pvc,pv,configmap,secret,serviceaccount -A -o name
         kubectl get storageclass,csidriver,clusterrole,clusterrolebinding -o name
+        kubectl get volumeattachments.storage.k8s.io \
+          -o custom-columns=NAME:.metadata.name,ATTACHER:.spec.attacher,PV:.spec.source.persistentVolumeName --no-headers
       } 2>/dev/null | grep -E '(sw-block|seaweed-block|block\.csi\.seaweedfs\.com)' || true
     )"
     if [[ -z "${residue}" ]]; then
@@ -74,42 +136,135 @@ wait_for_no_sw_block_k8s() {
   return 1
 }
 
-cleanup() {
-  set +e
-  # Delete mounted consumers while CSI is still installed so normal detach/delete can run.
-  delete_pod_before_uninstall "${MOUNTED_POD}"
-  kubectl -n "${APP_NAMESPACE}" delete pod -l sw-block-test=multi-volume --ignore-not-found=true --wait=true --timeout=120s >/dev/null 2>&1
-  kubectl -n "${APP_NAMESPACE}" delete pod sw-block-multi-reader-1 sw-block-multi-writer-1 --ignore-not-found=true --wait=true --timeout=120s >/dev/null 2>&1
-  kubectl -n "${APP_NAMESPACE}" delete pvc sw-block-multi-pvc-1 --ignore-not-found=true --wait=true --timeout=120s >/dev/null 2>&1
-  kubectl delete storageclass sw-block-multi --ignore-not-found=true --wait=true --timeout=120s >/dev/null 2>&1
-  sudo -n nvme disconnect-all >/dev/null 2>&1 || true
-  helm status "${HELM_RELEASE}" --namespace "${HELM_NAMESPACE}" >/dev/null 2>&1 && \
-    helm uninstall "${HELM_RELEASE}" --namespace "${HELM_NAMESPACE}" --wait --timeout 240s \
-      >"${ARTIFACT_DIR}/cleanup/helm-uninstall.txt" 2>&1
-  wait_for_no_sw_block_k8s "${ARTIFACT_DIR}/cleanup/wait-after-helm-uninstall.txt" || true
-  kubectl -n "${APP_NAMESPACE}" delete deploy -l app=sw-blockvolume --ignore-not-found=true --wait=false >/dev/null 2>&1
-  kubectl -n "${HELM_NAMESPACE}" delete deploy -l app=sw-blockvolume --ignore-not-found=true --wait=false >/dev/null 2>&1
-  kubectl -n "${HELM_NAMESPACE}" get swblockvolumes.block.seaweedfs.com -o name 2>/dev/null | \
-    xargs -r -n1 kubectl -n "${HELM_NAMESPACE}" patch --type=merge -p '{"metadata":{"finalizers":[]}}' >/dev/null 2>&1
-  kubectl -n "${HELM_NAMESPACE}" delete swblockvolumes.block.seaweedfs.com --all --ignore-not-found=true --wait=true --timeout=60s >/dev/null 2>&1
-  kubectl -n "${HELM_NAMESPACE}" delete swblockclusters.block.seaweedfs.com --all --ignore-not-found=true --wait=true --timeout=60s >/dev/null 2>&1
-  kubectl delete validatingadmissionpolicy,validatingadmissionpolicybinding -l "app.kubernetes.io/instance=${HELM_RELEASE}" --ignore-not-found=true >/dev/null 2>&1
-  kubectl delete crd \
+wait_for_gate_volume_detached() {
+  local volume_id="$1"
+  local log="${ARTIFACT_DIR}/cleanup/wait-volume-detached.txt"
+  local stable=0
+  : >"${log}"
+  [[ -n "${volume_id}" ]] || return 0
+  for _ in $(seq 1 180); do
+    local count
+    count="$(kubectl get volumeattachments.storage.k8s.io \
+      -o custom-columns=PV:.spec.source.persistentVolumeName --no-headers 2>/dev/null \
+      | awk -v volume="${volume_id}" '$1 == volume {count++} END {print count + 0}')"
+    printf 'attachment_count=%s\n' "${count}" >>"${log}"
+    if [[ "${count}" == 0 ]]; then
+      stable=$((stable + 1))
+      [[ "${stable}" == 3 ]] && return 0
+    else
+      stable=0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+wait_for_gate_pv_deleted() {
+  local volume_id="$1"
+  local log="${ARTIFACT_DIR}/cleanup/wait-pv-deleted.txt"
+  : >"${log}"
+  [[ -n "${volume_id}" ]] || return 0
+  for _ in $(seq 1 180); do
+    if ! kubectl get pv "${volume_id}" >/dev/null 2>&1; then
+      echo "pv_deleted=true" >>"${log}"
+      return 0
+    fi
+    echo "pv_deleted=false" >>"${log}"
+    sleep 1
+  done
+  return 1
+}
+
+disconnect_gate_nvme_paths() {
+  local nqn
+  {
+    [[ -n "${NQN}" ]] && printf '%s\n' "${NQN}"
+    if strict_cleanup_scope_enabled; then
+      kubectl -n "${HELM_NAMESPACE}" get swblockvolume sw-block-multi-pvc-1 -o jsonpath='{.status.nvme.nqn}{"\n"}' 2>/dev/null || true
+    else
+      kubectl -n "${HELM_NAMESPACE}" get swblockvolumes -o jsonpath='{range .items[*]}{.status.nvme.nqn}{"\n"}{end}' 2>/dev/null || true
+    fi
+  } | awk 'NF && !seen[$0]++' | while IFS= read -r nqn; do
+    run_on_app_host sudo -n nvme disconnect -n "${nqn}" >/dev/null 2>&1 || true
+  done
+}
+
+delete_gate_created_crds() {
+  local crd
+  for crd in \
     swblockclusters.block.seaweedfs.com \
     swblockvolumes.block.seaweedfs.com \
     swblockreplicaeligibilities.block.seaweedfs.com \
     swblockreplicarebuilds.block.seaweedfs.com \
     swblockreplicafailbacks.block.seaweedfs.com \
-    swblockfrontendpublications.block.seaweedfs.com \
-    --ignore-not-found=true --wait=true --timeout=60s >/dev/null 2>&1
+    swblockfrontendpublications.block.seaweedfs.com; do
+    if strict_cleanup_scope_enabled && grep -Fqx "${crd}" "${BASELINE_CRDS}"; then
+      continue
+    fi
+    kubectl delete crd "${crd}" --ignore-not-found=true --wait=true --timeout=60s >/dev/null 2>&1
+  done
+}
+
+cleanup_gate_state_hostpath() {
+  [[ "${CLEANUP_STATE_HOSTPATH}" == "1" || "${CLEANUP_STATE_HOSTPATH}" == "true" ]] || return 0
+  case "${STATE_HOSTPATH}" in
+    /var/lib/sw-block/testops-*) sudo -n rm -rf -- "${STATE_HOSTPATH}" ;;
+    *) echo "refusing to remove non-testops state hostPath ${STATE_HOSTPATH}" >&2; return 1 ;;
+  esac
+}
+
+cleanup() {
+  set +e
+  local cleanup_volume_id="${VOLUME_ID}"
+  if [[ -z "${cleanup_volume_id}" ]]; then
+    cleanup_volume_id="$(kubectl -n "${APP_NAMESPACE}" get pvc sw-block-multi-pvc-1 \
+      -o jsonpath='{.spec.volumeName}' 2>/dev/null || true)"
+  fi
+  # Delete mounted consumers while CSI is still installed so normal detach/delete can run.
+  delete_pod_before_uninstall "${MOUNTED_POD}"
+  if ! strict_cleanup_scope_enabled; then
+    kubectl -n "${APP_NAMESPACE}" delete pod -l sw-block-test=multi-volume --ignore-not-found=true --wait=true --timeout=120s >/dev/null 2>&1
+  fi
+  kubectl -n "${APP_NAMESPACE}" delete pod sw-block-multi-reader-1 sw-block-multi-writer-1 --ignore-not-found=true --wait=true --timeout=120s >/dev/null 2>&1
+  wait_for_gate_volume_detached "${cleanup_volume_id}" || true
+  kubectl -n "${APP_NAMESPACE}" delete pvc sw-block-multi-pvc-1 --ignore-not-found=true --wait=true --timeout=120s >/dev/null 2>&1
+  kubectl delete storageclass sw-block-multi --ignore-not-found=true --wait=true --timeout=120s >/dev/null 2>&1
+  wait_for_gate_pv_deleted "${cleanup_volume_id}" || true
+  disconnect_gate_nvme_paths
+  helm status "${HELM_RELEASE}" --namespace "${HELM_NAMESPACE}" >/dev/null 2>&1 && \
+    helm uninstall "${HELM_RELEASE}" --namespace "${HELM_NAMESPACE}" --wait --timeout 240s \
+      >"${ARTIFACT_DIR}/cleanup/helm-uninstall.txt" 2>&1
+  wait_for_no_sw_block_k8s "${ARTIFACT_DIR}/cleanup/wait-after-helm-uninstall.txt" || true
+  if strict_cleanup_scope_enabled; then
+    if [[ -n "${VOLUME_ID}" ]]; then
+      kubectl -n "${APP_NAMESPACE}" delete deploy -l "sw-block.seaweedfs.com/volume=${VOLUME_ID}" --ignore-not-found=true --wait=false >/dev/null 2>&1
+      kubectl -n "${HELM_NAMESPACE}" delete deploy -l "sw-block.seaweedfs.com/volume=${VOLUME_ID}" --ignore-not-found=true --wait=false >/dev/null 2>&1
+    fi
+    kubectl -n "${HELM_NAMESPACE}" patch swblockvolume sw-block-multi-pvc-1 --type=merge -p '{"metadata":{"finalizers":[]}}' >/dev/null 2>&1 || true
+    kubectl -n "${HELM_NAMESPACE}" delete swblockvolume sw-block-multi-pvc-1 --ignore-not-found=true --wait=true --timeout=60s >/dev/null 2>&1
+    kubectl -n "${HELM_NAMESPACE}" delete swblockcluster sw-block --ignore-not-found=true --wait=true --timeout=60s >/dev/null 2>&1
+  else
+    kubectl -n "${APP_NAMESPACE}" delete deploy -l app=sw-blockvolume --ignore-not-found=true --wait=false >/dev/null 2>&1
+    kubectl -n "${HELM_NAMESPACE}" delete deploy -l app=sw-blockvolume --ignore-not-found=true --wait=false >/dev/null 2>&1
+    kubectl -n "${HELM_NAMESPACE}" get swblockvolumes.block.seaweedfs.com -o name 2>/dev/null | \
+      xargs -r -n1 kubectl -n "${HELM_NAMESPACE}" patch --type=merge -p '{"metadata":{"finalizers":[]}}' >/dev/null 2>&1
+    kubectl -n "${HELM_NAMESPACE}" delete swblockvolumes.block.seaweedfs.com --all --ignore-not-found=true --wait=true --timeout=60s >/dev/null 2>&1
+    kubectl -n "${HELM_NAMESPACE}" delete swblockclusters.block.seaweedfs.com --all --ignore-not-found=true --wait=true --timeout=60s >/dev/null 2>&1
+  fi
+  kubectl delete validatingadmissionpolicy,validatingadmissionpolicybinding -l "app.kubernetes.io/instance=${HELM_RELEASE}" --ignore-not-found=true >/dev/null 2>&1
+  delete_gate_created_crds
   kubectl get pv --no-headers 2>/dev/null | awk '/sw-block-multi/ {print $1}' | \
     xargs -r -n1 kubectl patch pv --type=merge -p '{"metadata":{"finalizers":[]}}' >/dev/null 2>&1
   kubectl -n "${APP_NAMESPACE}" get pvc sw-block-multi-pvc-1 >/dev/null 2>&1 && \
     kubectl -n "${APP_NAMESPACE}" patch pvc sw-block-multi-pvc-1 --type=merge -p '{"metadata":{"finalizers":[]}}' >/dev/null 2>&1
   kubectl get pv --no-headers 2>/dev/null | awk '/sw-block-multi/ {print $1}' | xargs -r kubectl delete pv --wait=false >/dev/null 2>&1
-  sudo -n nvme disconnect-all >/dev/null 2>&1 || true
+  disconnect_gate_nvme_paths
+  cleanup_gate_state_hostpath >/dev/null 2>&1 || true
   set -e
 }
+if strict_cleanup_scope_enabled; then
+  record_and_require_clean_baseline
+fi
 trap cleanup EXIT
 
 wait_for_port() {
@@ -133,8 +288,8 @@ with_master_port_forward() {
     wait "${pf_pid}" >/dev/null 2>&1 || true
     return 1
   fi
-  "$@"
-  local rc=$?
+  local rc=0
+  "$@" || rc=$?
   kill "${pf_pid}" >/dev/null 2>&1 || true
   wait "${pf_pid}" >/dev/null 2>&1 || true
   return "${rc}"
@@ -172,7 +327,7 @@ wait_for_crd_status() {
   for _ in $(seq 1 90); do
     kubectl -n "${HELM_NAMESPACE}" get swblockvolumes -o json >"${out_json}" 2>/dev/null || true
     python3 - "${out_json}" "${want_status}" "${want_reason}" "${want_path_count}" <<'PY' && return 0 || true
-import json, sys
+import json, os, sys
 path, want_status, want_reason, want_path_count = sys.argv[1:]
 try:
     doc=json.load(open(path))
@@ -183,9 +338,12 @@ if len(items) != 1:
     raise SystemExit(1)
 st=items[0].get("status") or {}
 nv=st.get("nvme") or {}
+required_transport=os.environ.get("SW_BLOCK_NVME_REQUIRE_HOST_TRANSPORT", "")
 if st.get("status") != want_status or st.get("reasonCode") != want_reason:
     raise SystemExit(1)
 if want_path_count != "-" and int(nv.get("pathCount", -1)) != int(want_path_count):
+    raise SystemExit(1)
+if required_transport and nv.get("transport") != required_transport:
     raise SystemExit(1)
 conds={c.get("type"): c.get("status") for c in st.get("conditions") or []}
 if want_status == "blocked" and conds.get("Ready") == "True":
@@ -203,9 +361,10 @@ write_host_nvme_path_info() {
   local nqn="$2"
   local json_path="${ARTIFACT_DIR}/inject/nvme-list-subsys.${label}.json"
   local env_path="${ARTIFACT_DIR}/inject/nvme-path-info.${label}.env"
-  sudo -n nvme list-subsys -o json >"${json_path}"
+  run_on_app_host sudo -n nvme list-subsys -o json >"${json_path}"
   python3 - "${json_path}" "${nqn}" >"${env_path}" <<'PY'
 import json
+import os
 import sys
 
 path, want_nqn = sys.argv[1:]
@@ -236,8 +395,25 @@ paths = []
 for sub in walk(doc):
     paths.extend(sub.get("Paths") or [])
 
+def field(path, name):
+    return str(path.get(name) or path.get(name.lower()) or "").lower()
+
+def controller(path):
+    name = path.get("Name") or path.get("Controller") or path.get("Device") or ""
+    if name and not str(name).startswith("/dev/"):
+        name = "/dev/" + str(name)
+    return str(name)
+
+records = [(controller(p), field(p, "Transport"), field(p, "State"), addr(p.get("Address"))) for p in paths]
+required = __import__("os").environ.get("SW_BLOCK_NVME_REQUIRE_HOST_TRANSPORT", "").lower()
 print(f"path_count={len(paths)}")
-print("addrs=" + ",".join(a for a in [addr(p.get("Address")) for p in paths] if a))
+print("addrs=" + ",".join(a for _, _, _, a in records if a))
+print("path_records=" + ";".join(f"{c}|{t}|{s}|{a}" for c, t, s, a in records))
+if required:
+    print(f"required_transport_path_count={sum(t == required for _, t, _, _ in records)}")
+    print(f"required_transport_live_path_count={sum(t == required and s == 'live' for _, t, s, _ in records)}")
+    print(f"unexpected_transport_path_count={sum(t != required for _, t, _, _ in records)}")
+    print(f"non_live_path_count={sum(s != 'live' for _, _, s, _ in records)}")
 if paths:
     first = paths[0]
     name = first.get("Name") or first.get("Controller") or first.get("Device") or ""
@@ -246,6 +422,64 @@ if paths:
     print(f"controller={name}")
     print(f"addr={addr(first.get('Address'))}")
 PY
+}
+
+host_controller_for_addr() {
+  local env_path="$1"
+  local addr="$2"
+  python3 - "${env_path}" "${addr}" <<'PY'
+import sys
+fields={}
+for line in open(sys.argv[1]):
+    key, _, value=line.rstrip("\n").partition("=")
+    fields[key]=value
+for record in fields.get("path_records", "").split(";"):
+    parts=record.split("|", 3)
+    if len(parts) == 4 and parts[3] == sys.argv[2]:
+        print(parts[0])
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+require_host_controller_live() {
+  local env_path="$1"
+  local controller="$2"
+  local addr="$3"
+  local transport="$4"
+  python3 - "${env_path}" "${controller}" "${addr}" "${transport}" <<'PY'
+import sys
+fields={}
+for line in open(sys.argv[1]):
+    key, _, value=line.rstrip("\n").partition("=")
+    fields[key]=value
+want=(sys.argv[2], sys.argv[4], "live", sys.argv[3])
+records=[tuple(record.split("|", 3)) for record in fields.get("path_records", "").split(";") if record]
+raise SystemExit(0 if want in records else 1)
+PY
+}
+
+wait_for_host_transport_live_path_count() {
+  local label="$1"
+  local nqn="$2"
+  local want="$3"
+  local allow_non_live="${4:-false}"
+  [[ -n "${REQUIRE_HOST_TRANSPORT}" ]] || return 0
+  for _ in $(seq 1 90); do
+    write_host_nvme_path_info "${label}" "${nqn}" || true
+    local total live unexpected non_live
+    total="$(read_env_value "${ARTIFACT_DIR}/inject/nvme-path-info.${label}.env" path_count)"
+    live="$(read_env_value "${ARTIFACT_DIR}/inject/nvme-path-info.${label}.env" required_transport_live_path_count)"
+    unexpected="$(read_env_value "${ARTIFACT_DIR}/inject/nvme-path-info.${label}.env" unexpected_transport_path_count)"
+    non_live="$(read_env_value "${ARTIFACT_DIR}/inject/nvme-path-info.${label}.env" non_live_path_count)"
+    if [[ "${live}" == "${want}" && "${unexpected}" == "0" ]] && \
+       { [[ "${allow_non_live}" == "true" ]] || [[ "${total}" == "${want}" && "${non_live}" == "0" ]]; }; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "NVMe host paths did not reach ${want} live ${REQUIRE_HOST_TRANSPORT} controllers for ${nqn}" >&2
+  return 1
 }
 
 read_env_value() {
@@ -398,9 +632,24 @@ PY
 }
 
 write_summary "${PHASE_STATUS_KEY}=running"
-cleanup
+if ! strict_cleanup_scope_enabled; then
+  cleanup
+fi
 
 echo "[phase111] build sw-block CLI"
+GENERATE_NVME_ARGS=(
+  --nvme-transport "${NVME_TRANSPORT}"
+  --restart-persistence "${RESTART_PERSISTENCE}"
+)
+if [[ -n "${FRONTEND_IP_MAP}" ]]; then
+  GENERATE_NVME_ARGS+=(
+    --frontend-ip-map "${FRONTEND_IP_MAP}"
+    --frontend-network-class "${FRONTEND_NETWORK_CLASS}"
+  )
+fi
+if [[ "${RESTART_PERSISTENCE}" == "hostpath" ]]; then
+  GENERATE_NVME_ARGS+=(--state-hostpath "${STATE_HOSTPATH}")
+fi
 (
   cd "${ROOT}"
   go build -o "${ARTIFACT_DIR}/bin/sw-block" ./cmd/sw-block
@@ -411,7 +660,8 @@ echo "[phase111] build sw-block CLI"
     --csi-image "${CSI_IMAGE}" \
     --protocol nvme \
     --replication-factor 2 \
-    --node-limit 2 >"${ARTIFACT_DIR}/values/generate.stdout.txt"
+    --node-limit 2 \
+    "${GENERATE_NVME_ARGS[@]}" >"${ARTIFACT_DIR}/values/generate.stdout.txt"
 )
 cat >>"${ARTIFACT_DIR}/values/values.nvme.yaml" <<'YAML'
 operatorStatus:
@@ -444,6 +694,12 @@ python3 -c "${python_read_nodes}" "${ARTIFACT_DIR}"
 
 grep -q '^network_mode=external-nvme$' "${ARTIFACT_DIR}/values/generate.stdout.txt"
 grep -q 'externalNVMe: true' "${ARTIFACT_DIR}/values/values.nvme.yaml"
+grep -q "^nvme_transport=${NVME_TRANSPORT}$" "${ARTIFACT_DIR}/values/generate.stdout.txt"
+write_summary "nvme_transport=${NVME_TRANSPORT}"
+write_summary "restart_persistence_mode=${RESTART_PERSISTENCE}"
+if [[ -n "${REQUIRE_HOST_TRANSPORT}" ]]; then
+  write_summary "required_host_transport=${REQUIRE_HOST_TRANSPORT}"
+fi
 
 echo "[phase111] install Helm stack"
 (
@@ -457,12 +713,18 @@ echo "[phase111] install Helm stack"
     -f "${ARTIFACT_DIR}/values/values.nvme.yaml" --wait --timeout 10m >"${ARTIFACT_DIR}/install/helm-install.txt"
 )
 
-APP_NODE="$(cat "${ARTIFACT_DIR}/values/app-node.txt")"
+APP_NODE="${APP_NODE_OVERRIDE:-$(cat "${ARTIFACT_DIR}/values/app-node.txt")}"
+kubectl get node "${APP_NODE}" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' | grep -q '^True$'
+if [[ -n "${APP_HOST_SSH_ADDR}" ]]; then
+  run_on_app_host true
+fi
+write_summary "app_node=${APP_NODE}"
 echo "[phase111] create one RF2 NVMe PVC and verify data path"
 (
   cd "${ROOT}"
   SW_BLOCK_MULTI_VOLUME_NODE_SELECTOR="${APP_NODE}" \
   SW_BLOCK_MULTI_VOLUME_PROTOCOL=nvme \
+  SW_BLOCK_MULTI_VOLUME_NVME_TRANSPORT="${NVME_TRANSPORT}" \
   SW_BLOCK_MULTI_VOLUME_RF=2 \
   SW_BLOCK_MULTI_VOLUME_COUNT=1 \
   SW_BLOCK_MULTI_VOLUME_CLEANUP=0 \
@@ -473,8 +735,18 @@ echo "[phase111] create one RF2 NVMe PVC and verify data path"
 grep -q '^multi_volume_status=ok$' "${ARTIFACT_DIR}/multi-volume/multi-volume-summary.txt"
 grep -q '^writer_verified_count=1$' "${ARTIFACT_DIR}/multi-volume/multi-volume-summary.txt"
 grep -q '^reader_verified_count=1$' "${ARTIFACT_DIR}/multi-volume/multi-volume-summary.txt"
+grep -q "^nvme_transport=${NVME_TRANSPORT}$" "${ARTIFACT_DIR}/multi-volume/multi-volume-summary.txt"
+kubectl get storageclass sw-block-multi -o yaml >"${ARTIFACT_DIR}/multi-volume/storageclass.yaml"
+grep -q "sw-block.seaweedfs.com/nvme-transport: ${NVME_TRANSPORT}" "${ARTIFACT_DIR}/multi-volume/storageclass.yaml"
 
 wait_for_crd_status "healthy" "ready" "first_volume_verified" "2"
+VOLUME_ID="$(volume_field_from_crd "${ARTIFACT_DIR}/surfaces/swblockvolumes.healthy.json" "status.volumeID")"
+NQN="$(volume_field_from_crd "${ARTIFACT_DIR}/surfaces/swblockvolumes.healthy.json" "status.nvme.nqn")"
+wait_for_host_transport_live_path_count "healthy" "${NQN}" "2"
+if [[ -n "${REQUIRE_HOST_TRANSPORT}" ]]; then
+  write_summary "initial_live_${REQUIRE_HOST_TRANSPORT}_path_count=2"
+  write_summary "initial_tcp_fallback_observed=false"
+fi
 
 MOUNTED_POD_UID_BEFORE=""
 if [[ "${MOUNTED_IO}" == "1" || "${MOUNTED_IO}" == "true" ]]; then
@@ -532,7 +804,7 @@ if len(desired) != 2:
 primary = st.get("primaryReplicaID") or ""
 volume_id = st.get("volumeID") or ""
 nqn = nv.get("nqn") or ""
-if not volume_id or not nqn:
+if not volume_id or not nqn or not primary:
     raise SystemExit(f"missing volume_id/nqn in status: {st}")
 
 current_addrs = set(desired)
@@ -551,13 +823,16 @@ for item in deploys.get("items") or []:
             if not str(arg).startswith("--nvme-listen="):
                 continue
             old_addr = str(arg).split("=", 1)[1]
-            if old_addr in current_addrs:
-                candidates.append((replica == primary, replica, namespace, name, ci, ai, old_addr))
+            if old_addr in current_addrs and replica and replica != primary:
+                candidates.append((replica, namespace, name, ci, ai, old_addr))
 
 if not candidates:
     raise SystemExit(f"no deployment --nvme-listen matched desired addrs {desired}")
-candidates.sort(key=lambda x: (x[0], x[1], x[3]))
-_, replica, namespace, name, ci, ai, old_addr = candidates[0]
+candidates.sort(key=lambda x: (x[0], x[2]))
+replica, namespace, name, ci, ai, old_addr = candidates[0]
+surviving_addr = next((addr for addr in desired if addr != old_addr), "")
+if not surviving_addr:
+    raise SystemExit(f"no surviving desired path beside {old_addr}")
 host, port_text = old_addr.rsplit(":", 1)
 port = int(port_text)
 used = {int(a.rsplit(":", 1)[1]) for a in current_addrs if a.startswith(host + ":")}
@@ -578,8 +853,10 @@ for key, value in {
     "target_namespace": namespace,
     "target_deployment": name,
     "target_replica": replica,
+    "primary_replica": primary,
     "old_desired_path": old_addr,
     "new_desired_path": new_addr,
+    "surviving_desired_path": surviving_addr,
     "initial_desired_paths": ",".join(desired),
     "initial_path_count": str(len(desired)),
 }.items():
@@ -594,17 +871,45 @@ PY
   INITIAL_PATH_COUNT="$(read_env_value "${ARTIFACT_DIR}/inject/desired-path-change.env" initial_path_count)"
   INITIAL_DESIRED_PATHS="$(read_env_value "${ARTIFACT_DIR}/inject/desired-path-change.env" initial_desired_paths)"
   TARGET_REPLICA="$(read_env_value "${ARTIFACT_DIR}/inject/desired-path-change.env" target_replica)"
+  PRIMARY_REPLICA="$(read_env_value "${ARTIFACT_DIR}/inject/desired-path-change.env" primary_replica)"
+  SURVIVING_DESIRED_PATH="$(read_env_value "${ARTIFACT_DIR}/inject/desired-path-change.env" surviving_desired_path)"
   write_summary "volume_id=${VOLUME_ID}"
   write_summary "nvme_nqn=${NQN}"
   write_summary "initial_path_count=${INITIAL_PATH_COUNT}"
   write_summary "initial_desired_paths=${INITIAL_DESIRED_PATHS}"
   write_summary "target_deployment=${TARGET_NAMESPACE}/${TARGET_DEPLOY}"
   write_summary "target_replica=${TARGET_REPLICA}"
+  write_summary "primary_replica=${PRIMARY_REPLICA}"
+  write_summary "endpoint_change_is_non_primary=true"
   write_summary "old_desired_path=${OLD_DESIRED_PATH}"
   write_summary "new_desired_path=${NEW_DESIRED_PATH}"
+  write_summary "surviving_desired_path=${SURVIVING_DESIRED_PATH}"
+
+  write_host_nvme_path_info "before-desired-path-change" "${NQN}"
+  SURVIVING_CONTROLLER="$(host_controller_for_addr "${ARTIFACT_DIR}/inject/nvme-path-info.before-desired-path-change.env" "${SURVIVING_DESIRED_PATH}")"
+  [[ -n "${SURVIVING_CONTROLLER}" ]]
+  require_host_controller_live "${ARTIFACT_DIR}/inject/nvme-path-info.before-desired-path-change.env" \
+    "${SURVIVING_CONTROLLER}" "${SURVIVING_DESIRED_PATH}" "${NVME_TRANSPORT}"
+  write_summary "surviving_controller_before=${SURVIVING_CONTROLLER}"
+
+  TRANSITION_IO_PID=""
+  if [[ "${MOUNTED_IO}" == "1" || "${MOUNTED_IO}" == "true" ]]; then
+    kubectl -n "${APP_NAMESPACE}" exec "${MOUNTED_POD}" -- sh -c \
+      'set -eu; rm -f /tmp/phase166-stop; i=0; while [ ! -e /tmp/phase166-stop ]; do i=$((i+1)); echo "transition-${i}" >> /data/phase166-transition.txt; sync; tail -n 1 /data/phase166-transition.txt; sleep 1; done' \
+      >"${ARTIFACT_DIR}/inject/mounted-during-desired-path-change.log" 2>&1 &
+    TRANSITION_IO_PID=$!
+    for _ in $(seq 1 30); do
+      [[ -s "${ARTIFACT_DIR}/inject/mounted-during-desired-path-change.log" ]] && break
+      sleep 0.2
+    done
+    [[ -s "${ARTIFACT_DIR}/inject/mounted-during-desired-path-change.log" ]]
+  fi
 
   kubectl -n "${TARGET_NAMESPACE}" patch "deploy/${TARGET_DEPLOY}" --type=json --patch-file "${ARTIFACT_DIR}/inject/desired-path-change-patch.json" \
     >"${ARTIFACT_DIR}/inject/patch-desired-path.txt" 2>&1
+  write_host_nvme_path_info "during-desired-path-change" "${NQN}"
+  require_host_controller_live "${ARTIFACT_DIR}/inject/nvme-path-info.during-desired-path-change.env" \
+    "${SURVIVING_CONTROLLER}" "${SURVIVING_DESIRED_PATH}" "${NVME_TRANSPORT}"
   kubectl -n "${TARGET_NAMESPACE}" rollout status "deploy/${TARGET_DEPLOY}" --timeout=240s \
     >"${ARTIFACT_DIR}/inject/rollout-desired-path-change.txt" 2>&1
   kubectl -n "${TARGET_NAMESPACE}" get deploy,pod -l app=sw-blockvolume -o wide >"${ARTIFACT_DIR}/inject/blockvolume.after-desired-change.txt"
@@ -619,10 +924,18 @@ PY
     exit 1
   fi
   wait_for_host_nvme_addr "after-desired-path-change" "${NQN}" "${NEW_DESIRED_PATH}"
+  wait_for_host_transport_live_path_count "after-desired-path-change" "${NQN}" "2"
   write_summary "reconnect_invoked=true"
   write_summary "new_desired_path_connected=true"
+  if [[ -n "${REQUIRE_HOST_TRANSPORT}" ]]; then
+    write_summary "desired_change_live_${REQUIRE_HOST_TRANSPORT}_path_count=2"
+    write_summary "desired_change_tcp_fallback_observed=false"
+  fi
   HOST_PATH_COUNT_AFTER_DESIRED_CHANGE="$(read_env_value "${ARTIFACT_DIR}/inject/nvme-path-info.after-desired-path-change.env" path_count)"
   HOST_PATHS_AFTER_DESIRED_CHANGE="$(read_env_value "${ARTIFACT_DIR}/inject/nvme-path-info.after-desired-path-change.env" addrs)"
+  require_host_controller_live "${ARTIFACT_DIR}/inject/nvme-path-info.after-desired-path-change.env" \
+    "${SURVIVING_CONTROLLER}" "${SURVIVING_DESIRED_PATH}" "${NVME_TRANSPORT}"
+  write_summary "surviving_controller_during=${SURVIVING_CONTROLLER}"
   write_summary "host_path_count_after_desired_change=${HOST_PATH_COUNT_AFTER_DESIRED_CHANGE}"
   write_summary "host_paths_after_desired_change=${HOST_PATHS_AFTER_DESIRED_CHANGE}"
   if python3 - "${HOST_PATHS_AFTER_DESIRED_CHANGE}" "${OLD_DESIRED_PATH}" <<'PY'
@@ -632,19 +945,33 @@ raise SystemExit(0 if sys.argv[2] in addrs else 1)
 PY
   then
     write_summary "stale_old_host_path_after_desired_change=true"
+    STALE_OLD_PATH_DETECTED=true
   else
     write_summary "stale_old_host_path_after_desired_change=false"
+    STALE_OLD_PATH_DETECTED=false
   fi
 
   if [[ "${REQUIRE_STALE_PATH_PRUNE}" == "1" || "${REQUIRE_STALE_PATH_PRUNE}" == "true" ]]; then
-    write_summary "stale_old_path_detected=true"
+    write_summary "stale_old_path_detected=${STALE_OLD_PATH_DETECTED}"
     wait_for_host_nvme_addr_absent_count "after-stale-path-prune" "${NQN}" "${OLD_DESIRED_PATH}" "2"
+    wait_for_host_transport_live_path_count "after-stale-path-prune" "${NQN}" "2"
+    require_host_controller_live "${ARTIFACT_DIR}/inject/nvme-path-info.after-stale-path-prune.env" \
+      "${SURVIVING_CONTROLLER}" "${SURVIVING_DESIRED_PATH}" "${NVME_TRANSPORT}"
     HOST_PATH_COUNT_AFTER_PRUNE="$(read_env_value "${ARTIFACT_DIR}/inject/nvme-path-info.after-stale-path-prune.env" path_count)"
     HOST_PATHS_AFTER_PRUNE="$(read_env_value "${ARTIFACT_DIR}/inject/nvme-path-info.after-stale-path-prune.env" addrs)"
     write_summary "stale_old_path_pruned=true"
     write_summary "host_path_count_after_prune=${HOST_PATH_COUNT_AFTER_PRUNE}"
     write_summary "host_paths_after_prune=${HOST_PATHS_AFTER_PRUNE}"
   fi
+
+  if [[ -n "${TRANSITION_IO_PID}" ]]; then
+    kubectl -n "${APP_NAMESPACE}" exec "${MOUNTED_POD}" -- touch /tmp/phase166-stop
+    wait "${TRANSITION_IO_PID}"
+    TRANSITION_IO_PID=""
+    [[ "$(wc -l <"${ARTIFACT_DIR}/inject/mounted-during-desired-path-change.log")" -ge 2 ]]
+    write_summary "mounted_io_during_endpoint_change=ok"
+  fi
+  write_summary "surviving_controller_preserved=true"
 
   if [[ "${MOUNTED_IO}" == "1" || "${MOUNTED_IO}" == "true" ]]; then
     MOUNTED_POD_UID_CHANGED="$(kubectl -n "${APP_NAMESPACE}" get pod "${MOUNTED_POD}" -o jsonpath='{.metadata.uid}')"
@@ -663,6 +990,9 @@ PY
       --namespace "${APP_NAMESPACE}" \
       --out "${ARTIFACT_DIR}/surfaces/desired-change-report" \
       --timeout 30s >"${ARTIFACT_DIR}/surfaces/desired-change-report.stdout.txt" 2>"${ARTIFACT_DIR}/surfaces/desired-change-report.stderr.txt"
+  "${ARTIFACT_DIR}/bin/sw-block" ops explain volume \
+    --from-bundle "${ARTIFACT_DIR}/surfaces/desired-change-report" \
+    "${VOLUME_ID}" >"${ARTIFACT_DIR}/surfaces/desired-change-explain.txt" 2>"${ARTIFACT_DIR}/surfaces/desired-change-explain.stderr.txt"
   DASHBOARD_PORT="$(python3 - <<'PY'
 import socket
 s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()
@@ -682,6 +1012,7 @@ PY
 
   python3 - "${ARTIFACT_DIR}" "${VOLUME_ID}" "${OLD_DESIRED_PATH}" "${NEW_DESIRED_PATH}" <<'PY'
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -693,6 +1024,8 @@ nvme = status.get("nvme") or {}
 summary = (base/"surfaces/desired-change-report/summary.txt").read_text()
 snapshot = json.load(open(base/"surfaces/desired-change-report/operator-snapshot.json"))
 dashboard = json.load(open(base/"surfaces/desired-change-dashboard-operator-snapshot.json"))
+explain = (base/"surfaces/desired-change-explain.txt").read_text()
+required_transport = os.environ.get("SW_BLOCK_NVME_REQUIRE_HOST_TRANSPORT", "")
 
 def assert_status(name, st):
     nv = st.get("nvme") or {}
@@ -701,6 +1034,8 @@ def assert_status(name, st):
         raise SystemExit(f"{name} status mismatch: {st}")
     if nv.get("path_count") != 2 and nv.get("pathCount") != 2:
         raise SystemExit(f"{name} path count mismatch: {nv}")
+    if required_transport and nv.get("transport") != required_transport:
+        raise SystemExit(f"{name} transport mismatch: {nv}")
     if new_addr not in addrs or old_addr in addrs:
         raise SystemExit(f"{name} desired addrs mismatch: {addrs}")
 
@@ -708,6 +1043,8 @@ if status.get("status") != "ready" or status.get("reasonCode") != "first_volume_
     raise SystemExit(f"CRD status mismatch: {status}")
 if nvme.get("pathCount") != 2:
     raise SystemExit(f"CRD path count mismatch: {nvme}")
+if required_transport and nvme.get("transport") != required_transport:
+    raise SystemExit(f"CRD transport mismatch: {nvme}")
 if new_addr not in (nvme.get("nvmeAddrs") or []) or old_addr in (nvme.get("nvmeAddrs") or []):
     raise SystemExit(f"CRD desired addrs mismatch: {nvme}")
 if f"managed_volume={volume_id} status=ready reason=first_volume_verified" not in summary:
@@ -717,6 +1054,13 @@ if len(nvme_lines) != 1:
     raise SystemExit("report missing managed_volume_nvme line")
 if new_addr not in nvme_lines[0] or old_addr in nvme_lines[0] or "path_count=2" not in nvme_lines[0]:
     raise SystemExit("report did not reflect desired path replacement")
+if required_transport and f"transport={required_transport}" not in nvme_lines[0]:
+    raise SystemExit("report did not retain the required NVMe transport")
+explain_nvme = next((line for line in explain.splitlines() if line.startswith("managed_volume_nvme ")), "")
+if new_addr not in explain_nvme or old_addr in explain_nvme or "path_count=2" not in explain_nvme:
+    raise SystemExit(f"explain did not reflect desired path replacement: {explain_nvme}")
+if required_transport and f"transport={required_transport}" not in explain_nvme:
+    raise SystemExit("explain did not retain the required NVMe transport")
 for name, doc in (("operator_snapshot", snapshot), ("dashboard", dashboard)):
     vols = doc.get("volumes") or []
     if len(vols) != 1:
@@ -725,6 +1069,7 @@ for name, doc in (("operator_snapshot", snapshot), ("dashboard", dashboard)):
 (base/"nvme-k8s-desired-path-change-asserts.txt").write_text("\n".join([
     "crd_status_agrees=true",
     "report_dashboard_agree=true",
+    "explain_agrees=true",
     "surface_ready_reason=first_volume_verified",
 ]) + "\n")
 PY
@@ -766,7 +1111,7 @@ if [[ "${HOST_PATH_DISCONNECT}" == "1" || "${HOST_PATH_DISCONNECT}" == "true" ]]
     echo "need exactly two host NVMe paths and a target controller, got count=${INITIAL_PATH_COUNT} controller=${TARGET_CONTROLLER}" >&2
     exit 1
   fi
-  sudo -n nvme disconnect -d "${TARGET_CONTROLLER}" >"${ARTIFACT_DIR}/inject/nvme-disconnect-one-path.txt" 2>&1
+  run_on_app_host sudo -n nvme disconnect -d "${TARGET_CONTROLLER}" >"${ARTIFACT_DIR}/inject/nvme-disconnect-one-path.txt" 2>&1
   wait_for_host_nvme_path_count "after-host-disconnect" "${NQN}" "1"
   write_summary "path_loss_detected=true"
   write_summary "after_disconnect_path_count=1"
@@ -775,6 +1120,7 @@ if [[ "${HOST_PATH_DISCONNECT}" == "1" || "${HOST_PATH_DISCONNECT}" == "true" ]]
     exit 1
   fi
   wait_for_host_nvme_path_count "after-owner-reconnect" "${NQN}" "2"
+  wait_for_host_transport_live_path_count "after-owner-reconnect" "${NQN}" "2"
   write_summary "reconnect_invoked=true"
   write_summary "replacement_path_connected=true"
   write_summary "reconnected_path_count=2"
@@ -872,17 +1218,41 @@ fi
 
 echo "[phase111] scale one blockvolume deployment to zero to remove one NVMe path"
 kubectl -n "${APP_NAMESPACE}" get deploy -l app=sw-blockvolume -o json >"${ARTIFACT_DIR}/inject/blockvolume-deployments.before.json"
-TARGET_DEPLOY="$(python3 - "${ARTIFACT_DIR}/inject/blockvolume-deployments.before.json" <<'PY'
+python3 - "${ARTIFACT_DIR}/inject/blockvolume-deployments.before.json" "${ARTIFACT_DIR}/surfaces/swblockvolumes.healthy.json" \
+  >"${ARTIFACT_DIR}/inject/path-loss-target.env" <<'PY'
 import json, sys
 doc=json.load(open(sys.argv[1]))
+crd=json.load(open(sys.argv[2]))
 items=doc.get("items") or []
 if len(items) < 2:
     raise SystemExit(f"need at least two blockvolume deployments, got {len(items)}")
-items=sorted(items, key=lambda i: i["metadata"]["name"])
-print(items[0]["metadata"]["name"])
+volumes=crd.get("items") or []
+if len(volumes) != 1:
+    raise SystemExit(f"need one SwBlockVolume, got {len(volumes)}")
+primary=(volumes[0].get("status") or {}).get("primaryReplicaID") or ""
+if not primary:
+    raise SystemExit("missing primaryReplicaID")
+candidates=[]
+for item in items:
+    meta=item.get("metadata") or {}
+    replica=(meta.get("labels") or {}).get("sw-block.seaweedfs.com/replica") or ""
+    if replica and replica != primary:
+        candidates.append((replica, meta.get("name") or ""))
+if not candidates:
+    raise SystemExit(f"no non-primary deployment found for primary {primary}")
+replica, name=sorted(candidates)[0]
+print(f"primary_replica={primary}")
+print(f"target_replica={replica}")
+print(f"target_deployment={name}")
 PY
-)"
+TARGET_DEPLOY="$(read_env_value "${ARTIFACT_DIR}/inject/path-loss-target.env" target_deployment)"
+PRIMARY_REPLICA="$(read_env_value "${ARTIFACT_DIR}/inject/path-loss-target.env" primary_replica)"
+TARGET_REPLICA="$(read_env_value "${ARTIFACT_DIR}/inject/path-loss-target.env" target_replica)"
+[[ -n "${TARGET_DEPLOY}" && -n "${PRIMARY_REPLICA}" && -n "${TARGET_REPLICA}" && "${TARGET_REPLICA}" != "${PRIMARY_REPLICA}" ]]
 write_summary "target_deployment=${TARGET_DEPLOY}"
+write_summary "primary_replica=${PRIMARY_REPLICA}"
+write_summary "outage_replica=${TARGET_REPLICA}"
+write_summary "outage_is_non_primary=true"
 kubectl -n "${APP_NAMESPACE}" scale "deploy/${TARGET_DEPLOY}" --replicas=0 >"${ARTIFACT_DIR}/inject/scale-target.txt"
 kubectl -n "${APP_NAMESPACE}" rollout status "deploy/${TARGET_DEPLOY}" --timeout=120s >"${ARTIFACT_DIR}/inject/rollout-target-zero.txt" 2>&1 || true
 for _ in $(seq 1 60); do
@@ -893,6 +1263,7 @@ done
 kubectl -n "${APP_NAMESPACE}" get deploy,pod -l app=sw-blockvolume -o wide >"${ARTIFACT_DIR}/inject/blockvolume.after-scale.txt"
 
 wait_for_crd_status "pathloss" "blocked" "nvme_multipath_path_missing" "1"
+wait_for_host_transport_live_path_count "pathloss" "${NQN}" "1" "true"
 VOLUME_ID="$(python3 - "${ARTIFACT_DIR}/surfaces/swblockvolumes.pathloss.json" <<'PY'
 import json, sys
 doc=json.load(open(sys.argv[1]))
@@ -900,6 +1271,10 @@ print(doc["items"][0]["status"]["volumeID"])
 PY
 )"
 write_summary "volume_id=${VOLUME_ID}"
+if [[ -n "${REQUIRE_HOST_TRANSPORT}" ]]; then
+  write_summary "degraded_live_${REQUIRE_HOST_TRANSPORT}_path_count=1"
+  write_summary "degraded_tcp_fallback_observed=false"
+fi
 
 if [[ "${MOUNTED_IO}" == "1" || "${MOUNTED_IO}" == "true" ]]; then
   echo "[phase111] verify mounted pod survives and writes after one path loss"
@@ -944,7 +1319,7 @@ kill "${DASH_PID}" >/dev/null 2>&1 || true
 wait "${DASH_PID}" >/dev/null 2>&1 || true
 
 SW_BLOCK_NVME_PATH_LOSS_PHASE_STATUS_KEY="${PHASE_STATUS_KEY}" python3 - "${ARTIFACT_DIR}" <<'PY'
-import json, re, sys
+import json, os, re, sys
 from pathlib import Path
 base=Path(sys.argv[1])
 crd=json.load(open(base/"surfaces/swblockvolumes.pathloss.json"))
@@ -956,11 +1331,14 @@ summary=(base/"surfaces/report/summary.txt").read_text()
 snapshot=json.load(open(base/"surfaces/report/operator-snapshot.json"))
 dashboard=json.load(open(base/"surfaces/dashboard-operator-snapshot.json"))
 explain=(base/"surfaces/explain.txt").read_text()
+required_transport=os.environ.get("SW_BLOCK_NVME_REQUIRE_HOST_TRANSPORT", "")
 docs=[("report", snapshot), ("dashboard", dashboard)]
 if st.get("status") != "blocked" or st.get("reasonCode") != "nvme_multipath_path_missing":
     raise SystemExit(f"crd mismatch: {st}")
 if nv.get("pathCount") != 1:
     raise SystemExit(f"crd nvme path count mismatch: {nv}")
+if required_transport and nv.get("transport") != required_transport:
+    raise SystemExit(f"crd nvme transport mismatch: {nv}")
 if any(c.get("type") == "Ready" and c.get("status") == "True" for c in st.get("conditions") or []):
     raise SystemExit("CRD contains Ready=True")
 if f"managed_volume={volume_id} status=blocked reason=nvme_multipath_path_missing" not in summary:
@@ -969,6 +1347,8 @@ if "Ready=True" in summary:
     raise SystemExit("report summary contains Ready=True")
 if f"managed_volume_nvme={volume_id}" not in summary or "path_count=1" not in summary:
     raise SystemExit("report summary missing nvme path_count=1")
+if required_transport and f"transport={required_transport}" not in summary:
+    raise SystemExit("report summary missing required NVMe transport")
 for name, doc in docs:
     vols=doc.get("volumes") or []
     if len(vols) != 1:
@@ -979,6 +1359,8 @@ for name, doc in docs:
         raise SystemExit(f"{name} status mismatch: {s}")
     if n.get("path_count") != 1:
         raise SystemExit(f"{name} nvme mismatch: {n}")
+    if required_transport and n.get("transport") != required_transport:
+        raise SystemExit(f"{name} nvme transport mismatch: {n}")
     if any(c.get("type") == "Ready" and c.get("status") == "True" for c in s.get("conditions") or []):
         raise SystemExit(f"{name} contains Ready=True")
 if "status=blocked reason=nvme_multipath_path_missing" not in explain:
@@ -1006,6 +1388,11 @@ if [[ "${RESTORE_PATH}" == "1" || "${RESTORE_PATH}" == "true" ]]; then
   kubectl -n "${APP_NAMESPACE}" rollout status "deploy/${TARGET_DEPLOY}" --timeout=240s >"${ARTIFACT_DIR}/inject/rollout-target-restore.txt" 2>&1
 
   wait_for_crd_status "restored" "ready" "first_volume_verified" "2"
+  wait_for_host_transport_live_path_count "restored" "${NQN}" "2"
+  if [[ -n "${REQUIRE_HOST_TRANSPORT}" ]]; then
+    write_summary "restored_live_${REQUIRE_HOST_TRANSPORT}_path_count=2"
+    write_summary "restored_tcp_fallback_observed=false"
+  fi
   if [[ "${MOUNTED_IO}" == "1" || "${MOUNTED_IO}" == "true" ]]; then
     MOUNTED_POD_UID_RESTORED="$(kubectl -n "${APP_NAMESPACE}" get pod "${MOUNTED_POD}" -o jsonpath='{.metadata.uid}')"
     if [[ "${MOUNTED_POD_UID_RESTORED}" != "${MOUNTED_POD_UID_BEFORE}" ]]; then
@@ -1030,7 +1417,7 @@ if [[ "${RESTORE_PATH}" == "1" || "${RESTORE_PATH}" == "true" ]]; then
     "${VOLUME_ID}" >"${ARTIFACT_DIR}/surfaces/restore-explain.txt" 2>"${ARTIFACT_DIR}/surfaces/restore-explain.stderr.txt"
 
   python3 - "${ARTIFACT_DIR}" "${VOLUME_ID}" <<'PY'
-import json, sys
+import json, os, sys
 from pathlib import Path
 base=Path(sys.argv[1])
 volume_id=sys.argv[2]
@@ -1041,14 +1428,19 @@ nv=st.get("nvme") or {}
 summary=(base/"surfaces/restore-report/summary.txt").read_text()
 snapshot=json.load(open(base/"surfaces/restore-report/operator-snapshot.json"))
 explain=(base/"surfaces/restore-explain.txt").read_text()
+required_transport=os.environ.get("SW_BLOCK_NVME_REQUIRE_HOST_TRANSPORT", "")
 if st.get("status") != "ready" or st.get("reasonCode") != "first_volume_verified":
     raise SystemExit(f"restored CRD mismatch: {st}")
 if nv.get("pathCount") != 2:
     raise SystemExit(f"restored CRD path count mismatch: {nv}")
+if required_transport and nv.get("transport") != required_transport:
+    raise SystemExit(f"restored CRD transport mismatch: {nv}")
 if f"managed_volume={volume_id} status=ready reason=first_volume_verified" not in summary:
     raise SystemExit("restore report summary missing ready/first_volume_verified")
 if f"managed_volume_nvme={volume_id}" not in summary or "path_count=2" not in summary:
     raise SystemExit("restore report missing nvme path_count=2")
+if required_transport and f"transport={required_transport}" not in summary:
+    raise SystemExit("restore report missing required NVMe transport")
 vols=snapshot.get("volumes") or []
 if len(vols) != 1:
     raise SystemExit(f"restore snapshot volume count={len(vols)}")
@@ -1058,6 +1450,8 @@ if s.get("status") != "ready" or s.get("reason_code") != "first_volume_verified"
     raise SystemExit(f"restore snapshot mismatch: {s}")
 if n.get("path_count") != 2:
     raise SystemExit(f"restore snapshot nvme mismatch: {n}")
+if required_transport and n.get("transport") != required_transport:
+    raise SystemExit(f"restore snapshot transport mismatch: {n}")
 if "status=ready reason=first_volume_verified" not in explain:
     raise SystemExit("restore explain missing ready/first_volume_verified")
 (base/"nvme-k8s-path-restore-asserts.txt").write_text("\n".join([

@@ -367,12 +367,12 @@ func (r *realNVMeUtil) IsConnected(ctx context.Context, nqn string) (bool, error
 	return nvmeSubsystemPathCount(doc, nqn) > 0, nil
 }
 
-func (r *realNVMeUtil) IsPathConnected(ctx context.Context, nqn, addr string) (bool, error) {
+func (r *realNVMeUtil) IsPathConnected(ctx context.Context, nqn string, transport FrontendTransport, addr string) (bool, error) {
 	doc, err := nvmeListSubsystems(ctx)
 	if err != nil {
 		return false, err
 	}
-	return nvmeSubsystemHasPath(doc, nqn, addr), nil
+	return nvmeSubsystemHasPath(doc, nqn, transport, addr), nil
 }
 
 func (r *realNVMeUtil) ListPaths(ctx context.Context, nqn string) ([]NVMeConnectedPath, error) {
@@ -439,7 +439,7 @@ func nvmeSubsystemPathCount(doc any, nqn string) int {
 	return total
 }
 
-func nvmeSubsystemHasPath(doc any, nqn, addr string) bool {
+func nvmeSubsystemHasPath(doc any, nqn string, transport FrontendTransport, addr string) bool {
 	host, port, err := splitHostPort(addr)
 	if err != nil {
 		return false
@@ -451,6 +451,14 @@ func nvmeSubsystemHasPath(doc any, nqn, addr string) bool {
 		paths, _ := sub["Paths"].([]any)
 		for _, path := range paths {
 			pathMap, _ := path.(map[string]any)
+			pathTransport, _ := pathMap["Transport"].(string)
+			if FrontendTransport(strings.ToLower(pathTransport)) != transport {
+				continue
+			}
+			pathState, _ := pathMap["State"].(string)
+			if !strings.EqualFold(pathState, "live") {
+				continue
+			}
 			rawAddr, _ := pathMap["Address"].(string)
 			if rawAddr == "" {
 				continue
@@ -483,7 +491,12 @@ func nvmeSubsystemPaths(doc any, nqn string) []NVMeConnectedPath {
 			if addr == "" && controller == "" {
 				continue
 			}
-			out = append(out, NVMeConnectedPath{Addr: addr, Controller: controller})
+			pathTransport, _ := pathMap["Transport"].(string)
+			out = append(out, NVMeConnectedPath{
+				Addr:       addr,
+				Controller: controller,
+				Transport:  FrontendTransport(strings.ToLower(pathTransport)),
+			})
 		}
 	}
 	return out

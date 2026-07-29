@@ -71,6 +71,8 @@ wait_for_k8s_cleanup() {
       {
         kubectl get deploy,daemonset,statefulset,pod,svc,pvc,pv,configmap,secret,serviceaccount -A -o name
         kubectl get storageclass,csidriver,clusterrole,clusterrolebinding -o name
+        kubectl get volumeattachments.storage.k8s.io \
+          -o custom-columns=NAME:.metadata.name,ATTACHER:.spec.attacher,PV:.spec.source.persistentVolumeName --no-headers
       } 2>/dev/null | grep -E '(sw-block|seaweed-block|block\.csi\.seaweedfs\.com)' || true
     )"
     if [[ -z "$residue" ]]; then
@@ -95,11 +97,28 @@ fi
 capture "k8s-resources.after-cleanup.txt" bash -c '
   kubectl get deploy,daemonset,statefulset,pod,svc,pvc,pv,configmap,secret,serviceaccount -A -o name
   kubectl get storageclass,csidriver,clusterrole,clusterrolebinding -o name
+  kubectl get volumeattachments.storage.k8s.io \
+    -o custom-columns=NAME:.metadata.name,ATTACHER:.spec.attacher,PV:.spec.source.persistentVolumeName --no-headers
 '
 if grep -E '(sw-block|seaweed-block|block\.csi\.seaweedfs\.com)' "$ARTIFACT_DIR/k8s-resources.after-cleanup.txt" >"$ARTIFACT_DIR/k8s-residue.after-cleanup.txt"; then
   mark_fail "kubernetes_sw_block_resources_present"
 else
   : >"$ARTIFACT_DIR/k8s-residue.after-cleanup.txt"
+fi
+
+if [[ -d /sys/kernel/config/nvmet/subsystems ]]; then
+  if command -v sudo >/dev/null 2>&1; then
+    sudo -n find /sys/kernel/config/nvmet/subsystems -mindepth 1 -maxdepth 1 -type d \
+      -name '*io.seaweedfs*' -printf '%f\n' >"$ARTIFACT_DIR/nvme-target-residue.after-cleanup.txt" 2>/dev/null || true
+  else
+    find /sys/kernel/config/nvmet/subsystems -mindepth 1 -maxdepth 1 -type d \
+      -name '*io.seaweedfs*' -printf '%f\n' >"$ARTIFACT_DIR/nvme-target-residue.after-cleanup.txt" 2>/dev/null || true
+  fi
+else
+  : >"$ARTIFACT_DIR/nvme-target-residue.after-cleanup.txt"
+fi
+if [[ -s "$ARTIFACT_DIR/nvme-target-residue.after-cleanup.txt" ]]; then
+  mark_fail "nvme_target_subsystems_present"
 fi
 
 if command -v sudo >/dev/null 2>&1; then
@@ -229,6 +248,7 @@ fi
   echo "helm_namespace=$HELM_NAMESPACE"
   echo "iqn_substr=$IQN_SUBSTR"
   echo "k8s_residue_count=$(wc -l <"$ARTIFACT_DIR/k8s-residue.after-cleanup.txt")"
+  echo "nvme_target_residue_count=$(wc -l <"$ARTIFACT_DIR/nvme-target-residue.after-cleanup.txt")"
   echo "iscsi_residue_count=$ISCSI_RESIDUE_COUNT"
   echo "process_residue_count=$(wc -l <"$ARTIFACT_DIR/process-residue.after-cleanup.txt")"
   echo "multipath_residue_count=$(wc -l <"$ARTIFACT_DIR/multipath-residue.after-cleanup.txt")"

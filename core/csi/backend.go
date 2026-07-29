@@ -122,7 +122,9 @@ func publishContext(t PublishTarget) map[string]string {
 		ctx["protocol"] = string(t.Protocol)
 	}
 	if t.Protocol == ProtocolNVMe {
-		ctx["nvmeTransport"] = string(normalizeFrontendTransport(t.Protocol, t.FrontendTransport))
+		if t.FrontendTransport != "" {
+			ctx["nvmeTransport"] = string(t.FrontendTransport)
+		}
 	}
 	if t.ISCSIAddr != "" && t.IQN != "" {
 		ctx["iscsiAddr"] = t.ISCSIAddr

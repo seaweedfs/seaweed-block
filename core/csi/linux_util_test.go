@@ -60,18 +60,26 @@ func TestNVMeSubsystemHasPathRequiresTargetAddressNotSourceAddress(t *testing.T)
 				"NQN": "nqn.2026-05.io.seaweedfs:v1",
 				"Paths": []any{
 					map[string]any{
-						"Address": "traddr=192.168.1.181,trsvcid=4420,src_addr=192.168.1.184",
-						"State":   "live",
+						"Address":   "traddr=192.168.1.181,trsvcid=4420,src_addr=192.168.1.184",
+						"State":     "live",
+						"Transport": "tcp",
 					},
 				},
 			},
 		},
 	}
-	if !nvmeSubsystemHasPath(doc, "nqn.2026-05.io.seaweedfs:v1", "192.168.1.181:4420") {
+	if !nvmeSubsystemHasPath(doc, "nqn.2026-05.io.seaweedfs:v1", FrontendTransportTCP, "192.168.1.181:4420") {
 		t.Fatal("expected exact traddr/trsvcid path to match")
 	}
-	if nvmeSubsystemHasPath(doc, "nqn.2026-05.io.seaweedfs:v1", "192.168.1.184:4420") {
+	if nvmeSubsystemHasPath(doc, "nqn.2026-05.io.seaweedfs:v1", FrontendTransportTCP, "192.168.1.184:4420") {
 		t.Fatal("src_addr must not satisfy requested target traddr")
+	}
+	if nvmeSubsystemHasPath(doc, "nqn.2026-05.io.seaweedfs:v1", FrontendTransportRDMA, "192.168.1.181:4420") {
+		t.Fatal("TCP path must not satisfy requested RDMA transport")
+	}
+	doc["Subsystems"].([]any)[0].(map[string]any)["Paths"].([]any)[0].(map[string]any)["State"] = "reconnecting"
+	if nvmeSubsystemHasPath(doc, "nqn.2026-05.io.seaweedfs:v1", FrontendTransportTCP, "192.168.1.181:4420") {
+		t.Fatal("reconnecting path must not satisfy a live-path check")
 	}
 }
 
@@ -82,12 +90,16 @@ func TestNVMeSubsystemPathsReturnsAddressAndController(t *testing.T) {
 				"NQN": "nqn.2026-05.io.seaweedfs:v1",
 				"Paths": []any{
 					map[string]any{
-						"Name":    "nvme2",
-						"Address": "traddr=192.168.1.181,trsvcid=4420,src_addr=192.168.1.184",
+						"Name":      "nvme2",
+						"Address":   "traddr=192.168.1.181,trsvcid=4420,src_addr=192.168.1.184",
+						"State":     "live",
+						"Transport": "tcp",
 					},
 					map[string]any{
 						"Controller": "/dev/nvme3",
 						"Address":    "traddr=192.168.1.184,trsvcid=4520",
+						"State":      "live",
+						"Transport":  "rdma",
 					},
 				},
 			},
@@ -95,8 +107,10 @@ func TestNVMeSubsystemPathsReturnsAddressAndController(t *testing.T) {
 				"NQN": "nqn.2026-05.io.seaweedfs:other",
 				"Paths": []any{
 					map[string]any{
-						"Name":    "nvme9",
-						"Address": "traddr=192.168.1.199,trsvcid=4420",
+						"Name":      "nvme9",
+						"Address":   "traddr=192.168.1.199,trsvcid=4420",
+						"State":     "live",
+						"Transport": "tcp",
 					},
 				},
 			},
@@ -107,10 +121,10 @@ func TestNVMeSubsystemPathsReturnsAddressAndController(t *testing.T) {
 	if len(paths) != 2 {
 		t.Fatalf("paths=%+v", paths)
 	}
-	if paths[0].Addr != "192.168.1.181:4420" || paths[0].Controller != "/dev/nvme2" {
+	if paths[0].Addr != "192.168.1.181:4420" || paths[0].Controller != "/dev/nvme2" || paths[0].Transport != FrontendTransportTCP {
 		t.Fatalf("path[0]=%+v", paths[0])
 	}
-	if paths[1].Addr != "192.168.1.184:4520" || paths[1].Controller != "/dev/nvme3" {
+	if paths[1].Addr != "192.168.1.184:4520" || paths[1].Controller != "/dev/nvme3" || paths[1].Transport != FrontendTransportRDMA {
 		t.Fatalf("path[1]=%+v", paths[1])
 	}
 }
