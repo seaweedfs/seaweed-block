@@ -351,7 +351,7 @@ func TestG9A_ReplicationVolume_OnLocalWrite_BestEffortRetainsRecoveringPeer(t *t
 
 	data := make([]byte, 4096)
 	data[0] = 0xA9
-	if err := v.OnLocalWrite(context.Background(), LocalWrite{LBA: 3, Data: data, LSN: 9}); err != nil {
+	if err := v.OnLocalWrite(context.Background(), LocalWrite{LBA: 3, Data: data, LSN: 1}); err != nil {
 		t.Fatalf("best-effort recovering peer should retain/feed without failing Write observer: %v", err)
 	}
 }
@@ -369,7 +369,7 @@ func TestG9A_ReplicationVolume_OnLocalWrite_SyncAllFailsRecoveringPeer(t *testin
 
 	data := make([]byte, 4096)
 	data[0] = 0xB9
-	err := v.OnLocalWrite(context.Background(), LocalWrite{LBA: 4, Data: data, LSN: 10})
+	err := v.OnLocalWrite(context.Background(), LocalWrite{LBA: 4, Data: data, LSN: 1})
 	if !strings.Contains(fmt.Sprint(err), ErrDurabilityBarrierFailed.Error()) {
 		t.Fatalf("sync_all recovering peer should fail write ack, got %v", err)
 	}
@@ -388,7 +388,7 @@ func TestG9A_ReplicationVolume_OnLocalWrite_SyncQuorumRF2FailsRecoveringPeer(t *
 
 	data := make([]byte, 4096)
 	data[0] = 0xC9
-	err := v.OnLocalWrite(context.Background(), LocalWrite{LBA: 5, Data: data, LSN: 11})
+	err := v.OnLocalWrite(context.Background(), LocalWrite{LBA: 5, Data: data, LSN: 1})
 	if !strings.Contains(fmt.Sprint(err), ErrDurabilityQuorumLost.Error()) {
 		t.Fatalf("sync_quorum RF=2 recovering peer should fail write ack, got %v", err)
 	}
@@ -477,21 +477,19 @@ func TestReplicationVolume_OnLocalWrite_PeerErrorDoesNotFailCaller(t *testing.T)
 // TestReplicationVolume_OnLocalWrite_ConcurrentLSNs_OrderedAtReplica —
 // the architect-requested adversarial ordering pin.
 //
-// Shape: N goroutines, each pre-assigned a unique LSN. Calls are
-// funneled through a caller-side serialization primitive that
-// mimics how Backend.Write will work in production (hold a lock
-// across LSN allocation + OnLocalWrite invocation). Under the
-// architect-approved Option X design, ReplicationVolume.OnLocalWrite
-// preserves LSN order through fan-out AS LONG AS the caller path
-// is serialized.
+// Shape: N goroutines allocate unique LSNs and call OnLocalWrite
+// without a caller-side lock. ReplicationVolume must tolerate the
+// callback for LSN N+1 arriving before LSN N and still ship a
+// contiguous stream to the replica.
 //
 // Test schedules N writes where LSN order and LBA order are distinct
 // (LSN 1 writes to LBA 9, LSN 2 writes to LBA 8, ...) so any
 // out-of-order application would produce detectable final-state
 // corruption.
 //
-// Proves: V2 shipMu semantic is preserved by V3's Option X pattern
-// when the system-level caller contract is honored.
+// Proves: V2 shipMu ordering is preserved inside ReplicationVolume;
+// callers do not need to serialize storage allocation and observer
+// dispatch as one critical section.
 func TestReplicationVolume_OnLocalWrite_ConcurrentLSNs_OrderedAtReplica(t *testing.T) {
 	addr, replica := replicaHarness(t, "r1")
 	v := volumeHarness(t, "vol1")
@@ -500,7 +498,6 @@ func TestReplicationVolume_OnLocalWrite_ConcurrentLSNs_OrderedAtReplica(t *testi
 	}
 
 	const n = 40
-	var callerMu sync.Mutex
 	var nextLSN atomic.Uint64
 	var wg sync.WaitGroup
 	start := make(chan struct{})
@@ -527,9 +524,6 @@ func TestReplicationVolume_OnLocalWrite_ConcurrentLSNs_OrderedAtReplica(t *testi
 			defer wg.Done()
 			<-start
 
-			// Caller-side serialized section: mimics Backend.Write holding
-			// a volume-level mutex across LSN allocation + OnLocalWrite.
-			callerMu.Lock()
 			lsn := nextLSN.Add(1)
 			// Resolve plan deterministically by LSN.
 			p := plans[lsn-1]
@@ -541,7 +535,6 @@ func TestReplicationVolume_OnLocalWrite_ConcurrentLSNs_OrderedAtReplica(t *testi
 				Data: data,
 				LSN:  lsn,
 			})
-			callerMu.Unlock()
 			if err != nil {
 				t.Errorf("OnLocalWrite idx=%d lsn=%d: %v", idx, lsn, err)
 			}

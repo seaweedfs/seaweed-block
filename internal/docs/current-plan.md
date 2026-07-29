@@ -33,6 +33,31 @@ This is one large milestone. Its implementation may use several reviewable
 commits or PR slices, but individual lock, counter, queue, and syscall changes
 do not become separate phases.
 
+## Current Progress
+
+The D1 local baseline slice is implemented and repeatable through
+`scripts/run-phase167-parallel-write-engine-local-baseline-gate.sh`:
+
+- direct WAL and real TCP RF3 sync-quorum benchmarks cover 1, 2, 4, and 8
+  writers with throughput, p99, WAL-lock wait, and replication-fanout timing;
+- the benchmark asserts the replication observer processed every accepted
+  write, so a detached observer cannot produce a false performance PASS;
+- the first same-run Windows baseline measured WAL four-writer scaling at
+  `0.882x`, while RF3 four-writer scaling was `0.167x`;
+- concurrent RF3 execution exposed a real pre-existing ordering gap: storage
+  could assign LSN N before N+1 while observer callbacks arrived in the
+  opposite order, causing the replica ship cursor to reject the gap;
+- `ReplicationVolume` now resequences concurrent callbacks by storage-assigned
+  LSN, owns queued buffers, makes `Sync(targetLSN)` wait for the ordered ship
+  frontier, and unblocks pending work safely on shutdown;
+- five repeated RF3 benchmark runs and the storage/frontend/replication test
+  suites passed without another cursor gap.
+
+This is evidence and a correctness prerequisite, not a parallel-engine
+performance claim. Linux race, CPU/queue-depth evidence, mounted NVMe/TCP, and
+same-run lab comparison remain open. D2 ordered asynchronous replication is
+the active implementation target.
+
 ## Assumptions And Boundaries
 
 - `walstore` remains the default backend until the candidate passes the full

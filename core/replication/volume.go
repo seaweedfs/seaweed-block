@@ -2,6 +2,7 @@ package replication
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -33,6 +34,25 @@ type RuntimeRecoveryRequest struct {
 	FromLSN         uint64
 	FrontierHintLSN uint64
 	BasePinLSN      uint64
+}
+
+// VolumeStats is a read-only contention snapshot for write-path gates. These
+// counters describe the current serialized implementation; they do not affect
+// acknowledgement or ordering semantics.
+type VolumeStats struct {
+	WriteOps           uint64
+	WriteLockWaitNanos uint64
+	WriteFanoutNanos   uint64
+	SyncOps            uint64
+	SyncOrderWaitNanos uint64
+	SyncLockWaitNanos  uint64
+	SyncDurationNanos  uint64
+}
+
+type orderedLocalWrite struct {
+	ctx    context.Context
+	write  LocalWrite
+	result chan error
 }
 
 type RuntimeRecoveryStatus struct {
@@ -68,10 +88,24 @@ type ReplicationVolume struct {
 	durabilityMode        DurabilityMode // set via SetDurabilityMode; default is BestEffort
 
 	// replayedGens counts UpdateReplicaSet calls dropped as stale
-	// (generation > 0 && generation <= lastAppliedGeneration). Exposed
-	// only to same-package tests for now; a public Stats() or
-	// Prometheus hook is a future observability pass.
+	// (generation > 0 && generation <= lastAppliedGeneration).
 	replayedGens atomic.Uint64
+
+	// Write/sync counters expose the current whole-volume serialization cost.
+	writeOps      atomic.Uint64
+	writeWait     atomic.Uint64
+	writeFanout   atomic.Uint64
+	syncOps       atomic.Uint64
+	syncOrderWait atomic.Uint64
+	syncWait      atomic.Uint64
+	syncDuration  atomic.Uint64
+
+	orderMu     sync.Mutex
+	nextShipLSN uint64
+	pending     map[uint64]*orderedLocalWrite
+	draining    bool
+	orderClosed bool
+	progress    chan struct{}
 
 	// Probe loop integration. Set once via ConfigureProbeLoop;
 	// started via StartProbeLoop after primary admit; stopped FIRST
@@ -127,6 +161,9 @@ func NewReplicationVolume(volumeID string, store storage.LogicalStorage) *Replic
 		coord:          NewDurabilityCoordinator(),
 		peers:          make(map[string]*ReplicaPeer),
 		durabilityMode: DurabilityBestEffort, // zero value; explicit for clarity
+		nextShipLSN:    store.NextLSN(),
+		pending:        make(map[uint64]*orderedLocalWrite),
+		progress:       make(chan struct{}),
 	}
 }
 
@@ -203,7 +240,19 @@ func (v *ReplicationVolume) Sync(ctx context.Context, targetLSN uint64) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	start := time.Now()
+	orderStart := time.Now()
+	if err := v.waitUntilShipped(ctx, targetLSN); err != nil {
+		return err
+	}
+	v.syncOrderWait.Add(replicationDurationNanos(time.Since(orderStart)))
+	lockStart := time.Now()
 	v.mu.Lock()
+	v.syncOps.Add(1)
+	v.syncWait.Add(replicationDurationNanos(time.Since(lockStart)))
+	defer func() {
+		v.syncDuration.Add(replicationDurationNanos(time.Since(start)))
+	}()
 	defer v.mu.Unlock()
 	if v.closed {
 		return fmt.Errorf("replication: Sync: volume %s closed", v.volumeID)
@@ -454,13 +503,14 @@ func formatIDSet(s map[string]struct{}) string {
 	return "{" + strings.Join(ids, ",") + "}"
 }
 
-// OnLocalWrite fans out one acked local write to every tracked peer.
+// OnLocalWrite orders one acked local write by its storage-assigned LSN and
+// fans it out to every tracked peer.
 //
-// Contract: OnLocalWrite serializes fan-out in LSN order for a given
-// volume. Caller order is NOT trusted as the correctness mechanism —
-// the volume-level mutex v.mu is held across the entire fan-out loop.
-// A future refactor that releases v.mu before issuing per-peer Ship
-// calls silently reintroduces an out-of-order-ship hazard.
+// Caller arrival order is not trusted: concurrent StorageBackend writes can
+// allocate LSN N before LSN N+1 but reach this method in the opposite order.
+// The resequencer retains owned buffers until every preceding LSN has shipped.
+// The current fan-out remains serialized; Phase 167 replaces that execution
+// step with per-peer ordered queues without removing this ordering boundary.
 //
 // Best-effort semantics: per-peer ship errors are logged and the
 // offending peer is marked Degraded (by ReplicaPeer.ShipEntry's own
@@ -475,14 +525,116 @@ func formatIDSet(s map[string]struct{}) string {
 //
 // Called by: Backend.Write wrapper immediately after
 // LogicalStorage.Write returns with the assigned LSN.
-// Owns: the per-write mutex hold across fan-out (LSN-order lock
-// scope); per-peer error aggregation and logging.
-// Borrows: w.Data slice — caller retains; fan-out must not mutate.
+// Owns: an immutable copy of w.Data while queued; per-peer error aggregation
+// and logging.
 func (v *ReplicationVolume) OnLocalWrite(ctx context.Context, w LocalWrite) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if w.LSN == 0 {
+		return errors.New("replication: OnLocalWrite: LSN must be nonzero")
+	}
+	owned := append([]byte(nil), w.Data...)
+	req := &orderedLocalWrite{
+		ctx:    ctx,
+		write:  LocalWrite{LBA: w.LBA, Data: owned, LSN: w.LSN},
+		result: make(chan error, 1),
+	}
+
+	v.orderMu.Lock()
+	if v.orderClosed {
+		v.orderMu.Unlock()
+		return fmt.Errorf("replication: OnLocalWrite: volume %s closed", v.volumeID)
+	}
+	if w.LSN < v.nextShipLSN {
+		next := v.nextShipLSN
+		v.orderMu.Unlock()
+		return fmt.Errorf("replication: OnLocalWrite: stale LSN %d below next ship LSN %d", w.LSN, next)
+	}
+	if _, exists := v.pending[w.LSN]; exists {
+		v.orderMu.Unlock()
+		return fmt.Errorf("replication: OnLocalWrite: duplicate pending LSN %d", w.LSN)
+	}
+	v.pending[w.LSN] = req
+	leader := !v.draining
+	if leader {
+		v.draining = true
+	}
+	v.orderMu.Unlock()
+
+	if leader {
+		v.drainOrderedWrites()
+	}
+
+	select {
+	case err := <-req.result:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (v *ReplicationVolume) drainOrderedWrites() {
+	for {
+		v.orderMu.Lock()
+		if v.orderClosed {
+			v.draining = false
+			v.orderMu.Unlock()
+			return
+		}
+		req := v.pending[v.nextShipLSN]
+		if req == nil {
+			v.draining = false
+			v.orderMu.Unlock()
+			return
+		}
+		delete(v.pending, v.nextShipLSN)
+		v.orderMu.Unlock()
+
+		err := v.shipLocalWrite(context.WithoutCancel(req.ctx), req.write)
+		req.result <- err
+
+		v.orderMu.Lock()
+		v.nextShipLSN++
+		if !v.orderClosed {
+			close(v.progress)
+			v.progress = make(chan struct{})
+		}
+		v.orderMu.Unlock()
+	}
+}
+
+func (v *ReplicationVolume) waitUntilShipped(ctx context.Context, targetLSN uint64) error {
+	for {
+		v.orderMu.Lock()
+		if targetLSN < v.nextShipLSN {
+			v.orderMu.Unlock()
+			return nil
+		}
+		if v.orderClosed {
+			v.orderMu.Unlock()
+			return fmt.Errorf("replication: Sync: volume %s closed", v.volumeID)
+		}
+		progress := v.progress
+		v.orderMu.Unlock()
+
+		select {
+		case <-progress:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+func (v *ReplicationVolume) shipLocalWrite(ctx context.Context, w LocalWrite) error {
+	start := time.Now()
+	lockStart := time.Now()
 	v.mu.Lock()
+	v.writeOps.Add(1)
+	v.writeWait.Add(replicationDurationNanos(time.Since(lockStart)))
+	defer func() {
+		v.writeFanout.Add(replicationDurationNanos(time.Since(start)))
+	}()
 	defer v.mu.Unlock()
 	if v.closed {
 		return fmt.Errorf("replication: OnLocalWrite: volume %s closed", v.volumeID)
@@ -573,6 +725,17 @@ func (v *ReplicationVolume) Stop() error {
 // (via peer.Close()).
 // Borrows: nothing.
 func (v *ReplicationVolume) Close() error {
+	v.orderMu.Lock()
+	if !v.orderClosed {
+		v.orderClosed = true
+		close(v.progress)
+		for lsn, req := range v.pending {
+			req.result <- fmt.Errorf("replication: OnLocalWrite: volume %s closed before LSN %d shipped", v.volumeID, lsn)
+			delete(v.pending, lsn)
+		}
+	}
+	v.orderMu.Unlock()
+
 	// Ordering: stop the
 	// probe loop FIRST, before acquiring v.mu and tearing down
 	// peers. This ensures any in-flight probe callback completes /
@@ -624,6 +787,26 @@ func (v *ReplicationVolume) PeerCount() int {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	return len(v.peers)
+}
+
+// Stats returns a stable diagnostic snapshot without exposing mutable state.
+func (v *ReplicationVolume) Stats() VolumeStats {
+	return VolumeStats{
+		WriteOps:           v.writeOps.Load(),
+		WriteLockWaitNanos: v.writeWait.Load(),
+		WriteFanoutNanos:   v.writeFanout.Load(),
+		SyncOps:            v.syncOps.Load(),
+		SyncOrderWaitNanos: v.syncOrderWait.Load(),
+		SyncLockWaitNanos:  v.syncWait.Load(),
+		SyncDurationNanos:  v.syncDuration.Load(),
+	}
+}
+
+func replicationDurationNanos(d time.Duration) uint64 {
+	if d <= 0 {
+		return 1
+	}
+	return uint64(d.Nanoseconds())
 }
 
 // PeerStatuses returns a stable, sorted diagnostic snapshot of all

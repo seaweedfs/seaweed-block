@@ -251,6 +251,8 @@ func (b *StorageBackend) durableStatus(volumeID, path, impl string) VolumeStatus
 		writeProfile.WALAppendOps = storageProfile.WALAppendOps
 		writeProfile.WALAppendBytes = storageProfile.WALAppendBytes
 		writeProfile.WALAppendDurationNanos = storageProfile.WALAppendDurationNanos
+		writeProfile.WALAppendLockWaitOps = storageProfile.WALAppendLockWaitOps
+		writeProfile.WALAppendLockWaitNanos = storageProfile.WALAppendLockWaitNanos
 		writeProfile.WALAppendWriteAtCalls = storageProfile.WALAppendWriteAtCalls
 		writeProfile.WALAppendWriteAtBytes = storageProfile.WALAppendWriteAtBytes
 		writeProfile.WALAppendWriteAtMaxBytes = storageProfile.WALAppendWriteAtMaxBytes

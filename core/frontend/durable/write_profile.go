@@ -38,6 +38,8 @@ type WriteProfileStatus struct {
 	WALAppendOps                uint64
 	WALAppendBytes              uint64
 	WALAppendDurationNanos      uint64
+	WALAppendLockWaitOps        uint64
+	WALAppendLockWaitNanos      uint64
 	WALAppendWriteAtCalls       uint64
 	WALAppendWriteAtBytes       uint64
 	WALAppendWriteAtMaxBytes    uint64

@@ -64,7 +64,11 @@ func (w *walWriter) append(entry *walEntry) (walRelOffset uint64, err error) {
 		return 0, fmt.Errorf("walWriter.append: encode: %w", err)
 	}
 
+	lockStart := time.Now()
 	w.mu.Lock()
+	if w.instr != nil {
+		w.instr.recordWALAppendLockWait(time.Since(lockStart))
+	}
 	defer w.mu.Unlock()
 
 	entryLen := uint64(len(buf))
@@ -124,7 +128,11 @@ func (w *walWriter) appendBatch(entries []walEntry) ([]uint64, error) {
 	}
 	pendingCapacity := boundedPendingCapacity(lengths)
 
+	lockStart := time.Now()
 	w.mu.Lock()
+	if w.instr != nil {
+		w.instr.recordWALAppendLockWait(time.Since(lockStart))
+	}
 	defer w.mu.Unlock()
 
 	offsets, finalHead, err := w.planAppendBatchLengths(lengths)
