@@ -43,14 +43,16 @@ import (
 //   - Online resize
 //   - Compaction (the WAL is bounded but periodic checkpoints free space)
 type WALStore struct {
-	path      string
-	fd        *os.File
-	sb        *superblock
-	wal       *walWriter
-	dm        *dirtyMap
-	committer *GroupCommitter
-	flusher   *flusher      // background WAL→extent applier; nil if disabled
-	admission *walAdmission // backpressure on WAL pressure; nil if disabled
+	path                       string
+	fd                         *os.File
+	sb                         *superblock
+	wal                        *walWriter
+	dm                         *dirtyMap
+	committer                  *GroupCommitter
+	syncCache                  func() error
+	syncDirectFrontierMetadata func([]byte) error
+	flusher                    *flusher      // background WAL→extent applier; nil if disabled
+	admission                  *walAdmission // backpressure on WAL pressure; nil if disabled
 
 	// admissionTimeout is the per-Write deadline for admission. If
 	// the WAL stays above the hard watermark for longer than this,
@@ -215,6 +217,16 @@ func openInitialized(path string, f *os.File, sb *superblock) (*WALStore, error)
 	})
 	go committer.Run()
 	s.committer = committer
+	s.syncCache = committer.SyncCache
+	s.syncDirectFrontierMetadata = func(data []byte) error {
+		if _, err := f.WriteAt(data, 0); err != nil {
+			return fmt.Errorf("storage: pwrite direct frontier superblock: %w", err)
+		}
+		if err := f.Sync(); err != nil {
+			return fmt.Errorf("storage: fsync direct frontier superblock: %w", err)
+		}
+		return nil
+	}
 
 	// Background flusher: drains dirty map → extent, advances
 	// checkpoint, allows WAL recycling. Defaults are conservative
@@ -398,14 +410,14 @@ func (s *WALStore) Write(lba uint32, data []byte) (uint64, error) {
 		defer s.admission.Release()
 	}
 
+	commitLockStart := time.Now()
 	s.mu.Lock()
+	s.instr.recordWriteCommitLockWait(time.Since(commitLockStart))
 	if s.closed {
 		s.mu.Unlock()
 		return 0, errors.New("storage: Write after Close")
 	}
 	lsn := s.nextLSN
-	s.nextLSN++
-	s.mu.Unlock()
 
 	entry := &walEntry{
 		LSN:    lsn,
@@ -416,13 +428,14 @@ func (s *WALStore) Write(lba uint32, data []byte) (uint64, error) {
 	}
 	walRelOff, err := s.wal.append(entry)
 	if err != nil {
+		s.mu.Unlock()
 		return 0, fmt.Errorf("storage: WAL append: %w", err)
 	}
 	dirtyStart := time.Now()
 	s.dm.put(uint64(lba), walRelOff, lsn, uint32(len(data)))
 	s.instr.recordDirtyMapUpdate(1, time.Since(dirtyStart))
 
-	s.mu.Lock()
+	s.nextLSN++
 	if lsn > s.walHead {
 		s.walHead = lsn
 	}
@@ -454,18 +467,20 @@ func (s *WALStore) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error
 		defer s.admission.Release()
 	}
 
+	commitLockStart := time.Now()
 	s.mu.Lock()
+	s.instr.recordWriteCommitLockWait(time.Since(commitLockStart))
 	if s.closed {
 		s.mu.Unlock()
 		return nil, errors.New("storage: WriteBatch after Close")
 	}
 	firstLSN := s.nextLSN
-	s.nextLSN += uint64(len(blocks))
 	useMultiBlock := s.multiBlockRecords && len(blocks) > 1
-	s.mu.Unlock()
 
 	if useMultiBlock {
-		return s.writeBatchMultiBlock(startLBA, blocks, firstLSN)
+		lsns, err := s.writeBatchMultiBlockLocked(startLBA, blocks, firstLSN)
+		s.mu.Unlock()
+		return lsns, err
 	}
 
 	entries := make([]walEntry, len(blocks))
@@ -483,6 +498,7 @@ func (s *WALStore) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error
 	}
 	offsets, err := s.wal.appendBatch(entries)
 	if err != nil {
+		s.mu.Unlock()
 		return nil, fmt.Errorf("storage: WAL batch append: %w", err)
 	}
 	dirtyStart := time.Now()
@@ -491,8 +507,8 @@ func (s *WALStore) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error
 	}
 	s.instr.recordDirtyMapUpdate(len(offsets), time.Since(dirtyStart))
 
-	s.mu.Lock()
 	lastLSN := lsns[len(lsns)-1]
+	s.nextLSN += uint64(len(lsns))
 	if lastLSN > s.walHead {
 		s.walHead = lastLSN
 	}
@@ -503,7 +519,9 @@ func (s *WALStore) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error
 	return lsns, nil
 }
 
-func (s *WALStore) writeBatchMultiBlock(startLBA uint32, blocks [][]byte, firstLSN uint64) ([]uint64, error) {
+// writeBatchMultiBlockLocked appends one multi-block record while the caller
+// holds s.mu, so a failed append cannot consume an LSN range.
+func (s *WALStore) writeBatchMultiBlockLocked(startLBA uint32, blocks [][]byte, firstLSN uint64) ([]uint64, error) {
 	totalLen := 0
 	for _, data := range blocks {
 		totalLen += len(data)
@@ -540,15 +558,14 @@ func (s *WALStore) writeBatchMultiBlock(startLBA uint32, blocks [][]byte, firstL
 	}
 	s.instr.recordDirtyMapUpdate(len(blocks), time.Since(dirtyStart))
 
-	s.mu.Lock()
 	lastLSN := lsns[len(lsns)-1]
+	s.nextLSN += uint64(len(lsns))
 	if lastLSN > s.walHead {
 		s.walHead = lastLSN
 	}
 	if s.walTail == 0 {
 		s.walTail = firstLSN
 	}
-	s.mu.Unlock()
 	return lsns, nil
 }
 
@@ -657,42 +674,43 @@ func (s *WALStore) Sync() (uint64, error) {
 		s.mu.RUnlock()
 		return 0, errors.New("storage: Sync after Close")
 	}
+	targetHead := s.walHead
+	targetDirectFrontier := s.pendingDirectFrontierLSN
 	s.mu.RUnlock()
 
-	if err := s.committer.SyncCache(); err != nil {
+	if err := s.syncCache(); err != nil {
 		return 0, fmt.Errorf("storage: group commit fsync: %w", err)
 	}
 	s.syncs.Add(1)
 
 	s.mu.Lock()
-	if s.walHead > s.syncedLSN {
-		s.syncedLSN = s.walHead
-	}
-	frontier := s.syncedLSN
-	var sbBytes []byte
-	if s.pendingDirectFrontierLSN > s.checkpointLSN && s.pendingDirectFrontierLSN <= s.syncedLSN {
-		s.checkpointLSN = s.pendingDirectFrontierLSN
-		s.sb.WALCheckpointLSN = s.pendingDirectFrontierLSN
-		if s.walHead > s.sb.WALHead {
-			s.sb.WALHead = s.walHead
-		}
+	if targetDirectFrontier > s.checkpointLSN && targetDirectFrontier <= targetHead {
+		sbCopy := *s.sb
+		sbCopy.WALCheckpointLSN = targetDirectFrontier
+		// WALHead is a logical byte cursor, not an LSN. Holding s.mu
+		// excludes appends while the second fsync makes this cursor durable.
+		sbCopy.WALHead = s.wal.logicalHeadValue()
 		buf := newSimpleByteBuf()
-		if _, err := s.sb.writeTo(buf); err != nil {
+		if _, err := sbCopy.writeTo(buf); err != nil {
 			s.mu.Unlock()
 			return 0, fmt.Errorf("storage: encode superblock: %w", err)
 		}
-		sbBytes = buf.bytes()
-		s.pendingDirectFrontierLSN = 0
+		if err := s.syncDirectFrontierMetadata(buf.bytes()); err != nil {
+			s.mu.Unlock()
+			return 0, err
+		}
+		s.checkpointLSN = targetDirectFrontier
+		s.sb.WALCheckpointLSN = targetDirectFrontier
+		s.sb.WALHead = sbCopy.WALHead
+		if s.pendingDirectFrontierLSN <= targetDirectFrontier {
+			s.pendingDirectFrontierLSN = 0
+		}
 	}
+	if targetHead > s.syncedLSN {
+		s.syncedLSN = targetHead
+	}
+	frontier := s.syncedLSN
 	s.mu.Unlock()
-	if len(sbBytes) > 0 {
-		if _, err := s.fd.WriteAt(sbBytes, 0); err != nil {
-			return 0, fmt.Errorf("storage: pwrite direct frontier superblock: %w", err)
-		}
-		if err := s.fd.Sync(); err != nil {
-			return 0, fmt.Errorf("storage: fsync direct frontier superblock: %w", err)
-		}
-	}
 	return frontier, nil
 }
 

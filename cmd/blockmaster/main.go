@@ -84,7 +84,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.launcherImage, "launcher-image", "sw-block:local", "G15d rendered blockvolume container image")
 	fs.StringVar(&f.launcherMasterAddr, "launcher-master-addr", "", "G15d master address used in rendered blockvolume args; defaults to listener address after bind")
 	fs.StringVar(&f.launcherDurableRoot, "launcher-durable-root", "/var/lib/sw-block", "G15d rendered blockvolume durable root base")
-	fs.StringVar(&f.launcherDurableImpl, "launcher-durable-impl", "walstore", "G15d rendered blockvolume durable implementation: walstore (default) or smartwal")
+	fs.StringVar(&f.launcherDurableImpl, "launcher-durable-impl", "walstore", "G15d rendered blockvolume durable implementation: walstore (default), smartwal, or opt-in parallel-walstore")
 	fs.BoolVar(&f.launcherWALMultiBlockRecords, "launcher-durable-wal-multiblock-records", false, "G15d render opt-in for experimental walstore multi-block WAL records; default false")
 	fs.BoolVar(&f.launcherWALRecoveryTestDisableFlusher, "launcher-durable-wal-recovery-test-disable-flusher", false, "test-only G15d render opt-in for blockvolume --durable-wal-recovery-test-disable-flusher; default false")
 	fs.StringVar(&f.launcherStateHostPath, "launcher-state-hostpath", "", "optional hostPath base mounted at the blockvolume durable root; empty keeps generated blockvolume state on throwaway emptyDir")

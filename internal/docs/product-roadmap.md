@@ -122,6 +122,17 @@ This is the short internal roadmap. Keep it current and readable.
   CSI and CRD status retain `rdma`, the Linux initiator confirms the active
   RDMA controller, and exact cleanup returns to baseline. NVMe/TCP remains the
   default; RDMA reconnect/failover and performance remain non-claims.
+- Phase 166 implements the Kubernetes NVMe/RDMA RF2 reconnect and exact
+  endpoint-replacement contract, but its live close gate remains on HOLD. The
+  current lab has only two RoCE target nodes and no third remote RoCE-capable
+  Kubernetes initiator, so it cannot honestly prove two remote surviving
+  paths. The implementation and blocked gate remain tracked independently.
+- Phase 167 is the active Parallel Write Engine milestone. It follows the
+  Phase 122-156 finding that mounted write throughput is backend-limited, not
+  network-limited. It will address ordered asynchronous replication,
+  parallel WAL ownership, RF3 slow-peer behavior, recovery compatibility, and
+  same-run mounted performance evidence as one large milestone rather than a
+  sequence of one-lock or one-counter phases.
 
 Do not skip from scripts directly to mutating operator lifecycle. Helm has
 stabilized the installation contract, and Phase 35 added read-only CRD status,
@@ -568,9 +579,14 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   the MVP backend. NVMe/TCP and opt-in NVMe/RDMA have Kubernetes supported-lab
   paths; RDMA uses kernel `nvmet-rdma` and a product-owned NBD-to-backend
   bridge.
-- Next: make NVMe/RDMA reconnect/failover ownership explicit before any
-  transparent-HA claim. Multipath and performance remain later, separate gates.
-  Storage-engine boundary and smartwal/delta experiments also remain separate.
+- Current hold: Phase 166 has implemented NVMe/RDMA reconnect ownership, but
+  its RF2 live close gate needs a third RoCE-capable initiator. Do not convert
+  that infrastructure gap into a transparent-HA claim.
+- Active next: Phase 167 Parallel Write Engine. Remove whole-volume replication
+  waits, add opt-in parallel WAL ownership, preserve global LSN/frontier and
+  recovery contracts, and prove RF1/RF3 behavior through the mounted NVMe path.
+  `io_uring` and device atomic writes are evidence-gated follow-ups inside this
+  milestone, not assumptions or standalone feature claims.
 - Protocol hardening now has a dedicated working area under
   `internal/docs/protocol/`. New protocol semantics should update the control
   model, invariant ledger, and anti-pattern checklist there before release
@@ -1181,6 +1197,19 @@ Approximate engineering effort if scope remains tight:
   write/coalescing shape as the next backend step.
 - Phase 139 is closed for WAL append batch-shape analysis and names frontend
   request size as the next backend/frontend seam to inspect.
+- Phases 140-156 are closed for frontend request-size profiling, WAL
+  materialization/multi-block experiments, mounted recovery compatibility, and
+  source-gated release boundaries. They reduced call and record counts but did
+  not establish a performance/SLO claim or remove the backend bottleneck.
+- Phases 157-165 are closed through standalone and Kubernetes single-path
+  NVMe/RDMA publish/attach. Phase 166's reconnect implementation is complete,
+  but the honest RF2 RDMA live close gate remains infrastructure-blocked and is
+  retained under
+  `internal/docs/ref/phase166-nvme-rdma-kubernetes-multipath-reconnect-hold.md`.
+- Phase 167 Parallel Write Engine is the active development pointer. Its full
+  milestone contract is `internal/docs/current-plan.md`; it keeps the existing
+  backend default until ordered async replication, parallel WAL ownership,
+  RF3/recovery correctness, mounted scaling, and zero-residue gates all pass.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.

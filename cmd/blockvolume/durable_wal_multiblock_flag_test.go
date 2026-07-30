@@ -74,3 +74,24 @@ func TestPhase152_BlockvolumeDurableWALRecoveryTestDisableFlusherRequiresWalstor
 		t.Fatal("parseFlags succeeded; want walstore requirement error")
 	}
 }
+
+func TestPhase167_BlockvolumeParallelWALStoreIsExplicitOptIn(t *testing.T) {
+	args := append(phase150RequiredBlockvolumeArgs(),
+		"--durable-root=/tmp/sw-block",
+		"--durable-impl=parallel-walstore",
+	)
+	f, err := parseFlags(args)
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if f.durableImpl != "parallel-walstore" {
+		t.Fatalf("durableImpl=%q want parallel-walstore", f.durableImpl)
+	}
+}
+
+func TestPhase167_BlockvolumeRejectsUnknownDurableImpl(t *testing.T) {
+	args := append(phase150RequiredBlockvolumeArgs(), "--durable-impl=parallel-looking")
+	if _, err := parseFlags(args); err == nil {
+		t.Fatal("parseFlags succeeded; want unknown durable impl rejected")
+	}
+}
