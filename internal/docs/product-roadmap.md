@@ -605,12 +605,18 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   BASE overlap, stale-slot handling, and dual-lane barrier sealing fail closed.
   Its Linux admission gate rejected bounded extent coalescing because
   sequential opportunity was stable in only `1/5` samples.
-- Active next: Phase 172 tests one bounded WAL materialization pipeline. The
-  default flusher currently performs one header read plus one full-record read
-  per validated dirty entry; the candidate may replace those with one
-  fully-validated read and bounded same-record reuse. Direct I/O, fixed
-  buffers, FUA, raw devices, and device atomic writes remain later
-  evidence-gated decisions.
+- Closed experiment: Phase 172 reduced ordinary WAL materialization reads from
+  `2.000` to `1.000` per validated record and multi-block reads to `0.06250`,
+  but four-writer throughput improved only `1.068x` against the required
+  `1.15x`, and candidate range was `2.031x` against the `1.50x` bound. The
+  candidate and measurement-only overhead were removed. Legacy range-trim and
+  recovery correctness fixes remain.
+- Active next: Phase 173 establishes a fixed-work performance contract,
+  attributes the complete shipped path, and uses diagnostic controls to choose
+  at most one architecture direction: owner/queue redesign, WAL/extent media
+  separation, or no backend change. No candidate is implemented until the
+  baseline range is at most `1.25x` and OS/device evidence reconciles with
+  product counters.
 - Protocol hardening now has a dedicated working area under
   `internal/docs/protocol/`. New protocol semantics should update the control
   model, invariant ledger, and anti-pattern checklist there before release
@@ -1257,10 +1263,16 @@ Approximate engineering effort if scope remains tight:
   hardening and full-pipeline evidence passed; bounded extent writeback was
   rejected by its admission gate. The finished plan is
   `internal/docs/finished-plans/phase171_finishedplan_default_walstore_checkpoint_pipeline.md`.
-- Phase 172 WAL Materialization Pipeline is active. It tests whether replacing
-  duplicate per-entry WAL reads with one bounded, fully validated
-  materialization improves the shipped backend. The contract is
-  `internal/docs/current-plan.md`.
+- Phase 172 WAL Materialization Pipeline is closed as a performance rejection.
+  Physical reads fell as designed, but throughput and stability did not meet
+  the pre-declared gate. The candidate was removed while independent recovery
+  fixes remained. The finished plan is
+  `internal/docs/finished-plans/phase172_finishedplan_wal_materialization_pipeline.md`.
+- Phase 173 Storage Execution Architecture Decision is active. It replaces
+  auto-calibrated admission data with a fixed-work harness, attributes
+  foreground, flusher, lock, syscall, fsync, frontend, and replication costs,
+  and permits only one evidence-selected architecture candidate. The contract
+  is `internal/docs/current-plan.md`.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.

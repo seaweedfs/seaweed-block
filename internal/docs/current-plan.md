@@ -1,277 +1,217 @@
-# Current Plan: Phase 172 WAL Materialization Pipeline
+# Current Plan: Phase 173 Storage Execution Architecture Decision
 
-Status: active evidence-first shipped-backend milestone.
+Status: active evidence-first architecture milestone.
 
 ## Why This Is Next
 
-Phase 171 rejected bounded contiguous extent writeback without weakening its
-gate. Its instrumentation exposed a different stable amplification in the
-default `walstore` flusher:
+Phases 167-172 rejected five plausible optimizations without weakening their
+gates:
+
+- a parallel WAL backend did not beat the shipped path;
+- native `io_uring` reduced no dominant persistence round;
+- segmented group commit did not scale;
+- staged append ownership had no stable batching headroom;
+- extent coalescing opportunity was workload-dependent;
+- WAL materialization cut physical reads but improved four-writer throughput
+  only `1.068x` and produced a `2.031x` sample range.
+
+The Phase 172 CPU profile explains why another local patch is unlikely to
+close the gap:
 
 ```text
-ordinary dirty entry:
-  ReadAt(header)       = 1 operation
-  ReadAt(full record)  = 1 operation
-  extent WriteAt       = 1 operation
-
-Linux strace control:
-  workload             = BenchmarkPhase167WALStoreContention/writers_4
-  logical writes       = 67,539
-  pread64              = 155,282 calls
-  pwrite64             = 155,304 calls
-  fsync                = 44 calls
+flusher.flushOnceInternal cumulative CPU: 38.6%
+WALStore.Write cumulative CPU:             34.2%
+syscall flat CPU:                          32.9%
+foreground WAL pwrite cumulative CPU:      17.8%
+flusher pread cumulative CPU:              13.3%
+mutex lock/spin cumulative CPU:            about 11%
 ```
 
-The header is read once to discover and validate the record, then read again as
-part of the full record. Product counters report one header read and one record
-read per validated dirty entry across sequential and scattered workloads. This
-is deterministic work, unlike the snapshot-dependent coalescing opportunity
-that failed Phase 171 admission.
+No single stage dominates. Foreground append, background WAL readback, extent
+writeback, fsync, and lock scheduling share one file and one volume-level
+execution context. Vitastor's useful lesson is not a specific algorithm to
+copy; it is to make journal/data ownership, queue depth, durability boundaries,
+and completion order explicit before optimizing.
 
-The next candidate therefore changes only WAL materialization: provide enough
-trusted in-memory record geometry to issue one bounded read, then run the
-existing decode, CRC, LSN, type, LBA, length, data-offset, wrap, and stale-slot
-checks before using any bytes or advancing checkpoint.
-
-This is one large milestone. Record identity, single-read materialization,
-shared-record reuse, corruption and concurrency behavior, Linux performance,
-and conditional mounted admission are deliverables inside Phase 172.
+Phase 173 is therefore one large decision-and-delivery milestone. It first
+stabilizes the measurement model, then attributes the complete shipped path,
+then selects at most one architectural candidate. Implementation, recovery,
+replication, mounted validation, and promotion remain in this phase rather
+than being split into many semantic micro-phases.
 
 ## Goal
 
-Build one disabled-by-default comparison path for the shipped `WALStore` that:
+Produce one defensible answer to:
 
-- reduces a current ordinary dirty entry from two WAL reads to one;
-- reads a multi-block WAL record once for all snapshot entries that reference
-  that exact record;
-- preserves the current disk format and complete-snapshot checkpoint rule;
-- retains fail-closed validation before extent write or checkpoint progress;
-- bounds temporary memory to one WAL record or one configured read chunk;
-- keeps trim, wrap, padding, overwrite, direct BASE, retention, Sync, Close,
-  recovery, rebuild, and replication semantics unchanged;
-- earns promotion only through same-run Linux and mounted evidence.
+```text
+Which architectural boundary, if any, can materially improve shipped
+WALStore throughput while preserving its durability and recovery contract?
+```
+
+The eligible outcomes are:
+
+1. implement and promote one evidence-selected architecture;
+2. implement and retain one opt-in candidate with named blockers;
+3. reject all candidates and publish the measured shipped-backend envelope.
+
+All three are valid. Repeating a previously rejected mechanism without new
+evidence is not.
 
 ## Non-Goals
 
-- No new WAL format, backend name, frontend, or public selector in D1-D4.
-- No extent-write coalescing rejected by Phase 171.
-- No staged append owner rejected by Phase 170.
-- No `io_uring` candidate rejected by Phase 168.
-- No `O_DIRECT`, raw device, fixed buffer, SQPOLL, FUA, or atomic-write claim.
-- No trusting dirty-map metadata without revalidating on-disk record bytes.
-- No volume-sized record cache or unbounded grouping map.
-- No disabled-flusher or checkpoint-free performance claim.
+- No immediate `io_uring`, SQPOLL, fixed-buffer, `O_DIRECT`, FUA, or raw-device
+  implementation.
+- No automatic switch from `walstore` to `parallel-walstore` or `smartwal`.
+- No disk-format change before a format/recovery design is selected.
+- No disabled-flusher, checkpoint-free, page-cache-only, or sink-only number
+  may be presented as product throughput.
+- No frontend, replication, or mounted result may be inferred from an engine
+  microbenchmark.
+- No threshold changes after candidate results are visible.
 
 ## Required Invariants
 
-1. Dirty metadata is an address hint, never proof that the WAL slot still
-   contains the expected record.
-2. Every materialized record passes the existing decode and CRC validation
-   before any extent write.
-3. Ordinary write validation matches exact LSN, LBA, type, length, flags, and
-   data range.
-4. Trim validation produces one zero block only after exact trim identity is
-   proven.
-5. Multi-block entries sharing a WAL offset may reuse bytes only when record
-   identity and each block's LSN/LBA/data offset are independently validated.
-6. Ring padding and wrap are never exposed as a record and no read crosses the
-   WAL-region boundary.
-7. A stale slot, short read, CRC mismatch, unsupported type, or metadata
-   disagreement fails the complete cycle closed: no dirty deletion,
-   checkpoint advance, or tail reuse.
-8. Concurrent overwrite keeps the newer dirty entry through the existing
-   compare-and-delete contract.
-9. Direct BASE and flusher ownership remains governed by the existing extent
-   locks; materialization does not create a second extent writer.
-10. Checkpoint publication remains extent write -> extent fsync -> checkpoint
-    write -> checkpoint fsync -> tail publication.
-11. Close, admission, pressure wakeup, recycle pins, and Sync cannot deadlock
-    with the candidate path.
-12. A rejected candidate leaves the default path and all external contracts
-    unchanged.
+1. Acknowledged writes remain recoverable after process kill and host restart.
+2. Checkpoint and recyclable tail never advance over incomplete work.
+3. Same-LBA order is deterministic; cross-LBA concurrency cannot publish a
+   non-contiguous durable frontier.
+4. Direct BASE/rebuild ownership cannot race with background writeback.
+5. WAL corruption and malformed geometry fail closed with typed evidence.
+6. Sync fences every write admitted before the call and does not wait for work
+   admitted later.
+7. Close blocks new mutation, drains owned work, and reports terminal failure.
+8. RF3 acknowledgement and catch-up semantics remain unchanged.
+9. Memory and queue ownership are bounded and visible.
+10. Rejected candidates leave the shipped format and defaults unchanged.
 
 ## Deliverables
 
-### D1. Record Geometry And Baseline Contract
+### D1. Deterministic Fixed-Work Measurement Contract
 
-Implementation status: complete. Linux exact-commit D1 admission passed on
-`6dd89e7` with sequential/scattered duplicate-read counts `5/5` and `5/5`,
-product/`strace` exact-path reads `2048/2048`, race and vet green, and actual
-reuse hits zero. D2 was admitted without changing thresholds.
+- Replace Go benchmark auto-calibration as the admission source with a
+  fixed-operation harness. Keep Go benchmarks as diagnostics only.
+- Use a predeclared operation count, warmup, file size, LBA sequence, writer
+  count, 100 ms flusher, one final Sync, and complete drain.
+- Run ordinary sequential/scattered 4 KiB, explicit 16-block batch, and
+  mounted-sized mixed write shapes at 1/2/4/8 writers.
+- Record foreground wall time and p50/p95/p99 separately from Sync/drain.
+- Record CPU affinity, scheduler, kernel, filesystem, mount options, device,
+  page-cache policy, free space, temperature/throttling evidence, and
+  background load.
+- Require two independent five-run baseline sets with four-writer max/min
+  range at most `1.25x` before any architecture admission. If the harness
+  cannot meet that bound, fix the harness/lab and stop.
 
-- Extend the dirty-entry in-memory contract with only the geometry needed to
-  size one record read. Populate it at ordinary append, trim, WriteBatch,
-  multi-block append, and recovery replay.
-- Prove this metadata is reconstructed after reopen and is never serialized as
-  a new disk format.
-- Add deterministic counters for logical dirty entries, unique WAL records,
-  materialization reads/bytes, reused-record hits, and validation failures.
-- Add a five-run Linux baseline for ordinary, explicit batch, multi-block
-  opt-in, wrap, and scattered workloads. Cover legacy trim records with a
-  deterministic recovery fixture because `WALStore` has no public trim API.
-- Admit D2 only when at least four of five sequential samples and four of five
-  scattered samples each report:
-  - header reads per validated record in `[0.95, 1.05]`;
-  - full-record reads per validated record in `[0.95, 1.05]`;
-  - combined materialization reads per validated record at least `1.90`.
-- Require a dedicated scoped `strace` control to corroborate the product
-  counter shape. Whole-process counts may be reported as qualitative context
-  but cannot satisfy admission.
+### D2. Complete Shipped-Path Attribution
 
-The D1 review exposed and fixed a pre-existing legacy range-trim inconsistency:
-recovery expanded the record per block, while dirty reads treated trim length
-as payload and the flusher accepted only the base LBA. The corrected fixture
-starts from nonzero extents and proves read-only, dirty-read, writeback,
-checkpoint, crash/reopen, and explicit-close behavior for a three-block trim.
-This changes no disk format or default materialization mode.
+- Correlate product counters with exact-path `strace`, `perf stat`, CPU/memory
+  profiles, lock wait, `iostat`, and final checkpoint evidence.
+- Attribute foreground WAL encode/copy/CRC/pwrite/lock, flusher
+  snapshot/pread/decode/extent-pwrite/fsync/checkpoint, replication wait, and
+  frontend cost separately.
+- Report time and operation count, not percentages alone.
+- Prove all counters reconcile with fixed logical operations and bytes.
 
-### D2. Single-Read Fail-Closed Materialization
+### D3. Diagnostic Architecture Controls
 
-Implementation status: complete. Exact-commit Linux D2 correctness gate passed
-on `a46af56`: focused and race repetitions were green, the shipped default
-remained at `2048` exact-file reads for 1024 records, and the candidate used
-exactly `1024` product/`strace` reads with zero shared-record reuse.
+Run test-only controls in the same session; none are product candidates:
 
-- Add one internal disabled-by-default comparison mode.
-- Read each ordinary or trim record once at its exact bounded size.
-- Decode and validate with the existing CRC and semantic checks; do not add a
-  fast parser that bypasses `decodeWALEntry`.
-- Return one block view/copy only after validation.
-- Prove ordinary write, trim, gapped/reverse snapshot, ring-end padding, wrap,
-  short read, stale slot, corrupt header, corrupt payload, flags, and
-  unsupported-type behavior.
-- Inject first/middle/final materialization failures and prove no false
-  checkpoint or dirty deletion.
+- foreground append ceiling with writeback deferred, clearly labeled
+  non-durable/non-product;
+- prefilled flusher-only drain with no foreground writers;
+- current shared-file WAL/extent path versus a same-device split-file scratch
+  control;
+- current volume lock versus a bounded no-contention single-writer control;
+- engine-only versus NVMe/TCP frontend and RF1 versus RF3 acknowledgement.
 
-### D3. Shared Multi-Block Record Materialization
+Select at most one direction:
 
-Implementation status: complete. Exact-commit Linux D3 correctness gate passed
-on `7d09924`: seven focused and CGO race tests each passed 20 repetitions,
-1024 logical blocks produced exactly `64/64` product/`strace` record reads and
-`960` actual reuse hits, and D4 was admitted.
+- **Owner/queue redesign** only if lock/scheduling is a stable dominant cost;
+- **WAL/extent media separation** only if same-file I/O/fsync interference is
+  a stable dominant cost;
+- **No backend change** if frontend, replication, device, or benchmark
+  variance dominates or the shipped path already meets the target envelope.
 
-- Order the complete snapshot by WAL record identity without omitting entries.
-- Read one multi-block record once and validate every referenced block's
-  expected LSN, LBA, length, and data offset.
-- Keep at most one bounded decoded record live; release it before moving to the
-  next record.
-- Prove partial overwrite of a shared record leaves newer blocks dirty while
-  safely flushing still-current blocks.
-- Prove malformed `Reserved`, total length, offset, and wrap metadata fail the
-  whole cycle closed.
+### D4. Selected Architecture Contract
 
-### D4. Concurrency, Recovery, And Lifecycle Equivalence
+Required only when D3 selects a candidate.
 
-Implementation status: complete. Linux D4 passed on exact commit `1cf3cbc`:
-six candidate and CGO race fixtures each passed 20 repetitions, seven existing
-equivalence fixtures including real SIGKILL each passed 10 repetitions, and
-the complete storage, recovery, replication, replication-component, and vet
-gates were green. No skip, race, test, product, gate, or lab blocker remained;
-`d5_performance_gate_eligible=true`.
+- Define owner, queue, backpressure, durability frontier, checkpoint, recycle,
+  Close, and failure semantics before code.
+- If storage layout changes, version it explicitly and define create, reopen,
+  upgrade refusal, rollback refusal, support-bundle evidence, and cleanup.
+- Add one dry-run/diagnostic proof and one fail-closed rejected operation
+  before implementing mutation.
+- Independent design review must find no unresolved correctness blocker.
 
-D4 exposed and fixed four recovery-contract gaps rather than weakening the
-fixtures: a checkpoint inside one multi-block record now replays only its
-uncheckpointed suffix; valid-CRC malformed batch geometry returns typed
-`WALIntegrity`; recovery restores byte-based writer head/tail before any new
-append; and legacy `head==tail` metadata can reconstruct a retained window that
-crosses ring wrap. Checkpoint metadata now carries conservative byte boundaries
-in its existing write/fsync without adding a new disk field or sync.
+### D5. Bounded Candidate Implementation
 
-- Run foreground Write/WriteBatch and repeated same-LBA overwrite during large
-  materialization cycles.
-- Exercise direct BASE overlap, pressure wakeups, recycle-floor pins, Sync,
-  Close, and final-flush failure under race instrumentation.
-- Reopen candidate-created files and run corruption, typed-failure, retention,
-  `ScanLBAs`, catch-up, returned-replica rebuild, RF1, and RF3 component suites.
-- Add crash windows before materialization, after extent write/fsync, and
-  around checkpoint/tail publication.
-- No new recovery or replication branch is allowed.
+- Implement only the selected architecture behind an internal or explicit
+  opt-in boundary.
+- Add no second candidate and no speculative configurability.
+- Keep allocations, queues, buffers, and in-flight operations bounded.
+- Add exact counters for ownership, queue depth, I/O rounds, bytes, wait,
+  completion, failure, and fallback.
 
-### D5. Comparable Linux Performance Decision
+### D6. Correctness, Recovery, And Replication Gate
 
-Implementation status: complete with an honest `PASS REJECT` on exact commit
-`db9e701`. The candidate cut ordinary materialization reads from `2.000` to
-`1.000` per validated record and multi-block reads from `2.000` to `0.06250`,
-with exact product/`strace` agreement. It was not admitted because ordinary
-four-writer throughput improved only `1.068x` against the required `1.15x`,
-and its `2.031x` sample range exceeded the `1.50x` stability bound. D6 must not
-run; remove the disabled candidate without reverting the independent D4
-recovery correctness fixes.
+- Same-LBA and cross-LBA concurrency, partial writes, batch wrap, WAL pressure,
+  Sync/Close, direct BASE, recycle floors, malformed records, and crash
+  windows.
+- Reopen, `ScanLBAs`, catch-up, returned-replica rebuild, RF1, and RF3
+  component suites.
+- CGO race repetition and real Linux SIGKILL windows.
+- No fallback or recovery branch may hide candidate failure.
 
-- Compare candidate and unchanged default in one rotated m02 run with five
-  one-second repetitions and identical 100 ms flusher/Sync/drain settings.
-- Cover ordinary 4 KiB, scattered 4 KiB, explicit 16-block batch, and
-  multi-block opt-in at 1/2/4/8 writers where applicable; keep trim as a
-  correctness fixture rather than inventing a benchmark-only product API.
-- Report foreground throughput and p50/p95/p99 separately from final Sync and
-  drain, plus allocations, CPU, scoped syscalls, failed cycles, checkpoint
-  coverage, and exact materialization counters.
-- Admit only if:
-  - WAL materialization reads per validated ordinary entry fall by at least
-    45% and match scoped `strace`;
-  - one-writer ordinary throughput is at least 95% of baseline;
-  - four-writer ordinary median improves by at least 1.15x;
-  - candidate four-writer range is at most 1.50x;
-  - p99 does not regress by more than 10%;
-  - multi-block reuse reduces physical reads without increasing corruption or
-    recovery ambiguity;
-  - failed cycles remain zero and checkpoint coverage remains complete.
+### D7. Same-Run Performance Admission
 
-### D6. Mounted RF1 And RF3 Close Gate
+Use the D1 fixed-work harness and unchanged thresholds:
 
-Status: not run; D5 did not admit the candidate.
+- one-writer ordinary throughput at least `0.95x` shipped baseline;
+- four-writer ordinary median at least `1.30x` shipped baseline;
+- candidate four-writer max/min range at most `1.25x`;
+- ordinary four-writer p99 no worse than `1.10x`;
+- no workload regresses more than 10%;
+- failed operations/cycles zero and checkpoint coverage complete;
+- product counters agree with OS/device evidence.
 
-- Run only if D5 admits the candidate.
-- Build exact matching product and CSI images.
-- Run mounted NVMe/TCP RF1 concurrent write/flush/read/checksum, durable
-  restart, and sustained writeback pressure.
-- Run RF3 sync-quorum with delayed peer, catch-up/rebuild, restart, honest
-  status, and continued mounted I/O.
-- Compare baseline and candidate in the same lab session and finish with
-  product-owned zero-residue cleanup.
-- Promote the candidate only after this gate passes; otherwise remove it.
+Reject and remove the candidate if any required condition fails.
 
-### D7. Rejection Cleanup Close Gate
+### D8. Mounted RF1/RF3 Close Gate
 
-Implementation status: candidate removal complete locally; exact-commit Linux
-close gate pending.
+Run only after D7 admits the candidate:
 
-- Remove the single-read/shared-record runtime fields, selectors, cache/sort
-  branch, dirty-map record geometry, measurement-only counters, candidate
-  tests, and obsolete executable gates.
-- Restore the pre-candidate default flusher and instrumentation shape.
-- Retain the legacy range-trim correction and D4 recovery fixes for partial
-  multi-block suffix replay, malformed batch fail-closed behavior, physical
-  byte-bound restoration, and legacy wrapped retained-window reconstruction.
-- Repeat the retained tests under race instrumentation and run the full
-  storage/recovery/replication/component suites and vet.
+- exact matching product/CSI images;
+- mounted NVMe/TCP RF1 concurrent write/read/checksum, sustained pressure,
+  restart, and zero-residue cleanup;
+- RF3 sync-quorum with delayed peer, catch-up/rebuild, restart, honest status,
+  and continuous mounted I/O;
+- same-session shipped baseline/candidate comparison;
+- no default promotion until both correctness and performance gates pass.
 
 ## Stop Rules
 
-Stop and remove the candidate if:
+Stop before implementation when:
 
-- D1 does not reproduce stable duplicate WAL reads;
-- exact record sizing requires trusting unverified disk metadata;
-- one-read materialization weakens CRC/type/LSN/LBA/length/offset checks;
-- grouping can omit a dirty entry or advance checkpoint over incomplete work;
-- temporary memory grows with volume size rather than one bounded record;
-- any failure deletes dirty state or publishes checkpoint/tail progress;
-- concurrency or lifecycle tests deadlock;
-- physical read reduction does not improve ordinary throughput or stability;
-- only the opt-in multi-block path improves.
-
-An honest rejection is a valid Phase 172 result. It must leave the current disk
-format, default flusher, and all frontend, recovery, replication, and Operation
-Layer contracts intact.
+- fixed-work baseline remains noisier than `1.25x`;
+- counters do not reconcile with logical work;
+- diagnostic controls identify no dominant architecture boundary;
+- the proposed direction repeats a Phase 167-172 rejection without new
+  evidence;
+- the candidate requires weaker durability, recovery, corruption, cleanup,
+  or RF3 semantics;
+- benefit exists only in a non-product control.
 
 ## Exit Criteria
 
 ```text
-record geometry and duplicate-read evidence
--> disabled single-read materialization
--> bounded shared-record reuse
--> concurrency/recovery/lifecycle equivalence
--> same-run Linux performance decision
+stable fixed-work baseline
+-> complete shipped-path attribution
+-> diagnostic architecture controls
+-> one selected design or honest no-change decision
+-> bounded implementation only if selected
+-> correctness/recovery/replication
+-> same-run admission
 -> mounted RF1/RF3 only if admitted
--> promote or remove
+-> promote, retain opt-in with blockers, or remove
 ```
