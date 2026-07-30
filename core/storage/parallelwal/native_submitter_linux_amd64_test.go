@@ -35,6 +35,15 @@ func TestIOUringOwnerBatchesAcrossLanesAndRecoversPortably(t *testing.T) {
 		stats.FallbackCount != 0 {
 		t.Fatalf("native stats=%+v", stats)
 	}
+	t.Logf(
+		"native_owner_stats enabled=%t rounds=%d sqes=%d completions=%d inflight_high_water=%d fallback=%d",
+		stats.Enabled,
+		stats.SubmissionRounds,
+		stats.SQEs,
+		stats.CompletionCount,
+		stats.InflightHighWater,
+		stats.FallbackCount,
+	)
 	if stable, err := store.Sync(); err != nil || stable != 4 {
 		t.Fatalf("Sync=(%d,%v) want=(4,nil)", stable, err)
 	}
