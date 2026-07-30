@@ -1,15 +1,19 @@
 package storage
 
 import (
+	"encoding/binary"
 	"fmt"
 	"log"
 	"os"
+	"sort"
 )
 
 // recoveryResult summarizes what RecoverWAL did on one open.
 type recoveryResult struct {
 	EntriesReplayed int    // valid entries past checkpoint that were replayed
 	HighestLSN      uint64 // highest LSN observed across the whole scan
+	WALHead         uint64 // reconstructed logical byte head of retained WAL
+	WALTail         uint64 // reconstructed logical byte tail of retained WAL
 	TornEntries     int    // entries discarded due to CRC failure or truncation
 	DefensiveScan   bool   // true when the superblock was empty and we scanned the whole region
 }
@@ -33,6 +37,12 @@ type recoveryResult struct {
 // resumes after them.
 func recoverWAL(fd *os.File, sb *superblock, dm *dirtyMap) (recoveryResult, error) {
 	result := recoveryResult{}
+	type retainedRecord struct {
+		firstLSN uint64
+		start    uint64
+		end      uint64
+	}
+	var retainedRecords []retainedRecord
 
 	logicalHead := sb.WALHead
 	logicalTail := sb.WALTail
@@ -46,10 +56,20 @@ func recoverWAL(fd *os.File, sb *superblock, dm *dirtyMap) (recoveryResult, erro
 	var ranges []scanRange
 
 	if logicalHead == logicalTail {
-		// Superblock claims WAL is empty. Scan the whole region; on a
-		// genuinely empty WAL the first byte is zero and CRC fails
-		// immediately.
-		ranges = append(ranges, scanRange{0, walSize})
+		// A pre-boundary-persistence crash can leave a wrapped retained
+		// window while the superblock still says empty. Find the high
+		// physical run from record footers, then scan high and low as
+		// disjoint ranges so neither side is hidden behind the gap.
+		highStart, found := findDefensiveHighRunStart(fd, walOffset, walSize)
+		if found && highStart > 0 {
+			ranges = append(
+				ranges,
+				scanRange{highStart, walSize},
+				scanRange{0, highStart},
+			)
+		} else {
+			ranges = append(ranges, scanRange{0, walSize})
+		}
 		result.DefensiveScan = true
 		log.Printf("storage: recovery defensive scan (head==tail=%d checkpoint=%d)",
 			logicalHead, checkpointLSN)
@@ -111,10 +131,36 @@ func recoverWAL(fd *os.File, sb *superblock, dm *dirtyMap) (recoveryResult, erro
 				result.TornEntries++
 				break
 			}
-			if entry.LSN <= checkpointLSN {
+			highestEntryLSN := entry.LSN
+			if entry.Type == walEntryWriteBatch {
+				maxBlocks := uint64(^uint32(0)) / uint64(sb.BlockSize)
+				if entry.Reserved == 0 ||
+					entry.Reserved > maxBlocks ||
+					entry.Reserved-1 > ^uint64(0)-entry.LSN ||
+					uint64(entry.Length) != entry.Reserved*uint64(sb.BlockSize) {
+					return result, NewWALIntegrityFailure(
+						nil,
+						fmt.Sprintf(
+							"invalid walstore batch at offset=%d LSN=%d reserved=%d length=%d block_size=%d",
+							pos, entry.LSN, entry.Reserved, entry.Length, sb.BlockSize,
+						),
+					)
+				}
+				highestEntryLSN = entry.LSN + entry.Reserved - 1
+			}
+			if highestEntryLSN <= checkpointLSN {
 				pos += entrySize
 				continue
 			}
+			firstRetainedLSN := entry.LSN
+			if firstRetainedLSN <= checkpointLSN {
+				firstRetainedLSN = checkpointLSN + 1
+			}
+			retainedRecords = append(retainedRecords, retainedRecord{
+				firstLSN: firstRetainedLSN,
+				start:    pos,
+				end:      pos + entrySize,
+			})
 			switch entry.Type {
 			case walEntryWrite:
 				blocks := entry.Length / sb.BlockSize
@@ -127,10 +173,6 @@ func recoverWAL(fd *os.File, sb *superblock, dm *dirtyMap) (recoveryResult, erro
 				result.EntriesReplayed++
 			case walEntryWriteBatch:
 				blocks := uint32(entry.Reserved)
-				if blocks == 0 || entry.Length != blocks*sb.BlockSize {
-					result.TornEntries++
-					break
-				}
 				for i := uint32(0); i < blocks; i++ {
 					lsn := entry.LSN + uint64(i)
 					if lsn <= checkpointLSN {
@@ -157,10 +199,6 @@ func recoverWAL(fd *os.File, sb *superblock, dm *dirtyMap) (recoveryResult, erro
 			case walEntryBarrier:
 				// no data; skip
 			}
-			highestEntryLSN := entry.LSN
-			if entry.Type == walEntryWriteBatch && entry.Reserved > 0 {
-				highestEntryLSN = entry.LSN + entry.Reserved - 1
-			}
 			if highestEntryLSN > result.HighestLSN {
 				result.HighestLSN = highestEntryLSN
 			}
@@ -168,10 +206,120 @@ func recoverWAL(fd *os.File, sb *superblock, dm *dirtyMap) (recoveryResult, erro
 		}
 	}
 
-	if result.HighestLSN > sb.WALHead {
-		log.Printf("storage: recovery extended scan found entries past WALHead (%d → %d, %d replayed)",
-			sb.WALHead, result.HighestLSN, result.EntriesReplayed)
-		sb.WALHead = result.HighestLSN
+	sort.Slice(retainedRecords, func(left, right int) bool {
+		return retainedRecords[left].firstLSN < retainedRecords[right].firstLSN
+	})
+	if len(retainedRecords) > 0 {
+		result.WALTail = retainedRecords[0].start
+		result.WALHead = retainedRecords[0].end
+		previousStart := retainedRecords[0].start
+		var wrapBase uint64
+		for _, record := range retainedRecords[1:] {
+			if record.start < previousStart {
+				wrapBase += walSize
+			}
+			logicalStart := wrapBase + record.start
+			logicalEnd := wrapBase + record.end
+			if logicalStart < result.WALHead || logicalEnd-logicalStart > walSize {
+				return result, NewWALIntegrityFailure(
+					nil,
+					fmt.Sprintf(
+						"invalid walstore recovery order at LSN=%d offset=%d",
+						record.firstLSN, record.start,
+					),
+				)
+			}
+			result.WALHead = logicalEnd
+			previousStart = record.start
+		}
+		if result.WALHead < result.WALTail ||
+			result.WALHead-result.WALTail > walSize {
+			return result, NewWALIntegrityFailure(
+				nil,
+				fmt.Sprintf(
+					"invalid walstore recovery bounds tail=%d head=%d size=%d",
+					result.WALTail, result.WALHead, walSize,
+				),
+			)
+		}
+	}
+	if result.DefensiveScan && result.EntriesReplayed > 0 {
+		log.Printf(
+			"storage: recovery reconstructed WAL bytes tail=%d head=%d frontier=%d (%d replayed)",
+			result.WALTail, result.WALHead, result.HighestLSN, result.EntriesReplayed,
+		)
 	}
 	return result, nil
+}
+
+func findDefensiveHighRunStart(
+	fd *os.File,
+	walOffset uint64,
+	walSize uint64,
+) (uint64, bool) {
+	maxGap := uint64(walEntryHeaderSize - 1)
+	if maxGap >= walSize {
+		maxGap = walSize - 1
+	}
+	for gap := uint64(0); gap <= maxGap; gap++ {
+		cursor := walSize - gap
+		start, entry, ok := previousValidWALRecord(fd, walOffset, cursor)
+		if !ok {
+			continue
+		}
+		earliest := start
+		foundData := entry.Type != walEntryPadding
+		cursor = start
+		for cursor > 0 {
+			previousStart, previous, ok := previousValidWALRecord(
+				fd, walOffset, cursor,
+			)
+			if !ok {
+				break
+			}
+			earliest = previousStart
+			if previous.Type != walEntryPadding {
+				foundData = true
+			}
+			cursor = previousStart
+		}
+		if foundData {
+			return earliest, true
+		}
+	}
+	return 0, false
+}
+
+func previousValidWALRecord(
+	fd *os.File,
+	walOffset uint64,
+	end uint64,
+) (uint64, walEntry, bool) {
+	if end < 4 {
+		return 0, walEntry{}, false
+	}
+	var sizeBytes [4]byte
+	if _, err := fd.ReadAt(sizeBytes[:], int64(walOffset+end-4)); err != nil {
+		return 0, walEntry{}, false
+	}
+	size := uint64(binary.LittleEndian.Uint32(sizeBytes[:]))
+	if size < uint64(walEntryHeaderSize) || size > end {
+		return 0, walEntry{}, false
+	}
+	start := end - size
+	record := make([]byte, size)
+	if _, err := fd.ReadAt(record, int64(walOffset+start)); err != nil {
+		return 0, walEntry{}, false
+	}
+	entry, err := decodeWALEntry(record)
+	if err != nil {
+		return 0, walEntry{}, false
+	}
+	switch entry.Type {
+	case walEntryWrite, walEntryWriteBatch, walEntryTrim,
+		walEntryBarrier, walEntryPadding:
+		return start, entry, true
+	default:
+		return 0, walEntry{}, false
+	}
 }

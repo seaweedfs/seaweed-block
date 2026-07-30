@@ -162,6 +162,19 @@ on `7d09924`: seven focused and CGO race tests each passed 20 repetitions,
 
 ### D4. Concurrency, Recovery, And Lifecycle Equivalence
 
+Implementation status: complete locally; Linux exact-commit race, SIGKILL,
+recovery, and replication gates remain pending. Candidate-on lifecycle fixtures
+cover large concurrent snapshots, direct BASE ownership, recycle-floor
+recovery, Close final flush/failure, and malformed batch recovery.
+
+D4 exposed and fixed four recovery-contract gaps rather than weakening the
+fixtures: a checkpoint inside one multi-block record now replays only its
+uncheckpointed suffix; valid-CRC malformed batch geometry returns typed
+`WALIntegrity`; recovery restores byte-based writer head/tail before any new
+append; and legacy `head==tail` metadata can reconstruct a retained window that
+crosses ring wrap. Checkpoint metadata now carries conservative byte boundaries
+in its existing write/fsync without adding a new disk field or sync.
+
 - Run foreground Write/WriteBatch and repeated same-LBA overwrite during large
   materialization cycles.
 - Exercise direct BASE overlap, pressure wakeups, recycle-floor pins, Sync,

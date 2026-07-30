@@ -363,6 +363,20 @@ func (w *walWriter) reset() {
 	w.logicalTail = 0
 }
 
+func (w *walWriter) restoreRecoveredBounds(head, tail uint64) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if head < tail || head-tail > w.walSize {
+		return fmt.Errorf(
+			"walWriter: invalid recovered bounds tail=%d head=%d size=%d",
+			tail, head, w.walSize,
+		)
+	}
+	w.logicalHead = head
+	w.logicalTail = tail
+	return nil
+}
+
 func (w *walWriter) head() uint64 {
 	w.mu.Lock()
 	defer w.mu.Unlock()

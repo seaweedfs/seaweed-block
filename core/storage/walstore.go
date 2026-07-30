@@ -344,6 +344,8 @@ func (s *WALStore) persistCheckpoint(highestLSN uint64) error {
 
 	sbCopy := *s.sb
 	sbCopy.WALCheckpointLSN = highestLSN
+	sbCopy.WALHead = s.wal.logicalHeadValue()
+	sbCopy.WALTail = s.wal.logicalTailValue()
 	buf := newSimpleByteBuf()
 	if _, err := sbCopy.writeTo(buf); err != nil {
 		return fmt.Errorf("storage: encode superblock: %w", err)
@@ -366,6 +368,8 @@ func (s *WALStore) persistCheckpoint(highestLSN uint64) error {
 	}
 	s.checkpointLSN = highestLSN
 	s.sb.WALCheckpointLSN = highestLSN
+	s.sb.WALHead = sbCopy.WALHead
+	s.sb.WALTail = sbCopy.WALTail
 	return nil
 }
 
@@ -412,8 +416,15 @@ func (s *WALStore) Recover() (uint64, error) {
 	s.dm.clear()
 	res, err := recoverWAL(s.fd, s.sb, s.dm)
 	if err != nil {
+		s.dm.clear()
 		return 0, err
 	}
+	if err := s.wal.restoreRecoveredBounds(res.WALHead, res.WALTail); err != nil {
+		s.dm.clear()
+		return 0, NewWALIntegrityFailure(err, "restore walstore recovery bounds")
+	}
+	s.sb.WALHead = res.WALHead
+	s.sb.WALTail = res.WALTail
 	recoveredHead := s.checkpointLSN
 	if res.HighestLSN > recoveredHead {
 		recoveredHead = res.HighestLSN
