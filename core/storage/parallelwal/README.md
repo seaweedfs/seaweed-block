@@ -64,8 +64,9 @@ fails with typed `storage.ErrWALIntegrityFault`.
 The store allocates global LSN and lane sequence under one short metadata lock.
 Execution then moves to the LBA's lane:
 
-1. same-lane requests wait for their exact lane sequence;
-2. the owner writes the record to that lane's region;
+1. same-lane requests enter one bounded, sequence-ordered queue;
+2. one drainer combines adjacent physical ring slots into positioned writes
+   no larger than 1 MiB, splitting at ring wrap;
 3. completion enters the global ledger;
 4. the ledger publishes consecutive completed LSNs from `H+1`;
 5. the caller returns only after its LSN is published.
@@ -73,9 +74,11 @@ Execution then moves to the LBA's lane:
 If LSN `N` fails, the store enters a terminal error state. A physically
 completed `N+1` cannot return success or advance `H`.
 
-`WriteBatch` reserves one contiguous global LSN range, groups requests by lane,
-and uses at most one dispatcher per active lane. Same-LBA writes always map to
-the same lane and remain ordered.
+`WriteBatch` reserves one contiguous global LSN range and queues requests by
+lane. Same-LBA writes always map to the same lane and remain ordered. A failed
+later ring chunk terminal-faults the store: an earlier physical chunk may be
+reported as a partial in-process result, but it cannot become durable because
+the covering `Sync` fails and the durable header does not advance.
 
 ## Sync And Checkpoint
 
@@ -96,6 +99,11 @@ When a lane exceeds its retained-slot threshold, `Sync` additionally:
 3. advances checkpoint and lane tails in the alternate header;
 4. fsyncs that header;
 5. advances `S` to the first LSN still honestly scannable.
+
+Before advancing a lane tail, recycle verification reads adjacent WAL records
+in bounded 1 MiB chunks. Every record is still decoded and CRC checked; the
+optimization removes one-`pread`-per-record amplification, not integrity
+validation.
 
 No unstable record is copied into the checkpoint. No slot is reused before
 the extent is durable and both header slots have been sealed with the recycled
@@ -171,8 +179,15 @@ BASE-stage reset, direct-frontier retention, and adapter integration. It also
 runs the canonical `LogicalStorage` contract and compares 1/2/4/8-writer
 throughput against legacy `walstore`.
 
-The current Windows positioned-I/O result does not meet the Phase 167
-promotion thresholds. Multiple lanes are active and correctness gates pass,
-but `performance_claim_allowed=false`. Do not describe this package as a
-performance improvement until the same-run Linux/device gate meets the
-single-writer and four-writer acceptance ratios.
+The exact-commit Linux gate at `a5b687f` passed race, recovery stress, and
+external syscall validation. The deterministic syscall probes observed five
+`pwrite64` calls for eight concurrent same-lane writes and three `pread64`
+calls while recycling 224 records. In the same 3000-iteration run, four-writer
+16-block batches reached `116.95 MiB/s` versus legacy `80.00 MiB/s`, but 4 KiB
+writes reached only `49.79 MiB/s` for one writer and `39.25 MiB/s` for four,
+versus legacy `107.85 MiB/s` and `104.08 MiB/s`.
+
+The batch path therefore improved, but the candidate did not meet the
+single-writer or four-writer scaling thresholds:
+`performance_claim_allowed=false`. `parallel-walstore` remains opt-in and must
+not be described as a default-backend or general performance improvement.

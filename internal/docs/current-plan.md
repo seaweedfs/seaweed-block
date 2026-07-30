@@ -1,6 +1,6 @@
 # Current Plan: Phase 167 Parallel Write Engine Milestone
 
-Status: active design and implementation milestone.
+Status: closed as an opt-in experimental backend; not promoted to default.
 
 Phase 166 NVMe/RDMA multipath reconnect is implemented but remains open because
 its honest live gate needs a third RoCE-capable Kubernetes initiator. That
@@ -150,6 +150,37 @@ The first D4 execution change therefore coalesces contiguous checkpoint LBAs
 into bounded 1 MiB positioned writes. This is simpler than a new Linux-only
 backend, preserves the established WAL/header protocol, and gives a direct
 gate metric (`checkpoint_write_ops`) before any `io_uring` decision.
+
+The final D4 execution slice at exact commit `a5b687f` also:
+
+- queues same-lane appends behind one ordered drainer and combines adjacent
+  physical ring slots into bounded positioned writes;
+- splits batches at ring wrap and proves both crash/reopen success and
+  fail-closed behavior when the second physical chunk fails;
+- combines recycle verification reads into bounded chunks while still
+  decoding and CRC-checking every record;
+- validates the syscall reductions independently with Linux `strace`, not
+  only product counters.
+
+The exact m02 gate passed Linux race, the 50x recovery/corruption matrix, Helm
+lint, and external syscall checks. The deterministic probes observed
+`5 pwrite64` calls for eight concurrent same-lane writes and `3 pread64` calls
+while recycling 224 records. The same-run performance result was:
+
+| Shape | Candidate | Legacy | Decision |
+|---|---:|---:|---|
+| 4 KiB, 1 writer | 49.79 MiB/s | 107.85 MiB/s | reject promotion |
+| 4 KiB, 4 writers | 39.25 MiB/s | 104.08 MiB/s | reject promotion |
+| 16-block batch, 4 writers | 116.95 MiB/s | 80.00 MiB/s | useful opt-in gain |
+
+The ordinary-write single-writer ratio was `0.462` and four-writer scaling was
+`0.788`, so `performance_claim_allowed=false`. D5/D6 RF3 and mounted promotion
+gates were intentionally not claimed: running them cannot repair a candidate
+that already fails its local admission threshold. The implemented backend and
+ordered replication work remain opt-in research foundations. The next engine
+milestone may prototype Linux native asynchronous submission now that
+checkpoint and recycle syscall amplification have been removed, but it must
+retain the positioned-I/O fallback and the same correctness gates.
 
 ## Assumptions And Boundaries
 
