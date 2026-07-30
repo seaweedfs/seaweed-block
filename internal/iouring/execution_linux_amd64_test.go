@@ -212,7 +212,7 @@ func TestAcceptedOperationRetainsBufferThroughForcedGC(t *testing.T) {
 		close(accepted)
 		<-release
 
-		data := unsafe.Slice((*byte)(unsafe.Pointer(uintptr(sqe.Address))), int(sqe.Length))
+		data := retainedSQEBytes(sqe.Address, sqe.Length)
 		bufferChecked <- len(data) == probeBlockSize &&
 			bytes.Equal(data, bytes.Repeat([]byte{0x5a}, probeBlockSize))
 		tail := atomic.LoadUint32(executor.ring.cqTail)
@@ -247,4 +247,9 @@ func TestAcceptedOperationRetainsBufferThroughForcedGC(t *testing.T) {
 	if err := <-result; err != nil {
 		t.Fatal(err)
 	}
+}
+
+//go:nocheckptr
+func retainedSQEBytes(address uint64, length uint32) []byte {
+	return unsafe.Slice((*byte)(unsafe.Pointer(uintptr(address))), int(length))
 }
