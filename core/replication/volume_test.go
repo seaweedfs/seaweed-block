@@ -3,6 +3,7 @@ package replication
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -238,6 +239,14 @@ func TestReplicationVolume_UpdateReplicaSet_RemovePeer_ExecutorTornDown(t *testi
 	if firstExec.HasSession(peer1SessionID) {
 		t.Fatal("executor session not torn down on peer removal")
 	}
+	err := firstExec.RegisterLiveShipSession(transport.RecoveryLineage{
+		SessionID:       peer1SessionID + 1000,
+		Epoch:           1,
+		EndpointVersion: 1,
+	})
+	if !errors.Is(err, transport.ErrExecutorStopped) {
+		t.Fatalf("removed peer executor accepted new session: %v", err)
+	}
 
 	// (c) re-add at same ReplicaID must work cleanly and ship must reach replica.
 	if err := v.UpdateReplicaSet(0, []ReplicaTarget{targetFor("r1", addr, 1, 1)}); err != nil {
@@ -267,6 +276,24 @@ func TestReplicationVolume_UpdateReplicaSet_RemovePeer_ExecutorTornDown(t *testi
 func TestReplicationVolume_UpdateReplicaSet_LineageBump_RecreatesPeer(t *testing.T) {
 	addr, _ := replicaHarness(t, "r1")
 	v := volumeHarness(t, "vol1")
+	var firstExecutor *transport.BlockExecutor
+	oldStoppedBeforeReplacement := false
+	membershipBlockedBeforeReplacement := false
+	v.newExec = func(store storage.LogicalStorage, replicaAddr string) *transport.BlockExecutor {
+		executor := transport.NewBlockExecutor(store, replicaAddr)
+		if firstExecutor == nil {
+			firstExecutor = executor
+		} else {
+			membershipBlockedBeforeReplacement = v.membershipUpdating
+			err := firstExecutor.RegisterLiveShipSession(transport.RecoveryLineage{
+				SessionID:       999999,
+				Epoch:           1,
+				EndpointVersion: 1,
+			})
+			oldStoppedBeforeReplacement = errors.Is(err, transport.ErrExecutorStopped)
+		}
+		return executor
+	}
 
 	if err := v.UpdateReplicaSet(0, []ReplicaTarget{targetFor("r1", addr, 1, 1)}); err != nil {
 		t.Fatal(err)
@@ -288,8 +315,85 @@ func TestReplicationVolume_UpdateReplicaSet_LineageBump_RecreatesPeer(t *testing
 	if firstSessionID == secondSessionID {
 		t.Fatal("sessionID did not change across lineage bump — peer was not recreated")
 	}
+	if !oldStoppedBeforeReplacement {
+		t.Fatal("replacement executor was admitted before the old executor stopped")
+	}
+	if !membershipBlockedBeforeReplacement {
+		t.Fatal("writes were not blocked while the replacement executor was admitted")
+	}
+	if v.membershipUpdating {
+		t.Fatal("membership transition remained blocked after replacement completed")
+	}
 	if firstEpoch != 1 || secondEpoch != 2 {
 		t.Fatalf("epoch bump not reflected: first=%d second=%d", firstEpoch, secondEpoch)
+	}
+}
+
+func TestReplicationVolume_MembershipTransitionRejectsWriteAndSync(t *testing.T) {
+	v := volumeHarness(t, "vol-transition")
+	v.mu.Lock()
+	v.membershipUpdating = true
+	v.mu.Unlock()
+
+	err := v.OnLocalWrite(context.Background(), LocalWrite{
+		LBA:  1,
+		Data: make([]byte, 4096),
+		LSN:  1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "membership transition in progress") {
+		t.Fatalf("OnLocalWrite error=%v, want membership transition rejection", err)
+	}
+
+	err = v.Sync(context.Background(), 0)
+	if err == nil || !strings.Contains(err.Error(), "membership transition in progress") {
+		t.Fatalf("Sync error=%v, want membership transition rejection", err)
+	}
+}
+
+func TestReplicationVolume_FailedMembershipReplacementRemainsBlocked(t *testing.T) {
+	addr, _ := replicaHarness(t, "r1")
+	v := volumeHarness(t, "vol-failed-transition")
+	if err := v.UpdateReplicaSet(1, []ReplicaTarget{targetFor("r1", addr, 1, 1)}); err != nil {
+		t.Fatal(err)
+	}
+
+	v.newExec = func(store storage.LogicalStorage, replicaAddr string) *transport.BlockExecutor {
+		executor := transport.NewBlockExecutor(store, replicaAddr)
+		executor.Stop()
+		return executor
+	}
+	err := v.UpdateReplicaSet(2, []ReplicaTarget{targetFor("r1", addr, 2, 1)})
+	if !errors.Is(err, transport.ErrExecutorStopped) {
+		t.Fatalf("UpdateReplicaSet error=%v, want ErrExecutorStopped", err)
+	}
+
+	v.mu.Lock()
+	blocked := v.membershipUpdating
+	v.mu.Unlock()
+	if !blocked {
+		t.Fatal("failed membership replacement reopened writes on a partial replica set")
+	}
+	err = v.OnLocalWrite(context.Background(), LocalWrite{
+		LBA:  1,
+		Data: make([]byte, 4096),
+		LSN:  1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "membership transition in progress") {
+		t.Fatalf("OnLocalWrite error=%v, want membership transition rejection", err)
+	}
+	if err := v.Sync(context.Background(), 0); err == nil || !strings.Contains(err.Error(), "membership transition in progress") {
+		t.Fatalf("Sync error=%v, want membership transition rejection", err)
+	}
+
+	v.newExec = transport.NewBlockExecutor
+	if err := v.UpdateReplicaSet(2, []ReplicaTarget{targetFor("r1", addr, 2, 1)}); err != nil {
+		t.Fatalf("retry replacement: %v", err)
+	}
+	v.mu.Lock()
+	blocked = v.membershipUpdating
+	v.mu.Unlock()
+	if blocked {
+		t.Fatal("successful replacement retry did not reopen writes")
 	}
 }
 

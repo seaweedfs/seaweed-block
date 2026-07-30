@@ -79,17 +79,21 @@ type RuntimeRecoveryStatus struct {
 //
 // Lifecycle: borrowed LogicalStorage — Provider owns the engine;
 // ReplicationVolume must NEVER call store.Close() (BUG-005 discipline).
+// Executors created by newExec/newDualExec are owned and stopped here.
 type ReplicationVolume struct {
 	volumeID    string
 	store       storage.LogicalStorage  // borrowed, NEVER closed by us
 	newExec     executorFactory         // test seam; default dials real TCP
 	newDualExec dualLaneExecutorFactory // optional dual-lane override; nil = use newExec
 
+	updateMu              sync.Mutex // serializes membership replacement with Close
 	mu                    sync.Mutex // protects membership, lineage, and lifecycle snapshots
 	peers                 map[string]*ReplicaPeer
+	executors             map[string]*transport.BlockExecutor
 	peerQueues            map[string]*peerWorkQueue
 	peerQueueDepth        int
 	closed                bool
+	membershipUpdating    bool
 	lastAppliedGeneration uint64         // monotonic guard; 0 means "no generation applied yet"
 	durabilityMode        DurabilityMode // set via SetDurabilityMode; default is BestEffort
 
@@ -162,7 +166,7 @@ type dualLaneExecutorFactory func(store storage.LogicalStorage, replicaAddr, rep
 //
 // Called by: DurableProvider / Host composition root at volume
 // lifecycle start, after LogicalStorage is recovered and ready.
-// Owns: the peers map; all *ReplicaPeer lifecycles (Close on remove);
+// Owns: the peers map; all *ReplicaPeer and BlockExecutor lifecycles;
 // the LSN resequencer and lineage-scoped work queues.
 // Borrows: store (LogicalStorage). Provider owns engine lifecycle;
 // ReplicationVolume MUST NOT call store.Close() (BUG-005).
@@ -173,6 +177,7 @@ func NewReplicationVolume(volumeID string, store storage.LogicalStorage) *Replic
 		store:          store,
 		newExec:        transport.NewBlockExecutor,
 		peers:          make(map[string]*ReplicaPeer),
+		executors:      make(map[string]*transport.BlockExecutor),
 		peerQueues:     make(map[string]*peerWorkQueue),
 		peerQueueDepth: defaultPeerWorkQueueDepth,
 		durabilityMode: DurabilityBestEffort, // zero value; explicit for clarity
@@ -255,6 +260,10 @@ func (v *ReplicationVolume) Sync(ctx context.Context, targetLSN uint64) error {
 		v.mu.Unlock()
 		return fmt.Errorf("replication: Sync: volume %s closed", v.volumeID)
 	}
+	if v.membershipUpdating {
+		v.mu.Unlock()
+		return fmt.Errorf("replication: Sync: volume %s membership transition in progress", v.volumeID)
+	}
 	mode := v.durabilityMode
 	localResult := make(chan localSyncResult, 1)
 	go func() {
@@ -312,9 +321,12 @@ func (v *ReplicationVolume) Sync(ctx context.Context, targetLSN uint64) error {
 // Borrows: targets slice — caller retains; we read-only copy the
 // fields we need.
 func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []ReplicaTarget) error {
+	v.updateMu.Lock()
+	defer v.updateMu.Unlock()
+
 	v.mu.Lock()
-	defer v.mu.Unlock()
 	if v.closed {
+		v.mu.Unlock()
 		return fmt.Errorf("replication: UpdateReplicaSet: volume %s closed", v.volumeID)
 	}
 
@@ -333,51 +345,70 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 				v.volumeID, generation, v.lastAppliedGeneration,
 				formatIDSet(had), formatIDSet(got))
 		}
+		v.mu.Unlock()
 		return nil
 	}
 
 	want := make(map[string]ReplicaTarget, len(targets))
 	for _, t := range targets {
 		if t.ReplicaID == "" {
+			v.mu.Unlock()
 			return fmt.Errorf("replication: UpdateReplicaSet: empty ReplicaID in targets")
 		}
 		want[t.ReplicaID] = t
 	}
 
-	// Remove peers no longer in the authoritative set. Same teardown
-	// path is used for N → 0 (empty targets) — no special branch.
-	for id, peer := range v.peers {
-		if _, keep := want[id]; !keep {
-			v.closePeerQueueLocked(id)
-			_ = peer.Close()
-			delete(v.peers, id)
-			// Notify peer-lifecycle hook AFTER peer.Close to mirror
-			// the existing teardown ordering. Hook is called under
-			// v.mu (lock-order: v.mu → host registry's mu).
-			if v.onPeerRemoved != nil {
-				v.onPeerRemoved(id)
+	membershipChanged := len(want) != len(v.peers)
+	if !membershipChanged {
+		for id, peer := range v.peers {
+			target, keep := want[id]
+			current := peer.Target()
+			if !keep ||
+				current.Epoch != target.Epoch ||
+				current.EndpointVersion != target.EndpointVersion ||
+				current.DataAddr != target.DataAddr {
+				membershipChanged = true
+				break
 			}
 		}
 	}
+	v.membershipUpdating = membershipChanged
 
-	// Add new peers + recreate on lineage bump.
-	addedPeers := make([]*ReplicaPeer, 0, len(want))
-	for id, t := range want {
-		if existing, ok := v.peers[id]; ok {
-			cur := existing.Target()
-			if cur.Epoch == t.Epoch && cur.EndpointVersion == t.EndpointVersion && cur.DataAddr == t.DataAddr {
+	// Detach removed and lineage-replaced peers while holding membership
+	// state, then stop their executors without v.mu. Replacements are not
+	// admitted until the old executor has fully released the borrowed
+	// store.
+	executorsToStop := make([]*transport.BlockExecutor, 0, len(v.peers))
+	for id, peer := range v.peers {
+		target, keep := want[id]
+		if keep {
+			current := peer.Target()
+			if current.Epoch == target.Epoch &&
+				current.EndpointVersion == target.EndpointVersion &&
+				current.DataAddr == target.DataAddr {
 				continue
 			}
-			// Lineage or address bumped → tear down + recreate.
-			v.closePeerQueueLocked(id)
-			_ = existing.Close()
-			delete(v.peers, id)
-			// Lineage-bump teardown also notifies the hook so the
-			// per-peer adapter is dropped before the fresh adapter is
-			// added below (new peer instance, fresh engine state).
-			if v.onPeerRemoved != nil {
-				v.onPeerRemoved(id)
-			}
+		}
+		v.closePeerQueueLocked(id)
+		_ = peer.Close()
+		if executor := v.detachExecutorLocked(id); executor != nil {
+			executorsToStop = append(executorsToStop, executor)
+		}
+		delete(v.peers, id)
+		if v.onPeerRemoved != nil {
+			v.onPeerRemoved(id)
+		}
+	}
+	v.mu.Unlock()
+	for _, executor := range executorsToStop {
+		executor.Stop()
+	}
+
+	v.mu.Lock()
+	addedPeers := make([]*ReplicaPeer, 0, len(want))
+	for id, t := range want {
+		if _, exists := v.peers[id]; exists {
+			continue
 		}
 		var executor *transport.BlockExecutor
 		if v.newDualExec != nil {
@@ -387,6 +418,8 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 		}
 		peer, err := NewReplicaPeer(t, executor)
 		if err != nil {
+			v.mu.Unlock()
+			executor.Stop()
 			return fmt.Errorf("replication: UpdateReplicaSet: add peer %s: %w", id, err)
 		}
 		peer.setOnHealthy(func() {
@@ -405,6 +438,7 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 			})
 		}
 		v.peers[id] = peer
+		v.executors[id] = executor
 		v.peerQueues[id] = newPeerWorkQueue(peer, v.peerQueueDepth)
 		// Notify peer-lifecycle hook AFTER the peer is installed in
 		// the map so the host's registry can construct the per-peer
@@ -421,6 +455,8 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 	if generation > 0 {
 		v.lastAppliedGeneration = generation
 	}
+	v.membershipUpdating = false
+	v.mu.Unlock()
 	return nil
 }
 
@@ -429,6 +465,12 @@ func (v *ReplicationVolume) closePeerQueueLocked(replicaID string) {
 		q.closeAndWait()
 		delete(v.peerQueues, replicaID)
 	}
+}
+
+func (v *ReplicationVolume) detachExecutorLocked(replicaID string) *transport.BlockExecutor {
+	executor := v.executors[replicaID]
+	delete(v.executors, replicaID)
+	return executor
 }
 
 func (v *ReplicationVolume) resetTerminalPeerQueue(peer *ReplicaPeer) {
@@ -696,6 +738,10 @@ func (v *ReplicationVolume) dispatchLocalWrite(w LocalWrite) writeAckSet {
 		v.mu.Unlock()
 		return writeAckSet{directErr: fmt.Errorf("replication: OnLocalWrite: volume %s closed", v.volumeID)}
 	}
+	if v.membershipUpdating {
+		v.mu.Unlock()
+		return writeAckSet{directErr: fmt.Errorf("replication: OnLocalWrite: volume %s membership transition in progress", v.volumeID)}
+	}
 	mode := v.durabilityMode
 	peerCount := len(v.peerQueues)
 	results := make(chan peerWorkResult, peerCount)
@@ -742,9 +788,9 @@ func (v *ReplicationVolume) waitForWriteAcks(ctx context.Context, acks writeAckS
 	return waitForPeerAcks(ctx, acks.mode, acks.rf, acks.peerCount, acks.results, "write")
 }
 
-// Stop is the canonical lifecycle entry point. Tears down all peers
-// (their executor sessions are invalidated), closes ordered work queues,
-// and is idempotent. Does NOT close the borrowed store
+// Stop is the canonical lifecycle entry point. Tears down all peers and
+// their executors, closes ordered work queues, and is idempotent. Does
+// NOT close the borrowed store
 // (`INV-REPL-LIFECYCLE-HANDLE-BORROWED-001`).
 //
 // Stop and Close are equivalent (Stop delegates to Close); the
@@ -755,7 +801,7 @@ func (v *ReplicationVolume) waitForWriteAcks(ctx context.Context, acks writeAckS
 // TestReplicationVolume_Stop_DoesNotCloseBorrowedStore.
 //
 // Called by: Provider teardown.
-// Owns: peer-set teardown via peer.Close().
+// Owns: peer-set teardown via peer.Close() and executor.Stop().
 // Borrows: nothing (store is BORROWED — never closed).
 func (v *ReplicationVolume) Stop() error {
 	return v.Close()
@@ -768,10 +814,12 @@ func (v *ReplicationVolume) Stop() error {
 // backward compatibility with existing callers. Both do the same thing.
 //
 // Called by: Provider teardown when the volume shuts down.
-// Owns: close flag; invalidation of each peer's executor session
-// (via peer.Close()).
+// Owns: close flag; peer session invalidation and executor shutdown.
 // Borrows: nothing.
 func (v *ReplicationVolume) Close() error {
+	v.updateMu.Lock()
+	defer v.updateMu.Unlock()
+
 	v.cancel()
 	v.orderMu.Lock()
 	if !v.orderClosed {
@@ -802,17 +850,25 @@ func (v *ReplicationVolume) Close() error {
 	}
 
 	v.mu.Lock()
-	defer v.mu.Unlock()
 	if v.closed {
+		v.mu.Unlock()
 		return nil
 	}
 	v.closed = true
 	for id := range v.peerQueues {
 		v.closePeerQueueLocked(id)
 	}
+	executorsToStop := make([]*transport.BlockExecutor, 0, len(v.peers))
 	for id, peer := range v.peers {
 		_ = peer.Close()
+		if executor := v.detachExecutorLocked(id); executor != nil {
+			executorsToStop = append(executorsToStop, executor)
+		}
 		delete(v.peers, id)
+	}
+	v.mu.Unlock()
+	for _, executor := range executorsToStop {
+		executor.Stop()
 	}
 	return nil
 }

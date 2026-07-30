@@ -20,6 +20,10 @@ import (
 // MsgRebuildBlock per LBA, then a terminal MsgRebuildDone whose
 // BarrierResponse carries the replica's actually achieved frontier.
 func (e *BlockExecutor) StartRebuild(replicaID string, sessionID, epoch, endpointVersion, frontierHint uint64) error {
+	if err := e.beginAsyncOperation(); err != nil {
+		return err
+	}
+	defer e.asyncWG.Done()
 	// Legacy wrapper: older adapter/engine surfaces only provide the
 	// frontier hint. The transport owns the base snapshot cut, so take a
 	// local durable sync here and use that as BasePinLSN. This keeps the
@@ -38,6 +42,10 @@ func (e *BlockExecutor) StartRebuild(replicaID string, sessionID, epoch, endpoin
 // band. Keeping them separate prevents the recovery feeder from using a
 // close/band value as the WAL rewind point by accident.
 func (e *BlockExecutor) StartRebuildPinned(replicaID string, sessionID, epoch, endpointVersion, basePinLSN, frontierHint uint64) error {
+	if err := e.beginAsyncOperation(); err != nil {
+		return err
+	}
+	defer e.asyncWG.Done()
 	if e.dualLane != nil {
 		return e.startRebuildDualLane(replicaID, sessionID, epoch, endpointVersion, basePinLSN, frontierHint)
 	}
@@ -48,7 +56,7 @@ func (e *BlockExecutor) StartRebuildPinned(replicaID string, sessionID, epoch, e
 		FrontierHint:    frontierHint,
 		TargetLSN:       frontierHint,
 	}
-	session, err := e.registerSession(lineage)
+	session, err := e.registerAsyncSession(lineage)
 	if err != nil {
 		return err
 	}
@@ -67,6 +75,7 @@ func (e *BlockExecutor) StartRebuildPinned(replicaID string, sessionID, epoch, e
 		replicaID, sessionID, epoch, endpointVersion, basePinLSN, frontierHint, frontierHint)
 
 	go func() {
+		defer e.asyncWG.Done()
 		achieved, err := e.doRebuild(replicaID, session, frontierHint)
 		e.finishSession(replicaID, session, achieved, err)
 	}()
