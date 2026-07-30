@@ -344,8 +344,17 @@ func TestPhase172ScopedMaterializationProbe(t *testing.T) {
 	}
 	s.DisableAutoFlushForRecoveryTest()
 	t.Cleanup(func() { _ = s.Close() })
-	singleRead := os.Getenv("SW_BLOCK_PHASE172_SCOPED_PROBE_SINGLE_READ") == "true"
-	s.enableSingleReadMaterializationForTest(singleRead)
+	mode := os.Getenv("SW_BLOCK_PHASE172_SCOPED_PROBE_MODE")
+	if mode == "" {
+		mode = "default"
+		if os.Getenv("SW_BLOCK_PHASE172_SCOPED_PROBE_SINGLE_READ") == "true" {
+			mode = "single-read"
+		}
+	}
+	if err := configurePhase172BenchmarkMaterialization(s, mode); err != nil {
+		t.Fatal(err)
+	}
+	singleRead := s.singleReadMaterialization.Load()
 
 	for lba := uint32(0); lba < records; lba++ {
 		if _, err := s.Write(lba, makeBlock(blockSize, byte(lba%251+1))); err != nil {
@@ -360,7 +369,9 @@ func TestPhase172ScopedMaterializationProbe(t *testing.T) {
 	}
 
 	got := s.FlusherInstrumentation()
+	t.Logf("phase172_probe_mode=%s", mode)
 	t.Logf("phase172_probe_single_read=%t", singleRead)
+	t.Logf("phase172_probe_shared_record=%t", s.sharedRecordMaterialization.Load())
 	t.Logf("phase172_probe_validated_records=%d", got.ValidatedRecords)
 	t.Logf("phase172_probe_header_read_ops=%d", got.WALHeaderReadOps)
 	t.Logf("phase172_probe_record_read_ops=%d", got.WALRecordReadOps)
@@ -402,7 +413,13 @@ func TestPhase172ScopedSharedRecordProbe(t *testing.T) {
 	}
 	s.DisableAutoFlushForRecoveryTest()
 	s.enableMultiBlockRecordsForTest(true)
-	s.enableSharedRecordMaterializationForTest(true)
+	mode := os.Getenv("SW_BLOCK_PHASE172_SHARED_PROBE_MODE")
+	if mode == "" {
+		mode = "shared-record"
+	}
+	if err := configurePhase172BenchmarkMaterialization(s, mode); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { _ = s.Close() })
 
 	for base := uint32(0); base < logicalBlocks; base += blocksPerRecord {
@@ -423,7 +440,8 @@ func TestPhase172ScopedSharedRecordProbe(t *testing.T) {
 	}
 
 	got := s.FlusherInstrumentation()
-	t.Log("phase172_shared_probe_enabled=true")
+	t.Logf("phase172_shared_probe_mode=%s", mode)
+	t.Logf("phase172_shared_probe_enabled=%t", s.sharedRecordMaterialization.Load())
 	t.Logf("phase172_shared_probe_snapshot_entries=%d", got.SnapshotEntries)
 	t.Logf("phase172_shared_probe_unique_records=%d", got.SnapshotUniqueWALRecords)
 	t.Logf("phase172_shared_probe_reuse_candidates=%d", got.SnapshotRecordReuseCandidates)
@@ -432,19 +450,32 @@ func TestPhase172ScopedSharedRecordProbe(t *testing.T) {
 	t.Logf("phase172_shared_probe_record_read_ops=%d", got.WALRecordReadOps)
 	t.Logf("phase172_shared_probe_materialization_read_ops=%d", got.MaterializationReadOps)
 	t.Logf("phase172_shared_probe_reuse_hits=%d", got.MaterializationRecordReuseHits)
+	wantHeaderReads := uint64(0)
+	wantRecordReads := uint64(physicalRecords)
+	wantMaterializationReads := uint64(physicalRecords)
+	wantReuseHits := uint64(logicalBlocks - physicalRecords)
+	if mode == "default" {
+		wantHeaderReads = logicalBlocks
+		wantRecordReads = logicalBlocks
+		wantMaterializationReads = 2 * logicalBlocks
+		wantReuseHits = 0
+	} else if mode != "shared-record" {
+		t.Fatalf("shared probe mode=%q want default or shared-record", mode)
+	}
 	if got.SnapshotEntries != logicalBlocks ||
 		got.SnapshotUniqueWALRecords != physicalRecords ||
 		got.SnapshotRecordReuseCandidates != logicalBlocks-physicalRecords ||
 		got.ValidatedRecords != logicalBlocks ||
-		got.WALHeaderReadOps != 0 ||
-		got.WALRecordReadOps != physicalRecords ||
-		got.MaterializationReadOps != physicalRecords ||
-		got.MaterializationRecordReuseHits != logicalBlocks-physicalRecords {
-		t.Fatalf("entries/unique/candidates/validated/header/record/materialization/reuse=%d/%d/%d/%d/%d/%d/%d/%d want 1024/64/960/1024/0/64/64/960",
+		got.WALHeaderReadOps != wantHeaderReads ||
+		got.WALRecordReadOps != wantRecordReads ||
+		got.MaterializationReadOps != wantMaterializationReads ||
+		got.MaterializationRecordReuseHits != wantReuseHits {
+		t.Fatalf("entries/unique/candidates/validated/header/record/materialization/reuse=%d/%d/%d/%d/%d/%d/%d/%d want 1024/64/960/1024/%d/%d/%d/%d",
 			got.SnapshotEntries, got.SnapshotUniqueWALRecords,
 			got.SnapshotRecordReuseCandidates, got.ValidatedRecords,
 			got.WALHeaderReadOps, got.WALRecordReadOps,
-			got.MaterializationReadOps, got.MaterializationRecordReuseHits)
+			got.MaterializationReadOps, got.MaterializationRecordReuseHits,
+			wantHeaderReads, wantRecordReads, wantMaterializationReads, wantReuseHits)
 	}
 	if got := s.CheckpointLSN(); got != logicalBlocks {
 		t.Fatalf("checkpoint=%d want %d", got, logicalBlocks)

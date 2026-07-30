@@ -189,6 +189,10 @@ in its existing write/fsync without adding a new disk field or sync.
 
 ### D5. Comparable Linux Performance Decision
 
+Implementation status: gate implemented locally; exact-commit Linux decision
+pending. The benchmark selector exists only in `_test.go`; no product or
+external configuration surface was added.
+
 - Compare candidate and unchanged default in one rotated m02 run with five
   one-second repetitions and identical 100 ms flusher/Sync/drain settings.
 - Cover ordinary 4 KiB, scattered 4 KiB, explicit 16-block batch, and
