@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
-	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -22,10 +21,11 @@ const (
 	ioUringOffCQRing = 0x08000000
 	ioUringOffSQEs   = 0x10000000
 
-	ioUringFeatSingleMmap = 1 << 0
-	ioUringEnterGetEvents = 1 << 0
-	ioUringRegisterProbe  = 8
-	ioUringOpSupported    = 1 << 0
+	ioUringFeatSingleMmap  = 1 << 0
+	ioUringEnterGetEvents  = 1 << 0
+	ioUringRegisterEventFD = 4
+	ioUringRegisterProbe   = 8
+	ioUringOpSupported     = 1 << 0
 
 	ioUringOpFsync = 3
 	ioUringOpWrite = 23
@@ -103,7 +103,8 @@ type ringOperation struct {
 }
 
 type ioUring struct {
-	fd int
+	fd      int
+	eventFD int
 
 	sqRing []byte
 	cqRing []byte
@@ -279,12 +280,30 @@ func newIOUring(entries uint32) (_ *ioUring, retErr error) {
 		return nil, errno
 	}
 
-	ring := &ioUring{fd: int(fd)}
+	ring := &ioUring{fd: int(fd), eventFD: -1}
 	defer func() {
 		if retErr != nil {
 			ring.close()
 		}
 	}()
+	ring.eventFD, retErr = unix.Eventfd(0, unix.EFD_CLOEXEC|unix.EFD_NONBLOCK)
+	if retErr != nil {
+		return nil, fmt.Errorf("eventfd: %w", retErr)
+	}
+	eventFD := int32(ring.eventFD)
+	_, _, errno = unix.Syscall6(
+		unix.SYS_IO_URING_REGISTER,
+		uintptr(ring.fd),
+		ioUringRegisterEventFD,
+		uintptr(unsafe.Pointer(&eventFD)),
+		1,
+		0,
+		0,
+	)
+	runtime.KeepAlive(&eventFD)
+	if errno != 0 {
+		return nil, fmt.Errorf("register eventfd: %w", errno)
+	}
 
 	sqRingSize := int(params.SQOff.Array + params.SQEntries*uint32(unsafe.Sizeof(uint32(0))))
 	cqRingSize := int(params.CQOff.CQEs + params.CQEntries*uint32(unsafe.Sizeof(ioUringCQE{})))
@@ -359,6 +378,10 @@ func (ring *ioUring) close() {
 	if ring.fd >= 0 {
 		_ = unix.Close(ring.fd)
 		ring.fd = -1
+	}
+	if ring.eventFD >= 0 {
+		_ = unix.Close(ring.eventFD)
+		ring.eventFD = -1
 	}
 }
 
@@ -458,21 +481,49 @@ func (ring *ioUring) submitAndWait(operations []ringOperation) ([]ioUringCQE, in
 }
 
 // waitForAccepted does not return until every accepted SQE has a terminal CQE.
-// Returning earlier would let the kernel retain a pointer to a Go-owned buffer
-// after its final strong reference has disappeared. The gate process supplies
-// the outer timeout for a kernel that can no longer make progress.
+// The registered eventfd separates completion wakeup from io_uring_enter, so a
+// GETEVENTS syscall failure cannot strand accepted buffers.
 func (ring *ioUring) waitForAccepted(expected int) []ioUringCQE {
 	completions := make([]ioUringCQE, 0, expected)
 	for len(completions) < expected {
 		completions = append(completions, ring.drainCompletions()...)
 		if len(completions) >= expected {
+			ring.consumeCompletionEvent()
 			break
 		}
-		if _, err := ring.enter(0, uint32(expected-len(completions)), ioUringEnterGetEvents); err != nil {
-			time.Sleep(time.Millisecond)
+		if err := ring.waitCompletionEvent(); err != nil {
+			continue
 		}
 	}
 	return completions
+}
+
+func (ring *ioUring) waitCompletionEvent() error {
+	pollFDs := []unix.PollFd{{
+		Fd:     int32(ring.eventFD),
+		Events: unix.POLLIN,
+	}}
+	for {
+		_, err := unix.Poll(pollFDs, -1)
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if pollFDs[0].Revents&(unix.POLLERR|unix.POLLHUP|unix.POLLNVAL) != 0 {
+			return fmt.Errorf("eventfd poll revents=%d", pollFDs[0].Revents)
+		}
+		if pollFDs[0].Revents&unix.POLLIN != 0 {
+			ring.consumeCompletionEvent()
+			return nil
+		}
+	}
+}
+
+func (ring *ioUring) consumeCompletionEvent() {
+	var counter [8]byte
+	_, _ = unix.Read(ring.eventFD, counter[:])
 }
 
 func (ring *ioUring) enqueue(operation ringOperation) error {
