@@ -162,10 +162,12 @@ on `7d09924`: seven focused and CGO race tests each passed 20 repetitions,
 
 ### D4. Concurrency, Recovery, And Lifecycle Equivalence
 
-Implementation status: complete locally; Linux exact-commit race, SIGKILL,
-recovery, and replication gates remain pending. Candidate-on lifecycle fixtures
-cover large concurrent snapshots, direct BASE ownership, recycle-floor
-recovery, Close final flush/failure, and malformed batch recovery.
+Implementation status: complete. Linux D4 passed on exact commit `1cf3cbc`:
+six candidate and CGO race fixtures each passed 20 repetitions, seven existing
+equivalence fixtures including real SIGKILL each passed 10 repetitions, and
+the complete storage, recovery, replication, replication-component, and vet
+gates were green. No skip, race, test, product, gate, or lab blocker remained;
+`d5_performance_gate_eligible=true`.
 
 D4 exposed and fixed four recovery-contract gaps rather than weakening the
 fixtures: a checkpoint inside one multi-block record now replays only its
