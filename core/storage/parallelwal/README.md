@@ -59,6 +59,46 @@ Open chooses the highest valid generation. A damaged latest header may fall
 back to the prior valid generation; a torn or CRC-invalid committed record
 fails with typed `storage.ErrWALIntegrityFault`.
 
+### Phase 169 Segmented Format Candidate
+
+Phase 169 adds an internal format proof before changing the Store:
+
+```text
+[64-byte segment header]
+[N x 32-byte entry descriptors]
+[N contiguous fixed-block payloads]
+```
+
+The segment header records the version, total bytes, entry count, block size,
+first/last LSN, monotonic segment sequence, table-and-payload CRC, and header
+CRC. Each descriptor records one LSN, LBA, write flag, canonical payload
+offset/size, data CRC, and descriptor-plus-data CRC.
+
+The initial bounds are 256 entries and 1 MiB of payload per segment. Decode
+validates the bounds before allocation, requires contiguous increasing LSNs,
+and rejects non-canonical offsets, invalid LBAs, unsupported flags, and every
+CRC mismatch. Repeated writes to the same LBA are valid and retain LSN order.
+
+Segment commitment is not inferred from bytes that happen to exist in the
+file. Recovery receives a trusted manifest from the future dual-header
+protocol: committed bytes, segment count, first segment sequence, and
+first/last committed LSN:
+
+- malformed or incomplete bytes inside that boundary fail closed;
+- physical bytes after the boundary are an uncommitted tail and are ignored;
+- the first and last segment must match the trusted logical anchors;
+- adjacent committed segments must have consecutive segment sequences and LSN
+  ranges.
+
+The scanner streams one bounded segment at a time into a callback. It does not
+retain payload memory proportional to the committed WAL length, and callers
+must not publish accumulated recovery state until the complete manifest
+validates.
+
+The codec and committed-prefix scanner are not yet selected by
+`CreateStore`/`OpenStore`. This separation is deliberate: D1 proves format and
+recovery behavior before D2 adds a bounded group-commit owner.
+
 ## Write And Publication
 
 The store allocates global LSN and lane sequence under one short metadata lock.

@@ -78,7 +78,7 @@ Block's own LSN, recovery, replication, and frontend contracts.
 2. Every LSN appears in exactly one committed segment or receives a terminal
    error.
 3. Segment decode validates geometry, bounds, header CRC, entry CRC, monotonic
-   LSN order, and duplicate LSN/LBA metadata before replay.
+   and duplicate LSN metadata, and invalid LBA metadata before replay.
 4. Torn or corrupt committed segments fail closed; an uncommitted tail is
    ignored only under an explicit tail rule.
 5. The publication frontier advances only through the contiguous successful
