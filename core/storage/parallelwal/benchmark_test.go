@@ -363,7 +363,6 @@ func BenchmarkPhase167LegacyWALContentionControl(b *testing.B) {
 				b.Fatal(err)
 			}
 			b.Cleanup(func() { _ = s.Close() })
-			s.DisableAutoFlushForRecoveryTest()
 
 			data := make([][]byte, writers)
 			for i := range data {

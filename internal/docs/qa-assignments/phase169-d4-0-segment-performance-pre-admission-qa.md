@@ -30,10 +30,11 @@ next_recommendation=implement_checkpoint_rebuild_equivalence
 
 `concurrency_gain_threshold_pass=true` requires either 1.5x candidate
 four-writer scaling or at least 1.25x four-writer throughput over both controls.
-The gate disables legacy background flushing and positioned checkpoint/recycle
-so it compares the WAL append core with one final logical Sync. It is an
-optimistic upper bound: admission only justifies full D4 implementation and is
-not a product performance claim.
+The positioned control must report zero checkpoint and recycle operations. The
+legacy control retains its mature dirty-map and background-flush path, while
+the incomplete candidate does not yet pay equivalent costs. This is therefore
+an optimistic candidate upper bound: admission only justifies full D4
+implementation and is not a product performance claim.
 
 If any threshold is false, report PASS for the evidence mechanism and REJECT
 for the candidate. Do not reinterpret a batch/grouping gain as an ordinary

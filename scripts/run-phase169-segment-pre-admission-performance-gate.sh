@@ -64,6 +64,12 @@ ratio_at_least() {
   }'
 }
 
+is_zero() {
+  awk -v value="$1" 'BEGIN {
+    print (value + 0 == 0) ? "true" : "false"
+  }'
+}
+
 if [[ "${REPETITIONS}" != "5" ]]; then
   echo "SW_BLOCK_PHASE169_REPETITIONS must be exactly 5" >&2
   exit 1
@@ -79,7 +85,7 @@ write_summary "repetitions=${REPETITIONS}"
 write_summary "writers=1,4"
 write_summary "sync_cadence=one_final_sync_per_sample"
 write_summary "comparison_scope=optimistic_wal_append_core_upper_bound"
-write_summary "legacy_background_flush_enabled=false"
+write_summary "legacy_background_flush_enabled=true"
 write_summary "positioned_checkpoint_recycle_expected=false"
 
 cd "${ROOT}"
@@ -112,6 +118,16 @@ for repetition in 1 2 3 4 5; do
       if [[ "${sync_calls}" != "1.000" ]]; then
         echo "invalid ${mode} writers=${writers} logical Sync count in ${log}" >&2
         exit 1
+      fi
+      if [[ "${mode}" == "positioned" ]]; then
+        checkpoint_ops="$(metric_from_log "${log}" "${benchmark}" "${writers}" "checkpoint_write_ops")"
+        recycle_ops="$(metric_from_log "${log}" "${benchmark}" "${writers}" "recycle_read_ops")"
+        if [[ -z "${checkpoint_ops}" || -z "${recycle_ops}" ||
+              "$(is_zero "${checkpoint_ops}")" != "true" ||
+              "$(is_zero "${recycle_ops}")" != "true" ]]; then
+          echo "positioned writers=${writers} performed checkpoint/recycle work in ${log}" >&2
+          exit 1
+        fi
       fi
       echo "${mibps}" >>"${ARTIFACT_DIR}/${mode}-writers-${writers}-mibps.values"
     done

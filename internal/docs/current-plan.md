@@ -155,9 +155,11 @@ four-package storage regression, and Windows cross-compile.
   within 90% of legacy, match positioned four-writer throughput, prove more
   than one entry per segment, and either reach 1.5x four-writer scaling or
   beat both four-writer controls by at least 25%.
-- Treat D4-0 as an optimistic WAL-core upper bound, not a product performance
-  claim. Legacy background flush and positioned checkpoint/recycle are disabled
-  for this gate; full D4 must add those costs before the final D5 decision.
+- Treat D4-0 as an optimistic upper bound for the incomplete candidate, not a
+  product performance claim. The candidate does not yet pay mature dirty-map,
+  background-flush, checkpoint, or rebuild costs. The positioned control must
+  report zero checkpoint/recycle work; full D4 must add equivalent candidate
+  costs before the final D5 decision.
 - Reuse the accepted COW extent/checkpoint design where possible.
 - Define segment-level retention and wrap/reuse fences.
 - Prove catch-up scan and source-frontier behavior across segment boundaries.
