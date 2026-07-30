@@ -91,11 +91,12 @@ type flags struct {
 
 	// Durable-backend flags. When --durable-root is set, the iSCSI
 	// and NVMe providers use DurableProvider instead of memback.
-	// --durable-impl selects walstore or smartwal (default smartwal).
+	// --durable-impl selects smartwal, walstore, or the explicit
+	// parallel-walstore candidate (default smartwal).
 	// --durable-blocks + --durable-blocksize are used on first-time
 	// storage create.
 	durableRoot                          string
-	durableImpl                          string // "smartwal" | "walstore"
+	durableImpl                          string // "smartwal" | "walstore" | "parallel-walstore"
 	durableBlocks                        uint
 	durableBlockSize                     uint
 	durableWALMultiBlockRecords          bool
@@ -165,7 +166,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.UintVar(&f.nvmeMaxH2C, "nvme-max-h2c-data-length", 0, "NVMe/TCP MaxH2CDataLength in bytes. 0 preserves the target default")
 	fs.BoolVar(&f.allowExternalNVMeBind, "allow-external-nvme-bind", false, "allow NVMe to bind a non-loopback address; unauthenticated, intended only for explicit gates")
 	fs.StringVar(&f.durableRoot, "durable-root", "", "directory for persistent storage files; empty = memback (non-durable)")
-	fs.StringVar(&f.durableImpl, "durable-impl", "smartwal", "LogicalStorage impl: smartwal (default) or walstore; ignored unless --durable-root is set")
+	fs.StringVar(&f.durableImpl, "durable-impl", "smartwal", "LogicalStorage impl: smartwal (default), walstore, or opt-in parallel-walstore; ignored unless --durable-root is set")
 	fs.UintVar(&f.durableBlocks, "durable-blocks", 2048, "number of blocks per volume on first create (ignored when opening existing)")
 	fs.UintVar(&f.durableBlockSize, "durable-blocksize", 4096, "block size in bytes on first create")
 	fs.BoolVar(&f.durableWALMultiBlockRecords, "durable-wal-multiblock-records", false, "enable experimental walstore multi-block WAL records; default false; requires --durable-impl=walstore")
@@ -213,6 +214,11 @@ func parseFlags(args []string) (flags, error) {
 	}
 	if _, _, err := parseReplicationAckProfile(f.replicationAck); err != nil {
 		return flags{}, err
+	}
+	switch f.durableImpl {
+	case "smartwal", "walstore", "parallel-walstore":
+	default:
+		return flags{}, fmt.Errorf("--durable-impl=%q invalid; want smartwal, walstore, or parallel-walstore", f.durableImpl)
 	}
 	if f.durableWALMultiBlockRecords {
 		if f.durableRoot == "" {

@@ -198,6 +198,19 @@ func (r *ReplicaListener) acceptLoop() {
 func (r *ReplicaListener) handleConn(conn net.Conn) {
 	defer conn.Close()
 	lane := mutationLaneLive
+	basePrepared := false
+	prepareBaseInstall := func() error {
+		if basePrepared {
+			return nil
+		}
+		if preparer, ok := r.store.(storage.BaseInstallPreparer); ok {
+			if err := preparer.BeginBaseInstall(); err != nil {
+				return err
+			}
+		}
+		basePrepared = true
+		return nil
+	}
 
 	for {
 		msgType, payload, err := ReadMsg(conn)
@@ -303,8 +316,13 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 			// Rebuild blocks are BASE-lane bytes. They must not enter the
 			// WAL apply path and must not advance R/S/H per block; the
 			// frontier is reconciled once, at MsgRebuildDone.
+			if err := prepareBaseInstall(); err != nil {
+				log.Printf("replica: prepare rebuild base: %v", err)
+				return
+			}
 			if err := r.store.WriteExtentDirect(lba, data); err != nil {
 				log.Printf("replica: apply rebuild base block: %v", err)
+				return
 			}
 
 		case MsgRebuildDone:
@@ -316,6 +334,10 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 			if !r.acceptMutationLineage(lineage) {
 				log.Printf("replica: reject stale rebuild done session=%d epoch=%d endpointVersion=%d",
 					lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
+				return
+			}
+			if err := prepareBaseInstall(); err != nil {
+				log.Printf("replica: prepare empty rebuild base: %v", err)
 				return
 			}
 			// The done message carries the engine's frozen base frontier hint.

@@ -118,6 +118,19 @@ func TestPhase34_K8sRendererRejectsUnknownDurableImpl(t *testing.T) {
 	}
 }
 
+func TestPhase167_K8sRendererAllowsParallelWALStoreOptIn(t *testing.T) {
+	manifests, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{
+		MasterAddr:  "blockmaster.kube-system.svc.cluster.local:9333",
+		DurableImpl: "parallel-walstore",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(manifests[0].YAML); !strings.Contains(got, "--durable-impl=parallel-walstore") {
+		t.Fatalf("manifest missing parallel-walstore opt-in:\n%s", got)
+	}
+}
+
 func TestG15d_K8sRenderer_RF2UsesDistinctNamesAndPorts(t *testing.T) {
 	manifests, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{MasterAddr: "m:9333"})
 	if err != nil {

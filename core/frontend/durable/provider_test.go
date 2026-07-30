@@ -1,6 +1,6 @@
 // T3b Provider tests — mini plan §2 acceptance rows #1-#4, #8.
-// Matrix-parameterized per Addendum A #1: every test iterates both
-// walstore and smartwal impls.
+// Matrix-parameterized per Addendum A #1: every test iterates all
+// registered durable implementations.
 
 package durable_test
 
@@ -17,10 +17,15 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/storage"
+	"github.com/seaweedfs/seaweed-block/core/storage/parallelwal"
 )
 
 func implMatrix() []durable.ImplName {
-	return []durable.ImplName{durable.ImplSmartWAL, durable.ImplWALStore}
+	return []durable.ImplName{
+		durable.ImplSmartWAL,
+		durable.ImplWALStore,
+		durable.ImplParallelWALStore,
+	}
 }
 
 func TestPhase150_DurableProviderWALMultiBlockOptIn(t *testing.T) {
@@ -240,6 +245,8 @@ func TestT3b_DurableProvider_Open_SelectsImpl_Matrix(t *testing.T) {
 				expectMagic = "SWBK"
 			case durable.ImplSmartWAL:
 				expectMagic = "SWAW"
+			case durable.ImplParallelWALStore:
+				expectMagic = "SWPW"
 			}
 			if magic != expectMagic {
 				t.Errorf("on-disk magic=%q want %q (impl=%s)", magic, expectMagic, impl)
@@ -312,6 +319,68 @@ func TestT3b_DurableProvider_Open_ImplKindMismatch_FailsFast(t *testing.T) {
 	}
 	if !errors.Is(err, durable.ErrImplKindMismatch) {
 		t.Fatalf("want ErrImplKindMismatch, got %v", err)
+	}
+}
+
+func TestDurableProviderParallelWALUsesDualHeaderProbe(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "v1.bin")
+	s, err := parallelwal.CreateStoreWithConfig(path, parallelwal.Config{
+		NumBlocks:    16,
+		BlockSize:    4096,
+		LaneCount:    4,
+		StripeBlocks: 1,
+		SlotsPerLane: 128,
+		QueueDepth:   64,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Write(0, bytes.Repeat([]byte{0x71}, 4096)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteAt([]byte("BAD!"), 0); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	id := frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1}
+	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+		Impl:        durable.ImplParallelWALStore,
+		StorageRoot: root,
+		BlockSize:   4096,
+		NumBlocks:   16,
+	}, newStubView(healthyProj(id)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	raw, err := p.EnsureStorage("v1")
+	if err != nil {
+		t.Fatalf("EnsureStorage should recover from header slot 1: %v", err)
+	}
+	if _, err := p.RecoverVolume(context.Background(), "v1"); err != nil {
+		t.Fatalf("RecoverVolume should select header slot 1: %v", err)
+	}
+	got, err := raw.Read(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[0] != 0x71 {
+		t.Fatalf("recovered byte=%02x want=71", got[0])
 	}
 }
 

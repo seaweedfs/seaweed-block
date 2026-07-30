@@ -42,6 +42,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -149,11 +150,12 @@ type StorageBackend struct {
 	operational atomic.Bool
 	opEvidence  atomic.Value // string
 
-	mu       sync.Mutex
-	closed   bool
-	observer WriteObserver // optional; nil = no replication fan-out
-	writeAck WriteAckPolicy
-	profile  writeProfile
+	mu            sync.Mutex
+	closed        bool
+	observer      WriteObserver // optional; nil = no replication fan-out
+	writeAck      WriteAckPolicy
+	profile       writeProfile
+	lbaWriteLocks [256]sync.Mutex
 }
 
 // NewStorageBackend constructs a backend. Starts NON-operational
@@ -556,6 +558,8 @@ func (b *StorageBackend) writeBytes(ctx context.Context, offset int64, p []byte)
 			chunkLen = available
 		}
 
+		writeLock := &b.lbaWriteLocks[lba%uint32(len(b.lbaWriteLocks))]
+		writeLock.Lock()
 		var block []byte
 		if inBlockOff == 0 && chunkLen == int(bs) {
 			// Full-block write: skip the read.
@@ -564,6 +568,7 @@ func (b *StorageBackend) writeBytes(ctx context.Context, offset int64, p []byte)
 			// Partial-block: RMW.
 			existing, err := b.storage.Read(lba)
 			if err != nil {
+				writeLock.Unlock()
 				return total, fmt.Errorf("durable: RMW read lba=%d: %w", lba, err)
 			}
 			block = make([]byte, bs)
@@ -571,10 +576,12 @@ func (b *StorageBackend) writeBytes(ctx context.Context, offset int64, p []byte)
 			copy(block[inBlockOff:], buf[:chunkLen])
 		}
 		if obs == nil && policy == WriteAckRequireObserverAck {
+			writeLock.Unlock()
 			return total, fmt.Errorf("%w: no write observer installed", ErrReplicationAckUnavailable)
 		}
 
 		lsn, err := b.storage.Write(lba, block)
+		writeLock.Unlock()
 		if err != nil {
 			return total, fmt.Errorf("durable: write lba=%d: %w", lba, err)
 		}
@@ -608,7 +615,9 @@ func (b *StorageBackend) writeFullBlockBatch(ctx context.Context, startLBA uint3
 	for i := range blocks {
 		blocks[i] = p[i*bs : (i+1)*bs]
 	}
+	unlock := b.lockLBARange(startLBA, blockCount)
 	lsns, err := batcher.WriteBatch(startLBA, blocks)
+	unlock()
 	if len(lsns) > 0 {
 		b.profile.recordBackendStorageWrite(len(lsns), true)
 		b.profile.recordBackendFullBlockBatch(len(lsns))
@@ -637,6 +646,27 @@ func (b *StorageBackend) writeFullBlockBatch(ctx context.Context, startLBA uint3
 		return len(lsns) * bs, fmt.Errorf("durable: write batch lba=%d returned %d LSNs for %d blocks", startLBA, len(lsns), blockCount)
 	}
 	return len(p), nil
+}
+
+func (b *StorageBackend) lockLBARange(startLBA uint32, blockCount int) func() {
+	var used [256]bool
+	indices := make([]int, 0, blockCount)
+	for i := 0; i < blockCount; i++ {
+		index := int((startLBA + uint32(i)) % uint32(len(b.lbaWriteLocks)))
+		if !used[index] {
+			used[index] = true
+			indices = append(indices, index)
+		}
+	}
+	sort.Ints(indices)
+	for _, index := range indices {
+		b.lbaWriteLocks[index].Lock()
+	}
+	return func() {
+		for i := len(indices) - 1; i >= 0; i-- {
+			b.lbaWriteLocks[indices[i]].Unlock()
+		}
+	}
 }
 
 func (b *StorageBackend) observeWrite(ctx context.Context, lba uint32, lsn uint64, block []byte, obs WriteObserver, policy WriteAckPolicy) error {

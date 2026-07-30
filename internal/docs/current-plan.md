@@ -98,6 +98,41 @@ writer and `6.48 MiB/s` for four writers (`0.131x` scaling); ACK wait dominates
 the multi-writer path. Linux race, mounted NVMe/TCP, and same-run lab evidence
 remain open. D3 parallel local WAL is now the active implementation target.
 
+The first D3 candidate slice is implemented behind the explicit
+`parallel-walstore` selector:
+
+- one file contains alternating CRC headers, four fixed WAL rings, and dual
+  data extents; lane geometry, durable heads/tails, `R`, checkpoint, `S`, and
+  the authoritative extent are persisted;
+- deterministic LBA lanes execute positioned writes independently while a
+  global ledger publishes only contiguous LSN completion;
+- pressure-triggered checkpointing copies only `LSN <= R`, then advances
+  recyclable lane tails after extent durability;
+- recovery merges durable lane records by LSN and fails closed on CRC,
+  mapping, duplicate, or committed-hole evidence;
+- provider, blockvolume flag, launcher rendering, adapter/reopen matrices,
+  canonical `LogicalStorage`, source-LSN jumps, direct rebuild frontier, ring
+  wrap, and per-LBA serialization across partial/full/batch writes are covered;
+- adversarial review drove explicit Sync admission fencing, terminal append
+  drain before close/recover, dual-header provider probing, checked persisted
+  geometry, and protection against retained pre-checkpoint WAL overriding
+  rebuilt BASE extents;
+- rebuild BASE installation now clears and writes an inactive COW extent,
+  overlays session-live WAL, and switches the authoritative extent only in the
+  final fsynced header; failed commits retain prior acknowledged data and a new
+  session cannot inherit an abandoned BASE stage;
+- `scripts/run-phase167-parallel-wal-candidate-gate.sh` passes the correctness
+  stress gate with multiple lanes and steady-state WAL recycle observed.
+
+The candidate has not earned a performance claim. The latest Windows
+positioned-I/O control, now including checkpoint/recycle work, measured
+`84.02 MiB/s` for one candidate writer and `94.06 MiB/s` for four (`1.119x`
+scaling), versus `345.27 MiB/s` and `275.77 MiB/s` for legacy `walstore`. The
+gate therefore records
+`performance_claim_allowed=false`. D4 Linux/device profiling and execution
+redesign are required before RF3 or mounted promotion gates; the default
+backend remains unchanged.
+
 ## Assumptions And Boundaries
 
 - `walstore` remains the default backend until the candidate passes the full
@@ -174,10 +209,24 @@ remain open. D3 parallel local WAL is now the active implementation target.
 - Allocate global LSN ranges centrally with minimal synchronization.
 - Track completion in a contiguous frontier ledger so out-of-order lane
   completion cannot advance `R` over a hole.
+- Persist geometry, lane cursors, checkpoint, and durable frontier through
+  alternating CRC-protected headers. `Sync` may publish `R=N` only after every
+  record through `N` is complete and the corresponding lane writes are
+  durable; a lower-LSN failure terminal-faults the store instead of allowing a
+  higher lane to publish success.
+- Keep one logical shared extent, materialized as two physical COW copies for
+  rebuild commit safety, and flush only the stable `LSN <= R` prefix. Extent
+  writeback, checkpoint advance, WAL recycling, `ApplyEntry`, and
+  `AdvanceFrontier` must preserve the same global ordering contract.
 - Merge lane recovery scans by LSN and return the existing typed
   `ErrWALRecycled`/recovery failures where the old contract requires them.
+- Use a format-specific recovery scanner. Do not reuse legacy recovery logic
+  that mixes byte-ring cursors with logical LSNs.
 - Keep lane count and mapping format on disk so reopen does not reinterpret
   existing data.
+- Serialize partial-block read-modify-write by LBA (or the same deterministic
+  stripe owner) so frontend concurrency cannot lose overlapping updates before
+  they reach the WAL.
 
 ### D4. Storage Execution Backend
 

@@ -36,7 +36,7 @@
           "additionalProperties": { "type": "string" }
         },
         "failbackRuntimeRPC": { "type": "boolean" },
-        "durableImpl": { "type": "string", "enum": ["walstore", "smartwal"] },
+        "durableImpl": { "type": "string", "enum": ["walstore", "smartwal", "parallel-walstore"] },
         "durableWALMultiBlockRecords": { "type": "boolean" },
         "durableWALRecoveryTestDisableFlusher": { "type": "boolean" },
         "stateHostPath": { "type": "string" },

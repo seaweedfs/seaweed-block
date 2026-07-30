@@ -11,7 +11,7 @@
 //   3. LargeSpanningWrite — multi-LBA single-write integrity
 //
 // All three tests matrix-parameterize via logicalStorageFactories()
-// so walstore and smartwal are both exercised.
+// so every registered durable implementation is exercised.
 
 package durable_test
 
@@ -24,6 +24,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/storage"
+	"github.com/seaweedfs/seaweed-block/core/storage/parallelwal"
 	"github.com/seaweedfs/seaweed-block/core/storage/smartwal"
 )
 
@@ -132,6 +133,16 @@ func TestT3_Durable_RecoverThenServe(t *testing.T) {
 			name:   "smartwal",
 			create: func(p string) (storage.LogicalStorage, error) { return smartwal.CreateStore(p, numBlocks, blockSize) },
 			reopen: func(p string) (storage.LogicalStorage, error) { return smartwal.OpenStore(p) },
+		},
+		{
+			name: "parallelwal",
+			create: func(p string) (storage.LogicalStorage, error) {
+				return parallelwal.CreateStoreWithConfig(p, parallelwal.Config{
+					NumBlocks: numBlocks, BlockSize: blockSize, LaneCount: 4,
+					StripeBlocks: 1, SlotsPerLane: 128, QueueDepth: 64,
+				})
+			},
+			reopen: func(p string) (storage.LogicalStorage, error) { return parallelwal.OpenStore(p) },
 		},
 	}
 

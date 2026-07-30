@@ -8,7 +8,7 @@ import (
 )
 
 func TestReceiver_SessionStart_UsesFromLSNAsBaseFrontierHint(t *testing.T) {
-	replica := storage.NewBlockStore(0, 4096)
+	replica := &basePreparingStore{LogicalStorage: storage.NewBlockStore(0, 4096)}
 	primaryConn, replicaConn := net.Pipe()
 	defer primaryConn.Close()
 	defer replicaConn.Close()
@@ -80,6 +80,19 @@ func TestReceiver_SessionStart_UsesFromLSNAsBaseFrontierHint(t *testing.T) {
 	if st.TargetLSN != basePinLSN {
 		t.Fatalf("TargetLSN legacy status alias=%d want BaseFrontierHint %d", st.TargetLSN, basePinLSN)
 	}
+	if replica.prepareCalls != 1 {
+		t.Fatalf("BeginBaseInstall calls=%d want=1 for empty BASE", replica.prepareCalls)
+	}
+}
+
+type basePreparingStore struct {
+	storage.LogicalStorage
+	prepareCalls int
+}
+
+func (s *basePreparingStore) BeginBaseInstall() error {
+	s.prepareCalls++
+	return nil
 }
 
 func TestReceiver_DurableProgressAck_DoesNotExceedDurableSyncFrontier(t *testing.T) {

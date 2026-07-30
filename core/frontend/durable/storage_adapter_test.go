@@ -1,5 +1,5 @@
 // T3a adapter tests — matrix-parameterized per Addendum A #1.
-// EVERY test runs against BOTH walstore and smartwal.Store so
+// EVERY test runs against walstore, smartwal.Store, and parallelwal.Store so
 // variant skew is caught at L1 instead of prod.
 //
 // Acceptance-criteria mapping (mini plan §2):
@@ -21,10 +21,13 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/storage"
+	"github.com/seaweedfs/seaweed-block/core/storage/memorywal"
+	"github.com/seaweedfs/seaweed-block/core/storage/parallelwal"
 	"github.com/seaweedfs/seaweed-block/core/storage/smartwal"
 )
 
@@ -198,6 +201,180 @@ func logicalStorageFactories() []logicalStorageFactory {
 				return s
 			},
 		},
+		{
+			name: "parallelwal",
+			make: func(t *testing.T, numBlocks uint32, blockSize int) storage.LogicalStorage {
+				t.Helper()
+				path := filepath.Join(t.TempDir(), "parallelwal.bin")
+				s, err := parallelwal.CreateStoreWithConfig(path, parallelwal.Config{
+					NumBlocks:    numBlocks,
+					BlockSize:    blockSize,
+					LaneCount:    4,
+					StripeBlocks: 1,
+					SlotsPerLane: 128,
+					QueueDepth:   64,
+				})
+				if err != nil {
+					t.Fatalf("parallelwal.CreateStoreWithConfig: %v", err)
+				}
+				t.Cleanup(func() { _ = s.Close() })
+				return s
+			},
+		},
+	}
+}
+
+type firstReadGateStorage struct {
+	storage.LogicalStorage
+	reads   atomic.Int32
+	entered chan struct{}
+	release chan struct{}
+}
+
+type firstReadGateBatchStorage struct {
+	*firstReadGateStorage
+}
+
+func (s *firstReadGateBatchStorage) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error) {
+	return s.LogicalStorage.(storage.WriteBatcher).WriteBatch(startLBA, blocks)
+}
+
+func (s *firstReadGateStorage) Read(lba uint32) ([]byte, error) {
+	if s.reads.Add(1) == 1 {
+		close(s.entered)
+		<-s.release
+	}
+	return s.LogicalStorage.Read(lba)
+}
+
+func TestStorageBackend_SerializesPartialRMWPerLBA(t *testing.T) {
+	base := storage.NewBlockStore(2, 4096)
+	gated := &firstReadGateStorage{
+		LogicalStorage: base,
+		entered:        make(chan struct{}),
+		release:        make(chan struct{}),
+	}
+	id := frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1}
+	view := newStubView(healthyProj(id))
+	b := durable.NewStorageBackend(gated, view, id)
+	b.SetOperational(true, "test")
+
+	results := make(chan error, 2)
+	go func() {
+		_, err := b.Write(context.Background(), 0, []byte{0x11})
+		results <- err
+	}()
+	<-gated.entered
+	go func() {
+		_, err := b.Write(context.Background(), 1, []byte{0x22})
+		results <- err
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	if got := gated.reads.Load(); got != 1 {
+		t.Fatalf("partial RMW reads=%d before first write completed; want serialized single read", got)
+	}
+	close(gated.release)
+	for i := 0; i < 2; i++ {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	block, err := base.Read(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if block[0] != 0x11 || block[1] != 0x22 {
+		t.Fatalf("partial RMW lost update: first bytes=%02x %02x", block[0], block[1])
+	}
+}
+
+func TestStorageBackend_SerializesPartialRMWAgainstFullBlockWrite(t *testing.T) {
+	base := storage.NewBlockStore(2, 4096)
+	gated := &firstReadGateStorage{
+		LogicalStorage: base,
+		entered:        make(chan struct{}),
+		release:        make(chan struct{}),
+	}
+	id := frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1}
+	b := durable.NewStorageBackend(gated, newStubView(healthyProj(id)), id)
+	b.SetOperational(true, "test")
+
+	partialDone := make(chan error, 1)
+	go func() {
+		_, err := b.Write(context.Background(), 1, []byte{0x22})
+		partialDone <- err
+	}()
+	<-gated.entered
+	fullDone := make(chan error, 1)
+	go func() {
+		_, err := b.Write(context.Background(), 0, bytes.Repeat([]byte{0x55}, 4096))
+		fullDone <- err
+	}()
+	select {
+	case err := <-fullDone:
+		t.Fatalf("full-block write bypassed in-flight RMW: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(gated.release)
+	if err := <-partialDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-fullDone; err != nil {
+		t.Fatal(err)
+	}
+	block, err := base.Read(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(block, bytes.Repeat([]byte{0x55}, 4096)) {
+		t.Fatal("stale partial RMW overwrote the later full-block write")
+	}
+}
+
+func TestStorageBackend_SerializesPartialRMWAgainstBatchWrite(t *testing.T) {
+	base := memorywal.NewStore(4, 4096)
+	gated := &firstReadGateBatchStorage{firstReadGateStorage: &firstReadGateStorage{
+		LogicalStorage: base,
+		entered:        make(chan struct{}),
+		release:        make(chan struct{}),
+	}}
+	id := frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1}
+	b := durable.NewStorageBackend(gated, newStubView(healthyProj(id)), id)
+	b.SetOperational(true, "test")
+
+	partialDone := make(chan error, 1)
+	go func() {
+		_, err := b.Write(context.Background(), 1, []byte{0x22})
+		partialDone <- err
+	}()
+	<-gated.entered
+	batchDone := make(chan error, 1)
+	go func() {
+		payload := append(bytes.Repeat([]byte{0x55}, 4096), bytes.Repeat([]byte{0x66}, 4096)...)
+		_, err := b.Write(context.Background(), 0, payload)
+		batchDone <- err
+	}()
+	select {
+	case err := <-batchDone:
+		t.Fatalf("batch write bypassed in-flight RMW: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(gated.release)
+	if err := <-partialDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-batchDone; err != nil {
+		t.Fatal(err)
+	}
+	for lba, want := range []byte{0x55, 0x66} {
+		block, err := base.Read(uint32(lba))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if block[0] != want {
+			t.Fatalf("LBA %d byte=%02x want=%02x", lba, block[0], want)
+		}
 	}
 }
 
@@ -634,14 +811,14 @@ func TestT3a_StorageBackend_Close_ReturnsErrBackendClosed(t *testing.T) {
 	}
 }
 
-// Stop-rule sanity — ensure every test ran against both impls.
+// Stop-rule sanity — ensure every test ran against every registered impl.
 func TestT3a_MatrixCoverage(t *testing.T) {
 	names := []string{}
 	for _, f := range logicalStorageFactories() {
 		names = append(names, f.name)
 	}
 	got := fmt.Sprint(names)
-	want := "[walstore smartwal]"
+	want := "[walstore smartwal parallelwal]"
 	if got != want {
 		t.Fatalf("matrix drifted: got %s want %s", got, want)
 	}
