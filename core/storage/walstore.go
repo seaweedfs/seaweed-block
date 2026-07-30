@@ -470,7 +470,10 @@ func (s *WALStore) Write(lba uint32, data []byte) (uint64, error) {
 		return 0, fmt.Errorf("storage: WAL append: %w", err)
 	}
 	dirtyStart := time.Now()
-	s.dm.put(uint64(lba), walRelOff, lsn, uint32(len(data)))
+	s.dm.put(
+		uint64(lba), walRelOff, lsn, uint32(len(data)),
+		uint64(walEntryHeaderSize+len(data)),
+	)
 	s.instr.recordDirtyMapUpdate(1, time.Since(dirtyStart))
 
 	s.nextLSN++
@@ -543,7 +546,10 @@ func (s *WALStore) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error
 	}
 	dirtyStart := time.Now()
 	for i, walRelOff := range offsets {
-		s.dm.put(uint64(startLBA+uint32(i)), walRelOff, lsns[i], uint32(len(blocks[i])))
+		s.dm.put(
+			uint64(startLBA+uint32(i)), walRelOff, lsns[i], uint32(len(blocks[i])),
+			uint64(walEntryHeaderSize+len(blocks[i])),
+		)
 	}
 	s.instr.recordDirtyMapUpdate(len(offsets), time.Since(dirtyStart))
 
@@ -594,6 +600,7 @@ func (s *WALStore) writeBatchMultiBlockLocked(startLBA uint32, blocks [][]byte, 
 			uint32(i*int(s.sb.BlockSize)),
 			lsn,
 			uint32(len(data)),
+			uint64(walEntryHeaderSize+len(payload)),
 		)
 	}
 	s.instr.recordDirtyMapUpdate(len(blocks), time.Since(dirtyStart))
@@ -642,11 +649,10 @@ func (s *WALStore) readFromWAL(walRelOff uint64, dataOffset uint32) ([]byte, err
 	if _, err := s.fd.ReadAt(headerBuf, absOff); err != nil {
 		return nil, fmt.Errorf("storage: WAL read header: %w", err)
 	}
-	length := parseLengthFromHeader(headerBuf)
-	if length == 0 {
-		// Trim entry — return zeros, same as a never-written LBA.
+	if headerBuf[16] == walEntryTrim {
 		return make([]byte, s.sb.BlockSize), nil
 	}
+	length := parseLengthFromHeader(headerBuf)
 	if dataOffset >= length {
 		return nil, fmt.Errorf("storage: WAL read data offset %d >= length %d", dataOffset, length)
 	}
@@ -932,7 +938,10 @@ func (s *WALStore) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
 	if err != nil {
 		return fmt.Errorf("storage: WAL append (apply): %w", err)
 	}
-	s.dm.put(uint64(lba), walRelOff, lsn, uint32(len(dataCopy)))
+	s.dm.put(
+		uint64(lba), walRelOff, lsn, uint32(len(dataCopy)),
+		uint64(walEntryHeaderSize+len(dataCopy)),
+	)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()

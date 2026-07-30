@@ -131,12 +131,21 @@ func benchmarkWALStoreContention(b *testing.B, lbaForIndex func(int, int) uint32
 				b, s, status, flusherStatus, uint64(b.N), 1,
 				foregroundDuration, syncDuration, drainDuration,
 			)
+			b.ReportMetric(0, "multi_block_records")
 			b.ReportMetric(float64(b.N)/foregroundDuration.Seconds(), "write_ops/s")
 		})
 	}
 }
 
 func BenchmarkPhase170WALStoreBatchContention(b *testing.B) {
+	benchmarkWALStoreBatchContention(b, false)
+}
+
+func BenchmarkPhase172WALStoreMultiBlockContention(b *testing.B) {
+	benchmarkWALStoreBatchContention(b, true)
+}
+
+func benchmarkWALStoreBatchContention(b *testing.B, multiBlockRecords bool) {
 	const (
 		blockSize   = 4096
 		numBlocks   = 16384
@@ -149,6 +158,7 @@ func BenchmarkPhase170WALStoreBatchContention(b *testing.B) {
 				b.Fatal(err)
 			}
 			b.Cleanup(func() { _ = s.Close() })
+			s.enableMultiBlockRecordsForTest(multiBlockRecords)
 			b.ReportAllocs()
 
 			data := make([][][]byte, writers)
@@ -223,6 +233,11 @@ func BenchmarkPhase170WALStoreBatchContention(b *testing.B) {
 				foregroundDuration, syncDuration, drainDuration,
 			)
 			b.ReportMetric(batchBlocks, "batch_blocks")
+			if multiBlockRecords {
+				b.ReportMetric(1, "multi_block_records")
+			} else {
+				b.ReportMetric(0, "multi_block_records")
+			}
 			b.ReportMetric(float64(logicalEntries)/foregroundDuration.Seconds(), "block_ops/s")
 		})
 	}
@@ -252,6 +267,18 @@ func reportWALStoreContentionMetrics(
 		}
 		return float64(total) / float64(logicalEntries)
 	}
+	perValidatedRecord := func(total uint64) float64 {
+		if flusherStatus.ValidatedRecords == 0 {
+			return 0
+		}
+		return float64(total) / float64(flusherStatus.ValidatedRecords)
+	}
+	perSnapshotEntry := func(total uint64) float64 {
+		if flusherStatus.SnapshotEntries == 0 {
+			return 0
+		}
+		return float64(total) / float64(flusherStatus.SnapshotEntries)
+	}
 
 	_, _, headLSN := s.Boundaries()
 	checkpointLSN := s.CheckpointLSN()
@@ -279,19 +306,29 @@ func reportWALStoreContentionMetrics(
 	b.ReportMetric(float64(syncDuration.Nanoseconds()), "final_sync_ns")
 	b.ReportMetric(float64(drainDuration.Nanoseconds()), "final_drain_ns")
 	b.ReportMetric(perEntry(flusherStatus.SnapshotEntries), "flush_snapshot_entries/entry")
+	b.ReportMetric(perEntry(flusherStatus.SnapshotUniqueWALRecords), "flush_unique_wal_records/entry")
+	b.ReportMetric(perEntry(flusherStatus.SnapshotRecordReuseCandidates), "flush_record_reuse_opportunities/entry")
+	b.ReportMetric(perSnapshotEntry(flusherStatus.SnapshotUniqueWALRecords), "flush_unique_wal_records/snapshot_entry")
+	b.ReportMetric(perSnapshotEntry(flusherStatus.SnapshotRecordReuseCandidates), "flush_record_reuse_opportunities/snapshot_entry")
 	b.ReportMetric(perEntry(flusherStatus.SnapshotDurationNanos), "flush_snapshot_ns/entry")
 	b.ReportMetric(perEntry(flusherStatus.OpportunityAnalysisNanos), "flush_opportunity_ns/entry")
 	b.ReportMetric(perEntry(flusherStatus.ValidatedRecords), "flush_validated_records/entry")
 	b.ReportMetric(float64(flusherStatus.ValidationFailures), "flush_validation_failures")
 	b.ReportMetric(perEntry(flusherStatus.SupersededEntries), "flush_superseded_entries/entry")
 	b.ReportMetric(perEntry(flusherStatus.WALHeaderReadOps), "flush_header_reads/entry")
+	b.ReportMetric(perValidatedRecord(flusherStatus.WALHeaderReadOps), "flush_header_reads/validated_record")
 	b.ReportMetric(float64(flusherStatus.WALHeaderReadFailures), "flush_header_read_failures")
 	b.ReportMetric(perEntry(flusherStatus.WALHeaderReadBytes), "flush_header_read_bytes/entry")
 	b.ReportMetric(perEntry(flusherStatus.WALHeaderReadDurationNanos), "flush_header_read_ns/entry")
 	b.ReportMetric(perEntry(flusherStatus.WALRecordReadOps), "flush_record_reads/entry")
+	b.ReportMetric(perValidatedRecord(flusherStatus.WALRecordReadOps), "flush_record_reads/validated_record")
 	b.ReportMetric(float64(flusherStatus.WALRecordReadFailures), "flush_record_read_failures")
 	b.ReportMetric(perEntry(flusherStatus.WALRecordReadBytes), "flush_record_read_bytes/entry")
 	b.ReportMetric(perEntry(flusherStatus.WALRecordReadDurationNanos), "flush_record_read_ns/entry")
+	b.ReportMetric(perEntry(flusherStatus.MaterializationReadOps), "flush_materialization_reads/entry")
+	b.ReportMetric(perValidatedRecord(flusherStatus.MaterializationReadOps), "flush_materialization_reads/validated_record")
+	b.ReportMetric(perEntry(flusherStatus.MaterializationReadBytes), "flush_materialization_read_bytes/entry")
+	b.ReportMetric(perValidatedRecord(flusherStatus.MaterializationRecordReuseHits), "flush_record_reuse_hits/validated_record")
 	b.ReportMetric(perEntry(flusherStatus.ExtentWriteOps), "extent_write_ops/entry")
 	b.ReportMetric(float64(flusherStatus.ExtentWriteFailures), "extent_write_failures")
 	b.ReportMetric(perEntry(flusherStatus.ExtentWriteBytes), "extent_write_bytes/entry")

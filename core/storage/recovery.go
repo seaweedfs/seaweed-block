@@ -119,7 +119,10 @@ func recoverWAL(fd *os.File, sb *superblock, dm *dirtyMap) (recoveryResult, erro
 			case walEntryWrite:
 				blocks := entry.Length / sb.BlockSize
 				for i := uint32(0); i < blocks; i++ {
-					dm.putAt(entry.LBA+uint64(i), pos, i*sb.BlockSize, entry.LSN, sb.BlockSize)
+					dm.putAt(
+						entry.LBA+uint64(i), pos, i*sb.BlockSize,
+						entry.LSN, sb.BlockSize, entrySize,
+					)
 				}
 				result.EntriesReplayed++
 			case walEntryWriteBatch:
@@ -133,7 +136,10 @@ func recoverWAL(fd *os.File, sb *superblock, dm *dirtyMap) (recoveryResult, erro
 					if lsn <= checkpointLSN {
 						continue
 					}
-					dm.putAt(entry.LBA+uint64(i), pos, i*sb.BlockSize, lsn, sb.BlockSize)
+					dm.putAt(
+						entry.LBA+uint64(i), pos, i*sb.BlockSize,
+						lsn, sb.BlockSize, entrySize,
+					)
 				}
 				result.EntriesReplayed++
 			case walEntryTrim:
@@ -142,7 +148,10 @@ func recoverWAL(fd *os.File, sb *superblock, dm *dirtyMap) (recoveryResult, erro
 					blocks = 1
 				}
 				for i := uint32(0); i < blocks; i++ {
-					dm.put(entry.LBA+uint64(i), pos, entry.LSN, sb.BlockSize)
+					dm.putAt(
+						entry.LBA+uint64(i), pos, i*sb.BlockSize,
+						entry.LSN, sb.BlockSize, entrySize,
+					)
 				}
 				result.EntriesReplayed++
 			case walEntryBarrier:

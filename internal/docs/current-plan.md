@@ -94,6 +94,8 @@ Build one disabled-by-default comparison path for the shipped `WALStore` that:
 
 ### D1. Record Geometry And Baseline Contract
 
+Implementation status: complete locally; exact-commit Linux admission pending.
+
 - Extend the dirty-entry in-memory contract with only the geometry needed to
   size one record read. Populate it at ordinary append, trim, WriteBatch,
   multi-block append, and recovery replay.
@@ -112,6 +114,13 @@ Build one disabled-by-default comparison path for the shipped `WALStore` that:
 - Require a dedicated scoped `strace` control to corroborate the product
   counter shape. Whole-process counts may be reported as qualitative context
   but cannot satisfy admission.
+
+The D1 review exposed and fixed a pre-existing legacy range-trim inconsistency:
+recovery expanded the record per block, while dirty reads treated trim length
+as payload and the flusher accepted only the base LBA. The corrected fixture
+starts from nonzero extents and proves read-only, dirty-read, writeback,
+checkpoint, crash/reopen, and explicit-close behavior for a three-block trim.
+This changes no disk format or default materialization mode.
 
 ### D2. Single-Read Fail-Closed Materialization
 

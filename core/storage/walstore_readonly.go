@@ -113,10 +113,10 @@ func (r *WALStoreReader) readFromWAL(walRelOff uint64, dataOffset uint32) ([]byt
 	if _, err := r.fd.ReadAt(headerBuf, absOff); err != nil {
 		return nil, fmt.Errorf("storage: OpenReadOnly WAL header: %w", err)
 	}
-	length := parseLengthFromHeader(headerBuf)
-	if length == 0 {
+	if headerBuf[16] == walEntryTrim {
 		return make([]byte, r.sb.BlockSize), nil
 	}
+	length := parseLengthFromHeader(headerBuf)
 	if dataOffset >= length {
 		return nil, fmt.Errorf("storage: OpenReadOnly WAL data offset %d >= length %d", dataOffset, length)
 	}

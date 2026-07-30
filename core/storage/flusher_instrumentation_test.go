@@ -61,9 +61,23 @@ func TestFlusherInstrumentationCountsCompleteCycle(t *testing.T) {
 		t.Fatalf("snapshot/validated/superseded=%d/%d/%d want 4/4/0",
 			got.SnapshotEntries, got.ValidatedRecords, got.SupersededEntries)
 	}
+	if got.SnapshotUniqueWALRecords != 4 || got.SnapshotRecordReuseCandidates != 0 {
+		t.Fatalf("unique/reuse-opportunities=%d/%d want 4/0",
+			got.SnapshotUniqueWALRecords, got.SnapshotRecordReuseCandidates)
+	}
 	if got.WALHeaderReadOps != 4 || got.WALRecordReadOps != 4 {
 		t.Fatalf("header/record reads=%d/%d want 4/4",
 			got.WALHeaderReadOps, got.WALRecordReadOps)
+	}
+	if got.MaterializationReadOps != 8 ||
+		got.MaterializationReadBytes != 4*walEntryHeaderSize+4*(walEntryHeaderSize+4096) {
+		t.Fatalf("materialization reads/bytes=%d/%d want 8/%d",
+			got.MaterializationReadOps, got.MaterializationReadBytes,
+			4*walEntryHeaderSize+4*(walEntryHeaderSize+4096))
+	}
+	if got.MaterializationRecordReuseHits != 0 {
+		t.Fatalf("materialization reuse hits=%d want 0 on default path",
+			got.MaterializationRecordReuseHits)
 	}
 	if got.ExtentWriteOps != 4 || got.ExtentWriteBytes != 4*4096 ||
 		got.ExtentWriteMaxBytes != 4096 || got.ExtentWriteFailures != 0 {
@@ -136,6 +150,82 @@ func TestFlusherInstrumentationSeparatesSnapshotAndWrittenOpportunity(t *testing
 		t.Fatalf("written minimum/runs/singletons/coalescible=%d/%d/%d/%d want 2/2/2/0",
 			got.WrittenBoundedWriteMinimum, got.WrittenRunCount,
 			got.WrittenSingletonRuns, got.WrittenCoalescibleEntries)
+	}
+}
+
+func TestFlusherInstrumentationCountsWALRecordMaterializationShape(t *testing.T) {
+	entries := []snapshotEntry{
+		{LBA: 0, WALOffset: 100, RecordSize: 8230},
+		{LBA: 1, WALOffset: 100, RecordSize: 8230},
+		{LBA: 2, WALOffset: 100, RecordSize: 8230},
+		{LBA: 9, WALOffset: 900, RecordSize: 4134},
+	}
+	var instr flusherInstrumentation
+	finish := instr.recordCycle(time.Now(), time.Nanosecond, entries, 4096)
+	instr.recordWALHeaderRead(walEntryHeaderSize, time.Nanosecond, nil)
+	instr.recordWALRecordRead(4134, time.Nanosecond, nil)
+	instr.recordMaterializationReuseHit()
+	finish(true)
+
+	got := instr.snapshot()
+	if got.SnapshotEntries != 4 ||
+		got.SnapshotUniqueWALRecords != 2 ||
+		got.SnapshotRecordReuseCandidates != 2 {
+		t.Fatalf("entries/unique/reuse-opportunities=%d/%d/%d want 4/2/2",
+			got.SnapshotEntries, got.SnapshotUniqueWALRecords,
+			got.SnapshotRecordReuseCandidates)
+	}
+	if got.MaterializationReadOps != 2 ||
+		got.MaterializationReadBytes != walEntryHeaderSize+4134 {
+		t.Fatalf("materialization reads/bytes=%d/%d want 2/%d",
+			got.MaterializationReadOps, got.MaterializationReadBytes,
+			walEntryHeaderSize+4134)
+	}
+	if got.MaterializationRecordReuseHits != 1 {
+		t.Fatalf("materialization reuse hits=%d want 1", got.MaterializationRecordReuseHits)
+	}
+}
+
+func TestFlusherInstrumentationExposesCurrentDuplicateReadsForSharedRecord(t *testing.T) {
+	s, err := CreateWALStore(filepath.Join(t.TempDir(), "store.bin"), 16, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	s.DisableAutoFlushForRecoveryTest()
+	s.enableMultiBlockRecordsForTest(true)
+
+	if _, err := s.WriteBatch(3, [][]byte{
+		makeBlock(4096, 0x81),
+		makeBlock(4096, 0x82),
+		makeBlock(4096, 0x83),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.flusher.flushOnce(); err != nil {
+		t.Fatal(err)
+	}
+
+	got := s.FlusherInstrumentation()
+	if got.SnapshotEntries != 3 ||
+		got.SnapshotUniqueWALRecords != 1 ||
+		got.SnapshotRecordReuseCandidates != 2 {
+		t.Fatalf("entries/unique/reuse-opportunities=%d/%d/%d want 3/1/2",
+			got.SnapshotEntries, got.SnapshotUniqueWALRecords,
+			got.SnapshotRecordReuseCandidates)
+	}
+	if got.WALHeaderReadOps != 3 || got.WALRecordReadOps != 3 ||
+		got.MaterializationReadOps != 6 {
+		t.Fatalf("header/record/materialization reads=%d/%d/%d want 3/3/6",
+			got.WALHeaderReadOps, got.WALRecordReadOps,
+			got.MaterializationReadOps)
+	}
+	if got.MaterializationRecordReuseHits != 0 {
+		t.Fatalf("materialization reuse hits=%d want 0 before D3",
+			got.MaterializationRecordReuseHits)
 	}
 }
 

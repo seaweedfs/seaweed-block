@@ -339,8 +339,23 @@ func (f *flusher) readDirtyRecord(e snapshotEntry) (data []byte, entrySize uint6
 		}
 		return entry.Data[start:end], entrySize, nil
 	case walEntryTrim:
-		if entry.LSN != e.LSN || entry.LBA != e.LBA || e.DataOffset != 0 ||
-			e.Length != blockSize {
+		trimBlocks := uint64(1)
+		if entry.Length > 0 {
+			if entry.Length%blockSize != 0 {
+				return nil, 0, fmt.Errorf(
+					"flusher: invalid dirty WAL trim LBA %d offset %d length %d",
+					e.LBA, e.WALOffset, entry.Length)
+			}
+			trimBlocks = uint64(entry.Length / blockSize)
+		}
+		if e.DataOffset%blockSize != 0 || e.Length != blockSize {
+			return nil, 0, fmt.Errorf(
+				"flusher: invalid dirty WAL trim LBA %d offset %d",
+				e.LBA, e.WALOffset)
+		}
+		blockIndex := uint64(e.DataOffset / blockSize)
+		if entry.LSN != e.LSN || blockIndex >= trimBlocks ||
+			entry.LBA+blockIndex != e.LBA {
 			return nil, 0, fmt.Errorf(
 				"flusher: WAL slot mismatch trim LBA %d offset %d dirty LSN %d record LSN %d",
 				e.LBA, e.WALOffset, e.LSN, entry.LSN)
