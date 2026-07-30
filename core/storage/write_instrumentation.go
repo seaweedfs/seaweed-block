@@ -22,6 +22,8 @@ type WriteInstrumentationStatus struct {
 	WALAppendDurationNanos      uint64
 	WALAppendLockWaitOps        uint64
 	WALAppendLockWaitNanos      uint64
+	WriteCommitLockWaitOps      uint64
+	WriteCommitLockWaitNanos    uint64
 	WALAppendWriteAtCalls       uint64
 	WALAppendWriteAtBytes       uint64
 	WALAppendWriteAtMaxBytes    uint64
@@ -52,6 +54,8 @@ type writeInstrumentation struct {
 	walAppendDurationNanos      atomic.Uint64
 	walAppendLockWaitOps        atomic.Uint64
 	walAppendLockWaitNanos      atomic.Uint64
+	writeCommitLockWaitOps      atomic.Uint64
+	writeCommitLockWaitNanos    atomic.Uint64
 	walAppendWriteAtCalls       atomic.Uint64
 	walAppendWriteAtBytes       atomic.Uint64
 	walAppendWriteAtMaxBytes    atomic.Uint64
@@ -113,6 +117,14 @@ func (i *writeInstrumentation) recordWALAppendLockWait(d time.Duration) {
 	i.walAppendLockWaitNanos.Add(storageDurationNanos(d))
 }
 
+func (i *writeInstrumentation) recordWriteCommitLockWait(d time.Duration) {
+	if i == nil {
+		return
+	}
+	i.writeCommitLockWaitOps.Add(1)
+	i.writeCommitLockWaitNanos.Add(storageDurationNanos(d))
+}
+
 func (i *writeInstrumentation) recordWALAppendWriteAt(bytes int) {
 	if i == nil || bytes <= 0 {
 		return
@@ -163,6 +175,8 @@ func (i *writeInstrumentation) snapshot() WriteInstrumentationStatus {
 		WALAppendDurationNanos:      i.walAppendDurationNanos.Load(),
 		WALAppendLockWaitOps:        i.walAppendLockWaitOps.Load(),
 		WALAppendLockWaitNanos:      i.walAppendLockWaitNanos.Load(),
+		WriteCommitLockWaitOps:      i.writeCommitLockWaitOps.Load(),
+		WriteCommitLockWaitNanos:    i.writeCommitLockWaitNanos.Load(),
 		WALAppendWriteAtCalls:       i.walAppendWriteAtCalls.Load(),
 		WALAppendWriteAtBytes:       i.walAppendWriteAtBytes.Load(),
 		WALAppendWriteAtMaxBytes:    i.walAppendWriteAtMaxBytes.Load(),

@@ -50,7 +50,6 @@ type VolumeStats struct {
 }
 
 type orderedLocalWrite struct {
-	ctx    context.Context
 	write  LocalWrite
 	result chan error
 }
@@ -102,10 +101,13 @@ type ReplicationVolume struct {
 
 	orderMu     sync.Mutex
 	nextShipLSN uint64
+	inflightLSN uint64
 	pending     map[uint64]*orderedLocalWrite
 	draining    bool
 	orderClosed bool
 	progress    chan struct{}
+	lifecycle   context.Context
+	cancel      context.CancelFunc
 
 	// Probe loop integration. Set once via ConfigureProbeLoop;
 	// started via StartProbeLoop after primary admit; stopped FIRST
@@ -154,6 +156,7 @@ type dualLaneExecutorFactory func(store storage.LogicalStorage, replicaAddr, rep
 // Borrows: store (LogicalStorage). Provider owns engine lifecycle;
 // ReplicationVolume MUST NOT call store.Close() (BUG-005).
 func NewReplicationVolume(volumeID string, store storage.LogicalStorage) *ReplicationVolume {
+	lifecycle, cancel := context.WithCancel(context.Background())
 	return &ReplicationVolume{
 		volumeID:       volumeID,
 		store:          store,
@@ -164,6 +167,8 @@ func NewReplicationVolume(volumeID string, store storage.LogicalStorage) *Replic
 		nextShipLSN:    store.NextLSN(),
 		pending:        make(map[uint64]*orderedLocalWrite),
 		progress:       make(chan struct{}),
+		lifecycle:      lifecycle,
+		cancel:         cancel,
 	}
 }
 
@@ -528,15 +533,11 @@ func formatIDSet(s map[string]struct{}) string {
 // Owns: an immutable copy of w.Data while queued; per-peer error aggregation
 // and logging.
 func (v *ReplicationVolume) OnLocalWrite(ctx context.Context, w LocalWrite) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
 	if w.LSN == 0 {
 		return errors.New("replication: OnLocalWrite: LSN must be nonzero")
 	}
 	owned := append([]byte(nil), w.Data...)
 	req := &orderedLocalWrite{
-		ctx:    ctx,
 		write:  LocalWrite{LBA: w.LBA, Data: owned, LSN: w.LSN},
 		result: make(chan error, 1),
 	}
@@ -555,6 +556,10 @@ func (v *ReplicationVolume) OnLocalWrite(ctx context.Context, w LocalWrite) erro
 		v.orderMu.Unlock()
 		return fmt.Errorf("replication: OnLocalWrite: duplicate pending LSN %d", w.LSN)
 	}
+	if w.LSN == v.inflightLSN {
+		v.orderMu.Unlock()
+		return fmt.Errorf("replication: OnLocalWrite: duplicate in-flight LSN %d", w.LSN)
+	}
 	v.pending[w.LSN] = req
 	leader := !v.draining
 	if leader {
@@ -563,7 +568,7 @@ func (v *ReplicationVolume) OnLocalWrite(ctx context.Context, w LocalWrite) erro
 	v.orderMu.Unlock()
 
 	if leader {
-		v.drainOrderedWrites()
+		go v.drainOrderedWrites()
 	}
 
 	select {
@@ -589,12 +594,14 @@ func (v *ReplicationVolume) drainOrderedWrites() {
 			return
 		}
 		delete(v.pending, v.nextShipLSN)
+		v.inflightLSN = req.write.LSN
 		v.orderMu.Unlock()
 
-		err := v.shipLocalWrite(context.WithoutCancel(req.ctx), req.write)
+		err := v.shipLocalWrite(v.lifecycle, req.write)
 		req.result <- err
 
 		v.orderMu.Lock()
+		v.inflightLSN = 0
 		v.nextShipLSN++
 		if !v.orderClosed {
 			close(v.progress)
@@ -725,6 +732,7 @@ func (v *ReplicationVolume) Stop() error {
 // (via peer.Close()).
 // Borrows: nothing.
 func (v *ReplicationVolume) Close() error {
+	v.cancel()
 	v.orderMu.Lock()
 	if !v.orderClosed {
 		v.orderClosed = true

@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -32,6 +31,12 @@ func TestWALStore_WriteInstrumentationCountsAppendLockWait(t *testing.T) {
 	if got.WALAppendLockWaitNanos == 0 {
 		t.Fatal("WALAppendLockWaitNanos=0 want diagnostic evidence")
 	}
+	if got.WriteCommitLockWaitOps != 2 {
+		t.Fatalf("WriteCommitLockWaitOps=%d want 2", got.WriteCommitLockWaitOps)
+	}
+	if got.WriteCommitLockWaitNanos == 0 {
+		t.Fatal("WriteCommitLockWaitNanos=0 want diagnostic evidence")
+	}
 }
 
 func BenchmarkPhase167WALStoreContention(b *testing.B) {
@@ -53,7 +58,7 @@ func BenchmarkPhase167WALStoreContention(b *testing.B) {
 				data[i][0] = byte(i + 1)
 			}
 			latencies := make([]int64, b.N)
-			var next atomic.Int64
+			workerOps := make([]int, writers)
 			var firstErr error
 			var errOnce sync.Once
 			start := make(chan struct{})
@@ -67,11 +72,7 @@ func BenchmarkPhase167WALStoreContention(b *testing.B) {
 				go func(worker int) {
 					defer wg.Done()
 					<-start
-					for {
-						idx := int(next.Add(1) - 1)
-						if idx >= b.N {
-							return
-						}
+					for idx := worker; idx < b.N; idx += writers {
 						opStart := time.Now()
 						_, writeErr := s.Write(uint32(idx%numBlocks), data[worker])
 						latencies[idx] = time.Since(opStart).Nanoseconds()
@@ -79,6 +80,7 @@ func BenchmarkPhase167WALStoreContention(b *testing.B) {
 							errOnce.Do(func() { firstErr = writeErr })
 							return
 						}
+						workerOps[worker]++
 					}
 				}(worker)
 			}
@@ -92,10 +94,18 @@ func BenchmarkPhase167WALStoreContention(b *testing.B) {
 			if firstErr != nil {
 				b.Fatal(firstErr)
 			}
+			if b.N >= writers {
+				for worker, ops := range workerOps {
+					if ops == 0 {
+						b.Fatalf("worker %d completed zero writes", worker)
+					}
+				}
+			}
 
 			status := s.WriteInstrumentation()
 			reportLatencyPercentiles(b, latencies)
 			b.ReportMetric(float64(status.WALAppendLockWaitNanos)/float64(status.WALAppendLockWaitOps), "wal_lock_wait_ns/op")
+			b.ReportMetric(float64(status.WriteCommitLockWaitNanos)/float64(status.WriteCommitLockWaitOps), "commit_lock_wait_ns/op")
 			b.ReportMetric(float64(b.N)/wallDuration.Seconds(), "write_ops/s")
 		})
 	}

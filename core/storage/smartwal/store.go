@@ -57,6 +57,7 @@ type Store struct {
 	hdr       *header
 	ring      *ring
 	committer *storage.GroupCommitter // batches concurrent Sync into one fsync
+	syncCache func() error
 
 	extentBase int64
 
@@ -167,6 +168,7 @@ func openInitialized(path string, f *os.File, hdr *header) (*Store, error) {
 		MaxDelay: 1 * time.Millisecond,
 		MaxBatch: 64,
 	})
+	s.syncCache = s.committer.SyncCache
 	go s.committer.Run()
 	return s, nil
 }
@@ -216,13 +218,13 @@ func (s *Store) Write(lba uint32, data []byte) (uint64, error) {
 		return 0, errors.New("smartwal: Write after Close")
 	}
 	lsn := s.nextLSN
-	s.nextLSN++
-	s.mu.Unlock()
-
 	if err := s.writeAt(lba, lsn, data, flagWrite); err != nil {
+		s.mu.Unlock()
 		return 0, err
 	}
-	s.bumpHead(lsn)
+	s.nextLSN++
+	s.bumpHeadLocked(lsn)
+	s.mu.Unlock()
 	return lsn, nil
 }
 
@@ -243,19 +245,18 @@ func (s *Store) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error) {
 		s.mu.Unlock()
 		return nil, errors.New("smartwal: WriteBatch after Close")
 	}
-	firstLSN := s.nextLSN
-	s.nextLSN += uint64(len(blocks))
-	s.mu.Unlock()
-
 	lsns := make([]uint64, 0, len(blocks))
 	for i, data := range blocks {
-		lsn := firstLSN + uint64(i)
+		lsn := s.nextLSN
 		if err := s.writeAt(startLBA+uint32(i), lsn, data, flagWrite); err != nil {
+			s.mu.Unlock()
 			return lsns, err
 		}
-		s.bumpHead(lsn)
+		s.nextLSN++
+		s.bumpHeadLocked(lsn)
 		lsns = append(lsns, lsn)
 	}
+	s.mu.Unlock()
 	return lsns, nil
 }
 
@@ -316,15 +317,16 @@ func (s *Store) Sync() (uint64, error) {
 		s.mu.RUnlock()
 		return 0, errors.New("smartwal: Sync after Close")
 	}
+	targetHead := s.walHead
 	s.mu.RUnlock()
-	if err := s.committer.SyncCache(); err != nil {
+	if err := s.syncCache(); err != nil {
 		return 0, fmt.Errorf("smartwal: group commit fsync: %w", err)
 	}
 	s.syncs.Add(1)
 
 	s.mu.Lock()
-	if s.walHead > s.syncedLSN {
-		s.syncedLSN = s.walHead
+	if targetHead > s.syncedLSN {
+		s.syncedLSN = targetHead
 	}
 	frontier := s.syncedLSN
 	s.mu.Unlock()
@@ -413,17 +415,15 @@ func (s *Store) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
 	if len(data) != int(s.hdr.BlockSize) {
 		return fmt.Errorf("smartwal: apply data size %d != block size %d", len(data), s.hdr.BlockSize)
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := s.writeAt(lba, lsn, data, flagWrite); err != nil {
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if lsn >= s.nextLSN {
 		s.nextLSN = lsn + 1
 	}
-	if lsn > s.walHead {
-		s.walHead = lsn
-	}
+	s.bumpHeadLocked(lsn)
 	return nil
 }
 
@@ -511,12 +511,9 @@ func (s *Store) Close() error {
 	return nil
 }
 
-// bumpHead advances the in-memory walHead boundary under lock. Called
-// after a successful Write/ApplyEntry so subsequent Boundaries()
-// readers see the new head.
-func (s *Store) bumpHead(lsn uint64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// bumpHeadLocked advances the in-memory walHead boundary after a successful
+// append. The caller holds s.mu so nextLSN and the visible head move together.
+func (s *Store) bumpHeadLocked(lsn uint64) {
 	if lsn > s.walHead {
 		s.walHead = lsn
 	}

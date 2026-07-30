@@ -92,19 +92,37 @@ func TestReplicationVolume_SyncWaitingForMissingLSNHonorsContext(t *testing.T) {
 	}
 }
 
-func TestReplicationVolume_OnLocalWriteRejectsPreCanceledContext(t *testing.T) {
+func TestReplicationVolume_CanceledCallerDoesNotDropCommittedLSN(t *testing.T) {
+	addr, replica := replicaHarness(t, "canceled-caller")
 	v := volumeHarness(t, "vol-canceled")
+	if err := v.UpdateReplicaSet(1, []ReplicaTarget{targetFor("r1", addr, 1, 1)}); err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err := v.OnLocalWrite(ctx, LocalWrite{LBA: 1, Data: make([]byte, 4096), LSN: 1})
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("OnLocalWrite error=%v want context canceled", err)
+	first := make([]byte, 4096)
+	first[0] = 0x41
+	_ = v.OnLocalWrite(ctx, LocalWrite{LBA: 1, Data: first, LSN: 1})
+	waitForReplicaLBA(t, replica, 1, 0x41, 0, time.Second)
+
+	second := make([]byte, 4096)
+	second[0] = 0x42
+	if err := v.OnLocalWrite(context.Background(), LocalWrite{LBA: 2, Data: second, LSN: 2}); err != nil {
+		t.Fatalf("LSN 2 remained blocked after canceled LSN 1 caller: %v", err)
 	}
+	waitForReplicaLBA(t, replica, 2, 0x42, 0, time.Second)
+}
+
+func TestReplicationVolume_RejectsDuplicateInFlightLSN(t *testing.T) {
+	v := volumeHarness(t, "vol-duplicate-inflight")
 	v.orderMu.Lock()
-	defer v.orderMu.Unlock()
-	if len(v.pending) != 0 {
-		t.Fatalf("pending writes=%d want 0", len(v.pending))
+	v.inflightLSN = 1
+	v.orderMu.Unlock()
+
+	err := v.OnLocalWrite(context.Background(), LocalWrite{LBA: 1, Data: make([]byte, 4096), LSN: 1})
+	if err == nil || !strings.Contains(err.Error(), "duplicate in-flight LSN 1") {
+		t.Fatalf("duplicate in-flight error=%v", err)
 	}
 }
 

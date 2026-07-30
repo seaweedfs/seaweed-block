@@ -38,6 +38,102 @@ func freshStore(t *testing.T) *Store {
 	return s
 }
 
+func TestSmartWAL_FailedAppendDoesNotConsumeLSN(t *testing.T) {
+	s := freshStore(t)
+	bad, err := os.CreateTemp(t.TempDir(), "closed-ring")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bad.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s.ring.fd = bad
+	if _, err := s.Write(0, makeBlock(4096, 0xA1)); err == nil {
+		t.Fatal("Write with closed ring fd succeeded")
+	}
+	if got := s.NextLSN(); got != 1 {
+		t.Fatalf("NextLSN after failed append=%d want 1", got)
+	}
+
+	s.ring.fd = s.fd
+	lsn, err := s.Write(0, makeBlock(4096, 0xA2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lsn != 1 {
+		t.Fatalf("successful Write LSN=%d want reused LSN 1", lsn)
+	}
+
+	s.ring.fd = bad
+	lsns, err := s.WriteBatch(1, [][]byte{
+		makeBlock(4096, 0xB1),
+		makeBlock(4096, 0xB2),
+	})
+	if err == nil {
+		t.Fatal("WriteBatch with closed ring fd succeeded")
+	}
+	if len(lsns) != 0 {
+		t.Fatalf("failed batch returned LSNs=%v want none", lsns)
+	}
+	if got := s.NextLSN(); got != 2 {
+		t.Fatalf("NextLSN after failed batch=%d want 2", got)
+	}
+
+	s.ring.fd = s.fd
+	lsns, err = s.WriteBatch(1, [][]byte{
+		makeBlock(4096, 0xC1),
+		makeBlock(4096, 0xC2),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lsns) != 2 || lsns[0] != 2 || lsns[1] != 3 {
+		t.Fatalf("successful batch LSNs=%v want [2 3]", lsns)
+	}
+}
+
+func TestSmartWAL_SyncDoesNotClaimConcurrentWrite(t *testing.T) {
+	s := freshStore(t)
+	if lsn, err := s.Write(0, makeBlock(4096, 0xA1)); err != nil || lsn != 1 {
+		t.Fatalf("first Write lsn=%d err=%v", lsn, err)
+	}
+
+	syncStarted := make(chan struct{})
+	releaseSync := make(chan struct{})
+	s.syncCache = func() error {
+		close(syncStarted)
+		<-releaseSync
+		return nil
+	}
+	type syncResult struct {
+		frontier uint64
+		err      error
+	}
+	result := make(chan syncResult, 1)
+	go func() {
+		frontier, syncErr := s.Sync()
+		result <- syncResult{frontier: frontier, err: syncErr}
+	}()
+
+	<-syncStarted
+	if lsn, err := s.Write(1, makeBlock(4096, 0xA2)); err != nil || lsn != 2 {
+		t.Fatalf("concurrent Write lsn=%d err=%v", lsn, err)
+	}
+	close(releaseSync)
+	got := <-result
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	if got.frontier != 1 {
+		t.Fatalf("Sync frontier=%d want captured frontier 1", got.frontier)
+	}
+	R, _, H := s.Boundaries()
+	if R != 1 || H != 2 {
+		t.Fatalf("boundaries R=%d H=%d want R=1 H=2", R, H)
+	}
+}
+
 // --- LogicalStorage contract surface (the same shape as the main
 // core/storage contract tests). ---
 
@@ -651,4 +747,3 @@ func TestSmartWAL_RingWrapPreservesLatestPerLBA(t *testing.T) {
 		}
 	}
 }
-

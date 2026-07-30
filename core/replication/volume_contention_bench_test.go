@@ -1,7 +1,9 @@
 package replication
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
@@ -9,7 +11,6 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -47,8 +48,10 @@ func BenchmarkPhase167RF3SyncQuorumContention(b *testing.B) {
 			b.Cleanup(func() { _ = primary.Close() })
 
 			targets := make([]ReplicaTarget, 0, 2)
+			replicaStores := make([]*storage.BlockStore, 0, 2)
 			for i := 0; i < 2; i++ {
 				replicaStore := storage.NewBlockStore(numBlocks, blockSize)
+				replicaStores = append(replicaStores, replicaStore)
 				listener, listenErr := transport.NewReplicaListener("127.0.0.1:0", replicaStore)
 				if listenErr != nil {
 					b.Fatal(listenErr)
@@ -94,10 +97,9 @@ func BenchmarkPhase167RF3SyncQuorumContention(b *testing.B) {
 			data := make([][]byte, writers)
 			for i := range data {
 				data[i] = make([]byte, blockSize)
-				data[i][0] = byte(i + 1)
 			}
 			latencies := make([]int64, b.N)
-			var next atomic.Int64
+			workerOps := make([]int, writers)
 			var firstErr error
 			var errOnce sync.Once
 			start := make(chan struct{})
@@ -111,12 +113,9 @@ func BenchmarkPhase167RF3SyncQuorumContention(b *testing.B) {
 				go func(worker int) {
 					defer wg.Done()
 					<-start
-					for {
-						idx := int(next.Add(1) - 1)
-						if idx >= b.N {
-							return
-						}
+					for idx := worker; idx < b.N; idx += writers {
 						opStart := time.Now()
+						fillPhase167Block(data[worker], idx)
 						_, writeErr := backend.Write(
 							context.Background(),
 							int64(idx%numBlocks)*blockSize,
@@ -127,6 +126,7 @@ func BenchmarkPhase167RF3SyncQuorumContention(b *testing.B) {
 							errOnce.Do(func() { firstErr = writeErr })
 							return
 						}
+						workerOps[worker]++
 					}
 				}(worker)
 			}
@@ -145,11 +145,47 @@ func BenchmarkPhase167RF3SyncQuorumContention(b *testing.B) {
 			if stats.WriteOps != uint64(b.N) {
 				b.Fatalf("replication write ops=%d want %d", stats.WriteOps, b.N)
 			}
+			if b.N >= writers {
+				for worker, ops := range workerOps {
+					if ops == 0 {
+						b.Fatalf("worker %d completed zero writes", worker)
+					}
+				}
+			}
+			for replicaIndex, replicaStore := range replicaStores {
+				_, _, head := replicaStore.Boundaries()
+				if head != uint64(b.N) {
+					b.Fatalf("replica %d head=%d want %d", replicaIndex, head, b.N)
+				}
+				if b.N <= numBlocks {
+					for idx := 0; idx < b.N; idx++ {
+						got, readErr := replicaStore.Read(uint32(idx))
+						if readErr != nil {
+							b.Fatal(readErr)
+						}
+						want := make([]byte, blockSize)
+						fillPhase167Block(want, idx)
+						if !bytes.Equal(got, want) {
+							b.Fatalf("replica %d LBA %d data mismatch", replicaIndex, idx)
+						}
+					}
+				}
+			}
 			reportReplicationLatencyPercentiles(b, latencies)
 			b.ReportMetric(float64(stats.WriteLockWaitNanos)/float64(stats.WriteOps), "repl_lock_wait_ns/op")
 			b.ReportMetric(float64(stats.WriteFanoutNanos)/float64(stats.WriteOps), "repl_fanout_ns/op")
 			b.ReportMetric(float64(b.N)/wallDuration.Seconds(), "write_ops/s")
 		})
+	}
+}
+
+func fillPhase167Block(block []byte, operation int) {
+	for offset := 0; offset+8 <= len(block); offset += 8 {
+		value := uint64(uint32(operation+1))<<32 | uint64(uint32(offset/8))
+		binary.LittleEndian.PutUint64(block[offset:offset+8], value)
+	}
+	for offset := len(block) &^ 7; offset < len(block); offset++ {
+		block[offset] = byte(operation + offset + 1)
 	}
 }
 
