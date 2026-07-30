@@ -446,8 +446,8 @@ func (e *BlockExecutor) doFence(replicaID string, lineage RecoveryLineage) {
 // A future optimization MUST NOT weaken this to epoch-only; the
 // full-lineage rule is load-bearing for the durability gate.
 //
-// Called by: DurabilityCoordinator.SyncLocalAndReplicas per-peer
-// fan-out.
+// Called by: replication's per-peer ordered work queue and by the legacy
+// synchronous durability coordinator contract.
 // Owns: per-call conn deadline (recoveryConnTimeout); lineage binding;
 // ack validation against the session's registered lineage.
 // Borrows: session by replicaID + lineage.SessionID; BarrierAck

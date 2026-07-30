@@ -161,6 +161,9 @@ type ReplicaPeer struct {
 	mu     sync.Mutex
 	state  ReplicaState
 	closed bool
+	// onHealthy lets the owning ReplicationVolume reopen a terminal work
+	// queue only after recovery has returned this peer to Healthy.
+	onHealthy func()
 
 	// Probe cooldown / in-flight state. All fields read+written
 	// under p.mu only.
@@ -654,8 +657,8 @@ func (p *ReplicaPeer) ShipEntry(ctx context.Context, lineage transport.RecoveryL
 // Caller uses targetLSN at the coordinator layer (comparing against
 // ack.AchievedLSN) to decide per-mode durability arithmetic.
 //
-// Called by: DurabilityCoordinator.SyncLocalAndReplicas per-peer
-// fan-out.
+// Called by: peerWorkQueue for the production ordered barrier path, and by
+// DurabilityCoordinator.SyncLocalAndReplicas in synchronous contract tests.
 // Owns: the error → Invalidate translation (peer state mutation).
 // Borrows: ctx + targetLSN from caller; lineage is read from peer's
 // own registered state.
@@ -755,8 +758,18 @@ func (p *ReplicaPeer) SetState(next ReplicaState) {
 		return
 	}
 	p.state = next
+	onHealthy := p.onHealthy
 	p.mu.Unlock()
 	log.Printf("replication: peer %s state %s → %s", p.target.ReplicaID, prev, next)
+	if prev != ReplicaHealthy && next == ReplicaHealthy && onHealthy != nil {
+		onHealthy()
+	}
+}
+
+func (p *ReplicaPeer) setOnHealthy(fn func()) {
+	p.mu.Lock()
+	p.onHealthy = fn
+	p.mu.Unlock()
 }
 
 // replicaStateTransitionAllowed is the table-driven transition gate.

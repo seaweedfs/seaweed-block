@@ -120,7 +120,8 @@ func NewDurabilityCoordinator() *DurabilityCoordinator {
 //     (Invalidate + Degraded) already happened inside peer.Barrier
 //     — see INV-REPL-BARRIER-FAILURE-DEGRADES-PEER pinned at T4b-3.
 //
-// Called by: ReplicationVolume.Sync (T4b-5).
+// Called by: synchronous durability contract tests. ReplicationVolume.Sync
+// uses lineage-scoped ordered queues so barriers cannot overtake writes.
 // Owns: parallel fan-out; DurabilityResult construction; FailedPeers
 // slice assembly.
 // Borrows: localSync closure from caller; peers slice from caller
@@ -257,4 +258,3 @@ func collectFailedPeerIDs(peers []*ReplicaPeer, errs []error) []string {
 	}
 	return failed
 }
-

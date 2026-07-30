@@ -47,6 +47,116 @@ func (f writeObserverFunc) Sync(ctx context.Context, targetLSN uint64) error {
 	return nil
 }
 
+type batchWriteObserverFunc struct {
+	writeObserverFunc
+	observeBatch func(context.Context, uint32, []uint64, [][]byte) error
+}
+
+type partialBatchStorage struct {
+	storage.LogicalStorage
+	err error
+}
+
+func (s partialBatchStorage) WriteBatch(_ uint32, _ [][]byte) ([]uint64, error) {
+	return []uint64{1}, s.err
+}
+
+func (f batchWriteObserverFunc) ObserveBatch(
+	ctx context.Context,
+	startLBA uint32,
+	lsns []uint64,
+	blocks [][]byte,
+) error {
+	if f.observeBatch != nil {
+		return f.observeBatch(ctx, startLBA, lsns, blocks)
+	}
+	return nil
+}
+
+func TestStorageBackend_StrictAckUsesBatchObserver(t *testing.T) {
+	b, _, s := newTestBackend(t, logicalStorageFactories()[0], 16, 4096)
+	b.SetWriteAckPolicy(durable.WriteAckRequireObserverAck)
+
+	var singleCalls atomic.Int64
+	var batchCalls atomic.Int64
+	b.SetWriteObserver(batchWriteObserverFunc{
+		writeObserverFunc: writeObserverFunc{
+			observe: func(context.Context, uint32, uint64, []byte) error {
+				singleCalls.Add(1)
+				return nil
+			},
+		},
+		observeBatch: func(_ context.Context, startLBA uint32, lsns []uint64, blocks [][]byte) error {
+			batchCalls.Add(1)
+			if startLBA != 0 || len(lsns) != 2 || len(blocks) != 2 {
+				t.Fatalf("batch start=%d lsns=%v blocks=%d", startLBA, lsns, len(blocks))
+			}
+			if lsns[0]+1 != lsns[1] {
+				t.Fatalf("batch LSNs are not contiguous: %v", lsns)
+			}
+			return nil
+		},
+	})
+
+	payload := make([]byte, 2*4096)
+	payload[0] = 0x41
+	payload[4096] = 0x42
+	n, err := b.Write(context.Background(), 0, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != len(payload) {
+		t.Fatalf("Write n=%d want %d", n, len(payload))
+	}
+	if batchCalls.Load() != 1 || singleCalls.Load() != 0 {
+		t.Fatalf("batch calls=%d single calls=%d want 1/0", batchCalls.Load(), singleCalls.Load())
+	}
+	for lba, marker := range []byte{0x41, 0x42} {
+		block, readErr := s.Read(uint32(lba))
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if block[0] != marker {
+			t.Fatalf("LBA %d marker=%x want %x", lba, block[0], marker)
+		}
+	}
+}
+
+func TestStorageBackend_PartialBatchObservesOnlyCommittedPrefix(t *testing.T) {
+	_, view, base := newTestBackend(t, logicalStorageFactories()[0], 16, 4096)
+	batchErr := errors.New("partial batch failure")
+	s := partialBatchStorage{LogicalStorage: base, err: batchErr}
+	id := frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1}
+	b := durable.NewStorageBackend(s, view, id)
+	b.SetOperational(true, "test")
+	b.SetWriteAckPolicy(durable.WriteAckRequireObserverAck)
+
+	var observedLSNs []uint64
+	var observedBlocks int
+	b.SetWriteObserver(batchWriteObserverFunc{
+		observeBatch: func(_ context.Context, startLBA uint32, lsns []uint64, blocks [][]byte) error {
+			if startLBA != 0 {
+				t.Fatalf("startLBA=%d want 0", startLBA)
+			}
+			observedLSNs = append(observedLSNs, lsns...)
+			observedBlocks = len(blocks)
+			return nil
+		},
+	})
+
+	payload := make([]byte, 2*4096)
+	n, err := b.Write(context.Background(), 0, payload)
+	if !errors.Is(err, batchErr) {
+		t.Fatalf("error=%v want partial batch failure", err)
+	}
+	if n != 4096 {
+		t.Fatalf("written=%d want committed prefix 4096", n)
+	}
+	if len(observedLSNs) != 1 || observedLSNs[0] != 1 || observedBlocks != 1 {
+		t.Fatalf("observed LSNs=%v blocks=%d want committed prefix [1]/1", observedLSNs, observedBlocks)
+	}
+}
+
 // ------- Matrix factory (Addendum A #1) -------
 
 // logicalStorageFactory is the shared factory contract; every

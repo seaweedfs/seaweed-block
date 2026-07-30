@@ -119,6 +119,13 @@ for writers in 1 2 4 8; do
   rf3_mibps="$(require_metric "${RF3_BENCH}" BenchmarkPhase167RF3SyncQuorumContention "${writers}" MB/s)"
   rf3_p99="$(require_metric "${RF3_BENCH}" BenchmarkPhase167RF3SyncQuorumContention "${writers}" p99_ns)"
   rf3_fanout="$(require_metric "${RF3_BENCH}" BenchmarkPhase167RF3SyncQuorumContention "${writers}" repl_fanout_ns/op)"
+  rf3_ack_wait="$(require_metric "${RF3_BENCH}" BenchmarkPhase167RF3SyncQuorumContention "${writers}" repl_ack_wait_ns/op)"
+  rf3_queue_depth="$(require_metric "${RF3_BENCH}" BenchmarkPhase167RF3SyncQuorumContention "${writers}" peer_queue_max_depth)"
+  rf3_queue_saturated="$(require_metric "${RF3_BENCH}" BenchmarkPhase167RF3SyncQuorumContention "${writers}" peer_queue_saturated)"
+  if [[ "${rf3_queue_saturated}" != "0" ]]; then
+    echo "writers_${writers} peer queue saturated ${rf3_queue_saturated} times" >&2
+    exit 1
+  fi
 
   write_summary "wal_writers_${writers}_mibps=${wal_mibps}"
   write_summary "wal_writers_${writers}_p99_ns=${wal_p99}"
@@ -127,6 +134,9 @@ for writers in 1 2 4 8; do
   write_summary "rf3_writers_${writers}_mibps=${rf3_mibps}"
   write_summary "rf3_writers_${writers}_p99_ns=${rf3_p99}"
   write_summary "rf3_writers_${writers}_fanout_ns_per_op=${rf3_fanout}"
+  write_summary "rf3_writers_${writers}_ack_wait_ns_per_op=${rf3_ack_wait}"
+  write_summary "rf3_writers_${writers}_queue_max_depth=${rf3_queue_depth}"
+  write_summary "rf3_writers_${writers}_queue_saturated=${rf3_queue_saturated}"
 done
 
 wal_1="$(require_metric "${WAL_BENCH}" BenchmarkPhase167WALStoreContention 1 MB/s)"

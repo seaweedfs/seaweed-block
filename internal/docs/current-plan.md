@@ -64,10 +64,39 @@ The D1 local baseline slice is implemented and repeatable through
 - repeated RF3 benchmark runs and the storage/frontend/replication test suites
   passed without another cursor gap.
 
-This is evidence and a correctness prerequisite, not a parallel-engine
-performance claim. Linux race, CPU/queue-depth evidence, mounted NVMe/TCP, and
-same-run lab comparison remain open. D2 ordered asynchronous replication is
-the active implementation target.
+The D2 ordered asynchronous replication slice is implemented and repeatable
+through `scripts/run-phase167-ordered-async-replication-gate.sh`:
+
+- each replica lineage owns one bounded FIFO shared by writes and barriers, so
+  per-peer LSN order is retained without holding the whole-volume mutex across
+  network I/O;
+- the global resequencer dispatches every contiguous committed LSN before
+  waiting for individual acknowledgements, allowing multiple writes and
+  independent peers to remain in flight;
+- sync-quorum returns after local durability plus the required peer frontier,
+  while a slow non-quorum queue continues independently; sync-all still waits
+  for every peer;
+- queue saturation fails closed with typed evidence and degrades that peer
+  lineage rather than skipping one LSN and sending later writes;
+- terminal queue failures cannot be hidden by an earlier ordinary transport
+  error; terminal replacement and enqueue are atomic with queue identity, and
+  the failed committed write is retained on the replacement queue so the
+  recovery boundary cannot lose its first LSN;
+- write and barrier queues are closed before a removed or replaced peer
+  lineage is torn down; the gate verifies an in-flight old-lineage write has
+  stopped before replacement returns;
+- strict observer-ack mode now retains full-block storage batching through an
+  explicit batch observer seam, including correct observation of a partially
+  committed batch prefix;
+- repeated slow-peer, sync-all, saturation, ordering, and batch tests pass,
+  and the real-TCP RF3 gate verifies eventual frontier and byte agreement on
+  both replicas with zero normal-path queue saturation.
+
+D2 is a correctness and slow-peer isolation improvement, not yet a throughput
+win. The latest same-host result measured about `49.38 MiB/s` for one RF3
+writer and `6.48 MiB/s` for four writers (`0.131x` scaling); ACK wait dominates
+the multi-writer path. Linux race, mounted NVMe/TCP, and same-run lab evidence
+remain open. D3 parallel local WAL is now the active implementation target.
 
 ## Assumptions And Boundaries
 

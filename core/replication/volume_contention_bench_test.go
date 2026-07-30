@@ -153,9 +153,16 @@ func BenchmarkPhase167RF3SyncQuorumContention(b *testing.B) {
 				}
 			}
 			for replicaIndex, replicaStore := range replicaStores {
-				_, _, head := replicaStore.Boundaries()
-				if head != uint64(b.N) {
-					b.Fatalf("replica %d head=%d want %d", replicaIndex, head, b.N)
+				deadline := time.Now().Add(3 * time.Second)
+				for {
+					_, _, head := replicaStore.Boundaries()
+					if head == uint64(b.N) {
+						break
+					}
+					if time.Now().After(deadline) {
+						b.Fatalf("replica %d head=%d want %d after queued-work drain", replicaIndex, head, b.N)
+					}
+					time.Sleep(time.Millisecond)
 				}
 				if b.N <= numBlocks {
 					for idx := 0; idx < b.N; idx++ {
@@ -174,6 +181,9 @@ func BenchmarkPhase167RF3SyncQuorumContention(b *testing.B) {
 			reportReplicationLatencyPercentiles(b, latencies)
 			b.ReportMetric(float64(stats.WriteLockWaitNanos)/float64(stats.WriteOps), "repl_lock_wait_ns/op")
 			b.ReportMetric(float64(stats.WriteFanoutNanos)/float64(stats.WriteOps), "repl_fanout_ns/op")
+			b.ReportMetric(float64(stats.WriteAckWaitNanos)/float64(stats.WriteOps), "repl_ack_wait_ns/op")
+			b.ReportMetric(float64(stats.PeerQueueMaxDepth), "peer_queue_max_depth")
+			b.ReportMetric(float64(stats.PeerQueueSaturated), "peer_queue_saturated")
 			b.ReportMetric(float64(b.N)/wallDuration.Seconds(), "write_ops/s")
 		})
 	}
