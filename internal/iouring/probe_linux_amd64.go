@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -457,19 +458,25 @@ func (ring *ioUring) submitAndWait(operations []ringOperation) ([]ioUringCQE, in
 			if submitted == 0 {
 				return nil, 0, err
 			}
-			completions := ring.waitForAccepted(submitted)
-			return completions, submitted, err
+			completions, waitErr := ring.waitForAccepted(submitted)
+			return completions, submitted, errors.Join(err, waitErr)
 		}
 		if submitted == before {
 			if submitted == 0 {
 				return nil, 0, errors.New("io_uring_enter submitted zero operations")
 			}
-			completions := ring.waitForAccepted(submitted)
-			return completions, submitted, errors.New("io_uring_enter submitted zero operations")
+			completions, waitErr := ring.waitForAccepted(submitted)
+			return completions, submitted, errors.Join(
+				errors.New("io_uring_enter submitted zero operations"),
+				waitErr,
+			)
 		}
 	}
 
-	completions := ring.waitForAccepted(len(operations))
+	completions, waitErr := ring.waitForAccepted(len(operations))
+	if waitErr != nil {
+		return completions, submitted, waitErr
+	}
 	if len(completions) != len(operations) {
 		return completions, submitted, fmt.Errorf(
 			"completion count=%d want=%d",
@@ -483,19 +490,22 @@ func (ring *ioUring) submitAndWait(operations []ringOperation) ([]ioUringCQE, in
 // waitForAccepted does not return until every accepted SQE has a terminal CQE.
 // The registered eventfd separates completion wakeup from io_uring_enter, so a
 // GETEVENTS syscall failure cannot strand accepted buffers.
-func (ring *ioUring) waitForAccepted(expected int) []ioUringCQE {
+func (ring *ioUring) waitForAccepted(expected int) ([]ioUringCQE, error) {
 	completions := make([]ioUringCQE, 0, expected)
+	var wakeErr error
 	for len(completions) < expected {
 		completions = append(completions, ring.drainCompletions()...)
 		if len(completions) >= expected {
 			ring.consumeCompletionEvent()
 			break
 		}
-		if err := ring.waitCompletionEvent(); err != nil {
+		if wakeErr != nil {
+			time.Sleep(time.Millisecond)
 			continue
 		}
+		wakeErr = ring.waitCompletionEvent()
 	}
-	return completions
+	return completions, wakeErr
 }
 
 func (ring *ioUring) waitCompletionEvent() error {

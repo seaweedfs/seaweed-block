@@ -4,7 +4,10 @@ package parallelwal
 
 import (
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestIOUringOwnerBatchesAcrossLanesAndRecoversPortably(t *testing.T) {
@@ -106,5 +109,72 @@ func TestIOUringOwnerRotatesAcrossLanesAtDepthOne(t *testing.T) {
 	if stats.QueueDepth != 1 || stats.AdmittedRequests != 4 || stats.SubmissionRounds != 4 ||
 		stats.SQEs != 4 || stats.CompletionCount != 4 {
 		t.Fatalf("depth-one native stats=%+v", stats)
+	}
+}
+
+func TestNativeSyncIsNotStarvedByLaterWriters(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sync-liveness.bin")
+	cfg := testConfig()
+	cfg.SlotsPerLane = 4096
+	cfg.RetainPerLane = 2048
+	cfg.QueueDepth = 64
+	cfg.Execution = ExecutionIOUring
+	store, err := CreateStoreWithConfig(path, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var writes atomic.Uint64
+	stop := make(chan struct{})
+	var writers sync.WaitGroup
+	for writer := 0; writer < 8; writer++ {
+		writers.Add(1)
+		go func(writer int) {
+			defer writers.Done()
+			data := testBlock(byte(writer+1), cfg.BlockSize)
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					if _, err := store.Write(uint32(writer), data); err != nil {
+						return
+					}
+					writes.Add(1)
+				}
+			}
+		}(writer)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for writes.Load() < 32 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if writes.Load() < 32 {
+		close(stop)
+		writers.Wait()
+		_ = store.Close()
+		t.Fatal("writers did not establish continuous load")
+	}
+
+	syncDone := make(chan error, 1)
+	go func() {
+		_, err := store.Sync()
+		syncDone <- err
+	}()
+	select {
+	case err := <-syncDone:
+		if err != nil {
+			t.Fatalf("Sync under later writes: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		close(stop)
+		writers.Wait()
+		t.Fatal("Sync was starved by later writes")
+	}
+	close(stop)
+	writers.Wait()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
 	}
 }

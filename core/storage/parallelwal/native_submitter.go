@@ -133,37 +133,64 @@ func (submitter *nativeWALSubmitter) run() {
 	defer close(submitter.done)
 	for {
 		select {
-		case <-submitter.wake:
-			_ = submitter.drainQueued()
 		case result := <-submitter.barriers:
-			// Store.Sync waits for its target LSN to publish before sending
-			// this request, so queued later writes are outside the fence.
-			err := submitter.submitBarrier()
-			if err != nil {
-				submitter.failBatchesAndQueues(nil, err)
+			submitter.handleBarrier(result)
+			continue
+		default:
+		}
+		select {
+		case <-submitter.wake:
+			more, err := submitter.processOneRound()
+			if err == nil && more {
+				submitter.notify()
 			}
-			result <- err
+		case result := <-submitter.barriers:
+			submitter.handleBarrier(result)
 		case <-submitter.stop:
 			return
 		}
 	}
 }
 
-func (submitter *nativeWALSubmitter) drainQueued() error {
-	for {
-		batches, err := submitter.takeRound()
-		if err != nil {
-			submitter.failBatchesAndQueues(batches, err)
-			return err
-		}
-		if len(batches) == 0 {
-			return nil
-		}
-		if err := submitter.submitRound(batches); err != nil {
-			submitter.failBatchesAndQueues(batches, err)
-			return err
-		}
+func (submitter *nativeWALSubmitter) handleBarrier(result chan error) {
+	// Store.Sync waits for its target LSN to publish before sending this
+	// request, so queued later writes are outside the fence.
+	err := submitter.submitBarrier()
+	if err != nil {
+		submitter.failBatchesAndQueues(nil, err)
 	}
+	result <- err
+}
+
+func (submitter *nativeWALSubmitter) processOneRound() (bool, error) {
+	batches, err := submitter.takeRound()
+	if err != nil {
+		submitter.failBatchesAndQueues(batches, err)
+		return false, err
+	}
+	if len(batches) == 0 {
+		return false, nil
+	}
+	if err := submitter.submitRound(batches); err != nil {
+		submitter.failBatchesAndQueues(batches, err)
+		return false, err
+	}
+	return submitter.hasQueued(), nil
+}
+
+func (submitter *nativeWALSubmitter) hasQueued() bool {
+	hasQueued := false
+	for _, lane := range submitter.store.lanes {
+		lane.mu.Lock()
+		if len(lane.queue) == 0 {
+			lane.queue = nil
+			lane.draining = false
+		} else {
+			hasQueued = true
+		}
+		lane.mu.Unlock()
+	}
+	return hasQueued
 }
 
 func (submitter *nativeWALSubmitter) sync() error {

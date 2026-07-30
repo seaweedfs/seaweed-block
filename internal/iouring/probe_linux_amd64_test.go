@@ -4,7 +4,9 @@ package iouring
 
 import (
 	"errors"
+	"sync/atomic"
 	"testing"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -77,5 +79,36 @@ func TestEnterRetriesInterruptedWait(t *testing.T) {
 	}
 	if _, err := ring.enter(0, 1, ioUringEnterGetEvents); err == nil {
 		t.Fatal("non-EINTR error was unexpectedly retried as success")
+	}
+}
+
+func TestEventFDWaitErrorDrainsCQBeforeReturning(t *testing.T) {
+	ring, err := newIOUring(4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registeredEventFD := ring.eventFD
+	ring.eventFD = 1 << 30
+	defer func() {
+		ring.close()
+		_ = unix.Close(registeredEventFD)
+	}()
+
+	go func() {
+		time.Sleep(5 * time.Millisecond)
+		tail := atomic.LoadUint32(ring.cqTail)
+		ring.cqes[tail&atomic.LoadUint32(ring.cqMask)] = ioUringCQE{
+			UserData: 91,
+			Result:   probeBlockSize,
+		}
+		atomic.StoreUint32(ring.cqTail, tail+1)
+	}()
+
+	completions, waitErr := ring.waitForAccepted(1)
+	if waitErr == nil {
+		t.Fatal("invalid eventfd wait unexpectedly succeeded")
+	}
+	if len(completions) != 1 || completions[0].UserData != 91 {
+		t.Fatalf("completions=%+v want one terminal CQE", completions)
 	}
 }

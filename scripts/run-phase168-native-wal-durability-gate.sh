@@ -34,14 +34,16 @@ if [[ "$(go env GOOS)/$(go env GOARCH)" != "linux/amd64" ]]; then
 fi
 
 timeout 60s go test ./core/storage/parallelwal \
-  -run '^TestIOUringOwnerBatchesAcrossLanesAndRecoversPortably$' \
+  -run 'TestIOUringOwnerBatchesAcrossLanesAndRecoversPortably|TestNativeSyncIsNotStarvedByLaterWriters' \
   -count=1 -v >"${TEST_LOG}" 2>&1
 require_line '^--- PASS: TestIOUringOwnerBatchesAcrossLanesAndRecoversPortably ' "${TEST_LOG}"
+require_line '^--- PASS: TestNativeSyncIsNotStarvedByLaterWriters ' "${TEST_LOG}"
 require_line 'native_durability_stats barriers=2 fsync_completions=2 submit_syscalls=[1-9][0-9]*' "${TEST_LOG}"
 write_summary "target_lsn_barrier=pass"
 write_summary "durability_barriers=2"
 write_summary "fsync_completions=2"
 write_summary "portable_reopen_recovery=pass"
+write_summary "sync_under_continuous_later_writes=pass"
 
 timeout 60s go test ./core/storage/parallelwal \
   -run '^TestNativeFsyncFailureTerminallyRejectsLaterWrites$' \
@@ -51,6 +53,13 @@ require_line '^--- PASS: TestNativeFsyncFailureTerminallyRejectsLaterWrites ' \
 write_summary "fsync_failure_terminal=true"
 write_summary "later_write_after_fsync_failure=denied"
 write_summary "close_reports_terminal_failure=true"
+
+timeout 60s go test ./internal/iouring \
+  -run '^TestEventFDWaitErrorDrainsCQBeforeReturning$' \
+  -count=1 -v >"${ARTIFACT_DIR}/eventfd-error-test.log" 2>&1
+require_line '^--- PASS: TestEventFDWaitErrorDrainsCQBeforeReturning ' \
+  "${ARTIFACT_DIR}/eventfd-error-test.log"
+write_summary "eventfd_error_terminal_drain=pass"
 
 timeout 120s go test -race \
   ./internal/iouring \
@@ -75,7 +84,7 @@ if command -v strace >/dev/null 2>&1; then
     echo "completion path unexpectedly used IORING_ENTER_GETEVENTS" >&2
     exit 1
   fi
-  write_summary "completion_wakeup=eventfd"
+  write_summary "completion_notification_registration=eventfd"
   write_summary "getevents_wait_calls=0"
   write_summary "external_native_syscall_validation=strace"
 else
