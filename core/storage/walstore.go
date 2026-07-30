@@ -114,6 +114,11 @@ type WALStore struct {
 	// It must not be wired into production paths before version/compatibility
 	// gates and mounted NVMe/TCP profiling pass.
 	multiBlockRecords bool
+
+	// singleReadMaterialization is a disabled-by-default Phase 172 comparison
+	// path. It changes only how the flusher reads one WAL record; decoded bytes
+	// still pass the existing CRC and semantic validation before use.
+	singleReadMaterialization atomic.Bool
 }
 
 // CreateWALStore initializes a new store file at path. Fails if path
@@ -682,6 +687,10 @@ func (s *WALStore) SetMultiBlockRecords(enabled bool) {
 
 func (s *WALStore) enableMultiBlockRecordsForTest(enabled bool) {
 	s.SetMultiBlockRecords(enabled)
+}
+
+func (s *WALStore) enableSingleReadMaterializationForTest(enabled bool) {
+	s.singleReadMaterialization.Store(enabled)
 }
 
 // DisableAutoFlushForRecoveryTest stops the background WAL->extent flusher

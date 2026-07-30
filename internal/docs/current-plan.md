@@ -94,7 +94,10 @@ Build one disabled-by-default comparison path for the shipped `WALStore` that:
 
 ### D1. Record Geometry And Baseline Contract
 
-Implementation status: complete locally; exact-commit Linux admission pending.
+Implementation status: complete. Linux exact-commit D1 admission passed on
+`6dd89e7` with sequential/scattered duplicate-read counts `5/5` and `5/5`,
+product/`strace` exact-path reads `2048/2048`, race and vet green, and actual
+reuse hits zero. D2 was admitted without changing thresholds.
 
 - Extend the dirty-entry in-memory contract with only the geometry needed to
   size one record read. Populate it at ordinary append, trim, WriteBatch,
@@ -123,6 +126,9 @@ checkpoint, crash/reopen, and explicit-close behavior for a three-block trim.
 This changes no disk format or default materialization mode.
 
 ### D2. Single-Read Fail-Closed Materialization
+
+Implementation status: complete locally; exact-commit Linux correctness gate
+pending.
 
 - Add one internal disabled-by-default comparison mode.
 - Read each ordinary or trim record once at its exact bounded size.

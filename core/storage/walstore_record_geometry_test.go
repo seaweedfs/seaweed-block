@@ -344,6 +344,8 @@ func TestPhase172ScopedMaterializationProbe(t *testing.T) {
 	}
 	s.DisableAutoFlushForRecoveryTest()
 	t.Cleanup(func() { _ = s.Close() })
+	singleRead := os.Getenv("SW_BLOCK_PHASE172_SCOPED_PROBE_SINGLE_READ") == "true"
+	s.enableSingleReadMaterializationForTest(singleRead)
 
 	for lba := uint32(0); lba < records; lba++ {
 		if _, err := s.Write(lba, makeBlock(blockSize, byte(lba%251+1))); err != nil {
@@ -358,17 +360,25 @@ func TestPhase172ScopedMaterializationProbe(t *testing.T) {
 	}
 
 	got := s.FlusherInstrumentation()
+	t.Logf("phase172_probe_single_read=%t", singleRead)
 	t.Logf("phase172_probe_validated_records=%d", got.ValidatedRecords)
 	t.Logf("phase172_probe_header_read_ops=%d", got.WALHeaderReadOps)
 	t.Logf("phase172_probe_record_read_ops=%d", got.WALRecordReadOps)
 	t.Logf("phase172_probe_materialization_read_ops=%d", got.MaterializationReadOps)
+	wantHeaderReads := uint64(records)
+	wantMaterializationReads := uint64(2 * records)
+	if singleRead {
+		wantHeaderReads = 0
+		wantMaterializationReads = records
+	}
 	if got.ValidatedRecords != records ||
-		got.WALHeaderReadOps != records ||
+		got.WALHeaderReadOps != wantHeaderReads ||
 		got.WALRecordReadOps != records ||
-		got.MaterializationReadOps != 2*records {
+		got.MaterializationReadOps != uint64(wantMaterializationReads) {
 		t.Fatalf("validated/header/record/materialization=%d/%d/%d/%d want %d/%d/%d/%d",
 			got.ValidatedRecords, got.WALHeaderReadOps, got.WALRecordReadOps,
-			got.MaterializationReadOps, records, records, records, 2*records)
+			got.MaterializationReadOps, records, wantHeaderReads, records,
+			wantMaterializationReads)
 	}
 }
 
