@@ -33,9 +33,19 @@ type nativeWALBatch struct {
 	attempted bool
 }
 
+type nativeIOExecutor interface {
+	SubmitAndWait([]iouring.Operation) ([]iouring.Completion, error)
+	Stats() iouring.ExecutionStats
+	Close() error
+}
+
+var newNativeIOExecutor = func(depth uint32) (nativeIOExecutor, error) {
+	return iouring.New(depth)
+}
+
 type nativeWALSubmitter struct {
 	store     *Store
-	executor  *iouring.Executor
+	executor  nativeIOExecutor
 	wake      chan struct{}
 	barriers  chan chan error
 	stop      chan struct{}
@@ -61,7 +71,7 @@ func (s *Store) attachExecution(mode ExecutionMode, queueDepth int) error {
 	if depth < 1 {
 		depth = 1
 	}
-	executor, err := iouring.New(uint32(depth))
+	executor, err := newNativeIOExecutor(uint32(depth))
 	if err != nil {
 		return fmt.Errorf("parallelwal: io_uring execution: %w", err)
 	}

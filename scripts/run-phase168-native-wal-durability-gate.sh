@@ -43,6 +43,15 @@ write_summary "durability_barriers=2"
 write_summary "fsync_completions=2"
 write_summary "portable_reopen_recovery=pass"
 
+timeout 60s go test ./core/storage/parallelwal \
+  -run '^TestNativeFsyncFailureTerminallyRejectsLaterWrites$' \
+  -count=1 -v >"${ARTIFACT_DIR}/fsync-failure-test.log" 2>&1
+require_line '^--- PASS: TestNativeFsyncFailureTerminallyRejectsLaterWrites ' \
+  "${ARTIFACT_DIR}/fsync-failure-test.log"
+write_summary "fsync_failure_terminal=true"
+write_summary "later_write_after_fsync_failure=denied"
+write_summary "close_reports_terminal_failure=true"
+
 timeout 120s go test -race \
   ./internal/iouring \
   ./core/storage/parallelwal \
