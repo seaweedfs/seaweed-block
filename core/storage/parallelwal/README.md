@@ -99,6 +99,29 @@ The codec and committed-prefix scanner are not yet selected by
 `CreateStore`/`OpenStore`. This separation is deliberate: D1 proves format and
 recovery behavior before D2 adds a bounded group-commit owner.
 
+### Phase 169 Bounded Segment Owner
+
+D2 adds one internal owner around the codec. It is still not a Store or product
+selector. Admission assigns LSNs while holding one short mutex and enqueues an
+immutable block into a bounded channel. The single owner goroutine:
+
+1. takes the first request immediately, without a batching timer;
+2. non-blockingly gathers requests that are already queued, up to the segment
+   entry/payload limits;
+3. encodes one segment and issues exactly one positioned `WriteAt`;
+4. completes every request in that segment from the same write result.
+
+Queue-full rejection does not consume an LSN. Queue depth is capped at 4096,
+and a bounded reservation is acquired before copying caller payloads. Payload
+ownership is measured through terminal completion, and a configured log-byte
+ceiling prevents unbounded append growth. A short write, I/O error, or log-full
+condition terminally fails the owner and all already admitted work.
+
+The owner exposes admitted-request, segment, entry, byte, queue-rejection,
+queue-high-water, and owned-byte-high-water counters. D3 still must add the
+publication ledger, Sync target fence, durable dual header, and complete
+failure-state proof before this can back a Store.
+
 ## Write And Publication
 
 The store allocates global LSN and lane sequence under one short metadata lock.
