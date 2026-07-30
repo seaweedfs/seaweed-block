@@ -207,6 +207,7 @@ func runProbe(requestedDepth uint32) (probeReport, error) {
 		report.SubmitSyscalls = ring.submitSyscalls
 		return report, fmt.Errorf("write round: %w", err)
 	}
+	seenWrites := make(map[uint64]bool, len(writeCQEs))
 	for i, cqe := range writeCQEs {
 		if cqe.Result != probeBlockSize {
 			report.SubmitSyscalls = ring.submitSyscalls
@@ -218,6 +219,10 @@ func runProbe(requestedDepth uint32) (probeReport, error) {
 				probeBlockSize,
 			)
 		}
+		if cqe.UserData < 1 || cqe.UserData > uint64(len(payloads)) || seenWrites[cqe.UserData] {
+			return report, fmt.Errorf("unexpected write completion user_data=%d", cqe.UserData)
+		}
+		seenWrites[cqe.UserData] = true
 	}
 
 	fsyncCQEs, submitted, err := ring.submitAndWait([]ringOperation{{
@@ -232,7 +237,7 @@ func runProbe(requestedDepth uint32) (probeReport, error) {
 	if err != nil {
 		return report, fmt.Errorf("fsync round: %w", err)
 	}
-	if len(fsyncCQEs) != 1 || fsyncCQEs[0].Result != 0 {
+	if len(fsyncCQEs) != 1 || fsyncCQEs[0].UserData != 1000 || fsyncCQEs[0].Result != 0 {
 		return report, fmt.Errorf("fsync completion=%+v want one successful completion", fsyncCQEs)
 	}
 

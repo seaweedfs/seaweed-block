@@ -2,7 +2,22 @@
 
 package main
 
-import "testing"
+import (
+	"testing"
+	"unsafe"
+)
+
+func TestLinuxUAPIStructSizes(t *testing.T) {
+	if got := unsafe.Sizeof(ioUringParams{}); got != 120 {
+		t.Fatalf("io_uring_params size=%d want=120", got)
+	}
+	if got := unsafe.Sizeof(ioUringSQE{}); got != 64 {
+		t.Fatalf("io_uring_sqe size=%d want=64", got)
+	}
+	if got := unsafe.Sizeof(ioUringCQE{}); got != 16 {
+		t.Fatalf("io_uring_cqe size=%d want=16", got)
+	}
+}
 
 func TestRunProbeCompletesWritesFsyncAndReopen(t *testing.T) {
 	report, err := runProbe(8)
