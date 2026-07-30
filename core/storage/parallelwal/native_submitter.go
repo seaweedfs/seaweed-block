@@ -23,10 +23,11 @@ type NativeIOStats struct {
 }
 
 type nativeWALBatch struct {
-	lane     *lane
-	requests []*writeRequest
-	buffer   []byte
-	offset   int64
+	lane      *lane
+	requests  []*writeRequest
+	buffer    []byte
+	offset    int64
+	attempted bool
 }
 
 type nativeWALSubmitter struct {
@@ -224,6 +225,10 @@ func (submitter *nativeWALSubmitter) submitRound(batches []nativeWALBatch) error
 	before := submitter.executor.Stats()
 	completions, submitErr := submitter.executor.SubmitAndWait(operations)
 	after := submitter.executor.Stats()
+	submittedOps := after.SubmittedOps - before.SubmittedOps
+	for i := uint64(0); i < submittedOps && i < uint64(len(batches)); i++ {
+		batches[i].attempted = true
+	}
 
 	submitter.mu.Lock()
 	submitter.stats.SubmissionRounds++
@@ -289,9 +294,11 @@ func (submitter *nativeWALSubmitter) completeBatch(batch nativeWALBatch, err err
 	batch.lane.mu.Lock()
 	batch.lane.completedSeq += uint64(len(batch.requests))
 	batch.lane.mu.Unlock()
-	submitter.store.mu.Lock()
-	submitter.store.walWriteOps++
-	submitter.store.mu.Unlock()
+	if batch.attempted {
+		submitter.store.mu.Lock()
+		submitter.store.walWriteOps++
+		submitter.store.mu.Unlock()
+	}
 	for _, request := range batch.requests {
 		submitter.store.complete(request, err)
 	}
