@@ -843,7 +843,7 @@ func (s *Store) Sync() (uint64, error) {
 	}
 	s.mu.Unlock()
 
-	if err := s.fd.Sync(); err != nil {
+	if err := s.syncFile(); err != nil {
 		return 0, fmt.Errorf("parallelwal: sync lane WAL: %w", err)
 	}
 	if !needsBaseCheckpoint {
@@ -864,7 +864,7 @@ func (s *Store) Sync() (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if err := s.fd.Sync(); err != nil {
+	if err := s.syncFile(); err != nil {
 		return 0, fmt.Errorf("parallelwal: sync checkpoint extent: %w", err)
 	}
 	newTails, newWALTail, recycleReadOps, err := s.recycleStablePrefix(heads)
@@ -994,7 +994,7 @@ func (s *Store) persistHeader(
 	if err := writeHeaderAt(s.fd, nextSlot, h); err != nil {
 		return err
 	}
-	if err := s.fd.Sync(); err != nil {
+	if err := s.syncFile(); err != nil {
 		return fmt.Errorf("parallelwal: fsync header generation %d: %w", h.Generation, err)
 	}
 	s.mu.Lock()

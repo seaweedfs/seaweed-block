@@ -49,6 +49,10 @@ func TestIOUringOwnerBatchesAcrossLanesAndRecoversPortably(t *testing.T) {
 	if stable, err := store.Sync(); err != nil || stable != 4 {
 		t.Fatalf("Sync=(%d,%v) want=(4,nil)", stable, err)
 	}
+	stats = store.NativeIOStats()
+	if stats.DurabilityBarriers != 2 || stats.FsyncCompletions != 2 {
+		t.Fatalf("native durability stats=%+v want two completed barriers", stats)
+	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}

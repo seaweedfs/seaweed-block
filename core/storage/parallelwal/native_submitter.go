@@ -10,17 +10,19 @@ import (
 )
 
 type NativeIOStats struct {
-	Enabled           bool
-	QueueDepth        uint32
-	AdmittedRequests  uint64
-	SubmissionRounds  uint64
-	SQEs              uint64
-	SubmitSyscalls    uint64
-	CompletionCount   uint64
-	ShortCompletions  uint64
-	QueueFullRejects  uint64
-	InflightHighWater uint64
-	FallbackCount     uint64
+	Enabled            bool
+	QueueDepth         uint32
+	AdmittedRequests   uint64
+	SubmissionRounds   uint64
+	SQEs               uint64
+	SubmitSyscalls     uint64
+	CompletionCount    uint64
+	DurabilityBarriers uint64
+	FsyncCompletions   uint64
+	ShortCompletions   uint64
+	QueueFullRejects   uint64
+	InflightHighWater  uint64
+	FallbackCount      uint64
 }
 
 type nativeWALBatch struct {
@@ -35,6 +37,7 @@ type nativeWALSubmitter struct {
 	store     *Store
 	executor  *iouring.Executor
 	wake      chan struct{}
+	barriers  chan chan error
 	stop      chan struct{}
 	done      chan struct{}
 	closeOnce sync.Once
@@ -66,6 +69,7 @@ func (s *Store) attachExecution(mode ExecutionMode, queueDepth int) error {
 		store:    s,
 		executor: executor,
 		wake:     make(chan struct{}, 1),
+		barriers: make(chan chan error),
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
 		stats: NativeIOStats{
@@ -120,24 +124,46 @@ func (submitter *nativeWALSubmitter) run() {
 	for {
 		select {
 		case <-submitter.wake:
+			_ = submitter.drainQueued()
+		case result := <-submitter.barriers:
+			// Store.Sync waits for its target LSN to publish before sending
+			// this request, so queued later writes are outside the fence.
+			err := submitter.submitBarrier()
+			if err != nil {
+				submitter.failBatchesAndQueues(nil, err)
+			}
+			result <- err
 		case <-submitter.stop:
 			return
 		}
-		for {
-			batches, err := submitter.takeRound()
-			if err != nil {
-				submitter.failBatchesAndQueues(batches, err)
-				break
-			}
-			if len(batches) == 0 {
-				break
-			}
-			if err := submitter.submitRound(batches); err != nil {
-				submitter.failBatchesAndQueues(batches, err)
-				break
-			}
+	}
+}
+
+func (submitter *nativeWALSubmitter) drainQueued() error {
+	for {
+		batches, err := submitter.takeRound()
+		if err != nil {
+			submitter.failBatchesAndQueues(batches, err)
+			return err
+		}
+		if len(batches) == 0 {
+			return nil
+		}
+		if err := submitter.submitRound(batches); err != nil {
+			submitter.failBatchesAndQueues(batches, err)
+			return err
 		}
 	}
+}
+
+func (submitter *nativeWALSubmitter) sync() error {
+	result := make(chan error, 1)
+	select {
+	case submitter.barriers <- result:
+	case <-submitter.done:
+		return errors.New("parallelwal: native WAL owner stopped before durability barrier")
+	}
+	return <-result
 }
 
 func (submitter *nativeWALSubmitter) takeRound() ([]nativeWALBatch, error) {
@@ -304,6 +330,52 @@ func (submitter *nativeWALSubmitter) submitRound(batches []nativeWALBatch) error
 	return nil
 }
 
+func (submitter *nativeWALSubmitter) submitBarrier() error {
+	const barrierUserData = ^uint64(0)
+	before := submitter.executor.Stats()
+	completions, err := submitter.executor.SubmitAndWait([]iouring.Operation{
+		iouring.Fsync(int(submitter.store.fd.Fd()), barrierUserData),
+	})
+	after := submitter.executor.Stats()
+	submittedOps := after.SubmittedOps - before.SubmittedOps
+
+	submitter.mu.Lock()
+	submitter.stats.SQEs += submittedOps
+	submitter.stats.SubmitSyscalls += after.SubmitSyscalls - before.SubmitSyscalls
+	submitter.stats.CompletionCount += uint64(len(completions))
+	submitter.stats.DurabilityBarriers += submittedOps
+	if submittedOps > submitter.stats.InflightHighWater {
+		submitter.stats.InflightHighWater = submittedOps
+	}
+	submitter.mu.Unlock()
+
+	if err != nil {
+		return fmt.Errorf("parallelwal: native WAL durability barrier: %w", err)
+	}
+	if len(completions) != 1 || completions[0].UserData != barrierUserData {
+		return fmt.Errorf("parallelwal: native WAL barrier completions=%+v", completions)
+	}
+	if completions[0].Result != 0 {
+		submitter.mu.Lock()
+		submitter.stats.ShortCompletions++
+		submitter.mu.Unlock()
+		if completions[0].Result < 0 {
+			return fmt.Errorf(
+				"parallelwal: native WAL durability barrier: %w",
+				syscall.Errno(-completions[0].Result),
+			)
+		}
+		return fmt.Errorf(
+			"parallelwal: native WAL durability barrier result=%d want=0",
+			completions[0].Result,
+		)
+	}
+	submitter.mu.Lock()
+	submitter.stats.FsyncCompletions++
+	submitter.mu.Unlock()
+	return nil
+}
+
 func (submitter *nativeWALSubmitter) completeBatch(batch nativeWALBatch, err error) {
 	batch.lane.mu.Lock()
 	batch.lane.completedSeq += uint64(len(batch.requests))
@@ -322,10 +394,30 @@ func (submitter *nativeWALSubmitter) failBatchesAndQueues(batches []nativeWALBat
 	if err == nil {
 		err = errors.New("parallelwal: native WAL execution failed")
 	}
+	submitter.store.markTerminal(err)
 	for _, batch := range batches {
 		submitter.completeBatch(batch, err)
 	}
 	for _, lane := range submitter.store.lanes {
 		submitter.store.failQueuedLane(lane, err)
 	}
+}
+
+func (s *Store) markTerminal(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.terminalErr == nil {
+		s.terminalErr = err
+	}
+	for _, pending := range s.pending {
+		s.deliverLocked(pending, s.terminalErr)
+	}
+	s.cond.Broadcast()
+}
+
+func (s *Store) syncFile() error {
+	if s.native != nil {
+		return s.native.sync()
+	}
+	return s.fd.Sync()
 }
