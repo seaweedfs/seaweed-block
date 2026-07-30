@@ -51,9 +51,10 @@ func (h fileHeader) validate() error {
 	if h.BlockSize == 0 || h.NumBlocks == 0 {
 		return fmt.Errorf("%w: blockSize=%d numBlocks=%d", errBadGeometry, h.BlockSize, h.NumBlocks)
 	}
-	if h.BlockSize > maxCheckpointWriteBytes {
+	maxBlockSize := uint32(maxWALIOBytes - recordHeaderSize)
+	if h.BlockSize > maxBlockSize {
 		return fmt.Errorf("%w: blockSize=%d exceeds maximum=%d",
-			errBadGeometry, h.BlockSize, maxCheckpointWriteBytes)
+			errBadGeometry, h.BlockSize, maxBlockSize)
 	}
 	if h.LaneCount == 0 || h.LaneCount > maxLaneCount {
 		return fmt.Errorf("%w: laneCount=%d", errBadGeometry, h.LaneCount)

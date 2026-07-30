@@ -91,7 +91,7 @@ fi
 write_summary "helm_candidate_schema=pass"
 
 go test ./core/storage/parallelwal \
-  -run 'Test(CreateSyncRecoverAndScan|CrossLaneCompletionPublishesContiguousLSNs|SyncFencesWritesAdmittedBeforeCall|LowerLSNFailureBlocksCompletedHigherLane|CloseDrainsActiveAppenderAfterTerminalFailure|RecoverRejectsActiveAppender|UnsyncedTailIgnoredAfterCrash|OpenFallsBackFromCorruptLatestHeader|CommittedRecordCorruptionFailsClosed|RecoveryRejectsInvalidCommittedRecordSemantics|ApplyEntryAcceptsSourceFrontierJump|FailedApplyEntryDoesNotPublishSourceFrontierJump|SourceFrontierJumpPersistsWithoutFalseCheckpoint|ConcurrentSameLBAWritesRemainOrdered|WriteBatchDispatchesAcrossLanesBeforePublishing|RingWrapRecyclesOnlyCheckpointedPrefix|AdvancedWALTailBeyondHeadSurvivesRecovery|RecoverReplaysDurableWALBeforeCheckpoint|DirectExtentFrontierPersistsWithoutSyntheticWAL|RetainedPreCheckpointWALDoesNotOverrideRebuiltExtent|BaseExtentHeaderFailureKeepsPriorAcknowledgedExtent|BeginBaseInstallClearsAbortedStage|AdvanceFrontierWithoutBaseStageKeepsExistingData|NextBaseStagePreservesHeaderFallbackToCurrentExtent|RecycledSlotsRemainRecoverableThroughHeaderFallback|HeaderValidationRejectsWrappedRecordSize)$' \
+  -run 'Test(CreateSyncRecoverAndScan|CrossLaneCompletionPublishesContiguousLSNs|SyncFencesWritesAdmittedBeforeCall|LowerLSNFailureBlocksCompletedHigherLane|CloseDrainsActiveAppenderAfterTerminalFailure|RecoverRejectsActiveAppender|UnsyncedTailIgnoredAfterCrash|OpenFallsBackFromCorruptLatestHeader|CommittedRecordCorruptionFailsClosed|RecoveryRejectsInvalidCommittedRecordSemantics|ApplyEntryAcceptsSourceFrontierJump|FailedApplyEntryDoesNotPublishSourceFrontierJump|SourceFrontierJumpPersistsWithoutFalseCheckpoint|ConcurrentSameLBAWritesRemainOrdered|WriteBatchDispatchesAcrossLanesBeforePublishing|ConcurrentSameLaneWritesCoalesceWALAppends|WriteBatchSplitsWALAppendAtRingWrap|WriteBatchRingWrapSecondChunkFailureIsNotDurable|RecycleStablePrefixCoalescesIntegrityReads|RecycleBatchedReadDetectsCorruptRecord|RingWrapRecyclesOnlyCheckpointedPrefix|AdvancedWALTailBeyondHeadSurvivesRecovery|RecoverReplaysDurableWALBeforeCheckpoint|DirectExtentFrontierPersistsWithoutSyntheticWAL|RetainedPreCheckpointWALDoesNotOverrideRebuiltExtent|BaseExtentHeaderFailureKeepsPriorAcknowledgedExtent|BeginBaseInstallClearsAbortedStage|AdvanceFrontierWithoutBaseStageKeepsExistingData|NextBaseStagePreservesHeaderFallbackToCurrentExtent|RecycledSlotsRemainRecoverableThroughHeaderFallback|HeaderValidationRejectsWrappedRecordSize)$' \
   -count=50 >"${ARTIFACT_DIR}/correctness-stress.log" 2>&1
 write_summary "correctness_stress=pass"
 write_summary "dual_crc_header_fallback=pass"
@@ -99,6 +99,10 @@ write_summary "sync_admission_fence=pass"
 write_summary "contiguous_completion_frontier=pass"
 write_summary "lower_lsn_failure_fail_closed=pass"
 write_summary "terminal_append_drain=pass"
+write_summary "same_lane_wal_append_coalescing=pass"
+write_summary "ring_wrap_batched_append_recovery=pass"
+write_summary "ring_wrap_second_chunk_failure_fail_closed=pass"
+write_summary "batched_recycle_crc_validation=pass"
 write_summary "unsynced_tail_ignored=pass"
 write_summary "committed_crc_corruption_fail_closed=pass"
 write_summary "ring_wrap_retention=pass"
@@ -116,9 +120,35 @@ write_summary "record_semantics_validation=pass"
 write_summary "persisted_geometry_overflow_validation=pass"
 write_summary "partial_rmw_serialized=pass"
 
+if command -v strace >/dev/null 2>&1 && [[ "$(go env GOOS)" == "linux" ]]; then
+  syscall_test_bin="${ARTIFACT_DIR}/parallelwal-syscall.test"
+  go test -c -o "${syscall_test_bin}" ./core/storage/parallelwal
+  strace -qq -f -e trace=pwrite64 \
+    -o "${ARTIFACT_DIR}/wal-append-coalescing.strace" \
+    "${syscall_test_bin}" \
+    -test.run '^TestConcurrentSameLaneWritesCoalesceWALAppends$' \
+    -test.count=1 >"${ARTIFACT_DIR}/wal-append-coalescing-test.log" 2>&1
+  append_pwrite_calls="$(grep -c 'pwrite64(' "${ARTIFACT_DIR}/wal-append-coalescing.strace" || true)"
+  awk -v value="${append_pwrite_calls}" 'BEGIN { if (value <= 0 || value >= 8) exit 1 }'
+
+  strace -qq -f -e trace=pread64 \
+    -o "${ARTIFACT_DIR}/wal-recycle-coalescing.strace" \
+    "${syscall_test_bin}" \
+    -test.run '^TestRecycleStablePrefixCoalescesIntegrityReads$' \
+    -test.count=1 >"${ARTIFACT_DIR}/wal-recycle-coalescing-test.log" 2>&1
+  recycle_pread_calls="$(grep -c 'pread64(' "${ARTIFACT_DIR}/wal-recycle-coalescing.strace" || true)"
+  awk -v value="${recycle_pread_calls}" 'BEGIN { if (value <= 0 || value >= 8) exit 1 }'
+
+  write_summary "external_syscall_validation=strace"
+  write_summary "external_append_pwrite_calls=${append_pwrite_calls}"
+  write_summary "external_recycle_pread_calls=${recycle_pread_calls}"
+else
+  write_summary "external_syscall_validation=not_available"
+fi
+
 go test ./core/storage/parallelwal \
   -run '^$' \
-  -bench '^BenchmarkPhase167(ParallelWALContention|LegacyWALContentionControl)$' \
+  -bench '^BenchmarkPhase167(ParallelWALContention|ParallelWALBatchContention|LegacyWALContentionControl|LegacyWALBatchContentionControl)$' \
   -benchtime="${BENCHTIME}" \
   -count=1 >"${BENCH}" 2>&1
 
@@ -127,12 +157,16 @@ for writers in 1 2 4 8; do
   candidate_p99="$(require_metric BenchmarkPhase167ParallelWALContention "${writers}" p99_ns)"
   active_lanes="$(require_metric BenchmarkPhase167ParallelWALContention "${writers}" active_lanes)"
   checkpoint_write_ops="$(require_metric BenchmarkPhase167ParallelWALContention "${writers}" checkpoint_write_ops)"
+  recycle_read_ops="$(require_metric BenchmarkPhase167ParallelWALContention "${writers}" recycle_read_ops)"
+  wal_write_ops="$(require_metric BenchmarkPhase167ParallelWALContention "${writers}" wal_write_ops)"
   wal_tail="$(require_metric BenchmarkPhase167ParallelWALContention "${writers}" wal_tail)"
   legacy_mibps="$(require_metric BenchmarkPhase167LegacyWALContentionControl "${writers}" MB/s)"
   write_summary "candidate_writers_${writers}_mibps=${candidate_mibps}"
   write_summary "candidate_writers_${writers}_p99_ns=${candidate_p99}"
   write_summary "candidate_writers_${writers}_active_lanes=${active_lanes}"
   write_summary "candidate_writers_${writers}_checkpoint_write_ops=${checkpoint_write_ops}"
+  write_summary "candidate_writers_${writers}_recycle_read_ops=${recycle_read_ops}"
+  write_summary "candidate_writers_${writers}_wal_write_ops=${wal_write_ops}"
   write_summary "candidate_writers_${writers}_wal_tail=${wal_tail}"
   write_summary "legacy_writers_${writers}_mibps=${legacy_mibps}"
 done
@@ -148,6 +182,26 @@ awk -v value="${checkpoint_ops_four}" -v writes="${iterations}" 'BEGIN {
   if (value <= 0 || value >= writes / 16) exit 1
 }'
 write_summary "checkpoint_write_coalescing_observed=true"
+batch_mibps_four="$(require_metric BenchmarkPhase167ParallelWALBatchContention 4 MB/s)"
+batch_blocks_four="$(require_metric BenchmarkPhase167ParallelWALBatchContention 4 batch_blocks)"
+batch_recycle_read_ops_four="$(require_metric BenchmarkPhase167ParallelWALBatchContention 4 recycle_read_ops)"
+batch_wal_ops_four="$(require_metric BenchmarkPhase167ParallelWALBatchContention 4 wal_write_ops)"
+legacy_batch_mibps_four="$(require_metric BenchmarkPhase167LegacyWALBatchContentionControl 4 MB/s)"
+batch_vs_legacy="$(ratio "${batch_mibps_four}" "${legacy_batch_mibps_four}")"
+write_summary "candidate_batch_writers_4_mibps=${batch_mibps_four}"
+write_summary "candidate_batch_writers_4_blocks=${batch_blocks_four}"
+write_summary "candidate_batch_writers_4_recycle_read_ops=${batch_recycle_read_ops_four}"
+write_summary "candidate_batch_writers_4_wal_write_ops=${batch_wal_ops_four}"
+write_summary "legacy_batch_writers_4_mibps=${legacy_batch_mibps_four}"
+write_summary "candidate_batch_four_writer_vs_legacy_ratio=${batch_vs_legacy}"
+awk -v value="${batch_wal_ops_four}" -v writes="${iterations}" -v blocks="${batch_blocks_four}" 'BEGIN {
+  if (value <= 0 || value >= writes * blocks / 2) exit 1
+}'
+write_summary "wal_append_coalescing_observed=true"
+awk -v value="${batch_recycle_read_ops_four}" -v writes="${iterations}" -v blocks="${batch_blocks_four}" 'BEGIN {
+  if (value <= 0 || value >= writes * blocks / 16) exit 1
+}'
+write_summary "wal_recycle_read_coalescing_observed=true"
 
 candidate_1="$(require_metric BenchmarkPhase167ParallelWALContention 1 MB/s)"
 candidate_4="$(require_metric BenchmarkPhase167ParallelWALContention 4 MB/s)"

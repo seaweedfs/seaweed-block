@@ -610,6 +610,273 @@ func TestWriteBatchDispatchesAcrossLanesBeforePublishing(t *testing.T) {
 	}
 }
 
+func TestConcurrentSameLaneWritesCoalesceWALAppends(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "coalesce.bin")
+	s, err := CreateStoreWithConfig(path, Config{
+		NumBlocks:     32,
+		BlockSize:     512,
+		LaneCount:     1,
+		StripeBlocks:  1,
+		SlotsPerLane:  32,
+		RetainPerLane: 8,
+		QueueDepth:    16,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var blockFirst sync.Once
+	s.lanes[0].beforeWrite = func(*writeRequest) {
+		blockFirst.Do(func() {
+			close(entered)
+			<-release
+		})
+	}
+
+	const writes = 8
+	errs := make(chan error, writes)
+	go func() {
+		_, writeErr := s.Write(0, testBlock(1, s.BlockSize()))
+		errs <- writeErr
+	}()
+	<-entered
+	for i := 1; i < writes; i++ {
+		go func(lba uint32) {
+			_, writeErr := s.Write(lba, testBlock(byte(lba+1), s.BlockSize()))
+			errs <- writeErr
+		}(uint32(i))
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		s.mu.RLock()
+		inflight := s.inflightAppends
+		s.mu.RUnlock()
+		if inflight == writes {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("inflight=%d want=%d", inflight, writes)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(release)
+	for i := 0; i < writes; i++ {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.mu.RLock()
+	writeOps := s.walWriteOps
+	s.mu.RUnlock()
+	if writeOps != 2 {
+		t.Fatalf("WAL write ops=%d want=2", writeOps)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWriteBatchSplitsWALAppendAtRingWrap(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wrap-batch.bin")
+	s, err := CreateStoreWithConfig(path, Config{
+		NumBlocks:     64,
+		BlockSize:     512,
+		LaneCount:     1,
+		StripeBlocks:  1,
+		SlotsPerLane:  8,
+		RetainPerLane: 2,
+		QueueDepth:    8,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	for lba := uint32(0); lba < 7; lba++ {
+		if _, err := s.Write(lba, testBlock(byte(lba+1), s.BlockSize())); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Sync(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.mu.RLock()
+	before := s.walWriteOps
+	s.mu.RUnlock()
+	if _, err := s.WriteBatch(7, [][]byte{
+		testBlock(0xa1, s.BlockSize()),
+		testBlock(0xa2, s.BlockSize()),
+		testBlock(0xa3, s.BlockSize()),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.RLock()
+	writeOps := s.walWriteOps - before
+	s.mu.RUnlock()
+	if writeOps != 2 {
+		t.Fatalf("wrapped batch WAL write ops=%d want=2", writeOps)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	crashStore(t, s)
+
+	reopened, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if got, err := reopened.Recover(); err != nil || got != 10 {
+		t.Fatalf("Recover=(%d,%v) want=(10,nil)", got, err)
+	}
+	for i, want := range []byte{0xa1, 0xa2, 0xa3} {
+		got, err := reopened.Read(uint32(7 + i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got[0] != want {
+			t.Fatalf("recovered LBA %d byte=%02x want=%02x", 7+i, got[0], want)
+		}
+	}
+}
+
+func TestWriteBatchRingWrapSecondChunkFailureIsNotDurable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wrap-batch-failure.bin")
+	s, err := CreateStoreWithConfig(path, Config{
+		NumBlocks:     64,
+		BlockSize:     512,
+		LaneCount:     1,
+		StripeBlocks:  1,
+		SlotsPerLane:  8,
+		RetainPerLane: 2,
+		QueueDepth:    8,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	for lba := uint32(0); lba < 7; lba++ {
+		if _, err := s.Write(lba, testBlock(byte(lba+1), s.BlockSize())); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Sync(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.lanes[0].beforeWrite = func(req *writeRequest) {
+		if req.laneSeq == 8 {
+			s.lanes[0].base = -int64(s.recordSize)
+		}
+	}
+	lsns, err := s.WriteBatch(7, [][]byte{
+		testBlock(0xa1, s.BlockSize()),
+		testBlock(0xa2, s.BlockSize()),
+		testBlock(0xa3, s.BlockSize()),
+	})
+	if err == nil {
+		t.Fatal("wrapped batch unexpectedly succeeded after second-chunk failure")
+	}
+	if len(lsns) != 1 || lsns[0] != 8 {
+		t.Fatalf("partial LSNs=%v want=[8]", lsns)
+	}
+	if R, _, H := s.Boundaries(); R != 7 || H != 8 {
+		t.Fatalf("Boundaries R=%d H=%d want R=7 H=8", R, H)
+	}
+	if _, err := s.Sync(); err == nil {
+		t.Fatal("Sync succeeded after terminal wrapped-batch failure")
+	}
+	crashStore(t, s)
+
+	reopened, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if got, err := reopened.Recover(); err != nil || got != 7 {
+		t.Fatalf("Recover=(%d,%v) want=(7,nil)", got, err)
+	}
+	for lba := uint32(7); lba < 10; lba++ {
+		got, err := reopened.Read(lba)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got[0] != 0 {
+			t.Fatalf("failed batch LBA %d became durable: %02x", lba, got[0])
+		}
+	}
+}
+
+func TestRecycleStablePrefixCoalescesIntegrityReads(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "recycle-read.bin")
+	s, err := CreateStoreWithConfig(path, Config{
+		NumBlocks:     256,
+		BlockSize:     512,
+		LaneCount:     1,
+		StripeBlocks:  1,
+		SlotsPerLane:  512,
+		RetainPerLane: 32,
+		QueueDepth:    512,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	for lba := uint32(0); lba < 256; lba++ {
+		if _, err := s.Write(lba, testBlock(byte(lba+1), s.BlockSize())); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.RLock()
+	readOps := s.recycleReadOps
+	s.mu.RUnlock()
+	if readOps != 1 {
+		t.Fatalf("recycle read ops=%d want=1", readOps)
+	}
+}
+
+func TestRecycleBatchedReadDetectsCorruptRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "recycle-corrupt.bin")
+	s, err := CreateStoreWithConfig(path, Config{
+		NumBlocks:     64,
+		BlockSize:     512,
+		LaneCount:     1,
+		StripeBlocks:  1,
+		SlotsPerLane:  64,
+		RetainPerLane: 8,
+		QueueDepth:    64,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	for lba := uint32(0); lba < 32; lba++ {
+		if _, err := s.Write(lba, testBlock(byte(lba+1), s.BlockSize())); err != nil {
+			t.Fatal(err)
+		}
+	}
+	off := s.lanes[0].base + 10*int64(s.recordSize) + recordHeaderSize
+	var corrupt [1]byte
+	if _, err := s.fd.ReadAt(corrupt[:], off); err != nil {
+		t.Fatal(err)
+	}
+	corrupt[0] ^= 0xff
+	if _, err := s.fd.WriteAt(corrupt[:], off); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Sync(); !errors.Is(err, storage.ErrWALIntegrityFault) {
+		t.Fatalf("Sync error=%v want WAL integrity failure", err)
+	}
+}
+
 func TestRingWrapRecyclesOnlyCheckpointedPrefix(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "wrap.bin")
 	s, err := CreateStoreWithConfig(path, Config{
@@ -1098,7 +1365,7 @@ func TestHeaderForConfigRejectsPersistedGeometryOverflow(t *testing.T) {
 	tests := []Config{
 		{
 			NumBlocks:    1,
-			BlockSize:    maxCheckpointWriteBytes + 1,
+			BlockSize:    maxWALIOBytes - recordHeaderSize + 1,
 			LaneCount:    1,
 			StripeBlocks: 1,
 			SlotsPerLane: 2,

@@ -20,6 +20,7 @@ import (
 const (
 	defaultQueueDepth       = 128
 	maxCheckpointWriteBytes = 1 << 20
+	maxWALIOBytes           = 1 << 20
 )
 
 var (
@@ -63,9 +64,10 @@ type lane struct {
 	nextSeq uint64
 
 	mu           sync.Mutex
-	cond         *sync.Cond
 	completedSeq uint64
 	queueDepth   uint64
+	queue        []*writeRequest
+	draining     bool
 	buffer       []byte
 	beforeWrite  func(*writeRequest)
 }
@@ -111,6 +113,8 @@ type Store struct {
 	baseStageSlot      int
 	baseStage          map[uint32][]byte
 	checkpointWriteOps uint64
+	walWriteOps        uint64
+	recycleReadOps     uint64
 
 	lanes       []*lane
 	extentLocks [256]sync.RWMutex
@@ -325,36 +329,118 @@ func newStore(path string, f *os.File, h fileHeader, headerSlot, queueDepth int,
 			queueDepth:   uint64(queueDepth),
 			buffer:       make([]byte, h.RecordSize),
 		}
-		l.cond = sync.NewCond(&l.mu)
 		s.publishedHeads[i] = h.LaneHeads[i]
 		s.lanes[i] = l
 	}
 	return s
 }
 
-func (s *Store) appendRequest(l *lane, req *writeRequest) {
+func (s *Store) queueRequest(l *lane, req *writeRequest) bool {
 	l.mu.Lock()
-	for req.laneSeq != l.completedSeq {
-		l.cond.Wait()
+	defer l.mu.Unlock()
+	l.queue = append(l.queue, req)
+	if l.draining {
+		return false
 	}
-	if l.beforeWrite != nil {
-		l.beforeWrite(req)
-	}
-	err := encodeRecordInto(l.buffer,
-		walRecord{LSN: req.lsn, LBA: req.lba, Flags: req.flags, Data: req.data},
-		int(s.blockSize))
-	if err == nil {
-		slot := req.laneSeq % s.slotsPerLane
-		off := l.base + int64(slot)*int64(s.recordSize)
-		_, err = s.fd.WriteAt(l.buffer, off)
+	l.draining = true
+	return true
+}
+
+func (s *Store) drainLane(l *lane, handoffAfterBatch bool) {
+	for {
+		l.mu.Lock()
+		if len(l.queue) == 0 {
+			l.queue = nil
+			l.draining = false
+			l.mu.Unlock()
+			return
+		}
+		firstSeq := l.queue[0].laneSeq
+		slot := firstSeq % s.slotsPerLane
+		maxRecords := maxWALIOBytes / int(s.recordSize)
+		if maxRecords < 1 {
+			maxRecords = 1
+		}
+		if untilWrap := int(s.slotsPerLane - slot); maxRecords > untilWrap {
+			maxRecords = untilWrap
+		}
+		if maxRecords > len(l.queue) {
+			maxRecords = len(l.queue)
+		}
+		batch := append([]*writeRequest(nil), l.queue[:maxRecords]...)
+		for i := 0; i < maxRecords; i++ {
+			l.queue[i] = nil
+		}
+		l.queue = l.queue[maxRecords:]
+		beforeWrite := l.beforeWrite
+		l.mu.Unlock()
+
+		for _, req := range batch {
+			if beforeWrite != nil {
+				beforeWrite(req)
+			}
+		}
+		bytesNeeded := len(batch) * int(s.recordSize)
+		if cap(l.buffer) < bytesNeeded {
+			l.buffer = make([]byte, bytesNeeded)
+		}
+		buf := l.buffer[:bytesNeeded]
+		var err error
+		for i, req := range batch {
+			recordBuf := buf[i*int(s.recordSize) : (i+1)*int(s.recordSize)]
+			err = encodeRecordInto(recordBuf,
+				walRecord{LSN: req.lsn, LBA: req.lba, Flags: req.flags, Data: req.data},
+				int(s.blockSize))
+			if err != nil {
+				break
+			}
+		}
+		if err == nil {
+			off := l.base + int64(slot)*int64(s.recordSize)
+			_, err = s.fd.WriteAt(buf, off)
+			s.mu.Lock()
+			s.walWriteOps++
+			s.mu.Unlock()
+			if err != nil {
+				err = fmt.Errorf("parallelwal: lane %d append LSN range [%d,%d]: %w",
+					l.id, batch[0].lsn, batch[len(batch)-1].lsn, err)
+			}
+		}
+
+		l.mu.Lock()
+		l.completedSeq += uint64(len(batch))
+		l.mu.Unlock()
+		for _, req := range batch {
+			s.complete(req, err)
+		}
 		if err != nil {
-			err = fmt.Errorf("parallelwal: lane %d append LSN=%d: %w", l.id, req.lsn, err)
+			s.failQueuedLane(l, err)
+			return
+		}
+		if handoffAfterBatch {
+			l.mu.Lock()
+			if len(l.queue) == 0 {
+				l.draining = false
+				l.mu.Unlock()
+			} else {
+				l.mu.Unlock()
+				go s.drainLane(l, false)
+			}
+			return
 		}
 	}
-	l.completedSeq++
-	l.cond.Broadcast()
+}
+
+func (s *Store) failQueuedLane(l *lane, err error) {
+	l.mu.Lock()
+	queued := l.queue
+	l.queue = nil
+	l.completedSeq += uint64(len(queued))
+	l.draining = false
 	l.mu.Unlock()
-	s.complete(req, err)
+	for _, req := range queued {
+		s.complete(req, err)
+	}
 }
 
 func (s *Store) complete(req *writeRequest, err error) {
@@ -501,8 +587,11 @@ func (s *Store) submit(lba uint32, data []byte, sourceLSN uint64) (uint64, error
 	s.nextLSN = lsn + 1
 	s.pending[lsn] = req
 	s.inflightAppends++
+	startDrainer := s.queueRequest(l, req)
 	s.mu.Unlock()
-	s.appendRequest(l, req)
+	if startDrainer {
+		s.drainLane(l, true)
+	}
 	if err := <-req.result; err != nil {
 		return 0, err
 	}
@@ -589,27 +678,19 @@ func (s *Store) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error) {
 	}
 	s.nextLSN += uint64(len(reqs))
 	s.inflightAppends += len(reqs)
+	startDrainers := make([]bool, len(s.lanes))
+	for _, req := range reqs {
+		if s.queueRequest(s.lanes[req.lane], req) {
+			startDrainers[req.lane] = true
+		}
+	}
 	s.mu.Unlock()
 
-	byLane := make([][]*writeRequest, len(s.lanes))
-	for _, req := range reqs {
-		byLane[req.lane] = append(byLane[req.lane], req)
-	}
-	var appenders sync.WaitGroup
-	for laneID, laneReqs := range byLane {
-		if len(laneReqs) == 0 {
-			continue
+	for laneID, start := range startDrainers {
+		if start {
+			go s.drainLane(s.lanes[laneID], false)
 		}
-		l := s.lanes[laneID]
-		appenders.Add(1)
-		go func() {
-			defer appenders.Done()
-			for _, req := range laneReqs {
-				s.appendRequest(l, req)
-			}
-		}()
 	}
-	appenders.Wait()
 	for i, req := range reqs {
 		if err := <-req.result; err != nil {
 			return lsns[:i], err
@@ -731,7 +812,7 @@ func (s *Store) Sync() (uint64, error) {
 	if err := s.fd.Sync(); err != nil {
 		return 0, fmt.Errorf("parallelwal: sync checkpoint extent: %w", err)
 	}
-	newTails, newWALTail, err := s.recycleStablePrefix(heads)
+	newTails, newWALTail, recycleReadOps, err := s.recycleStablePrefix(heads)
 	if err != nil {
 		return 0, err
 	}
@@ -755,6 +836,7 @@ func (s *Store) Sync() (uint64, error) {
 	}
 	s.baseCommitPending = false
 	s.checkpointWriteOps = uint64(checkpointWriteOps)
+	s.recycleReadOps = uint64(recycleReadOps)
 	if target > s.stableLSN {
 		s.stableLSN = target
 	}
@@ -867,13 +949,18 @@ func (s *Store) persistHeader(
 	return nil
 }
 
-func (s *Store) recycleStablePrefix(heads [maxLaneCount]uint64) ([maxLaneCount]uint64, uint64, error) {
+func (s *Store) recycleStablePrefix(heads [maxLaneCount]uint64) ([maxLaneCount]uint64, uint64, int, error) {
 	s.mu.RLock()
 	h := s.hdr
 	walTail := s.walTail
 	s.mu.RUnlock()
 	tails := h.LaneTails
-	buf := make([]byte, h.RecordSize)
+	maxRecords := maxWALIOBytes / int(h.RecordSize)
+	if maxRecords < 1 {
+		maxRecords = 1
+	}
+	buf := make([]byte, maxRecords*int(h.RecordSize))
+	readOps := 0
 	for laneID := 0; laneID < int(h.LaneCount); laneID++ {
 		head := heads[laneID]
 		keep := h.RetainPerLane
@@ -881,30 +968,44 @@ func (s *Store) recycleStablePrefix(heads [maxLaneCount]uint64) ([maxLaneCount]u
 			continue
 		}
 		newTail := head - keep
-		for seq := tails[laneID]; seq < newTail; seq++ {
+		for seq := tails[laneID]; seq < newTail; {
 			slot := seq % h.SlotsPerLane
+			count := maxRecords
+			if untilWrap := int(h.SlotsPerLane - slot); count > untilWrap {
+				count = untilWrap
+			}
+			if remaining := int(newTail - seq); count > remaining {
+				count = remaining
+			}
+			chunk := buf[:count*int(h.RecordSize)]
 			off := s.lanes[laneID].base + int64(slot)*int64(h.RecordSize)
-			n, err := s.fd.ReadAt(buf, off)
+			n, err := s.fd.ReadAt(chunk, off)
+			readOps++
 			if err != nil && !errors.Is(err, io.EOF) {
-				return tails, walTail, storage.NewSubstrateIOFailure(err,
-					fmt.Sprintf("recycle read lane=%d seq=%d", laneID, seq))
+				return tails, walTail, readOps, storage.NewSubstrateIOFailure(err,
+					fmt.Sprintf("recycle read lane=%d seq-range=[%d,%d)", laneID, seq, seq+uint64(count)))
 			}
-			if n != len(buf) {
-				return tails, walTail, storage.NewSubstrateIOFailure(io.ErrUnexpectedEOF,
-					fmt.Sprintf("recycle short read lane=%d seq=%d bytes=%d", laneID, seq, n))
+			if n != len(chunk) {
+				return tails, walTail, readOps, storage.NewSubstrateIOFailure(io.ErrUnexpectedEOF,
+					fmt.Sprintf("recycle short read lane=%d seq-range=[%d,%d) bytes=%d",
+						laneID, seq, seq+uint64(count), n))
 			}
-			rec, err := decodeRecord(buf, int(h.BlockSize))
-			if err != nil {
-				return tails, walTail, storage.NewWALIntegrityFailure(nil,
-					fmt.Sprintf("recycle decode lane=%d seq=%d: %v", laneID, seq, err))
+			for i := 0; i < count; i++ {
+				recordBuf := chunk[i*int(h.RecordSize) : (i+1)*int(h.RecordSize)]
+				rec, err := decodeRecord(recordBuf, int(h.BlockSize))
+				if err != nil {
+					return tails, walTail, readOps, storage.NewWALIntegrityFailure(nil,
+						fmt.Sprintf("recycle decode lane=%d seq=%d: %v", laneID, seq+uint64(i), err))
+				}
+				if rec.LSN+1 > walTail {
+					walTail = rec.LSN + 1
+				}
 			}
-			if rec.LSN+1 > walTail {
-				walTail = rec.LSN + 1
-			}
+			seq += uint64(count)
 		}
 		tails[laneID] = newTail
 	}
-	return tails, walTail, nil
+	return tails, walTail, readOps, nil
 }
 
 func (s *Store) Recover() (uint64, error) {
@@ -978,7 +1079,6 @@ func (s *Store) Recover() (uint64, error) {
 		l.nextSeq = s.hdr.LaneHeads[i]
 		l.mu.Lock()
 		l.completedSeq = s.hdr.LaneHeads[i]
-		l.cond.Broadcast()
 		l.mu.Unlock()
 	}
 	s.recovered = true
