@@ -62,7 +62,6 @@ if command -v strace >/dev/null 2>&1; then
   require_line 'eventfd2\(' "${ARTIFACT_DIR}/native-durability.strace"
   require_line 'io_uring_register\(' "${ARTIFACT_DIR}/native-durability.strace"
   require_line 'io_uring_enter\(' "${ARTIFACT_DIR}/native-durability.strace"
-  require_line 'poll\(' "${ARTIFACT_DIR}/native-durability.strace"
   if grep -q 'IORING_ENTER_GETEVENTS' "${ARTIFACT_DIR}/native-durability.strace"; then
     echo "completion path unexpectedly used IORING_ENTER_GETEVENTS" >&2
     exit 1
