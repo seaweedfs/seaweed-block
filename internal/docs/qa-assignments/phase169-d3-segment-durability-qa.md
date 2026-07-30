@@ -24,6 +24,7 @@ sync_waits_for_target=pass
 sync_excludes_future_admission=pass
 segment_write_error_terminal=pass
 data_sync_failure_terminal=pass
+failure_barrier_blocks_future_publish=pass
 header_write_failure_terminal=pass
 header_sync_failure_terminal=pass
 external_failure_blocks_active_publish=pass

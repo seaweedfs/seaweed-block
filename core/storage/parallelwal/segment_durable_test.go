@@ -277,6 +277,9 @@ type faultSegmentDurableFile struct {
 	mu               sync.Mutex
 	syncCalls        int
 	failSyncCall     int
+	blockSyncCall    int
+	syncEntered      chan struct{}
+	releaseSync      chan struct{}
 	failHeaderOffset int64
 }
 
@@ -314,9 +317,16 @@ func (f *faultSegmentDurableFile) WriteAt(data []byte, offset int64) (int, error
 
 func (f *faultSegmentDurableFile) Sync() error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.syncCalls++
-	if f.failSyncCall != 0 && f.syncCalls == f.failSyncCall {
+	call := f.syncCalls
+	block := f.blockSyncCall != 0 && call == f.blockSyncCall
+	fail := f.failSyncCall != 0 && call == f.failSyncCall
+	f.mu.Unlock()
+	if block {
+		close(f.syncEntered)
+		<-f.releaseSync
+	}
+	if fail {
 		return errInjectedSegmentSync
 	}
 	return f.File.Sync()
@@ -348,6 +358,76 @@ func TestSegmentDurableSyncFailureTerminallyFaultsOwner(t *testing.T) {
 	}
 	if header.Generation != 1 || header.LastLSN != 0 {
 		t.Fatalf("failed Sync advanced header=%+v", header)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSegmentDurableFailureBarrierBlocksFuturePublication(t *testing.T) {
+	config := segmentDurableTestConfig()
+	raw, _ := createSegmentDurableTestFile(t, config)
+	file := &faultSegmentDurableFile{
+		File:             raw,
+		failSyncCall:     2,
+		blockSyncCall:    2,
+		syncEntered:      make(chan struct{}),
+		releaseSync:      make(chan struct{}),
+		failHeaderOffset: -1,
+	}
+	engine, err := newSegmentDurableEngine(file, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Submit(0, testBlock(1, 512)); err != nil {
+		t.Fatal(err)
+	}
+	syncResult := make(chan error, 1)
+	go func() {
+		_, err := engine.Sync()
+		syncResult <- err
+	}()
+	<-file.syncEntered
+
+	futureResult := make(chan error, 1)
+	go func() {
+		_, err := engine.Submit(1, testBlock(2, 512))
+		futureResult <- err
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		engine.owner.mu.Lock()
+		waiters := engine.owner.barrierWaiters
+		engine.owner.mu.Unlock()
+		if waiters == 1 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	engine.owner.mu.Lock()
+	waiters := engine.owner.barrierWaiters
+	engine.owner.mu.Unlock()
+	if waiters != 1 {
+		t.Fatal("future write did not reach the durability publication barrier")
+	}
+	select {
+	case err := <-futureResult:
+		t.Fatalf("future write escaped active durability barrier: %v", err)
+	default:
+	}
+
+	close(file.releaseSync)
+	if err := <-syncResult; !errors.Is(err, errInjectedSegmentSync) {
+		t.Fatalf("Sync error=%v", err)
+	}
+	if err := <-futureResult; !errors.Is(err, errInjectedSegmentSync) {
+		t.Fatalf("future write error=%v", err)
+	}
+	if err := engine.Close(); !errors.Is(err, errInjectedSegmentSync) {
+		t.Fatalf("Close error=%v", err)
+	}
+	if metrics := engine.owner.Metrics(); metrics.EntriesWritten != 1 {
+		t.Fatalf("future write published after Sync failure: %+v", metrics)
 	}
 	if err := raw.Close(); err != nil {
 		t.Fatal(err)

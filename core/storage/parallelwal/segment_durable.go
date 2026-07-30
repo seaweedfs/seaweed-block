@@ -65,11 +65,12 @@ func (e *segmentDurableEngine) Sync() (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	snapshot, err := e.owner.WaitPublished(targetLSN)
+	snapshot, err := e.owner.BeginDurability(targetLSN)
 	if err != nil {
 		return 0, err
 	}
 	if snapshot.PublishedLSN <= e.header.LastLSN {
+		e.owner.EndDurability(nil)
 		return e.header.LastLSN, nil
 	}
 	if err := e.file.Sync(); err != nil {
@@ -99,11 +100,12 @@ func (e *segmentDurableEngine) Sync() (uint64, error) {
 	}
 	e.header = next
 	e.slot = nextSlot
+	e.owner.EndDurability(nil)
 	return next.LastLSN, nil
 }
 
 func (e *segmentDurableEngine) failSync(err error) error {
-	e.owner.Fail(err)
+	e.owner.EndDurability(err)
 	return err
 }
 

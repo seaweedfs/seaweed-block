@@ -91,6 +91,8 @@ type segmentOwner struct {
 	writtenBytes       int64
 	completedSegments  uint64
 	publicationWaiters int
+	durabilityBarrier  bool
+	barrierWaiters     int
 	admissionTokens    chan struct{}
 	beforePublish      func()
 
@@ -266,6 +268,13 @@ func (o *segmentOwner) publish(
 ) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	if o.durabilityBarrier && o.terminalErr == nil {
+		o.barrierWaiters++
+		defer func() { o.barrierWaiters-- }()
+	}
+	for o.durabilityBarrier && o.terminalErr == nil {
+		o.cond.Wait()
+	}
 	if o.terminalErr != nil {
 		return o.terminalErr
 	}
@@ -368,6 +377,45 @@ func (o *segmentOwner) WaitPublished(targetLSN uint64) (segmentCommitSnapshot, e
 			"parallelwal: segment owner stopped at LSN %d before target %d",
 			o.publishedLSN, targetLSN)
 	}
+	return o.commitSnapshotLocked(), nil
+}
+
+func (o *segmentOwner) BeginDurability(targetLSN uint64) (segmentCommitSnapshot, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.durabilityBarrier {
+		return segmentCommitSnapshot{}, errors.New("parallelwal: durability barrier already active")
+	}
+	if o.publishedLSN < targetLSN && o.terminalErr == nil {
+		o.publicationWaiters++
+		defer func() { o.publicationWaiters-- }()
+	}
+	for o.publishedLSN < targetLSN && o.terminalErr == nil {
+		o.cond.Wait()
+	}
+	if o.terminalErr != nil {
+		return segmentCommitSnapshot{}, o.terminalErr
+	}
+	if o.publishedLSN < targetLSN {
+		return segmentCommitSnapshot{}, fmt.Errorf(
+			"parallelwal: segment owner stopped at LSN %d before durability target %d",
+			o.publishedLSN, targetLSN)
+	}
+	o.durabilityBarrier = true
+	return o.commitSnapshotLocked(), nil
+}
+
+func (o *segmentOwner) EndDurability(err error) {
+	if err != nil {
+		o.Fail(err)
+	}
+	o.mu.Lock()
+	o.durabilityBarrier = false
+	o.cond.Broadcast()
+	o.mu.Unlock()
+}
+
+func (o *segmentOwner) commitSnapshotLocked() segmentCommitSnapshot {
 	snapshot := segmentCommitSnapshot{
 		PublishedLSN:   o.publishedLSN,
 		CommittedBytes: o.writtenBytes,
@@ -378,7 +426,7 @@ func (o *segmentOwner) WaitPublished(targetLSN uint64) (segmentCommitSnapshot, e
 		snapshot.FirstLSN = 1
 		snapshot.LastLSN = o.publishedLSN
 	}
-	return snapshot, nil
+	return snapshot
 }
 
 func (o *segmentOwner) Close() error {

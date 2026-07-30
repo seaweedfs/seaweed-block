@@ -132,8 +132,11 @@ The owner publishes a coherent snapshot only after the complete segment
 ```
 
 `Sync` captures the highest LSN admitted before the call, waits for that target
-to publish, and may include later writes only when their complete segments
-already published. It then performs:
+to publish, then installs an owner-held durability barrier. Later segment
+writes may finish their physical `WriteAt`, but cannot publish or return
+success until the barrier resolves. The committed snapshot may include later
+writes only when their complete segments published before the barrier. Sync
+then performs:
 
 ```text
 segment data fsync
@@ -142,7 +145,9 @@ segment data fsync
 -> expose the new durable LSN
 ```
 
-The dual header persists the exact recovery manifest and the segment-log
+Successful Sync releases the barrier; failed Sync converts it into a terminal
+fault before any waiting publication can escape. The dual header persists the
+exact recovery manifest and the segment-log
 offset. Recovery selects the highest valid generation, stages only its trusted
 window, and ignores later physical bytes. A data-fsync, header-write, or
 header-fsync failure terminally faults the owner. If a later segment write is
