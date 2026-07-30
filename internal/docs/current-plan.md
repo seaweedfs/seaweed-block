@@ -145,8 +145,10 @@ exactly `1024` product/`strace` reads with zero shared-record reuse.
 
 ### D3. Shared Multi-Block Record Materialization
 
-Implementation status: complete locally; exact-commit Linux correctness gate
-pending.
+Implementation status: complete. Exact-commit Linux D3 correctness gate passed
+on `7d09924`: seven focused and CGO race tests each passed 20 repetitions,
+1024 logical blocks produced exactly `64/64` product/`strace` record reads and
+`960` actual reuse hits, and D4 was admitted.
 
 - Order the complete snapshot by WAL record identity without omitting entries.
 - Read one multi-block record once and validate every referenced block's
