@@ -12,6 +12,14 @@ import (
 )
 
 func BenchmarkPhase167ParallelWALContention(b *testing.B) {
+	benchmarkParallelWALContention(b, ExecutionPositioned)
+}
+
+func BenchmarkPhase168NativeWALContention(b *testing.B) {
+	benchmarkParallelWALContention(b, ExecutionIOUring)
+}
+
+func benchmarkParallelWALContention(b *testing.B, execution ExecutionMode) {
 	const (
 		blockSize = 4096
 		numBlocks = 16384
@@ -26,11 +34,13 @@ func BenchmarkPhase167ParallelWALContention(b *testing.B) {
 				SlotsPerLane:  4096,
 				RetainPerLane: 64,
 				QueueDepth:    256,
+				Execution:     execution,
 			})
 			if err != nil {
 				b.Fatal(err)
 			}
 			b.Cleanup(func() { _ = s.Close() })
+			b.ReportAllocs()
 
 			data := make([][]byte, writers)
 			for i := range data {
@@ -102,6 +112,18 @@ func BenchmarkPhase167ParallelWALContention(b *testing.B) {
 			b.ReportMetric(float64(walWriteOps), "wal_write_ops")
 			b.ReportMetric(float64(walTail), "wal_tail")
 			b.ReportMetric(float64(b.N)/wallDuration.Seconds(), "write_ops/s")
+			if execution == ExecutionIOUring {
+				stats := s.NativeIOStats()
+				b.ReportMetric(float64(stats.AdmittedRequests), "native_admitted")
+				b.ReportMetric(float64(stats.SubmissionRounds), "native_rounds")
+				b.ReportMetric(float64(stats.SQEs), "native_sqes")
+				b.ReportMetric(float64(stats.SubmitSyscalls), "native_submit_syscalls")
+				b.ReportMetric(float64(stats.CompletionCount), "native_cqes")
+				b.ReportMetric(float64(stats.QueueFullRejects), "native_queue_full")
+				b.ReportMetric(float64(stats.ShortCompletions), "native_short_cqes")
+				b.ReportMetric(float64(stats.InflightHighWater), "native_inflight_high_water")
+				b.ReportMetric(float64(stats.FallbackCount), "native_fallback")
+			}
 		})
 	}
 }
