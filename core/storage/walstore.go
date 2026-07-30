@@ -114,16 +114,6 @@ type WALStore struct {
 	// It must not be wired into production paths before version/compatibility
 	// gates and mounted NVMe/TCP profiling pass.
 	multiBlockRecords bool
-
-	// singleReadMaterialization is a disabled-by-default Phase 172 comparison
-	// path. It changes only how the flusher reads one WAL record; decoded bytes
-	// still pass the existing CRC and semantic validation before use.
-	singleReadMaterialization atomic.Bool
-
-	// sharedRecordMaterialization permits one decoded WAL record to serve
-	// adjacent snapshot entries with the same exact record identity. The
-	// flusher owns this bounded, cycle-local cache.
-	sharedRecordMaterialization atomic.Bool
 }
 
 // CreateWALStore initializes a new store file at path. Fails if path
@@ -491,10 +481,7 @@ func (s *WALStore) Write(lba uint32, data []byte) (uint64, error) {
 		return 0, fmt.Errorf("storage: WAL append: %w", err)
 	}
 	dirtyStart := time.Now()
-	s.dm.put(
-		uint64(lba), walRelOff, lsn, uint32(len(data)),
-		uint64(walEntryHeaderSize+len(data)),
-	)
+	s.dm.put(uint64(lba), walRelOff, lsn, uint32(len(data)))
 	s.instr.recordDirtyMapUpdate(1, time.Since(dirtyStart))
 
 	s.nextLSN++
@@ -567,10 +554,7 @@ func (s *WALStore) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error
 	}
 	dirtyStart := time.Now()
 	for i, walRelOff := range offsets {
-		s.dm.put(
-			uint64(startLBA+uint32(i)), walRelOff, lsns[i], uint32(len(blocks[i])),
-			uint64(walEntryHeaderSize+len(blocks[i])),
-		)
+		s.dm.put(uint64(startLBA+uint32(i)), walRelOff, lsns[i], uint32(len(blocks[i])))
 	}
 	s.instr.recordDirtyMapUpdate(len(offsets), time.Since(dirtyStart))
 
@@ -621,7 +605,6 @@ func (s *WALStore) writeBatchMultiBlockLocked(startLBA uint32, blocks [][]byte, 
 			uint32(i*int(s.sb.BlockSize)),
 			lsn,
 			uint32(len(data)),
-			uint64(walEntryHeaderSize+len(payload)),
 		)
 	}
 	s.instr.recordDirtyMapUpdate(len(blocks), time.Since(dirtyStart))
@@ -703,17 +686,6 @@ func (s *WALStore) SetMultiBlockRecords(enabled bool) {
 
 func (s *WALStore) enableMultiBlockRecordsForTest(enabled bool) {
 	s.SetMultiBlockRecords(enabled)
-}
-
-func (s *WALStore) enableSingleReadMaterializationForTest(enabled bool) {
-	s.singleReadMaterialization.Store(enabled)
-}
-
-func (s *WALStore) enableSharedRecordMaterializationForTest(enabled bool) {
-	if enabled {
-		s.singleReadMaterialization.Store(true)
-	}
-	s.sharedRecordMaterialization.Store(enabled)
 }
 
 // DisableAutoFlushForRecoveryTest stops the background WAL->extent flusher
@@ -970,10 +942,7 @@ func (s *WALStore) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
 	if err != nil {
 		return fmt.Errorf("storage: WAL append (apply): %w", err)
 	}
-	s.dm.put(
-		uint64(lba), walRelOff, lsn, uint32(len(dataCopy)),
-		uint64(walEntryHeaderSize+len(dataCopy)),
-	)
+	s.dm.put(uint64(lba), walRelOff, lsn, uint32(len(dataCopy)))
 
 	s.mu.Lock()
 	defer s.mu.Unlock()

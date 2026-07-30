@@ -167,7 +167,7 @@ func recoverWAL(fd *os.File, sb *superblock, dm *dirtyMap) (recoveryResult, erro
 				for i := uint32(0); i < blocks; i++ {
 					dm.putAt(
 						entry.LBA+uint64(i), pos, i*sb.BlockSize,
-						entry.LSN, sb.BlockSize, entrySize,
+						entry.LSN, sb.BlockSize,
 					)
 				}
 				result.EntriesReplayed++
@@ -180,7 +180,7 @@ func recoverWAL(fd *os.File, sb *superblock, dm *dirtyMap) (recoveryResult, erro
 					}
 					dm.putAt(
 						entry.LBA+uint64(i), pos, i*sb.BlockSize,
-						lsn, sb.BlockSize, entrySize,
+						lsn, sb.BlockSize,
 					)
 				}
 				result.EntriesReplayed++
@@ -192,7 +192,7 @@ func recoverWAL(fd *os.File, sb *superblock, dm *dirtyMap) (recoveryResult, erro
 				for i := uint32(0); i < blocks; i++ {
 					dm.putAt(
 						entry.LBA+uint64(i), pos, i*sb.BlockSize,
-						entry.LSN, sb.BlockSize, entrySize,
+						entry.LSN, sb.BlockSize,
 					)
 				}
 				result.EntriesReplayed++

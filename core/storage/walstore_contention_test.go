@@ -2,7 +2,6 @@ package storage
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -52,86 +51,6 @@ func BenchmarkPhase171WALStoreScatteredContention(b *testing.B) {
 	})
 }
 
-func TestPhase172BenchmarkMaterializationModes(t *testing.T) {
-	for _, tc := range []struct {
-		mode       string
-		singleRead bool
-		shared     bool
-		wantErr    bool
-	}{
-		{mode: "default"},
-		{mode: "single-read", singleRead: true},
-		{mode: "shared-record", singleRead: true, shared: true},
-		{mode: "unsupported", wantErr: true},
-	} {
-		t.Run(tc.mode, func(t *testing.T) {
-			s, err := CreateWALStore(filepath.Join(t.TempDir(), "store.bin"), 8, 4096)
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { _ = s.Close() })
-			err = configurePhase172BenchmarkMaterialization(s, tc.mode)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatal("expected unsupported mode error")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got := s.singleReadMaterialization.Load(); got != tc.singleRead {
-				t.Fatalf("single-read=%t want %t", got, tc.singleRead)
-			}
-			if got := s.sharedRecordMaterialization.Load(); got != tc.shared {
-				t.Fatalf("shared-record=%t want %t", got, tc.shared)
-			}
-		})
-	}
-}
-
-func configurePhase172BenchmarkMaterialization(s *WALStore, mode string) error {
-	s.enableSingleReadMaterializationForTest(false)
-	s.enableSharedRecordMaterializationForTest(false)
-	switch mode {
-	case "default":
-		return nil
-	case "single-read":
-		s.enableSingleReadMaterializationForTest(true)
-		return nil
-	case "shared-record":
-		s.enableSharedRecordMaterializationForTest(true)
-		return nil
-	default:
-		return fmt.Errorf("unsupported Phase 172 benchmark materialization mode %q", mode)
-	}
-}
-
-func enablePhase172BenchmarkMaterialization(b *testing.B, s *WALStore) {
-	b.Helper()
-	mode := os.Getenv("SW_BLOCK_PHASE172_MATERIALIZATION_MODE")
-	if mode == "" {
-		mode = "default"
-	}
-	if err := configurePhase172BenchmarkMaterialization(s, mode); err != nil {
-		b.Fatal(err)
-	}
-}
-
-func reportPhase172BenchmarkMaterialization(b *testing.B, s *WALStore) {
-	b.Helper()
-	if s.singleReadMaterialization.Load() {
-		b.ReportMetric(1, "single_read_materialization")
-	} else {
-		b.ReportMetric(0, "single_read_materialization")
-	}
-	if s.sharedRecordMaterialization.Load() {
-		b.ReportMetric(1, "shared_record_materialization")
-	} else {
-		b.ReportMetric(0, "shared_record_materialization")
-	}
-}
-
 func benchmarkWALStoreContention(b *testing.B, lbaForIndex func(int, int) uint32) {
 	const (
 		blockSize = 4096
@@ -144,7 +63,6 @@ func benchmarkWALStoreContention(b *testing.B, lbaForIndex func(int, int) uint32
 				b.Fatal(err)
 			}
 			b.Cleanup(func() { _ = s.Close() })
-			enablePhase172BenchmarkMaterialization(b, s)
 			b.ReportAllocs()
 
 			data := make([][]byte, writers)
@@ -208,7 +126,6 @@ func benchmarkWALStoreContention(b *testing.B, lbaForIndex func(int, int) uint32
 
 			status := s.WriteInstrumentation()
 			flusherStatus := s.FlusherInstrumentation()
-			reportPhase172BenchmarkMaterialization(b, s)
 			reportLatencyPercentiles(b, latencies)
 			reportWALStoreContentionMetrics(
 				b, s, status, flusherStatus, uint64(b.N), 1,
@@ -241,7 +158,6 @@ func benchmarkWALStoreBatchContention(b *testing.B, multiBlockRecords bool) {
 				b.Fatal(err)
 			}
 			b.Cleanup(func() { _ = s.Close() })
-			enablePhase172BenchmarkMaterialization(b, s)
 			s.enableMultiBlockRecordsForTest(multiBlockRecords)
 			b.ReportAllocs()
 
@@ -310,7 +226,6 @@ func benchmarkWALStoreBatchContention(b *testing.B, multiBlockRecords bool) {
 
 			status := s.WriteInstrumentation()
 			flusherStatus := s.FlusherInstrumentation()
-			reportPhase172BenchmarkMaterialization(b, s)
 			logicalEntries := uint64(b.N * batchBlocks)
 			reportLatencyPercentiles(b, latencies)
 			reportWALStoreContentionMetrics(
@@ -352,19 +267,6 @@ func reportWALStoreContentionMetrics(
 		}
 		return float64(total) / float64(logicalEntries)
 	}
-	perValidatedRecord := func(total uint64) float64 {
-		if flusherStatus.ValidatedRecords == 0 {
-			return 0
-		}
-		return float64(total) / float64(flusherStatus.ValidatedRecords)
-	}
-	perSnapshotEntry := func(total uint64) float64 {
-		if flusherStatus.SnapshotEntries == 0 {
-			return 0
-		}
-		return float64(total) / float64(flusherStatus.SnapshotEntries)
-	}
-
 	_, _, headLSN := s.Boundaries()
 	checkpointLSN := s.CheckpointLSN()
 
@@ -391,29 +293,19 @@ func reportWALStoreContentionMetrics(
 	b.ReportMetric(float64(syncDuration.Nanoseconds()), "final_sync_ns")
 	b.ReportMetric(float64(drainDuration.Nanoseconds()), "final_drain_ns")
 	b.ReportMetric(perEntry(flusherStatus.SnapshotEntries), "flush_snapshot_entries/entry")
-	b.ReportMetric(perEntry(flusherStatus.SnapshotUniqueWALRecords), "flush_unique_wal_records/entry")
-	b.ReportMetric(perEntry(flusherStatus.SnapshotRecordReuseCandidates), "flush_record_reuse_opportunities/entry")
-	b.ReportMetric(perSnapshotEntry(flusherStatus.SnapshotUniqueWALRecords), "flush_unique_wal_records/snapshot_entry")
-	b.ReportMetric(perSnapshotEntry(flusherStatus.SnapshotRecordReuseCandidates), "flush_record_reuse_opportunities/snapshot_entry")
 	b.ReportMetric(perEntry(flusherStatus.SnapshotDurationNanos), "flush_snapshot_ns/entry")
 	b.ReportMetric(perEntry(flusherStatus.OpportunityAnalysisNanos), "flush_opportunity_ns/entry")
 	b.ReportMetric(perEntry(flusherStatus.ValidatedRecords), "flush_validated_records/entry")
 	b.ReportMetric(float64(flusherStatus.ValidationFailures), "flush_validation_failures")
 	b.ReportMetric(perEntry(flusherStatus.SupersededEntries), "flush_superseded_entries/entry")
 	b.ReportMetric(perEntry(flusherStatus.WALHeaderReadOps), "flush_header_reads/entry")
-	b.ReportMetric(perValidatedRecord(flusherStatus.WALHeaderReadOps), "flush_header_reads/validated_record")
 	b.ReportMetric(float64(flusherStatus.WALHeaderReadFailures), "flush_header_read_failures")
 	b.ReportMetric(perEntry(flusherStatus.WALHeaderReadBytes), "flush_header_read_bytes/entry")
 	b.ReportMetric(perEntry(flusherStatus.WALHeaderReadDurationNanos), "flush_header_read_ns/entry")
 	b.ReportMetric(perEntry(flusherStatus.WALRecordReadOps), "flush_record_reads/entry")
-	b.ReportMetric(perValidatedRecord(flusherStatus.WALRecordReadOps), "flush_record_reads/validated_record")
 	b.ReportMetric(float64(flusherStatus.WALRecordReadFailures), "flush_record_read_failures")
 	b.ReportMetric(perEntry(flusherStatus.WALRecordReadBytes), "flush_record_read_bytes/entry")
 	b.ReportMetric(perEntry(flusherStatus.WALRecordReadDurationNanos), "flush_record_read_ns/entry")
-	b.ReportMetric(perEntry(flusherStatus.MaterializationReadOps), "flush_materialization_reads/entry")
-	b.ReportMetric(perValidatedRecord(flusherStatus.MaterializationReadOps), "flush_materialization_reads/validated_record")
-	b.ReportMetric(perEntry(flusherStatus.MaterializationReadBytes), "flush_materialization_read_bytes/entry")
-	b.ReportMetric(perValidatedRecord(flusherStatus.MaterializationRecordReuseHits), "flush_record_reuse_hits/validated_record")
 	b.ReportMetric(perEntry(flusherStatus.ExtentWriteOps), "extent_write_ops/entry")
 	b.ReportMetric(float64(flusherStatus.ExtentWriteFailures), "extent_write_failures")
 	b.ReportMetric(perEntry(flusherStatus.ExtentWriteBytes), "extent_write_bytes/entry")

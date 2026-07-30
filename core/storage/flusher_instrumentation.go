@@ -18,8 +18,6 @@ type FlusherInstrumentationStatus struct {
 	CycleDurationNanos              uint64
 	CycleMaxDurationNanos           uint64
 	SnapshotEntries                 uint64
-	SnapshotUniqueWALRecords        uint64
-	SnapshotRecordReuseCandidates   uint64
 	SnapshotDurationNanos           uint64
 	OpportunityAnalysisNanos        uint64
 	SnapshotBoundedWriteMinimum     uint64
@@ -43,9 +41,6 @@ type FlusherInstrumentationStatus struct {
 	WALRecordReadFailures           uint64
 	WALRecordReadBytes              uint64
 	WALRecordReadDurationNanos      uint64
-	MaterializationReadOps          uint64
-	MaterializationReadBytes        uint64
-	MaterializationRecordReuseHits  uint64
 	ExtentWriteOps                  uint64
 	ExtentWriteFailures             uint64
 	ExtentWriteBytes                uint64
@@ -70,8 +65,6 @@ type flusherInstrumentation struct {
 	cycleDurationNanos              atomic.Uint64
 	cycleMaxDurationNanos           atomic.Uint64
 	snapshotEntries                 atomic.Uint64
-	snapshotUniqueWALRecords        atomic.Uint64
-	snapshotRecordReuseCandidates   atomic.Uint64
 	snapshotDurationNanos           atomic.Uint64
 	opportunityAnalysisNanos        atomic.Uint64
 	snapshotBoundedWriteMinimum     atomic.Uint64
@@ -95,7 +88,6 @@ type flusherInstrumentation struct {
 	walRecordReadFailures           atomic.Uint64
 	walRecordReadBytes              atomic.Uint64
 	walRecordReadDurationNanos      atomic.Uint64
-	materializationRecordReuseHits  atomic.Uint64
 	extentWriteOps                  atomic.Uint64
 	extentWriteFailures             atomic.Uint64
 	extentWriteBytes                atomic.Uint64
@@ -124,10 +116,7 @@ func (i *flusherInstrumentation) recordCycle(
 	i.snapshotDurationNanos.Add(storageDurationNanos(snapshotDuration))
 	opportunityStart := time.Now()
 	opportunity := boundedExtentWriteOpportunity(entries, blockSize)
-	recordShape := walRecordMaterializationShape(entries)
 	i.opportunityAnalysisNanos.Add(storageDurationNanos(time.Since(opportunityStart)))
-	i.snapshotUniqueWALRecords.Add(recordShape.uniqueRecords)
-	i.snapshotRecordReuseCandidates.Add(recordShape.reuseCandidates)
 	i.snapshotBoundedWriteMinimum.Add(opportunity.minimumOps)
 	i.snapshotRunCount.Add(opportunity.runCount)
 	i.snapshotSingletonRuns.Add(opportunity.singletonRuns)
@@ -142,27 +131,6 @@ func (i *flusherInstrumentation) recordCycle(
 		} else {
 			i.cyclesFailed.Add(1)
 		}
-	}
-}
-
-type walRecordShape struct {
-	uniqueRecords   uint64
-	reuseCandidates uint64
-}
-
-func walRecordMaterializationShape(entries []snapshotEntry) walRecordShape {
-	type identity struct {
-		offset uint64
-		size   uint64
-	}
-	records := make(map[identity]struct{}, len(entries))
-	for _, entry := range entries {
-		records[identity{offset: entry.WALOffset, size: entry.RecordSize}] = struct{}{}
-	}
-	uniqueRecords := uint64(len(records))
-	return walRecordShape{
-		uniqueRecords:   uniqueRecords,
-		reuseCandidates: uint64(len(entries)) - uniqueRecords,
 	}
 }
 
@@ -250,10 +218,6 @@ func (i *flusherInstrumentation) recordSupersededEntry() {
 	i.supersededEntries.Add(1)
 }
 
-func (i *flusherInstrumentation) recordMaterializationReuseHit() {
-	i.materializationRecordReuseHits.Add(1)
-}
-
 func (i *flusherInstrumentation) recordExtentWrite(bytes int, duration time.Duration, err error) {
 	value := uint64(bytes)
 	i.extentWriteOps.Add(1)
@@ -302,10 +266,6 @@ func updateAtomicMax(target *atomic.Uint64, value uint64) {
 }
 
 func (i *flusherInstrumentation) snapshot() FlusherInstrumentationStatus {
-	walHeaderReadOps := i.walHeaderReadOps.Load()
-	walHeaderReadBytes := i.walHeaderReadBytes.Load()
-	walRecordReadOps := i.walRecordReadOps.Load()
-	walRecordReadBytes := i.walRecordReadBytes.Load()
 	return FlusherInstrumentationStatus{
 		CyclesStarted:                   i.cyclesStarted.Load(),
 		CyclesSucceeded:                 i.cyclesSucceeded.Load(),
@@ -313,8 +273,6 @@ func (i *flusherInstrumentation) snapshot() FlusherInstrumentationStatus {
 		CycleDurationNanos:              i.cycleDurationNanos.Load(),
 		CycleMaxDurationNanos:           i.cycleMaxDurationNanos.Load(),
 		SnapshotEntries:                 i.snapshotEntries.Load(),
-		SnapshotUniqueWALRecords:        i.snapshotUniqueWALRecords.Load(),
-		SnapshotRecordReuseCandidates:   i.snapshotRecordReuseCandidates.Load(),
 		SnapshotDurationNanos:           i.snapshotDurationNanos.Load(),
 		OpportunityAnalysisNanos:        i.opportunityAnalysisNanos.Load(),
 		SnapshotBoundedWriteMinimum:     i.snapshotBoundedWriteMinimum.Load(),
@@ -330,17 +288,14 @@ func (i *flusherInstrumentation) snapshot() FlusherInstrumentationStatus {
 		ValidatedRecords:                i.validatedRecords.Load(),
 		ValidationFailures:              i.validationFailures.Load(),
 		SupersededEntries:               i.supersededEntries.Load(),
-		WALHeaderReadOps:                walHeaderReadOps,
+		WALHeaderReadOps:                i.walHeaderReadOps.Load(),
 		WALHeaderReadFailures:           i.walHeaderReadFailures.Load(),
-		WALHeaderReadBytes:              walHeaderReadBytes,
+		WALHeaderReadBytes:              i.walHeaderReadBytes.Load(),
 		WALHeaderReadDurationNanos:      i.walHeaderReadDurationNanos.Load(),
-		WALRecordReadOps:                walRecordReadOps,
+		WALRecordReadOps:                i.walRecordReadOps.Load(),
 		WALRecordReadFailures:           i.walRecordReadFailures.Load(),
-		WALRecordReadBytes:              walRecordReadBytes,
+		WALRecordReadBytes:              i.walRecordReadBytes.Load(),
 		WALRecordReadDurationNanos:      i.walRecordReadDurationNanos.Load(),
-		MaterializationReadOps:          walHeaderReadOps + walRecordReadOps,
-		MaterializationReadBytes:        walHeaderReadBytes + walRecordReadBytes,
-		MaterializationRecordReuseHits:  i.materializationRecordReuseHits.Load(),
 		ExtentWriteOps:                  i.extentWriteOps.Load(),
 		ExtentWriteFailures:             i.extentWriteFailures.Load(),
 		ExtentWriteBytes:                i.extentWriteBytes.Load(),

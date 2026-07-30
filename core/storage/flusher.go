@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -156,24 +155,6 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 	if len(entries) == 0 {
 		return nil
 	}
-	sharedRecords := store.sharedRecordMaterialization.Load()
-	if sharedRecords {
-		sort.Slice(entries, func(left, right int) bool {
-			if entries[left].WALOffset != entries[right].WALOffset {
-				return entries[left].WALOffset < entries[right].WALOffset
-			}
-			if entries[left].RecordSize != entries[right].RecordSize {
-				return entries[left].RecordSize < entries[right].RecordSize
-			}
-			if entries[left].DataOffset != entries[right].DataOffset {
-				return entries[left].DataOffset < entries[right].DataOffset
-			}
-			if entries[left].LSN != entries[right].LSN {
-				return entries[left].LSN < entries[right].LSN
-			}
-			return entries[left].LBA < entries[right].LBA
-		})
-	}
 	finishCycle := f.instr.recordCycle(
 		cycleStart, time.Since(snapshotStart), entries, store.sb.BlockSize,
 	)
@@ -190,26 +171,8 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 		f.instr.recordWrittenOpportunity(writtenEntries, store.sb.BlockSize)
 	}()
 
-	var cachedRecord *walEntry
-	var cachedWALOffset uint64
-	var cachedRecordSize uint64
 	for _, e := range entries {
-		var data []byte
-		var entrySize uint64
-		if sharedRecords && cachedRecord != nil &&
-			e.WALOffset == cachedWALOffset &&
-			e.RecordSize == cachedRecordSize {
-			data, err = f.reuseDirtyRecord(e, cachedRecord)
-			entrySize = cachedRecordSize
-		} else {
-			var materialized *walEntry
-			data, entrySize, err = f.readDirtyRecord(e, &materialized)
-			if sharedRecords && err == nil {
-				cachedRecord = materialized
-				cachedWALOffset = e.WALOffset
-				cachedRecordSize = e.RecordSize
-			}
-		}
+		data, entrySize, err := f.readDirtyRecord(e)
 		if err != nil {
 			return err
 		}
@@ -271,10 +234,7 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 	return nil
 }
 
-func (f *flusher) readDirtyRecord(
-	e snapshotEntry,
-	materializedOut **walEntry,
-) (data []byte, entrySize uint64, err error) {
+func (f *flusher) readDirtyRecord(e snapshotEntry) (data []byte, entrySize uint64, err error) {
 	store := f.store
 	readFailed := false
 	defer func() {
@@ -287,75 +247,55 @@ func (f *flusher) readDirtyRecord(
 	}()
 
 	absOff := int64(store.sb.WALOffset + e.WALOffset)
-	var full []byte
-	if store.singleReadMaterialization.Load() {
-		entrySize = e.RecordSize
-		if entrySize < uint64(walEntryHeaderSize) ||
-			entrySize > store.sb.WALSize ||
-			e.WALOffset > store.sb.WALSize-entrySize {
-			return nil, 0, fmt.Errorf(
-				"flusher: invalid dirty WAL record LBA %d offset %d record size %d WAL size %d",
-				e.LBA, e.WALOffset, entrySize, store.sb.WALSize)
-		}
-		full = make([]byte, entrySize)
-		recordStart := time.Now()
-		n, readErr := store.fd.ReadAt(full, absOff)
-		f.instr.recordWALRecordRead(n, time.Since(recordStart), readErr)
-		if readErr != nil {
-			readFailed = true
-			return nil, 0, fmt.Errorf("flusher: read WAL record at %d: %w", e.WALOffset, readErr)
-		}
-	} else {
-		header := make([]byte, walEntryHeaderSize)
-		headerStart := time.Now()
-		n, readErr := store.fd.ReadAt(header, absOff)
-		f.instr.recordWALHeaderRead(n, time.Since(headerStart), readErr)
-		if readErr != nil {
-			readFailed = true
-			return nil, 0, fmt.Errorf("flusher: read WAL header at %d: %w", e.WALOffset, readErr)
-		}
-
-		entryLSN := binary.LittleEndian.Uint64(header[0:8])
-		entryType := header[16]
-		if entryType != walEntryWriteBatch && entryLSN != e.LSN {
-			return nil, 0, fmt.Errorf(
-				"flusher: WAL slot mismatch LBA %d offset %d dirty LSN %d record LSN %d",
-				e.LBA, e.WALOffset, e.LSN, entryLSN)
-		}
-		if entryType != walEntryWrite && entryType != walEntryWriteBatch && entryType != walEntryTrim {
-			return nil, 0, fmt.Errorf(
-				"flusher: invalid dirty WAL record LBA %d offset %d type %d",
-				e.LBA, e.WALOffset, entryType)
-		}
-
-		payloadLen := uint64(0)
-		if entryType == walEntryWrite || entryType == walEntryWriteBatch {
-			payloadLen = uint64(parseLengthFromHeader(header))
-			if payloadLen == 0 {
-				return nil, 0, fmt.Errorf(
-					"flusher: invalid dirty WAL record LBA %d offset %d with zero payload",
-					e.LBA, e.WALOffset)
-			}
-		}
-		entrySize = uint64(walEntryHeaderSize) + payloadLen
-		if entrySize > store.sb.WALSize || e.WALOffset+entrySize > store.sb.WALSize {
-			return nil, 0, fmt.Errorf(
-				"flusher: invalid dirty WAL record LBA %d offset %d size %d WAL size %d",
-				e.LBA, e.WALOffset, entrySize, store.sb.WALSize)
-		}
-
-		full = make([]byte, entrySize)
-		recordStart := time.Now()
-		n, readErr = store.fd.ReadAt(full, absOff)
-		f.instr.recordWALRecordRead(n, time.Since(recordStart), readErr)
-		if readErr != nil {
-			readFailed = true
-			return nil, 0, fmt.Errorf("flusher: read WAL record at %d: %w", e.WALOffset, readErr)
-		}
+	header := make([]byte, walEntryHeaderSize)
+	headerStart := time.Now()
+	n, readErr := store.fd.ReadAt(header, absOff)
+	f.instr.recordWALHeaderRead(n, time.Since(headerStart), readErr)
+	if readErr != nil {
+		readFailed = true
+		return nil, 0, fmt.Errorf("flusher: read WAL header at %d: %w", e.WALOffset, readErr)
 	}
 
-	entryLSN := binary.LittleEndian.Uint64(full[0:8])
-	entryType := full[16]
+	entryLSN := binary.LittleEndian.Uint64(header[0:8])
+	entryType := header[16]
+	if entryType != walEntryWriteBatch && entryLSN != e.LSN {
+		return nil, 0, fmt.Errorf(
+			"flusher: WAL slot mismatch LBA %d offset %d dirty LSN %d record LSN %d",
+			e.LBA, e.WALOffset, e.LSN, entryLSN)
+	}
+	if entryType != walEntryWrite && entryType != walEntryWriteBatch && entryType != walEntryTrim {
+		return nil, 0, fmt.Errorf(
+			"flusher: invalid dirty WAL record LBA %d offset %d type %d",
+			e.LBA, e.WALOffset, entryType)
+	}
+
+	payloadLen := uint64(0)
+	if entryType == walEntryWrite || entryType == walEntryWriteBatch {
+		payloadLen = uint64(parseLengthFromHeader(header))
+		if payloadLen == 0 {
+			return nil, 0, fmt.Errorf(
+				"flusher: invalid dirty WAL record LBA %d offset %d with zero payload",
+				e.LBA, e.WALOffset)
+		}
+	}
+	entrySize = uint64(walEntryHeaderSize) + payloadLen
+	if entrySize > store.sb.WALSize || e.WALOffset+entrySize > store.sb.WALSize {
+		return nil, 0, fmt.Errorf(
+			"flusher: invalid dirty WAL record LBA %d offset %d size %d WAL size %d",
+			e.LBA, e.WALOffset, entrySize, store.sb.WALSize)
+	}
+
+	full := make([]byte, entrySize)
+	recordStart := time.Now()
+	n, readErr = store.fd.ReadAt(full, absOff)
+	f.instr.recordWALRecordRead(n, time.Since(recordStart), readErr)
+	if readErr != nil {
+		readFailed = true
+		return nil, 0, fmt.Errorf("flusher: read WAL record at %d: %w", e.WALOffset, readErr)
+	}
+
+	entryLSN = binary.LittleEndian.Uint64(full[0:8])
+	entryType = full[16]
 	if entryType != walEntryWriteBatch && entryLSN != e.LSN {
 		return nil, 0, fmt.Errorf(
 			"flusher: WAL slot mismatch LBA %d offset %d dirty LSN %d record LSN %d",
@@ -396,22 +336,7 @@ func (f *flusher) readDirtyRecord(
 	if err != nil {
 		return nil, 0, err
 	}
-	if materializedOut != nil {
-		*materializedOut = &entry
-	}
 	return data, entrySize, nil
-}
-
-func (f *flusher) reuseDirtyRecord(e snapshotEntry, entry *walEntry) (data []byte, err error) {
-	defer func() {
-		if err == nil {
-			f.instr.recordValidatedRecord()
-			f.instr.recordMaterializationReuseHit()
-		} else {
-			f.instr.recordValidationFailure()
-		}
-	}()
-	return f.validateMaterializedDirtyEntry(e, entry)
 }
 
 func (f *flusher) validateMaterializedDirtyEntry(e snapshotEntry, entry *walEntry) ([]byte, error) {

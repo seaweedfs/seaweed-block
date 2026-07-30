@@ -3,11 +3,9 @@ package storage
 import "sync"
 
 // dirtyEntry tracks where a single LBA's most recent value lives in
-// the WAL. recordSize is the exact encoded record geometry reconstructed
-// from the append or recovery path; on-disk bytes remain authoritative.
+// the WAL, used by readers and the flusher.
 type dirtyEntry struct {
 	walOffset  uint64
-	recordSize uint64
 	dataOffset uint32
 	lsn        uint64
 	length     uint32
@@ -45,8 +43,8 @@ func newDirtyMap(numShards int) *dirtyMap {
 
 func (d *dirtyMap) shard(lba uint64) *dirtyShard { return &d.shards[lba&d.mask] }
 
-func (d *dirtyMap) put(lba, walOffset, lsn uint64, length uint32, recordSize uint64) {
-	d.putAt(lba, walOffset, 0, lsn, length, recordSize)
+func (d *dirtyMap) put(lba, walOffset, lsn uint64, length uint32) {
+	d.putAt(lba, walOffset, 0, lsn, length)
 }
 
 func (d *dirtyMap) putAt(
@@ -54,13 +52,11 @@ func (d *dirtyMap) putAt(
 	dataOffset uint32,
 	lsn uint64,
 	length uint32,
-	recordSize uint64,
 ) {
 	s := d.shard(lba)
 	s.mu.Lock()
 	s.m[lba] = dirtyEntry{
 		walOffset:  walOffset,
-		recordSize: recordSize,
 		dataOffset: dataOffset,
 		lsn:        lsn,
 		length:     length,
@@ -115,7 +111,6 @@ func (d *dirtyMap) compareAndDelete(lba, expectedLSN uint64) bool {
 type snapshotEntry struct {
 	LBA        uint64
 	WALOffset  uint64
-	RecordSize uint64
 	DataOffset uint32
 	LSN        uint64
 	Length     uint32
@@ -134,7 +129,6 @@ func (d *dirtyMap) snapshot() []snapshotEntry {
 			out = append(out, snapshotEntry{
 				LBA:        lba,
 				WALOffset:  e.walOffset,
-				RecordSize: e.recordSize,
 				DataOffset: e.dataOffset,
 				LSN:        e.lsn,
 				Length:     e.length,

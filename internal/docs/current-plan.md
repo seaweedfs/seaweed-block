@@ -231,6 +231,21 @@ Status: not run; D5 did not admit the candidate.
   product-owned zero-residue cleanup.
 - Promote the candidate only after this gate passes; otherwise remove it.
 
+### D7. Rejection Cleanup Close Gate
+
+Implementation status: candidate removal complete locally; exact-commit Linux
+close gate pending.
+
+- Remove the single-read/shared-record runtime fields, selectors, cache/sort
+  branch, dirty-map record geometry, measurement-only counters, candidate
+  tests, and obsolete executable gates.
+- Restore the pre-candidate default flusher and instrumentation shape.
+- Retain the legacy range-trim correction and D4 recovery fixes for partial
+  multi-block suffix replay, malformed batch fail-closed behavior, physical
+  byte-bound restoration, and legacy wrapped retained-window reconstruction.
+- Repeat the retained tests under race instrumentation and run the full
+  storage/recovery/replication/component suites and vet.
+
 ## Stop Rules
 
 Stop and remove the candidate if:
