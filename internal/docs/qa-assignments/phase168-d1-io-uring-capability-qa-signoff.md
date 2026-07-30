@@ -1,6 +1,7 @@
 # Phase 168 D1 io_uring Capability Gate
 
-Status: developer gate PASS at `aa538bf`; independent review and QA pending.
+Status: initial developer/QA happy-path PASS at `e919720`; adversarial review
+found a submitted-buffer lifetime blocker. Hardened re-validation pending.
 
 ## Scope
 
@@ -36,7 +37,7 @@ probe package a public storage abstraction.
 
 ## Developer Evidence
 
-Exact source commit: `aa538bf`
+Initial source commit: `e919720`
 
 Environment:
 
@@ -88,7 +89,8 @@ The three writes use offsets `0`, `12288`, and `4096`, so they are deliberately
 non-contiguous in submission order. The barrier is an `IORING_OP_FSYNC`, not an
 `os.File.Sync` hidden outside the ring. Every CQE is matched by `user_data`,
 write lengths are checked, and all payloads are verified after reopening the
-file.
+file. The hardened follow-up must additionally retry interrupted waits and keep
+every accepted request buffer alive through a terminal CQE.
 
 ## D1 Verdict
 

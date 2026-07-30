@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -123,6 +124,7 @@ type ioUring struct {
 	cqes   []ioUringCQE
 
 	submitSyscalls int
+	enterCall      func(toSubmit, minComplete, flags uint32) (int, error)
 }
 
 func runProbe(requestedDepth uint32) (probeReport, error) {
@@ -412,28 +414,40 @@ func (ring *ioUring) submitAndWait(operations []ringOperation) ([]ioUringCQE, in
 		}
 	}
 
+	submissionHead := atomic.LoadUint32(ring.sqHead)
 	submitted := 0
 	for submitted < len(operations) {
-		count, err := ring.enter(uint32(len(operations)-submitted), 0, 0)
-		if err != nil {
-			return nil, submitted, err
+		before := submitted
+		_, err := ring.enter(uint32(len(operations)-submitted), 0, 0)
+		submitted = int(atomic.LoadUint32(ring.sqHead) - submissionHead)
+		if submitted > len(operations) {
+			return nil, 0, fmt.Errorf(
+				"submission head advanced by %d want at most %d",
+				submitted,
+				len(operations),
+			)
 		}
-		if count == 0 {
-			return nil, submitted, errors.New("io_uring_enter submitted zero operations")
+		if err != nil {
+			if errors.Is(err, unix.EINTR) {
+				continue
+			}
+			if submitted == 0 {
+				return nil, 0, err
+			}
+			completions := ring.waitForAccepted(submitted)
+			return completions, submitted, err
+		}
+		if submitted == before {
+			if submitted == 0 {
+				return nil, 0, errors.New("io_uring_enter submitted zero operations")
+			}
+			completions := ring.waitForAccepted(submitted)
+			return completions, submitted, errors.New("io_uring_enter submitted zero operations")
 		}
 		submitted += count
 	}
 
-	completions := make([]ioUringCQE, 0, len(operations))
-	for len(completions) < len(operations) {
-		completions = append(completions, ring.drainCompletions()...)
-		if len(completions) >= len(operations) {
-			break
-		}
-		if _, err := ring.enter(0, uint32(len(operations)-len(completions)), ioUringEnterGetEvents); err != nil {
-			return completions, submitted, err
-		}
-	}
+	completions := ring.waitForAccepted(len(operations))
 	if len(completions) != len(operations) {
 		return completions, submitted, fmt.Errorf(
 			"completion count=%d want=%d",
@@ -442,6 +456,24 @@ func (ring *ioUring) submitAndWait(operations []ringOperation) ([]ioUringCQE, in
 		)
 	}
 	return completions, submitted, nil
+}
+
+// waitForAccepted does not return until every accepted SQE has a terminal CQE.
+// Returning earlier would let the kernel retain a pointer to a Go-owned buffer
+// after its final strong reference has disappeared. The gate process supplies
+// the outer timeout for a kernel that can no longer make progress.
+func (ring *ioUring) waitForAccepted(expected int) []ioUringCQE {
+	completions := make([]ioUringCQE, 0, expected)
+	for len(completions) < expected {
+		completions = append(completions, ring.drainCompletions()...)
+		if len(completions) >= expected {
+			break
+		}
+		if _, err := ring.enter(0, uint32(expected-len(completions)), ioUringEnterGetEvents); err != nil {
+			time.Sleep(time.Millisecond)
+		}
+	}
+	return completions
 }
 
 func (ring *ioUring) enqueue(operation ringOperation) error {
@@ -469,20 +501,32 @@ func (ring *ioUring) enqueue(operation ringOperation) error {
 }
 
 func (ring *ioUring) enter(toSubmit, minComplete, flags uint32) (int, error) {
-	ring.submitSyscalls++
-	count, _, errno := unix.Syscall6(
-		unix.SYS_IO_URING_ENTER,
-		uintptr(ring.fd),
-		uintptr(toSubmit),
-		uintptr(minComplete),
-		uintptr(flags),
-		0,
-		0,
-	)
-	if errno != 0 {
-		return int(count), errno
+	for {
+		ring.submitSyscalls++
+		if ring.enterCall != nil {
+			count, err := ring.enterCall(toSubmit, minComplete, flags)
+			if toSubmit == 0 && errors.Is(err, unix.EINTR) {
+				continue
+			}
+			return count, err
+		}
+		count, _, errno := unix.Syscall6(
+			unix.SYS_IO_URING_ENTER,
+			uintptr(ring.fd),
+			uintptr(toSubmit),
+			uintptr(minComplete),
+			uintptr(flags),
+			0,
+			0,
+		)
+		if toSubmit == 0 && errno == unix.EINTR {
+			continue
+		}
+		if errno != 0 {
+			return int(count), errno
+		}
+		return int(count), nil
 	}
-	return int(count), nil
 }
 
 func (ring *ioUring) drainCompletions() []ioUringCQE {

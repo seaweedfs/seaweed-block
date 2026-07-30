@@ -32,16 +32,22 @@ if [[ "$(go env GOOS)/$(go env GOARCH)" != "linux/amd64" ]]; then
   exit 2
 fi
 
-go test ./cmd/io-uring-probe -count=1 -v \
-  >"${ARTIFACT_DIR}/probe-tests.log" 2>&1
-write_summary "linux_probe_test=pass"
+set +e
+timeout 30s go run ./cmd/io-uring-probe >"${PROBE_LOG}" 2>&1
+probe_exit=$?
+set -e
+if (( probe_exit != 0 )); then
+  write_summary "phase168_io_uring_capability_status=unsupported"
+  write_summary "probe_exit=${probe_exit}"
+  refusal_reason="$(sed -n 's/^refusal_reason=//p' "${PROBE_LOG}" | head -1)"
+  write_summary "refusal_reason=${refusal_reason:-probe_did_not_report_reason}"
+  exit "${probe_exit}"
+fi
 
-go run ./cmd/io-uring-probe | tee "${PROBE_LOG}" >/dev/null
 require_probe_line '^io_uring_probe_status=ok$'
 require_probe_line '^platform=linux/amd64$'
 require_probe_line '^io_uring_supported=true$'
 require_probe_line '^refusal_reason=-$'
-require_probe_line '^queue_depth=[4-9][0-9]*$'
 require_probe_line '^write_opcode_supported=true$'
 require_probe_line '^fsync_opcode_supported=true$'
 require_probe_line '^submitted_ops=4$'
@@ -52,10 +58,19 @@ require_probe_line '^verified_bytes=12288$'
 require_probe_line '^implementation=raw_linux_uapi$'
 require_probe_line '^dependency=golang.org/x/sys/unix$'
 require_probe_line '^cgo_required=false$'
+queue_depth="$(sed -n 's/^queue_depth=//p' "${PROBE_LOG}" | head -1)"
+if [[ ! "${queue_depth}" =~ ^[0-9]+$ ]] || (( queue_depth < 4 )); then
+  echo "invalid queue depth: ${queue_depth:-missing}" >&2
+  exit 1
+fi
 write_summary "linux_write_fsync_reopen=pass"
 write_summary "required_opcodes=write,fsync"
 write_summary "dependency_added=false"
 write_summary "cgo_required=false"
+
+timeout 60s go test ./cmd/io-uring-probe -count=1 -v \
+  >"${ARTIFACT_DIR}/probe-tests.log" 2>&1
+write_summary "linux_probe_test=pass"
 
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
   go build -o "${ARTIFACT_DIR}/io-uring-probe-windows-amd64.exe" ./cmd/io-uring-probe
