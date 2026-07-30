@@ -444,7 +444,6 @@ func (ring *ioUring) submitAndWait(operations []ringOperation) ([]ioUringCQE, in
 			completions := ring.waitForAccepted(submitted)
 			return completions, submitted, errors.New("io_uring_enter submitted zero operations")
 		}
-		submitted += count
 	}
 
 	completions := ring.waitForAccepted(len(operations))
