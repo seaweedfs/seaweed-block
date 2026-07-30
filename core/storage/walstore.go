@@ -119,6 +119,11 @@ type WALStore struct {
 	// path. It changes only how the flusher reads one WAL record; decoded bytes
 	// still pass the existing CRC and semantic validation before use.
 	singleReadMaterialization atomic.Bool
+
+	// sharedRecordMaterialization permits one decoded WAL record to serve
+	// adjacent snapshot entries with the same exact record identity. The
+	// flusher owns this bounded, cycle-local cache.
+	sharedRecordMaterialization atomic.Bool
 }
 
 // CreateWALStore initializes a new store file at path. Fails if path
@@ -691,6 +696,13 @@ func (s *WALStore) enableMultiBlockRecordsForTest(enabled bool) {
 
 func (s *WALStore) enableSingleReadMaterializationForTest(enabled bool) {
 	s.singleReadMaterialization.Store(enabled)
+}
+
+func (s *WALStore) enableSharedRecordMaterializationForTest(enabled bool) {
+	if enabled {
+		s.singleReadMaterialization.Store(true)
+	}
+	s.sharedRecordMaterialization.Store(enabled)
 }
 
 // DisableAutoFlushForRecoveryTest stops the background WAL->extent flusher

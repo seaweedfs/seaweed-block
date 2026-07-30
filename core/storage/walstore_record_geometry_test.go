@@ -382,6 +382,78 @@ func TestPhase172ScopedMaterializationProbe(t *testing.T) {
 	}
 }
 
+func TestPhase172ScopedSharedRecordProbe(t *testing.T) {
+	path := os.Getenv("SW_BLOCK_PHASE172_SHARED_PROBE_PATH")
+	if path == "" {
+		t.Skip("set SW_BLOCK_PHASE172_SHARED_PROBE_PATH to run the shared-record probe")
+	}
+	const (
+		blockSize       = 4096
+		logicalBlocks   = 1024
+		blocksPerRecord = 16
+		physicalRecords = logicalBlocks / blocksPerRecord
+	)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	s, err := CreateWALStore(path, logicalBlocks, blockSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.DisableAutoFlushForRecoveryTest()
+	s.enableMultiBlockRecordsForTest(true)
+	s.enableSharedRecordMaterializationForTest(true)
+	t.Cleanup(func() { _ = s.Close() })
+
+	for base := uint32(0); base < logicalBlocks; base += blocksPerRecord {
+		blocks := make([][]byte, blocksPerRecord)
+		for index := range blocks {
+			lba := base + uint32(index)
+			blocks[index] = makeBlock(blockSize, byte(lba%251+1))
+		}
+		if _, err := s.WriteBatch(base, blocks); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.flusher.flushOnce(); err != nil {
+		t.Fatal(err)
+	}
+
+	got := s.FlusherInstrumentation()
+	t.Log("phase172_shared_probe_enabled=true")
+	t.Logf("phase172_shared_probe_snapshot_entries=%d", got.SnapshotEntries)
+	t.Logf("phase172_shared_probe_unique_records=%d", got.SnapshotUniqueWALRecords)
+	t.Logf("phase172_shared_probe_reuse_candidates=%d", got.SnapshotRecordReuseCandidates)
+	t.Logf("phase172_shared_probe_validated_records=%d", got.ValidatedRecords)
+	t.Logf("phase172_shared_probe_header_read_ops=%d", got.WALHeaderReadOps)
+	t.Logf("phase172_shared_probe_record_read_ops=%d", got.WALRecordReadOps)
+	t.Logf("phase172_shared_probe_materialization_read_ops=%d", got.MaterializationReadOps)
+	t.Logf("phase172_shared_probe_reuse_hits=%d", got.MaterializationRecordReuseHits)
+	if got.SnapshotEntries != logicalBlocks ||
+		got.SnapshotUniqueWALRecords != physicalRecords ||
+		got.SnapshotRecordReuseCandidates != logicalBlocks-physicalRecords ||
+		got.ValidatedRecords != logicalBlocks ||
+		got.WALHeaderReadOps != 0 ||
+		got.WALRecordReadOps != physicalRecords ||
+		got.MaterializationReadOps != physicalRecords ||
+		got.MaterializationRecordReuseHits != logicalBlocks-physicalRecords {
+		t.Fatalf("entries/unique/candidates/validated/header/record/materialization/reuse=%d/%d/%d/%d/%d/%d/%d/%d want 1024/64/960/1024/0/64/64/960",
+			got.SnapshotEntries, got.SnapshotUniqueWALRecords,
+			got.SnapshotRecordReuseCandidates, got.ValidatedRecords,
+			got.WALHeaderReadOps, got.WALRecordReadOps,
+			got.MaterializationReadOps, got.MaterializationRecordReuseHits)
+	}
+	if got := s.CheckpointLSN(); got != logicalBlocks {
+		t.Fatalf("checkpoint=%d want %d", got, logicalBlocks)
+	}
+	if got := s.dm.len(); got != 0 {
+		t.Fatalf("dirty entries=%d want 0", got)
+	}
+}
+
 func createGeometryTestStore(t *testing.T) *WALStore {
 	t.Helper()
 	s, err := CreateWALStore(filepath.Join(t.TempDir(), "store.bin"), 32, 4096)

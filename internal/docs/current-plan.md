@@ -127,8 +127,10 @@ This changes no disk format or default materialization mode.
 
 ### D2. Single-Read Fail-Closed Materialization
 
-Implementation status: complete locally; exact-commit Linux correctness gate
-pending.
+Implementation status: complete. Exact-commit Linux D2 correctness gate passed
+on `a46af56`: focused and race repetitions were green, the shipped default
+remained at `2048` exact-file reads for 1024 records, and the candidate used
+exactly `1024` product/`strace` reads with zero shared-record reuse.
 
 - Add one internal disabled-by-default comparison mode.
 - Read each ordinary or trim record once at its exact bounded size.
@@ -142,6 +144,9 @@ pending.
   checkpoint or dirty deletion.
 
 ### D3. Shared Multi-Block Record Materialization
+
+Implementation status: complete locally; exact-commit Linux correctness gate
+pending.
 
 - Order the complete snapshot by WAL record identity without omitting entries.
 - Read one multi-block record once and validate every referenced block's

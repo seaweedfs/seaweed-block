@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -155,6 +156,24 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 	if len(entries) == 0 {
 		return nil
 	}
+	sharedRecords := store.sharedRecordMaterialization.Load()
+	if sharedRecords {
+		sort.Slice(entries, func(left, right int) bool {
+			if entries[left].WALOffset != entries[right].WALOffset {
+				return entries[left].WALOffset < entries[right].WALOffset
+			}
+			if entries[left].RecordSize != entries[right].RecordSize {
+				return entries[left].RecordSize < entries[right].RecordSize
+			}
+			if entries[left].DataOffset != entries[right].DataOffset {
+				return entries[left].DataOffset < entries[right].DataOffset
+			}
+			if entries[left].LSN != entries[right].LSN {
+				return entries[left].LSN < entries[right].LSN
+			}
+			return entries[left].LBA < entries[right].LBA
+		})
+	}
 	finishCycle := f.instr.recordCycle(
 		cycleStart, time.Since(snapshotStart), entries, store.sb.BlockSize,
 	)
@@ -171,8 +190,26 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 		f.instr.recordWrittenOpportunity(writtenEntries, store.sb.BlockSize)
 	}()
 
+	var cachedRecord *walEntry
+	var cachedWALOffset uint64
+	var cachedRecordSize uint64
 	for _, e := range entries {
-		data, entrySize, err := f.readDirtyRecord(e)
+		var data []byte
+		var entrySize uint64
+		if sharedRecords && cachedRecord != nil &&
+			e.WALOffset == cachedWALOffset &&
+			e.RecordSize == cachedRecordSize {
+			data, err = f.reuseDirtyRecord(e, cachedRecord)
+			entrySize = cachedRecordSize
+		} else {
+			var materialized *walEntry
+			data, entrySize, err = f.readDirtyRecord(e, &materialized)
+			if sharedRecords && err == nil {
+				cachedRecord = materialized
+				cachedWALOffset = e.WALOffset
+				cachedRecordSize = e.RecordSize
+			}
+		}
 		if err != nil {
 			return err
 		}
@@ -234,7 +271,10 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 	return nil
 }
 
-func (f *flusher) readDirtyRecord(e snapshotEntry) (data []byte, entrySize uint64, err error) {
+func (f *flusher) readDirtyRecord(
+	e snapshotEntry,
+	materializedOut **walEntry,
+) (data []byte, entrySize uint64, err error) {
 	store := f.store
 	readFailed := false
 	defer func() {
@@ -352,63 +392,91 @@ func (f *flusher) readDirtyRecord(e snapshotEntry) (data []byte, entrySize uint6
 			"flusher: invalid dirty WAL record LBA %d offset %d flags %d",
 			e.LBA, e.WALOffset, entry.Flags)
 	}
-	blockSize := store.sb.BlockSize
+	data, err = f.validateMaterializedDirtyEntry(e, &entry)
+	if err != nil {
+		return nil, 0, err
+	}
+	if materializedOut != nil {
+		*materializedOut = &entry
+	}
+	return data, entrySize, nil
+}
+
+func (f *flusher) reuseDirtyRecord(e snapshotEntry, entry *walEntry) (data []byte, err error) {
+	defer func() {
+		if err == nil {
+			f.instr.recordValidatedRecord()
+			f.instr.recordMaterializationReuseHit()
+		} else {
+			f.instr.recordValidationFailure()
+		}
+	}()
+	return f.validateMaterializedDirtyEntry(e, entry)
+}
+
+func (f *flusher) validateMaterializedDirtyEntry(e snapshotEntry, entry *walEntry) ([]byte, error) {
+	blockSize := f.store.sb.BlockSize
 	switch entry.Type {
 	case walEntryWrite:
 		if entry.LSN != e.LSN || entry.LBA != e.LBA || e.DataOffset != 0 ||
 			entry.Length != blockSize || e.Length != blockSize {
-			return nil, 0, fmt.Errorf(
+			return nil, fmt.Errorf(
 				"flusher: WAL slot mismatch LBA %d offset %d dirty LSN %d record LSN %d",
 				e.LBA, e.WALOffset, e.LSN, entry.LSN)
 		}
-		return entry.Data, entrySize, nil
+		return entry.Data, nil
 	case walEntryWriteBatch:
+		maxBlocks := uint64(^uint32(0)) / uint64(blockSize)
+		if entry.Reserved == 0 || entry.Reserved > maxBlocks {
+			return nil, fmt.Errorf(
+				"flusher: invalid dirty WAL batch LBA %d offset %d",
+				e.LBA, e.WALOffset)
+		}
 		expectedLength := entry.Reserved * uint64(blockSize)
-		if entry.Reserved == 0 || expectedLength > uint64(^uint32(0)) ||
-			uint64(entry.Length) != expectedLength ||
+		if uint64(entry.Length) != expectedLength ||
 			e.DataOffset%blockSize != 0 || e.Length != blockSize {
-			return nil, 0, fmt.Errorf(
+			return nil, fmt.Errorf(
 				"flusher: invalid dirty WAL batch LBA %d offset %d",
 				e.LBA, e.WALOffset)
 		}
 		blockIndex := uint64(e.DataOffset / blockSize)
 		if blockIndex >= entry.Reserved || entry.LSN+blockIndex != e.LSN ||
 			entry.LBA+blockIndex != e.LBA {
-			return nil, 0, fmt.Errorf(
+			return nil, fmt.Errorf(
 				"flusher: WAL slot mismatch LBA %d offset %d dirty LSN %d batch base %d block %d count %d",
 				e.LBA, e.WALOffset, e.LSN, entry.LSN, blockIndex, entry.Reserved)
 		}
 		start := uint64(e.DataOffset)
 		end := start + uint64(blockSize)
 		if end > uint64(len(entry.Data)) {
-			return nil, 0, fmt.Errorf(
+			return nil, fmt.Errorf(
 				"flusher: invalid dirty WAL batch LBA %d offset %d data range [%d,%d)",
 				e.LBA, e.WALOffset, start, end)
 		}
-		return entry.Data[start:end], entrySize, nil
+		return entry.Data[start:end], nil
 	case walEntryTrim:
 		trimBlocks := uint64(1)
 		if entry.Length > 0 {
 			if entry.Length%blockSize != 0 {
-				return nil, 0, fmt.Errorf(
+				return nil, fmt.Errorf(
 					"flusher: invalid dirty WAL trim LBA %d offset %d length %d",
 					e.LBA, e.WALOffset, entry.Length)
 			}
 			trimBlocks = uint64(entry.Length / blockSize)
 		}
 		if e.DataOffset%blockSize != 0 || e.Length != blockSize {
-			return nil, 0, fmt.Errorf(
+			return nil, fmt.Errorf(
 				"flusher: invalid dirty WAL trim LBA %d offset %d",
 				e.LBA, e.WALOffset)
 		}
 		blockIndex := uint64(e.DataOffset / blockSize)
 		if entry.LSN != e.LSN || blockIndex >= trimBlocks ||
 			entry.LBA+blockIndex != e.LBA {
-			return nil, 0, fmt.Errorf(
+			return nil, fmt.Errorf(
 				"flusher: WAL slot mismatch trim LBA %d offset %d dirty LSN %d record LSN %d",
 				e.LBA, e.WALOffset, e.LSN, entry.LSN)
 		}
-		return make([]byte, blockSize), entrySize, nil
+		return make([]byte, blockSize), nil
 	default:
 		panic("validated dirty WAL type became unsupported")
 	}
