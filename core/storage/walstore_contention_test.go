@@ -40,6 +40,18 @@ func TestWALStore_WriteInstrumentationCountsAppendLockWait(t *testing.T) {
 }
 
 func BenchmarkPhase167WALStoreContention(b *testing.B) {
+	benchmarkWALStoreContention(b, func(index, numBlocks int) uint32 {
+		return uint32(index % numBlocks)
+	})
+}
+
+func BenchmarkPhase171WALStoreScatteredContention(b *testing.B) {
+	benchmarkWALStoreContention(b, func(index, numBlocks int) uint32 {
+		return uint32((index * 7919) % numBlocks)
+	})
+}
+
+func benchmarkWALStoreContention(b *testing.B, lbaForIndex func(int, int) uint32) {
 	const (
 		blockSize = 4096
 		numBlocks = 16384
@@ -67,7 +79,7 @@ func BenchmarkPhase167WALStoreContention(b *testing.B) {
 
 			b.SetBytes(blockSize)
 			b.ResetTimer()
-			wallStart := time.Now()
+			foregroundStart := time.Now()
 			for worker := 0; worker < writers; worker++ {
 				wg.Add(1)
 				go func(worker int) {
@@ -75,7 +87,7 @@ func BenchmarkPhase167WALStoreContention(b *testing.B) {
 					<-start
 					for idx := worker; idx < b.N; idx += writers {
 						opStart := time.Now()
-						_, writeErr := s.Write(uint32(idx%numBlocks), data[worker])
+						_, writeErr := s.Write(lbaForIndex(idx, numBlocks), data[worker])
 						latencies[idx] = time.Since(opStart).Nanoseconds()
 						if writeErr != nil {
 							errOnce.Do(func() { firstErr = writeErr })
@@ -87,15 +99,19 @@ func BenchmarkPhase167WALStoreContention(b *testing.B) {
 			}
 			close(start)
 			wg.Wait()
+			foregroundDuration := time.Since(foregroundStart)
+			b.StopTimer()
 			var syncedLSN uint64
+			syncStart := time.Now()
 			if firstErr == nil {
 				syncedLSN, firstErr = s.Sync()
 			}
+			syncDuration := time.Since(syncStart)
+			drainStart := time.Now()
 			if firstErr == nil {
-				s.flusher.Stop()
+				firstErr = s.flusher.Stop()
 			}
-			wallDuration := time.Since(wallStart)
-			b.StopTimer()
+			drainDuration := time.Since(drainStart)
 			if firstErr != nil {
 				b.Fatal(firstErr)
 			}
@@ -109,9 +125,13 @@ func BenchmarkPhase167WALStoreContention(b *testing.B) {
 			}
 
 			status := s.WriteInstrumentation()
+			flusherStatus := s.FlusherInstrumentation()
 			reportLatencyPercentiles(b, latencies)
-			reportWALStoreContentionMetrics(b, s, status, uint64(b.N), 1)
-			b.ReportMetric(float64(b.N)/wallDuration.Seconds(), "write_ops/s")
+			reportWALStoreContentionMetrics(
+				b, s, status, flusherStatus, uint64(b.N), 1,
+				foregroundDuration, syncDuration, drainDuration,
+			)
+			b.ReportMetric(float64(b.N)/foregroundDuration.Seconds(), "write_ops/s")
 		})
 	}
 }
@@ -148,7 +168,7 @@ func BenchmarkPhase170WALStoreBatchContention(b *testing.B) {
 
 			b.SetBytes(blockSize * batchBlocks)
 			b.ResetTimer()
-			wallStart := time.Now()
+			foregroundStart := time.Now()
 			for worker := 0; worker < writers; worker++ {
 				wg.Add(1)
 				go func(worker int) {
@@ -169,15 +189,19 @@ func BenchmarkPhase170WALStoreBatchContention(b *testing.B) {
 			}
 			close(start)
 			wg.Wait()
+			foregroundDuration := time.Since(foregroundStart)
+			b.StopTimer()
 			var syncedLSN uint64
+			syncStart := time.Now()
 			if firstErr == nil {
 				syncedLSN, firstErr = s.Sync()
 			}
+			syncDuration := time.Since(syncStart)
+			drainStart := time.Now()
 			if firstErr == nil {
-				s.flusher.Stop()
+				firstErr = s.flusher.Stop()
 			}
-			wallDuration := time.Since(wallStart)
-			b.StopTimer()
+			drainDuration := time.Since(drainStart)
 			if firstErr != nil {
 				b.Fatal(firstErr)
 			}
@@ -191,11 +215,15 @@ func BenchmarkPhase170WALStoreBatchContention(b *testing.B) {
 			}
 
 			status := s.WriteInstrumentation()
+			flusherStatus := s.FlusherInstrumentation()
 			logicalEntries := uint64(b.N * batchBlocks)
 			reportLatencyPercentiles(b, latencies)
-			reportWALStoreContentionMetrics(b, s, status, logicalEntries, batchBlocks)
+			reportWALStoreContentionMetrics(
+				b, s, status, flusherStatus, logicalEntries, batchBlocks,
+				foregroundDuration, syncDuration, drainDuration,
+			)
 			b.ReportMetric(batchBlocks, "batch_blocks")
-			b.ReportMetric(float64(logicalEntries)/wallDuration.Seconds(), "block_ops/s")
+			b.ReportMetric(float64(logicalEntries)/foregroundDuration.Seconds(), "block_ops/s")
 		})
 	}
 }
@@ -204,8 +232,12 @@ func reportWALStoreContentionMetrics(
 	b *testing.B,
 	s *WALStore,
 	status WriteInstrumentationStatus,
+	flusherStatus FlusherInstrumentationStatus,
 	logicalEntries uint64,
 	entriesPerAPICall int,
+	foregroundDuration time.Duration,
+	syncDuration time.Duration,
+	drainDuration time.Duration,
 ) {
 	b.Helper()
 	perOp := func(total, count uint64) float64 {
@@ -243,6 +275,61 @@ func reportWALStoreContentionMetrics(
 	b.ReportMetric(float64(checkpointLSN)/float64(headLSN), "checkpoint_coverage")
 	b.ReportMetric(float64(s.syncs.Load()), "explicit_sync_calls")
 	b.ReportMetric(float64(entriesPerAPICall), "entries/api_call")
+	b.ReportMetric(float64(foregroundDuration.Nanoseconds()), "foreground_ns")
+	b.ReportMetric(float64(syncDuration.Nanoseconds()), "final_sync_ns")
+	b.ReportMetric(float64(drainDuration.Nanoseconds()), "final_drain_ns")
+	b.ReportMetric(perEntry(flusherStatus.SnapshotEntries), "flush_snapshot_entries/entry")
+	b.ReportMetric(perEntry(flusherStatus.SnapshotDurationNanos), "flush_snapshot_ns/entry")
+	b.ReportMetric(perEntry(flusherStatus.OpportunityAnalysisNanos), "flush_opportunity_ns/entry")
+	b.ReportMetric(perEntry(flusherStatus.ValidatedRecords), "flush_validated_records/entry")
+	b.ReportMetric(float64(flusherStatus.ValidationFailures), "flush_validation_failures")
+	b.ReportMetric(perEntry(flusherStatus.SupersededEntries), "flush_superseded_entries/entry")
+	b.ReportMetric(perEntry(flusherStatus.WALHeaderReadOps), "flush_header_reads/entry")
+	b.ReportMetric(float64(flusherStatus.WALHeaderReadFailures), "flush_header_read_failures")
+	b.ReportMetric(perEntry(flusherStatus.WALHeaderReadBytes), "flush_header_read_bytes/entry")
+	b.ReportMetric(perEntry(flusherStatus.WALHeaderReadDurationNanos), "flush_header_read_ns/entry")
+	b.ReportMetric(perEntry(flusherStatus.WALRecordReadOps), "flush_record_reads/entry")
+	b.ReportMetric(float64(flusherStatus.WALRecordReadFailures), "flush_record_read_failures")
+	b.ReportMetric(perEntry(flusherStatus.WALRecordReadBytes), "flush_record_read_bytes/entry")
+	b.ReportMetric(perEntry(flusherStatus.WALRecordReadDurationNanos), "flush_record_read_ns/entry")
+	b.ReportMetric(perEntry(flusherStatus.ExtentWriteOps), "extent_write_ops/entry")
+	b.ReportMetric(float64(flusherStatus.ExtentWriteFailures), "extent_write_failures")
+	b.ReportMetric(perEntry(flusherStatus.ExtentWriteBytes), "extent_write_bytes/entry")
+	b.ReportMetric(perEntry(flusherStatus.ExtentWriteDurationNanos), "extent_write_ns/entry")
+	b.ReportMetric(perEntry(flusherStatus.SnapshotBoundedWriteMinimum), "extent_snapshot_min_write_ops/entry")
+	b.ReportMetric(perEntry(flusherStatus.SnapshotRunCount), "extent_snapshot_runs/entry")
+	b.ReportMetric(perEntry(flusherStatus.SnapshotSingletonRuns), "extent_snapshot_singleton_runs/entry")
+	b.ReportMetric(perEntry(flusherStatus.SnapshotCoalescibleEntries), "extent_snapshot_coalescible_entries/entry")
+	b.ReportMetric(float64(flusherStatus.SnapshotMaxContiguousRunBlocks), "extent_snapshot_max_run_blocks")
+	b.ReportMetric(perEntry(flusherStatus.WrittenBoundedWriteMinimum), "extent_written_min_write_ops/entry")
+	b.ReportMetric(perEntry(flusherStatus.WrittenRunCount), "extent_written_runs/entry")
+	b.ReportMetric(perEntry(flusherStatus.WrittenSingletonRuns), "extent_written_singleton_runs/entry")
+	b.ReportMetric(perEntry(flusherStatus.WrittenCoalescibleEntries), "extent_written_coalescible_entries/entry")
+	b.ReportMetric(float64(flusherStatus.WrittenMaxContiguousRunBlocks), "extent_written_max_run_blocks")
+	b.ReportMetric(float64(flusherStatus.ExtentWriteMaxBytes), "extent_write_max_bytes")
+	b.ReportMetric(float64(flusherStatus.ExtentSyncOps), "extent_sync_ops")
+	b.ReportMetric(float64(flusherStatus.ExtentSyncFailures), "extent_sync_failures")
+	b.ReportMetric(
+		perOp(flusherStatus.ExtentSyncDurationNanos, flusherStatus.ExtentSyncOps),
+		"extent_sync_ns/op",
+	)
+	b.ReportMetric(float64(flusherStatus.CheckpointMetadataWriteOps), "checkpoint_write_ops")
+	b.ReportMetric(float64(flusherStatus.CheckpointMetadataWriteFailures), "checkpoint_write_failures")
+	b.ReportMetric(
+		perOp(flusherStatus.CheckpointMetadataWriteNanos, flusherStatus.CheckpointMetadataWriteOps),
+		"checkpoint_write_ns/op",
+	)
+	b.ReportMetric(float64(flusherStatus.CheckpointMetadataSyncOps), "checkpoint_sync_ops")
+	b.ReportMetric(float64(flusherStatus.CheckpointMetadataSyncFailures), "checkpoint_sync_failures")
+	b.ReportMetric(
+		perOp(flusherStatus.CheckpointMetadataSyncNanos, flusherStatus.CheckpointMetadataSyncOps),
+		"checkpoint_sync_ns/op",
+	)
+	b.ReportMetric(float64(flusherStatus.CyclesStarted), "flush_cycles_started")
+	b.ReportMetric(float64(flusherStatus.CyclesSucceeded), "flush_cycles_succeeded")
+	b.ReportMetric(float64(flusherStatus.CyclesFailed), "flush_cycles_failed")
+	b.ReportMetric(perEntry(flusherStatus.CycleDurationNanos), "flush_cycle_ns/entry")
+	b.ReportMetric(float64(flusherStatus.CycleMaxDurationNanos), "flush_cycle_max_ns")
 }
 
 func assertWALStoreContentionDrained(b *testing.B, s *WALStore, syncedLSN uint64) {

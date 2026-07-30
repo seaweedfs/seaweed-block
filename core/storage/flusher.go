@@ -50,6 +50,7 @@ type flusher struct {
 	stopErr  error
 	flushes  atomic.Uint64 // diagnostic
 	bytesOut atomic.Uint64 // diagnostic
+	instr    flusherInstrumentation
 }
 
 type flusherConfig struct {
@@ -139,7 +140,8 @@ func (f *flusher) flushOnceAllowClosed() error {
 	return f.flushOnceInternal(true)
 }
 
-func (f *flusher) flushOnceInternal(allowClosed bool) error {
+func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
+	cycleStart := time.Now()
 	store := f.store
 	store.mu.RLock()
 	if store.closed && !allowClosed {
@@ -148,10 +150,15 @@ func (f *flusher) flushOnceInternal(allowClosed bool) error {
 	}
 	store.mu.RUnlock()
 
+	snapshotStart := time.Now()
 	entries := store.dm.snapshot()
 	if len(entries) == 0 {
 		return nil
 	}
+	finishCycle := f.instr.recordCycle(
+		cycleStart, time.Since(snapshotStart), entries, store.sb.BlockSize,
+	)
+	defer func() { finishCycle(err == nil) }()
 
 	// Validate and materialize each complete WAL record before using it for
 	// checkpoint progress. Partial extent writes are safe because checkpoint
@@ -159,18 +166,29 @@ func (f *flusher) flushOnceInternal(allowClosed bool) error {
 	var maxLSN uint64
 	var maxLSNPhys uint64
 	var maxLSNEntrySize uint64
+	writtenEntries := make([]snapshotEntry, 0, len(entries))
+	defer func() {
+		f.instr.recordWrittenOpportunity(writtenEntries, store.sb.BlockSize)
+	}()
 
 	for _, e := range entries {
 		data, entrySize, err := f.readDirtyRecord(e)
 		if err != nil {
 			return err
 		}
+		writeStart := time.Now()
 		written, err := store.writeExtentIfCurrent(e.LBA, e.LSN, data)
+		if written || err != nil {
+			f.instr.recordExtentWrite(len(data), time.Since(writeStart), err)
+		}
 		if err != nil {
 			return fmt.Errorf("flusher: write extent LBA %d: %w", e.LBA, err)
 		}
 		if written {
 			f.bytesOut.Add(uint64(len(data)))
+			writtenEntries = append(writtenEntries, e)
+		} else {
+			f.instr.recordSupersededEntry()
 		}
 		if e.LSN > maxLSN {
 			maxLSN = e.LSN
@@ -178,11 +196,13 @@ func (f *flusher) flushOnceInternal(allowClosed bool) error {
 			maxLSNEntrySize = entrySize
 		}
 	}
-
 	// Step 2: one fsync covers all extent writes in this batch
 	// (and any other in-flight WAL writes since they share a file).
-	if err := store.fd.Sync(); err != nil {
-		return fmt.Errorf("flusher: fsync after extent writes: %w", err)
+	syncStart := time.Now()
+	syncErr := store.fd.Sync()
+	f.instr.recordExtentSync(time.Since(syncStart), syncErr)
+	if syncErr != nil {
+		return fmt.Errorf("flusher: fsync after extent writes: %w", syncErr)
 	}
 
 	// Step 3: advance the on-disk checkpoint to the highest LSN
@@ -214,11 +234,25 @@ func (f *flusher) flushOnceInternal(allowClosed bool) error {
 	return nil
 }
 
-func (f *flusher) readDirtyRecord(e snapshotEntry) ([]byte, uint64, error) {
+func (f *flusher) readDirtyRecord(e snapshotEntry) (data []byte, entrySize uint64, err error) {
 	store := f.store
+	readFailed := false
+	defer func() {
+		switch {
+		case err == nil:
+			f.instr.recordValidatedRecord()
+		case !readFailed:
+			f.instr.recordValidationFailure()
+		}
+	}()
+
 	header := make([]byte, walEntryHeaderSize)
 	absOff := int64(store.sb.WALOffset + e.WALOffset)
-	if _, err := store.fd.ReadAt(header, absOff); err != nil {
+	headerStart := time.Now()
+	n, err := store.fd.ReadAt(header, absOff)
+	f.instr.recordWALHeaderRead(n, time.Since(headerStart), err)
+	if err != nil {
+		readFailed = true
 		return nil, 0, fmt.Errorf("flusher: read WAL header at %d: %w", e.WALOffset, err)
 	}
 
@@ -244,7 +278,7 @@ func (f *flusher) readDirtyRecord(e snapshotEntry) ([]byte, uint64, error) {
 				e.LBA, e.WALOffset)
 		}
 	}
-	entrySize := uint64(walEntryHeaderSize) + payloadLen
+	entrySize = uint64(walEntryHeaderSize) + payloadLen
 	if entrySize > store.sb.WALSize || e.WALOffset+entrySize > store.sb.WALSize {
 		return nil, 0, fmt.Errorf(
 			"flusher: invalid dirty WAL record LBA %d offset %d size %d WAL size %d",
@@ -252,7 +286,11 @@ func (f *flusher) readDirtyRecord(e snapshotEntry) ([]byte, uint64, error) {
 	}
 
 	full := make([]byte, entrySize)
-	if _, err := store.fd.ReadAt(full, absOff); err != nil {
+	recordStart := time.Now()
+	n, err = store.fd.ReadAt(full, absOff)
+	f.instr.recordWALRecordRead(n, time.Since(recordStart), err)
+	if err != nil {
+		readFailed = true
 		return nil, 0, fmt.Errorf("flusher: read WAL record at %d: %w", e.WALOffset, err)
 	}
 	entry, err := decodeWALEntry(full)
@@ -266,7 +304,6 @@ func (f *flusher) readDirtyRecord(e snapshotEntry) ([]byte, uint64, error) {
 			"flusher: invalid dirty WAL record LBA %d offset %d flags %d",
 			e.LBA, e.WALOffset, entry.Flags)
 	}
-
 	blockSize := store.sb.BlockSize
 	switch entry.Type {
 	case walEntryWrite:

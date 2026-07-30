@@ -226,6 +226,12 @@ func TestFlusherWALSlotMismatchFailsClosed(t *testing.T) {
 	if got := s.dm.len(); got != 1 {
 		t.Fatalf("dirty entries after WAL slot mismatch=%d want 1", got)
 	}
+	instr := s.FlusherInstrumentation()
+	if instr.ValidationFailures != 1 || instr.ValidatedRecords != 0 ||
+		instr.CyclesFailed != 1 {
+		t.Fatalf("validation failures/validated/cycles failed=%d/%d/%d want 1/0/1",
+			instr.ValidationFailures, instr.ValidatedRecords, instr.CyclesFailed)
+	}
 	_, _, currentLSN, _, ok := s.dm.get(4)
 	if !ok || currentLSN != lsn {
 		t.Fatalf("dirty entry after mismatch ok=%t lsn=%d want true/%d", ok, currentLSN, lsn)
@@ -300,6 +306,12 @@ func TestFlusherRejectsCorruptOrUnsupportedDirtyRecord(t *testing.T) {
 			}
 			if got := s.dm.len(); got != 1 {
 				t.Fatalf("dirty entries after invalid record=%d want 1", got)
+			}
+			instr := s.FlusherInstrumentation()
+			if instr.ValidationFailures != 1 || instr.ValidatedRecords != 0 ||
+				instr.CyclesFailed != 1 {
+				t.Fatalf("validation failures/validated/cycles failed=%d/%d/%d want 1/0/1",
+					instr.ValidationFailures, instr.ValidatedRecords, instr.CyclesFailed)
 			}
 
 			if _, err := s.fd.WriteAt(original, absoluteOffset); err != nil {

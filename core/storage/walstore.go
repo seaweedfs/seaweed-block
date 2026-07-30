@@ -338,10 +338,20 @@ func (s *WALStore) persistCheckpoint(highestLSN uint64) error {
 	if _, err := sbCopy.writeTo(buf); err != nil {
 		return fmt.Errorf("storage: encode superblock: %w", err)
 	}
-	if err := s.writeSuperblockMetadata(buf.bytes()); err != nil {
+	checkpointWriteStart := time.Now()
+	err := s.writeSuperblockMetadata(buf.bytes())
+	if s.flusher != nil {
+		s.flusher.instr.recordCheckpointWrite(len(buf.bytes()), time.Since(checkpointWriteStart), err)
+	}
+	if err != nil {
 		return fmt.Errorf("storage: pwrite superblock: %w", err)
 	}
-	if err := s.syncSuperblockMetadata(); err != nil {
+	checkpointSyncStart := time.Now()
+	err = s.syncSuperblockMetadata()
+	if s.flusher != nil {
+		s.flusher.instr.recordCheckpointSync(time.Since(checkpointSyncStart), err)
+	}
+	if err != nil {
 		return fmt.Errorf("storage: fsync checkpoint superblock: %w", err)
 	}
 	s.checkpointLSN = highestLSN
@@ -364,6 +374,15 @@ func (s *WALStore) FlushCount() uint64 {
 		return 0
 	}
 	return s.flusher.FlushCount()
+}
+
+// FlusherInstrumentation returns a cumulative checkpoint-pipeline diagnostic
+// snapshot.
+func (s *WALStore) FlusherInstrumentation() FlusherInstrumentationStatus {
+	if s.flusher == nil {
+		return FlusherInstrumentationStatus{}
+	}
+	return s.flusher.instr.snapshot()
 }
 
 // Recover replays WAL entries past the last checkpoint into the dirty
