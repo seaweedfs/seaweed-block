@@ -118,9 +118,39 @@ ceiling prevents unbounded append growth. A short write, I/O error, or log-full
 condition terminally fails the owner and all already admitted work.
 
 The owner exposes admitted-request, segment, entry, byte, queue-rejection,
-queue-high-water, and owned-byte-high-water counters. D3 still must add the
-publication ledger, Sync target fence, durable dual header, and complete
-failure-state proof before this can back a Store.
+queue-high-water, and owned-byte-high-water counters. By itself it does not
+claim durability; the D3 coordinator below owns that boundary.
+
+### Phase 169 Publication And Durable Header
+
+D3 adds an internal durability coordinator without selecting it as a Store.
+The owner publishes a coherent snapshot only after the complete segment
+`WriteAt` succeeds:
+
+```text
+{published LSN, committed bytes, segment count, first sequence, first/last LSN}
+```
+
+`Sync` captures the highest LSN admitted before the call, waits for that target
+to publish, and may include later writes only when their complete segments
+already published. It then performs:
+
+```text
+segment data fsync
+-> write alternate 4 KiB CRC header
+-> header fsync
+-> expose the new durable LSN
+```
+
+The dual header persists the exact recovery manifest and the segment-log
+offset. Recovery selects the highest valid generation, stages only its trusted
+window, and ignores later physical bytes. A data-fsync, header-write, or
+header-fsync failure terminally faults the owner. If a later segment write is
+already active, it cannot publish or return success after that failure.
+
+The coordinator remains create-only and internal in D3. Reopen as a full
+`LogicalStorage`, checkpoint/recycle, rebuild, source-frontier, and replication
+equivalence remain D4 work.
 
 ## Write And Publication
 

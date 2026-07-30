@@ -21,6 +21,7 @@ type segmentOwnerConfig struct {
 	NumBlocks            uint32
 	QueueDepth           int
 	MaxEntriesPerSegment int
+	LogOffset            int64
 	MaxLogBytes          int64
 }
 
@@ -28,7 +29,8 @@ func (c segmentOwnerConfig) validate() error {
 	if c.BlockSize == 0 || c.NumBlocks == 0 || c.QueueDepth <= 0 ||
 		c.QueueDepth > maxSegmentQueueDepth ||
 		c.MaxEntriesPerSegment <= 0 || c.MaxEntriesPerSegment > maxSegmentEntries ||
-		c.MaxLogBytes <= 0 {
+		c.LogOffset < 0 || c.MaxLogBytes <= 0 ||
+		c.LogOffset > int64(^uint64(0)>>1)-c.MaxLogBytes {
 		return fmt.Errorf("parallelwal: invalid segment owner config %+v", c)
 	}
 	if _, err := segmentEncodedSize(uint32(c.MaxEntriesPerSegment), c.BlockSize); err != nil {
@@ -60,23 +62,37 @@ type segmentOwnerMetrics struct {
 	OwnedBytesHighWater uint64
 }
 
+type segmentCommitSnapshot struct {
+	PublishedLSN   uint64
+	CommittedBytes int64
+	SegmentCount   uint64
+	FirstSequence  uint64
+	FirstLSN       uint64
+	LastLSN        uint64
+}
+
 type segmentOwner struct {
 	writer io.WriterAt
 	config segmentOwnerConfig
 	queue  []*segmentOwnerRequest
 	done   chan struct{}
 
-	mu              sync.Mutex
-	cond            *sync.Cond
-	closeOnce       sync.Once
-	closed          bool
-	terminalErr     error
-	nextLSN         uint64
-	admitting       int
-	queueHead       int
-	queueLen        int
-	ownedBytes      uint64
-	admissionTokens chan struct{}
+	mu                 sync.Mutex
+	cond               *sync.Cond
+	closeOnce          sync.Once
+	closed             bool
+	terminalErr        error
+	nextLSN            uint64
+	admitting          int
+	queueHead          int
+	queueLen           int
+	ownedBytes         uint64
+	publishedLSN       uint64
+	writtenBytes       int64
+	completedSegments  uint64
+	publicationWaiters int
+	admissionTokens    chan struct{}
+	beforePublish      func()
 
 	admittedRequests    atomic.Uint64
 	segmentsWritten     atomic.Uint64
@@ -187,7 +203,7 @@ func (o *segmentOwner) Submit(lba uint32, data []byte) (uint64, error) {
 
 func (o *segmentOwner) run() {
 	defer close(o.done)
-	var offset int64
+	offset := o.config.LogOffset
 	var sequence uint64 = 1
 	for {
 		o.mu.Lock()
@@ -213,7 +229,7 @@ func (o *segmentOwner) run() {
 			records[i] = request.record
 		}
 		encoded, err := encodeSegment(sequence, records, o.config.BlockSize, o.config.NumBlocks)
-		if err == nil && int64(len(encoded)) > o.config.MaxLogBytes-offset {
+		if err == nil && int64(len(encoded)) > o.config.MaxLogBytes-(offset-o.config.LogOffset) {
 			err = errSegmentLogFull
 		}
 		if err == nil {
@@ -230,12 +246,43 @@ func (o *segmentOwner) run() {
 		}
 
 		offset += int64(len(encoded))
+		if o.beforePublish != nil {
+			o.beforePublish()
+		}
+		if err := o.publish(batch, records[len(records)-1].LSN,
+			offset-o.config.LogOffset, len(encoded)); err != nil {
+			o.failTerminal(batch, err)
+			return
+		}
 		sequence++
-		o.segmentsWritten.Add(1)
-		o.entriesWritten.Add(uint64(len(batch)))
-		o.bytesWritten.Add(uint64(len(encoded)))
-		o.complete(batch, nil)
 	}
+}
+
+func (o *segmentOwner) publish(
+	requests []*segmentOwnerRequest,
+	lastLSN uint64,
+	committedBytes int64,
+	encodedBytes int,
+) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.terminalErr != nil {
+		return o.terminalErr
+	}
+	o.publishedLSN = lastLSN
+	o.writtenBytes = committedBytes
+	o.completedSegments++
+	o.segmentsWritten.Add(1)
+	o.entriesWritten.Add(uint64(len(requests)))
+	o.bytesWritten.Add(uint64(encodedBytes))
+	for _, request := range requests {
+		request.result <- nil
+		close(request.result)
+		request.record.Data = nil
+		o.releaseOwnedLocked()
+	}
+	o.cond.Broadcast()
+	return nil
 }
 
 func (o *segmentOwner) complete(requests []*segmentOwnerRequest, err error) {
@@ -268,6 +315,70 @@ func (o *segmentOwner) failTerminal(active []*segmentOwnerRequest, err error) {
 	o.mu.Unlock()
 	o.complete(active, terminalErr)
 	o.complete(queued, terminalErr)
+}
+
+func (o *segmentOwner) Fail(err error) {
+	if err == nil {
+		return
+	}
+	o.mu.Lock()
+	if o.terminalErr == nil {
+		o.terminalErr = err
+	}
+	terminalErr := o.terminalErr
+	queued := make([]*segmentOwnerRequest, o.queueLen)
+	for i := range queued {
+		queued[i] = o.queue[o.queueHead]
+		o.queue[o.queueHead] = nil
+		o.queueHead = (o.queueHead + 1) % len(o.queue)
+	}
+	o.queueLen = 0
+	o.cond.Broadcast()
+	o.mu.Unlock()
+	o.complete(queued, terminalErr)
+}
+
+func (o *segmentOwner) Fence() (uint64, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.terminalErr != nil {
+		return 0, o.terminalErr
+	}
+	if o.closed {
+		return 0, errSegmentOwnerClosed
+	}
+	return o.nextLSN - 1, nil
+}
+
+func (o *segmentOwner) WaitPublished(targetLSN uint64) (segmentCommitSnapshot, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.publishedLSN < targetLSN && o.terminalErr == nil {
+		o.publicationWaiters++
+		defer func() { o.publicationWaiters-- }()
+	}
+	for o.publishedLSN < targetLSN && o.terminalErr == nil {
+		o.cond.Wait()
+	}
+	if o.terminalErr != nil {
+		return segmentCommitSnapshot{}, o.terminalErr
+	}
+	if o.publishedLSN < targetLSN {
+		return segmentCommitSnapshot{}, fmt.Errorf(
+			"parallelwal: segment owner stopped at LSN %d before target %d",
+			o.publishedLSN, targetLSN)
+	}
+	snapshot := segmentCommitSnapshot{
+		PublishedLSN:   o.publishedLSN,
+		CommittedBytes: o.writtenBytes,
+		SegmentCount:   o.completedSegments,
+	}
+	if snapshot.SegmentCount != 0 {
+		snapshot.FirstSequence = 1
+		snapshot.FirstLSN = 1
+		snapshot.LastLSN = o.publishedLSN
+	}
+	return snapshot, nil
 }
 
 func (o *segmentOwner) Close() error {

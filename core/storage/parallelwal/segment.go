@@ -42,6 +42,7 @@ type walSegment struct {
 // generation will persist. CommittedBytes alone cannot prove that the logical
 // prefix starts and ends at the expected sequence and LSN.
 type segmentRecoveryWindow struct {
+	StartOffset    int64
 	CommittedBytes int64
 	SegmentCount   uint64
 	FirstSequence  uint64
@@ -50,8 +51,10 @@ type segmentRecoveryWindow struct {
 }
 
 func (w segmentRecoveryWindow) validate() error {
-	if w.CommittedBytes < 0 {
-		return fmt.Errorf("%w: negative committed bytes %d", errBadSegment, w.CommittedBytes)
+	if w.StartOffset < 0 || w.CommittedBytes < 0 ||
+		w.StartOffset > int64(^uint64(0)>>1)-w.CommittedBytes {
+		return fmt.Errorf("%w: invalid physical window offset=%d bytes=%d",
+			errBadSegment, w.StartOffset, w.CommittedBytes)
 	}
 	if w.CommittedBytes == 0 {
 		if w.SegmentCount != 0 || w.FirstSequence != 0 || w.FirstLSN != 0 || w.LastLSN != 0 {
@@ -308,22 +311,23 @@ func scanCommittedSegments(
 	if err != nil {
 		return fmt.Errorf("parallelwal: stat segment file: %w", err)
 	}
-	if window.CommittedBytes > st.Size() {
-		return fmt.Errorf("%w: committed bytes=%d file size=%d",
-			errBadSegment, window.CommittedBytes, st.Size())
+	committedEnd := window.StartOffset + window.CommittedBytes
+	if committedEnd > st.Size() {
+		return fmt.Errorf("%w: committed end=%d file size=%d",
+			errBadSegment, committedEnd, st.Size())
 	}
 
-	var offset int64
+	offset := window.StartOffset
 	var segmentCount uint64
 	var lastLSN uint64
-	for offset < window.CommittedBytes {
+	for offset < committedEnd {
 		if segmentCount >= window.SegmentCount {
 			return fmt.Errorf("%w: committed bytes contain more than %d segments",
 				errBadSegment, window.SegmentCount)
 		}
-		if window.CommittedBytes-offset < segmentHeaderSize {
+		if committedEnd-offset < segmentHeaderSize {
 			return fmt.Errorf("%w: committed tail has %d header bytes",
-				errBadSegment, window.CommittedBytes-offset)
+				errBadSegment, committedEnd-offset)
 		}
 		headerBytes := make([]byte, segmentHeaderSize)
 		if n, err := f.ReadAt(headerBytes, offset); err != nil || n != len(headerBytes) {
@@ -333,9 +337,9 @@ func scanCommittedSegments(
 		if err != nil {
 			return fmt.Errorf("parallelwal: decode segment at %d: %w", offset, err)
 		}
-		if int64(h.Size) > window.CommittedBytes-offset {
+		if int64(h.Size) > committedEnd-offset {
 			return fmt.Errorf("%w: committed segment at %d size=%d remaining=%d",
-				errBadSegment, offset, h.Size, window.CommittedBytes-offset)
+				errBadSegment, offset, h.Size, committedEnd-offset)
 		}
 		segmentBytes := make([]byte, h.Size)
 		if n, err := f.ReadAt(segmentBytes, offset); err != nil || n != len(segmentBytes) {
