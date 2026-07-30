@@ -270,7 +270,11 @@ func (submitter *nativeWALSubmitter) takeLaneBatch(lane *lane) (nativeWALBatch, 
 	bytesNeeded := len(requests) * int(submitter.store.recordSize)
 	buffer := submitter.buffers[lane.id]
 	if cap(buffer) < bytesNeeded {
-		buffer = make([]byte, bytesNeeded)
+		bufferRecords := maxWALIOBytes / int(submitter.store.recordSize)
+		if lane.queueDepth < uint64(bufferRecords) {
+			bufferRecords = int(lane.queueDepth)
+		}
+		buffer = make([]byte, bytesNeeded, bufferRecords*int(submitter.store.recordSize))
 		submitter.mu.Lock()
 		submitter.stats.BufferAllocations++
 		submitter.mu.Unlock()
