@@ -34,12 +34,10 @@ type barrierEligibilityProbe interface {
 	ProbeBarrierEligibility() (debtZero, liveTail, walLegOk bool, cursor, head uint64)
 }
 
-// preBarrierSealer is implemented only by the bridging sink. It lets
-// Sender close the live-write acceptance window at the single point
-// where both base and WAL backlog have completed, immediately before
-// BarrierReq. Production RecoverySink does not implement this; its
-// resident WalShipper remains the live feeder through the barrier
-// window until EndSession.
+// preBarrierSealer lets Sender close the live-write acceptance window
+// at the single point where both base and WAL backlog have completed,
+// immediately before BarrierReq. Both the bridging sink and the
+// transport RecoverySink implement this atomic cut.
 type preBarrierSealer interface {
 	SealBeforeBarrier() error
 }

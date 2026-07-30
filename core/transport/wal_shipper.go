@@ -117,6 +117,8 @@ const (
 	ModeBacklog
 )
 
+var ErrWalShipperSessionSealed = errors.New("walshipper: recovery session sealed before barrier")
+
 func (m WalShipperMode) String() string {
 	switch m {
 	case ModeIdle:
@@ -249,6 +251,7 @@ type WalShipper struct {
 	// initial state at NewWalShipper construction; there is no path
 	// from any non-Idle mode back to Idle in current API.
 	sessionActive bool
+	sessionSealed bool
 	fromLSN       uint64 // session entry watermark (post-rewind cursor anchor)
 
 	// Saturation observability (R2). lagSample updated on every emit
@@ -431,6 +434,12 @@ func (s *WalShipper) drive(in driveInput) error {
 	defer s.shipMu.Unlock()
 
 	if s.mode == ModeIdle {
+		return nil
+	}
+	if s.sessionSealed {
+		if in.has {
+			return ErrWalShipperSessionSealed
+		}
 		return nil
 	}
 
@@ -644,9 +653,26 @@ func (s *WalShipper) StartSession(fromLSN uint64) error {
 	s.cursor = fromLSN // the one rewind, per INV-MONOTONIC-CURSOR
 	s.fromLSN = fromLSN
 	s.sessionActive = true
+	s.sessionSealed = false
 	s.mode = ModeBacklog
 	s.saturationFired.Store(false)
 	s.firstLiveEmitted.Store(false) // §IV.2.1 PrimaryLiveTail reset per session
+	return nil
+}
+
+// SealSession establishes the atomic pre-barrier cut under the same
+// serializer used by NotifyAppend and the timer drain. It is legal only
+// after backlog drain has reached Realtime.
+func (s *WalShipper) SealSession() error {
+	s.shipMu.Lock()
+	defer s.shipMu.Unlock()
+	if !s.sessionActive {
+		return errors.New("walshipper: SealSession without active session")
+	}
+	if s.mode != ModeRealtime {
+		return fmt.Errorf("walshipper: SealSession in mode %s (want Realtime)", s.mode)
+	}
+	s.sessionSealed = true
 	return nil
 }
 
@@ -655,6 +681,13 @@ func (s *WalShipper) StartSession(fromLSN uint64) error {
 // DrainBacklog success). Called from recovery.Sender's defer or on
 // session failure.
 func (s *WalShipper) EndSession() {
+	s.endSessionWithHandoff(nil)
+}
+
+// endSessionWithHandoff keeps emission sealed while the owner swaps
+// session-specific state, such as the executor's wire context, back to
+// steady state.
+func (s *WalShipper) endSessionWithHandoff(handoff func()) {
 	s.shipMu.Lock()
 	defer s.shipMu.Unlock()
 	s.sessionActive = false
@@ -664,6 +697,10 @@ func (s *WalShipper) EndSession() {
 	// fromLSN. Mode Realtime is safe because steady-state callers
 	// (NotifyAppend) check shipMu + cursor independently.
 	s.mode = ModeRealtime
+	if handoff != nil {
+		handoff()
+	}
+	s.sessionSealed = false
 }
 
 // NotifyAppend is the §6.3 single-mailbox entry for "primary just
