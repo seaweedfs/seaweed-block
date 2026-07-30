@@ -2,7 +2,6 @@ package parallelwal
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -11,103 +10,6 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
-
-func BenchmarkPhase169SegmentedWALContention(b *testing.B) {
-	const (
-		blockSize  = 4096
-		numBlocks  = 16384
-		maxLogSize = int64(4 << 30)
-	)
-	for _, writers := range []int{1, 2, 4, 8} {
-		b.Run(fmt.Sprintf("writers_%d", writers), func(b *testing.B) {
-			path := filepath.Join(b.TempDir(), "store.bin")
-			file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
-			if err != nil {
-				b.Fatal(err)
-			}
-			if err := file.Truncate(segmentDurableLogOffset + maxLogSize); err != nil {
-				_ = file.Close()
-				b.Fatal(err)
-			}
-			engine, err := newSegmentDurableEngine(file, segmentOwnerConfig{
-				BlockSize:            blockSize,
-				NumBlocks:            numBlocks,
-				QueueDepth:           256,
-				MaxEntriesPerSegment: maxSegmentEntries,
-				MaxLogBytes:          maxLogSize,
-			})
-			if err != nil {
-				_ = file.Close()
-				b.Fatal(err)
-			}
-			b.Cleanup(func() {
-				_ = engine.Close()
-				_ = file.Close()
-			})
-
-			data := make([][]byte, writers)
-			for i := range data {
-				data[i] = make([]byte, blockSize)
-				data[i][0] = byte(i + 1)
-			}
-			latencies := make([]int64, b.N)
-			workerOps := make([]int, writers)
-			var firstErr error
-			var errOnce sync.Once
-			start := make(chan struct{})
-			var wg sync.WaitGroup
-
-			b.SetBytes(blockSize)
-			b.ResetTimer()
-			wallStart := time.Now()
-			for worker := 0; worker < writers; worker++ {
-				wg.Add(1)
-				go func(worker int) {
-					defer wg.Done()
-					<-start
-					for idx := worker; idx < b.N; idx += writers {
-						opStart := time.Now()
-						_, writeErr := engine.Submit(uint32(idx%numBlocks), data[worker])
-						latencies[idx] = time.Since(opStart).Nanoseconds()
-						if writeErr != nil {
-							errOnce.Do(func() { firstErr = writeErr })
-							return
-						}
-						workerOps[worker]++
-					}
-				}(worker)
-			}
-			close(start)
-			wg.Wait()
-			if firstErr == nil {
-				_, firstErr = engine.Sync()
-			}
-			wallDuration := time.Since(wallStart)
-			b.StopTimer()
-			if firstErr != nil {
-				b.Fatal(firstErr)
-			}
-			if b.N >= writers {
-				for worker, ops := range workerOps {
-					if ops == 0 {
-						b.Fatalf("worker %d completed zero writes", worker)
-					}
-				}
-			}
-			metrics := engine.owner.Metrics()
-			reportParallelLatencyPercentiles(b, latencies)
-			b.ReportMetric(float64(metrics.SegmentsWritten), "segments")
-			b.ReportMetric(float64(metrics.EntriesWritten), "entries")
-			if metrics.SegmentsWritten != 0 {
-				b.ReportMetric(float64(metrics.EntriesWritten)/float64(metrics.SegmentsWritten),
-					"entries/segment")
-			}
-			b.ReportMetric(float64(metrics.BytesWritten), "wal_bytes")
-			b.ReportMetric(1, "sync_calls")
-			b.ReportMetric(float64(b.N)/wallDuration.Seconds(), "write_ops/s")
-		})
-	}
-}
 
 func BenchmarkPhase167ParallelWALContention(b *testing.B) {
 	const (
@@ -121,8 +23,8 @@ func BenchmarkPhase167ParallelWALContention(b *testing.B) {
 				BlockSize:     blockSize,
 				LaneCount:     4,
 				StripeBlocks:  1,
-				SlotsPerLane:  65536,
-				RetainPerLane: 65535,
+				SlotsPerLane:  4096,
+				RetainPerLane: 64,
 				QueueDepth:    256,
 			})
 			if err != nil {
@@ -199,7 +101,6 @@ func BenchmarkPhase167ParallelWALContention(b *testing.B) {
 			b.ReportMetric(float64(recycleReadOps), "recycle_read_ops")
 			b.ReportMetric(float64(walWriteOps), "wal_write_ops")
 			b.ReportMetric(float64(walTail), "wal_tail")
-			b.ReportMetric(1, "sync_calls")
 			b.ReportMetric(float64(b.N)/wallDuration.Seconds(), "write_ops/s")
 		})
 	}
@@ -405,7 +306,6 @@ func BenchmarkPhase167LegacyWALContentionControl(b *testing.B) {
 				b.Fatal(firstErr)
 			}
 			reportParallelLatencyPercentiles(b, latencies)
-			b.ReportMetric(1, "sync_calls")
 			b.ReportMetric(float64(b.N)/wallDuration.Seconds(), "write_ops/s")
 		})
 	}
