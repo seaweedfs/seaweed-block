@@ -36,6 +36,7 @@ type nativeWALSubmitter struct {
 	stop      chan struct{}
 	done      chan struct{}
 	closeOnce sync.Once
+	nextLane  int
 
 	mu    sync.Mutex
 	stats NativeIOStats
@@ -137,10 +138,13 @@ func (submitter *nativeWALSubmitter) takeRound() ([]nativeWALBatch, error) {
 		maxOperations = len(submitter.store.lanes)
 	}
 	batches := make([]nativeWALBatch, 0, maxOperations)
-	for _, lane := range submitter.store.lanes {
+	startLane := submitter.nextLane
+	for visited := 0; visited < len(submitter.store.lanes); visited++ {
 		if len(batches) == maxOperations {
 			break
 		}
+		laneID := (startLane + visited) % len(submitter.store.lanes)
+		lane := submitter.store.lanes[laneID]
 		batch, ok, err := submitter.takeLaneBatch(lane)
 		if err != nil {
 			if len(batch.requests) != 0 {
@@ -150,6 +154,7 @@ func (submitter *nativeWALSubmitter) takeRound() ([]nativeWALBatch, error) {
 		}
 		if ok {
 			batches = append(batches, batch)
+			submitter.nextLane = (laneID + 1) % len(submitter.store.lanes)
 		}
 	}
 	return batches, nil

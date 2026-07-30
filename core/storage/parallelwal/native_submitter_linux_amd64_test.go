@@ -69,3 +69,30 @@ func TestIOUringOwnerBatchesAcrossLanesAndRecoversPortably(t *testing.T) {
 		}
 	}
 }
+
+func TestIOUringOwnerRotatesAcrossLanesAtDepthOne(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "depth-one.bin")
+	cfg := testConfig()
+	cfg.QueueDepth = 1
+	cfg.Execution = ExecutionIOUring
+	store, err := CreateStoreWithConfig(path, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	blocks := [][]byte{
+		testBlock(0x51, cfg.BlockSize),
+		testBlock(0x52, cfg.BlockSize),
+		testBlock(0x53, cfg.BlockSize),
+		testBlock(0x54, cfg.BlockSize),
+	}
+	if _, err := store.WriteBatch(0, blocks); err != nil {
+		t.Fatal(err)
+	}
+	stats := store.NativeIOStats()
+	if stats.QueueDepth != 1 || stats.SubmissionRounds != 4 ||
+		stats.SQEs != 4 || stats.CompletionCount != 4 {
+		t.Fatalf("depth-one native stats=%+v", stats)
+	}
+}
