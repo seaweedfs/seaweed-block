@@ -1,6 +1,6 @@
 //go:build linux && amd64
 
-package main
+package iouring
 
 import (
 	"errors"
@@ -24,7 +24,7 @@ func TestLinuxUAPIStructSizes(t *testing.T) {
 }
 
 func TestRunProbeCompletesWritesFsyncAndReopen(t *testing.T) {
-	report, err := runProbe(8)
+	report, err := RunProbe(8)
 	if err != nil {
 		t.Fatalf("run probe: %v (report=%+v)", err, report)
 	}

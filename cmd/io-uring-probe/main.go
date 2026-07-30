@@ -5,23 +5,11 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"github.com/seaweedfs/seaweed-block/internal/iouring"
 )
 
-type probeReport struct {
-	Platform             string
-	KernelRelease        string
-	Supported            bool
-	RefusalReason        string
-	QueueDepth           uint32
-	WriteOpcodeSupported bool
-	FsyncOpcodeSupported bool
-	SubmittedOps         int
-	SubmitSyscalls       int
-	WriteCompletions     int
-	FsyncCompletions     int
-	CompletionCount      int
-	VerifiedBytes        int
-}
+type probeReport = iouring.Report
 
 func main() {
 	report, err := runProbe(8)

@@ -68,7 +68,7 @@ write_summary "required_opcodes=write,fsync"
 write_summary "dependency_added=false"
 write_summary "cgo_required=false"
 
-timeout 60s go test ./cmd/io-uring-probe -count=1 -v \
+timeout 60s go test ./cmd/io-uring-probe ./internal/iouring -count=1 -v \
   >"${ARTIFACT_DIR}/probe-tests.log" 2>&1
 write_summary "linux_probe_test=pass"
 
