@@ -53,6 +53,12 @@ func TestIOUringOwnerBatchesAcrossLanesAndRecoversPortably(t *testing.T) {
 	if stats.DurabilityBarriers != 2 || stats.FsyncCompletions != 2 {
 		t.Fatalf("native durability stats=%+v want two completed barriers", stats)
 	}
+	t.Logf(
+		"native_durability_stats barriers=%d fsync_completions=%d submit_syscalls=%d",
+		stats.DurabilityBarriers,
+		stats.FsyncCompletions,
+		stats.SubmitSyscalls,
+	)
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
