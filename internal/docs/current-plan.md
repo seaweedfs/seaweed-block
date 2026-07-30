@@ -120,7 +120,8 @@ reuse it, not create another codec.
 
 - Extend the existing `BenchmarkPhase167WALStoreContention` evidence rather
   than creating a synthetic backend.
-- Run 4 KiB ordinary Write with 1/2/4/8 writers and explicit final Sync.
+- Run 4 KiB ordinary Write with 1/2/4/8 writers, explicit final Sync, and a
+  timed final flusher drain that must settle checkpoint to head.
 - Run the existing explicit `WriteBatch` control to show whether fewer
   `WriteAt` calls have measurable value on the same machine.
 - Report median/range, p50/p95/p99, allocations, CPU profile, syscall counts,
@@ -128,10 +129,11 @@ reuse it, not create another codec.
   Sync cadence.
 - Separate cumulative CPU work from wall-clock lock wait; do not sum
   overlapping concurrent durations into a false percentage.
-- Admit D2 only if the baseline has a reproducible concurrency deficit and
+- Admit D2 only if five-run range and paired-sample checks are stable and
   either record encode/copy/checksum/lock work has material parallel headroom
   or the existing-format batch control proves material syscall/coalescing
-  headroom.
+  headroom. A concurrency deficit is important diagnostic evidence, not a
+  mandatory stop when absolute coalescing headroom is already material.
 - Stop if the profile instead shows an already saturated device or no
   existing-format batch advantage.
 
