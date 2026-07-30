@@ -32,6 +32,8 @@ import (
 // references to fn or to RecoveryEntry.Data past the callback
 // return.
 func (s *WALStore) ScanLBAs(fromLSN uint64, fn func(RecoveryEntry) error) error {
+	s.lifecycleMu.RLock()
+	defer s.lifecycleMu.RUnlock()
 	if fn == nil {
 		return errors.New("storage: walstore ScanLBAs: nil callback")
 	}
