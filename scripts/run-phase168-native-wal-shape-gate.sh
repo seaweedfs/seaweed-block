@@ -35,30 +35,40 @@ if [[ "$(go env GOOS)/$(go env GOARCH)" != "linux/amd64" ]]; then
 fi
 
 timeout 60s go test ./core/storage/parallelwal \
-  -run 'TestNativeQueueSaturationReturnsTypedBackpressure|TestNativeCountsEveryShortCompletionAndFailsAllRequests|TestNativeCloseWaitsForInflightWriteBeforeClosingExecutor' \
+  -run 'TestNativeQueueSaturationReturnsTypedBackpressure|TestNativeCountsEveryShortCompletionAndFailsAllRequests|TestNativeCloseWaitsForInflightWriteBeforeClosingExecutor|TestNativeFsyncFailureTerminallyRejectsLaterWrites' \
   -count=1 -v >"${PORTABLE_LOG}" 2>&1
 require_line '^--- PASS: TestNativeQueueSaturationReturnsTypedBackpressure ' "${PORTABLE_LOG}"
 require_line '^--- PASS: TestNativeCountsEveryShortCompletionAndFailsAllRequests ' "${PORTABLE_LOG}"
 require_line '^--- PASS: TestNativeCloseWaitsForInflightWriteBeforeClosingExecutor ' "${PORTABLE_LOG}"
+require_line '^--- PASS: TestNativeFsyncFailureTerminallyRejectsLaterWrites ' "${PORTABLE_LOG}"
 write_summary "typed_queue_backpressure=pass"
 write_summary "all_short_completions_counted=pass"
 write_summary "later_write_after_short_completion=denied"
 write_summary "close_waits_for_inflight=pass"
+write_summary "close_reopen_recovery=pass"
+write_summary "fsync_failure_terminal=true"
 
 timeout 60s go test ./internal/iouring ./core/storage/parallelwal \
-  -run 'TestExecutorPoisonsAfterEventFDWaitErrorDrainsAcceptedCQE|TestIOUringOwnerRotatesAcrossLanesAtDepthOne|TestIOUringOwnerUsesMultipleRoundsWhenDepthBounded|TestNativeRingWrapRecyclesAndRecovers' \
+  -run 'TestExecutorPoisonsRingAfterPartialSubmission|TestExecutorPoisonsAfterEventFDWaitErrorDrainsAcceptedCQE|TestExecutorRejectsOversizedSubmissionWithoutStaleSQEs|TestAcceptedOperationRetainsBufferThroughForcedGC|TestIOUringOwnerRotatesAcrossLanesAtDepthOne|TestIOUringOwnerUsesMultipleRoundsWhenDepthBounded|TestNativeRingWrapRecyclesAndRecovers' \
   -count=1 -v >"${LINUX_LOG}" 2>&1
+require_line '^--- PASS: TestExecutorPoisonsRingAfterPartialSubmission ' "${LINUX_LOG}"
 require_line '^--- PASS: TestExecutorPoisonsAfterEventFDWaitErrorDrainsAcceptedCQE ' "${LINUX_LOG}"
+require_line '^--- PASS: TestExecutorRejectsOversizedSubmissionWithoutStaleSQEs ' "${LINUX_LOG}"
+require_line '^--- PASS: TestAcceptedOperationRetainsBufferThroughForcedGC ' "${LINUX_LOG}"
 require_line '^--- PASS: TestIOUringOwnerRotatesAcrossLanesAtDepthOne ' "${LINUX_LOG}"
 require_line '^--- PASS: TestIOUringOwnerUsesMultipleRoundsWhenDepthBounded ' "${LINUX_LOG}"
 require_line '^--- PASS: TestNativeRingWrapRecyclesAndRecovers ' "${LINUX_LOG}"
+write_summary "partial_submission_executor_poisoned=true"
 write_summary "eventfd_error_executor_poisoned=true"
-write_summary "depth_one_lane_rotation=pass"
+write_summary "oversized_submission_rejected_without_stale_sqe=true"
+write_summary "full_submission_queue=pass"
+write_summary "accepted_buffer_forced_gc=pass"
+write_summary "depth_one_round_accounting=pass"
 write_summary "bounded_multiple_rounds=pass"
 write_summary "native_ring_wrap_recovery=pass"
 
 timeout 120s go test -race ./internal/iouring ./core/storage/parallelwal \
-  -run 'TestExecutorPoisonsAfterEventFDWaitErrorDrainsAcceptedCQE|TestNativeQueueSaturationReturnsTypedBackpressure|TestNativeCountsEveryShortCompletionAndFailsAllRequests|TestNativeCloseWaitsForInflightWriteBeforeClosingExecutor|TestIOUringOwnerUsesMultipleRoundsWhenDepthBounded|TestNativeRingWrapRecyclesAndRecovers' \
+  -run 'TestExecutorPoisonsRingAfterPartialSubmission|TestExecutorPoisonsAfterEventFDWaitErrorDrainsAcceptedCQE|TestExecutorRejectsOversizedSubmissionWithoutStaleSQEs|TestAcceptedOperationRetainsBufferThroughForcedGC|TestNativeQueueSaturationReturnsTypedBackpressure|TestNativeCountsEveryShortCompletionAndFailsAllRequests|TestNativeCloseWaitsForInflightWriteBeforeClosingExecutor|TestNativeFsyncFailureTerminallyRejectsLaterWrites|TestIOUringOwnerUsesMultipleRoundsWhenDepthBounded|TestNativeRingWrapRecyclesAndRecovers' \
   -count=10 >"${ARTIFACT_DIR}/shape-race-tests.log" 2>&1
 write_summary "shape_matrix_linux_race=pass"
 write_summary "race_repetitions=10"

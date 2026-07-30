@@ -7,9 +7,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -140,5 +142,109 @@ func TestExecutorPoisonsAfterEventFDWaitErrorDrainsAcceptedCQE(t *testing.T) {
 		Write(-1, 0, bytes.Repeat([]byte{0x72}, probeBlockSize), 72),
 	}); err == nil {
 		t.Fatal("eventfd-poisoned executor accepted a later submission")
+	}
+}
+
+func TestExecutorRejectsOversizedSubmissionWithoutStaleSQEs(t *testing.T) {
+	executor, err := New(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer executor.Close()
+
+	path := filepath.Join(t.TempDir(), "full-sq.dat")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+
+	depth := int(executor.Stats().QueueDepth)
+	if err := file.Truncate(int64(depth * probeBlockSize)); err != nil {
+		t.Fatal(err)
+	}
+	operations := make([]Operation, depth+1)
+	for i := range operations {
+		operations[i] = Write(
+			int(file.Fd()),
+			int64(i*probeBlockSize),
+			bytes.Repeat([]byte{byte(i + 1)}, probeBlockSize),
+			uint64(i+1),
+		)
+	}
+	head := atomic.LoadUint32(executor.ring.sqHead)
+	tail := atomic.LoadUint32(executor.ring.sqTail)
+	if _, err := executor.SubmitAndWait(operations); err == nil {
+		t.Fatal("oversized submission unexpectedly succeeded")
+	}
+	if got := executor.Stats(); got.SubmittedOps != 0 || got.CompletionCount != 0 {
+		t.Fatalf("oversized submission changed stats: %+v", got)
+	}
+	if atomic.LoadUint32(executor.ring.sqHead) != head ||
+		atomic.LoadUint32(executor.ring.sqTail) != tail {
+		t.Fatal("oversized submission left stale SQEs")
+	}
+
+	completions, err := executor.SubmitAndWait(operations[:depth])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(completions) != depth {
+		t.Fatalf("full-depth completions=%d want=%d", len(completions), depth)
+	}
+}
+
+func TestAcceptedOperationRetainsBufferThroughForcedGC(t *testing.T) {
+	executor, err := New(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer executor.Close()
+
+	accepted := make(chan struct{})
+	release := make(chan struct{})
+	bufferChecked := make(chan bool, 1)
+	executor.ring.enterCall = func(toSubmit, _, _ uint32) (int, error) {
+		head := atomic.LoadUint32(executor.ring.sqHead)
+		index := executor.ring.sqArray[head&atomic.LoadUint32(executor.ring.sqMask)]
+		sqe := executor.ring.sqeArray[index]
+		atomic.StoreUint32(executor.ring.sqHead, head+toSubmit)
+		close(accepted)
+		<-release
+
+		data := unsafe.Slice((*byte)(unsafe.Pointer(uintptr(sqe.Address))), int(sqe.Length))
+		bufferChecked <- len(data) == probeBlockSize &&
+			bytes.Equal(data, bytes.Repeat([]byte{0x5a}, probeBlockSize))
+		tail := atomic.LoadUint32(executor.ring.cqTail)
+		executor.ring.cqes[tail&atomic.LoadUint32(executor.ring.cqMask)] = ioUringCQE{
+			UserData: sqe.UserData,
+			Result:   int32(sqe.Length),
+		}
+		atomic.StoreUint32(executor.ring.cqTail, tail+1)
+		return int(toSubmit), nil
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		payload := bytes.Repeat([]byte{0x5a}, probeBlockSize)
+		completions, submitErr := executor.SubmitAndWait([]Operation{
+			Write(-1, 0, payload, 95),
+		})
+		if submitErr == nil &&
+			(len(completions) != 1 || completions[0].UserData != 95) {
+			submitErr = errors.New("accepted buffer completion mismatch")
+		}
+		result <- submitErr
+	}()
+	<-accepted
+	for i := 0; i < 5; i++ {
+		runtime.GC()
+	}
+	close(release)
+	if !<-bufferChecked {
+		t.Fatal("accepted operation buffer changed or became unreachable")
+	}
+	if err := <-result; err != nil {
+		t.Fatal(err)
 	}
 }
