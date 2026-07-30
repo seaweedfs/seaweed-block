@@ -1,7 +1,6 @@
 # Phase 168 D1 io_uring Capability Gate
 
-Status: initial developer/QA happy-path PASS at `e919720`; adversarial review
-found a submitted-buffer lifetime blocker. Hardened re-validation pending.
+Status: PASS at exact commit `ea1a44c`.
 
 ## Scope
 
@@ -37,7 +36,7 @@ probe package a public storage abstraction.
 
 ## Developer Evidence
 
-Initial source commit: `e919720`
+Exact source commit: `ea1a44c`
 
 Environment:
 
@@ -89,11 +88,29 @@ The three writes use offsets `0`, `12288`, and `4096`, so they are deliberately
 non-contiguous in submission order. The barrier is an `IORING_OP_FSYNC`, not an
 `os.File.Sync` hidden outside the ring. Every CQE is matched by `user_data`,
 write lengths are checked, and all payloads are verified after reopening the
-file. The hardened follow-up must additionally retry interrupted waits and keep
-every accepted request buffer alive through a terminal CQE.
+file. Interrupted waits are retried, accepted submissions are counted from the
+kernel-owned SQ head, and every accepted request buffer remains live through a
+terminal CQE.
+
+Independent validation:
+
+```text
+adversarial_review=ACCEPT
+independent_qa=PASS
+linux_race_count_20=PASS
+go_vet=PASS
+probe_temp_dir_count=0
+remote_cleanup_status=ok
+local_cleanup_status=ok
+```
+
+The probe's accepted-request drain intentionally relies on the gate's outer
+timeout if the kernel stops making progress. That is acceptable for this
+process-scoped capability test only. D2 product code must define bounded
+shutdown and terminal completion semantics before it can own application
+buffers.
 
 ## D1 Verdict
 
-D1 may close only after the follow-up exact-commit run and adversarial review
-confirm the same result. Passing D1 permits D2 implementation work; it does not
-permit a selector, default change, performance claim, or mounted/RF3 claim.
+D1 is closed. It permits D2 implementation work; it does not permit a selector,
+default change, performance claim, or mounted/RF3 claim.

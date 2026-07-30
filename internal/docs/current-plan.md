@@ -114,6 +114,12 @@ licensing-sensitive source.
 
 ### D1. Executable Capability And Dependency Spike
 
+Status: complete at `ea1a44c`. The exact m02 gate, independent QA, Linux race
+repetition, and adversarial review passed. The selected D1 implementation uses
+the existing `x/sys/unix` dependency with no CGO or new module; unsupported
+platforms remain explicit. No product selector or `parallelwal` integration was
+added.
+
 - Add a Linux-only executable test that creates a bounded ring, submits
   multiple non-contiguous writes to a temporary file, consumes every
   completion, fsyncs, and verifies bytes after reopen.
