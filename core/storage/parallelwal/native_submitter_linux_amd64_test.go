@@ -112,6 +112,83 @@ func TestIOUringOwnerRotatesAcrossLanesAtDepthOne(t *testing.T) {
 	}
 }
 
+func TestIOUringOwnerUsesMultipleRoundsWhenDepthBounded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bounded-rounds.bin")
+	cfg := testConfig()
+	cfg.QueueDepth = 2
+	cfg.Execution = ExecutionIOUring
+	store, err := CreateStoreWithConfig(path, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	blocks := [][]byte{
+		testBlock(0x61, cfg.BlockSize),
+		testBlock(0x62, cfg.BlockSize),
+		testBlock(0x63, cfg.BlockSize),
+		testBlock(0x64, cfg.BlockSize),
+	}
+	if _, err := store.WriteBatch(0, blocks); err != nil {
+		t.Fatal(err)
+	}
+	stats := store.NativeIOStats()
+	if stats.QueueDepth != 2 || stats.SubmissionRounds != 2 ||
+		stats.SQEs != 4 || stats.CompletionCount != 4 ||
+		stats.InflightHighWater != 2 || stats.FallbackCount != 0 {
+		t.Fatalf("bounded-round native stats=%+v", stats)
+	}
+}
+
+func TestNativeRingWrapRecyclesAndRecovers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "native-wrap.bin")
+	cfg := Config{
+		NumBlocks:     8,
+		BlockSize:     512,
+		LaneCount:     1,
+		StripeBlocks:  1,
+		SlotsPerLane:  4,
+		RetainPerLane: 2,
+		QueueDepth:    4,
+		Execution:     ExecutionIOUring,
+	}
+	store, err := CreateStoreWithConfig(path, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 10; i++ {
+		if _, err := store.Write(0, testBlock(byte(i), cfg.BlockSize)); err != nil {
+			t.Fatalf("Write %d: %v", i, err)
+		}
+		if stable, err := store.Sync(); err != nil || stable != uint64(i) {
+			t.Fatalf("Sync %d=(%d,%v)", i, stable, err)
+		}
+	}
+	stats := store.NativeIOStats()
+	if stats.SubmissionRounds != 10 || stats.FallbackCount != 0 {
+		t.Fatalf("native wrap stats=%+v", stats)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if recovered, err := reopened.Recover(); err != nil || recovered != 10 {
+		t.Fatalf("Recover=(%d,%v) want=(10,nil)", recovered, err)
+	}
+	data, err := reopened.Read(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data[0] != 10 {
+		t.Fatalf("latest byte=%d want=10", data[0])
+	}
+}
+
 func TestNativeSyncIsNotStarvedByLaterWriters(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sync-liveness.bin")
 	cfg := testConfig()
