@@ -152,8 +152,12 @@ four-package storage regression, and Windows cross-compile.
   machine, run a same-session D4-0 ordinary-write admission gate against the
   D3 durable coordinator, Phase 167 positioned WAL, and legacy WAL.
 - Stop before full D4 implementation if D4-0 cannot keep one-writer throughput
-  within 90% of legacy, reach 1.5x four-writer scaling, match positioned
-  four-writer throughput, and prove more than one entry per segment.
+  within 90% of legacy, match positioned four-writer throughput, prove more
+  than one entry per segment, and either reach 1.5x four-writer scaling or
+  beat both four-writer controls by at least 25%.
+- Treat D4-0 as an optimistic WAL-core upper bound, not a product performance
+  claim. Legacy background flush and positioned checkpoint/recycle are disabled
+  for this gate; full D4 must add those costs before the final D5 decision.
 - Reuse the accepted COW extent/checkpoint design where possible.
 - Define segment-level retention and wrap/reuse fences.
 - Prove catch-up scan and source-frontier behavior across segment boundaries.

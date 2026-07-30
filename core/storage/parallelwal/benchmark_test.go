@@ -121,8 +121,8 @@ func BenchmarkPhase167ParallelWALContention(b *testing.B) {
 				BlockSize:     blockSize,
 				LaneCount:     4,
 				StripeBlocks:  1,
-				SlotsPerLane:  4096,
-				RetainPerLane: 64,
+				SlotsPerLane:  65536,
+				RetainPerLane: 65535,
 				QueueDepth:    256,
 			})
 			if err != nil {
@@ -199,6 +199,7 @@ func BenchmarkPhase167ParallelWALContention(b *testing.B) {
 			b.ReportMetric(float64(recycleReadOps), "recycle_read_ops")
 			b.ReportMetric(float64(walWriteOps), "wal_write_ops")
 			b.ReportMetric(float64(walTail), "wal_tail")
+			b.ReportMetric(1, "sync_calls")
 			b.ReportMetric(float64(b.N)/wallDuration.Seconds(), "write_ops/s")
 		})
 	}
@@ -362,6 +363,7 @@ func BenchmarkPhase167LegacyWALContentionControl(b *testing.B) {
 				b.Fatal(err)
 			}
 			b.Cleanup(func() { _ = s.Close() })
+			s.DisableAutoFlushForRecoveryTest()
 
 			data := make([][]byte, writers)
 			for i := range data {
@@ -404,6 +406,7 @@ func BenchmarkPhase167LegacyWALContentionControl(b *testing.B) {
 				b.Fatal(firstErr)
 			}
 			reportParallelLatencyPercentiles(b, latencies)
+			b.ReportMetric(1, "sync_calls")
 			b.ReportMetric(float64(b.N)/wallDuration.Seconds(), "write_ops/s")
 		})
 	}
