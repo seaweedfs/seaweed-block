@@ -1060,8 +1060,50 @@ func TestRecycledSlotsRemainRecoverableThroughHeaderFallback(t *testing.T) {
 	}
 }
 
+func TestCheckpointWritesCoalesceContiguousLBAs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "parallelwal.bin")
+	cfg := testConfig()
+	cfg.NumBlocks = 1024
+	cfg.BlockSize = 4096
+	s, err := CreateStoreWithConfig(path, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	blocks := make(map[uint32][]byte)
+	for lba := uint32(0); lba < 600; lba++ {
+		blocks[lba] = testBlock(byte(lba%251+1), s.BlockSize())
+	}
+	blocks[700] = testBlock(0xee, s.BlockSize())
+	writeOps, err := s.writeCheckpointBlocks(s.activeExtent, blocks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writeOps != 4 {
+		t.Fatalf("checkpoint write ops=%d want=4 (three bounded contiguous writes plus one gap)", writeOps)
+	}
+	for _, lba := range []uint32{0, 255, 256, 599, 700} {
+		data := make([]byte, s.BlockSize())
+		if _, err := s.fd.ReadAt(data, s.extentOffsetFor(s.activeExtent, lba)); err != nil {
+			t.Fatal(err)
+		}
+		if want := blocks[lba][0]; data[0] != want {
+			t.Fatalf("LBA %d byte=%02x want=%02x", lba, data[0], want)
+		}
+	}
+}
+
 func TestHeaderForConfigRejectsPersistedGeometryOverflow(t *testing.T) {
 	tests := []Config{
+		{
+			NumBlocks:    1,
+			BlockSize:    maxCheckpointWriteBytes + 1,
+			LaneCount:    1,
+			StripeBlocks: 1,
+			SlotsPerLane: 2,
+			QueueDepth:   1,
+		},
 		{
 			NumBlocks:    1,
 			BlockSize:    int(uint64(^uint32(0)) + 1),

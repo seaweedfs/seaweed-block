@@ -90,8 +90,12 @@ func BenchmarkPhase167ParallelWALContention(b *testing.B) {
 			}
 			s.mu.RUnlock()
 			_, walTail, _ := s.Boundaries()
+			s.mu.RLock()
+			checkpointWriteOps := s.checkpointWriteOps
+			s.mu.RUnlock()
 			reportParallelLatencyPercentiles(b, latencies)
 			b.ReportMetric(float64(activeLanes), "active_lanes")
+			b.ReportMetric(float64(checkpointWriteOps), "checkpoint_write_ops")
 			b.ReportMetric(float64(walTail), "wal_tail")
 			b.ReportMetric(float64(b.N)/wallDuration.Seconds(), "write_ops/s")
 		})

@@ -17,7 +17,10 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
-const defaultQueueDepth = 128
+const (
+	defaultQueueDepth       = 128
+	maxCheckpointWriteBytes = 1 << 20
+)
 
 var (
 	ErrNotRecovered = errors.New("parallelwal: store must be recovered before use")
@@ -83,30 +86,31 @@ type Store struct {
 	slotsPerLane  uint64
 	retainPerLane uint64
 
-	mu                sync.RWMutex
-	cond              *sync.Cond
-	syncMu            sync.Mutex
-	closed            bool
-	closing           bool
-	recovered         bool
-	terminalErr       error
-	reuseFence        bool
-	nextLSN           uint64
-	stableLSN         uint64
-	checkpointLSN     uint64
-	pendingBaseLSN    uint64
-	baseCommitPending bool
-	walTail           uint64
-	publishedLSN      uint64
-	publishedHeads    [maxLaneCount]uint64
-	inflightAppends   int
-	pending           map[uint64]*writeRequest
-	latest            map[uint32]blockVersion
-	applied           map[uint32]uint64
-	history           map[uint64]walRecord
-	baseStageActive   bool
-	baseStageSlot     int
-	baseStage         map[uint32][]byte
+	mu                 sync.RWMutex
+	cond               *sync.Cond
+	syncMu             sync.Mutex
+	closed             bool
+	closing            bool
+	recovered          bool
+	terminalErr        error
+	reuseFence         bool
+	nextLSN            uint64
+	stableLSN          uint64
+	checkpointLSN      uint64
+	pendingBaseLSN     uint64
+	baseCommitPending  bool
+	walTail            uint64
+	publishedLSN       uint64
+	publishedHeads     [maxLaneCount]uint64
+	inflightAppends    int
+	pending            map[uint64]*writeRequest
+	latest             map[uint32]blockVersion
+	applied            map[uint32]uint64
+	history            map[uint64]walRecord
+	baseStageActive    bool
+	baseStageSlot      int
+	baseStage          map[uint32][]byte
+	checkpointWriteOps uint64
 
 	lanes       []*lane
 	extentLocks [256]sync.RWMutex
@@ -720,14 +724,9 @@ func (s *Store) Sync() (uint64, error) {
 		return target, nil
 	}
 
-	for lba, data := range blocks {
-		lock := &s.extentLocks[lba%uint32(len(s.extentLocks))]
-		lock.Lock()
-		_, err := s.fd.WriteAt(data, s.extentOffsetFor(checkpointExtent, lba))
-		lock.Unlock()
-		if err != nil {
-			return 0, fmt.Errorf("parallelwal: checkpoint extent LBA %d: %w", lba, err)
-		}
+	checkpointWriteOps, err := s.writeCheckpointBlocks(checkpointExtent, blocks)
+	if err != nil {
+		return 0, err
 	}
 	if err := s.fd.Sync(); err != nil {
 		return 0, fmt.Errorf("parallelwal: sync checkpoint extent: %w", err)
@@ -755,6 +754,7 @@ func (s *Store) Sync() (uint64, error) {
 		s.pendingBaseLSN = 0
 	}
 	s.baseCommitPending = false
+	s.checkpointWriteOps = uint64(checkpointWriteOps)
 	if target > s.stableLSN {
 		s.stableLSN = target
 	}
@@ -780,6 +780,61 @@ func (s *Store) Sync() (uint64, error) {
 		return 0, fmt.Errorf("parallelwal: seal recycled checkpoint header: %w", sealErr)
 	}
 	return target, nil
+}
+
+func (s *Store) writeCheckpointBlocks(extent int, blocks map[uint32][]byte) (int, error) {
+	if len(blocks) == 0 {
+		return 0, nil
+	}
+	lbas := make([]uint32, 0, len(blocks))
+	for lba := range blocks {
+		lbas = append(lbas, lba)
+	}
+	sort.Slice(lbas, func(i, j int) bool { return lbas[i] < lbas[j] })
+
+	maxBlocks := maxCheckpointWriteBytes / int(s.blockSize)
+	if maxBlocks < 1 {
+		maxBlocks = 1
+	}
+	writeOps := 0
+	for first := 0; first < len(lbas); {
+		last := first + 1
+		for last < len(lbas) &&
+			last-first < maxBlocks &&
+			lbas[last] == lbas[last-1]+1 {
+			last++
+		}
+
+		lockIDs := make([]int, 0, last-first)
+		seenLocks := make(map[int]struct{}, last-first)
+		for _, lba := range lbas[first:last] {
+			lockID := int(lba % uint32(len(s.extentLocks)))
+			if _, exists := seenLocks[lockID]; !exists {
+				seenLocks[lockID] = struct{}{}
+				lockIDs = append(lockIDs, lockID)
+			}
+		}
+		sort.Ints(lockIDs)
+		for _, lockID := range lockIDs {
+			s.extentLocks[lockID].Lock()
+		}
+
+		buf := make([]byte, (last-first)*int(s.blockSize))
+		for i, lba := range lbas[first:last] {
+			copy(buf[i*int(s.blockSize):], blocks[lba])
+		}
+		_, err := s.fd.WriteAt(buf, s.extentOffsetFor(extent, lbas[first]))
+		for i := len(lockIDs) - 1; i >= 0; i-- {
+			s.extentLocks[lockIDs[i]].Unlock()
+		}
+		if err != nil {
+			return writeOps, fmt.Errorf("parallelwal: checkpoint extent LBA range [%d,%d]: %w",
+				lbas[first], lbas[last-1], err)
+		}
+		writeOps++
+		first = last
+	}
+	return writeOps, nil
 }
 
 func (s *Store) persistHeader(

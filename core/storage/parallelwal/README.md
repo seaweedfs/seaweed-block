@@ -90,7 +90,8 @@ failure is known, then snapshots `H` and the per-lane published heads. It then:
 
 When a lane exceeds its retained-slot threshold, `Sync` additionally:
 
-1. writes only latest blocks with `LSN <= R` to the shared extent;
+1. writes only latest blocks with `LSN <= R` to the shared extent, coalescing
+   contiguous LBAs into bounded 1 MiB positioned writes;
 2. fsyncs the extent;
 3. advances checkpoint and lane tails in the alternate header;
 4. fsyncs that header;

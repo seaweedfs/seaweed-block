@@ -133,6 +133,24 @@ gate therefore records
 redesign are required before RF3 or mounted promotion gates; the default
 backend remains unchanged.
 
+D4 Linux profiling at exact commit `ac2b4d5` passed the race suites and showed
+why `io_uring` is not the first change:
+
+- three same-run rounds measured the candidate at about `88-101 MiB/s` and
+  legacy `walstore` at `174-211 MiB/s`;
+- an 8000-write candidate run issued `16009 pwrite64` calls versus `11852` for
+  legacy, because pressure checkpointing wrote each stable block separately;
+- candidate CPU samples were dominated by syscall (`32%`), memory copy
+  (`21%`), CRC (`11%`), and lock spinning (`11%`);
+- sustained loops could drive the local NVMe device above `90%` utilization,
+  so the evidence does not support treating the device as idle or adding an
+  asynchronous API without first removing avoidable write amplification.
+
+The first D4 execution change therefore coalesces contiguous checkpoint LBAs
+into bounded 1 MiB positioned writes. This is simpler than a new Linux-only
+backend, preserves the established WAL/header protocol, and gives a direct
+gate metric (`checkpoint_write_ops`) before any `io_uring` decision.
+
 ## Assumptions And Boundaries
 
 - `walstore` remains the default backend until the candidate passes the full

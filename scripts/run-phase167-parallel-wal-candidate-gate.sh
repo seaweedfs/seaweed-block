@@ -126,11 +126,13 @@ for writers in 1 2 4 8; do
   candidate_mibps="$(require_metric BenchmarkPhase167ParallelWALContention "${writers}" MB/s)"
   candidate_p99="$(require_metric BenchmarkPhase167ParallelWALContention "${writers}" p99_ns)"
   active_lanes="$(require_metric BenchmarkPhase167ParallelWALContention "${writers}" active_lanes)"
+  checkpoint_write_ops="$(require_metric BenchmarkPhase167ParallelWALContention "${writers}" checkpoint_write_ops)"
   wal_tail="$(require_metric BenchmarkPhase167ParallelWALContention "${writers}" wal_tail)"
   legacy_mibps="$(require_metric BenchmarkPhase167LegacyWALContentionControl "${writers}" MB/s)"
   write_summary "candidate_writers_${writers}_mibps=${candidate_mibps}"
   write_summary "candidate_writers_${writers}_p99_ns=${candidate_p99}"
   write_summary "candidate_writers_${writers}_active_lanes=${active_lanes}"
+  write_summary "candidate_writers_${writers}_checkpoint_write_ops=${checkpoint_write_ops}"
   write_summary "candidate_writers_${writers}_wal_tail=${wal_tail}"
   write_summary "legacy_writers_${writers}_mibps=${legacy_mibps}"
 done
@@ -141,6 +143,11 @@ write_summary "multiple_lanes_observed=true"
 wal_tail_four="$(require_metric BenchmarkPhase167ParallelWALContention 4 wal_tail)"
 awk -v value="${wal_tail_four}" 'BEGIN { if (value <= 1) exit 1 }'
 write_summary "steady_state_recycle_observed=true"
+checkpoint_ops_four="$(require_metric BenchmarkPhase167ParallelWALContention 4 checkpoint_write_ops)"
+awk -v value="${checkpoint_ops_four}" -v writes="${iterations}" 'BEGIN {
+  if (value <= 0 || value >= writes / 16) exit 1
+}'
+write_summary "checkpoint_write_coalescing_observed=true"
 
 candidate_1="$(require_metric BenchmarkPhase167ParallelWALContention 1 MB/s)"
 candidate_4="$(require_metric BenchmarkPhase167ParallelWALContention 4 MB/s)"
