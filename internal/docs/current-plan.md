@@ -114,6 +114,13 @@ anchor, and same-LBA replay checks. Product selection remains unchanged.
 
 ### D2. One Bounded Group-Commit Owner
 
+Status: complete at `c98072d`. The owner reserves request and payload capacity
+before copying caller bytes, bounds active, queued, and copy-in-flight
+ownership, assigns LSNs only after queue admission, and drains accepted work on
+Close or terminal failure. The exact isolated m02 gate passed all named tests,
+Linux race, the four-package storage regression, and Windows cross-compile.
+There is no batching timer or product selector.
+
 - Add one owner queue for the candidate.
 - Form a segment from already queued requests up to explicit byte/count bounds.
 - Avoid a forced delay when no other request is ready.
