@@ -22,6 +22,7 @@ type NativeIOStats struct {
 	ShortCompletions   uint64
 	QueueFullRejects   uint64
 	InflightHighWater  uint64
+	BufferAllocations  uint64
 	FallbackCount      uint64
 }
 
@@ -52,6 +53,7 @@ type nativeWALSubmitter struct {
 	done      chan struct{}
 	closeOnce sync.Once
 	nextLane  int
+	buffers   [][]byte
 
 	mu    sync.Mutex
 	stats NativeIOStats
@@ -82,6 +84,7 @@ func (s *Store) attachExecution(mode ExecutionMode, queueDepth int) error {
 		barriers: make(chan chan error),
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
+		buffers:  make([][]byte, len(s.lanes)),
 		stats: NativeIOStats{
 			Enabled:    true,
 			QueueDepth: executor.Stats().QueueDepth,
@@ -265,7 +268,16 @@ func (submitter *nativeWALSubmitter) takeLaneBatch(lane *lane) (nativeWALBatch, 
 		}
 	}
 	bytesNeeded := len(requests) * int(submitter.store.recordSize)
-	buffer := make([]byte, bytesNeeded)
+	buffer := submitter.buffers[lane.id]
+	if cap(buffer) < bytesNeeded {
+		buffer = make([]byte, bytesNeeded)
+		submitter.mu.Lock()
+		submitter.stats.BufferAllocations++
+		submitter.mu.Unlock()
+	} else {
+		buffer = buffer[:bytesNeeded]
+	}
+	submitter.buffers[lane.id] = buffer
 	for i, request := range requests {
 		recordBuffer := buffer[i*int(submitter.store.recordSize) : (i+1)*int(submitter.store.recordSize)]
 		if err := encodeRecordInto(recordBuffer, walRecord{

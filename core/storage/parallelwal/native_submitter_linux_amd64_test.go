@@ -140,6 +140,33 @@ func TestIOUringOwnerUsesMultipleRoundsWhenDepthBounded(t *testing.T) {
 	}
 }
 
+func TestNativeReusesLaneEncodeBuffer(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "reuse-buffer.bin")
+	cfg := testConfig()
+	cfg.Execution = ExecutionIOUring
+	store, err := CreateStoreWithConfig(path, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	if _, err := store.Write(0, testBlock(0x65, cfg.BlockSize)); err != nil {
+		t.Fatal(err)
+	}
+	first := &store.native.buffers[0][0]
+	if _, err := store.Write(4, testBlock(0x66, cfg.BlockSize)); err != nil {
+		t.Fatal(err)
+	}
+	second := &store.native.buffers[0][0]
+	if first != second {
+		t.Fatal("same-lane native encode buffer was reallocated")
+	}
+	stats := store.NativeIOStats()
+	if stats.BufferAllocations != 1 {
+		t.Fatalf("buffer allocations=%d want=1", stats.BufferAllocations)
+	}
+}
+
 func TestNativeRingWrapRecyclesAndRecovers(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "native-wrap.bin")
 	cfg := Config{
