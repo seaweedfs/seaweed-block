@@ -173,6 +173,15 @@ failure. The default remains positioned I/O and no product selector was added.
 
 ### D4. Execution Shape And Buffer Ownership
 
+Status: complete at `428a0de`. Independent QA and adversarial review accepted
+the exact Linux gate. The matrix now covers typed per-lane backpressure,
+oversized and full-SQ behavior, partial submission, all short CQEs, eventfd
+failure, forced-GC buffer ownership, bounded multiple rounds, ring wrap,
+fsync failure, deterministic executor-close ordering, and real native
+close/reopen recovery. The only product change rejects oversized submissions
+before raw SQ enqueue so the reusable ring is neither polluted nor needlessly
+poisoned.
+
 - Reuse bounded owned buffers; remove avoidable request-channel and batch-slice
   allocation only after profiles identify them.
 - Keep the Phase 167 bounded checkpoint writes and recycle reads. They may use
@@ -185,6 +194,12 @@ failure. The default remains positioned I/O and no product selector was added.
   shows registration can remove a named remaining cost.
 
 ### D5. Comparable Linux Performance Gate
+
+Status: active at `09061f7`. The exact gate compares native, positioned
+parallel WAL, and legacy WAL in one m02 session with fixed iterations, five
+repetitions, median/range, latency, allocation, native counters, strace, and
+CPU/allocation profiles. No buffer pool, registered-file, or fixed-buffer
+optimization is admitted before this evidence.
 
 - Run the exact Phase 167 candidate and legacy controls in the same isolated
   m02 session with 1/2/4/8 writers.
