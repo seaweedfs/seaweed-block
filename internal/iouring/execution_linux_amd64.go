@@ -49,6 +49,13 @@ func (executor *Executor) SubmitAndWait(operations []Operation) ([]Completion, e
 	if executor.closed {
 		return nil, errors.New("io_uring executor is closed")
 	}
+	if len(operations) > int(executor.stats.QueueDepth) {
+		return nil, fmt.Errorf(
+			"submission size %d exceeds queue depth %d",
+			len(operations),
+			executor.stats.QueueDepth,
+		)
+	}
 
 	raw := make([]ringOperation, len(operations))
 	for i, operation := range operations {
