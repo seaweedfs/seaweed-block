@@ -5,6 +5,7 @@ package iouring
 import (
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 )
 
@@ -77,6 +78,7 @@ func (executor *Executor) SubmitAndWait(operations []Operation) ([]Completion, e
 
 	beforeSyscalls := executor.ring.submitSyscalls
 	cqes, submitted, err := executor.ring.submitAndWait(raw)
+	runtime.KeepAlive(raw)
 	executor.stats.SubmittedOps += uint64(submitted)
 	executor.stats.SubmitSyscalls += uint64(executor.ring.submitSyscalls - beforeSyscalls)
 	executor.stats.CompletionCount += uint64(len(cqes))
@@ -88,6 +90,10 @@ func (executor *Executor) SubmitAndWait(operations []Operation) ([]Completion, e
 			Result:   cqe.Result,
 			Flags:    cqe.Flags,
 		}
+	}
+	if err != nil {
+		executor.closed = true
+		executor.ring.close()
 	}
 	return completions, err
 }

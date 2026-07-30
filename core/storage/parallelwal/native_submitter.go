@@ -232,11 +232,11 @@ func (submitter *nativeWALSubmitter) submitRound(batches []nativeWALBatch) error
 
 	submitter.mu.Lock()
 	submitter.stats.SubmissionRounds++
-	submitter.stats.SQEs += uint64(len(operations))
+	submitter.stats.SQEs += submittedOps
 	submitter.stats.SubmitSyscalls += after.SubmitSyscalls - before.SubmitSyscalls
 	submitter.stats.CompletionCount += uint64(len(completions))
-	if uint64(len(operations)) > submitter.stats.InflightHighWater {
-		submitter.stats.InflightHighWater = uint64(len(operations))
+	if submittedOps > submitter.stats.InflightHighWater {
+		submitter.stats.InflightHighWater = submittedOps
 	}
 	submitter.mu.Unlock()
 
@@ -257,31 +257,38 @@ func (submitter *nativeWALSubmitter) submitRound(batches []nativeWALBatch) error
 		return fmt.Errorf("parallelwal: native WAL completions=%d want=%d", len(byID), len(batches))
 	}
 
+	var completionErr error
+	var shortCompletions uint64
 	for i, batch := range batches {
 		completion := byID[uint64(i+1)]
 		expected := int32(len(batch.buffer))
 		if completion.Result != expected {
-			submitter.mu.Lock()
-			submitter.stats.ShortCompletions++
-			submitter.mu.Unlock()
+			shortCompletions++
 			if completion.Result < 0 {
-				return fmt.Errorf(
+				completionErr = errors.Join(completionErr, fmt.Errorf(
 					"parallelwal: native lane %d append LSN range [%d,%d]: %w",
 					batch.lane.id,
 					batch.requests[0].lsn,
 					batch.requests[len(batch.requests)-1].lsn,
 					syscall.Errno(-completion.Result),
-				)
+				))
+				continue
 			}
-			return fmt.Errorf(
+			completionErr = errors.Join(completionErr, fmt.Errorf(
 				"parallelwal: native lane %d short append LSN range [%d,%d]: got=%d want=%d",
 				batch.lane.id,
 				batch.requests[0].lsn,
 				batch.requests[len(batch.requests)-1].lsn,
 				completion.Result,
 				expected,
-			)
+			))
 		}
+	}
+	if shortCompletions != 0 {
+		submitter.mu.Lock()
+		submitter.stats.ShortCompletions += shortCompletions
+		submitter.mu.Unlock()
+		return completionErr
 	}
 
 	for _, batch := range batches {
