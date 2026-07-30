@@ -620,6 +620,9 @@ func (s *Store) submit(lba uint32, data []byte, sourceLSN uint64) (uint64, error
 	s.nextLSN = lsn + 1
 	s.pending[lsn] = req
 	s.inflightAppends++
+	if s.native != nil {
+		s.native.recordAdmitted(1)
+	}
 	startDrainer := s.queueRequest(l, req)
 	s.mu.Unlock()
 	if startDrainer {
@@ -718,6 +721,9 @@ func (s *Store) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error) {
 	}
 	s.nextLSN += uint64(len(reqs))
 	s.inflightAppends += len(reqs)
+	if s.native != nil {
+		s.native.recordAdmitted(len(reqs))
+	}
 	startDrainers := make([]bool, len(s.lanes))
 	for _, req := range reqs {
 		if s.queueRequest(s.lanes[req.lane], req) {

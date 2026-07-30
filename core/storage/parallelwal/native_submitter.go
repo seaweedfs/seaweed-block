@@ -12,6 +12,7 @@ import (
 type NativeIOStats struct {
 	Enabled           bool
 	QueueDepth        uint32
+	AdmittedRequests  uint64
 	SubmissionRounds  uint64
 	SQEs              uint64
 	SubmitSyscalls    uint64
@@ -96,6 +97,12 @@ func (submitter *nativeWALSubmitter) close() error {
 func (submitter *nativeWALSubmitter) recordQueueFull() {
 	submitter.mu.Lock()
 	submitter.stats.QueueFullRejects++
+	submitter.mu.Unlock()
+}
+
+func (submitter *nativeWALSubmitter) recordAdmitted(count int) {
+	submitter.mu.Lock()
+	submitter.stats.AdmittedRequests += uint64(count)
 	submitter.mu.Unlock()
 }
 

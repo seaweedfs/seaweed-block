@@ -30,14 +30,16 @@ func TestIOUringOwnerBatchesAcrossLanesAndRecoversPortably(t *testing.T) {
 		t.Fatalf("LSNs=%v want=[1 2 3 4]", lsns)
 	}
 	stats := store.NativeIOStats()
-	if !stats.Enabled || stats.SubmissionRounds != 1 || stats.SQEs != 4 ||
+	if !stats.Enabled || stats.AdmittedRequests != 4 ||
+		stats.SubmissionRounds != 1 || stats.SQEs != 4 ||
 		stats.CompletionCount != 4 || stats.InflightHighWater != 4 ||
 		stats.FallbackCount != 0 {
 		t.Fatalf("native stats=%+v", stats)
 	}
 	t.Logf(
-		"native_owner_stats enabled=%t rounds=%d sqes=%d completions=%d inflight_high_water=%d fallback=%d",
+		"native_owner_stats enabled=%t admitted=%d rounds=%d sqes=%d completions=%d inflight_high_water=%d fallback=%d",
 		stats.Enabled,
+		stats.AdmittedRequests,
 		stats.SubmissionRounds,
 		stats.SQEs,
 		stats.CompletionCount,
@@ -91,7 +93,7 @@ func TestIOUringOwnerRotatesAcrossLanesAtDepthOne(t *testing.T) {
 		t.Fatal(err)
 	}
 	stats := store.NativeIOStats()
-	if stats.QueueDepth != 1 || stats.SubmissionRounds != 4 ||
+	if stats.QueueDepth != 1 || stats.AdmittedRequests != 4 || stats.SubmissionRounds != 4 ||
 		stats.SQEs != 4 || stats.CompletionCount != 4 {
 		t.Fatalf("depth-one native stats=%+v", stats)
 	}

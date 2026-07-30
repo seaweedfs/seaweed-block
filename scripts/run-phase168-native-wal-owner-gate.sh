@@ -38,8 +38,9 @@ timeout 60s go test ./core/storage/parallelwal \
   -count=1 -v >"${OWNER_LOG}" 2>&1
 require_line '^--- PASS: TestIOUringOwnerBatchesAcrossLanesAndRecoversPortably ' "${OWNER_LOG}"
 require_line '^--- PASS: TestPositionedExecutionRemainsDefault ' "${OWNER_LOG}"
-require_line 'native_owner_stats enabled=true rounds=1 sqes=4 completions=4 inflight_high_water=4 fallback=0' "${OWNER_LOG}"
+require_line 'native_owner_stats enabled=true admitted=4 rounds=1 sqes=4 completions=4 inflight_high_water=4 fallback=0' "${OWNER_LOG}"
 write_summary "single_owner_cross_lane_round=pass"
+write_summary "admitted_requests=4"
 write_summary "submission_rounds=1"
 write_summary "sqes=4"
 write_summary "completions=4"
