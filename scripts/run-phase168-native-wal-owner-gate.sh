@@ -61,8 +61,8 @@ if command -v strace >/dev/null 2>&1; then
     go test ./core/storage/parallelwal \
       -run '^TestIOUringOwnerBatchesAcrossLanesAndRecoversPortably$' \
       -count=1 >/dev/null 2>&1
-  require_line 'io_uring_setup\\(' "${ARTIFACT_DIR}/native-owner.strace"
-  require_line 'io_uring_enter\\(' "${ARTIFACT_DIR}/native-owner.strace"
+  require_line 'io_uring_setup\(' "${ARTIFACT_DIR}/native-owner.strace"
+  require_line 'io_uring_enter\(' "${ARTIFACT_DIR}/native-owner.strace"
   write_summary "external_native_syscall_validation=strace"
 else
   write_summary "external_native_syscall_validation=unavailable"
