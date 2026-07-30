@@ -12,14 +12,6 @@ import (
 )
 
 func BenchmarkPhase167ParallelWALContention(b *testing.B) {
-	benchmarkParallelWALContention(b, ExecutionPositioned)
-}
-
-func BenchmarkPhase168NativeWALContention(b *testing.B) {
-	benchmarkParallelWALContention(b, ExecutionIOUring)
-}
-
-func benchmarkParallelWALContention(b *testing.B, execution ExecutionMode) {
 	const (
 		blockSize = 4096
 		numBlocks = 16384
@@ -31,16 +23,14 @@ func benchmarkParallelWALContention(b *testing.B, execution ExecutionMode) {
 				BlockSize:     blockSize,
 				LaneCount:     4,
 				StripeBlocks:  1,
-				SlotsPerLane:  65536,
+				SlotsPerLane:  4096,
 				RetainPerLane: 64,
 				QueueDepth:    256,
-				Execution:     execution,
 			})
 			if err != nil {
 				b.Fatal(err)
 			}
 			b.Cleanup(func() { _ = s.Close() })
-			b.ReportAllocs()
 
 			data := make([][]byte, writers)
 			for i := range data {
@@ -112,34 +102,11 @@ func benchmarkParallelWALContention(b *testing.B, execution ExecutionMode) {
 			b.ReportMetric(float64(walWriteOps), "wal_write_ops")
 			b.ReportMetric(float64(walTail), "wal_tail")
 			b.ReportMetric(float64(b.N)/wallDuration.Seconds(), "write_ops/s")
-			b.ReportMetric(1, "sync_calls")
-			b.ReportMetric(float64(b.N), "writes_per_sync")
-			if execution == ExecutionIOUring {
-				stats := s.NativeIOStats()
-				b.ReportMetric(float64(stats.AdmittedRequests), "native_admitted")
-				b.ReportMetric(float64(stats.SubmissionRounds), "native_rounds")
-				b.ReportMetric(float64(stats.SQEs), "native_sqes")
-				b.ReportMetric(float64(stats.SubmitSyscalls), "native_submit_syscalls")
-				b.ReportMetric(float64(stats.CompletionCount), "native_cqes")
-				b.ReportMetric(float64(stats.QueueFullRejects), "native_queue_full")
-				b.ReportMetric(float64(stats.ShortCompletions), "native_short_cqes")
-				b.ReportMetric(float64(stats.InflightHighWater), "native_inflight_high_water")
-				b.ReportMetric(float64(stats.BufferAllocations), "native_buffer_allocations")
-				b.ReportMetric(float64(stats.FallbackCount), "native_fallback")
-			}
 		})
 	}
 }
 
 func BenchmarkPhase167ParallelWALBatchContention(b *testing.B) {
-	benchmarkParallelWALBatchContention(b, ExecutionPositioned)
-}
-
-func BenchmarkPhase168NativeWALBatchContention(b *testing.B) {
-	benchmarkParallelWALBatchContention(b, ExecutionIOUring)
-}
-
-func benchmarkParallelWALBatchContention(b *testing.B, execution ExecutionMode) {
 	const (
 		blockSize   = 4096
 		numBlocks   = 16384
@@ -155,13 +122,11 @@ func benchmarkParallelWALBatchContention(b *testing.B, execution ExecutionMode) 
 				SlotsPerLane:  32768,
 				RetainPerLane: 64,
 				QueueDepth:    256,
-				Execution:     execution,
 			})
 			if err != nil {
 				b.Fatal(err)
 			}
 			b.Cleanup(func() { _ = s.Close() })
-			b.ReportAllocs()
 
 			data := make([][][]byte, writers)
 			for worker := range data {
@@ -218,21 +183,6 @@ func benchmarkParallelWALBatchContention(b *testing.B, execution ExecutionMode) 
 			b.ReportMetric(float64(recycleReadOps), "recycle_read_ops")
 			b.ReportMetric(float64(walWriteOps), "wal_write_ops")
 			b.ReportMetric(float64(b.N*batchBlocks)/wallDuration.Seconds(), "block_ops/s")
-			b.ReportMetric(1, "sync_calls")
-			b.ReportMetric(float64(b.N), "batches_per_sync")
-			if execution == ExecutionIOUring {
-				stats := s.NativeIOStats()
-				b.ReportMetric(float64(stats.AdmittedRequests), "native_admitted")
-				b.ReportMetric(float64(stats.SubmissionRounds), "native_rounds")
-				b.ReportMetric(float64(stats.SQEs), "native_sqes")
-				b.ReportMetric(float64(stats.SubmitSyscalls), "native_submit_syscalls")
-				b.ReportMetric(float64(stats.CompletionCount), "native_cqes")
-				b.ReportMetric(float64(stats.QueueFullRejects), "native_queue_full")
-				b.ReportMetric(float64(stats.ShortCompletions), "native_short_cqes")
-				b.ReportMetric(float64(stats.InflightHighWater), "native_inflight_high_water")
-				b.ReportMetric(float64(stats.BufferAllocations), "native_buffer_allocations")
-				b.ReportMetric(float64(stats.FallbackCount), "native_fallback")
-			}
 		})
 	}
 }
