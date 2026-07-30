@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${1:-$(pwd)}"
+ARTIFACT_DIR="${SW_BLOCK_ARTIFACT_DIR:-${ROOT}/results/phase169-segment-pre-admission-performance-gate}"
+SUMMARY="${ARTIFACT_DIR}/phase169-segment-pre-admission-performance-summary.txt"
+BENCHTIME="${SW_BLOCK_PHASE169_BENCHTIME:-1s}"
+REPETITIONS="${SW_BLOCK_PHASE169_REPETITIONS:-5}"
+
+mkdir -p "${ARTIFACT_DIR}"
+: >"${SUMMARY}"
+
+write_summary() {
+  echo "$*" | tee -a "${SUMMARY}" >/dev/null
+}
+
+benchmark_for_mode() {
+  case "$1" in
+    segmented) echo "BenchmarkPhase169SegmentedWALContention" ;;
+    positioned) echo "BenchmarkPhase167ParallelWALContention" ;;
+    legacy) echo "BenchmarkPhase167LegacyWALContentionControl" ;;
+    *) return 1 ;;
+  esac
+}
+
+metric_from_log() {
+  local file="$1"
+  local benchmark="$2"
+  local writers="$3"
+  local metric="$4"
+  awk -v prefix="${benchmark}/writers_${writers}-" -v metric="${metric}" '
+    index($1, prefix) == 1 {
+      for (i = 2; i < NF; i++) {
+        if ($(i + 1) == metric) {
+          print $i
+          exit
+        }
+      }
+    }
+  ' "${file}"
+}
+
+median_file() {
+  sort -n "$1" | awk 'NR == 3 { print; exit }'
+}
+
+ratio() {
+  awk -v numerator="$1" -v denominator="$2" 'BEGIN {
+    if (numerator <= 0 || denominator <= 0) exit 1
+    printf "%.3f", numerator / denominator
+  }'
+}
+
+at_least() {
+  awk -v value="$1" -v minimum="$2" 'BEGIN {
+    print (value >= minimum) ? "true" : "false"
+  }'
+}
+
+if [[ "${REPETITIONS}" != "5" ]]; then
+  echo "SW_BLOCK_PHASE169_REPETITIONS must be exactly 5" >&2
+  exit 1
+fi
+if [[ ! "${BENCHTIME}" =~ ^[1-9][0-9]*(ms|s)$ ]]; then
+  echo "SW_BLOCK_PHASE169_BENCHTIME must be a positive time duration" >&2
+  exit 1
+fi
+
+write_summary "phase169_segment_pre_admission_performance_status=running"
+write_summary "benchmark_time=${BENCHTIME}"
+write_summary "repetitions=${REPETITIONS}"
+write_summary "writers=1,4"
+write_summary "sync_cadence=one_final_sync_per_sample"
+
+cd "${ROOT}"
+for mode in segmented positioned legacy; do
+  : >"${ARTIFACT_DIR}/${mode}-writers-1-mibps.values"
+  : >"${ARTIFACT_DIR}/${mode}-writers-4-mibps.values"
+done
+: >"${ARTIFACT_DIR}/segmented-writers-4-entries-per-segment.values"
+
+for repetition in 1 2 3 4 5; do
+  case $((repetition % 3)) in
+    1) order=(segmented positioned legacy) ;;
+    2) order=(positioned legacy segmented) ;;
+    0) order=(legacy segmented positioned) ;;
+  esac
+  write_summary "repetition_${repetition}_order=${order[*]}"
+  for mode in "${order[@]}"; do
+    benchmark="$(benchmark_for_mode "${mode}")"
+    log="${ARTIFACT_DIR}/${repetition}-${mode}.log"
+    go test ./core/storage/parallelwal -run '^$' \
+      -bench "^${benchmark}/writers_(1|4)$" \
+      -benchtime="${BENCHTIME}" -count=1 >"${log}" 2>&1
+    for writers in 1 4; do
+      mibps="$(metric_from_log "${log}" "${benchmark}" "${writers}" "MB/s")"
+      if [[ -z "${mibps}" ]]; then
+        echo "missing ${mode} writers=${writers} MB/s in ${log}" >&2
+        exit 1
+      fi
+      echo "${mibps}" >>"${ARTIFACT_DIR}/${mode}-writers-${writers}-mibps.values"
+    done
+    if [[ "${mode}" == "segmented" ]]; then
+      grouping="$(metric_from_log "${log}" "${benchmark}" 4 "entries/segment")"
+      sync_calls_1="$(metric_from_log "${log}" "${benchmark}" 1 "sync_calls")"
+      sync_calls_4="$(metric_from_log "${log}" "${benchmark}" 4 "sync_calls")"
+      if [[ -z "${grouping}" || "${sync_calls_1}" != "1.000" || "${sync_calls_4}" != "1.000" ]]; then
+        echo "invalid segmented grouping/sync metrics in ${log}" >&2
+        exit 1
+      fi
+      echo "${grouping}" >>"${ARTIFACT_DIR}/segmented-writers-4-entries-per-segment.values"
+    fi
+  done
+done
+
+segmented_1="$(median_file "${ARTIFACT_DIR}/segmented-writers-1-mibps.values")"
+segmented_4="$(median_file "${ARTIFACT_DIR}/segmented-writers-4-mibps.values")"
+positioned_4="$(median_file "${ARTIFACT_DIR}/positioned-writers-4-mibps.values")"
+legacy_1="$(median_file "${ARTIFACT_DIR}/legacy-writers-1-mibps.values")"
+legacy_4="$(median_file "${ARTIFACT_DIR}/legacy-writers-4-mibps.values")"
+grouping_4="$(median_file "${ARTIFACT_DIR}/segmented-writers-4-entries-per-segment.values")"
+
+single_ratio="$(ratio "${segmented_1}" "${legacy_1}")"
+scaling_ratio="$(ratio "${segmented_4}" "${segmented_1}")"
+positioned_ratio="$(ratio "${segmented_4}" "${positioned_4}")"
+single_pass="$(at_least "${single_ratio}" "0.900")"
+scaling_pass="$(at_least "${scaling_ratio}" "1.500")"
+positioned_pass="$(at_least "${positioned_ratio}" "1.000")"
+grouping_pass="$(at_least "${grouping_4}" "1.001")"
+
+write_summary "segmented_writers_1_mibps_median=${segmented_1}"
+write_summary "segmented_writers_4_mibps_median=${segmented_4}"
+write_summary "positioned_writers_4_mibps_median=${positioned_4}"
+write_summary "legacy_writers_1_mibps_median=${legacy_1}"
+write_summary "legacy_writers_4_mibps_median=${legacy_4}"
+write_summary "segmented_writers_4_entries_per_segment_median=${grouping_4}"
+write_summary "segmented_single_vs_legacy_ratio=${single_ratio}"
+write_summary "segmented_four_writer_scaling_ratio=${scaling_ratio}"
+write_summary "segmented_four_vs_positioned_ratio=${positioned_ratio}"
+write_summary "single_writer_threshold_pass=${single_pass}"
+write_summary "four_writer_scaling_threshold_pass=${scaling_pass}"
+write_summary "positioned_threshold_pass=${positioned_pass}"
+write_summary "grouping_threshold_pass=${grouping_pass}"
+
+if [[ "${single_pass}" == "true" && "${scaling_pass}" == "true" &&
+      "${positioned_pass}" == "true" && "${grouping_pass}" == "true" ]]; then
+  write_summary "d4_full_engine_admitted=true"
+  write_summary "next_recommendation=implement_checkpoint_rebuild_equivalence"
+else
+  write_summary "d4_full_engine_admitted=false"
+  write_summary "next_recommendation=stop_before_full_engine_integration"
+fi
+write_summary "phase169_segment_pre_admission_performance_status=ok"

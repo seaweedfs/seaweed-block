@@ -131,6 +131,14 @@ There is no batching timer or product selector.
 
 ### D3. Publication, Sync, And Terminal Failure
 
+Status: complete at `c8ee7b1`. Sync installs an owner-held publication barrier
+at the highest LSN admitted before the call, persists data before the alternate
+CRC header, and advances the durable snapshot only after the final fsync.
+Terminal data/header failures are recorded before the barrier is released, so
+future segment completion cannot publish through a failed durability round.
+The exact isolated m02 gate passed all failure injections, 20 race runs, the
+four-package storage regression, and Windows cross-compile.
+
 - Feed segment completions into the existing contiguous global-LSN ledger.
 - Implement target-LSN Sync and dual-header durability without per-request
   fsync.
@@ -140,6 +148,12 @@ There is no batching timer or product selector.
 
 ### D4. Checkpoint, Retention, Rebuild, And Replication Equivalence
 
+- Before duplicating or refactoring the accepted checkpoint/rebuild state
+  machine, run a same-session D4-0 ordinary-write admission gate against the
+  D3 durable coordinator, Phase 167 positioned WAL, and legacy WAL.
+- Stop before full D4 implementation if D4-0 cannot keep one-writer throughput
+  within 90% of legacy, reach 1.5x four-writer scaling, match positioned
+  four-writer throughput, and prove more than one entry per segment.
 - Reuse the accepted COW extent/checkpoint design where possible.
 - Define segment-level retention and wrap/reuse fences.
 - Prove catch-up scan and source-frontier behavior across segment boundaries.
