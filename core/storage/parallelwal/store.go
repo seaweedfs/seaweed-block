@@ -29,6 +29,13 @@ var (
 	ErrWALFull      = errors.New("parallelwal: lane WAL full")
 )
 
+type ExecutionMode string
+
+const (
+	ExecutionPositioned ExecutionMode = "positioned"
+	ExecutionIOUring    ExecutionMode = "io_uring"
+)
+
 type Config struct {
 	NumBlocks     uint32
 	BlockSize     int
@@ -37,6 +44,7 @@ type Config struct {
 	SlotsPerLane  uint64
 	RetainPerLane uint64
 	QueueDepth    int
+	Execution     ExecutionMode
 }
 
 type blockVersion struct {
@@ -118,6 +126,7 @@ type Store struct {
 
 	lanes       []*lane
 	extentLocks [256]sync.RWMutex
+	native      *nativeWALSubmitter
 }
 
 func CreateStore(path string, numBlocks uint32, blockSize int) (*Store, error) {
@@ -162,10 +171,20 @@ func CreateStoreWithConfig(path string, cfg Config) (*Store, error) {
 		_ = f.Close()
 		return nil, fmt.Errorf("parallelwal: fsync create: %w", err)
 	}
-	return newStore(path, f, h, 0, cfg.QueueDepth, true), nil
+	store := newStore(path, f, h, 0, cfg.QueueDepth, true)
+	if err := store.attachExecution(cfg.Execution, cfg.QueueDepth); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return nil, err
+	}
+	return store, nil
 }
 
 func OpenStore(path string) (*Store, error) {
+	return OpenStoreWithExecution(path, ExecutionPositioned)
+}
+
+func OpenStoreWithExecution(path string, execution ExecutionMode) (*Store, error) {
 	f, err := os.OpenFile(path, os.O_RDWR, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("parallelwal: open %s: %w", path, err)
@@ -189,7 +208,12 @@ func OpenStore(path string) (*Store, error) {
 		_ = f.Close()
 		return nil, fmt.Errorf("%w: truncated file size=%d required=%d", errBadGeometry, st.Size(), required)
 	}
-	return newStore(path, f, h, slot, defaultQueueDepth, false), nil
+	store := newStore(path, f, h, slot, defaultQueueDepth, false)
+	if err := store.attachExecution(execution, defaultQueueDepth); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return store, nil
 }
 
 func normalizeConfig(cfg Config) Config {
@@ -214,6 +238,9 @@ func normalizeConfig(cfg Config) Config {
 	if cfg.QueueDepth == 0 {
 		cfg.QueueDepth = defaultQueueDepth
 	}
+	if cfg.Execution == "" {
+		cfg.Execution = ExecutionPositioned
+	}
 	return cfg
 }
 
@@ -231,6 +258,9 @@ func headerForConfig(cfg Config) (fileHeader, error) {
 		cfg.QueueDepth <= 0 {
 		return fileHeader{}, fmt.Errorf("%w: lanes=%d stripes=%d slots=%d retain=%d queue=%d",
 			errBadGeometry, cfg.LaneCount, cfg.StripeBlocks, cfg.SlotsPerLane, cfg.RetainPerLane, cfg.QueueDepth)
+	}
+	if cfg.Execution != "" && cfg.Execution != ExecutionPositioned && cfg.Execution != ExecutionIOUring {
+		return fileHeader{}, fmt.Errorf("parallelwal: execution mode %q invalid", cfg.Execution)
 	}
 	h := fileHeader{
 		Generation:    1,
@@ -570,6 +600,9 @@ func (s *Store) submit(lba uint32, data []byte, sourceLSN uint64) (uint64, error
 	completedSeq := l.completedSeq
 	l.mu.Unlock()
 	if l.nextSeq-completedSeq >= l.queueDepth {
+		if s.native != nil {
+			s.native.recordQueueFull()
+		}
 		s.mu.Unlock()
 		return 0, ErrQueueFull
 	}
@@ -590,7 +623,11 @@ func (s *Store) submit(lba uint32, data []byte, sourceLSN uint64) (uint64, error
 	startDrainer := s.queueRequest(l, req)
 	s.mu.Unlock()
 	if startDrainer {
-		s.drainLane(l, true)
+		if s.native != nil {
+			s.native.notify()
+		} else {
+			s.drainLane(l, true)
+		}
 	}
 	if err := <-req.result; err != nil {
 		return 0, err
@@ -650,6 +687,9 @@ func (s *Store) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error) {
 		completedSeq := l.completedSeq
 		l.mu.Unlock()
 		if l.nextSeq+uint64(count)-completedSeq > l.queueDepth {
+			if s.native != nil {
+				s.native.recordQueueFull()
+			}
 			s.mu.Unlock()
 			return nil, ErrQueueFull
 		}
@@ -686,9 +726,18 @@ func (s *Store) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error) {
 	}
 	s.mu.Unlock()
 
-	for laneID, start := range startDrainers {
-		if start {
-			go s.drainLane(s.lanes[laneID], false)
+	if s.native != nil {
+		for _, start := range startDrainers {
+			if start {
+				s.native.notify()
+				break
+			}
+		}
+	} else {
+		for laneID, start := range startDrainers {
+			if start {
+				go s.drainLane(s.lanes[laneID], false)
+			}
 		}
 	}
 	for i, req := range reqs {
@@ -1404,13 +1453,17 @@ func (s *Store) Close() error {
 	s.mu.Unlock()
 
 	_, syncErr := s.Sync()
+	var nativeErr error
+	if s.native != nil {
+		nativeErr = s.native.close()
+	}
 	s.mu.Lock()
 	s.closed = true
 	s.closing = false
 	s.cond.Broadcast()
 	s.mu.Unlock()
 	closeErr := s.fd.Close()
-	return errors.Join(syncErr, closeErr)
+	return errors.Join(syncErr, nativeErr, closeErr)
 }
 
 func (s *Store) extentOffsetFor(extent int, lba uint32) int64 {
