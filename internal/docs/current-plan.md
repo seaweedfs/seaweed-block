@@ -134,6 +134,11 @@ added.
 
 ### D2. One Bounded Submission Owner
 
+Status: complete at `240bff8`. Independent QA passed and adversarial review
+accepted the corrected single-owner path. The exact Linux gate proves one
+four-lane submission round with four accepted SQEs, four CQEs, zero fallback,
+portable reopen/recovery, race coverage, and Windows compile isolation.
+
 - Introduce the minimum internal execution seam needed by `parallelwal`; do
   not generalize all storage backends.
 - Run one long-lived owner for the native ring. Callers enqueue immutable
