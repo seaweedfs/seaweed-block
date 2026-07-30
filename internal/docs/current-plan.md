@@ -98,6 +98,12 @@ Block's own LSN, recovery, replication, and frontend contracts.
 
 ### D1. Segment Format And Executable Recovery Proof
 
+Status: complete at `5a14936`. Adversarial review accepted the trusted recovery
+manifest and bounded streaming scanner. Independent m02 QA passed the exact
+gate, Linux race, Windows cross-compile, storage regression, frozen-vector CRC
+verification, committed-corruption fail-closed, uncommitted-tail, logical
+anchor, and same-LBA replay checks. Product selection remains unchanged.
+
 - Define the minimum versioned segment header and entry table.
 - Bound segment bytes and entry count; reject integer overflow before
   allocation or I/O.
