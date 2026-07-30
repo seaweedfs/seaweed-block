@@ -1087,14 +1087,15 @@ control-plane path is mature.
    protocol=nvme  -> nvme connect path
    ```
 
-3. `walstore` remains the MVP backend while the parallel engine is developed.
+3. `walstore` remains the default backend while native asynchronous execution
+   is evaluated.
 
-   The Phase 167 candidate stays explicit and opt-in until it preserves global
-   LSN/frontier semantics, crash recovery, catch-up/rebuild, RF3 quorum
-   behavior, mounted workload correctness, and cleanup. `io_uring`, direct I/O,
-   and device atomic-write support are adopted only when measurements show they
-   improve the already-parallel path; they are not substitutes for removing
-   software serialization.
+   Phase 167's `parallel-walstore` preserves its tested global LSN/frontier,
+   crash recovery, and catch-up/rebuild semantics, but remains explicit and
+   opt-in because its 4 KiB throughput/scaling gate failed. Phase 168 tests a
+   bounded Linux `io_uring` submission/completion owner against the same
+   controls. Direct I/O, fixed buffers, FUA, and device atomic-write support
+   remain evidence-gated follow-ups rather than assumed performance features.
 
 ## Contributor-Friendly Work Items
 

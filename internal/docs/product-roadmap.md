@@ -582,11 +582,14 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
 - Current hold: Phase 166 has implemented NVMe/RDMA reconnect ownership, but
   its RF2 live close gate needs a third RoCE-capable initiator. Do not convert
   that infrastructure gap into a transparent-HA claim.
-- Active next: Phase 167 Parallel Write Engine. Remove whole-volume replication
-  waits, add opt-in parallel WAL ownership, preserve global LSN/frontier and
-  recovery contracts, and prove RF1/RF3 behavior through the mounted NVMe path.
-  `io_uring` and device atomic writes are evidence-gated follow-ups inside this
-  milestone, not assumptions or standalone feature claims.
+- Closed foundation: Phase 167 removed whole-volume replication waits and
+  added opt-in parallel WAL ownership while preserving global LSN/frontier and
+  recovery contracts. Its batch path improved, but its 4 KiB path did not earn
+  promotion.
+- Active next: Phase 168 tests Linux native asynchronous submission now that
+  checkpoint/recycle amplification is removed. `io_uring` remains an
+  evidence-gated candidate with positioned-I/O fallback; direct I/O, fixed
+  buffers, FUA, and device atomic writes remain later decisions.
 - Protocol hardening now has a dedicated working area under
   `internal/docs/protocol/`. New protocol semantics should update the control
   model, invariant ledger, and anti-pattern checklist there before release
@@ -1206,10 +1209,16 @@ Approximate engineering effort if scope remains tight:
   but the honest RF2 RDMA live close gate remains infrastructure-blocked and is
   retained under
   `internal/docs/ref/phase166-nvme-rdma-kubernetes-multipath-reconnect-hold.md`.
-- Phase 167 Parallel Write Engine is the active development pointer. Its full
-  milestone contract is `internal/docs/current-plan.md`; it keeps the existing
-  backend default until ordered async replication, parallel WAL ownership,
-  RF3/recovery correctness, mounted scaling, and zero-residue gates all pass.
+- Phase 167 Parallel Write Engine is closed as an opt-in research result.
+  Ordered replication, parallel WAL ownership, COW recovery, and bounded WAL
+  I/O passed correctness gates, and batched writes improved. The 4 KiB path
+  failed single-writer and scaling thresholds, so `walstore` remains default
+  and no RF3/mounted performance claim was made. The finished plan is
+  `internal/docs/finished-plans/phase167_finishedplan_parallel_write_engine.md`.
+- Phase 168 Linux Native Async WAL Execution is active. It tests one bounded
+  `io_uring` submission/completion owner against the exact Phase 167 controls,
+  with positioned-I/O fallback and explicit stop rules. The contract is
+  `internal/docs/current-plan.md`.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.
