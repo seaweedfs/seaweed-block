@@ -153,6 +153,13 @@ portable reopen/recovery, race coverage, and Windows compile isolation.
 
 ### D3. Completion And Durability State Machine
 
+Status: complete at `85d3336`. Independent QA passed the exact Linux gate and
+20 race repetitions; adversarial review accepted the owner/barrier and
+eventfd-error terminal-drain paths. Native Sync now fences the published target
+LSN, submits fsync through the same owner, prioritizes barriers between bounded
+write rounds, and terminal-faults the store on durability or completion-wait
+failure. The default remains positioned I/O and no product selector was added.
+
 - Convert CQEs into the existing `writeRequest` completion ledger without
   advancing over lower-LSN holes.
 - Treat partial/negative completions as terminal substrate I/O failures.
