@@ -1087,15 +1087,20 @@ control-plane path is mature.
    protocol=nvme  -> nvme connect path
    ```
 
-3. `walstore` remains the default backend while native asynchronous execution
-   is evaluated.
+3. `walstore` remains the default backend while segmented group commit is
+   evaluated.
 
    Phase 167's `parallel-walstore` preserves its tested global LSN/frontier,
    crash recovery, and catch-up/rebuild semantics, but remains explicit and
-   opt-in because its 4 KiB throughput/scaling gate failed. Phase 168 tests a
-   bounded Linux `io_uring` submission/completion owner against the same
-   controls. Direct I/O, fixed buffers, FUA, and device atomic-write support
-   remain evidence-gated follow-ups rather than assumed performance features.
+   opt-in because its 4 KiB throughput/scaling gate failed. Phase 168 then
+   tested a bounded Linux `io_uring` submission/completion owner against the
+   same controls. Correctness passed, but comparable performance did not:
+   native execution reached only 0.96x the legacy single-writer path and 0.96x
+   four-writer scaling, so the candidate was removed rather than promoted.
+   Phase 169 changes the persistence unit instead: multiple logical writes are
+   encoded into one checksummed WAL segment and committed with positioned I/O.
+   Direct I/O, fixed buffers, FUA, and device atomic-write support remain
+   evidence-gated follow-ups rather than assumed performance features.
 
 ## Contributor-Friendly Work Items
 

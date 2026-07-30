@@ -586,10 +586,15 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   added opt-in parallel WAL ownership while preserving global LSN/frontier and
   recovery contracts. Its batch path improved, but its 4 KiB path did not earn
   promotion.
-- Active next: Phase 168 tests Linux native asynchronous submission now that
-  checkpoint/recycle amplification is removed. `io_uring` remains an
-  evidence-gated candidate with positioned-I/O fallback; direct I/O, fixed
-  buffers, FUA, and device atomic writes remain later decisions.
+- Closed experiment: Phase 168's Linux native asynchronous WAL candidate
+  passed correctness but failed the comparable 4 KiB throughput and scaling
+  thresholds. The implementation was removed; `walstore` remains the default
+  and `parallel-walstore` remains opt-in.
+- Active next: Phase 169 tests segmented group commit with positioned I/O.
+  This changes the persistence unit by committing multiple logical writes in
+  one checksummed segment instead of substituting one syscall API for another.
+  Direct I/O, fixed buffers, FUA, and device atomic writes remain later
+  evidence-gated decisions.
 - Protocol hardening now has a dedicated working area under
   `internal/docs/protocol/`. New protocol semantics should update the control
   model, invariant ledger, and anti-pattern checklist there before release
@@ -1215,9 +1220,15 @@ Approximate engineering effort if scope remains tight:
   failed single-writer and scaling thresholds, so `walstore` remains default
   and no RF3/mounted performance claim was made. The finished plan is
   `internal/docs/finished-plans/phase167_finishedplan_parallel_write_engine.md`.
-- Phase 168 Linux Native Async WAL Execution is active. It tests one bounded
-  `io_uring` submission/completion owner against the exact Phase 167 controls,
-  with positioned-I/O fallback and explicit stop rules. The contract is
+- Phase 168 Linux Native Async WAL Execution is closed as a rejected
+  performance candidate. Its bounded owner, correctness, recovery, failure,
+  and benchmark gates passed, but the final gate measured only 0.96x legacy
+  single-writer throughput and 0.96x four-writer scaling. The candidate code
+  was removed. The finished plan is
+  `internal/docs/finished-plans/phase168_finishedplan_linux_native_async_wal.md`.
+- Phase 169 Segmented WAL Group-Commit Engine is active. It keeps positioned
+  I/O initially and changes the persistence unit to one checksummed segment
+  containing multiple ordered logical writes. The contract is
   `internal/docs/current-plan.md`.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and

@@ -1,282 +1,193 @@
-# Current Plan: Phase 168 Linux Native Async WAL Execution Milestone
+# Current Plan: Phase 169 Segmented WAL Group-Commit Engine
 
 Status: active design and implementation milestone.
 
-Phase 167 removed replication waits under the whole-volume lock, built an
-opt-in parallel WAL format, and passed its ordering, corruption, recovery, and
-rebuild gates. It also removed two large avoidable syscall amplifications:
+Phase 167 proved that lane ownership, COW checkpointing, recovery, and bounded
+WAL I/O can be made correct, but its ordinary 4 KiB path did not scale. Phase
+168 then proved that replacing positioned writes with buffered-file
+`io_uring` does not fix the underlying shape: a synchronous single request
+still becomes one submission/completion round, and the extra completion path
+can cost more syscalls than `pwrite64`.
 
-- stable checkpoint writeback changed from one `pwrite64` per LBA to bounded
-  contiguous writes;
-- recycle verification changed from one `pread64` per record to bounded
-  contiguous reads while retaining per-record decode and CRC validation.
-
-The exact Phase 167 gate still rejected promotion:
-
-| Shape | `parallel-walstore` | legacy `walstore` |
-|---|---:|---:|
-| 4 KiB, 1 writer | 49.79 MiB/s | 107.85 MiB/s |
-| 4 KiB, 4 writers | 39.25 MiB/s | 104.08 MiB/s |
-| 16-block batch, 4 writers | 116.95 MiB/s | 80.00 MiB/s |
-
-The batch path is useful, but ordinary writes still issue one positioned write
-per request when each writer maps to a different lane. Four-writer scaling was
-`0.788x`, so the backend remains opt-in and the default remains `walstore`.
-
-Phase 168 is the next evidence-gated execution experiment: submit independent
-lane writes asynchronously on Linux so multiple non-contiguous WAL records can
-share submission/completion machinery without changing the Phase 167 disk
-format or global LSN contract.
+Phase 169 changes the unit of persistence rather than the syscall API. It tests
+whether multiple independently admitted logical writes can become one bounded
+contiguous WAL segment and one commit round while retaining exact per-LSN
+completion, Sync, corruption, recovery, and rebuild semantics.
 
 ## Goal
 
-Build one Linux-native asynchronous execution candidate that:
+Build one opt-in segmented group-commit candidate that:
 
-- keeps Phase 167's deterministic lane ownership and contiguous global LSN
-  publication;
-- aggregates non-contiguous lane writes into bounded asynchronous submission
-  rounds;
-- models write, durability barrier, completion, and terminal failure
-  explicitly;
-- retains the existing positioned-I/O backend as the portable and runtime
-  fallback;
-- proves or disproves a concrete 4 KiB throughput/scaling hypothesis before
-  any default switch or mounted RF3 claim.
+- preserves the global monotonically increasing LSN and contiguous publication
+  frontier;
+- admits concurrent logical writes into a bounded owner queue;
+- encodes multiple records into one checksummed contiguous segment;
+- performs one positioned WAL write per segment, without io_uring, direct I/O,
+  or registered buffers;
+- returns each write only after its own segment write succeeds and never
+  publishes through a failed lower LSN;
+- gives Sync an explicit target-LSN fence and durable segment/header barrier;
+- proves whether fewer persistence rounds improve four-writer scaling without
+  penalizing the one-writer path.
 
-This is one large milestone. Capability probing, queue ownership, submission,
-barriers, metrics, and live gates are deliverables inside Phase 168, not
-separate phases.
+This is one large engine milestone. Segment format, owner, failure model,
+recovery, benchmark decision, and mounted admission are deliverables inside
+Phase 169, not separate phases.
 
-## Industry And Vitastor Lessons
+## Why This Follows Phase 168
 
-The local Vitastor review at `C:\work\vitastor-review` shows mechanisms worth
-testing:
+Phase 168's final evidence was:
 
-- `src/util/ringloop.*` owns one `io_uring`, reserves SQEs, submits a batch, and
-  drives completion callbacks from CQEs;
-- `src/blockstore/blockstore_impl.*` keeps a submit queue and a bounded
-  `max_write_iodepth` instead of letting callers issue unbounded disk work;
-- blockstore write/sync code models data write, journal write, metadata, fsync,
-  and stable completion as explicit stages;
-- journal sector buffers combine updates before submission instead of paying
-  one syscall for every logical operation.
+```text
+native single/legacy        = 0.960x
+native four-writer scaling  = 0.963x
+native four/positioned      = 0.942x
+native batch/positioned     = 0.961x
+native selected syscalls    = 1553
+positioned selected syscalls= 1052
+```
 
-Seaweed Block should borrow those execution mechanisms, not Vitastor's whole
-architecture. This phase does not copy its etcd placement, PG peering,
-object-version model, raw-device layout, immediate-commit assumptions, or
-licensing-sensitive source.
+The result rejects a syscall-substitution theory. It does not reject
+asynchronous admission or batching. Vitastor's useful lesson is not simply
+"use io_uring"; it is to keep explicit operation stages, bounded queues, and
+journal-sector/segment aggregation so several logical operations share
+persistence work. Phase 169 borrows that mechanism while retaining Seaweed
+Block's own LSN, recovery, replication, and frontend contracts.
 
 ## Assumptions And Boundaries
 
 - `walstore` remains the default.
-- `parallel-walstore` remains opt-in. A Linux-native mode must be separately
-  explicit until it passes all fallback, recovery, and mounted gates.
-- The on-disk Phase 167 header, WAL record, lane mapping, COW extents, and
-  recovery algorithm do not change merely to add asynchronous submission.
-- Global LSN allocation and publication remain contiguous. CQE completion
-  order may differ from LSN order; user-visible success may not cross a hole.
-- The first prototype uses ordinary file semantics. `O_DIRECT`, registered
-  files, fixed buffers, SQPOLL, FUA, and device atomic-write support require
-  separate evidence and are not bundled into the initial comparison.
-- Linux capability or policy refusal must be explicit and must fall back only
-  when the user selected an automatic mode. An explicitly requested native
-  mode fails clearly rather than silently changing paths.
-- No new third-party dependency is accepted until a small executable spike
-  proves kernel support, shutdown safety, and a maintainable license/build
-  boundary.
-- Existing iSCSI, NVMe/TCP, NVMe/RDMA, CSI, recovery, and operation-layer
-  contracts remain unchanged.
+- `parallel-walstore` remains opt-in. The segmented format is a separate
+  internal candidate and cannot silently open an existing Phase 167 file.
+- The initial implementation uses positioned buffered-file I/O. No io_uring,
+  `O_DIRECT`, FUA, SQPOLL, registered files, fixed buffers, or raw-device claim
+  is part of this milestone.
+- No artificial batching delay is allowed for an isolated one-writer request.
+  Grouping may use already queued work or a measured bounded handoff, never an
+  unbounded timer.
+- A segment may contain multiple LSNs and LBAs, but user-visible completion
+  remains per request.
+- Sync cadence and durability semantics cannot be weakened to pass a
+  benchmark.
+- Existing iSCSI, NVMe/TCP, NVMe/RDMA, CSI, operation-layer, and replication
+  APIs remain unchanged until local engine admission passes.
 
 ## Required Invariants
 
-1. Every admitted request owns immutable bytes until its completion is
-   consumed.
-2. One lane sequence maps to exactly one WAL slot and exactly one terminal
-   completion.
-3. A short write, negative CQE, canceled request, or missing completion
-   terminal-faults the store; it never becomes a successful higher LSN.
-4. `H` advances only through the contiguous completed global prefix.
-5. `Sync` fences the highest request admitted before the call and completes
-   only after every request through that fence and the required fsync/barrier
-   complete successfully.
-6. A later submission round may not reuse a ring slot until the existing
-   checkpoint, dual-header seal, and reuse fence permit it.
-7. Queue saturation returns typed backpressure. It may not allocate
-   unbounded goroutines, SQEs, or buffers.
-8. Close drains or terminally completes all admitted work before releasing the
-   file and ring. Recover refuses active work.
-9. Capability fallback is observable through metrics and logs. A fallback run
-   cannot pass a native-path performance gate.
-10. The positioned-I/O and native backends recover byte-identical data and
-    report the same `R/S/H`, retention, and corruption results.
+1. Every admitted request owns immutable bytes until terminal completion.
+2. Every LSN appears in exactly one committed segment or receives a terminal
+   error.
+3. Segment decode validates geometry, bounds, header CRC, entry CRC, monotonic
+   LSN order, and duplicate LSN/LBA metadata before replay.
+4. Torn or corrupt committed segments fail closed; an uncommitted tail is
+   ignored only under an explicit tail rule.
+5. The publication frontier advances only through the contiguous successful
+   LSN prefix, regardless of segment or checkpoint completion order.
+6. A failed segment fails every request it owns and prevents higher LSN
+   success from escaping.
+7. Sync fences the highest LSN admitted before the call and returns only after
+   its segment and durable header generation are stable.
+8. Queue entries, segment bytes, request count, waiters, and retained WAL bytes
+   are bounded.
+9. Close drains or terminally completes all admitted requests before closing
+   the file. Recover rejects active work.
+10. Recovery, catch-up scan, checkpoint, COW rebuild, and source-frontier
+    behavior remain equivalent to the accepted Phase 167 contracts.
 
 ## Deliverables
 
-### D1. Executable Capability And Dependency Spike
+### D1. Segment Format And Executable Recovery Proof
 
-Status: complete at `ea1a44c`. The exact m02 gate, independent QA, Linux race
-repetition, and adversarial review passed. The selected D1 implementation uses
-the existing `x/sys/unix` dependency with no CGO or new module; unsupported
-platforms remain explicit. No product selector or `parallelwal` integration was
-added.
+- Define the minimum versioned segment header and entry table.
+- Bound segment bytes and entry count; reject integer overflow before
+  allocation or I/O.
+- Prove clean decode, torn tail, bad header CRC, bad entry CRC, duplicate LSN,
+  non-monotonic LSN, invalid LBA, and truncated payload.
+- Reopen and recover mixed one-entry and multi-entry segments without a product
+  selector.
 
-- Add a Linux-only executable test that creates a bounded ring, submits
-  multiple non-contiguous writes to a temporary file, consumes every
-  completion, fsyncs, and verifies bytes after reopen.
-- Record kernel/version, supported opcodes, queue depth, submission count,
-  completion count, and exact refusal reason.
-- Compare a small raw `io_uring`/`x/sys` implementation with one maintained Go
-  wrapper only if necessary. Document license, CGO, cross-compile, and shutdown
-  implications before selecting either.
-- Prove Windows and unsupported Linux builds remain unchanged.
-- Exit D1 with one selected implementation or an explicit rejection. Do not
-  create a permanent abstraction for a backend that cannot pass the spike.
+### D2. One Bounded Group-Commit Owner
 
-### D2. One Bounded Submission Owner
+- Add one owner queue for the candidate.
+- Form a segment from already queued requests up to explicit byte/count bounds.
+- Avoid a forced delay when no other request is ready.
+- Complete every request from the segment result and expose admitted requests,
+  segments, entries/segment, bytes/segment, queue-full, and high-water metrics.
+- Prove one writer, concurrent writers, same-LBA order, queue saturation, and
+  no goroutine/buffer growth.
 
-Status: complete at `240bff8`. Independent QA passed and adversarial review
-accepted the corrected single-owner path. The exact Linux gate proves one
-four-lane submission round with four accepted SQEs, four CQEs, zero fallback,
-portable reopen/recovery, race coverage, and Windows compile isolation.
+### D3. Publication, Sync, And Terminal Failure
 
-- Introduce the minimum internal execution seam needed by `parallelwal`; do
-  not generalize all storage backends.
-- Run one long-lived owner for the native ring. Callers enqueue immutable
-  requests into bounded per-lane queues; the owner reserves SQEs across active
-  lanes and submits them in one round.
-- Keep lane sequence ordering while allowing different lanes to have writes
-  in flight concurrently.
-- Bound ring depth, request depth, owned bytes, and completion bookkeeping.
-- Eliminate per-batch goroutine creation from the native path.
-- Expose product metrics for admitted requests, queue-full rejects, SQEs,
-  submit syscalls, completions, short completions, and in-flight high-water.
+- Feed segment completions into the existing contiguous global-LSN ledger.
+- Implement target-LSN Sync and dual-header durability without per-request
+  fsync.
+- Inject short segment writes, `EIO`, fsync failure, header failure, and lower
+  segment failure with completed higher work.
+- Prove Close, recovery exclusion, and no orphaned waiter.
 
-### D3. Completion And Durability State Machine
+### D4. Checkpoint, Retention, Rebuild, And Replication Equivalence
 
-Status: complete at `85d3336`. Independent QA passed the exact Linux gate and
-20 race repetitions; adversarial review accepted the owner/barrier and
-eventfd-error terminal-drain paths. Native Sync now fences the published target
-LSN, submits fsync through the same owner, prioritizes barriers between bounded
-write rounds, and terminal-faults the store on durability or completion-wait
-failure. The default remains positioned I/O and no product selector was added.
+- Reuse the accepted COW extent/checkpoint design where possible.
+- Define segment-level retention and wrap/reuse fences.
+- Prove catch-up scan and source-frontier behavior across segment boundaries.
+- Run corruption, header fallback, wrap, aborted rebuild, and restart matrices.
+- Run RF3 logical replication tests without changing the replication protocol.
 
-- Convert CQEs into the existing `writeRequest` completion ledger without
-  advancing over lower-LSN holes.
-- Treat partial/negative completions as terminal substrate I/O failures.
-- Implement a target-LSN Sync barrier: drain writes through the fence, submit
-  the durability operation, wait for its completion, then persist the same
-  alternate CRC header protocol.
-- Define Close and terminal-error drain behavior with no orphaned waiter and no
-  ring use after file close.
-- Prove an old ring generation cannot complete work into a reopened/recovered
-  store.
+### D5. Comparable Linux Performance Decision
 
-### D4. Execution Shape And Buffer Ownership
+- Compare segmented candidate, Phase 167 positioned parallel WAL, and legacy
+  WAL in one rotated time-driven m02 session.
+- Include 4 KiB Write and 16-block WriteBatch with 1/2/4/8 writers where
+  applicable.
+- Report median/range, p50/p95/p99, allocations, CPU, queue depth,
+  entries/segment, segments, write syscalls, checkpoint/recycle I/O, and exact
+  Sync cadence.
+- Use external strace/perf where available.
+- Admit only if:
+  - one-writer throughput is at least 90% of same-run legacy;
+  - four-writer throughput is at least 1.5x candidate one-writer throughput;
+  - four-writer candidate throughput is not below positioned parallel WAL;
+  - p99 and sample range remain bounded;
+  - zero fallback, queue saturation, short write, or durability weakening is
+    present.
 
-Status: complete at `428a0de`. Independent QA and adversarial review accepted
-the exact Linux gate. The matrix now covers typed per-lane backpressure,
-oversized and full-SQ behavior, partial submission, all short CQEs, eventfd
-failure, forced-GC buffer ownership, bounded multiple rounds, ring wrap,
-fsync failure, deterministic executor-close ordering, and real native
-close/reopen recovery. The only product change rejects oversized submissions
-before raw SQ enqueue so the reusable ring is neither polluted nor needlessly
-poisoned.
+### D6. Mounted And RF3 Admission
 
-- Reuse bounded owned buffers; remove avoidable request-channel and batch-slice
-  allocation only after profiles identify them.
-- Keep the Phase 167 bounded checkpoint writes and recycle reads. They may use
-  the positioned path initially unless asynchronous execution gives a measured
-  benefit without weakening extent locks or CRC checks.
-- Test ring wrap, multiple SQE rounds, queue saturation, a full submission
-  queue, short completion injection, fsync failure, and shutdown with work in
-  flight.
-- Consider registered files/fixed buffers only if the first native profile
-  shows registration can remove a named remaining cost.
-
-### D5. Comparable Linux Performance Gate
-
-Status: active at `09061f7`. The exact gate compares native, positioned
-parallel WAL, and legacy WAL in one m02 session with fixed iterations, five
-repetitions, median/range, latency, allocation, native counters, strace, and
-CPU/allocation profiles. No buffer pool, registered-file, or fixed-buffer
-optimization is admitted before this evidence.
-
-- Run the exact Phase 167 candidate and legacy controls in the same isolated
-  m02 session with 1/2/4/8 writers.
-- Include 4 KiB `Write`, 16-block `WriteBatch`, Sync cadence, p50/p95/p99,
-  allocations, CPU, queue depth, SQEs, submit syscalls, CQEs, fallback count,
-  `pwrite64`/`pread64`, and `io_uring_enter`.
-- Use external `strace`/perf evidence where available; product counters alone
-  cannot prove syscall reduction.
-- Run enough repetitions to report median and range. Do not select the best
-  sample.
-- Keep the candidate only if single-writer throughput is at least 90% of the
-  same-run legacy result and four-writer aggregate is at least 1.5x the
-  candidate's own single-writer result, or a measured device queue limit
-  explains the plateau.
-
-### D6. Recovery, Mounted, And RF3 Admission
-
-- Before mounted use, pass Linux race plus the Phase 167 corruption, header
-  fallback, ring wrap, COW rebuild, and source-frontier matrix on both native
-  and fallback execution.
-- Build matching product/CSI images only after D5 admits the candidate.
+- Run only if D5 admits the candidate.
+- Build matching product/CSI images.
 - Run mounted NVMe/TCP RF1 concurrent write/read/flush/checksum and restart
   recovery.
-- Then run RF3 sync-quorum with a delayed non-quorum peer, catch-up/rebuild,
-  restart, status honesty, and zero-residue cleanup.
-- Keep NVMe/RDMA performance and Phase 166's third-RoCE-host reconnect gate
-  separate.
+- Run RF3 sync-quorum with delayed peer, catch-up/rebuild, restart, status
+  honesty, and zero-residue cleanup.
+- Keep NVMe/RDMA performance and reconnect claims separate.
 
-## Acceptance And Stop Rules
+## Stop Rules
 
-The native path may remain in the tree only if:
+Stop and remove the segmented candidate if:
 
-- D1 proves a maintainable capability/build boundary;
-- all correctness and recovery invariants pass with zero acknowledged-data
-  loss, frontier hole, or false readiness;
-- native-path counters prove no fallback during its performance gate;
-- 4 KiB single-writer and four-writer thresholds pass;
-- p99 remains bounded;
-- mounted restart and RF3 slow-peer gates pass before any default proposal.
+- one-writer cost cannot stay within 90% of legacy without weakening
+  durability;
+- concurrent writes still map approximately one-to-one to persistence rounds;
+- batching requires an arbitrary latency sleep rather than queued work;
+- corruption or recovery needs ambiguous tail rules;
+- the candidate only wins synthetic WriteBatch while ordinary Write remains
+  unscaled;
+- mounted correctness would be used to excuse a failed local performance gate.
 
-Stop and remove the native implementation if:
-
-- buffered-file `io_uring` does not outperform positioned I/O after obvious
-  queue/allocation issues are removed;
-- it requires silent fallback to pass;
-- completion handling duplicates the storage state machine without a clear
-  owner;
-- shutdown, cancellation, or fsync semantics cannot be made deterministic;
-- the only gain comes from changing durability or Sync cadence.
-
-An honest rejection is a valid Phase 168 result. It should leave Phase 167's
-opt-in backend and the default `walstore` behavior intact.
-
-## Out Of Scope
-
-- New WAL format or vector frontier.
-- Raw-device deployment, SPDK, DPDK, or userspace NVMe.
-- `O_DIRECT`, FUA, atomic writes, fixed buffers, or SQPOLL without a separate
-  measured decision.
-- New frontend protocols or NVMe/RDMA performance claims.
-- PG placement, etcd control plane, erasure coding, snapshots, backup, or
-  restore.
-- Changes to Kubernetes operator ownership or lifecycle mutation boundaries.
+An honest rejection remains a valid outcome. It must leave the Phase 167
+positioned backend and default `walstore` intact.
 
 ## Exit Criteria
 
-Phase 168 closes with one of two evidence-backed outcomes:
-
 ```text
-Phase 167 profile
--> native capability proof
--> bounded submission/completion owner
--> exact Sync and failure semantics
--> same-run 4 KiB scaling decision
--> mounted RF1/RF3 admission if performance passes
--> promote, retain opt-in, or remove
+segment format proof
+-> bounded group-commit owner
+-> exact publication/Sync/failure semantics
+-> checkpoint/rebuild/replication equivalence
+-> same-run scaling decision
+-> mounted RF1/RF3 only if admitted
+-> promote, retain research-only, or remove
 ```
 
-Documentation must state which outcome occurred. A ring that compiles, an
-`io_uring_enter` counter, or a batch-only gain is not a product capability.
+The milestone succeeds only through an evidence-backed decision, not by adding
+another backend name.
