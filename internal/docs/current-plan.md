@@ -189,9 +189,14 @@ in its existing write/fsync without adding a new disk field or sync.
 
 ### D5. Comparable Linux Performance Decision
 
-Implementation status: gate implemented locally; exact-commit Linux decision
-pending. The benchmark selector exists only in `_test.go`; no product or
-external configuration surface was added.
+Implementation status: complete with an honest `PASS REJECT` on exact commit
+`db9e701`. The candidate cut ordinary materialization reads from `2.000` to
+`1.000` per validated record and multi-block reads from `2.000` to `0.06250`,
+with exact product/`strace` agreement. It was not admitted because ordinary
+four-writer throughput improved only `1.068x` against the required `1.15x`,
+and its `2.031x` sample range exceeded the `1.50x` stability bound. D6 must not
+run; remove the disabled candidate without reverting the independent D4
+recovery correctness fixes.
 
 - Compare candidate and unchanged default in one rotated m02 run with five
   one-second repetitions and identical 100 ms flusher/Sync/drain settings.
@@ -213,6 +218,8 @@ external configuration surface was added.
   - failed cycles remain zero and checkpoint coverage remains complete.
 
 ### D6. Mounted RF1 And RF3 Close Gate
+
+Status: not run; D5 did not admit the candidate.
 
 - Run only if D5 admits the candidate.
 - Build exact matching product and CSI images.
