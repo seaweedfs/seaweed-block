@@ -127,12 +127,12 @@ This is the short internal roadmap. Keep it current and readable.
   current lab has only two RoCE target nodes and no third remote RoCE-capable
   Kubernetes initiator, so it cannot honestly prove two remote surviving
   paths. The implementation and blocked gate remain tracked independently.
-- Phase 167 is the active Parallel Write Engine milestone. It follows the
-  Phase 122-156 finding that mounted write throughput is backend-limited, not
-  network-limited. It will address ordered asynchronous replication,
-  parallel WAL ownership, RF3 slow-peer behavior, recovery compatibility, and
-  same-run mounted performance evidence as one large milestone rather than a
-  sequence of one-lock or one-counter phases.
+- Phase 167 closed as an opt-in Parallel Write Engine research result. Phase
+  168 then rejected native `io_uring` execution, and Phase 169 rejected a
+  segmented group-commit format after its four-writer optimistic upper bound
+  failed both scaling and positioned-control thresholds. Phase 170 works on
+  the default `walstore` pipeline and existing-format `appendBatch` seam rather
+  than adding another backend.
 
 Do not skip from scripts directly to mutating operator lifecycle. Helm has
 stabilized the installation contract, and Phase 35 added read-only CRD status,
@@ -590,10 +590,15 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   passed correctness but failed the comparable 4 KiB throughput and scaling
   thresholds. The implementation was removed; `walstore` remains the default
   and `parallel-walstore` remains opt-in.
-- Active next: Phase 169 tests segmented group commit with positioned I/O.
-  This changes the persistence unit by committing multiple logical writes in
-  one checksummed segment instead of substituting one syscall API for another.
-  Direct I/O, fixed buffers, FUA, and device atomic writes remain later
+- Closed experiment: Phase 169's segmented group-commit candidate passed
+  format, bounded-owner, durability, failure, and recovery gates. Its m02
+  optimistic upper bound grouped `1.348` entries/segment but four writers
+  reached only `0.772x` one writer and `0.990x` the positioned control. The
+  implementation was removed before checkpoint/rebuild integration.
+- Active next: Phase 170 profiles and stages the default `walstore` write
+  pipeline. It may use the existing-format `walWriter.appendBatch` seam only
+  if measured CRC/copy/global-lock headroom justifies a bounded owner. Direct
+  I/O, fixed buffers, FUA, and device atomic writes remain later
   evidence-gated decisions.
 - Protocol hardening now has a dedicated working area under
   `internal/docs/protocol/`. New protocol semantics should update the control
@@ -1226,10 +1231,15 @@ Approximate engineering effort if scope remains tight:
   single-writer throughput and 0.96x four-writer scaling. The candidate code
   was removed. The finished plan is
   `internal/docs/finished-plans/phase168_finishedplan_linux_native_async_wal.md`.
-- Phase 169 Segmented WAL Group-Commit Engine is active. It keeps positioned
-  I/O initially and changes the persistence unit to one checksummed segment
-  containing multiple ordered logical writes. The contract is
-  `internal/docs/current-plan.md`.
+- Phase 169 Segmented WAL Group-Commit Engine is closed as a rejected
+  performance candidate. D1-D3 correctness passed; D4-0 measured `0.772x`
+  four-writer scaling and `0.990x` the positioned four-writer control before
+  the candidate paid full checkpoint/rebuild costs. The implementation was
+  removed. The finished plan is
+  `internal/docs/finished-plans/phase169_finishedplan_segmented_wal_group_commit.md`.
+- Phase 170 Default WALStore Staged Commit Pipeline is active. It starts from
+  the shipped backend and existing WAL format, with an evidence gate before
+  any queue/owner integration. The contract is `internal/docs/current-plan.md`.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.
