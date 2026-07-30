@@ -130,10 +130,10 @@ This is the short internal roadmap. Keep it current and readable.
 - Phase 167 closed as an opt-in Parallel Write Engine research result. Phase
   168 then rejected native `io_uring` execution, Phase 169 rejected a
   segmented group-commit format, and Phase 170 rejected a default-WAL staged
-  append owner before implementation because existing-format batching reduced
-  WAL writes but did not produce stable concurrent throughput. Phase 171 now
-  measures and optimizes the shipped `walstore` checkpoint/writeback half
-  rather than adding another backend or append queue.
+  append owner. Phase 171 hardened the shipped checkpoint path and rejected
+  bounded extent coalescing at its D1 admission gate. Phase 172 now targets the
+  stable two-read WAL materialization amplification without adding another
+  backend or append queue.
 
 Do not skip from scripts directly to mutating operator lifecycle. Helm has
 stabilized the installation contract, and Phase 35 added read-only CRD status,
@@ -601,11 +601,15 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   entry, but four-writer throughput was only `0.737x` ordinary Write, paired
   gain passed only `2/5` samples, and run ranges exceeded `2.9x`. The staged
   owner was stopped before implementation.
-- Active next: Phase 171 instruments and optimizes the default `walstore`
-  checkpoint/writeback path. It may port bounded contiguous extent writes from
-  the Phase 167 research backend only if full-pipeline evidence shows
-  writeback amplification and the complete flusher/recovery contract remains
-  intact. Direct I/O, fixed buffers, FUA, and device atomic writes remain later
+- Closed hardening: Phase 171 made checkpoint/tail publication, Close, direct
+  BASE overlap, stale-slot handling, and dual-lane barrier sealing fail closed.
+  Its Linux admission gate rejected bounded extent coalescing because
+  sequential opportunity was stable in only `1/5` samples.
+- Active next: Phase 172 tests one bounded WAL materialization pipeline. The
+  default flusher currently performs one header read plus one full-record read
+  per validated dirty entry; the candidate may replace those with one
+  fully-validated read and bounded same-record reuse. Direct I/O, fixed
+  buffers, FUA, raw devices, and device atomic writes remain later
   evidence-gated decisions.
 - Protocol hardening now has a dedicated working area under
   `internal/docs/protocol/`. New protocol semantics should update the control
@@ -1249,10 +1253,14 @@ Approximate engineering effort if scope remains tight:
   `WriteAt` calls by about 16x but did not provide stable four-writer
   throughput headroom, so no owner or selector was added. The finished plan is
   `internal/docs/finished-plans/phase170_finishedplan_default_walstore_staged_commit.md`.
-- Phase 171 Default WALStore Checkpoint Pipeline is active. It starts by
-  measuring foreground/background I/O separately, then may add bounded
-  contiguous extent writeback to the shipped flusher before any mounted or RF3
-  claim. The contract is `internal/docs/current-plan.md`.
+- Phase 171 Default WALStore Checkpoint Pipeline is closed at D1. Correctness
+  hardening and full-pipeline evidence passed; bounded extent writeback was
+  rejected by its admission gate. The finished plan is
+  `internal/docs/finished-plans/phase171_finishedplan_default_walstore_checkpoint_pipeline.md`.
+- Phase 172 WAL Materialization Pipeline is active. It tests whether replacing
+  duplicate per-entry WAL reads with one bounded, fully validated
+  materialization improves the shipped backend. The contract is
+  `internal/docs/current-plan.md`.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.
