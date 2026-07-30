@@ -189,6 +189,62 @@ func TestNativeRingWrapRecyclesAndRecovers(t *testing.T) {
 	}
 }
 
+func TestNativeCloseWithInflightWriteRecovers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "native-close-inflight.bin")
+	cfg := testConfig()
+	cfg.Execution = ExecutionIOUring
+	store, err := CreateStoreWithConfig(path, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	store.lanes[0].beforeWrite = func(*writeRequest) {
+		close(entered)
+		<-release
+	}
+	writeDone := make(chan error, 1)
+	go func() {
+		_, writeErr := store.Write(0, testBlock(0x51, cfg.BlockSize))
+		writeDone <- writeErr
+	}()
+	<-entered
+
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- store.Close()
+	}()
+	select {
+	case err := <-closeDone:
+		t.Fatalf("Close returned with a native write in flight: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	if err := <-writeDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-closeDone; err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if recovered, err := reopened.Recover(); err != nil || recovered != 1 {
+		t.Fatalf("Recover=(%d,%v) want=(1,nil)", recovered, err)
+	}
+	data, err := reopened.Read(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data[0] != 0x51 {
+		t.Fatalf("recovered byte=%02x want=51", data[0])
+	}
+}
+
 func TestNativeSyncIsNotStarvedByLaterWriters(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sync-liveness.bin")
 	cfg := testConfig()

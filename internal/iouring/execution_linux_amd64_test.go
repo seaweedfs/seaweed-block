@@ -11,7 +11,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -203,7 +202,6 @@ func TestAcceptedOperationRetainsBufferThroughForcedGC(t *testing.T) {
 
 	accepted := make(chan struct{})
 	release := make(chan struct{})
-	bufferChecked := make(chan bool, 1)
 	executor.ring.enterCall = func(toSubmit, _, _ uint32) (int, error) {
 		head := atomic.LoadUint32(executor.ring.sqHead)
 		index := executor.ring.sqArray[head&atomic.LoadUint32(executor.ring.sqMask)]
@@ -212,9 +210,6 @@ func TestAcceptedOperationRetainsBufferThroughForcedGC(t *testing.T) {
 		close(accepted)
 		<-release
 
-		data := retainedSQEBytes(sqe.Address, sqe.Length)
-		bufferChecked <- len(data) == probeBlockSize &&
-			bytes.Equal(data, bytes.Repeat([]byte{0x5a}, probeBlockSize))
 		tail := atomic.LoadUint32(executor.ring.cqTail)
 		executor.ring.cqes[tail&atomic.LoadUint32(executor.ring.cqMask)] = ioUringCQE{
 			UserData: sqe.UserData,
@@ -225,10 +220,17 @@ func TestAcceptedOperationRetainsBufferThroughForcedGC(t *testing.T) {
 	}
 
 	result := make(chan error, 1)
+	finalized := make(chan struct{}, 1)
 	go func() {
-		payload := bytes.Repeat([]byte{0x5a}, probeBlockSize)
+		owner := &finalizableWriteBuffer{}
+		for i := range owner.data {
+			owner.data[i] = 0x5a
+		}
+		runtime.SetFinalizer(owner, func(*finalizableWriteBuffer) {
+			finalized <- struct{}{}
+		})
 		completions, submitErr := executor.SubmitAndWait([]Operation{
-			Write(-1, 0, payload, 95),
+			Write(-1, 0, owner.data[:], 95),
 		})
 		if submitErr == nil &&
 			(len(completions) != 1 || completions[0].UserData != 95) {
@@ -240,16 +242,30 @@ func TestAcceptedOperationRetainsBufferThroughForcedGC(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		runtime.GC()
 	}
-	close(release)
-	if !<-bufferChecked {
-		t.Fatal("accepted operation buffer changed or became unreachable")
+	select {
+	case <-finalized:
+		t.Fatal("accepted operation owner finalized before its CQE")
+	default:
 	}
+	close(release)
 	if err := <-result; err != nil {
 		t.Fatal(err)
 	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		runtime.GC()
+		select {
+		case <-finalized:
+			return
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("buffer owner finalizer did not run after completion")
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
-//go:nocheckptr
-func retainedSQEBytes(address uint64, length uint32) []byte {
-	return unsafe.Slice((*byte)(unsafe.Pointer(uintptr(address))), int(length))
+type finalizableWriteBuffer struct {
+	data [probeBlockSize]byte
 }

@@ -114,15 +114,14 @@ func TestExplicitIOUringDoesNotFallbackWhenUnsupported(t *testing.T) {
 }
 
 type blockingWriteExecutor struct {
-	mu       sync.Mutex
-	stats    iouring.ExecutionStats
-	calls    int
-	entered  chan struct{}
-	release  chan struct{}
-	closeCh  chan struct{}
-	closeMu  sync.Once
-	complete func() error
-	closed   bool
+	mu      sync.Mutex
+	stats   iouring.ExecutionStats
+	calls   int
+	entered chan struct{}
+	release chan struct{}
+	closeCh chan struct{}
+	closeMu sync.Once
+	closed  bool
 }
 
 func newBlockingWriteExecutor() *blockingWriteExecutor {
@@ -148,11 +147,6 @@ func (executor *blockingWriteExecutor) SubmitAndWait(
 	if call == 1 {
 		close(executor.entered)
 		<-executor.release
-		if executor.complete != nil {
-			if err := executor.complete(); err != nil {
-				return nil, err
-			}
-		}
 		return []iouring.Completion{{
 			UserData: 1,
 			Result:   int32(recordHeaderSize + testConfig().BlockSize),
@@ -298,20 +292,9 @@ func TestNativeCloseWaitsForInflightWriteBeforeClosingExecutor(t *testing.T) {
 
 	cfg := testConfig()
 	cfg.Execution = ExecutionIOUring
-	path := filepath.Join(t.TempDir(), "close-inflight.bin")
-	store, err := CreateStoreWithConfig(path, cfg)
+	store, err := CreateStoreWithConfig(filepath.Join(t.TempDir(), "close-inflight.bin"), cfg)
 	if err != nil {
 		t.Fatal(err)
-	}
-	fake.complete = func() error {
-		record := make([]byte, store.recordSize)
-		if err := encodeRecordInto(record, walRecord{
-			LSN: 1, LBA: 0, Flags: flagWrite, Data: testBlock(0x51, cfg.BlockSize),
-		}, cfg.BlockSize); err != nil {
-			return err
-		}
-		_, err := store.fd.WriteAt(record, store.lanes[0].base)
-		return err
 	}
 
 	writeDone := make(chan error, 1)
@@ -356,21 +339,5 @@ func TestNativeCloseWaitsForInflightWriteBeforeClosingExecutor(t *testing.T) {
 	fake.mu.Unlock()
 	if !closed {
 		t.Fatal("native executor remained open after Close")
-	}
-
-	reopened, err := OpenStore(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reopened.Close()
-	if recovered, err := reopened.Recover(); err != nil || recovered != 1 {
-		t.Fatalf("Recover=(%d,%v) want=(1,nil)", recovered, err)
-	}
-	data, err := reopened.Read(0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if data[0] != 0x51 {
-		t.Fatalf("recovered byte=%02x want=51", data[0])
 	}
 }
