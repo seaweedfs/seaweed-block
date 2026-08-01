@@ -466,7 +466,7 @@ func stageVerifiedArchive(ctx context.Context, r io.Reader, rec Record, dir stri
 	if err := tmp.Chmod(0o600); err != nil {
 		return "", fmt.Errorf("snapshot: chmod restore staging file: %w", err)
 	}
-	written, err := io.Copy(tmp, io.LimitReader(r, rec.ArchiveBytes+1))
+	written, err := io.Copy(tmp, io.LimitReader(contextReader{ctx: ctx, r: r}, rec.ArchiveBytes+1))
 	if err != nil {
 		return "", fmt.Errorf("snapshot: stage restore archive: %w", err)
 	}

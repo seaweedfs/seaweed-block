@@ -214,6 +214,59 @@ func (m *Manager) StreamArchive(ctx context.Context, snapshotID string, w io.Wri
 	return rec, nil
 }
 
+// ImportArchive verifies an immutable archive before atomically adding its
+// original snapshot identity to this catalog. It never reads a live volume and
+// never replaces an existing snapshot or name binding.
+func (m *Manager) ImportArchive(ctx context.Context, rec Record, r io.Reader) (Record, error) {
+	if r == nil || validateImportedRecord(rec) != nil {
+		return Record{}, fmt.Errorf("%w: invalid snapshot import", ErrInvalidRequest)
+	}
+	stagedPath, err := stageVerifiedArchive(ctx, r, rec, m.archivesDir)
+	if err != nil {
+		return Record{}, err
+	}
+	defer os.Remove(stagedPath)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if existing, ok := m.byID[rec.SnapshotID]; ok {
+		if sameCatalogRecord(existing, rec) {
+			return existing, nil
+		}
+		return Record{}, ErrRestoreConflict
+	}
+	if existingID, ok := m.byName[rec.Name]; ok && existingID != rec.SnapshotID {
+		return Record{}, ErrNameConflict
+	}
+	finalArchive := m.archivePath(rec.SnapshotID)
+	if _, err := os.Stat(finalArchive); err == nil {
+		return Record{}, fmt.Errorf("%w: snapshot archive already exists", ErrRestoreConflict)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return Record{}, fmt.Errorf("snapshot: stat import archive: %w", err)
+	}
+	if err := os.Rename(stagedPath, finalArchive); err != nil {
+		return Record{}, fmt.Errorf("snapshot: publish imported archive: %w", err)
+	}
+	archivePublished := true
+	defer func() {
+		if archivePublished {
+			_ = os.Remove(finalArchive)
+		}
+	}()
+	if err := syncDir(m.archivesDir); err != nil {
+		return Record{}, err
+	}
+	if err := m.writeRecord(rec); err != nil {
+		_ = os.Remove(m.recordPath(rec.SnapshotID))
+		_ = syncDir(m.recordsDir)
+		return Record{}, err
+	}
+	archivePublished = false
+	m.byID[rec.SnapshotID] = rec
+	m.byName[rec.Name] = rec.SnapshotID
+	return rec, nil
+}
+
 func (m *Manager) beginRead(snapshotID string) (Record, func(), error) {
 	m.mu.Lock()
 	rec, ok := m.byID[snapshotID]
@@ -408,6 +461,17 @@ func validateRecord(rec Record) error {
 	wantArchiveBytes, err := archiveSize(storage.SnapshotCut{BlockSize: rec.BlockSize, NumBlocks: rec.NumBlocks, BlockCount: rec.RecordCount, DataBytes: rec.DataBytes})
 	if err != nil || wantArchiveBytes != rec.ArchiveBytes {
 		return fmt.Errorf("invalid ready snapshot record")
+	}
+	return nil
+}
+
+func sameCatalogRecord(a, b Record) bool {
+	return sameRestoreRecord(a, b) && a.Name == b.Name && a.State == b.State && a.CreatedAt.Equal(b.CreatedAt)
+}
+
+func validateImportedRecord(rec Record) error {
+	if validateRecord(rec) != nil || validateCreateRequest(CreateRequest{Name: rec.Name, SourceVolumeID: rec.SourceVolumeID}) != nil || rec.SnapshotID != snapshotID(rec.Name, rec.SourceVolumeID) {
+		return fmt.Errorf("invalid imported snapshot record")
 	}
 	return nil
 }
