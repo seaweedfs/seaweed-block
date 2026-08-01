@@ -50,9 +50,14 @@ Progress through the local data layer, distributed runtime, and CSI contract:
   `f1ba252` now rejects that configuration at render time. The exact-commit
   live rerun created a real ready `VolumeSnapshot`, created and attached a
   distinct restored volume, then failed its first mount because ext4 could not
-  read the superblock from `/dev/sdb`. D6 is blocked on source/target block and
-  device-geometry diagnosis; control-plane apply/activate evidence alone is
-  not accepted as restored-data proof.
+  read the superblock from `/dev/sdb`. Exact diagnostic rerun proved source
+  unstage, equal device geometry, passing source and target `e2fsck`, and
+  byte-identical full-device SHA-256. The defect is post-restore replication
+  sequencing: restore advanced WAL to 27 while the startup resequencer still
+  waited at 1, so the first mounted write at 28 timed out. A frontier-bound
+  resequencer advance is implemented locally, but D6 remains blocked until the
+  mounted Kubernetes path is rerun; control-plane apply/activate evidence
+  alone is not accepted as restored-data proof.
 - D7 adversarial coverage audit found strong L1 component coverage but no
   Phase 175 dirty-failure L2 scenarios. D7 remains open. The minimum live set
   is: create crash/retry isolation; restore restart, source delete, and

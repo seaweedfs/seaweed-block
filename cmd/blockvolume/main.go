@@ -1130,8 +1130,7 @@ func run(f flags) int {
 		var restoreHandler *coresnapshot.RestoreRuntimeHandler
 		if restoreTarget != nil {
 			restoreHandler, err = coresnapshot.NewRestoreRuntimeHandler(restoreTarget, func() error {
-				h.ClearLocalReadinessBlock()
-				return nil
+				return releaseSnapshotRestoreReadiness(replVolume, restoreTarget.Marker().TargetFrontier, h.ClearLocalReadinessBlock)
 			}, token)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "blockvolume: restore runtime:", err)
@@ -1213,6 +1212,17 @@ func run(f flags) int {
 
 type restoreTargetPathProvider interface {
 	VolumeDataPath(volumeID string) (string, error)
+}
+
+func releaseSnapshotRestoreReadiness(replVolume *replication.ReplicationVolume, restoredFrontier uint64, clearReadiness func()) error {
+	if replVolume == nil || clearReadiness == nil {
+		return fmt.Errorf("snapshot restore: replication volume and readiness callback are required")
+	}
+	if err := replVolume.AdvanceAfterSnapshotRestore(restoredFrontier); err != nil {
+		return err
+	}
+	clearReadiness()
+	return nil
 }
 
 func prepareRestoreTarget(f flags, provider restoreTargetPathProvider) (*coresnapshot.RestoreTarget, error) {

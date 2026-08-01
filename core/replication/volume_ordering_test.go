@@ -3,9 +3,12 @@ package replication
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 func TestReplicationVolume_ResequencesConcurrentArrivalByLSN(t *testing.T) {
@@ -52,6 +55,105 @@ func TestReplicationVolume_ResequencesConcurrentArrivalByLSN(t *testing.T) {
 	_, _, head := replica.Boundaries()
 	if head != 2 {
 		t.Fatalf("replica head=%d want 2", head)
+	}
+}
+
+func TestPhase175ReplicationVolumeAdvancesAfterSnapshotRestore(t *testing.T) {
+	store, err := storage.CreateWALStore(filepath.Join(t.TempDir(), "restored.bin"), 64, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	v := NewReplicationVolume("restored-volume", store)
+	for i := uint32(0); i < 27; i++ {
+		if _, err := store.Write(i, make([]byte, 4096)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := v.AdvanceAfterSnapshotRestore(27); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.AdvanceAfterSnapshotRestore(27); err != nil {
+		t.Fatalf("idempotent advance: %v", err)
+	}
+	lsn, err := store.Write(27, make([]byte, 4096))
+	if err != nil || lsn != 28 {
+		t.Fatalf("first post-restore write lsn=%d err=%v", lsn, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := v.OnLocalWrite(ctx, LocalWrite{LBA: 27, Data: make([]byte, 4096), LSN: lsn}); err != nil {
+		t.Fatalf("first post-restore write did not pass resequencer: %v", err)
+	}
+	if err := v.AdvanceAfterSnapshotRestore(27); err != nil {
+		t.Fatalf("advance retry after post-restore write: %v", err)
+	}
+	if err := v.AdvanceAfterSnapshotRestore(26); err == nil || !strings.Contains(err.Error(), "frontier changed") {
+		t.Fatalf("different restore frontier retry error=%v", err)
+	}
+}
+
+func TestPhase175ReplicationVolumeRejectsUnsafeRestoreAdvance(t *testing.T) {
+	store := storage.NewBlockStore(64, 4096)
+	v := NewReplicationVolume("restored-volume", store)
+	if _, err := store.Write(0, make([]byte, 4096)); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.AdvanceAfterSnapshotRestore(2); err == nil || !strings.Contains(err.Error(), "does not match storage next LSN") {
+		t.Fatalf("mismatched frontier error=%v", err)
+	}
+	v.orderMu.Lock()
+	v.pending[1] = &orderedLocalWrite{write: LocalWrite{LSN: 1}}
+	v.orderMu.Unlock()
+	if err := v.AdvanceAfterSnapshotRestore(1); err == nil || !strings.Contains(err.Error(), "active local writes") {
+		t.Fatalf("active-write advance error=%v", err)
+	}
+}
+
+func TestPhase175ReplicationVolumeRestoreAdvanceSurvivesRestartBeforeReadiness(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "restored.bin")
+	store, err := storage.CreateWALStore(path, 64, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := NewReplicationVolume("restored-volume", store)
+	for i := uint32(0); i < 27; i++ {
+		if _, err := store.Write(i, make([]byte, 4096)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.AdvanceAfterSnapshotRestore(27); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := storage.OpenWALStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if frontier, err := reopened.Recover(); err != nil || frontier != 27 {
+		t.Fatalf("recover frontier=%d err=%v", frontier, err)
+	}
+	second := NewReplicationVolume("restored-volume", reopened)
+	t.Cleanup(func() { _ = second.Close() })
+	if err := second.AdvanceAfterSnapshotRestore(27); err != nil {
+		t.Fatalf("activation callback retry after restart: %v", err)
+	}
+	lsn, err := reopened.Write(27, make([]byte, 4096))
+	if err != nil || lsn != 28 {
+		t.Fatalf("post-restart write lsn=%d err=%v", lsn, err)
+	}
+	if err := second.OnLocalWrite(context.Background(), LocalWrite{LBA: 27, Data: make([]byte, 4096), LSN: lsn}); err != nil {
+		t.Fatalf("post-restart write did not pass resequencer: %v", err)
 	}
 }
 

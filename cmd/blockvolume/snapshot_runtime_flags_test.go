@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/seaweedfs/seaweed-block/core/replication"
+	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 func TestPhase175SnapshotRuntimeFlagsRequireCompleteSecureConfiguration(t *testing.T) {
@@ -81,6 +84,35 @@ func TestPhase175RestoreFlagRequiresSecureRuntime(t *testing.T) {
 	got, err := parseFlags(args)
 	if err != nil || got.restoreSnapshotID != "snap-a" {
 		t.Fatalf("flags=%+v error=%v", got, err)
+	}
+}
+
+func TestPhase175SnapshotRestoreRebasesReplicationBeforeReadiness(t *testing.T) {
+	store := storage.NewBlockStore(64, 4096)
+	repl := replication.NewReplicationVolume("restored-volume", store)
+	t.Cleanup(func() { _ = repl.Close() })
+	for i := uint32(0); i < 27; i++ {
+		if _, err := store.Write(i, make([]byte, 4096)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cleared := false
+	if err := releaseSnapshotRestoreReadiness(repl, 27, func() { cleared = true }); err != nil {
+		t.Fatal(err)
+	}
+	if !cleared {
+		t.Fatal("successful replication rebase did not clear readiness")
+	}
+
+	badStore := storage.NewBlockStore(64, 4096)
+	badRepl := replication.NewReplicationVolume("bad-restored-volume", badStore)
+	t.Cleanup(func() { _ = badRepl.Close() })
+	cleared = false
+	if err := releaseSnapshotRestoreReadiness(badRepl, 27, func() { cleared = true }); err == nil {
+		t.Fatal("mismatched restore frontier cleared readiness")
+	}
+	if cleared {
+		t.Fatal("failed replication rebase cleared readiness")
 	}
 }
 

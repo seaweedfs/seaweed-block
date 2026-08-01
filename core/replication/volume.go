@@ -122,6 +122,8 @@ type ReplicationVolume struct {
 	progress    chan struct{}
 	lifecycle   context.Context
 	cancel      context.CancelFunc
+	restoreSet  bool
+	restoreLSN  uint64
 
 	// Probe loop integration. Set once via ConfigureProbeLoop;
 	// started via StartProbeLoop after primary admit; stopped FIRST
@@ -187,6 +189,52 @@ func NewReplicationVolume(volumeID string, store storage.LogicalStorage) *Replic
 		lifecycle:      lifecycle,
 		cancel:         cancel,
 	}
+}
+
+// AdvanceAfterSnapshotRestore moves the local-write resequencer to the
+// verified frontier installed directly by the restore path. The caller must
+// keep local readiness blocked while invoking this method; any queued or
+// in-flight foreground write makes the transition unsafe.
+func (v *ReplicationVolume) AdvanceAfterSnapshotRestore(restoredFrontier uint64) error {
+	if restoredFrontier == ^uint64(0) {
+		return fmt.Errorf("replication: snapshot restore frontier overflows")
+	}
+	next := restoredFrontier + 1
+	storeNext := v.store.NextLSN()
+	v.orderMu.Lock()
+	defer v.orderMu.Unlock()
+	if v.orderClosed {
+		return fmt.Errorf("replication: snapshot restore rebase on closed volume %s", v.volumeID)
+	}
+	if v.restoreSet {
+		if v.restoreLSN != restoredFrontier {
+			return fmt.Errorf("replication: snapshot restore frontier changed from %d to %d", v.restoreLSN, restoredFrontier)
+		}
+		if storeNext < next {
+			return fmt.Errorf("replication: accepted snapshot restore frontier %d regressed", restoredFrontier)
+		}
+		if storeNext != v.nextShipLSN {
+			return fmt.Errorf("replication: post-restore storage next LSN %d diverged from resequencer %d", storeNext, v.nextShipLSN)
+		}
+		return nil
+	}
+	if storeNext != next {
+		return fmt.Errorf("replication: snapshot restore frontier %d does not match storage next LSN %d", restoredFrontier, storeNext)
+	}
+	if v.draining || v.inflightLSN != 0 || len(v.pending) != 0 {
+		return fmt.Errorf("replication: snapshot restore rebase has active local writes")
+	}
+	if next < v.nextShipLSN {
+		return fmt.Errorf("replication: snapshot restore next LSN %d is behind resequencer %d", next, v.nextShipLSN)
+	}
+	if next > v.nextShipLSN {
+		v.nextShipLSN = next
+		close(v.progress)
+		v.progress = make(chan struct{})
+	}
+	v.restoreSet = true
+	v.restoreLSN = restoredFrontier
+	return nil
 }
 
 // SetDualLaneExecutorFactory injects the dual-lane BlockExecutor
