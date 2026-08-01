@@ -1,7 +1,65 @@
 # Phase 174 D2 NVMe/TCP Fixed-Work QA Sign-off
 
-Verdict: **PASS for NVMe/TCP RF1 attribution; all-shapes stability remains
-HOLD.** No architecture candidate is selected.
+Verdict: **PASS for detailed NVMe/TCP RF1 attribution; cross-run stability
+remains HOLD.** No architecture candidate is selected.
+
+## Detailed Phase Re-validation
+
+The read-only phase counters were run from the exact instrumentation commit:
+
+```text
+source_commit=c588800ba5760e25b2be937de3c146db88005a96
+host=m02
+store_source=/dev/nvme0n1p1
+store_filesystem=ext4
+artifact=/mnt/smb/work/share/g15d-k8s/20260801T110640Z-phase174-d2-nvme-detailed.tar.gz
+sha256=631646794af6dd2edb2201c78155a0302dfcd4210126a9cf41850da35e7a2608
+result_rows=30
+linux_race_test=pass
+store_residue_count=0
+```
+
+Every row reported exactly 16,384 operations for capsule receive/parse, R2T
+data collection, dispatch wait, handler, completion queue wait, and completion
+send. The six accumulated phase durations never exceeded accumulated client
+latency, and the exact difference was recorded as client/wire residual. Protocol,
+adapter, WAL, byte, Flush, close/reopen, `R == H`, and recovered-data checks also
+passed for all rows.
+
+The current run was stable:
+
+| IO queues | Median MiB/s | Overall max/min | Set 1 | Set 2 |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 102.495 | 1.019 | 1.010 | 1.019 |
+| 4 | 258.718 | 1.037 | 1.029 | 1.037 |
+| 8 | 300.370 | 1.121 | 1.120 | 1.091 |
+
+The four-queue median accumulated time per operation is now split as follows:
+
+```text
+client write round trip              59.763 us/op
+  capsule receive/parse               0.185 us/op
+  R2T data collection                30.096 us/op
+  dispatch wait                       0.818 us/op
+  handler                             8.204 us/op
+  completion queue wait               0.690 us/op
+  completion send                     3.710 us/op
+  remaining client/wire residual     15.922 us/op
+target backend call                   7.178 us/op
+adapter write                         6.809 us/op
+```
+
+R2T collection is the largest measured detailed phase, but it includes target
+R2T publication, initiator response, loopback wire time, and H2CData receive.
+The remaining residual also includes initiator and uninstrumented wire work.
+This test-client loopback result is therefore not sufficient to select a target
+protocol rewrite. The next bounded check is the same target counters under a
+mounted Linux kernel NVMe initiator.
+
+The current gate reports `nvme_tcp_rf1_all_shapes_stability_gate=pass`, but D1
+remains cross-run HOLD: the prior semantically identical run below contained a
+`1.530x` one-queue set. An instrumentation-only commit does not invalidate that
+evidence or prove a stability fix.
 
 ## Source And Evidence
 

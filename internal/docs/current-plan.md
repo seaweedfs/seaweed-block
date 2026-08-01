@@ -10,11 +10,16 @@ hotspot. The distinct-node RF3 slice passed at `7d75a47`: 15 primary samples,
 and zero residue. Its one-writer shape remained unstable and the management-LAN
 numbers select no candidate. The NVMe/TCP RF1 slice passed at `706b173`: all 30
 rows reconciled from protocol command through recovered WAL bytes, and the
-four-writer admission shape was stable at `1.035x`. All-shapes stability remains
-HOLD because one-writer set 2 reached `1.530x`; the slow rows correlated `0.995`
-with foreground flusher time. The dominant frontend bucket is still the broad
-NVMe/TCP round-trip non-backend aggregate, so internal frontend phase attribution
-and mounted diagnostics are next. No architecture implementation is eligible.
+four-writer admission shape was stable at `1.035x`. Detailed phase attribution
+passed at `c588800`: all 30 rows reconciled six target phases, Linux race passed,
+and the current run was stable at `1.019x/1.037x/1.121x` for one/four/eight IO
+queues. Four-queue accumulated latency splits into R2T collection `30.10 us/op`,
+client/wire residual `15.92 us/op`, handler `8.20 us/op`, completion send
+`3.71 us/op`, and smaller receive/dispatch/queue phases. Cross-run D1 stability
+remains HOLD because the prior semantically identical one-queue run reached
+`1.530x`; instrumentation alone is not a stability fix. R2T is a bounded mounted
+kernel-initiator diagnostic next, not yet an architecture candidate. No
+architecture implementation is eligible.
 
 ## Why This Is Next
 
