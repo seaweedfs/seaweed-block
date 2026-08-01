@@ -67,6 +67,7 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // errDisconnect is a sentinel returned by handleDisconnect (BUG-002)
@@ -76,10 +77,11 @@ var errDisconnect = errors.New("disconnect")
 
 // Request represents an in-flight NVMe command being processed.
 type Request struct {
-	capsule CapsuleCommand
-	payload []byte // inline/R2T-collected data for Write
-	resp    CapsuleResponse
-	c2hData []byte // non-nil for Read/Identify responses
+	capsule         CapsuleCommand
+	payload         []byte // inline/R2T-collected data for Write
+	resp            CapsuleResponse
+	c2hData         []byte // non-nil for Read/Identify responses
+	dispatchReadyAt time.Time
 }
 
 // response represents a pending response to be written by txLoop.
@@ -92,6 +94,9 @@ type response struct {
 
 	r2t     *R2THeader
 	r2tDone chan struct{}
+
+	writeCompletion bool
+	queuedAt        time.Time
 }
 
 // Session carries per-connection NVMe/TCP state.
@@ -249,6 +254,7 @@ func (s *Session) rxLoop(ctx context.Context) error {
 }
 
 func (s *Session) parseCapsule() (*Request, error) {
+	start := time.Now()
 	var capsule CapsuleCommand
 	if err := s.wire.Receive(&capsule); err != nil {
 		return nil, err
@@ -262,6 +268,9 @@ func (s *Session) parseCapsule() (*Request, error) {
 	}
 	req := &Request{capsule: capsule, payload: payload}
 	req.resp.CID = capsule.CID
+	if s.qid > 0 && capsule.OpCode == ioWrite {
+		s.recordWriteCapsuleReceiveParse(time.Since(start))
+	}
 	return req, nil
 }
 
@@ -312,6 +321,7 @@ func (s *Session) dispatchFromRx(ctx context.Context, req *Request) error {
 		} else {
 			s.recordInlineWrite(uint32(len(req.payload)))
 		}
+		req.dispatchReadyAt = time.Now()
 	}
 
 	s.cmdWg.Add(1)
@@ -328,6 +338,7 @@ func (s *Session) dispatchFromRx(ctx context.Context, req *Request) error {
 // blocks rxLoop; pipelined Cmds arriving during this window are
 // absorbed into pendingCapsules by bufferInterleaved.
 func (s *Session) collectR2TData(req *Request) error {
+	start := time.Now()
 	totalBytes := req.capsule.LbaLength() * s.handler.BlockSize()
 
 	r2tDone := make(chan struct{})
@@ -356,6 +367,7 @@ func (s *Session) collectR2TData(req *Request) error {
 		return err
 	}
 	req.payload = data
+	s.recordR2TDataCollection(time.Since(start))
 	return nil
 }
 
@@ -521,6 +533,9 @@ func (s *Session) writeResponse(resp *response) error {
 	} else {
 		resp.resp.SQHD = uint16(s.sqhd.Load())
 	}
+	if resp.writeCompletion {
+		s.recordWriteCompletionQueueWait(time.Since(resp.queuedAt))
+	}
 
 	if len(resp.c2hData) > 0 {
 		s.recordC2HData(uint32(len(resp.c2hData)))
@@ -533,7 +548,12 @@ func (s *Session) writeResponse(resp *response) error {
 			return err
 		}
 	}
-	return s.wire.SendHeaderOnly(pduCapsuleResp, &resp.resp, capsuleRespSize)
+	sendStart := time.Now()
+	err := s.wire.SendHeaderOnly(pduCapsuleResp, &resp.resp, capsuleRespSize)
+	if resp.writeCompletion {
+		s.recordWriteCompletionSend(time.Since(sendStart))
+	}
+	return err
 }
 
 func (s *Session) enqueueResponse(resp *response) {
@@ -563,6 +583,8 @@ func (s *Session) handleRead(ctx context.Context, req *Request) {
 
 func (s *Session) handleWrite(ctx context.Context, req *Request) {
 	s.recordWriteCommand()
+	s.recordWriteDispatchWait(time.Since(req.dispatchReadyAt))
+	handlerStart := time.Now()
 	res := s.handler.Handle(ctx, IOCommand{
 		Opcode: req.capsule.OpCode,
 		NSID:   req.capsule.NSID,
@@ -570,10 +592,11 @@ func (s *Session) handleWrite(ctx context.Context, req *Request) {
 		NLB:    req.capsule.LbaLength(),
 		Data:   req.payload,
 	})
+	s.recordWriteHandler(time.Since(handlerStart))
 	if res.AsError() != nil {
 		req.resp.Status = MakeStatusField(res.SCT, res.SC, true)
 	}
-	s.enqueueResponse(&response{resp: req.resp})
+	s.enqueueResponse(&response{resp: req.resp, writeCompletion: true, queuedAt: time.Now()})
 }
 
 // ---------- Fabric ----------
@@ -762,6 +785,48 @@ func (s *Session) recordC2HData(bytes uint32) {
 	if s.target != nil {
 		s.target.stats.c2hDataPDUs.Add(1)
 		s.target.stats.c2hDataBytes.Add(uint64(bytes))
+	}
+}
+
+func (s *Session) recordWriteCapsuleReceiveParse(d time.Duration) {
+	if s.target != nil {
+		s.target.stats.writeCapsuleReceiveParseOps.Add(1)
+		s.target.stats.writeCapsuleReceiveParseNanos.Add(statsDurationNanos(d))
+	}
+}
+
+func (s *Session) recordR2TDataCollection(d time.Duration) {
+	if s.target != nil {
+		s.target.stats.r2tDataCollectionOps.Add(1)
+		s.target.stats.r2tDataCollectionNanos.Add(statsDurationNanos(d))
+	}
+}
+
+func (s *Session) recordWriteDispatchWait(d time.Duration) {
+	if s.target != nil {
+		s.target.stats.writeDispatchWaitOps.Add(1)
+		s.target.stats.writeDispatchWaitNanos.Add(statsDurationNanos(d))
+	}
+}
+
+func (s *Session) recordWriteHandler(d time.Duration) {
+	if s.target != nil {
+		s.target.stats.writeHandlerOps.Add(1)
+		s.target.stats.writeHandlerNanos.Add(statsDurationNanos(d))
+	}
+}
+
+func (s *Session) recordWriteCompletionQueueWait(d time.Duration) {
+	if s.target != nil {
+		s.target.stats.writeCompletionQueueWaitOps.Add(1)
+		s.target.stats.writeCompletionQueueWaitNanos.Add(statsDurationNanos(d))
+	}
+}
+
+func (s *Session) recordWriteCompletionSend(d time.Duration) {
+	if s.target != nil {
+		s.target.stats.writeCompletionSendOps.Add(1)
+		s.target.stats.writeCompletionSendNanos.Add(statsDurationNanos(d))
 	}
 }
 

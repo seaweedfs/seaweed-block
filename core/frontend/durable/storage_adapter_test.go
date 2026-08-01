@@ -60,6 +60,25 @@ type partialBatchStorage struct {
 	err error
 }
 
+func TestStorageBackend_WriteProfileReturnsCurrentSnapshot(t *testing.T) {
+	b, _, _ := newTestBackend(t, logicalStorageFactories()[0], 16, 4096)
+	payload := make([]byte, 4096)
+	if _, err := b.Write(context.Background(), 0, payload); err != nil {
+		t.Fatal(err)
+	}
+
+	profile := b.WriteProfile()
+	if profile.BackendWriteRequestOps != 1 || profile.BackendWriteRequestBytes != uint64(len(payload)) {
+		t.Fatalf("request profile=%+v", profile)
+	}
+	if profile.BackendWriteOps != 1 || profile.BackendWriteBytes != uint64(len(payload)) {
+		t.Fatalf("write profile=%+v", profile)
+	}
+	if profile.BackendStorageWriteCalls != 1 || profile.BackendStorageWriteBlocks != 1 {
+		t.Fatalf("storage profile=%+v", profile)
+	}
+}
+
 func (s partialBatchStorage) WriteBatch(_ uint32, _ [][]byte) ([]uint64, error) {
 	return []uint64{1}, s.err
 }

@@ -155,11 +155,20 @@ func TestReplicationVolume_SyncAllWaitsForSlowBarrier(t *testing.T) {
 }
 
 func TestReplicationVolume_QueueSaturationIsTypedAndCounted(t *testing.T) {
-	v := NewReplicationVolume("queue-saturation", storage.NewBlockStore(64, 4096))
+	addr, _ := replicaHarness(t, "queue-saturation")
+	v := volumeHarness(t, "queue-saturation")
+	if err := v.UpdateReplicaSet(1, []ReplicaTarget{targetFor("slow", addr, 1, 1)}); err != nil {
+		t.Fatal(err)
+	}
 	started := make(chan struct{})
 	releaseCh := make(chan struct{})
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(releaseCh) }) }
+	v.mu.Lock()
+	oldQueue := v.peerQueues["slow"]
+	peer := v.peers["slow"]
+	v.mu.Unlock()
+	oldQueue.closeAndWait()
 	q := newPeerWorkQueueWithOps("slow", 1, peerWorkQueueOps{
 		ship: func(ctx context.Context, _ LocalWrite) (bool, error) {
 			select {
@@ -174,11 +183,11 @@ func TestReplicationVolume_QueueSaturationIsTypedAndCounted(t *testing.T) {
 				return false, ctx.Err()
 			}
 		},
+		invalidate: peer.Invalidate,
 	})
 	v.mu.Lock()
 	v.peerQueues["slow"] = q
 	v.mu.Unlock()
-	t.Cleanup(func() { _ = v.Close() })
 	t.Cleanup(release)
 
 	first, err := v.enqueueLocalWrite(LocalWrite{LBA: 0, LSN: 1, Data: make([]byte, 4096)})
@@ -204,6 +213,12 @@ func TestReplicationVolume_QueueSaturationIsTypedAndCounted(t *testing.T) {
 	}
 	if got := v.Stats().PeerQueueSaturated; got != 1 {
 		t.Fatalf("PeerQueueSaturated=%d want 1", got)
+	}
+	v.mu.Lock()
+	current := v.peerQueues["slow"]
+	v.mu.Unlock()
+	if current != q {
+		t.Fatal("saturated queue changed before peer recovery completed")
 	}
 	release()
 	<-first.result

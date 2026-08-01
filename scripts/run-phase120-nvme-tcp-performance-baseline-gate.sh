@@ -160,6 +160,138 @@ raise SystemExit(1)
 PY
 }
 
+collect_nvme_stats_snapshot() {
+  local out="$1"
+  python3 - \
+    "${ARTIFACT_DIR}/status/cluster-evidence.json" \
+    "${ARTIFACT_DIR}/status/inventory/volume-inventory.json" \
+    "${out}" <<'PY'
+import json
+import sys
+import urllib.request
+
+cluster_path, inventory_path, out = sys.argv[1:]
+
+def field(obj, *names, default=None):
+    for name in names:
+        if isinstance(obj, dict) and name in obj:
+            return obj[name]
+    return default
+
+doc = json.load(open(cluster_path))
+managed = field(doc, "managed_volumes", "managedVolumes", default=[]) or []
+if len(managed) != 1:
+    raise SystemExit(f"managed_volume_count={len(managed)}, want 1")
+volume = managed[0]
+volume_id = field(volume, "volume_id", "volumeID")
+replicas = field(volume, "replicas", default=[]) or []
+if not replicas:
+    inventory = json.load(open(inventory_path))
+    for item in field(inventory, "volumes", default=[]) or []:
+        if field(item, "volume_id", "volumeID") == volume_id:
+            replicas = field(item, "replicas", default=[]) or []
+            break
+chosen = next((r for r in replicas if field(r, "frontend_primary_ready", "frontendPrimaryReady", default=False)), None)
+if chosen is None:
+    chosen = next((r for r in replicas if field(r, "healthy", default=False)), None)
+if chosen is None and replicas:
+    chosen = replicas[0]
+status_addr = field(chosen or {}, "status_addr", "statusAddr", "status_address", "statusAddress")
+if not volume_id or not status_addr:
+    raise SystemExit("volume_id or status_addr unavailable")
+with urllib.request.urlopen(f"http://{status_addr}/status/nvme?volume={volume_id}", timeout=10) as resp:
+    raw = resp.read()
+body = json.loads(raw)
+if body.get("volumeID") != volume_id or not isinstance(body.get("stats"), dict):
+    raise SystemExit(f"invalid NVMe status response: {body}")
+open(out, "wb").write(raw)
+PY
+}
+
+collect_nvme_phase_profile() {
+  python3 - \
+    "${ARTIFACT_DIR}/status/status-nvme-before-seq-write.json" \
+    "${ARTIFACT_DIR}/status/status-nvme-after-seq-write.json" \
+    "${SEQ_BYTES}" \
+    "${ARTIFACT_DIR}/status/nvme-phase-profile-summary.txt" <<'PY'
+import json
+import sys
+
+before_path, after_path, seq_bytes_raw, summary_path = sys.argv[1:]
+before = json.load(open(before_path))["stats"]
+after = json.load(open(after_path))["stats"]
+seq_bytes = int(seq_bytes_raw)
+
+def delta(name):
+    old = int(before.get(name, 0) or 0)
+    new = int(after.get(name, 0) or 0)
+    if new < old:
+        raise SystemExit(f"NVMe counter regressed: {name} before={old} after={new}")
+    return new - old
+
+write_ops = delta("write_commands")
+inline_ops = delta("inline_write_commands")
+inline_bytes = delta("inline_write_bytes")
+r2t_ops = delta("r2t_write_commands")
+r2t_bytes = delta("r2t_write_bytes")
+h2c_pdus = delta("h2c_data_pdus")
+h2c_bytes = delta("h2c_data_bytes")
+if write_ops <= 0:
+    raise SystemExit("mounted sequence write produced no NVMe Write commands")
+if inline_ops + r2t_ops != write_ops:
+    raise SystemExit(f"write shape mismatch: writes={write_ops} inline={inline_ops} r2t={r2t_ops}")
+if inline_bytes + r2t_bytes < seq_bytes:
+    raise SystemExit(f"NVMe write bytes={inline_bytes + r2t_bytes}, want >= {seq_bytes}")
+if h2c_bytes != r2t_bytes:
+    raise SystemExit(f"H2C bytes={h2c_bytes}, want R2T bytes {r2t_bytes}")
+
+phase_ops = {
+    "capsule_receive_parse": delta("write_capsule_receive_parse_ops"),
+    "r2t_collection": delta("r2t_data_collection_ops"),
+    "dispatch_wait": delta("write_dispatch_wait_ops"),
+    "handler": delta("write_handler_ops"),
+    "completion_queue_wait": delta("write_completion_queue_wait_ops"),
+    "completion_send": delta("write_completion_send_ops"),
+}
+for name in ("capsule_receive_parse", "dispatch_wait", "handler", "completion_queue_wait", "completion_send"):
+    if phase_ops[name] != write_ops:
+        raise SystemExit(f"{name}_ops={phase_ops[name]}, want writes {write_ops}")
+if phase_ops["r2t_collection"] != r2t_ops:
+    raise SystemExit(f"r2t_collection_ops={phase_ops['r2t_collection']}, want R2T writes {r2t_ops}")
+
+phase_fields = {
+    "capsule_receive_parse": "write_capsule_receive_parse_ns",
+    "r2t_collection": "r2t_data_collection_ns",
+    "dispatch_wait": "write_dispatch_wait_ns",
+    "handler": "write_handler_ns",
+    "completion_queue_wait": "write_completion_queue_wait_ns",
+    "completion_send": "write_completion_send_ns",
+}
+phase_ns = {name: delta(field) for name, field in phase_fields.items()}
+server_phase_ns = sum(phase_ns.values())
+dominant = max(phase_ns, key=phase_ns.get)
+
+with open(summary_path, "w") as out:
+    out.write("phase120_nvme_phase_profile_status=ok\n")
+    out.write(f"mounted_nvme_write_ops={write_ops}\n")
+    out.write(f"mounted_nvme_inline_write_ops={inline_ops}\n")
+    out.write(f"mounted_nvme_r2t_write_ops={r2t_ops}\n")
+    out.write(f"mounted_nvme_write_bytes={inline_bytes + r2t_bytes}\n")
+    out.write(f"mounted_nvme_h2c_data_pdus={h2c_pdus}\n")
+    for name in phase_ops:
+        out.write(f"mounted_nvme_{name}_ops={phase_ops[name]}\n")
+        out.write(f"mounted_nvme_{name}_ns={phase_ns[name]}\n")
+        out.write(f"mounted_nvme_{name}_ns_per_op={phase_ns[name] / write_ops:.3f}\n")
+    out.write(f"mounted_nvme_server_phase_ns={server_phase_ns}\n")
+    out.write(f"mounted_nvme_server_phase_ns_per_op={server_phase_ns / write_ops:.3f}\n")
+    out.write(f"mounted_nvme_dominant_phase={dominant}\n")
+    out.write("mounted_nvme_phase_counter_reconciliation=true\n")
+    out.write("mounted_client_latency_reconciliation_available=false\n")
+    out.write("mounted_shape_comparable=false\n")
+PY
+  cat "${ARTIFACT_DIR}/status/nvme-phase-profile-summary.txt" >>"${SUMMARY}"
+}
+
 wait_managed_volume_ready_after_restart() {
   for _ in $(seq 1 90); do
     if with_master_port_forward "${ARTIFACT_DIR}/status/blockmaster-port-forward-after-restart.log" collect_cluster_evidence_after_restart; then
@@ -683,6 +815,12 @@ kubectl apply -f "${ARTIFACT_DIR}/pvc/perf-pvc.yaml" >"${ARTIFACT_DIR}/pvc/apply
 kubectl -n "${APP_NAMESPACE}" wait --for=jsonpath='{.status.phase}'=Bound "pvc/${PVC_NAME}" --timeout=180s \
   >"${ARTIFACT_DIR}/pvc/wait-pvc-bound.log" 2>&1
 kubectl -n "${APP_NAMESPACE}" get pvc "${PVC_NAME}" -o wide >"${ARTIFACT_DIR}/pvc/pvc.after-bound.txt" 2>&1
+PV_NAME="$(kubectl -n "${APP_NAMESPACE}" get pvc "${PVC_NAME}" -o jsonpath='{.spec.volumeName}')"
+if [[ -z "${PV_NAME}" ]]; then
+  echo "bound PVC ${APP_NAMESPACE}/${PVC_NAME} has no volumeName" >&2
+  exit 1
+fi
+write_summary "pv_name=${PV_NAME}"
 write_summary "pvc_bound=true"
 
 cat >"${ARTIFACT_DIR}/perf/perf-pod.yaml" <<YAML
@@ -786,6 +924,9 @@ write_summary "marker_verify_ms=${MARKER_MS}"
 write_summary "marker_verified=true"
 
 SEQ_BYTES=$((SEQ_MIB * 1024 * 1024))
+if [[ "${PROFILE_WRITE}" == "true" ]]; then
+  collect_nvme_stats_snapshot "${ARTIFACT_DIR}/status/status-nvme-before-seq-write.json"
+fi
 SEQ_WRITE_MS="$(measure_profiled_exec_ms "${ARTIFACT_DIR}/perf/seq-write.log" "${ARTIFACT_DIR}/profile/seq-write-samples.txt" \
   kubectl -n "${APP_NAMESPACE}" exec "${PERF_POD}" -- sh -c \
   "set -eu; dd if=/dev/zero of=/data/phase120-seq.bin bs=1M count=${SEQ_MIB} conv=fsync; sync")"
@@ -800,6 +941,8 @@ write_summary "seq_write_mibps=${SEQ_WRITE_MIBPS}"
 write_summary "seq_read_duration_ms=${SEQ_READ_MS}"
 write_summary "seq_read_mibps=${SEQ_READ_MIBPS}"
 if [[ "${PROFILE_WRITE}" == "true" ]]; then
+  collect_nvme_stats_snapshot "${ARTIFACT_DIR}/status/status-nvme-after-seq-write.json"
+  collect_nvme_phase_profile
   collect_durable_write_profile
 fi
 if [[ "${RESTART_BLOCKVOLUME_AFTER_WRITE_PROFILE}" == "true" ]]; then
@@ -829,6 +972,20 @@ kubectl -n "${APP_NAMESPACE}" delete pod "${PERF_POD}" --ignore-not-found=true -
   >"${ARTIFACT_DIR}/cleanup/delete-perf-pod.txt" 2>&1
 kubectl -n "${APP_NAMESPACE}" delete pvc "${PVC_NAME}" --ignore-not-found=true --wait=true --timeout=120s \
   >"${ARTIFACT_DIR}/cleanup/delete-pvc.txt" 2>&1
+pv_deleted=false
+for _ in $(seq 1 180); do
+  if ! kubectl get pv "${PV_NAME}" >/dev/null 2>&1; then
+    pv_deleted=true
+    break
+  fi
+  sleep 1
+done
+if [[ "${pv_deleted}" != "true" ]]; then
+  kubectl get pv "${PV_NAME}" -o yaml >"${ARTIFACT_DIR}/cleanup/pv-delete-timeout.yaml" 2>&1 || true
+  echo "PV ${PV_NAME} remained after PVC deletion while CSI was running" >&2
+  exit 1
+fi
+write_summary "pv_deleted_before_csi_uninstall=true"
 kubectl delete storageclass "${SC_NAME}" --ignore-not-found=true --wait=true --timeout=120s \
   >"${ARTIFACT_DIR}/cleanup/delete-storageclass.txt" 2>&1
 sudo -n nvme disconnect-all >/dev/null 2>&1 || true

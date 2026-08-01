@@ -41,6 +41,10 @@ type FlusherInstrumentationStatus struct {
 	WALRecordReadFailures           uint64
 	WALRecordReadBytes              uint64
 	WALRecordReadDurationNanos      uint64
+	WALRecordDecodeOps              uint64
+	WALRecordDecodeFailures         uint64
+	WALRecordDecodeBytes            uint64
+	WALRecordDecodeDurationNanos    uint64
 	ExtentWriteOps                  uint64
 	ExtentWriteFailures             uint64
 	ExtentWriteBytes                uint64
@@ -88,6 +92,10 @@ type flusherInstrumentation struct {
 	walRecordReadFailures           atomic.Uint64
 	walRecordReadBytes              atomic.Uint64
 	walRecordReadDurationNanos      atomic.Uint64
+	walRecordDecodeOps              atomic.Uint64
+	walRecordDecodeFailures         atomic.Uint64
+	walRecordDecodeBytes            atomic.Uint64
+	walRecordDecodeDurationNanos    atomic.Uint64
 	extentWriteOps                  atomic.Uint64
 	extentWriteFailures             atomic.Uint64
 	extentWriteBytes                atomic.Uint64
@@ -206,6 +214,15 @@ func (i *flusherInstrumentation) recordWALRecordRead(bytes int, duration time.Du
 	}
 }
 
+func (i *flusherInstrumentation) recordWALRecordDecode(bytes int, duration time.Duration, err error) {
+	i.walRecordDecodeOps.Add(1)
+	i.walRecordDecodeBytes.Add(uint64(bytes))
+	i.walRecordDecodeDurationNanos.Add(storageDurationNanos(duration))
+	if err != nil {
+		i.walRecordDecodeFailures.Add(1)
+	}
+}
+
 func (i *flusherInstrumentation) recordValidatedRecord() {
 	i.validatedRecords.Add(1)
 }
@@ -296,6 +313,10 @@ func (i *flusherInstrumentation) snapshot() FlusherInstrumentationStatus {
 		WALRecordReadFailures:           i.walRecordReadFailures.Load(),
 		WALRecordReadBytes:              i.walRecordReadBytes.Load(),
 		WALRecordReadDurationNanos:      i.walRecordReadDurationNanos.Load(),
+		WALRecordDecodeOps:              i.walRecordDecodeOps.Load(),
+		WALRecordDecodeFailures:         i.walRecordDecodeFailures.Load(),
+		WALRecordDecodeBytes:            i.walRecordDecodeBytes.Load(),
+		WALRecordDecodeDurationNanos:    i.walRecordDecodeDurationNanos.Load(),
 		ExtentWriteOps:                  i.extentWriteOps.Load(),
 		ExtentWriteFailures:             i.extentWriteFailures.Load(),
 		ExtentWriteBytes:                i.extentWriteBytes.Load(),

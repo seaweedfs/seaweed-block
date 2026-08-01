@@ -13,6 +13,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/engine"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
 	"github.com/seaweedfs/seaweed-block/core/replication"
 )
 
@@ -40,6 +41,10 @@ import (
 //	  -> 400                                  (missing volume query param)
 //	  -> 403                                  (non-loopback client)
 //
+//	GET /status/nvme?volume=<id>
+//	  -> 200 JSON read-only NVMe target counters (when a TCP target is wired)
+//	  -> 404                                  (wrong volume or no TCP source)
+//
 // The server binds on a caller-supplied addr (":0" for tests);
 // the actual bound addr is available via Addr() after Start.
 type StatusServer struct {
@@ -54,6 +59,7 @@ type StatusServer struct {
 	allowExternal   bool
 	peerSource      peerStatusSource
 	durableSource   durableStatusSource
+	nvmeSource      nvmeStatusSource
 	runtimeSource   runtimeRecoverySource
 	frontendCaps    []FrontendTransportCapability
 }
@@ -64,6 +70,10 @@ type peerStatusSource interface {
 
 type durableStatusSource interface {
 	DurableStatuses() []durable.VolumeStatus
+}
+
+type nvmeStatusSource interface {
+	Stats() nvme.Stats
 }
 
 type runtimeRecoverySource interface {
@@ -120,6 +130,11 @@ type FrontendCapabilitiesStatus struct {
 	VolumeID                     string                        `json:"volumeID"`
 	HostCapabilityIsProductClaim bool                          `json:"hostCapabilityIsProductClaim"`
 	FrontendTransports           []FrontendTransportCapability `json:"frontendTransports"`
+}
+
+type NVMeStatus struct {
+	VolumeID string     `json:"volumeID"`
+	Stats    nvme.Stats `json:"stats"`
 }
 
 const (
@@ -208,6 +223,14 @@ func (s *StatusServer) SetDurableStatusSource(src durableStatusSource) {
 	s.durableSource = src
 }
 
+// SetNVMeStatusSource enables /status/nvme with a read-only target snapshot.
+// It may be called before or after Start.
+func (s *StatusServer) SetNVMeStatusSource(src nvmeStatusSource) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nvmeSource = src
+}
+
 func (s *StatusServer) SetRuntimeRecoverySource(src runtimeRecoverySource) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -251,6 +274,7 @@ func (s *StatusServer) Start(addr string) (string, error) {
 	mux.HandleFunc("/status", s.handleStatus)
 	mux.HandleFunc("/status/peers", s.handleStatusPeers)
 	mux.HandleFunc("/status/durable", s.handleStatusDurable)
+	mux.HandleFunc("/status/nvme", s.handleStatusNVMe)
 	mux.HandleFunc("/status/frontend-capabilities", s.handleFrontendCapabilities)
 	if s.recoveryEnabled {
 		mux.HandleFunc("/status/recovery", s.handleStatusRecovery)
@@ -333,6 +357,32 @@ func (s *StatusServer) handleFrontendCapabilities(w http.ResponseWriter, r *http
 		HostCapabilityIsProductClaim: false,
 		FrontendTransports:           caps,
 	})
+}
+
+func (s *StatusServer) handleStatusNVMe(w http.ResponseWriter, r *http.Request) {
+	if !s.externalAccessAllowed() && !isLoopbackRemote(r.RemoteAddr) {
+		http.Error(w, "status endpoint restricted to loopback", http.StatusForbidden)
+		return
+	}
+	vol := r.URL.Query().Get("volume")
+	if vol == "" {
+		http.Error(w, "missing volume query param", http.StatusBadRequest)
+		return
+	}
+	p := s.statusProjection()
+	if p.VolumeID != vol {
+		http.Error(w, fmt.Sprintf("volume %q not served by this host (serves %q)", vol, p.VolumeID), http.StatusNotFound)
+		return
+	}
+	s.mu.Lock()
+	src := s.nvmeSource
+	s.mu.Unlock()
+	if src == nil {
+		http.Error(w, "NVMe status source unavailable", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(NVMeStatus{VolumeID: p.VolumeID, Stats: src.Stats()})
 }
 
 func (s *StatusServer) statusProjection() StatusProjection {

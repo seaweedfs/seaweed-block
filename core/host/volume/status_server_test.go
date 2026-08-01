@@ -16,6 +16,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/adapter"
 	"github.com/seaweedfs/seaweed-block/core/engine"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
 	"github.com/seaweedfs/seaweed-block/core/replication"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 )
@@ -128,6 +129,55 @@ func TestStatusServer_FrontendCapabilitiesReportsTransportBoundary(t *testing.T)
 	}
 	if len(rdma.Preflight) != 1 || rdma.Preflight[0].Name != "nvme_rdma_module" || rdma.Preflight[0].Available {
 		t.Fatalf("rdma preflight unexpected: %+v", rdma.Preflight)
+	}
+}
+
+type stubNVMeStatusSource struct {
+	stats nvme.Stats
+}
+
+func (s stubNVMeStatusSource) Stats() nvme.Stats { return s.stats }
+
+func TestStatusServer_NVMeStatusEndpoint(t *testing.T) {
+	s := NewStatusServer(NewAdapterProjectionView(stubProjector{}, "v1", "r1", nil))
+	addr, err := s.Start("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = s.Close(context.Background()) }()
+
+	resp, err := http.Get("http://" + addr + "/status/nvme?volume=v1")
+	if err != nil {
+		t.Fatalf("get without source: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status without source=%d want 404", resp.StatusCode)
+	}
+
+	s.SetNVMeStatusSource(stubNVMeStatusSource{stats: nvme.Stats{
+		WriteCommands:               17,
+		R2TWriteCommands:            17,
+		WriteCapsuleReceiveParseOps: 17,
+		WriteHandlerOps:             17,
+		WriteCompletionSendOps:      17,
+	}})
+	resp, err = http.Get("http://" + addr + "/status/nvme?volume=v1")
+	if err != nil {
+		t.Fatalf("get with source: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status with source=%d want 200", resp.StatusCode)
+	}
+	var body NVMeStatus
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.VolumeID != "v1" || body.Stats.WriteCommands != 17 ||
+		body.Stats.R2TWriteCommands != 17 || body.Stats.WriteCapsuleReceiveParseOps != 17 ||
+		body.Stats.WriteHandlerOps != 17 || body.Stats.WriteCompletionSendOps != 17 {
+		t.Fatalf("unexpected NVMe status: %+v", body)
 	}
 }
 

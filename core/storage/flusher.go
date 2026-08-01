@@ -91,9 +91,16 @@ func (f *flusher) NotifyUrgent() {
 // run drives the flush loop. Wakes on either the periodic ticker
 // or an explicit Notify(). Call once in a goroutine.
 func (f *flusher) run() {
+	f.runWithStartSignal(nil)
+}
+
+func (f *flusher) runWithStartSignal(started chan<- struct{}) {
 	defer close(f.doneCh)
 	ticker := time.NewTicker(f.interval)
 	defer ticker.Stop()
+	if started != nil {
+		close(started)
+	}
 	for {
 		select {
 		case <-f.stopCh:
@@ -321,7 +328,9 @@ func (f *flusher) readDirtyRecord(e snapshotEntry) (data []byte, entrySize uint6
 			"flusher: invalid dirty WAL record LBA %d offset %d record size %d expected %d",
 			e.LBA, e.WALOffset, entrySize, expectedRecordSize)
 	}
+	decodeStart := time.Now()
 	entry, err := decodeWALEntry(full)
+	f.instr.recordWALRecordDecode(len(full), time.Since(decodeStart), err)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"flusher: invalid dirty WAL record LBA %d offset %d: %w",
