@@ -1027,6 +1027,9 @@ func run(f flags) int {
 		}
 		if status != nil {
 			status.SetFrontendCapabilities(nvmeFrontendCapabilities(f.nvmeListen, f.nvmeTransport, true))
+			if source, ok := nvmeTarget.(interface{ Stats() nvme.Stats }); ok {
+				status.SetNVMeStatusSource(source)
+			}
 		}
 	}
 
