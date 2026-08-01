@@ -78,10 +78,10 @@ func parseFlags(args []string) (flags, error) {
 	if f.endpoint == "" {
 		return flags{}, fmt.Errorf("--endpoint is required")
 	}
-	if f.masterAddr == "" && (f.stage2Multipath || f.nvmeReconnectOwner || f.rejectLoopbackPublishTargets || f.pvcUIDLookup || f.swBlockVolumeCRNamespace != "") {
-		return flags{}, fmt.Errorf("--stage2-multipath, --nvme-reconnect-owner, --reject-loopback-publish-targets, --kubernetes-pvc-uid-lookup, and --swblockvolume-cr-namespace require --master")
-	}
 	snapshotConfigured := f.snapshotAPIAddr != "" || f.snapshotAPICAFile != "" || f.snapshotAPIClientCertFile != "" || f.snapshotAPIClientKeyFile != "" || f.snapshotAPITokenFile != ""
+	if f.masterAddr == "" && (f.stage2Multipath || f.nvmeReconnectOwner || f.rejectLoopbackPublishTargets || f.pvcUIDLookup || f.swBlockVolumeCRNamespace != "" || snapshotConfigured) {
+		return flags{}, fmt.Errorf("--stage2-multipath, --nvme-reconnect-owner, --reject-loopback-publish-targets, --kubernetes-pvc-uid-lookup, --swblockvolume-cr-namespace, and snapshot API configuration require --master")
+	}
 	if snapshotConfigured && (f.snapshotAPIAddr == "" || f.snapshotAPICAFile == "" || f.snapshotAPIClientCertFile == "" || f.snapshotAPIClientKeyFile == "" || f.snapshotAPITokenFile == "") {
 		return flags{}, fmt.Errorf("--snapshot-api, --snapshot-api-ca, --snapshot-api-client-cert, --snapshot-api-client-key, and --snapshot-api-token-file must be configured together")
 	}

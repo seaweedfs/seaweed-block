@@ -38,7 +38,14 @@ func (p *ControlSnapshotProvisioner) GetSnapshot(ctx context.Context, snapshotID
 	if err != nil {
 		return SnapshotSpec{}, err
 	}
-	return snapshotSpecFromWire(record)
+	spec, err := snapshotSpecFromWire(record)
+	if err != nil {
+		return SnapshotSpec{}, err
+	}
+	if spec.SnapshotID != snapshotID {
+		return SnapshotSpec{}, fmt.Errorf("csi: get snapshot response identity mismatch")
+	}
+	return spec, nil
 }
 
 func (p *ControlSnapshotProvisioner) ListSnapshots(ctx context.Context, sourceVolumeID string) ([]SnapshotSpec, error) {

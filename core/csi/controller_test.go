@@ -435,6 +435,13 @@ func TestPhase175ControllerSnapshotLifecycleAndPagination(t *testing.T) {
 	if !advertised {
 		t.Fatal("configured controller did not advertise CREATE_DELETE_SNAPSHOT")
 	}
+	listAdvertised := false
+	for _, capability := range caps.GetCapabilities() {
+		listAdvertised = listAdvertised || capability.GetRpc().GetType() == csipb.ControllerServiceCapability_RPC_LIST_SNAPSHOTS
+	}
+	if !listAdvertised {
+		t.Fatal("configured controller did not advertise LIST_SNAPSHOTS")
+	}
 	created, err := s.CreateSnapshot(context.Background(), &csipb.CreateSnapshotRequest{Name: "daily", SourceVolumeId: "vol-a"})
 	if err != nil || created.GetSnapshot().GetSnapshotId() != "snap-2" || !created.GetSnapshot().GetReadyToUse() {
 		t.Fatalf("created=%+v err=%v", created, err)
@@ -452,6 +459,9 @@ func TestPhase175ControllerSnapshotLifecycleAndPagination(t *testing.T) {
 	}
 	if fmt.Sprint(snapshotter.createCalls) != "[daily/vol-a]" || fmt.Sprint(snapshotter.deleteCalls) != "[snap-2]" {
 		t.Fatalf("create=%v delete=%v", snapshotter.createCalls, snapshotter.deleteCalls)
+	}
+	if _, err := s.ListSnapshots(context.Background(), &csipb.ListSnapshotsRequest{SourceVolumeId: "vol-b", StartingToken: first.GetNextToken()}); status.Code(err) != codes.Aborted {
+		t.Fatalf("query-mismatched token error=%v", err)
 	}
 }
 
@@ -497,6 +507,51 @@ func TestPhase175ControllerRestoreStaysFailClosedUntilRuntimeReady(t *testing.T)
 	}
 	if len(provisioner.calls) != 1 || fmt.Sprint(snapshotter.restoreCalls) != "[snap-source/restored-vol]" {
 		t.Fatalf("provisioned=%v restore=%v", provisioner.calls, snapshotter.restoreCalls)
+	}
+}
+
+func TestPhase175ControllerRestoreSelectsSnapshotSizeWithinRequestedRange(t *testing.T) {
+	snapshotter := &stubSnapshotter{snapshots: []SnapshotSpec{{
+		SnapshotID: "snap-source", SourceVolumeID: "source-vol", CreatedAt: time.Now().UTC(), State: SnapshotStateReady, SizeBytes: 1 << 20,
+	}}}
+	for _, tc := range []struct {
+		name     string
+		rangeReq *csipb.CapacityRange
+		wantCode codes.Code
+	}{
+		{name: "contained", rangeReq: &csipb.CapacityRange{RequiredBytes: 512 << 10, LimitBytes: 2 << 20}, wantCode: codes.OK},
+		{name: "required too large", rangeReq: &csipb.CapacityRange{RequiredBytes: 2 << 20}, wantCode: codes.OutOfRange},
+		{name: "limit too small", rangeReq: &csipb.CapacityRange{LimitBytes: 512 << 10}, wantCode: codes.OutOfRange},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provisioner := &stubProvisioner{}
+			s := NewControllerServerWithProvisionerMetadataRegistrarAndSnapshotter(&stubLookup{}, provisioner, nil, nil, snapshotter)
+			response, err := s.CreateVolume(context.Background(), &csipb.CreateVolumeRequest{
+				Name: "restored-vol", CapacityRange: tc.rangeReq, VolumeCapabilities: []*csipb.VolumeCapability{testVolumeCapability()},
+				VolumeContentSource: &csipb.VolumeContentSource{Type: &csipb.VolumeContentSource_Snapshot{Snapshot: &csipb.VolumeContentSource_SnapshotSource{SnapshotId: "snap-source"}}},
+			})
+			if status.Code(err) != tc.wantCode {
+				t.Fatalf("error=%v want code %s", err, tc.wantCode)
+			}
+			if tc.wantCode == codes.OK && (len(provisioner.calls) != 1 || provisioner.calls[0].SizeBytes != 1<<20 || response.GetVolume().GetCapacityBytes() != 1<<20) {
+				t.Fatalf("provisioned=%+v response=%+v", provisioner.calls, response)
+			}
+		})
+	}
+}
+
+func TestPhase175ControllerRejectsProvisionerThatDropsSnapshotIdentity(t *testing.T) {
+	snapshotter := &stubSnapshotter{snapshots: []SnapshotSpec{{
+		SnapshotID: "snap-source", SourceVolumeID: "source-vol", CreatedAt: time.Now().UTC(), State: SnapshotStateReady, SizeBytes: 1 << 20,
+	}}}
+	provisioner := &stubProvisioner{created: VolumeSpec{VolumeID: "restored-vol", SizeBytes: 1 << 20, ReplicationFactor: 1, Protocol: ProtocolISCSI}}
+	s := NewControllerServerWithProvisionerMetadataRegistrarAndSnapshotter(&stubLookup{}, provisioner, nil, nil, snapshotter)
+	_, err := s.CreateVolume(context.Background(), &csipb.CreateVolumeRequest{
+		Name: "restored-vol", CapacityRange: &csipb.CapacityRange{RequiredBytes: 1 << 20}, VolumeCapabilities: []*csipb.VolumeCapability{testVolumeCapability()},
+		VolumeContentSource: &csipb.VolumeContentSource{Type: &csipb.VolumeContentSource_Snapshot{Snapshot: &csipb.VolumeContentSource_SnapshotSource{SnapshotId: "snap-source"}}},
+	})
+	if status.Code(err) != codes.Internal || len(snapshotter.restoreCalls) != 0 {
+		t.Fatalf("error=%v restore=%v", err, snapshotter.restoreCalls)
 	}
 }
 

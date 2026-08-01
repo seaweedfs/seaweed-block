@@ -3,6 +3,7 @@ package csi
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"log"
 	"sort"
@@ -27,6 +28,15 @@ type ControllerServer struct {
 	metadataResolver KubernetesMetadataResolver
 	registrar        VolumeObjectRegistrar
 	snapshotter      SnapshotProvisioner
+}
+
+const snapshotListTokenVersion = 1
+
+type snapshotListToken struct {
+	Version        int    `json:"version"`
+	SourceVolumeID string `json:"source_volume_id,omitempty"`
+	SnapshotID     string `json:"snapshot_id,omitempty"`
+	LastSnapshotID string `json:"last_snapshot_id"`
 }
 
 func NewControllerServer(lookup PublishTargetLookup) *ControllerServer {
@@ -72,9 +82,10 @@ func (s *ControllerServer) CreateVolume(ctx context.Context, req *csipb.CreateVo
 		if snapshotSpec.State != SnapshotStateReady {
 			return nil, status.Errorf(codes.Aborted, "snapshot %q is not ready", snapshotSpec.SnapshotID)
 		}
-		if snapshotSpec.SizeBytes != spec.SizeBytes {
-			return nil, status.Errorf(codes.InvalidArgument, "restored volume capacity %d must equal snapshot capacity %d", spec.SizeBytes, snapshotSpec.SizeBytes)
+		if !snapshotSizeFitsCapacityRange(req.GetCapacityRange(), snapshotSpec.SizeBytes) {
+			return nil, status.Errorf(codes.OutOfRange, "snapshot capacity %d is outside the requested capacity range", snapshotSpec.SizeBytes)
 		}
+		spec.SizeBytes = snapshotSpec.SizeBytes
 		spec.SourceSnapshotID = snapshotSpec.SnapshotID
 	}
 	if err := s.resolveKubernetesMetadata(ctx, &spec); err != nil {
@@ -87,6 +98,9 @@ func (s *ControllerServer) CreateVolume(ctx context.Context, req *csipb.CreateVo
 			return nil, status.Errorf(codes.AlreadyExists, "volume %q already exists with different spec", spec.VolumeID)
 		}
 		return nil, status.Errorf(codes.Internal, "create volume intent: %v", err)
+	}
+	if !createdVolumeIdentityMatches(spec, created) {
+		return nil, status.Errorf(codes.Internal, "create volume intent returned mismatched identity for %q", spec.VolumeID)
 	}
 	if s.registrar != nil {
 		if err := s.registrar.EnsureVolumeObject(ctx, created); err != nil {
@@ -169,11 +183,11 @@ func (s *ControllerServer) ListSnapshots(ctx context.Context, req *csipb.ListSna
 	}
 	startAfter := ""
 	if req.GetStartingToken() != "" {
-		raw, err := base64.RawURLEncoding.DecodeString(req.GetStartingToken())
-		if err != nil || len(raw) == 0 {
+		token, err := decodeSnapshotListToken(req.GetStartingToken())
+		if err != nil || token.SourceVolumeID != req.GetSourceVolumeId() || token.SnapshotID != req.GetSnapshotId() {
 			return nil, status.Error(codes.Aborted, "invalid snapshot starting token")
 		}
-		startAfter = string(raw)
+		startAfter = token.LastSnapshotID
 	}
 	start := sort.Search(len(snapshots), func(i int) bool { return snapshots[i].SnapshotID > startAfter })
 	snapshots = snapshots[start:]
@@ -186,7 +200,13 @@ func (s *ControllerServer) ListSnapshots(ctx context.Context, req *csipb.ListSna
 		response.Entries = append(response.Entries, &csipb.ListSnapshotsResponse_Entry{Snapshot: csiSnapshot(item)})
 	}
 	if limit < len(snapshots) && limit > 0 {
-		response.NextToken = base64.RawURLEncoding.EncodeToString([]byte(snapshots[limit-1].SnapshotID))
+		nextToken, err := encodeSnapshotListToken(snapshotListToken{
+			Version: snapshotListTokenVersion, SourceVolumeID: req.GetSourceVolumeId(), SnapshotID: req.GetSnapshotId(), LastSnapshotID: snapshots[limit-1].SnapshotID,
+		})
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "encode snapshot continuation: %v", err)
+		}
+		response.NextToken = nextToken
 	}
 	return response, nil
 }
@@ -309,8 +329,11 @@ func (s *ControllerServer) ControllerGetCapabilities(context.Context, *csipb.Con
 	if s.provisioner != nil {
 		caps = append(caps, csipb.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME)
 	}
-	if s.snapshotter != nil {
-		caps = append(caps, csipb.ControllerServiceCapability_RPC_CREATE_DELETE_SNAPSHOT)
+	if s.snapshotter != nil && s.provisioner != nil {
+		caps = append(caps,
+			csipb.ControllerServiceCapability_RPC_CREATE_DELETE_SNAPSHOT,
+			csipb.ControllerServiceCapability_RPC_LIST_SNAPSHOTS,
+		)
 	}
 	out := make([]*csipb.ControllerServiceCapability, 0, len(caps))
 	for _, capType := range caps {
@@ -342,13 +365,56 @@ func snapshotCSIError(operation string, err error) error {
 
 func snapshotRestoreCSIError(err error) error {
 	switch status.Code(err) {
-	case codes.FailedPrecondition, codes.Aborted, codes.Unavailable, codes.DeadlineExceeded:
+	case codes.FailedPrecondition, codes.Aborted:
 		return status.Errorf(codes.Aborted, "snapshot restore is not ready: %v", err)
+	case codes.Unavailable, codes.DeadlineExceeded:
+		return status.Errorf(status.Code(err), "restore snapshot: %v", err)
 	case codes.InvalidArgument, codes.NotFound:
 		return status.Errorf(status.Code(err), "restore snapshot: %v", err)
 	default:
 		return status.Errorf(codes.Internal, "restore snapshot: %v", err)
 	}
+}
+
+func snapshotSizeFitsCapacityRange(capacity *csipb.CapacityRange, snapshotSize uint64) bool {
+	if snapshotSize == 0 || snapshotSize > uint64(^uint64(0)>>1) {
+		return false
+	}
+	size := int64(snapshotSize)
+	return (capacity.GetRequiredBytes() <= 0 || size >= capacity.GetRequiredBytes()) &&
+		(capacity.GetLimitBytes() <= 0 || size <= capacity.GetLimitBytes())
+}
+
+func createdVolumeIdentityMatches(requested, created VolumeSpec) bool {
+	return created.VolumeID == requested.VolumeID &&
+		created.SizeBytes == requested.SizeBytes &&
+		created.ReplicationFactor == requested.ReplicationFactor &&
+		normalizeProtocol(created.Protocol) == normalizeProtocol(requested.Protocol) &&
+		normalizeFrontendTransport(normalizeProtocol(created.Protocol), created.FrontendTransport) == normalizeFrontendTransport(normalizeProtocol(requested.Protocol), requested.FrontendTransport) &&
+		created.SourceSnapshotID == requested.SourceSnapshotID
+}
+
+func encodeSnapshotListToken(token snapshotListToken) (string, error) {
+	raw, err := json.Marshal(token)
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+func decodeSnapshotListToken(encoded string) (snapshotListToken, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		return snapshotListToken{}, err
+	}
+	var token snapshotListToken
+	if err := json.Unmarshal(raw, &token); err != nil {
+		return snapshotListToken{}, err
+	}
+	if token.Version != snapshotListTokenVersion || token.LastSnapshotID == "" {
+		return snapshotListToken{}, errors.New("unsupported or incomplete snapshot list token")
+	}
+	return token, nil
 }
 
 func (s *ControllerServer) ValidateVolumeCapabilities(ctx context.Context, req *csipb.ValidateVolumeCapabilitiesRequest) (*csipb.ValidateVolumeCapabilitiesResponse, error) {

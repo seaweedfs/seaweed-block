@@ -149,7 +149,7 @@ func TestParseFlags_MasterDependentFlagsRequireMaster(t *testing.T) {
 }
 
 func TestPhase175ParseFlags_SnapshotAPIConfigurationIsAllOrNothing(t *testing.T) {
-	base := []string{"--endpoint", "unix:///tmp/csi.sock", "--node-id", "node-a"}
+	base := []string{"--endpoint", "unix:///tmp/csi.sock", "--node-id", "node-a", "--master", "blockmaster:9333"}
 	if _, err := parseFlags(append(base, "--snapshot-api", "blockmaster:9343")); err == nil {
 		t.Fatal("expected incomplete snapshot API configuration to fail")
 	}
@@ -166,6 +166,11 @@ func TestPhase175ParseFlags_SnapshotAPIConfigurationIsAllOrNothing(t *testing.T)
 	}
 	if f.snapshotAPIAddr != "blockmaster:9343" || f.snapshotAPITokenFile != "/secrets/token" {
 		t.Fatalf("snapshot flags=%+v", f)
+	}
+	withoutMaster := append([]string(nil), args...)
+	withoutMaster = append(withoutMaster[:4], withoutMaster[6:]...)
+	if _, err := parseFlags(withoutMaster); err == nil {
+		t.Fatal("expected snapshot API configuration without --master to fail")
 	}
 }
 

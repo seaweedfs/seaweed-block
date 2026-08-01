@@ -16,6 +16,7 @@ type fakeSnapshotServiceClient struct {
 	createRequest  *control.CreateSnapshotRequest
 	restoreRequest *control.RestoreSnapshotRequest
 	restoreReply   *control.RestoreSnapshotResponse
+	getReply       *control.SnapshotRecord
 }
 
 func (f *fakeSnapshotServiceClient) CreateSnapshot(ctx context.Context, request *control.CreateSnapshotRequest, _ ...grpc.CallOption) (*control.SnapshotRecord, error) {
@@ -26,6 +27,9 @@ func (f *fakeSnapshotServiceClient) CreateSnapshot(ctx context.Context, request 
 
 func (f *fakeSnapshotServiceClient) GetSnapshot(ctx context.Context, request *control.GetSnapshotRequest, _ ...grpc.CallOption) (*control.SnapshotRecord, error) {
 	f.contexts = append(f.contexts, ctx)
+	if f.getReply != nil {
+		return f.getReply, nil
+	}
 	return validWireSnapshot(request.GetSnapshotId(), "daily", "vol-a"), nil
 }
 
@@ -106,5 +110,16 @@ func TestPhase175ControlSnapshotProvisionerRejectsRestoreIdentityMismatch(t *tes
 	}
 	if err := provisioner.RestoreSnapshot(context.Background(), "snap-a", "restored-a"); err == nil {
 		t.Fatal("expected restore response identity mismatch")
+	}
+}
+
+func TestPhase175ControlSnapshotProvisionerRejectsGetIdentityMismatch(t *testing.T) {
+	client := &fakeSnapshotServiceClient{getReply: validWireSnapshot("snap-b", "daily", "vol-a")}
+	provisioner, err := NewControlSnapshotProvisioner(client, "secret-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provisioner.GetSnapshot(context.Background(), "snap-a"); err == nil {
+		t.Fatal("expected get response identity mismatch")
 	}
 }
