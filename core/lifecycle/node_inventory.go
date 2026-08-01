@@ -237,8 +237,8 @@ func validateReplicaInventory(replica ReplicaInventory) error {
 	if err := validateVolumeID(replica.VolumeID); err != nil {
 		return err
 	}
-	if replica.ReplicaID == "" {
-		return fmt.Errorf("%w: empty replica id", ErrInvalidNodeRegistration)
+	if !IsSafeStorageIdentityComponent(replica.ReplicaID) {
+		return fmt.Errorf("%w: invalid replica id %q", ErrInvalidNodeRegistration, replica.ReplicaID)
 	}
 	if replica.StoreUUID == "" {
 		return fmt.Errorf("%w: empty store uuid", ErrInvalidNodeRegistration)

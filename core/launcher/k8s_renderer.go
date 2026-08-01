@@ -92,6 +92,19 @@ func RenderBlockVolumeDeployments(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8
 	if cfg.MasterAddr == "" {
 		return nil, fmt.Errorf("launcher: master addr is required")
 	}
+	if !lifecycle.IsSafeStorageIdentityComponent(plan.VolumeID) {
+		return nil, fmt.Errorf("launcher: volume id %q is not a safe hostPath component", plan.VolumeID)
+	}
+	seenReplicaIDs := make(map[string]bool, len(plan.Replicas))
+	for _, replica := range plan.Replicas {
+		if !lifecycle.IsSafeStorageIdentityComponent(replica.ReplicaID) {
+			return nil, fmt.Errorf("launcher: replica id %q is not a safe hostPath component", replica.ReplicaID)
+		}
+		if seenReplicaIDs[replica.ReplicaID] {
+			return nil, fmt.Errorf("launcher: duplicate replica id %q would reuse one hostPath leaf", replica.ReplicaID)
+		}
+		seenReplicaIDs[replica.ReplicaID] = true
+	}
 	namespace := cfg.Namespace
 	ownerRefs, err := ownerReferences(plan, cfg)
 	if err != nil {

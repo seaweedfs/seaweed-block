@@ -227,8 +227,8 @@ func validatePlacementIntent(intent PlacementIntent) error {
 				return fmt.Errorf("%w: blank-pool slot on %s must not preassign replica id", ErrInvalidVolumeSpec, slot.ServerID)
 			}
 		case PlacementSourceExistingReplica:
-			if slot.ReplicaID == "" {
-				return fmt.Errorf("%w: existing-replica slot on %s missing replica id", ErrInvalidVolumeSpec, slot.ServerID)
+			if !IsSafeStorageIdentityComponent(slot.ReplicaID) {
+				return fmt.Errorf("%w: existing-replica slot on %s has invalid replica id %q", ErrInvalidVolumeSpec, slot.ServerID, slot.ReplicaID)
 			}
 		default:
 			return fmt.Errorf("%w: unknown placement source %q", ErrInvalidVolumeSpec, slot.Source)

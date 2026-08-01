@@ -144,6 +144,27 @@ func TestG15d_K8sRenderer_RF2UsesDistinctNamesAndPorts(t *testing.T) {
 	}
 }
 
+func TestPhase175K8sRendererRejectsHostPathIdentityTraversalAndCollision(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*lifecycle.BlockVolumeWorkloadPlan)
+	}{
+		{name: "dot volume", mutate: func(plan *lifecycle.BlockVolumeWorkloadPlan) { plan.VolumeID = "." }},
+		{name: "parent volume", mutate: func(plan *lifecycle.BlockVolumeWorkloadPlan) { plan.VolumeID = ".." }},
+		{name: "replica traversal", mutate: func(plan *lifecycle.BlockVolumeWorkloadPlan) { plan.Replicas[0].ReplicaID = "../../master" }},
+		{name: "dot replica", mutate: func(plan *lifecycle.BlockVolumeWorkloadPlan) { plan.Replicas[0].ReplicaID = "." }},
+		{name: "duplicate replica", mutate: func(plan *lifecycle.BlockVolumeWorkloadPlan) { plan.Replicas[1].ReplicaID = plan.Replicas[0].ReplicaID }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			plan := sampleWorkloadPlan()
+			tc.mutate(&plan)
+			if _, err := RenderBlockVolumeDeployments(plan, K8sRenderConfig{MasterAddr: "m:9333", StateHostPathBase: "/var/lib/sw-block/replicas"}); err == nil {
+				t.Fatal("unsafe hostPath identity rendered")
+			}
+		})
+	}
+}
+
 func TestMountedFailover_K8sRendererCanRenderSyncQuorumAckProfile(t *testing.T) {
 	manifests, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{
 		MasterAddr:     "m:9333",

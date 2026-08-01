@@ -321,11 +321,15 @@ func normalizeVolumeSpec(spec VolumeSpec) VolumeSpec {
 }
 
 func validateVolumeID(volumeID string) error {
-	if volumeID == "" {
-		return fmt.Errorf("%w: empty volume id", ErrInvalidVolumeSpec)
-	}
-	if !volumeIDPattern.MatchString(volumeID) {
+	if !IsSafeStorageIdentityComponent(volumeID) {
 		return fmt.Errorf("%w: invalid volume id %q", ErrInvalidVolumeSpec, volumeID)
 	}
 	return nil
+}
+
+// IsSafeStorageIdentityComponent reports whether an identity can be used as
+// one filesystem path component. Lifecycle ingress and workload renderers
+// both enforce it because these identities select durable hostPath leaves.
+func IsSafeStorageIdentityComponent(value string) bool {
+	return value != "" && value != "." && value != ".." && volumeIDPattern.MatchString(value)
 }
