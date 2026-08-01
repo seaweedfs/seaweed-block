@@ -1,6 +1,7 @@
 # Current Plan: Phase 174 Frontend And Replication Execution Architecture
 
-Status: active. Phase 173 closed with no storage-backend change. Phase 174 D1
+Status: closing with no architecture candidate. Phase 173 closed with no
+storage-backend change. Phase 174 D1
 completed its local fixed-work matrix at `ed270f3`: direct WALStore was stable,
 but durable-adapter RF1 remained above the unchanged `1.25x` range limit. D1 is
 HOLD. D2's RF1 slice at `4034f37` reconciled all counters and attributed the
@@ -17,9 +18,11 @@ queues. Four-queue accumulated latency splits into R2T collection `30.10 us/op`,
 client/wire residual `15.92 us/op`, handler `8.20 us/op`, completion send
 `3.71 us/op`, and smaller receive/dispatch/queue phases. Cross-run D1 stability
 remains HOLD because the prior semantically identical one-queue run reached
-`1.530x`; instrumentation alone is not a stability fix. R2T is a bounded mounted
-kernel-initiator diagnostic next, not yet an architecture candidate. No
-architecture implementation is eligible.
+`1.530x`; instrumentation alone is not a stability fix. The exact mounted
+kernel gate passed at `415942e`: all 8,200 writes were inline, none used R2T,
+all phase counters reconciled, the handler bucket dominated, mounted data was
+verified, and cleanup was zero. The synthetic R2T shape therefore does not
+represent the shipped mounted path. No architecture implementation is eligible.
 
 ## Why This Is Next
 
@@ -106,6 +109,11 @@ payload semantics is not a candidate.
   `perf`, and network/device evidence.
 - Separate accumulated concurrent wait from wall time.
 
+Result: complete. RF1 variance followed flusher overlap, RF3 management-LAN
+evidence selected no candidate, synthetic NVMe/TCP phases reconciled, and the
+mounted kernel cross-check proved that the synthetic R2T-dominant shape does
+not occur on the shipped mounted write path.
+
 ### D3. Architecture Controls And Selection
 
 Run test-only controls for:
@@ -118,6 +126,9 @@ Run test-only controls for:
 
 Select at most one direction only when the effect is stable and at least
 `1.30x` on the four-writer admission shape. Otherwise select no change.
+
+Result: no change selected. No measured frontend, adapter, or replication
+direction met the stability, comparable-shape, and gain requirements together.
 
 ### D4. Selected Architecture Contract
 
