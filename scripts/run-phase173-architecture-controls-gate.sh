@@ -123,7 +123,7 @@ done
 
 mkdir -p "${STORE_DIR}/tmp"
 TMPDIR="${STORE_DIR}/tmp" GOMAXPROCS="${CONTROL_GOMAXPROCS}" taskset -c "${CONTROL_CPUSET}" go test ./core/frontend/durable \
-  -run '^$' -bench '^BenchmarkT3c_DurablePerf/walstore$' \
+  -run '^$' -bench '^BenchmarkT3c_DurablePerf$/^walstore$' \
   -benchtime=8000x -count=1 \
   >"${ARTIFACT_DIR}/rf1-durable-adapter-benchmark.txt" 2>&1
 TMPDIR="${STORE_DIR}/tmp" GOMAXPROCS="${CONTROL_GOMAXPROCS}" taskset -c "${CONTROL_CPUSET}" go test ./core/replication \
@@ -286,8 +286,29 @@ require_metric() {
   printf '%s' "${value}"
 }
 
-rf1_mibps="$(require_metric "${ARTIFACT_DIR}/rf1-durable-adapter-benchmark.txt" BenchmarkT3c_DurablePerf/walstore- MB/s)"
-rf1_ns="$(require_metric "${ARTIFACT_DIR}/rf1-durable-adapter-benchmark.txt" BenchmarkT3c_DurablePerf/walstore- ns/op)"
+require_iteration_metric() {
+  local file="$1"
+  local iterations="$2"
+  local metric="$3"
+  local values
+  values="$(awk -v iterations="${iterations}" -v metric="${metric}" '
+    $1 == iterations {
+      for (i = 2; i <= NF; i++) {
+        if ($(i + 1) == metric) {
+          print $i
+        }
+      }
+    }
+  ' "${file}")"
+  if [[ -z "${values}" || "${values}" == *$'\n'* ]]; then
+    echo "expected one ${iterations}-iteration ${metric} result in ${file}" >&2
+    exit 1
+  fi
+  printf '%s' "${values}"
+}
+
+rf1_mibps="$(require_iteration_metric "${ARTIFACT_DIR}/rf1-durable-adapter-benchmark.txt" 8000 MB/s)"
+rf1_ns="$(require_iteration_metric "${ARTIFACT_DIR}/rf1-durable-adapter-benchmark.txt" 8000 ns/op)"
 write_summary "rf1_durable_adapter_fixed_iterations=8000"
 write_summary "rf1_durable_adapter_mibps=${rf1_mibps}"
 write_summary "rf1_durable_adapter_ns_per_op=${rf1_ns}"
