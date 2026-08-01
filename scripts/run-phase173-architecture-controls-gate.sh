@@ -12,7 +12,7 @@ MATERIAL_RATIO="1.30"
 RUNS=5
 CONTROL_CPUSET="${SW_BLOCK_PHASE173_CONTROL_CPUSET:-}"
 
-mkdir -p "${ARTIFACT_DIR}" "${STORE_DIR}" "${ARTIFACT_DIR}/environment"
+mkdir -p "${ARTIFACT_DIR}" "${STORE_DIR}" "${ARTIFACT_DIR}/environment" "${ARTIFACT_DIR}/logs"
 : >"${SUMMARY}"
 : >"${RESULTS}"
 
@@ -90,12 +90,25 @@ go test ./core/storage -run '^TestPhase173ArchitectureControlContract$' -count=1
   >"${ARTIFACT_DIR}/control-contract-test.log" 2>&1
 go test -c -o "${TEST_BINARY}" ./core/storage
 
-control_log="${ARTIFACT_DIR}/architecture-controls.log"
-SW_BLOCK_PHASE173_ARCH_CONTROL_STORE_DIR="${STORE_DIR}" \
-  GOMAXPROCS="${CONTROL_GOMAXPROCS}" taskset -c "${CONTROL_CPUSET}" \
-  "${TEST_BINARY}" -test.run '^TestPhase173ArchitectureControls$' -test.v -test.count=1 \
-  >"${control_log}" 2>&1
-sed -n 's/^phase173_architecture_control_result=//p' "${control_log}" >"${RESULTS}"
+for control in \
+  shipped_concurrent_writers_4 \
+  deferred_foreground_writers_1 \
+  deferred_foreground_writers_4 \
+  shared_file_scratch \
+  split_file_scratch; do
+  for run in $(seq 1 "${RUNS}"); do
+    sync
+    sleep 0.25
+    control_log="${ARTIFACT_DIR}/logs/${control}-run${run}.log"
+    SW_BLOCK_PHASE173_ARCH_CONTROL_STORE_DIR="${STORE_DIR}" \
+    SW_BLOCK_PHASE173_ARCH_CONTROL="${control}" \
+    SW_BLOCK_PHASE173_ARCH_CONTROL_RUN="${run}" \
+    GOMAXPROCS="${CONTROL_GOMAXPROCS}" taskset -c "${CONTROL_CPUSET}" \
+      "${TEST_BINARY}" -test.run '^TestPhase173ArchitectureControls$' -test.v -test.count=1 \
+      >"${control_log}" 2>&1
+    sed -n 's/^phase173_architecture_control_result=//p' "${control_log}" >>"${RESULTS}"
+  done
+done
 
 mkdir -p "${STORE_DIR}/tmp"
 TMPDIR="${STORE_DIR}/tmp" GOMAXPROCS="${CONTROL_GOMAXPROCS}" taskset -c "${CONTROL_CPUSET}" go test ./core/frontend/durable \

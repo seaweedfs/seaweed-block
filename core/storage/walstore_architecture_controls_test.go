@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +16,8 @@ import (
 
 const (
 	phase173ControlStoreEnv = "SW_BLOCK_PHASE173_ARCH_CONTROL_STORE_DIR"
+	phase173ControlNameEnv  = "SW_BLOCK_PHASE173_ARCH_CONTROL"
+	phase173ControlRunEnv   = "SW_BLOCK_PHASE173_ARCH_CONTROL_RUN"
 	phase173ControlRuns     = 5
 	phase173ControlAPIOps   = 2320
 	phase173ControlWarmup   = 80
@@ -81,29 +84,36 @@ func TestPhase173ArchitectureControls(t *testing.T) {
 	if dir == "" {
 		t.Skip("formal architecture controls require " + phase173ControlStoreEnv)
 	}
+	control := os.Getenv(phase173ControlNameEnv)
+	run, err := strconv.Atoi(os.Getenv(phase173ControlRunEnv))
+	if err != nil || run < 1 || run > phase173ControlRuns {
+		t.Fatalf("%s must be in [1,%d]", phase173ControlRunEnv, phase173ControlRuns)
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
 	for _, tc := range []struct {
+		name    string
 		control string
 		writers int
 		live    bool
 	}{
-		{control: "shipped_concurrent", writers: 4, live: true},
-		{control: "deferred_foreground", writers: 1, live: false},
-		{control: "deferred_foreground", writers: 4, live: false},
+		{name: "shipped_concurrent_writers_4", control: "shipped_concurrent", writers: 4, live: true},
+		{name: "deferred_foreground_writers_1", control: "deferred_foreground", writers: 1, live: false},
+		{name: "deferred_foreground_writers_4", control: "deferred_foreground", writers: 4, live: false},
 	} {
-		path := filepath.Join(dir, fmt.Sprintf("phase173-control-%s-writers%d.store", tc.control, tc.writers))
+		if control != tc.name {
+			continue
+		}
+		path := filepath.Join(dir, fmt.Sprintf("phase173-control-%s-run%d.store", tc.name, run))
 		s := preparePhase173ControlStore(t, path, tc.writers)
-		for run := 1; run <= phase173ControlRuns; run++ {
-			runtime.GC()
-			time.Sleep(100 * time.Millisecond)
-			foreground, flusher := runPhase173WALStoreControl(t, s, tc.control, tc.writers, tc.live, run)
-			emitPhase173ArchitectureControl(t, foreground)
-			if tc.control == "deferred_foreground" && tc.writers == 4 {
-				emitPhase173ArchitectureControl(t, flusher)
-			}
+		runtime.GC()
+		time.Sleep(100 * time.Millisecond)
+		foreground, flusher := runPhase173WALStoreControl(t, s, tc.control, tc.writers, tc.live, run)
+		emitPhase173ArchitectureControl(t, foreground)
+		if tc.writers == 4 && !tc.live {
+			emitPhase173ArchitectureControl(t, flusher)
 		}
 		if err := s.Close(); err != nil {
 			t.Fatal(err)
@@ -111,21 +121,18 @@ func TestPhase173ArchitectureControls(t *testing.T) {
 		if err := os.Remove(path); err != nil {
 			t.Fatal(err)
 		}
+		return
 	}
 
-	scratch := preparePhase173FileLayoutScratch(t, dir)
-	defer scratch.close(t)
-	for run := 1; run <= phase173ControlRuns; run++ {
-		order := []bool{false, true}
-		if run%2 == 0 {
-			order = []bool{true, false}
-		}
-		for _, split := range order {
-			runtime.GC()
-			time.Sleep(100 * time.Millisecond)
-			emitPhase173ArchitectureControl(t, scratch.run(t, split, run))
-		}
+	if control == "shared_file_scratch" || control == "split_file_scratch" {
+		scratch := preparePhase173FileLayoutScratch(t, dir)
+		defer scratch.close(t)
+		runtime.GC()
+		time.Sleep(100 * time.Millisecond)
+		emitPhase173ArchitectureControl(t, scratch.run(t, control == "split_file_scratch", run))
+		return
 	}
+	t.Fatalf("unsupported %s=%q", phase173ControlNameEnv, control)
 }
 
 func phase173ControlConfig(writers int) phase173FixedWorkConfig {

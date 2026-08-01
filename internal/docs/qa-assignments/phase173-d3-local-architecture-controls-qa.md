@@ -31,6 +31,8 @@ run the formal gate on a network share, tmpfs, overlay, or OS-root filesystem.
 The CPU set must contain at least four comparable physical cores. Do not mix
 performance and efficiency cores or sibling SMT threads; the gate records the
 set and constrains both process affinity and `GOMAXPROCS`.
+Each sample runs in a fresh process after `sync` and a 250 ms settle interval,
+matching the Phase 173 D1 baseline's sample-isolation policy.
 
 ## Fixed Controls
 
