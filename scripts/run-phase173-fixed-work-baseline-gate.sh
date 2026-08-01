@@ -20,6 +20,11 @@ mkdir -p "${ARTIFACT_DIR}" "${STORE_DIR}" "${ARTIFACT_DIR}/environment" "${ARTIF
 : >"${SUMMARY}"
 : >"${RESULTS}"
 
+cleanup() {
+  rm -f "${STORE_DIR}"/phase173-*.store
+}
+trap cleanup EXIT
+
 write_summary() {
   echo "$*" | tee -a "${SUMMARY}" >/dev/null
 }
@@ -40,6 +45,8 @@ write_summary "flusher_interval_ms=100"
 write_summary "page_cache_policy=warm_process_and_filesystem_no_drop_caches"
 write_summary "go_benchmark_autocalibration_allowed=false"
 write_summary "architecture_candidate_admission_allowed=false"
+write_summary "precondition_runs=32"
+write_summary "measured_store_reuse_required=true"
 
 store_source="$(findmnt -n -T "${STORE_DIR}" -o SOURCE)"
 store_filesystem="$(findmnt -n -T "${STORE_DIR}" -o FSTYPE)"
@@ -95,12 +102,28 @@ for set_id in $(seq 1 "${SETS}"); do
       if [[ "${writers}" == "4" ]]; then
         point_runs="${RUNS}"
       fi
+      store_id="set${set_id}-${shape}-writers${writers}"
+      precondition_id="${store_id}-precondition"
+      precondition_log="${ARTIFACT_DIR}/logs/${precondition_id}.log"
+      SW_BLOCK_PHASE173_SHAPE="${shape}" \
+      SW_BLOCK_PHASE173_WRITERS="${writers}" \
+      SW_BLOCK_PHASE173_RUN_ID="${precondition_id}" \
+      SW_BLOCK_PHASE173_STORE_ID="${store_id}" \
+      SW_BLOCK_PHASE173_REUSE_STORE="true" \
+      SW_BLOCK_PHASE173_STORE_DIR="${STORE_DIR}" \
+        "${TEST_BINARY}" -test.run '^TestPhase173WALStoreFixedWork$' -test.v -test.count=1 \
+        >"${precondition_log}" 2>&1
+      grep -q '^phase173_fixed_work_result=' "${precondition_log}"
+      sync
+      sleep 0.25
       for run_id in $(seq 1 "${point_runs}"); do
         id="set${set_id}-${shape}-writers${writers}-run${run_id}"
         log="${ARTIFACT_DIR}/logs/${id}.log"
         SW_BLOCK_PHASE173_SHAPE="${shape}" \
         SW_BLOCK_PHASE173_WRITERS="${writers}" \
         SW_BLOCK_PHASE173_RUN_ID="${id}" \
+        SW_BLOCK_PHASE173_STORE_ID="${store_id}" \
+        SW_BLOCK_PHASE173_REUSE_STORE="true" \
         SW_BLOCK_PHASE173_STORE_DIR="${STORE_DIR}" \
           "${TEST_BINARY}" -test.run '^TestPhase173WALStoreFixedWork$' -test.v -test.count=1 \
           >"${log}" 2>&1
@@ -141,6 +164,8 @@ for row in rows:
     grouped[key].append(row)
     if row["contract"] != "phase173-fixed-work-v1":
         raise SystemExit(f"bad contract: {row}")
+    if not row["store_reused"]:
+        raise SystemExit(f"measured sample did not reuse its preconditioned store: {row}")
     if row["final_sync_calls"] != 1:
         raise SystemExit(f"final_sync_calls != 1: {row}")
     if row["dirty_entries"] != 0 or row["checkpoint_lsn"] != row["head_lsn"] or row["head_lsn"] != row["synced_lsn"]:
@@ -205,6 +230,8 @@ if not gate_ok:
     raise SystemExit("four-writer stability exceeded the predeclared 1.25x range")
 PY
 
+cleanup
+sync
 find "${STORE_DIR}" -maxdepth 1 -type f -name 'phase173-*.store' -print -quit | grep -q . && {
   echo "fixed-work store residue remains under ${STORE_DIR}" >&2
   exit 1

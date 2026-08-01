@@ -17,6 +17,8 @@ const (
 	phase173FixedWorkWritersEnv = "SW_BLOCK_PHASE173_WRITERS"
 	phase173FixedWorkRunIDEnv   = "SW_BLOCK_PHASE173_RUN_ID"
 	phase173FixedWorkStoreEnv   = "SW_BLOCK_PHASE173_STORE_DIR"
+	phase173FixedWorkStoreIDEnv = "SW_BLOCK_PHASE173_STORE_ID"
+	phase173FixedWorkReuseEnv   = "SW_BLOCK_PHASE173_REUSE_STORE"
 
 	phase173FixedWorkBlockSize    = 4096
 	phase173FixedWorkNumBlocks    = 65536
@@ -33,6 +35,8 @@ type phase173FixedWorkConfig struct {
 type phase173FixedWorkResult struct {
 	Contract               string  `json:"contract"`
 	RunID                  string  `json:"run_id"`
+	StoreID                string  `json:"store_id"`
+	StoreReused            bool    `json:"store_reused"`
 	Shape                  string  `json:"shape"`
 	Writers                int     `json:"writers"`
 	APIOperations          int     `json:"api_operations"`
@@ -123,7 +127,14 @@ func TestPhase173WALStoreFixedWork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := runPhase173FixedWork(t, cfg, os.Getenv(phase173FixedWorkRunIDEnv), os.Getenv(phase173FixedWorkStoreEnv))
+	result, err := runPhase173FixedWork(
+		t,
+		cfg,
+		os.Getenv(phase173FixedWorkRunIDEnv),
+		os.Getenv(phase173FixedWorkStoreIDEnv),
+		os.Getenv(phase173FixedWorkStoreEnv),
+		os.Getenv(phase173FixedWorkReuseEnv) == "true",
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,20 +210,49 @@ func phase173Operation(shape string, index int, base uint32) (uint32, int) {
 	}
 }
 
-func runPhase173FixedWork(t *testing.T, cfg phase173FixedWorkConfig, runID, storeDir string) (phase173FixedWorkResult, error) {
+func runPhase173FixedWork(
+	t *testing.T,
+	cfg phase173FixedWorkConfig,
+	runID string,
+	storeID string,
+	storeDir string,
+	reuseStore bool,
+) (phase173FixedWorkResult, error) {
 	t.Helper()
 	if storeDir == "" {
 		storeDir = t.TempDir()
 	}
+	if storeID == "" {
+		storeID = runID
+	}
 	if err := os.MkdirAll(storeDir, 0o755); err != nil {
 		return phase173FixedWorkResult{}, err
 	}
-	storePath := filepath.Join(storeDir, fmt.Sprintf("phase173-%s-%d-%s.store", cfg.Shape, cfg.Writers, runID))
-	if err := os.Remove(storePath); err != nil && !os.IsNotExist(err) {
-		return phase173FixedWorkResult{}, err
+	storePath := filepath.Join(storeDir, fmt.Sprintf("phase173-%s-%d-%s.store", cfg.Shape, cfg.Writers, storeID))
+	var s *WALStore
+	var err error
+	storeReused := false
+	if reuseStore {
+		if _, statErr := os.Stat(storePath); statErr == nil {
+			s, err = OpenWALStore(storePath)
+			if err == nil {
+				_, err = s.Recover()
+			}
+			storeReused = err == nil
+		} else if !os.IsNotExist(statErr) {
+			return phase173FixedWorkResult{}, statErr
+		}
 	}
-	s, err := CreateWALStore(storePath, phase173FixedWorkNumBlocks, phase173FixedWorkBlockSize)
+	if s == nil && err == nil {
+		if removeErr := os.Remove(storePath); removeErr != nil && !os.IsNotExist(removeErr) {
+			return phase173FixedWorkResult{}, removeErr
+		}
+		s, err = CreateWALStore(storePath, phase173FixedWorkNumBlocks, phase173FixedWorkBlockSize)
+	}
 	if err != nil {
+		if s != nil {
+			_ = s.Close()
+		}
 		return phase173FixedWorkResult{}, err
 	}
 	closed := false
@@ -220,7 +260,9 @@ func runPhase173FixedWork(t *testing.T, cfg phase173FixedWorkConfig, runID, stor
 		if !closed {
 			_ = s.Close()
 		}
-		_ = os.Remove(storePath)
+		if !reuseStore {
+			_ = os.Remove(storePath)
+		}
 	}()
 	if s.flusher == nil || s.flusher.interval != 100*time.Millisecond {
 		return phase173FixedWorkResult{}, fmt.Errorf("phase173: flusher interval=%v want 100ms", s.flusher.interval)
@@ -296,8 +338,10 @@ func runPhase173FixedWork(t *testing.T, cfg phase173FixedWorkConfig, runID, stor
 		return phase173FixedWorkResult{}, err
 	}
 	closed = true
-	if err := os.Remove(storePath); err != nil && !os.IsNotExist(err) {
-		return phase173FixedWorkResult{}, err
+	if !reuseStore {
+		if err := os.Remove(storePath); err != nil && !os.IsNotExist(err) {
+			return phase173FixedWorkResult{}, err
+		}
 	}
 
 	p50, p95, p99 := phase173Percentiles(latencies)
@@ -305,6 +349,8 @@ func runPhase173FixedWork(t *testing.T, cfg phase173FixedWorkConfig, runID, stor
 	result := phase173FixedWorkResult{
 		Contract:               "phase173-fixed-work-v1",
 		RunID:                  runID,
+		StoreID:                storeID,
+		StoreReused:            storeReused,
 		Shape:                  cfg.Shape,
 		Writers:                cfg.Writers,
 		APIOperations:          cfg.APIOperations,
