@@ -564,6 +564,51 @@ func TestG15d_K8sRenderer_CanWireCHAPSecret(t *testing.T) {
 	}
 }
 
+func TestPhase175K8sRendererWiresAuthenticatedSnapshotRuntime(t *testing.T) {
+	manifests, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{
+		MasterAddr:                "m:9333",
+		SnapshotRuntimeSecretName: "sw-block-snapshot-runtime",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := string(manifests[0].YAML)
+	for _, want := range []string{
+		"--snapshot-runtime-listen=0.0.0.0:33260",
+		"--snapshot-runtime-advertise=https://10.0.0.1:33260",
+		"--snapshot-runtime-tls-cert=/var/run/sw-block/snapshot-runtime/tls.crt",
+		"--snapshot-runtime-tls-key=/var/run/sw-block/snapshot-runtime/tls.key",
+		"--snapshot-runtime-client-ca=/var/run/sw-block/snapshot-runtime/ca.crt",
+		"--snapshot-runtime-token-file=/var/run/sw-block/snapshot-runtime/token",
+		"mountPath: /var/run/sw-block/snapshot-runtime",
+		"secretName: sw-block-snapshot-runtime",
+		"key: ca.crt",
+	} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("manifest missing %q:\n%s", want, raw)
+		}
+	}
+}
+
+func TestPhase175K8sRendererRejectsCrossNamespaceSnapshotSecret(t *testing.T) {
+	_, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{
+		MasterAddr: "m:9333", SnapshotRuntimeSecretName: "sw-block-snapshot-runtime", OwnerReferenceToPVC: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "launcher namespace") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestPhase175K8sRendererSnapshotRuntimeDisabledByDefault(t *testing.T) {
+	manifests, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{MasterAddr: "m:9333"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(manifests[0].YAML), "snapshot-runtime") {
+		t.Fatalf("default manifest unexpectedly enables snapshot runtime:\n%s", manifests[0].YAML)
+	}
+}
+
 func TestNodeLoss_K8sRenderer_ExternalISCSIRequiresCHAP(t *testing.T) {
 	_, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{
 		MasterAddr:    "m:9333",

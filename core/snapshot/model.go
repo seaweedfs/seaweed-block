@@ -12,6 +12,7 @@ var (
 	ErrNameConflict     = errors.New("snapshot: name already belongs to another source")
 	ErrInUse            = errors.New("snapshot: in use")
 	ErrArchiveCorrupt   = errors.New("snapshot: archive corrupt")
+	ErrInvalidRequest   = errors.New("snapshot: invalid request")
 	ErrSourceNotReady   = errors.New("snapshot: source not ready")
 	ErrAuthorityChanged = errors.New("snapshot: source authority changed")
 )

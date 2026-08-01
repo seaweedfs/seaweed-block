@@ -46,16 +46,17 @@ type HeartbeatMessage struct {
 // the observation institution needs; omits V2 fields that
 // relate to promotion policy (see denylist).
 type HeartbeatSlot struct {
-	VolumeID        string
-	ReplicaID       string
-	DataAddr        string
-	CtrlAddr        string
-	Frontends       []FrontendTargetFact
-	Reachable       bool
-	ReadyForPrimary bool
-	Eligible        bool
-	Withdrawn       bool
-	EvidenceScore   uint64
+	VolumeID                string
+	ReplicaID               string
+	DataAddr                string
+	CtrlAddr                string
+	SnapshotRuntimeEndpoint string
+	Frontends               []FrontendTargetFact
+	Reachable               bool
+	ReadyForPrimary         bool
+	Eligible                bool
+	Withdrawn               bool
+	EvidenceScore           uint64
 	// LocalRoleClaim is the V2 "I think I am" role flag, mapped
 	// one-to-one into the V3 Observation shape without
 	// reinterpretation. Two servers each sending LocalRolePrimary
@@ -83,17 +84,18 @@ func HeartbeatToObservation(msg HeartbeatMessage) (Observation, error) {
 	for _, s := range msg.Slots {
 		frontends := append([]FrontendTargetFact(nil), s.Frontends...)
 		slots = append(slots, SlotFact{
-			VolumeID:        s.VolumeID,
-			ReplicaID:       s.ReplicaID,
-			DataAddr:        s.DataAddr,
-			CtrlAddr:        s.CtrlAddr,
-			Frontends:       frontends,
-			Reachable:       s.Reachable,
-			ReadyForPrimary: s.ReadyForPrimary,
-			Eligible:        s.Eligible,
-			Withdrawn:       s.Withdrawn,
-			EvidenceScore:   s.EvidenceScore,
-			LocalRoleClaim:  s.LocalRoleClaim,
+			VolumeID:                s.VolumeID,
+			ReplicaID:               s.ReplicaID,
+			DataAddr:                s.DataAddr,
+			CtrlAddr:                s.CtrlAddr,
+			SnapshotRuntimeEndpoint: s.SnapshotRuntimeEndpoint,
+			Frontends:               frontends,
+			Reachable:               s.Reachable,
+			ReadyForPrimary:         s.ReadyForPrimary,
+			Eligible:                s.Eligible,
+			Withdrawn:               s.Withdrawn,
+			EvidenceScore:           s.EvidenceScore,
+			LocalRoleClaim:          s.LocalRoleClaim,
 		})
 	}
 

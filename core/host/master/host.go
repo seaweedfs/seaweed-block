@@ -6,8 +6,8 @@
 //
 // T0 scope (v3-phase-15-t0-sketch.md §1): this package is the
 // master-side hosting layer only. It does NOT implement frontend,
-// data path, CSI, security, or operator workflows beyond the
-// read-only status surface.
+// data path, CSI, or general operator workflows beyond the read-only status
+// surface. The optional snapshot API is isolated on its own mTLS listener.
 //
 // Boundary (sketch §3): gRPC messages carry observation facts
 // (volume -> master) and minted assignment facts (master ->
@@ -17,6 +17,7 @@ package master
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log"
 	"net"
@@ -24,12 +25,15 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/host/bootstrap"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"github.com/seaweedfs/seaweed-block/core/snapshot"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 )
 
 // Config holds the master host construction inputs. Flag parsing
@@ -71,6 +75,21 @@ type Config struct {
 	FrontendPublicationRuntimeHTTP   bool
 	FrontendPublicationRuntimeListen string
 
+	// SnapshotRoot enables the durable snapshot catalog and RPC surface.
+	// RuntimeCAFile and RuntimeTokenFile are required with it so blockmaster
+	// can authenticate the current primary's dedicated HTTPS capture endpoint.
+	SnapshotRoot                  string
+	SnapshotRuntimeCAFile         string
+	SnapshotRuntimeTokenFile      string
+	SnapshotRuntimeClientCertFile string
+	SnapshotRuntimeClientKeyFile  string
+	SnapshotAPIListen             string
+	SnapshotAPITLSCertFile        string
+	SnapshotAPITLSKeyFile         string
+	SnapshotAPIClientCAFile       string
+	SnapshotAPITokenFile          string
+	SnapshotCaptureTimeout        time.Duration
+
 	// Logger is used for structured startup and error logging. If
 	// nil, the default log package logger is used.
 	Logger *log.Logger
@@ -88,22 +107,28 @@ type LifecycleStores struct {
 // Host is the composed master-side block product daemon. Lifecycle
 // is: New -> Start -> (serve requests) -> Close.
 type Host struct {
-	cfg                 Config
-	log                 *log.Logger
-	boot                *bootstrap.DurableAuthorityBootstrap
-	ctrl                *authority.TopologyController
-	obs                 *authority.ObservationHost
-	ln                  net.Listener
-	frontendRuntimeLn   net.Listener
-	frontendRuntimeHTTP *http.Server
-	grpc                *grpc.Server
-	topo                authority.AcceptedTopology
-	lifecycle           *LifecycleStores
-	events              *eventRing
-	promotionMu         sync.RWMutex
-	promotionProber     PromotionEvidenceProvider
-	cancel              context.CancelFunc
-	wg                  sync.WaitGroup
+	cfg                    Config
+	log                    *log.Logger
+	boot                   *bootstrap.DurableAuthorityBootstrap
+	ctrl                   *authority.TopologyController
+	obs                    *authority.ObservationHost
+	ln                     net.Listener
+	frontendRuntimeLn      net.Listener
+	frontendRuntimeHTTP    *http.Server
+	grpc                   *grpc.Server
+	snapshotAPILn          net.Listener
+	snapshotAPIGRPC        *grpc.Server
+	snapshotAPITLSConfig   *tls.Config
+	topo                   authority.AcceptedTopology
+	lifecycle              *LifecycleStores
+	events                 *eventRing
+	promotionMu            sync.RWMutex
+	promotionProber        PromotionEvidenceProvider
+	snapshotCoordinator    *snapshot.Coordinator
+	snapshotAPIToken       string
+	snapshotCaptureTimeout time.Duration
+	cancel                 context.CancelFunc
+	wg                     sync.WaitGroup
 
 	started atomic.Bool
 }
@@ -235,6 +260,14 @@ func New(cfg Config) (*Host, error) {
 		h.frontendRuntimeLn = frontendLn
 		h.frontendRuntimeHTTP = &http.Server{Handler: h.frontendPublicationRuntimeHandler()}
 	}
+	if err := h.configureSnapshotCoordinator(); err != nil {
+		if h.frontendRuntimeLn != nil {
+			_ = h.frontendRuntimeLn.Close()
+		}
+		_ = ln.Close()
+		_ = boot.Close()
+		return nil, fmt.Errorf("master.New: snapshot service: %w", err)
+	}
 
 	grpcSrv := grpc.NewServer()
 	svc := newServices(h)
@@ -245,11 +278,18 @@ func New(cfg Config) (*Host, error) {
 	control.RegisterLifecycleServiceServer(grpcSrv, svc)
 	control.RegisterFailbackServiceServer(grpcSrv, svc)
 	h.grpc = grpcSrv
+	if h.snapshotAPILn != nil {
+		h.snapshotAPIGRPC = grpc.NewServer(grpc.Creds(credentials.NewTLS(h.snapshotAPITLSConfig)))
+		control.RegisterSnapshotServiceServer(h.snapshotAPIGRPC, svc)
+	}
 
 	lg.Printf("blockmaster: lock acquired, reloaded=%d, listen=%s",
 		boot.ReloadedRecords, ln.Addr().String())
 	if h.frontendRuntimeLn != nil {
 		lg.Printf("blockmaster: frontend publication runtime listen=%s", h.frontendRuntimeLn.Addr().String())
+	}
+	if h.snapshotAPILn != nil {
+		lg.Printf("blockmaster: snapshot API mTLS listen=%s", h.snapshotAPILn.Addr().String())
 	}
 	for _, e := range boot.ReloadSkips {
 		lg.Printf("blockmaster: reload skip: %v", e)
@@ -282,6 +322,16 @@ func openLifecycleStores(dir string) (*LifecycleStores, error) {
 
 // Addr returns the bound listener address. Valid after New.
 func (h *Host) Addr() string { return h.ln.Addr().String() }
+
+// SnapshotAPIAddr returns the dedicated mTLS SnapshotService address, or an
+// empty string when snapshots are disabled. SnapshotService is never
+// registered on the shared plaintext control-plane listener.
+func (h *Host) SnapshotAPIAddr() string {
+	if h.snapshotAPILn == nil {
+		return ""
+	}
+	return h.snapshotAPILn.Addr().String()
+}
 
 // FrontendPublicationRuntimeAddr returns the bound frontend publication
 // runtime HTTP address, or empty when the runtime is disabled.
@@ -382,6 +432,16 @@ func (h *Host) Start() context.Context {
 		_ = h.boot.Publisher.Run(ctx)
 	}()
 
+	if h.snapshotAPIGRPC != nil && h.snapshotAPILn != nil {
+		h.wg.Add(1)
+		go func() {
+			defer h.wg.Done()
+			if err := h.snapshotAPIGRPC.Serve(h.snapshotAPILn); err != nil && err != grpc.ErrServerStopped {
+				h.log.Printf("blockmaster: snapshot API grpc.Serve: %v", err)
+			}
+		}()
+	}
+
 	h.obs.Start(ctx)
 
 	h.wg.Add(1)
@@ -416,17 +476,25 @@ func (h *Host) Close(ctx context.Context) error {
 	}
 	h.obs.Stop()
 
+	gracefulStopGRPC(ctx, h.snapshotAPIGRPC)
+	gracefulStopGRPC(ctx, h.grpc)
+
+	h.wg.Wait()
+	return h.boot.Close()
+}
+
+func gracefulStopGRPC(ctx context.Context, server *grpc.Server) {
+	if server == nil {
+		return
+	}
 	done := make(chan struct{})
 	go func() {
-		h.grpc.GracefulStop()
+		server.GracefulStop()
 		close(done)
 	}()
 	select {
 	case <-done:
 	case <-ctx.Done():
-		h.grpc.Stop()
+		server.Stop()
 	}
-
-	h.wg.Wait()
-	return h.boot.Close()
 }

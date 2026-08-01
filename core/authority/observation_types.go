@@ -44,16 +44,20 @@ type ServerFact struct {
 // server thinks it hosts for some volume. All fields are raw
 // facts; the observation layer does not rank or aggregate them.
 type SlotFact struct {
-	VolumeID        string
-	ReplicaID       string
-	DataAddr        string
-	CtrlAddr        string
-	Frontends       []FrontendTargetFact
-	Reachable       bool
-	ReadyForPrimary bool
-	Eligible        bool
-	Withdrawn       bool
-	EvidenceScore   uint64
+	VolumeID                string
+	ReplicaID               string
+	DataAddr                string
+	CtrlAddr                string
+	SnapshotRuntimeEndpoint string
+	Frontends               []FrontendTargetFact
+	Reachable               bool
+	ReadyForPrimary         bool
+	Eligible                bool
+	Withdrawn               bool
+	EvidenceScore           uint64
+	// ReportingServerID is filled by ObservationStore from the owning
+	// observation. It is never accepted from the heartbeat wire payload.
+	ReportingServerID string
 	// ObservedAt/ExpiresAt are store-owned per-slot freshness
 	// markers. They let one Kubernetes node run multiple
 	// blockvolume processes that each report a different slot

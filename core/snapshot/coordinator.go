@@ -16,6 +16,7 @@ type SourceAuthority struct {
 	Epoch           uint64
 	EndpointVersion uint64
 	RuntimeEndpoint string
+	SizeBytes       uint64
 }
 
 func (a SourceAuthority) valid() bool {

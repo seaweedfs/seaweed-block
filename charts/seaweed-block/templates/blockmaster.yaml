@@ -7,6 +7,18 @@
 {{- if and (ne .Values.blockmaster.durableImpl "walstore") (not .Values.compat.launcherDurableImplFlag) -}}
 {{- fail "blockmaster.durableImpl requires compat.launcherDurableImplFlag=true because older published images do not accept --launcher-durable-impl" -}}
 {{- end -}}
+{{- if and .Values.snapshot.enabled (not .Values.snapshot.runtimeSecretName) -}}
+{{- fail "snapshot.enabled=true requires snapshot.runtimeSecretName" -}}
+{{- end -}}
+{{- if and .Values.snapshot.enabled (not .Values.blockmaster.stateHostPath) -}}
+{{- fail "snapshot.enabled=true requires blockmaster.stateHostPath so the snapshot catalog survives restart" -}}
+{{- end -}}
+{{- if and .Values.snapshot.enabled (not (index .Values.blockmaster.nodeSelector "kubernetes.io/hostname")) -}}
+{{- fail "snapshot.enabled=true requires blockmaster.nodeSelector.kubernetes.io/hostname so the node-local snapshot catalog is pinned to exactly one node" -}}
+{{- end -}}
+{{- if and .Values.snapshot.enabled (ne (int .Values.blockmaster.replicas) 1) -}}
+{{- fail "snapshot.enabled=true requires blockmaster.replicas=1 for the node-local snapshot catalog" -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -40,7 +52,7 @@ spec:
           imagePullPolicy: {{ .Values.blockmaster.statePermissionsImage.pullPolicy }}
           command: ["/bin/sh", "-c"]
           args:
-            - "mkdir -p /var/lib/sw-block/authority /var/lib/sw-block/lifecycle && chown -R 65532:65532 /var/lib/sw-block"
+            - "mkdir -p /var/lib/sw-block/authority /var/lib/sw-block/lifecycle{{ if .Values.snapshot.enabled }} /var/lib/sw-block/snapshots{{ end }} && chown -R 65532:65532 /var/lib/sw-block"
           securityContext:
             runAsUser: 0
           volumeMounts:
@@ -83,11 +95,24 @@ spec:
             {{- if ne (int .Values.nvme.maxH2CDataLength) 32768 }}
             - "--launcher-nvme-max-h2c-data-length={{ .Values.nvme.maxH2CDataLength }}"
             {{- end }}
-            {{- if .Values.blockmaster.launcherPVCOwnerRef }}
+            {{- if and .Values.blockmaster.launcherPVCOwnerRef (not .Values.snapshot.enabled) }}
             - "--launcher-pvc-owner-ref"
             {{- end }}
             {{- if .Values.blockmaster.stateHostPath }}
             - "--launcher-state-hostpath={{ .Values.blockmaster.stateHostPath }}"
+            {{- end }}
+            {{- if .Values.snapshot.enabled }}
+            - "--snapshot-root=/var/lib/sw-block/snapshots"
+            - "--snapshot-runtime-ca-file=/var/run/sw-block/snapshot-runtime/ca.crt"
+            - "--snapshot-runtime-token-file=/var/run/sw-block/snapshot-runtime/token"
+            - "--snapshot-runtime-client-cert=/var/run/sw-block/snapshot-runtime/client.crt"
+            - "--snapshot-runtime-client-key=/var/run/sw-block/snapshot-runtime/client.key"
+            - "--snapshot-api-listen=0.0.0.0:{{ .Values.snapshot.apiPort }}"
+            - "--snapshot-api-tls-cert=/var/run/sw-block/snapshot-runtime/api-server.crt"
+            - "--snapshot-api-tls-key=/var/run/sw-block/snapshot-runtime/api-server.key"
+            - "--snapshot-api-client-ca=/var/run/sw-block/snapshot-runtime/api-client-ca.crt"
+            - "--snapshot-api-token-file=/var/run/sw-block/snapshot-runtime/api-token"
+            - "--launcher-snapshot-runtime-secret-name={{ .Values.snapshot.runtimeSecretName }}"
             {{- end }}
             {{- if .Values.network.externalISCSI }}
             - "--launcher-external-iscsi"
@@ -117,6 +142,10 @@ spec:
           ports:
             - name: grpc
               containerPort: {{ .Values.blockmaster.listenPort }}
+            {{- if .Values.snapshot.enabled }}
+            - name: snapshot-grpc
+              containerPort: {{ .Values.snapshot.apiPort }}
+            {{- end }}
             {{- if .Values.blockmaster.frontendPublicationRuntimeHTTP }}
             - name: frontend-http
               containerPort: {{ .Values.blockmaster.frontendPublicationRuntimePort }}
@@ -129,6 +158,11 @@ spec:
               mountPath: /var/lib/sw-block
             - name: manifests
               mountPath: /manifests
+            {{- if .Values.snapshot.enabled }}
+            - name: snapshot-runtime-identity
+              mountPath: /var/run/sw-block/snapshot-runtime
+              readOnly: true
+            {{- end }}
       volumes:
         - name: cluster-spec
           configMap:
@@ -143,6 +177,28 @@ spec:
           {{- end }}
         - name: manifests
           emptyDir: {}
+        {{- if .Values.snapshot.enabled }}
+        - name: snapshot-runtime-identity
+          secret:
+            secretName: {{ .Values.snapshot.runtimeSecretName }}
+            items:
+              - key: ca.crt
+                path: ca.crt
+              - key: token
+                path: token
+              - key: client.crt
+                path: client.crt
+              - key: client.key
+                path: client.key
+              - key: api-token
+                path: api-token
+              - key: api-server.crt
+                path: api-server.crt
+              - key: api-server.key
+                path: api-server.key
+              - key: api-client-ca.crt
+                path: api-client-ca.crt
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service
@@ -159,6 +215,11 @@ spec:
     - name: grpc
       port: {{ .Values.blockmaster.listenPort }}
       targetPort: grpc
+    {{- if .Values.snapshot.enabled }}
+    - name: snapshot-grpc
+      port: {{ .Values.snapshot.apiPort }}
+      targetPort: snapshot-grpc
+    {{- end }}
     {{- if .Values.blockmaster.frontendPublicationRuntimeHTTP }}
     - name: frontend-http
       port: {{ .Values.blockmaster.frontendPublicationRuntimePort }}

@@ -111,6 +111,16 @@ ports:
 nvme:
   maxH2CDataLength: 32768
 
+# Snapshot product runtime is disabled until a durable hostPath and an
+# externally managed Secret are supplied. The Secret must contain ca.crt,
+# tls.crt, tls.key, client.crt, client.key, token, api-token, api-server.crt,
+# api-server.key, and api-client-ca.crt. tls.crt must cover every advertised
+# node IP; api-server.crt must cover the blockmaster snapshot Service address.
+snapshot:
+  enabled: false
+  runtimeSecretName: ""
+  apiPort: 9444
+
 # Initial block-capable nodes. D2 will add a generator that derives this from
 # `kubectl get nodes` so node names and InternalIPs are verified against the
 # live cluster.

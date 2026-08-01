@@ -54,9 +54,21 @@ type flags struct {
 	launcherCHAPSecretName                string
 	launcherCHAPUserKey                   string
 	launcherCHAPSecretKey                 string
+	launcherSnapshotRuntimeSecretName     string
 	failbackRuntimeRPC                    bool
 	frontendPublicationRuntimeHTTP        bool
 	frontendPublicationRuntimeListen      string
+	snapshotRoot                          string
+	snapshotRuntimeCAFile                 string
+	snapshotRuntimeTokenFile              string
+	snapshotRuntimeClientCertFile         string
+	snapshotRuntimeClientKeyFile          string
+	snapshotAPIListen                     string
+	snapshotAPITLSCertFile                string
+	snapshotAPITLSKeyFile                 string
+	snapshotAPIClientCAFile               string
+	snapshotAPITokenFile                  string
+	snapshotCaptureTimeout                time.Duration
 	version                               bool
 	// printReadyLine: test-only flag that emits a single
 	// structured JSON line to stdout after the gRPC listener is
@@ -101,9 +113,21 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.launcherCHAPSecretName, "launcher-iscsi-chap-secret-name", "", "optional Kubernetes Secret name used by generated blockvolume Deployments for target-side iSCSI CHAP")
 	fs.StringVar(&f.launcherCHAPUserKey, "launcher-iscsi-chap-username-key", "chapUsername", "Kubernetes Secret key for generated blockvolume iSCSI CHAP username")
 	fs.StringVar(&f.launcherCHAPSecretKey, "launcher-iscsi-chap-secret-key", "chapSecret", "Kubernetes Secret key for generated blockvolume iSCSI CHAP secret")
+	fs.StringVar(&f.launcherSnapshotRuntimeSecretName, "launcher-snapshot-runtime-secret-name", "", "Kubernetes Secret mounted into generated blockvolume workloads for snapshot TLS identity and token; empty disables snapshot runtimes")
 	fs.BoolVar(&f.failbackRuntimeRPC, "failback-runtime-rpc", false, "enable disabled-by-default authority failback RPC; requires expected-current and terminal evidence")
 	fs.BoolVar(&f.frontendPublicationRuntimeHTTP, "frontend-publication-runtime-http", false, "enable disabled-by-default frontend publication HTTP runtime; confirms post-failback authority publication only")
 	fs.StringVar(&f.frontendPublicationRuntimeListen, "frontend-publication-runtime-listen", "127.0.0.1:9334", "HTTP listen address for --frontend-publication-runtime-http")
+	fs.StringVar(&f.snapshotRoot, "snapshot-root", "", "durable central snapshot archive/catalog root; empty disables SnapshotService")
+	fs.StringVar(&f.snapshotRuntimeCAFile, "snapshot-runtime-ca-file", "", "CA certificate used to authenticate blockvolume snapshot runtimes")
+	fs.StringVar(&f.snapshotRuntimeTokenFile, "snapshot-runtime-token-file", "", "file containing the bearer token used for blockvolume snapshot runtimes")
+	fs.StringVar(&f.snapshotRuntimeClientCertFile, "snapshot-runtime-client-cert", "", "mTLS client certificate used to call blockvolume snapshot runtimes")
+	fs.StringVar(&f.snapshotRuntimeClientKeyFile, "snapshot-runtime-client-key", "", "mTLS client private key used to call blockvolume snapshot runtimes")
+	fs.StringVar(&f.snapshotAPIListen, "snapshot-api-listen", "", "dedicated mTLS SnapshotService listen address; empty disables snapshots")
+	fs.StringVar(&f.snapshotAPITLSCertFile, "snapshot-api-tls-cert", "", "TLS server certificate for the dedicated SnapshotService listener")
+	fs.StringVar(&f.snapshotAPITLSKeyFile, "snapshot-api-tls-key", "", "TLS server private key for the dedicated SnapshotService listener")
+	fs.StringVar(&f.snapshotAPIClientCAFile, "snapshot-api-client-ca", "", "CA certificate used to authenticate SnapshotService clients")
+	fs.StringVar(&f.snapshotAPITokenFile, "snapshot-api-token-file", "", "file containing the bearer token required by SnapshotService RPCs")
+	fs.DurationVar(&f.snapshotCaptureTimeout, "snapshot-capture-timeout", 30*time.Minute, "maximum duration of one snapshot capture")
 	fs.BoolVar(&f.version, "version", false, "print build provenance and exit")
 	fs.BoolVar(&f.printReadyLine, "t0-print-ready", false, "internal test-only: emit one structured JSON line on stdout after listener bound")
 	fs.SetOutput(os.Stderr)
@@ -124,6 +148,20 @@ func parseFlags(args []string) (flags, error) {
 	}
 	if f.launcherExternalISCSI && f.launcherCHAPSecretName == "" {
 		return flags{}, fmt.Errorf("cannot enable --launcher-external-iscsi without --launcher-iscsi-chap-secret-name")
+	}
+	if f.launcherSnapshotRuntimeSecretName != "" && f.launcherPVCOwnerRef {
+		return flags{}, fmt.Errorf("--launcher-snapshot-runtime-secret-name cannot be combined with --launcher-pvc-owner-ref because Secrets are namespace-scoped")
+	}
+	snapshotConfigured := f.snapshotRoot != "" || f.snapshotRuntimeCAFile != "" || f.snapshotRuntimeTokenFile != "" ||
+		f.snapshotRuntimeClientCertFile != "" || f.snapshotRuntimeClientKeyFile != "" || f.snapshotAPIListen != "" ||
+		f.snapshotAPITLSCertFile != "" || f.snapshotAPITLSKeyFile != "" || f.snapshotAPIClientCAFile != "" || f.snapshotAPITokenFile != ""
+	if snapshotConfigured && (f.snapshotRoot == "" || f.snapshotRuntimeCAFile == "" || f.snapshotRuntimeTokenFile == "" ||
+		f.snapshotRuntimeClientCertFile == "" || f.snapshotRuntimeClientKeyFile == "" || f.snapshotAPIListen == "" ||
+		f.snapshotAPITLSCertFile == "" || f.snapshotAPITLSKeyFile == "" || f.snapshotAPIClientCAFile == "" || f.snapshotAPITokenFile == "") {
+		return flags{}, fmt.Errorf("snapshot root, runtime mTLS/token, and API listen/mTLS/token must be configured together")
+	}
+	if f.snapshotCaptureTimeout <= 0 {
+		return flags{}, fmt.Errorf("--snapshot-capture-timeout must be positive")
 	}
 	return f, nil
 }
@@ -172,6 +210,17 @@ func run(f flags) int {
 		FailbackRuntimeRPC:               f.failbackRuntimeRPC,
 		FrontendPublicationRuntimeHTTP:   f.frontendPublicationRuntimeHTTP,
 		FrontendPublicationRuntimeListen: f.frontendPublicationRuntimeListen,
+		SnapshotRoot:                     f.snapshotRoot,
+		SnapshotRuntimeCAFile:            f.snapshotRuntimeCAFile,
+		SnapshotRuntimeTokenFile:         f.snapshotRuntimeTokenFile,
+		SnapshotRuntimeClientCertFile:    f.snapshotRuntimeClientCertFile,
+		SnapshotRuntimeClientKeyFile:     f.snapshotRuntimeClientKeyFile,
+		SnapshotAPIListen:                f.snapshotAPIListen,
+		SnapshotAPITLSCertFile:           f.snapshotAPITLSCertFile,
+		SnapshotAPITLSKeyFile:            f.snapshotAPITLSKeyFile,
+		SnapshotAPIClientCAFile:          f.snapshotAPIClientCAFile,
+		SnapshotAPITokenFile:             f.snapshotAPITokenFile,
+		SnapshotCaptureTimeout:           f.snapshotCaptureTimeout,
 	}
 	h, err := master.New(cfg)
 	if err != nil {
@@ -370,6 +419,7 @@ func runLifecycleLauncherTick(h *master.Host, f flags) error {
 				UsernameKey: f.launcherCHAPUserKey,
 				SecretKey:   f.launcherCHAPSecretKey,
 			},
+			SnapshotRuntimeSecretName: f.launcherSnapshotRuntimeSecretName,
 		})
 		if err != nil {
 			return err

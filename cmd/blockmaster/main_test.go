@@ -96,6 +96,38 @@ func TestParseFlags_FrontendPublicationRuntimeHTTPDisabledByDefault(t *testing.T
 	}
 }
 
+func TestParseFlags_SnapshotServiceRequiresCompleteSecureConfiguration(t *testing.T) {
+	f, err := parseFlags([]string{"--authority-store", "authority-dir"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.snapshotRoot != "" {
+		t.Fatal("snapshot service must be disabled by default")
+	}
+	if _, err := parseFlags([]string{"--authority-store", "authority-dir", "--snapshot-root", "snapshots"}); err == nil {
+		t.Fatal("expected incomplete snapshot configuration to fail")
+	}
+	f, err = parseFlags([]string{
+		"--authority-store", "authority-dir",
+		"--snapshot-root", "snapshots",
+		"--snapshot-runtime-ca-file", "ca.pem",
+		"--snapshot-runtime-token-file", "token",
+		"--snapshot-runtime-client-cert", "client.crt",
+		"--snapshot-runtime-client-key", "client.key",
+		"--snapshot-api-listen", "127.0.0.1:9444",
+		"--snapshot-api-tls-cert", "api.crt",
+		"--snapshot-api-tls-key", "api.key",
+		"--snapshot-api-client-ca", "api-ca.crt",
+		"--snapshot-api-token-file", "api-token",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.snapshotRuntimeCAFile != "ca.pem" || f.snapshotRuntimeTokenFile != "token" || f.snapshotAPIListen != "127.0.0.1:9444" {
+		t.Fatalf("snapshot flags=%+v", f)
+	}
+}
+
 func TestParseFlags_ClusterSpecOptional(t *testing.T) {
 	f, err := parseFlags([]string{
 		"--authority-store", "authority-dir",

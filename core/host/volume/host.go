@@ -136,8 +136,9 @@ type Host struct {
 	otherMu   sync.Mutex
 	lastOther *control.AssignmentFact
 
-	frontendMu      sync.RWMutex
-	frontendTargets []*control.FrontendTarget
+	frontendMu              sync.RWMutex
+	frontendTargets         []*control.FrontendTarget
+	snapshotRuntimeEndpoint string
 }
 
 // LastOtherLine returns the most recent VOLUME authority fact
@@ -377,6 +378,21 @@ func (h *Host) SetFrontendTargets(targets []*control.FrontendTarget) {
 	h.frontendTargets = cloneFrontendTargets(targets)
 }
 
+// SetSnapshotRuntimeEndpoint publishes the separately authenticated snapshot
+// capture endpoint as an observation fact. It is not an authority input and is
+// never inferred from data, control, status, or frontend addresses.
+func (h *Host) SetSnapshotRuntimeEndpoint(endpoint string) {
+	h.frontendMu.Lock()
+	h.snapshotRuntimeEndpoint = endpoint
+	h.frontendMu.Unlock()
+}
+
+func (h *Host) snapshotRuntimeEndpointSnapshot() string {
+	h.frontendMu.RLock()
+	defer h.frontendMu.RUnlock()
+	return h.snapshotRuntimeEndpoint
+}
+
 func (h *Host) frontendTargetsSnapshot() []*control.FrontendTarget {
 	h.frontendMu.RLock()
 	defer h.frontendMu.RUnlock()
@@ -461,14 +477,15 @@ func (h *Host) buildReport() *control.HeartbeatReport {
 		Eligible:  true,
 		Slots: []*control.HeartbeatSlot{
 			{
-				VolumeId:        h.cfg.VolumeID,
-				ReplicaId:       h.cfg.ReplicaID,
-				DataAddr:        h.cfg.DataAddr,
-				CtrlAddr:        h.cfg.CtrlAddr,
-				Frontends:       h.frontendTargetsSnapshot(),
-				Reachable:       true,
-				ReadyForPrimary: h.readyForPrimaryFact(),
-				Eligible:        true,
+				VolumeId:                h.cfg.VolumeID,
+				ReplicaId:               h.cfg.ReplicaID,
+				DataAddr:                h.cfg.DataAddr,
+				CtrlAddr:                h.cfg.CtrlAddr,
+				SnapshotRuntimeEndpoint: h.snapshotRuntimeEndpointSnapshot(),
+				Frontends:               h.frontendTargetsSnapshot(),
+				Reachable:               true,
+				ReadyForPrimary:         h.readyForPrimaryFact(),
+				Eligible:                true,
 			},
 		},
 	}

@@ -121,6 +121,7 @@ func (s *ObservationStore) SlotFact(volumeID, replicaID string) (SlotFact, bool)
 			candidateObsAt := slotObservedAt(slot, obs)
 			if !found || candidateObsAt.After(bestObsAt) {
 				best = slot
+				best.ReportingServerID = obs.ServerID
 				best.Frontends = append([]FrontendTargetFact(nil), slot.Frontends...)
 				bestObsAt = candidateObsAt
 				found = true

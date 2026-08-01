@@ -9,7 +9,22 @@ package master
 // explicit max-valid + overflow-rejected tests rather than
 // comment-only.
 
-import "testing"
+import (
+	"testing"
+
+	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
+)
+
+func TestHeartbeatFromWireCarriesSnapshotRuntimeEndpointAsObservation(t *testing.T) {
+	got := heartbeatFromWire(&control.HeartbeatReport{Slots: []*control.HeartbeatSlot{{
+		VolumeId:                "vol-a",
+		ReplicaId:               "r1",
+		SnapshotRuntimeEndpoint: "https://10.0.0.2:24443",
+	}}})
+	if len(got.Slots) != 1 || got.Slots[0].SnapshotRuntimeEndpoint != "https://10.0.0.2:24443" {
+		t.Fatalf("heartbeat mapping=%+v", got.Slots)
+	}
+}
 
 // --- Test 1: max-valid pair accepted ---
 

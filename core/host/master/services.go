@@ -34,6 +34,7 @@ type services struct {
 	control.UnimplementedEvidenceServiceServer
 	control.UnimplementedClusterEvidenceServiceServer
 	control.UnimplementedLifecycleServiceServer
+	control.UnimplementedSnapshotServiceServer
 	control.UnimplementedFailbackServiceServer
 
 	host *Host
@@ -648,17 +649,18 @@ func heartbeatFromWire(r *control.HeartbeatReport) authority.HeartbeatMessage {
 	slots := make([]authority.HeartbeatSlot, 0, len(r.Slots))
 	for _, s := range r.Slots {
 		slots = append(slots, authority.HeartbeatSlot{
-			VolumeID:        s.VolumeId,
-			ReplicaID:       s.ReplicaId,
-			DataAddr:        s.DataAddr,
-			CtrlAddr:        s.CtrlAddr,
-			Frontends:       frontendTargetsFromWire(s.Frontends),
-			Reachable:       s.Reachable,
-			ReadyForPrimary: s.ReadyForPrimary,
-			Eligible:        s.Eligible,
-			Withdrawn:       s.Withdrawn,
-			EvidenceScore:   s.EvidenceScore,
-			LocalRoleClaim:  authority.LocalRoleClaim(s.LocalRoleClaim),
+			VolumeID:                s.VolumeId,
+			ReplicaID:               s.ReplicaId,
+			DataAddr:                s.DataAddr,
+			CtrlAddr:                s.CtrlAddr,
+			SnapshotRuntimeEndpoint: s.SnapshotRuntimeEndpoint,
+			Frontends:               frontendTargetsFromWire(s.Frontends),
+			Reachable:               s.Reachable,
+			ReadyForPrimary:         s.ReadyForPrimary,
+			Eligible:                s.Eligible,
+			Withdrawn:               s.Withdrawn,
+			EvidenceScore:           s.EvidenceScore,
+			LocalRoleClaim:          authority.LocalRoleClaim(s.LocalRoleClaim),
 		})
 	}
 	return authority.HeartbeatMessage{

@@ -11,7 +11,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const stateMountPath = "/var/lib/sw-block"
+const (
+	stateMountPath           = "/var/lib/sw-block"
+	snapshotRuntimeMountPath = "/var/run/sw-block/snapshot-runtime"
+)
 
 type K8sRenderConfig struct {
 	Namespace                     string
@@ -31,6 +34,7 @@ type K8sRenderConfig struct {
 	ExternalStatus                bool
 	NVMeMaxH2CDataLength          uint32
 	ISCSICHAP                     CHAPSecretRef
+	SnapshotRuntimeSecretName     string
 }
 
 type CHAPSecretRef struct {
@@ -82,6 +86,9 @@ func RenderBlockVolumeDeployments(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8
 	if cfg.ExternalStatus && !cfg.ExternalISCSI && !cfg.ExternalNVMe {
 		return nil, fmt.Errorf("launcher: external status requires an external block frontend mode")
 	}
+	if cfg.SnapshotRuntimeSecretName != "" && cfg.OwnerReferenceToPVC {
+		return nil, fmt.Errorf("launcher: snapshot runtime credentials require blockvolume workloads to remain in the launcher namespace")
+	}
 	if cfg.MasterAddr == "" {
 		return nil, fmt.Errorf("launcher: master addr is required")
 	}
@@ -102,6 +109,18 @@ func RenderBlockVolumeDeployments(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8
 		}
 		volumeMounts := []volumeMount{{Name: "state", MountPath: stateMountPath}}
 		volumes := []volume{stateVolume(cfg)}
+		if cfg.SnapshotRuntimeSecretName != "" {
+			volumeMounts = append(volumeMounts, volumeMount{Name: "snapshot-runtime-identity", MountPath: snapshotRuntimeMountPath, ReadOnly: true})
+			volumes = append(volumes, volume{Name: "snapshot-runtime-identity", Secret: &secretVolumeSource{
+				SecretName: cfg.SnapshotRuntimeSecretName,
+				Items: []keyToPath{
+					{Key: "ca.crt", Path: "ca.crt"},
+					{Key: "tls.crt", Path: "tls.crt"},
+					{Key: "tls.key", Path: "tls.key"},
+					{Key: "token", Path: "token"},
+				},
+			}})
+		}
 		var securityContext *containerSecurityContext
 		if plan.Protocol == "nvme" && plan.NVMeTransport == "rdma" {
 			volumeMounts = append(volumeMounts,
@@ -233,6 +252,25 @@ func blockVolumeArgs(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.B
 			args = append(args, "--allow-external-status-bind")
 		}
 	}
+	if cfg.SnapshotRuntimeSecretName != "" {
+		port, err := blockVolumeSnapshotRuntimePort(plan, replica)
+		if err != nil {
+			return nil, err
+		}
+		host, err := hostFromAddr(replica.DataAddr)
+		if err != nil {
+			return nil, fmt.Errorf("launcher: snapshot runtime volume=%s replica=%s: %w", plan.VolumeID, replica.ReplicaID, err)
+		}
+		endpoint := "https://" + net.JoinHostPort(host, fmt.Sprintf("%d", port))
+		args = append(args,
+			fmt.Sprintf("--snapshot-runtime-listen=0.0.0.0:%d", port),
+			"--snapshot-runtime-advertise="+endpoint,
+			"--snapshot-runtime-tls-cert="+path.Join(snapshotRuntimeMountPath, "tls.crt"),
+			"--snapshot-runtime-tls-key="+path.Join(snapshotRuntimeMountPath, "tls.key"),
+			"--snapshot-runtime-client-ca="+path.Join(snapshotRuntimeMountPath, "ca.crt"),
+			"--snapshot-runtime-token-file="+path.Join(snapshotRuntimeMountPath, "token"),
+		)
+	}
 	switch plan.Protocol {
 	case "nvme":
 		nvmeTransport := plan.NVMeTransport
@@ -327,6 +365,18 @@ func blockVolumeStatusPort(plan lifecycle.BlockVolumeWorkloadPlan, replica lifec
 		return 0, fmt.Errorf("launcher: derived status port %d overflows TCP port range for volume=%s replica=%s frontend_port=%d", port, plan.VolumeID, replica.ReplicaID, base)
 	}
 	return port, nil
+}
+
+func blockVolumeSnapshotRuntimePort(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.BlockVolumeReplicaWorkload) (int, error) {
+	const offset = 30000
+	base := replica.ISCSIListenPort
+	if plan.Protocol == "nvme" && replica.NVMeListenPort > 0 {
+		base = replica.NVMeListenPort
+	}
+	if base <= 0 || base+offset > 65535 {
+		return 0, fmt.Errorf("launcher: cannot derive snapshot runtime port for volume=%s replica=%s frontend_port=%d", plan.VolumeID, replica.ReplicaID, base)
+	}
+	return base + offset, nil
 }
 
 func blockVolumeInitContainers(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.BlockVolumeReplicaWorkload, cfg K8sRenderConfig) []container {
@@ -493,9 +543,20 @@ type volumeMount struct {
 }
 
 type volume struct {
-	Name     string    `yaml:"name"`
-	EmptyDir *emptyDir `yaml:"emptyDir,omitempty"`
-	HostPath *hostPath `yaml:"hostPath,omitempty"`
+	Name     string              `yaml:"name"`
+	EmptyDir *emptyDir           `yaml:"emptyDir,omitempty"`
+	HostPath *hostPath           `yaml:"hostPath,omitempty"`
+	Secret   *secretVolumeSource `yaml:"secret,omitempty"`
+}
+
+type secretVolumeSource struct {
+	SecretName string      `yaml:"secretName"`
+	Items      []keyToPath `yaml:"items,omitempty"`
+}
+
+type keyToPath struct {
+	Key  string `yaml:"key"`
+	Path string `yaml:"path"`
 }
 
 type emptyDir struct{}

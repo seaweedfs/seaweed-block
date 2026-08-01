@@ -61,6 +61,17 @@ func TestHost_SetFrontendTargets_ReplacesPreviousSet(t *testing.T) {
 	}
 }
 
+func TestHost_SetSnapshotRuntimeEndpoint_IncludedInHeartbeat(t *testing.T) {
+	h := newTestVolumeHost(t)
+	defer func() { _ = h.Close() }()
+
+	h.SetSnapshotRuntimeEndpoint("https://10.0.0.2:24443")
+	got := h.buildReport().GetSlots()[0].GetSnapshotRuntimeEndpoint()
+	if got != "https://10.0.0.2:24443" {
+		t.Fatalf("snapshot runtime endpoint=%q", got)
+	}
+}
+
 func TestHost_BuildReport_NotReadyForPrimaryFromHeartbeatAlone(t *testing.T) {
 	h := newTestVolumeHost(t)
 	defer func() { _ = h.Close() }()

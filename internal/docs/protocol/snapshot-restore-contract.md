@@ -153,7 +153,7 @@ volume's authority or write frontier.
 |---|---|---|
 | CSI controller | CSI validation, idempotency mapping, gRPC status, content-source mapping | block scanning, authority, direct archive writes |
 | blockmaster snapshot service | durable product catalog, request orchestration, source/current-primary lookup | fabricating source readiness or reading block files directly |
-| current-primary blockvolume runtime | authority-guarded local cut and archive production | Kubernetes VolumeSnapshot reconciliation |
+| current-primary blockvolume runtime | authority-guarded local cut and integrity-framed block stream | catalog publication or Kubernetes VolumeSnapshot reconciliation |
 | storage substrate | atomic cut, block stream, durability frontier | CSI names, Kubernetes objects, retention policy |
 | external-snapshotter | Kubernetes-to-CSI request bridge | storage consistency implementation |
 | operator-status | status, Conditions, Events, report evidence | snapshot/restore/delete execution |
@@ -162,6 +162,58 @@ An authority epoch or current-primary change during capture invalidates the
 runtime result unless the request proves the cut completed under the expected
 lineage. The master may retry against the new current primary; it may not join
 partial archives from different replicas.
+
+## Capture Runtime Protocol
+
+The capture path is not the unauthenticated status endpoint and is not inferred
+from a data, replication-control, iSCSI, or NVMe address. An enabled
+blockvolume starts a dedicated HTTPS listener and publishes its advertised
+endpoint as a heartbeat observation. Blockmaster resolves that endpoint only
+when the same fresh slot positively matches the publisher's current authority
+line (`volume_id`, `replica_id`, data/control addresses, epoch, and endpoint
+version) and is reachable, eligible, ready-for-primary, and not withdrawn.
+
+```text
+SnapshotService.CreateSnapshot
+  -> resolve exact current authority and fresh runtime observation
+  -> HTTPS POST /v1/snapshot/capture with expected lineage
+  -> blockvolume verifies local healthy projection before the cut
+  -> storage holds the mutation barrier and streams ascending block frames
+  -> blockvolume verifies the same projection after the cut
+  -> terminal frame reconciles geometry/frontier/block-count/data-bytes
+  -> blockmaster fsyncs and atomically publishes archive then catalog record
+```
+
+Transport requirements:
+
+- TLS 1.2 or newer with mutual certificate authentication; plain HTTP and a
+  client without the blockmaster client certificate are rejected;
+- bearer token loaded from a mounted file, never a command-line value;
+- redirects are not followed, so credentials cannot be forwarded;
+- every block frame carries LBA, length, and CRC32;
+- a stream has exactly one terminal success frame, or an error/EOF and no
+  catalog publication;
+- authority changes before, during, or after capture fail closed; partial
+  bytes remain temporary and are removed by the catalog owner.
+
+The first implementation uses one cluster runtime Secret containing
+`ca.crt`, `tls.crt`, `tls.key`, `client.crt`, `client.key`, `token`,
+`api-token`, `api-server.crt`, `api-server.key`, and `api-client-ca.crt`.
+Kubernetes Secret projection separates roles: blockmaster receives the runtime
+CA, mTLS runtime-client identity, runtime token, SnapshotService server
+identity/client CA, and API token; blockvolume receives only the runtime CA,
+server identity, and runtime token. SnapshotService is not registered on the
+shared plaintext control listener. Its dedicated gRPC listener requires a
+client certificate signed by `api-client-ca.crt` and the separate API bearer
+token. Per-node runtime server identities remain future hardening; blockmaster
+additionally binds the observed endpoint host and reporting server to the
+current authority slot.
+
+The initial catalog is node-local durable state. Enabling snapshots therefore
+requires exactly one blockmaster replica, durable `stateHostPath`, and an
+explicit `kubernetes.io/hostname` selector. A generic selector such as
+`kubernetes.io/os=linux` is not sufficient because it permits rescheduling to a
+different host with an empty catalog.
 
 ## CSI Mapping
 

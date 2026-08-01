@@ -82,6 +82,14 @@
         "maxH2CDataLength": { "type": "integer", "minimum": 32768, "maximum": 1048576 }
       }
     },
+    "snapshot": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "runtimeSecretName": { "type": "string" },
+        "apiPort": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      }
+    },
     "compat": {
       "type": "object",
       "properties": {

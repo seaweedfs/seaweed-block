@@ -6,6 +6,7 @@
 //   operator -> master: EvidenceService.QueryVolumeStatus (unary, read-only)
 //   operator/dashboard -> master: ClusterEvidenceService read-only observation
 //   CSI/operator -> master: LifecycleService.CreateVolume/DeleteVolume (desired intent only)
+//   CSI/snapshot client -> master dedicated mTLS listener: SnapshotService catalog operations
 //
 // Boundary (T0 sketch §3 load-bearing):
 //   - no message carries an AssignmentAsk
@@ -122,6 +123,20 @@ message HeartbeatSlot {
     uint64 evidence_score = 9;
     uint32 local_role_claim = 10; // authority.LocalRoleClaim enum value
     repeated FrontendTarget frontends = 11;
+    string snapshot_runtime_endpoint = 12; // authenticated HTTPS capture endpoint; observation only
+}
+
+// SnapshotService owns crash-consistent, immutable single-volume snapshots.
+// It is registered only on blockmaster's dedicated mTLS listener and also
+// requires a file-backed API bearer token; it is absent from the shared
+// plaintext control listener.
+// Create captures only the positively ready current primary. Restore and CSI
+// orchestration are separate layers and are not implied by this service.
+service SnapshotService {
+    rpc CreateSnapshot(CreateSnapshotRequest) returns (SnapshotRecord);
+    rpc GetSnapshot(GetSnapshotRequest) returns (SnapshotRecord);
+    rpc ListSnapshots(ListSnapshotsRequest) returns (ListSnapshotsResponse);
+    rpc DeleteSnapshot(DeleteSnapshotRequest) returns (DeleteSnapshotResponse);
 }
 
 // FrontendTarget — read-only frontend publication fact reported by
@@ -384,6 +399,46 @@ message DeleteVolumeRequest {
 }
 
 message DeleteVolumeResponse {
+}
+
+message CreateSnapshotRequest {
+    string name = 1;
+    string source_volume_id = 2;
+}
+
+message GetSnapshotRequest {
+    string snapshot_id = 1;
+}
+
+message ListSnapshotsRequest {
+    string source_volume_id = 1;
+}
+
+message ListSnapshotsResponse {
+    repeated SnapshotRecord snapshots = 1;
+}
+
+message DeleteSnapshotRequest {
+    string snapshot_id = 1;
+}
+
+message DeleteSnapshotResponse {
+}
+
+message SnapshotRecord {
+    string snapshot_id = 1;
+    string name = 2;
+    string source_volume_id = 3;
+    google.protobuf.Timestamp created_at = 4;
+    string state = 5;
+    uint64 frontier = 6;
+    uint64 size_bytes = 7;
+    uint32 num_blocks = 8;
+    uint32 block_size = 9;
+    uint64 record_count = 10;
+    uint64 data_bytes = 11;
+    int64 archive_bytes = 12;
+    string archive_sha256 = 13;
 }
 
 message FailbackRequest {

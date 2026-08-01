@@ -333,10 +333,10 @@ func snapshotID(name, source string) string {
 
 func validateCreateRequest(req CreateRequest) error {
 	if req.Name == "" || len(req.Name) > 128 {
-		return fmt.Errorf("snapshot: name must contain 1-128 bytes")
+		return fmt.Errorf("%w: name must contain 1-128 bytes", ErrInvalidRequest)
 	}
 	if req.SourceVolumeID == "" || len(req.SourceVolumeID) > 128 {
-		return fmt.Errorf("snapshot: source volume id must contain 1-128 bytes")
+		return fmt.Errorf("%w: source volume id must contain 1-128 bytes", ErrInvalidRequest)
 	}
 	return nil
 }

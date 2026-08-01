@@ -6,6 +6,7 @@
 //   operator -> master: EvidenceService.QueryVolumeStatus (unary, read-only)
 //   operator/dashboard -> master: ClusterEvidenceService read-only observation
 //   CSI/operator -> master: LifecycleService.CreateVolume/DeleteVolume (desired intent only)
+//   CSI/snapshot client -> master dedicated mTLS listener: SnapshotService catalog operations
 //
 // Boundary (T0 sketch §3 load-bearing):
 //   - no message carries an AssignmentAsk
@@ -875,6 +876,207 @@ var FailbackService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ExecuteFailback",
 			Handler:    _FailbackService_ExecuteFailback_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "control.proto",
+}
+
+const (
+	SnapshotService_CreateSnapshot_FullMethodName = "/seaweedfs.block.control.SnapshotService/CreateSnapshot"
+	SnapshotService_GetSnapshot_FullMethodName    = "/seaweedfs.block.control.SnapshotService/GetSnapshot"
+	SnapshotService_ListSnapshots_FullMethodName  = "/seaweedfs.block.control.SnapshotService/ListSnapshots"
+	SnapshotService_DeleteSnapshot_FullMethodName = "/seaweedfs.block.control.SnapshotService/DeleteSnapshot"
+)
+
+// SnapshotServiceClient is the client API for SnapshotService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+type SnapshotServiceClient interface {
+	CreateSnapshot(ctx context.Context, in *CreateSnapshotRequest, opts ...grpc.CallOption) (*SnapshotRecord, error)
+	GetSnapshot(ctx context.Context, in *GetSnapshotRequest, opts ...grpc.CallOption) (*SnapshotRecord, error)
+	ListSnapshots(ctx context.Context, in *ListSnapshotsRequest, opts ...grpc.CallOption) (*ListSnapshotsResponse, error)
+	DeleteSnapshot(ctx context.Context, in *DeleteSnapshotRequest, opts ...grpc.CallOption) (*DeleteSnapshotResponse, error)
+}
+
+type snapshotServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewSnapshotServiceClient(cc grpc.ClientConnInterface) SnapshotServiceClient {
+	return &snapshotServiceClient{cc}
+}
+
+func (c *snapshotServiceClient) CreateSnapshot(ctx context.Context, in *CreateSnapshotRequest, opts ...grpc.CallOption) (*SnapshotRecord, error) {
+	out := new(SnapshotRecord)
+	err := c.cc.Invoke(ctx, SnapshotService_CreateSnapshot_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *snapshotServiceClient) GetSnapshot(ctx context.Context, in *GetSnapshotRequest, opts ...grpc.CallOption) (*SnapshotRecord, error) {
+	out := new(SnapshotRecord)
+	err := c.cc.Invoke(ctx, SnapshotService_GetSnapshot_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *snapshotServiceClient) ListSnapshots(ctx context.Context, in *ListSnapshotsRequest, opts ...grpc.CallOption) (*ListSnapshotsResponse, error) {
+	out := new(ListSnapshotsResponse)
+	err := c.cc.Invoke(ctx, SnapshotService_ListSnapshots_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *snapshotServiceClient) DeleteSnapshot(ctx context.Context, in *DeleteSnapshotRequest, opts ...grpc.CallOption) (*DeleteSnapshotResponse, error) {
+	out := new(DeleteSnapshotResponse)
+	err := c.cc.Invoke(ctx, SnapshotService_DeleteSnapshot_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// SnapshotServiceServer is the server API for SnapshotService service.
+// All implementations must embed UnimplementedSnapshotServiceServer
+// for forward compatibility
+type SnapshotServiceServer interface {
+	CreateSnapshot(context.Context, *CreateSnapshotRequest) (*SnapshotRecord, error)
+	GetSnapshot(context.Context, *GetSnapshotRequest) (*SnapshotRecord, error)
+	ListSnapshots(context.Context, *ListSnapshotsRequest) (*ListSnapshotsResponse, error)
+	DeleteSnapshot(context.Context, *DeleteSnapshotRequest) (*DeleteSnapshotResponse, error)
+	mustEmbedUnimplementedSnapshotServiceServer()
+}
+
+// UnimplementedSnapshotServiceServer must be embedded to have forward compatible implementations.
+type UnimplementedSnapshotServiceServer struct {
+}
+
+func (UnimplementedSnapshotServiceServer) CreateSnapshot(context.Context, *CreateSnapshotRequest) (*SnapshotRecord, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CreateSnapshot not implemented")
+}
+func (UnimplementedSnapshotServiceServer) GetSnapshot(context.Context, *GetSnapshotRequest) (*SnapshotRecord, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetSnapshot not implemented")
+}
+func (UnimplementedSnapshotServiceServer) ListSnapshots(context.Context, *ListSnapshotsRequest) (*ListSnapshotsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListSnapshots not implemented")
+}
+func (UnimplementedSnapshotServiceServer) DeleteSnapshot(context.Context, *DeleteSnapshotRequest) (*DeleteSnapshotResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DeleteSnapshot not implemented")
+}
+func (UnimplementedSnapshotServiceServer) mustEmbedUnimplementedSnapshotServiceServer() {}
+
+// UnsafeSnapshotServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to SnapshotServiceServer will
+// result in compilation errors.
+type UnsafeSnapshotServiceServer interface {
+	mustEmbedUnimplementedSnapshotServiceServer()
+}
+
+func RegisterSnapshotServiceServer(s grpc.ServiceRegistrar, srv SnapshotServiceServer) {
+	s.RegisterService(&SnapshotService_ServiceDesc, srv)
+}
+
+func _SnapshotService_CreateSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateSnapshotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SnapshotServiceServer).CreateSnapshot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SnapshotService_CreateSnapshot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SnapshotServiceServer).CreateSnapshot(ctx, req.(*CreateSnapshotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SnapshotService_GetSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetSnapshotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SnapshotServiceServer).GetSnapshot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SnapshotService_GetSnapshot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SnapshotServiceServer).GetSnapshot(ctx, req.(*GetSnapshotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SnapshotService_ListSnapshots_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListSnapshotsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SnapshotServiceServer).ListSnapshots(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SnapshotService_ListSnapshots_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SnapshotServiceServer).ListSnapshots(ctx, req.(*ListSnapshotsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SnapshotService_DeleteSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteSnapshotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SnapshotServiceServer).DeleteSnapshot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SnapshotService_DeleteSnapshot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SnapshotServiceServer).DeleteSnapshot(ctx, req.(*DeleteSnapshotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// SnapshotService_ServiceDesc is the grpc.ServiceDesc for SnapshotService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var SnapshotService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "seaweedfs.block.control.SnapshotService",
+	HandlerType: (*SnapshotServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "CreateSnapshot",
+			Handler:    _SnapshotService_CreateSnapshot_Handler,
+		},
+		{
+			MethodName: "GetSnapshot",
+			Handler:    _SnapshotService_GetSnapshot_Handler,
+		},
+		{
+			MethodName: "ListSnapshots",
+			Handler:    _SnapshotService_ListSnapshots_Handler,
+		},
+		{
+			MethodName: "DeleteSnapshot",
+			Handler:    _SnapshotService_DeleteSnapshot_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

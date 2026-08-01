@@ -28,6 +28,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/recovery"
 	"github.com/seaweedfs/seaweed-block/core/replication"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
+	coresnapshot "github.com/seaweedfs/seaweed-block/core/snapshot"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"github.com/seaweedfs/seaweed-block/core/transport"
 	"github.com/seaweedfs/seaweed-block/internal/buildinfo"
@@ -60,8 +61,14 @@ type flags struct {
 	statusRecovery bool
 	// External status bind is off by default. Node-loss gates opt in so
 	// blockmaster can probe surviving replicas across Kubernetes nodes.
-	allowExternalStatusBind bool
-	runtimeRebuildEndpoint  bool
+	allowExternalStatusBind  bool
+	runtimeRebuildEndpoint   bool
+	snapshotRuntimeListen    string
+	snapshotRuntimeAdvertise string
+	snapshotRuntimeTLSCert   string
+	snapshotRuntimeTLSKey    string
+	snapshotRuntimeClientCA  string
+	snapshotRuntimeTokenFile string
 
 	// iSCSI frontend flags. iscsiListen is the TCP address the iSCSI
 	// target binds on; empty disables the frontend. The safe default
@@ -151,6 +158,12 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.statusRecovery, "status-recovery", false, "expose /status/recovery?volume=<id> with engine.ReplicaProjection (Mode/R/S/H/RecoveryDecision); off by default; loopback-only; intended for hardware test orchestration")
 	fs.BoolVar(&f.allowExternalStatusBind, "allow-external-status-bind", false, "allow the unauthenticated status endpoint to bind and serve non-loopback addresses; intended only for explicit Kubernetes node-loss gates")
 	fs.BoolVar(&f.runtimeRebuildEndpoint, "runtime-rebuild-endpoint", false, "expose POST /runtime/rebuild on the status HTTP listener; off by default; starts primary-side rebuild/catch-up traffic only after request lineage validation")
+	fs.StringVar(&f.snapshotRuntimeListen, "snapshot-runtime-listen", "", "dedicated authenticated HTTPS snapshot capture listen address; empty disables")
+	fs.StringVar(&f.snapshotRuntimeAdvertise, "snapshot-runtime-advertise", "", "HTTPS snapshot runtime endpoint published in heartbeat; required with --snapshot-runtime-listen")
+	fs.StringVar(&f.snapshotRuntimeTLSCert, "snapshot-runtime-tls-cert", "", "TLS certificate file for snapshot runtime")
+	fs.StringVar(&f.snapshotRuntimeTLSKey, "snapshot-runtime-tls-key", "", "TLS private key file for snapshot runtime")
+	fs.StringVar(&f.snapshotRuntimeClientCA, "snapshot-runtime-client-ca", "", "CA certificate used to authenticate the blockmaster snapshot client")
+	fs.StringVar(&f.snapshotRuntimeTokenFile, "snapshot-runtime-token-file", "", "file containing snapshot runtime bearer token; token is never accepted on the command line")
 	fs.StringVar(&f.iscsiListen, "iscsi-listen", "", "iSCSI target bind address (e.g. 127.0.0.1:0); empty disables. Loopback-only unless paired with an operator-managed proxy")
 	fs.StringVar(&f.iscsiIQN, "iscsi-iqn", "", "iSCSI target IQN (required if --iscsi-listen is set)")
 	fs.StringVar(&f.iscsiPortalAddr, "iscsi-portal-addr", "", "iSCSI TargetAddress advertised in SendTargets responses (e.g. 203.0.113.10:3260,1). Defaults to the bound listen address. Does not change the loopback-only bind policy")
@@ -254,6 +267,31 @@ func parseFlags(args []string) (flags, error) {
 	}
 	if len(missing) > 0 {
 		return flags{}, fmt.Errorf("required: %v", missing)
+	}
+	snapshotRuntimeValues := []string{
+		f.snapshotRuntimeListen,
+		f.snapshotRuntimeAdvertise,
+		f.snapshotRuntimeTLSCert,
+		f.snapshotRuntimeTLSKey,
+		f.snapshotRuntimeClientCA,
+		f.snapshotRuntimeTokenFile,
+	}
+	snapshotRuntimeConfigured := false
+	for _, value := range snapshotRuntimeValues {
+		snapshotRuntimeConfigured = snapshotRuntimeConfigured || value != ""
+	}
+	if snapshotRuntimeConfigured {
+		for _, value := range snapshotRuntimeValues {
+			if value == "" {
+				return flags{}, fmt.Errorf("snapshot runtime requires listen, advertise, TLS cert/key, client CA, and token file")
+			}
+		}
+		if f.durableRoot == "" {
+			return flags{}, fmt.Errorf("snapshot runtime requires --durable-root")
+		}
+		if err := coresnapshot.ValidateRuntimeEndpoint(f.snapshotRuntimeAdvertise); err != nil {
+			return flags{}, fmt.Errorf("--snapshot-runtime-advertise: %w", err)
+		}
 	}
 	if f.iscsiListen != "" {
 		if f.iscsiIQN == "" {
@@ -462,6 +500,12 @@ type nvmeReadyLine struct {
 	Phase     string `json:"phase"`
 	NvmeAddr  string `json:"nvme_addr"`
 	SubsysNQN string `json:"subsys_nqn"`
+}
+
+type snapshotRuntimeReadyLine struct {
+	Component string `json:"component"`
+	Phase     string `json:"phase"`
+	Endpoint  string `json:"snapshot_runtime_endpoint"`
 }
 
 func run(f flags) int {
@@ -1033,10 +1077,57 @@ func run(f flags) int {
 		}
 	}
 
+	var snapshotRuntime *coresnapshot.RuntimeServer
+	if f.snapshotRuntimeListen != "" {
+		store := durableProv.LogicalStorage(f.volumeID)
+		source, ok := store.(storage.SnapshotSource)
+		if !ok {
+			fmt.Fprintln(os.Stderr, "blockvolume: configured durable backend does not support snapshot capture")
+			closeBlockVolumeRuntime(nvmeTarget, iscsiTarget, replListen, replVolume, durableProv, status, h)
+			return 1
+		}
+		tokenBytes, err := os.ReadFile(f.snapshotRuntimeTokenFile)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "blockvolume: snapshot runtime token:", err)
+			closeBlockVolumeRuntime(nvmeTarget, iscsiTarget, replListen, replVolume, durableProv, status, h)
+			return 1
+		}
+		handler, err := coresnapshot.NewRuntimeHandler(source, h.ProjectionView(), strings.TrimSpace(string(tokenBytes)))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "blockvolume: snapshot runtime:", err)
+			closeBlockVolumeRuntime(nvmeTarget, iscsiTarget, replListen, replVolume, durableProv, status, h)
+			return 1
+		}
+		snapshotRuntime, err = coresnapshot.StartRuntimeServer(coresnapshot.RuntimeServerConfig{
+			Listen:            f.snapshotRuntimeListen,
+			AdvertiseEndpoint: f.snapshotRuntimeAdvertise,
+			TLSCertFile:       f.snapshotRuntimeTLSCert,
+			TLSKeyFile:        f.snapshotRuntimeTLSKey,
+			ClientCAFile:      f.snapshotRuntimeClientCA,
+			Handler:           handler,
+		})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "blockvolume: snapshot runtime:", err)
+			closeBlockVolumeRuntime(nvmeTarget, iscsiTarget, replListen, replVolume, durableProv, status, h)
+			return 1
+		}
+		h.SetSnapshotRuntimeEndpoint(snapshotRuntime.Endpoint())
+		_ = json.NewEncoder(os.Stdout).Encode(snapshotRuntimeReadyLine{
+			Component: "blockvolume",
+			Phase:     "snapshot-runtime-listening",
+			Endpoint:  snapshotRuntime.Endpoint(),
+		})
+	}
+
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
 
+	if snapshotRuntime != nil {
+		shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = snapshotRuntime.Close(shutCtx)
+		shutCancel()
+	}
 	if nvmeTarget != nil {
 		_ = nvmeTarget.Close()
 	}
@@ -1071,6 +1162,30 @@ func run(f flags) int {
 		return 1
 	}
 	return 0
+}
+
+func closeBlockVolumeRuntime(nvmeTarget interface{ Close() error }, iscsiTarget interface{ Close() error }, replListen *transport.ReplicaListener, replVolume *replication.ReplicationVolume, durableProv *durable.DurableProvider, status *volume.StatusServer, h *volume.Host) {
+	if nvmeTarget != nil {
+		_ = nvmeTarget.Close()
+	}
+	if iscsiTarget != nil {
+		_ = iscsiTarget.Close()
+	}
+	if replListen != nil {
+		replListen.Stop()
+	}
+	if replVolume != nil {
+		_ = replVolume.Close()
+	}
+	if durableProv != nil {
+		_ = durableProv.Close()
+	}
+	if status != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = status.Close(ctx)
+		cancel()
+	}
+	_ = h.Close()
 }
 
 func shouldPublishNVMeFrontendTarget(transport string) bool {
