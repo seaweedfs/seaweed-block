@@ -213,7 +213,11 @@ The initial catalog is node-local durable state. Enabling snapshots therefore
 requires exactly one blockmaster replica, durable `stateHostPath`, and an
 explicit `kubernetes.io/hostname` selector. A generic selector such as
 `kubernetes.io/os=linux` is not sufficient because it permits rescheduling to a
-different host with an empty catalog.
+different host with an empty catalog. The chart mounts only the
+`stateHostPath/master` subtree into blockmaster and derives blockvolume storage
+from `stateHostPath/replicas/<volume>/<replica>`. Each blockvolume mounts only
+its own leaf, so it cannot traverse into authority, lifecycle, or snapshot
+catalog state even when scheduled on the blockmaster node.
 
 ## CSI Mapping
 

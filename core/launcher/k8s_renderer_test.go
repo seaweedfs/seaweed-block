@@ -248,13 +248,13 @@ func TestG15d_K8sRenderer_CanUseHostPathStateVolume(t *testing.T) {
 	raw := string(manifests[0].YAML)
 	for _, want := range []string{
 		"hostPath:",
-		"path: /var/lib/sw-block/test-run",
+		"path: /var/lib/sw-block/test-run/pvc-a/r1",
 		"type: DirectoryOrCreate",
 		"initContainers:",
 		"name: state-permissions",
 		"runAsUser: 0",
 		"mkdir -p \"/var/lib/sw-block/pvc-a/r1\" && chown -R 65532:65532 \"/var/lib/sw-block/pvc-a/r1\"",
-		"mountPath: /var/lib/sw-block",
+		"mountPath: /var/lib/sw-block/pvc-a/r1",
 		"--durable-root=/var/lib/sw-block/pvc-a/r1",
 	} {
 		if !strings.Contains(raw, want) {
@@ -263,6 +263,13 @@ func TestG15d_K8sRenderer_CanUseHostPathStateVolume(t *testing.T) {
 	}
 	if strings.Contains(raw, "emptyDir:") {
 		t.Fatalf("hostPath state volume must not render emptyDir:\n%s", raw)
+	}
+	if strings.Contains(raw, "mountPath: /var/lib/sw-block\n") {
+		t.Fatalf("hostPath volume exposed the shared state root:\n%s", raw)
+	}
+	r2 := string(manifests[1].YAML)
+	if !strings.Contains(r2, "path: /var/lib/sw-block/test-run/pvc-a/r2") || strings.Contains(r2, "path: /var/lib/sw-block/test-run/pvc-a/r1") {
+		t.Fatalf("replica state hostPath is not leaf-isolated:\n%s", r2)
 	}
 }
 
@@ -286,9 +293,9 @@ func TestG15d_K8sRenderer_DurableHostPathPreservesOwnerRefAndStatus(t *testing.T
 		"uid: uid-123",
 		"controller: true",
 		"hostPath:",
-		"path: /var/lib/sw-block/testops-run",
+		"path: /var/lib/sw-block/testops-run/pvc-a/r1",
 		"type: DirectoryOrCreate",
-		"mountPath: /var/lib/sw-block",
+		"mountPath: /var/lib/sw-block/pvc-a/r1",
 		"--durable-root=/var/lib/sw-block/pvc-a/r1",
 		"--status-addr=127.0.0.1:23260",
 	} {

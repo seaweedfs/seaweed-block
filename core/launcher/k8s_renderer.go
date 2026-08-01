@@ -107,8 +107,8 @@ func RenderBlockVolumeDeployments(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8
 		if err != nil {
 			return nil, err
 		}
-		volumeMounts := []volumeMount{{Name: "state", MountPath: stateMountPath}}
-		volumes := []volume{stateVolume(cfg)}
+		volumeMounts := []volumeMount{stateVolumeMount(plan, replica, cfg)}
+		volumes := []volume{stateVolume(plan, replica, cfg)}
 		if cfg.SnapshotRuntimeSecretName != "" {
 			volumeMounts = append(volumeMounts, volumeMount{Name: "snapshot-runtime-identity", MountPath: snapshotRuntimeMountPath, ReadOnly: true})
 			volumes = append(volumes, volume{Name: "snapshot-runtime-identity", Secret: &secretVolumeSource{
@@ -187,14 +187,22 @@ func RenderBlockVolumeDeployments(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8
 	return out, nil
 }
 
-func stateVolume(cfg K8sRenderConfig) volume {
+func stateVolume(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.BlockVolumeReplicaWorkload, cfg K8sRenderConfig) volume {
 	if cfg.StateHostPathBase == "" {
 		return volume{Name: "state", EmptyDir: &emptyDir{}}
 	}
 	return volume{Name: "state", HostPath: &hostPath{
-		Path: path.Clean(cfg.StateHostPathBase),
+		Path: path.Join(path.Clean(cfg.StateHostPathBase), plan.VolumeID, replica.ReplicaID),
 		Type: "DirectoryOrCreate",
 	}}
+}
+
+func stateVolumeMount(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.BlockVolumeReplicaWorkload, cfg K8sRenderConfig) volumeMount {
+	mountPath := stateMountPath
+	if cfg.StateHostPathBase != "" {
+		mountPath = durableRoot(plan, replica, cfg)
+	}
+	return volumeMount{Name: "state", MountPath: mountPath}
 }
 
 func ownerReferences(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8sRenderConfig) ([]ownerReference, error) {
@@ -391,7 +399,7 @@ func blockVolumeInitContainers(plan lifecycle.BlockVolumeWorkloadPlan, replica l
 		Args:    []string{fmt.Sprintf("mkdir -p %q && chown -R 65532:65532 %q", root, root)},
 		VolumeMounts: []volumeMount{{
 			Name:      "state",
-			MountPath: stateMountPath,
+			MountPath: root,
 		}},
 		SecurityContext: &containerSecurityContext{RunAsUser: int64Ptr(0)},
 	}}

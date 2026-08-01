@@ -99,7 +99,11 @@ spec:
             - "--launcher-pvc-owner-ref"
             {{- end }}
             {{- if .Values.blockmaster.stateHostPath }}
+            {{- if .Values.snapshot.enabled }}
+            - "--launcher-state-hostpath={{ trimSuffix "/" .Values.blockmaster.stateHostPath }}/replicas"
+            {{- else }}
             - "--launcher-state-hostpath={{ .Values.blockmaster.stateHostPath }}"
+            {{- end }}
             {{- end }}
             {{- if .Values.snapshot.enabled }}
             - "--snapshot-root=/var/lib/sw-block/snapshots"
@@ -170,7 +174,11 @@ spec:
         - name: state
           {{- if .Values.blockmaster.stateHostPath }}
           hostPath:
+            {{- if .Values.snapshot.enabled }}
+            path: {{ printf "%s/master" (trimSuffix "/" .Values.blockmaster.stateHostPath) | quote }}
+            {{- else }}
             path: {{ .Values.blockmaster.stateHostPath | quote }}
+            {{- end }}
             type: {{ .Values.blockmaster.stateHostPathType | quote }}
           {{- else }}
           emptyDir: {}

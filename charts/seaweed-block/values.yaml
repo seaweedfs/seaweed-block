@@ -46,6 +46,9 @@ blockmaster:
   durableImpl: walstore
   durableWALMultiBlockRecords: false
   durableWALRecoveryTestDisableFlusher: false
+  # With snapshot.enabled=true this is an isolation root: blockmaster mounts
+  # only <root>/master and generated replicas mount only
+  # <root>/replicas/<volume>/<replica>.
   stateHostPath: ""
   stateHostPathType: DirectoryOrCreate
   statePermissionsImage:
