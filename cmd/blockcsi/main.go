@@ -6,6 +6,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -13,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -21,6 +24,7 @@ import (
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"github.com/seaweedfs/seaweed-block/internal/buildinfo"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
@@ -35,6 +39,11 @@ type flags struct {
 	nvmeReconnectOwner           bool
 	nvmeReconnectInterval        time.Duration
 	rejectLoopbackPublishTargets bool
+	snapshotAPIAddr              string
+	snapshotAPICAFile            string
+	snapshotAPIClientCertFile    string
+	snapshotAPIClientKeyFile     string
+	snapshotAPITokenFile         string
 	version                      bool
 	printReadyLine               bool
 }
@@ -52,6 +61,11 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.nvmeReconnectOwner, "nvme-reconnect-owner", false, "opt-in: CSI node periodically reconnects missing mounted NVMe paths from refreshed publish evidence")
 	fs.DurationVar(&f.nvmeReconnectInterval, "nvme-reconnect-interval", 5*time.Second, "interval for --nvme-reconnect-owner")
 	fs.BoolVar(&f.rejectLoopbackPublishTargets, "reject-loopback-publish-targets", false, "opt-in: reject loopback publish targets for node-loss recovery gates")
+	fs.StringVar(&f.snapshotAPIAddr, "snapshot-api", "", "opt-in dedicated blockmaster mTLS SnapshotService address")
+	fs.StringVar(&f.snapshotAPICAFile, "snapshot-api-ca", "", "CA certificate for the blockmaster SnapshotService")
+	fs.StringVar(&f.snapshotAPIClientCertFile, "snapshot-api-client-cert", "", "client certificate for the blockmaster SnapshotService")
+	fs.StringVar(&f.snapshotAPIClientKeyFile, "snapshot-api-client-key", "", "client private key for the blockmaster SnapshotService")
+	fs.StringVar(&f.snapshotAPITokenFile, "snapshot-api-token-file", "", "file containing the SnapshotService bearer token")
 	fs.BoolVar(&f.version, "version", false, "print build provenance and exit")
 	fs.BoolVar(&f.printReadyLine, "t0-print-ready", false, "internal test-only: emit one structured JSON ready line after listener bind")
 	fs.SetOutput(os.Stderr)
@@ -66,6 +80,10 @@ func parseFlags(args []string) (flags, error) {
 	}
 	if f.masterAddr == "" && (f.stage2Multipath || f.nvmeReconnectOwner || f.rejectLoopbackPublishTargets || f.pvcUIDLookup || f.swBlockVolumeCRNamespace != "") {
 		return flags{}, fmt.Errorf("--stage2-multipath, --nvme-reconnect-owner, --reject-loopback-publish-targets, --kubernetes-pvc-uid-lookup, and --swblockvolume-cr-namespace require --master")
+	}
+	snapshotConfigured := f.snapshotAPIAddr != "" || f.snapshotAPICAFile != "" || f.snapshotAPIClientCertFile != "" || f.snapshotAPIClientKeyFile != "" || f.snapshotAPITokenFile != ""
+	if snapshotConfigured && (f.snapshotAPIAddr == "" || f.snapshotAPICAFile == "" || f.snapshotAPIClientCertFile == "" || f.snapshotAPIClientKeyFile == "" || f.snapshotAPITokenFile == "") {
+		return flags{}, fmt.Errorf("--snapshot-api, --snapshot-api-ca, --snapshot-api-client-cert, --snapshot-api-client-key, and --snapshot-api-token-file must be configured together")
 	}
 	if f.nodeID == "" {
 		host, err := os.Hostname()
@@ -125,6 +143,7 @@ func run(f flags) int {
 		provisioner blockcsi.VolumeProvisioner
 		resolver    blockcsi.KubernetesMetadataResolver
 		registrar   blockcsi.VolumeObjectRegistrar
+		snapshotter blockcsi.SnapshotProvisioner
 	)
 	if f.masterAddr != "" {
 		masterConn, err = grpc.NewClient(f.masterAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -144,6 +163,47 @@ func run(f flags) int {
 		lookup = blockcsi.NewControlStatusLookupWithOptions(evidence, opts...)
 		reporter = blockcsi.NewControlEventReporter(control.NewObservationServiceClient(masterConn))
 		provisioner = blockcsi.NewControlLifecycleProvisioner(control.NewLifecycleServiceClient(masterConn))
+	}
+	var snapshotConn *grpc.ClientConn
+	if f.snapshotAPIAddr != "" {
+		clientCertificate, err := tls.LoadX509KeyPair(f.snapshotAPIClientCertFile, f.snapshotAPIClientKeyFile)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "blockcsi: snapshot API client identity:", err)
+			return 1
+		}
+		caPEM, err := os.ReadFile(f.snapshotAPICAFile)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "blockcsi: snapshot API CA:", err)
+			return 1
+		}
+		roots := x509.NewCertPool()
+		if !roots.AppendCertsFromPEM(caPEM) {
+			fmt.Fprintln(os.Stderr, "blockcsi: snapshot API CA contains no certificates")
+			return 1
+		}
+		tokenBytes, err := os.ReadFile(f.snapshotAPITokenFile)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "blockcsi: snapshot API token:", err)
+			return 1
+		}
+		token := strings.TrimSpace(string(tokenBytes))
+		if token == "" {
+			fmt.Fprintln(os.Stderr, "blockcsi: snapshot API token is empty")
+			return 1
+		}
+		snapshotConn, err = grpc.NewClient(f.snapshotAPIAddr, grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{
+			RootCAs: roots, Certificates: []tls.Certificate{clientCertificate}, MinVersion: tls.VersionTLS12,
+		})))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "blockcsi: snapshot API dial:", err)
+			return 1
+		}
+		defer snapshotConn.Close()
+		snapshotter, err = blockcsi.NewControlSnapshotProvisioner(control.NewSnapshotServiceClient(snapshotConn), token)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "blockcsi: snapshot API:", err)
+			return 1
+		}
 	}
 	if f.pvcUIDLookup && provisioner != nil {
 		resolver, err = blockcsi.NewInClusterPVCMetadataResolver()
@@ -169,7 +229,7 @@ func run(f flags) int {
 
 	srv := grpc.NewServer()
 	csipb.RegisterIdentityServer(srv, blockcsi.NewIdentityServer())
-	csipb.RegisterControllerServer(srv, blockcsi.NewControllerServerWithProvisionerMetadataAndRegistrar(lookup, provisioner, resolver, registrar))
+	csipb.RegisterControllerServer(srv, blockcsi.NewControllerServerWithProvisionerMetadataRegistrarAndSnapshotter(lookup, provisioner, resolver, registrar, snapshotter))
 	csipb.RegisterNodeServer(srv, nodeSrv)
 
 	if f.printReadyLine {

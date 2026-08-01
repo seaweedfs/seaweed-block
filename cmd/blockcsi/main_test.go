@@ -148,6 +148,27 @@ func TestParseFlags_MasterDependentFlagsRequireMaster(t *testing.T) {
 	}
 }
 
+func TestPhase175ParseFlags_SnapshotAPIConfigurationIsAllOrNothing(t *testing.T) {
+	base := []string{"--endpoint", "unix:///tmp/csi.sock", "--node-id", "node-a"}
+	if _, err := parseFlags(append(base, "--snapshot-api", "blockmaster:9343")); err == nil {
+		t.Fatal("expected incomplete snapshot API configuration to fail")
+	}
+	args := append(base,
+		"--snapshot-api", "blockmaster:9343",
+		"--snapshot-api-ca", "/secrets/ca.crt",
+		"--snapshot-api-client-cert", "/secrets/tls.crt",
+		"--snapshot-api-client-key", "/secrets/tls.key",
+		"--snapshot-api-token-file", "/secrets/token",
+	)
+	f, err := parseFlags(args)
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if f.snapshotAPIAddr != "blockmaster:9343" || f.snapshotAPITokenFile != "/secrets/token" {
+		t.Fatalf("snapshot flags=%+v", f)
+	}
+}
+
 func TestG15a_BlockCSIControllerPublishUsesMasterFrontendFact(t *testing.T) {
 	if testing.Short() {
 		t.Skip("L2 subprocess test; -short skip")

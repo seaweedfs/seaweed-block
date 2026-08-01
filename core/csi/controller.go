@@ -2,14 +2,17 @@ package csi
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"log"
+	"sort"
 	"strconv"
 	"time"
 
 	csipb "github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 const (
@@ -23,6 +26,7 @@ type ControllerServer struct {
 	provisioner      VolumeProvisioner
 	metadataResolver KubernetesMetadataResolver
 	registrar        VolumeObjectRegistrar
+	snapshotter      SnapshotProvisioner
 }
 
 func NewControllerServer(lookup PublishTargetLookup) *ControllerServer {
@@ -41,6 +45,10 @@ func NewControllerServerWithProvisionerMetadataAndRegistrar(lookup PublishTarget
 	return &ControllerServer{lookup: lookup, provisioner: provisioner, metadataResolver: resolver, registrar: registrar}
 }
 
+func NewControllerServerWithProvisionerMetadataRegistrarAndSnapshotter(lookup PublishTargetLookup, provisioner VolumeProvisioner, resolver KubernetesMetadataResolver, registrar VolumeObjectRegistrar, snapshotter SnapshotProvisioner) *ControllerServer {
+	return &ControllerServer{lookup: lookup, provisioner: provisioner, metadataResolver: resolver, registrar: registrar, snapshotter: snapshotter}
+}
+
 func (s *ControllerServer) CreateVolume(ctx context.Context, req *csipb.CreateVolumeRequest) (*csipb.CreateVolumeResponse, error) {
 	if s.provisioner == nil {
 		return nil, status.Error(codes.Unimplemented, "dynamic provisioning is not configured")
@@ -48,6 +56,26 @@ func (s *ControllerServer) CreateVolume(ctx context.Context, req *csipb.CreateVo
 	spec, err := volumeSpecFromCreateRequest(req)
 	if err != nil {
 		return nil, err
+	}
+	if source := req.GetVolumeContentSource(); source != nil {
+		snapshotSource := source.GetSnapshot()
+		if snapshotSource == nil || snapshotSource.GetSnapshotId() == "" {
+			return nil, status.Error(codes.InvalidArgument, "only snapshot volume content sources are supported")
+		}
+		if s.snapshotter == nil {
+			return nil, status.Error(codes.InvalidArgument, "snapshot restore is not configured")
+		}
+		snapshotSpec, err := s.snapshotter.GetSnapshot(ctx, snapshotSource.GetSnapshotId())
+		if err != nil {
+			return nil, snapshotCSIError("get source snapshot", err)
+		}
+		if snapshotSpec.State != SnapshotStateReady {
+			return nil, status.Errorf(codes.Aborted, "snapshot %q is not ready", snapshotSpec.SnapshotID)
+		}
+		if snapshotSpec.SizeBytes != spec.SizeBytes {
+			return nil, status.Errorf(codes.InvalidArgument, "restored volume capacity %d must equal snapshot capacity %d", spec.SizeBytes, snapshotSpec.SizeBytes)
+		}
+		spec.SourceSnapshotID = snapshotSpec.SnapshotID
 	}
 	if err := s.resolveKubernetesMetadata(ctx, &spec); err != nil {
 		return nil, err
@@ -63,6 +91,11 @@ func (s *ControllerServer) CreateVolume(ctx context.Context, req *csipb.CreateVo
 	if s.registrar != nil {
 		if err := s.registrar.EnsureVolumeObject(ctx, created); err != nil {
 			return nil, status.Errorf(codes.Internal, "ensure SwBlockVolume object: %v", err)
+		}
+	}
+	if created.SourceSnapshotID != "" {
+		if err := s.snapshotter.RestoreSnapshot(ctx, created.SourceSnapshotID, created.VolumeID); err != nil {
+			return nil, snapshotRestoreCSIError(err)
 		}
 	}
 	protocol := normalizeProtocol(created.Protocol)
@@ -81,8 +114,81 @@ func (s *ControllerServer) CreateVolume(ctx context.Context, req *csipb.CreateVo
 			VolumeId:      created.VolumeID,
 			CapacityBytes: int64(created.SizeBytes),
 			VolumeContext: volumeContext,
+			ContentSource: req.GetVolumeContentSource(),
 		},
 	}, nil
+}
+
+func (s *ControllerServer) CreateSnapshot(ctx context.Context, req *csipb.CreateSnapshotRequest) (*csipb.CreateSnapshotResponse, error) {
+	if s.snapshotter == nil {
+		return nil, status.Error(codes.Unimplemented, "snapshot service is not configured")
+	}
+	if req.GetName() == "" || req.GetSourceVolumeId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "snapshot name and source volume ID are required")
+	}
+	snapshotSpec, err := s.snapshotter.CreateSnapshot(ctx, req.GetName(), req.GetSourceVolumeId())
+	if err != nil {
+		return nil, snapshotCSIError("create snapshot", err)
+	}
+	return &csipb.CreateSnapshotResponse{Snapshot: csiSnapshot(snapshotSpec)}, nil
+}
+
+func (s *ControllerServer) DeleteSnapshot(ctx context.Context, req *csipb.DeleteSnapshotRequest) (*csipb.DeleteSnapshotResponse, error) {
+	if s.snapshotter == nil {
+		return nil, status.Error(codes.Unimplemented, "snapshot service is not configured")
+	}
+	if req.GetSnapshotId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "snapshot ID is required")
+	}
+	if err := s.snapshotter.DeleteSnapshot(ctx, req.GetSnapshotId()); err != nil {
+		return nil, snapshotCSIError("delete snapshot", err)
+	}
+	return &csipb.DeleteSnapshotResponse{}, nil
+}
+
+func (s *ControllerServer) ListSnapshots(ctx context.Context, req *csipb.ListSnapshotsRequest) (*csipb.ListSnapshotsResponse, error) {
+	if s.snapshotter == nil {
+		return nil, status.Error(codes.Unimplemented, "snapshot service is not configured")
+	}
+	if req.GetMaxEntries() < 0 {
+		return nil, status.Error(codes.InvalidArgument, "max_entries must be non-negative")
+	}
+	snapshots, err := s.snapshotter.ListSnapshots(ctx, req.GetSourceVolumeId())
+	if err != nil {
+		return nil, snapshotCSIError("list snapshots", err)
+	}
+	sort.Slice(snapshots, func(i, j int) bool { return snapshots[i].SnapshotID < snapshots[j].SnapshotID })
+	if req.GetSnapshotId() != "" {
+		filtered := snapshots[:0]
+		for _, item := range snapshots {
+			if item.SnapshotID == req.GetSnapshotId() {
+				filtered = append(filtered, item)
+			}
+		}
+		snapshots = filtered
+	}
+	startAfter := ""
+	if req.GetStartingToken() != "" {
+		raw, err := base64.RawURLEncoding.DecodeString(req.GetStartingToken())
+		if err != nil || len(raw) == 0 {
+			return nil, status.Error(codes.Aborted, "invalid snapshot starting token")
+		}
+		startAfter = string(raw)
+	}
+	start := sort.Search(len(snapshots), func(i int) bool { return snapshots[i].SnapshotID > startAfter })
+	snapshots = snapshots[start:]
+	limit := len(snapshots)
+	if req.GetMaxEntries() > 0 && int(req.GetMaxEntries()) < limit {
+		limit = int(req.GetMaxEntries())
+	}
+	response := &csipb.ListSnapshotsResponse{Entries: make([]*csipb.ListSnapshotsResponse_Entry, 0, limit)}
+	for _, item := range snapshots[:limit] {
+		response.Entries = append(response.Entries, &csipb.ListSnapshotsResponse_Entry{Snapshot: csiSnapshot(item)})
+	}
+	if limit < len(snapshots) && limit > 0 {
+		response.NextToken = base64.RawURLEncoding.EncodeToString([]byte(snapshots[limit-1].SnapshotID))
+	}
+	return response, nil
 }
 
 func (s *ControllerServer) resolveKubernetesMetadata(ctx context.Context, spec *VolumeSpec) error {
@@ -203,6 +309,9 @@ func (s *ControllerServer) ControllerGetCapabilities(context.Context, *csipb.Con
 	if s.provisioner != nil {
 		caps = append(caps, csipb.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME)
 	}
+	if s.snapshotter != nil {
+		caps = append(caps, csipb.ControllerServiceCapability_RPC_CREATE_DELETE_SNAPSHOT)
+	}
 	out := make([]*csipb.ControllerServiceCapability, 0, len(caps))
 	for _, capType := range caps {
 		out = append(out, &csipb.ControllerServiceCapability{
@@ -212,6 +321,34 @@ func (s *ControllerServer) ControllerGetCapabilities(context.Context, *csipb.Con
 		})
 	}
 	return &csipb.ControllerGetCapabilitiesResponse{Capabilities: out}, nil
+}
+
+func csiSnapshot(spec SnapshotSpec) *csipb.Snapshot {
+	return &csipb.Snapshot{
+		SnapshotId:     spec.SnapshotID,
+		SourceVolumeId: spec.SourceVolumeID,
+		SizeBytes:      int64(spec.SizeBytes),
+		CreationTime:   timestamppb.New(spec.CreatedAt),
+		ReadyToUse:     spec.State == SnapshotStateReady,
+	}
+}
+
+func snapshotCSIError(operation string, err error) error {
+	if code := status.Code(err); code != codes.Unknown {
+		return status.Errorf(code, "%s: %v", operation, err)
+	}
+	return status.Errorf(codes.Internal, "%s: %v", operation, err)
+}
+
+func snapshotRestoreCSIError(err error) error {
+	switch status.Code(err) {
+	case codes.FailedPrecondition, codes.Aborted, codes.Unavailable, codes.DeadlineExceeded:
+		return status.Errorf(codes.Aborted, "snapshot restore is not ready: %v", err)
+	case codes.InvalidArgument, codes.NotFound:
+		return status.Errorf(status.Code(err), "restore snapshot: %v", err)
+	default:
+		return status.Errorf(codes.Internal, "restore snapshot: %v", err)
+	}
 }
 
 func (s *ControllerServer) ValidateVolumeCapabilities(ctx context.Context, req *csipb.ValidateVolumeCapabilitiesRequest) (*csipb.ValidateVolumeCapabilitiesResponse, error) {

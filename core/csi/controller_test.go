@@ -66,6 +66,69 @@ type stubVolumeRegistrar struct {
 	calls []VolumeSpec
 }
 
+type stubSnapshotter struct {
+	created      SnapshotSpec
+	snapshots    []SnapshotSpec
+	createErr    error
+	deleteErr    error
+	getErr       error
+	listErr      error
+	restoreErr   error
+	createCalls  []string
+	deleteCalls  []string
+	restoreCalls []string
+	getCalls     []string
+	listSources  []string
+}
+
+func (s *stubSnapshotter) CreateSnapshot(_ context.Context, name, sourceVolumeID string) (SnapshotSpec, error) {
+	s.createCalls = append(s.createCalls, name+"/"+sourceVolumeID)
+	if s.createErr != nil {
+		return SnapshotSpec{}, s.createErr
+	}
+	return s.created, nil
+}
+
+func (s *stubSnapshotter) DeleteSnapshot(_ context.Context, snapshotID string) error {
+	s.deleteCalls = append(s.deleteCalls, snapshotID)
+	return s.deleteErr
+}
+
+func (s *stubSnapshotter) GetSnapshot(_ context.Context, snapshotID string) (SnapshotSpec, error) {
+	s.getCalls = append(s.getCalls, snapshotID)
+	if s.getErr != nil {
+		return SnapshotSpec{}, s.getErr
+	}
+	for _, item := range s.snapshots {
+		if item.SnapshotID == snapshotID {
+			return item, nil
+		}
+	}
+	if s.created.SnapshotID == snapshotID {
+		return s.created, nil
+	}
+	return SnapshotSpec{}, status.Error(codes.NotFound, "snapshot not found")
+}
+
+func (s *stubSnapshotter) ListSnapshots(_ context.Context, sourceVolumeID string) ([]SnapshotSpec, error) {
+	s.listSources = append(s.listSources, sourceVolumeID)
+	if s.listErr != nil {
+		return nil, s.listErr
+	}
+	out := make([]SnapshotSpec, 0, len(s.snapshots))
+	for _, item := range s.snapshots {
+		if sourceVolumeID == "" || item.SourceVolumeID == sourceVolumeID {
+			out = append(out, item)
+		}
+	}
+	return out, nil
+}
+
+func (s *stubSnapshotter) RestoreSnapshot(_ context.Context, snapshotID, targetVolumeID string) error {
+	s.restoreCalls = append(s.restoreCalls, snapshotID+"/"+targetVolumeID)
+	return s.restoreErr
+}
+
 func (s *stubVolumeRegistrar) EnsureVolumeObject(_ context.Context, spec VolumeSpec) error {
 	s.calls = append(s.calls, spec)
 	return s.err
@@ -347,6 +410,93 @@ func TestG15c_ControllerCapabilities_AdvertiseDynamicProvisioningWhenConfigured(
 	}
 	if !got[csipb.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME] {
 		t.Fatal("missing CREATE_DELETE_VOLUME")
+	}
+}
+
+func TestPhase175ControllerSnapshotLifecycleAndPagination(t *testing.T) {
+	now := time.Now().UTC()
+	snapshotter := &stubSnapshotter{
+		created: SnapshotSpec{SnapshotID: "snap-2", Name: "daily", SourceVolumeID: "vol-a", CreatedAt: now, State: SnapshotStateReady, SizeBytes: 1 << 20},
+		snapshots: []SnapshotSpec{
+			{SnapshotID: "snap-3", SourceVolumeID: "vol-a", CreatedAt: now, State: SnapshotStateReady, SizeBytes: 1 << 20},
+			{SnapshotID: "snap-1", SourceVolumeID: "vol-a", CreatedAt: now, State: SnapshotStateReady, SizeBytes: 1 << 20},
+			{SnapshotID: "snap-other", SourceVolumeID: "vol-b", CreatedAt: now, State: SnapshotStateReady, SizeBytes: 1 << 20},
+		},
+	}
+	s := NewControllerServerWithProvisionerMetadataRegistrarAndSnapshotter(&stubLookup{}, &stubProvisioner{}, nil, nil, snapshotter)
+	caps, err := s.ControllerGetCapabilities(context.Background(), &csipb.ControllerGetCapabilitiesRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	advertised := false
+	for _, capability := range caps.GetCapabilities() {
+		advertised = advertised || capability.GetRpc().GetType() == csipb.ControllerServiceCapability_RPC_CREATE_DELETE_SNAPSHOT
+	}
+	if !advertised {
+		t.Fatal("configured controller did not advertise CREATE_DELETE_SNAPSHOT")
+	}
+	created, err := s.CreateSnapshot(context.Background(), &csipb.CreateSnapshotRequest{Name: "daily", SourceVolumeId: "vol-a"})
+	if err != nil || created.GetSnapshot().GetSnapshotId() != "snap-2" || !created.GetSnapshot().GetReadyToUse() {
+		t.Fatalf("created=%+v err=%v", created, err)
+	}
+	first, err := s.ListSnapshots(context.Background(), &csipb.ListSnapshotsRequest{SourceVolumeId: "vol-a", MaxEntries: 1})
+	if err != nil || len(first.GetEntries()) != 1 || first.GetEntries()[0].GetSnapshot().GetSnapshotId() != "snap-1" || first.GetNextToken() == "" {
+		t.Fatalf("first page=%+v err=%v", first, err)
+	}
+	second, err := s.ListSnapshots(context.Background(), &csipb.ListSnapshotsRequest{SourceVolumeId: "vol-a", StartingToken: first.GetNextToken(), MaxEntries: 1})
+	if err != nil || len(second.GetEntries()) != 1 || second.GetEntries()[0].GetSnapshot().GetSnapshotId() != "snap-3" || second.GetNextToken() != "" {
+		t.Fatalf("second page=%+v err=%v", second, err)
+	}
+	if _, err := s.DeleteSnapshot(context.Background(), &csipb.DeleteSnapshotRequest{SnapshotId: "snap-2"}); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(snapshotter.createCalls) != "[daily/vol-a]" || fmt.Sprint(snapshotter.deleteCalls) != "[snap-2]" {
+		t.Fatalf("create=%v delete=%v", snapshotter.createCalls, snapshotter.deleteCalls)
+	}
+}
+
+func TestPhase175ControllerCreateVolumeRestoresSnapshotBeforeSuccess(t *testing.T) {
+	snapshotter := &stubSnapshotter{snapshots: []SnapshotSpec{{
+		SnapshotID: "snap-source", SourceVolumeID: "source-vol", CreatedAt: time.Now().UTC(), State: SnapshotStateReady, SizeBytes: 1 << 20,
+	}}}
+	provisioner := &stubProvisioner{}
+	s := NewControllerServerWithProvisionerMetadataRegistrarAndSnapshotter(&stubLookup{}, provisioner, nil, nil, snapshotter)
+	request := &csipb.CreateVolumeRequest{
+		Name: "restored-vol", CapacityRange: &csipb.CapacityRange{RequiredBytes: 1 << 20},
+		VolumeCapabilities:  []*csipb.VolumeCapability{testVolumeCapability()},
+		VolumeContentSource: &csipb.VolumeContentSource{Type: &csipb.VolumeContentSource_Snapshot{Snapshot: &csipb.VolumeContentSource_SnapshotSource{SnapshotId: "snap-source"}}},
+	}
+	response, err := s.CreateVolume(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(provisioner.calls) != 1 || provisioner.calls[0].SourceSnapshotID != "snap-source" {
+		t.Fatalf("provisioned=%+v", provisioner.calls)
+	}
+	if fmt.Sprint(snapshotter.restoreCalls) != "[snap-source/restored-vol]" {
+		t.Fatalf("restore calls=%v", snapshotter.restoreCalls)
+	}
+	if response.GetVolume().GetContentSource().GetSnapshot().GetSnapshotId() != "snap-source" {
+		t.Fatalf("response=%+v", response)
+	}
+}
+
+func TestPhase175ControllerRestoreStaysFailClosedUntilRuntimeReady(t *testing.T) {
+	snapshotter := &stubSnapshotter{
+		snapshots:  []SnapshotSpec{{SnapshotID: "snap-source", SourceVolumeID: "source-vol", CreatedAt: time.Now().UTC(), State: SnapshotStateReady, SizeBytes: 1 << 20}},
+		restoreErr: status.Error(codes.FailedPrecondition, "targets not ready"),
+	}
+	provisioner := &stubProvisioner{}
+	s := NewControllerServerWithProvisionerMetadataRegistrarAndSnapshotter(&stubLookup{}, provisioner, nil, nil, snapshotter)
+	_, err := s.CreateVolume(context.Background(), &csipb.CreateVolumeRequest{
+		Name: "restored-vol", CapacityRange: &csipb.CapacityRange{RequiredBytes: 1 << 20}, VolumeCapabilities: []*csipb.VolumeCapability{testVolumeCapability()},
+		VolumeContentSource: &csipb.VolumeContentSource{Type: &csipb.VolumeContentSource_Snapshot{Snapshot: &csipb.VolumeContentSource_SnapshotSource{SnapshotId: "snap-source"}}},
+	})
+	if status.Code(err) != codes.Aborted {
+		t.Fatalf("error=%v", err)
+	}
+	if len(provisioner.calls) != 1 || fmt.Sprint(snapshotter.restoreCalls) != "[snap-source/restored-vol]" {
+		t.Fatalf("provisioned=%v restore=%v", provisioner.calls, snapshotter.restoreCalls)
 	}
 }
 
