@@ -49,6 +49,12 @@ type phase173ArchitectureControlResult struct {
 	ScratchPReadOps        uint64  `json:"scratch_pread_ops,omitempty"`
 	ScratchPWriteOps       uint64  `json:"scratch_pwrite_ops,omitempty"`
 	ScratchSyncOps         uint64  `json:"scratch_sync_ops,omitempty"`
+	MeasuredAllocBytes     uint64  `json:"measured_alloc_bytes,omitempty"`
+	MeasuredMallocs        uint64  `json:"measured_mallocs,omitempty"`
+	MeasuredGCCycles       uint32  `json:"measured_gc_cycles,omitempty"`
+	MeasuredGCPauseNanos   uint64  `json:"measured_gc_pause_ns,omitempty"`
+	MeasuredHeapAllocStart uint64  `json:"measured_heap_alloc_start,omitempty"`
+	MeasuredHeapAllocEnd   uint64  `json:"measured_heap_alloc_end,omitempty"`
 	CorrectnessSamples     int     `json:"correctness_samples"`
 }
 
@@ -202,7 +208,11 @@ func runPhase173WALStoreControl(
 		startPhase173ControlFlusher(s)
 	}
 	writeBefore := s.WriteInstrumentation()
+	var memoryBefore runtime.MemStats
+	runtime.ReadMemStats(&memoryBefore)
 	foreground, latencies, err := runPhase173BalancedOperations(s, cfg, cfg.APIOperations, 0, payloads, true)
+	var memoryAfter runtime.MemStats
+	runtime.ReadMemStats(&memoryAfter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,6 +275,12 @@ func runPhase173WALStoreControl(
 		ExtentWriteOps:         flush.ExtentWriteOps,
 		ExtentSyncOps:          flush.ExtentSyncOps,
 		CheckpointSyncOps:      flush.CheckpointMetadataSyncOps,
+		MeasuredAllocBytes:     memoryAfter.TotalAlloc - memoryBefore.TotalAlloc,
+		MeasuredMallocs:        memoryAfter.Mallocs - memoryBefore.Mallocs,
+		MeasuredGCCycles:       memoryAfter.NumGC - memoryBefore.NumGC,
+		MeasuredGCPauseNanos:   memoryAfter.PauseTotalNs - memoryBefore.PauseTotalNs,
+		MeasuredHeapAllocStart: memoryBefore.HeapAlloc,
+		MeasuredHeapAllocEnd:   memoryAfter.HeapAlloc,
 		CorrectnessSamples:     correctness,
 	}
 	flusherResult := phase173ArchitectureControlResult{

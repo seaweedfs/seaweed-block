@@ -165,8 +165,14 @@ for key in sorted(expected):
     if key[0] in ("shipped_concurrent", "deferred_foreground"):
         waits = [row["commit_lock_wait_ns"] / row["commit_lock_wait_ops"] for row in group]
         p99 = [row["p99_ns"] for row in group]
+        gc_cycles = [row.get("measured_gc_cycles", 0) for row in group]
+        gc_pause = [row.get("measured_gc_pause_ns", 0) for row in group]
+        alloc_bytes = [row.get("measured_alloc_bytes", 0) for row in group]
         summary.append(f"{prefix}_median_commit_lock_wait_ns_per_op={statistics.median(waits):.0f}")
         summary.append(f"{prefix}_median_p99_ns={statistics.median(p99):.0f}")
+        summary.append(f"{prefix}_median_measured_gc_cycles={statistics.median(gc_cycles):.0f}")
+        summary.append(f"{prefix}_median_measured_gc_pause_ns={statistics.median(gc_pause):.0f}")
+        summary.append(f"{prefix}_median_measured_alloc_bytes={statistics.median(alloc_bytes):.0f}")
 
 shipped = medians[("shipped_concurrent", 4)]
 deferred_one = medians[("deferred_foreground", 1)]
