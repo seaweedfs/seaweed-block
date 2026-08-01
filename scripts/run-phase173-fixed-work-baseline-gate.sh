@@ -11,6 +11,7 @@ SHAPES=(sequential_4k scattered_4k batch_16 mounted_mixed)
 WRITERS=(1 2 4 8)
 SETS=2
 RUNS=5
+DIAGNOSTIC_RUNS=1
 MAX_RANGE="1.25"
 
 mkdir -p "${ARTIFACT_DIR}" "${STORE_DIR}" "${ARTIFACT_DIR}/environment" "${ARTIFACT_DIR}/logs"
@@ -30,7 +31,8 @@ capture() {
 write_summary "phase173_fixed_work_baseline_status=running"
 write_summary "contract=phase173-fixed-work-v1"
 write_summary "sets=${SETS}"
-write_summary "runs_per_matrix_point=${RUNS}"
+write_summary "four_writer_runs_per_set=${RUNS}"
+write_summary "diagnostic_runs_per_set=${DIAGNOSTIC_RUNS}"
 write_summary "four_writer_max_min_limit=${MAX_RANGE}"
 write_summary "flusher_interval_ms=100"
 write_summary "page_cache_policy=warm_process_and_filesystem_no_drop_caches"
@@ -67,7 +69,11 @@ go test -c -o "${TEST_BINARY}" ./core/storage
 for set_id in $(seq 1 "${SETS}"); do
   for shape in "${SHAPES[@]}"; do
     for writers in "${WRITERS[@]}"; do
-      for run_id in $(seq 1 "${RUNS}"); do
+      point_runs="${DIAGNOSTIC_RUNS}"
+      if [[ "${writers}" == "4" ]]; then
+        point_runs="${RUNS}"
+      fi
+      for run_id in $(seq 1 "${point_runs}"); do
         id="set${set_id}-${shape}-writers${writers}-run${run_id}"
         log="${ARTIFACT_DIR}/logs/${id}.log"
         SW_BLOCK_PHASE173_SHAPE="${shape}" \
@@ -101,7 +107,7 @@ max_range = float(max_range_text)
 rows = [json.loads(line) for line in open(results_path, encoding="utf-8") if line.strip()]
 shapes = ("sequential_4k", "scattered_4k", "batch_16", "mounted_mixed")
 writers_values = (1, 2, 4, 8)
-expected = sets * runs * len(shapes) * len(writers_values)
+expected = sets * len(shapes) * (runs + len(writers_values) - 1)
 if len(rows) != expected:
     raise SystemExit(f"fixed-work rows={len(rows)} want {expected}")
 
@@ -131,8 +137,9 @@ gate_ok = True
 for shape in shapes:
     for writers in writers_values:
         group = grouped[(shape, writers)]
-        if len(group) != sets * runs:
-            raise SystemExit(f"shape={shape} writers={writers} rows={len(group)}")
+        expected_group = sets * (runs if writers == 4 else 1)
+        if len(group) != expected_group:
+            raise SystemExit(f"shape={shape} writers={writers} rows={len(group)} want {expected_group}")
         values = [float(row["foreground_mib_per_second"]) for row in group]
         summary.append(f"{shape}_writers_{writers}_median_mibps={statistics.median(values):.3f}")
         summary.append(f"{shape}_writers_{writers}_median_p99_ns={statistics.median(row['p99_ns'] for row in group):.0f}")

@@ -19,7 +19,7 @@ const (
 	phase173FixedWorkStoreEnv   = "SW_BLOCK_PHASE173_STORE_DIR"
 
 	phase173FixedWorkBlockSize    = 4096
-	phase173FixedWorkNumBlocks    = 32768
+	phase173FixedWorkNumBlocks    = 131072
 	phase173FixedWorkRegionBlocks = phase173FixedWorkNumBlocks / 2
 )
 
@@ -85,11 +85,11 @@ func TestPhase173FixedWorkContract(t *testing.T) {
 			if err != nil {
 				t.Fatalf("shape=%s writers=%d: %v", shape, writers, err)
 			}
-			if cfg.APILogicalBlocks() < 8000 || cfg.APILogicalBlocks() > 8192 {
-				t.Fatalf("shape=%s logical blocks=%d want [8000,8192]", shape, cfg.APILogicalBlocks())
+			if cfg.APILogicalBlocks() < 64000 || cfg.APILogicalBlocks() > 65536 {
+				t.Fatalf("shape=%s logical blocks=%d want [64000,65536]", shape, cfg.APILogicalBlocks())
 			}
-			if cfg.WarmupLogicalBlocks() < 500 || cfg.WarmupLogicalBlocks() > 512 {
-				t.Fatalf("shape=%s warmup logical blocks=%d want [500,512]", shape, cfg.WarmupLogicalBlocks())
+			if cfg.WarmupLogicalBlocks() < 4000 || cfg.WarmupLogicalBlocks() > 4096 {
+				t.Fatalf("shape=%s warmup logical blocks=%d want [4000,4096]", shape, cfg.WarmupLogicalBlocks())
 			}
 			for index := 0; index < cfg.APIOperations; index++ {
 				start, blocks := cfg.operation(index, 0)
@@ -139,15 +139,15 @@ func newPhase173FixedWorkConfig(shape string, writers int) (phase173FixedWorkCon
 	cfg := phase173FixedWorkConfig{Shape: shape, Writers: writers}
 	switch shape {
 	case "sequential_4k", "scattered_4k":
-		cfg.APIOperations = 8192
-		cfg.WarmupAPIOps = 512
+		cfg.APIOperations = 65536
+		cfg.WarmupAPIOps = 4096
 	case "batch_16":
-		cfg.APIOperations = 512
-		cfg.WarmupAPIOps = 32
+		cfg.APIOperations = 4096
+		cfg.WarmupAPIOps = 256
 	case "mounted_mixed":
-		// 320 fixed cycles of 4K, 16K, 64K, and 16K requests.
-		cfg.APIOperations = 1280
-		cfg.WarmupAPIOps = 80
+		// 2560 fixed cycles of 4K, 16K, 64K, and 16K requests.
+		cfg.APIOperations = 10240
+		cfg.WarmupAPIOps = 640
 	default:
 		return phase173FixedWorkConfig{}, fmt.Errorf("phase173: unsupported shape %q", shape)
 	}

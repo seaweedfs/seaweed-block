@@ -29,7 +29,7 @@ Do not lower run counts or change the `1.25x` threshold after seeing results.
 ## Required Evidence
 
 - `phase173_fixed_work_baseline_status=ok`
-- `fixed_work_result_count=160`
+- `fixed_work_result_count=64`
 - `fixed_work_counter_reconciliation=true`
 - `fixed_work_complete_drain=true`
 - `fixed_work_correctness_samples=true`
@@ -50,7 +50,10 @@ may encode 16 records while coalescing them into one physical append.
 ## Verdict
 
 - `PASS`: all required evidence is present and both independent five-run
-  four-writer sets remain within the predeclared range.
+  four-writer sets remain within the predeclared range. Each fixed-work sample
+  writes about 256 MiB so foreground execution crosses multiple 100 ms flusher
+  periods; 1/2/8 writers are diagnostic matrix points, while four writers use
+  the two independent five-run admission sets.
 - `FAIL`: a correctness, counter, drain, or residue invariant fails.
 - `HOLD`: the stability range exceeds `1.25x`; fix the harness or lab before
   D2/D3 and do not implement an architecture candidate.
