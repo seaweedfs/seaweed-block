@@ -683,6 +683,12 @@ kubectl apply -f "${ARTIFACT_DIR}/pvc/perf-pvc.yaml" >"${ARTIFACT_DIR}/pvc/apply
 kubectl -n "${APP_NAMESPACE}" wait --for=jsonpath='{.status.phase}'=Bound "pvc/${PVC_NAME}" --timeout=180s \
   >"${ARTIFACT_DIR}/pvc/wait-pvc-bound.log" 2>&1
 kubectl -n "${APP_NAMESPACE}" get pvc "${PVC_NAME}" -o wide >"${ARTIFACT_DIR}/pvc/pvc.after-bound.txt" 2>&1
+PV_NAME="$(kubectl -n "${APP_NAMESPACE}" get pvc "${PVC_NAME}" -o jsonpath='{.spec.volumeName}')"
+if [[ -z "${PV_NAME}" ]]; then
+  echo "bound PVC ${APP_NAMESPACE}/${PVC_NAME} has no volumeName" >&2
+  exit 1
+fi
+write_summary "pv_name=${PV_NAME}"
 write_summary "pvc_bound=true"
 
 cat >"${ARTIFACT_DIR}/perf/perf-pod.yaml" <<YAML
@@ -829,6 +835,20 @@ kubectl -n "${APP_NAMESPACE}" delete pod "${PERF_POD}" --ignore-not-found=true -
   >"${ARTIFACT_DIR}/cleanup/delete-perf-pod.txt" 2>&1
 kubectl -n "${APP_NAMESPACE}" delete pvc "${PVC_NAME}" --ignore-not-found=true --wait=true --timeout=120s \
   >"${ARTIFACT_DIR}/cleanup/delete-pvc.txt" 2>&1
+pv_deleted=false
+for _ in $(seq 1 180); do
+  if ! kubectl get pv "${PV_NAME}" >/dev/null 2>&1; then
+    pv_deleted=true
+    break
+  fi
+  sleep 1
+done
+if [[ "${pv_deleted}" != "true" ]]; then
+  kubectl get pv "${PV_NAME}" -o yaml >"${ARTIFACT_DIR}/cleanup/pv-delete-timeout.yaml" 2>&1 || true
+  echo "PV ${PV_NAME} remained after PVC deletion while CSI was running" >&2
+  exit 1
+fi
+write_summary "pv_deleted_before_csi_uninstall=true"
 kubectl delete storageclass "${SC_NAME}" --ignore-not-found=true --wait=true --timeout=120s \
   >"${ARTIFACT_DIR}/cleanup/delete-storageclass.txt" 2>&1
 sudo -n nvme disconnect-all >/dev/null 2>&1 || true
