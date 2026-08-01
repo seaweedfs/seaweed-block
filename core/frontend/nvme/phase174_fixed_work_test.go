@@ -70,6 +70,20 @@ type phase174NVMeFixedWorkResult struct {
 	NVMeR2TWriteBytes             uint64  `json:"nvme_r2t_write_bytes"`
 	NVMeH2CDataPDUs               uint64  `json:"nvme_h2c_data_pdus"`
 	NVMeH2CDataBytes              uint64  `json:"nvme_h2c_data_bytes"`
+	NVMeCapsuleReceiveParseOps    uint64  `json:"nvme_capsule_receive_parse_ops"`
+	NVMeCapsuleReceiveParseNanos  uint64  `json:"nvme_capsule_receive_parse_ns"`
+	NVMeR2TCollectionOps          uint64  `json:"nvme_r2t_collection_ops"`
+	NVMeR2TCollectionNanos        uint64  `json:"nvme_r2t_collection_ns"`
+	NVMeDispatchWaitOps           uint64  `json:"nvme_dispatch_wait_ops"`
+	NVMeDispatchWaitNanos         uint64  `json:"nvme_dispatch_wait_ns"`
+	NVMeHandlerOps                uint64  `json:"nvme_handler_ops"`
+	NVMeHandlerNanos              uint64  `json:"nvme_handler_ns"`
+	NVMeCompletionQueueWaitOps    uint64  `json:"nvme_completion_queue_wait_ops"`
+	NVMeCompletionQueueWaitNanos  uint64  `json:"nvme_completion_queue_wait_ns"`
+	NVMeCompletionSendOps         uint64  `json:"nvme_completion_send_ops"`
+	NVMeCompletionSendNanos       uint64  `json:"nvme_completion_send_ns"`
+	NVMeServerPhaseNanos          uint64  `json:"nvme_server_phase_ns"`
+	NVMeClientResidualNanos       uint64  `json:"nvme_client_residual_ns"`
 	TargetWriteOps                uint64  `json:"target_write_ops"`
 	TargetWriteBytes              uint64  `json:"target_write_bytes"`
 	TargetWriteNanos              uint64  `json:"target_write_ns"`
@@ -215,7 +229,7 @@ func phase174RunNVMeFixedWork(
 	if err != nil {
 		t.Fatalf("measured writes: %v", err)
 	}
-	targetAfter := target.Stats()
+	targetAfter := phase174NVMeWaitForWritePhases(t, target, targetBefore, phase174NVMeAPIOperations)
 	adapterAfter := backend.WriteProfile()
 	storageAfter := store.WriteInstrumentation()
 	flusherAfter := store.FlusherInstrumentation()
@@ -244,6 +258,17 @@ func phase174RunNVMeFixedWork(
 	if clientLatencyNanos > targetWriteNanos {
 		nonBackendNanos = clientLatencyNanos - targetWriteNanos
 	}
+	serverPhaseNanos :=
+		(targetAfter.WriteCapsuleReceiveParseNanos - targetBefore.WriteCapsuleReceiveParseNanos) +
+			(targetAfter.R2TDataCollectionNanos - targetBefore.R2TDataCollectionNanos) +
+			(targetAfter.WriteDispatchWaitNanos - targetBefore.WriteDispatchWaitNanos) +
+			(targetAfter.WriteHandlerNanos - targetBefore.WriteHandlerNanos) +
+			(targetAfter.WriteCompletionQueueWaitNanos - targetBefore.WriteCompletionQueueWaitNanos) +
+			(targetAfter.WriteCompletionSendNanos - targetBefore.WriteCompletionSendNanos)
+	clientResidualNanos := uint64(0)
+	if clientLatencyNanos > serverPhaseNanos {
+		clientResidualNanos = clientLatencyNanos - serverPhaseNanos
+	}
 	result := phase174NVMeFixedWorkResult{
 		Contract: "phase174-fixed-work-v1", Layer: "nvme_tcp_rf1",
 		Scope: "nvme_tcp_target_durable_adapter", AckProfile: "local_durable",
@@ -261,6 +286,20 @@ func phase174RunNVMeFixedWork(
 		NVMeR2TWriteBytes:             targetAfter.R2TWriteBytes - targetBefore.R2TWriteBytes,
 		NVMeH2CDataPDUs:               targetAfter.H2CDataPDUs - targetBefore.H2CDataPDUs,
 		NVMeH2CDataBytes:              targetAfter.H2CDataBytes - targetBefore.H2CDataBytes,
+		NVMeCapsuleReceiveParseOps:    targetAfter.WriteCapsuleReceiveParseOps - targetBefore.WriteCapsuleReceiveParseOps,
+		NVMeCapsuleReceiveParseNanos:  targetAfter.WriteCapsuleReceiveParseNanos - targetBefore.WriteCapsuleReceiveParseNanos,
+		NVMeR2TCollectionOps:          targetAfter.R2TDataCollectionOps - targetBefore.R2TDataCollectionOps,
+		NVMeR2TCollectionNanos:        targetAfter.R2TDataCollectionNanos - targetBefore.R2TDataCollectionNanos,
+		NVMeDispatchWaitOps:           targetAfter.WriteDispatchWaitOps - targetBefore.WriteDispatchWaitOps,
+		NVMeDispatchWaitNanos:         targetAfter.WriteDispatchWaitNanos - targetBefore.WriteDispatchWaitNanos,
+		NVMeHandlerOps:                targetAfter.WriteHandlerOps - targetBefore.WriteHandlerOps,
+		NVMeHandlerNanos:              targetAfter.WriteHandlerNanos - targetBefore.WriteHandlerNanos,
+		NVMeCompletionQueueWaitOps:    targetAfter.WriteCompletionQueueWaitOps - targetBefore.WriteCompletionQueueWaitOps,
+		NVMeCompletionQueueWaitNanos:  targetAfter.WriteCompletionQueueWaitNanos - targetBefore.WriteCompletionQueueWaitNanos,
+		NVMeCompletionSendOps:         targetAfter.WriteCompletionSendOps - targetBefore.WriteCompletionSendOps,
+		NVMeCompletionSendNanos:       targetAfter.WriteCompletionSendNanos - targetBefore.WriteCompletionSendNanos,
+		NVMeServerPhaseNanos:          serverPhaseNanos,
+		NVMeClientResidualNanos:       clientResidualNanos,
 		TargetWriteOps:                adapterAfter.TargetWriteOps - adapterBefore.TargetWriteOps,
 		TargetWriteBytes:              adapterAfter.TargetWriteBytes - adapterBefore.TargetWriteBytes,
 		TargetWriteNanos:              targetWriteNanos,
@@ -291,6 +330,30 @@ func phase174RunNVMeFixedWork(
 	}
 	phase174NVMeValidateResult(t, result)
 	return result
+}
+
+func phase174NVMeWaitForWritePhases(
+	t *testing.T,
+	target *nvme.Target,
+	before nvme.Stats,
+	want uint64,
+) nvme.Stats {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		after := target.Stats()
+		if after.WriteCapsuleReceiveParseOps-before.WriteCapsuleReceiveParseOps >= want &&
+			after.WriteDispatchWaitOps-before.WriteDispatchWaitOps >= want &&
+			after.WriteHandlerOps-before.WriteHandlerOps >= want &&
+			after.WriteCompletionQueueWaitOps-before.WriteCompletionQueueWaitOps >= want &&
+			after.WriteCompletionSendOps-before.WriteCompletionSendOps >= want {
+			return after
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("write phase stats did not reach %d: before=%+v after=%+v", want, before, after)
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func phase174NVMeWrites(
@@ -424,15 +487,21 @@ func phase174NVMeValidateResult(t *testing.T, result phase174NVMeFixedWorkResult
 	wantOps := uint64(phase174NVMeAPIOperations)
 	wantBytes := uint64(phase174NVMeAPIOperations * phase174NVMeBlockSize)
 	for name, got := range map[string]uint64{
-		"nvme_write_commands":          result.NVMeWriteCommands,
-		"nvme_r2t_write_commands":      result.NVMeR2TWriteCommands,
-		"nvme_h2c_data_pdus":           result.NVMeH2CDataPDUs,
-		"target_write_ops":             result.TargetWriteOps,
-		"adapter_request_ops":          result.AdapterRequestOps,
-		"adapter_write_ops":            result.AdapterWriteOps,
-		"adapter_storage_write_calls":  result.AdapterStorageCalls,
-		"adapter_storage_write_blocks": result.AdapterStorageBlocks,
-		"primary_wal_write_ops":        result.PrimaryWALWrites,
+		"nvme_write_commands":            result.NVMeWriteCommands,
+		"nvme_r2t_write_commands":        result.NVMeR2TWriteCommands,
+		"nvme_h2c_data_pdus":             result.NVMeH2CDataPDUs,
+		"nvme_capsule_receive_parse_ops": result.NVMeCapsuleReceiveParseOps,
+		"nvme_r2t_collection_ops":        result.NVMeR2TCollectionOps,
+		"nvme_dispatch_wait_ops":         result.NVMeDispatchWaitOps,
+		"nvme_handler_ops":               result.NVMeHandlerOps,
+		"nvme_completion_queue_wait_ops": result.NVMeCompletionQueueWaitOps,
+		"nvme_completion_send_ops":       result.NVMeCompletionSendOps,
+		"target_write_ops":               result.TargetWriteOps,
+		"adapter_request_ops":            result.AdapterRequestOps,
+		"adapter_write_ops":              result.AdapterWriteOps,
+		"adapter_storage_write_calls":    result.AdapterStorageCalls,
+		"adapter_storage_write_blocks":   result.AdapterStorageBlocks,
+		"primary_wal_write_ops":          result.PrimaryWALWrites,
 	} {
 		if got != wantOps {
 			t.Fatalf("%s=%d want %d", name, got, wantOps)
@@ -452,6 +521,11 @@ func phase174NVMeValidateResult(t *testing.T, result phase174NVMeFixedWorkResult
 	if result.PrimaryStableLSN != result.PrimaryHeadLSN || result.CorrectnessSamples < 5 {
 		t.Fatalf("recovery stable=%d head=%d samples=%d",
 			result.PrimaryStableLSN, result.PrimaryHeadLSN, result.CorrectnessSamples)
+	}
+	if result.NVMeServerPhaseNanos > result.ClientWriteLatencyNanos ||
+		result.NVMeClientResidualNanos != result.ClientWriteLatencyNanos-result.NVMeServerPhaseNanos {
+		t.Fatalf("NVMe phase time does not reconcile: client=%d server=%d residual=%d",
+			result.ClientWriteLatencyNanos, result.NVMeServerPhaseNanos, result.NVMeClientResidualNanos)
 	}
 }
 

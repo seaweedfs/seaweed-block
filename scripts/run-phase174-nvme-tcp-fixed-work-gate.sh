@@ -185,6 +185,8 @@ for row in rows:
         raise SystemExit(f"bad fixed work: {row}")
     for key in (
         "nvme_write_commands", "nvme_r2t_write_commands", "nvme_h2c_data_pdus",
+        "nvme_capsule_receive_parse_ops", "nvme_r2t_collection_ops", "nvme_dispatch_wait_ops",
+        "nvme_handler_ops", "nvme_completion_queue_wait_ops", "nvme_completion_send_ops",
         "target_write_ops", "adapter_request_ops", "adapter_write_ops",
         "adapter_storage_write_calls", "adapter_storage_write_blocks",
         "primary_wal_write_ops",
@@ -201,6 +203,10 @@ for row in rows:
         raise SystemExit(f"target duration exceeds client duration: {row}")
     if row["nvme_round_trip_nonbackend_ns"] != row["client_write_latency_ns"] - row["target_write_ns"]:
         raise SystemExit(f"non-backend duration mismatch: {row}")
+    if row["nvme_server_phase_ns"] > row["client_write_latency_ns"]:
+        raise SystemExit(f"server phase duration exceeds client duration: {row}")
+    if row["nvme_client_residual_ns"] != row["client_write_latency_ns"] - row["nvme_server_phase_ns"]:
+        raise SystemExit(f"client residual duration mismatch: {row}")
     if row["primary_stable_lsn"] != row["primary_head_lsn"]:
         raise SystemExit(f"primary frontier mismatch: {row}")
     if not row["flusher_phase_reset"] or not row["close_recover_complete"]:
@@ -254,6 +260,16 @@ all_shapes_stable = all(
 target_per_op = median_per_op(four, "target_write_ns")
 roundtrip_per_op = median_per_op(four, "nvme_round_trip_nonbackend_ns")
 dominant = "target_backend_call" if target_per_op >= roundtrip_per_op else "nvme_tcp_round_trip_nonbackend"
+phase_fields = {
+    "capsule_receive_parse": "nvme_capsule_receive_parse_ns",
+    "r2t_collection": "nvme_r2t_collection_ns",
+    "dispatch_wait": "nvme_dispatch_wait_ns",
+    "handler": "nvme_handler_ns",
+    "completion_queue_wait": "nvme_completion_queue_wait_ns",
+    "completion_send": "nvme_completion_send_ns",
+    "client_residual": "nvme_client_residual_ns",
+}
+dominant_phase = max(phase_fields, key=lambda name: median_per_op(four, phase_fields[name]))
 
 with open(summary_path, "a", encoding="utf-8") as out:
     for writers in (1, 4, 8):
@@ -263,6 +279,9 @@ with open(summary_path, "a", encoding="utf-8") as out:
         out.write(f"nvme_tcp_rf1_writers_{writers}_set2_max_min_ratio={rate_range(writers, 2):.3f}\n")
     for field in (
         "client_write_latency_ns", "nvme_round_trip_nonbackend_ns", "target_write_ns",
+        "nvme_capsule_receive_parse_ns", "nvme_r2t_collection_ns", "nvme_dispatch_wait_ns",
+        "nvme_handler_ns", "nvme_completion_queue_wait_ns", "nvme_completion_send_ns",
+        "nvme_server_phase_ns", "nvme_client_residual_ns",
         "adapter_write_ns", "primary_write_commit_lock_wait_ns", "primary_wal_encode_ns",
         "primary_wal_append_ns", "primary_dirty_map_ns", "foreground_flusher_cycle_ns",
         "foreground_flusher_extent_write_ns", "foreground_flusher_extent_sync_ns",
@@ -272,7 +291,9 @@ with open(summary_path, "a", encoding="utf-8") as out:
     out.write(f"nvme_tcp_rf1_writers_8_flusher_cycle_ns_per_op={median_per_op(eight, 'foreground_flusher_cycle_ns'):.3f}\n")
     out.write(f"nvme_tcp_rf1_writers_8_flusher_foreground_correlation={correlation(eight, 'foreground_flusher_cycle_ns'):.3f}\n")
     out.write(f"nvme_tcp_rf1_dominant_accumulated_boundary={dominant}\n")
+    out.write(f"nvme_tcp_rf1_dominant_detailed_phase={dominant_phase}\n")
     out.write("nvme_tcp_rf1_counter_reconciliation=true\n")
+    out.write("nvme_tcp_rf1_phase_counter_reconciliation=true\n")
     out.write("nvme_tcp_rf1_close_recover_verified=true\n")
     out.write(f"nvme_tcp_rf1_four_writer_stability_gate={'pass' if four_stable else 'hold'}\n")
     out.write(f"nvme_tcp_rf1_all_shapes_stability_gate={'pass' if all_shapes_stable else 'hold'}\n")

@@ -2,6 +2,7 @@ package nvme_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
@@ -45,7 +46,7 @@ func TestTargetStats_RecordInlineAndR2TWrites(t *testing.T) {
 	status = writeChunkedOnClient(t, cli, 1, 2, r2tPayload, 2)
 	expectStatusSuccess(t, status, "R2T Write")
 
-	st := tg.Stats()
+	st := waitForWritePhaseStats(t, tg, 2)
 	if st.AdminConnects != 1 || st.IOConnects != 1 {
 		t.Fatalf("connect stats admin=%d io=%d want 1/1", st.AdminConnects, st.IOConnects)
 	}
@@ -63,6 +64,39 @@ func TestTargetStats_RecordInlineAndR2TWrites(t *testing.T) {
 	if st.H2CDataPDUs != 2 || st.H2CDataBytes != uint64(len(r2tPayload)) {
 		t.Fatalf("h2c stats pdus=%d bytes=%d want 2/%d",
 			st.H2CDataPDUs, st.H2CDataBytes, len(r2tPayload))
+	}
+	for name, got := range map[string]uint64{
+		"write capsule receive/parse": st.WriteCapsuleReceiveParseOps,
+		"write dispatch wait":         st.WriteDispatchWaitOps,
+		"write handler":               st.WriteHandlerOps,
+		"write completion queue wait": st.WriteCompletionQueueWaitOps,
+		"write completion send":       st.WriteCompletionSendOps,
+	} {
+		if got != 2 {
+			t.Fatalf("%s ops=%d want 2", name, got)
+		}
+	}
+	if st.R2TDataCollectionOps != 1 {
+		t.Fatalf("R2T data collection ops=%d want 1", st.R2TDataCollectionOps)
+	}
+}
+
+func waitForWritePhaseStats(t *testing.T, target *nvme.Target, want uint64) nvme.Stats {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		stats := target.Stats()
+		if stats.WriteCapsuleReceiveParseOps >= want &&
+			stats.WriteDispatchWaitOps >= want &&
+			stats.WriteHandlerOps >= want &&
+			stats.WriteCompletionQueueWaitOps >= want &&
+			stats.WriteCompletionSendOps >= want {
+			return stats
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("write phase stats did not reach %d: %+v", want, stats)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 

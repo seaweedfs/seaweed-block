@@ -45,15 +45,21 @@ SW_BLOCK_PHASE174_SOURCE_COMMIT=<full-source-commit> \
    time plus NVMe/TCP round-trip non-backend time. The latter includes test
    initiator, loopback TCP, R2T/H2C receive, dispatch, and completion; do not
    relabel it as a pure target CPU measurement.
-6. Final NVMe Flush succeeds, close/reopen/recovery reaches `R == H`, and at
+6. The detailed target counters each report 16,384 operations and split the
+   server path into capsule receive/parse, R2T data collection, dispatch wait,
+   handler, completion queue wait, and completion send. Capsule receive/parse
+   includes inbound socket wait; R2T collection includes target/initiator/wire
+   exchange time. Their sum must not exceed accumulated client request latency;
+   the exact difference is the remaining client/wire residual.
+7. Final NVMe Flush succeeds, close/reopen/recovery reaches `R == H`, and at
    least five measured LBAs retain the expected bytes.
-7. Capture merged CPU, block, and mutex profiles for five four-queue diagnostic
+8. Capture merged CPU, block, and mutex profiles for five four-queue diagnostic
    runs.
-8. Record the four-writer admission stability and all-shapes stability
+9. Record the four-writer admission stability and all-shapes stability
    separately. A range above `1.25x` is HOLD evidence, not a reason to delete
    a slow run or select an architecture candidate. Correlate four/eight-writer
    foreground time with the existing WAL flusher counters.
-9. All test stores and the test binary are removed after the gate.
+10. All test stores and the test binary are removed after the gate.
 
 ## Mounted Boundary
 
