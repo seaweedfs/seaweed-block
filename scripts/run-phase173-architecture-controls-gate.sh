@@ -10,6 +10,7 @@ TEST_BINARY="${ARTIFACT_DIR}/storage.test"
 MAX_RANGE="1.25"
 MATERIAL_RATIO="1.30"
 RUNS=5
+CONTROL_CPUSET="${SW_BLOCK_PHASE173_CONTROL_CPUSET:-}"
 
 mkdir -p "${ARTIFACT_DIR}" "${STORE_DIR}" "${ARTIFACT_DIR}/environment"
 : >"${SUMMARY}"
@@ -31,12 +32,22 @@ capture() {
   "$@" >"${ARTIFACT_DIR}/environment/${name}.txt" 2>&1 || true
 }
 
-for tool in go python3 findmnt; do
+for tool in go python3 findmnt taskset nproc; do
   command -v "${tool}" >/dev/null 2>&1 || {
     echo "required tool ${tool} is unavailable" >&2
     exit 1
   }
 done
+
+if [[ -z "${CONTROL_CPUSET}" ]]; then
+  echo "SW_BLOCK_PHASE173_CONTROL_CPUSET must name at least four comparable CPUs" >&2
+  exit 1
+fi
+CONTROL_GOMAXPROCS="$(taskset -c "${CONTROL_CPUSET}" nproc)"
+if (( CONTROL_GOMAXPROCS < 4 )); then
+  echo "control cpuset ${CONTROL_CPUSET} exposes ${CONTROL_GOMAXPROCS} CPUs; need at least four" >&2
+  exit 1
+fi
 
 store_source="$(findmnt -n -T "${STORE_DIR}" -o SOURCE)"
 store_filesystem="$(findmnt -n -T "${STORE_DIR}" -o FSTYPE)"
@@ -60,6 +71,8 @@ write_summary "store_source=${store_source}"
 write_summary "store_filesystem=${store_filesystem}"
 write_summary "root_source=${root_source}"
 write_summary "dedicated_store_source=true"
+write_summary "control_cpuset=${CONTROL_CPUSET}"
+write_summary "control_gomaxprocs=${CONTROL_GOMAXPROCS}"
 write_summary "architecture_candidate_selected=false"
 write_summary "product_mutation_present=false"
 write_summary "deferred_foreground_product_claim_allowed=false"
@@ -79,16 +92,17 @@ go test -c -o "${TEST_BINARY}" ./core/storage
 
 control_log="${ARTIFACT_DIR}/architecture-controls.log"
 SW_BLOCK_PHASE173_ARCH_CONTROL_STORE_DIR="${STORE_DIR}" \
+  GOMAXPROCS="${CONTROL_GOMAXPROCS}" taskset -c "${CONTROL_CPUSET}" \
   "${TEST_BINARY}" -test.run '^TestPhase173ArchitectureControls$' -test.v -test.count=1 \
   >"${control_log}" 2>&1
 sed -n 's/^phase173_architecture_control_result=//p' "${control_log}" >"${RESULTS}"
 
 mkdir -p "${STORE_DIR}/tmp"
-TMPDIR="${STORE_DIR}/tmp" go test ./core/frontend/durable \
+TMPDIR="${STORE_DIR}/tmp" GOMAXPROCS="${CONTROL_GOMAXPROCS}" taskset -c "${CONTROL_CPUSET}" go test ./core/frontend/durable \
   -run '^$' -bench '^BenchmarkT3c_DurablePerf/walstore$' \
   -benchtime=8000x -count=1 \
   >"${ARTIFACT_DIR}/rf1-durable-adapter-benchmark.txt" 2>&1
-TMPDIR="${STORE_DIR}/tmp" go test ./core/replication \
+TMPDIR="${STORE_DIR}/tmp" GOMAXPROCS="${CONTROL_GOMAXPROCS}" taskset -c "${CONTROL_CPUSET}" go test ./core/replication \
   -run '^$' -bench '^BenchmarkPhase167RF3SyncQuorumContention/(writers_1|writers_4)$' \
   -benchtime=2048x -count=1 \
   >"${ARTIFACT_DIR}/rf3-real-tcp-benchmark.txt" 2>&1

@@ -22,11 +22,15 @@ has no WALStore format or recovery contract.
 cd /path/to/seaweed_block
 export SW_BLOCK_ARTIFACT_DIR=/path/to/results/phase173-d3-local
 export SW_BLOCK_PHASE173_STORE_DIR=/path/on/evaluated/filesystem/phase173-d3-stores
+export SW_BLOCK_PHASE173_CONTROL_CPUSET=0,2,4,6
 bash scripts/run-phase173-architecture-controls-gate.sh "$PWD"
 ```
 
 The store directory must resolve to the dedicated local block device. Do not
 run the formal gate on a network share, tmpfs, overlay, or OS-root filesystem.
+The CPU set must contain at least four comparable physical cores. Do not mix
+performance and efficiency cores or sibling SMT threads; the gate records the
+set and constrains both process affinity and `GOMAXPROCS`.
 
 ## Fixed Controls
 
@@ -47,6 +51,7 @@ running long enough on the admission host to cross normal flusher periods.
 ## Required Evidence
 
 - `phase173_architecture_controls_status=ok`
+- the expected `control_cpuset` and `control_gomaxprocs`
 - `local_control_stability_gate=pass`
 - all six `*_max_min_ratio` values at most `1.25`
 - `rf1_rf3_component_attribution=complete`
