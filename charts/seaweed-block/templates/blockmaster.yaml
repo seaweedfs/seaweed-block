@@ -19,6 +19,14 @@
 {{- if and .Values.snapshot.enabled (ne (int .Values.blockmaster.replicas) 1) -}}
 {{- fail "snapshot.enabled=true requires blockmaster.replicas=1 for the node-local snapshot catalog" -}}
 {{- end -}}
+{{- if .Values.snapshot.enabled -}}
+{{- range $node := .Values.blockNodes -}}
+{{- $runtimeIP := lower (default $node.internalIP $node.frontendIP) -}}
+{{- if or (hasPrefix "127." $runtimeIP) (eq $runtimeIP "localhost") (eq $runtimeIP "::1") (eq $runtimeIP "[::1]") (eq $runtimeIP "0.0.0.0") (eq $runtimeIP "::") -}}
+{{- fail (printf "snapshot.enabled=true requires blockNodes[%s] to have a non-loopback frontendIP or internalIP for the authenticated snapshot runtime" $node.name) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

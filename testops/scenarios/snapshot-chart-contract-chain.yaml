@@ -38,6 +38,14 @@ phases:
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase175-snapshot-chart/phase175-snapshot-chart-contract-summary.txt"
+        pattern: "^snapshot_loopback_config_rejected=true$"
+        save_as: loopback_rejected
+      - action: assert_greater
+        actual: "{{ loopback_rejected }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase175-snapshot-chart/phase175-snapshot-chart-contract-summary.txt"
         pattern: "^snapshot_mtls_identity_projected=true$"
         save_as: mtls_projected
       - action: assert_greater

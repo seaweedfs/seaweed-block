@@ -38,11 +38,28 @@ if helm template sw-block "${CHART}" --namespace kube-system \
 fi
 write_summary "snapshot_incomplete_config_rejected=true"
 
+if helm template sw-block "${CHART}" --namespace kube-system \
+  --set snapshot.enabled=true \
+  --set snapshot.runtimeSecretName=sw-block-snapshot \
+  --set blockmaster.stateHostPath=/var/lib/sw-block \
+  --set 'blockmaster.nodeSelector.kubernetes\.io/hostname=m02' \
+  >"${ARTIFACT_DIR}/helm-loopback.yaml" 2>"${ARTIFACT_DIR}/helm-loopback.err"; then
+  echo "snapshot render accepted a loopback runtime address" >&2
+  exit 1
+fi
+if ! grep -Fq 'requires blockNodes[m02] to have a non-loopback frontendIP or internalIP' "${ARTIFACT_DIR}/helm-loopback.err"; then
+  echo "snapshot loopback rejection did not explain the invalid node address" >&2
+  exit 1
+fi
+write_summary "snapshot_loopback_config_rejected=true"
+
 helm template sw-block "${CHART}" --namespace kube-system \
   --set snapshot.enabled=true \
   --set snapshot.runtimeSecretName=sw-block-snapshot \
   --set blockmaster.stateHostPath=/var/lib/sw-block \
   --set 'blockmaster.nodeSelector.kubernetes\.io/hostname=m02' \
+  --set blockNodes[0].name=m02 \
+  --set blockNodes[0].internalIP=192.168.1.184 \
   >"${ARTIFACT_DIR}/helm-snapshot.yaml"
 
 require_rendered 'registry.k8s.io/sig-storage/csi-snapshotter:v8.5.0'

@@ -223,6 +223,11 @@ snapshot:
     create: true
     name: sw-block-snapshot
     deletionPolicy: Delete
+
+blockNodes:
+  - name: m02
+    kubernetesNode: m02
+    internalIP: 192.168.1.184
 ```
 
 The Secret has distinct credentials for the blockvolume runtime and the CSI
@@ -234,7 +239,11 @@ api-server.crt  api-server.key  api-server-ca.crt
 api-client-ca.crt  api-client.crt  api-client.key  api-token
 ```
 
-`tls.crt` covers every advertised blockvolume node IP. `api-server.crt` is
+The effective blockvolume data address (`frontendIP` when set, otherwise
+`internalIP`) must be non-loopback because blockmaster calls the authenticated
+snapshot runtime from another pod. The chart rejects loopback snapshot
+configurations at render time. `tls.crt` covers every advertised blockvolume
+node IP. `api-server.crt` is
 signed by `api-server-ca.crt` and covers
 `blockmaster.<namespace>.svc.cluster.local`; `api-client.crt` is signed by
 `api-client-ca.crt`. The CSI pod receives only the API server CA, API client
