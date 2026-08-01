@@ -150,10 +150,16 @@ func (s *FileStore) DeleteVolume(volumeID string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.records, volumeID)
-	if err := os.Remove(s.path(volumeID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+	err := os.Remove(s.path(volumeID))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("lifecycle: remove %s: %w", volumeID, err)
 	}
+	if err == nil {
+		if err := syncLifecycleDirectory(s.dir); err != nil {
+			return fmt.Errorf("lifecycle: sync directory after remove %s: %w", volumeID, err)
+		}
+	}
+	delete(s.records, volumeID)
 	return nil
 }
 
@@ -312,17 +318,18 @@ func (s *FileStore) putLocked(rec VolumeRecord) error {
 		_ = tmp.Close()
 		return fmt.Errorf("lifecycle: write temp %s: %w", rec.Spec.VolumeID, err)
 	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("lifecycle: sync temp %s: %w", rec.Spec.VolumeID, err)
+	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("lifecycle: close temp %s: %w", rec.Spec.VolumeID, err)
 	}
-	// Windows os.Rename does not replace existing files. Remove first;
-	// lifecycle records are intent metadata, and the in-memory state is
-	// updated only after this write succeeds.
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("lifecycle: replace %s: %w", rec.Spec.VolumeID, err)
-	}
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := replaceDurableFile(tmpName, path); err != nil {
 		return fmt.Errorf("lifecycle: rename %s: %w", rec.Spec.VolumeID, err)
+	}
+	if err := syncLifecycleDirectory(s.dir); err != nil {
+		return fmt.Errorf("lifecycle: sync directory for %s: %w", rec.Spec.VolumeID, err)
 	}
 	return nil
 }

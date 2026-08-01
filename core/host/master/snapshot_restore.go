@@ -72,7 +72,13 @@ func (h *Host) CompleteSnapshotRestore(ctx context.Context, targetVolumeID, snap
 		return snapshot.ErrRestoreNotReady
 	}
 	plan, err := h.resolveSnapshotRestoreTargets(ctx, targetVolumeID, snapshot.Record{SnapshotID: snapshotID, SizeBytes: volume.Spec.SizeBytes})
-	if err != nil || plan.AlreadyComplete || !sameSnapshotRestoreTargets(plan.Targets, expectedTargets) {
+	if err != nil {
+		return fmt.Errorf("%w: target placement changed before authority gate", snapshot.ErrRestoreNotReady)
+	}
+	if plan.AlreadyComplete {
+		return nil
+	}
+	if !sameSnapshotRestoreTargets(plan.Targets, expectedTargets) {
 		return fmt.Errorf("%w: target placement changed before authority gate", snapshot.ErrRestoreNotReady)
 	}
 	_, err = h.lifecycle.Volumes.MarkRestoreComplete(targetVolumeID, snapshotID)

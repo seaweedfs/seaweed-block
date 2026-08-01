@@ -80,12 +80,7 @@ func (h *Host) configureSnapshotCoordinator() error {
 	if err != nil {
 		return err
 	}
-	runtimeClient := &http.Client{Transport: &http.Transport{
-		TLSClientConfig:       &tls.Config{RootCAs: roots, Certificates: []tls.Certificate{clientCertificate}, MinVersion: tls.VersionTLS12},
-		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 15 * time.Second,
-		IdleConnTimeout:       30 * time.Second,
-	}}
+	runtimeClient := newSnapshotRuntimeHTTPClient(&tls.Config{RootCAs: roots, Certificates: []tls.Certificate{clientCertificate}, MinVersion: tls.VersionTLS12})
 	runtime, err := snapshot.NewHTTPSCaptureRuntime(runtimeClient, token)
 	if err != nil {
 		return err
@@ -118,6 +113,14 @@ func (h *Host) configureSnapshotCoordinator() error {
 		h.snapshotCaptureTimeout = 30 * time.Minute
 	}
 	return nil
+}
+
+func newSnapshotRuntimeHTTPClient(tlsConfig *tls.Config) *http.Client {
+	return &http.Client{Transport: &http.Transport{
+		TLSClientConfig:     tlsConfig,
+		TLSHandshakeTimeout: 10 * time.Second,
+		IdleConnTimeout:     30 * time.Second,
+	}}
 }
 
 func (s *services) CreateSnapshot(ctx context.Context, req *control.CreateSnapshotRequest) (*control.SnapshotRecord, error) {

@@ -72,15 +72,17 @@ func PlanBlockVolumeWorkloads(volume VolumeRecord, placement PlacementIntent, no
 	}
 
 	out := BlockVolumeWorkloadPlan{
-		VolumeID:         volume.Spec.VolumeID,
-		SizeBytes:        volume.Spec.SizeBytes,
-		Protocol:         protocol,
-		NVMeTransport:    volume.Spec.FrontendTransport,
-		SourceSnapshotID: volume.Spec.SourceSnapshotID,
-		PVCName:          volume.Spec.PVCName,
-		PVCNamespace:     volume.Spec.PVCNamespace,
-		PVCUID:           volume.Spec.PVCUID,
-		Replicas:         make([]BlockVolumeReplicaWorkload, 0, len(placement.Slots)),
+		VolumeID:      volume.Spec.VolumeID,
+		SizeBytes:     volume.Spec.SizeBytes,
+		Protocol:      protocol,
+		NVMeTransport: volume.Spec.FrontendTransport,
+		PVCName:       volume.Spec.PVCName,
+		PVCNamespace:  volume.Spec.PVCNamespace,
+		PVCUID:        volume.Spec.PVCUID,
+		Replicas:      make([]BlockVolumeReplicaWorkload, 0, len(placement.Slots)),
+	}
+	if volume.RestoreState == VolumeRestorePending {
+		out.SourceSnapshotID = volume.Spec.SourceSnapshotID
 	}
 	for i, slot := range placement.Slots {
 		node, ok := nodeByID[slot.ServerID]

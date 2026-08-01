@@ -77,6 +77,59 @@ func TestPhase175RestoreCoordinatorNeverActivatesPartialOrChangedApply(t *testin
 	}
 }
 
+func TestPhase175RestoreCoordinatorHoldsSnapshotLeaseAcrossAllReplicas(t *testing.T) {
+	manager, rec, _ := createStreamFixture(t)
+	targets := []RestoreReplicaTarget{
+		{VolumeID: "target-vol", ReplicaID: "r1", RuntimeEndpoint: "https://10.0.0.1:24443"},
+		{VolumeID: "target-vol", ReplicaID: "r2", RuntimeEndpoint: "https://10.0.0.2:24443"},
+	}
+	var deleteErr error
+	runtime := &fakeRestoreRuntime{afterApply: func(replicaID string) {
+		if replicaID == "r1" {
+			deleteErr = manager.Delete(rec.SnapshotID)
+		}
+	}}
+	coordinator, err := NewCoordinator(manager, fixedSnapshotResolver{}, fixedCaptureRuntime{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.ConfigureRestore(&fakeRestoreResolver{plans: []RestorePlan{{Targets: targets}, {Targets: targets}}}, runtime); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coordinator.Restore(context.Background(), rec.SnapshotID, "target-vol"); err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(deleteErr, ErrInUse) {
+		t.Fatalf("delete between replicas=%v want ErrInUse", deleteErr)
+	}
+	if err := manager.Delete(rec.SnapshotID); err != nil {
+		t.Fatalf("delete after restore: %v", err)
+	}
+}
+
+func TestPhase175RestoreCoordinatorAcceptsConcurrentCompletionAfterApply(t *testing.T) {
+	manager, rec, _ := createStreamFixture(t)
+	targets := []RestoreReplicaTarget{{VolumeID: "target-vol", ReplicaID: "r1", RuntimeEndpoint: "https://10.0.0.1:24443"}}
+	coordinator, err := NewCoordinator(manager, fixedSnapshotResolver{}, fixedCaptureRuntime{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &fakeRestoreRuntime{}
+	if err := coordinator.ConfigureRestore(&fakeRestoreResolver{plans: []RestorePlan{{Targets: targets}, {AlreadyComplete: true}}}, runtime); err != nil {
+		t.Fatal(err)
+	}
+	result, err := coordinator.Restore(context.Background(), rec.SnapshotID, "target-vol")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.AlreadyComplete || result.ReplicaCount != 1 {
+		t.Fatalf("result=%+v", result)
+	}
+	if fmt.Sprint(runtime.calls) != "[apply:r1]" {
+		t.Fatalf("calls=%v", runtime.calls)
+	}
+}
+
 type fakeRestoreResolver struct {
 	plans     []RestorePlan
 	calls     int
@@ -103,6 +156,7 @@ func (r *fakeRestoreResolver) CompleteSnapshotRestore(_ context.Context, volumeI
 type fakeRestoreRuntime struct {
 	calls            []string
 	failApplyReplica string
+	afterApply       func(replicaID string)
 }
 
 func (r *fakeRestoreRuntime) Apply(ctx context.Context, req RuntimeRestoreRequest, source ArchiveStreamer) (RestoreApplyResult, error) {
@@ -121,6 +175,9 @@ func (r *fakeRestoreRuntime) Apply(ctx context.Context, req RuntimeRestoreReques
 		return err
 	}); err != nil {
 		return RestoreApplyResult{}, err
+	}
+	if r.afterApply != nil {
+		r.afterApply(req.TargetReplicaID)
 	}
 	return RestoreApplyResult{State: RestoreStateApplied}, nil
 }

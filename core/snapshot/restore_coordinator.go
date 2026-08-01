@@ -50,10 +50,11 @@ func (c *Coordinator) Restore(ctx context.Context, snapshotID, targetVolumeID st
 	if snapshotID == "" || targetVolumeID == "" {
 		return RestoreOperationResult{}, fmt.Errorf("%w: snapshot and target volume are required", ErrInvalidRequest)
 	}
-	rec, ok := c.manager.Get(snapshotID)
-	if !ok {
-		return RestoreOperationResult{}, ErrNotFound
+	rec, release, err := c.manager.beginRead(snapshotID)
+	if err != nil {
+		return RestoreOperationResult{}, err
 	}
+	defer release()
 	if targetVolumeID == rec.SourceVolumeID {
 		return RestoreOperationResult{}, fmt.Errorf("%w: restore target must be a new volume", ErrInvalidRequest)
 	}
@@ -74,8 +75,11 @@ func (c *Coordinator) Restore(ctx context.Context, snapshotID, targetVolumeID st
 		}
 	}
 	refreshed, err := c.restoreResolver.ResolveSnapshotRestoreTargets(ctx, targetVolumeID, rec)
-	if err != nil || refreshed.AlreadyComplete {
+	if err != nil {
 		return RestoreOperationResult{}, fmt.Errorf("%w: target placement changed after apply", ErrRestoreNotReady)
+	}
+	if refreshed.AlreadyComplete {
+		return RestoreOperationResult{SnapshotID: snapshotID, TargetVolumeID: targetVolumeID, ReplicaCount: len(targets), AlreadyComplete: true}, nil
 	}
 	refreshedTargets, err := validateRestoreTargets(targetVolumeID, refreshed.Targets)
 	if err != nil || !sameRestoreTargets(targets, refreshedTargets) {

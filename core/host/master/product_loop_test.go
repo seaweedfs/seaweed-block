@@ -904,6 +904,11 @@ func TestPhase175AuthorityPlacementsStayClosedUntilRestoreCompletes(t *testing.T
 	if len(eligible) != 2 || skipped != 0 {
 		t.Fatalf("complete eligible=%+v skipped=%d", eligible, skipped)
 	}
+	placements = append(placements, lifecycle.PlacementIntent{VolumeID: "orphan-a", RestoreSnapshotID: "snap-orphan"})
+	eligible, skipped = authorityEligiblePlacements(volumes, placements)
+	if len(eligible) != 2 || skipped != 1 {
+		t.Fatalf("orphan placement failed open: eligible=%+v skipped=%d", eligible, skipped)
+	}
 }
 
 func ingestRF3ObservationForServers(t *testing.T, h *Host, volumeID, r1ServerID, r2ServerID, r3ServerID string, r1Ready, r2Ready, r3Ready bool) {

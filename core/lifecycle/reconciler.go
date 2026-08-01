@@ -46,6 +46,9 @@ func shouldPreserveMaterializedPlacement(volume VolumeRecord, intent PlacementIn
 	if intent.VolumeID != volume.Spec.VolumeID || intent.DesiredRF != volume.Spec.ReplicationFactor {
 		return false
 	}
+	if intent.RestoreSnapshotID != desiredPlacementRestoreSnapshotID(volume) {
+		return false
+	}
 	if len(intent.Slots) != intent.DesiredRF || len(intent.Slots) == 0 {
 		return false
 	}

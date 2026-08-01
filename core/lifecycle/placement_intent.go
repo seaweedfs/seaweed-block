@@ -28,9 +28,10 @@ type PlacementSlotIntent struct {
 
 // PlacementIntent is durable controller input for one volume.
 type PlacementIntent struct {
-	VolumeID  string                `json:"volume_id"`
-	DesiredRF int                   `json:"desired_rf"`
-	Slots     []PlacementSlotIntent `json:"slots"`
+	VolumeID          string                `json:"volume_id"`
+	DesiredRF         int                   `json:"desired_rf"`
+	RestoreSnapshotID string                `json:"restore_snapshot_id,omitempty"`
+	Slots             []PlacementSlotIntent `json:"slots"`
 }
 
 // PlacementIntentStore persists one placement intent per volume.
@@ -65,9 +66,10 @@ func (s *PlacementIntentStore) ApplyPlan(plan PlacementPlan) (PlacementIntent, e
 		return PlacementIntent{}, ErrInsufficientPlacementCandidates
 	}
 	intent := PlacementIntent{
-		VolumeID:  plan.VolumeID,
-		DesiredRF: plan.DesiredRF,
-		Slots:     make([]PlacementSlotIntent, 0, plan.DesiredRF),
+		VolumeID:          plan.VolumeID,
+		DesiredRF:         plan.DesiredRF,
+		RestoreSnapshotID: plan.RestoreSnapshotID,
+		Slots:             make([]PlacementSlotIntent, 0, plan.DesiredRF),
 	}
 	for _, candidate := range plan.Candidates[:plan.DesiredRF] {
 		intent.Slots = append(intent.Slots, PlacementSlotIntent{
@@ -101,10 +103,16 @@ func (s *PlacementIntentStore) DeletePlacement(volumeID string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.records, volumeID)
-	if err := os.Remove(s.path(volumeID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+	err := os.Remove(s.path(volumeID))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("lifecycle: remove placement intent %s: %w", volumeID, err)
 	}
+	if err == nil {
+		if err := syncLifecycleDirectory(s.dir); err != nil {
+			return fmt.Errorf("lifecycle: sync placement directory after remove %s: %w", volumeID, err)
+		}
+	}
+	delete(s.records, volumeID)
 	return nil
 }
 
@@ -177,14 +185,18 @@ func (s *PlacementIntentStore) putLocked(rec PlacementIntent) error {
 		_ = tmp.Close()
 		return fmt.Errorf("lifecycle: write placement intent temp %s: %w", rec.VolumeID, err)
 	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("lifecycle: sync placement intent temp %s: %w", rec.VolumeID, err)
+	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("lifecycle: close placement intent temp %s: %w", rec.VolumeID, err)
 	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("lifecycle: replace placement intent %s: %w", rec.VolumeID, err)
-	}
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := replaceDurableFile(tmpName, path); err != nil {
 		return fmt.Errorf("lifecycle: rename placement intent %s: %w", rec.VolumeID, err)
+	}
+	if err := syncLifecycleDirectory(s.dir); err != nil {
+		return fmt.Errorf("lifecycle: sync placement directory for %s: %w", rec.VolumeID, err)
 	}
 	return nil
 }
@@ -202,6 +214,9 @@ func validatePlacementIntent(intent PlacementIntent) error {
 	}
 	if len(intent.Slots) != intent.DesiredRF {
 		return fmt.Errorf("%w: slot count %d != desired_rf %d", ErrInvalidVolumeSpec, len(intent.Slots), intent.DesiredRF)
+	}
+	if intent.RestoreSnapshotID != "" && !IsSafeStorageIdentityComponent(intent.RestoreSnapshotID) {
+		return fmt.Errorf("%w: invalid placement restore snapshot id %q", ErrInvalidVolumeSpec, intent.RestoreSnapshotID)
 	}
 	seenServers := make(map[string]bool)
 	for _, slot := range intent.Slots {

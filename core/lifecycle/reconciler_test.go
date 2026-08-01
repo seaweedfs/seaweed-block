@@ -248,6 +248,36 @@ func TestReconcilePlacement_ExistingIntentSameInputsOverwritesSameValue(t *testi
 	}
 }
 
+func TestPhase175ReconcilePlacementPersistsAndClearsRestoreBarrier(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenPlacementIntentStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	volume := VolumeRecord{
+		Spec:         VolumeSpec{VolumeID: "restored-a", SizeBytes: 1 << 20, ReplicationFactor: 1, SourceSnapshotID: "snap-abc"},
+		RestoreState: VolumeRestorePending,
+	}
+	nodes := []NodeRegistration{nodeWithPool("node-a", "pool-a", 1<<30)}
+	results := ReconcilePlacement([]VolumeRecord{volume}, nodes, store)
+	if len(results) != 1 || !results[0].Applied || results[0].Intent.RestoreSnapshotID != "snap-abc" {
+		t.Fatalf("pending reconcile=%+v", results)
+	}
+	reopened, err := OpenPlacementIntentStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent, ok := reopened.GetPlacement("restored-a")
+	if !ok || intent.RestoreSnapshotID != "snap-abc" {
+		t.Fatalf("durable restore barrier=%+v ok=%v", intent, ok)
+	}
+	volume.RestoreState = VolumeRestoreComplete
+	results = ReconcilePlacement([]VolumeRecord{volume}, nodes, reopened)
+	if len(results) != 1 || !results[0].Applied || results[0].Intent.RestoreSnapshotID != "" {
+		t.Fatalf("completed reconcile=%+v", results)
+	}
+}
+
 func nodeWithPool(serverID, poolID string, freeBytes uint64) NodeRegistration {
 	return NodeRegistration{
 		ServerID: serverID,

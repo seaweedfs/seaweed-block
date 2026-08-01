@@ -33,10 +33,11 @@ type PlacementConflict struct {
 
 // PlacementPlan summarizes candidate slots for one desired volume.
 type PlacementPlan struct {
-	VolumeID   string
-	DesiredRF  int
-	Candidates []PlacementCandidate
-	Conflicts  []PlacementConflict
+	VolumeID          string
+	DesiredRF         int
+	RestoreSnapshotID string
+	Candidates        []PlacementCandidate
+	Conflicts         []PlacementConflict
 }
 
 // PlanPlacement converts desired volume state plus node inventory into
@@ -46,8 +47,9 @@ type PlacementPlan struct {
 func PlanPlacement(volume VolumeRecord, nodes []NodeRegistration) PlacementPlan {
 	spec := volume.Spec
 	plan := PlacementPlan{
-		VolumeID:  spec.VolumeID,
-		DesiredRF: spec.ReplicationFactor,
+		VolumeID:          spec.VolumeID,
+		DesiredRF:         spec.ReplicationFactor,
+		RestoreSnapshotID: desiredPlacementRestoreSnapshotID(volume),
 	}
 	seenServers := make(map[string]bool)
 	nodes = append([]NodeRegistration(nil), nodes...)
@@ -101,6 +103,13 @@ func PlanPlacement(volume VolumeRecord, nodes []NodeRegistration) PlacementPlan 
 		plan.Candidates = plan.Candidates[:spec.ReplicationFactor]
 	}
 	return plan
+}
+
+func desiredPlacementRestoreSnapshotID(volume VolumeRecord) string {
+	if volume.RestoreState == VolumeRestorePending {
+		return volume.Spec.SourceSnapshotID
+	}
+	return ""
 }
 
 // EnoughCandidates reports whether the plan has enough candidate slots to

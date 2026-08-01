@@ -64,6 +64,9 @@ func TestPhase175MasterResolvesEveryFreshRestoreTargetAndCompletesGate(t *testin
 	if err != nil || !plan.AlreadyComplete {
 		t.Fatalf("completed plan=%+v error=%v", plan, err)
 	}
+	if err := h.CompleteSnapshotRestore(context.Background(), "restored-a", rec.SnapshotID, plan.Targets); err != nil {
+		t.Fatalf("idempotent completion: %v", err)
+	}
 }
 
 func TestPhase175RestoreTargetFactsRejectWrongServerAndEndpointHost(t *testing.T) {

@@ -114,14 +114,17 @@ func (h *Host) RunLifecycleProductTick() (LifecycleProductTickResult, error) {
 }
 
 func authorityEligiblePlacements(volumes []lifecycle.VolumeRecord, placements []lifecycle.PlacementIntent) ([]lifecycle.PlacementIntent, int) {
-	pending := make(map[string]bool, len(volumes))
+	volumeByID := make(map[string]lifecycle.VolumeRecord, len(volumes))
 	for _, volume := range volumes {
-		pending[volume.Spec.VolumeID] = volume.Spec.SourceSnapshotID != "" && volume.RestoreState != lifecycle.VolumeRestoreComplete
+		volumeByID[volume.Spec.VolumeID] = volume
 	}
 	out := make([]lifecycle.PlacementIntent, 0, len(placements))
 	skipped := 0
 	for _, placement := range placements {
-		if pending[placement.VolumeID] {
+		volume, hasVolume := volumeByID[placement.VolumeID]
+		pendingFromVolume := hasVolume && volume.Spec.SourceSnapshotID != "" && volume.RestoreState != lifecycle.VolumeRestoreComplete
+		barrierUnsatisfied := placement.RestoreSnapshotID != "" && (!hasVolume || volume.Spec.SourceSnapshotID != placement.RestoreSnapshotID || volume.RestoreState != lifecycle.VolumeRestoreComplete)
+		if pendingFromVolume || barrierUnsatisfied {
 			skipped++
 			continue
 		}

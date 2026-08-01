@@ -47,7 +47,7 @@ func TestG15d_WorkloadPlan_BlankPoolRF2CreatesReplicaWorkloads(t *testing.T) {
 }
 
 func TestPhase175WorkloadPlanCarriesSourceSnapshot(t *testing.T) {
-	volume := VolumeRecord{Spec: VolumeSpec{VolumeID: "restored-a", SizeBytes: 1 << 20, ReplicationFactor: 1, SourceSnapshotID: "snap-abc"}}
+	volume := VolumeRecord{Spec: VolumeSpec{VolumeID: "restored-a", SizeBytes: 1 << 20, ReplicationFactor: 1, SourceSnapshotID: "snap-abc"}, RestoreState: VolumeRestorePending}
 	placement := PlacementIntent{VolumeID: "restored-a", DesiredRF: 1, Slots: []PlacementSlotIntent{{ServerID: "node-a", PoolID: "pool-a", Source: PlacementSourceBlankPool}}}
 	plan, err := PlanBlockVolumeWorkloads(volume, placement, []NodeRegistration{nodeForWorkload("node-a", "10.0.0.1:9201", "10.0.0.1:9101")}, WorkloadPlanConfig{})
 	if err != nil {
@@ -55,6 +55,14 @@ func TestPhase175WorkloadPlanCarriesSourceSnapshot(t *testing.T) {
 	}
 	if plan.SourceSnapshotID != "snap-abc" {
 		t.Fatalf("source snapshot=%q", plan.SourceSnapshotID)
+	}
+	volume.RestoreState = VolumeRestoreComplete
+	plan, err = PlanBlockVolumeWorkloads(volume, placement, []NodeRegistration{nodeForWorkload("node-a", "10.0.0.1:9201", "10.0.0.1:9101")}, WorkloadPlanConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.SourceSnapshotID != "" {
+		t.Fatalf("completed restore retained launcher source snapshot=%q", plan.SourceSnapshotID)
 	}
 }
 
