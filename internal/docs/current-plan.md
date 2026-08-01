@@ -68,7 +68,8 @@ payload semantics is not a candidate.
 - Define one fixed logical payload, LBA sequence, operation count, writer
   matrix, queue limits, ACK profile, warmup, Sync, and complete drain.
 - Run engine, durable adapter RF1, RF3 real TCP, NVMe/TCP target, and mounted
-  controls without changing logical or durability semantics.
+  controls with identical logical work and an explicit unchanged ACK profile
+  at each layer. Compare throughput ratios only inside compatible profiles.
 - Record one/four/eight writers, throughput, p50/p95/p99, Sync/drain, CPU
   affinity, network route, device, and run stability.
 - Require two independent five-run sets with the admission shape at or below
