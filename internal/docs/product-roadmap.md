@@ -131,9 +131,10 @@ This is the short internal roadmap. Keep it current and readable.
   168 then rejected native `io_uring` execution, Phase 169 rejected a
   segmented group-commit format, and Phase 170 rejected a default-WAL staged
   append owner. Phase 171 hardened the shipped checkpoint path and rejected
-  bounded extent coalescing at its D1 admission gate. Phase 172 now targets the
-  stable two-read WAL materialization amplification without adding another
-  backend or append queue.
+  bounded extent coalescing at its D1 admission gate. Phase 172 reduced WAL
+  materialization reads but rejected the candidate on performance stability.
+  Phases 173-174 then completed backend and frontend/replication architecture
+  decisions with no qualifying change; shipped defaults remain unchanged.
 
 Do not skip from scripts directly to mutating operator lifecycle. Helm has
 stabilized the installation contract, and Phase 35 added read-only CRD status,
@@ -616,10 +617,12 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   evidence, and selected no backend change. Owner/queue, deferred-writeback,
   and media-separation controls produced no stable `1.30x` direction signal;
   WALStore and its defaults remain unchanged.
-- Active next: Phase 174 moves the same discipline above the backend. It first
-  defines comparable fixed work across frontend, durable adapter, RF1/RF3 TCP,
-  NVMe/TCP target, and mounted paths, then attributes queue/ACK/completion cost
-  and permits at most one evidence-selected non-backend candidate.
+- Closed decision: Phase 174 moved the same discipline above the backend and
+  selected no frontend, adapter, or replication architecture change. RF1/RF3
+  and NVMe/TCP counters reconciled, but no direction met comparable-shape,
+  stability, and gain requirements together. The mounted Linux kernel path
+  used inline Write capsules rather than the synthetic gate's R2T shape, so an
+  R2T optimization was explicitly rejected as a shipped-path candidate.
 - Protocol hardening now has a dedicated working area under
   `internal/docs/protocol/`. New protocol semantics should update the control
   model, invariant ledger, and anti-pattern checklist there before release
@@ -1279,12 +1282,12 @@ Approximate engineering effort if scope remains tight:
   with a real 100 GbE mounted NVMe/TCP writer/read/cleanup gate. The finished
   plan is
   `internal/docs/finished-plans/phase173_finishedplan_storage_execution_architecture_decision.md`.
-- Phase 174 Frontend And Replication Execution Architecture is active. It does
-  not infer ratios from Phase 173's differently shaped component controls. It
-  creates one comparable contract across engine, adapter, frontend, RF1/RF3,
-  and mounted paths, performs complete queue/ACK attribution, and selects at
-  most one candidate only after stable evidence. The contract is
-  `internal/docs/current-plan.md`.
+- Phase 174 Frontend And Replication Execution Architecture is closed with no
+  architecture candidate. RF1 variance followed flusher overlap, the RF3
+  management-LAN shape remained unstable, and the mounted Linux kernel
+  NVMe/TCP path proved the synthetic R2T-dominant shape was not representative.
+  Shipped defaults remain unchanged. The finished plan is
+  `internal/docs/finished-plans/phase174_finishedplan_frontend_replication_execution_architecture.md`.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.

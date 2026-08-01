@@ -1,6 +1,6 @@
-# Current Plan: Phase 174 Frontend And Replication Execution Architecture
+# Finished Plan: Phase 174 Frontend And Replication Execution Architecture
 
-Status: closing with no architecture candidate. Phase 173 closed with no
+Status: closed with no architecture candidate. Phase 173 closed with no
 storage-backend change. Phase 174 D1
 completed its local fixed-work matrix at `ed270f3`: direct WALStore was stable,
 but durable-adapter RF1 remained above the unchanged `1.25x` range limit. D1 is
