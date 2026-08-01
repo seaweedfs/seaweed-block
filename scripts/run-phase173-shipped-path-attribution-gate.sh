@@ -141,7 +141,8 @@ write_summary "contract=phase173-fixed-work-v1"
 write_summary "scope=walstore_engine_checkpoint_path"
 write_summary "shape=${SHAPE}"
 write_summary "writers=${WRITERS}"
-write_summary "measurement_window=post_warmup_foreground_through_final_drain_and_correctness"
+write_summary "counter_window=post_warmup_foreground_through_final_drain"
+write_summary "trace_window=post_warmup_foreground_through_final_drain_and_correctness"
 write_summary "architecture_candidate_selected=false"
 write_summary "optimization_code_present=false"
 
@@ -183,7 +184,7 @@ run_fixed_work "d2-precondition" "${precondition_log}"
 extract_result "${precondition_log}" "${ARTIFACT_DIR}/precondition-result.json"
 sync
 
-iostat -xz 1 3 >"${ARTIFACT_DIR}/iostat.txt" 2>&1 &
+iostat -xyz 1 3 >"${ARTIFACT_DIR}/iostat.txt" 2>&1 &
 iostat_pid=$!
 sleep 0.2
 plain_log="${ARTIFACT_DIR}/logs/plain.log"
@@ -209,7 +210,10 @@ done
 write_summary "cpu_profile=profiles/measured/cpu.pprof"
 write_summary "heap_profile=profiles/measured/heap.pprof"
 write_summary "allocs_profile=profiles/measured/allocs.pprof"
-write_summary "profile_scope_exact=true"
+write_summary "cpu_profile_scope_exact=true"
+write_summary "memory_delta_scope_exact=true"
+write_summary "heap_profile_scope=post_window_after_gc"
+write_summary "allocs_profile_scope=process_cumulative_reference"
 
 strace_control="${ARTIFACT_DIR}/control/strace"
 strace_log="${ARTIFACT_DIR}/logs/strace.log"
@@ -306,6 +310,8 @@ for row in rows:
         raise SystemExit(f"checkpoint write/sync accounting failed: {row}")
     if row["extent_sync_ops"] != row["flush_cycles"]:
         raise SystemExit(f"extent sync/cycle accounting failed: {row}")
+    if row["measured_alloc_bytes"] <= 0 or row["measured_mallocs"] <= 0:
+        raise SystemExit(f"measured allocation evidence is empty: {row}")
 
 trace = open(trace_path, encoding="utf-8", errors="replace").read()
 counts = {name: len(re.findall(rf"\b{name}\(", trace)) for name in ("pread64", "pwrite64", "fsync", "fdatasync")}
@@ -321,10 +327,19 @@ if counts["fsync"] + counts["fdatasync"] != expected_sync:
     raise SystemExit(f"strace sync={counts['fsync'] + counts['fdatasync']} want {expected_sync}")
 
 perf_text = open(perf_csv, encoding="utf-8", errors="replace").read()
-for event in ("task-clock", "cycles", "instructions", "cache-misses", "context-switches", "page-faults"):
+perf_values = {}
+for event in ("task-clock", "cycles", "instructions", "cache-misses", "context-switches", "cpu-migrations", "page-faults"):
     matching = [line for line in perf_text.splitlines() if event in line]
     if not matching or any("<not" in line for line in matching):
         raise SystemExit(f"perf event unavailable: {event}")
+    values = []
+    for line in matching:
+        value = line.split(",", 1)[0].strip()
+        try:
+            values.append(float(value))
+        except ValueError as error:
+            raise SystemExit(f"bad perf value for {event}: {line}") from error
+    perf_values[event] = sum(values)
 
 plain = rows[0]
 known_flush = sum(plain[key] for key in (
@@ -347,6 +362,11 @@ summary = [
     f"logical_bytes={plain['logical_bytes']}",
     f"foreground_ns={plain['foreground_ns']}",
     f"foreground_mib_per_second={plain['foreground_mib_per_second']:.3f}",
+    f"measured_alloc_bytes={plain['measured_alloc_bytes']}",
+    f"measured_mallocs={plain['measured_mallocs']}",
+    f"measured_frees={plain['measured_frees']}",
+    f"measured_heap_alloc_start={plain['measured_heap_alloc_start']}",
+    f"measured_heap_alloc_end={plain['measured_heap_alloc_end']}",
     f"wal_copy_ops={plain['wal_copy_ops']}",
     f"wal_copy_bytes={plain['wal_copy_bytes']}",
     f"wal_copy_ns={plain['wal_copy_ns']}",
@@ -385,6 +405,13 @@ summary = [
     f"strace_pwrite64_calls={counts['pwrite64']}",
     f"strace_sync_calls={counts['fsync'] + counts['fdatasync']}",
     "strace_product_counter_reconciliation=true",
+    f"perf_task_clock={perf_values['task-clock']:.0f}",
+    f"perf_cycles={perf_values['cycles']:.0f}",
+    f"perf_instructions={perf_values['instructions']:.0f}",
+    f"perf_cache_misses={perf_values['cache-misses']:.0f}",
+    f"perf_context_switches={perf_values['context-switches']:.0f}",
+    f"perf_cpu_migrations={perf_values['cpu-migrations']:.0f}",
+    f"perf_page_faults={perf_values['page-faults']:.0f}",
     "perf_required_events_present=true",
     "checkpoint_frontiers_equal=true",
     "complete_drain=true",

@@ -61,6 +61,11 @@ type phase173FixedWorkResult struct {
 	FinalSyncNanos         int64   `json:"final_sync_ns"`
 	FinalDrainNanos        int64   `json:"final_drain_ns"`
 	FinalSyncCalls         uint64  `json:"final_sync_calls"`
+	MeasuredAllocBytes     uint64  `json:"measured_alloc_bytes"`
+	MeasuredMallocs        uint64  `json:"measured_mallocs"`
+	MeasuredFrees          uint64  `json:"measured_frees"`
+	MeasuredHeapAllocStart uint64  `json:"measured_heap_alloc_start"`
+	MeasuredHeapAllocEnd   uint64  `json:"measured_heap_alloc_end"`
 	SyncedLSN              uint64  `json:"synced_lsn"`
 	CheckpointLSN          uint64  `json:"checkpoint_lsn"`
 	HeadLSN                uint64  `json:"head_lsn"`
@@ -403,6 +408,8 @@ func runPhase173FixedWork(
 			_ = stopProfiles()
 		}
 	}()
+	var memoryBefore runtime.MemStats
+	runtime.ReadMemStats(&memoryBefore)
 	foreground, latencies, err := runPhase173Operations(s, cfg, cfg.APIOperations, 0, payloads, true)
 	if err != nil {
 		return phase173FixedWorkResult{}, fmt.Errorf("phase173 foreground: %w", err)
@@ -418,6 +425,8 @@ func runPhase173FixedWork(
 		return phase173FixedWorkResult{}, fmt.Errorf("phase173 final drain: %w", err)
 	}
 	finalDrain := time.Since(drainStart)
+	var memoryAfter runtime.MemStats
+	runtime.ReadMemStats(&memoryAfter)
 	if profilesActive {
 		if err := stopProfiles(); err != nil {
 			return phase173FixedWorkResult{}, err
@@ -501,6 +510,11 @@ func runPhase173FixedWork(
 		FinalSyncNanos:         finalSync.Nanoseconds(),
 		FinalDrainNanos:        finalDrain.Nanoseconds(),
 		FinalSyncCalls:         s.syncs.Load() - syncBefore,
+		MeasuredAllocBytes:     memoryAfter.TotalAlloc - memoryBefore.TotalAlloc,
+		MeasuredMallocs:        memoryAfter.Mallocs - memoryBefore.Mallocs,
+		MeasuredFrees:          memoryAfter.Frees - memoryBefore.Frees,
+		MeasuredHeapAllocStart: memoryBefore.HeapAlloc,
+		MeasuredHeapAllocEnd:   memoryAfter.HeapAlloc,
 		SyncedLSN:              syncedLSN,
 		CheckpointLSN:          checkpointLSN,
 		HeadLSN:                headLSN,

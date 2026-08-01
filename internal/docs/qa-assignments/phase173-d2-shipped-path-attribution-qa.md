@@ -39,7 +39,10 @@ signals sent to those root-owned tools. The gate does not need Kubernetes.
 - `strace_product_counter_reconciliation=true`
 - `perf_scope_exact=true`
 - `perf_required_events_present=true`
-- `profile_scope_exact=true`
+- `cpu_profile_scope_exact=true`
+- `memory_delta_scope_exact=true`
+- `heap_profile_scope=post_window_after_gc`
+- `allocs_profile_scope=process_cumulative_reference`
 - `iostat_device_observed=true`
 - `checkpoint_frontiers_equal=true`
 - `complete_drain=true`
@@ -64,6 +67,12 @@ starts the measured foreground work, waits through final Sync, complete drain,
 and correctness reads, detaches the tool, and only then permits `Close`. Store
 create/recover/warmup and final-close metadata I/O are therefore outside the
 exact attribution window.
+
+The CPU profile and memory counter deltas cover foreground work through final
+drain. The heap profile is taken after that window and a forced GC. Go's allocs
+profile is process-cumulative, so it is retained only as a function-level
+reference and is not labeled exact; the `measured_alloc_*` JSON and summary
+fields are the exact-window allocation evidence.
 
 ## Verdict
 
