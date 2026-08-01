@@ -51,6 +51,7 @@ type HeartbeatSlot struct {
 	DataAddr                string
 	CtrlAddr                string
 	SnapshotRuntimeEndpoint string
+	SnapshotRestore         SnapshotRestoreEvidenceFact
 	Frontends               []FrontendTargetFact
 	Reachable               bool
 	ReadyForPrimary         bool
@@ -89,6 +90,7 @@ func HeartbeatToObservation(msg HeartbeatMessage) (Observation, error) {
 			DataAddr:                s.DataAddr,
 			CtrlAddr:                s.CtrlAddr,
 			SnapshotRuntimeEndpoint: s.SnapshotRuntimeEndpoint,
+			SnapshotRestore:         s.SnapshotRestore,
 			Frontends:               frontends,
 			Reachable:               s.Reachable,
 			ReadyForPrimary:         s.ReadyForPrimary,

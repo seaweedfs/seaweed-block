@@ -636,6 +636,7 @@ func run(f flags) int {
 				_ = h.Close()
 				return 1
 			}
+			h.SetSnapshotRestoreEvidenceSource(restoreTarget)
 		}
 		recCtx, recCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		report, recErr := dp.RecoverVolume(recCtx, f.volumeID)

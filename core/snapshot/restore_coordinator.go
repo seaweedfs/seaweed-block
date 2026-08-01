@@ -10,6 +10,9 @@ type RestoreReplicaTarget struct {
 	VolumeID        string
 	ReplicaID       string
 	RuntimeEndpoint string
+	TargetStorageID string
+	TargetNumBlocks uint32
+	TargetBlockSize int
 }
 
 type RestorePlan struct {
@@ -69,10 +72,16 @@ func (c *Coordinator) Restore(ctx context.Context, snapshotID, targetVolumeID st
 	if err != nil {
 		return RestoreOperationResult{}, err
 	}
+	applyResults := make(map[string]RestoreApplyResult, len(targets))
 	for _, target := range targets {
-		if _, err := c.restoreRuntime.Apply(ctx, runtimeRestoreRequest(rec, target), c.manager); err != nil {
+		result, err := c.restoreRuntime.Apply(ctx, runtimeRestoreRequest(rec, target), c.manager)
+		if err != nil {
 			return RestoreOperationResult{}, fmt.Errorf("snapshot: apply replica %s: %w", target.ReplicaID, err)
 		}
+		if !validRestoreApplyEvidence(result, target, rec) {
+			return RestoreOperationResult{}, fmt.Errorf("%w: replica %s returned invalid apply evidence", ErrRestoreUnsafe, target.ReplicaID)
+		}
+		applyResults[target.ReplicaID] = result
 	}
 	refreshed, err := c.restoreResolver.ResolveSnapshotRestoreTargets(ctx, targetVolumeID, rec)
 	if err != nil {
@@ -90,7 +99,7 @@ func (c *Coordinator) Restore(ctx context.Context, snapshotID, targetVolumeID st
 		if err != nil {
 			return RestoreOperationResult{}, fmt.Errorf("snapshot: activate replica %s: %w", target.ReplicaID, err)
 		}
-		if marker.State != RestoreStateActivated || marker.SnapshotID != rec.SnapshotID || marker.TargetVolumeID != target.VolumeID || marker.TargetReplicaID != target.ReplicaID {
+		if !validRestoreActivationEvidence(marker, applyResults[target.ReplicaID], target, rec) {
 			return RestoreOperationResult{}, fmt.Errorf("%w: replica %s returned invalid activation evidence", ErrRestoreUnsafe, target.ReplicaID)
 		}
 	}
@@ -107,7 +116,7 @@ func validateRestoreTargets(targetVolumeID string, targets []RestoreReplicaTarge
 	out := append([]RestoreReplicaTarget(nil), targets...)
 	sort.Slice(out, func(i, j int) bool { return out[i].ReplicaID < out[j].ReplicaID })
 	for i, target := range out {
-		if target.VolumeID != targetVolumeID || target.ReplicaID == "" || ValidateRuntimeEndpoint(target.RuntimeEndpoint) != nil {
+		if target.VolumeID != targetVolumeID || target.ReplicaID == "" || ValidateRuntimeEndpoint(target.RuntimeEndpoint) != nil || target.TargetStorageID == "" || target.TargetNumBlocks == 0 || target.TargetBlockSize <= 0 {
 			return nil, fmt.Errorf("%w: invalid restore replica target", ErrRestoreNotReady)
 		}
 		if i > 0 && target.ReplicaID == out[i-1].ReplicaID {
@@ -115,6 +124,31 @@ func validateRestoreTargets(targetVolumeID string, targets []RestoreReplicaTarge
 		}
 	}
 	return out, nil
+}
+
+func validRestoreApplyEvidence(result RestoreApplyResult, target RestoreReplicaTarget, rec Record) bool {
+	return (result.State == RestoreStateApplied || result.State == RestoreStateActivated) &&
+		result.TargetStorageID == target.TargetStorageID &&
+		result.TargetNumBlocks == target.TargetNumBlocks &&
+		result.TargetBlockSize == target.TargetBlockSize &&
+		result.TargetNumBlocks == rec.NumBlocks &&
+		result.TargetBlockSize == rec.BlockSize &&
+		result.RestoredBlocks == rec.RecordCount &&
+		result.RestoredBytes == rec.DataBytes
+}
+
+func validRestoreActivationEvidence(marker RestoreMarker, applied RestoreApplyResult, target RestoreReplicaTarget, rec Record) bool {
+	return marker.State == RestoreStateActivated &&
+		marker.SnapshotID == rec.SnapshotID &&
+		marker.TargetVolumeID == target.VolumeID &&
+		marker.TargetReplicaID == target.ReplicaID &&
+		marker.TargetStorageID == applied.TargetStorageID &&
+		marker.TargetNumBlocks == applied.TargetNumBlocks &&
+		marker.TargetBlockSize == applied.TargetBlockSize &&
+		marker.RestoredBlocks == applied.RestoredBlocks &&
+		marker.RestoredBytes == applied.RestoredBytes &&
+		marker.TargetFrontier == applied.TargetFrontier &&
+		marker.Snapshot != nil && sameRestoreRecord(*marker.Snapshot, rec)
 }
 
 func sameRestoreTargets(a, b []RestoreReplicaTarget) bool {
@@ -130,5 +164,13 @@ func sameRestoreTargets(a, b []RestoreReplicaTarget) bool {
 }
 
 func runtimeRestoreRequest(rec Record, target RestoreReplicaTarget) RuntimeRestoreRequest {
-	return RuntimeRestoreRequest{Endpoint: target.RuntimeEndpoint, Snapshot: rec, TargetVolumeID: target.VolumeID, TargetReplicaID: target.ReplicaID}
+	return RuntimeRestoreRequest{
+		Endpoint:        target.RuntimeEndpoint,
+		Snapshot:        rec,
+		TargetVolumeID:  target.VolumeID,
+		TargetReplicaID: target.ReplicaID,
+		TargetStorageID: target.TargetStorageID,
+		TargetNumBlocks: target.TargetNumBlocks,
+		TargetBlockSize: target.TargetBlockSize,
+	}
 }

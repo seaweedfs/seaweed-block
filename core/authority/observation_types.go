@@ -49,6 +49,7 @@ type SlotFact struct {
 	DataAddr                string
 	CtrlAddr                string
 	SnapshotRuntimeEndpoint string
+	SnapshotRestore         SnapshotRestoreEvidenceFact
 	Frontends               []FrontendTargetFact
 	Reachable               bool
 	ReadyForPrimary         bool
@@ -71,6 +72,14 @@ type SlotFact struct {
 	// Primary for the same volume is the
 	// ReasonConflictingPrimaryClaim trigger.
 	LocalRoleClaim LocalRoleClaim
+}
+
+type SnapshotRestoreEvidenceFact struct {
+	SnapshotID string
+	State      string
+	StorageID  string
+	NumBlocks  uint32
+	BlockSize  uint32
 }
 
 // FrontendTargetFact is a read-only fact reported by a volume

@@ -20,8 +20,15 @@ func TestHeartbeatFromWireCarriesSnapshotRuntimeEndpointAsObservation(t *testing
 		VolumeId:                "vol-a",
 		ReplicaId:               "r1",
 		SnapshotRuntimeEndpoint: "https://10.0.0.2:24443",
+		SnapshotRestore: &control.SnapshotRestoreEvidence{
+			SnapshotId: "snap-a",
+			State:      "applied",
+			StorageId:  "store-a",
+			NumBlocks:  256,
+			BlockSize:  4096,
+		},
 	}}})
-	if len(got.Slots) != 1 || got.Slots[0].SnapshotRuntimeEndpoint != "https://10.0.0.2:24443" {
+	if len(got.Slots) != 1 || got.Slots[0].SnapshotRuntimeEndpoint != "https://10.0.0.2:24443" || got.Slots[0].SnapshotRestore.StorageID != "store-a" {
 		t.Fatalf("heartbeat mapping=%+v", got.Slots)
 	}
 }

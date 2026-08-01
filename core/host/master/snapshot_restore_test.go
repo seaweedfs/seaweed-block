@@ -29,7 +29,7 @@ func TestPhase175MasterResolvesEveryFreshRestoreTargetAndCompletesGate(t *testin
 		server, replica, host string
 	}{{"m01", "r1", "10.0.0.1"}, {"m02", "r2", "10.0.0.2"}} {
 		if err := h.obs.Store().Ingest(authority.Observation{ServerID: item.server, ObservedAt: now, Slots: []authority.SlotFact{{
-			VolumeID: "restored-a", ReplicaID: item.replica, DataAddr: item.host + ":9201", CtrlAddr: item.host + ":9101", SnapshotRuntimeEndpoint: "https://" + item.host + ":24443", Reachable: true,
+			VolumeID: "restored-a", ReplicaID: item.replica, DataAddr: item.host + ":9201", CtrlAddr: item.host + ":9101", SnapshotRuntimeEndpoint: "https://" + item.host + ":24443", SnapshotRestore: testSnapshotRestoreEvidence(rec.SnapshotID, item.replica), Reachable: true,
 		}}}); err != nil {
 			t.Fatal(err)
 		}
@@ -42,7 +42,7 @@ func TestPhase175MasterResolvesEveryFreshRestoreTargetAndCompletesGate(t *testin
 		t.Fatalf("plan=%+v", plan)
 	}
 	if err := h.obs.Store().Ingest(authority.Observation{ServerID: "m02", ObservedAt: now.Add(time.Second), Slots: []authority.SlotFact{{
-		VolumeID: "restored-a", ReplicaID: "r2", DataAddr: "10.0.0.2:9201", CtrlAddr: "10.0.0.2:9101", SnapshotRuntimeEndpoint: "https://10.0.0.2:24444", Reachable: true,
+		VolumeID: "restored-a", ReplicaID: "r2", DataAddr: "10.0.0.2:9201", CtrlAddr: "10.0.0.2:9101", SnapshotRuntimeEndpoint: "https://10.0.0.2:24444", SnapshotRestore: testSnapshotRestoreEvidence(rec.SnapshotID, "r2"), Reachable: true,
 	}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -52,8 +52,18 @@ func TestPhase175MasterResolvesEveryFreshRestoreTargetAndCompletesGate(t *testin
 	if volume, _ := stores.Volumes.GetVolume("restored-a"); volume.RestoreState != lifecycle.VolumeRestorePending {
 		t.Fatalf("changed target restore state=%q", volume.RestoreState)
 	}
+	replacedStore := testSnapshotRestoreEvidence(rec.SnapshotID, "r2")
+	replacedStore.StorageID = "r2-replacement-store"
 	if err := h.obs.Store().Ingest(authority.Observation{ServerID: "m02", ObservedAt: now.Add(2 * time.Second), Slots: []authority.SlotFact{{
-		VolumeID: "restored-a", ReplicaID: "r2", DataAddr: "10.0.0.2:9201", CtrlAddr: "10.0.0.2:9101", SnapshotRuntimeEndpoint: "https://10.0.0.2:24443", Reachable: true,
+		VolumeID: "restored-a", ReplicaID: "r2", DataAddr: "10.0.0.2:9201", CtrlAddr: "10.0.0.2:9101", SnapshotRuntimeEndpoint: "https://10.0.0.2:24443", SnapshotRestore: replacedStore, Reachable: true,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.CompleteSnapshotRestore(context.Background(), "restored-a", rec.SnapshotID, plan.Targets); err == nil {
+		t.Fatal("replacement durable store opened restore authority gate")
+	}
+	if err := h.obs.Store().Ingest(authority.Observation{ServerID: "m02", ObservedAt: now.Add(3 * time.Second), Slots: []authority.SlotFact{{
+		VolumeID: "restored-a", ReplicaID: "r2", DataAddr: "10.0.0.2:9201", CtrlAddr: "10.0.0.2:9101", SnapshotRuntimeEndpoint: "https://10.0.0.2:24443", SnapshotRestore: testSnapshotRestoreEvidence(rec.SnapshotID, "r2"), Reachable: true,
 	}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -70,18 +80,38 @@ func TestPhase175MasterResolvesEveryFreshRestoreTargetAndCompletesGate(t *testin
 }
 
 func TestPhase175RestoreTargetFactsRejectWrongServerAndEndpointHost(t *testing.T) {
-	base := authority.SlotFact{VolumeID: "restored-a", ReplicaID: "r1", ReportingServerID: "m01", DataAddr: "10.0.0.1:9201", SnapshotRuntimeEndpoint: "https://10.0.0.1:24443", Reachable: true}
-	if target, ok := snapshotRestoreTargetFromFacts("restored-a", "m01", "r1", true, base); !ok || target.ReplicaID != "r1" {
+	base := authority.SlotFact{VolumeID: "restored-a", ReplicaID: "r1", ReportingServerID: "m01", DataAddr: "10.0.0.1:9201", SnapshotRuntimeEndpoint: "https://10.0.0.1:24443", SnapshotRestore: testSnapshotRestoreEvidence("snap-abc", "r1"), Reachable: true}
+	if target, ok := snapshotRestoreTargetFromFacts("restored-a", "m01", "r1", "snap-abc", true, base); !ok || target.ReplicaID != "r1" || target.TargetStorageID != "r1-store" {
 		t.Fatalf("valid target=%+v ok=%v", target, ok)
 	}
 	wrongServer := base
 	wrongServer.ReportingServerID = "m02"
-	if _, ok := snapshotRestoreTargetFromFacts("restored-a", "m01", "r1", true, wrongServer); ok {
+	if _, ok := snapshotRestoreTargetFromFacts("restored-a", "m01", "r1", "snap-abc", true, wrongServer); ok {
 		t.Fatal("wrong reporting server accepted")
 	}
 	wrongEndpoint := base
 	wrongEndpoint.SnapshotRuntimeEndpoint = "https://10.0.0.9:24443"
-	if _, ok := snapshotRestoreTargetFromFacts("restored-a", "m01", "r1", true, wrongEndpoint); ok {
+	if _, ok := snapshotRestoreTargetFromFacts("restored-a", "m01", "r1", "snap-abc", true, wrongEndpoint); ok {
 		t.Fatal("endpoint on another data host accepted")
+	}
+	wrongSnapshot := base
+	wrongSnapshot.SnapshotRestore.SnapshotID = "snap-other"
+	if _, ok := snapshotRestoreTargetFromFacts("restored-a", "m01", "r1", "snap-abc", true, wrongSnapshot); ok {
+		t.Fatal("restore evidence for another snapshot accepted")
+	}
+	missingStore := base
+	missingStore.SnapshotRestore.StorageID = ""
+	if _, ok := snapshotRestoreTargetFromFacts("restored-a", "m01", "r1", "snap-abc", true, missingStore); ok {
+		t.Fatal("restore evidence without durable store identity accepted")
+	}
+}
+
+func testSnapshotRestoreEvidence(snapshotID, replicaID string) authority.SnapshotRestoreEvidenceFact {
+	return authority.SnapshotRestoreEvidenceFact{
+		SnapshotID: snapshotID,
+		State:      snapshot.RestoreStatePending,
+		StorageID:  replicaID + "-store",
+		NumBlocks:  256,
+		BlockSize:  4096,
 	}
 }

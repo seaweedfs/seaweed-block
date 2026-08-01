@@ -124,6 +124,7 @@ message HeartbeatSlot {
     uint32 local_role_claim = 10; // authority.LocalRoleClaim enum value
     repeated FrontendTarget frontends = 11;
     string snapshot_runtime_endpoint = 12; // authenticated HTTPS capture endpoint; observation only
+    SnapshotRestoreEvidence snapshot_restore = 13; // durable restore-store identity; observation only
 }
 
 // SnapshotService owns crash-consistent, immutable single-volume snapshots.
@@ -478,4 +479,15 @@ message FailbackResponse {
     bool no_storage_mutation = 5;
     bool no_cross_volume_identity_change = 6;
     repeated string evidence_refs = 7;
+}
+
+// SnapshotRestoreEvidence binds a restore runtime endpoint to the durable
+// store generation it currently serves. Master uses this only to refuse
+// restore completion when the target process or backing store changed.
+message SnapshotRestoreEvidence {
+    string snapshot_id = 1;
+    string state = 2;
+    string storage_id = 3;
+    uint32 num_blocks = 4;
+    uint32 block_size = 5;
 }

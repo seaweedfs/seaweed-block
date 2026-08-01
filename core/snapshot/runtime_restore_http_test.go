@@ -31,12 +31,12 @@ func TestPhase175HTTPSRestoreRuntimeApplyThenActivate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := RuntimeRestoreRequest{Endpoint: server.URL, Snapshot: rec, TargetVolumeID: "target-vol", TargetReplicaID: "r2"}
+	req := runtimeRestoreRequestForTest(server.URL, rec)
 	result, err := client.Apply(context.Background(), req, manager)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.State != RestoreStateApplied || *released {
+	if result.State != RestoreStateApplied || result.TargetStorageID != "runtime-store" || result.TargetNumBlocks != rec.NumBlocks || result.TargetBlockSize != rec.BlockSize || result.RestoredBlocks != rec.RecordCount || result.RestoredBytes != rec.DataBytes || *released {
 		t.Fatalf("result=%+v released=%v", result, *released)
 	}
 	for lba, expected := range want {
@@ -56,7 +56,7 @@ func TestPhase175HTTPSRestoreRuntimeApplyThenActivate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if marker.State != RestoreStateActivated || !*released {
+	if marker.State != RestoreStateActivated || marker.TargetStorageID != result.TargetStorageID || marker.TargetNumBlocks != result.TargetNumBlocks || marker.TargetBlockSize != result.TargetBlockSize || marker.TargetFrontier != result.TargetFrontier || !*released {
 		t.Fatalf("marker=%+v released=%v", marker, *released)
 	}
 }
@@ -70,7 +70,7 @@ func TestPhase175HTTPSRestoreRuntimeRejectsBadArchiveAndIdentity(t *testing.T) {
 	}
 	server := httptest.NewTLSServer(handler)
 	defer server.Close()
-	req := RuntimeRestoreRequest{Endpoint: server.URL, Snapshot: rec, TargetVolumeID: "target-vol", TargetReplicaID: "r2"}
+	req := runtimeRestoreRequestForTest(server.URL, rec)
 
 	wrongToken, err := NewHTTPSRestoreRuntime(server.Client(), "wrong-token")
 	if err != nil {
@@ -87,6 +87,14 @@ func TestPhase175HTTPSRestoreRuntimeRejectsBadArchiveAndIdentity(t *testing.T) {
 	wrongIdentity.TargetReplicaID = "r3"
 	if _, err := client.Apply(context.Background(), wrongIdentity, manager); err == nil {
 		t.Fatal("wrong target identity succeeded")
+	}
+	wrongStore := req
+	wrongStore.TargetStorageID = "replacement-store"
+	if _, err := client.Apply(context.Background(), wrongStore, manager); err == nil {
+		t.Fatal("wrong target store generation succeeded")
+	}
+	if marker := target.Marker(); marker.State != RestoreStatePending {
+		t.Fatalf("wrong store request mutated target marker: %+v", marker)
 	}
 	if _, err := client.Activate(context.Background(), req); err == nil {
 		t.Fatal("activation before apply succeeded")
@@ -127,7 +135,7 @@ func TestPhase175RestoreRuntimeRequiresMTLSAndToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer server.Close(context.Background())
-	req := RuntimeRestoreRequest{Endpoint: server.Endpoint(), Snapshot: rec, TargetVolumeID: "target-vol", TargetReplicaID: "r2"}
+	req := runtimeRestoreRequestForTest(server.Endpoint(), rec)
 	withoutCertificate, err := NewHTTPSRestoreRuntime(&http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
 		RootCAs: identity.roots, MinVersion: tls.VersionTLS12,
 	}}}, "restore-token")
@@ -202,4 +210,16 @@ func newRuntimeRestoreTarget(t *testing.T, rec Record) (*RestoreTarget, storage.
 	}
 	released := false
 	return target, store, &released
+}
+
+func runtimeRestoreRequestForTest(endpoint string, rec Record) RuntimeRestoreRequest {
+	return RuntimeRestoreRequest{
+		Endpoint:        endpoint,
+		Snapshot:        rec,
+		TargetVolumeID:  "target-vol",
+		TargetReplicaID: "r2",
+		TargetStorageID: "runtime-store",
+		TargetNumBlocks: rec.NumBlocks,
+		TargetBlockSize: rec.BlockSize,
+	}
 }

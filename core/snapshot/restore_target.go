@@ -47,11 +47,14 @@ type RestoreMarker struct {
 }
 
 type RestoreApplyResult struct {
-	State          string
-	RestoredBlocks uint64
-	RestoredBytes  uint64
-	TargetFrontier uint64
-	AlreadyApplied bool
+	State           string
+	TargetStorageID string
+	TargetNumBlocks uint32
+	TargetBlockSize int
+	RestoredBlocks  uint64
+	RestoredBytes   uint64
+	TargetFrontier  uint64
+	AlreadyApplied  bool
 }
 
 // RestoreTarget owns the durable publication fence for one new replica. It
@@ -396,7 +399,16 @@ func sameRestoreRecord(a, b Record) bool {
 }
 
 func restoreApplyResult(marker RestoreMarker, already bool) RestoreApplyResult {
-	return RestoreApplyResult{State: marker.State, RestoredBlocks: marker.RestoredBlocks, RestoredBytes: marker.RestoredBytes, TargetFrontier: marker.TargetFrontier, AlreadyApplied: already}
+	return RestoreApplyResult{
+		State:           marker.State,
+		TargetStorageID: marker.TargetStorageID,
+		TargetNumBlocks: marker.TargetNumBlocks,
+		TargetBlockSize: marker.TargetBlockSize,
+		RestoredBlocks:  marker.RestoredBlocks,
+		RestoredBytes:   marker.RestoredBytes,
+		TargetFrontier:  marker.TargetFrontier,
+		AlreadyApplied:  already,
+	}
 }
 
 func cloneRestoreMarker(marker RestoreMarker) RestoreMarker {

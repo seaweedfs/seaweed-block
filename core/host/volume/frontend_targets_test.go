@@ -5,6 +5,7 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/engine"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"github.com/seaweedfs/seaweed-block/core/snapshot"
 )
 
 func TestHost_SetFrontendTargets_IncludedInHeartbeat(t *testing.T) {
@@ -71,6 +72,34 @@ func TestHost_SetSnapshotRuntimeEndpoint_IncludedInHeartbeat(t *testing.T) {
 		t.Fatalf("snapshot runtime endpoint=%q", got)
 	}
 }
+
+func TestHost_SetSnapshotRestoreEvidenceSource_IncludedInHeartbeat(t *testing.T) {
+	h := newTestVolumeHost(t)
+	defer func() { _ = h.Close() }()
+
+	source := &testRestoreEvidenceSource{marker: snapshot.RestoreMarker{
+		SnapshotID:      "snap-a",
+		State:           snapshot.RestoreStateApplied,
+		TargetStorageID: "store-a",
+		TargetNumBlocks: 256,
+		TargetBlockSize: 4096,
+	}}
+	h.SetSnapshotRestoreEvidenceSource(source)
+	got := h.buildReport().GetSlots()[0].GetSnapshotRestore()
+	if got.GetSnapshotId() != "snap-a" || got.GetState() != snapshot.RestoreStateApplied || got.GetStorageId() != "store-a" || got.GetNumBlocks() != 256 || got.GetBlockSize() != 4096 {
+		t.Fatalf("snapshot restore evidence=%+v", got)
+	}
+	source.marker.State = snapshot.RestoreStateActivated
+	if state := h.buildReport().GetSlots()[0].GetSnapshotRestore().GetState(); state != snapshot.RestoreStateActivated {
+		t.Fatalf("snapshot restore state=%q", state)
+	}
+}
+
+type testRestoreEvidenceSource struct {
+	marker snapshot.RestoreMarker
+}
+
+func (s *testRestoreEvidenceSource) Marker() snapshot.RestoreMarker { return s.marker }
 
 func TestHost_BuildReport_NotReadyForPrimaryFromHeartbeatAlone(t *testing.T) {
 	h := newTestVolumeHost(t)

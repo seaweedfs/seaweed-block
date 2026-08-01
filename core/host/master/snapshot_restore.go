@@ -49,7 +49,7 @@ func (h *Host) resolveSnapshotRestoreTargets(ctx context.Context, targetVolumeID
 			return snapshot.RestorePlan{}, fmt.Errorf("target placement has an unmaterialized replica")
 		}
 		slot, ok := h.obs.Store().SlotFact(targetVolumeID, expected.ReplicaID)
-		target, ok := snapshotRestoreTargetFromFacts(targetVolumeID, expected.ServerID, expected.ReplicaID, ok, slot)
+		target, ok := snapshotRestoreTargetFromFacts(targetVolumeID, expected.ServerID, expected.ReplicaID, rec.SnapshotID, ok, slot)
 		if !ok {
 			return snapshot.RestorePlan{}, fmt.Errorf("target replica %s has no fresh matching restore runtime", expected.ReplicaID)
 		}
@@ -101,8 +101,8 @@ func sameSnapshotRestoreTargets(a, b []snapshot.RestoreReplicaTarget) bool {
 	return true
 }
 
-func snapshotRestoreTargetFromFacts(volumeID, expectedServerID, expectedReplicaID string, hasSlot bool, slot authority.SlotFact) (snapshot.RestoreReplicaTarget, bool) {
-	if volumeID == "" || expectedServerID == "" || expectedReplicaID == "" || !hasSlot {
+func snapshotRestoreTargetFromFacts(volumeID, expectedServerID, expectedReplicaID, snapshotID string, hasSlot bool, slot authority.SlotFact) (snapshot.RestoreReplicaTarget, bool) {
+	if volumeID == "" || expectedServerID == "" || expectedReplicaID == "" || snapshotID == "" || !hasSlot {
 		return snapshot.RestoreReplicaTarget{}, false
 	}
 	if slot.VolumeID != volumeID || slot.ReplicaID != expectedReplicaID || slot.ReportingServerID != expectedServerID || !slot.Reachable || slot.Withdrawn || slot.DataAddr == "" || slot.SnapshotRuntimeEndpoint == "" {
@@ -111,7 +111,27 @@ func snapshotRestoreTargetFromFacts(volumeID, expectedServerID, expectedReplicaI
 	if snapshot.ValidateRuntimeEndpoint(slot.SnapshotRuntimeEndpoint) != nil || !snapshotEndpointMatchesDataHost(slot.SnapshotRuntimeEndpoint, slot.DataAddr) {
 		return snapshot.RestoreReplicaTarget{}, false
 	}
-	return snapshot.RestoreReplicaTarget{VolumeID: volumeID, ReplicaID: expectedReplicaID, RuntimeEndpoint: slot.SnapshotRuntimeEndpoint}, true
+	restore := slot.SnapshotRestore
+	if restore.SnapshotID != snapshotID || restore.StorageID == "" || restore.NumBlocks == 0 || restore.BlockSize == 0 || !validSnapshotRestoreObservationState(restore.State) {
+		return snapshot.RestoreReplicaTarget{}, false
+	}
+	return snapshot.RestoreReplicaTarget{
+		VolumeID:        volumeID,
+		ReplicaID:       expectedReplicaID,
+		RuntimeEndpoint: slot.SnapshotRuntimeEndpoint,
+		TargetStorageID: restore.StorageID,
+		TargetNumBlocks: restore.NumBlocks,
+		TargetBlockSize: int(restore.BlockSize),
+	}, true
+}
+
+func validSnapshotRestoreObservationState(state string) bool {
+	switch state {
+	case snapshot.RestoreStatePending, snapshot.RestoreStateApplying, snapshot.RestoreStateApplied, snapshot.RestoreStateActivated:
+		return true
+	default:
+		return false
+	}
 }
 
 var _ snapshot.RestoreTargetResolver = (*Host)(nil)

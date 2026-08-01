@@ -13,11 +13,11 @@ import (
 func TestPhase175RestoreCoordinatorAppliesAllBeforeActivateAndCompletesGate(t *testing.T) {
 	manager, rec, _ := createStreamFixture(t)
 	resolver := &fakeRestoreResolver{plans: []RestorePlan{{Targets: []RestoreReplicaTarget{
-		{VolumeID: "target-vol", ReplicaID: "r2", RuntimeEndpoint: "https://10.0.0.2:24443"},
-		{VolumeID: "target-vol", ReplicaID: "r1", RuntimeEndpoint: "https://10.0.0.1:24443"},
+		testRestoreReplicaTarget(rec, "r2", "https://10.0.0.2:24443"),
+		testRestoreReplicaTarget(rec, "r1", "https://10.0.0.1:24443"),
 	}}, {Targets: []RestoreReplicaTarget{
-		{VolumeID: "target-vol", ReplicaID: "r1", RuntimeEndpoint: "https://10.0.0.1:24443"},
-		{VolumeID: "target-vol", ReplicaID: "r2", RuntimeEndpoint: "https://10.0.0.2:24443"},
+		testRestoreReplicaTarget(rec, "r1", "https://10.0.0.1:24443"),
+		testRestoreReplicaTarget(rec, "r2", "https://10.0.0.2:24443"),
 	}}}}
 	runtime := &fakeRestoreRuntime{}
 	coordinator, err := NewCoordinator(manager, fixedSnapshotResolver{}, fixedCaptureRuntime{})
@@ -43,8 +43,8 @@ func TestPhase175RestoreCoordinatorAppliesAllBeforeActivateAndCompletesGate(t *t
 func TestPhase175RestoreCoordinatorNeverActivatesPartialOrChangedApply(t *testing.T) {
 	manager, rec, _ := createStreamFixture(t)
 	targets := []RestoreReplicaTarget{
-		{VolumeID: "target-vol", ReplicaID: "r1", RuntimeEndpoint: "https://10.0.0.1:24443"},
-		{VolumeID: "target-vol", ReplicaID: "r2", RuntimeEndpoint: "https://10.0.0.2:24443"},
+		testRestoreReplicaTarget(rec, "r1", "https://10.0.0.1:24443"),
+		testRestoreReplicaTarget(rec, "r2", "https://10.0.0.2:24443"),
 	}
 	for _, tc := range []struct {
 		name     string
@@ -52,7 +52,7 @@ func TestPhase175RestoreCoordinatorNeverActivatesPartialOrChangedApply(t *testin
 		runtime  *fakeRestoreRuntime
 	}{
 		{name: "apply failure", resolver: &fakeRestoreResolver{plans: []RestorePlan{{Targets: targets}}}, runtime: &fakeRestoreRuntime{failApplyReplica: "r2"}},
-		{name: "placement drift", resolver: &fakeRestoreResolver{plans: []RestorePlan{{Targets: targets}, {Targets: []RestoreReplicaTarget{{VolumeID: "target-vol", ReplicaID: "r1", RuntimeEndpoint: "https://10.0.0.9:24443"}}}}}, runtime: &fakeRestoreRuntime{}},
+		{name: "placement drift", resolver: &fakeRestoreResolver{plans: []RestorePlan{{Targets: targets}, {Targets: []RestoreReplicaTarget{testRestoreReplicaTarget(rec, "r1", "https://10.0.0.9:24443")}}}}, runtime: &fakeRestoreRuntime{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			coordinator, err := NewCoordinator(manager, fixedSnapshotResolver{}, fixedCaptureRuntime{})
@@ -77,11 +77,41 @@ func TestPhase175RestoreCoordinatorNeverActivatesPartialOrChangedApply(t *testin
 	}
 }
 
+func TestPhase175RestoreCoordinatorRejectsChangedDurableStoreEvidence(t *testing.T) {
+	manager, rec, _ := createStreamFixture(t)
+	targets := []RestoreReplicaTarget{testRestoreReplicaTarget(rec, "r1", "https://10.0.0.1:24443")}
+	for _, tc := range []struct {
+		name    string
+		runtime *fakeRestoreRuntime
+	}{
+		{name: "apply store generation", runtime: &fakeRestoreRuntime{applyStorageID: "replacement-store"}},
+		{name: "activation store generation", runtime: &fakeRestoreRuntime{activateStorageID: "replacement-store"}},
+		{name: "activation frontier", runtime: &fakeRestoreRuntime{activateFrontier: rec.Frontier + 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resolver := &fakeRestoreResolver{plans: []RestorePlan{{Targets: targets}, {Targets: targets}}}
+			coordinator, err := NewCoordinator(manager, fixedSnapshotResolver{}, fixedCaptureRuntime{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := coordinator.ConfigureRestore(resolver, tc.runtime); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := coordinator.Restore(context.Background(), rec.SnapshotID, "target-vol"); !errors.Is(err, ErrRestoreUnsafe) {
+				t.Fatalf("restore error=%v want ErrRestoreUnsafe", err)
+			}
+			if resolver.completed != "" {
+				t.Fatalf("unsafe evidence completed authority gate: %q", resolver.completed)
+			}
+		})
+	}
+}
+
 func TestPhase175RestoreCoordinatorHoldsSnapshotLeaseAcrossAllReplicas(t *testing.T) {
 	manager, rec, _ := createStreamFixture(t)
 	targets := []RestoreReplicaTarget{
-		{VolumeID: "target-vol", ReplicaID: "r1", RuntimeEndpoint: "https://10.0.0.1:24443"},
-		{VolumeID: "target-vol", ReplicaID: "r2", RuntimeEndpoint: "https://10.0.0.2:24443"},
+		testRestoreReplicaTarget(rec, "r1", "https://10.0.0.1:24443"),
+		testRestoreReplicaTarget(rec, "r2", "https://10.0.0.2:24443"),
 	}
 	var deleteErr error
 	runtime := &fakeRestoreRuntime{afterApply: func(replicaID string) {
@@ -109,7 +139,7 @@ func TestPhase175RestoreCoordinatorHoldsSnapshotLeaseAcrossAllReplicas(t *testin
 
 func TestPhase175RestoreCoordinatorAcceptsConcurrentCompletionAfterApply(t *testing.T) {
 	manager, rec, _ := createStreamFixture(t)
-	targets := []RestoreReplicaTarget{{VolumeID: "target-vol", ReplicaID: "r1", RuntimeEndpoint: "https://10.0.0.1:24443"}}
+	targets := []RestoreReplicaTarget{testRestoreReplicaTarget(rec, "r1", "https://10.0.0.1:24443")}
 	coordinator, err := NewCoordinator(manager, fixedSnapshotResolver{}, fixedCaptureRuntime{})
 	if err != nil {
 		t.Fatal(err)
@@ -154,9 +184,12 @@ func (r *fakeRestoreResolver) CompleteSnapshotRestore(_ context.Context, volumeI
 }
 
 type fakeRestoreRuntime struct {
-	calls            []string
-	failApplyReplica string
-	afterApply       func(replicaID string)
+	calls             []string
+	failApplyReplica  string
+	applyStorageID    string
+	activateStorageID string
+	activateFrontier  uint64
+	afterApply        func(replicaID string)
 }
 
 func (r *fakeRestoreRuntime) Apply(ctx context.Context, req RuntimeRestoreRequest, source ArchiveStreamer) (RestoreApplyResult, error) {
@@ -179,12 +212,56 @@ func (r *fakeRestoreRuntime) Apply(ctx context.Context, req RuntimeRestoreReques
 	if r.afterApply != nil {
 		r.afterApply(req.TargetReplicaID)
 	}
-	return RestoreApplyResult{State: RestoreStateApplied}, nil
+	storageID := req.TargetReplicaID + "-store"
+	if r.applyStorageID != "" {
+		storageID = r.applyStorageID
+	}
+	return RestoreApplyResult{
+		State:           RestoreStateApplied,
+		TargetStorageID: storageID,
+		TargetNumBlocks: req.Snapshot.NumBlocks,
+		TargetBlockSize: req.Snapshot.BlockSize,
+		RestoredBlocks:  req.Snapshot.RecordCount,
+		RestoredBytes:   req.Snapshot.DataBytes,
+		TargetFrontier:  req.Snapshot.Frontier,
+	}, nil
 }
 
 func (r *fakeRestoreRuntime) Activate(_ context.Context, req RuntimeRestoreRequest) (RestoreMarker, error) {
 	r.calls = append(r.calls, "activate:"+req.TargetReplicaID)
-	return RestoreMarker{State: RestoreStateActivated, SnapshotID: req.Snapshot.SnapshotID, TargetVolumeID: req.TargetVolumeID, TargetReplicaID: req.TargetReplicaID}, nil
+	storageID := req.TargetReplicaID + "-store"
+	if r.activateStorageID != "" {
+		storageID = r.activateStorageID
+	}
+	frontier := req.Snapshot.Frontier
+	if r.activateFrontier != 0 {
+		frontier = r.activateFrontier
+	}
+	rec := req.Snapshot
+	return RestoreMarker{
+		State:           RestoreStateActivated,
+		SnapshotID:      rec.SnapshotID,
+		TargetVolumeID:  req.TargetVolumeID,
+		TargetReplicaID: req.TargetReplicaID,
+		TargetStorageID: storageID,
+		TargetNumBlocks: rec.NumBlocks,
+		TargetBlockSize: rec.BlockSize,
+		Snapshot:        &rec,
+		RestoredBlocks:  rec.RecordCount,
+		RestoredBytes:   rec.DataBytes,
+		TargetFrontier:  frontier,
+	}, nil
+}
+
+func testRestoreReplicaTarget(rec Record, replicaID, endpoint string) RestoreReplicaTarget {
+	return RestoreReplicaTarget{
+		VolumeID:        "target-vol",
+		ReplicaID:       replicaID,
+		RuntimeEndpoint: endpoint,
+		TargetStorageID: replicaID + "-store",
+		TargetNumBlocks: rec.NumBlocks,
+		TargetBlockSize: rec.BlockSize,
+	}
 }
 
 type fixedSnapshotResolver struct{}

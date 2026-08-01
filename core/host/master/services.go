@@ -656,6 +656,7 @@ func heartbeatFromWire(r *control.HeartbeatReport) authority.HeartbeatMessage {
 			DataAddr:                s.DataAddr,
 			CtrlAddr:                s.CtrlAddr,
 			SnapshotRuntimeEndpoint: s.SnapshotRuntimeEndpoint,
+			SnapshotRestore:         snapshotRestoreEvidenceFromWire(s.SnapshotRestore),
 			Frontends:               frontendTargetsFromWire(s.Frontends),
 			Reachable:               s.Reachable,
 			ReadyForPrimary:         s.ReadyForPrimary,
@@ -671,6 +672,19 @@ func heartbeatFromWire(r *control.HeartbeatReport) authority.HeartbeatMessage {
 		Reachable: r.Reachable,
 		Eligible:  r.Eligible,
 		Slots:     slots,
+	}
+}
+
+func snapshotRestoreEvidenceFromWire(in *control.SnapshotRestoreEvidence) authority.SnapshotRestoreEvidenceFact {
+	if in == nil {
+		return authority.SnapshotRestoreEvidenceFact{}
+	}
+	return authority.SnapshotRestoreEvidenceFact{
+		SnapshotID: in.SnapshotId,
+		State:      in.State,
+		StorageID:  in.StorageId,
+		NumBlocks:  in.NumBlocks,
+		BlockSize:  in.BlockSize,
 	}
 }
 

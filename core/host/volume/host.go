@@ -12,6 +12,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/adapter"
 	"github.com/seaweedfs/seaweed-block/core/replication"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"github.com/seaweedfs/seaweed-block/core/snapshot"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/proto"
@@ -139,6 +140,7 @@ type Host struct {
 	frontendMu              sync.RWMutex
 	frontendTargets         []*control.FrontendTarget
 	snapshotRuntimeEndpoint string
+	snapshotRestoreSource   interface{ Marker() snapshot.RestoreMarker }
 }
 
 // LastOtherLine returns the most recent VOLUME authority fact
@@ -387,6 +389,35 @@ func (h *Host) SetSnapshotRuntimeEndpoint(endpoint string) {
 	h.frontendMu.Unlock()
 }
 
+// SetSnapshotRestoreEvidenceSource publishes the durable store identity behind
+// a restore runtime endpoint. The source is read for each heartbeat so state
+// transitions remain observable without granting the heartbeat any authority.
+func (h *Host) SetSnapshotRestoreEvidenceSource(source interface{ Marker() snapshot.RestoreMarker }) {
+	h.frontendMu.Lock()
+	h.snapshotRestoreSource = source
+	h.frontendMu.Unlock()
+}
+
+func (h *Host) snapshotRestoreEvidenceSnapshot() *control.SnapshotRestoreEvidence {
+	h.frontendMu.RLock()
+	source := h.snapshotRestoreSource
+	h.frontendMu.RUnlock()
+	if source == nil {
+		return nil
+	}
+	marker := source.Marker()
+	if marker.SnapshotID == "" || marker.TargetStorageID == "" || marker.TargetNumBlocks == 0 || marker.TargetBlockSize <= 0 {
+		return nil
+	}
+	return &control.SnapshotRestoreEvidence{
+		SnapshotId: marker.SnapshotID,
+		State:      marker.State,
+		StorageId:  marker.TargetStorageID,
+		NumBlocks:  marker.TargetNumBlocks,
+		BlockSize:  uint32(marker.TargetBlockSize),
+	}
+}
+
 func (h *Host) snapshotRuntimeEndpointSnapshot() string {
 	h.frontendMu.RLock()
 	defer h.frontendMu.RUnlock()
@@ -482,6 +513,7 @@ func (h *Host) buildReport() *control.HeartbeatReport {
 				DataAddr:                h.cfg.DataAddr,
 				CtrlAddr:                h.cfg.CtrlAddr,
 				SnapshotRuntimeEndpoint: h.snapshotRuntimeEndpointSnapshot(),
+				SnapshotRestore:         h.snapshotRestoreEvidenceSnapshot(),
 				Frontends:               h.frontendTargetsSnapshot(),
 				Reachable:               true,
 				ReadyForPrimary:         h.readyForPrimaryFact(),

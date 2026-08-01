@@ -23,6 +23,9 @@ type runtimeRestoreWireRequest struct {
 	Snapshot        Record `json:"snapshot"`
 	TargetVolumeID  string `json:"targetVolumeID"`
 	TargetReplicaID string `json:"targetReplicaID"`
+	TargetStorageID string `json:"targetStorageID"`
+	TargetNumBlocks uint32 `json:"targetNumBlocks"`
+	TargetBlockSize int    `json:"targetBlockSize"`
 }
 
 type RuntimeRestoreRequest struct {
@@ -30,6 +33,9 @@ type RuntimeRestoreRequest struct {
 	Snapshot        Record
 	TargetVolumeID  string
 	TargetReplicaID string
+	TargetStorageID string
+	TargetNumBlocks uint32
+	TargetBlockSize int
 }
 
 type RestoreRuntimeHandler struct {
@@ -140,7 +146,12 @@ func (h *RestoreRuntimeHandler) serveActivate(w http.ResponseWriter, r *http.Req
 
 func (h *RestoreRuntimeHandler) matchesTarget(req runtimeRestoreWireRequest) bool {
 	marker := h.target.Marker()
-	return req.Snapshot.SnapshotID == marker.SnapshotID && req.TargetVolumeID == marker.TargetVolumeID && req.TargetReplicaID == marker.TargetReplicaID
+	return req.Snapshot.SnapshotID == marker.SnapshotID &&
+		req.TargetVolumeID == marker.TargetVolumeID &&
+		req.TargetReplicaID == marker.TargetReplicaID &&
+		req.TargetStorageID == marker.TargetStorageID &&
+		req.TargetNumBlocks == marker.TargetNumBlocks &&
+		req.TargetBlockSize == marker.TargetBlockSize
 }
 
 type ArchiveStreamer interface {
@@ -169,7 +180,7 @@ func (c *HTTPSRestoreRuntime) Apply(ctx context.Context, req RuntimeRestoreReque
 	if err != nil {
 		return RestoreApplyResult{}, err
 	}
-	wire := runtimeRestoreWireRequest{Snapshot: req.Snapshot, TargetVolumeID: req.TargetVolumeID, TargetReplicaID: req.TargetReplicaID}
+	wire := restoreWireRequest(req)
 	metadata, err := json.Marshal(wire)
 	if err != nil {
 		return RestoreApplyResult{}, err
@@ -235,7 +246,7 @@ func (c *HTTPSRestoreRuntime) Activate(ctx context.Context, req RuntimeRestoreRe
 	if err != nil {
 		return RestoreMarker{}, err
 	}
-	body, err := json.Marshal(runtimeRestoreWireRequest{Snapshot: req.Snapshot, TargetVolumeID: req.TargetVolumeID, TargetReplicaID: req.TargetReplicaID})
+	body, err := json.Marshal(restoreWireRequest(req))
 	if err != nil {
 		return RestoreMarker{}, err
 	}
@@ -282,7 +293,18 @@ func readRestoreWireRequest(r io.Reader) (runtimeRestoreWireRequest, int, error)
 }
 
 func validRuntimeRestoreRequest(req RuntimeRestoreRequest) bool {
-	return req.Endpoint != "" && req.TargetVolumeID != "" && req.TargetReplicaID != "" && validateRecord(req.Snapshot) == nil
+	return req.Endpoint != "" && req.TargetVolumeID != "" && req.TargetReplicaID != "" && req.TargetStorageID != "" && req.TargetNumBlocks != 0 && req.TargetBlockSize > 0 && req.TargetNumBlocks == req.Snapshot.NumBlocks && req.TargetBlockSize == req.Snapshot.BlockSize && validateRecord(req.Snapshot) == nil
+}
+
+func restoreWireRequest(req RuntimeRestoreRequest) runtimeRestoreWireRequest {
+	return runtimeRestoreWireRequest{
+		Snapshot:        req.Snapshot,
+		TargetVolumeID:  req.TargetVolumeID,
+		TargetReplicaID: req.TargetReplicaID,
+		TargetStorageID: req.TargetStorageID,
+		TargetNumBlocks: req.TargetNumBlocks,
+		TargetBlockSize: req.TargetBlockSize,
+	}
 }
 
 func decodeSingleJSON(r io.Reader, value any) error {
