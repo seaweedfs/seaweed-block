@@ -260,6 +260,41 @@ projected into the CSI pod. The first implementation exports only an already
 ready immutable snapshot. It does not read a live volume, accept arbitrary
 server paths, upload to object storage, or implement incremental backup.
 
+Use the backup-only client identity and token with `sw-block`; operations take
+catalog IDs, never server paths:
+
+```bash
+sw-block ops snapshot-backup export \
+  --api blockmaster.kube-system.svc.cluster.local:9444 \
+  --ca api-server-ca.crt \
+  --client-cert api-client.crt --client-key api-client.key \
+  --token-file backup-api-token \
+  --backup-id nightly-001 --snapshot-id snap-0123456789abcdef0123456789abcdef
+
+sw-block ops snapshot-backup get \
+  --api blockmaster.kube-system.svc.cluster.local:9444 \
+  --ca api-server-ca.crt \
+  --client-cert api-client.crt --client-key api-client.key \
+  --token-file backup-api-token --backup-id nightly-001
+
+sw-block ops snapshot-backup list \
+  --api blockmaster.kube-system.svc.cluster.local:9444 \
+  --ca api-server-ca.crt \
+  --client-cert api-client.crt --client-key api-client.key \
+  --token-file backup-api-token
+
+sw-block ops snapshot-backup import \
+  --api blockmaster.kube-system.svc.cluster.local:9444 \
+  --ca api-server-ca.crt \
+  --client-cert api-client.crt --client-key api-client.key \
+  --token-file backup-api-token --backup-id nightly-001
+```
+
+The first file target is the fixed `/var/lib/sw-block/backups` root. Moving a
+backup between installations is an administrator file-transfer step; import
+validates the manifest and archive before republishing the original canonical
+snapshot identity.
+
 When enabled, this chart adds the `csi-snapshotter` sidecar, its snapshot API
 RBAC, and the configured `VolumeSnapshotClass`. The requested PVC capacity
 range must contain the snapshot size; the restored volume initially uses that

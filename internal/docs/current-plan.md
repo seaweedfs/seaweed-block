@@ -4,8 +4,8 @@ Status: active. Started 2026-08-01 from merged `origin/main` at `7d016ed`.
 
 Progress through the local data layer, distributed runtime, and CSI contract:
 
-- D1 storage cut contract implemented for `BlockStore`, `walstore`, and the
-  shipped-default `smartwal`; deterministic tests prove normal writes and
+- D1 storage cut contract implemented for `BlockStore`, the shipped-default
+  `walstore`, and `smartwal`; deterministic tests prove normal writes and
   direct extent installs cannot cross an in-progress cut.
 - D2 immutable archive and durable catalog implemented locally with per-block
   CRC, archive SHA-256, fsync/rename publication, restart validation,
@@ -36,17 +36,39 @@ Progress through the local data layer, distributed runtime, and CSI contract:
   authority only after durable target evidence. Linux race/repeat QA passed on
   `43e550e`; `c79104b` then hardened durable lifecycle replacement, orphan
   restore barriers, operation-wide deletion leases, long-running apply, and
-  concurrent idempotency. The hardened commit still requires Linux QA rerun.
+  concurrent idempotency. Linux race/repeat QA passed on the final hardened
+  restore evidence chain at `7d75453`.
 - D5 CSI snapshot RPCs and capability are implemented at `ba6b17e`. The CSI
   path uses the dedicated mTLS and bearer-token SnapshotService, returns a new
   volume only after restore completion, keeps the capability absent when
   disabled, and has unit/repeat/vet coverage. The requested CSI capacity range
   must contain the snapshot size; the initial target uses that exact geometry
   because post-restore expansion is not yet implemented.
-- D6 chart wiring is in progress: default-disabled snapshotter sidecar,
+- D6 chart wiring is complete locally: default-disabled snapshotter sidecar,
   role-separated Secret projection, snapshot RBAC, and `VolumeSnapshotClass`
-  render locally. The real Kubernetes `VolumeSnapshot` and restored-PVC gate
-  remains open.
+  render locally. The first live attempt exposed a loopback runtime address;
+  `f1ba252` now rejects that configuration at render time. The exact-commit
+  live rerun created a real ready `VolumeSnapshot`, created and attached a
+  distinct restored volume, then failed its first mount because ext4 could not
+  read the superblock from `/dev/sdb`. D6 is blocked on source/target block and
+  device-geometry diagnosis; control-plane apply/activate evidence alone is
+  not accepted as restored-data proof.
+- D7 adversarial coverage audit found strong L1 component coverage but no
+  Phase 175 dirty-failure L2 scenarios. D7 remains open. The minimum live set
+  is: create crash/retry isolation; restore restart, source delete, and
+  snapshot-delete hold; and target-delete/residue isolation. Helper summaries
+  alone do not satisfy these gates.
+- D8 full file-target backup data layer landed at `c5be432`: export only a
+  ready immutable snapshot, durable archive/manifest publication, portable
+  offline import, canonical identity/path containment, catalog restart,
+  corruption/tamper refusal, and restore isolation. Exact-commit m02 Linux
+  race/repeat QA passed. `b73716e` adds a separate mTLS
+  `SnapshotBackupService`, fixed durable root, distinct bearer token, and
+  default-disabled Helm packaging. Its exact-commit Linux tests, vet, Helm
+  lint/render contract, and runner validation passed. The `sw-block ops
+  snapshot-backup` client now exposes ID-only export/get/list/import with
+  mTLS, the backup-only token, canonical response validation, and import
+  identity binding.
 
 ## Product Outcome
 
@@ -158,6 +180,8 @@ refusal, and no ready record for partial data.
 
 - Restore an archive into a newly-created empty storage object.
 - Verify geometry and archive integrity before publication.
+- Read every restored archive LBA back from the target after its durability
+  fence; write counters alone are not restored-data evidence.
 - Give the restored volume its own write frontier and lifecycle identity.
 - On failure, discard the unpublished target rather than leaving a partially
   usable volume.
@@ -198,6 +222,9 @@ Gate: CSI conformance-style unit tests plus a real CSI sidecar call path.
   contain the complete path.
 - Prove PVC -> VolumeSnapshot readyToUse -> restored PVC -> mounted read ->
   independent write/read.
+- The live gate must retain snapshot geometry/counters and compare source and
+  target device geometry plus filesystem-signature evidence on mount failure;
+  deleting a source pod is not proof that NodeUnstage/unmount completed.
 
 Gate: real Kubernetes API, matching images, no manual snapshot CR stubs, and
 cross-surface identity agreement.

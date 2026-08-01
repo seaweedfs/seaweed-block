@@ -476,6 +476,17 @@ func validateImportedRecord(rec Record) error {
 	return nil
 }
 
+// ValidatePortableRecord applies the complete catalog/import contract to a
+// record received across a trusted transport boundary.
+func ValidatePortableRecord(rec Record) error {
+	return validateImportedRecord(rec)
+}
+
+// SamePortableRecord compares every persisted snapshot catalog field.
+func SamePortableRecord(a, b Record) bool {
+	return sameCatalogRecord(a, b)
+}
+
 func removeTemporaryFiles(dir string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {

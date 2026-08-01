@@ -124,6 +124,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runOpsFrontendPublicationTargetOwner(args[2:], stdout, stderr)
 	case "frontend-publication-executor":
 		return runOpsFrontendPublicationExecutor(args[2:], stdout, stderr)
+	case "snapshot-backup":
+		return runOpsSnapshotBackup(args[2:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "sw-block: unknown ops subcommand %q\n", args[1])
 		usage(stderr)
@@ -2285,6 +2287,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  sw-block ops failback-executor [--dry-run] [--namespace <ns>] [--enable-execution] [--execution-policy] [--failback-runtime-url <url>] [--interval 30s]")
 	fmt.Fprintln(w, "  sw-block ops frontend-publication-target-owner [--dry-run] [--namespace <ns>] [--interval 30s] [--activate-targets --activation-policy --runtime-endpoint <url>]")
 	fmt.Fprintln(w, "  sw-block ops frontend-publication-executor [--dry-run] [--namespace <ns>] [--enable-execution] [--execution-policy] [--frontend-publication-runtime-url <url>] [--interval 30s]")
+	fmt.Fprintln(w, "  sw-block ops snapshot-backup export|get|list|import --api <addr> --ca <file> --client-cert <file> --client-key <file> --token-file <file> [--backup-id <id>] [--snapshot-id <id>]")
 }
 
 func emptyCLI(value string) string {

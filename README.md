@@ -38,7 +38,7 @@ This is an **alpha** product path for supported lab clusters, not production.
 | Returned-replica rebuild traffic | Planned | Frontend publication after failback | Planned |
 | NVMe/TCP CSI multipath + backend write batching | Source-gated | NVMe/RDMA Kubernetes CSI publish/attach | Source-gated |
 | WAL multi-block record opt-in | Source-gated | WAL format default change | Not claimed |
-| Backup/snapshot/restore | Planned | NVMe/RDMA failover or performance SLO | Not claimed |
+| Backup/snapshot/restore | Source-gated; live restore blocked | NVMe/RDMA failover or performance SLO | Not claimed |
 | Production SLO/performance claims | Not claimed | Hosted production UI | Not claimed |
 
 ## What You Can Do Today
@@ -107,7 +107,10 @@ These are narrow alpha claims tied to documented gates. See
   finalizer.
 - Automatic cleanup execution, host repair, or PVC/PV/workload deletion.
   Delete-safety uses externally supplied cleanup evidence.
-- Backup, snapshot, or restore.
+- Published-image backup, snapshot, or restore. The source implementation has
+  an immutable catalog, restore-to-new, CSI `VolumeSnapshot`, and fixed-root
+  full backup APIs, but its Kubernetes restored-filesystem mount gate is still
+  blocked; this is not a release claim.
 - Returned-replica rebuild traffic, frontend publication after failback, or
   automatic deployed failback. The failback runtime path is explicit, opt-in,
   and source-gated until a release smoke validates it on published images.

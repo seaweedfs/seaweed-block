@@ -121,6 +121,45 @@ On restart, temporary files are not snapshots. Unreferenced immutable files
 may be removed only when catalog reconciliation proves no record references
 them.
 
+## Full Backup Export And Import
+
+The first backup path copies an already-ready immutable snapshot archive. It
+does not scan a live volume and therefore does not define a second consistency
+mechanism:
+
+```text
+ready snapshot catalog record + immutable archive
+-> stream under the snapshot deletion lease
+-> fsync and atomically publish full backup archive
+-> fsync and atomically publish backup manifest
+-> move/copy the complete backup directory
+-> verify manifest, archive SHA-256, geometry, and per-block CRC
+-> atomically import the original snapshot identity into a catalog
+-> use the normal restore-to-new-volume path
+```
+
+The backup manifest contains the backup ID, source snapshot ID, server creation
+time, archive size and SHA-256, relative destination evidence, the complete
+snapshot record, and a SHA-256 over the canonical manifest. The archive digest
+protects data bytes; the manifest digest detects accidental metadata changes.
+Neither is an authenticity signature. Authenticity and encryption remain a
+deployment/transport responsibility.
+
+Imported snapshot identities must equal the canonical product ID derived from
+the validated snapshot name and source volume. Import never accepts a path or
+uses an untrusted ID as an unchecked filesystem component. It stages and
+verifies the complete archive before publishing either archive or catalog
+metadata, never overwrites an existing identity/name binding, and is
+idempotent only when the complete catalog record agrees.
+
+The initial destination is a fixed server-side file root configured by the
+administrator. `SnapshotBackupService` is registered only on the dedicated
+mTLS snapshot listener when that root and a separate backup bearer-token file
+are configured. The backup token must differ from the CSI SnapshotService
+token and is not projected into the CSI pod. Arbitrary server paths, object
+storage, incremental/changelog backup, retention policy, encryption, and a
+cross-cluster disaster-recovery claim are outside this first slice.
+
 ## Restore State Machine
 
 ```mermaid
@@ -129,10 +168,13 @@ stateDiagram-v2
   Requested --> Validating
   Validating --> Rejected: missing/not-ready/geometry/integrity
   Validating --> Restoring: valid immutable archive
-  Restoring --> Failed: write/sync/restart failure
+  Restoring --> Failed: write/sync failure
   Restoring --> Durable: all records written and synced
-  Durable --> Published: lifecycle identity becomes visible
+  Durable --> IntegrityFault: target readback differs from archive
+  Durable --> Verified: every archive LBA reads back exactly
+  Verified --> Published: lifecycle identity becomes visible
   Failed --> Discarded: unpublished target removed
+  IntegrityFault --> Discarded: destroy target; never retry same store
   Published --> [*]
 ```
 
@@ -144,8 +186,11 @@ Restore preconditions:
 - the operation owns a reference that prevents snapshot deletion.
 
 Restored writes use the target substrate's normal write path and receive a new
-target LSN sequence. The source frontier is provenance, not the restored
-volume's authority or write frontier.
+target LSN sequence. After the target durability fence, the restore owner reads
+every archived LBA through the target's logical read path and compares it with
+the verified archive before publication. Write counts are diagnostics, not
+proof that restored bytes are usable. The source frontier is provenance, not
+the restored volume's authority or write frontier.
 
 ## Distributed Ownership
 
@@ -153,6 +198,7 @@ volume's authority or write frontier.
 |---|---|---|
 | CSI controller | CSI validation, idempotency mapping, gRPC status, content-source mapping | block scanning, authority, direct archive writes |
 | blockmaster snapshot service | durable product catalog, request orchestration, source/current-primary lookup | fabricating source readiness or reading block files directly |
+| blockmaster backup service | fixed-root full export/import of ready immutable snapshots | live-volume scanning, arbitrary paths, object upload, CSI credential reuse |
 | current-primary blockvolume runtime | authority-guarded local cut and integrity-framed block stream | catalog publication or Kubernetes VolumeSnapshot reconciliation |
 | storage substrate | atomic cut, block stream, durability frontier | CSI names, Kubernetes objects, retention policy |
 | external-snapshotter | Kubernetes-to-CSI request bridge | storage consistency implementation |
