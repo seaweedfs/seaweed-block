@@ -38,29 +38,41 @@ write_summary() {
 }
 
 cleanup() {
-	local exit_status=$?
-	if [[ "${GATE_COMPLETE}" != "true" ]]; then
-		mkdir -p "${ARTIFACT_DIR}/remote"
-		for spec in "${M01_HOST}:m01" "${TP01_HOST}:tp01"; do
-			local host="${spec%:*}" node="${spec##*:}"
-			for writers in "${WRITERS[@]}"; do
-				local dir="${REMOTE_ROOT}/w${writers}-${node}"
-				"${SCP[@]}" "${host}:${dir}/replica.log" "${ARTIFACT_DIR}/remote/w${writers}-${node}-failure.log" >/dev/null 2>&1 || true
-				"${SCP[@]}" "${host}:${dir}/result.json" "${ARTIFACT_DIR}/remote/w${writers}-${node}-failure-result.json" >/dev/null 2>&1 || true
-				done
-			done
-		write_summary "phase174_distinct_node_rf3_status=failed"
-		write_summary "failure_artifact=${PUBLISH_ROOT}/${RUN_ID}.tar.gz"
-		tar -C "$(dirname "${ARTIFACT_DIR}")" -czf "${ARTIFACT_DIR}.tar.gz" "$(basename "${ARTIFACT_DIR}")" >/dev/null 2>&1 || true
-		sha256sum "${ARTIFACT_DIR}.tar.gz" >"${ARTIFACT_DIR}.tar.gz.sha256" 2>/dev/null || true
-		"${SCP[@]}" "${ARTIFACT_DIR}.tar.gz" "${M02_HOST}:${PUBLISH_ROOT}/${RUN_ID}.tar.gz" >/dev/null 2>&1 || true
-	fi
-	rm -f "${LOCAL_BINARY}"
+  local exit_status=$?
+  if [[ "${GATE_COMPLETE}" != "true" ]]; then
+    mkdir -p "${ARTIFACT_DIR}/remote"
+    for spec in "${M01_HOST}:m01" "${TP01_HOST}:tp01"; do
+      local host="${spec%:*}" node="${spec##*:}"
+      remote "${host}" "for pidfile in '${REMOTE_ROOT}'/w*-'${node}'/pid; do
+        test -f \"\${pidfile}\" || continue
+        touch \"\$(dirname \"\${pidfile}\")/stop\"
+      done
+      for pidfile in '${REMOTE_ROOT}'/w*-'${node}'/pid; do
+        test -f \"\${pidfile}\" || continue
+        pid=\$(cat \"\${pidfile}\")
+        for _ in \$(seq 1 50); do kill -0 \"\${pid}\" 2>/dev/null || break; sleep 0.1; done
+        if kill -0 \"\${pid}\" 2>/dev/null && tr '\\0' ' ' <\"/proc/\${pid}/cmdline\" | grep -Fq '${REMOTE_BINARY}'; then
+          kill \"\${pid}\"
+        fi
+      done" >/dev/null 2>&1 || true
+      for writers in "${WRITERS[@]}"; do
+        local dir="${REMOTE_ROOT}/w${writers}-${node}"
+        "${SCP[@]}" "${host}:${dir}/replica.log" "${ARTIFACT_DIR}/remote/w${writers}-${node}-failure.log" >/dev/null 2>&1 || true
+        "${SCP[@]}" "${host}:${dir}/result.json" "${ARTIFACT_DIR}/remote/w${writers}-${node}-failure-result.json" >/dev/null 2>&1 || true
+      done
+    done
+    write_summary "phase174_distinct_node_rf3_status=failed"
+    write_summary "failure_artifact=${PUBLISH_ROOT}/${RUN_ID}.tar.gz"
+    tar -C "$(dirname "${ARTIFACT_DIR}")" -czf "${ARTIFACT_DIR}.tar.gz" "$(basename "${ARTIFACT_DIR}")" >/dev/null 2>&1 || true
+    sha256sum "${ARTIFACT_DIR}.tar.gz" >"${ARTIFACT_DIR}.tar.gz.sha256" 2>/dev/null || true
+    "${SCP[@]}" "${ARTIFACT_DIR}.tar.gz" "${M02_HOST}:${PUBLISH_ROOT}/${RUN_ID}.tar.gz" >/dev/null 2>&1 || true
+  fi
+  rm -f "${LOCAL_BINARY}"
   for host in "${M01_HOST}" "${TP01_HOST}"; do
     remote "${host}" "test '${REMOTE_ROOT}' = '/tmp/${RUN_ID}'; rm -rf -- '${REMOTE_ROOT}'" >/dev/null 2>&1 || true
   done
-	remote "${M02_HOST}" "test '${REMOTE_ROOT}' = '/tmp/${RUN_ID}'; test '${M02_STORE_ROOT}' = '/data/nvme/block/${RUN_ID}-stores'; rm -rf -- '${REMOTE_ROOT}' '${M02_STORE_ROOT}'" >/dev/null 2>&1 || true
-	return "${exit_status}"
+  remote "${M02_HOST}" "test '${REMOTE_ROOT}' = '/tmp/${RUN_ID}'; test '${M02_STORE_ROOT}' = '/data/nvme/block/${RUN_ID}-stores'; rm -rf -- '${REMOTE_ROOT}' '${M02_STORE_ROOT}'" >/dev/null 2>&1 || true
+  return "${exit_status}"
 }
 trap cleanup EXIT
 
