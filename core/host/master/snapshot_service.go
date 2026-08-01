@@ -23,7 +23,11 @@ import (
 
 func (h *Host) configureSnapshotCoordinator() error {
 	cfg := h.cfg
-	configured := cfg.SnapshotRoot != "" || cfg.SnapshotRuntimeCAFile != "" || cfg.SnapshotRuntimeTokenFile != "" ||
+	backupConfigured := cfg.SnapshotBackupRoot != "" || cfg.SnapshotBackupAPITokenFile != ""
+	if backupConfigured && (cfg.SnapshotBackupRoot == "" || cfg.SnapshotBackupAPITokenFile == "") {
+		return fmt.Errorf("snapshot backup root and API token must be configured together")
+	}
+	configured := cfg.SnapshotRoot != "" || backupConfigured || cfg.SnapshotRuntimeCAFile != "" || cfg.SnapshotRuntimeTokenFile != "" ||
 		cfg.SnapshotRuntimeClientCertFile != "" || cfg.SnapshotRuntimeClientKeyFile != "" || cfg.SnapshotAPIListen != "" ||
 		cfg.SnapshotAPITLSCertFile != "" || cfg.SnapshotAPITLSKeyFile != "" || cfg.SnapshotAPIClientCAFile != "" || cfg.SnapshotAPITokenFile != ""
 	if !configured {
@@ -95,6 +99,22 @@ func (h *Host) configureSnapshotCoordinator() error {
 	}
 	if err := coordinator.ConfigureRestore(h, restoreRuntime); err != nil {
 		return err
+	}
+	if cfg.SnapshotBackupRoot != "" {
+		if err := coordinator.ConfigureBackup(cfg.SnapshotBackupRoot); err != nil {
+			return err
+		}
+		backupTokenBytes, err := os.ReadFile(cfg.SnapshotBackupAPITokenFile)
+		if err != nil {
+			return fmt.Errorf("read snapshot backup API token: %w", err)
+		}
+		h.snapshotBackupAPIToken = strings.TrimSpace(string(backupTokenBytes))
+		if h.snapshotBackupAPIToken == "" {
+			return fmt.Errorf("snapshot backup API token is empty")
+		}
+		if len(h.snapshotBackupAPIToken) == len(apiToken) && subtle.ConstantTimeCompare([]byte(h.snapshotBackupAPIToken), []byte(apiToken)) == 1 {
+			return fmt.Errorf("snapshot backup API token must differ from the CSI snapshot API token")
+		}
 	}
 	h.snapshotCoordinator = coordinator
 	h.snapshotAPIToken = apiToken
@@ -219,6 +239,83 @@ func (s *services) RestoreSnapshot(ctx context.Context, req *control.RestoreSnap
 	}, nil
 }
 
+func (s *services) ExportSnapshotBackup(ctx context.Context, req *control.ExportSnapshotBackupRequest) (*control.SnapshotBackupRecord, error) {
+	coordinator, err := s.snapshotService()
+	if err != nil {
+		return nil, err
+	}
+	if err := s.authorizeSnapshotBackup(ctx); err != nil {
+		return nil, err
+	}
+	backupCtx, cancel := context.WithTimeout(ctx, s.host.snapshotCaptureTimeout)
+	defer cancel()
+	record, err := coordinator.ExportBackup(backupCtx, snapshot.BackupRequest{BackupID: req.GetBackupId(), SnapshotID: req.GetSnapshotId()})
+	if err != nil {
+		return nil, snapshotRPCError("export snapshot backup", err)
+	}
+	return snapshotBackupRecordToWire(record), nil
+}
+
+func (s *services) GetSnapshotBackup(ctx context.Context, req *control.GetSnapshotBackupRequest) (*control.SnapshotBackupRecord, error) {
+	coordinator, err := s.snapshotService()
+	if err != nil {
+		return nil, err
+	}
+	if err := s.authorizeSnapshotBackup(ctx); err != nil {
+		return nil, err
+	}
+	if req.GetBackupId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "backup_id is required")
+	}
+	record, ok, err := coordinator.GetBackup(req.GetBackupId())
+	if err != nil {
+		return nil, snapshotRPCError("get snapshot backup", err)
+	}
+	if !ok {
+		return nil, status.Error(codes.NotFound, snapshot.ErrNotFound.Error())
+	}
+	return snapshotBackupRecordToWire(record), nil
+}
+
+func (s *services) ListSnapshotBackups(ctx context.Context, _ *control.ListSnapshotBackupsRequest) (*control.ListSnapshotBackupsResponse, error) {
+	coordinator, err := s.snapshotService()
+	if err != nil {
+		return nil, err
+	}
+	if err := s.authorizeSnapshotBackup(ctx); err != nil {
+		return nil, err
+	}
+	records, err := coordinator.ListBackups()
+	if err != nil {
+		return nil, snapshotRPCError("list snapshot backups", err)
+	}
+	out := &control.ListSnapshotBackupsResponse{Backups: make([]*control.SnapshotBackupRecord, 0, len(records))}
+	for _, record := range records {
+		out.Backups = append(out.Backups, snapshotBackupRecordToWire(record))
+	}
+	return out, nil
+}
+
+func (s *services) ImportSnapshotBackup(ctx context.Context, req *control.ImportSnapshotBackupRequest) (*control.SnapshotRecord, error) {
+	coordinator, err := s.snapshotService()
+	if err != nil {
+		return nil, err
+	}
+	if err := s.authorizeSnapshotBackup(ctx); err != nil {
+		return nil, err
+	}
+	if req.GetBackupId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "backup_id is required")
+	}
+	importCtx, cancel := context.WithTimeout(ctx, s.host.snapshotCaptureTimeout)
+	defer cancel()
+	record, err := coordinator.ImportBackup(importCtx, req.GetBackupId())
+	if err != nil {
+		return nil, snapshotRPCError("import snapshot backup", err)
+	}
+	return snapshotRecordToWire(record), nil
+}
+
 func (s *services) snapshotService() (*snapshot.Coordinator, error) {
 	if s.host.snapshotCoordinator == nil {
 		return nil, status.Error(codes.FailedPrecondition, "snapshot service is not configured")
@@ -231,6 +328,15 @@ func (s *services) authorizeSnapshot(ctx context.Context) error {
 	want := "Bearer " + s.host.snapshotAPIToken
 	if len(values) != 1 || len(values[0]) != len(want) || subtle.ConstantTimeCompare([]byte(values[0]), []byte(want)) != 1 {
 		return status.Error(codes.Unauthenticated, "snapshot API authentication failed")
+	}
+	return nil
+}
+
+func (s *services) authorizeSnapshotBackup(ctx context.Context) error {
+	values := metadata.ValueFromIncomingContext(ctx, "authorization")
+	want := "Bearer " + s.host.snapshotBackupAPIToken
+	if s.host.snapshotBackupAPIToken == "" || len(values) != 1 || len(values[0]) != len(want) || subtle.ConstantTimeCompare([]byte(values[0]), []byte(want)) != 1 {
+		return status.Error(codes.Unauthenticated, "snapshot backup API authentication failed")
 	}
 	return nil
 }
@@ -253,6 +359,20 @@ func snapshotRecordToWire(record snapshot.Record) *control.SnapshotRecord {
 	}
 }
 
+func snapshotBackupRecordToWire(record snapshot.BackupRecord) *control.SnapshotBackupRecord {
+	return &control.SnapshotBackupRecord{
+		BackupId:            record.BackupID,
+		SourceSnapshotId:    record.SourceSnapshotID,
+		CreatedAt:           timestamppb.New(record.CreatedAt),
+		State:               record.State,
+		ArchiveBytes:        record.ArchiveBytes,
+		ArchiveSha256:       record.ArchiveSHA256,
+		ManifestSha256:      record.ManifestSHA256,
+		DestinationEvidence: record.DestinationEvidence,
+		Snapshot:            snapshotRecordToWire(record.Snapshot),
+	}
+}
+
 func snapshotRPCError(operation string, err error) error {
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):
@@ -266,6 +386,8 @@ func snapshotRPCError(operation string, err error) error {
 	case errors.Is(err, snapshot.ErrNameConflict):
 		return status.Error(codes.AlreadyExists, err.Error())
 	case errors.Is(err, snapshot.ErrInUse), errors.Is(err, snapshot.ErrSourceNotReady):
+		return status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, snapshot.ErrBackupUnavailable):
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, snapshot.ErrRestoreNotReady), errors.Is(err, snapshot.ErrRestoreNotApplied), errors.Is(err, snapshot.ErrRestoreUnsafe), errors.Is(err, snapshot.ErrRestoreConflict):
 		return status.Error(codes.FailedPrecondition, err.Error())

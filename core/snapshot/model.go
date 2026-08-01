@@ -19,6 +19,7 @@ var (
 	ErrRestoreNotApplied = errors.New("snapshot: restore target not applied")
 	ErrRestoreUnsafe     = errors.New("snapshot: restore target state is unsafe")
 	ErrRestoreNotReady   = errors.New("snapshot: restore target not ready")
+	ErrBackupUnavailable = errors.New("snapshot: backup service is not configured")
 )
 
 const StateReady = "ready"

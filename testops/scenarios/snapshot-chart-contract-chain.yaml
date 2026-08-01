@@ -51,6 +51,22 @@ phases:
       - action: assert_greater
         actual: "{{ mtls_projected }}"
         threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase175-snapshot-chart/phase175-snapshot-chart-contract-summary.txt"
+        pattern: "^snapshot_backup_fixed_root_rendered=true$"
+        save_as: backup_root_rendered
+      - action: assert_greater
+        actual: "{{ backup_root_rendered }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase175-snapshot-chart/phase175-snapshot-chart-contract-summary.txt"
+        pattern: "^snapshot_backup_token_not_projected_to_csi=true$"
+        save_as: backup_token_isolated
+      - action: assert_greater
+        actual: "{{ backup_token_isolated }}"
+        threshold: "0"
 
   - name: collect
     always: true

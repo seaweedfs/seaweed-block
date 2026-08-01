@@ -107,9 +107,14 @@ func TestParseFlags_SnapshotServiceRequiresCompleteSecureConfiguration(t *testin
 	if _, err := parseFlags([]string{"--authority-store", "authority-dir", "--snapshot-root", "snapshots"}); err == nil {
 		t.Fatal("expected incomplete snapshot configuration to fail")
 	}
+	if _, err := parseFlags([]string{"--authority-store", "authority-dir", "--snapshot-backup-root", "backups"}); err == nil {
+		t.Fatal("expected backup root without snapshot service to fail")
+	}
 	f, err = parseFlags([]string{
 		"--authority-store", "authority-dir",
 		"--snapshot-root", "snapshots",
+		"--snapshot-backup-root", "backups",
+		"--snapshot-backup-api-token-file", "backup-token",
 		"--snapshot-runtime-ca-file", "ca.pem",
 		"--snapshot-runtime-token-file", "token",
 		"--snapshot-runtime-client-cert", "client.crt",
@@ -123,7 +128,7 @@ func TestParseFlags_SnapshotServiceRequiresCompleteSecureConfiguration(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if f.snapshotRuntimeCAFile != "ca.pem" || f.snapshotRuntimeTokenFile != "token" || f.snapshotAPIListen != "127.0.0.1:9444" {
+	if f.snapshotRuntimeCAFile != "ca.pem" || f.snapshotRuntimeTokenFile != "token" || f.snapshotAPIListen != "127.0.0.1:9444" || f.snapshotBackupRoot != "backups" || f.snapshotBackupAPITokenFile != "backup-token" {
 		t.Fatalf("snapshot flags=%+v", f)
 	}
 }

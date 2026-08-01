@@ -1119,3 +1119,204 @@ var SnapshotService_ServiceDesc = grpc.ServiceDesc{
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "control.proto",
 }
+
+const (
+	SnapshotBackupService_ExportSnapshotBackup_FullMethodName = "/seaweedfs.block.control.SnapshotBackupService/ExportSnapshotBackup"
+	SnapshotBackupService_GetSnapshotBackup_FullMethodName    = "/seaweedfs.block.control.SnapshotBackupService/GetSnapshotBackup"
+	SnapshotBackupService_ListSnapshotBackups_FullMethodName  = "/seaweedfs.block.control.SnapshotBackupService/ListSnapshotBackups"
+	SnapshotBackupService_ImportSnapshotBackup_FullMethodName = "/seaweedfs.block.control.SnapshotBackupService/ImportSnapshotBackup"
+)
+
+// SnapshotBackupServiceClient is the client API for SnapshotBackupService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+type SnapshotBackupServiceClient interface {
+	ExportSnapshotBackup(ctx context.Context, in *ExportSnapshotBackupRequest, opts ...grpc.CallOption) (*SnapshotBackupRecord, error)
+	GetSnapshotBackup(ctx context.Context, in *GetSnapshotBackupRequest, opts ...grpc.CallOption) (*SnapshotBackupRecord, error)
+	ListSnapshotBackups(ctx context.Context, in *ListSnapshotBackupsRequest, opts ...grpc.CallOption) (*ListSnapshotBackupsResponse, error)
+	ImportSnapshotBackup(ctx context.Context, in *ImportSnapshotBackupRequest, opts ...grpc.CallOption) (*SnapshotRecord, error)
+}
+
+type snapshotBackupServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewSnapshotBackupServiceClient(cc grpc.ClientConnInterface) SnapshotBackupServiceClient {
+	return &snapshotBackupServiceClient{cc}
+}
+
+func (c *snapshotBackupServiceClient) ExportSnapshotBackup(ctx context.Context, in *ExportSnapshotBackupRequest, opts ...grpc.CallOption) (*SnapshotBackupRecord, error) {
+	out := new(SnapshotBackupRecord)
+	err := c.cc.Invoke(ctx, SnapshotBackupService_ExportSnapshotBackup_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *snapshotBackupServiceClient) GetSnapshotBackup(ctx context.Context, in *GetSnapshotBackupRequest, opts ...grpc.CallOption) (*SnapshotBackupRecord, error) {
+	out := new(SnapshotBackupRecord)
+	err := c.cc.Invoke(ctx, SnapshotBackupService_GetSnapshotBackup_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *snapshotBackupServiceClient) ListSnapshotBackups(ctx context.Context, in *ListSnapshotBackupsRequest, opts ...grpc.CallOption) (*ListSnapshotBackupsResponse, error) {
+	out := new(ListSnapshotBackupsResponse)
+	err := c.cc.Invoke(ctx, SnapshotBackupService_ListSnapshotBackups_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *snapshotBackupServiceClient) ImportSnapshotBackup(ctx context.Context, in *ImportSnapshotBackupRequest, opts ...grpc.CallOption) (*SnapshotRecord, error) {
+	out := new(SnapshotRecord)
+	err := c.cc.Invoke(ctx, SnapshotBackupService_ImportSnapshotBackup_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// SnapshotBackupServiceServer is the server API for SnapshotBackupService service.
+// All implementations must embed UnimplementedSnapshotBackupServiceServer
+// for forward compatibility
+type SnapshotBackupServiceServer interface {
+	ExportSnapshotBackup(context.Context, *ExportSnapshotBackupRequest) (*SnapshotBackupRecord, error)
+	GetSnapshotBackup(context.Context, *GetSnapshotBackupRequest) (*SnapshotBackupRecord, error)
+	ListSnapshotBackups(context.Context, *ListSnapshotBackupsRequest) (*ListSnapshotBackupsResponse, error)
+	ImportSnapshotBackup(context.Context, *ImportSnapshotBackupRequest) (*SnapshotRecord, error)
+	mustEmbedUnimplementedSnapshotBackupServiceServer()
+}
+
+// UnimplementedSnapshotBackupServiceServer must be embedded to have forward compatible implementations.
+type UnimplementedSnapshotBackupServiceServer struct {
+}
+
+func (UnimplementedSnapshotBackupServiceServer) ExportSnapshotBackup(context.Context, *ExportSnapshotBackupRequest) (*SnapshotBackupRecord, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ExportSnapshotBackup not implemented")
+}
+func (UnimplementedSnapshotBackupServiceServer) GetSnapshotBackup(context.Context, *GetSnapshotBackupRequest) (*SnapshotBackupRecord, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetSnapshotBackup not implemented")
+}
+func (UnimplementedSnapshotBackupServiceServer) ListSnapshotBackups(context.Context, *ListSnapshotBackupsRequest) (*ListSnapshotBackupsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListSnapshotBackups not implemented")
+}
+func (UnimplementedSnapshotBackupServiceServer) ImportSnapshotBackup(context.Context, *ImportSnapshotBackupRequest) (*SnapshotRecord, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ImportSnapshotBackup not implemented")
+}
+func (UnimplementedSnapshotBackupServiceServer) mustEmbedUnimplementedSnapshotBackupServiceServer() {}
+
+// UnsafeSnapshotBackupServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to SnapshotBackupServiceServer will
+// result in compilation errors.
+type UnsafeSnapshotBackupServiceServer interface {
+	mustEmbedUnimplementedSnapshotBackupServiceServer()
+}
+
+func RegisterSnapshotBackupServiceServer(s grpc.ServiceRegistrar, srv SnapshotBackupServiceServer) {
+	s.RegisterService(&SnapshotBackupService_ServiceDesc, srv)
+}
+
+func _SnapshotBackupService_ExportSnapshotBackup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExportSnapshotBackupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SnapshotBackupServiceServer).ExportSnapshotBackup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SnapshotBackupService_ExportSnapshotBackup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SnapshotBackupServiceServer).ExportSnapshotBackup(ctx, req.(*ExportSnapshotBackupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SnapshotBackupService_GetSnapshotBackup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetSnapshotBackupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SnapshotBackupServiceServer).GetSnapshotBackup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SnapshotBackupService_GetSnapshotBackup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SnapshotBackupServiceServer).GetSnapshotBackup(ctx, req.(*GetSnapshotBackupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SnapshotBackupService_ListSnapshotBackups_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListSnapshotBackupsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SnapshotBackupServiceServer).ListSnapshotBackups(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SnapshotBackupService_ListSnapshotBackups_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SnapshotBackupServiceServer).ListSnapshotBackups(ctx, req.(*ListSnapshotBackupsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SnapshotBackupService_ImportSnapshotBackup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ImportSnapshotBackupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SnapshotBackupServiceServer).ImportSnapshotBackup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SnapshotBackupService_ImportSnapshotBackup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SnapshotBackupServiceServer).ImportSnapshotBackup(ctx, req.(*ImportSnapshotBackupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// SnapshotBackupService_ServiceDesc is the grpc.ServiceDesc for SnapshotBackupService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var SnapshotBackupService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "seaweedfs.block.control.SnapshotBackupService",
+	HandlerType: (*SnapshotBackupServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "ExportSnapshotBackup",
+			Handler:    _SnapshotBackupService_ExportSnapshotBackup_Handler,
+		},
+		{
+			MethodName: "GetSnapshotBackup",
+			Handler:    _SnapshotBackupService_GetSnapshotBackup_Handler,
+		},
+		{
+			MethodName: "ListSnapshotBackups",
+			Handler:    _SnapshotBackupService_ListSnapshotBackups_Handler,
+		},
+		{
+			MethodName: "ImportSnapshotBackup",
+			Handler:    _SnapshotBackupService_ImportSnapshotBackup_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "control.proto",
+}

@@ -219,6 +219,8 @@ blockmaster:
 snapshot:
   enabled: true
   runtimeSecretName: sw-block-snapshot-runtime
+  backup:
+    enabled: false
   class:
     create: true
     name: sw-block-snapshot
@@ -237,6 +239,7 @@ SnapshotService client:
 ca.crt  tls.crt  tls.key  client.crt  client.key  token
 api-server.crt  api-server.key  api-server-ca.crt
 api-client-ca.crt  api-client.crt  api-client.key  api-token
+backup-api-token
 ```
 
 The effective blockvolume data address (`frontendIP` when set, otherwise
@@ -249,6 +252,13 @@ signed by `api-server-ca.crt` and covers
 `api-client-ca.crt`. The CSI pod receives only the API server CA, API client
 identity, and API token. The blockmaster SnapshotService remains isolated from
 the plaintext control listener by mTLS plus bearer authentication.
+
+Set `snapshot.backup.enabled=true` to enable full export/import into the fixed
+`/var/lib/sw-block/backups` directory, persisted under the hostname-pinned
+blockmaster hostPath. Backup RPCs require `backup-api-token`, which is not
+projected into the CSI pod. The first implementation exports only an already
+ready immutable snapshot. It does not read a live volume, accept arbitrary
+server paths, upload to object storage, or implement incremental backup.
 
 When enabled, this chart adds the `csi-snapshotter` sidecar, its snapshot API
 RBAC, and the configured `VolumeSnapshotClass`. The requested PVC capacity

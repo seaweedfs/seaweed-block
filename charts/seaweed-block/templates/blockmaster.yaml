@@ -10,6 +10,9 @@
 {{- if and .Values.snapshot.enabled (not .Values.snapshot.runtimeSecretName) -}}
 {{- fail "snapshot.enabled=true requires snapshot.runtimeSecretName" -}}
 {{- end -}}
+{{- if and .Values.snapshot.backup.enabled (not .Values.snapshot.enabled) -}}
+{{- fail "snapshot.backup.enabled=true requires snapshot.enabled=true" -}}
+{{- end -}}
 {{- if and .Values.snapshot.enabled (not .Values.blockmaster.stateHostPath) -}}
 {{- fail "snapshot.enabled=true requires blockmaster.stateHostPath so the snapshot catalog survives restart" -}}
 {{- end -}}
@@ -60,7 +63,7 @@ spec:
           imagePullPolicy: {{ .Values.blockmaster.statePermissionsImage.pullPolicy }}
           command: ["/bin/sh", "-c"]
           args:
-            - "mkdir -p /var/lib/sw-block/authority /var/lib/sw-block/lifecycle{{ if .Values.snapshot.enabled }} /var/lib/sw-block/snapshots{{ end }} && chown -R 65532:65532 /var/lib/sw-block"
+            - "mkdir -p /var/lib/sw-block/authority /var/lib/sw-block/lifecycle{{ if .Values.snapshot.enabled }} /var/lib/sw-block/snapshots{{ end }}{{ if .Values.snapshot.backup.enabled }} /var/lib/sw-block/backups{{ end }} && chown -R 65532:65532 /var/lib/sw-block"
           securityContext:
             runAsUser: 0
           volumeMounts:
@@ -124,6 +127,10 @@ spec:
             - "--snapshot-api-tls-key=/var/run/sw-block/snapshot-runtime/api-server.key"
             - "--snapshot-api-client-ca=/var/run/sw-block/snapshot-runtime/api-client-ca.crt"
             - "--snapshot-api-token-file=/var/run/sw-block/snapshot-runtime/api-token"
+            {{- if .Values.snapshot.backup.enabled }}
+            - "--snapshot-backup-root=/var/lib/sw-block/backups"
+            - "--snapshot-backup-api-token-file=/var/run/sw-block/snapshot-runtime/backup-api-token"
+            {{- end }}
             - "--launcher-snapshot-runtime-secret-name={{ .Values.snapshot.runtimeSecretName }}"
             {{- end }}
             {{- if .Values.network.externalISCSI }}
@@ -208,6 +215,10 @@ spec:
                 path: client.key
               - key: api-token
                 path: api-token
+              {{- if .Values.snapshot.backup.enabled }}
+              - key: backup-api-token
+                path: backup-api-token
+              {{- end }}
               - key: api-server.crt
                 path: api-server.crt
               - key: api-server.key

@@ -141,6 +141,16 @@ service SnapshotService {
     rpc RestoreSnapshot(RestoreSnapshotRequest) returns (RestoreSnapshotResponse);
 }
 
+// SnapshotBackupService exports and imports already-ready immutable snapshots.
+// It shares SnapshotService's dedicated mTLS listener but requires a distinct
+// bearer token and is absent unless the fixed server-side backup root is set.
+service SnapshotBackupService {
+    rpc ExportSnapshotBackup(ExportSnapshotBackupRequest) returns (SnapshotBackupRecord);
+    rpc GetSnapshotBackup(GetSnapshotBackupRequest) returns (SnapshotBackupRecord);
+    rpc ListSnapshotBackups(ListSnapshotBackupsRequest) returns (ListSnapshotBackupsResponse);
+    rpc ImportSnapshotBackup(ImportSnapshotBackupRequest) returns (SnapshotRecord);
+}
+
 // FrontendTarget — read-only frontend publication fact reported by
 // a blockvolume process. This is an observation/status fact only:
 // CSI may consume it to publish an already-running target, but
@@ -455,6 +465,38 @@ message SnapshotRecord {
     uint64 data_bytes = 11;
     int64 archive_bytes = 12;
     string archive_sha256 = 13;
+}
+
+message ExportSnapshotBackupRequest {
+    string backup_id = 1;
+    string snapshot_id = 2;
+}
+
+message GetSnapshotBackupRequest {
+    string backup_id = 1;
+}
+
+message ListSnapshotBackupsRequest {
+}
+
+message ListSnapshotBackupsResponse {
+    repeated SnapshotBackupRecord backups = 1;
+}
+
+message ImportSnapshotBackupRequest {
+    string backup_id = 1;
+}
+
+message SnapshotBackupRecord {
+    string backup_id = 1;
+    string source_snapshot_id = 2;
+    google.protobuf.Timestamp created_at = 3;
+    string state = 4;
+    int64 archive_bytes = 5;
+    string archive_sha256 = 6;
+    string manifest_sha256 = 7;
+    string destination_evidence = 8;
+    SnapshotRecord snapshot = 9;
 }
 
 message FailbackRequest {

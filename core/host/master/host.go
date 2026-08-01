@@ -79,6 +79,8 @@ type Config struct {
 	// RuntimeCAFile and RuntimeTokenFile are required with it so blockmaster
 	// can authenticate the current primary's dedicated HTTPS capture endpoint.
 	SnapshotRoot                  string
+	SnapshotBackupRoot            string
+	SnapshotBackupAPITokenFile    string
 	SnapshotRuntimeCAFile         string
 	SnapshotRuntimeTokenFile      string
 	SnapshotRuntimeClientCertFile string
@@ -127,6 +129,7 @@ type Host struct {
 	promotionProber        PromotionEvidenceProvider
 	snapshotCoordinator    *snapshot.Coordinator
 	snapshotAPIToken       string
+	snapshotBackupAPIToken string
 	snapshotCaptureTimeout time.Duration
 	cancel                 context.CancelFunc
 	wg                     sync.WaitGroup
@@ -282,6 +285,9 @@ func New(cfg Config) (*Host, error) {
 	if h.snapshotAPILn != nil {
 		h.snapshotAPIGRPC = grpc.NewServer(grpc.Creds(credentials.NewTLS(h.snapshotAPITLSConfig)))
 		control.RegisterSnapshotServiceServer(h.snapshotAPIGRPC, svc)
+		if h.snapshotBackupAPIToken != "" {
+			control.RegisterSnapshotBackupServiceServer(h.snapshotAPIGRPC, svc)
+		}
 	}
 
 	lg.Printf("blockmaster: lock acquired, reloaded=%d, listen=%s",

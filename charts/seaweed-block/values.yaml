@@ -123,6 +123,8 @@ snapshot:
   enabled: false
   runtimeSecretName: ""
   apiPort: 9444
+  backup:
+    enabled: false
   class:
     create: true
     name: sw-block-snapshot

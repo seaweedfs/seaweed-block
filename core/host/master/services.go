@@ -35,6 +35,7 @@ type services struct {
 	control.UnimplementedClusterEvidenceServiceServer
 	control.UnimplementedLifecycleServiceServer
 	control.UnimplementedSnapshotServiceServer
+	control.UnimplementedSnapshotBackupServiceServer
 	control.UnimplementedFailbackServiceServer
 
 	host *Host

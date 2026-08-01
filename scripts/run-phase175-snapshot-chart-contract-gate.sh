@@ -39,6 +39,13 @@ fi
 write_summary "snapshot_incomplete_config_rejected=true"
 
 if helm template sw-block "${CHART}" --namespace kube-system \
+  --set snapshot.backup.enabled=true >"${ARTIFACT_DIR}/helm-invalid-backup.yaml" 2>"${ARTIFACT_DIR}/helm-invalid-backup.err"; then
+  echo "snapshot backup render accepted a disabled snapshot runtime" >&2
+  exit 1
+fi
+write_summary "snapshot_backup_without_runtime_rejected=true"
+
+if helm template sw-block "${CHART}" --namespace kube-system \
   --set snapshot.enabled=true \
   --set snapshot.runtimeSecretName=sw-block-snapshot \
   --set blockmaster.stateHostPath=/var/lib/sw-block \
@@ -56,6 +63,7 @@ write_summary "snapshot_loopback_config_rejected=true"
 helm template sw-block "${CHART}" --namespace kube-system \
   --set snapshot.enabled=true \
   --set snapshot.runtimeSecretName=sw-block-snapshot \
+  --set snapshot.backup.enabled=true \
   --set blockmaster.stateHostPath=/var/lib/sw-block \
   --set 'blockmaster.nodeSelector.kubernetes\.io/hostname=m02' \
   --set blockNodes[0].name=m02 \
@@ -73,11 +81,20 @@ require_rendered 'kind: VolumeSnapshotClass'
 require_rendered 'name: sw-block-snapshot'
 require_rendered 'driver: block.csi.seaweedfs.com'
 require_rendered 'deletionPolicy: Delete'
+require_rendered '--snapshot-backup-root=/var/lib/sw-block/backups'
+require_rendered '--snapshot-backup-api-token-file=/var/run/sw-block/snapshot-runtime/backup-api-token'
+require_rendered 'key: backup-api-token'
+if [[ "$(grep -Fc -- 'key: backup-api-token' "${ARTIFACT_DIR}/helm-snapshot.yaml")" -ne 1 ]]; then
+  echo "backup API token must be projected exactly once to blockmaster and never to CSI" >&2
+  exit 1
+fi
 
 write_summary "snapshot_sidecar_rendered=true"
 write_summary "snapshot_mtls_identity_projected=true"
 write_summary "snapshot_rbac_rendered=true"
 write_summary "volume_snapshot_class_rendered=true"
 write_summary "snapshot_controller_crds_chart_owned=false"
+write_summary "snapshot_backup_fixed_root_rendered=true"
+write_summary "snapshot_backup_token_not_projected_to_csi=true"
 write_summary "cleanup_status=ok"
 write_summary "phase175_snapshot_chart_contract_status=ok"

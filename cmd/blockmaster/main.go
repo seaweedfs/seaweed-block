@@ -59,6 +59,8 @@ type flags struct {
 	frontendPublicationRuntimeHTTP        bool
 	frontendPublicationRuntimeListen      string
 	snapshotRoot                          string
+	snapshotBackupRoot                    string
+	snapshotBackupAPITokenFile            string
 	snapshotRuntimeCAFile                 string
 	snapshotRuntimeTokenFile              string
 	snapshotRuntimeClientCertFile         string
@@ -118,6 +120,8 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.frontendPublicationRuntimeHTTP, "frontend-publication-runtime-http", false, "enable disabled-by-default frontend publication HTTP runtime; confirms post-failback authority publication only")
 	fs.StringVar(&f.frontendPublicationRuntimeListen, "frontend-publication-runtime-listen", "127.0.0.1:9334", "HTTP listen address for --frontend-publication-runtime-http")
 	fs.StringVar(&f.snapshotRoot, "snapshot-root", "", "durable central snapshot archive/catalog root; empty disables SnapshotService")
+	fs.StringVar(&f.snapshotBackupRoot, "snapshot-backup-root", "", "optional durable full-backup root; fixed server path, empty disables backup RPCs")
+	fs.StringVar(&f.snapshotBackupAPITokenFile, "snapshot-backup-api-token-file", "", "file containing the bearer token required by snapshot backup RPCs")
 	fs.StringVar(&f.snapshotRuntimeCAFile, "snapshot-runtime-ca-file", "", "CA certificate used to authenticate blockvolume snapshot runtimes")
 	fs.StringVar(&f.snapshotRuntimeTokenFile, "snapshot-runtime-token-file", "", "file containing the bearer token used for blockvolume snapshot runtimes")
 	fs.StringVar(&f.snapshotRuntimeClientCertFile, "snapshot-runtime-client-cert", "", "mTLS client certificate used to call blockvolume snapshot runtimes")
@@ -152,7 +156,11 @@ func parseFlags(args []string) (flags, error) {
 	if f.launcherSnapshotRuntimeSecretName != "" && f.launcherPVCOwnerRef {
 		return flags{}, fmt.Errorf("--launcher-snapshot-runtime-secret-name cannot be combined with --launcher-pvc-owner-ref because Secrets are namespace-scoped")
 	}
-	snapshotConfigured := f.snapshotRoot != "" || f.snapshotRuntimeCAFile != "" || f.snapshotRuntimeTokenFile != "" ||
+	backupConfigured := f.snapshotBackupRoot != "" || f.snapshotBackupAPITokenFile != ""
+	if backupConfigured && (f.snapshotBackupRoot == "" || f.snapshotBackupAPITokenFile == "") {
+		return flags{}, fmt.Errorf("snapshot backup root and API token must be configured together")
+	}
+	snapshotConfigured := f.snapshotRoot != "" || backupConfigured || f.snapshotRuntimeCAFile != "" || f.snapshotRuntimeTokenFile != "" ||
 		f.snapshotRuntimeClientCertFile != "" || f.snapshotRuntimeClientKeyFile != "" || f.snapshotAPIListen != "" ||
 		f.snapshotAPITLSCertFile != "" || f.snapshotAPITLSKeyFile != "" || f.snapshotAPIClientCAFile != "" || f.snapshotAPITokenFile != ""
 	if snapshotConfigured && (f.snapshotRoot == "" || f.snapshotRuntimeCAFile == "" || f.snapshotRuntimeTokenFile == "" ||
@@ -211,6 +219,8 @@ func run(f flags) int {
 		FrontendPublicationRuntimeHTTP:   f.frontendPublicationRuntimeHTTP,
 		FrontendPublicationRuntimeListen: f.frontendPublicationRuntimeListen,
 		SnapshotRoot:                     f.snapshotRoot,
+		SnapshotBackupRoot:               f.snapshotBackupRoot,
+		SnapshotBackupAPITokenFile:       f.snapshotBackupAPITokenFile,
 		SnapshotRuntimeCAFile:            f.snapshotRuntimeCAFile,
 		SnapshotRuntimeTokenFile:         f.snapshotRuntimeTokenFile,
 		SnapshotRuntimeClientCertFile:    f.snapshotRuntimeClientCertFile,

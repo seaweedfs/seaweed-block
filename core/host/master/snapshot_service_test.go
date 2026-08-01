@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,8 +39,15 @@ func TestPhase175SnapshotServiceLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc := newServices(&Host{snapshotCoordinator: coordinator, snapshotAPIToken: "api-token", snapshotCaptureTimeout: time.Minute})
+	if err := coordinator.ConfigureBackup(filepath.Join(t.TempDir(), "backups")); err != nil {
+		t.Fatal(err)
+	}
+	svc := newServices(&Host{snapshotCoordinator: coordinator, snapshotAPIToken: "api-token", snapshotBackupAPIToken: "backup-token", snapshotCaptureTimeout: time.Minute})
 	ctx := snapshotIncomingContext("api-token")
+	backupCtx := snapshotIncomingContext("backup-token")
+	if _, err := svc.ListSnapshots(backupCtx, &control.ListSnapshotsRequest{}); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("backup token authorized snapshot API: %v", err)
+	}
 
 	created, err := svc.CreateSnapshot(ctx, &control.CreateSnapshotRequest{Name: "snap-a", SourceVolumeId: "vol-a"})
 	if err != nil {
@@ -56,11 +64,26 @@ func TestPhase175SnapshotServiceLifecycle(t *testing.T) {
 	if err != nil || got.GetArchiveSha256() == "" {
 		t.Fatalf("got=%+v err=%v", got, err)
 	}
+	if _, err := svc.ExportSnapshotBackup(ctx, &control.ExportSnapshotBackupRequest{BackupId: "backup-a", SnapshotId: created.GetSnapshotId()}); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("snapshot token authorized backup export: %v", err)
+	}
+	backup, err := svc.ExportSnapshotBackup(backupCtx, &control.ExportSnapshotBackupRequest{BackupId: "backup-a", SnapshotId: created.GetSnapshotId()})
+	if err != nil || backup.GetSourceSnapshotId() != created.GetSnapshotId() || backup.GetManifestSha256() == "" || backup.GetSnapshot().GetSnapshotId() != created.GetSnapshotId() {
+		t.Fatalf("backup=%+v err=%v", backup, err)
+	}
+	backups, err := svc.ListSnapshotBackups(backupCtx, &control.ListSnapshotBackupsRequest{})
+	if err != nil || len(backups.GetBackups()) != 1 || backups.GetBackups()[0].GetBackupId() != "backup-a" {
+		t.Fatalf("backups=%+v err=%v", backups, err)
+	}
 	if _, err := svc.DeleteSnapshot(ctx, &control.DeleteSnapshotRequest{SnapshotId: created.GetSnapshotId()}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := svc.GetSnapshot(ctx, &control.GetSnapshotRequest{SnapshotId: created.GetSnapshotId()}); status.Code(err) != codes.NotFound {
 		t.Fatalf("get deleted error=%v", err)
+	}
+	imported, err := svc.ImportSnapshotBackup(backupCtx, &control.ImportSnapshotBackupRequest{BackupId: "backup-a"})
+	if err != nil || imported.GetSnapshotId() != created.GetSnapshotId() {
+		t.Fatalf("imported=%+v err=%v", imported, err)
 	}
 }
 
@@ -78,12 +101,44 @@ func TestPhase175SnapshotServiceFailsClosedWhenDisabledOrInvalid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc = newServices(&Host{snapshotCoordinator: coordinator, snapshotAPIToken: "api-token", snapshotCaptureTimeout: time.Minute})
+	svc = newServices(&Host{snapshotCoordinator: coordinator, snapshotAPIToken: "api-token", snapshotBackupAPIToken: "backup-token", snapshotCaptureTimeout: time.Minute})
 	if _, err := svc.CreateSnapshot(snapshotIncomingContext("api-token"), &control.CreateSnapshotRequest{}); status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("invalid create error=%v", err)
 	}
 	if _, err := svc.ListSnapshots(context.Background(), &control.ListSnapshotsRequest{}); status.Code(err) != codes.Unauthenticated {
 		t.Fatalf("unauthenticated list error=%v", err)
+	}
+	if _, err := svc.ExportSnapshotBackup(snapshotIncomingContext("backup-token"), &control.ExportSnapshotBackupRequest{BackupId: "backup-a", SnapshotId: "snap-a"}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("unconfigured backup error=%v", err)
+	}
+}
+
+func TestPhase175SnapshotBackupRejectsSharedCSIToken(t *testing.T) {
+	tlsFiles := writeSnapshotAPITestIdentity(t)
+	tokenFile := filepath.Join(t.TempDir(), "shared-token")
+	if err := os.WriteFile(tokenFile, []byte("shared-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := New(Config{
+		AuthorityStoreDir:             filepath.Join(t.TempDir(), "authority"),
+		LifecycleStoreDir:             filepath.Join(t.TempDir(), "lifecycle"),
+		Listen:                        "127.0.0.1:0",
+		SnapshotRoot:                  filepath.Join(t.TempDir(), "snapshots"),
+		SnapshotBackupRoot:            filepath.Join(t.TempDir(), "backups"),
+		SnapshotBackupAPITokenFile:    tokenFile,
+		SnapshotRuntimeCAFile:         tlsFiles.caFile,
+		SnapshotRuntimeTokenFile:      tokenFile,
+		SnapshotRuntimeClientCertFile: tlsFiles.clientCertFile,
+		SnapshotRuntimeClientKeyFile:  tlsFiles.clientKeyFile,
+		SnapshotAPIListen:             "127.0.0.1:0",
+		SnapshotAPITLSCertFile:        tlsFiles.serverCertFile,
+		SnapshotAPITLSKeyFile:         tlsFiles.serverKeyFile,
+		SnapshotAPIClientCAFile:       tlsFiles.caFile,
+		SnapshotAPITokenFile:          tokenFile,
+		SnapshotCaptureTimeout:        time.Minute,
+	})
+	if err == nil || !strings.Contains(err.Error(), "must differ") {
+		t.Fatalf("shared CSI/backup token error=%v", err)
 	}
 }
 
@@ -93,11 +148,18 @@ func TestPhase175SnapshotServiceOnlyRegisteredOnDedicatedMTLSGRPC(t *testing.T) 
 	if err := os.WriteFile(tokenFile, []byte("grpc-api-token\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	backupTokenFile := filepath.Join(t.TempDir(), "backup-token")
+	if err := os.WriteFile(backupTokenFile, []byte("grpc-backup-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	backupRoot := filepath.Join(t.TempDir(), "backups")
 	h, err := New(Config{
 		AuthorityStoreDir:             filepath.Join(t.TempDir(), "authority"),
 		LifecycleStoreDir:             filepath.Join(t.TempDir(), "lifecycle"),
 		Listen:                        "127.0.0.1:0",
 		SnapshotRoot:                  filepath.Join(t.TempDir(), "snapshots"),
+		SnapshotBackupRoot:            backupRoot,
+		SnapshotBackupAPITokenFile:    backupTokenFile,
 		SnapshotRuntimeCAFile:         tlsFiles.caFile,
 		SnapshotRuntimeTokenFile:      tokenFile,
 		SnapshotRuntimeClientCertFile: tlsFiles.clientCertFile,
@@ -112,8 +174,15 @@ func TestPhase175SnapshotServiceOnlyRegisteredOnDedicatedMTLSGRPC(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.Start()
 	defer closeTestMaster(t, h)
+	services := h.snapshotAPIGRPC.GetServiceInfo()
+	if _, ok := services["seaweedfs.block.control.SnapshotService"]; !ok {
+		t.Fatalf("snapshot service not registered: %v", services)
+	}
+	if _, ok := services["seaweedfs.block.control.SnapshotBackupService"]; !ok {
+		t.Fatalf("snapshot backup service not registered: %v", services)
+	}
+	h.Start()
 	manager, err := snapshot.OpenManager(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -125,6 +194,9 @@ func TestPhase175SnapshotServiceOnlyRegisteredOnDedicatedMTLSGRPC(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := h.snapshotCoordinator.ConfigureBackup(backupRoot); err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	plainConn, err := grpc.DialContext(ctx, h.Addr(), grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
@@ -134,6 +206,9 @@ func TestPhase175SnapshotServiceOnlyRegisteredOnDedicatedMTLSGRPC(t *testing.T) 
 	defer plainConn.Close()
 	if _, err := control.NewSnapshotServiceClient(plainConn).ListSnapshots(ctx, &control.ListSnapshotsRequest{}); status.Code(err) != codes.Unimplemented {
 		t.Fatalf("plaintext control listener exposed SnapshotService: %v", err)
+	}
+	if _, err := control.NewSnapshotBackupServiceClient(plainConn).ListSnapshotBackups(ctx, &control.ListSnapshotBackupsRequest{}); status.Code(err) != codes.Unimplemented {
+		t.Fatalf("plaintext control listener exposed SnapshotBackupService: %v", err)
 	}
 
 	clientCertificate, err := tls.LoadX509KeyPair(tlsFiles.clientCertFile, tlsFiles.clientKeyFile)
@@ -154,10 +229,16 @@ func TestPhase175SnapshotServiceOnlyRegisteredOnDedicatedMTLSGRPC(t *testing.T) 
 	noCertCtx, noCertCancel := context.WithTimeout(metadata.AppendToOutgoingContext(context.Background(), "authorization", "Bearer grpc-api-token"), 2*time.Second)
 	_, noCertErr := control.NewSnapshotServiceClient(noCertConn).ListSnapshots(noCertCtx, &control.ListSnapshotsRequest{})
 	noCertCancel()
-	_ = noCertConn.Close()
 	if status.Code(noCertErr) != codes.Unavailable {
 		t.Fatalf("snapshot API accepted a client without an mTLS identity: %v", noCertErr)
 	}
+	noCertBackupCtx, noCertBackupCancel := context.WithTimeout(metadata.AppendToOutgoingContext(context.Background(), "authorization", "Bearer grpc-backup-token"), 2*time.Second)
+	_, noCertBackupErr := control.NewSnapshotBackupServiceClient(noCertConn).ListSnapshotBackups(noCertBackupCtx, &control.ListSnapshotBackupsRequest{})
+	noCertBackupCancel()
+	if status.Code(noCertBackupErr) != codes.Unavailable {
+		t.Fatalf("snapshot backup API accepted a client without an mTLS identity: %v", noCertBackupErr)
+	}
+	_ = noCertConn.Close()
 	conn, err := grpc.DialContext(ctx, h.SnapshotAPIAddr(), grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{
 		RootCAs: roots, Certificates: []tls.Certificate{clientCertificate}, MinVersion: tls.VersionTLS12,
 	})), grpc.WithBlock())
@@ -171,6 +252,15 @@ func TestPhase175SnapshotServiceOnlyRegisteredOnDedicatedMTLSGRPC(t *testing.T) 
 	})
 	if err != nil || created.GetSnapshotId() == "" || created.GetState() != snapshot.StateReady {
 		t.Fatalf("created=%+v err=%v", created, err)
+	}
+	backupClient := control.NewSnapshotBackupServiceClient(conn)
+	if _, err := backupClient.ExportSnapshotBackup(authCtx, &control.ExportSnapshotBackupRequest{BackupId: "grpc-backup", SnapshotId: created.GetSnapshotId()}); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("CSI snapshot token authorized backup RPC: %v", err)
+	}
+	backupAuthCtx := metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer grpc-backup-token")
+	backup, err := backupClient.ExportSnapshotBackup(backupAuthCtx, &control.ExportSnapshotBackupRequest{BackupId: "grpc-backup", SnapshotId: created.GetSnapshotId()})
+	if err != nil || backup.GetSnapshot().GetSnapshotId() != created.GetSnapshotId() {
+		t.Fatalf("gRPC backup=%+v err=%v", backup, err)
 	}
 }
 

@@ -48,6 +48,7 @@ type Coordinator struct {
 	runtime         CaptureRuntime
 	restoreResolver RestoreTargetResolver
 	restoreRuntime  RestoreRuntime
+	backups         *BackupManager
 }
 
 func NewCoordinator(manager *Manager, resolver SourceResolver, runtime CaptureRuntime) (*Coordinator, error) {
