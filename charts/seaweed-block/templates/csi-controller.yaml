@@ -38,6 +38,13 @@ spec:
             {{- if .Values.network.rejectLoopbackPublishTargets }}
             - "--reject-loopback-publish-targets"
             {{- end }}
+            {{- if .Values.snapshot.enabled }}
+            - "--snapshot-api={{ include "seaweed-block.snapshotAPIAddress" . }}"
+            - "--snapshot-api-ca=/var/run/sw-block/snapshot-api/api-server-ca.crt"
+            - "--snapshot-api-client-cert=/var/run/sw-block/snapshot-api/api-client.crt"
+            - "--snapshot-api-client-key=/var/run/sw-block/snapshot-api/api-client.key"
+            - "--snapshot-api-token-file=/var/run/sw-block/snapshot-api/api-token"
+            {{- end }}
           env:
             - name: BLOCKMASTER_ADDR
               value: {{ include "seaweed-block.blockmasterAddress" . | quote }}
@@ -48,6 +55,11 @@ spec:
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
+            {{- if .Values.snapshot.enabled }}
+            - name: snapshot-api-identity
+              mountPath: /var/run/sw-block/snapshot-api
+              readOnly: true
+            {{- end }}
         - name: csi-provisioner
           image: {{ .Values.sidecars.provisionerImage | quote }}
           args:
@@ -67,6 +79,32 @@ spec:
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
+        {{- if .Values.snapshot.enabled }}
+        - name: csi-snapshotter
+          image: {{ .Values.sidecars.snapshotterImage | quote }}
+          args:
+            - "--csi-address=/csi/csi.sock"
+            - "--timeout=30s"
+            - "--leader-election=true"
+            - "--extra-create-metadata"
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        {{- end }}
       volumes:
         - name: socket-dir
           emptyDir: {}
+        {{- if .Values.snapshot.enabled }}
+        - name: snapshot-api-identity
+          secret:
+            secretName: {{ .Values.snapshot.runtimeSecretName }}
+            items:
+              - key: api-server-ca.crt
+                path: api-server-ca.crt
+              - key: api-client.crt
+                path: api-client.crt
+              - key: api-client.key
+                path: api-client.key
+              - key: api-token
+                path: api-token
+        {{- end }}

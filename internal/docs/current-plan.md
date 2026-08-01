@@ -2,7 +2,7 @@
 
 Status: active. Started 2026-08-01 from merged `origin/main` at `7d016ed`.
 
-Progress through the local data layer plus the D4 capture runtime:
+Progress through the local data layer, distributed runtime, and CSI contract:
 
 - D1 storage cut contract implemented for `BlockStore`, `walstore`, and the
   shipped-default `smartwal`; deterministic tests prove normal writes and
@@ -29,10 +29,24 @@ Progress through the local data layer plus the D4 capture runtime:
   on the shared plaintext control listener. Launcher and Helm wiring are
   explicit opt-in and default-disabled, require a hostname-pinned single
   blockmaster replica, and keep the catalog on durable hostPath storage. A real
-  mTLS integration test streams a
-  cut into the durable catalog; authority-change and partial-stream paths
-  publish no ready record. D4 restore orchestration and the live distributed
-  gate remain open.
+  mTLS integration test streams a cut into the durable catalog;
+  authority-change and partial-stream paths publish no ready record.
+- D4 distributed restore now stages and verifies the whole archive before
+  target mutation, restores every replica before activation, and opens
+  authority only after durable target evidence. Linux race/repeat QA passed on
+  `43e550e`; `c79104b` then hardened durable lifecycle replacement, orphan
+  restore barriers, operation-wide deletion leases, long-running apply, and
+  concurrent idempotency. The hardened commit still requires Linux QA rerun.
+- D5 CSI snapshot RPCs and capability are implemented at `ba6b17e`. The CSI
+  path uses the dedicated mTLS and bearer-token SnapshotService, returns a new
+  volume only after restore completion, keeps the capability absent when
+  disabled, and has unit/repeat/vet coverage. The requested CSI capacity range
+  must contain the snapshot size; the initial target uses that exact geometry
+  because post-restore expansion is not yet implemented.
+- D6 chart wiring is in progress: default-disabled snapshotter sidecar,
+  role-separated Secret projection, snapshot RBAC, and `VolumeSnapshotClass`
+  render locally. The real Kubernetes `VolumeSnapshot` and restored-PVC gate
+  remains open.
 
 ## Product Outcome
 

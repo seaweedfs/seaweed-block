@@ -48,6 +48,10 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
 {{- printf "%s.%s.svc.cluster.local:%v" .Values.blockmaster.serviceName .Release.Namespace .Values.blockmaster.listenPort -}}
 {{- end -}}
 
+{{- define "seaweed-block.snapshotAPIAddress" -}}
+{{- printf "%s.%s.svc.cluster.local:%v" .Values.blockmaster.serviceName .Release.Namespace .Values.snapshot.apiPort -}}
+{{- end -}}
+
 {{- define "seaweed-block.expectedSlotsPerVolume" -}}
 {{- if gt (int .Values.replication.expectedSlotsPerVolume) 0 -}}
 {{- .Values.replication.expectedSlotsPerVolume -}}

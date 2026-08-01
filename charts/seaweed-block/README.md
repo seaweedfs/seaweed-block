@@ -8,8 +8,10 @@ This chart installs the Seaweed Block alpha Kubernetes CSI stack:
 - optional `StorageClass`
 - optional CHAP secret for cross-node iSCSI
 
-The chart is read/write only through Kubernetes PVCs. It does not add a
-mutating dashboard, operator reconciliation, backup/restore, or upgrade safety.
+The default chart is read/write only through Kubernetes PVCs. A source-gated,
+disabled-by-default single-volume snapshot/restore path is available for
+development validation; it does not add a mutating dashboard, automatic
+backup policy, cross-cluster DR, or upgrade safety.
 
 ## Quick Install
 
@@ -192,6 +194,59 @@ failbackExecutor:
 The chart rejects unsafe combinations such as execution with `dryRun: true`,
 missing execution policy, or both HTTP and gRPC runtime addresses. This wiring
 does not enable automatic failback by default.
+
+## Optional VolumeSnapshot Path
+
+The chart does not install the cluster-wide Kubernetes snapshot CRDs or
+snapshot-controller. Install a compatible external-snapshotter controller
+stack first and verify the prerequisite APIs:
+
+```bash
+kubectl api-resources --api-group=snapshot.storage.k8s.io
+kubectl -n kube-system get deploy | grep snapshot-controller
+```
+
+Then supply a durable, hostname-pinned blockmaster and an externally managed
+Secret:
+
+```yaml
+blockmaster:
+  replicas: 1
+  stateHostPath: /var/lib/sw-block
+  nodeSelector:
+    kubernetes.io/hostname: m02
+
+snapshot:
+  enabled: true
+  runtimeSecretName: sw-block-snapshot-runtime
+  class:
+    create: true
+    name: sw-block-snapshot
+    deletionPolicy: Delete
+```
+
+The Secret has distinct credentials for the blockvolume runtime and the CSI
+SnapshotService client:
+
+```text
+ca.crt  tls.crt  tls.key  client.crt  client.key  token
+api-server.crt  api-server.key  api-server-ca.crt
+api-client-ca.crt  api-client.crt  api-client.key  api-token
+```
+
+`tls.crt` covers every advertised blockvolume node IP. `api-server.crt` is
+signed by `api-server-ca.crt` and covers
+`blockmaster.<namespace>.svc.cluster.local`; `api-client.crt` is signed by
+`api-client-ca.crt`. The CSI pod receives only the API server CA, API client
+identity, and API token. The blockmaster SnapshotService remains isolated from
+the plaintext control listener by mTLS plus bearer authentication.
+
+When enabled, this chart adds the `csi-snapshotter` sidecar, its snapshot API
+RBAC, and the configured `VolumeSnapshotClass`. The requested PVC capacity
+range must contain the snapshot size; the restored volume initially uses that
+exact geometry. Larger restored volumes, application-consistent quiescing,
+group snapshots, incremental backup, and in-place revert are not yet
+supported.
 
 ## Current Boundary
 

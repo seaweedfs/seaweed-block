@@ -1,0 +1,54 @@
+name: snapshot-chart-contract-chain
+timeout: 5m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: snapshot_chart_contract
+    actions:
+      - action: exec
+        node: m02
+        timeout: 4m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase175-snapshot-chart && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase175-snapshot-chart && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase175-snapshot-chart bash scripts/run-phase175-snapshot-chart-contract-gate.sh {{ product_root }}"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase175-snapshot-chart/phase175-snapshot-chart-contract-summary.txt"
+        pattern: "^phase175_snapshot_chart_contract_status=ok$"
+        save_as: chart_ok
+      - action: assert_greater
+        actual: "{{ chart_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase175-snapshot-chart/phase175-snapshot-chart-contract-summary.txt"
+        pattern: "^snapshot_default_disabled=true$"
+        save_as: default_disabled
+      - action: assert_greater
+        actual: "{{ default_disabled }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase175-snapshot-chart/phase175-snapshot-chart-contract-summary.txt"
+        pattern: "^snapshot_mtls_identity_projected=true$"
+        save_as: mtls_projected
+      - action: assert_greater
+        actual: "{{ mtls_projected }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase175-snapshot-chart"
+        name: "remote-phases"
+        ignore_error: true

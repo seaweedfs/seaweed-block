@@ -1,0 +1,10 @@
+{{- if and .Values.snapshot.enabled .Values.snapshot.class.create }}
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: {{ .Values.snapshot.class.name }}
+  labels:
+    {{- include "seaweed-block.labels" . | nindent 4 }}
+driver: {{ .Values.driver.name }}
+deletionPolicy: {{ .Values.snapshot.class.deletionPolicy }}
+{{- end }}

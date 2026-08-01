@@ -87,7 +87,15 @@
       "properties": {
         "enabled": { "type": "boolean" },
         "runtimeSecretName": { "type": "string" },
-        "apiPort": { "type": "integer", "minimum": 1, "maximum": 65535 }
+        "apiPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "class": {
+          "type": "object",
+          "properties": {
+            "create": { "type": "boolean" },
+            "name": { "type": "string", "minLength": 1 },
+            "deletionPolicy": { "type": "string", "enum": ["Delete", "Retain"] }
+          }
+        }
       }
     },
     "compat": {

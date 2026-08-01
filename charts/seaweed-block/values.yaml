@@ -19,6 +19,7 @@ csiImage:
 sidecars:
   provisionerImage: registry.k8s.io/sig-storage/csi-provisioner:v5.2.0
   attacherImage: registry.k8s.io/sig-storage/csi-attacher:v4.8.1
+  snapshotterImage: registry.k8s.io/sig-storage/csi-snapshotter:v8.5.0
   nodeDriverRegistrarImage: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.13.0
 
 driver:
@@ -115,14 +116,17 @@ nvme:
   maxH2CDataLength: 32768
 
 # Snapshot product runtime is disabled until a durable hostPath and an
-# externally managed Secret are supplied. The Secret must contain ca.crt,
-# tls.crt, tls.key, client.crt, client.key, token, api-token, api-server.crt,
-# api-server.key, and api-client-ca.crt. tls.crt must cover every advertised
-# node IP; api-server.crt must cover the blockmaster snapshot Service address.
+# externally managed Secret are supplied. In addition to the blockvolume and
+# blockmaster runtime identities, the Secret contains a distinct CSI client
+# identity and API server CA. See the chart README for the complete key list.
 snapshot:
   enabled: false
   runtimeSecretName: ""
   apiPort: 9444
+  class:
+    create: true
+    name: sw-block-snapshot
+    deletionPolicy: Delete
 
 # Initial block-capable nodes. D2 will add a generator that derives this from
 # `kubectl get nodes` so node names and InternalIPs are verified against the

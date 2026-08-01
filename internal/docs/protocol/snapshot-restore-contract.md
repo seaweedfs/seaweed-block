@@ -198,16 +198,19 @@ Transport requirements:
 
 The first implementation uses one cluster runtime Secret containing
 `ca.crt`, `tls.crt`, `tls.key`, `client.crt`, `client.key`, `token`,
-`api-token`, `api-server.crt`, `api-server.key`, and `api-client-ca.crt`.
+`api-token`, `api-server.crt`, `api-server.key`, `api-client-ca.crt`,
+`api-server-ca.crt`, `api-client.crt`, and `api-client.key`.
 Kubernetes Secret projection separates roles: blockmaster receives the runtime
 CA, mTLS runtime-client identity, runtime token, SnapshotService server
 identity/client CA, and API token; blockvolume receives only the runtime CA,
-server identity, and runtime token. SnapshotService is not registered on the
-shared plaintext control listener. Its dedicated gRPC listener requires a
-client certificate signed by `api-client-ca.crt` and the separate API bearer
-token. Per-node runtime server identities remain future hardening; blockmaster
-additionally binds the observed endpoint host and reporting server to the
-current authority slot.
+server identity, and runtime token; CSI receives only `api-server-ca.crt`, the
+`api-client.crt`/`api-client.key` identity, and `api-token`. SnapshotService is
+not registered on the shared plaintext control listener. Its dedicated gRPC
+listener requires a client certificate signed by `api-client-ca.crt` and the
+separate API bearer token. `api-server.crt` is signed by `api-server-ca.crt`
+and covers the blockmaster Service DNS name. Per-node runtime server identities
+remain future hardening; blockmaster additionally binds the observed endpoint
+host and reporting server to the current authority slot.
 
 The initial catalog is node-local durable state. Enabling snapshots therefore
 requires exactly one blockmaster replica, durable `stateHostPath`, and an
@@ -246,7 +249,11 @@ catalog state even when scheduled on the blockmaster node.
 
 ### CreateVolume From Snapshot
 
-- validate requested capacity is at least snapshot size;
+- require the CSI requested capacity range to contain the snapshot size;
+- create the initial target at the exact snapshot size because the restore
+  target currently requires identical block geometry;
+- a larger target remains unsupported until explicit post-restore expansion is
+  implemented and gated;
 - create a new volume identity;
 - complete restore durability before returning the volume;
 - retry returns the same compatible target; incompatible retry is conflict;
