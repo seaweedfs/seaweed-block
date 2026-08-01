@@ -64,7 +64,11 @@ func (w *walWriter) append(entry *walEntry) (walRelOffset uint64, err error) {
 		return 0, fmt.Errorf("walWriter.append: encode: %w", err)
 	}
 
+	lockStart := time.Now()
 	w.mu.Lock()
+	if w.instr != nil {
+		w.instr.recordWALAppendLockWait(time.Since(lockStart))
+	}
 	defer w.mu.Unlock()
 
 	entryLen := uint64(len(buf))
@@ -124,7 +128,11 @@ func (w *walWriter) appendBatch(entries []walEntry) ([]uint64, error) {
 	}
 	pendingCapacity := boundedPendingCapacity(lengths)
 
+	lockStart := time.Now()
 	w.mu.Lock()
+	if w.instr != nil {
+		w.instr.recordWALAppendLockWait(time.Since(lockStart))
+	}
 	defer w.mu.Unlock()
 
 	offsets, finalHead, err := w.planAppendBatchLengths(lengths)
@@ -353,6 +361,20 @@ func (w *walWriter) reset() {
 	defer w.mu.Unlock()
 	w.logicalHead = 0
 	w.logicalTail = 0
+}
+
+func (w *walWriter) restoreRecoveredBounds(head, tail uint64) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if head < tail || head-tail > w.walSize {
+		return fmt.Errorf(
+			"walWriter: invalid recovered bounds tail=%d head=%d size=%d",
+			tail, head, w.walSize,
+		)
+	}
+	w.logicalHead = head
+	w.logicalTail = tail
+	return nil
 }
 
 func (w *walWriter) head() uint64 {

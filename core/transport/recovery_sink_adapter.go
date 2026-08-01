@@ -56,16 +56,19 @@ type RecoverySink struct {
 	steadyLineage RecoveryLineage
 	steadyProfile EmitProfile
 
-	// sealMu protects sealed and serializes NotifyAppend's check-
-	// then-delegate against EndSession. After EndSession sets
-	// sealed=true, NotifyAppend returns ErrSinkSealed instead of
-	// delegating to WalShipper — matches senderBacklogSink's
-	// post-flushAndSeal contract so callers (PrimaryBridge.PushLiveWrite)
-	// get a clean "session is closing" signal during the brief
-	// window between sink-end and bridge-map-removal.
+	// sealMu serializes NotifyAppend against the pre-barrier cut and
+	// EndSession. ended distinguishes writes retained while the
+	// barrier is in flight from writes that may use restored steady
+	// context after EndSession.
 	sealMu sync.Mutex
 	sealed bool
+	ended  bool
 }
+
+// ErrSinkBarrierSealed is returned after the recovery sender has made
+// its atomic pre-barrier cut but before EndSession restores the steady
+// emit context. The committed WAL entry must be retained for replay.
+var ErrSinkBarrierSealed = errors.New("recovery: NotifyAppend after pre-barrier seal")
 
 // ErrSinkSealed is returned by RecoverySink.NotifyAppend after the
 // session's EndSession has fired. Callers (PushLiveWrite) treat this
@@ -170,17 +173,34 @@ func (r *RecoverySink) DrainBacklog(ctx context.Context) error {
 // emit triggered by the EndSession path completes under session
 // context before the restore lands.
 func (r *RecoverySink) EndSession() {
-	// Set sealed FIRST so any in-flight NotifyAppend that races
-	// past the sealMu check sees the sealed=true gate before the
-	// WalShipper transitions and emit context is restored. This is
-	// the analogue of senderBacklogSink.flushAndSeal's atomic seal
-	// boundary.
 	r.sealMu.Lock()
 	defer r.sealMu.Unlock()
+	if r.ended {
+		return
+	}
 	r.sealed = true
 
-	r.e.WalShipperFor(r.replicaID).EndSession()
-	r.e.updateWalShipperEmitContext(r.replicaID, r.steadyConn, r.steadyLineage, r.steadyProfile)
+	r.e.WalShipperFor(r.replicaID).endSessionWithHandoff(func() {
+		r.e.updateWalShipperEmitContext(r.replicaID, r.steadyConn, r.steadyLineage, r.steadyProfile)
+	})
+	r.ended = true
+}
+
+// SealBeforeBarrier establishes the recovery cut. NotifyAppend holds
+// the same lock through its WalShipper call, so every accepted write
+// completes before this method returns and every later write is
+// retained until a future recovery session.
+func (r *RecoverySink) SealBeforeBarrier() error {
+	r.sealMu.Lock()
+	defer r.sealMu.Unlock()
+	if r.ended {
+		return ErrSinkSealed
+	}
+	if err := r.e.WalShipperFor(r.replicaID).SealSession(); err != nil {
+		return err
+	}
+	r.sealed = true
+	return nil
 }
 
 // NotifyAppend delegates to WalShipper.NotifyAppend during the
@@ -199,9 +219,16 @@ func (r *RecoverySink) NotifyAppend(lba uint32, lsn uint64, data []byte) error {
 	r.sealMu.Lock()
 	defer r.sealMu.Unlock()
 	if r.sealed {
+		if !r.ended {
+			return ErrSinkBarrierSealed
+		}
 		return ErrSinkSealed
 	}
-	return r.e.WalShipperFor(r.replicaID).NotifyAppend(lba, lsn, data)
+	err := r.e.WalShipperFor(r.replicaID).NotifyAppend(lba, lsn, data)
+	if errors.Is(err, ErrWalShipperSessionSealed) {
+		return ErrSinkBarrierSealed
+	}
+	return err
 }
 
 // WriteMu returns the per-replica entry's writeMu so recovery.Sender

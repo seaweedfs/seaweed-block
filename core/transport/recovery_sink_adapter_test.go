@@ -521,6 +521,52 @@ func TestRecoverySink_NotifyAppendAfterEndSession_Sealed(t *testing.T) {
 	}
 }
 
+func TestRecoverySink_SealBeforeBarrier_RetainsUntilEndSession(t *testing.T) {
+	primary := memorywal.NewStore(8, 4096)
+	e := NewBlockExecutor(primary, "127.0.0.1:0")
+	const replicaID = "r1"
+
+	steadyConn, _ := net.Pipe()
+	defer steadyConn.Close()
+	sessionConn, _ := net.Pipe()
+	defer sessionConn.Close()
+
+	steadyLineage := RecoveryLineage{SessionID: 7, Epoch: 1, EndpointVersion: 1, TargetLSN: 1}
+	sessionLineage := RecoveryLineage{SessionID: 42, Epoch: 1, EndpointVersion: 1, TargetLSN: 200}
+	e.updateWalShipperEmitContext(replicaID, steadyConn, steadyLineage, EmitProfileSteadyMsgShip)
+
+	sink := NewRecoverySink(e, replicaID,
+		sessionConn, sessionLineage,
+		steadyConn, steadyLineage,
+	)
+	if err := sink.StartSession(0); err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	if err := sink.DrainBacklog(context.Background()); err != nil {
+		t.Fatalf("DrainBacklog: %v", err)
+	}
+	if err := sink.SealBeforeBarrier(); err != nil {
+		t.Fatalf("SealBeforeBarrier: %v", err)
+	}
+
+	if err := sink.NotifyAppend(0, 1, []byte{0x42}); !errors.Is(err, ErrSinkBarrierSealed) {
+		t.Fatalf("NotifyAppend before barrier err=%v want ErrSinkBarrierSealed", err)
+	}
+	gotConn, gotLineage := readEntryEmitContext(t, e, replicaID)
+	if gotConn != sessionConn || gotLineage != sessionLineage {
+		t.Fatalf("pre-barrier seal restored steady context early: conn=%p lineage=%+v", gotConn, gotLineage)
+	}
+
+	sink.EndSession()
+	if err := sink.NotifyAppend(0, 1, []byte{0x42}); !errors.Is(err, ErrSinkSealed) {
+		t.Fatalf("NotifyAppend after EndSession err=%v want ErrSinkSealed", err)
+	}
+	gotConn, gotLineage = readEntryEmitContext(t, e, replicaID)
+	if gotConn != steadyConn || gotLineage != steadyLineage {
+		t.Fatalf("EndSession did not restore steady context: conn=%p lineage=%+v", gotConn, gotLineage)
+	}
+}
+
 // TestRecoverySink_SatisfiesWalShipperSink — compile-time check
 // that *RecoverySink implements the recovery.WalShipperSink
 // interface by duck typing. The interface lives in `recovery`
@@ -536,6 +582,7 @@ func TestRecoverySink_SatisfiesWalShipperSink(t *testing.T) {
 	type walShipperSinkShape interface {
 		StartSession(fromLSN uint64) error
 		DrainBacklog(ctx context.Context) error
+		SealBeforeBarrier() error
 		EndSession()
 		NotifyAppend(lba uint32, lsn uint64, data []byte) error
 	}

@@ -42,6 +42,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -91,15 +92,14 @@ var ErrReplicationAckUnavailable = errors.New("durable: replication ack unavaila
 //     RF=2/full-ack seam: a recovering/down replica must not be
 //     silently treated as a full-sync peer.
 //   - StorageBackend calls Observe from within writeBytes; the
-//     ReplicationVolume's own mutex then serializes fan-out per
-//     volume (V2 shipMu equivalent; closes
-//     INV-REPL-LSN-ORDER-FANOUT-001 at the replication seam).
+//     ReplicationVolume resequences callbacks by storage-assigned LSN,
+//     then dispatches through one ordered queue per peer lineage.
 //
 // Sync contract (T4b-5 — matches V2 BlockVol.MakeDistributedSync):
 //   - When an observer is installed, StorageBackend.Sync DELEGATES
 //     the full sync job to observer.Sync — the observer owns both
-//     the local LogicalStorage.Sync call and the peer barriers,
-//     fanned out in parallel by DurabilityCoordinator.
+//     the local LogicalStorage.Sync call and the peer barriers, with
+//     barriers ordered behind prior writes in each peer queue.
 //   - targetLSN is the primary's current walHead at the moment the
 //     host requested Sync; caller (StorageBackend) reads it from
 //     LogicalStorage.Boundaries().
@@ -111,6 +111,15 @@ var ErrReplicationAckUnavailable = errors.New("durable: replication ack unavaila
 type WriteObserver interface {
 	Observe(ctx context.Context, lba uint32, lsn uint64, data []byte) error
 	Sync(ctx context.Context, targetLSN uint64) error
+}
+
+// BatchWriteObserver lets a replication observer accept a contiguous batch of
+// locally-committed blocks before waiting for acknowledgement. StorageBackend
+// only enables strict-ACK WriteBatch when the installed observer implements
+// this interface.
+type BatchWriteObserver interface {
+	WriteObserver
+	ObserveBatch(ctx context.Context, startLBA uint32, lsns []uint64, blocks [][]byte) error
 }
 
 // errInvalidOffset is returned for negative byte offsets. Callers
@@ -141,11 +150,12 @@ type StorageBackend struct {
 	operational atomic.Bool
 	opEvidence  atomic.Value // string
 
-	mu       sync.Mutex
-	closed   bool
-	observer WriteObserver // optional; nil = no replication fan-out
-	writeAck WriteAckPolicy
-	profile  writeProfile
+	mu            sync.Mutex
+	closed        bool
+	observer      WriteObserver // optional; nil = no replication fan-out
+	writeAck      WriteAckPolicy
+	profile       writeProfile
+	lbaWriteLocks [256]sync.Mutex
 }
 
 // NewStorageBackend constructs a backend. Starts NON-operational
@@ -251,6 +261,10 @@ func (b *StorageBackend) durableStatus(volumeID, path, impl string) VolumeStatus
 		writeProfile.WALAppendOps = storageProfile.WALAppendOps
 		writeProfile.WALAppendBytes = storageProfile.WALAppendBytes
 		writeProfile.WALAppendDurationNanos = storageProfile.WALAppendDurationNanos
+		writeProfile.WALAppendLockWaitOps = storageProfile.WALAppendLockWaitOps
+		writeProfile.WALAppendLockWaitNanos = storageProfile.WALAppendLockWaitNanos
+		writeProfile.WriteCommitLockWaitOps = storageProfile.WriteCommitLockWaitOps
+		writeProfile.WriteCommitLockWaitNanos = storageProfile.WriteCommitLockWaitNanos
 		writeProfile.WALAppendWriteAtCalls = storageProfile.WALAppendWriteAtCalls
 		writeProfile.WALAppendWriteAtBytes = storageProfile.WALAppendWriteAtBytes
 		writeProfile.WALAppendWriteAtMaxBytes = storageProfile.WALAppendWriteAtMaxBytes
@@ -345,9 +359,9 @@ func (b *StorageBackend) Sync(ctx context.Context) error {
 	// T4b-5: if an observer is installed, delegate the FULL sync
 	// job — the observer (ReplicationVolume) owns both the local
 	// LogicalStorage.Sync call and the peer barriers fanned out
-	// in parallel by DurabilityCoordinator. Without this branch the
+	// through the peer queues. Without this branch the
 	// local sync would run twice (once here, once inside the
-	// coordinator) which is both wasteful and semantically wrong
+	// observer) which is both wasteful and semantically wrong
 	// (primary would be "durable" before peers were even queried).
 	//
 	// targetLSN is the primary's current walHead — the replica-facing
@@ -522,7 +536,7 @@ func (b *StorageBackend) writeBytes(ctx context.Context, offset int64, p []byte)
 		obs := b.observer
 		policy := b.writeAck
 		b.mu.Unlock()
-		if _, ok := b.storage.(storage.WriteBatcher); ok && inBlockOff == 0 && len(buf) >= int(bs) && canBatchFullBlockRun(policy) {
+		if _, ok := b.storage.(storage.WriteBatcher); ok && inBlockOff == 0 && len(buf) >= int(bs) && canBatchFullBlockRun(policy, obs) {
 			fullBlocks := len(buf) / int(bs)
 			if fullBlocks > maxFullBlockBatchBlocks {
 				fullBlocks = maxFullBlockBatchBlocks
@@ -544,6 +558,8 @@ func (b *StorageBackend) writeBytes(ctx context.Context, offset int64, p []byte)
 			chunkLen = available
 		}
 
+		writeLock := &b.lbaWriteLocks[lba%uint32(len(b.lbaWriteLocks))]
+		writeLock.Lock()
 		var block []byte
 		if inBlockOff == 0 && chunkLen == int(bs) {
 			// Full-block write: skip the read.
@@ -552,6 +568,7 @@ func (b *StorageBackend) writeBytes(ctx context.Context, offset int64, p []byte)
 			// Partial-block: RMW.
 			existing, err := b.storage.Read(lba)
 			if err != nil {
+				writeLock.Unlock()
 				return total, fmt.Errorf("durable: RMW read lba=%d: %w", lba, err)
 			}
 			block = make([]byte, bs)
@@ -559,10 +576,12 @@ func (b *StorageBackend) writeBytes(ctx context.Context, offset int64, p []byte)
 			copy(block[inBlockOff:], buf[:chunkLen])
 		}
 		if obs == nil && policy == WriteAckRequireObserverAck {
+			writeLock.Unlock()
 			return total, fmt.Errorf("%w: no write observer installed", ErrReplicationAckUnavailable)
 		}
 
 		lsn, err := b.storage.Write(lba, block)
+		writeLock.Unlock()
 		if err != nil {
 			return total, fmt.Errorf("durable: write lba=%d: %w", lba, err)
 		}
@@ -577,8 +596,12 @@ func (b *StorageBackend) writeBytes(ctx context.Context, offset int64, p []byte)
 	return total, nil
 }
 
-func canBatchFullBlockRun(policy WriteAckPolicy) bool {
-	return policy != WriteAckRequireObserverAck
+func canBatchFullBlockRun(policy WriteAckPolicy, obs WriteObserver) bool {
+	if policy != WriteAckRequireObserverAck {
+		return true
+	}
+	_, ok := obs.(BatchWriteObserver)
+	return ok
 }
 
 func (b *StorageBackend) writeFullBlockBatch(ctx context.Context, startLBA uint32, p []byte, obs WriteObserver, policy WriteAckPolicy) (int, error) {
@@ -592,16 +615,28 @@ func (b *StorageBackend) writeFullBlockBatch(ctx context.Context, startLBA uint3
 	for i := range blocks {
 		blocks[i] = p[i*bs : (i+1)*bs]
 	}
+	unlock := b.lockLBARange(startLBA, blockCount)
 	lsns, err := batcher.WriteBatch(startLBA, blocks)
+	unlock()
 	if len(lsns) > 0 {
 		b.profile.recordBackendStorageWrite(len(lsns), true)
 		b.profile.recordBackendFullBlockBatch(len(lsns))
 	}
-	for i, lsn := range lsns {
-		block := blocks[i]
-		lba := startLBA + uint32(i)
-		if obsErr := b.observeWrite(ctx, lba, lsn, block, obs, policy); obsErr != nil {
-			return (i + 1) * bs, obsErr
+	if batchObserver, ok := obs.(BatchWriteObserver); ok && len(lsns) > 0 {
+		if obsErr := batchObserver.ObserveBatch(ctx, startLBA, lsns, blocks[:len(lsns)]); obsErr != nil {
+			log.Printf("durable: replication batch fan-out failed lba=%d blocks=%d: %v",
+				startLBA, len(lsns), obsErr)
+			if policy == WriteAckRequireObserverAck {
+				return len(lsns) * bs, fmt.Errorf("%w: %w", ErrReplicationAckUnavailable, obsErr)
+			}
+		}
+	} else {
+		for i, lsn := range lsns {
+			block := blocks[i]
+			lba := startLBA + uint32(i)
+			if obsErr := b.observeWrite(ctx, lba, lsn, block, obs, policy); obsErr != nil {
+				return (i + 1) * bs, obsErr
+			}
 		}
 	}
 	if err != nil {
@@ -611,6 +646,27 @@ func (b *StorageBackend) writeFullBlockBatch(ctx context.Context, startLBA uint3
 		return len(lsns) * bs, fmt.Errorf("durable: write batch lba=%d returned %d LSNs for %d blocks", startLBA, len(lsns), blockCount)
 	}
 	return len(p), nil
+}
+
+func (b *StorageBackend) lockLBARange(startLBA uint32, blockCount int) func() {
+	var used [256]bool
+	indices := make([]int, 0, blockCount)
+	for i := 0; i < blockCount; i++ {
+		index := int((startLBA + uint32(i)) % uint32(len(b.lbaWriteLocks)))
+		if !used[index] {
+			used[index] = true
+			indices = append(indices, index)
+		}
+	}
+	sort.Ints(indices)
+	for _, index := range indices {
+		b.lbaWriteLocks[index].Lock()
+	}
+	return func() {
+		for i := len(indices) - 1; i >= 0; i-- {
+			b.lbaWriteLocks[indices[i]].Unlock()
+		}
+	}
 }
 
 func (b *StorageBackend) observeWrite(ctx context.Context, lba uint32, lsn uint64, block []byte, obs WriteObserver, policy WriteAckPolicy) error {

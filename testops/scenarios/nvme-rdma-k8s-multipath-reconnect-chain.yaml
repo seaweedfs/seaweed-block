@@ -1,0 +1,201 @@
+name: nvme-rdma-k8s-multipath-reconnect-chain
+timeout: 130m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+  app_node: ""
+  app_ssh_addr: ""
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: run_close_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 125m
+        cmd: "cd {{ product_root }} && bash scripts/run-phase166-nvme-rdma-k8s-multipath-reconnect-gate.sh {{ product_root }}"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase166-nvme-rdma-multipath"
+        env.SW_BLOCK_PHASE166_RUN_ID: "{{ run_id }}"
+        env.SW_BLOCK_PHASE166_APP_NODE: "{{ app_node }}"
+        env.SW_BLOCK_PHASE166_APP_SSH_ADDR: "{{ app_ssh_addr }}"
+        env.SW_BLOCK_PHASE166_APP_SSH_KEY: "/opt/work/testdev_key"
+
+  - name: assert_terminal_evidence
+    actions:
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase166-nvme-rdma-multipath/phase166-nvme-rdma-k8s-multipath-reconnect-summary.txt"
+        pattern: "^phase166_nvme_rdma_k8s_multipath_reconnect_status=ok$"
+        save_as: gate_ok
+      - action: assert_greater
+        actual: "{{ gate_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase166-nvme-rdma-multipath/phase166-nvme-rdma-k8s-multipath-reconnect-summary.txt"
+        pattern: "^outage_initial_live_rdma_path_count=2$"
+        save_as: outage_baseline
+      - action: assert_greater
+        actual: "{{ outage_baseline }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase166-nvme-rdma-multipath/phase166-nvme-rdma-k8s-multipath-reconnect-summary.txt"
+        pattern: "^outage_degraded_live_rdma_path_count=1$"
+        save_as: outage_degraded
+      - action: assert_greater
+        actual: "{{ outage_degraded }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase166-nvme-rdma-multipath/phase166-nvme-rdma-k8s-multipath-reconnect-summary.txt"
+        pattern: "^outage_mounted_io=ok$"
+        save_as: outage_io
+      - action: assert_greater
+        actual: "{{ outage_io }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase166-nvme-rdma-multipath/phase166-nvme-rdma-k8s-multipath-reconnect-summary.txt"
+        pattern: "^outage_negative_surface_reason=nvme_multipath_path_missing$"
+        save_as: outage_negative
+      - action: assert_greater
+        actual: "{{ outage_negative }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase166-nvme-rdma-multipath/phase166-nvme-rdma-k8s-multipath-reconnect-summary.txt"
+        pattern: "^outage_restored_live_rdma_path_count=2$"
+        save_as: outage_restored
+      - action: assert_greater
+        actual: "{{ outage_restored }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase166-nvme-rdma-multipath/phase166-nvme-rdma-k8s-multipath-reconnect-summary.txt"
+        pattern: "^outage_restore_mounted_io=ok$"
+        save_as: restore_io
+      - action: assert_greater
+        actual: "{{ restore_io }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase166-nvme-rdma-multipath/phase166-nvme-rdma-k8s-multipath-reconnect-summary.txt"
+        pattern: "^desired_rdma_endpoint_changed=true$"
+        save_as: endpoint_changed
+      - action: assert_greater
+        actual: "{{ endpoint_changed }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase166-nvme-rdma-multipath/phase166-nvme-rdma-k8s-multipath-reconnect-summary.txt"
+        pattern: "^new_rdma_endpoint_connected=true$"
+        save_as: endpoint_connected
+      - action: assert_greater
+        actual: "{{ endpoint_connected }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase166-nvme-rdma-multipath/phase166-nvme-rdma-k8s-multipath-reconnect-summary.txt"
+        pattern: "^stale_rdma_endpoint_pruned=true$"
+        save_as: stale_pruned
+      - action: assert_greater
+        actual: "{{ stale_pruned }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase166-nvme-rdma-multipath/phase166-nvme-rdma-k8s-multipath-reconnect-summary.txt"
+        pattern: "^endpoint_live_rdma_path_count=2$"
+        save_as: endpoint_paths
+      - action: assert_greater
+        actual: "{{ endpoint_paths }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase166-nvme-rdma-multipath/phase166-nvme-rdma-k8s-multipath-reconnect-summary.txt"
+        pattern: "^endpoint_pod_uid_preserved=true$"
+        save_as: endpoint_uid
+      - action: assert_greater
+        actual: "{{ endpoint_uid }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase166-nvme-rdma-multipath/phase166-nvme-rdma-k8s-multipath-reconnect-summary.txt"
+        pattern: "^endpoint_mounted_io=ok$"
+        save_as: endpoint_io
+      - action: assert_greater
+        actual: "{{ endpoint_io }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase166-nvme-rdma-multipath/phase166-nvme-rdma-k8s-multipath-reconnect-summary.txt"
+        pattern: "^endpoint_surfaces_agree=true$"
+        save_as: surfaces
+      - action: assert_greater
+        actual: "{{ surfaces }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase166-nvme-rdma-multipath/phase166-nvme-rdma-k8s-multipath-reconnect-summary.txt"
+        pattern: "^outage_tcp_fallback_observed=false$"
+        save_as: outage_no_tcp
+      - action: assert_greater
+        actual: "{{ outage_no_tcp }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase166-nvme-rdma-multipath/phase166-nvme-rdma-k8s-multipath-reconnect-summary.txt"
+        pattern: "^endpoint_tcp_fallback_observed=false$"
+        save_as: endpoint_no_tcp
+      - action: assert_greater
+        actual: "{{ endpoint_no_tcp }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase166-nvme-rdma-multipath/phase166-nvme-rdma-k8s-multipath-reconnect-summary.txt"
+        pattern: "^outage_is_non_primary=true$"
+        save_as: non_primary_outage
+      - action: assert_greater
+        actual: "{{ non_primary_outage }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase166-nvme-rdma-multipath/phase166-nvme-rdma-k8s-multipath-reconnect-summary.txt"
+        pattern: "^endpoint_transition_io=ok$"
+        save_as: transition_io
+      - action: assert_greater
+        actual: "{{ transition_io }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase166-nvme-rdma-multipath/phase166-nvme-rdma-k8s-multipath-reconnect-summary.txt"
+        pattern: "^hostpath_cleanup_nodes=m01,m02$"
+        save_as: hostpath_cleanup
+      - action: assert_greater
+        actual: "{{ hostpath_cleanup }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase166-nvme-rdma-multipath/phase166-nvme-rdma-k8s-multipath-reconnect-summary.txt"
+        pattern: "^cleanup_status=ok$"
+        save_as: cleanup_ok
+      - action: assert_greater
+        actual: "{{ cleanup_ok }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase166-nvme-rdma-multipath"
+        name: remote-phases
+        ignore_error: true

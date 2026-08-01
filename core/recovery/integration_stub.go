@@ -70,13 +70,37 @@ type PrimaryBridge struct {
 	onClose SessionCloseCallback
 	onAck   BridgeDurableAckCallback
 
-	mu      sync.Mutex
-	senders map[ReplicaID]*Sender
+	mu         sync.Mutex
+	senders    map[ReplicaID]*Sender
+	cancels    map[ReplicaID]context.CancelFunc
+	conns      map[ReplicaID]net.Conn
+	starting   map[ReplicaID]*bridgeStart
+	stopped    bool
+	stopOnce   sync.Once
+	stopDone   chan struct{}
+	startWG    sync.WaitGroup
+	wg         sync.WaitGroup
+	callbackWG sync.WaitGroup
+}
+
+type bridgeStart struct {
+	launch chan struct{}
+	once   sync.Once
+}
+
+func (s *bridgeStart) release() {
+	s.once.Do(func() {
+		close(s.launch)
+	})
 }
 
 // ErrNoActiveSession means the bridge has no sender registered for the
 // requested replica.
 var ErrNoActiveSession = errors.New("recovery bridge: no active session")
+
+// ErrPrimaryBridgeStopped means no new recovery session can be registered
+// because the bridge owner has ended its lifecycle.
+var ErrPrimaryBridgeStopped = errors.New("recovery bridge: stopped")
 
 // ErrSessionNotLiveReady means a session is registered and owns the
 // peer's WAL route, but the sink has not entered its live feeder window
@@ -87,11 +111,15 @@ var ErrSessionNotLiveReady = errors.New("recovery bridge: session not live-ready
 // substrate. Callbacks may be nil (fire-and-forget).
 func NewPrimaryBridge(store storage.LogicalStorage, coord *PeerShipCoordinator, onStart SessionStartCallback, onClose SessionCloseCallback) *PrimaryBridge {
 	return &PrimaryBridge{
-		store:   store,
-		coord:   coord,
-		onStart: onStart,
-		onClose: onClose,
-		senders: make(map[ReplicaID]*Sender),
+		store:    store,
+		coord:    coord,
+		onStart:  onStart,
+		onClose:  onClose,
+		senders:  make(map[ReplicaID]*Sender),
+		cancels:  make(map[ReplicaID]context.CancelFunc),
+		conns:    make(map[ReplicaID]net.Conn),
+		starting: make(map[ReplicaID]*bridgeStart),
+		stopDone: make(chan struct{}),
 	}
 }
 
@@ -154,6 +182,10 @@ func (b *PrimaryBridge) startRebuildSessionLocked(ctx context.Context, conn net.
 	// reports the racing-bridge-call case distinctly from the
 	// coordinator's INV-SINGLE-FLIGHT-PER-REPLICA.
 	b.mu.Lock()
+	if b.stopped {
+		b.mu.Unlock()
+		return ErrPrimaryBridgeStopped
+	}
 	if _, busy := b.senders[replicaID]; busy {
 		b.mu.Unlock()
 		return fmt.Errorf("recovery bridge: replica %q already has active sender (single-flight)", replicaID)
@@ -183,32 +215,147 @@ func (b *PrimaryBridge) startRebuildSessionLocked(ctx context.Context, conn net.
 	sender.SetOnDurableAck(func(rid ReplicaID, sid, acknowledgedLSN, primaryS, primaryH uint64) {
 		b.mu.Lock()
 		cb := b.onAck
+		if b.stopped {
+			cb = nil
+		}
+		if cb != nil {
+			b.callbackWG.Add(1)
+		}
 		b.mu.Unlock()
 		if cb != nil {
-			cb(rid, sid, acknowledgedLSN, primaryS, primaryH)
+			b.runCallback(func() {
+				cb(rid, sid, acknowledgedLSN, primaryS, primaryH)
+			})
 		}
 	})
+	sessionCtx, cancel := context.WithCancel(ctx)
+	start := &bridgeStart{launch: make(chan struct{})}
 	b.senders[replicaID] = sender
+	b.cancels[replicaID] = cancel
+	b.conns[replicaID] = conn
+	b.starting[replicaID] = start
+	b.startWG.Add(1)
+	onStart := b.onStart
+	if onStart != nil {
+		b.callbackWG.Add(1)
+	}
 	b.mu.Unlock()
 
-	if b.onStart != nil {
-		b.onStart(replicaID, sessionID)
+	go func() {
+		<-start.launch
+		b.mu.Lock()
+		if b.stopped || b.starting[replicaID] != start {
+			b.mu.Unlock()
+			b.startWG.Done()
+			return
+		}
+		delete(b.starting, replicaID)
+		b.wg.Add(1)
+		b.mu.Unlock()
+		b.startWG.Done()
+
+		log.Printf("g7-debug: sender goroutine entry replica=%s sessionID=%d", replicaID, sessionID)
+		achieved, runErr := sender.Run(sessionCtx, sessionID, fromLSN, frontierHint)
+		log.Printf("g7-debug: sender goroutine exit replica=%s sessionID=%d achieved=%d err=%v", replicaID, sessionID, achieved, runErr)
+		_ = conn.Close()
+		b.mu.Lock()
+		delete(b.senders, replicaID)
+		delete(b.cancels, replicaID)
+		delete(b.conns, replicaID)
+		onClose := b.onClose
+		if b.stopped {
+			onClose = nil
+		}
+		if onClose != nil {
+			b.callbackWG.Add(1)
+		}
+		b.mu.Unlock()
+		cancel()
+		b.wg.Done()
+		if onClose != nil {
+			b.runCallback(func() {
+				onClose(replicaID, sessionID, achieved, runErr)
+			})
+		}
+	}()
+
+	if onStart != nil {
+		b.runCallback(func() {
+			onStart(replicaID, sessionID)
+		})
 	}
 
 	log.Printf("g7-debug: bridge.startRebuildSessionLocked spawning sender goroutine replica=%s sessionID=%d fromLSN=%d frontierHint=%d sinkType=%T",
 		replicaID, sessionID, fromLSN, frontierHint, sink)
-	go func() {
-		log.Printf("g7-debug: sender goroutine entry replica=%s sessionID=%d", replicaID, sessionID)
-		achieved, err := sender.Run(ctx, sessionID, fromLSN, frontierHint)
-		log.Printf("g7-debug: sender goroutine exit replica=%s sessionID=%d achieved=%d err=%v", replicaID, sessionID, achieved, err)
-		b.mu.Lock()
-		delete(b.senders, replicaID)
-		b.mu.Unlock()
-		if b.onClose != nil {
-			b.onClose(replicaID, sessionID, achieved, err)
-		}
-	}()
+	start.release()
+	b.mu.Lock()
+	stopped := b.stopped
+	b.mu.Unlock()
+	if stopped {
+		return ErrPrimaryBridgeStopped
+	}
 	return nil
+}
+
+func (b *PrimaryBridge) runCallback(fn func()) {
+	defer b.callbackWG.Done()
+	fn()
+}
+
+// Stop initiates bridge shutdown without waiting. Callback code may call it
+// safely. Lifecycle owners that need the borrowed store released must call
+// StopAndWait.
+func (b *PrimaryBridge) Stop() {
+	b.stopOnce.Do(func() {
+		b.mu.Lock()
+		b.stopped = true
+		cancels := make([]context.CancelFunc, 0, len(b.cancels))
+		conns := make([]net.Conn, 0, len(b.conns))
+		starts := make([]*bridgeStart, 0, len(b.starting))
+		startingReplicas := make([]ReplicaID, 0, len(b.starting))
+		for _, cancel := range b.cancels {
+			cancels = append(cancels, cancel)
+		}
+		for _, conn := range b.conns {
+			conns = append(conns, conn)
+		}
+		for replicaID, start := range b.starting {
+			starts = append(starts, start)
+			startingReplicas = append(startingReplicas, replicaID)
+			delete(b.starting, replicaID)
+			delete(b.senders, replicaID)
+			delete(b.cancels, replicaID)
+			delete(b.conns, replicaID)
+		}
+		b.mu.Unlock()
+
+		for _, cancel := range cancels {
+			cancel()
+		}
+		for _, conn := range conns {
+			_ = conn.Close()
+		}
+		for _, replicaID := range startingReplicas {
+			b.coord.EndSession(replicaID)
+		}
+		for _, start := range starts {
+			start.release()
+		}
+
+		go func() {
+			b.startWG.Wait()
+			b.wg.Wait()
+			b.callbackWG.Wait()
+			close(b.stopDone)
+		}()
+	})
+}
+
+// StopAndWait initiates shutdown and waits until starting work, senders, and
+// callbacks can no longer access the borrowed store or bridge state.
+func (b *PrimaryBridge) StopAndWait() {
+	b.Stop()
+	<-b.stopDone
 }
 
 // HasActiveSession reports whether a dual-lane recovery session is

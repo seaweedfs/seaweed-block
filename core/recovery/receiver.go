@@ -50,6 +50,7 @@ type Receiver struct {
 	blocksSinceLastAck uint32
 	lastAckTime        time.Time
 	baseInstalledUpper uint32 // highest base LBA installed; advisory only in BaseBatchAck
+	basePrepared       bool
 }
 
 // NewReceiver constructs a receiver bound to the replica's substrate
@@ -159,6 +160,7 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 			r.session.SeedWalApplied(s.FromLSN)
 			r.recvFromLSN = s.FromLSN
 			r.appliedWalLSN = s.FromLSN
+			r.basePrepared = false
 			log.Printf("g7-debug: Receiver.Run frameSessionStart sessionID=%d fromLSN=%d targetLSN=%d numBlocks=%d", s.SessionID, s.FromLSN, s.TargetLSN, s.NumBlocks)
 
 		case frameBaseBlock:
@@ -169,6 +171,9 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 			lba, data, decErr := decodeBaseBlock(payload)
 			if decErr != nil {
 				return 0, newFailure(FailureProtocol, PhaseRecvDispatch, decErr)
+			}
+			if prepErr := r.prepareBaseInstall(); prepErr != nil {
+				return 0, newFailure(FailureSubstrate, PhaseRecvApply, prepErr)
 			}
 			if _, applyErr := r.session.ApplyBaseBlock(lba, data); applyErr != nil {
 				log.Printf("g7-debug: Receiver.Run ApplyBaseBlock err lba=%d err=%v", lba, applyErr)
@@ -220,6 +225,9 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 			if r.session == nil {
 				return 0, newFailure(FailureProtocol, PhaseRecvDispatch,
 					errors.New("BaseDone before SessionStart"))
+			}
+			if prepErr := r.prepareBaseInstall(); prepErr != nil {
+				return 0, newFailure(FailureSubstrate, PhaseRecvApply, prepErr)
 			}
 			log.Printf("g7-debug: Receiver.Run frameBaseDone baseCount=%d walCount=%d", baseCount, walCount)
 			r.session.MarkBaseComplete()
@@ -280,6 +288,19 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 				fmt.Errorf("unknown frame type %d", ft))
 		}
 	}
+}
+
+func (r *Receiver) prepareBaseInstall() error {
+	if r.basePrepared {
+		return nil
+	}
+	if preparer, ok := r.store.(storage.BaseInstallPreparer); ok {
+		if err := preparer.BeginBaseInstall(); err != nil {
+			return fmt.Errorf("prepare BASE install: %w", err)
+		}
+	}
+	r.basePrepared = true
+	return nil
 }
 
 // shouldAck evaluates the cadence rule per docs/recovery-pin-floor-wire.md §3.

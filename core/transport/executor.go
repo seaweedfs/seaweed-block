@@ -42,6 +42,10 @@ type BlockExecutor struct {
 	sessions        map[uint64]*activeSession
 	sessionResults  map[uint64]RecoverySessionStatus
 	stepDelay       time.Duration
+	stopped         bool
+	stopOnce        sync.Once
+	asyncWG         sync.WaitGroup
+	transientConns  map[net.Conn]struct{}
 
 	// walShippers is the per-replica WalShipper registry per
 	// v3-recovery-wal-shipper-spec.md §3 INV-SINGLE: at most one
@@ -50,6 +54,10 @@ type BlockExecutor struct {
 	// pointer that Ship() updates before delegating NotifyAppend.
 	walShipperMu sync.Mutex
 	walShippers  map[string]*walShipperEntry
+	// walShippersStopped prevents a caller racing executor teardown
+	// from creating a new resident timer after Stop snapshots the
+	// registry.
+	walShippersStopped bool
 }
 
 // EmitProfile selects the wire encoder + frame format used by the
@@ -183,6 +191,10 @@ const (
 
 var errSessionInvalidated = errors.New("session invalidated")
 
+// ErrExecutorStopped is returned when a caller attempts to register new
+// transport work after the executor lifecycle has ended.
+var ErrExecutorStopped = errors.New("executor stopped")
+
 const recoveryConnTimeout = 5 * time.Second
 
 // NewBlockExecutor creates a legacy-mode executor for one primary -> replica
@@ -224,6 +236,10 @@ func NewBlockExecutorWithDualLane(
 		primaryStore,
 		coord,
 		func(rid recovery.ReplicaID, sid uint64) {
+			if err := e.beginAsyncOperation(); err != nil {
+				return
+			}
+			defer e.asyncWG.Done()
 			e.mu.Lock()
 			cb := e.onSessionStart
 			e.mu.Unlock()
@@ -242,6 +258,10 @@ func NewBlockExecutorWithDualLane(
 			}
 		},
 		func(rid recovery.ReplicaID, sid uint64, achieved uint64, err error) {
+			if lifecycleErr := e.beginAsyncOperation(); lifecycleErr != nil {
+				return
+			}
+			defer e.asyncWG.Done()
 			// Hardware-harness completion marker (matches the legacy
 			// doRebuild Printf form so QA's wait_until_rebuild_complete
 			// helper regex catches the dual-lane path identically). The
@@ -293,6 +313,10 @@ func NewBlockExecutorWithDualLane(
 		},
 	)
 	bridge.SetOnDurableAck(func(rid recovery.ReplicaID, sid, acknowledgedLSN, primaryS, primaryH uint64) {
+		if err := e.beginAsyncOperation(); err != nil {
+			return
+		}
+		defer e.asyncWG.Done()
 		e.mu.Lock()
 		cb := e.onDurableAck
 		e.mu.Unlock()
@@ -315,10 +339,14 @@ func NewBlockExecutorWithDualLane(
 }
 
 func (e *BlockExecutor) SetOnSessionClose(fn adapter.OnSessionClose) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	e.onSessionClose = fn
 }
 
 func (e *BlockExecutor) SetOnSessionStart(fn adapter.OnSessionStart) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	e.onSessionStart = fn
 }
 
@@ -335,6 +363,8 @@ func (e *BlockExecutor) SetStepDelay(d time.Duration) {
 }
 
 func (e *BlockExecutor) SetOnFenceComplete(fn adapter.OnFenceComplete) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	e.onFenceComplete = fn
 }
 
@@ -347,6 +377,9 @@ func (e *BlockExecutor) SetOnFenceComplete(fn adapter.OnFenceComplete) {
 // callback exactly once. Retry is the adapter/engine's
 // responsibility (probe-driven); this method never retries.
 func (e *BlockExecutor) Fence(replicaID string, sessionID, epoch, endpointVersion uint64) error {
+	if err := e.beginAsyncOperation(); err != nil {
+		return err
+	}
 	lineage := RecoveryLineage{
 		SessionID:       sessionID,
 		Epoch:           epoch,
@@ -361,7 +394,10 @@ func (e *BlockExecutor) Fence(replicaID string, sessionID, epoch, endpointVersio
 		// value.
 		TargetLSN: fenceSentinelTargetLSN,
 	}
-	go e.doFence(replicaID, lineage)
+	go func() {
+		defer e.asyncWG.Done()
+		e.doFence(replicaID, lineage)
+	}()
 	return nil
 }
 
@@ -381,19 +417,30 @@ const fenceSentinelTargetLSN uint64 = 1
 // exchange, not a recovery session. Does NOT fire OnFenceComplete; the
 // async entry point Fence() wraps FenceSync and handles the callback.
 //
-// Called by: BlockExecutor.doFence (async wrapper for legacy callback-
-// driven callers like the engine's recovery path) and
-// ReplicaPeer.Fence (sync-style wrapper for callers like
-// DurabilityCoordinator).
+// Called by: ReplicaPeer.Fence and other synchronous callers. The
+// asynchronous doFence path uses fenceSync after registering its own
+// lifecycle operation.
 // Owns: per-call conn dial + deadline; lineage validation against the
 // request lineage (uniform rule).
 // Borrows: lineage from caller.
 func (e *BlockExecutor) FenceSync(replicaID string, lineage RecoveryLineage) error {
+	if err := e.beginAsyncOperation(); err != nil {
+		return err
+	}
+	defer e.asyncWG.Done()
+	return e.fenceSync(replicaID, lineage)
+}
+
+func (e *BlockExecutor) fenceSync(replicaID string, lineage RecoveryLineage) error {
 	conn, err := net.DialTimeout("tcp", e.replicaAddr, 2*time.Second)
 	if err != nil {
 		return fmt.Errorf("fence dial: %w", err)
 	}
 	defer conn.Close()
+	if err := e.trackTransientConn(conn); err != nil {
+		return err
+	}
+	defer e.untrackTransientConn(conn)
 
 	if err := sendBarrierReq(conn, lineage, recoveryConnTimeout); err != nil {
 		return fmt.Errorf("fence barrier send: %w", err)
@@ -424,7 +471,7 @@ func (e *BlockExecutor) doFence(replicaID string, lineage RecoveryLineage) {
 		Epoch:           lineage.Epoch,
 		EndpointVersion: lineage.EndpointVersion,
 	}
-	if err := e.FenceSync(replicaID, lineage); err != nil {
+	if err := e.fenceSync(replicaID, lineage); err != nil {
 		result.Success = false
 		result.FailReason = err.Error()
 	} else {
@@ -446,8 +493,8 @@ func (e *BlockExecutor) doFence(replicaID string, lineage RecoveryLineage) {
 // A future optimization MUST NOT weaken this to epoch-only; the
 // full-lineage rule is load-bearing for the durability gate.
 //
-// Called by: DurabilityCoordinator.SyncLocalAndReplicas per-peer
-// fan-out.
+// Called by: replication's per-peer ordered work queue and by the legacy
+// synchronous durability coordinator contract.
 // Owns: per-call conn deadline (recoveryConnTimeout); lineage binding;
 // ack validation against the session's registered lineage.
 // Borrows: session by replicaID + lineage.SessionID; BarrierAck
@@ -527,6 +574,10 @@ func (e *BlockExecutor) Barrier(replicaID string, lineage RecoveryLineage, front
 
 func (e *BlockExecutor) fireFenceComplete(result adapter.FenceResult) {
 	e.mu.Lock()
+	if e.stopped {
+		e.mu.Unlock()
+		return
+	}
 	cb := e.onFenceComplete
 	e.mu.Unlock()
 	if cb != nil {
@@ -572,6 +623,17 @@ var ErrProbeLineageMismatch = errors.New("transport: probe: response lineage doe
 // Borrows: primaryStore (boundaries snapshot for frontier-hint floor and
 // for R/S/H facts).
 func (e *BlockExecutor) Probe(replicaID, dataAddr, ctrlAddr string, sessionID, epoch, endpointVersion uint64) adapter.ProbeResult {
+	if err := e.beginAsyncOperation(); err != nil {
+		return adapter.ProbeResult{
+			ReplicaID:       replicaID,
+			Success:         false,
+			EndpointVersion: endpointVersion,
+			TransportEpoch:  epoch,
+			FailReason:      err.Error(),
+		}
+	}
+	defer e.asyncWG.Done()
+
 	addr := e.replicaAddr
 	if dataAddr != "" {
 		addr = dataAddr
@@ -621,6 +683,16 @@ func (e *BlockExecutor) Probe(replicaID, dataAddr, ctrlAddr string, sessionID, e
 		}
 	}
 	defer conn.Close()
+	if err := e.trackTransientConn(conn); err != nil {
+		return adapter.ProbeResult{
+			ReplicaID:       replicaID,
+			Success:         false,
+			EndpointVersion: endpointVersion,
+			TransportEpoch:  epoch,
+			FailReason:      err.Error(),
+		}
+	}
+	defer e.untrackTransientConn(conn)
 	conn.SetDeadline(time.Now().Add(3 * time.Second))
 
 	if err := WriteMsg(conn, MsgProbeReq, EncodeProbeReq(ProbeRequest{Lineage: requestLineage})); err != nil {
@@ -699,6 +771,57 @@ func (e *BlockExecutor) InvalidateSession(replicaID string, sessionID uint64, re
 		_ = conn.Close()
 	}
 	log.Printf("executor: invalidate session %d for %s: %s", sessionID, replicaID, reason)
+}
+
+// Stop ends all executor-owned background work before the borrowed primary
+// store can be closed. It is idempotent and waits for legacy recovery
+// goroutines, dual-lane senders, and resident WalShipper timers to exit.
+func (e *BlockExecutor) Stop() {
+	e.stopOnce.Do(func() {
+		var sessionConns []net.Conn
+		e.mu.Lock()
+		e.stopped = true
+		for sessionID, session := range e.sessions {
+			delete(e.sessions, sessionID)
+			close(session.cancel)
+			if session.conn != nil {
+				sessionConns = append(sessionConns, session.conn)
+				session.conn = nil
+			}
+		}
+		for conn := range e.transientConns {
+			sessionConns = append(sessionConns, conn)
+		}
+		e.mu.Unlock()
+		for _, conn := range sessionConns {
+			_ = conn.Close()
+		}
+
+		if e.dualLane != nil {
+			e.dualLane.Bridge.StopAndWait()
+		}
+
+		e.walShipperMu.Lock()
+		e.walShippersStopped = true
+		entries := make([]*walShipperEntry, 0, len(e.walShippers))
+		for _, entry := range e.walShippers {
+			entries = append(entries, entry)
+		}
+		e.walShipperMu.Unlock()
+		for _, entry := range entries {
+			entry.emitCtxMu.Lock()
+			conn := entry.emitConn
+			entry.emitConn = nil
+			entry.postEmit = nil
+			entry.emitCtxMu.Unlock()
+			if conn != nil {
+				_ = conn.Close()
+			}
+			entry.shipper.Stop()
+		}
+
+		e.asyncWG.Wait()
+	})
 }
 
 func (e *BlockExecutor) RecoverySessionStatus(replicaID string, sessionID uint64) RecoverySessionStatus {
@@ -828,11 +951,18 @@ func (e *BlockExecutor) WalShipperFor(replicaID string) *WalShipper {
 		}
 		return err
 	}
-	s := NewWalShipper(replicaID, HeadSourceFromStorage(e.primaryStore), e.primaryStore, emit)
+	cfg := DefaultWalShipperConfig()
+	if e.walShippersStopped {
+		cfg.DisableTimerDrain = true
+	}
+	s := NewWalShipperWithOptions(replicaID, HeadSourceFromStorage(e.primaryStore), e.primaryStore, emit, cfg)
 	// Activate immediately into Realtime — first Ship's lsn > 0 will
 	// emit cleanly. Recovery sessions later StartSession to transition
 	// to Backlog.
 	_ = s.Activate(0)
+	if e.walShippersStopped {
+		s.Stop()
+	}
 	entry.shipper = s
 	e.walShippers[replicaID] = entry
 	return s
@@ -867,8 +997,14 @@ func (e *BlockExecutor) AdvanceLiveShipCursor(replicaID string, achievedLSN uint
 // create via WalShipperFor and re-call).
 func (e *BlockExecutor) updateWalShipperEmitContext(replicaID string, conn net.Conn, lineage RecoveryLineage, profile EmitProfile) {
 	e.walShipperMu.Lock()
+	defer e.walShipperMu.Unlock()
 	entry, ok := e.walShippers[replicaID]
-	e.walShipperMu.Unlock()
+	if e.walShippersStopped {
+		if conn != nil {
+			_ = conn.Close()
+		}
+		return
+	}
 	if !ok {
 		return
 	}
@@ -892,9 +1028,9 @@ func (e *BlockExecutor) updateWalShipperEmitContext(replicaID string, conn net.C
 // No-op if no WalShipperEntry exists for replicaID.
 func (e *BlockExecutor) SetWalShipperPostEmitHook(replicaID string, hook func(lsn uint64)) {
 	e.walShipperMu.Lock()
+	defer e.walShipperMu.Unlock()
 	entry, ok := e.walShippers[replicaID]
-	e.walShipperMu.Unlock()
-	if !ok {
+	if !ok || e.walShippersStopped {
 		return
 	}
 	entry.emitCtxMu.Lock()
@@ -964,19 +1100,59 @@ func (e *BlockExecutor) DualLanePrimaryBridge() (*recovery.PrimaryBridge, recove
 	return e.dualLane.Bridge, e.dualLane.ReplicaID, true
 }
 
-// Registry lifecycle note: walShippers entries are never torn down
-// today. For replica churn, lineage invalidation, or executor reuse
-// across distinct peer generations, a future Forget(replicaID) /
-// teardown hook may be needed. Out of scope for MVP since current
-// call sites (cmd/blockvolume, tests) construct one BlockExecutor
-// per (volume, replica) lifecycle.
-
 func (e *BlockExecutor) registerSession(lineage RecoveryLineage) (*activeSession, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	return e.registerSessionLocked(lineage, false)
+}
 
+func (e *BlockExecutor) beginAsyncOperation() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.stopped {
+		return ErrExecutorStopped
+	}
+	e.asyncWG.Add(1)
+	return nil
+}
+
+func (e *BlockExecutor) trackTransientConn(conn net.Conn) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.stopped {
+		return ErrExecutorStopped
+	}
+	if e.transientConns == nil {
+		e.transientConns = make(map[net.Conn]struct{})
+	}
+	e.transientConns[conn] = struct{}{}
+	return nil
+}
+
+func (e *BlockExecutor) untrackTransientConn(conn net.Conn) {
+	e.mu.Lock()
+	delete(e.transientConns, conn)
+	e.mu.Unlock()
+}
+
+func (e *BlockExecutor) registerAsyncSession(lineage RecoveryLineage) (*activeSession, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.registerSessionLocked(lineage, true)
+}
+
+func (e *BlockExecutor) registerSessionLocked(lineage RecoveryLineage, async bool) (*activeSession, error) {
+	if e.stopped {
+		return nil, ErrExecutorStopped
+	}
 	if _, exists := e.sessions[lineage.SessionID]; exists {
 		return nil, fmt.Errorf("executor: session %d already active", lineage.SessionID)
+	}
+	if e.sessions == nil {
+		e.sessions = make(map[uint64]*activeSession)
+	}
+	if e.sessionResults == nil {
+		e.sessionResults = make(map[uint64]RecoverySessionStatus)
 	}
 	delete(e.sessionResults, lineage.SessionID)
 	session := &activeSession{
@@ -984,6 +1160,9 @@ func (e *BlockExecutor) registerSession(lineage RecoveryLineage) (*activeSession
 		cancel:  make(chan struct{}),
 	}
 	e.sessions[lineage.SessionID] = session
+	if async {
+		e.asyncWG.Add(1)
+	}
 	return session, nil
 }
 

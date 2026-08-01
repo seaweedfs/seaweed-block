@@ -3,6 +3,7 @@ package replication
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -238,6 +239,14 @@ func TestReplicationVolume_UpdateReplicaSet_RemovePeer_ExecutorTornDown(t *testi
 	if firstExec.HasSession(peer1SessionID) {
 		t.Fatal("executor session not torn down on peer removal")
 	}
+	err := firstExec.RegisterLiveShipSession(transport.RecoveryLineage{
+		SessionID:       peer1SessionID + 1000,
+		Epoch:           1,
+		EndpointVersion: 1,
+	})
+	if !errors.Is(err, transport.ErrExecutorStopped) {
+		t.Fatalf("removed peer executor accepted new session: %v", err)
+	}
 
 	// (c) re-add at same ReplicaID must work cleanly and ship must reach replica.
 	if err := v.UpdateReplicaSet(0, []ReplicaTarget{targetFor("r1", addr, 1, 1)}); err != nil {
@@ -267,6 +276,24 @@ func TestReplicationVolume_UpdateReplicaSet_RemovePeer_ExecutorTornDown(t *testi
 func TestReplicationVolume_UpdateReplicaSet_LineageBump_RecreatesPeer(t *testing.T) {
 	addr, _ := replicaHarness(t, "r1")
 	v := volumeHarness(t, "vol1")
+	var firstExecutor *transport.BlockExecutor
+	oldStoppedBeforeReplacement := false
+	membershipBlockedBeforeReplacement := false
+	v.newExec = func(store storage.LogicalStorage, replicaAddr string) *transport.BlockExecutor {
+		executor := transport.NewBlockExecutor(store, replicaAddr)
+		if firstExecutor == nil {
+			firstExecutor = executor
+		} else {
+			membershipBlockedBeforeReplacement = v.membershipUpdating
+			err := firstExecutor.RegisterLiveShipSession(transport.RecoveryLineage{
+				SessionID:       999999,
+				Epoch:           1,
+				EndpointVersion: 1,
+			})
+			oldStoppedBeforeReplacement = errors.Is(err, transport.ErrExecutorStopped)
+		}
+		return executor
+	}
 
 	if err := v.UpdateReplicaSet(0, []ReplicaTarget{targetFor("r1", addr, 1, 1)}); err != nil {
 		t.Fatal(err)
@@ -288,8 +315,85 @@ func TestReplicationVolume_UpdateReplicaSet_LineageBump_RecreatesPeer(t *testing
 	if firstSessionID == secondSessionID {
 		t.Fatal("sessionID did not change across lineage bump — peer was not recreated")
 	}
+	if !oldStoppedBeforeReplacement {
+		t.Fatal("replacement executor was admitted before the old executor stopped")
+	}
+	if !membershipBlockedBeforeReplacement {
+		t.Fatal("writes were not blocked while the replacement executor was admitted")
+	}
+	if v.membershipUpdating {
+		t.Fatal("membership transition remained blocked after replacement completed")
+	}
 	if firstEpoch != 1 || secondEpoch != 2 {
 		t.Fatalf("epoch bump not reflected: first=%d second=%d", firstEpoch, secondEpoch)
+	}
+}
+
+func TestReplicationVolume_MembershipTransitionRejectsWriteAndSync(t *testing.T) {
+	v := volumeHarness(t, "vol-transition")
+	v.mu.Lock()
+	v.membershipUpdating = true
+	v.mu.Unlock()
+
+	err := v.OnLocalWrite(context.Background(), LocalWrite{
+		LBA:  1,
+		Data: make([]byte, 4096),
+		LSN:  1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "membership transition in progress") {
+		t.Fatalf("OnLocalWrite error=%v, want membership transition rejection", err)
+	}
+
+	err = v.Sync(context.Background(), 0)
+	if err == nil || !strings.Contains(err.Error(), "membership transition in progress") {
+		t.Fatalf("Sync error=%v, want membership transition rejection", err)
+	}
+}
+
+func TestReplicationVolume_FailedMembershipReplacementRemainsBlocked(t *testing.T) {
+	addr, _ := replicaHarness(t, "r1")
+	v := volumeHarness(t, "vol-failed-transition")
+	if err := v.UpdateReplicaSet(1, []ReplicaTarget{targetFor("r1", addr, 1, 1)}); err != nil {
+		t.Fatal(err)
+	}
+
+	v.newExec = func(store storage.LogicalStorage, replicaAddr string) *transport.BlockExecutor {
+		executor := transport.NewBlockExecutor(store, replicaAddr)
+		executor.Stop()
+		return executor
+	}
+	err := v.UpdateReplicaSet(2, []ReplicaTarget{targetFor("r1", addr, 2, 1)})
+	if !errors.Is(err, transport.ErrExecutorStopped) {
+		t.Fatalf("UpdateReplicaSet error=%v, want ErrExecutorStopped", err)
+	}
+
+	v.mu.Lock()
+	blocked := v.membershipUpdating
+	v.mu.Unlock()
+	if !blocked {
+		t.Fatal("failed membership replacement reopened writes on a partial replica set")
+	}
+	err = v.OnLocalWrite(context.Background(), LocalWrite{
+		LBA:  1,
+		Data: make([]byte, 4096),
+		LSN:  1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "membership transition in progress") {
+		t.Fatalf("OnLocalWrite error=%v, want membership transition rejection", err)
+	}
+	if err := v.Sync(context.Background(), 0); err == nil || !strings.Contains(err.Error(), "membership transition in progress") {
+		t.Fatalf("Sync error=%v, want membership transition rejection", err)
+	}
+
+	v.newExec = transport.NewBlockExecutor
+	if err := v.UpdateReplicaSet(2, []ReplicaTarget{targetFor("r1", addr, 2, 1)}); err != nil {
+		t.Fatalf("retry replacement: %v", err)
+	}
+	v.mu.Lock()
+	blocked = v.membershipUpdating
+	v.mu.Unlock()
+	if blocked {
+		t.Fatal("successful replacement retry did not reopen writes")
 	}
 }
 
@@ -351,7 +455,7 @@ func TestG9A_ReplicationVolume_OnLocalWrite_BestEffortRetainsRecoveringPeer(t *t
 
 	data := make([]byte, 4096)
 	data[0] = 0xA9
-	if err := v.OnLocalWrite(context.Background(), LocalWrite{LBA: 3, Data: data, LSN: 9}); err != nil {
+	if err := v.OnLocalWrite(context.Background(), LocalWrite{LBA: 3, Data: data, LSN: 1}); err != nil {
 		t.Fatalf("best-effort recovering peer should retain/feed without failing Write observer: %v", err)
 	}
 }
@@ -369,7 +473,7 @@ func TestG9A_ReplicationVolume_OnLocalWrite_SyncAllFailsRecoveringPeer(t *testin
 
 	data := make([]byte, 4096)
 	data[0] = 0xB9
-	err := v.OnLocalWrite(context.Background(), LocalWrite{LBA: 4, Data: data, LSN: 10})
+	err := v.OnLocalWrite(context.Background(), LocalWrite{LBA: 4, Data: data, LSN: 1})
 	if !strings.Contains(fmt.Sprint(err), ErrDurabilityBarrierFailed.Error()) {
 		t.Fatalf("sync_all recovering peer should fail write ack, got %v", err)
 	}
@@ -388,7 +492,7 @@ func TestG9A_ReplicationVolume_OnLocalWrite_SyncQuorumRF2FailsRecoveringPeer(t *
 
 	data := make([]byte, 4096)
 	data[0] = 0xC9
-	err := v.OnLocalWrite(context.Background(), LocalWrite{LBA: 5, Data: data, LSN: 11})
+	err := v.OnLocalWrite(context.Background(), LocalWrite{LBA: 5, Data: data, LSN: 1})
 	if !strings.Contains(fmt.Sprint(err), ErrDurabilityQuorumLost.Error()) {
 		t.Fatalf("sync_quorum RF=2 recovering peer should fail write ack, got %v", err)
 	}
@@ -477,21 +581,19 @@ func TestReplicationVolume_OnLocalWrite_PeerErrorDoesNotFailCaller(t *testing.T)
 // TestReplicationVolume_OnLocalWrite_ConcurrentLSNs_OrderedAtReplica —
 // the architect-requested adversarial ordering pin.
 //
-// Shape: N goroutines, each pre-assigned a unique LSN. Calls are
-// funneled through a caller-side serialization primitive that
-// mimics how Backend.Write will work in production (hold a lock
-// across LSN allocation + OnLocalWrite invocation). Under the
-// architect-approved Option X design, ReplicationVolume.OnLocalWrite
-// preserves LSN order through fan-out AS LONG AS the caller path
-// is serialized.
+// Shape: N goroutines allocate unique LSNs and call OnLocalWrite
+// without a caller-side lock. ReplicationVolume must tolerate the
+// callback for LSN N+1 arriving before LSN N and still ship a
+// contiguous stream to the replica.
 //
 // Test schedules N writes where LSN order and LBA order are distinct
 // (LSN 1 writes to LBA 9, LSN 2 writes to LBA 8, ...) so any
 // out-of-order application would produce detectable final-state
 // corruption.
 //
-// Proves: V2 shipMu semantic is preserved by V3's Option X pattern
-// when the system-level caller contract is honored.
+// Proves: V2 shipMu ordering is preserved inside ReplicationVolume;
+// callers do not need to serialize storage allocation and observer
+// dispatch as one critical section.
 func TestReplicationVolume_OnLocalWrite_ConcurrentLSNs_OrderedAtReplica(t *testing.T) {
 	addr, replica := replicaHarness(t, "r1")
 	v := volumeHarness(t, "vol1")
@@ -500,7 +602,6 @@ func TestReplicationVolume_OnLocalWrite_ConcurrentLSNs_OrderedAtReplica(t *testi
 	}
 
 	const n = 40
-	var callerMu sync.Mutex
 	var nextLSN atomic.Uint64
 	var wg sync.WaitGroup
 	start := make(chan struct{})
@@ -527,9 +628,6 @@ func TestReplicationVolume_OnLocalWrite_ConcurrentLSNs_OrderedAtReplica(t *testi
 			defer wg.Done()
 			<-start
 
-			// Caller-side serialized section: mimics Backend.Write holding
-			// a volume-level mutex across LSN allocation + OnLocalWrite.
-			callerMu.Lock()
 			lsn := nextLSN.Add(1)
 			// Resolve plan deterministically by LSN.
 			p := plans[lsn-1]
@@ -541,7 +639,6 @@ func TestReplicationVolume_OnLocalWrite_ConcurrentLSNs_OrderedAtReplica(t *testi
 				Data: data,
 				LSN:  lsn,
 			})
-			callerMu.Unlock()
 			if err != nil {
 				t.Errorf("OnLocalWrite idx=%d lsn=%d: %v", idx, lsn, err)
 			}

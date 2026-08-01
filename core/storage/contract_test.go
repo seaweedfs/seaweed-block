@@ -7,6 +7,7 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"github.com/seaweedfs/seaweed-block/core/storage/memorywal"
+	"github.com/seaweedfs/seaweed-block/core/storage/parallelwal"
 )
 
 // LogicalStorage is re-aliased for brevity inside this _test package.
@@ -60,6 +61,25 @@ func implementations() []implFactory {
 			name: "MemoryWAL",
 			fresh: func(t *testing.T, dir string, numBlocks uint32, blockSize int) LogicalStorage {
 				return memorywal.NewStore(numBlocks, blockSize)
+			},
+		},
+		{
+			name: "ParallelWAL",
+			fresh: func(t *testing.T, dir string, numBlocks uint32, blockSize int) LogicalStorage {
+				path := filepath.Join(dir, "parallelwal.bin")
+				s, err := parallelwal.CreateStoreWithConfig(path, parallelwal.Config{
+					NumBlocks:    numBlocks,
+					BlockSize:    blockSize,
+					LaneCount:    4,
+					StripeBlocks: 1,
+					SlotsPerLane: 128,
+					QueueDepth:   64,
+				})
+				if err != nil {
+					t.Fatalf("Create parallelwal: %v", err)
+				}
+				t.Cleanup(func() { _ = s.Close() })
+				return s
 			},
 		},
 	}

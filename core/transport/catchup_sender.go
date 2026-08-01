@@ -30,12 +30,13 @@ func (e *BlockExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpoin
 		FrontierHint:    frontierHint,
 		TargetLSN:       frontierHint,
 	}
-	session, err := e.registerSession(lineage)
+	session, err := e.registerAsyncSession(lineage)
 	if err != nil {
 		return err
 	}
 
 	go func() {
+		defer e.asyncWG.Done()
 		achieved, err := e.doCatchUp(replicaID, session, fromLSN, frontierHint)
 		e.finishSession(replicaID, session, achieved, err)
 	}()

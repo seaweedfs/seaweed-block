@@ -117,10 +117,11 @@ func configureProbeLoopOnCluster(t *testing.T, c *Cluster) {
 	}
 }
 
-// drivePeerAdmit applies AssignmentInfo + a successful ProbeResult
-// into the per-replica adapter so the engine reaches Healthy before
-// we exercise the failure → restart path. The cluster harness exposes
-// DriveAssignment + DriveProbeResult for exactly this seam.
+// drivePeerAdmit applies AssignmentInfo and waits for its real asynchronous
+// probe to finish before exercising the restart path.
+// Injecting a second ProbeResult here leaves the assignment probe in flight;
+// that stale probe can cross the later kill/rebind boundary and accidentally
+// trigger recovery in the no-probe-loop negative control.
 func drivePeerAdmit(t *testing.T, c *Cluster) {
 	t.Helper()
 	r := c.Replica(0)
@@ -132,16 +133,18 @@ func drivePeerAdmit(t *testing.T, c *Cluster) {
 		DataAddr:        r.Addr,
 		CtrlAddr:        r.Addr,
 	})
-	_, primaryS, primaryH := c.primary.Store.Boundaries()
-	c.DriveProbeResult(0, adapter.ProbeResult{
-		ReplicaID:         "replica-0",
-		Success:           true,
-		EndpointVersion:   1,
-		TransportEpoch:    1,
-		ReplicaFlushedLSN: primaryH, // start caught up
-		PrimaryTailLSN:    primaryS,
-		PrimaryHeadLSN:    primaryH,
-	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, entry := range c.Adapter(0).Trace() {
+			if entry.Step == "event" && entry.Detail == "ProbeSucceeded" {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("drivePeerAdmit: assignment probe did not complete; projection=%+v trace=%v",
+		c.Adapter(0).Projection(), c.Adapter(0).Trace())
 }
 
 // writeOneBlock writes a single LBA via the primary's StorageBackend

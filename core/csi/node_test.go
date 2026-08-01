@@ -94,28 +94,44 @@ type mockMountUtil struct {
 }
 
 type mockNVMeUtil struct {
-	connectErr        error
-	disconnectErr     error
-	getDeviceResult   string
-	getDeviceErr      error
-	connected         map[string]bool
-	connectedPaths    map[string]bool
-	calls             []string
-	connectTransports []FrontendTransport
+	connectErr                error
+	connectCreatesPathOnError bool
+	disconnectErr             error
+	getDeviceResult           string
+	getDeviceErr              error
+	connected                 map[string]bool
+	connectedPaths            map[string]bool
+	pathConnectDelay          map[string]int
+	pathChecks                map[string]int
+	calls                     []string
+	connectTransports         []FrontendTransport
 }
 
 func newMockNVMeUtil() *mockNVMeUtil {
-	return &mockNVMeUtil{connected: map[string]bool{}, connectedPaths: map[string]bool{}, getDeviceResult: "/dev/nvme1n1"}
+	return &mockNVMeUtil{
+		connected:        map[string]bool{},
+		connectedPaths:   map[string]bool{},
+		pathConnectDelay: map[string]int{},
+		pathChecks:       map[string]int{},
+		getDeviceResult:  "/dev/nvme1n1",
+	}
 }
 
 func (m *mockNVMeUtil) Connect(_ context.Context, transport FrontendTransport, addr, nqn string) error {
 	m.calls = append(m.calls, "connect:"+addr+":"+nqn)
 	m.connectTransports = append(m.connectTransports, transport)
 	if m.connectErr != nil {
+		if m.connectCreatesPathOnError {
+			m.connected[nqn] = true
+			m.connectedPaths[mockNVMePathKey(nqn, transport, addr)] = true
+		}
 		return m.connectErr
 	}
 	m.connected[nqn] = true
-	m.connectedPaths[nqn+"|"+addr] = true
+	key := mockNVMePathKey(nqn, transport, addr)
+	if m.pathConnectDelay[key] == 0 {
+		m.connectedPaths[key] = true
+	}
 	return nil
 }
 
@@ -139,11 +155,11 @@ func (m *mockNVMeUtil) DisconnectPath(_ context.Context, controller string) erro
 		return m.disconnectErr
 	}
 	for key := range m.connectedPaths {
-		nqn, addr, ok := strings.Cut(key, "|")
+		nqn, transport, addr, ok := parseMockNVMePathKey(key)
 		if !ok {
 			continue
 		}
-		if mockNVMeController(nqn, addr) == controller {
+		if mockNVMeController(nqn, transport, addr) == controller {
 			delete(m.connectedPaths, key)
 		}
 	}
@@ -160,31 +176,51 @@ func (m *mockNVMeUtil) IsConnected(_ context.Context, nqn string) (bool, error) 
 	return m.connected[nqn], nil
 }
 
-func (m *mockNVMeUtil) IsPathConnected(_ context.Context, nqn, addr string) (bool, error) {
+func (m *mockNVMeUtil) IsPathConnected(_ context.Context, nqn string, transport FrontendTransport, addr string) (bool, error) {
 	m.calls = append(m.calls, "ispathconnected:"+addr+":"+nqn)
-	return m.connectedPaths[nqn+"|"+addr], nil
+	key := mockNVMePathKey(nqn, transport, addr)
+	if !m.connectedPaths[key] && m.pathConnectDelay[key] > 0 {
+		m.pathChecks[key]++
+		if m.pathChecks[key] >= m.pathConnectDelay[key] {
+			m.connectedPaths[key] = true
+		}
+	}
+	return m.connectedPaths[key], nil
 }
 
 func (m *mockNVMeUtil) ListPaths(_ context.Context, nqn string) ([]NVMeConnectedPath, error) {
 	m.calls = append(m.calls, "listpaths:"+nqn)
 	var paths []NVMeConnectedPath
 	for key := range m.connectedPaths {
-		gotNQN, addr, ok := strings.Cut(key, "|")
+		gotNQN, transport, addr, ok := parseMockNVMePathKey(key)
 		if !ok || gotNQN != nqn {
 			continue
 		}
 		paths = append(paths, NVMeConnectedPath{
 			Addr:       addr,
-			Controller: mockNVMeController(gotNQN, addr),
+			Controller: mockNVMeController(gotNQN, transport, addr),
+			Transport:  transport,
 		})
 	}
 	sort.Slice(paths, func(i, j int) bool { return paths[i].Addr < paths[j].Addr })
 	return paths, nil
 }
 
-func mockNVMeController(nqn, addr string) string {
+func mockNVMePathKey(nqn string, transport FrontendTransport, addr string) string {
+	return nqn + "|" + string(transport) + "|" + addr
+}
+
+func parseMockNVMePathKey(key string) (string, FrontendTransport, string, bool) {
+	parts := strings.SplitN(key, "|", 3)
+	if len(parts) != 3 {
+		return "", "", "", false
+	}
+	return parts[0], FrontendTransport(parts[1]), parts[2], true
+}
+
+func mockNVMeController(nqn string, transport FrontendTransport, addr string) string {
 	replacer := strings.NewReplacer(":", "-", ".", "-", "/", "-", "|", "-", "=", "-")
-	return "/dev/mock-" + replacer.Replace(nqn+"-"+addr)
+	return "/dev/mock-" + replacer.Replace(nqn+"-"+string(transport)+"-"+addr)
 }
 
 func newMockMountUtil() *mockMountUtil {
@@ -671,7 +707,11 @@ func TestNodeStage_NVMeProtocolUsesNVMeTarget(t *testing.T) {
 	}
 	want := []string{
 		"isconnected:nqn.2026-05.io.seaweedfs:v1",
+		"listpaths:nqn.2026-05.io.seaweedfs:v1",
+		"ispathconnected:127.0.0.1:4420:nqn.2026-05.io.seaweedfs:v1",
 		"connect:127.0.0.1:4420:nqn.2026-05.io.seaweedfs:v1",
+		"ispathconnected:127.0.0.1:4420:nqn.2026-05.io.seaweedfs:v1",
+		"listpaths:nqn.2026-05.io.seaweedfs:v1",
 		"getdevice:nqn.2026-05.io.seaweedfs:v1",
 	}
 	for i, w := range want {
@@ -752,12 +792,14 @@ func TestNodeStage_NVMeMultipathConnectsAllTargets(t *testing.T) {
 	}
 	want := []string{
 		"isconnected:nqn.2026-05.io.seaweedfs:v1",
+		"listpaths:nqn.2026-05.io.seaweedfs:v1",
 		"ispathconnected:127.0.0.1:4420:nqn.2026-05.io.seaweedfs:v1",
 		"connect:127.0.0.1:4420:nqn.2026-05.io.seaweedfs:v1",
 		"ispathconnected:127.0.0.1:4421:nqn.2026-05.io.seaweedfs:v1",
 		"connect:127.0.0.1:4421:nqn.2026-05.io.seaweedfs:v1",
 		"ispathconnected:127.0.0.1:4420:nqn.2026-05.io.seaweedfs:v1",
 		"ispathconnected:127.0.0.1:4421:nqn.2026-05.io.seaweedfs:v1",
+		"listpaths:nqn.2026-05.io.seaweedfs:v1",
 		"getdevice:nqn.2026-05.io.seaweedfs:v1",
 	}
 	for i, w := range want {
@@ -878,7 +920,7 @@ func TestNodeStage_NVMeRecreatesStagingIdentityForAlreadyConnectedSubsystem(t *t
 	addrs := []string{"127.0.0.1:4420", "127.0.0.1:4421"}
 	mn.connected[nqn] = true
 	for _, addr := range addrs {
-		mn.connectedPaths[nqn+"|"+addr] = true
+		mn.connectedPaths[mockNVMePathKey(nqn, FrontendTransportTCP, addr)] = true
 	}
 	staging := t.TempDir()
 
@@ -934,14 +976,13 @@ func TestNodeStage_NVMeCleansUpConnectWhenMountFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected mount failure")
 	}
-	foundDisconnect := false
-	for _, call := range mn.calls {
-		if call == "disconnect:nqn.2026-05.io.seaweedfs:v1" {
-			foundDisconnect = true
-		}
+	nqn := "nqn.2026-05.io.seaweedfs:v1"
+	controller := mockNVMeController(nqn, FrontendTransportTCP, "127.0.0.1:4420")
+	if !containsString(mn.calls, "disconnectpath:"+controller) {
+		t.Fatalf("expected scoped cleanup disconnect, calls=%v", mn.calls)
 	}
-	if !foundDisconnect {
-		t.Fatalf("expected cleanup disconnect, calls=%v", mn.calls)
+	if containsString(mn.calls, "disconnect:"+nqn) {
+		t.Fatalf("rollback must not disconnect the whole subsystem, calls=%v", mn.calls)
 	}
 	if ns.staged["v1"] != nil {
 		t.Fatalf("staged entry must not be recorded after mount failure: %+v", ns.staged["v1"])
@@ -966,17 +1007,112 @@ func TestNodeStage_NVMeMultipathCleansUpConnectsWhenMountFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected mount failure")
 	}
-	foundDisconnect := false
-	for _, call := range mn.calls {
-		if call == "disconnect:nqn.2026-05.io.seaweedfs:v1" {
-			foundDisconnect = true
+	nqn := "nqn.2026-05.io.seaweedfs:v1"
+	for _, addr := range []string{"127.0.0.1:4420", "127.0.0.1:4421"} {
+		controller := mockNVMeController(nqn, FrontendTransportTCP, addr)
+		if !containsString(mn.calls, "disconnectpath:"+controller) {
+			t.Fatalf("expected scoped cleanup disconnect for %s, calls=%v", addr, mn.calls)
 		}
 	}
-	if !foundDisconnect {
-		t.Fatalf("expected cleanup disconnect, calls=%v", mn.calls)
+	if containsString(mn.calls, "disconnect:"+nqn) {
+		t.Fatalf("rollback must not disconnect the whole subsystem, calls=%v", mn.calls)
 	}
 	if ns.staged["v1"] != nil {
 		t.Fatalf("staged entry must not be recorded after mount failure: %+v", ns.staged["v1"])
+	}
+}
+
+func TestPhase166_NodeStageWaitsForRDMAPathToBecomeLive(t *testing.T) {
+	mn, mm := newMockNVMeUtil(), newMockMountUtil()
+	ns := newTestNodeWithNVMe(newMockISCSIUtil(), mn, mm)
+	nqn := "nqn.2026-05.io.seaweedfs:v1"
+	addr := "10.0.0.3:4420"
+	key := mockNVMePathKey(nqn, FrontendTransportRDMA, addr)
+	mn.pathConnectDelay[key] = 2
+
+	_, err := ns.NodeStageVolume(context.Background(), &csipb.NodeStageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: t.TempDir(),
+		VolumeCapability:  testVolumeCapability(),
+		PublishContext: map[string]string{
+			"protocol":      "nvme",
+			"nvmeTransport": "rdma",
+			"nvmeAddr":      addr,
+			"nqn":           nqn,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NodeStageVolume: %v", err)
+	}
+	if mn.pathChecks[key] < 2 {
+		t.Fatalf("path checks=%d want at least 2", mn.pathChecks[key])
+	}
+}
+
+func TestPhase166_NodeStageRollbackPreservesPreexistingPath(t *testing.T) {
+	mn, mm := newMockNVMeUtil(), newMockMountUtil()
+	mm.formatAndMountErr = errors.New("mkfs failed")
+	ns := newTestNodeWithNVMe(newMockISCSIUtil(), mn, mm)
+	nqn := "nqn.2026-05.io.seaweedfs:v1"
+	existingAddr := "10.0.0.1:4420"
+	newAddr := "10.0.0.3:4420"
+	mn.connected[nqn] = true
+	mn.connectedPaths[mockNVMePathKey(nqn, FrontendTransportRDMA, existingAddr)] = true
+
+	_, err := ns.NodeStageVolume(context.Background(), &csipb.NodeStageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: t.TempDir(),
+		VolumeCapability:  testVolumeCapability(),
+		PublishContext: map[string]string{
+			"protocol":         "nvme",
+			"nvmeTransport":    "rdma",
+			"nvmeAddr":         existingAddr,
+			"nvmeAddrs":        existingAddr + "," + newAddr,
+			"nqn":              nqn,
+			"stage2_multipath": "true",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected mount failure")
+	}
+	existingController := mockNVMeController(nqn, FrontendTransportRDMA, existingAddr)
+	newController := mockNVMeController(nqn, FrontendTransportRDMA, newAddr)
+	if containsString(mn.calls, "disconnectpath:"+existingController) {
+		t.Fatalf("rollback disconnected preexisting path, calls=%v", mn.calls)
+	}
+	if !containsString(mn.calls, "disconnectpath:"+newController) {
+		t.Fatalf("rollback did not disconnect new path, calls=%v", mn.calls)
+	}
+	if !mn.connectedPaths[mockNVMePathKey(nqn, FrontendTransportRDMA, existingAddr)] {
+		t.Fatal("preexisting path was removed")
+	}
+}
+
+func TestPhase166_NodeStageRollsBackControllerCreatedByFailedConnect(t *testing.T) {
+	mn, mm := newMockNVMeUtil(), newMockMountUtil()
+	mn.connectErr = errors.New("connect command failed after controller creation")
+	mn.connectCreatesPathOnError = true
+	ns := newTestNodeWithNVMe(newMockISCSIUtil(), mn, mm)
+	nqn := "nqn.2026-05.io.seaweedfs:v1"
+	addr := "10.0.0.3:4420"
+
+	_, err := ns.NodeStageVolume(context.Background(), &csipb.NodeStageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: t.TempDir(),
+		VolumeCapability:  testVolumeCapability(),
+		PublishContext: map[string]string{
+			"protocol":      "nvme",
+			"nvmeTransport": "rdma",
+			"nvmeAddr":      addr,
+			"nqn":           nqn,
+		},
+	})
+	if err == nil {
+		t.Fatal("expected connect failure")
+	}
+	controller := mockNVMeController(nqn, FrontendTransportRDMA, addr)
+	if !containsString(mn.calls, "disconnectpath:"+controller) {
+		t.Fatalf("failed connect controller was not rolled back, calls=%v", mn.calls)
 	}
 }
 
@@ -1073,7 +1209,7 @@ func TestNodeStage_MountedNVMeReconnectsMissingPublishedPath(t *testing.T) {
 	oldAddr := "127.0.0.1:4420"
 	newAddr := "127.0.0.1:4421"
 	mn.connected[nqn] = true
-	mn.connectedPaths[nqn+"|"+oldAddr] = true
+	mn.connectedPaths[mockNVMePathKey(nqn, FrontendTransportTCP, oldAddr)] = true
 	lookup := &sequenceLookup{targets: []PublishTarget{{
 		VolumeID:  "v1",
 		ReplicaID: "r1",
@@ -1204,7 +1340,7 @@ func TestMountedNVMeReconnectOwner_ReconcilesMissingPublishedPath(t *testing.T) 
 	oldAddr := "127.0.0.1:4420"
 	newAddr := "127.0.0.1:4421"
 	mn.connected[nqn] = true
-	mn.connectedPaths[nqn+"|"+oldAddr] = true
+	mn.connectedPaths[mockNVMePathKey(nqn, FrontendTransportTCP, oldAddr)] = true
 	lookup := &sequenceLookup{targets: []PublishTarget{{
 		VolumeID:  "v1",
 		ReplicaID: "r1",
@@ -1277,9 +1413,9 @@ func TestMountedNVMeReconnectOwner_PrunesStaleDesiredPath(t *testing.T) {
 	otherAddr := "127.0.0.3:4420"
 	mn.connected[nqn] = true
 	mn.connected[otherNQN] = true
-	mn.connectedPaths[nqn+"|"+oldAddr] = true
-	mn.connectedPaths[nqn+"|"+remainingAddr] = true
-	mn.connectedPaths[otherNQN+"|"+otherAddr] = true
+	mn.connectedPaths[mockNVMePathKey(nqn, FrontendTransportTCP, oldAddr)] = true
+	mn.connectedPaths[mockNVMePathKey(nqn, FrontendTransportTCP, remainingAddr)] = true
+	mn.connectedPaths[mockNVMePathKey(otherNQN, FrontendTransportTCP, otherAddr)] = true
 	lookup := &sequenceLookup{targets: []PublishTarget{{
 		VolumeID:  "v1",
 		ReplicaID: "r1",
@@ -1325,27 +1461,192 @@ func TestMountedNVMeReconnectOwner_PrunesStaleDesiredPath(t *testing.T) {
 	if result.Checked != 1 || result.Reconnected != 1 || result.Pruned != 1 || result.Failed != 0 {
 		t.Fatalf("result=%+v", result)
 	}
-	if mn.connectedPaths[nqn+"|"+oldAddr] {
+	if mn.connectedPaths[mockNVMePathKey(nqn, FrontendTransportTCP, oldAddr)] {
 		t.Fatalf("stale old path %s still connected", oldAddr)
 	}
-	for _, key := range []string{nqn + "|" + newAddr, nqn + "|" + remainingAddr, otherNQN + "|" + otherAddr} {
+	for _, key := range []string{
+		mockNVMePathKey(nqn, FrontendTransportTCP, newAddr),
+		mockNVMePathKey(nqn, FrontendTransportTCP, remainingAddr),
+		mockNVMePathKey(otherNQN, FrontendTransportTCP, otherAddr),
+	} {
 		if !mn.connectedPaths[key] {
 			t.Fatalf("expected path %s to remain connected, paths=%v", key, mn.connectedPaths)
 		}
 	}
-	if !containsString(mn.calls, "disconnectpath:"+mockNVMeController(nqn, oldAddr)) {
+	if !containsString(mn.calls, "disconnectpath:"+mockNVMeController(nqn, FrontendTransportTCP, oldAddr)) {
 		t.Fatalf("missing scoped stale path disconnect, calls=%v", mn.calls)
 	}
 	if containsString(mn.calls, "disconnect:"+nqn) || containsString(mn.calls, "disconnect:"+otherNQN) {
 		t.Fatalf("prune must not use full subsystem disconnect, calls=%v", mn.calls)
 	}
 	for _, call := range mn.calls {
-		if call == "disconnectpath:"+mockNVMeController(otherNQN, otherAddr) {
+		if call == "disconnectpath:"+mockNVMeController(otherNQN, FrontendTransportTCP, otherAddr) {
 			t.Fatalf("prune touched unrelated NQN, calls=%v", mn.calls)
 		}
 	}
 	if len(reporter.events) != 1 || reporter.events[0].Type != EventTypeCSIReattachObserved {
 		t.Fatalf("events=%+v", reporter.events)
+	}
+}
+
+func TestMountedNVMeReconnectOwner_ReplacesSingleRDMAEndpoint(t *testing.T) {
+	_, mn, mm := newMockISCSIUtil(), newMockNVMeUtil(), newMockMountUtil()
+	nqn := "nqn.2026-05.io.seaweedfs:v1"
+	oldAddr := "10.0.0.3:4420"
+	newAddr := "10.0.0.3:4520"
+	mn.connected[nqn] = true
+	mn.connectedPaths[mockNVMePathKey(nqn, FrontendTransportRDMA, oldAddr)] = true
+	lookup := &sequenceLookup{targets: []PublishTarget{{
+		VolumeID:          "v1",
+		ReplicaID:         "r1",
+		Protocol:          ProtocolNVMe,
+		FrontendTransport: FrontendTransportRDMA,
+		NVMeAddr:          newAddr,
+		NVMeAddrs:         []string{newAddr},
+		NQN:               nqn,
+		NSID:              1,
+	}}}
+	ns := NewNodeServer(NodeConfig{
+		NodeID:    "node-a",
+		NVMeUtil:  mn,
+		MountUtil: mm,
+		Lookup:    lookup,
+	})
+	staging := t.TempDir()
+	mm.mounted[staging] = true
+	if err := writeTransportFile(staging, transportNVMe); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeVolumeFile(staging, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeTargetFile(staging, nqn); err != nil {
+		t.Fatal(err)
+	}
+	ns.staged["v1"] = &stagedVolumeInfo{
+		nqn:           nqn,
+		nvmeAddr:      oldAddr,
+		nvmeAddrs:     []string{oldAddr},
+		nvmeTransport: FrontendTransportRDMA,
+		transport:     transportNVMe,
+		stagingPath:   staging,
+	}
+
+	result, err := ns.ReconcileMountedNVMeVolumes(context.Background())
+	if err != nil {
+		t.Fatalf("ReconcileMountedNVMeVolumes: %v", err)
+	}
+	if result.Checked != 1 || result.Reconnected != 1 || result.Pruned != 1 || result.Failed != 0 {
+		t.Fatalf("result=%+v", result)
+	}
+	if len(mn.connectTransports) != 1 || mn.connectTransports[0] != FrontendTransportRDMA {
+		t.Fatalf("connect transports=%v want [rdma]", mn.connectTransports)
+	}
+	if !mn.connectedPaths[mockNVMePathKey(nqn, FrontendTransportRDMA, newAddr)] ||
+		mn.connectedPaths[mockNVMePathKey(nqn, FrontendTransportRDMA, oldAddr)] {
+		t.Fatalf("connected paths=%v", mn.connectedPaths)
+	}
+	if !containsString(mn.calls, "disconnectpath:"+mockNVMeController(nqn, FrontendTransportRDMA, oldAddr)) {
+		t.Fatalf("missing scoped stale path disconnect, calls=%v", mn.calls)
+	}
+	connectIndex, disconnectIndex := -1, -1
+	for i, call := range mn.calls {
+		if call == "connect:"+newAddr+":"+nqn {
+			connectIndex = i
+		}
+		if call == "disconnectpath:"+mockNVMeController(nqn, FrontendTransportRDMA, oldAddr) {
+			disconnectIndex = i
+		}
+	}
+	if connectIndex < 0 || disconnectIndex < 0 || connectIndex >= disconnectIndex {
+		t.Fatalf("new path must connect before old path is pruned, calls=%v", mn.calls)
+	}
+	if containsString(mn.calls, "disconnect:"+nqn) {
+		t.Fatalf("single-path replacement must not disconnect the whole subsystem, calls=%v", mn.calls)
+	}
+	info := ns.staged["v1"]
+	if info == nil || info.nvmeTransport != FrontendTransportRDMA || info.nvmeAddr != newAddr {
+		t.Fatalf("staged info=%+v", info)
+	}
+}
+
+func TestMountedNVMeReconnectOwner_DoesNotAcceptTCPAtDesiredRDMAEndpoint(t *testing.T) {
+	_, mn, mm := newMockISCSIUtil(), newMockNVMeUtil(), newMockMountUtil()
+	nqn := "nqn.2026-05.io.seaweedfs:v1"
+	addr := "10.0.0.3:4420"
+	mn.connected[nqn] = true
+	mn.connectedPaths[mockNVMePathKey(nqn, FrontendTransportTCP, addr)] = true
+	lookup := &sequenceLookup{targets: []PublishTarget{{
+		VolumeID:          "v1",
+		Protocol:          ProtocolNVMe,
+		FrontendTransport: FrontendTransportRDMA,
+		NVMeAddr:          addr,
+		NQN:               nqn,
+	}}}
+	ns := NewNodeServer(NodeConfig{NodeID: "node-a", NVMeUtil: mn, MountUtil: mm, Lookup: lookup})
+	staging := t.TempDir()
+	mm.mounted[staging] = true
+	if err := writeTransportFile(staging, transportNVMe); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeVolumeFile(staging, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeTargetFile(staging, nqn); err != nil {
+		t.Fatal(err)
+	}
+	ns.staged["v1"] = &stagedVolumeInfo{
+		nqn: nqn, nvmeAddr: addr, nvmeAddrs: []string{addr},
+		nvmeTransport: FrontendTransportRDMA, transport: transportNVMe, stagingPath: staging,
+	}
+
+	result, err := ns.ReconcileMountedNVMeVolumes(context.Background())
+	if err != nil {
+		t.Fatalf("ReconcileMountedNVMeVolumes: %v", err)
+	}
+	if result.Reconnected != 1 || result.Pruned != 1 || result.Failed != 0 {
+		t.Fatalf("result=%+v", result)
+	}
+	if !mn.connectedPaths[mockNVMePathKey(nqn, FrontendTransportRDMA, addr)] ||
+		mn.connectedPaths[mockNVMePathKey(nqn, FrontendTransportTCP, addr)] {
+		t.Fatalf("connected paths=%v", mn.connectedPaths)
+	}
+	if len(mn.connectTransports) != 1 || mn.connectTransports[0] != FrontendTransportRDMA {
+		t.Fatalf("connect transports=%v want [rdma]", mn.connectTransports)
+	}
+}
+
+func TestMountedNVMeReconnectOwner_RejectsTransportChangeWithoutRestage(t *testing.T) {
+	_, mn, mm := newMockISCSIUtil(), newMockNVMeUtil(), newMockMountUtil()
+	nqn := "nqn.2026-05.io.seaweedfs:v1"
+	addr := "10.0.0.3:4420"
+	lookup := &sequenceLookup{targets: []PublishTarget{{
+		VolumeID: "v1", Protocol: ProtocolNVMe, FrontendTransport: FrontendTransportTCP,
+		NVMeAddr: addr, NQN: nqn,
+	}}}
+	ns := NewNodeServer(NodeConfig{NodeID: "node-a", NVMeUtil: mn, MountUtil: mm, Lookup: lookup})
+	staging := t.TempDir()
+	mm.mounted[staging] = true
+	if err := writeTransportFile(staging, transportNVMe); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeVolumeFile(staging, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeTargetFile(staging, nqn); err != nil {
+		t.Fatal(err)
+	}
+	ns.staged["v1"] = &stagedVolumeInfo{
+		nqn: nqn, nvmeAddr: addr, nvmeAddrs: []string{addr},
+		nvmeTransport: FrontendTransportRDMA, transport: transportNVMe, stagingPath: staging,
+	}
+
+	_, err := ns.ReconcileMountedNVMeVolumes(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "transport change requires restage") {
+		t.Fatalf("err=%v want transport-change refusal", err)
+	}
+	if len(mn.connectTransports) != 0 {
+		t.Fatalf("transport mismatch must fail before connect, transports=%v", mn.connectTransports)
 	}
 }
 
@@ -1355,7 +1656,7 @@ func TestMountedNVMeReconnectOwnerLoop_InvokesReconnect(t *testing.T) {
 	oldAddr := "127.0.0.1:4420"
 	newAddr := "127.0.0.1:4421"
 	mn.connected[nqn] = true
-	mn.connectedPaths[nqn+"|"+oldAddr] = true
+	mn.connectedPaths[mockNVMePathKey(nqn, FrontendTransportTCP, oldAddr)] = true
 	lookup := &sequenceLookup{targets: []PublishTarget{{
 		VolumeID:  "v1",
 		ReplicaID: "r1",

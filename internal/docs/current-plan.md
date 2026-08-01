@@ -1,84 +1,217 @@
-# Current Plan: Phase 165 NVMe/RDMA Kubernetes Publish And Attach
+# Current Plan: Phase 173 Storage Execution Architecture Decision
 
-Status: closed on 2026-07-18.
+Status: active evidence-first architecture milestone.
 
-Phase 164 closed the standalone Linux NVMe/RDMA correctness and lifecycle gate.
-Phase 165 carries that transport through Kubernetes without changing the
-NVMe/TCP default.
+## Why This Is Next
+
+Phases 167-172 rejected five plausible optimizations without weakening their
+gates:
+
+- a parallel WAL backend did not beat the shipped path;
+- native `io_uring` reduced no dominant persistence round;
+- segmented group commit did not scale;
+- staged append ownership had no stable batching headroom;
+- extent coalescing opportunity was workload-dependent;
+- WAL materialization cut physical reads but improved four-writer throughput
+  only `1.068x` and produced a `2.031x` sample range.
+
+The Phase 172 CPU profile explains why another local patch is unlikely to
+close the gap:
+
+```text
+flusher.flushOnceInternal cumulative CPU: 38.6%
+WALStore.Write cumulative CPU:             34.2%
+syscall flat CPU:                          32.9%
+foreground WAL pwrite cumulative CPU:      17.8%
+flusher pread cumulative CPU:              13.3%
+mutex lock/spin cumulative CPU:            about 11%
+```
+
+No single stage dominates. Foreground append, background WAL readback, extent
+writeback, fsync, and lock scheduling share one file and one volume-level
+execution context. Vitastor's useful lesson is not a specific algorithm to
+copy; it is to make journal/data ownership, queue depth, durability boundaries,
+and completion order explicit before optimizing.
+
+Phase 173 is therefore one large decision-and-delivery milestone. It first
+stabilizes the measurement model, then attributes the complete shipped path,
+then selects at most one architectural candidate. Implementation, recovery,
+replication, mounted validation, and promotion remain in this phase rather
+than being split into many semantic micro-phases.
 
 ## Goal
 
-Add one opt-in Kubernetes NVMe/RDMA path from StorageClass intent through
-launcher publication and CSI node attach to mounted Pod I/O. Keep NVMe/TCP as
-the default and preserve the existing three-way control ownership boundaries.
+Produce one defensible answer to:
+
+```text
+Which architectural boundary, if any, can materially improve shipped
+WALStore throughput while preserving its durability and recovery contract?
+```
+
+The eligible outcomes are:
+
+1. implement and promote one evidence-selected architecture;
+2. implement and retain one opt-in candidate with named blockers;
+3. reject all candidates and publish the measured shipped-backend envelope.
+
+All three are valid. Repeating a previously rejected mechanism without new
+evidence is not.
+
+## Non-Goals
+
+- No immediate `io_uring`, SQPOLL, fixed-buffer, `O_DIRECT`, FUA, or raw-device
+  implementation.
+- No automatic switch from `walstore` to `parallel-walstore` or `smartwal`.
+- No disk-format change before a format/recovery design is selected.
+- No disabled-flusher, checkpoint-free, page-cache-only, or sink-only number
+  may be presented as product throughput.
+- No frontend, replication, or mounted result may be inferred from an engine
+  microbenchmark.
+- No threshold changes after candidate results are visible.
+
+## Required Invariants
+
+1. Acknowledged writes remain recoverable after process kill and host restart.
+2. Checkpoint and recyclable tail never advance over incomplete work.
+3. Same-LBA order is deterministic; cross-LBA concurrency cannot publish a
+   non-contiguous durable frontier.
+4. Direct BASE/rebuild ownership cannot race with background writeback.
+5. WAL corruption and malformed geometry fail closed with typed evidence.
+6. Sync fences every write admitted before the call and does not wait for work
+   admitted later.
+7. Close blocks new mutation, drains owned work, and reports terminal failure.
+8. RF3 acknowledgement and catch-up semantics remain unchanged.
+9. Memory and queue ownership are bounded and visible.
+10. Rejected candidates leave the shipped format and defaults unchanged.
 
 ## Deliverables
 
-### D1. Typed Publish Contract
+### D1. Deterministic Fixed-Work Measurement Contract
 
-- Add an explicit NVMe transport value to frontend publication and CSI volume
-  context; do not infer transport from port or address.
-- Accept only `tcp` or `rdma`, defaulting old/empty records to `tcp`.
-- Preserve compatibility for existing iSCSI and NVMe/TCP volumes.
+- Replace Go benchmark auto-calibration as the admission source with a
+  fixed-operation harness. Keep Go benchmarks as diagnostics only.
+- Use a predeclared operation count, warmup, file size, LBA sequence, writer
+  count, 100 ms flusher, one final Sync, and complete drain.
+- Run ordinary sequential/scattered 4 KiB, explicit 16-block batch, and
+  mounted-sized mixed write shapes at 1/2/4/8 writers.
+- Record foreground wall time and p50/p95/p99 separately from Sync/drain.
+- Record CPU affinity, scheduler, kernel, filesystem, mount options, device,
+  page-cache policy, free space, temperature/throttling evidence, and
+  background load.
+- Require two independent five-run baseline sets with four-writer max/min
+  range at most `1.25x` before any architecture admission. If the harness
+  cannot meet that bound, fix the harness/lab and stop.
 
-### D2. Launcher And Chart Wiring
+### D2. Complete Shipped-Path Attribution
 
-- Add an opt-in StorageClass/Helm value for NVMe/RDMA.
-- Select a non-loopback node data-plane address and pass
-  `--nvme-transport=rdma` to the target volume only when requested.
-- Project module, RDMA device, bind-address, NBD, and configfs blockers before
-  claiming a publishable target.
+- Correlate product counters with exact-path `strace`, `perf stat`, CPU/memory
+  profiles, lock wait, `iostat`, and final checkpoint evidence.
+- Attribute foreground WAL encode/copy/CRC/pwrite/lock, flusher
+  snapshot/pread/decode/extent-pwrite/fsync/checkpoint, replication wait, and
+  frontend cost separately.
+- Report time and operation count, not percentages alone.
+- Prove all counters reconcile with fixed logical operations and bytes.
 
-### D3. CSI Node Lifecycle
+### D3. Diagnostic Architecture Controls
 
-- Use transport-aware `nvme connect -t rdma` for an RDMA publish context.
-- Make NodeStage/NodeUnstage idempotent and preserve foreign NVMe controllers.
-- Refuse missing host prerequisites without falling back silently to TCP.
+Run test-only controls in the same session; none are product candidates:
 
-### D4. Mounted Workload Gate
+- foreground append ceiling with writeback deferred, clearly labeled
+  non-durable/non-product;
+- prefilled flusher-only drain with no foreground writers;
+- current shared-file WAL/extent path versus a same-device split-file scratch
+  control;
+- current volume lock versus a bounded no-contention single-writer control;
+- engine-only versus NVMe/TCP frontend and RF1 versus RF3 acknowledgement.
 
-- Create a PVC from the opt-in RDMA StorageClass.
-- Prove the published target uses the RoCE address and RDMA transport.
-- Mount the volume into a Pod and verify writer/reader checksums through the
-  real CSI node path.
+Select at most one direction:
 
-### D5. Negative And Cleanup Boundary
+- **Owner/queue redesign** only if lock/scheduling is a stable dominant cost;
+- **WAL/extent media separation** only if same-file I/O/fsync interference is
+  a stable dominant cost;
+- **No backend change** if frontend, replication, device, or benchmark
+  variance dominates or the shipped path already meets the target envelope.
 
-- Verify unsupported nodes surface a stable non-Ready reason with no false
-  `Ready=True` and no TCP fallback.
-- Delete Pod/PVC, uninstall, and return host controllers, configfs, NBD,
-  iSCSI/multipath, CRDs, and product processes to baseline.
-- Keep failover, multipath, performance, broad compatibility, and SLOs as
-  explicit non-claims.
+### D4. Selected Architecture Contract
 
-### D6. Close Gate
+Required only when D3 selects a candidate.
 
-- Package D1-D5 into one TestOps scenario using fresh matching product and CSI
-  images.
-- Require control-plane status, CSI evidence, mounted I/O, and independent host
-  cleanup evidence in the same run bundle.
+- Define owner, queue, backpressure, durability frontier, checkpoint, recycle,
+  Close, and failure semantics before code.
+- If storage layout changes, version it explicitly and define create, reopen,
+  upgrade refusal, rollback refusal, support-bundle evidence, and cleanup.
+- Add one dry-run/diagnostic proof and one fail-closed rejected operation
+  before implementing mutation.
+- Independent design review must find no unresolved correctness blocker.
+
+### D5. Bounded Candidate Implementation
+
+- Implement only the selected architecture behind an internal or explicit
+  opt-in boundary.
+- Add no second candidate and no speculative configurability.
+- Keep allocations, queues, buffers, and in-flight operations bounded.
+- Add exact counters for ownership, queue depth, I/O rounds, bytes, wait,
+  completion, failure, and fallback.
+
+### D6. Correctness, Recovery, And Replication Gate
+
+- Same-LBA and cross-LBA concurrency, partial writes, batch wrap, WAL pressure,
+  Sync/Close, direct BASE, recycle floors, malformed records, and crash
+  windows.
+- Reopen, `ScanLBAs`, catch-up, returned-replica rebuild, RF1, and RF3
+  component suites.
+- CGO race repetition and real Linux SIGKILL windows.
+- No fallback or recovery branch may hide candidate failure.
+
+### D7. Same-Run Performance Admission
+
+Use the D1 fixed-work harness and unchanged thresholds:
+
+- one-writer ordinary throughput at least `0.95x` shipped baseline;
+- four-writer ordinary median at least `1.30x` shipped baseline;
+- candidate four-writer max/min range at most `1.25x`;
+- ordinary four-writer p99 no worse than `1.10x`;
+- no workload regresses more than 10%;
+- failed operations/cycles zero and checkpoint coverage complete;
+- product counters agree with OS/device evidence.
+
+Reject and remove the candidate if any required condition fails.
+
+### D8. Mounted RF1/RF3 Close Gate
+
+Run only after D7 admits the candidate:
+
+- exact matching product/CSI images;
+- mounted NVMe/TCP RF1 concurrent write/read/checksum, sustained pressure,
+  restart, and zero-residue cleanup;
+- RF3 sync-quorum with delayed peer, catch-up/rebuild, restart, honest status,
+  and continuous mounted I/O;
+- same-session shipped baseline/candidate comparison;
+- no default promotion until both correctness and performance gates pass.
+
+## Stop Rules
+
+Stop before implementation when:
+
+- fixed-work baseline remains noisier than `1.25x`;
+- counters do not reconcile with logical work;
+- diagnostic controls identify no dominant architecture boundary;
+- the proposed direction repeats a Phase 167-172 rejection without new
+  evidence;
+- the candidate requires weaker durability, recovery, corruption, cleanup,
+  or RF3 semantics;
+- benefit exists only in a non-product control.
 
 ## Exit Criteria
 
-Phase 165 closes only when a normal Kubernetes user can select the opt-in
-NVMe/RDMA class, mount a PVC, read back written data, and delete it with zero
-residue while NVMe/TCP behavior remains unchanged. The next phase may then own
-NVMe/RDMA reconnect/failover; performance work remains later and separate.
-
-## Result
-
-All deliverables are complete. TestOps run `20260718-025048-9d6a` passed 14/14
-actions with fresh matching images. It proved an RDMA StorageClass, dynamic PVC,
-mounted writer/reader, `SwBlockVolume.status.nvme.transport=rdma`, a live m01
-controller with `transport=rdma` and `traddr=10.0.0.3`, no TCP fallback, and zero
-Kubernetes, controller, configfs, and NBD residue.
-
-During the live gate, two contract gaps were fixed rather than hidden:
-
-- the cluster-evidence protobuf initially dropped `frontend_transport`, causing
-  a false TCP CRD projection despite real RDMA I/O;
-- the runtime image lacked `modprobe`, so `nvmet-rdma` startup could not run.
-
-Gate-only namespace, verifier filename, CR cleanup ownership, and PV deletion
-ordering defects were also corrected. The status CR is explicitly test-cleaned
-because CSI does not own CR deletion under the Phase 44 lifecycle contract.
+```text
+stable fixed-work baseline
+-> complete shipped-path attribution
+-> diagnostic architecture controls
+-> one selected design or honest no-change decision
+-> bounded implementation only if selected
+-> correctness/recovery/replication
+-> same-run admission
+-> mounted RF1/RF3 only if admitted
+-> promote, retain opt-in with blockers, or remove
+```

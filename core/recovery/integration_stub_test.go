@@ -3,6 +3,7 @@ package recovery
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net"
 	"sync"
 	"testing"
@@ -10,6 +11,103 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
+
+func TestPrimaryBridgeStopTerminatesActiveSenderAndRejectsRestart(t *testing.T) {
+	store := storage.NewBlockStore(8, 4096)
+	coord := NewPeerShipCoordinator()
+	bridge := NewPrimaryBridge(store, coord, nil, nil)
+	client, server := net.Pipe()
+	defer server.Close()
+
+	if err := bridge.StartRebuildSession(context.Background(), client, "r1", 1, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	stopped := make(chan struct{})
+	go func() {
+		bridge.StopAndWait()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("PrimaryBridge.StopAndWait did not terminate the active sender")
+	}
+	bridge.StopAndWait()
+
+	nextClient, nextServer := net.Pipe()
+	defer nextClient.Close()
+	defer nextServer.Close()
+	err := bridge.StartRebuildSession(context.Background(), nextClient, "r1", 2, 0, 0)
+	if !errors.Is(err, ErrPrimaryBridgeStopped) {
+		t.Fatalf("StartRebuildSession after Stop error=%v, want ErrPrimaryBridgeStopped", err)
+	}
+}
+
+func TestPrimaryBridgeOnStartCanStopWithoutDeadlock(t *testing.T) {
+	store := storage.NewBlockStore(8, 4096)
+	coord := NewPeerShipCoordinator()
+	var bridge *PrimaryBridge
+	onStartReturned := make(chan struct{})
+	bridge = NewPrimaryBridge(store, coord, func(ReplicaID, uint64) {
+		bridge.Stop()
+		close(onStartReturned)
+	}, nil)
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	err := bridge.StartRebuildSession(context.Background(), client, "r1", 1, 0, 0)
+	if !errors.Is(err, ErrPrimaryBridgeStopped) {
+		t.Fatalf("StartRebuildSession error=%v, want ErrPrimaryBridgeStopped", err)
+	}
+	select {
+	case <-onStartReturned:
+	case <-time.After(time.Second):
+		t.Fatal("onStart-triggered Stop deadlocked")
+	}
+	bridge.StopAndWait()
+}
+
+func TestPrimaryBridgeOnCloseCanStopWithoutDeadlock(t *testing.T) {
+	const blockSize = 4096
+	primary := storage.NewBlockStore(8, blockSize)
+	replica := storage.NewBlockStore(8, blockSize)
+	_, _ = primary.Write(0, formulaPayload(0, 0xD0, blockSize))
+	_, _ = primary.Sync()
+
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+	replicaDone := make(chan struct{})
+	go func() {
+		defer close(replicaDone)
+		_, _ = NewReplicaBridge(replica).Serve(context.Background(), server)
+	}()
+
+	coord := NewPeerShipCoordinator()
+	var bridge *PrimaryBridge
+	closeReturned := make(chan struct{})
+	bridge = NewPrimaryBridge(primary, coord, nil, func(ReplicaID, uint64, uint64, error) {
+		bridge.Stop()
+		close(closeReturned)
+	})
+	_, _, head := primary.Boundaries()
+	if err := bridge.StartRebuildSession(context.Background(), client, "r1", 1, 0, head); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-closeReturned:
+	case <-time.After(time.Second):
+		t.Fatal("onClose-triggered Stop deadlocked")
+	}
+	bridge.StopAndWait()
+	select {
+	case <-replicaDone:
+	case <-time.After(time.Second):
+		t.Fatal("replica did not release after bridge completion")
+	}
+}
 
 // TestIntegrationStub_LifecycleCallbacks exercises the bridge as a
 // CommandExecutor-shaped surface: StartRebuildSession spawns a

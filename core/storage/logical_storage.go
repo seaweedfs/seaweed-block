@@ -211,6 +211,13 @@ type LogicalStorage interface {
 	Close() error
 }
 
+// BaseInstallPreparer is an optional rebuild capability for substrates that
+// stage BASE snapshots before making them authoritative. Recovery callers
+// invoke it once before the first BASE block (or an empty BASE completion).
+type BaseInstallPreparer interface {
+	BeginBaseInstall() error
+}
+
 // WriteBatcher is an optional LogicalStorage extension for contiguous
 // full-block write batches. Each block still receives its own LSN and recovery
 // entry; batching is only an execution optimization and must not change

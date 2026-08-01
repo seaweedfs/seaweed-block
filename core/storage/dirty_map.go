@@ -3,8 +3,7 @@ package storage
 import "sync"
 
 // dirtyEntry tracks where a single LBA's most recent value lives in
-// the WAL — used by readers to fetch unflushed data and by the
-// flusher to apply WAL records to the extent region.
+// the WAL, used by readers and the flusher.
 type dirtyEntry struct {
 	walOffset  uint64
 	dataOffset uint32
@@ -48,10 +47,20 @@ func (d *dirtyMap) put(lba, walOffset, lsn uint64, length uint32) {
 	d.putAt(lba, walOffset, 0, lsn, length)
 }
 
-func (d *dirtyMap) putAt(lba, walOffset uint64, dataOffset uint32, lsn uint64, length uint32) {
+func (d *dirtyMap) putAt(
+	lba, walOffset uint64,
+	dataOffset uint32,
+	lsn uint64,
+	length uint32,
+) {
 	s := d.shard(lba)
 	s.mu.Lock()
-	s.m[lba] = dirtyEntry{walOffset: walOffset, dataOffset: dataOffset, lsn: lsn, length: length}
+	s.m[lba] = dirtyEntry{
+		walOffset:  walOffset,
+		dataOffset: dataOffset,
+		lsn:        lsn,
+		length:     length,
+	}
 	s.mu.Unlock()
 }
 
@@ -118,7 +127,11 @@ func (d *dirtyMap) snapshot() []snapshotEntry {
 		s.mu.RLock()
 		for lba, e := range s.m {
 			out = append(out, snapshotEntry{
-				LBA: lba, WALOffset: e.walOffset, DataOffset: e.dataOffset, LSN: e.lsn, Length: e.length,
+				LBA:        lba,
+				WALOffset:  e.walOffset,
+				DataOffset: e.dataOffset,
+				LSN:        e.lsn,
+				Length:     e.length,
 			})
 		}
 		s.mu.RUnlock()

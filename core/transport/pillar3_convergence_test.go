@@ -46,6 +46,7 @@ package transport
 
 import (
 	"bytes"
+	"sync"
 	"testing"
 	"time"
 
@@ -54,6 +55,34 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"github.com/seaweedfs/seaweed-block/core/storage/memorywal"
 )
+
+type pillar3BlockFirstReadStore struct {
+	storage.LogicalStorage
+	entered     chan struct{}
+	release     chan struct{}
+	enterOnce   sync.Once
+	releaseOnce sync.Once
+}
+
+func newPillar3BlockFirstReadStore(inner storage.LogicalStorage) *pillar3BlockFirstReadStore {
+	return &pillar3BlockFirstReadStore{
+		LogicalStorage: inner,
+		entered:        make(chan struct{}),
+		release:        make(chan struct{}),
+	}
+}
+
+func (s *pillar3BlockFirstReadStore) Read(lba uint32) ([]byte, error) {
+	s.enterOnce.Do(func() {
+		close(s.entered)
+		<-s.release
+	})
+	return s.LogicalStorage.Read(lba)
+}
+
+func (s *pillar3BlockFirstReadStore) unblock() {
+	s.releaseOnce.Do(func() { close(s.release) })
+}
 
 // TestPillar3Slice1_ReceiverConvergence_LiveOverwritesBacklog_SameLBAs —
 // the architect-suggested "pattern A then B" check, generalised to
@@ -99,6 +128,8 @@ func TestPillar3Slice1_ReceiverConvergence_LiveOverwritesBacklog_SameLBAs(t *tes
 	overwriteLBAs := []uint32{3, 5, 7}
 
 	primary := memorywal.NewStore(numBlocks, blockSize)
+	recoveryStore := newPillar3BlockFirstReadStore(primary)
+	defer recoveryStore.unblock()
 	replica := storage.NewBlockStore(numBlocks, blockSize)
 
 	// Seed: A_i pattern keyed by LBA. byte 0 = 0x40 | lba so we can
@@ -126,7 +157,7 @@ func TestPillar3Slice1_ReceiverConvergence_LiveOverwritesBacklog_SameLBAs(t *tes
 	coord := recovery.NewPeerShipCoordinator()
 	const replicaID = "r1"
 	exec := NewBlockExecutorWithDualLane(
-		primary, "127.0.0.1:0", dualLaneAddr, coord,
+		recoveryStore, "127.0.0.1:0", dualLaneAddr, coord,
 		recovery.ReplicaID(replicaID),
 	)
 
@@ -151,6 +182,11 @@ func TestPillar3Slice1_ReceiverConvergence_LiveOverwritesBacklog_SameLBAs(t *tes
 	// will ship it as WALKindSessionLive on the wire.
 	bridge := exec.dualLane.Bridge
 	waitDualLaneLiveReady(t, bridge, recovery.ReplicaID(replicaID))
+	select {
+	case <-recoveryStore.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("base lane did not enter blocked Read")
+	}
 	bRefs := make(map[uint32][]byte, len(overwriteLBAs))
 	for _, lba := range overwriteLBAs {
 		bData := make([]byte, blockSize)
@@ -168,6 +204,7 @@ func TestPillar3Slice1_ReceiverConvergence_LiveOverwritesBacklog_SameLBAs(t *tes
 		}
 		bRefs[lba] = bData
 	}
+	recoveryStore.unblock()
 
 	var res adapter.SessionCloseResult
 	select {

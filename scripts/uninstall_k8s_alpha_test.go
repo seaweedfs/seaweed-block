@@ -134,6 +134,7 @@ func TestVerifyHelmCleanupReportsAllResidueDimensions(t *testing.T) {
 		"cleanup_status=ok",
 		"cleanup_status=failed",
 		"k8s_residue_count=",
+		"nvme_target_residue_count=",
 		"iscsi_residue_count=",
 		"process_residue_count=",
 		"multipath_residue_count=",
@@ -141,6 +142,8 @@ func TestVerifyHelmCleanupReportsAllResidueDimensions(t *testing.T) {
 		"failure_count=",
 		"helm_release_still_present",
 		"kubernetes_sw_block_resources_present",
+		"volumeattachments.storage.k8s.io",
+		"nvme_target_subsystems_present",
 		"iscsi_sessions_present",
 		"iscsi_node_records_present",
 		"multipath_maps_present",
@@ -274,6 +277,44 @@ func TestPhase106NVMETCPCrossNodePublishGateIsClaimBounded(t *testing.T) {
 	for _, forbidden := range []string{"nvme connect", "nvme disconnect", "kubectl patch", "kubectl delete"} {
 		if strings.Contains(script, forbidden) {
 			t.Fatalf("phase106 publish gate must not mutate host or Kubernetes state, found %q", forbidden)
+		}
+	}
+}
+
+func TestPhase166NVMERDMAGateRequiresDisjointInitiator(t *testing.T) {
+	root := repoRoot(t)
+	phase166Raw, err := os.ReadFile(filepath.Join(root, "scripts", "run-phase166-nvme-rdma-k8s-multipath-reconnect-gate.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	phase166 := string(phase166Raw)
+	for _, want := range []string{
+		"require_disjoint_rdma_initiator",
+		"SW_BLOCK_PHASE166_APP_NODE must name a third RoCE-capable Kubernetes initiator",
+		"must be disjoint from RDMA target",
+		`SW_BLOCK_NVME_APP_NODE_SELECTOR="${APP_NODE}"`,
+		`SW_BLOCK_NVME_APP_HOST_SSH_ADDR="${APP_SSH_ADDR}"`,
+		`SW_BLOCK_IMPORT_K3S_NODES="${TARGET_REMOTE_SSH_ADDR},${APP_SSH_ADDR}"`,
+	} {
+		if !strings.Contains(phase166, want) {
+			t.Fatalf("phase166 gate missing %q", want)
+		}
+	}
+
+	phase111Raw, err := os.ReadFile(filepath.Join(root, "scripts", "run-phase111-nvme-k8s-path-loss-crd-gate.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	phase111 := string(phase111Raw)
+	for _, want := range []string{
+		"APP_NODE_OVERRIDE=",
+		"APP_HOST_SSH_ADDR=",
+		"run_on_app_host sudo -n nvme list-subsys",
+		"run_on_app_host sudo -n nvme disconnect",
+		`APP_NODE="${APP_NODE_OVERRIDE:-`,
+	} {
+		if !strings.Contains(phase111, want) {
+			t.Fatalf("phase111 gate missing remote initiator support %q", want)
 		}
 	}
 }

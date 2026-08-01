@@ -170,6 +170,19 @@ Seaweed Block can already demonstrate a narrow Kubernetes block-storage loop:
   exact controller/configfs/NBD/Kubernetes cleanup returns to zero. NVMe/TCP
   remains the default. RDMA reconnect/failover, multipath, performance, broad
   compatibility, and SLOs remain separate future gates.
+- Phase 166 implements the RF2 NVMe/RDMA reconnect and exact path-replacement
+  contract, but the live close gate remains blocked by lab topology. A third
+  remote RoCE-capable Kubernetes initiator is required before the project can
+  claim mounted RDMA multipath survival or reconnect.
+- Phase 167 closed as an opt-in Parallel Write Engine research result. Its
+  correctness model and batch path passed, but ordinary 4 KiB scaling did not.
+- Phase 168 rejected a Linux `io_uring` WAL execution candidate, and Phase 169
+  rejected a segmented group-commit format after its four-writer optimistic
+  upper bound reached only `0.772x` its one-writer rate and `0.990x` the
+  positioned control. Both candidates were removed.
+- Phase 170 moves performance work back to the default `walstore` product path:
+  profile its staged costs, then use the existing-format `appendBatch` seam
+  only if CRC/copy/lock evidence justifies a bounded commit pipeline.
 - Kubernetes NVMe/TCP mounted reconnect is source-gated through changed
   desired path-set evidence: CSI-node can connect a newly published desired
   NVMe path, prune the stale old host path for the same NQN, preserve pod
@@ -1078,10 +1091,24 @@ control-plane path is mature.
    protocol=nvme  -> nvme connect path
    ```
 
-3. `walstore` remains the MVP backend.
+3. `walstore` remains the default backend while its existing commit pipeline
+   is optimized.
 
-   `smartwal` should be introduced behind an explicit gate with the same K8s
-   scenarios, not silently switched into the MVP.
+   Phase 167's `parallel-walstore` preserves its tested global LSN/frontier,
+   crash recovery, and catch-up/rebuild semantics, but remains explicit and
+   opt-in because its 4 KiB throughput/scaling gate failed. Phase 168 then
+   tested a bounded Linux `io_uring` submission/completion owner against the
+   same controls. Correctness passed, but comparable performance did not:
+   native execution reached only 0.96x the legacy single-writer path and 0.96x
+   four-writer scaling, so the candidate was removed rather than promoted.
+   Phase 169 then changed the persistence unit to checksummed multi-entry
+   segments. Format, recovery, Sync, and failure semantics passed, but the
+   optimistic m02 gate measured four-writer scaling of only `0.772x` and
+   `0.990x` the positioned control. That candidate was also removed before
+   checkpoint/rebuild integration. Phase 170 targets the existing default
+   `WALStore.Write` path and existing-format `appendBatch` seam instead of
+   adding another backend. Direct I/O, fixed buffers, FUA, and device
+   atomic-write support remain evidence-gated follow-ups.
 
 ## Contributor-Friendly Work Items
 

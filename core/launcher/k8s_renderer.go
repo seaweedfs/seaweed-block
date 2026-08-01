@@ -58,9 +58,9 @@ func RenderBlockVolumeDeployments(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8
 		cfg.DurableImpl = "walstore"
 	}
 	switch cfg.DurableImpl {
-	case "walstore", "smartwal":
+	case "walstore", "smartwal", "parallel-walstore":
 	default:
-		return nil, fmt.Errorf("launcher: durable impl %q invalid; want walstore or smartwal", cfg.DurableImpl)
+		return nil, fmt.Errorf("launcher: durable impl %q invalid; want walstore, smartwal, or parallel-walstore", cfg.DurableImpl)
 	}
 	if cfg.StateHostPathBase != "" && path.Clean(cfg.DurableRootBase) != stateMountPath {
 		return nil, fmt.Errorf("launcher: state hostPath requires durable root base %q, got %q", stateMountPath, cfg.DurableRootBase)

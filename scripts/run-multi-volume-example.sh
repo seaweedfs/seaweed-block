@@ -13,6 +13,7 @@ CHAP_SECRET_NAME="${SW_BLOCK_ISCSI_CHAP_SECRET_NAME:-sw-block-iscsi-chap}"
 MASTER_PORT="${SW_BLOCK_MASTER_PORT_FORWARD_PORT:-}"
 CLEANUP_REQUESTED="${SW_BLOCK_MULTI_VOLUME_CLEANUP:-1}"
 MULTI_VOLUME_PROTOCOL="${SW_BLOCK_MULTI_VOLUME_PROTOCOL:-iscsi}"
+MULTI_VOLUME_NVME_TRANSPORT="${SW_BLOCK_MULTI_VOLUME_NVME_TRANSPORT:-tcp}"
 MULTI_VOLUME_NODE_SELECTOR="${SW_BLOCK_MULTI_VOLUME_NODE_SELECTOR:-}"
 MULTI_VOLUME_STAGE2_MULTIPATH="${SW_BLOCK_MULTI_VOLUME_STAGE2_MULTIPATH:-0}"
 
@@ -136,6 +137,7 @@ render_storageclass() {
     if [[ "$MULTI_VOLUME_PROTOCOL" == "nvme" ]]; then
       echo "  sw-block.seaweedfs.com/protocol: \"nvme\""
       echo "  protocol: \"nvme\""
+      echo "  sw-block.seaweedfs.com/nvme-transport: \"${MULTI_VOLUME_NVME_TRANSPORT}\""
     fi
     if is_true "$MULTI_VOLUME_STAGE2_MULTIPATH"; then
       echo "  stage2_multipath: \"true\""
@@ -420,6 +422,7 @@ write_summary() {
     echo "namespace=$NAMESPACE"
     echo "storageclass=$STORAGECLASS_NAME"
     echo "protocol=$MULTI_VOLUME_PROTOCOL"
+    echo "nvme_transport=$MULTI_VOLUME_NVME_TRANSPORT"
     echo "stage2_multipath=$MULTI_VOLUME_STAGE2_MULTIPATH"
     echo "app_node_selector=${MULTI_VOLUME_NODE_SELECTOR:-none}"
     echo "requested_volume_count=$VOLUME_COUNT"
@@ -442,6 +445,14 @@ if [[ "$MULTI_VOLUME_PROTOCOL" != "iscsi" && "$MULTI_VOLUME_PROTOCOL" != "nvme" 
   echo "SW_BLOCK_MULTI_VOLUME_PROTOCOL must be iscsi or nvme" >&2
   exit 2
 fi
+if [[ "$MULTI_VOLUME_NVME_TRANSPORT" != "tcp" && "$MULTI_VOLUME_NVME_TRANSPORT" != "rdma" ]]; then
+  echo "SW_BLOCK_MULTI_VOLUME_NVME_TRANSPORT must be tcp or rdma" >&2
+  exit 2
+fi
+if [[ "$MULTI_VOLUME_PROTOCOL" != "nvme" && "$MULTI_VOLUME_NVME_TRANSPORT" != "tcp" ]]; then
+  echo "SW_BLOCK_MULTI_VOLUME_NVME_TRANSPORT=rdma requires SW_BLOCK_MULTI_VOLUME_PROTOCOL=nvme" >&2
+  exit 2
+fi
 case "$VOLUME_COUNT" in
   ''|*[!0-9]*|0)
     echo "SW_BLOCK_MULTI_VOLUME_COUNT must be a positive integer; got: $VOLUME_COUNT" >&2
@@ -456,6 +467,7 @@ log "artifact_dir=$ARTIFACT_DIR"
 log "namespace=$NAMESPACE"
 log "volume_count=$VOLUME_COUNT"
 log "protocol=$MULTI_VOLUME_PROTOCOL"
+log "nvme_transport=$MULTI_VOLUME_NVME_TRANSPORT"
 log "stage2_multipath=$MULTI_VOLUME_STAGE2_MULTIPATH"
 log "app_node_selector=${MULTI_VOLUME_NODE_SELECTOR:-none}"
 log "master_port=$MASTER_PORT"

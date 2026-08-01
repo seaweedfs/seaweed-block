@@ -93,6 +93,11 @@ func (e *BlockExecutor) FeedLiveWrite(replicaID string, lineage RecoveryLineage,
 				replicaID, lsn)
 			return LiveWriteRetained, nil
 		}
+		if errors.Is(err, ErrSinkBarrierSealed) {
+			log.Printf("transport: live write retained replica=%s lsn=%d (recovery barrier cut established)",
+				replicaID, lsn)
+			return LiveWriteRetained, nil
+		}
 		if errors.Is(err, recovery.ErrNoActiveSession) {
 			// Bridge sender-map deletion raced with our registered-session
 			// snapshot. Recovery no longer owns this write; use the steady

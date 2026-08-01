@@ -28,7 +28,7 @@ import (
 // defaultLogWriter / setDefaultLogWriter wrap the standard `log`
 // package's writer so the component framework can tee executor +
 // replica log output into the per-test capture buffer.
-func defaultLogWriter() io.Writer    { return log.Writer() }
+func defaultLogWriter() io.Writer     { return log.Writer() }
 func setDefaultLogWriter(w io.Writer) { log.SetOutput(w) }
 
 // SubstrateFactory opens a fresh LogicalStorage in the given dir.
@@ -417,13 +417,13 @@ func (c *Cluster) Start() *Cluster {
 			cleanup()
 		}
 		node := &ReplicaNode{
-			Idx:           i,
-			Store:         store,
-			Listener:      listener,
-			Addr:          listener.Addr(),
-			DualLaneAddr:  dualLaneAddr,
-			ApplyGate:     gate,
-			cleanup:       nodeCleanup,
+			Idx:          i,
+			Store:        store,
+			Listener:     listener,
+			Addr:         listener.Addr(),
+			DualLaneAddr: dualLaneAddr,
+			ApplyGate:    gate,
+			cleanup:      nodeCleanup,
 		}
 		// Register replica cleanup FIRST so it runs LAST in LIFO.
 		c.t.Cleanup(node.cleanup)
@@ -505,6 +505,14 @@ func (c *Cluster) Start() *Cluster {
 	c.logCapture = newLogCapture()
 	c.t.Cleanup(c.logCapture.Stop)
 	c.logCapture.Start()
+	c.t.Cleanup(func() {
+		if c.primary.RepVol != nil {
+			_ = c.primary.RepVol.Stop()
+		}
+		for _, executor := range c.primary.executors {
+			executor.Stop()
+		}
+	})
 
 	return c
 }
@@ -893,16 +901,12 @@ type logCapture struct {
 func newLogCapture() *logCapture { return &logCapture{} }
 
 func (l *logCapture) Start() {
-	l.mu.Lock()
-	defer l.mu.Unlock()
 	// Tee log.Default().Writer() into the capture buffer.
 	prev := defaultLogWriter()
 	tee := &teeWriter{primary: prev, capture: &l.buf, mu: &l.mu}
 	setDefaultLogWriter(tee)
 	l.stopper = func() {
-		l.mu.Lock()
 		setDefaultLogWriter(prev)
-		l.mu.Unlock()
 	}
 }
 

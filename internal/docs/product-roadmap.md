@@ -122,6 +122,18 @@ This is the short internal roadmap. Keep it current and readable.
   CSI and CRD status retain `rdma`, the Linux initiator confirms the active
   RDMA controller, and exact cleanup returns to baseline. NVMe/TCP remains the
   default; RDMA reconnect/failover and performance remain non-claims.
+- Phase 166 implements the Kubernetes NVMe/RDMA RF2 reconnect and exact
+  endpoint-replacement contract, but its live close gate remains on HOLD. The
+  current lab has only two RoCE target nodes and no third remote RoCE-capable
+  Kubernetes initiator, so it cannot honestly prove two remote surviving
+  paths. The implementation and blocked gate remain tracked independently.
+- Phase 167 closed as an opt-in Parallel Write Engine research result. Phase
+  168 then rejected native `io_uring` execution, Phase 169 rejected a
+  segmented group-commit format, and Phase 170 rejected a default-WAL staged
+  append owner. Phase 171 hardened the shipped checkpoint path and rejected
+  bounded extent coalescing at its D1 admission gate. Phase 172 now targets the
+  stable two-read WAL materialization amplification without adding another
+  backend or append queue.
 
 Do not skip from scripts directly to mutating operator lifecycle. Helm has
 stabilized the installation contract, and Phase 35 added read-only CRD status,
@@ -568,9 +580,43 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   the MVP backend. NVMe/TCP and opt-in NVMe/RDMA have Kubernetes supported-lab
   paths; RDMA uses kernel `nvmet-rdma` and a product-owned NBD-to-backend
   bridge.
-- Next: make NVMe/RDMA reconnect/failover ownership explicit before any
-  transparent-HA claim. Multipath and performance remain later, separate gates.
-  Storage-engine boundary and smartwal/delta experiments also remain separate.
+- Current hold: Phase 166 has implemented NVMe/RDMA reconnect ownership, but
+  its RF2 live close gate needs a third RoCE-capable initiator. Do not convert
+  that infrastructure gap into a transparent-HA claim.
+- Closed foundation: Phase 167 removed whole-volume replication waits and
+  added opt-in parallel WAL ownership while preserving global LSN/frontier and
+  recovery contracts. Its batch path improved, but its 4 KiB path did not earn
+  promotion.
+- Closed experiment: Phase 168's Linux native asynchronous WAL candidate
+  passed correctness but failed the comparable 4 KiB throughput and scaling
+  thresholds. The implementation was removed; `walstore` remains the default
+  and `parallel-walstore` remains opt-in.
+- Closed experiment: Phase 169's segmented group-commit candidate passed
+  format, bounded-owner, durability, failure, and recovery gates. Its m02
+  optimistic upper bound grouped `1.348` entries/segment but four writers
+  reached only `0.772x` one writer and `0.990x` the positioned control. The
+  implementation was removed before checkpoint/rebuild integration.
+- Closed experiment: Phase 170's default-WAL headroom gate proved that explicit
+  16-record batching reduced WAL `WriteAt` calls from `1.0` to `0.0625` per
+  entry, but four-writer throughput was only `0.737x` ordinary Write, paired
+  gain passed only `2/5` samples, and run ranges exceeded `2.9x`. The staged
+  owner was stopped before implementation.
+- Closed hardening: Phase 171 made checkpoint/tail publication, Close, direct
+  BASE overlap, stale-slot handling, and dual-lane barrier sealing fail closed.
+  Its Linux admission gate rejected bounded extent coalescing because
+  sequential opportunity was stable in only `1/5` samples.
+- Closed experiment: Phase 172 reduced ordinary WAL materialization reads from
+  `2.000` to `1.000` per validated record and multi-block reads to `0.06250`,
+  but four-writer throughput improved only `1.068x` against the required
+  `1.15x`, and candidate range was `2.031x` against the `1.50x` bound. The
+  candidate and measurement-only overhead were removed. Legacy range-trim and
+  recovery correctness fixes remain.
+- Active next: Phase 173 establishes a fixed-work performance contract,
+  attributes the complete shipped path, and uses diagnostic controls to choose
+  at most one architecture direction: owner/queue redesign, WAL/extent media
+  separation, or no backend change. No candidate is implemented until the
+  baseline range is at most `1.25x` and OS/device evidence reconciles with
+  product counters.
 - Protocol hardening now has a dedicated working area under
   `internal/docs/protocol/`. New protocol semantics should update the control
   model, invariant ledger, and anti-pattern checklist there before release
@@ -1181,6 +1227,52 @@ Approximate engineering effort if scope remains tight:
   write/coalescing shape as the next backend step.
 - Phase 139 is closed for WAL append batch-shape analysis and names frontend
   request size as the next backend/frontend seam to inspect.
+- Phases 140-156 are closed for frontend request-size profiling, WAL
+  materialization/multi-block experiments, mounted recovery compatibility, and
+  source-gated release boundaries. They reduced call and record counts but did
+  not establish a performance/SLO claim or remove the backend bottleneck.
+- Phases 157-165 are closed through standalone and Kubernetes single-path
+  NVMe/RDMA publish/attach. Phase 166's reconnect implementation is complete,
+  but the honest RF2 RDMA live close gate remains infrastructure-blocked and is
+  retained under
+  `internal/docs/ref/phase166-nvme-rdma-kubernetes-multipath-reconnect-hold.md`.
+- Phase 167 Parallel Write Engine is closed as an opt-in research result.
+  Ordered replication, parallel WAL ownership, COW recovery, and bounded WAL
+  I/O passed correctness gates, and batched writes improved. The 4 KiB path
+  failed single-writer and scaling thresholds, so `walstore` remains default
+  and no RF3/mounted performance claim was made. The finished plan is
+  `internal/docs/finished-plans/phase167_finishedplan_parallel_write_engine.md`.
+- Phase 168 Linux Native Async WAL Execution is closed as a rejected
+  performance candidate. Its bounded owner, correctness, recovery, failure,
+  and benchmark gates passed, but the final gate measured only 0.96x legacy
+  single-writer throughput and 0.96x four-writer scaling. The candidate code
+  was removed. The finished plan is
+  `internal/docs/finished-plans/phase168_finishedplan_linux_native_async_wal.md`.
+- Phase 169 Segmented WAL Group-Commit Engine is closed as a rejected
+  performance candidate. D1-D3 correctness passed; D4-0 measured `0.772x`
+  four-writer scaling and `0.990x` the positioned four-writer control before
+  the candidate paid full checkpoint/rebuild costs. The implementation was
+  removed. The finished plan is
+  `internal/docs/finished-plans/phase169_finishedplan_segmented_wal_group_commit.md`.
+- Phase 170 Default WALStore Staged Commit Pipeline is closed as a
+  pre-implementation rejection. Existing-format batching reduced WAL
+  `WriteAt` calls by about 16x but did not provide stable four-writer
+  throughput headroom, so no owner or selector was added. The finished plan is
+  `internal/docs/finished-plans/phase170_finishedplan_default_walstore_staged_commit.md`.
+- Phase 171 Default WALStore Checkpoint Pipeline is closed at D1. Correctness
+  hardening and full-pipeline evidence passed; bounded extent writeback was
+  rejected by its admission gate. The finished plan is
+  `internal/docs/finished-plans/phase171_finishedplan_default_walstore_checkpoint_pipeline.md`.
+- Phase 172 WAL Materialization Pipeline is closed as a performance rejection.
+  Physical reads fell as designed, but throughput and stability did not meet
+  the pre-declared gate. The candidate was removed while independent recovery
+  fixes remained. The finished plan is
+  `internal/docs/finished-plans/phase172_finishedplan_wal_materialization_pipeline.md`.
+- Phase 173 Storage Execution Architecture Decision is active. It replaces
+  auto-calibrated admission data with a fixed-work harness, attributes
+  foreground, flusher, lock, syscall, fsync, frontend, and replication costs,
+  and permits only one evidence-selected architecture candidate. The contract
+  is `internal/docs/current-plan.md`.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.

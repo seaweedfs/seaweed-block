@@ -2,6 +2,7 @@ package replication
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -35,6 +36,30 @@ type RuntimeRecoveryRequest struct {
 	BasePinLSN      uint64
 }
 
+// VolumeStats is a read-only contention and queue snapshot for write-path
+// gates. The counters do not affect acknowledgement or ordering semantics.
+type VolumeStats struct {
+	WriteOps           uint64
+	WriteLockWaitNanos uint64
+	WriteFanoutNanos   uint64
+	WriteAckWaitNanos  uint64
+	PeerQueueMaxDepth  uint64
+	PeerQueueSaturated uint64
+	SyncOps            uint64
+	SyncOrderWaitNanos uint64
+	SyncLockWaitNanos  uint64
+	SyncDurationNanos  uint64
+}
+
+type orderedLocalWrite struct {
+	write  LocalWrite
+	result chan error
+}
+
+type localSyncResult struct {
+	err error
+}
+
 type RuntimeRecoveryStatus struct {
 	State       string
 	ReplicaID   string
@@ -47,31 +72,56 @@ type RuntimeRecoveryStatus struct {
 // ReplicationVolume is the per-volume fan-out owner. It:
 //   - tracks the authoritative replica set (peers) from master
 //     assignments;
-//   - serializes per-write fan-out so the LSN-order invariant
-//     V2 enforced via BlockVol.shipMu survives into V3 even though
-//     the LSN allocation seam (LogicalStorage.Write) is now split
-//     from the ship seam (this type).
+//   - resequences concurrent local callbacks by global LSN;
+//   - dispatches writes and barriers through one bounded FIFO per peer
+//     lineage, preserving wire order without holding a whole-volume network
+//     lock.
 //
 // Lifecycle: borrowed LogicalStorage — Provider owns the engine;
 // ReplicationVolume must NEVER call store.Close() (BUG-005 discipline).
+// Executors created by newExec/newDualExec are owned and stopped here.
 type ReplicationVolume struct {
 	volumeID    string
 	store       storage.LogicalStorage  // borrowed, NEVER closed by us
 	newExec     executorFactory         // test seam; default dials real TCP
 	newDualExec dualLaneExecutorFactory // optional dual-lane override; nil = use newExec
-	coord       *DurabilityCoordinator  // used by Sync; stateless
 
-	mu                    sync.Mutex // serializes UpdateReplicaSet + OnLocalWrite entry AND fan-out AND Sync
+	updateMu              sync.Mutex // serializes membership replacement with Close
+	mu                    sync.Mutex // protects membership, lineage, and lifecycle snapshots
 	peers                 map[string]*ReplicaPeer
+	executors             map[string]*transport.BlockExecutor
+	peerQueues            map[string]*peerWorkQueue
+	peerQueueDepth        int
 	closed                bool
+	membershipUpdating    bool
 	lastAppliedGeneration uint64         // monotonic guard; 0 means "no generation applied yet"
 	durabilityMode        DurabilityMode // set via SetDurabilityMode; default is BestEffort
 
 	// replayedGens counts UpdateReplicaSet calls dropped as stale
-	// (generation > 0 && generation <= lastAppliedGeneration). Exposed
-	// only to same-package tests for now; a public Stats() or
-	// Prometheus hook is a future observability pass.
+	// (generation > 0 && generation <= lastAppliedGeneration).
 	replayedGens atomic.Uint64
+
+	// Write/sync counters expose snapshot, dispatch, queue, and ACK costs.
+	writeOps      atomic.Uint64
+	writeWait     atomic.Uint64
+	writeFanout   atomic.Uint64
+	writeAckWait  atomic.Uint64
+	queueMaxDepth atomic.Uint64
+	queueFull     atomic.Uint64
+	syncOps       atomic.Uint64
+	syncOrderWait atomic.Uint64
+	syncWait      atomic.Uint64
+	syncDuration  atomic.Uint64
+
+	orderMu     sync.Mutex
+	nextShipLSN uint64
+	inflightLSN uint64
+	pending     map[uint64]*orderedLocalWrite
+	draining    bool
+	orderClosed bool
+	progress    chan struct{}
+	lifecycle   context.Context
+	cancel      context.CancelFunc
 
 	// Probe loop integration. Set once via ConfigureProbeLoop;
 	// started via StartProbeLoop after primary admit; stopped FIRST
@@ -92,6 +142,7 @@ type ReplicationVolume struct {
 }
 
 const promotionSeedBarrierTimeout = 5 * time.Second
+const defaultPeerWorkQueueDepth = 1024
 
 // executorFactory lets tests inject a BlockExecutor constructor that
 // binds to a specific replica address. Production uses the real
@@ -115,18 +166,26 @@ type dualLaneExecutorFactory func(store storage.LogicalStorage, replicaAddr, rep
 //
 // Called by: DurableProvider / Host composition root at volume
 // lifecycle start, after LogicalStorage is recovered and ready.
-// Owns: the peers map; all *ReplicaPeer lifecycles (Close on remove);
-// the volume-level serialization mutex.
+// Owns: the peers map; all *ReplicaPeer and BlockExecutor lifecycles;
+// the LSN resequencer and lineage-scoped work queues.
 // Borrows: store (LogicalStorage). Provider owns engine lifecycle;
 // ReplicationVolume MUST NOT call store.Close() (BUG-005).
 func NewReplicationVolume(volumeID string, store storage.LogicalStorage) *ReplicationVolume {
+	lifecycle, cancel := context.WithCancel(context.Background())
 	return &ReplicationVolume{
 		volumeID:       volumeID,
 		store:          store,
 		newExec:        transport.NewBlockExecutor,
-		coord:          NewDurabilityCoordinator(),
 		peers:          make(map[string]*ReplicaPeer),
+		executors:      make(map[string]*transport.BlockExecutor),
+		peerQueues:     make(map[string]*peerWorkQueue),
+		peerQueueDepth: defaultPeerWorkQueueDepth,
 		durabilityMode: DurabilityBestEffort, // zero value; explicit for clarity
+		nextShipLSN:    store.NextLSN(),
+		pending:        make(map[uint64]*orderedLocalWrite),
+		progress:       make(chan struct{}),
+		lifecycle:      lifecycle,
+		cancel:         cancel,
 	}
 }
 
@@ -156,10 +215,9 @@ func (v *ReplicationVolume) SetDualLaneExecutorFactory(f func(store storage.Logi
 	v.newDualExec = f
 }
 
-// SetDurabilityMode configures the per-volume durability semantic
-// that Sync uses. Safe to call at any time; effect applies from the
-// next Sync call forward. There is no per-Sync-call mode override —
-// mode is a per-volume setting.
+// SetDurabilityMode configures the per-volume write and Sync
+// acknowledgement semantic. Safe to call at any time; each operation uses the
+// mode captured with its membership snapshot.
 //
 // Called by: Host / Provider composition root at volume lifecycle
 // start, or on operator reconfiguration.
@@ -179,50 +237,56 @@ func (v *ReplicationVolume) DurabilityMode() DurabilityMode {
 	return v.durabilityMode
 }
 
-// Sync runs the per-volume durability closure for host-requested
-// cache flushes. Delegates to DurabilityCoordinator.SyncLocalAndReplicas
-// with the volume's configured mode + current peer set + a localSync
-// closure that wraps LogicalStorage.Sync.
-//
-// Lock scope: v.mu is held across the FULL call. This preserves the
-// same discipline as OnLocalWrite — LSN-order fan-out serialization
-// at the replication layer. Concurrent Sync and OnLocalWrite calls
-// are thus serialized on v.mu. Accepted correctness-first trade-off:
-// a slow peer barrier stalls other writers on the same volume;
-// async-queue optimization is a future refinement.
-//
-// Pinned by: INV-REPL-LSN-ORDER-FANOUT-001 +
-// TestReplicationVolume_Sync_PreservesLSNOrder_UnderConcurrency.
-//
-// Called by: StorageBackend.Sync (when a WriteObserver is installed)
-// per host-side FLUSH / SYNCHRONIZE_CACHE.
-// Owns: v.mu across the full SyncLocalAndReplicas call; peer snapshot
-// assembly.
-// Borrows: ctx + targetLSN from caller.
+// Sync queues one barrier behind every write through targetLSN, runs the local
+// fsync in parallel, and applies the configured acknowledgement policy. The
+// membership mutex is held only long enough to snapshot lineage-scoped queues.
+// A sync-quorum call may return after the local fsync plus enough peer barriers
+// succeed; queued work for a slow non-quorum peer continues in its own FIFO.
 func (v *ReplicationVolume) Sync(ctx context.Context, targetLSN uint64) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	start := time.Now()
+	orderStart := time.Now()
+	if err := v.waitUntilShipped(ctx, targetLSN); err != nil {
+		return err
+	}
+	v.syncOrderWait.Add(replicationDurationNanos(time.Since(orderStart)))
+	lockStart := time.Now()
 	v.mu.Lock()
-	defer v.mu.Unlock()
+	v.syncOps.Add(1)
+	v.syncWait.Add(replicationDurationNanos(time.Since(lockStart)))
 	if v.closed {
+		v.mu.Unlock()
 		return fmt.Errorf("replication: Sync: volume %s closed", v.volumeID)
 	}
-
-	// Snapshot the peers under v.mu — DurabilityCoordinator reads
-	// them from a slice so no further lock coordination is needed.
-	peers := make([]*ReplicaPeer, 0, len(v.peers))
-	for _, p := range v.peers {
-		peers = append(peers, p)
+	if v.membershipUpdating {
+		v.mu.Unlock()
+		return fmt.Errorf("replication: Sync: volume %s membership transition in progress", v.volumeID)
 	}
-
 	mode := v.durabilityMode
-	localSync := func(ctx context.Context) (uint64, error) {
-		return v.store.Sync()
-	}
+	localResult := make(chan localSyncResult, 1)
+	go func() {
+		_, err := v.store.Sync()
+		localResult <- localSyncResult{err: err}
+	}()
 
-	_, err := v.coord.SyncLocalAndReplicas(ctx, mode, targetLSN, localSync, peers)
-	return err
+	peerCount := len(v.peerQueues)
+	results := make(chan peerWorkResult, peerCount)
+	for _, q := range v.peerQueues {
+		depth, err := q.enqueueBarrier(targetLSN, results)
+		v.observeQueueDepth(depth)
+		if err != nil {
+			v.observeQueueError(err)
+			results <- peerWorkResult{peerID: q.peerID, err: err}
+			v.replaceTerminalPeerQueueLocked(q.peerID, q)
+		}
+	}
+	v.mu.Unlock()
+	defer func() {
+		v.syncDuration.Add(replicationDurationNanos(time.Since(start)))
+	}()
+	return waitForSyncAcks(ctx, mode, targetLSN, peerCount, localResult, results)
 }
 
 // UpdateReplicaSet applies the authoritative replica set from a master
@@ -257,9 +321,12 @@ func (v *ReplicationVolume) Sync(ctx context.Context, targetLSN uint64) error {
 // Borrows: targets slice — caller retains; we read-only copy the
 // fields we need.
 func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []ReplicaTarget) error {
+	v.updateMu.Lock()
+	defer v.updateMu.Unlock()
+
 	v.mu.Lock()
-	defer v.mu.Unlock()
 	if v.closed {
+		v.mu.Unlock()
 		return fmt.Errorf("replication: UpdateReplicaSet: volume %s closed", v.volumeID)
 	}
 
@@ -278,49 +345,70 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 				v.volumeID, generation, v.lastAppliedGeneration,
 				formatIDSet(had), formatIDSet(got))
 		}
+		v.mu.Unlock()
 		return nil
 	}
 
 	want := make(map[string]ReplicaTarget, len(targets))
 	for _, t := range targets {
 		if t.ReplicaID == "" {
+			v.mu.Unlock()
 			return fmt.Errorf("replication: UpdateReplicaSet: empty ReplicaID in targets")
 		}
 		want[t.ReplicaID] = t
 	}
 
-	// Remove peers no longer in the authoritative set. Same teardown
-	// path is used for N → 0 (empty targets) — no special branch.
-	for id, peer := range v.peers {
-		if _, keep := want[id]; !keep {
-			_ = peer.Close()
-			delete(v.peers, id)
-			// Notify peer-lifecycle hook AFTER peer.Close to mirror
-			// the existing teardown ordering. Hook is called under
-			// v.mu (lock-order: v.mu → host registry's mu).
-			if v.onPeerRemoved != nil {
-				v.onPeerRemoved(id)
+	membershipChanged := len(want) != len(v.peers)
+	if !membershipChanged {
+		for id, peer := range v.peers {
+			target, keep := want[id]
+			current := peer.Target()
+			if !keep ||
+				current.Epoch != target.Epoch ||
+				current.EndpointVersion != target.EndpointVersion ||
+				current.DataAddr != target.DataAddr {
+				membershipChanged = true
+				break
 			}
 		}
 	}
+	v.membershipUpdating = membershipChanged
 
-	// Add new peers + recreate on lineage bump.
-	addedPeers := make([]*ReplicaPeer, 0, len(want))
-	for id, t := range want {
-		if existing, ok := v.peers[id]; ok {
-			cur := existing.Target()
-			if cur.Epoch == t.Epoch && cur.EndpointVersion == t.EndpointVersion && cur.DataAddr == t.DataAddr {
+	// Detach removed and lineage-replaced peers while holding membership
+	// state, then stop their executors without v.mu. Replacements are not
+	// admitted until the old executor has fully released the borrowed
+	// store.
+	executorsToStop := make([]*transport.BlockExecutor, 0, len(v.peers))
+	for id, peer := range v.peers {
+		target, keep := want[id]
+		if keep {
+			current := peer.Target()
+			if current.Epoch == target.Epoch &&
+				current.EndpointVersion == target.EndpointVersion &&
+				current.DataAddr == target.DataAddr {
 				continue
 			}
-			// Lineage or address bumped → tear down + recreate.
-			_ = existing.Close()
-			delete(v.peers, id)
-			// Lineage-bump teardown also notifies the hook so the
-			// per-peer adapter is dropped before the fresh adapter is
-			// added below (new peer instance, fresh engine state).
-			if v.onPeerRemoved != nil {
-				v.onPeerRemoved(id)
-			}
+		}
+		v.closePeerQueueLocked(id)
+		_ = peer.Close()
+		if executor := v.detachExecutorLocked(id); executor != nil {
+			executorsToStop = append(executorsToStop, executor)
+		}
+		delete(v.peers, id)
+		if v.onPeerRemoved != nil {
+			v.onPeerRemoved(id)
+		}
+	}
+	v.mu.Unlock()
+	for _, executor := range executorsToStop {
+		executor.Stop()
+	}
+
+	v.mu.Lock()
+	addedPeers := make([]*ReplicaPeer, 0, len(want))
+	for id, t := range want {
+		if _, exists := v.peers[id]; exists {
+			continue
 		}
 		var executor *transport.BlockExecutor
 		if v.newDualExec != nil {
@@ -330,8 +418,13 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 		}
 		peer, err := NewReplicaPeer(t, executor)
 		if err != nil {
+			v.mu.Unlock()
+			executor.Stop()
 			return fmt.Errorf("replication: UpdateReplicaSet: add peer %s: %w", id, err)
 		}
+		peer.setOnHealthy(func() {
+			v.resetTerminalPeerQueue(peer)
+		})
 		// Push the volume-level probe cooldown config onto the fresh
 		// peer. A new peer (whether first add or post-lineage-bump
 		// recreate) starts with cooldown reset to defaults; the prior
@@ -345,6 +438,8 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 			})
 		}
 		v.peers[id] = peer
+		v.executors[id] = executor
+		v.peerQueues[id] = newPeerWorkQueue(peer, v.peerQueueDepth)
 		// Notify peer-lifecycle hook AFTER the peer is installed in
 		// the map so the host's registry can construct the per-peer
 		// adapter and prime it with the peer's identity.
@@ -360,7 +455,47 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 	if generation > 0 {
 		v.lastAppliedGeneration = generation
 	}
+	v.membershipUpdating = false
+	v.mu.Unlock()
 	return nil
+}
+
+func (v *ReplicationVolume) closePeerQueueLocked(replicaID string) {
+	if q := v.peerQueues[replicaID]; q != nil {
+		q.closeAndWait()
+		delete(v.peerQueues, replicaID)
+	}
+}
+
+func (v *ReplicationVolume) detachExecutorLocked(replicaID string) *transport.BlockExecutor {
+	executor := v.executors[replicaID]
+	delete(v.executors, replicaID)
+	return executor
+}
+
+func (v *ReplicationVolume) resetTerminalPeerQueue(peer *ReplicaPeer) {
+	id := peer.Target().ReplicaID
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.closed || v.peers[id] != peer {
+		return
+	}
+	v.replaceTerminalPeerQueueLocked(id, v.peerQueues[id])
+}
+
+func (v *ReplicationVolume) replaceTerminalPeerQueueLocked(id string, old *peerWorkQueue) *peerWorkQueue {
+	if old == nil || v.peerQueues[id] != old || !old.isTerminal() {
+		return v.peerQueues[id]
+	}
+	old.closeAndWait()
+	peer := v.peers[id]
+	if peer == nil || v.closed {
+		delete(v.peerQueues, id)
+		return nil
+	}
+	replacement := newPeerWorkQueue(peer, v.peerQueueDepth)
+	v.peerQueues[id] = replacement
+	return replacement
 }
 
 // seedNewPeerLiveCursorsLocked verifies that newly installed peers have
@@ -454,13 +589,14 @@ func formatIDSet(s map[string]struct{}) string {
 	return "{" + strings.Join(ids, ",") + "}"
 }
 
-// OnLocalWrite fans out one acked local write to every tracked peer.
+// OnLocalWrite orders one acked local write by its storage-assigned LSN and
+// fans it out to every tracked peer.
 //
-// Contract: OnLocalWrite serializes fan-out in LSN order for a given
-// volume. Caller order is NOT trusted as the correctness mechanism —
-// the volume-level mutex v.mu is held across the entire fan-out loop.
-// A future refactor that releases v.mu before issuing per-peer Ship
-// calls silently reintroduces an out-of-order-ship hazard.
+// Caller arrival order is not trusted: concurrent StorageBackend writes can
+// allocate LSN N before LSN N+1 but reach this method in the opposite order.
+// The resequencer retains owned buffers until every preceding LSN has been
+// dispatched to the lineage-scoped peer queues. Each queue then preserves the
+// same order independently.
 //
 // Best-effort semantics: per-peer ship errors are logged and the
 // offending peer is marked Degraded (by ReplicaPeer.ShipEntry's own
@@ -468,84 +604,193 @@ func formatIDSet(s map[string]struct{}) string {
 // call — the remaining peers still receive the entry. Stricter
 // durability closure (sync_all / sync_quorum) is layered above this.
 //
-// Accepted trade-off: this is a correctness-first serialized design.
-// Throughput may be reduced or peer slowness may amplify into writer
-// latency when a peer's dial / write is slow. Async-queue
-// optimization is a future refinement.
-//
 // Called by: Backend.Write wrapper immediately after
 // LogicalStorage.Write returns with the assigned LSN.
-// Owns: the per-write mutex hold across fan-out (LSN-order lock
-// scope); per-peer error aggregation and logging.
-// Borrows: w.Data slice — caller retains; fan-out must not mutate.
+// Owns: an immutable copy of w.Data while queued; per-peer error aggregation
+// and logging.
 func (v *ReplicationVolume) OnLocalWrite(ctx context.Context, w LocalWrite) error {
-	if err := ctx.Err(); err != nil {
+	req, err := v.enqueueLocalWrite(w)
+	if err != nil {
 		return err
 	}
+
+	select {
+	case err := <-req.result:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (v *ReplicationVolume) enqueueLocalWrite(w LocalWrite) (*orderedLocalWrite, error) {
+	if w.LSN == 0 {
+		return nil, errors.New("replication: OnLocalWrite: LSN must be nonzero")
+	}
+	owned := append([]byte(nil), w.Data...)
+	req := &orderedLocalWrite{
+		write:  LocalWrite{LBA: w.LBA, Data: owned, LSN: w.LSN},
+		result: make(chan error, 1),
+	}
+
+	v.orderMu.Lock()
+	if v.orderClosed {
+		v.orderMu.Unlock()
+		return nil, fmt.Errorf("replication: OnLocalWrite: volume %s closed", v.volumeID)
+	}
+	if w.LSN < v.nextShipLSN {
+		next := v.nextShipLSN
+		v.orderMu.Unlock()
+		return nil, fmt.Errorf("replication: OnLocalWrite: stale LSN %d below next ship LSN %d", w.LSN, next)
+	}
+	if _, exists := v.pending[w.LSN]; exists {
+		v.orderMu.Unlock()
+		return nil, fmt.Errorf("replication: OnLocalWrite: duplicate pending LSN %d", w.LSN)
+	}
+	if w.LSN == v.inflightLSN {
+		v.orderMu.Unlock()
+		return nil, fmt.Errorf("replication: OnLocalWrite: duplicate in-flight LSN %d", w.LSN)
+	}
+	v.pending[w.LSN] = req
+	leader := !v.draining
+	if leader {
+		v.draining = true
+	}
+	v.orderMu.Unlock()
+
+	if leader {
+		go v.drainOrderedWrites()
+	}
+	return req, nil
+}
+
+func (v *ReplicationVolume) drainOrderedWrites() {
+	for {
+		v.orderMu.Lock()
+		if v.orderClosed {
+			v.draining = false
+			v.orderMu.Unlock()
+			return
+		}
+		req := v.pending[v.nextShipLSN]
+		if req == nil {
+			v.draining = false
+			v.orderMu.Unlock()
+			return
+		}
+		delete(v.pending, v.nextShipLSN)
+		v.inflightLSN = req.write.LSN
+		v.orderMu.Unlock()
+
+		acks := v.dispatchLocalWrite(req.write)
+
+		v.orderMu.Lock()
+		v.inflightLSN = 0
+		v.nextShipLSN++
+		if !v.orderClosed {
+			close(v.progress)
+			v.progress = make(chan struct{})
+		}
+		v.orderMu.Unlock()
+
+		go func(req *orderedLocalWrite, acks writeAckSet) {
+			req.result <- v.waitForWriteAcks(v.lifecycle, acks)
+		}(req, acks)
+	}
+}
+
+func (v *ReplicationVolume) waitUntilShipped(ctx context.Context, targetLSN uint64) error {
+	for {
+		v.orderMu.Lock()
+		if targetLSN < v.nextShipLSN {
+			v.orderMu.Unlock()
+			return nil
+		}
+		if v.orderClosed {
+			v.orderMu.Unlock()
+			return fmt.Errorf("replication: Sync: volume %s closed", v.volumeID)
+		}
+		progress := v.progress
+		v.orderMu.Unlock()
+
+		select {
+		case <-progress:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+type writeAckSet struct {
+	mode      DurabilityMode
+	rf        int
+	peerCount int
+	results   <-chan peerWorkResult
+	directErr error
+}
+
+func (v *ReplicationVolume) dispatchLocalWrite(w LocalWrite) writeAckSet {
+	start := time.Now()
+	lockStart := time.Now()
 	v.mu.Lock()
-	defer v.mu.Unlock()
+	v.writeOps.Add(1)
+	v.writeWait.Add(replicationDurationNanos(time.Since(lockStart)))
 	if v.closed {
-		return fmt.Errorf("replication: OnLocalWrite: volume %s closed", v.volumeID)
+		v.mu.Unlock()
+		return writeAckSet{directErr: fmt.Errorf("replication: OnLocalWrite: volume %s closed", v.volumeID)}
 	}
-	// Log entry with peer count so we can disambiguate
-	// "OnLocalWrite never called" vs "called but peers map is empty"
-	// vs "called and fans out".
-	log.Printf("replication: OnLocalWrite volume=%s lba=%d lsn=%d peers=%d",
-		v.volumeID, w.LBA, w.LSN, len(v.peers))
-
+	if v.membershipUpdating {
+		v.mu.Unlock()
+		return writeAckSet{directErr: fmt.Errorf("replication: OnLocalWrite: volume %s membership transition in progress", v.volumeID)}
+	}
 	mode := v.durabilityMode
-	rf := len(v.peers) + 1
-	successes := 0
-	failures := 0
+	peerCount := len(v.peerQueues)
+	results := make(chan peerWorkResult, peerCount)
+	for _, q := range v.peerQueues {
+		depth, err := q.enqueueWrite(w, results)
+		v.observeQueueDepth(depth)
+		if err != nil {
+			v.observeQueueError(err)
+			results <- peerWorkResult{peerID: q.peerID, err: err}
+			replacement := v.replaceTerminalPeerQueueLocked(q.peerID, q)
+			if replacement != nil && replacement != q {
+				shadowDepth, shadowErr := replacement.enqueueWrite(w, nil)
+				v.observeQueueDepth(shadowDepth)
+				if shadowErr != nil {
+					v.observeQueueError(shadowErr)
+					log.Printf("replication: retained write enqueue failed peer=%s lsn=%d: %v",
+						q.peerID, w.LSN, shadowErr)
+				}
+			}
+		}
+	}
+	v.mu.Unlock()
 
-	// Fan out under the mutex — LSN-order invariant. Lineage is
-	// informational; each peer uses its own registered lineage for
-	// authority framing.
-	informational := transport.RecoveryLineage{}
-	for _, peer := range v.peers {
-		eligible := peer.State() == ReplicaHealthy
-		if err := peer.ShipEntry(ctx, informational, w.LBA, w.LSN, w.Data); err != nil {
-			log.Printf("replication: volume %s peer %s ship failed lsn=%d: %v",
-				v.volumeID, peer.Target().ReplicaID, w.LSN, err)
-			// Best-effort: continue iterating peers. Peer is already
-			// marked Degraded inside ShipEntry.
-			failures++
-			continue
-		}
-		if eligible {
-			successes++
-		} else {
-			failures++
-		}
+	log.Printf("replication: OnLocalWrite volume=%s lba=%d lsn=%d peers=%d",
+		v.volumeID, w.LBA, w.LSN, peerCount)
+
+	v.writeFanout.Add(replicationDurationNanos(time.Since(start)))
+	return writeAckSet{
+		mode:      mode,
+		rf:        peerCount + 1,
+		peerCount: peerCount,
+		results:   results,
 	}
-	if err := evaluateWriteAck(mode, rf, successes, failures); err != nil {
-		return err
-	}
-	return nil
 }
 
-func evaluateWriteAck(mode DurabilityMode, rf, peerSuccesses, peerFailures int) error {
-	switch mode {
-	case DurabilitySyncAll:
-		if peerFailures > 0 {
-			return fmt.Errorf("%w: %d of %d write acknowledgements unavailable",
-				ErrDurabilityBarrierFailed, peerFailures, rf-1)
-		}
-	case DurabilitySyncQuorum:
-		quorum := rf/2 + 1
-		durableNodes := 1 + peerSuccesses // local primary write already succeeded before Observe.
-		if durableNodes < quorum {
-			return fmt.Errorf("%w: %d durable of %d needed for write acknowledgement",
-				ErrDurabilityQuorumLost, durableNodes, quorum)
-		}
+func (v *ReplicationVolume) waitForWriteAcks(ctx context.Context, acks writeAckSet) error {
+	if acks.directErr != nil {
+		return acks.directErr
 	}
-	return nil
+	start := time.Now()
+	defer func() {
+		v.writeAckWait.Add(replicationDurationNanos(time.Since(start)))
+	}()
+	return waitForPeerAcks(ctx, acks.mode, acks.rf, acks.peerCount, acks.results, "write")
 }
 
-// Stop is the canonical lifecycle entry point. Tears down all peers
-// (their executor sessions are invalidated), serializes against
-// concurrent OnLocalWrite/Sync via the volume mutex, and is
-// idempotent. Does NOT close the borrowed store
+// Stop is the canonical lifecycle entry point. Tears down all peers and
+// their executors, closes ordered work queues, and is idempotent. Does
+// NOT close the borrowed store
 // (`INV-REPL-LIFECYCLE-HANDLE-BORROWED-001`).
 //
 // Stop and Close are equivalent (Stop delegates to Close); the
@@ -556,7 +801,7 @@ func evaluateWriteAck(mode DurabilityMode, rf, peerSuccesses, peerFailures int) 
 // TestReplicationVolume_Stop_DoesNotCloseBorrowedStore.
 //
 // Called by: Provider teardown.
-// Owns: peer-set teardown via peer.Close().
+// Owns: peer-set teardown via peer.Close() and executor.Stop().
 // Borrows: nothing (store is BORROWED — never closed).
 func (v *ReplicationVolume) Stop() error {
 	return v.Close()
@@ -569,10 +814,24 @@ func (v *ReplicationVolume) Stop() error {
 // backward compatibility with existing callers. Both do the same thing.
 //
 // Called by: Provider teardown when the volume shuts down.
-// Owns: close flag; invalidation of each peer's executor session
-// (via peer.Close()).
+// Owns: close flag; peer session invalidation and executor shutdown.
 // Borrows: nothing.
 func (v *ReplicationVolume) Close() error {
+	v.updateMu.Lock()
+	defer v.updateMu.Unlock()
+
+	v.cancel()
+	v.orderMu.Lock()
+	if !v.orderClosed {
+		v.orderClosed = true
+		close(v.progress)
+		for lsn, req := range v.pending {
+			req.result <- fmt.Errorf("replication: OnLocalWrite: volume %s closed before LSN %d shipped", v.volumeID, lsn)
+			delete(v.pending, lsn)
+		}
+	}
+	v.orderMu.Unlock()
+
 	// Ordering: stop the
 	// probe loop FIRST, before acquiring v.mu and tearing down
 	// peers. This ensures any in-flight probe callback completes /
@@ -591,14 +850,25 @@ func (v *ReplicationVolume) Close() error {
 	}
 
 	v.mu.Lock()
-	defer v.mu.Unlock()
 	if v.closed {
+		v.mu.Unlock()
 		return nil
 	}
 	v.closed = true
+	for id := range v.peerQueues {
+		v.closePeerQueueLocked(id)
+	}
+	executorsToStop := make([]*transport.BlockExecutor, 0, len(v.peers))
 	for id, peer := range v.peers {
 		_ = peer.Close()
+		if executor := v.detachExecutorLocked(id); executor != nil {
+			executorsToStop = append(executorsToStop, executor)
+		}
 		delete(v.peers, id)
+	}
+	v.mu.Unlock()
+	for _, executor := range executorsToStop {
+		executor.Stop()
 	}
 	return nil
 }
@@ -612,10 +882,55 @@ func (v *ReplicationVolume) Close() error {
 //
 // Called by: core/frontend/durable.StorageBackend.writeBytes
 // after a successful LogicalStorage.Write.
-// Owns: same serialization and fan-out semantics as OnLocalWrite.
+// Owns: same resequencing and fan-out semantics as OnLocalWrite.
 // Borrows: data slice; see OnLocalWrite for the full contract.
 func (v *ReplicationVolume) Observe(ctx context.Context, lba uint32, lsn uint64, data []byte) error {
 	return v.OnLocalWrite(ctx, LocalWrite{LBA: lba, Data: data, LSN: lsn})
+}
+
+// ObserveBatch submits a contiguous storage batch to the LSN resequencer
+// before waiting for any individual acknowledgement. This preserves storage
+// batching while each peer FIFO retains the wire-order invariant.
+func (v *ReplicationVolume) ObserveBatch(ctx context.Context, startLBA uint32, lsns []uint64, blocks [][]byte) error {
+	if len(lsns) != len(blocks) {
+		return fmt.Errorf("replication: ObserveBatch: %d LSNs for %d blocks", len(lsns), len(blocks))
+	}
+	if len(lsns) == 0 {
+		return nil
+	}
+	for i, lsn := range lsns {
+		if lsn == 0 {
+			return fmt.Errorf("replication: ObserveBatch: zero LSN at index %d", i)
+		}
+		if i > 0 && lsn != lsns[i-1]+1 {
+			return fmt.Errorf("replication: ObserveBatch: non-contiguous LSN %d after %d", lsn, lsns[i-1])
+		}
+	}
+
+	requests := make([]*orderedLocalWrite, 0, len(lsns))
+	for i, lsn := range lsns {
+		req, err := v.enqueueLocalWrite(LocalWrite{
+			LBA:  startLBA + uint32(i),
+			LSN:  lsn,
+			Data: blocks[i],
+		})
+		if err != nil {
+			return err
+		}
+		requests = append(requests, req)
+	}
+
+	for _, req := range requests {
+		select {
+		case err := <-req.result:
+			if err != nil {
+				return err
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
 }
 
 // PeerCount returns the current number of tracked peers. Test helper
@@ -624,6 +939,48 @@ func (v *ReplicationVolume) PeerCount() int {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	return len(v.peers)
+}
+
+// Stats returns a stable diagnostic snapshot without exposing mutable state.
+func (v *ReplicationVolume) Stats() VolumeStats {
+	return VolumeStats{
+		WriteOps:           v.writeOps.Load(),
+		WriteLockWaitNanos: v.writeWait.Load(),
+		WriteFanoutNanos:   v.writeFanout.Load(),
+		WriteAckWaitNanos:  v.writeAckWait.Load(),
+		PeerQueueMaxDepth:  v.queueMaxDepth.Load(),
+		PeerQueueSaturated: v.queueFull.Load(),
+		SyncOps:            v.syncOps.Load(),
+		SyncOrderWaitNanos: v.syncOrderWait.Load(),
+		SyncLockWaitNanos:  v.syncWait.Load(),
+		SyncDurationNanos:  v.syncDuration.Load(),
+	}
+}
+
+func (v *ReplicationVolume) observeQueueDepth(depth int) {
+	if depth <= 0 {
+		return
+	}
+	value := uint64(depth)
+	for {
+		current := v.queueMaxDepth.Load()
+		if value <= current || v.queueMaxDepth.CompareAndSwap(current, value) {
+			return
+		}
+	}
+}
+
+func (v *ReplicationVolume) observeQueueError(err error) {
+	if errors.Is(err, ErrPeerQueueSaturated) {
+		v.queueFull.Add(1)
+	}
+}
+
+func replicationDurationNanos(d time.Duration) uint64 {
+	if d <= 0 {
+		return 1
+	}
+	return uint64(d.Nanoseconds())
 }
 
 // PeerStatuses returns a stable, sorted diagnostic snapshot of all

@@ -16,7 +16,9 @@ package transport
 // kickoff §10 OOS — WAL substrate, not BlockStore).
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -88,6 +90,107 @@ func (r *recordingEmit) Snapshot() []emitRecord {
 }
 
 func (r *recordingEmit) MaxInFlight() int32 { return r.maxInFlight.Load() }
+
+func TestWalShipper_SealSessionStopsTimerAndAppend(t *testing.T) {
+	primary := memorywal.NewStore(8, 64)
+	emit := newRecordingEmit()
+	cfg := DefaultWalShipperConfig()
+	cfg.IdleSleep = time.Millisecond
+	s := NewWalShipperWithOptions("r1", HeadSourceFromStorage(primary), primary, emit.Func(), cfg)
+	defer s.Stop()
+
+	if err := s.StartSession(0); err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	if err := s.DrainBacklog(context.Background()); err != nil {
+		t.Fatalf("DrainBacklog: %v", err)
+	}
+	if err := s.SealSession(); err != nil {
+		t.Fatalf("SealSession: %v", err)
+	}
+
+	data := bytes.Repeat([]byte{0x5a}, 64)
+	lsn, err := primary.Write(1, data)
+	if err != nil {
+		t.Fatalf("primary Write: %v", err)
+	}
+	if err := s.NotifyAppend(1, lsn, data); !errors.Is(err, ErrWalShipperSessionSealed) {
+		t.Fatalf("NotifyAppend after SealSession err=%v want ErrWalShipperSessionSealed", err)
+	}
+	time.Sleep(10 * cfg.IdleSleep)
+	if got := len(emit.Snapshot()); got != 0 {
+		t.Fatalf("sealed session emitted %d records from timer/append; want 0", got)
+	}
+	if got := s.Cursor(); got != 0 {
+		t.Fatalf("sealed session cursor=%d want 0", got)
+	}
+
+	s.EndSession()
+	if err := s.NotifyAppend(1, lsn, data); err != nil {
+		t.Fatalf("NotifyAppend after EndSession: %v", err)
+	}
+	if got := len(emit.Snapshot()); got != 1 {
+		t.Fatalf("post-EndSession steady emits=%d want 1", got)
+	}
+}
+
+func TestWalShipper_EndSessionHandoffKeepsTimerSealed(t *testing.T) {
+	primary := memorywal.NewStore(8, 64)
+	emit := newRecordingEmit()
+	cfg := DefaultWalShipperConfig()
+	cfg.IdleSleep = time.Millisecond
+	s := NewWalShipperWithOptions("r1", HeadSourceFromStorage(primary), primary, emit.Func(), cfg)
+	defer s.Stop()
+
+	if err := s.StartSession(0); err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	if err := s.DrainBacklog(context.Background()); err != nil {
+		t.Fatalf("DrainBacklog: %v", err)
+	}
+	if err := s.SealSession(); err != nil {
+		t.Fatalf("SealSession: %v", err)
+	}
+	if _, err := primary.Write(1, bytes.Repeat([]byte{0x6b}, 64)); err != nil {
+		t.Fatalf("primary Write: %v", err)
+	}
+
+	handoffEntered := make(chan struct{})
+	handoffRelease := make(chan struct{})
+	endDone := make(chan struct{})
+	go func() {
+		s.endSessionWithHandoff(func() {
+			close(handoffEntered)
+			<-handoffRelease
+		})
+		close(endDone)
+	}()
+
+	select {
+	case <-handoffEntered:
+	case <-time.After(time.Second):
+		t.Fatal("EndSession handoff did not start")
+	}
+	time.Sleep(10 * cfg.IdleSleep)
+	if got := len(emit.Snapshot()); got != 0 {
+		t.Fatalf("timer emitted %d records before handoff completed; want 0", got)
+	}
+
+	close(handoffRelease)
+	select {
+	case <-endDone:
+	case <-time.After(time.Second):
+		t.Fatal("EndSession handoff did not complete")
+	}
+
+	deadline := time.Now().Add(100 * time.Millisecond)
+	for len(emit.Snapshot()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := len(emit.Snapshot()); got != 1 {
+		t.Fatalf("steady timer emits after handoff=%d want 1", got)
+	}
+}
 
 // fixedHeadSource lets the test pin head independently of substrate;
 // useful for R1 race tests where we want to control the head value

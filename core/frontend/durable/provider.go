@@ -38,6 +38,7 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/storage"
+	"github.com/seaweedfs/seaweed-block/core/storage/parallelwal"
 	"github.com/seaweedfs/seaweed-block/core/storage/smartwal"
 )
 
@@ -49,6 +50,9 @@ type ImplName string
 const (
 	ImplSmartWAL ImplName = "smartwal" // production default per PM direction
 	ImplWALStore ImplName = "walstore"
+	// ImplParallelWALStore is the explicit Phase 167 candidate. It remains
+	// opt-in until the full recovery, replication, and mounted close gates pass.
+	ImplParallelWALStore ImplName = "parallel-walstore"
 )
 
 // ErrImplKindMismatch is returned by Open when the configured
@@ -158,9 +162,9 @@ func NewDurableProvider(cfg ProviderConfig, view frontend.ProjectionView) (*Dura
 	if cfg.Impl == "" {
 		cfg.Impl = ImplSmartWAL
 	}
-	if cfg.Impl != ImplSmartWAL && cfg.Impl != ImplWALStore {
-		return nil, fmt.Errorf("durable: unknown impl %q (want %q or %q)",
-			cfg.Impl, ImplSmartWAL, ImplWALStore)
+	if cfg.Impl != ImplSmartWAL && cfg.Impl != ImplWALStore && cfg.Impl != ImplParallelWALStore {
+		return nil, fmt.Errorf("durable: unknown impl %q (want %q, %q, or %q)",
+			cfg.Impl, ImplSmartWAL, ImplWALStore, ImplParallelWALStore)
 	}
 	if cfg.BlockSize == 0 {
 		cfg.BlockSize = 4096
@@ -446,6 +450,14 @@ func (p *DurableProvider) verifyImplOnDisk(path string) error {
 	}
 	diskImpl, ok := magicToImpl(string(magic))
 	if !ok {
+		// parallelwal has two independently checksummed headers. Slot 0
+		// may be torn while slot 1 remains authoritative, so fall back to
+		// the format's real header selector instead of rejecting on byte 0.
+		if err := parallelwal.ProbeStore(path); err == nil {
+			diskImpl, ok = ImplParallelWALStore, true
+		}
+	}
+	if !ok {
 		return fmt.Errorf("%w: unrecognized magic %q at %s",
 			ErrImplKindMismatch, string(magic), path)
 	}
@@ -465,6 +477,8 @@ func magicToImpl(magic string) (ImplName, bool) {
 		return ImplWALStore, true
 	case "SWAW":
 		return ImplSmartWAL, true
+	case "SWPW":
+		return ImplParallelWALStore, true
 	default:
 		return "", false
 	}
@@ -498,6 +512,12 @@ func (p *DurableProvider) openExisting(volumeID, path string) (*volHandle, error
 			return nil, fmt.Errorf("durable: smartwal.OpenStore %s: %w", path, err)
 		}
 		s = sw
+	case ImplParallelWALStore:
+		pw, err := parallelwal.OpenStore(path)
+		if err != nil {
+			return nil, fmt.Errorf("durable: parallelwal.OpenStore %s: %w", path, err)
+		}
+		s = pw
 	default:
 		return nil, fmt.Errorf("durable: unknown impl %q", p.cfg.Impl)
 	}
@@ -536,6 +556,12 @@ func (p *DurableProvider) createFresh(volumeID, path string) (*volHandle, error)
 			return nil, fmt.Errorf("durable: smartwal.CreateStore %s: %w", path, err)
 		}
 		s = sw
+	case ImplParallelWALStore:
+		pw, err := parallelwal.CreateStore(path, p.cfg.NumBlocks, p.cfg.BlockSize)
+		if err != nil {
+			return nil, fmt.Errorf("durable: parallelwal.CreateStore %s: %w", path, err)
+		}
+		s = pw
 	default:
 		return nil, fmt.Errorf("durable: unknown impl %q", p.cfg.Impl)
 	}

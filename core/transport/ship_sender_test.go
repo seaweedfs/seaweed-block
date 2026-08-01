@@ -801,3 +801,78 @@ func TestExecutor_Ship_ActiveSessionSealed_FallsBackToSteadyEmitter(t *testing.T
 	_ = sessionServer.Close()
 	close(sink.release)
 }
+
+func TestExecutor_FeedLiveWrite_BarrierSealedSessionRetains(t *testing.T) {
+	primary := storage.NewBlockStore(8, 4096)
+	coord := recovery.NewPeerShipCoordinator()
+	replicaID := "r1"
+	exec := NewBlockExecutorWithDualLane(primary, "127.0.0.1:1", "127.0.0.1:2", coord, recovery.ReplicaID(replicaID))
+
+	steadyClient, steadyServer := net.Pipe()
+	t.Cleanup(func() {
+		_ = steadyClient.Close()
+		_ = steadyServer.Close()
+	})
+	go func() {
+		_, _ = io.Copy(io.Discard, steadyServer)
+	}()
+
+	steadyLineage := RecoveryLineage{SessionID: 91, Epoch: 7, EndpointVersion: 3, TargetLSN: 100}
+	session, err := exec.registerSession(steadyLineage)
+	if err != nil {
+		t.Fatalf("register steady session: %v", err)
+	}
+	session.conn = steadyClient
+	shipper := exec.WalShipperFor(replicaID)
+	exec.updateWalShipperEmitContext(replicaID, steadyClient, steadyLineage, EmitProfileSteadyMsgShip)
+
+	sessionClient, sessionServer := net.Pipe()
+	t.Cleanup(func() {
+		_ = sessionClient.Close()
+		_ = sessionServer.Close()
+	})
+	go func() {
+		_, _ = io.Copy(io.Discard, sessionServer)
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	sink := newRecordingSessionSink()
+	sink.notifyErr = ErrSinkBarrierSealed
+	if err := exec.dualLane.Bridge.StartRebuildSessionWithSink(
+		ctx, sessionClient, recovery.ReplicaID(replicaID), 77, 10, 10, sink,
+	); err != nil {
+		t.Fatalf("StartRebuildSessionWithSink: %v", err)
+	}
+	select {
+	case <-sink.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("session sink did not start")
+	}
+
+	data := make([]byte, 4096)
+	data[0] = 0x6a
+	disposition, err := exec.FeedLiveWrite(replicaID, steadyLineage, true, 3, 1, data)
+	if err != nil {
+		t.Fatalf("FeedLiveWrite with barrier-sealed session: %v", err)
+	}
+	if disposition != LiveWriteRetained {
+		t.Fatalf("disposition=%v want LiveWriteRetained", disposition)
+	}
+	if got := sink.Entries(); got != 0 {
+		t.Fatalf("barrier-sealed session recorded %d entries; want 0", got)
+	}
+	if got := shipper.Cursor(); got != 0 {
+		t.Fatalf("steady shipper cursor=%d want 0; write fell through during barrier", got)
+	}
+	gotConn, gotLineage, gotProfile := exec.SnapshotEmitContext(replicaID)
+	if gotConn != steadyClient || gotLineage != steadyLineage || gotProfile != EmitProfileSteadyMsgShip {
+		t.Fatalf("barrier-sealed write mutated steady context: conn=%p lineage=%+v profile=%s",
+			gotConn, gotLineage, gotProfile)
+	}
+
+	cancel()
+	_ = sessionClient.Close()
+	_ = sessionServer.Close()
+	close(sink.release)
+}

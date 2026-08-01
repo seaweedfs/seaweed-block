@@ -99,8 +99,19 @@ if kubectl get pods,pvc,pv -A -o name 2>/dev/null | grep -Eq '(sw-block|seaweed-
   echo "existing Seaweed Block Kubernetes resources; refusing unscoped cleanup" >&2
   exit 1
 fi
+if kubectl get volumeattachments.storage.k8s.io \
+    -o custom-columns=ATTACHER:.spec.attacher --no-headers 2>/dev/null \
+    | grep -q '^block\.csi\.seaweedfs\.com$'; then
+  echo "existing Seaweed Block VolumeAttachment; refusing contaminated lab" >&2
+  exit 1
+fi
 if app_ssh "sudo nvme list-subsys -o json 2>/dev/null" | grep -q 'nqn.2026-05.io.seaweedfs'; then
   echo "existing Seaweed Block NVMe controller on app host; refusing unscoped cleanup" >&2
+  exit 1
+fi
+if sudo find /sys/kernel/config/nvmet/subsystems -mindepth 1 -maxdepth 1 -type d \
+    -name '*io.seaweedfs*' -print -quit 2>/dev/null | grep -q .; then
+  echo "existing Seaweed Block NVMe target; refusing contaminated lab" >&2
   exit 1
 fi
 
@@ -112,6 +123,10 @@ app_ssh "ip -4 -o addr show | grep -q ' ${APP_RDMA_IP}/'; rdma link show | grep 
 sudo modprobe nvmet-rdma
 sudo modprobe nbd
 NBD_BASELINE="$(active_nbd_count)"
+if [[ "${NBD_BASELINE}" != 0 ]]; then
+  echo "existing active NBD device; refusing contaminated lab" >&2
+  exit 1
+fi
 write_summary "rdma_host_preflight=ok"
 write_summary "nbd_baseline=${NBD_BASELINE}"
 
@@ -269,6 +284,26 @@ write_summary "tcp_fallback_observed=false"
 
 kubectl -n "${APP_NAMESPACE}" delete pod phase165-rdma-hold sw-block-example-reader sw-block-example-writer \
   --ignore-not-found=true --wait=true --timeout=120s
+detached_samples=0
+for _ in $(seq 1 120); do
+  attachment_count="$(kubectl get volumeattachments.storage.k8s.io \
+    -o custom-columns=PV:.spec.source.persistentVolumeName --no-headers 2>/dev/null \
+    | awk -v volume="${VOLUME_ID}" '$1 == volume {count++} END {print count + 0}')"
+  if [[ "${attachment_count}" == 0 ]]; then
+    detached_samples=$((detached_samples + 1))
+    [[ "${detached_samples}" == 3 ]] && break
+  else
+    detached_samples=0
+  fi
+  sleep 1
+done
+if [[ "${detached_samples}" != 3 ]]; then
+  kubectl get volumeattachments.storage.k8s.io -o yaml \
+    >"${ARTIFACT_DIR}/cleanup/volumeattachments-detach-timeout.yaml" 2>&1 || true
+  echo "VolumeAttachment for ${VOLUME_ID} did not detach before PVC deletion" >&2
+  exit 1
+fi
+write_summary "volume_detached_before_pvc_delete=true"
 kubectl -n "${APP_NAMESPACE}" delete pvc "${APP_PVC}" --wait=true --timeout=180s
 kubectl delete storageclass sw-block-example --ignore-not-found=true --wait=true --timeout=60s
 for _ in $(seq 1 60); do
@@ -276,6 +311,19 @@ for _ in $(seq 1 60); do
   sleep 2
 done
 if kubectl get pv "${VOLUME_ID}" >/dev/null 2>&1; then
+  kubectl get pv "${VOLUME_ID}" -o yaml >"${ARTIFACT_DIR}/cleanup/pv-stuck.yaml" 2>&1 || true
+  kubectl get volumeattachments.storage.k8s.io -o yaml \
+    >"${ARTIFACT_DIR}/cleanup/volumeattachments-stuck.yaml" 2>&1 || true
+  kubectl -n "${APP_NAMESPACE}" get events --sort-by=.lastTimestamp \
+    >"${ARTIFACT_DIR}/cleanup/events-stuck.txt" 2>&1 || true
+  controller_pod="$(kubectl -n "${HELM_NAMESPACE}" get pod -l app=sw-block-csi-controller \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  if [[ -n "${controller_pod}" ]]; then
+    for container in block-csi csi-attacher csi-provisioner; do
+      kubectl -n "${HELM_NAMESPACE}" logs "${controller_pod}" -c "${container}" --since=15m \
+        >"${ARTIFACT_DIR}/cleanup/${container}-stuck.log" 2>&1 || true
+    done
+  fi
   echo "PV ${VOLUME_ID} still exists before Helm uninstall" >&2
   exit 1
 fi
