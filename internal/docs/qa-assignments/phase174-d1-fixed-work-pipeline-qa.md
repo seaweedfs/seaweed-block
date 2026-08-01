@@ -39,6 +39,8 @@ overlay, or a network share.
 - 1,024 warmup writes in a disjoint region;
 - 1, 4, and 8 writers;
 - one final Sync, close, reopen, Recover, frontier, and byte checks;
+- a build-tag-only `swblock_testtools` flusher reset after warmup, with no
+  control method present in shipped binaries;
 - two independent sets of five measured runs;
 - exact primary WAL and replication operation counts;
 - explicit `local_durable` versus `sync_quorum_rf3` ACK profiles.
@@ -53,6 +55,7 @@ sample is never reused as though it were healthy in the next sample.
 - `cross_ack_profile_throughput_ratio_allowed=false`
 - all 90 measured rows reconcile 16,384 writes and 64 MiB logical data
 - recovered primary stable/head frontiers agree
+- every row reports `flusher_phase_reset=true`
 - RF3 has exactly two configured replicas and at least one durable replica
 - direct and adapter four-writer combined max/min ranges are at most `1.25x`
 - `rf1_local_stability_gate=pass`

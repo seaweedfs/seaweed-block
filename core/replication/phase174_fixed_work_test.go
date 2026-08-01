@@ -74,6 +74,7 @@ type phase174FixedWorkResult struct {
 	ReplicaCount            int     `json:"replica_count"`
 	ReplicaDurableCount     int     `json:"replica_durable_count"`
 	ReplicaFrontiersEqual   bool    `json:"replica_frontiers_equal"`
+	FlusherPhaseReset       bool    `json:"flusher_phase_reset"`
 	CloseRecoverComplete    bool    `json:"close_recover_complete"`
 	CorrectnessSamples      int     `json:"correctness_samples"`
 }
@@ -290,6 +291,10 @@ func runPhase174FixedWork(t *testing.T, p *phase174Pipeline, set, run, writers i
 	if reached := p.waitForReplicaFrontier(time.Second); len(p.replicas) > 0 && reached < 1 {
 		t.Fatal("no replica reached warmup frontier")
 	}
+	flusherPhaseReset, err := p.resetFlushersForMeasurement()
+	if err != nil {
+		t.Fatalf("reset flusher phase: %v", err)
+	}
 
 	writeBefore := p.primary.WriteInstrumentation()
 	replicationBefore := p.replicationStats()
@@ -347,6 +352,7 @@ func runPhase174FixedWork(t *testing.T, p *phase174Pipeline, set, run, writers i
 		PrimaryStableLSN: primaryR, PrimaryHeadLSN: primaryH,
 		ReplicaCount: len(p.replicaPaths), ReplicaDurableCount: durableReplicas,
 		ReplicaFrontiersEqual: replicasEqual,
+		FlusherPhaseReset:     flusherPhaseReset,
 		CloseRecoverComplete:  true, CorrectnessSamples: correctness,
 	}
 	if p.replication != nil {
@@ -416,6 +422,26 @@ func (p *phase174Pipeline) replicationStats() VolumeStats {
 		return VolumeStats{}
 	}
 	return p.replication.Stats()
+}
+
+type phase174FlusherResetter interface {
+	ResetFlusherForMeasurement() error
+}
+
+func (p *phase174Pipeline) resetFlushersForMeasurement() (bool, error) {
+	stores := make([]*storage.WALStore, 0, 1+len(p.replicas))
+	stores = append(stores, p.primary)
+	stores = append(stores, p.replicas...)
+	for _, store := range stores {
+		resetter, ok := any(store).(phase174FlusherResetter)
+		if !ok {
+			return false, nil
+		}
+		if err := resetter.ResetFlusherForMeasurement(); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
 }
 
 func (p *phase174Pipeline) waitForReplicaFrontier(timeout time.Duration) int {

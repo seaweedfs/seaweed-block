@@ -73,9 +73,9 @@ capture free-space df -hT "${STORE_DIR}"
 capture load uptime
 
 cd "${ROOT}"
-go test ./core/replication -run '^TestPhase174FixedWorkContract$' -count=1 \
+go test -tags swblock_testtools ./core/replication -run '^TestPhase174FixedWorkContract$' -count=1 \
   >"${ARTIFACT_DIR}/contract-test.log" 2>&1
-go test -c -o "${TEST_BINARY}" ./core/replication
+go test -tags swblock_testtools -c -o "${TEST_BINARY}" ./core/replication
 
 for set_id in 1 2; do
   for layer in direct_walstore adapter_rf1 rf3_tcp; do
@@ -132,6 +132,8 @@ for row in rows:
         raise SystemExit(f"bad primary write count: {row}")
     if row["primary_stable_lsn"] != row["primary_head_lsn"]:
         raise SystemExit(f"primary frontier mismatch: {row}")
+    if not row["flusher_phase_reset"]:
+        raise SystemExit(f"flusher phase was not reset: {row}")
     if not row["close_recover_complete"] or row["correctness_samples"] < 5:
         raise SystemExit(f"close/recover correctness failed: {row}")
     if row["foreground_ns"] <= 0 or row["final_sync_ns"] <= 0 or row["p99_ns"] <= 0:
