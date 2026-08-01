@@ -96,6 +96,17 @@ for control in \
   deferred_foreground_writers_4 \
   shared_file_scratch \
   split_file_scratch; do
+  if [[ "${control}" != *_scratch ]]; then
+    precondition_log="${ARTIFACT_DIR}/logs/${control}-precondition.log"
+    SW_BLOCK_PHASE173_ARCH_CONTROL_STORE_DIR="${STORE_DIR}" \
+    SW_BLOCK_PHASE173_ARCH_CONTROL="${control}" \
+    SW_BLOCK_PHASE173_ARCH_CONTROL_RUN="0" \
+    GOMAXPROCS="${CONTROL_GOMAXPROCS}" taskset -c "${CONTROL_CPUSET}" \
+      "${TEST_BINARY}" -test.run '^TestPhase173ArchitectureControls$' -test.v -test.count=1 \
+      >"${precondition_log}" 2>&1
+    sync
+    sleep 0.25
+  fi
   for run in $(seq 1 "${RUNS}"); do
     sync
     sleep 0.25

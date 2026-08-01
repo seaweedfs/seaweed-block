@@ -86,8 +86,8 @@ func TestPhase173ArchitectureControls(t *testing.T) {
 	}
 	control := os.Getenv(phase173ControlNameEnv)
 	run, err := strconv.Atoi(os.Getenv(phase173ControlRunEnv))
-	if err != nil || run < 1 || run > phase173ControlRuns {
-		t.Fatalf("%s must be in [1,%d]", phase173ControlRunEnv, phase173ControlRuns)
+	if err != nil || run < 0 || run > phase173ControlRuns {
+		t.Fatalf("%s must be in [0,%d]", phase173ControlRunEnv, phase173ControlRuns)
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
@@ -106,8 +106,15 @@ func TestPhase173ArchitectureControls(t *testing.T) {
 		if control != tc.name {
 			continue
 		}
-		path := filepath.Join(dir, fmt.Sprintf("phase173-control-%s-run%d.store", tc.name, run))
-		s := preparePhase173ControlStore(t, path, tc.writers)
+		path := filepath.Join(dir, fmt.Sprintf("phase173-control-%s.store", tc.name))
+		if run == 0 {
+			s := preparePhase173ControlStore(t, path, tc.writers)
+			if err := s.Close(); err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+		s := openPhase173ControlStore(t, path)
 		runtime.GC()
 		time.Sleep(100 * time.Millisecond)
 		foreground, flusher := runPhase173WALStoreControl(t, s, tc.control, tc.writers, tc.live, run)
@@ -116,9 +123,6 @@ func TestPhase173ArchitectureControls(t *testing.T) {
 			emitPhase173ArchitectureControl(t, flusher)
 		}
 		if err := s.Close(); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Remove(path); err != nil {
 			t.Fatal(err)
 		}
 		return
@@ -170,7 +174,12 @@ func preparePhase173ControlStore(t *testing.T, path string, writers int) *WALSto
 		t.Fatal(err)
 	}
 
-	s, err = OpenWALStore(path)
+	return openPhase173ControlStore(t, path)
+}
+
+func openPhase173ControlStore(t *testing.T, path string) *WALStore {
+	t.Helper()
+	s, err := OpenWALStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
