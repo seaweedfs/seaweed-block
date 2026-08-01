@@ -48,8 +48,10 @@ SW_BLOCK_PHASE174_NVME_STORE_DIR=/data/nvme/block/<run-id>-stores \
    least five measured LBAs retain the expected bytes.
 7. Capture merged CPU, block, and mutex profiles for five four-queue diagnostic
    runs.
-8. Record stability honestly. A range above `1.25x` is HOLD evidence, not a
-   reason to delete a slow run or select an architecture candidate.
+8. Record the four-writer admission stability and all-shapes stability
+   separately. A range above `1.25x` is HOLD evidence, not a reason to delete
+   a slow run or select an architecture candidate. Correlate four/eight-writer
+   foreground time with the existing WAL flusher counters.
 9. All test stores and the test binary are removed after the gate.
 
 ## Mounted Boundary

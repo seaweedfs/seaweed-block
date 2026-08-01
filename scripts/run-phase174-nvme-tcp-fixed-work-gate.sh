@@ -157,6 +157,7 @@ go tool pprof -top -nodecount=40 "${TEST_BINARY}" "${mutex_profiles[@]}" \
 
 python3 - "${RESULTS}" "${SUMMARY}" "${RUNS}" "${MAX_RANGE}" <<'PY'
 import json
+import math
 import statistics
 import sys
 from collections import defaultdict
@@ -224,8 +225,26 @@ def rate_range(writers, set_id=None):
 def median_per_op(rows, field):
     return statistics.median(row[field] / row["api_operations"] for row in rows)
 
+def correlation(rows, field):
+    xs = [float(row["foreground_ns"]) for row in rows]
+    ys = [float(row[field]) for row in rows]
+    x_mean = statistics.mean(xs)
+    y_mean = statistics.mean(ys)
+    numerator = sum((x - x_mean) * (y - y_mean) for x, y in zip(xs, ys))
+    x_norm = math.sqrt(sum((x - x_mean) ** 2 for x in xs))
+    y_norm = math.sqrt(sum((y - y_mean) ** 2 for y in ys))
+    if x_norm == 0 or y_norm == 0:
+        return 0.0
+    return numerator / (x_norm * y_norm)
+
 four = all_rows(4)
-frontend_stable = all(rate_range(4, set_id) <= max_range for set_id in (1, 2)) and rate_range(4) <= max_range
+eight = all_rows(8)
+four_stable = all(rate_range(4, set_id) <= max_range for set_id in (1, 2)) and rate_range(4) <= max_range
+all_shapes_stable = all(
+    rate_range(writers, set_id) <= max_range
+    for writers in (1, 4, 8)
+    for set_id in (1, 2)
+) and all(rate_range(writers) <= max_range for writers in (1, 4, 8))
 target_per_op = median_per_op(four, "target_write_ns")
 roundtrip_per_op = median_per_op(four, "nvme_round_trip_nonbackend_ns")
 dominant = "target_backend_call" if target_per_op >= roundtrip_per_op else "nvme_tcp_round_trip_nonbackend"
@@ -239,13 +258,18 @@ with open(summary_path, "a", encoding="utf-8") as out:
     for field in (
         "client_write_latency_ns", "nvme_round_trip_nonbackend_ns", "target_write_ns",
         "adapter_write_ns", "primary_write_commit_lock_wait_ns", "primary_wal_encode_ns",
-        "primary_wal_append_ns", "primary_dirty_map_ns",
+        "primary_wal_append_ns", "primary_dirty_map_ns", "foreground_flusher_cycle_ns",
+        "foreground_flusher_extent_write_ns", "foreground_flusher_extent_sync_ns",
     ):
         out.write(f"nvme_tcp_rf1_writers_4_{field}_per_op={median_per_op(four, field):.3f}\n")
+    out.write(f"nvme_tcp_rf1_writers_4_flusher_foreground_correlation={correlation(four, 'foreground_flusher_cycle_ns'):.3f}\n")
+    out.write(f"nvme_tcp_rf1_writers_8_flusher_cycle_ns_per_op={median_per_op(eight, 'foreground_flusher_cycle_ns'):.3f}\n")
+    out.write(f"nvme_tcp_rf1_writers_8_flusher_foreground_correlation={correlation(eight, 'foreground_flusher_cycle_ns'):.3f}\n")
     out.write(f"nvme_tcp_rf1_dominant_accumulated_boundary={dominant}\n")
     out.write("nvme_tcp_rf1_counter_reconciliation=true\n")
     out.write("nvme_tcp_rf1_close_recover_verified=true\n")
-    out.write(f"nvme_tcp_rf1_stability_gate={'pass' if frontend_stable else 'hold'}\n")
+    out.write(f"nvme_tcp_rf1_four_writer_stability_gate={'pass' if four_stable else 'hold'}\n")
+    out.write(f"nvme_tcp_rf1_all_shapes_stability_gate={'pass' if all_shapes_stable else 'hold'}\n")
     out.write("mounted_shape_comparable=false\n")
     out.write("mounted_throughput_ratio_allowed=false\n")
     out.write("architecture_candidate_selected=false\n")

@@ -88,6 +88,12 @@ type phase174NVMeFixedWorkResult struct {
 	PrimaryWALAppendLockWaitNanos uint64  `json:"primary_wal_append_lock_wait_ns"`
 	PrimaryWriteCommitWaitNanos   uint64  `json:"primary_write_commit_lock_wait_ns"`
 	PrimaryDirtyMapNanos          uint64  `json:"primary_dirty_map_ns"`
+	FlusherCycles                 uint64  `json:"foreground_flusher_cycles"`
+	FlusherCycleNanos             uint64  `json:"foreground_flusher_cycle_ns"`
+	FlusherExtentWriteOps         uint64  `json:"foreground_flusher_extent_write_ops"`
+	FlusherExtentWriteNanos       uint64  `json:"foreground_flusher_extent_write_ns"`
+	FlusherExtentSyncOps          uint64  `json:"foreground_flusher_extent_sync_ops"`
+	FlusherExtentSyncNanos        uint64  `json:"foreground_flusher_extent_sync_ns"`
 	PrimaryStableLSN              uint64  `json:"primary_stable_lsn"`
 	PrimaryHeadLSN                uint64  `json:"primary_head_lsn"`
 	FlusherPhaseReset             bool    `json:"flusher_phase_reset"`
@@ -203,6 +209,7 @@ func phase174RunNVMeFixedWork(
 	targetBefore := target.Stats()
 	adapterBefore := backend.WriteProfile()
 	storageBefore := store.WriteInstrumentation()
+	flusherBefore := store.FlusherInstrumentation()
 	payloads := phase174NVMePayloads(phase174NVMeAPIOperations, set, run, 0x1741)
 	foreground, latencies, err := phase174NVMeWrites(t, client, writers, 0, payloads, true)
 	if err != nil {
@@ -211,6 +218,7 @@ func phase174RunNVMeFixedWork(
 	targetAfter := target.Stats()
 	adapterAfter := backend.WriteProfile()
 	storageAfter := store.WriteInstrumentation()
+	flusherAfter := store.FlusherInstrumentation()
 	flushStart := time.Now()
 	if err := phase174NVMeFlush(t, client); err != nil {
 		t.Fatalf("final flush: %v", err)
@@ -271,6 +279,12 @@ func phase174RunNVMeFixedWork(
 		PrimaryWALAppendLockWaitNanos: storageAfter.WALAppendLockWaitNanos - storageBefore.WALAppendLockWaitNanos,
 		PrimaryWriteCommitWaitNanos:   storageAfter.WriteCommitLockWaitNanos - storageBefore.WriteCommitLockWaitNanos,
 		PrimaryDirtyMapNanos:          storageAfter.DirtyMapUpdateDurationNanos - storageBefore.DirtyMapUpdateDurationNanos,
+		FlusherCycles:                 flusherAfter.CyclesStarted - flusherBefore.CyclesStarted,
+		FlusherCycleNanos:             flusherAfter.CycleDurationNanos - flusherBefore.CycleDurationNanos,
+		FlusherExtentWriteOps:         flusherAfter.ExtentWriteOps - flusherBefore.ExtentWriteOps,
+		FlusherExtentWriteNanos:       flusherAfter.ExtentWriteDurationNanos - flusherBefore.ExtentWriteDurationNanos,
+		FlusherExtentSyncOps:          flusherAfter.ExtentSyncOps - flusherBefore.ExtentSyncOps,
+		FlusherExtentSyncNanos:        flusherAfter.ExtentSyncDurationNanos - flusherBefore.ExtentSyncDurationNanos,
 		PrimaryStableLSN:              stable, PrimaryHeadLSN: head, FlusherPhaseReset: true,
 		CloseRecoverComplete: true, CorrectnessSamples: samples,
 		MountedShapeComparable: false, MountedThroughputRatioAllowed: false,
