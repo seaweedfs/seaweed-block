@@ -1,6 +1,7 @@
 # Current Plan: Phase 173 Storage Execution Architecture Decision
 
-Status: active; D1 fixed-work measurement is closed and D2 attribution is next.
+Status: active; D1 fixed-work measurement and D2 local shipped-path attribution
+are closed. D3 diagnostic architecture controls are next.
 
 ## Why This Is Next
 
@@ -108,6 +109,14 @@ of `1.143`, `1.129`, `1.078`, and `1.143` across the four required shapes. See
   cannot meet that bound, fix the harness/lab and stop.
 
 ### D2. Complete Shipped-Path Attribution
+
+Status: closed at `f780cc4` for the local WALStore engine/checkpoint path. Four
+independent fixed-work runs reconciled 16,000 logical blocks with product
+counters, exact `strace` (`pread64=32010`, `pwrite64=18564`, sync=7), exact
+perf, CPU/memory evidence, iostat, and complete checkpoint/drain evidence. See
+`internal/docs/qa-assignments/phase173-d2-shipped-path-attribution-qa-signoff.md`.
+Frontend and RF1/RF3 comparisons remain the explicitly listed D3 controls and
+must not be inferred from this engine result.
 
 - Correlate product counters with exact-path `strace`, `perf stat`, CPU/memory
   profiles, lock wait, `iostat`, and final checkpoint evidence.

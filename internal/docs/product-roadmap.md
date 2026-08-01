@@ -1274,8 +1274,11 @@ Approximate engineering effort if scope remains tight:
   and permits only one evidence-selected architecture candidate. The contract
   is `internal/docs/current-plan.md`. D1 is closed: the exact Linux fixed-work
   baseline passed on the dedicated m02 NVMe with all four required four-writer
-  combined ranges at or below `1.143x`. D2 shipped-path attribution is next;
-  no architecture candidate has been selected yet.
+  combined ranges at or below `1.143x`. D2 local shipped-path attribution is
+  also closed: fixed logical work reconciled exactly with product counters,
+  `strace`, perf, profiles, iostat, and checkpoint evidence on the dedicated
+  m02 NVMe. D3 diagnostic architecture controls are next; no architecture
+  candidate has been selected yet.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.
