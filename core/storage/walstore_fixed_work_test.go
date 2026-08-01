@@ -2,9 +2,12 @@ package storage
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/pprof"
 	"sort"
 	"strconv"
 	"sync"
@@ -19,6 +22,8 @@ const (
 	phase173FixedWorkStoreEnv   = "SW_BLOCK_PHASE173_STORE_DIR"
 	phase173FixedWorkStoreIDEnv = "SW_BLOCK_PHASE173_STORE_ID"
 	phase173FixedWorkReuseEnv   = "SW_BLOCK_PHASE173_REUSE_STORE"
+	phase173FixedWorkControlEnv = "SW_BLOCK_PHASE173_CONTROL_DIR"
+	phase173FixedWorkProfileEnv = "SW_BLOCK_PHASE173_PROFILE_DIR"
 
 	phase173FixedWorkBlockSize    = 4096
 	phase173FixedWorkNumBlocks    = 65536
@@ -61,9 +66,16 @@ type phase173FixedWorkResult struct {
 	HeadLSN                uint64  `json:"head_lsn"`
 	DirtyEntries           int     `json:"dirty_entries"`
 	WALCopyOps             uint64  `json:"wal_copy_ops"`
+	WALCopyBytes           uint64  `json:"wal_copy_bytes"`
+	WALCopyNanos           uint64  `json:"wal_copy_ns"`
 	WALEncodeOps           uint64  `json:"wal_encode_ops"`
+	WALEncodeBytes         uint64  `json:"wal_encode_bytes"`
+	WALEncodeNanos         uint64  `json:"wal_encode_ns"`
 	WALChecksumOps         uint64  `json:"wal_checksum_ops"`
+	WALChecksumBytes       uint64  `json:"wal_checksum_bytes"`
+	WALChecksumNanos       uint64  `json:"wal_checksum_ns"`
 	WALAppendOps           uint64  `json:"wal_append_ops"`
+	WALAppendBytes         uint64  `json:"wal_append_bytes"`
 	WALWriteAtCalls        uint64  `json:"wal_writeat_calls"`
 	WALWriteAtBytes        uint64  `json:"wal_writeat_bytes"`
 	WALWraps               uint64  `json:"wal_wraps"`
@@ -72,17 +84,93 @@ type phase173FixedWorkResult struct {
 	WALAppendLockWaitNanos uint64  `json:"wal_append_lock_wait_ns"`
 	CommitLockWaitOps      uint64  `json:"commit_lock_wait_ops"`
 	CommitLockWaitNanos    uint64  `json:"commit_lock_wait_ns"`
+	DirtyMapUpdateOps      uint64  `json:"dirty_map_update_ops"`
 	DirtyMapUpdateNanos    uint64  `json:"dirty_map_update_ns"`
 	FlushCycles            uint64  `json:"flush_cycles"`
+	FlushSnapshotEntries   uint64  `json:"flush_snapshot_entries"`
+	FlushCycleNanos        uint64  `json:"flush_cycle_ns"`
+	FlushSnapshotNanos     uint64  `json:"flush_snapshot_ns"`
+	FlushOpportunityNanos  uint64  `json:"flush_opportunity_ns"`
+	FlushHeaderReads       uint64  `json:"flush_header_reads"`
+	FlushHeaderReadBytes   uint64  `json:"flush_header_read_bytes"`
+	FlushHeaderReadNanos   uint64  `json:"flush_header_read_ns"`
 	FlushRecordReads       uint64  `json:"flush_record_reads"`
 	FlushRecordReadBytes   uint64  `json:"flush_record_read_bytes"`
+	FlushRecordReadNanos   uint64  `json:"flush_record_read_ns"`
+	FlushRecordDecodeOps   uint64  `json:"flush_record_decode_ops"`
+	FlushRecordDecodeBytes uint64  `json:"flush_record_decode_bytes"`
+	FlushRecordDecodeNanos uint64  `json:"flush_record_decode_ns"`
+	FlushDecodeFailures    uint64  `json:"flush_record_decode_failures"`
+	ValidatedRecords       uint64  `json:"validated_records"`
+	SupersededEntries      uint64  `json:"superseded_entries"`
 	ExtentWriteOps         uint64  `json:"extent_write_ops"`
 	ExtentWriteBytes       uint64  `json:"extent_write_bytes"`
+	ExtentWriteNanos       uint64  `json:"extent_write_ns"`
 	ExtentSyncOps          uint64  `json:"extent_sync_ops"`
+	ExtentSyncNanos        uint64  `json:"extent_sync_ns"`
 	CheckpointWriteOps     uint64  `json:"checkpoint_write_ops"`
+	CheckpointWriteNanos   uint64  `json:"checkpoint_write_ns"`
 	CheckpointSyncOps      uint64  `json:"checkpoint_sync_ops"`
+	CheckpointSyncNanos    uint64  `json:"checkpoint_sync_ns"`
 	ValidationFailures     uint64  `json:"validation_failures"`
 	CorrectnessSamples     int     `json:"correctness_samples"`
+}
+
+func TestPhase173MeasurementControlHandshake(t *testing.T) {
+	control := phase173MeasurementControl{dir: t.TempDir()}
+	started := make(chan error, 1)
+	go func() {
+		active, err := control.awaitStart()
+		if err == nil && !active {
+			err = errors.New("phase173 control did not activate")
+		}
+		started <- err
+	}()
+	if err := phase173WaitForPath(filepath.Join(control.dir, "ready"), time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(control.dir, "go"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-started; err != nil {
+		t.Fatal(err)
+	}
+
+	finished := make(chan error, 1)
+	go func() { finished <- control.finish() }()
+	if err := phase173WaitForPath(filepath.Join(control.dir, "done"), time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(control.dir, "detached"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-finished; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPhase173MeasuredProfiles(t *testing.T) {
+	dir := t.TempDir()
+	stop, err := startPhase173Profiles(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(25 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		runtime.Gosched()
+	}
+	if err := stop(); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"cpu.pprof", "heap.pprof", "allocs.pprof"} {
+		info, err := os.Stat(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Size() == 0 {
+			t.Fatalf("%s is empty", name)
+		}
+	}
 }
 
 func TestPhase173FixedWorkContract(t *testing.T) {
@@ -287,6 +375,16 @@ func runPhase173FixedWork(
 			s.dm.len(), s.CheckpointLSN(), warmupHeadLSN, warmupLSN,
 		)
 	}
+	control := phase173MeasurementControl{dir: os.Getenv(phase173FixedWorkControlEnv)}
+	controlActive, err := control.awaitStart()
+	if err != nil {
+		return phase173FixedWorkResult{}, err
+	}
+	defer func() {
+		if controlActive {
+			_ = control.finish()
+		}
+	}()
 	s.flusher = newFlusher(s, flusherConfig{Interval: 100 * time.Millisecond})
 	flusherStarted := make(chan struct{})
 	go s.flusher.runWithStartSignal(flusherStarted)
@@ -295,6 +393,16 @@ func runPhase173FixedWork(
 	writeBefore := s.WriteInstrumentation()
 	flushBefore := s.FlusherInstrumentation()
 	syncBefore := s.syncs.Load()
+	stopProfiles, err := startPhase173Profiles(os.Getenv(phase173FixedWorkProfileEnv))
+	if err != nil {
+		return phase173FixedWorkResult{}, err
+	}
+	profilesActive := stopProfiles != nil
+	defer func() {
+		if profilesActive {
+			_ = stopProfiles()
+		}
+	}()
 	foreground, latencies, err := runPhase173Operations(s, cfg, cfg.APIOperations, 0, payloads, true)
 	if err != nil {
 		return phase173FixedWorkResult{}, fmt.Errorf("phase173 foreground: %w", err)
@@ -310,6 +418,12 @@ func runPhase173FixedWork(
 		return phase173FixedWorkResult{}, fmt.Errorf("phase173 final drain: %w", err)
 	}
 	finalDrain := time.Since(drainStart)
+	if profilesActive {
+		if err := stopProfiles(); err != nil {
+			return phase173FixedWorkResult{}, err
+		}
+		profilesActive = false
+	}
 
 	writeAfter := s.WriteInstrumentation()
 	flushAfter := s.FlusherInstrumentation()
@@ -344,6 +458,12 @@ func runPhase173FixedWork(
 	correctnessSamples, err := verifyPhase173Samples(s, cfg, payloads)
 	if err != nil {
 		return phase173FixedWorkResult{}, err
+	}
+	if controlActive {
+		if err := control.finish(); err != nil {
+			return phase173FixedWorkResult{}, err
+		}
+		controlActive = false
 	}
 	if err := s.Close(); err != nil {
 		return phase173FixedWorkResult{}, err
@@ -386,9 +506,16 @@ func runPhase173FixedWork(
 		HeadLSN:                headLSN,
 		DirtyEntries:           dirtyEntries,
 		WALCopyOps:             writeAfter.WALCopyOps - writeBefore.WALCopyOps,
+		WALCopyBytes:           writeAfter.WALCopyBytes - writeBefore.WALCopyBytes,
+		WALCopyNanos:           writeAfter.WALCopyDurationNanos - writeBefore.WALCopyDurationNanos,
 		WALEncodeOps:           writeAfter.WALEncodeOps - writeBefore.WALEncodeOps,
+		WALEncodeBytes:         writeAfter.WALEncodeBytes - writeBefore.WALEncodeBytes,
+		WALEncodeNanos:         writeAfter.WALEncodeDurationNanos - writeBefore.WALEncodeDurationNanos,
 		WALChecksumOps:         writeAfter.WALChecksumOps - writeBefore.WALChecksumOps,
+		WALChecksumBytes:       writeAfter.WALChecksumBytes - writeBefore.WALChecksumBytes,
+		WALChecksumNanos:       writeAfter.WALChecksumDurationNanos - writeBefore.WALChecksumDurationNanos,
 		WALAppendOps:           writeAfter.WALAppendOps - writeBefore.WALAppendOps,
+		WALAppendBytes:         writeAfter.WALAppendBytes - writeBefore.WALAppendBytes,
 		WALWriteAtCalls:        writeAfter.WALAppendWriteAtCalls - writeBefore.WALAppendWriteAtCalls,
 		WALWriteAtBytes:        writeAfter.WALAppendWriteAtBytes - writeBefore.WALAppendWriteAtBytes,
 		WALWraps:               wraps,
@@ -397,19 +524,131 @@ func runPhase173FixedWork(
 		WALAppendLockWaitNanos: writeAfter.WALAppendLockWaitNanos - writeBefore.WALAppendLockWaitNanos,
 		CommitLockWaitOps:      writeAfter.WriteCommitLockWaitOps - writeBefore.WriteCommitLockWaitOps,
 		CommitLockWaitNanos:    writeAfter.WriteCommitLockWaitNanos - writeBefore.WriteCommitLockWaitNanos,
+		DirtyMapUpdateOps:      writeAfter.DirtyMapUpdateOps - writeBefore.DirtyMapUpdateOps,
 		DirtyMapUpdateNanos:    writeAfter.DirtyMapUpdateDurationNanos - writeBefore.DirtyMapUpdateDurationNanos,
 		FlushCycles:            flushAfter.CyclesStarted - flushBefore.CyclesStarted,
+		FlushSnapshotEntries:   flushAfter.SnapshotEntries - flushBefore.SnapshotEntries,
+		FlushCycleNanos:        flushAfter.CycleDurationNanos - flushBefore.CycleDurationNanos,
+		FlushSnapshotNanos:     flushAfter.SnapshotDurationNanos - flushBefore.SnapshotDurationNanos,
+		FlushOpportunityNanos:  flushAfter.OpportunityAnalysisNanos - flushBefore.OpportunityAnalysisNanos,
+		FlushHeaderReads:       flushAfter.WALHeaderReadOps - flushBefore.WALHeaderReadOps,
+		FlushHeaderReadBytes:   flushAfter.WALHeaderReadBytes - flushBefore.WALHeaderReadBytes,
+		FlushHeaderReadNanos:   flushAfter.WALHeaderReadDurationNanos - flushBefore.WALHeaderReadDurationNanos,
 		FlushRecordReads:       flushAfter.WALRecordReadOps - flushBefore.WALRecordReadOps,
 		FlushRecordReadBytes:   flushAfter.WALRecordReadBytes - flushBefore.WALRecordReadBytes,
+		FlushRecordReadNanos:   flushAfter.WALRecordReadDurationNanos - flushBefore.WALRecordReadDurationNanos,
+		FlushRecordDecodeOps:   flushAfter.WALRecordDecodeOps - flushBefore.WALRecordDecodeOps,
+		FlushRecordDecodeBytes: flushAfter.WALRecordDecodeBytes - flushBefore.WALRecordDecodeBytes,
+		FlushRecordDecodeNanos: flushAfter.WALRecordDecodeDurationNanos - flushBefore.WALRecordDecodeDurationNanos,
+		FlushDecodeFailures:    flushAfter.WALRecordDecodeFailures - flushBefore.WALRecordDecodeFailures,
+		ValidatedRecords:       flushAfter.ValidatedRecords - flushBefore.ValidatedRecords,
+		SupersededEntries:      flushAfter.SupersededEntries - flushBefore.SupersededEntries,
 		ExtentWriteOps:         flushAfter.ExtentWriteOps - flushBefore.ExtentWriteOps,
 		ExtentWriteBytes:       flushAfter.ExtentWriteBytes - flushBefore.ExtentWriteBytes,
+		ExtentWriteNanos:       flushAfter.ExtentWriteDurationNanos - flushBefore.ExtentWriteDurationNanos,
 		ExtentSyncOps:          flushAfter.ExtentSyncOps - flushBefore.ExtentSyncOps,
+		ExtentSyncNanos:        flushAfter.ExtentSyncDurationNanos - flushBefore.ExtentSyncDurationNanos,
 		CheckpointWriteOps:     flushAfter.CheckpointMetadataWriteOps - flushBefore.CheckpointMetadataWriteOps,
+		CheckpointWriteNanos:   flushAfter.CheckpointMetadataWriteNanos - flushBefore.CheckpointMetadataWriteNanos,
 		CheckpointSyncOps:      flushAfter.CheckpointMetadataSyncOps - flushBefore.CheckpointMetadataSyncOps,
+		CheckpointSyncNanos:    flushAfter.CheckpointMetadataSyncNanos - flushBefore.CheckpointMetadataSyncNanos,
 		ValidationFailures:     flushAfter.ValidationFailures - flushBefore.ValidationFailures,
 		CorrectnessSamples:     correctnessSamples,
 	}
 	return result, nil
+}
+
+type phase173MeasurementControl struct {
+	dir string
+}
+
+func (c phase173MeasurementControl) awaitStart() (bool, error) {
+	if c.dir == "" {
+		return false, nil
+	}
+	if err := os.MkdirAll(c.dir, 0o755); err != nil {
+		return false, err
+	}
+	for _, name := range []string{"ready", "go", "done", "detached"} {
+		if err := os.Remove(filepath.Join(c.dir, name)); err != nil && !os.IsNotExist(err) {
+			return false, err
+		}
+	}
+	if err := os.WriteFile(filepath.Join(c.dir, "ready"), []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+		return false, err
+	}
+	if err := phase173WaitForPath(filepath.Join(c.dir, "go"), 30*time.Second); err != nil {
+		return false, fmt.Errorf("phase173 measurement start: %w", err)
+	}
+	return true, nil
+}
+
+func (c phase173MeasurementControl) finish() error {
+	if c.dir == "" {
+		return nil
+	}
+	if err := os.WriteFile(filepath.Join(c.dir, "done"), []byte("done\n"), 0o644); err != nil {
+		return err
+	}
+	if err := phase173WaitForPath(filepath.Join(c.dir, "detached"), 30*time.Second); err != nil {
+		return fmt.Errorf("phase173 measurement detach: %w", err)
+	}
+	return nil
+}
+
+func phase173WaitForPath(path string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return nil
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return fmt.Errorf("timeout waiting for %s", path)
+}
+
+func startPhase173Profiles(dir string) (func() error, error) {
+	if dir == "" {
+		return nil, nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+	cpu, err := os.Create(filepath.Join(dir, "cpu.pprof"))
+	if err != nil {
+		return nil, err
+	}
+	if err := pprof.StartCPUProfile(cpu); err != nil {
+		_ = cpu.Close()
+		return nil, err
+	}
+	return func() error {
+		pprof.StopCPUProfile()
+		var errs []error
+		if err := cpu.Close(); err != nil {
+			errs = append(errs, err)
+		}
+		runtime.GC()
+		for _, name := range []string{"heap", "allocs"} {
+			file, err := os.Create(filepath.Join(dir, name+".pprof"))
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			profile := pprof.Lookup(name)
+			if profile == nil {
+				errs = append(errs, fmt.Errorf("phase173 profile %s unavailable", name))
+			} else if err := profile.WriteTo(file, 0); err != nil {
+				errs = append(errs, err)
+			}
+			if err := file.Close(); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		return errors.Join(errs...)
+	}, nil
 }
 
 func phase173Payloads(writers int) []map[int][][]byte {

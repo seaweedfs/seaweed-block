@@ -61,9 +61,13 @@ func TestFlusherInstrumentationCountsCompleteCycle(t *testing.T) {
 		t.Fatalf("snapshot/validated/superseded=%d/%d/%d want 4/4/0",
 			got.SnapshotEntries, got.ValidatedRecords, got.SupersededEntries)
 	}
-	if got.WALHeaderReadOps != 4 || got.WALRecordReadOps != 4 {
-		t.Fatalf("header/record reads=%d/%d want 4/4",
-			got.WALHeaderReadOps, got.WALRecordReadOps)
+	if got.WALHeaderReadOps != 4 || got.WALRecordReadOps != 4 ||
+		got.WALRecordDecodeOps != 4 || got.WALRecordDecodeBytes == 0 ||
+		got.WALRecordDecodeDurationNanos == 0 {
+		t.Fatalf("header/record reads and decode ops/bytes/ns=%d/%d %d/%d/%d want 4/4 4/nonzero/nonzero",
+			got.WALHeaderReadOps, got.WALRecordReadOps,
+			got.WALRecordDecodeOps, got.WALRecordDecodeBytes,
+			got.WALRecordDecodeDurationNanos)
 	}
 	if got.ExtentWriteOps != 4 || got.ExtentWriteBytes != 4*4096 ||
 		got.ExtentWriteMaxBytes != 4096 || got.ExtentWriteFailures != 0 {
@@ -230,6 +234,7 @@ func TestFlusherInstrumentationCountsExtentFailures(t *testing.T) {
 	instr.recordExtentSync(time.Nanosecond, injected)
 	instr.recordWALHeaderRead(12, time.Nanosecond, injected)
 	instr.recordWALRecordRead(34, time.Nanosecond, injected)
+	instr.recordWALRecordDecode(34, time.Nanosecond, injected)
 
 	got := instr.snapshot()
 	if got.ExtentWriteOps != 1 || got.ExtentWriteFailures != 1 ||
@@ -245,10 +250,13 @@ func TestFlusherInstrumentationCountsExtentFailures(t *testing.T) {
 	if got.WALHeaderReadOps != 1 || got.WALHeaderReadFailures != 1 ||
 		got.WALHeaderReadBytes != 12 ||
 		got.WALRecordReadOps != 1 || got.WALRecordReadFailures != 1 ||
-		got.WALRecordReadBytes != 34 {
-		t.Fatalf("WAL header ops/failures/bytes and record ops/failures/bytes=%d/%d/%d %d/%d/%d want 1/1/12 1/1/34",
+		got.WALRecordReadBytes != 34 ||
+		got.WALRecordDecodeOps != 1 || got.WALRecordDecodeFailures != 1 ||
+		got.WALRecordDecodeBytes != 34 {
+		t.Fatalf("WAL header/read/decode ops/failures/bytes=%d/%d/%d %d/%d/%d %d/%d/%d want 1/1/12 1/1/34 1/1/34",
 			got.WALHeaderReadOps, got.WALHeaderReadFailures, got.WALHeaderReadBytes,
-			got.WALRecordReadOps, got.WALRecordReadFailures, got.WALRecordReadBytes)
+			got.WALRecordReadOps, got.WALRecordReadFailures, got.WALRecordReadBytes,
+			got.WALRecordDecodeOps, got.WALRecordDecodeFailures, got.WALRecordDecodeBytes)
 	}
 }
 

@@ -328,7 +328,9 @@ func (f *flusher) readDirtyRecord(e snapshotEntry) (data []byte, entrySize uint6
 			"flusher: invalid dirty WAL record LBA %d offset %d record size %d expected %d",
 			e.LBA, e.WALOffset, entrySize, expectedRecordSize)
 	}
+	decodeStart := time.Now()
 	entry, err := decodeWALEntry(full)
+	f.instr.recordWALRecordDecode(len(full), time.Since(decodeStart), err)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"flusher: invalid dirty WAL record LBA %d offset %d: %w",
