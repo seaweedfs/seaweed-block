@@ -86,6 +86,7 @@ func TestPhase175WALStoreRestorePreservesExt4Image(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	mustPrepareRestoreStorage(t, target, "walstore", numBlocks, blockSize)
 	targetStore, err := storage.CreateWALStore(targetPath, numBlocks, blockSize)
 	if err != nil {
 		t.Fatal(err)

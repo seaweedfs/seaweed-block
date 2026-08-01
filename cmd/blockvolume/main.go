@@ -467,6 +467,9 @@ func isLocalhostOrLoopbackHost(host string) bool {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "restore-discard" {
+		os.Exit(runRestoreDiscardCommand(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	f, err := parseFlags(os.Args[1:])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "blockvolume:", err)
@@ -606,6 +609,21 @@ func run(f flags) int {
 			_ = dp.Close()
 			_ = h.Close()
 			return 1
+		}
+		if restoreTarget != nil {
+			storeKind, err := snapshotRestoreStoreKind(cfg.Impl)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "blockvolume: restore storage intent:", err)
+				_ = dp.Close()
+				_ = h.Close()
+				return 1
+			}
+			if err := restoreTarget.PrepareStorage(storeKind, cfg.NumBlocks, cfg.BlockSize); err != nil {
+				fmt.Fprintln(os.Stderr, "blockvolume: restore storage intent:", err)
+				_ = dp.Close()
+				_ = h.Close()
+				return 1
+			}
 		}
 
 		// Open storage role-agnostically via EnsureStorage so replica
@@ -1252,6 +1270,19 @@ func prepareRestoreTarget(f flags, provider restoreTargetPathProvider) (*coresna
 		TargetVolumeID:  f.volumeID,
 		TargetReplicaID: f.replicaID,
 	})
+}
+
+func snapshotRestoreStoreKind(impl durable.ImplName) (string, error) {
+	switch impl {
+	case durable.ImplWALStore:
+		return "walstore", nil
+	case durable.ImplSmartWAL:
+		return "smartwal", nil
+	case durable.ImplParallelWALStore:
+		return "parallelwal", nil
+	default:
+		return "", fmt.Errorf("unsupported durable implementation %q", impl)
+	}
 }
 
 func closeBlockVolumeRuntime(nvmeTarget interface{ Close() error }, iscsiTarget interface{ Close() error }, replListen *transport.ReplicaListener, replVolume *replication.ReplicationVolume, durableProv *durable.DurableProvider, status *volume.StatusServer, h *volume.Host) {

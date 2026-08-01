@@ -211,7 +211,7 @@ func (s *services) DeleteSnapshot(ctx context.Context, req *control.DeleteSnapsh
 	}
 	s.host.lifecycleProductMu.Lock()
 	defer s.host.lifecycleProductMu.Unlock()
-	if s.host.snapshotHasPendingRestore(req.GetSnapshotId()) {
+	if s.host.snapshotHasRestoreReference(req.GetSnapshotId()) {
 		return nil, status.Error(codes.FailedPrecondition, "snapshot is referenced by a pending restore")
 	}
 	if err := coordinator.Delete(req.GetSnapshotId()); err != nil {
@@ -220,13 +220,13 @@ func (s *services) DeleteSnapshot(ctx context.Context, req *control.DeleteSnapsh
 	return &control.DeleteSnapshotResponse{}, nil
 }
 
-func (h *Host) snapshotHasPendingRestore(snapshotID string) bool {
+func (h *Host) snapshotHasRestoreReference(snapshotID string) bool {
 	stores := h.Lifecycle()
 	if stores == nil || stores.Volumes == nil {
 		return false
 	}
 	for _, volume := range stores.Volumes.ListVolumes() {
-		if volume.Spec.SourceSnapshotID == snapshotID && volume.RestoreState == lifecycle.VolumeRestorePending {
+		if volume.Spec.SourceSnapshotID == snapshotID && (volume.RestoreState == lifecycle.VolumeRestorePending || volume.RestoreState == lifecycle.VolumeRestoreAbortRequested) {
 			return true
 		}
 	}
@@ -256,6 +256,40 @@ func (s *services) RestoreSnapshot(ctx context.Context, req *control.RestoreSnap
 		ReplicaCount:    uint32(result.ReplicaCount),
 		AlreadyComplete: result.AlreadyComplete,
 	}, nil
+}
+
+func (s *services) AbortSnapshotRestore(ctx context.Context, req *control.AbortSnapshotRestoreRequest) (*control.AbortSnapshotRestoreResponse, error) {
+	if _, err := s.snapshotService(); err != nil {
+		return nil, err
+	}
+	if err := s.authorizeSnapshot(ctx); err != nil {
+		return nil, err
+	}
+	if req.GetSnapshotId() == "" || req.GetTargetVolumeId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "snapshot_id and target_volume_id are required")
+	}
+	record, err := s.host.RequestSnapshotRestoreAbort(ctx, req.GetTargetVolumeId(), req.GetSnapshotId())
+	if err != nil {
+		return nil, snapshotRPCError("abort snapshot restore", err)
+	}
+	response := &control.AbortSnapshotRestoreResponse{
+		OperationId:    record.RestoreAbort.OperationID,
+		SnapshotId:     record.RestoreAbort.SnapshotID,
+		TargetVolumeId: record.Spec.VolumeID,
+		State:          record.RestoreState,
+		Targets:        make([]*control.RestoreDiscardTarget, 0, len(record.RestoreAbort.Replicas)),
+	}
+	for _, replica := range record.RestoreAbort.Replicas {
+		retryNotBefore := ""
+		if !replica.RetryNotBefore.IsZero() {
+			retryNotBefore = replica.RetryNotBefore.UTC().Format(time.RFC3339Nano)
+		}
+		response.Targets = append(response.Targets, &control.RestoreDiscardTarget{
+			ServerId: replica.ServerID, ReplicaId: replica.ReplicaID, State: replica.State, KubernetesNodeName: replica.KubernetesNodeName,
+			Attempt: replica.Attempt, RetryNotBefore: retryNotBefore, FailureReason: replica.FailureReason, EvidenceRef: replica.EvidenceRef,
+		})
+	}
+	return response, nil
 }
 
 func (s *services) ExportSnapshotBackup(ctx context.Context, req *control.ExportSnapshotBackupRequest) (*control.SnapshotBackupRecord, error) {

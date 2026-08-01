@@ -25,11 +25,33 @@
 package storage
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"sync"
 )
+
+// InspectWALStoreIdentity reads only the durable superblock identity and
+// geometry. It starts no recovery or background writer machinery.
+func InspectWALStoreIdentity(path string) (DurableStorageIdentity, uint32, int, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return DurableStorageIdentity{}, 0, 0, fmt.Errorf("storage: inspect walstore %s: %w", path, err)
+	}
+	defer f.Close()
+	sb, err := readSuperblock(f)
+	if err != nil {
+		return DurableStorageIdentity{}, 0, 0, err
+	}
+	if err := sb.validate(); err != nil {
+		return DurableStorageIdentity{}, 0, 0, err
+	}
+	if sb.BlockSize == 0 || sb.VolumeSize%uint64(sb.BlockSize) != 0 || sb.VolumeSize/uint64(sb.BlockSize) > uint64(^uint32(0)) {
+		return DurableStorageIdentity{}, 0, 0, fmt.Errorf("storage: invalid walstore geometry")
+	}
+	return DurableStorageIdentity{Path: path, StoreID: "walstore:" + hex.EncodeToString(sb.UUID[:])}, uint32(sb.VolumeSize / uint64(sb.BlockSize)), int(sb.BlockSize), nil
+}
 
 // WALStoreReader is the read-only handle returned by OpenReadOnly.
 // Surface is intentionally narrow: Read(lba), Close. No mutating

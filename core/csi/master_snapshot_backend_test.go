@@ -52,6 +52,11 @@ func (f *fakeSnapshotServiceClient) RestoreSnapshot(ctx context.Context, request
 	return &control.RestoreSnapshotResponse{SnapshotId: request.GetSnapshotId(), TargetVolumeId: request.GetTargetVolumeId()}, nil
 }
 
+func (f *fakeSnapshotServiceClient) AbortSnapshotRestore(ctx context.Context, request *control.AbortSnapshotRestoreRequest, _ ...grpc.CallOption) (*control.AbortSnapshotRestoreResponse, error) {
+	f.contexts = append(f.contexts, ctx)
+	return &control.AbortSnapshotRestoreResponse{SnapshotId: request.GetSnapshotId(), TargetVolumeId: request.GetTargetVolumeId()}, nil
+}
+
 func validWireSnapshot(snapshotID, name, sourceVolumeID string) *control.SnapshotRecord {
 	return &control.SnapshotRecord{
 		SnapshotId: snapshotID, Name: name, SourceVolumeId: sourceVolumeID,

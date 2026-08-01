@@ -31,6 +31,7 @@ func TestPhase175RestoreTargetFailsClosedThenRetriesAndActivates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	mustPrepareRestoreStorage(t, target, "store-a", rec.NumBlocks, rec.BlockSize)
 	if err := os.WriteFile(dataPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -120,6 +121,7 @@ func TestPhase175RestoreTargetRejectsUnsafeOrConflictingState(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		mustPrepareRestoreStorage(t, target, "store-b", rec.NumBlocks, rec.BlockSize)
 		if err := os.WriteFile(dataPath, nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -145,6 +147,7 @@ func TestPhase175RestoreTargetRejectsUnsafeOrConflictingState(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		mustPrepareRestoreStorage(t, target, "store-c", rec.NumBlocks, rec.BlockSize)
 		if err := os.WriteFile(dataPath, nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -178,6 +181,7 @@ func TestPhase175RestoreTargetCorruptStreamNeverApplies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	mustPrepareRestoreStorage(t, target, "store-d", rec.NumBlocks, rec.BlockSize)
 	if err := os.WriteFile(dataPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -206,6 +210,7 @@ func TestPhase175RestoreTargetVerifiesDigestBeforeApplyingLBA(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	mustPrepareRestoreStorage(t, target, "digest-first", rec.NumBlocks, rec.BlockSize)
 	if err := os.WriteFile(dataPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -243,6 +248,7 @@ func TestPhase175RestoreTargetReadsBackAppliedBlocksBeforePublication(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
+	mustPrepareRestoreStorage(t, target, "misdirect-write", rec.NumBlocks, rec.BlockSize)
 	if err := os.WriteFile(dataPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -282,6 +288,7 @@ func TestPhase175RestoreTargetRejectsDifferentDurableStoreOnReopen(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	mustPrepareRestoreStorage(t, target, "store-original", rec.NumBlocks, rec.BlockSize)
 	if err := os.WriteFile(dataPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -312,6 +319,13 @@ func openRestoreTargetForTest(t *testing.T, markerPath, dataPath string, rec Rec
 		t.Fatal(err)
 	}
 	return target
+}
+
+func mustPrepareRestoreStorage(t *testing.T, target *RestoreTarget, kind string, numBlocks uint32, blockSize int) {
+	t.Helper()
+	if err := target.PrepareStorage(kind, numBlocks, blockSize); err != nil {
+		t.Fatal(err)
+	}
 }
 
 type identifiedRestoreStorage struct {

@@ -24,6 +24,8 @@ var (
 	ErrAlreadyAttached   = errors.New("lifecycle: volume already attached to another node")
 	ErrAttachedElsewhere = errors.New("lifecycle: volume attached to another node")
 	ErrRestorePending    = errors.New("lifecycle: snapshot restore is pending")
+	ErrRestoreConflict   = errors.New("lifecycle: snapshot restore state conflict")
+	ErrDiscardIncomplete = errors.New("lifecycle: snapshot restore discard is incomplete")
 )
 
 var volumeIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
@@ -45,14 +47,17 @@ type VolumeSpec struct {
 
 // VolumeRecord is the durable lifecycle state for one volume.
 type VolumeRecord struct {
-	Spec         VolumeSpec `json:"spec"`
-	AttachedTo   string     `json:"attached_to,omitempty"`
-	RestoreState string     `json:"restore_state,omitempty"`
+	Spec         VolumeSpec          `json:"spec"`
+	AttachedTo   string              `json:"attached_to,omitempty"`
+	RestoreState string              `json:"restore_state,omitempty"`
+	RestoreAbort *RestoreAbortRecord `json:"restore_abort,omitempty"`
 }
 
 const (
-	VolumeRestorePending  = "restore_pending"
-	VolumeRestoreComplete = "restore_complete"
+	VolumeRestorePending        = "restore_pending"
+	VolumeRestoreComplete       = "restore_complete"
+	VolumeRestoreAbortRequested = "restore_abort_requested"
+	VolumeRestoreDiscarded      = "restore_discarded"
 )
 
 // FileStore persists one JSON record per volume ID.
@@ -100,9 +105,9 @@ func (s *FileStore) CreateVolume(spec VolumeSpec) (VolumeRecord, error) {
 				return VolumeRecord{}, err
 			}
 			s.records[spec.VolumeID] = merged
-			return merged, nil
+			return copyVolumeRecord(merged), nil
 		}
-		return existing, nil
+		return copyVolumeRecord(existing), nil
 	}
 	rec := VolumeRecord{Spec: spec}
 	if spec.SourceSnapshotID != "" {
@@ -112,7 +117,7 @@ func (s *FileStore) CreateVolume(spec VolumeSpec) (VolumeRecord, error) {
 		return VolumeRecord{}, err
 	}
 	s.records[spec.VolumeID] = rec
-	return rec, nil
+	return copyVolumeRecord(rec), nil
 }
 
 func volumeSpecsCompatible(a, b VolumeSpec) bool {
@@ -151,7 +156,7 @@ func (s *FileStore) DeleteVolume(volumeID string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if rec, ok := s.records[volumeID]; ok && rec.RestoreState == VolumeRestorePending {
+	if rec, ok := s.records[volumeID]; ok && (rec.RestoreState == VolumeRestorePending || rec.RestoreState == VolumeRestoreAbortRequested) {
 		return ErrRestorePending
 	}
 	err := os.Remove(s.path(volumeID))
@@ -182,6 +187,9 @@ func (s *FileStore) AttachVolume(volumeID, nodeID string) (VolumeRecord, error) 
 	if !ok {
 		return VolumeRecord{}, ErrVolumeNotFound
 	}
+	if rec.Spec.SourceSnapshotID != "" && rec.RestoreState != VolumeRestoreComplete {
+		return VolumeRecord{}, ErrRestorePending
+	}
 	if rec.AttachedTo != "" && rec.AttachedTo != nodeID {
 		return VolumeRecord{}, ErrAlreadyAttached
 	}
@@ -190,7 +198,7 @@ func (s *FileStore) AttachVolume(volumeID, nodeID string) (VolumeRecord, error) 
 		return VolumeRecord{}, err
 	}
 	s.records[volumeID] = rec
-	return rec, nil
+	return copyVolumeRecord(rec), nil
 }
 
 // DetachVolume clears an attach intent. Repeating the same detach is
@@ -213,7 +221,7 @@ func (s *FileStore) DetachVolume(volumeID, nodeID string) (VolumeRecord, error) 
 		return VolumeRecord{}, err
 	}
 	s.records[volumeID] = rec
-	return rec, nil
+	return copyVolumeRecord(rec), nil
 }
 
 // GetVolume returns a copy of a volume record.
@@ -221,7 +229,7 @@ func (s *FileStore) GetVolume(volumeID string) (VolumeRecord, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rec, ok := s.records[volumeID]
-	return rec, ok
+	return copyVolumeRecord(rec), ok
 }
 
 // ListVolumes returns records ordered by VolumeID.
@@ -235,7 +243,7 @@ func (s *FileStore) ListVolumes() []VolumeRecord {
 	sort.Strings(keys)
 	out := make([]VolumeRecord, 0, len(keys))
 	for _, k := range keys {
-		out = append(out, s.records[k])
+		out = append(out, copyVolumeRecord(s.records[k]))
 	}
 	return out
 }
@@ -260,7 +268,7 @@ func (s *FileStore) MarkRestoreComplete(volumeID, snapshotID string) (VolumeReco
 		return VolumeRecord{}, ErrVolumeConflict
 	}
 	if rec.RestoreState == VolumeRestoreComplete {
-		return rec, nil
+		return copyVolumeRecord(rec), nil
 	}
 	if rec.RestoreState != VolumeRestorePending {
 		return VolumeRecord{}, fmt.Errorf("%w: invalid restore state %q", ErrInvalidVolumeSpec, rec.RestoreState)
@@ -270,7 +278,7 @@ func (s *FileStore) MarkRestoreComplete(volumeID, snapshotID string) (VolumeReco
 		return VolumeRecord{}, err
 	}
 	s.records[volumeID] = rec
-	return rec, nil
+	return copyVolumeRecord(rec), nil
 }
 
 func (s *FileStore) load() error {
@@ -373,15 +381,34 @@ func validateSpec(spec VolumeSpec) error {
 
 func validateVolumeRestoreState(rec VolumeRecord) error {
 	if rec.Spec.SourceSnapshotID == "" {
-		if rec.RestoreState != "" {
+		if rec.RestoreState != "" || rec.RestoreAbort != nil {
 			return fmt.Errorf("%w: non-restore volume has restore state %q", ErrInvalidVolumeSpec, rec.RestoreState)
 		}
 		return nil
 	}
-	if rec.RestoreState != VolumeRestorePending && rec.RestoreState != VolumeRestoreComplete {
+	if rec.RestoreState != VolumeRestorePending && rec.RestoreState != VolumeRestoreComplete && rec.RestoreState != VolumeRestoreAbortRequested && rec.RestoreState != VolumeRestoreDiscarded {
 		return fmt.Errorf("%w: source snapshot volume has restore state %q", ErrInvalidVolumeSpec, rec.RestoreState)
 	}
+	if rec.RestoreState == VolumeRestorePending || rec.RestoreState == VolumeRestoreComplete {
+		if rec.RestoreAbort != nil {
+			return fmt.Errorf("%w: restore state %q carries abort state", ErrInvalidVolumeSpec, rec.RestoreState)
+		}
+		return nil
+	}
+	if err := validateRestoreAbortRecord(rec.Spec, rec.RestoreState, rec.RestoreAbort); err != nil {
+		return err
+	}
 	return nil
+}
+
+func copyVolumeRecord(rec VolumeRecord) VolumeRecord {
+	if rec.RestoreAbort == nil {
+		return rec
+	}
+	abort := *rec.RestoreAbort
+	abort.Replicas = append([]RestoreAbortReplica(nil), abort.Replicas...)
+	rec.RestoreAbort = &abort
+	return rec
 }
 
 func normalizeVolumeSpec(spec VolumeSpec) VolumeSpec {

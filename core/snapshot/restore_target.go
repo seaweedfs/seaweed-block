@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/seaweedfs/seaweed-block/core/storage"
@@ -39,6 +40,7 @@ type RestoreMarker struct {
 	TargetVolumeID  string  `json:"target_volume_id"`
 	TargetReplicaID string  `json:"target_replica_id"`
 	TargetDataPath  string  `json:"target_data_path"`
+	TargetStoreKind string  `json:"target_store_kind,omitempty"`
 	TargetStorageID string  `json:"target_storage_id,omitempty"`
 	TargetNumBlocks uint32  `json:"target_num_blocks,omitempty"`
 	TargetBlockSize int     `json:"target_block_size,omitempty"`
@@ -46,6 +48,55 @@ type RestoreMarker struct {
 	RestoredBlocks  uint64  `json:"restored_blocks,omitempty"`
 	RestoredBytes   uint64  `json:"restored_bytes,omitempty"`
 	TargetFrontier  uint64  `json:"target_frontier,omitempty"`
+}
+
+// PrepareStorage durably reserves the target path for one backend and
+// geometry before that backend creates its file. This closes the crash window
+// between store creation and BindStorage recording the generated StoreID.
+func (t *RestoreTarget) PrepareStorage(kind string, numBlocks uint32, blockSize int) error {
+	if !safeRestoreStorageKind(kind) || numBlocks == 0 || blockSize <= 0 {
+		return fmt.Errorf("%w: restore storage kind and geometry are required", ErrInvalidRequest)
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	legacyUpgrade := false
+	if t.marker.TargetStoreKind == "" && t.marker.TargetStorageID != "" {
+		legacyKind, ok := restoreStorageKindFromID(t.marker.TargetStorageID)
+		if !ok {
+			return fmt.Errorf("%w: restore marker has an unknown storage identity", ErrRestoreUnsafe)
+		}
+		t.marker.TargetStoreKind = legacyKind
+		legacyUpgrade = true
+	}
+	if t.marker.State != RestoreStatePending {
+		if t.marker.TargetStoreKind == kind && t.marker.TargetNumBlocks == numBlocks && t.marker.TargetBlockSize == blockSize {
+			if legacyUpgrade {
+				return t.persistLocked()
+			}
+			return nil
+		}
+		return fmt.Errorf("%w: restore storage intent conflicts with state %q", ErrRestoreConflict, t.marker.State)
+	}
+	if t.marker.TargetStoreKind != "" {
+		if t.marker.TargetStoreKind != kind || t.marker.TargetNumBlocks != numBlocks || t.marker.TargetBlockSize != blockSize {
+			return fmt.Errorf("%w: restore storage intent changed", ErrRestoreConflict)
+		}
+		if legacyUpgrade {
+			return t.persistLocked()
+		}
+		return nil
+	}
+	exists, err := restorePathExists(t.marker.TargetDataPath)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return fmt.Errorf("%w: target data exists before durable storage intent", ErrRestoreUnsafe)
+	}
+	t.marker.TargetStoreKind = kind
+	t.marker.TargetNumBlocks = numBlocks
+	t.marker.TargetBlockSize = blockSize
+	return t.persistLocked()
 }
 
 type RestoreApplyResult struct {
@@ -151,13 +202,17 @@ func (t *RestoreTarget) BindStorage(target storage.LogicalStorage) error {
 	if path != t.marker.TargetDataPath {
 		return fmt.Errorf("%w: target storage path mismatch", ErrRestoreConflict)
 	}
+	if t.marker.TargetStoreKind == "" {
+		return fmt.Errorf("%w: target storage was created without a durable intent", ErrRestoreUnsafe)
+	}
+	if !restoreStorageIDMatchesKind(identity.StoreID, t.marker.TargetStoreKind) || t.marker.TargetNumBlocks != target.NumBlocks() || t.marker.TargetBlockSize != target.BlockSize() {
+		return fmt.Errorf("%w: target storage does not match its durable intent", ErrRestoreConflict)
+	}
 	if t.marker.TargetStorageID == "" {
 		if t.marker.State != RestoreStatePending && t.marker.State != RestoreStateApplying {
 			return fmt.Errorf("%w: %s marker has no storage identity", ErrRestoreUnsafe, t.marker.State)
 		}
 		t.marker.TargetStorageID = identity.StoreID
-		t.marker.TargetNumBlocks = target.NumBlocks()
-		t.marker.TargetBlockSize = target.BlockSize()
 		if err := t.persistLocked(); err != nil {
 			return err
 		}
@@ -426,11 +481,18 @@ func validateRestoreMarker(marker RestoreMarker, cfg RestoreTargetConfig) error 
 	if marker.Version != restoreMarkerVersion || marker.SnapshotID != cfg.SnapshotID || marker.TargetVolumeID != cfg.TargetVolumeID || marker.TargetReplicaID != cfg.TargetReplicaID || marker.TargetDataPath != cfg.TargetDataPath {
 		return fmt.Errorf("%w: restore marker identity mismatch", ErrRestoreConflict)
 	}
-	if marker.TargetStorageID == "" {
-		if marker.TargetNumBlocks != 0 || marker.TargetBlockSize != 0 {
+	if marker.TargetStoreKind == "" && marker.TargetStorageID != "" {
+		legacyKind, ok := restoreStorageKindFromID(marker.TargetStorageID)
+		if !ok || marker.TargetNumBlocks == 0 || marker.TargetBlockSize <= 0 {
 			return fmt.Errorf("%w: incomplete target storage identity", ErrRestoreUnsafe)
 		}
-	} else if marker.TargetNumBlocks == 0 || marker.TargetBlockSize <= 0 {
+		marker.TargetStoreKind = legacyKind
+	}
+	if marker.TargetStoreKind == "" {
+		if marker.TargetStorageID != "" || marker.TargetNumBlocks != 0 || marker.TargetBlockSize != 0 {
+			return fmt.Errorf("%w: incomplete target storage intent", ErrRestoreUnsafe)
+		}
+	} else if !safeRestoreStorageKind(marker.TargetStoreKind) || marker.TargetNumBlocks == 0 || marker.TargetBlockSize <= 0 || (marker.TargetStorageID != "" && !restoreStorageIDMatchesKind(marker.TargetStorageID, marker.TargetStoreKind)) {
 		return fmt.Errorf("%w: incomplete target storage geometry", ErrRestoreUnsafe)
 	}
 	switch marker.State {
@@ -455,6 +517,23 @@ func validateRestoreMarker(marker RestoreMarker, cfg RestoreTargetConfig) error 
 		}
 	}
 	return nil
+}
+
+func safeRestoreStorageKind(kind string) bool {
+	return kind != "" && kind != "." && kind != ".." && restoreDiscardIdentityPattern.MatchString(kind)
+}
+
+func restoreStorageKindFromID(storeID string) (string, bool) {
+	kind, _, found := strings.Cut(storeID, ":")
+	if !found {
+		kind = storeID
+	}
+	return kind, safeRestoreStorageKind(kind)
+}
+
+func restoreStorageIDMatchesKind(storeID, kind string) bool {
+	actual, ok := restoreStorageKindFromID(storeID)
+	return ok && actual == kind
 }
 
 func sameRestoreRecord(a, b Record) bool {

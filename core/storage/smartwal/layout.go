@@ -12,6 +12,7 @@ import (
 // It is intentionally read-only; fault injection must use these offsets instead
 // of legacy WALStore constants.
 type Layout struct {
+	StoreID     string
 	HeaderSize  int64
 	RecordSize  int64
 	WALOffset   int64
@@ -70,6 +71,7 @@ func InspectLayout(path string) (Layout, error) {
 	}
 
 	return Layout{
+		StoreID:     "smartwal:" + hex.EncodeToString(hdr.UUID[:]),
 		HeaderSize:  int64(headerSize),
 		RecordSize:  int64(recordSize),
 		WALOffset:   walOffset,

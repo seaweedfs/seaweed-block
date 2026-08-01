@@ -25,6 +25,9 @@ func TestInspectLayoutReadsSmartWALGeometry(t *testing.T) {
 	if layout.HeaderSize != 4096 {
 		t.Fatalf("HeaderSize=%d want 4096", layout.HeaderSize)
 	}
+	if layout.StoreID == "" {
+		t.Fatal("StoreID is empty")
+	}
 	if layout.RecordSize != 32 {
 		t.Fatalf("RecordSize=%d want 32", layout.RecordSize)
 	}

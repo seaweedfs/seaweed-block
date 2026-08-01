@@ -93,16 +93,30 @@ func (s *services) CreateVolume(ctx context.Context, req *control.CreateVolumeRe
 }
 
 func (s *services) DeleteVolume(ctx context.Context, req *control.DeleteVolumeRequest) (*control.DeleteVolumeResponse, error) {
-	s.host.lifecycleProductMu.Lock()
-	defer s.host.lifecycleProductMu.Unlock()
+	if req.GetVolumeId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "volume_id is required")
+	}
 	stores := s.host.Lifecycle()
 	if stores == nil {
 		return nil, status.Error(codes.FailedPrecondition, "lifecycle store is not configured")
 	}
-	if req.GetVolumeId() == "" {
-		return nil, status.Error(codes.InvalidArgument, "volume_id is required")
+	s.host.lifecycleProductMu.Lock()
+	rec, ok := stores.Volumes.GetVolume(req.GetVolumeId())
+	if ok && rec.RestoreState == lifecycle.VolumeRestorePending {
+		snapshotID := rec.Spec.SourceSnapshotID
+		s.host.lifecycleProductMu.Unlock()
+		if _, err := s.host.RequestSnapshotRestoreAbort(ctx, req.GetVolumeId(), snapshotID); err != nil {
+			s.host.log.Printf("blockmaster: restore abort request volume=%q snapshot=%q: %v", req.GetVolumeId(), snapshotID, err)
+		}
+		return nil, lifecycleError("delete volume", lifecycle.ErrRestorePending)
 	}
-	if rec, ok := stores.Volumes.GetVolume(req.GetVolumeId()); ok && rec.RestoreState == lifecycle.VolumeRestorePending {
+	defer s.host.lifecycleProductMu.Unlock()
+	if ok && rec.RestoreState == lifecycle.VolumeRestoreAbortRequested {
+		for _, replica := range rec.RestoreAbort.Replicas {
+			if replica.State == lifecycle.RestoreDiscardTerminalFailure {
+				return nil, status.Errorf(codes.FailedPrecondition, "delete volume: restore discard terminal failure on replica %s after %d attempts: %s", replica.ReplicaID, replica.Attempt, replica.FailureReason)
+			}
+		}
 		return nil, lifecycleError("delete volume", lifecycle.ErrRestorePending)
 	}
 	if err := stores.Placements.DeletePlacement(req.GetVolumeId()); err != nil {

@@ -44,6 +44,9 @@ func PlanBlockVolumeWorkloads(volume VolumeRecord, placement PlacementIntent, no
 	if err := validateSpec(volume.Spec); err != nil {
 		return BlockVolumeWorkloadPlan{}, err
 	}
+	if volume.RestoreState == VolumeRestoreAbortRequested || volume.RestoreState == VolumeRestoreDiscarded {
+		return BlockVolumeWorkloadPlan{}, fmt.Errorf("%w: restore discard suppresses blockvolume workload", ErrRestorePending)
+	}
 	if placement.VolumeID != volume.Spec.VolumeID {
 		return BlockVolumeWorkloadPlan{}, fmt.Errorf("%w: placement volume %q != desired volume %q", ErrInvalidVolumeSpec, placement.VolumeID, volume.Spec.VolumeID)
 	}

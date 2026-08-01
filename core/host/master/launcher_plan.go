@@ -15,6 +15,7 @@ type LifecycleWorkloadPlanTickResult struct {
 	Plans                   []lifecycle.BlockVolumeWorkloadPlan
 	SkippedMissingVolume    int
 	SkippedMissingInventory int
+	SkippedRestoreAbort     int
 }
 
 // RunLifecycleWorkloadPlanTick converts desired lifecycle state into
@@ -30,8 +31,15 @@ func (h *Host) RunLifecycleWorkloadPlanTick(cfg lifecycle.WorkloadPlanConfig) (L
 		return LifecycleWorkloadPlanTickResult{}, nil
 	}
 	volumes := stores.Volumes.ListVolumes()
+	var result LifecycleWorkloadPlanTickResult
 	volumeByID := make(map[string]lifecycle.VolumeRecord, len(volumes))
+	aborting := make(map[string]bool)
 	for _, volume := range volumes {
+		if volume.RestoreState == lifecycle.VolumeRestoreAbortRequested || volume.RestoreState == lifecycle.VolumeRestoreDiscarded {
+			aborting[volume.Spec.VolumeID] = true
+			result.SkippedRestoreAbort++
+			continue
+		}
 		volumeByID[volume.Spec.VolumeID] = volume
 	}
 	nodes := stores.Nodes.ListNodes()
@@ -40,9 +48,11 @@ func (h *Host) RunLifecycleWorkloadPlanTick(cfg lifecycle.WorkloadPlanConfig) (L
 		plan        lifecycle.BlockVolumeWorkloadPlan
 		materialize bool
 	}
-	var result LifecycleWorkloadPlanTickResult
 	var pending []pendingPlan
 	for _, placement := range stores.Placements.ListPlacements() {
+		if aborting[placement.VolumeID] {
+			continue
+		}
 		volume, ok := volumeByID[placement.VolumeID]
 		if !ok {
 			result.SkippedMissingVolume++

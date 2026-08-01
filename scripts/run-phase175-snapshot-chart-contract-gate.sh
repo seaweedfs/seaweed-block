@@ -25,7 +25,7 @@ write_summary "phase175_snapshot_chart_contract_status=running"
 
 helm lint "${CHART}" >"${ARTIFACT_DIR}/helm-lint.log"
 helm template sw-block "${CHART}" --namespace kube-system >"${ARTIFACT_DIR}/helm-default.yaml"
-if grep -Eq 'csi-snapshotter|kind: VolumeSnapshotClass|--snapshot-api=' "${ARTIFACT_DIR}/helm-default.yaml"; then
+if grep -Eq 'csi-snapshotter|kind: VolumeSnapshotClass|--snapshot-api=|resources: \["jobs"\]' "${ARTIFACT_DIR}/helm-default.yaml"; then
   echo "default render exposed snapshot resources" >&2
   exit 1
 fi
@@ -77,6 +77,7 @@ require_rendered 'api-client.crt'
 require_rendered 'api-client.key'
 require_rendered 'volumesnapshotclasses'
 require_rendered 'volumesnapshotcontents/status'
+require_rendered 'resources: ["jobs"]'
 require_rendered 'kind: VolumeSnapshotClass'
 require_rendered 'name: sw-block-snapshot'
 require_rendered 'driver: block.csi.seaweedfs.com'
@@ -88,10 +89,19 @@ if [[ "$(grep -Fc -- 'key: backup-api-token' "${ARTIFACT_DIR}/helm-snapshot.yaml
   echo "backup API token must be projected exactly once to blockmaster and never to CSI" >&2
   exit 1
 fi
+if ! grep -A2 -F -- 'resources: ["jobs"]' "${ARTIFACT_DIR}/helm-snapshot.yaml" | grep -Fq -- 'verbs: ["get", "list", "watch", "create", "delete", "update", "patch"]'; then
+  echo "snapshot launcher Jobs do not have the required bounded lifecycle permissions" >&2
+  exit 1
+fi
+if ! grep -A4 -F -- 'resources: ["jobs"]' "${ARTIFACT_DIR}/helm-snapshot.yaml" | grep -A1 -F -- 'resources: ["pods"]' | grep -Fq -- 'verbs: ["get", "list", "watch"]'; then
+  echo "snapshot launcher cleanup Pod evidence is not read-only" >&2
+  exit 1
+fi
 
 write_summary "snapshot_sidecar_rendered=true"
 write_summary "snapshot_mtls_identity_projected=true"
 write_summary "snapshot_rbac_rendered=true"
+write_summary "snapshot_restore_discard_rbac_bounded=true"
 write_summary "volume_snapshot_class_rendered=true"
 write_summary "snapshot_controller_crds_chart_owned=false"
 write_summary "snapshot_backup_fixed_root_rendered=true"

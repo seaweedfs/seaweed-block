@@ -129,6 +129,31 @@ func (s *Store) DurableStorageIdentity() storage.DurableStorageIdentity {
 	}
 }
 
+// InspectStoreIdentity reads the selected durable header and geometry without
+// starting lane workers or opening the file for writes.
+func InspectStoreIdentity(path string) (storage.DurableStorageIdentity, uint32, int, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return storage.DurableStorageIdentity{}, 0, 0, fmt.Errorf("parallelwal: inspect open %s: %w", path, err)
+	}
+	defer f.Close()
+	h, _, err := readBestHeader(f)
+	if err != nil {
+		return storage.DurableStorageIdentity{}, 0, 0, err
+	}
+	required, err := fileSize(h)
+	if err != nil {
+		return storage.DurableStorageIdentity{}, 0, 0, err
+	}
+	stat, err := f.Stat()
+	if err != nil || stat.Size() < required {
+		return storage.DurableStorageIdentity{}, 0, 0, fmt.Errorf("%w: truncated parallelwal store", errBadGeometry)
+	}
+	return storage.DurableStorageIdentity{
+		Path: path, StoreID: fmt.Sprintf("parallelwal:%d:%d:%d:%d:%d", h.CreatedAt, h.NumBlocks, h.BlockSize, h.LaneCount, h.SlotsPerLane),
+	}, h.NumBlocks, int(h.BlockSize), nil
+}
+
 func CreateStore(path string, numBlocks uint32, blockSize int) (*Store, error) {
 	return CreateStoreWithConfig(path, Config{
 		NumBlocks:     numBlocks,

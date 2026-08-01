@@ -883,11 +883,12 @@ var FailbackService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	SnapshotService_CreateSnapshot_FullMethodName  = "/seaweedfs.block.control.SnapshotService/CreateSnapshot"
-	SnapshotService_GetSnapshot_FullMethodName     = "/seaweedfs.block.control.SnapshotService/GetSnapshot"
-	SnapshotService_ListSnapshots_FullMethodName   = "/seaweedfs.block.control.SnapshotService/ListSnapshots"
-	SnapshotService_DeleteSnapshot_FullMethodName  = "/seaweedfs.block.control.SnapshotService/DeleteSnapshot"
-	SnapshotService_RestoreSnapshot_FullMethodName = "/seaweedfs.block.control.SnapshotService/RestoreSnapshot"
+	SnapshotService_CreateSnapshot_FullMethodName       = "/seaweedfs.block.control.SnapshotService/CreateSnapshot"
+	SnapshotService_GetSnapshot_FullMethodName          = "/seaweedfs.block.control.SnapshotService/GetSnapshot"
+	SnapshotService_ListSnapshots_FullMethodName        = "/seaweedfs.block.control.SnapshotService/ListSnapshots"
+	SnapshotService_DeleteSnapshot_FullMethodName       = "/seaweedfs.block.control.SnapshotService/DeleteSnapshot"
+	SnapshotService_RestoreSnapshot_FullMethodName      = "/seaweedfs.block.control.SnapshotService/RestoreSnapshot"
+	SnapshotService_AbortSnapshotRestore_FullMethodName = "/seaweedfs.block.control.SnapshotService/AbortSnapshotRestore"
 )
 
 // SnapshotServiceClient is the client API for SnapshotService service.
@@ -899,6 +900,7 @@ type SnapshotServiceClient interface {
 	ListSnapshots(ctx context.Context, in *ListSnapshotsRequest, opts ...grpc.CallOption) (*ListSnapshotsResponse, error)
 	DeleteSnapshot(ctx context.Context, in *DeleteSnapshotRequest, opts ...grpc.CallOption) (*DeleteSnapshotResponse, error)
 	RestoreSnapshot(ctx context.Context, in *RestoreSnapshotRequest, opts ...grpc.CallOption) (*RestoreSnapshotResponse, error)
+	AbortSnapshotRestore(ctx context.Context, in *AbortSnapshotRestoreRequest, opts ...grpc.CallOption) (*AbortSnapshotRestoreResponse, error)
 }
 
 type snapshotServiceClient struct {
@@ -954,6 +956,15 @@ func (c *snapshotServiceClient) RestoreSnapshot(ctx context.Context, in *Restore
 	return out, nil
 }
 
+func (c *snapshotServiceClient) AbortSnapshotRestore(ctx context.Context, in *AbortSnapshotRestoreRequest, opts ...grpc.CallOption) (*AbortSnapshotRestoreResponse, error) {
+	out := new(AbortSnapshotRestoreResponse)
+	err := c.cc.Invoke(ctx, SnapshotService_AbortSnapshotRestore_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SnapshotServiceServer is the server API for SnapshotService service.
 // All implementations must embed UnimplementedSnapshotServiceServer
 // for forward compatibility
@@ -963,6 +974,7 @@ type SnapshotServiceServer interface {
 	ListSnapshots(context.Context, *ListSnapshotsRequest) (*ListSnapshotsResponse, error)
 	DeleteSnapshot(context.Context, *DeleteSnapshotRequest) (*DeleteSnapshotResponse, error)
 	RestoreSnapshot(context.Context, *RestoreSnapshotRequest) (*RestoreSnapshotResponse, error)
+	AbortSnapshotRestore(context.Context, *AbortSnapshotRestoreRequest) (*AbortSnapshotRestoreResponse, error)
 	mustEmbedUnimplementedSnapshotServiceServer()
 }
 
@@ -984,6 +996,9 @@ func (UnimplementedSnapshotServiceServer) DeleteSnapshot(context.Context, *Delet
 }
 func (UnimplementedSnapshotServiceServer) RestoreSnapshot(context.Context, *RestoreSnapshotRequest) (*RestoreSnapshotResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method RestoreSnapshot not implemented")
+}
+func (UnimplementedSnapshotServiceServer) AbortSnapshotRestore(context.Context, *AbortSnapshotRestoreRequest) (*AbortSnapshotRestoreResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AbortSnapshotRestore not implemented")
 }
 func (UnimplementedSnapshotServiceServer) mustEmbedUnimplementedSnapshotServiceServer() {}
 
@@ -1088,6 +1103,24 @@ func _SnapshotService_RestoreSnapshot_Handler(srv interface{}, ctx context.Conte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SnapshotService_AbortSnapshotRestore_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AbortSnapshotRestoreRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SnapshotServiceServer).AbortSnapshotRestore(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SnapshotService_AbortSnapshotRestore_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SnapshotServiceServer).AbortSnapshotRestore(ctx, req.(*AbortSnapshotRestoreRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // SnapshotService_ServiceDesc is the grpc.ServiceDesc for SnapshotService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1114,6 +1147,10 @@ var SnapshotService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RestoreSnapshot",
 			Handler:    _SnapshotService_RestoreSnapshot_Handler,
+		},
+		{
+			MethodName: "AbortSnapshotRestore",
+			Handler:    _SnapshotService_AbortSnapshotRestore_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

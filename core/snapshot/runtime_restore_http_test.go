@@ -201,6 +201,7 @@ func newRuntimeRestoreTarget(t *testing.T, rec Record) (*RestoreTarget, storage.
 	if err != nil {
 		t.Fatal(err)
 	}
+	mustPrepareRestoreStorage(t, target, "runtime-store", rec.NumBlocks, rec.BlockSize)
 	if err := os.WriteFile(dataPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}

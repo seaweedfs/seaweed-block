@@ -2,6 +2,9 @@ package master
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"sort"
 
@@ -9,6 +12,72 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 	"github.com/seaweedfs/seaweed-block/core/snapshot"
 )
+
+func (h *Host) RequestSnapshotRestoreAbort(ctx context.Context, targetVolumeID, snapshotID string) (lifecycle.VolumeRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return lifecycle.VolumeRecord{}, err
+	}
+	if h == nil || h.lifecycle == nil || h.lifecycle.Volumes == nil || h.lifecycle.Placements == nil || h.lifecycle.Nodes == nil || h.snapshotCoordinator == nil || h.Publisher() == nil {
+		return lifecycle.VolumeRecord{}, snapshot.ErrRestoreNotReady
+	}
+	h.lifecycleProductMu.Lock()
+	defer h.lifecycleProductMu.Unlock()
+	volume, ok := h.lifecycle.Volumes.GetVolume(targetVolumeID)
+	if !ok || volume.Spec.SourceSnapshotID != snapshotID {
+		return lifecycle.VolumeRecord{}, snapshot.ErrRestoreNotReady
+	}
+	if volume.RestoreState == lifecycle.VolumeRestoreAbortRequested || volume.RestoreState == lifecycle.VolumeRestoreDiscarded {
+		return volume, nil
+	}
+	if volume.RestoreState != lifecycle.VolumeRestorePending || volume.AttachedTo != "" {
+		return lifecycle.VolumeRecord{}, snapshot.ErrRestoreUnsafe
+	}
+	source, ok := h.snapshotCoordinator.Get(snapshotID)
+	if !ok || source.SourceVolumeID == targetVolumeID {
+		return lifecycle.VolumeRecord{}, snapshot.ErrRestoreUnsafe
+	}
+	if line, ok := h.Publisher().VolumeAuthorityLine(targetVolumeID); ok && line.Assigned {
+		return lifecycle.VolumeRecord{}, snapshot.ErrRestoreUnsafe
+	}
+	placement, ok := h.lifecycle.Placements.GetPlacement(targetVolumeID)
+	if !ok || placement.RestoreSnapshotID != snapshotID || placement.DesiredRF != volume.Spec.ReplicationFactor || len(placement.Slots) != volume.Spec.ReplicationFactor {
+		return lifecycle.VolumeRecord{}, snapshot.ErrRestoreNotReady
+	}
+	replicas := make([]lifecycle.RestoreAbortReplica, 0, len(placement.Slots))
+	for _, slot := range placement.Slots {
+		if slot.Source != lifecycle.PlacementSourceExistingReplica || slot.ServerID == "" || slot.ReplicaID == "" {
+			return lifecycle.VolumeRecord{}, snapshot.ErrRestoreNotReady
+		}
+		node, ok := h.lifecycle.Nodes.GetNode(slot.ServerID)
+		if !ok || node.Labels[lifecycle.KubernetesNodeNameLabel] == "" {
+			return lifecycle.VolumeRecord{}, snapshot.ErrRestoreNotReady
+		}
+		replicas = append(replicas, lifecycle.RestoreAbortReplica{
+			ServerID: slot.ServerID, KubernetesNodeName: node.Labels[lifecycle.KubernetesNodeNameLabel], ReplicaID: slot.ReplicaID, State: lifecycle.RestoreDiscardPending,
+		})
+	}
+	operationID, err := newSnapshotRestoreAbortOperationID()
+	if err != nil {
+		return lifecycle.VolumeRecord{}, err
+	}
+	record, err := h.lifecycle.Volumes.RequestRestoreAbort(targetVolumeID, snapshotID, lifecycle.RestoreAbortRecord{
+		OperationID: operationID,
+		SnapshotID:  snapshotID,
+		Replicas:    replicas,
+	})
+	if errors.Is(err, lifecycle.ErrRestoreConflict) {
+		return lifecycle.VolumeRecord{}, snapshot.ErrRestoreConflict
+	}
+	return record, err
+}
+
+func newSnapshotRestoreAbortOperationID() (string, error) {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", fmt.Errorf("snapshot: generate restore abort operation: %w", err)
+	}
+	return "abort-" + hex.EncodeToString(raw[:]), nil
+}
 
 func (h *Host) ResolveSnapshotRestoreTargets(ctx context.Context, targetVolumeID string, rec snapshot.Record) (snapshot.RestorePlan, error) {
 	if h == nil {

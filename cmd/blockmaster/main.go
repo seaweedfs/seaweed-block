@@ -464,6 +464,18 @@ func runLifecycleLauncherTick(h *master.Host, f flags) error {
 			}
 			fmt.Fprintf(os.Stderr, "blockmaster: launcher kubernetes reconcile namespace=%s applied=%d deleted=%d skipped=%d\n", namespace, reconcileResult.Applied, reconcileResult.Deleted, reconcileResult.Skipped)
 		}
+		if f.launcherStateHostPath != "" {
+			discardResult, err := h.RunSnapshotRestoreDiscardTick(context.Background(), master.RestoreDiscardReconcileConfig{
+				Namespace: f.launcherNamespace, Image: f.launcherImage, StateHostPathBase: f.launcherStateHostPath,
+			}, client)
+			if err != nil {
+				return err
+			}
+			if discardResult.Volumes != 0 {
+				fmt.Fprintf(os.Stderr, "blockmaster: restore discard reconcile volumes=%d waiting=%d jobs_created=%d jobs_active=%d jobs_failed=%d retry_waiting=%d terminal_failures=%d evidence=%d jobs_deleted=%d discarded=%d\n",
+					discardResult.Volumes, discardResult.WaitingForWorkloads, discardResult.JobsCreated, discardResult.JobsActive, discardResult.JobsFailed, discardResult.JobsRetryWaiting, discardResult.TerminalFailures, discardResult.EvidenceRecorded, discardResult.JobsDeleted, discardResult.VolumesDiscarded)
+			}
+		}
 	}
 	return nil
 }

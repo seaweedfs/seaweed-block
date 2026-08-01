@@ -139,6 +139,7 @@ service SnapshotService {
     rpc ListSnapshots(ListSnapshotsRequest) returns (ListSnapshotsResponse);
     rpc DeleteSnapshot(DeleteSnapshotRequest) returns (DeleteSnapshotResponse);
     rpc RestoreSnapshot(RestoreSnapshotRequest) returns (RestoreSnapshotResponse);
+    rpc AbortSnapshotRestore(AbortSnapshotRestoreRequest) returns (AbortSnapshotRestoreResponse);
 }
 
 // SnapshotBackupService exports and imports already-ready immutable snapshots.
@@ -532,4 +533,28 @@ message SnapshotRestoreEvidence {
     string storage_id = 3;
     uint32 num_blocks = 4;
     uint32 block_size = 5;
+}
+
+message AbortSnapshotRestoreRequest {
+    string snapshot_id = 1;
+    string target_volume_id = 2;
+}
+
+message AbortSnapshotRestoreResponse {
+    string operation_id = 1;
+    string snapshot_id = 2;
+    string target_volume_id = 3;
+    string state = 4;
+    repeated RestoreDiscardTarget targets = 5;
+}
+
+message RestoreDiscardTarget {
+    string server_id = 1;
+    string replica_id = 2;
+    string state = 3;
+    string kubernetes_node_name = 4;
+    uint32 attempt = 5;
+    string retry_not_before = 6;
+    string failure_reason = 7;
+    string evidence_ref = 8;
 }
