@@ -93,6 +93,10 @@ type phase174FixedWorkResult struct {
 	PeerQueueSaturated      uint64  `json:"peer_queue_saturated,omitempty"`
 	PostMeasurementDrain    bool    `json:"post_measurement_sync_all"`
 	PostMeasurementDrainNS  int64   `json:"post_measurement_sync_all_ns,omitempty"`
+	PostMeasurementRecovery bool    `json:"post_measurement_recovery"`
+	ReplicaProbeCount       int     `json:"replica_probe_count,omitempty"`
+	ReplicaCatchUpCount     int     `json:"replica_catchup_count,omitempty"`
+	MaxReplicaLagLSN        uint64  `json:"max_replica_lag_lsn,omitempty"`
 	RemoteReplicaEvidence   bool    `json:"remote_replica_evidence_required"`
 	ReplicaCount            int     `json:"replica_count"`
 	ReplicaDurableCount     int     `json:"replica_durable_count"`
@@ -122,6 +126,12 @@ type phase174Pipeline struct {
 	configuredReplicas int
 	remoteReplicas     bool
 	closed             bool
+}
+
+type phase174RecoveryEvidence struct {
+	probeCount   int
+	catchUpCount int
+	maxLagLSN    uint64
 }
 
 func TestPhase174FixedWorkContract(t *testing.T) {
@@ -174,6 +184,9 @@ func TestPhase174FixedWorkPipeline(t *testing.T) {
 	set, err := strconv.Atoi(os.Getenv(phase174SetEnv))
 	if err != nil || set < 1 || set > 2 {
 		t.Fatalf("%s must be 1 or 2", phase174SetEnv)
+	}
+	if os.Getenv(phase174RemoteReplicasEnv) != "" {
+		peerSessionIDCounter.Store(phase174RemoteSessionBase(set, run, writers))
 	}
 
 	oldLogWriter := log.Writer()
@@ -353,9 +366,15 @@ func runPhase174FixedWork(t *testing.T, p *phase174Pipeline, set, run, writers i
 		t.Fatalf("no replica reached final frontier")
 	}
 	var postMeasurementDrain time.Duration
+	var recoveryEvidence phase174RecoveryEvidence
 	if p.remoteReplicas {
-		p.replication.SetDurabilityMode(DurabilitySyncAll)
 		drainStart := time.Now()
+		_, _, targetLSN := p.primary.Boundaries()
+		recoveryEvidence, err = p.recoverRemoteReplicas(context.Background(), set, run, writers, targetLSN)
+		if err != nil {
+			t.Fatalf("post-measurement replica recovery: %v", err)
+		}
+		p.replication.SetDurabilityMode(DurabilitySyncAll)
 		if err := p.sync(context.Background()); err != nil {
 			t.Fatalf("post-measurement sync-all: %v", err)
 		}
@@ -419,8 +438,12 @@ func runPhase174FixedWork(t *testing.T, p *phase174Pipeline, set, run, writers i
 		FlusherExtentSyncNanos:  flusherForeground.ExtentSyncDurationNanos - flusherBefore.ExtentSyncDurationNanos,
 		PrimaryStableLSN:        primaryR, PrimaryHeadLSN: primaryH,
 		PostMeasurementDrain: p.remoteReplicas, PostMeasurementDrainNS: postMeasurementDrain.Nanoseconds(),
-		RemoteReplicaEvidence: p.remoteReplicas,
-		ReplicaCount:          p.configuredReplicas, ReplicaDurableCount: durableReplicas,
+		PostMeasurementRecovery: p.remoteReplicas,
+		ReplicaProbeCount:       recoveryEvidence.probeCount,
+		ReplicaCatchUpCount:     recoveryEvidence.catchUpCount,
+		MaxReplicaLagLSN:        recoveryEvidence.maxLagLSN,
+		RemoteReplicaEvidence:   p.remoteReplicas,
+		ReplicaCount:            p.configuredReplicas, ReplicaDurableCount: durableReplicas,
 		ReplicaFrontiersEqual: replicasEqual,
 		FlusherPhaseReset:     flusherPhaseReset,
 		CloseRecoverComplete:  true, CorrectnessSamples: correctness,
@@ -485,6 +508,106 @@ func (p *phase174Pipeline) sync(ctx context.Context) error {
 	}
 	_, err := p.primary.Sync()
 	return err
+}
+
+func phase174RemoteSessionBase(set, run, writers int) uint64 {
+	return 1_740_000_000 + uint64(set)*100_000_000 + uint64(writers)*1_000_000 + uint64(run)*1_000
+}
+
+func (p *phase174Pipeline) recoverRemoteReplicas(
+	ctx context.Context,
+	set, run, writers int,
+	targetLSN uint64,
+) (phase174RecoveryEvidence, error) {
+	var evidence phase174RecoveryEvidence
+	if p.replication == nil || !p.remoteReplicas {
+		return evidence, nil
+	}
+	p.replication.mu.Lock()
+	peers := make([]*ReplicaPeer, 0, len(p.replication.peers))
+	for _, peer := range p.replication.peers {
+		peers = append(peers, peer)
+	}
+	p.replication.mu.Unlock()
+	sort.Slice(peers, func(i, j int) bool {
+		return peers[i].Target().ReplicaID < peers[j].Target().ReplicaID
+	})
+
+	for index := range peers {
+		peer := peers[index]
+		target := peer.Target()
+		sessionBase := phase174RemoteSessionBase(set, run, writers) + 100 + uint64(index)*10
+		probe := peer.Executor().Probe(
+			target.ReplicaID, target.DataAddr, target.ControlAddr,
+			sessionBase, target.Epoch, target.EndpointVersion,
+		)
+		if !probe.Success {
+			return evidence, fmt.Errorf("probe peer %s: %s", target.ReplicaID, probe.FailReason)
+		}
+		evidence.probeCount++
+		if probe.ReplicaFlushedLSN > targetLSN {
+			return evidence, fmt.Errorf("probe peer %s frontier %d exceeds primary target %d",
+				target.ReplicaID, probe.ReplicaFlushedLSN, targetLSN)
+		}
+		lag := targetLSN - probe.ReplicaFlushedLSN
+		if lag > evidence.maxLagLSN {
+			evidence.maxLagLSN = lag
+		}
+		completedSessionID := sessionBase
+		achievedLSN := probe.ReplicaFlushedLSN
+		if lag > 0 {
+			completedSessionID++
+			peer.SetState(ReplicaCatchingUp)
+			req := RuntimeRecoveryRequest{
+				ReplicaID:       target.ReplicaID,
+				TargetDataAddr:  target.DataAddr,
+				SessionID:       completedSessionID,
+				Epoch:           target.Epoch,
+				EndpointVersion: target.EndpointVersion,
+				FromLSN:         probe.ReplicaFlushedLSN + 1,
+				FrontierHintLSN: targetLSN,
+			}
+			if err := p.replication.StartRuntimeRecovery(ctx, req); err != nil {
+				peer.Invalidate("phase174 catch-up start failed: " + err.Error())
+				return evidence, fmt.Errorf("start catch-up peer %s: %w", target.ReplicaID, err)
+			}
+			evidence.catchUpCount++
+			deadline := time.Now().Add(2 * time.Minute)
+			for {
+				status, err := p.replication.RuntimeRecoveryStatus(ctx, req)
+				if err != nil {
+					return evidence, fmt.Errorf("catch-up status peer %s: %w", target.ReplicaID, err)
+				}
+				if status.State == "caught_up" {
+					achievedLSN = status.AchievedLSN
+					break
+				}
+				if status.State == "failed" {
+					peer.Invalidate("phase174 catch-up failed: " + status.FailReason)
+					return evidence, fmt.Errorf("catch-up peer %s failed kind=%s reason=%s",
+						target.ReplicaID, status.FailureKind, status.FailReason)
+				}
+				if time.Now().After(deadline) {
+					return evidence, fmt.Errorf("catch-up peer %s timed out", target.ReplicaID)
+				}
+				select {
+				case <-ctx.Done():
+					return evidence, ctx.Err()
+				case <-time.After(10 * time.Millisecond):
+				}
+			}
+		}
+		if achievedLSN < targetLSN {
+			return evidence, fmt.Errorf("peer %s achieved %d below target %d",
+				target.ReplicaID, achievedLSN, targetLSN)
+		}
+		if err := peer.RefreshLiveShipSessionAfter(completedSessionID, achievedLSN, "phase174 recovery completed"); err != nil {
+			peer.Invalidate("phase174 live session refresh failed: " + err.Error())
+			return evidence, fmt.Errorf("refresh live session peer %s: %w", target.ReplicaID, err)
+		}
+		peer.SetState(ReplicaHealthy)
+	}
+	return evidence, nil
 }
 
 func (p *phase174Pipeline) replicationStats() VolumeStats {

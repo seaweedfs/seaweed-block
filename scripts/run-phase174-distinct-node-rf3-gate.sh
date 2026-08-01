@@ -22,6 +22,7 @@ M01_ADDR="${M01_DATA_IP}:17411"
 TP01_ADDR="${TP01_DATA_IP}:17412"
 RUNS=5
 WRITERS=(1 4 8)
+GATE_COMPLETE=false
 
 SSH=(ssh -T -i "${SSH_KEY}" -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o BatchMode=yes)
 SCP=(scp -q -i "${SSH_KEY}" -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o BatchMode=yes)
@@ -37,11 +38,29 @@ write_summary() {
 }
 
 cleanup() {
-  rm -f "${LOCAL_BINARY}"
+	local exit_status=$?
+	if [[ "${GATE_COMPLETE}" != "true" ]]; then
+		mkdir -p "${ARTIFACT_DIR}/remote"
+		for spec in "${M01_HOST}:m01" "${TP01_HOST}:tp01"; do
+			local host="${spec%:*}" node="${spec##*:}"
+			for writers in "${WRITERS[@]}"; do
+				local dir="${REMOTE_ROOT}/w${writers}-${node}"
+				"${SCP[@]}" "${host}:${dir}/replica.log" "${ARTIFACT_DIR}/remote/w${writers}-${node}-failure.log" >/dev/null 2>&1 || true
+				"${SCP[@]}" "${host}:${dir}/result.json" "${ARTIFACT_DIR}/remote/w${writers}-${node}-failure-result.json" >/dev/null 2>&1 || true
+				done
+			done
+		write_summary "phase174_distinct_node_rf3_status=failed"
+		write_summary "failure_artifact=${PUBLISH_ROOT}/${RUN_ID}.tar.gz"
+		tar -C "$(dirname "${ARTIFACT_DIR}")" -czf "${ARTIFACT_DIR}.tar.gz" "$(basename "${ARTIFACT_DIR}")" >/dev/null 2>&1 || true
+		sha256sum "${ARTIFACT_DIR}.tar.gz" >"${ARTIFACT_DIR}.tar.gz.sha256" 2>/dev/null || true
+		"${SCP[@]}" "${ARTIFACT_DIR}.tar.gz" "${M02_HOST}:${PUBLISH_ROOT}/${RUN_ID}.tar.gz" >/dev/null 2>&1 || true
+	fi
+	rm -f "${LOCAL_BINARY}"
   for host in "${M01_HOST}" "${TP01_HOST}"; do
     remote "${host}" "test '${REMOTE_ROOT}' = '/tmp/${RUN_ID}'; rm -rf -- '${REMOTE_ROOT}'" >/dev/null 2>&1 || true
   done
-  remote "${M02_HOST}" "test '${REMOTE_ROOT}' = '/tmp/${RUN_ID}'; test '${M02_STORE_ROOT}' = '/data/nvme/block/${RUN_ID}-stores'; rm -rf -- '${REMOTE_ROOT}' '${M02_STORE_ROOT}'" >/dev/null 2>&1 || true
+	remote "${M02_HOST}" "test '${REMOTE_ROOT}' = '/tmp/${RUN_ID}'; test '${M02_STORE_ROOT}' = '/data/nvme/block/${RUN_ID}-stores'; rm -rf -- '${REMOTE_ROOT}' '${M02_STORE_ROOT}'" >/dev/null 2>&1 || true
+	return "${exit_status}"
 }
 trap cleanup EXIT
 
@@ -101,7 +120,7 @@ write_summary "phase174_distinct_node_rf3_status=running"
 write_summary "contract=phase174-distinct-node-rf3-v1"
 write_summary "source_commit=$(git -C "${ROOT}" rev-parse HEAD)"
 write_summary "foreground_ack_profile=sync_quorum_rf3"
-write_summary "post_measurement_drain=sync_all"
+write_summary "post_measurement_drain=probe_catchup_then_sync_all"
 write_summary "transport=tcp"
 write_summary "network_class=management_lan"
 write_summary "primary_node=m02"
@@ -175,6 +194,9 @@ if len(rows) != 3 * runs:
     raise SystemExit(f"primary rows={len(rows)} want {3 * runs}")
 
 queue_saturation_rows = 0
+replica_probe_count = 0
+replica_catchup_count = 0
+max_replica_lag_lsn = 0
 for row in rows:
     if row["contract"] != "phase174-fixed-work-v1" or row["ack_profile"] != "sync_quorum_rf3":
         raise SystemExit(f"bad primary contract: {row}")
@@ -182,6 +204,8 @@ for row in rows:
         raise SystemExit(f"bad external replica contract: {row}")
     if not row["post_measurement_sync_all"] or row["post_measurement_sync_all_ns"] <= 0:
         raise SystemExit(f"missing post-measurement drain: {row}")
+    if not row["post_measurement_recovery"] or row.get("replica_probe_count") != 2:
+        raise SystemExit(f"missing post-measurement recovery evidence: {row}")
     if row["api_operations"] != 16384 or row["logical_bytes"] != 67108864:
         raise SystemExit(f"bad fixed work: {row}")
     if row["primary_wal_write_ops"] != 16384 or row["replication_write_ops"] != 16384:
@@ -190,6 +214,9 @@ for row in rows:
         raise SystemExit(f"primary recovery mismatch: {row}")
     if row.get("peer_queue_saturated", 0) > 0:
         queue_saturation_rows += 1
+    replica_probe_count += row["replica_probe_count"]
+    replica_catchup_count += row.get("replica_catchup_count", 0)
+    max_replica_lag_lsn = max(max_replica_lag_lsn, row.get("max_replica_lag_lsn", 0))
 
 remote_paths = sorted(glob.glob(f"{remote_dir}/w*-*-result.json"))
 if len(remote_paths) != 6:
@@ -209,8 +236,12 @@ with open(summary_path, "a", encoding="utf-8") as out:
     out.write(f"primary_result_count={len(rows)}\n")
     out.write(f"remote_recovered_replica_count={len(remote_paths)}\n")
     out.write(f"peer_queue_saturation_row_count={queue_saturation_rows}\n")
+    out.write(f"replica_probe_count={replica_probe_count}\n")
+    out.write(f"replica_catchup_count={replica_catchup_count}\n")
+    out.write(f"max_replica_lag_lsn={max_replica_lag_lsn}\n")
     out.write("remote_replica_frontiers_and_bytes_equal=true\n")
     out.write("foreground_sync_quorum_preserved=true\n")
+    out.write("post_measurement_recovery_verified=true\n")
     out.write("post_measurement_sync_all_verified=true\n")
     out.write("rf3_distinct_node_healthy=true\n")
     out.write("architecture_candidate_selected=false\n")
@@ -218,6 +249,7 @@ with open(summary_path, "a", encoding="utf-8") as out:
     out.write("phase174_distinct_node_rf3_status=ok\n")
 PY
 
+GATE_COMPLETE=true
 cleanup
 trap - EXIT
 for host in "${M01_HOST}" "${M02_HOST}" "${TP01_HOST}"; do

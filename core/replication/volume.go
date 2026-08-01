@@ -487,12 +487,18 @@ func (v *ReplicationVolume) replaceTerminalPeerQueueLocked(id string, old *peerW
 	if old == nil || v.peerQueues[id] != old || !old.isTerminal() {
 		return v.peerQueues[id]
 	}
-	old.closeAndWait()
 	peer := v.peers[id]
 	if peer == nil || v.closed {
+		old.closeAndWait()
 		delete(v.peerQueues, id)
 		return nil
 	}
+	// Saturation degrades the peer before this call returns. Recovery must
+	// close the LSN gap before a fresh queue can accept steady writes.
+	if peer.State() != ReplicaHealthy {
+		return old
+	}
+	old.closeAndWait()
 	replacement := newPeerWorkQueue(peer, v.peerQueueDepth)
 	v.peerQueues[id] = replacement
 	return replacement

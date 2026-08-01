@@ -22,9 +22,10 @@ provided binary.
 - 16,384 deterministic 4 KiB writes and 64 MiB per measured run;
 - 1, 4, and 8 writers, five runs each, after a persistent precondition run;
 - foreground ACK remains `sync_quorum_rf3`;
-- after the measured Sync, an explicitly excluded SyncAll drain makes both
-  external replicas inspectable without weakening or relabeling foreground
-  semantics;
+- after the measured Sync, an explicitly excluded recovery phase probes each
+  external replica, catches any lagging replica up from its durable `R+1`,
+  completes the production-equivalent live-session handoff, and only then
+  requires SyncAll;
 - each remote process stops, reopens WALStore, recovers the exact expected
   frontier, and verifies final payload bytes independently;
 - the primary also closes, reopens, recovers, and verifies bytes every run.
@@ -34,10 +35,13 @@ provided binary.
 - `phase174_distinct_node_rf3_status=ok`;
 - 15 primary result rows and six independently recovered remote results;
 - `foreground_sync_quorum_preserved=true`;
+- `post_measurement_recovery_verified=true`;
 - `post_measurement_sync_all_verified=true`;
 - `remote_replica_frontiers_and_bytes_equal=true`;
 - `rf3_distinct_node_healthy=true`;
 - peer queue saturation is reported, not hidden;
+- every primary row reports two live probes; catch-up count and maximum LSN lag
+  are preserved as evidence rather than inferred from the final barrier;
 - no cross-ACK-profile throughput ratio, candidate selection, or product
   mutation;
 - remote process/store cleanup leaves no gate residue.
