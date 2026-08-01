@@ -208,6 +208,7 @@ if len(rows) != 3 * runs:
 queue_saturation_rows = 0
 replica_probe_count = 0
 replica_catchup_count = 0
+replica_rebuild_count = 0
 max_replica_lag_lsn = 0
 for row in rows:
     if row["contract"] != "phase174-fixed-work-v1" or row["ack_profile"] != "sync_quorum_rf3":
@@ -228,6 +229,7 @@ for row in rows:
         queue_saturation_rows += 1
     replica_probe_count += row["replica_probe_count"]
     replica_catchup_count += row.get("replica_catchup_count", 0)
+    replica_rebuild_count += row.get("replica_rebuild_count", 0)
     max_replica_lag_lsn = max(max_replica_lag_lsn, row.get("max_replica_lag_lsn", 0))
 
 remote_paths = sorted(glob.glob(f"{remote_dir}/w*-*-result.json"))
@@ -250,6 +252,7 @@ with open(summary_path, "a", encoding="utf-8") as out:
     out.write(f"peer_queue_saturation_row_count={queue_saturation_rows}\n")
     out.write(f"replica_probe_count={replica_probe_count}\n")
     out.write(f"replica_catchup_count={replica_catchup_count}\n")
+    out.write(f"replica_rebuild_count={replica_rebuild_count}\n")
     out.write(f"max_replica_lag_lsn={max_replica_lag_lsn}\n")
     out.write("remote_replica_frontiers_and_bytes_equal=true\n")
     out.write("foreground_sync_quorum_preserved=true\n")

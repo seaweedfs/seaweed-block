@@ -24,6 +24,7 @@ provided binary.
 - foreground ACK remains `sync_quorum_rf3`;
 - after the measured Sync, an explicitly excluded recovery phase probes each
   external replica, catches any lagging replica up from its durable `R+1`,
+  or rebuilds it when `R < S` proves the WAL window has moved past it,
   completes the production-equivalent live-session handoff, and only then
   requires SyncAll;
 - each remote process stops, reopens WALStore, recovers the exact expected
@@ -40,8 +41,9 @@ provided binary.
 - `remote_replica_frontiers_and_bytes_equal=true`;
 - `rf3_distinct_node_healthy=true`;
 - peer queue saturation is reported, not hidden;
-- every primary row reports two live probes; catch-up count and maximum LSN lag
-  are preserved as evidence rather than inferred from the final barrier;
+- every primary row reports two live probes; catch-up/rebuild counts and
+  maximum LSN lag are preserved as evidence rather than inferred from the
+  final barrier;
 - no cross-ACK-profile throughput ratio, candidate selection, or product
   mutation;
 - remote process/store cleanup leaves no gate residue.

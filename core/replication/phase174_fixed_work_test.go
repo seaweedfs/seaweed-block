@@ -96,6 +96,7 @@ type phase174FixedWorkResult struct {
 	PostMeasurementRecovery bool    `json:"post_measurement_recovery"`
 	ReplicaProbeCount       int     `json:"replica_probe_count,omitempty"`
 	ReplicaCatchUpCount     int     `json:"replica_catchup_count,omitempty"`
+	ReplicaRebuildCount     int     `json:"replica_rebuild_count,omitempty"`
 	MaxReplicaLagLSN        uint64  `json:"max_replica_lag_lsn,omitempty"`
 	RemoteReplicaEvidence   bool    `json:"remote_replica_evidence_required"`
 	ReplicaCount            int     `json:"replica_count"`
@@ -131,8 +132,17 @@ type phase174Pipeline struct {
 type phase174RecoveryEvidence struct {
 	probeCount   int
 	catchUpCount int
+	rebuildCount int
 	maxLagLSN    uint64
 }
+
+type phase174RecoveryKind string
+
+const (
+	phase174RecoveryNone    phase174RecoveryKind = "none"
+	phase174RecoveryCatchUp phase174RecoveryKind = "catch_up"
+	phase174RecoveryRebuild phase174RecoveryKind = "rebuild"
+)
 
 func TestPhase174FixedWorkContract(t *testing.T) {
 	for _, layer := range []phase174Layer{phase174DirectWALStore, phase174AdapterRF1, phase174RF3TCP} {
@@ -158,6 +168,23 @@ func TestPhase174FixedWorkContract(t *testing.T) {
 	}
 	if err := phase174ValidateWriters(3); err == nil {
 		t.Fatal("writers=3 accepted")
+	}
+	for _, tc := range []struct {
+		name     string
+		replicaR uint64
+		primaryS uint64
+		primaryH uint64
+		want     phase174RecoveryKind
+	}{
+		{name: "current", replicaR: 100, primaryS: 50, primaryH: 100, want: phase174RecoveryNone},
+		{name: "retained", replicaR: 75, primaryS: 50, primaryH: 100, want: phase174RecoveryCatchUp},
+		{name: "recycled", replicaR: 49, primaryS: 50, primaryH: 100, want: phase174RecoveryRebuild},
+	} {
+		t.Run("recovery_"+tc.name, func(t *testing.T) {
+			if got := phase174RecoveryKindFor(tc.replicaR, tc.primaryS, tc.primaryH); got != tc.want {
+				t.Fatalf("kind=%s want %s", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -441,6 +468,7 @@ func runPhase174FixedWork(t *testing.T, p *phase174Pipeline, set, run, writers i
 		PostMeasurementRecovery: p.remoteReplicas,
 		ReplicaProbeCount:       recoveryEvidence.probeCount,
 		ReplicaCatchUpCount:     recoveryEvidence.catchUpCount,
+		ReplicaRebuildCount:     recoveryEvidence.rebuildCount,
 		MaxReplicaLagLSN:        recoveryEvidence.maxLagLSN,
 		RemoteReplicaEvidence:   p.remoteReplicas,
 		ReplicaCount:            p.configuredReplicas, ReplicaDurableCount: durableReplicas,
@@ -514,6 +542,16 @@ func phase174RemoteSessionBase(set, run, writers int) uint64 {
 	return 1_740_000_000 + uint64(set)*100_000_000 + uint64(writers)*1_000_000 + uint64(run)*1_000
 }
 
+func phase174RecoveryKindFor(replicaR, primaryS, primaryH uint64) phase174RecoveryKind {
+	if replicaR >= primaryH {
+		return phase174RecoveryNone
+	}
+	if replicaR < primaryS {
+		return phase174RecoveryRebuild
+	}
+	return phase174RecoveryCatchUp
+}
+
 func (p *phase174Pipeline) recoverRemoteReplicas(
 	ctx context.Context,
 	set, run, writers int,
@@ -564,31 +602,35 @@ func (p *phase174Pipeline) recoverRemoteReplicas(
 				SessionID:       completedSessionID,
 				Epoch:           target.Epoch,
 				EndpointVersion: target.EndpointVersion,
-				FromLSN:         probe.ReplicaFlushedLSN + 1,
 				FrontierHintLSN: targetLSN,
 			}
-			if err := p.replication.StartRuntimeRecovery(ctx, req); err != nil {
-				peer.Invalidate("phase174 catch-up start failed: " + err.Error())
-				return evidence, fmt.Errorf("start catch-up peer %s: %w", target.ReplicaID, err)
+			if phase174RecoveryKindFor(probe.ReplicaFlushedLSN, probe.PrimaryTailLSN, targetLSN) == phase174RecoveryRebuild {
+				evidence.rebuildCount++
+			} else {
+				req.FromLSN = probe.ReplicaFlushedLSN + 1
+				evidence.catchUpCount++
 			}
-			evidence.catchUpCount++
+			if err := p.replication.StartRuntimeRecovery(ctx, req); err != nil {
+				peer.Invalidate("phase174 recovery start failed: " + err.Error())
+				return evidence, fmt.Errorf("start recovery peer %s: %w", target.ReplicaID, err)
+			}
 			deadline := time.Now().Add(2 * time.Minute)
 			for {
 				status, err := p.replication.RuntimeRecoveryStatus(ctx, req)
 				if err != nil {
-					return evidence, fmt.Errorf("catch-up status peer %s: %w", target.ReplicaID, err)
+					return evidence, fmt.Errorf("recovery status peer %s: %w", target.ReplicaID, err)
 				}
 				if status.State == "caught_up" {
 					achievedLSN = status.AchievedLSN
 					break
 				}
 				if status.State == "failed" {
-					peer.Invalidate("phase174 catch-up failed: " + status.FailReason)
-					return evidence, fmt.Errorf("catch-up peer %s failed kind=%s reason=%s",
+					peer.Invalidate("phase174 recovery failed: " + status.FailReason)
+					return evidence, fmt.Errorf("recovery peer %s failed kind=%s reason=%s",
 						target.ReplicaID, status.FailureKind, status.FailReason)
 				}
 				if time.Now().After(deadline) {
-					return evidence, fmt.Errorf("catch-up peer %s timed out", target.ReplicaID)
+					return evidence, fmt.Errorf("recovery peer %s timed out", target.ReplicaID)
 				}
 				select {
 				case <-ctx.Done():
