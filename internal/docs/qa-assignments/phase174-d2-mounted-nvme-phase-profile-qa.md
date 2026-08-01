@@ -16,6 +16,7 @@ settings used by the existing mounted baseline:
 SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/<run-id>-phase174-mounted-nvme \
 SW_BLOCK_PHASE174_SOURCE_COMMIT=<full-source-commit> \
 SW_BLOCK_FRONTEND_IP_MAP=m01=10.0.0.1,m02=10.0.0.3 \
+SW_BLOCK_PHASE174_MOUNTED_FRONTEND_NETWORK_CLASS=100gbe_tcp \
 SW_BLOCK_EXPECTED_FRONTEND_ROUTE_DEV=enp1s0np0 \
 SW_BLOCK_IMPORT_K3S_SSH_KEY=/opt/work/testdev_key \
   bash scripts/run-phase174-mounted-nvme-phase-profile-gate.sh "$PWD"

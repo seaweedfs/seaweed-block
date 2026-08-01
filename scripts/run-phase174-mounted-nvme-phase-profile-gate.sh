@@ -7,6 +7,7 @@ BASELINE_DIR="${ARTIFACT_DIR}/phase120-mounted-profile"
 SUMMARY="${ARTIFACT_DIR}/phase174-mounted-nvme-phase-profile-summary.txt"
 SEQ_MIB="${SW_BLOCK_PHASE174_MOUNTED_SEQ_MIB:-256}"
 PVC_SIZE="${SW_BLOCK_PHASE174_MOUNTED_PVC_SIZE:-1Gi}"
+FRONTEND_NETWORK_CLASS="${SW_BLOCK_PHASE174_MOUNTED_FRONTEND_NETWORK_CLASS:-100gbe_tcp}"
 SOURCE_COMMIT="${SW_BLOCK_PHASE174_SOURCE_COMMIT:-$(git -C "${ROOT}" rev-parse HEAD 2>/dev/null || true)}"
 
 mkdir -p "${ARTIFACT_DIR}" "${BASELINE_DIR}"
@@ -49,6 +50,7 @@ write_summary "source_commit=${SOURCE_COMMIT}"
 write_summary "initiator=linux_kernel_nvme_tcp"
 write_summary "workload=mounted_ext4_sequential_write"
 write_summary "seq_size_mib=${SEQ_MIB}"
+write_summary "frontend_network_class=${FRONTEND_NETWORK_CLASS}"
 write_summary "status_surface=/status/nvme"
 write_summary "mounted_shape_comparable=false"
 write_summary "fixed_work_throughput_ratio_allowed=false"
@@ -57,6 +59,7 @@ SW_BLOCK_ARTIFACT_DIR="${BASELINE_DIR}" \
 SW_BLOCK_PHASE120_PROFILE_WRITE=true \
 SW_BLOCK_PHASE120_SEQ_MIB="${SEQ_MIB}" \
 SW_BLOCK_PHASE120_PVC_SIZE="${PVC_SIZE}" \
+SW_BLOCK_FRONTEND_NETWORK_CLASS="${FRONTEND_NETWORK_CLASS}" \
   bash "${ROOT}/scripts/run-phase120-nvme-tcp-performance-baseline-gate.sh" "${ROOT}" \
   >"${ARTIFACT_DIR}/phase120.stdout.txt" \
   2>"${ARTIFACT_DIR}/phase120.stderr.txt"
