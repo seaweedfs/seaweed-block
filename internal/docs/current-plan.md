@@ -8,8 +8,13 @@ variance to foreground/background flusher overlap rather than an adapter CPU
 hotspot. The distinct-node RF3 slice passed at `7d75a47`: 15 primary samples,
 30 live probes, eight real rebuilds, six independently reopened remote stores,
 and zero residue. Its one-writer shape remained unstable and the management-LAN
-numbers select no candidate. Frontend and mounted attribution are next; no
-architecture implementation is eligible.
+numbers select no candidate. The NVMe/TCP RF1 slice passed at `706b173`: all 30
+rows reconciled from protocol command through recovered WAL bytes, and the
+four-writer admission shape was stable at `1.035x`. All-shapes stability remains
+HOLD because one-writer set 2 reached `1.530x`; the slow rows correlated `0.995`
+with foreground flusher time. The dominant frontend bucket is still the broad
+NVMe/TCP round-trip non-backend aggregate, so internal frontend phase attribution
+and mounted diagnostics are next. No architecture implementation is eligible.
 
 ## Why This Is Next
 
