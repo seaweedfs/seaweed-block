@@ -11,13 +11,14 @@ import (
 
 // LifecycleProductTickResult summarizes one explicit product-loop tick.
 type LifecycleProductTickResult struct {
-	ReconciledVolumes  int
-	VerifiedPlacements int
-	PublishedAsks      int
-	SkippedCurrent     int
-	SkippedUnverified  int
-	PromotionProbes    int
-	PromotionBlocked   int
+	ReconciledVolumes     int
+	VerifiedPlacements    int
+	PublishedAsks         int
+	SkippedCurrent        int
+	SkippedUnverified     int
+	PromotionProbes       int
+	PromotionBlocked      int
+	SkippedRestorePending int
 }
 
 type PromotionCandidateEvidence struct {
@@ -50,17 +51,21 @@ func (h *Host) SetPromotionEvidenceProvider(p PromotionEvidenceProvider) {
 // directive queue. It never calls Publisher.apply; Publisher remains the only
 // authority minter through its normal Run loop.
 func (h *Host) RunLifecycleProductTick() (LifecycleProductTickResult, error) {
+	h.lifecycleProductMu.Lock()
+	defer h.lifecycleProductMu.Unlock()
 	stores := h.Lifecycle()
 	if stores == nil {
 		return LifecycleProductTickResult{}, nil
 	}
 	nodes := stores.Nodes.ListNodes()
-	reconciled := lifecycle.ReconcilePlacement(stores.Volumes.ListVolumes(), nodes, stores.Placements)
-	placements := stores.Placements.ListPlacements()
+	volumes := stores.Volumes.ListVolumes()
+	reconciled := lifecycle.ReconcilePlacement(volumes, nodes, stores.Placements)
+	placements, restorePending := authorityEligiblePlacements(volumes, stores.Placements.ListPlacements())
 	verified := h.verifyPlacements(placements, nodes)
 	result := LifecycleProductTickResult{
-		ReconciledVolumes:  len(reconciled),
-		VerifiedPlacements: len(verified),
+		ReconciledVolumes:     len(reconciled),
+		VerifiedPlacements:    len(verified),
+		SkippedRestorePending: restorePending,
 	}
 	h.recordPlacementVerifiedEvents(verified)
 	submitted, probeCount, blockedCount, directAsks, err := h.submitPlacementSnapshots(placements)
@@ -106,6 +111,23 @@ func (h *Host) RunLifecycleProductTick() (LifecycleProductTickResult, error) {
 		}
 	}
 	return result, nil
+}
+
+func authorityEligiblePlacements(volumes []lifecycle.VolumeRecord, placements []lifecycle.PlacementIntent) ([]lifecycle.PlacementIntent, int) {
+	pending := make(map[string]bool, len(volumes))
+	for _, volume := range volumes {
+		pending[volume.Spec.VolumeID] = volume.Spec.SourceSnapshotID != "" && volume.RestoreState != lifecycle.VolumeRestoreComplete
+	}
+	out := make([]lifecycle.PlacementIntent, 0, len(placements))
+	skipped := 0
+	for _, placement := range placements {
+		if pending[placement.VolumeID] {
+			skipped++
+			continue
+		}
+		out = append(out, placement)
+	}
+	return out, skipped
 }
 
 func (h *Host) submitPlacementSnapshots(placements []lifecycle.PlacementIntent) (bool, int, int, []authority.AssignmentAsk, error) {

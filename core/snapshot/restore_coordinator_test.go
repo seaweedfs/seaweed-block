@@ -1,0 +1,143 @@
+package snapshot
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"testing"
+
+	"github.com/seaweedfs/seaweed-block/core/storage"
+)
+
+func TestPhase175RestoreCoordinatorAppliesAllBeforeActivateAndCompletesGate(t *testing.T) {
+	manager, rec, _ := createStreamFixture(t)
+	resolver := &fakeRestoreResolver{plans: []RestorePlan{{Targets: []RestoreReplicaTarget{
+		{VolumeID: "target-vol", ReplicaID: "r2", RuntimeEndpoint: "https://10.0.0.2:24443"},
+		{VolumeID: "target-vol", ReplicaID: "r1", RuntimeEndpoint: "https://10.0.0.1:24443"},
+	}}, {Targets: []RestoreReplicaTarget{
+		{VolumeID: "target-vol", ReplicaID: "r1", RuntimeEndpoint: "https://10.0.0.1:24443"},
+		{VolumeID: "target-vol", ReplicaID: "r2", RuntimeEndpoint: "https://10.0.0.2:24443"},
+	}}}}
+	runtime := &fakeRestoreRuntime{}
+	coordinator, err := NewCoordinator(manager, fixedSnapshotResolver{}, fixedCaptureRuntime{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.ConfigureRestore(resolver, runtime); err != nil {
+		t.Fatal(err)
+	}
+	result, err := coordinator.Restore(context.Background(), rec.SnapshotID, "target-vol")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ReplicaCount != 2 || resolver.completed != "target-vol/"+rec.SnapshotID {
+		t.Fatalf("result=%+v completed=%q", result, resolver.completed)
+	}
+	wantCalls := []string{"apply:r1", "apply:r2", "activate:r1", "activate:r2"}
+	if fmt.Sprint(runtime.calls) != fmt.Sprint(wantCalls) {
+		t.Fatalf("calls=%v want %v", runtime.calls, wantCalls)
+	}
+}
+
+func TestPhase175RestoreCoordinatorNeverActivatesPartialOrChangedApply(t *testing.T) {
+	manager, rec, _ := createStreamFixture(t)
+	targets := []RestoreReplicaTarget{
+		{VolumeID: "target-vol", ReplicaID: "r1", RuntimeEndpoint: "https://10.0.0.1:24443"},
+		{VolumeID: "target-vol", ReplicaID: "r2", RuntimeEndpoint: "https://10.0.0.2:24443"},
+	}
+	for _, tc := range []struct {
+		name     string
+		resolver *fakeRestoreResolver
+		runtime  *fakeRestoreRuntime
+	}{
+		{name: "apply failure", resolver: &fakeRestoreResolver{plans: []RestorePlan{{Targets: targets}}}, runtime: &fakeRestoreRuntime{failApplyReplica: "r2"}},
+		{name: "placement drift", resolver: &fakeRestoreResolver{plans: []RestorePlan{{Targets: targets}, {Targets: []RestoreReplicaTarget{{VolumeID: "target-vol", ReplicaID: "r1", RuntimeEndpoint: "https://10.0.0.9:24443"}}}}}, runtime: &fakeRestoreRuntime{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			coordinator, err := NewCoordinator(manager, fixedSnapshotResolver{}, fixedCaptureRuntime{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := coordinator.ConfigureRestore(tc.resolver, tc.runtime); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := coordinator.Restore(context.Background(), rec.SnapshotID, "target-vol"); err == nil {
+				t.Fatal("unsafe restore succeeded")
+			}
+			for _, call := range tc.runtime.calls {
+				if len(call) >= len("activate:") && call[:len("activate:")] == "activate:" {
+					t.Fatalf("partial restore activated: %v", tc.runtime.calls)
+				}
+			}
+			if tc.resolver.completed != "" {
+				t.Fatalf("partial restore completed gate: %q", tc.resolver.completed)
+			}
+		})
+	}
+}
+
+type fakeRestoreResolver struct {
+	plans     []RestorePlan
+	calls     int
+	completed string
+}
+
+func (r *fakeRestoreResolver) ResolveSnapshotRestoreTargets(context.Context, string, Record) (RestorePlan, error) {
+	if r.calls >= len(r.plans) {
+		return RestorePlan{}, errors.New("unexpected resolve")
+	}
+	plan := r.plans[r.calls]
+	r.calls++
+	return plan, nil
+}
+
+func (r *fakeRestoreResolver) CompleteSnapshotRestore(_ context.Context, volumeID, snapshotID string, targets []RestoreReplicaTarget) error {
+	if len(targets) == 0 {
+		return errors.New("missing completion target evidence")
+	}
+	r.completed = volumeID + "/" + snapshotID
+	return nil
+}
+
+type fakeRestoreRuntime struct {
+	calls            []string
+	failApplyReplica string
+}
+
+func (r *fakeRestoreRuntime) Apply(ctx context.Context, req RuntimeRestoreRequest, source ArchiveStreamer) (RestoreApplyResult, error) {
+	r.calls = append(r.calls, "apply:"+req.TargetReplicaID)
+	if req.TargetReplicaID == r.failApplyReplica {
+		return RestoreApplyResult{}, errors.New("injected apply failure")
+	}
+	var archive bytes.Buffer
+	streamed, err := source.StreamArchive(ctx, req.Snapshot.SnapshotID, &archive)
+	if err != nil || !sameRestoreRecord(streamed, req.Snapshot) {
+		return RestoreApplyResult{}, errors.New("invalid archive source")
+	}
+	target := storage.NewBlockStore(req.Snapshot.NumBlocks, req.Snapshot.BlockSize)
+	if _, err := ApplyArchiveStream(ctx, bytes.NewReader(archive.Bytes()), req.Snapshot, func(lba uint32, data []byte) error {
+		_, err := target.Write(lba, data)
+		return err
+	}); err != nil {
+		return RestoreApplyResult{}, err
+	}
+	return RestoreApplyResult{State: RestoreStateApplied}, nil
+}
+
+func (r *fakeRestoreRuntime) Activate(_ context.Context, req RuntimeRestoreRequest) (RestoreMarker, error) {
+	r.calls = append(r.calls, "activate:"+req.TargetReplicaID)
+	return RestoreMarker{State: RestoreStateActivated, SnapshotID: req.Snapshot.SnapshotID, TargetVolumeID: req.TargetVolumeID, TargetReplicaID: req.TargetReplicaID}, nil
+}
+
+type fixedSnapshotResolver struct{}
+
+func (fixedSnapshotResolver) ResolveSnapshotSource(context.Context, string) (SourceAuthority, error) {
+	return SourceAuthority{VolumeID: "unused", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1, RuntimeEndpoint: "https://127.0.0.1:24443", SizeBytes: 4096}, nil
+}
+
+type fixedCaptureRuntime struct{}
+
+func (fixedCaptureRuntime) CaptureSnapshot(context.Context, RuntimeCaptureRequest, storage.SnapshotBlockSink) (storage.SnapshotCut, error) {
+	return storage.SnapshotCut{}, errors.New("unused")
+}

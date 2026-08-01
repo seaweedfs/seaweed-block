@@ -43,9 +43,11 @@ type CaptureRuntime interface {
 }
 
 type Coordinator struct {
-	manager  *Manager
-	resolver SourceResolver
-	runtime  CaptureRuntime
+	manager         *Manager
+	resolver        SourceResolver
+	runtime         CaptureRuntime
+	restoreResolver RestoreTargetResolver
+	restoreRuntime  RestoreRuntime
 }
 
 func NewCoordinator(manager *Manager, resolver SourceResolver, runtime CaptureRuntime) (*Coordinator, error) {

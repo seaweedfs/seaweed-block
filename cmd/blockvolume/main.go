@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -69,6 +70,7 @@ type flags struct {
 	snapshotRuntimeTLSKey    string
 	snapshotRuntimeClientCA  string
 	snapshotRuntimeTokenFile string
+	restoreSnapshotID        string
 
 	// iSCSI frontend flags. iscsiListen is the TCP address the iSCSI
 	// target binds on; empty disables the frontend. The safe default
@@ -164,6 +166,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.snapshotRuntimeTLSKey, "snapshot-runtime-tls-key", "", "TLS private key file for snapshot runtime")
 	fs.StringVar(&f.snapshotRuntimeClientCA, "snapshot-runtime-client-ca", "", "CA certificate used to authenticate the blockmaster snapshot client")
 	fs.StringVar(&f.snapshotRuntimeTokenFile, "snapshot-runtime-token-file", "", "file containing snapshot runtime bearer token; token is never accepted on the command line")
+	fs.StringVar(&f.restoreSnapshotID, "restore-snapshot-id", "", "restore this new replica from an immutable snapshot before local readiness; requires snapshot runtime")
 	fs.StringVar(&f.iscsiListen, "iscsi-listen", "", "iSCSI target bind address (e.g. 127.0.0.1:0); empty disables. Loopback-only unless paired with an operator-managed proxy")
 	fs.StringVar(&f.iscsiIQN, "iscsi-iqn", "", "iSCSI target IQN (required if --iscsi-listen is set)")
 	fs.StringVar(&f.iscsiPortalAddr, "iscsi-portal-addr", "", "iSCSI TargetAddress advertised in SendTargets responses (e.g. 203.0.113.10:3260,1). Defaults to the bound listen address. Does not change the loopback-only bind policy")
@@ -292,6 +295,9 @@ func parseFlags(args []string) (flags, error) {
 		if err := coresnapshot.ValidateRuntimeEndpoint(f.snapshotRuntimeAdvertise); err != nil {
 			return flags{}, fmt.Errorf("--snapshot-runtime-advertise: %w", err)
 		}
+	}
+	if f.restoreSnapshotID != "" && !snapshotRuntimeConfigured {
+		return flags{}, fmt.Errorf("--restore-snapshot-id requires the authenticated snapshot runtime")
 	}
 	if f.iscsiListen != "" {
 		if f.iscsiIQN == "" {
@@ -566,6 +572,7 @@ func run(f flags) int {
 	// accept connections.
 	var provider frontend.Provider
 	var durableProv *durable.DurableProvider
+	var restoreTarget *coresnapshot.RestoreTarget
 	if f.durableRoot != "" {
 		cfg := durable.ProviderConfig{
 			Impl:                          durable.ImplName(f.durableImpl),
@@ -593,6 +600,14 @@ func run(f flags) int {
 			status.SetDurableStatusSource(dp)
 		}
 
+		restoreTarget, err = prepareRestoreTarget(f, dp)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "blockvolume: restore target:", err)
+			_ = dp.Close()
+			_ = h.Close()
+			return 1
+		}
+
 		// Open storage role-agnostically via EnsureStorage so replica
 		// roles (assigned to SUPPORTING, never reach Healthy via
 		// projection) can still expose LogicalStorage to
@@ -602,7 +617,8 @@ func run(f flags) int {
 		// will succeed at frontend bind. Replica role: frontends are
 		// not enabled (operator doesn't pass --iscsi-listen /
 		// --nvme-listen for replicas), so dp.Open is never called.
-		if _, sErr := dp.EnsureStorage(f.volumeID); sErr != nil {
+		restoreStorage, sErr := dp.EnsureStorage(f.volumeID)
+		if sErr != nil {
 			fmt.Fprintln(os.Stderr, "blockvolume: durable storage open:", sErr)
 			_ = dp.Close()
 			if status != nil {
@@ -613,6 +629,14 @@ func run(f flags) int {
 			_ = h.Close()
 			return 1
 		}
+		if restoreTarget != nil {
+			if err := restoreTarget.BindStorage(restoreStorage); err != nil {
+				fmt.Fprintln(os.Stderr, "blockvolume: bind restore storage:", err)
+				_ = dp.Close()
+				_ = h.Close()
+				return 1
+			}
+		}
 		recCtx, recCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		report, recErr := dp.RecoverVolume(recCtx, f.volumeID)
 		recCancel()
@@ -620,9 +644,12 @@ func run(f flags) int {
 			fmt.Fprintln(os.Stderr, "blockvolume: durable recovery failed:", report.Evidence)
 			h.BlockLocalReadiness(report.Evidence)
 			return waitFaultedDurableRecovery(h, status, durableProv, report.Evidence)
-		} else {
+		} else if restoreTarget == nil || restoreTarget.Marker().State == coresnapshot.RestoreStateActivated {
 			fmt.Fprintln(os.Stderr, "blockvolume: durable recovered:", report.Evidence)
 			h.ClearLocalReadinessBlock()
+		} else {
+			fmt.Fprintf(os.Stderr, "blockvolume: durable recovered; local readiness remains blocked for snapshot restore state=%s snapshot=%s\n", restoreTarget.Marker().State, restoreTarget.Marker().SnapshotID)
+			h.BlockLocalReadiness("snapshot restore " + restoreTarget.Marker().State)
 		}
 	} else {
 		// memback fallback — wraps the volume's AdapterProjectionView
@@ -1092,9 +1119,28 @@ func run(f flags) int {
 			closeBlockVolumeRuntime(nvmeTarget, iscsiTarget, replListen, replVolume, durableProv, status, h)
 			return 1
 		}
-		handler, err := coresnapshot.NewRuntimeHandler(source, h.ProjectionView(), strings.TrimSpace(string(tokenBytes)))
+		token := strings.TrimSpace(string(tokenBytes))
+		captureHandler, err := coresnapshot.NewRuntimeHandler(source, h.ProjectionView(), token)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "blockvolume: snapshot runtime:", err)
+			closeBlockVolumeRuntime(nvmeTarget, iscsiTarget, replListen, replVolume, durableProv, status, h)
+			return 1
+		}
+		var restoreHandler *coresnapshot.RestoreRuntimeHandler
+		if restoreTarget != nil {
+			restoreHandler, err = coresnapshot.NewRestoreRuntimeHandler(restoreTarget, func() error {
+				h.ClearLocalReadinessBlock()
+				return nil
+			}, token)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "blockvolume: restore runtime:", err)
+				closeBlockVolumeRuntime(nvmeTarget, iscsiTarget, replListen, replVolume, durableProv, status, h)
+				return 1
+			}
+		}
+		handler, err := coresnapshot.NewRuntimeMux(captureHandler, restoreHandler)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "blockvolume: snapshot runtime mux:", err)
 			closeBlockVolumeRuntime(nvmeTarget, iscsiTarget, replListen, replVolume, durableProv, status, h)
 			return 1
 		}
@@ -1162,6 +1208,39 @@ func run(f flags) int {
 		return 1
 	}
 	return 0
+}
+
+type restoreTargetPathProvider interface {
+	VolumeDataPath(volumeID string) (string, error)
+}
+
+func prepareRestoreTarget(f flags, provider restoreTargetPathProvider) (*coresnapshot.RestoreTarget, error) {
+	markerPath := filepath.Join(f.durableRoot, f.volumeID+".restore.json")
+	marker, markerExists, err := coresnapshot.LoadRestoreMarker(markerPath)
+	if err != nil {
+		return nil, err
+	}
+	snapshotID := f.restoreSnapshotID
+	if markerExists && snapshotID == "" {
+		snapshotID = marker.SnapshotID
+	}
+	if snapshotID == "" {
+		return nil, nil
+	}
+	if f.snapshotRuntimeListen == "" && (!markerExists || marker.State != coresnapshot.RestoreStateActivated) {
+		return nil, fmt.Errorf("unfinished restore requires the authenticated snapshot runtime")
+	}
+	dataPath, err := provider.VolumeDataPath(f.volumeID)
+	if err != nil {
+		return nil, err
+	}
+	return coresnapshot.OpenRestoreTarget(coresnapshot.RestoreTargetConfig{
+		MarkerPath:      markerPath,
+		TargetDataPath:  dataPath,
+		SnapshotID:      snapshotID,
+		TargetVolumeID:  f.volumeID,
+		TargetReplicaID: f.replicaID,
+	})
 }
 
 func closeBlockVolumeRuntime(nvmeTarget interface{ Close() error }, iscsiTarget interface{ Close() error }, replListen *transport.ReplicaListener, replVolume *replication.ReplicationVolume, durableProv *durable.DurableProvider, status *volume.StatusServer, h *volume.Host) {

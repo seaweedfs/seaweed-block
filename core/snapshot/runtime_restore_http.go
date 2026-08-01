@@ -11,8 +11,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-
-	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 const (
@@ -36,16 +34,39 @@ type RuntimeRestoreRequest struct {
 
 type RestoreRuntimeHandler struct {
 	target           *RestoreTarget
-	storage          storage.LogicalStorage
 	releaseReadiness func() error
 	token            string
 }
 
-func NewRestoreRuntimeHandler(target *RestoreTarget, targetStorage storage.LogicalStorage, releaseReadiness func() error, token string) (*RestoreRuntimeHandler, error) {
-	if target == nil || targetStorage == nil || releaseReadiness == nil || token == "" {
-		return nil, fmt.Errorf("snapshot: restore runtime requires target, storage, readiness callback, and token")
+func NewRuntimeMux(capture *RuntimeHandler, restore *RestoreRuntimeHandler) (http.Handler, error) {
+	if capture == nil && restore == nil {
+		return nil, fmt.Errorf("snapshot: runtime mux requires at least one handler")
 	}
-	return &RestoreRuntimeHandler{target: target, storage: targetStorage, releaseReadiness: releaseReadiness, token: token}, nil
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case runtimeCapturePath:
+			if capture == nil {
+				http.NotFound(w, r)
+				return
+			}
+			capture.ServeHTTP(w, r)
+		case runtimeRestoreApplyPath, runtimeRestoreActivatePath:
+			if restore == nil {
+				http.NotFound(w, r)
+				return
+			}
+			restore.ServeHTTP(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	}), nil
+}
+
+func NewRestoreRuntimeHandler(target *RestoreTarget, releaseReadiness func() error, token string) (*RestoreRuntimeHandler, error) {
+	if target == nil || releaseReadiness == nil || token == "" {
+		return nil, fmt.Errorf("snapshot: restore runtime requires target, readiness callback, and token")
+	}
+	return &RestoreRuntimeHandler{target: target, releaseReadiness: releaseReadiness, token: token}, nil
 }
 
 func (h *RestoreRuntimeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -87,7 +108,7 @@ func (h *RestoreRuntimeHandler) serveApply(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "invalid restore content length", http.StatusBadRequest)
 		return
 	}
-	result, err := h.target.Apply(r.Context(), r.Body, req.Snapshot, h.storage)
+	result, err := h.target.Apply(r.Context(), r.Body, req.Snapshot)
 	if err != nil {
 		writeRestoreRuntimeError(w, err)
 		return

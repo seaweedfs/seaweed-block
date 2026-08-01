@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -115,6 +116,12 @@ type WALStore struct {
 	// It must not be wired into production paths before version/compatibility
 	// gates and mounted NVMe/TCP profiling pass.
 	multiBlockRecords bool
+}
+
+func (s *WALStore) DurableStorageIdentity() DurableStorageIdentity {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return DurableStorageIdentity{Path: s.path, StoreID: "walstore:" + hex.EncodeToString(s.sb.UUID[:])}
 }
 
 // CreateWALStore initializes a new store file at path. Fails if path

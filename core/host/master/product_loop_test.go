@@ -886,6 +886,26 @@ func seedRF3PlacementForServersWithAddrs(t *testing.T, h *Host, volumeID, r1Serv
 	}
 }
 
+func TestPhase175AuthorityPlacementsStayClosedUntilRestoreCompletes(t *testing.T) {
+	placements := []lifecycle.PlacementIntent{
+		{VolumeID: "normal-a"},
+		{VolumeID: "restored-a"},
+	}
+	volumes := []lifecycle.VolumeRecord{
+		{Spec: lifecycle.VolumeSpec{VolumeID: "normal-a"}},
+		{Spec: lifecycle.VolumeSpec{VolumeID: "restored-a", SourceSnapshotID: "snap-abc"}, RestoreState: lifecycle.VolumeRestorePending},
+	}
+	eligible, skipped := authorityEligiblePlacements(volumes, placements)
+	if len(eligible) != 1 || eligible[0].VolumeID != "normal-a" || skipped != 1 {
+		t.Fatalf("pending eligible=%+v skipped=%d", eligible, skipped)
+	}
+	volumes[1].RestoreState = lifecycle.VolumeRestoreComplete
+	eligible, skipped = authorityEligiblePlacements(volumes, placements)
+	if len(eligible) != 2 || skipped != 0 {
+		t.Fatalf("complete eligible=%+v skipped=%d", eligible, skipped)
+	}
+}
+
 func ingestRF3ObservationForServers(t *testing.T, h *Host, volumeID, r1ServerID, r2ServerID, r3ServerID string, r1Ready, r2Ready, r3Ready bool) {
 	t.Helper()
 	ingestRF3ObservationForServersWithReady(t, h, volumeID, r1ServerID, r2ServerID, r3ServerID,

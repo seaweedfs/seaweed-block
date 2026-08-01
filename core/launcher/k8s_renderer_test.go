@@ -165,6 +165,31 @@ func TestPhase175K8sRendererRejectsHostPathIdentityTraversalAndCollision(t *test
 	}
 }
 
+func TestPhase175K8sRendererCarriesRestoreSnapshotToEveryReplica(t *testing.T) {
+	plan := sampleWorkloadPlan()
+	plan.SourceSnapshotID = "snap-abc"
+	manifests, err := RenderBlockVolumeDeployments(plan, K8sRenderConfig{MasterAddr: "m:9333", SnapshotRuntimeSecretName: "snapshot-runtime"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifests) != 2 {
+		t.Fatalf("manifest count=%d", len(manifests))
+	}
+	for _, manifest := range manifests {
+		if !strings.Contains(string(manifest.YAML), "--restore-snapshot-id=snap-abc") {
+			t.Fatalf("manifest %s missing restore source:\n%s", manifest.Name, manifest.YAML)
+		}
+	}
+}
+
+func TestPhase175K8sRendererRejectsRestoreWithoutRuntimeCredentials(t *testing.T) {
+	plan := sampleWorkloadPlan()
+	plan.SourceSnapshotID = "snap-abc"
+	if _, err := RenderBlockVolumeDeployments(plan, K8sRenderConfig{MasterAddr: "m:9333"}); err == nil || !strings.Contains(err.Error(), "requires authenticated snapshot runtime credentials") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
 func TestMountedFailover_K8sRendererCanRenderSyncQuorumAckProfile(t *testing.T) {
 	manifests, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{
 		MasterAddr:     "m:9333",

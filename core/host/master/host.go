@@ -122,6 +122,7 @@ type Host struct {
 	topo                   authority.AcceptedTopology
 	lifecycle              *LifecycleStores
 	events                 *eventRing
+	lifecycleProductMu     sync.Mutex
 	promotionMu            sync.RWMutex
 	promotionProber        PromotionEvidenceProvider
 	snapshotCoordinator    *snapshot.Coordinator

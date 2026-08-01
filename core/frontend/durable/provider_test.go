@@ -79,6 +79,65 @@ func TestPhase150_DurableProviderWALMultiBlockOptIn(t *testing.T) {
 	}
 }
 
+func TestPhase175DurableProviderRejectsVolumePathTraversal(t *testing.T) {
+	id := frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1}
+	p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplSmartWAL, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: 4}, newStubView(healthyProj(id)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	for _, volumeID := range []string{"", ".", "..", "../master", `r1\..\master`} {
+		if _, err := p.VolumeDataPath(volumeID); err == nil {
+			t.Fatalf("VolumeDataPath accepted %q", volumeID)
+		}
+		if _, err := p.EnsureStorage(volumeID); err == nil {
+			t.Fatalf("EnsureStorage accepted %q", volumeID)
+		}
+	}
+}
+
+func TestPhase175DurableStorageIdentitySurvivesReopen(t *testing.T) {
+	for _, impl := range implMatrix() {
+		t.Run(string(impl), func(t *testing.T) {
+			root := t.TempDir()
+			id := frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1}
+			cfg := durable.ProviderConfig{Impl: impl, StorageRoot: root, BlockSize: 4096, NumBlocks: 4}
+			first, err := durable.NewDurableProvider(cfg, newStubView(healthyProj(id)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			store, err := first.EnsureStorage("v1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			provider, ok := store.(storage.DurableStorageIdentityProvider)
+			if !ok {
+				t.Fatalf("storage %T has no durable identity", store)
+			}
+			want := provider.DurableStorageIdentity()
+			if want.Path == "" || want.StoreID == "" {
+				t.Fatalf("identity=%+v", want)
+			}
+			if err := first.Close(); err != nil {
+				t.Fatal(err)
+			}
+			second, err := durable.NewDurableProvider(cfg, newStubView(healthyProj(id)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer second.Close()
+			reopened, err := second.EnsureStorage("v1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := reopened.(storage.DurableStorageIdentityProvider).DurableStorageIdentity()
+			if got != want {
+				t.Fatalf("reopened identity=%+v want=%+v", got, want)
+			}
+		})
+	}
+}
+
 func TestPhase152_DurableProviderCanDisableWALStoreAutoFlushForRecoveryTest(t *testing.T) {
 	root := t.TempDir()
 	id := frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1}

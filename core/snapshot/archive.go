@@ -148,7 +148,7 @@ func readArchive(ctx context.Context, path, expectedDigest string, sink storage.
 // records to an unpublished target. Callers must keep the target non-ready
 // until this method and the target durability fence both succeed.
 func ApplyArchiveStream(ctx context.Context, r io.Reader, rec Record, sink storage.SnapshotBlockSink) (storage.SnapshotCut, error) {
-	if r == nil || sink == nil || rec.ArchiveBytes <= 0 || validateRecord(rec) != nil {
+	if r == nil || rec.ArchiveBytes <= 0 || validateRecord(rec) != nil {
 		return storage.SnapshotCut{}, fmt.Errorf("%w: invalid streamed archive contract", ErrInvalidRequest)
 	}
 	h := sha256.New()

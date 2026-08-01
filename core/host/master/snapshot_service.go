@@ -80,17 +80,25 @@ func (h *Host) configureSnapshotCoordinator() error {
 	if err != nil {
 		return err
 	}
-	runtime, err := snapshot.NewHTTPSCaptureRuntime(&http.Client{Transport: &http.Transport{
+	runtimeClient := &http.Client{Transport: &http.Transport{
 		TLSClientConfig:       &tls.Config{RootCAs: roots, Certificates: []tls.Certificate{clientCertificate}, MinVersion: tls.VersionTLS12},
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 15 * time.Second,
 		IdleConnTimeout:       30 * time.Second,
-	}}, token)
+	}}
+	runtime, err := snapshot.NewHTTPSCaptureRuntime(runtimeClient, token)
+	if err != nil {
+		return err
+	}
+	restoreRuntime, err := snapshot.NewHTTPSRestoreRuntime(runtimeClient, token)
 	if err != nil {
 		return err
 	}
 	coordinator, err := snapshot.NewCoordinator(manager, h, runtime)
 	if err != nil {
+		return err
+	}
+	if err := coordinator.ConfigureRestore(h, restoreRuntime); err != nil {
 		return err
 	}
 	h.snapshotCoordinator = coordinator
@@ -183,6 +191,31 @@ func (s *services) DeleteSnapshot(ctx context.Context, req *control.DeleteSnapsh
 	return &control.DeleteSnapshotResponse{}, nil
 }
 
+func (s *services) RestoreSnapshot(ctx context.Context, req *control.RestoreSnapshotRequest) (*control.RestoreSnapshotResponse, error) {
+	coordinator, err := s.snapshotService()
+	if err != nil {
+		return nil, err
+	}
+	if err := s.authorizeSnapshot(ctx); err != nil {
+		return nil, err
+	}
+	if req.GetSnapshotId() == "" || req.GetTargetVolumeId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "snapshot_id and target_volume_id are required")
+	}
+	restoreCtx, cancel := context.WithTimeout(ctx, s.host.snapshotCaptureTimeout)
+	defer cancel()
+	result, err := coordinator.Restore(restoreCtx, req.GetSnapshotId(), req.GetTargetVolumeId())
+	if err != nil {
+		return nil, snapshotRPCError("restore snapshot", err)
+	}
+	return &control.RestoreSnapshotResponse{
+		SnapshotId:      result.SnapshotID,
+		TargetVolumeId:  result.TargetVolumeID,
+		ReplicaCount:    uint32(result.ReplicaCount),
+		AlreadyComplete: result.AlreadyComplete,
+	}, nil
+}
+
 func (s *services) snapshotService() (*snapshot.Coordinator, error) {
 	if s.host.snapshotCoordinator == nil {
 		return nil, status.Error(codes.FailedPrecondition, "snapshot service is not configured")
@@ -230,6 +263,8 @@ func snapshotRPCError(operation string, err error) error {
 	case errors.Is(err, snapshot.ErrNameConflict):
 		return status.Error(codes.AlreadyExists, err.Error())
 	case errors.Is(err, snapshot.ErrInUse), errors.Is(err, snapshot.ErrSourceNotReady):
+		return status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, snapshot.ErrRestoreNotReady), errors.Is(err, snapshot.ErrRestoreNotApplied), errors.Is(err, snapshot.ErrRestoreUnsafe), errors.Is(err, snapshot.ErrRestoreConflict):
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, snapshot.ErrAuthorityChanged):
 		return status.Error(codes.Aborted, err.Error())

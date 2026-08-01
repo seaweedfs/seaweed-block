@@ -392,6 +392,7 @@ func (f *fakeLifecycleClient) CreateVolume(_ context.Context, req *control.Creat
 		ReplicationFactor: req.GetReplicationFactor(),
 		Protocol:          req.GetProtocol(),
 		FrontendTransport: req.GetFrontendTransport(),
+		SourceSnapshotId:  req.GetSourceSnapshotId(),
 		PvcName:           req.GetPvcName(),
 		PvcNamespace:      req.GetPvcNamespace(),
 		PvcUid:            req.GetPvcUid(),
@@ -413,6 +414,7 @@ func TestG15c_ControlLifecycleProvisioner_CreateVolumeRoundTrip(t *testing.T) {
 		ReplicationFactor: 2,
 		Protocol:          ProtocolNVMe,
 		FrontendTransport: FrontendTransportRDMA,
+		SourceSnapshotID:  "snap-abc",
 		PVCName:           "demo-pvc",
 		PVCNamespace:      "demo-ns",
 		PVCUID:            "uid-123",
@@ -429,6 +431,9 @@ func TestG15c_ControlLifecycleProvisioner_CreateVolumeRoundTrip(t *testing.T) {
 	}
 	if client.createReq.GetFrontendTransport() != "rdma" || got.FrontendTransport != FrontendTransportRDMA {
 		t.Fatalf("transport request=%q response=%q want rdma", client.createReq.GetFrontendTransport(), got.FrontendTransport)
+	}
+	if client.createReq.GetSourceSnapshotId() != "snap-abc" || got.SourceSnapshotID != "snap-abc" {
+		t.Fatalf("source snapshot request=%q response=%q", client.createReq.GetSourceSnapshotId(), got.SourceSnapshotID)
 	}
 	if client.createReq.GetPvcName() != "demo-pvc" || client.createReq.GetPvcNamespace() != "demo-ns" || client.createReq.GetPvcUid() != "uid-123" || client.createReq.GetPvName() != "pvc-a" {
 		t.Fatalf("kubernetes metadata request=%+v", client.createReq)

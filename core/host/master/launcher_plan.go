@@ -23,6 +23,8 @@ type LifecycleWorkloadPlanTickResult struct {
 // placement intent so the launched blockvolume daemons can later verify via
 // heartbeat.
 func (h *Host) RunLifecycleWorkloadPlanTick(cfg lifecycle.WorkloadPlanConfig) (LifecycleWorkloadPlanTickResult, error) {
+	h.lifecycleProductMu.Lock()
+	defer h.lifecycleProductMu.Unlock()
 	stores := h.Lifecycle()
 	if stores == nil {
 		return LifecycleWorkloadPlanTickResult{}, nil

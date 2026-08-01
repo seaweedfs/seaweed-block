@@ -1,5 +1,19 @@
 package storage
 
+// DurableStorageIdentity binds an opened storage object to its persistent
+// file. Restore fences use it to reject a marker reopened against another
+// store, even when that store has compatible geometry.
+type DurableStorageIdentity struct {
+	Path    string
+	StoreID string
+}
+
+// DurableStorageIdentityProvider is implemented by file-backed stores that
+// can expose a stable identity without transferring ownership of the handle.
+type DurableStorageIdentityProvider interface {
+	DurableStorageIdentity() DurableStorageIdentity
+}
+
 // LogicalStorage is the V3 persistence-seam contract. It separates the
 // "what data exists, what frontier is durable" question (storage) from
 // the "what does the engine decide" question (semantic core). The

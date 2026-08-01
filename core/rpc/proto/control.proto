@@ -137,6 +137,7 @@ service SnapshotService {
     rpc GetSnapshot(GetSnapshotRequest) returns (SnapshotRecord);
     rpc ListSnapshots(ListSnapshotsRequest) returns (ListSnapshotsResponse);
     rpc DeleteSnapshot(DeleteSnapshotRequest) returns (DeleteSnapshotResponse);
+    rpc RestoreSnapshot(RestoreSnapshotRequest) returns (RestoreSnapshotResponse);
 }
 
 // FrontendTarget — read-only frontend publication fact reported by
@@ -380,6 +381,7 @@ message CreateVolumeRequest {
     string pvc_uid = 7;
     string protocol = 8; // "iscsi" default | "nvme"
     string frontend_transport = 9; // NVMe: "tcp" default | "rdma"
+    string source_snapshot_id = 10; // immutable snapshot restored before the new volume becomes ready
 }
 
 message CreateVolumeResponse {
@@ -392,6 +394,7 @@ message CreateVolumeResponse {
     string pvc_uid = 7;
     string protocol = 8; // "iscsi" default | "nvme"
     string frontend_transport = 9; // NVMe: "tcp" default | "rdma"
+    string source_snapshot_id = 10;
 }
 
 message DeleteVolumeRequest {
@@ -423,6 +426,18 @@ message DeleteSnapshotRequest {
 }
 
 message DeleteSnapshotResponse {
+}
+
+message RestoreSnapshotRequest {
+    string snapshot_id = 1;
+    string target_volume_id = 2;
+}
+
+message RestoreSnapshotResponse {
+    string snapshot_id = 1;
+    string target_volume_id = 2;
+    uint32 replica_count = 3;
+    bool already_complete = 4;
 }
 
 message SnapshotRecord {

@@ -22,6 +22,7 @@ func TestG15c_LifecycleService_CreateVolumePersistsDesiredIntent(t *testing.T) {
 		ReplicationFactor: 2,
 		Protocol:          "nvme",
 		FrontendTransport: "rdma",
+		SourceSnapshotId:  "snap-abc",
 		PvcName:           "demo-pvc",
 		PvcNamespace:      "demo-ns",
 		PvcUid:            "uid-123",
@@ -42,6 +43,9 @@ func TestG15c_LifecycleService_CreateVolumePersistsDesiredIntent(t *testing.T) {
 	if resp.GetFrontendTransport() != "rdma" {
 		t.Fatalf("response transport=%q want rdma", resp.GetFrontendTransport())
 	}
+	if resp.GetSourceSnapshotId() != "snap-abc" {
+		t.Fatalf("response source snapshot=%q", resp.GetSourceSnapshotId())
+	}
 	rec, ok := h.Lifecycle().Volumes.GetVolume("pvc-a")
 	if !ok {
 		t.Fatal("desired volume not persisted")
@@ -54,6 +58,9 @@ func TestG15c_LifecycleService_CreateVolumePersistsDesiredIntent(t *testing.T) {
 	}
 	if rec.Spec.FrontendTransport != "rdma" {
 		t.Fatalf("record transport=%q want rdma", rec.Spec.FrontendTransport)
+	}
+	if rec.Spec.SourceSnapshotID != "snap-abc" {
+		t.Fatalf("record source snapshot=%q", rec.Spec.SourceSnapshotID)
 	}
 	if rec.Spec.PVCName != "demo-pvc" || rec.Spec.PVCNamespace != "demo-ns" || rec.Spec.PVCUID != "uid-123" || rec.Spec.PVName != "pvc-a" {
 		t.Fatalf("kubernetes metadata record=%+v", rec)

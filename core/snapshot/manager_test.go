@@ -397,6 +397,14 @@ type failSecondWrite struct {
 	writes int
 }
 
+func (s *failSecondWrite) DurableStorageIdentity() storage.DurableStorageIdentity {
+	provider, _ := s.LogicalStorage.(storage.DurableStorageIdentityProvider)
+	if provider == nil {
+		return storage.DurableStorageIdentity{}
+	}
+	return provider.DurableStorageIdentity()
+}
+
 func (s *failSecondWrite) Write(lba uint32, data []byte) (uint64, error) {
 	s.writes++
 	if s.writes == 2 {

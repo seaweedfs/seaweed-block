@@ -243,6 +243,44 @@ func TestFileStore_DeleteVolumeRemovesRecord(t *testing.T) {
 	}
 }
 
+func TestPhase175VolumeSourceSnapshotIsDurableAndImmutable(t *testing.T) {
+	root := t.TempDir()
+	store, err := OpenFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := VolumeSpec{VolumeID: "restored-a", SizeBytes: 1 << 20, ReplicationFactor: 2, SourceSnapshotID: "snap-abc"}
+	if _, err := store.CreateVolume(spec); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, ok := reopened.GetVolume(spec.VolumeID)
+	if !ok || rec.Spec.SourceSnapshotID != "snap-abc" || rec.RestoreState != VolumeRestorePending {
+		t.Fatalf("record=%+v ok=%v", rec, ok)
+	}
+	rec, err = reopened.MarkRestoreComplete(spec.VolumeID, spec.SourceSnapshotID)
+	if err != nil || rec.RestoreState != VolumeRestoreComplete {
+		t.Fatalf("complete record=%+v error=%v", rec, err)
+	}
+	if _, err := reopened.MarkRestoreComplete(spec.VolumeID, spec.SourceSnapshotID); err != nil {
+		t.Fatalf("idempotent completion: %v", err)
+	}
+	changed := spec
+	changed.SourceSnapshotID = "snap-def"
+	if _, err := reopened.CreateVolume(changed); err != ErrVolumeConflict {
+		t.Fatalf("source snapshot mutation error=%v", err)
+	}
+	changed = spec
+	changed.SourceSnapshotID = "../catalog"
+	changed.VolumeID = "restored-b"
+	if _, err := reopened.CreateVolume(changed); err == nil {
+		t.Fatal("unsafe source snapshot id accepted")
+	}
+}
+
 func TestLifecyclePackageDoesNotImportAdapterOrAssignmentInfo(t *testing.T) {
 	root := "."
 	entries, err := os.ReadDir(root)

@@ -120,6 +120,15 @@ type Store struct {
 	extentLocks [256]sync.RWMutex
 }
 
+func (s *Store) DurableStorageIdentity() storage.DurableStorageIdentity {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return storage.DurableStorageIdentity{
+		Path:    s.path,
+		StoreID: fmt.Sprintf("parallelwal:%d:%d:%d:%d:%d", s.hdr.CreatedAt, s.numBlocks, s.blockSize, s.laneCount, s.slotsPerLane),
+	}
+}
+
 func CreateStore(path string, numBlocks uint32, blockSize int) (*Store, error) {
 	return CreateStoreWithConfig(path, Config{
 		NumBlocks:     numBlocks,

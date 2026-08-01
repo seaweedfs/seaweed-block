@@ -89,6 +89,14 @@ func RenderBlockVolumeDeployments(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8
 	if cfg.SnapshotRuntimeSecretName != "" && cfg.OwnerReferenceToPVC {
 		return nil, fmt.Errorf("launcher: snapshot runtime credentials require blockvolume workloads to remain in the launcher namespace")
 	}
+	if plan.SourceSnapshotID != "" {
+		if !lifecycle.IsSafeStorageIdentityComponent(plan.SourceSnapshotID) {
+			return nil, fmt.Errorf("launcher: source snapshot id %q is invalid", plan.SourceSnapshotID)
+		}
+		if cfg.SnapshotRuntimeSecretName == "" {
+			return nil, fmt.Errorf("launcher: source snapshot restore requires authenticated snapshot runtime credentials")
+		}
+	}
 	if cfg.MasterAddr == "" {
 		return nil, fmt.Errorf("launcher: master addr is required")
 	}
@@ -248,6 +256,9 @@ func blockVolumeArgs(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.B
 		"--durable-blocksize=4096",
 		"--recovery-mode=" + cfg.RecoveryMode,
 		"--replication-ack=" + cfg.ReplicationAck,
+	}
+	if plan.SourceSnapshotID != "" {
+		args = append(args, "--restore-snapshot-id="+plan.SourceSnapshotID)
 	}
 	if cfg.WALMultiBlockRecords {
 		args = append(args, "--durable-wal-multiblock-records")

@@ -2,6 +2,7 @@ package smartwal
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"hash/crc32"
@@ -70,6 +71,12 @@ type Store struct {
 	walHead   uint64 // exposed H boundary
 
 	syncs atomic.Uint64
+}
+
+func (s *Store) DurableStorageIdentity() storage.DurableStorageIdentity {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return storage.DurableStorageIdentity{Path: s.path, StoreID: "smartwal:" + hex.EncodeToString(s.hdr.UUID[:])}
 }
 
 // CreateStore initializes a fresh smartwal store at path. Fails if

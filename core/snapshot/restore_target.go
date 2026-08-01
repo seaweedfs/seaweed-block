@@ -13,7 +13,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
-const restoreMarkerVersion = 1
+const restoreMarkerVersion = 2
 
 const (
 	RestoreStatePending   = "pending"
@@ -36,6 +36,10 @@ type RestoreMarker struct {
 	SnapshotID      string  `json:"snapshot_id"`
 	TargetVolumeID  string  `json:"target_volume_id"`
 	TargetReplicaID string  `json:"target_replica_id"`
+	TargetDataPath  string  `json:"target_data_path"`
+	TargetStorageID string  `json:"target_storage_id,omitempty"`
+	TargetNumBlocks uint32  `json:"target_num_blocks,omitempty"`
+	TargetBlockSize int     `json:"target_block_size,omitempty"`
 	Snapshot        *Record `json:"snapshot,omitempty"`
 	RestoredBlocks  uint64  `json:"restored_blocks,omitempty"`
 	RestoredBytes   uint64  `json:"restored_bytes,omitempty"`
@@ -54,9 +58,11 @@ type RestoreApplyResult struct {
 // never grants authority itself: Activate only records that the local bytes
 // passed verification and then invokes the caller's readiness callback.
 type RestoreTarget struct {
-	mu         sync.Mutex
-	markerPath string
-	marker     RestoreMarker
+	mu           sync.Mutex
+	activationMu sync.Mutex
+	markerPath   string
+	marker       RestoreMarker
+	storage      storage.LogicalStorage
 }
 
 // OpenRestoreTarget creates or recovers the marker before the target storage
@@ -66,15 +72,26 @@ func OpenRestoreTarget(cfg RestoreTargetConfig) (*RestoreTarget, error) {
 	if cfg.MarkerPath == "" || cfg.TargetDataPath == "" || cfg.SnapshotID == "" || cfg.TargetVolumeID == "" || cfg.TargetReplicaID == "" {
 		return nil, fmt.Errorf("%w: restore marker, data path, snapshot, volume, and replica are required", ErrInvalidRequest)
 	}
-	if filepath.Clean(cfg.MarkerPath) == filepath.Clean(cfg.TargetDataPath) {
+	markerPath, err := canonicalRestorePath(cfg.MarkerPath)
+	if err != nil {
+		return nil, err
+	}
+	targetDataPath, err := canonicalRestorePath(cfg.TargetDataPath)
+	if err != nil {
+		return nil, err
+	}
+	if markerPath == targetDataPath {
 		return nil, fmt.Errorf("%w: restore marker and target data paths must differ", ErrInvalidRequest)
 	}
-	t := &RestoreTarget{markerPath: cfg.MarkerPath}
-	raw, err := os.ReadFile(cfg.MarkerPath)
-	if err == nil {
-		if err := json.Unmarshal(raw, &t.marker); err != nil {
-			return nil, fmt.Errorf("%w: parse restore marker: %v", ErrRestoreUnsafe, err)
-		}
+	cfg.MarkerPath = markerPath
+	cfg.TargetDataPath = targetDataPath
+	t := &RestoreTarget{markerPath: markerPath}
+	marker, exists, err := LoadRestoreMarker(markerPath)
+	if err != nil {
+		return nil, err
+	}
+	if exists {
+		t.marker = marker
 		if err := validateRestoreMarker(t.marker, cfg); err != nil {
 			return nil, err
 		}
@@ -86,9 +103,6 @@ func OpenRestoreTarget(cfg RestoreTargetConfig) (*RestoreTarget, error) {
 			return nil, fmt.Errorf("%w: %s marker has no target data", ErrRestoreUnsafe, t.marker.State)
 		}
 		return t, nil
-	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("snapshot: read restore marker: %w", err)
 	}
 	exists, statErr := restorePathExists(cfg.TargetDataPath)
 	if statErr != nil {
@@ -103,11 +117,67 @@ func OpenRestoreTarget(cfg RestoreTargetConfig) (*RestoreTarget, error) {
 		SnapshotID:      cfg.SnapshotID,
 		TargetVolumeID:  cfg.TargetVolumeID,
 		TargetReplicaID: cfg.TargetReplicaID,
+		TargetDataPath:  targetDataPath,
 	}
 	if err := t.persistLocked(); err != nil {
 		return nil, err
 	}
 	return t, nil
+}
+
+// BindStorage binds the restore fence to one file-backed store before any
+// archive bytes can be applied. Reopens must present the same canonical path,
+// persistent store identity, and geometry recorded in the marker.
+func (t *RestoreTarget) BindStorage(target storage.LogicalStorage) error {
+	if target == nil {
+		return fmt.Errorf("%w: target storage is required", ErrInvalidRequest)
+	}
+	provider, ok := target.(storage.DurableStorageIdentityProvider)
+	if !ok {
+		return fmt.Errorf("%w: target storage has no durable identity", ErrRestoreUnsafe)
+	}
+	identity := provider.DurableStorageIdentity()
+	path, err := canonicalRestorePath(identity.Path)
+	if err != nil || identity.StoreID == "" {
+		return fmt.Errorf("%w: invalid target storage identity", ErrRestoreUnsafe)
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if path != t.marker.TargetDataPath {
+		return fmt.Errorf("%w: target storage path mismatch", ErrRestoreConflict)
+	}
+	if t.marker.TargetStorageID == "" {
+		if t.marker.State != RestoreStatePending && t.marker.State != RestoreStateApplying {
+			return fmt.Errorf("%w: %s marker has no storage identity", ErrRestoreUnsafe, t.marker.State)
+		}
+		t.marker.TargetStorageID = identity.StoreID
+		t.marker.TargetNumBlocks = target.NumBlocks()
+		t.marker.TargetBlockSize = target.BlockSize()
+		if err := t.persistLocked(); err != nil {
+			return err
+		}
+	} else if t.marker.TargetStorageID != identity.StoreID || t.marker.TargetNumBlocks != target.NumBlocks() || t.marker.TargetBlockSize != target.BlockSize() {
+		return fmt.Errorf("%w: target storage identity or geometry mismatch", ErrRestoreConflict)
+	}
+	t.storage = target
+	return nil
+}
+
+// LoadRestoreMarker inspects a durable restore fence without changing it.
+// Callers use this to resume a restore even if its launch flag was lost.
+func LoadRestoreMarker(path string) (RestoreMarker, bool, error) {
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return RestoreMarker{}, false, nil
+	}
+	if err != nil {
+		return RestoreMarker{}, false, fmt.Errorf("snapshot: read restore marker: %w", err)
+	}
+	var marker RestoreMarker
+	if err := json.Unmarshal(raw, &marker); err != nil {
+		return RestoreMarker{}, false, fmt.Errorf("%w: parse restore marker: %v", ErrRestoreUnsafe, err)
+	}
+	return marker, true, nil
 }
 
 func (t *RestoreTarget) Marker() RestoreMarker {
@@ -116,25 +186,30 @@ func (t *RestoreTarget) Marker() RestoreMarker {
 	return cloneRestoreMarker(t.marker)
 }
 
-func (t *RestoreTarget) Apply(ctx context.Context, r io.Reader, rec Record, target storage.LogicalStorage) (RestoreApplyResult, error) {
-	if r == nil || target == nil {
-		return RestoreApplyResult{}, fmt.Errorf("%w: restore stream and target storage are required", ErrInvalidRequest)
+func (t *RestoreTarget) Apply(ctx context.Context, r io.Reader, rec Record) (RestoreApplyResult, error) {
+	if r == nil {
+		return RestoreApplyResult{}, fmt.Errorf("%w: restore stream is required", ErrInvalidRequest)
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if err := t.verifyStorageLocked(); err != nil {
+		return RestoreApplyResult{}, err
+	}
 	if rec.SnapshotID != t.marker.SnapshotID || validateRecord(rec) != nil {
 		return RestoreApplyResult{}, fmt.Errorf("%w: snapshot record does not match target", ErrRestoreConflict)
 	}
 	if t.marker.Snapshot != nil && !sameRestoreRecord(*t.marker.Snapshot, rec) {
 		return RestoreApplyResult{}, fmt.Errorf("%w: target is already bound to another archive", ErrRestoreConflict)
 	}
-	if target.NumBlocks() != rec.NumBlocks || target.BlockSize() != rec.BlockSize {
-		return RestoreApplyResult{}, fmt.Errorf("%w: target geometry blocks=%d/%d block_size=%d/%d", ErrRestoreConflict, target.NumBlocks(), rec.NumBlocks, target.BlockSize(), rec.BlockSize)
+	if t.storage.NumBlocks() != rec.NumBlocks || t.storage.BlockSize() != rec.BlockSize {
+		return RestoreApplyResult{}, fmt.Errorf("%w: target geometry blocks=%d/%d block_size=%d/%d", ErrRestoreConflict, t.storage.NumBlocks(), rec.NumBlocks, t.storage.BlockSize(), rec.BlockSize)
 	}
 	if t.marker.State == RestoreStateApplied || t.marker.State == RestoreStateActivated {
-		if _, err := ApplyArchiveStream(ctx, r, rec, func(uint32, []byte) error { return nil }); err != nil {
+		stagedPath, err := stageVerifiedArchive(ctx, r, rec, filepath.Dir(t.markerPath))
+		if err != nil {
 			return RestoreApplyResult{}, err
 		}
+		defer os.Remove(stagedPath)
 		return restoreApplyResult(t.marker, true), nil
 	}
 	if t.marker.State != RestoreStatePending && t.marker.State != RestoreStateApplying {
@@ -150,19 +225,29 @@ func (t *RestoreTarget) Apply(ctx context.Context, r io.Reader, rec Record, targ
 	if err := t.persistLocked(); err != nil {
 		return RestoreApplyResult{}, err
 	}
+	stagedPath, err := stageVerifiedArchive(ctx, r, rec, filepath.Dir(t.markerPath))
+	if err != nil {
+		return RestoreApplyResult{}, t.resetPendingLocked(err)
+	}
+	defer os.Remove(stagedPath)
 	var restoredBlocks, restoredBytes uint64
-	_, err := ApplyArchiveStream(ctx, r, rec, func(lba uint32, data []byte) error {
-		if _, err := target.Write(lba, data); err != nil {
+	staged, err := os.Open(stagedPath)
+	if err != nil {
+		return RestoreApplyResult{}, t.resetPendingLocked(fmt.Errorf("snapshot: reopen staged archive: %w", err))
+	}
+	_, applyErr := ApplyArchiveStream(ctx, staged, rec, func(lba uint32, data []byte) error {
+		if _, err := t.storage.Write(lba, data); err != nil {
 			return fmt.Errorf("snapshot: apply target LBA %d: %w", lba, err)
 		}
 		restoredBlocks++
 		restoredBytes += uint64(len(data))
 		return nil
 	})
-	if err != nil {
-		return RestoreApplyResult{}, t.resetPendingLocked(err)
+	closeErr := staged.Close()
+	if applyErr != nil || closeErr != nil {
+		return RestoreApplyResult{}, t.resetPendingLocked(errors.Join(applyErr, closeErr))
 	}
-	frontier, err := target.Sync()
+	frontier, err := t.storage.Sync()
 	if err != nil {
 		return RestoreApplyResult{}, t.resetPendingLocked(fmt.Errorf("snapshot: sync restore target: %w", err))
 	}
@@ -186,18 +271,43 @@ func (t *RestoreTarget) Activate(releaseReadiness func() error) error {
 	if releaseReadiness == nil {
 		return fmt.Errorf("%w: readiness callback is required", ErrInvalidRequest)
 	}
+	t.activationMu.Lock()
+	defer t.activationMu.Unlock()
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	if err := t.verifyStorageLocked(); err != nil {
+		t.mu.Unlock()
+		return err
+	}
 	if t.marker.State != RestoreStateApplied && t.marker.State != RestoreStateActivated {
-		return fmt.Errorf("%w: state=%s", ErrRestoreNotApplied, t.marker.State)
+		state := t.marker.State
+		t.mu.Unlock()
+		return fmt.Errorf("%w: state=%s", ErrRestoreNotApplied, state)
 	}
 	if t.marker.State == RestoreStateApplied {
 		t.marker.State = RestoreStateActivated
 		if err := t.persistLocked(); err != nil {
+			t.mu.Unlock()
 			return err
 		}
 	}
+	t.mu.Unlock()
 	return releaseReadiness()
+}
+
+func (t *RestoreTarget) verifyStorageLocked() error {
+	if t.storage == nil {
+		return fmt.Errorf("%w: target storage is not bound", ErrRestoreUnsafe)
+	}
+	provider, ok := t.storage.(storage.DurableStorageIdentityProvider)
+	if !ok {
+		return fmt.Errorf("%w: target storage has no durable identity", ErrRestoreUnsafe)
+	}
+	identity := provider.DurableStorageIdentity()
+	path, err := canonicalRestorePath(identity.Path)
+	if err != nil || path != t.marker.TargetDataPath || identity.StoreID == "" || identity.StoreID != t.marker.TargetStorageID || t.storage.NumBlocks() != t.marker.TargetNumBlocks || t.storage.BlockSize() != t.marker.TargetBlockSize {
+		return fmt.Errorf("%w: bound target storage identity changed", ErrRestoreUnsafe)
+	}
+	return nil
 }
 
 func (t *RestoreTarget) resetPendingLocked(cause error) error {
@@ -247,13 +357,24 @@ func (t *RestoreTarget) persistLocked() error {
 }
 
 func validateRestoreMarker(marker RestoreMarker, cfg RestoreTargetConfig) error {
-	if marker.Version != restoreMarkerVersion || marker.SnapshotID != cfg.SnapshotID || marker.TargetVolumeID != cfg.TargetVolumeID || marker.TargetReplicaID != cfg.TargetReplicaID {
+	if marker.Version != restoreMarkerVersion || marker.SnapshotID != cfg.SnapshotID || marker.TargetVolumeID != cfg.TargetVolumeID || marker.TargetReplicaID != cfg.TargetReplicaID || marker.TargetDataPath != cfg.TargetDataPath {
 		return fmt.Errorf("%w: restore marker identity mismatch", ErrRestoreConflict)
 	}
+	if marker.TargetStorageID == "" {
+		if marker.TargetNumBlocks != 0 || marker.TargetBlockSize != 0 {
+			return fmt.Errorf("%w: incomplete target storage identity", ErrRestoreUnsafe)
+		}
+	} else if marker.TargetNumBlocks == 0 || marker.TargetBlockSize <= 0 {
+		return fmt.Errorf("%w: incomplete target storage geometry", ErrRestoreUnsafe)
+	}
 	switch marker.State {
-	case RestoreStatePending, RestoreStateApplying:
+	case RestoreStatePending:
+	case RestoreStateApplying:
+		if marker.TargetStorageID == "" || marker.Snapshot == nil {
+			return fmt.Errorf("%w: invalid applying marker", ErrRestoreUnsafe)
+		}
 	case RestoreStateApplied, RestoreStateActivated:
-		if marker.Snapshot == nil || validateRecord(*marker.Snapshot) != nil || marker.RestoredBlocks != marker.Snapshot.RecordCount || marker.RestoredBytes != marker.Snapshot.DataBytes {
+		if marker.TargetStorageID == "" || marker.Snapshot == nil || validateRecord(*marker.Snapshot) != nil || marker.RestoredBlocks != marker.Snapshot.RecordCount || marker.RestoredBytes != marker.Snapshot.DataBytes {
 			return fmt.Errorf("%w: invalid %s marker", ErrRestoreUnsafe, marker.State)
 		}
 	default:
@@ -295,4 +416,72 @@ func restorePathExists(path string) (bool, error) {
 		return false, nil
 	}
 	return false, fmt.Errorf("snapshot: stat restore target: %w", err)
+}
+
+func canonicalRestorePath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("snapshot: resolve restore path: %w", err)
+	}
+	abs = filepath.Clean(abs)
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return filepath.Clean(resolved), nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("snapshot: resolve restore path: %w", err)
+	}
+	parent, err := filepath.EvalSymlinks(filepath.Dir(abs))
+	if err == nil {
+		return filepath.Join(parent, filepath.Base(abs)), nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("snapshot: resolve restore parent: %w", err)
+	}
+	return abs, nil
+}
+
+func stageVerifiedArchive(ctx context.Context, r io.Reader, rec Record, dir string) (path string, retErr error) {
+	tmp, err := os.CreateTemp(dir, ".tmp-restore-archive-*")
+	if err != nil {
+		return "", fmt.Errorf("snapshot: create restore staging file: %w", err)
+	}
+	path = tmp.Name()
+	defer func() {
+		if retErr != nil {
+			_ = tmp.Close()
+			_ = os.Remove(path)
+		}
+	}()
+	if err := tmp.Chmod(0o600); err != nil {
+		return "", fmt.Errorf("snapshot: chmod restore staging file: %w", err)
+	}
+	written, err := io.Copy(tmp, io.LimitReader(r, rec.ArchiveBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("snapshot: stage restore archive: %w", err)
+	}
+	if written != rec.ArchiveBytes {
+		return "", fmt.Errorf("%w: streamed archive bytes got %d want %d", ErrArchiveCorrupt, written, rec.ArchiveBytes)
+	}
+	if err := tmp.Sync(); err != nil {
+		return "", fmt.Errorf("snapshot: fsync restore staging file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return "", fmt.Errorf("snapshot: close restore staging file: %w", err)
+	}
+	digest, err := digestFile(path)
+	if err != nil {
+		return "", err
+	}
+	if digest != rec.ArchiveSHA256 {
+		return "", fmt.Errorf("%w: digest got %s want %s", ErrArchiveCorrupt, digest, rec.ArchiveSHA256)
+	}
+	verified, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("snapshot: open restore staging file: %w", err)
+	}
+	_, verifyErr := ApplyArchiveStream(ctx, verified, rec, nil)
+	closeErr := verified.Close()
+	if verifyErr != nil || closeErr != nil {
+		return "", errors.Join(verifyErr, closeErr)
+	}
+	return path, nil
 }

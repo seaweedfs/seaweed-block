@@ -9,14 +9,15 @@ import (
 // daemons should exist for one desired volume. It is deliberately not
 // authority-shaped: no epoch, endpoint_version, primary, ready, or healthy.
 type BlockVolumeWorkloadPlan struct {
-	VolumeID      string
-	SizeBytes     uint64
-	Protocol      string
-	NVMeTransport string
-	PVCName       string
-	PVCNamespace  string
-	PVCUID        string
-	Replicas      []BlockVolumeReplicaWorkload
+	VolumeID         string
+	SizeBytes        uint64
+	Protocol         string
+	NVMeTransport    string
+	SourceSnapshotID string
+	PVCName          string
+	PVCNamespace     string
+	PVCUID           string
+	Replicas         []BlockVolumeReplicaWorkload
 }
 
 type BlockVolumeReplicaWorkload struct {
@@ -71,14 +72,15 @@ func PlanBlockVolumeWorkloads(volume VolumeRecord, placement PlacementIntent, no
 	}
 
 	out := BlockVolumeWorkloadPlan{
-		VolumeID:      volume.Spec.VolumeID,
-		SizeBytes:     volume.Spec.SizeBytes,
-		Protocol:      protocol,
-		NVMeTransport: volume.Spec.FrontendTransport,
-		PVCName:       volume.Spec.PVCName,
-		PVCNamespace:  volume.Spec.PVCNamespace,
-		PVCUID:        volume.Spec.PVCUID,
-		Replicas:      make([]BlockVolumeReplicaWorkload, 0, len(placement.Slots)),
+		VolumeID:         volume.Spec.VolumeID,
+		SizeBytes:        volume.Spec.SizeBytes,
+		Protocol:         protocol,
+		NVMeTransport:    volume.Spec.FrontendTransport,
+		SourceSnapshotID: volume.Spec.SourceSnapshotID,
+		PVCName:          volume.Spec.PVCName,
+		PVCNamespace:     volume.Spec.PVCNamespace,
+		PVCUID:           volume.Spec.PVCUID,
+		Replicas:         make([]BlockVolumeReplicaWorkload, 0, len(placement.Slots)),
 	}
 	for i, slot := range placement.Slots {
 		node, ok := nodeByID[slot.ServerID]

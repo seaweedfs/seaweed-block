@@ -33,6 +33,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -183,11 +184,19 @@ func NewDurableProvider(cfg ProviderConfig, view frontend.ProjectionView) (*Dura
 	}, nil
 }
 
-// volumePath returns the on-disk path for a volumeID. Volume IDs
-// are used as filenames; callers are responsible for passing
-// filesystem-safe strings (the master/adapter layer already does).
+// volumePath returns the on-disk path after the public entry points have
+// validated volumeID as one filesystem component.
 func (p *DurableProvider) volumePath(volumeID string) string {
 	return filepath.Join(p.cfg.StorageRoot, volumeID+".bin")
+}
+
+// VolumeDataPath returns the provider-owned file for startup fencing such as
+// restore-to-new. Callers must not read or write this path directly.
+func (p *DurableProvider) VolumeDataPath(volumeID string) (string, error) {
+	if err := validateStorageVolumeID(volumeID); err != nil {
+		return "", err
+	}
+	return p.volumePath(volumeID), nil
 }
 
 // Open implements frontend.Provider. Returns the cached backend
@@ -233,6 +242,9 @@ func (p *DurableProvider) Open(ctx context.Context, volumeID string) (frontend.B
 }
 
 func (p *DurableProvider) ensureHandle(volumeID string) (*volHandle, error) {
+	if err := validateStorageVolumeID(volumeID); err != nil {
+		return nil, err
+	}
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
@@ -280,6 +292,13 @@ func (p *DurableProvider) ensureHandle(volumeID string) (*volHandle, error) {
 	}
 	p.volumes[volumeID] = h
 	return h, nil
+}
+
+func validateStorageVolumeID(volumeID string) error {
+	if volumeID == "" || volumeID == "." || volumeID == ".." || strings.ContainsAny(volumeID, `/\`) || filepath.Base(volumeID) != volumeID {
+		return fmt.Errorf("durable: invalid volume id %q", volumeID)
+	}
+	return nil
 }
 
 // EnsureStorage opens (or creates) the on-disk LogicalStorage for

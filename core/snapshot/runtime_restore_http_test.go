@@ -3,7 +3,10 @@ package snapshot
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"io"
+	"net"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -15,7 +18,7 @@ import (
 func TestPhase175HTTPSRestoreRuntimeApplyThenActivate(t *testing.T) {
 	manager, rec, want := createStreamFixture(t)
 	target, store, released := newRuntimeRestoreTarget(t, rec)
-	handler, err := NewRestoreRuntimeHandler(target, store, func() error {
+	handler, err := NewRestoreRuntimeHandler(target, func() error {
 		*released = true
 		return nil
 	}, "restore-token")
@@ -60,8 +63,8 @@ func TestPhase175HTTPSRestoreRuntimeApplyThenActivate(t *testing.T) {
 
 func TestPhase175HTTPSRestoreRuntimeRejectsBadArchiveAndIdentity(t *testing.T) {
 	manager, rec, _ := createStreamFixture(t)
-	target, store, released := newRuntimeRestoreTarget(t, rec)
-	handler, err := NewRestoreRuntimeHandler(target, store, func() error { *released = true; return nil }, "right-token")
+	target, _, released := newRuntimeRestoreTarget(t, rec)
+	handler, err := NewRestoreRuntimeHandler(target, func() error { *released = true; return nil }, "right-token")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,6 +102,66 @@ func TestPhase175HTTPSRestoreRuntimeRejectsBadArchiveAndIdentity(t *testing.T) {
 	}
 }
 
+func TestPhase175RestoreRuntimeRequiresMTLSAndToken(t *testing.T) {
+	manager, rec, _ := createStreamFixture(t)
+	target, _, released := newRuntimeRestoreTarget(t, rec)
+	restore, err := NewRestoreRuntimeHandler(target, func() error { *released = true; return nil }, "restore-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := NewRuntimeMux(nil, restore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := writeRuntimeTLSIdentity(t)
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := probe.Addr().String()
+	_ = probe.Close()
+	server, err := StartRuntimeServer(RuntimeServerConfig{
+		Listen: addr, AdvertiseEndpoint: "https://" + addr, TLSCertFile: identity.serverCertFile, TLSKeyFile: identity.serverKeyFile, ClientCAFile: identity.caFile, Handler: handler,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close(context.Background())
+	req := RuntimeRestoreRequest{Endpoint: server.Endpoint(), Snapshot: rec, TargetVolumeID: "target-vol", TargetReplicaID: "r2"}
+	withoutCertificate, err := NewHTTPSRestoreRuntime(&http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
+		RootCAs: identity.roots, MinVersion: tls.VersionTLS12,
+	}}}, "restore-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := withoutCertificate.Apply(context.Background(), req, manager); err == nil {
+		t.Fatal("restore runtime accepted a client without mTLS identity")
+	}
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
+		RootCAs: identity.roots, Certificates: []tls.Certificate{identity.clientCertificate}, MinVersion: tls.VersionTLS12,
+	}}}
+	wrongToken, err := NewHTTPSRestoreRuntime(client, "wrong-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wrongToken.Apply(context.Background(), req, manager); err == nil {
+		t.Fatal("restore runtime accepted a wrong bearer token")
+	}
+	authorized, err := NewHTTPSRestoreRuntime(client, "restore-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := authorized.Apply(context.Background(), req, manager); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := authorized.Activate(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	if !*released {
+		t.Fatal("authorized restore did not release local readiness")
+	}
+}
+
 type corruptArchiveStreamer struct {
 	manager *Manager
 }
@@ -133,7 +196,10 @@ func newRuntimeRestoreTarget(t *testing.T, rec Record) (*RestoreTarget, storage.
 	if err := os.WriteFile(dataPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	store := storage.NewBlockStore(rec.NumBlocks, rec.BlockSize)
+	store := identifyRestoreStorage(dataPath, "runtime-store", storage.NewBlockStore(rec.NumBlocks, rec.BlockSize))
+	if err := target.BindStorage(store); err != nil {
+		t.Fatal(err)
+	}
 	released := false
 	return target, store, &released
 }

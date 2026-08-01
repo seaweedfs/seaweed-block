@@ -35,6 +35,7 @@ type VolumeSpec struct {
 	ReplicationFactor int    `json:"replication_factor"`
 	Protocol          string `json:"protocol,omitempty"`
 	FrontendTransport string `json:"frontend_transport,omitempty"`
+	SourceSnapshotID  string `json:"source_snapshot_id,omitempty"`
 	PVCName           string `json:"pvc_name,omitempty"`
 	PVCNamespace      string `json:"pvc_namespace,omitempty"`
 	PVCUID            string `json:"pvc_uid,omitempty"`
@@ -43,9 +44,15 @@ type VolumeSpec struct {
 
 // VolumeRecord is the durable lifecycle state for one volume.
 type VolumeRecord struct {
-	Spec       VolumeSpec `json:"spec"`
-	AttachedTo string     `json:"attached_to,omitempty"`
+	Spec         VolumeSpec `json:"spec"`
+	AttachedTo   string     `json:"attached_to,omitempty"`
+	RestoreState string     `json:"restore_state,omitempty"`
 }
+
+const (
+	VolumeRestorePending  = "restore_pending"
+	VolumeRestoreComplete = "restore_complete"
+)
 
 // FileStore persists one JSON record per volume ID.
 type FileStore struct {
@@ -97,6 +104,9 @@ func (s *FileStore) CreateVolume(spec VolumeSpec) (VolumeRecord, error) {
 		return existing, nil
 	}
 	rec := VolumeRecord{Spec: spec}
+	if spec.SourceSnapshotID != "" {
+		rec.RestoreState = VolumeRestorePending
+	}
 	if err := s.putLocked(rec); err != nil {
 		return VolumeRecord{}, err
 	}
@@ -111,7 +121,8 @@ func volumeSpecsCompatible(a, b VolumeSpec) bool {
 		a.SizeBytes == b.SizeBytes &&
 		a.ReplicationFactor == b.ReplicationFactor &&
 		a.Protocol == b.Protocol &&
-		a.FrontendTransport == b.FrontendTransport
+		a.FrontendTransport == b.FrontendTransport &&
+		a.SourceSnapshotID == b.SourceSnapshotID
 }
 
 func mergeVolumeSpecMetadata(existing, incoming VolumeSpec) VolumeSpec {
@@ -219,6 +230,39 @@ func (s *FileStore) ListVolumes() []VolumeRecord {
 	return out
 }
 
+// MarkRestoreComplete opens the authority gate only after the restore
+// coordinator has observed every target replica activated. It is idempotent
+// for the same immutable source snapshot.
+func (s *FileStore) MarkRestoreComplete(volumeID, snapshotID string) (VolumeRecord, error) {
+	if err := validateVolumeID(volumeID); err != nil {
+		return VolumeRecord{}, err
+	}
+	if !IsSafeStorageIdentityComponent(snapshotID) {
+		return VolumeRecord{}, fmt.Errorf("%w: invalid source snapshot id %q", ErrInvalidVolumeSpec, snapshotID)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.records[volumeID]
+	if !ok {
+		return VolumeRecord{}, ErrVolumeNotFound
+	}
+	if rec.Spec.SourceSnapshotID != snapshotID {
+		return VolumeRecord{}, ErrVolumeConflict
+	}
+	if rec.RestoreState == VolumeRestoreComplete {
+		return rec, nil
+	}
+	if rec.RestoreState != VolumeRestorePending {
+		return VolumeRecord{}, fmt.Errorf("%w: invalid restore state %q", ErrInvalidVolumeSpec, rec.RestoreState)
+	}
+	rec.RestoreState = VolumeRestoreComplete
+	if err := s.putLocked(rec); err != nil {
+		return VolumeRecord{}, err
+	}
+	s.records[volumeID] = rec
+	return rec, nil
+}
+
 func (s *FileStore) load() error {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
@@ -241,6 +285,9 @@ func (s *FileStore) load() error {
 			return fmt.Errorf("lifecycle: invalid record %q: %w", path, err)
 		}
 		rec.Spec = normalizeVolumeSpec(rec.Spec)
+		if err := validateVolumeRestoreState(rec); err != nil {
+			return fmt.Errorf("lifecycle: invalid record %q: %w", path, err)
+		}
 		if filepath.Base(s.path(rec.Spec.VolumeID)) != entry.Name() {
 			return fmt.Errorf("lifecycle: record filename %q does not match volume_id %q", entry.Name(), rec.Spec.VolumeID)
 		}
@@ -295,6 +342,9 @@ func validateSpec(spec VolumeSpec) error {
 	if spec.ReplicationFactor <= 0 {
 		return fmt.Errorf("%w: replication_factor must be > 0", ErrInvalidVolumeSpec)
 	}
+	if spec.SourceSnapshotID != "" && !IsSafeStorageIdentityComponent(spec.SourceSnapshotID) {
+		return fmt.Errorf("%w: invalid source_snapshot_id %q", ErrInvalidVolumeSpec, spec.SourceSnapshotID)
+	}
 	switch spec.Protocol {
 	case "iscsi":
 		if spec.FrontendTransport != "" {
@@ -306,6 +356,19 @@ func validateSpec(spec VolumeSpec) error {
 		}
 	default:
 		return fmt.Errorf("%w: protocol must be iscsi or nvme", ErrInvalidVolumeSpec)
+	}
+	return nil
+}
+
+func validateVolumeRestoreState(rec VolumeRecord) error {
+	if rec.Spec.SourceSnapshotID == "" {
+		if rec.RestoreState != "" {
+			return fmt.Errorf("%w: non-restore volume has restore state %q", ErrInvalidVolumeSpec, rec.RestoreState)
+		}
+		return nil
+	}
+	if rec.RestoreState != VolumeRestorePending && rec.RestoreState != VolumeRestoreComplete {
+		return fmt.Errorf("%w: source snapshot volume has restore state %q", ErrInvalidVolumeSpec, rec.RestoreState)
 	}
 	return nil
 }

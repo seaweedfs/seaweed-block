@@ -109,6 +109,7 @@ type VolumeSpec struct {
 	ReplicationFactor int
 	Protocol          Protocol
 	FrontendTransport FrontendTransport
+	SourceSnapshotID  string
 	PVCName           string
 	PVCNamespace      string
 	PVCUID            string
