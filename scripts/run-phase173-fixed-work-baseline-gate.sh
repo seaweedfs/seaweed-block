@@ -7,8 +7,10 @@ STORE_DIR="${SW_BLOCK_PHASE173_STORE_DIR:-${ARTIFACT_DIR}/stores}"
 SUMMARY="${ARTIFACT_DIR}/phase173-fixed-work-baseline-summary.txt"
 RESULTS="${ARTIFACT_DIR}/phase173-fixed-work-results.jsonl"
 TEST_BINARY="${ARTIFACT_DIR}/storage.test"
-SHAPES=(sequential_4k scattered_4k batch_16 mounted_mixed)
-WRITERS=(1 2 4 8)
+SHAPES_FORWARD=(sequential_4k scattered_4k batch_16 mounted_mixed)
+SHAPES_REVERSE=(mounted_mixed batch_16 scattered_4k sequential_4k)
+WRITERS_FORWARD=(1 2 4 8)
+WRITERS_REVERSE=(8 4 2 1)
 SETS=2
 RUNS=5
 DIAGNOSTIC_RUNS=1
@@ -39,6 +41,15 @@ write_summary "page_cache_policy=warm_process_and_filesystem_no_drop_caches"
 write_summary "go_benchmark_autocalibration_allowed=false"
 write_summary "architecture_candidate_admission_allowed=false"
 
+store_source="$(findmnt -n -T "${STORE_DIR}" -o SOURCE)"
+store_filesystem="$(findmnt -n -T "${STORE_DIR}" -o FSTYPE)"
+if [[ "${store_source}" != /dev/* ]]; then
+  echo "store source ${store_source} is not a local block device" >&2
+  exit 1
+fi
+write_summary "store_source=${store_source}"
+write_summary "store_filesystem=${store_filesystem}"
+
 capture kernel uname -a
 capture go-version go version
 capture cpu lscpu
@@ -67,8 +78,19 @@ go test ./core/storage -run '^TestPhase173FixedWorkContract$' -count=1 \
 go test -c -o "${TEST_BINARY}" ./core/storage
 
 for set_id in $(seq 1 "${SETS}"); do
-  for shape in "${SHAPES[@]}"; do
-    for writers in "${WRITERS[@]}"; do
+  sync
+  sleep 5
+  capture "set-${set_id}-start-iostat" iostat -xz 1 2
+  capture "set-${set_id}-start-load" uptime
+  if [[ "${set_id}" == "1" ]]; then
+    shapes=("${SHAPES_FORWARD[@]}")
+    writers_values=("${WRITERS_FORWARD[@]}")
+  else
+    shapes=("${SHAPES_REVERSE[@]}")
+    writers_values=("${WRITERS_REVERSE[@]}")
+  fi
+  for shape in "${shapes[@]}"; do
+    for writers in "${writers_values[@]}"; do
       point_runs="${DIAGNOSTIC_RUNS}"
       if [[ "${writers}" == "4" ]]; then
         point_runs="${RUNS}"
@@ -88,6 +110,8 @@ for set_id in $(seq 1 "${SETS}"); do
           exit 1
         fi
         printf '%s\n' "${result}" >>"${RESULTS}"
+        sync
+        sleep 0.25
       done
     done
   done

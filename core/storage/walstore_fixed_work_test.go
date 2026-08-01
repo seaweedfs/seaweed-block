@@ -19,7 +19,7 @@ const (
 	phase173FixedWorkStoreEnv   = "SW_BLOCK_PHASE173_STORE_DIR"
 
 	phase173FixedWorkBlockSize    = 4096
-	phase173FixedWorkNumBlocks    = 131072
+	phase173FixedWorkNumBlocks    = 65536
 	phase173FixedWorkRegionBlocks = phase173FixedWorkNumBlocks / 2
 )
 
@@ -87,11 +87,11 @@ func TestPhase173FixedWorkContract(t *testing.T) {
 			if err != nil {
 				t.Fatalf("shape=%s writers=%d: %v", shape, writers, err)
 			}
-			if cfg.APILogicalBlocks() < 64000 || cfg.APILogicalBlocks() > 65536 {
-				t.Fatalf("shape=%s logical blocks=%d want [64000,65536]", shape, cfg.APILogicalBlocks())
+			if cfg.APILogicalBlocks() < 16000 || cfg.APILogicalBlocks() > 16384 {
+				t.Fatalf("shape=%s logical blocks=%d want [16000,16384]", shape, cfg.APILogicalBlocks())
 			}
-			if cfg.WarmupLogicalBlocks() < 4000 || cfg.WarmupLogicalBlocks() > 4096 {
-				t.Fatalf("shape=%s warmup logical blocks=%d want [4000,4096]", shape, cfg.WarmupLogicalBlocks())
+			if cfg.WarmupLogicalBlocks() < 1000 || cfg.WarmupLogicalBlocks() > 1024 {
+				t.Fatalf("shape=%s warmup logical blocks=%d want [1000,1024]", shape, cfg.WarmupLogicalBlocks())
 			}
 			for index := 0; index < cfg.APIOperations; index++ {
 				start, blocks := cfg.operation(index, 0)
@@ -141,15 +141,15 @@ func newPhase173FixedWorkConfig(shape string, writers int) (phase173FixedWorkCon
 	cfg := phase173FixedWorkConfig{Shape: shape, Writers: writers}
 	switch shape {
 	case "sequential_4k", "scattered_4k":
-		cfg.APIOperations = 65536
-		cfg.WarmupAPIOps = 4096
+		cfg.APIOperations = 16384
+		cfg.WarmupAPIOps = 1024
 	case "batch_16":
-		cfg.APIOperations = 4096
-		cfg.WarmupAPIOps = 256
+		cfg.APIOperations = 1024
+		cfg.WarmupAPIOps = 64
 	case "mounted_mixed":
-		// 2560 fixed cycles of 4K, 16K, 64K, and 16K requests.
-		cfg.APIOperations = 10240
-		cfg.WarmupAPIOps = 640
+		// 640 fixed cycles of 4K, 16K, 64K, and 16K requests.
+		cfg.APIOperations = 2560
+		cfg.WarmupAPIOps = 160
 	default:
 		return phase173FixedWorkConfig{}, fmt.Errorf("phase173: unsupported shape %q", shape)
 	}

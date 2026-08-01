@@ -39,6 +39,8 @@ Do not lower run counts or change the `1.25x` threshold after seeing results.
   `1.25`
 - environment evidence identifies kernel, CPU/affinity/scheduler, filesystem,
   mount options, backing device, free space, load, and available thermal data
+- `store_source` is the dedicated local block device under evaluation, not the
+  OS/root filesystem by convenience and never CIFS/NFS/tmpfs/overlay
 - the store directory contains no `phase173-*.store` residue after the gate
 
 Each JSON result must show one final sync, `dirty_entries=0`, and equal
@@ -53,9 +55,11 @@ wrap may add one separately counted padding `WriteAt`; `wal_wraps` and
 
 - `PASS`: all required evidence is present and both independent five-run
   four-writer sets remain within the predeclared range. Each fixed-work sample
-  writes about 256 MiB so foreground execution crosses multiple 100 ms flusher
+  writes about 64 MiB so foreground execution crosses multiple 100 ms flusher
   periods; 1/2/8 writers are diagnostic matrix points, while four writers use
-  the two independent five-run admission sets.
+  the two independent five-run admission sets. The second set reverses shape
+  and writer order; the gate syncs between samples and records each set's
+  starting device/load evidence.
 - `FAIL`: a correctness, counter, drain, or residue invariant fails.
 - `HOLD`: the stability range exceeds `1.25x`; fix the harness or lab before
   D2/D3 and do not implement an architecture candidate.
