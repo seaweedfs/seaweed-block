@@ -66,4 +66,3 @@ attribution data only. No throughput ratio can authorize D4/D5 implementation.
 - `d1ef486`: reached recovery and failed honestly with typed `WALRecycled`
   because the test helper fixed every lag to catch-up.
 - `7d75a47`: PASS after using the existing R/S/H recovery classification.
-
