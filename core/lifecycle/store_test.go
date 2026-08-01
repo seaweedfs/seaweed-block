@@ -1,6 +1,7 @@
 package lifecycle
 
 import (
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -278,6 +279,34 @@ func TestPhase175VolumeSourceSnapshotIsDurableAndImmutable(t *testing.T) {
 	changed.VolumeID = "restored-b"
 	if _, err := reopened.CreateVolume(changed); err == nil {
 		t.Fatal("unsafe source snapshot id accepted")
+	}
+}
+
+func TestPhase175PendingRestoreDeletionIsDurablyHeld(t *testing.T) {
+	root := t.TempDir()
+	store, err := OpenFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := VolumeSpec{VolumeID: "restored-a", SizeBytes: 1 << 20, ReplicationFactor: 1, SourceSnapshotID: "snap-abc"}
+	if _, err := store.CreateVolume(spec); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteVolume(spec.VolumeID); !errors.Is(err, ErrRestorePending) {
+		t.Fatalf("delete pending restore error=%v", err)
+	}
+	reopened, err := OpenFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.DeleteVolume(spec.VolumeID); !errors.Is(err, ErrRestorePending) {
+		t.Fatalf("delete pending restore after restart error=%v", err)
+	}
+	if _, err := reopened.MarkRestoreComplete(spec.VolumeID, spec.SourceSnapshotID); err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.DeleteVolume(spec.VolumeID); err != nil {
+		t.Fatalf("delete completed restore: %v", err)
 	}
 }
 

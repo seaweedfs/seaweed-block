@@ -51,6 +51,8 @@ func newServices(h *Host) *services {
 }
 
 func (s *services) CreateVolume(ctx context.Context, req *control.CreateVolumeRequest) (*control.CreateVolumeResponse, error) {
+	s.host.lifecycleProductMu.Lock()
+	defer s.host.lifecycleProductMu.Unlock()
 	stores := s.host.Lifecycle()
 	if stores == nil {
 		return nil, status.Error(codes.FailedPrecondition, "lifecycle store is not configured")
@@ -76,12 +78,17 @@ func (s *services) CreateVolume(ctx context.Context, req *control.CreateVolumeRe
 }
 
 func (s *services) DeleteVolume(ctx context.Context, req *control.DeleteVolumeRequest) (*control.DeleteVolumeResponse, error) {
+	s.host.lifecycleProductMu.Lock()
+	defer s.host.lifecycleProductMu.Unlock()
 	stores := s.host.Lifecycle()
 	if stores == nil {
 		return nil, status.Error(codes.FailedPrecondition, "lifecycle store is not configured")
 	}
 	if req.GetVolumeId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "volume_id is required")
+	}
+	if rec, ok := stores.Volumes.GetVolume(req.GetVolumeId()); ok && rec.RestoreState == lifecycle.VolumeRestorePending {
+		return nil, lifecycleError("delete volume", lifecycle.ErrRestorePending)
 	}
 	if err := stores.Placements.DeletePlacement(req.GetVolumeId()); err != nil {
 		return nil, lifecycleError("delete placement", err)
@@ -165,6 +172,9 @@ func lifecycleError(op string, err error) error {
 	}
 	if errors.Is(err, lifecycle.ErrVolumeConflict) {
 		return status.Errorf(codes.AlreadyExists, "%s: %v", op, err)
+	}
+	if errors.Is(err, lifecycle.ErrRestorePending) {
+		return status.Errorf(codes.FailedPrecondition, "%s: %v", op, err)
 	}
 	return status.Errorf(codes.Internal, "%s: %v", op, err)
 }

@@ -234,6 +234,9 @@ func (s *ControllerServer) DeleteVolume(ctx context.Context, req *csipb.DeleteVo
 		return nil, status.Error(codes.Unimplemented, "dynamic provisioning is not configured")
 	}
 	if err := s.provisioner.DeleteVolume(ctx, req.GetVolumeId()); err != nil {
+		if code := status.Code(err); code != codes.Unknown {
+			return nil, status.Errorf(code, "delete volume intent: %v", err)
+		}
 		return nil, status.Errorf(codes.Internal, "delete volume intent: %v", err)
 	}
 	return &csipb.DeleteVolumeResponse{}, nil

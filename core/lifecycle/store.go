@@ -23,6 +23,7 @@ var (
 	ErrVolumeNotFound    = errors.New("lifecycle: volume not found")
 	ErrAlreadyAttached   = errors.New("lifecycle: volume already attached to another node")
 	ErrAttachedElsewhere = errors.New("lifecycle: volume attached to another node")
+	ErrRestorePending    = errors.New("lifecycle: snapshot restore is pending")
 )
 
 var volumeIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
@@ -150,6 +151,9 @@ func (s *FileStore) DeleteVolume(volumeID string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if rec, ok := s.records[volumeID]; ok && rec.RestoreState == VolumeRestorePending {
+		return ErrRestorePending
+	}
 	err := os.Remove(s.path(volumeID))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("lifecycle: remove %s: %w", volumeID, err)

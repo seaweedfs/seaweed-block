@@ -943,6 +943,15 @@ func TestG15c_ControllerDeleteVolume_DelegatesToProvisioner(t *testing.T) {
 	}
 }
 
+func TestPhase175ControllerDeleteVolumePreservesRestoreHold(t *testing.T) {
+	prov := &stubProvisioner{err: status.Error(codes.FailedPrecondition, "snapshot restore is pending")}
+	s := NewControllerServerWithProvisioner(&stubLookup{}, prov)
+	_, err := s.DeleteVolume(context.Background(), &csipb.DeleteVolumeRequest{VolumeId: "restored-a"})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("DeleteVolume error=%v", err)
+	}
+}
+
 func TestValidateVolumeCapabilities_ConfirmsExistingTarget(t *testing.T) {
 	s := NewControllerServer(&stubLookup{target: PublishTarget{VolumeID: "v1", ISCSIAddr: "127.0.0.1:3260", IQN: "iqn.x:v1"}})
 	caps := []*csipb.VolumeCapability{testVolumeCapability()}

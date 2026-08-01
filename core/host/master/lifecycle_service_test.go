@@ -2,6 +2,7 @@ package master
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -150,6 +151,93 @@ func TestG15e_LifecycleService_DeleteVolumeRemovesPlacementIntent(t *testing.T) 
 	}
 	if _, ok := h.Publisher().VolumeAuthorityLine("pvc-a"); ok {
 		t.Fatal("DeleteVolume must not mint or mutate authority")
+	}
+}
+
+func TestPhase175LifecycleServiceHoldsPendingRestoreBeforePlacementDelete(t *testing.T) {
+	h := newTestMaster(t, t.TempDir())
+	defer closeTestMaster(t, h)
+	svc := newServices(h)
+	const volumeID = "restored-a"
+	if _, err := svc.CreateVolume(context.Background(), &control.CreateVolumeRequest{
+		VolumeId: volumeID, SizeBytes: 1 << 20, ReplicationFactor: 1, SourceSnapshotId: "snap-abc",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.Lifecycle().Placements.ApplyPlan(lifecycle.PlacementPlan{
+		VolumeID: volumeID, DesiredRF: 1, Candidates: []lifecycle.PlacementCandidate{{
+			VolumeID: volumeID, ServerID: "m02", PoolID: "default", ReplicaID: "r1", Source: lifecycle.PlacementSourceExistingReplica,
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.DeleteVolume(context.Background(), &control.DeleteVolumeRequest{VolumeId: volumeID}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("delete pending restore error=%v", err)
+	}
+	if _, ok := h.Lifecycle().Volumes.GetVolume(volumeID); !ok {
+		t.Fatal("pending restore volume intent was deleted")
+	}
+	if _, ok := h.Lifecycle().Placements.GetPlacement(volumeID); !ok {
+		t.Fatal("pending restore placement was deleted")
+	}
+	if _, err := h.Lifecycle().Volumes.MarkRestoreComplete(volumeID, "snap-abc"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.DeleteVolume(context.Background(), &control.DeleteVolumeRequest{VolumeId: volumeID}); err != nil {
+		t.Fatalf("delete completed restore: %v", err)
+	}
+}
+
+func TestPhase175ConcurrentRestoreCreateDeleteNeverReturnsHoldAfterPlacementLoss(t *testing.T) {
+	h := newTestMaster(t, t.TempDir())
+	defer closeTestMaster(t, h)
+	svc := newServices(h)
+	for i := 0; i < 32; i++ {
+		volumeID := fmt.Sprintf("restored-%d", i)
+		if _, err := h.Lifecycle().Placements.ApplyPlan(lifecycle.PlacementPlan{
+			VolumeID: volumeID, DesiredRF: 1, Candidates: []lifecycle.PlacementCandidate{{
+				VolumeID: volumeID, ServerID: "m02", PoolID: "default", ReplicaID: "r1", Source: lifecycle.PlacementSourceExistingReplica,
+			}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		start := make(chan struct{})
+		createDone := make(chan error, 1)
+		deleteDone := make(chan error, 1)
+		go func() {
+			<-start
+			_, err := svc.CreateVolume(context.Background(), &control.CreateVolumeRequest{
+				VolumeId: volumeID, SizeBytes: 1 << 20, ReplicationFactor: 1, SourceSnapshotId: "snap-abc",
+			})
+			createDone <- err
+		}()
+		go func() {
+			<-start
+			_, err := svc.DeleteVolume(context.Background(), &control.DeleteVolumeRequest{VolumeId: volumeID})
+			deleteDone <- err
+		}()
+		close(start)
+		if err := <-createDone; err != nil {
+			t.Fatal(err)
+		}
+		deleteErr := <-deleteDone
+		switch status.Code(deleteErr) {
+		case codes.OK:
+		case codes.FailedPrecondition:
+			if _, ok := h.Lifecycle().Placements.GetPlacement(volumeID); !ok {
+				t.Fatalf("iteration %d returned restore hold after deleting placement", i)
+			}
+		default:
+			t.Fatalf("iteration %d delete error=%v", i, deleteErr)
+		}
+		if rec, ok := h.Lifecycle().Volumes.GetVolume(volumeID); ok {
+			if _, err := h.Lifecycle().Volumes.MarkRestoreComplete(volumeID, rec.Spec.SourceSnapshotID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := svc.DeleteVolume(context.Background(), &control.DeleteVolumeRequest{VolumeId: volumeID}); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 }
 
