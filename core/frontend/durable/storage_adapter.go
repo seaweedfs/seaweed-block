@@ -327,6 +327,13 @@ func (b *StorageBackend) SetWriteAckPolicy(policy WriteAckPolicy) {
 	b.mu.Unlock()
 }
 
+// WriteProfile returns a read-only snapshot of the adapter's existing
+// cumulative write counters. It does not enable instrumentation or alter the
+// write path.
+func (b *StorageBackend) WriteProfile() WriteProfileStatus {
+	return b.profile.snapshot()
+}
+
 // SetOperational flips the readiness gate. evidence is surfaced
 // in error strings and diagnostic logs — pass a short reason like
 // "recovered LSN=123 epoch=4" or "superblock ahead of assignment".

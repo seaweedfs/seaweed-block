@@ -124,8 +124,39 @@ for set_id in 1 2; do
   done
 done
 
+for layer in direct_walstore adapter_rf1; do
+  cpu_profiles=()
+  block_profiles=()
+  mutex_profiles=()
+  for profile_run in $(seq 1 "${RUNS}"); do
+    prefix="${ARTIFACT_DIR}/profiles/${layer}-run${profile_run}"
+    mkdir -p "${ARTIFACT_DIR}/profiles"
+    SW_BLOCK_PHASE174_STORE_DIR="${STORE_DIR}" \
+    SW_BLOCK_PHASE174_LAYER="${layer}" \
+    SW_BLOCK_PHASE174_WRITERS=4 \
+    SW_BLOCK_PHASE174_SET=1 \
+    SW_BLOCK_PHASE174_RUN="${profile_run}" \
+    GOMAXPROCS="${GOMAXPROCS_VALUE}" taskset -c "${CPUSET}" \
+      "${TEST_BINARY}" -test.run '^TestPhase174FixedWorkPipeline$' -test.count=1 \
+      -test.cpuprofile="${prefix}-cpu.pprof" \
+      -test.blockprofile="${prefix}-block.pprof" -test.blockprofilerate=1 \
+      -test.mutexprofile="${prefix}-mutex.pprof" -test.mutexprofilefraction=1 \
+      >"${prefix}.log" 2>&1
+    cpu_profiles+=("${prefix}-cpu.pprof")
+    block_profiles+=("${prefix}-block.pprof")
+    mutex_profiles+=("${prefix}-mutex.pprof")
+  done
+  go tool pprof -top -nodecount=30 "${TEST_BINARY}" "${cpu_profiles[@]}" \
+    >"${ARTIFACT_DIR}/profiles/${layer}-cpu-top.txt" 2>&1
+  go tool pprof -top -nodecount=30 "${TEST_BINARY}" "${block_profiles[@]}" \
+    >"${ARTIFACT_DIR}/profiles/${layer}-block-top.txt" 2>&1
+  go tool pprof -top -nodecount=30 "${TEST_BINARY}" "${mutex_profiles[@]}" \
+    >"${ARTIFACT_DIR}/profiles/${layer}-mutex-top.txt" 2>&1
+done
+
 python3 - "${RESULTS}" "${SUMMARY}" "${RUNS}" "${MAX_RANGE}" <<'PY'
 import json
+import math
 import statistics
 import sys
 from collections import defaultdict
@@ -183,6 +214,21 @@ def set_rate_range(layer, writers, set_id):
         raise SystemExit(f"group {(layer, writers)} set={set_id} rows={len(values)} want {runs}")
     return max(values) / min(values)
 
+def median_per_op(rows, field):
+    return statistics.median(row[field] / row["api_operations"] for row in rows)
+
+def correlation(rows, field):
+    xs = [float(row["foreground_ns"]) for row in rows]
+    ys = [float(row[field]) for row in rows]
+    x_mean = statistics.mean(xs)
+    y_mean = statistics.mean(ys)
+    numerator = sum((x - x_mean) * (y - y_mean) for x, y in zip(xs, ys))
+    x_norm = math.sqrt(sum((x - x_mean) ** 2 for x in xs))
+    y_norm = math.sqrt(sum((y - y_mean) ** 2 for y in ys))
+    if x_norm == 0 or y_norm == 0:
+        return 0.0
+    return numerator / (x_norm * y_norm)
+
 with open(summary_path, "a", encoding="utf-8") as out:
     for layer in ("direct_walstore", "adapter_rf1", "rf3_tcp"):
         for writers in (1, 4, 8):
@@ -207,11 +253,51 @@ with open(summary_path, "a", encoding="utf-8") as out:
         for row in rf3_rows
     )
     queue_saturation_rows = sum(row.get("peer_queue_saturated", 0) > 0 for row in rf3_rows)
+    adapter_rows = groups[("adapter_rf1", 4)]
+    for row in adapter_rows:
+        if row["adapter_request_ops"] != row["api_operations"]:
+            raise SystemExit(f"adapter request count mismatch: {row}")
+        if row["adapter_write_ops"] != row["api_operations"]:
+            raise SystemExit(f"adapter write count mismatch: {row}")
+        if row["adapter_request_bytes"] != row["logical_bytes"] or row["adapter_write_bytes"] != row["logical_bytes"]:
+            raise SystemExit(f"adapter byte count mismatch: {row}")
+        if row["adapter_storage_write_calls"] != row["api_operations"]:
+            raise SystemExit(f"adapter storage call count mismatch: {row}")
+        if row["adapter_storage_write_blocks"] != row["api_operations"]:
+            raise SystemExit(f"adapter storage block count mismatch: {row}")
+        row["storage_attributed_ns"] = (
+            row["primary_commit_lock_wait_ns"]
+            + row["primary_wal_encode_ns"]
+            + row["primary_wal_append_lock_wait_ns"]
+            + row["primary_wal_append_ns"]
+            + row["primary_dirty_map_ns"]
+        )
+        row["adapter_unattributed_ns"] = max(0, row["adapter_write_ns"] - row["storage_attributed_ns"])
+    attribution_fields = (
+        "adapter_write_ns",
+        "storage_attributed_ns",
+        "primary_commit_lock_wait_ns",
+        "primary_wal_encode_ns",
+        "primary_wal_append_ns",
+        "primary_dirty_map_ns",
+        "adapter_unattributed_ns",
+        "foreground_flusher_cycle_ns",
+    )
+    dominant = max(
+        ("storage_attributed", "adapter_unattributed"),
+        key=lambda name: median_per_op(adapter_rows, f"{name}_ns"),
+    )
     out.write(f"direct_walstore_writers_4_set1_max_min_ratio={direct_set_ranges[0]:.3f}\n")
     out.write(f"direct_walstore_writers_4_set2_max_min_ratio={direct_set_ranges[1]:.3f}\n")
     out.write(f"adapter_rf1_writers_4_set1_max_min_ratio={adapter_set_ranges[0]:.3f}\n")
     out.write(f"adapter_rf1_writers_4_set2_max_min_ratio={adapter_set_ranges[1]:.3f}\n")
     out.write(f"rf1_direct_adapter_four_writer_ratio={adapter_four / direct_four:.3f}\n")
+    for field in attribution_fields:
+        out.write(f"adapter_rf1_writers_4_{field}_per_op={median_per_op(adapter_rows, field):.3f}\n")
+        out.write(f"adapter_rf1_writers_4_{field}_foreground_correlation={correlation(adapter_rows, field):.3f}\n")
+    out.write(f"adapter_rf1_dominant_accounted_boundary={dominant}\n")
+    out.write("rf1_attribution_counter_reconciliation=true\n")
+    out.write("rf1_attribution_status=ok\n")
     out.write(f"rf1_local_stability_gate={'pass' if rf1_stable else 'hold'}\n")
     out.write(f"rf3_same_host_healthy_baseline={str(rf3_healthy).lower()}\n")
     out.write(f"rf3_queue_saturation_row_count={queue_saturation_rows}\n")

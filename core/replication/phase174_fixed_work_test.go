@@ -64,6 +64,26 @@ type phase174FixedWorkResult struct {
 	FinalSyncNanos          int64   `json:"final_sync_ns"`
 	CloseRecoverNanos       int64   `json:"close_recover_ns"`
 	PrimaryWALWrites        uint64  `json:"primary_wal_write_ops"`
+	PrimaryWALCopyNanos     uint64  `json:"primary_wal_copy_ns"`
+	PrimaryWALEncodeNanos   uint64  `json:"primary_wal_encode_ns"`
+	PrimaryWALChecksumNanos uint64  `json:"primary_wal_checksum_ns"`
+	PrimaryWALAppendNanos   uint64  `json:"primary_wal_append_ns"`
+	PrimaryAppendWaitNanos  uint64  `json:"primary_wal_append_lock_wait_ns"`
+	PrimaryCommitWaitNanos  uint64  `json:"primary_commit_lock_wait_ns"`
+	PrimaryDirtyMapNanos    uint64  `json:"primary_dirty_map_ns"`
+	AdapterRequestOps       uint64  `json:"adapter_request_ops,omitempty"`
+	AdapterRequestBytes     uint64  `json:"adapter_request_bytes,omitempty"`
+	AdapterWriteOps         uint64  `json:"adapter_write_ops,omitempty"`
+	AdapterWriteBytes       uint64  `json:"adapter_write_bytes,omitempty"`
+	AdapterWriteNanos       uint64  `json:"adapter_write_ns,omitempty"`
+	AdapterStorageCalls     uint64  `json:"adapter_storage_write_calls,omitempty"`
+	AdapterStorageBlocks    uint64  `json:"adapter_storage_write_blocks,omitempty"`
+	FlusherCycles           uint64  `json:"foreground_flusher_cycles"`
+	FlusherCycleNanos       uint64  `json:"foreground_flusher_cycle_ns"`
+	FlusherExtentWriteOps   uint64  `json:"foreground_flusher_extent_write_ops"`
+	FlusherExtentWriteNanos uint64  `json:"foreground_flusher_extent_write_ns"`
+	FlusherExtentSyncOps    uint64  `json:"foreground_flusher_extent_sync_ops"`
+	FlusherExtentSyncNanos  uint64  `json:"foreground_flusher_extent_sync_ns"`
 	PrimaryStableLSN        uint64  `json:"primary_stable_lsn"`
 	PrimaryHeadLSN          uint64  `json:"primary_head_lsn"`
 	ReplicationWrites       uint64  `json:"replication_write_ops,omitempty"`
@@ -299,12 +319,17 @@ func runPhase174FixedWork(t *testing.T, p *phase174Pipeline, set, run, writers i
 	}
 
 	writeBefore := p.primary.WriteInstrumentation()
+	flusherBefore := p.primary.FlusherInstrumentation()
+	adapterBefore := p.adapterProfile()
 	replicationBefore := p.replicationStats()
 	payloads := phase174Payloads(phase174APIOperations, set, run, 0x1741)
 	foreground, latencies, err := phase174RunWrites(p, writers, 0, payloads, true)
 	if err != nil {
 		t.Fatalf("measured writes: %v", err)
 	}
+	writeForeground := p.primary.WriteInstrumentation()
+	flusherForeground := p.primary.FlusherInstrumentation()
+	adapterForeground := p.adapterProfile()
 	syncStart := time.Now()
 	if err := p.sync(context.Background()); err != nil {
 		t.Fatalf("final sync: %v", err)
@@ -348,8 +373,28 @@ func runPhase174FixedWork(t *testing.T, p *phase174Pipeline, set, run, writers i
 		MiBPerSecond:    (float64(logicalBytes) / (1024 * 1024)) / foreground.Seconds(),
 		P50Nanos:        p50, P95Nanos: p95, P99Nanos: p99,
 		FinalSyncNanos: finalSync.Nanoseconds(), CloseRecoverNanos: closeRecover.Nanoseconds(),
-		PrimaryWALWrites: writeAfter.WALEncodeOps - writeBefore.WALEncodeOps,
-		PrimaryStableLSN: primaryR, PrimaryHeadLSN: primaryH,
+		PrimaryWALWrites:        writeAfter.WALEncodeOps - writeBefore.WALEncodeOps,
+		PrimaryWALCopyNanos:     writeForeground.WALCopyDurationNanos - writeBefore.WALCopyDurationNanos,
+		PrimaryWALEncodeNanos:   writeForeground.WALEncodeDurationNanos - writeBefore.WALEncodeDurationNanos,
+		PrimaryWALChecksumNanos: writeForeground.WALChecksumDurationNanos - writeBefore.WALChecksumDurationNanos,
+		PrimaryWALAppendNanos:   writeForeground.WALAppendDurationNanos - writeBefore.WALAppendDurationNanos,
+		PrimaryAppendWaitNanos:  writeForeground.WALAppendLockWaitNanos - writeBefore.WALAppendLockWaitNanos,
+		PrimaryCommitWaitNanos:  writeForeground.WriteCommitLockWaitNanos - writeBefore.WriteCommitLockWaitNanos,
+		PrimaryDirtyMapNanos:    writeForeground.DirtyMapUpdateDurationNanos - writeBefore.DirtyMapUpdateDurationNanos,
+		AdapterRequestOps:       adapterForeground.BackendWriteRequestOps - adapterBefore.BackendWriteRequestOps,
+		AdapterRequestBytes:     adapterForeground.BackendWriteRequestBytes - adapterBefore.BackendWriteRequestBytes,
+		AdapterWriteOps:         adapterForeground.BackendWriteOps - adapterBefore.BackendWriteOps,
+		AdapterWriteBytes:       adapterForeground.BackendWriteBytes - adapterBefore.BackendWriteBytes,
+		AdapterWriteNanos:       adapterForeground.BackendWriteDurationNanos - adapterBefore.BackendWriteDurationNanos,
+		AdapterStorageCalls:     adapterForeground.BackendStorageWriteCalls - adapterBefore.BackendStorageWriteCalls,
+		AdapterStorageBlocks:    adapterForeground.BackendStorageWriteBlocks - adapterBefore.BackendStorageWriteBlocks,
+		FlusherCycles:           flusherForeground.CyclesStarted - flusherBefore.CyclesStarted,
+		FlusherCycleNanos:       flusherForeground.CycleDurationNanos - flusherBefore.CycleDurationNanos,
+		FlusherExtentWriteOps:   flusherForeground.ExtentWriteOps - flusherBefore.ExtentWriteOps,
+		FlusherExtentWriteNanos: flusherForeground.ExtentWriteDurationNanos - flusherBefore.ExtentWriteDurationNanos,
+		FlusherExtentSyncOps:    flusherForeground.ExtentSyncOps - flusherBefore.ExtentSyncOps,
+		FlusherExtentSyncNanos:  flusherForeground.ExtentSyncDurationNanos - flusherBefore.ExtentSyncDurationNanos,
+		PrimaryStableLSN:        primaryR, PrimaryHeadLSN: primaryH,
 		ReplicaCount: len(p.replicaPaths), ReplicaDurableCount: durableReplicas,
 		ReplicaFrontiersEqual: replicasEqual,
 		FlusherPhaseReset:     flusherPhaseReset,
@@ -422,6 +467,13 @@ func (p *phase174Pipeline) replicationStats() VolumeStats {
 		return VolumeStats{}
 	}
 	return p.replication.Stats()
+}
+
+func (p *phase174Pipeline) adapterProfile() durable.WriteProfileStatus {
+	if p.backend == nil {
+		return durable.WriteProfileStatus{}
+	}
+	return p.backend.WriteProfile()
 }
 
 type phase174FlusherResetter interface {
