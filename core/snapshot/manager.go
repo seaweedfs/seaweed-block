@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -170,23 +171,79 @@ func (m *Manager) List(sourceVolumeID string) []Record {
 }
 
 func (m *Manager) ReadBlocks(ctx context.Context, snapshotID string, sink storage.SnapshotBlockSink) (storage.SnapshotCut, error) {
+	rec, release, err := m.beginRead(snapshotID)
+	if err != nil {
+		return storage.SnapshotCut{}, err
+	}
+	defer release()
+	return readArchive(ctx, m.archivePath(snapshotID), rec.ArchiveSHA256, sink)
+}
+
+// StreamArchive writes one immutable archive while holding its catalog read
+// lease. The bytes and digest are revalidated on every transfer so a damaged
+// archive is never reported as a successful restore source.
+func (m *Manager) StreamArchive(ctx context.Context, snapshotID string, w io.Writer) (Record, error) {
+	if w == nil {
+		return Record{}, fmt.Errorf("%w: archive writer is required", ErrInvalidRequest)
+	}
+	rec, release, err := m.beginRead(snapshotID)
+	if err != nil {
+		return Record{}, err
+	}
+	defer release()
+
+	f, err := os.Open(m.archivePath(snapshotID))
+	if err != nil {
+		return Record{}, fmt.Errorf("snapshot: open archive: %w", err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return Record{}, fmt.Errorf("snapshot: stat archive: %w", err)
+	}
+	if info.Size() != rec.ArchiveBytes {
+		return Record{}, fmt.Errorf("%w: archive size got %d want %d", ErrArchiveCorrupt, info.Size(), rec.ArchiveBytes)
+	}
+	h := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(w, h), contextReader{ctx: ctx, r: f}); err != nil {
+		return Record{}, fmt.Errorf("snapshot: stream archive: %w", err)
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); got != rec.ArchiveSHA256 {
+		return Record{}, fmt.Errorf("%w: digest got %s want %s", ErrArchiveCorrupt, got, rec.ArchiveSHA256)
+	}
+	return rec, nil
+}
+
+func (m *Manager) beginRead(snapshotID string) (Record, func(), error) {
 	m.mu.Lock()
 	rec, ok := m.byID[snapshotID]
 	if !ok {
 		m.mu.Unlock()
-		return storage.SnapshotCut{}, ErrNotFound
+		return Record{}, nil, ErrNotFound
 	}
 	m.activeReaders[snapshotID]++
 	m.mu.Unlock()
-	defer func() {
+	release := func() {
 		m.mu.Lock()
 		m.activeReaders[snapshotID]--
 		if m.activeReaders[snapshotID] == 0 {
 			delete(m.activeReaders, snapshotID)
 		}
 		m.mu.Unlock()
-	}()
-	return readArchive(ctx, m.archivePath(snapshotID), rec.ArchiveSHA256, sink)
+	}
+	return rec, release, nil
+}
+
+type contextReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.r.Read(p)
 }
 
 func (m *Manager) Delete(snapshotID string) error {
@@ -342,7 +399,14 @@ func validateCreateRequest(req CreateRequest) error {
 }
 
 func validateRecord(rec Record) error {
-	if rec.SnapshotID == "" || rec.Name == "" || rec.SourceVolumeID == "" || rec.State != StateReady || rec.BlockSize <= 0 || rec.NumBlocks == 0 || rec.SizeBytes != uint64(rec.NumBlocks)*uint64(rec.BlockSize) || rec.DataBytes != rec.RecordCount*uint64(rec.BlockSize) || len(rec.ArchiveSHA256) != sha256.Size*2 {
+	if rec.SnapshotID == "" || rec.Name == "" || rec.SourceVolumeID == "" || rec.State != StateReady || rec.BlockSize <= 0 || rec.BlockSize > maxArchiveBlockSize || rec.NumBlocks == 0 || rec.RecordCount > uint64(rec.NumBlocks) || rec.SizeBytes != uint64(rec.NumBlocks)*uint64(rec.BlockSize) || rec.DataBytes != rec.RecordCount*uint64(rec.BlockSize) || rec.ArchiveBytes <= 0 || len(rec.ArchiveSHA256) != sha256.Size*2 {
+		return fmt.Errorf("invalid ready snapshot record")
+	}
+	if _, err := hex.DecodeString(rec.ArchiveSHA256); err != nil {
+		return fmt.Errorf("invalid ready snapshot record")
+	}
+	wantArchiveBytes, err := archiveSize(storage.SnapshotCut{BlockSize: rec.BlockSize, NumBlocks: rec.NumBlocks, BlockCount: rec.RecordCount, DataBytes: rec.DataBytes})
+	if err != nil || wantArchiveBytes != rec.ArchiveBytes {
 		return fmt.Errorf("invalid ready snapshot record")
 	}
 	return nil

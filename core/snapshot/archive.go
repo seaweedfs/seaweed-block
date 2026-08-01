@@ -14,10 +14,11 @@ import (
 )
 
 const (
-	archiveMagic      = "SWBSNP01"
-	archiveVersion    = uint32(1)
-	archiveHeaderSize = 64
-	recordHeaderSize  = 8
+	archiveMagic        = "SWBSNP01"
+	archiveVersion      = uint32(1)
+	archiveHeaderSize   = 64
+	recordHeaderSize    = 8
+	maxArchiveBlockSize = 16 << 20
 )
 
 func writeArchive(ctx context.Context, path string, source storage.SnapshotSource) (storage.SnapshotCut, int64, string, error) {
@@ -40,8 +41,8 @@ func writeArchive(ctx context.Context, path string, source storage.SnapshotSourc
 	havePrevious := false
 	observedBlockSize := 0
 	cut, err := source.CaptureSnapshot(ctx, func(lba uint32, data []byte) error {
-		if len(data) == 0 {
-			return fmt.Errorf("snapshot: source emitted empty block at LBA %d", lba)
+		if len(data) == 0 || len(data) > maxArchiveBlockSize {
+			return fmt.Errorf("snapshot: source emitted invalid block size %d at LBA %d", len(data), lba)
 		}
 		if observedBlockSize == 0 {
 			observedBlockSize = len(data)
@@ -69,7 +70,7 @@ func writeArchive(ctx context.Context, path string, source storage.SnapshotSourc
 	if err != nil {
 		return storage.SnapshotCut{}, 0, "", fmt.Errorf("snapshot: capture source: %w", err)
 	}
-	if cut.NumBlocks == 0 || cut.BlockSize <= 0 {
+	if cut.NumBlocks == 0 || cut.BlockSize <= 0 || cut.BlockSize > maxArchiveBlockSize {
 		return storage.SnapshotCut{}, 0, "", fmt.Errorf("snapshot: invalid source geometry blocks=%d block_size=%d", cut.NumBlocks, cut.BlockSize)
 	}
 	if observedBlockSize != 0 && observedBlockSize != cut.BlockSize {
@@ -128,21 +129,66 @@ func readArchive(ctx context.Context, path, expectedDigest string, sink storage.
 		return storage.SnapshotCut{}, fmt.Errorf("snapshot: open archive: %w", err)
 	}
 	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return storage.SnapshotCut{}, fmt.Errorf("snapshot: stat archive: %w", err)
+	}
+	cut, err := readArchiveRecords(ctx, f, sink)
+	if err != nil {
+		return storage.SnapshotCut{}, err
+	}
+	expectedSize, err := archiveSize(cut)
+	if err != nil || expectedSize != info.Size() {
+		return storage.SnapshotCut{}, fmt.Errorf("%w: size got %d want %d", ErrArchiveCorrupt, info.Size(), expectedSize)
+	}
+	return cut, nil
+}
+
+// ApplyArchiveStream verifies one exact immutable archive while applying its
+// records to an unpublished target. Callers must keep the target non-ready
+// until this method and the target durability fence both succeed.
+func ApplyArchiveStream(ctx context.Context, r io.Reader, rec Record, sink storage.SnapshotBlockSink) (storage.SnapshotCut, error) {
+	if r == nil || sink == nil || rec.ArchiveBytes <= 0 || validateRecord(rec) != nil {
+		return storage.SnapshotCut{}, fmt.Errorf("%w: invalid streamed archive contract", ErrInvalidRequest)
+	}
+	h := sha256.New()
+	tee := io.TeeReader(io.LimitReader(r, rec.ArchiveBytes+1), h)
+	cut, err := readArchiveRecordsExpected(ctx, tee, sink, &rec)
+	if err != nil {
+		return storage.SnapshotCut{}, err
+	}
+	var extra [1]byte
+	if n, err := tee.Read(extra[:]); n != 0 || err != io.EOF {
+		return storage.SnapshotCut{}, fmt.Errorf("%w: streamed archive has trailing or unread bytes", ErrArchiveCorrupt)
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); got != rec.ArchiveSHA256 {
+		return storage.SnapshotCut{}, fmt.Errorf("%w: digest got %s want %s", ErrArchiveCorrupt, got, rec.ArchiveSHA256)
+	}
+	expectedSize, err := archiveSize(cut)
+	if err != nil || expectedSize != rec.ArchiveBytes {
+		return storage.SnapshotCut{}, fmt.Errorf("%w: size got %d want %d", ErrArchiveCorrupt, rec.ArchiveBytes, expectedSize)
+	}
+	if cut.Frontier != rec.Frontier || cut.NumBlocks != rec.NumBlocks || cut.BlockSize != rec.BlockSize || cut.BlockCount != rec.RecordCount || cut.DataBytes != rec.DataBytes || rec.SizeBytes != uint64(cut.NumBlocks)*uint64(cut.BlockSize) {
+		return storage.SnapshotCut{}, fmt.Errorf("%w: streamed archive does not match catalog", ErrArchiveCorrupt)
+	}
+	return cut, nil
+}
+
+func readArchiveRecords(ctx context.Context, r io.Reader, sink storage.SnapshotBlockSink) (storage.SnapshotCut, error) {
+	return readArchiveRecordsExpected(ctx, r, sink, nil)
+}
+
+func readArchiveRecordsExpected(ctx context.Context, r io.Reader, sink storage.SnapshotBlockSink, expected *Record) (storage.SnapshotCut, error) {
 	header := make([]byte, archiveHeaderSize)
-	if _, err := io.ReadFull(f, header); err != nil {
+	if _, err := io.ReadFull(r, header); err != nil {
 		return storage.SnapshotCut{}, fmt.Errorf("%w: read header: %v", ErrArchiveCorrupt, err)
 	}
 	cut, err := decodeArchiveHeader(header)
 	if err != nil {
 		return storage.SnapshotCut{}, err
 	}
-	info, err := f.Stat()
-	if err != nil {
-		return storage.SnapshotCut{}, fmt.Errorf("snapshot: stat archive: %w", err)
-	}
-	expectedSize, err := archiveSize(cut)
-	if err != nil || expectedSize != info.Size() {
-		return storage.SnapshotCut{}, fmt.Errorf("%w: size got %d want %d", ErrArchiveCorrupt, info.Size(), expectedSize)
+	if expected != nil && (cut.Frontier != expected.Frontier || cut.NumBlocks != expected.NumBlocks || cut.BlockSize != expected.BlockSize || cut.BlockCount != expected.RecordCount || cut.DataBytes != expected.DataBytes) {
+		return storage.SnapshotCut{}, fmt.Errorf("%w: streamed archive header does not match catalog", ErrArchiveCorrupt)
 	}
 
 	var previousLBA uint32
@@ -151,7 +197,7 @@ func readArchive(ctx context.Context, path, expectedDigest string, sink storage.
 			return storage.SnapshotCut{}, err
 		}
 		var recordHeader [recordHeaderSize]byte
-		if _, err := io.ReadFull(f, recordHeader[:]); err != nil {
+		if _, err := io.ReadFull(r, recordHeader[:]); err != nil {
 			return storage.SnapshotCut{}, fmt.Errorf("%w: read record %d header: %v", ErrArchiveCorrupt, i, err)
 		}
 		lba := binary.LittleEndian.Uint32(recordHeader[0:4])
@@ -160,7 +206,7 @@ func readArchive(ctx context.Context, path, expectedDigest string, sink storage.
 			return storage.SnapshotCut{}, fmt.Errorf("%w: invalid LBA order at record %d", ErrArchiveCorrupt, i)
 		}
 		data := make([]byte, cut.BlockSize)
-		if _, err := io.ReadFull(f, data); err != nil {
+		if _, err := io.ReadFull(r, data); err != nil {
 			return storage.SnapshotCut{}, fmt.Errorf("%w: read record %d data: %v", ErrArchiveCorrupt, i, err)
 		}
 		if got := crc32.ChecksumIEEE(data); got != wantCRC {
@@ -190,7 +236,7 @@ func decodeArchiveHeader(header []byte) (storage.SnapshotCut, error) {
 		BlockCount: binary.LittleEndian.Uint64(header[32:40]),
 		DataBytes:  binary.LittleEndian.Uint64(header[40:48]),
 	}
-	if cut.BlockSize <= 0 || cut.NumBlocks == 0 || cut.BlockCount > uint64(cut.NumBlocks) || cut.DataBytes != cut.BlockCount*uint64(cut.BlockSize) {
+	if cut.BlockSize <= 0 || cut.BlockSize > maxArchiveBlockSize || cut.NumBlocks == 0 || cut.BlockCount > uint64(cut.NumBlocks) || cut.DataBytes != cut.BlockCount*uint64(cut.BlockSize) {
 		return storage.SnapshotCut{}, fmt.Errorf("%w: invalid archive geometry", ErrArchiveCorrupt)
 	}
 	return cut, nil

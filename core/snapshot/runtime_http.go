@@ -221,6 +221,10 @@ func (c *HTTPSCaptureRuntime) CaptureSnapshot(ctx context.Context, req RuntimeCa
 }
 
 func runtimeCaptureURL(endpoint string) (string, error) {
+	return runtimeURL(endpoint, runtimeCapturePath)
+}
+
+func runtimeURL(endpoint, path string) (string, error) {
 	u, err := url.Parse(endpoint)
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return "", fmt.Errorf("snapshot: invalid HTTPS runtime endpoint")
@@ -228,7 +232,7 @@ func runtimeCaptureURL(endpoint string) (string, error) {
 	if u.Path != "" && u.Path != "/" {
 		return "", fmt.Errorf("snapshot: runtime endpoint must not contain a path")
 	}
-	u.Path = runtimeCapturePath
+	u.Path = path
 	return u.String(), nil
 }
 
@@ -369,7 +373,7 @@ func StartRuntimeServer(cfg RuntimeServerConfig) (*RuntimeServer, error) {
 	})
 	srv := &RuntimeServer{
 		ln:       tlsLn,
-		server:   &http.Server{Handler: cfg.Handler, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 15 * time.Second, IdleTimeout: 30 * time.Second},
+		server:   &http.Server{Handler: cfg.Handler, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Minute, IdleTimeout: 30 * time.Second},
 		endpoint: strings.TrimSuffix(endpointURL, runtimeCapturePath),
 	}
 	go func() { _ = srv.server.Serve(tlsLn) }()

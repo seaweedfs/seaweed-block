@@ -8,13 +8,16 @@ import (
 )
 
 var (
-	ErrNotFound         = errors.New("snapshot: not found")
-	ErrNameConflict     = errors.New("snapshot: name already belongs to another source")
-	ErrInUse            = errors.New("snapshot: in use")
-	ErrArchiveCorrupt   = errors.New("snapshot: archive corrupt")
-	ErrInvalidRequest   = errors.New("snapshot: invalid request")
-	ErrSourceNotReady   = errors.New("snapshot: source not ready")
-	ErrAuthorityChanged = errors.New("snapshot: source authority changed")
+	ErrNotFound          = errors.New("snapshot: not found")
+	ErrNameConflict      = errors.New("snapshot: name already belongs to another source")
+	ErrInUse             = errors.New("snapshot: in use")
+	ErrArchiveCorrupt    = errors.New("snapshot: archive corrupt")
+	ErrInvalidRequest    = errors.New("snapshot: invalid request")
+	ErrSourceNotReady    = errors.New("snapshot: source not ready")
+	ErrAuthorityChanged  = errors.New("snapshot: source authority changed")
+	ErrRestoreConflict   = errors.New("snapshot: restore target conflict")
+	ErrRestoreNotApplied = errors.New("snapshot: restore target not applied")
+	ErrRestoreUnsafe     = errors.New("snapshot: restore target state is unsafe")
 )
 
 const StateReady = "ready"
