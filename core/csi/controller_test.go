@@ -510,6 +510,32 @@ func TestPhase175ControllerRestoreStaysFailClosedUntilRuntimeReady(t *testing.T)
 	}
 }
 
+func TestPhase175ControllerCreateVolumePreservesLifecycleStatus(t *testing.T) {
+	for _, code := range []codes.Code{codes.NotFound, codes.InvalidArgument, codes.FailedPrecondition} {
+		t.Run(code.String(), func(t *testing.T) {
+			provisioner := &stubProvisioner{err: status.Error(code, "restore intent rejected")}
+			s := NewControllerServerWithProvisioner(&stubLookup{}, provisioner)
+			_, err := s.CreateVolume(context.Background(), &csipb.CreateVolumeRequest{
+				Name:               "restored-vol",
+				CapacityRange:      &csipb.CapacityRange{RequiredBytes: 1 << 20},
+				VolumeCapabilities: []*csipb.VolumeCapability{testVolumeCapability()},
+			})
+			if status.Code(err) != code {
+				t.Fatalf("CreateVolume error=%v", err)
+			}
+		})
+	}
+	provisioner := &stubProvisioner{err: errors.New("lifecycle backend unavailable")}
+	s := NewControllerServerWithProvisioner(&stubLookup{}, provisioner)
+	_, err := s.CreateVolume(context.Background(), &csipb.CreateVolumeRequest{
+		Name: "restored-vol", CapacityRange: &csipb.CapacityRange{RequiredBytes: 1 << 20},
+		VolumeCapabilities: []*csipb.VolumeCapability{testVolumeCapability()},
+	})
+	if status.Code(err) != codes.Internal {
+		t.Fatalf("plain CreateVolume error=%v", err)
+	}
+}
+
 func TestPhase175ControllerRestoreSelectsSnapshotSizeWithinRequestedRange(t *testing.T) {
 	snapshotter := &stubSnapshotter{snapshots: []SnapshotSpec{{
 		SnapshotID: "snap-source", SourceVolumeID: "source-vol", CreatedAt: time.Now().UTC(), State: SnapshotStateReady, SizeBytes: 1 << 20,

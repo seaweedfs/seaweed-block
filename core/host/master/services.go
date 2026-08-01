@@ -58,6 +58,21 @@ func (s *services) CreateVolume(ctx context.Context, req *control.CreateVolumeRe
 		return nil, status.Error(codes.FailedPrecondition, "lifecycle store is not configured")
 	}
 	spec := lifecycleSpecFromWire(req)
+	if spec.SourceSnapshotID != "" {
+		if _, exists := stores.Volumes.GetVolume(spec.VolumeID); !exists {
+			coordinator := s.host.snapshotCoordinator
+			if coordinator == nil {
+				return nil, status.Error(codes.FailedPrecondition, "snapshot restore is not configured")
+			}
+			record, ok := coordinator.Get(spec.SourceSnapshotID)
+			if !ok {
+				return nil, status.Error(codes.NotFound, "source snapshot not found")
+			}
+			if record.SizeBytes != spec.SizeBytes {
+				return nil, status.Error(codes.InvalidArgument, "source snapshot size does not match target volume")
+			}
+		}
+	}
 	s.host.log.Printf("blockmaster: CreateVolume volume=%q protocol=%q replication_factor=%d pvc=%q namespace=%q", spec.VolumeID, spec.Protocol, spec.ReplicationFactor, spec.PVCName, spec.PVCNamespace)
 	rec, err := stores.Volumes.CreateVolume(spec)
 	if err != nil {

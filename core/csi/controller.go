@@ -97,6 +97,9 @@ func (s *ControllerServer) CreateVolume(ctx context.Context, req *csipb.CreateVo
 		if errors.Is(err, ErrVolumeConflict) {
 			return nil, status.Errorf(codes.AlreadyExists, "volume %q already exists with different spec", spec.VolumeID)
 		}
+		if code := status.Code(err); code != codes.Unknown {
+			return nil, status.Errorf(code, "create volume intent: %v", err)
+		}
 		return nil, status.Errorf(codes.Internal, "create volume intent: %v", err)
 	}
 	if !createdVolumeIdentityMatches(spec, created) {

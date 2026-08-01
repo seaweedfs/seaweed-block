@@ -8,6 +8,7 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"github.com/seaweedfs/seaweed-block/core/snapshot"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -16,14 +17,15 @@ func TestG15c_LifecycleService_CreateVolumePersistsDesiredIntent(t *testing.T) {
 	h := newTestMaster(t, t.TempDir())
 	defer closeTestMaster(t, h)
 	svc := newServices(h)
+	source := createLifecycleSnapshot(t, h, "source-a")
 
 	resp, err := svc.CreateVolume(context.Background(), &control.CreateVolumeRequest{
 		VolumeId:          "pvc-a",
-		SizeBytes:         1 << 30,
+		SizeBytes:         source.SizeBytes,
 		ReplicationFactor: 2,
 		Protocol:          "nvme",
 		FrontendTransport: "rdma",
-		SourceSnapshotId:  "snap-abc",
+		SourceSnapshotId:  source.SnapshotID,
 		PvcName:           "demo-pvc",
 		PvcNamespace:      "demo-ns",
 		PvcUid:            "uid-123",
@@ -32,7 +34,7 @@ func TestG15c_LifecycleService_CreateVolumePersistsDesiredIntent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateVolume: %v", err)
 	}
-	if resp.GetVolumeId() != "pvc-a" || resp.GetSizeBytes() != 1<<30 || resp.GetReplicationFactor() != 2 {
+	if resp.GetVolumeId() != "pvc-a" || resp.GetSizeBytes() != source.SizeBytes || resp.GetReplicationFactor() != 2 {
 		t.Fatalf("response=%+v", resp)
 	}
 	if resp.GetPvcName() != "demo-pvc" || resp.GetPvcNamespace() != "demo-ns" || resp.GetPvcUid() != "uid-123" || resp.GetPvName() != "pvc-a" {
@@ -44,14 +46,14 @@ func TestG15c_LifecycleService_CreateVolumePersistsDesiredIntent(t *testing.T) {
 	if resp.GetFrontendTransport() != "rdma" {
 		t.Fatalf("response transport=%q want rdma", resp.GetFrontendTransport())
 	}
-	if resp.GetSourceSnapshotId() != "snap-abc" {
+	if resp.GetSourceSnapshotId() != source.SnapshotID {
 		t.Fatalf("response source snapshot=%q", resp.GetSourceSnapshotId())
 	}
 	rec, ok := h.Lifecycle().Volumes.GetVolume("pvc-a")
 	if !ok {
 		t.Fatal("desired volume not persisted")
 	}
-	if rec.Spec.VolumeID != "pvc-a" || rec.Spec.SizeBytes != 1<<30 || rec.Spec.ReplicationFactor != 2 {
+	if rec.Spec.VolumeID != "pvc-a" || rec.Spec.SizeBytes != source.SizeBytes || rec.Spec.ReplicationFactor != 2 {
 		t.Fatalf("record=%+v", rec)
 	}
 	if rec.Spec.Protocol != "nvme" {
@@ -60,7 +62,7 @@ func TestG15c_LifecycleService_CreateVolumePersistsDesiredIntent(t *testing.T) {
 	if rec.Spec.FrontendTransport != "rdma" {
 		t.Fatalf("record transport=%q want rdma", rec.Spec.FrontendTransport)
 	}
-	if rec.Spec.SourceSnapshotID != "snap-abc" {
+	if rec.Spec.SourceSnapshotID != source.SnapshotID {
 		t.Fatalf("record source snapshot=%q", rec.Spec.SourceSnapshotID)
 	}
 	if rec.Spec.PVCName != "demo-pvc" || rec.Spec.PVCNamespace != "demo-ns" || rec.Spec.PVCUID != "uid-123" || rec.Spec.PVName != "pvc-a" {
@@ -158,9 +160,10 @@ func TestPhase175LifecycleServiceHoldsPendingRestoreBeforePlacementDelete(t *tes
 	h := newTestMaster(t, t.TempDir())
 	defer closeTestMaster(t, h)
 	svc := newServices(h)
+	source := createLifecycleSnapshot(t, h, "source-hold")
 	const volumeID = "restored-a"
 	if _, err := svc.CreateVolume(context.Background(), &control.CreateVolumeRequest{
-		VolumeId: volumeID, SizeBytes: 1 << 20, ReplicationFactor: 1, SourceSnapshotId: "snap-abc",
+		VolumeId: volumeID, SizeBytes: source.SizeBytes, ReplicationFactor: 1, SourceSnapshotId: source.SnapshotID,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +183,7 @@ func TestPhase175LifecycleServiceHoldsPendingRestoreBeforePlacementDelete(t *tes
 	if _, ok := h.Lifecycle().Placements.GetPlacement(volumeID); !ok {
 		t.Fatal("pending restore placement was deleted")
 	}
-	if _, err := h.Lifecycle().Volumes.MarkRestoreComplete(volumeID, "snap-abc"); err != nil {
+	if _, err := h.Lifecycle().Volumes.MarkRestoreComplete(volumeID, source.SnapshotID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := svc.DeleteVolume(context.Background(), &control.DeleteVolumeRequest{VolumeId: volumeID}); err != nil {
@@ -188,10 +191,45 @@ func TestPhase175LifecycleServiceHoldsPendingRestoreBeforePlacementDelete(t *tes
 	}
 }
 
+func TestPhase175RestoreIntentRequiresCurrentSnapshotButExistingRetryIsIndependent(t *testing.T) {
+	h := newTestMaster(t, t.TempDir())
+	defer closeTestMaster(t, h)
+	svc := newServices(h)
+	request := &control.CreateVolumeRequest{
+		VolumeId: "restored-a", SizeBytes: 8 * 4096, ReplicationFactor: 1, SourceSnapshotId: "missing",
+	}
+	if _, err := svc.CreateVolume(context.Background(), request); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("unconfigured snapshot restore error=%v", err)
+	}
+	source := createLifecycleSnapshot(t, h, "source-validation")
+	if _, err := svc.CreateVolume(context.Background(), request); status.Code(err) != codes.NotFound {
+		t.Fatalf("missing source snapshot error=%v", err)
+	}
+	request.SourceSnapshotId = source.SnapshotID
+	request.SizeBytes = source.SizeBytes + 4096
+	if _, err := svc.CreateVolume(context.Background(), request); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("source snapshot size mismatch error=%v", err)
+	}
+	request.SizeBytes = source.SizeBytes
+	if _, err := svc.CreateVolume(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.Lifecycle().Volumes.MarkRestoreComplete(request.VolumeId, source.SnapshotID); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.snapshotCoordinator.Delete(source.SnapshotID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.CreateVolume(context.Background(), request); err != nil {
+		t.Fatalf("idempotent completed restore retry depends on deleted snapshot: %v", err)
+	}
+}
+
 func TestPhase175ConcurrentRestoreCreateDeleteNeverReturnsHoldAfterPlacementLoss(t *testing.T) {
 	h := newTestMaster(t, t.TempDir())
 	defer closeTestMaster(t, h)
 	svc := newServices(h)
+	source := createLifecycleSnapshot(t, h, "source-race")
 	for i := 0; i < 32; i++ {
 		volumeID := fmt.Sprintf("restored-%d", i)
 		if _, err := h.Lifecycle().Placements.ApplyPlan(lifecycle.PlacementPlan{
@@ -207,7 +245,7 @@ func TestPhase175ConcurrentRestoreCreateDeleteNeverReturnsHoldAfterPlacementLoss
 		go func() {
 			<-start
 			_, err := svc.CreateVolume(context.Background(), &control.CreateVolumeRequest{
-				VolumeId: volumeID, SizeBytes: 1 << 20, ReplicationFactor: 1, SourceSnapshotId: "snap-abc",
+				VolumeId: volumeID, SizeBytes: source.SizeBytes, ReplicationFactor: 1, SourceSnapshotId: source.SnapshotID,
 			})
 			createDone <- err
 		}()
@@ -239,6 +277,27 @@ func TestPhase175ConcurrentRestoreCreateDeleteNeverReturnsHoldAfterPlacementLoss
 			}
 		}
 	}
+}
+
+func createLifecycleSnapshot(t *testing.T, h *Host, name string) snapshot.Record {
+	t.Helper()
+	manager, err := snapshot.OpenManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority := snapshot.SourceAuthority{
+		VolumeID: "source-volume", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1, RuntimeEndpoint: "https://snapshot.example:9443",
+	}
+	coordinator, err := snapshot.NewCoordinator(manager, fixedSnapshotResolver{authority: authority}, fixedSnapshotRuntime{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.snapshotCoordinator = coordinator
+	record, err := coordinator.Create(context.Background(), snapshot.CreateRequest{Name: name, SourceVolumeID: authority.VolumeID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return record
 }
 
 func TestG15c_LifecycleWireMessagesAreNotAuthorityShaped(t *testing.T) {

@@ -87,6 +87,93 @@ func TestPhase175SnapshotServiceLifecycle(t *testing.T) {
 	}
 }
 
+func TestPhase175SnapshotDeleteHoldsDurablePendingRestoreReference(t *testing.T) {
+	h := newTestMaster(t, t.TempDir())
+	defer closeTestMaster(t, h)
+	manager, err := snapshot.OpenManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority := snapshot.SourceAuthority{
+		VolumeID: "vol-source", ReplicaID: "r1", Epoch: 4, EndpointVersion: 2, RuntimeEndpoint: "https://snapshot.example:9443",
+	}
+	h.snapshotCoordinator, err = snapshot.NewCoordinator(manager, fixedSnapshotResolver{authority: authority}, fixedSnapshotRuntime{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.snapshotAPIToken = "api-token"
+	h.snapshotCaptureTimeout = time.Minute
+	svc := newServices(h)
+	ctx := snapshotIncomingContext("api-token")
+	created, err := svc.CreateSnapshot(ctx, &control.CreateSnapshotRequest{Name: "snap-held", SourceVolumeId: authority.VolumeID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.CreateVolume(context.Background(), &control.CreateVolumeRequest{
+		VolumeId: "restore-target", SizeBytes: created.GetSizeBytes(), ReplicationFactor: 1, SourceSnapshotId: created.GetSnapshotId(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.DeleteSnapshot(ctx, &control.DeleteSnapshotRequest{SnapshotId: created.GetSnapshotId()}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("delete referenced snapshot error=%v", err)
+	}
+	if _, ok := manager.Get(created.GetSnapshotId()); !ok {
+		t.Fatal("pending restore reference did not preserve snapshot")
+	}
+	if _, err := h.Lifecycle().Volumes.MarkRestoreComplete("restore-target", created.GetSnapshotId()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.DeleteSnapshot(ctx, &control.DeleteSnapshotRequest{SnapshotId: created.GetSnapshotId()}); err != nil {
+		t.Fatalf("delete snapshot after restore completion: %v", err)
+	}
+}
+
+func TestPhase175SnapshotDeleteAndRestoreIntentCreationAreAtomic(t *testing.T) {
+	for i := 0; i < 32; i++ {
+		h := newTestMaster(t, t.TempDir())
+		source := createLifecycleSnapshot(t, h, "snap-race")
+		h.snapshotAPIToken = "api-token"
+		svc := newServices(h)
+		start := make(chan struct{})
+		createDone := make(chan error, 1)
+		deleteDone := make(chan error, 1)
+		go func() {
+			<-start
+			_, err := svc.CreateVolume(context.Background(), &control.CreateVolumeRequest{
+				VolumeId: "restore-target", SizeBytes: source.SizeBytes, ReplicationFactor: 1, SourceSnapshotId: source.SnapshotID,
+			})
+			createDone <- err
+		}()
+		go func() {
+			<-start
+			_, err := svc.DeleteSnapshot(snapshotIncomingContext("api-token"), &control.DeleteSnapshotRequest{SnapshotId: source.SnapshotID})
+			deleteDone <- err
+		}()
+		close(start)
+		createErr := <-createDone
+		deleteErr := <-deleteDone
+		switch {
+		case createErr == nil:
+			if status.Code(deleteErr) != codes.FailedPrecondition {
+				t.Fatalf("iteration %d create succeeded with delete error=%v", i, deleteErr)
+			}
+			if _, ok := h.snapshotCoordinator.Get(source.SnapshotID); !ok {
+				t.Fatalf("iteration %d created restore intent without snapshot", i)
+			}
+		case deleteErr == nil:
+			if status.Code(createErr) != codes.NotFound {
+				t.Fatalf("iteration %d delete succeeded with create error=%v", i, createErr)
+			}
+			if _, ok := h.Lifecycle().Volumes.GetVolume("restore-target"); ok {
+				t.Fatalf("iteration %d deleted snapshot left restore intent", i)
+			}
+		default:
+			t.Fatalf("iteration %d create=%v delete=%v", i, createErr, deleteErr)
+		}
+		closeTestMaster(t, h)
+	}
+}
+
 func TestPhase175SnapshotServiceFailsClosedWhenDisabledOrInvalid(t *testing.T) {
 	svc := newServices(&Host{})
 	if _, err := svc.ListSnapshots(context.Background(), &control.ListSnapshotsRequest{}); status.Code(err) != codes.FailedPrecondition {

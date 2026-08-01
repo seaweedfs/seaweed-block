@@ -65,8 +65,10 @@ Progress through the local data layer, distributed runtime, and CSI contract:
   alone do not satisfy these gates. A target in durable `restore_pending`
   state is now held before either placement or volume intent deletion, across
   blockmaster restart, and CSI preserves the `FailedPrecondition` result. This
-  is only the hold half: an explicit abort/discard path for a permanently
-  failed restore is still required before target-delete can close.
+  pending state also holds its source snapshot catalog entry against deletion;
+  the reference is released only after durable restore completion. This is
+  only the hold half: an explicit abort/discard path for a permanently failed
+  restore is still required before target-delete can close.
 - D8 full file-target backup data layer landed at `c5be432`: export only a
   ready immutable snapshot, durable archive/manifest publication, portable
   offline import, canonical identity/path containment, catalog restart,

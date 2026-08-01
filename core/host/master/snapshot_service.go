@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"github.com/seaweedfs/seaweed-block/core/snapshot"
 	"google.golang.org/grpc/codes"
@@ -208,10 +209,28 @@ func (s *services) DeleteSnapshot(ctx context.Context, req *control.DeleteSnapsh
 	if req.GetSnapshotId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "snapshot_id is required")
 	}
+	s.host.lifecycleProductMu.Lock()
+	defer s.host.lifecycleProductMu.Unlock()
+	if s.host.snapshotHasPendingRestore(req.GetSnapshotId()) {
+		return nil, status.Error(codes.FailedPrecondition, "snapshot is referenced by a pending restore")
+	}
 	if err := coordinator.Delete(req.GetSnapshotId()); err != nil {
 		return nil, snapshotRPCError("delete snapshot", err)
 	}
 	return &control.DeleteSnapshotResponse{}, nil
+}
+
+func (h *Host) snapshotHasPendingRestore(snapshotID string) bool {
+	stores := h.Lifecycle()
+	if stores == nil || stores.Volumes == nil {
+		return false
+	}
+	for _, volume := range stores.Volumes.ListVolumes() {
+		if volume.Spec.SourceSnapshotID == snapshotID && volume.RestoreState == lifecycle.VolumeRestorePending {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *services) RestoreSnapshot(ctx context.Context, req *control.RestoreSnapshotRequest) (*control.RestoreSnapshotResponse, error) {
