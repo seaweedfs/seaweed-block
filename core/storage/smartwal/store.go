@@ -1,6 +1,7 @@
 package smartwal
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"hash/crc32"
@@ -395,11 +396,10 @@ func (s *Store) WriteExtentDirect(lba uint32, data []byte) error {
 		return fmt.Errorf("smartwal: WriteExtentDirect data size %d != block size %d", len(data), s.hdr.BlockSize)
 	}
 	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if s.closed {
-		s.mu.RUnlock()
 		return errors.New("smartwal: WriteExtentDirect after Close")
 	}
-	s.mu.RUnlock()
 	offset := s.extentBase + int64(lba)*int64(s.hdr.BlockSize)
 	if _, err := s.fd.WriteAt(data, offset); err != nil {
 		return fmt.Errorf("smartwal: WriteExtentDirect extent LBA %d: %w", lba, err)
@@ -490,6 +490,60 @@ func (s *Store) AllBlocks() map[uint32][]byte {
 	return out
 }
 
+// CaptureSnapshot serializes the durability fence and block stream with every
+// SmartWAL mutation under mu. The initial implementation intentionally holds
+// this barrier for the full stream rather than claiming an unsafe asynchronous
+// scan is a point-in-time snapshot.
+func (s *Store) CaptureSnapshot(ctx context.Context, sink storage.SnapshotBlockSink) (storage.SnapshotCut, error) {
+	if sink == nil {
+		return storage.SnapshotCut{}, fmt.Errorf("smartwal: snapshot sink is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return storage.SnapshotCut{}, errors.New("smartwal: CaptureSnapshot after Close")
+	}
+	targetHead := s.walHead
+	if err := s.syncCache(); err != nil {
+		return storage.SnapshotCut{}, fmt.Errorf("smartwal: snapshot fsync: %w", err)
+	}
+	s.syncs.Add(1)
+	if targetHead > s.syncedLSN {
+		s.syncedLSN = targetHead
+	}
+	cut := storage.SnapshotCut{
+		Frontier:  s.syncedLSN,
+		NumBlocks: s.hdr.NumBlocks,
+		BlockSize: int(s.hdr.BlockSize),
+	}
+	for lba := uint32(0); lba < s.hdr.NumBlocks; lba++ {
+		if err := ctx.Err(); err != nil {
+			return storage.SnapshotCut{}, err
+		}
+		data := make([]byte, s.hdr.BlockSize)
+		off := s.extentBase + int64(lba)*int64(s.hdr.BlockSize)
+		if _, err := s.fd.ReadAt(data, off); err != nil {
+			return storage.SnapshotCut{}, fmt.Errorf("smartwal: snapshot read LBA %d: %w", lba, err)
+		}
+		nonZero := false
+		for _, b := range data {
+			if b != 0 {
+				nonZero = true
+				break
+			}
+		}
+		if !nonZero {
+			continue
+		}
+		if err := sink(lba, data); err != nil {
+			return storage.SnapshotCut{}, err
+		}
+		cut.BlockCount++
+		cut.DataBytes += uint64(len(data))
+	}
+	return cut, nil
+}
+
 // Close fsyncs and releases the file. Idempotent.
 func (s *Store) Close() error {
 	s.mu.Lock()
@@ -528,3 +582,4 @@ func (s *Store) SyncCount() uint64 { return s.syncs.Load() }
 
 // Compile-time assertion: Store satisfies the LogicalStorage contract.
 var _ storage.LogicalStorage = (*Store)(nil)
+var _ storage.SnapshotSource = (*Store)(nil)

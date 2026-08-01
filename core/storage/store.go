@@ -7,7 +7,9 @@
 package storage
 
 import (
+	"context"
 	"fmt"
+	"sort"
 	"sync"
 )
 
@@ -327,3 +329,42 @@ func (s *BlockStore) AllBlocks() map[uint32][]byte {
 	}
 	return result
 }
+
+// CaptureSnapshot takes one in-memory point-in-time cut. Holding mu for the
+// callback is deliberately stop-the-world for writers; this is the
+// correctness-first Phase 175 contract, not a low-latency COW implementation.
+func (s *BlockStore) CaptureSnapshot(ctx context.Context, sink SnapshotBlockSink) (SnapshotCut, error) {
+	if sink == nil {
+		return SnapshotCut{}, fmt.Errorf("storage: snapshot sink is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.syncedLSN = s.walHead
+	cut := SnapshotCut{
+		Frontier:  s.syncedLSN,
+		NumBlocks: s.numBlocks,
+		BlockSize: s.blockSize,
+	}
+	lbas := make([]uint32, 0, len(s.blocks))
+	for lba, data := range s.blocks {
+		if !blockIsZero(data) {
+			lbas = append(lbas, lba)
+		}
+	}
+	sort.Slice(lbas, func(i, j int) bool { return lbas[i] < lbas[j] })
+	for _, lba := range lbas {
+		if err := ctx.Err(); err != nil {
+			return SnapshotCut{}, err
+		}
+		data := append([]byte(nil), s.blocks[lba]...)
+		if err := sink(lba, data); err != nil {
+			return SnapshotCut{}, err
+		}
+		cut.BlockCount++
+		cut.DataBytes += uint64(len(data))
+	}
+	return cut, nil
+}
+
+var _ SnapshotSource = (*BlockStore)(nil)

@@ -1288,6 +1288,14 @@ Approximate engineering effort if scope remains tight:
   NVMe/TCP path proved the synthetic R2T-dominant shape was not representative.
   Shipped defaults remain unchanged. The finished plan is
   `internal/docs/finished-plans/phase174_finishedplan_frontend_replication_execution_architecture.md`.
+- Phase 175 Snapshot, Backup, And Restore is the active large product
+  milestone. It starts with an atomic crash-consistent single-volume snapshot
+  cut and durable catalog, restores only into a new volume, then wires the CSI
+  snapshot RPCs, Kubernetes `VolumeSnapshot`, backup export/import, operations
+  surfaces, dirty-failure gates, and matching-image release proof. Snapshot,
+  backup, and restore remain product non-claims until those gates close. The
+  active plan is `internal/docs/current-plan.md`; the contract is
+  `internal/docs/protocol/snapshot-restore-contract.md`.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.

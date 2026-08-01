@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -724,6 +725,10 @@ func (s *WALStore) readFromExtent(lba uint32) ([]byte, error) {
 func (s *WALStore) Sync() (uint64, error) {
 	s.lifecycleMu.RLock()
 	defer s.lifecycleMu.RUnlock()
+	return s.syncWithLifecycleHeld()
+}
+
+func (s *WALStore) syncWithLifecycleHeld() (uint64, error) {
 	s.mu.RLock()
 	if s.closed {
 		s.mu.RUnlock()
@@ -1024,6 +1029,47 @@ func (s *WALStore) AllBlocks() map[uint32][]byte {
 	}
 	return out
 }
+
+// CaptureSnapshot holds the lifecycle write lock across the durability fence
+// and block stream. Every mutating LogicalStorage method takes the matching
+// read lock, so writes cannot interleave with this cut.
+func (s *WALStore) CaptureSnapshot(ctx context.Context, sink SnapshotBlockSink) (SnapshotCut, error) {
+	if sink == nil {
+		return SnapshotCut{}, fmt.Errorf("storage: snapshot sink is required")
+	}
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+
+	frontier, err := s.syncWithLifecycleHeld()
+	if err != nil {
+		return SnapshotCut{}, err
+	}
+	cut := SnapshotCut{
+		Frontier:  frontier,
+		NumBlocks: s.NumBlocks(),
+		BlockSize: s.BlockSize(),
+	}
+	for lba := uint32(0); lba < cut.NumBlocks; lba++ {
+		if err := ctx.Err(); err != nil {
+			return SnapshotCut{}, err
+		}
+		data, err := s.Read(lba)
+		if err != nil {
+			return SnapshotCut{}, err
+		}
+		if blockIsZero(data) {
+			continue
+		}
+		if err := sink(lba, data); err != nil {
+			return SnapshotCut{}, err
+		}
+		cut.BlockCount++
+		cut.DataBytes += uint64(len(data))
+	}
+	return cut, nil
+}
+
+var _ SnapshotSource = (*WALStore)(nil)
 
 // bytesAllZero is a fast tight-loop equality against a zero slice.
 // We pass zero in to avoid allocating it per LBA.
