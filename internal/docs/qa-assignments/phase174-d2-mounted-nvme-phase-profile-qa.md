@@ -29,19 +29,23 @@ SW_BLOCK_IMPORT_K3S_SSH_KEY=/opt/work/testdev_key \
 2. `/status/nvme` is read before and after only the measured sequential write.
 3. Write operations equal capsule receive/parse, dispatch, handler, completion
    queue, and completion-send operations. R2T collection operations equal R2T
-   Write commands; H2C bytes equal R2T bytes.
+   Write commands; H2C bytes equal R2T bytes. Classify the observed kernel
+   write shape as `inline`, `r2t`, or `mixed`; no individual shape is required
+   for PASS.
 4. Each phase has an accumulated duration and the dominant mounted phase is
    recorded. Do not compare accumulated concurrent phase time to wall time.
 5. Keep `mounted_shape_comparable=false`,
    `fixed_work_throughput_ratio_allowed=false`, and
    `architecture_candidate_selected=false`. A candidate requires compatible
-   same-session controls, not a ratio across different workloads.
+   same-session controls, not a ratio across different workloads. Record
+   whether the synthetic fixed-work R2T shape matches the mounted kernel shape.
 6. Writer/read data verification, exact PVC/PV teardown, NVMe disconnect, Helm
    uninstall, and `cleanup_status=ok` all pass.
 
 ## Verdict
 
-- PASS: all counters reconcile, mounted data is correct, and cleanup is zero.
+- PASS: all counters reconcile for the observed write shape, mounted data is
+  correct, and cleanup is zero.
 - FAIL: missing/contradictory counters, data failure, endpoint identity error,
   or residue.
 - The result may nominate a same-session control for D3, but cannot select an

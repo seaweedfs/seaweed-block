@@ -73,6 +73,7 @@ assert_equal "$(require_value "${BASELINE_SUMMARY}" mounted_shape_comparable)" "
 assert_equal "$(require_value "${BASELINE_SUMMARY}" cleanup_status)" "ok" "cleanup status"
 
 WRITE_OPS="$(require_value "${BASELINE_SUMMARY}" mounted_nvme_write_ops)"
+INLINE_OPS="$(require_value "${BASELINE_SUMMARY}" mounted_nvme_inline_write_ops)"
 R2T_OPS="$(require_value "${BASELINE_SUMMARY}" mounted_nvme_r2t_write_ops)"
 R2T_PHASE_OPS="$(require_value "${BASELINE_SUMMARY}" mounted_nvme_r2t_collection_ops)"
 HANDLER_OPS="$(require_value "${BASELINE_SUMMARY}" mounted_nvme_handler_ops)"
@@ -81,17 +82,27 @@ assert_equal "${R2T_PHASE_OPS}" "${R2T_OPS}" "R2T phase operations"
 assert_equal "${HANDLER_OPS}" "${WRITE_OPS}" "handler operations"
 assert_equal "${COMPLETION_OPS}" "${WRITE_OPS}" "completion operations"
 
-python3 - "${WRITE_OPS}" "${R2T_OPS}" "$(require_value "${BASELINE_SUMMARY}" mounted_nvme_server_phase_ns)" <<'PY'
+MOUNTED_WRITE_SHAPE="$(python3 - "${WRITE_OPS}" "${INLINE_OPS}" "${R2T_OPS}" "$(require_value "${BASELINE_SUMMARY}" mounted_nvme_server_phase_ns)" <<'PY'
 import sys
-write_ops, r2t_ops, phase_ns = map(int, sys.argv[1:])
-if write_ops <= 0 or r2t_ops <= 0 or phase_ns <= 0:
-    raise SystemExit(f"missing mounted NVMe work: writes={write_ops} r2t={r2t_ops} phase_ns={phase_ns}")
+write_ops, inline_ops, r2t_ops, phase_ns = map(int, sys.argv[1:])
+if write_ops <= 0 or phase_ns <= 0:
+    raise SystemExit(f"missing mounted NVMe work: writes={write_ops} phase_ns={phase_ns}")
+if inline_ops + r2t_ops != write_ops:
+    raise SystemExit(f"write shape mismatch: writes={write_ops} inline={inline_ops} r2t={r2t_ops}")
+if inline_ops == write_ops:
+    print("inline")
+elif r2t_ops == write_ops:
+    print("r2t")
+else:
+    print("mixed")
 PY
+)"
 
 for key in \
   seq_write_mibps \
   seq_read_mibps \
   mounted_nvme_write_ops \
+  mounted_nvme_inline_write_ops \
   mounted_nvme_r2t_write_ops \
   mounted_nvme_write_bytes \
   mounted_nvme_capsule_receive_parse_ns_per_op \
@@ -105,6 +116,13 @@ for key in \
   write_summary "${key}=$(require_value "${BASELINE_SUMMARY}" "${key}")"
 done
 
+write_summary "synthetic_fixed_work_write_shape=r2t"
+write_summary "mounted_write_shape=${MOUNTED_WRITE_SHAPE}"
+if [[ "${MOUNTED_WRITE_SHAPE}" == "r2t" ]]; then
+  write_summary "synthetic_fixed_work_write_shape_matches_mounted=true"
+else
+  write_summary "synthetic_fixed_work_write_shape_matches_mounted=false"
+fi
 write_summary "mounted_nvme_phase_counter_reconciliation=true"
 write_summary "mounted_client_latency_reconciliation_available=false"
 write_summary "architecture_candidate_selected=false"
