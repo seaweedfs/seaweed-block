@@ -14,8 +14,10 @@ Progress at `3c354da` plus the next local snapshot commit:
 - D3 restore-to-new implemented locally for `smartwal` and `walstore` with
   normal target writes, durability before atomic publication, restart proof,
   source/snapshot/target isolation, and failed-restore cleanup.
-- Windows unit and repeated tests pass. Linux race/directory-fsync validation
-  remains a required gate before D1-D3 close.
+- D1-D3 local data-layer gate passed on exact `11b945f` on m02 Linux with
+  `go test -race -count=10 ./core/snapshot ./core/storage/...`; Linux directory
+  fsync paths executed and all packages passed. D1-D3 are closed for the local
+  data layer. Distributed authority/runtime and CSI claims remain D4+ work.
 
 ## Product Outcome
 
