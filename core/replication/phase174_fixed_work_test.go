@@ -91,6 +91,9 @@ type phase174FixedWorkResult struct {
 	ReplicationAckWaitNanos uint64  `json:"replication_ack_wait_ns,omitempty"`
 	PeerQueueMaxDepth       uint64  `json:"peer_queue_max_depth,omitempty"`
 	PeerQueueSaturated      uint64  `json:"peer_queue_saturated,omitempty"`
+	PostMeasurementDrain    bool    `json:"post_measurement_sync_all"`
+	PostMeasurementDrainNS  int64   `json:"post_measurement_sync_all_ns,omitempty"`
+	RemoteReplicaEvidence   bool    `json:"remote_replica_evidence_required"`
 	ReplicaCount            int     `json:"replica_count"`
 	ReplicaDurableCount     int     `json:"replica_durable_count"`
 	ReplicaFrontiersEqual   bool    `json:"replica_frontiers_equal"`
@@ -108,15 +111,17 @@ func (v *phase174HealthyView) Projection() frontend.Projection {
 }
 
 type phase174Pipeline struct {
-	layer        phase174Layer
-	primaryPath  string
-	replicaPaths []string
-	primary      *storage.WALStore
-	replicas     []*storage.WALStore
-	backend      *durable.StorageBackend
-	replication  *ReplicationVolume
-	listeners    []*transport.ReplicaListener
-	closed       bool
+	layer              phase174Layer
+	primaryPath        string
+	replicaPaths       []string
+	primary            *storage.WALStore
+	replicas           []*storage.WALStore
+	backend            *durable.StorageBackend
+	replication        *ReplicationVolume
+	listeners          []*transport.ReplicaListener
+	configuredReplicas int
+	remoteReplicas     bool
+	closed             bool
 }
 
 func TestPhase174FixedWorkContract(t *testing.T) {
@@ -179,7 +184,7 @@ func TestPhase174FixedWorkPipeline(t *testing.T) {
 
 	groupDir := filepath.Join(storeRoot, fmt.Sprintf("set%d-%s-writers%d", set, layer, writers))
 	create := run == 0
-	if layer == phase174RF3TCP {
+	if layer == phase174RF3TCP && os.Getenv(phase174RemoteReplicasEnv) == "" {
 		// Same-host durable RF3 is diagnostic: sync-quorum may let one peer
 		// lag, so every sample needs independent stores rather than inheriting
 		// an intentionally incomplete replica from the previous sample.
@@ -249,23 +254,32 @@ func newPhase174Pipeline(t *testing.T, layer phase174Layer, dir string, create b
 	if layer == phase174RF3TCP {
 		p.replication = NewReplicationVolume("phase174", p.primary)
 		p.replication.SetDurabilityMode(DurabilitySyncQuorum)
-		targets := make([]ReplicaTarget, 0, 2)
-		for replica := 1; replica <= 2; replica++ {
-			path := filepath.Join(dir, fmt.Sprintf("replica-%d.store", replica))
-			store := phase174OpenWALStore(t, path, create)
-			listener, err := transport.NewReplicaListener("127.0.0.1:0", store)
-			if err != nil {
-				t.Fatal(err)
-			}
-			listener.Serve()
-			p.replicaPaths = append(p.replicaPaths, path)
-			p.replicas = append(p.replicas, store)
-			p.listeners = append(p.listeners, listener)
-			targets = append(targets, ReplicaTarget{
-				ReplicaID: fmt.Sprintf("r%d", replica), DataAddr: listener.Addr(),
-				ControlAddr: listener.Addr(), Epoch: 1, EndpointVersion: 1,
-			})
+		targets, err := phase174RemoteReplicaTargets()
+		if err != nil {
+			t.Fatal(err)
 		}
+		if len(targets) > 0 {
+			p.remoteReplicas = true
+		} else {
+			targets = make([]ReplicaTarget, 0, 2)
+			for replica := 1; replica <= 2; replica++ {
+				path := filepath.Join(dir, fmt.Sprintf("replica-%d.store", replica))
+				store := phase174OpenWALStore(t, path, create)
+				listener, err := transport.NewReplicaListener("127.0.0.1:0", store)
+				if err != nil {
+					t.Fatal(err)
+				}
+				listener.Serve()
+				p.replicaPaths = append(p.replicaPaths, path)
+				p.replicas = append(p.replicas, store)
+				p.listeners = append(p.listeners, listener)
+				targets = append(targets, ReplicaTarget{
+					ReplicaID: fmt.Sprintf("r%d", replica), DataAddr: listener.Addr(),
+					ControlAddr: listener.Addr(), Epoch: 1, EndpointVersion: 1,
+				})
+			}
+		}
+		p.configuredReplicas = len(targets)
 		if err := p.replication.UpdateReplicaSet(1, targets); err != nil {
 			t.Fatal(err)
 		}
@@ -338,6 +352,15 @@ func runPhase174FixedWork(t *testing.T, p *phase174Pipeline, set, run, writers i
 	if reached := p.waitForReplicaFrontier(2 * time.Second); len(p.replicas) > 0 && reached < 1 {
 		t.Fatalf("no replica reached final frontier")
 	}
+	var postMeasurementDrain time.Duration
+	if p.remoteReplicas {
+		p.replication.SetDurabilityMode(DurabilitySyncAll)
+		drainStart := time.Now()
+		if err := p.sync(context.Background()); err != nil {
+			t.Fatalf("post-measurement sync-all: %v", err)
+		}
+		postMeasurementDrain = time.Since(drainStart)
+	}
 	writeAfter := p.primary.WriteInstrumentation()
 	replicationAfter := p.replicationStats()
 	if got := writeAfter.WALEncodeOps - writeBefore.WALEncodeOps; got != phase174APIOperations {
@@ -395,7 +418,9 @@ func runPhase174FixedWork(t *testing.T, p *phase174Pipeline, set, run, writers i
 		FlusherExtentSyncOps:    flusherForeground.ExtentSyncOps - flusherBefore.ExtentSyncOps,
 		FlusherExtentSyncNanos:  flusherForeground.ExtentSyncDurationNanos - flusherBefore.ExtentSyncDurationNanos,
 		PrimaryStableLSN:        primaryR, PrimaryHeadLSN: primaryH,
-		ReplicaCount: len(p.replicaPaths), ReplicaDurableCount: durableReplicas,
+		PostMeasurementDrain: p.remoteReplicas, PostMeasurementDrainNS: postMeasurementDrain.Nanoseconds(),
+		RemoteReplicaEvidence: p.remoteReplicas,
+		ReplicaCount:          p.configuredReplicas, ReplicaDurableCount: durableReplicas,
 		ReplicaFrontiersEqual: replicasEqual,
 		FlusherPhaseReset:     flusherPhaseReset,
 		CloseRecoverComplete:  true, CorrectnessSamples: correctness,
