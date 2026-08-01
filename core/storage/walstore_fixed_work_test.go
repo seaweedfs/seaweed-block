@@ -47,6 +47,7 @@ type phase173FixedWorkResult struct {
 	BlockSize              int     `json:"block_size"`
 	NumBlocks              int     `json:"num_blocks"`
 	FlusherIntervalMillis  int64   `json:"flusher_interval_ms"`
+	FlusherPhaseReset      bool    `json:"flusher_phase_reset"`
 	ForegroundNanos        int64   `json:"foreground_ns"`
 	ForegroundMiBPerSecond float64 `json:"foreground_mib_per_second"`
 	P50Nanos               int64   `json:"p50_ns"`
@@ -276,10 +277,20 @@ func runPhase173FixedWork(
 	if err != nil {
 		return phase173FixedWorkResult{}, fmt.Errorf("phase173 warmup sync: %w", err)
 	}
-	s.flusher.Notify()
-	if err := waitPhase173Drained(s, warmupLSN, 5*time.Second); err != nil {
+	if err := s.flusher.Stop(); err != nil {
 		return phase173FixedWorkResult{}, fmt.Errorf("phase173 warmup drain: %w", err)
 	}
+	_, _, warmupHeadLSN := s.Boundaries()
+	if s.dm.len() != 0 || s.CheckpointLSN() != warmupLSN || warmupHeadLSN != warmupLSN {
+		return phase173FixedWorkResult{}, fmt.Errorf(
+			"phase173 warmup drain incomplete dirty=%d checkpoint=%d head=%d synced=%d",
+			s.dm.len(), s.CheckpointLSN(), warmupHeadLSN, warmupLSN,
+		)
+	}
+	s.flusher = newFlusher(s, flusherConfig{Interval: 100 * time.Millisecond})
+	flusherStarted := make(chan struct{})
+	go s.flusher.runWithStartSignal(flusherStarted)
+	<-flusherStarted
 
 	writeBefore := s.WriteInstrumentation()
 	flushBefore := s.FlusherInstrumentation()
@@ -361,6 +372,7 @@ func runPhase173FixedWork(
 		BlockSize:              phase173FixedWorkBlockSize,
 		NumBlocks:              phase173FixedWorkNumBlocks,
 		FlusherIntervalMillis:  s.flusher.interval.Milliseconds(),
+		FlusherPhaseReset:      true,
 		ForegroundNanos:        foreground.Nanoseconds(),
 		ForegroundMiBPerSecond: float64(logicalBytes) / (1024 * 1024) / foreground.Seconds(),
 		P50Nanos:               p50,
@@ -463,19 +475,6 @@ func runPhase173Operations(
 	close(start)
 	wg.Wait()
 	return time.Since(begin), latencies, firstErr
-}
-
-func waitPhase173Drained(s *WALStore, syncedLSN uint64, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		_, _, headLSN := s.Boundaries()
-		if s.dm.len() == 0 && s.CheckpointLSN() == syncedLSN && headLSN == syncedLSN {
-			return nil
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	_, _, headLSN := s.Boundaries()
-	return fmt.Errorf("timeout dirty=%d checkpoint=%d head=%d synced=%d", s.dm.len(), s.CheckpointLSN(), headLSN, syncedLSN)
 }
 
 func verifyPhase173Samples(s *WALStore, cfg phase173FixedWorkConfig, payloads []map[int][][]byte) (int, error) {

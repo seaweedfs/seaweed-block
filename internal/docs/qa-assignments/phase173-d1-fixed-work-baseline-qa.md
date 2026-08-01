@@ -36,6 +36,8 @@ Do not lower run counts or change the `1.25x` threshold after seeing results.
 - `precondition_runs=32`
 - `measured_store_reuse_required=true`, with `store_reused=true` in every
   measured JSON row
+- `flusher_phase_policy=restart_after_warmup_with_start_signal`, with
+  `flusher_phase_reset=true` in every measured JSON row
 - `four_writer_stability_gate=pass`
 - `architecture_candidate_admission_allowed=true`
 - every `*_writers_4_set_{1,2}_max_min_ratio` and combined ratio is at most

@@ -42,6 +42,7 @@ write_summary "four_writer_runs_per_set=${RUNS}"
 write_summary "diagnostic_runs_per_set=${DIAGNOSTIC_RUNS}"
 write_summary "four_writer_max_min_limit=${MAX_RANGE}"
 write_summary "flusher_interval_ms=100"
+write_summary "flusher_phase_policy=restart_after_warmup_with_start_signal"
 write_summary "page_cache_policy=warm_process_and_filesystem_no_drop_caches"
 write_summary "go_benchmark_autocalibration_allowed=false"
 write_summary "architecture_candidate_admission_allowed=false"
@@ -183,6 +184,8 @@ for row in rows:
         raise SystemExit(f"correctness evidence failed: {row}")
     if row["flusher_interval_ms"] != 100:
         raise SystemExit(f"unexpected flusher interval: {row}")
+    if not row["flusher_phase_reset"]:
+        raise SystemExit(f"flusher phase was not reset after warmup: {row}")
 
 summary = []
 gate_ok = True

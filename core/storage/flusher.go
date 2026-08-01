@@ -91,9 +91,16 @@ func (f *flusher) NotifyUrgent() {
 // run drives the flush loop. Wakes on either the periodic ticker
 // or an explicit Notify(). Call once in a goroutine.
 func (f *flusher) run() {
+	f.runWithStartSignal(nil)
+}
+
+func (f *flusher) runWithStartSignal(started chan<- struct{}) {
 	defer close(f.doneCh)
 	ticker := time.NewTicker(f.interval)
 	defer ticker.Stop()
+	if started != nil {
+		close(started)
+	}
 	for {
 		select {
 		case <-f.stopCh:
