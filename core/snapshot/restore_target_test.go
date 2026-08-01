@@ -173,7 +173,8 @@ func TestPhase175RestoreTargetCorruptStreamNeverApplies(t *testing.T) {
 	}
 	root := t.TempDir()
 	dataPath := filepath.Join(root, "target.bin")
-	target, err := OpenRestoreTarget(RestoreTargetConfig{MarkerPath: filepath.Join(root, "restore.json"), TargetDataPath: dataPath, SnapshotID: rec.SnapshotID, TargetVolumeID: "v", TargetReplicaID: "r1"})
+	markerPath := filepath.Join(root, "restore.json")
+	target, err := OpenRestoreTarget(RestoreTargetConfig{MarkerPath: markerPath, TargetDataPath: dataPath, SnapshotID: rec.SnapshotID, TargetVolumeID: "v", TargetReplicaID: "r1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,6 +230,45 @@ func TestPhase175RestoreTargetVerifiesDigestBeforeApplyingLBA(t *testing.T) {
 	}
 }
 
+func TestPhase175RestoreTargetReadsBackAppliedBlocksBeforePublication(t *testing.T) {
+	manager, rec, _ := createStreamFixture(t)
+	var archive bytes.Buffer
+	if _, err := manager.StreamArchive(context.Background(), rec.SnapshotID, &archive); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	dataPath := filepath.Join(root, "target.bin")
+	markerPath := filepath.Join(root, "restore.json")
+	target, err := OpenRestoreTarget(RestoreTargetConfig{MarkerPath: markerPath, TargetDataPath: dataPath, SnapshotID: rec.SnapshotID, TargetVolumeID: "v", TargetReplicaID: "r1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dataPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	contaminating := &contaminatingRestoreStorage{LogicalStorage: storage.NewBlockStore(rec.NumBlocks, rec.BlockSize)}
+	identified := identifyRestoreStorage(dataPath, "misdirect-write", contaminating)
+	if err := target.BindStorage(identified); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := target.Apply(context.Background(), bytes.NewReader(archive.Bytes()), rec); !errors.Is(err, ErrArchiveCorrupt) {
+		t.Fatalf("silent target corruption error=%v", err)
+	}
+	if marker := target.Marker(); marker.State != RestoreStateIntegrityFault {
+		t.Fatalf("unverified target became publishable: %+v", marker)
+	}
+	reopened, err := OpenRestoreTarget(RestoreTargetConfig{MarkerPath: markerPath, TargetDataPath: dataPath, SnapshotID: rec.SnapshotID, TargetVolumeID: "v", TargetReplicaID: "r1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.BindStorage(identified); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reopened.Apply(context.Background(), bytes.NewReader(archive.Bytes()), rec); !errors.Is(err, ErrRestoreUnsafe) {
+		t.Fatalf("integrity-fault target was reused: %v", err)
+	}
+}
+
 func TestPhase175RestoreTargetRejectsDifferentDurableStoreOnReopen(t *testing.T) {
 	manager, rec, _ := createStreamFixture(t)
 	var archive bytes.Buffer
@@ -277,6 +317,20 @@ func openRestoreTargetForTest(t *testing.T, markerPath, dataPath string, rec Rec
 type identifiedRestoreStorage struct {
 	storage.LogicalStorage
 	identity storage.DurableStorageIdentity
+}
+
+type contaminatingRestoreStorage struct {
+	storage.LogicalStorage
+	contaminated bool
+}
+
+func (s *contaminatingRestoreStorage) Write(lba uint32, data []byte) (uint64, error) {
+	lsn, err := s.LogicalStorage.Write(lba, data)
+	if err == nil && !s.contaminated {
+		s.contaminated = true
+		_, err = s.LogicalStorage.Write(1, bytes.Repeat([]byte{0xcc}, s.BlockSize()))
+	}
+	return lsn, err
 }
 
 func (s *identifiedRestoreStorage) DurableStorageIdentity() storage.DurableStorageIdentity {

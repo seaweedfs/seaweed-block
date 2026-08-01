@@ -160,6 +160,18 @@ func TestPhase175RestoreCoordinatorAcceptsConcurrentCompletionAfterApply(t *test
 	}
 }
 
+func TestPhase175RestoreIntegrityFaultIsObservableButNeverSuccessful(t *testing.T) {
+	_, rec, _ := createStreamFixture(t)
+	if !validRestoreTargetState(RestoreStateIntegrityFault) {
+		t.Fatal("integrity fault must remain observable to the coordinator")
+	}
+	target := testRestoreReplicaTarget(rec, "r1", "https://10.0.0.1:24443")
+	result := RestoreApplyResult{State: RestoreStateIntegrityFault, TargetStorageID: target.TargetStorageID, TargetNumBlocks: target.TargetNumBlocks, TargetBlockSize: target.TargetBlockSize, RestoredBlocks: rec.RecordCount, RestoredBytes: rec.DataBytes}
+	if validRestoreApplyEvidence(result, target, rec) {
+		t.Fatal("integrity fault satisfied restore apply evidence")
+	}
+}
+
 type fakeRestoreResolver struct {
 	plans     []RestorePlan
 	calls     int

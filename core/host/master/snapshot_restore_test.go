@@ -120,6 +120,12 @@ func TestPhase175RestoreTargetFactsRejectWrongServerAndEndpointHost(t *testing.T
 	}
 }
 
+func TestPhase175RestoreIntegrityFaultRemainsAnObservedTargetState(t *testing.T) {
+	if !validSnapshotRestoreObservationState(snapshot.RestoreStateIntegrityFault) {
+		t.Fatal("integrity fault was dropped from restore observations")
+	}
+}
+
 func testSnapshotRestoreEvidence(snapshotID, replicaID string) authority.SnapshotRestoreEvidenceFact {
 	return authority.SnapshotRestoreEvidenceFact{
 		SnapshotID: snapshotID,

@@ -1,6 +1,7 @@
 package snapshot
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,10 +17,11 @@ import (
 const restoreMarkerVersion = 2
 
 const (
-	RestoreStatePending   = "pending"
-	RestoreStateApplying  = "applying"
-	RestoreStateApplied   = "applied"
-	RestoreStateActivated = "activated"
+	RestoreStatePending        = "pending"
+	RestoreStateApplying       = "applying"
+	RestoreStateApplied        = "applied"
+	RestoreStateActivated      = "activated"
+	RestoreStateIntegrityFault = "integrity_fault"
 )
 
 type RestoreTargetConfig struct {
@@ -102,7 +104,7 @@ func OpenRestoreTarget(cfg RestoreTargetConfig) (*RestoreTarget, error) {
 		if err != nil {
 			return nil, err
 		}
-		if (t.marker.State == RestoreStateApplied || t.marker.State == RestoreStateActivated) && !exists {
+		if (t.marker.State == RestoreStateApplied || t.marker.State == RestoreStateActivated || t.marker.State == RestoreStateIntegrityFault) && !exists {
 			return nil, fmt.Errorf("%w: %s marker has no target data", ErrRestoreUnsafe, t.marker.State)
 		}
 		return t, nil
@@ -257,6 +259,12 @@ func (t *RestoreTarget) Apply(ctx context.Context, r io.Reader, rec Record) (Res
 	if restoredBlocks != rec.RecordCount || restoredBytes != rec.DataBytes {
 		return RestoreApplyResult{}, t.resetPendingLocked(fmt.Errorf("%w: applied counters do not match catalog", ErrArchiveCorrupt))
 	}
+	if err := verifyRestoredArchive(ctx, stagedPath, rec, t.storage); err != nil {
+		if errors.Is(err, ErrArchiveCorrupt) {
+			return RestoreApplyResult{}, t.failIntegrityLocked(err, restoredBlocks, restoredBytes, frontier)
+		}
+		return RestoreApplyResult{}, t.resetPendingLocked(err)
+	}
 	t.marker.State = RestoreStateApplied
 	t.marker.RestoredBlocks = restoredBlocks
 	t.marker.RestoredBytes = restoredBytes
@@ -265,6 +273,50 @@ func (t *RestoreTarget) Apply(ctx context.Context, r io.Reader, rec Record) (Res
 		return RestoreApplyResult{}, err
 	}
 	return restoreApplyResult(t.marker, false), nil
+}
+
+func verifyRestoredArchive(ctx context.Context, archivePath string, rec Record, target storage.LogicalStorage) error {
+	archive, err := os.Open(archivePath)
+	if err != nil {
+		return fmt.Errorf("snapshot: reopen staged archive for target verification: %w", err)
+	}
+	defer archive.Close()
+	nextLBA := uint32(0)
+	zero := make([]byte, rec.BlockSize)
+	verifyZeroRange := func(end uint32) error {
+		for nextLBA < end {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			got, err := target.Read(nextLBA)
+			if err != nil {
+				return fmt.Errorf("snapshot: verify target LBA %d: %w", nextLBA, err)
+			}
+			if !bytes.Equal(got, zero) {
+				return fmt.Errorf("%w: restored target sparse LBA %d is non-zero", ErrArchiveCorrupt, nextLBA)
+			}
+			nextLBA++
+		}
+		return nil
+	}
+	_, err = ApplyArchiveStream(ctx, archive, rec, func(lba uint32, want []byte) error {
+		if err := verifyZeroRange(lba); err != nil {
+			return err
+		}
+		got, err := target.Read(lba)
+		if err != nil {
+			return fmt.Errorf("snapshot: verify target LBA %d: %w", lba, err)
+		}
+		if !bytes.Equal(got, want) {
+			return fmt.Errorf("%w: restored target LBA %d does not match archive", ErrArchiveCorrupt, lba)
+		}
+		nextLBA = lba + 1
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return verifyZeroRange(rec.NumBlocks)
 }
 
 // Activate durably records publication eligibility before releasing local
@@ -324,6 +376,17 @@ func (t *RestoreTarget) resetPendingLocked(cause error) error {
 	return cause
 }
 
+func (t *RestoreTarget) failIntegrityLocked(cause error, restoredBlocks, restoredBytes, frontier uint64) error {
+	t.marker.State = RestoreStateIntegrityFault
+	t.marker.RestoredBlocks = restoredBlocks
+	t.marker.RestoredBytes = restoredBytes
+	t.marker.TargetFrontier = frontier
+	if err := t.persistLocked(); err != nil {
+		return errors.Join(cause, err)
+	}
+	return cause
+}
+
 func (t *RestoreTarget) persistLocked() error {
 	if err := os.MkdirAll(filepath.Dir(t.markerPath), 0o755); err != nil {
 		return fmt.Errorf("snapshot: mkdir restore marker: %w", err)
@@ -376,7 +439,7 @@ func validateRestoreMarker(marker RestoreMarker, cfg RestoreTargetConfig) error 
 		if marker.TargetStorageID == "" || marker.Snapshot == nil {
 			return fmt.Errorf("%w: invalid applying marker", ErrRestoreUnsafe)
 		}
-	case RestoreStateApplied, RestoreStateActivated:
+	case RestoreStateApplied, RestoreStateActivated, RestoreStateIntegrityFault:
 		if marker.TargetStorageID == "" || marker.Snapshot == nil || validateRecord(*marker.Snapshot) != nil || marker.RestoredBlocks != marker.Snapshot.RecordCount || marker.RestoredBytes != marker.Snapshot.DataBytes {
 			return fmt.Errorf("%w: invalid %s marker", ErrRestoreUnsafe, marker.State)
 		}

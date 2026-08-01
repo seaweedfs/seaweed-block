@@ -140,7 +140,7 @@ func snapshotRestoreTargetFromFacts(volumeID, expectedServerID, expectedReplicaI
 
 func validSnapshotRestoreObservationState(state string) bool {
 	switch state {
-	case snapshot.RestoreStatePending, snapshot.RestoreStateApplying, snapshot.RestoreStateApplied, snapshot.RestoreStateActivated:
+	case snapshot.RestoreStatePending, snapshot.RestoreStateApplying, snapshot.RestoreStateApplied, snapshot.RestoreStateActivated, snapshot.RestoreStateIntegrityFault:
 		return true
 	default:
 		return false

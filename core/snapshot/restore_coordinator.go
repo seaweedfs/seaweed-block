@@ -175,7 +175,7 @@ func sameRestoreTargetIdentity(a, b RestoreReplicaTarget) bool {
 
 func validRestoreTargetState(state string) bool {
 	switch state {
-	case RestoreStatePending, RestoreStateApplying, RestoreStateApplied, RestoreStateActivated:
+	case RestoreStatePending, RestoreStateApplying, RestoreStateApplied, RestoreStateActivated, RestoreStateIntegrityFault:
 		return true
 	default:
 		return false
