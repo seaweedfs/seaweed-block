@@ -30,14 +30,16 @@ run the formal gate on a network share, tmpfs, overlay, or OS-root filesystem.
 
 ## Fixed Controls
 
-Each control uses 14,500 logical 4 KiB blocks (56.64 MiB), five runs, persistent
-preconditioned files, and a predeclared max/min limit of `1.25x`:
+The WALStore controls use 14,500 logical 4 KiB blocks (56.64 MiB). The scratch
+comparison repeats the same 14,500-block layout three times per run so a single
+filesystem sync does not dominate its variance. All controls use five runs,
+persistent preconditioned files, and a predeclared max/min limit of `1.25x`:
 
 - shipped 4-writer foreground with the normal 100 ms flusher;
 - 1- and 4-writer foreground while writeback is deferred;
 - real flusher drain of the 4-writer prefilled dirty set with no writers;
-- shared-file and same-device split-file scratch with identical 29,000 preads,
-  14,501 pwrites, two syncs, decode/CRC, and correctness samples.
+- shared-file and same-device split-file scratch with identical 87,000 preads,
+  43,501 pwrites, two syncs, decode/CRC, and correctness samples.
 
 The fixed work stays below the default 64 MiB WAL's 90% hard watermark while
 running long enough on the admission host to cross normal flusher periods.

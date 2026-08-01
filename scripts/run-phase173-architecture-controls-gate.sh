@@ -115,7 +115,9 @@ for row in rows:
         raise SystemExit(f"bad contract: {row}")
     key = (row["control"], int(row["writers"]))
     groups[key].append(row)
-    if row["logical_blocks"] != 14500 or row["logical_bytes"] != 14500 * 4096:
+    scratch = row["control"] in ("shared_file_scratch", "split_file_scratch")
+    expected_blocks = 14500 * 3 if scratch else 14500
+    if row["logical_blocks"] != expected_blocks or row["logical_bytes"] != expected_blocks * 4096:
         raise SystemExit(f"bad fixed work: {row}")
     if row["duration_ns"] <= 0 or row["mib_per_second"] <= 0 or row["correctness_samples"] < 3:
         raise SystemExit(f"empty duration/rate/correctness: {row}")
@@ -130,7 +132,7 @@ for row in rows:
         if row["writers"] != 0 or row["flush_record_reads"] != 14500 or row["extent_write_ops"] != 14500:
             raise SystemExit(f"bad prefilled flusher work: {row}")
     else:
-        if row["scratch_pread_ops"] != 29000 or row["scratch_pwrite_ops"] != 14501 or row["scratch_sync_ops"] != 2:
+        if row["scratch_pread_ops"] != 87000 or row["scratch_pwrite_ops"] != 43501 or row["scratch_sync_ops"] != 2:
             raise SystemExit(f"bad scratch I/O shape: {row}")
 
 expected = {

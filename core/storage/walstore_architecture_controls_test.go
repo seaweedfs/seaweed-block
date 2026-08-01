@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 )
@@ -18,6 +19,7 @@ const (
 	phase173ControlAPIOps   = 2320
 	phase173ControlWarmup   = 80
 	phase173ScratchBlocks   = 14500
+	phase173ScratchPasses   = 3
 )
 
 type phase173ArchitectureControlResult struct {
@@ -38,6 +40,7 @@ type phase173ArchitectureControlResult struct {
 	WALAppendLockWaitNanos uint64  `json:"wal_append_lock_wait_ns,omitempty"`
 	WALWriteAtCalls        uint64  `json:"wal_writeat_calls,omitempty"`
 	FlushCycles            uint64  `json:"flush_cycles,omitempty"`
+	FlushCycleNanos        uint64  `json:"flush_cycle_ns,omitempty"`
 	FlushRecordReads       uint64  `json:"flush_record_reads,omitempty"`
 	FlushDecodeOps         uint64  `json:"flush_decode_ops,omitempty"`
 	ExtentWriteOps         uint64  `json:"extent_write_ops,omitempty"`
@@ -57,6 +60,12 @@ func TestPhase173ArchitectureControlContract(t *testing.T) {
 		}
 		if cfg.WarmupLogicalBlocks() != 500 {
 			t.Fatalf("writers=%d warmup blocks=%d want 500", writers, cfg.WarmupLogicalBlocks())
+		}
+	}
+	for worker := 0; worker < 4; worker++ {
+		start, end := phase173BalancedOperationRange(worker, 4, phase173ControlAPIOps)
+		if end-start != phase173ControlAPIOps/4 || start%4 != 0 || end%4 != 0 {
+			t.Fatalf("worker=%d range=[%d,%d) is not a balanced mixed-pattern partition", worker, start, end)
 		}
 	}
 }
@@ -176,7 +185,7 @@ func runPhase173WALStoreControl(
 	payloads := phase173Payloads(writers)
 
 	startPhase173ControlFlusher(s)
-	if _, _, err := runPhase173Operations(s, cfg, cfg.WarmupAPIOps, phase173FixedWorkRegionBlocks, payloads, false); err != nil {
+	if _, _, err := runPhase173BalancedOperations(s, cfg, cfg.WarmupAPIOps, phase173FixedWorkRegionBlocks, payloads, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Sync(); err != nil {
@@ -193,7 +202,7 @@ func runPhase173WALStoreControl(
 		startPhase173ControlFlusher(s)
 	}
 	writeBefore := s.WriteInstrumentation()
-	foreground, latencies, err := runPhase173Operations(s, cfg, cfg.APIOperations, 0, payloads, true)
+	foreground, latencies, err := runPhase173BalancedOperations(s, cfg, cfg.APIOperations, 0, payloads, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,13 +221,16 @@ func runPhase173WALStoreControl(
 	}
 	finalDrain := time.Since(drainStart)
 	assertPhase173ControlDrained(t, s, synced)
-	correctness, err := verifyPhase173Samples(s, cfg, payloads)
+	correctness, err := verifyPhase173BalancedSamples(s, cfg, payloads)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	writeAfter := s.WriteInstrumentation()
 	flush := s.FlusherInstrumentation()
+	if flush.CycleDurationNanos == 0 {
+		t.Fatalf("control=%s writers=%d recorded no flusher duration", control, writers)
+	}
 	logicalBlocks := cfg.APILogicalBlocks()
 	logicalBytes := logicalBlocks * phase173FixedWorkBlockSize
 	if got := writeAfter.WALEncodeOps - writeBefore.WALEncodeOps; got != logicalBlocks {
@@ -247,6 +259,7 @@ func runPhase173WALStoreControl(
 		WALAppendLockWaitNanos: writeAfter.WALAppendLockWaitNanos - writeBefore.WALAppendLockWaitNanos,
 		WALWriteAtCalls:        writeAfter.WALAppendWriteAtCalls - writeBefore.WALAppendWriteAtCalls,
 		FlushCycles:            flush.CyclesStarted,
+		FlushCycleNanos:        flush.CycleDurationNanos,
 		FlushRecordReads:       flush.WALRecordReadOps,
 		FlushDecodeOps:         flush.WALRecordDecodeOps,
 		ExtentWriteOps:         flush.ExtentWriteOps,
@@ -262,9 +275,10 @@ func runPhase173WALStoreControl(
 		Writers:            0,
 		LogicalBlocks:      logicalBlocks,
 		LogicalBytes:       logicalBytes,
-		DurationNanos:      finalDrain.Nanoseconds(),
-		MiBPerSecond:       phase173Rate(logicalBytes, finalDrain),
+		DurationNanos:      int64(flush.CycleDurationNanos),
+		MiBPerSecond:       phase173Rate(logicalBytes, time.Duration(flush.CycleDurationNanos)),
 		FlushCycles:        flush.CyclesStarted,
+		FlushCycleNanos:    flush.CycleDurationNanos,
 		FlushRecordReads:   flush.WALRecordReadOps,
 		FlushDecodeOps:     flush.WALRecordDecodeOps,
 		ExtentWriteOps:     flush.ExtentWriteOps,
@@ -273,6 +287,98 @@ func runPhase173WALStoreControl(
 		CorrectnessSamples: correctness,
 	}
 	return foregroundResult, flusherResult
+}
+
+func runPhase173BalancedOperations(
+	s *WALStore,
+	cfg phase173FixedWorkConfig,
+	operations int,
+	base uint32,
+	payloads []map[int][][]byte,
+	recordLatency bool,
+) (time.Duration, []int64, error) {
+	latencies := make([]int64, operations)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	var ready sync.WaitGroup
+	var firstErr error
+	var errOnce sync.Once
+	for worker := 0; worker < cfg.Writers; worker++ {
+		first, last := phase173BalancedOperationRange(worker, cfg.Writers, operations)
+		wg.Add(1)
+		ready.Add(1)
+		go func(worker, first, last int) {
+			defer wg.Done()
+			ready.Done()
+			<-start
+			for index := first; index < last; index++ {
+				lba, blocks := cfg.operation(index, base)
+				opStart := time.Now()
+				var err error
+				if blocks == 1 {
+					_, err = s.Write(lba, payloads[worker][1][0])
+				} else {
+					_, err = s.WriteBatch(lba, payloads[worker][blocks])
+				}
+				if recordLatency {
+					latencies[index] = time.Since(opStart).Nanoseconds()
+				}
+				if err != nil {
+					errOnce.Do(func() { firstErr = err })
+					return
+				}
+			}
+		}(worker, first, last)
+	}
+	ready.Wait()
+	begin := time.Now()
+	close(start)
+	wg.Wait()
+	return time.Since(begin), latencies, firstErr
+}
+
+func phase173BalancedOperationRange(worker, writers, operations int) (int, int) {
+	return worker * operations / writers, (worker + 1) * operations / writers
+}
+
+func verifyPhase173BalancedSamples(
+	s *WALStore,
+	cfg phase173FixedWorkConfig,
+	payloads []map[int][][]byte,
+) (int, error) {
+	indexes := map[int]struct{}{0: {}, cfg.APIOperations / 2: {}, cfg.APIOperations - 1: {}}
+	for worker := 0; worker < cfg.Writers; worker++ {
+		first, _ := phase173BalancedOperationRange(worker, cfg.Writers, cfg.APIOperations)
+		indexes[first] = struct{}{}
+	}
+	ordered := make([]int, 0, len(indexes))
+	for index := range indexes {
+		ordered = append(ordered, index)
+	}
+	sort.Ints(ordered)
+	samples := 0
+	for _, index := range ordered {
+		worker := index * cfg.Writers / cfg.APIOperations
+		if worker >= cfg.Writers {
+			worker = cfg.Writers - 1
+		}
+		lba, blocks := cfg.operation(index, 0)
+		for _, block := range []int{0, blocks - 1} {
+			data, err := s.Read(lba + uint32(block))
+			if err != nil {
+				return samples, err
+			}
+			want := payloads[worker][blocks][block]
+			if len(data) != len(want) || data[0] != want[0] || data[1] != want[1] || data[2] != want[2] {
+				return samples, fmt.Errorf("phase173 balanced data mismatch op=%d block=%d", index, block)
+			}
+			samples++
+			if blocks == 1 {
+				break
+			}
+		}
+	}
+	return samples, nil
 }
 
 func startPhase173ControlFlusher(s *WALStore) {
@@ -396,25 +502,27 @@ func (s *phase173FileLayoutScratch) run(t *testing.T, split bool, run int) phase
 		control = "split_file_scratch"
 	}
 	start := time.Now()
-	for index := 0; index < phase173ScratchBlocks; index++ {
-		offset := s.walBase + int64(index*s.recordSize)
-		header := make([]byte, walEntryHeaderSize)
-		if _, err := walFile.ReadAt(header, offset); err != nil {
-			t.Fatal(err)
-		}
-		full := make([]byte, s.recordSize)
-		if _, err := walFile.ReadAt(full, offset); err != nil {
-			t.Fatal(err)
-		}
-		entry, err := decodeWALEntry(full)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if entry.LBA != uint64(index) || !bytes.Equal(entry.Data, s.logicalData) {
-			t.Fatalf("scratch record %d mismatch", index)
-		}
-		if _, err := extentFile.WriteAt(entry.Data, extentBase+int64(index*phase173FixedWorkBlockSize)); err != nil {
-			t.Fatal(err)
+	for pass := 0; pass < phase173ScratchPasses; pass++ {
+		for index := 0; index < phase173ScratchBlocks; index++ {
+			offset := s.walBase + int64(index*s.recordSize)
+			header := make([]byte, walEntryHeaderSize)
+			if _, err := walFile.ReadAt(header, offset); err != nil {
+				t.Fatal(err)
+			}
+			full := make([]byte, s.recordSize)
+			if _, err := walFile.ReadAt(full, offset); err != nil {
+				t.Fatal(err)
+			}
+			entry, err := decodeWALEntry(full)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if entry.LBA != uint64(index) || !bytes.Equal(entry.Data, s.logicalData) {
+				t.Fatalf("scratch record %d mismatch", index)
+			}
+			if _, err := extentFile.WriteAt(entry.Data, extentBase+int64(index*phase173FixedWorkBlockSize)); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 	if err := extentFile.Sync(); err != nil {
@@ -439,18 +547,19 @@ func (s *phase173FileLayoutScratch) run(t *testing.T, split bool, run int) phase
 		}
 		samples++
 	}
-	logicalBytes := uint64(phase173ScratchBlocks * phase173FixedWorkBlockSize)
+	logicalBlocks := uint64(phase173ScratchBlocks * phase173ScratchPasses)
+	logicalBytes := logicalBlocks * phase173FixedWorkBlockSize
 	return phase173ArchitectureControlResult{
 		Contract:           "phase173-architecture-controls-v1",
 		Control:            control,
 		Scope:              "same_device_scratch_no_recovery_contract",
 		Run:                run,
-		LogicalBlocks:      phase173ScratchBlocks,
+		LogicalBlocks:      logicalBlocks,
 		LogicalBytes:       logicalBytes,
 		DurationNanos:      duration.Nanoseconds(),
 		MiBPerSecond:       phase173Rate(logicalBytes, duration),
-		ScratchPReadOps:    phase173ScratchBlocks * 2,
-		ScratchPWriteOps:   phase173ScratchBlocks + 1,
+		ScratchPReadOps:    phase173ScratchBlocks * phase173ScratchPasses * 2,
+		ScratchPWriteOps:   phase173ScratchBlocks*phase173ScratchPasses + 1,
 		ScratchSyncOps:     2,
 		CorrectnessSamples: samples,
 	}
