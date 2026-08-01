@@ -3,7 +3,10 @@
 Status: active. Phase 173 closed with no storage-backend change. Phase 174 D1
 completed its local fixed-work matrix at `ed270f3`: direct WALStore was stable,
 but durable-adapter RF1 remained above the unchanged `1.25x` range limit. D1 is
-HOLD and D2 attribution is active; no architecture implementation is eligible.
+HOLD. D2's RF1 slice at `4034f37` reconciled all counters and attributed the
+variance to foreground/background flusher overlap rather than an adapter CPU
+hotspot. Distinct-node RF3 and frontend/mounted attribution are next; no
+architecture implementation is eligible.
 
 ## Why This Is Next
 
