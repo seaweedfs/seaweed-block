@@ -2,6 +2,21 @@
 
 Status: active. Started 2026-08-01 from merged `origin/main` at `7d016ed`.
 
+Progress at `3c354da` plus the next local snapshot commit:
+
+- D1 storage cut contract implemented for `BlockStore`, `walstore`, and the
+  shipped-default `smartwal`; deterministic tests prove normal writes and
+  direct extent installs cannot cross an in-progress cut.
+- D2 immutable archive and durable catalog implemented locally with per-block
+  CRC, archive SHA-256, fsync/rename publication, restart validation,
+  idempotency, corruption refusal, active-reader deletion hold, and owned
+  temporary/orphan cleanup.
+- D3 restore-to-new implemented locally for `smartwal` and `walstore` with
+  normal target writes, durability before atomic publication, restart proof,
+  source/snapshot/target isolation, and failed-restore cleanup.
+- Windows unit and repeated tests pass. Linux race/directory-fsync validation
+  remains a required gate before D1-D3 close.
+
 ## Product Outcome
 
 Deliver one user-visible data-lifecycle loop rather than a sequence of small
