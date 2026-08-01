@@ -13,6 +13,7 @@ type RestoreReplicaTarget struct {
 	TargetStorageID string
 	TargetNumBlocks uint32
 	TargetBlockSize int
+	RestoreState    string
 }
 
 type RestorePlan struct {
@@ -116,7 +117,7 @@ func validateRestoreTargets(targetVolumeID string, targets []RestoreReplicaTarge
 	out := append([]RestoreReplicaTarget(nil), targets...)
 	sort.Slice(out, func(i, j int) bool { return out[i].ReplicaID < out[j].ReplicaID })
 	for i, target := range out {
-		if target.VolumeID != targetVolumeID || target.ReplicaID == "" || ValidateRuntimeEndpoint(target.RuntimeEndpoint) != nil || target.TargetStorageID == "" || target.TargetNumBlocks == 0 || target.TargetBlockSize <= 0 {
+		if target.VolumeID != targetVolumeID || target.ReplicaID == "" || ValidateRuntimeEndpoint(target.RuntimeEndpoint) != nil || target.TargetStorageID == "" || target.TargetNumBlocks == 0 || target.TargetBlockSize <= 0 || !validRestoreTargetState(target.RestoreState) {
 			return nil, fmt.Errorf("%w: invalid restore replica target", ErrRestoreNotReady)
 		}
 		if i > 0 && target.ReplicaID == out[i-1].ReplicaID {
@@ -156,11 +157,29 @@ func sameRestoreTargets(a, b []RestoreReplicaTarget) bool {
 		return false
 	}
 	for i := range a {
-		if a[i] != b[i] {
+		if !sameRestoreTargetIdentity(a[i], b[i]) {
 			return false
 		}
 	}
 	return true
+}
+
+func sameRestoreTargetIdentity(a, b RestoreReplicaTarget) bool {
+	return a.VolumeID == b.VolumeID &&
+		a.ReplicaID == b.ReplicaID &&
+		a.RuntimeEndpoint == b.RuntimeEndpoint &&
+		a.TargetStorageID == b.TargetStorageID &&
+		a.TargetNumBlocks == b.TargetNumBlocks &&
+		a.TargetBlockSize == b.TargetBlockSize
+}
+
+func validRestoreTargetState(state string) bool {
+	switch state {
+	case RestoreStatePending, RestoreStateApplying, RestoreStateApplied, RestoreStateActivated:
+		return true
+	default:
+		return false
+	}
 }
 
 func runtimeRestoreRequest(rec Record, target RestoreReplicaTarget) RuntimeRestoreRequest {

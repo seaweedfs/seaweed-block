@@ -67,6 +67,20 @@ func TestPhase175MasterResolvesEveryFreshRestoreTargetAndCompletesGate(t *testin
 	}}}); err != nil {
 		t.Fatal(err)
 	}
+	if err := h.CompleteSnapshotRestore(context.Background(), "restored-a", rec.SnapshotID, plan.Targets); err == nil {
+		t.Fatal("pending restore observation opened restore authority gate")
+	}
+	for _, item := range []struct {
+		server, replica, host string
+	}{{"m01", "r1", "10.0.0.1"}, {"m02", "r2", "10.0.0.2"}} {
+		evidence := testSnapshotRestoreEvidence(rec.SnapshotID, item.replica)
+		evidence.State = snapshot.RestoreStateActivated
+		if err := h.obs.Store().Ingest(authority.Observation{ServerID: item.server, ObservedAt: now.Add(4 * time.Second), Slots: []authority.SlotFact{{
+			VolumeID: "restored-a", ReplicaID: item.replica, DataAddr: item.host + ":9201", CtrlAddr: item.host + ":9101", SnapshotRuntimeEndpoint: "https://" + item.host + ":24443", SnapshotRestore: evidence, Reachable: true,
+		}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := h.CompleteSnapshotRestore(context.Background(), "restored-a", rec.SnapshotID, plan.Targets); err != nil {
 		t.Fatal(err)
 	}

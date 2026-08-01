@@ -261,6 +261,7 @@ func testRestoreReplicaTarget(rec Record, replicaID, endpoint string) RestoreRep
 		TargetStorageID: replicaID + "-store",
 		TargetNumBlocks: rec.NumBlocks,
 		TargetBlockSize: rec.BlockSize,
+		RestoreState:    RestoreStatePending,
 	}
 }
 

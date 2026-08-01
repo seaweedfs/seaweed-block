@@ -81,6 +81,9 @@ func (h *Host) CompleteSnapshotRestore(ctx context.Context, targetVolumeID, snap
 	if !sameSnapshotRestoreTargets(plan.Targets, expectedTargets) {
 		return fmt.Errorf("%w: target placement changed before authority gate", snapshot.ErrRestoreNotReady)
 	}
+	if !allSnapshotRestoreTargetsActivated(plan.Targets) {
+		return fmt.Errorf("%w: target replicas have not reported activated restore evidence", snapshot.ErrRestoreNotReady)
+	}
 	_, err = h.lifecycle.Volumes.MarkRestoreComplete(targetVolumeID, snapshotID)
 	return err
 }
@@ -94,11 +97,20 @@ func sameSnapshotRestoreTargets(a, b []snapshot.RestoreReplicaTarget) bool {
 	sort.Slice(left, func(i, j int) bool { return left[i].ReplicaID < left[j].ReplicaID })
 	sort.Slice(right, func(i, j int) bool { return right[i].ReplicaID < right[j].ReplicaID })
 	for i := range left {
-		if left[i] != right[i] {
+		if left[i].VolumeID != right[i].VolumeID || left[i].ReplicaID != right[i].ReplicaID || left[i].RuntimeEndpoint != right[i].RuntimeEndpoint || left[i].TargetStorageID != right[i].TargetStorageID || left[i].TargetNumBlocks != right[i].TargetNumBlocks || left[i].TargetBlockSize != right[i].TargetBlockSize {
 			return false
 		}
 	}
 	return true
+}
+
+func allSnapshotRestoreTargetsActivated(targets []snapshot.RestoreReplicaTarget) bool {
+	for _, target := range targets {
+		if target.RestoreState != snapshot.RestoreStateActivated {
+			return false
+		}
+	}
+	return len(targets) > 0
 }
 
 func snapshotRestoreTargetFromFacts(volumeID, expectedServerID, expectedReplicaID, snapshotID string, hasSlot bool, slot authority.SlotFact) (snapshot.RestoreReplicaTarget, bool) {
@@ -122,6 +134,7 @@ func snapshotRestoreTargetFromFacts(volumeID, expectedServerID, expectedReplicaI
 		TargetStorageID: restore.StorageID,
 		TargetNumBlocks: restore.NumBlocks,
 		TargetBlockSize: int(restore.BlockSize),
+		RestoreState:    restore.State,
 	}, true
 }
 
