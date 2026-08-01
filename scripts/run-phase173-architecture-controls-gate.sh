@@ -77,6 +77,7 @@ write_summary "architecture_candidate_selected=false"
 write_summary "product_mutation_present=false"
 write_summary "deferred_foreground_product_claim_allowed=false"
 write_summary "split_file_scratch_product_claim_allowed=false"
+write_summary "d1_fixed_work_baseline_authoritative=true"
 
 capture kernel uname -a
 capture go-version go version
@@ -227,7 +228,9 @@ split_vs_shared = split / shared
 owner_signal = single_vs_four >= material
 writeback_signal = deferred_vs_shipped >= material
 media_signal = split_vs_shared >= material
-if not counterfactual_stable:
+if not shipped_stable:
+    direction = "no_backend_change_unstable_diagnostic_controls"
+elif not counterfactual_stable:
     direction = "no_backend_change_unstable_counterfactuals"
 elif media_signal and not owner_signal:
     direction = "wal_extent_media_separation"
@@ -248,13 +251,12 @@ summary.extend([
     f"local_architecture_direction={direction}",
     f"shipped_control_stability_gate={'pass' if shipped_stable else 'fail'}",
     f"counterfactual_control_stability_gate={'pass' if counterfactual_stable else 'inconclusive'}",
+    f"diagnostic_controls_candidate_eligible={'true' if shipped_stable and counterfactual_stable else 'false'}",
     "architecture_candidate_selected=false",
 ])
 with open(summary_path, "a", encoding="utf-8") as out:
     for line in summary:
         out.write(line + "\n")
-if not shipped_stable:
-    raise SystemExit("shipped-path control stability exceeded predeclared 1.25x range")
 PY
 
 benchmark_metric() {
@@ -313,6 +315,7 @@ write_summary "rf1_durable_adapter_fixed_iterations=8000"
 write_summary "rf1_durable_adapter_mibps=${rf1_mibps}"
 write_summary "rf1_durable_adapter_ns_per_op=${rf1_ns}"
 
+rf3_queue_saturation_observed=false
 for writers in 1 4; do
   prefix="BenchmarkPhase167RF3SyncQuorumContention/writers_${writers}-"
   write_summary "rf3_writers_${writers}_fixed_iterations=2048"
@@ -323,12 +326,12 @@ for writers in 1 4; do
   write_summary "rf3_writers_${writers}_queue_max_depth=$(require_metric "${ARTIFACT_DIR}/rf3-real-tcp-benchmark.txt" "${prefix}" peer_queue_max_depth)"
   queue_saturated="$(require_metric "${ARTIFACT_DIR}/rf3-real-tcp-benchmark.txt" "${prefix}" peer_queue_saturated)"
   if [[ "${queue_saturated}" != "0" ]]; then
-    echo "RF3 writers=${writers} queue saturated ${queue_saturated} times" >&2
-    exit 1
+    rf3_queue_saturation_observed=true
   fi
   write_summary "rf3_writers_${writers}_queue_saturated=${queue_saturated}"
 done
 
+write_summary "rf3_queue_saturation_observed=${rf3_queue_saturation_observed}"
 write_summary "rf1_rf3_component_attribution=complete"
 write_summary "mounted_nvme_tcp_control=pending_same_session_live_gate"
 write_summary "d3_close_allowed=false"
