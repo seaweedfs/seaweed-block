@@ -141,6 +141,16 @@ func (m *Manager) Get(snapshotID string) (Record, bool) {
 	return rec, ok
 }
 
+func (m *Manager) GetByName(name string) (Record, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	id, ok := m.byName[name]
+	if !ok {
+		return Record{}, false
+	}
+	return m.byID[id], true
+}
+
 func (m *Manager) List(sourceVolumeID string) []Record {
 	m.mu.Lock()
 	defer m.mu.Unlock()

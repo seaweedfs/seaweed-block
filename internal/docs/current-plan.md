@@ -2,7 +2,7 @@
 
 Status: active. Started 2026-08-01 from merged `origin/main` at `7d016ed`.
 
-Progress at `3c354da` plus the next local snapshot commit:
+Progress through the local data layer plus the D4 coordinator contract:
 
 - D1 storage cut contract implemented for `BlockStore`, `walstore`, and the
   shipped-default `smartwal`; deterministic tests prove normal writes and
@@ -18,6 +18,11 @@ Progress at `3c354da` plus the next local snapshot commit:
   `go test -race -count=10 ./core/snapshot ./core/storage/...`; Linux directory
   fsync paths executed and all packages passed. D1-D3 are closed for the local
   data layer. Distributed authority/runtime and CSI claims remain D4+ work.
+- D4 coordinator contract resolves one positively ready current primary,
+  carries the exact replica/epoch/endpoint-version/runtime-endpoint lineage,
+  fences the capture before and after streaming, and publishes no catalog
+  record when authority changes. The separately authenticated runtime RPC and
+  heartbeat endpoint publication are still required before D4 can close.
 
 ## Product Outcome
 
