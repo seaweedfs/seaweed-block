@@ -68,7 +68,11 @@ Progress through the local data layer, distributed runtime, and CSI contract:
   lint/render contract, and runner validation passed. The `sw-block ops
   snapshot-backup` client now exposes ID-only export/get/list/import with
   mTLS, the backup-only token, canonical response validation, and import
-  identity binding.
+  identity binding. Exact `ed9757f` m02 Linux QA passed race coverage for
+  snapshot, CLI, master, and CSI; 20-repeat restore and CLI gates; vet; and a
+  real `mkfs.ext4` -> WALStore restore -> `e2fsck` filesystem round trip. This
+  is local/component evidence only and does not close the blocked D6 mounted
+  Kubernetes path.
 
 ## Product Outcome
 
