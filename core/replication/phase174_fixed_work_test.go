@@ -291,6 +291,8 @@ func runPhase174FixedWork(t *testing.T, p *phase174Pipeline, set, run, writers i
 	if reached := p.waitForReplicaFrontier(time.Second); len(p.replicas) > 0 && reached < 1 {
 		t.Fatal("no replica reached warmup frontier")
 	}
+	runtime.GC()
+	time.Sleep(100 * time.Millisecond)
 	flusherPhaseReset, err := p.resetFlushersForMeasurement()
 	if err != nil {
 		t.Fatalf("reset flusher phase: %v", err)
@@ -299,8 +301,6 @@ func runPhase174FixedWork(t *testing.T, p *phase174Pipeline, set, run, writers i
 	writeBefore := p.primary.WriteInstrumentation()
 	replicationBefore := p.replicationStats()
 	payloads := phase174Payloads(phase174APIOperations, set, run, 0x1741)
-	runtime.GC()
-	time.Sleep(100 * time.Millisecond)
 	foreground, latencies, err := phase174RunWrites(p, writers, 0, payloads, true)
 	if err != nil {
 		t.Fatalf("measured writes: %v", err)
