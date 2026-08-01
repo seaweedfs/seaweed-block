@@ -11,6 +11,10 @@ RUNS=5
 MAX_RANGE="1.25"
 CPUSET="${SW_BLOCK_PHASE174_CPUSET:-0,2,4,6}"
 GOMAXPROCS_VALUE="${SW_BLOCK_PHASE174_GOMAXPROCS:-4}"
+LAYERS_FORWARD=(direct_walstore adapter_rf1 rf3_tcp)
+LAYERS_REVERSE=(rf3_tcp adapter_rf1 direct_walstore)
+WRITERS_FORWARD=(1 4 8)
+WRITERS_REVERSE=(8 4 1)
 
 mkdir -p "${ARTIFACT_DIR}/logs" "${STORE_DIR}"
 : >"${SUMMARY}"
@@ -61,6 +65,7 @@ write_summary "store_filesystem=${store_filesystem}"
 write_summary "dedicated_store_source=true"
 write_summary "control_cpuset=${CPUSET}"
 write_summary "control_gomaxprocs=${GOMAXPROCS_VALUE}"
+write_summary "second_set_order=reversed"
 write_summary "rf1_ack_profile=local_durable"
 write_summary "rf3_ack_profile=sync_quorum_rf3"
 write_summary "cross_ack_profile_throughput_ratio_allowed=false"
@@ -78,8 +83,18 @@ go test -tags swblock_testtools ./core/replication -run '^TestPhase174FixedWorkC
 go test -tags swblock_testtools -c -o "${TEST_BINARY}" ./core/replication
 
 for set_id in 1 2; do
-  for layer in direct_walstore adapter_rf1 rf3_tcp; do
-    for writers in 1 4 8; do
+  sync
+  sleep 5
+  capture "set-${set_id}-start-load" uptime
+  if [[ "${set_id}" == "1" ]]; then
+    layers=("${LAYERS_FORWARD[@]}")
+    writers_values=("${WRITERS_FORWARD[@]}")
+  else
+    layers=("${LAYERS_REVERSE[@]}")
+    writers_values=("${WRITERS_REVERSE[@]}")
+  fi
+  for layer in "${layers[@]}"; do
+    for writers in "${writers_values[@]}"; do
       if [[ "${layer}" != "rf3_tcp" ]]; then
         precondition_log="${ARTIFACT_DIR}/logs/set${set_id}-${layer}-writers${writers}-precondition.log"
         SW_BLOCK_PHASE174_STORE_DIR="${STORE_DIR}" \

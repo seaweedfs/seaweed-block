@@ -41,7 +41,8 @@ overlay, or a network share.
 - one final Sync, close, reopen, Recover, frontier, and byte checks;
 - a build-tag-only `swblock_testtools` flusher reset after warmup, with no
   control method present in shipped binaries;
-- two independent sets of five measured runs;
+- two independent sets of five measured runs, with the second set reversing
+  layer and writer order to expose time/device-order bias;
 - exact primary WAL and replication operation counts;
 - explicit `local_durable` versus `sync_quorum_rf3` ACK profiles.
 
