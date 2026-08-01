@@ -1,231 +1,163 @@
-# Current Plan: Phase 173 Storage Execution Architecture Decision
+# Current Plan: Phase 174 Frontend And Replication Execution Architecture
 
-Status: active; D1 fixed-work measurement and D2 local shipped-path attribution
-are closed. D3 diagnostic architecture controls are next.
+Status: active. Phase 173 closed with no storage-backend change; D1 comparable
+end-to-end measurement is next.
 
 ## Why This Is Next
 
-Phases 167-172 rejected five plausible optimizations without weakening their
-gates:
-
-- a parallel WAL backend did not beat the shipped path;
-- native `io_uring` reduced no dominant persistence round;
-- segmented group commit did not scale;
-- staged append ownership had no stable batching headroom;
-- extent coalescing opportunity was workload-dependent;
-- WAL materialization cut physical reads but improved four-writer throughput
-  only `1.068x` and produced a `2.031x` sample range.
-
-The Phase 172 CPU profile explains why another local patch is unlikely to
-close the gap:
+Phase 173 proved the shipped WALStore engine is stable enough to measure and
+found no evidence for an owner/queue rewrite or WAL/extent media split. The
+remaining diagnostic gap is above the backend:
 
 ```text
-flusher.flushOnceInternal cumulative CPU: 38.6%
-WALStore.Write cumulative CPU:             34.2%
-syscall flat CPU:                          32.9%
-foreground WAL pwrite cumulative CPU:      17.8%
-flusher pread cumulative CPU:              13.3%
-mutex lock/spin cumulative CPU:            about 11%
+WALStore shipped control, 4 writers: 255.743 MiB/s
+RF1 durable adapter diagnostic:       61.28 MiB/s
+RF3 TCP diagnostic, 1 writer:         91.56 MiB/s
+RF3 TCP diagnostic, 4 writers:        14.69 MiB/s
+mounted NVMe/TCP sequential write:    127.49 MiB/s
 ```
 
-No single stage dominates. Foreground append, background WAL readback, extent
-writeback, fsync, and lock scheduling share one file and one volume-level
-execution context. Vitastor's useful lesson is not a specific algorithm to
-copy; it is to make journal/data ownership, queue depth, durability boundaries,
-and completion order explicit before optimizing.
-
-Phase 173 is therefore one large decision-and-delivery milestone. It first
-stabilizes the measurement model, then attributes the complete shipped path,
-then selects at most one architectural candidate. Implementation, recovery,
-replication, mounted validation, and promotion remain in this phase rather
-than being split into many semantic micro-phases.
+These values use different work shapes and cannot be divided into a valid
+performance ratio. They do show that another backend patch is the wrong next
+move. Phase 174 creates one comparable contract across frontend, adapter,
+replication, and mounted paths, attributes each boundary, and selects at most
+one non-backend architecture candidate.
 
 ## Goal
 
-Produce one defensible answer to:
+Answer one product question:
 
 ```text
-Which architectural boundary, if any, can materially improve shipped
-WALStore throughput while preserving its durability and recovery contract?
+Which frontend, adapter, or replication ownership boundary limits concurrent
+shipped writes, and can one bounded change improve it without weakening ACK,
+ordering, recovery, fencing, or mounted I/O semantics?
 ```
 
-The eligible outcomes are:
-
-1. implement and promote one evidence-selected architecture;
-2. implement and retain one opt-in candidate with named blockers;
-3. reject all candidates and publish the measured shipped-backend envelope.
-
-All three are valid. Repeating a previously rejected mechanism without new
-evidence is not.
+Valid outcomes are promote one candidate, retain one opt-in candidate with
+named blockers, or select no change. A diagnostic with different durability or
+payload semantics is not a candidate.
 
 ## Non-Goals
 
-- No immediate `io_uring`, SQPOLL, fixed-buffer, `O_DIRECT`, FUA, or raw-device
-  implementation.
-- No automatic switch from `walstore` to `parallel-walstore` or `smartwal`.
-- No disk-format change before a format/recovery design is selected.
-- No disabled-flusher, checkpoint-free, page-cache-only, or sink-only number
-  may be presented as product throughput.
-- No frontend, replication, or mounted result may be inferred from an engine
-  microbenchmark.
-- No threshold changes after candidate results are visible.
+- No WALStore format or backend ownership redesign.
+- No RDMA transport optimization; Phase 174 first establishes the TCP shipped
+  path contract.
+- No weakened RF3 quorum, asynchronous acknowledgement, sink peer, disabled
+  persistence, or loopback-only number as a product claim.
+- No batch/request-size change before identical logical work and durability
+  are proven.
+- No broad rewrite of CSI, NVMe target, replication, and adapter together.
 
 ## Required Invariants
 
-1. Acknowledged writes remain recoverable after process kill and host restart.
-2. Checkpoint and recyclable tail never advance over incomplete work.
-3. Same-LBA order is deterministic; cross-LBA concurrency cannot publish a
-   non-contiguous durable frontier.
-4. Direct BASE/rebuild ownership cannot race with background writeback.
-5. WAL corruption and malformed geometry fail closed with typed evidence.
-6. Sync fences every write admitted before the call and does not wait for work
-   admitted later.
-7. Close blocks new mutation, drains owned work, and reports terminal failure.
-8. RF3 acknowledgement and catch-up semantics remain unchanged.
-9. Memory and queue ownership are bounded and visible.
-10. Rejected candidates leave the shipped format and defaults unchanged.
+1. RF1 and RF3 ACK profiles remain explicit and unchanged.
+2. Acknowledged writes survive process restart and required replica recovery.
+3. Same-LBA order, global durable frontier, and fencing remain deterministic.
+4. Per-peer and frontend queues are bounded, observable, and fail closed.
+5. Backpressure cannot silently drop, reorder, or acknowledge work early.
+6. Sync fences all prior admitted work and excludes later work.
+7. Peer failure, timeout, close, and reconnect have terminal evidence.
+8. Mounted data and checksums remain correct through restart and catch-up.
+9. No fallback path may hide candidate failure.
+10. Rejected work leaves defaults and shipped behavior unchanged.
 
 ## Deliverables
 
-### D1. Deterministic Fixed-Work Measurement Contract
+### D1. Comparable Fixed-Work Pipeline Contract
 
-Status: closed at `29897cc`. Exact Linux QA passed on `/dev/nvme0n1p1` with
-64 measured rows, 32 precondition runs, and combined four-writer max/min ratios
-of `1.143`, `1.129`, `1.078`, and `1.143` across the four required shapes. See
-`internal/docs/qa-assignments/phase173-d1-fixed-work-baseline-qa-signoff.md`.
+- Define one fixed logical payload, LBA sequence, operation count, writer
+  matrix, queue limits, ACK profile, warmup, Sync, and complete drain.
+- Run engine, durable adapter RF1, RF3 real TCP, NVMe/TCP target, and mounted
+  controls without changing logical or durability semantics.
+- Record one/four/eight writers, throughput, p50/p95/p99, Sync/drain, CPU
+  affinity, network route, device, and run stability.
+- Require two independent five-run sets with the admission shape at or below
+  `1.25x` max/min before selecting a candidate.
+- Where a layer cannot implement the identical contract, label it diagnostic
+  and do not compare its throughput ratio.
 
-- Replace Go benchmark auto-calibration as the admission source with a
-  fixed-operation harness. Keep Go benchmarks as diagnostics only.
-- Use a predeclared operation count, warmup, file size, LBA sequence, writer
-  count, 100 ms flusher, one final Sync, and complete drain.
-- Run ordinary sequential/scattered 4 KiB, explicit 16-block batch, and
-  mounted-sized mixed write shapes at 1/2/4/8 writers.
-- Record foreground wall time and p50/p95/p99 separately from Sync/drain.
-- Record CPU affinity, scheduler, kernel, filesystem, mount options, device,
-  page-cache policy, free space, temperature/throttling evidence, and
-  background load.
-- Require two independent five-run baseline sets with four-writer max/min
-  range at most `1.25x` before any architecture admission. If the harness
-  cannot meet that bound, fix the harness/lab and stop.
+### D2. Complete Boundary Attribution
 
-### D2. Complete Shipped-Path Attribution
+- Measure frontend parse/copy/queue/completion, adapter mapping and commit,
+  replication fanout, per-peer enqueue/send/ACK, backend commit, Sync, and
+  completion publication.
+- Reconcile logical operations and bytes with every queue, peer, backend, TCP,
+  and acknowledgement counter.
+- Correlate product counters with CPU/heap/block profiles, socket statistics,
+  `perf`, and network/device evidence.
+- Separate accumulated concurrent wait from wall time.
 
-Status: closed at `f780cc4` for the local WALStore engine/checkpoint path. Four
-independent fixed-work runs reconciled 16,000 logical blocks with product
-counters, exact `strace` (`pread64=32010`, `pwrite64=18564`, sync=7), exact
-perf, CPU/memory evidence, iostat, and complete checkpoint/drain evidence. See
-`internal/docs/qa-assignments/phase173-d2-shipped-path-attribution-qa-signoff.md`.
-Frontend and RF1/RF3 comparisons remain the explicitly listed D3 controls and
-must not be inferred from this engine result.
+### D3. Architecture Controls And Selection
 
-- Correlate product counters with exact-path `strace`, `perf stat`, CPU/memory
-  profiles, lock wait, `iostat`, and final checkpoint evidence.
-- Attribute foreground WAL encode/copy/CRC/pwrite/lock, flusher
-  snapshot/pread/decode/extent-pwrite/fsync/checkpoint, replication wait, and
-  frontend cost separately.
-- Report time and operation count, not percentages alone.
-- Prove all counters reconcile with fixed logical operations and bytes.
+Run test-only controls for:
 
-### D3. Diagnostic Architecture Controls
+- direct backend versus durable adapter with identical fixed work;
+- frontend request/completion overhead without bypassing durability;
+- RF1 versus RF3 with one peer delayed and with queue limits reached;
+- per-request versus bounded batch submission where ordering is unchanged;
+- one shared replication owner versus bounded per-peer ownership.
 
-Run test-only controls in the same session; none are product candidates:
-
-- foreground append ceiling with writeback deferred, clearly labeled
-  non-durable/non-product;
-- prefilled flusher-only drain with no foreground writers;
-- current shared-file WAL/extent path versus a same-device split-file scratch
-  control;
-- current volume lock versus a bounded no-contention single-writer control;
-- engine-only versus NVMe/TCP frontend and RF1 versus RF3 acknowledgement.
-
-Select at most one direction:
-
-- **Owner/queue redesign** only if lock/scheduling is a stable dominant cost;
-- **WAL/extent media separation** only if same-file I/O/fsync interference is
-  a stable dominant cost;
-- **No backend change** if frontend, replication, device, or benchmark
-  variance dominates or the shipped path already meets the target envelope.
+Select at most one direction only when the effect is stable and at least
+`1.30x` on the four-writer admission shape. Otherwise select no change.
 
 ### D4. Selected Architecture Contract
 
-Required only when D3 selects a candidate.
-
-- Define owner, queue, backpressure, durability frontier, checkpoint, recycle,
-  Close, and failure semantics before code.
-- If storage layout changes, version it explicitly and define create, reopen,
-  upgrade refusal, rollback refusal, support-bundle evidence, and cleanup.
-- Add one dry-run/diagnostic proof and one fail-closed rejected operation
-  before implementing mutation.
-- Independent design review must find no unresolved correctness blocker.
+Required only if D3 selects a candidate. Define owner, queue, admission,
+backpressure, ordering, ACK frontier, Sync, Close, reconnect, failure, and
+evidence semantics before implementation. Require independent correctness
+review and one fail-closed rejected operation.
 
 ### D5. Bounded Candidate Implementation
 
-- Implement only the selected architecture behind an internal or explicit
-  opt-in boundary.
-- Add no second candidate and no speculative configurability.
-- Keep allocations, queues, buffers, and in-flight operations bounded.
-- Add exact counters for ownership, queue depth, I/O rounds, bytes, wait,
-  completion, failure, and fallback.
+Implement only the selected direction behind an internal or explicit opt-in
+boundary. Add exact counters for queue depth, wait, batches, bytes, completion,
+failure, timeout, and fallback. Keep all memory and in-flight work bounded.
 
-### D6. Correctness, Recovery, And Replication Gate
+### D6. Correctness, Failure, And Recovery
 
-- Same-LBA and cross-LBA concurrency, partial writes, batch wrap, WAL pressure,
-  Sync/Close, direct BASE, recycle floors, malformed records, and crash
-  windows.
-- Reopen, `ScanLBAs`, catch-up, returned-replica rebuild, RF1, and RF3
-  component suites.
-- CGO race repetition and real Linux SIGKILL windows.
-- No fallback or recovery branch may hide candidate failure.
+- Same/cross-LBA concurrency, partial requests, queue pressure, Sync/Close,
+  timeout, peer loss, reconnect, process kill, and malformed completion.
+- RF1 and RF3 recovery, catch-up, returned-replica rebuild, and authority
+  fencing.
+- Race tests and real Linux failure windows; zero hidden fallback.
 
 ### D7. Same-Run Performance Admission
 
-Use the D1 fixed-work harness and unchanged thresholds:
+- one-writer throughput at least `0.95x` shipped;
+- four-writer median at least `1.30x` shipped;
+- candidate max/min at most `1.25x`;
+- four-writer p99 no worse than `1.10x` shipped;
+- no required shape regresses more than 10%;
+- zero failed work and complete counter reconciliation.
 
-- one-writer ordinary throughput at least `0.95x` shipped baseline;
-- four-writer ordinary median at least `1.30x` shipped baseline;
-- candidate four-writer max/min range at most `1.25x`;
-- ordinary four-writer p99 no worse than `1.10x`;
-- no workload regresses more than 10%;
-- failed operations/cycles zero and checkpoint coverage complete;
-- product counters agree with OS/device evidence.
-
-Reject and remove the candidate if any required condition fails.
+Reject and remove the candidate if any required gate fails.
 
 ### D8. Mounted RF1/RF3 Close Gate
 
-Run only after D7 admits the candidate:
-
-- exact matching product/CSI images;
-- mounted NVMe/TCP RF1 concurrent write/read/checksum, sustained pressure,
-  restart, and zero-residue cleanup;
-- RF3 sync-quorum with delayed peer, catch-up/rebuild, restart, honest status,
-  and continuous mounted I/O;
-- same-session shipped baseline/candidate comparison;
-- no default promotion until both correctness and performance gates pass.
+- matching product/CSI images and 100 GbE data-plane route;
+- mounted NVMe/TCP fixed-work comparison against the same-session shipped
+  path;
+- RF1 restart and RF3 delayed-peer/catch-up while mounted checksums continue;
+- honest status, no false Ready, safe detach, exact PV deletion before CSI
+  teardown, and zero residue;
+- promote no default until correctness and performance both pass.
 
 ## Stop Rules
 
-Stop before implementation when:
-
-- fixed-work baseline remains noisier than `1.25x`;
-- counters do not reconcile with logical work;
-- diagnostic controls identify no dominant architecture boundary;
-- the proposed direction repeats a Phase 167-172 rejection without new
-  evidence;
-- the candidate requires weaker durability, recovery, corruption, cleanup,
-  or RF3 semantics;
-- benefit exists only in a non-product control.
+Stop before implementation if the comparable baseline is unstable, counters
+do not reconcile, no single boundary dominates, the gain exists only in a
+weakened/non-product control, or the candidate requires weaker durability,
+recovery, fencing, or cleanup semantics.
 
 ## Exit Criteria
 
 ```text
-stable fixed-work baseline
--> complete shipped-path attribution
--> diagnostic architecture controls
+comparable fixed-work contract
+-> complete frontend/adapter/replication attribution
 -> one selected design or honest no-change decision
 -> bounded implementation only if selected
--> correctness/recovery/replication
--> same-run admission
--> mounted RF1/RF3 only if admitted
+-> correctness and recovery
+-> same-run performance admission
+-> mounted RF1/RF3 close
 -> promote, retain opt-in with blockers, or remove
 ```

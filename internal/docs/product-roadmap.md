@@ -611,12 +611,15 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   `1.15x`, and candidate range was `2.031x` against the `1.50x` bound. The
   candidate and measurement-only overhead were removed. Legacy range-trim and
   recovery correctness fixes remain.
-- Active next: Phase 173 establishes a fixed-work performance contract,
-  attributes the complete shipped path, and uses diagnostic controls to choose
-  at most one architecture direction: owner/queue redesign, WAL/extent media
-  separation, or no backend change. No candidate is implemented until the
-  baseline range is at most `1.25x` and OS/device evidence reconciles with
-  product counters.
+- Closed decision: Phase 173 established a stable fixed-work performance
+  contract, reconciled the complete shipped WALStore path with product and OS
+  evidence, and selected no backend change. Owner/queue, deferred-writeback,
+  and media-separation controls produced no stable `1.30x` direction signal;
+  WALStore and its defaults remain unchanged.
+- Active next: Phase 174 moves the same discipline above the backend. It first
+  defines comparable fixed work across frontend, durable adapter, RF1/RF3 TCP,
+  NVMe/TCP target, and mounted paths, then attributes queue/ACK/completion cost
+  and permits at most one evidence-selected non-backend candidate.
 - Protocol hardening now has a dedicated working area under
   `internal/docs/protocol/`. New protocol semantics should update the control
   model, invariant ledger, and anti-pattern checklist there before release
@@ -1268,17 +1271,20 @@ Approximate engineering effort if scope remains tight:
   the pre-declared gate. The candidate was removed while independent recovery
   fixes remained. The finished plan is
   `internal/docs/finished-plans/phase172_finishedplan_wal_materialization_pipeline.md`.
-- Phase 173 Storage Execution Architecture Decision is active. It replaces
-  auto-calibrated admission data with a fixed-work harness, attributes
-  foreground, flusher, lock, syscall, fsync, frontend, and replication costs,
-  and permits only one evidence-selected architecture candidate. The contract
-  is `internal/docs/current-plan.md`. D1 is closed: the exact Linux fixed-work
-  baseline passed on the dedicated m02 NVMe with all four required four-writer
-  combined ranges at or below `1.143x`. D2 local shipped-path attribution is
-  also closed: fixed logical work reconciled exactly with product counters,
-  `strace`, perf, profiles, iostat, and checkpoint evidence on the dedicated
-  m02 NVMe. D3 diagnostic architecture controls are next; no architecture
-  candidate has been selected yet.
+- Phase 173 Storage Execution Architecture Decision is closed with no backend
+  candidate. The exact Linux fixed-work baseline passed on dedicated m02 NVMe;
+  shipped logical work reconciled with product counters, `strace`, perf,
+  profiles, iostat, and checkpoint evidence. D3 then found no stable
+  owner/queue, writeback-interference, or media-separation signal and closed
+  with a real 100 GbE mounted NVMe/TCP writer/read/cleanup gate. The finished
+  plan is
+  `internal/docs/finished-plans/phase173_finishedplan_storage_execution_architecture_decision.md`.
+- Phase 174 Frontend And Replication Execution Architecture is active. It does
+  not infer ratios from Phase 173's differently shaped component controls. It
+  creates one comparable contract across engine, adapter, frontend, RF1/RF3,
+  and mounted paths, performs complete queue/ACK attribution, and selects at
+  most one candidate only after stable evidence. The contract is
+  `internal/docs/current-plan.md`.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.
