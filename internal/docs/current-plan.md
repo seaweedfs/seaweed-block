@@ -44,31 +44,30 @@ Progress through the local data layer, distributed runtime, and CSI contract:
   disabled, and has unit/repeat/vet coverage. The requested CSI capacity range
   must contain the snapshot size; the initial target uses that exact geometry
   because post-restore expansion is not yet implemented.
-- D6 chart wiring is complete locally: default-disabled snapshotter sidecar,
-  role-separated Secret projection, snapshot RBAC, and `VolumeSnapshotClass`
-  render locally. The first live attempt exposed a loopback runtime address;
-  `f1ba252` now rejects that configuration at render time. The exact-commit
-  live rerun created a real ready `VolumeSnapshot`, created and attached a
-  distinct restored volume, then failed its first mount because ext4 could not
-  read the superblock from `/dev/sdb`. Exact diagnostic rerun proved source
-  unstage, equal device geometry, passing source and target `e2fsck`, and
-  byte-identical full-device SHA-256. The defect is post-restore replication
-  sequencing: restore advanced WAL to 27 while the startup resequencer still
-  waited at 1, so the first mounted write at 28 timed out. A frontier-bound
-  resequencer advance is implemented locally, but D6 remains blocked until the
-  mounted Kubernetes path is rerun; control-plane apply/activate evidence
-  alone is not accepted as restored-data proof.
-- D7 adversarial coverage audit found strong L1 component coverage but no
-  Phase 175 dirty-failure L2 scenarios. D7 remains open. The minimum live set
-  is: create crash/retry isolation; restore restart, source delete, and
-  snapshot-delete hold; and target-delete/residue isolation. Helper summaries
-  alone do not satisfy these gates. A target in durable `restore_pending`
-  state is now held before either placement or volume intent deletion, across
-  blockmaster restart, and CSI preserves the `FailedPrecondition` result. This
-  pending state also holds its source snapshot catalog entry against deletion;
-  the reference is released only after durable restore completion. This is
-  only the hold half: an explicit abort/discard path for a permanently failed
-  restore is still required before target-delete can close.
+- D6 Kubernetes packaging and mounted restore passed live on exact `d02ad49`.
+  A real `VolumeSnapshot` became ready, source NodeUnstage/session cleanup
+  completed before restore, a distinct restored ext4 device mounted, pre-cut
+  data was present, a post-cut sentinel was absent, and independent restored
+  writes survived readback. Restore advanced to frontier 15 and the first
+  post-restore write used LSN 16 with zero write timeouts, closing the startup
+  resequencer defect. CSI snapshot capabilities and supported uninstall
+  cleanup also passed. Raw Helm uninstall alone left two inactive iSCSI node
+  records; the product-owned uninstall path removed them and the cleanup
+  verifier reached zero residue. Evidence is recorded in the D6 QA sign-off.
+- D7 now has both the hold and explicit abort/discard implementation at exact
+  `31ac6a3`. A pending target and its source snapshot are deletion-held; abort
+  records immutable replica/node identity, suppresses target workloads and
+  authority, and runs node-pinned, tokenless, leaf-scoped cleanup Jobs only
+  after the old workload is absent. Cleanup validates the exact durable store
+  identity and geometry for walstore, smartwal, and parallelwal; persists
+  crash-safe receipts; retries with bounded backoff and a 120-second attempt
+  deadline; and publishes terminal failure rather than false success. The
+  volume becomes `restore_discarded` only after every replica has exact
+  terminal evidence and all owned Jobs/Pods are gone. Repeated component tests,
+  vet, Helm contract, and adversarial review pass. The real Kubernetes dirty
+  target-delete/foreground-GC gate is running; D7 remains open until that L2
+  evidence passes. Create-crash and restore-restart isolation also remain in
+  the minimum D7 live matrix; helper summaries do not close them.
 - D8 full file-target backup data layer landed at `c5be432`: export only a
   ready immutable snapshot, durable archive/manifest publication, portable
   offline import, canonical identity/path containment, catalog restart,
