@@ -12,6 +12,7 @@ PUBLISH_ROOT="${SW_BLOCK_PHASE174_PUBLISH_ROOT:-/mnt/smb/work/share/g15d-k8s}"
 RUN_ID="${SW_BLOCK_PHASE174_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-phase174-d2-rf3-distinct}"
 ARTIFACT_DIR="${SW_BLOCK_ARTIFACT_DIR:-/tmp/${RUN_ID}}"
 LOCAL_BINARY="/tmp/${RUN_ID}-replication.test"
+PREBUILT_BINARY="${SW_BLOCK_PHASE174_PREBUILT_BINARY:-}"
 REMOTE_ROOT="/tmp/${RUN_ID}"
 REMOTE_BINARY="${REMOTE_ROOT}/replication.test"
 M02_STORE_ROOT="/data/nvme/block/${RUN_ID}-stores"
@@ -85,7 +86,11 @@ mkdir -p "${ARTIFACT_DIR}/environment" "${ARTIFACT_DIR}/logs" "${ARTIFACT_DIR}/r
 : >"${SUMMARY}"
 : >"${RESULTS}"
 
-for command in go ssh scp python3 tar; do
+required_commands=(ssh scp python3 tar)
+if [[ -z "${PREBUILT_BINARY}" ]]; then
+  required_commands+=(go)
+fi
+for command in "${required_commands[@]}"; do
   command -v "${command}" >/dev/null 2>&1 || {
     echo "missing required command: ${command}" >&2
     exit 2
@@ -119,8 +124,12 @@ remote "${M01_HOST}" "! ss -ltnH | grep -q ':17411 '"
 remote "${TP01_HOST}" "! ss -ltnH | grep -q ':17412 '"
 
 cd "${ROOT}"
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -tags swblock_testtools -c \
-  -o "${LOCAL_BINARY}" ./core/replication
+if [[ -n "${PREBUILT_BINARY}" ]]; then
+  cp "${PREBUILT_BINARY}" "${LOCAL_BINARY}"
+else
+  CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -tags swblock_testtools -c \
+    -o "${LOCAL_BINARY}" ./core/replication
+fi
 for host in "${M01_HOST}" "${M02_HOST}" "${TP01_HOST}"; do
   remote "${host}" "test '${REMOTE_ROOT}' = '/tmp/${RUN_ID}'; rm -rf -- '${REMOTE_ROOT}'; mkdir -p '${REMOTE_ROOT}'"
   "${SCP[@]}" "${LOCAL_BINARY}" "${host}:${REMOTE_BINARY}"

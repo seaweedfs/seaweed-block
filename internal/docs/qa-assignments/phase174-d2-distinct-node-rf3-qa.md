@@ -12,6 +12,11 @@ SW_BLOCK_PHASE174_SSH_KEY=/c/work/dev_server/testdev_key \
   bash scripts/run-phase174-distinct-node-rf3-gate.sh "$PWD"
 ```
 
+If the workstation Go toolchain is older than the module requirement, build
+the exact assignment commit's Linux test binary on a Go 1.25 host and pass it
+as `SW_BLOCK_PHASE174_PREBUILT_BINARY`. The gate copies but never modifies the
+provided binary.
+
 ## Contract
 
 - 16,384 deterministic 4 KiB writes and 64 MiB per measured run;
