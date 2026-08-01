@@ -1,6 +1,6 @@
 # Current Plan: Phase 173 Storage Execution Architecture Decision
 
-Status: active evidence-first architecture milestone.
+Status: active; D1 fixed-work measurement is closed and D2 attribution is next.
 
 ## Why This Is Next
 
@@ -87,6 +87,11 @@ evidence is not.
 ## Deliverables
 
 ### D1. Deterministic Fixed-Work Measurement Contract
+
+Status: closed at `29897cc`. Exact Linux QA passed on `/dev/nvme0n1p1` with
+64 measured rows, 32 precondition runs, and combined four-writer max/min ratios
+of `1.143`, `1.129`, `1.078`, and `1.143` across the four required shapes. See
+`internal/docs/qa-assignments/phase173-d1-fixed-work-baseline-qa-signoff.md`.
 
 - Replace Go benchmark auto-calibration as the admission source with a
   fixed-operation harness. Keep Go benchmarks as diagnostics only.

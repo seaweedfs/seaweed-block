@@ -1272,7 +1272,10 @@ Approximate engineering effort if scope remains tight:
   auto-calibrated admission data with a fixed-work harness, attributes
   foreground, flusher, lock, syscall, fsync, frontend, and replication costs,
   and permits only one evidence-selected architecture candidate. The contract
-  is `internal/docs/current-plan.md`.
+  is `internal/docs/current-plan.md`. D1 is closed: the exact Linux fixed-work
+  baseline passed on the dedicated m02 NVMe with all four required four-writer
+  combined ranges at or below `1.143x`. D2 shipped-path attribution is next;
+  no architecture candidate has been selected yet.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.
