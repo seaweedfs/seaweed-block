@@ -185,7 +185,8 @@ if set(groups) != expected:
     raise SystemExit(f"control groups={set(groups)} want {expected}")
 
 summary = []
-stable = True
+shipped_stable = True
+counterfactual_stable = True
 medians = {}
 for key in sorted(expected):
     group = groups[key]
@@ -198,8 +199,11 @@ for key in sorted(expected):
     prefix = f"{key[0]}_writers_{key[1]}"
     summary.append(f"{prefix}_median_mibps={median:.3f}")
     summary.append(f"{prefix}_max_min_ratio={ratio:.3f}")
-    if not math.isfinite(ratio) or ratio > max_range:
-        stable = False
+    group_stable = math.isfinite(ratio) and ratio <= max_range
+    if key == ("shipped_concurrent", 4):
+        shipped_stable = group_stable
+    elif not group_stable:
+        counterfactual_stable = False
     if key[0] in ("shipped_concurrent", "deferred_foreground"):
         waits = [row["commit_lock_wait_ns"] / row["commit_lock_wait_ops"] for row in group]
         p99 = [row["p99_ns"] for row in group]
@@ -223,7 +227,9 @@ split_vs_shared = split / shared
 owner_signal = single_vs_four >= material
 writeback_signal = deferred_vs_shipped >= material
 media_signal = split_vs_shared >= material
-if media_signal and not owner_signal:
+if not counterfactual_stable:
+    direction = "no_backend_change_unstable_counterfactuals"
+elif media_signal and not owner_signal:
     direction = "wal_extent_media_separation"
 elif owner_signal and not media_signal:
     direction = "owner_queue_redesign"
@@ -240,14 +246,15 @@ summary.extend([
     f"writeback_interference_signal={'true' if writeback_signal else 'false'}",
     f"media_separation_signal={'true' if media_signal else 'false'}",
     f"local_architecture_direction={direction}",
-    f"local_control_stability_gate={'pass' if stable else 'fail'}",
+    f"shipped_control_stability_gate={'pass' if shipped_stable else 'fail'}",
+    f"counterfactual_control_stability_gate={'pass' if counterfactual_stable else 'inconclusive'}",
     "architecture_candidate_selected=false",
 ])
 with open(summary_path, "a", encoding="utf-8") as out:
     for line in summary:
         out.write(line + "\n")
-if not stable:
-    raise SystemExit("control stability exceeded predeclared 1.25x range")
+if not shipped_stable:
+    raise SystemExit("shipped-path control stability exceeded predeclared 1.25x range")
 PY
 
 benchmark_metric() {

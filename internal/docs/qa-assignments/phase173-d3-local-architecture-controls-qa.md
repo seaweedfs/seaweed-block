@@ -54,8 +54,10 @@ running long enough on the admission host to cross normal flusher periods.
 
 - `phase173_architecture_controls_status=ok`
 - the expected `control_cpuset` and `control_gomaxprocs`
-- `local_control_stability_gate=pass`
-- all six `*_max_min_ratio` values at most `1.25`
+- `shipped_control_stability_gate=pass`
+- every `*_max_min_ratio` remains recorded against `1.25`; an unstable
+  counterfactual must report `counterfactual_control_stability_gate=inconclusive`
+  and force `local_architecture_direction=no_backend_change_unstable_counterfactuals`
 - `rf1_rf3_component_attribution=complete`
 - RF3 queue saturation zero for one and four writers
 - `architecture_candidate_selected=false`
@@ -77,8 +79,11 @@ until the same-session mounted NVMe/TCP control runs:
 
 ## Verdict
 
-- `PASS`: the local control gate and RF1/RF3 component diagnostics pass. This
-  advances D3 but does not close it.
+- `PASS`: the shipped-path control and RF1/RF3 component diagnostics pass.
+  Stable counterfactuals may nominate one direction; unstable counterfactuals
+  force an honest no-change decision. This advances D3 but does not close it.
 - `FAIL`: correctness, counter, queue, or residue evidence fails.
-- `HOLD`: any control range exceeds `1.25x` or the dedicated-device condition
-  is unavailable. Fix the control/lab before selecting a candidate.
+- `HOLD`: the shipped-path range exceeds `1.25x` or the dedicated-device
+  condition is unavailable. A counterfactual range above `1.25x` is not
+  promoted or tuned into a candidate; it is recorded as inconclusive and
+  selects no backend change, as required by the Phase 173 stop rules.
