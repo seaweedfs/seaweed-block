@@ -61,6 +61,8 @@ type phase173FixedWorkResult struct {
 	WALAppendOps           uint64  `json:"wal_append_ops"`
 	WALWriteAtCalls        uint64  `json:"wal_writeat_calls"`
 	WALWriteAtBytes        uint64  `json:"wal_writeat_bytes"`
+	WALWraps               uint64  `json:"wal_wraps"`
+	WALPaddingBytes        uint64  `json:"wal_padding_bytes"`
 	WALAppendNanos         uint64  `json:"wal_append_ns"`
 	WALAppendLockWaitNanos uint64  `json:"wal_append_lock_wait_ns"`
 	CommitLockWaitOps      uint64  `json:"commit_lock_wait_ops"`
@@ -275,8 +277,10 @@ func runPhase173FixedWork(t *testing.T, cfg phase173FixedWorkConfig, runID, stor
 	if appendOps < uint64(cfg.APIOperations) {
 		return phase173FixedWorkResult{}, fmt.Errorf("phase173 WAL append ops=%d want at least API operations=%d", appendOps, cfg.APIOperations)
 	}
-	if writeAtCalls := writeAfter.WALAppendWriteAtCalls - writeBefore.WALAppendWriteAtCalls; writeAtCalls != appendOps {
-		return phase173FixedWorkResult{}, fmt.Errorf("phase173 WAL writeat calls=%d want append ops=%d", writeAtCalls, appendOps)
+	writeAtCalls := writeAfter.WALAppendWriteAtCalls - writeBefore.WALAppendWriteAtCalls
+	wraps := writeAfter.WALAppendWrapCount - writeBefore.WALAppendWrapCount
+	if writeAtCalls < appendOps || writeAtCalls-appendOps > wraps {
+		return phase173FixedWorkResult{}, fmt.Errorf("phase173 WAL writeat calls=%d append ops=%d wraps=%d", writeAtCalls, appendOps, wraps)
 	}
 	if got := writeAfter.WriteCommitLockWaitOps - writeBefore.WriteCommitLockWaitOps; got != uint64(cfg.APIOperations) {
 		return phase173FixedWorkResult{}, fmt.Errorf("phase173 commit lock ops=%d want API operations=%d", got, cfg.APIOperations)
@@ -329,6 +333,8 @@ func runPhase173FixedWork(t *testing.T, cfg phase173FixedWorkConfig, runID, stor
 		WALAppendOps:           writeAfter.WALAppendOps - writeBefore.WALAppendOps,
 		WALWriteAtCalls:        writeAfter.WALAppendWriteAtCalls - writeBefore.WALAppendWriteAtCalls,
 		WALWriteAtBytes:        writeAfter.WALAppendWriteAtBytes - writeBefore.WALAppendWriteAtBytes,
+		WALWraps:               wraps,
+		WALPaddingBytes:        writeAfter.WALAppendPaddingBytes - writeBefore.WALAppendPaddingBytes,
 		WALAppendNanos:         writeAfter.WALAppendDurationNanos - writeBefore.WALAppendDurationNanos,
 		WALAppendLockWaitNanos: writeAfter.WALAppendLockWaitNanos - writeBefore.WALAppendLockWaitNanos,
 		CommitLockWaitOps:      writeAfter.WriteCommitLockWaitOps - writeBefore.WriteCommitLockWaitOps,

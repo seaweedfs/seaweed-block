@@ -125,8 +125,11 @@ for row in rows:
         raise SystemExit(f"logical/WAL record mismatch: {row}")
     if row["commit_lock_wait_ops"] != row["api_operations"]:
         raise SystemExit(f"API/commit operation mismatch: {row}")
-    if row["wal_append_ops"] < row["api_operations"] or row["wal_writeat_calls"] != row["wal_append_ops"]:
+    if row["wal_append_ops"] < row["api_operations"]:
         raise SystemExit(f"API/WAL physical append mismatch: {row}")
+    extra_writeats = row["wal_writeat_calls"] - row["wal_append_ops"]
+    if extra_writeats < 0 or extra_writeats > row["wal_wraps"]:
+        raise SystemExit(f"WAL padding/writeat mismatch: {row}")
     if row["validation_failures"] != 0 or row["correctness_samples"] < 3:
         raise SystemExit(f"correctness evidence failed: {row}")
     if row["flusher_interval_ms"] != 100:

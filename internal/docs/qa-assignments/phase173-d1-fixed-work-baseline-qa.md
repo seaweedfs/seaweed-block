@@ -45,7 +45,9 @@ Each JSON result must show one final sync, `dirty_entries=0`, and equal
 checkpoint/head/synced frontiers. WAL encode operations must equal logical
 blocks, commit-lock operations must equal fixed API operations, and physical
 WAL append calls must reconcile independently with `WriteAt` calls. A batch
-may encode 16 records while coalescing them into one physical append.
+may encode 16 records while coalescing them into one physical append. A WAL
+wrap may add one separately counted padding `WriteAt`; `wal_wraps` and
+`wal_padding_bytes` make that physical I/O explicit.
 
 ## Verdict
 
