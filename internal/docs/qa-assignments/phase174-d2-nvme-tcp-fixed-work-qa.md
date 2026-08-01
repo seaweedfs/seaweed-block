@@ -27,6 +27,7 @@ test-only reset or benchmark behavior.
 ```bash
 SW_BLOCK_ARTIFACT_DIR=/tmp/<run-id> \
 SW_BLOCK_PHASE174_NVME_STORE_DIR=/data/nvme/block/<run-id>-stores \
+SW_BLOCK_PHASE174_SOURCE_COMMIT=<full-source-commit> \
   bash scripts/run-phase174-nvme-tcp-fixed-work-gate.sh "$PWD"
 ```
 

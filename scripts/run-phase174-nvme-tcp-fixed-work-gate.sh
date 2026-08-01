@@ -11,6 +11,7 @@ RUNS=5
 MAX_RANGE="1.25"
 CPUSET="${SW_BLOCK_PHASE174_CPUSET:-0,2,4,6}"
 GOMAXPROCS_VALUE="${SW_BLOCK_PHASE174_GOMAXPROCS:-4}"
+SOURCE_COMMIT="${SW_BLOCK_PHASE174_SOURCE_COMMIT:-$(git -C "${ROOT}" rev-parse HEAD 2>/dev/null || true)}"
 WRITERS_FORWARD=(1 4 8)
 WRITERS_REVERSE=(8 4 1)
 
@@ -41,6 +42,10 @@ for command in go python3 taskset findmnt; do
     exit 2
   }
 done
+if [[ -z "${SOURCE_COMMIT}" ]]; then
+  echo "phase174 source commit is required" >&2
+  exit 2
+fi
 
 store_source="$(findmnt -n -o SOURCE -T "${STORE_DIR}")"
 store_filesystem="$(findmnt -n -o FSTYPE -T "${STORE_DIR}")"
@@ -52,6 +57,7 @@ fi
 
 write_summary "phase174_nvme_tcp_fixed_work_status=running"
 write_summary "contract=phase174-fixed-work-v1"
+write_summary "source_commit=${SOURCE_COMMIT}"
 write_summary "layer=nvme_tcp_rf1"
 write_summary "scope=nvme_tcp_target_durable_adapter"
 write_summary "ack_profile=local_durable"
