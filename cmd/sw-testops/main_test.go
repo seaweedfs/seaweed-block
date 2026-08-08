@@ -20,6 +20,9 @@ func TestSWTestOpsListShowsRegisteredScenario(t *testing.T) {
 	if !strings.Contains(stdout.String(), "g15e-k8s-dynamic-cleanup") {
 		t.Fatalf("list output missing g15e scenario:\n%s", stdout.String())
 	}
+	if !strings.Contains(stdout.String(), "alpha-k8s-large") {
+		t.Fatalf("list output missing alpha large scenario:\n%s", stdout.String())
+	}
 }
 
 func TestSWTestOpsPassesScenarioParams(t *testing.T) {
