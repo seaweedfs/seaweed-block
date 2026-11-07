@@ -105,3 +105,30 @@ func TestG2_PromotedHostRefusesShipFromDeposedPrimary(t *testing.T) {
 		t.Fatal("G2: the new primary's listener kept the deposed primary's connection open (mutation not refused)")
 	}
 }
+
+// stubFencer fails FenceAsPrimary, as a listener whose in-flight mutations did
+// not drain within the bound would.
+type stubFencer struct{ err error }
+
+func (s stubFencer) FenceAsPrimary(uint64) error { return s.err }
+func (s stubFencer) AdmitAsReplica(uint64)       {}
+
+// If the host cannot fence its own listener, it must not adopt the primary
+// role: OnAssignment is skipped (frontend stays gated), as for an
+// UpdateReplicaSet failure, and master's stream replay redelivers the fact.
+func TestG2_HostDoesNotAdoptPrimaryWhenItsListenerCannotBeFenced(t *testing.T) {
+	h, a, _ := newStubbedHost(t, "vol1", "rB", &orderingRecorder{})
+	h.SetSelfFence(stubFencer{err: errors.New("2 replication mutation(s) still in flight")})
+	h.applyFact(&control.AssignmentFact{
+		VolumeId:          "vol1",
+		ReplicaId:         "rB",
+		Epoch:             2,
+		EndpointVersion:   1,
+		DataAddr:          "127.0.0.1:1",
+		CtrlAddr:          "127.0.0.1:2",
+		PeerSetGeneration: 2,
+	})
+	if got := a.callCount.Load(); got != 0 {
+		t.Fatalf("fail-closed violated: OnAssignment calls=%d want 0", got)
+	}
+}
