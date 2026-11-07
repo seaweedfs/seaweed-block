@@ -18,11 +18,11 @@ row in [`invariant-ledger.md`](./invariant-ledger.md).
 | G1 | Replica lineage floor lives only in memory | Confirmed by code | P1 | Persist an epoch floor; reject mutations until floor is known |
 | G2 | New primary does not fence its own replica listener | Confirmed by code | P1 | On becoming primary, raise own floor and refuse inbound ship |
 | G3 | Production promotion runs without a required ACK frontier | Confirmed by code | P1 | Probe all survivors (R+W>N), then record the ACK frontier in master |
-| G4 | No primary-side lease; a cut-off primary keeps serving reads | Design choice | P2 (decide) | Keep as non-claim, or add a quorum read lease |
+| G4 | No primary-side lease; a cut-off primary keeps serving reads | Decided 2026-11-07: option A | P2 | Keep as an explicit non-claim for alpha/beta (see G4) |
 | G5 | Caught-up check compares LSN without epoch | Plausible, needs test | P2 | (epoch, LSN) comparison plus truncation at the epoch start |
 
-Suggested order: G2, G1, G3 (small, local changes that close the stale-writer
-paths), then the G5 test, then the G4 decision.
+Order: G2, G1, G3 (small, local changes that close the stale-writer
+paths), then the G5 test. G4 is decided (option A).
 
 ## G1: Replica lineage floor lives only in memory
 
@@ -172,8 +172,9 @@ Decision needed (owner):
   primary waits T plus a drift bound before serving. Correctness then
   depends on a bounded clock rate, not on clock sync.
 
-Recommendation: A for alpha and beta, written into the non-claims list; B
-only if a customer needs linearizable reads across partitions.
+Decision (owner, 2026-11-07): A for alpha and beta, written into the
+non-claims list; B only if a customer needs linearizable reads across
+partitions.
 
 ## G5: Caught-up check compares LSN without epoch
 
