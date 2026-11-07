@@ -64,7 +64,7 @@ type ReplicaListener struct {
 	// unaffected.
 	epochFloor uint64
 	primary    bool
-	conns         map[net.Conn]struct{} // active handler connections; protected by mu
+	conns      map[net.Conn]struct{} // active handler connections; protected by mu
 }
 
 // NewReplicaListener creates a listener on the given address.
