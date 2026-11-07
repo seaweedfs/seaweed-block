@@ -425,6 +425,14 @@ func (r *ReplicaListener) validateProbeLineage(incoming RecoveryLineage) bool {
 	return true
 }
 
+// FenceAsPrimary is called when this host takes the primary role at epoch
+// (G2). Not enforced yet: see the G2 fix.
+func (r *ReplicaListener) FenceAsPrimary(epoch uint64) {}
+
+// AdmitAsReplica is called when this host is admitted as a supporting
+// replica at epoch (G2). Not enforced yet: see the G2 fix.
+func (r *ReplicaListener) AdmitAsReplica(epoch uint64) {}
+
 func (r *ReplicaListener) acceptMutationLineage(incoming RecoveryLineage) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
