@@ -57,6 +57,13 @@ type ReplicaListener struct {
 
 	mu            sync.Mutex
 	activeLineage RecoveryLineage
+	// epochFloor is the highest epoch this host has taken a role at
+	// (G2): mutating traffic below it is refused. primary is set while
+	// this host is the primary: then every inbound replication mutation
+	// is refused (it may only come from a deposed primary). Probes are
+	// unaffected.
+	epochFloor uint64
+	primary    bool
 	conns         map[net.Conn]struct{} // active handler connections; protected by mu
 }
 
@@ -426,18 +433,40 @@ func (r *ReplicaListener) validateProbeLineage(incoming RecoveryLineage) bool {
 }
 
 // FenceAsPrimary is called when this host takes the primary role at epoch
-// (G2). Not enforced yet: see the G2 fix.
-func (r *ReplicaListener) FenceAsPrimary(epoch uint64) {}
+// (G2), before its frontend serves IO: from now on the listener refuses
+// every replication mutation (ship, recovery lane start, rebuild), and none
+// below epoch is accepted again. Probes are still answered.
+func (r *ReplicaListener) FenceAsPrimary(epoch uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.primary = true
+	if epoch > r.epochFloor {
+		r.epochFloor = epoch
+	}
+}
 
 // AdmitAsReplica is called when this host is admitted as a supporting
-// replica at epoch (G2). Not enforced yet: see the G2 fix.
-func (r *ReplicaListener) AdmitAsReplica(epoch uint64) {}
+// replica at epoch (G2): replication is accepted again, but none below
+// epoch (the floor never goes down).
+func (r *ReplicaListener) AdmitAsReplica(epoch uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.primary = false
+	if epoch > r.epochFloor {
+		r.epochFloor = epoch
+	}
+}
 
 func (r *ReplicaListener) acceptMutationLineage(incoming RecoveryLineage) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if incoming.SessionID == 0 || incoming.Epoch == 0 || incoming.EndpointVersion == 0 {
+		return false
+	}
+	// G2: a primary applies no inbound replication, and no host applies
+	// any below the epoch it has taken a role at.
+	if r.primary || incoming.Epoch < r.epochFloor {
 		return false
 	}
 
