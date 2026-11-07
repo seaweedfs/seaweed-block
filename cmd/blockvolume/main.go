@@ -772,6 +772,9 @@ func run(f flags) int {
 			_ = h.Close()
 			return 1
 		}
+		// G2: fence the listener with the role the host already holds
+		// (the assignment stream started above) before it serves.
+		h.SetSelfFence(listener)
 		listener.Serve()
 		replListen = listener
 

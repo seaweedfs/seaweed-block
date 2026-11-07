@@ -1,9 +1,11 @@
 package transport
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
@@ -57,7 +59,20 @@ type ReplicaListener struct {
 
 	mu            sync.Mutex
 	activeLineage RecoveryLineage
-	conns         map[net.Conn]struct{} // active handler connections; protected by mu
+	// epochFloor is the highest epoch this host has taken a role at
+	// (G2): mutating traffic below it is refused. primary is set while
+	// this host is the primary: then every inbound replication mutation
+	// is refused (it may only come from a deposed primary). Probes are
+	// unaffected.
+	epochFloor uint64
+	primary    bool
+	// inFlight counts mutating frames between their gate check and the
+	// end of their effect; drained is signalled when it reaches zero.
+	inFlight int
+	drained  *sync.Cond
+	// fenceDrainTimeout bounds how long FenceAsPrimary waits for them.
+	fenceDrainTimeout time.Duration
+	conns             map[net.Conn]struct{} // active handler connections; protected by mu
 }
 
 // NewReplicaListener creates a listener on the given address.
@@ -218,168 +233,191 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 			return // connection closed
 		}
 
-		switch msgType {
-		case MsgRecoveryLaneStart:
-			lineage, err := DecodeLineage(payload)
-			if err != nil {
-				log.Printf("replica: decode recovery lane start: %v", err)
-				return
-			}
-			if !r.acceptMutationLineage(lineage) {
-				log.Printf("replica: reject stale recovery lane start session=%d epoch=%d endpointVersion=%d",
-					lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
-				return
-			}
-			lane = mutationLaneRecovery
-
-		case MsgShipEntry:
-			entry, err := DecodeShipEntry(payload)
-			if err != nil {
-				log.Printf("replica: decode ship entry: %v", err)
-				return
-			}
-			if !r.acceptMutationLineage(entry.Lineage) {
-				log.Printf("replica: reject stale ship session=%d epoch=%d endpointVersion=%d",
-					entry.Lineage.SessionID, entry.Lineage.Epoch, entry.Lineage.EndpointVersion)
-				return
-			}
-			// If the apply-gate is installed, route through it.
-			// Caller (this handler) decides lane; gate is lane-pure.
-			// Live-lane stale entries return error here → log +
-			// close conn (INV-REPL-LIVE-LANE-STALE-FAILS-LOUD).
-			if r.applyHook != nil {
-				var err error
-				if lane == mutationLaneRecovery {
-					err = r.applyHook.ApplyRecovery(entry.Lineage, entry.LBA, entry.Data, entry.LSN)
-				} else {
-					err = r.applyHook.ApplyLive(entry.Lineage, entry.LBA, entry.Data, entry.LSN)
-				}
+		// G2: a mutating frame is counted from before its gate check until its
+		// effect is done, so FenceAsPrimary can wait out every frame that may
+		// already have passed the gate (claude03 review of #82).
+		mutating := isMutationMsg(msgType)
+		if mutating {
+			r.beginMutationFrame()
+		}
+		// A mutating frame's ack is written after the frame is uncounted:
+		// the fence waits for storage effects only, never for the network.
+		var replyType byte
+		var reply []byte
+		stop := func() bool {
+			switch msgType {
+			case MsgRecoveryLaneStart:
+				lineage, err := DecodeLineage(payload)
 				if err != nil {
-					log.Printf("replica: apply gate: %v", err)
-					return
+					log.Printf("replica: decode recovery lane start: %v", err)
+					return true
 				}
-				continue
-			}
-			// No hook: direct apply.
-			if err := r.store.ApplyEntry(entry.LBA, entry.Data, entry.LSN); err != nil {
-				log.Printf("replica: apply entry: %v", err)
-			}
+				if !r.acceptMutationLineage(lineage) {
+					log.Printf("replica: reject stale recovery lane start session=%d epoch=%d endpointVersion=%d",
+						lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
+					return true
+				}
+				lane = mutationLaneRecovery
 
-		case MsgProbeReq:
-			// ProbeReq carries full RecoveryLineage. Decode + validate
-			// + echo via the symmetric-pair rule. Failure to decode
-			// (short / zeroed lineage) closes the conn without
-			// echoing — the primary times out + treats as
-			// unreachable, which is the correct fail-closed surface.
-			//
-			// Probe is non-mutating: validation gates zeros and clearly
-			// stale lineages but MUST NOT advance `activeLineage`.
-			// Advancing activeLineage from a probe would cause a
-			// later catch-up / rebuild session at a lower sessionID
-			// (but same epoch / endpointVersion) to be incorrectly
-			// rejected as stale — probes monotonically advance
-			// sessionID via the adapter's global counter, so they
-			// would routinely race ahead of in-flight session IDs.
-			// Use `validateProbeLineage` instead.
-			req, err := DecodeProbeReq(payload)
-			if err != nil {
-				log.Printf("replica: decode probe req: %v", err)
-				return
-			}
-			if !r.validateProbeLineage(req.Lineage) {
-				log.Printf("replica: reject stale probe session=%d epoch=%d endpointVersion=%d",
-					req.Lineage.SessionID, req.Lineage.Epoch, req.Lineage.EndpointVersion)
-				return
-			}
-			R, S, H := r.store.Boundaries()
-			resp := EncodeProbeResp(ProbeResponse{
-				Lineage:   req.Lineage, // echo per symmetric-pair rule
-				SyncedLSN: R,
-				WalTail:   S,
-				WalHead:   H,
-			})
-			if err := WriteMsg(conn, MsgProbeResp, resp); err != nil {
-				return
-			}
+			case MsgShipEntry:
+				entry, err := DecodeShipEntry(payload)
+				if err != nil {
+					log.Printf("replica: decode ship entry: %v", err)
+					return true
+				}
+				if !r.acceptMutationLineage(entry.Lineage) {
+					log.Printf("replica: reject stale ship session=%d epoch=%d endpointVersion=%d",
+						entry.Lineage.SessionID, entry.Lineage.Epoch, entry.Lineage.EndpointVersion)
+					return true
+				}
+				// If the apply-gate is installed, route through it.
+				// Caller (this handler) decides lane; gate is lane-pure.
+				// Live-lane stale entries return error here → log +
+				// close conn (INV-REPL-LIVE-LANE-STALE-FAILS-LOUD).
+				if r.applyHook != nil {
+					var err error
+					if lane == mutationLaneRecovery {
+						err = r.applyHook.ApplyRecovery(entry.Lineage, entry.LBA, entry.Data, entry.LSN)
+					} else {
+						err = r.applyHook.ApplyLive(entry.Lineage, entry.LBA, entry.Data, entry.LSN)
+					}
+					if err != nil {
+						log.Printf("replica: apply gate: %v", err)
+						return true
+					}
+					return false
+				}
+				// No hook: direct apply.
+				if err := r.store.ApplyEntry(entry.LBA, entry.Data, entry.LSN); err != nil {
+					log.Printf("replica: apply entry: %v", err)
+				}
 
-		case MsgRebuildBlock:
-			lineage, lba, data, err := DecodeRebuildBlock(payload)
-			if err != nil {
-				log.Printf("replica: decode rebuild block: %v", err)
-				return
-			}
-			if !r.acceptMutationLineage(lineage) {
-				log.Printf("replica: reject stale rebuild block session=%d epoch=%d endpointVersion=%d",
-					lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
-				return
-			}
-			// Rebuild blocks are BASE-lane bytes. They must not enter the
-			// WAL apply path and must not advance R/S/H per block; the
-			// frontier is reconciled once, at MsgRebuildDone.
-			if err := prepareBaseInstall(); err != nil {
-				log.Printf("replica: prepare rebuild base: %v", err)
-				return
-			}
-			if err := r.store.WriteExtentDirect(lba, data); err != nil {
-				log.Printf("replica: apply rebuild base block: %v", err)
-				return
-			}
+			case MsgProbeReq:
+				// ProbeReq carries full RecoveryLineage. Decode + validate
+				// + echo via the symmetric-pair rule. Failure to decode
+				// (short / zeroed lineage) closes the conn without
+				// echoing — the primary times out + treats as
+				// unreachable, which is the correct fail-closed surface.
+				//
+				// Probe is non-mutating: validation gates zeros and clearly
+				// stale lineages but MUST NOT advance `activeLineage`.
+				// Advancing activeLineage from a probe would cause a
+				// later catch-up / rebuild session at a lower sessionID
+				// (but same epoch / endpointVersion) to be incorrectly
+				// rejected as stale — probes monotonically advance
+				// sessionID via the adapter's global counter, so they
+				// would routinely race ahead of in-flight session IDs.
+				// Use `validateProbeLineage` instead.
+				req, err := DecodeProbeReq(payload)
+				if err != nil {
+					log.Printf("replica: decode probe req: %v", err)
+					return true
+				}
+				if !r.validateProbeLineage(req.Lineage) {
+					log.Printf("replica: reject stale probe session=%d epoch=%d endpointVersion=%d",
+						req.Lineage.SessionID, req.Lineage.Epoch, req.Lineage.EndpointVersion)
+					return true
+				}
+				R, S, H := r.store.Boundaries()
+				resp := EncodeProbeResp(ProbeResponse{
+					Lineage:   req.Lineage, // echo per symmetric-pair rule
+					SyncedLSN: R,
+					WalTail:   S,
+					WalHead:   H,
+				})
+				if err := WriteMsg(conn, MsgProbeResp, resp); err != nil {
+					return true
+				}
 
-		case MsgRebuildDone:
-			lineage, err := DecodeLineage(payload)
-			if err != nil {
-				log.Printf("replica: decode rebuild done: %v", err)
-				return
-			}
-			if !r.acceptMutationLineage(lineage) {
-				log.Printf("replica: reject stale rebuild done session=%d epoch=%d endpointVersion=%d",
-					lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
-				return
-			}
-			if err := prepareBaseInstall(); err != nil {
-				log.Printf("replica: prepare empty rebuild base: %v", err)
-				return
-			}
-			// The done message carries the engine's frozen base frontier hint.
-			// Advance the replica's frontier metadata without touching
-			// any block data — AdvanceFrontier only updates nextLSN/walHead.
-			r.store.AdvanceFrontier(lineage.EffectiveFrontierHint())
-			frontier, _ := r.store.Sync()
-			// Echo the request's full lineage in the rebuild-done ack
-			// so primary-side validators can consume it.
-			resp := EncodeBarrierResp(BarrierResponse{
-				Lineage:     lineage,
-				AchievedLSN: frontier,
-			})
-			if err := WriteMsg(conn, MsgBarrierResp, resp); err != nil {
-				return
-			}
-			return
+			case MsgRebuildBlock:
+				lineage, lba, data, err := DecodeRebuildBlock(payload)
+				if err != nil {
+					log.Printf("replica: decode rebuild block: %v", err)
+					return true
+				}
+				if !r.acceptMutationLineage(lineage) {
+					log.Printf("replica: reject stale rebuild block session=%d epoch=%d endpointVersion=%d",
+						lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
+					return true
+				}
+				// Rebuild blocks are BASE-lane bytes. They must not enter the
+				// WAL apply path and must not advance R/S/H per block; the
+				// frontier is reconciled once, at MsgRebuildDone.
+				if err := prepareBaseInstall(); err != nil {
+					log.Printf("replica: prepare rebuild base: %v", err)
+					return true
+				}
+				if err := r.store.WriteExtentDirect(lba, data); err != nil {
+					log.Printf("replica: apply rebuild base block: %v", err)
+					return true
+				}
 
-		case MsgBarrierReq:
-			lineage, err := DecodeLineage(payload)
-			if err != nil {
-				log.Printf("replica: decode barrier req: %v", err)
-				return
-			}
-			if !r.acceptMutationLineage(lineage) {
-				log.Printf("replica: reject stale barrier session=%d epoch=%d endpointVersion=%d",
-					lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
-				return
-			}
-			frontier, _ := r.store.Sync()
-			// Echo the request's full lineage in the barrier ack.
-			// The primary's DurabilityCoordinator validates this
-			// tuple against the session it is awaiting before
-			// counting the ack toward quorum.
-			resp := EncodeBarrierResp(BarrierResponse{
-				Lineage:     lineage,
-				AchievedLSN: frontier,
-			})
-			WriteMsg(conn, MsgBarrierResp, resp)
+			case MsgRebuildDone:
+				lineage, err := DecodeLineage(payload)
+				if err != nil {
+					log.Printf("replica: decode rebuild done: %v", err)
+					return true
+				}
+				if !r.acceptMutationLineage(lineage) {
+					log.Printf("replica: reject stale rebuild done session=%d epoch=%d endpointVersion=%d",
+						lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
+					return true
+				}
+				if err := prepareBaseInstall(); err != nil {
+					log.Printf("replica: prepare empty rebuild base: %v", err)
+					return true
+				}
+				// The done message carries the engine's frozen base frontier hint.
+				// Advance the replica's frontier metadata without touching
+				// any block data — AdvanceFrontier only updates nextLSN/walHead.
+				r.store.AdvanceFrontier(lineage.EffectiveFrontierHint())
+				frontier, _ := r.store.Sync()
+				// Echo the request's full lineage in the rebuild-done ack
+				// so primary-side validators can consume it.
+				resp := EncodeBarrierResp(BarrierResponse{
+					Lineage:     lineage,
+					AchievedLSN: frontier,
+				})
+				replyType, reply = MsgBarrierResp, resp
+				return true
 
-		default:
-			log.Printf("replica: unknown message type 0x%02x", msgType)
+			case MsgBarrierReq:
+				lineage, err := DecodeLineage(payload)
+				if err != nil {
+					log.Printf("replica: decode barrier req: %v", err)
+					return true
+				}
+				if !r.acceptMutationLineage(lineage) {
+					log.Printf("replica: reject stale barrier session=%d epoch=%d endpointVersion=%d",
+						lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
+					return true
+				}
+				frontier, _ := r.store.Sync()
+				// Echo the request's full lineage in the barrier ack.
+				// The primary's DurabilityCoordinator validates this
+				// tuple against the session it is awaiting before
+				// counting the ack toward quorum.
+				resp := EncodeBarrierResp(BarrierResponse{
+					Lineage:     lineage,
+					AchievedLSN: frontier,
+				})
+				replyType, reply = MsgBarrierResp, resp
+
+			default:
+				log.Printf("replica: unknown message type 0x%02x", msgType)
+				return true
+			}
+			return false
+		}()
+		if mutating {
+			r.endMutationFrame()
+		}
+		if reply != nil {
+			if err := WriteMsg(conn, replyType, reply); err != nil {
+				return
+			}
+		}
+		if stop {
 			return
 		}
 	}
@@ -425,11 +463,108 @@ func (r *ReplicaListener) validateProbeLineage(incoming RecoveryLineage) bool {
 	return true
 }
 
+// FenceAsPrimary is called when this host takes the primary role at epoch
+// (G2), before its frontend serves IO: from now on the listener refuses
+// every replication mutation (ship, recovery lane start, rebuild), and none
+// below epoch is accepted again. Probes are still answered.
+//
+// It returns only once every mutating frame that may already have passed
+// the gate has finished its effect, so nothing from a deposed primary is
+// applied after the host serves as primary. If that does not happen within
+// fenceDrainTimeout it returns an error, and the host must not take the
+// role (it fails closed; master redelivers the assignment).
+func (r *ReplicaListener) FenceAsPrimary(epoch uint64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.primary = true
+	if epoch > r.epochFloor {
+		r.epochFloor = epoch
+	}
+	if r.inFlight == 0 {
+		return nil
+	}
+	timeout := r.fenceDrainTimeout
+	if timeout <= 0 {
+		timeout = defaultFenceDrainTimeout
+	}
+	drained := r.drainedLocked()
+	expired := false
+	timer := time.AfterFunc(timeout, func() {
+		r.mu.Lock()
+		expired = true
+		r.mu.Unlock()
+		drained.Broadcast()
+	})
+	defer timer.Stop()
+	for r.inFlight > 0 && !expired {
+		drained.Wait()
+	}
+	if r.inFlight > 0 {
+		return fmt.Errorf("replica listener: %d replication mutation(s) still in flight %v after fencing as primary at epoch %d", r.inFlight, timeout, epoch)
+	}
+	return nil
+}
+
+// defaultFenceDrainTimeout bounds FenceAsPrimary's wait for in-flight
+// mutations (one apply or rebuild extent write, or one barrier fsync).
+const defaultFenceDrainTimeout = 10 * time.Second
+
+// isMutationMsg names the frames that pass acceptMutationLineage.
+func isMutationMsg(msgType byte) bool {
+	switch msgType {
+	case MsgRecoveryLaneStart, MsgShipEntry, MsgRebuildBlock, MsgRebuildDone, MsgBarrierReq:
+		return true
+	}
+	return false
+}
+
+func (r *ReplicaListener) beginMutationFrame() {
+	r.mu.Lock()
+	r.inFlight++
+	r.mu.Unlock()
+}
+
+func (r *ReplicaListener) endMutationFrame() {
+	r.mu.Lock()
+	r.inFlight--
+	if r.inFlight == 0 {
+		r.drainedLocked().Broadcast()
+	}
+	r.mu.Unlock()
+}
+
+// drainedLocked returns the in-flight condition variable, creating it on
+// first use (some callers build the listener without a constructor).
+// Caller holds r.mu.
+func (r *ReplicaListener) drainedLocked() *sync.Cond {
+	if r.drained == nil {
+		r.drained = sync.NewCond(&r.mu)
+	}
+	return r.drained
+}
+
+// AdmitAsReplica is called when this host is admitted as a supporting
+// replica at epoch (G2): replication is accepted again, but none below
+// epoch (the floor never goes down).
+func (r *ReplicaListener) AdmitAsReplica(epoch uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.primary = false
+	if epoch > r.epochFloor {
+		r.epochFloor = epoch
+	}
+}
+
 func (r *ReplicaListener) acceptMutationLineage(incoming RecoveryLineage) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if incoming.SessionID == 0 || incoming.Epoch == 0 || incoming.EndpointVersion == 0 {
+		return false
+	}
+	// G2: a primary applies no inbound replication, and no host applies
+	// any below the epoch it has taken a role at.
+	if r.primary || incoming.Epoch < r.epochFloor {
 		return false
 	}
 

@@ -111,6 +111,17 @@ type Host struct {
 	replicationMu sync.RWMutex
 	replication   replicaSetUpdater
 
+	// selfFence is this host's own replica listener (G2). When the host
+	// takes the primary role at epoch e it fences the listener at e before
+	// the adapter is told (so before the frontend serves IO); when it is
+	// admitted as a supporting replica it re-admits replication at that
+	// epoch. selfRole/selfEpoch remember the last decision so a listener
+	// wired after the first fact (the binary path) is fenced on install.
+	selfFenceMu sync.Mutex
+	selfFence   selfFencer
+	selfRole    selfRole
+	selfEpoch   uint64
+
 	conn   *grpc.ClientConn
 	obsCli control.ObservationServiceClient
 	asnCli control.AssignmentServiceClient
@@ -320,6 +331,65 @@ func (h *Host) replayLocalReadinessFactIfReady() {
 	}
 	h.log.Printf("blockvolume: volume %s replaying assignment after local readiness cleared", h.cfg.VolumeID)
 	h.applyFact(fact)
+}
+
+// selfFencer is the narrow interface Host needs from its own replica
+// listener (G2). *transport.ReplicaListener satisfies it.
+type selfFencer interface {
+	// FenceAsPrimary: this host is primary at epoch; refuse all inbound
+	// replication mutations, and any below epoch. It returns once no
+	// mutation admitted before the fence is still applying, or an error
+	// if that did not happen in time (the host must not take the role).
+	FenceAsPrimary(epoch uint64) error
+	// AdmitAsReplica: this host supports another primary at epoch;
+	// accept replication again, but none below epoch.
+	AdmitAsReplica(epoch uint64)
+}
+
+type selfRole int
+
+const (
+	selfRoleNone selfRole = iota
+	selfRolePrimary
+	selfRoleReplica
+)
+
+// SetSelfFence installs this host's own replica listener (G2). The binary
+// starts the assignment stream before the listener exists, so a role
+// already adopted is applied to the listener here, before it serves (a
+// listener that is not yet serving has nothing in flight to wait for).
+func (h *Host) SetSelfFence(f selfFencer) {
+	h.selfFenceMu.Lock()
+	defer h.selfFenceMu.Unlock()
+	h.selfFence = f
+	if f != nil {
+		if err := applySelfRole(f, h.selfRole, h.selfEpoch); err != nil {
+			h.log.Printf("blockvolume: volume %s replica listener fence on install: %v", h.cfg.VolumeID, err)
+		}
+	}
+}
+
+// fenceSelf records the role this host just took and applies it to its
+// listener, if installed. An error means the listener could not be fenced
+// in time; the caller must not adopt the primary role.
+func (h *Host) fenceSelf(role selfRole, epoch uint64) error {
+	h.selfFenceMu.Lock()
+	defer h.selfFenceMu.Unlock()
+	h.selfRole, h.selfEpoch = role, epoch
+	if h.selfFence != nil {
+		return applySelfRole(h.selfFence, role, epoch)
+	}
+	return nil
+}
+
+func applySelfRole(f selfFencer, role selfRole, epoch uint64) error {
+	switch role {
+	case selfRolePrimary:
+		return f.FenceAsPrimary(epoch)
+	case selfRoleReplica:
+		f.AdmitAsReplica(epoch)
+	}
+	return nil
 }
 
 // getReplication returns the current replication slot under a
@@ -606,6 +676,7 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 					h.cfg.VolumeID, reason, info.ReplicaID, info.Epoch, info.EndpointVersion)
 				return
 			}
+			_ = h.fenceSelf(selfRoleReplica, info.Epoch) // admitting cannot fail
 			h.adpt.OnAssignment(info)
 			h.log.Printf("blockvolume: volume %s admitted as SUPPORTING replica %s at epoch=%d EV=%d behind primary %s; frontend remains gated",
 				h.cfg.VolumeID, info.ReplicaID, info.Epoch, info.EndpointVersion, fact.ReplicaId)
@@ -655,6 +726,16 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 	// Step (2c): identity install only after replication is live.
 	// SOLE permitted decode path. See subscribe.go.
 	info := decodeAssignmentFact(fact)
+	// G2: fence our own replica listener at this epoch before the adapter
+	// can turn Healthy and the frontend serves IO, so a deposed primary that
+	// still reaches us cannot get its writes applied (or counted) here.
+	if err := h.fenceSelf(selfRolePrimary, info.Epoch); err != nil {
+		// Fail closed, as for an UpdateReplicaSet failure: the frontend
+		// stays gated and master's stream replay redelivers the fact.
+		h.log.Printf("blockvolume: volume %s could not fence its own replica listener at epoch %d: %v — NOT applying to adapter (fail-closed)",
+			h.cfg.VolumeID, info.Epoch, err)
+		return
+	}
 	h.adpt.OnAssignment(info)
 	h.log.Printf("blockvolume: volume %s adopted as PRIMARY at %s@%d (EV=%d)",
 		h.cfg.VolumeID, info.ReplicaID, info.Epoch, info.EndpointVersion)
