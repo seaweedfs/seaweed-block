@@ -121,6 +121,12 @@ type Host struct {
 	selfFence   selfFencer
 	selfRole    selfRole
 	selfEpoch   uint64
+	// roleAdmissionFailed (G1) latches a failed role call on the listener
+	// (a floor that could not be persisted, or a fence that did not drain).
+	// While set, the frontend projection is not Healthy, so writes refuse
+	// even on a host that was healthy at its prior epoch; only a later
+	// successful role call for the current role and epoch clears it.
+	roleAdmissionFailed atomic.Value // string reason; "" = not failed
 
 	conn   *grpc.ClientConn
 	obsCli control.ObservationServiceClient
@@ -342,8 +348,9 @@ type selfFencer interface {
 	// if that did not happen in time (the host must not take the role).
 	FenceAsPrimary(epoch uint64) error
 	// AdmitAsReplica: this host supports another primary at epoch;
-	// accept replication again, but none below epoch.
-	AdmitAsReplica(epoch uint64)
+	// accept replication again, but none below epoch. An error means the
+	// floor could not be made durable; the host must not admit the role.
+	AdmitAsReplica(epoch uint64) error
 }
 
 type selfRole int
@@ -358,15 +365,42 @@ const (
 // starts the assignment stream before the listener exists, so a role
 // already adopted is applied to the listener here, before it serves (a
 // listener that is not yet serving has nothing in flight to wait for).
-func (h *Host) SetSelfFence(f selfFencer) {
+//
+// A replay error is returned (and latched): the caller must not serve the
+// listener, and the host's frontend stays unhealthy until a later role call
+// succeeds.
+func (h *Host) SetSelfFence(f selfFencer) error {
 	h.selfFenceMu.Lock()
 	defer h.selfFenceMu.Unlock()
 	h.selfFence = f
-	if f != nil {
-		if err := applySelfRole(f, h.selfRole, h.selfEpoch); err != nil {
-			h.log.Printf("blockvolume: volume %s replica listener fence on install: %v", h.cfg.VolumeID, err)
-		}
+	if f == nil {
+		return nil
 	}
+	err := applySelfRole(f, h.selfRole, h.selfEpoch)
+	h.latchRoleAdmission(h.selfRole, h.selfEpoch, err)
+	return err
+}
+
+// latchRoleAdmission records the outcome of a role call: a failure sets the
+// latch (projection not Healthy); a success clears it. Caller holds
+// selfFenceMu.
+func (h *Host) latchRoleAdmission(role selfRole, epoch uint64, err error) {
+	if role == selfRoleNone {
+		return
+	}
+	if err != nil {
+		h.roleAdmissionFailed.Store(fmt.Sprintf("replica listener role call failed at epoch %d: %v", epoch, err))
+		return
+	}
+	h.roleAdmissionFailed.Store("")
+}
+
+// RoleAdmissionFailure reports the G1 admission latch: whether the last role
+// call on this host's replica listener failed, and why. The projection view
+// treats a failure as not Healthy.
+func (h *Host) RoleAdmissionFailure() (bool, string) {
+	reason, _ := h.roleAdmissionFailed.Load().(string)
+	return reason != "", reason
 }
 
 // fenceSelf records the role this host just took and applies it to its
@@ -376,10 +410,12 @@ func (h *Host) fenceSelf(role selfRole, epoch uint64) error {
 	h.selfFenceMu.Lock()
 	defer h.selfFenceMu.Unlock()
 	h.selfRole, h.selfEpoch = role, epoch
-	if h.selfFence != nil {
-		return applySelfRole(h.selfFence, role, epoch)
+	if h.selfFence == nil {
+		return nil
 	}
-	return nil
+	err := applySelfRole(h.selfFence, role, epoch)
+	h.latchRoleAdmission(role, epoch, err)
+	return err
 }
 
 func applySelfRole(f selfFencer, role selfRole, epoch uint64) error {
@@ -387,7 +423,7 @@ func applySelfRole(f selfFencer, role selfRole, epoch uint64) error {
 	case selfRolePrimary:
 		return f.FenceAsPrimary(epoch)
 	case selfRoleReplica:
-		f.AdmitAsReplica(epoch)
+		return f.AdmitAsReplica(epoch)
 	}
 	return nil
 }
@@ -676,7 +712,13 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 					h.cfg.VolumeID, reason, info.ReplicaID, info.Epoch, info.EndpointVersion)
 				return
 			}
-			_ = h.fenceSelf(selfRoleReplica, info.Epoch) // admitting cannot fail
+			if err := h.fenceSelf(selfRoleReplica, info.Epoch); err != nil {
+				// G1: fail closed, as for the primary path; stream replay
+				// redelivers the fact and a later success clears the latch.
+				h.log.Printf("blockvolume: volume %s could not admit its replica listener at epoch %d: %v — NOT admitting supporting replica (fail-closed)",
+					h.cfg.VolumeID, info.Epoch, err)
+				return
+			}
 			h.adpt.OnAssignment(info)
 			h.log.Printf("blockvolume: volume %s admitted as SUPPORTING replica %s at epoch=%d EV=%d behind primary %s; frontend remains gated",
 				h.cfg.VolumeID, info.ReplicaID, info.Epoch, info.EndpointVersion, fact.ReplicaId)

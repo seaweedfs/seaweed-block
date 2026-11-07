@@ -158,6 +158,9 @@ type StatusProjection struct {
 	FrontendPrimaryReady bool
 	AuthorityRole        string
 	ReplicationRole      string
+	// RoleAdmissionFailure (G1) explains a not-Healthy projection caused
+	// by a failed role call on the replica listener; empty otherwise.
+	RoleAdmissionFailure string `json:",omitempty"`
 }
 
 // NewStatusServer wires a server to one volume host's view.
@@ -410,6 +413,7 @@ func (s *StatusServer) statusProjection() StatusProjection {
 		FrontendPrimaryReady: p.Healthy && !superseded && !supportingReady,
 		AuthorityRole:        authorityRole,
 		ReplicationRole:      replicationRole,
+		RoleAdmissionFailure: s.view.roleAdmissionReason(),
 	}
 }
 

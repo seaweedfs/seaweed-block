@@ -190,6 +190,14 @@ func (p *DurableProvider) volumePath(volumeID string) string {
 	return filepath.Join(p.cfg.StorageRoot, volumeID+".bin")
 }
 
+// VolumeExists reports whether volumeID's storage file already exists, i.e.
+// whether opening it would open an existing volume rather than create one.
+// Callers that must do something before a volume's creation (the replica
+// floor record, fencing gap G1) ask here first.
+func (p *DurableProvider) VolumeExists(volumeID string) (bool, error) {
+	return fileExists(p.volumePath(volumeID))
+}
+
 // Open implements frontend.Provider. Returns the cached backend
 // for volumeID if already opened; otherwise opens (or creates)
 // storage and caches the handle.

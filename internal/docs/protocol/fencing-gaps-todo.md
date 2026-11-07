@@ -15,7 +15,7 @@ row in [`invariant-ledger.md`](./invariant-ledger.md).
 
 | ID | Gap | Status | Priority | Proposed fix (short) |
 |---|---|---|---|---|
-| G1 | Replica lineage floor lives only in memory | Confirmed by code | P1 | Persist an epoch floor; reject mutations until floor is known |
+| G1 | Replica lineage floor lives only in memory | Fixed (red test + fix; ledger `INV-FENCE-FLOOR-DURABLE-001`) | P1 | Persist an epoch floor; reject mutations until floor is known |
 | G2 | New primary does not fence its own replica listener | Fixed (red test + fix; ledger `INV-FENCE-SELF-ON-PROMOTE-001`) | P1 | On becoming primary, raise own floor and refuse inbound ship |
 | G3 | Production promotion runs without a required ACK frontier | Confirmed by code | P1 | Probe all survivors (R+W>N), then record the ACK frontier in master |
 | G4 | No primary-side lease; a cut-off primary keeps serving reads | Decided 2026-11-07: option A | P2 | Keep as an explicit non-claim for alpha/beta (see G4) |
