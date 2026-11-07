@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -558,6 +559,25 @@ func run(f flags) int {
 		// will succeed at frontend bind. Replica role: frontends are
 		// not enabled (operator doesn't pass --iscsi-listen /
 		// --nvme-listen for replicas), so dp.Open is never called.
+		// G1: a volume about to be created gets its replica floor record
+		// (epoch 0) FIRST, so every later start can require the record and
+		// an existing volume is never mistaken for a fresh one. A crash
+		// between the two keeps the record; the volume is created next time.
+		exists, xErr := dp.VolumeExists(f.volumeID)
+		if xErr == nil && !exists {
+			xErr = transport.InitReplicaFloor(replicaFloorPath(f), f.volumeID)
+		}
+		if xErr != nil {
+			fmt.Fprintln(os.Stderr, "blockvolume: replica floor init:", xErr)
+			_ = dp.Close()
+			if status != nil {
+				shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
+				_ = status.Close(shutCtx)
+				shutCancel()
+			}
+			_ = h.Close()
+			return 1
+		}
 		if _, sErr := dp.EnsureStorage(f.volumeID); sErr != nil {
 			fmt.Fprintln(os.Stderr, "blockvolume: durable storage open:", sErr)
 			_ = dp.Close()
@@ -759,7 +779,11 @@ func run(f flags) int {
 			fmt.Fprintln(os.Stderr, "blockvolume: write-observer wire: Backend(", f.volumeID, ") returned nil; replication fan-out disabled")
 		}
 
-		listener, err := transport.NewReplicaListener(f.dataAddr, store)
+		// G1: the replica's epoch floor lives beside the volume's durable
+		// files so it survives a restart; non-durable (memback) runs keep it
+		// in memory only. Either way the listener refuses every mutation
+		// until the host's role call succeeds.
+		listener, err := transport.NewReplicaListenerWithFloor(f.dataAddr, store, f.volumeID, replicaFloorPath(f))
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "blockvolume: replica listener:", err)
 			_ = replVolume.Close()
@@ -773,8 +797,21 @@ func run(f flags) int {
 			return 1
 		}
 		// G2: fence the listener with the role the host already holds
-		// (the assignment stream started above) before it serves.
-		h.SetSelfFence(listener)
+		// (the assignment stream started above) before it serves. G1: if
+		// that role cannot be made durable, do not serve at all.
+		if fErr := h.SetSelfFence(listener); fErr != nil {
+			fmt.Fprintln(os.Stderr, "blockvolume: replica listener role:", fErr)
+			listener.Stop()
+			_ = replVolume.Close()
+			_ = durableProv.Close()
+			if status != nil {
+				shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
+				_ = status.Close(shutCtx)
+				shutCancel()
+			}
+			_ = h.Close()
+			return 1
+		}
 		listener.Serve()
 		replListen = listener
 
@@ -1260,4 +1297,13 @@ func deriveDualLaneAddr(addr string) (string, error) {
 		return "", fmt.Errorf("port %d+1 overflows", port)
 	}
 	return net.JoinHostPort(host, strconv.Itoa(port+1)), nil
+}
+
+// replicaFloorPath is where the replica's epoch floor record lives (G1):
+// beside the volume's durable files, or "" for non-durable memback runs.
+func replicaFloorPath(f flags) string {
+	if f.durableRoot == "" {
+		return ""
+	}
+	return filepath.Join(f.durableRoot, f.volumeID+".replica-floor")
 }

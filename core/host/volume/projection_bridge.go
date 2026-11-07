@@ -102,7 +102,7 @@ func (v *AdapterProjectionView) projectionWithSupersede() (frontend.Projection, 
 	p := v.projector.Projection()
 	healthy := p.Mode == engine.ModeHealthy
 	superseded := healthy && v.isSupersededLine(p.Epoch, p.EndpointVersion)
-	if superseded || (healthy && v.supportingReplicaReady(p.Epoch, p.EndpointVersion)) {
+	if superseded || (healthy && v.supportingReplicaReady(p.Epoch, p.EndpointVersion)) || v.roleAdmissionFailed() {
 		healthy = false
 	}
 	return frontend.Projection{
@@ -131,6 +131,29 @@ func (v *AdapterProjectionView) supportingReplicaReady(selfEpoch, selfEV uint64)
 	return other.GetReplicaId() != v.replicaID &&
 		other.GetEpoch() == selfEpoch &&
 		other.GetEndpointVersion() == selfEV
+}
+
+// roleAdmissionFailed is the G1 admission latch from the volume host: a role
+// call on its replica listener failed (floor not durable, or fence not
+// drained). Healthy is false until a later role call succeeds, even when the
+// engine projection is unchanged from a prior healthy epoch.
+func (v *AdapterProjectionView) roleAdmissionFailed() bool {
+	return v.roleAdmissionReason() != ""
+}
+
+// roleAdmissionReason is the latch's reason, or "" when not latched.
+func (v *AdapterProjectionView) roleAdmissionReason() string {
+	if v == nil || v.probe == nil {
+		return ""
+	}
+	probe, ok := v.probe.(interface{ RoleAdmissionFailure() (bool, string) })
+	if !ok {
+		return ""
+	}
+	if failed, reason := probe.RoleAdmissionFailure(); failed {
+		return reason
+	}
+	return ""
 }
 
 func (v *AdapterProjectionView) isSupersededLine(epoch, endpointVersion uint64) bool {

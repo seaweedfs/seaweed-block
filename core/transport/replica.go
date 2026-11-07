@@ -72,7 +72,20 @@ type ReplicaListener struct {
 	drained  *sync.Cond
 	// fenceDrainTimeout bounds how long FenceAsPrimary waits for them.
 	fenceDrainTimeout time.Duration
-	conns             map[net.Conn]struct{} // active handler connections; protected by mu
+	// G1: the durable floor. requireRole (listeners built with
+	// NewReplicaListenerWithFloor) refuses every mutation until a role call
+	// has succeeded (assigned). floorPath "" keeps the floor in memory only.
+	requireRole bool
+	assigned    bool
+	volumeID    string
+	floorPath   string
+	// floorMu serializes floor persistence; persisted is the highest epoch
+	// durably recorded, checked under floorMu so a lower write never lands
+	// over a higher one. Lock order: floorMu, then mu (briefly); never the
+	// reverse, and mu is never held across the file I/O.
+	floorMu   sync.Mutex
+	persisted uint64
+	conns     map[net.Conn]struct{} // active handler connections; protected by mu
 }
 
 // NewReplicaListener creates a listener on the given address.
@@ -80,6 +93,77 @@ type ReplicaListener struct {
 // directly (the simpler no-gate path).
 func NewReplicaListener(addr string, store storage.LogicalStorage) (*ReplicaListener, error) {
 	return NewReplicaListenerWithApplyHook(addr, store, nil)
+}
+
+// NewReplicaListenerWithFloor creates the production listener (fencing gap
+// G1). It starts unassigned: every mutating frame is refused until the host
+// calls FenceAsPrimary or AdmitAsReplica successfully. With a floorPath the
+// epoch floor is loaded from the volume's floor record (InitReplicaFloor
+// writes it when the volume is created) and every raise is persisted before
+// it takes effect; a missing or invalid record refuses construction. An
+// empty floorPath (non-durable memback) keeps the floor in memory.
+func NewReplicaListenerWithFloor(addr string, store storage.LogicalStorage, volumeID, floorPath string) (*ReplicaListener, error) {
+	var floor uint64
+	if floorPath != "" {
+		var err error
+		if floor, err = loadFloor(floorPath, volumeID); err != nil {
+			return nil, err
+		}
+	}
+	r, err := NewReplicaListenerWithApplyHook(addr, store, nil)
+	if err != nil {
+		return nil, err
+	}
+	r.requireRole, r.volumeID, r.floorPath = true, volumeID, floorPath
+	r.epochFloor, r.persisted = floor, floor
+	return r, nil
+}
+
+// raiseFloor makes epoch the floor if it is higher: persisted first (when the
+// listener has a floor record), then in memory. A persist error leaves both
+// unchanged and is returned; the caller must not act on the higher epoch.
+func (r *ReplicaListener) raiseFloor(epoch uint64) error {
+	r.floorMu.Lock()
+	defer r.floorMu.Unlock()
+	if epoch > r.persisted {
+		if r.floorPath != "" {
+			if err := persistFloor(r.floorPath, r.volumeID, epoch); err != nil {
+				return err
+			}
+		}
+		r.persisted = epoch
+	}
+	r.mu.Lock()
+	if epoch > r.epochFloor {
+		r.epochFloor = epoch
+	}
+	r.mu.Unlock()
+	return nil
+}
+
+// admitMutation is the gate for every mutating frame: the lineage check,
+// then, if the frame's epoch raises the floor, the durable raise before any
+// effect or ACK (G1). It runs inside the frame's counted section (G2), so a
+// fence waits for it.
+func (r *ReplicaListener) admitMutation(l RecoveryLineage) bool {
+	r.mu.Lock()
+	prev := r.activeLineage
+	r.mu.Unlock()
+	if !r.acceptMutationLineage(l) {
+		return false
+	}
+	if err := r.raiseFloor(l.Epoch); err != nil {
+		// Nothing changes on a refused frame: undo the lineage advance,
+		// unless another frame has moved it on since.
+		r.mu.Lock()
+		if r.activeLineage == l {
+			r.activeLineage = prev
+		}
+		r.mu.Unlock()
+		log.Printf("replica: refuse mutation at epoch %d: %v", l.Epoch, err)
+		return false
+	}
+	return true
 }
 
 // NewReplicaListenerWithApplyHook creates a listener with the
@@ -252,7 +336,7 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 					log.Printf("replica: decode recovery lane start: %v", err)
 					return true
 				}
-				if !r.acceptMutationLineage(lineage) {
+				if !r.admitMutation(lineage) {
 					log.Printf("replica: reject stale recovery lane start session=%d epoch=%d endpointVersion=%d",
 						lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
 					return true
@@ -265,7 +349,7 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 					log.Printf("replica: decode ship entry: %v", err)
 					return true
 				}
-				if !r.acceptMutationLineage(entry.Lineage) {
+				if !r.admitMutation(entry.Lineage) {
 					log.Printf("replica: reject stale ship session=%d epoch=%d endpointVersion=%d",
 						entry.Lineage.SessionID, entry.Lineage.Epoch, entry.Lineage.EndpointVersion)
 					return true
@@ -335,7 +419,7 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 					log.Printf("replica: decode rebuild block: %v", err)
 					return true
 				}
-				if !r.acceptMutationLineage(lineage) {
+				if !r.admitMutation(lineage) {
 					log.Printf("replica: reject stale rebuild block session=%d epoch=%d endpointVersion=%d",
 						lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
 					return true
@@ -358,7 +442,7 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 					log.Printf("replica: decode rebuild done: %v", err)
 					return true
 				}
-				if !r.acceptMutationLineage(lineage) {
+				if !r.admitMutation(lineage) {
 					log.Printf("replica: reject stale rebuild done session=%d epoch=%d endpointVersion=%d",
 						lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
 					return true
@@ -387,7 +471,7 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 					log.Printf("replica: decode barrier req: %v", err)
 					return true
 				}
-				if !r.acceptMutationLineage(lineage) {
+				if !r.admitMutation(lineage) {
 					log.Printf("replica: reject stale barrier session=%d epoch=%d endpointVersion=%d",
 						lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
 					return true
@@ -473,7 +557,24 @@ func (r *ReplicaListener) validateProbeLineage(incoming RecoveryLineage) bool {
 // applied after the host serves as primary. If that does not happen within
 // fenceDrainTimeout it returns an error, and the host must not take the
 // role (it fails closed; master redelivers the assignment).
+//
+// G1: after the drain, the floor (at least epoch) is persisted before it
+// returns success; a persist error is returned and the role must not be
+// adopted. Order: refuse new admissions, drain, persist, then assigned.
 func (r *ReplicaListener) FenceAsPrimary(epoch uint64) error {
+	if err := r.fenceAndDrain(epoch); err != nil {
+		return err
+	}
+	if err := r.raiseFloor(epoch); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	r.assigned = true
+	r.mu.Unlock()
+	return nil
+}
+
+func (r *ReplicaListener) fenceAndDrain(epoch uint64) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.primary = true
@@ -545,14 +646,18 @@ func (r *ReplicaListener) drainedLocked() *sync.Cond {
 
 // AdmitAsReplica is called when this host is admitted as a supporting
 // replica at epoch (G2): replication is accepted again, but none below
-// epoch (the floor never goes down).
-func (r *ReplicaListener) AdmitAsReplica(epoch uint64) {
+// epoch (the floor never goes down). G1: the floor is persisted first; on a
+// persist error nothing changes (a primary stays fenced, an unassigned
+// listener stays unassigned) and the error is returned.
+func (r *ReplicaListener) AdmitAsReplica(epoch uint64) error {
+	if err := r.raiseFloor(epoch); err != nil {
+		return err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.primary = false
-	if epoch > r.epochFloor {
-		r.epochFloor = epoch
-	}
+	r.assigned = true
+	return nil
 }
 
 func (r *ReplicaListener) acceptMutationLineage(incoming RecoveryLineage) bool {
@@ -563,8 +668,9 @@ func (r *ReplicaListener) acceptMutationLineage(incoming RecoveryLineage) bool {
 		return false
 	}
 	// G2: a primary applies no inbound replication, and no host applies
-	// any below the epoch it has taken a role at.
-	if r.primary || incoming.Epoch < r.epochFloor {
+	// any below the epoch it has taken a role at. G1: a production listener
+	// applies nothing before its role is known.
+	if r.primary || incoming.Epoch < r.epochFloor || (r.requireRole && !r.assigned) {
 		return false
 	}
 

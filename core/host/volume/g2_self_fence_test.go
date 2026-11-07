@@ -111,7 +111,7 @@ func TestG2_PromotedHostRefusesShipFromDeposedPrimary(t *testing.T) {
 type stubFencer struct{ err error }
 
 func (s stubFencer) FenceAsPrimary(uint64) error { return s.err }
-func (s stubFencer) AdmitAsReplica(uint64)       {}
+func (s stubFencer) AdmitAsReplica(uint64) error { return nil }
 
 // If the host cannot fence its own listener, it must not adopt the primary
 // role: OnAssignment is skipped (frontend stays gated), as for an
