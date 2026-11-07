@@ -62,6 +62,9 @@ engines that project from it.
   reviews which parts of the control/model work have become real product
   capability, which remain too semantic, and what proof is required before
   approving more model work.
+- [`fencing-gaps-todo.md`](./fencing-gaps-todo.md)
+  tracks open epoch / fencing gaps G1-G5 with the failure scenario, proposed
+  fix, and red test for each.
 
 ## Review Rule
 
