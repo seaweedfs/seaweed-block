@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -759,7 +760,14 @@ func run(f flags) int {
 			fmt.Fprintln(os.Stderr, "blockvolume: write-observer wire: Backend(", f.volumeID, ") returned nil; replication fan-out disabled")
 		}
 
-		listener, err := transport.NewReplicaListener(f.dataAddr, store)
+		// G1: the replica's epoch floor lives beside the volume's durable
+		// files so it survives a restart; non-durable (memback) runs keep it
+		// in memory only.
+		floorPath := ""
+		if f.durableRoot != "" {
+			floorPath = filepath.Join(f.durableRoot, f.volumeID+".replica-floor")
+		}
+		listener, err := transport.NewReplicaListenerWithFloor(f.dataAddr, store, floorPath)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "blockvolume: replica listener:", err)
 			_ = replVolume.Close()

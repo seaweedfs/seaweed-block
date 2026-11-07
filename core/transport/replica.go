@@ -82,6 +82,13 @@ func NewReplicaListener(addr string, store storage.LogicalStorage) (*ReplicaList
 	return NewReplicaListenerWithApplyHook(addr, store, nil)
 }
 
+// NewReplicaListenerWithFloor creates a listener whose epoch floor is kept
+// in floorPath across restarts (fencing gap G1). Not enforced yet: see the
+// G1 fix.
+func NewReplicaListenerWithFloor(addr string, store storage.LogicalStorage, floorPath string) (*ReplicaListener, error) {
+	return NewReplicaListenerWithApplyHook(addr, store, nil)
+}
+
 // NewReplicaListenerWithApplyHook creates a listener with the
 // apply-gate plug-in installed. The MsgShipEntry handler dispatches
 // caller-side to `hook.ApplyRecovery` or `hook.ApplyLive` based on
