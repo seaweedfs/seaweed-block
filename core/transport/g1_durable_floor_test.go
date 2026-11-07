@@ -242,6 +242,11 @@ func TestG1_InvalidOrMissingRecordRefusesTheListener(t *testing.T) {
 		"missing field": `{"schema":"seaweed-block.replica-floor/v1","volume_id":"vol1"}`,
 		"bad epoch":     `{"schema":"seaweed-block.replica-floor/v1","volume_id":"vol1","epoch":-1}`,
 		"oversized":     ok + string(bytes.Repeat([]byte(" "), floorRecordMaxBytes)),
+		// codex01 R2 on #83: case variants are not the same key.
+		"uppercase keys":            `{"SCHEMA":"seaweed-block.replica-floor/v1","VOLUME_ID":"vol1","EPOCH":3}`,
+		"case-folded duplicate":     `{"schema":"seaweed-block.replica-floor/v1","volume_id":"vol1","epoch":7,"EPOCH":0}`,
+		"case-folded duplicate rev": `{"schema":"seaweed-block.replica-floor/v1","volume_id":"vol1","Epoch":0,"epoch":7}`,
+		"case-folded schema":        `{"Schema":"seaweed-block.replica-floor/v1","volume_id":"vol1","epoch":3}`,
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -252,6 +257,9 @@ func TestG1_InvalidOrMissingRecordRefusesTheListener(t *testing.T) {
 	}
 	if _, err := NewReplicaListenerWithFloor("127.0.0.1:0", store, g1Vol, write(t, ok)); err != nil {
 		t.Fatalf("a valid record was refused: %v", err)
+	}
+	if e, err := decodeFloor([]byte(`{"schema":"seaweed-block.replica-floor/v1","volume_id":"vol1","epoch":0}`), g1Vol); err != nil || e != 0 {
+		t.Fatalf("the canonical bootstrap record (epoch 0) was refused: %d %v", e, err)
 	}
 
 	// An existing volume whose record is missing, even an empty one whose only

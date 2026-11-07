@@ -118,6 +118,12 @@ func decodeFloor(raw []byte, volumeID string) (uint64, error) {
 	return *rec.Epoch, nil
 }
 
+// floorRecordKeys is the record's closed key set, matched exactly (encoding/json
+// struct decoding alone would also accept case variants such as "EPOCH").
+var floorRecordKeys = map[string]bool{"schema": true, "volume_id": true, "epoch": true}
+
+// rejectDuplicateKeys checks the record's top-level keys BEFORE struct
+// decoding: exactly the closed key set, case-sensitive, none repeated.
 func rejectDuplicateKeys(raw []byte) error {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	tok, err := dec.Token()
@@ -131,6 +137,9 @@ func rejectDuplicateKeys(raw []byte) error {
 			return fmt.Errorf("replica floor record malformed: %w", err)
 		}
 		key, _ := k.(string)
+		if !floorRecordKeys[key] {
+			return fmt.Errorf("replica floor record has unexpected key %q", key)
+		}
 		if seen[key] {
 			return fmt.Errorf("replica floor record repeats %q", key)
 		}

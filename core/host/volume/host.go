@@ -406,9 +406,17 @@ func (h *Host) RoleAdmissionFailure() (bool, string) {
 // fenceSelf records the role this host just took and applies it to its
 // listener, if installed. An error means the listener could not be fenced
 // in time; the caller must not adopt the primary role.
+//
+// The desired role is monotonic in epoch: a call below the current desired
+// epoch is a stale fact (master replay) and is refused without replacing the
+// desired role or touching the admission latch, so a stale success can never
+// reconcile a newer failure (codex01 R1 on #83).
 func (h *Host) fenceSelf(role selfRole, epoch uint64) error {
 	h.selfFenceMu.Lock()
 	defer h.selfFenceMu.Unlock()
+	if epoch < h.selfEpoch {
+		return fmt.Errorf("stale role call at epoch %d (current desired epoch %d)", epoch, h.selfEpoch)
+	}
 	h.selfRole, h.selfEpoch = role, epoch
 	if h.selfFence == nil {
 		return nil

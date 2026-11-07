@@ -142,3 +142,113 @@ func TestG1_SetSelfFenceReturnsTheReplayError(t *testing.T) {
 		t.Fatal("no admission latch after a failed replay")
 	}
 }
+
+// epochFencer fails every role call at the given epoch only.
+type epochFencer struct{ failAt atomic.Uint64 }
+
+func (e *epochFencer) FenceAsPrimary(epoch uint64) error {
+	if epoch == e.failAt.Load() {
+		return errFloorNotDurable
+	}
+	return nil
+}
+
+func (e *epochFencer) AdmitAsReplica(epoch uint64) error { return e.FenceAsPrimary(epoch) }
+
+func supportingFact(epoch uint64) *control.AssignmentFact {
+	return &control.AssignmentFact{
+		VolumeId: "vol1", ReplicaId: "rA", Epoch: epoch, EndpointVersion: 1,
+		DataAddr: "127.0.0.1:3", CtrlAddr: "127.0.0.1:4", PeerSetGeneration: epoch,
+		Peers: []*control.ReplicaDescriptor{{ReplicaId: "rB", Epoch: epoch, EndpointVersion: 1, DataAddr: "127.0.0.1:5", CtrlAddr: "127.0.0.1:6"}},
+	}
+}
+
+// codex01 R1 on #83: after the epoch-3 role call fails, a stale epoch-2 replay
+// whose role call would succeed must not clear the latch or reopen writes on
+// the real StorageBackend; only the current epoch's success reconciles.
+func TestG1_StaleReplayDoesNotClearANewerAdmissionFailure(t *testing.T) {
+	h, _, _ := newStubbedHost(t, "vol1", "rB", &orderingRecorder{})
+	proj := &mutableProjector{p: engine.ReplicaProjection{Mode: engine.ModeHealthy, Epoch: 2, EndpointVersion: 1}}
+	h.view = NewAdapterProjectionView(proj, "vol1", "rB", h)
+	fencer := &epochFencer{}
+	fencer.failAt.Store(3)
+	if err := h.SetSelfFence(fencer); err != nil {
+		t.Fatal(err)
+	}
+	h.applyFact(selfFact(2))
+	store := memorywal.NewStore(8, 4096)
+	t.Cleanup(func() { _ = store.Close() })
+	backend := durable.NewStorageBackend(store, h.view, frontend.Identity{VolumeID: "vol1", ReplicaID: "rB", Epoch: 2, EndpointVersion: 1})
+	backend.SetOperational(true, "g1 stale replay baseline")
+	ctx := context.Background()
+	if _, err := backend.Write(ctx, 0, []byte("baseline")); err != nil {
+		t.Fatal(err)
+	}
+	h.applyFact(selfFact(3)) // fails: latched
+	h.applyFact(selfFact(2)) // stale replay; its role call would succeed
+	if failed, _ := h.RoleAdmissionFailure(); !failed {
+		t.Fatal("a stale epoch-2 replay cleared the unresolved epoch-3 admission failure")
+	}
+	if _, err := backend.Write(ctx, 0, []byte("stale")); !errors.Is(err, frontend.ErrStalePrimary) {
+		t.Fatalf("stale replay reopened writes: %v", err)
+	}
+	fencer.failAt.Store(0)
+	h.applyFact(selfFact(3)) // the current epoch, now durable
+	if failed, _ := h.RoleAdmissionFailure(); failed {
+		t.Fatal("the current epoch's success did not clear the latch")
+	}
+}
+
+// The same on the supporting-replica path.
+func TestG1_StaleSupportingReplayDoesNotClearTheLatch(t *testing.T) {
+	h, a, _ := newStubbedHost(t, "vol1", "rB", &orderingRecorder{})
+	fencer := &epochFencer{}
+	fencer.failAt.Store(3)
+	if err := h.SetSelfFence(fencer); err != nil {
+		t.Fatal(err)
+	}
+	h.applyFact(supportingFact(2))
+	h.applyFact(supportingFact(3)) // fails
+	calls := a.callCount.Load()
+	h.applyFact(supportingFact(2)) // stale
+	if failed, _ := h.RoleAdmissionFailure(); !failed {
+		t.Fatal("a stale supporting replay cleared the latch")
+	}
+	if a.callCount.Load() != calls {
+		t.Fatal("a stale supporting replay was admitted")
+	}
+	fencer.failAt.Store(0)
+	h.applyFact(supportingFact(3))
+	if failed, _ := h.RoleAdmissionFailure(); failed {
+		t.Fatal("the current supporting admission did not clear the latch")
+	}
+}
+
+// Install replay targets the retained current role: a failure at epoch 3, a
+// stale epoch-2 fact, then installing a working listener replays epoch 3 and
+// only that clears the latch.
+func TestG1_InstallReplayTargetsTheCurrentRole(t *testing.T) {
+	h, _, _ := newStubbedHost(t, "vol1", "rB", &orderingRecorder{})
+	failing := &epochFencer{}
+	failing.failAt.Store(3)
+	if err := h.SetSelfFence(failing); err != nil {
+		t.Fatal(err)
+	}
+	h.applyFact(selfFact(3)) // fails
+	h.applyFact(selfFact(2)) // stale
+	recorder := &recordingFencer{}
+	if err := h.SetSelfFence(recorder); err != nil {
+		t.Fatalf("install replay: %v", err)
+	}
+	if recorder.last.Load() != 3 {
+		t.Fatalf("install replayed epoch %d, want the current desired epoch 3", recorder.last.Load())
+	}
+	if failed, _ := h.RoleAdmissionFailure(); failed {
+		t.Fatal("a successful replay of the current role did not clear the latch")
+	}
+}
+
+type recordingFencer struct{ last atomic.Uint64 }
+
+func (r *recordingFencer) FenceAsPrimary(epoch uint64) error { r.last.Store(epoch); return nil }
+func (r *recordingFencer) AdmitAsReplica(epoch uint64) error { r.last.Store(epoch); return nil }
