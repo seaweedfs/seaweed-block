@@ -298,15 +298,17 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 			}
 			log.Printf("g7-debug: Receiver.Run frameBarrierReq sessionID=%d baseCount=%d walCount=%d appliedWalLSN=%d", r.sessionID, baseCount, walCount, r.appliedWalLSN)
 			// A barrier completes the rebuild, so it is gated like a
-			// mutation and its section holds until the response is written.
+			// mutation. Its section covers the sync and completion effects
+			// and ends before the reply: a fence drains effects, never a
+			// network write the peer may not read.
 			release, gateErr := r.enterFrame()
 			if gateErr != nil {
 				return 0, gateErr
 			}
-			defer release()
 			// Sync substrate so AchievedLSN reflects durable state.
 			frontier, syncErr := r.store.Sync()
 			if syncErr != nil {
+				release()
 				log.Printf("g7-debug: Receiver.Run Sync err err=%v", syncErr)
 				return 0, newFailure(FailureSubstrate, PhaseRecvSync, syncErr)
 			}
@@ -321,6 +323,7 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 			// system close is the primary's CanEmitSessionComplete
 			// after reading our response).
 			achieved, done := r.session.TryComplete()
+			release()
 			if !done {
 				st := r.session.Status()
 				log.Printf("g7-debug: Receiver.Run TryComplete=false st=%+v", st)

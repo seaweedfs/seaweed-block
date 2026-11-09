@@ -19,6 +19,8 @@ type recordingGate struct {
 	admit   int
 	entered int
 	atRel   []uint64
+	// onRelease, if set, runs at each release with mu held.
+	onRelease func()
 }
 
 func (g *recordingGate) EnterDualLane(epoch uint64) (func(), error) {
@@ -32,6 +34,9 @@ func (g *recordingGate) EnterDualLane(epoch uint64) (func(), error) {
 		_, _, h := g.store.Boundaries()
 		g.mu.Lock()
 		g.atRel = append(g.atRel, h)
+		if g.onRelease != nil {
+			g.onRelease()
+		}
 		g.mu.Unlock()
 	}, nil
 }
@@ -105,12 +110,41 @@ func TestReceiverGate_BarrierRefusedAfterFence(t *testing.T) {
 	}
 }
 
-// The barrier's section holds until its response is written, so a fence
-// cannot slip between the check and the reply. net.Pipe writes block until
-// read, so the release cannot happen before the test reads the response.
-func TestReceiverGate_BarrierSectionHoldsUntilResponse(t *testing.T) {
-	store := &basePreparingStore{LogicalStorage: storage.NewBlockStore(0, 4096)}
+// syncCounting counts Sync calls, so a gate release can see whether the
+// barrier's effects ran inside its section.
+type syncCounting struct {
+	storage.LogicalStorage
+	mu    sync.Mutex
+	syncs int
+	fail  bool
+}
+
+func (s *syncCounting) Sync() (uint64, error) {
+	s.mu.Lock()
+	s.syncs++
+	fail := s.fail
+	s.mu.Unlock()
+	if fail {
+		return 0, errors.New("sync failed")
+	}
+	return s.LogicalStorage.Sync()
+}
+
+func (s *syncCounting) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.syncs
+}
+
+// The barrier's section covers its effects (the sync and the completion check)
+// and ends before the reply, so a fence never waits on a peer that does not
+// read. net.Pipe writes block until read; the test does not read the reply.
+func TestReceiverGate_BarrierSectionEndsBeforeUnreadReply(t *testing.T) {
+	inner := &basePreparingStore{LogicalStorage: storage.NewBlockStore(0, 4096)}
+	store := &syncCounting{LogicalStorage: inner}
 	gate := &recordingGate{store: store, admit: 10}
+	var syncsAtRelease []int
+	gate.onRelease = func() { syncsAtRelease = append(syncsAtRelease, store.count()) }
 	conn, _ := gatedReceiver(t, gate)
 	if err := writeFrame(conn, frameSessionStart, encodeSessionStart(sessionStartPayload{SessionID: 1, FromLSN: 7, Epoch: 5})); err != nil {
 		t.Fatalf("write SessionStart: %v", err)
@@ -121,17 +155,62 @@ func TestReceiverGate_BarrierSectionHoldsUntilResponse(t *testing.T) {
 	if ft, _, err := readFrame(conn); err != nil || ft != frameBaseBatchAck {
 		t.Fatalf("read BaseBatchAck: type=%v err=%v", ft, err)
 	}
+	before := store.count() // syncs so far, e.g. for the BaseDone ack
 	if err := writeFrame(conn, frameBarrierReq, nil); err != nil {
 		t.Fatalf("write BarrierReq: %v", err)
 	}
-	time.Sleep(200 * time.Millisecond)
-	gate.mu.Lock()
-	early := len(gate.atRel)
-	gate.mu.Unlock()
-	if early != 2 {
-		t.Fatalf("barrier released its section before its response was read (%d releases, want 2)", early)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		gate.mu.Lock()
+		n := len(gate.atRel)
+		gate.mu.Unlock()
+		if n == 3 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("barrier still holds its section while its reply is unread (%d releases, want 3)", n)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	if ft, _, err := readFrame(conn); err != nil || ft != frameBarrierResp {
-		t.Fatalf("read BarrierResp: type=%v err=%v", ft, err)
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	if last := syncsAtRelease[len(syncsAtRelease)-1]; last <= before {
+		t.Fatalf("barrier released its section before its own sync ran (%d syncs before the barrier, %d at its release)", before, last)
+	}
+}
+
+// A failed barrier sync still ends its section, so a fence is not left waiting.
+func TestReceiverGate_BarrierSyncErrorReleases(t *testing.T) {
+	inner := &basePreparingStore{LogicalStorage: storage.NewBlockStore(0, 4096)}
+	store := &syncCounting{LogicalStorage: inner}
+	gate := &recordingGate{store: store, admit: 10}
+	conn, done := gatedReceiver(t, gate)
+	if err := writeFrame(conn, frameSessionStart, encodeSessionStart(sessionStartPayload{SessionID: 1, FromLSN: 7, Epoch: 5})); err != nil {
+		t.Fatalf("write SessionStart: %v", err)
+	}
+	if err := writeFrame(conn, frameBaseDone, nil); err != nil {
+		t.Fatalf("write BaseDone: %v", err)
+	}
+	if ft, _, err := readFrame(conn); err != nil || ft != frameBaseBatchAck {
+		t.Fatalf("read BaseBatchAck: type=%v err=%v", ft, err)
+	}
+	store.mu.Lock()
+	store.fail = true
+	store.mu.Unlock()
+	if err := writeFrame(conn, frameBarrierReq, nil); err != nil {
+		t.Fatalf("write BarrierReq: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatalf("receiver ended without an error after a failed sync")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("receiver did not end after a failed sync")
+	}
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	if gate.entered != len(gate.atRel) {
+		t.Fatalf("a failed barrier left its section open: %d entered, %d released", gate.entered, len(gate.atRel))
 	}
 }
