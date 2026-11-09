@@ -148,7 +148,7 @@ func (b *PrimaryBridge) SetOnDurableAck(fn BridgeDurableAckCallback) {
 // integration would dial through the existing connection pool /
 // listener registry.
 func (b *PrimaryBridge) StartRebuildSession(ctx context.Context, conn net.Conn, replicaID ReplicaID, sessionID, fromLSN, frontierHint uint64) error {
-	return b.startRebuildSessionLocked(ctx, conn, replicaID, sessionID, fromLSN, frontierHint, nil)
+	return b.startRebuildSessionLocked(ctx, conn, replicaID, sessionID, 0, fromLSN, frontierHint, nil)
 }
 
 // StartRebuildSessionWithSink is the variant that accepts an external
@@ -169,14 +169,23 @@ func (b *PrimaryBridge) StartRebuildSessionWithSink(ctx context.Context, conn ne
 	if sink == nil {
 		return fmt.Errorf("recovery bridge: StartRebuildSessionWithSink: sink is required (use StartRebuildSession for the bridging path)")
 	}
-	return b.startRebuildSessionLocked(ctx, conn, replicaID, sessionID, fromLSN, frontierHint, sink)
+	return b.startRebuildSessionLocked(ctx, conn, replicaID, sessionID, 0, fromLSN, frontierHint, sink)
+}
+
+// StartRebuildSessionAtEpoch is StartRebuildSessionWithSink for production:
+// the epoch travels in SessionStart so a gated replica can check it.
+func (b *PrimaryBridge) StartRebuildSessionAtEpoch(ctx context.Context, conn net.Conn, replicaID ReplicaID, sessionID, epoch, fromLSN, frontierHint uint64, sink WalShipperSink) error {
+	if sink == nil {
+		return fmt.Errorf("recovery bridge: StartRebuildSessionAtEpoch: sink is required")
+	}
+	return b.startRebuildSessionLocked(ctx, conn, replicaID, sessionID, epoch, fromLSN, frontierHint, sink)
 }
 
 // startRebuildSessionLocked is the shared implementation. When `sink`
 // is nil, it constructs a bridging `senderBacklogSink` via
 // NewSenderWithBacklogRelay (legacy compatible). When non-nil, the
 // caller-provided sink is installed via NewSenderWithSink.
-func (b *PrimaryBridge) startRebuildSessionLocked(ctx context.Context, conn net.Conn, replicaID ReplicaID, sessionID, fromLSN, frontierHint uint64, sink WalShipperSink) error {
+func (b *PrimaryBridge) startRebuildSessionLocked(ctx context.Context, conn net.Conn, replicaID ReplicaID, sessionID, epoch, fromLSN, frontierHint uint64, sink WalShipperSink) error {
 	// Single-flight check at the bridge level (before coordinator),
 	// so a second call observes our internal sender map first and
 	// reports the racing-bridge-call case distinctly from the
@@ -212,6 +221,7 @@ func (b *PrimaryBridge) startRebuildSessionLocked(ctx context.Context, conn net.
 	} else {
 		sender = NewSenderWithSink(b.store, b.coord, conn, replicaID, sink)
 	}
+	sender.epoch = epoch
 	sender.SetOnDurableAck(func(rid ReplicaID, sid, acknowledgedLSN, primaryS, primaryH uint64) {
 		b.mu.Lock()
 		cb := b.onAck
@@ -411,11 +421,18 @@ func (b *PrimaryBridge) PushLiveWrite(replicaID ReplicaID, lba uint32, lsn uint6
 // flag-toggled, per architect ruling).
 type ReplicaBridge struct {
 	store storage.LogicalStorage
+	gate  DualLaneGate
 }
 
 // NewReplicaBridge constructs a bridge bound to the replica's substrate.
 func NewReplicaBridge(store storage.LogicalStorage) *ReplicaBridge {
 	return &ReplicaBridge{store: store}
+}
+
+// NewReplicaBridgeWithGate is the production constructor: every session and
+// mutating frame goes through gate, the same rules as the replication port.
+func NewReplicaBridgeWithGate(store storage.LogicalStorage, gate DualLaneGate) *ReplicaBridge {
+	return &ReplicaBridge{store: store, gate: gate}
 }
 
 // Serve accepts one inbound connection and drives a Receiver until
@@ -425,6 +442,7 @@ func NewReplicaBridge(store storage.LogicalStorage) *ReplicaBridge {
 // Caller spawns this in a goroutine per accepted connection.
 func (b *ReplicaBridge) Serve(ctx context.Context, conn net.Conn) (uint64, error) {
 	receiver := NewReceiver(b.store, conn)
+	receiver.gate = b.gate
 	// Caller is responsible for closing conn on return; wire the
 	// ctx through a goroutine that closes the conn on cancel so
 	// receiver.Run returns from its blocking read.

@@ -51,6 +51,28 @@ type Receiver struct {
 	lastAckTime        time.Time
 	baseInstalledUpper uint32 // highest base LBA installed; advisory only in BaseBatchAck
 	basePrepared       bool
+
+	gate  DualLaneGate // nil only in tests that exercise the protocol alone
+	epoch uint64       // from SessionStart; checked by gate on every mutating frame
+}
+
+// DualLaneGate applies the replica's epoch and role rules to the dual-lane
+// port. EnterDualLane refuses a sender the replica must not accept; on success
+// the caller holds a counted section until it calls release, so a fence waits
+// for a frame already admitted.
+type DualLaneGate interface {
+	EnterDualLane(epoch uint64) (release func(), err error)
+}
+
+func (r *Receiver) enterFrame() (func(), error) {
+	if r.gate == nil {
+		return func() {}, nil
+	}
+	release, err := r.gate.EnterDualLane(r.epoch)
+	if err != nil {
+		return nil, newFailure(FailureContract, PhaseRecvDispatch, fmt.Errorf("dual-lane frame refused: %w", err))
+	}
+	return release, nil
 }
 
 // NewReceiver constructs a receiver bound to the replica's substrate
@@ -144,6 +166,12 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 				return 0, newFailure(FailureContract, PhaseRecvDispatch,
 					fmt.Errorf("numBlocks mismatch primary=%d local=%d", s.NumBlocks, got))
 			}
+			r.epoch = s.Epoch
+			release, gateErr := r.enterFrame()
+			if gateErr != nil {
+				return 0, gateErr
+			}
+			release()
 			r.sessionID = s.SessionID
 			// Wire compat: sessionStart still carries TargetLSN in
 			// the legacy fourth slot, but BASE frontier comes from
@@ -172,10 +200,20 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 			if decErr != nil {
 				return 0, newFailure(FailureProtocol, PhaseRecvDispatch, decErr)
 			}
-			if prepErr := r.prepareBaseInstall(); prepErr != nil {
+			release, gateErr := r.enterFrame()
+			if gateErr != nil {
+				return 0, gateErr
+			}
+			prepErr := r.prepareBaseInstall()
+			var applyErr error
+			if prepErr == nil {
+				_, applyErr = r.session.ApplyBaseBlock(lba, data)
+			}
+			release()
+			if prepErr != nil {
 				return 0, newFailure(FailureSubstrate, PhaseRecvApply, prepErr)
 			}
-			if _, applyErr := r.session.ApplyBaseBlock(lba, data); applyErr != nil {
+			if applyErr != nil {
 				log.Printf("g7-debug: Receiver.Run ApplyBaseBlock err lba=%d err=%v", lba, applyErr)
 				return 0, newFailure(FailureSubstrate, PhaseRecvApply,
 					fmt.Errorf("apply base lba=%d: %w", lba, applyErr))
@@ -208,7 +246,13 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 				log.Printf("g7-debug: Receiver.Run enforceWalWireMonotonic err lsn=%d appliedWalLSN=%d err=%v", lsn, r.appliedWalLSN, err)
 				return 0, err
 			}
-			if applyErr := r.session.ApplyWALEntry(kind, lba, data, lsn); applyErr != nil {
+			release, gateErr := r.enterFrame()
+			if gateErr != nil {
+				return 0, gateErr
+			}
+			applyErr := r.session.ApplyWALEntry(kind, lba, data, lsn)
+			release()
+			if applyErr != nil {
 				log.Printf("g7-debug: Receiver.Run ApplyWALEntry err lsn=%d err=%v", lsn, applyErr)
 				return 0, newFailure(FailureSubstrate, PhaseRecvApply,
 					fmt.Errorf("apply wal kind=%s lba=%d lsn=%d: %w", kind, lba, lsn, applyErr))
@@ -226,7 +270,13 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 				return 0, newFailure(FailureProtocol, PhaseRecvDispatch,
 					errors.New("BaseDone before SessionStart"))
 			}
-			if prepErr := r.prepareBaseInstall(); prepErr != nil {
+			release, gateErr := r.enterFrame()
+			if gateErr != nil {
+				return 0, gateErr
+			}
+			prepErr := r.prepareBaseInstall()
+			release()
+			if prepErr != nil {
 				return 0, newFailure(FailureSubstrate, PhaseRecvApply, prepErr)
 			}
 			log.Printf("g7-debug: Receiver.Run frameBaseDone baseCount=%d walCount=%d", baseCount, walCount)

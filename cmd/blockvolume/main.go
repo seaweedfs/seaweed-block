@@ -851,7 +851,7 @@ func run(f flags) int {
 				_ = h.Close()
 				return 1
 			}
-			replicaBridge := recovery.NewReplicaBridge(store)
+			replicaBridge := recovery.NewReplicaBridgeWithGate(store, replListen)
 			dualLaneCtx, dualLaneCancel := context.WithCancel(context.Background())
 			go replicaBridge.AcceptDualLaneLoop(dualLaneCtx, dlLn)
 			defer func() {
