@@ -275,12 +275,15 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 				return 0, gateErr
 			}
 			prepErr := r.prepareBaseInstall()
-			release()
 			if prepErr != nil {
+				release()
 				return 0, newFailure(FailureSubstrate, PhaseRecvApply, prepErr)
 			}
 			log.Printf("g7-debug: Receiver.Run frameBaseDone baseCount=%d walCount=%d", baseCount, walCount)
+			// The frontier advance is a mutation too: it stays inside the
+			// counted section, so a fence cannot return while it is pending.
 			r.session.MarkBaseComplete()
+			release()
 			// Mandatory final base-lane ack — base done means primary
 			// expects to know our base-installed cursor before drain
 			// even if cadence wouldn't have triggered yet.
@@ -294,6 +297,13 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 					errors.New("BarrierReq before SessionStart"))
 			}
 			log.Printf("g7-debug: Receiver.Run frameBarrierReq sessionID=%d baseCount=%d walCount=%d appliedWalLSN=%d", r.sessionID, baseCount, walCount, r.appliedWalLSN)
+			// A barrier completes the rebuild, so it is gated like a
+			// mutation and its section holds until the response is written.
+			release, gateErr := r.enterFrame()
+			if gateErr != nil {
+				return 0, gateErr
+			}
+			defer release()
 			// Sync substrate so AchievedLSN reflects durable state.
 			frontier, syncErr := r.store.Sync()
 			if syncErr != nil {
