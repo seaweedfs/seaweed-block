@@ -83,26 +83,29 @@ type sessionStartPayload struct {
 	FromLSN   uint64
 	TargetLSN uint64
 	NumBlocks uint32
+	Epoch     uint64 // sender's assignment epoch; the receiver's gate checks it
 }
 
 func encodeSessionStart(s sessionStartPayload) []byte {
-	out := make([]byte, 8+8+8+4)
+	out := make([]byte, 8+8+8+4+8)
 	binary.BigEndian.PutUint64(out[0:], s.SessionID)
 	binary.BigEndian.PutUint64(out[8:], s.FromLSN)
 	binary.BigEndian.PutUint64(out[16:], s.TargetLSN)
 	binary.BigEndian.PutUint32(out[24:], s.NumBlocks)
+	binary.BigEndian.PutUint64(out[28:], s.Epoch)
 	return out
 }
 
 func decodeSessionStart(p []byte) (sessionStartPayload, error) {
-	if len(p) != 28 {
-		return sessionStartPayload{}, fmt.Errorf("recovery: sessionStart payload len=%d want 28", len(p))
+	if len(p) != 36 {
+		return sessionStartPayload{}, fmt.Errorf("recovery: sessionStart payload len=%d want 36", len(p))
 	}
 	return sessionStartPayload{
 		SessionID: binary.BigEndian.Uint64(p[0:]),
 		FromLSN:   binary.BigEndian.Uint64(p[8:]),
 		TargetLSN: binary.BigEndian.Uint64(p[16:]),
 		NumBlocks: binary.BigEndian.Uint32(p[24:]),
+		Epoch:     binary.BigEndian.Uint64(p[28:]),
 	}, nil
 }
 

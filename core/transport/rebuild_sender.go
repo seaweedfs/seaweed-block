@@ -246,8 +246,8 @@ func (e *BlockExecutor) startRebuildDualLane(replicaID string, sessionID, epoch,
 	//
 	sessionFromLSN := basePinLSN
 	log.Printf("g7-debug: startRebuildDualLane calling Bridge.StartRebuildSessionWithSink replica=%s sessionID=%d basePinLSN=%d frontierHint=%d", replicaID, sessionID, sessionFromLSN, frontierHint)
-	if err := dl.Bridge.StartRebuildSessionWithSink(
-		context.Background(), conn, argRID, sessionID, sessionFromLSN, frontierHint, sink,
+	if err := dl.Bridge.StartRebuildSessionAtEpoch(
+		context.Background(), conn, argRID, sessionID, epoch, sessionFromLSN, frontierHint, sink,
 	); err != nil {
 		log.Printf("g7-debug: startRebuildDualLane Bridge.StartRebuildSessionWithSink err replica=%s err=%v", replicaID, err)
 		_ = conn.Close()

@@ -110,6 +110,8 @@ type Sender struct {
 	// Set by NewSenderWithSink / NewSenderWithBacklogRelay.
 	sink WalShipperSink
 
+	epoch uint64 // sent in SessionStart for the replica's gate
+
 	// liveReady is true only after Run has written SessionStart and
 	// the sink has entered its session bracket. PrimaryBridge uses it
 	// to avoid routing live writes into a sender that is registered for
@@ -462,7 +464,7 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, frontierHint uint6
 	numBlocks := s.primaryStore.NumBlocks()
 	log.Printf("g7-debug: Sender.Run writing frameSessionStart replica=%s numBlocks=%d", s.replicaID, numBlocks)
 	if err := s.writeFrame(frameSessionStart, encodeSessionStart(sessionStartPayload{
-		SessionID: sessionID, FromLSN: fromLSN, TargetLSN: frontierHint, NumBlocks: numBlocks,
+		SessionID: sessionID, FromLSN: fromLSN, TargetLSN: frontierHint, NumBlocks: numBlocks, Epoch: s.epoch,
 	})); err != nil {
 		return 0, newFailure(FailureWire, PhaseSendStart, err)
 	}

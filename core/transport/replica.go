@@ -619,6 +619,28 @@ func isMutationMsg(msgType byte) bool {
 	return false
 }
 
+// EnterDualLane applies this listener's admission rules to the dual-lane
+// rebuild port (recovery.DualLaneGate): no frame on a primary, none below the
+// floor, none before the role is known, and a higher epoch is made durable
+// before any effect. The returned release ends the counted section a fence
+// waits on.
+func (r *ReplicaListener) EnterDualLane(epoch uint64) (func(), error) {
+	r.beginMutationFrame()
+	r.mu.Lock()
+	refused := epoch == 0 || r.primary || epoch < r.epochFloor || (r.requireRole && !r.assigned)
+	floor := r.epochFloor
+	r.mu.Unlock()
+	if refused {
+		r.endMutationFrame()
+		return nil, fmt.Errorf("replica: dual-lane epoch %d refused (floor %d)", epoch, floor)
+	}
+	if err := r.raiseFloor(epoch); err != nil {
+		r.endMutationFrame()
+		return nil, fmt.Errorf("replica: dual-lane epoch %d: %w", epoch, err)
+	}
+	return r.endMutationFrame, nil
+}
+
 func (r *ReplicaListener) beginMutationFrame() {
 	r.mu.Lock()
 	r.inFlight++
