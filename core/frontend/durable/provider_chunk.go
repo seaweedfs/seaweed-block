@@ -265,6 +265,7 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 		FreshFromHead:   h.fresh,
 		ReadMissTimeout: p.cfg.ChunkReadMissTimeout,
 		Bitmap:          storage.NewFileChunkBitmapStore(h.path + ".chunkbitmap"),
+		BarrierBound:    p.cfg.ChunkDirtyThreshold,
 		CaptureAllowed: func() error {
 			cur := p.view.Projection()
 			if !cur.Healthy || cur.VolumeID != volumeID || lin.volumeID != volumeID {

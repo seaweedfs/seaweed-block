@@ -326,6 +326,12 @@ type chunkLayerConfig struct {
 	ReadMissTimeout time.Duration
 	// Bitmap persists the dirty-since-HEAD bitmap. Required.
 	Bitmap chunkBitmapStore
+
+	// BarrierBound bounds how many chunks a cut copies under its barrier:
+	// beyond it, chunks are pre-copied outside the barrier in staging
+	// rounds (at most chunkStageRounds; then the barrier takes the rest).
+	// Zero: unbounded, no staging.
+	BarrierBound int
 }
 
 // chunkCutStats describes one cut. The periodic-cut work fills it; a zero
@@ -343,6 +349,16 @@ type chunkCutStats struct {
 	CASNs           int64
 	CASResult       string
 	TotalNs         int64
+	// Pre-copy (BarrierBound > 0): StageRounds staging rounds staged
+	// StagedChunks chunks outside the barrier; StagedChunksUsed of the
+	// uploads in HEAD came from staging. BarrierCopyChunks were copied
+	// under the barrier; BarrierOverBound: more than the bound (the
+	// staging rounds did not converge).
+	StageRounds       int
+	StagedChunks      int
+	StagedChunksUsed  int
+	BarrierCopyChunks int
+	BarrierOverBound  bool
 }
 
 // chunkLayerStats are a layer's cumulative cut counters and its last
@@ -372,6 +388,9 @@ type chunkLayerStats struct {
 	LastCut           chunkCutStats
 	LastCutH          uint64
 	LastCutNs         int64
+	// BarrierOverBound counts cuts whose barrier copied more than the
+	// bound after the staging rounds.
+	BarrierOverBound uint64
 }
 
 // chunkCutResult is the outcome of one successful cut.
