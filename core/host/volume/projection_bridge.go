@@ -1,6 +1,8 @@
 package volume
 
 import (
+	"time"
+
 	"github.com/seaweedfs/seaweed-block/core/engine"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
@@ -162,6 +164,30 @@ func (v *AdapterProjectionView) roleAdmissionReason() string {
 		return reason
 	}
 	return ""
+}
+
+// unhealthyReason is the host's explicit unhealthy report (#128 rule 6),
+// or "" when the probe does not provide one.
+func (v *AdapterProjectionView) unhealthyReason() string {
+	if v == nil || v.probe == nil {
+		return ""
+	}
+	if p, ok := v.probe.(interface{ UnhealthyReason() string }); ok {
+		return p.UnhealthyReason()
+	}
+	return ""
+}
+
+// catchUpSince is when the host was admitted as a supporting replica at
+// its current epoch; zero when not supporting or not provided.
+func (v *AdapterProjectionView) catchUpSince() time.Time {
+	if v == nil || v.probe == nil {
+		return time.Time{}
+	}
+	if p, ok := v.probe.(interface{ CatchUpSince() time.Time }); ok {
+		return p.CatchUpSince()
+	}
+	return time.Time{}
 }
 
 func (v *AdapterProjectionView) isSupersededLine(epoch, endpointVersion uint64) bool {

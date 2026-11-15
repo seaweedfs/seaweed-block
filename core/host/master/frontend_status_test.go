@@ -66,8 +66,10 @@ func TestStatusFrontendsForAssignedVolume_ReturnsObservedFrontendFactsForAllSlot
 
 func TestStatusFrontendsForAssignedVolume_DedupesRepeatedFacts(t *testing.T) {
 	obs := authority.NewObservationHost(authority.ObservationHostConfig{})
+	// The repeated replica IDs below are what this pins. A heartbeat
+	// naming the same slot twice is refused at ingest (#134), so the
+	// fact is ingested once.
 	hb := frontendHeartbeat("node-a", "v1", "r1", "127.0.0.1:3260")
-	hb.Slots = append(hb.Slots, hb.Slots[0])
 	if err := obs.IngestHeartbeat(hb); err != nil {
 		t.Fatalf("ingest heartbeat: %v", err)
 	}

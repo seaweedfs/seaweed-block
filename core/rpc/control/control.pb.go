@@ -144,6 +144,12 @@ type HeartbeatSlot struct {
 	// every process start. Raw observation fact: the controller uses it
 	// only to bound a restarted primary's boot grace.
 	Incarnation string `protobuf:"bytes,12,opt,name=incarnation,proto3" json:"incarnation,omitempty"`
+	// unhealthy_reason is an explicit unhealthy report for this slot
+	// (#128 rule 6): recovery_timeout when a primary-assigned replica did
+	// not become promotion-ready within its recover timeout, or
+	// role_admission_failed for the G1 latch. Set together with
+	// eligible=false; empty when healthy.
+	UnhealthyReason string `protobuf:"bytes,13,opt,name=unhealthy_reason,json=unhealthyReason,proto3" json:"unhealthy_reason,omitempty"`
 }
 
 func (x *HeartbeatSlot) Reset() {
@@ -258,6 +264,13 @@ func (x *HeartbeatSlot) GetFrontends() []*FrontendTarget {
 func (x *HeartbeatSlot) GetIncarnation() string {
 	if x != nil {
 		return x.Incarnation
+	}
+	return ""
+}
+
+func (x *HeartbeatSlot) GetUnhealthyReason() string {
+	if x != nil {
+		return x.UnhealthyReason
 	}
 	return ""
 }
@@ -809,6 +822,9 @@ type StatusResponse struct {
 	LastUnsupportedReason  string            `protobuf:"bytes,6,opt,name=last_unsupported_reason,json=lastUnsupportedReason,proto3" json:"last_unsupported_reason,omitempty"`
 	LastConvergenceStuckAt string            `protobuf:"bytes,7,opt,name=last_convergence_stuck_at,json=lastConvergenceStuckAt,proto3" json:"last_convergence_stuck_at,omitempty"`
 	Frontends              []*FrontendTarget `protobuf:"bytes,8,rep,name=frontends,proto3" json:"frontends,omitempty"`
+	// unhealthy_replicas lists the volume's replicas whose fresh
+	// heartbeat carries an explicit unhealthy reason (#128 rule 6).
+	UnhealthyReplicas []*ReplicaUnhealthy `protobuf:"bytes,9,rep,name=unhealthy_replicas,json=unhealthyReplicas,proto3" json:"unhealthy_replicas,omitempty"`
 }
 
 func (x *StatusResponse) Reset() {
@@ -899,6 +915,68 @@ func (x *StatusResponse) GetFrontends() []*FrontendTarget {
 	return nil
 }
 
+func (x *StatusResponse) GetUnhealthyReplicas() []*ReplicaUnhealthy {
+	if x != nil {
+		return x.UnhealthyReplicas
+	}
+	return nil
+}
+
+type ReplicaUnhealthy struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	ReplicaId string `protobuf:"bytes,1,opt,name=replica_id,json=replicaId,proto3" json:"replica_id,omitempty"`
+	Reason    string `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
+}
+
+func (x *ReplicaUnhealthy) Reset() {
+	*x = ReplicaUnhealthy{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_control_proto_msgTypes[10]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *ReplicaUnhealthy) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReplicaUnhealthy) ProtoMessage() {}
+
+func (x *ReplicaUnhealthy) ProtoReflect() protoreflect.Message {
+	mi := &file_control_proto_msgTypes[10]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReplicaUnhealthy.ProtoReflect.Descriptor instead.
+func (*ReplicaUnhealthy) Descriptor() ([]byte, []int) {
+	return file_control_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *ReplicaUnhealthy) GetReplicaId() string {
+	if x != nil {
+		return x.ReplicaId
+	}
+	return ""
+}
+
+func (x *ReplicaUnhealthy) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
 type GetClusterStatusRequest struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
@@ -908,7 +986,7 @@ type GetClusterStatusRequest struct {
 func (x *GetClusterStatusRequest) Reset() {
 	*x = GetClusterStatusRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_control_proto_msgTypes[10]
+		mi := &file_control_proto_msgTypes[11]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -921,7 +999,7 @@ func (x *GetClusterStatusRequest) String() string {
 func (*GetClusterStatusRequest) ProtoMessage() {}
 
 func (x *GetClusterStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[10]
+	mi := &file_control_proto_msgTypes[11]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -934,7 +1012,7 @@ func (x *GetClusterStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetClusterStatusRequest.ProtoReflect.Descriptor instead.
 func (*GetClusterStatusRequest) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{10}
+	return file_control_proto_rawDescGZIP(), []int{11}
 }
 
 type ListVolumesRequest struct {
@@ -946,7 +1024,7 @@ type ListVolumesRequest struct {
 func (x *ListVolumesRequest) Reset() {
 	*x = ListVolumesRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_control_proto_msgTypes[11]
+		mi := &file_control_proto_msgTypes[12]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -959,7 +1037,7 @@ func (x *ListVolumesRequest) String() string {
 func (*ListVolumesRequest) ProtoMessage() {}
 
 func (x *ListVolumesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[11]
+	mi := &file_control_proto_msgTypes[12]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -972,7 +1050,7 @@ func (x *ListVolumesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListVolumesRequest.ProtoReflect.Descriptor instead.
 func (*ListVolumesRequest) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{11}
+	return file_control_proto_rawDescGZIP(), []int{12}
 }
 
 type GetVolumeStatusRequest struct {
@@ -986,7 +1064,7 @@ type GetVolumeStatusRequest struct {
 func (x *GetVolumeStatusRequest) Reset() {
 	*x = GetVolumeStatusRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_control_proto_msgTypes[12]
+		mi := &file_control_proto_msgTypes[13]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -999,7 +1077,7 @@ func (x *GetVolumeStatusRequest) String() string {
 func (*GetVolumeStatusRequest) ProtoMessage() {}
 
 func (x *GetVolumeStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[12]
+	mi := &file_control_proto_msgTypes[13]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1012,7 +1090,7 @@ func (x *GetVolumeStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetVolumeStatusRequest.ProtoReflect.Descriptor instead.
 func (*GetVolumeStatusRequest) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{12}
+	return file_control_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *GetVolumeStatusRequest) GetVolumeId() string {
@@ -1033,7 +1111,7 @@ type GetVolumeTimelineRequest struct {
 func (x *GetVolumeTimelineRequest) Reset() {
 	*x = GetVolumeTimelineRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_control_proto_msgTypes[13]
+		mi := &file_control_proto_msgTypes[14]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -1046,7 +1124,7 @@ func (x *GetVolumeTimelineRequest) String() string {
 func (*GetVolumeTimelineRequest) ProtoMessage() {}
 
 func (x *GetVolumeTimelineRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[13]
+	mi := &file_control_proto_msgTypes[14]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1059,7 +1137,7 @@ func (x *GetVolumeTimelineRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetVolumeTimelineRequest.ProtoReflect.Descriptor instead.
 func (*GetVolumeTimelineRequest) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{13}
+	return file_control_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *GetVolumeTimelineRequest) GetVolumeId() string {
@@ -1080,7 +1158,7 @@ type WatchClusterEventsRequest struct {
 func (x *WatchClusterEventsRequest) Reset() {
 	*x = WatchClusterEventsRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_control_proto_msgTypes[14]
+		mi := &file_control_proto_msgTypes[15]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -1093,7 +1171,7 @@ func (x *WatchClusterEventsRequest) String() string {
 func (*WatchClusterEventsRequest) ProtoMessage() {}
 
 func (x *WatchClusterEventsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[14]
+	mi := &file_control_proto_msgTypes[15]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1106,7 +1184,7 @@ func (x *WatchClusterEventsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchClusterEventsRequest.ProtoReflect.Descriptor instead.
 func (*WatchClusterEventsRequest) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{14}
+	return file_control_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *WatchClusterEventsRequest) GetSinceEventId() string {
@@ -1131,7 +1209,7 @@ type ObservationCondition struct {
 func (x *ObservationCondition) Reset() {
 	*x = ObservationCondition{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_control_proto_msgTypes[15]
+		mi := &file_control_proto_msgTypes[16]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -1144,7 +1222,7 @@ func (x *ObservationCondition) String() string {
 func (*ObservationCondition) ProtoMessage() {}
 
 func (x *ObservationCondition) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[15]
+	mi := &file_control_proto_msgTypes[16]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1157,7 +1235,7 @@ func (x *ObservationCondition) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ObservationCondition.ProtoReflect.Descriptor instead.
 func (*ObservationCondition) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{15}
+	return file_control_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ObservationCondition) GetType() string {
@@ -1214,7 +1292,7 @@ type ClusterStatusResponse struct {
 func (x *ClusterStatusResponse) Reset() {
 	*x = ClusterStatusResponse{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_control_proto_msgTypes[16]
+		mi := &file_control_proto_msgTypes[17]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -1227,7 +1305,7 @@ func (x *ClusterStatusResponse) String() string {
 func (*ClusterStatusResponse) ProtoMessage() {}
 
 func (x *ClusterStatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[16]
+	mi := &file_control_proto_msgTypes[17]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1240,7 +1318,7 @@ func (x *ClusterStatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClusterStatusResponse.ProtoReflect.Descriptor instead.
 func (*ClusterStatusResponse) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{16}
+	return file_control_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *ClusterStatusResponse) GetSchemaVersion() string {
@@ -1329,7 +1407,7 @@ type NodeEvidence struct {
 func (x *NodeEvidence) Reset() {
 	*x = NodeEvidence{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_control_proto_msgTypes[17]
+		mi := &file_control_proto_msgTypes[18]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -1342,7 +1420,7 @@ func (x *NodeEvidence) String() string {
 func (*NodeEvidence) ProtoMessage() {}
 
 func (x *NodeEvidence) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[17]
+	mi := &file_control_proto_msgTypes[18]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1355,7 +1433,7 @@ func (x *NodeEvidence) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NodeEvidence.ProtoReflect.Descriptor instead.
 func (*NodeEvidence) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{17}
+	return file_control_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *NodeEvidence) GetNodeName() string {
@@ -1479,7 +1557,7 @@ type VolumeEvidence struct {
 func (x *VolumeEvidence) Reset() {
 	*x = VolumeEvidence{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_control_proto_msgTypes[18]
+		mi := &file_control_proto_msgTypes[19]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -1492,7 +1570,7 @@ func (x *VolumeEvidence) String() string {
 func (*VolumeEvidence) ProtoMessage() {}
 
 func (x *VolumeEvidence) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[18]
+	mi := &file_control_proto_msgTypes[19]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1505,7 +1583,7 @@ func (x *VolumeEvidence) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VolumeEvidence.ProtoReflect.Descriptor instead.
 func (*VolumeEvidence) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{18}
+	return file_control_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *VolumeEvidence) GetVolumeId() string {
@@ -1679,7 +1757,7 @@ type ReplicaEvidence struct {
 func (x *ReplicaEvidence) Reset() {
 	*x = ReplicaEvidence{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_control_proto_msgTypes[19]
+		mi := &file_control_proto_msgTypes[20]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -1692,7 +1770,7 @@ func (x *ReplicaEvidence) String() string {
 func (*ReplicaEvidence) ProtoMessage() {}
 
 func (x *ReplicaEvidence) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[19]
+	mi := &file_control_proto_msgTypes[20]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1705,7 +1783,7 @@ func (x *ReplicaEvidence) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReplicaEvidence.ProtoReflect.Descriptor instead.
 func (*ReplicaEvidence) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{19}
+	return file_control_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *ReplicaEvidence) GetReplicaId() string {
@@ -1880,7 +1958,7 @@ type ClusterEvent struct {
 func (x *ClusterEvent) Reset() {
 	*x = ClusterEvent{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_control_proto_msgTypes[20]
+		mi := &file_control_proto_msgTypes[21]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -1893,7 +1971,7 @@ func (x *ClusterEvent) String() string {
 func (*ClusterEvent) ProtoMessage() {}
 
 func (x *ClusterEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[20]
+	mi := &file_control_proto_msgTypes[21]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1906,7 +1984,7 @@ func (x *ClusterEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClusterEvent.ProtoReflect.Descriptor instead.
 func (*ClusterEvent) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{20}
+	return file_control_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *ClusterEvent) GetEventId() string {
@@ -2027,7 +2105,7 @@ type ListVolumesResponse struct {
 func (x *ListVolumesResponse) Reset() {
 	*x = ListVolumesResponse{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_control_proto_msgTypes[21]
+		mi := &file_control_proto_msgTypes[22]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -2040,7 +2118,7 @@ func (x *ListVolumesResponse) String() string {
 func (*ListVolumesResponse) ProtoMessage() {}
 
 func (x *ListVolumesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[21]
+	mi := &file_control_proto_msgTypes[22]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2053,7 +2131,7 @@ func (x *ListVolumesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListVolumesResponse.ProtoReflect.Descriptor instead.
 func (*ListVolumesResponse) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{21}
+	return file_control_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *ListVolumesResponse) GetSchemaVersion() string {
@@ -2091,7 +2169,7 @@ type VolumeTimelineResponse struct {
 func (x *VolumeTimelineResponse) Reset() {
 	*x = VolumeTimelineResponse{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_control_proto_msgTypes[22]
+		mi := &file_control_proto_msgTypes[23]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -2104,7 +2182,7 @@ func (x *VolumeTimelineResponse) String() string {
 func (*VolumeTimelineResponse) ProtoMessage() {}
 
 func (x *VolumeTimelineResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[22]
+	mi := &file_control_proto_msgTypes[23]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2117,7 +2195,7 @@ func (x *VolumeTimelineResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VolumeTimelineResponse.ProtoReflect.Descriptor instead.
 func (*VolumeTimelineResponse) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{22}
+	return file_control_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *VolumeTimelineResponse) GetSchemaVersion() string {
@@ -2167,7 +2245,7 @@ type CreateVolumeRequest struct {
 func (x *CreateVolumeRequest) Reset() {
 	*x = CreateVolumeRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_control_proto_msgTypes[23]
+		mi := &file_control_proto_msgTypes[24]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -2180,7 +2258,7 @@ func (x *CreateVolumeRequest) String() string {
 func (*CreateVolumeRequest) ProtoMessage() {}
 
 func (x *CreateVolumeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[23]
+	mi := &file_control_proto_msgTypes[24]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2193,7 +2271,7 @@ func (x *CreateVolumeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateVolumeRequest.ProtoReflect.Descriptor instead.
 func (*CreateVolumeRequest) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{23}
+	return file_control_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *CreateVolumeRequest) GetVolumeId() string {
@@ -2278,7 +2356,7 @@ type CreateVolumeResponse struct {
 func (x *CreateVolumeResponse) Reset() {
 	*x = CreateVolumeResponse{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_control_proto_msgTypes[24]
+		mi := &file_control_proto_msgTypes[25]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -2291,7 +2369,7 @@ func (x *CreateVolumeResponse) String() string {
 func (*CreateVolumeResponse) ProtoMessage() {}
 
 func (x *CreateVolumeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[24]
+	mi := &file_control_proto_msgTypes[25]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2304,7 +2382,7 @@ func (x *CreateVolumeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateVolumeResponse.ProtoReflect.Descriptor instead.
 func (*CreateVolumeResponse) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{24}
+	return file_control_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *CreateVolumeResponse) GetVolumeId() string {
@@ -2381,7 +2459,7 @@ type DeleteVolumeRequest struct {
 func (x *DeleteVolumeRequest) Reset() {
 	*x = DeleteVolumeRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_control_proto_msgTypes[25]
+		mi := &file_control_proto_msgTypes[26]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -2394,7 +2472,7 @@ func (x *DeleteVolumeRequest) String() string {
 func (*DeleteVolumeRequest) ProtoMessage() {}
 
 func (x *DeleteVolumeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[25]
+	mi := &file_control_proto_msgTypes[26]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2407,7 +2485,7 @@ func (x *DeleteVolumeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteVolumeRequest.ProtoReflect.Descriptor instead.
 func (*DeleteVolumeRequest) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{25}
+	return file_control_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *DeleteVolumeRequest) GetVolumeId() string {
@@ -2426,7 +2504,7 @@ type DeleteVolumeResponse struct {
 func (x *DeleteVolumeResponse) Reset() {
 	*x = DeleteVolumeResponse{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_control_proto_msgTypes[26]
+		mi := &file_control_proto_msgTypes[27]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -2439,7 +2517,7 @@ func (x *DeleteVolumeResponse) String() string {
 func (*DeleteVolumeResponse) ProtoMessage() {}
 
 func (x *DeleteVolumeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[26]
+	mi := &file_control_proto_msgTypes[27]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2452,7 +2530,7 @@ func (x *DeleteVolumeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteVolumeResponse.ProtoReflect.Descriptor instead.
 func (*DeleteVolumeResponse) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{26}
+	return file_control_proto_rawDescGZIP(), []int{27}
 }
 
 type FailbackRequest struct {
@@ -2476,7 +2554,7 @@ type FailbackRequest struct {
 func (x *FailbackRequest) Reset() {
 	*x = FailbackRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_control_proto_msgTypes[27]
+		mi := &file_control_proto_msgTypes[28]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -2489,7 +2567,7 @@ func (x *FailbackRequest) String() string {
 func (*FailbackRequest) ProtoMessage() {}
 
 func (x *FailbackRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[27]
+	mi := &file_control_proto_msgTypes[28]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2502,7 +2580,7 @@ func (x *FailbackRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FailbackRequest.ProtoReflect.Descriptor instead.
 func (*FailbackRequest) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{27}
+	return file_control_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *FailbackRequest) GetVolumeId() string {
@@ -2599,7 +2677,7 @@ type FailbackResponse struct {
 func (x *FailbackResponse) Reset() {
 	*x = FailbackResponse{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_control_proto_msgTypes[28]
+		mi := &file_control_proto_msgTypes[29]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -2612,7 +2690,7 @@ func (x *FailbackResponse) String() string {
 func (*FailbackResponse) ProtoMessage() {}
 
 func (x *FailbackResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[28]
+	mi := &file_control_proto_msgTypes[29]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2625,7 +2703,7 @@ func (x *FailbackResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FailbackResponse.ProtoReflect.Descriptor instead.
 func (*FailbackResponse) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{28}
+	return file_control_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *FailbackResponse) GetFailbackStarted() bool {
@@ -2698,7 +2776,7 @@ var file_control_proto_rawDesc = []byte{
 	0x74, 0x73, 0x18, 0x05, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x26, 0x2e, 0x73, 0x65, 0x61, 0x77, 0x65,
 	0x65, 0x64, 0x66, 0x73, 0x2e, 0x62, 0x6c, 0x6f, 0x63, 0x6b, 0x2e, 0x63, 0x6f, 0x6e, 0x74, 0x72,
 	0x6f, 0x6c, 0x2e, 0x48, 0x65, 0x61, 0x72, 0x74, 0x62, 0x65, 0x61, 0x74, 0x53, 0x6c, 0x6f, 0x74,
-	0x52, 0x05, 0x73, 0x6c, 0x6f, 0x74, 0x73, 0x22, 0xc3, 0x03, 0x0a, 0x0d, 0x48, 0x65, 0x61, 0x72,
+	0x52, 0x05, 0x73, 0x6c, 0x6f, 0x74, 0x73, 0x22, 0xee, 0x03, 0x0a, 0x0d, 0x48, 0x65, 0x61, 0x72,
 	0x74, 0x62, 0x65, 0x61, 0x74, 0x53, 0x6c, 0x6f, 0x74, 0x12, 0x1b, 0x0a, 0x09, 0x76, 0x6f, 0x6c,
 	0x75, 0x6d, 0x65, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x08, 0x76, 0x6f,
 	0x6c, 0x75, 0x6d, 0x65, 0x49, 0x64, 0x12, 0x1d, 0x0a, 0x0a, 0x72, 0x65, 0x70, 0x6c, 0x69, 0x63,
@@ -2726,94 +2804,107 @@ var file_control_proto_rawDesc = []byte{
 	0x6c, 0x2e, 0x46, 0x72, 0x6f, 0x6e, 0x74, 0x65, 0x6e, 0x64, 0x54, 0x61, 0x72, 0x67, 0x65, 0x74,
 	0x52, 0x09, 0x66, 0x72, 0x6f, 0x6e, 0x74, 0x65, 0x6e, 0x64, 0x73, 0x12, 0x20, 0x0a, 0x0b, 0x69,
 	0x6e, 0x63, 0x61, 0x72, 0x6e, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x18, 0x0c, 0x20, 0x01, 0x28, 0x09,
-	0x52, 0x0b, 0x69, 0x6e, 0x63, 0x61, 0x72, 0x6e, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x22, 0xa8, 0x01,
-	0x0a, 0x0e, 0x46, 0x72, 0x6f, 0x6e, 0x74, 0x65, 0x6e, 0x64, 0x54, 0x61, 0x72, 0x67, 0x65, 0x74,
-	0x12, 0x1a, 0x0a, 0x08, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x63, 0x6f, 0x6c, 0x18, 0x01, 0x20, 0x01,
-	0x28, 0x09, 0x52, 0x08, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x63, 0x6f, 0x6c, 0x12, 0x12, 0x0a, 0x04,
-	0x61, 0x64, 0x64, 0x72, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x04, 0x61, 0x64, 0x64, 0x72,
-	0x12, 0x10, 0x0a, 0x03, 0x69, 0x71, 0x6e, 0x18, 0x03, 0x20, 0x01, 0x28, 0x09, 0x52, 0x03, 0x69,
-	0x71, 0x6e, 0x12, 0x10, 0x0a, 0x03, 0x6e, 0x71, 0x6e, 0x18, 0x04, 0x20, 0x01, 0x28, 0x09, 0x52,
-	0x03, 0x6e, 0x71, 0x6e, 0x12, 0x10, 0x0a, 0x03, 0x6c, 0x75, 0x6e, 0x18, 0x05, 0x20, 0x01, 0x28,
-	0x0d, 0x52, 0x03, 0x6c, 0x75, 0x6e, 0x12, 0x12, 0x0a, 0x04, 0x6e, 0x73, 0x69, 0x64, 0x18, 0x06,
-	0x20, 0x01, 0x28, 0x0d, 0x52, 0x04, 0x6e, 0x73, 0x69, 0x64, 0x12, 0x1c, 0x0a, 0x09, 0x74, 0x72,
-	0x61, 0x6e, 0x73, 0x70, 0x6f, 0x72, 0x74, 0x18, 0x07, 0x20, 0x01, 0x28, 0x09, 0x52, 0x09, 0x74,
-	0x72, 0x61, 0x6e, 0x73, 0x70, 0x6f, 0x72, 0x74, 0x22, 0x67, 0x0a, 0x0c, 0x48, 0x65, 0x61, 0x72,
-	0x74, 0x62, 0x65, 0x61, 0x74, 0x41, 0x63, 0x6b, 0x12, 0x3b, 0x0a, 0x0b, 0x61, 0x63, 0x63, 0x65,
-	0x70, 0x74, 0x65, 0x64, 0x5f, 0x61, 0x74, 0x18, 0x01, 0x20, 0x01, 0x28, 0x0b, 0x32, 0x1a, 0x2e,
-	0x67, 0x6f, 0x6f, 0x67, 0x6c, 0x65, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x62, 0x75, 0x66, 0x2e,
-	0x54, 0x69, 0x6d, 0x65, 0x73, 0x74, 0x61, 0x6d, 0x70, 0x52, 0x0a, 0x61, 0x63, 0x63, 0x65, 0x70,
-	0x74, 0x65, 0x64, 0x41, 0x74, 0x12, 0x1a, 0x0a, 0x08, 0x73, 0x65, 0x71, 0x75, 0x65, 0x6e, 0x63,
-	0x65, 0x18, 0x02, 0x20, 0x01, 0x28, 0x04, 0x52, 0x08, 0x73, 0x65, 0x71, 0x75, 0x65, 0x6e, 0x63,
-	0x65, 0x22, 0x69, 0x0a, 0x0f, 0x43, 0x6c, 0x75, 0x73, 0x74, 0x65, 0x72, 0x45, 0x76, 0x65, 0x6e,
-	0x74, 0x41, 0x63, 0x6b, 0x12, 0x3b, 0x0a, 0x0b, 0x61, 0x63, 0x63, 0x65, 0x70, 0x74, 0x65, 0x64,
-	0x5f, 0x61, 0x74, 0x18, 0x01, 0x20, 0x01, 0x28, 0x0b, 0x32, 0x1a, 0x2e, 0x67, 0x6f, 0x6f, 0x67,
-	0x6c, 0x65, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x62, 0x75, 0x66, 0x2e, 0x54, 0x69, 0x6d, 0x65,
-	0x73, 0x74, 0x61, 0x6d, 0x70, 0x52, 0x0a, 0x61, 0x63, 0x63, 0x65, 0x70, 0x74, 0x65, 0x64, 0x41,
-	0x74, 0x12, 0x19, 0x0a, 0x08, 0x65, 0x76, 0x65, 0x6e, 0x74, 0x5f, 0x69, 0x64, 0x18, 0x02, 0x20,
-	0x01, 0x28, 0x09, 0x52, 0x07, 0x65, 0x76, 0x65, 0x6e, 0x74, 0x49, 0x64, 0x22, 0x71, 0x0a, 0x10,
-	0x53, 0x75, 0x62, 0x73, 0x63, 0x72, 0x69, 0x62, 0x65, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74,
-	0x12, 0x1b, 0x0a, 0x09, 0x76, 0x6f, 0x6c, 0x75, 0x6d, 0x65, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20,
-	0x01, 0x28, 0x09, 0x52, 0x08, 0x76, 0x6f, 0x6c, 0x75, 0x6d, 0x65, 0x49, 0x64, 0x12, 0x1d, 0x0a,
-	0x0a, 0x72, 0x65, 0x70, 0x6c, 0x69, 0x63, 0x61, 0x5f, 0x69, 0x64, 0x18, 0x02, 0x20, 0x01, 0x28,
-	0x09, 0x52, 0x09, 0x72, 0x65, 0x70, 0x6c, 0x69, 0x63, 0x61, 0x49, 0x64, 0x12, 0x21, 0x0a, 0x0c,
-	0x72, 0x65, 0x73, 0x75, 0x6d, 0x65, 0x5f, 0x65, 0x70, 0x6f, 0x63, 0x68, 0x18, 0x03, 0x20, 0x01,
-	0x28, 0x04, 0x52, 0x0b, 0x72, 0x65, 0x73, 0x75, 0x6d, 0x65, 0x45, 0x70, 0x6f, 0x63, 0x68, 0x22,
-	0xad, 0x01, 0x0a, 0x11, 0x52, 0x65, 0x70, 0x6c, 0x69, 0x63, 0x61, 0x44, 0x65, 0x73, 0x63, 0x72,
-	0x69, 0x70, 0x74, 0x6f, 0x72, 0x12, 0x1d, 0x0a, 0x0a, 0x72, 0x65, 0x70, 0x6c, 0x69, 0x63, 0x61,
-	0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x09, 0x72, 0x65, 0x70, 0x6c, 0x69,
-	0x63, 0x61, 0x49, 0x64, 0x12, 0x14, 0x0a, 0x05, 0x65, 0x70, 0x6f, 0x63, 0x68, 0x18, 0x02, 0x20,
-	0x01, 0x28, 0x04, 0x52, 0x05, 0x65, 0x70, 0x6f, 0x63, 0x68, 0x12, 0x29, 0x0a, 0x10, 0x65, 0x6e,
-	0x64, 0x70, 0x6f, 0x69, 0x6e, 0x74, 0x5f, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x18, 0x03,
-	0x20, 0x01, 0x28, 0x04, 0x52, 0x0f, 0x65, 0x6e, 0x64, 0x70, 0x6f, 0x69, 0x6e, 0x74, 0x56, 0x65,
-	0x72, 0x73, 0x69, 0x6f, 0x6e, 0x12, 0x1b, 0x0a, 0x09, 0x64, 0x61, 0x74, 0x61, 0x5f, 0x61, 0x64,
-	0x64, 0x72, 0x18, 0x04, 0x20, 0x01, 0x28, 0x09, 0x52, 0x08, 0x64, 0x61, 0x74, 0x61, 0x41, 0x64,
-	0x64, 0x72, 0x12, 0x1b, 0x0a, 0x09, 0x63, 0x74, 0x72, 0x6c, 0x5f, 0x61, 0x64, 0x64, 0x72, 0x18,
-	0x05, 0x20, 0x01, 0x28, 0x09, 0x52, 0x08, 0x63, 0x74, 0x72, 0x6c, 0x41, 0x64, 0x64, 0x72, 0x22,
-	0xb9, 0x02, 0x0a, 0x0e, 0x41, 0x73, 0x73, 0x69, 0x67, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x46, 0x61,
-	0x63, 0x74, 0x12, 0x1b, 0x0a, 0x09, 0x76, 0x6f, 0x6c, 0x75, 0x6d, 0x65, 0x5f, 0x69, 0x64, 0x18,
-	0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x08, 0x76, 0x6f, 0x6c, 0x75, 0x6d, 0x65, 0x49, 0x64, 0x12,
-	0x1d, 0x0a, 0x0a, 0x72, 0x65, 0x70, 0x6c, 0x69, 0x63, 0x61, 0x5f, 0x69, 0x64, 0x18, 0x02, 0x20,
-	0x01, 0x28, 0x09, 0x52, 0x09, 0x72, 0x65, 0x70, 0x6c, 0x69, 0x63, 0x61, 0x49, 0x64, 0x12, 0x14,
-	0x0a, 0x05, 0x65, 0x70, 0x6f, 0x63, 0x68, 0x18, 0x03, 0x20, 0x01, 0x28, 0x04, 0x52, 0x05, 0x65,
-	0x70, 0x6f, 0x63, 0x68, 0x12, 0x29, 0x0a, 0x10, 0x65, 0x6e, 0x64, 0x70, 0x6f, 0x69, 0x6e, 0x74,
-	0x5f, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x18, 0x04, 0x20, 0x01, 0x28, 0x04, 0x52, 0x0f,
-	0x65, 0x6e, 0x64, 0x70, 0x6f, 0x69, 0x6e, 0x74, 0x56, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x12,
-	0x1b, 0x0a, 0x09, 0x64, 0x61, 0x74, 0x61, 0x5f, 0x61, 0x64, 0x64, 0x72, 0x18, 0x05, 0x20, 0x01,
-	0x28, 0x09, 0x52, 0x08, 0x64, 0x61, 0x74, 0x61, 0x41, 0x64, 0x64, 0x72, 0x12, 0x1b, 0x0a, 0x09,
-	0x63, 0x74, 0x72, 0x6c, 0x5f, 0x61, 0x64, 0x64, 0x72, 0x18, 0x06, 0x20, 0x01, 0x28, 0x09, 0x52,
-	0x08, 0x63, 0x74, 0x72, 0x6c, 0x41, 0x64, 0x64, 0x72, 0x12, 0x40, 0x0a, 0x05, 0x70, 0x65, 0x65,
-	0x72, 0x73, 0x18, 0x07, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x2a, 0x2e, 0x73, 0x65, 0x61, 0x77, 0x65,
-	0x65, 0x64, 0x66, 0x73, 0x2e, 0x62, 0x6c, 0x6f, 0x63, 0x6b, 0x2e, 0x63, 0x6f, 0x6e, 0x74, 0x72,
-	0x6f, 0x6c, 0x2e, 0x52, 0x65, 0x70, 0x6c, 0x69, 0x63, 0x61, 0x44, 0x65, 0x73, 0x63, 0x72, 0x69,
-	0x70, 0x74, 0x6f, 0x72, 0x52, 0x05, 0x70, 0x65, 0x65, 0x72, 0x73, 0x12, 0x2e, 0x0a, 0x13, 0x70,
-	0x65, 0x65, 0x72, 0x5f, 0x73, 0x65, 0x74, 0x5f, 0x67, 0x65, 0x6e, 0x65, 0x72, 0x61, 0x74, 0x69,
-	0x6f, 0x6e, 0x18, 0x08, 0x20, 0x01, 0x28, 0x04, 0x52, 0x11, 0x70, 0x65, 0x65, 0x72, 0x53, 0x65,
-	0x74, 0x47, 0x65, 0x6e, 0x65, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x22, 0x2c, 0x0a, 0x0d, 0x53,
-	0x74, 0x61, 0x74, 0x75, 0x73, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x12, 0x1b, 0x0a, 0x09,
-	0x76, 0x6f, 0x6c, 0x75, 0x6d, 0x65, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52,
-	0x08, 0x76, 0x6f, 0x6c, 0x75, 0x6d, 0x65, 0x49, 0x64, 0x22, 0xe3, 0x02, 0x0a, 0x0e, 0x53, 0x74,
-	0x61, 0x74, 0x75, 0x73, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x1b, 0x0a, 0x09,
-	0x76, 0x6f, 0x6c, 0x75, 0x6d, 0x65, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52,
-	0x08, 0x76, 0x6f, 0x6c, 0x75, 0x6d, 0x65, 0x49, 0x64, 0x12, 0x1d, 0x0a, 0x0a, 0x72, 0x65, 0x70,
-	0x6c, 0x69, 0x63, 0x61, 0x5f, 0x69, 0x64, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x09, 0x72,
-	0x65, 0x70, 0x6c, 0x69, 0x63, 0x61, 0x49, 0x64, 0x12, 0x14, 0x0a, 0x05, 0x65, 0x70, 0x6f, 0x63,
-	0x68, 0x18, 0x03, 0x20, 0x01, 0x28, 0x04, 0x52, 0x05, 0x65, 0x70, 0x6f, 0x63, 0x68, 0x12, 0x29,
-	0x0a, 0x10, 0x65, 0x6e, 0x64, 0x70, 0x6f, 0x69, 0x6e, 0x74, 0x5f, 0x76, 0x65, 0x72, 0x73, 0x69,
-	0x6f, 0x6e, 0x18, 0x04, 0x20, 0x01, 0x28, 0x04, 0x52, 0x0f, 0x65, 0x6e, 0x64, 0x70, 0x6f, 0x69,
-	0x6e, 0x74, 0x56, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x12, 0x1a, 0x0a, 0x08, 0x61, 0x73, 0x73,
-	0x69, 0x67, 0x6e, 0x65, 0x64, 0x18, 0x05, 0x20, 0x01, 0x28, 0x08, 0x52, 0x08, 0x61, 0x73, 0x73,
-	0x69, 0x67, 0x6e, 0x65, 0x64, 0x12, 0x36, 0x0a, 0x17, 0x6c, 0x61, 0x73, 0x74, 0x5f, 0x75, 0x6e,
-	0x73, 0x75, 0x70, 0x70, 0x6f, 0x72, 0x74, 0x65, 0x64, 0x5f, 0x72, 0x65, 0x61, 0x73, 0x6f, 0x6e,
-	0x18, 0x06, 0x20, 0x01, 0x28, 0x09, 0x52, 0x15, 0x6c, 0x61, 0x73, 0x74, 0x55, 0x6e, 0x73, 0x75,
-	0x70, 0x70, 0x6f, 0x72, 0x74, 0x65, 0x64, 0x52, 0x65, 0x61, 0x73, 0x6f, 0x6e, 0x12, 0x39, 0x0a,
-	0x19, 0x6c, 0x61, 0x73, 0x74, 0x5f, 0x63, 0x6f, 0x6e, 0x76, 0x65, 0x72, 0x67, 0x65, 0x6e, 0x63,
-	0x65, 0x5f, 0x73, 0x74, 0x75, 0x63, 0x6b, 0x5f, 0x61, 0x74, 0x18, 0x07, 0x20, 0x01, 0x28, 0x09,
-	0x52, 0x16, 0x6c, 0x61, 0x73, 0x74, 0x43, 0x6f, 0x6e, 0x76, 0x65, 0x72, 0x67, 0x65, 0x6e, 0x63,
-	0x65, 0x53, 0x74, 0x75, 0x63, 0x6b, 0x41, 0x74, 0x12, 0x45, 0x0a, 0x09, 0x66, 0x72, 0x6f, 0x6e,
-	0x74, 0x65, 0x6e, 0x64, 0x73, 0x18, 0x08, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x27, 0x2e, 0x73, 0x65,
-	0x61, 0x77, 0x65, 0x65, 0x64, 0x66, 0x73, 0x2e, 0x62, 0x6c, 0x6f, 0x63, 0x6b, 0x2e, 0x63, 0x6f,
-	0x6e, 0x74, 0x72, 0x6f, 0x6c, 0x2e, 0x46, 0x72, 0x6f, 0x6e, 0x74, 0x65, 0x6e, 0x64, 0x54, 0x61,
-	0x72, 0x67, 0x65, 0x74, 0x52, 0x09, 0x66, 0x72, 0x6f, 0x6e, 0x74, 0x65, 0x6e, 0x64, 0x73, 0x22,
+	0x52, 0x0b, 0x69, 0x6e, 0x63, 0x61, 0x72, 0x6e, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x12, 0x29, 0x0a,
+	0x10, 0x75, 0x6e, 0x68, 0x65, 0x61, 0x6c, 0x74, 0x68, 0x79, 0x5f, 0x72, 0x65, 0x61, 0x73, 0x6f,
+	0x6e, 0x18, 0x0d, 0x20, 0x01, 0x28, 0x09, 0x52, 0x0f, 0x75, 0x6e, 0x68, 0x65, 0x61, 0x6c, 0x74,
+	0x68, 0x79, 0x52, 0x65, 0x61, 0x73, 0x6f, 0x6e, 0x22, 0xa8, 0x01, 0x0a, 0x0e, 0x46, 0x72, 0x6f,
+	0x6e, 0x74, 0x65, 0x6e, 0x64, 0x54, 0x61, 0x72, 0x67, 0x65, 0x74, 0x12, 0x1a, 0x0a, 0x08, 0x70,
+	0x72, 0x6f, 0x74, 0x6f, 0x63, 0x6f, 0x6c, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x08, 0x70,
+	0x72, 0x6f, 0x74, 0x6f, 0x63, 0x6f, 0x6c, 0x12, 0x12, 0x0a, 0x04, 0x61, 0x64, 0x64, 0x72, 0x18,
+	0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x04, 0x61, 0x64, 0x64, 0x72, 0x12, 0x10, 0x0a, 0x03, 0x69,
+	0x71, 0x6e, 0x18, 0x03, 0x20, 0x01, 0x28, 0x09, 0x52, 0x03, 0x69, 0x71, 0x6e, 0x12, 0x10, 0x0a,
+	0x03, 0x6e, 0x71, 0x6e, 0x18, 0x04, 0x20, 0x01, 0x28, 0x09, 0x52, 0x03, 0x6e, 0x71, 0x6e, 0x12,
+	0x10, 0x0a, 0x03, 0x6c, 0x75, 0x6e, 0x18, 0x05, 0x20, 0x01, 0x28, 0x0d, 0x52, 0x03, 0x6c, 0x75,
+	0x6e, 0x12, 0x12, 0x0a, 0x04, 0x6e, 0x73, 0x69, 0x64, 0x18, 0x06, 0x20, 0x01, 0x28, 0x0d, 0x52,
+	0x04, 0x6e, 0x73, 0x69, 0x64, 0x12, 0x1c, 0x0a, 0x09, 0x74, 0x72, 0x61, 0x6e, 0x73, 0x70, 0x6f,
+	0x72, 0x74, 0x18, 0x07, 0x20, 0x01, 0x28, 0x09, 0x52, 0x09, 0x74, 0x72, 0x61, 0x6e, 0x73, 0x70,
+	0x6f, 0x72, 0x74, 0x22, 0x67, 0x0a, 0x0c, 0x48, 0x65, 0x61, 0x72, 0x74, 0x62, 0x65, 0x61, 0x74,
+	0x41, 0x63, 0x6b, 0x12, 0x3b, 0x0a, 0x0b, 0x61, 0x63, 0x63, 0x65, 0x70, 0x74, 0x65, 0x64, 0x5f,
+	0x61, 0x74, 0x18, 0x01, 0x20, 0x01, 0x28, 0x0b, 0x32, 0x1a, 0x2e, 0x67, 0x6f, 0x6f, 0x67, 0x6c,
+	0x65, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x62, 0x75, 0x66, 0x2e, 0x54, 0x69, 0x6d, 0x65, 0x73,
+	0x74, 0x61, 0x6d, 0x70, 0x52, 0x0a, 0x61, 0x63, 0x63, 0x65, 0x70, 0x74, 0x65, 0x64, 0x41, 0x74,
+	0x12, 0x1a, 0x0a, 0x08, 0x73, 0x65, 0x71, 0x75, 0x65, 0x6e, 0x63, 0x65, 0x18, 0x02, 0x20, 0x01,
+	0x28, 0x04, 0x52, 0x08, 0x73, 0x65, 0x71, 0x75, 0x65, 0x6e, 0x63, 0x65, 0x22, 0x69, 0x0a, 0x0f,
+	0x43, 0x6c, 0x75, 0x73, 0x74, 0x65, 0x72, 0x45, 0x76, 0x65, 0x6e, 0x74, 0x41, 0x63, 0x6b, 0x12,
+	0x3b, 0x0a, 0x0b, 0x61, 0x63, 0x63, 0x65, 0x70, 0x74, 0x65, 0x64, 0x5f, 0x61, 0x74, 0x18, 0x01,
+	0x20, 0x01, 0x28, 0x0b, 0x32, 0x1a, 0x2e, 0x67, 0x6f, 0x6f, 0x67, 0x6c, 0x65, 0x2e, 0x70, 0x72,
+	0x6f, 0x74, 0x6f, 0x62, 0x75, 0x66, 0x2e, 0x54, 0x69, 0x6d, 0x65, 0x73, 0x74, 0x61, 0x6d, 0x70,
+	0x52, 0x0a, 0x61, 0x63, 0x63, 0x65, 0x70, 0x74, 0x65, 0x64, 0x41, 0x74, 0x12, 0x19, 0x0a, 0x08,
+	0x65, 0x76, 0x65, 0x6e, 0x74, 0x5f, 0x69, 0x64, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x07,
+	0x65, 0x76, 0x65, 0x6e, 0x74, 0x49, 0x64, 0x22, 0x71, 0x0a, 0x10, 0x53, 0x75, 0x62, 0x73, 0x63,
+	0x72, 0x69, 0x62, 0x65, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x12, 0x1b, 0x0a, 0x09, 0x76,
+	0x6f, 0x6c, 0x75, 0x6d, 0x65, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x08,
+	0x76, 0x6f, 0x6c, 0x75, 0x6d, 0x65, 0x49, 0x64, 0x12, 0x1d, 0x0a, 0x0a, 0x72, 0x65, 0x70, 0x6c,
+	0x69, 0x63, 0x61, 0x5f, 0x69, 0x64, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x09, 0x72, 0x65,
+	0x70, 0x6c, 0x69, 0x63, 0x61, 0x49, 0x64, 0x12, 0x21, 0x0a, 0x0c, 0x72, 0x65, 0x73, 0x75, 0x6d,
+	0x65, 0x5f, 0x65, 0x70, 0x6f, 0x63, 0x68, 0x18, 0x03, 0x20, 0x01, 0x28, 0x04, 0x52, 0x0b, 0x72,
+	0x65, 0x73, 0x75, 0x6d, 0x65, 0x45, 0x70, 0x6f, 0x63, 0x68, 0x22, 0xad, 0x01, 0x0a, 0x11, 0x52,
+	0x65, 0x70, 0x6c, 0x69, 0x63, 0x61, 0x44, 0x65, 0x73, 0x63, 0x72, 0x69, 0x70, 0x74, 0x6f, 0x72,
+	0x12, 0x1d, 0x0a, 0x0a, 0x72, 0x65, 0x70, 0x6c, 0x69, 0x63, 0x61, 0x5f, 0x69, 0x64, 0x18, 0x01,
+	0x20, 0x01, 0x28, 0x09, 0x52, 0x09, 0x72, 0x65, 0x70, 0x6c, 0x69, 0x63, 0x61, 0x49, 0x64, 0x12,
+	0x14, 0x0a, 0x05, 0x65, 0x70, 0x6f, 0x63, 0x68, 0x18, 0x02, 0x20, 0x01, 0x28, 0x04, 0x52, 0x05,
+	0x65, 0x70, 0x6f, 0x63, 0x68, 0x12, 0x29, 0x0a, 0x10, 0x65, 0x6e, 0x64, 0x70, 0x6f, 0x69, 0x6e,
+	0x74, 0x5f, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x18, 0x03, 0x20, 0x01, 0x28, 0x04, 0x52,
+	0x0f, 0x65, 0x6e, 0x64, 0x70, 0x6f, 0x69, 0x6e, 0x74, 0x56, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e,
+	0x12, 0x1b, 0x0a, 0x09, 0x64, 0x61, 0x74, 0x61, 0x5f, 0x61, 0x64, 0x64, 0x72, 0x18, 0x04, 0x20,
+	0x01, 0x28, 0x09, 0x52, 0x08, 0x64, 0x61, 0x74, 0x61, 0x41, 0x64, 0x64, 0x72, 0x12, 0x1b, 0x0a,
+	0x09, 0x63, 0x74, 0x72, 0x6c, 0x5f, 0x61, 0x64, 0x64, 0x72, 0x18, 0x05, 0x20, 0x01, 0x28, 0x09,
+	0x52, 0x08, 0x63, 0x74, 0x72, 0x6c, 0x41, 0x64, 0x64, 0x72, 0x22, 0xb9, 0x02, 0x0a, 0x0e, 0x41,
+	0x73, 0x73, 0x69, 0x67, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x46, 0x61, 0x63, 0x74, 0x12, 0x1b, 0x0a,
+	0x09, 0x76, 0x6f, 0x6c, 0x75, 0x6d, 0x65, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09,
+	0x52, 0x08, 0x76, 0x6f, 0x6c, 0x75, 0x6d, 0x65, 0x49, 0x64, 0x12, 0x1d, 0x0a, 0x0a, 0x72, 0x65,
+	0x70, 0x6c, 0x69, 0x63, 0x61, 0x5f, 0x69, 0x64, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x09,
+	0x72, 0x65, 0x70, 0x6c, 0x69, 0x63, 0x61, 0x49, 0x64, 0x12, 0x14, 0x0a, 0x05, 0x65, 0x70, 0x6f,
+	0x63, 0x68, 0x18, 0x03, 0x20, 0x01, 0x28, 0x04, 0x52, 0x05, 0x65, 0x70, 0x6f, 0x63, 0x68, 0x12,
+	0x29, 0x0a, 0x10, 0x65, 0x6e, 0x64, 0x70, 0x6f, 0x69, 0x6e, 0x74, 0x5f, 0x76, 0x65, 0x72, 0x73,
+	0x69, 0x6f, 0x6e, 0x18, 0x04, 0x20, 0x01, 0x28, 0x04, 0x52, 0x0f, 0x65, 0x6e, 0x64, 0x70, 0x6f,
+	0x69, 0x6e, 0x74, 0x56, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x12, 0x1b, 0x0a, 0x09, 0x64, 0x61,
+	0x74, 0x61, 0x5f, 0x61, 0x64, 0x64, 0x72, 0x18, 0x05, 0x20, 0x01, 0x28, 0x09, 0x52, 0x08, 0x64,
+	0x61, 0x74, 0x61, 0x41, 0x64, 0x64, 0x72, 0x12, 0x1b, 0x0a, 0x09, 0x63, 0x74, 0x72, 0x6c, 0x5f,
+	0x61, 0x64, 0x64, 0x72, 0x18, 0x06, 0x20, 0x01, 0x28, 0x09, 0x52, 0x08, 0x63, 0x74, 0x72, 0x6c,
+	0x41, 0x64, 0x64, 0x72, 0x12, 0x40, 0x0a, 0x05, 0x70, 0x65, 0x65, 0x72, 0x73, 0x18, 0x07, 0x20,
+	0x03, 0x28, 0x0b, 0x32, 0x2a, 0x2e, 0x73, 0x65, 0x61, 0x77, 0x65, 0x65, 0x64, 0x66, 0x73, 0x2e,
+	0x62, 0x6c, 0x6f, 0x63, 0x6b, 0x2e, 0x63, 0x6f, 0x6e, 0x74, 0x72, 0x6f, 0x6c, 0x2e, 0x52, 0x65,
+	0x70, 0x6c, 0x69, 0x63, 0x61, 0x44, 0x65, 0x73, 0x63, 0x72, 0x69, 0x70, 0x74, 0x6f, 0x72, 0x52,
+	0x05, 0x70, 0x65, 0x65, 0x72, 0x73, 0x12, 0x2e, 0x0a, 0x13, 0x70, 0x65, 0x65, 0x72, 0x5f, 0x73,
+	0x65, 0x74, 0x5f, 0x67, 0x65, 0x6e, 0x65, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x18, 0x08, 0x20,
+	0x01, 0x28, 0x04, 0x52, 0x11, 0x70, 0x65, 0x65, 0x72, 0x53, 0x65, 0x74, 0x47, 0x65, 0x6e, 0x65,
+	0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x22, 0x2c, 0x0a, 0x0d, 0x53, 0x74, 0x61, 0x74, 0x75, 0x73,
+	0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x12, 0x1b, 0x0a, 0x09, 0x76, 0x6f, 0x6c, 0x75, 0x6d,
+	0x65, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x08, 0x76, 0x6f, 0x6c, 0x75,
+	0x6d, 0x65, 0x49, 0x64, 0x22, 0xbd, 0x03, 0x0a, 0x0e, 0x53, 0x74, 0x61, 0x74, 0x75, 0x73, 0x52,
+	0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x1b, 0x0a, 0x09, 0x76, 0x6f, 0x6c, 0x75, 0x6d,
+	0x65, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x08, 0x76, 0x6f, 0x6c, 0x75,
+	0x6d, 0x65, 0x49, 0x64, 0x12, 0x1d, 0x0a, 0x0a, 0x72, 0x65, 0x70, 0x6c, 0x69, 0x63, 0x61, 0x5f,
+	0x69, 0x64, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x09, 0x72, 0x65, 0x70, 0x6c, 0x69, 0x63,
+	0x61, 0x49, 0x64, 0x12, 0x14, 0x0a, 0x05, 0x65, 0x70, 0x6f, 0x63, 0x68, 0x18, 0x03, 0x20, 0x01,
+	0x28, 0x04, 0x52, 0x05, 0x65, 0x70, 0x6f, 0x63, 0x68, 0x12, 0x29, 0x0a, 0x10, 0x65, 0x6e, 0x64,
+	0x70, 0x6f, 0x69, 0x6e, 0x74, 0x5f, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x18, 0x04, 0x20,
+	0x01, 0x28, 0x04, 0x52, 0x0f, 0x65, 0x6e, 0x64, 0x70, 0x6f, 0x69, 0x6e, 0x74, 0x56, 0x65, 0x72,
+	0x73, 0x69, 0x6f, 0x6e, 0x12, 0x1a, 0x0a, 0x08, 0x61, 0x73, 0x73, 0x69, 0x67, 0x6e, 0x65, 0x64,
+	0x18, 0x05, 0x20, 0x01, 0x28, 0x08, 0x52, 0x08, 0x61, 0x73, 0x73, 0x69, 0x67, 0x6e, 0x65, 0x64,
+	0x12, 0x36, 0x0a, 0x17, 0x6c, 0x61, 0x73, 0x74, 0x5f, 0x75, 0x6e, 0x73, 0x75, 0x70, 0x70, 0x6f,
+	0x72, 0x74, 0x65, 0x64, 0x5f, 0x72, 0x65, 0x61, 0x73, 0x6f, 0x6e, 0x18, 0x06, 0x20, 0x01, 0x28,
+	0x09, 0x52, 0x15, 0x6c, 0x61, 0x73, 0x74, 0x55, 0x6e, 0x73, 0x75, 0x70, 0x70, 0x6f, 0x72, 0x74,
+	0x65, 0x64, 0x52, 0x65, 0x61, 0x73, 0x6f, 0x6e, 0x12, 0x39, 0x0a, 0x19, 0x6c, 0x61, 0x73, 0x74,
+	0x5f, 0x63, 0x6f, 0x6e, 0x76, 0x65, 0x72, 0x67, 0x65, 0x6e, 0x63, 0x65, 0x5f, 0x73, 0x74, 0x75,
+	0x63, 0x6b, 0x5f, 0x61, 0x74, 0x18, 0x07, 0x20, 0x01, 0x28, 0x09, 0x52, 0x16, 0x6c, 0x61, 0x73,
+	0x74, 0x43, 0x6f, 0x6e, 0x76, 0x65, 0x72, 0x67, 0x65, 0x6e, 0x63, 0x65, 0x53, 0x74, 0x75, 0x63,
+	0x6b, 0x41, 0x74, 0x12, 0x45, 0x0a, 0x09, 0x66, 0x72, 0x6f, 0x6e, 0x74, 0x65, 0x6e, 0x64, 0x73,
+	0x18, 0x08, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x27, 0x2e, 0x73, 0x65, 0x61, 0x77, 0x65, 0x65, 0x64,
+	0x66, 0x73, 0x2e, 0x62, 0x6c, 0x6f, 0x63, 0x6b, 0x2e, 0x63, 0x6f, 0x6e, 0x74, 0x72, 0x6f, 0x6c,
+	0x2e, 0x46, 0x72, 0x6f, 0x6e, 0x74, 0x65, 0x6e, 0x64, 0x54, 0x61, 0x72, 0x67, 0x65, 0x74, 0x52,
+	0x09, 0x66, 0x72, 0x6f, 0x6e, 0x74, 0x65, 0x6e, 0x64, 0x73, 0x12, 0x58, 0x0a, 0x12, 0x75, 0x6e,
+	0x68, 0x65, 0x61, 0x6c, 0x74, 0x68, 0x79, 0x5f, 0x72, 0x65, 0x70, 0x6c, 0x69, 0x63, 0x61, 0x73,
+	0x18, 0x09, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x29, 0x2e, 0x73, 0x65, 0x61, 0x77, 0x65, 0x65, 0x64,
+	0x66, 0x73, 0x2e, 0x62, 0x6c, 0x6f, 0x63, 0x6b, 0x2e, 0x63, 0x6f, 0x6e, 0x74, 0x72, 0x6f, 0x6c,
+	0x2e, 0x52, 0x65, 0x70, 0x6c, 0x69, 0x63, 0x61, 0x55, 0x6e, 0x68, 0x65, 0x61, 0x6c, 0x74, 0x68,
+	0x79, 0x52, 0x11, 0x75, 0x6e, 0x68, 0x65, 0x61, 0x6c, 0x74, 0x68, 0x79, 0x52, 0x65, 0x70, 0x6c,
+	0x69, 0x63, 0x61, 0x73, 0x22, 0x49, 0x0a, 0x10, 0x52, 0x65, 0x70, 0x6c, 0x69, 0x63, 0x61, 0x55,
+	0x6e, 0x68, 0x65, 0x61, 0x6c, 0x74, 0x68, 0x79, 0x12, 0x1d, 0x0a, 0x0a, 0x72, 0x65, 0x70, 0x6c,
+	0x69, 0x63, 0x61, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x09, 0x72, 0x65,
+	0x70, 0x6c, 0x69, 0x63, 0x61, 0x49, 0x64, 0x12, 0x16, 0x0a, 0x06, 0x72, 0x65, 0x61, 0x73, 0x6f,
+	0x6e, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x06, 0x72, 0x65, 0x61, 0x73, 0x6f, 0x6e, 0x22,
 	0x19, 0x0a, 0x17, 0x47, 0x65, 0x74, 0x43, 0x6c, 0x75, 0x73, 0x74, 0x65, 0x72, 0x53, 0x74, 0x61,
 	0x74, 0x75, 0x73, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x22, 0x14, 0x0a, 0x12, 0x4c, 0x69,
 	0x73, 0x74, 0x56, 0x6f, 0x6c, 0x75, 0x6d, 0x65, 0x73, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74,
@@ -3282,7 +3373,7 @@ func file_control_proto_rawDescGZIP() []byte {
 	return file_control_proto_rawDescData
 }
 
-var file_control_proto_msgTypes = make([]protoimpl.MessageInfo, 29)
+var file_control_proto_msgTypes = make([]protoimpl.MessageInfo, 30)
 var file_control_proto_goTypes = []interface{}{
 	(*HeartbeatReport)(nil),           // 0: seaweedfs.block.control.HeartbeatReport
 	(*HeartbeatSlot)(nil),             // 1: seaweedfs.block.control.HeartbeatSlot
@@ -3294,79 +3385,81 @@ var file_control_proto_goTypes = []interface{}{
 	(*AssignmentFact)(nil),            // 7: seaweedfs.block.control.AssignmentFact
 	(*StatusRequest)(nil),             // 8: seaweedfs.block.control.StatusRequest
 	(*StatusResponse)(nil),            // 9: seaweedfs.block.control.StatusResponse
-	(*GetClusterStatusRequest)(nil),   // 10: seaweedfs.block.control.GetClusterStatusRequest
-	(*ListVolumesRequest)(nil),        // 11: seaweedfs.block.control.ListVolumesRequest
-	(*GetVolumeStatusRequest)(nil),    // 12: seaweedfs.block.control.GetVolumeStatusRequest
-	(*GetVolumeTimelineRequest)(nil),  // 13: seaweedfs.block.control.GetVolumeTimelineRequest
-	(*WatchClusterEventsRequest)(nil), // 14: seaweedfs.block.control.WatchClusterEventsRequest
-	(*ObservationCondition)(nil),      // 15: seaweedfs.block.control.ObservationCondition
-	(*ClusterStatusResponse)(nil),     // 16: seaweedfs.block.control.ClusterStatusResponse
-	(*NodeEvidence)(nil),              // 17: seaweedfs.block.control.NodeEvidence
-	(*VolumeEvidence)(nil),            // 18: seaweedfs.block.control.VolumeEvidence
-	(*ReplicaEvidence)(nil),           // 19: seaweedfs.block.control.ReplicaEvidence
-	(*ClusterEvent)(nil),              // 20: seaweedfs.block.control.ClusterEvent
-	(*ListVolumesResponse)(nil),       // 21: seaweedfs.block.control.ListVolumesResponse
-	(*VolumeTimelineResponse)(nil),    // 22: seaweedfs.block.control.VolumeTimelineResponse
-	(*CreateVolumeRequest)(nil),       // 23: seaweedfs.block.control.CreateVolumeRequest
-	(*CreateVolumeResponse)(nil),      // 24: seaweedfs.block.control.CreateVolumeResponse
-	(*DeleteVolumeRequest)(nil),       // 25: seaweedfs.block.control.DeleteVolumeRequest
-	(*DeleteVolumeResponse)(nil),      // 26: seaweedfs.block.control.DeleteVolumeResponse
-	(*FailbackRequest)(nil),           // 27: seaweedfs.block.control.FailbackRequest
-	(*FailbackResponse)(nil),          // 28: seaweedfs.block.control.FailbackResponse
-	(*timestamp.Timestamp)(nil),       // 29: google.protobuf.Timestamp
+	(*ReplicaUnhealthy)(nil),          // 10: seaweedfs.block.control.ReplicaUnhealthy
+	(*GetClusterStatusRequest)(nil),   // 11: seaweedfs.block.control.GetClusterStatusRequest
+	(*ListVolumesRequest)(nil),        // 12: seaweedfs.block.control.ListVolumesRequest
+	(*GetVolumeStatusRequest)(nil),    // 13: seaweedfs.block.control.GetVolumeStatusRequest
+	(*GetVolumeTimelineRequest)(nil),  // 14: seaweedfs.block.control.GetVolumeTimelineRequest
+	(*WatchClusterEventsRequest)(nil), // 15: seaweedfs.block.control.WatchClusterEventsRequest
+	(*ObservationCondition)(nil),      // 16: seaweedfs.block.control.ObservationCondition
+	(*ClusterStatusResponse)(nil),     // 17: seaweedfs.block.control.ClusterStatusResponse
+	(*NodeEvidence)(nil),              // 18: seaweedfs.block.control.NodeEvidence
+	(*VolumeEvidence)(nil),            // 19: seaweedfs.block.control.VolumeEvidence
+	(*ReplicaEvidence)(nil),           // 20: seaweedfs.block.control.ReplicaEvidence
+	(*ClusterEvent)(nil),              // 21: seaweedfs.block.control.ClusterEvent
+	(*ListVolumesResponse)(nil),       // 22: seaweedfs.block.control.ListVolumesResponse
+	(*VolumeTimelineResponse)(nil),    // 23: seaweedfs.block.control.VolumeTimelineResponse
+	(*CreateVolumeRequest)(nil),       // 24: seaweedfs.block.control.CreateVolumeRequest
+	(*CreateVolumeResponse)(nil),      // 25: seaweedfs.block.control.CreateVolumeResponse
+	(*DeleteVolumeRequest)(nil),       // 26: seaweedfs.block.control.DeleteVolumeRequest
+	(*DeleteVolumeResponse)(nil),      // 27: seaweedfs.block.control.DeleteVolumeResponse
+	(*FailbackRequest)(nil),           // 28: seaweedfs.block.control.FailbackRequest
+	(*FailbackResponse)(nil),          // 29: seaweedfs.block.control.FailbackResponse
+	(*timestamp.Timestamp)(nil),       // 30: google.protobuf.Timestamp
 }
 var file_control_proto_depIdxs = []int32{
-	29, // 0: seaweedfs.block.control.HeartbeatReport.sent_at:type_name -> google.protobuf.Timestamp
+	30, // 0: seaweedfs.block.control.HeartbeatReport.sent_at:type_name -> google.protobuf.Timestamp
 	1,  // 1: seaweedfs.block.control.HeartbeatReport.slots:type_name -> seaweedfs.block.control.HeartbeatSlot
 	2,  // 2: seaweedfs.block.control.HeartbeatSlot.frontends:type_name -> seaweedfs.block.control.FrontendTarget
-	29, // 3: seaweedfs.block.control.HeartbeatAck.accepted_at:type_name -> google.protobuf.Timestamp
-	29, // 4: seaweedfs.block.control.ClusterEventAck.accepted_at:type_name -> google.protobuf.Timestamp
+	30, // 3: seaweedfs.block.control.HeartbeatAck.accepted_at:type_name -> google.protobuf.Timestamp
+	30, // 4: seaweedfs.block.control.ClusterEventAck.accepted_at:type_name -> google.protobuf.Timestamp
 	6,  // 5: seaweedfs.block.control.AssignmentFact.peers:type_name -> seaweedfs.block.control.ReplicaDescriptor
 	2,  // 6: seaweedfs.block.control.StatusResponse.frontends:type_name -> seaweedfs.block.control.FrontendTarget
-	29, // 7: seaweedfs.block.control.ClusterStatusResponse.captured_at:type_name -> google.protobuf.Timestamp
-	17, // 8: seaweedfs.block.control.ClusterStatusResponse.nodes:type_name -> seaweedfs.block.control.NodeEvidence
-	18, // 9: seaweedfs.block.control.ClusterStatusResponse.volumes:type_name -> seaweedfs.block.control.VolumeEvidence
-	15, // 10: seaweedfs.block.control.ClusterStatusResponse.conditions:type_name -> seaweedfs.block.control.ObservationCondition
-	20, // 11: seaweedfs.block.control.ClusterStatusResponse.events:type_name -> seaweedfs.block.control.ClusterEvent
-	29, // 12: seaweedfs.block.control.NodeEvidence.last_heartbeat_at:type_name -> google.protobuf.Timestamp
-	15, // 13: seaweedfs.block.control.NodeEvidence.conditions:type_name -> seaweedfs.block.control.ObservationCondition
-	19, // 14: seaweedfs.block.control.VolumeEvidence.replicas:type_name -> seaweedfs.block.control.ReplicaEvidence
-	15, // 15: seaweedfs.block.control.VolumeEvidence.conditions:type_name -> seaweedfs.block.control.ObservationCondition
-	15, // 16: seaweedfs.block.control.ReplicaEvidence.conditions:type_name -> seaweedfs.block.control.ObservationCondition
-	29, // 17: seaweedfs.block.control.ClusterEvent.event_time:type_name -> google.protobuf.Timestamp
-	29, // 18: seaweedfs.block.control.ListVolumesResponse.captured_at:type_name -> google.protobuf.Timestamp
-	18, // 19: seaweedfs.block.control.ListVolumesResponse.volumes:type_name -> seaweedfs.block.control.VolumeEvidence
-	29, // 20: seaweedfs.block.control.VolumeTimelineResponse.captured_at:type_name -> google.protobuf.Timestamp
-	20, // 21: seaweedfs.block.control.VolumeTimelineResponse.events:type_name -> seaweedfs.block.control.ClusterEvent
-	0,  // 22: seaweedfs.block.control.ObservationService.ReportHeartbeat:input_type -> seaweedfs.block.control.HeartbeatReport
-	20, // 23: seaweedfs.block.control.ObservationService.ReportClusterEvent:input_type -> seaweedfs.block.control.ClusterEvent
-	5,  // 24: seaweedfs.block.control.AssignmentService.SubscribeAssignments:input_type -> seaweedfs.block.control.SubscribeRequest
-	8,  // 25: seaweedfs.block.control.EvidenceService.QueryVolumeStatus:input_type -> seaweedfs.block.control.StatusRequest
-	10, // 26: seaweedfs.block.control.ClusterEvidenceService.GetClusterStatus:input_type -> seaweedfs.block.control.GetClusterStatusRequest
-	11, // 27: seaweedfs.block.control.ClusterEvidenceService.ListVolumes:input_type -> seaweedfs.block.control.ListVolumesRequest
-	12, // 28: seaweedfs.block.control.ClusterEvidenceService.GetVolumeStatus:input_type -> seaweedfs.block.control.GetVolumeStatusRequest
-	13, // 29: seaweedfs.block.control.ClusterEvidenceService.GetVolumeTimeline:input_type -> seaweedfs.block.control.GetVolumeTimelineRequest
-	14, // 30: seaweedfs.block.control.ClusterEvidenceService.WatchClusterEvents:input_type -> seaweedfs.block.control.WatchClusterEventsRequest
-	23, // 31: seaweedfs.block.control.LifecycleService.CreateVolume:input_type -> seaweedfs.block.control.CreateVolumeRequest
-	25, // 32: seaweedfs.block.control.LifecycleService.DeleteVolume:input_type -> seaweedfs.block.control.DeleteVolumeRequest
-	27, // 33: seaweedfs.block.control.FailbackService.ExecuteFailback:input_type -> seaweedfs.block.control.FailbackRequest
-	3,  // 34: seaweedfs.block.control.ObservationService.ReportHeartbeat:output_type -> seaweedfs.block.control.HeartbeatAck
-	4,  // 35: seaweedfs.block.control.ObservationService.ReportClusterEvent:output_type -> seaweedfs.block.control.ClusterEventAck
-	7,  // 36: seaweedfs.block.control.AssignmentService.SubscribeAssignments:output_type -> seaweedfs.block.control.AssignmentFact
-	9,  // 37: seaweedfs.block.control.EvidenceService.QueryVolumeStatus:output_type -> seaweedfs.block.control.StatusResponse
-	16, // 38: seaweedfs.block.control.ClusterEvidenceService.GetClusterStatus:output_type -> seaweedfs.block.control.ClusterStatusResponse
-	21, // 39: seaweedfs.block.control.ClusterEvidenceService.ListVolumes:output_type -> seaweedfs.block.control.ListVolumesResponse
-	18, // 40: seaweedfs.block.control.ClusterEvidenceService.GetVolumeStatus:output_type -> seaweedfs.block.control.VolumeEvidence
-	22, // 41: seaweedfs.block.control.ClusterEvidenceService.GetVolumeTimeline:output_type -> seaweedfs.block.control.VolumeTimelineResponse
-	20, // 42: seaweedfs.block.control.ClusterEvidenceService.WatchClusterEvents:output_type -> seaweedfs.block.control.ClusterEvent
-	24, // 43: seaweedfs.block.control.LifecycleService.CreateVolume:output_type -> seaweedfs.block.control.CreateVolumeResponse
-	26, // 44: seaweedfs.block.control.LifecycleService.DeleteVolume:output_type -> seaweedfs.block.control.DeleteVolumeResponse
-	28, // 45: seaweedfs.block.control.FailbackService.ExecuteFailback:output_type -> seaweedfs.block.control.FailbackResponse
-	34, // [34:46] is the sub-list for method output_type
-	22, // [22:34] is the sub-list for method input_type
-	22, // [22:22] is the sub-list for extension type_name
-	22, // [22:22] is the sub-list for extension extendee
-	0,  // [0:22] is the sub-list for field type_name
+	10, // 7: seaweedfs.block.control.StatusResponse.unhealthy_replicas:type_name -> seaweedfs.block.control.ReplicaUnhealthy
+	30, // 8: seaweedfs.block.control.ClusterStatusResponse.captured_at:type_name -> google.protobuf.Timestamp
+	18, // 9: seaweedfs.block.control.ClusterStatusResponse.nodes:type_name -> seaweedfs.block.control.NodeEvidence
+	19, // 10: seaweedfs.block.control.ClusterStatusResponse.volumes:type_name -> seaweedfs.block.control.VolumeEvidence
+	16, // 11: seaweedfs.block.control.ClusterStatusResponse.conditions:type_name -> seaweedfs.block.control.ObservationCondition
+	21, // 12: seaweedfs.block.control.ClusterStatusResponse.events:type_name -> seaweedfs.block.control.ClusterEvent
+	30, // 13: seaweedfs.block.control.NodeEvidence.last_heartbeat_at:type_name -> google.protobuf.Timestamp
+	16, // 14: seaweedfs.block.control.NodeEvidence.conditions:type_name -> seaweedfs.block.control.ObservationCondition
+	20, // 15: seaweedfs.block.control.VolumeEvidence.replicas:type_name -> seaweedfs.block.control.ReplicaEvidence
+	16, // 16: seaweedfs.block.control.VolumeEvidence.conditions:type_name -> seaweedfs.block.control.ObservationCondition
+	16, // 17: seaweedfs.block.control.ReplicaEvidence.conditions:type_name -> seaweedfs.block.control.ObservationCondition
+	30, // 18: seaweedfs.block.control.ClusterEvent.event_time:type_name -> google.protobuf.Timestamp
+	30, // 19: seaweedfs.block.control.ListVolumesResponse.captured_at:type_name -> google.protobuf.Timestamp
+	19, // 20: seaweedfs.block.control.ListVolumesResponse.volumes:type_name -> seaweedfs.block.control.VolumeEvidence
+	30, // 21: seaweedfs.block.control.VolumeTimelineResponse.captured_at:type_name -> google.protobuf.Timestamp
+	21, // 22: seaweedfs.block.control.VolumeTimelineResponse.events:type_name -> seaweedfs.block.control.ClusterEvent
+	0,  // 23: seaweedfs.block.control.ObservationService.ReportHeartbeat:input_type -> seaweedfs.block.control.HeartbeatReport
+	21, // 24: seaweedfs.block.control.ObservationService.ReportClusterEvent:input_type -> seaweedfs.block.control.ClusterEvent
+	5,  // 25: seaweedfs.block.control.AssignmentService.SubscribeAssignments:input_type -> seaweedfs.block.control.SubscribeRequest
+	8,  // 26: seaweedfs.block.control.EvidenceService.QueryVolumeStatus:input_type -> seaweedfs.block.control.StatusRequest
+	11, // 27: seaweedfs.block.control.ClusterEvidenceService.GetClusterStatus:input_type -> seaweedfs.block.control.GetClusterStatusRequest
+	12, // 28: seaweedfs.block.control.ClusterEvidenceService.ListVolumes:input_type -> seaweedfs.block.control.ListVolumesRequest
+	13, // 29: seaweedfs.block.control.ClusterEvidenceService.GetVolumeStatus:input_type -> seaweedfs.block.control.GetVolumeStatusRequest
+	14, // 30: seaweedfs.block.control.ClusterEvidenceService.GetVolumeTimeline:input_type -> seaweedfs.block.control.GetVolumeTimelineRequest
+	15, // 31: seaweedfs.block.control.ClusterEvidenceService.WatchClusterEvents:input_type -> seaweedfs.block.control.WatchClusterEventsRequest
+	24, // 32: seaweedfs.block.control.LifecycleService.CreateVolume:input_type -> seaweedfs.block.control.CreateVolumeRequest
+	26, // 33: seaweedfs.block.control.LifecycleService.DeleteVolume:input_type -> seaweedfs.block.control.DeleteVolumeRequest
+	28, // 34: seaweedfs.block.control.FailbackService.ExecuteFailback:input_type -> seaweedfs.block.control.FailbackRequest
+	3,  // 35: seaweedfs.block.control.ObservationService.ReportHeartbeat:output_type -> seaweedfs.block.control.HeartbeatAck
+	4,  // 36: seaweedfs.block.control.ObservationService.ReportClusterEvent:output_type -> seaweedfs.block.control.ClusterEventAck
+	7,  // 37: seaweedfs.block.control.AssignmentService.SubscribeAssignments:output_type -> seaweedfs.block.control.AssignmentFact
+	9,  // 38: seaweedfs.block.control.EvidenceService.QueryVolumeStatus:output_type -> seaweedfs.block.control.StatusResponse
+	17, // 39: seaweedfs.block.control.ClusterEvidenceService.GetClusterStatus:output_type -> seaweedfs.block.control.ClusterStatusResponse
+	22, // 40: seaweedfs.block.control.ClusterEvidenceService.ListVolumes:output_type -> seaweedfs.block.control.ListVolumesResponse
+	19, // 41: seaweedfs.block.control.ClusterEvidenceService.GetVolumeStatus:output_type -> seaweedfs.block.control.VolumeEvidence
+	23, // 42: seaweedfs.block.control.ClusterEvidenceService.GetVolumeTimeline:output_type -> seaweedfs.block.control.VolumeTimelineResponse
+	21, // 43: seaweedfs.block.control.ClusterEvidenceService.WatchClusterEvents:output_type -> seaweedfs.block.control.ClusterEvent
+	25, // 44: seaweedfs.block.control.LifecycleService.CreateVolume:output_type -> seaweedfs.block.control.CreateVolumeResponse
+	27, // 45: seaweedfs.block.control.LifecycleService.DeleteVolume:output_type -> seaweedfs.block.control.DeleteVolumeResponse
+	29, // 46: seaweedfs.block.control.FailbackService.ExecuteFailback:output_type -> seaweedfs.block.control.FailbackResponse
+	35, // [35:47] is the sub-list for method output_type
+	23, // [23:35] is the sub-list for method input_type
+	23, // [23:23] is the sub-list for extension type_name
+	23, // [23:23] is the sub-list for extension extendee
+	0,  // [0:23] is the sub-list for field type_name
 }
 
 func init() { file_control_proto_init() }
@@ -3496,7 +3589,7 @@ func file_control_proto_init() {
 			}
 		}
 		file_control_proto_msgTypes[10].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*GetClusterStatusRequest); i {
+			switch v := v.(*ReplicaUnhealthy); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -3508,7 +3601,7 @@ func file_control_proto_init() {
 			}
 		}
 		file_control_proto_msgTypes[11].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*ListVolumesRequest); i {
+			switch v := v.(*GetClusterStatusRequest); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -3520,7 +3613,7 @@ func file_control_proto_init() {
 			}
 		}
 		file_control_proto_msgTypes[12].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*GetVolumeStatusRequest); i {
+			switch v := v.(*ListVolumesRequest); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -3532,7 +3625,7 @@ func file_control_proto_init() {
 			}
 		}
 		file_control_proto_msgTypes[13].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*GetVolumeTimelineRequest); i {
+			switch v := v.(*GetVolumeStatusRequest); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -3544,7 +3637,7 @@ func file_control_proto_init() {
 			}
 		}
 		file_control_proto_msgTypes[14].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*WatchClusterEventsRequest); i {
+			switch v := v.(*GetVolumeTimelineRequest); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -3556,7 +3649,7 @@ func file_control_proto_init() {
 			}
 		}
 		file_control_proto_msgTypes[15].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*ObservationCondition); i {
+			switch v := v.(*WatchClusterEventsRequest); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -3568,7 +3661,7 @@ func file_control_proto_init() {
 			}
 		}
 		file_control_proto_msgTypes[16].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*ClusterStatusResponse); i {
+			switch v := v.(*ObservationCondition); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -3580,7 +3673,7 @@ func file_control_proto_init() {
 			}
 		}
 		file_control_proto_msgTypes[17].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*NodeEvidence); i {
+			switch v := v.(*ClusterStatusResponse); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -3592,7 +3685,7 @@ func file_control_proto_init() {
 			}
 		}
 		file_control_proto_msgTypes[18].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*VolumeEvidence); i {
+			switch v := v.(*NodeEvidence); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -3604,7 +3697,7 @@ func file_control_proto_init() {
 			}
 		}
 		file_control_proto_msgTypes[19].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*ReplicaEvidence); i {
+			switch v := v.(*VolumeEvidence); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -3616,7 +3709,7 @@ func file_control_proto_init() {
 			}
 		}
 		file_control_proto_msgTypes[20].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*ClusterEvent); i {
+			switch v := v.(*ReplicaEvidence); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -3628,7 +3721,7 @@ func file_control_proto_init() {
 			}
 		}
 		file_control_proto_msgTypes[21].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*ListVolumesResponse); i {
+			switch v := v.(*ClusterEvent); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -3640,7 +3733,7 @@ func file_control_proto_init() {
 			}
 		}
 		file_control_proto_msgTypes[22].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*VolumeTimelineResponse); i {
+			switch v := v.(*ListVolumesResponse); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -3652,7 +3745,7 @@ func file_control_proto_init() {
 			}
 		}
 		file_control_proto_msgTypes[23].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*CreateVolumeRequest); i {
+			switch v := v.(*VolumeTimelineResponse); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -3664,7 +3757,7 @@ func file_control_proto_init() {
 			}
 		}
 		file_control_proto_msgTypes[24].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*CreateVolumeResponse); i {
+			switch v := v.(*CreateVolumeRequest); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -3676,7 +3769,7 @@ func file_control_proto_init() {
 			}
 		}
 		file_control_proto_msgTypes[25].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*DeleteVolumeRequest); i {
+			switch v := v.(*CreateVolumeResponse); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -3688,7 +3781,7 @@ func file_control_proto_init() {
 			}
 		}
 		file_control_proto_msgTypes[26].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*DeleteVolumeResponse); i {
+			switch v := v.(*DeleteVolumeRequest); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -3700,7 +3793,7 @@ func file_control_proto_init() {
 			}
 		}
 		file_control_proto_msgTypes[27].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*FailbackRequest); i {
+			switch v := v.(*DeleteVolumeResponse); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -3712,6 +3805,18 @@ func file_control_proto_init() {
 			}
 		}
 		file_control_proto_msgTypes[28].Exporter = func(v interface{}, i int) interface{} {
+			switch v := v.(*FailbackRequest); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_control_proto_msgTypes[29].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*FailbackResponse); i {
 			case 0:
 				return &v.state
@@ -3730,7 +3835,7 @@ func file_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: file_control_proto_rawDesc,
 			NumEnums:      0,
-			NumMessages:   29,
+			NumMessages:   30,
 			NumExtensions: 0,
 			NumServices:   6,
 		},

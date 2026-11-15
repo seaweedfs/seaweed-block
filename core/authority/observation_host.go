@@ -153,6 +153,17 @@ func (h *ObservationHost) IngestHeartbeat(msg HeartbeatMessage) error {
 	return h.Ingest(obs)
 }
 
+// IngestHeartbeatWithHealthTransitions is IngestHeartbeat returning the
+// accepted slot health transitions (ObservationStore
+// .IngestWithHealthTransitions).
+func (h *ObservationHost) IngestHeartbeatWithHealthTransitions(msg HeartbeatMessage) ([]SlotHealthTransition, error) {
+	obs, err := HeartbeatToObservation(msg)
+	if err != nil {
+		return nil, err
+	}
+	return h.store.IngestWithHealthTransitions(obs)
+}
+
 // LastBuild returns the most recent BuildResult produced by the
 // rebuild loop, if any. Safe for concurrent readers; returns a
 // value copy.

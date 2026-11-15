@@ -44,6 +44,8 @@ type flags struct {
 	ctrlAddr       string
 	hbInterval     time.Duration
 	workspaceLease bool
+	// recoverTimeout: #128 rule 6 recovery watchdog.
+	recoverTimeout time.Duration
 	// printReadyLine: test-only flag — emits one structured JSON
 	// line to stdout on the FIRST received assignment with
 	// Epoch > 0. L2 subprocess smoke uses this to assert route
@@ -150,6 +152,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.dataAddr, "data-addr", "", "data-path address (required)")
 	fs.StringVar(&f.ctrlAddr, "ctrl-addr", "", "control-path address (required)")
 	fs.DurationVar(&f.hbInterval, "heartbeat-interval", 2*time.Second, "heartbeat send interval")
+	fs.DurationVar(&f.recoverTimeout, "recover-timeout", volume.DefaultRecoverTimeout, "how long a primary-assigned replica may stay not promotion-ready before it reports itself unhealthy (recovery_timeout) so the master can fail over")
 	fs.BoolVar(&f.workspaceLease, "workspace-lease", false, "walstore-chunk workspace: require host-owned master lease; fail closed when unavailable")
 	fs.BoolVar(&f.printReadyLine, "t0-print-ready", false, "internal test-only: emit one structured JSON line on stdout on first assignment")
 	fs.BoolVar(&f.enableT1Readiness, "t1-readiness", false, "enable readiness bridge (HealthyPathExecutor) so adapter projection reaches Healthy")
@@ -494,6 +497,7 @@ func run(f flags) int {
 		DataAddr:          f.dataAddr,
 		CtrlAddr:          f.ctrlAddr,
 		HeartbeatInterval: f.hbInterval,
+		RecoverTimeout:    f.recoverTimeout,
 		ReadyMarker:       readyCh,
 		EnableT1Readiness: f.enableT1Readiness,
 		WorkspaceLease:    f.workspaceLease,

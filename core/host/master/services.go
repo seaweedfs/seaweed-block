@@ -10,6 +10,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/adapter"
 	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
+	"github.com/seaweedfs/seaweed-block/core/ops"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -130,7 +131,7 @@ func (s *services) ReportHeartbeat(ctx context.Context, r *control.HeartbeatRepo
 		return nil, err
 	}
 	msg := heartbeatFromWire(r)
-	if err := s.host.obs.IngestHeartbeat(msg); err != nil {
+	if err := s.host.ingestHeartbeatRecordingHealth(msg); err != nil {
 		return nil, fmt.Errorf("ingest: %w", err)
 	}
 	return &control.HeartbeatAck{
@@ -345,6 +346,7 @@ func (s *services) QueryVolumeStatus(ctx context.Context, req *control.StatusReq
 		}
 		replicaIDs = primaryFirstReplicaIDs(replicaIDs, line.ReplicaID)
 		resp.Frontends = statusFrontendsForAssignedVolume(s.host.obs, req.VolumeId, replicaIDs, line.Assigned)
+		resp.UnhealthyReplicas = statusUnhealthyReplicas(s.host.obs, req.VolumeId, replicaIDs)
 	}
 	if ev, ok := ctrl.LastUnsupported(req.VolumeId); ok {
 		resp.LastUnsupportedReason = ev.Reason
@@ -453,6 +455,7 @@ func validateHeartbeat(r *control.HeartbeatReport) error {
 	if r.SentAt == nil || !r.SentAt.IsValid() {
 		return errors.New("heartbeat: invalid SentAt")
 	}
+	seen := make(map[string]int, len(r.Slots))
 	for i, s := range r.Slots {
 		if s == nil {
 			return fmt.Errorf("heartbeat: slot[%d] is nil", i)
@@ -460,6 +463,11 @@ func validateHeartbeat(r *control.HeartbeatReport) error {
 		if s.VolumeId == "" || s.ReplicaId == "" {
 			return fmt.Errorf("heartbeat: slot[%d] missing VolumeID or ReplicaID", i)
 		}
+		key := s.VolumeId + "/" + s.ReplicaId
+		if j, dup := seen[key]; dup {
+			return fmt.Errorf("heartbeat: slot[%d] repeats slot[%d] (%s)", i, j, key)
+		}
+		seen[key] = i
 		if s.DataAddr == "" || s.CtrlAddr == "" {
 			return fmt.Errorf("heartbeat: slot[%d] (%s/%s) missing DataAddr or CtrlAddr", i, s.VolumeId, s.ReplicaId)
 		}
@@ -660,6 +668,7 @@ func heartbeatFromWire(r *control.HeartbeatReport) authority.HeartbeatMessage {
 			Withdrawn:       s.Withdrawn,
 			EvidenceScore:   s.EvidenceScore,
 			Incarnation:     s.Incarnation,
+			UnhealthyReason: s.UnhealthyReason,
 			LocalRoleClaim:  authority.LocalRoleClaim(s.LocalRoleClaim),
 		})
 	}
@@ -711,4 +720,51 @@ func frontendTargetsToWire(in []authority.FrontendTargetFact) []*control.Fronten
 		})
 	}
 	return out
+}
+
+// statusUnhealthyReplicas lists the replicas whose fresh slot fact
+// carries an explicit unhealthy reason (#128 rule 6).
+func statusUnhealthyReplicas(obs *authority.ObservationHost, volumeID string, replicaIDs []string) []*control.ReplicaUnhealthy {
+	if obs == nil {
+		return nil
+	}
+	var out []*control.ReplicaUnhealthy
+	for _, replicaID := range replicaIDs {
+		if slot, ok := obs.Store().SlotFact(volumeID, replicaID); ok && slot.UnhealthyReason != "" {
+			out = append(out, &control.ReplicaUnhealthy{ReplicaId: replicaID, Reason: slot.UnhealthyReason})
+		}
+	}
+	return out
+}
+
+// ingestHeartbeatRecordingHealth ingests a heartbeat and records a
+// replica_unhealthy / replica_unhealthy_cleared event for every slot
+// whose unhealthy reason the accepted report changed (#128 rule 6). The
+// transitions come from the accepted store mutation itself, so a refused
+// report records nothing and expiry never fabricates a clear. healthMu
+// keeps the events in accepted order across concurrent heartbeats.
+func (h *Host) ingestHeartbeatRecordingHealth(msg authority.HeartbeatMessage) error {
+	h.healthMu.Lock()
+	defer h.healthMu.Unlock()
+	transitions, err := h.obs.IngestHeartbeatWithHealthTransitions(msg)
+	if err != nil {
+		return err
+	}
+	for _, tr := range transitions {
+		if tr.New == "" {
+			h.events.append(ops.ClusterEvent{
+				VolumeID: tr.VolumeID, ReplicaID: tr.ReplicaID,
+				Type: "replica_unhealthy_cleared", Severity: "info",
+				Message: "replica reported healthy again", OldValue: tr.Old,
+			})
+			continue
+		}
+		h.events.append(ops.ClusterEvent{
+			VolumeID: tr.VolumeID, ReplicaID: tr.ReplicaID,
+			Type: "replica_unhealthy", Severity: "warning",
+			Message: "replica reported an explicit unhealthy fact: " + tr.New,
+			Reason:  tr.New, OldValue: tr.Old, NewValue: tr.New,
+		})
+	}
+	return nil
 }

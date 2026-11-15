@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/adapter"
+	"github.com/seaweedfs/seaweed-block/core/engine"
 	"github.com/seaweedfs/seaweed-block/core/replication"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"google.golang.org/grpc"
@@ -40,6 +41,11 @@ type Config struct {
 	// HeartbeatInterval is the loop cadence for ReportHeartbeat.
 	// Zero picks the default (2s).
 	HeartbeatInterval time.Duration
+
+	// RecoverTimeout bounds how long a primary-assigned replica may stay
+	// not promotion-ready before it reports an explicit unhealthy fact
+	// (#128 rule 6). Zero picks DefaultRecoverTimeout.
+	RecoverTimeout time.Duration
 
 	// Logger receives structured startup + loop-event logs.
 	// Nil falls through to the default log package logger.
@@ -96,6 +102,8 @@ type Host struct {
 	// incarnation is new on every process start and reported in every
 	// heartbeat, so the master can tell a restart from a long silence.
 	incarnation string
+	// wd is the recovery watchdog (#128 rule 6).
+	wd *recoveryWatchdog
 
 	cfg    Config
 	log    *log.Logger
@@ -255,6 +263,8 @@ func New(cfg Config) (*Host, error) {
 		asnCli:   control.NewAssignmentServiceClient(conn),
 	}
 	h.incarnation = newIncarnation()
+	h.wd = newRecoveryWatchdog(cfg.RecoverTimeout)
+	h.log.Printf("blockvolume: volume %s recovery watchdog: a primary assignment must become promotion-ready within %s", cfg.VolumeID, h.wd.timeout)
 	if cfg.ReplicationVolume != nil {
 		h.setReplicationLocked(cfg.ReplicationVolume)
 	}
@@ -583,6 +593,8 @@ func (h *Host) runHeartbeat(ctx context.Context) {
 // buildReport collects local slot facts into a wire HeartbeatReport.
 // T0 single-volume-per-process simplicity: one replica slot.
 func (h *Host) buildReport() *control.HeartbeatReport {
+	fact, ready := h.promotionReady()
+	unhealthy := h.unhealthyReason(fact, ready)
 	return &control.HeartbeatReport{
 		ServerId:  h.cfg.ServerID,
 		SentAt:    timestamppb.Now(),
@@ -596,9 +608,10 @@ func (h *Host) buildReport() *control.HeartbeatReport {
 				CtrlAddr:        h.cfg.CtrlAddr,
 				Frontends:       h.frontendTargetsSnapshot(),
 				Reachable:       true,
-				ReadyForPrimary: h.readyForPrimaryFact(),
-				Eligible:        true,
+				ReadyForPrimary: ready,
+				Eligible:        unhealthy == "", // an explicit unhealthy slot is ineligible
 				Incarnation:     h.incarnation,
+				UnhealthyReason: unhealthy,
 			},
 		},
 	}
@@ -621,14 +634,21 @@ func newIncarnation() string {
 // a valid candidate fact even though it remains frontend-unhealthy until
 // authority moves.
 func (h *Host) readyForPrimaryFact() bool {
+	_, ready := h.promotionReady()
+	return ready
+}
+
+// promotionReady returns the engine's promotion fact and whether it
+// counts as ready (ready, and its line not superseded).
+func (h *Host) promotionReady() (engine.PromotionReadyFact, bool) {
 	if h == nil || h.view == nil {
-		return false
+		return engine.PromotionReadyFact{}, false
 	}
 	fact := h.view.PromotionReadyFact()
 	if !fact.Ready {
-		return false
+		return fact, false
 	}
-	return !h.view.isSupersededLine(fact.Epoch, fact.EndpointVersion)
+	return fact, !h.view.isSupersededLine(fact.Epoch, fact.EndpointVersion)
 }
 
 // runSubscribe maintains a SubscribeAssignments stream. Reconnects
@@ -734,6 +754,7 @@ func (h *Host) streamOnce(ctx context.Context) error {
 // installed, admitting local-only writes with zero fan-out.
 func (h *Host) applyFact(fact *control.AssignmentFact) {
 	if fact.ReplicaId != h.cfg.ReplicaID {
+		h.wd.notPrimary()
 		// Another replica is authoritative for this volume line. Record that
 		// line first so AdapterProjectionView can keep this replica frontend-
 		// unhealthy even if its local engine is otherwise caught up.
@@ -753,6 +774,7 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 				return
 			}
 			h.adpt.OnAssignment(info)
+			h.wd.supportingAdmitted(info.Epoch)
 			h.log.Printf("blockvolume: volume %s admitted as SUPPORTING replica %s at epoch=%d EV=%d behind primary %s; frontend remains gated",
 				h.cfg.VolumeID, info.ReplicaID, info.Epoch, info.EndpointVersion, fact.ReplicaId)
 			// Supporting replicas need durable lineage latching for promotion-readiness,
@@ -766,6 +788,9 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 		return
 	}
 
+	// The recovery watchdog runs from the primary assignment, before any
+	// admission step can fail (#128 rule 6).
+	h.wd.primaryAssigned(fact.Epoch)
 	if blocked, reason := h.localReadinessBlock(); blocked {
 		h.storeLocalReadinessReplayFact(fact)
 		h.log.Printf("blockvolume: volume %s local readiness blocked (%s); NOT applying primary assignment %s@%d to adapter",
