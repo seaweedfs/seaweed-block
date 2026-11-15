@@ -54,6 +54,9 @@ type SlotFact struct {
 	Eligible        bool
 	Withdrawn       bool
 	EvidenceScore   uint64
+	// Incarnation identifies the reporting volume process (new on
+	// every process start); raw fact, empty from older binaries.
+	Incarnation string
 	// ObservedAt/ExpiresAt are store-owned per-slot freshness
 	// markers. They let one Kubernetes node run multiple
 	// blockvolume processes that each report a different slot

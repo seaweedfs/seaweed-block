@@ -122,6 +122,10 @@ message HeartbeatSlot {
     uint64 evidence_score = 9;
     uint32 local_role_claim = 10; // authority.LocalRoleClaim enum value
     repeated FrontendTarget frontends = 11;
+    // incarnation identifies the reporting volume process; it is new on
+    // every process start. Raw observation fact: the controller uses it
+    // only to bound a restarted primary's boot grace.
+    string incarnation = 12;
 }
 
 // FrontendTarget — read-only frontend publication fact reported by

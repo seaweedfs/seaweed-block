@@ -2,6 +2,8 @@ package volume
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log"
@@ -91,6 +93,9 @@ type replicaSetUpdater interface {
 // Host is the composed volume-side block product daemon.
 type Host struct {
 	cfg    Config
+	// incarnation is new on every process start and reported in every
+	// heartbeat, so the master can tell a restart from a long silence.
+	incarnation string
 	log    *log.Logger
 	exec   *noopExecutor
 	t1exec *HealthyPathExecutor
@@ -233,6 +238,7 @@ func New(cfg Config) (*Host, error) {
 
 	h := &Host{
 		cfg:      cfg,
+		incarnation: newIncarnation(),
 		log:      lg,
 		exec:     noopExec,
 		t1exec:   t1Exec,
@@ -583,9 +589,19 @@ func (h *Host) buildReport() *control.HeartbeatReport {
 				Reachable:       true,
 				ReadyForPrimary: h.readyForPrimaryFact(),
 				Eligible:        true,
+				Incarnation:     h.incarnation,
 			},
 		},
 	}
+}
+
+// newIncarnation returns a random process incarnation id.
+func newIncarnation() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("t%x", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b[:])
 }
 
 // readyForPrimaryFact is the volume-side promotion-readiness fact used by the
