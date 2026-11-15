@@ -1,10 +1,15 @@
 package volume
 
 import (
+	"errors"
+	"io"
+	"io/fs"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/engine"
+	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 // Recovery watchdog (#128 rule 6).
@@ -37,12 +42,17 @@ import (
 //     an engine still ready at an older epoch (its new assignment not
 //     admitted) does not.
 //
-// wal_corrupt and io_error need typed failures out of the durable
-// recovery path; they are a tracked follow-up.
+//   - wal_corrupt / io_error (#133): when local durable recovery failed
+//     with a classifiable error (LocalRecoveryHealthReason), a
+//     primary-assigned replica reports that typed reason at once instead
+//     of waiting out the timeout. An unclassified failure reports nothing
+//     early; recovery_timeout still covers it.
 
 const (
 	UnhealthyRecoveryTimeout = "recovery_timeout"
 	UnhealthyRoleAdmission   = "role_admission_failed"
+	UnhealthyWALCorrupt      = "wal_corrupt"
+	UnhealthyIOError         = "io_error"
 
 	// DefaultRecoverTimeout matches blockmaster's default freshness
 	// window.
@@ -115,7 +125,7 @@ func (w *recoveryWatchdog) supportingAdmitted(epoch uint64) {
 // epoch, compared under the lock, so an assignment that advanced while
 // the fact was read is not cleared by it. fired is true on the call that
 // latched recovery_timeout.
-func (w *recoveryWatchdog) reason(ready bool, readyEpoch uint64, roleAdmissionFailed bool) (reason string, fired bool) {
+func (w *recoveryWatchdog) reason(ready bool, readyEpoch uint64, roleAdmissionFailed bool, localFailure string) (reason string, fired bool) {
 	if w == nil {
 		return "", false
 	}
@@ -126,6 +136,9 @@ func (w *recoveryWatchdog) reason(ready bool, readyEpoch uint64, roleAdmissionFa
 	}
 	if roleAdmissionFailed {
 		return UnhealthyRoleAdmission, false
+	}
+	if localFailure != "" {
+		return localFailure, false
 	}
 	if ready && readyEpoch == w.primaryEpoch {
 		w.timedOut, w.readySeen = false, true
@@ -168,7 +181,8 @@ func (h *Host) unhealthyReason(fact engine.PromotionReadyFact, ready bool) strin
 		return ""
 	}
 	failed, _ := h.RoleAdmissionFailure()
-	reason, fired := h.wd.reason(ready, fact.Epoch, failed)
+	local, _ := h.localRecoveryReason.Load().(string)
+	reason, fired := h.wd.reason(ready, fact.Epoch, failed, local)
 	if fired {
 		h.log.Printf("blockvolume: volume %s primary assignment epoch=%d not promotion-ready after %s: reporting unhealthy (%s)",
 			h.cfg.VolumeID, h.wd.epoch(), h.wd.timeout, UnhealthyRecoveryTimeout)
@@ -189,4 +203,47 @@ func (h *Host) CatchUpSince() time.Time {
 		return time.Time{}
 	}
 	return h.wd.catchUpSince()
+}
+
+// LocalRecoveryHealthReason classifies a local durable recovery failure
+// into a typed unhealthy reason (#133): wal_corrupt for a WAL/extent
+// integrity fault, io_error for a storage I/O failure. It returns "" for
+// an error it cannot classify (the watchdog's timeout still covers that).
+func LocalRecoveryHealthReason(err error) string {
+	if red := true; red {
+		return "" // RED: not classified yet
+	}
+	if err == nil {
+		return ""
+	}
+	var rf *storage.RecoveryFailure
+	if errors.As(err, &rf) {
+		switch rf.Kind {
+		case storage.StorageRecoveryFailureWALIntegrity:
+			return UnhealthyWALCorrupt
+		case storage.StorageRecoveryFailureSubstrateIO:
+			return UnhealthyIOError
+		}
+	}
+	if errors.Is(err, storage.ErrWALIntegrityFault) {
+		return UnhealthyWALCorrupt
+	}
+	var pathErr *fs.PathError
+	if errors.As(err, &pathErr) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, syscall.EIO) {
+		return UnhealthyIOError
+	}
+	return ""
+}
+
+// ReportLocalRecoveryFailure records why local durable recovery failed,
+// classified by LocalRecoveryHealthReason, and returns the reason. A
+// primary-assigned replica then reports it at once (#133). It holds until
+// ClearLocalReadinessBlock (a later clean recovery).
+func (h *Host) ReportLocalRecoveryFailure(err error) string {
+	reason := LocalRecoveryHealthReason(err)
+	h.localRecoveryReason.Store(reason)
+	if reason != "" {
+		h.log.Printf("blockvolume: volume %s local durable recovery failed (%s): a primary assignment reports it as unhealthy", h.cfg.VolumeID, reason)
+	}
+	return reason
 }

@@ -642,6 +642,10 @@ func run(f flags) int {
 		if recErr != nil {
 			fmt.Fprintln(os.Stderr, "blockvolume: durable recovery failed:", report.Evidence)
 			h.BlockLocalReadiness(report.Evidence)
+			// #133: a classifiable failure (wal_corrupt / io_error) is
+			// reported at once by a primary assignment, not after the
+			// recover timeout.
+			h.ReportLocalRecoveryFailure(recErr)
 			return waitFaultedDurableRecovery(h, status, durableProv, report.Evidence)
 		} else {
 			fmt.Fprintln(os.Stderr, "blockvolume: durable recovered:", report.Evidence)
