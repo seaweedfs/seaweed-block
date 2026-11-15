@@ -22,7 +22,7 @@ const (
 	pcChunkBlocks = 16
 )
 
-func chunkProvider(t *testing.T, root string, remote *storage.MemChunkRemote, view *stubView, interval time.Duration) *durable.DurableProvider {
+func chunkProvider(t *testing.T, root string, remote storage.ChunkRemote, view *stubView, interval time.Duration) *durable.DurableProvider {
 	t.Helper()
 	p, err := durable.NewDurableProvider(durable.ProviderConfig{
 		Impl:                 durable.ImplWALStoreChunk,
