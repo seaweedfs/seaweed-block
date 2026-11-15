@@ -8,7 +8,11 @@ package durable_test
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
+	"hash/crc32"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -529,5 +533,171 @@ func TestWALStoreChunk_CloseSettlesDeferredAttach(t *testing.T) {
 	_ = recvErr(t, closed, "Close")
 	if _, err := p.CaptureVolume(context.Background(), "v1"); !errors.Is(err, durable.ErrVolumeNotOpen) {
 		t.Fatalf("chunk layer reachable after Close: %v", err)
+	}
+}
+
+// corruptWALWrite finds the WAL record of the one write carrying fill and
+// turns it into a CRC-valid write-batch record with no block count, which
+// recovery refuses as a WAL integrity fault. It returns a restore func.
+func corruptWALWrite(t *testing.T, path string, fill byte) func() {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := bytes.Repeat([]byte{fill}, 4096)
+	at := bytes.Index(raw, payload)
+	if at < 30 || bytes.Index(raw[at+1:], payload) >= 0 {
+		t.Fatalf("WAL record for fill %#x not found exactly once", fill)
+	}
+	const hdr = 30 // LSN 8, Reserved 8, Type 1, Flags 1, LBA 8, Length 4
+	start := at - hdr
+	rec := append([]byte(nil), raw[start:at+4096+8]...)
+	orig := append([]byte(nil), rec...)
+	if rec[16] != 0x01 || binary.LittleEndian.Uint64(rec[8:]) != 0 {
+		t.Fatalf("unexpected WAL record header % x", rec[:hdr])
+	}
+	rec[16] = 0x04 // write batch, Reserved stays 0: invalid
+	binary.LittleEndian.PutUint32(rec[hdr+4096:], crc32.ChecksumIEEE(rec[:hdr+4096]))
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.WriteAt(rec, int64(start)); err != nil {
+		t.Fatal(err)
+	}
+	return func() {
+		f, err := os.OpenFile(path, os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		if _, err := f.WriteAt(orig, int64(start)); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A deferred attach belongs to the recovery that registered it. Recovery
+// A succeeds before authority; recovery B then fails on a real WAL
+// integrity fault; when authority arrives, A's wait must neither attach
+// nor admit I/O. A later successful recovery converges.
+func TestWALStoreChunk_StaleWaiterCannotOverrideFailedRecovery(t *testing.T) {
+	root := t.TempDir()
+	view := newStubView(frontend.Projection{VolumeID: "v1", ReplicaID: "r1"})
+	remote := storage.NewMemChunkRemote()
+	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+		Impl: durable.ImplWALStoreChunk, StorageRoot: root, BlockSize: 4096,
+		NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
+		WALRecoveryTestDisableFlusher: true,
+		ChunkRemoteFor:                func(string) (storage.ChunkRemote, error) { return remote, nil },
+	}, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	s, err := p.EnsureStorage("v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, err := p.RecoverVolume(ctx, "v1"); err != nil { // A: ok, no authority
+		t.Fatalf("recovery A: %v", err)
+	}
+	if _, err := s.Write(5, block(0xA7)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	restore := corruptWALWrite(t, filepath.Join(root, "v1.bin"), 0xA7)
+	if _, err := p.RecoverVolume(ctx, "v1"); !errors.Is(err, storage.ErrWALIntegrityFault) { // B
+		t.Fatalf("recovery B over a corrupt WAL record: %v; want a WAL integrity fault", err)
+	}
+
+	authority := healthyProj(frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 4, EndpointVersion: 2})
+	view.set(authority)
+	be, err := p.Open(ctx, "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond) // many authority-wait ticks
+	if _, err := be.Write(ctx, 7*4096, block(1)); err == nil {
+		t.Fatal("I/O admitted after the latest recovery failed")
+	}
+	if _, err := p.CaptureVolume(ctx, "v1"); err == nil {
+		t.Fatal("chunk layer attached after the latest recovery failed")
+	}
+
+	// Convergence: repair, recover again without authority, then authority.
+	restore()
+	view.set(frontend.Projection{VolumeID: "v1", ReplicaID: "r1"})
+	if _, err := p.RecoverVolume(ctx, "v1"); err != nil { // C
+		t.Fatalf("recovery C after repair: %v", err)
+	}
+	view.set(authority)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err = be.Write(ctx, 7*4096, block(1)); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("I/O never admitted after a later successful recovery: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, err := p.CaptureVolume(ctx, "v1"); err != nil {
+		t.Fatalf("capture after convergence: %v", err)
+	}
+	readEq(t, s, 5, block(0xA7), "repaired WAL record after convergence")
+}
+
+// A failed recovery retires the authority wait of the earlier successful
+// one: the volume no longer reports a layer awaiting authority.
+func TestWALStoreChunk_FailedRecoveryRetiresAuthorityWait(t *testing.T) {
+	root := t.TempDir()
+	view := newStubView(frontend.Projection{VolumeID: "v1", ReplicaID: "r1"})
+	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+		Impl: durable.ImplWALStoreChunk, StorageRoot: root, BlockSize: 4096,
+		NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
+		WALRecoveryTestDisableFlusher: true,
+		ChunkRemoteFor:                func(string) (storage.ChunkRemote, error) { return storage.NewMemChunkRemote(), nil },
+	}, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	s, err := p.EnsureStorage("v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, err := p.RecoverVolume(ctx, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.CaptureVolume(ctx, "v1"); errors.Is(err, durable.ErrNotChunkVolume) || err == nil {
+		t.Fatalf("after recovery without authority: %v; want the volume awaiting authority", err)
+	}
+	if _, err := s.Write(5, block(0xA7)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	corruptWALWrite(t, filepath.Join(root, "v1.bin"), 0xA7)
+	if _, err := p.RecoverVolume(ctx, "v1"); !errors.Is(err, storage.ErrWALIntegrityFault) {
+		t.Fatalf("failing recovery: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, err := p.CaptureVolume(ctx, "v1")
+		if errors.Is(err, durable.ErrNotChunkVolume) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after a failed recovery: %v; want no layer and no live authority wait", err)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
