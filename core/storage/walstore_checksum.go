@@ -19,7 +19,7 @@ var checksumZeroCRC = crc32.Checksum(checksumZeros[:], checksumTable)
 
 // ErrDataChecksum identifies wrong extent or remote-chunk bytes. A mismatch
 // is also EIO; callers must never return the unverified bytes as successful IO.
-var ErrDataChecksum = errors.New("storage: data checksum mismatch")
+var ErrDataChecksum = fmt.Errorf("storage: data checksum mismatch: %w", syscall.EIO)
 var ErrDataChecksumsRequired = errors.New("storage: data checksums required; walstore v1 is unprotected (no automatic migration)")
 
 type DataChecksumFailure struct {

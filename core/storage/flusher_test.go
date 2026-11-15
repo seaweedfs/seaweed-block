@@ -150,7 +150,11 @@ func createWALStoreWithWALSizeForTest(t *testing.T, path string, numBlocks uint3
 		_ = f.Close()
 		t.Fatalf("newSuperblock: %v", err)
 	}
-	totalSize := int64(superblockSize) + int64(sb.WALSize) + int64(sb.VolumeSize)
+	totalSize, err := walstoreFileSize(&sb)
+	if err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
 	if err := f.Truncate(totalSize); err != nil {
 		_ = f.Close()
 		t.Fatalf("truncate: %v", err)
