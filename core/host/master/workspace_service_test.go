@@ -28,11 +28,13 @@ func TestWorkspaceRPCCleanMoveRecordsAckAndJournal(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
-		state := "attached"
+		state := "active"
+		proof := ""
 		if detached.Load() {
 			state = "detached"
+			proof = `,"detachedBy":{"holder":"r2","epoch":1,"gen":9}`
 		}
-		fmt.Fprintf(w, `{"format":1,"gen":9,"epoch":1,"holder":"r2","remote_lsn":42,"state":%q}`, state)
+		fmt.Fprintf(w, `{"format":1,"gen":9,"epoch":1,"holder":"r2","remote_lsn":42,"state":%q%s}`, state, proof)
 	}))
 	defer server.Close()
 	reader, err := NewWorkspaceHEADReader(server.URL)

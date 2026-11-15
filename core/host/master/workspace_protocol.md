@@ -15,8 +15,12 @@ refresh cannot bypass an enrolled workspace's move path.
 
 ## Move admission and persistence
 
-Clean: the configured filer HEAD reader must observe `state: "detached"` at
-the expected holder/epoch, and the master's stored revocation ACK must name that
+Clean: the configured filer HEAD reader must observe `state: "detached"` and
+`detachedBy: {holder, epoch, gen}` matching the installed HEAD's holder, epoch and
+generation. W2 writes both in the same final-cut CAS. State is exactly `active`
+or `detached`; missing state means active for older HEADs. No boolean `detached`
+is accepted. A new holder's takeover CAS sets active and clears detachedBy; the
+move journal retains history. The master's stored revocation ACK must name that
 exact HEAD generation. Revocation stops extending the lease. `AckWorkspaceRevoked`
 is a trusted host protocol fact, not a request to close another host remotely.
 
@@ -39,7 +43,9 @@ ID/target at the reserved epoch. A restart after step 2 sees both assignment and
 journal. Pending reservations are not issued epochs and are not GC fencing proof.
 The new epoch exceeds all prior published/reserved epochs. The remote HEAD still
 must be takeover-CASed by the new host before I/O; granting authority alone does
-not fence an old filer's CAS.
+not fence an old filer's CAS. GC may expire an intent only after observing the
+remote HEAD's epoch greater than the intent epoch AND age greater than intent TTL;
+an issued master epoch alone is not sufficient.
 
 Persisted lease time never expires the authority line itself. In process, forced
 admission also checks a monotonic deadline; after restart it waits at least a full
