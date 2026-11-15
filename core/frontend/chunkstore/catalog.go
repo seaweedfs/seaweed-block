@@ -113,6 +113,15 @@ func (e *CatalogError) Error() string {
 
 func (e *CatalogError) Unwrap() error { return e.Err }
 
+// Detail is the error without its code: the message, and the cause if any
+// (an error body carries the code in its own field).
+func (e *CatalogError) Detail() string {
+	if e.Err != nil {
+		return fmt.Sprintf("%s: %v", e.Message, e.Err)
+	}
+	return e.Message
+}
+
 // CodeOf returns the control-plane code of err, or "" when it has none.
 func CodeOf(err error) string {
 	var ce *CatalogError

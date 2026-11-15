@@ -147,7 +147,12 @@ func writeChunkErr(w http.ResponseWriter, status int, code string, retryable boo
 // writeChunkFailure answers err with its B9 code and HTTP status.
 func writeChunkFailure(w http.ResponseWriter, err error) {
 	status, code, retryable := chunkErrorCode(err)
-	writeChunkJSON(w, status, chunkErrorBody{Code: code, Message: err.Error(), Retryable: retryable})
+	msg := err.Error()
+	var ce *chunkstore.CatalogError
+	if errors.As(err, &ce) {
+		msg = ce.Detail() // the code is in its own field
+	}
+	writeChunkJSON(w, status, chunkErrorBody{Code: code, Message: msg, Retryable: retryable})
 }
 
 // chunkErrorCode maps an operation's error to (HTTP status, code,
