@@ -482,9 +482,13 @@ func (h *Host) probePromotionCandidates(volumeID string, current authority.Autho
 // the current primary's own fresh heartbeat advanced to ready (a newer
 // fact, or a new incarnation) while the probe ran, its "not ready"
 // verdict may predate a finished recovery, so the probe is run once
-// more and that fresh result is used. A heartbeat alone is never taken
-// as frontend readiness: the fresh probe still decides, so a frontend
-// that is still unready keeps a legitimate failover.
+// more and that fresh result is used. The trigger is the whole fresh
+// verdict, never the single ReadyForPrimary bit: the newer fact must be
+// ready AND placeable (reachable, eligible, not withdrawn), so frontend
+// readiness can never preserve a primary the newest fact excludes. A
+// heartbeat alone is never taken as frontend readiness either: the fresh
+// probe still decides, so a frontend that is still unready keeps a
+// legitimate failover.
 func (h *Host) probePromotionCandidatesCurrent(volumeID string, current authority.AuthorityBasis, candidates []authority.ReplicaCandidate) (PromotionProbeResult, bool) {
 	before, beforeOK := h.freshCurrentSlot(volumeID, current.ReplicaID)
 	result, ok := h.probePromotionCandidates(volumeID, current, candidates)
@@ -492,7 +496,7 @@ func (h *Host) probePromotionCandidatesCurrent(volumeID string, current authorit
 		return result, ok
 	}
 	after, afterOK := h.freshCurrentSlot(volumeID, current.ReplicaID)
-	if !afterOK || !after.ReadyForPrimary {
+	if !afterOK || !after.ReadyForPrimary || !after.Reachable || !after.Eligible || after.Withdrawn {
 		return result, ok
 	}
 	if beforeOK && !after.ObservedAt.After(before.ObservedAt) && after.Incarnation == before.Incarnation {
