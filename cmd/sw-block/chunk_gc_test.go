@@ -222,3 +222,45 @@ func TestOpsChunkGC_PartialReclaimReportsKnownAndUnknown(t *testing.T) {
 		t.Fatalf("partial effects discarded or overclaimed: %s %v", out, err)
 	}
 }
+
+type gcFailedMarkLookup struct {
+	*gcCLIStore
+	lookups int
+}
+
+func (s *gcFailedMarkLookup) LookupEntry(ctx context.Context, dir, name string) (*filerpb.Entry, error) {
+	if name == "_GC_MARK" {
+		s.lookups++
+		return nil, errors.New("mark lookup unavailable")
+	}
+	return s.gcCLIStore.LookupEntry(ctx, dir, name)
+}
+func TestOpsChunkGC_FailedMarkLookupPreservesUnknownUnbound(t *testing.T) {
+	for _, apply := range []bool{false, true} {
+		name := "dry-run"
+		if apply {
+			name = "apply"
+		}
+		t.Run(name, func(t *testing.T) {
+			store := &gcFailedMarkLookup{gcCLIStore: &gcCLIStore{MemFiler: chunkstore.NewMemFiler()}}
+			old := dialChunkFiler
+			t.Cleanup(func() { dialChunkFiler = old })
+			dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return store, func() error { return nil }, nil }
+			args := []string{"gc", "--master", "127.0.0.1:1", "--chunk-filer", "local", "--chunk-path", "/gc-lookup"}
+			if apply {
+				args = append(args, "--apply")
+			}
+			rc, out, stderr := runChunk(args...)
+			var body struct {
+				Code string                 `json:"code"`
+				GC   chunkstore.GCExecution `json:"gc"`
+			}
+			if err := json.Unmarshal([]byte(out), &body); err != nil {
+				t.Fatal(err)
+			}
+			if rc != 1 || body.Code == "" || !strings.Contains(stderr, "mark lookup unavailable") || !body.GC.UnknownUnbound || body.GC.MarkOutcome != "not_attempted" || body.GC.DryRun == apply || body.GC.MarkSaved || store.lookups != 1 || store.writes != 0 || store.deletes != 0 {
+				t.Fatalf("failed lookup misreported/mutated: rc=%d out=%s stderr=%s lookups=%d writes=%d deletes=%d", rc, out, stderr, store.lookups, store.writes, store.deletes)
+			}
+		})
+	}
+}
