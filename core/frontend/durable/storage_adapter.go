@@ -145,10 +145,11 @@ const maxFullBlockBatchBlocks = 64
 
 // StorageBackend adapts a LogicalStorage into frontend.Backend.
 type StorageBackend struct {
-	storage   storage.LogicalStorage
-	view      frontend.ProjectionView
-	id        frontend.Identity
-	blockSize int
+	onDataChecksumFailure func(error) // immutable after construction, before publication
+	storage               storage.LogicalStorage
+	view                  frontend.ProjectionView
+	id                    frontend.Identity
+	blockSize             int
 
 	// operational is the T3a Addendum A readiness gate. Starts
 	// false; provider flips true after Recover() succeeds (T3b).
@@ -302,7 +303,13 @@ func (b *StorageBackend) durableStatus(volumeID, path, impl string) VolumeStatus
 		writeProfile.DirtyMapUpdateOps = storageProfile.DirtyMapUpdateOps
 		writeProfile.DirtyMapUpdateDurationNanos = storageProfile.DirtyMapUpdateDurationNanos
 	}
+	version := uint32(0)
+	protected := false
+	if ws, ok := b.storage.(*storage.WALStore); ok {
+		version, protected = ws.FormatVersion(), ws.DataChecksums()
+	}
 	return VolumeStatus{
+		StorageFormatVersion: version, DataChecksums: protected,
 		VolumeID:        volumeID,
 		Path:            path,
 		Impl:            impl,
@@ -504,12 +511,12 @@ func (b *StorageBackend) Sync(ctx context.Context) error {
 
 // Read copies up to len(p) bytes starting at offset. Reads past
 // end-of-volume return zero bytes (no error). Every read is gated.
-func (b *StorageBackend) Read(ctx context.Context, offset int64, p []byte) (int, error) {
+func (b *StorageBackend) Read(ctx context.Context, offset int64, p []byte) (n int, err error) {
 	release, err := b.admit()
 	if err != nil {
 		return 0, err
 	}
-	defer release()
+	defer func() { release(); b.reportChecksumFailure(err) }()
 	if len(p) == 0 {
 		return 0, nil
 	}
@@ -520,19 +527,19 @@ func (b *StorageBackend) Read(ctx context.Context, offset int64, p []byte) (int,
 // writes perform a read-modify-write: fetch the current block,
 // overlay the partial range, write the full block back.
 // Every write is gated.
-func (b *StorageBackend) Write(ctx context.Context, offset int64, p []byte) (int, error) {
+func (b *StorageBackend) Write(ctx context.Context, offset int64, p []byte) (n int, err error) {
 	release, err := b.admit()
 	if err != nil {
 		log.Printf("durable: StorageBackend.Write gate-rejected offset=%d: %v", offset, err)
 		return 0, err
 	}
-	defer release()
+	defer func() { release(); b.reportChecksumFailure(err) }()
 	if len(p) == 0 {
 		return 0, nil
 	}
 	b.profile.recordBackendWriteRequest(len(p))
 	start := time.Now()
-	n, err := b.writeBytes(ctx, offset, p)
+	n, err = b.writeBytes(ctx, offset, p)
 	if n > 0 {
 		b.profile.recordBackendWrite(n, time.Since(start))
 	}
@@ -832,3 +839,13 @@ func (b *StorageBackend) observeWrite(ctx context.Context, lba uint32, lsn uint6
 // Compile-time check that StorageBackend satisfies frontend.Backend.
 // Catches interface drift at build time rather than runtime.
 var _ frontend.Backend = (*StorageBackend)(nil)
+
+func (b *StorageBackend) reportChecksumFailure(err error) {
+	if !errors.Is(err, storage.ErrDataChecksum) {
+		return
+	}
+	b.SetOperational(false, "data_checksum: "+err.Error())
+	if b.onDataChecksumFailure != nil {
+		b.onDataChecksumFailure(err)
+	}
+}

@@ -2,6 +2,8 @@ package storage
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -232,10 +234,14 @@ func TestWALStoreC12_BitmapAndCRCBeforeTail(t *testing.T) {
 		t.Fatal(err)
 	}
 	cp, tail := s.CheckpointLSN(), walLogicalTail(s)
+	syncs := s.flusher.instr.snapshot().ExtentSyncOps
 	bm.mu.Lock()
 	bm.onSave = func(dirty []uint64) {
 		if s.checkpointLSN != cp || s.wal.logicalTail != tail {
 			t.Error("tail/checkpoint moved before bitmap save")
+		}
+		if got := s.flusher.instr.snapshot(); got.ExtentSyncOps <= syncs || got.ExtentSyncFailures != 0 {
+			t.Error("bitmap saved before successful shared extent/CRC fsync")
 		}
 		got := extentBytes(t, s, 12)
 		if !bytes.Equal(got, want) {
@@ -261,5 +267,39 @@ func TestWALStoreC12_BitmapAndCRCBeforeTail(t *testing.T) {
 	}
 	if s.CheckpointLSN() <= cp || walLogicalTail(s) <= tail || !bm.persisted(3) {
 		t.Fatal("successful shared durability did not advance")
+	}
+}
+
+func TestWALStoreC12_LazyFetchVerifiesBeforeInstall(t *testing.T) {
+	for _, corrupt := range []bool{false, true} {
+		t.Run(fmt.Sprint(corrupt), func(t *testing.T) {
+			s, _ := newChunkTestStore(t)
+			remote := newFakeChunkRemote()
+			data := makeBlock(ctChunkBytes, 0x37)
+			key := "chunks/e1/c0/test"
+			if err := remote.Put(context.Background(), key, data); err != nil {
+				t.Fatal(err)
+			}
+			remote.mu.Lock()
+			remote.head = chunkHead{Gen: 1, Epoch: 1, Holder: "host-a", RemoteLSN: 1, Chunks: map[uint64]chunkRef{0: {Key: key, SHA256: sha256.Sum256(data)}}}
+			if corrupt {
+				remote.objs[key][17] ^= 1
+			}
+			remote.mu.Unlock()
+			cfg := ctConfig(1)
+			cfg.FreshFromHead = true
+			mustAttach(t, s, remote, cfg)
+			got, err := s.Read(0)
+			if corrupt {
+				if !errors.Is(err, ErrDataChecksum) || !errors.Is(err, syscall.EIO) || len(got) != 0 {
+					t.Fatalf("corrupt remote accepted/mistyped: %v bytes=%d", err, len(got))
+				}
+				if raw := extentBytes(t, s, 0); !bytes.Equal(raw, make([]byte, ctBlockSize)) {
+					t.Fatal("corrupt chunk installed before hash verification")
+				}
+			} else if err != nil || !bytes.Equal(got, data[:ctBlockSize]) {
+				t.Fatalf("valid remote rejected: %v", err)
+			}
+		})
 	}
 }

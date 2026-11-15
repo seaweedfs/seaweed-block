@@ -119,6 +119,12 @@ type ProviderConfig struct {
 	// single-block WAL record format. Do not enable for release claims until a
 	// mounted NVMe/TCP profile gate passes.
 	WALMultiBlockRecords bool
+	// RequireDataChecksums refuses existing walstore v1 files. New walstore
+	// volumes use v2 regardless; there is no implicit migration of old bytes.
+	RequireDataChecksums bool
+	// ReportDataChecksumFailure receives runtime read/RMW faults after the
+	// backend IO lock is released, so the host can latch typed unhealthy status.
+	ReportDataChecksumFailure func(error)
 
 	// WALRecoveryTestDisableFlusher stops walstore's background checkpoint
 	// flusher before test writes are issued. It exists only for recovery gates
@@ -208,21 +214,23 @@ type volHandle struct {
 // handle. It intentionally exposes lineage and readiness facts without giving
 // callers a control surface.
 type VolumeStatus struct {
-	VolumeID        string
-	Path            string
-	Impl            string
-	ReplicaID       string
-	Epoch           uint64
-	EndpointVersion uint64
-	Latched         bool
-	Operational     bool
-	FrontierKnown   bool
-	DurableLSN      uint64
-	RetainedLSN     uint64
-	HeadLSN         uint64
-	Evidence        string
-	Closed          bool
-	WriteProfile    WriteProfileStatus
+	StorageFormatVersion uint32
+	DataChecksums        bool
+	VolumeID             string
+	Path                 string
+	Impl                 string
+	ReplicaID            string
+	Epoch                uint64
+	EndpointVersion      uint64
+	Latched              bool
+	Operational          bool
+	FrontierKnown        bool
+	DurableLSN           uint64
+	RetainedLSN          uint64
+	HeadLSN              uint64
+	Evidence             string
+	Closed               bool
+	WriteProfile         WriteProfileStatus
 	// Chunk is the chunk layer's state and cut counters; walstore-chunk
 	// volumes only.
 	Chunk *ChunkStatus
@@ -631,7 +639,11 @@ func (p *DurableProvider) openExisting(volumeID, path string) (*volHandle, error
 	var s storage.LogicalStorage
 	switch p.cfg.Impl {
 	case ImplWALStore, ImplWALStoreChunk:
-		ws, err := storage.OpenWALStore(path)
+		opener := storage.OpenWALStore
+		if p.cfg.RequireDataChecksums {
+			opener = storage.OpenWALStoreWithChecksums
+		}
+		ws, err := opener(path)
 		if err != nil {
 			return nil, fmt.Errorf("durable: OpenWALStore %s: %w", path, err)
 		}
@@ -722,6 +734,7 @@ func (p *DurableProvider) wrap(volumeID, path string, s storage.LogicalStorage) 
 		EndpointVersion: proj.EndpointVersion,
 	}
 	b := NewStorageBackend(s, p.view, id)
+	b.onDataChecksumFailure = p.cfg.ReportDataChecksumFailure
 	return &volHandle{storage: s, backend: b, path: path}, nil
 }
 
