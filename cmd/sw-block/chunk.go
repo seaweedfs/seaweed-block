@@ -24,6 +24,7 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
 	"github.com/seaweedfs/seaweed-block/core/ops"
+	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 const (
@@ -58,6 +59,8 @@ func runOpsChunk(args []string, stdout, stderr io.Writer) int {
 		return chunkSnapshotDelete(args[1:], stdout, stderr)
 	case "fork":
 		return chunkFork(args[1:], stdout, stderr)
+	case "show":
+		return chunkShow(args[1:], stdout, stderr)
 	default:
 		return chunkFail("", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, fmt.Sprintf("unknown subcommand %q", args[0]), false)
 	}
@@ -390,4 +393,47 @@ func chunkFork(args []string, stdout, stderr io.Writer) int {
 	defer cancel()
 	res, err := cat.Fork(ctx, chunkstore.ForkRequest{Source: source, Snapshot: snapshot, Target: target, RequestID: requestID, Labels: map[string]string(labels)})
 	return chunkResult("fork", res, err, stdout, stderr)
+}
+
+// chunkShow prints one volume's VOLUME entry and HEAD from the filer (§0.1).
+func chunkShow(args []string, stdout, stderr io.Writer) int {
+	fs := chunkFlagSet("show", stderr)
+	var (
+		volumeID, filer, base string
+		timeout               time.Duration
+	)
+	fs.StringVar(&volumeID, "volume", "", "volume id")
+	fs.StringVar(&filer, "chunk-filer", "", "SeaweedFS filer gRPC address host:port")
+	fs.StringVar(&base, "chunk-path", defaultChunkPathCLI, "filer directory holding one directory per volume")
+	fs.DurationVar(&timeout, "timeout", 30*time.Second, "filer timeout")
+	if err := fs.Parse(args); err != nil {
+		return chunkFail(chunkName(fs), stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, err.Error(), false)
+	}
+	if volumeID == "" {
+		return chunkFail("show", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--volume is required", false)
+	}
+	cat, closeFn, exit := chunkCatalog("show", filer, base, stdout, stderr)
+	if exit >= 0 {
+		return exit
+	}
+	defer closeFn()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	v, hasVolume, err := cat.ReadVolume(ctx, volumeID)
+	if err != nil {
+		return chunkResult("show", nil, err, stdout, stderr)
+	}
+	h, hasHead, err := cat.ReadHead(ctx, volumeID)
+	if err != nil {
+		return chunkResult("show", nil, err, stdout, stderr)
+	}
+	var vp *chunkstore.VolumeInfo
+	if hasVolume {
+		vp = &v
+	}
+	var hp *storage.ChunkHead
+	if hasHead {
+		hp = &h
+	}
+	return chunkResult("show", chunkstore.NewVolumeShowBody(volumeID, vp, hp), nil, stdout, stderr)
 }

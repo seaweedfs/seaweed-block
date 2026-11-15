@@ -410,6 +410,26 @@ func (c *Catalog) headExists(ctx context.Context, root string) (bool, error) {
 	return true, nil
 }
 
+// ReadHead returns vol's HEAD, and false when no HEAD was ever published.
+func (c *Catalog) ReadHead(ctx context.Context, vol string) (storage.ChunkHead, bool, error) {
+	root, err := c.volRoot(vol)
+	if err != nil {
+		return storage.ChunkHead{}, false, err
+	}
+	e, err := c.f.LookupEntry(ctx, root, headName)
+	if errors.Is(err, ErrNotFound) {
+		return storage.ChunkHead{}, false, nil
+	}
+	if err != nil {
+		return storage.ChunkHead{}, false, remoteErr(err, "read HEAD of %s", vol)
+	}
+	h, err := decodeHead(path.Join(root, headName), e)
+	if err != nil {
+		return storage.ChunkHead{}, false, err
+	}
+	return h, true, nil
+}
+
 // EnsureVolume applies the attach rules of spec §4.2 for a volume served
 // with geometry g: it creates a missing VOLUME entry (origin create), and
 // refuses with geometry_mismatch when VOLUME disagrees with g, or with
