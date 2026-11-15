@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"path"
+	"strings"
 	"sync"
 	"time"
 
@@ -44,9 +45,9 @@ type gcCandidate struct {
 	digest [32]byte
 }
 type gcBinding struct {
-	volume, key string
-	entry       *filerpb.Entry
-	digest      [32]byte
+	volume string
+	entry  *filerpb.Entry
+	digest [32]byte
 }
 type gcIntent struct {
 	remote *ChunkRemote
@@ -153,9 +154,11 @@ func (g *Collector) Run(ctx context.Context) (result GCResult, err error) {
 				return result, errors.New("chunkstore: invalid intent creation time")
 			}
 			expire := false
-			if start.Sub(time.Unix(0, in.CreatedNs)) > g.cfg.IntentTTL {
+			if !strings.HasPrefix(in.Holder, "snapshot:") && !strings.HasPrefix(in.Holder, "fork:") && start.Sub(time.Unix(0, in.CreatedNs)) > g.cfg.IntentTTL {
 				issued, authorityErr := g.cfg.IssuedEpoch(ctx, vol)
-				// Both the authority and the actual CAS domain must have
+				// Catalog copy intents are retained: their exclusive creates
+				// are not epoch-fenced. For a capture, both the authority
+				// and the actual CAS domain must have
 				// advanced. Mere lease loss, or issuance without takeover,
 				// cannot authorize expiry of a paused publisher's intent.
 				expire = authorityErr == nil && issued > in.Epoch && h.Epoch > in.Epoch && h.Epoch <= issued
@@ -194,7 +197,7 @@ func (g *Collector) Run(ctx context.Context) (result GCResult, err error) {
 				if e != nil {
 					return result, e
 				}
-				bindings = append(bindings, gcBinding{vol, key, entry, sha256.Sum256(raw)})
+				bindings = append(bindings, gcBinding{vol, entry, sha256.Sum256(raw)})
 				pageAfter = entry.GetName()
 			}
 			if len(page) < listPage {
