@@ -81,7 +81,7 @@ CHUNKSTORE_WEED=/path/to/weed go test -tags chunkstore_integration \
   -v -count=1 -timeout=180s
 ```
 
-This test requires the binary and fails rather than skips when it is absent.
+This test requires the binary and fails rather than skips when it is absent. It configures and reads back the filer rule `fs.configure -locationPrefix=/swblock/ -collection=swblock -fsync -apply` before creating catalog data.
 It advances only the GC clock to exercise grace admission deterministically;
 network services, conditional metadata writes, authority RPC and blob deletion
 are real. It is not an elapsed-time soak or a lab qualification.

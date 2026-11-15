@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -36,7 +37,7 @@ func TestIntegration_OpsChunkGC_RealMasterAndStore(t *testing.T) {
 	filer := startGCWeed(t, weed)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	const base = "/gc-cli-test"
+	const base = "/swblock/gc-cli-test"
 	s, err := chunkstore.DialSWFS(chunkstore.SWFSConfig{FilerGRPC: filer, Collection: "swblock", AssignPath: base})
 	if err != nil {
 		t.Fatal(err)
@@ -55,6 +56,17 @@ func TestIntegration_OpsChunkGC_RealMasterAndStore(t *testing.T) {
 		case <-time.After(200 * time.Millisecond):
 		}
 	}
+	// Verify persisted configuration, not shell exit alone. SaveInsideFiler
+	// stores this small configuration inline in the actual filer.
+	conf, err := s.LookupEntry(ctx, "/etc/seaweedfs", "filer.conf")
+	if err != nil || len(conf.GetChunks()) != 0 {
+		t.Fatalf("fsync configuration unavailable: %v %v", conf, err)
+	}
+	compact := strings.Join(strings.Fields(string(conf.Content)), "")
+	if !strings.Contains(compact, `location_prefix:"/swblock/"`) || !strings.Contains(compact, `collection:"swblock"`) || !strings.Contains(compact, "fsync:true") {
+		t.Fatalf("unexpected filer configuration: %s", conf.Content)
+	}
+	t.Logf("verified filer configuration: %s", conf.Content)
 	cat, err := chunkstore.NewCatalog(s, base)
 	if err != nil {
 		t.Fatal(err)
@@ -319,5 +331,15 @@ func startGCWeed(t *testing.T, weed string) string {
 	run("volume", "-ip=127.0.0.1", fmt.Sprintf("-port=%d", vp), "-dir="+filepath.Join(dir, "v"), "-master="+masterAddr, "-max=32")
 	run("filer", "-ip=127.0.0.1", fmt.Sprintf("-port=%d", fp), "-master="+masterAddr, "-defaultStoreDir="+filepath.Join(dir, "f"))
 	wait(fp + 10000)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	configure := exec.CommandContext(ctx, weed, "shell", "-master="+masterAddr, fmt.Sprintf("-filer=127.0.0.1:%d", fp))
+	configure.Dir = dir
+	configure.Stdin = strings.NewReader("fs.configure -locationPrefix=/swblock/ -collection=swblock -fsync -apply\n")
+	configure.Stdout, configure.Stderr = io.Discard, io.Discard
+	configure.WaitDelay = 2 * time.Second
+	if err := configure.Run(); err != nil {
+		t.Fatalf("configure filer durability: %v", err)
+	}
 	return fmt.Sprintf("127.0.0.1:%d", fp+10000)
 }
