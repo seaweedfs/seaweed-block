@@ -143,10 +143,15 @@ type ProviderConfig struct {
 	// ChunkReadMissTimeout bounds one remote fetch of an absent block.
 	// Zero: the storage default.
 	ChunkReadMissTimeout time.Duration
-	// ChunkCaptureInterval runs a cut every interval while the volume's
-	// projection is healthy. Zero: cuts only on CaptureVolume and
-	// MakeVolumeRemoteDurable.
+	// ChunkCaptureInterval: an automatic cut is due once this long has
+	// passed since the volume's last successful cut (of any kind). Zero
+	// disables the timer.
 	ChunkCaptureInterval time.Duration
+	// ChunkDirtyThreshold: an automatic cut is due once this many chunks
+	// are dirty since the last HEAD. Zero disables the threshold. With
+	// both zero there are no automatic cuts (only CaptureVolume and
+	// MakeVolumeRemoteDurable).
+	ChunkDirtyThreshold int
 }
 
 // DurableProvider is the production frontend.Provider implementation.
