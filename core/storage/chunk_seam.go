@@ -345,6 +345,35 @@ type chunkCutStats struct {
 	TotalNs         int64
 }
 
+// chunkLayerStats are a layer's cumulative cut counters and its last
+// successful cut (B9 7.2-7.3). Cuts counts every Cut, Capture,
+// MakeRemoteDurable and Detach attempt that got past the closed check.
+//   - CutsOK counts cuts that installed a HEAD; CutsNoop those with
+//     nothing new (no CAS); CutsFailed every other failure.
+//   - CutsRefused counts refusals by reason: "admission" (CaptureAllowed:
+//     not a healthy primary of this lineage, BASE install), "fenced",
+//     "detached".
+//   - CASConflicts counts CAS precondition failures; CASUnknown CAS
+//     results whose outcome stayed unresolved after the HEAD re-read.
+//   - PendingUnresolved: an unresolved proposal is held now.
+//   - DirtyChunks is the number of chunks dirty since the last HEAD now
+//     (the C11 bitmap popcount); the cut scheduler's threshold reads it.
+//   - LastCut, LastCutH and LastCutNs (wall clock, Unix ns) describe the
+//     last successful cut, whatever triggered it.
+type chunkLayerStats struct {
+	CutsOK            uint64
+	CutsNoop          uint64
+	CutsFailed        uint64
+	CutsRefused       map[string]uint64
+	CASConflicts      uint64
+	CASUnknown        uint64
+	PendingUnresolved bool
+	DirtyChunks       int
+	LastCut           chunkCutStats
+	LastCutH          uint64
+	LastCutNs         int64
+}
+
 // chunkCutResult is the outcome of one successful cut.
 //   - H is the cut LSN; Head.RemoteLSN = H when the cut installed a HEAD.
 //     A volume's LSNs carry forward across hosts: a new host's WAL starts
@@ -370,6 +399,8 @@ type chunkLayer interface {
 	// It returns the HEAD it installed, so a snapshot can copy exactly the
 	// image of H even when other cuts follow.
 	Cut(ctx context.Context) (chunkCutResult, error)
+	// Stats returns the cumulative cut counters and the last cut.
+	Stats() chunkLayerStats
 	// Capture is Cut, returning only H.
 	Capture(ctx context.Context) (uint64, error)
 	// Detach is the final cut of a clean stop: one cut whose CAS publishes
