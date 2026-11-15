@@ -28,7 +28,12 @@ package storage
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
+	"fmt"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -176,12 +181,61 @@ type chunkHead struct {
 // unknown: the caller re-reads HEAD after every such result before any
 // further CAS, never retries blindly, and reports no success or frontier
 // advance while it is unresolved.
+//
+// Intents protect chunks a holder is about to publish (W5): GC treats every
+// live intent as a root. A holder durably writes an intent naming the keys
+// before it uploads the first of them (or, for a snapshot or fork, before it
+// writes the manifest that references them), and deletes it after the HEAD
+// CAS succeeds or the attempt is cleanly abandoned.
+//   - PutIntent stores in durably and returns its id, "<in.Gen>-<nonce>",
+//     unique per call; the id and CreatedNs it assigns are listed back.
+//   - DeleteIntent removes that one intent; a missing id is not an error.
+//   - ListIntents returns every live intent of the volume, or an error; it
+//     never skips an intent it cannot read.
 type chunkRemote interface {
 	Put(ctx context.Context, key string, data []byte) error
 	Get(ctx context.Context, key string) ([]byte, error)
 	GetHead(ctx context.Context) (chunkHead, error)
 	CASHead(ctx context.Context, expected chunkHeadVersion, next chunkHead) (uint64, error)
 	Delete(ctx context.Context, key string) error
+	PutIntent(ctx context.Context, in chunkIntent) (string, error)
+	DeleteIntent(ctx context.Context, id string) error
+	ListIntents(ctx context.Context) ([]chunkIntent, error)
+}
+
+// chunkIntent is one live intent: the keys a holder at HEAD generation Gen
+// and epoch Epoch is about to publish.
+type chunkIntent struct {
+	ID        string // "<Gen>-<nonce>"; assigned by PutIntent
+	Gen       uint64
+	Epoch     uint64
+	Holder    string
+	Keys      []string
+	CreatedNs int64 // assigned by PutIntent
+}
+
+// newChunkIntentID returns "<gen>-<16 lowercase hex digits>" from a random
+// nonce.
+func newChunkIntentID(gen uint64) (string, error) {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("storage: intent nonce: %w", err)
+	}
+	return strconv.FormatUint(gen, 10) + "-" + hex.EncodeToString(b[:]), nil
+}
+
+// validChunkIntentID accepts exactly the ids newChunkIntentID produces.
+func validChunkIntentID(id string) bool {
+	gen, nonce, ok := strings.Cut(id, "-")
+	if !ok || len(nonce) != 16 || strings.ToLower(nonce) != nonce {
+		return false
+	}
+	v, err := strconv.ParseUint(gen, 10, 64)
+	if err != nil || strconv.FormatUint(v, 10) != gen {
+		return false
+	}
+	_, err = hex.DecodeString(nonce)
+	return err == nil
 }
 
 // chunkLayerConfig configures one attachment.

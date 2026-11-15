@@ -9,9 +9,18 @@ package chunkstore
 //	                    {gen, epoch, holder} mirrored in extended attributes
 //	<root>/keys/<key>   one write-once entry per chunk key, naming the
 //	                    needle (fid) that holds the chunk's bytes
+//	<root>/intents/<id> one entry per live intent (<gen>-<nonce>): the keys a
+//	                    holder is about to publish; GC treats them as roots
 //
 // The chunk layer names chunks itself (immutable keys) while SeaweedFS
-// assigns needle ids, so a key entry binds the two. It is created with
+// assigns needle ids, so a key entry binds the two.
+//
+// A key may be owner-qualified, "@<owner>/<key>": the binding then lives in
+// the owner volume's keys/ directory, <base>/<owner>/keys/, where <base> is
+// the parent of this volume's root. A fork's HEAD names its parent's chunks
+// this way, so the fork shares them without copying any binding. The layer
+// never generates a key starting with "@"; Get resolves qualified keys and
+// Put refuses them (a volume only ever writes its own keys). It is created with
 // o_excl: a key that exists is never rebound, which is the "keys are
 // immutable" rule of storage.ChunkRemote.
 //
@@ -37,6 +46,7 @@ import (
 	"net/url"
 	"path"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,11 +62,18 @@ const (
 	extKind   = "swb.kind"
 	extFid    = "swb.fid"
 
-	kindChunkHead = "chunkhead"
-	kindChunkKey  = "chunkkey"
+	kindChunkHead   = "chunkhead"
+	kindChunkKey    = "chunkkey"
+	kindChunkIntent = "chunkintent"
 
-	headName = "HEAD"
-	keysDir  = "keys"
+	headName   = "HEAD"
+	keysDir    = "keys"
+	intentsDir = "intents"
+
+	// intentFormat is the only intent document format this code reads.
+	intentFormat = 1
+	// listPage is the page size of a full directory listing.
+	listPage = 1000
 
 	// headFormat is the only HEAD document format this code reads.
 	headFormat = 1
@@ -96,10 +113,39 @@ func keyName(key string) (string, error) {
 	return url.PathEscape(key), nil // one flat directory: '/' is escaped
 }
 
+// CheckVolumeID accepts a volume id that is one plain path element, so a
+// volume's directory, or a qualified key's owner, stays inside the base.
+func CheckVolumeID(id string) error {
+	if id == "" || id == "." || id == ".." || strings.ContainsAny(id, "/\\") {
+		return fmt.Errorf("chunkstore: volume id %q is not a plain path element", id)
+	}
+	return nil
+}
+
+// keyLocation returns the directory and entry name holding key's binding:
+// the owner's keys/ directory for "@<owner>/<key>", this volume's otherwise.
+func (r *ChunkRemote) keyLocation(key string) (dir, name string, err error) {
+	if !strings.HasPrefix(key, "@") {
+		name, err := keyName(key)
+		return r.keyDir(), name, err
+	}
+	owner, own, ok := strings.Cut(key[1:], "/")
+	if !ok || own == "" {
+		return "", "", fmt.Errorf("%w: %q is not \"@<owner>/<key>\"", ErrInvalidKey, key)
+	}
+	if err := CheckVolumeID(owner); err != nil {
+		return "", "", fmt.Errorf("%w: %q: %v", ErrInvalidKey, key, err)
+	}
+	return path.Join(path.Dir(r.root), owner, keysDir), url.PathEscape(own), nil
+}
+
 // Put stores data as a new needle, then binds key to it with an exclusive
 // create. A key that is already bound fails with storage.ErrChunkKeyExists
 // and its bytes are untouched.
 func (r *ChunkRemote) Put(ctx context.Context, key string, data []byte) error {
+	if strings.HasPrefix(key, "@") {
+		return fmt.Errorf("%w: %q is owner-qualified; a volume writes only its own keys", ErrInvalidKey, key)
+	}
 	name, err := keyName(key)
 	if err != nil {
 		return err
@@ -135,7 +181,7 @@ func (r *ChunkRemote) Put(ctx context.Context, key string, data []byte) error {
 // Get returns the bytes bound to key. The chunk layer checks them against
 // the SHA-256 in HEAD.
 func (r *ChunkRemote) Get(ctx context.Context, key string) ([]byte, error) {
-	name, err := keyName(key)
+	dir, name, err := r.keyLocation(key)
 	if err != nil {
 		return nil, err
 	}
@@ -143,7 +189,7 @@ func (r *ChunkRemote) Get(ctx context.Context, key string) ([]byte, error) {
 	fid, ok := r.fids[key]
 	r.mu.Unlock()
 	if !ok {
-		e, err := r.f.LookupEntry(ctx, r.keyDir(), name)
+		e, err := r.f.LookupEntry(ctx, dir, name)
 		if err != nil {
 			return nil, fmt.Errorf("chunkstore: chunk key %q: %w", key, err)
 		}
@@ -160,6 +206,108 @@ func (r *ChunkRemote) Get(ctx context.Context, key string) ([]byte, error) {
 
 // Delete is not supported; see ErrDeleteUnsupported.
 func (r *ChunkRemote) Delete(context.Context, string) error { return ErrDeleteUnsupported }
+
+type intentDoc struct {
+	Format    int      `json:"format"`
+	Gen       uint64   `json:"gen"`
+	Epoch     uint64   `json:"epoch"`
+	Holder    string   `json:"holder"`
+	Keys      []string `json:"keys"`
+	CreatedNs int64    `json:"created_ns"`
+}
+
+func (r *ChunkRemote) intentDir() string { return path.Join(r.root, intentsDir) }
+
+// PutIntent writes <root>/intents/<gen>-<nonce> with an exclusive create.
+// The entry is durable when the filer's fsync rule covers the chunk path,
+// the same condition as for HEAD.
+func (r *ChunkRemote) PutIntent(ctx context.Context, in storage.ChunkIntent) (string, error) {
+	id, err := storage.NewChunkIntentID(in.Gen)
+	if err != nil {
+		return "", err
+	}
+	now := time.Now()
+	body, err := json.Marshal(intentDoc{Format: intentFormat, Gen: in.Gen, Epoch: in.Epoch, Holder: in.Holder, Keys: in.Keys, CreatedNs: now.UnixNano()})
+	if err != nil {
+		return "", err
+	}
+	e := &filerpb.Entry{
+		Name:       id,
+		Attributes: &filerpb.FuseAttributes{FileSize: uint64(len(body)), Mtime: now.Unix(), Crtime: now.Unix(), FileMode: 0o644, Mime: "application/json"},
+		Extended: map[string][]byte{
+			extKind:   []byte(kindChunkIntent),
+			extGen:    []byte(strconv.FormatUint(in.Gen, 10)),
+			extEpoch:  []byte(strconv.FormatUint(in.Epoch, 10)),
+			extHolder: []byte(in.Holder),
+		},
+		Content: body,
+	}
+	if err := r.f.CreateEntry(ctx, r.intentDir(), e, true); err != nil {
+		return "", fmt.Errorf("chunkstore: put intent %s: %w", id, err)
+	}
+	return id, nil
+}
+
+// DeleteIntent removes <root>/intents/<id> and nothing else; a missing
+// intent is not an error.
+func (r *ChunkRemote) DeleteIntent(ctx context.Context, id string) error {
+	if !storage.ValidChunkIntentID(id) {
+		return fmt.Errorf("chunkstore: intent id %q is not \"<gen>-<nonce>\"", id)
+	}
+	return r.f.DeleteEntry(ctx, r.intentDir(), id, nil)
+}
+
+// ListIntents lists every entry under <root>/intents/. An entry that is not
+// a well-formed intent fails the listing, so GC never misses a root.
+func (r *ChunkRemote) ListIntents(ctx context.Context) ([]storage.ChunkIntent, error) {
+	var out []storage.ChunkIntent
+	after := ""
+	for {
+		page, err := r.f.ListEntries(ctx, r.intentDir(), "", after, listPage)
+		if err != nil {
+			return nil, err
+		}
+		for _, e := range page {
+			in, err := decodeIntent(path.Join(r.intentDir(), e.GetName()), e)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, in)
+		}
+		if len(page) < listPage {
+			return out, nil
+		}
+		after = page[len(page)-1].GetName()
+	}
+}
+
+func decodeIntent(p string, e *filerpb.Entry) (storage.ChunkIntent, error) {
+	fail := func(format string, a ...any) (storage.ChunkIntent, error) {
+		return storage.ChunkIntent{}, fmt.Errorf("chunkstore: intent %s: "+format, append([]any{p}, a...)...)
+	}
+	if len(e.GetChunks()) != 0 {
+		return fail("carries %d filer chunks", len(e.Chunks))
+	}
+	if k := string(e.Extended[extKind]); k != kindChunkIntent {
+		return fail("kind %q, want %q", k, kindChunkIntent)
+	}
+	if !storage.ValidChunkIntentID(e.GetName()) {
+		return fail("name is not \"<gen>-<nonce>\"")
+	}
+	var doc intentDoc
+	if err := json.Unmarshal(e.GetContent(), &doc); err != nil {
+		return fail("decode: %v", err)
+	}
+	if doc.Format != intentFormat {
+		return fail("format %d not supported (want %d)", doc.Format, intentFormat)
+	}
+	if !strings.HasPrefix(e.GetName(), strconv.FormatUint(doc.Gen, 10)+"-") ||
+		string(e.Extended[extEpoch]) != strconv.FormatUint(doc.Epoch, 10) || string(e.Extended[extHolder]) != doc.Holder {
+		return fail("name or extended gen/epoch/holder disagree with the document")
+	}
+	return storage.ChunkIntent{ID: e.GetName(), Gen: doc.Gen, Epoch: doc.Epoch, Holder: doc.Holder,
+		Keys: append([]string(nil), doc.Keys...), CreatedNs: doc.CreatedNs}, nil
+}
 
 type headDoc struct {
 	Format    int               `json:"format"`

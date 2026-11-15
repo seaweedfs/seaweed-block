@@ -294,6 +294,24 @@ func (r *closeBoundRemote) Delete(ctx context.Context, key string) error {
 	return r.ChunkRemote.Delete(c, key)
 }
 
+func (r closeBoundRemote) PutIntent(ctx context.Context, in storage.ChunkIntent) (string, error) {
+	c, end := r.bind(ctx)
+	defer end()
+	return r.ChunkRemote.PutIntent(c, in)
+}
+
+func (r closeBoundRemote) DeleteIntent(ctx context.Context, id string) error {
+	c, end := r.bind(ctx)
+	defer end()
+	return r.ChunkRemote.DeleteIntent(c, id)
+}
+
+func (r closeBoundRemote) ListIntents(ctx context.Context) ([]storage.ChunkIntent, error) {
+	c, end := r.bind(ctx)
+	defer end()
+	return r.ChunkRemote.ListIntents(c)
+}
+
 // The fresh marker: <volume path>.chunkfresh.
 
 func chunkFreshMarker(path string) string { return path + ".chunkfresh" }

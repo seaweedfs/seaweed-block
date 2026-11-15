@@ -71,10 +71,43 @@ type fakeChunkRemote struct {
 	casModes   []fakeCASMode            // consumed one per CAS; empty = casNormal
 	beforeCAS  func(f *fakeChunkRemote) // runs once, under mu, before the next CAS is decided
 	afterCAS   func(f *fakeChunkRemote) // runs once, under mu, after the next CAS is decided
+	intents    map[string]chunkIntent
 }
 
 func newFakeChunkRemote() *fakeChunkRemote {
-	return &fakeChunkRemote{objs: map[string][]byte{}, putBytes: map[string][]byte{}, everStored: map[string]bool{}}
+	return &fakeChunkRemote{objs: map[string][]byte{}, putBytes: map[string][]byte{}, everStored: map[string]bool{}, intents: map[string]chunkIntent{}}
+}
+
+func (f *fakeChunkRemote) PutIntent(ctx context.Context, in chunkIntent) (string, error) {
+	id, err := newChunkIntentID(in.Gen)
+	if err != nil {
+		return "", err
+	}
+	in.ID, in.CreatedNs, in.Keys = id, time.Now().UnixNano(), append([]string(nil), in.Keys...)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ops = append(f.ops, "putintent:"+id)
+	f.intents[id] = in
+	return id, nil
+}
+
+func (f *fakeChunkRemote) DeleteIntent(ctx context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ops = append(f.ops, "deleteintent:"+id)
+	delete(f.intents, id)
+	return nil
+}
+
+func (f *fakeChunkRemote) ListIntents(ctx context.Context) ([]chunkIntent, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]chunkIntent, 0, len(f.intents))
+	for _, in := range f.intents {
+		in.Keys = append([]string(nil), in.Keys...)
+		out = append(out, in)
+	}
+	return out, nil
 }
 
 func (f *fakeChunkRemote) Put(ctx context.Context, key string, data []byte) error {

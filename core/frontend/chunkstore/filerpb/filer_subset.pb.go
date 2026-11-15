@@ -193,6 +193,150 @@ func (x *LookupDirectoryEntryResponse) GetEntry() *Entry {
 	return nil
 }
 
+type ListEntriesRequest struct {
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	Directory          string                 `protobuf:"bytes,1,opt,name=directory,proto3" json:"directory,omitempty"`
+	Prefix             string                 `protobuf:"bytes,2,opt,name=prefix,proto3" json:"prefix,omitempty"`
+	StartFromFileName  string                 `protobuf:"bytes,3,opt,name=startFromFileName,proto3" json:"startFromFileName,omitempty"`
+	InclusiveStartFrom bool                   `protobuf:"varint,4,opt,name=inclusiveStartFrom,proto3" json:"inclusiveStartFrom,omitempty"`
+	Limit              uint32                 `protobuf:"varint,5,opt,name=limit,proto3" json:"limit,omitempty"`
+	SnapshotTsNs       int64                  `protobuf:"varint,6,opt,name=snapshot_ts_ns,json=snapshotTsNs,proto3" json:"snapshot_ts_ns,omitempty"`
+	OmitChunks         bool                   `protobuf:"varint,7,opt,name=omit_chunks,json=omitChunks,proto3" json:"omit_chunks,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
+}
+
+func (x *ListEntriesRequest) Reset() {
+	*x = ListEntriesRequest{}
+	mi := &file_filer_subset_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListEntriesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListEntriesRequest) ProtoMessage() {}
+
+func (x *ListEntriesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_filer_subset_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListEntriesRequest.ProtoReflect.Descriptor instead.
+func (*ListEntriesRequest) Descriptor() ([]byte, []int) {
+	return file_filer_subset_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *ListEntriesRequest) GetDirectory() string {
+	if x != nil {
+		return x.Directory
+	}
+	return ""
+}
+
+func (x *ListEntriesRequest) GetPrefix() string {
+	if x != nil {
+		return x.Prefix
+	}
+	return ""
+}
+
+func (x *ListEntriesRequest) GetStartFromFileName() string {
+	if x != nil {
+		return x.StartFromFileName
+	}
+	return ""
+}
+
+func (x *ListEntriesRequest) GetInclusiveStartFrom() bool {
+	if x != nil {
+		return x.InclusiveStartFrom
+	}
+	return false
+}
+
+func (x *ListEntriesRequest) GetLimit() uint32 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
+func (x *ListEntriesRequest) GetSnapshotTsNs() int64 {
+	if x != nil {
+		return x.SnapshotTsNs
+	}
+	return 0
+}
+
+func (x *ListEntriesRequest) GetOmitChunks() bool {
+	if x != nil {
+		return x.OmitChunks
+	}
+	return false
+}
+
+type ListEntriesResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Entry         *Entry                 `protobuf:"bytes,1,opt,name=entry,proto3" json:"entry,omitempty"`
+	SnapshotTsNs  int64                  `protobuf:"varint,2,opt,name=snapshot_ts_ns,json=snapshotTsNs,proto3" json:"snapshot_ts_ns,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListEntriesResponse) Reset() {
+	*x = ListEntriesResponse{}
+	mi := &file_filer_subset_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListEntriesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListEntriesResponse) ProtoMessage() {}
+
+func (x *ListEntriesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_filer_subset_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListEntriesResponse.ProtoReflect.Descriptor instead.
+func (*ListEntriesResponse) Descriptor() ([]byte, []int) {
+	return file_filer_subset_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *ListEntriesResponse) GetEntry() *Entry {
+	if x != nil {
+		return x.Entry
+	}
+	return nil
+}
+
+func (x *ListEntriesResponse) GetSnapshotTsNs() int64 {
+	if x != nil {
+		return x.SnapshotTsNs
+	}
+	return 0
+}
+
 type Entry struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
@@ -207,7 +351,7 @@ type Entry struct {
 
 func (x *Entry) Reset() {
 	*x = Entry{}
-	mi := &file_filer_subset_proto_msgTypes[2]
+	mi := &file_filer_subset_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -219,7 +363,7 @@ func (x *Entry) String() string {
 func (*Entry) ProtoMessage() {}
 
 func (x *Entry) ProtoReflect() protoreflect.Message {
-	mi := &file_filer_subset_proto_msgTypes[2]
+	mi := &file_filer_subset_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -232,7 +376,7 @@ func (x *Entry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Entry.ProtoReflect.Descriptor instead.
 func (*Entry) Descriptor() ([]byte, []int) {
-	return file_filer_subset_proto_rawDescGZIP(), []int{2}
+	return file_filer_subset_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *Entry) GetName() string {
@@ -288,7 +432,7 @@ type FileChunk struct {
 
 func (x *FileChunk) Reset() {
 	*x = FileChunk{}
-	mi := &file_filer_subset_proto_msgTypes[3]
+	mi := &file_filer_subset_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -300,7 +444,7 @@ func (x *FileChunk) String() string {
 func (*FileChunk) ProtoMessage() {}
 
 func (x *FileChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_filer_subset_proto_msgTypes[3]
+	mi := &file_filer_subset_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -313,7 +457,7 @@ func (x *FileChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FileChunk.ProtoReflect.Descriptor instead.
 func (*FileChunk) Descriptor() ([]byte, []int) {
-	return file_filer_subset_proto_rawDescGZIP(), []int{3}
+	return file_filer_subset_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *FileChunk) GetFileId() string {
@@ -338,7 +482,7 @@ type FuseAttributes struct {
 
 func (x *FuseAttributes) Reset() {
 	*x = FuseAttributes{}
-	mi := &file_filer_subset_proto_msgTypes[4]
+	mi := &file_filer_subset_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -350,7 +494,7 @@ func (x *FuseAttributes) String() string {
 func (*FuseAttributes) ProtoMessage() {}
 
 func (x *FuseAttributes) ProtoReflect() protoreflect.Message {
-	mi := &file_filer_subset_proto_msgTypes[4]
+	mi := &file_filer_subset_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -363,7 +507,7 @@ func (x *FuseAttributes) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FuseAttributes.ProtoReflect.Descriptor instead.
 func (*FuseAttributes) Descriptor() ([]byte, []int) {
-	return file_filer_subset_proto_rawDescGZIP(), []int{4}
+	return file_filer_subset_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *FuseAttributes) GetFileSize() uint64 {
@@ -429,7 +573,7 @@ type CreateEntryRequest struct {
 
 func (x *CreateEntryRequest) Reset() {
 	*x = CreateEntryRequest{}
-	mi := &file_filer_subset_proto_msgTypes[5]
+	mi := &file_filer_subset_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -441,7 +585,7 @@ func (x *CreateEntryRequest) String() string {
 func (*CreateEntryRequest) ProtoMessage() {}
 
 func (x *CreateEntryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_filer_subset_proto_msgTypes[5]
+	mi := &file_filer_subset_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -454,7 +598,7 @@ func (x *CreateEntryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateEntryRequest.ProtoReflect.Descriptor instead.
 func (*CreateEntryRequest) Descriptor() ([]byte, []int) {
-	return file_filer_subset_proto_rawDescGZIP(), []int{5}
+	return file_filer_subset_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *CreateEntryRequest) GetDirectory() string {
@@ -509,7 +653,7 @@ type CreateEntryResponse struct {
 
 func (x *CreateEntryResponse) Reset() {
 	*x = CreateEntryResponse{}
-	mi := &file_filer_subset_proto_msgTypes[6]
+	mi := &file_filer_subset_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -521,7 +665,7 @@ func (x *CreateEntryResponse) String() string {
 func (*CreateEntryResponse) ProtoMessage() {}
 
 func (x *CreateEntryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_filer_subset_proto_msgTypes[6]
+	mi := &file_filer_subset_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -534,7 +678,7 @@ func (x *CreateEntryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateEntryResponse.ProtoReflect.Descriptor instead.
 func (*CreateEntryResponse) Descriptor() ([]byte, []int) {
-	return file_filer_subset_proto_rawDescGZIP(), []int{6}
+	return file_filer_subset_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *CreateEntryResponse) GetError() string {
@@ -564,7 +708,7 @@ type UpdateEntryRequest struct {
 
 func (x *UpdateEntryRequest) Reset() {
 	*x = UpdateEntryRequest{}
-	mi := &file_filer_subset_proto_msgTypes[7]
+	mi := &file_filer_subset_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -576,7 +720,7 @@ func (x *UpdateEntryRequest) String() string {
 func (*UpdateEntryRequest) ProtoMessage() {}
 
 func (x *UpdateEntryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_filer_subset_proto_msgTypes[7]
+	mi := &file_filer_subset_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -589,7 +733,7 @@ func (x *UpdateEntryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateEntryRequest.ProtoReflect.Descriptor instead.
 func (*UpdateEntryRequest) Descriptor() ([]byte, []int) {
-	return file_filer_subset_proto_rawDescGZIP(), []int{7}
+	return file_filer_subset_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *UpdateEntryRequest) GetDirectory() string {
@@ -635,7 +779,7 @@ type UpdateEntryResponse struct {
 
 func (x *UpdateEntryResponse) Reset() {
 	*x = UpdateEntryResponse{}
-	mi := &file_filer_subset_proto_msgTypes[8]
+	mi := &file_filer_subset_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -647,7 +791,7 @@ func (x *UpdateEntryResponse) String() string {
 func (*UpdateEntryResponse) ProtoMessage() {}
 
 func (x *UpdateEntryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_filer_subset_proto_msgTypes[8]
+	mi := &file_filer_subset_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -660,7 +804,7 @@ func (x *UpdateEntryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateEntryResponse.ProtoReflect.Descriptor instead.
 func (*UpdateEntryResponse) Descriptor() ([]byte, []int) {
-	return file_filer_subset_proto_rawDescGZIP(), []int{8}
+	return file_filer_subset_proto_rawDescGZIP(), []int{10}
 }
 
 type DeleteEntryRequest struct {
@@ -676,7 +820,7 @@ type DeleteEntryRequest struct {
 
 func (x *DeleteEntryRequest) Reset() {
 	*x = DeleteEntryRequest{}
-	mi := &file_filer_subset_proto_msgTypes[9]
+	mi := &file_filer_subset_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -688,7 +832,7 @@ func (x *DeleteEntryRequest) String() string {
 func (*DeleteEntryRequest) ProtoMessage() {}
 
 func (x *DeleteEntryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_filer_subset_proto_msgTypes[9]
+	mi := &file_filer_subset_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -701,7 +845,7 @@ func (x *DeleteEntryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteEntryRequest.ProtoReflect.Descriptor instead.
 func (*DeleteEntryRequest) Descriptor() ([]byte, []int) {
-	return file_filer_subset_proto_rawDescGZIP(), []int{9}
+	return file_filer_subset_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *DeleteEntryRequest) GetDirectory() string {
@@ -748,7 +892,7 @@ type DeleteEntryResponse struct {
 
 func (x *DeleteEntryResponse) Reset() {
 	*x = DeleteEntryResponse{}
-	mi := &file_filer_subset_proto_msgTypes[10]
+	mi := &file_filer_subset_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -760,7 +904,7 @@ func (x *DeleteEntryResponse) String() string {
 func (*DeleteEntryResponse) ProtoMessage() {}
 
 func (x *DeleteEntryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_filer_subset_proto_msgTypes[10]
+	mi := &file_filer_subset_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -773,7 +917,7 @@ func (x *DeleteEntryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteEntryResponse.ProtoReflect.Descriptor instead.
 func (*DeleteEntryResponse) Descriptor() ([]byte, []int) {
-	return file_filer_subset_proto_rawDescGZIP(), []int{10}
+	return file_filer_subset_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *DeleteEntryResponse) GetError() string {
@@ -801,7 +945,7 @@ type AssignVolumeRequest struct {
 
 func (x *AssignVolumeRequest) Reset() {
 	*x = AssignVolumeRequest{}
-	mi := &file_filer_subset_proto_msgTypes[11]
+	mi := &file_filer_subset_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -813,7 +957,7 @@ func (x *AssignVolumeRequest) String() string {
 func (*AssignVolumeRequest) ProtoMessage() {}
 
 func (x *AssignVolumeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_filer_subset_proto_msgTypes[11]
+	mi := &file_filer_subset_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -826,7 +970,7 @@ func (x *AssignVolumeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AssignVolumeRequest.ProtoReflect.Descriptor instead.
 func (*AssignVolumeRequest) Descriptor() ([]byte, []int) {
-	return file_filer_subset_proto_rawDescGZIP(), []int{11}
+	return file_filer_subset_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *AssignVolumeRequest) GetCount() int32 {
@@ -917,7 +1061,7 @@ type AssignVolumeResponse struct {
 
 func (x *AssignVolumeResponse) Reset() {
 	*x = AssignVolumeResponse{}
-	mi := &file_filer_subset_proto_msgTypes[12]
+	mi := &file_filer_subset_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -929,7 +1073,7 @@ func (x *AssignVolumeResponse) String() string {
 func (*AssignVolumeResponse) ProtoMessage() {}
 
 func (x *AssignVolumeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_filer_subset_proto_msgTypes[12]
+	mi := &file_filer_subset_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -942,7 +1086,7 @@ func (x *AssignVolumeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AssignVolumeResponse.ProtoReflect.Descriptor instead.
 func (*AssignVolumeResponse) Descriptor() ([]byte, []int) {
-	return file_filer_subset_proto_rawDescGZIP(), []int{12}
+	return file_filer_subset_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *AssignVolumeResponse) GetFileId() string {
@@ -1024,7 +1168,7 @@ type LookupVolumeRequest struct {
 
 func (x *LookupVolumeRequest) Reset() {
 	*x = LookupVolumeRequest{}
-	mi := &file_filer_subset_proto_msgTypes[13]
+	mi := &file_filer_subset_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1036,7 +1180,7 @@ func (x *LookupVolumeRequest) String() string {
 func (*LookupVolumeRequest) ProtoMessage() {}
 
 func (x *LookupVolumeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_filer_subset_proto_msgTypes[13]
+	mi := &file_filer_subset_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1049,7 +1193,7 @@ func (x *LookupVolumeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LookupVolumeRequest.ProtoReflect.Descriptor instead.
 func (*LookupVolumeRequest) Descriptor() ([]byte, []int) {
-	return file_filer_subset_proto_rawDescGZIP(), []int{13}
+	return file_filer_subset_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *LookupVolumeRequest) GetVolumeIds() []string {
@@ -1068,7 +1212,7 @@ type Locations struct {
 
 func (x *Locations) Reset() {
 	*x = Locations{}
-	mi := &file_filer_subset_proto_msgTypes[14]
+	mi := &file_filer_subset_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1080,7 +1224,7 @@ func (x *Locations) String() string {
 func (*Locations) ProtoMessage() {}
 
 func (x *Locations) ProtoReflect() protoreflect.Message {
-	mi := &file_filer_subset_proto_msgTypes[14]
+	mi := &file_filer_subset_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1093,7 +1237,7 @@ func (x *Locations) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Locations.ProtoReflect.Descriptor instead.
 func (*Locations) Descriptor() ([]byte, []int) {
-	return file_filer_subset_proto_rawDescGZIP(), []int{14}
+	return file_filer_subset_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *Locations) GetLocations() []*Location {
@@ -1116,7 +1260,7 @@ type Location struct {
 
 func (x *Location) Reset() {
 	*x = Location{}
-	mi := &file_filer_subset_proto_msgTypes[15]
+	mi := &file_filer_subset_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1128,7 +1272,7 @@ func (x *Location) String() string {
 func (*Location) ProtoMessage() {}
 
 func (x *Location) ProtoReflect() protoreflect.Message {
-	mi := &file_filer_subset_proto_msgTypes[15]
+	mi := &file_filer_subset_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1141,7 +1285,7 @@ func (x *Location) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Location.ProtoReflect.Descriptor instead.
 func (*Location) Descriptor() ([]byte, []int) {
-	return file_filer_subset_proto_rawDescGZIP(), []int{15}
+	return file_filer_subset_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *Location) GetUrl() string {
@@ -1188,7 +1332,7 @@ type LookupVolumeResponse struct {
 
 func (x *LookupVolumeResponse) Reset() {
 	*x = LookupVolumeResponse{}
-	mi := &file_filer_subset_proto_msgTypes[16]
+	mi := &file_filer_subset_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1200,7 +1344,7 @@ func (x *LookupVolumeResponse) String() string {
 func (*LookupVolumeResponse) ProtoMessage() {}
 
 func (x *LookupVolumeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_filer_subset_proto_msgTypes[16]
+	mi := &file_filer_subset_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1213,7 +1357,7 @@ func (x *LookupVolumeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LookupVolumeResponse.ProtoReflect.Descriptor instead.
 func (*LookupVolumeResponse) Descriptor() ([]byte, []int) {
-	return file_filer_subset_proto_rawDescGZIP(), []int{16}
+	return file_filer_subset_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *LookupVolumeResponse) GetLocationsMap() map[string]*Locations {
@@ -1232,7 +1376,19 @@ const file_filer_subset_proto_rawDesc = "" +
 	"\tdirectory\x18\x01 \x01(\tR\tdirectory\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\"E\n" +
 	"\x1cLookupDirectoryEntryResponse\x12%\n" +
-	"\x05entry\x18\x01 \x01(\v2\x0f.filer_pb.EntryR\x05entry\"\xb7\x02\n" +
+	"\x05entry\x18\x01 \x01(\v2\x0f.filer_pb.EntryR\x05entry\"\x85\x02\n" +
+	"\x12ListEntriesRequest\x12\x1c\n" +
+	"\tdirectory\x18\x01 \x01(\tR\tdirectory\x12\x16\n" +
+	"\x06prefix\x18\x02 \x01(\tR\x06prefix\x12,\n" +
+	"\x11startFromFileName\x18\x03 \x01(\tR\x11startFromFileName\x12.\n" +
+	"\x12inclusiveStartFrom\x18\x04 \x01(\bR\x12inclusiveStartFrom\x12\x14\n" +
+	"\x05limit\x18\x05 \x01(\rR\x05limit\x12$\n" +
+	"\x0esnapshot_ts_ns\x18\x06 \x01(\x03R\fsnapshotTsNs\x12\x1f\n" +
+	"\vomit_chunks\x18\a \x01(\bR\n" +
+	"omitChunks\"b\n" +
+	"\x13ListEntriesResponse\x12%\n" +
+	"\x05entry\x18\x01 \x01(\v2\x0f.filer_pb.EntryR\x05entry\x12$\n" +
+	"\x0esnapshot_ts_ns\x18\x02 \x01(\x03R\fsnapshotTsNs\"\xb7\x02\n" +
 	"\x05Entry\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12!\n" +
 	"\fis_directory\x18\x02 \x01(\bR\visDirectory\x12+\n" +
@@ -1348,9 +1504,10 @@ const file_filer_subset_proto_rawDesc = "" +
 	"\x10EXISTING_IS_FILE\x10\x04\x12\x18\n" +
 	"\x14ENTRY_ALREADY_EXISTS\x10\x05\x12\x17\n" +
 	"\x13PRECONDITION_FAILED\x10\x06\x12\r\n" +
-	"\tREAD_ONLY\x10\a2\x83\x04\n" +
+	"\tREAD_ONLY\x10\a2\xd3\x04\n" +
 	"\fSeaweedFiler\x12g\n" +
-	"\x14LookupDirectoryEntry\x12%.filer_pb.LookupDirectoryEntryRequest\x1a&.filer_pb.LookupDirectoryEntryResponse\"\x00\x12L\n" +
+	"\x14LookupDirectoryEntry\x12%.filer_pb.LookupDirectoryEntryRequest\x1a&.filer_pb.LookupDirectoryEntryResponse\"\x00\x12N\n" +
+	"\vListEntries\x12\x1c.filer_pb.ListEntriesRequest\x1a\x1d.filer_pb.ListEntriesResponse\"\x000\x01\x12L\n" +
 	"\vCreateEntry\x12\x1c.filer_pb.CreateEntryRequest\x1a\x1d.filer_pb.CreateEntryResponse\"\x00\x12L\n" +
 	"\vUpdateEntry\x12\x1c.filer_pb.UpdateEntryRequest\x1a\x1d.filer_pb.UpdateEntryResponse\"\x00\x12L\n" +
 	"\vDeleteEntry\x12\x1c.filer_pb.DeleteEntryRequest\x1a\x1d.filer_pb.DeleteEntryResponse\"\x00\x12O\n" +
@@ -1370,64 +1527,69 @@ func file_filer_subset_proto_rawDescGZIP() []byte {
 }
 
 var file_filer_subset_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_filer_subset_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
+var file_filer_subset_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_filer_subset_proto_goTypes = []any{
 	(FilerError)(0),                      // 0: filer_pb.FilerError
 	(*LookupDirectoryEntryRequest)(nil),  // 1: filer_pb.LookupDirectoryEntryRequest
 	(*LookupDirectoryEntryResponse)(nil), // 2: filer_pb.LookupDirectoryEntryResponse
-	(*Entry)(nil),                        // 3: filer_pb.Entry
-	(*FileChunk)(nil),                    // 4: filer_pb.FileChunk
-	(*FuseAttributes)(nil),               // 5: filer_pb.FuseAttributes
-	(*CreateEntryRequest)(nil),           // 6: filer_pb.CreateEntryRequest
-	(*CreateEntryResponse)(nil),          // 7: filer_pb.CreateEntryResponse
-	(*UpdateEntryRequest)(nil),           // 8: filer_pb.UpdateEntryRequest
-	(*UpdateEntryResponse)(nil),          // 9: filer_pb.UpdateEntryResponse
-	(*DeleteEntryRequest)(nil),           // 10: filer_pb.DeleteEntryRequest
-	(*DeleteEntryResponse)(nil),          // 11: filer_pb.DeleteEntryResponse
-	(*AssignVolumeRequest)(nil),          // 12: filer_pb.AssignVolumeRequest
-	(*AssignVolumeResponse)(nil),         // 13: filer_pb.AssignVolumeResponse
-	(*LookupVolumeRequest)(nil),          // 14: filer_pb.LookupVolumeRequest
-	(*Locations)(nil),                    // 15: filer_pb.Locations
-	(*Location)(nil),                     // 16: filer_pb.Location
-	(*LookupVolumeResponse)(nil),         // 17: filer_pb.LookupVolumeResponse
-	nil,                                  // 18: filer_pb.Entry.ExtendedEntry
-	nil,                                  // 19: filer_pb.UpdateEntryRequest.ExpectedExtendedEntry
-	nil,                                  // 20: filer_pb.DeleteEntryRequest.ExpectedExtendedEntry
-	nil,                                  // 21: filer_pb.LookupVolumeResponse.LocationsMapEntry
+	(*ListEntriesRequest)(nil),           // 3: filer_pb.ListEntriesRequest
+	(*ListEntriesResponse)(nil),          // 4: filer_pb.ListEntriesResponse
+	(*Entry)(nil),                        // 5: filer_pb.Entry
+	(*FileChunk)(nil),                    // 6: filer_pb.FileChunk
+	(*FuseAttributes)(nil),               // 7: filer_pb.FuseAttributes
+	(*CreateEntryRequest)(nil),           // 8: filer_pb.CreateEntryRequest
+	(*CreateEntryResponse)(nil),          // 9: filer_pb.CreateEntryResponse
+	(*UpdateEntryRequest)(nil),           // 10: filer_pb.UpdateEntryRequest
+	(*UpdateEntryResponse)(nil),          // 11: filer_pb.UpdateEntryResponse
+	(*DeleteEntryRequest)(nil),           // 12: filer_pb.DeleteEntryRequest
+	(*DeleteEntryResponse)(nil),          // 13: filer_pb.DeleteEntryResponse
+	(*AssignVolumeRequest)(nil),          // 14: filer_pb.AssignVolumeRequest
+	(*AssignVolumeResponse)(nil),         // 15: filer_pb.AssignVolumeResponse
+	(*LookupVolumeRequest)(nil),          // 16: filer_pb.LookupVolumeRequest
+	(*Locations)(nil),                    // 17: filer_pb.Locations
+	(*Location)(nil),                     // 18: filer_pb.Location
+	(*LookupVolumeResponse)(nil),         // 19: filer_pb.LookupVolumeResponse
+	nil,                                  // 20: filer_pb.Entry.ExtendedEntry
+	nil,                                  // 21: filer_pb.UpdateEntryRequest.ExpectedExtendedEntry
+	nil,                                  // 22: filer_pb.DeleteEntryRequest.ExpectedExtendedEntry
+	nil,                                  // 23: filer_pb.LookupVolumeResponse.LocationsMapEntry
 }
 var file_filer_subset_proto_depIdxs = []int32{
-	3,  // 0: filer_pb.LookupDirectoryEntryResponse.entry:type_name -> filer_pb.Entry
-	4,  // 1: filer_pb.Entry.chunks:type_name -> filer_pb.FileChunk
-	5,  // 2: filer_pb.Entry.attributes:type_name -> filer_pb.FuseAttributes
-	18, // 3: filer_pb.Entry.extended:type_name -> filer_pb.Entry.ExtendedEntry
-	3,  // 4: filer_pb.CreateEntryRequest.entry:type_name -> filer_pb.Entry
-	0,  // 5: filer_pb.CreateEntryResponse.error_code:type_name -> filer_pb.FilerError
-	3,  // 6: filer_pb.UpdateEntryRequest.entry:type_name -> filer_pb.Entry
-	19, // 7: filer_pb.UpdateEntryRequest.expected_extended:type_name -> filer_pb.UpdateEntryRequest.ExpectedExtendedEntry
-	20, // 8: filer_pb.DeleteEntryRequest.expected_extended:type_name -> filer_pb.DeleteEntryRequest.ExpectedExtendedEntry
-	16, // 9: filer_pb.AssignVolumeResponse.location:type_name -> filer_pb.Location
-	16, // 10: filer_pb.AssignVolumeResponse.replicas:type_name -> filer_pb.Location
-	0,  // 11: filer_pb.AssignVolumeResponse.error_code:type_name -> filer_pb.FilerError
-	16, // 12: filer_pb.Locations.locations:type_name -> filer_pb.Location
-	21, // 13: filer_pb.LookupVolumeResponse.locations_map:type_name -> filer_pb.LookupVolumeResponse.LocationsMapEntry
-	15, // 14: filer_pb.LookupVolumeResponse.LocationsMapEntry.value:type_name -> filer_pb.Locations
-	1,  // 15: filer_pb.SeaweedFiler.LookupDirectoryEntry:input_type -> filer_pb.LookupDirectoryEntryRequest
-	6,  // 16: filer_pb.SeaweedFiler.CreateEntry:input_type -> filer_pb.CreateEntryRequest
-	8,  // 17: filer_pb.SeaweedFiler.UpdateEntry:input_type -> filer_pb.UpdateEntryRequest
-	10, // 18: filer_pb.SeaweedFiler.DeleteEntry:input_type -> filer_pb.DeleteEntryRequest
-	12, // 19: filer_pb.SeaweedFiler.AssignVolume:input_type -> filer_pb.AssignVolumeRequest
-	14, // 20: filer_pb.SeaweedFiler.LookupVolume:input_type -> filer_pb.LookupVolumeRequest
-	2,  // 21: filer_pb.SeaweedFiler.LookupDirectoryEntry:output_type -> filer_pb.LookupDirectoryEntryResponse
-	7,  // 22: filer_pb.SeaweedFiler.CreateEntry:output_type -> filer_pb.CreateEntryResponse
-	9,  // 23: filer_pb.SeaweedFiler.UpdateEntry:output_type -> filer_pb.UpdateEntryResponse
-	11, // 24: filer_pb.SeaweedFiler.DeleteEntry:output_type -> filer_pb.DeleteEntryResponse
-	13, // 25: filer_pb.SeaweedFiler.AssignVolume:output_type -> filer_pb.AssignVolumeResponse
-	17, // 26: filer_pb.SeaweedFiler.LookupVolume:output_type -> filer_pb.LookupVolumeResponse
-	21, // [21:27] is the sub-list for method output_type
-	15, // [15:21] is the sub-list for method input_type
-	15, // [15:15] is the sub-list for extension type_name
-	15, // [15:15] is the sub-list for extension extendee
-	0,  // [0:15] is the sub-list for field type_name
+	5,  // 0: filer_pb.LookupDirectoryEntryResponse.entry:type_name -> filer_pb.Entry
+	5,  // 1: filer_pb.ListEntriesResponse.entry:type_name -> filer_pb.Entry
+	6,  // 2: filer_pb.Entry.chunks:type_name -> filer_pb.FileChunk
+	7,  // 3: filer_pb.Entry.attributes:type_name -> filer_pb.FuseAttributes
+	20, // 4: filer_pb.Entry.extended:type_name -> filer_pb.Entry.ExtendedEntry
+	5,  // 5: filer_pb.CreateEntryRequest.entry:type_name -> filer_pb.Entry
+	0,  // 6: filer_pb.CreateEntryResponse.error_code:type_name -> filer_pb.FilerError
+	5,  // 7: filer_pb.UpdateEntryRequest.entry:type_name -> filer_pb.Entry
+	21, // 8: filer_pb.UpdateEntryRequest.expected_extended:type_name -> filer_pb.UpdateEntryRequest.ExpectedExtendedEntry
+	22, // 9: filer_pb.DeleteEntryRequest.expected_extended:type_name -> filer_pb.DeleteEntryRequest.ExpectedExtendedEntry
+	18, // 10: filer_pb.AssignVolumeResponse.location:type_name -> filer_pb.Location
+	18, // 11: filer_pb.AssignVolumeResponse.replicas:type_name -> filer_pb.Location
+	0,  // 12: filer_pb.AssignVolumeResponse.error_code:type_name -> filer_pb.FilerError
+	18, // 13: filer_pb.Locations.locations:type_name -> filer_pb.Location
+	23, // 14: filer_pb.LookupVolumeResponse.locations_map:type_name -> filer_pb.LookupVolumeResponse.LocationsMapEntry
+	17, // 15: filer_pb.LookupVolumeResponse.LocationsMapEntry.value:type_name -> filer_pb.Locations
+	1,  // 16: filer_pb.SeaweedFiler.LookupDirectoryEntry:input_type -> filer_pb.LookupDirectoryEntryRequest
+	3,  // 17: filer_pb.SeaweedFiler.ListEntries:input_type -> filer_pb.ListEntriesRequest
+	8,  // 18: filer_pb.SeaweedFiler.CreateEntry:input_type -> filer_pb.CreateEntryRequest
+	10, // 19: filer_pb.SeaweedFiler.UpdateEntry:input_type -> filer_pb.UpdateEntryRequest
+	12, // 20: filer_pb.SeaweedFiler.DeleteEntry:input_type -> filer_pb.DeleteEntryRequest
+	14, // 21: filer_pb.SeaweedFiler.AssignVolume:input_type -> filer_pb.AssignVolumeRequest
+	16, // 22: filer_pb.SeaweedFiler.LookupVolume:input_type -> filer_pb.LookupVolumeRequest
+	2,  // 23: filer_pb.SeaweedFiler.LookupDirectoryEntry:output_type -> filer_pb.LookupDirectoryEntryResponse
+	4,  // 24: filer_pb.SeaweedFiler.ListEntries:output_type -> filer_pb.ListEntriesResponse
+	9,  // 25: filer_pb.SeaweedFiler.CreateEntry:output_type -> filer_pb.CreateEntryResponse
+	11, // 26: filer_pb.SeaweedFiler.UpdateEntry:output_type -> filer_pb.UpdateEntryResponse
+	13, // 27: filer_pb.SeaweedFiler.DeleteEntry:output_type -> filer_pb.DeleteEntryResponse
+	15, // 28: filer_pb.SeaweedFiler.AssignVolume:output_type -> filer_pb.AssignVolumeResponse
+	19, // 29: filer_pb.SeaweedFiler.LookupVolume:output_type -> filer_pb.LookupVolumeResponse
+	23, // [23:30] is the sub-list for method output_type
+	16, // [16:23] is the sub-list for method input_type
+	16, // [16:16] is the sub-list for extension type_name
+	16, // [16:16] is the sub-list for extension extendee
+	0,  // [0:16] is the sub-list for field type_name
 }
 
 func init() { file_filer_subset_proto_init() }
@@ -1441,7 +1603,7 @@ func file_filer_subset_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_filer_subset_proto_rawDesc), len(file_filer_subset_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   21,
+			NumMessages:   23,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"sort"
+	"strings"
 	"sync"
 
 	"google.golang.org/protobuf/proto"
@@ -29,6 +31,7 @@ type fakeFiler struct {
 	// applied; a non-nil return is reported to the caller (ambiguous error).
 	failUpdateAfterApply func(p string) error
 	updates              int
+	deletes              int
 }
 
 func newFakeFiler() *fakeFiler { return &fakeFiler{entries: map[string]*filerpb.Entry{}} }
@@ -83,6 +86,51 @@ func (f *fakeFiler) UpdateEntry(_ context.Context, dir string, e *filerpb.Entry,
 			return err
 		}
 	}
+	return nil
+}
+
+func (f *fakeFiler) ListEntries(_ context.Context, dir, prefix, startAfter string, limit uint32) ([]*filerpb.Entry, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var names []string
+	for p := range f.entries {
+		if path.Dir(p) != path.Clean(dir) {
+			continue
+		}
+		n := path.Base(p)
+		if strings.HasPrefix(n, prefix) && n > startAfter {
+			names = append(names, n)
+		}
+	}
+	sort.Strings(names)
+	if limit > 0 && len(names) > int(limit) {
+		names = names[:limit]
+	}
+	out := make([]*filerpb.Entry, 0, len(names))
+	for _, n := range names {
+		out = append(out, proto.Clone(f.entries[path.Join(dir, n)]).(*filerpb.Entry))
+	}
+	return out, nil
+}
+
+func (f *fakeFiler) DeleteEntry(_ context.Context, dir, name string, expected map[string][]byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p := path.Join(dir, name)
+	cur, ok := f.entries[p]
+	if len(expected) > 0 {
+		if !ok {
+			return fmt.Errorf("%w: %s not found", ErrPrecondition, p)
+		}
+		for k, want := range expected {
+			got, has := cur.Extended[k]
+			if has && !bytes.Equal(got, want) || !has && len(want) > 0 {
+				return fmt.Errorf("%w: extended %q changed", ErrPrecondition, k)
+			}
+		}
+	}
+	delete(f.entries, p)
+	f.deletes++
 	return nil
 }
 

@@ -17,7 +17,14 @@ type (
 	ChunkLayer        = chunkLayer
 	ChunkCutResult    = chunkCutResult
 	ChunkCutStats     = chunkCutStats
+	ChunkIntent       = chunkIntent
 )
+
+// NewChunkIntentID returns a fresh intent id "<gen>-<nonce>" for a remote
+// implementation's PutIntent; ValidChunkIntentID accepts exactly those ids.
+func NewChunkIntentID(gen uint64) (string, error) { return newChunkIntentID(gen) }
+
+func ValidChunkIntentID(id string) bool { return validChunkIntentID(id) }
 
 const (
 	ChunkBaseNone                 = chunkBaseNone
