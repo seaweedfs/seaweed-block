@@ -205,10 +205,18 @@ func (h *Host) CatchUpSince() time.Time {
 	return h.wd.catchUpSince()
 }
 
-// LocalRecoveryHealthReason classifies a local durable recovery failure
-// into a typed unhealthy reason (#133): wal_corrupt for a WAL/extent
-// integrity fault, io_error for a storage I/O failure. It returns "" for
-// an error it cannot classify (the watchdog's timeout still covers that).
+// LocalRecoveryHealthReason classifies a local durable open or replay
+// failure into a typed unhealthy reason (#133). It returns "" for an
+// error it cannot classify (the watchdog's timeout still covers that).
+//
+//   - wal_corrupt: the substrate found a WAL/extent integrity fault
+//     (storage.RecoveryFailure kind WALIntegrity, or ErrWALIntegrityFault).
+//   - io_error: the local storage could not be opened or read at startup:
+//     kind SubstrateIO, any fs.PathError, io.ErrUnexpectedEOF or EIO. This
+//     is deliberately broad. A path error such as ENOENT, EACCES or EISDIR
+//     is io_error too: it says the volume's local storage is unusable, NOT
+//     that the physical disk is damaged. The underlying error is kept in
+//     the readiness evidence and the log line, for diagnosis.
 func LocalRecoveryHealthReason(err error) string {
 	if err == nil {
 		return ""
@@ -240,7 +248,7 @@ func (h *Host) ReportLocalRecoveryFailure(err error) string {
 	reason := LocalRecoveryHealthReason(err)
 	h.localRecoveryReason.Store(reason)
 	if reason != "" {
-		h.log.Printf("blockvolume: volume %s local durable recovery failed (%s): a primary assignment reports it as unhealthy", h.cfg.VolumeID, reason)
+		h.log.Printf("blockvolume: volume %s local durable open/recovery failed (%s): %v; a primary assignment reports it as unhealthy", h.cfg.VolumeID, reason, err)
 	}
 	return reason
 }

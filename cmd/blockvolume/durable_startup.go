@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/host/volume"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -43,7 +44,13 @@ const (
 // exit.
 func openAndRecoverDurable(dp durableStartup, h localRecoveryHost, volumeID string, recoverTimeout time.Duration) (durableStartupOutcome, string, error) {
 	if _, err := dp.EnsureStorage(volumeID); err != nil {
-		return durableStartupFatal, "", err // RED: open failures still exit unreported
+		if volume.LocalRecoveryHealthReason(err) == "" {
+			return durableStartupFatal, "", err
+		}
+		evidence := "durable storage open failed: " + err.Error()
+		h.BlockLocalReadiness(evidence)
+		h.ReportLocalRecoveryFailure(err)
+		return durableStartupFaulted, evidence, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), recoverTimeout)
 	defer cancel()
