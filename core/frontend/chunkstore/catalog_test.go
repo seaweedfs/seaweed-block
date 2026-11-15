@@ -411,8 +411,21 @@ func TestFork_ThenFreshHostReadsSnapshotImage(t *testing.T) {
 			t.Fatal(err)
 		}
 		r, _ := NewChunkRemote(f, b, path.Join(catBase, vol))
-		l, err := storage.AttachChunkLayer(s, r, storage.ChunkLayerConfig{ChunkBlocks: chunkBlocks, Epoch: epoch, Holder: vol, FreshFromHead: fresh,
-			Bitmap: storage.NewFileChunkBitmapStore(p + ".chunkbitmap")})
+		cfg := storage.ChunkLayerConfig{ChunkBlocks: chunkBlocks, Epoch: epoch, Holder: vol, FreshFromHead: fresh,
+			Bitmap: storage.NewFileChunkBitmapStore(p + ".chunkbitmap")}
+		if fresh {
+			// This low-level fixture bypasses the provider: perform the same
+			// takeover and durable frontier seed before attaching its layer.
+			head, err := storage.ClaimChunkHead(ctx, r, cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.SeedChunkFrontier(head.RemoteLSN); err != nil {
+				t.Fatal(err)
+			}
+			cfg.RestoreGuard = &storage.ChunkHeadVersion{Gen: head.Gen, Epoch: head.Epoch}
+		}
+		l, err := storage.AttachChunkLayer(s, r, cfg)
 		if err != nil {
 			t.Fatal(err)
 		}

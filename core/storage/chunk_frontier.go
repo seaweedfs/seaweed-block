@@ -1,0 +1,46 @@
+package storage
+
+import (
+	"errors"
+	"fmt"
+)
+
+// SeedChunkFrontier installs an empty fresh host's inherited remote frontier.
+// Unlike AdvanceFrontier + Sync, it publishes no allocator/head watermark until
+// both the data sync and checkpoint-metadata sync have succeeded. Call before
+// attaching the chunk layer or admitting writes. Repeating after failure is safe.
+// Order: captureMu -> lifecycleMu -> mu; no remote call or layer callback.
+func (s *WALStore) SeedChunkFrontier(lsn uint64) error {
+	s.captureMu.Lock()
+	defer s.captureMu.Unlock()
+	s.lifecycleMu.RLock()
+	defer s.lifecycleMu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.chunk.Load() != nil {
+		return errors.New("storage: seed frontier requires an open, unattached store")
+	}
+	if lsn == ^uint64(0) || lsn < s.checkpointLSN || s.walHead > s.checkpointLSN || s.nextLSN > lsn+1 {
+		return errors.New("storage: seed frontier cannot replace local writes or wrap LSN")
+	}
+	if s.checkpointLSN == lsn && s.syncedLSN >= lsn && s.nextLSN == lsn+1 {
+		return nil
+	}
+	if err := s.syncCache(); err != nil {
+		return fmt.Errorf("storage: seed data sync: %w", err)
+	}
+	next := *s.sb
+	next.WALCheckpointLSN = lsn
+	next.WALHead = s.wal.logicalHeadValue()
+	buf := newSimpleByteBuf()
+	if _, err := next.writeTo(buf); err != nil {
+		return err
+	}
+	if err := s.syncDirectFrontierMetadata(buf.bytes()); err != nil {
+		return fmt.Errorf("storage: seed metadata sync: %w", err)
+	}
+	*s.sb = next
+	s.checkpointLSN, s.syncedLSN, s.walHead, s.nextLSN = lsn, lsn, lsn, lsn+1
+	s.pendingDirectFrontierLSN = 0
+	return nil
+}

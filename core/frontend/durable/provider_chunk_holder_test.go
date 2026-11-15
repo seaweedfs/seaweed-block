@@ -60,7 +60,12 @@ func TestWALStoreChunk_SameReplicaOnAnotherServerIsFenced(t *testing.T) {
 	if _, err := be.Write(ctx, 4096, block(2)); !errors.Is(err, frontend.ErrNotReady) {
 		t.Fatalf("a write on the fenced second server: %v; want ErrNotReady", err)
 	}
-	if _, err := b.CaptureVolume(ctx, "v1"); !errors.Is(err, storage.ErrChunkLayerFenced) {
-		t.Fatalf("a cut on the fenced second server: %v; want fenced", err)
+	// The canonical refusal is at Claim, before any layer is installed.
+	// Later cuts must still refuse; they need not repeat a layer's fence.
+	if _, err := b.CaptureVolume(ctx, "v1"); err == nil {
+		t.Fatal("a cut succeeded after refused recovery")
+	}
+	if after, _ := remote.GetHead(ctx); after.Gen != head.Gen || after.Holder != head.Holder {
+		t.Fatalf("refused cut changed HEAD: %+v", after)
 	}
 }

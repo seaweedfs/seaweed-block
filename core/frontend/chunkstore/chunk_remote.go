@@ -377,6 +377,16 @@ func (r *ChunkRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVer
 	if expected.Gen == 0 && expected.Epoch != 0 {
 		return 0, storage.ErrChunkHeadPrecondition // the absent HEAD has epoch 0
 	}
+	// Read the LSN under the same generation/epoch guard used by UpdateEntry.
+	// A competing write after this read makes the conditional update fail;
+	// no successful CAS can lower the committed lineage frontier.
+	current, err := r.GetHead(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if current.Gen != expected.Gen || current.Epoch != expected.Epoch || next.RemoteLSN < current.RemoteLSN {
+		return 0, storage.ErrChunkHeadPrecondition
+	}
 	next.Gen = expected.Gen + 1
 	e, err := headEntry(next)
 	if err != nil {

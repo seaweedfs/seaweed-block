@@ -138,6 +138,10 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 		l.cancel()
 		return nil, fmt.Errorf("storage: chunk layer attach: read HEAD: %w", err)
 	}
+	if cfg.RestoreGuard != nil && (head.Gen != cfg.RestoreGuard.Gen || head.Epoch != cfg.RestoreGuard.Epoch) {
+		l.cancel()
+		return nil, fmt.Errorf("%w: HEAD changed after restore claim/seed", errChunkHeadPrecondition)
+	}
 	l.head = copyHead(head)
 	l.remoteLSN = head.RemoteLSN
 	// A HEAD that already belongs to a newer epoch or a competing holder is
@@ -178,6 +182,24 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 	}
 
 	if cfg.FreshFromHead {
+		// An existing HEAD defines the fresh host's lazy image. With no HEAD,
+		// local writes may already have checkpointed out of the WAL dirty map:
+		// preserve ALL chunks as candidates for the first hash-comparing cut.
+		// Persist that obligation before publishing hooks/readiness.
+		l.hdr = chunkBitmapHeader{BaseLSN: head.RemoteLSN, HeadGen: head.Gen, Epoch: cfg.Epoch}
+		var initialDirty []uint64
+		l.dirty = map[uint64]bool{}
+		l.hashMode = head.Gen == 0 && s.NextLSN() > 1
+		if l.hashMode {
+			for idx := uint64(0); idx < l.numChunks; idx++ {
+				l.dirty[idx] = true
+				initialDirty = append(initialDirty, idx)
+			}
+		}
+		if err := cfg.Bitmap.Reset(l.hdr, initialDirty, chunkDelta{}); err != nil {
+			l.cancel()
+			return nil, fmt.Errorf("storage: fresh bitmap reset: %w", err)
+		}
 		for idx := range head.Chunks {
 			l.absent[idx] = true
 			l.absentGen[idx]++
@@ -259,7 +281,7 @@ func (l *chunkLayerImpl) BeforeCheckpointAdvance(lsn uint64) error {
 	return l.persistPresence()
 }
 
-// saveDirty persists dirty ∪ inflight ∪ the chunks of WAL entries still in
+// saveDirty persists dirty Ã¢Ë†Âª inflight Ã¢Ë†Âª the chunks of WAL entries still in
 // the dirty map (all chunks when a BASE block landed or the set is unknown).
 func (l *chunkLayerImpl) saveDirty() error {
 	l.bmMu.Lock()
@@ -696,6 +718,20 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (chunkC
 		changed = append(changed, u.c.idx)
 	}
 	if !detach && len(changed) == 0 && h == baseHead.RemoteLSN && baseHead.Gen != 0 && !chunkHeadIsDetached(baseHead) {
+		// A no-op cut still observes authority: a fresh host may have
+		// claimed HEAD without uploading a single chunk since our last cut.
+		cur, err := l.remote.GetHead(ctx)
+		if err != nil {
+			l.abortCut(all)
+			return chunkCutResult{}, fmt.Errorf("storage: no-op cut authority read: %w: %w", errChunkRemoteUnavailable, err)
+		}
+		if cur.Gen != baseHead.Gen || !sameProposal(cur, baseHead) {
+			l.abortCut(all)
+			l.stMu.Lock()
+			l.fenced, l.head = true, copyHead(cur)
+			l.stMu.Unlock()
+			return chunkCutResult{}, errChunkLayerFenced
+		}
 		l.finishCut(baseHead, h, nil, nil) // nothing new: no CAS
 		return chunkCutResult{H: h, Head: copyHead(baseHead), Noop: true, FullHash: all}, nil
 	}

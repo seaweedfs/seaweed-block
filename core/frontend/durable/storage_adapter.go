@@ -164,6 +164,7 @@ type StorageBackend struct {
 
 	mu            sync.Mutex
 	closed        bool
+	chunkFenced   func() bool   // installed under mu; called only after releasing mu
 	observer      WriteObserver // optional; nil = no replication fan-out
 	writeAck      WriteAckPolicy
 	profile       writeProfile
@@ -521,9 +522,13 @@ func (b *StorageBackend) gate() error {
 func (b *StorageBackend) readyCheck() error {
 	b.mu.Lock()
 	closed := b.closed
+	chunkFenced := b.chunkFenced
 	b.mu.Unlock()
 	if closed {
 		return frontend.ErrBackendClosed
+	}
+	if chunkFenced != nil && chunkFenced() {
+		return frontend.ErrStalePrimary
 	}
 	if !b.operational.Load() {
 		ev, _ := b.opEvidence.Load().(string)
