@@ -92,10 +92,11 @@ type replicaSetUpdater interface {
 
 // Host is the composed volume-side block product daemon.
 type Host struct {
-	cfg    Config
 	// incarnation is new on every process start and reported in every
 	// heartbeat, so the master can tell a restart from a long silence.
 	incarnation string
+
+	cfg    Config
 	log    *log.Logger
 	exec   *noopExecutor
 	t1exec *HealthyPathExecutor
@@ -238,7 +239,6 @@ func New(cfg Config) (*Host, error) {
 
 	h := &Host{
 		cfg:      cfg,
-		incarnation: newIncarnation(),
 		log:      lg,
 		exec:     noopExec,
 		t1exec:   t1Exec,
@@ -248,6 +248,7 @@ func New(cfg Config) (*Host, error) {
 		obsCli:   control.NewObservationServiceClient(conn),
 		asnCli:   control.NewAssignmentServiceClient(conn),
 	}
+	h.incarnation = newIncarnation()
 	if cfg.ReplicationVolume != nil {
 		h.setReplicationLocked(cfg.ReplicationVolume)
 	}
