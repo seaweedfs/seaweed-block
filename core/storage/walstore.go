@@ -525,6 +525,7 @@ func (s *WALStore) Write(lba uint32, data []byte) (uint64, error) {
 	}
 	dirtyStart := time.Now()
 	s.dm.put(uint64(lba), walRelOff, lsn, uint32(len(data)))
+	s.noteChunkMutation(uint64(lba))
 	s.instr.recordDirtyMapUpdate(1, time.Since(dirtyStart))
 
 	s.nextLSN++
@@ -602,6 +603,7 @@ func (s *WALStore) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error
 	dirtyStart := time.Now()
 	for i, walRelOff := range offsets {
 		s.dm.put(uint64(startLBA+uint32(i)), walRelOff, lsns[i], uint32(len(blocks[i])))
+		s.noteChunkMutation(uint64(startLBA + uint32(i)))
 	}
 	s.instr.recordDirtyMapUpdate(len(offsets), time.Since(dirtyStart))
 
@@ -655,6 +657,7 @@ func (s *WALStore) writeBatchMultiBlockLocked(startLBA uint32, blocks [][]byte, 
 			lsn,
 			uint32(len(data)),
 		)
+		s.noteChunkMutation(uint64(startLBA + uint32(i)))
 	}
 	s.instr.recordDirtyMapUpdate(len(blocks), time.Since(dirtyStart))
 
@@ -999,6 +1002,14 @@ func (s *WALStore) WriteExtentDirect(lba uint32, data []byte) error {
 // ApplyEntry writes a replicated block with the source's LSN rather
 // than allocating a fresh one. Same durability semantics as Write
 // (becomes durable on next Sync).
+// noteChunkMutation tells an attached chunk layer that lba changed; it
+// runs after the dirty-map insert that made the change visible.
+func (s *WALStore) noteChunkMutation(lba uint64) {
+	if h := s.chunk.Load(); h != nil && h.mutated != nil {
+		h.mutated(lba)
+	}
+}
+
 func (s *WALStore) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
 	s.bypassSyncDedup.Store(true)
 	s.captureMu.RLock()
@@ -1035,6 +1046,7 @@ func (s *WALStore) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
 		return fmt.Errorf("storage: WAL append (apply): %w", err)
 	}
 	s.dm.put(uint64(lba), walRelOff, lsn, uint32(len(dataCopy)))
+	s.noteChunkMutation(uint64(lba))
 
 	if lsn >= s.nextLSN {
 		s.nextLSN = lsn + 1

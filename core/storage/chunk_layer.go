@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -34,6 +35,9 @@ import (
 type chunkHooks struct {
 	sink   chunkSink
 	closer func() error
+	// mutated runs after every dirty-map insert (a write, a batch write,
+	// a replica apply) with the LBA: O(1), lock-free, on the write path.
+	mutated func(lba uint64)
 }
 
 const defaultReadMissTimeout = 30 * time.Second
@@ -87,10 +91,11 @@ type chunkLayerImpl struct {
 	allDirty        bool              // a BASE block landed: every chunk is dirty
 	hashMode        bool              // the dirty set is unknown: compare every chunk by hash
 	cutLSN          uint64            // H of the latest cut taken (in flight or installed)
-	// chunkVer is the highest LSN flushed into each chunk (under stMu).
-	// With the WAL's entries it gives a chunk's version (chunkVersion):
-	// flushing an entry never changes it, any newer write raises it.
-	chunkVer map[uint64]uint64
+	// chunkMut counts the mutations of each chunk: every dirty-map insert
+	// (any LSN, a replica apply's lower LSN included) and every BASE
+	// block. Flushing moves bytes without changing them and never counts.
+	// A chunk staged at count n is unchanged while its count is n.
+	chunkMut []atomic.Uint64
 	keySeq   uint64
 
 	// Test-only scheduling hooks; nil in production.
@@ -131,10 +136,10 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 		absent:      map[uint64]bool{},
 		absentGen:   map[uint64]uint64{},
 		localBlocks: map[uint64]bool{},
-		chunkVer:    map[uint64]uint64{},
 		closeDone:   make(chan struct{}),
 		syncDirFn:   syncDir,
 	}
+	l.chunkMut = make([]atomic.Uint64, l.numChunks)
 	var nb8 [8]byte
 	if _, err := rand.Read(nb8[:]); err != nil {
 		return nil, err
@@ -218,7 +223,7 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 		l.cancel()
 		return nil, err
 	}
-	hooks := &chunkHooks{sink: l, closer: l.Close}
+	hooks := &chunkHooks{sink: l, closer: l.Close, mutated: l.noteMutation}
 	if !s.chunk.CompareAndSwap(nil, hooks) {
 		l.cancel()
 		return nil, errors.New("storage: a chunk layer is already attached")
@@ -277,31 +282,33 @@ func (l *chunkLayerImpl) OnExtentWrite(lba uint64, lsn uint64) {
 		l.localBlocks[lba] = true
 		l.presenceVer++
 	}
-	if lsn > l.chunkVer[idx] {
-		l.chunkVer[idx] = lsn
+	if lsn == 0 { // a BASE block lands in the extent directly
+		l.noteMutation(lba)
 	}
 	l.dirtyVer++
 }
 
-// walMaxLSN maps each chunk with entries in the WAL dirty map to its
-// highest entry LSN.
-func (l *chunkLayerImpl) walMaxLSN() map[uint64]uint64 {
-	out := map[uint64]uint64{}
+// noteMutation counts a mutation of lba's chunk. It runs after the
+// mutation is visible to reads, so a staging read that sampled the count
+// first either sees the new bytes or a stale count (never reused).
+func (l *chunkLayerImpl) noteMutation(lba uint64) {
+	if idx := l.chunkOf(lba); idx < uint64(len(l.chunkMut)) {
+		l.chunkMut[idx].Add(1)
+	}
+}
+
+// walChunks returns the chunks with entries in the WAL dirty map.
+func (l *chunkLayerImpl) walChunks() map[uint64]bool {
+	out := map[uint64]bool{}
 	for _, e := range l.s.dm.snapshot() {
-		if idx := l.chunkOf(e.LBA); e.LSN > out[idx] {
-			out[idx] = e.LSN
-		}
+		out[l.chunkOf(e.LBA)] = true
 	}
 	return out
 }
 
-// chunkVersion is chunk idx's highest write LSN, flushed or in the WAL
-// (wal from walMaxLSN). Caller holds stMu.
-func (l *chunkLayerImpl) chunkVersion(idx uint64, wal map[uint64]uint64) uint64 {
-	if v := wal[idx]; v > l.chunkVer[idx] {
-		return v
-	}
-	return l.chunkVer[idx]
+// chunkVersion is chunk idx's mutation count.
+func (l *chunkLayerImpl) chunkVersion(idx uint64) uint64 {
+	return l.chunkMut[idx].Load()
 }
 
 // BeforeCheckpointAdvance runs inside persistCheckpoint and the direct
@@ -669,11 +676,11 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	if err != nil {
 		l.s.captureMu.Unlock()
 		st.BarrierPauseNs = time.Since(barrier).Nanoseconds()
+		l.dropIntents(ctx, intents) // a clean abort: staged keys are released
 		return chunkCutResult{}, fmt.Errorf("storage: capture sync: %w", err)
 	}
 	candidates := map[uint64]bool{}
-	wal := l.walMaxLSN()
-	for idx := range wal {
+	for idx := range l.walChunks() {
 		candidates[idx] = true
 	}
 	l.stMu.Lock()
@@ -697,7 +704,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	var captured []capturedChunk
 	useStaged := map[uint64]bool{}
 	for idx := range candidates {
-		if sc, ok := staged[idx]; ok && sc.ver == l.chunkVersion(idx, wal) && sc.headGen == l.head.Gen {
+		if sc, ok := staged[idx]; ok && sc.ver == l.chunkVersion(idx) && sc.headGen == l.head.Gen {
 			useStaged[idx] = true
 			captured = append(captured, sc.capturedChunk)
 		}
@@ -1138,11 +1145,11 @@ func (l *chunkLayerImpl) stage(ctx context.Context, st *chunkCutStats) (map[uint
 	staged := map[uint64]stagedChunk{}
 	var intents []string
 	for round := 0; round < chunkStageRounds; round++ {
-		wal := l.walMaxLSN()
+		wal := l.walChunks()
 		l.stMu.Lock()
 		need := map[uint64]bool{}
 		consider := func(idx uint64) {
-			if sc, ok := staged[idx]; ok && sc.ver == l.chunkVersion(idx, wal) && sc.headGen == l.head.Gen {
+			if sc, ok := staged[idx]; ok && sc.ver == l.chunkVersion(idx) && sc.headGen == l.head.Gen {
 				return // still current
 			}
 			need[idx] = true
@@ -1168,7 +1175,7 @@ func (l *chunkLayerImpl) stage(ctx context.Context, st *chunkCutStats) (map[uint
 		batch := sortedKeys(need)[:bound]
 		vers := make(map[uint64]uint64, len(batch))
 		for _, idx := range batch {
-			vers[idx] = l.chunkVersion(idx, wal) // before the read: a later write raises it
+			vers[idx] = l.chunkVersion(idx) // before the read: a later mutation raises it
 		}
 		head := copyHead(l.head)
 		l.stMu.Unlock()
