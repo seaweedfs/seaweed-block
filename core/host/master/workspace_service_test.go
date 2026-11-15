@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -21,7 +22,7 @@ type workspaceRPCView struct{ p frontend.Projection }
 
 func (v workspaceRPCView) Projection() frontend.Projection { return v.p }
 
-func TestWorkspaceRPCCleanMoveRecordsAckAndJournal(t *testing.T) {
+func TestWorkspaceRPCCleanMovePreservesReplicaIdentity(t *testing.T) {
 	var detached atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/vol-a/HEAD" {
@@ -81,7 +82,7 @@ func TestWorkspaceRPCCleanMoveRecordsAckAndJournal(t *testing.T) {
 	if err := g.Refresh(ctx); err != nil {
 		t.Fatal(err)
 	}
-	q := &control.WorkspaceMove{RequestId: "clean-1", VolumeId: "vol-a", ExpectedReplicaId: "r2", ExpectedEpoch: 1, TargetReplicaId: "r1", TargetServerId: "node-b",
+	q := &control.WorkspaceMove{RequestId: "clean-1", VolumeId: "vol-a", ExpectedReplicaId: "r2", ExpectedEpoch: 1, TargetReplicaId: "r2", TargetServerId: "node-b",
 		TargetDataAddr: "127.0.0.1:9201", TargetCtrlAddr: "127.0.0.1:9101", Kind: "clean"}
 	if _, err := client.MoveWorkspace(ctx, q); err == nil {
 		t.Fatal("move without detached/ACK accepted")
@@ -99,6 +100,31 @@ func TestWorkspaceRPCCleanMoveRecordsAckAndJournal(t *testing.T) {
 		t.Fatal("ACK without detached HEAD accepted")
 	}
 	detached.Store(true)
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	defer cancelStream()
+	stream, err := control.NewAssignmentServiceClient(conn).SubscribeAssignments(streamCtx, &control.SubscribeRequest{VolumeId: "vol-a", ReplicaId: "r2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := stream.Recv()
+	if err != nil || initial.ReplicaId != "r2" || initial.Epoch != 1 {
+		t.Fatal("initial assignment", initial, err)
+	}
+	beforeLine, _ := h.Publisher().VolumeAuthorityLine("vol-a")
+	beforeState := h.Publisher().WorkspaceState("vol-a")
+	q.TargetReplicaId = "r1" // Only this fully prepared negative changes logical identity.
+	if grant, err := client.MoveWorkspace(ctx, q); err == nil {
+		t.Fatalf("v1 accepted logical replica change r2 -> r1: %v", grant)
+	}
+	afterLine, _ := h.Publisher().VolumeAuthorityLine("vol-a")
+	if !reflect.DeepEqual(beforeLine, afterLine) || !reflect.DeepEqual(beforeState, h.Publisher().WorkspaceState("vol-a")) {
+		t.Fatal("refused replica change altered authority or journal")
+	}
+	unchanged, err := client.QueryWorkspace(ctx, &control.WorkspaceVolume{VolumeId: "vol-a"})
+	if err != nil || len(unchanged.GetMoves()) != 0 || unchanged.GetRevocationAck().GetHeadGen() != 9 {
+		t.Fatal("refusal consumed ACK or wrote a move", unchanged, err)
+	}
+	q.TargetReplicaId = "r2"
 	grant, err := client.MoveWorkspace(ctx, q)
 	if err != nil {
 		t.Fatal(err)
@@ -106,6 +132,11 @@ func TestWorkspaceRPCCleanMoveRecordsAckAndJournal(t *testing.T) {
 	if !grant.Issued || grant.NewEpoch != 2 || grant.HeadGen != 9 || grant.RemoteLsn != 42 || grant.OldHost != "node-a" || grant.NewHost != "node-b" {
 		t.Fatal(grant)
 	}
+	delivered, err := stream.Recv()
+	if err != nil || delivered.ReplicaId != "r2" || delivered.Epoch != 2 || delivered.DataAddr != q.TargetDataAddr || delivered.CtrlAddr != q.TargetCtrlAddr || len(delivered.Peers) != 0 {
+		t.Fatal("same-ID move was not delivered on the existing stream with no retired peer", delivered, err)
+	}
+	cancelStream()
 	state, err := client.QueryWorkspace(ctx, &control.WorkspaceVolume{VolumeId: "vol-a"})
 	if err != nil || len(state.GetMoves()) != 1 {
 		t.Fatal(state, err)
@@ -113,7 +144,7 @@ func TestWorkspaceRPCCleanMoveRecordsAckAndJournal(t *testing.T) {
 	if _, err := client.RenewWorkspaceLease(ctx, id); err == nil {
 		t.Fatal("old authority renewed")
 	}
-	if _, err := client.RenewWorkspaceLease(ctx, &control.WorkspaceIdentity{VolumeId: "vol-a", ReplicaId: "r1", Epoch: 2}); err != nil {
+	if _, err := client.RenewWorkspaceLease(ctx, &control.WorkspaceIdentity{VolumeId: "vol-a", ReplicaId: "r2", Epoch: 2}); err != nil {
 		t.Fatal(err)
 	}
 	if err := h.Close(ctx); err != nil {
@@ -125,7 +156,7 @@ func TestWorkspaceRPCCleanMoveRecordsAckAndJournal(t *testing.T) {
 	}
 	restarted.Start()
 	defer closeTestMaster(t, restarted)
-	if line, ok := restarted.Publisher().VolumeAuthorityLine("vol-a"); !ok || line.Epoch != 2 || line.ReplicaID != "r1" {
+	if line, ok := restarted.Publisher().VolumeAuthorityLine("vol-a"); !ok || line.Epoch != 2 || line.ReplicaID != "r2" {
 		t.Fatal(line)
 	}
 	if state := restarted.Publisher().WorkspaceState("vol-a"); state == nil || len(state.Moves) != 1 || !state.Moves[0].Issued {
