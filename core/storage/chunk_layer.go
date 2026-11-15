@@ -379,9 +379,12 @@ func (l *chunkLayerImpl) fillOnce(ctx context.Context, idx, gen uint64, ref chun
 }
 
 // installFetchedBlock writes a fetched block into the extent under its
-// extent lock, unless a newer local version exists (a dirty-map entry, or
-// stillAbsent reporting a local write since the fetch began). It never
-// notifies the chunk layer: a fill is not new dirt.
+// extent lock, unless stillAbsent reports that the block got a local extent
+// version since the fetch began. A newer dirty-map (WAL) entry does not
+// stop it: reads resolve the dirty map first and the flusher replaces the
+// extent later, so installing HEAD's block beneath it is safe, and it keeps
+// the extent at HEAD's value if that unsynced write is lost in a crash. It
+// never notifies the chunk layer: a fill is not new dirt.
 func (s *WALStore) installFetchedBlock(lba uint32, data []byte, stillAbsent func() bool) error {
 	s.lifecycleMu.RLock()
 	defer s.lifecycleMu.RUnlock()
@@ -394,7 +397,7 @@ func (s *WALStore) installFetchedBlock(lba uint32, data []byte, stillAbsent func
 	lock := &s.extentMu[uint64(lba)%uint64(len(s.extentMu))]
 	lock.Lock()
 	defer lock.Unlock()
-	if _, _, _, _, dirty := s.dm.get(uint64(lba)); dirty || !stillAbsent() {
+	if !stillAbsent() {
 		return nil
 	}
 	return s.writeExtentUnlocked(lba, data)

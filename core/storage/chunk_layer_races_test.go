@@ -430,3 +430,77 @@ func TestChunkLayer_FreshHostHashCutFetchesNoUntouchedChunk(t *testing.T) {
 		}
 	}
 }
+
+// A fill that overlaps a WAL-only write to the SAME block must not let the
+// read fall through to the untouched extent. Schedule: a fresh host's read
+// of LBA 9 holds its HEAD fetch; LBA 9 is written and synced but not
+// flushed (it lives only in the WAL); the fetch resumes. The original held
+// read must return HEAD's block or the new write (either is valid for a
+// read overlapping a write) or an error, never the zero extent; the next
+// read returns the new write; and the fill has put HEAD's block beneath the
+// unflushed write, so the extent never holds a value that is neither.
+func TestChunkLayer_WALOnlyOverlapReadNeverReturnsUntouchedZero(t *testing.T) {
+	src := make([]byte, ctNumBlocks*ctBlockSize)
+	for lba := uint32(8); lba < 12; lba++ { // chunk 2 in HEAD
+		copy(src[int(lba)*ctBlockSize:], makeBlock(ctBlockSize, byte(0x80+lba)))
+	}
+	f := newFakeChunkRemote()
+	f.seedHead(t, src, 5, 1)
+	s, _ := newChunkTestStore(t) // auto flusher stopped before any write
+	cfg := ctConfig(2)
+	cfg.FreshFromHead = true
+	mustAttach(t, s, f, cfg)
+
+	held, release := holdNextGet(t, f)
+	type res struct {
+		b   []byte
+		err error
+	}
+	readA := make(chan res, 1)
+	joined := make(chan struct{})
+	t.Cleanup(func() {
+		release()
+		select {
+		case <-joined:
+		case <-time.After(ctLocalBound):
+			t.Errorf("held read not joined")
+		}
+	})
+	go func() {
+		defer close(joined)
+		b, err := s.Read(9)
+		readA <- res{b, err}
+	}()
+	waitKey(t, held, "fetch of chunk 2")
+	x := makeBlock(ctBlockSize, 0xD9)
+	if _, err := s.Write(9, x); err != nil { // same LBA, WAL only
+		t.Fatal(err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	select {
+	case r := <-readA:
+		switch {
+		case r.err != nil:
+			// allowed: an explicit refusal
+		case bytes.Equal(r.b, make([]byte, ctBlockSize)):
+			t.Fatal("the held read returned the untouched zero extent beneath a WAL-only write")
+		case !bytes.Equal(r.b, blockOf(src, 9)) && !bytes.Equal(r.b, x):
+			t.Fatalf("the held read returned neither HEAD's block nor the overlapping write (byte %#x)", r.b[0])
+		}
+	case <-time.After(ctLocalBound):
+		t.Fatal("the held read did not finish after its fetch was released")
+	}
+	if got, err := s.Read(9); err != nil || !bytes.Equal(got, x) {
+		t.Fatalf("the read after the overlap is not the WAL write: %v", err)
+	}
+	if got := extentBytes(t, s, 9); !bytes.Equal(got, blockOf(src, 9)) {
+		t.Fatalf("beneath the unflushed write the extent holds byte %#x, not HEAD's block (a lost unsynced write would expose it)", got[0])
+	}
+	mustSyncFlush(t, s)
+	if got, err := s.Read(9); err != nil || !bytes.Equal(got, x) {
+		t.Fatalf("after the flush LBA 9 is not the write: %v", err)
+	}
+}

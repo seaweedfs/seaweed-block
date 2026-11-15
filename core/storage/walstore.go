@@ -737,6 +737,12 @@ func (s *WALStore) readFromExtent(lba uint32) ([]byte, error) {
 		if data != nil {
 			return data, nil
 		}
+		// The miss may have waited on a remote fetch while this block was
+		// written: re-resolve through the normal path (dirty map/WAL first)
+		// before the extent. No lock is held here.
+		if walRelOff, dataOffset, _, _, ok := s.dm.get(uint64(lba)); ok {
+			return s.readFromWAL(walRelOff, dataOffset)
+		}
 	}
 	lock := &s.extentMu[uint64(lba)%uint64(len(s.extentMu))]
 	lock.RLock()
