@@ -231,8 +231,10 @@ type chunkCutStats struct {
 }
 
 // chunkCutResult is the outcome of one successful cut.
-//   - H is the cut LSN. It is meaningful only within this host's WAL: a new
-//     host starts at LSN 1, so order cuts by Head.Gen, never by H.
+//   - H is the cut LSN; Head.RemoteLSN = H when the cut installed a HEAD.
+//     A volume's LSNs carry forward across hosts: a new host's WAL starts
+//     at HEAD.RemoteLSN + 1, and a fork starts after its snapshot's
+//     RemoteLSN, so RemoteLSN never decreases across generations.
 //   - Head is the HEAD this cut installed (copied, owned by the caller), or
 //     the current HEAD when the cut had nothing new (Noop: no CAS).
 //   - FullHash says the cut compared every chunk by hash (no usable bitmap,

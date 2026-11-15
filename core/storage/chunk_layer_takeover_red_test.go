@@ -70,7 +70,9 @@ func TestChunkAttach_TakeOverRacesOldHolder(t *testing.T) {
 	for lba := uint32(4); lba < 8; lba++ {
 		copy(newer[int(lba)*ctBlockSize:], makeBlock(ctBlockSize, byte(0xE0+lba)))
 	}
+	injected := false
 	f.beforeCAS = func(f *fakeChunkRemote) {
+		injected = true
 		next := copyChunkHead(f.head)
 		key := "seed/newer/1"
 		c := newer[1*ctChunkBytes : 2*ctChunkBytes]
@@ -85,8 +87,21 @@ func TestChunkAttach_TakeOverRacesOldHolder(t *testing.T) {
 	cfg := ctConfig(2)
 	cfg.FreshFromHead = true
 	layer, err := attachChunkLayer(s, f, cfg)
+	f.mu.Lock()
+	ran := injected
+	f.mu.Unlock()
+	if !ran {
+		// The race is injected before the takeover CAS; without that CAS the
+		// test has not exercised the race at all, whatever attach returned.
+		t.Fatalf("the old holder's competing CAS was never injected (attach err %v): attach made no takeover CAS", err)
+	}
 	if err != nil {
-		return // failing the attach is an allowed outcome
+		// Failing the attach is an allowed outcome, but only as a refusal
+		// to serve: nothing may have been published by the new host.
+		if h := f.stats().head; h.Holder == cfg.Holder {
+			t.Fatalf("attach failed (%v) but HEAD names the new holder: %+v", err, h)
+		}
+		return
 	}
 	t.Cleanup(func() { _ = layer.Close() })
 
