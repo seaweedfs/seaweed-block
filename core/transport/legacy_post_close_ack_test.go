@@ -40,8 +40,8 @@ func nextEvent(t *testing.T, evCh <-chan closeOrAck, what string) closeOrAck {
 }
 
 // checkCloseThenAck: a successful close is followed by exactly one
-// durable ack carrying the barrier-achieved LSN and the primary's
-// boundaries.
+// durable ack carrying the session's lineage, the barrier-achieved LSN
+// and the primary's boundaries.
 func checkCloseThenAck(t *testing.T, evCh <-chan closeOrAck, sessionID uint64, primary *storage.BlockStore) {
 	t.Helper()
 	first := nextEvent(t, evCh, "session close")
@@ -57,11 +57,13 @@ func checkCloseThenAck(t *testing.T, evCh <-chan closeOrAck, sessionID uint64, p
 	}
 	_, pS, pH := primary.Boundaries()
 	want := adapter.DurableAckResult{
-		ReplicaID:      "r1",
-		SessionID:      sessionID,
-		DurableLSN:     first.close.AchievedLSN,
-		PrimaryTailLSN: pS,
-		PrimaryHeadLSN: pH,
+		ReplicaID:       "r1",
+		SessionID:       sessionID,
+		EndpointVersion: 1, // the session's lineage (started at epoch 1, EV 1)
+		TransportEpoch:  1,
+		DurableLSN:      first.close.AchievedLSN,
+		PrimaryTailLSN:  pS,
+		PrimaryHeadLSN:  pH,
 	}
 	if *second.ack != want {
 		t.Fatalf("post-close ack = %+v, want %+v", *second.ack, want)
