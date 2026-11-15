@@ -360,3 +360,22 @@ func TestSWFS_DeleteBlobStatusesAndExactPath(t *testing.T) {
 		})
 	}
 }
+
+func TestGC_UnboundNeedleRetainedAndCountUnknown(t *testing.T) {
+	_, b, _, g, now := gcFixture(t)
+	ctx := context.Background()
+	fid, e := b.Put(ctx, []byte("pre-binding orphan"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	for i := 0; i < 3; i++ {
+		result, e := g.Run(ctx)
+		if e != nil || !result.UnknownUnbound || result.Reclaimed != 0 {
+			t.Fatalf("unbound inventory claim: %+v %v", result, e)
+		}
+		*now = now.Add(2 * time.Hour)
+	}
+	if got, e := b.Get(ctx, fid); e != nil || string(got) != "pre-binding orphan" {
+		t.Fatalf("unbound orphan deleted: %q %v", got, e)
+	}
+}
