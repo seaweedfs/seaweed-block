@@ -69,6 +69,9 @@ type chunkLayerImpl struct {
 	// re-read shows it applied.
 	pendingDetach bool
 	pendingCut    chunkCutResult
+	// pendingBase is the version the unresolved CAS expected. While HEAD is
+	// still at it, that CAS may still land, so a read alone never settles it.
+	pendingBase chunkHeadVersion
 	remoteLSN     uint64
 	hdr           chunkBitmapHeader // last header written or loaded
 	dirty         map[uint64]bool   // chunks dirtied since the cut in progress or the last HEAD
@@ -668,15 +671,25 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (chunkC
 	}
 	// Precondition or unknown outcome: resolve by re-reading HEAD, never by
 	// a blind retry.
-	cur, gerr := l.remote.GetHead(ctx)
-	if gerr != nil {
+	keepPending := func() {
 		l.stMu.Lock()
 		p := copyHead(next)
 		l.pending = &p
-		l.pendingDetach, l.pendingCut = detach, chunkCutResult{H: h, FullHash: all}
+		l.pendingDetach, l.pendingCut, l.pendingBase = detach, chunkCutResult{H: h, FullHash: all}, expected
 		l.stMu.Unlock()
 		l.abortCut(all)
+	}
+	cur, gerr := l.remote.GetHead(ctx)
+	if gerr != nil {
+		keepPending()
 		return chunkCutResult{}, fmt.Errorf("storage: capture CAS outcome unresolved (%v): %w: %w", casErr, errChunkCASOutcomeUnknown, gerr)
+	}
+	if !errors.Is(casErr, errChunkHeadPrecondition) && !sameProposal(cur, next) && cur.Gen == expected.Gen && cur.Epoch == expected.Epoch {
+		// HEAD is still the CAS's base and the server gave no definite
+		// refusal: the CAS may still land. Settle it before any later
+		// capture or durability point (resolvePending re-proposes it).
+		keepPending()
+		return chunkCutResult{}, fmt.Errorf("storage: capture CAS outcome unresolved (%v): HEAD unchanged: %w", casErr, errChunkCASOutcomeUnknown)
 	}
 	if sameProposal(cur, next) {
 		l.finishCut(cur, h, changed, newKeys)
@@ -758,7 +771,7 @@ func sameProposal(cur, next chunkHead) bool {
 // resolvePending re-reads HEAD when an earlier CAS outcome is unresolved.
 func (l *chunkLayerImpl) resolvePending(ctx context.Context) error {
 	l.stMu.Lock()
-	pending := l.pending
+	pending, base := l.pending, l.pendingBase
 	l.stMu.Unlock()
 	if pending == nil {
 		return nil
@@ -767,11 +780,26 @@ func (l *chunkLayerImpl) resolvePending(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("storage: capture: earlier CAS outcome still unresolved: %w: %w", errChunkCASOutcomeUnknown, err)
 	}
+	if !sameProposal(cur, *pending) && !l.supersededBy(cur) && cur.Gen == base.Gen && cur.Epoch == base.Epoch {
+		// HEAD is still the unresolved CAS's base, so that CAS may still
+		// land. Settle it by issuing the same proposal at the same base:
+		// whichever lands first, HEAD ends at this proposal and the other
+		// fails its precondition.
+		gen, casErr := l.remote.CASHead(ctx, base, copyHead(*pending))
+		if casErr == nil {
+			cur = copyHead(*pending)
+			cur.Gen = gen
+		} else if cur, err = l.remote.GetHead(ctx); err != nil {
+			return fmt.Errorf("storage: capture: earlier CAS outcome still unresolved (%v): %w: %w", casErr, errChunkCASOutcomeUnknown, err)
+		} else if !sameProposal(cur, *pending) && !l.supersededBy(cur) && cur.Gen == base.Gen && cur.Epoch == base.Epoch {
+			return fmt.Errorf("storage: capture: earlier CAS outcome still unresolved (%v): HEAD unchanged: %w", casErr, errChunkCASOutcomeUnknown)
+		}
+	}
 	l.stMu.Lock()
 	defer l.stMu.Unlock()
 	l.pending = nil
 	wasDetach, cut := l.pendingDetach, l.pendingCut
-	l.pendingDetach, l.pendingCut = false, chunkCutResult{}
+	l.pendingDetach, l.pendingCut, l.pendingBase = false, chunkCutResult{}, chunkHeadVersion{}
 	switch {
 	case sameProposal(cur, *pending):
 		l.head, l.remoteLSN = copyHead(cur), cur.RemoteLSN
@@ -785,6 +813,8 @@ func (l *chunkLayerImpl) resolvePending(ctx context.Context) error {
 		l.head = copyHead(cur)
 		return errChunkLayerFenced
 	default:
+		// HEAD moved past the unresolved CAS's base without it: that CAS
+		// can never land.
 		l.head = copyHead(cur)
 	}
 	return nil

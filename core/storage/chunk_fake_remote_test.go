@@ -36,7 +36,31 @@ const (
 	casNormal            fakeCASMode = iota
 	casUnknownNotApplied             // not applied, returns errFakeCASUnknown
 	casAppliedLost                   // applied, returns errFakeCASResponseLost
+	casDeferred                      // retained server-side, returns errFakeCASUnknown; applied later by releaseDeferredCAS
 )
+
+type deferredCAS struct {
+	expected chunkHeadVersion
+	next     chunkHead
+}
+
+// releaseDeferredCAS lets the server finish every retained CAS now: each
+// applies only if HEAD is still at its expected version (as a real filer
+// would evaluate the precondition when it finally runs). It returns how
+// many applied.
+func (f *fakeChunkRemote) releaseDeferredCAS() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	applied := 0
+	for _, d := range f.deferred {
+		if f.head.Gen == d.expected.Gen && f.head.Epoch == d.expected.Epoch {
+			f.installLocked(copyChunkHead(d.next))
+			applied++
+		}
+	}
+	f.deferred = nil
+	return applied
+}
 
 // fakeChunkRemote enforces immutable keys, chunk hashes and the HEAD CAS,
 // logs every call in order, and injects faults on request. Every field is
@@ -72,6 +96,7 @@ type fakeChunkRemote struct {
 	beforeCAS  func(f *fakeChunkRemote) // runs once, under mu, before the next CAS is decided
 	afterCAS   func(f *fakeChunkRemote) // runs once, under mu, after the next CAS is decided
 	intents    map[string]chunkIntent
+	deferred   []deferredCAS
 }
 
 func newFakeChunkRemote() *fakeChunkRemote {
@@ -241,6 +266,11 @@ func (f *fakeChunkRemote) CASHead(ctx context.Context, expected chunkHeadVersion
 	}()
 	if mode == casUnknownNotApplied {
 		outcome = "cas:unknown"
+		return 0, errFakeCASUnknown
+	}
+	if mode == casDeferred {
+		outcome = "cas:deferred"
+		f.deferred = append(f.deferred, deferredCAS{expected: expected, next: copyChunkHead(next)})
 		return 0, errFakeCASUnknown
 	}
 	if expected.Gen != f.head.Gen || expected.Epoch != f.head.Epoch {
