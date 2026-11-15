@@ -77,7 +77,8 @@ func TestGC_StalledCutRemainsReadableAfterTwoMarks(t *testing.T) {
 	if _, e = s.Recover(); e != nil {
 		t.Fatal(e)
 	}
-	layer, e := storage.AttachChunkLayer(s, held, storage.ChunkLayerConfig{ChunkBlocks: 8, Epoch: 1, Holder: "h1", Bitmap: storage.NewFileChunkBitmapStore(p + ".bitmap")})
+	layer, e := storage.AttachChunkLayer(s, held, storage.ChunkLayerConfig{ChunkBlocks: 8, Epoch: 1, Holder: "h1", Bitmap: storage.NewFileChunkBitmapStore(p + ".bitmap"),
+		FreshFromHead: true}) // a new, empty store: its dirty set is known (empty)
 	if e != nil {
 		t.Fatal(e)
 	}

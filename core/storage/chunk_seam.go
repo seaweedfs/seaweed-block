@@ -332,6 +332,16 @@ type chunkLayerConfig struct {
 	// rounds (at most chunkStageRounds; then the barrier takes the rest).
 	// Zero: unbounded, no staging.
 	BarrierBound int
+
+	// testReconcileHold, set only by this package's tests, holds the
+	// reconciler before each slice until a token is received or the
+	// channel is closed.
+	testReconcileHold chan struct{}
+	// testReconcileHook, set only by this package's tests, is called by a
+	// reconciliation worker with its generation before each slice
+	// ("batch"), after comparing a chunk and before recording the result
+	// ("compared"), and before certifying the result ("finish").
+	testReconcileHook func(stage string, gen uint64)
 }
 
 // chunkCutStats describes one cut. The periodic-cut work fills it; a zero
@@ -374,6 +384,10 @@ type chunkCutStats struct {
 //   - PendingUnresolved: an unresolved proposal is held now.
 //   - DirtyChunks is the number of chunks dirty since the last HEAD now
 //     (the C11 bitmap popcount); the cut scheduler's threshold reads it.
+//     Chunks still awaiting reconciliation are not counted.
+//   - Reconciling: the dirty set is being reconciled against HEAD; no cut
+//     publishes until it is done. ReconcileDone of ReconcileTotal chunks
+//     are compared.
 //   - LastCut, LastCutH and LastCutNs (wall clock, Unix ns) describe the
 //     last successful cut, whatever triggered it.
 type chunkLayerStats struct {
@@ -385,6 +399,9 @@ type chunkLayerStats struct {
 	CASUnknown        uint64
 	PendingUnresolved bool
 	DirtyChunks       int
+	Reconciling       bool
+	ReconcileDone     int
+	ReconcileTotal    int
 	LastCut           chunkCutStats
 	LastCutH          uint64
 	LastCutNs         int64
@@ -464,6 +481,10 @@ var (
 	// remote_lsn, so a cut would move remote_lsn backwards (B9 W2 appendix,
 	// 2026-11-15 14:30Z; LSN continuity across hosts is W4b's).
 	errChunkLSNBehind = errors.New("storage: cut LSN is behind the HEAD's remote_lsn")
+	// errChunkReconciling: the layer is still reconciling its dirty set
+	// against HEAD (bitmap lost or mismatched, or a BASE install just
+	// finished); HEAD does not move until it is done. Retryable.
+	errChunkReconciling = errors.New("storage: chunk layer reconciling")
 )
 
 // attachChunkLayer attaches a chunk layer to an open store (chunk_layer.go).

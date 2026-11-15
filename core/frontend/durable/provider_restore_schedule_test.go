@@ -49,9 +49,11 @@ func TestRestoreCheckpointBeforeAssignmentPreservesRemoteBytes(t *testing.T) {
 		t.Fatal("unexpected HEAD before assignment", h)
 	}
 	view.set(healthyProj(frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 3, EndpointVersion: 1}))
-	awaitRestoreCondition(t, ctx, "deferred attachment", func() bool {
+	// The local volume took writes before its first attach, so its dirty
+	// set is unknown and is reconciled against HEAD before cuts resume.
+	awaitRestoreCondition(t, ctx, "deferred attachment and reconciliation", func() bool {
 		st := p.DurableStatuses()
-		return len(st) == 1 && st[0].Operational
+		return len(st) == 1 && st[0].Operational && st[0].Chunk != nil && st[0].Chunk.Attached && !st[0].Chunk.Stats.Reconciling
 	})
 	if h, err := p.CaptureVolume(ctx, "v1"); err != nil || h != lsn {
 		t.Fatal("cut", h, err)

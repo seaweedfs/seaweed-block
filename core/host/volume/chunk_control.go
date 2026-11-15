@@ -87,14 +87,15 @@ type chunkErrorBody struct {
 }
 
 // The codes the routes add to the catalog's (B9 §2.2 plus the 2026-11-15
-// rulings: awaiting_assignment, internal, lsn_behind, and the transport
-// errors bad_request, method_not_allowed, forbidden).
+// rulings: awaiting_assignment, reconciling, internal, lsn_behind, and the
+// transport errors bad_request, method_not_allowed, forbidden).
 const (
 	codeVolumeNotServed    = "volume_not_served"
 	codeNotPrimary         = "not_primary"
 	codeAwaitingAssignment = "awaiting_assignment"
 	codeEpochStale         = "epoch_stale"
 	codeBaseInstalling     = "base_installing"
+	codeReconciling        = "reconciling"
 	codeFenced             = "fenced"
 	codeHeadConflict       = "head_conflict"
 	codeClosing            = "closing"
@@ -180,6 +181,9 @@ func chunkErrorCode(err error) (int, string, bool) {
 		return http.StatusConflict, codeEpochStale, false
 	case errors.Is(err, storage.ErrChunkBaseInstalling):
 		return http.StatusConflict, codeBaseInstalling, true
+	case errors.Is(err, storage.ErrChunkReconciling):
+		// HEAD does not move until the dirty set is reconciled; retry.
+		return http.StatusConflict, codeReconciling, true
 	case errors.Is(err, storage.ErrChunkHeadPrecondition):
 		return http.StatusConflict, codeHeadConflict, true
 	case errors.Is(err, storage.ErrChunkRemoteUnavailable):

@@ -6,8 +6,8 @@ import (
 
 // A fresh local volume starts with an empty bitmap bound to HEAD, not in
 // hash mode: its first cut uploads only the chunks actually written
-// (integration ruling F1). Hash mode stays for an existing volume whose
-// bitmap is lost.
+// (integration ruling F1). An existing volume whose bitmap is lost
+// reconciles its dirty set against HEAD instead (F1(b)).
 func TestChunkLayer_FreshVolumeStartsWithEmptyBitmap(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -45,21 +45,24 @@ func TestChunkLayer_FreshVolumeStartsWithEmptyBitmap(t *testing.T) {
 	}
 }
 
-// Control: an existing volume (not fresh) without a bitmap compares every
-// chunk on its first cut.
-func TestChunkLayer_LostBitmapStillHashes(t *testing.T) {
+// Control: an existing volume (not fresh) without a bitmap reconciles its
+// local image against HEAD before it publishes, so a chunk that differs
+// from HEAD without a recorded write is still uploaded by its first cut.
+func TestChunkLayer_LostBitmapReconciles(t *testing.T) {
 	src := make([]byte, ctNumBlocks*ctBlockSize)
-	copy(src, makeBlock(ctBlockSize, 0x44))
+	copy(src, makeBlock(ctBlockSize, 0x44)) // HEAD's block 0 differs from the local image
 	f := newFakeChunkRemote()
 	f.seedHead(t, src, 0, 0) // an older epoch: this holder may publish over it
 	s, _ := newChunkTestStore(t)
-	layer := mustAttach(t, s, f, ctConfig(1))
-	newWriteLog().write(t, s, 3, 0x33)
+	layer := mustAttach(t, s, f, ctConfig(1)) // waits for reconciliation
+	if st := layer.Stats(); st.Reconciling || st.ReconcileTotal == 0 || st.ReconcileDone != st.ReconcileTotal {
+		t.Fatalf("an existing volume without a bitmap did not reconcile: reconciling=%v done=%d/%d", st.Reconciling, st.ReconcileDone, st.ReconcileTotal)
+	}
+	w := newWriteLog()
+	w.write(t, s, ctNumBlocks-1, 0x33) // the last chunk, never HEAD's block 0 chunk
 	r, err := layer.Cut(ctTimeout(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !r.FullHash {
-		t.Fatal("an existing volume without a bitmap did not compare every chunk")
-	}
+	assertImage(t, "first cut after reconciliation vs the local image", f.imageOf(t, r.Head), w.imageAt(r.H))
 }

@@ -47,6 +47,7 @@ var (
 	ErrChunkLayerFenced       = errChunkLayerFenced
 	ErrChunkEvictRefused      = errChunkEvictRefused
 	ErrChunkCaptureRefused    = errChunkCaptureRefused
+	ErrChunkReconciling       = errChunkReconciling
 	ErrChunkKeyInvalid        = errChunkKeyInvalid
 	ErrChunkLayerDetached     = errChunkLayerDetached
 	ErrChunkCASOutcomeUnknown = errChunkCASOutcomeUnknown

@@ -236,7 +236,7 @@ func TestIntegration_ChunkLayerCaptureThenFreshHost(t *testing.T) {
 		t.Cleanup(func() { _ = s.Close() })
 		return s, l
 	}
-	src, layer := attach("a", false)
+	src, layer := attach("a", true) // a new, empty source volume
 	want := map[uint32][]byte{}
 	rng := rand.New(rand.NewSource(1))
 	for _, lba := range []uint32{0, 63, 64, 300, 511} {

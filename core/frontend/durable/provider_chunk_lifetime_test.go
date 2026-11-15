@@ -648,7 +648,7 @@ func TestWALStoreChunk_StaleWaiterCannotOverrideFailedRecovery(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if _, err := p.CaptureVolume(ctx, "v1"); err != nil {
+	if _, err := captureWhenReconciled(ctx, p, "v1"); err != nil {
 		t.Fatalf("capture after convergence: %v", err)
 	}
 	readEq(t, s, 5, block(0xA7), "repaired WAL record after convergence")
@@ -834,8 +834,21 @@ func TestWALStoreChunk_StaleWaiterPastTickCheckCannotAttach(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if _, err := p.CaptureVolume(ctx, "v1"); err != nil {
+	if _, err := captureWhenReconciled(ctx, p, "v1"); err != nil {
 		t.Fatalf("capture after convergence: %v", err)
 	}
 	readEq(t, s, 5, block(0xA7), "repaired WAL record after convergence")
+}
+
+// captureWhenReconciled cuts once the volume's chunk layer has reconciled
+// its dirty set: a volume recovered with local writes reconciles first,
+// and a cut meanwhile is refused as retryable (ErrChunkReconciling).
+func captureWhenReconciled(ctx context.Context, p *durable.DurableProvider, vol string) (uint64, error) {
+	for {
+		h, err := p.CaptureVolume(ctx, vol)
+		if !errors.Is(err, storage.ErrChunkReconciling) || ctx.Err() != nil {
+			return h, err
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
