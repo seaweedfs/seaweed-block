@@ -86,32 +86,6 @@ type snapshotBody struct {
 	Replayed      bool              `json:"replayed"`
 }
 
-// snapshotItem is one entry of GET /chunk/snapshots, exactly §3.3's fields.
-type snapshotItem struct {
-	Name        string             `json:"name"`
-	HeadGen     uint64             `json:"headGen"`
-	HeadEpoch   uint64             `json:"headEpoch"`
-	CutLSN      uint64             `json:"cutLSN"`
-	CreatedNs   int64              `json:"createdNs"`
-	State       string             `json:"state"`
-	ChunkCount  int                `json:"chunkCount"`
-	Labels      map[string]string  `json:"labels"`
-	Consistency string             `json:"consistency"`
-	Parent      *chunkstore.Parent `json:"parent"`
-}
-
-type snapshotsBody struct {
-	VolumeID  string         `json:"volumeID"`
-	Snapshots []snapshotItem `json:"snapshots"`
-	Next      string         `json:"next"`
-}
-
-type snapshotDeleteBody struct {
-	VolumeID string `json:"volumeID"`
-	Name     string `json:"name"`
-	State    string `json:"state"`
-}
-
 type chunkErrorBody struct {
 	Code      string `json:"code"`
 	Message   string `json:"message"`
@@ -380,13 +354,7 @@ func (s *StatusServer) handleChunkSnapshots(w http.ResponseWriter, r *http.Reque
 		writeChunkFailure(w, err)
 		return
 	}
-	body := snapshotsBody{VolumeID: vol, Snapshots: make([]snapshotItem, 0, len(list)), Next: next}
-	for _, s := range list {
-		body.Snapshots = append(body.Snapshots, snapshotItem{Name: s.Name, HeadGen: s.HeadGen, HeadEpoch: s.HeadEpoch,
-			CutLSN: s.CutLSN, CreatedNs: s.CreatedNs, State: s.State, ChunkCount: s.ChunkCount, Labels: s.Labels,
-			Consistency: s.Consistency, Parent: s.Parent})
-	}
-	writeChunkJSON(w, http.StatusOK, body)
+	writeChunkJSON(w, http.StatusOK, chunkstore.NewSnapshotListBody(vol, list, next))
 }
 
 func (s *StatusServer) handleChunkSnapshotDelete(w http.ResponseWriter, r *http.Request) {
@@ -409,7 +377,7 @@ func (s *StatusServer) handleChunkSnapshotDelete(w http.ResponseWriter, r *http.
 		writeChunkFailure(w, err)
 		return
 	}
-	writeChunkJSON(w, http.StatusOK, snapshotDeleteBody{VolumeID: req.VolumeID, Name: req.Name, State: state})
+	writeChunkJSON(w, http.StatusOK, chunkstore.SnapshotDeleteBody{VolumeID: req.VolumeID, Name: req.Name, State: state})
 }
 
 func (s *StatusServer) handleChunkDetach(w http.ResponseWriter, r *http.Request) {
