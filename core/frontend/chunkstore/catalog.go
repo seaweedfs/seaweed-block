@@ -834,7 +834,7 @@ func (c *Catalog) CreateSnapshot(ctx context.Context, vol string, req SnapshotRe
 	}
 	doc := snapDoc{Format: snapFormat, VolumeID: vol, Name: req.Name, RequestID: req.RequestID, CreatedNs: c.now().UnixNano(),
 		CreatedBy: req.CreatedBy, Consistency: consistency, Head: headEnt.Content, Geometry: v.Geometry, Parent: v.Parent,
-		Labels: req.Labels, ExpiresAtNs: req.ExpiresAtNs, Class: ""} // RED: class not stored
+		Labels: req.Labels, ExpiresAtNs: req.ExpiresAtNs, Class: req.Class}
 	body, err := json.Marshal(doc)
 	if err != nil {
 		return SnapshotInfo{}, err

@@ -73,9 +73,6 @@ func chunkSize(g Geometry, idx uint64) uint64 {
 
 // Usage computes vol's space accounting.
 func (c *Catalog) Usage(ctx context.Context, vol string) (VolumeUsage, error) {
-	if red := true; red { // RED: no accounting
-		return VolumeUsage{VolumeID: vol, Snapshots: []SnapshotUsage{}}, nil
-	}
 	v, ok, err := c.ReadVolume(ctx, vol)
 	if err != nil {
 		return VolumeUsage{}, err

@@ -56,9 +56,6 @@ const (
 )
 
 func validSnapshotClass(class string) error {
-	if red := true; red { // RED: no validation
-		return nil
-	}
 	switch class {
 	case "", SnapshotClassSemantic, SnapshotClassPinned:
 		return nil
@@ -136,9 +133,6 @@ func (c *Catalog) volumeEntry(ctx context.Context, vol string) (*filerpb.Entry, 
 // is conditional on the policy revision read, so of two concurrent setters
 // one wins and the other gets a retryable remote error.
 func (c *Catalog) SetRetentionPolicy(ctx context.Context, vol string, p RetentionPolicy) error {
-	if red := true; red { // RED: stores nothing
-		return nil
-	}
 	if err := p.validate(); err != nil {
 		return err
 	}
@@ -191,13 +185,6 @@ const (
 // are ranked newest first; equal creation times rank by name, so the plan
 // is deterministic.
 func planRetention(p RetentionPolicy, snaps []SnapshotInfo, needed map[string]bool, now time.Time) []RetentionDecision {
-	if red := true; red { // RED: keeps everything
-		out := make([]RetentionDecision, len(snaps))
-		for i, s := range snaps {
-			out[i] = RetentionDecision{Name: s.Name, Keep: true, Reasons: []string{"red"}}
-		}
-		return out
-	}
 	ordered := append([]SnapshotInfo(nil), snaps...)
 	sort.SliceStable(ordered, func(i, j int) bool {
 		if ordered[i].CreatedNs != ordered[j].CreatedNs {
@@ -336,9 +323,6 @@ func (c *Catalog) allSnapshots(ctx context.Context, vol string) ([]SnapshotInfo,
 // real published HEAD yet (absent or aborted). A published fork HEAD pins
 // its chunks for GC itself, so it no longer needs the snapshot.
 func (c *Catalog) forkParentsNeeded(ctx context.Context, vol string) (map[string]bool, error) {
-	if red := true; red { // RED: no fork needs a parent
-		return map[string]bool{}, nil
-	}
 	vols, err := c.ListVolumes(ctx)
 	if err != nil {
 		return nil, err
