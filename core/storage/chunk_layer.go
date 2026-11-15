@@ -72,14 +72,20 @@ type chunkLayerImpl struct {
 	// pendingBase is the version the unresolved CAS expected. While HEAD is
 	// still at it, that CAS may still land, so a read alone never settles it.
 	pendingBase chunkHeadVersion
-	remoteLSN   uint64
-	hdr         chunkBitmapHeader // last header written or loaded
-	dirty       map[uint64]bool   // chunks dirtied since the cut in progress or the last HEAD
-	inflight    map[uint64]bool   // chunks captured by a cut whose HEAD is not yet installed
-	allDirty    bool              // a BASE block landed: every chunk is dirty
-	hashMode    bool              // the dirty set is unknown: compare every chunk by hash
-	cutLSN      uint64            // H of the latest cut taken (in flight or installed)
-	keySeq      uint64
+	// pendingIntent is the intent of the unresolved proposal in pending;
+	// it is deleted once that proposal is settled.
+	pendingIntent string
+	// leftoverIntents are this layer's own intents whose delete failed
+	// after their cut was settled; every cut retries them.
+	leftoverIntents []string
+	remoteLSN       uint64
+	hdr             chunkBitmapHeader // last header written or loaded
+	dirty           map[uint64]bool   // chunks dirtied since the cut in progress or the last HEAD
+	inflight        map[uint64]bool   // chunks captured by a cut whose HEAD is not yet installed
+	allDirty        bool              // a BASE block landed: every chunk is dirty
+	hashMode        bool              // the dirty set is unknown: compare every chunk by hash
+	cutLSN          uint64            // H of the latest cut taken (in flight or installed)
+	keySeq          uint64
 
 	// Test-only scheduling hooks; nil in production.
 	testPresenceSnapshotHook func()                 // after a presence snapshot, before it is written
@@ -557,6 +563,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (chunkC
 	if err := l.resolvePending(ctx); err != nil {
 		return chunkCutResult{}, err
 	}
+	l.retryLeftoverIntents(ctx)
 
 	// Quiesced cut.
 	l.s.captureMu.Lock()
@@ -628,6 +635,11 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (chunkC
 	}
 	var changed []uint64
 	newKeys := map[uint64]string{}
+	type upload struct {
+		c   capturedChunk
+		key string
+	}
+	var uploads []upload
 	for _, c := range captured {
 		ref, had := baseHead.Chunks[c.idx]
 		switch {
@@ -638,14 +650,32 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (chunkC
 			changed = append(changed, c.idx)
 			continue
 		}
-		key := l.newKey(c.idx)
-		if err := l.remote.Put(ctx, key, c.data); err != nil {
-			l.abortCut(all)
-			return chunkCutResult{}, fmt.Errorf("storage: capture upload chunk %d: %w", c.idx, err)
+		uploads = append(uploads, upload{c: c, key: l.newKey(c.idx)})
+	}
+	// The intent names every key this cut uploads and is durable before
+	// the first upload: GC treats it as a root until the cut is settled.
+	var intent string
+	if len(uploads) > 0 {
+		keys := make([]string, len(uploads))
+		for i, u := range uploads {
+			keys[i] = u.key
 		}
-		next.Chunks[c.idx] = chunkRef{Key: key, SHA256: c.sum}
-		newKeys[c.idx] = key
-		changed = append(changed, c.idx)
+		id, err := l.remote.PutIntent(ctx, chunkIntent{Gen: baseHead.Gen, Epoch: l.cfg.Epoch, Holder: l.cfg.Holder, Keys: keys})
+		if err != nil {
+			l.abortCut(all)
+			return chunkCutResult{}, fmt.Errorf("storage: capture intent: %w", err)
+		}
+		intent = id
+	}
+	for _, u := range uploads {
+		if err := l.remote.Put(ctx, u.key, u.c.data); err != nil {
+			l.abortCut(all)
+			l.dropIntent(ctx, intent)
+			return chunkCutResult{}, fmt.Errorf("storage: capture upload chunk %d: %w", u.c.idx, err)
+		}
+		next.Chunks[u.c.idx] = chunkRef{Key: u.key, SHA256: u.c.sum}
+		newKeys[u.c.idx] = u.key
+		changed = append(changed, u.c.idx)
 	}
 	if !detach && len(changed) == 0 && h == baseHead.RemoteLSN && baseHead.Gen != 0 && !chunkHeadIsDetached(baseHead) {
 		l.finishCut(baseHead, h, nil, nil) // nothing new: no CAS
@@ -653,10 +683,12 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (chunkC
 	}
 	if err := l.admit(); err != nil { // admission re-checked right before the CAS
 		l.abortCut(all)
+		l.dropIntent(ctx, intent)
 		return chunkCutResult{}, err
 	}
 	if l.supersededBy(baseHead) {
 		l.abortCut(all)
+		l.dropIntent(ctx, intent)
 		l.stMu.Lock()
 		l.fenced = true
 		l.stMu.Unlock()
@@ -667,6 +699,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (chunkC
 	if casErr == nil {
 		next.Gen = gen
 		l.finishCut(next, h, changed, newKeys)
+		l.dropIntent(ctx, intent)
 		return l.cutDone(chunkCutResult{H: h, Head: copyHead(next), FullHash: all}, detach), nil
 	}
 	// Precondition or unknown outcome: resolve by re-reading HEAD, never by
@@ -676,6 +709,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (chunkC
 		p := copyHead(next)
 		l.pending = &p
 		l.pendingDetach, l.pendingCut, l.pendingBase = detach, chunkCutResult{H: h, FullHash: all}, expected
+		l.pendingIntent = intent // kept until the proposal is settled
 		l.stMu.Unlock()
 		l.abortCut(all)
 	}
@@ -693,9 +727,12 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (chunkC
 	}
 	if sameProposal(cur, next) {
 		l.finishCut(cur, h, changed, newKeys)
+		l.dropIntent(ctx, intent)
 		return l.cutDone(chunkCutResult{H: h, Head: copyHead(cur), FullHash: all}, detach), nil
 	}
+	// HEAD moved past the CAS's base without it: it can never land.
 	l.abortCut(all)
+	l.dropIntent(ctx, intent)
 	if l.supersededBy(cur) {
 		l.stMu.Lock()
 		l.fenced = true
@@ -771,7 +808,7 @@ func sameProposal(cur, next chunkHead) bool {
 // resolvePending re-reads HEAD when an earlier CAS outcome is unresolved.
 func (l *chunkLayerImpl) resolvePending(ctx context.Context) error {
 	l.stMu.Lock()
-	pending, base := l.pending, l.pendingBase
+	pending, base, intent := l.pending, l.pendingBase, l.pendingIntent
 	l.stMu.Unlock()
 	if pending == nil {
 		return nil
@@ -801,9 +838,11 @@ func (l *chunkLayerImpl) resolvePending(ctx context.Context) error {
 			return fmt.Errorf("storage: capture: earlier CAS outcome still unresolved (%v): HEAD unchanged: %w", casErr, errChunkCASOutcomeUnknown)
 		}
 	}
+	// Settled: the proposal landed or can never land.
+	l.dropIntent(ctx, intent)
 	l.stMu.Lock()
 	defer l.stMu.Unlock()
-	l.pending = nil
+	l.pending, l.pendingIntent = nil, ""
 	wasDetach, cut := l.pendingDetach, l.pendingCut
 	l.pendingDetach, l.pendingCut, l.pendingBase = false, chunkCutResult{}, chunkHeadVersion{}
 	switch {
@@ -824,6 +863,31 @@ func (l *chunkLayerImpl) resolvePending(ctx context.Context) error {
 		l.head = copyHead(cur)
 	}
 	return nil
+}
+
+// dropIntent deletes this layer's own intent id (none if empty) once its
+// cut is settled. A failed delete is kept and retried by the next cut; it
+// never fails a cut whose outcome is already settled.
+func (l *chunkLayerImpl) dropIntent(ctx context.Context, id string) {
+	if id == "" {
+		return
+	}
+	if err := l.remote.DeleteIntent(ctx, id); err != nil {
+		l.stMu.Lock()
+		l.leftoverIntents = append(l.leftoverIntents, id)
+		l.stMu.Unlock()
+	}
+}
+
+// retryLeftoverIntents retries the deletes dropIntent could not make.
+func (l *chunkLayerImpl) retryLeftoverIntents(ctx context.Context) {
+	l.stMu.Lock()
+	ids := l.leftoverIntents
+	l.leftoverIntents = nil
+	l.stMu.Unlock()
+	for _, id := range ids {
+		l.dropIntent(ctx, id)
+	}
 }
 
 // abortCut returns a failed cut's chunks to the dirty set.
