@@ -128,7 +128,7 @@ type WALStore struct {
 	// Physical WAL sync attempts exclude the separate metadata/checkpoint syncs.
 	syncWALFile  func() error
 	walSyncCalls atomic.Uint64
-	// A generation is published only after a normal WAL append has completed.
+	// Generations cover completed append attempts and recovery publication.
 	walMutation     atomic.Uint64
 	durableMutation atomic.Uint64
 	// Recovery/direct paths conservatively disable dedup for this open store.
@@ -438,6 +438,10 @@ func (s *WALStore) Recover() (uint64, error) {
 	if s.closed {
 		return 0, errors.New("storage: Recover after Close")
 	}
+	// Recovery can republish a prefix left by a failed append (including on
+	// this same open file). Invalidate before releasing publication, even on
+	// a failed scan; the next successful sync establishes a reusable new cut.
+	defer s.walMutation.Add(1)
 	s.dm.clear()
 	res, err := recoverWAL(s.fd, s.sb, s.dm)
 	if err != nil {
@@ -513,6 +517,8 @@ func (s *WALStore) Write(lba uint32, data []byte) (uint64, error) {
 		Data:   data,
 	}
 	walRelOff, err := s.wal.append(entry)
+	// A failed pwrite may still leave complete records or padding in the file.
+	s.walMutation.Add(1)
 	if err != nil {
 		s.mu.Unlock()
 		return 0, fmt.Errorf("storage: WAL append: %w", err)
@@ -528,7 +534,6 @@ func (s *WALStore) Write(lba uint32, data []byte) (uint64, error) {
 	if s.walTail == 0 {
 		s.walTail = lsn
 	}
-	s.walMutation.Add(1)
 	s.mu.Unlock()
 	return lsn, nil
 }
@@ -588,6 +593,8 @@ func (s *WALStore) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error
 		}
 	}
 	offsets, err := s.wal.appendBatch(entries)
+	// A failed pwrite may still leave complete records or padding in the file.
+	s.walMutation.Add(1)
 	if err != nil {
 		s.mu.Unlock()
 		return nil, fmt.Errorf("storage: WAL batch append: %w", err)
@@ -606,7 +613,6 @@ func (s *WALStore) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error
 	if s.walTail == 0 {
 		s.walTail = firstLSN
 	}
-	s.walMutation.Add(1)
 	s.mu.Unlock()
 	return lsns, nil
 }
@@ -631,6 +637,8 @@ func (s *WALStore) writeBatchMultiBlockLocked(startLBA uint32, blocks [][]byte, 
 		Data:     payload,
 	}
 	walRelOff, err := s.wal.append(entry)
+	// A failed pwrite may still leave complete records or padding in the file.
+	s.walMutation.Add(1)
 	if err != nil {
 		return nil, fmt.Errorf("storage: WAL multiblock append: %w", err)
 	}
@@ -658,7 +666,6 @@ func (s *WALStore) writeBatchMultiBlockLocked(startLBA uint32, blocks [][]byte, 
 	if s.walTail == 0 {
 		s.walTail = firstLSN
 	}
-	s.walMutation.Add(1)
 	return lsns, nil
 }
 
@@ -1022,6 +1029,8 @@ func (s *WALStore) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
 		Data:   dataCopy,
 	}
 	walRelOff, err := s.wal.append(entry)
+	// A failed pwrite may still leave complete records or padding in the file.
+	s.walMutation.Add(1)
 	if err != nil {
 		return fmt.Errorf("storage: WAL append (apply): %w", err)
 	}
