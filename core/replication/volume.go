@@ -669,6 +669,31 @@ func (v *ReplicationVolume) enqueueLocalWrite(w LocalWrite) (*orderedLocalWrite,
 	return req, nil
 }
 
+// RebaseShipLSN moves the next LSN to ship forward to lsn. The volume
+// orders writes from the store's next LSN, captured when it was built; a
+// restored host's frontier seed (its WAL continues at HEAD.remote_lsn+1)
+// moves that LSN later, and whoever moves it calls this before the volume
+// serves I/O. It is refused while any write is pending or in flight, never
+// dropping one, and lsn never moves backwards; equal is a no-op.
+func (v *ReplicationVolume) RebaseShipLSN(lsn uint64) error {
+	v.orderMu.Lock()
+	defer v.orderMu.Unlock()
+	switch {
+	case v.orderClosed:
+		return fmt.Errorf("replication: RebaseShipLSN: volume %s closed", v.volumeID)
+	case len(v.pending) > 0 || v.inflightLSN != 0 || v.draining:
+		return fmt.Errorf("replication: RebaseShipLSN(%d): volume %s has %d pending writes (in flight %d)", lsn, v.volumeID, len(v.pending), v.inflightLSN)
+	case lsn < v.nextShipLSN:
+		return fmt.Errorf("replication: RebaseShipLSN(%d): volume %s would move back from %d", lsn, v.volumeID, v.nextShipLSN)
+	case lsn == v.nextShipLSN:
+		return nil
+	}
+	v.nextShipLSN = lsn
+	close(v.progress) // Sync waiters re-check against the new LSN
+	v.progress = make(chan struct{})
+	return nil
+}
+
 func (v *ReplicationVolume) drainOrderedWrites() {
 	for {
 		v.orderMu.Lock()
