@@ -213,12 +213,49 @@ type chunkLayerConfig struct {
 	Bitmap chunkBitmapStore
 }
 
+// chunkCutStats describes one cut. The periodic-cut work fills it; a zero
+// value means "not measured".
+type chunkCutStats struct {
+	BarrierPauseNs  int64
+	SyncNs          int64
+	CopyNs          int64
+	CandidateChunks int
+	UploadedChunks  int
+	UploadedBytes   int64
+	ZeroedChunks    int
+	UnchangedChunks int
+	UploadNs        int64
+	CASNs           int64
+	CASResult       string
+	TotalNs         int64
+}
+
+// chunkCutResult is the outcome of one successful cut.
+//   - H is the cut LSN; Head.RemoteLSN = H when the cut installed a HEAD.
+//     A volume's LSNs carry forward across hosts: a new host's WAL starts
+//     at HEAD.RemoteLSN + 1, and a fork starts after its snapshot's
+//     RemoteLSN, so RemoteLSN never decreases across generations.
+//   - Head is the HEAD this cut installed (copied, owned by the caller), or
+//     the current HEAD when the cut had nothing new (Noop: no CAS).
+//   - FullHash says the cut compared every chunk by hash (no usable bitmap,
+//     or the first cut after a BASE install).
+type chunkCutResult struct {
+	H        uint64
+	Head     chunkHead
+	Noop     bool
+	FullHash bool
+	Stats    chunkCutStats
+}
+
 // chunkLayer is what the store owner drives.
 type chunkLayer interface {
 	chunkSink
-	// Capture takes a quiesced cut at H (the last written LSN), uploads the
+	// Cut takes a quiesced cut at H (the last written LSN), uploads the
 	// chunks dirtied since the last HEAD and CASes HEAD with RemoteLSN = H.
-	// It returns H once HEAD is installed.
+	// It returns the HEAD it installed, so a snapshot can copy exactly the
+	// image of H even when other cuts follow.
+	Cut(ctx context.Context) (chunkCutResult, error)
+	// Capture is Cut, returning only H.
 	Capture(ctx context.Context) (uint64, error)
 	// MakeRemoteDurable is the durability point for snapshot, detach and
 	// migrate: a Capture whose H >= t. Only a nil return makes t remote

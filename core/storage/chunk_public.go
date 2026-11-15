@@ -15,6 +15,8 @@ type (
 	ChunkDelta        = chunkDelta
 	ChunkLayerConfig  = chunkLayerConfig
 	ChunkLayer        = chunkLayer
+	ChunkCutResult    = chunkCutResult
+	ChunkCutStats     = chunkCutStats
 )
 
 const (
