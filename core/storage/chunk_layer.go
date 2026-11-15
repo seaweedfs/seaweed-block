@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -50,8 +51,11 @@ type chunkLayerImpl struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup // captures and fills in flight
 
-	capMu sync.Mutex // serializes Capture, Evict, Begin/EndBaseInstall
-	bmMu  sync.Mutex // serializes bitmap store calls
+	capMu  sync.Mutex // serializes Capture, Evict, Begin/EndBaseInstall
+	bmMu   sync.Mutex // serializes bitmap store calls
+	presMu sync.Mutex // serializes a whole presence save: snapshot, fsync, replace, version
+
+	closeDone chan struct{} // closed when Close has finished
 
 	stMu      sync.Mutex
 	closed    bool
@@ -67,9 +71,14 @@ type chunkLayerImpl struct {
 	cutLSN    uint64            // H of the latest cut taken (in flight or installed)
 	keySeq    uint64
 
+	// Test-only scheduling hooks; nil in production.
+	testPresenceSnapshotHook func() // after a presence snapshot, before it is written
+	testAfterAdmitHook       func() // right after a capture is admitted
+
 	// Absence: chunks whose local bytes are not authoritative (fresh host,
 	// evicted), and blocks written locally inside such chunks since.
 	absent        map[uint64]bool
+	absentGen     map[uint64]uint64 // bumped on every eviction; binds a fill to its generation
 	localBlocks   map[uint64]bool
 	presenceVer   uint64
 	savedPresVer  uint64
@@ -95,7 +104,9 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 		dirty:       map[uint64]bool{},
 		inflight:    map[uint64]bool{},
 		absent:      map[uint64]bool{},
+		absentGen:   map[uint64]uint64{},
 		localBlocks: map[uint64]bool{},
+		closeDone:   make(chan struct{}),
 	}
 	var nb8 [8]byte
 	if _, err := rand.Read(nb8[:]); err != nil {
@@ -111,6 +122,9 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 	}
 	l.head = copyHead(head)
 	l.remoteLSN = head.RemoteLSN
+	// A HEAD that already belongs to a newer epoch or a competing holder is
+	// never used as this holder's publication guard.
+	l.fenced = l.supersededBy(head)
 
 	hdr, saved, ok, err := cfg.Bitmap.Load()
 	if err != nil {
@@ -137,6 +151,7 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 	if cfg.FreshFromHead {
 		for idx := range head.Chunks {
 			l.absent[idx] = true
+			l.absentGen[idx]++
 		}
 		l.presenceVer++
 	} else if err := l.loadPresence(); err != nil {
@@ -270,9 +285,15 @@ func (l *chunkLayerImpl) OnReadMiss(lba uint64) ([]byte, error) {
 		return nil, nil
 	}
 	ref, ok := l.head.Chunks[idx]
+	gen := l.absentGen[idx]
 	l.wg.Add(1)
 	l.stMu.Unlock()
 	defer l.wg.Done()
+	// current reports whether this fill still belongs to the chunk's present
+	// absence: same generation, same HEAD ref. Caller holds stMu.
+	current := func() bool {
+		return l.absent[idx] && l.absentGen[idx] == gen && l.head.Chunks[idx] == ref
+	}
 	if !ok { // ZERO in HEAD: nothing to fetch
 		return make([]byte, l.blockSize), nil
 	}
@@ -295,13 +316,13 @@ func (l *chunkLayerImpl) OnReadMiss(lba uint64) ([]byte, error) {
 		if err := l.s.installFetchedBlock(uint32(b), block, func() bool {
 			l.stMu.Lock()
 			defer l.stMu.Unlock()
-			return l.absent[idx] && !l.localBlocks[b]
+			return current() && !l.localBlocks[b]
 		}); err != nil {
 			return nil, err
 		}
 	}
 	l.stMu.Lock()
-	if l.absent[idx] {
+	if current() {
 		delete(l.absent, idx)
 		for i := uint64(0); i < l.chunkBlocks; i++ {
 			delete(l.localBlocks, first+i)
@@ -377,6 +398,18 @@ func (l *chunkLayerImpl) opCtx(ctx context.Context) (context.Context, context.Ca
 	return c, func() { stop(); cancel() }
 }
 
+// register admits new work and registers it with Close in one critical
+// section: once Close has started, no work registers.
+func (l *chunkLayerImpl) register() (done func(), err error) {
+	l.stMu.Lock()
+	defer l.stMu.Unlock()
+	if l.closed {
+		return nil, errors.New("storage: chunk layer closed")
+	}
+	l.wg.Add(1)
+	return l.wg.Done, nil
+}
+
 func (l *chunkLayerImpl) admit() error {
 	l.stMu.Lock()
 	closed, fenced, base := l.closed, l.fenced, l.hdr.Base
@@ -433,11 +466,17 @@ type capturedChunk struct {
 }
 
 func (l *chunkLayerImpl) captureLocked(ctx context.Context) (uint64, error) {
+	done, err := l.register()
+	if err != nil {
+		return 0, err
+	}
+	defer done()
 	if err := l.admit(); err != nil {
 		return 0, err
 	}
-	l.wg.Add(1)
-	defer l.wg.Done()
+	if hook := l.testAfterAdmitHook; hook != nil {
+		hook()
+	}
 	ctx, cancel := l.opCtx(ctx)
 	defer cancel()
 
@@ -531,6 +570,13 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context) (uint64, error) {
 	if err := l.admit(); err != nil { // admission re-checked right before the CAS
 		l.abortCut(all)
 		return 0, err
+	}
+	if l.supersededBy(baseHead) {
+		l.abortCut(all)
+		l.stMu.Lock()
+		l.fenced = true
+		l.stMu.Unlock()
+		return 0, errChunkLayerFenced
 	}
 	expected := chunkHeadVersion{Gen: baseHead.Gen, Epoch: baseHead.Epoch}
 	gen, casErr := l.remote.CASHead(ctx, expected, next)
@@ -712,6 +758,7 @@ func (l *chunkLayerImpl) EvictChunk(idx uint64) error {
 		return nil // ZERO in HEAD: nothing to make absent
 	}
 	l.absent[idx] = true
+	l.absentGen[idx]++
 	first := idx * l.chunkBlocks
 	for i := uint64(0); i < l.chunkBlocks; i++ {
 		delete(l.localBlocks, first+i)
@@ -726,6 +773,10 @@ func (l *chunkLayerImpl) presencePath() string { return l.s.path + ".chunkpresen
 // persistPresence makes the absence state durable. It fsyncs the volume
 // first, so a chunk recorded as present has its filled bytes on disk.
 func (l *chunkLayerImpl) persistPresence() error {
+	// The whole save runs under presMu, so a snapshot can never be written
+	// after a newer one. Lock order: WALStore.mu -> presMu -> stMu.
+	l.presMu.Lock()
+	defer l.presMu.Unlock()
 	l.stMu.Lock()
 	ver := l.presenceVer
 	if ver == l.savedPresVer {
@@ -740,6 +791,9 @@ func (l *chunkLayerImpl) persistPresence() error {
 		fmt.Fprintf(&b, "local %d\n", lba)
 	}
 	l.stMu.Unlock()
+	if hook := l.testPresenceSnapshotHook; hook != nil {
+		hook()
+	}
 	if fd := l.s.fd; fd != nil {
 		if err := fd.Sync(); err != nil {
 			return fmt.Errorf("storage: chunk presence: fsync volume: %w", err)
@@ -748,6 +802,7 @@ func (l *chunkLayerImpl) persistPresence() error {
 	if err := writeFileDurable(l.presencePath(), []byte(b.String())); err != nil {
 		return err
 	}
+	syncDir(filepath.Dir(l.presencePath())) // the rename itself must be durable
 	l.stMu.Lock()
 	if ver > l.savedPresVer {
 		l.savedPresVer = ver
@@ -807,6 +862,14 @@ func writeFileDurable(path string, data []byte) error {
 	return os.Rename(tmp, path)
 }
 
+// syncDir makes a rename in dir durable where the platform allows it.
+func syncDir(dir string) {
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+}
+
 // ---- status and lifetime ----
 
 func (l *chunkLayerImpl) RemoteLSN() uint64 {
@@ -827,11 +890,13 @@ func (l *chunkLayerImpl) Close() error {
 	l.stMu.Lock()
 	if l.closed {
 		l.stMu.Unlock()
+		<-l.closeDone // every caller returns only after shutdown completes
 		return nil
 	}
 	l.closed = true
 	l.stMu.Unlock()
 	l.cancel()
 	l.wg.Wait()
+	close(l.closeDone)
 	return nil
 }

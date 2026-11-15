@@ -64,6 +64,8 @@ type fakeChunkRemote struct {
 	putEntered chan string   // non-nil: receives each Put key on entry (non-blocking)
 	getGate    chan struct{} // non-nil: Get blocks after recording, until closed
 	getEntered chan string
+	getHoldOne chan struct{} // non-nil: only the next Get blocks on it (one-shot)
+	getHoldIn  chan string   // receives the key of the one-shot held Get
 	failPut    error
 	failGet    error                    // Get and GetHead
 	casModes   []fakeCASMode            // consumed one per CAS; empty = casNormal
@@ -124,7 +126,22 @@ func (f *fakeChunkRemote) Get(ctx context.Context, key string) ([]byte, error) {
 	f.ops = append(f.ops, "get:"+key)
 	f.getCalls++
 	gate, entered := f.getGate, f.getEntered
+	holdOne, holdIn := f.getHoldOne, f.getHoldIn
+	f.getHoldOne = nil
 	f.mu.Unlock()
+	if holdOne != nil {
+		if holdIn != nil {
+			select {
+			case holdIn <- key:
+			default:
+			}
+		}
+		select {
+		case <-holdOne:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	if entered != nil {
 		select {
 		case entered <- key:
@@ -359,6 +376,22 @@ func holdGets(t *testing.T, f *fakeChunkRemote) (entered chan string, release fu
 			close(gate)
 		})
 	}
+	t.Cleanup(release)
+	onUnblock(t, release)
+	return entered, release
+}
+
+// holdNextGet makes only the next Get block until release (registered as a
+// cleanup and unblocker before any worker starts); later Gets proceed.
+func holdNextGet(t *testing.T, f *fakeChunkRemote) (entered chan string, release func()) {
+	t.Helper()
+	gate := make(chan struct{})
+	entered = make(chan string, 1)
+	f.mu.Lock()
+	f.getHoldOne, f.getHoldIn = gate, entered
+	f.mu.Unlock()
+	var once sync.Once
+	release = func() { once.Do(func() { close(gate) }) }
 	t.Cleanup(release)
 	onUnblock(t, release)
 	return entered, release
@@ -751,6 +784,7 @@ func startCapture(t *testing.T, layer chunkLayer) <-chan error {
 	done := make(chan struct{})
 	result := make(chan error, 1)
 	t.Cleanup(func() {
+		runUnblock(t) // release anything the capture may be parked on
 		cancel()
 		select {
 		case <-done:
