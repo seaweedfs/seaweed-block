@@ -348,7 +348,7 @@ func (l *chunkLayerImpl) BeforeCheckpointAdvance(lsn uint64) error {
 	return l.persistPresence()
 }
 
-// saveDirty persists dirty ÃƒÂ¢Ã‹â€ Ã‚Âª inflight ÃƒÂ¢Ã‹â€ Ã‚Âª the chunks of WAL entries still in
+// saveDirty persists dirty Ã¢Ë†Âª inflight Ã¢Ë†Âª the chunks of WAL entries still in
 // the dirty map (all chunks when a BASE block landed or the set is unknown).
 func (l *chunkLayerImpl) saveDirty() error {
 	l.bmMu.Lock()

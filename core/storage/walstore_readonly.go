@@ -1,5 +1,5 @@
 // G5-5: read-only walstore opener for hardware-test byte-equal
-// verification. Provides Read(lba) only â€” no Write, no Sync, no
+// verification. Provides Read(lba) only — no Write, no Sync, no
 // Recover, no checkpoint advance, no background goroutines, no
 // superblock writes.
 //
@@ -7,7 +7,7 @@
 // the replica's stored bytes for a target LBA range and compare
 // against the primary's known write payload.
 //
-// NOT a substrate semantic change â€” exposes the same Read(lba)
+// NOT a substrate semantic change — exposes the same Read(lba)
 // merge logic the daemon uses (WAL-replay then extent fallback)
 // through a read-only file handle, but constructed without the
 // writer machinery (committer / flusher / admission goroutines)
@@ -18,7 +18,7 @@
 // started flusher + committer + admission goroutines and persisted
 // the superblock back through the file descriptor on Close. Those
 // writes target the same fd opened O_RDONLY, so they would silently
-// fail in the OS layer â€” a "read-only verifier" leak. This rewrite
+// fail in the OS layer — a "read-only verifier" leak. This rewrite
 // constructs only the fields Read + Recover need, and Close only
 // closes the fd.
 
@@ -46,10 +46,10 @@ type WALStoreReader struct {
 // OpenReadOnly opens an existing walstore file for read-only access
 // and replays the WAL into an in-memory dirty map so subsequent
 // Read(lba) calls return the most-recent value (per-LBA WAL-then-
-// extent merge â€” same semantic as the daemon's Read).
+// extent merge — same semantic as the daemon's Read).
 //
 // No background goroutines are started. The file descriptor is
-// opened O_RDONLY; on Close only the fd is released â€” no superblock
+// opened O_RDONLY; on Close only the fd is released — no superblock
 // or checkpoint persistence.
 //
 // Caller MUST ensure no writer (i.e., no daemon) is currently open
@@ -80,7 +80,7 @@ func OpenReadOnly(path string) (*WALStoreReader, error) {
 	}
 	dm := newDirtyMap(64)
 	// Replay WAL into the dirty map. recoverWAL is a pure read pass
-	// over the WAL frames â€” no writes back to the fd.
+	// over the WAL frames — no writes back to the fd.
 	if _, err := recoverWAL(f, &sb, dm); err != nil {
 		_ = f.Close()
 		return nil, fmt.Errorf("storage: OpenReadOnly recover: %w", err)
@@ -88,7 +88,7 @@ func OpenReadOnly(path string) (*WALStoreReader, error) {
 	return &WALStoreReader{fd: f, sb: &sb, dm: dm}, nil
 }
 
-// Read returns the current bytes at lba â€” same merge logic the
+// Read returns the current bytes at lba — same merge logic the
 // daemon uses (WAL-recent over extent). No mutation; safe to call
 // concurrently from multiple goroutines.
 func (r *WALStoreReader) Read(lba uint32) ([]byte, error) {
@@ -149,7 +149,7 @@ func (r *WALStoreReader) readFromExtent(lba uint32) ([]byte, error) {
 }
 
 // Close releases the file descriptor. Idempotent. Does NOT persist
-// superblock or any state â€” the verifier path is read-only.
+// superblock or any state — the verifier path is read-only.
 func (r *WALStoreReader) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
