@@ -455,6 +455,7 @@ func validateHeartbeat(r *control.HeartbeatReport) error {
 	if r.SentAt == nil || !r.SentAt.IsValid() {
 		return errors.New("heartbeat: invalid SentAt")
 	}
+	seen := make(map[string]int, len(r.Slots))
 	for i, s := range r.Slots {
 		if s == nil {
 			return fmt.Errorf("heartbeat: slot[%d] is nil", i)
@@ -462,6 +463,11 @@ func validateHeartbeat(r *control.HeartbeatReport) error {
 		if s.VolumeId == "" || s.ReplicaId == "" {
 			return fmt.Errorf("heartbeat: slot[%d] missing VolumeID or ReplicaID", i)
 		}
+		key := s.VolumeId + "/" + s.ReplicaId
+		if j, dup := seen[key]; dup {
+			return fmt.Errorf("heartbeat: slot[%d] repeats slot[%d] (%s)", i, j, key)
+		}
+		seen[key] = i
 		if s.DataAddr == "" || s.CtrlAddr == "" {
 			return fmt.Errorf("heartbeat: slot[%d] (%s/%s) missing DataAddr or CtrlAddr", i, s.VolumeId, s.ReplicaId)
 		}

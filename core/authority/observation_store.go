@@ -250,6 +250,17 @@ func (s *ObservationStore) ingest(obs Observation) ([]SlotHealthTransition, erro
 	if obs.ObservedAt.IsZero() {
 		return nil, ErrInvalidObservation
 	}
+	// One fact per volume/replica slot: a report that names a slot twice
+	// is refused before any mutation, so storage and health transitions
+	// can never disagree about which entry is the slot (#134).
+	seen := make(map[string]struct{}, len(obs.Slots))
+	for _, slot := range obs.Slots {
+		k := slotKey(slot)
+		if _, dup := seen[k]; dup {
+			return nil, ErrInvalidObservation
+		}
+		seen[k] = struct{}{}
+	}
 
 	// Always compute ExpiresAt from store config — do not trust
 	// caller-supplied ExpiresAt to prevent out-of-band freshness
