@@ -55,6 +55,8 @@ type flags struct {
 	launcherCHAPUserKey                   string
 	launcherCHAPSecretKey                 string
 	failbackRuntimeRPC                    bool
+	workspaceRPC                          bool
+	workspaceHEADBase                     string
 	frontendPublicationRuntimeHTTP        bool
 	frontendPublicationRuntimeListen      string
 	version                               bool
@@ -102,6 +104,8 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.launcherCHAPUserKey, "launcher-iscsi-chap-username-key", "chapUsername", "Kubernetes Secret key for generated blockvolume iSCSI CHAP username")
 	fs.StringVar(&f.launcherCHAPSecretKey, "launcher-iscsi-chap-secret-key", "chapSecret", "Kubernetes Secret key for generated blockvolume iSCSI CHAP secret")
 	fs.BoolVar(&f.failbackRuntimeRPC, "failback-runtime-rpc", false, "enable disabled-by-default authority failback RPC; requires expected-current and terminal evidence")
+	fs.BoolVar(&f.workspaceRPC, "workspace-rpc", false, "enable RF1 workspace lease/revocation/move RPCs")
+	fs.StringVar(&f.workspaceHEADBase, "workspace-head-base-url", "", "filer HTTP directory containing per-volume HEAD files; required with --workspace-rpc")
 	fs.BoolVar(&f.frontendPublicationRuntimeHTTP, "frontend-publication-runtime-http", false, "enable disabled-by-default frontend publication HTTP runtime; confirms post-failback authority publication only")
 	fs.StringVar(&f.frontendPublicationRuntimeListen, "frontend-publication-runtime-listen", "127.0.0.1:9334", "HTTP listen address for --frontend-publication-runtime-http")
 	fs.BoolVar(&f.version, "version", false, "print build provenance and exit")
@@ -172,6 +176,15 @@ func run(f flags) int {
 		FailbackRuntimeRPC:               f.failbackRuntimeRPC,
 		FrontendPublicationRuntimeHTTP:   f.frontendPublicationRuntimeHTTP,
 		FrontendPublicationRuntimeListen: f.frontendPublicationRuntimeListen,
+	}
+	if f.workspaceRPC {
+		reader, err := master.NewWorkspaceHEADReader(f.workspaceHEADBase)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "blockmaster:", err)
+			return 1
+		}
+		cfg.WorkspaceRPC = true
+		cfg.WorkspaceHeadReader = reader
 	}
 	h, err := master.New(cfg)
 	if err != nil {

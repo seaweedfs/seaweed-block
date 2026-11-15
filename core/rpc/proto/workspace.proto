@@ -1,0 +1,37 @@
+syntax = "proto3";
+package seaweedfs.block.control;
+option go_package = "github.com/seaweedfs/seaweed-block/core/rpc/control;control";
+
+// Opt-in RF=1 workspace authority protocol. Epochs are minted only by Publisher.
+service WorkspaceService {
+  rpc RenewWorkspaceLease(WorkspaceIdentity) returns (WorkspaceLeaseFact);
+  rpc RevokeWorkspace(WorkspaceIdentity) returns (WorkspaceLeaseFact);
+  rpc AckWorkspaceRevoked(WorkspaceRevocationAck) returns (WorkspaceEmpty);
+  rpc MoveWorkspace(WorkspaceMove) returns (WorkspaceGrant);
+  rpc QueryWorkspace(WorkspaceVolume) returns (WorkspaceStatus);
+}
+message WorkspaceIdentity { string volume_id = 1; string holder = 2; uint64 epoch = 3; }
+message WorkspaceVolume { string volume_id = 1; }
+message WorkspaceEmpty {}
+message WorkspaceLeaseFact {
+  string volume_id = 1; string holder = 2; uint64 epoch = 3;
+  int64 expires_at_ns = 4; int64 valid_for_ns = 5; bool revoking = 6;
+}
+message WorkspaceRevocationAck { WorkspaceIdentity identity = 1; uint64 head_gen = 2; }
+message WorkspaceMove {
+  string request_id = 1; string volume_id = 2;
+  string expected_holder = 3; uint64 expected_epoch = 4;
+  string target_holder = 5; string target_data_addr = 6; string target_ctrl_addr = 7;
+  string kind = 8; bool force = 9;
+  string target_server_id = 10;
+}
+message WorkspaceGrant {
+  string request_id = 1; string volume_id = 2; string old_holder = 3; string new_holder = 4;
+  string kind = 5; uint64 old_epoch = 6; uint64 new_epoch = 7;
+  uint64 head_gen = 8; uint64 remote_lsn = 9; bool issued = 10;
+  string old_host = 11; string new_host = 12;
+}
+message WorkspaceStatus {
+  WorkspaceLeaseFact lease = 1; WorkspaceRevocationAck revocation_ack = 2;
+  repeated WorkspaceGrant moves = 3;
+}

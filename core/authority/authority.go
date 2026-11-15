@@ -6,6 +6,7 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/adapter"
 )
@@ -152,6 +153,14 @@ type Publisher struct {
 	loadErrs []error
 
 	observer PublishObserver
+
+	// Workspace state is serialized with assignment minting under mu. Remote
+	// HEAD reads and subscriber delivery never run under this lock.
+	workspace              map[string]*WorkspaceState
+	workspaceUncertain     map[string]bool
+	workspaceNow           func() time.Time
+	workspaceTTL           time.Duration
+	workspaceLeaseDeadline map[string]time.Time
 }
 
 // PublisherOption configures a Publisher at construction.
@@ -201,10 +210,15 @@ func WithPublishObserver(observer PublishObserver) PublisherOption {
 // the pieces.
 func NewPublisher(dir Directive, opts ...PublisherOption) *Publisher {
 	p := &Publisher{
-		dir:              dir,
-		state:            make(map[subKey]assignmentState),
-		subs:             make(map[subKey][]*subscription),
-		writeSeqByVolume: map[string]uint64{},
+		dir:                    dir,
+		state:                  make(map[subKey]assignmentState),
+		subs:                   make(map[subKey][]*subscription),
+		writeSeqByVolume:       map[string]uint64{},
+		workspace:              map[string]*WorkspaceState{},
+		workspaceUncertain:     map[string]bool{},
+		workspaceNow:           time.Now,
+		workspaceTTL:           30 * time.Second,
+		workspaceLeaseDeadline: map[string]time.Time{},
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -229,6 +243,12 @@ func (p *Publisher) reloadFromStore() {
 		panic(fmt.Sprintf("authority: index-level store load failure: %v", err))
 	}
 	for _, rec := range records {
+		if rec.Workspace != nil {
+			p.workspace[rec.VolumeID] = cloneWorkspace(rec.Workspace)
+			// Conservatively cover every previously granted TTL after restart.
+			// Persisted wall time alone must never shorten a live host's lease.
+			p.workspaceLeaseDeadline[rec.VolumeID] = p.workspaceNow().Add(p.workspaceTTL)
+		}
 		key := subKey{volumeID: rec.VolumeID, replicaID: rec.ReplicaID}
 		p.state[key] = assignmentState{
 			info: adapter.AssignmentInfo{
@@ -396,11 +416,40 @@ func (p *Publisher) closeAllSubscriptions() {
 // non-zero Epoch. The structural non-forgeability test in
 // authority_test.go enforces this boundary at repo scope.
 func (p *Publisher) apply(ask AssignmentAsk) error {
+	return p.applyWithWorkspaceMove(ask, nil)
+}
+
+func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGrant) error {
 	if err := validateAsk(ask); err != nil {
 		return err
 	}
 
 	p.mu.Lock()
+	if p.workspaceUncertain[ask.VolumeID] {
+		p.mu.Unlock()
+		return fmt.Errorf("authority: workspace persistence uncertain; restart required")
+	}
+	if p.workspace[ask.VolumeID] != nil && ask.Intent != IntentRefreshEndpoint && grant == nil {
+		p.mu.Unlock()
+		return fmt.Errorf("authority: enrolled workspace changes require a guarded move")
+	}
+	if p.workspace[ask.VolumeID] != nil && ask.Intent == IntentRefreshEndpoint {
+		_, current, ok := p.workspaceLineLocked(ask.VolumeID)
+		if !ok || current.info.ReplicaID != ask.ReplicaID {
+			p.mu.Unlock()
+			return fmt.Errorf("authority: cannot refresh retired workspace slot")
+		}
+	}
+	var issuedWorkspace *WorkspaceState
+	var reservedEpoch uint64
+	if grant != nil {
+		var err error
+		issuedWorkspace, reservedEpoch, err = p.prepareWorkspaceMoveLocked(ask, *grant)
+		if err != nil {
+			p.mu.Unlock()
+			return err
+		}
+	}
 	k := subKey{volumeID: ask.VolumeID, replicaID: ask.ReplicaID}
 	prev, had := p.state[k]
 
@@ -465,6 +514,9 @@ func (p *Publisher) apply(ask AssignmentAsk) error {
 			DataAddr:        ask.DataAddr,
 			CtrlAddr:        ask.CtrlAddr,
 		}
+		if reservedEpoch != 0 {
+			next.Epoch = reservedEpoch
+		}
 
 	default:
 		p.mu.Unlock()
@@ -490,14 +542,25 @@ func (p *Publisher) apply(ask AssignmentAsk) error {
 			DataAddr:        next.DataAddr,
 			CtrlAddr:        next.CtrlAddr,
 			WriteSeq:        nextSeq,
+			Workspace:       cloneWorkspace(p.workspace[ask.VolumeID]),
+		}
+		if issuedWorkspace != nil {
+			record.Workspace = cloneWorkspace(issuedWorkspace)
 		}
 		if err := p.store.Put(record); err != nil {
 			// State mutation hasn't happened yet; nothing to
 			// unwind. Just report the failure.
+			if record.Workspace != nil {
+				p.workspaceUncertain[ask.VolumeID] = true
+			}
 			p.mu.Unlock()
 			return fmt.Errorf("authority: durable Put failed, rolling back mint: %w", err)
 		}
 		p.writeSeqByVolume[ask.VolumeID] = nextSeq
+	}
+	if issuedWorkspace != nil {
+		p.workspace[ask.VolumeID] = issuedWorkspace
+		delete(p.workspaceLeaseDeadline, ask.VolumeID)
 	}
 
 	p.state[k] = assignmentState{info: next, present: true}

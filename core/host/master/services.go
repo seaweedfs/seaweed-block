@@ -35,6 +35,7 @@ type services struct {
 	control.UnimplementedClusterEvidenceServiceServer
 	control.UnimplementedLifecycleServiceServer
 	control.UnimplementedFailbackServiceServer
+	control.UnimplementedWorkspaceServiceServer
 
 	host *Host
 	// seq is incremented per ReportHeartbeat handler invocation.
