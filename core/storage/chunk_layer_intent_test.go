@@ -128,8 +128,8 @@ func TestChunkIntent_FailedPutIntentUploadsNothing(t *testing.T) {
 	f.failPutIntent = errors.New("injected PutIntent failure")
 	f.mu.Unlock()
 	mark := len(f.stats().ops)
-	if _, err := layer.Cut(ctTimeout(t)); err == nil {
-		t.Fatal("cut succeeded although its intent could not be written")
+	if _, err := layer.Cut(ctTimeout(t)); !errors.Is(err, errChunkRemoteUnavailable) {
+		t.Fatalf("cut with a failed intent write: %v; want a remote-unavailable refusal", err)
 	}
 	if got := uploadedKeys(opsSince(f, mark)); len(got) != 0 {
 		t.Fatalf("chunks uploaded without an intent: %q", got)
@@ -154,8 +154,8 @@ func TestChunkIntent_FailedUploadDeletesIntent(t *testing.T) {
 	f.mu.Lock()
 	f.failPut = errors.New("injected upload failure")
 	f.mu.Unlock()
-	if _, err := layer.Cut(ctTimeout(t)); err == nil {
-		t.Fatal("cut succeeded although its upload failed")
+	if _, err := layer.Cut(ctTimeout(t)); !errors.Is(err, errChunkRemoteUnavailable) {
+		t.Fatalf("cut with a failed upload: %v; want a remote-unavailable refusal", err)
 	}
 	in := lastPutIntent(t, f)
 	if live := liveIntents(t, f); len(live) != 0 {
