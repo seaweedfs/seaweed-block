@@ -80,8 +80,40 @@ func TestReplicationVolume_RebaseShipLSNRefusesWithPendingWrites(t *testing.T) {
 func TestReplicationVolume_RebaseShipLSNRefusesWhenClosed(t *testing.T) {
 	v := NewReplicationVolume("vol1", storage.NewBlockStore(64, 4096))
 	_ = v.Close()
-	err := v.RebaseShipLSN(v.nextShipLSN + 1)
+	err := func() (err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("rebase on a closed volume panicked: %v", r)
+			}
+		}()
+		return v.RebaseShipLSN(v.nextShipLSN + 1)
+	}()
 	if err == nil || errors.Is(err, context.Canceled) {
 		t.Fatalf("rebase on a closed volume: %v; want a refusal", err)
+	}
+}
+
+// A Sync already waiting when the rebase lands is released by it.
+func TestReplicationVolume_RebaseShipLSNReleasesWaitingSync(t *testing.T) {
+	v := NewReplicationVolume("vol1", storage.NewBlockStore(64, 4096))
+	t.Cleanup(func() { _ = v.Close() })
+	base := v.nextShipLSN
+	done := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		done <- v.Sync(ctx, base+10)
+	}()
+	time.Sleep(100 * time.Millisecond) // the Sync is waiting on progress
+	if err := v.RebaseShipLSN(base + 100); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("waiting Sync after the rebase: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("a Sync waiting before the rebase was not released")
 	}
 }
