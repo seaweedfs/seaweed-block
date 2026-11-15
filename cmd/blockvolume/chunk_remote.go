@@ -105,6 +105,12 @@ func chunkAttachCheck(cat *chunkstore.Catalog) func(context.Context, string, dur
 	}
 }
 
+// chunkHolder is how this host names itself in HEAD: <server-id>/<replica-id>
+// (B9 W2 appendix, 2026-11-15 14:30Z). The replica id alone is not enough:
+// two hosts that both serve replica r1 would look like the same holder
+// returning, and the later one would not be fenced.
+func chunkHolder(f flags) string { return f.serverID + "/" + f.replicaID }
+
 // chunkVolumeRoot is <base>/<volumeID>; the volume ID must be one plain
 // path element so no volume can reach another volume's directory.
 func chunkVolumeRoot(base, volumeID string) (string, error) {

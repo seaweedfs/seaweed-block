@@ -132,7 +132,8 @@ type ProviderConfig struct {
 	// entry's attach rules (B9 W2 §4.2): create VOLUME when missing, refuse
 	// a geometry mismatch and a fork whose HEAD is not written yet.
 	ChunkAttachCheck func(ctx context.Context, volumeID string, g ChunkGeometry) error
-	// ChunkHolder names this node in HEAD. Zero: the replica ID.
+	// ChunkHolder names this node in HEAD; blockvolume sets
+	// <server-id>/<replica-id>. Zero: the replica ID (tests).
 	ChunkHolder string
 	// ChunkReadMissTimeout bounds one remote fetch of an absent block.
 	// Zero: the storage default.
