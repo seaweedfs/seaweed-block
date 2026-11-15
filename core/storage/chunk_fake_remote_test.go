@@ -94,6 +94,7 @@ type fakeChunkRemote struct {
 	failGet    error                    // Get and GetHead
 	casModes   []fakeCASMode            // consumed one per CAS; empty = casNormal
 	beforeCAS  func(f *fakeChunkRemote) // runs once, under mu, before the next CAS is decided
+	onGetHead  func(f *fakeChunkRemote) // runs under mu inside every GetHead while set (a read that blocks across a change)
 	afterCAS   func(f *fakeChunkRemote) // runs once, under mu, after the next CAS is decided
 	intents    map[string]chunkIntent
 	deferred   []deferredCAS
@@ -238,6 +239,9 @@ func (f *fakeChunkRemote) GetHead(ctx context.Context) (chunkHead, error) {
 	defer f.mu.Unlock()
 	f.ops = append(f.ops, "gethead")
 	f.getHeadCalls++
+	if hook := f.onGetHead; hook != nil {
+		hook(f)
+	}
 	if f.failGet != nil {
 		return chunkHead{}, f.failGet
 	}

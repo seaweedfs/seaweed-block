@@ -784,7 +784,13 @@ func (l *chunkLayerImpl) resolvePending(ctx context.Context) error {
 		// HEAD is still the unresolved CAS's base, so that CAS may still
 		// land. Settle it by issuing the same proposal at the same base:
 		// whichever lands first, HEAD ends at this proposal and the other
-		// fails its precondition.
+		// fails its precondition. That is a new publication, so it passes
+		// the capture admission again first: the HEAD read above may have
+		// blocked across a demotion or a lineage change. A refusal keeps
+		// the CAS unresolved.
+		if err := l.admit(); err != nil {
+			return fmt.Errorf("storage: capture: earlier CAS outcome still unresolved (%w); re-proposal refused: %w", errChunkCASOutcomeUnknown, err)
+		}
 		gen, casErr := l.remote.CASHead(ctx, base, copyHead(*pending))
 		if casErr == nil {
 			cur = copyHead(*pending)
