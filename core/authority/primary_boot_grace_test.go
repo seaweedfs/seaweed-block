@@ -212,3 +212,37 @@ func TestPrimaryBootGrace_EqualTimestampFactIgnored(t *testing.T) {
 	g.submit(r1Slot("r1-b", "d1-old", "c1-old", false))
 	expectNoNext(t, g.ctrl) // the equal-time ready fact did not end the grace
 }
+
+// A delayed UNREADY fact from the previous incarnation arrives while the
+// restarted primary is in its grace: the decision follows the newest
+// recorded fact, so it must not fail over (review of #130 r2).
+func TestPrimaryBootGrace_DelayedUnreadyPreviousIncarnationKeepsGrace(t *testing.T) {
+	g := newBootGraceRig(t)
+	t1 := g.now
+	g.steadyPrimary() // r1-a observed at t1
+	g.now = g.now.Add(time.Second)
+	g.submit(r1Slot("r1-b", "d1-old", "c1-old", false)) // r1-b, in grace
+	expectNoNext(t, g.ctrl)
+
+	delayedA := r1Slot("r1-a", "d1-old", "c1-old", false) // unready, older
+	delayedA.ObservedAt = t1
+	g.now = g.now.Add(time.Second)
+	g.submit(delayedA)
+	expectNoNext(t, g.ctrl)
+}
+
+// A fact with the same observation time as the recorded one but a
+// different incarnation is superseded, never a decision input.
+func TestPrimaryBootGrace_EqualTimeChangedIncarnationKeepsGrace(t *testing.T) {
+	g := newBootGraceRig(t)
+	g.steadyPrimary()
+	g.now = g.now.Add(time.Second)
+	b := r1Slot("r1-b", "d1-old", "c1-old", false)
+	g.submit(b)
+	expectNoNext(t, g.ctrl)
+
+	other := r1Slot("r1-x", "d1-old", "c1-old", false)
+	other.ObservedAt = g.now // same time as r1-b's fact
+	g.submit(other)
+	expectNoNext(t, g.ctrl)
+}
