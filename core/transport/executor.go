@@ -1270,16 +1270,20 @@ func (e *BlockExecutor) finishSession(replicaID string, session *activeSession, 
 		// As the dual-lane close does: the close proves the recovery
 		// window closed, and the engine publishes healthy only after
 		// a durable progress fact observed after it. achieved is the
-		// replica's barrier-acknowledged durable LSN. The ack follows
-		// the close, so the engine sees the window closed first. Both
-		// callbacks run without e.mu held.
+		// replica's barrier-acknowledged durable LSN. The ack carries
+		// the session's lineage, so the engine refuses it as stale if
+		// the identity moved between the two callbacks. The ack
+		// follows the close, so the engine sees the window closed
+		// first. Both callbacks run without e.mu held.
 		_, primaryS, primaryH := e.primaryStore.Boundaries()
 		ackCb(adapter.DurableAckResult{
-			ReplicaID:      replicaID,
-			SessionID:      session.lineage.SessionID,
-			DurableLSN:     achieved,
-			PrimaryTailLSN: primaryS,
-			PrimaryHeadLSN: primaryH,
+			ReplicaID:       replicaID,
+			SessionID:       session.lineage.SessionID,
+			EndpointVersion: session.lineage.EndpointVersion,
+			TransportEpoch:  session.lineage.Epoch,
+			DurableLSN:      achieved,
+			PrimaryTailLSN:  primaryS,
+			PrimaryHeadLSN:  primaryH,
 		})
 	}
 }
