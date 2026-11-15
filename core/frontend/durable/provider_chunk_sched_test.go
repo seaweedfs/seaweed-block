@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
@@ -108,5 +109,64 @@ func TestWALStoreChunk_ExplicitCutRestartsTheTimer(t *testing.T) {
 			t.Fatal("no automatic cut one interval after the explicit cut")
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// The volume status carries the chunk layer's state and cut counters.
+func TestWALStoreChunk_StatusCarriesChunkLayer(t *testing.T) {
+	remote := storage.NewMemChunkRemote()
+	view := newStubView(frontend.Projection{VolumeID: "v1", ReplicaID: "r1"}) // pre-assignment
+	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096,
+		NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
+		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
+	}, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	s, err := p.EnsureStorage("v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.RecoverVolume(context.Background(), "v1"); err != nil {
+		t.Fatal(err)
+	}
+	st := p.DurableStatuses()
+	if len(st) != 1 || st[0].Chunk == nil || !st[0].Chunk.AwaitingAuthority || st[0].Chunk.Attached {
+		t.Fatalf("status before authority: %+v", st)
+	}
+	view.set(healthyProj(frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 3, EndpointVersion: 1}))
+	if _, err := s.Write(1, block(1)); err != nil {
+		t.Fatal(err)
+	}
+	var lsn uint64
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if lsn, err = p.CaptureVolume(context.Background(), "v1"); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("capture never succeeded: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	c := p.DurableStatuses()[0].Chunk
+	if c == nil || !c.Attached || c.AwaitingAuthority || c.Fenced || c.RemoteLSN != lsn || c.Stats.CutsOK != 1 || c.Stats.LastCutH != lsn {
+		t.Fatalf("status after a cut: %+v", c)
+	}
+}
+
+func TestWALStoreChunk_StatusHasNoChunkSectionForWALStore(t *testing.T) {
+	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+		Impl: durable.ImplWALStore, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks,
+	}, v1View())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	_ = openRecovered(t, p)
+	if st := p.DurableStatuses(); len(st) != 1 || st[0].Chunk != nil {
+		t.Fatalf("walstore status: %+v", st)
 	}
 }
