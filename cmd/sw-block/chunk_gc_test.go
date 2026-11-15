@@ -66,3 +66,29 @@ func (s *gcCLIStore) DeleteEntry(ctx context.Context, dir, name string, expected
 	s.writes++
 	return s.MemFiler.DeleteEntry(ctx, dir, name, expected)
 }
+
+func TestOpsChunkGC_InvalidAdmissionHasNoStoreEffects(t *testing.T) {
+	old := dialChunkFiler
+	defer func() { dialChunkFiler = old }()
+	calls := 0
+	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) {
+		calls++
+		t.Fatal("invalid request reached store")
+		return nil, nil, nil
+	}
+	for _, args := range [][]string{
+		{"gc"},
+		{"gc", "--chunk-filer", "store", "--master", "master", "--grace", "5m"},
+		{"gc", "--chunk-filer", "store", "--master", "master", "--intent-ttl", "0"},
+		{"gc", "--chunk-filer", "store", "--master", "master", "--timeout", "0"},
+		{"gc", "--chunk-filer", "store", "--master", "master", "unexpected"},
+	} {
+		rc, _, _ := runChunk(args...)
+		if rc != 2 {
+			t.Fatalf("invalid %v: exit=%d", args, rc)
+		}
+	}
+	if calls != 0 {
+		t.Fatalf("invalid admission dialed %d times", calls)
+	}
+}

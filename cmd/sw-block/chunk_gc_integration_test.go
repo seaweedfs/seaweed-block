@@ -43,8 +43,9 @@ func TestIntegration_OpsChunkGC_RealMasterAndStore(t *testing.T) {
 	}
 	defer s.Close()
 	// Wait for the real volume registration/assign path, bounded by ctx.
+	var unboundFID string
 	for {
-		_, err = s.Put(ctx, []byte("readiness"))
+		unboundFID, err = s.Put(ctx, []byte("readiness"))
 		if err == nil {
 			break
 		}
@@ -235,6 +236,9 @@ func TestIntegration_OpsChunkGC_RealMasterAndStore(t *testing.T) {
 	reclaimed := call(true)
 	if reclaimed.Reclaimed != 1 || len(reclaimed.WouldDelete) != 1 || reclaimed.WouldDelete[0].Key != "held" {
 		t.Fatalf("expired capture: %+v", reclaimed)
+	}
+	if got, err := s.Get(ctx, unboundFID); err != nil || string(got) != "readiness" {
+		t.Fatalf("unbound needle reclaimed: %q %v", got, err)
 	}
 	for _, key := range []string{"live", "copy"} {
 		if got, err := remote.Get(ctx, key); err != nil || !bytes.Equal(got, data) {
