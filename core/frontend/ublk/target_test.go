@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -99,5 +100,18 @@ func TestTarget_CloseGivesEveryCallerTheSameResult(t *testing.T) {
 	}
 	if n := dev.closes.Load(); n != 1 {
 		t.Fatalf("device closed %d times, want once", n)
+	}
+}
+
+// Close before Start must not leave a device nobody can close: a Start
+// after Close refuses before creating anything.
+func TestTarget_StartAfterCloseRefuses(t *testing.T) {
+	tg := NewTarget(TargetConfig{Provider: testback.NewStaticProvider(nil), BlockSize: 4096, VolumeSize: 1 << 20, DevID: -1})
+	if err := tg.Close(); err != nil {
+		t.Fatalf("Close before Start: %v", err)
+	}
+	_, err := tg.Start()
+	if err == nil || !strings.Contains(err.Error(), "closed") {
+		t.Fatalf("Start after Close: %v, want a refusal because the target is closed", err)
 	}
 }

@@ -42,8 +42,8 @@ func TestSettleQueues_NeverReleasesAQueueThatMayStillRun(t *testing.T) {
 	stuck := &fakeQueue{id: 1, done: make(chan struct{})}
 	late := &fakeQueue{id: 2, done: make(chan struct{})}
 	close(late.done)
-	err := settleQueues([]settler{stopped, stuck, late}, 50*time.Millisecond)
-	if err == nil || !strings.Contains(err.Error(), "queue 1") {
+	leaked, err := settleQueues([]settler{stopped, stuck, late}, 50*time.Millisecond)
+	if !leaked || err == nil || !strings.Contains(err.Error(), "queue 1") {
 		t.Fatalf("err %v, want queue 1 reported", err)
 	}
 	if stuck.released {
@@ -59,8 +59,8 @@ func TestSettleQueues_NeverReleasesAQueueThatMayStillRun(t *testing.T) {
 func TestSettleQueues_SurfacesAQueueThreadError(t *testing.T) {
 	q := &fakeQueue{id: 3, done: make(chan struct{}), err: errors.New("io_uring_enter: EBADF")}
 	close(q.done)
-	err := settleQueues([]settler{q}, time.Second)
-	if err == nil || !strings.Contains(err.Error(), "EBADF") {
+	leaked, err := settleQueues([]settler{q}, time.Second)
+	if leaked || err == nil || !strings.Contains(err.Error(), "EBADF") {
 		t.Fatalf("err %v, want the queue thread's error surfaced", err)
 	}
 	if !q.released {

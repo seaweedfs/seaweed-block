@@ -19,6 +19,12 @@ func refusePreExisting(id uint32, exists bool) error {
 		"Remove it as a separate operator step once it is proven unused", id, charDevicePrefix, id)
 }
 
+// controller runs one ublk control command (the device's control ring in
+// production; a recorder in tests).
+type controller interface {
+	command(cmdOp uint32, devID uint32, buf []byte, data uint64) (int32, error)
+}
+
 // settler is a queue being shut down: done closes when its thread has
 // exited, release frees the memory the kernel and the thread share.
 type settler interface {
@@ -33,7 +39,7 @@ type settler interface {
 // queue's thread ended with. A queue that did not stop keeps its mappings:
 // its thread may still read descriptors or write buffers, so they are
 // leaked (fail closed) and the failure is returned.
-func settleQueues(qs []settler, timeout time.Duration) error {
+func settleQueues(qs []settler, timeout time.Duration) (leaked bool, err error) {
 	var firstErr error
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
@@ -58,10 +64,11 @@ func settleQueues(qs []settler, timeout time.Duration) error {
 				firstErr = fmt.Errorf("ublk: %s: %w", q.name(), err)
 			}
 		default:
+			leaked = true
 			if firstErr == nil {
 				firstErr = fmt.Errorf("ublk: %s did not stop; its mappings are kept (leaked) while its thread may run", q.name())
 			}
 		}
 	}
-	return firstErr
+	return leaked, firstErr
 }

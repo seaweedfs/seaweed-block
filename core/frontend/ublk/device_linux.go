@@ -153,6 +153,21 @@ func (d *Device) Close() error {
 }
 
 func (d *Device) teardown(added bool) error {
+	qs := make([]settler, len(d.queues))
+	for i, q := range d.queues {
+		qs[i] = q
+	}
+	return d.teardownWith(qs, d, added)
+}
+
+// command implements controller on the device's control ring.
+func (d *Device) command(cmdOp uint32, devID uint32, buf []byte, data uint64) (int32, error) {
+	return d.ctrlCommand(cmdOp, devID, buf, data)
+}
+
+// teardownWith stops the device through ctl, settles the queues and deletes
+// the device. It is the whole Close path; tests drive it with recorders.
+func (d *Device) teardownWith(qs []settler, ctl controller, added bool) error {
 	var firstErr error
 	note := func(err error) {
 		if err != nil && firstErr == nil {
@@ -160,18 +175,14 @@ func (d *Device) teardown(added bool) error {
 		}
 	}
 	if d.path != "" {
-		if _, err := d.ctrlCommand(uCmdStopDev, d.devID, nil, 0); err != nil && added {
+		if _, err := ctl.command(uCmdStopDev, d.devID, nil, 0); err != nil && added {
 			note(fmt.Errorf("ublk: stop device: %w", err))
 		}
 	}
 	if d.cancel != nil {
 		d.cancel()
 	}
-	qs := make([]settler, len(d.queues))
-	for i, q := range d.queues {
-		qs[i] = q
-	}
-	settleErr := settleQueues(qs, queueStopTimeout)
+	_, settleErr := settleQueues(qs, queueStopTimeout)
 	note(settleErr)
 	if d.charFD >= 0 {
 		note(unix.Close(d.charFD))
@@ -183,12 +194,16 @@ func (d *Device) teardown(added bool) error {
 		// The device stays (it fails I/O); the error above reports it.
 		note(fmt.Errorf("ublk: device %d left in place: a queue did not stop", d.devID))
 	} else if d.path != "" {
-		if _, err := d.ctrlCommand(uCmdDelDev, d.devID, nil, 0); err != nil {
+		if _, err := ctl.command(uCmdDelDev, d.devID, nil, 0); err != nil {
 			note(fmt.Errorf("ublk: delete device: %w", err))
 		}
 	}
-	note(d.ctrl.close())
-	note(unix.Close(d.ctrlFD))
+	if d.ctrl != nil {
+		note(d.ctrl.close())
+	}
+	if d.ctrlFD >= 0 {
+		note(unix.Close(d.ctrlFD))
+	}
 	return firstErr
 }
 
@@ -300,18 +315,31 @@ func (q *queue) run(ctx context.Context) {
 		}
 		cq = r.reap(cq[:0])
 		for _, c := range cq {
-			tag := int(c.UserData)
-			if c.Res != ioResOK { // ABORT (-ENODEV) or a failure: no re-fetch
-				live--
-				continue
-			}
-			result := q.h.handle(ctx, q.desc(tag).request(), q.buf(tag))
-			if err := q.ioCommand(r, uIOCommitAndFetchReq, tag, result); err != nil {
+			still, err := q.onCQE(ctx, c, func(tag int, result int32) error {
+				return q.ioCommand(r, uIOCommitAndFetchReq, tag, result)
+			})
+			if err != nil {
 				q.err = err
 				return
 			}
+			if !still {
+				live--
+			}
 		}
 	}
+}
+
+// onCQE handles one completion of a FETCH or COMMIT_AND_FETCH for a tag:
+// a new request is served and committed (the tag stays live); any other
+// result ends the tag (no re-fetch). It returns whether the tag is still
+// live and a commit failure.
+func (q *queue) onCQE(ctx context.Context, c cqe, commit func(tag int, result int32) error) (bool, error) {
+	tag := int(c.UserData)
+	if c.Res != ioResOK { // ABORT (-ENODEV) or a failure: no re-fetch
+		return false, nil
+	}
+	result := q.h.handle(ctx, q.desc(tag).request(), q.buf(tag))
+	return true, commit(tag, result)
 }
 
 func (q *queue) doneCh() <-chan struct{} { return q.done }

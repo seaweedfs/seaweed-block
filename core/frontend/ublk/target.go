@@ -30,6 +30,7 @@ type Target struct {
 
 	closeOnce sync.Once
 	closeErr  error
+	closed    bool // under mu: Close was called
 }
 
 // targetDevice is what Target needs from a running device.
