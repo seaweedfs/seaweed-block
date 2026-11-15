@@ -135,3 +135,98 @@ func TestIntegration_RetainAndUsage(t *testing.T) {
 		t.Fatalf("after: %d bindings, upper=%t; want all still stored (no GC yet), flagged as an upper bound", after.StoredBindings, after.StoredUpperBound)
 	}
 }
+
+// The two held schedules of the review of #142 against a real filer:
+// (1) a same-name pinned replacement made after planning survives (the
+// filer's conditional name delete refuses the stale attempt); (2) a fork
+// that starts after the scan and stops before its HEAD (VOLUME published,
+// deadline exceeded) keeps its parent, and completes on retry.
+func TestIntegration_RetainHeldSchedules(t *testing.T) {
+	c := startWeed(t)
+	ctx := context.Background()
+	const base = "/swblock/chunks"
+	geo := Geometry{NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 8}
+	full := int(geo.ChunkBlocks) * int(geo.BlockSize)
+	cat, err := NewCatalog(c.client(t, base), base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cat.EnsureVolume(ctx, "v1", geo); err != nil {
+		t.Fatal(err)
+	}
+	r := c.remote(t, path.Join(base, "v1"))
+	data := bytes.Repeat([]byte{7}, full)
+	if err := r.Put(ctx, "chunks/e1/c0/k", data); err != nil {
+		t.Fatal(err)
+	}
+	cur, err := r.GetHead(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := storage.ChunkHead{Epoch: 1, Holder: "h1", RemoteLSN: 1, Chunks: map[uint64]storage.ChunkRef{0: ref("chunks/e1/c0/k", data)}}
+	if head.Gen, err = r.CASHead(ctx, storage.ChunkHeadVersion{Gen: cur.Gen, Epoch: cur.Epoch}, head); err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Now().Add(-72 * time.Hour)
+	cat.SetClock(func() time.Time { clock = clock.Add(time.Second); return clock }) // every read advances
+	for i := 0; i < 3; i++ {
+		if _, err := cat.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: fmt.Sprintf("s%02d", i), RequestID: fmt.Sprintf("r%02d", i), Class: SnapshotClassSemantic}, head); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := cat.SetRetentionPolicy(ctx, "v1", RetentionPolicy{}); err != nil { // keep nothing by policy
+		t.Fatal(err)
+	}
+	clock = time.Now()
+
+	var pinnedAttempt string
+	cat.retainHook = func(stage, _ string) {
+		if stage != hookPlanned {
+			return
+		}
+		// (1) s00 is replaced by a pinned snapshot of the same name.
+		if _, err := cat.DeleteSnapshot(ctx, "v1", "s00"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := cat.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: "s00", RequestID: "pinned-b", Class: SnapshotClassPinned}, head); err != nil {
+			t.Fatal(err)
+		}
+		b, err := cat.readSnap(ctx, "v1", "s00")
+		if err != nil {
+			t.Fatal(err)
+		}
+		pinnedAttempt = b.attempt
+		// (2) a fork of s01 publishes its VOLUME and stops before HEAD.
+		cat.OpDeadline = time.Nanosecond
+		_, err = cat.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s01", Target: "v2", RequestID: "f"})
+		cat.OpDeadline = 0
+		if CodeOf(err) != CodeDeadlineExceeded {
+			t.Fatalf("fork past its deadline: %v; want deadline_exceeded", err)
+		}
+		if _, ok, err := cat.ReadVolume(ctx, "v2"); !ok || err != nil {
+			t.Fatalf("the stopped fork's VOLUME: ok=%t %v", ok, err)
+		}
+	}
+	res, err := cat.Retain(ctx, "v1", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cat.retainHook = nil
+	if fmt.Sprint(res.Deleted) != "[s02]" || fmt.Sprint(res.Replaced) != "[s00]" || fmt.Sprint(res.ForkHeld) != "[s01]" {
+		t.Fatalf("retain: deleted=%v replaced=%v forkHeld=%v; want s02 / s00 / s01", res.Deleted, res.Replaced, res.ForkHeld)
+	}
+	b, err := cat.readSnap(ctx, "v1", "s00")
+	if err != nil || b.attempt != pinnedAttempt || b.State != SnapActive || b.Class != SnapshotClassPinned {
+		t.Fatalf("pinned replacement: %+v %v (attempt %s, want %s)", b, err, b.attempt, pinnedAttempt)
+	}
+	if s, err := cat.readSnap(ctx, "v1", "s01"); err != nil || s.State != SnapActive {
+		t.Fatalf("fork parent: %+v %v; want active", s, err)
+	}
+	if _, err := cat.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s01", Target: "v2", RequestID: "f"}); err != nil {
+		t.Fatalf("fork retry: %v", err)
+	}
+	res, err = cat.Retain(ctx, "v1", false)
+	if err != nil || fmt.Sprint(res.Deleted) != "[s01]" {
+		t.Fatalf("after the fork completed: deleted=%v %v; want s01 (s00 is pinned)", res.Deleted, err)
+	}
+}

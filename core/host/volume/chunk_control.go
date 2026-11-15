@@ -214,7 +214,7 @@ func chunkErrorCode(err error) (int, string, bool) {
 
 func catalogStatus(code string) int {
 	switch code {
-	case chunkstore.CodeInvalidName, chunkstore.CodeInvalidLabel:
+	case chunkstore.CodeInvalidName, chunkstore.CodeInvalidLabel: // RED: class and policy errors fall to 409
 		return http.StatusBadRequest
 	case chunkstore.CodeSnapshotNotFound:
 		return http.StatusNotFound
@@ -463,6 +463,11 @@ func (c *chunkControl) Cut(ctx context.Context, volumeID string, minLSN uint64) 
 // for the name gets snapshot_exists, both without cutting. Only a free name
 // is cut, and the HEAD that cut installed is stored.
 func (c *chunkControl) Snapshot(ctx context.Context, volumeID string, req ChunkSnapshotRequest) (chunkstore.SnapshotInfo, error) {
+	// Admit the request before anything can cut: an invalid class must
+	// not advance HEAD (review of #142).
+	if red := true; !red { // RED: the class is checked only after the cut
+		return chunkstore.SnapshotInfo{}, chunkstore.ValidateSnapshotClass(req.Class)
+	}
 	sreq := chunkstore.SnapshotRequest{Name: req.Name, RequestID: req.RequestID, Labels: req.Labels,
 		Consistency: req.Consistency, ExpiresAtNs: req.ExpiresAtNs, CreatedBy: "blockvolume", Class: req.Class}
 	if info, replayed, err := c.cat.SnapshotReplay(ctx, volumeID, sreq); err != nil || replayed {

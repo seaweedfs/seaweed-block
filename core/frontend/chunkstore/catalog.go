@@ -220,6 +220,8 @@ type SnapshotInfo struct {
 	Replayed      bool              `json:"replayed"`
 	Class         string            `json:"class"`
 
+	attempt string // the attempt the name resolved to, when read by name
+
 	head storage.ChunkHead
 	geo  Geometry
 }
@@ -282,6 +284,9 @@ type Catalog struct {
 	// OpDeadline bounds a snapshot or fork (DefaultOpDeadline when zero).
 	OpDeadline time.Duration
 	now        func() time.Time
+	// retainHook, when set, runs at the named stages of a Retain pass (a
+	// test seam for interleavings; see hookPlanned).
+	retainHook func(stage, name string)
 }
 
 // NewCatalog returns the catalog for the chunk base directory base (the
@@ -606,6 +611,7 @@ func (c *Catalog) resolveSnap(ctx context.Context, vol, name string) (snapRef, b
 	if err != nil {
 		return snapRef{}, false, err
 	}
+	info.attempt = rec.Attempt
 	ref.entry, ref.info = e, info
 	return ref, true, nil
 }
@@ -808,7 +814,7 @@ func (c *Catalog) CreateSnapshot(ctx context.Context, vol string, req SnapshotRe
 	if consistency == "" {
 		consistency = "crash"
 	}
-	if err := validSnapshotClass(req.Class); err != nil {
+	if err := ValidateSnapshotClass(req.Class); err != nil {
 		return SnapshotInfo{}, err
 	}
 	if head.Gen == 0 {
@@ -1160,12 +1166,31 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 		}
 	}
 
-	readAt := c.now()
-	snap, err := c.readSnap(ctx, req.Source, req.Snapshot)
+	// Hold the parent attempt before reading it (review of #142): a
+	// retention pass that marks it deleting reads the holds after its
+	// mark, so either it sees this hold and keeps the snapshot, or this
+	// read sees the attempt deleting and the fork refuses before anything
+	// is installed.
+	srcRoot, err := c.volRoot(req.Source)
 	if err != nil {
 		return ForkResult{}, err
 	}
+	held, err := c.holdForkParent(ctx, srcRoot, req)
+	if err != nil {
+		return ForkResult{}, err
+	}
+	readAt := c.now()
+	snap, err := c.readSnap(ctx, req.Source, req.Snapshot)
+	if err != nil {
+		c.dropForkHold(ctx, srcRoot, req, held)
+		return ForkResult{}, err
+	}
+	if snap.attempt != held {
+		c.dropForkHold(ctx, srcRoot, req, held)
+		return ForkResult{}, catErr(CodeOutcomeUnknown, true, nil, "fork %s: snapshot %s/%s changed while it was being held; retry", req.Target, req.Source, req.Snapshot)
+	}
 	if snap.State == SnapDeleting {
+		c.dropForkHold(ctx, srcRoot, req, held)
 		return ForkResult{}, catErr(CodeSnapshotDeleting, false, nil, "snapshot %s/%s is being deleted", req.Source, req.Snapshot)
 	}
 	if snap.geo == (Geometry{}) {
@@ -1261,7 +1286,36 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 	if outcome != createUnsettled {
 		c.dropIntent(ctx, dstRoot, id) // confirmed, or refused for good
 	}
+	c.dropForkHold(ctx, srcRoot, req, held) // the fork has its HEAD: the parent is no longer needed for it
 	return forkResult(existing, outcome != createdNow), nil
+}
+
+// holdForkParent records that fork req needs the attempt its snapshot name
+// resolves to now, and returns that attempt ("" when the name resolves to
+// nothing; the read that follows then refuses).
+func (c *Catalog) holdForkParent(ctx context.Context, srcRoot string, req ForkRequest) (string, error) {
+	ref, ok, err := c.resolveSnap(ctx, req.Source, req.Snapshot)
+	if err != nil || !ok {
+		return "", err
+	}
+	if red := true; red { // RED: no hold recorded
+		return ref.rec.Attempt, nil
+	}
+	now := c.now().Unix()
+	e := &filerpb.Entry{Name: req.Target, Attributes: &filerpb.FuseAttributes{Mtime: now, Crtime: now, FileMode: 0o644}}
+	if err := c.f.CreateEntry(ctx, forkHoldDir(srcRoot, req.Snapshot, ref.rec.Attempt), e, true); err != nil && !errors.Is(err, ErrExists) {
+		return "", remoteErr(err, "hold snapshot %s/%s for fork %s", req.Source, req.Snapshot, req.Target)
+	}
+	return ref.rec.Attempt, nil
+}
+
+// dropForkHold removes a completed fork's hold (best effort: a stale hold
+// is ignored once the target has a HEAD).
+func (c *Catalog) dropForkHold(ctx context.Context, srcRoot string, req ForkRequest, attempt string) {
+	if attempt == "" {
+		return
+	}
+	_ = c.f.DeleteEntry(ctx, forkHoldDir(srcRoot, req.Snapshot, attempt), req.Target, nil)
 }
 
 // AbortFork settles a dead fork for a GC sweep (W5 ruling, 2026-11-15

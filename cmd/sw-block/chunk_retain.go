@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"time"
 
@@ -86,5 +89,42 @@ func chunkRetain(args []string, stdout, stderr io.Writer) int {
 		return chunkResult("retain", map[string]any{"volumeID": volumeID, "policy": p, "policySet": true}, nil, stdout, stderr)
 	}
 	res, err := cat.Retain(ctx, volumeID, dryRun)
+	if err != nil && res.VolumeID != "" {
+		// The pass stopped part way: report what it did (confirmed
+		// deletions, the failing snapshot with whether its outcome is
+		// uncertain, what it never reached) with the error, and fail.
+		return retainPartial(res, err, stdout, stderr)
+	}
 	return chunkResult("retain", res, err, stdout, stderr)
+}
+
+// retainOutput is a retention result together with the error that
+// stopped it.
+type retainOutput struct {
+	chunkstore.RetentionResult
+	Error *chunkErrBody `json:"error,omitempty"`
+}
+
+func retainPartial(res chunkstore.RetentionResult, err error, stdout, stderr io.Writer) int {
+	if red := true; red { // RED: the partial result is discarded
+		return chunkResult("retain", nil, err, stdout, stderr)
+	}
+	body := chunkErrBody{Code: chunkstore.CodeOf(err), Message: err.Error(), Retryable: true}
+	var ce *chunkstore.CatalogError
+	if errors.As(err, &ce) {
+		body = chunkErrBody{Code: ce.Code, Message: ce.Detail(), Retryable: ce.Retryable}
+	}
+	if body.Code == "" {
+		body.Code = codeInternalCLI
+	}
+	fmt.Fprintf(stderr, "sw-block ops chunk retain: %s: %s (deleted %d, not attempted %d)\n", body.Code, body.Message, len(res.Deleted), len(res.NotAttempted))
+	out, mErr := json.Marshal(retainOutput{RetentionResult: res, Error: &body})
+	if mErr != nil {
+		fmt.Fprintf(stderr, "sw-block ops chunk retain: %v\n", mErr)
+		return chunkExitFailed
+	}
+	if wErr := writeAll(stdout, append(out, '\n')); wErr != nil {
+		fmt.Fprintf(stderr, "sw-block ops chunk retain: write the result: %v\n", wErr)
+	}
+	return chunkExitFailed
 }

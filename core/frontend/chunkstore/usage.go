@@ -18,9 +18,13 @@ import (
 // NumBlocks (ChunkRef carries no size).
 //
 //   - LiveBytes: the chunks HEAD references.
-//   - per snapshot, ExclusiveBytes: the chunks that snapshot references and
-//     neither HEAD nor any other live snapshot does, i.e. what deleting it
-//     would let GC reclaim.
+//   - per snapshot, ExclusiveBytes: the chunks that snapshot references
+//     and no other holder does, where the holders are this volume's HEAD
+//     and live snapshots AND every other volume's HEAD and live snapshots
+//     (a fork's "@owner/key" references are resolved to the owner's
+//     chunk). These are the bytes deleting that snapshot makes eligible
+//     for GC; GC still keeps them through its grace period and while any
+//     in-flight intent names them, so they are not reclaimed at once.
 //   - StoredBytes: the volume's chunk-key bindings in the filer (what is
 //     stored now, referenced or not). A binding a manifest references is
 //     counted at its exact (clipped) size; any other binding at the full
@@ -95,38 +99,66 @@ func (c *Catalog) Usage(ctx context.Context, vol string) (VolumeUsage, error) {
 		return VolumeUsage{}, err
 	}
 
-	// holders counts, per chunk key, how many of HEAD and the live
-	// snapshots reference it; size is each referenced key's byte size.
+	// holders counts, per chunk identity (owner volume + key), how many
+	// HEADs and live snapshots of any volume reference it; size is each
+	// identity's byte size as this volume's geometry indexes it.
 	holders := map[string]int{}
 	size := map[string]uint64{}
-	addHolder := func(h storage.ChunkHead) {
+	addHolder := func(owner string, h storage.ChunkHead, sized bool) {
 		seen := map[string]bool{}
 		for idx, ref := range h.Chunks {
-			size[ref.Key] = chunkSize(g, idx)
-			if !seen[ref.Key] {
-				seen[ref.Key] = true
-				holders[ref.Key]++
+			id := chunkIdentity(owner, ref.Key)
+			if sized {
+				size[id] = chunkSize(g, idx)
+			}
+			if !seen[id] {
+				seen[id] = true
+				holders[id]++
 			}
 		}
 	}
-	addHolder(head)
+	addHolder(vol, head, true)
 	for idx := range head.Chunks {
 		u.LiveChunks++
 		u.LiveBytes += chunkSize(g, idx)
 	}
 	for _, s := range snaps {
-		addHolder(s.Head())
+		addHolder(vol, s.Head(), true)
+	}
+	others, err := c.ListVolumes(ctx)
+	if err != nil {
+		return VolumeUsage{}, err
+	}
+	for _, other := range others {
+		if other == vol {
+			continue
+		}
+		oh, has, err := c.ReadHead(ctx, other)
+		if err != nil {
+			return VolumeUsage{}, err
+		}
+		if has {
+			addHolder(other, oh, false)
+		}
+		osnaps, err := c.allSnapshots(ctx, other)
+		if err != nil {
+			return VolumeUsage{}, err
+		}
+		for _, s := range osnaps {
+			addHolder(other, s.Head(), false)
+		}
 	}
 	for _, s := range snaps {
 		su := SnapshotUsage{Name: s.Name, CreatedNs: s.CreatedNs, Class: s.Class, Pinned: s.Pinned(), Chunks: len(s.Head().Chunks)}
 		seen := map[string]bool{}
 		for _, ref := range s.Head().Chunks {
-			if seen[ref.Key] {
+			id := chunkIdentity(vol, ref.Key)
+			if seen[id] {
 				continue
 			}
-			seen[ref.Key] = true
-			if holders[ref.Key] == 1 {
-				su.ExclusiveBytes += size[ref.Key]
+			seen[id] = true
+			if holders[id] == 1 {
+				su.ExclusiveBytes += size[id]
 			}
 		}
 		u.Snapshots = append(u.Snapshots, su)
@@ -162,7 +194,7 @@ func (c *Catalog) Usage(ctx context.Context, vol string) (VolumeUsage, error) {
 				continue
 			}
 			u.StoredBindings++
-			if n, ok := size[key]; ok {
+			if n, ok := size[chunkIdentity(vol, key)]; ok {
 				u.StoredBytes += n
 			} else {
 				u.StoredBytes += u.ChunkBytes
@@ -173,4 +205,19 @@ func (c *Catalog) Usage(ctx context.Context, vol string) (VolumeUsage, error) {
 			return u, nil
 		}
 	}
+}
+
+// chunkIdentity names the chunk a ref in volume vol points at: an
+// owner-qualified "@owner/key" (a fork's reference) is owner's key,
+// anything else is vol's.
+func chunkIdentity(vol, key string) string {
+	if red := true; red { // RED: owner-qualified refs not resolved
+		return vol + "\x00" + key
+	}
+	if strings.HasPrefix(key, "@") {
+		if owner, rest, ok := strings.Cut(key[1:], "/"); ok {
+			return owner + "\x00" + rest
+		}
+	}
+	return vol + "\x00" + key
 }
