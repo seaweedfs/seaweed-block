@@ -113,6 +113,13 @@ type WriteObserver interface {
 	Sync(ctx context.Context, targetLSN uint64) error
 }
 
+// ShipLSNRebaser is implemented by a write observer that orders writes by
+// LSN from a next LSN it cached from the store. Whoever moves the store's
+// next LSN (a restored host's frontier seed) rebases it before I/O.
+type ShipLSNRebaser interface {
+	RebaseShipLSN(lsn uint64) error
+}
+
 // BatchWriteObserver lets a replication observer accept a contiguous batch of
 // locally-committed blocks before waiting for acknowledgement. StorageBackend
 // only enables strict-ACK WriteBatch when the installed observer implements
@@ -330,6 +337,23 @@ func (b *StorageBackend) SetWriteObserver(obs WriteObserver) {
 	b.mu.Lock()
 	b.observer = obs
 	b.mu.Unlock()
+	// The store's frontier may have been seeded before the observer was
+	// installed: start its ship order at the store's next LSN.
+	if err := b.rebaseShipLSN(); err != nil {
+		log.Printf("durable: write observer ship LSN: %v", err)
+	}
+}
+
+// rebaseShipLSN moves an LSN-ordering observer to the store's next LSN.
+func (b *StorageBackend) rebaseShipLSN() error {
+	b.mu.Lock()
+	obs := b.observer
+	b.mu.Unlock()
+	r, ok := obs.(ShipLSNRebaser)
+	if !ok {
+		return nil
+	}
+	return r.RebaseShipLSN(b.storage.NextLSN())
 }
 
 // SetWriteAckPolicy configures whether observer acknowledgement participates
