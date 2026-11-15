@@ -131,11 +131,9 @@ func (s *services) ReportHeartbeat(ctx context.Context, r *control.HeartbeatRepo
 		return nil, err
 	}
 	msg := heartbeatFromWire(r)
-	before := s.host.slotUnhealthyReasons(msg)
-	if err := s.host.obs.IngestHeartbeat(msg); err != nil {
+	if err := s.host.ingestHeartbeatRecordingHealth(msg); err != nil {
 		return nil, fmt.Errorf("ingest: %w", err)
 	}
-	s.host.recordUnhealthyTransitions(msg, before)
 	return &control.HeartbeatAck{
 		AcceptedAt: timestamppb.Now(),
 		Sequence:   s.seq.Add(1),
@@ -733,47 +731,34 @@ func statusUnhealthyReplicas(obs *authority.ObservationHost, volumeID string, re
 	return out
 }
 
-// slotUnhealthyReasons returns the stored unhealthy reason of every slot
-// the heartbeat reports, before it is ingested.
-func (h *Host) slotUnhealthyReasons(msg authority.HeartbeatMessage) map[string]string {
-	if h.obs == nil {
-		return nil
+// ingestHeartbeatRecordingHealth ingests a heartbeat and records a
+// replica_unhealthy / replica_unhealthy_cleared event for every slot
+// whose unhealthy reason the accepted report changed (#128 rule 6). The
+// transitions come from the accepted store mutation itself, so a refused
+// report records nothing and expiry never fabricates a clear. healthMu
+// keeps the events in accepted order across concurrent heartbeats.
+func (h *Host) ingestHeartbeatRecordingHealth(msg authority.HeartbeatMessage) error {
+	h.healthMu.Lock()
+	defer h.healthMu.Unlock()
+	transitions, err := h.obs.IngestHeartbeatWithHealthTransitions(msg)
+	if err != nil {
+		return err
 	}
-	out := make(map[string]string, len(msg.Slots))
-	for _, s := range msg.Slots {
-		prev, _ := h.obs.Store().SlotFact(s.VolumeID, s.ReplicaID)
-		out[s.VolumeID+"/"+s.ReplicaID] = prev.UnhealthyReason
-	}
-	return out
-}
-
-// recordUnhealthyTransitions records an event when a slot's stored
-// unhealthy reason changed with this heartbeat: set, changed, or cleared
-// (#128 rule 6). It compares stored facts, so an ingest the store
-// refused records nothing.
-func (h *Host) recordUnhealthyTransitions(msg authority.HeartbeatMessage, before map[string]string) {
-	if h.obs == nil {
-		return
-	}
-	for _, s := range msg.Slots {
-		cur, _ := h.obs.Store().SlotFact(s.VolumeID, s.ReplicaID)
-		prev := before[s.VolumeID+"/"+s.ReplicaID]
-		if cur.UnhealthyReason == prev {
-			continue
-		}
-		if cur.UnhealthyReason == "" {
+	for _, tr := range transitions {
+		if tr.New == "" {
 			h.events.append(ops.ClusterEvent{
-				VolumeID: s.VolumeID, ReplicaID: s.ReplicaID,
+				VolumeID: tr.VolumeID, ReplicaID: tr.ReplicaID,
 				Type: "replica_unhealthy_cleared", Severity: "info",
-				Message: "replica reported healthy again", OldValue: prev,
+				Message: "replica reported healthy again", OldValue: tr.Old,
 			})
 			continue
 		}
 		h.events.append(ops.ClusterEvent{
-			VolumeID: s.VolumeID, ReplicaID: s.ReplicaID,
+			VolumeID: tr.VolumeID, ReplicaID: tr.ReplicaID,
 			Type: "replica_unhealthy", Severity: "warning",
-			Message: "replica reported an explicit unhealthy fact: " + cur.UnhealthyReason,
-			Reason:  cur.UnhealthyReason, OldValue: prev, NewValue: cur.UnhealthyReason,
+			Message: "replica reported an explicit unhealthy fact: " + tr.New,
+			Reason:  tr.New, OldValue: tr.Old, NewValue: tr.New,
 		})
 	}
+	return nil
 }

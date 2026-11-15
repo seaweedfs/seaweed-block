@@ -124,12 +124,12 @@ func (w *recoveryWatchdog) reason(ready bool, readyEpoch uint64, roleAdmissionFa
 	if w.primarySince.IsZero() {
 		return "", false
 	}
-	if ready { // RED: old order, epoch ignored
-		w.timedOut, w.readySeen = false, true
-		return "", false
-	}
 	if roleAdmissionFailed {
 		return UnhealthyRoleAdmission, false
+	}
+	if ready && readyEpoch == w.primaryEpoch {
+		w.timedOut, w.readySeen = false, true
+		return "", false
 	}
 	if w.readySeen {
 		return "", false
