@@ -141,6 +141,11 @@ func TestStatusServer_ChunkSuccessBodiesUseSpecFields(t *testing.T) {
 	if w.Code != 200 || ctl.lastMin != 7 || ctl.deadline <= 0 || ctl.deadline > time.Second {
 		t.Fatalf("cut: %d %s (minLSN %d, deadline %v)", w.Code, w.Body, ctl.lastMin, ctl.deadline)
 	}
+	// A timeoutMs too large for a Duration is clamped to OpDeadline, not overflowed.
+	if w := serve(t, s, http.MethodPost, "/chunk/cut", `{"volumeID":"v1","timeoutMs":9223372036855}`, ""); w.Code != 200 ||
+		ctl.deadline < chunkstore.DefaultOpDeadline-time.Minute || ctl.deadline > chunkstore.DefaultOpDeadline {
+		t.Fatalf("cut with a huge timeoutMs: %d (deadline %v), want OpDeadline", w.Code, ctl.deadline)
+	}
 	wantKeys(t, "cut", jsonKeys(t, w.Body.Bytes()), "volumeID", "cutLSN", "headGen", "headEpoch", "holder", "noop", "fullHash",
 		"candidateChunks", "uploadedChunks", "uploadedBytes", "zeroedChunks", "barrierPauseNs", "uploadNs", "casNs", "totalNs")
 
@@ -208,6 +213,11 @@ func TestStatusServer_ChunkErrorBodyIsTyped(t *testing.T) {
 		{&chunkstore.CatalogError{Code: chunkstore.CodeDeadlineExceeded, Message: "m", Retryable: true}, "deadline_exceeded", 503, true},
 		{context.DeadlineExceeded, "deadline_exceeded", 503, true},
 		{errors.New("something else"), "internal", 500, false},
+		// A held CAS whose re-proposal was refused: the uncertainty is reported.
+		{fmt.Errorf("x (%w); re-proposal refused: %w", storage.ErrChunkCASOutcomeUnknown,
+			fmt.Errorf("%w: %w", storage.ErrChunkCaptureRefused, durable.ErrChunkNotPrimary)), "outcome_unknown", 503, true},
+		{fmt.Errorf("x (%w); re-proposal refused: %w", storage.ErrChunkCASOutcomeUnknown,
+			fmt.Errorf("%w: %w", storage.ErrChunkCaptureRefused, durable.ErrChunkEpochStale)), "outcome_unknown", 503, true},
 	}
 	for _, c := range cases {
 		ctl := &fakeChunkControl{err: c.err}
@@ -239,14 +249,18 @@ func TestStatusServer_ChunkRequestGuards(t *testing.T) {
 	if w := serve(t, s, http.MethodPost, "/chunk/cut", `{"volumeID":"v9"}`, ""); w.Code != 404 || code(w) != "volume_not_served" {
 		t.Fatalf("other volume: %d %s", w.Code, w.Body)
 	}
-	if w := serve(t, s, http.MethodGet, "/chunk/cut", "", ""); w.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("GET on a POST route: %d", w.Code)
+	// Transport errors are JSON too (ruling of 2026-11-15).
+	if w := serve(t, s, http.MethodGet, "/chunk/cut", "", ""); w.Code != http.StatusMethodNotAllowed || code(w) != "method_not_allowed" {
+		t.Fatalf("GET on a POST route: %d %s", w.Code, w.Body)
 	}
-	if w := serve(t, s, http.MethodPost, "/chunk/cut", `{"volumeID":"v1"}`, "10.0.0.9:4000"); w.Code != http.StatusForbidden {
-		t.Fatalf("non-loopback client: %d", w.Code)
+	if w := serve(t, s, http.MethodPost, "/chunk/cut", `{"volumeID":"v1"}`, "10.0.0.9:4000"); w.Code != http.StatusForbidden || code(w) != "forbidden" {
+		t.Fatalf("non-loopback client: %d %s", w.Code, w.Body)
 	}
-	if w := serve(t, s, http.MethodPost, "/chunk/cut", `{not json`, ""); w.Code != 400 {
-		t.Fatalf("bad body: %d", w.Code)
+	if w := serve(t, s, http.MethodPost, "/chunk/cut", `{not json`, ""); w.Code != 400 || code(w) != "bad_request" {
+		t.Fatalf("bad body: %d %s", w.Code, w.Body)
+	}
+	if w := serve(t, s, http.MethodGet, "/chunk/snapshots?volume=v1&limit=x", "", ""); w.Code != 400 || code(w) != "bad_request" {
+		t.Fatalf("bad limit: %d %s", w.Code, w.Body)
 	}
 	unwired := chunkServer(t, nil, true)
 	if w := serve(t, unwired, http.MethodPost, "/chunk/cut", `{"volumeID":"v1"}`, ""); w.Code != 409 || code(w) != "not_chunk_volume" {

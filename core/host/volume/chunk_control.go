@@ -118,7 +118,8 @@ type chunkErrorBody struct {
 }
 
 // The codes the routes add to the catalog's (B9 §2.2 plus the 2026-11-15
-// rulings: awaiting_assignment, internal).
+// rulings: awaiting_assignment, internal, and the transport errors
+// bad_request, method_not_allowed, forbidden).
 const (
 	codeVolumeNotServed    = "volume_not_served"
 	codeNotPrimary         = "not_primary"
@@ -129,6 +130,9 @@ const (
 	codeHeadConflict       = "head_conflict"
 	codeClosing            = "closing"
 	codeInternal           = "internal"
+	codeBadRequest         = "bad_request"
+	codeMethodNotAllowed   = "method_not_allowed"
+	codeForbidden          = "forbidden"
 )
 
 const chunkBodyLimit = 64 << 10
@@ -177,9 +181,9 @@ func writeChunkFailure(w http.ResponseWriter, err error) {
 }
 
 // chunkErrorCode maps an operation's error to (HTTP status, code,
-// retryable). The most specific cause wins: a refused capture reports why
-// it was refused, an unresolved CAS reports outcome_unknown even when the
-// re-read failed on the remote.
+// retryable). An unresolved CAS reports outcome_unknown even when the
+// attempt was also refused or the re-read failed on the remote; otherwise
+// a refused capture reports why it was refused.
 func chunkErrorCode(err error) (int, string, bool) {
 	var ce *chunkstore.CatalogError
 	switch {
@@ -187,6 +191,10 @@ func chunkErrorCode(err error) (int, string, bool) {
 		return catalogStatus(ce.Code), ce.Code, ce.Retryable
 	case errors.Is(err, storage.ErrChunkLayerFenced):
 		return http.StatusConflict, codeFenced, false
+	case errors.Is(err, storage.ErrChunkCASOutcomeUnknown):
+		// An earlier CAS may still land: report that even when this
+		// attempt was also refused (the re-proposal re-checks admission).
+		return http.StatusServiceUnavailable, chunkstore.CodeOutcomeUnknown, true
 	case errors.Is(err, durable.ErrChunkAwaitingAuthority):
 		return http.StatusConflict, codeAwaitingAssignment, true
 	case errors.Is(err, durable.ErrChunkNotPrimary):
@@ -195,8 +203,6 @@ func chunkErrorCode(err error) (int, string, bool) {
 		return http.StatusConflict, codeEpochStale, false
 	case errors.Is(err, storage.ErrChunkBaseInstalling):
 		return http.StatusConflict, codeBaseInstalling, true
-	case errors.Is(err, storage.ErrChunkCASOutcomeUnknown):
-		return http.StatusServiceUnavailable, chunkstore.CodeOutcomeUnknown, true
 	case errors.Is(err, storage.ErrChunkHeadPrecondition):
 		return http.StatusConflict, codeHeadConflict, true
 	case errors.Is(err, storage.ErrChunkRemoteUnavailable):
@@ -226,17 +232,16 @@ func catalogStatus(code string) int {
 }
 
 // chunkAdmit runs the transport checks every route shares: method, then
-// client. Like a malformed request, these are answered in plain text as
-// on the rest of the listener; the typed JSON body is for the operation's
-// own outcome (B9 §2.2 has no codes for them).
+// client. Like every /chunk/* response, they answer in JSON (ruling of
+// 2026-11-15); the rest of the listener keeps plain text.
 func (s *StatusServer) chunkAdmit(w http.ResponseWriter, r *http.Request, method string) bool {
 	if r.Method != method {
 		w.Header().Set("Allow", method)
-		http.Error(w, r.URL.Path+" requires "+method, http.StatusMethodNotAllowed)
+		writeChunkErr(w, http.StatusMethodNotAllowed, codeMethodNotAllowed, false, "%s requires %s", r.URL.Path, method)
 		return false
 	}
 	if !s.externalAccessAllowed() && !isLoopbackRemote(r.RemoteAddr) {
-		http.Error(w, "chunk control restricted to loopback", http.StatusForbidden)
+		writeChunkErr(w, http.StatusForbidden, codeForbidden, false, "chunk control restricted to loopback")
 		return false
 	}
 	return true
@@ -263,7 +268,7 @@ func decodeChunkBody(w http.ResponseWriter, r *http.Request, v any) bool {
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, chunkBodyLimit))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
-		http.Error(w, "decode "+r.URL.Path+" request: "+err.Error(), http.StatusBadRequest)
+		writeChunkErr(w, http.StatusBadRequest, codeBadRequest, false, "decode %s request: %v", r.URL.Path, err)
 		return false
 	}
 	return true
@@ -272,8 +277,8 @@ func decodeChunkBody(w http.ResponseWriter, r *http.Request, v any) bool {
 // chunkContext bounds a long operation by min(timeoutMs, OpDeadline).
 func chunkContext(r *http.Request, timeoutMs int64) (context.Context, context.CancelFunc) {
 	d := chunkstore.DefaultOpDeadline
-	if t := time.Duration(timeoutMs) * time.Millisecond; timeoutMs > 0 && t < d {
-		d = t
+	if timeoutMs > 0 && timeoutMs < d.Milliseconds() { // compare before converting: no overflow
+		d = time.Duration(timeoutMs) * time.Millisecond
 	}
 	return context.WithTimeout(r.Context(), d)
 }
@@ -346,7 +351,7 @@ func (s *StatusServer) handleChunkSnapshots(w http.ResponseWriter, r *http.Reque
 	if v := q.Get("limit"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 0 {
-			http.Error(w, fmt.Sprintf("limit=%q: a non-negative integer", v), http.StatusBadRequest)
+			writeChunkErr(w, http.StatusBadRequest, codeBadRequest, false, "limit=%q: a non-negative integer", v)
 			return
 		}
 		opts.Limit = n
@@ -354,7 +359,7 @@ func (s *StatusServer) handleChunkSnapshots(w http.ResponseWriter, r *http.Reque
 	if v := q.Get("includeDeleting"); v != "" {
 		b, err := strconv.ParseBool(v)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("includeDeleting=%q: true or false", v), http.StatusBadRequest)
+			writeChunkErr(w, http.StatusBadRequest, codeBadRequest, false, "includeDeleting=%q: true or false", v)
 			return
 		}
 		opts.IncludeDeleting = b
@@ -430,8 +435,10 @@ func (s *StatusServer) handleChunkDetach(w http.ResponseWriter, r *http.Request)
 
 // ChunkProvider is the durable provider's chunk surface the control uses.
 type ChunkProvider interface {
-	// CutVolume takes one quiesced cut and returns what it installed.
-	CutVolume(ctx context.Context, volumeID string) (storage.ChunkCutResult, error)
+	// CutVolume takes one quiesced cut and returns what it installed; with
+	// minLSN > 0 it refuses an LSN never written before publishing, and
+	// fails unless the cut reaches minLSN.
+	CutVolume(ctx context.Context, volumeID string, minLSN uint64) (storage.ChunkCutResult, error)
 	// DetachVolume stops the volume's I/O and periodic cuts and publishes
 	// the detached final cut; it also returns the last written LSN.
 	DetachVolume(ctx context.Context, volumeID string) (storage.ChunkCutResult, uint64, error)
@@ -449,12 +456,9 @@ func NewChunkControl(p ChunkProvider, cat *chunkstore.Catalog) ChunkControl {
 }
 
 func (c *chunkControl) Cut(ctx context.Context, volumeID string, minLSN uint64) (ChunkCutResponse, error) {
-	r, err := c.p.CutVolume(ctx, volumeID)
+	r, err := c.p.CutVolume(ctx, volumeID, minLSN)
 	if err != nil {
 		return ChunkCutResponse{}, err
-	}
-	if r.H < minLSN {
-		return ChunkCutResponse{}, fmt.Errorf("chunk cut of %s reached LSN %d, below minLSN %d (never written)", volumeID, r.H, minLSN)
 	}
 	st := r.Stats
 	return ChunkCutResponse{VolumeID: volumeID, CutLSN: r.H, HeadGen: r.Head.Gen, HeadEpoch: r.Head.Epoch, Holder: r.Head.Holder,
@@ -463,23 +467,22 @@ func (c *chunkControl) Cut(ctx context.Context, volumeID string, minLSN uint64) 
 		UploadNs: st.UploadNs, CasNs: st.CASNs, TotalNs: st.TotalNs}, nil
 }
 
-// Snapshot validates the request, cuts, and stores the HEAD that cut
-// installed (§3.2). A retry with the same request id returns the first
-// snapshot even though it cut again.
+// Snapshot resolves the request against the catalog first (§3.2 step 1):
+// a retry of a recorded request returns that snapshot and another request
+// for the name gets snapshot_exists, both without cutting. Only a free name
+// is cut, and the HEAD that cut installed is stored.
 func (c *chunkControl) Snapshot(ctx context.Context, volumeID string, req ChunkSnapshotRequest) (chunkstore.SnapshotInfo, error) {
-	if err := chunkstore.CheckSnapshotName(req.Name); err != nil {
-		return chunkstore.SnapshotInfo{}, err
+	sreq := chunkstore.SnapshotRequest{Name: req.Name, RequestID: req.RequestID, Labels: req.Labels,
+		Consistency: req.Consistency, ExpiresAtNs: req.ExpiresAtNs, CreatedBy: "blockvolume"}
+	if info, replayed, err := c.cat.SnapshotReplay(ctx, volumeID, sreq); err != nil || replayed {
+		return info, err
 	}
-	if req.RequestID == "" {
-		return chunkstore.SnapshotInfo{}, &chunkstore.CatalogError{Code: chunkstore.CodeInvalidName, Message: "a request id is required"}
-	}
-	r, err := c.p.CutVolume(ctx, volumeID)
+	r, err := c.p.CutVolume(ctx, volumeID, 0)
 	if err != nil {
 		return chunkstore.SnapshotInfo{}, err
 	}
-	return c.cat.CreateSnapshot(ctx, volumeID, chunkstore.SnapshotRequest{Name: req.Name, RequestID: req.RequestID,
-		Labels: req.Labels, Consistency: req.Consistency, ExpiresAtNs: req.ExpiresAtNs, CreatedBy: "blockvolume",
-		SourceReadAt: time.Now()}, r.Head)
+	sreq.SourceReadAt = time.Now()
+	return c.cat.CreateSnapshot(ctx, volumeID, sreq, r.Head)
 }
 
 func (c *chunkControl) ListSnapshots(ctx context.Context, volumeID string, opts chunkstore.ListOptions) ([]chunkstore.SnapshotInfo, string, error) {

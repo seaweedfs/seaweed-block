@@ -9,14 +9,20 @@ import (
 )
 
 type fakeChunkProvider struct {
-	cut    storage.ChunkCutResult
-	detach storage.ChunkCutResult
-	last   uint64
-	cuts   int
+	cut     storage.ChunkCutResult
+	cutErr  error
+	detach  storage.ChunkCutResult
+	last    uint64
+	cuts    int
+	lastMin uint64
 }
 
-func (f *fakeChunkProvider) CutVolume(context.Context, string) (storage.ChunkCutResult, error) {
+func (f *fakeChunkProvider) CutVolume(_ context.Context, _ string, minLSN uint64) (storage.ChunkCutResult, error) {
 	f.cuts++
+	f.lastMin = minLSN
+	if f.cutErr != nil {
+		return storage.ChunkCutResult{}, f.cutErr
+	}
 	return f.cut, nil
 }
 
@@ -76,12 +82,9 @@ func TestChunkControl_SnapshotStoresTheCutHead(t *testing.T) {
 func TestChunkControl_CutMinLSNAndDetach(t *testing.T) {
 	ctx := context.Background()
 	fp, ctl := adapterFixture(t)
-	if _, err := ctl.Cut(ctx, "v1", 10); err == nil {
-		t.Fatal("a cut that reached LSN 9 satisfied minLSN 10")
-	}
 	r, err := ctl.Cut(ctx, "v1", 9)
-	if err != nil || r != (ChunkCutResponse{VolumeID: "v1", CutLSN: 9, HeadGen: 3, HeadEpoch: 2, Holder: "r1"}) {
-		t.Fatalf("cut: %+v %v", r, err)
+	if err != nil || fp.lastMin != 9 || r != (ChunkCutResponse{VolumeID: "v1", CutLSN: 9, HeadGen: 3, HeadEpoch: 2, Holder: "r1"}) {
+		t.Fatalf("cut: %+v %v (provider got minLSN %d)", r, err, fp.lastMin)
 	}
 	fp.detach = storage.ChunkCutResult{H: 12, Head: storage.ChunkHead{Gen: 4, Epoch: 2, State: storage.ChunkHeadDetached}}
 	fp.last = 12
