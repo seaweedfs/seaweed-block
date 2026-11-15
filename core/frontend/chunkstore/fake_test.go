@@ -1,0 +1,144 @@
+package chunkstore
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"path"
+	"sync"
+
+	"google.golang.org/protobuf/proto"
+
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/filerpb"
+)
+
+// fakeFiler is an in-memory filer with the same precondition semantics as
+// seaweed-mono's UpdateEntry (validateUpdateEntryPreconditions) and
+// CreateEntry(o_excl). It records every entry ever written so tests can
+// check that no HEAD or snapshot entry carries chunks.
+type fakeFiler struct {
+	mu      sync.Mutex
+	entries map[string]*filerpb.Entry
+	written []*filerpb.Entry
+
+	// failUpdate, if set, is called before an UpdateEntry is applied; a
+	// non-nil return fails the call and the update is NOT applied.
+	failUpdate func(p string) error
+	// failUpdateAfterApply, if set, is called after an UpdateEntry was
+	// applied; a non-nil return is reported to the caller (ambiguous error).
+	failUpdateAfterApply func(p string) error
+	updates              int
+}
+
+func newFakeFiler() *fakeFiler { return &fakeFiler{entries: map[string]*filerpb.Entry{}} }
+
+func (f *fakeFiler) LookupEntry(_ context.Context, dir, name string) (*filerpb.Entry, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	e, ok := f.entries[path.Join(dir, name)]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return proto.Clone(e).(*filerpb.Entry), nil
+}
+
+func (f *fakeFiler) CreateEntry(_ context.Context, dir string, e *filerpb.Entry, oExcl bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p := path.Join(dir, e.Name)
+	if _, ok := f.entries[p]; ok && oExcl {
+		return fmt.Errorf("%w: %s", ErrExists, p)
+	}
+	c := proto.Clone(e).(*filerpb.Entry)
+	f.entries[p] = c
+	f.written = append(f.written, proto.Clone(e).(*filerpb.Entry))
+	return nil
+}
+
+func (f *fakeFiler) UpdateEntry(_ context.Context, dir string, e *filerpb.Entry, expected map[string][]byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p := path.Join(dir, e.Name)
+	if f.failUpdate != nil {
+		if err := f.failUpdate(p); err != nil {
+			return err
+		}
+	}
+	cur, ok := f.entries[p]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrNotFound, p)
+	}
+	for k, want := range expected {
+		got, has := cur.Extended[k]
+		if has && !bytes.Equal(got, want) || !has && len(want) > 0 {
+			return fmt.Errorf("%w: extended %q changed", ErrPrecondition, k)
+		}
+	}
+	f.entries[p] = proto.Clone(e).(*filerpb.Entry)
+	f.written = append(f.written, proto.Clone(e).(*filerpb.Entry))
+	f.updates++
+	if f.failUpdateAfterApply != nil {
+		if err := f.failUpdateAfterApply(p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// bumpExtended mutates a stored entry's extended key, as another writer would.
+func (f *fakeFiler) bumpExtended(p, key, val string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.entries[p].Extended[key] = []byte(val)
+}
+
+func (f *fakeFiler) allWritten() []*filerpb.Entry {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]*filerpb.Entry(nil), f.written...)
+}
+
+// fakeBlobs is an in-memory needle store.
+type fakeBlobs struct {
+	mu      sync.Mutex
+	data    map[string][]byte
+	next    int
+	puts    int
+	gets    int
+	failPut func(n int) error
+}
+
+func newFakeBlobs() *fakeBlobs { return &fakeBlobs{data: map[string][]byte{}} }
+
+func (b *fakeBlobs) Put(_ context.Context, d []byte) (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.puts++
+	if b.failPut != nil {
+		if err := b.failPut(b.puts); err != nil {
+			return "", err
+		}
+	}
+	b.next++
+	fid := fmt.Sprintf("3,%08x", b.next)
+	b.data[fid] = append([]byte(nil), d...)
+	return fid, nil
+}
+
+func (b *fakeBlobs) Get(_ context.Context, fid string) ([]byte, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.gets++
+	d, ok := b.data[fid]
+	if !ok {
+		return nil, errors.New("fake: no such fid " + fid)
+	}
+	return append([]byte(nil), d...), nil
+}
+
+func (b *fakeBlobs) counts() (puts, gets, stored int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.puts, b.gets, len(b.data)
+}

@@ -1,0 +1,153 @@
+// Minimal subset of SeaweedFS filer.proto (seaweed-mono 8b582399d,
+// enterprise/weed/pb/filer.proto) used by the chunkstore PoC client.
+//
+// Package, service, message names and field numbers are copied verbatim so
+// the wire format and the gRPC method paths (/filer_pb.SeaweedFiler/...)
+// match a real filer. Fields chunkstore never reads or writes are omitted;
+// protobuf keeps them as unknown fields on decode.
+//
+// Regenerate (from this directory):
+//   protoc --go_out=. --go_opt=paths=source_relative \
+//          --go-grpc_out=. --go-grpc_opt=paths=source_relative filer_subset.proto
+syntax = "proto3";
+
+package filer_pb;
+
+option go_package = "github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/filerpb";
+
+service SeaweedFiler {
+    rpc LookupDirectoryEntry (LookupDirectoryEntryRequest) returns (LookupDirectoryEntryResponse) {}
+    rpc CreateEntry (CreateEntryRequest) returns (CreateEntryResponse) {}
+    rpc UpdateEntry (UpdateEntryRequest) returns (UpdateEntryResponse) {}
+    rpc DeleteEntry (DeleteEntryRequest) returns (DeleteEntryResponse) {}
+    rpc AssignVolume (AssignVolumeRequest) returns (AssignVolumeResponse) {}
+    rpc LookupVolume (LookupVolumeRequest) returns (LookupVolumeResponse) {}
+}
+
+message LookupDirectoryEntryRequest {
+    string directory = 1;
+    string name = 2;
+}
+
+message LookupDirectoryEntryResponse {
+    Entry entry = 1;
+}
+
+message Entry {
+    string name = 1;
+    bool is_directory = 2;
+    repeated FileChunk chunks = 3;
+    FuseAttributes attributes = 4;
+    map<string, bytes> extended = 5;
+    bytes content = 9; // if not empty, the file content
+}
+
+// Only file_id is modelled: chunkstore never writes chunks, and reads them
+// only to refuse a HEAD entry that carries any.
+message FileChunk {
+    string file_id = 1;
+}
+
+message FuseAttributes {
+    uint64 file_size = 1;
+    int64 mtime = 2; // unix time in seconds
+    uint32 file_mode = 3;
+    uint32 uid = 4;
+    uint32 gid = 5;
+    int64 crtime = 6; // unix time in seconds
+    string mime = 7;
+}
+
+message CreateEntryRequest {
+    string directory = 1;
+    Entry entry = 2;
+    bool o_excl = 3;
+    bool is_from_other_cluster = 4;
+    repeated int32 signatures = 5;
+    bool skip_check_parent_directory = 6;
+}
+
+enum FilerError {
+    OK                    = 0;
+    ENTRY_NAME_TOO_LONG   = 1;
+    PARENT_IS_FILE        = 2;
+    EXISTING_IS_DIRECTORY = 3;
+    EXISTING_IS_FILE      = 4;
+    ENTRY_ALREADY_EXISTS  = 5;
+    PRECONDITION_FAILED   = 6;
+    READ_ONLY             = 7;
+}
+
+message CreateEntryResponse {
+    string error = 1;
+    FilerError error_code = 3;
+}
+
+message UpdateEntryRequest {
+    string directory = 1;
+    Entry entry = 2;
+    bool is_from_other_cluster = 3;
+    repeated int32 signatures = 4;
+    map<string, bytes> expected_extended = 5;
+}
+
+message UpdateEntryResponse {
+}
+
+message DeleteEntryRequest {
+    string directory = 1;
+    string name = 2;
+    bool is_delete_data = 4;
+    bool is_recursive = 5;
+    map<string, bytes> expected_extended = 12;
+}
+
+message DeleteEntryResponse {
+    string error = 1;
+}
+
+message AssignVolumeRequest {
+    int32 count = 1;
+    string collection = 2;
+    string replication = 3;
+    int32 ttl_sec = 4;
+    string data_center = 5;
+    string path = 6;
+    string rack = 7;
+    string disk_type = 8;
+    string data_node = 9;
+    uint64 expected_data_size = 10;
+}
+
+message AssignVolumeResponse {
+    string file_id = 1;
+    int32 count = 4;
+    string auth = 5;
+    string collection = 6;
+    string replication = 7;
+    string error = 8;
+    Location location = 9;
+    repeated Location replicas = 10;
+    bool fsync = 11;
+    FilerError error_code = 12;
+}
+
+message LookupVolumeRequest {
+    repeated string volume_ids = 1;
+}
+
+message Locations {
+    repeated Location locations = 1;
+}
+
+message Location {
+    string url = 1;
+    string public_url = 2;
+    uint32 grpc_port = 3;
+    string data_center = 4;
+    bool data_in_remote = 5;
+}
+
+message LookupVolumeResponse {
+    map<string, Locations> locations_map = 1;
+}
