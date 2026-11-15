@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -700,4 +701,141 @@ func TestWALStoreChunk_FailedRecoveryRetiresAuthorityWait(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// parkingView parks exactly one Projection call once armed, until the test
+// releases it with the projection it should return; that projection then
+// stays current.
+type parkingView struct {
+	*stubView
+	mu      sync.Mutex
+	armed   bool
+	parked  chan struct{}
+	release chan frontend.Projection
+}
+
+func (v *parkingView) arm() {
+	v.mu.Lock()
+	v.armed, v.parked, v.release = true, make(chan struct{}), make(chan frontend.Projection)
+	v.mu.Unlock()
+}
+
+func (v *parkingView) Projection() frontend.Projection {
+	v.mu.Lock()
+	if !v.armed {
+		v.mu.Unlock()
+		return v.stubView.Projection()
+	}
+	v.armed = false
+	parked, release := v.parked, v.release
+	v.mu.Unlock()
+	close(parked)
+	p := <-release
+	v.stubView.set(p)
+	return p
+}
+
+// countingRemote counts HEAD reads (an attach starts with one).
+type countingRemote struct {
+	storage.ChunkRemote
+	heads atomic.Int64
+}
+
+func (c *countingRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
+	c.heads.Add(1)
+	return c.ChunkRemote.GetHead(ctx)
+}
+
+// The window the per-tick check cannot cover: wait A has passed its tick
+// check and is reading the projection when recovery B takes the volume and
+// fails. Only the re-check under the per-volume serialization stops A.
+func TestWALStoreChunk_StaleWaiterPastTickCheckCannotAttach(t *testing.T) {
+	root := t.TempDir()
+	view := &parkingView{stubView: newStubView(frontend.Projection{VolumeID: "v1", ReplicaID: "r1"})}
+	remote := &countingRemote{ChunkRemote: storage.NewMemChunkRemote()}
+	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+		Impl: durable.ImplWALStoreChunk, StorageRoot: root, BlockSize: 4096,
+		NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
+		WALRecoveryTestDisableFlusher: true,
+		ChunkRemoteFor:                func(string) (storage.ChunkRemote, error) { return remote, nil },
+	}, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	s, err := p.EnsureStorage("v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, err := p.RecoverVolume(ctx, "v1"); err != nil { // A: ok, no authority
+		t.Fatalf("recovery A: %v", err)
+	}
+	if _, err := s.Write(5, block(0xA7)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	restore := corruptWALWrite(t, filepath.Join(root, "v1.bin"), 0xA7)
+
+	// Park A's wait inside its projection read, after its tick check.
+	view.arm()
+	select {
+	case <-view.parked:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the authority wait never read the projection")
+	}
+	if _, err := p.RecoverVolume(ctx, "v1"); !errors.Is(err, storage.ErrWALIntegrityFault) { // B
+		t.Fatalf("recovery B over a corrupt WAL record: %v; want a WAL integrity fault", err)
+	}
+	authority := healthyProj(frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 4, EndpointVersion: 2})
+	view.release <- authority // A resumes and sees authority
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		_, err = p.CaptureVolume(ctx, "v1")
+		if !errors.Is(err, durable.ErrChunkAwaitingAuthority) {
+			break // A has settled
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the stale authority wait never settled")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !errors.Is(err, durable.ErrNotChunkVolume) {
+		t.Fatalf("stale wait attached a layer after the latest recovery failed: capture %v", err)
+	}
+	if n := remote.heads.Load(); n != 0 {
+		t.Fatalf("stale wait started a remote attach (%d HEAD reads)", n)
+	}
+	be, err := p.Open(ctx, "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := be.Write(ctx, 7*4096, block(1)); err == nil {
+		t.Fatal("stale wait admitted I/O after the latest recovery failed")
+	}
+
+	// Convergence: repair, recovery C without authority, then authority.
+	restore()
+	view.set(frontend.Projection{VolumeID: "v1", ReplicaID: "r1"})
+	if _, err := p.RecoverVolume(ctx, "v1"); err != nil { // C
+		t.Fatalf("recovery C after repair: %v", err)
+	}
+	view.set(authority)
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		if _, err = be.Write(ctx, 7*4096, block(1)); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("I/O never admitted after a later successful recovery: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, err := p.CaptureVolume(ctx, "v1"); err != nil {
+		t.Fatalf("capture after convergence: %v", err)
+	}
+	readEq(t, s, 5, block(0xA7), "repaired WAL record after convergence")
 }
