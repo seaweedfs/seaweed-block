@@ -57,6 +57,7 @@ type HeartbeatSlot struct {
 	Withdrawn       bool
 	EvidenceScore   uint64
 	Incarnation     string
+	UnhealthyReason string
 	// LocalRoleClaim is the V2 "I think I am" role flag, mapped
 	// one-to-one into the V3 Observation shape without
 	// reinterpretation. Two servers each sending LocalRolePrimary
@@ -95,6 +96,7 @@ func HeartbeatToObservation(msg HeartbeatMessage) (Observation, error) {
 			Withdrawn:       s.Withdrawn,
 			EvidenceScore:   s.EvidenceScore,
 			Incarnation:     s.Incarnation,
+			UnhealthyReason: s.UnhealthyReason,
 			LocalRoleClaim:  s.LocalRoleClaim,
 		})
 	}

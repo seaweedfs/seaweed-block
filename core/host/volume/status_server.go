@@ -163,6 +163,22 @@ type StatusProjection struct {
 	// RoleAdmissionFailure (G1) explains a not-Healthy projection caused
 	// by a failed role call on the replica listener; empty otherwise.
 	RoleAdmissionFailure string `json:",omitempty"`
+	// UnhealthyReason is the slot's explicit unhealthy report (#128 rule
+	// 6), the value its heartbeat carries; empty when healthy.
+	UnhealthyReason string `json:",omitempty"`
+	// CatchUp shows a supporting replica's catch-up progress while it is
+	// not yet replica_ready; it is visible without being an alert.
+	CatchUp *CatchUpStatus `json:",omitempty"`
+}
+
+// CatchUpStatus is a supporting replica's catch-up state.
+type CatchUpStatus struct {
+	// ElapsedMs is the time since this replica was admitted as a
+	// supporting replica at its current epoch.
+	ElapsedMs int64
+	// LagLSN is the engine's H-R (primary head minus this replica's
+	// durable frontier) as last observed; 0 when unknown or caught up.
+	LagLSN uint64
 }
 
 // NewStatusServer wires a server to one volume host's view.
@@ -413,13 +429,22 @@ func (s *StatusServer) statusProjection() StatusProjection {
 	case ep.Mode == engine.ModeDegraded || ep.Mode == engine.ModeIdle:
 		replicationRole = ReplicationRoleNotReady
 	}
-	return StatusProjection{
+	out := StatusProjection{
 		Projection:           p,
 		FrontendPrimaryReady: p.Healthy && !superseded && !supportingReady,
 		AuthorityRole:        authorityRole,
 		ReplicationRole:      replicationRole,
 		RoleAdmissionFailure: s.view.roleAdmissionReason(),
+		UnhealthyReason:      s.view.unhealthyReason(),
 	}
+	if since := s.view.catchUpSince(); !since.IsZero() && replicationRole != ReplicationRoleReady {
+		cu := &CatchUpStatus{ElapsedMs: time.Since(since).Milliseconds()}
+		if ep.H > ep.R {
+			cu.LagLSN = ep.H - ep.R
+		}
+		out.CatchUp = cu
+	}
+	return out
 }
 
 func (s *StatusServer) supportingReplicaReady(selfEpoch, selfEV uint64) bool {

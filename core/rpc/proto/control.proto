@@ -126,6 +126,12 @@ message HeartbeatSlot {
     // every process start. Raw observation fact: the controller uses it
     // only to bound a restarted primary's boot grace.
     string incarnation = 12;
+    // unhealthy_reason is an explicit unhealthy report for this slot
+    // (#128 rule 6): recovery_timeout when a primary-assigned replica did
+    // not become promotion-ready within its recover timeout, or
+    // role_admission_failed for the G1 latch. Set together with
+    // eligible=false; empty when healthy.
+    string unhealthy_reason = 13;
 }
 
 // FrontendTarget — read-only frontend publication fact reported by
@@ -225,6 +231,14 @@ message StatusResponse {
     string last_unsupported_reason = 6;
     string last_convergence_stuck_at = 7;
     repeated FrontendTarget frontends = 8;
+    // unhealthy_replicas lists the volume's replicas whose fresh
+    // heartbeat carries an explicit unhealthy reason (#128 rule 6).
+    repeated ReplicaUnhealthy unhealthy_replicas = 9;
+}
+
+message ReplicaUnhealthy {
+    string replica_id = 1;
+    string reason = 2;
 }
 
 message GetClusterStatusRequest {

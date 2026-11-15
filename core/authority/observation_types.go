@@ -57,6 +57,9 @@ type SlotFact struct {
 	// Incarnation identifies the reporting volume process (new on
 	// every process start); raw fact, empty from older binaries.
 	Incarnation string
+	// UnhealthyReason is the slot's explicit unhealthy report (reported
+	// with Eligible=false); raw fact, empty when healthy.
+	UnhealthyReason string
 	// ObservedAt/ExpiresAt are store-owned per-slot freshness
 	// markers. They let one Kubernetes node run multiple
 	// blockvolume processes that each report a different slot
