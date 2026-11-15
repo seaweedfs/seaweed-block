@@ -31,6 +31,9 @@ type ChunkControl interface {
 	ListSnapshots(ctx context.Context, volumeID string, opts chunkstore.ListOptions) ([]chunkstore.SnapshotInfo, string, error)
 	DeleteSnapshot(ctx context.Context, volumeID, name string) (string, error)
 	Detach(ctx context.Context, volumeID string) (ChunkDetachResponse, error)
+	// Usage is the volume's space accounting and retention policy
+	// (GET /status/chunk).
+	Usage(ctx context.Context, volumeID string) (chunkstore.VolumeUsage, error)
 }
 
 // ChunkCutResponse is the body of a successful POST /chunk/cut (§3.1).
@@ -54,6 +57,7 @@ type ChunkSnapshotRequest struct {
 	Labels      map[string]string
 	Consistency string
 	ExpiresAtNs int64
+	Class       string // retention class: "semantic" or "pinned"
 }
 
 // ChunkDetachResponse is the body of a successful POST /chunk/detach (§3.6).
@@ -315,6 +319,7 @@ func (s *StatusServer) handleChunkSnapshot(w http.ResponseWriter, r *http.Reques
 		Labels      map[string]string `json:"labels"`
 		Consistency string            `json:"consistency"`
 		ExpiresAtNs int64             `json:"expiresAtNs"`
+		Class       string            `json:"class"`
 		TimeoutMs   int64             `json:"timeoutMs"`
 	}
 	if !decodeChunkBody(w, r, &req) {
@@ -327,7 +332,7 @@ func (s *StatusServer) handleChunkSnapshot(w http.ResponseWriter, r *http.Reques
 	ctx, cancel := chunkContext(r, req.TimeoutMs)
 	defer cancel()
 	info, err := ctl.Snapshot(ctx, req.VolumeID, ChunkSnapshotRequest{Name: req.Name, RequestID: req.RequestID,
-		Labels: req.Labels, Consistency: req.Consistency, ExpiresAtNs: req.ExpiresAtNs})
+		Labels: req.Labels, Consistency: req.Consistency, ExpiresAtNs: req.ExpiresAtNs, Class: req.Class})
 	if err != nil {
 		writeChunkFailure(w, err)
 		return
@@ -459,7 +464,7 @@ func (c *chunkControl) Cut(ctx context.Context, volumeID string, minLSN uint64) 
 // is cut, and the HEAD that cut installed is stored.
 func (c *chunkControl) Snapshot(ctx context.Context, volumeID string, req ChunkSnapshotRequest) (chunkstore.SnapshotInfo, error) {
 	sreq := chunkstore.SnapshotRequest{Name: req.Name, RequestID: req.RequestID, Labels: req.Labels,
-		Consistency: req.Consistency, ExpiresAtNs: req.ExpiresAtNs, CreatedBy: "blockvolume"}
+		Consistency: req.Consistency, ExpiresAtNs: req.ExpiresAtNs, CreatedBy: "blockvolume", Class: req.Class}
 	if info, replayed, err := c.cat.SnapshotReplay(ctx, volumeID, sreq); err != nil || replayed {
 		return info, err
 	}
@@ -477,6 +482,32 @@ func (c *chunkControl) ListSnapshots(ctx context.Context, volumeID string, opts 
 
 func (c *chunkControl) DeleteSnapshot(ctx context.Context, volumeID, name string) (string, error) {
 	return c.cat.DeleteSnapshot(ctx, volumeID, name)
+}
+
+func (c *chunkControl) Usage(ctx context.Context, volumeID string) (chunkstore.VolumeUsage, error) {
+	return c.cat.Usage(ctx, volumeID)
+}
+
+// handleStatusChunk answers GET /status/chunk?volume=<id>: the served
+// volume's space accounting and retention policy, computed from manifests
+// and filer listings (no chunk data reads).
+func (s *StatusServer) handleStatusChunk(w http.ResponseWriter, r *http.Request) {
+	if !s.chunkAdmit(w, r, http.MethodGet) {
+		return
+	}
+	volumeID := r.URL.Query().Get("volume")
+	ctl := s.chunkTarget(w, volumeID)
+	if ctl == nil {
+		return
+	}
+	ctx, cancel := chunkContext(r, 0)
+	defer cancel()
+	u, err := ctl.Usage(ctx, volumeID)
+	if err != nil {
+		writeChunkFailure(w, err)
+		return
+	}
+	writeChunkJSON(w, http.StatusOK, u)
 }
 
 func (c *chunkControl) Detach(ctx context.Context, volumeID string) (ChunkDetachResponse, error) {

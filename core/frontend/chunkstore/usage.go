@@ -1,0 +1,179 @@
+package chunkstore
+
+import (
+	"context"
+	"errors"
+	"net/url"
+	"path"
+	"sort"
+	"strings"
+
+	"github.com/seaweedfs/seaweed-block/core/storage"
+)
+
+// Space accounting (claude05's rulings, 2026-11-15 22:53Z). Everything is
+// computed from manifests and filer listings; no chunk data is read.
+//
+// A chunk's bytes are ChunkBlocks x BlockSize, the last chunk clipped to
+// NumBlocks (ChunkRef carries no size).
+//
+//   - LiveBytes: the chunks HEAD references.
+//   - per snapshot, ExclusiveBytes: the chunks that snapshot references and
+//     neither HEAD nor any other live snapshot does, i.e. what deleting it
+//     would let GC reclaim.
+//   - StoredBytes: the volume's chunk-key bindings in the filer (what is
+//     stored now, referenced or not). A binding a manifest references is
+//     counted at its exact (clipped) size; any other binding at the full
+//     chunk size, so StoredBytes is an upper bound whenever
+//     StoredUpperBound is set.
+//
+// "Bytes uploaded since creation" needs a counter nothing records today (a
+// follow-up). The unreferenced-not-yet-collected bytes come from GC's
+// preview once that lands (#140).
+
+// SnapshotUsage is one snapshot's share of a volume's space.
+type SnapshotUsage struct {
+	Name           string `json:"name"`
+	CreatedNs      int64  `json:"createdNs"`
+	Class          string `json:"class"`
+	Pinned         bool   `json:"pinned"`
+	Chunks         int    `json:"chunks"`
+	ExclusiveBytes uint64 `json:"exclusiveBytes"`
+}
+
+// VolumeUsage is a volume's space accounting.
+type VolumeUsage struct {
+	VolumeID         string          `json:"volumeID"`
+	ChunkBytes       uint64          `json:"chunkBytes"` // one full chunk
+	LiveChunks       int             `json:"liveChunks"`
+	LiveBytes        uint64          `json:"liveBytes"`
+	Snapshots        []SnapshotUsage `json:"snapshots"`
+	StoredBindings   int             `json:"storedBindings"`
+	StoredBytes      uint64          `json:"storedBytes"`
+	StoredUpperBound bool            `json:"storedUpperBound"`
+	Policy           RetentionPolicy `json:"policy"`
+	PolicySet        bool            `json:"policySet"`
+}
+
+// chunkSize is the byte size of chunk index idx under g.
+func chunkSize(g Geometry, idx uint64) uint64 {
+	full := uint64(g.ChunkBlocks) * uint64(g.BlockSize)
+	if g.ChunkBlocks == 0 {
+		return 0
+	}
+	first := idx * uint64(g.ChunkBlocks)
+	if first >= g.NumBlocks {
+		return 0
+	}
+	if rest := g.NumBlocks - first; rest < uint64(g.ChunkBlocks) {
+		return rest * uint64(g.BlockSize)
+	}
+	return full
+}
+
+// Usage computes vol's space accounting.
+func (c *Catalog) Usage(ctx context.Context, vol string) (VolumeUsage, error) {
+	if red := true; red { // RED: no accounting
+		return VolumeUsage{VolumeID: vol, Snapshots: []SnapshotUsage{}}, nil
+	}
+	v, ok, err := c.ReadVolume(ctx, vol)
+	if err != nil {
+		return VolumeUsage{}, err
+	}
+	if !ok {
+		return VolumeUsage{}, catErr(CodeNotChunkVolume, false, nil, "volume %s has no VOLUME entry", vol)
+	}
+	g := v.Geometry
+	u := VolumeUsage{VolumeID: vol, ChunkBytes: uint64(g.ChunkBlocks) * uint64(g.BlockSize), Snapshots: []SnapshotUsage{}}
+	if u.Policy, u.PolicySet, err = c.ReadRetentionPolicy(ctx, vol); err != nil {
+		return VolumeUsage{}, err
+	}
+
+	head, _, err := c.ReadHead(ctx, vol)
+	if err != nil {
+		return VolumeUsage{}, err
+	}
+	snaps, err := c.allSnapshots(ctx, vol)
+	if err != nil {
+		return VolumeUsage{}, err
+	}
+
+	// holders counts, per chunk key, how many of HEAD and the live
+	// snapshots reference it; size is each referenced key's byte size.
+	holders := map[string]int{}
+	size := map[string]uint64{}
+	addHolder := func(h storage.ChunkHead) {
+		seen := map[string]bool{}
+		for idx, ref := range h.Chunks {
+			size[ref.Key] = chunkSize(g, idx)
+			if !seen[ref.Key] {
+				seen[ref.Key] = true
+				holders[ref.Key]++
+			}
+		}
+	}
+	addHolder(head)
+	for idx := range head.Chunks {
+		u.LiveChunks++
+		u.LiveBytes += chunkSize(g, idx)
+	}
+	for _, s := range snaps {
+		addHolder(s.Head())
+	}
+	for _, s := range snaps {
+		su := SnapshotUsage{Name: s.Name, CreatedNs: s.CreatedNs, Class: s.Class, Pinned: s.Pinned(), Chunks: len(s.Head().Chunks)}
+		seen := map[string]bool{}
+		for _, ref := range s.Head().Chunks {
+			if seen[ref.Key] {
+				continue
+			}
+			seen[ref.Key] = true
+			if holders[ref.Key] == 1 {
+				su.ExclusiveBytes += size[ref.Key]
+			}
+		}
+		u.Snapshots = append(u.Snapshots, su)
+	}
+	sort.Slice(u.Snapshots, func(i, j int) bool {
+		if u.Snapshots[i].CreatedNs != u.Snapshots[j].CreatedNs {
+			return u.Snapshots[i].CreatedNs > u.Snapshots[j].CreatedNs
+		}
+		return u.Snapshots[i].Name < u.Snapshots[j].Name
+	})
+
+	// Stored: this volume's own chunk-key bindings.
+	r, err := NewChunkRemote(c.f, nilBlobs{}, path.Join(c.base, vol))
+	if err != nil {
+		return VolumeUsage{}, err
+	}
+	after := ""
+	for {
+		page, err := c.f.ListEntries(ctx, r.keyDir(), "", after, listPage)
+		if err != nil {
+			return VolumeUsage{}, remoteErr(err, "list the chunk keys of %s", vol)
+		}
+		for _, e := range page {
+			if e.GetName() <= after {
+				return VolumeUsage{}, errors.New("chunkstore: non-advancing chunk key listing")
+			}
+			after = e.GetName()
+			if e.GetIsDirectory() || string(e.Extended[extKind]) != kindChunkKey {
+				continue
+			}
+			key, err := url.PathUnescape(e.GetName())
+			if err != nil || strings.HasPrefix(key, "@") {
+				continue
+			}
+			u.StoredBindings++
+			if n, ok := size[key]; ok {
+				u.StoredBytes += n
+			} else {
+				u.StoredBytes += u.ChunkBytes
+				u.StoredUpperBound = true
+			}
+		}
+		if len(page) < listPage {
+			return u, nil
+		}
+	}
+}

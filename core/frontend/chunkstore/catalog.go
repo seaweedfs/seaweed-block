@@ -196,6 +196,9 @@ type snapDoc struct {
 	Parent      *Parent           `json:"parent"`
 	Labels      map[string]string `json:"labels"`
 	ExpiresAtNs int64             `json:"expires_at_ns"`
+	// Class is the retention class: "semantic", "pinned", or "" for a
+	// snapshot made before classes existed (see retention.go).
+	Class string `json:"class,omitempty"`
 }
 
 // SnapshotInfo describes one snapshot, with the field names of the HTTP API
@@ -215,6 +218,7 @@ type SnapshotInfo struct {
 	Parent        *Parent           `json:"parent"`
 	ExpiresAtNs   int64             `json:"expiresAtNs"`
 	Replayed      bool              `json:"replayed"`
+	Class         string            `json:"class"`
 
 	head storage.ChunkHead
 	geo  Geometry
@@ -231,6 +235,9 @@ type SnapshotRequest struct {
 	Consistency string // "crash" (default) or "app"
 	ExpiresAtNs int64
 	CreatedBy   string
+	// Class is the retention class: "semantic" or "pinned" ("" leaves it
+	// unset, which retention treats as unpinned).
+	Class string
 	// SourceReadAt is when the caller obtained the HEAD it snapshots (the
 	// cut's return); OpDeadline counts from it. Zero means now.
 	SourceReadAt time.Time
@@ -651,7 +658,7 @@ func decodeSnap(p string, e *filerpb.Entry) (SnapshotInfo, string, error) {
 		VolumeID: doc.VolumeID, Name: doc.Name, HeadGen: head.Gen, HeadEpoch: head.Epoch, CutLSN: head.RemoteLSN,
 		CreatedNs: doc.CreatedNs, State: state, ChunkCount: len(head.Chunks), ManifestBytes: len(e.GetContent()),
 		Consistency: doc.Consistency, Labels: doc.Labels, Parent: doc.Parent, ExpiresAtNs: doc.ExpiresAtNs,
-		head: head, geo: doc.Geometry,
+		Class: doc.Class, head: head, geo: doc.Geometry,
 	}, doc.RequestID, nil
 }
 
@@ -801,6 +808,9 @@ func (c *Catalog) CreateSnapshot(ctx context.Context, vol string, req SnapshotRe
 	if consistency == "" {
 		consistency = "crash"
 	}
+	if err := validSnapshotClass(req.Class); err != nil {
+		return SnapshotInfo{}, err
+	}
 	if head.Gen == 0 {
 		return SnapshotInfo{}, catErr(CodeNotChunkVolume, false, nil, "volume %s has no published HEAD to snapshot", vol)
 	}
@@ -824,7 +834,7 @@ func (c *Catalog) CreateSnapshot(ctx context.Context, vol string, req SnapshotRe
 	}
 	doc := snapDoc{Format: snapFormat, VolumeID: vol, Name: req.Name, RequestID: req.RequestID, CreatedNs: c.now().UnixNano(),
 		CreatedBy: req.CreatedBy, Consistency: consistency, Head: headEnt.Content, Geometry: v.Geometry, Parent: v.Parent,
-		Labels: req.Labels, ExpiresAtNs: req.ExpiresAtNs}
+		Labels: req.Labels, ExpiresAtNs: req.ExpiresAtNs, Class: ""} // RED: class not stored
 	body, err := json.Marshal(doc)
 	if err != nil {
 		return SnapshotInfo{}, err

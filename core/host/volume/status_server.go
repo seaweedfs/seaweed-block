@@ -316,6 +316,7 @@ func (s *StatusServer) Start(addr string) (string, error) {
 	}
 	if s.chunkEnabled {
 		mux.Handle("/chunk/", s.chunkMux())
+		mux.HandleFunc("/status/chunk", s.handleStatusChunk)
 	}
 	s.srv = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 
