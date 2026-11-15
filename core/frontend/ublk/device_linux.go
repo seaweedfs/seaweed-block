@@ -182,13 +182,13 @@ func (d *Device) teardownWith(qs []settler, ctl controller, added bool) error {
 	if d.cancel != nil {
 		d.cancel()
 	}
-	_, settleErr := settleQueues(qs, queueStopTimeout)
+	leaked, settleErr := settleQueues(qs, queueStopTimeout)
 	note(settleErr)
 	if d.charFD >= 0 {
 		note(unix.Close(d.charFD))
 		d.charFD = -1
 	}
-	if d.path != "" && settleErr != nil {
+	if d.path != "" && leaked {
 		// A queue's mappings are kept (it may still run), which holds the
 		// char device open: DEL_DEV would wait for its release forever.
 		// The device stays (it fails I/O); the error above reports it.
@@ -335,7 +335,11 @@ func (q *queue) run(ctx context.Context) {
 // live and a commit failure.
 func (q *queue) onCQE(ctx context.Context, c cqe, commit func(tag int, result int32) error) (bool, error) {
 	tag := int(c.UserData)
-	if c.Res != ioResOK { // ABORT (-ENODEV) or a failure: no re-fetch
+	switch {
+	case c.Res == ioResAbort: // the device is stopping: no re-fetch
+		return false, nil
+	case c.Res != ioResOK: // anything else ends the tag and is reported
+		q.err = errors.Join(q.err, fmt.Errorf("ublk: queue %d tag %d: unexpected completion result %d", q.id, tag, c.Res))
 		return false, nil
 	}
 	result := q.h.handle(ctx, q.desc(tag).request(), q.buf(tag))

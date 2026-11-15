@@ -52,6 +52,9 @@ func NewTarget(cfg TargetConfig) *Target {
 func (t *Target) Start() (string, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.closed {
+		return "", errors.New("ublk: target closed; a closed target never starts a device")
+	}
 	if t.device != nil {
 		return "", errors.New("ublk: target already started")
 	}
@@ -87,6 +90,9 @@ func (t *Target) Close() error {
 	if t == nil {
 		return nil
 	}
+	t.mu.Lock()
+	t.closed = true // a later Start refuses; a running Start finishes first (it holds mu)
+	t.mu.Unlock()
 	t.closeOnce.Do(func() {
 		t.mu.Lock()
 		d := t.device
