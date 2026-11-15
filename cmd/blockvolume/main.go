@@ -96,8 +96,10 @@ type flags struct {
 	// parallel-walstore candidate (default smartwal).
 	// --durable-blocks + --durable-blocksize are used on first-time
 	// storage create.
-	durableRoot                          string
-	durableImpl                          string // "smartwal" | "walstore" | "parallel-walstore"
+	durableRoot string
+	durableImpl string // "smartwal" | "walstore" | "parallel-walstore" | "walstore-chunk"
+	// --chunk-*: the SeaweedFS remote of --durable-impl=walstore-chunk.
+	chunk                                chunkFlags
 	durableBlocks                        uint
 	durableBlockSize                     uint
 	durableWALMultiBlockRecords          bool
@@ -167,7 +169,12 @@ func parseFlags(args []string) (flags, error) {
 	fs.UintVar(&f.nvmeMaxH2C, "nvme-max-h2c-data-length", 0, "NVMe/TCP MaxH2CDataLength in bytes. 0 preserves the target default")
 	fs.BoolVar(&f.allowExternalNVMeBind, "allow-external-nvme-bind", false, "allow NVMe to bind a non-loopback address; unauthenticated, intended only for explicit gates")
 	fs.StringVar(&f.durableRoot, "durable-root", "", "directory for persistent storage files; empty = memback (non-durable)")
-	fs.StringVar(&f.durableImpl, "durable-impl", "smartwal", "LogicalStorage impl: smartwal (default), walstore, or opt-in parallel-walstore; ignored unless --durable-root is set")
+	fs.StringVar(&f.durableImpl, "durable-impl", "smartwal", "LogicalStorage impl: smartwal (default), walstore, opt-in parallel-walstore, or opt-in walstore-chunk (walstore published to SeaweedFS; proof of concept); ignored unless --durable-root is set")
+	fs.StringVar(&f.chunk.filer, "chunk-filer", "", "walstore-chunk: SeaweedFS filer gRPC address host:port")
+	fs.StringVar(&f.chunk.path, "chunk-path", defaultChunkPath, "walstore-chunk: filer directory holding one directory per volume (HEAD and chunk key bindings)")
+	fs.StringVar(&f.chunk.collection, "chunk-collection", "", "walstore-chunk: collection for chunk needles (empty = filer default / storage rule)")
+	fs.StringVar(&f.chunk.replication, "chunk-replication", "", "walstore-chunk: replication for chunk needles (empty = filer default / storage rule)")
+	fs.DurationVar(&f.chunk.captureInterval, "chunk-capture-interval", 0, "walstore-chunk: publish a cut every interval while healthy; 0 = only on demand")
 	fs.UintVar(&f.durableBlocks, "durable-blocks", 2048, "number of blocks per volume on first create (ignored when opening existing)")
 	fs.UintVar(&f.durableBlockSize, "durable-blocksize", 4096, "block size in bytes on first create")
 	fs.BoolVar(&f.durableWALMultiBlockRecords, "durable-wal-multiblock-records", false, "enable experimental walstore multi-block WAL records; default false; requires --durable-impl=walstore")
@@ -217,9 +224,12 @@ func parseFlags(args []string) (flags, error) {
 		return flags{}, err
 	}
 	switch f.durableImpl {
-	case "smartwal", "walstore", "parallel-walstore":
+	case "smartwal", "walstore", "parallel-walstore", "walstore-chunk":
 	default:
-		return flags{}, fmt.Errorf("--durable-impl=%q invalid; want smartwal, walstore, or parallel-walstore", f.durableImpl)
+		return flags{}, fmt.Errorf("--durable-impl=%q invalid; want smartwal, walstore, parallel-walstore, or walstore-chunk", f.durableImpl)
+	}
+	if err := validateChunkFlags(f); err != nil {
+		return flags{}, err
 	}
 	if f.durableWALMultiBlockRecords {
 		if f.durableRoot == "" {
@@ -533,7 +543,19 @@ func run(f flags) int {
 			WALMultiBlockRecords:          f.durableWALMultiBlockRecords,
 			WALRecoveryTestDisableFlusher: f.durableWALRecoveryTestDisableFlusher,
 		}
+		var chunkErr error
+		if cfg.Impl == durable.ImplWALStoreChunk {
+			var closeChunkClient func() error
+			cfg.ChunkRemoteFor, closeChunkClient, chunkErr = newChunkRemoteFor(f.chunk)
+			cfg.ChunkCaptureInterval = f.chunk.captureInterval
+			if chunkErr == nil {
+				defer closeChunkClient()
+			}
+		}
 		dp, err := durable.NewDurableProvider(cfg, h.ProjectionView())
+		if chunkErr != nil {
+			err = chunkErr
+		}
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "blockvolume: durable provider:", err)
 			if status != nil {
