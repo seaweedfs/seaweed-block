@@ -228,6 +228,12 @@ func (r *ChunkRemote) intentDir() string { return path.Join(r.root, intentsDir) 
 // The entry is durable when the filer's fsync rule covers the chunk path,
 // the same condition as for HEAD.
 func (r *ChunkRemote) PutIntent(ctx context.Context, in storage.ChunkIntent) (string, error) {
+	return putIntent(ctx, r.f, r.root, in)
+}
+
+// putIntent writes an intent under <root>/intents/; the catalog uses it for
+// snapshots and forks, which have no ChunkRemote.
+func putIntent(ctx context.Context, f Filer, root string, in storage.ChunkIntent) (string, error) {
 	for _, k := range in.Keys {
 		if err := storage.ValidChunkKey(k); err != nil {
 			return "", fmt.Errorf("%w: %v", ErrInvalidKey, err)
@@ -253,7 +259,7 @@ func (r *ChunkRemote) PutIntent(ctx context.Context, in storage.ChunkIntent) (st
 		},
 		Content: body,
 	}
-	if err := r.f.CreateEntry(ctx, r.intentDir(), e, true); err != nil {
+	if err := f.CreateEntry(ctx, path.Join(root, intentsDir), e, true); err != nil {
 		return "", fmt.Errorf("chunkstore: put intent %s: %w", id, err)
 	}
 	return id, nil
@@ -327,6 +333,17 @@ type headDoc struct {
 	Holder    string            `json:"holder"`
 	RemoteLSN uint64            `json:"remote_lsn"`
 	Chunks    map[uint64]refDoc `json:"chunks"`
+	// State is "active" or "detached"; a document without it is active.
+	// DetachedBy names the holder whose final cut (this generation) a
+	// detached HEAD is; it is absent unless State is detached.
+	State      string         `json:"state,omitempty"`
+	DetachedBy *detachedByDoc `json:"detachedBy,omitempty"`
+}
+
+type detachedByDoc struct {
+	Holder string `json:"holder"`
+	Epoch  uint64 `json:"epoch"`
+	Gen    uint64 `json:"gen"`
 }
 
 type refDoc struct {
@@ -383,7 +400,10 @@ func (r *ChunkRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVer
 
 func headEntry(h storage.ChunkHead) (*filerpb.Entry, error) {
 	doc := headDoc{Format: headFormat, Gen: h.Gen, Epoch: h.Epoch, Holder: h.Holder, RemoteLSN: h.RemoteLSN,
-		Chunks: make(map[uint64]refDoc, len(h.Chunks))}
+		Chunks: make(map[uint64]refDoc, len(h.Chunks)), State: h.State}
+	if h.DetachedBy != nil {
+		doc.DetachedBy = &detachedByDoc{Holder: h.DetachedBy.Holder, Epoch: h.DetachedBy.Epoch, Gen: h.DetachedBy.Gen}
+	}
 	for idx, ref := range h.Chunks {
 		if ref.Key == "" {
 			return nil, fmt.Errorf("chunkstore: HEAD chunk %d has no key", idx)
@@ -424,8 +444,29 @@ func decodeHead(p string, e *filerpb.Entry) (storage.ChunkHead, error) {
 	if k := string(e.Extended[extKind]); k != kindChunkHead {
 		return fail("kind %q, want %q", k, kindChunkHead)
 	}
+	h, err := decodeHeadDoc(p, e.GetContent())
+	if err != nil {
+		return storage.ChunkHead{}, err
+	}
+	// The CAS compares the extended attributes, so they must agree with the
+	// document or a CAS could validate against a different state.
+	if string(e.Extended[extGen]) != strconv.FormatUint(h.Gen, 10) ||
+		string(e.Extended[extEpoch]) != strconv.FormatUint(h.Epoch, 10) ||
+		string(e.Extended[extHolder]) != h.Holder {
+		return fail("extended gen/epoch/holder (%q/%q/%q) disagree with the document (%d/%d/%q)",
+			e.Extended[extGen], e.Extended[extEpoch], e.Extended[extHolder], h.Gen, h.Epoch, h.Holder)
+	}
+	return h, nil
+}
+
+// decodeHeadDoc decodes and checks a HEAD document: HEAD's own content, or
+// the copy a snapshot embeds.
+func decodeHeadDoc(p string, content []byte) (storage.ChunkHead, error) {
+	fail := func(format string, a ...any) (storage.ChunkHead, error) {
+		return storage.ChunkHead{}, fmt.Errorf("chunkstore: HEAD %s: "+format, append([]any{p}, a...)...)
+	}
 	var doc headDoc
-	if err := json.Unmarshal(e.GetContent(), &doc); err != nil {
+	if err := json.Unmarshal(content, &doc); err != nil {
 		return fail("decode: %v", err)
 	}
 	if doc.Format != headFormat {
@@ -434,16 +475,24 @@ func decodeHead(p string, e *filerpb.Entry) (storage.ChunkHead, error) {
 	if doc.Gen == 0 {
 		return fail("generation 0")
 	}
-	// The CAS compares the extended attributes, so they must agree with the
-	// document or a CAS could validate against a different state.
-	if string(e.Extended[extGen]) != strconv.FormatUint(doc.Gen, 10) ||
-		string(e.Extended[extEpoch]) != strconv.FormatUint(doc.Epoch, 10) ||
-		string(e.Extended[extHolder]) != doc.Holder {
-		return fail("extended gen/epoch/holder (%q/%q/%q) disagree with the document (%d/%d/%q)",
-			e.Extended[extGen], e.Extended[extEpoch], e.Extended[extHolder], doc.Gen, doc.Epoch, doc.Holder)
+	switch doc.State {
+	case "", storage.ChunkHeadActive:
+		if doc.DetachedBy != nil {
+			return fail("detachedBy on a HEAD that is not detached")
+		}
+	case storage.ChunkHeadDetached:
+		d := doc.DetachedBy
+		if d == nil || d.Gen != doc.Gen || d.Holder != doc.Holder || d.Epoch != doc.Epoch {
+			return fail("detached HEAD whose detachedBy %+v is not its own holder, epoch and generation", d)
+		}
+	default:
+		return fail("state %q", doc.State)
 	}
 	h := storage.ChunkHead{Gen: doc.Gen, Epoch: doc.Epoch, Holder: doc.Holder, RemoteLSN: doc.RemoteLSN,
-		Chunks: make(map[uint64]storage.ChunkRef, len(doc.Chunks))}
+		Chunks: make(map[uint64]storage.ChunkRef, len(doc.Chunks)), State: doc.State}
+	if doc.DetachedBy != nil {
+		h.DetachedBy = &storage.ChunkDetachedBy{Holder: doc.DetachedBy.Holder, Epoch: doc.DetachedBy.Epoch, Gen: doc.DetachedBy.Gen}
+	}
 	for idx, ref := range doc.Chunks {
 		sum, err := hex.DecodeString(ref.SHA256)
 		if err != nil || len(sum) != 32 || ref.Key == "" {

@@ -18,6 +18,13 @@ type (
 	ChunkCutResult    = chunkCutResult
 	ChunkCutStats     = chunkCutStats
 	ChunkIntent       = chunkIntent
+	ChunkDetachedBy   = chunkDetachedBy
+)
+
+// HEAD states.
+const (
+	ChunkHeadActive   = chunkHeadActive
+	ChunkHeadDetached = chunkHeadDetached
 )
 
 // NewChunkIntentID returns a fresh intent id "<gen>-<nonce>" for a remote
@@ -33,12 +40,14 @@ const (
 )
 
 var (
-	ErrChunkKeyExists        = errChunkKeyExists
-	ErrChunkHeadPrecondition = errChunkHeadPrecondition
-	ErrChunkLayerFenced      = errChunkLayerFenced
-	ErrChunkEvictRefused     = errChunkEvictRefused
-	ErrChunkCaptureRefused   = errChunkCaptureRefused
-	ErrChunkKeyInvalid       = errChunkKeyInvalid
+	ErrChunkKeyExists         = errChunkKeyExists
+	ErrChunkHeadPrecondition  = errChunkHeadPrecondition
+	ErrChunkLayerFenced       = errChunkLayerFenced
+	ErrChunkEvictRefused      = errChunkEvictRefused
+	ErrChunkCaptureRefused    = errChunkCaptureRefused
+	ErrChunkKeyInvalid        = errChunkKeyInvalid
+	ErrChunkLayerDetached     = errChunkLayerDetached
+	ErrChunkCASOutcomeUnknown = errChunkCASOutcomeUnknown
 )
 
 // ValidChunkKey enforces the chunk key domain (non-empty valid UTF-8); a
