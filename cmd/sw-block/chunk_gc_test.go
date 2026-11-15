@@ -7,10 +7,12 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/filerpb"
 	"github.com/seaweedfs/seaweed-block/core/host/master"
 )
 
 type gcCLIStore struct {
+	writes int
 	*chunkstore.MemFiler
 	deletes int
 }
@@ -47,7 +49,20 @@ func TestOpsChunkGC_DefaultIsReadOnly(t *testing.T) {
 		t.Fatalf("incomplete dry-run report: %s %v", out, e)
 	}
 	entries, e := store.ListEntries(context.Background(), "/gc-test", "", "", 100)
-	if e != nil || len(entries) != 0 || store.deletes != 0 {
+	if e != nil || len(entries) != 0 || store.deletes != 0 || store.writes != 0 {
 		t.Fatalf("default GC mutated store: entries=%d deletes=%d err=%v", len(entries), store.deletes, e)
 	}
+}
+
+func (s *gcCLIStore) CreateEntry(ctx context.Context, dir string, e *filerpb.Entry, excl bool) error {
+	s.writes++
+	return s.MemFiler.CreateEntry(ctx, dir, e, excl)
+}
+func (s *gcCLIStore) UpdateEntry(ctx context.Context, dir string, e *filerpb.Entry, expected map[string][]byte) error {
+	s.writes++
+	return s.MemFiler.UpdateEntry(ctx, dir, e, expected)
+}
+func (s *gcCLIStore) DeleteEntry(ctx context.Context, dir, name string, expected map[string][]byte) error {
+	s.writes++
+	return s.MemFiler.DeleteEntry(ctx, dir, name, expected)
 }
