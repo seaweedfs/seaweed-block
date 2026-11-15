@@ -74,13 +74,9 @@ func Start(cfg Config) (*Device, error) {
 	id := devIDAuto
 	if cfg.DevID >= 0 {
 		id = uint32(cfg.DevID)
-		if _, err := os.Stat(charDevicePrefix + strconv.Itoa(cfg.DevID)); err == nil {
-			// A server that died left its device behind: it fails I/O
-			// (no user recovery); remove it before creating ours.
-			_, _ = d.ctrlCommand(uCmdStopDev, id, nil, 0)
-			if _, err := d.ctrlCommand(uCmdDelDev, id, nil, 0); err != nil {
-				return fail(fmt.Errorf("ublk: delete stale device %d: %w", id, err))
-			}
+		_, statErr := os.Stat(charDevicePrefix + strconv.Itoa(cfg.DevID))
+		if err := reclaimStale(d, id, statErr == nil, processAlive); err != nil {
+			return fail(err)
 		}
 	}
 
@@ -171,14 +167,11 @@ func (d *Device) teardown(added bool) error {
 	if d.cancel != nil {
 		d.cancel()
 	}
-	for _, q := range d.queues {
-		select {
-		case <-q.done:
-		case <-time.After(10 * time.Second):
-			note(fmt.Errorf("ublk: queue %d did not stop", q.id))
-		}
-		q.release()
+	qs := make([]settler, len(d.queues))
+	for i, q := range d.queues {
+		qs[i] = q
 	}
+	note(settleQueues(qs, queueStopTimeout))
 	if d.charFD >= 0 {
 		note(unix.Close(d.charFD))
 		d.charFD = -1
@@ -191,6 +184,27 @@ func (d *Device) teardown(added bool) error {
 	note(d.ctrl.close())
 	note(unix.Close(d.ctrlFD))
 	return firstErr
+}
+
+// queueStopTimeout bounds how long Close waits for the queue threads.
+const queueStopTimeout = 10 * time.Second
+
+// command implements controller for reclaimStale.
+func (d *Device) command(cmdOp uint32, devID uint32, buf []byte, data uint64) (int32, error) {
+	return d.ctrlCommand(cmdOp, devID, buf, data)
+}
+
+// processAlive reports whether pid names a live process: signal 0 is
+// delivered (or refused with EPERM: it exists), ESRCH means it is gone.
+func processAlive(pid int32) (bool, error) {
+	switch err := unix.Kill(int(pid), 0); err {
+	case nil, unix.EPERM:
+		return true, nil
+	case unix.ESRCH:
+		return false, nil
+	default:
+		return false, fmt.Errorf("ublk: probe pid %d: %w", pid, err)
+	}
 }
 
 // ctrlCommand runs one control command on /dev/ublk-control and returns
@@ -311,6 +325,9 @@ func (q *queue) run(ctx context.Context) {
 		}
 	}
 }
+
+func (q *queue) doneCh() <-chan struct{} { return q.done }
+func (q *queue) name() string            { return "queue " + strconv.Itoa(q.id) }
 
 func (q *queue) release() {
 	if q.descs != nil {

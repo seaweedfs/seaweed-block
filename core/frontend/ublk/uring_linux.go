@@ -68,6 +68,15 @@ type uring struct {
 	cqes                   []byte
 	sqEntries              uint32
 	pending                uint32 // SQEs filled but not yet submitted
+
+	// enter is io_uring_enter (a test may wrap it): it returns how many
+	// SQEs the kernel consumed.
+	enter func(fd int, toSubmit, minComplete uint32, flags uintptr) (int, unix.Errno)
+}
+
+func sysEnter(fd int, toSubmit, minComplete uint32, flags uintptr) (int, unix.Errno) {
+	n, _, errno := unix.Syscall6(unix.SYS_IO_URING_ENTER, uintptr(fd), uintptr(toSubmit), uintptr(minComplete), flags, 0, 0)
+	return int(n), errno
 }
 
 func newURing(entries uint32) (*uring, error) {
@@ -77,7 +86,7 @@ func newURing(entries uint32) (*uring, error) {
 	if errno != 0 {
 		return nil, fmt.Errorf("ublk: io_uring_setup: %w", errno)
 	}
-	r := &uring{fd: int(fd), sqEntries: p.SqEntries}
+	r := &uring{fd: int(fd), sqEntries: p.SqEntries, enter: sysEnter}
 	sqSize := int(p.SqOff.Array + p.SqEntries*4)
 	cqSize := int(p.CqOff.Cqes + p.CqEntries*cqeSize)
 	single := p.Features&featSingleMMap != 0
@@ -144,7 +153,7 @@ func (r *uring) submitAndWait(minComplete uint32) error {
 		flags = enterGetEvents
 	}
 	for {
-		_, _, errno := unix.Syscall6(unix.SYS_IO_URING_ENTER, uintptr(r.fd), uintptr(toSubmit), uintptr(minComplete), flags, 0, 0)
+		_, errno := r.enter(r.fd, toSubmit, minComplete, flags)
 		switch errno {
 		case 0:
 			return nil
