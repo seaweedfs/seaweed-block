@@ -2,20 +2,22 @@ package chunkstore
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
 
 // A snapshot or fork copy intent records its publication deadline, and the
 // publishing create runs under a context bounded by that deadline (W5
-// ruling, 2026-11-15 17:06Z): GC may expire copy intents by deadline.
+// ruling, 2026-11-15 17:06Z). Since 17:30Z the deadline is metadata only:
+// a sweep settles a dead attempt by a tombstone claim (catalog_tombstone).
 
 func TestCatalog_CopyIntentRecordsItsDeadline(t *testing.T) {
 	f, _, c, h := catalogFixture(t)
 	ctx := context.Background()
 	t0 := time.Unix(1_800_000_000, 0)
 	c.SetClock(func() time.Time { return t0 })
-	holdFirst(f, catBase+"/v1/snaps/s1")
+	holdFirst(f, catBase+"/v1/snaps/s1/")
 	if _, err := c.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: "s1", RequestID: "r", SourceReadAt: t0}, h); CodeOf(err) != CodeOutcomeUnknown {
 		t.Fatalf("held snapshot create: %v", err)
 	}
@@ -58,7 +60,7 @@ func TestCatalog_PublishIsBoundedByTheDeadline(t *testing.T) {
 		}},
 	} {
 		stalled := tc.path
-		f.stallCreate = func(p string) bool { return p == stalled }
+		f.stallCreate = func(p string) bool { return p == stalled || strings.HasPrefix(p, stalled+"/") }
 		done := make(chan error, 1)
 		start := time.Now()
 		go func() { done <- tc.run() }()

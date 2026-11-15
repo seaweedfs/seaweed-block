@@ -178,10 +178,11 @@ func TestOpsChunk_FilerCommands(t *testing.T) {
 	if code, _, errs := runChunk("fork", "--chunk-filer", "filer:18888", "--source", "v1", "--snapshot", "s1", "--target", "v2", "--request-id", "other"); code != chunkExitFailed || !strings.Contains(errs, "target_exists") {
 		t.Fatalf("fork with another request id: %d %q", code, errs)
 	}
-	for i := 0; i < 2; i++ {
+	// The first delete frees the name; a repeated one finds it absent.
+	for i, want := range []string{`"state":"deleting"`, `"state":"absent"`} {
 		code, out, errs = runChunk("snapshot-delete", "--volume", "v1", "--name", "s1", "--chunk-filer", "filer:18888")
-		if code != 0 || !strings.Contains(out, `"state":"deleting"`) {
-			t.Fatalf("snapshot-delete #%d: %d %q %q", i+1, code, out, errs)
+		if code != 0 || !strings.Contains(out, want) {
+			t.Fatalf("snapshot-delete #%d: %d %q %q, want %s", i+1, code, out, errs, want)
 		}
 	}
 	if code, _, _ := runChunk("snapshots", "--volume", "v1"); code != 2 {

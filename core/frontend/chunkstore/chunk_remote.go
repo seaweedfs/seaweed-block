@@ -482,6 +482,11 @@ func decodeHeadDoc(p string, content []byte) (storage.ChunkHead, error) {
 		if doc.DetachedBy != nil {
 			return fail("detachedBy on a HEAD that is not detached")
 		}
+	case storage.ChunkHeadAborted:
+		// A sweep's tombstone over a dead fork's HEAD (gen 1, no chunks).
+		if doc.DetachedBy != nil || len(doc.Chunks) != 0 {
+			return fail("an aborted HEAD with content")
+		}
 	case storage.ChunkHeadDetached:
 		d := doc.DetachedBy
 		if d == nil || d.Gen != doc.Gen || d.Holder != doc.Holder || d.Epoch != doc.Epoch {

@@ -198,6 +198,11 @@ type chunkDetachedBy struct {
 }
 
 // chunkHeadIsDetached reports whether h is a detached HEAD.
+// chunkHeadAborted marks a fork target's HEAD tombstone: a GC sweep claimed
+// the HEAD of a dead fork so its late create can never land (W5 ruling,
+// 2026-11-15 17:30Z). Such a volume never attaches.
+const chunkHeadAborted = "aborted"
+
 func chunkHeadIsDetached(h chunkHead) bool { return h.State == chunkHeadDetached }
 
 // chunkRemote is the remote store. Keys are non-empty valid UTF-8 strings
@@ -241,9 +246,10 @@ type chunkIntent struct {
 	Holder    string
 	Keys      []string
 	CreatedNs int64 // assigned by PutIntent
-	// DeadlineNs (unix ns) is a copy intent's publication deadline: the
-	// snapshot or fork never publishes after it, so GC may expire the intent
-	// once it is past (plus RPC timeout and grace). 0 for capture intents.
+	// DeadlineNs (unix ns) is a copy intent's publication deadline, kept as
+	// metadata: a GC sweep settles a dead copy attempt by claiming its
+	// publishing entry with a tombstone, never by the deadline alone (W5
+	// ruling, 2026-11-15 17:30Z). 0 for capture intents.
 	DeadlineNs int64
 }
 

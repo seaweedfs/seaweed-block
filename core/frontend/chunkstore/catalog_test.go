@@ -49,6 +49,21 @@ func publishSource(t *testing.T, f *fakeFiler, b *fakeBlobs, vol string, chunks 
 	return h
 }
 
+// snapPath is the attempt path the name record of vol/name points at.
+func snapPath(t *testing.T, f *fakeFiler, vol, name string) string {
+	t.Helper()
+	e, err := f.LookupEntry(context.Background(), path.Join(catBase, vol, snapNamesDir), name)
+	if err != nil {
+		t.Fatalf("name record %s/%s: %v", vol, name, err)
+	}
+	return path.Join(catBase, vol, snapsDir, name, string(e.Extended[extAttempt]))
+}
+
+// isSnapPath reports whether p is an attempt path of vol/name.
+func isSnapPath(p, vol, name string) bool {
+	return strings.HasPrefix(p, path.Join(catBase, vol, snapsDir, name)+"/")
+}
+
 func newCat(t *testing.T, f *fakeFiler) *Catalog {
 	t.Helper()
 	c, err := NewCatalog(f, catBase)
@@ -106,7 +121,8 @@ func TestCatalog_SnapshotCreateExclusive(t *testing.T) {
 	}
 	assertNoFilerChunks(t, f)
 	// The stored HEAD copy is byte-for-byte the HEAD document.
-	e, _ := f.LookupEntry(ctx, catBase+"/v1/snaps", "s1")
+	sp := snapPath(t, f, "v1", "s1")
+	e, _ := f.LookupEntry(ctx, path.Dir(sp), path.Base(sp))
 	var doc snapDoc
 	if err := json.Unmarshal(e.Content, &doc); err != nil {
 		t.Fatal(err)
@@ -124,8 +140,9 @@ func TestCatalog_SnapshotEntryNeverCarriesChunks(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertNoFilerChunks(t, f)
+	sp := snapPath(t, f, "v1", "s1")
 	f.mu.Lock()
-	f.entries[catBase+"/v1/snaps/s1"].Chunks = []*filerpb.FileChunk{{FileId: "3,01"}}
+	f.entries[sp].Chunks = []*filerpb.FileChunk{{FileId: "3,01"}}
 	f.mu.Unlock()
 	if _, _, err := c.ListSnapshots(ctx, "v1", ListOptions{}); err == nil || CodeOf(err) == CodeSnapshotNotFound {
 		t.Fatalf("a snapshot entry with filer chunks listed: %v", err)
@@ -162,9 +179,11 @@ func TestCatalog_ListPagesAndFilters(t *testing.T) {
 	if names(page) != "" || next != "" {
 		t.Fatalf("page 3: %s next %q", names(page), next)
 	}
+	// A deleted snapshot no longer holds its name, so even includeDeleting
+	// does not list it (its attempt path stays for GC).
 	page, _, _ = c.ListSnapshots(ctx, "v1", ListOptions{Prefix: "b", IncludeDeleting: true})
-	if names(page) != "b1,b2,b3" || page[1].State != SnapDeleting {
-		t.Fatalf("prefix b with deleting: %s", names(page))
+	if names(page) != "b1,b3" {
+		t.Fatalf("prefix b with deleting: %s, want the deleted b2 gone with its name", names(page))
 	}
 	if page, _, err := c.ListSnapshots(ctx, "v9", ListOptions{}); err != nil || len(page) != 0 {
 		t.Fatalf("volume without snapshots: %v %v", page, err)
@@ -182,7 +201,8 @@ func TestCatalog_DeleteMarksThenIdempotent(t *testing.T) {
 	if _, err := c.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: "s1", RequestID: "r"}, h); err != nil {
 		t.Fatal(err)
 	}
-	before, _ := f.LookupEntry(ctx, catBase+"/v1/snaps", "s1")
+	sp := snapPath(t, f, "v1", "s1")
+	before, _ := f.LookupEntry(ctx, path.Dir(sp), path.Base(sp))
 	f.mu.Lock()
 	deletesBefore := f.deletes
 	f.mu.Unlock()
@@ -190,12 +210,16 @@ func TestCatalog_DeleteMarksThenIdempotent(t *testing.T) {
 	if err != nil || st != SnapDeleting {
 		t.Fatalf("delete: %q %v", st, err)
 	}
-	after, _ := f.LookupEntry(ctx, catBase+"/v1/snaps", "s1")
+	after, _ := f.LookupEntry(ctx, path.Dir(sp), path.Base(sp))
 	if !bytes.Equal(before.Content, after.Content) || string(after.Extended[extSnapState]) != SnapDeleting || len(after.Extended[extSnapDeletedNs]) == 0 {
-		t.Fatal("delete must only mark the entry (content unchanged, state deleting, deleted_ns set)")
+		t.Fatal("delete must only mark the attempt entry (content unchanged, state deleting, deleted_ns set)")
 	}
-	if st, err := c.DeleteSnapshot(ctx, "v1", "s1"); err != nil || st != SnapDeleting {
-		t.Fatalf("repeated delete: %q %v", st, err)
+	// The name is freed (its record removed); the attempt path stays.
+	if _, err := f.LookupEntry(ctx, catBase+"/v1/"+snapNamesDir, "s1"); err == nil {
+		t.Fatal("delete left the name record: the name is not freed")
+	}
+	if st, err := c.DeleteSnapshot(ctx, "v1", "s1"); err != nil || st != SnapAbsent {
+		t.Fatalf("repeated delete: %q %v, want absent (the name is free)", st, err)
 	}
 	if st, err := c.DeleteSnapshot(ctx, "v1", "nope"); err != nil || st != SnapAbsent {
 		t.Fatalf("delete of a missing snapshot: %q %v", st, err)
@@ -203,8 +227,8 @@ func TestCatalog_DeleteMarksThenIdempotent(t *testing.T) {
 	f.mu.Lock()
 	removed := f.deletes - deletesBefore
 	f.mu.Unlock()
-	if removed != 0 {
-		t.Fatalf("DeleteSnapshot removed %d entries; it must only mark", removed)
+	if removed != 1 {
+		t.Fatalf("DeleteSnapshot removed %d entries; it must remove only the name record", removed)
 	}
 }
 
@@ -310,8 +334,9 @@ func TestFork_RefusalsAndDeadline(t *testing.T) {
 	if _, err := c.DeleteSnapshot(ctx, "v1", "gone"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "gone", Target: "v2", RequestID: "f"}); CodeOf(err) != CodeSnapshotDeleting {
-		t.Fatalf("fork of a deleting snapshot: %v", err)
+	// Deleting frees the name: a fork of it finds no snapshot.
+	if _, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "gone", Target: "v2", RequestID: "f"}); CodeOf(err) != CodeSnapshotNotFound {
+		t.Fatalf("fork of a deleted snapshot: %v, want snapshot_not_found", err)
 	}
 	if _, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s1", Target: "../x", RequestID: "f"}); CodeOf(err) != CodeInvalidName {
 		t.Fatalf("fork onto a non-plain volume id: %v", err)
@@ -338,7 +363,7 @@ func TestFork_RefusalsAndDeadline(t *testing.T) {
 		t.Fatalf("retry after the late attempt: %+v %v", res, err)
 	}
 	// A fork whose VOLUME is written but HEAD is not refuses to attach.
-	s1, _, _, err := c.readSnap(ctx, "v1", "s1")
+	s1, err := c.readSnap(ctx, "v1", "s1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -461,7 +486,7 @@ func TestCatalog_SnapshotIntentAroundEntry(t *testing.T) {
 	ctx := context.Background()
 	seen := -1
 	f.beforeCreate = func(p string) {
-		if p == catBase+"/v1/snaps/s1" {
+		if isSnapPath(p, "v1", "s1") {
 			seen = 0
 			for k := range f.entries {
 				if strings.HasPrefix(k, catBase+"/v1/intents/") {

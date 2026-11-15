@@ -25,6 +25,7 @@ type (
 const (
 	ChunkHeadActive   = chunkHeadActive
 	ChunkHeadDetached = chunkHeadDetached
+	ChunkHeadAborted  = chunkHeadAborted
 )
 
 // NewChunkIntentID returns a fresh intent id "<gen>-<nonce>" for a remote
