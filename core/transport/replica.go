@@ -371,9 +371,13 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 					}
 					return false
 				}
-				// No hook: direct apply.
+				// No hook: direct apply. A failed apply ends the connection, as
+				// the apply gate does: no later entry on it is applied, so no
+				// barrier can ack a frontier past the missing LSN (#89). The
+				// primary sees the closed connection and recovers the replica.
 				if err := r.store.ApplyEntry(entry.LBA, entry.Data, entry.LSN); err != nil {
-					log.Printf("replica: apply entry: %v", err)
+					log.Printf("replica: apply entry lsn=%d: %v", entry.LSN, err)
+					return true
 				}
 
 			case MsgProbeReq:
