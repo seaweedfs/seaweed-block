@@ -226,6 +226,14 @@ func (h *Host) applyUnsupportedPromotionEvidenceGate(placements []lifecycle.Plac
 		if !ok || !current.Assigned {
 			continue
 		}
+		// Record the current primary's own fresh slot fact on every
+		// pass, not only when a promotion is considered, so a ready
+		// report ends its boot grace and every start counts toward
+		// flap history (#128).
+		cur, curFresh := h.freshCurrentSlot(placement.VolumeID, current.ReplicaID)
+		if curFresh && h.ctrl != nil {
+			h.ctrl.RecordPrimaryBootFact(placement.VolumeID, cur)
+		}
 		vol, ok := topologyFromUnsupportedPlacement(placement, current)
 		if !ok {
 			continue
@@ -262,7 +270,7 @@ func (h *Host) applyUnsupportedPromotionEvidenceGate(placements []lifecycle.Plac
 			// Unsupported does not mean the current primary is unhealthy:
 			// a different slot may be stale. Judge the current primary
 			// from its own fresh heartbeat slot, never from placement.
-			if cur, ok := h.freshCurrentSlot(vol.VolumeID, current.ReplicaID); ok && h.primaryBootGraceHolds(vol.VolumeID, cur) {
+			if curFresh && h.primaryBootGraceHolds(vol.VolumeID, cur) {
 				h.log.Printf("blockmaster: promotion gate unsupported volume=%s current=%s not ready but in boot grace; no direct reassign", vol.VolumeID, current.ReplicaID)
 				continue
 			}

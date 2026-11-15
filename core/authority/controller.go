@@ -230,7 +230,7 @@ func (c *TopologyController) processSupportedVolumeLocked(
 	// S4 behavior; stuck evidence has its own lifecycle and is
 	// NOT cleared here — §10 clearing rule 4.)
 	delete(c.unsupported, vol.VolumeID)
-	c.observeIncarnationsLocked(vol)
+	c.observeIncarnationsLocked(vol, serverIndex)
 
 	c.confirmDesiredLocked(vol, currentLine, hasLine)
 
@@ -497,8 +497,8 @@ func (c *TopologyController) decideVolume(
 	// A restarted current primary that is placeable but not ready yet
 	// keeps its authority through its boot grace; only its endpoint
 	// may be refreshed.
-	if candidatePlaceable(current, serverIndex) && c.inPrimaryBootGraceLocked(vol.VolumeID, current) {
-		if current.DataAddr != currentLine.DataAddr || current.CtrlAddr != currentLine.CtrlAddr {
+	if hold, superseded := c.primaryBootGraceLocked(vol.VolumeID, current, candidatePlaceable(current, serverIndex)); hold {
+		if !superseded && (current.DataAddr != currentLine.DataAddr || current.CtrlAddr != currentLine.CtrlAddr) {
 			return AssignmentAsk{
 				VolumeID:  vol.VolumeID,
 				ReplicaID: current.ReplicaID,

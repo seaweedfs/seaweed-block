@@ -179,10 +179,12 @@ func New(cfg Config) (*Host, error) {
 
 	holder := &publisherHolder{}
 	ctrlCfg := cfg.ControllerConfig
-	if w := cfg.Freshness.FreshnessWindow; w > 0 && (ctrlCfg.PrimaryBootGrace == 0 || ctrlCfg.PrimaryBootGrace > w) {
+	if w := cfg.Freshness.EffectiveFreshnessWindow(); ctrlCfg.PrimaryBootGrace <= 0 || ctrlCfg.PrimaryBootGrace > w {
 		// A restarted primary may stay not-ready for at most the
-		// window in which its observations are trusted (#128); a
-		// larger configured grace is capped, never widened.
+		// window in which its observations are trusted (#128): the
+		// store's effective window, also when the config omits it. A
+		// larger configured grace is capped, never widened; an unset
+		// or nonpositive one takes the window.
 		if ctrlCfg.PrimaryBootGrace > w {
 			lg.Printf("blockmaster: primary boot grace %s capped at freshness window %s", ctrlCfg.PrimaryBootGrace, w)
 		}

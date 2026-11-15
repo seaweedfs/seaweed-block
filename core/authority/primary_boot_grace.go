@@ -26,13 +26,16 @@ import "time"
 // Ordering: a fact changes the history only if its ObservedAt is
 // strictly newer than the last fact recorded for that replica, so a
 // delayed or superseded snapshot can never count a restart, reset a
-// grace, or end one. A slot without an incarnation (an older volume
+// grace, or end one. A superseded fact (older, or equal-time with a
+// different incarnation) is not a decision input either: the decision
+// follows the newest recorded fact, and its endpoint is never used. A slot without an incarnation (an older volume
 // binary) or without an observation time gets no grace. All state is
 // guarded by TopologyController.mu.
 
 type primaryBootGrace struct {
 	incarnation    string
 	lastObservedAt time.Time   // newest fact recorded for this replica
+	lastPlaceable  bool        // whether that newest fact was placeable
 	graceStart     time.Time   // controller clock when the incarnation was first recorded
 	ended          bool        // reported ready, expired, or never granted
 	starts         []time.Time // incarnation starts within the flap window
@@ -41,14 +44,14 @@ type primaryBootGrace struct {
 func bootGraceKey(volumeID, replicaID string) string { return volumeID + "/" + replicaID }
 
 // observeIncarnationsLocked records each slot's boot fact.
-func (c *TopologyController) observeIncarnationsLocked(vol VolumeTopologySnapshot) {
+func (c *TopologyController) observeIncarnationsLocked(vol VolumeTopologySnapshot, servers map[string]ServerObservation) {
 	for _, slot := range vol.Slots {
-		c.recordBootFactLocked(vol.VolumeID, slot)
+		c.recordBootFactLocked(vol.VolumeID, slot, candidatePlaceable(slot, servers))
 	}
 }
 
 // recordBootFactLocked is the only writer of bootGrace.
-func (c *TopologyController) recordBootFactLocked(volumeID string, slot ReplicaCandidate) {
+func (c *TopologyController) recordBootFactLocked(volumeID string, slot ReplicaCandidate, placeable bool) {
 	if slot.Incarnation == "" || slot.ObservedAt.IsZero() {
 		return
 	}
@@ -65,6 +68,7 @@ func (c *TopologyController) recordBootFactLocked(volumeID string, slot ReplicaC
 		c.bootGrace[key] = g
 	}
 	g.lastObservedAt = slot.ObservedAt
+	g.lastPlaceable = placeable
 	if slot.ReadyForPrimary {
 		g.ended = true
 	}
@@ -92,14 +96,34 @@ func (c *TopologyController) startIncarnation(prev *primaryBootGrace, incarnatio
 	}
 }
 
-// inPrimaryBootGraceLocked reports whether the current primary's slot
-// is inside its boot grace now. Expiry ends the grace for good.
-func (c *TopologyController) inPrimaryBootGraceLocked(volumeID string, current ReplicaCandidate) bool {
-	if current.Incarnation == "" || current.ReadyForPrimary {
-		return false
+// primaryBootGraceLocked decides whether the current primary, described
+// by fact, holds its authority through a boot grace. hold is true when
+// it does; superseded reports that fact is older than the newest
+// recorded one (or equal-time with another incarnation), in which case
+// the decision follows the recorded fact and the caller must not use
+// fact's endpoint.
+func (c *TopologyController) primaryBootGraceLocked(volumeID string, fact ReplicaCandidate, placeable bool) (hold, superseded bool) {
+	if fact.Incarnation == "" {
+		return false, false
 	}
-	g := c.bootGrace[bootGraceKey(volumeID, current.ReplicaID)]
-	if g == nil || g.incarnation != current.Incarnation || g.ended {
+	g := c.bootGrace[bootGraceKey(volumeID, fact.ReplicaID)]
+	if g == nil {
+		return false, false
+	}
+	if !fact.ObservedAt.IsZero() && (fact.ObservedAt.Before(g.lastObservedAt) ||
+		(fact.ObservedAt.Equal(g.lastObservedAt) && fact.Incarnation != g.incarnation)) {
+		return g.lastPlaceable && c.graceActiveLocked(g), true
+	}
+	if !placeable || fact.ReadyForPrimary || g.incarnation != fact.Incarnation {
+		return false, false
+	}
+	return c.graceActiveLocked(g), false
+}
+
+// graceActiveLocked reports whether g's grace is running. Expiry ends
+// it for good.
+func (c *TopologyController) graceActiveLocked(g *primaryBootGrace) bool {
+	if g.ended {
 		return false
 	}
 	if c.now().Sub(g.graceStart) >= c.config.PrimaryBootGrace {
@@ -119,11 +143,26 @@ func (c *TopologyController) inPrimaryBootGraceLocked(volumeID string, current R
 func (c *TopologyController) PrimaryBootGraceHolds(volumeID string, current ReplicaCandidate) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if !current.Reachable || !current.Eligible || current.Withdrawn {
-		return false
-	}
-	c.recordBootFactLocked(volumeID, current)
-	return c.inPrimaryBootGraceLocked(volumeID, current)
+	placeable := ownPlaceable(current)
+	c.recordBootFactLocked(volumeID, current, placeable)
+	hold, _ := c.primaryBootGraceLocked(volumeID, current, placeable)
+	return hold
+}
+
+// RecordPrimaryBootFact records the current primary's fresh slot fact
+// (ordered, as above) whether or not a promotion is being considered,
+// so a ready report ends the grace and every start counts toward flap
+// history. Same caller contract as PrimaryBootGraceHolds.
+func (c *TopologyController) RecordPrimaryBootFact(volumeID string, current ReplicaCandidate) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.recordBootFactLocked(volumeID, current, ownPlaceable(current))
+}
+
+// ownPlaceable reports placeability from a slot that already carries
+// its server's reachability and eligibility.
+func ownPlaceable(slot ReplicaCandidate) bool {
+	return slot.Reachable && slot.Eligible && !slot.Withdrawn
 }
 
 // PrimaryBootGrace returns the effective boot-grace bound.

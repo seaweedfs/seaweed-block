@@ -125,6 +125,12 @@ type FreshnessConfig struct {
 	PendingGrace time.Duration
 }
 
+// EffectiveFreshnessWindow is the window the observation store actually
+// uses: the configured one, or its default when omitted or nonpositive.
+func (c FreshnessConfig) EffectiveFreshnessWindow() time.Duration {
+	return c.withDefaults().FreshnessWindow
+}
+
 func (c FreshnessConfig) withDefaults() FreshnessConfig {
 	out := c
 	if out.FreshnessWindow <= 0 {
