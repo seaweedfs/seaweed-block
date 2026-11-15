@@ -29,10 +29,14 @@ func newBootGraceRig(t *testing.T) *bootGraceRig {
 	return g
 }
 
-// r1 is the current primary; r2 and r3 are ready peers.
+// r1 is the current primary; r2 and r3 are ready peers. A slot without
+// an observation time is stamped with the rig's clock.
 func (g *bootGraceRig) submit(r1 ReplicaCandidate) {
 	g.t.Helper()
 	g.rev++
+	if r1.ObservedAt.IsZero() {
+		r1.ObservedAt = g.now
+	}
 	r2 := candidate("r2", "s2", "d2", "c2", 20)
 	r2.Incarnation = "r2-a"
 	r3 := candidate("r3", "s3", "d3", "c3", 10)
@@ -65,6 +69,7 @@ func (g *bootGraceRig) steadyPrimary() {
 	g.t.Helper()
 	g.submit(r1Slot("r1-a", "d1-old", "c1-old", true))
 	expectNoNext(g.t, g.ctrl)
+	g.now = g.now.Add(time.Second) // later facts are strictly newer
 }
 
 func expectFailoverToR2(t *testing.T, ctrl *TopologyController, why string) {
@@ -160,4 +165,50 @@ func TestPrimaryBootGrace_NoIncarnationNoGrace(t *testing.T) {
 	g := newBootGraceRig(t)
 	g.submit(r1Slot("", "d1-old", "c1-old", false))
 	expectFailoverToR2(t, g.ctrl, "no incarnation")
+}
+
+// A delayed snapshot carrying the previous incarnation's older fact
+// arrives after the restart: it must neither count a process start nor
+// reset or end the restarted primary's grace (review of #130).
+func TestPrimaryBootGrace_OutOfOrderSnapshotDoesNotTouchHistory(t *testing.T) {
+	g := newBootGraceRig(t)
+	t1 := g.now
+	g.steadyPrimary() // A, observed at t1
+	g.now = g.now.Add(time.Second)
+	g.submit(r1Slot("r1-b", "d1-old", "c1-old", false)) // B restarted, observed at t1+1s
+	expectNoNext(t, g.ctrl)
+
+	delayedA := r1Slot("r1-a", "d1-old", "c1-old", true)
+	delayedA.ObservedAt = t1 // older than B's fact
+	g.now = g.now.Add(time.Second)
+	g.submit(delayedA)
+	expectNoNext(t, g.ctrl) // A is ready in this stale view: nothing to do
+
+	for i := 0; i < 2; i++ {
+		g.now = g.now.Add(time.Second)
+		g.submit(r1Slot("r1-b", "d1-old", "c1-old", false))
+		expectNoNext(t, g.ctrl) // B keeps its grace: no extra starts, not flapping
+	}
+	g.now = g.now.Add(testBootGrace)
+	g.submit(r1Slot("r1-b", "d1-old", "c1-old", false))
+	expectFailoverToR2(t, g.ctrl, "B unready past its own grace")
+}
+
+// Two facts with the same observation time: the second never changes
+// history (no new start, no ready latch).
+func TestPrimaryBootGrace_EqualTimestampFactIgnored(t *testing.T) {
+	g := newBootGraceRig(t)
+	g.steadyPrimary()
+	g.now = g.now.Add(time.Second)
+	b := r1Slot("r1-b", "d1-old", "c1-old", false)
+	g.submit(b)
+	expectNoNext(t, g.ctrl)
+	sameTimeReady := b
+	sameTimeReady.ObservedAt = g.now
+	sameTimeReady.ReadyForPrimary = true
+	g.submit(sameTimeReady)
+	expectNoNext(t, g.ctrl)
+	g.now = g.now.Add(time.Second)
+	g.submit(r1Slot("r1-b", "d1-old", "c1-old", false))
+	expectNoNext(t, g.ctrl) // the equal-time ready fact did not end the grace
 }

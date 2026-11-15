@@ -448,6 +448,7 @@ func assembleVolumeTopology(
 			Withdrawn:       f.slot.Withdrawn,
 			EvidenceScore:   f.slot.EvidenceScore,
 			Incarnation:     f.slot.Incarnation,
+			ObservedAt:      f.observedAt,
 		})
 	}
 

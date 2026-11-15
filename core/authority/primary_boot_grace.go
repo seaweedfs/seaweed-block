@@ -112,3 +112,10 @@ func (c *TopologyController) PrimaryInBootGrace(volumeID string, current Replica
 	}
 	return c.inPrimaryBootGraceLocked(volumeID, current)
 }
+
+// PrimaryBootGrace returns the effective boot-grace bound.
+func (c *TopologyController) PrimaryBootGrace() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.config.PrimaryBootGrace
+}

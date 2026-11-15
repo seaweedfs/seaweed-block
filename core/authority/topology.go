@@ -32,6 +32,10 @@ type ReplicaCandidate struct {
 	// Incarnation identifies the reporting volume process; it changes
 	// on every process start. Empty from older volume binaries.
 	Incarnation string
+	// ObservedAt is the observation time of the slot fact this
+	// candidate was built from (zero when synthesized). It orders boot
+	// facts: an older fact never changes boot-grace history.
+	ObservedAt time.Time
 }
 
 // VolumeTopologySnapshot is the complete point-in-time topology and
