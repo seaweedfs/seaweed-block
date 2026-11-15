@@ -3,6 +3,8 @@ package volume
 import (
 	"sync"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/engine"
 )
 
 // Recovery watchdog (#128 rule 6).
@@ -29,7 +31,11 @@ import (
 //     later degrades is not a boot-recovery stall: it goes through the
 //     normal controller/gate failover.
 //   - role_admission_failed reports the G1 role-admission latch of a
-//     primary-assigned replica, for as long as the latch holds.
+//     primary-assigned replica, for as long as the latch holds, whatever
+//     an older engine-ready fact says.
+//   - Only a ready fact for the watched primary epoch clears or disarms:
+//     an engine still ready at an older epoch (its new assignment not
+//     admitted) does not.
 //
 // wal_corrupt and io_error need typed failures out of the durable
 // recovery path; they are a tracked follow-up.
@@ -104,9 +110,12 @@ func (w *recoveryWatchdog) supportingAdmitted(epoch uint64) {
 }
 
 // reason returns the slot's explicit unhealthy reason given whether it
-// is promotion-ready now and whether the G1 latch holds. fired is true
-// on the call that latched recovery_timeout.
-func (w *recoveryWatchdog) reason(ready, roleAdmissionFailed bool) (reason string, fired bool) {
+// is promotion-ready now, at which epoch that readiness is, and whether
+// the G1 latch holds. Readiness counts only for the watched primary
+// epoch, compared under the lock, so an assignment that advanced while
+// the fact was read is not cleared by it. fired is true on the call that
+// latched recovery_timeout.
+func (w *recoveryWatchdog) reason(ready bool, readyEpoch uint64, roleAdmissionFailed bool) (reason string, fired bool) {
 	if w == nil {
 		return "", false
 	}
@@ -115,7 +124,7 @@ func (w *recoveryWatchdog) reason(ready, roleAdmissionFailed bool) (reason strin
 	if w.primarySince.IsZero() {
 		return "", false
 	}
-	if ready {
+	if ready { // RED: old order, epoch ignored
 		w.timedOut, w.readySeen = false, true
 		return "", false
 	}
@@ -148,15 +157,18 @@ func (w *recoveryWatchdog) catchUpSince() time.Time {
 // UnhealthyReason is the slot's explicit unhealthy reason now (#128
 // rule 6), the same value its heartbeat reports; empty when healthy.
 func (h *Host) UnhealthyReason() string {
-	return h.unhealthyReason(h.readyForPrimaryFact())
+	fact, ready := h.promotionReady()
+	return h.unhealthyReason(fact, ready)
 }
 
-func (h *Host) unhealthyReason(ready bool) string {
+// unhealthyReason evaluates the watchdog with the promotion fact (its
+// epoch binds readiness to the watched assignment) and the G1 latch.
+func (h *Host) unhealthyReason(fact engine.PromotionReadyFact, ready bool) string {
 	if h == nil || h.wd == nil {
 		return ""
 	}
 	failed, _ := h.RoleAdmissionFailure()
-	reason, fired := h.wd.reason(ready, failed)
+	reason, fired := h.wd.reason(ready, fact.Epoch, failed)
 	if fired {
 		h.log.Printf("blockvolume: volume %s primary assignment epoch=%d not promotion-ready after %s: reporting unhealthy (%s)",
 			h.cfg.VolumeID, h.wd.epoch(), h.wd.timeout, UnhealthyRecoveryTimeout)

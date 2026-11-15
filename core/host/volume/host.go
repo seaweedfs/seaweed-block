@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/adapter"
+	"github.com/seaweedfs/seaweed-block/core/engine"
 	"github.com/seaweedfs/seaweed-block/core/replication"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"google.golang.org/grpc"
@@ -584,8 +585,8 @@ func (h *Host) runHeartbeat(ctx context.Context) {
 // buildReport collects local slot facts into a wire HeartbeatReport.
 // T0 single-volume-per-process simplicity: one replica slot.
 func (h *Host) buildReport() *control.HeartbeatReport {
-	ready := h.readyForPrimaryFact()
-	unhealthy := h.unhealthyReason(ready)
+	fact, ready := h.promotionReady()
+	unhealthy := h.unhealthyReason(fact, ready)
 	return &control.HeartbeatReport{
 		ServerId:  h.cfg.ServerID,
 		SentAt:    timestamppb.Now(),
@@ -625,14 +626,21 @@ func newIncarnation() string {
 // a valid candidate fact even though it remains frontend-unhealthy until
 // authority moves.
 func (h *Host) readyForPrimaryFact() bool {
+	_, ready := h.promotionReady()
+	return ready
+}
+
+// promotionReady returns the engine's promotion fact and whether it
+// counts as ready (ready, and its line not superseded).
+func (h *Host) promotionReady() (engine.PromotionReadyFact, bool) {
 	if h == nil || h.view == nil {
-		return false
+		return engine.PromotionReadyFact{}, false
 	}
 	fact := h.view.PromotionReadyFact()
 	if !fact.Ready {
-		return false
+		return fact, false
 	}
-	return !h.view.isSupersededLine(fact.Epoch, fact.EndpointVersion)
+	return fact, !h.view.isSupersededLine(fact.Epoch, fact.EndpointVersion)
 }
 
 // runSubscribe maintains a SubscribeAssignments stream. Reconnects

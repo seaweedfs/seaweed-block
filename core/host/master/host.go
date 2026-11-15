@@ -94,6 +94,7 @@ type LifecycleStores struct {
 // is: New -> Start -> (serve requests) -> Close.
 type Host struct {
 	cfg                 Config
+	healthMu            sync.Mutex // orders replica health events with their accepted heartbeats (#128 rule 6)
 	log                 *log.Logger
 	boot                *bootstrap.DurableAuthorityBootstrap
 	ctrl                *authority.TopologyController

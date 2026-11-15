@@ -2,6 +2,8 @@ package master
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -161,5 +163,96 @@ func TestRecoveryWatchdog_MasterLaterDegradationFollowsNormalRules(t *testing.T)
 	}
 	if got := unhealthyReplicas(t, svc); len(got) != 0 {
 		t.Fatalf("unhealthy replicas=%v; want none (no explicit unhealthy fact)", got)
+	}
+}
+
+func reportR1(t *testing.T, svc *services, slot wireSlot, sentAt time.Time) {
+	t.Helper()
+	_, err := svc.ReportHeartbeat(context.Background(), &control.HeartbeatReport{
+		ServerId: "node-a", SentAt: timestamppb.New(sentAt), Reachable: true, Eligible: true,
+		Slots: []*control.HeartbeatSlot{{
+			VolumeId: "vol-rf3", ReplicaId: "r1", DataAddr: "127.0.0.1:19101", CtrlAddr: "127.0.0.1:19102",
+			Reachable: true, ReadyForPrimary: slot.ready, Eligible: slot.unhealthy == "",
+			EvidenceScore: 30, Incarnation: slot.incarnation, UnhealthyReason: slot.unhealthy,
+		}},
+	})
+	if err != nil {
+		t.Errorf("ReportHeartbeat r1: %v", err)
+	}
+}
+
+func r1HealthEvents(t *testing.T, svc *services) []string {
+	t.Helper()
+	var out []string
+	for _, e := range timelineEvents(t, svc) {
+		if e.GetReplicaId() == "r1" && (e.GetEventType() == "replica_unhealthy" || e.GetEventType() == "replica_unhealthy_cleared") {
+			out = append(out, e.GetEventType())
+		}
+	}
+	return out
+}
+
+// onFirstMutation runs fn once, right after the next accepted store
+// mutation (inside that ingest, after the store lock is released).
+func onFirstMutation(h *Host, fn func()) {
+	var once sync.Once
+	h.ObservationHost().Store().SetOnMutation(func() { once.Do(fn) })
+}
+
+// Review of #134 (P2 3): a second heartbeat lands between the first
+// one's ingest and its event bookkeeping. Both transitions must be
+// recorded, in accepted order: unhealthy, then cleared.
+func TestRecoveryWatchdog_MasterConcurrentHeartbeatsKeepBothTransitions(t *testing.T) {
+	h, svc := watchdogMaster(t)
+	defer closeTestMaster(t, h)
+
+	t0 := time.Now()
+	done := make(chan struct{})
+	onFirstMutation(h, func() {
+		go func() {
+			reportR1(t, svc, wireSlot{"r1-b", true, ""}, t0.Add(time.Millisecond)) // healthy, newer
+			close(done)
+		}()
+		select { // let it run now if nothing blocks it
+		case <-done:
+		case <-time.After(300 * time.Millisecond):
+		}
+	})
+	reportR1(t, svc, wireSlot{"r1-b", false, "recovery_timeout"}, t0) // unhealthy
+	<-done
+	got := r1HealthEvents(t, svc)
+	if len(got) != 2 || got[0] != "replica_unhealthy" || got[1] != "replica_unhealthy_cleared" {
+		t.Fatalf("r1 health events=%v; want [replica_unhealthy replica_unhealthy_cleared]", got)
+	}
+}
+
+// Review of #134 (P2 3): the stored unhealthy fact expires during an
+// ingest that reports unhealthy again. No clear may be fabricated.
+func TestRecoveryWatchdog_MasterExpiryFabricatesNoClear(t *testing.T) {
+	h, svc := watchdogMaster(t)
+	defer closeTestMaster(t, h)
+	var offset atomic.Int64
+	h.ObservationHost().SetNowForTest(func() time.Time { return time.Now().Add(time.Duration(offset.Load())) })
+
+	t0 := time.Now()
+	reportR1(t, svc, wireSlot{"r1-b", false, "recovery_timeout"}, t0)
+	onFirstMutation(h, func() { offset.Store(int64(time.Hour)) }) // everything expires mid-ingest
+	reportR1(t, svc, wireSlot{"r1-b", false, "recovery_timeout"}, t0.Add(time.Millisecond))
+	for _, ev := range r1HealthEvents(t, svc) {
+		if ev == "replica_unhealthy_cleared" {
+			t.Fatalf("r1 health events=%v: a clear was fabricated by expiry", r1HealthEvents(t, svc))
+		}
+	}
+}
+
+// Control: an older heartbeat the store refuses records nothing.
+func TestRecoveryWatchdog_MasterRejectedHeartbeatRecordsNothing(t *testing.T) {
+	h, svc := watchdogMaster(t)
+	defer closeTestMaster(t, h)
+	t0 := time.Now()
+	reportR1(t, svc, wireSlot{"r1-b", false, "recovery_timeout"}, t0)
+	reportR1(t, svc, wireSlot{"r1-b", true, ""}, t0.Add(-time.Second)) // older: refused
+	if got := r1HealthEvents(t, svc); len(got) != 1 || got[0] != "replica_unhealthy" {
+		t.Fatalf("r1 health events=%v; want only [replica_unhealthy]", got)
 	}
 }

@@ -220,11 +220,35 @@ var ErrInvalidObservation = errors.New("observation_store: invalid observation")
 // stale ingest). No error is returned for that case; it's a
 // routine ordering event, not a bug.
 func (s *ObservationStore) Ingest(obs Observation) error {
+	_, err := s.ingest(obs)
+	return err
+}
+
+// SlotHealthTransition is a slot whose explicit unhealthy reason changed
+// with an accepted observation: Old is the reason in the same server's
+// previously stored fact for that slot (whether or not it had expired;
+// "" when there was none), New the reason just stored.
+type SlotHealthTransition struct {
+	VolumeID  string
+	ReplicaID string
+	Old       string
+	New       string
+}
+
+// IngestWithHealthTransitions ingests like Ingest and returns, derived
+// from the accepted mutation itself under the store lock, every slot
+// whose unhealthy reason changed. A refused (older) observation returns
+// none, and expiry never produces one: only an accepted report does.
+func (s *ObservationStore) IngestWithHealthTransitions(obs Observation) ([]SlotHealthTransition, error) {
+	return s.ingest(obs)
+}
+
+func (s *ObservationStore) ingest(obs Observation) ([]SlotHealthTransition, error) {
 	if obs.ServerID == "" {
-		return ErrInvalidObservation
+		return nil, ErrInvalidObservation
 	}
 	if obs.ObservedAt.IsZero() {
-		return ErrInvalidObservation
+		return nil, ErrInvalidObservation
 	}
 
 	// Always compute ExpiresAt from store config — do not trust
@@ -237,8 +261,10 @@ func (s *ObservationStore) Ingest(obs Observation) error {
 	}
 
 	var fn func()
+	var transitions []SlotHealthTransition
 	s.mu.Lock()
-	if prev, ok := s.observations[obs.ServerID]; ok {
+	prev, hadPrev := s.observations[obs.ServerID]
+	if hadPrev {
 		if prev.ObservedAt.After(obs.ObservedAt) {
 			// Out-of-order ingest: keep the newer one already
 			// stored. No mutation fired.
@@ -251,8 +277,28 @@ func (s *ObservationStore) Ingest(obs Observation) error {
 			// distinct from "silently dropped".
 			s.supersededCount++
 			s.mu.Unlock()
-			return nil
+			return nil, nil
 		}
+	}
+	// Health transitions, from this accepted report against the same
+	// server's previously stored fact for each slot it carries.
+	for _, slot := range obs.Slots {
+		old := ""
+		if hadPrev {
+			for _, p := range prev.Slots {
+				if slotKey(p) == slotKey(slot) {
+					old = p.UnhealthyReason
+					break
+				}
+			}
+		}
+		if old != slot.UnhealthyReason {
+			transitions = append(transitions, SlotHealthTransition{
+				VolumeID: slot.VolumeID, ReplicaID: slot.ReplicaID, Old: old, New: slot.UnhealthyReason,
+			})
+		}
+	}
+	if hadPrev {
 		obs.Slots = mergeServerSlots(prev.Slots, obs.Slots)
 	}
 	s.observations[obs.ServerID] = obs
@@ -263,7 +309,7 @@ func (s *ObservationStore) Ingest(obs Observation) error {
 	if fn != nil {
 		fn()
 	}
-	return nil
+	return transitions, nil
 }
 
 func mergeServerSlots(prev []SlotFact, next []SlotFact) []SlotFact {

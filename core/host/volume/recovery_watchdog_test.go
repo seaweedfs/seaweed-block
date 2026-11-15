@@ -1,9 +1,11 @@
 package volume
 
 import (
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/engine"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 )
 
@@ -84,26 +86,26 @@ func TestRecoveryWatchdog_ReadyClearsAndDisarmsNewEpochRearms(t *testing.T) {
 
 	w.primaryAssigned(1)
 	clk.advance(11 * time.Second)
-	if r, fired := w.reason(false, false); r != UnhealthyRecoveryTimeout || !fired {
+	if r, fired := w.reason(false, 0, false); r != UnhealthyRecoveryTimeout || !fired {
 		t.Fatalf("past timeout: %q fired=%t", r, fired)
 	}
-	if r, fired := w.reason(false, false); r != UnhealthyRecoveryTimeout || fired {
+	if r, fired := w.reason(false, 0, false); r != UnhealthyRecoveryTimeout || fired {
 		t.Fatalf("latched: %q fired=%t; want the reason, fired only once", r, fired)
 	}
-	if r, _ := w.reason(true, false); r != "" {
+	if r, _ := w.reason(true, 1, false); r != "" {
 		t.Fatalf("ready: %q; want cleared", r)
 	}
-	if r, _ := w.reason(false, false); r != "" {
+	if r, _ := w.reason(false, 0, false); r != "" {
 		t.Fatalf("unready again in the same assignment: %q; want disarmed", r)
 	}
 
 	w.primaryAssigned(2) // new primary epoch: fresh clock
 	clk.advance(9 * time.Second)
-	if r, _ := w.reason(false, false); r != "" {
+	if r, _ := w.reason(false, 0, false); r != "" {
 		t.Fatalf("new epoch inside timeout: %q", r)
 	}
 	clk.advance(2 * time.Second)
-	if r, _ := w.reason(false, false); r != UnhealthyRecoveryTimeout {
+	if r, _ := w.reason(false, 0, false); r != UnhealthyRecoveryTimeout {
 		t.Fatalf("new epoch past timeout: %q", r)
 	}
 }
@@ -112,11 +114,11 @@ func TestRecoveryWatchdog_ReadyClearsAndDisarmsNewEpochRearms(t *testing.T) {
 // at once; it never applies to a replica without the primary assignment.
 func TestRecoveryWatchdog_RoleAdmissionFailure(t *testing.T) {
 	w := newRecoveryWatchdog(time.Hour)
-	if r, _ := w.reason(false, true); r != "" {
+	if r, _ := w.reason(false, 0, true); r != "" {
 		t.Fatalf("not primary-assigned: %q", r)
 	}
 	w.primaryAssigned(1)
-	if r, _ := w.reason(false, true); r != UnhealthyRoleAdmission {
+	if r, _ := w.reason(false, 0, true); r != UnhealthyRoleAdmission {
 		t.Fatalf("primary-assigned with the G1 latch: %q; want %s", r, UnhealthyRoleAdmission)
 	}
 }
@@ -148,16 +150,16 @@ func TestRecoveryWatchdog_ReadyThenLaterNotReadyReportsNoTimeout(t *testing.T) {
 	h, clk := watchdogHost(t, 10*time.Second)
 	h.applyFact(selfPrimaryFact(1))
 	clk.advance(time.Second)
-	if r := h.unhealthyReason(true); r != "" {
+	if r := h.unhealthyReason(readyAt(1), true); r != "" {
 		t.Fatalf("ready: %q", r)
 	}
 	clk.advance(time.Hour)
-	if r := h.unhealthyReason(false); r != "" {
+	if r := h.unhealthyReason(readyAt(1), false); r != "" {
 		t.Fatalf("not ready an hour after being ready, same incarnation: %q; want no recovery_timeout", r)
 	}
 	h.applyFact(selfPrimaryFact(1)) // the same assignment replayed: still disarmed
 	clk.advance(time.Hour)
-	if r := h.unhealthyReason(false); r != "" {
+	if r := h.unhealthyReason(readyAt(1), false); r != "" {
 		t.Fatalf("same assignment replayed: %q; want still disarmed", r)
 	}
 }
@@ -168,7 +170,7 @@ func TestRecoveryWatchdog_ReadyThenLaterNotReadyReportsNoTimeout(t *testing.T) {
 func TestRecoveryWatchdog_NewIncarnationRearms(t *testing.T) {
 	old, clk := watchdogHost(t, 10*time.Second)
 	old.applyFact(selfPrimaryFact(1))
-	if r := old.unhealthyReason(true); r != "" {
+	if r := old.unhealthyReason(readyAt(1), true); r != "" {
 		t.Fatalf("old process ready: %q", r)
 	}
 
@@ -182,7 +184,84 @@ func TestRecoveryWatchdog_NewIncarnationRearms(t *testing.T) {
 		t.Fatalf("restarted process past timeout: eligible=%t reason=%q; want ineligible, %s", s.Eligible, s.UnhealthyReason, UnhealthyRecoveryTimeout)
 	}
 	clk.advance(time.Hour)
-	if r := old.unhealthyReason(false); r != "" {
+	if r := old.unhealthyReason(readyAt(1), false); r != "" {
 		t.Fatalf("old process stays disarmed: %q", r)
+	}
+}
+
+func readyAt(epoch uint64) engine.PromotionReadyFact {
+	return engine.PromotionReadyFact{Ready: true, Epoch: epoch, EndpointVersion: 1}
+}
+
+// readyView makes the host's promotion fact controllable through *ready.
+func readyView(h *Host, volumeID, replicaID string, ready *engine.PromotionReadyFact) {
+	h.view = NewAdapterProjectionView(stubProjector{
+		p:     engine.ReplicaProjection{Mode: engine.ModeHealthy, Epoch: ready.Epoch, EndpointVersion: 1},
+		ready: ready,
+	}, volumeID, replicaID, h)
+}
+
+// Review of #134 (P2 1), real host: ready at epoch 2, then the epoch-3
+// primary assignment is refused at admission (peer-set install fails),
+// so the engine is still ready at epoch 2 only. That must not disarm the
+// epoch-3 watchdog: it times out; a genuine epoch-3 ready fact clears it.
+func TestRecoveryWatchdog_OldEpochReadyDoesNotDisarmNewAssignment(t *testing.T) {
+	h, a, repl := newStubbedHost(t, "vol1", "rB", &orderingRecorder{})
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	h.wd = newRecoveryWatchdog(10 * time.Second)
+	h.wd.now = clk.now
+	ready := &engine.PromotionReadyFact{Ready: true, Epoch: 2, EndpointVersion: 1, ReplicaID: "rB"}
+	readyView(h, "vol1", "rB", ready)
+
+	h.applyFact(selfFact(2))
+	if s := reportSlot(t, h); !s.Eligible || s.UnhealthyReason != "" {
+		t.Fatalf("ready primary at epoch 2: %+v", s)
+	}
+
+	repl.returnErr = errors.New("injected: peer set install failed")
+	h.applyFact(selfFact(3)) // refused: the adapter stays at epoch 2
+	if a.callCount.Load() != 1 {
+		t.Fatal("fixture: the epoch-3 assignment was adopted")
+	}
+	clk.advance(11 * time.Second)
+	if s := reportSlot(t, h); s.Eligible || s.UnhealthyReason != UnhealthyRecoveryTimeout {
+		t.Fatalf("epoch 3 never admitted, engine ready only at epoch 2: eligible=%t reason=%q; want %s", s.Eligible, s.UnhealthyReason, UnhealthyRecoveryTimeout)
+	}
+
+	*ready = engine.PromotionReadyFact{Ready: true, Epoch: 3, EndpointVersion: 1, ReplicaID: "rB"}
+	if s := reportSlot(t, h); !s.Eligible || s.UnhealthyReason != "" {
+		t.Fatalf("genuine epoch-3 ready fact: eligible=%t reason=%q; want cleared", s.Eligible, s.UnhealthyReason)
+	}
+}
+
+// Review of #134 (P2 2), real host: a previously ready primary whose
+// epoch-3 role call fails (G1 latch) reports role_admission_failed even
+// though its engine is still ready at epoch 2; redelivery with a working
+// role call clears the latch.
+func TestRecoveryWatchdog_G1LatchWinsOverOldReady(t *testing.T) {
+	h, _, _ := newStubbedHost(t, "vol1", "rB", &orderingRecorder{})
+	h.wd = newRecoveryWatchdog(time.Hour)
+	ready := &engine.PromotionReadyFact{Ready: true, Epoch: 2, EndpointVersion: 1, ReplicaID: "rB"}
+	readyView(h, "vol1", "rB", ready)
+	fencer := &switchFencer{}
+	if err := h.SetSelfFence(fencer); err != nil {
+		t.Fatal(err)
+	}
+	h.applyFact(selfFact(2))
+	if s := reportSlot(t, h); !s.Eligible || s.UnhealthyReason != "" {
+		t.Fatalf("ready primary at epoch 2: %+v", s)
+	}
+
+	fencer.fail.Store(true)
+	h.applyFact(selfFact(3)) // role call fails: G1 latch
+	if s := reportSlot(t, h); s.Eligible || s.UnhealthyReason != UnhealthyRoleAdmission {
+		t.Fatalf("G1 latch with an old ready fact: eligible=%t reason=%q; want %s", s.Eligible, s.UnhealthyReason, UnhealthyRoleAdmission)
+	}
+
+	fencer.fail.Store(false)
+	h.applyFact(selfFact(3)) // redelivery succeeds
+	*ready = engine.PromotionReadyFact{Ready: true, Epoch: 3, EndpointVersion: 1, ReplicaID: "rB"}
+	if s := reportSlot(t, h); !s.Eligible || s.UnhealthyReason != "" {
+		t.Fatalf("after successful redelivery and an epoch-3 ready fact: eligible=%t reason=%q; want cleared", s.Eligible, s.UnhealthyReason)
 	}
 }
