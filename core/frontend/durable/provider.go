@@ -146,15 +146,28 @@ type DurableProvider struct {
 	volumes map[string]*volHandle  // keyed by volumeID
 	opening map[string]*sync.Mutex // keyed by volumeID; serializes open/create
 	closed  bool
+
+	// walstore-chunk: closeCtx ends with Close and cancels in-flight
+	// remote attachment; inflight counts RecoverVolume calls admitted
+	// before Close, which Close waits for before closing any store.
+	closeCtx    context.Context
+	closeCancel context.CancelFunc
+	inflight    sync.WaitGroup
 }
 
 type volHandle struct {
 	storage storage.LogicalStorage
 	backend *StorageBackend
 	path    string
-	created bool // created by this provider (a fresh local volume)
 
-	chunk     storage.ChunkLayer // ImplWALStoreChunk, after RecoverVolume
+	// ImplWALStoreChunk. fresh: the local volume is new and starts from
+	// the remote HEAD. It mirrors the durable fresh marker beside the
+	// volume file, written before the file is created and removed only
+	// after the first attach succeeded, so an interrupted initialization
+	// is still fresh after a restart.
+	fresh     bool
+	attachMu  sync.Mutex         // serializes recovery and attach of this volume
+	chunk     storage.ChunkLayer // after RecoverVolume
 	chunkStop context.CancelFunc
 	chunkDone chan struct{}
 }
@@ -209,11 +222,14 @@ func NewDurableProvider(cfg ProviderConfig, view frontend.ProjectionView) (*Dura
 	if err := os.MkdirAll(cfg.StorageRoot, 0o755); err != nil {
 		return nil, fmt.Errorf("durable: mkdir %s: %w", cfg.StorageRoot, err)
 	}
+	closeCtx, closeCancel := context.WithCancel(context.Background())
 	return &DurableProvider{
-		cfg:     cfg,
-		view:    view,
-		volumes: map[string]*volHandle{},
-		opening: map[string]*sync.Mutex{},
+		cfg:         cfg,
+		view:        view,
+		volumes:     map[string]*volHandle{},
+		opening:     map[string]*sync.Mutex{},
+		closeCtx:    closeCtx,
+		closeCancel: closeCancel,
 	}, nil
 }
 
@@ -471,9 +487,28 @@ func (p *DurableProvider) openOrCreate(volumeID string) (*volHandle, error) {
 		if err := p.verifyImplOnDisk(path); err != nil {
 			return nil, err
 		}
-		return p.openExisting(volumeID, path)
+		h, err := p.openExisting(volumeID, path)
+		if err != nil || p.cfg.Impl != ImplWALStoreChunk {
+			return h, err
+		}
+		if h.fresh, err = fileExists(chunkFreshMarker(path)); err != nil {
+			_ = h.storage.Close()
+			return nil, fmt.Errorf("durable: stat fresh marker: %w", err)
+		}
+		return h, nil
 	}
-	return p.createFresh(volumeID, path)
+	if p.cfg.Impl == ImplWALStoreChunk {
+		// Durable before the volume file exists: a crash anywhere between
+		// here and the first successful attach leaves a fresh volume.
+		if err := writeChunkFreshMarker(path); err != nil {
+			return nil, err
+		}
+	}
+	h, err := p.createFresh(volumeID, path)
+	if err == nil && p.cfg.Impl == ImplWALStoreChunk {
+		h.fresh = true
+	}
+	return h, err
 }
 
 // verifyImplOnDisk peeks the 4-byte magic at offset 0 and returns
@@ -610,12 +645,7 @@ func (p *DurableProvider) createFresh(volumeID, path string) (*volHandle, error)
 	default:
 		return nil, fmt.Errorf("durable: unknown impl %q", p.cfg.Impl)
 	}
-	h, err := p.wrap(volumeID, path, s)
-	if err != nil {
-		return nil, err
-	}
-	h.created = true
-	return h, nil
+	return p.wrap(volumeID, path, s)
 }
 
 // wrap builds a StorageBackend around an opened LogicalStorage
@@ -646,16 +676,27 @@ func (p *DurableProvider) wrap(volumeID, path string, s storage.LogicalStorage) 
 func (p *DurableProvider) RecoverVolume(ctx context.Context, volumeID string) (RecoveryReport, error) {
 	p.mu.Lock()
 	h, ok := p.volumes[volumeID]
+	// Close empties p.volumes under the same lock that sets closed, so a
+	// handle found here was admitted before Close; Close waits for it.
+	chunked := ok && p.cfg.Impl == ImplWALStoreChunk
+	if chunked {
+		p.inflight.Add(1)
+	}
 	p.mu.Unlock()
 	if !ok {
 		return RecoveryReport{VolumeID: volumeID}, ErrVolumeNotOpen
+	}
+	if chunked {
+		defer p.inflight.Done()
+		h.attachMu.Lock()
+		defer h.attachMu.Unlock()
 	}
 	report := Recover(h.storage, volumeID)
 	if report.Err != nil {
 		h.backend.SetOperational(false, report.Evidence)
 		return report, report.Err
 	}
-	if p.cfg.Impl == ImplWALStoreChunk {
+	if chunked {
 		if err := p.attachChunk(volumeID, h); err != nil {
 			h.backend.SetOperational(false, "chunk layer attach failed: "+err.Error())
 			report.Err = err
@@ -679,6 +720,11 @@ func (p *DurableProvider) Close() error {
 	handles := p.volumes
 	p.volumes = map[string]*volHandle{}
 	p.mu.Unlock()
+	// walstore-chunk: cancel remote attachment and let every admitted
+	// recovery settle (it sees closed and publishes nothing) before any
+	// store is closed.
+	p.closeCancel()
+	p.inflight.Wait()
 
 	var firstErr error
 	for _, h := range handles {
