@@ -256,7 +256,7 @@ func validateRunID(runID string) error {
 	if runID == "" {
 		return fmt.Errorf("run_id is required")
 	}
-	if filepath.Base(runID) != runID || strings.Contains(runID, "..") {
+	if filepath.Base(runID) != runID || strings.Contains(runID, "..") || strings.ContainsRune(runID, '\\') {
 		return fmt.Errorf("must not contain path traversal components")
 	}
 	return nil
