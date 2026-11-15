@@ -294,7 +294,15 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 				cfg.FreshFromHead = false
 				return nil
 			}
-			return ws.SeedChunkFrontier(head.RemoteLSN)
+			if err := ws.SeedChunkFrontier(head.RemoteLSN); err != nil {
+				return err
+			}
+			// Every component that cached the next LSN learns the seeded
+			// one before the takeover CAS and before the volume serves I/O.
+			if err := h.backend.rebaseShipLSN(); err != nil {
+				return fmt.Errorf("durable: rebase ship LSN after the frontier seed: %w", err)
+			}
+			return nil
 		}
 		head, err := storage.ClaimChunkHead(ctx, remote, cfg)
 		if err != nil {
