@@ -171,6 +171,8 @@ func TestNVMePairedFlushCrashRecovery(t *testing.T) {
 	select {
 	case ok := <-ack:
 		if !ok {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait() // join stderr copying before reading the buffer
 			t.Fatalf("child failed before ACK: %s", stderr.String())
 		}
 	case <-ctx.Done():

@@ -117,7 +117,7 @@ type WALStore struct {
 	// §6 + INV-RECYCLE-GATED-BY-MIN-ACTIVE-PIN.
 	recycleFloorSrc RecycleFloorSource
 
-	syncs atomic.Uint64 // total fsync operations performed (test/diagnostic)
+	syncs atomic.Uint64 // completed logical Sync calls (test/diagnostic)
 	instr writeInstrumentation
 
 	// multiBlockRecords is a disabled-by-default Phase 148 local prototype.
