@@ -47,6 +47,7 @@ const (
 	snapsDir   = "snaps"
 
 	extReq           = "swb.req"
+	extAttempt       = "swb.attempt" // the id of the intent of the attempt that wrote the entry
 	extSnapGen       = "swb.snap.gen"
 	extSnapEpoch     = "swb.snap.epoch"
 	extSnapLSN       = "swb.snap.lsn"
@@ -497,57 +498,49 @@ func decodeSnap(p string, e *filerpb.Entry) (SnapshotInfo, string, error) {
 	}, doc.RequestID, nil
 }
 
-// settleIntents removes every intent under root that operation tag wrote:
-// those of this attempt and of earlier ones whose outcome it has now
-// settled. A failure leaves intents behind, which only over-protects.
-func (c *Catalog) settleIntents(ctx context.Context, root, tag string) {
-	ctx = context.WithoutCancel(ctx)
-	dir := path.Join(root, intentsDir)
-	after := ""
-	for {
-		page, err := c.f.ListEntries(ctx, dir, "", after, listPage)
-		if err != nil {
-			return
-		}
-		for _, e := range page {
-			after = e.GetName()
-			if string(e.Extended[extHolder]) == tag {
-				_ = c.f.DeleteEntry(ctx, dir, e.GetName(), nil)
-			}
-		}
-		if len(page) < listPage {
-			return
-		}
-	}
+// dropIntent deletes one attempt's own intent, once that attempt's create
+// is confirmed or can never apply. It never touches another attempt's
+// intent, even under the same operation: an earlier attempt's create may
+// still be held by the server and land later (W5 rule). A failed delete
+// leaves the intent, which only over-protects.
+func (c *Catalog) dropIntent(ctx context.Context, root, id string) {
+	_ = c.f.DeleteEntry(context.WithoutCancel(ctx), path.Join(root, intentsDir), id, nil)
 }
 
 type createOutcome int
 
 const (
-	createdNow    createOutcome = iota // this call's create applied (confirmed)
-	existsOurs                         // the entry exists and is this operation's
-	existsOther                        // another entry holds the name: our create can never land
-	createUnknown                      // the create's outcome is not known
+	createdNow      createOutcome = iota // this attempt's create applied (confirmed)
+	createRefused                        // the filer refused it (the name exists): it will never apply
+	createUnsettled                      // no answer: it may still apply, even later
 )
 
-// createResolved makes an exclusive create and resolves its outcome against
-// the operation's identity (ours) by re-reading the entry on any failure.
-// Only a re-read that finds the entry settles an ambiguous failure; a
-// failed re-read, or not finding it, leaves the outcome unknown (the create
-// may still land later).
-func (c *Catalog) createResolved(ctx context.Context, dir string, e *filerpb.Entry, ours func(*filerpb.Entry) bool) (createOutcome, error) {
+// createResolved makes this attempt's exclusive create of e under dir and
+// returns its outcome and the entry now under the name (nil if unread).
+// attempt, when not empty, is stored in e as extAttempt; a re-read that
+// finds it confirms this attempt's create. Only the filer's own "already
+// exists" answer settles a failure as refused; any other failure leaves
+// the create unsettled, whatever entry the re-read finds (that entry may
+// be another attempt's, and this one may still land after it is gone).
+func (c *Catalog) createResolved(ctx context.Context, dir string, e *filerpb.Entry, attempt string) (createOutcome, *filerpb.Entry, error) {
+	if attempt != "" {
+		e.Extended[extAttempt] = []byte(attempt)
+	}
 	err := c.f.CreateEntry(ctx, dir, e, true)
 	if err == nil {
-		return createdNow, nil
+		return createdNow, e, nil
 	}
 	got, lerr := c.f.LookupEntry(ctx, dir, e.GetName())
 	if lerr != nil {
-		return createUnknown, err
+		got = nil
 	}
-	if ours(got) {
-		return existsOurs, nil
+	if got != nil && attempt != "" && string(got.Extended[extAttempt]) == attempt {
+		return createdNow, got, nil
 	}
-	return existsOther, nil
+	if errors.Is(err, ErrExists) {
+		return createRefused, got, err
+	}
+	return createUnsettled, got, err
 }
 
 func headDigest(h storage.ChunkHead) (string, error) {
@@ -602,7 +595,6 @@ func (c *Catalog) CreateSnapshot(ctx context.Context, vol string, req SnapshotRe
 	}
 	if existing, prev, _, err := c.readSnap(ctx, vol, req.Name); err == nil {
 		if prev == req.RequestID {
-			c.settleIntents(ctx, root, "snapshot:"+vol+"/"+req.Name+"/"+req.RequestID)
 			existing.Replayed = true
 			return existing, nil
 		}
@@ -651,25 +643,34 @@ func (c *Catalog) CreateSnapshot(ctx context.Context, vol string, req SnapshotRe
 	}
 	if c.now().Sub(readAt) > c.deadline() {
 		// Clean abort: the snapshot entry was never sent.
-		_ = c.f.DeleteEntry(context.WithoutCancel(ctx), path.Join(root, intentsDir), id, nil)
+		c.dropIntent(ctx, root, id)
 		return SnapshotInfo{}, catErr(CodeDeadlineExceeded, true, nil, "snapshot %s/%s: %v since the cut, over the %v deadline; nothing written", vol, req.Name, c.now().Sub(readAt), c.deadline())
 	}
 	dir := path.Join(root, snapsDir)
-	ours := func(got *filerpb.Entry) bool { return string(got.Extended[extReq]) == req.RequestID }
-	outcome, cerr := c.createResolved(ctx, dir, e, ours)
-	switch outcome {
-	case createUnknown:
+	outcome, got, cerr := c.createResolved(ctx, dir, e, id)
+	if outcome != createUnsettled {
+		c.dropIntent(ctx, root, id) // confirmed, or refused for good
+	}
+	if outcome == createdNow {
+		info, _, _, err := c.readSnap(ctx, vol, req.Name)
+		return info, err
+	}
+	// Not this attempt's entry. When unsettled, its intent stays: this
+	// create may still land after the entry found here is removed.
+	if got == nil && outcome == createUnsettled {
 		return SnapshotInfo{}, catErr(CodeOutcomeUnknown, true, cerr, "snapshot %s/%s: create outcome unknown; its intent is kept, retry with the same request id", vol, req.Name)
-	case existsOther:
-		c.settleIntents(ctx, root, tag) // our exclusive create can never land
+	}
+	if got == nil {
+		return SnapshotInfo{}, remoteErr(cerr, "snapshot %s/%s exists but could not be read; retry with the same request id", vol, req.Name)
+	}
+	if string(got.Extended[extReq]) != req.RequestID {
 		return SnapshotInfo{}, catErr(CodeSnapshotExists, false, nil, "snapshot %s/%s exists (another request)", vol, req.Name)
 	}
-	c.settleIntents(ctx, root, tag) // confirmed published
-	info, _, _, err := c.readSnap(ctx, vol, req.Name)
+	info, _, err := decodeSnap(path.Join(dir, req.Name), got)
 	if err != nil {
 		return SnapshotInfo{}, err
 	}
-	info.Replayed = outcome == existsOurs && errors.Is(cerr, ErrExists)
+	info.Replayed = true // another attempt of this request wrote it
 	return info, nil
 }
 
@@ -799,8 +800,10 @@ func (c *Catalog) ListVolumes(ctx context.Context) ([]string, error) {
 //     the snapshot's remote_lsn (LSNs carry forward).
 //
 // The HEAD write is refused once OpDeadline has passed since step 1. An
-// uncertain outcome of step 2 or 4 is outcome_unknown and keeps the intent;
-// a retry with the same request id settles it.
+// uncertain outcome of step 2 or 4 is outcome_unknown; a retry with the same
+// request id completes the fork. An attempt whose HEAD create stays
+// unsettled keeps its own intent (that create may still land); no attempt
+// or replay deletes another attempt's intent.
 func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error) {
 	if _, err := c.volRoot(req.Source); err != nil {
 		return ForkResult{}, err
@@ -837,7 +840,6 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 			return ForkResult{}, remoteErr(err, "read HEAD of %s", req.Target)
 		}
 		if has {
-			c.settleIntents(ctx, dstRoot, tag)
 			return forkResult(existing, true), nil
 		}
 	}
@@ -884,15 +886,17 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 		if err != nil {
 			return ForkResult{}, err
 		}
-		outcome, cerr := c.createResolved(ctx, dstRoot, ve, func(got *filerpb.Entry) bool {
+		// VOLUME names no chunk keys, so it needs no intent; a found VOLUME
+		// is this request's when it binds the same request and image.
+		outcome, got, cerr := c.createResolved(ctx, dstRoot, ve, "")
+		if outcome != createdNow {
+			if got == nil {
+				return ForkResult{}, catErr(CodeOutcomeUnknown, true, cerr, "fork %s: VOLUME create outcome unknown; retry with the same request id", req.Target)
+			}
 			v, err := decodeVolume(path.Join(dstRoot, volumeName), got)
-			return err == nil && c.checkForkRecord(v, req) == nil && v.Fork.HeadSHA256 == digest
-		})
-		switch outcome {
-		case createUnknown:
-			return ForkResult{}, catErr(CodeOutcomeUnknown, true, cerr, "fork %s: VOLUME create outcome unknown; retry with the same request id", req.Target)
-		case existsOther:
-			return ForkResult{}, catErr(CodeTargetExists, false, nil, "volume %s exists (another request, or another image)", req.Target)
+			if err != nil || c.checkForkRecord(v, req) != nil || v.Fork.HeadSHA256 != digest {
+				return ForkResult{}, catErr(CodeTargetExists, false, nil, "volume %s exists (another request, or another image)", req.Target)
+			}
 		}
 		existing = vol
 	}
@@ -908,17 +912,21 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 	}
 	if c.now().Sub(readAt) > c.deadline() {
 		// Clean abort: HEAD was never sent.
-		_ = c.f.DeleteEntry(context.WithoutCancel(ctx), path.Join(dstRoot, intentsDir), id, nil)
+		c.dropIntent(ctx, dstRoot, id)
 		return ForkResult{}, catErr(CodeDeadlineExceeded, true, nil, "fork %s: %v since reading the snapshot, over the %v deadline; HEAD not written", req.Target, c.now().Sub(readAt), c.deadline())
 	}
-	// Under this request's VOLUME only this fork ever writes HEAD (attach
-	// refuses a fork without HEAD), so any HEAD found there is ours.
-	outcome, cerr := c.createResolved(ctx, dstRoot, he, func(*filerpb.Entry) bool { return true })
-	if outcome == createUnknown {
+	// Under this request's VOLUME only this request's attempts write HEAD
+	// (attach refuses a fork without HEAD), so a HEAD found there completes
+	// the fork; if it is another attempt's and this create is unsettled,
+	// this attempt's intent stays (the create may land after HEAD is gone).
+	outcome, got, cerr := c.createResolved(ctx, dstRoot, he, id)
+	if outcome != createUnsettled {
+		c.dropIntent(ctx, dstRoot, id) // confirmed, or refused for good
+	}
+	if outcome == createUnsettled && got == nil {
 		return ForkResult{}, catErr(CodeOutcomeUnknown, true, cerr, "fork %s: HEAD create outcome unknown; its intent is kept, retry with the same request id", req.Target)
 	}
-	c.settleIntents(ctx, dstRoot, tag)
-	return forkResult(existing, outcome == existsOurs && errors.Is(cerr, ErrExists)), nil
+	return forkResult(existing, outcome != createdNow), nil // refused: the filer says HEAD exists
 }
 
 // checkForkRecord refuses a target VOLUME that is not this fork request's.

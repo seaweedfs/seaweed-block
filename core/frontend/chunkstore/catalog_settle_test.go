@@ -45,8 +45,10 @@ func sameStrings(a, b []string) bool {
 }
 
 // An uncertain snapshot create keeps the intent that protects the
-// snapshot's keys; a retry with the same request id settles it and removes
-// every intent of the operation (review of #111, P1).
+// snapshot's keys (review of #111, P1). A retry with the same
+// request id publishes the snapshot and deletes only its own intent: from
+// the catalog's view the first create may still land, so its intent stays
+// (W5 rule; second review).
 func TestCatalog_SnapshotUncertainCreateKeepsIntent(t *testing.T) {
 	f, _, c, h := catalogFixture(t)
 	ctx := context.Background()
@@ -68,8 +70,8 @@ func TestCatalog_SnapshotUncertainCreateKeepsIntent(t *testing.T) {
 	if _, err := c.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: "s1", RequestID: "r"}, h); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
-	if in := intentsOf(t, f, "v1"); len(in) != 0 {
-		t.Fatalf("a settled snapshot left %d intents", len(in))
+	if got := intentsOf(t, f, "v1"); len(got) != 1 || got[0].ID != in[0].ID {
+		t.Fatalf("after the retry: intents %+v, want only the first attempt's %s", got, in[0].ID)
 	}
 }
 
@@ -118,8 +120,8 @@ func TestFork_UncertainHeadCreateKeepsIntent(t *testing.T) {
 	if err != nil || res.Replayed {
 		t.Fatalf("retry: %+v %v", res, err)
 	}
-	if in := intentsOf(t, f, "v2"); len(in) != 0 {
-		t.Fatalf("a settled fork left %d intents", len(in))
+	if got := intentsOf(t, f, "v2"); len(got) != 1 || got[0].ID != in[0].ID {
+		t.Fatalf("after the retry: intents %+v, want only the first attempt's %s", got, in[0].ID)
 	}
 
 	// Applied, response lost: confirmed by the re-read.

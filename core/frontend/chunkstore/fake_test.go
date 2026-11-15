@@ -42,6 +42,14 @@ type fakeFiler struct {
 	// failCreateAfterApply, if set, is called after a create was applied; a
 	// non-nil return is reported to the caller (applied, response lost).
 	failCreateAfterApply func(p string) error
+	// deferCreate, if set and true for a create, makes the server retain
+	// it (not applied yet) and return an error; releaseDeferredCreates
+	// applies retained creates later, each only if its name is still free
+	// (exclusive create, evaluated when the server finally runs it). It
+	// runs under the lock and may read or change f.entries (e is the
+	// caller's entry: read it, do not keep it).
+	deferCreate     func(p string, e *filerpb.Entry) bool
+	deferredCreates []deferredCreate
 }
 
 func newFakeFiler() *fakeFiler { return &fakeFiler{entries: map[string]*filerpb.Entry{}} }
@@ -70,6 +78,10 @@ func (f *fakeFiler) CreateEntry(_ context.Context, dir string, e *filerpb.Entry,
 		if err := f.failCreate(p); err != nil {
 			return err
 		}
+	}
+	if f.deferCreate != nil && f.deferCreate(p, e) {
+		f.deferredCreates = append(f.deferredCreates, deferredCreate{p: p, e: proto.Clone(e).(*filerpb.Entry)})
+		return errors.New("fake: create retained by the server")
 	}
 	c := proto.Clone(e).(*filerpb.Entry)
 	f.entries[p] = c
@@ -155,6 +167,29 @@ func (f *fakeFiler) DeleteEntry(_ context.Context, dir, name string, expected ma
 	delete(f.entries, p)
 	f.deletes++
 	return nil
+}
+
+type deferredCreate struct {
+	p string
+	e *filerpb.Entry
+}
+
+// releaseDeferredCreates lets the server finish retained creates; it returns
+// how many applied (a name that is taken by then is not overwritten).
+func (f *fakeFiler) releaseDeferredCreates() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	applied := 0
+	for _, d := range f.deferredCreates {
+		if _, taken := f.entries[d.p]; taken {
+			continue
+		}
+		f.entries[d.p] = d.e
+		f.written = append(f.written, proto.Clone(d.e).(*filerpb.Entry))
+		applied++
+	}
+	f.deferredCreates = nil
+	return applied
 }
 
 // bumpExtended mutates a stored entry's extended key, as another writer would.
