@@ -207,6 +207,8 @@ func TestStatusServer_ChunkErrorBodyIsTyped(t *testing.T) {
 		{&chunkstore.CatalogError{Code: chunkstore.CodeOutcomeUnknown, Message: "m", Retryable: true}, "outcome_unknown", 503, true},
 		{fmt.Errorf("%w: %w", storage.ErrChunkCaptureRefused, durable.ErrChunkEpochStale), "epoch_stale", 409, false},
 		{fmt.Errorf("%w: %w", storage.ErrChunkCaptureRefused, storage.ErrChunkBaseInstalling), "base_installing", 409, true},
+		{fmt.Errorf("%w: %w", storage.ErrChunkCaptureRefused, storage.ErrChunkReconciling), "reconciling", 409, true},
+		{fmt.Errorf("%w: %w", storage.ErrChunkReconciling, context.DeadlineExceeded), "reconciling", 409, true},
 		{fmt.Errorf("x: %w", storage.ErrChunkCASOutcomeUnknown), "outcome_unknown", 503, true},
 		{fmt.Errorf("x: %w", storage.ErrChunkHeadPrecondition), "head_conflict", 409, true},
 		{fmt.Errorf("x: %w", storage.ErrChunkRemoteUnavailable), "remote_unavailable", 503, true},
