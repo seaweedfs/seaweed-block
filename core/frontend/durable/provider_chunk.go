@@ -28,9 +28,11 @@ var ErrChunkAwaitingAuthority = errors.New("durable: chunk layer awaiting master
 
 // ChunkGeometry is a chunk volume's shape as this host serves it.
 type ChunkGeometry struct {
-	NumBlocks   uint64
-	BlockSize   uint32
-	ChunkBlocks uint32
+	StorageFormatVersion uint32
+	DataChecksums        bool
+	NumBlocks            uint64
+	BlockSize            uint32
+	ChunkBlocks          uint32
 }
 
 // ErrChunkNotPrimary and ErrChunkEpochStale are the causes of a cut the
@@ -236,7 +238,7 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 		return nil, errChunkNoAuthority
 	}
 	if check := p.cfg.ChunkAttachCheck; check != nil {
-		g := ChunkGeometry{NumBlocks: uint64(ws.NumBlocks()), BlockSize: uint32(ws.BlockSize()), ChunkBlocks: p.cfg.ChunkBlocks}
+		g := ChunkGeometry{NumBlocks: uint64(ws.NumBlocks()), BlockSize: uint32(ws.BlockSize()), ChunkBlocks: p.cfg.ChunkBlocks, StorageFormatVersion: ws.FormatVersion(), DataChecksums: ws.DataChecksums()}
 		cctx, cancel := context.WithCancel(ctx)
 		stop := context.AfterFunc(p.closeCtx, cancel)
 		err := check(cctx, volumeID, g)

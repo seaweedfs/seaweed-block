@@ -86,18 +86,19 @@ const (
 // Error codes of the control plane (spec §2.2), as the HTTP API and the CLI
 // report them.
 const (
-	CodeNotChunkVolume    = "not_chunk_volume"
-	CodeInvalidName       = "invalid_name"
-	CodeSnapshotExists    = "snapshot_exists"
-	CodeSnapshotNotFound  = "snapshot_not_found"
-	CodeSnapshotDeleting  = "snapshot_deleting"
-	CodeTargetExists      = "target_exists"
-	CodeGeometryMismatch  = "geometry_mismatch"
-	CodeForkIncomplete    = "fork_incomplete"
-	CodeDeadlineExceeded  = "deadline_exceeded"
-	CodeRemoteUnavailable = "remote_unavailable"
-	CodeOutcomeUnknown    = "outcome_unknown"
-	CodeInvalidLabel      = "invalid_label"
+	CodeNotChunkVolume        = "not_chunk_volume"
+	CodeInvalidName           = "invalid_name"
+	CodeSnapshotExists        = "snapshot_exists"
+	CodeSnapshotNotFound      = "snapshot_not_found"
+	CodeSnapshotDeleting      = "snapshot_deleting"
+	CodeTargetExists          = "target_exists"
+	CodeGeometryMismatch      = "geometry_mismatch"
+	CodeStorageFormatMismatch = "storage_format_mismatch"
+	CodeForkIncomplete        = "fork_incomplete"
+	CodeDeadlineExceeded      = "deadline_exceeded"
+	CodeRemoteUnavailable     = "remote_unavailable"
+	CodeOutcomeUnknown        = "outcome_unknown"
+	CodeInvalidLabel          = "invalid_label"
 )
 
 // CatalogError is a typed control-plane failure.
@@ -158,8 +159,16 @@ type Parent struct {
 	Gen      uint64 `json:"gen"`
 }
 
+// VolumeProtection declares the original volume format. Zero is legacy
+// metadata with unknown protection, never a claim of C12 coverage.
+type VolumeProtection struct {
+	StorageFormatVersion uint32 `json:"storage_format_version,omitempty"`
+	DataChecksums        bool   `json:"data_checksums,omitempty"`
+}
+
 // VolumeInfo is the VOLUME entry (spec §4.2).
 type VolumeInfo struct {
+	VolumeProtection
 	Format   int    `json:"format"`
 	VolumeID string `json:"volume_id"`
 	Geometry
@@ -184,6 +193,7 @@ type ForkRecord struct {
 }
 
 type snapDoc struct {
+	VolumeProtection
 	Format      int               `json:"format"`
 	VolumeID    string            `json:"volume_id"`
 	Name        string            `json:"name"`
@@ -201,6 +211,7 @@ type snapDoc struct {
 // SnapshotInfo describes one snapshot, with the field names of the HTTP API
 // (spec §3.2-§3.3).
 type SnapshotInfo struct {
+	VolumeProtection
 	VolumeID      string            `json:"volumeID"`
 	Name          string            `json:"name"`
 	HeadGen       uint64            `json:"headGen"`
@@ -457,7 +468,17 @@ func (c *Catalog) ReadHead(ctx context.Context, vol string) (storage.ChunkHead, 
 // with geometry g: it creates a missing VOLUME entry (origin create), and
 // refuses with geometry_mismatch when VOLUME disagrees with g, or with
 // fork_incomplete when VOLUME is a fork whose HEAD is not written yet.
-func (c *Catalog) EnsureVolume(ctx context.Context, vol string, g Geometry) (VolumeInfo, error) {
+func (c *Catalog) EnsureVolume(ctx context.Context, vol string, g Geometry, protection ...VolumeProtection) (VolumeInfo, error) {
+	var want VolumeProtection
+	if len(protection) > 1 {
+		return VolumeInfo{}, catErr(CodeBadRequest, false, nil, "one storage protection declaration is allowed")
+	}
+	if len(protection) == 1 {
+		want = protection[0]
+		if (want.StorageFormatVersion != 1 && want.StorageFormatVersion != 2) || want.DataChecksums != (want.StorageFormatVersion == 2) {
+			return VolumeInfo{}, catErr(CodeBadRequest, false, nil, "invalid storage protection declaration")
+		}
+	}
 	root, err := c.volRoot(vol)
 	if err != nil {
 		return VolumeInfo{}, err
@@ -467,7 +488,7 @@ func (c *Catalog) EnsureVolume(ctx context.Context, vol string, g Geometry) (Vol
 		return VolumeInfo{}, err
 	}
 	if !ok {
-		v = VolumeInfo{Format: volumeFormat, VolumeID: vol, Geometry: g, Origin: OriginCreate, CreatedNs: c.now().UnixNano()}
+		v = VolumeInfo{VolumeProtection: want, Format: volumeFormat, VolumeID: vol, Geometry: g, Origin: OriginCreate, CreatedNs: c.now().UnixNano()}
 		e, err := volumeEntry(v, "")
 		if err != nil {
 			return VolumeInfo{}, err
@@ -481,6 +502,9 @@ func (c *Catalog) EnsureVolume(ctx context.Context, vol string, g Geometry) (Vol
 				return VolumeInfo{}, remoteErr(err, "re-read VOLUME of %s", vol)
 			}
 		}
+	}
+	if v.StorageFormatVersion != 0 && want.StorageFormatVersion != 0 && v.VolumeProtection != want {
+		return VolumeInfo{}, catErr(CodeStorageFormatMismatch, false, nil, "volume %s: declared protection %+v, this host serves %+v", vol, v.VolumeProtection, want)
 	}
 	if v.Geometry != g {
 		return VolumeInfo{}, catErr(CodeGeometryMismatch, false, nil, "volume %s: VOLUME geometry %+v, this host serves %+v", vol, v.Geometry, g)
@@ -651,7 +675,7 @@ func decodeSnap(p string, e *filerpb.Entry) (SnapshotInfo, string, error) {
 		VolumeID: doc.VolumeID, Name: doc.Name, HeadGen: head.Gen, HeadEpoch: head.Epoch, CutLSN: head.RemoteLSN,
 		CreatedNs: doc.CreatedNs, State: state, ChunkCount: len(head.Chunks), ManifestBytes: len(e.GetContent()),
 		Consistency: doc.Consistency, Labels: doc.Labels, Parent: doc.Parent, ExpiresAtNs: doc.ExpiresAtNs,
-		head: head, geo: doc.Geometry,
+		head: head, geo: doc.Geometry, VolumeProtection: doc.VolumeProtection,
 	}, doc.RequestID, nil
 }
 
@@ -823,7 +847,7 @@ func (c *Catalog) CreateSnapshot(ctx context.Context, vol string, req SnapshotRe
 		return SnapshotInfo{}, err
 	}
 	doc := snapDoc{Format: snapFormat, VolumeID: vol, Name: req.Name, RequestID: req.RequestID, CreatedNs: c.now().UnixNano(),
-		CreatedBy: req.CreatedBy, Consistency: consistency, Head: headEnt.Content, Geometry: v.Geometry, Parent: v.Parent,
+		CreatedBy: req.CreatedBy, Consistency: consistency, Head: headEnt.Content, Geometry: v.Geometry, Parent: v.Parent, VolumeProtection: v.VolumeProtection,
 		Labels: req.Labels, ExpiresAtNs: req.ExpiresAtNs}
 	body, err := json.Marshal(doc)
 	if err != nil {
@@ -1186,7 +1210,7 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 				req.Target, req.Source, req.Snapshot, existing.Fork.SourceGen, snap.HeadGen)
 		}
 	} else {
-		vol := VolumeInfo{Format: volumeFormat, VolumeID: req.Target, Geometry: snap.geo, Origin: OriginFork, CreatedNs: c.now().UnixNano(),
+		vol := VolumeInfo{VolumeProtection: snap.VolumeProtection, Format: volumeFormat, VolumeID: req.Target, Geometry: snap.geo, Origin: OriginFork, CreatedNs: c.now().UnixNano(),
 			Parent: &Parent{VolumeID: req.Source, Snapshot: req.Snapshot, Gen: snap.HeadGen}, Fork: record}
 		ve, err := volumeEntry(vol, req.RequestID)
 		if err != nil {

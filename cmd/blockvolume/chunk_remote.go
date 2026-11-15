@@ -114,7 +114,7 @@ func newChunkWiring(c chunkFlags) (chunkWiring, error) {
 // fork whose HEAD is not written yet.
 func chunkAttachCheck(cat *chunkstore.Catalog) func(context.Context, string, durable.ChunkGeometry) error {
 	return func(ctx context.Context, volumeID string, g durable.ChunkGeometry) error {
-		_, err := cat.EnsureVolume(ctx, volumeID, chunkstore.Geometry{NumBlocks: g.NumBlocks, BlockSize: g.BlockSize, ChunkBlocks: g.ChunkBlocks})
+		_, err := cat.EnsureVolume(ctx, volumeID, chunkstore.Geometry{NumBlocks: g.NumBlocks, BlockSize: g.BlockSize, ChunkBlocks: g.ChunkBlocks}, chunkstore.VolumeProtection{StorageFormatVersion: g.StorageFormatVersion, DataChecksums: g.DataChecksums})
 		return err
 	}
 }

@@ -251,6 +251,9 @@ type ChunkStatus struct {
 // source of authority lineage the provider is allowed to consult
 // (sketch §9 boundary).
 func NewDurableProvider(cfg ProviderConfig, view frontend.ProjectionView) (*DurableProvider, error) {
+	if cfg.RequireDataChecksums && cfg.Impl != ImplWALStore && cfg.Impl != ImplWALStoreChunk {
+		return nil, errors.New("durable: require data checksums supports walstore and walstore-chunk only")
+	}
 	if cfg.StorageRoot == "" {
 		return nil, fmt.Errorf("durable: ProviderConfig.StorageRoot required")
 	}

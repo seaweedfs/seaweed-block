@@ -79,7 +79,7 @@ func TestWALStoreChunk_AttachCheckRunsFirstWithLocalGeometry(t *testing.T) {
 	if len(ops) < 2 || ops[0] != "check:v1" {
 		t.Fatalf("attach ran %v; want the check first, before any remote call", ops)
 	}
-	if want := (durable.ChunkGeometry{NumBlocks: pcBlocks, BlockSize: 4096, ChunkBlocks: pcChunkBlocks}); got != want {
+	if want := (durable.ChunkGeometry{NumBlocks: pcBlocks, BlockSize: 4096, ChunkBlocks: pcChunkBlocks, StorageFormatVersion: 2, DataChecksums: true}); got != want {
 		t.Fatalf("check saw geometry %+v, want the local %+v", got, want)
 	}
 }
