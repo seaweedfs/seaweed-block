@@ -303,3 +303,12 @@ func TestWALStoreC12_LazyFetchVerifiesBeforeInstall(t *testing.T) {
 		})
 	}
 }
+
+func TestWALStoreC12_RegionSizeOverflowRefused(t *testing.T) {
+	for _, walSize := range []uint64{^uint64(0), uint64(1) << 63} {
+		sb := superblock{WALOffset: 4096, WALSize: walSize, VolumeSize: 16 * 4096, BlockSize: 4096, ImplVersion: 2}
+		if _, err := walstoreFileSize(&sb); err == nil {
+			t.Fatalf("wrapped region accepted: %+v", sb)
+		}
+	}
+}

@@ -39,17 +39,22 @@ func checksumWords(sb *superblock) uint64 {
 }
 func checksumBase(sb *superblock) uint64 { return sb.WALOffset + sb.WALSize + sb.VolumeSize }
 func walstoreFileSize(sb *superblock) (int64, error) {
-	base := checksumBase(sb)
-	if base < sb.VolumeSize || base > math.MaxInt64 {
+	if sb.WALOffset > math.MaxInt64 || sb.WALSize > math.MaxInt64-sb.WALOffset || sb.VolumeSize > math.MaxInt64-sb.WALOffset-sb.WALSize {
 		return 0, errors.New("storage: walstore size overflow")
 	}
+	base := checksumBase(sb)
 	if sb.ImplVersion == 1 {
 		return int64(base), nil
 	}
 	if sb.ImplVersion != WALStoreImplVersion {
 		return 0, fmt.Errorf("storage: unsupported walstore implementation version %d", sb.ImplVersion)
 	}
-	size := (sb.VolumeSize / uint64(sb.BlockSize)) * checksumWords(sb) * 4
+	words := checksumWords(sb)
+	blocks := sb.VolumeSize / uint64(sb.BlockSize)
+	if words == 0 || blocks > (math.MaxInt64-base)/(words*4) {
+		return 0, errors.New("storage: checksum region size overflow")
+	}
+	size := blocks * words * 4
 	if size > math.MaxInt64-base {
 		return 0, errors.New("storage: checksum region size overflow")
 	}
