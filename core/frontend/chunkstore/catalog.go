@@ -858,7 +858,7 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 	if err != nil {
 		return ForkResult{}, err
 	}
-	head := storage.ChunkHead{Gen: 1, Epoch: 0, Holder: "", RemoteLSN: src.RemoteLSN, Chunks: make(map[uint64]storage.ChunkRef, len(src.Chunks))}
+	head := storage.ChunkHead{Gen: 1, Epoch: 0, Holder: "", RemoteLSN: src.RemoteLSN, Chunks: make(map[uint64]storage.ChunkRef, len(src.Chunks)), State: storage.ChunkHeadActive}
 	qualified := 0
 	for idx, ref := range src.Chunks {
 		if !strings.HasPrefix(ref.Key, "@") {

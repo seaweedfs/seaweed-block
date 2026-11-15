@@ -64,19 +64,19 @@ type chunkLayerImpl struct {
 	pending  *chunkHead // a proposal whose CAS outcome is unresolved
 	fenced   bool
 	detached *chunkCutResult // set by a successful Detach
-	// pendingDetach is a Detach mark whose CAS outcome is unresolved (the
-	// re-read failed too); pendingDetachCut is that Detach's final cut.
-	// Every later capture, durability point or Detach settles it first.
-	pendingDetach    *chunkHead
-	pendingDetachCut chunkCutResult
-	remoteLSN        uint64
-	hdr              chunkBitmapHeader // last header written or loaded
-	dirty            map[uint64]bool   // chunks dirtied since the cut in progress or the last HEAD
-	inflight         map[uint64]bool   // chunks captured by a cut whose HEAD is not yet installed
-	allDirty         bool              // a BASE block landed: every chunk is dirty
-	hashMode         bool              // the dirty set is unknown: compare every chunk by hash
-	cutLSN           uint64            // H of the latest cut taken (in flight or installed)
-	keySeq           uint64
+	// pendingDetach says the unresolved proposal in pending is a Detach;
+	// pendingCut is its cut result, installed as the detach result if the
+	// re-read shows it applied.
+	pendingDetach bool
+	pendingCut    chunkCutResult
+	remoteLSN     uint64
+	hdr           chunkBitmapHeader // last header written or loaded
+	dirty         map[uint64]bool   // chunks dirtied since the cut in progress or the last HEAD
+	inflight      map[uint64]bool   // chunks captured by a cut whose HEAD is not yet installed
+	allDirty      bool              // a BASE block landed: every chunk is dirty
+	hashMode      bool              // the dirty set is unknown: compare every chunk by hash
+	cutLSN        uint64            // H of the latest cut taken (in flight or installed)
+	keySeq        uint64
 
 	// Test-only scheduling hooks; nil in production.
 	testPresenceSnapshotHook func()                 // after a presence snapshot, before it is written
@@ -182,6 +182,10 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 
 func copyHead(h chunkHead) chunkHead {
 	out := h
+	if h.DetachedBy != nil {
+		d := *h.DetachedBy
+		out.DetachedBy = &d
+	}
 	out.Chunks = make(map[uint64]chunkRef, len(h.Chunks))
 	for k, v := range h.Chunks {
 		out.Chunks[k] = v
@@ -489,7 +493,7 @@ func (l *chunkLayerImpl) admit() error {
 func (l *chunkLayerImpl) Cut(ctx context.Context) (chunkCutResult, error) {
 	l.capMu.Lock()
 	defer l.capMu.Unlock()
-	return l.captureLocked(ctx)
+	return l.captureLocked(ctx, false)
 }
 
 func (l *chunkLayerImpl) Capture(ctx context.Context) (uint64, error) {
@@ -515,7 +519,7 @@ func (l *chunkLayerImpl) MakeRemoteDurable(ctx context.Context, t uint64) error 
 	if last := l.s.NextLSN() - 1; t > last {
 		return fmt.Errorf("storage: MakeRemoteDurable(%d): LSN was never written (last %d)", t, last)
 	}
-	r, err := l.captureLocked(ctx)
+	r, err := l.captureLocked(ctx, false)
 	if err != nil {
 		return err
 	}
@@ -532,7 +536,7 @@ type capturedChunk struct {
 	zero bool
 }
 
-func (l *chunkLayerImpl) captureLocked(ctx context.Context) (chunkCutResult, error) {
+func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (chunkCutResult, error) {
 	done, err := l.register()
 	if err != nil {
 		return chunkCutResult{}, err
@@ -547,9 +551,6 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context) (chunkCutResult, err
 	ctx, cancel := l.opCtx(ctx)
 	defer cancel()
 
-	if err := l.settlePendingDetach(ctx); err != nil {
-		return chunkCutResult{}, err
-	}
 	if err := l.resolvePending(ctx); err != nil {
 		return chunkCutResult{}, err
 	}
@@ -617,7 +618,11 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context) (chunkCutResult, err
 	// Upload only what changed against HEAD.
 	next := copyHead(baseHead)
 	next.Epoch, next.Holder, next.RemoteLSN = l.cfg.Epoch, l.cfg.Holder, h
-	next.Detached = false // a normal cut is never a clean-stop mark
+	next.State, next.DetachedBy = chunkHeadActive, nil
+	if detach {
+		next.State = chunkHeadDetached
+		next.DetachedBy = &chunkDetachedBy{Holder: l.cfg.Holder, Epoch: l.cfg.Epoch, Gen: baseHead.Gen + 1}
+	}
 	var changed []uint64
 	newKeys := map[uint64]string{}
 	for _, c := range captured {
@@ -639,7 +644,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context) (chunkCutResult, err
 		newKeys[c.idx] = key
 		changed = append(changed, c.idx)
 	}
-	if len(changed) == 0 && h == baseHead.RemoteLSN && baseHead.Gen != 0 && !baseHead.Detached {
+	if !detach && len(changed) == 0 && h == baseHead.RemoteLSN && baseHead.Gen != 0 && !chunkHeadIsDetached(baseHead) {
 		l.finishCut(baseHead, h, nil, nil) // nothing new: no CAS
 		return chunkCutResult{H: h, Head: copyHead(baseHead), Noop: true, FullHash: all}, nil
 	}
@@ -659,7 +664,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context) (chunkCutResult, err
 	if casErr == nil {
 		next.Gen = gen
 		l.finishCut(next, h, changed, newKeys)
-		return chunkCutResult{H: h, Head: copyHead(next), FullHash: all}, nil
+		return l.cutDone(chunkCutResult{H: h, Head: copyHead(next), FullHash: all}, detach), nil
 	}
 	// Precondition or unknown outcome: resolve by re-reading HEAD, never by
 	// a blind retry.
@@ -668,13 +673,14 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context) (chunkCutResult, err
 		l.stMu.Lock()
 		p := copyHead(next)
 		l.pending = &p
+		l.pendingDetach, l.pendingCut = detach, chunkCutResult{H: h, FullHash: all}
 		l.stMu.Unlock()
 		l.abortCut(all)
 		return chunkCutResult{}, fmt.Errorf("storage: capture CAS outcome unresolved (%v): %w: %w", casErr, errChunkCASOutcomeUnknown, gerr)
 	}
 	if sameProposal(cur, next) {
 		l.finishCut(cur, h, changed, newKeys)
-		return chunkCutResult{H: h, Head: copyHead(cur), FullHash: all}, nil
+		return l.cutDone(chunkCutResult{H: h, Head: copyHead(cur), FullHash: all}, detach), nil
 	}
 	l.abortCut(all)
 	if l.supersededBy(cur) {
@@ -693,133 +699,39 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context) (chunkCutResult, err
 func (l *chunkLayerImpl) Detach(ctx context.Context) (chunkCutResult, error) {
 	l.capMu.Lock()
 	defer l.capMu.Unlock()
-	stored := func() (chunkCutResult, bool) {
-		l.stMu.Lock()
-		defer l.stMu.Unlock()
-		if d := l.detached; d != nil {
-			r := *d
-			r.Head = copyHead(d.Head)
-			return r, true
-		}
-		return chunkCutResult{}, false
-	}
-	if r, ok := stored(); ok {
+	if r, ok := l.storedDetach(); ok {
 		return r, nil
 	}
-	if err := func() error {
-		done, err := l.register()
-		if err != nil {
-			return err
+	r, err := l.captureLocked(ctx, true)
+	if errors.Is(err, errChunkLayerDetached) {
+		if d, ok := l.storedDetach(); ok {
+			return d, nil // an earlier, unresolved detach CAS had applied
 		}
-		defer done()
-		sctx, cancel := l.opCtx(ctx)
-		defer cancel()
-		return l.settlePendingDetach(sctx)
-	}(); err != nil {
-		if r, ok := stored(); ok && errors.Is(err, errChunkLayerDetached) {
-			return r, nil // the earlier mark had applied
-		}
-		return chunkCutResult{}, err
 	}
-
-	r, err := l.captureLocked(ctx) // the final cut
-	if err != nil {
-		return chunkCutResult{}, err
-	}
-	done, err := l.register()
-	if err != nil {
-		return chunkCutResult{}, err
-	}
-	defer done()
-	ctx, cancel := l.opCtx(ctx)
-	defer cancel()
-
-	base := r.Head
-	next := copyHead(base)
-	next.Detached = true
-	gen, casErr := l.remote.CASHead(ctx, chunkHeadVersion{Gen: base.Gen, Epoch: base.Epoch}, next)
-	if casErr == nil {
-		next.Gen = gen
-	} else {
-		// Precondition or unknown outcome: resolve by re-reading HEAD.
-		cur, gerr := l.remote.GetHead(ctx)
-		if gerr != nil {
-			l.stMu.Lock()
-			p := copyHead(next)
-			l.pendingDetach, l.pendingDetachCut = &p, r
-			l.stMu.Unlock()
-			return chunkCutResult{}, fmt.Errorf("storage: detach mark CAS outcome unresolved (%v): %w: %w", casErr, errChunkCASOutcomeUnknown, gerr)
-		}
-		if !(sameProposal(cur, next) && cur.Detached) {
-			l.stMu.Lock()
-			if l.supersededBy(cur) {
-				l.fenced = true
-			}
-			l.head = copyHead(cur)
-			l.stMu.Unlock()
-			if l.supersededBy(cur) {
-				return chunkCutResult{}, errors.Join(errChunkLayerFenced, casErr)
-			}
-			return chunkCutResult{}, fmt.Errorf("storage: detach mark CAS not applied: %w", casErr)
-		}
-		next = cur
-	}
-
-	// The bitmap header follows HEAD's generation; a failed write only leaves
-	// a stale header, which a restart treats as a mismatch (hash compare).
-	l.bmMu.Lock()
-	hdr := chunkBitmapHeader{BaseLSN: r.H, HeadGen: next.Gen, Epoch: next.Epoch, Base: chunkBaseNone}
-	if err := l.cfg.Bitmap.WriteHeader(hdr); err == nil {
-		l.stMu.Lock()
-		l.hdr = hdr
-		l.stMu.Unlock()
-	}
-	l.bmMu.Unlock()
-
-	res := chunkCutResult{H: r.H, Head: copyHead(next), FullHash: r.FullHash, Stats: r.Stats}
-	l.stMu.Lock()
-	l.head = copyHead(next)
-	keep := res
-	keep.Head = copyHead(next)
-	l.detached = &keep
-	l.stMu.Unlock()
-	return res, nil
+	return r, err
 }
 
-// settlePendingDetach resolves an unresolved Detach mark by re-reading HEAD.
-// It returns errChunkLayerDetached when the mark had applied (the layer is
-// detached from then on), errChunkLayerFenced when a newer holder took
-// over, an outcome-unknown error when HEAD still cannot be read, and nil
-// when the mark did not apply (the layer continues as before).
-func (l *chunkLayerImpl) settlePendingDetach(ctx context.Context) error {
-	l.stMu.Lock()
-	p, cut := l.pendingDetach, l.pendingDetachCut
-	l.stMu.Unlock()
-	if p == nil {
-		return nil
-	}
-	cur, err := l.remote.GetHead(ctx)
-	if err != nil {
-		return fmt.Errorf("storage: an earlier detach mark is still unresolved: %w: %w", errChunkCASOutcomeUnknown, err)
-	}
+func (l *chunkLayerImpl) storedDetach() (chunkCutResult, bool) {
 	l.stMu.Lock()
 	defer l.stMu.Unlock()
-	l.pendingDetach = nil
-	switch {
-	case sameProposal(cur, *p) && cur.Detached:
-		res := cut
-		res.Head = copyHead(cur)
-		l.head = copyHead(cur)
-		l.detached = &res
-		return errChunkLayerDetached
-	case l.supersededBy(cur):
-		l.fenced = true
-		l.head = copyHead(cur)
-		return errChunkLayerFenced
-	default:
-		l.head = copyHead(cur) // the mark did not apply
-		return nil
+	if d := l.detached; d != nil {
+		r := *d
+		r.Head = copyHead(d.Head)
+		return r, true
 	}
+	return chunkCutResult{}, false
+}
+
+// cutDone records a successful detach cut; the layer is detached from then on.
+func (l *chunkLayerImpl) cutDone(r chunkCutResult, detach bool) chunkCutResult {
+	if detach {
+		l.stMu.Lock()
+		keep := r
+		keep.Head = copyHead(r.Head)
+		l.detached = &keep
+		l.stMu.Unlock()
+	}
+	return r
 }
 
 // supersededBy reports whether cur belongs to a newer or competing holder.
@@ -829,6 +741,10 @@ func (l *chunkLayerImpl) supersededBy(cur chunkHead) bool {
 
 func sameProposal(cur, next chunkHead) bool {
 	if cur.Epoch != next.Epoch || cur.Holder != next.Holder || cur.RemoteLSN != next.RemoteLSN || len(cur.Chunks) != len(next.Chunks) {
+		return false
+	}
+	if chunkHeadIsDetached(cur) != chunkHeadIsDetached(next) || (cur.DetachedBy == nil) != (next.DetachedBy == nil) ||
+		(cur.DetachedBy != nil && *cur.DetachedBy != *next.DetachedBy) {
 		return false
 	}
 	for k, v := range next.Chunks {
@@ -854,9 +770,16 @@ func (l *chunkLayerImpl) resolvePending(ctx context.Context) error {
 	l.stMu.Lock()
 	defer l.stMu.Unlock()
 	l.pending = nil
+	wasDetach, cut := l.pendingDetach, l.pendingCut
+	l.pendingDetach, l.pendingCut = false, chunkCutResult{}
 	switch {
 	case sameProposal(cur, *pending):
 		l.head, l.remoteLSN = copyHead(cur), cur.RemoteLSN
+		if wasDetach {
+			cut.Head = copyHead(cur)
+			l.detached = &cut
+			return errChunkLayerDetached
+		}
 	case l.supersededBy(cur):
 		l.fenced = true
 		l.head = copyHead(cur)

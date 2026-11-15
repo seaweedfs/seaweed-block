@@ -5,11 +5,11 @@ import (
 	"testing"
 )
 
-// Detach publishes a final cut, then the same image once more with Detached
-// set, so the next holder and the block master can tell from HEAD alone
-// that this holder stopped after its last cut. Afterwards the layer refuses
-// every cut; a repeated Detach returns the first result.
-func TestChunkDetach_FinalCutThenDetachedHead(t *testing.T) {
+// Detach publishes its final cut with State = detached and DetachedBy =
+// {holder, epoch, the generation that CAS installs} in that one CAS (HEAD
+// schema ruling, 2026-11-15). Afterwards the layer refuses every cut; a
+// repeated Detach returns the first result.
+func TestChunkDetach_OneCASPublishesDetachedFinalCut(t *testing.T) {
 	s, _ := newChunkTestStore(t)
 	f := newFakeChunkRemote()
 	layer := mustAttach(t, s, f, ctConfig(1))
@@ -22,18 +22,15 @@ func TestChunkDetach_FinalCutThenDetachedHead(t *testing.T) {
 		t.Fatal(err)
 	}
 	heads := f.installedHeads()
-	if len(heads) != 2 {
-		t.Fatalf("installed %d HEADs, want the final cut and the detached mark", len(heads))
+	if len(heads) != 1 {
+		t.Fatalf("installed %d HEADs, want the one detach cut", len(heads))
 	}
-	cut, mark := heads[0], heads[1]
-	if cut.Detached || !mark.Detached || mark.Gen != cut.Gen+1 {
-		t.Fatalf("final cut gen %d detached=%v, mark gen %d detached=%v", cut.Gen, cut.Detached, mark.Gen, mark.Detached)
+	h := heads[0]
+	if h.State != chunkHeadDetached || h.DetachedBy == nil || *h.DetachedBy != (chunkDetachedBy{Holder: "host-a", Epoch: 1, Gen: h.Gen}) {
+		t.Fatalf("detach cut HEAD state %q detachedBy %+v, want detached by {host-a 1 %d}", h.State, h.DetachedBy, h.Gen)
 	}
-	if mark.RemoteLSN != cut.RemoteLSN || mark.RemoteLSN != s.NextLSN()-1 || mark.Holder != cut.Holder || mark.Epoch != cut.Epoch || !sameChunks(mark, cut) {
-		t.Fatalf("the detached mark changed the image: %+v vs %+v", mark, cut)
-	}
-	if !r.Head.Detached || !sameHead(r.Head, mark) || r.H != cut.RemoteLSN {
-		t.Fatalf("Detach returned %+v H %d, the remote holds %+v", r.Head, r.H, mark)
+	if h.RemoteLSN != s.NextLSN()-1 || !sameHead(r.Head, h) || r.Head.State != chunkHeadDetached || r.H != h.RemoteLSN {
+		t.Fatalf("Detach returned %+v H %d, the remote holds %+v", r.Head, r.H, h)
 	}
 	assertEveryHeadIsPrefixImage(t, f, w)
 
@@ -48,7 +45,7 @@ func TestChunkDetach_FinalCutThenDetachedHead(t *testing.T) {
 		t.Fatalf("MakeRemoteDurable after Detach: %v, want errChunkLayerDetached", err)
 	}
 	again, err := layer.Detach(ctTimeout(t))
-	if err != nil || !sameHead(again.Head, mark) || again.H != r.H {
+	if err != nil || !sameHead(again.Head, h) || again.H != r.H || again.Head.State != chunkHeadDetached {
 		t.Fatalf("repeated Detach: %+v %v, want the first result", again, err)
 	}
 	if n := f.stats().cas; n != casBefore {
@@ -56,8 +53,8 @@ func TestChunkDetach_FinalCutThenDetachedHead(t *testing.T) {
 	}
 }
 
-// With nothing new since the last HEAD, Detach still marks HEAD detached.
-func TestChunkDetach_NothingNewStillMarks(t *testing.T) {
+// With nothing new since the last HEAD, Detach still publishes one CAS.
+func TestChunkDetach_NothingNewStillPublishes(t *testing.T) {
 	s, _ := newChunkTestStore(t)
 	f := newFakeChunkRemote()
 	layer := mustAttach(t, s, f, ctConfig(1))
@@ -66,46 +63,50 @@ func TestChunkDetach_NothingNewStillMarks(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := f.stats().head
-	r, err := layer.Detach(ctTimeout(t))
-	if err != nil {
+	if before.State != chunkHeadActive || before.DetachedBy != nil {
+		t.Fatalf("a normal cut published state %q detachedBy %+v", before.State, before.DetachedBy)
+	}
+	if _, err := layer.Detach(ctTimeout(t)); err != nil {
 		t.Fatal(err)
 	}
 	after := f.stats().head
-	if !after.Detached || after.Gen != before.Gen+1 || !sameChunks(after, before) || after.RemoteLSN != before.RemoteLSN || !r.Head.Detached {
+	if after.State != chunkHeadDetached || after.Gen != before.Gen+1 || after.DetachedBy == nil || after.DetachedBy.Gen != after.Gen ||
+		!sameChunks(after, before) || after.RemoteLSN != before.RemoteLSN {
 		t.Fatalf("detach with nothing new: before %+v after %+v", before, after)
 	}
 }
 
-// A detached-mark CAS whose response is lost is resolved by re-reading HEAD.
+// A detach CAS whose response is lost is resolved by re-reading HEAD.
 func TestChunkDetach_LostResponseResolvedByReread(t *testing.T) {
 	s, _ := newChunkTestStore(t)
 	f := newFakeChunkRemote()
 	layer := mustAttach(t, s, f, ctConfig(1))
 	newWriteLog().write(t, s, 2, 0x22)
-	if _, err := layer.Capture(ctTimeout(t)); err != nil {
-		t.Fatal(err)
-	}
 	f.mu.Lock()
 	f.casModes = []fakeCASMode{casAppliedLost}
 	f.mu.Unlock()
 	r, err := layer.Detach(ctTimeout(t))
 	if err != nil {
-		t.Fatalf("detach whose mark CAS applied but lost its response: %v", err)
+		t.Fatalf("detach whose CAS applied but lost its response: %v", err)
 	}
-	if h := f.stats().head; !h.Detached || !sameHead(r.Head, h) {
+	if h := f.stats().head; h.State != chunkHeadDetached || !sameHead(r.Head, h) {
 		t.Fatalf("Detach returned %+v, remote %+v", r.Head, h)
+	}
+	if _, err := layer.Cut(ctTimeout(t)); !errors.Is(err, errChunkLayerDetached) {
+		t.Fatalf("Cut after the resolved detach: %v", err)
 	}
 }
 
-// A normal cut by a new holder clears a predecessor's Detached mark.
-func TestChunkCut_ClearsDetachedMark(t *testing.T) {
+// A new holder's normal cut publishes State = active and clears DetachedBy.
+func TestChunkCut_NewHolderClearsDetachedState(t *testing.T) {
 	src := make([]byte, ctNumBlocks*ctBlockSize)
 	copy(src, makeBlock(ctBlockSize, 0x44))
 	f := newFakeChunkRemote()
 	f.seedHead(t, src, 10, 1)
 	f.mu.Lock()
 	h := copyChunkHead(f.head)
-	h.Detached = true
+	h.State = chunkHeadDetached
+	h.DetachedBy = &chunkDetachedBy{Holder: h.Holder, Epoch: h.Epoch, Gen: h.Gen + 1}
 	f.installLocked(h)
 	f.mu.Unlock()
 
@@ -113,15 +114,12 @@ func TestChunkCut_ClearsDetachedMark(t *testing.T) {
 	cfg := ctConfig(2)
 	cfg.FreshFromHead = true
 	layer := mustAttach(t, s, f, cfg)
-	if _, err := s.Write(6, makeBlock(ctBlockSize, 0x66)); err != nil {
-		t.Fatal(err)
-	}
-	r, err := layer.Cut(ctTimeout(t))
+	r, err := layer.Cut(ctTimeout(t)) // nothing new locally: still a CAS, the base is detached
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Head.Detached || f.stats().head.Detached {
-		t.Fatalf("the new holder's cut kept the predecessor's Detached mark: %+v", f.stats().head)
+	if got := f.stats().head; r.Noop || got.State != chunkHeadActive || got.DetachedBy != nil || got.Holder != "host-a" {
+		t.Fatalf("the new holder's cut left state %q detachedBy %+v holder %q (noop %v)", got.State, got.DetachedBy, got.Holder, r.Noop)
 	}
 }
 

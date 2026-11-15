@@ -18,6 +18,13 @@ type (
 	ChunkCutResult    = chunkCutResult
 	ChunkCutStats     = chunkCutStats
 	ChunkIntent       = chunkIntent
+	ChunkDetachedBy   = chunkDetachedBy
+)
+
+// HEAD states.
+const (
+	ChunkHeadActive   = chunkHeadActive
+	ChunkHeadDetached = chunkHeadDetached
 )
 
 // NewChunkIntentID returns a fresh intent id "<gen>-<nonce>" for a remote

@@ -333,9 +333,17 @@ type headDoc struct {
 	Holder    string            `json:"holder"`
 	RemoteLSN uint64            `json:"remote_lsn"`
 	Chunks    map[uint64]refDoc `json:"chunks"`
-	// Detached: published by Detach, the holder's clean stop (omitted when
-	// false, so earlier documents read unchanged).
-	Detached bool `json:"detached,omitempty"`
+	// State is "active" or "detached"; a document without it is active.
+	// DetachedBy names the holder whose final cut (this generation) a
+	// detached HEAD is; it is absent unless State is detached.
+	State      string         `json:"state,omitempty"`
+	DetachedBy *detachedByDoc `json:"detachedBy,omitempty"`
+}
+
+type detachedByDoc struct {
+	Holder string `json:"holder"`
+	Epoch  uint64 `json:"epoch"`
+	Gen    uint64 `json:"gen"`
 }
 
 type refDoc struct {
@@ -392,7 +400,10 @@ func (r *ChunkRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVer
 
 func headEntry(h storage.ChunkHead) (*filerpb.Entry, error) {
 	doc := headDoc{Format: headFormat, Gen: h.Gen, Epoch: h.Epoch, Holder: h.Holder, RemoteLSN: h.RemoteLSN,
-		Chunks: make(map[uint64]refDoc, len(h.Chunks)), Detached: h.Detached}
+		Chunks: make(map[uint64]refDoc, len(h.Chunks)), State: h.State}
+	if h.DetachedBy != nil {
+		doc.DetachedBy = &detachedByDoc{Holder: h.DetachedBy.Holder, Epoch: h.DetachedBy.Epoch, Gen: h.DetachedBy.Gen}
+	}
 	for idx, ref := range h.Chunks {
 		if ref.Key == "" {
 			return nil, fmt.Errorf("chunkstore: HEAD chunk %d has no key", idx)
@@ -464,8 +475,24 @@ func decodeHeadDoc(p string, content []byte) (storage.ChunkHead, error) {
 	if doc.Gen == 0 {
 		return fail("generation 0")
 	}
+	switch doc.State {
+	case "", storage.ChunkHeadActive:
+		if doc.DetachedBy != nil {
+			return fail("detachedBy on a HEAD that is not detached")
+		}
+	case storage.ChunkHeadDetached:
+		d := doc.DetachedBy
+		if d == nil || d.Gen != doc.Gen || d.Holder != doc.Holder || d.Epoch != doc.Epoch {
+			return fail("detached HEAD whose detachedBy %+v is not its own holder, epoch and generation", d)
+		}
+	default:
+		return fail("state %q", doc.State)
+	}
 	h := storage.ChunkHead{Gen: doc.Gen, Epoch: doc.Epoch, Holder: doc.Holder, RemoteLSN: doc.RemoteLSN,
-		Chunks: make(map[uint64]storage.ChunkRef, len(doc.Chunks)), Detached: doc.Detached}
+		Chunks: make(map[uint64]storage.ChunkRef, len(doc.Chunks)), State: doc.State}
+	if doc.DetachedBy != nil {
+		h.DetachedBy = &storage.ChunkDetachedBy{Holder: doc.DetachedBy.Holder, Epoch: doc.DetachedBy.Epoch, Gen: doc.DetachedBy.Gen}
+	}
 	for idx, ref := range doc.Chunks {
 		sum, err := hex.DecodeString(ref.SHA256)
 		if err != nil || len(sum) != 32 || ref.Key == "" {

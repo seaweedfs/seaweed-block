@@ -474,23 +474,107 @@ func TestCatalog_SnapshotIntentAroundEntry(t *testing.T) {
 	}
 }
 
-func TestHeadDoc_DetachedRoundTrip(t *testing.T) {
+// The HEAD document carries "state" ("active" by every normal cut) and,
+// only when detached, "detachedBy" {holder, epoch, gen} naming its own
+// holder, epoch and generation; a document without "state" reads as active,
+// and an inconsistent detachedBy is refused.
+func TestHeadDoc_StateAndDetachedBy(t *testing.T) {
 	f, b := newFakeFiler(), newFakeBlobs()
 	r, _ := NewChunkRemote(f, b, catBase+"/v1")
 	ctx := context.Background()
-	gen, err := r.CASHead(ctx, storage.ChunkHeadVersion{}, storage.ChunkHead{Epoch: 1, Holder: "h", RemoteLSN: 5, Chunks: map[uint64]storage.ChunkRef{}})
+	gen, err := r.CASHead(ctx, storage.ChunkHeadVersion{}, storage.ChunkHead{Epoch: 1, Holder: "h", RemoteLSN: 5, Chunks: map[uint64]storage.ChunkRef{}, State: storage.ChunkHeadActive})
 	if err != nil {
 		t.Fatal(err)
 	}
 	e, _ := f.LookupEntry(ctx, catBase+"/v1", "HEAD")
-	if strings.Contains(string(e.Content), "detached") {
-		t.Fatalf("a normal HEAD document mentions detached: %s", e.Content)
+	if !strings.Contains(string(e.Content), `"state":"active"`) || strings.Contains(string(e.Content), "detachedBy") {
+		t.Fatalf("an active HEAD document: %s", e.Content)
 	}
-	if _, err := r.CASHead(ctx, storage.ChunkHeadVersion{Gen: gen, Epoch: 1}, storage.ChunkHead{Epoch: 1, Holder: "h", RemoteLSN: 5, Chunks: map[uint64]storage.ChunkRef{}, Detached: true}); err != nil {
+	det := storage.ChunkHead{Epoch: 1, Holder: "h", RemoteLSN: 5, Chunks: map[uint64]storage.ChunkRef{}, State: storage.ChunkHeadDetached,
+		DetachedBy: &storage.ChunkDetachedBy{Holder: "h", Epoch: 1, Gen: gen + 1}}
+	if _, err := r.CASHead(ctx, storage.ChunkHeadVersion{Gen: gen, Epoch: 1}, det); err != nil {
 		t.Fatal(err)
 	}
 	h, err := r.GetHead(ctx)
-	if err != nil || !h.Detached || h.Gen != gen+1 {
+	if err != nil || h.State != storage.ChunkHeadDetached || h.DetachedBy == nil || *h.DetachedBy != (storage.ChunkDetachedBy{Holder: "h", Epoch: 1, Gen: gen + 1}) {
 		t.Fatalf("detached HEAD read back as %+v %v", h, err)
+	}
+
+	// An older document without "state" reads as active.
+	e, _ = f.LookupEntry(ctx, catBase+"/v1", "HEAD")
+	var doc map[string]any
+	_ = json.Unmarshal(e.Content, &doc)
+	delete(doc, "state")
+	delete(doc, "detachedBy")
+	old, _ := json.Marshal(doc)
+	f.mu.Lock()
+	f.entries[catBase+"/v1/HEAD"].Content = old
+	f.mu.Unlock()
+	if h, err := r.GetHead(ctx); err != nil || h.State == storage.ChunkHeadDetached {
+		t.Fatalf("a HEAD without state: %+v %v, want active", h, err)
+	}
+	// detachedBy that is not the HEAD's own holder/epoch/gen is refused.
+	doc["state"] = "detached"
+	doc["detachedBy"] = map[string]any{"holder": "h", "epoch": 1, "gen": gen} // stale gen
+	bad, _ := json.Marshal(doc)
+	f.mu.Lock()
+	f.entries[catBase+"/v1/HEAD"].Content = bad
+	f.mu.Unlock()
+	if _, err := r.GetHead(ctx); err == nil {
+		t.Fatal("a detached HEAD with another generation in detachedBy was accepted")
+	}
+}
+
+// Production serialization end to end: the walstore chunk layer's Detach,
+// over the SeaweedFS remote, writes HEAD to the filer with exactly the
+// ruled fields, in one CAS with the final cut.
+func TestDetach_ProductionSerializedHead(t *testing.T) {
+	ctx := context.Background()
+	f, b := newFakeFiler(), newFakeBlobs()
+	p := filepath.Join(t.TempDir(), "v1")
+	s, err := storage.CreateWALStore(p, 64, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if _, err := s.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := NewChunkRemote(f, b, catBase+"/v1")
+	l, err := storage.AttachChunkLayer(s, r, storage.ChunkLayerConfig{ChunkBlocks: 8, Epoch: 3, Holder: "host-a",
+		Bitmap: storage.NewFileChunkBitmapStore(p + ".chunkbitmap")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Write(9, bytes.Repeat([]byte{9}, 4096)); err != nil {
+		t.Fatal(err)
+	}
+	res, err := l.Detach(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := f.LookupEntry(ctx, catBase+"/v1", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Gen        uint64         `json:"gen"`
+		Epoch      uint64         `json:"epoch"`
+		Holder     string         `json:"holder"`
+		RemoteLSN  uint64         `json:"remote_lsn"`
+		State      string         `json:"state"`
+		DetachedBy map[string]any `json:"detachedBy"`
+	}
+	if err := json.Unmarshal(e.Content, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Gen != 1 || doc.State != "detached" || doc.Holder != "host-a" || doc.Epoch != 3 || doc.RemoteLSN != res.H {
+		t.Fatalf("serialized HEAD: %s", e.Content)
+	}
+	if len(doc.DetachedBy) != 3 || doc.DetachedBy["holder"] != "host-a" || doc.DetachedBy["epoch"] != float64(3) || doc.DetachedBy["gen"] != float64(1) {
+		t.Fatalf("serialized detachedBy %v, want exactly {holder host-a, epoch 3, gen 1}", doc.DetachedBy)
+	}
+	if string(e.Extended[extGen]) != "1" || len(e.Chunks) != 0 {
+		t.Fatalf("HEAD entry extended gen %q, filer chunks %d", e.Extended[extGen], len(e.Chunks))
 	}
 }

@@ -167,18 +167,38 @@ type chunkHeadVersion struct {
 // chunk holding its bytes (block i of the chunk at offset i*BlockSize). A
 // chunk index missing from the map is ZERO: every block in it reads as zeros.
 //
-// Detached marks a HEAD its holder published with Detach: the same image as
-// that holder's final cut, one generation later. It tells the next holder
-// and the block master that the holder stopped after its last cut (a clean
-// move). Every normal cut publishes Detached = false.
+// State is chunkHeadActive or chunkHeadDetached ("" reads as active: older
+// HEADs carry no state). A holder's Detach publishes its final cut with
+// State = detached and DetachedBy = {its holder, its epoch, the generation
+// that CAS installs}, in that one CAS: the next holder and the block master
+// can tell from HEAD alone that the holder stopped after that cut (a clean
+// move). Every normal cut publishes State = active and no DetachedBy; a new
+// holder's takeover does the same.
 type chunkHead struct {
-	Gen       uint64
-	Epoch     uint64
-	Holder    string
-	RemoteLSN uint64
-	Chunks    map[uint64]chunkRef
-	Detached  bool
+	Gen        uint64
+	Epoch      uint64
+	Holder     string
+	RemoteLSN  uint64
+	Chunks     map[uint64]chunkRef
+	State      string
+	DetachedBy *chunkDetachedBy
 }
+
+// HEAD states.
+const (
+	chunkHeadActive   = "active"
+	chunkHeadDetached = "detached"
+)
+
+// chunkDetachedBy names the holder whose final cut a detached HEAD is.
+type chunkDetachedBy struct {
+	Holder string
+	Epoch  uint64
+	Gen    uint64
+}
+
+// chunkHeadIsDetached reports whether h is a detached HEAD.
+func chunkHeadIsDetached(h chunkHead) bool { return h.State == chunkHeadDetached }
 
 // chunkRemote is the remote store. Keys are non-empty valid UTF-8 strings
 // (validChunkKey); Put and PutIntent refuse any other key before writing
@@ -332,11 +352,12 @@ type chunkLayer interface {
 	Cut(ctx context.Context) (chunkCutResult, error)
 	// Capture is Cut, returning only H.
 	Capture(ctx context.Context) (uint64, error)
-	// Detach is the final cut of a clean stop: a Cut, then one more CAS of
-	// the same image with Detached set. It returns the detached HEAD (H is
-	// the final cut's LSN). The caller stops new writes first. Afterwards
-	// Cut, Capture and MakeRemoteDurable fail with errChunkLayerDetached;
-	// a repeated Detach returns the first result.
+	// Detach is the final cut of a clean stop: one cut whose CAS publishes
+	// State = detached and DetachedBy (always a CAS, even with nothing new).
+	// The caller stops new writes first. Afterwards Cut, Capture and
+	// MakeRemoteDurable fail with errChunkLayerDetached, and a repeated
+	// Detach returns the first result. An unresolved detach CAS is settled
+	// like any other unresolved CAS, before the next capture or Detach.
 	Detach(ctx context.Context) (chunkCutResult, error)
 	// MakeRemoteDurable is the durability point for snapshot, detach and
 	// migrate: a Capture whose H >= t. Only a nil return makes t remote
