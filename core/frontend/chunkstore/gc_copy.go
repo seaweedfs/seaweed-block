@@ -74,7 +74,7 @@ func (g *Collector) SweepCopies(ctx context.Context) (settled int, err error) {
 			if readErr != nil {
 				return settled, readErr
 			}
-			if info.VolumeID != a.vol || info.Name != parts[1] || string(e.Extended[extAttempt]) != parts[2] {
+			if info.VolumeID != a.vol || info.Name != parts[1] || (info.State != SnapAborted && string(e.Extended[extAttempt]) != parts[2]) {
 				return settled, errors.New("chunkstore: copy claim identity mismatch")
 			}
 		} else {
@@ -151,14 +151,14 @@ func (g *Collector) snapshotAttemptHeads(ctx context.Context, vol string, now ti
 			return nil, err
 		}
 		for _, e := range entries {
-			if !storage.ValidChunkIntentID(e.Name) || string(e.Extended[extAttempt]) != e.Name {
+			if !storage.ValidChunkIntentID(e.Name) {
 				return nil, errors.New("chunkstore: invalid snapshot attempt identity")
 			}
 			info, _, err := decodeSnap(path.Join(root, dir.Name, e.Name), e)
 			if err != nil {
 				return nil, err
 			}
-			if info.VolumeID != vol || info.Name != dir.Name {
+			if info.VolumeID != vol || info.Name != dir.Name || (info.State != SnapAborted && string(e.Extended[extAttempt]) != e.Name) {
 				return nil, errors.New("chunkstore: snapshot attempt names another volume/name")
 			}
 			if info.State == SnapAborted {
