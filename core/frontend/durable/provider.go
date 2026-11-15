@@ -53,7 +53,15 @@ const (
 	// ImplParallelWALStore is the explicit Phase 167 candidate. It remains
 	// opt-in until the full recovery, replication, and mounted close gates pass.
 	ImplParallelWALStore ImplName = "parallel-walstore"
+	// ImplWALStoreChunk is a walstore volume with an attached chunk layer:
+	// an asynchronous remote copy of immutable chunks published by a HEAD
+	// compare-and-swap. On disk it is a walstore file. Requires
+	// ProviderConfig.ChunkRemoteFor. Opt-in proof of concept.
+	ImplWALStoreChunk ImplName = "walstore-chunk"
 )
+
+// defaultChunkBlocks is 4 MiB chunks of 4 KiB blocks.
+const defaultChunkBlocks = 1024
 
 // ErrImplKindMismatch is returned by Open when the configured
 // selector does not match the on-disk superblock magic. Named so
@@ -112,6 +120,21 @@ type ProviderConfig struct {
 	// that need synced-but-uncheckpointed WAL records to survive a process
 	// restart and prove real replay. Default false.
 	WALRecoveryTestDisableFlusher bool
+
+	// ChunkRemoteFor returns the remote that holds volumeID's chunks and
+	// HEAD. Required for ImplWALStoreChunk, ignored otherwise.
+	ChunkRemoteFor func(volumeID string) (storage.ChunkRemote, error)
+	// ChunkBlocks is the number of blocks per chunk. Zero: 1024.
+	ChunkBlocks uint32
+	// ChunkHolder names this node in HEAD. Zero: the replica ID.
+	ChunkHolder string
+	// ChunkReadMissTimeout bounds one remote fetch of an absent block.
+	// Zero: the storage default.
+	ChunkReadMissTimeout time.Duration
+	// ChunkCaptureInterval runs a cut every interval while the volume's
+	// projection is healthy. Zero: cuts only on CaptureVolume and
+	// MakeVolumeRemoteDurable.
+	ChunkCaptureInterval time.Duration
 }
 
 // DurableProvider is the production frontend.Provider implementation.
@@ -129,6 +152,11 @@ type volHandle struct {
 	storage storage.LogicalStorage
 	backend *StorageBackend
 	path    string
+	created bool // created by this provider (a fresh local volume)
+
+	chunk     storage.ChunkLayer // ImplWALStoreChunk, after RecoverVolume
+	chunkStop context.CancelFunc
+	chunkDone chan struct{}
 }
 
 // VolumeStatus is a read-only diagnostic snapshot of one durable volume
@@ -162,9 +190,15 @@ func NewDurableProvider(cfg ProviderConfig, view frontend.ProjectionView) (*Dura
 	if cfg.Impl == "" {
 		cfg.Impl = ImplSmartWAL
 	}
-	if cfg.Impl != ImplSmartWAL && cfg.Impl != ImplWALStore && cfg.Impl != ImplParallelWALStore {
-		return nil, fmt.Errorf("durable: unknown impl %q (want %q, %q, or %q)",
-			cfg.Impl, ImplSmartWAL, ImplWALStore, ImplParallelWALStore)
+	if cfg.Impl != ImplSmartWAL && cfg.Impl != ImplWALStore && cfg.Impl != ImplParallelWALStore && cfg.Impl != ImplWALStoreChunk {
+		return nil, fmt.Errorf("durable: unknown impl %q (want %q, %q, %q, or %q)",
+			cfg.Impl, ImplSmartWAL, ImplWALStore, ImplParallelWALStore, ImplWALStoreChunk)
+	}
+	if cfg.Impl == ImplWALStoreChunk && cfg.ChunkRemoteFor == nil {
+		return nil, fmt.Errorf("durable: impl %q requires ProviderConfig.ChunkRemoteFor", ImplWALStoreChunk)
+	}
+	if cfg.ChunkBlocks == 0 {
+		cfg.ChunkBlocks = defaultChunkBlocks
 	}
 	if cfg.BlockSize == 0 {
 		cfg.BlockSize = 4096
@@ -469,6 +503,9 @@ func (p *DurableProvider) verifyImplOnDisk(path string) error {
 		return fmt.Errorf("%w: unrecognized magic %q at %s",
 			ErrImplKindMismatch, string(magic), path)
 	}
+	if diskImpl == ImplWALStore && p.cfg.Impl == ImplWALStoreChunk {
+		return nil // a chunk volume is a walstore file
+	}
 	if diskImpl != p.cfg.Impl {
 		return fmt.Errorf("%w: selector=%s on-disk=%s at %s",
 			ErrImplKindMismatch, p.cfg.Impl, diskImpl, path)
@@ -496,7 +533,7 @@ func magicToImpl(magic string) (ImplName, bool) {
 func (p *DurableProvider) openExisting(volumeID, path string) (*volHandle, error) {
 	var s storage.LogicalStorage
 	switch p.cfg.Impl {
-	case ImplWALStore:
+	case ImplWALStore, ImplWALStoreChunk:
 		ws, err := storage.OpenWALStore(path)
 		if err != nil {
 			return nil, fmt.Errorf("durable: OpenWALStore %s: %w", path, err)
@@ -542,7 +579,7 @@ func (p *DurableProvider) createFresh(volumeID, path string) (*volHandle, error)
 	}
 	var s storage.LogicalStorage
 	switch p.cfg.Impl {
-	case ImplWALStore:
+	case ImplWALStore, ImplWALStoreChunk:
 		ws, err := storage.CreateWALStore(path, p.cfg.NumBlocks, p.cfg.BlockSize)
 		if err != nil {
 			return nil, fmt.Errorf("durable: CreateWALStore %s: %w", path, err)
@@ -573,7 +610,12 @@ func (p *DurableProvider) createFresh(volumeID, path string) (*volHandle, error)
 	default:
 		return nil, fmt.Errorf("durable: unknown impl %q", p.cfg.Impl)
 	}
-	return p.wrap(volumeID, path, s)
+	h, err := p.wrap(volumeID, path, s)
+	if err != nil {
+		return nil, err
+	}
+	h.created = true
+	return h, nil
 }
 
 // wrap builds a StorageBackend around an opened LogicalStorage
@@ -613,6 +655,13 @@ func (p *DurableProvider) RecoverVolume(ctx context.Context, volumeID string) (R
 		h.backend.SetOperational(false, report.Evidence)
 		return report, report.Err
 	}
+	if p.cfg.Impl == ImplWALStoreChunk {
+		if err := p.attachChunk(volumeID, h); err != nil {
+			h.backend.SetOperational(false, "chunk layer attach failed: "+err.Error())
+			report.Err = err
+			return report, err
+		}
+	}
 	h.backend.SetOperational(true, report.Evidence)
 	return report, nil
 }
@@ -633,6 +682,7 @@ func (p *DurableProvider) Close() error {
 
 	var firstErr error
 	for _, h := range handles {
+		p.stopChunkLoop(h)
 		_ = h.backend.Close()
 		if err := h.storage.Close(); err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("durable: close storage: %w", err)
