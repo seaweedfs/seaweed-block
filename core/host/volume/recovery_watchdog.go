@@ -210,9 +210,6 @@ func (h *Host) CatchUpSince() time.Time {
 // integrity fault, io_error for a storage I/O failure. It returns "" for
 // an error it cannot classify (the watchdog's timeout still covers that).
 func LocalRecoveryHealthReason(err error) string {
-	if red := true; red {
-		return "" // RED: not classified yet
-	}
 	if err == nil {
 		return ""
 	}
