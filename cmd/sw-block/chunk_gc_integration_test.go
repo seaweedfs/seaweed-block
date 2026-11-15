@@ -116,7 +116,9 @@ func TestIntegration_OpsChunkGC_RealMasterAndStore(t *testing.T) {
 	if _, err = remote.PutIntent(ctx, storage.ChunkIntent{Gen: h.Gen, Epoch: 1, Holder: "snapshot:vol-a/pending/attempt", Keys: []string{"copy"}}); err != nil {
 		t.Fatal(err)
 	}
-	m, err := master.New(master.Config{AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), Listen: "127.0.0.1:0"})
+	cfg := gcTestMasterConfig(t)
+	cfg.LifecycleStoreDir = t.TempDir()
+	m, err := master.New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

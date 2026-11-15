@@ -48,7 +48,7 @@ func (s *gcCLIStore) DeleteBlob(_ context.Context, fid string) error {
 }
 
 func TestOpsChunkGC_DefaultIsReadOnly(t *testing.T) {
-	h, e := master.New(master.Config{AuthorityStoreDir: t.TempDir(), Listen: "127.0.0.1:0"})
+	h, e := master.New(gcTestMasterConfig(t))
 	if e != nil {
 		t.Fatal(e)
 	}
