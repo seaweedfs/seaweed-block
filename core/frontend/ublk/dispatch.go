@@ -45,5 +45,44 @@ type handler struct {
 // and writes) and returns the ublk result: bytes transferred, 0 for a
 // flush, or a negative errno.
 func (h handler) handle(ctx context.Context, r request, buf []byte) int32 {
-	return -int32(syscall.EIO)
+	switch r.op {
+	case ioOpFlush:
+		if err := h.backend.Sync(ctx); err != nil {
+			return errno(syscall.EIO)
+		}
+		return 0
+	case ioOpRead, ioOpWrite:
+	default:
+		return errno(syscall.EOPNOTSUPP)
+	}
+
+	length := uint64(r.nrSectors) << sectorShift
+	if r.startSector > h.size>>sectorShift {
+		return errno(syscall.EINVAL)
+	}
+	offset := r.startSector << sectorShift
+	if length > h.size-offset || length > uint64(len(buf)) || length > 1<<31-1 {
+		return errno(syscall.EINVAL)
+	}
+	data := buf[:length]
+
+	if r.op == ioOpRead {
+		n, err := h.backend.Read(ctx, int64(offset), data)
+		if err != nil || n != len(data) {
+			return errno(syscall.EIO)
+		}
+		return int32(n)
+	}
+	n, err := h.backend.Write(ctx, int64(offset), data)
+	if err != nil || n != len(data) {
+		return errno(syscall.EIO)
+	}
+	if r.flags&ioFlagFUA != 0 {
+		if err := h.backend.Sync(ctx); err != nil {
+			return errno(syscall.EIO)
+		}
+	}
+	return int32(n)
 }
+
+func errno(e syscall.Errno) int32 { return -int32(e) }
