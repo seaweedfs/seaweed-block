@@ -26,15 +26,20 @@ type chunkFlags struct {
 	collection      string
 	replication     string
 	captureInterval time.Duration
+	// controlEndpoint mounts the /chunk/* routes on the status listener.
+	controlEndpoint bool
 }
 
 func validateChunkFlags(f flags) error {
 	c := f.chunk
 	if f.durableImpl != "walstore-chunk" {
-		if c.filer != "" || c.collection != "" || c.replication != "" || c.captureInterval != 0 || c.path != defaultChunkPath {
+		if c.filer != "" || c.collection != "" || c.replication != "" || c.captureInterval != 0 || c.path != defaultChunkPath || c.controlEndpoint {
 			return errors.New("--chunk-* flags require --durable-impl=walstore-chunk")
 		}
 		return nil
+	}
+	if c.controlEndpoint && f.statusAddr == "" {
+		return errors.New("--chunk-control-endpoint requires --status-addr")
 	}
 	if f.durableRoot == "" {
 		return errors.New("--durable-impl=walstore-chunk requires --durable-root")

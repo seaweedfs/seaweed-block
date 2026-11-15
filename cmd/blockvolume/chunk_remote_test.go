@@ -19,8 +19,13 @@ func TestWALStoreChunkFlags(t *testing.T) {
 	if err != nil {
 		t.Fatalf("walstore-chunk with a filer: %v", err)
 	}
-	if f.chunk.filer != "127.0.0.1:18888" || f.chunk.path != defaultChunkPath || f.chunk.captureInterval != 30*time.Second {
+	if f.chunk.filer != "127.0.0.1:18888" || f.chunk.path != defaultChunkPath || f.chunk.captureInterval != 30*time.Second || f.chunk.controlEndpoint {
 		t.Fatalf("parsed chunk flags = %+v", f.chunk)
+	}
+	f, err = parseFlags(base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1",
+		"--status-addr=127.0.0.1:0", "--chunk-control-endpoint"))
+	if err != nil || !f.chunk.controlEndpoint {
+		t.Fatalf("walstore-chunk with the control endpoint: %+v %v", f.chunk, err)
 	}
 	refused := map[string][]string{
 		"no filer":               base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk"),
@@ -30,6 +35,10 @@ func TestWALStoreChunkFlags(t *testing.T) {
 		"negative interval":      base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-capture-interval=-1s"),
 		"chunk flag on walstore": base("--durable-root=/tmp/sw-block", "--durable-impl=walstore", "--chunk-filer=x:1"),
 		"chunk path on walstore": base("--durable-root=/tmp/sw-block", "--durable-impl=walstore", "--chunk-path=/other"),
+		"control endpoint on walstore": base("--durable-root=/tmp/sw-block", "--durable-impl=walstore", "--status-addr=127.0.0.1:0",
+			"--chunk-control-endpoint"),
+		"control endpoint without a status listener": base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk",
+			"--chunk-filer=x:1", "--chunk-control-endpoint"),
 	}
 	for name, args := range refused {
 		if _, err := parseFlags(args); err == nil {
