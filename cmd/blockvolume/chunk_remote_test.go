@@ -89,7 +89,7 @@ func TestChunkAttachCheckAppliesVolumeRules(t *testing.T) {
 		t.Fatal(err)
 	}
 	check := chunkAttachCheck(cat)
-	g := durable.ChunkGeometry{NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 8}
+	g := durable.ChunkGeometry{NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 8, StorageFormatVersion: 2, DataChecksums: true}
 	if err := check(ctx, "v1", g); err != nil {
 		t.Fatalf("first attach: %v", err)
 	}
@@ -100,6 +100,16 @@ func TestChunkAttachCheckAppliesVolumeRules(t *testing.T) {
 	if err := check(ctx, "v1", g); err != nil {
 		t.Fatalf("attach with the same geometry: %v", err)
 	}
+	if v.StorageFormatVersion != 2 || !v.DataChecksums {
+		t.Fatalf("VOLUME omits C12 protection: %+v", v)
+	}
+	legacy := g
+	legacy.StorageFormatVersion = 1
+	legacy.DataChecksums = false
+	if err := check(ctx, "v1", legacy); chunkstore.CodeOf(err) != chunkstore.CodeStorageFormatMismatch {
+		t.Fatalf("unprotected host admitted to protected volume: %v", err)
+	}
+
 	other := g
 	other.NumBlocks = 128
 	if err := check(ctx, "v1", other); chunkstore.CodeOf(err) != chunkstore.CodeGeometryMismatch {

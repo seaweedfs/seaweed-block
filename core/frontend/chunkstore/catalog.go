@@ -471,12 +471,12 @@ func (c *Catalog) ReadHead(ctx context.Context, vol string) (storage.ChunkHead, 
 func (c *Catalog) EnsureVolume(ctx context.Context, vol string, g Geometry, protection ...VolumeProtection) (VolumeInfo, error) {
 	var want VolumeProtection
 	if len(protection) > 1 {
-		return VolumeInfo{}, catErr(CodeBadRequest, false, nil, "one storage protection declaration is allowed")
+		return VolumeInfo{}, catErr(CodeStorageFormatMismatch, false, nil, "one storage protection declaration is allowed")
 	}
 	if len(protection) == 1 {
 		want = protection[0]
 		if (want.StorageFormatVersion != 1 && want.StorageFormatVersion != 2) || want.DataChecksums != (want.StorageFormatVersion == 2) {
-			return VolumeInfo{}, catErr(CodeBadRequest, false, nil, "invalid storage protection declaration")
+			return VolumeInfo{}, catErr(CodeStorageFormatMismatch, false, nil, "invalid storage protection declaration")
 		}
 	}
 	root, err := c.volRoot(vol)
