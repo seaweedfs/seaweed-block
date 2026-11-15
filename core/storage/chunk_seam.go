@@ -78,7 +78,7 @@ import (
 //     fetch began); a local version always wins.
 //
 // The dirty bitmap stays off the write hot path. WAL entries carry their
-// LBA, so the dirty set is always the persisted bitmap ∪ the chunks of WAL
+// LBA, so the dirty set is always the persisted bitmap âˆª the chunks of WAL
 // entries above the checkpoint. The persisted bitmap may over-report, never
 // under-report.
 type chunkSink interface {
@@ -137,7 +137,7 @@ type chunkDelta struct {
 // clears post-cut dirt.
 //
 // Restart or failover: a header equal to HEAD {RemoteLSN, Gen, Epoch} with
-// Base == chunkBaseNone means incremental, dirty = persisted bitmap ∪
+// Base == chunkBaseNone means incremental, dirty = persisted bitmap âˆª
 // chunks of WAL entries above the checkpoint. A lost bitmap or any header
 // mismatch falls back to a per-chunk SHA-256 compare against HEAD's chunk
 // refs; only differing chunks are uploaded (Base == chunkBaseInstalling
@@ -304,6 +304,16 @@ type chunkLayerConfig struct {
 	// HEAD (every block absent, read lazily). False means an existing local
 	// volume. Never inferred from the local contents.
 	FreshFromHead bool
+	// RestoreGuard binds fresh attachment to the HEAD the provider claimed
+	// and durably seeded. A changed read refuses before hooks/readiness; the
+	// next recovery must repeat claim and seed. Nil is for direct layer users.
+	RestoreGuard *chunkHeadVersion
+	// PrepareRestore runs after ClaimChunkHead validates its observed HEAD
+	// and before any ownership CAS (also for an idempotent claim). The owner
+	// durably seeds the local frontier and rebases cached ship cursors here,
+	// while its frontend is gated. An error leaves remote ownership unchanged.
+	// No store/layer/remote lock is held across the callback.
+	PrepareRestore func(head chunkHead) error
 	// CaptureAllowed is supplied by the store owner. It is an admission
 	// check, made when a capture starts and again right before its HEAD CAS:
 	// it refuses a cut during a BASE install or rebuild, or when this node is
@@ -396,7 +406,7 @@ var (
 	errChunkKeyInvalid          = errors.New("storage: chunk key is not non-empty valid UTF-8")
 	errChunkLayerDetached       = errors.New("storage: chunk layer detached")
 	errChunkCASOutcomeUnknown   = errors.New("storage: chunk HEAD CAS outcome unknown")
-	// The causes a control plane reports as typed codes (B9 W2 §2.2).
+	// The causes a control plane reports as typed codes (B9 W2 Â§2.2).
 	errChunkLayerClosed       = errors.New("storage: chunk layer closed")
 	errChunkBaseInstalling    = errors.New("storage: chunk BASE install in progress")
 	errChunkRemoteUnavailable = errors.New("storage: chunk remote unavailable")

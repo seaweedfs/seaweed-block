@@ -72,7 +72,7 @@ type chunkLineage struct {
 // host blocks it until local recovery is done) the projection has epoch 0
 // and is not healthy; a layer is never attached under that.
 func chunkAuthority(proj frontend.Projection, volumeID string) bool {
-	return proj.VolumeID == volumeID && proj.Healthy && proj.Epoch > 0
+	return proj.VolumeID == volumeID && proj.Healthy && proj.Epoch > 0 && proj.ReplicaID != ""
 }
 
 // recoverChunk runs after a successful local Recover, generation gen. It
@@ -113,6 +113,23 @@ func (p *DurableProvider) current(h *volHandle, gen uint64) bool {
 
 func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen uint64) {
 	defer p.inflight.Done()
+	limit := p.cfg.ChunkAssignmentTimeout
+	if limit <= 0 {
+		limit = 30 * time.Second
+	}
+	waitCtx, endWait := context.WithTimeout(p.closeCtx, limit)
+	defer endWait()
+	defer func() {
+		if !errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
+			return
+		}
+		// The old wait must not overwrite a newer recovery's readiness.
+		h.attachMu.Lock()
+		defer h.attachMu.Unlock()
+		if p.current(h, gen) && h.chunk == nil {
+			h.backend.SetOperational(false, "chunk assignment unavailable: "+waitCtx.Err().Error())
+		}
+	}()
 	defer func() {
 		p.mu.Lock()
 		if h.waitGen == gen {
@@ -124,7 +141,7 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 	defer t.Stop()
 	for {
 		select {
-		case <-p.closeCtx.Done():
+		case <-waitCtx.Done():
 			return
 		case <-t.C:
 		}
@@ -139,7 +156,7 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 			h.attachMu.Unlock()
 			return
 		}
-		ctx, cancel := context.WithTimeout(p.closeCtx, chunkAttachTimeout)
+		ctx, cancel := context.WithTimeout(waitCtx, chunkAttachTimeout)
 		err := p.attachChunk(ctx, volumeID, h)
 		cancel()
 		if err == nil {
@@ -160,7 +177,7 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 		}
 		log.Printf("durable: chunk layer attach for volume=%s: %v (retrying)", volumeID, err)
 		select {
-		case <-p.closeCtx.Done():
+		case <-waitCtx.Done():
 			return
 		case <-time.After(chunkAttachRetry):
 		}
@@ -188,6 +205,9 @@ func (p *DurableProvider) attachChunk(ctx context.Context, volumeID string, h *v
 			return errProviderClosed
 		}
 		h.chunk = layer
+		h.backend.mu.Lock()
+		h.backend.chunkFenced = layer.Fenced
+		h.backend.mu.Unlock()
 		if p.cfg.ChunkCaptureInterval > 0 {
 			ctx, cancel := context.WithCancel(context.Background())
 			h.chunkStop, h.chunkDone = cancel, make(chan struct{})
@@ -238,7 +258,7 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 	remote := &closeBoundRemote{ChunkRemote: inner, done: p.closeCtx}
 	remote.setAttach(ctx) // the attach's calls also end with the caller's ctx
 	defer remote.setAttach(nil)
-	return storage.AttachChunkLayer(ws, remote, storage.ChunkLayerConfig{
+	cfg := storage.ChunkLayerConfig{
 		ChunkBlocks:     p.cfg.ChunkBlocks,
 		Epoch:           lin.epoch,
 		Holder:          holder,
@@ -256,7 +276,34 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 			}
 			return nil
 		},
-	})
+	}
+	if h.fresh {
+		// Attach preparation is gated. Seed the exact observed HEAD before
+		// its takeover CAS; only then finalize lazy attachment and expose I/O.
+		cfg.PrepareRestore = func(head storage.ChunkHead) error {
+			// No HEAD is a new lineage; preserve any pre-assignment local
+			// writes instead of replacing their frontier with zero.
+			if head.Gen == 0 {
+				return nil
+			}
+			// EnsureVolume's initial ZERO HEAD is not a remote data image.
+			// A local frontier already advanced before assignment belongs to
+			// this bootstrap: retain its extent bytes and unknown dirty set,
+			// rather than seeding backwards or installing lazy absence.
+			if head.RemoteLSN == 0 && len(head.Chunks) == 0 && head.State != storage.ChunkHeadDetached && head.DetachedBy == nil && ws.NextLSN() > 1 {
+				cfg.FreshFromHead = false
+				return nil
+			}
+			return ws.SeedChunkFrontier(head.RemoteLSN)
+		}
+		head, err := storage.ClaimChunkHead(ctx, remote, cfg)
+		if err != nil {
+			return nil, fmt.Errorf("durable: restore HEAD claim: %w", err)
+		}
+		cfg.RestoreGuard = &storage.ChunkHeadVersion{Gen: head.Gen, Epoch: head.Epoch}
+	}
+
+	return storage.AttachChunkLayer(ws, remote, cfg)
 }
 
 // closeBoundRemote ends every remote call when the provider closes, so a
@@ -481,7 +528,7 @@ func chunkFenced(volumeID string, h *volHandle) error {
 
 // CutVolume takes one quiesced cut of volumeID and returns what it
 // installed: the cut LSN, the HEAD (the current one when nothing changed)
-// and the cut's statistics (B9 W2 §2.4, §3.1). With minLSN > 0 it is
+// and the cut's statistics (B9 W2 Â§2.4, Â§3.1). With minLSN > 0 it is
 // MakeRemoteDurable(minLSN) returning the cut: an LSN never written is
 // refused before anything is published, and the cut must reach minLSN.
 func (p *DurableProvider) CutVolume(ctx context.Context, volumeID string, minLSN uint64) (storage.ChunkCutResult, error) {
@@ -507,7 +554,7 @@ func (p *DurableProvider) CutVolume(ctx context.Context, volumeID string, minLSN
 	return r, nil
 }
 
-// DetachVolume is a clean stop's final cut (B9 W2 §3.6): it stops the
+// DetachVolume is a clean stop's final cut (B9 W2 Â§3.6): it stops the
 // volume's frontend I/O and waits (bounded by ctx) for the I/O already
 // admitted to finish, stops the periodic cuts, then publishes one cut with
 // HEAD state detached. It also returns the last LSN written. From its
