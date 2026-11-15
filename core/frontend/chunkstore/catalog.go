@@ -1298,9 +1298,6 @@ func (c *Catalog) holdForkParent(ctx context.Context, srcRoot string, req ForkRe
 	if err != nil || !ok {
 		return "", err
 	}
-	if red := true; red { // RED: no hold recorded
-		return ref.rec.Attempt, nil
-	}
 	now := c.now().Unix()
 	e := &filerpb.Entry{Name: req.Target, Attributes: &filerpb.FuseAttributes{Mtime: now, Crtime: now, FileMode: 0o644}}
 	if err := c.f.CreateEntry(ctx, forkHoldDir(srcRoot, req.Snapshot, ref.rec.Attempt), e, true); err != nil && !errors.Is(err, ErrExists) {

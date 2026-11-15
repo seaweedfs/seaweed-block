@@ -211,9 +211,6 @@ func (c *Catalog) Usage(ctx context.Context, vol string) (VolumeUsage, error) {
 // owner-qualified "@owner/key" (a fork's reference) is owner's key,
 // anything else is vol's.
 func chunkIdentity(vol, key string) string {
-	if red := true; red { // RED: owner-qualified refs not resolved
-		return vol + "\x00" + key
-	}
 	if strings.HasPrefix(key, "@") {
 		if owner, rest, ok := strings.Cut(key[1:], "/"); ok {
 			return owner + "\x00" + rest

@@ -106,9 +106,6 @@ type retainOutput struct {
 }
 
 func retainPartial(res chunkstore.RetentionResult, err error, stdout, stderr io.Writer) int {
-	if red := true; red { // RED: the partial result is discarded
-		return chunkResult("retain", nil, err, stdout, stderr)
-	}
 	body := chunkErrBody{Code: chunkstore.CodeOf(err), Message: err.Error(), Retryable: true}
 	var ce *chunkstore.CatalogError
 	if errors.As(err, &ce) {

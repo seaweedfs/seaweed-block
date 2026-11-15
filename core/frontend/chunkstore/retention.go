@@ -254,13 +254,6 @@ func planRetention(p RetentionPolicy, snaps []SnapshotInfo, needed map[string]bo
 				continue
 			}
 			k := int64(age / lk.period) // the rolling window holding this age
-			// RED: calendar periods, as before the review
-			if red := true; red {
-				if age >= time.Duration(lk.count)*lk.period {
-					continue
-				}
-				k = -1 - s.CreatedNs/int64(lk.period)
-			}
 			if k >= int64(lk.count) {
 				continue
 			}
@@ -403,13 +396,6 @@ const (
 // that attempt. uncertain reports, with an error, that the failing call
 // was a mutation whose outcome is unknown.
 func (c *Catalog) deleteRetainedAttempt(ctx context.Context, vol, name, attempt string) (retainOutcome, bool, error) {
-	if red := true; red { // RED: delete by name, as before the review
-		c.hook(hookUnheld, name)
-		if _, err := c.DeleteSnapshot(ctx, vol, name); err != nil && CodeOf(err) != CodeSnapshotNotFound {
-			return 0, false, err
-		}
-		return retainDeleted, false, nil
-	}
 	root, err := c.volRoot(vol)
 	if err != nil {
 		return 0, false, err
