@@ -75,6 +75,8 @@ type chunkLayerImpl struct {
 	// pendingIntent is the intent of the unresolved proposal in pending;
 	// it is deleted once that proposal is settled.
 	pendingIntent string
+	// stats holds the cumulative cut counters (under stMu).
+	stats chunkLayerStats
 	// leftoverIntents are this layer's own intents whose delete failed
 	// after their cut was settled; every cut retries them.
 	leftoverIntents []string
@@ -545,12 +547,21 @@ type capturedChunk struct {
 	zero bool
 }
 
-func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (chunkCutResult, error) {
+func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res chunkCutResult, err error) {
 	done, err := l.register()
 	if err != nil {
 		return chunkCutResult{}, err
 	}
 	defer done()
+	start := time.Now()
+	var st chunkCutStats
+	defer func() {
+		st.TotalNs = time.Since(start).Nanoseconds()
+		if err == nil {
+			res.Stats = st
+		}
+		l.recordCut(res, st, err)
+	}()
 	if err := l.admit(); err != nil {
 		return chunkCutResult{}, err
 	}
@@ -567,9 +578,12 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (chunkC
 
 	// Quiesced cut.
 	l.s.captureMu.Lock()
+	barrier := time.Now()
 	h, err := l.s.Sync()
+	st.SyncNs = time.Since(barrier).Nanoseconds()
 	if err != nil {
 		l.s.captureMu.Unlock()
+		st.BarrierPauseNs = time.Since(barrier).Nanoseconds()
 		return chunkCutResult{}, fmt.Errorf("storage: capture sync: %w", err)
 	}
 	candidates := map[uint64]bool{}
@@ -598,8 +612,10 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (chunkC
 	baseHead := copyHead(l.head)
 	l.stMu.Unlock()
 
+	st.CandidateChunks = len(candidates)
 	var captured []capturedChunk
 	var copyErr error
+	copyStart := time.Now()
 	for _, idx := range sortedKeys(candidates) {
 		buf := make([]byte, int(l.chunkBlocks)*l.blockSize)
 		for i := uint64(0); i < l.chunkBlocks; i++ {
@@ -619,7 +635,9 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (chunkC
 		}
 		captured = append(captured, capturedChunk{idx: idx, data: buf, sum: sha256.Sum256(buf), zero: isAllZero(buf)})
 	}
+	st.CopyNs = time.Since(copyStart).Nanoseconds()
 	l.s.captureMu.Unlock()
+	st.BarrierPauseNs = time.Since(barrier).Nanoseconds()
 	if copyErr != nil {
 		l.abortCut(all)
 		return chunkCutResult{}, fmt.Errorf("storage: capture copy: %w", copyErr)
@@ -651,16 +669,19 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (chunkC
 		ref, had := baseHead.Chunks[c.idx]
 		switch {
 		case c.zero && !had, had && !c.zero && ref.SHA256 == c.sum:
+			st.UnchangedChunks++
 			continue
 		case c.zero:
 			delete(next.Chunks, c.idx)
 			changed = append(changed, c.idx)
+			st.ZeroedChunks++
 			continue
 		}
 		uploads = append(uploads, upload{c: c, key: l.newKey(c.idx)})
 	}
 	// The intent names every key this cut uploads and is durable before
 	// the first upload: GC treats it as a root until the cut is settled.
+	uploadStart := time.Now()
 	var intent string
 	if len(uploads) > 0 {
 		keys := make([]string, len(uploads))
@@ -683,7 +704,10 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (chunkC
 		next.Chunks[u.c.idx] = chunkRef{Key: u.key, SHA256: u.c.sum}
 		newKeys[u.c.idx] = u.key
 		changed = append(changed, u.c.idx)
+		st.UploadedChunks++
+		st.UploadedBytes += int64(len(u.c.data))
 	}
+	st.UploadNs = time.Since(uploadStart).Nanoseconds()
 	if !detach && len(changed) == 0 && h == baseHead.RemoteLSN && baseHead.Gen != 0 && !chunkHeadIsDetached(baseHead) {
 		l.finishCut(baseHead, h, nil, nil) // nothing new: no CAS
 		return chunkCutResult{H: h, Head: copyHead(baseHead), Noop: true, FullHash: all}, nil
@@ -702,7 +726,15 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (chunkC
 		return chunkCutResult{}, errChunkLayerFenced
 	}
 	expected := chunkHeadVersion{Gen: baseHead.Gen, Epoch: baseHead.Epoch}
+	casStart := time.Now()
 	gen, casErr := l.remote.CASHead(ctx, expected, next)
+	st.CASNs = time.Since(casStart).Nanoseconds()
+	st.CASResult = "ok"
+	if errors.Is(casErr, errChunkHeadPrecondition) {
+		st.CASResult = "precondition"
+	} else if casErr != nil {
+		st.CASResult = "unknown"
+	}
 	if casErr == nil {
 		next.Gen = gen
 		l.finishCut(next, h, changed, newKeys)
@@ -733,6 +765,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (chunkC
 		return chunkCutResult{}, fmt.Errorf("storage: capture CAS outcome unresolved (%v): HEAD unchanged: %w", casErr, errChunkCASOutcomeUnknown)
 	}
 	if sameProposal(cur, next) {
+		st.CASResult = "resolved-by-reread"
 		l.finishCut(cur, h, changed, newKeys)
 		l.dropIntent(ctx, intent)
 		return l.cutDone(chunkCutResult{H: h, Head: copyHead(cur), FullHash: all}, detach), nil
@@ -875,6 +908,57 @@ func (l *chunkLayerImpl) resolvePending(ctx context.Context) error {
 		l.head = copyHead(cur)
 	}
 	return nil
+}
+
+// recordCut updates the cumulative counters after one cut attempt.
+func (l *chunkLayerImpl) recordCut(r chunkCutResult, st chunkCutStats, err error) {
+	l.stMu.Lock()
+	defer l.stMu.Unlock()
+	switch st.CASResult {
+	case "precondition":
+		l.stats.CASConflicts++
+	case "unknown":
+		if l.pending != nil { // the HEAD re-read did not settle it
+			l.stats.CASUnknown++
+		}
+	}
+	reason := ""
+	switch {
+	case err == nil && r.Noop:
+		l.stats.CutsNoop++
+	case err == nil:
+		l.stats.CutsOK++
+	case errors.Is(err, errChunkCaptureRefused):
+		reason = "admission"
+	case errors.Is(err, errChunkLayerFenced):
+		reason = "fenced"
+	case errors.Is(err, errChunkLayerDetached):
+		reason = "detached"
+	default:
+		l.stats.CutsFailed++
+	}
+	if reason != "" {
+		if l.stats.CutsRefused == nil {
+			l.stats.CutsRefused = map[string]uint64{}
+		}
+		l.stats.CutsRefused[reason]++
+	}
+	if err == nil {
+		l.stats.LastCut, l.stats.LastCutH, l.stats.LastCutNs = st, r.H, time.Now().UnixNano()
+	}
+}
+
+func (l *chunkLayerImpl) Stats() chunkLayerStats {
+	l.stMu.Lock()
+	defer l.stMu.Unlock()
+	out := l.stats
+	out.CutsRefused = make(map[string]uint64, len(l.stats.CutsRefused))
+	for k, v := range l.stats.CutsRefused {
+		out.CutsRefused[k] = v
+	}
+	out.PendingUnresolved = l.pending != nil
+	out.DirtyChunks = len(l.dirty)
+	return out
 }
 
 // dropIntent deletes this layer's own intent id (none if empty) once its

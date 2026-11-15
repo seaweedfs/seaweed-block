@@ -17,6 +17,7 @@ type (
 	ChunkLayer        = chunkLayer
 	ChunkCutResult    = chunkCutResult
 	ChunkCutStats     = chunkCutStats
+	ChunkLayerStats   = chunkLayerStats
 	ChunkIntent       = chunkIntent
 	ChunkDetachedBy   = chunkDetachedBy
 )
