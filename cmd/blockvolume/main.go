@@ -625,7 +625,12 @@ func run(f flags) int {
 			_ = h.Close()
 			return 1
 		}
-		if _, sErr := dp.EnsureStorage(f.volumeID); sErr != nil {
+		// Open and replay (#133): a classifiable failure in either step
+		// (wal_corrupt / io_error) faults fail-closed and is reported at
+		// once by a primary assignment; see openAndRecoverDurable.
+		outcome, evidence, sErr := openAndRecoverDurable(dp, h, f.volumeID, 10*time.Second)
+		switch outcome {
+		case durableStartupFatal:
 			fmt.Fprintln(os.Stderr, "blockvolume: durable storage open:", sErr)
 			_ = dp.Close()
 			if status != nil {
@@ -635,21 +640,11 @@ func run(f flags) int {
 			}
 			_ = h.Close()
 			return 1
-		}
-		recCtx, recCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		report, recErr := dp.RecoverVolume(recCtx, f.volumeID)
-		recCancel()
-		if recErr != nil {
-			fmt.Fprintln(os.Stderr, "blockvolume: durable recovery failed:", report.Evidence)
-			h.BlockLocalReadiness(report.Evidence)
-			// #133: a classifiable failure (wal_corrupt / io_error) is
-			// reported at once by a primary assignment, not after the
-			// recover timeout.
-			h.ReportLocalRecoveryFailure(recErr)
-			return waitFaultedDurableRecovery(h, status, durableProv, report.Evidence)
-		} else {
-			fmt.Fprintln(os.Stderr, "blockvolume: durable recovered:", report.Evidence)
-			h.ClearLocalReadinessBlock()
+		case durableStartupFaulted:
+			fmt.Fprintln(os.Stderr, "blockvolume: durable recovery failed:", evidence)
+			return waitFaultedDurableRecovery(h, status, durableProv, evidence)
+		default:
+			fmt.Fprintln(os.Stderr, "blockvolume: durable recovered:", evidence)
 		}
 	} else {
 		// memback fallback — wraps the volume's AdapterProjectionView

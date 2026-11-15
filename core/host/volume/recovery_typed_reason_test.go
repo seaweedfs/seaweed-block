@@ -31,6 +31,12 @@ func TestLocalRecoveryHealthReason_Classifies(t *testing.T) {
 		{"integrity sentinel", fmt.Errorf("x: %w", storage.ErrWALIntegrityFault), UnhealthyWALCorrupt},
 		{"substrate io", storage.NewSubstrateIOFailure(errors.New("read"), "scan"), UnhealthyIOError},
 		{"path error", &fs.PathError{Op: "read", Path: "/v", Err: syscall.EIO}, UnhealthyIOError},
+		// io_error is broad by contract: a path error that says the local
+		// storage is unusable (missing, not permitted) is io_error too; it
+		// is not a claim that the disk is physically damaged.
+		{"path ENOENT", &fs.PathError{Op: "open", Path: "/v", Err: syscall.ENOENT}, UnhealthyIOError},
+		{"path EACCES", &fs.PathError{Op: "open", Path: "/v", Err: syscall.EACCES}, UnhealthyIOError},
+		{"integrity wrapping a path error", storage.NewWALIntegrityFailure(&fs.PathError{Op: "read", Path: "/v", Err: syscall.EIO}, "x"), UnhealthyWALCorrupt},
 		{"unexpected eof", fmt.Errorf("decode: %w", io.ErrUnexpectedEOF), UnhealthyIOError},
 		{"eio", fmt.Errorf("x: %w", syscall.EIO), UnhealthyIOError},
 		{"wal recycled", storage.NewWALRecycledFailure(nil, "x"), ""},
