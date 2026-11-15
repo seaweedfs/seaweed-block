@@ -164,9 +164,9 @@ type Host struct {
 	localReadinessReason  atomic.Value // string
 	// localRecoveryReason is the typed reason local durable recovery
 	// failed (#133); empty when none or unclassified.
-	localRecoveryReason   atomic.Value // string
-	readinessReplayMu     sync.Mutex
-	readinessReplayFact   *control.AssignmentFact
+	localRecoveryReason atomic.Value // string
+	readinessReplayMu   sync.Mutex
+	readinessReplayFact *control.AssignmentFact
 
 	// lastOtherLine captures the most recent AssignmentFact that
 	// named a REPLICA OTHER than self for this host's VolumeID.
