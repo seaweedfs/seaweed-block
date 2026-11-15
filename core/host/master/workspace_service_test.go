@@ -82,7 +82,7 @@ func TestWorkspaceRPCCleanMovePreservesReplicaIdentity(t *testing.T) {
 	if err := g.Refresh(ctx); err != nil {
 		t.Fatal(err)
 	}
-	q := &control.WorkspaceMove{RequestId: "clean-1", VolumeId: "vol-a", ExpectedReplicaId: "r2", ExpectedEpoch: 1, TargetReplicaId: "r1", TargetServerId: "node-b",
+	q := &control.WorkspaceMove{RequestId: "clean-1", VolumeId: "vol-a", ExpectedReplicaId: "r2", ExpectedEpoch: 1, TargetReplicaId: "r2", TargetServerId: "node-b",
 		TargetDataAddr: "127.0.0.1:9201", TargetCtrlAddr: "127.0.0.1:9101", Kind: "clean"}
 	if _, err := client.MoveWorkspace(ctx, q); err == nil {
 		t.Fatal("move without detached/ACK accepted")
@@ -112,6 +112,7 @@ func TestWorkspaceRPCCleanMovePreservesReplicaIdentity(t *testing.T) {
 	}
 	beforeLine, _ := h.Publisher().VolumeAuthorityLine("vol-a")
 	beforeState := h.Publisher().WorkspaceState("vol-a")
+	q.TargetReplicaId = "r1" // Only this fully prepared negative changes logical identity.
 	if grant, err := client.MoveWorkspace(ctx, q); err == nil {
 		t.Fatalf("v1 accepted logical replica change r2 -> r1: %v", grant)
 	}
