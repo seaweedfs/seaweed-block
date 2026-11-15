@@ -53,6 +53,8 @@ type GCExecution struct {
 // and identify uncertain stages, rather than asserting remote absence.
 // The catalog namespace is the scope; permanent tombstones are untouched.
 func (c *Catalog) ExecuteGC(ctx context.Context, blobs BlobDeleter, cfg GCConfig, apply bool) (out GCExecution, err error) {
+	// Pre-binding needles remain unenumerable even if admission/readback fails.
+	out.UnknownUnbound = true
 	out.DryRun = !apply
 	out.MarkOutcome = "not_attempted"
 	out.UnknownOutcomes = []string{}
