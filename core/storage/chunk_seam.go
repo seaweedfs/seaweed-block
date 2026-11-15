@@ -294,6 +294,10 @@ type chunkLayerConfig struct {
 	// HEAD (every block absent, read lazily). False means an existing local
 	// volume. Never inferred from the local contents.
 	FreshFromHead bool
+	// RestoreGuard binds fresh attachment to the HEAD the provider claimed
+	// and durably seeded. A changed read refuses before hooks/readiness; the
+	// next recovery must repeat claim and seed. Nil is for direct layer users.
+	RestoreGuard *chunkHeadVersion
 	// CaptureAllowed is supplied by the store owner. It is an admission
 	// check, made when a capture starts and again right before its HEAD CAS:
 	// it refuses a cut during a BASE install or rebuild, or when this node is

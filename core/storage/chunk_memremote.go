@@ -123,7 +123,7 @@ func (m *MemChunkRemote) CASHead(ctx context.Context, expected chunkHeadVersion,
 		return 0, errChunkHeadPrecondition
 	}
 	// Ownership only moves forward: a proposal never lowers the epoch.
-	if next.Epoch < m.head.Epoch {
+	if next.Epoch < m.head.Epoch || next.RemoteLSN < m.head.RemoteLSN {
 		return 0, errChunkHeadPrecondition
 	}
 	for idx, ref := range next.Chunks {
