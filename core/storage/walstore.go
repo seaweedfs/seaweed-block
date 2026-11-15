@@ -117,13 +117,22 @@ type WALStore struct {
 	// §6 + INV-RECYCLE-GATED-BY-MIN-ACTIVE-PIN.
 	recycleFloorSrc RecycleFloorSource
 
-	syncs atomic.Uint64 // total fsync operations performed (test/diagnostic)
+	syncs atomic.Uint64 // completed logical Sync calls (test/diagnostic)
 	instr writeInstrumentation
 
 	// multiBlockRecords is a disabled-by-default Phase 148 local prototype.
 	// It must not be wired into production paths before version/compatibility
 	// gates and mounted NVMe/TCP profiling pass.
 	multiBlockRecords bool
+
+	// Physical WAL sync attempts exclude the separate metadata/checkpoint syncs.
+	syncWALFile  func() error
+	walSyncCalls atomic.Uint64
+	// Generations cover completed append attempts and recovery publication.
+	walMutation     atomic.Uint64
+	durableMutation atomic.Uint64
+	// Replicated/direct paths conservatively disable dedup for this open store.
+	bypassSyncDedup atomic.Bool
 }
 
 // CreateWALStore initializes a new store file at path. Fails if path
@@ -224,8 +233,14 @@ func openInitialized(path string, f *os.File, sb *superblock) (*WALStore, error)
 	if s.nextLSN < 1 {
 		s.nextLSN = 1
 	}
+	// The initial superblock must be synced even before the first write.
+	s.walMutation.Store(1)
+	s.syncWALFile = func() error {
+		s.walSyncCalls.Add(1)
+		return f.Sync()
+	}
 	committer := NewGroupCommitter(GroupCommitterConfig{
-		SyncFunc: func() error { return f.Sync() },
+		SyncFunc: s.syncWALBatch,
 		MaxDelay: 1 * time.Millisecond,
 		MaxBatch: 64,
 	})
@@ -423,6 +438,10 @@ func (s *WALStore) Recover() (uint64, error) {
 	if s.closed {
 		return 0, errors.New("storage: Recover after Close")
 	}
+	// Recovery can republish a prefix left by a failed append (including on
+	// this same open file). Invalidate before releasing publication, even on
+	// a failed scan; the next successful sync establishes a reusable new cut.
+	defer s.walMutation.Add(1)
 	s.dm.clear()
 	res, err := recoverWAL(s.fd, s.sb, s.dm)
 	if err != nil {
@@ -498,6 +517,8 @@ func (s *WALStore) Write(lba uint32, data []byte) (uint64, error) {
 		Data:   data,
 	}
 	walRelOff, err := s.wal.append(entry)
+	// A failed pwrite may still leave complete records or padding in the file.
+	s.walMutation.Add(1)
 	if err != nil {
 		s.mu.Unlock()
 		return 0, fmt.Errorf("storage: WAL append: %w", err)
@@ -572,6 +593,8 @@ func (s *WALStore) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error
 		}
 	}
 	offsets, err := s.wal.appendBatch(entries)
+	// A failed pwrite may still leave complete records or padding in the file.
+	s.walMutation.Add(1)
 	if err != nil {
 		s.mu.Unlock()
 		return nil, fmt.Errorf("storage: WAL batch append: %w", err)
@@ -614,6 +637,8 @@ func (s *WALStore) writeBatchMultiBlockLocked(startLBA uint32, blocks [][]byte, 
 		Data:     payload,
 	}
 	walRelOff, err := s.wal.append(entry)
+	// A failed pwrite may still leave complete records or padding in the file.
+	s.walMutation.Add(1)
 	if err != nil {
 		return nil, fmt.Errorf("storage: WAL multiblock append: %w", err)
 	}
@@ -774,7 +799,14 @@ func (s *WALStore) Sync() (uint64, error) {
 	targetDirectFrontier := s.pendingDirectFrontierLSN
 	s.mu.RUnlock()
 
-	if err := s.syncCache(); err != nil {
+	if s.walSyncCovered() {
+		// Preserve shutdown refusal even when no file I/O is necessary.
+		select {
+		case <-s.committer.stopCh:
+			return 0, ErrGroupCommitShutdown
+		default:
+		}
+	} else if err := s.syncCache(); err != nil {
 		return 0, fmt.Errorf("storage: group commit fsync: %w", err)
 	}
 	s.syncs.Add(1)
@@ -882,6 +914,7 @@ func (s *WALStore) RecoveryRetentionLSNs() uint64 {
 // Used by the rebuild server to declare the replica's frontier
 // matches the primary's head once base blocks are installed.
 func (s *WALStore) AdvanceFrontier(lsn uint64) {
+	s.bypassSyncDedup.Store(true)
 	s.lifecycleMu.RLock()
 	defer s.lifecycleMu.RUnlock()
 	s.mu.Lock()
@@ -929,6 +962,7 @@ func (s *WALStore) AdvanceWALTail(newTail uint64) {
 // Durability follows the same rule as Write: bytes become durable
 // only on the next successful Sync (the extent fsync covers them).
 func (s *WALStore) WriteExtentDirect(lba uint32, data []byte) error {
+	s.bypassSyncDedup.Store(true)
 	s.captureMu.RLock()
 	defer s.captureMu.RUnlock()
 	s.lifecycleMu.RLock()
@@ -966,6 +1000,7 @@ func (s *WALStore) WriteExtentDirect(lba uint32, data []byte) error {
 // than allocating a fresh one. Same durability semantics as Write
 // (becomes durable on next Sync).
 func (s *WALStore) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
+	s.bypassSyncDedup.Store(true)
 	s.captureMu.RLock()
 	defer s.captureMu.RUnlock()
 	s.lifecycleMu.RLock()
@@ -994,6 +1029,8 @@ func (s *WALStore) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
 		Data:   dataCopy,
 	}
 	walRelOff, err := s.wal.append(entry)
+	// A failed pwrite may still leave complete records or padding in the file.
+	s.walMutation.Add(1)
 	if err != nil {
 		return fmt.Errorf("storage: WAL append (apply): %w", err)
 	}
@@ -1156,3 +1193,30 @@ func (s *WALStore) Close() error {
 
 // Compile-time assertion: WALStore satisfies LogicalStorage.
 var _ LogicalStorage = (*WALStore)(nil)
+
+// WALSyncCount returns physical WAL sync attempts (including errors), not logical
+// Sync calls or the separate checkpoint/extent metadata sync operations.
+func (s *WALStore) WALSyncCount() uint64 { return s.walSyncCalls.Load() }
+
+// walSyncCovered is used only after the caller has captured its publication
+// frontier. A later concurrent write may force extra I/O, never a false ACK.
+func (s *WALStore) walSyncCovered() bool {
+	return !s.bypassSyncDedup.Load() && s.chunk.Load() == nil &&
+		s.walMutation.Load() <= s.durableMutation.Load()
+}
+
+// syncWALBatch runs only on the existing committer's single leader. It takes no
+// lifecycle/publication/WAL/shard locks and the queue mutex is already released.
+// Requests queued during a sync can reuse it only if their mutations predate its
+// captured cut. Failure leaves the previous durable generation unchanged.
+func (s *WALStore) syncWALBatch() error {
+	cut := s.walMutation.Load()
+	if !s.bypassSyncDedup.Load() && s.chunk.Load() == nil && cut <= s.durableMutation.Load() {
+		return nil
+	}
+	if err := s.syncWALFile(); err != nil {
+		return err
+	}
+	s.durableMutation.Store(cut)
+	return nil
+}
