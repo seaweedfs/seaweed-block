@@ -101,7 +101,7 @@ type WALStore struct {
 	// as fromLSN > checkpointLSN - recoveryRetentionLSNs. Zero means
 	// strict checkpoint-driven recycle. Operator sets via
 	// blockvolume's --wal-retention-lsns flag at store construction.
-	// Stored in-memory only — NOT persisted to the superblock; on
+	// Stored in-memory only â€” NOT persisted to the superblock; on
 	// restart the daemon re-applies the flag.
 	//
 	// Pinned by: INV-G6-RETENTION-POLICY-OPERATOR-VISIBLE.
@@ -114,7 +114,7 @@ type WALStore struct {
 	// --recovery-mode=dual-lane.
 	//
 	// nil = no gate (legacy behavior). Per docs/recovery-wiring-plan.md
-	// §6 + INV-RECYCLE-GATED-BY-MIN-ACTIVE-PIN.
+	// Â§6 + INV-RECYCLE-GATED-BY-MIN-ACTIVE-PIN.
 	recycleFloorSrc RecycleFloorSource
 
 	syncs atomic.Uint64 // total fsync operations performed (test/diagnostic)
@@ -124,6 +124,10 @@ type WALStore struct {
 	// It must not be wired into production paths before version/compatibility
 	// gates and mounted NVMe/TCP profiling pass.
 	multiBlockRecords bool
+
+	// Physical WAL sync attempts exclude the separate metadata/checkpoint syncs.
+	syncWALFile  func() error
+	walSyncCalls atomic.Uint64
 }
 
 // CreateWALStore initializes a new store file at path. Fails if path
@@ -224,8 +228,12 @@ func openInitialized(path string, f *os.File, sb *superblock) (*WALStore, error)
 	if s.nextLSN < 1 {
 		s.nextLSN = 1
 	}
+	s.syncWALFile = func() error {
+		s.walSyncCalls.Add(1)
+		return f.Sync()
+	}
 	committer := NewGroupCommitter(GroupCommitterConfig{
-		SyncFunc: func() error { return f.Sync() },
+		SyncFunc: func() error { return s.syncWALFile() },
 		MaxDelay: 1 * time.Millisecond,
 		MaxBatch: 64,
 	})
@@ -249,7 +257,7 @@ func openInitialized(path string, f *os.File, sb *superblock) (*WALStore, error)
 	}
 	s.syncSuperblockMetadata = f.Sync
 
-	// Background flusher: drains dirty map → extent, advances
+	// Background flusher: drains dirty map â†’ extent, advances
 	// checkpoint, allows WAL recycling. Defaults are conservative
 	// for the demo workload; tunable via config in future.
 	s.flusher = newFlusher(s, flusherConfig{})
@@ -262,7 +270,7 @@ func openInitialized(path string, f *os.File, sb *superblock) (*WALStore, error)
 	// returning ErrWALFull to callers under transient load.
 	// Watermarks 0.7/0.9 match V2 config.go defaults
 	// (WALSoftWatermark, WALHardWatermark). Admission wakes the
-	// flusher via NotifyUrgent — same seam V2 wires for pressure-
+	// flusher via NotifyUrgent â€” same seam V2 wires for pressure-
 	// driven flushes.
 	s.admissionTimeout = 30 * time.Second
 	s.admission = newWALAdmission(walAdmissionConfig{
@@ -472,7 +480,7 @@ func (s *WALStore) Write(lba uint32, data []byte) (uint64, error) {
 
 	// WAL admission: throttle/block under WAL pressure. If admission
 	// is disabled (admission==nil), Write proceeds immediately. The
-	// admission Acquire may block up to admissionTimeout — under
+	// admission Acquire may block up to admissionTimeout â€” under
 	// hard pressure it spins waiting for the flusher to drain.
 	if s.admission != nil {
 		if err := s.admission.Acquire(s.admissionTimeout); err != nil {
@@ -816,7 +824,7 @@ func (s *WALStore) Sync() (uint64, error) {
 	return frontier, nil
 }
 
-// Boundaries returns the current R/S/H boundaries — what is durable,
+// Boundaries returns the current R/S/H boundaries â€” what is durable,
 // what the WAL still retains, what's the newest write.
 func (s *WALStore) Boundaries() (R, S, H uint64) {
 	s.mu.RLock()
@@ -854,7 +862,7 @@ func (s *WALStore) BlockSize() int { return int(s.sb.BlockSize) }
 // persistCheckpoint to clamp checkpoint advancement against active
 // recover-session pin floors. Pass nil to disable.
 //
-// Idempotent. Safe to call at any time — the gate is read under
+// Idempotent. Safe to call at any time â€” the gate is read under
 // s.mu so concurrent persistCheckpoint sees a consistent value.
 //
 // Implements storage.RecycleFloorGate.
@@ -917,8 +925,8 @@ func (s *WALStore) AdvanceWALTail(newTail uint64) {
 }
 
 // WriteExtentDirect installs a base block directly into the extent
-// without going through the WAL append path — INV-RECV-BITMAP-CORE
-// (§6.10). The receiver's per-session bitmap is the sole arbiter of
+// without going through the WAL append path â€” INV-RECV-BITMAP-CORE
+// (Â§6.10). The receiver's per-session bitmap is the sole arbiter of
 // BASE-vs-WAL conflict at this LBA; substrate-level WAL replay /
 // stale-skip is intentionally bypassed.
 //
@@ -1017,16 +1025,16 @@ func (s *WALStore) RecoveryMode() RecoveryMode {
 // AppliedLSNs returns a partial view of per-LBA applied LSN: only
 // LBAs whose latest write is still in the WAL (not yet flushed to
 // extent) are reported. Once an entry is flushed and the dirty-map
-// entry is cleared, walstore loses per-LBA LSN tracking — the
+// entry is cleared, walstore loses per-LBA LSN tracking â€” the
 // extent stores data only, not per-LBA LSN.
 //
 // PARTIAL-VIEW LIMITATION: for full per-LBA applied-LSN tracking,
 // walstore would need a permanent per-LBA LSN map (substrate
 // refactor). The replica recovery apply gate is the authoritative
-// correctness boundary; this partial seed is defense-in-depth —
+// correctness boundary; this partial seed is defense-in-depth â€”
 // it correctly stale-skips recovery entries for LBAs still in the
 // WAL window, and falls back to "appliedLSN[LBA] = 0" semantics
-// for flushed LBAs (which means recovery WILL apply them —
+// for flushed LBAs (which means recovery WILL apply them â€”
 // acceptable when the gate's session-only tracking + live-lane
 // updates fill in the gap during the session).
 //
@@ -1051,7 +1059,7 @@ func (s *WALStore) AppliedLSNs() (map[uint32]uint64, error) {
 // content is non-zero.
 //
 // This honors the LogicalStorage contract: "snapshots every
-// written LBA's current bytes" — including LBAs whose data has
+// written LBA's current bytes" â€” including LBAs whose data has
 // been flushed out of the dirty map into the extent. Filtering
 // zeros preserves the "snapshot of dirty bits" semantics callers
 // expect (a never-written LBA shouldn't appear in the output;
@@ -1156,3 +1164,7 @@ func (s *WALStore) Close() error {
 
 // Compile-time assertion: WALStore satisfies LogicalStorage.
 var _ LogicalStorage = (*WALStore)(nil)
+
+// WALSyncCount returns physical WAL sync attempts (including errors), not logical
+// Sync calls or the separate checkpoint/extent metadata sync operations.
+func (s *WALStore) WALSyncCount() uint64 { return s.walSyncCalls.Load() }
