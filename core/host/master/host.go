@@ -65,6 +65,11 @@ type Config struct {
 	// terminal evidence when enabled.
 	FailbackRuntimeRPC bool
 
+	// WorkspaceRPC enables the RF1 lease/revoke/move surface. HEAD must be
+	// obtained from the configured remote source, never from operator flags.
+	WorkspaceRPC        bool
+	WorkspaceHeadReader func(context.Context, string) (authority.WorkspaceHead, error)
+
 	// FrontendPublicationRuntimeHTTP enables the frontend publication runtime
 	// HTTP surface. It is disabled by default and only confirms a post-failback
 	// authority line that has already been minted by the failback owner.
@@ -158,6 +163,9 @@ func (h *publisherHolder) VolumeAuthorityLine(vid string) (authority.AuthorityBa
 //
 // Live loops (publisher.Run, host.Start, grpc.Serve) run in Start.
 func New(cfg Config) (*Host, error) {
+	if cfg.WorkspaceRPC && (cfg.WorkspaceHeadReader == nil || cfg.LifecycleStoreDir == "") {
+		return nil, fmt.Errorf("master.New: workspace RPC requires HEAD reader and lifecycle store")
+	}
 	if cfg.AuthorityStoreDir == "" {
 		return nil, fmt.Errorf("master.New: AuthorityStoreDir is required")
 	}
@@ -244,6 +252,7 @@ func New(cfg Config) (*Host, error) {
 	control.RegisterClusterEvidenceServiceServer(grpcSrv, svc)
 	control.RegisterLifecycleServiceServer(grpcSrv, svc)
 	control.RegisterFailbackServiceServer(grpcSrv, svc)
+	control.RegisterWorkspaceServiceServer(grpcSrv, svc)
 	h.grpc = grpcSrv
 
 	lg.Printf("blockmaster: lock acquired, reloaded=%d, listen=%s",

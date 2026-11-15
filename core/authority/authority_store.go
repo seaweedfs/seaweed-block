@@ -33,10 +33,9 @@ import (
 //     reload sanity and as a future-proof ordering key for
 //     non-single-file backends.
 //
-// Wall-clock is NOT a field here. Storing a wall-clock timestamp
-// would invite someone to use it as a freshness/stale judgment —
-// which the S5 architect constraint explicitly forbids (durable
-// truth is authoritative until Publisher mints a new one).
+// The authority line never expires by wall-clock judgment. Optional Workspace
+// lease time gates serving and forced moves; it never erases the last authored
+// line. Only Publisher can mint its replacement.
 type DurableRecord struct {
 	VolumeID        string
 	ReplicaID       string
@@ -45,6 +44,10 @@ type DurableRecord struct {
 	DataAddr        string
 	CtrlAddr        string
 	WriteSeq        uint64
+	// Optional workspace move/lease state. Omitting nil preserves the v1
+	// checksum of pre-workspace records. Authority itself remains non-expiring;
+	// the lease gates serving, never authorizes an epoch by itself.
+	Workspace *WorkspaceState `json:",omitempty"`
 }
 
 // AuthorityStore is the narrow durable-authority interface. The
@@ -86,7 +89,7 @@ type AuthorityStore interface {
 // circular serialization (checksum of a struct that contains
 // itself). The on-wire layout is:
 //
-//   {"v":1,"body":{...record...},"checksum":"<hex sha256>"}
+//	{"v":1,"body":{...record...},"checksum":"<hex sha256>"}
 //
 // Checksum is over the canonical JSON serialization of Body.
 type storeEnvelope struct {
