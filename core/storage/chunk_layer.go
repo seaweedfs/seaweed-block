@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -34,6 +35,12 @@ import (
 type chunkHooks struct {
 	sink   chunkSink
 	closer func() error
+	// mutated runs after every dirty-map insert (a write, a batch write,
+	// a replica apply) with the LBA: O(1), lock-free, on the write path.
+	mutated func(lba uint64)
+	// recovered runs when Recover republished the dirty map (any chunk
+	// may have changed), before reads resume.
+	recovered func()
 }
 
 const defaultReadMissTimeout = 30 * time.Second
@@ -72,9 +79,11 @@ type chunkLayerImpl struct {
 	// pendingBase is the version the unresolved CAS expected. While HEAD is
 	// still at it, that CAS may still land, so a read alone never settles it.
 	pendingBase chunkHeadVersion
-	// pendingIntent is the intent of the unresolved proposal in pending;
-	// it is deleted once that proposal is settled.
-	pendingIntent string
+	// pendingIntents are the intents (staging rounds and the barrier) of
+	// the unresolved proposal in pending; deleted once it is settled.
+	pendingIntents []string
+	// stats holds the cumulative cut counters (under stMu).
+	stats chunkLayerStats
 	// leftoverIntents are this layer's own intents whose delete failed
 	// after their cut was settled; every cut retries them.
 	leftoverIntents []string
@@ -85,11 +94,19 @@ type chunkLayerImpl struct {
 	allDirty        bool              // a BASE block landed: every chunk is dirty
 	hashMode        bool              // the dirty set is unknown: compare every chunk by hash
 	cutLSN          uint64            // H of the latest cut taken (in flight or installed)
-	keySeq          uint64
+	// chunkMut counts the mutations of each chunk: every dirty-map insert
+	// (any LSN, a replica apply's lower LSN included) and every BASE
+	// block. Flushing moves bytes without changing them and never counts.
+	// A chunk staged at count n is unchanged while its count is n.
+	chunkMut []atomic.Uint64
+	keySeq   uint64
 
 	// Test-only scheduling hooks; nil in production.
 	testPresenceSnapshotHook func()                 // after a presence snapshot, before it is written
 	testAfterAdmitHook       func()                 // right after a capture is admitted
+	testAfterStageHook       func(round int)        // after each pre-copy staging round
+	testAfterStageReadHook   func(idx uint64)       // after a staging read, before its result is kept
+	testAfterBarrierSyncHook func(h uint64)         // under the capture barrier, right after Sync fixed H
 	syncDirFn                func(dir string) error // directory fsync after a rename; syncDir in production
 
 	// Absence: chunks whose local bytes are not authoritative (fresh host,
@@ -126,6 +143,7 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 		closeDone:   make(chan struct{}),
 		syncDirFn:   syncDir,
 	}
+	l.chunkMut = make([]atomic.Uint64, l.numChunks)
 	var nb8 [8]byte
 	if _, err := rand.Read(nb8[:]); err != nil {
 		return nil, err
@@ -209,7 +227,7 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 		l.cancel()
 		return nil, err
 	}
-	hooks := &chunkHooks{sink: l, closer: l.Close}
+	hooks := &chunkHooks{sink: l, closer: l.Close, mutated: l.noteMutation, recovered: l.noteAllMutated}
 	if !s.chunk.CompareAndSwap(nil, hooks) {
 		l.cancel()
 		return nil, errors.New("storage: a chunk layer is already attached")
@@ -268,7 +286,42 @@ func (l *chunkLayerImpl) OnExtentWrite(lba uint64, lsn uint64) {
 		l.localBlocks[lba] = true
 		l.presenceVer++
 	}
+	if lsn == 0 { // a BASE block lands in the extent directly
+		l.noteMutation(lba)
+	}
 	l.dirtyVer++
+}
+
+// noteMutation counts a mutation of lba's chunk. It runs after the
+// mutation is visible to reads, so a staging read that sampled the count
+// first either sees the new bytes or a stale count (never reused).
+func (l *chunkLayerImpl) noteMutation(lba uint64) {
+	if idx := l.chunkOf(lba); idx < uint64(len(l.chunkMut)) {
+		l.chunkMut[idx].Add(1)
+	}
+}
+
+// noteAllMutated counts a mutation of every chunk: Recover republished
+// the dirty map, so no staged pre-copy may be reused across it. O(chunks),
+// on recovery only.
+func (l *chunkLayerImpl) noteAllMutated() {
+	for i := range l.chunkMut {
+		l.chunkMut[i].Add(1)
+	}
+}
+
+// walChunks returns the chunks with entries in the WAL dirty map.
+func (l *chunkLayerImpl) walChunks() map[uint64]bool {
+	out := map[uint64]bool{}
+	for _, e := range l.s.dm.snapshot() {
+		out[l.chunkOf(e.LBA)] = true
+	}
+	return out
+}
+
+// chunkVersion is chunk idx's mutation count.
+func (l *chunkLayerImpl) chunkVersion(idx uint64) uint64 {
+	return l.chunkMut[idx].Load()
 }
 
 // BeforeCheckpointAdvance runs inside persistCheckpoint and the direct
@@ -576,14 +629,36 @@ type capturedChunk struct {
 	data []byte
 	sum  [32]byte
 	zero bool
+	key  string // staged: already uploaded under this key (data is nil)
 }
 
-func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (chunkCutResult, error) {
+// stagedChunk is a chunk pre-copied outside the barrier at chunk version
+// ver against HEAD generation headGen (key empty: nothing to upload).
+type stagedChunk struct {
+	capturedChunk
+	ver     uint64
+	headGen uint64
+}
+
+// chunkStageRounds bounds the pre-copy: after this many staging rounds the
+// barrier copies whatever remains (correctness over pause).
+const chunkStageRounds = 3
+
+func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res chunkCutResult, err error) {
 	done, err := l.register()
 	if err != nil {
 		return chunkCutResult{}, err
 	}
 	defer done()
+	start := time.Now()
+	var st chunkCutStats
+	defer func() {
+		st.TotalNs = time.Since(start).Nanoseconds()
+		if err == nil {
+			res.Stats = st
+		}
+		l.recordCut(res, st, err)
+	}()
 	if err := l.admit(); err != nil {
 		return chunkCutResult{}, err
 	}
@@ -598,16 +673,31 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (chunkC
 	}
 	l.retryLeftoverIntents(ctx)
 
+	// Pre-copy: while more chunks than the bound would be copied under the
+	// barrier, stage up to the bound per round outside it.
+	staged, intents, err := l.stage(ctx, &st)
+	if err != nil {
+		l.dropIntents(ctx, intents)
+		return chunkCutResult{}, err
+	}
+
 	// Quiesced cut.
 	l.s.captureMu.Lock()
+	barrier := time.Now()
 	h, err := l.s.Sync()
+	st.SyncNs = time.Since(barrier).Nanoseconds()
+	if hook := l.testAfterBarrierSyncHook; hook != nil && err == nil {
+		hook(h)
+	}
 	if err != nil {
 		l.s.captureMu.Unlock()
+		st.BarrierPauseNs = time.Since(barrier).Nanoseconds()
+		l.dropIntents(ctx, intents) // a clean abort: staged keys are released
 		return chunkCutResult{}, fmt.Errorf("storage: capture sync: %w", err)
 	}
 	candidates := map[uint64]bool{}
-	for _, e := range l.s.dm.snapshot() {
-		candidates[l.chunkOf(e.LBA)] = true
+	for idx := range l.walChunks() {
+		candidates[idx] = true
 	}
 	l.stMu.Lock()
 	all := l.hashMode || l.allDirty
@@ -624,6 +714,17 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (chunkC
 			candidates[i] = true
 		}
 	}
+	// A staged chunk stands for the barrier copy while no write reached
+	// it since staging (its version is unchanged) and HEAD is the one it
+	// was compared against.
+	var captured []capturedChunk
+	useStaged := map[uint64]bool{}
+	for idx := range candidates {
+		if sc, ok := staged[idx]; ok && sc.ver == l.chunkVersion(idx) && sc.headGen == l.head.Gen {
+			useStaged[idx] = true
+			captured = append(captured, sc.capturedChunk)
+		}
+	}
 	l.inflight = candidates
 	l.dirty = map[uint64]bool{}
 	l.allDirty = false
@@ -631,37 +732,38 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (chunkC
 	baseHead := copyHead(l.head)
 	l.stMu.Unlock()
 
-	var captured []capturedChunk
+	st.CandidateChunks = len(candidates)
+	st.BarrierCopyChunks = len(candidates) - len(useStaged)
 	var copyErr error
+	copyStart := time.Now()
 	for _, idx := range sortedKeys(candidates) {
-		buf := make([]byte, int(l.chunkBlocks)*l.blockSize)
-		for i := uint64(0); i < l.chunkBlocks; i++ {
-			lba := idx*l.chunkBlocks + i
-			if lba >= uint64(l.s.NumBlocks()) {
-				break
-			}
-			b, err := l.s.Read(uint32(lba))
-			if err != nil {
-				copyErr = err
-				break
-			}
-			copy(buf[int(i)*l.blockSize:], b)
+		if useStaged[idx] {
+			continue
 		}
-		if copyErr != nil {
+		buf, err := l.readChunk(idx)
+		if err != nil {
+			copyErr = err
 			break
 		}
 		captured = append(captured, capturedChunk{idx: idx, data: buf, sum: sha256.Sum256(buf), zero: isAllZero(buf)})
 	}
+	st.CopyNs = time.Since(copyStart).Nanoseconds()
 	l.s.captureMu.Unlock()
+	st.BarrierPauseNs = time.Since(barrier).Nanoseconds()
 	if copyErr != nil {
 		l.abortCut(all)
+		l.dropIntents(ctx, intents)
 		return chunkCutResult{}, fmt.Errorf("storage: capture copy: %w", copyErr)
+	}
+	if b := l.cfg.BarrierBound; b > 0 && st.BarrierCopyChunks > b {
+		st.BarrierOverBound = true
 	}
 	if h < baseHead.RemoteLSN && !l.supersededBy(baseHead) {
 		// HEAD holds the image of a later LSN than this host's log has
 		// reached: publishing would move remote_lsn backwards. Refused
 		// before any upload. (A HEAD of a newer holder fences below.)
 		l.abortCut(all)
+		l.dropIntents(ctx, intents)
 		return chunkCutResult{}, fmt.Errorf("%w: %w: cut LSN %d, HEAD remote_lsn %d", errChunkCaptureRefused, errChunkLSNBehind, h, baseHead.RemoteLSN)
 	}
 
@@ -684,17 +786,26 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (chunkC
 		ref, had := baseHead.Chunks[c.idx]
 		switch {
 		case c.zero && !had, had && !c.zero && ref.SHA256 == c.sum:
+			st.UnchangedChunks++
 			continue
 		case c.zero:
 			delete(next.Chunks, c.idx)
 			changed = append(changed, c.idx)
+			st.ZeroedChunks++
+			continue
+		}
+		if c.key != "" { // staged: uploaded before the barrier
+			next.Chunks[c.idx] = chunkRef{Key: c.key, SHA256: c.sum}
+			newKeys[c.idx] = c.key
+			changed = append(changed, c.idx)
+			st.StagedChunksUsed++
 			continue
 		}
 		uploads = append(uploads, upload{c: c, key: l.newKey(c.idx)})
 	}
 	// The intent names every key this cut uploads and is durable before
 	// the first upload: GC treats it as a root until the cut is settled.
-	var intent string
+	uploadStart := time.Now()
 	if len(uploads) > 0 {
 		keys := make([]string, len(uploads))
 		for i, u := range uploads {
@@ -703,57 +814,72 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (chunkC
 		id, err := l.remote.PutIntent(ctx, chunkIntent{Gen: baseHead.Gen, Epoch: l.cfg.Epoch, Holder: l.cfg.Holder, Keys: keys})
 		if err != nil {
 			l.abortCut(all)
+			l.dropIntents(ctx, intents)
 			return chunkCutResult{}, fmt.Errorf("storage: capture intent: %w: %w", errChunkRemoteUnavailable, err)
 		}
-		intent = id
+		intents = append(intents, id)
 	}
 	for _, u := range uploads {
 		if err := l.remote.Put(ctx, u.key, u.c.data); err != nil {
 			l.abortCut(all)
-			l.dropIntent(ctx, intent)
+			l.dropIntents(ctx, intents)
 			return chunkCutResult{}, fmt.Errorf("storage: capture upload chunk %d: %w: %w", u.c.idx, errChunkRemoteUnavailable, err)
 		}
 		next.Chunks[u.c.idx] = chunkRef{Key: u.key, SHA256: u.c.sum}
 		newKeys[u.c.idx] = u.key
 		changed = append(changed, u.c.idx)
+		st.UploadedChunks++
+		st.UploadedBytes += int64(len(u.c.data))
 	}
+	st.UploadNs = time.Since(uploadStart).Nanoseconds()
 	if !detach && len(changed) == 0 && h == baseHead.RemoteLSN && baseHead.Gen != 0 && !chunkHeadIsDetached(baseHead) {
 		// A no-op cut still observes authority: a fresh host may have
 		// claimed HEAD without uploading a single chunk since our last cut.
 		cur, err := l.remote.GetHead(ctx)
 		if err != nil {
 			l.abortCut(all)
+			l.dropIntents(ctx, intents)
 			return chunkCutResult{}, fmt.Errorf("storage: no-op cut authority read: %w: %w", errChunkRemoteUnavailable, err)
 		}
 		if cur.Gen != baseHead.Gen || !sameProposal(cur, baseHead) {
 			l.abortCut(all)
+			l.dropIntents(ctx, intents)
 			l.stMu.Lock()
 			l.fenced, l.head = true, copyHead(cur)
 			l.stMu.Unlock()
 			return chunkCutResult{}, errChunkLayerFenced
 		}
 		l.finishCut(baseHead, h, nil, nil) // nothing new: no CAS
+		l.dropIntents(ctx, intents)        // superseded staged uploads only
 		return chunkCutResult{H: h, Head: copyHead(baseHead), Noop: true, FullHash: all}, nil
 	}
 	if err := l.admit(); err != nil { // admission re-checked right before the CAS
 		l.abortCut(all)
-		l.dropIntent(ctx, intent)
+		l.dropIntents(ctx, intents)
 		return chunkCutResult{}, err
 	}
 	if l.supersededBy(baseHead) {
 		l.abortCut(all)
-		l.dropIntent(ctx, intent)
+		l.dropIntents(ctx, intents)
 		l.stMu.Lock()
 		l.fenced = true
 		l.stMu.Unlock()
 		return chunkCutResult{}, errChunkLayerFenced
 	}
 	expected := chunkHeadVersion{Gen: baseHead.Gen, Epoch: baseHead.Epoch}
+	casStart := time.Now()
 	gen, casErr := l.remote.CASHead(ctx, expected, next)
+	st.CASNs = time.Since(casStart).Nanoseconds()
+	st.CASResult = "ok"
+	if errors.Is(casErr, errChunkHeadPrecondition) {
+		st.CASResult = "precondition"
+	} else if casErr != nil {
+		st.CASResult = "unknown"
+	}
 	if casErr == nil {
 		next.Gen = gen
 		l.finishCut(next, h, changed, newKeys)
-		l.dropIntent(ctx, intent)
+		l.dropIntents(ctx, intents)
 		return l.cutDone(chunkCutResult{H: h, Head: copyHead(next), FullHash: all}, detach), nil
 	}
 	// Precondition or unknown outcome: resolve by re-reading HEAD, never by
@@ -763,7 +889,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (chunkC
 		p := copyHead(next)
 		l.pending = &p
 		l.pendingDetach, l.pendingCut, l.pendingBase = detach, chunkCutResult{H: h, FullHash: all}, expected
-		l.pendingIntent = intent // kept until the proposal is settled
+		l.pendingIntents = intents // kept until the proposal is settled
 		l.stMu.Unlock()
 		l.abortCut(all)
 	}
@@ -780,13 +906,14 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (chunkC
 		return chunkCutResult{}, fmt.Errorf("storage: capture CAS outcome unresolved (%v): HEAD unchanged: %w", casErr, errChunkCASOutcomeUnknown)
 	}
 	if sameProposal(cur, next) {
+		st.CASResult = "resolved-by-reread"
 		l.finishCut(cur, h, changed, newKeys)
-		l.dropIntent(ctx, intent)
+		l.dropIntents(ctx, intents)
 		return l.cutDone(chunkCutResult{H: h, Head: copyHead(cur), FullHash: all}, detach), nil
 	}
 	// HEAD moved past the CAS's base without it: it can never land.
 	l.abortCut(all)
-	l.dropIntent(ctx, intent)
+	l.dropIntents(ctx, intents)
 	if l.supersededBy(cur) {
 		l.stMu.Lock()
 		l.fenced = true
@@ -867,7 +994,7 @@ func sameProposal(cur, next chunkHead) bool {
 // resolvePending re-reads HEAD when an earlier CAS outcome is unresolved.
 func (l *chunkLayerImpl) resolvePending(ctx context.Context) error {
 	l.stMu.Lock()
-	pending, base, intent := l.pending, l.pendingBase, l.pendingIntent
+	pending, base, intents := l.pending, l.pendingBase, l.pendingIntents
 	l.stMu.Unlock()
 	if pending == nil {
 		return nil
@@ -898,10 +1025,10 @@ func (l *chunkLayerImpl) resolvePending(ctx context.Context) error {
 		}
 	}
 	// Settled: the proposal landed or can never land.
-	l.dropIntent(ctx, intent)
+	l.dropIntents(ctx, intents)
 	l.stMu.Lock()
 	defer l.stMu.Unlock()
-	l.pending, l.pendingIntent = nil, ""
+	l.pending, l.pendingIntents = nil, nil
 	wasDetach, cut := l.pendingDetach, l.pendingCut
 	l.pendingDetach, l.pendingCut, l.pendingBase = false, chunkCutResult{}, chunkHeadVersion{}
 	switch {
@@ -924,6 +1051,60 @@ func (l *chunkLayerImpl) resolvePending(ctx context.Context) error {
 	return nil
 }
 
+// recordCut updates the cumulative counters after one cut attempt.
+func (l *chunkLayerImpl) recordCut(r chunkCutResult, st chunkCutStats, err error) {
+	l.stMu.Lock()
+	defer l.stMu.Unlock()
+	switch st.CASResult {
+	case "precondition":
+		l.stats.CASConflicts++
+	case "unknown":
+		if l.pending != nil { // the HEAD re-read did not settle it
+			l.stats.CASUnknown++
+		}
+	}
+	reason := ""
+	switch {
+	case err == nil && r.Noop:
+		l.stats.CutsNoop++
+	case err == nil:
+		l.stats.CutsOK++
+	case errors.Is(err, errChunkCaptureRefused):
+		reason = "admission"
+	case errors.Is(err, errChunkLayerFenced):
+		reason = "fenced"
+	case errors.Is(err, errChunkLayerDetached):
+		reason = "detached"
+	default:
+		l.stats.CutsFailed++
+	}
+	if reason != "" {
+		if l.stats.CutsRefused == nil {
+			l.stats.CutsRefused = map[string]uint64{}
+		}
+		l.stats.CutsRefused[reason]++
+	}
+	if err == nil {
+		l.stats.LastCut, l.stats.LastCutH, l.stats.LastCutNs = st, r.H, time.Now().UnixNano()
+	}
+	if st.BarrierOverBound {
+		l.stats.BarrierOverBound++
+	}
+}
+
+func (l *chunkLayerImpl) Stats() chunkLayerStats {
+	l.stMu.Lock()
+	defer l.stMu.Unlock()
+	out := l.stats
+	out.CutsRefused = make(map[string]uint64, len(l.stats.CutsRefused))
+	for k, v := range l.stats.CutsRefused {
+		out.CutsRefused[k] = v
+	}
+	out.PendingUnresolved = l.pending != nil
+	out.DirtyChunks = len(l.dirty)
+	return out
+}
+
 // dropIntent deletes this layer's own intent id (none if empty) once its
 // cut is settled. A failed delete is kept and retried by the next cut; it
 // never fails a cut whose outcome is already settled.
@@ -936,6 +1117,129 @@ func (l *chunkLayerImpl) dropIntent(ctx context.Context, id string) {
 		l.leftoverIntents = append(l.leftoverIntents, id)
 		l.stMu.Unlock()
 	}
+}
+
+// readChunk copies chunk idx from the store (the barrier copy and the
+// pre-copy staging both use it).
+func (l *chunkLayerImpl) readChunk(idx uint64) ([]byte, error) {
+	buf := make([]byte, int(l.chunkBlocks)*l.blockSize)
+	for i := uint64(0); i < l.chunkBlocks; i++ {
+		lba := idx*l.chunkBlocks + i
+		if lba >= uint64(l.s.NumBlocks()) {
+			break
+		}
+		b, err := l.s.Read(uint32(lba))
+		if err != nil {
+			return nil, err
+		}
+		copy(buf[int(i)*l.blockSize:], b)
+	}
+	return buf, nil
+}
+
+// dropIntents drops every intent of a settled cut (staging rounds and
+// the barrier).
+func (l *chunkLayerImpl) dropIntents(ctx context.Context, ids []string) {
+	for _, id := range ids {
+		l.dropIntent(ctx, id)
+	}
+}
+
+// stage pre-copies chunks outside the barrier (B9 W3 bound ruling): while
+// more than BarrierBound chunks would be copied under the barrier, it
+// stages up to BarrierBound per round, at most chunkStageRounds rounds.
+// Each staged chunk records its chunk version; a staged chunk whose bytes
+// differ from HEAD is uploaded under a fresh content key named by an
+// intent written before the round's first upload. It returns the staged
+// chunks and the intents to settle with the cut; it changes no dirty
+// state, so a failed cut simply leaves its staged keys to the intents.
+func (l *chunkLayerImpl) stage(ctx context.Context, st *chunkCutStats) (map[uint64]stagedChunk, []string, error) {
+	bound := l.cfg.BarrierBound
+	if bound <= 0 {
+		return nil, nil, nil
+	}
+	staged := map[uint64]stagedChunk{}
+	var intents []string
+	for round := 0; round < chunkStageRounds; round++ {
+		wal := l.walChunks()
+		l.stMu.Lock()
+		need := map[uint64]bool{}
+		consider := func(idx uint64) {
+			if sc, ok := staged[idx]; ok && sc.ver == l.chunkVersion(idx) && sc.headGen == l.head.Gen {
+				return // still current
+			}
+			need[idx] = true
+		}
+		for idx := range wal {
+			consider(idx)
+		}
+		for idx := range l.dirty {
+			consider(idx)
+		}
+		if l.hashMode || l.allDirty {
+			for i := uint64(0); i < l.numChunks; i++ {
+				if l.absent[i] && !l.chunkHasLocalLocked(i) {
+					continue
+				}
+				consider(i)
+			}
+		}
+		if len(need) <= bound {
+			l.stMu.Unlock()
+			break
+		}
+		batch := sortedKeys(need)[:bound]
+		vers := make(map[uint64]uint64, len(batch))
+		for _, idx := range batch {
+			vers[idx] = l.chunkVersion(idx) // before the read: a later mutation raises it
+		}
+		head := copyHead(l.head)
+		l.stMu.Unlock()
+		st.StageRounds++
+		var uploads []stagedChunk
+		for _, idx := range batch {
+			data, err := l.readChunk(idx)
+			if err != nil {
+				return nil, intents, fmt.Errorf("storage: capture stage chunk %d: %w", idx, err)
+			}
+			if hook := l.testAfterStageReadHook; hook != nil {
+				hook(idx)
+			}
+			sc := stagedChunk{capturedChunk: capturedChunk{idx: idx, sum: sha256.Sum256(data), zero: isAllZero(data)}, ver: vers[idx], headGen: head.Gen}
+			ref, had := head.Chunks[idx]
+			if !sc.zero && !(had && ref.SHA256 == sc.sum) {
+				sc.key, sc.data = l.newKey(idx), data
+				uploads = append(uploads, sc)
+				continue
+			}
+			staged[idx] = sc
+		}
+		if len(uploads) > 0 {
+			keys := make([]string, len(uploads))
+			for i, u := range uploads {
+				keys[i] = u.key
+			}
+			id, err := l.remote.PutIntent(ctx, chunkIntent{Gen: head.Gen, Epoch: l.cfg.Epoch, Holder: l.cfg.Holder, Keys: keys})
+			if err != nil {
+				return nil, intents, fmt.Errorf("storage: capture stage intent: %w: %w", errChunkRemoteUnavailable, err)
+			}
+			intents = append(intents, id)
+			for _, u := range uploads {
+				if err := l.remote.Put(ctx, u.key, u.data); err != nil {
+					return nil, intents, fmt.Errorf("storage: capture stage chunk %d: %w: %w", u.idx, errChunkRemoteUnavailable, err)
+				}
+				st.UploadedChunks++
+				st.UploadedBytes += int64(len(u.data))
+				u.data = nil
+				staged[u.idx] = u
+			}
+		}
+		st.StagedChunks += len(batch)
+		if hook := l.testAfterStageHook; hook != nil {
+			hook(round)
+		}
+	}
+	return staged, intents, nil
 }
 
 // retryLeftoverIntents retries the deletes dropIntent could not make.

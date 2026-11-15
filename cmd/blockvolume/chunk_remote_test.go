@@ -27,6 +27,21 @@ func TestWALStoreChunkFlags(t *testing.T) {
 	if err != nil || !f.chunk.controlEndpoint {
 		t.Fatalf("walstore-chunk with the control endpoint: %+v %v", f.chunk, err)
 	}
+	d, err := parseFlags(base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.chunk.captureInterval != 0 || d.chunk.dirtyThreshold != 512 {
+		t.Fatalf("scheduler defaults interval %s threshold %d, want timer off and 512", d.chunk.captureInterval, d.chunk.dirtyThreshold)
+	}
+	off, err := parseFlags(base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1",
+		"--chunk-capture-interval=0", "--chunk-dirty-threshold=0"))
+	if err != nil || off.chunk.captureInterval != 0 || off.chunk.dirtyThreshold != 0 {
+		t.Fatalf("disabling both triggers: %+v %v", off.chunk, err)
+	}
+	if _, err := parseFlags(base("--durable-root=/tmp/sw-block", "--durable-impl=walstore")); err != nil {
+		t.Fatalf("walstore with the chunk defaults untouched: %v", err)
+	}
 	refused := map[string][]string{
 		"no filer":               base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk"),
 		"no durable root":        base("--durable-impl=walstore-chunk", "--chunk-filer=127.0.0.1:18888"),
@@ -39,6 +54,9 @@ func TestWALStoreChunkFlags(t *testing.T) {
 			"--chunk-control-endpoint"),
 		"control endpoint without a status listener": base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk",
 			"--chunk-filer=x:1", "--chunk-control-endpoint"),
+		"negative threshold":    base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-dirty-threshold=-1"),
+		"threshold on walstore": base("--durable-root=/tmp/sw-block", "--durable-impl=walstore", "--chunk-dirty-threshold=8"),
+		"interval on walstore":  base("--durable-root=/tmp/sw-block", "--durable-impl=walstore", "--chunk-capture-interval=5s"),
 	}
 	for name, args := range refused {
 		if _, err := parseFlags(args); err == nil {

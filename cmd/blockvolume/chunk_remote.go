@@ -18,7 +18,15 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
-const defaultChunkPath = "/swblock/chunks"
+const (
+	defaultChunkPath = "/swblock/chunks"
+	// The remote holds snapshots, not live data: cuts are published at
+	// snapshots, at detach/stop and on explicit request. The timer is off
+	// by default (an operator may set one, e.g. 15m, as a host-loss safety
+	// net); the dirty threshold only bounds how large one cut can grow.
+	defaultChunkCaptureInterval = 0
+	defaultChunkDirtyThreshold  = 512 // chunks, 2 GiB at 4 MiB chunks
+)
 
 type chunkFlags struct {
 	filer           string
@@ -26,6 +34,7 @@ type chunkFlags struct {
 	collection      string
 	replication     string
 	captureInterval time.Duration
+	dirtyThreshold  int
 	// controlEndpoint mounts the /chunk/* routes on the status listener.
 	controlEndpoint bool
 }
@@ -33,7 +42,9 @@ type chunkFlags struct {
 func validateChunkFlags(f flags) error {
 	c := f.chunk
 	if f.durableImpl != "walstore-chunk" {
-		if c.filer != "" || c.collection != "" || c.replication != "" || c.captureInterval != 0 || c.path != defaultChunkPath || c.controlEndpoint {
+		if c.filer != "" || c.collection != "" || c.replication != "" || c.path != defaultChunkPath ||
+			c.captureInterval != defaultChunkCaptureInterval || c.dirtyThreshold != defaultChunkDirtyThreshold ||
+			c.controlEndpoint {
 			return errors.New("--chunk-* flags require --durable-impl=walstore-chunk")
 		}
 		return nil
@@ -52,6 +63,9 @@ func validateChunkFlags(f flags) error {
 	}
 	if c.captureInterval < 0 {
 		return fmt.Errorf("--chunk-capture-interval=%s must not be negative", c.captureInterval)
+	}
+	if c.dirtyThreshold < 0 {
+		return fmt.Errorf("--chunk-dirty-threshold=%d must not be negative", c.dirtyThreshold)
 	}
 	return nil
 }
