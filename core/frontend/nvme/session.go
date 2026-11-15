@@ -591,6 +591,7 @@ func (s *Session) handleWrite(ctx context.Context, req *Request) {
 		SLBA:   req.capsule.Lba(),
 		NLB:    req.capsule.LbaLength(),
 		Data:   req.payload,
+		FUA:    req.capsule.D12&(1<<30) != 0,
 	})
 	s.recordWriteHandler(time.Since(handlerStart))
 	if res.AsError() != nil {
