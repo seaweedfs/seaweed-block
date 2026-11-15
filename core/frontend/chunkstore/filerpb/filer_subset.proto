@@ -17,6 +17,7 @@ option go_package = "github.com/seaweedfs/seaweed-block/core/frontend/chunkstore
 
 service SeaweedFiler {
     rpc LookupDirectoryEntry (LookupDirectoryEntryRequest) returns (LookupDirectoryEntryResponse) {}
+    rpc ListEntries (ListEntriesRequest) returns (stream ListEntriesResponse) {}
     rpc CreateEntry (CreateEntryRequest) returns (CreateEntryResponse) {}
     rpc UpdateEntry (UpdateEntryRequest) returns (UpdateEntryResponse) {}
     rpc DeleteEntry (DeleteEntryRequest) returns (DeleteEntryResponse) {}
@@ -31,6 +32,21 @@ message LookupDirectoryEntryRequest {
 
 message LookupDirectoryEntryResponse {
     Entry entry = 1;
+}
+
+message ListEntriesRequest {
+    string directory = 1;
+    string prefix = 2;
+    string startFromFileName = 3;
+    bool inclusiveStartFrom = 4;
+    uint32 limit = 5;
+    int64 snapshot_ts_ns = 6;
+    bool omit_chunks = 7;
+}
+
+message ListEntriesResponse {
+    Entry entry = 1;
+    int64 snapshot_ts_ns = 2;
 }
 
 message Entry {

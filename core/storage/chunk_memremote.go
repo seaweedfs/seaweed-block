@@ -10,23 +10,74 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"sort"
 	"sync"
+	"time"
 )
 
 type MemChunkRemote struct {
-	mu   sync.Mutex
-	objs map[string][]byte
-	ever map[string]bool
-	head chunkHead
-	puts int
+	mu      sync.Mutex
+	objs    map[string][]byte
+	ever    map[string]bool
+	head    chunkHead
+	puts    int
+	intents map[string]chunkIntent
 }
 
 func NewMemChunkRemote() *MemChunkRemote {
-	return &MemChunkRemote{objs: map[string][]byte{}, ever: map[string]bool{}}
+	return &MemChunkRemote{objs: map[string][]byte{}, ever: map[string]bool{}, intents: map[string]chunkIntent{}}
+}
+
+func (m *MemChunkRemote) PutIntent(ctx context.Context, in chunkIntent) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	for _, k := range in.Keys {
+		if err := validChunkKey(k); err != nil {
+			return "", err
+		}
+	}
+	id, err := newChunkIntentID(in.Gen)
+	if err != nil {
+		return "", err
+	}
+	in.ID, in.CreatedNs, in.Keys = id, time.Now().UnixNano(), append([]string(nil), in.Keys...)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.intents[id] = in
+	return id, nil
+}
+
+func (m *MemChunkRemote) DeleteIntent(ctx context.Context, id string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.intents, id)
+	return nil
+}
+
+func (m *MemChunkRemote) ListIntents(ctx context.Context) ([]chunkIntent, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]chunkIntent, 0, len(m.intents))
+	for _, in := range m.intents {
+		in.Keys = append([]string(nil), in.Keys...)
+		out = append(out, in)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
 }
 
 func (m *MemChunkRemote) Put(ctx context.Context, key string, data []byte) error {
 	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validChunkKey(key); err != nil {
 		return err
 	}
 	m.mu.Lock()

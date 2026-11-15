@@ -24,6 +24,15 @@ type Filer interface {
 	// UpdateEntry applies e only if every expected extended key still holds
 	// the given value; otherwise ErrPrecondition. ErrNotFound if absent.
 	UpdateEntry(ctx context.Context, dir string, e *filerpb.Entry, expected map[string][]byte) error
+	// ListEntries returns up to limit (0 = the filer's default) children of
+	// dir whose names start with prefix and sort after startAfter, in name
+	// order. A directory that does not exist lists as empty.
+	ListEntries(ctx context.Context, dir, prefix, startAfter string, limit uint32) ([]*filerpb.Entry, error)
+	// DeleteEntry removes dir/name without deleting any data, and only if
+	// every expected extended key still holds the given value; otherwise
+	// ErrPrecondition (also when the entry is missing and expected is not
+	// empty). An unconditional delete of a missing entry succeeds.
+	DeleteEntry(ctx context.Context, dir, name string, expected map[string][]byte) error
 }
 
 // Blobs stores immutable chunk payloads as SeaweedFS needles.
@@ -42,4 +51,7 @@ var (
 	ErrExists = errors.New("chunkstore: entry already exists")
 	// ErrPrecondition: a conditional write lost (HEAD changed under us).
 	ErrPrecondition = errors.New("chunkstore: precondition failed")
+	// ErrInvalidKey: a chunk key is malformed, or names an owner that is
+	// not a plain volume id, or is qualified where only own keys are allowed.
+	ErrInvalidKey = errors.New("chunkstore: invalid chunk key")
 )

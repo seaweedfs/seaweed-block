@@ -141,6 +141,62 @@ func (c *SWFS) UpdateEntry(ctx context.Context, dir string, e *filerpb.Entry, ex
 	return fmt.Errorf("chunkstore: update %s/%s: %w", dir, e.GetName(), err)
 }
 
+// ListEntries implements Filer: one ListEntries stream of at most limit
+// entries. The filer's not-found styles (gRPC NotFound, or its raw sentinel
+// crossing as Unknown) mean an empty listing; any other error fails it.
+func (c *SWFS) ListEntries(ctx context.Context, dir, prefix, startAfter string, limit uint32) ([]*filerpb.Entry, error) {
+	stream, err := c.fc.ListEntries(ctx, &filerpb.ListEntriesRequest{
+		Directory: dir, Prefix: prefix, StartFromFileName: startAfter, InclusiveStartFrom: false, Limit: limit,
+	})
+	if err != nil {
+		if isFilerNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("chunkstore: list %s: %w", dir, err)
+	}
+	var out []*filerpb.Entry
+	for {
+		resp, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			return out, nil
+		}
+		if err != nil {
+			if isFilerNotFound(err) && len(out) == 0 {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("chunkstore: list %s: %w", dir, err)
+		}
+		if resp.GetEntry() != nil {
+			out = append(out, resp.Entry)
+		}
+	}
+}
+
+// DeleteEntry implements Filer. It never deletes data or recurses. A failed
+// expected_extended (including a missing entry) comes back as gRPC
+// FailedPrecondition; other failures are a gRPC error or the response's
+// Error string, and are returned unwrapped from the sentinels.
+func (c *SWFS) DeleteEntry(ctx context.Context, dir, name string, expected map[string][]byte) error {
+	resp, err := c.fc.DeleteEntry(ctx, &filerpb.DeleteEntryRequest{
+		Directory: dir, Name: name, IsDeleteData: false, IsRecursive: false, ExpectedExtended: expected,
+	})
+	if err != nil {
+		if status.Code(err) == codes.FailedPrecondition {
+			return fmt.Errorf("%w: delete %s/%s: %v", ErrPrecondition, dir, name, err)
+		}
+		return fmt.Errorf("chunkstore: delete %s/%s: %w", dir, name, err)
+	}
+	if resp.GetError() != "" {
+		return fmt.Errorf("chunkstore: delete %s/%s: %s", dir, name, resp.GetError())
+	}
+	return nil
+}
+
+func isFilerNotFound(err error) bool {
+	st, ok := status.FromError(err)
+	return ok && (st.Code() == codes.NotFound || (st.Code() == codes.Unknown && strings.Contains(st.Message(), filerNotFoundText)))
+}
+
 // Put implements Blobs: filer AssignVolume, then a raw HTTP POST of data to
 // the assigned volume server. The body is sent as application/octet-stream
 // with no Content-Encoding, so the volume server stores it uncompressed (its

@@ -32,6 +32,7 @@ const _ = grpc.SupportPackageIsVersion9
 
 const (
 	SeaweedFiler_LookupDirectoryEntry_FullMethodName = "/filer_pb.SeaweedFiler/LookupDirectoryEntry"
+	SeaweedFiler_ListEntries_FullMethodName          = "/filer_pb.SeaweedFiler/ListEntries"
 	SeaweedFiler_CreateEntry_FullMethodName          = "/filer_pb.SeaweedFiler/CreateEntry"
 	SeaweedFiler_UpdateEntry_FullMethodName          = "/filer_pb.SeaweedFiler/UpdateEntry"
 	SeaweedFiler_DeleteEntry_FullMethodName          = "/filer_pb.SeaweedFiler/DeleteEntry"
@@ -44,6 +45,7 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type SeaweedFilerClient interface {
 	LookupDirectoryEntry(ctx context.Context, in *LookupDirectoryEntryRequest, opts ...grpc.CallOption) (*LookupDirectoryEntryResponse, error)
+	ListEntries(ctx context.Context, in *ListEntriesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ListEntriesResponse], error)
 	CreateEntry(ctx context.Context, in *CreateEntryRequest, opts ...grpc.CallOption) (*CreateEntryResponse, error)
 	UpdateEntry(ctx context.Context, in *UpdateEntryRequest, opts ...grpc.CallOption) (*UpdateEntryResponse, error)
 	DeleteEntry(ctx context.Context, in *DeleteEntryRequest, opts ...grpc.CallOption) (*DeleteEntryResponse, error)
@@ -68,6 +70,25 @@ func (c *seaweedFilerClient) LookupDirectoryEntry(ctx context.Context, in *Looku
 	}
 	return out, nil
 }
+
+func (c *seaweedFilerClient) ListEntries(ctx context.Context, in *ListEntriesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ListEntriesResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &SeaweedFiler_ServiceDesc.Streams[0], SeaweedFiler_ListEntries_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[ListEntriesRequest, ListEntriesResponse]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SeaweedFiler_ListEntriesClient = grpc.ServerStreamingClient[ListEntriesResponse]
 
 func (c *seaweedFilerClient) CreateEntry(ctx context.Context, in *CreateEntryRequest, opts ...grpc.CallOption) (*CreateEntryResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
@@ -124,6 +145,7 @@ func (c *seaweedFilerClient) LookupVolume(ctx context.Context, in *LookupVolumeR
 // for forward compatibility.
 type SeaweedFilerServer interface {
 	LookupDirectoryEntry(context.Context, *LookupDirectoryEntryRequest) (*LookupDirectoryEntryResponse, error)
+	ListEntries(*ListEntriesRequest, grpc.ServerStreamingServer[ListEntriesResponse]) error
 	CreateEntry(context.Context, *CreateEntryRequest) (*CreateEntryResponse, error)
 	UpdateEntry(context.Context, *UpdateEntryRequest) (*UpdateEntryResponse, error)
 	DeleteEntry(context.Context, *DeleteEntryRequest) (*DeleteEntryResponse, error)
@@ -141,6 +163,9 @@ type UnimplementedSeaweedFilerServer struct{}
 
 func (UnimplementedSeaweedFilerServer) LookupDirectoryEntry(context.Context, *LookupDirectoryEntryRequest) (*LookupDirectoryEntryResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method LookupDirectoryEntry not implemented")
+}
+func (UnimplementedSeaweedFilerServer) ListEntries(*ListEntriesRequest, grpc.ServerStreamingServer[ListEntriesResponse]) error {
+	return status.Error(codes.Unimplemented, "method ListEntries not implemented")
 }
 func (UnimplementedSeaweedFilerServer) CreateEntry(context.Context, *CreateEntryRequest) (*CreateEntryResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateEntry not implemented")
@@ -195,6 +220,17 @@ func _SeaweedFiler_LookupDirectoryEntry_Handler(srv interface{}, ctx context.Con
 	}
 	return interceptor(ctx, in, info, handler)
 }
+
+func _SeaweedFiler_ListEntries_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(ListEntriesRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(SeaweedFilerServer).ListEntries(m, &grpc.GenericServerStream[ListEntriesRequest, ListEntriesResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SeaweedFiler_ListEntriesServer = grpc.ServerStreamingServer[ListEntriesResponse]
 
 func _SeaweedFiler_CreateEntry_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CreateEntryRequest)
@@ -318,6 +354,12 @@ var SeaweedFiler_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _SeaweedFiler_LookupVolume_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "ListEntries",
+			Handler:       _SeaweedFiler_ListEntries_Handler,
+			ServerStreams: true,
+		},
+	},
 	Metadata: "filer_subset.proto",
 }
