@@ -92,8 +92,9 @@ type ProviderConfig struct {
 	// report healthy for the requested volumeID. Zero → default 5s.
 	OpenTimeout time.Duration
 
-	// ChunkAssignmentTimeout bounds startup waiting for a healthy, nonzero
-	// master assignment before attaching walstore-chunk. Zero defaults to 30s.
+	// ChunkAssignmentTimeout bounds deferred startup waiting for a healthy,
+	// nonzero master assignment and attach. Local recovery returns first so
+	// the host can apply its assignment. Zero defaults to 30s.
 	ChunkAssignmentTimeout time.Duration
 
 	// WALRetentionLSNs is the operator-tunable retention window past
