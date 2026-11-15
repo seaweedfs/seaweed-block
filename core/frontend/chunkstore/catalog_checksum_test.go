@@ -17,7 +17,7 @@ func TestCatalogC12_ProtectionSurvivesSnapshotAndFork(t *testing.T) {
 	if vol.VolumeProtection != policy {
 		t.Fatalf("VOLUME protection missing: %+v", vol)
 	}
-	h := publishSource(t, f, b, "v1", map[uint64][]byte{0: chunkData(0x41)})
+	h := publishSource(t, f, b, "v1", map[uint64][]byte{0: chunkBytes(0x41)})
 	snap, err := c.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: "s1", RequestID: "c12-snap"}, h)
 	if err != nil {
 		t.Fatal(err)

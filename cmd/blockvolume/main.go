@@ -107,8 +107,9 @@ type flags struct {
 	// parallel-walstore candidate (default smartwal).
 	// --durable-blocks + --durable-blocksize are used on first-time
 	// storage create.
-	durableRoot string
-	durableImpl string // "smartwal" | "walstore" | "parallel-walstore" | "walstore-chunk"
+	durableRoot          string
+	requireDataChecksums bool
+	durableImpl          string // "smartwal" | "walstore" | "parallel-walstore" | "walstore-chunk"
 	// --chunk-*: the SeaweedFS remote of --durable-impl=walstore-chunk.
 	chunk                                chunkFlags
 	durableBlocks                        uint
@@ -184,6 +185,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.IntVar(&f.ublkDevice, "ublk-device", -1, "serve the volume as the local block device /dev/ublkbN (Linux ublk_drv, root); -1 disables. Same-host alternative to the NVMe/TCP loopback")
 	fs.IntVar(&f.ublkQueues, "ublk-queues", 0, "ublk hardware queues (one server thread each); 0 = default 1. Requires --ublk-device")
 	fs.IntVar(&f.ublkQueueDepth, "ublk-queue-depth", 0, "ublk in-flight requests per queue; 0 = default 64. Requires --ublk-device")
+	fs.BoolVar(&f.requireDataChecksums, "require-data-checksums", false, "require protected walstore v2 storage; refuse existing v1 without migration")
 	fs.StringVar(&f.durableRoot, "durable-root", "", "directory for persistent storage files; empty = memback (non-durable)")
 	fs.StringVar(&f.durableImpl, "durable-impl", "smartwal", "LogicalStorage impl: smartwal (default), walstore, opt-in parallel-walstore, or opt-in walstore-chunk (walstore published to SeaweedFS; proof of concept); ignored unless --durable-root is set")
 	fs.StringVar(&f.chunk.filer, "chunk-filer", "", "walstore-chunk: SeaweedFS filer gRPC address host:port")
@@ -245,6 +247,9 @@ func parseFlags(args []string) (flags, error) {
 	case "smartwal", "walstore", "parallel-walstore", "walstore-chunk":
 	default:
 		return flags{}, fmt.Errorf("--durable-impl=%q invalid; want smartwal, walstore, parallel-walstore, or walstore-chunk", f.durableImpl)
+	}
+	if f.requireDataChecksums && (f.durableRoot == "" || (f.durableImpl != "walstore" && f.durableImpl != "walstore-chunk")) {
+		return flags{}, fmt.Errorf("--require-data-checksums requires --durable-root and walstore or walstore-chunk")
 	}
 	if f.workspaceLease && (f.durableRoot == "" || f.durableImpl != "walstore-chunk") {
 		return flags{}, fmt.Errorf("--workspace-lease requires --durable-root and --durable-impl=walstore-chunk")
@@ -592,6 +597,7 @@ func run(f flags) int {
 		cfg := durable.ProviderConfig{
 			Impl:                          durable.ImplName(f.durableImpl),
 			StorageRoot:                   f.durableRoot,
+			RequireDataChecksums:          f.requireDataChecksums,
 			BlockSize:                     int(f.durableBlockSize),
 			NumBlocks:                     uint32(f.durableBlocks),
 			WALRetentionLSNs:              f.walRetentionLSNs,
