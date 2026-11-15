@@ -83,7 +83,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return ops.VolumeStatusExitInvalid
 	}
 	if len(args) < 2 {
-		fmt.Fprintln(stderr, "sw-block: expected subcommand ops status|inventory|list|cluster|volumes|describe|timeline|explain|report|dashboard|generate-helm-values|operator-status|lifecycle-owner|authority-executor|rebuild-target-owner|failback-target-owner|failback-executor|frontend-publication-target-owner|frontend-publication-executor")
+		fmt.Fprintln(stderr, "sw-block: expected subcommand ops status|inventory|list|cluster|volumes|describe|timeline|explain|report|dashboard|generate-helm-values|operator-status|lifecycle-owner|authority-executor|rebuild-target-owner|failback-target-owner|failback-executor|frontend-publication-target-owner|frontend-publication-executor|chunk")
 		usage(stderr)
 		return ops.VolumeStatusExitInvalid
 	}
@@ -124,6 +124,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runOpsFrontendPublicationTargetOwner(args[2:], stdout, stderr)
 	case "frontend-publication-executor":
 		return runOpsFrontendPublicationExecutor(args[2:], stdout, stderr)
+	case "chunk":
+		return runOpsChunk(args[2:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "sw-block: unknown ops subcommand %q\n", args[1])
 		usage(stderr)
@@ -2285,6 +2287,10 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  sw-block ops failback-executor [--dry-run] [--namespace <ns>] [--enable-execution] [--execution-policy] [--failback-runtime-url <url>] [--interval 30s]")
 	fmt.Fprintln(w, "  sw-block ops frontend-publication-target-owner [--dry-run] [--namespace <ns>] [--interval 30s] [--activate-targets --activation-policy --runtime-endpoint <url>]")
 	fmt.Fprintln(w, "  sw-block ops frontend-publication-executor [--dry-run] [--namespace <ns>] [--enable-execution] [--execution-policy] [--frontend-publication-runtime-url <url>] [--interval 30s]")
+	fmt.Fprintln(w, "  sw-block ops chunk cut|detach --volume <id> --status-addr <addr|url> [--min-lsn <n>] [--timeout <d>]")
+	fmt.Fprintln(w, "  sw-block ops chunk snapshot --volume <id> --status-addr <addr|url> --name <name> [--label k=v]... [--request-id <id>] [--consistency crash|app]")
+	fmt.Fprintln(w, "  sw-block ops chunk snapshots|snapshot-delete --volume <id> [--name <name>] --chunk-filer <host:port> [--chunk-path /swblock/chunks]")
+	fmt.Fprintln(w, "  sw-block ops chunk fork --chunk-filer <host:port> [--chunk-path /swblock/chunks] --source <id> --snapshot <name> --target <id> [--request-id <id>] [--label k=v]...")
 }
 
 func emptyCLI(value string) string {
