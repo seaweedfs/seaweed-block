@@ -53,7 +53,7 @@ func TestCatalog_SnapshotUncertainCreateKeepsIntent(t *testing.T) {
 	f, _, c, h := catalogFixture(t)
 	ctx := context.Background()
 	f.failCreate = func(p string) error {
-		if p == catBase+"/v1/snaps/s1" {
+		if isSnapPath(p, "v1", "s1") {
 			return errTransport
 		}
 		return nil
@@ -80,7 +80,7 @@ func TestCatalog_SnapshotAppliedResponseLostIsConfirmed(t *testing.T) {
 	f, _, c, h := catalogFixture(t)
 	ctx := context.Background()
 	f.failCreateAfterApply = func(p string) error {
-		if p == catBase+"/v1/snaps/s1" {
+		if isSnapPath(p, "v1", "s1") {
 			return errTransport
 		}
 		return nil
@@ -167,9 +167,9 @@ func TestFork_IncompleteRetryBoundToOriginalImage(t *testing.T) {
 	}
 
 	// s1 is deleted and recreated over a newer source image.
-	f.mu.Lock()
-	delete(f.entries, catBase+"/v1/snaps/s1")
-	f.mu.Unlock()
+	if _, err := c.DeleteSnapshot(ctx, "v1", "s1"); err != nil { // frees the name
+		t.Fatal(err)
+	}
 	r1, _ := NewChunkRemote(f, b, catBase+"/v1")
 	if err := r1.Put(ctx, "chunks/e1/c5/new", chunkBytes(0x55)); err != nil {
 		t.Fatal(err)

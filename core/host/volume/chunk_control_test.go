@@ -152,8 +152,8 @@ func TestStatusServer_ChunkSuccessBodiesUseSpecFields(t *testing.T) {
 		ctl.deadline < chunkstore.DefaultOpDeadline-time.Minute || ctl.deadline > chunkstore.DefaultOpDeadline {
 		t.Fatalf("cut with a huge timeoutMs: %d (deadline %v), want OpDeadline", w.Code, ctl.deadline)
 	}
-	wantKeys(t, "cut", jsonKeys(t, w.Body.Bytes()), "volumeID", "cutLSN", "headGen", "headEpoch", "holder", "noop", "fullHash",
-		"candidateChunks", "uploadedChunks", "uploadedBytes", "zeroedChunks", "barrierPauseNs", "uploadNs", "casNs", "totalNs")
+	// The cut statistics are omitted until W3 fills them (appendix 14:30Z).
+	wantKeys(t, "cut", jsonKeys(t, w.Body.Bytes()), "volumeID", "cutLSN", "headGen", "headEpoch", "holder", "noop", "fullHash")
 
 	w = serve(t, s, http.MethodPost, "/chunk/snapshot", `{"volumeID":"v1","name":"s1","requestID":"r","labels":{"agent.step":"x"},"consistency":"app","expiresAtNs":9}`, "")
 	if w.Code != 200 || ctl.lastSnap.Name != "s1" || ctl.lastSnap.RequestID != "r" || ctl.lastSnap.Consistency != "app" || ctl.lastSnap.Labels["agent.step"] != "x" || ctl.lastSnap.ExpiresAtNs != 9 {
@@ -211,7 +211,9 @@ func TestStatusServer_ChunkErrorBodyIsTyped(t *testing.T) {
 		{fmt.Errorf("x: %w", storage.ErrChunkHeadPrecondition), "head_conflict", 409, true},
 		{fmt.Errorf("x: %w", storage.ErrChunkRemoteUnavailable), "remote_unavailable", 503, true},
 		{fmt.Errorf("x: %w", storage.ErrChunkLayerClosed), "closing", 503, false},
-		{fmt.Errorf("x: %w", storage.ErrChunkLayerDetached), "closing", 503, false},
+		{fmt.Errorf("x: %w", storage.ErrChunkLayerDetached), "closing", 409, false},
+		{fmt.Errorf("%w: %w: cut LSN 1, HEAD remote_lsn 10", storage.ErrChunkCaptureRefused, storage.ErrChunkLSNBehind), "lsn_behind", 409, false},
+		{&chunkstore.CatalogError{Code: chunkstore.CodeInvalidLabel, Message: "m"}, "invalid_label", 400, false},
 		{fmt.Errorf("x: %w", durable.ErrNotChunkVolume), "not_chunk_volume", 409, false},
 		{&chunkstore.CatalogError{Code: chunkstore.CodeSnapshotExists, Message: "m"}, "snapshot_exists", 409, false},
 		{&chunkstore.CatalogError{Code: chunkstore.CodeSnapshotNotFound, Message: "m"}, "snapshot_not_found", 404, false},

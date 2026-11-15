@@ -159,6 +159,17 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 		for _, idx := range saved {
 			l.dirty[idx] = true
 		}
+	case !ok && cfg.FreshFromHead:
+		// A fresh local volume has taken no write yet (I/O waits for its
+		// first attach): its image is HEAD's, so nothing is dirty. Start with
+		// an empty bitmap bound to HEAD instead of hash mode, which stays for
+		// an existing volume whose bitmap is lost (integration ruling F1).
+		fresh := chunkBitmapHeader{BaseLSN: head.RemoteLSN, HeadGen: head.Gen, Epoch: head.Epoch, Base: chunkBaseNone}
+		if err := cfg.Bitmap.WriteHeader(fresh); err != nil {
+			l.hashMode = true // safe: compare every chunk on the first cut
+		} else {
+			l.hdr = fresh
+		}
 	default:
 		if ok {
 			l.hdr = hdr
@@ -623,6 +634,13 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (chunkC
 	if copyErr != nil {
 		l.abortCut(all)
 		return chunkCutResult{}, fmt.Errorf("storage: capture copy: %w", copyErr)
+	}
+	if h < baseHead.RemoteLSN && !l.supersededBy(baseHead) {
+		// HEAD holds the image of a later LSN than this host's log has
+		// reached: publishing would move remote_lsn backwards. Refused
+		// before any upload. (A HEAD of a newer holder fences below.)
+		l.abortCut(all)
+		return chunkCutResult{}, fmt.Errorf("%w: %w: cut LSN %d, HEAD remote_lsn %d", errChunkCaptureRefused, errChunkLSNBehind, h, baseHead.RemoteLSN)
 	}
 
 	// Upload only what changed against HEAD.
