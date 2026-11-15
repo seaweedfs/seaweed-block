@@ -26,6 +26,16 @@ var ErrNotChunkVolume = errors.New("durable: volume has no chunk layer")
 // assignment is not visible in the projection.
 var ErrChunkAwaitingAuthority = errors.New("durable: chunk layer awaiting master authority")
 
+// ErrChunkNotPrimary and ErrChunkEpochStale are the causes of a cut the
+// capture admission refused (wrapped with storage.ErrChunkCaptureRefused):
+// the projection is not a healthy primary of the volume here (the caller
+// goes elsewhere), or its lineage moved since the layer attached (a new
+// attach is needed).
+var (
+	ErrChunkNotPrimary = errors.New("durable: not a healthy primary for the chunk layer")
+	ErrChunkEpochStale = errors.New("durable: chunk layer lineage moved since attach")
+)
+
 var (
 	errProviderClosed   = errors.New("durable: provider closed")
 	errChunkNoAuthority = errors.New("durable: projection carries no master authority for the chunk layer")
@@ -214,11 +224,11 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 		CaptureAllowed: func() error {
 			cur := p.view.Projection()
 			if !cur.Healthy || cur.VolumeID != volumeID || lin.volumeID != volumeID {
-				return fmt.Errorf("volume %s is not a healthy primary here", volumeID)
+				return fmt.Errorf("%w: volume %s is not a healthy primary here", ErrChunkNotPrimary, volumeID)
 			}
 			if cur.ReplicaID != lin.replicaID || cur.Epoch != lin.epoch || cur.EndpointVersion != lin.endpoint {
-				return fmt.Errorf("volume %s lineage moved from replica %q epoch %d endpoint %d to replica %q epoch %d endpoint %d",
-					volumeID, lin.replicaID, lin.epoch, lin.endpoint, cur.ReplicaID, cur.Epoch, cur.EndpointVersion)
+				return fmt.Errorf("%w: volume %s lineage moved from replica %q epoch %d endpoint %d to replica %q epoch %d endpoint %d",
+					ErrChunkEpochStale, volumeID, lin.replicaID, lin.epoch, lin.endpoint, cur.ReplicaID, cur.Epoch, cur.EndpointVersion)
 			}
 			return nil
 		},
