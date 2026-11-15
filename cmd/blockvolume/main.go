@@ -510,6 +510,9 @@ func run(f flags) int {
 	var status *volume.StatusServer
 	if f.statusAddr != "" {
 		status = volume.NewStatusServer(h.ProjectionView())
+		if f.nvmeListen != "" {
+			status.SetNVMeListenerReady(false)
+		}
 		if f.statusRecovery {
 			status.EnableRecoveryEndpoint()
 		}
@@ -1095,6 +1098,9 @@ func run(f flags) int {
 			_ = h.Close()
 			return 1
 		}
+		if status != nil {
+			status.SetNVMeListenerReady(true)
+		}
 		_ = json.NewEncoder(os.Stdout).Encode(nvmeReadyLine{
 			Component: "blockvolume",
 			Phase:     "nvme-listening",
@@ -1144,6 +1150,9 @@ func run(f flags) int {
 	}
 	h.SetFrontendTargets(nil)
 	if nvmeTarget != nil {
+		if status != nil {
+			status.SetNVMeListenerReady(false)
+		}
 		drainErr = errors.Join(drainErr, nvmeTarget.Close())
 	}
 	if iscsiTarget != nil {
