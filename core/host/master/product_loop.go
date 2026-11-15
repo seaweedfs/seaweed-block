@@ -160,7 +160,7 @@ func (h *Host) applyPromotionEvidenceGate(snap *authority.ClusterSnapshot) (int,
 			continue
 		}
 		probeCount++
-		result, ok := h.probePromotionCandidates(vol.VolumeID, vol.Authority, candidates)
+		result, ok := h.probePromotionCandidatesCurrent(vol.VolumeID, vol.Authority, candidates)
 		allowed := promotionAllowedReplicas(result, ok)
 		if ok {
 			h.log.Printf("blockmaster: promotion gate volume=%s current=%s current_known=%t current_ready=%t ack_profile=%s required_lsn=%d candidates=%v allowed=%v",
@@ -183,7 +183,12 @@ func (h *Host) applyPromotionEvidenceGate(snap *authority.ClusterSnapshot) (int,
 				slot.ReadyForPrimary = false
 			}
 		}
-		if enabledCandidate && result.CurrentKnown && !result.Current.Ready {
+		// After the (blocking) probe, judge the current primary from its
+		// own fresh heartbeat slot as it is now, not from the snapshot
+		// taken before the probe.
+		if enabledCandidate && result.CurrentKnown && !result.Current.Ready && h.primaryBootGraceHoldsNow(vol.VolumeID, vol.Authority.ReplicaID) {
+			h.log.Printf("blockmaster: promotion gate volume=%s current=%s not ready but in boot grace; no direct reassign", vol.VolumeID, vol.Authority.ReplicaID)
+		} else if enabledCandidate && result.CurrentKnown && !result.Current.Ready {
 			current := &vol.Slots[currentIdx]
 			current.Reachable = false
 			current.ReadyForPrimary = false
@@ -213,11 +218,20 @@ func (h *Host) applyUnsupportedPromotionEvidenceGate(placements []lifecycle.Plac
 	probeCount, blockedCount := 0, 0
 	var directAsks []authority.AssignmentAsk
 	for _, placement := range placements {
-		if supported[placement.VolumeID] || len(placement.Slots) < 3 || !placementIsConcreteExistingReplica(placement) {
+		if supported[placement.VolumeID] {
 			continue
 		}
 		evidence, ok := report.Unsupported[placement.VolumeID]
-		if !ok || !unsupportedReasonsAllowPromotionProbe(evidence.Reasons) {
+		if !ok {
+			continue
+		}
+		// Record the current primary's own fresh slot fact for every
+		// unsupported volume, whatever the reason and whether or not a
+		// promotion is considered, so a ready report ends its boot grace
+		// and every start counts toward flap history (#128). The
+		// promotion rules below are unchanged.
+		h.recordCurrentBootFact(placement.VolumeID)
+		if len(placement.Slots) < 3 || !placementIsConcreteExistingReplica(placement) || !unsupportedReasonsAllowPromotionProbe(evidence.Reasons) {
 			continue
 		}
 		current, ok := h.Publisher().VolumeAuthorityLine(placement.VolumeID)
@@ -239,7 +253,7 @@ func (h *Host) applyUnsupportedPromotionEvidenceGate(placements []lifecycle.Plac
 			}
 		}
 		probeCount++
-		result, probeOK := h.probePromotionCandidates(vol.VolumeID, current, candidates)
+		result, probeOK := h.probePromotionCandidatesCurrent(vol.VolumeID, current, candidates)
 		allowed := promotionAllowedReplicas(result, probeOK)
 		if probeOK {
 			h.log.Printf("blockmaster: promotion gate unsupported volume=%s current=%s reasons=%v current_known=%t current_ready=%t ack_profile=%s required_lsn=%d candidates=%v allowed=%v",
@@ -257,6 +271,20 @@ func (h *Host) applyUnsupportedPromotionEvidenceGate(placements []lifecycle.Plac
 			}
 		}
 		if enabledCandidate && (!result.CurrentKnown || !result.Current.Ready) {
+			// Unsupported does not mean the current primary is unhealthy:
+			// a different slot may be stale. Judge the current primary
+			// from its own fresh heartbeat slot, never from placement.
+			// After the (blocking) probe: the authority must still be the
+			// one probed, and the current primary is judged from its own
+			// fresh heartbeat slot as it is now.
+			if now, ok := h.Publisher().VolumeAuthorityLine(vol.VolumeID); !ok || now.ReplicaID != current.ReplicaID || now.Epoch != current.Epoch || now.EndpointVersion != current.EndpointVersion {
+				h.log.Printf("blockmaster: promotion gate unsupported volume=%s authority moved during the probe; no direct reassign", vol.VolumeID)
+				continue
+			}
+			if h.primaryBootGraceHoldsNow(vol.VolumeID, current.ReplicaID) {
+				h.log.Printf("blockmaster: promotion gate unsupported volume=%s current=%s not ready but in boot grace; no direct reassign", vol.VolumeID, current.ReplicaID)
+				continue
+			}
 			if target, ok := chooseAllowedPromotionTarget(vol, result, allowed); ok {
 				h.log.Printf("blockmaster: promotion gate unsupported volume=%s direct_reassign=%s current=%s", vol.VolumeID, target.ReplicaID, current.ReplicaID)
 				directAsks = append(directAsks, authority.AssignmentAsk{
@@ -448,6 +476,36 @@ func (h *Host) probePromotionCandidates(volumeID string, current authority.Autho
 	return result, true
 }
 
+// probePromotionCandidatesCurrent probes like probePromotionCandidates,
+// but does not let an outdated verdict on the current primary stand
+// (#128). The provider probes the current primary before the peers; if
+// the current primary's own fresh heartbeat advanced to ready (a newer
+// fact, or a new incarnation) while the probe ran, its "not ready"
+// verdict may predate a finished recovery, so the probe is run once
+// more and that fresh result is used. The trigger is the whole fresh
+// verdict, never the single ReadyForPrimary bit: the newer fact must be
+// ready AND placeable (reachable, eligible, not withdrawn), so frontend
+// readiness can never preserve a primary the newest fact excludes. A
+// heartbeat alone is never taken as frontend readiness either: the fresh
+// probe still decides, so a frontend that is still unready keeps a
+// legitimate failover.
+func (h *Host) probePromotionCandidatesCurrent(volumeID string, current authority.AuthorityBasis, candidates []authority.ReplicaCandidate) (PromotionProbeResult, bool) {
+	before, beforeOK := h.freshCurrentSlot(volumeID, current.ReplicaID)
+	result, ok := h.probePromotionCandidates(volumeID, current, candidates)
+	if !ok || (result.CurrentKnown && result.Current.Ready) {
+		return result, ok
+	}
+	after, afterOK := h.freshCurrentSlot(volumeID, current.ReplicaID)
+	if !afterOK || !after.ReadyForPrimary || !after.Reachable || !after.Eligible || after.Withdrawn {
+		return result, ok
+	}
+	if beforeOK && !after.ObservedAt.After(before.ObservedAt) && after.Incarnation == before.Incarnation {
+		return result, ok
+	}
+	h.log.Printf("blockmaster: promotion gate volume=%s current=%s reported ready during the probe; probing again", volumeID, current.ReplicaID)
+	return h.probePromotionCandidates(volumeID, current, candidates)
+}
+
 func promotionAllowedReplicas(result PromotionProbeResult, ok bool) map[string]bool {
 	allowed := map[string]bool{}
 	if !ok || !isKnownAckProfile(result.AckProfile) {
@@ -561,4 +619,44 @@ func (h *Host) assignmentAskAlreadyCurrent(volumeID, replicaID, dataAddr, ctrlAd
 		line.ReplicaID == replicaID &&
 		line.DataAddr == dataAddr &&
 		line.CtrlAddr == ctrlAddr
+}
+
+// primaryBootGraceHoldsNow reports whether the current primary is a
+// restarted primary that is merely not ready yet, judged from its own
+// fresh heartbeat slot read now: placeable by that report and inside its
+// boot grace (#128). No fresh slot, or an explicit unhealthy report
+// (unreachable, ineligible, withdrawn), never holds.
+func (h *Host) primaryBootGraceHoldsNow(volumeID, replicaID string) bool {
+	if h.ctrl == nil {
+		return false
+	}
+	cur, ok := h.freshCurrentSlot(volumeID, replicaID)
+	if !ok {
+		return false
+	}
+	return h.ctrl.PrimaryBootGraceHolds(volumeID, cur)
+}
+
+// recordCurrentBootFact records the current primary's own fresh slot
+// fact for the volume, if it has an authority line and a fresh slot.
+func (h *Host) recordCurrentBootFact(volumeID string) {
+	if h.ctrl == nil {
+		return
+	}
+	line, ok := h.Publisher().VolumeAuthorityLine(volumeID)
+	if !ok || !line.Assigned {
+		return
+	}
+	if cur, ok := h.freshCurrentSlot(volumeID, line.ReplicaID); ok {
+		h.ctrl.RecordPrimaryBootFact(volumeID, cur)
+	}
+}
+
+// freshCurrentSlot returns the replica's own fresh heartbeat slot from
+// the observation store (server facts folded in).
+func (h *Host) freshCurrentSlot(volumeID, replicaID string) (authority.ReplicaCandidate, bool) {
+	if h.obs == nil {
+		return authority.ReplicaCandidate{}, false
+	}
+	return h.obs.Store().Snapshot().FreshSlotCandidate(volumeID, replicaID)
 }

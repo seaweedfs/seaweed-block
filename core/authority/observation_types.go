@@ -54,6 +54,9 @@ type SlotFact struct {
 	Eligible        bool
 	Withdrawn       bool
 	EvidenceScore   uint64
+	// Incarnation identifies the reporting volume process (new on
+	// every process start); raw fact, empty from older binaries.
+	Incarnation string
 	// ObservedAt/ExpiresAt are store-owned per-slot freshness
 	// markers. They let one Kubernetes node run multiple
 	// blockvolume processes that each report a different slot
@@ -120,6 +123,12 @@ type FreshnessConfig struct {
 	// distinct from FreshnessWindow at the API level so future
 	// 14A review can tune them independently.
 	PendingGrace time.Duration
+}
+
+// EffectiveFreshnessWindow is the window the observation store actually
+// uses: the configured one, or its default when omitted or nonpositive.
+func (c FreshnessConfig) EffectiveFreshnessWindow() time.Duration {
+	return c.withDefaults().FreshnessWindow
 }
 
 func (c FreshnessConfig) withDefaults() FreshnessConfig {

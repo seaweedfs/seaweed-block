@@ -29,6 +29,13 @@ type ReplicaCandidate struct {
 	Eligible        bool
 	Withdrawn       bool
 	EvidenceScore   uint64
+	// Incarnation identifies the reporting volume process; it changes
+	// on every process start. Empty from older volume binaries.
+	Incarnation string
+	// ObservedAt is the observation time of the slot fact this
+	// candidate was built from (zero when synthesized). It orders boot
+	// facts: an older fact never changes boot-grace history.
+	ObservedAt time.Time
 }
 
 // VolumeTopologySnapshot is the complete point-in-time topology and
@@ -64,6 +71,14 @@ type TopologyControllerConfig struct {
 	ExpectedSlotsPerVolume int
 	RebalanceSkew          int
 	RetryWindow            time.Duration
+	// PrimaryBootGrace bounds how long a restarted current primary is
+	// kept while it reports not-ready (see primary_boot_grace.go).
+	// The master sets it to its observation freshness window.
+	PrimaryBootGrace time.Duration
+	// PrimaryBootFlapRestarts process starts within
+	// PrimaryBootFlapWindow mark a replica as flapping: no grace.
+	PrimaryBootFlapRestarts int
+	PrimaryBootFlapWindow   time.Duration
 }
 
 func (c TopologyControllerConfig) withDefaults() TopologyControllerConfig {
@@ -75,6 +90,15 @@ func (c TopologyControllerConfig) withDefaults() TopologyControllerConfig {
 	}
 	if c.RetryWindow == 0 {
 		c.RetryWindow = 5 * time.Second
+	}
+	if c.PrimaryBootGrace == 0 {
+		c.PrimaryBootGrace = 10 * time.Second // the observation store's default freshness window
+	}
+	if c.PrimaryBootFlapRestarts == 0 {
+		c.PrimaryBootFlapRestarts = 3
+	}
+	if c.PrimaryBootFlapWindow == 0 {
+		c.PrimaryBootFlapWindow = 10 * time.Minute
 	}
 	return c
 }

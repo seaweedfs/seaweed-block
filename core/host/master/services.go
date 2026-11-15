@@ -659,6 +659,7 @@ func heartbeatFromWire(r *control.HeartbeatReport) authority.HeartbeatMessage {
 			Eligible:        s.Eligible,
 			Withdrawn:       s.Withdrawn,
 			EvidenceScore:   s.EvidenceScore,
+			Incarnation:     s.Incarnation,
 			LocalRoleClaim:  authority.LocalRoleClaim(s.LocalRoleClaim),
 		})
 	}
