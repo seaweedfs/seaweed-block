@@ -72,14 +72,14 @@ type chunkLayerImpl struct {
 	// pendingBase is the version the unresolved CAS expected. While HEAD is
 	// still at it, that CAS may still land, so a read alone never settles it.
 	pendingBase chunkHeadVersion
-	remoteLSN     uint64
-	hdr           chunkBitmapHeader // last header written or loaded
-	dirty         map[uint64]bool   // chunks dirtied since the cut in progress or the last HEAD
-	inflight      map[uint64]bool   // chunks captured by a cut whose HEAD is not yet installed
-	allDirty      bool              // a BASE block landed: every chunk is dirty
-	hashMode      bool              // the dirty set is unknown: compare every chunk by hash
-	cutLSN        uint64            // H of the latest cut taken (in flight or installed)
-	keySeq        uint64
+	remoteLSN   uint64
+	hdr         chunkBitmapHeader // last header written or loaded
+	dirty       map[uint64]bool   // chunks dirtied since the cut in progress or the last HEAD
+	inflight    map[uint64]bool   // chunks captured by a cut whose HEAD is not yet installed
+	allDirty    bool              // a BASE block landed: every chunk is dirty
+	hashMode    bool              // the dirty set is unknown: compare every chunk by hash
+	cutLSN      uint64            // H of the latest cut taken (in flight or installed)
+	keySeq      uint64
 
 	// Test-only scheduling hooks; nil in production.
 	testPresenceSnapshotHook func()                 // after a presence snapshot, before it is written
