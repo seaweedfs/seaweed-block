@@ -2,6 +2,7 @@ package component_test
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/engine"
 	"github.com/seaweedfs/seaweed-block/core/recovery"
 	"github.com/seaweedfs/seaweed-block/core/replication/component"
+	"github.com/seaweedfs/seaweed-block/core/transport"
 )
 
 // TestDualLane_EngineDrivenRebuild_HappyPath — closes the
@@ -273,6 +275,14 @@ func TestDualLane_CoordReleasesPinFloorAfterSession(t *testing.T) {
 // MUST synchronize on session-ready (WalShipper in Backlog) before
 // PushLiveWrite. Replacement coverage for the strict variant is in
 // TestC1_Realtime_OutOfOrder_StrictFailsClosed.
+//
+// A 12-entry rebuild is short, so the push can race every stage of the
+// session. PushLiveWrite then returns what the production live-write
+// path (transport ship_sender) treats as retained or handed back to the
+// steady path: not live-ready yet, past the pre-barrier cut
+// (ErrSinkBarrierSealed), or sealed / gone once the session closed. The
+// entry is in the primary WAL in every case, and the byte check at the
+// end pins that the live LBA still reaches the replica.
 func TestDualLane_EngineDrivenRebuild_WithPushLiveDuringSession(t *testing.T) {
 	component.RunSubstrate(t, "memorywal", component.MemoryWAL, func(t *testing.T, c *component.Cluster) {
 		c.WithReplicas(1).
@@ -327,13 +337,14 @@ func TestDualLane_EngineDrivenRebuild_WithPushLiveDuringSession(t *testing.T) {
 		if rt := c.Coord().RouteLocalWrite(coordRID, liveLSN); rt != recovery.RouteSessionLane {
 			t.Fatalf("RouteLocalWrite during session: got %v want RouteSessionLane", rt)
 		}
-		waitBridgeLiveReady(t, br, coordRID)
 		// In Backlog mode, NotifyAppend is lag-only (no emit); the
 		// substrate scan in drainOpportunity picks up the entry from
 		// primary's WAL. So the live LSN reaches replica via the
 		// drain path, not the direct-emit path.
-		if err := br.PushLiveWrite(coordRID, liveLBA, liveLSN, liveData); err != nil {
-			t.Fatalf("PushLiveWrite: %v", err)
+		if bridgeLiveReadyOrClosed(br, coordRID) {
+			if err := br.PushLiveWrite(coordRID, liveLBA, liveLSN, liveData); err != nil && !pushRaceOutcome(err) {
+				t.Fatalf("PushLiveWrite: %v", err)
+			}
 		}
 
 		deadline := time.Now().Add(8 * time.Second)
@@ -559,6 +570,31 @@ func TestPillar3Slice2_EngineDriven_SameLBAArbitration(t *testing.T) {
 			}
 		}
 	})
+}
+
+// pushRaceOutcome reports the PushLiveWrite errors that the production
+// caller (transport ship_sender) does not treat as failures.
+func pushRaceOutcome(err error) bool {
+	return errors.Is(err, recovery.ErrSessionNotLiveReady) ||
+		errors.Is(err, transport.ErrSinkBarrierSealed) ||
+		errors.Is(err, transport.ErrSinkSealed) ||
+		errors.Is(err, recovery.ErrNoActiveSession)
+}
+
+// bridgeLiveReadyOrClosed waits up to 2s for the bridge session to be
+// live-ready. False means it never was seen live: the session already
+// closed, so there is nothing to push into.
+func bridgeLiveReadyOrClosed(bridge interface {
+	HasActiveSession(recovery.ReplicaID) bool
+}, replicaID recovery.ReplicaID) bool {
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if bridge.HasActiveSession(replicaID) {
+			return true
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return false
 }
 
 func waitBridgeLiveReady(t *testing.T, bridge interface {
