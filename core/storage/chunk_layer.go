@@ -169,6 +169,15 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 	}
 
 	if cfg.FreshFromHead {
+		// A fresh host owns no local dirty period. Persist the claimed HEAD's
+		// lineage before publishing hooks/readiness; never inherit old bitmap bits.
+		l.hdr = chunkBitmapHeader{BaseLSN: head.RemoteLSN, HeadGen: head.Gen, Epoch: cfg.Epoch}
+		if err := cfg.Bitmap.Reset(l.hdr, nil, chunkDelta{}); err != nil {
+			l.cancel()
+			return nil, fmt.Errorf("storage: fresh bitmap reset: %w", err)
+		}
+		l.dirty = map[uint64]bool{}
+		l.hashMode = false
 		for idx := range head.Chunks {
 			l.absent[idx] = true
 			l.absentGen[idx]++
@@ -709,6 +718,20 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	}
 	st.UploadNs = time.Since(uploadStart).Nanoseconds()
 	if !detach && len(changed) == 0 && h == baseHead.RemoteLSN && baseHead.Gen != 0 && !chunkHeadIsDetached(baseHead) {
+		// A no-op cut still observes authority: a fresh host may have
+		// claimed HEAD without uploading a single chunk since our last cut.
+		cur, err := l.remote.GetHead(ctx)
+		if err != nil {
+			l.abortCut(all)
+			return chunkCutResult{}, fmt.Errorf("storage: capture HEAD read: %w: %w", errChunkRemoteUnavailable, err)
+		}
+		if cur.Gen != baseHead.Gen || !sameProposal(cur, baseHead) {
+			l.abortCut(all)
+			l.stMu.Lock()
+			l.fenced, l.head = true, copyHead(cur)
+			l.stMu.Unlock()
+			return chunkCutResult{}, errChunkLayerFenced
+		}
 		l.finishCut(baseHead, h, nil, nil) // nothing new: no CAS
 		return chunkCutResult{H: h, Head: copyHead(baseHead), Noop: true, FullHash: all}, nil
 	}

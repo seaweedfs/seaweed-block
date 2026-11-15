@@ -1,0 +1,65 @@
+package storage
+
+import (
+	"context"
+	"errors"
+	"fmt"
+)
+
+// ClaimChunkHead transfers only HEAD ownership, never chunk bodies. Epoch is
+// supplied by the master's projection, not allocated here. The caller must
+// persist lazy-read absence before exposing the local volume for I/O.
+// No WALStore, layer-state or provider-map lock is held across remote calls;
+// the provider may hold its per-volume attach serialization lock.
+func ClaimChunkHead(ctx context.Context, remote ChunkRemote, cfg ChunkLayerConfig) (ChunkHead, error) {
+	if remote == nil || cfg.Epoch == 0 || cfg.Holder == "" {
+		return ChunkHead{}, errors.New("storage: HEAD claim needs master epoch and holder")
+	}
+	allowed := func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if cfg.CaptureAllowed != nil {
+			return cfg.CaptureAllowed()
+		}
+		return nil
+	}
+	if err := allowed(); err != nil {
+		return ChunkHead{}, err
+	}
+	head, err := remote.GetHead(ctx)
+	if err != nil {
+		return ChunkHead{}, err
+	}
+	// No HEAD is a new volume, not a restore: there is no old holder to
+	// fence. The first content cut keeps exclusive-create semantics.
+	if head.Gen == 0 {
+		return head, allowed()
+	}
+	if head.Epoch > cfg.Epoch || (head.Gen != 0 && head.Epoch == cfg.Epoch && head.Holder != cfg.Holder) {
+		return ChunkHead{}, ErrChunkLayerFenced
+	}
+	if head.Gen != 0 && head.Epoch == cfg.Epoch && head.Holder == cfg.Holder {
+		return head, allowed() // idempotent restart or settled prior claim
+	}
+	next := copyHead(head)
+	next.Epoch, next.Holder = cfg.Epoch, cfg.Holder
+	if err := allowed(); err != nil {
+		return ChunkHead{}, err
+	}
+	gen, casErr := remote.CASHead(ctx, ChunkHeadVersion{Gen: head.Gen, Epoch: head.Epoch}, next)
+	if casErr == nil {
+		next.Gen = gen
+		return next, allowed()
+	}
+	// Never blindly replay a possibly committed takeover. A re-read must
+	// prove the exact proposal; otherwise the volume remains nonoperational.
+	current, readErr := remote.GetHead(ctx)
+	if readErr != nil {
+		return ChunkHead{}, fmt.Errorf("storage: HEAD claim unresolved: %w", errors.Join(casErr, readErr))
+	}
+	if current.Gen > head.Gen && sameProposal(current, next) {
+		return current, allowed()
+	}
+	return ChunkHead{}, fmt.Errorf("storage: HEAD claim not installed: %w", casErr)
+}

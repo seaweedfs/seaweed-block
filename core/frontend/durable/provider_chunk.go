@@ -182,6 +182,9 @@ func (p *DurableProvider) attachChunk(ctx context.Context, volumeID string, h *v
 			return errProviderClosed
 		}
 		h.chunk = layer
+		h.backend.mu.Lock()
+		h.backend.chunkFenced = layer.Fenced
+		h.backend.mu.Unlock()
 		if p.cfg.ChunkCaptureInterval > 0 || p.cfg.ChunkDirtyThreshold > 0 {
 			ctx, cancel := context.WithCancel(context.Background())
 			h.chunkStop, h.chunkDone = cancel, make(chan struct{})
@@ -232,7 +235,7 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 	remote := &closeBoundRemote{ChunkRemote: inner, done: p.closeCtx}
 	remote.setAttach(ctx) // the attach's calls also end with the caller's ctx
 	defer remote.setAttach(nil)
-	return storage.AttachChunkLayer(ws, remote, storage.ChunkLayerConfig{
+	cfg := storage.ChunkLayerConfig{
 		ChunkBlocks:     p.cfg.ChunkBlocks,
 		Epoch:           lin.epoch,
 		Holder:          holder,
@@ -250,7 +253,19 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 			}
 			return nil
 		},
-	})
+	}
+	if h.fresh {
+		head, err := storage.ClaimChunkHead(ctx, remote, cfg)
+		if err != nil {
+			return nil, fmt.Errorf("durable: restore HEAD claim: %w", err)
+		}
+		// The absence bitmap is installed by AttachChunkLayer before recovery
+		// can expose I/O. The durable fresh marker survives any earlier crash.
+		if err := ws.SeedChunkFrontier(head.RemoteLSN); err != nil {
+			return nil, err
+		}
+	}
+	return storage.AttachChunkLayer(ws, remote, cfg)
 }
 
 // closeBoundRemote ends every remote call when the provider closes, so a
