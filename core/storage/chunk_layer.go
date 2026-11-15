@@ -264,7 +264,7 @@ func (l *chunkLayerImpl) BeforeCheckpointAdvance(lsn uint64) error {
 	return l.persistPresence()
 }
 
-// saveDirty persists dirty ∪ inflight ∪ the chunks of WAL entries still in
+// saveDirty persists dirty âˆª inflight âˆª the chunks of WAL entries still in
 // the dirty map (all chunks when a BASE block landed or the set is unknown).
 func (l *chunkLayerImpl) saveDirty() error {
 	l.bmMu.Lock()
@@ -675,7 +675,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (chunkC
 		cur, err := l.remote.GetHead(ctx)
 		if err != nil {
 			l.abortCut(all)
-			return chunkCutResult{}, err
+			return chunkCutResult{}, fmt.Errorf("storage: no-op cut authority read: %w: %w", errChunkRemoteUnavailable, err)
 		}
 		if cur.Gen != baseHead.Gen || !sameProposal(cur, baseHead) {
 			l.abortCut(all)
