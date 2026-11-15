@@ -165,11 +165,14 @@ type volHandle struct {
 	// volume file, written before the file is created and removed only
 	// after the first attach succeeded, so an interrupted initialization
 	// is still fresh after a restart.
-	fresh     bool
-	attachMu  sync.Mutex         // serializes recovery and attach of this volume
-	chunk     storage.ChunkLayer // after RecoverVolume
-	chunkStop context.CancelFunc
-	chunkDone chan struct{}
+	fresh    bool
+	attachMu sync.Mutex // serializes recovery and attach of this volume
+	// awaitingAuthority: recovered, layer not attached yet because the
+	// projection carries no master authority; a wait goroutine attaches.
+	awaitingAuthority bool
+	chunk             storage.ChunkLayer // after RecoverVolume
+	chunkStop         context.CancelFunc
+	chunkDone         chan struct{}
 }
 
 // VolumeStatus is a read-only diagnostic snapshot of one durable volume
@@ -697,10 +700,18 @@ func (p *DurableProvider) RecoverVolume(ctx context.Context, volumeID string) (R
 		return report, report.Err
 	}
 	if chunked {
-		if err := p.attachChunk(volumeID, h); err != nil {
+		attached, err := p.recoverChunk(ctx, volumeID, h)
+		if err != nil {
 			h.backend.SetOperational(false, "chunk layer attach failed: "+err.Error())
 			report.Err = err
 			return report, err
+		}
+		if !attached {
+			// Recovered; I/O stays refused until the layer attaches under
+			// the master's assignment (the authority wait flips it).
+			report.Evidence += "; chunk layer awaiting master authority"
+			h.backend.SetOperational(false, report.Evidence)
+			return report, nil
 		}
 	}
 	h.backend.SetOperational(true, report.Evidence)

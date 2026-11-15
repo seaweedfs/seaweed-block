@@ -10,8 +10,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -19,7 +21,25 @@ import (
 // has no attached chunk layer (another impl, or not recovered yet).
 var ErrNotChunkVolume = errors.New("durable: volume has no chunk layer")
 
-var errProviderClosed = errors.New("durable: provider closed")
+// ErrChunkAwaitingAuthority is returned by the chunk operations for a
+// recovered volume whose layer is not attached yet because the master's
+// assignment is not visible in the projection.
+var ErrChunkAwaitingAuthority = errors.New("durable: chunk layer awaiting master authority")
+
+var (
+	errProviderClosed   = errors.New("durable: provider closed")
+	errChunkNoAuthority = errors.New("durable: projection carries no master authority for the chunk layer")
+)
+
+const (
+	// chunkAuthorityPoll is how often a volume awaiting authority checks
+	// the projection.
+	chunkAuthorityPoll = 20 * time.Millisecond
+	// chunkAttachTimeout bounds one deferred attach attempt; a failed
+	// attempt is retried after chunkAttachRetry.
+	chunkAttachTimeout = 30 * time.Second
+	chunkAttachRetry   = time.Second
+)
 
 // chunkLineage is the authority a chunk layer publishes under: the
 // projection identity at attach time. Every capture admission requires the
@@ -30,19 +50,94 @@ type chunkLineage struct {
 	epoch, endpoint     uint64
 }
 
-// attachChunk attaches the chunk layer after a successful Recover. The
-// caller (RecoverVolume) holds h.attachMu and is registered with Close.
-// A fresh volume starts from the remote HEAD; an existing local volume
-// stays authoritative. The manifest epoch is the master-assigned epoch
-// from the projection, held by the layer separately from the frontend
-// Identity.
-func (p *DurableProvider) attachChunk(volumeID string, h *volHandle) error {
+// chunkAuthority: the projection names this volume, is healthy and carries
+// a master-assigned epoch. Before the master's assignment is applied (the
+// host blocks it until local recovery is done) the projection has epoch 0
+// and is not healthy; a layer is never attached under that.
+func chunkAuthority(proj frontend.Projection, volumeID string) bool {
+	return proj.VolumeID == volumeID && proj.Healthy && proj.Epoch > 0
+}
+
+// recoverChunk runs after a successful local Recover. It attaches the
+// layer when the projection already carries master authority and reports
+// true. Otherwise it starts the volume's authority wait (which attaches
+// as soon as the assignment is applied) and reports false: the volume is
+// recovered but stays non-operational until then. The caller holds
+// h.attachMu and is registered with Close.
+func (p *DurableProvider) recoverChunk(ctx context.Context, volumeID string, h *volHandle) (bool, error) {
+	err := p.attachChunk(ctx, volumeID, h)
+	if errors.Is(err, errChunkNoAuthority) {
+		p.startChunkAuthorityWait(volumeID, h)
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// startChunkAuthorityWait starts at most one authority wait per volume,
+// registered with Close like a recovery.
+func (p *DurableProvider) startChunkAuthorityWait(volumeID string, h *volHandle) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed || h.awaitingAuthority {
+		return
+	}
+	h.awaitingAuthority = true
+	p.inflight.Add(1)
+	go p.chunkAuthorityWait(volumeID, h)
+}
+
+func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle) {
+	defer p.inflight.Done()
+	defer func() {
+		p.mu.Lock()
+		h.awaitingAuthority = false
+		p.mu.Unlock()
+	}()
+	t := time.NewTicker(chunkAuthorityPoll)
+	defer t.Stop()
+	for {
+		select {
+		case <-p.closeCtx.Done():
+			return
+		case <-t.C:
+		}
+		if !chunkAuthority(p.view.Projection(), volumeID) {
+			continue
+		}
+		h.attachMu.Lock()
+		ctx, cancel := context.WithTimeout(p.closeCtx, chunkAttachTimeout)
+		err := p.attachChunk(ctx, volumeID, h)
+		cancel()
+		if err == nil {
+			h.backend.SetOperational(true, "chunk layer attached under master authority")
+		}
+		h.attachMu.Unlock()
+		switch {
+		case err == nil, errors.Is(err, errProviderClosed):
+			return
+		case errors.Is(err, errChunkNoAuthority):
+			continue
+		}
+		log.Printf("durable: chunk layer attach for volume=%s: %v (retrying)", volumeID, err)
+		select {
+		case <-p.closeCtx.Done():
+			return
+		case <-time.After(chunkAttachRetry):
+		}
+	}
+}
+
+// attachChunk attaches the chunk layer once, under the projection's
+// master authority, then retires the fresh marker. The caller holds
+// h.attachMu and is registered with Close. ctx bounds the attach's remote
+// calls (with provider Close); it does not bound the attached layer.
+func (p *DurableProvider) attachChunk(ctx context.Context, volumeID string, h *volHandle) error {
 	p.mu.Lock()
 	layer := h.chunk
 	p.mu.Unlock()
 	if layer == nil {
 		var err error
-		if layer, err = p.newChunkLayer(volumeID, h); err != nil {
+		if layer, err = p.newChunkLayer(ctx, volumeID, h); err != nil {
 			return err
 		}
 		p.mu.Lock()
@@ -71,22 +166,28 @@ func (p *DurableProvider) attachChunk(volumeID string, h *volHandle) error {
 	return nil
 }
 
-func (p *DurableProvider) newChunkLayer(volumeID string, h *volHandle) (storage.ChunkLayer, error) {
+func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h *volHandle) (storage.ChunkLayer, error) {
 	ws, ok := h.storage.(*storage.WALStore)
 	if !ok {
 		return nil, fmt.Errorf("durable: %s storage is %T, not a walstore", ImplWALStoreChunk, h.storage)
 	}
-	remote, err := p.cfg.ChunkRemoteFor(volumeID)
+	proj := p.view.Projection()
+	if !chunkAuthority(proj, volumeID) {
+		return nil, errChunkNoAuthority
+	}
+	inner, err := p.cfg.ChunkRemoteFor(volumeID)
 	if err != nil {
 		return nil, fmt.Errorf("durable: chunk remote for %s: %w", volumeID, err)
 	}
-	proj := p.view.Projection()
 	lin := chunkLineage{volumeID: proj.VolumeID, replicaID: proj.ReplicaID, epoch: proj.Epoch, endpoint: proj.EndpointVersion}
 	holder := p.cfg.ChunkHolder
 	if holder == "" {
 		holder = proj.ReplicaID
 	}
-	return storage.AttachChunkLayer(ws, closeBoundRemote{remote, p.closeCtx}, storage.ChunkLayerConfig{
+	remote := &closeBoundRemote{ChunkRemote: inner, done: p.closeCtx}
+	remote.setAttach(ctx) // the attach's calls also end with the caller's ctx
+	defer remote.setAttach(nil)
+	return storage.AttachChunkLayer(ws, remote, storage.ChunkLayerConfig{
 		ChunkBlocks:     p.cfg.ChunkBlocks,
 		Epoch:           lin.epoch,
 		Holder:          holder,
@@ -108,43 +209,69 @@ func (p *DurableProvider) newChunkLayer(volumeID string, h *volHandle) (storage.
 }
 
 // closeBoundRemote ends every remote call when the provider closes, so a
-// shutdown never waits on the remote for an attach or a cut.
+// shutdown never waits on the remote for an attach or a cut. While an
+// attach runs, its calls also end with the attach caller's context.
 type closeBoundRemote struct {
 	storage.ChunkRemote
 	done context.Context
+
+	mu     sync.Mutex
+	attach context.Context
 }
 
-func (r closeBoundRemote) bind(ctx context.Context) (context.Context, func()) {
+func (r *closeBoundRemote) setAttach(ctx context.Context) {
+	r.mu.Lock()
+	r.attach = ctx
+	r.mu.Unlock()
+}
+
+func (r *closeBoundRemote) bind(ctx context.Context) (context.Context, func()) {
+	r.mu.Lock()
+	attach := r.attach
+	r.mu.Unlock()
 	c, cancel := context.WithCancel(ctx)
-	stop := context.AfterFunc(r.done, cancel)
-	return c, func() { stop(); cancel() }
+	stops := []func() bool{context.AfterFunc(r.done, cancel)}
+	if attach != nil {
+		stops = append(stops, context.AfterFunc(attach, cancel))
+	}
+	// AfterFunc runs its function in a new goroutine; a context that has
+	// already ended must cancel before the call starts, not after it.
+	if r.done.Err() != nil || (attach != nil && attach.Err() != nil) {
+		cancel()
+	}
+	return c, func() {
+		for _, stop := range stops {
+			stop()
+		}
+		cancel()
+	}
 }
 
-func (r closeBoundRemote) Put(ctx context.Context, key string, data []byte) error {
+func (r *closeBoundRemote) Put(ctx context.Context, key string, data []byte) error {
 	c, end := r.bind(ctx)
 	defer end()
 	return r.ChunkRemote.Put(c, key, data)
 }
 
-func (r closeBoundRemote) Get(ctx context.Context, key string) ([]byte, error) {
+func (r *closeBoundRemote) Get(ctx context.Context, key string) ([]byte, error) {
 	c, end := r.bind(ctx)
 	defer end()
 	return r.ChunkRemote.Get(c, key)
 }
 
-func (r closeBoundRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
+func (r *closeBoundRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
 	c, end := r.bind(ctx)
 	defer end()
 	return r.ChunkRemote.GetHead(c)
 }
 
-func (r closeBoundRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVersion, next storage.ChunkHead) (uint64, error) {
+func (r *closeBoundRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVersion, next storage.ChunkHead) (uint64, error) {
 	c, end := r.bind(ctx)
 	defer end()
 	return r.ChunkRemote.CASHead(c, expected, next)
 }
 
-func (r closeBoundRemote) Delete(ctx context.Context, key string) error {
+func (r *closeBoundRemote) Delete(ctx context.Context, key string) error {
 	c, end := r.bind(ctx)
 	defer end()
 	return r.ChunkRemote.Delete(c, key)
@@ -233,8 +360,11 @@ func (p *DurableProvider) chunkLayer(volumeID string) (storage.ChunkLayer, error
 		return nil, ErrVolumeNotOpen
 	}
 	p.mu.Lock()
-	layer := h.chunk
+	layer, awaiting := h.chunk, h.awaitingAuthority
 	p.mu.Unlock()
+	if layer == nil && awaiting {
+		return nil, ErrChunkAwaitingAuthority
+	}
 	if layer == nil {
 		return nil, ErrNotChunkVolume
 	}

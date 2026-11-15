@@ -501,3 +501,33 @@ func TestWALStoreChunk_CloseWhileAwaitingAuthority(t *testing.T) {
 		t.Fatalf("chunk layer reachable after Close: %v", err)
 	}
 }
+
+// Close settles a deferred attach that is in flight: the authority wait
+// is registered like a recovery.
+func TestWALStoreChunk_CloseSettlesDeferredAttach(t *testing.T) {
+	g := newGated(storage.NewMemChunkRemote())
+	g.holdGetHead = make(chan struct{})
+	t.Cleanup(g.release)
+	view := newStubView(frontend.Projection{VolumeID: "v1", ReplicaID: "r1"})
+	p := chunkProvider(t, t.TempDir(), g, view, 0)
+	if _, err := p.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.RecoverVolume(context.Background(), "v1"); err != nil {
+		t.Fatal(err)
+	}
+	view.set(healthyProj(frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 4, EndpointVersion: 2}))
+	waitEntered(t, g, "gethead") // the deferred attach is reading HEAD
+	closed := make(chan error, 1)
+	go func() { closed <- p.Close() }()
+	select {
+	case <-closed:
+		t.Fatal("Close returned while a deferred attach was still in flight")
+	case <-time.After(200 * time.Millisecond):
+	}
+	g.release()
+	_ = recvErr(t, closed, "Close")
+	if _, err := p.CaptureVolume(context.Background(), "v1"); !errors.Is(err, durable.ErrVolumeNotOpen) {
+		t.Fatalf("chunk layer reachable after Close: %v", err)
+	}
+}
