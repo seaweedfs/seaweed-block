@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/engine"
 	"github.com/seaweedfs/seaweed-block/core/recovery"
 	"github.com/seaweedfs/seaweed-block/core/replication/component"
+	"github.com/seaweedfs/seaweed-block/core/storage"
 	"github.com/seaweedfs/seaweed-block/core/transport"
 )
 
@@ -442,13 +444,27 @@ func TestDualLane_EngineDrivenRebuild_WithPushLiveDuringSession(t *testing.T) {
 // / 9f62ebe / 291e652 / 3495a12.
 func TestPillar3Slice2_EngineDriven_SameLBAArbitration(t *testing.T) {
 	component.RunSubstrate(t, "memorywal", component.MemoryWAL, func(t *testing.T, c *component.Cluster) {
+		const seedN = 12
+		overwriteLBAs := []uint32{3, 5, 7}
+		// The discriminating LBA: its BASE frame is read with the old value
+		// A, held, and released only after the newer WAL write B for the
+		// same LBA has been applied on the replica. Arbitration must keep B.
+		// Holding the base lane also keeps the session from sealing its
+		// recovery cut (it seals only after base completes), so the
+		// overwrites ship in-session instead of racing the cut, which made
+		// this test flaky when a 12-LBA rebuild finished first.
+		hold := &staleBaseHold{lba: 5, captured: make(chan struct{}), release: make(chan struct{})}
+		releaseHold := sync.OnceFunc(func() { close(hold.release) })
+		t.Cleanup(releaseHold)
+
 		c.WithReplicas(1).
 			WithEngineDrivenRecovery().
 			WithDualLaneRecovery().
+			WithPrimaryStorageWrap(func(inner storage.LogicalStorage) storage.LogicalStorage {
+				hold.LogicalStorage = inner
+				return hold
+			}).
 			Start()
-
-		const seedN = 12
-		overwriteLBAs := []uint32{3, 5, 7}
 
 		c.PrimaryWriteN(seedN)
 		c.PrimarySync()
@@ -468,20 +484,7 @@ func TestPillar3Slice2_EngineDriven_SameLBAArbitration(t *testing.T) {
 		if !ok || br == nil {
 			t.Fatal("BlockExecutor missing dual-lane PrimaryBridge")
 		}
-		// Hold the sender at its pre-barrier point: base copy and backlog
-		// drain done, recovery cut not yet sealed, session live. With a
-		// 12-LBA backlog that window is microseconds wide, so without the
-		// hold the overwrites below raced the cut and got the documented
-		// ErrSinkBarrierSealed ("retain for replay") instead of shipping
-		// in-session. Installed before the probe that starts the rebuild.
-		reached, release := make(chan struct{}), make(chan struct{})
-		var reachedOnce sync.Once
-		br.SetPreBarrierHook(func(recovery.ReplicaID) {
-			reachedOnce.Do(func() { close(reached) })
-			<-release
-		})
-		releaseHold := sync.OnceFunc(func() { close(release) })
-		t.Cleanup(releaseHold)
+		hold.armed.Store(true) // only the rebuild's base read of LBA 5 is held
 
 		c.DriveProbeResult(0, adapter.ProbeResult{
 			ReplicaID:         "replica-0",
@@ -494,12 +497,15 @@ func TestPillar3Slice2_EngineDriven_SameLBAArbitration(t *testing.T) {
 		})
 
 		select {
-		case <-reached:
+		case <-hold.captured:
 		case <-time.After(8 * time.Second):
-			t.Fatalf("sender never reached the pre-barrier point; cmd=%v trace=%v", a.CommandLog(), a.Trace())
+			t.Fatalf("base lane never read lba %d; cmd=%v trace=%v", hold.lba, a.CommandLog(), a.Trace())
 		}
-		if !br.HasActiveSession(coordRID) {
-			t.Fatal("session not live-ready at the pre-barrier hold")
+		// The session cannot seal while the base lane is held, so waiting
+		// for live-ready here is bounded by the session's own progress,
+		// not by a race with its completion.
+		if !bridgeLiveReadyOrClosed(br, coordRID) {
+			t.Fatal("session never became live-ready while its base lane was held")
 		}
 
 		// Live-overwrite the SAME LBAs as the backlog. Each Write goes
@@ -524,7 +530,20 @@ func TestPillar3Slice2_EngineDriven_SameLBAArbitration(t *testing.T) {
 			}
 			bRefs[lba] = data
 		}
-		releaseHold() // the overwrites shipped in-session; let the sender seal and barrier
+		// The newer WAL value must be on the replica BEFORE the stale base
+		// frame is released, so the release below delivers an older BASE
+		// frame after a newer WAL write for the same LBA.
+		deadlineB := time.Now().Add(5 * time.Second)
+		for {
+			if rd, err := c.Replica(0).Store.Read(hold.lba); err == nil && bytes.Equal(rd, bRefs[hold.lba]) {
+				break
+			}
+			if time.Now().After(deadlineB) {
+				t.Fatalf("WAL write for lba %d did not reach the replica while its base frame was held", hold.lba)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		releaseHold() // deliver the stale BASE frame (old value A) for lba 5
 
 		// Wait for engine's command loop to close: StartRebuild emitted
 		// AND SessionClosedCompleted observed in the adapter's Trace.
@@ -591,6 +610,31 @@ func TestPillar3Slice2_EngineDriven_SameLBAArbitration(t *testing.T) {
 			}
 		}
 	})
+}
+
+// staleBaseHold wraps the primary store and, once armed, holds the FIRST
+// Read of one LBA after capturing its bytes: the base frame built from that
+// Read carries the value as of the read and reaches the replica only after
+// release. Other reads pass through.
+type staleBaseHold struct {
+	storage.LogicalStorage
+	lba      uint32
+	armed    atomic.Bool
+	once     sync.Once
+	captured chan struct{}
+	release  chan struct{}
+}
+
+func (s *staleBaseHold) Read(lba uint32) ([]byte, error) {
+	data, err := s.LogicalStorage.Read(lba)
+	if lba == s.lba && s.armed.Load() {
+		data = append([]byte(nil), data...) // the captured (soon stale) bytes
+		s.once.Do(func() {
+			close(s.captured)
+			<-s.release
+		})
+	}
+	return data, err
 }
 
 // pushRaceOutcome reports the PushLiveWrite errors that the production

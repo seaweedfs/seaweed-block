@@ -119,11 +119,6 @@ type Sender struct {
 	liveReady atomic.Bool
 
 	onDurableAck DurableAckCallback
-
-	// preBarrierHook, when set (tests only, via PrimaryBridge.SetPreBarrierHook),
-	// runs after base + backlog drain complete and before SealBeforeBarrier:
-	// the session is live-ready and the recovery cut is not yet made.
-	preBarrierHook func()
 }
 
 // ackOrResult is the channel payload from the reader goroutine to
@@ -568,9 +563,6 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, frontierHint uint6
 		return 0, wErr
 	}
 
-	if s.preBarrierHook != nil {
-		s.preBarrierHook()
-	}
 	if sealer, ok := s.sink.(preBarrierSealer); ok {
 		if err := sealer.SealBeforeBarrier(); err != nil {
 			return 0, err
