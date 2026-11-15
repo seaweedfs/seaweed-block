@@ -183,7 +183,7 @@ func (h *Host) applyPromotionEvidenceGate(snap *authority.ClusterSnapshot) (int,
 				slot.ReadyForPrimary = false
 			}
 		}
-		if enabledCandidate && result.CurrentKnown && !result.Current.Ready && primaryBootGraceHolds(h.ctrl, vol.VolumeID, vol.Slots[currentIdx]) {
+		if enabledCandidate && result.CurrentKnown && !result.Current.Ready && h.primaryBootGraceHolds(vol.VolumeID, withServerFacts(vol.Slots[currentIdx], serverIndex)) {
 			h.log.Printf("blockmaster: promotion gate volume=%s current=%s not ready but in boot grace; no direct reassign", vol.VolumeID, vol.Authority.ReplicaID)
 		} else if enabledCandidate && result.CurrentKnown && !result.Current.Ready {
 			current := &vol.Slots[currentIdx]
@@ -259,6 +259,13 @@ func (h *Host) applyUnsupportedPromotionEvidenceGate(placements []lifecycle.Plac
 			}
 		}
 		if enabledCandidate && (!result.CurrentKnown || !result.Current.Ready) {
+			// Unsupported does not mean the current primary is unhealthy:
+			// a different slot may be stale. Judge the current primary
+			// from its own fresh heartbeat slot, never from placement.
+			if cur, ok := h.freshCurrentSlot(vol.VolumeID, current.ReplicaID); ok && h.primaryBootGraceHolds(vol.VolumeID, cur) {
+				h.log.Printf("blockmaster: promotion gate unsupported volume=%s current=%s not ready but in boot grace; no direct reassign", vol.VolumeID, current.ReplicaID)
+				continue
+			}
 			if target, ok := chooseAllowedPromotionTarget(vol, result, allowed); ok {
 				h.log.Printf("blockmaster: promotion gate unsupported volume=%s direct_reassign=%s current=%s", vol.VolumeID, target.ReplicaID, current.ReplicaID)
 				directAsks = append(directAsks, authority.AssignmentAsk{
@@ -565,13 +572,31 @@ func (h *Host) assignmentAskAlreadyCurrent(volumeID, replicaID, dataAddr, ctrlAd
 		line.CtrlAddr == ctrlAddr
 }
 
-// primaryBootGraceHolds reports whether the current primary's slot is
-// placeable by its own report and inside its boot grace (#128): a
-// restarted primary that is merely not ready yet. An explicit unhealthy
+// primaryBootGraceHolds reports whether the current primary is a
+// restarted primary that is merely not ready yet: placeable by its own
+// fresh report and inside its boot grace (#128). An explicit unhealthy
 // report (unreachable, ineligible, withdrawn) never holds.
-func primaryBootGraceHolds(ctrl *authority.TopologyController, volumeID string, current authority.ReplicaCandidate) bool {
-	if ctrl == nil || !current.Reachable || !current.Eligible || current.Withdrawn {
+func (h *Host) primaryBootGraceHolds(volumeID string, current authority.ReplicaCandidate) bool {
+	if h.ctrl == nil {
 		return false
 	}
-	return ctrl.PrimaryInBootGrace(volumeID, current)
+	return h.ctrl.PrimaryBootGraceHolds(volumeID, current)
+}
+
+// freshCurrentSlot returns the replica's own fresh heartbeat slot from
+// the observation store (server facts folded in).
+func (h *Host) freshCurrentSlot(volumeID, replicaID string) (authority.ReplicaCandidate, bool) {
+	if h.obs == nil {
+		return authority.ReplicaCandidate{}, false
+	}
+	return h.obs.Store().Snapshot().FreshSlotCandidate(volumeID, replicaID)
+}
+
+// withServerFacts folds the reporting server's reachability and
+// eligibility into a slot; a server absent from the index is neither.
+func withServerFacts(slot authority.ReplicaCandidate, servers map[string]authority.ServerObservation) authority.ReplicaCandidate {
+	srv, ok := servers[slot.ServerID]
+	slot.Reachable = slot.Reachable && ok && srv.Reachable
+	slot.Eligible = slot.Eligible && ok && srv.Eligible
+	return slot
 }

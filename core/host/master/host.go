@@ -179,10 +179,14 @@ func New(cfg Config) (*Host, error) {
 
 	holder := &publisherHolder{}
 	ctrlCfg := cfg.ControllerConfig
-	if ctrlCfg.PrimaryBootGrace == 0 && cfg.Freshness.FreshnessWindow > 0 {
+	if w := cfg.Freshness.FreshnessWindow; w > 0 && (ctrlCfg.PrimaryBootGrace == 0 || ctrlCfg.PrimaryBootGrace > w) {
 		// A restarted primary may stay not-ready for at most the
-		// window in which its observations are trusted (#128).
-		ctrlCfg.PrimaryBootGrace = cfg.Freshness.FreshnessWindow
+		// window in which its observations are trusted (#128); a
+		// larger configured grace is capped, never widened.
+		if ctrlCfg.PrimaryBootGrace > w {
+			lg.Printf("blockmaster: primary boot grace %s capped at freshness window %s", ctrlCfg.PrimaryBootGrace, w)
+		}
+		ctrlCfg.PrimaryBootGrace = w
 	}
 	ctrl := authority.NewTopologyController(ctrlCfg, holder)
 
