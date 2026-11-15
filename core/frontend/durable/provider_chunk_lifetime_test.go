@@ -395,3 +395,109 @@ func TestWALStoreChunk_ConcurrentRecoverAttachesOnce(t *testing.T) {
 		t.Fatalf("capture after concurrent recovery: %v", err)
 	}
 }
+
+// The caller's recovery deadline governs the attach's first remote call,
+// with no Close and no hold release.
+func TestWALStoreChunk_RecoverHonoursCallerDeadline(t *testing.T) {
+	g := newGated(storage.NewMemChunkRemote())
+	g.holdGetHead = make(chan struct{})
+	g.honourCtx = true
+	t.Cleanup(g.release)
+	p := chunkProvider(t, t.TempDir(), g, v1View(), 0)
+	if _, err := p.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	recErr := make(chan error, 1)
+	go func() { _, err := p.RecoverVolume(ctx, "v1"); recErr <- err }()
+	waitEntered(t, g, "gethead")
+	if err := recvErr(t, recErr, "RecoverVolume past its caller deadline"); err == nil {
+		t.Fatal("RecoverVolume succeeded although its deadline expired during attach")
+	}
+}
+
+// An attached layer outlives the recovery context: main cancels it right
+// after recovery, and captures must keep working.
+func TestWALStoreChunk_LayerOutlivesRecoveryContext(t *testing.T) {
+	remote := storage.NewMemChunkRemote()
+	p := chunkProvider(t, t.TempDir(), remote, v1View(), 0)
+	s, err := p.EnsureStorage("v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	if _, err := p.RecoverVolume(ctx, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	if _, err := s.Write(1, block(1)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.CaptureVolume(context.Background(), "v1"); err != nil {
+		t.Fatalf("capture after the recovery context ended: %v", err)
+	}
+}
+
+// Recovery before the master's assignment is visible does not bind the
+// layer to epoch 0: once the projection carries the assignment, the
+// volume publishes under it.
+func TestWALStoreChunk_AttachWaitsForMasterAuthority(t *testing.T) {
+	remote := storage.NewMemChunkRemote()
+	view := newStubView(frontend.Projection{VolumeID: "v1", ReplicaID: "r1"}) // pre-assignment
+	p := chunkProvider(t, t.TempDir(), remote, view, 0)
+	s, err := p.EnsureStorage("v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.RecoverVolume(context.Background(), "v1"); err != nil {
+		t.Fatalf("RecoverVolume before assignment: %v", err)
+	}
+	if _, err := s.Write(1, block(1)); err != nil {
+		t.Fatal(err)
+	}
+	// Healthy but with no master-assigned epoch is not authority either.
+	view.set(healthyProj(frontend.Identity{VolumeID: "v1", ReplicaID: "r1"}))
+	time.Sleep(150 * time.Millisecond)
+	if _, err := p.CaptureVolume(context.Background(), "v1"); err == nil {
+		t.Fatal("capture succeeded under a healthy projection with epoch 0")
+	}
+	if head, _ := remote.GetHead(context.Background()); head.Gen != 0 {
+		t.Fatalf("published under epoch 0: HEAD gen %d epoch %d", head.Gen, head.Epoch)
+	}
+	view.set(healthyProj(frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 4, EndpointVersion: 2}))
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		_, err = p.CaptureVolume(context.Background(), "v1")
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("capture never succeeded under the assigned epoch: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if head, _ := remote.GetHead(context.Background()); head.Epoch != 4 {
+		t.Fatalf("HEAD epoch %d, want the assigned 4", head.Epoch)
+	}
+}
+
+// Close while a volume still waits for authority returns and leaves no
+// layer behind.
+func TestWALStoreChunk_CloseWhileAwaitingAuthority(t *testing.T) {
+	view := newStubView(frontend.Projection{VolumeID: "v1", ReplicaID: "r1"})
+	p := chunkProvider(t, t.TempDir(), storage.NewMemChunkRemote(), view, 0)
+	if _, err := p.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.RecoverVolume(context.Background(), "v1"); err != nil {
+		t.Fatal(err)
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- p.Close() }()
+	_ = recvErr(t, closed, "Close")
+	view.set(healthyProj(frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 4, EndpointVersion: 2}))
+	if _, err := p.CaptureVolume(context.Background(), "v1"); !errors.Is(err, durable.ErrVolumeNotOpen) {
+		t.Fatalf("chunk layer reachable after Close: %v", err)
+	}
+}
