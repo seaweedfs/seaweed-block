@@ -64,6 +64,7 @@ type IOCommand struct {
 	SLBA   uint64
 	NLB    uint32
 	Data   []byte
+	FUA    bool // Force Unit Access: sync this write before completing it.
 }
 
 // IOResult is the handler-level outcome of one IO command.
@@ -269,6 +270,11 @@ func (h *IOHandler) write(ctx context.Context, cmd IOCommand) IOResult {
 	}
 	if rec, ok := h.backend.(targetWriteRecorder); ok {
 		rec.RecordTargetWrite(n, time.Since(start))
+	}
+	if cmd.FUA {
+		if err := h.backend.Sync(ctx); err != nil {
+			return mapBackendError(err, "FUA sync")
+		}
 	}
 	return IOResult{SCT: SCTGeneric, SC: SCSuccess}
 }
