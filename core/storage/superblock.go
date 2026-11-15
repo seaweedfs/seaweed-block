@@ -11,10 +11,11 @@ import (
 // File-format identity. Bumped only on incompatible layout changes.
 //
 // Version history:
-//   1: initial layout (magic+version+geometry+WAL state+CreatedAt)
-//   2: T3a Addendum A — added ImplKind + ImplVersion at end of
-//      layout. Opening a v1 store with v2 code returns
-//      errSuperblockBadVer (one-way bump; no compat read path).
+//
+//	1: initial layout (magic+version+geometry+WAL state+CreatedAt)
+//	2: T3a Addendum A â€” added ImplKind + ImplVersion at end of
+//	   layout. Opening a v1 store with v2 code returns
+//	   errSuperblockBadVer (one-way bump; no compat read path).
 const (
 	superblockSize    = 4096
 	superblockMagic   = "SWBK"
@@ -24,7 +25,7 @@ const (
 // ImplKind self-identifies which LogicalStorage implementation
 // owns this file. DurableProvider compares the stored ImplKind
 // against the selector at Open time and rejects mismatches with
-// errSuperblockImplMismatch — prevents silently opening a
+// errSuperblockImplMismatch â€” prevents silently opening a
 // walstore file as smartwal (or vice versa), which would then
 // attempt an incompatible format parse. ImplKindUnset (0) on
 // disk means the file predates T3a and is a format error.
@@ -38,9 +39,10 @@ const (
 
 // WALStoreImplVersion is the per-impl schema version for walstore
 // files. Independent from superblockVersion (which is the shared
-// superblock-format version) — walstore and smartwal evolve their
+// superblock-format version) â€” walstore and smartwal evolve their
 // WAL+extent layouts on independent clocks.
-const WALStoreImplVersion uint32 = 1
+// Version 2 appends per-4KiB extent CRC32C; v1 remains readable without C12.
+const WALStoreImplVersion uint32 = 2
 
 var (
 	errSuperblockNotOurs     = errors.New("storage: not a store file (bad magic)")
@@ -72,7 +74,7 @@ type superblock struct {
 	WALCheckpointLSN uint64 // last LSN durably present in extent
 	CreatedAt        uint64 // unix nanoseconds
 
-	// T3a Addendum A Addition 2 — impl self-identity.
+	// T3a Addendum A Addition 2 â€” impl self-identity.
 	// ImplKind is the store implementation (walstore vs smartwal);
 	// ImplVersion is the per-impl schema version. DurableProvider
 	// compares stored ImplKind against the selector at Open time
@@ -83,7 +85,7 @@ type superblock struct {
 
 // newSuperblock constructs a superblock with defaults and a fresh
 // UUID. Caller-supplied geometry overrides defaults. The caller
-// MUST pass a valid ImplKind (WALStore / SmartWAL) — unset (0)
+// MUST pass a valid ImplKind (WALStore / SmartWAL) â€” unset (0)
 // rejected at validate() time so no file can ever persist with
 // unidentified impl.
 func newSuperblock(volumeSize uint64, opts createOptions) (superblock, error) {
@@ -158,7 +160,7 @@ func (sb *superblock) writeTo(w io.Writer) (int64, error) {
 	off += 8
 	le.PutUint64(buf[off:], sb.CreatedAt)
 	off += 8
-	// T3a Addendum A Addition 2 — ImplKind + ImplVersion.
+	// T3a Addendum A Addition 2 â€” ImplKind + ImplVersion.
 	buf[off] = uint8(sb.ImplKind)
 	off++
 	// 3 bytes reserved for future ImplKind expansion / alignment.
@@ -266,7 +268,7 @@ type createOptions struct {
 	ExtentSize uint32 // default 64KB
 	WALSize    uint64 // default 64MB
 
-	// T3a Addendum A — impl self-identity. Required (no default);
+	// T3a Addendum A â€” impl self-identity. Required (no default);
 	// newSuperblock rejects ImplKindUnset (0).
 	ImplKind    ImplKind
 	ImplVersion uint32 // default WALStoreImplVersion
