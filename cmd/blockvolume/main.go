@@ -544,12 +544,14 @@ func run(f flags) int {
 			WALRecoveryTestDisableFlusher: f.durableWALRecoveryTestDisableFlusher,
 		}
 		var chunkErr error
+		var chunk chunkWiring
 		if cfg.Impl == durable.ImplWALStoreChunk {
-			var closeChunkClient func() error
-			cfg.ChunkRemoteFor, closeChunkClient, chunkErr = newChunkRemoteFor(f.chunk)
+			chunk, chunkErr = newChunkWiring(f.chunk)
 			cfg.ChunkCaptureInterval = f.chunk.captureInterval
 			if chunkErr == nil {
-				defer closeChunkClient()
+				cfg.ChunkRemoteFor = chunk.remoteFor
+				cfg.ChunkAttachCheck = chunkAttachCheck(chunk.catalog)
+				defer chunk.close()
 			}
 		}
 		dp, err := durable.NewDurableProvider(cfg, h.ProjectionView())

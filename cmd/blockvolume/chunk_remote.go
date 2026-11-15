@@ -6,6 +6,7 @@ package main
 // given by --chunk-filer; chunk bytes are needles on its volume servers.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"path"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -49,9 +51,17 @@ func validateChunkFlags(f flags) error {
 	return nil
 }
 
-// newChunkRemoteFor dials the filer (lazily) and returns the provider's
-// ChunkRemoteFor plus the client's closer.
-func newChunkRemoteFor(c chunkFlags) (func(volumeID string) (storage.ChunkRemote, error), func() error, error) {
+// chunkWiring is what --durable-impl=walstore-chunk dials once: the
+// provider's per-volume remotes, the catalog under the same base (VOLUME
+// entries, snapshots) and the client's closer.
+type chunkWiring struct {
+	remoteFor func(volumeID string) (storage.ChunkRemote, error)
+	catalog   *chunkstore.Catalog
+	close     func() error
+}
+
+// newChunkWiring dials the filer (lazily).
+func newChunkWiring(c chunkFlags) (chunkWiring, error) {
 	client, err := chunkstore.DialSWFS(chunkstore.SWFSConfig{
 		FilerGRPC:   c.filer,
 		Collection:  c.collection,
@@ -59,15 +69,35 @@ func newChunkRemoteFor(c chunkFlags) (func(volumeID string) (storage.ChunkRemote
 		AssignPath:  c.path,
 	})
 	if err != nil {
-		return nil, nil, err
+		return chunkWiring{}, err
 	}
-	return func(volumeID string) (storage.ChunkRemote, error) {
-		root, err := chunkVolumeRoot(c.path, volumeID)
-		if err != nil {
-			return nil, err
-		}
-		return chunkstore.NewSWFSChunkRemote(client, root)
-	}, client.Close, nil
+	cat, err := chunkstore.NewCatalog(client, c.path)
+	if err != nil {
+		_ = client.Close()
+		return chunkWiring{}, err
+	}
+	return chunkWiring{
+		remoteFor: func(volumeID string) (storage.ChunkRemote, error) {
+			root, err := chunkVolumeRoot(c.path, volumeID)
+			if err != nil {
+				return nil, err
+			}
+			return chunkstore.NewSWFSChunkRemote(client, root)
+		},
+		catalog: cat,
+		close:   client.Close,
+	}, nil
+}
+
+// chunkAttachCheck applies the VOLUME entry's attach rules before the chunk
+// layer attaches (B9 W2 §4.2): create VOLUME from the local geometry when
+// it is missing, refuse geometry_mismatch, and refuse fork_incomplete for a
+// fork whose HEAD is not written yet.
+func chunkAttachCheck(cat *chunkstore.Catalog) func(context.Context, string, durable.ChunkGeometry) error {
+	return func(ctx context.Context, volumeID string, g durable.ChunkGeometry) error {
+		_, err := cat.EnsureVolume(ctx, volumeID, chunkstore.Geometry{NumBlocks: g.NumBlocks, BlockSize: g.BlockSize, ChunkBlocks: g.ChunkBlocks})
+		return err
+	}
 }
 
 // chunkVolumeRoot is <base>/<volumeID>; the volume ID must be one plain
