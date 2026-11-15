@@ -144,6 +144,15 @@ func (g *Collector) Run(ctx context.Context) (result GCResult, err error) {
 			}
 			after = next
 		}
+		attempts, e := g.snapshotAttemptHeads(ctx, vol, start)
+		if e != nil {
+			return result, e
+		}
+		for _, head := range attempts {
+			if e = addHead(head); e != nil {
+				return result, e
+			}
+		}
 		intents, e := r.ListIntents(ctx)
 		if e != nil {
 			return result, e

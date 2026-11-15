@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/filerpb"
-	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 func snapshotDir(t *testing.T, f *fakeFiler, vol, name string) {
@@ -62,5 +61,4 @@ func TestGC_CopySweepClaimsSnapshotAttemptBeforeRelease(t *testing.T) {
 	if err != nil || info.Head().Gen != h.Gen {
 		t.Fatalf("new snapshot: %+v %v", info, err)
 	}
-	_ = storage.ChunkHead{}
 }
