@@ -148,7 +148,9 @@ type ProviderConfig struct {
 	// disables the timer.
 	ChunkCaptureInterval time.Duration
 	// ChunkDirtyThreshold: an automatic cut is due once this many chunks
-	// are dirty since the last HEAD. Zero disables the threshold. With
+	// are dirty since the last HEAD; it bounds one cut's size rather than
+	// keeping the remote fresh (the remote holds snapshots). Zero disables
+	// the threshold. With
 	// both zero there are no automatic cuts (only CaptureVolume and
 	// MakeVolumeRemoteDurable).
 	ChunkDirtyThreshold int
