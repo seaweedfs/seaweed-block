@@ -169,9 +169,15 @@ func TestIntegration_OpsChunkGC_RealMasterAndStore(t *testing.T) {
 	if got, err := remote.Get(ctx, "orphan"); err != nil || !bytes.Equal(got, data) {
 		t.Fatalf("preview deleted blob: %q %v", got, err)
 	}
+	if got, err := s.Get(ctx, preview.WouldDelete[0].FID); err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("raw orphan before delete: %q %v", got, err)
+	}
 	applied := call(true)
 	if applied.Reclaimed != 1 || applied.ExpiredIntents != 0 || !applied.MarkSaved {
 		t.Fatalf("apply: %+v", applied)
+	}
+	if _, err := s.Get(ctx, preview.WouldDelete[0].FID); err == nil {
+		t.Fatal("raw orphan needle still readable after DELETE")
 	}
 	if _, err = remote.Get(ctx, "orphan"); err == nil {
 		t.Fatal("orphan still readable")
