@@ -156,6 +156,11 @@ type StorageBackend struct {
 	// admit checks the gate once before the read lock too, so I/O arriving
 	// while a drain waits fails at once instead of queueing behind it.
 	ioMu sync.RWMutex
+	// drain, under drainMu, is closed once the pending StopIO drain has
+	// taken and released ioMu; nil when none is pending. Every StopIO
+	// waits on the same drain, so timed-out retries never pile up waiters.
+	drainMu sync.Mutex
+	drain   chan struct{}
 
 	mu            sync.Mutex
 	closed        bool
@@ -364,15 +369,25 @@ func (b *StorageBackend) SetOperational(ok bool, evidence string) {
 // ErrNotReady (evidence), then waits, bounded by ctx, for the I/O admitted
 // before the stop to finish. After a nil return no I/O admitted before the
 // stop is still running, so nothing can be acknowledged after a cut taken
-// next. On a ctx error I/O stays refused and admitted I/O may still run.
+// next. On a ctx error I/O stays refused and admitted I/O may still run;
+// a later StopIO waits on the same pending drain.
 func (b *StorageBackend) StopIO(ctx context.Context, evidence string) error {
 	b.SetOperational(false, evidence)
-	drained := make(chan struct{})
-	go func() {
-		b.ioMu.Lock()
-		b.ioMu.Unlock() //nolint:staticcheck // an empty critical section: waiting is the point
-		close(drained)
-	}()
+	b.drainMu.Lock()
+	drained := b.drain
+	if drained == nil {
+		drained = make(chan struct{})
+		b.drain = drained
+		go func() {
+			b.ioMu.Lock()
+			b.ioMu.Unlock() //nolint:staticcheck // an empty critical section: waiting is the point
+			b.drainMu.Lock()
+			b.drain = nil
+			b.drainMu.Unlock()
+			close(drained)
+		}()
+	}
+	b.drainMu.Unlock()
 	select {
 	case <-drained:
 		return nil

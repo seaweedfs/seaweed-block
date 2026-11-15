@@ -31,6 +31,7 @@ type fakeChunkControl struct {
 	lastSnap ChunkSnapshotRequest
 	lastMin  uint64
 	deadline time.Duration
+	calls    int
 }
 
 func (f *fakeChunkControl) remember(ctx context.Context) {
@@ -40,23 +41,28 @@ func (f *fakeChunkControl) remember(ctx context.Context) {
 }
 
 func (f *fakeChunkControl) Cut(ctx context.Context, vol string, minLSN uint64) (ChunkCutResponse, error) {
+	f.calls++
 	f.remember(ctx)
 	f.lastMin = minLSN
 	return f.cut, f.err
 }
 func (f *fakeChunkControl) Snapshot(ctx context.Context, vol string, req ChunkSnapshotRequest) (chunkstore.SnapshotInfo, error) {
+	f.calls++
 	f.remember(ctx)
 	f.lastSnap = req
 	return f.snap, f.err
 }
 func (f *fakeChunkControl) ListSnapshots(ctx context.Context, vol string, opts chunkstore.ListOptions) ([]chunkstore.SnapshotInfo, string, error) {
+	f.calls++
 	f.lastOpts = opts
 	return f.list, f.next, f.err
 }
 func (f *fakeChunkControl) DeleteSnapshot(ctx context.Context, vol, name string) (string, error) {
+	f.calls++
 	return f.state, f.err
 }
 func (f *fakeChunkControl) Detach(ctx context.Context, vol string) (ChunkDetachResponse, error) {
+	f.calls++
 	f.remember(ctx)
 	return f.detach, f.err
 }
@@ -265,5 +271,30 @@ func TestStatusServer_ChunkRequestGuards(t *testing.T) {
 	unwired := chunkServer(t, nil, true)
 	if w := serve(t, unwired, http.MethodPost, "/chunk/cut", `{"volumeID":"v1"}`, ""); w.Code != 409 || code(w) != "not_chunk_volume" {
 		t.Fatalf("no chunk control wired: %d %s", w.Code, w.Body)
+	}
+}
+
+// A request body is exactly one JSON object: trailing data refuses the
+// request with bad_request before any operation runs.
+func TestStatusServer_ChunkBodyIsOneJSONObject(t *testing.T) {
+	code := func(w *httptest.ResponseRecorder) string {
+		var b struct {
+			Code string `json:"code"`
+		}
+		_ = json.Unmarshal(w.Body.Bytes(), &b)
+		return b.Code
+	}
+	for _, body := range []string{`{"volumeID":"v1"} {"volumeID":"v1"}`, `{"volumeID":"v1"}garbage`, `{"volumeID":"v1"}{}`} {
+		for _, route := range []string{"/chunk/cut", "/chunk/detach"} {
+			ctl := &fakeChunkControl{}
+			w := serve(t, chunkServer(t, ctl, true), http.MethodPost, route, body, "")
+			if w.Code != http.StatusBadRequest || code(w) != "bad_request" || ctl.calls != 0 {
+				t.Fatalf("%s with body %q: %d %s, %d operations called; want bad_request and none", route, body, w.Code, w.Body, ctl.calls)
+			}
+		}
+	}
+	ctl := &fakeChunkControl{}
+	if w := serve(t, chunkServer(t, ctl, true), http.MethodPost, "/chunk/cut", "{\"volumeID\":\"v1\"}\n", ""); w.Code != 200 || ctl.calls != 1 {
+		t.Fatalf("one object and a newline: %d %s", w.Code, w.Body)
 	}
 }

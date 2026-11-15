@@ -416,22 +416,31 @@ func (p *DurableProvider) stopChunkLoop(h *volHandle) {
 }
 
 func (p *DurableProvider) chunkLayer(volumeID string) (storage.ChunkLayer, error) {
+	_, layer, err := p.chunkHandle(volumeID)
+	return layer, err
+}
+
+// chunkHandle resolves volumeID's handle and its attached layer in one
+// critical section; the caller keeps using that handle even if Close
+// removes it from the map afterwards.
+func (p *DurableProvider) chunkHandle(volumeID string) (*volHandle, storage.ChunkLayer, error) {
 	p.mu.Lock()
 	h, ok := p.volumes[volumeID]
+	var layer storage.ChunkLayer
+	awaiting := false
+	if ok {
+		layer, awaiting = h.chunk, h.waitGen != 0
+	}
 	p.mu.Unlock()
-	if !ok {
-		return nil, ErrVolumeNotOpen
+	switch {
+	case !ok:
+		return nil, nil, ErrVolumeNotOpen
+	case layer == nil && awaiting:
+		return nil, nil, ErrChunkAwaitingAuthority
+	case layer == nil:
+		return nil, nil, ErrNotChunkVolume
 	}
-	p.mu.Lock()
-	layer, awaiting := h.chunk, h.waitGen != 0
-	p.mu.Unlock()
-	if layer == nil && awaiting {
-		return nil, ErrChunkAwaitingAuthority
-	}
-	if layer == nil {
-		return nil, ErrNotChunkVolume
-	}
-	return layer, nil
+	return h, layer, nil
 }
 
 // CaptureVolume takes one quiesced cut of volumeID and publishes it to the
@@ -460,14 +469,14 @@ func (p *DurableProvider) MakeVolumeRemoteDurable(ctx context.Context, volumeID 
 // MakeRemoteDurable(minLSN) returning the cut: an LSN never written is
 // refused before anything is published, and the cut must reach minLSN.
 func (p *DurableProvider) CutVolume(ctx context.Context, volumeID string, minLSN uint64) (storage.ChunkCutResult, error) {
-	layer, err := p.chunkLayer(volumeID)
+	h, layer, err := p.chunkHandle(volumeID)
 	if err != nil {
 		return storage.ChunkCutResult{}, err
 	}
+	if hook := p.testAfterChunkResolve; hook != nil {
+		hook()
+	}
 	if minLSN > 0 {
-		p.mu.Lock()
-		h := p.volumes[volumeID]
-		p.mu.Unlock()
 		if last := h.storage.NextLSN() - 1; minLSN > last {
 			return storage.ChunkCutResult{}, fmt.Errorf("durable: cut of %s to LSN %d: that LSN was never written (last %d)", volumeID, minLSN, last)
 		}

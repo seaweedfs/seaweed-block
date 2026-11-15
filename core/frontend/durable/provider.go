@@ -153,6 +153,10 @@ type DurableProvider struct {
 	opening map[string]*sync.Mutex // keyed by volumeID; serializes open/create
 	closed  bool
 
+	// testAfterChunkResolve, test-only, runs in CutVolume right after the
+	// volume's handle and layer are resolved.
+	testAfterChunkResolve func()
+
 	// walstore-chunk: closeCtx ends with Close and cancels in-flight
 	// remote attachment; inflight counts RecoverVolume calls admitted
 	// before Close, which Close waits for before closing any store.

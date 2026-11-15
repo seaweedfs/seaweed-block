@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -269,6 +270,11 @@ func decodeChunkBody(w http.ResponseWriter, r *http.Request, v any) bool {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
 		writeChunkErr(w, http.StatusBadRequest, codeBadRequest, false, "decode %s request: %v", r.URL.Path, err)
+		return false
+	}
+	// Exactly one JSON value: trailing data refuses the whole request.
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		writeChunkErr(w, http.StatusBadRequest, codeBadRequest, false, "decode %s request: trailing data after the JSON object", r.URL.Path)
 		return false
 	}
 	return true
