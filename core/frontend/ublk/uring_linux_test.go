@@ -5,6 +5,7 @@ package ublk
 import (
 	"errors"
 	"testing"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -85,7 +86,7 @@ func TestURing_ShortSubmissionSubmitsTheRest(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := r.submitAndWait(4); err != nil {
+	if err := submitWithin(t, r, 4, 5*time.Second); err != nil {
 		t.Fatal(err)
 	}
 	if got := r.reap(nil); len(got) != 4 {
@@ -97,7 +98,22 @@ func TestURing_ShortSubmissionSubmitsTheRest(t *testing.T) {
 	if err := r.prepare(opNop, -1, 0, nil, 9); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.submitAndWait(0); err == nil {
+	if err := submitWithin(t, r, 0, 5*time.Second); err == nil {
 		t.Fatal("a submission the kernel never consumed was reported as submitted")
+	}
+}
+
+// submitWithin runs submitAndWait and fails the test if it does not
+// return in time (lost SQEs would leave it waiting forever).
+func submitWithin(t *testing.T, r *uring, minComplete uint32, d time.Duration) error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- r.submitAndWait(minComplete) }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(d):
+		t.Fatalf("submitAndWait(%d) did not return within %v: SQEs were lost or never consumed", minComplete, d)
+		return nil
 	}
 }

@@ -143,9 +143,20 @@ func TestDispatch_OutOfRangeNeverTouchesTheBackend(t *testing.T) {
 	}
 }
 
+// handleNoPanic reports a panic in the handler as a test failure.
+func handleNoPanic(t *testing.T, h handler, r request, buf []byte) (res int32) {
+	t.Helper()
+	defer func() {
+		if p := recover(); p != nil {
+			t.Fatalf("handler panicked on %+v with a %d-byte buffer: %v", r, len(buf), p)
+		}
+	}()
+	return h.handle(context.Background(), r, buf)
+}
+
 func TestDispatch_BufferShorterThanRequestIsRefused(t *testing.T) {
 	b := &failingBackend{}
-	if got := newTestHandler(b).handle(context.Background(), request{op: ioOpWrite, nrSectors: 16}, make([]byte, 4096)); got != -int32(syscall.EINVAL) {
+	if got := handleNoPanic(t, newTestHandler(b), request{op: ioOpWrite, nrSectors: 16}, make([]byte, 4096)); got != -int32(syscall.EINVAL) {
 		t.Fatalf("result %d, want -EINVAL for a request larger than its buffer", got)
 	}
 	if b.writes != 0 {
