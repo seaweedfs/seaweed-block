@@ -208,7 +208,7 @@ func (p *DurableProvider) attachChunk(ctx context.Context, volumeID string, h *v
 		h.backend.mu.Lock()
 		h.backend.chunkFenced = layer.Fenced
 		h.backend.mu.Unlock()
-		if p.cfg.ChunkCaptureInterval > 0 || p.cfg.ChunkDirtyThreshold > 0 {
+		if p.cfg.ChunkCaptureInterval > 0 {
 			ctx, cancel := context.WithCancel(context.Background())
 			h.chunkStop, h.chunkDone = cancel, make(chan struct{})
 			go p.chunkLoop(ctx, volumeID, layer, h.chunkDone)
@@ -451,41 +451,49 @@ const (
 	chunkCutBackoffMax = 30 * time.Second
 )
 
-// cutPolicy decides when an automatic cut is due:
+// cutPolicy decides when an automatic cut is due. The remote holds
+// snapshots, not live data: cuts are published at Snapshot, Detach/stop
+// and explicit Cut, and automatically only by the operator's timer:
 //   - the timer fires once interval has passed since the last successful
-//     cut of any kind (explicit Cut, Snapshot and Detach included);
-//   - the threshold fires once threshold chunks are dirty since the last
-//     HEAD;
-//   - whichever fires first triggers; zero disables either;
+//     cut of any kind (explicit Cut, Snapshot and Detach included); zero
+//     disables it, and with it every automatic cut;
+//   - the dirty-chunk count never triggers a cut;
 //   - automatic cuts are at least minSpacing apart (explicit ones are not
 //     subject to it);
 //   - a failed automatic cut resets nothing and is retried after a backoff
-//     doubling from backoffMin to backoffMax; a success (a no-op cut
-//     included) clears the backoff and restarts the timer.
+//     doubling from backoffMin to backoffMax; any later successful cut (a
+//     no-op cut and an explicit cut included) clears the backoff and
+//     restarts the timer.
 type cutPolicy struct {
 	interval, minSpacing, backoffMin, backoffMax time.Duration
-	threshold                                    int
 }
 
 type cutSchedule struct {
 	lastSuccess time.Time // last successful cut of any kind
 	lastAuto    time.Time // start of the last automatic cut
+	failedAt    time.Time // end of the last failed automatic cut
 	retryAt     time.Time // a failed automatic cut's backoff ends here
 	backoff     time.Duration
 }
 
-// observe takes in a successful cut the layer reports (any trigger).
+// observe takes in a successful cut the layer reports (any trigger). A
+// success after the last failed automatic cut makes that failure's
+// backoff obsolete.
 func (s cutSchedule) observe(lastCutNs int64) cutSchedule {
 	if lastCutNs > 0 {
-		if c := time.Unix(0, lastCutNs); c.After(s.lastSuccess) {
+		c := time.Unix(0, lastCutNs)
+		if c.After(s.lastSuccess) {
 			s.lastSuccess = c
+		}
+		if !s.failedAt.IsZero() && c.After(s.failedAt) {
+			s.backoff, s.retryAt, s.failedAt = 0, time.Time{}, time.Time{}
 		}
 	}
 	return s
 }
 
 // due reports whether an automatic cut is due at now, and why.
-func (pol cutPolicy) due(s cutSchedule, now time.Time, dirty int) (string, bool) {
+func (pol cutPolicy) due(s cutSchedule, now time.Time) (string, bool) {
 	if now.Before(s.retryAt) {
 		return "", false
 	}
@@ -495,9 +503,6 @@ func (pol cutPolicy) due(s cutSchedule, now time.Time, dirty int) (string, bool)
 	if pol.interval > 0 && now.Sub(s.lastSuccess) >= pol.interval {
 		return "periodic", true
 	}
-	if pol.threshold > 0 && dirty >= pol.threshold {
-		return "threshold", true
-	}
 	return "", false
 }
 
@@ -505,7 +510,7 @@ func (pol cutPolicy) due(s cutSchedule, now time.Time, dirty int) (string, bool)
 func (pol cutPolicy) after(s cutSchedule, start, end time.Time, err error) cutSchedule {
 	s.lastAuto = start
 	if err == nil {
-		s.backoff, s.retryAt = 0, time.Time{}
+		s.backoff, s.retryAt, s.failedAt = 0, time.Time{}, time.Time{}
 		if end.After(s.lastSuccess) {
 			s.lastSuccess = end
 		}
@@ -519,18 +524,18 @@ func (pol cutPolicy) after(s cutSchedule, start, end time.Time, err error) cutSc
 	default:
 		s.backoff *= 2
 	}
-	s.retryAt = end.Add(s.backoff)
+	s.failedAt, s.retryAt = end, end.Add(s.backoff)
 	return s
 }
 
 // chunkLoop runs the volume's automatic cuts under cutPolicy. A refused
 // cut (not a healthy primary of this lineage, BASE install) is expected
-// and logged only when it is something else.
+// and logged only when it is something else. A fenced layer can never
+// publish again: the loop ends.
 func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer storage.ChunkLayer, done chan struct{}) {
 	defer close(done)
 	pol := cutPolicy{
 		interval:   p.cfg.ChunkCaptureInterval,
-		threshold:  p.cfg.ChunkDirtyThreshold,
 		minSpacing: chunkCutMinSpacing,
 		backoffMin: chunkCutBackoffMin,
 		backoffMax: chunkCutBackoffMax,
@@ -544,10 +549,13 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 			return
 		case <-t.C:
 		}
+		if layer.Fenced() {
+			return
+		}
 		ls := layer.Stats()
 		s = s.observe(ls.LastCutNs)
 		start := time.Now()
-		reason, ok := pol.due(s, start, ls.DirtyChunks)
+		reason, ok := pol.due(s, start)
 		if !ok {
 			continue
 		}

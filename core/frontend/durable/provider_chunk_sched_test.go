@@ -37,34 +37,30 @@ func headGen(t *testing.T, remote storage.ChunkRemote) storage.ChunkHead {
 	return h
 }
 
-// With the timer off, enough dirty chunks trigger a cut on their own.
-func TestWALStoreChunk_DirtyThresholdTriggersCut(t *testing.T) {
+// The remote holds snapshots: with the timer off, no number of dirty
+// chunks publishes a cut on its own (the threshold only bounds a cut).
+func TestWALStoreChunk_DirtyThresholdNeverTriggersCut(t *testing.T) {
 	remote := storage.NewMemChunkRemote()
 	p := schedProvider(t, remote, 0, 2)
 	s := openRecovered(t, p)
-	if _, err := s.Write(1, block(0x01)); err != nil { // chunk 0
+	for c := uint32(0); c < 4; c++ { // four dirty chunks, twice the threshold
+		if _, err := s.Write(c*pcChunkBlocks+1, block(byte(c+1))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A negative invariant: checked repeatedly over several scheduler polls.
+	for i := 0; i < 15; i++ {
+		if h := headGen(t, remote); h.Gen != 0 {
+			t.Fatalf("a cut was published with the timer off (HEAD gen %d, %d chunks)", h.Gen, len(h.Chunks))
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	// An explicit cut still publishes every dirty chunk.
+	if _, err := p.CaptureVolume(context.Background(), "v1"); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(500 * time.Millisecond)
-	if h := headGen(t, remote); h.Gen != 0 {
-		t.Fatalf("cut below the threshold (HEAD gen %d)", h.Gen)
-	}
-	if _, err := s.Write(pcChunkBlocks+1, block(0x02)); err != nil { // chunk 1
-		t.Fatal(err)
-	}
-	deadline := time.Now().Add(15 * time.Second)
-	for {
-		h := headGen(t, remote)
-		if _, ok := h.Chunks[1]; ok && h.Gen >= 1 {
-			if _, ok := h.Chunks[0]; !ok {
-				t.Fatalf("threshold cut HEAD lacks chunk 0: %+v", h.Chunks)
-			}
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("no threshold cut after two dirty chunks (HEAD gen %d)", h.Gen)
-		}
-		time.Sleep(50 * time.Millisecond)
+	if h := headGen(t, remote); h.Gen == 0 || len(h.Chunks) != 4 {
+		t.Fatalf("explicit cut HEAD gen %d with %d chunks, want 4", h.Gen, len(h.Chunks))
 	}
 }
 

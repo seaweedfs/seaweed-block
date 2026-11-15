@@ -1,6 +1,7 @@
 package durable
 
-// The automatic cut policy (B9 W3 ruling), with explicit times.
+// The automatic cut policy (B9 W3 ruling, snapshots-only scope), with
+// explicit times.
 
 import (
 	"errors"
@@ -11,26 +12,25 @@ import (
 var t0 = time.Unix(1_700_000_000, 0)
 
 func testPolicy() cutPolicy {
-	return cutPolicy{interval: 30 * time.Second, threshold: 64, minSpacing: time.Second, backoffMin: time.Second, backoffMax: 30 * time.Second}
+	return cutPolicy{interval: 30 * time.Second, minSpacing: time.Second, backoffMin: time.Second, backoffMax: 30 * time.Second}
 }
 
 func at(d time.Duration) time.Time { return t0.Add(d) }
 
-func TestCutPolicy_TimerAndThresholdWhicheverFirst(t *testing.T) {
+// Only the operator's timer triggers an automatic cut; with it off,
+// nothing is ever due.
+func TestCutPolicy_OnlyTheTimerTriggers(t *testing.T) {
 	pol := testPolicy()
 	s := cutSchedule{lastSuccess: t0}
-	if r, ok := pol.due(s, at(29*time.Second), 63); ok {
-		t.Fatalf("due (%s) before the interval and below the threshold", r)
+	if r, ok := pol.due(s, at(29*time.Second)); ok {
+		t.Fatalf("due (%s) before the interval", r)
 	}
-	if r, ok := pol.due(s, at(30*time.Second), 0); !ok || r != "periodic" {
-		t.Fatalf("at the interval with nothing dirty: %q %v; want a periodic cut (a no-op cut still resets the timer)", r, ok)
+	if r, ok := pol.due(s, at(30*time.Second)); !ok || r != "periodic" {
+		t.Fatalf("at the interval: %q %v; want a periodic cut (a no-op cut still resets the timer)", r, ok)
 	}
-	if r, ok := pol.due(s, at(5*time.Second), 64); !ok || r != "threshold" {
-		t.Fatalf("at the threshold: %q %v; want a threshold cut", r, ok)
-	}
-	pol.interval, pol.threshold = 0, 0
-	if r, ok := pol.due(s, at(time.Hour), 1<<20); ok {
-		t.Fatalf("due (%s) with timer and threshold disabled", r)
+	pol.interval = 0
+	if r, ok := pol.due(s, at(1000*time.Hour)); ok {
+		t.Fatalf("due (%s) with the timer off", r)
 	}
 }
 
@@ -40,10 +40,10 @@ func TestCutPolicy_AnySuccessfulCutResetsTheTimer(t *testing.T) {
 	// An explicit Cut, Snapshot or Detach succeeded at 20 s: the layer
 	// reports it and the timer restarts from there.
 	s = s.observe(at(20 * time.Second).UnixNano())
-	if r, ok := pol.due(s, at(45*time.Second), 0); ok {
+	if r, ok := pol.due(s, at(45*time.Second)); ok {
 		t.Fatalf("due (%s) 25 s after an explicit cut", r)
 	}
-	if _, ok := pol.due(s, at(50*time.Second), 0); !ok {
+	if _, ok := pol.due(s, at(50*time.Second)); !ok {
 		t.Fatal("not due 30 s after the explicit cut")
 	}
 	// An older report never moves the timer back.
@@ -52,20 +52,21 @@ func TestCutPolicy_AnySuccessfulCutResetsTheTimer(t *testing.T) {
 	}
 	// An automatic success restarts it too.
 	s = pol.after(s, at(50*time.Second), at(50*time.Second+200*time.Millisecond), nil)
-	if _, ok := pol.due(s, at(79*time.Second), 0); ok {
+	if _, ok := pol.due(s, at(79*time.Second)); ok {
 		t.Fatal("due less than 30 s after an automatic success")
 	}
 }
 
 func TestCutPolicy_MinimumSpacingBetweenAutomaticCuts(t *testing.T) {
 	pol := testPolicy()
+	pol.interval = 500 * time.Millisecond
 	s := cutSchedule{lastSuccess: t0}
 	s = pol.after(s, at(10*time.Second), at(10*time.Second+50*time.Millisecond), nil)
-	if r, ok := pol.due(s, at(10*time.Second+900*time.Millisecond), 1000); ok {
-		t.Fatalf("hot writer at the threshold cut again after 0.9 s (%s)", r)
+	if r, ok := pol.due(s, at(10*time.Second+900*time.Millisecond)); ok {
+		t.Fatalf("automatic cut again after 0.9 s (%s)", r)
 	}
-	if _, ok := pol.due(s, at(11*time.Second), 1000); !ok {
-		t.Fatal("threshold cut not due 1 s after the last automatic cut")
+	if _, ok := pol.due(s, at(11*time.Second)); !ok {
+		t.Fatal("timer cut not due 1 s after the last automatic cut")
 	}
 }
 
@@ -78,11 +79,11 @@ func TestCutPolicy_FailureBacksOffAndResetsNothing(t *testing.T) {
 	for i := 0; i < 7; i++ {
 		s = pol.after(s, now, now, fail)
 		waits = append(waits, s.backoff)
-		if _, ok := pol.due(s, now.Add(s.backoff-time.Millisecond), 1000); ok {
+		if _, ok := pol.due(s, now.Add(s.backoff-time.Millisecond)); ok {
 			t.Fatalf("retry %d due before its backoff %s", i, s.backoff)
 		}
 		now = now.Add(s.backoff)
-		if _, ok := pol.due(s, now, 0); !ok {
+		if _, ok := pol.due(s, now); !ok {
 			t.Fatalf("retry %d not due after its backoff %s (the failure must not reset the timer)", i, s.backoff)
 		}
 	}
@@ -98,5 +99,40 @@ func TestCutPolicy_FailureBacksOffAndResetsNothing(t *testing.T) {
 	s = pol.after(s, now, now, nil)
 	if s.backoff != 0 || !s.retryAt.IsZero() || !s.lastSuccess.Equal(now) {
 		t.Fatalf("success did not clear the backoff: %+v", s)
+	}
+}
+
+// A failed automatic cut backs off; a later explicit success makes that
+// backoff obsolete, so the next timer cut is due one interval after the
+// explicit cut, not at the old retry time.
+func TestCutPolicy_ExplicitSuccessClearsFailedAutoBackoff(t *testing.T) {
+	pol := testPolicy()
+	pol.interval = time.Second
+	s := cutSchedule{lastSuccess: t0}
+	fail := errors.New("remote unavailable")
+	now := at(time.Second)
+	for s.backoff < pol.backoffMax {
+		s = pol.after(s, now, now, fail)
+		now = now.Add(time.Millisecond)
+	}
+	retryAt := s.retryAt
+	explicit := now.Add(2 * time.Second) // well before retryAt (30 s away)
+	s = s.observe(explicit.UnixNano())
+	next := explicit.Add(pol.interval)
+	if !next.Before(retryAt) {
+		t.Fatalf("test setup: next timer cut %v not before the old retry %v", next, retryAt)
+	}
+	if r, ok := pol.due(s, next.Add(-time.Millisecond)); ok {
+		t.Fatalf("due (%s) less than one interval after the explicit cut", r)
+	}
+	if r, ok := pol.due(s, next); !ok || r != "periodic" {
+		t.Fatalf("one interval after the explicit success: %q %v; want periodic (backoff %s, retry at %v)", r, ok, s.backoff, s.retryAt)
+	}
+	// A success older than the failure leaves the backoff in force.
+	s2 := cutSchedule{lastSuccess: t0}
+	s2 = pol.after(s2, at(10*time.Second), at(10*time.Second), fail)
+	s2 = s2.observe(at(5 * time.Second).UnixNano())
+	if s2.retryAt.IsZero() {
+		t.Fatal("a success older than the failure cleared its backoff")
 	}
 }
