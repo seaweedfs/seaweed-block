@@ -62,6 +62,17 @@ func ingestRF3Incarnations(t *testing.T, h *Host, r1, r2, r3 rf3Slot) {
 type switchProbe struct {
 	mu           sync.Mutex
 	currentReady bool
+	// When hold is set, a probe signals entered and then blocks until
+	// release is closed.
+	hold    bool
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (p *switchProbe) holdNext() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.hold, p.entered, p.release = true, make(chan struct{}), make(chan struct{})
 }
 
 func (p *switchProbe) setCurrentReady(ready bool) {
@@ -72,6 +83,14 @@ func (p *switchProbe) setCurrentReady(ready bool) {
 
 func (p *switchProbe) ProbePromotionCandidates(volumeID string, current authority.AuthorityBasis, candidates []authority.ReplicaCandidate) (PromotionProbeResult, error) {
 	p.mu.Lock()
+	if p.hold {
+		p.hold = false
+		entered, release := p.entered, p.release
+		p.mu.Unlock()
+		close(entered)
+		<-release
+		p.mu.Lock()
+	}
 	defer p.mu.Unlock()
 	return PromotionProbeResult{
 		AckProfile:   "sync-quorum",
@@ -289,4 +308,135 @@ func TestBootGrace_UnsupportedPathReadyStartsCountTowardFlapping(t *testing.T) {
 	third := rf3Slot{incarnation: "r1-c", reachable: true, eligible: true}
 	unsupportedTick(t, h, third) // start 3 within the window: flapping
 	expectFailoverToR2(t, h, "third start within the flap window")
+}
+
+// ingestUnknownClaim makes node-d report a replica the topology does not
+// know: UnknownReplicaClaim, a reason outside the promotion allow-list.
+func ingestUnknownClaim(t *testing.T, h *Host) {
+	t.Helper()
+	if err := h.ObservationHost().Ingest(authority.Observation{
+		ServerID:   "node-d",
+		ObservedAt: time.Now().UTC(),
+		Server:     authority.ServerFact{Reachable: true, Eligible: true},
+		Slots: []authority.SlotFact{{
+			VolumeID: "vol-rf3", ReplicaID: "r9", DataAddr: "127.0.0.1:19901", CtrlAddr: "127.0.0.1:19902",
+			Reachable: true, Eligible: true,
+		}},
+	}); err != nil {
+		t.Fatalf("ingest node-d: %v", err)
+	}
+}
+
+// disallowedTick ingests r1/r2 plus the unknown claim and runs a tick
+// while the volume is unsupported for a reason the promotion gate does
+// not probe for.
+func disallowedTick(t *testing.T, h *Host, r1 rf3Slot) {
+	t.Helper()
+	ingestRF3Incarnations(t, h, r1, readySlot("r2-a"), silent)
+	ingestUnknownClaim(t, h)
+	res, err := h.RunLifecycleProductTick()
+	if err != nil {
+		t.Fatalf("product tick: %v", err)
+	}
+	if res.PromotionProbes != 0 {
+		t.Fatalf("product tick %+v: the disallowed reason must not probe", res)
+	}
+}
+
+// A ready report while the volume is unsupported for a disallowed
+// reason is still recorded: after the reason clears, the same
+// incarnation going unready gets no grace.
+func TestBootGrace_DisallowedReasonStillRecordsReady(t *testing.T) {
+	h := newBootGraceMaster(t, Config{ControllerConfig: authority.TopologyControllerConfig{PrimaryBootGrace: time.Minute}})
+	defer closeTestMaster(t, h)
+
+	readyB := rf3Slot{incarnation: "r1-b", reachable: true, eligible: true, ready: true}
+	disallowedTick(t, h, readyB)
+	time.Sleep(testFreshness + 100*time.Millisecond) // node-d's claim ages out
+	unsupportedTick(t, h, restarting)                // r1-b unready, same incarnation
+	expectFailoverToR2(t, h, "unready after a ready report seen under a disallowed reason")
+}
+
+// A start seen under a disallowed reason counts toward flapping.
+func TestBootGrace_DisallowedReasonStartCountsTowardFlapping(t *testing.T) {
+	h := newBootGraceMaster(t, Config{ControllerConfig: authority.TopologyControllerConfig{PrimaryBootGrace: time.Minute}})
+	defer closeTestMaster(t, h)
+
+	readyB := rf3Slot{incarnation: "r1-b", reachable: true, eligible: true, ready: true}
+	disallowedTick(t, h, readyB) // start 2
+	time.Sleep(testFreshness + 100*time.Millisecond)
+	third := rf3Slot{incarnation: "r1-c", reachable: true, eligible: true}
+	unsupportedTick(t, h, third) // start 3: flapping
+	expectFailoverToR2(t, h, "third start, the second seen under a disallowed reason")
+}
+
+// heldTick starts a product tick whose promotion probe blocks, runs
+// during() while it is held, then releases it and waits for the tick.
+func heldTick(t *testing.T, h *Host, r1 rf3Slot, during func()) {
+	heldTickAfter(t, h, r1, 0, during)
+}
+
+// heldTickAfter is heldTick with a pause between the ingest and the tick,
+// so the heartbeat is older than the grace the tick starts.
+func heldTickAfter(t *testing.T, h *Host, r1 rf3Slot, pause time.Duration, during func()) {
+	t.Helper()
+	p := probeOf(t, h)
+	ingestRF3Incarnations(t, h, r1, readySlot("r2-a"), silent)
+	time.Sleep(pause)
+	p.holdNext()
+	done := make(chan error, 1)
+	go func() {
+		_, err := h.RunLifecycleProductTick()
+		done <- err
+	}()
+	select {
+	case <-p.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("promotion probe never entered")
+	}
+	during()
+	close(p.release)
+	if err := <-done; err != nil {
+		t.Fatalf("product tick: %v", err)
+	}
+}
+
+// The current primary turns explicitly unhealthy while the probe is
+// held: the gate must decide from the post-probe fact and fail over.
+func TestBootGrace_HeldProbeNewerUnhealthyFailsOver(t *testing.T) {
+	h := newBootGraceMaster(t, Config{ControllerConfig: authority.TopologyControllerConfig{PrimaryBootGrace: time.Minute}})
+	defer closeTestMaster(t, h)
+
+	heldTick(t, h, restarting, func() {
+		ineligible := restarting
+		ineligible.eligible = false
+		time.Sleep(5 * time.Millisecond) // a strictly newer observation
+		ingestRF3Incarnations(t, h, ineligible, readySlot("r2-a"), silent)
+	})
+	expectFailoverToR2(t, h, "ineligible report arrived during the probe")
+}
+
+// The current primary's heartbeat expires while the probe is held, its
+// grace (started at the tick) still running: no fresh slot remains at
+// the decision point, so there is no grace.
+func TestBootGrace_HeldProbeHeartbeatExpiryFailsOver(t *testing.T) {
+	h := newBootGraceMaster(t, Config{ControllerConfig: authority.TopologyControllerConfig{PrimaryBootGrace: time.Minute}})
+	defer closeTestMaster(t, h)
+
+	// r1's fact is ingested 600 ms before the tick; the grace starts at
+	// the tick (capped at the 1 s window). Holding the probe 500 ms ages
+	// the fact past 1 s while the grace is about 0.5 s old.
+	heldTickAfter(t, h, restarting, 600*time.Millisecond, func() {
+		time.Sleep(500 * time.Millisecond)
+	})
+	expectFailoverToR2(t, h, "heartbeat expired during the probe")
+}
+
+// Positive: nothing changes while the probe is held: the grace holds.
+func TestBootGrace_HeldProbeUnchangedFreshHolds(t *testing.T) {
+	h := newBootGraceMaster(t, Config{ControllerConfig: authority.TopologyControllerConfig{PrimaryBootGrace: time.Minute}})
+	defer closeTestMaster(t, h)
+
+	heldTick(t, h, restarting, func() { time.Sleep(50 * time.Millisecond) })
+	expectLineStaysR1(t, h, "unchanged fresh restarted primary across a held probe")
 }

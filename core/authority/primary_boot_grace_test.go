@@ -246,3 +246,44 @@ func TestPrimaryBootGrace_EqualTimeChangedIncarnationKeepsGrace(t *testing.T) {
 	g.submit(other)
 	expectNoNext(t, g.ctrl)
 }
+
+// A snapshot carrying a superseded fact is a stale snapshot: no
+// decision branch may use it (review of #130 r3). Here a delayed READY
+// fact of the previous incarnation carries an obsolete endpoint; today
+// it would drive an endpoint refresh to that endpoint.
+func TestPrimaryBootGrace_DelayedReadyObsoleteEndpointDecidesNothing(t *testing.T) {
+	g := newBootGraceRig(t)
+	t1 := g.now
+	g.steadyPrimary() // r1-a ready at d1-old (the line), observed at t1
+	g.now = g.now.Add(time.Second)
+	g.submit(r1Slot("r1-b", "d1-old", "c1-old", false)) // r1-b, in grace
+	expectNoNext(t, g.ctrl)
+
+	delayedA := r1Slot("r1-a", "d1-ancient", "c1-ancient", true)
+	delayedA.ObservedAt = t1
+	g.now = g.now.Add(time.Second)
+	g.submit(delayedA)
+	expectNoNext(t, g.ctrl)
+}
+
+// Newest B already reported ready (its grace ended); a delayed UNREADY
+// fact of the previous incarnation must not cause a failover.
+func TestPrimaryBootGrace_NewerReadyThenOlderUnreadyDecidesNothing(t *testing.T) {
+	g := newBootGraceRig(t)
+	t1 := g.now
+	g.steadyPrimary()
+	g.now = g.now.Add(time.Second)
+	g.submit(r1Slot("r1-b", "d1-old", "c1-old", true)) // r1-b ready
+	expectNoNext(t, g.ctrl)
+
+	delayedA := r1Slot("r1-a", "d1-old", "c1-old", false)
+	delayedA.ObservedAt = t1
+	g.now = g.now.Add(time.Second)
+	g.submit(delayedA)
+	expectNoNext(t, g.ctrl)
+
+	// A fresh unready fact of B is still a valid decision input.
+	g.now = g.now.Add(time.Second)
+	g.submit(r1Slot("r1-b", "d1-old", "c1-old", false))
+	expectFailoverToR2(t, g.ctrl, "fresh unready B after its grace ended")
+}
