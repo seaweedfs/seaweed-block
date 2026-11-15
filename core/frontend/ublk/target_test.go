@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"sync/atomic"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/testback"
@@ -53,5 +55,49 @@ func TestConfig_Validate(t *testing.T) {
 		if err := c.validate(); err == nil {
 			t.Errorf("%s: accepted %+v", name, c)
 		}
+	}
+}
+
+type fakeDevice struct {
+	closes  atomic.Int32
+	err     error
+	release chan struct{}
+}
+
+func (d *fakeDevice) Path() string { return "/dev/ublkb9" }
+func (d *fakeDevice) Stats() Stats { return Stats{} }
+func (d *fakeDevice) Close() error {
+	d.closes.Add(1)
+	<-d.release
+	return d.err
+}
+
+// Close is idempotent: concurrent and repeated callers all get the first
+// close's result (never a nil while it is pending or after it failed),
+// and the device is closed once.
+func TestTarget_CloseGivesEveryCallerTheSameResult(t *testing.T) {
+	dev := &fakeDevice{err: errors.New("queue 0 did not stop"), release: make(chan struct{})}
+	tg := &Target{cfg: TargetConfig{Provider: testback.NewStaticProvider(nil)}, device: dev}
+	results := make(chan error, 3)
+	for i := 0; i < 3; i++ {
+		go func() { results <- tg.Close() }()
+	}
+	time.Sleep(50 * time.Millisecond)
+	close(dev.release)
+	for i := 0; i < 3; i++ {
+		select {
+		case err := <-results:
+			if err == nil || err.Error() != dev.err.Error() {
+				t.Fatalf("concurrent Close %d returned %v, want %v", i, err, dev.err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("a concurrent Close did not return")
+		}
+	}
+	if err := tg.Close(); err == nil || err.Error() != dev.err.Error() {
+		t.Fatalf("repeated Close returned %v, want %v", err, dev.err)
+	}
+	if n := dev.closes.Load(); n != 1 {
+		t.Fatalf("device closed %d times, want once", n)
 	}
 }

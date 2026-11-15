@@ -48,6 +48,7 @@ type settler interface {
 	doneCh() <-chan struct{}
 	release()
 	name() string
+	result() error // read only after doneCh is closed
 }
 
 // settleQueues waits, until one shared deadline, for the queues to stop

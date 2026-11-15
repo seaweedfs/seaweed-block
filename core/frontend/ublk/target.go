@@ -26,7 +26,14 @@ type Target struct {
 	cfg TargetConfig
 
 	mu     sync.Mutex
-	device *Device
+	device targetDevice
+}
+
+// targetDevice is what Target needs from a running device.
+type targetDevice interface {
+	Path() string
+	Stats() Stats
+	Close() error
 }
 
 // NewTarget returns an unstarted target.

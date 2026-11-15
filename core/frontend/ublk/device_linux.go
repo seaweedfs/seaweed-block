@@ -333,6 +333,7 @@ func (q *queue) run(ctx context.Context) {
 }
 
 func (q *queue) doneCh() <-chan struct{} { return q.done }
+func (q *queue) result() error           { return q.err }
 func (q *queue) name() string            { return "queue " + strconv.Itoa(q.id) }
 
 func (q *queue) release() {
