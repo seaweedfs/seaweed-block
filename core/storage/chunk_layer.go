@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -72,8 +73,9 @@ type chunkLayerImpl struct {
 	keySeq    uint64
 
 	// Test-only scheduling hooks; nil in production.
-	testPresenceSnapshotHook func() // after a presence snapshot, before it is written
-	testAfterAdmitHook       func() // right after a capture is admitted
+	testPresenceSnapshotHook func()                 // after a presence snapshot, before it is written
+	testAfterAdmitHook       func()                 // right after a capture is admitted
+	syncDirFn                func(dir string) error // directory fsync after a rename; syncDir in production
 
 	// Absence: chunks whose local bytes are not authoritative (fresh host,
 	// evicted), and blocks written locally inside such chunks since.
@@ -107,6 +109,7 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 		absentGen:   map[uint64]uint64{},
 		localBlocks: map[uint64]bool{},
 		closeDone:   make(chan struct{}),
+		syncDirFn:   syncDir,
 	}
 	var nb8 [8]byte
 	if _, err := rand.Read(nb8[:]); err != nil {
@@ -181,6 +184,17 @@ func copyHead(h chunkHead) chunkHead {
 }
 
 func (l *chunkLayerImpl) chunkOf(lba uint64) uint64 { return lba / l.chunkBlocks }
+
+// chunkHasLocalLocked reports whether any block of an absent chunk was
+// written locally since it became absent. Caller holds stMu.
+func (l *chunkLayerImpl) chunkHasLocalLocked(idx uint64) bool {
+	for i := uint64(0); i < l.chunkBlocks; i++ {
+		if l.localBlocks[idx*l.chunkBlocks+i] {
+			return true
+		}
+	}
+	return false
+}
 
 // ---- sink callbacks ----
 
@@ -284,27 +298,57 @@ func (l *chunkLayerImpl) OnReadMiss(lba uint64) ([]byte, error) {
 		l.stMu.Unlock()
 		return nil, nil
 	}
-	ref, ok := l.head.Chunks[idx]
-	gen := l.absentGen[idx]
 	l.wg.Add(1)
 	l.stMu.Unlock()
 	defer l.wg.Done()
+	// One deadline covers every attempt. Each attempt fetches the chunk as
+	// the current HEAD names it; a fill that went stale (eviction generation
+	// or HEAD ref changed meanwhile) installs nothing and the read retries,
+	// so the extent is read only once the block is resolved: the chunk is no
+	// longer absent, or the block has a local version.
+	ctx, cancel := context.WithTimeout(l.ctx, l.cfg.ReadMissTimeout)
+	defer cancel()
+	for {
+		l.stMu.Lock()
+		if !l.absent[idx] || l.localBlocks[lba] {
+			l.stMu.Unlock()
+			return nil, nil
+		}
+		ref, ok := l.head.Chunks[idx]
+		gen := l.absentGen[idx]
+		l.stMu.Unlock()
+		if !ok { // ZERO in the current HEAD
+			return make([]byte, l.blockSize), nil
+		}
+		resolved, err := l.fillOnce(ctx, idx, gen, ref)
+		if err != nil {
+			return nil, err
+		}
+		if resolved {
+			return nil, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("storage: chunk %d fetch: fill kept going stale: %w", idx, err)
+		}
+	}
+}
+
+// fillOnce fetches one chunk version and installs every block that has no
+// newer local version, as long as the fill still belongs to the chunk's
+// current absence (generation and HEAD ref unchanged). It reports whether
+// it resolved the absence.
+func (l *chunkLayerImpl) fillOnce(ctx context.Context, idx, gen uint64, ref chunkRef) (bool, error) {
 	// current reports whether this fill still belongs to the chunk's present
 	// absence: same generation, same HEAD ref. Caller holds stMu.
 	current := func() bool {
 		return l.absent[idx] && l.absentGen[idx] == gen && l.head.Chunks[idx] == ref
 	}
-	if !ok { // ZERO in HEAD: nothing to fetch
-		return make([]byte, l.blockSize), nil
-	}
-	ctx, cancel := context.WithTimeout(l.ctx, l.cfg.ReadMissTimeout)
-	defer cancel()
 	data, err := l.remote.Get(ctx, ref.Key)
 	if err != nil {
-		return nil, fmt.Errorf("storage: chunk %d fetch: %w", idx, err)
+		return false, fmt.Errorf("storage: chunk %d fetch: %w", idx, err)
 	}
 	if sha256.Sum256(data) != ref.SHA256 || len(data) != int(l.chunkBlocks)*l.blockSize {
-		return nil, fmt.Errorf("storage: chunk %d fetch: content does not match HEAD", idx)
+		return false, fmt.Errorf("storage: chunk %d fetch: content does not match HEAD", idx)
 	}
 	first := idx * l.chunkBlocks
 	for i := uint64(0); i < l.chunkBlocks; i++ {
@@ -318,19 +362,20 @@ func (l *chunkLayerImpl) OnReadMiss(lba uint64) ([]byte, error) {
 			defer l.stMu.Unlock()
 			return current() && !l.localBlocks[b]
 		}); err != nil {
-			return nil, err
+			return false, err
 		}
 	}
 	l.stMu.Lock()
-	if current() {
-		delete(l.absent, idx)
-		for i := uint64(0); i < l.chunkBlocks; i++ {
-			delete(l.localBlocks, first+i)
-		}
-		l.presenceVer++
+	defer l.stMu.Unlock()
+	if !current() {
+		return false, nil
 	}
-	l.stMu.Unlock()
-	return nil, nil
+	delete(l.absent, idx)
+	for i := uint64(0); i < l.chunkBlocks; i++ {
+		delete(l.localBlocks, first+i)
+	}
+	l.presenceVer++
+	return true, nil
 }
 
 // installFetchedBlock writes a fetched block into the extent under its
@@ -502,6 +547,11 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context) (uint64, error) {
 	}
 	if all {
 		for i := uint64(0); i < l.numChunks; i++ {
+			// An absent chunk with no local write is HEAD's content by
+			// definition: comparing it would only fetch it back.
+			if l.absent[i] && !l.chunkHasLocalLocked(i) {
+				continue
+			}
 			candidates[i] = true
 		}
 	}
@@ -802,7 +852,12 @@ func (l *chunkLayerImpl) persistPresence() error {
 	if err := writeFileDurable(l.presencePath(), []byte(b.String())); err != nil {
 		return err
 	}
-	syncDir(filepath.Dir(l.presencePath())) // the rename itself must be durable
+	// The rename itself must be durable before the presence counts as saved;
+	// on failure the version stays unsaved and the caller (a checkpoint
+	// advance or an eviction) is refused.
+	if err := l.syncDirFn(filepath.Dir(l.presencePath())); err != nil {
+		return fmt.Errorf("storage: chunk presence: fsync directory: %w", err)
+	}
 	l.stMu.Lock()
 	if ver > l.savedPresVer {
 		l.savedPresVer = ver
@@ -862,12 +917,19 @@ func writeFileDurable(path string, data []byte) error {
 	return os.Rename(tmp, path)
 }
 
-// syncDir makes a rename in dir durable where the platform allows it.
-func syncDir(dir string) {
-	if d, err := os.Open(dir); err == nil {
-		_ = d.Sync()
-		_ = d.Close()
+// syncDir makes a rename in dir durable. Windows cannot fsync a directory
+// handle (NTFS orders the rename itself), so there it is a no-op; the
+// block volume runs on Linux.
+func syncDir(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
 	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 // ---- status and lifetime ----

@@ -7,6 +7,7 @@ package storage
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"errors"
 	"sync"
 	"testing"
@@ -196,6 +197,9 @@ func TestChunkLayer_StaleAttachDoesNotPublishOverNewerHolder(t *testing.T) {
 				t.Fatal(err)
 			}
 			layer := mustAttach(t, s, f, ctConfig(tc.myEpoch))
+			if got := layer.Fenced(); got != tc.wantFenced {
+				t.Fatalf("right after attach: fenced %v, want %v (a superseding HEAD must fence at attach)", got, tc.wantFenced)
+			}
 			before := f.stats()
 			_, err := layer.Capture(ctTimeout(t))
 			after := f.stats()
@@ -246,6 +250,183 @@ func TestChunkLayer_CloseWaitsForAdmittedCapture(t *testing.T) {
 		case <-c:
 		case <-time.After(ctLocalBound):
 			t.Fatal("Close did not return after the admitted capture finished")
+		}
+	}
+}
+
+// A presence replacement is not saved until its directory entry is durable.
+// With the directory open or fsync failing, the checkpoint that needs the
+// presence save must not advance (checkpoint and physical WAL tail
+// unchanged); after the fault clears, a retry advances it and the local
+// write inside the evicted chunk survives a crash.
+func TestChunkLayer_FailedDirSyncLeavesPresenceUnsaved(t *testing.T) {
+	for _, fault := range []string{"directory open fails", "directory fsync fails"} {
+		t.Run(fault, func(t *testing.T) {
+			s, path, crash := crashableStore(t)
+			f := newFakeChunkRemote()
+			cfg := ctConfig(1)
+			layer := mustAttach(t, s, f, cfg)
+			for lba := uint32(8); lba < 12; lba++ {
+				if _, err := s.Write(lba, makeBlock(ctBlockSize, byte(0x80+lba))); err != nil {
+					t.Fatal(err)
+				}
+			}
+			mustSyncFlush(t, s)
+			if _, err := layer.Capture(ctTimeout(t)); err != nil {
+				t.Fatal(err)
+			}
+			if err := layer.EvictChunk(2); err != nil {
+				t.Fatal(err)
+			}
+			impl := layer.(*chunkLayerImpl)
+			impl.syncDirFn = func(string) error { return errors.New("injected: " + fault) }
+
+			newer := makeBlock(ctBlockSize, 0xB9)
+			lsn, err := s.Write(9, newer) // a local write inside the evicted chunk
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.Sync(); err != nil {
+				t.Fatal(err)
+			}
+			cpBefore, tailBefore := s.CheckpointLSN(), walLogicalTail(s)
+			if err := flushWithin(t, s, "flush needing a presence save"); err == nil {
+				t.Fatal("the flush advanced although the presence replacement's directory entry is not durable")
+			}
+			if cp, tail := s.CheckpointLSN(), walLogicalTail(s); cp != cpBefore || tail != tailBefore {
+				t.Fatalf("failed directory sync still moved checkpoint %d -> %d or WAL tail %d -> %d", cpBefore, cp, tailBefore, tail)
+			}
+
+			impl.syncDirFn = syncDir // the fault clears: a retry must succeed
+			if err := flushWithin(t, s, "retried flush"); err != nil {
+				t.Fatalf("retry after the directory fault cleared: %v", err)
+			}
+			if cp := s.CheckpointLSN(); cp < lsn {
+				t.Fatalf("retried checkpoint %d did not pass LSN %d", cp, lsn)
+			}
+			crash()
+			s2, _ := reopen(t, path)
+			mustAttach(t, s2, f, cfg)
+			if got, err := s2.Read(9); err != nil || !bytes.Equal(got, newer) {
+				t.Fatalf("after restart LBA 9 is not the local write: %v", err)
+			}
+		})
+	}
+}
+
+// A fill whose HEAD ref went stale must not authorize reading the unfilled
+// extent. Schedule: a fresh host's read of chunk 2 holds its fetch of H1; a
+// competing holder publishes H2 with different chunk 2 bytes, and the
+// layer's failed CAS adopts H2; the held fetch resumes. The held read
+// itself must return H2's block or an error: never the zero extent, never H1.
+func TestChunkLayer_StaleFillNeverAuthorizesUnresolvedExtentRead(t *testing.T) {
+	src := make([]byte, ctNumBlocks*ctBlockSize)
+	for lba := uint32(8); lba < 12; lba++ { // chunk 2 in H1
+		copy(src[int(lba)*ctBlockSize:], makeBlock(ctBlockSize, byte(0x80+lba)))
+	}
+	f := newFakeChunkRemote()
+	f.seedHead(t, src, 5, 1)
+	s, _ := newChunkTestStore(t)
+	cfg := ctConfig(2)
+	cfg.FreshFromHead = true
+	layer := mustAttach(t, s, f, cfg)
+
+	held, releaseA := holdNextGet(t, f)
+	type res struct {
+		b   []byte
+		err error
+	}
+	readA := make(chan res, 1)
+	joined := make(chan struct{})
+	t.Cleanup(func() {
+		releaseA()
+		select {
+		case <-joined:
+		case <-time.After(ctLocalBound):
+			t.Errorf("held read not joined")
+		}
+	})
+	go func() {
+		defer close(joined)
+		b, err := s.Read(9)
+		readA <- res{b, err}
+	}()
+	waitKey(t, held, "fetch of chunk 2 from H1")
+
+	h2 := make([]byte, ctChunkBytes)
+	for i := 0; i < ctChunkBlocks; i++ {
+		copy(h2[i*ctBlockSize:], makeBlock(ctBlockSize, byte(0xC0+i)))
+	}
+	if _, err := s.Write(20, makeBlock(ctBlockSize, 0x20)); err != nil { // something for the cut to publish
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	f.beforeCAS = func(f *fakeChunkRemote) { // a competing holder publishes H2 first
+		f.objs["h2/chunk2"] = append([]byte(nil), h2...)
+		f.everStored["h2/chunk2"] = true
+		next := copyChunkHead(f.head)
+		next.Epoch, next.Holder = 3, "host-b"
+		next.Chunks[2] = chunkRef{Key: "h2/chunk2", SHA256: sha256.Sum256(h2)}
+		f.installLocked(next)
+	}
+	f.mu.Unlock()
+	if _, err := layer.Capture(ctTimeout(t)); err == nil {
+		t.Fatal("the cut succeeded although a newer holder published first")
+	}
+	releaseA()
+	select {
+	case r := <-readA:
+		want := h2[1*ctBlockSize : 2*ctBlockSize] // LBA 9 is block 1 of chunk 2
+		switch {
+		case r.err != nil:
+			// allowed: the read refuses instead of guessing
+		case bytes.Equal(r.b, make([]byte, ctBlockSize)):
+			t.Fatal("the held read returned the zero extent after its fill went stale")
+		case bytes.Equal(r.b, blockOf(src, 9)):
+			t.Fatal("the held read returned H1's block although HEAD is now H2")
+		case !bytes.Equal(r.b, want):
+			t.Fatalf("the held read returned neither H2's block nor an error (byte %#x)", r.b[0])
+		}
+	case <-time.After(ctLocalBound):
+		t.Fatal("the held read did not finish after its fetch was released")
+	}
+	if got, err := s.Read(10); err != nil || !bytes.Equal(got, h2[2*ctBlockSize:3*ctBlockSize]) {
+		t.Fatalf("after the stale fill, LBA 10 is not H2's block: %v", err)
+	}
+}
+
+// A fresh host's first cut runs as a hash compare (no usable bitmap). It
+// must not fetch chunks that are absent and unwritten: their content is
+// HEAD's by definition. Only the chunk written locally is published; the
+// untouched chunks keep their HEAD refs.
+func TestChunkLayer_FreshHostHashCutFetchesNoUntouchedChunk(t *testing.T) {
+	src := make([]byte, ctNumBlocks*ctBlockSize)
+	for lba := uint32(0); lba < 16; lba++ { // chunks 0-3 in HEAD
+		copy(src[int(lba)*ctBlockSize:], makeBlock(ctBlockSize, byte(0x70+lba)))
+	}
+	f := newFakeChunkRemote()
+	f.seedHead(t, src, 5, 1)
+	s, _ := newChunkTestStore(t)
+	cfg := ctConfig(2)
+	cfg.FreshFromHead = true
+	layer := mustAttach(t, s, f, cfg)
+	if _, err := s.Write(20, makeBlock(ctBlockSize, 0x20)); err != nil { // chunk 5, ZERO in HEAD
+		t.Fatal(err)
+	}
+	before := f.stats()
+	if _, err := layer.Capture(ctTimeout(t)); err != nil {
+		t.Fatalf("first cut on a fresh host: %v", err)
+	}
+	after := f.stats()
+	if after.gets != before.gets {
+		t.Fatalf("the first cut fetched %d chunks; untouched absent chunks must not be fetched", after.gets-before.gets)
+	}
+	if after.puts-before.puts != 1 {
+		t.Fatalf("the first cut stored %d chunks, want 1 (chunk 5)", after.puts-before.puts)
+	}
+	for idx := uint64(0); idx < 4; idx++ {
+		if after.head.Chunks[idx] != before.head.Chunks[idx] {
+			t.Fatalf("untouched chunk %d lost its HEAD ref", idx)
 		}
 	}
 }
