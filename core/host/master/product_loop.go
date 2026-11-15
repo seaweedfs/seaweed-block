@@ -160,7 +160,7 @@ func (h *Host) applyPromotionEvidenceGate(snap *authority.ClusterSnapshot) (int,
 			continue
 		}
 		probeCount++
-		result, ok := h.probePromotionCandidates(vol.VolumeID, vol.Authority, candidates)
+		result, ok := h.probePromotionCandidatesCurrent(vol.VolumeID, vol.Authority, candidates)
 		allowed := promotionAllowedReplicas(result, ok)
 		if ok {
 			h.log.Printf("blockmaster: promotion gate volume=%s current=%s current_known=%t current_ready=%t ack_profile=%s required_lsn=%d candidates=%v allowed=%v",
@@ -253,7 +253,7 @@ func (h *Host) applyUnsupportedPromotionEvidenceGate(placements []lifecycle.Plac
 			}
 		}
 		probeCount++
-		result, probeOK := h.probePromotionCandidates(vol.VolumeID, current, candidates)
+		result, probeOK := h.probePromotionCandidatesCurrent(vol.VolumeID, current, candidates)
 		allowed := promotionAllowedReplicas(result, probeOK)
 		if probeOK {
 			h.log.Printf("blockmaster: promotion gate unsupported volume=%s current=%s reasons=%v current_known=%t current_ready=%t ack_profile=%s required_lsn=%d candidates=%v allowed=%v",
@@ -474,6 +474,32 @@ func (h *Host) probePromotionCandidates(volumeID string, current authority.Autho
 		return PromotionProbeResult{}, false
 	}
 	return result, true
+}
+
+// probePromotionCandidatesCurrent probes like probePromotionCandidates,
+// but does not let an outdated verdict on the current primary stand
+// (#128). The provider probes the current primary before the peers; if
+// the current primary's own fresh heartbeat advanced to ready (a newer
+// fact, or a new incarnation) while the probe ran, its "not ready"
+// verdict may predate a finished recovery, so the probe is run once
+// more and that fresh result is used. A heartbeat alone is never taken
+// as frontend readiness: the fresh probe still decides, so a frontend
+// that is still unready keeps a legitimate failover.
+func (h *Host) probePromotionCandidatesCurrent(volumeID string, current authority.AuthorityBasis, candidates []authority.ReplicaCandidate) (PromotionProbeResult, bool) {
+	before, beforeOK := h.freshCurrentSlot(volumeID, current.ReplicaID)
+	result, ok := h.probePromotionCandidates(volumeID, current, candidates)
+	if !ok || (result.CurrentKnown && result.Current.Ready) {
+		return result, ok
+	}
+	after, afterOK := h.freshCurrentSlot(volumeID, current.ReplicaID)
+	if !afterOK || !after.ReadyForPrimary {
+		return result, ok
+	}
+	if beforeOK && !after.ObservedAt.After(before.ObservedAt) && after.Incarnation == before.Incarnation {
+		return result, ok
+	}
+	h.log.Printf("blockmaster: promotion gate volume=%s current=%s reported ready during the probe; probing again", volumeID, current.ReplicaID)
+	return h.probePromotionCandidates(volumeID, current, candidates)
 }
 
 func promotionAllowedReplicas(result PromotionProbeResult, ok bool) map[string]bool {
