@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,12 +15,37 @@ import (
 )
 
 type gcCLIStore struct {
-	writes int
+	writes       int
+	blobs        map[string][]byte
+	failDeleteAt int
+	afterUpdate  func(*filerpb.Entry) error
 	*chunkstore.MemFiler
 	deletes int
 }
 
-func (s *gcCLIStore) DeleteBlob(context.Context, string) error { s.deletes++; return nil }
+func (s *gcCLIStore) Put(_ context.Context, data []byte) (string, error) {
+	if s.blobs == nil {
+		s.blobs = map[string][]byte{}
+	}
+	fid := fmt.Sprintf("1,%d", len(s.blobs)+1)
+	s.blobs[fid] = append([]byte{}, data...)
+	return fid, nil
+}
+func (s *gcCLIStore) Get(_ context.Context, fid string) ([]byte, error) {
+	b, ok := s.blobs[fid]
+	if !ok {
+		return nil, errors.New("missing blob")
+	}
+	return b, nil
+}
+func (s *gcCLIStore) DeleteBlob(_ context.Context, fid string) error {
+	s.deletes++
+	delete(s.blobs, fid)
+	if s.deletes == s.failDeleteAt {
+		return errors.New("delete response lost")
+	}
+	return nil
+}
 
 func TestOpsChunkGC_DefaultIsReadOnly(t *testing.T) {
 	h, e := master.New(master.Config{AuthorityStoreDir: t.TempDir(), Listen: "127.0.0.1:0"})
@@ -60,7 +88,13 @@ func (s *gcCLIStore) CreateEntry(ctx context.Context, dir string, e *filerpb.Ent
 }
 func (s *gcCLIStore) UpdateEntry(ctx context.Context, dir string, e *filerpb.Entry, expected map[string][]byte) error {
 	s.writes++
-	return s.MemFiler.UpdateEntry(ctx, dir, e, expected)
+	if err := s.MemFiler.UpdateEntry(ctx, dir, e, expected); err != nil {
+		return err
+	}
+	if s.afterUpdate != nil {
+		return s.afterUpdate(e)
+	}
+	return nil
 }
 func (s *gcCLIStore) DeleteEntry(ctx context.Context, dir, name string, expected map[string][]byte) error {
 	s.writes++
@@ -90,5 +124,101 @@ func TestOpsChunkGC_InvalidAdmissionHasNoStoreEffects(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Fatalf("invalid admission dialed %d times", calls)
+	}
+}
+
+func gcPartialFixture(t *testing.T) (*gcCLIStore, *time.Time) {
+	t.Helper()
+	store := &gcCLIStore{MemFiler: chunkstore.NewMemFiler()}
+	oldDial, oldClock := dialChunkFiler, chunkGCNow
+	t.Cleanup(func() { dialChunkFiler = oldDial; chunkGCNow = oldClock })
+	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return store, func() error { return nil }, nil }
+	now := time.Now().Add(2 * time.Hour)
+	chunkGCNow = func() time.Time { return now }
+	ctx := context.Background()
+	if err := store.CreateEntry(ctx, "/gc-partial", &filerpb.Entry{Name: "v1", IsDirectory: true}, true); err != nil {
+		t.Fatal(err)
+	}
+	cat, err := chunkstore.NewCatalog(store, "/gc-partial")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = cat.EnsureVolume(ctx, "v1", chunkstore.Geometry{NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 8}); err != nil {
+		t.Fatal(err)
+	}
+	remote, err := chunkstore.NewChunkRemote(store, store, "/gc-partial/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"orphan-a", "orphan-b"} {
+		if err = remote.Put(ctx, key, []byte(key)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return store, &now
+}
+func runPartialGC() (int, string, string) {
+	return runChunk("gc", "--master", "127.0.0.1:1", "--chunk-filer", "local", "--chunk-path", "/gc-partial", "--apply")
+}
+func TestOpsChunkGC_FinalWriteResponseLostReportsUnknown(t *testing.T) {
+	store, now := gcPartialFixture(t)
+	store.afterUpdate = func(e *filerpb.Entry) error {
+		if e.Name == "_GC_MARK" && strings.Contains(string(e.Content), `"ready":true`) {
+			return errors.New("final write response lost")
+		}
+		return nil
+	}
+	rc, out, _ := runPartialGC()
+	if rc != 1 {
+		t.Fatalf("lost response must fail: rc=%d %s", rc, out)
+	}
+	entry, err := store.LookupEntry(context.Background(), "/gc-partial", "_GC_MARK")
+	if err != nil || !strings.Contains(string(entry.Content), `"ready":true`) {
+		t.Fatalf("fixture did not commit completed mark: %v %v", entry, err)
+	}
+	var body struct {
+		Code string `json:"code"`
+		GC   struct {
+			MarkOutcome string   `json:"mark_outcome"`
+			Unknown     []string `json:"unknown_outcomes"`
+		} `json:"gc"`
+	}
+	if err = json.Unmarshal([]byte(out), &body); err != nil || body.Code == "" || body.GC.MarkOutcome != "unknown" || len(body.GC.Unknown) != 1 || body.GC.Unknown[0] != "completed_mark_write" {
+		t.Fatalf("lost committed outcome discarded: %s %v", out, err)
+	}
+	store.afterUpdate = nil
+	*now = now.Add(2 * time.Hour)
+	rc, out, _ = runPartialGC()
+	var success chunkstore.GCExecution
+	if err = json.Unmarshal([]byte(out), &success); rc != 0 || err != nil || success.Reclaimed != 2 {
+		t.Fatalf("committed mark was not reusable despite error: %d %s %v", rc, out, err)
+	}
+}
+func TestOpsChunkGC_PartialReclaimReportsKnownAndUnknown(t *testing.T) {
+	store, now := gcPartialFixture(t)
+	if rc, out, _ := runPartialGC(); rc != 0 {
+		t.Fatalf("first mark: %d %s", rc, out)
+	}
+	*now = now.Add(2 * time.Hour)
+	store.failDeleteAt = 2
+	rc, out, _ := runPartialGC()
+	if rc != 1 {
+		t.Fatalf("partial failure exit=%d %s", rc, out)
+	}
+	// Both requests took effect, but only the first was acknowledged. The
+	// second is UNKNOWN to the caller; it must not be counted as known success.
+	if store.deletes != 2 || len(store.blobs) != 0 {
+		t.Fatal("partial-effect fixture was not exercised")
+	}
+	var body struct {
+		Code string `json:"code"`
+		GC   struct {
+			Reclaimed   int
+			MarkOutcome string   `json:"mark_outcome"`
+			Unknown     []string `json:"unknown_outcomes"`
+		} `json:"gc"`
+	}
+	if err := json.Unmarshal([]byte(out), &body); err != nil || body.Code == "" || body.GC.Reclaimed != 1 || body.GC.MarkOutcome != "in_progress" || len(body.GC.Unknown) != 1 || body.GC.Unknown[0] != "reclamation" {
+		t.Fatalf("partial effects discarded or overclaimed: %s %v", out, err)
 	}
 }
