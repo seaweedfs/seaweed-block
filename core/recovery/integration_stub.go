@@ -70,6 +70,8 @@ type PrimaryBridge struct {
 	onClose SessionCloseCallback
 	onAck   BridgeDurableAckCallback
 
+	preBarrierHook func(ReplicaID) // tests only; see SetPreBarrierHook
+
 	mu         sync.Mutex
 	senders    map[ReplicaID]*Sender
 	cancels    map[ReplicaID]context.CancelFunc
@@ -129,6 +131,17 @@ func (b *PrimaryBridge) SetOnDurableAck(fn BridgeDurableAckCallback) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.onAck = fn
+}
+
+// SetPreBarrierHook installs a test-only hook that every sender started
+// after this call runs once its base copy and backlog drain are done and
+// before it seals the recovery cut (SealBeforeBarrier). While the hook
+// blocks, the session is live-ready and live writes ship in-session, so a
+// test can place writes in that window deterministically. nil clears it.
+func (b *PrimaryBridge) SetPreBarrierHook(fn func(ReplicaID)) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.preBarrierHook = fn
 }
 
 // StartRebuildSession is shaped like CommandExecutor.StartRebuild:
@@ -222,6 +235,9 @@ func (b *PrimaryBridge) startRebuildSessionLocked(ctx context.Context, conn net.
 		sender = NewSenderWithSink(b.store, b.coord, conn, replicaID, sink)
 	}
 	sender.epoch = epoch
+	if hook := b.preBarrierHook; hook != nil {
+		sender.preBarrierHook = func() { hook(replicaID) }
+	}
 	sender.SetOnDurableAck(func(rid ReplicaID, sid, acknowledgedLSN, primaryS, primaryH uint64) {
 		b.mu.Lock()
 		cb := b.onAck

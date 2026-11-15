@@ -3,6 +3,7 @@ package component_test
 import (
 	"bytes"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -463,6 +464,25 @@ func TestPillar3Slice2_EngineDriven_SameLBAArbitration(t *testing.T) {
 			CtrlAddr:        c.Replica(0).Addr,
 		})
 
+		br, coordRID, ok := c.BlockExecutor(0).DualLanePrimaryBridge()
+		if !ok || br == nil {
+			t.Fatal("BlockExecutor missing dual-lane PrimaryBridge")
+		}
+		// Hold the sender at its pre-barrier point: base copy and backlog
+		// drain done, recovery cut not yet sealed, session live. With a
+		// 12-LBA backlog that window is microseconds wide, so without the
+		// hold the overwrites below raced the cut and got the documented
+		// ErrSinkBarrierSealed ("retain for replay") instead of shipping
+		// in-session. Installed before the probe that starts the rebuild.
+		reached, release := make(chan struct{}), make(chan struct{})
+		var reachedOnce sync.Once
+		br.SetPreBarrierHook(func(recovery.ReplicaID) {
+			reachedOnce.Do(func() { close(reached) })
+			<-release
+		})
+		releaseHold := sync.OnceFunc(func() { close(release) })
+		t.Cleanup(releaseHold)
+
 		c.DriveProbeResult(0, adapter.ProbeResult{
 			ReplicaID:         "replica-0",
 			Success:           true,
@@ -473,14 +493,14 @@ func TestPillar3Slice2_EngineDriven_SameLBAArbitration(t *testing.T) {
 			PrimaryHeadLSN:    seedN,
 		})
 
-		// Wait for engine to emit StartRebuild AND for the bridge to be
-		// reachable (DualLanePrimaryBridge returns once the executor has
-		// the dual-lane config).
-		br, coordRID, ok := c.BlockExecutor(0).DualLanePrimaryBridge()
-		if !ok || br == nil {
-			t.Fatal("BlockExecutor missing dual-lane PrimaryBridge")
+		select {
+		case <-reached:
+		case <-time.After(8 * time.Second):
+			t.Fatalf("sender never reached the pre-barrier point; cmd=%v trace=%v", a.CommandLog(), a.Trace())
 		}
-		waitBridgeLiveReady(t, br, coordRID)
+		if !br.HasActiveSession(coordRID) {
+			t.Fatal("session not live-ready at the pre-barrier hold")
+		}
 
 		// Live-overwrite the SAME LBAs as the backlog. Each Write goes
 		// onto primary's WAL with a fresh LSN > seedN; PushLiveWrite
@@ -504,6 +524,7 @@ func TestPillar3Slice2_EngineDriven_SameLBAArbitration(t *testing.T) {
 			}
 			bRefs[lba] = data
 		}
+		releaseHold() // the overwrites shipped in-session; let the sender seal and barrier
 
 		// Wait for engine's command loop to close: StartRebuild emitted
 		// AND SessionClosedCompleted observed in the adapter's Trace.
@@ -595,20 +616,6 @@ func bridgeLiveReadyOrClosed(bridge interface {
 		time.Sleep(time.Millisecond)
 	}
 	return false
-}
-
-func waitBridgeLiveReady(t *testing.T, bridge interface {
-	HasActiveSession(recovery.ReplicaID) bool
-}, replicaID recovery.ReplicaID) {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if bridge.HasActiveSession(replicaID) {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatalf("bridge session for %s did not become live-ready", replicaID)
 }
 
 func traceIndex(trace []engine.TraceEntry, start int, step, detail string) int {
