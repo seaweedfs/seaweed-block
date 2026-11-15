@@ -460,12 +460,6 @@ func (b *StorageBackend) Read(ctx context.Context, offset int64, p []byte) (int,
 // overlay the partial range, write the full block back.
 // Every write is gated.
 func (b *StorageBackend) Write(ctx context.Context, offset int64, p []byte) (int, error) {
-	// G5-5 instrumentation: log every Write entry. If this line
-	// doesn't appear when the iSCSI initiator writes, the iSCSI
-	// handler is NOT calling our StorageBackend.Write (= bigger
-	// wiring gap, potentially using a different backend instance
-	// or bypassing the durable layer entirely).
-	log.Printf("durable: StorageBackend.Write entry offset=%d len=%d", offset, len(p))
 	release, err := b.admit()
 	if err != nil {
 		log.Printf("durable: StorageBackend.Write gate-rejected offset=%d: %v", offset, err)
@@ -754,11 +748,8 @@ func (b *StorageBackend) observeWrite(ctx context.Context, lba uint32, lsn uint6
 	// Replication fan-out (T4a-6 hook). Error is logged best-effort
 	// unless the ack policy requires observer acknowledgement.
 	if obs == nil {
-		log.Printf("durable: write observer NIL — replication fan-out skipped (lba=%d lsn=%d) — SetWriteObserver not yet wired",
-			lba, lsn)
 		return nil
 	}
-	log.Printf("durable: write observer dispatch lba=%d lsn=%d", lba, lsn)
 	if werr := obs.Observe(ctx, lba, lsn, block); werr != nil {
 		log.Printf("durable: replication fan-out failed lba=%d lsn=%d: %v",
 			lba, lsn, werr)

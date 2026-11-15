@@ -101,6 +101,11 @@ verified the checksum. Independently, the blockvolume log recorded
 the request reached the Seaweed backend rather than stopping at a kernel-only
 control target.
 
+For new phase 163 runs, the backend-path witness is the increase in the
+existing per-volume successful-write byte/operation and storage-write counters
+across the controlled I/O window, bound to one process and volume lineage.
+The historical log evidence above is retained; per-write logging is not required.
+
 ## Phase 164 Hardening Evidence
 
 TestOps run `20260718-015204-af29` passed 24/24 actions. It added partial-start
