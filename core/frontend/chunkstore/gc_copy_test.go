@@ -130,7 +130,7 @@ func TestGC_PublishedUnnamedAttemptRootsUntilDeletingGrace(t *testing.T) {
 	c.f = f
 	oldPath := snapPath(t, f, "v1", "s1")
 	r, _ := NewChunkRemote(f, b, path.Join(catBase, "v1"))
-	if _, e := r.CASHead(ctx, storage.ChunkHeadVersion{Gen: h.Gen, Epoch: h.Epoch}, storage.ChunkHead{Epoch: 1, Holder: "h1"}); e != nil {
+	if _, e := r.CASHead(ctx, storage.ChunkHeadVersion{Gen: h.Gen, Epoch: h.Epoch}, storage.ChunkHead{Epoch: 1, Holder: "h1", RemoteLSN: h.RemoteLSN}); e != nil {
 		t.Fatal(e)
 	}
 	*now = now.Add(DefaultOpDeadline + time.Second)

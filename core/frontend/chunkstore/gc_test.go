@@ -295,7 +295,7 @@ func TestGC_SnapshotAndQualifiedForkAreRoots(t *testing.T) {
 		t.Fatal(e)
 	}
 	r, _ := NewChunkRemote(f, b, path.Join(catBase, "v1"))
-	if _, e := r.CASHead(ctx, storage.ChunkHeadVersion{Gen: h.Gen, Epoch: h.Epoch}, storage.ChunkHead{Epoch: 1, Holder: "h1", Chunks: map[uint64]storage.ChunkRef{}}); e != nil {
+	if _, e := r.CASHead(ctx, storage.ChunkHeadVersion{Gen: h.Gen, Epoch: h.Epoch}, storage.ChunkHead{Epoch: 1, Holder: "h1", RemoteLSN: h.RemoteLSN, Chunks: map[uint64]storage.ChunkRef{}}); e != nil {
 		t.Fatal(e)
 	}
 	for i := 0; i < 2; i++ {
