@@ -2,6 +2,7 @@ package master
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/seaweedfs/seaweed-block/core/authority"
@@ -51,9 +52,9 @@ func (h *Host) SetPromotionEvidenceProvider(p PromotionEvidenceProvider) {
 // authority minter through its normal Run loop.
 func (h *Host) RunLifecycleProductTick() (LifecycleProductTickResult, error) {
 	h.workspaceMu.Lock()
-	defer h.workspaceMu.Unlock()
 	stores := h.Lifecycle()
 	if stores == nil {
+		h.workspaceMu.Unlock()
 		return LifecycleProductTickResult{}, nil
 	}
 	nodes := stores.Nodes.ListNodes()
@@ -65,16 +66,29 @@ func (h *Host) RunLifecycleProductTick() (LifecycleProductTickResult, error) {
 		VerifiedPlacements: len(verified),
 	}
 	h.recordPlacementVerifiedEvents(verified)
+	h.workspaceMu.Unlock()
 	submitted, probeCount, blockedCount, directAsks, err := h.submitPlacementSnapshots(placements)
+	h.workspaceMu.Lock()
+	defer h.workspaceMu.Unlock()
 	if err != nil {
 		return result, err
 	}
+	// A remote probe may have overlapped a placement/move/delete. Never use
+	// its captured intent after that local intent has changed.
+	if !reflect.DeepEqual(placements, stores.Placements.ListPlacements()) {
+		return result, nil
+	}
+	verified = h.verifyPlacements(placements, stores.Nodes.ListNodes())
 	result.PromotionProbes += probeCount
 	result.PromotionBlocked += blockedCount
 	if submitted {
 		result.PublishedAsks++
 	}
 	for _, ask := range directAsks {
+		if err := stores.WorkspaceBindings.CheckAvailable(lifecycle.WorkspaceBinding{VolumeID: ask.VolumeID, DataAddr: ask.DataAddr, CtrlAddr: ask.CtrlAddr}); err != nil {
+			result.SkippedUnverified++
+			continue
+		}
 		if h.assignmentAskAlreadyCurrent(ask.VolumeID, ask.ReplicaID, ask.DataAddr, ask.CtrlAddr) {
 			result.SkippedCurrent++
 			continue
@@ -97,6 +111,10 @@ func (h *Host) RunLifecycleProductTick() (LifecycleProductTickResult, error) {
 			return result, err
 		}
 		for _, ask := range asks {
+			if err := stores.WorkspaceBindings.CheckAvailable(lifecycle.WorkspaceBinding{VolumeID: ask.VolumeID, ServerID: placement.Slots[0].ServerID, DataAddr: ask.DataAddr, CtrlAddr: ask.CtrlAddr}); err != nil {
+				result.SkippedUnverified++
+				continue
+			}
 			if h.assignmentAskAlreadyCurrent(ask.VolumeID, ask.ReplicaID, ask.DataAddr, ask.CtrlAddr) {
 				result.SkippedCurrent++
 				continue
@@ -111,7 +129,25 @@ func (h *Host) RunLifecycleProductTick() (LifecycleProductTickResult, error) {
 }
 
 func (h *Host) submitPlacementSnapshots(placements []lifecycle.PlacementIntent) (bool, int, int, []authority.AssignmentAsk, error) {
+	captured := placements
+
 	if h.obs == nil || h.ctrl == nil {
+		return false, 0, 0, nil, nil
+	}
+	// Explicit RF1 placements use only the server-and-pair verified direct
+	// path below; generic snapshots may select a different same-replica claim.
+	legacy := make([]lifecycle.PlacementIntent, 0, len(placements))
+	for _, p := range placements {
+		_, bound, err := h.lifecycle.WorkspaceBindings.Get(p.VolumeID)
+		if err != nil {
+			return false, 0, 0, nil, err
+		}
+		if !bound {
+			legacy = append(legacy, p)
+		}
+	}
+	placements = legacy
+	if len(placements) == 0 {
 		return false, 0, 0, nil, nil
 	}
 	topology, ok := acceptedTopologyFromPlacementIntents(placements)
@@ -125,6 +161,27 @@ func (h *Host) submitPlacementSnapshots(placements []lifecycle.PlacementIntent) 
 	probeCount += unsupportedProbeCount
 	blockedCount += unsupportedBlockedCount
 	directAsks = append(directAsks, unsupportedDirectAsks...)
+	// Probes above are remote. Only the final local validation and queueing
+	// serialize with workspace mutations, so unrelated CLEAN ACKs can proceed.
+	h.workspaceMu.Lock()
+	defer h.workspaceMu.Unlock()
+	if !reflect.DeepEqual(captured, h.lifecycle.Placements.ListPlacements()) {
+		return false, probeCount, blockedCount, nil, nil
+	}
+	for _, p := range placements {
+		if _, bound, err := h.lifecycle.WorkspaceBindings.Get(p.VolumeID); err != nil {
+			return false, probeCount, blockedCount, nil, err
+		} else if bound {
+			return false, probeCount, blockedCount, nil, nil
+		}
+	}
+	for _, v := range build.Snapshot.Volumes {
+		for _, slot := range v.Slots {
+			if err := h.lifecycle.WorkspaceBindings.CheckAvailable(lifecycle.WorkspaceBinding{VolumeID: v.VolumeID, DataAddr: slot.DataAddr, CtrlAddr: slot.CtrlAddr}); err != nil {
+				return false, probeCount, blockedCount, nil, nil
+			}
+		}
+	}
 	return true, probeCount, blockedCount, directAsks, h.ctrl.SubmitObservedState(build.Snapshot, build.Report)
 }
 

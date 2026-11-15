@@ -16,12 +16,13 @@ import (
 // Retired entries remain as a per-volume marker: explicit volumes never fall
 // back to node-level addresses, even after all their bindings are retired.
 type WorkspaceBinding struct {
-	VolumeID     string `json:"volume_id"`
-	ServerID     string `json:"server_id"`
-	DataAddr     string `json:"data_addr"`
-	CtrlAddr     string `json:"ctrl_addr"`
-	Retired      bool   `json:"retired,omitempty"`
-	RetiredEpoch uint64 `json:"retired_epoch,omitempty"` // idempotent authority retirement event
+	VolumeID       string `json:"volume_id"`
+	ServerID       string `json:"server_id"`
+	DataAddr       string `json:"data_addr"`
+	CtrlAddr       string `json:"ctrl_addr"`
+	Retired        bool   `json:"retired,omitempty"`
+	RetiredEpoch   uint64 `json:"retired_epoch,omitempty"`   // idempotent authority retirement event
+	RetirementOnly bool   `json:"retirement_only,omitempty"` // history before first explicit preparation
 }
 
 type WorkspaceBindingStore struct {
@@ -32,7 +33,24 @@ type WorkspaceBindingStore struct {
 }
 
 func OpenWorkspaceBindingStore(dir string) (*WorkspaceBindingStore, error) {
+	return openWorkspaceBindingStore(dir, syncBindingParent)
+}
+
+func syncBindingParent(dir string) error {
+	f, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Sync()
+}
+
+func openWorkspaceBindingStore(dir string, syncParent func(string) error) (*WorkspaceBindingStore, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, err
+	}
+	// Persist the directory entry before any binding can be acknowledged.
+	if err := syncParent(filepath.Dir(dir)); err != nil {
 		return nil, err
 	}
 	s := &WorkspaceBindingStore{dir: dir, records: map[string][]WorkspaceBinding{}}
@@ -59,6 +77,15 @@ func OpenWorkspaceBindingStore(dir string) (*WorkspaceBindingStore, error) {
 				return nil, fmt.Errorf("workspace bindings: inconsistent record")
 			}
 			seen[r.ServerID] = true
+			if r.RetirementOnly {
+				if !r.Retired || r.RetiredEpoch == 0 || r.DataAddr != "" || r.CtrlAddr != "" {
+					return nil, fmt.Errorf("workspace bindings: invalid retirement watermark")
+				}
+				if err = validateServerID(r.ServerID); err != nil {
+					return nil, err
+				}
+				continue
+			}
 			if err = validateWorkspaceBinding(r); err != nil {
 				return nil, err
 			}
@@ -136,8 +163,22 @@ func (s *WorkspaceBindingStore) Get(volume string) ([]WorkspaceBinding, bool, er
 	if s.uncertain {
 		return nil, false, fmt.Errorf("workspace bindings uncertain; restart required")
 	}
-	list, ok := s.records[volume]
-	return append([]WorkspaceBinding(nil), list...), ok, nil
+	var list []WorkspaceBinding
+	for _, b := range s.records[volume] {
+		if !b.RetirementOnly {
+			list = append(list, b)
+		}
+	}
+	return list, len(list) > 0, nil
+}
+
+func (s *WorkspaceBindingStore) CheckAvailable(b WorkspaceBinding) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.uncertain {
+		return fmt.Errorf("workspace bindings uncertain; restart required")
+	}
+	return bindingCollision(s.records, b)
 }
 
 func (s *WorkspaceBindingStore) Register(b WorkspaceBinding) error {
@@ -173,11 +214,19 @@ func (s *WorkspaceBindingStore) Register(b WorkspaceBinding) error {
 
 func (s *WorkspaceBindingStore) Retire(volume, server string, epoch uint64) error {
 	return s.update(func(all map[string][]WorkspaceBinding) error {
+		found := false
 		for i := range all[volume] {
-			if all[volume][i].ServerID == server && epoch > all[volume][i].RetiredEpoch {
+			if all[volume][i].ServerID != server {
+				continue
+			}
+			found = true
+			if epoch > all[volume][i].RetiredEpoch {
 				all[volume][i].Retired = true
 				all[volume][i].RetiredEpoch = epoch
 			}
+		}
+		if !found {
+			all[volume] = append(all[volume], WorkspaceBinding{VolumeID: volume, ServerID: server, Retired: true, RetiredEpoch: epoch, RetirementOnly: true})
 		}
 		return nil
 	})

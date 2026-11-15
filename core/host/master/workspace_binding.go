@@ -28,28 +28,40 @@ func (s *services) RegisterWorkspaceBinding(ctx context.Context, q *control.Work
 		return nil, workspaceError(fmt.Errorf("workspace binding: unknown server"))
 	}
 	b := lifecycle.WorkspaceBinding{VolumeID: q.GetVolumeId(), ServerID: q.GetServerId(), DataAddr: q.GetDataAddr(), CtrlAddr: q.GetCtrlAddr(), Retired: q.GetRetired()}
-	// Legacy assignments also reserve their live endpoints. Merely preparing
-	// the first explicit target must not make the old source pair reusable.
-	for _, v := range s.host.lifecycle.Volumes.ListVolumes() {
-		if v.Spec.VolumeID == b.VolumeID {
-			continue
-		}
-		line, ok := s.host.Publisher().VolumeAuthorityLine(v.Spec.VolumeID)
-		if !ok {
-			continue
-		}
-		state := s.host.Publisher().WorkspaceState(v.Spec.VolumeID)
-		if state != nil && state.Ack != nil && state.Ack.Epoch == line.Epoch {
-			continue
-		}
-		if b.EndpointsOverlap(lifecycle.WorkspaceBinding{DataAddr: line.DataAddr, CtrlAddr: line.CtrlAddr}) {
-			return nil, workspaceError(fmt.Errorf("workspace binding: endpoint belongs to live assignment"))
-		}
+	if err := s.host.workspaceEndpointsAvailable(b); err != nil {
+		return nil, workspaceError(err)
 	}
 	if err := s.host.lifecycle.WorkspaceBindings.Register(b); err != nil {
 		return nil, workspaceError(err)
 	}
 	return bindingFact(b), nil
+}
+
+// Caller holds workspaceMu through the subsequent local commit. Check both
+// prepared reservations and live legacy lines, including this volume's source.
+func (h *Host) workspaceEndpointsAvailable(b lifecycle.WorkspaceBinding) error {
+	if err := h.lifecycle.WorkspaceBindings.CheckAvailable(b); err != nil {
+		return err
+	}
+	// Legacy assignments also reserve their live endpoints. Merely preparing
+	// the first explicit target must not make the old source pair reusable.
+	for _, v := range h.lifecycle.Volumes.ListVolumes() {
+		line, ok := h.Publisher().VolumeAuthorityLine(v.Spec.VolumeID)
+		if !ok {
+			continue
+		}
+		state := h.Publisher().WorkspaceState(v.Spec.VolumeID)
+		if state != nil && state.Ack != nil && state.Ack.Epoch == line.Epoch {
+			continue
+		}
+		if b.EndpointsOverlap(lifecycle.WorkspaceBinding{DataAddr: line.DataAddr, CtrlAddr: line.CtrlAddr}) {
+			if b.VolumeID == v.Spec.VolumeID && h.workspaceSourceHost(b.VolumeID, line.ReplicaID, line.Epoch) == b.ServerID && b.DataAddr == line.DataAddr && b.CtrlAddr == line.CtrlAddr {
+				continue
+			}
+			return fmt.Errorf("workspace binding: endpoint belongs to live assignment")
+		}
+	}
+	return nil
 }
 
 func (h *Host) workspaceSourceHost(volume, replica string, epoch uint64) string {

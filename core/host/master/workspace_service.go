@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/authority"
+	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -97,8 +98,23 @@ func grantFact(r authority.WorkspaceMoveRecord) *control.WorkspaceGrant {
 }
 
 func (s *services) MoveWorkspace(ctx context.Context, q *control.WorkspaceMove) (*control.WorkspaceGrant, error) {
+	if err := s.workspaceVolume(q.GetVolumeId()); err != nil {
+		return nil, err
+	}
+	// Always bound the configured reader, even when the caller omitted a deadline.
+	readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	head, err := s.host.cfg.WorkspaceHeadReader(readCtx, q.GetVolumeId())
+	if err != nil {
+		return nil, workspaceError(err)
+	}
+	// Remote reads never hold the workspace mutation lock. Re-read every
+	// local precondition below; Publisher checks the expected epoch atomically.
 	s.host.workspaceMu.Lock()
 	defer s.host.workspaceMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, workspaceError(err)
+	}
 	if err := s.workspaceVolume(q.GetVolumeId()); err != nil {
 		return nil, err
 	}
@@ -117,11 +133,7 @@ func (s *services) MoveWorkspace(ctx context.Context, q *control.WorkspaceMove) 
 	if oldHost == "" || !ok || target.ServerID == oldHost || !matched {
 		return nil, status.Error(codes.FailedPrecondition, "move needs known source slot and registered target endpoints")
 	}
-	// Always bound the configured reader, even when the caller omitted a deadline.
-	readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	head, err := s.host.cfg.WorkspaceHeadReader(readCtx, q.GetVolumeId())
-	if err != nil {
+	if err = s.host.workspaceEndpointsAvailable(lifecycle.WorkspaceBinding{VolumeID: q.GetVolumeId(), ServerID: target.ServerID, DataAddr: q.GetTargetDataAddr(), CtrlAddr: q.GetTargetCtrlAddr()}); err != nil {
 		return nil, workspaceError(err)
 	}
 	r, err := s.host.Publisher().MoveWorkspace(ctx, authority.WorkspaceMoveRequest{RequestID: q.GetRequestId(), VolumeID: q.GetVolumeId(), ExpectedReplicaID: q.GetExpectedReplicaId(), ExpectedHost: oldHost, TargetHost: target.ServerID,

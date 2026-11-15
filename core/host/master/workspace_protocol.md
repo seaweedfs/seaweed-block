@@ -32,16 +32,22 @@ binding only after its durable clean ACK. FORCED retires it only after the new
 epoch is issued. Retirement carries the old epoch, making crash recovery and
 old-request replay harmless to a later re-prepared binding. Registration may
 reuse retired ports; a live target must be prepared again before another move.
-Volume deletion removes its binding marker and reservations after deleting
-lifecycle state. Failed deletion can be retried.
+Volume deletion removes its binding marker and reservations only after a clean
+revocation ACK for current authority. Pending moves and queued unassigned explicit
+placement refuse deletion. Canceled queued deletes do not mutate state. Failed
+deletion can be retried. Retirement watermarks are retained even before the first
+explicit binding, without switching a legacy volume to explicit mode.
 
-Bindings are a file-synced, atomic snapshot with directory fsync. Ambiguous
+Bindings are a file-synced, atomic snapshot with directory fsync. Opening the
+store also syncs its parent after directory creation, before admitting writes. Ambiguous
 publication errors fence binding reads/mutations until restart. Startup and
 registration reconcile retirement from persisted ACK/issued move records, so
 a crash between authority persistence and binding retirement is recoverable.
 `QueryWorkspace` returns the per-volume bindings including their retired state.
 
-Host workspace operations and product ticks serialize with `workspaceMu`.
+Host workspace mutations serialize with `workspaceMu`. Remote HEAD reads and
+promotion probes run outside it; local intent, binding and reservation checks are
+repeated under the lock before queueing or committing their results.
 Lock order is host workspace mutex, then Publisher or lifecycle-store locks.
 Initial placement persists under a Publisher unassigned guard; its callback
 must never call Publisher. Store reads do not hold their mutex while calling
