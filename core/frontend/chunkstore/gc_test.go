@@ -164,3 +164,141 @@ func TestGC_UnreachableRequiresTwoMarksAndUploadAge(t *testing.T) {
 		t.Fatalf("young upload admitted: %+v %v", result, e)
 	}
 }
+
+func TestGC_IntentExpiryNeedsTTLAuthorityAndRemoteFence(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		issued, head uint64
+		age          time.Duration
+		authorityErr bool
+		expire       bool
+	}{
+		{"current-holder-old-intent", 1, 1, 2 * time.Hour, false, false},
+		{"higher-issued-but-no-takeover", 2, 1, 2 * time.Hour, false, false},
+		{"takeover-but-no-authority", 1, 2, 2 * time.Hour, false, false},
+		{"unknown-authority", 2, 2, 2 * time.Hour, true, false},
+		{"TTL-not-exceeded", 2, 2, time.Hour, false, false},
+		{"higher-issued-and-fenced", 2, 2, time.Hour + time.Nanosecond, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, b, _, g, now := gcFixture(t)
+			ctx := context.Background()
+			r, _ := NewChunkRemote(f, b, path.Join(catBase, "v1"))
+			if e := r.Put(ctx, "inflight", []byte("protected")); e != nil {
+				t.Fatal(e)
+			}
+			id, e := r.PutIntent(ctx, storage.ChunkIntent{Gen: 0, Epoch: 1, Holder: "h1", Keys: []string{"inflight"}})
+			if e != nil {
+				t.Fatal(e)
+			}
+			ins, e := r.ListIntents(ctx)
+			if e != nil || len(ins) != 1 {
+				t.Fatalf("intent: %+v %v", ins, e)
+			}
+			*now = time.Unix(0, ins[0].CreatedNs).Add(tc.age)
+			// A real remote HEAD fence. The publisher's original expected version
+			// can no longer install after epoch 2 was published.
+			if _, e = r.CASHead(ctx, storage.ChunkHeadVersion{}, storage.ChunkHead{Epoch: tc.head, Holder: "new", Chunks: map[uint64]storage.ChunkRef{}}); e != nil {
+				t.Fatal(e)
+			}
+			g.cfg.IssuedEpoch = func(context.Context, string) (uint64, error) {
+				if tc.authorityErr {
+					return 0, errors.New("authority unavailable")
+				}
+				return tc.issued, nil
+			}
+			result, e := g.Run(ctx)
+			if e != nil {
+				t.Fatal(e)
+			}
+			ins, e = r.ListIntents(ctx)
+			if e != nil {
+				t.Fatal(e)
+			}
+			if (len(ins) == 0) != tc.expire {
+				t.Fatalf("intent %s expired=%v want=%v; %+v", id, len(ins) == 0, tc.expire, result)
+			}
+			if result.Reclaimed != 0 {
+				t.Fatal("one mark reclaimed bytes")
+			}
+			if tc.expire {
+				_, e = r.CASHead(ctx, storage.ChunkHeadVersion{}, storage.ChunkHead{Epoch: 1, Holder: "h1"})
+				if !errors.Is(e, storage.ErrChunkHeadPrecondition) {
+					t.Fatalf("expired publisher can still CAS: %v", e)
+				}
+			}
+		})
+	}
+}
+
+type failingGCListing struct {
+	Filer
+	fail bool
+}
+
+func (f *failingGCListing) ListEntries(ctx context.Context, dir, prefix, after string, limit uint32) ([]*filerpb.Entry, error) {
+	if f.fail {
+		return nil, errors.New("listing unavailable")
+	}
+	return f.Filer.ListEntries(ctx, dir, prefix, after, limit)
+}
+func TestGC_FailedMarkAndRestartNeverReuseCoverage(t *testing.T) {
+	f, b, c, g, now := gcFixture(t)
+	ctx := context.Background()
+	r, _ := NewChunkRemote(f, b, path.Join(catBase, "v1"))
+	if e := r.Put(ctx, "orphan", []byte("orphan")); e != nil {
+		t.Fatal(e)
+	}
+	wrapper := &failingGCListing{Filer: f}
+	c.f = wrapper
+	if _, e := g.Run(ctx); e != nil {
+		t.Fatal(e)
+	}
+	*now = now.Add(2 * time.Hour)
+	wrapper.fail = true
+	if _, e := g.Run(ctx); e == nil {
+		t.Fatal("failed listing accepted")
+	}
+	wrapper.fail = false
+	if result, e := g.Run(ctx); e != nil || result.Reclaimed != 0 {
+		t.Fatalf("failed mark preserved coverage: %+v %v", result, e)
+	}
+	fresh, e := NewCollector(c, b, g.cfg)
+	if e != nil {
+		t.Fatal(e)
+	}
+	*now = now.Add(2 * time.Hour)
+	if result, e := fresh.Run(ctx); e != nil || result.Reclaimed != 0 {
+		t.Fatalf("restart inferred prior mark: %+v %v", result, e)
+	}
+}
+
+func TestGC_SnapshotAndQualifiedForkAreRoots(t *testing.T) {
+	f, b, c, g, now := gcFixture(t)
+	ctx := context.Background()
+	h := publishSource(t, f, b.fakeBlobs, "v1", map[uint64][]byte{0: chunkBytes(0x21)})
+	if _, e := c.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: "s1", RequestID: "req"}, h); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := f.CreateEntry(ctx, catBase, &filerpb.Entry{Name: "v2", IsDirectory: true}, true); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s1", Target: "v2", RequestID: "fork"}); e != nil {
+		t.Fatal(e)
+	}
+	r, _ := NewChunkRemote(f, b, path.Join(catBase, "v1"))
+	if _, e := r.CASHead(ctx, storage.ChunkHeadVersion{Gen: h.Gen, Epoch: h.Epoch}, storage.ChunkHead{Epoch: 1, Holder: "h1", Chunks: map[uint64]storage.ChunkRef{}}); e != nil {
+		t.Fatal(e)
+	}
+	for i := 0; i < 2; i++ {
+		if result, e := g.Run(ctx); e != nil || result.Reclaimed != 0 {
+			t.Fatalf("rooted data reclaimed: %+v %v", result, e)
+		}
+		*now = now.Add(2 * time.Hour)
+	}
+	for _, ref := range h.Chunks {
+		if got, e := r.Get(ctx, ref.Key); e != nil || !bytes.Equal(got, chunkBytes(0x21)) {
+			t.Fatalf("shared bytes: %v", e)
+		}
+	}
+}
