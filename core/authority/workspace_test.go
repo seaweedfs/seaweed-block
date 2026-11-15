@@ -36,11 +36,19 @@ func TestWorkspaceCrashAfterJournalBeforeEpochResumesSameGrant(t *testing.T) {
 		t.Fatal(err)
 	}
 	now = now.Add(2 * time.Second)
-	req := WorkspaceMoveRequest{RequestID: "m", VolumeID: "v", ExpectedReplicaID: "old", ExpectedHost: "old-node", TargetHost: "new-node", ExpectedEpoch: 1, TargetReplicaID: "new", TargetDataAddr: "nd", TargetCtrlAddr: "nc", Kind: "forced", Force: true}
+	req := WorkspaceMoveRequest{RequestID: "m", VolumeID: "v", ExpectedReplicaID: "old", ExpectedHost: "old-node", TargetHost: "new-node", ExpectedEpoch: 1, TargetReplicaID: "old", TargetDataAddr: "nd", TargetCtrlAddr: "nc", Kind: "forced", Force: true}
 	head := WorkspaceHead{Gen: 7, Epoch: 1, Holder: "old-node/old", RemoteLSN: 42}
 	fault.failIssue = true
-	ch, unsubscribe := p.Subscribe("v", "new")
+	ch, unsubscribe := p.Subscribe("v", "old")
 	defer unsubscribe()
+	select {
+	case fact := <-ch:
+		if fact.Epoch != 1 {
+			t.Fatalf("initial authority: %+v", fact)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("missing initial authority catch-up")
+	}
 	if _, err := p.MoveWorkspace(context.Background(), req, head); err == nil {
 		t.Fatal("injected crash ignored")
 	}
@@ -89,7 +97,7 @@ func TestWorkspaceCleanMoveNeedsDetachedHEADAndRevocationAck(t *testing.T) {
 	if _, err := p.RenewWorkspaceLease(ctx, "v", "old", 1); err != nil {
 		t.Fatal(err)
 	}
-	req := WorkspaceMoveRequest{RequestID: "clean", VolumeID: "v", ExpectedReplicaID: "old", ExpectedHost: "old-node", TargetHost: "new-node", ExpectedEpoch: 1, TargetReplicaID: "new", TargetDataAddr: "nd", TargetCtrlAddr: "nc", Kind: "clean"}
+	req := WorkspaceMoveRequest{RequestID: "clean", VolumeID: "v", ExpectedReplicaID: "old", ExpectedHost: "old-node", TargetHost: "new-node", ExpectedEpoch: 1, TargetReplicaID: "old", TargetDataAddr: "nd", TargetCtrlAddr: "nc", Kind: "clean"}
 	head := WorkspaceHead{Gen: 7, Epoch: 1, Holder: "old-node/old", RemoteLSN: 42, Detached: true}
 	if _, err := p.MoveWorkspace(ctx, req, head); err == nil {
 		t.Fatal("clean without ack")
@@ -124,10 +132,10 @@ func TestWorkspaceCleanMoveNeedsDetachedHEADAndRevocationAck(t *testing.T) {
 	if _, err := p.RenewWorkspaceLease(ctx, "v", "old", 1); err == nil {
 		t.Fatal("old host renewed after move")
 	}
-	if _, err := p.RenewWorkspaceLease(ctx, "v", "new", 2); err != nil {
+	if _, err := p.RenewWorkspaceLease(ctx, "v", "old", 2); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.apply(AssignmentAsk{VolumeID: "v", ReplicaID: "old", DataAddr: "old-d", CtrlAddr: "old-c", Intent: IntentRefreshEndpoint}); err == nil {
+	if err := p.apply(AssignmentAsk{VolumeID: "v", ReplicaID: "retired", DataAddr: "old-d", CtrlAddr: "old-c", Intent: IntentRefreshEndpoint}); err == nil {
 		t.Fatal("retired slot overwrote current durable authority")
 	}
 }
@@ -143,7 +151,7 @@ func TestWorkspaceForcedMoveRequiresExplicitForceAndLeaseExpiry(t *testing.T) {
 	if _, err := p.RenewWorkspaceLease(ctx, "v", "old", 1); err != nil {
 		t.Fatal(err)
 	}
-	req := WorkspaceMoveRequest{RequestID: "f", VolumeID: "v", ExpectedReplicaID: "old", ExpectedHost: "old-node", TargetHost: "new-node", ExpectedEpoch: 1, TargetReplicaID: "new", TargetDataAddr: "nd", TargetCtrlAddr: "nc", Kind: "forced", Force: true}
+	req := WorkspaceMoveRequest{RequestID: "f", VolumeID: "v", ExpectedReplicaID: "old", ExpectedHost: "old-node", TargetHost: "new-node", ExpectedEpoch: 1, TargetReplicaID: "old", TargetDataAddr: "nd", TargetCtrlAddr: "nc", Kind: "forced", Force: true}
 	head := WorkspaceHead{Gen: 7, Epoch: 1, Holder: "old-node/old", RemoteLSN: 42}
 	if _, err := p.MoveWorkspace(ctx, req, head); err == nil {
 		t.Fatal("unexpired lease moved")
@@ -185,7 +193,7 @@ func TestWorkspaceMoveCannotIssueEpochWithoutJournal(t *testing.T) {
 	now = now.Add(2 * time.Second)
 	fault.failJournal = true
 	_, err := p.MoveWorkspace(context.Background(), WorkspaceMoveRequest{RequestID: "move-1", VolumeID: "v", ExpectedReplicaID: "old", ExpectedHost: "old-node", TargetHost: "new-node", ExpectedEpoch: 1,
-		TargetReplicaID: "new", TargetDataAddr: "nd", TargetCtrlAddr: "nc", Kind: "forced", Force: true}, WorkspaceHead{Gen: 7, Epoch: 1, Holder: "old-node/old", RemoteLSN: 42})
+		TargetReplicaID: "old", TargetDataAddr: "nd", TargetCtrlAddr: "nc", Kind: "forced", Force: true}, WorkspaceHead{Gen: 7, Epoch: 1, Holder: "old-node/old", RemoteLSN: 42})
 	if err == nil {
 		t.Error("journal failure did not stop move")
 	}

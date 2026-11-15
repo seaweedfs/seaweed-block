@@ -122,6 +122,11 @@ func (p *Publisher) MoveWorkspace(ctx context.Context, req WorkspaceMoveRequest,
 	if err := ctx.Err(); err != nil {
 		return WorkspaceMoveRecord{}, err
 	}
+	// v1 moves a replica between hosts without changing its logical slot.
+	// Refuse before locking or persisting a reservation/authority epoch.
+	if req.ExpectedReplicaID != req.TargetReplicaID {
+		return WorkspaceMoveRecord{}, fmt.Errorf("workspace move: v1 requires the same logical replica id")
+	}
 	if req.RequestID == "" || req.VolumeID == "" || req.ExpectedHost == "" || req.TargetHost == "" || req.ExpectedHost == req.TargetHost || req.ExpectedReplicaID == "" || req.ExpectedEpoch == 0 || req.TargetReplicaID == "" ||
 		req.TargetDataAddr == "" || req.TargetCtrlAddr == "" || (req.Kind != "clean" && req.Kind != "forced") || req.Force != (req.Kind == "forced") {
 		return WorkspaceMoveRecord{}, fmt.Errorf("workspace move: invalid request")
@@ -181,6 +186,10 @@ func (p *Publisher) AckWorkspaceRevocation(ctx context.Context, volume string, a
 	s := cloneWorkspace(p.workspace[volume])
 	if !ok || line.info.ReplicaID != ack.ReplicaID || line.info.Epoch != ack.Epoch || ack.HeadGen == 0 || s == nil || s.Lease == nil || !s.Lease.Revoking {
 		return fmt.Errorf("workspace revoke ACK: stale or unsolicited")
+	}
+	now := p.workspaceNow()
+	if now.UnixNano() >= s.Lease.ExpiresAtNS || !now.Before(p.workspaceLeaseDeadline[volume]) {
+		return fmt.Errorf("workspace revoke ACK: lease expired; forced move required")
 	}
 	if s.Ack != nil && *s.Ack != ack {
 		return fmt.Errorf("workspace revoke ACK changed")

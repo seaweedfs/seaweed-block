@@ -92,3 +92,12 @@ an unqualified HEAD holder, or another replica is refused before journaling.
 The destination provider must use ChunkHolder = new_host + "/" + new_replica_id;
 its projection still uses the logical new_replica_id. Moving the same logical
 replica to a different server is valid; it changes the qualified holder and epoch.
+
+## v1 move identity limit
+
+A workspace move keeps its logical replica ID. The target physical host and
+qualified HEAD holder change, and the epoch advances; expected_replica_id and
+target_replica_id must be equal. ID-changing requests are refused before any
+move journal or authority epoch is persisted. Dynamic subscription/peer changes
+for a different logical slot are outside v1. Use the existing logical replica
+ID for CLEAN and FORCED moves.

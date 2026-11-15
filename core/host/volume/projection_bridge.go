@@ -6,6 +6,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/engine"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"sync/atomic"
 )
 
 // adapterProjector is the narrow seam this bridge needs. Keeps
@@ -71,10 +72,12 @@ type SupersedeProbe interface {
 // I/O. Status surfaces that as replication_role=replica_ready; the
 // frontend projection fails closed by reporting Healthy=false.
 type AdapterProjectionView struct {
-	projector adapterProjector
-	volumeID  string
-	replicaID string
-	probe     SupersedeProbe
+	projector         adapterProjector
+	volumeID          string
+	replicaID         string
+	probe             SupersedeProbe
+	workspaceRequired bool // immutable after Host.New
+	workspaceGuard    atomic.Pointer[WorkspaceLeaseGuard]
 }
 
 // NewAdapterProjectionView wires the bridge. probe may be nil
@@ -107,13 +110,18 @@ func (v *AdapterProjectionView) projectionWithSupersede() (frontend.Projection, 
 	if superseded || (healthy && v.supportingReplicaReady(p.Epoch, p.EndpointVersion)) || v.roleAdmissionFailed() {
 		healthy = false
 	}
-	return frontend.Projection{
+	result := frontend.Projection{
 		VolumeID:        v.volumeID,
 		ReplicaID:       v.replicaID,
 		Epoch:           p.Epoch,
 		EndpointVersion: p.EndpointVersion,
 		Healthy:         healthy,
-	}, superseded
+	}
+	if v.workspaceRequired {
+		guard := v.workspaceGuard.Load()
+		result.Healthy = result.Healthy && guard != nil && guard.permits(result)
+	}
+	return result, superseded
 }
 
 func (v *AdapterProjectionView) supportingReplicaReady(selfEpoch, selfEV uint64) bool {
