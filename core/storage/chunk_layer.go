@@ -106,6 +106,7 @@ type chunkLayerImpl struct {
 	testAfterAdmitHook       func()                 // right after a capture is admitted
 	testAfterStageHook       func(round int)        // after each pre-copy staging round
 	testAfterStageReadHook   func(idx uint64)       // after a staging read, before its result is kept
+	testAfterBarrierSyncHook func(h uint64)         // under the capture barrier, right after Sync fixed H
 	syncDirFn                func(dir string) error // directory fsync after a rename; syncDir in production
 
 	// Absence: chunks whose local bytes are not authoritative (fresh host,
@@ -685,6 +686,9 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	barrier := time.Now()
 	h, err := l.s.Sync()
 	st.SyncNs = time.Since(barrier).Nanoseconds()
+	if hook := l.testAfterBarrierSyncHook; hook != nil && err == nil {
+		hook(h)
+	}
 	if err != nil {
 		l.s.captureMu.Unlock()
 		st.BarrierPauseNs = time.Since(barrier).Nanoseconds()

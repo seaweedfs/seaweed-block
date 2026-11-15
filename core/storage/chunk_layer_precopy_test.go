@@ -12,6 +12,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 // precopyLayer attaches a fresh layer with the given barrier bound and
@@ -348,4 +349,75 @@ func TestChunkPrecopy_RecoverAfterStagingInvalidatesTheStage(t *testing.T) {
 		t.Fatalf("HEAD at H=%d: LBA 0 is %#x..., want the recovered %#x... (a stage from before Recover reused)", r.H, got[0], want[0])
 	}
 	assertNoIntentsLeft(t, f)
+}
+
+// partialBatchPrefix leaves a complete, CRC-valid record for want at the
+// next LSN plus a torn second record through a real partial pwrite; the
+// failed batch publishes neither (same-open Recover would).
+func partialBatchPrefix(t *testing.T, s *WALStore, want []byte) {
+	t.Helper()
+	limit := walEntryHeaderSize + ctBlockSize + walEntryHeaderSize + 17
+	s.wal.batchWriteAt = func(data []byte, off int64) (int, error) {
+		if len(data) <= limit {
+			return 0, errors.New("fixture needs two whole records")
+		}
+		n, err := s.fd.WriteAt(data[:limit], off)
+		if err != nil {
+			return n, err
+		}
+		return n, io.ErrShortWrite
+	}
+	_, err := s.WriteBatch(0, [][]byte{want, makeBlock(ctBlockSize, 0xb8)})
+	s.wal.batchWriteAt = nil
+	if !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("partial batch: %v", err)
+	}
+}
+
+// A cut parked right after its barrier Sync fixed H: a same-open Recover
+// that would republish a newer complete record (H+1) waits for the
+// barrier, so the cut's HEAD at H never holds post-H bytes; the recovered
+// bytes are published by the next cut.
+func TestChunkCut_RecoverWaitsForTheCaptureBarrier(t *testing.T) {
+	s, f, l, w := precopyLayer(t, 0, 2) // no bound: the barrier copies all
+	newer := makeBlock(ctBlockSize, 0xa7)
+	partialBatchPrefix(t, s, newer)
+	recovered := make(chan error, 1)
+	parked := false
+	l.testAfterBarrierSyncHook = func(h uint64) {
+		parked = true
+		go func() { _, err := s.Recover(); recovered <- err }()
+		select {
+		case err := <-recovered:
+			t.Errorf("Recover ran inside the capture barrier after Sync fixed H=%d (err %v)", h, err)
+		case <-time.After(300 * time.Millisecond): // held: it waits for the barrier
+		}
+	}
+	r, err := l.Cut(ctTimeout(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !parked {
+		t.Fatal("the cut never reached the post-Sync hook")
+	}
+	assertEveryHeadIsPrefixImage(t, f, w) // HEAD at H is the image at H: no 0xa7
+	if got := f.imageOf(t, r.Head)[:ctBlockSize]; bytes.Equal(got, newer) {
+		t.Fatalf("HEAD at H=%d holds the post-H recovered bytes", r.H)
+	}
+	select {
+	case err := <-recovered:
+		if err != nil {
+			t.Fatalf("Recover after the barrier: %v", err)
+		}
+	case <-time.After(ctLocalBound):
+		t.Fatal("Recover never ran after the barrier was released")
+	}
+	l.testAfterBarrierSyncHook = nil
+	r2, err := l.Cut(ctTimeout(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := f.imageOf(t, r2.Head)[:ctBlockSize]; !bytes.Equal(got, newer) || r2.H <= r.H {
+		t.Fatalf("next cut H=%d (prev %d): LBA 0 %#x..., want the recovered %#x...", r2.H, r.H, got[0], newer[0])
+	}
 }

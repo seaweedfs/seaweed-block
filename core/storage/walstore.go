@@ -67,8 +67,8 @@ type WALStore struct {
 	lifecycleMu sync.RWMutex
 	mu          sync.RWMutex
 	// captureMu is the chunk layer's capture write barrier: Write,
-	// WriteBatch, ApplyEntry and WriteExtentDirect hold it shared (before
-	// lifecycleMu); a quiesced cut holds it exclusively. Order:
+	// WriteBatch, ApplyEntry, WriteExtentDirect and Recover hold it shared
+	// (before lifecycleMu); a quiesced cut holds it exclusively. Order:
 	// captureMu -> lifecycleMu -> mu.
 	captureMu sync.RWMutex
 	// chunk is the attached chunk layer's hooks; nil when none.
@@ -431,6 +431,12 @@ func (s *WALStore) FlusherInstrumentation() FlusherInstrumentationStatus {
 // Idempotent: calling Recover twice on the same on-disk state yields
 // identical results.
 func (s *WALStore) Recover() (uint64, error) {
+	// Recover republishes the dirty map like a write: it holds the capture
+	// barrier shared, so it can never publish bytes between a quiesced
+	// cut's Sync (which fixes H) and that cut's copy.
+	// Order: captureMu -> lifecycleMu -> mu.
+	s.captureMu.RLock()
+	defer s.captureMu.RUnlock()
 	s.lifecycleMu.RLock()
 	defer s.lifecycleMu.RUnlock()
 	s.mu.Lock()
