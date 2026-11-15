@@ -126,6 +126,12 @@ type ProviderConfig struct {
 	ChunkRemoteFor func(volumeID string) (storage.ChunkRemote, error)
 	// ChunkBlocks is the number of blocks per chunk. Zero: 1024.
 	ChunkBlocks uint32
+	// ChunkAttachCheck, if set, runs before every chunk layer attach, ahead
+	// of any remote read or CAS, with the volume's local geometry. A
+	// non-nil error refuses the attach. blockvolume wires it to the VOLUME
+	// entry's attach rules (B9 W2 §4.2): create VOLUME when missing, refuse
+	// a geometry mismatch and a fork whose HEAD is not written yet.
+	ChunkAttachCheck func(ctx context.Context, volumeID string, g ChunkGeometry) error
 	// ChunkHolder names this node in HEAD. Zero: the replica ID.
 	ChunkHolder string
 	// ChunkReadMissTimeout bounds one remote fetch of an absent block.

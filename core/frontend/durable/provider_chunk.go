@@ -26,6 +26,13 @@ var ErrNotChunkVolume = errors.New("durable: volume has no chunk layer")
 // assignment is not visible in the projection.
 var ErrChunkAwaitingAuthority = errors.New("durable: chunk layer awaiting master authority")
 
+// ChunkGeometry is a chunk volume's shape as this host serves it.
+type ChunkGeometry struct {
+	NumBlocks   uint64
+	BlockSize   uint32
+	ChunkBlocks uint32
+}
+
 // ErrChunkNotPrimary and ErrChunkEpochStale are the causes of a cut the
 // capture admission refused (wrapped with storage.ErrChunkCaptureRefused):
 // the projection is not a healthy primary of the volume here (the caller
@@ -201,6 +208,17 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 	proj := p.view.Projection()
 	if !chunkAuthority(proj, volumeID) {
 		return nil, errChunkNoAuthority
+	}
+	if check := p.cfg.ChunkAttachCheck; check != nil {
+		g := ChunkGeometry{NumBlocks: uint64(ws.NumBlocks()), BlockSize: uint32(ws.BlockSize()), ChunkBlocks: p.cfg.ChunkBlocks}
+		cctx, cancel := context.WithCancel(ctx)
+		stop := context.AfterFunc(p.closeCtx, cancel)
+		err := check(cctx, volumeID, g)
+		stop()
+		cancel()
+		if err != nil {
+			return nil, fmt.Errorf("durable: chunk attach check for %s: %w", volumeID, err)
+		}
 	}
 	inner, err := p.cfg.ChunkRemoteFor(volumeID)
 	if err != nil {
