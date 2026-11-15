@@ -62,8 +62,18 @@ func TestIntegration_OpsChunkGC_RealMasterAndStore(t *testing.T) {
 	if err != nil || len(conf.GetChunks()) != 0 {
 		t.Fatalf("fsync configuration unavailable: %v %v", conf, err)
 	}
-	compact := strings.Join(strings.Fields(string(conf.Content)), "")
-	if !strings.Contains(compact, `location_prefix:"/swblock/"`) || !strings.Contains(compact, `collection:"swblock"`) || !strings.Contains(compact, "fsync:true") {
+	var persisted struct {
+		Locations []struct {
+			LocationPrefix string `json:"locationPrefix"`
+			Collection     string `json:"collection"`
+			Fsync          bool   `json:"fsync"`
+		} `json:"locations"`
+	}
+	if err := json.Unmarshal(conf.Content, &persisted); err != nil || len(persisted.Locations) != 1 {
+		t.Fatalf("invalid filer configuration: %s %v", conf.Content, err)
+	}
+	rule := persisted.Locations[0]
+	if rule.LocationPrefix != "/swblock/" || rule.Collection != "swblock" || !rule.Fsync {
 		t.Fatalf("unexpected filer configuration: %s", conf.Content)
 	}
 	t.Logf("verified filer configuration: %s", conf.Content)

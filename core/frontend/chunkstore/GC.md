@@ -32,7 +32,10 @@ The first copy-sweep RED uses the prior retain-forever behavior (a no-op SweepCo
 
 Use the existing `sw-block ops chunk` surface rather than a background job: the
 operator explicitly chooses the catalog namespace and when deletion is allowed.
-The default is a read-only JSON preview:
+Before applied GC, configure durable filer writes for the namespace using the
+SeaweedFS shell, e.g. `fs.configure -locationPrefix=/swblock/ -collection=swblock -fsync -apply`,
+and retain that configuration. The catalog path must fall under the configured
+prefix. A different namespace needs its matching rule. The default is a read-only JSON preview:
 
 ```sh
 sw-block ops chunk gc --chunk-filer 127.0.0.1:18888 \
