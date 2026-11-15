@@ -164,3 +164,26 @@ func TestDispatch_UnsupportedOperations(t *testing.T) {
 		}
 	}
 }
+
+// The counters the fsync gate reads: every received request is counted
+// by kind before the backend call, FUA writes separately, and failures.
+func TestDispatch_CountersCountReceivedRequests(t *testing.T) {
+	c := &counters{}
+	h := handler{backend: &failingBackend{failSync: true, err: errors.New("boom")}, size: testSize, stats: c}
+	ctx := context.Background()
+	buf := make([]byte, 4096)
+	h.handle(ctx, request{op: ioOpRead, nrSectors: 8}, buf)
+	h.handle(ctx, request{op: ioOpWrite, nrSectors: 8}, buf)
+	h.handle(ctx, request{op: ioOpWrite, flags: ioFlagFUA, nrSectors: 8}, buf) // sync fails -> error
+	h.handle(ctx, request{op: ioOpFlush}, nil)                                 // sync fails -> error
+	h.handle(ctx, request{op: ioOpFlush}, nil)
+	h.handle(ctx, request{op: ioOpDiscard, nrSectors: 8}, buf) // -EOPNOTSUPP -> error
+	got := c.snapshot()
+	want := Stats{ReadRequests: 1, WriteRequests: 2, FUAWrites: 1, FlushRequests: 2, OtherRequests: 1, Errors: 4}
+	if got != want {
+		t.Fatalf("counters %+v, want %+v", got, want)
+	}
+	if (handler{backend: &failingBackend{}, size: testSize}).handle(ctx, request{op: ioOpFlush}, nil) != 0 {
+		t.Fatal("an uncounted handler failed a flush")
+	}
+}

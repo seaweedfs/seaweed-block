@@ -59,6 +59,17 @@ func (t *Target) Start() (string, error) {
 	return d.Path(), nil
 }
 
+// Stats returns the device's request counters (zero before Start).
+func (t *Target) Stats() Stats {
+	t.mu.Lock()
+	d := t.device
+	t.mu.Unlock()
+	if d == nil {
+		return Stats{}
+	}
+	return d.Stats()
+}
+
 // Close stops and deletes the device.
 func (t *Target) Close() error {
 	if t == nil {

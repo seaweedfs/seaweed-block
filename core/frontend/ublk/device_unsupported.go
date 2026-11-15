@@ -21,5 +21,8 @@ func Start(cfg Config) (*Device, error) {
 // Path is empty off Linux.
 func (d *Device) Path() string { return "" }
 
+// Stats is empty off Linux.
+func (d *Device) Stats() Stats { return Stats{} }
+
 // Close is a no-op off Linux.
 func (d *Device) Close() error { return nil }

@@ -2,6 +2,7 @@ package ublk
 
 import (
 	"context"
+	"sync/atomic"
 	"syscall"
 )
 
@@ -38,13 +39,68 @@ type request struct {
 // handler maps ublk requests onto a Backend.
 type handler struct {
 	backend Backend
-	size    uint64 // device size in bytes
+	size    uint64    // device size in bytes
+	stats   *counters // nil: not counted
+}
+
+// Stats are the device's request counters since it started. A request is
+// counted when it is received, before the backend call; Errors counts the
+// requests that completed with a negative result.
+type Stats struct {
+	ReadRequests  uint64 `json:"read_requests"`
+	WriteRequests uint64 `json:"write_requests"`
+	FlushRequests uint64 `json:"flush_requests"`
+	FUAWrites     uint64 `json:"fua_writes"`
+	OtherRequests uint64 `json:"other_requests"`
+	Errors        uint64 `json:"errors"`
+}
+
+type counters struct {
+	reads, writes, flushes, fuaWrites, others, errors atomic.Uint64
+}
+
+func (c *counters) snapshot() Stats {
+	if c == nil {
+		return Stats{}
+	}
+	return Stats{
+		ReadRequests: c.reads.Load(), WriteRequests: c.writes.Load(), FlushRequests: c.flushes.Load(),
+		FUAWrites: c.fuaWrites.Load(), OtherRequests: c.others.Load(), Errors: c.errors.Load(),
+	}
+}
+
+func (c *counters) count(r request) {
+	if c == nil {
+		return
+	}
+	switch r.op {
+	case ioOpRead:
+		c.reads.Add(1)
+	case ioOpWrite:
+		c.writes.Add(1)
+		if r.flags&ioFlagFUA != 0 {
+			c.fuaWrites.Add(1)
+		}
+	case ioOpFlush:
+		c.flushes.Add(1)
+	default:
+		c.others.Add(1)
+	}
 }
 
 // handle serves one request against buf (len >= nrSectors<<9 for reads
 // and writes) and returns the ublk result: bytes transferred, 0 for a
 // flush, or a negative errno.
 func (h handler) handle(ctx context.Context, r request, buf []byte) int32 {
+	h.stats.count(r)
+	res := h.serve(ctx, r, buf)
+	if res < 0 && h.stats != nil {
+		h.stats.errors.Add(1)
+	}
+	return res
+}
+
+func (h handler) serve(ctx context.Context, r request, buf []byte) int32 {
 	switch r.op {
 	case ioOpFlush:
 		if err := h.backend.Sync(ctx); err != nil {

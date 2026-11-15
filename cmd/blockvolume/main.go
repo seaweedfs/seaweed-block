@@ -1199,6 +1199,9 @@ func run(f flags) int {
 			_ = h.Close()
 			return 1
 		}
+		if status != nil {
+			status.SetUblkStatusSource(ublkTarget)
+		}
 		_ = json.NewEncoder(os.Stdout).Encode(ublkReadyLine{
 			Component: "blockvolume",
 			Phase:     "ublk-ready",

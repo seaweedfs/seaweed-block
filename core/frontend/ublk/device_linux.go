@@ -28,6 +28,7 @@ type Device struct {
 	ctrl   *uring
 	charFD int
 	queues []*queue
+	stats  *counters
 
 	cancel    context.CancelFunc
 	closeOnce sync.Once
@@ -121,7 +122,8 @@ func Start(cfg Config) (*Device, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	d.cancel = cancel
-	h := handler{backend: cfg.Backend, size: cfg.Size}
+	d.stats = &counters{}
+	h := handler{backend: cfg.Backend, size: cfg.Size, stats: d.stats}
 	for q := 0; q < cfg.Queues; q++ {
 		qu, err := newQueue(q, cfg, d.charFD, h)
 		if err != nil {
@@ -143,6 +145,9 @@ func Start(cfg Config) (*Device, error) {
 
 // Path is the block device, /dev/ublkbN.
 func (d *Device) Path() string { return d.path }
+
+// Stats returns the request counters since the device started.
+func (d *Device) Stats() Stats { return d.stats.snapshot() }
 
 // Close stops the device (outstanding fetches abort), waits for the queue
 // threads, and deletes the device.
