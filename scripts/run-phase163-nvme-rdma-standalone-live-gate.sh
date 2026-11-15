@@ -165,6 +165,11 @@ NBD_PATH="$(cat "/sys/kernel/config/nvmet/subsystems/${NQN}/namespaces/1/device_
 [[ -b "${NBD_PATH}" ]]
 write_summary "backend_bridge_device=${NBD_PATH}"
 
+# The successful-write profile is the backend-path witness; no per-write log
+# is required. Bind both samples to this binary/process and volume lineage.
+sudo python3 "${ROOT}/scripts/phase163-backend-write-proof.py" capture \
+  "${BIN}/blockvolume" 127.0.0.1:16334 >"${ARTIFACT_DIR}/backend-before.json"
+
 ssh -i "${HOST_SSH_KEY}" -o BatchMode=yes "${HOST_SSH_USER}@${HOST_SSH_ADDR}" \
   "sudo bash -s" >"${ARTIFACT_DIR}/host-io.txt" <<HOST
 set -euo pipefail
@@ -203,7 +208,11 @@ HOST
 grep -q '^linux_nvme_connect_rdma_succeeded=true$' "${ARTIFACT_DIR}/host-io.txt"
 grep -q '^standalone_write_read_verified=true$' "${ARTIFACT_DIR}/host-io.txt"
 grep -q '^flush_verified=true$' "${ARTIFACT_DIR}/host-io.txt"
-grep -a -q 'durable: write observer dispatch lba=0 lsn=' "${ARTIFACT_DIR}/blockvolume.log"
+sudo python3 "${ROOT}/scripts/phase163-backend-write-proof.py" capture \
+  "${BIN}/blockvolume" 127.0.0.1:16334 >"${ARTIFACT_DIR}/backend-after.json"
+python3 "${ROOT}/scripts/phase163-backend-write-proof.py" check \
+  "${ARTIFACT_DIR}/backend-before.json" "${ARTIFACT_DIR}/backend-after.json" \
+  >"${ARTIFACT_DIR}/backend-write-delta.json"
 write_summary "linux_nvme_connect_rdma_succeeded=true"
 write_summary "standalone_write_read_verified=true"
 write_summary "flush_verified=true"
