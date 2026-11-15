@@ -923,10 +923,12 @@ func (s *WALStore) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
 	if len(data) != int(s.sb.BlockSize) {
 		return fmt.Errorf("storage: apply data size %d != block size %d", len(data), s.sb.BlockSize)
 	}
-	s.mu.RLock()
-	closed := s.closed
-	s.mu.RUnlock()
-	if closed {
+	// Same publication order as Write/WriteBatch: lifecycleMu -> mu ->
+	// WAL mutex, then dirty shard (never held together). The flusher reads
+	// nextLSN under mu before scanning; no shard lock may acquire mu.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
 		return errors.New("storage: ApplyEntry after Close")
 	}
 	dataCopy := make([]byte, len(data))
@@ -944,8 +946,6 @@ func (s *WALStore) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
 	}
 	s.dm.put(uint64(lba), walRelOff, lsn, uint32(len(dataCopy)))
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if lsn >= s.nextLSN {
 		s.nextLSN = lsn + 1
 	}
