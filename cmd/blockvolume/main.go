@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -35,13 +36,14 @@ import (
 )
 
 type flags struct {
-	masterAddr string
-	serverID   string
-	volumeID   string
-	replicaID  string
-	dataAddr   string
-	ctrlAddr   string
-	hbInterval time.Duration
+	masterAddr     string
+	serverID       string
+	volumeID       string
+	replicaID      string
+	dataAddr       string
+	ctrlAddr       string
+	hbInterval     time.Duration
+	workspaceLease bool
 	// printReadyLine: test-only flag — emits one structured JSON
 	// line to stdout on the FIRST received assignment with
 	// Epoch > 0. L2 subprocess smoke uses this to assert route
@@ -148,6 +150,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.dataAddr, "data-addr", "", "data-path address (required)")
 	fs.StringVar(&f.ctrlAddr, "ctrl-addr", "", "control-path address (required)")
 	fs.DurationVar(&f.hbInterval, "heartbeat-interval", 2*time.Second, "heartbeat send interval")
+	fs.BoolVar(&f.workspaceLease, "workspace-lease", false, "walstore-chunk workspace: require host-owned master lease; fail closed when unavailable")
 	fs.BoolVar(&f.printReadyLine, "t0-print-ready", false, "internal test-only: emit one structured JSON line on stdout on first assignment")
 	fs.BoolVar(&f.enableT1Readiness, "t1-readiness", false, "enable readiness bridge (HealthyPathExecutor) so adapter projection reaches Healthy")
 	fs.StringVar(&f.statusAddr, "status-addr", "", "address for the status HTTP endpoint (e.g. 127.0.0.1:0); empty disables")
@@ -229,6 +232,9 @@ func parseFlags(args []string) (flags, error) {
 	case "smartwal", "walstore", "parallel-walstore", "walstore-chunk":
 	default:
 		return flags{}, fmt.Errorf("--durable-impl=%q invalid; want smartwal, walstore, parallel-walstore, or walstore-chunk", f.durableImpl)
+	}
+	if f.workspaceLease && (f.durableRoot == "" || f.durableImpl != "walstore-chunk") {
+		return flags{}, fmt.Errorf("--workspace-lease requires --durable-root and --durable-impl=walstore-chunk")
 	}
 	if err := validateChunkFlags(f); err != nil {
 		return flags{}, err
@@ -490,6 +496,7 @@ func run(f flags) int {
 		HeartbeatInterval: f.hbInterval,
 		ReadyMarker:       readyCh,
 		EnableT1Readiness: f.enableT1Readiness,
+		WorkspaceLease:    f.workspaceLease,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "blockvolume:", err)
@@ -538,6 +545,7 @@ func run(f flags) int {
 	// accept connections.
 	var provider frontend.Provider
 	var durableProv *durable.DurableProvider
+	var workspaceRemoteFor func(string) (storage.ChunkRemote, error)
 	if f.durableRoot != "" {
 		cfg := durable.ProviderConfig{
 			Impl:                          durable.ImplName(f.durableImpl),
@@ -557,6 +565,7 @@ func run(f flags) int {
 			cfg.ChunkHolder = chunkHolder(f)
 			if chunkErr == nil {
 				cfg.ChunkRemoteFor = chunk.remoteFor
+				workspaceRemoteFor = chunk.remoteFor
 				cfg.ChunkAttachCheck = chunkAttachCheck(chunk.catalog)
 				defer chunk.close()
 			}
@@ -1110,15 +1119,35 @@ func run(f flags) int {
 		}
 	}
 
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	<-sig
-
+	shutdownCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
+	var leaseRequests <-chan workspaceStopRequest
+	var leaseDone <-chan error
+	if f.workspaceLease {
+		leaseRequests, leaseDone = startWorkspaceLease(shutdownCtx, h)
+	}
+	var leaseStop *workspaceStopRequest
+	select {
+	case <-shutdownCtx.Done():
+	case request := <-leaseRequests:
+		leaseStop = &request
+	case err := <-leaseDone:
+		fmt.Fprintln(os.Stderr, "blockvolume: workspace lease stopped:", err)
+		leaseDone = nil
+	}
+	// The main goroutine owns shutdown. The lease callback waits for this
+	// exact drain; it cannot ACK a merely requested or failed close.
+	h.FenceWorkspaceLease()
+	var drainErr error
+	if leaseStop != nil && durableProv != nil {
+		drainErr = durableProv.Backend(f.volumeID).StopIO(leaseStop.ctx, "workspace lease fenced")
+	}
+	h.SetFrontendTargets(nil)
 	if nvmeTarget != nil {
-		_ = nvmeTarget.Close()
+		drainErr = errors.Join(drainErr, nvmeTarget.Close())
 	}
 	if iscsiTarget != nil {
-		_ = iscsiTarget.Close()
+		drainErr = errors.Join(drainErr, iscsiTarget.Close())
 	}
 	// Tear down replication BEFORE durable storage close (LIFO
 	// listener lifecycle). Listener closes its accept loop +
@@ -1130,18 +1159,35 @@ func run(f flags) int {
 		replListen.Stop()
 	}
 	if replVolume != nil {
-		_ = replVolume.Close()
+		drainErr = errors.Join(drainErr, replVolume.Close())
 	}
 	// T3b: close DurableProvider in correct order — Provider.Close
 	// closes backends first (flags them closed) then storage files
 	// (releases fd + final fsync).
 	if durableProv != nil {
-		_ = durableProv.Close()
+		drainErr = errors.Join(drainErr, durableProv.Close())
 	}
 	if status != nil {
 		shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
 		_ = status.Close(shutCtx)
 		shutCancel()
+	}
+	if leaseStop != nil {
+		gen := uint64(0)
+		if drainErr == nil {
+			gen, drainErr = workspaceDetachedGeneration(leaseStop.ctx, workspaceRemoteFor, leaseStop.id, chunkHolder(f))
+		}
+		leaseStop.reply <- workspaceStopResult{gen: gen, err: drainErr}
+	}
+	if leaseDone != nil {
+		select {
+		case err := <-leaseDone:
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "blockvolume: workspace lease closeout:", err)
+			}
+		case <-time.After(3 * time.Second):
+			fmt.Fprintln(os.Stderr, "blockvolume: workspace lease closeout deadline")
+		}
 	}
 	if err := h.Close(); err != nil {
 		fmt.Fprintln(os.Stderr, "blockvolume: close:", err)
