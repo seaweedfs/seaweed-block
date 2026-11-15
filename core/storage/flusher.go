@@ -155,21 +155,12 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 		store.mu.RUnlock()
 		return nil
 	}
-	// Writers publish their WAL record, dirty entry and nextLSN under mu.
-	// Take a cut before scanning shards: a later shard can otherwise include
-	// a newer write while an earlier shard omitted its predecessor.
-	cutLSN := store.nextLSN - 1
-	store.mu.RUnlock()
-
 	snapshotStart := time.Now()
+	// Hold the publication lock across all shards: a later shard must not
+	// include a write whose predecessor was omitted from an earlier shard.
+	// Release before WAL reads, extent writes or fsync.
 	entries := store.dm.snapshot()
-	eligible := entries[:0]
-	for _, e := range entries {
-		if e.LSN <= cutLSN {
-			eligible = append(eligible, e)
-		}
-	}
-	entries = eligible
+	store.mu.RUnlock()
 	if len(entries) == 0 {
 		return nil
 	}
@@ -225,9 +216,9 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 
 	// Step 3: advance the on-disk checkpoint to the highest LSN
 	// that was successfully flushed in this cycle. Because we
-	// processed the entire snapshot up to the pre-scan cut, every entry
+	// processed the entire consistent snapshot, every entry
 	// with LSN <= maxLSN is in extent or superseded by a retained newer
-	// WAL record. Writes beyond the cut remain dirty for the next cycle.
+	// WAL record. Concurrent writes remain dirty for the next cycle.
 	if maxLSN > 0 {
 		if err := store.persistCheckpoint(maxLSN); err != nil {
 			return fmt.Errorf("flusher: persist checkpoint %d: %w", maxLSN, err)
