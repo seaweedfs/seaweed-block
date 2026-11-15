@@ -674,7 +674,9 @@ func (v *ReplicationVolume) enqueueLocalWrite(w LocalWrite) (*orderedLocalWrite,
 // restored host's frontier seed (its WAL continues at HEAD.remote_lsn+1)
 // moves that LSN later, and whoever moves it calls this before the volume
 // serves I/O. It is refused while any write is pending or in flight, never
-// dropping one, and lsn never moves backwards; equal is a no-op.
+// dropping one, and lsn never moves backwards; equal is a no-op. It moves
+// only the ordering cursor: entries already dispatched to peer queues
+// carry LSNs below it and are untouched (an RF=1 volume has no peers).
 func (v *ReplicationVolume) RebaseShipLSN(lsn uint64) error {
 	v.orderMu.Lock()
 	defer v.orderMu.Unlock()

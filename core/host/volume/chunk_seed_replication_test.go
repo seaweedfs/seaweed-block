@@ -99,7 +99,9 @@ func restoredHostWrites(t *testing.T, inheritedLSN uint64, observerAfterSeed boo
 		t.Fatal("no durable backend for v1")
 	}
 	if !observerAfterSeed {
-		sb.SetWriteObserver(rv)
+		if err := sb.SetWriteObserver(rv); err != nil {
+			t.Fatalf("install the write observer: %v", err)
+		}
 	}
 
 	openCtx, openCancel := context.WithTimeout(ctx, 10*time.Second)
@@ -119,7 +121,9 @@ func restoredHostWrites(t *testing.T, inheritedLSN uint64, observerAfterSeed boo
 		time.Sleep(20 * time.Millisecond)
 	}
 	if observerAfterSeed {
-		sb.SetWriteObserver(rv)
+		if err := sb.SetWriteObserver(rv); err != nil {
+			t.Fatalf("install the write observer: %v", err)
+		}
 	}
 
 	// A frontend write and flush must complete (bounded here so a hang
