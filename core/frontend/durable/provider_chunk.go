@@ -276,6 +276,7 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 		if err != nil {
 			return nil, fmt.Errorf("durable: restore HEAD claim: %w", err)
 		}
+		cfg.RestoreGuard = &storage.ChunkHeadVersion{Gen: head.Gen, Epoch: head.Epoch}
 		// The absence bitmap is installed by AttachChunkLayer before recovery
 		// can expose I/O. The durable fresh marker survives any earlier crash.
 		// With no remote HEAD this is a new lineage, not restoration. Local

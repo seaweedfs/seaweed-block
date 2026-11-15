@@ -140,6 +140,10 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 		l.cancel()
 		return nil, fmt.Errorf("storage: chunk layer attach: read HEAD: %w", err)
 	}
+	if cfg.RestoreGuard != nil && (head.Gen != cfg.RestoreGuard.Gen || head.Epoch != cfg.RestoreGuard.Epoch) {
+		l.cancel()
+		return nil, fmt.Errorf("%w: HEAD changed after restore claim/seed", errChunkHeadPrecondition)
+	}
 	l.head = copyHead(head)
 	l.remoteLSN = head.RemoteLSN
 	// A HEAD that already belongs to a newer epoch or a competing holder is
@@ -169,15 +173,24 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 	}
 
 	if cfg.FreshFromHead {
-		// A fresh host owns no local dirty period. Persist the claimed HEAD's
-		// lineage before publishing hooks/readiness; never inherit old bitmap bits.
+		// An existing HEAD defines the fresh host's lazy image. With no HEAD,
+		// local writes may already have checkpointed out of the WAL dirty map:
+		// preserve ALL chunks as candidates for the first hash-comparing cut.
+		// Persist that obligation before publishing hooks/readiness.
 		l.hdr = chunkBitmapHeader{BaseLSN: head.RemoteLSN, HeadGen: head.Gen, Epoch: cfg.Epoch}
-		if err := cfg.Bitmap.Reset(l.hdr, nil, chunkDelta{}); err != nil {
+		var initialDirty []uint64
+		l.dirty = map[uint64]bool{}
+		l.hashMode = head.Gen == 0
+		if head.Gen == 0 {
+			for idx := uint64(0); idx < l.numChunks; idx++ {
+				l.dirty[idx] = true
+				initialDirty = append(initialDirty, idx)
+			}
+		}
+		if err := cfg.Bitmap.Reset(l.hdr, initialDirty, chunkDelta{}); err != nil {
 			l.cancel()
 			return nil, fmt.Errorf("storage: fresh bitmap reset: %w", err)
 		}
-		l.dirty = map[uint64]bool{}
-		l.hashMode = false
 		for idx := range head.Chunks {
 			l.absent[idx] = true
 			l.absentGen[idx]++
