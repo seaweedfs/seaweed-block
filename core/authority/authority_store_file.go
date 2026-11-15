@@ -89,9 +89,9 @@ func (s *FileAuthorityStore) volumePath(volumeID string) string {
 //
 // Example (the collision case the architect flagged):
 //
-//   VolumeID="/"       -> "_2f"          (1 byte, escaped)
-//   VolumeID="_2f"     -> "_5f2f"        ('_' escaped, then passthrough)
-//   VolumeID="_002f"   -> "_5f002f"      ('_' escaped, then passthrough)
+//	VolumeID="/"       -> "_2f"          (1 byte, escaped)
+//	VolumeID="_2f"     -> "_5f2f"        ('_' escaped, then passthrough)
+//	VolumeID="_002f"   -> "_5f002f"      ('_' escaped, then passthrough)
 //
 // All three are distinct. The old non-injective encoding
 // collapsed "_002f" and "/" onto the same name.
@@ -193,8 +193,18 @@ func (s *FileAuthorityStore) Put(record DurableRecord) error {
 	// On Windows, opening directories as files for fsync is not
 	// supported; skip silently.
 	if d, derr := os.Open(s.dir); derr == nil {
-		_ = d.Sync()
-		_ = d.Close()
+		syncErr := d.Sync()
+		closeErr := d.Close()
+		if record.Workspace != nil {
+			if syncErr != nil {
+				return fmt.Errorf("authority_store: workspace directory fsync: %w", syncErr)
+			}
+			if closeErr != nil {
+				return fmt.Errorf("authority_store: workspace directory close: %w", closeErr)
+			}
+		}
+	} else if record.Workspace != nil {
+		return fmt.Errorf("authority_store: workspace directory open: %w", derr)
 	}
 	return nil
 }
