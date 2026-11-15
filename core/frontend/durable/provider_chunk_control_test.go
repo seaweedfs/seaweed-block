@@ -22,17 +22,17 @@ func TestWALStoreChunk_CutVolumeReturnsInstalledHead(t *testing.T) {
 	if _, err := s.Write(1, block(1)); err != nil {
 		t.Fatal(err)
 	}
-	r, err := p.CutVolume(ctx, "v1")
+	r, err := p.CutVolume(ctx, "v1", 0)
 	head, _ := remote.GetHead(ctx)
 	// (r.Stats is W3's: its fields read zero until then.)
 	if err != nil || r.Noop || head.Gen != 1 || r.Head.Gen != head.Gen || r.H != s.NextLSN()-1 || r.Head.RemoteLSN != r.H {
 		t.Fatalf("cut: %+v %v; remote HEAD gen %d", r, err, head.Gen)
 	}
-	again, err := p.CutVolume(ctx, "v1")
+	again, err := p.CutVolume(ctx, "v1", 0)
 	if err != nil || !again.Noop || again.Head.Gen != 1 || again.H != r.H {
 		t.Fatalf("cut with nothing new: %+v %v", again, err)
 	}
-	if _, err := p.CutVolume(ctx, "v9"); !errors.Is(err, durable.ErrVolumeNotOpen) {
+	if _, err := p.CutVolume(ctx, "v9", 0); !errors.Is(err, durable.ErrVolumeNotOpen) {
 		t.Fatalf("cut of a volume that is not open: %v", err)
 	}
 }
@@ -65,7 +65,7 @@ func TestWALStoreChunk_DetachVolumeStopsIOAndPublishesDetached(t *testing.T) {
 	if err != nil || again.Head.Gen != r.Head.Gen || again.H != r.H || last2 != last {
 		t.Fatalf("repeated detach: %+v last %d %v; want the first result", again, last2, err)
 	}
-	if _, err := p.CutVolume(ctx, "v1"); !errors.Is(err, storage.ErrChunkLayerDetached) {
+	if _, err := p.CutVolume(ctx, "v1", 0); !errors.Is(err, storage.ErrChunkLayerDetached) {
 		t.Fatalf("cut after the detach: %v; want ErrChunkLayerDetached", err)
 	}
 }

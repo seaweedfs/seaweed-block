@@ -181,8 +181,12 @@ type volHandle struct {
 	recoverGen uint64
 	waitGen    uint64
 	chunk      storage.ChunkLayer // after RecoverVolume
-	chunkStop  context.CancelFunc
-	chunkDone  chan struct{}
+	// chunkDetach is set (under attachMu) when DetachVolume starts and
+	// never cleared in this process: frontend I/O stays stopped, through
+	// any later RecoverVolume, until a new lifetime attaches the volume.
+	chunkDetach bool
+	chunkStop   context.CancelFunc
+	chunkDone   chan struct{}
 }
 
 // VolumeStatus is a read-only diagnostic snapshot of one durable volume
@@ -704,6 +708,11 @@ func (p *DurableProvider) RecoverVolume(ctx context.Context, volumeID string) (R
 		defer p.inflight.Done()
 		h.attachMu.Lock()
 		defer h.attachMu.Unlock()
+		if h.chunkDetach {
+			err := fmt.Errorf("durable: volume %s was detached; I/O stays stopped until a new attach: %w", volumeID, storage.ErrChunkLayerDetached)
+			h.backend.SetOperational(false, "chunk detach: I/O stopped until a new attach")
+			return RecoveryReport{VolumeID: volumeID, Err: err}, err
+		}
 		p.mu.Lock()
 		h.recoverGen++ // any earlier recovery's authority wait is now stale
 		gen = h.recoverGen

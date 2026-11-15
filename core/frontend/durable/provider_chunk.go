@@ -142,7 +142,7 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 		ctx, cancel := context.WithTimeout(p.closeCtx, chunkAttachTimeout)
 		err := p.attachChunk(ctx, volumeID, h)
 		cancel()
-		if err == nil {
+		if err == nil && !h.chunkDetach {
 			h.backend.SetOperational(true, "chunk layer attached under master authority")
 		}
 		h.attachMu.Unlock()
@@ -456,20 +456,39 @@ func (p *DurableProvider) MakeVolumeRemoteDurable(ctx context.Context, volumeID 
 
 // CutVolume takes one quiesced cut of volumeID and returns what it
 // installed: the cut LSN, the HEAD (the current one when nothing changed)
-// and the cut's statistics (B9 W2 §2.4, §3.1).
-func (p *DurableProvider) CutVolume(ctx context.Context, volumeID string) (storage.ChunkCutResult, error) {
+// and the cut's statistics (B9 W2 §2.4, §3.1). With minLSN > 0 it is
+// MakeRemoteDurable(minLSN) returning the cut: an LSN never written is
+// refused before anything is published, and the cut must reach minLSN.
+func (p *DurableProvider) CutVolume(ctx context.Context, volumeID string, minLSN uint64) (storage.ChunkCutResult, error) {
 	layer, err := p.chunkLayer(volumeID)
 	if err != nil {
 		return storage.ChunkCutResult{}, err
 	}
-	return layer.Cut(ctx)
+	if minLSN > 0 {
+		p.mu.Lock()
+		h := p.volumes[volumeID]
+		p.mu.Unlock()
+		if last := h.storage.NextLSN() - 1; minLSN > last {
+			return storage.ChunkCutResult{}, fmt.Errorf("durable: cut of %s to LSN %d: that LSN was never written (last %d)", volumeID, minLSN, last)
+		}
+	}
+	r, err := layer.Cut(ctx)
+	if err != nil {
+		return storage.ChunkCutResult{}, err
+	}
+	if r.H < minLSN {
+		return storage.ChunkCutResult{}, fmt.Errorf("durable: cut of %s reached LSN %d, below %d", volumeID, r.H, minLSN)
+	}
+	return r, nil
 }
 
 // DetachVolume is a clean stop's final cut (B9 W2 §3.6): it stops the
-// volume's frontend I/O and its periodic cuts, then publishes one cut with
-// HEAD state detached. It also returns the last LSN written. A repeated
-// call returns the first result. A failed detach leaves I/O stopped; the
-// orchestrator retries or gives up.
+// volume's frontend I/O and waits (bounded by ctx) for the I/O already
+// admitted to finish, stops the periodic cuts, then publishes one cut with
+// HEAD state detached. It also returns the last LSN written. From its
+// start, the volume stays stopped for this process, through any later
+// RecoverVolume, even when the detach fails; a retry settles it and a
+// repeated call returns the first result.
 func (p *DurableProvider) DetachVolume(ctx context.Context, volumeID string) (storage.ChunkCutResult, uint64, error) {
 	p.mu.Lock()
 	h, ok := p.volumes[volumeID]
@@ -483,7 +502,10 @@ func (p *DurableProvider) DetachVolume(ctx context.Context, volumeID string) (st
 	if err != nil {
 		return storage.ChunkCutResult{}, 0, err
 	}
-	h.backend.SetOperational(false, "chunk detach")
+	h.chunkDetach = true
+	if err := h.backend.StopIO(ctx, "chunk detach: I/O stopped until a new attach"); err != nil {
+		return storage.ChunkCutResult{}, 0, err
+	}
 	p.stopChunkLoop(h)
 	r, err := layer.Detach(ctx)
 	if err != nil {
