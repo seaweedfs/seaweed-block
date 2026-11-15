@@ -337,6 +337,11 @@ type chunkLayerConfig struct {
 	// reconciler before each slice until a token is received or the
 	// channel is closed.
 	testReconcileHold chan struct{}
+	// testReconcileHook, set only by this package's tests, is called by a
+	// reconciliation worker with its generation before each slice
+	// ("batch"), after comparing a chunk and before recording the result
+	// ("compared"), and before certifying the result ("finish").
+	testReconcileHook func(stage string, gen uint64)
 }
 
 // chunkCutStats describes one cut. The periodic-cut work fills it; a zero

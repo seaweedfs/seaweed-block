@@ -95,10 +95,14 @@ type chunkLayerImpl struct {
 	hashMode        bool              // the dirty set is unknown: reconcile every chunk against HEAD before any cut
 	// reconcile holds the chunks the reconciler has not compared yet;
 	// reconcileTotal is the size of the current reconciliation, and
-	// reconciled is closed when it is done (under stMu).
+	// reconciled is closed when it is done or replaced (under stMu).
+	// reconcileGen names the current reconciliation: every start and every
+	// BeginBaseInstall bumps it, and a worker reads, updates and certifies
+	// only while its own generation is current.
 	reconcile      map[uint64]bool
 	reconcileTotal int
 	reconciled     chan struct{}
+	reconcileGen   uint64
 	cutLSN         uint64 // H of the latest cut taken (in flight or installed)
 	// chunkMut counts the mutations of each chunk: every dirty-map insert
 	// (any LSN, a replica apply's lower LSN included) and every BASE
@@ -523,7 +527,10 @@ func (s *WALStore) installFetchedBlock(lba uint32, data []byte, stillAbsent func
 func (l *chunkLayerImpl) BeginBaseInstall() error {
 	l.capMu.Lock()
 	defer l.capMu.Unlock()
-	return l.writeBaseState(chunkBaseInstalling, func() { l.allDirty = true })
+	// A running reconciliation is superseded: its worker can neither
+	// certify a dirty set nor clear the install guard. EndBaseInstall
+	// starts a new one.
+	return l.writeBaseState(chunkBaseInstalling, func() { l.allDirty = true; l.reconcileGen++ })
 }
 
 func (l *chunkLayerImpl) EndBaseInstall(frontier uint64) error {
@@ -1150,19 +1157,24 @@ func (l *chunkLayerImpl) startReconcile() {
 		}
 		set[i] = true
 	}
+	l.reconcileGen++
+	gen := l.reconcileGen
+	if l.reconciled != nil {
+		close(l.reconciled) // a waiter on the replaced run re-checks
+	}
 	l.reconcile, l.reconcileTotal, l.reconciled = set, len(set), make(chan struct{})
 	l.stMu.Unlock()
 	// Nothing to compare (a fresh host: every HEAD chunk is absent and no
 	// block was written): the dirty set is known now, with no window in
 	// which cuts are refused.
-	if len(set) == 0 && l.cfg.testReconcileHold == nil && l.finishReconcile() {
+	if len(set) == 0 && l.cfg.testReconcileHold == nil && l.cfg.testReconcileHook == nil && l.finishReconcile(gen) {
 		return
 	}
 	done, err := l.register()
 	if err != nil {
 		return
 	}
-	go l.reconcileLoop(done)
+	go l.reconcileLoop(done, gen)
 }
 
 // reconcileLoop compares the chunks in the reconcile set with HEAD outside
@@ -1170,7 +1182,7 @@ func (l *chunkLayerImpl) startReconcile() {
 // HEAD's becomes dirty. A write racing the comparison marks its chunk
 // dirty anyway, so a chunk is never lost. When the set is empty the dirty
 // set is exact: it is persisted with a header naming HEAD, and cuts resume.
-func (l *chunkLayerImpl) reconcileLoop(done func()) {
+func (l *chunkLayerImpl) reconcileLoop(done func(), gen uint64) {
 	defer done()
 	for {
 		if l.ctx.Err() != nil {
@@ -1183,7 +1195,14 @@ func (l *chunkLayerImpl) reconcileLoop(done func()) {
 				return
 			}
 		}
+		if hook := l.cfg.testReconcileHook; hook != nil {
+			hook("batch", gen)
+		}
 		l.stMu.Lock()
+		if l.reconcileGen != gen { // superseded
+			l.stMu.Unlock()
+			return
+		}
 		var batch []uint64
 		for _, idx := range sortedKeys(l.reconcile) {
 			if len(batch) == reconcileSlice {
@@ -1194,7 +1213,10 @@ func (l *chunkLayerImpl) reconcileLoop(done func()) {
 		head := copyHead(l.head)
 		l.stMu.Unlock()
 		if len(batch) == 0 {
-			if l.finishReconcile() {
+			if hook := l.cfg.testReconcileHook; hook != nil {
+				hook("finish", gen)
+			}
+			if l.finishReconcile(gen) {
 				return
 			}
 			if !l.sleep(100 * time.Millisecond) {
@@ -1212,7 +1234,14 @@ func (l *chunkLayerImpl) reconcileLoop(done func()) {
 			}
 			ref, had := head.Chunks[idx]
 			same := (!had && isAllZero(data)) || (had && sha256.Sum256(data) == ref.SHA256)
+			if hook := l.cfg.testReconcileHook; hook != nil {
+				hook("compared", gen)
+			}
 			l.stMu.Lock()
+			if l.reconcileGen != gen { // superseded: the replacement owns the set
+				l.stMu.Unlock()
+				return
+			}
 			if !same {
 				l.dirty[idx] = true
 				l.dirtyVer++
@@ -1223,12 +1252,19 @@ func (l *chunkLayerImpl) reconcileLoop(done func()) {
 	}
 }
 
-// finishReconcile persists the reconciled dirty set and leaves hash mode.
-// It reports false when the bitmap could not be written (retried).
-func (l *chunkLayerImpl) finishReconcile() bool {
+// finishReconcile persists reconciliation gen's dirty set and leaves hash
+// mode. It reports false when the bitmap could not be written (retried),
+// and true when done or when gen is no longer current: a superseded run
+// (replaced, or a BASE install began) writes nothing and certifies
+// nothing. bmMu is held throughout, so no BASE state change interleaves.
+func (l *chunkLayerImpl) finishReconcile(gen uint64) bool {
 	l.bmMu.Lock()
 	defer l.bmMu.Unlock()
 	l.stMu.Lock()
+	if l.reconcileGen != gen || len(l.reconcile) != 0 || l.hdr.Base == chunkBaseInstalling {
+		l.stMu.Unlock()
+		return true
+	}
 	still := map[uint64]bool{}
 	for idx := range l.dirty {
 		still[idx] = true
@@ -1264,24 +1300,26 @@ func (l *chunkLayerImpl) finishReconcile() bool {
 }
 
 // waitReconciled returns once the layer is not reconciling, or
-// errChunkReconciling when ctx ends first.
+// errChunkReconciling when ctx ends first. A replaced run wakes its
+// waiters, which re-check against the current one.
 func (l *chunkLayerImpl) waitReconciled(ctx context.Context) error {
-	l.stMu.Lock()
-	reconciling, ch := l.hashMode, l.reconciled
-	l.stMu.Unlock()
-	if !reconciling {
-		return nil
-	}
-	if ch == nil {
-		return errChunkReconciling
-	}
-	select {
-	case <-ch:
-		return nil
-	case <-ctx.Done():
-		return fmt.Errorf("%w: %w", errChunkReconciling, ctx.Err())
-	case <-l.ctx.Done():
-		return errors.New("storage: chunk layer closed")
+	for {
+		l.stMu.Lock()
+		reconciling, ch := l.hashMode, l.reconciled
+		l.stMu.Unlock()
+		if !reconciling {
+			return nil
+		}
+		if ch == nil {
+			return errChunkReconciling
+		}
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return fmt.Errorf("%w: %w", errChunkReconciling, ctx.Err())
+		case <-l.ctx.Done():
+			return errors.New("storage: chunk layer closed")
+		}
 	}
 }
 

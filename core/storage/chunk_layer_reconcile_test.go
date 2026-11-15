@@ -7,6 +7,8 @@ package storage
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -30,6 +32,12 @@ func newReconcileFixture(t *testing.T, hold bool) *reconcileFixture {
 
 // newReconcileFixtureWith reattaches after mutate damaged the bitmap.
 func newReconcileFixtureWith(t *testing.T, hold bool, mutate func(bm *fakeBitmapStore)) *reconcileFixture {
+	t.Helper()
+	return newReconcileFixtureOpts(t, hold, mutate, nil)
+}
+
+// newReconcileFixtureOpts also lets mutateCfg adjust the reattach config.
+func newReconcileFixtureOpts(t *testing.T, hold bool, mutate func(bm *fakeBitmapStore), mutateCfg func(cfg *chunkLayerConfig)) *reconcileFixture {
 	t.Helper()
 	s, path, crash := crashableStore(t)
 	f := newFakeChunkRemote()
@@ -57,6 +65,9 @@ func newReconcileFixtureWith(t *testing.T, hold bool, mutate func(bm *fakeBitmap
 	if hold {
 		fx.hold = make(chan struct{})
 		fx.cfg.testReconcileHold = fx.hold
+	}
+	if mutateCfg != nil {
+		mutateCfg(&fx.cfg)
 	}
 	l, err := attachChunkLayer(s2, f, fx.cfg)
 	if err != nil {
@@ -238,5 +249,169 @@ func TestChunkReconcile_UnpersistedResultKeepsReconciling(t *testing.T) {
 	fx.bm.mu.Lock()
 	fx.bm.failSave = nil
 	fx.bm.mu.Unlock()
+	waitReconciledForTest(t, fx.layer)
+}
+
+// refusedOver asserts check() holds at every poll for d: a negative
+// invariant is checked over an interval, not once.
+func refusedOver(t *testing.T, d time.Duration, what string, check func() error) {
+	t.Helper()
+	end := time.Now().Add(d)
+	for time.Now().Before(end) {
+		if err := check(); err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A worker reconciling a lost bitmap when a BASE install begins must not
+// finish over it: the install guard (Base=Installing) stays in force, in
+// memory and on disk, until the install itself completes.
+func TestChunkReconcile_BaseInstallSupersedesRunningReconciliation(t *testing.T) {
+	fx := newReconcileFixture(t, true) // the worker is held before its first slice
+	if err := fx.layer.BeginBaseInstall(); err != nil {
+		t.Fatal(err)
+	}
+	fx.release() // the old worker runs on
+	refusedOver(t, 300*time.Millisecond, "after BeginBaseInstall", func() error {
+		if _, err := fx.layer.Cut(ctTimeout(t)); !errors.Is(err, errChunkBaseInstalling) {
+			return fmt.Errorf("Cut admitted or refused for another cause during an incomplete BASE install: %v", err)
+		}
+		fx.bm.mu.Lock()
+		base := fx.bm.hdr.Base
+		fx.bm.mu.Unlock()
+		if base != chunkBaseInstalling {
+			return fmt.Errorf("persisted Base=%v, want the install guard (installing)", base)
+		}
+		return nil
+	})
+	// A restart still sees the incomplete install and refuses cuts.
+	if err := fx.s.Close(); err != nil { // closes the layer too
+		t.Fatal(err)
+	}
+	s3, _ := reopen(t, fx.path)
+	defer s3.Close()
+	cfg := fx.cfg
+	cfg.testReconcileHold = nil
+	l2, err := attachChunkLayer(s3, fx.f, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l2.Close()
+	if _, err := l2.Cut(ctTimeout(t)); !errors.Is(err, errChunkBaseInstalling) {
+		t.Fatalf("Cut after restart during an incomplete BASE install: %v", err)
+	}
+}
+
+// An old worker that saw its set empty and paused before certifying must
+// not certify (or touch) the replacement reconciliation that a BASE
+// install started meanwhile: cuts stay refused until the replacement is
+// done.
+func TestChunkReconcile_OldCompletionCannotCertifyReplacement(t *testing.T) {
+	var oldGen atomic.Uint64
+	atFinish, releaseFinish, replHold := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	hook := func(stage string, gen uint64) {
+		switch {
+		case stage == "finish" && oldGen.CompareAndSwap(0, gen):
+			close(atFinish)
+			<-releaseFinish
+		case stage == "batch" && oldGen.Load() != 0 && gen != oldGen.Load():
+			<-replHold
+		}
+	}
+	fx := newReconcileFixtureOpts(t, false, func(bm *fakeBitmapStore) { bm.lostNext = true },
+		func(cfg *chunkLayerConfig) { cfg.testReconcileHook = hook })
+	// Registered after the fixture: cleanups run last-in first-out, so the
+	// workers are released before the layer closes and waits for them.
+	t.Cleanup(func() {
+		for _, ch := range []chan struct{}{releaseFinish, replHold} {
+			select {
+			case <-ch:
+			default:
+				close(ch)
+			}
+		}
+	})
+	select {
+	case <-atFinish:
+	case <-time.After(ctLocalBound):
+		t.Fatal("the first reconciliation never reached certification")
+	}
+	if err := fx.layer.BeginBaseInstall(); err != nil {
+		t.Fatal(err)
+	}
+	if err := fx.layer.EndBaseInstall(fx.s.CheckpointLSN()); err != nil {
+		t.Fatal(err)
+	}
+	total := fx.layer.Stats().ReconcileTotal
+	if total == 0 {
+		t.Fatal("the replacement reconciliation has nothing to compare; the schedule needs local chunks")
+	}
+	close(releaseFinish) // the old worker resumes into certification
+	refusedOver(t, 300*time.Millisecond, "after the old worker resumed", func() error {
+		st := fx.layer.Stats()
+		if !st.Reconciling || st.ReconcileTotal != total || st.ReconcileDone != 0 {
+			return fmt.Errorf("replacement certified or modified by the old worker: reconciling=%v done=%d/%d (total was %d)", st.Reconciling, st.ReconcileDone, st.ReconcileTotal, total)
+		}
+		if _, err := fx.layer.Cut(ctTimeout(t)); !errors.Is(err, errChunkReconciling) {
+			return fmt.Errorf("Cut admitted while the replacement reconciles: %v", err)
+		}
+		return nil
+	})
+	close(replHold)
+	waitReconciledForTest(t, fx.layer)
+	if _, err := fx.layer.Cut(ctTimeout(t)); err != nil {
+		t.Fatalf("Cut after the replacement reconciled: %v", err)
+	}
+}
+
+// An old worker paused between comparing a chunk and recording it must not
+// record into (or delete from) the replacement reconciliation's set.
+func TestChunkReconcile_OldWorkerCannotModifyReplacementSet(t *testing.T) {
+	var oldGen atomic.Uint64
+	atCompared, releaseOld, replHold := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	hook := func(stage string, gen uint64) {
+		switch {
+		case stage == "compared" && oldGen.CompareAndSwap(0, gen):
+			close(atCompared)
+			<-releaseOld
+		case stage == "batch" && oldGen.Load() != 0 && gen != oldGen.Load():
+			<-replHold
+		}
+	}
+	fx := newReconcileFixtureOpts(t, false, func(bm *fakeBitmapStore) { bm.lostNext = true },
+		func(cfg *chunkLayerConfig) { cfg.testReconcileHook = hook })
+	// Registered after the fixture: cleanups run last-in first-out, so the
+	// workers are released before the layer closes and waits for them.
+	t.Cleanup(func() {
+		for _, ch := range []chan struct{}{releaseOld, replHold} {
+			select {
+			case <-ch:
+			default:
+				close(ch)
+			}
+		}
+	})
+	select {
+	case <-atCompared:
+	case <-time.After(ctLocalBound):
+		t.Fatal("the first reconciliation never compared a chunk")
+	}
+	if err := fx.layer.BeginBaseInstall(); err != nil {
+		t.Fatal(err)
+	}
+	if err := fx.layer.EndBaseInstall(fx.s.CheckpointLSN()); err != nil {
+		t.Fatal(err)
+	}
+	total := fx.layer.Stats().ReconcileTotal
+	close(releaseOld)
+	refusedOver(t, 300*time.Millisecond, "after the paused old worker resumed", func() error {
+		if st := fx.layer.Stats(); st.ReconcileTotal != total || st.ReconcileDone != 0 {
+			return fmt.Errorf("old worker modified the replacement set: done=%d/%d (total was %d)", st.ReconcileDone, st.ReconcileTotal, total)
+		}
+		return nil
+	})
+	close(replHold)
 	waitReconciledForTest(t, fx.layer)
 }
