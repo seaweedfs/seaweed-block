@@ -98,6 +98,10 @@ type fakeChunkRemote struct {
 	afterCAS   func(f *fakeChunkRemote) // runs once, under mu, after the next CAS is decided
 	intents    map[string]chunkIntent
 	deferred   []deferredCAS
+
+	failPutIntent    error         // PutIntent fails without writing
+	failDeleteIntent int           // the next N DeleteIntent calls fail without deleting
+	putIntents       []chunkIntent // every intent written, in order
 }
 
 func newFakeChunkRemote() *fakeChunkRemote {
@@ -117,14 +121,24 @@ func (f *fakeChunkRemote) PutIntent(ctx context.Context, in chunkIntent) (string
 	in.ID, in.CreatedNs, in.Keys = id, time.Now().UnixNano(), append([]string(nil), in.Keys...)
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failPutIntent != nil {
+		f.ops = append(f.ops, "putintent:fail")
+		return "", f.failPutIntent
+	}
 	f.ops = append(f.ops, "putintent:"+id)
 	f.intents[id] = in
+	f.putIntents = append(f.putIntents, in)
 	return id, nil
 }
 
 func (f *fakeChunkRemote) DeleteIntent(ctx context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failDeleteIntent > 0 {
+		f.failDeleteIntent--
+		f.ops = append(f.ops, "deleteintent:fail:"+id)
+		return errors.New("fake remote: injected DeleteIntent failure")
+	}
 	f.ops = append(f.ops, "deleteintent:"+id)
 	delete(f.intents, id)
 	return nil
