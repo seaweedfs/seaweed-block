@@ -27,8 +27,13 @@ import "time"
 // strictly newer than the last fact recorded for that replica, so a
 // delayed or superseded snapshot can never count a restart, reset a
 // grace, or end one. A superseded fact (older, or equal-time with a
-// different incarnation) is not a decision input either: the decision
-// follows the newest recorded fact, and its endpoint is never used. A slot without an incarnation (an older volume
+// different incarnation) is not a decision input either. In the
+// controller this is enforced once, at ingestion: a supported snapshot
+// that carries any superseded slot fact is a stale snapshot, and no
+// decision branch runs on it (supersededFactsLocked). The master's
+// promotion gates read the observation store, which keeps only the
+// newest fact per server; for them a superseded fact defers to the
+// newest recorded one and its endpoint is never used. A slot without an incarnation (an older volume
 // binary) or without an observation time gets no grace. All state is
 // guarded by TopologyController.mu.
 
@@ -42,6 +47,27 @@ type primaryBootGrace struct {
 }
 
 func bootGraceKey(volumeID, replicaID string) string { return volumeID + "/" + replicaID }
+
+// supersededFactsLocked reports whether any slot fact in vol is older
+// than the newest fact recorded for that replica, or has the same
+// observation time with another incarnation. Such a snapshot is stale:
+// it must neither change history nor drive any decision.
+func (c *TopologyController) supersededFactsLocked(vol VolumeTopologySnapshot) bool {
+	for _, slot := range vol.Slots {
+		if slot.Incarnation == "" || slot.ObservedAt.IsZero() {
+			continue
+		}
+		g := c.bootGrace[bootGraceKey(vol.VolumeID, slot.ReplicaID)]
+		if g == nil {
+			continue
+		}
+		if slot.ObservedAt.Before(g.lastObservedAt) ||
+			(slot.ObservedAt.Equal(g.lastObservedAt) && slot.Incarnation != g.incarnation) {
+			return true
+		}
+	}
+	return false
+}
 
 // observeIncarnationsLocked records each slot's boot fact.
 func (c *TopologyController) observeIncarnationsLocked(vol VolumeTopologySnapshot, servers map[string]ServerObservation) {

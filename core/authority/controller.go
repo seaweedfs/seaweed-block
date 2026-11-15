@@ -230,7 +230,12 @@ func (c *TopologyController) processSupportedVolumeLocked(
 	// S4 behavior; stuck evidence has its own lifecycle and is
 	// NOT cleared here — §10 clearing rule 4.)
 	delete(c.unsupported, vol.VolumeID)
-	c.observeIncarnationsLocked(vol, serverIndex)
+	// A snapshot carrying a superseded slot fact is stale (#128): it
+	// records nothing and decides nothing, below.
+	staleFacts := c.supersededFactsLocked(vol)
+	if !staleFacts {
+		c.observeIncarnationsLocked(vol, serverIndex)
+	}
 
 	c.confirmDesiredLocked(vol, currentLine, hasLine)
 
@@ -258,6 +263,11 @@ func (c *TopologyController) processSupportedVolumeLocked(
 	// Stale snapshot: do not emit from a stale basis, but keep any
 	// existing desired (publish-until-observed convergence record).
 	if !basisMatchesLine(vol.Authority, currentLine, hasLine) {
+		return
+	}
+	// Stale slot facts: likewise keep any existing desired and emit
+	// nothing from this snapshot.
+	if staleFacts {
 		return
 	}
 
