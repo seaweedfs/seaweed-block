@@ -66,12 +66,19 @@ type WALStore struct {
 	// shard. Never acquire mu while holding a dirty-shard lock.
 	lifecycleMu sync.RWMutex
 	mu          sync.RWMutex
-	extentMu    [64]sync.RWMutex
-	closed      bool
-	nextLSN     uint64 // next LSN to assign to a write
-	syncedLSN   uint64 // highest LSN durably present in extent OR WAL after fsync
-	walTail     uint64 // exposed S boundary (oldest retained LSN)
-	walHead     uint64 // exposed H boundary (newest written LSN)
+	// captureMu is the chunk layer's capture write barrier: Write,
+	// WriteBatch, ApplyEntry and WriteExtentDirect hold it shared (before
+	// lifecycleMu); a quiesced cut holds it exclusively. Order:
+	// captureMu -> lifecycleMu -> mu.
+	captureMu sync.RWMutex
+	// chunk is the attached chunk layer's hooks; nil when none.
+	chunk     atomic.Pointer[chunkHooks]
+	extentMu  [64]sync.RWMutex
+	closed    bool
+	nextLSN   uint64 // next LSN to assign to a write
+	syncedLSN uint64 // highest LSN durably present in extent OR WAL after fsync
+	walTail   uint64 // exposed S boundary (oldest retained LSN)
+	walHead   uint64 // exposed H boundary (newest written LSN)
 
 	// extentBase is the absolute file offset where the extent region
 	// begins; cached for fast read/write.
@@ -298,6 +305,9 @@ func (s *WALStore) writeExtentIfCurrent(lba, expectedLSN uint64, data []byte) (b
 	if err := s.writeExtentUnlocked(uint32(lba), data); err != nil {
 		return false, err
 	}
+	if h := s.chunk.Load(); h != nil {
+		h.sink.OnExtentWrite(lba, expectedLSN)
+	}
 	return true, nil
 }
 
@@ -333,6 +343,13 @@ func (s *WALStore) persistCheckpoint(highestLSN uint64) error {
 	}
 	if highestLSN <= s.checkpointLSN {
 		return nil
+	}
+	// The chunk layer's dirty bitmap must be durable before the checkpoint
+	// (and so the WAL tail) can pass the entries it covers.
+	if h := s.chunk.Load(); h != nil {
+		if err := h.sink.BeforeCheckpointAdvance(highestLSN); err != nil {
+			return fmt.Errorf("storage: chunk bitmap before checkpoint %d: %w", highestLSN, err)
+		}
 	}
 
 	sbCopy := *s.sb
@@ -442,6 +459,8 @@ func (s *WALStore) Recover() (uint64, error) {
 // covers this LSN). Reads after this Write see the new bytes
 // immediately.
 func (s *WALStore) Write(lba uint32, data []byte) (uint64, error) {
+	s.captureMu.RLock()
+	defer s.captureMu.RUnlock()
 	s.lifecycleMu.RLock()
 	defer s.lifecycleMu.RUnlock()
 	if uint64(lba) >= uint64(s.sb.VolumeSize/uint64(s.sb.BlockSize)) {
@@ -499,6 +518,8 @@ func (s *WALStore) Write(lba uint32, data []byte) (uint64, error) {
 }
 
 func (s *WALStore) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error) {
+	s.captureMu.RLock()
+	defer s.captureMu.RUnlock()
 	s.lifecycleMu.RLock()
 	defer s.lifecycleMu.RUnlock()
 	if len(blocks) == 0 {
@@ -706,6 +727,17 @@ func (s *WALStore) DisableAutoFlushForRecoveryTest() {
 }
 
 func (s *WALStore) readFromExtent(lba uint32) ([]byte, error) {
+	// An attached chunk layer resolves blocks that are absent locally
+	// before the extent lock is taken; nil data means read the extent.
+	if h := s.chunk.Load(); h != nil {
+		data, err := h.sink.OnReadMiss(uint64(lba))
+		if err != nil {
+			return nil, err
+		}
+		if data != nil {
+			return data, nil
+		}
+	}
 	lock := &s.extentMu[uint64(lba)%uint64(len(s.extentMu))]
 	lock.RLock()
 	defer lock.RUnlock()
@@ -743,6 +775,12 @@ func (s *WALStore) Sync() (uint64, error) {
 
 	s.mu.Lock()
 	if targetDirectFrontier > s.checkpointLSN && targetDirectFrontier <= targetHead {
+		if h := s.chunk.Load(); h != nil {
+			if err := h.sink.BeforeCheckpointAdvance(targetDirectFrontier); err != nil {
+				s.mu.Unlock()
+				return 0, fmt.Errorf("storage: chunk bitmap before direct frontier %d: %w", targetDirectFrontier, err)
+			}
+		}
 		sbCopy := *s.sb
 		sbCopy.WALCheckpointLSN = targetDirectFrontier
 		// WALHead is a logical byte cursor, not an LSN. Holding s.mu
@@ -885,6 +923,8 @@ func (s *WALStore) AdvanceWALTail(newTail uint64) {
 // Durability follows the same rule as Write: bytes become durable
 // only on the next successful Sync (the extent fsync covers them).
 func (s *WALStore) WriteExtentDirect(lba uint32, data []byte) error {
+	s.captureMu.RLock()
+	defer s.captureMu.RUnlock()
 	s.lifecycleMu.RLock()
 	defer s.lifecycleMu.RUnlock()
 	maxLBA := uint32(s.sb.VolumeSize / uint64(s.sb.BlockSize))
@@ -907,6 +947,9 @@ func (s *WALStore) WriteExtentDirect(lba uint32, data []byte) error {
 	if err := s.writeExtentUnlocked(lba, data); err != nil {
 		return err
 	}
+	if h := s.chunk.Load(); h != nil {
+		h.sink.OnExtentWrite(uint64(lba), 0)
+	}
 	if hadDirty {
 		s.dm.compareAndDelete(uint64(lba), previousLSN)
 	}
@@ -917,6 +960,8 @@ func (s *WALStore) WriteExtentDirect(lba uint32, data []byte) error {
 // than allocating a fresh one. Same durability semantics as Write
 // (becomes durable on next Sync).
 func (s *WALStore) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
+	s.captureMu.RLock()
+	defer s.captureMu.RUnlock()
 	s.lifecycleMu.RLock()
 	defer s.lifecycleMu.RUnlock()
 	maxLBA := uint32(s.sb.VolumeSize / uint64(s.sb.BlockSize))
@@ -1045,6 +1090,11 @@ func bytesAllZero(data, zero []byte) bool {
 // fsyncs the file, stops the group committer, and releases the
 // underlying file. Idempotent.
 func (s *WALStore) Close() error {
+	// Stop the chunk layer before taking the lifecycle lock: its captures
+	// and fills call back into the store.
+	if h := s.chunk.Load(); h != nil {
+		_ = h.closer()
+	}
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
 	s.mu.Lock()

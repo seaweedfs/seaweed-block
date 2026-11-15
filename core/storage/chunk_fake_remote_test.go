@@ -966,7 +966,17 @@ func TestChunkFakeBitmap_PersistsAcrossRestartAndBlocks(t *testing.T) {
 	b.block = make(chan struct{})
 	block := b.block
 	b.mu.Unlock()
+	var unblock sync.Once
+	release := func() { unblock.Do(func() { close(block) }) }
 	saved := make(chan struct{})
+	t.Cleanup(func() { // registered before the Save starts: release, then a bounded join
+		release()
+		select {
+		case <-saved:
+		case <-time.After(ctLocalBound):
+			t.Errorf("parked Save not joined within %v", ctLocalBound)
+		}
+	})
 	go func() { _ = b.Save(nil); close(saved) }()
 	select {
 	case <-b.entered: // the Save is parked on the block
@@ -978,7 +988,7 @@ func TestChunkFakeBitmap_PersistsAcrossRestartAndBlocks(t *testing.T) {
 		t.Fatal("Save returned while the bitmap store was blocked")
 	case <-time.After(50 * time.Millisecond):
 	}
-	close(block)
+	release()
 	select {
 	case <-saved:
 	case <-time.After(ctLocalBound):

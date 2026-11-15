@@ -24,9 +24,7 @@ package storage
 //  5. uploads the buffers, outside every walstore lock;
 //  6. CASes HEAD {gen, epoch} with RemoteLSN = H.
 //
-// This file declares the seam only. The layer is not implemented yet:
-// attachChunkLayer returns errChunkLayerNotImplemented, so the contract tests
-// fail until it exists.
+// This file declares the seam; chunk_layer.go implements it.
 
 import (
 	"context"
@@ -248,7 +246,7 @@ var (
 	errChunkCaptureRefused      = errors.New("storage: chunk capture refused")
 )
 
-// attachChunkLayer attaches a chunk layer to an open store.
+// attachChunkLayer attaches a chunk layer to an open store (chunk_layer.go).
 func attachChunkLayer(s *WALStore, remote chunkRemote, cfg chunkLayerConfig) (chunkLayer, error) {
-	return nil, errChunkLayerNotImplemented
+	return attachChunkLayerImpl(s, remote, cfg)
 }

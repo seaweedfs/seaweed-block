@@ -299,6 +299,10 @@ func c11BaseFixture(t *testing.T, failSave, complete bool) (path string, f *fake
 	w := newWriteLog()
 	w.write(t, s, 1, 0x01)          // chunk 0
 	last := w.write(t, s, 21, 0x21) // chunk 5
+	// Flush first: the direct-frontier checkpoint below covers every LSN up
+	// to the frontier, so recovery would skip unflushed WAL entries (a real
+	// rebuild installs the whole image).
+	mustSyncFlush(t, s)
 	if _, err := layer.Capture(ctTimeout(t)); err != nil {
 		t.Fatal(err)
 	}

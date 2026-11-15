@@ -258,10 +258,76 @@ func TestChunkLayer_C3_EveryHeadIsExactUnderConcurrentWrites(t *testing.T) {
 	if rounds.Load() < 15 {
 		t.Fatalf("writer completed only %d rounds; overlap not established", rounds.Load())
 	}
-	if n := len(f.installedHeads()); n < 25 {
-		t.Fatalf("%d HEADs installed, want 25", n)
+	// Each held round installs a HEAD; a free-running capture with no new
+	// LSN since the last cut is idle and may skip its CAS.
+	if n := len(f.installedHeads()); n < 6 {
+		t.Fatalf("%d HEADs installed, want the 5 held rounds plus at least one free-running", n)
 	}
 	assertEveryHeadIsPrefixImage(t, f, w)
+}
+
+// C3 barrier: a write issued while a cut is still copying its chunks does
+// not land until the copy is done, so it can never tear the captured image.
+// The copy is held deterministically: on a fresh host the cut's copy of a
+// dirty chunk must fetch that chunk's absent blocks, and the fetch is held.
+func TestChunkLayer_C3_WriteDuringCopyWaitsForTheCut(t *testing.T) {
+	src := make([]byte, ctNumBlocks*ctBlockSize)
+	for lba := uint32(8); lba < 12; lba++ { // chunk 2
+		copy(src[int(lba)*ctBlockSize:], makeBlock(ctBlockSize, byte(0x80+lba)))
+	}
+	f := newFakeChunkRemote()
+	f.seedHead(t, src, 10, 1)
+	s, _ := newChunkTestStore(t)
+	cfg := ctConfig(2)
+	cfg.FreshFromHead = true
+	layer := mustAttach(t, s, f, cfg)
+	local := makeBlock(ctBlockSize, 0xD8)
+	if _, err := s.Write(8, local); err != nil { // chunk 2 dirty; LBA 9-11 still absent
+		t.Fatal(err)
+	}
+
+	gEntered, gRelease := holdGets(t, f)
+	late := makeBlock(ctBlockSize, 0xDA)
+	wrote := make(chan error, 1)
+	joined := make(chan struct{})
+	t.Cleanup(func() {
+		gRelease()
+		select {
+		case <-joined:
+		case <-time.After(ctLocalBound):
+			t.Errorf("late writer not joined within %v", ctLocalBound)
+		}
+	})
+	done := startCapture(t, layer)
+	waitKey(t, gEntered, "the cut's fetch of an absent block in chunk 2")
+	go func() {
+		defer close(joined)
+		_, err := s.Write(10, late)
+		wrote <- err
+	}()
+	select {
+	case err := <-wrote:
+		t.Fatalf("a write landed while the cut was still copying (err %v); the barrier was released before the copy", err)
+	case <-time.After(200 * time.Millisecond): // the copy is held indefinitely; the write must wait
+	}
+	gRelease()
+	if err := waitErr(t, done, "held cut"); err != nil {
+		t.Fatalf("held cut: %v", err)
+	}
+	if err := waitErr(t, wrote, "write after the cut"); err != nil {
+		t.Fatal(err)
+	}
+	img := f.imageOf(t, f.stats().head)
+	if !bytes.Equal(blockOf(img, 8), local) {
+		t.Fatal("the cut's image lacks the write made before its barrier")
+	}
+	if !bytes.Equal(blockOf(img, 10), blockOf(src, 10)) {
+		t.Fatal("the cut's image contains a write issued after its barrier")
+	}
+	if got, _ := s.Read(10); !bytes.Equal(got, late) {
+		t.Fatal("the write that waited for the cut is not visible locally")
+	}
+	assertNoRemoteMisuse(t, f)
 }
 
 // C4 no missed dirt: every extent write marks its chunk dirty since HEAD,
@@ -999,10 +1065,10 @@ func TestChunkLayer_C9_EvictionSurvivesRestart(t *testing.T) {
 		_, path, crash, f, cfg, _ := setup(t)
 		crash() // nothing read or written since the eviction
 		s2, _ := reopen(t, path)
+		mustAttach(t, s2, f, cfg) // attach reads HEAD; the remote goes down after
 		f.mu.Lock()
 		f.failGet = errFakeRemoteDown
 		f.mu.Unlock()
-		mustAttach(t, s2, f, cfg)
 		if got, err := s2.Read(10); err == nil {
 			t.Fatalf("evicted block read back %#x from retained local bytes with the remote down; absence was lost across the restart", got[0])
 		}
