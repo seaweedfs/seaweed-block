@@ -280,7 +280,7 @@ func TestGC_SnapshotAndQualifiedForkAreRoots(t *testing.T) {
 	if _, e := c.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: "s1", RequestID: "req"}, h); e != nil {
 		t.Fatal(e)
 	}
-	if _, e := f.CreateEntry(ctx, catBase, &filerpb.Entry{Name: "v2", IsDirectory: true}, true); e != nil {
+	if e := f.CreateEntry(ctx, catBase, &filerpb.Entry{Name: "v2", IsDirectory: true}, true); e != nil {
 		t.Fatal(e)
 	}
 	if _, e := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s1", Target: "v2", RequestID: "fork"}); e != nil {
