@@ -218,6 +218,20 @@ type VolumeStatus struct {
 	Evidence        string
 	Closed          bool
 	WriteProfile    WriteProfileStatus
+	// Chunk is the chunk layer's state and cut counters; walstore-chunk
+	// volumes only.
+	Chunk *ChunkStatus
+}
+
+// ChunkStatus is one walstore-chunk volume's chunk layer (B9 7.2-7.3).
+// AwaitingAuthority: recovered, the layer waits for master authority to
+// attach. Stats is zero until the layer is attached.
+type ChunkStatus struct {
+	Attached          bool
+	AwaitingAuthority bool
+	Fenced            bool
+	RemoteLSN         uint64
+	Stats             storage.ChunkLayerStats
 }
 
 // NewDurableProvider constructs a provider. view is the ONLY
@@ -464,17 +478,33 @@ func durableIdentityConflict(got, want frontend.Identity) error {
 // volume handles. This is used by status endpoints and TestOps gates to prove
 // durable lineage latching without scraping logs.
 func (p *DurableProvider) DurableStatuses() []VolumeStatus {
+	type chunkView struct {
+		layer    storage.ChunkLayer
+		awaiting bool
+	}
 	p.mu.Lock()
 	handles := make(map[string]*volHandle, len(p.volumes))
+	chunks := map[string]chunkView{}
 	for volumeID, h := range p.volumes {
 		handles[volumeID] = h
+		if p.cfg.Impl == ImplWALStoreChunk {
+			chunks[volumeID] = chunkView{layer: h.chunk, awaiting: h.waitGen != 0}
+		}
 	}
 	impl := string(p.cfg.Impl)
 	p.mu.Unlock()
 
 	out := make([]VolumeStatus, 0, len(handles))
 	for volumeID, h := range handles {
-		out = append(out, h.backend.durableStatus(volumeID, h.path, impl))
+		st := h.backend.durableStatus(volumeID, h.path, impl)
+		if cv, ok := chunks[volumeID]; ok {
+			cs := &ChunkStatus{AwaitingAuthority: cv.awaiting}
+			if cv.layer != nil {
+				cs.Attached, cs.Fenced, cs.RemoteLSN, cs.Stats = true, cv.layer.Fenced(), cv.layer.RemoteLSN(), cv.layer.Stats()
+			}
+			st.Chunk = cs
+		}
+		out = append(out, st)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].VolumeID < out[j].VolumeID
