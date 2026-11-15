@@ -276,12 +276,13 @@ func TestDualLane_CoordReleasesPinFloorAfterSession(t *testing.T) {
 // PushLiveWrite. Replacement coverage for the strict variant is in
 // TestC1_Realtime_OutOfOrder_StrictFailsClosed.
 //
-// A 12-entry rebuild can finish its scan before the live write: the
-// session may already have made its pre-barrier cut (PushLiveWrite
-// returns ErrSinkBarrierSealed and the entry stays in the WAL for
-// replay, as the production live-write path treats it), or may already
-// have closed. Either way the live LBA must still reach the replica,
-// which the byte check at the end pins.
+// A 12-entry rebuild is short, so the push can race every stage of the
+// session. PushLiveWrite then returns what the production live-write
+// path (transport ship_sender) treats as retained or handed back to the
+// steady path: not live-ready yet, past the pre-barrier cut
+// (ErrSinkBarrierSealed), or sealed / gone once the session closed. The
+// entry is in the primary WAL in every case, and the byte check at the
+// end pins that the live LBA still reaches the replica.
 func TestDualLane_EngineDrivenRebuild_WithPushLiveDuringSession(t *testing.T) {
 	component.RunSubstrate(t, "memorywal", component.MemoryWAL, func(t *testing.T, c *component.Cluster) {
 		c.WithReplicas(1).
@@ -341,7 +342,7 @@ func TestDualLane_EngineDrivenRebuild_WithPushLiveDuringSession(t *testing.T) {
 		// primary's WAL. So the live LSN reaches replica via the
 		// drain path, not the direct-emit path.
 		if bridgeLiveReadyOrClosed(br, coordRID) {
-			if err := br.PushLiveWrite(coordRID, liveLBA, liveLSN, liveData); err != nil && !errors.Is(err, transport.ErrSinkBarrierSealed) {
+			if err := br.PushLiveWrite(coordRID, liveLBA, liveLSN, liveData); err != nil && !pushRaceOutcome(err) {
 				t.Fatalf("PushLiveWrite: %v", err)
 			}
 		}
@@ -569,6 +570,15 @@ func TestPillar3Slice2_EngineDriven_SameLBAArbitration(t *testing.T) {
 			}
 		}
 	})
+}
+
+// pushRaceOutcome reports the PushLiveWrite errors that the production
+// caller (transport ship_sender) does not treat as failures.
+func pushRaceOutcome(err error) bool {
+	return errors.Is(err, recovery.ErrSessionNotLiveReady) ||
+		errors.Is(err, transport.ErrSinkBarrierSealed) ||
+		errors.Is(err, transport.ErrSinkSealed) ||
+		errors.Is(err, recovery.ErrNoActiveSession)
 }
 
 // bridgeLiveReadyOrClosed waits up to 2s for the bridge session to be
