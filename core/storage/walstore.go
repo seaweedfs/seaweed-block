@@ -131,7 +131,7 @@ type WALStore struct {
 	// Generations cover completed append attempts and recovery publication.
 	walMutation     atomic.Uint64
 	durableMutation atomic.Uint64
-	// Recovery/direct paths conservatively disable dedup for this open store.
+	// Replicated/direct paths conservatively disable dedup for this open store.
 	bypassSyncDedup atomic.Bool
 }
 
