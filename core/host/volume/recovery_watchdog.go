@@ -105,13 +105,42 @@ func (w *recoveryWatchdog) supportingAdmitted(epoch uint64) {
 // is promotion-ready now and whether the G1 latch holds. fired is true
 // on the call that latched recovery_timeout.
 func (w *recoveryWatchdog) reason(ready, roleAdmissionFailed bool) (reason string, fired bool) {
-	return "", false // RED: no decision yet
+	if w == nil {
+		return "", false
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.primarySince.IsZero() {
+		return "", false
+	}
+	if ready {
+		w.timedOut, w.readySeen = false, true
+		return "", false
+	}
+	if roleAdmissionFailed {
+		return UnhealthyRoleAdmission, false
+	}
+	if w.readySeen {
+		return "", false
+	}
+	if !w.timedOut && w.now().Sub(w.primarySince) >= w.timeout {
+		w.timedOut, fired = true, true
+	}
+	if w.timedOut {
+		return UnhealthyRecoveryTimeout, fired
+	}
+	return "", false
 }
 
 // catchUpSince is when this replica was admitted as a supporting replica
 // at its current epoch; zero when it is not supporting.
 func (w *recoveryWatchdog) catchUpSince() time.Time {
-	return time.Time{} // RED
+	if w == nil {
+		return time.Time{}
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.supportingSince
 }
 
 // UnhealthyReason is the slot's explicit unhealthy reason now (#128

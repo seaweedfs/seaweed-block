@@ -10,6 +10,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/adapter"
 	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
+	"github.com/seaweedfs/seaweed-block/core/ops"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -130,9 +131,11 @@ func (s *services) ReportHeartbeat(ctx context.Context, r *control.HeartbeatRepo
 		return nil, err
 	}
 	msg := heartbeatFromWire(r)
+	before := s.host.slotUnhealthyReasons(msg)
 	if err := s.host.obs.IngestHeartbeat(msg); err != nil {
 		return nil, fmt.Errorf("ingest: %w", err)
 	}
+	s.host.recordUnhealthyTransitions(msg, before)
 	return &control.HeartbeatAck{
 		AcceptedAt: timestamppb.Now(),
 		Sequence:   s.seq.Add(1),
@@ -345,6 +348,7 @@ func (s *services) QueryVolumeStatus(ctx context.Context, req *control.StatusReq
 		}
 		replicaIDs = primaryFirstReplicaIDs(replicaIDs, line.ReplicaID)
 		resp.Frontends = statusFrontendsForAssignedVolume(s.host.obs, req.VolumeId, replicaIDs, line.Assigned)
+		resp.UnhealthyReplicas = statusUnhealthyReplicas(s.host.obs, req.VolumeId, replicaIDs)
 	}
 	if ev, ok := ctrl.LastUnsupported(req.VolumeId); ok {
 		resp.LastUnsupportedReason = ev.Reason
@@ -660,6 +664,7 @@ func heartbeatFromWire(r *control.HeartbeatReport) authority.HeartbeatMessage {
 			Withdrawn:       s.Withdrawn,
 			EvidenceScore:   s.EvidenceScore,
 			Incarnation:     s.Incarnation,
+			UnhealthyReason: s.UnhealthyReason,
 			LocalRoleClaim:  authority.LocalRoleClaim(s.LocalRoleClaim),
 		})
 	}
@@ -711,4 +716,64 @@ func frontendTargetsToWire(in []authority.FrontendTargetFact) []*control.Fronten
 		})
 	}
 	return out
+}
+
+// statusUnhealthyReplicas lists the replicas whose fresh slot fact
+// carries an explicit unhealthy reason (#128 rule 6).
+func statusUnhealthyReplicas(obs *authority.ObservationHost, volumeID string, replicaIDs []string) []*control.ReplicaUnhealthy {
+	if obs == nil {
+		return nil
+	}
+	var out []*control.ReplicaUnhealthy
+	for _, replicaID := range replicaIDs {
+		if slot, ok := obs.Store().SlotFact(volumeID, replicaID); ok && slot.UnhealthyReason != "" {
+			out = append(out, &control.ReplicaUnhealthy{ReplicaId: replicaID, Reason: slot.UnhealthyReason})
+		}
+	}
+	return out
+}
+
+// slotUnhealthyReasons returns the stored unhealthy reason of every slot
+// the heartbeat reports, before it is ingested.
+func (h *Host) slotUnhealthyReasons(msg authority.HeartbeatMessage) map[string]string {
+	if h.obs == nil {
+		return nil
+	}
+	out := make(map[string]string, len(msg.Slots))
+	for _, s := range msg.Slots {
+		prev, _ := h.obs.Store().SlotFact(s.VolumeID, s.ReplicaID)
+		out[s.VolumeID+"/"+s.ReplicaID] = prev.UnhealthyReason
+	}
+	return out
+}
+
+// recordUnhealthyTransitions records an event when a slot's stored
+// unhealthy reason changed with this heartbeat: set, changed, or cleared
+// (#128 rule 6). It compares stored facts, so an ingest the store
+// refused records nothing.
+func (h *Host) recordUnhealthyTransitions(msg authority.HeartbeatMessage, before map[string]string) {
+	if h.obs == nil {
+		return
+	}
+	for _, s := range msg.Slots {
+		cur, _ := h.obs.Store().SlotFact(s.VolumeID, s.ReplicaID)
+		prev := before[s.VolumeID+"/"+s.ReplicaID]
+		if cur.UnhealthyReason == prev {
+			continue
+		}
+		if cur.UnhealthyReason == "" {
+			h.events.append(ops.ClusterEvent{
+				VolumeID: s.VolumeID, ReplicaID: s.ReplicaID,
+				Type: "replica_unhealthy_cleared", Severity: "info",
+				Message: "replica reported healthy again", OldValue: prev,
+			})
+			continue
+		}
+		h.events.append(ops.ClusterEvent{
+			VolumeID: s.VolumeID, ReplicaID: s.ReplicaID,
+			Type: "replica_unhealthy", Severity: "warning",
+			Message: "replica reported an explicit unhealthy fact: " + cur.UnhealthyReason,
+			Reason:  cur.UnhealthyReason, OldValue: prev, NewValue: cur.UnhealthyReason,
+		})
+	}
 }
