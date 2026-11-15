@@ -142,12 +142,18 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 		ctx, cancel := context.WithTimeout(p.closeCtx, chunkAttachTimeout)
 		err := p.attachChunk(ctx, volumeID, h)
 		cancel()
+		if err == nil {
+			err = chunkFenced(volumeID, h)
+		}
 		if err == nil && !h.chunkDetach {
 			h.backend.SetOperational(true, "chunk layer attached under master authority")
 		}
 		h.attachMu.Unlock()
 		switch {
 		case err == nil, errors.Is(err, errProviderClosed):
+			return
+		case errors.Is(err, storage.ErrChunkLayerFenced):
+			log.Printf("durable: chunk layer for volume=%s: %v (not serving)", volumeID, err)
 			return
 		case errors.Is(err, errChunkNoAuthority):
 			continue
@@ -461,6 +467,16 @@ func (p *DurableProvider) MakeVolumeRemoteDurable(ctx context.Context, volumeID 
 		return err
 	}
 	return layer.MakeRemoteDurable(ctx, lsn)
+}
+
+// chunkFenced refuses a volume whose layer attached fenced: HEAD belongs to
+// a newer epoch or another holder (another server serving this replica),
+// so this host must not serve it (integration ruling F2).
+func chunkFenced(volumeID string, h *volHandle) error {
+	if h.chunk != nil && h.chunk.Fenced() {
+		return fmt.Errorf("durable: volume %s: HEAD belongs to a newer epoch or another holder: %w", volumeID, storage.ErrChunkLayerFenced)
+	}
+	return nil
 }
 
 // CutVolume takes one quiesced cut of volumeID and returns what it

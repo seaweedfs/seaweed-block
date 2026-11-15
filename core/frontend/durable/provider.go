@@ -742,6 +742,11 @@ func (p *DurableProvider) RecoverVolume(ctx context.Context, volumeID string) (R
 			h.backend.SetOperational(false, report.Evidence)
 			return report, nil
 		}
+		if err := chunkFenced(volumeID, h); err != nil {
+			h.backend.SetOperational(false, "chunk layer fenced: "+err.Error())
+			report.Err = err
+			return report, err
+		}
 	}
 	h.backend.SetOperational(true, report.Evidence)
 	return report, nil
