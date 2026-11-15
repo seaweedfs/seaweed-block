@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 )
@@ -293,5 +294,58 @@ func TestChunkPrecopy_BarrierSyncFailureSettlesStagedIntents(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertEveryHeadIsPrefixImage(t, f, w)
+	assertNoIntentsLeft(t, f)
+}
+
+// Recover republishes the dirty map outside the write path: a partial
+// batch append leaves a complete newer record (and a torn one) that
+// same-open Recover publishes. A chunk staged before it must not be reused:
+// HEAD at the recovered H has the recovered bytes.
+func TestChunkPrecopy_RecoverAfterStagingInvalidatesTheStage(t *testing.T) {
+	s, f, l, _ := precopyLayer(t, 1, 3) // chunk 0 staged in round 0; bound 1
+	want := makeBlock(ctBlockSize, 0xa7)
+	recovered := false
+	l.testAfterStageHook = func(round int) {
+		if round != 0 {
+			return
+		}
+		limit := walEntryHeaderSize + ctBlockSize + walEntryHeaderSize + 17
+		s.wal.batchWriteAt = func(data []byte, off int64) (int, error) {
+			if len(data) <= limit {
+				return 0, errors.New("fixture needs two whole records")
+			}
+			n, err := s.fd.WriteAt(data[:limit], off) // a real partial pwrite
+			if err != nil {
+				return n, err
+			}
+			return n, io.ErrShortWrite
+		}
+		_, err := s.WriteBatch(0, [][]byte{want, makeBlock(ctBlockSize, 0xb8)})
+		s.wal.batchWriteAt = nil
+		if !errors.Is(err, io.ErrShortWrite) {
+			t.Errorf("partial batch: %v", err)
+			return
+		}
+		if _, err := s.Recover(); err != nil { // same open, before the barrier
+			t.Errorf("same-open Recover: %v", err)
+			return
+		}
+		if got, err := s.Read(0); err != nil || !bytes.Equal(got, want) {
+			t.Errorf("valid prefix not recovered: err=%v", err)
+			return
+		}
+		recovered = true
+	}
+	r, err := l.Cut(ctTimeout(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !recovered || r.Stats.StagedChunks == 0 {
+		t.Fatalf("schedule did not run: recovered=%v staged=%d", recovered, r.Stats.StagedChunks)
+	}
+	img := f.imageOf(t, r.Head)
+	if got := img[:ctBlockSize]; !bytes.Equal(got, want) {
+		t.Fatalf("HEAD at H=%d: LBA 0 is %#x..., want the recovered %#x... (a stage from before Recover reused)", r.H, got[0], want[0])
+	}
 	assertNoIntentsLeft(t, f)
 }

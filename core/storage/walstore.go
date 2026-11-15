@@ -442,6 +442,11 @@ func (s *WALStore) Recover() (uint64, error) {
 	// this same open file). Invalidate before releasing publication, even on
 	// a failed scan; the next successful sync establishes a reusable new cut.
 	defer s.walMutation.Add(1)
+	// The same republication may change any chunk's bytes: an attached
+	// chunk layer counts it as a mutation of every chunk (staged pre-copies
+	// are never reused across it), also on a failed or partial scan. Runs
+	// before s.mu is released, so no read sees recovered bytes first.
+	defer s.noteChunkRecovery()
 	s.dm.clear()
 	res, err := recoverWAL(s.fd, s.sb, s.dm)
 	if err != nil {
@@ -1002,6 +1007,14 @@ func (s *WALStore) WriteExtentDirect(lba uint32, data []byte) error {
 // ApplyEntry writes a replicated block with the source's LSN rather
 // than allocating a fresh one. Same durability semantics as Write
 // (becomes durable on next Sync).
+// noteChunkRecovery tells an attached chunk layer that Recover republished
+// the dirty map: any chunk may have changed.
+func (s *WALStore) noteChunkRecovery() {
+	if h := s.chunk.Load(); h != nil && h.recovered != nil {
+		h.recovered()
+	}
+}
+
 // noteChunkMutation tells an attached chunk layer that lba changed; it
 // runs after the dirty-map insert that made the change visible.
 func (s *WALStore) noteChunkMutation(lba uint64) {

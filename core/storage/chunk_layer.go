@@ -38,6 +38,9 @@ type chunkHooks struct {
 	// mutated runs after every dirty-map insert (a write, a batch write,
 	// a replica apply) with the LBA: O(1), lock-free, on the write path.
 	mutated func(lba uint64)
+	// recovered runs when Recover republished the dirty map (any chunk
+	// may have changed), before reads resume.
+	recovered func()
 }
 
 const defaultReadMissTimeout = 30 * time.Second
@@ -223,7 +226,7 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 		l.cancel()
 		return nil, err
 	}
-	hooks := &chunkHooks{sink: l, closer: l.Close, mutated: l.noteMutation}
+	hooks := &chunkHooks{sink: l, closer: l.Close, mutated: l.noteMutation, recovered: l.noteAllMutated}
 	if !s.chunk.CompareAndSwap(nil, hooks) {
 		l.cancel()
 		return nil, errors.New("storage: a chunk layer is already attached")
@@ -294,6 +297,15 @@ func (l *chunkLayerImpl) OnExtentWrite(lba uint64, lsn uint64) {
 func (l *chunkLayerImpl) noteMutation(lba uint64) {
 	if idx := l.chunkOf(lba); idx < uint64(len(l.chunkMut)) {
 		l.chunkMut[idx].Add(1)
+	}
+}
+
+// noteAllMutated counts a mutation of every chunk: Recover republished
+// the dirty map, so no staged pre-copy may be reused across it. O(chunks),
+// on recovery only.
+func (l *chunkLayerImpl) noteAllMutated() {
+	for i := range l.chunkMut {
+		l.chunkMut[i].Add(1)
 	}
 }
 
