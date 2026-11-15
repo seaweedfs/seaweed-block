@@ -2,107 +2,11 @@ package volume
 
 import (
 	"context"
-	"path"
-	"sort"
-	"strings"
-	"sync"
 	"testing"
 
-	"google.golang.org/protobuf/proto"
-
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
-	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/filerpb"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
-
-// memFiler is an in-memory chunkstore.Filer: exclusive create, conditional
-// update and delete on extended attributes, and name-ordered listing.
-type memFiler struct {
-	mu sync.Mutex
-	e  map[string]*filerpb.Entry
-}
-
-func newMemFiler() *memFiler { return &memFiler{e: map[string]*filerpb.Entry{}} }
-
-func (m *memFiler) LookupEntry(_ context.Context, dir, name string) (*filerpb.Entry, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	e, ok := m.e[path.Join(dir, name)]
-	if !ok {
-		return nil, chunkstore.ErrNotFound
-	}
-	return proto.Clone(e).(*filerpb.Entry), nil
-}
-
-func (m *memFiler) CreateEntry(_ context.Context, dir string, e *filerpb.Entry, oExcl bool) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	p := path.Join(dir, e.GetName())
-	if _, ok := m.e[p]; ok && oExcl {
-		return chunkstore.ErrExists
-	}
-	m.e[p] = proto.Clone(e).(*filerpb.Entry)
-	return nil
-}
-
-func matches(e *filerpb.Entry, expected map[string][]byte) bool {
-	for k, v := range expected {
-		if string(e.GetExtended()[k]) != string(v) {
-			return false
-		}
-	}
-	return true
-}
-
-func (m *memFiler) UpdateEntry(_ context.Context, dir string, e *filerpb.Entry, expected map[string][]byte) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	p := path.Join(dir, e.GetName())
-	cur, ok := m.e[p]
-	if !ok {
-		return chunkstore.ErrNotFound
-	}
-	if !matches(cur, expected) {
-		return chunkstore.ErrPrecondition
-	}
-	m.e[p] = proto.Clone(e).(*filerpb.Entry)
-	return nil
-}
-
-func (m *memFiler) ListEntries(_ context.Context, dir, prefix, startAfter string, limit uint32) ([]*filerpb.Entry, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	var names []string
-	for p := range m.e {
-		if name := path.Base(p); path.Dir(p) == dir && strings.HasPrefix(name, prefix) && name > startAfter {
-			names = append(names, name)
-		}
-	}
-	sort.Strings(names)
-	if limit > 0 && uint32(len(names)) > limit {
-		names = names[:limit]
-	}
-	out := make([]*filerpb.Entry, 0, len(names))
-	for _, n := range names {
-		out = append(out, proto.Clone(m.e[path.Join(dir, n)]).(*filerpb.Entry))
-	}
-	return out, nil
-}
-
-func (m *memFiler) DeleteEntry(_ context.Context, dir, name string, expected map[string][]byte) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	p := path.Join(dir, name)
-	cur, ok := m.e[p]
-	if !ok {
-		return chunkstore.ErrNotFound
-	}
-	if !matches(cur, expected) {
-		return chunkstore.ErrPrecondition
-	}
-	delete(m.e, p)
-	return nil
-}
 
 type fakeChunkProvider struct {
 	cut    storage.ChunkCutResult
@@ -125,7 +29,7 @@ func adapterFixture(t *testing.T) (*fakeChunkProvider, ChunkControl) {
 	head := storage.ChunkHead{Gen: 3, Epoch: 2, Holder: "r1", RemoteLSN: 9, State: storage.ChunkHeadActive,
 		Chunks: map[uint64]storage.ChunkRef{0: {Key: "chunks/e2/c0/k1"}, 5: {Key: "chunks/e2/c5/k2"}}}
 	fp := &fakeChunkProvider{cut: storage.ChunkCutResult{H: 9, Head: head}}
-	cat, err := chunkstore.NewCatalog(newMemFiler(), "/swblock/chunks")
+	cat, err := chunkstore.NewCatalog(chunkstore.NewMemFiler(), "/swblock/chunks")
 	if err != nil {
 		t.Fatal(err)
 	}
