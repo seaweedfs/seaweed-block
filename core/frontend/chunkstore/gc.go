@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"path"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -33,7 +34,23 @@ type GCConfig struct {
 	Now              func() time.Time
 }
 
+type GCRoot struct {
+	Kind   string   `json:"kind"`
+	Volume string   `json:"volume"`
+	ID     string   `json:"id"`
+	Keys   []string `json:"keys"`
+	Epoch  uint64   `json:"epoch,omitempty"`
+	Holder string   `json:"holder,omitempty"`
+}
+type GCObject struct {
+	Volume string `json:"volume"`
+	Key    string `json:"key"`
+	FID    string `json:"fid"`
+}
 type GCResult struct {
+	Roots                                                   []GCRoot   `json:"roots"`
+	WouldDelete                                             []GCObject `json:"would_delete"`
+	WouldExpireIntents                                      []string   `json:"would_expire_intents"`
 	Volumes, Intents, ExpiredIntents, Candidates, Reclaimed int
 	// Pre-binding needles cannot be enumerated by this API. They are retained;
 	// UnknownUnbound is true rather than inventing a report-only count.
@@ -82,12 +99,21 @@ func NewCollector(cat *Catalog, blobs BlobDeleter, cfg GCConfig) (*Collector, er
 // previous candidates. Roots include active and deleting snapshots until
 // the catalog has actually removed them; this collector never infers their
 // absence from an age or a retention label.
-func (g *Collector) Run(ctx context.Context) (result GCResult, err error) {
+func (g *Collector) Run(ctx context.Context) (GCResult, error) { return g.run(ctx, true) }
+
+// Preview performs the same mark and admission as Run, with no metadata,
+// blob, intent or candidate-state mutations.
+func (g *Collector) Preview(ctx context.Context) (GCResult, error) { return g.run(ctx, false) }
+
+func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	result.UnknownUnbound = true
+	result.Roots = []GCRoot{}
+	result.WouldDelete = []GCObject{}
+	result.WouldExpireIntents = []string{}
 	defer func() {
-		if err != nil {
+		if err != nil && apply {
 			g.candidates = map[string]gcCandidate{}
 		}
 	}()
@@ -112,7 +138,13 @@ func (g *Collector) Run(ctx context.Context) (result GCResult, err error) {
 		if e != nil {
 			return result, e
 		}
-		addHead := func(head storage.ChunkHead) error {
+		addHead := func(kind, id string, head storage.ChunkHead) error {
+			keys := make([]string, 0, len(head.Chunks))
+			for _, ref := range head.Chunks {
+				keys = append(keys, ref.Key)
+			}
+			sort.Strings(keys)
+			result.Roots = append(result.Roots, GCRoot{Kind: kind, Volume: vol, ID: id, Keys: keys, Epoch: head.Epoch, Holder: head.Holder})
 			for _, ref := range head.Chunks {
 				dir, name, e := r.keyLocation(ref.Key)
 				if e != nil {
@@ -122,7 +154,7 @@ func (g *Collector) Run(ctx context.Context) (result GCResult, err error) {
 			}
 			return nil
 		}
-		if e = addHead(h); e != nil {
+		if e = addHead("HEAD", headName, h); e != nil {
 			return result, e
 		}
 		after := ""
@@ -132,7 +164,7 @@ func (g *Collector) Run(ctx context.Context) (result GCResult, err error) {
 				return result, e
 			}
 			for _, snap := range snaps {
-				if e = addHead(snap.Head()); e != nil {
+				if e = addHead("snapshot", snap.Name, snap.Head()); e != nil {
 					return result, e
 				}
 			}
@@ -148,8 +180,8 @@ func (g *Collector) Run(ctx context.Context) (result GCResult, err error) {
 		if e != nil {
 			return result, e
 		}
-		for _, head := range attempts {
-			if e = addHead(head); e != nil {
+		for _, attempt := range attempts {
+			if e = addHead("snapshot_attempt", attempt.Name, attempt.Head); e != nil {
 				return result, e
 			}
 		}
@@ -174,7 +206,13 @@ func (g *Collector) Run(ctx context.Context) (result GCResult, err error) {
 			}
 			if expire {
 				expired = append(expired, gcIntent{r, in})
+				result.WouldExpireIntents = append(result.WouldExpireIntents, path.Join(vol, in.ID))
 			} else {
+				kind := "capture_intent"
+				if strings.HasPrefix(in.Holder, "snapshot:") || strings.HasPrefix(in.Holder, "fork:") {
+					kind = "retained_copy_intent"
+				}
+				result.Roots = append(result.Roots, GCRoot{Kind: kind, Volume: vol, ID: in.ID, Keys: append([]string{}, in.Keys...), Epoch: in.Epoch, Holder: in.Holder})
 				for _, key := range in.Keys {
 					dir, name, e := r.keyLocation(key)
 					if e != nil {
@@ -219,6 +257,9 @@ func (g *Collector) Run(ctx context.Context) (result GCResult, err error) {
 	}
 	// An intent is retired only after the complete mark and confirmed fencing.
 	for _, x := range expired {
+		if !apply {
+			continue
+		}
 		if err = x.remote.DeleteIntent(ctx, x.intent.ID); err != nil {
 			return result, err
 		}
@@ -249,6 +290,13 @@ func (g *Collector) Run(ctx context.Context) (result GCResult, err error) {
 			nextCandidates[p] = candidate
 			continue
 		}
+		result.WouldDelete = append(result.WouldDelete, GCObject{Volume: b.volume, Key: mustUnescapeGCKey(b.entry.Name), FID: string(b.entry.Extended[extFid])})
+		if !apply {
+			continue
+		}
+		if err = ctx.Err(); err != nil {
+			return result, err
+		}
 		// Preserve the immutable binding forever: removing it would allow Put
 		// to rebind a key that once existed. The tombstone also permits retry
 		// after a failed physical delete without losing the fid.
@@ -270,8 +318,10 @@ func (g *Collector) Run(ctx context.Context) (result GCResult, err error) {
 		}
 		result.Reclaimed++
 	}
-	g.candidates = nextCandidates
-	g.last = start
+	if apply {
+		g.candidates = nextCandidates
+		g.last = start
+	}
 	return result, nil
 }
 
@@ -284,3 +334,6 @@ func (nilBlobs) Put(context.Context, []byte) (string, error) {
 func (nilBlobs) Get(context.Context, string) ([]byte, error) {
 	return nil, errors.New("chunkstore: metadata-only remote")
 }
+
+// The binding name was already validated before reclamation admission.
+func mustUnescapeGCKey(name string) string { k, _ := url.PathUnescape(name); return k }
