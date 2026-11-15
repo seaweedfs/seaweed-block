@@ -117,13 +117,22 @@ func chunkPost(name, statusAddr, route string, timeout time.Duration, body map[s
 		return chunkExitFailed
 	}
 	defer resp.Body.Close()
-	out, err := io.ReadAll(io.LimitReader(resp.Body, chunkResponseLimit))
+	out, err := io.ReadAll(io.LimitReader(resp.Body, chunkResponseLimit+1))
 	if err != nil {
 		fmt.Fprintf(stderr, "sw-block ops chunk %s: read response: %v\n", name, err)
 		return chunkExitFailed
 	}
+	if int64(len(out)) > chunkResponseLimit {
+		// Refuse rather than relay a truncated body; the operation may have
+		// happened, and its result is what would be lost.
+		fmt.Fprintf(stderr, "sw-block ops chunk %s: HTTP %d response exceeds %d bytes; not relaying a truncated body\n", name, resp.StatusCode, chunkResponseLimit)
+		return chunkExitFailed
+	}
 	if resp.StatusCode == http.StatusOK {
-		_, _ = stdout.Write(out)
+		if err := writeAll(stdout, out); err != nil {
+			fmt.Fprintf(stderr, "sw-block ops chunk %s: write the result: %v\n", name, err)
+			return chunkExitFailed
+		}
 		return ops.VolumeStatusExitOK
 	}
 	var e struct {
@@ -241,12 +250,26 @@ func chunkResult(name string, v any, err error, stdout, stderr io.Writer) int {
 		}
 		return chunkExitFailed
 	}
-	enc := json.NewEncoder(stdout)
-	if err := enc.Encode(v); err != nil {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(v); err != nil {
 		fmt.Fprintf(stderr, "sw-block ops chunk %s: %v\n", name, err)
 		return chunkExitFailed
 	}
+	if err := writeAll(stdout, buf.Bytes()); err != nil {
+		fmt.Fprintf(stderr, "sw-block ops chunk %s: write the result: %v\n", name, err)
+		return chunkExitFailed
+	}
 	return ops.VolumeStatusExitOK
+}
+
+// writeAll writes p and fails on a failed or short write: a lost result
+// must not exit 0.
+func writeAll(w io.Writer, p []byte) error {
+	n, err := w.Write(p)
+	if err == nil && n != len(p) {
+		err = io.ErrShortWrite
+	}
+	return err
 }
 
 func chunkSnapshots(args []string, stdout, stderr io.Writer) int {
