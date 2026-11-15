@@ -48,8 +48,11 @@ type fakeFiler struct {
 	// (exclusive create, evaluated when the server finally runs it). It
 	// runs under the lock and may read or change f.entries (e is the
 	// caller's entry: read it, do not keep it).
-	deferCreate     func(p string, e *filerpb.Entry) bool
-	stallCreate     func(p string) bool
+	deferCreate func(p string, e *filerpb.Entry) bool
+	stallCreate func(p string) bool
+	// afterLookup, if set, runs under the lock after a lookup of p has read
+	// its result: a change it makes is seen by the next read only.
+	afterLookup     func(p string)
 	deferredCreates []deferredCreate
 }
 
@@ -58,11 +61,19 @@ func newFakeFiler() *fakeFiler { return &fakeFiler{entries: map[string]*filerpb.
 func (f *fakeFiler) LookupEntry(_ context.Context, dir, name string) (*filerpb.Entry, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	e, ok := f.entries[path.Join(dir, name)]
+	p := path.Join(dir, name)
+	e, ok := f.entries[p]
+	var out *filerpb.Entry
+	if ok {
+		out = proto.Clone(e).(*filerpb.Entry)
+	}
+	if hook := f.afterLookup; hook != nil {
+		hook(p)
+	}
 	if !ok {
 		return nil, ErrNotFound
 	}
-	return proto.Clone(e).(*filerpb.Entry), nil
+	return out, nil
 }
 
 func (f *fakeFiler) CreateEntry(ctx context.Context, dir string, e *filerpb.Entry, oExcl bool) error {

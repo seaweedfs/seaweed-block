@@ -495,17 +495,15 @@ func (c *Catalog) EnsureVolume(ctx context.Context, vol string, g Geometry) (Vol
 		}
 	}
 	if v.Origin == OriginFork {
-		if h, has, err := c.ReadHead(ctx, vol); err != nil {
+		// One read of HEAD decides both: absent and aborted never attach.
+		h, has, err := c.ReadHead(ctx, vol)
+		switch {
+		case err != nil:
 			return VolumeInfo{}, err
-		} else if has && h.State == storage.ChunkHeadAborted {
-			return VolumeInfo{}, catErr(CodeForkIncomplete, false, nil, "volume %s: its fork was aborted (HEAD is a tombstone); it never attaches", vol)
-		}
-		has, err := c.headExists(ctx, root)
-		if err != nil {
-			return VolumeInfo{}, remoteErr(err, "read HEAD of %s", vol)
-		}
-		if !has {
+		case !has:
 			return VolumeInfo{}, catErr(CodeForkIncomplete, false, nil, "volume %s is a fork whose HEAD is not written yet", vol)
+		case h.State == storage.ChunkHeadAborted:
+			return VolumeInfo{}, catErr(CodeForkIncomplete, false, nil, "volume %s: its fork was aborted (HEAD is a tombstone); it never attaches", vol)
 		}
 	}
 	return v, nil
@@ -667,7 +665,7 @@ func (c *Catalog) abortedSnapEntry(vol, name, attempt string) (*filerpb.Entry, e
 	return &filerpb.Entry{
 		Name:       attempt,
 		Attributes: &filerpb.FuseAttributes{FileSize: uint64(len(body)), Mtime: now, Crtime: now, FileMode: 0o644, Mime: "application/json"},
-		Extended:   map[string][]byte{extKind: []byte(kindChunkSnap), extSnapState: []byte(SnapAborted), extAttempt: []byte(attempt)},
+		Extended:   map[string][]byte{extKind: []byte(kindChunkSnap), extSnapState: []byte(SnapAborted)},
 		Content:    body,
 	}, nil
 }
@@ -865,9 +863,18 @@ func (c *Catalog) CreateSnapshot(ctx context.Context, vol string, req SnapshotRe
 	switch {
 	case outcome == createdNow:
 		// This request's snapshot is at the attempt path (this create, or
-		// an earlier attempt's of the same request).
+		// an earlier attempt's of the same request). Judge it from that
+		// entry, never by resolving the name again (the name can be freed
+		// and reused meanwhile).
 		c.dropIntent(ctx, root, id)
-		return c.readSnap(ctx, vol, req.Name)
+		info, _, err := decodeSnap(path.Join(dir, attempt), got)
+		if err != nil {
+			return SnapshotInfo{}, err
+		}
+		if info.State == SnapAborted {
+			return SnapshotInfo{}, catErr(CodeSnapshotExists, false, nil, "snapshot %s/%s: this request's attempt was aborted; delete the name to reuse it", vol, req.Name)
+		}
+		return info, nil
 	case got != nil:
 		// The attempt path holds a sweep's tombstone, which is permanent:
 		// this create can never land.
@@ -1223,13 +1230,28 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 	pctx, cancel := c.publishCtx(ctx, deadline)
 	outcome, got, cerr := c.createResolved(ctx, pctx, dstRoot, he, id)
 	cancel()
+	// The HEAD now at the target decides, from that one read: a real HEAD
+	// completes the fork; an aborted tombstone means a sweep claimed the
+	// target first, so this fork lost and its create can never land.
+	if got == nil {
+		if outcome == createUnsettled {
+			return ForkResult{}, catErr(CodeOutcomeUnknown, true, cerr, "fork %s: HEAD create outcome unknown; its intent is kept, retry with the same request id", req.Target)
+		}
+		c.dropIntent(ctx, dstRoot, id) // refused for good, but HEAD could not be read
+		return ForkResult{}, remoteErr(cerr, "fork %s: HEAD exists but could not be read; retry with the same request id", req.Target)
+	}
+	h, err := decodeHead(path.Join(dstRoot, headName), got)
+	if err != nil {
+		return ForkResult{}, err
+	}
+	if h.State == storage.ChunkHeadAborted {
+		c.dropIntent(ctx, dstRoot, id) // the tombstone is permanent: this create never lands
+		return ForkResult{}, catErr(CodeTargetExists, false, nil, "fork %s lost to a sweep: its HEAD is an aborted tombstone; fork to a new volume id", req.Target)
+	}
 	if outcome != createUnsettled {
 		c.dropIntent(ctx, dstRoot, id) // confirmed, or refused for good
 	}
-	if outcome == createUnsettled && got == nil {
-		return ForkResult{}, catErr(CodeOutcomeUnknown, true, cerr, "fork %s: HEAD create outcome unknown; its intent is kept, retry with the same request id", req.Target)
-	}
-	return forkResult(existing, outcome != createdNow), nil // refused: the filer says HEAD exists
+	return forkResult(existing, outcome != createdNow), nil
 }
 
 // AbortFork settles a dead fork for a GC sweep (W5 ruling, 2026-11-15
