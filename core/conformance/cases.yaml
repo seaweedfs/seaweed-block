@@ -137,8 +137,8 @@ cases:
       session_phase: running
       must_not_emit_commands: [PublishHealthy]
 
-  - name: "session_closed_completed_to_healthy"
-    description: "Full lifecycle: assign → probe → facts → session → complete → healthy"
+  - name: "session_closed_completed_holds_until_durable_ack"
+    description: "A completed session alone does not publish healthy: it waits for a post-close durable ack"
     events:
       - kind: AssignmentObserved
         volume_id: vol1
@@ -168,6 +168,51 @@ cases:
         replica_id: r1
         session_id: 1
         achieved_lsn: 100
+    expect:
+      mode: recovering
+      session_phase: completed
+      must_have_trace_steps: [publish_healthy_held]
+      must_not_emit_commands: [PublishHealthy]
+
+  - name: "session_closed_completed_to_healthy"
+    description: "Full lifecycle: assign → probe → facts → session → complete → post-close durable ack → healthy"
+    events:
+      - kind: AssignmentObserved
+        volume_id: vol1
+        replica_id: r1
+        epoch: 1
+        endpoint_version: 1
+        data_addr: a
+        ctrl_addr: b
+      - kind: ProbeSucceeded
+        replica_id: r1
+        endpoint_version: 1
+        transport_epoch: 1
+      - kind: RecoveryFactsObserved
+        replica_id: r1
+        r: 0
+        s: 0
+        h: 100
+      - kind: SessionPrepared
+        replica_id: r1
+        session_id: 1
+        session_kind: catch_up
+        target_lsn: 100
+      - kind: SessionStarted
+        replica_id: r1
+        session_id: 1
+      - kind: SessionClosedCompleted
+        replica_id: r1
+        session_id: 1
+        achieved_lsn: 100
+      # Healthy needs a durable ack after the close (the recovery
+      # window closing alone is held as publish_healthy_held).
+      - kind: DurableAckObserved
+        replica_id: r1
+        endpoint_version: 1
+        transport_epoch: 1
+        durable_lsn: 100
+        primary_head_lsn: 100
     expect:
       mode: healthy
       recovery_decision: none

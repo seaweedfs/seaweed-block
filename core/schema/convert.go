@@ -86,6 +86,16 @@ func ToEngineEvent(ei EventInput) (engine.Event, error) {
 			AchievedLSN: ei.AchievedLSN,
 		}, nil
 
+	case "DurableAckObserved":
+		return engine.DurableAckObserved{
+			ReplicaID:       ei.ReplicaID,
+			EndpointVersion: ei.EndpointVersion,
+			TransportEpoch:  ei.TransportEpoch,
+			DurableLSN:      ei.DurableLSN,
+			PrimaryTailLSN:  ei.PrimaryTailLSN,
+			PrimaryHeadLSN:  ei.PrimaryHeadLSN,
+		}, nil
+
 	case "SessionClosedFailed":
 		return engine.SessionClosedFailed{
 			ReplicaID: ei.ReplicaID,
