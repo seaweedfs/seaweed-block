@@ -14,12 +14,19 @@ package chunkstore
 // entry that does not check out is an error, never "absent".
 //
 // Snapshot and fork are read-then-write. Each writes an intent naming the
-// keys it references before its final manifest write and deletes it after,
-// and refuses the final write once OpDeadline has passed since it read its
-// source (the GC contract of spec §2.3).
+// keys it references before its final manifest write, and refuses that
+// write once OpDeadline has passed since it read its source (spec §2.3).
+// The operation's intents are removed only once its outcome is settled: the
+// manifest is confirmed published (re-read shows it), or the attempt
+// cleanly aborted (it never sent the write, or another entry already holds
+// the name, so its exclusive create can never land). An uncertain outcome
+// keeps them and reports outcome_unknown; a retry with the same request id
+// settles it and removes every intent of the operation.
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -84,6 +91,7 @@ const (
 	CodeForkIncomplete    = "fork_incomplete"
 	CodeDeadlineExceeded  = "deadline_exceeded"
 	CodeRemoteUnavailable = "remote_unavailable"
+	CodeOutcomeUnknown    = "outcome_unknown"
 )
 
 // CatalogError is a typed control-plane failure.
@@ -143,6 +151,21 @@ type VolumeInfo struct {
 	Origin    string  `json:"origin"`
 	CreatedNs int64   `json:"created_ns"`
 	Parent    *Parent `json:"parent"`
+	// Fork records the fork operation that made this volume (origin fork):
+	// a retry is bound to it, and a completed fork replays it.
+	Fork *ForkRecord `json:"fork,omitempty"`
+}
+
+// ForkRecord is the operation identity and original result of a fork.
+type ForkRecord struct {
+	RequestID     string `json:"request_id"`
+	Source        string `json:"source"`
+	Snapshot      string `json:"snapshot"`
+	SourceGen     uint64 `json:"source_gen"`
+	HeadSHA256    string `json:"head_sha256"` // SHA-256 of the snapshot's HEAD document
+	RemoteLSN     uint64 `json:"remote_lsn"`
+	ChunkCount    int    `json:"chunk_count"`
+	QualifiedRefs int    `json:"qualified_refs"`
 }
 
 type snapDoc struct {
@@ -339,6 +362,9 @@ func decodeVolume(p string, e *filerpb.Entry) (VolumeInfo, error) {
 	if v.Origin != OriginCreate && v.Origin != OriginFork {
 		return VolumeInfo{}, fmt.Errorf("chunkstore: VOLUME %s: origin %q", p, v.Origin)
 	}
+	if v.Origin == OriginFork && (v.Fork == nil || v.Fork.RequestID == "") {
+		return VolumeInfo{}, fmt.Errorf("chunkstore: VOLUME %s: a fork without its fork record", p)
+	}
 	return v, nil
 }
 
@@ -471,6 +497,68 @@ func decodeSnap(p string, e *filerpb.Entry) (SnapshotInfo, string, error) {
 	}, doc.RequestID, nil
 }
 
+// settleIntents removes every intent under root that operation tag wrote:
+// those of this attempt and of earlier ones whose outcome it has now
+// settled. A failure leaves intents behind, which only over-protects.
+func (c *Catalog) settleIntents(ctx context.Context, root, tag string) {
+	ctx = context.WithoutCancel(ctx)
+	dir := path.Join(root, intentsDir)
+	after := ""
+	for {
+		page, err := c.f.ListEntries(ctx, dir, "", after, listPage)
+		if err != nil {
+			return
+		}
+		for _, e := range page {
+			after = e.GetName()
+			if string(e.Extended[extHolder]) == tag {
+				_ = c.f.DeleteEntry(ctx, dir, e.GetName(), nil)
+			}
+		}
+		if len(page) < listPage {
+			return
+		}
+	}
+}
+
+type createOutcome int
+
+const (
+	createdNow    createOutcome = iota // this call's create applied (confirmed)
+	existsOurs                         // the entry exists and is this operation's
+	existsOther                        // another entry holds the name: our create can never land
+	createUnknown                      // the create's outcome is not known
+)
+
+// createResolved makes an exclusive create and resolves its outcome against
+// the operation's identity (ours) by re-reading the entry on any failure.
+// Only a re-read that finds the entry settles an ambiguous failure; a
+// failed re-read, or not finding it, leaves the outcome unknown (the create
+// may still land later).
+func (c *Catalog) createResolved(ctx context.Context, dir string, e *filerpb.Entry, ours func(*filerpb.Entry) bool) (createOutcome, error) {
+	err := c.f.CreateEntry(ctx, dir, e, true)
+	if err == nil {
+		return createdNow, nil
+	}
+	got, lerr := c.f.LookupEntry(ctx, dir, e.GetName())
+	if lerr != nil {
+		return createUnknown, err
+	}
+	if ours(got) {
+		return existsOurs, nil
+	}
+	return existsOther, nil
+}
+
+func headDigest(h storage.ChunkHead) (string, error) {
+	e, err := headEntry(h)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(e.Content)
+	return hex.EncodeToString(sum[:]), nil
+}
+
 func headKeys(h storage.ChunkHead) []string {
 	keys := make([]string, 0, len(h.Chunks))
 	for _, ref := range h.Chunks {
@@ -514,6 +602,7 @@ func (c *Catalog) CreateSnapshot(ctx context.Context, vol string, req SnapshotRe
 	}
 	if existing, prev, _, err := c.readSnap(ctx, vol, req.Name); err == nil {
 		if prev == req.RequestID {
+			c.settleIntents(ctx, root, "snapshot:"+vol+"/"+req.Name+"/"+req.RequestID)
 			existing.Replayed = true
 			return existing, nil
 		}
@@ -555,32 +644,33 @@ func (c *Catalog) CreateSnapshot(ctx context.Context, vol string, req SnapshotRe
 		Content: body,
 	}
 
-	id, err := putIntent(ctx, c.f, root, storage.ChunkIntent{Gen: head.Gen, Epoch: head.Epoch, Holder: head.Holder, Keys: headKeys(head)})
+	tag := "snapshot:" + vol + "/" + req.Name + "/" + req.RequestID
+	id, err := putIntent(ctx, c.f, root, storage.ChunkIntent{Gen: head.Gen, Epoch: head.Epoch, Holder: tag, Keys: headKeys(head)})
 	if err != nil {
 		return SnapshotInfo{}, remoteErr(err, "intent for snapshot %s/%s", vol, req.Name)
 	}
-	defer func() { _ = c.f.DeleteEntry(context.WithoutCancel(ctx), path.Join(root, intentsDir), id, nil) }()
-
 	if c.now().Sub(readAt) > c.deadline() {
+		// Clean abort: the snapshot entry was never sent.
+		_ = c.f.DeleteEntry(context.WithoutCancel(ctx), path.Join(root, intentsDir), id, nil)
 		return SnapshotInfo{}, catErr(CodeDeadlineExceeded, true, nil, "snapshot %s/%s: %v since the cut, over the %v deadline; nothing written", vol, req.Name, c.now().Sub(readAt), c.deadline())
 	}
-	if err := c.f.CreateEntry(ctx, path.Join(root, snapsDir), e, true); err != nil {
-		if !errors.Is(err, ErrExists) {
-			return SnapshotInfo{}, remoteErr(err, "create snapshot %s/%s", vol, req.Name)
-		}
-		// Lost response of our own write, or a concurrent writer.
-		existing, prev, _, rerr := c.readSnap(ctx, vol, req.Name)
-		if rerr != nil {
-			return SnapshotInfo{}, rerr
-		}
-		if prev != req.RequestID {
-			return SnapshotInfo{}, catErr(CodeSnapshotExists, false, nil, "snapshot %s/%s exists (another request)", vol, req.Name)
-		}
-		existing.Replayed = true
-		return existing, nil
+	dir := path.Join(root, snapsDir)
+	ours := func(got *filerpb.Entry) bool { return string(got.Extended[extReq]) == req.RequestID }
+	outcome, cerr := c.createResolved(ctx, dir, e, ours)
+	switch outcome {
+	case createUnknown:
+		return SnapshotInfo{}, catErr(CodeOutcomeUnknown, true, cerr, "snapshot %s/%s: create outcome unknown; its intent is kept, retry with the same request id", vol, req.Name)
+	case existsOther:
+		c.settleIntents(ctx, root, tag) // our exclusive create can never land
+		return SnapshotInfo{}, catErr(CodeSnapshotExists, false, nil, "snapshot %s/%s exists (another request)", vol, req.Name)
 	}
-	info, _, err := decodeSnap(path.Join(root, snapsDir, req.Name), e)
-	return info, err
+	c.settleIntents(ctx, root, tag) // confirmed published
+	info, _, _, err := c.readSnap(ctx, vol, req.Name)
+	if err != nil {
+		return SnapshotInfo{}, err
+	}
+	info.Replayed = outcome == existsOurs && errors.Is(cerr, ErrExists)
+	return info, nil
 }
 
 // ListSnapshots lists vol's snapshots in name order, after opts.StartAfter.
@@ -689,22 +779,30 @@ func (c *Catalog) ListVolumes(ctx context.Context) ([]string, error) {
 // ---- fork ----
 
 // Fork makes req.Target a new volume whose content is snapshot
-// req.Source/req.Snapshot, in O(1) filer writes and no data copy:
-//  1. read the snapshot (snapshot_not_found, snapshot_deleting);
-//  2. exclusively create Target's VOLUME (origin fork, the snapshot's
-//     geometry, parent {Source, Snapshot, gen}); an existing one from the
-//     same request id is reused, another is target_exists;
-//  3. qualify every chunk ref as "@<owner>/<key>" (a ref already qualified
-//     keeps its owner), under an intent naming them in Target;
-//  4. exclusively create Target's HEAD: gen 1, epoch 0, no holder, and the
-//     snapshot's remote_lsn (LSNs carry forward); a HEAD from the same
-//     request is a replay, another is target_exists.
+// req.Source/req.Snapshot, in O(1) filer writes and no data copy.
 //
-// The final write is refused once OpDeadline has passed since step 1.
+// The target is resolved first, independently of the source:
+//   - a target VOLUME from another request is target_exists, and so is one
+//     from this request id with other parameters;
+//   - a completed fork of this request (VOLUME and HEAD exist) replays the
+//     result recorded in VOLUME, even if the source has changed since.
+//
+// Otherwise:
+//  1. read the snapshot (snapshot_not_found, snapshot_deleting);
+//  2. exclusively create the target's VOLUME (origin fork, the snapshot's
+//     geometry, parent, and a fork record binding the request to the
+//     snapshot's image digest and the result). An incomplete fork of this
+//     request resumes only if the snapshot still has that exact image;
+//  3. qualify every chunk ref as "@<owner>/<key>" (a ref already qualified
+//     keeps its owner), under an intent in the target;
+//  4. exclusively create the target's HEAD: gen 1, epoch 0, no holder, and
+//     the snapshot's remote_lsn (LSNs carry forward).
+//
+// The HEAD write is refused once OpDeadline has passed since step 1. An
+// uncertain outcome of step 2 or 4 is outcome_unknown and keeps the intent;
+// a retry with the same request id settles it.
 func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error) {
-	readAt := c.now()
-	srcRoot, err := c.volRoot(req.Source)
-	if err != nil {
+	if _, err := c.volRoot(req.Source); err != nil {
 		return ForkResult{}, err
 	}
 	dstRoot, err := c.volRoot(req.Target)
@@ -714,7 +812,6 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 	if req.Source == req.Target {
 		return ForkResult{}, catErr(CodeTargetExists, false, nil, "fork target %s is the source", req.Target)
 	}
-	_ = srcRoot
 	if err := CheckSnapshotName(req.Snapshot); err != nil {
 		return ForkResult{}, err
 	}
@@ -724,6 +821,28 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 	if err := checkLabels(req.Labels); err != nil {
 		return ForkResult{}, err
 	}
+	tag := "fork:" + req.Target + "/" + req.RequestID
+
+	// The target first: replay or refuse without reading the source.
+	existing, ok, err := c.ReadVolume(ctx, req.Target)
+	if err != nil {
+		return ForkResult{}, err
+	}
+	if ok {
+		if err := c.checkForkRecord(existing, req); err != nil {
+			return ForkResult{}, err
+		}
+		has, err := c.headExists(ctx, dstRoot)
+		if err != nil {
+			return ForkResult{}, remoteErr(err, "read HEAD of %s", req.Target)
+		}
+		if has {
+			c.settleIntents(ctx, dstRoot, tag)
+			return forkResult(existing, true), nil
+		}
+	}
+
+	readAt := c.now()
 	snap, _, _, err := c.readSnap(ctx, req.Source, req.Snapshot)
 	if err != nil {
 		return ForkResult{}, err
@@ -734,27 +853,11 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 	if snap.geo == (Geometry{}) {
 		return ForkResult{}, fmt.Errorf("chunkstore: snapshot %s/%s has no geometry", req.Source, req.Snapshot)
 	}
-
-	vol := VolumeInfo{Format: volumeFormat, VolumeID: req.Target, Geometry: snap.geo, Origin: OriginFork, CreatedNs: c.now().UnixNano(),
-		Parent: &Parent{VolumeID: req.Source, Snapshot: req.Snapshot, Gen: snap.HeadGen}}
-	ve, err := volumeEntry(vol, req.RequestID)
+	src := snap.Head()
+	digest, err := headDigest(src)
 	if err != nil {
 		return ForkResult{}, err
 	}
-	if err := c.f.CreateEntry(ctx, dstRoot, ve, true); err != nil {
-		if !errors.Is(err, ErrExists) {
-			return ForkResult{}, remoteErr(err, "create VOLUME of %s", req.Target)
-		}
-		got, lerr := c.f.LookupEntry(ctx, dstRoot, volumeName)
-		if lerr != nil {
-			return ForkResult{}, remoteErr(lerr, "re-read VOLUME of %s", req.Target)
-		}
-		if string(got.Extended[extReq]) != req.RequestID {
-			return ForkResult{}, catErr(CodeTargetExists, false, nil, "volume %s exists (another request)", req.Target)
-		}
-	}
-
-	src := snap.Head()
 	head := storage.ChunkHead{Gen: 1, Epoch: 0, Holder: "", RemoteLSN: src.RemoteLSN, Chunks: make(map[uint64]storage.ChunkRef, len(src.Chunks))}
 	qualified := 0
 	for idx, ref := range src.Chunks {
@@ -764,37 +867,74 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 		}
 		head.Chunks[idx] = ref
 	}
-	result := ForkResult{Target: req.Target, Source: req.Source, Snapshot: req.Snapshot, SourceGen: snap.HeadGen,
-		HeadGen: 1, HeadEpoch: 0, RemoteLSN: head.RemoteLSN, ChunkCount: len(head.Chunks), QualifiedRefs: qualified}
+	record := &ForkRecord{RequestID: req.RequestID, Source: req.Source, Snapshot: req.Snapshot, SourceGen: snap.HeadGen,
+		HeadSHA256: digest, RemoteLSN: head.RemoteLSN, ChunkCount: len(head.Chunks), QualifiedRefs: qualified}
+
+	if ok {
+		// An incomplete fork of this request resumes only on the same image.
+		if existing.Fork.HeadSHA256 != digest || existing.Fork.SourceGen != snap.HeadGen || existing.Geometry != snap.geo {
+			return ForkResult{}, catErr(CodeTargetExists, false, nil,
+				"fork %s: snapshot %s/%s changed since this request's first attempt (gen %d -> %d); not resuming onto another image",
+				req.Target, req.Source, req.Snapshot, existing.Fork.SourceGen, snap.HeadGen)
+		}
+	} else {
+		vol := VolumeInfo{Format: volumeFormat, VolumeID: req.Target, Geometry: snap.geo, Origin: OriginFork, CreatedNs: c.now().UnixNano(),
+			Parent: &Parent{VolumeID: req.Source, Snapshot: req.Snapshot, Gen: snap.HeadGen}, Fork: record}
+		ve, err := volumeEntry(vol, req.RequestID)
+		if err != nil {
+			return ForkResult{}, err
+		}
+		outcome, cerr := c.createResolved(ctx, dstRoot, ve, func(got *filerpb.Entry) bool {
+			v, err := decodeVolume(path.Join(dstRoot, volumeName), got)
+			return err == nil && c.checkForkRecord(v, req) == nil && v.Fork.HeadSHA256 == digest
+		})
+		switch outcome {
+		case createUnknown:
+			return ForkResult{}, catErr(CodeOutcomeUnknown, true, cerr, "fork %s: VOLUME create outcome unknown; retry with the same request id", req.Target)
+		case existsOther:
+			return ForkResult{}, catErr(CodeTargetExists, false, nil, "volume %s exists (another request, or another image)", req.Target)
+		}
+		existing = vol
+	}
 
 	he, err := headEntry(head)
 	if err != nil {
 		return ForkResult{}, err
 	}
 	he.Extended[extReq] = []byte(req.RequestID)
-
-	id, err := putIntent(ctx, c.f, dstRoot, storage.ChunkIntent{Gen: 0, Epoch: 0, Holder: "fork:" + req.RequestID, Keys: headKeys(head)})
+	id, err := putIntent(ctx, c.f, dstRoot, storage.ChunkIntent{Gen: 0, Epoch: 0, Holder: tag, Keys: headKeys(head)})
 	if err != nil {
 		return ForkResult{}, remoteErr(err, "intent for fork %s", req.Target)
 	}
-	defer func() { _ = c.f.DeleteEntry(context.WithoutCancel(ctx), path.Join(dstRoot, intentsDir), id, nil) }()
-
 	if c.now().Sub(readAt) > c.deadline() {
+		// Clean abort: HEAD was never sent.
+		_ = c.f.DeleteEntry(context.WithoutCancel(ctx), path.Join(dstRoot, intentsDir), id, nil)
 		return ForkResult{}, catErr(CodeDeadlineExceeded, true, nil, "fork %s: %v since reading the snapshot, over the %v deadline; HEAD not written", req.Target, c.now().Sub(readAt), c.deadline())
 	}
-	if err := c.f.CreateEntry(ctx, dstRoot, he, true); err != nil {
-		if !errors.Is(err, ErrExists) {
-			return ForkResult{}, remoteErr(err, "create HEAD of %s", req.Target)
-		}
-		// HEAD exists: ours (lost response or retry) if VOLUME is ours.
-		got, lerr := c.f.LookupEntry(ctx, dstRoot, volumeName)
-		if lerr != nil {
-			return ForkResult{}, remoteErr(lerr, "re-read VOLUME of %s", req.Target)
-		}
-		if string(got.Extended[extReq]) != req.RequestID {
-			return ForkResult{}, catErr(CodeTargetExists, false, nil, "volume %s has a HEAD (another request)", req.Target)
-		}
-		result.Replayed = true
+	// Under this request's VOLUME only this fork ever writes HEAD (attach
+	// refuses a fork without HEAD), so any HEAD found there is ours.
+	outcome, cerr := c.createResolved(ctx, dstRoot, he, func(*filerpb.Entry) bool { return true })
+	if outcome == createUnknown {
+		return ForkResult{}, catErr(CodeOutcomeUnknown, true, cerr, "fork %s: HEAD create outcome unknown; its intent is kept, retry with the same request id", req.Target)
 	}
-	return result, nil
+	c.settleIntents(ctx, dstRoot, tag)
+	return forkResult(existing, outcome == existsOurs && errors.Is(cerr, ErrExists)), nil
+}
+
+// checkForkRecord refuses a target VOLUME that is not this fork request's.
+func (c *Catalog) checkForkRecord(v VolumeInfo, req ForkRequest) error {
+	if v.Fork == nil || v.Fork.RequestID != req.RequestID {
+		return catErr(CodeTargetExists, false, nil, "volume %s exists (another request)", req.Target)
+	}
+	if v.Fork.Source != req.Source || v.Fork.Snapshot != req.Snapshot {
+		return catErr(CodeTargetExists, false, nil, "volume %s: request id %s was used for a fork of %s/%s", req.Target, req.RequestID, v.Fork.Source, v.Fork.Snapshot)
+	}
+	return nil
+}
+
+// forkResult is the result recorded when the fork created VOLUME.
+func forkResult(v VolumeInfo, replayed bool) ForkResult {
+	r := v.Fork
+	return ForkResult{Target: v.VolumeID, Source: r.Source, Snapshot: r.Snapshot, SourceGen: r.SourceGen, HeadGen: 1, HeadEpoch: 0,
+		RemoteLSN: r.RemoteLSN, ChunkCount: r.ChunkCount, QualifiedRefs: r.QualifiedRefs, Replayed: replayed}
 }

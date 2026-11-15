@@ -364,6 +364,7 @@ var (
 	errChunkCaptureRefused      = errors.New("storage: chunk capture refused")
 	errChunkKeyInvalid          = errors.New("storage: chunk key is not non-empty valid UTF-8")
 	errChunkLayerDetached       = errors.New("storage: chunk layer detached")
+	errChunkCASOutcomeUnknown   = errors.New("storage: chunk HEAD CAS outcome unknown")
 )
 
 // attachChunkLayer attaches a chunk layer to an open store (chunk_layer.go).

@@ -33,13 +33,14 @@ const (
 )
 
 var (
-	ErrChunkKeyExists        = errChunkKeyExists
-	ErrChunkHeadPrecondition = errChunkHeadPrecondition
-	ErrChunkLayerFenced      = errChunkLayerFenced
-	ErrChunkEvictRefused     = errChunkEvictRefused
-	ErrChunkCaptureRefused   = errChunkCaptureRefused
-	ErrChunkKeyInvalid       = errChunkKeyInvalid
-	ErrChunkLayerDetached    = errChunkLayerDetached
+	ErrChunkKeyExists         = errChunkKeyExists
+	ErrChunkHeadPrecondition  = errChunkHeadPrecondition
+	ErrChunkLayerFenced       = errChunkLayerFenced
+	ErrChunkEvictRefused      = errChunkEvictRefused
+	ErrChunkCaptureRefused    = errChunkCaptureRefused
+	ErrChunkKeyInvalid        = errChunkKeyInvalid
+	ErrChunkLayerDetached     = errChunkLayerDetached
+	ErrChunkCASOutcomeUnknown = errChunkCASOutcomeUnknown
 )
 
 // ValidChunkKey enforces the chunk key domain (non-empty valid UTF-8); a

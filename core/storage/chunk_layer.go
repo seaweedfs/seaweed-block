@@ -58,20 +58,25 @@ type chunkLayerImpl struct {
 
 	closeDone chan struct{} // closed when Close has finished
 
-	stMu      sync.Mutex
-	closed    bool
-	head      chunkHead
-	pending   *chunkHead // a proposal whose CAS outcome is unresolved
-	fenced    bool
-	detached  *chunkCutResult // set by a successful Detach
-	remoteLSN uint64
-	hdr       chunkBitmapHeader // last header written or loaded
-	dirty     map[uint64]bool   // chunks dirtied since the cut in progress or the last HEAD
-	inflight  map[uint64]bool   // chunks captured by a cut whose HEAD is not yet installed
-	allDirty  bool              // a BASE block landed: every chunk is dirty
-	hashMode  bool              // the dirty set is unknown: compare every chunk by hash
-	cutLSN    uint64            // H of the latest cut taken (in flight or installed)
-	keySeq    uint64
+	stMu     sync.Mutex
+	closed   bool
+	head     chunkHead
+	pending  *chunkHead // a proposal whose CAS outcome is unresolved
+	fenced   bool
+	detached *chunkCutResult // set by a successful Detach
+	// pendingDetach is a Detach mark whose CAS outcome is unresolved (the
+	// re-read failed too); pendingDetachCut is that Detach's final cut.
+	// Every later capture, durability point or Detach settles it first.
+	pendingDetach    *chunkHead
+	pendingDetachCut chunkCutResult
+	remoteLSN        uint64
+	hdr              chunkBitmapHeader // last header written or loaded
+	dirty            map[uint64]bool   // chunks dirtied since the cut in progress or the last HEAD
+	inflight         map[uint64]bool   // chunks captured by a cut whose HEAD is not yet installed
+	allDirty         bool              // a BASE block landed: every chunk is dirty
+	hashMode         bool              // the dirty set is unknown: compare every chunk by hash
+	cutLSN           uint64            // H of the latest cut taken (in flight or installed)
+	keySeq           uint64
 
 	// Test-only scheduling hooks; nil in production.
 	testPresenceSnapshotHook func()                 // after a presence snapshot, before it is written
@@ -542,6 +547,9 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context) (chunkCutResult, err
 	ctx, cancel := l.opCtx(ctx)
 	defer cancel()
 
+	if err := l.settlePendingDetach(ctx); err != nil {
+		return chunkCutResult{}, err
+	}
 	if err := l.resolvePending(ctx); err != nil {
 		return chunkCutResult{}, err
 	}
@@ -662,7 +670,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context) (chunkCutResult, err
 		l.pending = &p
 		l.stMu.Unlock()
 		l.abortCut(all)
-		return chunkCutResult{}, fmt.Errorf("storage: capture CAS outcome unresolved (%v): %w", casErr, gerr)
+		return chunkCutResult{}, fmt.Errorf("storage: capture CAS outcome unresolved (%v): %w: %w", casErr, errChunkCASOutcomeUnknown, gerr)
 	}
 	if sameProposal(cur, next) {
 		l.finishCut(cur, h, changed, newKeys)
@@ -685,14 +693,34 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context) (chunkCutResult, err
 func (l *chunkLayerImpl) Detach(ctx context.Context) (chunkCutResult, error) {
 	l.capMu.Lock()
 	defer l.capMu.Unlock()
-	l.stMu.Lock()
-	if d := l.detached; d != nil {
-		r := *d
-		r.Head = copyHead(d.Head)
-		l.stMu.Unlock()
+	stored := func() (chunkCutResult, bool) {
+		l.stMu.Lock()
+		defer l.stMu.Unlock()
+		if d := l.detached; d != nil {
+			r := *d
+			r.Head = copyHead(d.Head)
+			return r, true
+		}
+		return chunkCutResult{}, false
+	}
+	if r, ok := stored(); ok {
 		return r, nil
 	}
-	l.stMu.Unlock()
+	if err := func() error {
+		done, err := l.register()
+		if err != nil {
+			return err
+		}
+		defer done()
+		sctx, cancel := l.opCtx(ctx)
+		defer cancel()
+		return l.settlePendingDetach(sctx)
+	}(); err != nil {
+		if r, ok := stored(); ok && errors.Is(err, errChunkLayerDetached) {
+			return r, nil // the earlier mark had applied
+		}
+		return chunkCutResult{}, err
+	}
 
 	r, err := l.captureLocked(ctx) // the final cut
 	if err != nil {
@@ -716,7 +744,11 @@ func (l *chunkLayerImpl) Detach(ctx context.Context) (chunkCutResult, error) {
 		// Precondition or unknown outcome: resolve by re-reading HEAD.
 		cur, gerr := l.remote.GetHead(ctx)
 		if gerr != nil {
-			return chunkCutResult{}, fmt.Errorf("storage: detach mark CAS outcome unresolved (%v): %w", casErr, gerr)
+			l.stMu.Lock()
+			p := copyHead(next)
+			l.pendingDetach, l.pendingDetachCut = &p, r
+			l.stMu.Unlock()
+			return chunkCutResult{}, fmt.Errorf("storage: detach mark CAS outcome unresolved (%v): %w: %w", casErr, errChunkCASOutcomeUnknown, gerr)
 		}
 		if !(sameProposal(cur, next) && cur.Detached) {
 			l.stMu.Lock()
@@ -747,11 +779,47 @@ func (l *chunkLayerImpl) Detach(ctx context.Context) (chunkCutResult, error) {
 	res := chunkCutResult{H: r.H, Head: copyHead(next), FullHash: r.FullHash, Stats: r.Stats}
 	l.stMu.Lock()
 	l.head = copyHead(next)
-	stored := res
-	stored.Head = copyHead(next)
-	l.detached = &stored
+	keep := res
+	keep.Head = copyHead(next)
+	l.detached = &keep
 	l.stMu.Unlock()
 	return res, nil
+}
+
+// settlePendingDetach resolves an unresolved Detach mark by re-reading HEAD.
+// It returns errChunkLayerDetached when the mark had applied (the layer is
+// detached from then on), errChunkLayerFenced when a newer holder took
+// over, an outcome-unknown error when HEAD still cannot be read, and nil
+// when the mark did not apply (the layer continues as before).
+func (l *chunkLayerImpl) settlePendingDetach(ctx context.Context) error {
+	l.stMu.Lock()
+	p, cut := l.pendingDetach, l.pendingDetachCut
+	l.stMu.Unlock()
+	if p == nil {
+		return nil
+	}
+	cur, err := l.remote.GetHead(ctx)
+	if err != nil {
+		return fmt.Errorf("storage: an earlier detach mark is still unresolved: %w: %w", errChunkCASOutcomeUnknown, err)
+	}
+	l.stMu.Lock()
+	defer l.stMu.Unlock()
+	l.pendingDetach = nil
+	switch {
+	case sameProposal(cur, *p) && cur.Detached:
+		res := cut
+		res.Head = copyHead(cur)
+		l.head = copyHead(cur)
+		l.detached = &res
+		return errChunkLayerDetached
+	case l.supersededBy(cur):
+		l.fenced = true
+		l.head = copyHead(cur)
+		return errChunkLayerFenced
+	default:
+		l.head = copyHead(cur) // the mark did not apply
+		return nil
+	}
 }
 
 // supersededBy reports whether cur belongs to a newer or competing holder.
@@ -781,7 +849,7 @@ func (l *chunkLayerImpl) resolvePending(ctx context.Context) error {
 	}
 	cur, err := l.remote.GetHead(ctx)
 	if err != nil {
-		return fmt.Errorf("storage: capture: earlier CAS outcome still unresolved: %w", err)
+		return fmt.Errorf("storage: capture: earlier CAS outcome still unresolved: %w: %w", errChunkCASOutcomeUnknown, err)
 	}
 	l.stMu.Lock()
 	defer l.stMu.Unlock()

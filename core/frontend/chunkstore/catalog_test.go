@@ -333,7 +333,13 @@ func TestFork_RefusalsAndDeadline(t *testing.T) {
 		t.Fatalf("retry after the late attempt: %+v %v", res, err)
 	}
 	// A fork whose VOLUME is written but HEAD is not refuses to attach.
-	vol := VolumeInfo{Format: volumeFormat, VolumeID: "v5", Geometry: catGeo, Origin: OriginFork, Parent: &Parent{VolumeID: "v1", Snapshot: "s1", Gen: h.Gen}}
+	s1, _, _, err := c.readSnap(ctx, "v1", "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, _ := headDigest(s1.Head())
+	vol := VolumeInfo{Format: volumeFormat, VolumeID: "v5", Geometry: catGeo, Origin: OriginFork, Parent: &Parent{VolumeID: "v1", Snapshot: "s1", Gen: h.Gen},
+		Fork: &ForkRecord{RequestID: "crashed", Source: "v1", Snapshot: "s1", SourceGen: h.Gen, HeadSHA256: digest, RemoteLSN: 42, ChunkCount: 2, QualifiedRefs: 2}}
 	ve, _ := volumeEntry(vol, "crashed")
 	if err := f.CreateEntry(ctx, catBase+"/v5", ve, true); err != nil {
 		t.Fatal(err)

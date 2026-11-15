@@ -35,6 +35,13 @@ type fakeFiler struct {
 	// beforeCreate, if set, runs under the lock just before an entry is
 	// created (it may read f.entries but must not call f's methods).
 	beforeCreate func(p string)
+	// failCreate, if set, is called before a create is applied; a non-nil
+	// return fails the call and the entry is NOT created (an ambiguous
+	// transport error from the caller's view).
+	failCreate func(p string) error
+	// failCreateAfterApply, if set, is called after a create was applied; a
+	// non-nil return is reported to the caller (applied, response lost).
+	failCreateAfterApply func(p string) error
 }
 
 func newFakeFiler() *fakeFiler { return &fakeFiler{entries: map[string]*filerpb.Entry{}} }
@@ -59,9 +66,19 @@ func (f *fakeFiler) CreateEntry(_ context.Context, dir string, e *filerpb.Entry,
 	if f.beforeCreate != nil {
 		f.beforeCreate(p)
 	}
+	if f.failCreate != nil {
+		if err := f.failCreate(p); err != nil {
+			return err
+		}
+	}
 	c := proto.Clone(e).(*filerpb.Entry)
 	f.entries[p] = c
 	f.written = append(f.written, proto.Clone(e).(*filerpb.Entry))
+	if f.failCreateAfterApply != nil {
+		if err := f.failCreateAfterApply(p); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
