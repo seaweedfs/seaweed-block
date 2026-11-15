@@ -472,16 +472,24 @@ func (l *chunkLayerImpl) admit() error {
 	}
 	if gate := l.cfg.CaptureAllowed; gate != nil {
 		if err := gate(); err != nil {
-			return fmt.Errorf("%w: %v", errChunkCaptureRefused, err)
+			return fmt.Errorf("%w: %w", errChunkCaptureRefused, err)
 		}
 	}
 	return nil
 }
 
-func (l *chunkLayerImpl) Capture(ctx context.Context) (uint64, error) {
+func (l *chunkLayerImpl) Cut(ctx context.Context) (chunkCutResult, error) {
 	l.capMu.Lock()
 	defer l.capMu.Unlock()
 	return l.captureLocked(ctx)
+}
+
+func (l *chunkLayerImpl) Capture(ctx context.Context) (uint64, error) {
+	r, err := l.Cut(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return r.H, nil
 }
 
 func (l *chunkLayerImpl) MakeRemoteDurable(ctx context.Context, t uint64) error {
@@ -496,12 +504,12 @@ func (l *chunkLayerImpl) MakeRemoteDurable(ctx context.Context, t uint64) error 
 	if last := l.s.NextLSN() - 1; t > last {
 		return fmt.Errorf("storage: MakeRemoteDurable(%d): LSN was never written (last %d)", t, last)
 	}
-	h, err := l.captureLocked(ctx)
+	r, err := l.captureLocked(ctx)
 	if err != nil {
 		return err
 	}
-	if h < t {
-		return fmt.Errorf("storage: MakeRemoteDurable(%d): cut reached only %d", t, h)
+	if r.H < t {
+		return fmt.Errorf("storage: MakeRemoteDurable(%d): cut reached only %d", t, r.H)
 	}
 	return nil
 }
@@ -513,14 +521,14 @@ type capturedChunk struct {
 	zero bool
 }
 
-func (l *chunkLayerImpl) captureLocked(ctx context.Context) (uint64, error) {
+func (l *chunkLayerImpl) captureLocked(ctx context.Context) (chunkCutResult, error) {
 	done, err := l.register()
 	if err != nil {
-		return 0, err
+		return chunkCutResult{}, err
 	}
 	defer done()
 	if err := l.admit(); err != nil {
-		return 0, err
+		return chunkCutResult{}, err
 	}
 	if hook := l.testAfterAdmitHook; hook != nil {
 		hook()
@@ -529,7 +537,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context) (uint64, error) {
 	defer cancel()
 
 	if err := l.resolvePending(ctx); err != nil {
-		return 0, err
+		return chunkCutResult{}, err
 	}
 
 	// Quiesced cut.
@@ -537,7 +545,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context) (uint64, error) {
 	h, err := l.s.Sync()
 	if err != nil {
 		l.s.captureMu.Unlock()
-		return 0, fmt.Errorf("storage: capture sync: %w", err)
+		return chunkCutResult{}, fmt.Errorf("storage: capture sync: %w", err)
 	}
 	candidates := map[uint64]bool{}
 	for _, e := range l.s.dm.snapshot() {
@@ -589,7 +597,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context) (uint64, error) {
 	l.s.captureMu.Unlock()
 	if copyErr != nil {
 		l.abortCut(all)
-		return 0, fmt.Errorf("storage: capture copy: %w", copyErr)
+		return chunkCutResult{}, fmt.Errorf("storage: capture copy: %w", copyErr)
 	}
 
 	// Upload only what changed against HEAD.
@@ -610,7 +618,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context) (uint64, error) {
 		key := l.newKey(c.idx)
 		if err := l.remote.Put(ctx, key, c.data); err != nil {
 			l.abortCut(all)
-			return 0, fmt.Errorf("storage: capture upload chunk %d: %w", c.idx, err)
+			return chunkCutResult{}, fmt.Errorf("storage: capture upload chunk %d: %w", c.idx, err)
 		}
 		next.Chunks[c.idx] = chunkRef{Key: key, SHA256: c.sum}
 		newKeys[c.idx] = key
@@ -618,25 +626,25 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context) (uint64, error) {
 	}
 	if len(changed) == 0 && h == baseHead.RemoteLSN && baseHead.Gen != 0 {
 		l.finishCut(baseHead, h, nil, nil) // nothing new: no CAS
-		return h, nil
+		return chunkCutResult{H: h, Head: copyHead(baseHead), Noop: true, FullHash: all}, nil
 	}
 	if err := l.admit(); err != nil { // admission re-checked right before the CAS
 		l.abortCut(all)
-		return 0, err
+		return chunkCutResult{}, err
 	}
 	if l.supersededBy(baseHead) {
 		l.abortCut(all)
 		l.stMu.Lock()
 		l.fenced = true
 		l.stMu.Unlock()
-		return 0, errChunkLayerFenced
+		return chunkCutResult{}, errChunkLayerFenced
 	}
 	expected := chunkHeadVersion{Gen: baseHead.Gen, Epoch: baseHead.Epoch}
 	gen, casErr := l.remote.CASHead(ctx, expected, next)
 	if casErr == nil {
 		next.Gen = gen
 		l.finishCut(next, h, changed, newKeys)
-		return h, nil
+		return chunkCutResult{H: h, Head: copyHead(next), FullHash: all}, nil
 	}
 	// Precondition or unknown outcome: resolve by re-reading HEAD, never by
 	// a blind retry.
@@ -647,11 +655,11 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context) (uint64, error) {
 		l.pending = &p
 		l.stMu.Unlock()
 		l.abortCut(all)
-		return 0, fmt.Errorf("storage: capture CAS outcome unresolved (%v): %w", casErr, gerr)
+		return chunkCutResult{}, fmt.Errorf("storage: capture CAS outcome unresolved (%v): %w", casErr, gerr)
 	}
 	if sameProposal(cur, next) {
 		l.finishCut(cur, h, changed, newKeys)
-		return h, nil
+		return chunkCutResult{H: h, Head: copyHead(cur), FullHash: all}, nil
 	}
 	l.abortCut(all)
 	if l.supersededBy(cur) {
@@ -659,12 +667,12 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context) (uint64, error) {
 		l.fenced = true
 		l.head = copyHead(cur)
 		l.stMu.Unlock()
-		return 0, errors.Join(errChunkLayerFenced, casErr)
+		return chunkCutResult{}, errors.Join(errChunkLayerFenced, casErr)
 	}
 	l.stMu.Lock()
 	l.head = copyHead(cur)
 	l.stMu.Unlock()
-	return 0, fmt.Errorf("storage: capture CAS not applied: %w", casErr)
+	return chunkCutResult{}, fmt.Errorf("storage: capture CAS not applied: %w", casErr)
 }
 
 // supersededBy reports whether cur belongs to a newer or competing holder.
