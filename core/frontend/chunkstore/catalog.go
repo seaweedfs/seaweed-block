@@ -573,18 +573,27 @@ const (
 	createUnsettled                      // no answer: it may still apply, even later
 )
 
+// publishCtx bounds a publishing create by the operation's deadline
+// (catalog clock), so the RPC cannot outlive the deadline its intent
+// records (W5 ruling, 2026-11-15 17:06Z).
+func (c *Catalog) publishCtx(ctx context.Context, deadline time.Time) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, deadline.Sub(c.now()))
+}
+
 // createResolved makes this attempt's exclusive create of e under dir and
 // returns its outcome and the entry now under the name (nil if unread).
+// The create runs under publish (bounded by the operation's deadline); the
+// re-read that settles an ambiguous failure under ctx.
 // attempt, when not empty, is stored in e as extAttempt; a re-read that
 // finds it confirms this attempt's create. Only the filer's own "already
 // exists" answer settles a failure as refused; any other failure leaves
 // the create unsettled, whatever entry the re-read finds (that entry may
 // be another attempt's, and this one may still land after it is gone).
-func (c *Catalog) createResolved(ctx context.Context, dir string, e *filerpb.Entry, attempt string) (createOutcome, *filerpb.Entry, error) {
+func (c *Catalog) createResolved(ctx, publish context.Context, dir string, e *filerpb.Entry, attempt string) (createOutcome, *filerpb.Entry, error) {
 	if attempt != "" {
 		e.Extended[extAttempt] = []byte(attempt)
 	}
-	err := c.f.CreateEntry(ctx, dir, e, true)
+	err := c.f.CreateEntry(publish, dir, e, true)
 	if err == nil {
 		return createdNow, e, nil
 	}
@@ -689,17 +698,21 @@ func (c *Catalog) CreateSnapshot(ctx context.Context, vol string, req SnapshotRe
 	}
 
 	tag := "snapshot:" + vol + "/" + req.Name + "/" + req.RequestID
-	id, err := putIntent(ctx, c.f, root, storage.ChunkIntent{Gen: head.Gen, Epoch: head.Epoch, Holder: tag, Keys: headKeys(head)})
+	deadline := readAt.Add(c.deadline())
+	id, err := putIntent(ctx, c.f, root, storage.ChunkIntent{Gen: head.Gen, Epoch: head.Epoch, Holder: tag, Keys: headKeys(head),
+		DeadlineNs: deadline.UnixNano()})
 	if err != nil {
 		return SnapshotInfo{}, remoteErr(err, "intent for snapshot %s/%s", vol, req.Name)
 	}
-	if c.now().Sub(readAt) > c.deadline() {
+	if !c.now().Before(deadline) { // re-checked immediately before publishing
 		// Clean abort: the snapshot entry was never sent.
 		c.dropIntent(ctx, root, id)
 		return SnapshotInfo{}, catErr(CodeDeadlineExceeded, true, nil, "snapshot %s/%s: %v since the cut, over the %v deadline; nothing written", vol, req.Name, c.now().Sub(readAt), c.deadline())
 	}
 	dir := path.Join(root, snapsDir)
-	outcome, got, cerr := c.createResolved(ctx, dir, e, id)
+	pctx, cancel := c.publishCtx(ctx, deadline)
+	outcome, got, cerr := c.createResolved(ctx, pctx, dir, e, id)
+	cancel()
 	if outcome != createUnsettled {
 		c.dropIntent(ctx, root, id) // confirmed, or refused for good
 	}
@@ -976,7 +989,7 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 		}
 		// VOLUME names no chunk keys, so it needs no intent; a found VOLUME
 		// is this request's when it binds the same request and image.
-		outcome, got, cerr := c.createResolved(ctx, dstRoot, ve, "")
+		outcome, got, cerr := c.createResolved(ctx, ctx, dstRoot, ve, "")
 		if outcome != createdNow {
 			if got == nil {
 				return ForkResult{}, catErr(CodeOutcomeUnknown, true, cerr, "fork %s: VOLUME create outcome unknown; retry with the same request id", req.Target)
@@ -994,11 +1007,13 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 		return ForkResult{}, err
 	}
 	he.Extended[extReq] = []byte(req.RequestID)
-	id, err := putIntent(ctx, c.f, dstRoot, storage.ChunkIntent{Gen: 0, Epoch: 0, Holder: tag, Keys: headKeys(head)})
+	deadline := readAt.Add(c.deadline())
+	id, err := putIntent(ctx, c.f, dstRoot, storage.ChunkIntent{Gen: 0, Epoch: 0, Holder: tag, Keys: headKeys(head),
+		DeadlineNs: deadline.UnixNano()})
 	if err != nil {
 		return ForkResult{}, remoteErr(err, "intent for fork %s", req.Target)
 	}
-	if c.now().Sub(readAt) > c.deadline() {
+	if !c.now().Before(deadline) { // re-checked immediately before publishing
 		// Clean abort: HEAD was never sent.
 		c.dropIntent(ctx, dstRoot, id)
 		return ForkResult{}, catErr(CodeDeadlineExceeded, true, nil, "fork %s: %v since reading the snapshot, over the %v deadline; HEAD not written", req.Target, c.now().Sub(readAt), c.deadline())
@@ -1007,7 +1022,9 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 	// (attach refuses a fork without HEAD), so a HEAD found there completes
 	// the fork; if it is another attempt's and this create is unsettled,
 	// this attempt's intent stays (the create may land after HEAD is gone).
-	outcome, got, cerr := c.createResolved(ctx, dstRoot, he, id)
+	pctx, cancel := c.publishCtx(ctx, deadline)
+	outcome, got, cerr := c.createResolved(ctx, pctx, dstRoot, he, id)
+	cancel()
 	if outcome != createUnsettled {
 		c.dropIntent(ctx, dstRoot, id) // confirmed, or refused for good
 	}

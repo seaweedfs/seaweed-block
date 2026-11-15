@@ -49,6 +49,7 @@ type fakeFiler struct {
 	// runs under the lock and may read or change f.entries (e is the
 	// caller's entry: read it, do not keep it).
 	deferCreate     func(p string, e *filerpb.Entry) bool
+	stallCreate     func(p string) bool
 	deferredCreates []deferredCreate
 }
 
@@ -64,7 +65,13 @@ func (f *fakeFiler) LookupEntry(_ context.Context, dir, name string) (*filerpb.E
 	return proto.Clone(e).(*filerpb.Entry), nil
 }
 
-func (f *fakeFiler) CreateEntry(_ context.Context, dir string, e *filerpb.Entry, oExcl bool) error {
+func (f *fakeFiler) CreateEntry(ctx context.Context, dir string, e *filerpb.Entry, oExcl bool) error {
+	// stallCreate, if set and true for a path, makes the create hang until
+	// its context ends (a filer that never answers); set it before use.
+	if stall := f.stallCreate; stall != nil && stall(path.Join(dir, e.Name)) {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	p := path.Join(dir, e.Name)

@@ -241,6 +241,10 @@ type chunkIntent struct {
 	Holder    string
 	Keys      []string
 	CreatedNs int64 // assigned by PutIntent
+	// DeadlineNs (unix ns) is a copy intent's publication deadline: the
+	// snapshot or fork never publishes after it, so GC may expire the intent
+	// once it is past (plus RPC timeout and grace). 0 for capture intents.
+	DeadlineNs int64
 }
 
 // newChunkIntentID returns "<gen>-<16 lowercase hex digits>" from a random
