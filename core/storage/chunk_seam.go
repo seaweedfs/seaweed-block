@@ -390,6 +390,10 @@ var (
 	errChunkLayerClosed       = errors.New("storage: chunk layer closed")
 	errChunkBaseInstalling    = errors.New("storage: chunk BASE install in progress")
 	errChunkRemoteUnavailable = errors.New("storage: chunk remote unavailable")
+	// errChunkLSNBehind: this host's log has not reached the HEAD's
+	// remote_lsn, so a cut would move remote_lsn backwards (B9 W2 appendix,
+	// 2026-11-15 14:30Z; LSN continuity across hosts is W4b's).
+	errChunkLSNBehind = errors.New("storage: cut LSN is behind the HEAD's remote_lsn")
 )
 
 // attachChunkLayer attaches a chunk layer to an open store (chunk_layer.go).

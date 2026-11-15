@@ -411,10 +411,12 @@ func TestFork_ThenFreshHostReadsSnapshotImage(t *testing.T) {
 	if _, err := layer.Cut(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s1", Target: "v2", RequestID: "f"}); err != nil {
+	fork, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s1", Target: "v2", RequestID: "f"})
+	if err != nil {
 		t.Fatal(err)
 	}
 	dst, dlayer := attach("v2", true, 1)
+	dst.AdvanceFrontier(fork.RemoteLSN) // the fork's log continues from the copied remote_lsn (W4b's job in production)
 	zero := make([]byte, 4096)
 	for lba := uint32(0); lba < blocks; lba++ {
 		got, err := dst.Read(lba)
