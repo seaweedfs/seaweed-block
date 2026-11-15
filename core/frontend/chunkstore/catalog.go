@@ -1297,9 +1297,6 @@ func (c *Catalog) claimForkParent(ctx context.Context, req ForkRequest) (Snapsho
 			return SnapshotInfo{}, catErr(CodeSnapshotDeleting, false, nil, "snapshot %s/%s is being deleted", req.Source, req.Snapshot)
 		}
 		claims := decodeClaims(ref.entry)
-		if red := true; red { // RED: no claim written
-			return ref.info, nil
-		}
 		for _, cl := range claims {
 			if cl == token {
 				return ref.info, nil

@@ -361,10 +361,8 @@ func (c *Catalog) Retain(ctx context.Context, vol string, dryRun bool) (Retentio
 	}
 	for _, s := range unfinished {
 		d := RetentionDecision{Name: s.Name, Attempt: s.attempt, CreatedNs: s.CreatedNs, Class: s.Class, Pinned: s.Pinned(), Reasons: []string{SnapDeleting}}
-		if red := true; !red { // RED: unfinished attempts not listed
-			res.Decisions = append(res.Decisions, d)
-			res.Expired++
-		}
+		res.Decisions = append(res.Decisions, d)
+		res.Expired++
 		expired = append(expired, d)
 	}
 	if dryRun {
@@ -454,8 +452,9 @@ func (c *Catalog) deleteRetainedAttempt(ctx context.Context, vol, name, attempt 
 		next.Extended[extSnapState] = []byte(SnapDeleting)
 		next.Extended[extSnapDeletedNs] = []byte(strconv.FormatInt(c.now().UnixNano(), 10))
 		err = c.f.UpdateEntry(ctx, dir, next, map[string][]byte{
-			extSnapState: []byte(SnapActive), // RED: no claims condition
-			extSnapGen:   e.Extended[extSnapGen],
+			extSnapState:  []byte(SnapActive),
+			extSnapGen:    e.Extended[extSnapGen],
+			extSnapClaims: nil, // no claims: a fork that claimed meanwhile wins
 		})
 		if errors.Is(err, ErrPrecondition) || errors.Is(err, ErrNotFound) {
 			continue // a claim, a delete or a replacement landed: decide again
