@@ -319,3 +319,32 @@ var (
 	_ Filer = (*SWFS)(nil)
 	_ Blobs = (*SWFS)(nil)
 )
+
+// DeleteBlob removes an immutable needle from every resolved replica. A
+// partial/unknown result is an error, so GC retains its binding tombstone
+// and retries later; no response body is used to infer success.
+func (c *SWFS) DeleteBlob(ctx context.Context, fid string) error {
+	vid, needle, ok := strings.Cut(fid, ",")
+	if !ok || vid == "" || needle == "" || strings.ContainsAny(fid, "/\\?#% \r\n") {
+		return fmt.Errorf("chunkstore: bad deletion fid %q", fid)
+	}
+	urls, err := c.lookupVolume(ctx, vid)
+	if err != nil {
+		return err
+	}
+	for _, host := range urls {
+		req, err := http.NewRequestWithContext(ctx, http.MethodDelete, "http://"+host+"/"+fid, nil)
+		if err != nil {
+			return err
+		}
+		resp, err := c.http.Do(req)
+		if err != nil {
+			return err
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
+			return fmt.Errorf("chunkstore: delete %s: http %d", fid, resp.StatusCode)
+		}
+	}
+	return nil
+}
