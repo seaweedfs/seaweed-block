@@ -178,7 +178,13 @@ func New(cfg Config) (*Host, error) {
 	}
 
 	holder := &publisherHolder{}
-	ctrl := authority.NewTopologyController(cfg.ControllerConfig, holder)
+	ctrlCfg := cfg.ControllerConfig
+	if ctrlCfg.PrimaryBootGrace == 0 && cfg.Freshness.FreshnessWindow > 0 {
+		// A restarted primary may stay not-ready for at most the
+		// window in which its observations are trusted (#128).
+		ctrlCfg.PrimaryBootGrace = cfg.Freshness.FreshnessWindow
+	}
+	ctrl := authority.NewTopologyController(ctrlCfg, holder)
 
 	h := &Host{
 		cfg:    cfg,

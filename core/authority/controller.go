@@ -29,6 +29,7 @@ type TopologyController struct {
 	desired          map[string]DesiredAssignment
 	unsupported      map[string]UnsupportedEvidence
 	convergenceStuck map[string]*ConvergenceStuckEvidence
+	bootGrace        map[string]*primaryBootGrace // volume/replica -> current incarnation's grace
 	now              func() time.Time
 }
 
@@ -40,6 +41,7 @@ func NewTopologyController(config TopologyControllerConfig, reader AuthorityBasi
 		desired:          make(map[string]DesiredAssignment),
 		unsupported:      make(map[string]UnsupportedEvidence),
 		convergenceStuck: make(map[string]*ConvergenceStuckEvidence),
+		bootGrace:        make(map[string]*primaryBootGrace),
 		now:              time.Now,
 	}
 }
@@ -228,6 +230,7 @@ func (c *TopologyController) processSupportedVolumeLocked(
 	// S4 behavior; stuck evidence has its own lifecycle and is
 	// NOT cleared here — §10 clearing rule 4.)
 	delete(c.unsupported, vol.VolumeID)
+	c.observeIncarnationsLocked(vol)
 
 	c.confirmDesiredLocked(vol, currentLine, hasLine)
 
@@ -487,6 +490,22 @@ func (c *TopologyController) decideVolume(
 				CtrlAddr:  target.CtrlAddr,
 				Intent:    IntentReassign,
 			}, "rebalance", true
+		}
+		return AssignmentAsk{}, "", false
+	}
+
+	// A restarted current primary that is placeable but not ready yet
+	// keeps its authority through its boot grace; only its endpoint
+	// may be refreshed.
+	if candidatePlaceable(current, serverIndex) && c.inPrimaryBootGraceLocked(vol.VolumeID, current) {
+		if current.DataAddr != currentLine.DataAddr || current.CtrlAddr != currentLine.CtrlAddr {
+			return AssignmentAsk{
+				VolumeID:  vol.VolumeID,
+				ReplicaID: current.ReplicaID,
+				DataAddr:  current.DataAddr,
+				CtrlAddr:  current.CtrlAddr,
+				Intent:    IntentRefreshEndpoint,
+			}, "endpoint refresh (primary boot grace)", true
 		}
 		return AssignmentAsk{}, "", false
 	}

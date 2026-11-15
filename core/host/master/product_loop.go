@@ -183,7 +183,9 @@ func (h *Host) applyPromotionEvidenceGate(snap *authority.ClusterSnapshot) (int,
 				slot.ReadyForPrimary = false
 			}
 		}
-		if enabledCandidate && result.CurrentKnown && !result.Current.Ready {
+		if enabledCandidate && result.CurrentKnown && !result.Current.Ready && primaryBootGraceHolds(h.ctrl, vol.VolumeID, vol.Slots[currentIdx]) {
+			h.log.Printf("blockmaster: promotion gate volume=%s current=%s not ready but in boot grace; no direct reassign", vol.VolumeID, vol.Authority.ReplicaID)
+		} else if enabledCandidate && result.CurrentKnown && !result.Current.Ready {
 			current := &vol.Slots[currentIdx]
 			current.Reachable = false
 			current.ReadyForPrimary = false
@@ -561,4 +563,15 @@ func (h *Host) assignmentAskAlreadyCurrent(volumeID, replicaID, dataAddr, ctrlAd
 		line.ReplicaID == replicaID &&
 		line.DataAddr == dataAddr &&
 		line.CtrlAddr == ctrlAddr
+}
+
+// primaryBootGraceHolds reports whether the current primary's slot is
+// placeable by its own report and inside its boot grace (#128): a
+// restarted primary that is merely not ready yet. An explicit unhealthy
+// report (unreachable, ineligible, withdrawn) never holds.
+func primaryBootGraceHolds(ctrl *authority.TopologyController, volumeID string, current authority.ReplicaCandidate) bool {
+	if ctrl == nil || !current.Reachable || !current.Eligible || current.Withdrawn {
+		return false
+	}
+	return ctrl.PrimaryInBootGrace(volumeID, current)
 }
