@@ -27,6 +27,9 @@ type Target struct {
 
 	mu     sync.Mutex
 	device targetDevice
+
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // targetDevice is what Target needs from a running device.
@@ -77,19 +80,21 @@ func (t *Target) Stats() Stats {
 	return d.Stats()
 }
 
-// Close stops and deletes the device.
+// Close stops and deletes the device. It is idempotent: the device is
+// closed once, and every caller, concurrent or later, gets that result.
 func (t *Target) Close() error {
 	if t == nil {
 		return nil
 	}
-	t.mu.Lock()
-	d := t.device
-	t.device = nil
-	t.mu.Unlock()
-	if d == nil {
-		return nil
-	}
-	return d.Close()
+	t.closeOnce.Do(func() {
+		t.mu.Lock()
+		d := t.device
+		t.mu.Unlock()
+		if d != nil {
+			t.closeErr = d.Close()
+		}
+	})
+	return t.closeErr
 }
 
 type providerBackend struct {

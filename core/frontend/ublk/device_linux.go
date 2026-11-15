@@ -51,7 +51,7 @@ type queue struct {
 
 // Start creates /dev/ublkbN (N = cfg.DevID, or the kernel's choice when
 // DevID < 0) backed by cfg.Backend and serves it until Close. A device
-// left at the same id by a dead server is stopped and deleted first.
+// already present at the requested id is refused untouched.
 func Start(cfg Config) (*Device, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -75,7 +75,7 @@ func Start(cfg Config) (*Device, error) {
 	if cfg.DevID >= 0 {
 		id = uint32(cfg.DevID)
 		_, statErr := os.Stat(charDevicePrefix + strconv.Itoa(cfg.DevID))
-		if err := reclaimStale(d, id, statErr == nil, processAlive); err != nil {
+		if err := refusePreExisting(id, statErr == nil); err != nil {
 			return fail(err)
 		}
 	}
@@ -195,24 +195,6 @@ func (d *Device) teardown(added bool) error {
 // queueStopTimeout bounds how long Close waits for the queue threads.
 const queueStopTimeout = 10 * time.Second
 
-// command implements controller for reclaimStale.
-func (d *Device) command(cmdOp uint32, devID uint32, buf []byte, data uint64) (int32, error) {
-	return d.ctrlCommand(cmdOp, devID, buf, data)
-}
-
-// processAlive reports whether pid names a live process: signal 0 is
-// delivered (or refused with EPERM: it exists), ESRCH means it is gone.
-func processAlive(pid int32) (bool, error) {
-	switch err := unix.Kill(int(pid), 0); err {
-	case nil, unix.EPERM:
-		return true, nil
-	case unix.ESRCH:
-		return false, nil
-	default:
-		return false, fmt.Errorf("ublk: probe pid %d: %w", pid, err)
-	}
-}
-
 // ctrlCommand runs one control command on /dev/ublk-control and returns
 // the CQE result. buf (may be nil) is the command's in/out buffer.
 func (d *Device) ctrlCommand(cmdOp uint32, devID uint32, buf []byte, data uint64) (int32, error) {
@@ -302,12 +284,12 @@ func (q *queue) run(ctx context.Context) {
 	q.fetched <- err
 	if err != nil {
 		if r != nil {
-			_ = r.close()
+			err = errors.Join(err, r.close())
 		}
 		q.err = err
 		return
 	}
-	defer r.close()
+	defer func() { q.err = errors.Join(q.err, r.close()) }() // before done closes
 
 	live := q.depth // tags with a fetch outstanding
 	var cq []cqe
