@@ -593,14 +593,8 @@ func (c *Catalog) CreateSnapshot(ctx context.Context, vol string, req SnapshotRe
 	if head.Gen == 0 {
 		return SnapshotInfo{}, catErr(CodeNotChunkVolume, false, nil, "volume %s has no published HEAD to snapshot", vol)
 	}
-	if existing, prev, _, err := c.readSnap(ctx, vol, req.Name); err == nil {
-		if prev == req.RequestID {
-			existing.Replayed = true
-			return existing, nil
-		}
-		return SnapshotInfo{}, catErr(CodeSnapshotExists, false, nil, "snapshot %s/%s exists (another request)", vol, req.Name)
-	} else if CodeOf(err) != CodeSnapshotNotFound {
-		return SnapshotInfo{}, err
+	if existing, replayed, err := c.SnapshotReplay(ctx, vol, req); err != nil || replayed {
+		return existing, err
 	}
 	v, ok, err := c.ReadVolume(ctx, vol)
 	if err != nil {
@@ -672,6 +666,35 @@ func (c *Catalog) CreateSnapshot(ctx context.Context, vol string, req SnapshotRe
 	}
 	info.Replayed = true // another attempt of this request wrote it
 	return info, nil
+}
+
+// SnapshotReplay resolves a snapshot request against the catalog before
+// the caller cuts (B9 W2 §3.2 step 1): when snaps/<req.Name> exists with
+// req's request id it returns that snapshot (Replayed, true); with another
+// request id, snapshot_exists; when the name is free, (zero, false, nil).
+// It validates the name and the request id first.
+func (c *Catalog) SnapshotReplay(ctx context.Context, vol string, req SnapshotRequest) (SnapshotInfo, bool, error) {
+	if _, err := c.volRoot(vol); err != nil {
+		return SnapshotInfo{}, false, err
+	}
+	if err := CheckSnapshotName(req.Name); err != nil {
+		return SnapshotInfo{}, false, err
+	}
+	if req.RequestID == "" {
+		return SnapshotInfo{}, false, catErr(CodeInvalidName, false, nil, "snapshot %s/%s: a request id is required", vol, req.Name)
+	}
+	existing, prev, _, err := c.readSnap(ctx, vol, req.Name)
+	switch {
+	case err == nil && prev == req.RequestID:
+		existing.Replayed = true
+		return existing, true, nil
+	case err == nil:
+		return SnapshotInfo{}, false, catErr(CodeSnapshotExists, false, nil, "snapshot %s/%s exists (another request)", vol, req.Name)
+	case CodeOf(err) == CodeSnapshotNotFound:
+		return SnapshotInfo{}, false, nil
+	default:
+		return SnapshotInfo{}, false, err
+	}
 }
 
 // ListSnapshots lists vol's snapshots in name order, after opts.StartAfter.

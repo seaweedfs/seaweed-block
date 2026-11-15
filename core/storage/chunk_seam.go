@@ -386,6 +386,10 @@ var (
 	errChunkKeyInvalid          = errors.New("storage: chunk key is not non-empty valid UTF-8")
 	errChunkLayerDetached       = errors.New("storage: chunk layer detached")
 	errChunkCASOutcomeUnknown   = errors.New("storage: chunk HEAD CAS outcome unknown")
+	// The causes a control plane reports as typed codes (B9 W2 §2.2).
+	errChunkLayerClosed       = errors.New("storage: chunk layer closed")
+	errChunkBaseInstalling    = errors.New("storage: chunk BASE install in progress")
+	errChunkRemoteUnavailable = errors.New("storage: chunk remote unavailable")
 )
 
 // attachChunkLayer attaches a chunk layer to an open store (chunk_layer.go).

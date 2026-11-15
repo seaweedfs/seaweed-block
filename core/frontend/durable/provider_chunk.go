@@ -26,6 +26,23 @@ var ErrNotChunkVolume = errors.New("durable: volume has no chunk layer")
 // assignment is not visible in the projection.
 var ErrChunkAwaitingAuthority = errors.New("durable: chunk layer awaiting master authority")
 
+// ChunkGeometry is a chunk volume's shape as this host serves it.
+type ChunkGeometry struct {
+	NumBlocks   uint64
+	BlockSize   uint32
+	ChunkBlocks uint32
+}
+
+// ErrChunkNotPrimary and ErrChunkEpochStale are the causes of a cut the
+// capture admission refused (wrapped with storage.ErrChunkCaptureRefused):
+// the projection is not a healthy primary of the volume here (the caller
+// goes elsewhere), or its lineage moved since the layer attached (a new
+// attach is needed).
+var (
+	ErrChunkNotPrimary = errors.New("durable: not a healthy primary for the chunk layer")
+	ErrChunkEpochStale = errors.New("durable: chunk layer lineage moved since attach")
+)
+
 var (
 	errProviderClosed   = errors.New("durable: provider closed")
 	errChunkNoAuthority = errors.New("durable: projection carries no master authority for the chunk layer")
@@ -125,7 +142,7 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 		ctx, cancel := context.WithTimeout(p.closeCtx, chunkAttachTimeout)
 		err := p.attachChunk(ctx, volumeID, h)
 		cancel()
-		if err == nil {
+		if err == nil && !h.chunkDetach {
 			h.backend.SetOperational(true, "chunk layer attached under master authority")
 		}
 		h.attachMu.Unlock()
@@ -192,6 +209,17 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 	if !chunkAuthority(proj, volumeID) {
 		return nil, errChunkNoAuthority
 	}
+	if check := p.cfg.ChunkAttachCheck; check != nil {
+		g := ChunkGeometry{NumBlocks: uint64(ws.NumBlocks()), BlockSize: uint32(ws.BlockSize()), ChunkBlocks: p.cfg.ChunkBlocks}
+		cctx, cancel := context.WithCancel(ctx)
+		stop := context.AfterFunc(p.closeCtx, cancel)
+		err := check(cctx, volumeID, g)
+		stop()
+		cancel()
+		if err != nil {
+			return nil, fmt.Errorf("durable: chunk attach check for %s: %w", volumeID, err)
+		}
+	}
 	inner, err := p.cfg.ChunkRemoteFor(volumeID)
 	if err != nil {
 		return nil, fmt.Errorf("durable: chunk remote for %s: %w", volumeID, err)
@@ -214,11 +242,11 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 		CaptureAllowed: func() error {
 			cur := p.view.Projection()
 			if !cur.Healthy || cur.VolumeID != volumeID || lin.volumeID != volumeID {
-				return fmt.Errorf("volume %s is not a healthy primary here", volumeID)
+				return fmt.Errorf("%w: volume %s is not a healthy primary here", ErrChunkNotPrimary, volumeID)
 			}
 			if cur.ReplicaID != lin.replicaID || cur.Epoch != lin.epoch || cur.EndpointVersion != lin.endpoint {
-				return fmt.Errorf("volume %s lineage moved from replica %q epoch %d endpoint %d to replica %q epoch %d endpoint %d",
-					volumeID, lin.replicaID, lin.epoch, lin.endpoint, cur.ReplicaID, cur.Epoch, cur.EndpointVersion)
+				return fmt.Errorf("%w: volume %s lineage moved from replica %q epoch %d endpoint %d to replica %q epoch %d endpoint %d",
+					ErrChunkEpochStale, volumeID, lin.replicaID, lin.epoch, lin.endpoint, cur.ReplicaID, cur.Epoch, cur.EndpointVersion)
 			}
 			return nil
 		},
@@ -388,22 +416,31 @@ func (p *DurableProvider) stopChunkLoop(h *volHandle) {
 }
 
 func (p *DurableProvider) chunkLayer(volumeID string) (storage.ChunkLayer, error) {
+	_, layer, err := p.chunkHandle(volumeID)
+	return layer, err
+}
+
+// chunkHandle resolves volumeID's handle and its attached layer in one
+// critical section; the caller keeps using that handle even if Close
+// removes it from the map afterwards.
+func (p *DurableProvider) chunkHandle(volumeID string) (*volHandle, storage.ChunkLayer, error) {
 	p.mu.Lock()
 	h, ok := p.volumes[volumeID]
+	var layer storage.ChunkLayer
+	awaiting := false
+	if ok {
+		layer, awaiting = h.chunk, h.waitGen != 0
+	}
 	p.mu.Unlock()
-	if !ok {
-		return nil, ErrVolumeNotOpen
+	switch {
+	case !ok:
+		return nil, nil, ErrVolumeNotOpen
+	case layer == nil && awaiting:
+		return nil, nil, ErrChunkAwaitingAuthority
+	case layer == nil:
+		return nil, nil, ErrNotChunkVolume
 	}
-	p.mu.Lock()
-	layer, awaiting := h.chunk, h.waitGen != 0
-	p.mu.Unlock()
-	if layer == nil && awaiting {
-		return nil, ErrChunkAwaitingAuthority
-	}
-	if layer == nil {
-		return nil, ErrNotChunkVolume
-	}
-	return layer, nil
+	return h, layer, nil
 }
 
 // CaptureVolume takes one quiesced cut of volumeID and publishes it to the
@@ -424,4 +461,64 @@ func (p *DurableProvider) MakeVolumeRemoteDurable(ctx context.Context, volumeID 
 		return err
 	}
 	return layer.MakeRemoteDurable(ctx, lsn)
+}
+
+// CutVolume takes one quiesced cut of volumeID and returns what it
+// installed: the cut LSN, the HEAD (the current one when nothing changed)
+// and the cut's statistics (B9 W2 §2.4, §3.1). With minLSN > 0 it is
+// MakeRemoteDurable(minLSN) returning the cut: an LSN never written is
+// refused before anything is published, and the cut must reach minLSN.
+func (p *DurableProvider) CutVolume(ctx context.Context, volumeID string, minLSN uint64) (storage.ChunkCutResult, error) {
+	h, layer, err := p.chunkHandle(volumeID)
+	if err != nil {
+		return storage.ChunkCutResult{}, err
+	}
+	if hook := p.testAfterChunkResolve; hook != nil {
+		hook()
+	}
+	if minLSN > 0 {
+		if last := h.storage.NextLSN() - 1; minLSN > last {
+			return storage.ChunkCutResult{}, fmt.Errorf("durable: cut of %s to LSN %d: that LSN was never written (last %d)", volumeID, minLSN, last)
+		}
+	}
+	r, err := layer.Cut(ctx)
+	if err != nil {
+		return storage.ChunkCutResult{}, err
+	}
+	if r.H < minLSN {
+		return storage.ChunkCutResult{}, fmt.Errorf("durable: cut of %s reached LSN %d, below %d", volumeID, r.H, minLSN)
+	}
+	return r, nil
+}
+
+// DetachVolume is a clean stop's final cut (B9 W2 §3.6): it stops the
+// volume's frontend I/O and waits (bounded by ctx) for the I/O already
+// admitted to finish, stops the periodic cuts, then publishes one cut with
+// HEAD state detached. It also returns the last LSN written. From its
+// start, the volume stays stopped for this process, through any later
+// RecoverVolume, even when the detach fails; a retry settles it and a
+// repeated call returns the first result.
+func (p *DurableProvider) DetachVolume(ctx context.Context, volumeID string) (storage.ChunkCutResult, uint64, error) {
+	p.mu.Lock()
+	h, ok := p.volumes[volumeID]
+	p.mu.Unlock()
+	if !ok {
+		return storage.ChunkCutResult{}, 0, ErrVolumeNotOpen
+	}
+	h.attachMu.Lock()
+	defer h.attachMu.Unlock()
+	layer, err := p.chunkLayer(volumeID)
+	if err != nil {
+		return storage.ChunkCutResult{}, 0, err
+	}
+	h.chunkDetach = true
+	if err := h.backend.StopIO(ctx, "chunk detach: I/O stopped until a new attach"); err != nil {
+		return storage.ChunkCutResult{}, 0, err
+	}
+	p.stopChunkLoop(h)
+	r, err := layer.Detach(ctx)
+	if err != nil {
+		return storage.ChunkCutResult{}, 0, err
+	}
+	return r, h.storage.NextLSN() - 1, nil
 }

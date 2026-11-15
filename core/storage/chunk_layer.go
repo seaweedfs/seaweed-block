@@ -465,7 +465,7 @@ func (l *chunkLayerImpl) register() (done func(), err error) {
 	l.stMu.Lock()
 	defer l.stMu.Unlock()
 	if l.closed {
-		return nil, errors.New("storage: chunk layer closed")
+		return nil, errChunkLayerClosed
 	}
 	l.wg.Add(1)
 	return l.wg.Done, nil
@@ -477,13 +477,13 @@ func (l *chunkLayerImpl) admit() error {
 	l.stMu.Unlock()
 	switch {
 	case closed:
-		return errors.New("storage: chunk layer closed")
+		return errChunkLayerClosed
 	case fenced:
 		return errChunkLayerFenced
 	case detached:
 		return errChunkLayerDetached
 	case base == chunkBaseInstalling:
-		return fmt.Errorf("%w: BASE install in progress", errChunkCaptureRefused)
+		return fmt.Errorf("%w: %w", errChunkCaptureRefused, errChunkBaseInstalling)
 	}
 	if gate := l.cfg.CaptureAllowed; gate != nil {
 		if err := gate(); err != nil {
@@ -641,7 +641,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (chunkC
 		key := l.newKey(c.idx)
 		if err := l.remote.Put(ctx, key, c.data); err != nil {
 			l.abortCut(all)
-			return chunkCutResult{}, fmt.Errorf("storage: capture upload chunk %d: %w", c.idx, err)
+			return chunkCutResult{}, fmt.Errorf("storage: capture upload chunk %d: %w: %w", c.idx, errChunkRemoteUnavailable, err)
 		}
 		next.Chunks[c.idx] = chunkRef{Key: key, SHA256: c.sum}
 		newKeys[c.idx] = key
@@ -706,6 +706,11 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (chunkC
 	l.stMu.Lock()
 	l.head = copyHead(cur)
 	l.stMu.Unlock()
+	// HEAD moved past the CAS's base without it, and not to a holder that
+	// supersedes this one: a head conflict, whatever error the CAS returned.
+	if !errors.Is(casErr, errChunkHeadPrecondition) {
+		casErr = fmt.Errorf("%w (%w)", errChunkHeadPrecondition, casErr)
+	}
 	return chunkCutResult{}, fmt.Errorf("storage: capture CAS not applied: %w", casErr)
 }
 

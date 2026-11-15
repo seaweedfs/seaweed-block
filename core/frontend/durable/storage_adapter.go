@@ -150,6 +150,18 @@ type StorageBackend struct {
 	operational atomic.Bool
 	opEvidence  atomic.Value // string
 
+	// ioMu is the I/O admission boundary: every Read, Write and Sync holds
+	// its read side for the whole operation, gate included, so StopIO can
+	// wait for the I/O admitted before a stop by taking the write side.
+	// admit checks the gate once before the read lock too, so I/O arriving
+	// while a drain waits fails at once instead of queueing behind it.
+	ioMu sync.RWMutex
+	// drain, under drainMu, is closed once the pending StopIO drain has
+	// taken and released ioMu; nil when none is pending. Every StopIO
+	// waits on the same drain, so timed-out retries never pile up waiters.
+	drainMu sync.Mutex
+	drain   chan struct{}
+
 	mu            sync.Mutex
 	closed        bool
 	observer      WriteObserver // optional; nil = no replication fan-out
@@ -353,15 +365,48 @@ func (b *StorageBackend) SetOperational(ok bool, evidence string) {
 	b.operational.Store(ok)
 }
 
+// StopIO makes the backend refuse every new Read, Write and Sync with
+// ErrNotReady (evidence), then waits, bounded by ctx, for the I/O admitted
+// before the stop to finish. After a nil return no I/O admitted before the
+// stop is still running, so nothing can be acknowledged after a cut taken
+// next. On a ctx error I/O stays refused and admitted I/O may still run;
+// a later StopIO waits on the same pending drain.
+func (b *StorageBackend) StopIO(ctx context.Context, evidence string) error {
+	b.SetOperational(false, evidence)
+	b.drainMu.Lock()
+	drained := b.drain
+	if drained == nil {
+		drained = make(chan struct{})
+		b.drain = drained
+		go func() {
+			b.ioMu.Lock()
+			b.ioMu.Unlock() //nolint:staticcheck // an empty critical section: waiting is the point
+			b.drainMu.Lock()
+			b.drain = nil
+			b.drainMu.Unlock()
+			close(drained)
+		}()
+	}
+	b.drainMu.Unlock()
+	select {
+	case <-drained:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("durable: I/O admitted before the stop is still running: %w", ctx.Err())
+	}
+}
+
 // Sync flushes everything the storage has to its durability
 // boundary. Returns nil iff the stable frontier advanced without
 // error. Subject to the same gate stack as I/O: closed → Err-
 // BackendClosed, non-operational → ErrNotReady, lineage drift →
 // ErrStalePrimary.
 func (b *StorageBackend) Sync(ctx context.Context) error {
-	if err := b.gate(); err != nil {
+	release, err := b.admit()
+	if err != nil {
 		return err
 	}
+	defer release()
 	start := time.Now()
 	// T4b-5: if an observer is installed, delegate the FULL sync
 	// job — the observer (ReplicationVolume) owns both the local
@@ -399,9 +444,11 @@ func (b *StorageBackend) Sync(ctx context.Context) error {
 // Read copies up to len(p) bytes starting at offset. Reads past
 // end-of-volume return zero bytes (no error). Every read is gated.
 func (b *StorageBackend) Read(ctx context.Context, offset int64, p []byte) (int, error) {
-	if err := b.gate(); err != nil {
+	release, err := b.admit()
+	if err != nil {
 		return 0, err
 	}
+	defer release()
 	if len(p) == 0 {
 		return 0, nil
 	}
@@ -419,10 +466,12 @@ func (b *StorageBackend) Write(ctx context.Context, offset int64, p []byte) (int
 	// wiring gap, potentially using a different backend instance
 	// or bypassing the durable layer entirely).
 	log.Printf("durable: StorageBackend.Write entry offset=%d len=%d", offset, len(p))
-	if err := b.gate(); err != nil {
+	release, err := b.admit()
+	if err != nil {
 		log.Printf("durable: StorageBackend.Write gate-rejected offset=%d: %v", offset, err)
 		return 0, err
 	}
+	defer release()
 	if len(p) == 0 {
 		return 0, nil
 	}
@@ -442,6 +491,22 @@ func (b *StorageBackend) RecordTargetWrite(bytes int, d time.Duration) {
 	b.profile.recordTargetWrite(bytes, d)
 }
 
+// admit admits one I/O: it passes the gate under the read side of ioMu
+// and returns the release. A first check of the closed and operational
+// flags before the lock makes I/O that arrives while StopIO drains fail at
+// once rather than wait; the full gate runs under the lock.
+func (b *StorageBackend) admit() (func(), error) {
+	if err := b.readyCheck(); err != nil {
+		return nil, err
+	}
+	b.ioMu.RLock()
+	if err := b.gate(); err != nil {
+		b.ioMu.RUnlock()
+		return nil, err
+	}
+	return b.ioMu.RUnlock, nil
+}
+
 // gate is the per-I/O precondition stack. Order matters:
 //
 //  1. closed: tests the lifecycle, cheapest check
@@ -451,6 +516,15 @@ func (b *StorageBackend) RecordTargetWrite(bytes int, d time.Duration) {
 //
 // Returning ANY error short-circuits — no partial I/O.
 func (b *StorageBackend) gate() error {
+	if err := b.readyCheck(); err != nil {
+		return err
+	}
+	return b.lineageCheck()
+}
+
+// readyCheck is the gate without the lineage check: closed, then
+// operational.
+func (b *StorageBackend) readyCheck() error {
 	b.mu.Lock()
 	closed := b.closed
 	b.mu.Unlock()
@@ -461,7 +535,7 @@ func (b *StorageBackend) gate() error {
 		ev, _ := b.opEvidence.Load().(string)
 		return fmt.Errorf("%w: %s", frontend.ErrNotReady, ev)
 	}
-	return b.lineageCheck()
+	return nil
 }
 
 // lineageCheck re-reads the projection and compares all four

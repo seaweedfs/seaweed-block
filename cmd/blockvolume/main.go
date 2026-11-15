@@ -175,6 +175,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.chunk.collection, "chunk-collection", "", "walstore-chunk: collection for chunk needles (empty = filer default / storage rule)")
 	fs.StringVar(&f.chunk.replication, "chunk-replication", "", "walstore-chunk: replication for chunk needles (empty = filer default / storage rule)")
 	fs.DurationVar(&f.chunk.captureInterval, "chunk-capture-interval", 0, "walstore-chunk: publish a cut every interval while healthy; 0 = only on demand")
+	fs.BoolVar(&f.chunk.controlEndpoint, "chunk-control-endpoint", false, "walstore-chunk: expose the /chunk/* control routes (cut, snapshot, snapshots, snapshot/delete, detach) on the status HTTP listener; off by default; loopback-only like the listener")
 	fs.UintVar(&f.durableBlocks, "durable-blocks", 2048, "number of blocks per volume on first create (ignored when opening existing)")
 	fs.UintVar(&f.durableBlockSize, "durable-blocksize", 4096, "block size in bytes on first create")
 	fs.BoolVar(&f.durableWALMultiBlockRecords, "durable-wal-multiblock-records", false, "enable experimental walstore multi-block WAL records; default false; requires --durable-impl=walstore")
@@ -507,6 +508,9 @@ func run(f flags) int {
 		if f.runtimeRebuildEndpoint {
 			status.EnableRuntimeEndpoint()
 		}
+		if f.chunk.controlEndpoint {
+			status.EnableChunkControlEndpoint()
+		}
 		if f.allowExternalStatusBind {
 			status.AllowExternalAccess()
 		}
@@ -544,12 +548,14 @@ func run(f flags) int {
 			WALRecoveryTestDisableFlusher: f.durableWALRecoveryTestDisableFlusher,
 		}
 		var chunkErr error
+		var chunk chunkWiring
 		if cfg.Impl == durable.ImplWALStoreChunk {
-			var closeChunkClient func() error
-			cfg.ChunkRemoteFor, closeChunkClient, chunkErr = newChunkRemoteFor(f.chunk)
+			chunk, chunkErr = newChunkWiring(f.chunk)
 			cfg.ChunkCaptureInterval = f.chunk.captureInterval
 			if chunkErr == nil {
-				defer closeChunkClient()
+				cfg.ChunkRemoteFor = chunk.remoteFor
+				cfg.ChunkAttachCheck = chunkAttachCheck(chunk.catalog)
+				defer chunk.close()
 			}
 		}
 		dp, err := durable.NewDurableProvider(cfg, h.ProjectionView())
@@ -570,6 +576,9 @@ func run(f flags) int {
 		provider = dp
 		if status != nil {
 			status.SetDurableStatusSource(dp)
+			if f.chunk.controlEndpoint && chunk.catalog != nil {
+				status.SetChunkControl(volume.NewChunkControl(dp, chunk.catalog))
+			}
 		}
 
 		// Open storage role-agnostically via EnsureStorage so replica

@@ -126,6 +126,12 @@ type ProviderConfig struct {
 	ChunkRemoteFor func(volumeID string) (storage.ChunkRemote, error)
 	// ChunkBlocks is the number of blocks per chunk. Zero: 1024.
 	ChunkBlocks uint32
+	// ChunkAttachCheck, if set, runs before every chunk layer attach, ahead
+	// of any remote read or CAS, with the volume's local geometry. A
+	// non-nil error refuses the attach. blockvolume wires it to the VOLUME
+	// entry's attach rules (B9 W2 §4.2): create VOLUME when missing, refuse
+	// a geometry mismatch and a fork whose HEAD is not written yet.
+	ChunkAttachCheck func(ctx context.Context, volumeID string, g ChunkGeometry) error
 	// ChunkHolder names this node in HEAD. Zero: the replica ID.
 	ChunkHolder string
 	// ChunkReadMissTimeout bounds one remote fetch of an absent block.
@@ -146,6 +152,10 @@ type DurableProvider struct {
 	volumes map[string]*volHandle  // keyed by volumeID
 	opening map[string]*sync.Mutex // keyed by volumeID; serializes open/create
 	closed  bool
+
+	// testAfterChunkResolve, test-only, runs in CutVolume right after the
+	// volume's handle and layer are resolved.
+	testAfterChunkResolve func()
 
 	// walstore-chunk: closeCtx ends with Close and cancels in-flight
 	// remote attachment; inflight counts RecoverVolume calls admitted
@@ -175,8 +185,12 @@ type volHandle struct {
 	recoverGen uint64
 	waitGen    uint64
 	chunk      storage.ChunkLayer // after RecoverVolume
-	chunkStop  context.CancelFunc
-	chunkDone  chan struct{}
+	// chunkDetach is set (under attachMu) when DetachVolume starts and
+	// never cleared in this process: frontend I/O stays stopped, through
+	// any later RecoverVolume, until a new lifetime attaches the volume.
+	chunkDetach bool
+	chunkStop   context.CancelFunc
+	chunkDone   chan struct{}
 }
 
 // VolumeStatus is a read-only diagnostic snapshot of one durable volume
@@ -698,6 +712,11 @@ func (p *DurableProvider) RecoverVolume(ctx context.Context, volumeID string) (R
 		defer p.inflight.Done()
 		h.attachMu.Lock()
 		defer h.attachMu.Unlock()
+		if h.chunkDetach {
+			err := fmt.Errorf("durable: volume %s was detached; I/O stays stopped until a new attach: %w", volumeID, storage.ErrChunkLayerDetached)
+			h.backend.SetOperational(false, "chunk detach: I/O stopped until a new attach")
+			return RecoveryReport{VolumeID: volumeID, Err: err}, err
+		}
 		p.mu.Lock()
 		h.recoverGen++ // any earlier recovery's authority wait is now stale
 		gen = h.recoverGen

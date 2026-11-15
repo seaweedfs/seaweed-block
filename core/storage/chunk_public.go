@@ -48,6 +48,9 @@ var (
 	ErrChunkKeyInvalid        = errChunkKeyInvalid
 	ErrChunkLayerDetached     = errChunkLayerDetached
 	ErrChunkCASOutcomeUnknown = errChunkCASOutcomeUnknown
+	ErrChunkLayerClosed       = errChunkLayerClosed
+	ErrChunkBaseInstalling    = errChunkBaseInstalling
+	ErrChunkRemoteUnavailable = errChunkRemoteUnavailable
 )
 
 // ValidChunkKey enforces the chunk key domain (non-empty valid UTF-8); a
