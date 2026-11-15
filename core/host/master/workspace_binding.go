@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 )
@@ -149,4 +150,51 @@ func (s *services) PlaceWorkspace(ctx context.Context, q *control.WorkspacePlace
 		return nil, workspaceError(err)
 	}
 	return &control.WorkspaceEmpty{}, nil
+}
+
+// admitWorkspacePublication owns the last local boundary before an ordinary
+// Publisher mint. Guarded Move already owns workspaceMu in its RPC path.
+func (h *Host) admitWorkspacePublication(ask authority.AssignmentAsk, publish func() error) error {
+	if h.lifecycle == nil {
+		return publish()
+	}
+	h.workspaceMu.Lock()
+	defer h.workspaceMu.Unlock()
+	if _, alive := h.lifecycle.Volumes.GetVolume(ask.VolumeID); !alive {
+		return fmt.Errorf("workspace publication: volume no longer exists")
+	}
+	bindings, bound, err := h.lifecycle.WorkspaceBindings.Get(ask.VolumeID)
+	if err != nil {
+		return err
+	}
+	var epoch uint64
+	if line, ok := h.Publisher().VolumeAuthorityLine(ask.VolumeID); ok {
+		epoch = line.Epoch
+	}
+	server := h.workspaceSourceHost(ask.VolumeID, ask.ReplicaID, epoch)
+	b := lifecycle.WorkspaceBinding{VolumeID: ask.VolumeID, ServerID: server, DataAddr: ask.DataAddr, CtrlAddr: ask.CtrlAddr}
+	if bound {
+		matched := false
+		for _, r := range bindings {
+			if !r.Retired && r.ServerID == server && r.DataAddr == ask.DataAddr && r.CtrlAddr == ask.CtrlAddr {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return fmt.Errorf("workspace publication: no matching active binding")
+		}
+	}
+	if err := h.lifecycle.WorkspaceBindings.CheckAvailable(b); err != nil {
+		return err
+	}
+	// A supported snapshot and its direct promotion fallback may both be
+	// dequeued before either commits. Apply the product loop's existing
+	// already-current check again here, rather than advancing the epoch twice.
+	if ask.Intent == authority.IntentReassign && h.assignmentAskAlreadyCurrent(ask.VolumeID, ask.ReplicaID, ask.DataAddr, ask.CtrlAddr) {
+		return nil
+	}
+	// The same mutex covers Register/Delete. It stays held through the actual
+	// Publisher persistence and in-memory commit, not just queue admission.
+	return publish()
 }

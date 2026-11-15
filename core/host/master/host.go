@@ -206,7 +206,8 @@ func New(cfg Config) (*Host, error) {
 	}
 
 	boot, err := bootstrap.BootstrapWithOptions(cfg.AuthorityStoreDir, ctrl, bootstrap.Options{
-		PublishObserver: h.recordAuthorityPublishedEvent,
+		PublishObserver:      h.recordAuthorityPublishedEvent,
+		PublicationAdmission: h.admitWorkspacePublication,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("master.New: Bootstrap: %w", err)

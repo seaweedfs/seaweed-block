@@ -22,9 +22,17 @@ func reviewBindingHost(t *testing.T) (*Host, *grpc.ClientConn, context.Context) 
 
 func reviewBindingHostWithReader(t *testing.T, reader func(context.Context, string) (authority.WorkspaceHead, error)) (*Host, *grpc.ClientConn, context.Context) {
 	t.Helper()
+	return reviewBindingHostBeforeStart(t, reader, nil)
+}
+
+func reviewBindingHostBeforeStart(t *testing.T, reader func(context.Context, string) (authority.WorkspaceHead, error), before func(*Host)) (*Host, *grpc.ClientConn, context.Context) {
+	t.Helper()
 	h, e := New(Config{Listen: "127.0.0.1:0", AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), WorkspaceRPC: true, WorkspaceHeadReader: reader})
 	if e != nil {
 		t.Fatal(e)
+	}
+	if before != nil {
+		before(h)
 	}
 	h.Start()
 	t.Cleanup(func() { closeTestMaster(t, h) })
@@ -116,6 +124,23 @@ func TestWorkspaceBindingDeleteCannotReleaseLiveAuthority(t *testing.T) {
 	if _, bound, e := h.Lifecycle().WorkspaceBindings.Get("live"); e != nil || !bound {
 		t.Fatal("refused deletion removed binding", bound, e)
 	}
+	id := &control.WorkspaceIdentity{VolumeId: "live", ReplicaId: "r1", Epoch: 1}
+	if _, e := client.RevokeWorkspace(ctx, id); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := client.AckWorkspaceRevoked(ctx, &control.WorkspaceRevocationAck{Identity: id, HeadGen: 9}); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := control.NewLifecycleServiceClient(c).DeleteVolume(ctx, &control.DeleteVolumeRequest{VolumeId: "live"}); e != nil {
+		t.Fatal("clean retired deletion positive", e)
+	}
+	reviewCreate(t, c, ctx, "reuse")
+	b.VolumeId = "reuse"
+	b.ServerId = "node-b"
+	if _, e := client.RegisterWorkspaceBinding(ctx, b); e != nil {
+		t.Fatal("retired pair not reusable after clean delete", e)
+	}
+
 }
 
 func TestWorkspaceBindingCanceledQueuedDeleteDoesNotMutate(t *testing.T) {
@@ -239,6 +264,9 @@ func TestWorkspaceBindingRemoteReadDoesNotBlockAck(t *testing.T) {
 					done <- e
 				}()
 			} else {
+				if _, e := h.Lifecycle().Volumes.CreateVolume(lifecycle.VolumeSpec{VolumeID: "vol-rf3", SizeBytes: 1 << 20, ReplicationFactor: 3}); e != nil {
+					t.Fatal(e)
+				}
 				seedRF3Placement(t, h)
 				ingestRF3Observation(t, h, true, true, true)
 				if _, e := h.RunLifecycleProductTick(); e != nil {
@@ -276,4 +304,98 @@ func (p reviewHeldPromotion) ProbePromotionCandidates(string, authority.Authorit
 	close(p.arrived)
 	<-p.release
 	return PromotionProbeResult{}, nil
+}
+
+// The real controller dequeues the admitted ask, then its Publisher is held
+// before the production admission/mint boundary. Queue discard cannot pass this.
+func TestWorkspaceBindingInFlightPublicationRechecksOwnershipAndLifetime(t *testing.T) {
+	for _, action := range []string{"register", "delete"} {
+		t.Run(action, func(t *testing.T) {
+			arrived, release := make(chan struct{}), make(chan struct{})
+			finished := make(chan error, 1)
+			h, c, ctx := reviewBindingHostBeforeStart(t, func(context.Context, string) (authority.WorkspaceHead, error) { return authority.WorkspaceHead{}, nil }, func(h *Host) {
+				authority.WithPublicationAdmission(func(ask authority.AssignmentAsk, publish func() error) error {
+					if ask.VolumeID == "inflight" {
+						close(arrived)
+						select {
+						case <-release:
+						case <-time.After(5 * time.Second):
+							return context.DeadlineExceeded
+						}
+					}
+					err := h.admitWorkspacePublication(ask, publish)
+					if ask.VolumeID == "inflight" {
+						finished <- err
+					}
+					return err
+				})(h.Publisher())
+			})
+			reviewCreate(t, c, ctx, "inflight")
+			if _, e := h.Lifecycle().Placements.ApplyPlan(lifecycle.PlacementPlan{VolumeID: "inflight", DesiredRF: 1, Candidates: []lifecycle.PlacementCandidate{{VolumeID: "inflight", ServerID: "node-a", ReplicaID: "r1", Source: lifecycle.PlacementSourceExistingReplica}}}); e != nil {
+				t.Fatal(e)
+			}
+			reviewHeartbeat(t, c, ctx, "inflight", "node-a", "127.0.0.1:10000", "127.0.0.1:10001")
+			if _, e := h.RunLifecycleProductTick(); e != nil {
+				t.Fatal(e)
+			}
+			select {
+			case <-arrived:
+			case <-ctx.Done():
+				t.Fatal("publisher did not dequeue ask", ctx.Err())
+			}
+			defer func() {
+				select {
+				case <-release:
+				default:
+					close(release)
+				}
+			}()
+			if action == "delete" {
+				if _, e := control.NewLifecycleServiceClient(c).DeleteVolume(ctx, &control.DeleteVolumeRequest{VolumeId: "inflight"}); e != nil {
+					t.Fatal("unassigned legacy delete", e)
+				}
+				if _, ok := h.Lifecycle().Volumes.GetVolume("inflight"); ok {
+					t.Fatal("delete did not remove volume")
+				}
+			}
+			reviewCreate(t, c, ctx, "owner")
+			wc := control.NewWorkspaceServiceClient(c)
+			reserve := func() {
+				if _, e := wc.RegisterWorkspaceBinding(ctx, &control.WorkspaceBinding{VolumeId: "owner", ServerId: "node-b", DataAddr: "127.0.0.1:10000", CtrlAddr: "127.0.0.1:10001"}); e != nil {
+					t.Fatal("reservation", e)
+				}
+			}
+			if action == "register" {
+				reserve()
+			}
+			close(release)
+			select {
+			case e := <-finished:
+				if e == nil {
+					t.Error("held stale ask was published after competing " + action)
+				}
+			case <-ctx.Done():
+				t.Fatal("publisher did not settle", ctx.Err())
+			}
+			if line, ok := h.Publisher().VolumeAuthorityLine("inflight"); ok {
+				t.Fatal("stale or deleted ask minted authority", line)
+			}
+			if action == "delete" {
+				reserve()
+			}
+			st, e := wc.QueryWorkspace(ctx, &control.WorkspaceVolume{VolumeId: "owner"})
+			if e != nil || len(st.GetBindings()) != 1 {
+				t.Fatal("owner reservation lost", st, e)
+			}
+			// An unrelated, matching explicit owner can still reach the actual publisher.
+			if _, e = wc.PlaceWorkspace(ctx, &control.WorkspacePlacement{VolumeId: "owner", ServerId: "node-b", ReplicaId: "r1"}); e != nil {
+				t.Fatal(e)
+			}
+			reviewHeartbeat(t, c, ctx, "owner", "node-b", "127.0.0.1:10000", "127.0.0.1:10001")
+			if _, e = h.RunLifecycleProductTick(); e != nil {
+				t.Fatal(e)
+			}
+			waitAuthorityLine(t, h.Publisher(), "owner")
+		})
+	}
 }

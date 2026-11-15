@@ -47,7 +47,15 @@ a crash between authority persistence and binding retirement is recoverable.
 
 Host workspace mutations serialize with `workspaceMu`. Remote HEAD reads and
 promotion probes run outside it; local intent, binding and reservation checks are
-repeated under the lock before queueing or committing their results.
+repeated under the lock before queueing or committing their results. Ordinary
+Publisher mints also acquire that same host lock before checking the live volume,
+current binding owner/pair and reservations, and retain it through authority
+persistence/commit. The existing already-current product check is repeated for
+ordinary Reassign asks here, so a snapshot plus its direct promotion fallback
+cannot mint duplicate epochs after both were dequeued. Dequeued legacy asks therefore cannot bypass a later binding
+or publish after successful deletion. Hosts without lifecycle stores retain their
+static authority path. Guarded Move already holds this boundary and does not
+recursively acquire it.
 Lock order is host workspace mutex, then Publisher or lifecycle-store locks.
 Initial placement persists under a Publisher unassigned guard; its callback
 must never call Publisher. Store reads do not hold their mutex while calling
