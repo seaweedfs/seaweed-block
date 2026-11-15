@@ -58,39 +58,49 @@ func chunkAuthority(proj frontend.Projection, volumeID string) bool {
 	return proj.VolumeID == volumeID && proj.Healthy && proj.Epoch > 0
 }
 
-// recoverChunk runs after a successful local Recover. It attaches the
-// layer when the projection already carries master authority and reports
-// true. Otherwise it starts the volume's authority wait (which attaches
-// as soon as the assignment is applied) and reports false: the volume is
-// recovered but stays non-operational until then. The caller holds
-// h.attachMu and is registered with Close.
-func (p *DurableProvider) recoverChunk(ctx context.Context, volumeID string, h *volHandle) (bool, error) {
+// recoverChunk runs after a successful local Recover, generation gen. It
+// attaches the layer when the projection already carries master authority
+// and reports true. Otherwise it starts an authority wait bound to gen
+// (which attaches as soon as the assignment is applied) and reports
+// false: the volume is recovered but stays non-operational until then.
+// The caller holds h.attachMu and is registered with Close.
+func (p *DurableProvider) recoverChunk(ctx context.Context, volumeID string, h *volHandle, gen uint64) (bool, error) {
 	err := p.attachChunk(ctx, volumeID, h)
 	if errors.Is(err, errChunkNoAuthority) {
-		p.startChunkAuthorityWait(volumeID, h)
+		p.startChunkAuthorityWait(volumeID, h, gen)
 		return false, nil
 	}
 	return err == nil, err
 }
 
-// startChunkAuthorityWait starts at most one authority wait per volume,
-// registered with Close like a recovery.
-func (p *DurableProvider) startChunkAuthorityWait(volumeID string, h *volHandle) {
+// startChunkAuthorityWait starts the authority wait of recovery gen,
+// registered with Close like a recovery. A wait of an earlier recovery
+// sees it is stale and exits on its own.
+func (p *DurableProvider) startChunkAuthorityWait(volumeID string, h *volHandle, gen uint64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.closed || h.awaitingAuthority {
+	if p.closed || h.waitGen == gen {
 		return
 	}
-	h.awaitingAuthority = true
+	h.waitGen = gen
 	p.inflight.Add(1)
-	go p.chunkAuthorityWait(volumeID, h)
+	go p.chunkAuthorityWait(volumeID, h, gen)
 }
 
-func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle) {
+// current reports whether gen is still the latest recovery of h.
+func (p *DurableProvider) current(h *volHandle, gen uint64) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return h.recoverGen == gen
+}
+
+func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen uint64) {
 	defer p.inflight.Done()
 	defer func() {
 		p.mu.Lock()
-		h.awaitingAuthority = false
+		if h.waitGen == gen {
+			h.waitGen = 0
+		}
 		p.mu.Unlock()
 	}()
 	t := time.NewTicker(chunkAuthorityPoll)
@@ -101,10 +111,17 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle) {
 			return
 		case <-t.C:
 		}
+		if !p.current(h, gen) {
+			return // a later recovery (successful or failed) owns the volume
+		}
 		if !chunkAuthority(p.view.Projection(), volumeID) {
 			continue
 		}
 		h.attachMu.Lock()
+		if !p.current(h, gen) { // re-checked under the per-volume serialization
+			h.attachMu.Unlock()
+			return
+		}
 		ctx, cancel := context.WithTimeout(p.closeCtx, chunkAttachTimeout)
 		err := p.attachChunk(ctx, volumeID, h)
 		cancel()
@@ -360,7 +377,7 @@ func (p *DurableProvider) chunkLayer(volumeID string) (storage.ChunkLayer, error
 		return nil, ErrVolumeNotOpen
 	}
 	p.mu.Lock()
-	layer, awaiting := h.chunk, h.awaitingAuthority
+	layer, awaiting := h.chunk, h.waitGen != 0
 	p.mu.Unlock()
 	if layer == nil && awaiting {
 		return nil, ErrChunkAwaitingAuthority

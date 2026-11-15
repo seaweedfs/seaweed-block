@@ -167,12 +167,16 @@ type volHandle struct {
 	// is still fresh after a restart.
 	fresh    bool
 	attachMu sync.Mutex // serializes recovery and attach of this volume
-	// awaitingAuthority: recovered, layer not attached yet because the
-	// projection carries no master authority; a wait goroutine attaches.
-	awaitingAuthority bool
-	chunk             storage.ChunkLayer // after RecoverVolume
-	chunkStop         context.CancelFunc
-	chunkDone         chan struct{}
+	// recoverGen numbers this volume's RecoverVolume calls (written under
+	// attachMu and p.mu). waitGen is the generation of the live authority
+	// wait, 0 if none: a recovered volume whose layer waits for master
+	// authority. A wait only acts while its generation is still the
+	// latest recovery's.
+	recoverGen uint64
+	waitGen    uint64
+	chunk      storage.ChunkLayer // after RecoverVolume
+	chunkStop  context.CancelFunc
+	chunkDone  chan struct{}
 }
 
 // VolumeStatus is a read-only diagnostic snapshot of one durable volume
@@ -689,10 +693,15 @@ func (p *DurableProvider) RecoverVolume(ctx context.Context, volumeID string) (R
 	if !ok {
 		return RecoveryReport{VolumeID: volumeID}, ErrVolumeNotOpen
 	}
+	var gen uint64
 	if chunked {
 		defer p.inflight.Done()
 		h.attachMu.Lock()
 		defer h.attachMu.Unlock()
+		p.mu.Lock()
+		h.recoverGen++ // any earlier recovery's authority wait is now stale
+		gen = h.recoverGen
+		p.mu.Unlock()
 	}
 	report := Recover(h.storage, volumeID)
 	if report.Err != nil {
@@ -700,7 +709,7 @@ func (p *DurableProvider) RecoverVolume(ctx context.Context, volumeID string) (R
 		return report, report.Err
 	}
 	if chunked {
-		attached, err := p.recoverChunk(ctx, volumeID, h)
+		attached, err := p.recoverChunk(ctx, volumeID, h, gen)
 		if err != nil {
 			h.backend.SetOperational(false, "chunk layer attach failed: "+err.Error())
 			report.Err = err
