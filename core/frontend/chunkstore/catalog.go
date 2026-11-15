@@ -93,6 +93,7 @@ const (
 	CodeDeadlineExceeded  = "deadline_exceeded"
 	CodeRemoteUnavailable = "remote_unavailable"
 	CodeOutcomeUnknown    = "outcome_unknown"
+	CodeInvalidLabel      = "invalid_label"
 )
 
 // CatalogError is a typed control-plane failure.
@@ -311,15 +312,15 @@ func CheckSnapshotName(name string) error {
 
 func checkLabels(labels map[string]string) error {
 	if len(labels) > maxLabels {
-		return catErr(CodeInvalidName, false, nil, "%d labels, at most %d", len(labels), maxLabels)
+		return catErr(CodeInvalidLabel, false, nil, "%d labels, at most %d", len(labels), maxLabels)
 	}
 	for k, v := range labels {
 		if k == "" || len(k) > maxLabelKey || len(v) > maxLabelValue {
-			return catErr(CodeInvalidName, false, nil, "label %q: key 1-%d characters, value at most %d bytes", k, maxLabelKey, maxLabelValue)
+			return catErr(CodeInvalidLabel, false, nil, "label %q: key 1-%d characters, value at most %d bytes", k, maxLabelKey, maxLabelValue)
 		}
 		for _, r := range k {
 			if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-') {
-				return catErr(CodeInvalidName, false, nil, "label key %q: only [a-z0-9._-]", k)
+				return catErr(CodeInvalidLabel, false, nil, "label key %q: only [a-z0-9._-]", k)
 			}
 		}
 	}
@@ -672,7 +673,8 @@ func (c *Catalog) CreateSnapshot(ctx context.Context, vol string, req SnapshotRe
 // the caller cuts (B9 W2 §3.2 step 1): when snaps/<req.Name> exists with
 // req's request id it returns that snapshot (Replayed, true); with another
 // request id, snapshot_exists; when the name is free, (zero, false, nil).
-// It validates the name and the request id first.
+// It validates the whole request first (name, request id, labels,
+// consistency), so a caller can refuse a bad request before it cuts.
 func (c *Catalog) SnapshotReplay(ctx context.Context, vol string, req SnapshotRequest) (SnapshotInfo, bool, error) {
 	if _, err := c.volRoot(vol); err != nil {
 		return SnapshotInfo{}, false, err
@@ -682,6 +684,12 @@ func (c *Catalog) SnapshotReplay(ctx context.Context, vol string, req SnapshotRe
 	}
 	if req.RequestID == "" {
 		return SnapshotInfo{}, false, catErr(CodeInvalidName, false, nil, "snapshot %s/%s: a request id is required", vol, req.Name)
+	}
+	if err := checkLabels(req.Labels); err != nil {
+		return SnapshotInfo{}, false, err
+	}
+	if cs := req.Consistency; cs != "" && cs != "crash" && cs != "app" {
+		return SnapshotInfo{}, false, catErr(CodeInvalidName, false, nil, "consistency %q: crash or app", cs)
 	}
 	existing, prev, _, err := c.readSnap(ctx, vol, req.Name)
 	switch {
