@@ -85,9 +85,10 @@ type Config struct {
 // blockmaster. The stores are controller input only; assignment
 // publication remains owned by authority.Controller/Publisher.
 type LifecycleStores struct {
-	Volumes    *lifecycle.FileStore
-	Nodes      *lifecycle.NodeInventoryStore
-	Placements *lifecycle.PlacementIntentStore
+	Volumes           *lifecycle.FileStore
+	Nodes             *lifecycle.NodeInventoryStore
+	Placements        *lifecycle.PlacementIntentStore
+	WorkspaceBindings *lifecycle.WorkspaceBindingStore
 }
 
 // Host is the composed master-side block product daemon. Lifecycle
@@ -105,11 +106,14 @@ type Host struct {
 	grpc                *grpc.Server
 	topo                authority.AcceptedTopology
 	lifecycle           *LifecycleStores
-	events              *eventRing
-	promotionMu         sync.RWMutex
-	promotionProber     PromotionEvidenceProvider
-	cancel              context.CancelFunc
-	wg                  sync.WaitGroup
+	// RPC registration/place/move/ACK/delete and product ticks serialize here.
+	// Order: workspaceMu -> publisher or lifecycle store locks (not reversed).
+	workspaceMu     sync.Mutex
+	events          *eventRing
+	promotionMu     sync.RWMutex
+	promotionProber PromotionEvidenceProvider
+	cancel          context.CancelFunc
+	wg              sync.WaitGroup
 
 	started atomic.Bool
 }
@@ -241,6 +245,13 @@ func New(cfg Config) (*Host, error) {
 	h.obs = obs
 	h.ln = ln
 	h.lifecycle = lifecycleStores
+	if h.lifecycle != nil {
+		if err := h.reconcileWorkspaceBindings(); err != nil {
+			_ = ln.Close()
+			_ = boot.Close()
+			return nil, fmt.Errorf("master.New: workspace binding recovery: %w", err)
+		}
+	}
 
 	if cfg.FrontendPublicationRuntimeHTTP {
 		addr := cfg.FrontendPublicationRuntimeListen
@@ -295,10 +306,15 @@ func openLifecycleStores(dir string) (*LifecycleStores, error) {
 	if err != nil {
 		return nil, err
 	}
+	bindings, err := lifecycle.OpenWorkspaceBindingStore(filepath.Join(dir, "workspace-bindings"))
+	if err != nil {
+		return nil, err
+	}
 	return &LifecycleStores{
-		Volumes:    volumes,
-		Nodes:      nodes,
-		Placements: placements,
+		Volumes:           volumes,
+		Nodes:             nodes,
+		Placements:        placements,
+		WorkspaceBindings: bindings,
 	}, nil
 }
 

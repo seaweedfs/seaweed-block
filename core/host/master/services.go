@@ -75,6 +75,8 @@ func (s *services) CreateVolume(ctx context.Context, req *control.CreateVolumeRe
 }
 
 func (s *services) DeleteVolume(ctx context.Context, req *control.DeleteVolumeRequest) (*control.DeleteVolumeResponse, error) {
+	s.host.workspaceMu.Lock()
+	defer s.host.workspaceMu.Unlock()
 	stores := s.host.Lifecycle()
 	if stores == nil {
 		return nil, status.Error(codes.FailedPrecondition, "lifecycle store is not configured")
@@ -87,6 +89,9 @@ func (s *services) DeleteVolume(ctx context.Context, req *control.DeleteVolumeRe
 	}
 	if err := stores.Volumes.DeleteVolume(req.GetVolumeId()); err != nil {
 		return nil, lifecycleError("delete volume", err)
+	}
+	if err := stores.WorkspaceBindings.DeleteVolume(req.GetVolumeId()); err != nil {
+		return nil, lifecycleError("delete workspace bindings", err)
 	}
 	return &control.DeleteVolumeResponse{}, nil
 }

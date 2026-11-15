@@ -50,6 +50,8 @@ func (h *Host) SetPromotionEvidenceProvider(p PromotionEvidenceProvider) {
 // directive queue. It never calls Publisher.apply; Publisher remains the only
 // authority minter through its normal Run loop.
 func (h *Host) RunLifecycleProductTick() (LifecycleProductTickResult, error) {
+	h.workspaceMu.Lock()
+	defer h.workspaceMu.Unlock()
 	stores := h.Lifecycle()
 	if stores == nil {
 		return LifecycleProductTickResult{}, nil

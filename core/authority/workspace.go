@@ -118,6 +118,20 @@ type WorkspaceMoveRequest struct {
 
 // MoveWorkspace is the authority-owned guarded RF1 move seam. The host layer
 // validates volume eligibility and reads HEAD before calling this boundary.
+// RecordWorkspacePlacement serializes initial desired placement persistence
+// against authority publication. persist must not call back into Publisher.
+func (p *Publisher) RecordWorkspacePlacement(ctx context.Context, volume string, persist func() error) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if _, _, ok := p.workspaceLineLocked(volume); ok {
+		return fmt.Errorf("workspace placement: volume already assigned; use move")
+	}
+	return persist()
+}
+
 func (p *Publisher) MoveWorkspace(ctx context.Context, req WorkspaceMoveRequest, head WorkspaceHead) (WorkspaceMoveRecord, error) {
 	if err := ctx.Err(); err != nil {
 		return WorkspaceMoveRecord{}, err
