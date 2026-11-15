@@ -198,6 +198,49 @@ func TestIntegration_OpsChunkGC_RealMasterAndStore(t *testing.T) {
 	if err = remote.Put(ctx, "orphan", data); err == nil {
 		t.Fatal("GC removed permanent binding tombstone")
 	}
+
+	// The real authority runtime issues a higher epoch; the actual remote HEAD
+	// must also advance before the capture intent can be retired. No lease clock
+	// or fabricated epoch callback is used by the CLI.
+	if _, err := m.FailbackAuthorityRuntime().ExecuteFailback(ctx, authority.FailbackRuntimeRequest{
+		VolumeID: "vol-a", ReplicaID: "r1", TargetDataAddr: "127.0.0.1:9201", TargetCtrlAddr: "127.0.0.1:9101",
+		ExpectedCurrentReplicaID: "r2", ExpectedCurrentEpoch: 1, AckEligible: true, FrontendFencedBeforeFailback: true,
+		DurableFrontierCovered: true, NoCrossVolumeIdentityChange: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	issued, err := control.NewEvidenceServiceClient(conn).QueryVolumeStatus(ctx, &control.StatusRequest{VolumeId: "vol-a"})
+	if err != nil || issued.GetEpoch() <= 1 {
+		t.Fatalf("higher issued epoch: %v %v", issued, err)
+	}
+	stillHeld := call(false)
+	if len(stillHeld.WouldExpireIntents) != 0 {
+		t.Fatal("issued epoch without HEAD fence expired intent")
+	}
+	cur, err := remote.GetHead(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := cur
+	next.Epoch = issued.Epoch
+	next.Holder = "holder-b"
+	if _, err = remote.CASHead(ctx, storage.ChunkHeadVersion{Gen: cur.Gen, Epoch: cur.Epoch}, next); err != nil {
+		t.Fatal(err)
+	}
+	expired := call(true)
+	if expired.ExpiredIntents != 1 || expired.Reclaimed != 0 {
+		t.Fatalf("fenced intent admission: %+v", expired)
+	}
+	now = now.Add(time.Hour + time.Second)
+	reclaimed := call(true)
+	if reclaimed.Reclaimed != 1 || len(reclaimed.WouldDelete) != 1 || reclaimed.WouldDelete[0].Key != "held" {
+		t.Fatalf("expired capture: %+v", reclaimed)
+	}
+	for _, key := range []string{"live", "copy"} {
+		if got, err := remote.Get(ctx, key); err != nil || !bytes.Equal(got, data) {
+			t.Fatalf("lost surviving root %s: %q %v", key, got, err)
+		}
+	}
 }
 
 func startGCWeed(t *testing.T, weed string) string {
