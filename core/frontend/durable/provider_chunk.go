@@ -493,9 +493,11 @@ func (s cutSchedule) observe(lastCutNs int64) cutSchedule {
 	return s
 }
 
-// due reports whether an automatic cut is due at now, and why.
-func (pol cutPolicy) due(s cutSchedule, now time.Time) (string, bool) {
-	if now.Before(s.retryAt) {
+// due reports whether an automatic cut is due at now, and why. Nothing is
+// due while the layer reconciles its dirty set: no HEAD moves until then,
+// and the skipped tick is not a failure (no backoff).
+func (pol cutPolicy) due(s cutSchedule, now time.Time, reconciling bool) (string, bool) {
+	if reconciling || now.Before(s.retryAt) {
 		return "", false
 	}
 	if !s.lastAuto.IsZero() && now.Sub(s.lastAuto) < pol.minSpacing {
@@ -556,7 +558,7 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 		ls := layer.Stats()
 		s = s.observe(ls.LastCutNs)
 		start := time.Now()
-		reason, ok := pol.due(s, start)
+		reason, ok := pol.due(s, start, ls.Reconciling)
 		if !ok {
 			continue
 		}

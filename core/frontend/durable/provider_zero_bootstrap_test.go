@@ -85,7 +85,12 @@ func TestRestoreEnsureVolumeZeroHEADPreservesCheckpointedBootstrap(t *testing.T)
 		t.Fatalf("initial ZERO HEAD: %+v %v", h, err)
 	}
 	view.set(healthyProj(frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 3, EndpointVersion: 1}))
-	awaitRestoreCondition(t, ctx, "ZERO HEAD bootstrap attachment", func() bool { st := p.DurableStatuses(); return len(st) == 1 && st[0].Operational })
+	// The bootstrap's dirty set is unknown: it is reconciled against the
+	// ZERO HEAD before cuts resume.
+	awaitRestoreCondition(t, ctx, "ZERO HEAD bootstrap attachment and reconciliation", func() bool {
+		st := p.DurableStatuses()
+		return len(st) == 1 && st[0].Operational && st[0].Chunk != nil && st[0].Chunk.Attached && !st[0].Chunk.Stats.Reconciling
+	})
 	if got, err := p.CaptureVolume(ctx, "v1"); err != nil || got != lsn {
 		t.Fatalf("capture=%d want=%d err=%v", got, lsn, err)
 	}

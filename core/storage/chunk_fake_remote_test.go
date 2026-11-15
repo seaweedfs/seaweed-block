@@ -770,6 +770,9 @@ func mustAttach(t *testing.T, s *WALStore, r chunkRemote, cfg chunkLayerConfig) 
 	if err != nil {
 		t.Fatalf("attachChunkLayer: %v", err)
 	}
+	// A layer that attached without a usable bitmap reconciles its dirty
+	// set first (cuts are refused until then); contract tests start after.
+	waitReconciledForTest(t, layer)
 	t.Cleanup(func() {
 		done := make(chan struct{})
 		go func() { _ = layer.Close(); close(done) }()
@@ -1116,5 +1119,17 @@ func TestChunkFakeBitmap_PersistsAcrossRestartAndBlocks(t *testing.T) {
 	case <-saved:
 	case <-time.After(ctLocalBound):
 		t.Fatal("blocked Save did not return after release")
+	}
+}
+
+// waitReconciledForTest waits until layer has finished reconciling.
+func waitReconciledForTest(t *testing.T, layer chunkLayer) {
+	t.Helper()
+	deadline := time.Now().Add(ctLocalBound)
+	for layer.Stats().Reconciling {
+		if time.Now().After(deadline) {
+			t.Fatalf("chunk layer still reconciling after %v", ctLocalBound)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }

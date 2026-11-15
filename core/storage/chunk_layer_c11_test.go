@@ -413,6 +413,7 @@ func rerunBase(t *testing.T, s *WALStore, layer chunkLayer, frontier uint64) {
 	if err := layer.EndBaseInstall(frontier); err != nil {
 		t.Fatalf("EndBaseInstall after restart: %v", err)
 	}
+	waitReconciledForTest(t, layer) // the BASE is reconciled against HEAD first
 }
 
 // C11 BASE: recovery never infers that an install finished. An install

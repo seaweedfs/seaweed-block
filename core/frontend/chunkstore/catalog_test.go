@@ -432,7 +432,7 @@ func TestFork_ThenFreshHostReadsSnapshotImage(t *testing.T) {
 		t.Cleanup(func() { _ = s.Close() })
 		return s, l
 	}
-	src, layer := attach("v1", false, 1)
+	src, layer := attach("v1", true, 1) // a new, empty source volume
 	want := map[uint32][]byte{}
 	for _, lba := range []uint32{0, 9, 17, 63} {
 		want[lba] = bytes.Repeat([]byte{byte(lba + 1)}, 4096)

@@ -22,14 +22,14 @@ func at(d time.Duration) time.Time { return t0.Add(d) }
 func TestCutPolicy_OnlyTheTimerTriggers(t *testing.T) {
 	pol := testPolicy()
 	s := cutSchedule{lastSuccess: t0}
-	if r, ok := pol.due(s, at(29*time.Second)); ok {
+	if r, ok := pol.dueNR(s, at(29*time.Second)); ok {
 		t.Fatalf("due (%s) before the interval", r)
 	}
-	if r, ok := pol.due(s, at(30*time.Second)); !ok || r != "periodic" {
+	if r, ok := pol.dueNR(s, at(30*time.Second)); !ok || r != "periodic" {
 		t.Fatalf("at the interval: %q %v; want a periodic cut (a no-op cut still resets the timer)", r, ok)
 	}
 	pol.interval = 0
-	if r, ok := pol.due(s, at(1000*time.Hour)); ok {
+	if r, ok := pol.dueNR(s, at(1000*time.Hour)); ok {
 		t.Fatalf("due (%s) with the timer off", r)
 	}
 }
@@ -40,10 +40,10 @@ func TestCutPolicy_AnySuccessfulCutResetsTheTimer(t *testing.T) {
 	// An explicit Cut, Snapshot or Detach succeeded at 20 s: the layer
 	// reports it and the timer restarts from there.
 	s = s.observe(at(20 * time.Second).UnixNano())
-	if r, ok := pol.due(s, at(45*time.Second)); ok {
+	if r, ok := pol.dueNR(s, at(45*time.Second)); ok {
 		t.Fatalf("due (%s) 25 s after an explicit cut", r)
 	}
-	if _, ok := pol.due(s, at(50*time.Second)); !ok {
+	if _, ok := pol.dueNR(s, at(50*time.Second)); !ok {
 		t.Fatal("not due 30 s after the explicit cut")
 	}
 	// An older report never moves the timer back.
@@ -52,7 +52,7 @@ func TestCutPolicy_AnySuccessfulCutResetsTheTimer(t *testing.T) {
 	}
 	// An automatic success restarts it too.
 	s = pol.after(s, at(50*time.Second), at(50*time.Second+200*time.Millisecond), nil)
-	if _, ok := pol.due(s, at(79*time.Second)); ok {
+	if _, ok := pol.dueNR(s, at(79*time.Second)); ok {
 		t.Fatal("due less than 30 s after an automatic success")
 	}
 }
@@ -62,10 +62,10 @@ func TestCutPolicy_MinimumSpacingBetweenAutomaticCuts(t *testing.T) {
 	pol.interval = 500 * time.Millisecond
 	s := cutSchedule{lastSuccess: t0}
 	s = pol.after(s, at(10*time.Second), at(10*time.Second+50*time.Millisecond), nil)
-	if r, ok := pol.due(s, at(10*time.Second+900*time.Millisecond)); ok {
+	if r, ok := pol.dueNR(s, at(10*time.Second+900*time.Millisecond)); ok {
 		t.Fatalf("automatic cut again after 0.9 s (%s)", r)
 	}
-	if _, ok := pol.due(s, at(11*time.Second)); !ok {
+	if _, ok := pol.dueNR(s, at(11*time.Second)); !ok {
 		t.Fatal("timer cut not due 1 s after the last automatic cut")
 	}
 }
@@ -79,11 +79,11 @@ func TestCutPolicy_FailureBacksOffAndResetsNothing(t *testing.T) {
 	for i := 0; i < 7; i++ {
 		s = pol.after(s, now, now, fail)
 		waits = append(waits, s.backoff)
-		if _, ok := pol.due(s, now.Add(s.backoff-time.Millisecond)); ok {
+		if _, ok := pol.dueNR(s, now.Add(s.backoff-time.Millisecond)); ok {
 			t.Fatalf("retry %d due before its backoff %s", i, s.backoff)
 		}
 		now = now.Add(s.backoff)
-		if _, ok := pol.due(s, now); !ok {
+		if _, ok := pol.dueNR(s, now); !ok {
 			t.Fatalf("retry %d not due after its backoff %s (the failure must not reset the timer)", i, s.backoff)
 		}
 	}
@@ -122,10 +122,10 @@ func TestCutPolicy_ExplicitSuccessClearsFailedAutoBackoff(t *testing.T) {
 	if !next.Before(retryAt) {
 		t.Fatalf("test setup: next timer cut %v not before the old retry %v", next, retryAt)
 	}
-	if r, ok := pol.due(s, next.Add(-time.Millisecond)); ok {
+	if r, ok := pol.dueNR(s, next.Add(-time.Millisecond)); ok {
 		t.Fatalf("due (%s) less than one interval after the explicit cut", r)
 	}
-	if r, ok := pol.due(s, next); !ok || r != "periodic" {
+	if r, ok := pol.dueNR(s, next); !ok || r != "periodic" {
 		t.Fatalf("one interval after the explicit success: %q %v; want periodic (backoff %s, retry at %v)", r, ok, s.backoff, s.retryAt)
 	}
 	// A success older than the failure leaves the backoff in force.
@@ -134,5 +134,25 @@ func TestCutPolicy_ExplicitSuccessClearsFailedAutoBackoff(t *testing.T) {
 	s2 = s2.observe(at(5 * time.Second).UnixNano())
 	if s2.retryAt.IsZero() {
 		t.Fatal("a success older than the failure cleared its backoff")
+	}
+}
+
+// dueNR is due for a layer that is not reconciling.
+func (pol cutPolicy) dueNR(s cutSchedule, now time.Time) (string, bool) {
+	return pol.due(s, now, false)
+}
+
+func TestCutPolicy_NothingDueWhileReconciling(t *testing.T) {
+	pol := testPolicy()
+	s := cutSchedule{lastSuccess: t0}
+	if r, ok := pol.due(s, at(time.Hour), true); ok {
+		t.Fatalf("due (%s) while reconciling", r)
+	}
+	// The skipped tick is not a failure: no backoff once reconciled.
+	if s.backoff != 0 || !s.retryAt.IsZero() {
+		t.Fatalf("schedule changed by a skipped tick: %+v", s)
+	}
+	if r, ok := pol.due(s, at(time.Hour), false); !ok || r != "periodic" {
+		t.Fatalf("after reconciliation: %q %v; want an immediate periodic cut", r, ok)
 	}
 }

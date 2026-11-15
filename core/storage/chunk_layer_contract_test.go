@@ -406,6 +406,7 @@ func TestChunkLayer_C4_WritesDuringUploadAndBaseAreCapturedNext(t *testing.T) {
 	if err := layer.EndBaseInstall(frontier); err != nil {
 		t.Fatalf("EndBaseInstall after the durable frontier: %v", err)
 	}
+	waitReconciledForTest(t, layer) // the BASE is reconciled against HEAD first
 	if _, err := layer.Capture(ctTimeout(t)); err != nil {
 		t.Fatalf("Capture after BASE: %v", err)
 	}

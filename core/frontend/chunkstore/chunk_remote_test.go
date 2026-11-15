@@ -271,7 +271,7 @@ func TestChunkRemote_ChunkLayerCaptureThenFreshHost(t *testing.T) {
 		return s, l
 	}
 
-	src, layer := attach("a", false)
+	src, layer := attach("a", true) // a new, empty source volume
 	want := map[uint32][]byte{}
 	for _, lba := range []uint32{0, 9, 17, 63} {
 		want[lba] = bytes.Repeat([]byte{byte(lba + 1)}, 4096)

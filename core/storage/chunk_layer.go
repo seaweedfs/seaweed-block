@@ -92,8 +92,14 @@ type chunkLayerImpl struct {
 	dirty           map[uint64]bool   // chunks dirtied since the cut in progress or the last HEAD
 	inflight        map[uint64]bool   // chunks captured by a cut whose HEAD is not yet installed
 	allDirty        bool              // a BASE block landed: every chunk is dirty
-	hashMode        bool              // the dirty set is unknown: compare every chunk by hash
-	cutLSN          uint64            // H of the latest cut taken (in flight or installed)
+	hashMode        bool              // the dirty set is unknown: reconcile every chunk against HEAD before any cut
+	// reconcile holds the chunks the reconciler has not compared yet;
+	// reconcileTotal is the size of the current reconciliation, and
+	// reconciled is closed when it is done (under stMu).
+	reconcile      map[uint64]bool
+	reconcileTotal int
+	reconciled     chan struct{}
+	cutLSN         uint64 // H of the latest cut taken (in flight or installed)
 	// chunkMut counts the mutations of each chunk: every dirty-map insert
 	// (any LSN, a replica apply's lower LSN included) and every BASE
 	// block. Flushing moves bytes without changing them and never counts.
@@ -140,6 +146,7 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 		absent:      map[uint64]bool{},
 		absentGen:   map[uint64]uint64{},
 		localBlocks: map[uint64]bool{},
+		reconcile:   map[uint64]bool{},
 		closeDone:   make(chan struct{}),
 		syncDirFn:   syncDir,
 	}
@@ -236,6 +243,9 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 		s.chunk.CompareAndSwap(hooks, nil)
 		l.cancel()
 		return nil, err
+	}
+	if l.hashMode {
+		l.startReconcile()
 	}
 	return l, nil
 }
@@ -522,7 +532,11 @@ func (l *chunkLayerImpl) EndBaseInstall(frontier uint64) error {
 	if cp := l.s.CheckpointLSN(); cp < frontier {
 		return fmt.Errorf("storage: EndBaseInstall: frontier %d is not durable (checkpoint %d)", frontier, cp)
 	}
-	return l.writeBaseState(chunkBaseInstalledAwaitingCut, func() { l.hashMode = true })
+	if err := l.writeBaseState(chunkBaseInstalledAwaitingCut, func() { l.hashMode = true }); err != nil {
+		return err
+	}
+	l.startReconcile()
+	return nil
 }
 
 func (l *chunkLayerImpl) writeBaseState(state chunkBaseState, apply func()) error {
@@ -664,6 +678,12 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	}
 	if hook := l.testAfterAdmitHook; hook != nil {
 		hook()
+	}
+	l.stMu.Lock()
+	reconciling := l.hashMode
+	l.stMu.Unlock()
+	if reconciling { // no HEAD moves until the dirty set is known
+		return chunkCutResult{}, errChunkReconciling
 	}
 	ctx, cancel := l.opCtx(ctx)
 	defer cancel()
@@ -938,6 +958,9 @@ func (l *chunkLayerImpl) Detach(ctx context.Context) (chunkCutResult, error) {
 	if r, ok := l.storedDetach(); ok {
 		return r, nil
 	}
+	if err := l.waitReconciled(ctx); err != nil {
+		return chunkCutResult{}, err
+	}
 	r, err := l.captureLocked(ctx, true)
 	if errors.Is(err, errChunkLayerDetached) {
 		if d, ok := l.storedDetach(); ok {
@@ -1069,6 +1092,8 @@ func (l *chunkLayerImpl) recordCut(r chunkCutResult, st chunkCutStats, err error
 		l.stats.CutsNoop++
 	case err == nil:
 		l.stats.CutsOK++
+	case errors.Is(err, errChunkReconciling):
+		reason = "reconciling"
 	case errors.Is(err, errChunkCaptureRefused):
 		reason = "admission"
 	case errors.Is(err, errChunkLayerFenced):
@@ -1102,7 +1127,174 @@ func (l *chunkLayerImpl) Stats() chunkLayerStats {
 	}
 	out.PendingUnresolved = l.pending != nil
 	out.DirtyChunks = len(l.dirty)
+	out.Reconciling = l.hashMode
+	out.ReconcileTotal = l.reconcileTotal
+	out.ReconcileDone = l.reconcileTotal - len(l.reconcile)
 	return out
+}
+
+// ---- reconciliation (the dirty set is unknown) ----
+
+// reconcileSlice bounds one reconciler step; between steps it yields.
+const reconcileSlice = 8
+
+// startReconcile begins reconciling every chunk with a local copy against
+// HEAD. A chunk that is absent and was never written locally is HEAD's
+// content by definition and is skipped.
+func (l *chunkLayerImpl) startReconcile() {
+	l.stMu.Lock()
+	set := map[uint64]bool{}
+	for i := uint64(0); i < l.numChunks; i++ {
+		if l.absent[i] && !l.chunkHasLocalLocked(i) {
+			continue
+		}
+		set[i] = true
+	}
+	l.reconcile, l.reconcileTotal, l.reconciled = set, len(set), make(chan struct{})
+	l.stMu.Unlock()
+	// Nothing to compare (a fresh host: every HEAD chunk is absent and no
+	// block was written): the dirty set is known now, with no window in
+	// which cuts are refused.
+	if len(set) == 0 && l.cfg.testReconcileHold == nil && l.finishReconcile() {
+		return
+	}
+	done, err := l.register()
+	if err != nil {
+		return
+	}
+	go l.reconcileLoop(done)
+}
+
+// reconcileLoop compares the chunks in the reconcile set with HEAD outside
+// the capture barrier, a slice at a time: a chunk whose bytes differ from
+// HEAD's becomes dirty. A write racing the comparison marks its chunk
+// dirty anyway, so a chunk is never lost. When the set is empty the dirty
+// set is exact: it is persisted with a header naming HEAD, and cuts resume.
+func (l *chunkLayerImpl) reconcileLoop(done func()) {
+	defer done()
+	for {
+		if l.ctx.Err() != nil {
+			return
+		}
+		if hold := l.cfg.testReconcileHold; hold != nil {
+			select {
+			case <-hold:
+			case <-l.ctx.Done():
+				return
+			}
+		}
+		l.stMu.Lock()
+		var batch []uint64
+		for _, idx := range sortedKeys(l.reconcile) {
+			if len(batch) == reconcileSlice {
+				break
+			}
+			batch = append(batch, idx)
+		}
+		head := copyHead(l.head)
+		l.stMu.Unlock()
+		if len(batch) == 0 {
+			if l.finishReconcile() {
+				return
+			}
+			if !l.sleep(100 * time.Millisecond) {
+				return
+			}
+			continue
+		}
+		for _, idx := range batch {
+			data, err := l.readChunk(idx)
+			if err != nil {
+				if !l.sleep(100 * time.Millisecond) { // retried; the set keeps it
+					return
+				}
+				break
+			}
+			ref, had := head.Chunks[idx]
+			same := (!had && isAllZero(data)) || (had && sha256.Sum256(data) == ref.SHA256)
+			l.stMu.Lock()
+			if !same {
+				l.dirty[idx] = true
+				l.dirtyVer++
+			}
+			delete(l.reconcile, idx)
+			l.stMu.Unlock()
+		}
+	}
+}
+
+// finishReconcile persists the reconciled dirty set and leaves hash mode.
+// It reports false when the bitmap could not be written (retried).
+func (l *chunkLayerImpl) finishReconcile() bool {
+	l.bmMu.Lock()
+	defer l.bmMu.Unlock()
+	l.stMu.Lock()
+	still := map[uint64]bool{}
+	for idx := range l.dirty {
+		still[idx] = true
+	}
+	if l.allDirty {
+		for i := uint64(0); i < l.numChunks; i++ {
+			still[i] = true
+		}
+	}
+	hdr := chunkBitmapHeader{BaseLSN: l.head.RemoteLSN, HeadGen: l.head.Gen, Epoch: l.head.Epoch, Base: chunkBaseNone}
+	ver := l.dirtyVer
+	l.stMu.Unlock()
+	// The dirty set first, then the header naming HEAD: a crash between
+	// the two leaves the old header, which mismatches HEAD, so the next
+	// attach reconciles again instead of trusting an incomplete bitmap.
+	if err := l.cfg.Bitmap.Save(sortedKeys(still)); err != nil {
+		return false
+	}
+	if err := l.cfg.Bitmap.WriteHeader(hdr); err != nil {
+		return false
+	}
+	l.stMu.Lock()
+	defer l.stMu.Unlock()
+	l.hdr, l.hashMode = hdr, false
+	if ver > l.savedDirtyVer {
+		l.savedDirtyVer = ver
+	}
+	if l.reconciled != nil {
+		close(l.reconciled)
+		l.reconciled = nil
+	}
+	return true
+}
+
+// waitReconciled returns once the layer is not reconciling, or
+// errChunkReconciling when ctx ends first.
+func (l *chunkLayerImpl) waitReconciled(ctx context.Context) error {
+	l.stMu.Lock()
+	reconciling, ch := l.hashMode, l.reconciled
+	l.stMu.Unlock()
+	if !reconciling {
+		return nil
+	}
+	if ch == nil {
+		return errChunkReconciling
+	}
+	select {
+	case <-ch:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("%w: %w", errChunkReconciling, ctx.Err())
+	case <-l.ctx.Done():
+		return errors.New("storage: chunk layer closed")
+	}
+}
+
+// sleep waits d unless the layer closes first.
+func (l *chunkLayerImpl) sleep(d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-l.ctx.Done():
+		return false
+	}
 }
 
 // dropIntent deletes this layer's own intent id (none if empty) once its
@@ -1119,8 +1311,8 @@ func (l *chunkLayerImpl) dropIntent(ctx context.Context, id string) {
 	}
 }
 
-// readChunk copies chunk idx from the store (the barrier copy and the
-// pre-copy staging both use it).
+// readChunk copies chunk idx from the store (the barrier copy, the
+// pre-copy staging and the reconciler use it).
 func (l *chunkLayerImpl) readChunk(idx uint64) ([]byte, error) {
 	buf := make([]byte, int(l.chunkBlocks)*l.blockSize)
 	for i := uint64(0); i < l.chunkBlocks; i++ {
