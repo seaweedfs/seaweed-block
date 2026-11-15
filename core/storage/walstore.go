@@ -61,6 +61,9 @@ type WALStore struct {
 	// the Write returns errWALFull. Defaults to 30s.
 	admissionTimeout time.Duration
 
+	// Publication lock order: lifecycleMu -> mu -> WAL mutex, then dirty
+	// shard (WAL and shard are not held together). Snapshot takes mu ->
+	// shard. Never acquire mu while holding a dirty-shard lock.
 	lifecycleMu sync.RWMutex
 	mu          sync.RWMutex
 	extentMu    [64]sync.RWMutex
@@ -923,10 +926,11 @@ func (s *WALStore) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
 	if len(data) != int(s.sb.BlockSize) {
 		return fmt.Errorf("storage: apply data size %d != block size %d", len(data), s.sb.BlockSize)
 	}
-	s.mu.RLock()
-	closed := s.closed
-	s.mu.RUnlock()
-	if closed {
+	// Publish under the same lock as Write/WriteBatch and the flusher's
+	// cross-shard snapshot, including supplied LSNs below nextLSN.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
 		return errors.New("storage: ApplyEntry after Close")
 	}
 	dataCopy := make([]byte, len(data))
@@ -944,8 +948,6 @@ func (s *WALStore) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
 	}
 	s.dm.put(uint64(lba), walRelOff, lsn, uint32(len(dataCopy)))
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if lsn >= s.nextLSN {
 		s.nextLSN = lsn + 1
 	}

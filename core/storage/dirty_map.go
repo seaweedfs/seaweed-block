@@ -23,6 +23,9 @@ type dirtyShard struct {
 type dirtyMap struct {
 	shards []dirtyShard
 	mask   uint64 // numShards-1
+
+	// Test scheduling hook; set only while no snapshot is running.
+	afterSnapshotShard func(int)
 }
 
 // newDirtyMap creates an empty map with numShards shards. numShards
@@ -135,6 +138,9 @@ func (d *dirtyMap) snapshot() []snapshotEntry {
 			})
 		}
 		s.mu.RUnlock()
+		if d.afterSnapshotShard != nil {
+			d.afterSnapshotShard(i)
+		}
 	}
 	return out
 }
