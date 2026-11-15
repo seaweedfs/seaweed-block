@@ -101,7 +101,7 @@ type WALStore struct {
 	// as fromLSN > checkpointLSN - recoveryRetentionLSNs. Zero means
 	// strict checkpoint-driven recycle. Operator sets via
 	// blockvolume's --wal-retention-lsns flag at store construction.
-	// Stored in-memory only â€” NOT persisted to the superblock; on
+	// Stored in-memory only — NOT persisted to the superblock; on
 	// restart the daemon re-applies the flag.
 	//
 	// Pinned by: INV-G6-RETENTION-POLICY-OPERATOR-VISIBLE.
@@ -114,7 +114,7 @@ type WALStore struct {
 	// --recovery-mode=dual-lane.
 	//
 	// nil = no gate (legacy behavior). Per docs/recovery-wiring-plan.md
-	// Â§6 + INV-RECYCLE-GATED-BY-MIN-ACTIVE-PIN.
+	// §6 + INV-RECYCLE-GATED-BY-MIN-ACTIVE-PIN.
 	recycleFloorSrc RecycleFloorSource
 
 	syncs atomic.Uint64 // total fsync operations performed (test/diagnostic)
@@ -128,6 +128,11 @@ type WALStore struct {
 	// Physical WAL sync attempts exclude the separate metadata/checkpoint syncs.
 	syncWALFile  func() error
 	walSyncCalls atomic.Uint64
+	// A generation is published only after a normal WAL append has completed.
+	walMutation     atomic.Uint64
+	durableMutation atomic.Uint64
+	// Recovery/direct paths conservatively disable dedup for this open store.
+	bypassSyncDedup atomic.Bool
 }
 
 // CreateWALStore initializes a new store file at path. Fails if path
@@ -228,12 +233,14 @@ func openInitialized(path string, f *os.File, sb *superblock) (*WALStore, error)
 	if s.nextLSN < 1 {
 		s.nextLSN = 1
 	}
+	// The initial superblock must be synced even before the first write.
+	s.walMutation.Store(1)
 	s.syncWALFile = func() error {
 		s.walSyncCalls.Add(1)
 		return f.Sync()
 	}
 	committer := NewGroupCommitter(GroupCommitterConfig{
-		SyncFunc: func() error { return s.syncWALFile() },
+		SyncFunc: s.syncWALBatch,
 		MaxDelay: 1 * time.Millisecond,
 		MaxBatch: 64,
 	})
@@ -257,7 +264,7 @@ func openInitialized(path string, f *os.File, sb *superblock) (*WALStore, error)
 	}
 	s.syncSuperblockMetadata = f.Sync
 
-	// Background flusher: drains dirty map â†’ extent, advances
+	// Background flusher: drains dirty map → extent, advances
 	// checkpoint, allows WAL recycling. Defaults are conservative
 	// for the demo workload; tunable via config in future.
 	s.flusher = newFlusher(s, flusherConfig{})
@@ -270,7 +277,7 @@ func openInitialized(path string, f *os.File, sb *superblock) (*WALStore, error)
 	// returning ErrWALFull to callers under transient load.
 	// Watermarks 0.7/0.9 match V2 config.go defaults
 	// (WALSoftWatermark, WALHardWatermark). Admission wakes the
-	// flusher via NotifyUrgent â€” same seam V2 wires for pressure-
+	// flusher via NotifyUrgent — same seam V2 wires for pressure-
 	// driven flushes.
 	s.admissionTimeout = 30 * time.Second
 	s.admission = newWALAdmission(walAdmissionConfig{
@@ -480,7 +487,7 @@ func (s *WALStore) Write(lba uint32, data []byte) (uint64, error) {
 
 	// WAL admission: throttle/block under WAL pressure. If admission
 	// is disabled (admission==nil), Write proceeds immediately. The
-	// admission Acquire may block up to admissionTimeout â€” under
+	// admission Acquire may block up to admissionTimeout — under
 	// hard pressure it spins waiting for the flusher to drain.
 	if s.admission != nil {
 		if err := s.admission.Acquire(s.admissionTimeout); err != nil {
@@ -521,6 +528,7 @@ func (s *WALStore) Write(lba uint32, data []byte) (uint64, error) {
 	if s.walTail == 0 {
 		s.walTail = lsn
 	}
+	s.walMutation.Add(1)
 	s.mu.Unlock()
 	return lsn, nil
 }
@@ -598,6 +606,7 @@ func (s *WALStore) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error
 	if s.walTail == 0 {
 		s.walTail = firstLSN
 	}
+	s.walMutation.Add(1)
 	s.mu.Unlock()
 	return lsns, nil
 }
@@ -649,6 +658,7 @@ func (s *WALStore) writeBatchMultiBlockLocked(startLBA uint32, blocks [][]byte, 
 	if s.walTail == 0 {
 		s.walTail = firstLSN
 	}
+	s.walMutation.Add(1)
 	return lsns, nil
 }
 
@@ -782,7 +792,14 @@ func (s *WALStore) Sync() (uint64, error) {
 	targetDirectFrontier := s.pendingDirectFrontierLSN
 	s.mu.RUnlock()
 
-	if err := s.syncCache(); err != nil {
+	if s.walSyncCovered() {
+		// Preserve shutdown refusal even when no file I/O is necessary.
+		select {
+		case <-s.committer.stopCh:
+			return 0, ErrGroupCommitShutdown
+		default:
+		}
+	} else if err := s.syncCache(); err != nil {
 		return 0, fmt.Errorf("storage: group commit fsync: %w", err)
 	}
 	s.syncs.Add(1)
@@ -824,7 +841,7 @@ func (s *WALStore) Sync() (uint64, error) {
 	return frontier, nil
 }
 
-// Boundaries returns the current R/S/H boundaries â€” what is durable,
+// Boundaries returns the current R/S/H boundaries — what is durable,
 // what the WAL still retains, what's the newest write.
 func (s *WALStore) Boundaries() (R, S, H uint64) {
 	s.mu.RLock()
@@ -862,7 +879,7 @@ func (s *WALStore) BlockSize() int { return int(s.sb.BlockSize) }
 // persistCheckpoint to clamp checkpoint advancement against active
 // recover-session pin floors. Pass nil to disable.
 //
-// Idempotent. Safe to call at any time â€” the gate is read under
+// Idempotent. Safe to call at any time — the gate is read under
 // s.mu so concurrent persistCheckpoint sees a consistent value.
 //
 // Implements storage.RecycleFloorGate.
@@ -890,6 +907,7 @@ func (s *WALStore) RecoveryRetentionLSNs() uint64 {
 // Used by the rebuild server to declare the replica's frontier
 // matches the primary's head once base blocks are installed.
 func (s *WALStore) AdvanceFrontier(lsn uint64) {
+	s.bypassSyncDedup.Store(true)
 	s.lifecycleMu.RLock()
 	defer s.lifecycleMu.RUnlock()
 	s.mu.Lock()
@@ -925,8 +943,8 @@ func (s *WALStore) AdvanceWALTail(newTail uint64) {
 }
 
 // WriteExtentDirect installs a base block directly into the extent
-// without going through the WAL append path â€” INV-RECV-BITMAP-CORE
-// (Â§6.10). The receiver's per-session bitmap is the sole arbiter of
+// without going through the WAL append path — INV-RECV-BITMAP-CORE
+// (§6.10). The receiver's per-session bitmap is the sole arbiter of
 // BASE-vs-WAL conflict at this LBA; substrate-level WAL replay /
 // stale-skip is intentionally bypassed.
 //
@@ -937,6 +955,7 @@ func (s *WALStore) AdvanceWALTail(newTail uint64) {
 // Durability follows the same rule as Write: bytes become durable
 // only on the next successful Sync (the extent fsync covers them).
 func (s *WALStore) WriteExtentDirect(lba uint32, data []byte) error {
+	s.bypassSyncDedup.Store(true)
 	s.captureMu.RLock()
 	defer s.captureMu.RUnlock()
 	s.lifecycleMu.RLock()
@@ -974,6 +993,7 @@ func (s *WALStore) WriteExtentDirect(lba uint32, data []byte) error {
 // than allocating a fresh one. Same durability semantics as Write
 // (becomes durable on next Sync).
 func (s *WALStore) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
+	s.bypassSyncDedup.Store(true)
 	s.captureMu.RLock()
 	defer s.captureMu.RUnlock()
 	s.lifecycleMu.RLock()
@@ -1025,16 +1045,16 @@ func (s *WALStore) RecoveryMode() RecoveryMode {
 // AppliedLSNs returns a partial view of per-LBA applied LSN: only
 // LBAs whose latest write is still in the WAL (not yet flushed to
 // extent) are reported. Once an entry is flushed and the dirty-map
-// entry is cleared, walstore loses per-LBA LSN tracking â€” the
+// entry is cleared, walstore loses per-LBA LSN tracking — the
 // extent stores data only, not per-LBA LSN.
 //
 // PARTIAL-VIEW LIMITATION: for full per-LBA applied-LSN tracking,
 // walstore would need a permanent per-LBA LSN map (substrate
 // refactor). The replica recovery apply gate is the authoritative
-// correctness boundary; this partial seed is defense-in-depth â€”
+// correctness boundary; this partial seed is defense-in-depth —
 // it correctly stale-skips recovery entries for LBAs still in the
 // WAL window, and falls back to "appliedLSN[LBA] = 0" semantics
-// for flushed LBAs (which means recovery WILL apply them â€”
+// for flushed LBAs (which means recovery WILL apply them —
 // acceptable when the gate's session-only tracking + live-lane
 // updates fill in the gap during the session).
 //
@@ -1059,7 +1079,7 @@ func (s *WALStore) AppliedLSNs() (map[uint32]uint64, error) {
 // content is non-zero.
 //
 // This honors the LogicalStorage contract: "snapshots every
-// written LBA's current bytes" â€” including LBAs whose data has
+// written LBA's current bytes" — including LBAs whose data has
 // been flushed out of the dirty map into the extent. Filtering
 // zeros preserves the "snapshot of dirty bits" semantics callers
 // expect (a never-written LBA shouldn't appear in the output;
@@ -1168,3 +1188,26 @@ var _ LogicalStorage = (*WALStore)(nil)
 // WALSyncCount returns physical WAL sync attempts (including errors), not logical
 // Sync calls or the separate checkpoint/extent metadata sync operations.
 func (s *WALStore) WALSyncCount() uint64 { return s.walSyncCalls.Load() }
+
+// walSyncCovered is used only after the caller has captured its publication
+// frontier. A later concurrent write may force extra I/O, never a false ACK.
+func (s *WALStore) walSyncCovered() bool {
+	return !s.bypassSyncDedup.Load() && s.chunk.Load() == nil &&
+		s.walMutation.Load() <= s.durableMutation.Load()
+}
+
+// syncWALBatch runs only on the existing committer's single leader. It takes no
+// lifecycle/publication/WAL/shard locks and the queue mutex is already released.
+// Requests queued during a sync can reuse it only if their mutations predate its
+// captured cut. Failure leaves the previous durable generation unchanged.
+func (s *WALStore) syncWALBatch() error {
+	cut := s.walMutation.Load()
+	if !s.bypassSyncDedup.Load() && s.chunk.Load() == nil && cut <= s.durableMutation.Load() {
+		return nil
+	}
+	if err := s.syncWALFile(); err != nil {
+		return err
+	}
+	s.durableMutation.Store(cut)
+	return nil
+}
