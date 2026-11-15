@@ -166,12 +166,18 @@ type chunkHeadVersion struct {
 // chunkHead is the published remote state. Chunks maps a chunk index to the
 // chunk holding its bytes (block i of the chunk at offset i*BlockSize). A
 // chunk index missing from the map is ZERO: every block in it reads as zeros.
+//
+// Detached marks a HEAD its holder published with Detach: the same image as
+// that holder's final cut, one generation later. It tells the next holder
+// and the block master that the holder stopped after its last cut (a clean
+// move). Every normal cut publishes Detached = false.
 type chunkHead struct {
 	Gen       uint64
 	Epoch     uint64
 	Holder    string
 	RemoteLSN uint64
 	Chunks    map[uint64]chunkRef
+	Detached  bool
 }
 
 // chunkRemote is the remote store. Keys are non-empty valid UTF-8 strings
@@ -326,6 +332,12 @@ type chunkLayer interface {
 	Cut(ctx context.Context) (chunkCutResult, error)
 	// Capture is Cut, returning only H.
 	Capture(ctx context.Context) (uint64, error)
+	// Detach is the final cut of a clean stop: a Cut, then one more CAS of
+	// the same image with Detached set. It returns the detached HEAD (H is
+	// the final cut's LSN). The caller stops new writes first. Afterwards
+	// Cut, Capture and MakeRemoteDurable fail with errChunkLayerDetached;
+	// a repeated Detach returns the first result.
+	Detach(ctx context.Context) (chunkCutResult, error)
 	// MakeRemoteDurable is the durability point for snapshot, detach and
 	// migrate: a Capture whose H >= t. Only a nil return makes t remote
 	// durable; it requires the local Sync to cover t first, and fails
@@ -351,6 +363,7 @@ var (
 	errChunkEvictRefused        = errors.New("storage: chunk eviction refused")
 	errChunkCaptureRefused      = errors.New("storage: chunk capture refused")
 	errChunkKeyInvalid          = errors.New("storage: chunk key is not non-empty valid UTF-8")
+	errChunkLayerDetached       = errors.New("storage: chunk layer detached")
 )
 
 // attachChunkLayer attaches a chunk layer to an open store (chunk_layer.go).

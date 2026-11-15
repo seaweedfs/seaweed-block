@@ -63,6 +63,7 @@ type chunkLayerImpl struct {
 	head      chunkHead
 	pending   *chunkHead // a proposal whose CAS outcome is unresolved
 	fenced    bool
+	detached  *chunkCutResult // set by a successful Detach
 	remoteLSN uint64
 	hdr       chunkBitmapHeader // last header written or loaded
 	dirty     map[uint64]bool   // chunks dirtied since the cut in progress or the last HEAD
@@ -460,13 +461,15 @@ func (l *chunkLayerImpl) register() (done func(), err error) {
 
 func (l *chunkLayerImpl) admit() error {
 	l.stMu.Lock()
-	closed, fenced, base := l.closed, l.fenced, l.hdr.Base
+	closed, fenced, base, detached := l.closed, l.fenced, l.hdr.Base, l.detached != nil
 	l.stMu.Unlock()
 	switch {
 	case closed:
 		return errors.New("storage: chunk layer closed")
 	case fenced:
 		return errChunkLayerFenced
+	case detached:
+		return errChunkLayerDetached
 	case base == chunkBaseInstalling:
 		return fmt.Errorf("%w: BASE install in progress", errChunkCaptureRefused)
 	}
@@ -496,10 +499,13 @@ func (l *chunkLayerImpl) MakeRemoteDurable(ctx context.Context, t uint64) error 
 	l.capMu.Lock()
 	defer l.capMu.Unlock()
 	l.stMu.Lock()
-	fenced := l.fenced
+	fenced, detached := l.fenced, l.detached != nil
 	l.stMu.Unlock()
 	if fenced {
 		return errChunkLayerFenced
+	}
+	if detached {
+		return errChunkLayerDetached
 	}
 	if last := l.s.NextLSN() - 1; t > last {
 		return fmt.Errorf("storage: MakeRemoteDurable(%d): LSN was never written (last %d)", t, last)
@@ -603,6 +609,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context) (chunkCutResult, err
 	// Upload only what changed against HEAD.
 	next := copyHead(baseHead)
 	next.Epoch, next.Holder, next.RemoteLSN = l.cfg.Epoch, l.cfg.Holder, h
+	next.Detached = false // a normal cut is never a clean-stop mark
 	var changed []uint64
 	newKeys := map[uint64]string{}
 	for _, c := range captured {
@@ -624,7 +631,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context) (chunkCutResult, err
 		newKeys[c.idx] = key
 		changed = append(changed, c.idx)
 	}
-	if len(changed) == 0 && h == baseHead.RemoteLSN && baseHead.Gen != 0 {
+	if len(changed) == 0 && h == baseHead.RemoteLSN && baseHead.Gen != 0 && !baseHead.Detached {
 		l.finishCut(baseHead, h, nil, nil) // nothing new: no CAS
 		return chunkCutResult{H: h, Head: copyHead(baseHead), Noop: true, FullHash: all}, nil
 	}
@@ -673,6 +680,78 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context) (chunkCutResult, err
 	l.head = copyHead(cur)
 	l.stMu.Unlock()
 	return chunkCutResult{}, fmt.Errorf("storage: capture CAS not applied: %w", casErr)
+}
+
+func (l *chunkLayerImpl) Detach(ctx context.Context) (chunkCutResult, error) {
+	l.capMu.Lock()
+	defer l.capMu.Unlock()
+	l.stMu.Lock()
+	if d := l.detached; d != nil {
+		r := *d
+		r.Head = copyHead(d.Head)
+		l.stMu.Unlock()
+		return r, nil
+	}
+	l.stMu.Unlock()
+
+	r, err := l.captureLocked(ctx) // the final cut
+	if err != nil {
+		return chunkCutResult{}, err
+	}
+	done, err := l.register()
+	if err != nil {
+		return chunkCutResult{}, err
+	}
+	defer done()
+	ctx, cancel := l.opCtx(ctx)
+	defer cancel()
+
+	base := r.Head
+	next := copyHead(base)
+	next.Detached = true
+	gen, casErr := l.remote.CASHead(ctx, chunkHeadVersion{Gen: base.Gen, Epoch: base.Epoch}, next)
+	if casErr == nil {
+		next.Gen = gen
+	} else {
+		// Precondition or unknown outcome: resolve by re-reading HEAD.
+		cur, gerr := l.remote.GetHead(ctx)
+		if gerr != nil {
+			return chunkCutResult{}, fmt.Errorf("storage: detach mark CAS outcome unresolved (%v): %w", casErr, gerr)
+		}
+		if !(sameProposal(cur, next) && cur.Detached) {
+			l.stMu.Lock()
+			if l.supersededBy(cur) {
+				l.fenced = true
+			}
+			l.head = copyHead(cur)
+			l.stMu.Unlock()
+			if l.supersededBy(cur) {
+				return chunkCutResult{}, errors.Join(errChunkLayerFenced, casErr)
+			}
+			return chunkCutResult{}, fmt.Errorf("storage: detach mark CAS not applied: %w", casErr)
+		}
+		next = cur
+	}
+
+	// The bitmap header follows HEAD's generation; a failed write only leaves
+	// a stale header, which a restart treats as a mismatch (hash compare).
+	l.bmMu.Lock()
+	hdr := chunkBitmapHeader{BaseLSN: r.H, HeadGen: next.Gen, Epoch: next.Epoch, Base: chunkBaseNone}
+	if err := l.cfg.Bitmap.WriteHeader(hdr); err == nil {
+		l.stMu.Lock()
+		l.hdr = hdr
+		l.stMu.Unlock()
+	}
+	l.bmMu.Unlock()
+
+	res := chunkCutResult{H: r.H, Head: copyHead(next), FullHash: r.FullHash, Stats: r.Stats}
+	l.stMu.Lock()
+	l.head = copyHead(next)
+	stored := res
+	stored.Head = copyHead(next)
+	l.detached = &stored
+	l.stMu.Unlock()
+	return res, nil
 }
 
 // supersededBy reports whether cur belongs to a newer or competing holder.

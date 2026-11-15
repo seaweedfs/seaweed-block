@@ -32,6 +32,9 @@ type fakeFiler struct {
 	failUpdateAfterApply func(p string) error
 	updates              int
 	deletes              int
+	// beforeCreate, if set, runs under the lock just before an entry is
+	// created (it may read f.entries but must not call f's methods).
+	beforeCreate func(p string)
 }
 
 func newFakeFiler() *fakeFiler { return &fakeFiler{entries: map[string]*filerpb.Entry{}} }
@@ -52,6 +55,9 @@ func (f *fakeFiler) CreateEntry(_ context.Context, dir string, e *filerpb.Entry,
 	p := path.Join(dir, e.Name)
 	if _, ok := f.entries[p]; ok && oExcl {
 		return fmt.Errorf("%w: %s", ErrExists, p)
+	}
+	if f.beforeCreate != nil {
+		f.beforeCreate(p)
 	}
 	c := proto.Clone(e).(*filerpb.Entry)
 	f.entries[p] = c

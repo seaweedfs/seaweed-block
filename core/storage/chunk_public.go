@@ -39,6 +39,7 @@ var (
 	ErrChunkEvictRefused     = errChunkEvictRefused
 	ErrChunkCaptureRefused   = errChunkCaptureRefused
 	ErrChunkKeyInvalid       = errChunkKeyInvalid
+	ErrChunkLayerDetached    = errChunkLayerDetached
 )
 
 // ValidChunkKey enforces the chunk key domain (non-empty valid UTF-8); a
