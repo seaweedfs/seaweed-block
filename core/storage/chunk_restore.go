@@ -44,6 +44,9 @@ func ClaimChunkHead(ctx context.Context, remote ChunkRemote, cfg ChunkLayerConfi
 	}
 	next := copyHead(head)
 	next.Epoch, next.Holder = cfg.Epoch, cfg.Holder
+	// A new holder's takeover starts serving the same image as active. The
+	// previous holder's final-cut proof belongs only to its detached HEAD.
+	next.State, next.DetachedBy = chunkHeadActive, nil
 	if err := allowed(); err != nil {
 		return ChunkHead{}, err
 	}

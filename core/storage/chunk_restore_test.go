@@ -1,10 +1,40 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
 )
+
+func TestClaimChunkHeadClearsProductionDetachProof(t *testing.T) {
+	s, path := newChunkTestStore(t)
+	if _, err := s.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	remote := NewMemChunkRemote()
+	layer, err := AttachChunkLayer(s, remote, ChunkLayerConfig{ChunkBlocks: 4, Epoch: 1, Holder: "old", Bitmap: NewFileChunkBitmapStore(path + ".bitmap")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.Write(0, bytes.Repeat([]byte{0xD7}, 4096)); err != nil {
+		t.Fatal(err)
+	}
+	detached, err := layer.Detach(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detached.Head.State != chunkHeadDetached || detached.Head.DetachedBy == nil {
+		t.Fatal("producer did not detach", detached.Head)
+	}
+	claimed, err := ClaimChunkHead(context.Background(), remote, ChunkLayerConfig{Epoch: 2, Holder: "new"})
+	if err != nil {
+		t.Fatal("takeover of production detached HEAD", err)
+	}
+	if claimed.State != chunkHeadActive || claimed.DetachedBy != nil || claimed.RemoteLSN != detached.H {
+		t.Fatalf("takeover retained detached proof or changed frontier: %+v", claimed)
+	}
+}
 
 type claimFaultRemote struct {
 	ChunkRemote
