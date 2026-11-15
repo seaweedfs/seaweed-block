@@ -62,6 +62,8 @@ type StatusServer struct {
 	nvmeSource      nvmeStatusSource
 	runtimeSource   runtimeRecoverySource
 	frontendCaps    []FrontendTransportCapability
+	chunkEnabled    bool         // gates /chunk/*; off by default
+	chunkControl    ChunkControl // nil until SetChunkControl
 }
 
 type peerStatusSource interface {
@@ -284,6 +286,9 @@ func (s *StatusServer) Start(addr string) (string, error) {
 	}
 	if s.runtimeEnabled {
 		mux.HandleFunc("/runtime/rebuild", s.handleRuntimeRebuild)
+	}
+	if s.chunkEnabled {
+		mux.Handle("/chunk/", s.chunkMux())
 	}
 	s.srv = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 
