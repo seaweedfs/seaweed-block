@@ -108,7 +108,7 @@ func (g *WorkspaceLeaseGuard) Refresh(ctx context.Context) error {
 	g.mu.Lock()
 	// Check the OLD deadline before accepting a newer grant. In particular a
 	// reply received after expiry cannot undo a fence latched by a frontend.
-	if (!g.until.IsZero() && !g.now().Before(g.until)) || !g.now().Before(start.Add(time.Duration(reply.ValidForNs))) {
+	if ctx.Err() != nil || rpcCtx.Err() != nil || (!g.until.IsZero() && !g.now().Before(g.until)) || !g.now().Before(start.Add(time.Duration(reply.ValidForNs))) {
 		g.fenced = true
 	}
 	if !g.fenced {

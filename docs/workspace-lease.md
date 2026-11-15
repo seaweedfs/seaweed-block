@@ -25,3 +25,6 @@ for lease state, never across a base projection, RPC, or stop callback. The
 projection never takes the operation mutex. The blockvolume main goroutine
 alone closes physical resources; the lease worker requests closure and waits
 for its result before ACK. Host shutdown fences admission synchronously.
+The host installation mutex latches this terminal fence even before a guard
+exists; a later-installed guard is born fenced. Its lock order is installation
+mutex then guard state mutex. Canceled renewal replies cannot publish a grant.

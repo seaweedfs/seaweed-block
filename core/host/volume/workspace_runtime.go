@@ -13,6 +13,11 @@ import (
 // Stop must drain/close frontend, capture and replication, then observe the
 // stored detached HEAD. It must not take a final cut on revocation or expiry.
 func (h *Host) RunWorkspaceLease(ctx context.Context, stop func(context.Context, *control.WorkspaceIdentity) (uint64, error)) error {
+	return h.runWorkspaceLease(ctx, stop, nil)
+}
+
+// beforeInstall is a deterministic test seam before guard publication.
+func (h *Host) runWorkspaceLease(ctx context.Context, stop func(context.Context, *control.WorkspaceIdentity) (uint64, error), beforeInstall func()) error {
 	if !h.cfg.WorkspaceLease || stop == nil {
 		return fmt.Errorf("workspace lease runtime is not configured")
 	}
@@ -32,7 +37,15 @@ func (h *Host) RunWorkspaceLease(ctx context.Context, stop func(context.Context,
 			if err != nil {
 				return err
 			}
+			if beforeInstall != nil {
+				beforeInstall()
+			}
+			h.workspaceLeaseMu.Lock()
+			// The guard is not yet shared: publish it already fenced if a
+			// synchronous shutdown won the race with this installer.
+			guard.fenced = h.workspaceLeaseFenced || ctx.Err() != nil
 			h.view.workspaceGuard.Store(guard)
+			h.workspaceLeaseMu.Unlock()
 			return guard.Run(ctx)
 		}
 		select {
@@ -46,6 +59,9 @@ func (h *Host) RunWorkspaceLease(ctx context.Context, stop func(context.Context,
 // FenceWorkspaceLease closes admission synchronously before process shutdown.
 // Physical drain remains owned by run's stop callback; this never ACKs/cuts.
 func (h *Host) FenceWorkspaceLease() {
+	h.workspaceLeaseMu.Lock()
+	defer h.workspaceLeaseMu.Unlock()
+	h.workspaceLeaseFenced = true
 	if g := h.view.workspaceGuard.Load(); g != nil {
 		g.mu.Lock()
 		g.fenced = true

@@ -144,9 +144,13 @@ type Host struct {
 	started atomic.Bool
 
 	workspaceLeaseStarted atomic.Bool
-	readyOnce             atomic.Bool
-	readyMarkerMu         sync.Mutex
-	supportingReadyMarks  map[string]struct{}
+	// Guard installation and terminal host fencing share this lock. Order:
+	// workspaceLeaseMu -> guard.mu; never hold either across RPC or drain.
+	workspaceLeaseMu     sync.Mutex
+	workspaceLeaseFenced bool
+	readyOnce            atomic.Bool
+	readyMarkerMu        sync.Mutex
+	supportingReadyMarks map[string]struct{}
 
 	localReadinessBlocked atomic.Bool
 	localReadinessReason  atomic.Value // string
