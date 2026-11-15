@@ -62,8 +62,19 @@ type StatusServer struct {
 	nvmeSource      nvmeStatusSource
 	runtimeSource   runtimeRecoverySource
 	frontendCaps    []FrontendTransportCapability
+	nvmePending     bool         // configured listener has not started (or is stopping)
 	chunkEnabled    bool         // gates /chunk/*; off by default
 	chunkControl    ChunkControl // nil until SetChunkControl
+}
+
+// SetNVMeListenerReady gates only external readiness, not storage recovery or
+// authority. Call false before starting status for a configured NVMe listener,
+// true only after Target.Start succeeds, and false before closing the target.
+// Unconfigured callers retain the legacy default.
+func (s *StatusServer) SetNVMeListenerReady(ready bool) {
+	s.mu.Lock()
+	s.nvmePending = !ready
+	s.mu.Unlock()
 }
 
 type peerStatusSource interface {
@@ -410,6 +421,17 @@ func (s *StatusServer) handleStatusNVMe(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *StatusServer) statusProjection() StatusProjection {
+	p := s.authorityProjection()
+	s.mu.Lock()
+	p.Healthy = p.Healthy && !s.nvmePending
+	p.FrontendPrimaryReady = p.FrontendPrimaryReady && !s.nvmePending
+	s.mu.Unlock()
+	return p
+}
+
+// authorityProjection preserves the storage/authority gate used by runtime
+// recovery. Listener startup masks presentation only, not recovery admission.
+func (s *StatusServer) authorityProjection() StatusProjection {
 	p, superseded := s.view.projectionWithSupersede()
 	ep := s.view.EngineProjection()
 	authorityRole := AuthorityRoleUnknown
@@ -586,7 +608,7 @@ func (s *StatusServer) handleRuntimeRebuild(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "decode runtime rebuild request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	p := s.statusProjection()
+	p := s.authorityProjection()
 	if req.VolumeID == "" {
 		http.Error(w, "volumeID is required", http.StatusBadRequest)
 		return
