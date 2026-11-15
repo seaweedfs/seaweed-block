@@ -62,9 +62,10 @@ settle may still appear as a retained root in the preceding preview.
 
 Independent apply calls persist two-mark coverage in `_GC_MARK` under the
 catalog namespace. A conditional in-progress mark invalidates old coverage
-before effects; only a completed pass saves fresh coverage. Errors, interrupted
-passes, configuration changes and conditional-write conflicts cannot advance
-coverage. Do not edit or copy this state between namespaces. All filer/master/
+before effects; only a completed pass saves fresh coverage. A failed scan after an acknowledged in-progress write does not save completed
+coverage. Configuration changes cannot reuse prior coverage. A mark write can
+commit and then lose its response: an error does **not** prove that remote
+coverage is absent or unchanged. Do not edit or copy this state between namespaces. All filer/master/
 blob calls share `--timeout` (default 1m). Grace must exceed the catalog operation
 deadline (5m) plus the measured mark duration. Increase timeout only if the pass
 still fits that safety margin. Permanent attempt, HEAD and key tombstones are
@@ -73,7 +74,21 @@ never removed by this command. Pre-binding needle enumeration remains unknown.
 The CLI adds no storage lock edge: the collector retains its local mutex and
 uses the existing remote APIs. The persisted mark uses filer conditional writes,
 not a new WAL/publication/shard lock. Concurrent apply calls can conflict and
-report an error; callers must not treat a failed command as a completed mark.
+report an error. Callers must keep the failure status, but must not infer that
+all effects were rolled back or that no completed mark exists remotely.
+
+Errors after GC execution begins return `{code,message,retryable,gc}` with the
+known partial counters/root report preserved in `gc`. `mark_saved=true` means
+the completed-write response was acknowledged, not merely attempted.
+`mark_outcome` describes this invocation: `not_attempted`, `in_progress`
+(acknowledged), `complete` (acknowledged), or `unknown` (write response lost or
+failed; remote outcome not established). `unknown_outcomes` names incomplete
+stages (`in_progress_mark_write`, `copy_intent_settlement`, `reclamation`, or
+`completed_mark_write`). A stage may have partially taken effect even though
+its acknowledged counters are lower; for example a blob delete may succeed
+then lose its reply. Do not interpret the counters as an upper bound or assume
+that retries start from a pristine store. The next invocation reads the actual
+conditional mark and authoritative roots as usual.
 
 The opt-in end-to-end test invokes the actual CLI entrypoint against a real
 blockmaster runtime and real SeaweedFS master/volume/filer processes:

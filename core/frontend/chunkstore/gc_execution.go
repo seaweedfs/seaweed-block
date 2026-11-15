@@ -36,19 +36,26 @@ type savedGCMark struct {
 }
 
 type GCExecution struct {
-	DryRun        bool `json:"dry_run"`
-	SettledCopies int  `json:"settled_copy_intents"`
-	MarkSaved     bool `json:"mark_saved"`
+	// MarkSaved confirms this caller received the completed-write response;
+	// false does not prove that no completed mark exists remotely.
+	MarkOutcome     string   `json:"mark_outcome"`
+	UnknownOutcomes []string `json:"unknown_outcomes"`
+	DryRun          bool     `json:"dry_run"`
+	SettledCopies   int      `json:"settled_copy_intents"`
+	MarkSaved       bool     `json:"mark_saved"`
 	GCResult
 }
 
 // ExecuteGC binds independent CLI calls to completed filer-side marks.
 // Preview never writes even the watermark. Apply first invalidates stored
-// coverage with a conditional empty/in-progress record: crash or failure
-// cannot leave a failed pass's old coverage available to a later process.
+// coverage with a conditional empty/in-progress record before other effects.
+// A write may commit despite a lost response: errors retain known effects
+// and identify uncertain stages, rather than asserting remote absence.
 // The catalog namespace is the scope; permanent tombstones are untouched.
 func (c *Catalog) ExecuteGC(ctx context.Context, blobs BlobDeleter, cfg GCConfig, apply bool) (out GCExecution, err error) {
 	out.DryRun = !apply
+	out.MarkOutcome = "not_attempted"
+	out.UnknownOutcomes = []string{}
 	g, err := NewCollector(c, blobs, cfg)
 	if err != nil {
 		return out, err
@@ -73,20 +80,28 @@ func (c *Catalog) ExecuteGC(ctx context.Context, blobs BlobDeleter, cfg GCConfig
 	busy := g.mark(false)
 	token, err := g.writeMark(ctx, busy, previous)
 	if err != nil {
+		out.MarkOutcome = "unknown"
+		out.UnknownOutcomes = append(out.UnknownOutcomes, "in_progress_mark_write")
 		return out, err
 	}
+	out.MarkOutcome = "in_progress"
 	out.SettledCopies, err = g.SweepCopies(ctx)
 	if err != nil {
+		out.UnknownOutcomes = append(out.UnknownOutcomes, "copy_intent_settlement")
 		return out, err
 	}
 	out.GCResult, err = g.Run(ctx)
 	if err != nil {
+		out.UnknownOutcomes = append(out.UnknownOutcomes, "reclamation")
 		return out, err
 	}
 	_, err = g.writeMark(ctx, g.mark(true), token)
 	if err != nil {
+		out.MarkOutcome = "unknown"
+		out.UnknownOutcomes = append(out.UnknownOutcomes, "completed_mark_write")
 		return out, err
 	}
+	out.MarkOutcome = "complete"
 	out.MarkSaved = true
 	return out, nil
 }

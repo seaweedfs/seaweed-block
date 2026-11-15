@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -67,5 +68,29 @@ func chunkGC(args []string, stdout, stderr io.Writer) int {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	out, e := cat.ExecuteGC(ctx, blobs, chunkstore.GCConfig{Grace: grace, IntentTTL: ttl, Now: chunkGCNow, IssuedEpoch: issuedEpoch}, apply)
-	return chunkResult("gc", out, e, stdout, stderr)
+	return chunkGCResult(out, e, stdout, stderr)
+}
+
+// Error status and code remain failures, but a failure must not erase known
+// effects or imply that a lost write response means the write did not commit.
+func chunkGCResult(out chunkstore.GCExecution, err error, stdout, stderr io.Writer) int {
+	if err == nil {
+		return chunkResult("gc", out, nil, stdout, stderr)
+	}
+	body := struct {
+		chunkErrBody
+		GC chunkstore.GCExecution `json:"gc"`
+	}{GC: out}
+	body.Code, body.Message = codeInternalCLI, err.Error()
+	var ce *chunkstore.CatalogError
+	switch {
+	case errors.As(err, &ce):
+		body.Code, body.Message, body.Retryable = ce.Code, ce.Detail(), ce.Retryable
+	case errors.Is(err, context.DeadlineExceeded):
+		body.Code, body.Retryable = chunkstore.CodeDeadlineExceeded, true
+	}
+	fmt.Fprintf(stderr, "sw-block ops chunk gc: %s: %s\n", body.Code, body.Message)
+	// chunkResult also propagates output errors; either outcome remains FAIL.
+	chunkResult("gc", body, nil, stdout, stderr)
+	return chunkExitFailed
 }
