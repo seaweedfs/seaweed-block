@@ -201,7 +201,12 @@ func TestGC_IntentExpiryNeedsTTLAuthorityAndRemoteFence(t *testing.T) {
 			*now = time.Unix(0, ins[0].CreatedNs).Add(tc.age)
 			// A real remote HEAD fence. The publisher's original expected version
 			// can no longer install after epoch 2 was published.
-			if _, e = r.CASHead(ctx, storage.ChunkHeadVersion{}, storage.ChunkHead{Epoch: tc.head, Holder: "new", Chunks: map[uint64]storage.ChunkRef{}}); e != nil {
+			cur, e := r.GetHead(ctx)
+			if e != nil {
+				t.Fatal(e)
+			}
+			old := storage.ChunkHeadVersion{Gen: cur.Gen, Epoch: cur.Epoch}
+			if _, e = r.CASHead(ctx, old, storage.ChunkHead{Epoch: tc.head, Holder: "new", Chunks: map[uint64]storage.ChunkRef{}}); e != nil {
 				t.Fatal(e)
 			}
 			g.cfg.IssuedEpoch = func(context.Context, string) (uint64, error) {
@@ -225,7 +230,7 @@ func TestGC_IntentExpiryNeedsTTLAuthorityAndRemoteFence(t *testing.T) {
 				t.Fatal("one mark reclaimed bytes")
 			}
 			if tc.expire {
-				_, e = r.CASHead(ctx, storage.ChunkHeadVersion{}, storage.ChunkHead{Epoch: 1, Holder: "h1"})
+				_, e = r.CASHead(ctx, old, storage.ChunkHead{Epoch: 1, Holder: "h1"})
 				if !errors.Is(e, storage.ErrChunkHeadPrecondition) {
 					t.Fatalf("expired publisher can still CAS: %v", e)
 				}
@@ -315,7 +320,11 @@ func TestGC_CopyIntentSurvivesTakeover(t *testing.T) {
 			t.Fatal(e)
 		}
 	}
-	if _, e := r.CASHead(ctx, storage.ChunkHeadVersion{}, storage.ChunkHead{Epoch: 2, Holder: "new"}); e != nil {
+	cur, e := r.GetHead(ctx)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e := r.CASHead(ctx, storage.ChunkHeadVersion{Gen: cur.Gen, Epoch: cur.Epoch}, storage.ChunkHead{Epoch: 2, Holder: "new"}); e != nil {
 		t.Fatal(e)
 	}
 	g.cfg.IssuedEpoch = func(context.Context, string) (uint64, error) { return 2, nil }
