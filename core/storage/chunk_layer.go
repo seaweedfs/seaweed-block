@@ -153,6 +153,17 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 		for _, idx := range saved {
 			l.dirty[idx] = true
 		}
+	case !ok && cfg.FreshFromHead:
+		// A fresh local volume has taken no write yet (I/O waits for its
+		// first attach): its image is HEAD's, so nothing is dirty. Start with
+		// an empty bitmap bound to HEAD instead of hash mode, which stays for
+		// an existing volume whose bitmap is lost (integration ruling F1).
+		fresh := chunkBitmapHeader{BaseLSN: head.RemoteLSN, HeadGen: head.Gen, Epoch: head.Epoch, Base: chunkBaseNone}
+		if err := cfg.Bitmap.WriteHeader(fresh); err != nil {
+			l.hashMode = true // safe: compare every chunk on the first cut
+		} else {
+			l.hdr = fresh
+		}
 	default:
 		if ok {
 			l.hdr = hdr

@@ -51,8 +51,10 @@ func TestOpsChunk_Show(t *testing.T) {
 		fork.Head.ChunkCount != 1 || fork.Head.DetachedBy != nil {
 		t.Fatalf("show v2 HEAD: %+v", fork.Head)
 	}
-	if src := show("v1"); src.Volume == nil || src.Volume.Origin != chunkstore.OriginCreate || src.Head != nil {
-		t.Fatalf("show v1 (VOLUME, no HEAD yet): %+v %+v", src.Volume, src.Head)
+	// A created volume carries its initial HEAD (gen 1, epoch 0, no chunks).
+	if src := show("v1"); src.Volume == nil || src.Volume.Origin != chunkstore.OriginCreate || src.Head == nil || src.Head.Gen != 1 ||
+		src.Head.Epoch != 0 || src.Head.RemoteLSN != 0 || src.Head.ChunkCount != 0 || src.Head.State != "active" {
+		t.Fatalf("show v1 (VOLUME and its initial HEAD): %+v %+v", src.Volume, src.Head)
 	}
 	if none := show("v9"); none.Volume != nil || none.Head != nil || none.VolumeID != "v9" {
 		t.Fatalf("show of a volume that does not exist: %+v", none)

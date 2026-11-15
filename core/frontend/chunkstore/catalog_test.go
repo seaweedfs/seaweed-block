@@ -19,8 +19,9 @@ const catBase = "/swblock/chunks"
 
 var catGeo = Geometry{NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 8}
 
-// publishSource writes chunks for vol and installs its first HEAD (epoch 1,
-// remote_lsn 42) through the real ChunkRemote; it returns the HEAD.
+// publishSource writes chunks for vol and installs a HEAD (epoch 1,
+// remote_lsn 42) over the current one (the initial HEAD the VOLUME entry
+// came with, if any) through the real ChunkRemote; it returns the HEAD.
 func publishSource(t *testing.T, f *fakeFiler, b *fakeBlobs, vol string, chunks map[uint64][]byte) storage.ChunkHead {
 	t.Helper()
 	ctx := context.Background()
@@ -36,7 +37,11 @@ func publishSource(t *testing.T, f *fakeFiler, b *fakeBlobs, vol string, chunks 
 		}
 		h.Chunks[idx] = storage.ChunkRef{Key: key, SHA256: sha256.Sum256(data)}
 	}
-	gen, err := r.CASHead(ctx, storage.ChunkHeadVersion{}, h)
+	cur, err := r.GetHead(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gen, err := r.CASHead(ctx, storage.ChunkHeadVersion{Gen: cur.Gen, Epoch: cur.Epoch}, h)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -578,5 +583,47 @@ func TestDetach_ProductionSerializedHead(t *testing.T) {
 	}
 	if string(e.Extended[extGen]) != "1" || len(e.Chunks) != 0 {
 		t.Fatalf("HEAD entry extended gen %q, filer chunks %d", e.Extended[extGen], len(e.Chunks))
+	}
+}
+
+// A created volume gets its initial HEAD with the VOLUME entry (integration
+// ruling F1): gen 1, epoch 0, no holder, remote_lsn 0, no chunks. An existing
+// HEAD is kept, and a missing one is created again on the next attach.
+func TestCatalog_EnsureVolumeCreatesTheInitialHead(t *testing.T) {
+	ctx := context.Background()
+	f, b := newFakeFiler(), newFakeBlobs()
+	c := newCat(t, f)
+	if _, err := c.EnsureVolume(ctx, "v1", catGeo); err != nil {
+		t.Fatal(err)
+	}
+	h, ok, err := c.ReadHead(ctx, "v1")
+	if err != nil || !ok || h.Gen != 1 || h.Epoch != 0 || h.Holder != "" || h.RemoteLSN != 0 || len(h.Chunks) != 0 || h.State != storage.ChunkHeadActive {
+		t.Fatalf("initial HEAD: %+v ok=%v %v", h, ok, err)
+	}
+	if _, err := c.EnsureVolume(ctx, "v1", catGeo); err != nil {
+		t.Fatal(err)
+	}
+	if again, _, _ := c.ReadHead(ctx, "v1"); again.Gen != 1 {
+		t.Fatalf("a repeated attach replaced the HEAD: %+v", again)
+	}
+
+	// A volume published before VOLUME entries existed keeps its HEAD.
+	pub := publishSource(t, f, b, "v2", map[uint64][]byte{0: chunkBytes(0x10)})
+	if _, err := c.EnsureVolume(ctx, "v2", catGeo); err != nil {
+		t.Fatal(err)
+	}
+	if kept, _, _ := c.ReadHead(ctx, "v2"); kept.Gen != pub.Gen || len(kept.Chunks) != 1 {
+		t.Fatalf("an existing HEAD was replaced by the initial one: %+v, published %+v", kept, pub)
+	}
+
+	// VOLUME written, HEAD lost before it (an interrupted first attach).
+	f.mu.Lock()
+	delete(f.entries, catBase+"/v1/HEAD")
+	f.mu.Unlock()
+	if _, err := c.EnsureVolume(ctx, "v1", catGeo); err != nil {
+		t.Fatal(err)
+	}
+	if h, ok, _ := c.ReadHead(ctx, "v1"); !ok || h.Gen != 1 {
+		t.Fatalf("the initial HEAD was not created again: %+v ok=%v", h, ok)
 	}
 }

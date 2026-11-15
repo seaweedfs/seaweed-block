@@ -410,6 +410,25 @@ func (c *Catalog) headExists(ctx context.Context, root string) (bool, error) {
 	return true, nil
 }
 
+// ensureInitialHead creates vol's initial empty HEAD unless a HEAD exists.
+func (c *Catalog) ensureInitialHead(ctx context.Context, vol, root string) error {
+	has, err := c.headExists(ctx, root)
+	if err != nil {
+		return remoteErr(err, "read HEAD of %s", vol)
+	}
+	if has {
+		return nil
+	}
+	he, err := headEntry(storage.ChunkHead{Gen: 1, Chunks: map[uint64]storage.ChunkRef{}, State: storage.ChunkHeadActive})
+	if err != nil {
+		return err
+	}
+	if err := c.f.CreateEntry(ctx, root, he, true); err != nil && !errors.Is(err, ErrExists) {
+		return remoteErr(err, "create the initial HEAD of %s", vol)
+	}
+	return nil
+}
+
 // ReadHead returns vol's HEAD, and false when no HEAD was ever published.
 func (c *Catalog) ReadHead(ctx context.Context, vol string) (storage.ChunkHead, bool, error) {
 	root, err := c.volRoot(vol)
@@ -461,6 +480,15 @@ func (c *Catalog) EnsureVolume(ctx context.Context, vol string, g Geometry) (Vol
 	}
 	if v.Geometry != g {
 		return VolumeInfo{}, catErr(CodeGeometryMismatch, false, nil, "volume %s: VOLUME geometry %+v, this host serves %+v", vol, v.Geometry, g)
+	}
+	if v.Origin == OriginCreate {
+		// A created volume gets its initial HEAD with VOLUME (integration
+		// ruling F1): gen 1, epoch 0, no holder, remote_lsn 0, no chunks
+		// (all zero). An exclusive create: an existing HEAD (a volume made
+		// before VOLUME entries, or an earlier attach) is kept.
+		if err := c.ensureInitialHead(ctx, vol, root); err != nil {
+			return VolumeInfo{}, err
+		}
 	}
 	if v.Origin == OriginFork {
 		has, err := c.headExists(ctx, root)
