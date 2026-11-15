@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"path"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -300,5 +303,60 @@ func TestGC_SnapshotAndQualifiedForkAreRoots(t *testing.T) {
 		if got, e := r.Get(ctx, ref.Key); e != nil || !bytes.Equal(got, chunkBytes(0x21)) {
 			t.Fatalf("shared bytes: %v", e)
 		}
+	}
+}
+
+func TestGC_CopyIntentSurvivesTakeover(t *testing.T) {
+	f, b, _, g, now := gcFixture(t)
+	ctx := context.Background()
+	r, _ := NewChunkRemote(f, b, path.Join(catBase, "v1"))
+	for _, holder := range []string{"snapshot:v1/s1/req", "fork:v1/req"} {
+		if _, e := r.PutIntent(ctx, storage.ChunkIntent{Gen: 0, Epoch: 1, Holder: holder, Keys: []string{"k"}}); e != nil {
+			t.Fatal(e)
+		}
+	}
+	if _, e := r.CASHead(ctx, storage.ChunkHeadVersion{}, storage.ChunkHead{Epoch: 2, Holder: "new"}); e != nil {
+		t.Fatal(e)
+	}
+	g.cfg.IssuedEpoch = func(context.Context, string) (uint64, error) { return 2, nil }
+	*now = now.Add(24 * time.Hour)
+	if result, e := g.Run(ctx); e != nil || result.ExpiredIntents != 0 {
+		t.Fatalf("epochless copy publication lost its protection: %+v %v", result, e)
+	}
+	intents, e := r.ListIntents(ctx)
+	if e != nil || len(intents) != 2 {
+		t.Fatalf("copy intents: %+v %v", intents, e)
+	}
+}
+
+func TestSWFS_DeleteBlobStatusesAndExactPath(t *testing.T) {
+	for _, status := range []int{200, 204, 404, 401, 500} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if r.Method != "DELETE" || r.URL.Path != "/7,01abcdef" {
+					t.Errorf("unexpected delete %s %s", r.Method, r.URL.Path)
+				}
+				w.WriteHeader(status)
+			}))
+			defer server.Close()
+			c := &SWFS{http: server.Client(), vidCache: map[string][]string{"7": {strings.TrimPrefix(server.URL, "http://")}}}
+			e := c.DeleteBlob(context.Background(), "7,01abcdef")
+			if (e == nil) != (status == 200 || status == 204 || status == 404) {
+				t.Fatalf("status %d: %v", status, e)
+			}
+			if calls != 1 {
+				t.Fatalf("calls %d", calls)
+			}
+			for _, bad := range []string{"7,../bad", "7,a?bad", "7,a%2fb", "", ",a"} {
+				if e := c.DeleteBlob(context.Background(), bad); e == nil {
+					t.Errorf("invalid fid accepted: %q", bad)
+				}
+			}
+			if calls != 1 {
+				t.Fatal("invalid fid dispatched HTTP")
+			}
+		})
 	}
 }
