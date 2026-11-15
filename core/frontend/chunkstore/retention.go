@@ -8,6 +8,7 @@ import (
 	"path"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -49,22 +50,31 @@ import (
 // record is removed only while it still names that attempt, so a
 // same-name replacement made after planning is never touched.
 //
-// Fork parents. A fork records a hold on the parent attempt before it
-// reads it (forkholds/<name>/<attempt>/<target>, see Fork). Retain marks
-// the attempt deleting first and then reads its holds: a hold whose fork
-// target has no HEAD yet reverts the mark and keeps the snapshot. A fork
-// that creates its hold after that read finds the attempt deleting and
-// refuses before installing anything. Either way no incomplete fork loses
-// its parent. A hold counts while its target has no HEAD and either the
-// target's VOLUME records this fork, or the hold is younger than the
-// operation deadline (the fork may still be about to publish its VOLUME);
-// a hold left by a fork that died before its VOLUME is stale after that.
-// A fork published before holds existed is still found by the fork-record
-// scan (forkParentsNeeded).
+// Fork parents (codex01's design, review of #142 round 2). Protection is
+// one conditional write on the parent attempt's own entry, nothing else:
 //
-// A pass interrupted after marking a snapshot deleting (e.g. a lost
-// response) leaves it deleting with its name still held; the next pass
-// finishes it the same way (holds checked again, then the name freed).
+//   - Fork, before it reads the parent, adds its claim (target/request)
+//     to the entry's claims, conditioned on {state active, claims as read}.
+//     A parent already deleting is refused.
+//   - Retain marks an attempt deleting only conditioned on {state active,
+//     gen, no claims}. A lost condition re-reads and decides again.
+//
+// The two writes hit the same entry, so one of them sees the other: either
+// the claim landed first and retain keeps the snapshot (fork_held), or the
+// mark landed first and the fork refuses before installing anything.
+//
+// A claim is removed by the fork once its HEAD is installed. Retain removes
+// (conditionally) only claims that can never matter again: the target has
+// a HEAD (the fork completed, or a sweep aborted it), or the target's
+// VOLUME belongs to another request (this one can never publish there).
+// Any other claim keeps the snapshot, however old: a fork that died before
+// publishing its VOLUME holds it until the fork is retried to completion or
+// settled by AbortFork. Forks published before claims existed are still
+// found by the fork-record scan (forkParentsNeeded).
+//
+// A pass stopped after a mark (e.g. a lost response) leaves the attempt
+// deleting with its name still held; the next pass (and its dry run) lists
+// it and frees the name. A deleting attempt cannot gain claims.
 
 const (
 	SnapshotClassSemantic = "semantic"
@@ -79,7 +89,7 @@ const (
 	extRetention    = "retention"
 	extRetentionRev = "retention_rev"
 
-	forkHoldsDir = "forkholds"
+	extSnapClaims = "swb.snap.claims"
 )
 
 // ValidateSnapshotClass refuses a class other than "", "semantic" and
@@ -350,7 +360,12 @@ func (c *Catalog) Retain(ctx context.Context, vol string, dryRun bool) (Retentio
 		expired = append(expired, d)
 	}
 	for _, s := range unfinished {
-		expired = append(expired, RetentionDecision{Name: s.Name, Attempt: s.attempt, CreatedNs: s.CreatedNs, Class: s.Class, Reasons: []string{SnapDeleting}})
+		d := RetentionDecision{Name: s.Name, Attempt: s.attempt, CreatedNs: s.CreatedNs, Class: s.Class, Pinned: s.Pinned(), Reasons: []string{SnapDeleting}}
+		if red := true; !red { // RED: unfinished attempts not listed
+			res.Decisions = append(res.Decisions, d)
+			res.Expired++
+		}
+		expired = append(expired, d)
 	}
 	if dryRun {
 		return res, nil
@@ -389,7 +404,7 @@ type retainOutcome int
 const (
 	retainDeleted  retainOutcome = iota // marked deleting (or already gone) and the name freed
 	retainReplaced                      // the planned attempt is gone; another attempt holds the name
-	retainForkHeld                      // a fork holds the attempt: the mark was reverted, kept
+	retainForkHeld                      // a live fork claim is on the attempt: kept, nothing written
 )
 
 // deleteRetainedAttempt deletes the planned attempt of vol/name and only
@@ -401,76 +416,64 @@ func (c *Catalog) deleteRetainedAttempt(ctx context.Context, vol, name, attempt 
 		return 0, false, err
 	}
 	dir := path.Join(root, snapsDir, name)
-	e, err := c.f.LookupEntry(ctx, dir, attempt)
-	if errors.Is(err, ErrNotFound) {
-		return c.freeName(ctx, root, name, attempt)
-	}
-	if err != nil {
-		return 0, false, remoteErr(err, "read snapshot %s/%s attempt %s", vol, name, attempt)
-	}
-	if string(e.Extended[extSnapState]) == SnapDeleting {
-		// A pass stopped after its mark: decide the holds again.
-		held, err := c.forkHeld(ctx, vol, root, name, attempt)
-		if err != nil {
-			return 0, false, err
-		}
-		if held {
-			return c.revertMark(ctx, dir, e, name, attempt)
-		}
-		return c.freeName(ctx, root, name, attempt)
-	}
-	if string(e.Extended[extSnapState]) == SnapActive {
-		marked := proto.Clone(e).(*filerpb.Entry)
-		marked.Extended[extSnapState] = []byte(SnapDeleting)
-		marked.Extended[extSnapDeletedNs] = []byte(strconv.FormatInt(c.now().UnixNano(), 10))
-		err := c.f.UpdateEntry(ctx, dir, marked, map[string][]byte{
-			extSnapState: []byte(SnapActive),
-			extSnapGen:   e.Extended[extSnapGen],
-		})
-		switch {
-		case errors.Is(err, ErrPrecondition) || errors.Is(err, ErrNotFound):
-			// changed under us: decided again from a fresh read below
-		case err != nil:
-			return 0, true, remoteErr(err, "mark snapshot %s/%s attempt %s deleting", vol, name, attempt)
-		default:
-			held, err := c.forkHeld(ctx, vol, root, name, attempt)
-			if err != nil {
-				return 0, false, err // marked deleting; a rerun keeps or completes it
-			}
-			if held {
-				return c.revertMark(ctx, dir, marked, name, attempt)
-			}
-			c.hook(hookUnheld, name)
-		}
-		e, err = c.f.LookupEntry(ctx, dir, attempt)
+	for try := 0; try < 5; try++ {
+		e, err := c.f.LookupEntry(ctx, dir, attempt)
 		if errors.Is(err, ErrNotFound) {
 			return c.freeName(ctx, root, name, attempt)
 		}
 		if err != nil {
-			return 0, false, remoteErr(err, "re-read snapshot %s/%s attempt %s", vol, name, attempt)
+			return 0, false, remoteErr(err, "read snapshot %s/%s attempt %s", vol, name, attempt)
 		}
-		if string(e.Extended[extSnapState]) == SnapActive {
-			return 0, false, remoteErr(nil, "snapshot %s/%s attempt %s is still active after the delete mark", vol, name, attempt)
+		if string(e.Extended[extSnapState]) != SnapActive {
+			// Deleting (a stopped pass) or aborted: no fork can claim it.
+			return c.freeName(ctx, root, name, attempt)
 		}
+		raw := string(e.Extended[extSnapClaims])
+		claims := decodeClaims(e)
+		live, err := c.liveClaims(ctx, vol, name, claims)
+		if err != nil {
+			return 0, false, err
+		}
+		if len(live) > 0 {
+			return retainForkHeld, false, nil
+		}
+		c.hook(hookChecked, name)
+		next := proto.Clone(e).(*filerpb.Entry)
+		if len(claims) > 0 {
+			// Every claim is dead: clear them, then decide again.
+			delete(next.Extended, extSnapClaims)
+			err := c.f.UpdateEntry(ctx, dir, next, map[string][]byte{extSnapState: []byte(SnapActive), extSnapClaims: []byte(raw)})
+			if errors.Is(err, ErrPrecondition) || errors.Is(err, ErrNotFound) {
+				continue
+			}
+			if err != nil {
+				return 0, true, remoteErr(err, "clear the dead fork claims of %s/%s attempt %s", vol, name, attempt)
+			}
+			continue
+		}
+		next.Extended[extSnapState] = []byte(SnapDeleting)
+		next.Extended[extSnapDeletedNs] = []byte(strconv.FormatInt(c.now().UnixNano(), 10))
+		err = c.f.UpdateEntry(ctx, dir, next, map[string][]byte{
+			extSnapState: []byte(SnapActive), // RED: no claims condition
+			extSnapGen:   e.Extended[extSnapGen],
+		})
+		if errors.Is(err, ErrPrecondition) || errors.Is(err, ErrNotFound) {
+			continue // a claim, a delete or a replacement landed: decide again
+		}
+		if err != nil {
+			return 0, true, remoteErr(err, "mark snapshot %s/%s attempt %s deleting", vol, name, attempt)
+		}
+		c.hook(hookMarked, name)
+		return c.freeName(ctx, root, name, attempt)
 	}
-	return c.freeName(ctx, root, name, attempt)
-}
-
-// revertMark returns a deleting attempt to active: a fork holds it.
-func (c *Catalog) revertMark(ctx context.Context, dir string, e *filerpb.Entry, name, attempt string) (retainOutcome, bool, error) {
-	back := proto.Clone(e).(*filerpb.Entry)
-	back.Extended[extSnapState] = []byte(SnapActive)
-	delete(back.Extended, extSnapDeletedNs)
-	if err := c.f.UpdateEntry(ctx, dir, back, map[string][]byte{extSnapState: []byte(SnapDeleting)}); err != nil {
-		return 0, true, remoteErr(err, "revert snapshot %s attempt %s: a fork holds it", name, attempt)
-	}
-	return retainForkHeld, false, nil
+	return 0, false, remoteErr(nil, "snapshot %s/%s attempt %s kept changing", vol, name, attempt)
 }
 
 // Test seams: hook stages in a Retain pass.
 const (
 	hookPlanned = "planned" // after planning, before any deletion
-	hookUnheld  = "unheld"  // a snapshot is marked and no hold was found, before its name is freed
+	hookChecked = "checked" // an attempt's claims were read and none is live, before its mark
+	hookMarked  = "marked"  // an attempt is marked deleting, before its name is freed
 )
 
 func (c *Catalog) hook(stage, name string) {
@@ -491,46 +494,59 @@ func (c *Catalog) freeName(ctx context.Context, root, name, attempt string) (ret
 	return 0, true, remoteErr(err, "remove the name record %s", name)
 }
 
-// forkHoldDir is where forks record their holds on a parent attempt.
-func forkHoldDir(root, name, attempt string) string {
-	return path.Join(root, forkHoldsDir, name, attempt)
+// forkClaim is the claim a fork puts on its parent attempt.
+func forkClaim(target, requestID string) string { return target + "/" + requestID }
+
+func decodeClaims(e *filerpb.Entry) []string {
+	raw := e.Extended[extSnapClaims]
+	if len(raw) == 0 {
+		return nil
+	}
+	var out []string
+	if json.Unmarshal(raw, &out) != nil {
+		return []string{string(raw)} // unreadable: kept as one live claim (safe)
+	}
+	return out
 }
 
-// forkHeld reports whether a fork still needs attempt of vol/name: one of
-// its holds names a target with no HEAD yet whose VOLUME records this
-// fork, or whose hold is younger than the operation deadline (its VOLUME
-// may be about to land). A hold whose target has a real or aborted HEAD
-// is stale (that fork completed or lost), as is an old hold with no
-// matching VOLUME (that fork died before publishing).
-func (c *Catalog) forkHeld(ctx context.Context, vol, root, name, attempt string) (bool, error) {
-	holds, err := c.f.ListEntries(ctx, forkHoldDir(root, name, attempt), "", "", 0)
-	if err != nil {
-		return false, remoteErr(err, "list the fork holds of %s/%s", name, attempt)
+func setClaims(e *filerpb.Entry, claims []string) {
+	if len(claims) == 0 {
+		delete(e.Extended, extSnapClaims)
+		return
 	}
-	for _, h := range holds {
-		if h.GetIsDirectory() {
+	sort.Strings(claims)
+	body, _ := json.Marshal(claims)
+	e.Extended[extSnapClaims] = body
+}
+
+// liveClaims returns the claims on vol/name that a fork may still need: a
+// claim is dead only when its target has a HEAD, or its target's VOLUME
+// was made by another request (or from another parent).
+func (c *Catalog) liveClaims(ctx context.Context, vol, name string, claims []string) ([]string, error) {
+	var live []string
+	for _, cl := range claims {
+		target, req, ok := strings.Cut(cl, "/")
+		if !ok || CheckVolumeID(target) != nil {
+			live = append(live, cl) // not ours to judge: keep the snapshot
 			continue
 		}
-		target := h.GetName()
 		_, has, err := c.ReadHead(ctx, target)
 		if err != nil {
-			return false, err
+			return nil, err
 		}
 		if has {
 			continue
 		}
 		v, ok, err := c.ReadVolume(ctx, target)
 		if err != nil {
-			return false, err
+			return nil, err
 		}
-		if ok && v.Fork != nil && v.Fork.Source == vol && v.Fork.Snapshot == name {
-			return true, nil
+		if ok && (v.Fork == nil || v.Fork.RequestID != req || v.Fork.Source != vol || v.Fork.Snapshot != name) {
+			continue
 		}
-		if c.now().Sub(time.Unix(h.GetAttributes().GetCrtime(), 0)) < c.deadline() {
-			return true, nil
-		}
+		live = append(live, cl)
 	}
-	return false, nil
+	return live, nil
 }
 
 // allSnapshots lists every published, not-deleting snapshot of vol, with

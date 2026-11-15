@@ -140,7 +140,9 @@ func TestIntegration_RetainAndUsage(t *testing.T) {
 // (1) a same-name pinned replacement made after planning survives (the
 // filer's conditional name delete refuses the stale attempt); (2) a fork
 // that starts after the scan and stops before its HEAD (VOLUME published,
-// deadline exceeded) keeps its parent, and completes on retry.
+// deadline exceeded) keeps its parent, and completes on retry; (3) a fork
+// that claims between retention's claim check and its mark makes the
+// filer refuse the mark (conditioned on no claims), so the parent is kept.
 func TestIntegration_RetainHeldSchedules(t *testing.T) {
 	c := startWeed(t)
 	ctx := context.Background()
@@ -180,7 +182,23 @@ func TestIntegration_RetainHeldSchedules(t *testing.T) {
 	clock = time.Now()
 
 	var pinnedAttempt string
-	cat.retainHook = func(stage, _ string) {
+	stoppedFork := func(snap, target string) {
+		t.Helper()
+		cat.OpDeadline = time.Nanosecond
+		_, err := cat.Fork(ctx, ForkRequest{Source: "v1", Snapshot: snap, Target: target, RequestID: "f"})
+		cat.OpDeadline = 0
+		if CodeOf(err) != CodeDeadlineExceeded {
+			t.Fatalf("fork %s past its deadline: %v; want deadline_exceeded", target, err)
+		}
+		if _, ok, err := cat.ReadVolume(ctx, target); !ok || err != nil {
+			t.Fatalf("the stopped fork %s VOLUME: ok=%t %v", target, ok, err)
+		}
+	}
+	cat.retainHook = func(stage, name string) {
+		if stage == hookChecked && name == "s02" {
+			stoppedFork("s02", "v3") // (3) lands between the check and the mark
+			return
+		}
 		if stage != hookPlanned {
 			return
 		}
@@ -197,36 +215,30 @@ func TestIntegration_RetainHeldSchedules(t *testing.T) {
 		}
 		pinnedAttempt = b.attempt
 		// (2) a fork of s01 publishes its VOLUME and stops before HEAD.
-		cat.OpDeadline = time.Nanosecond
-		_, err = cat.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s01", Target: "v2", RequestID: "f"})
-		cat.OpDeadline = 0
-		if CodeOf(err) != CodeDeadlineExceeded {
-			t.Fatalf("fork past its deadline: %v; want deadline_exceeded", err)
-		}
-		if _, ok, err := cat.ReadVolume(ctx, "v2"); !ok || err != nil {
-			t.Fatalf("the stopped fork's VOLUME: ok=%t %v", ok, err)
-		}
+		stoppedFork("s01", "v2")
 	}
 	res, err := cat.Retain(ctx, "v1", false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	cat.retainHook = nil
-	if fmt.Sprint(res.Deleted) != "[s02]" || fmt.Sprint(res.Replaced) != "[s00]" || fmt.Sprint(res.ForkHeld) != "[s01]" {
-		t.Fatalf("retain: deleted=%v replaced=%v forkHeld=%v; want s02 / s00 / s01", res.Deleted, res.Replaced, res.ForkHeld)
+	if len(res.Deleted) != 0 || fmt.Sprint(res.Replaced) != "[s00]" || fmt.Sprint(res.ForkHeld) != "[s02 s01]" {
+		t.Fatalf("retain: deleted=%v replaced=%v forkHeld=%v; want none / s00 / s02 s01", res.Deleted, res.Replaced, res.ForkHeld)
 	}
 	b, err := cat.readSnap(ctx, "v1", "s00")
 	if err != nil || b.attempt != pinnedAttempt || b.State != SnapActive || b.Class != SnapshotClassPinned {
 		t.Fatalf("pinned replacement: %+v %v (attempt %s, want %s)", b, err, b.attempt, pinnedAttempt)
 	}
-	if s, err := cat.readSnap(ctx, "v1", "s01"); err != nil || s.State != SnapActive {
-		t.Fatalf("fork parent: %+v %v; want active", s, err)
-	}
-	if _, err := cat.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s01", Target: "v2", RequestID: "f"}); err != nil {
-		t.Fatalf("fork retry: %v", err)
+	for _, fk := range []struct{ snap, target string }{{"s01", "v2"}, {"s02", "v3"}} {
+		if s, err := cat.readSnap(ctx, "v1", fk.snap); err != nil || s.State != SnapActive {
+			t.Fatalf("fork parent %s: %+v %v; want active", fk.snap, s, err)
+		}
+		if _, err := cat.Fork(ctx, ForkRequest{Source: "v1", Snapshot: fk.snap, Target: fk.target, RequestID: "f"}); err != nil {
+			t.Fatalf("fork %s retry: %v", fk.target, err)
+		}
 	}
 	res, err = cat.Retain(ctx, "v1", false)
-	if err != nil || fmt.Sprint(res.Deleted) != "[s01]" {
-		t.Fatalf("after the fork completed: deleted=%v %v; want s01 (s00 is pinned)", res.Deleted, err)
+	if err != nil || fmt.Sprint(res.Deleted) != "[s02 s01]" {
+		t.Fatalf("after the forks completed: deleted=%v %v; want s02 s01 (s00 is pinned)", res.Deleted, err)
 	}
 }
