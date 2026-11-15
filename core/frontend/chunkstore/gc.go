@@ -149,9 +149,28 @@ func (g *Collector) Run(ctx context.Context) (result GCResult, err error) {
 		}
 		for _, in := range intents {
 			result.Intents++
-			// Initial candidate intentionally retains all intents. The caller RED
-			// proves omitting these roots deletes a stalled cut's uploaded bytes.
-			_ = in
+			if in.CreatedNs <= 0 || in.CreatedNs > start.UnixNano() {
+				return result, errors.New("chunkstore: invalid intent creation time")
+			}
+			expire := false
+			if start.Sub(time.Unix(0, in.CreatedNs)) > g.cfg.IntentTTL {
+				issued, authorityErr := g.cfg.IssuedEpoch(ctx, vol)
+				// Both the authority and the actual CAS domain must have
+				// advanced. Mere lease loss, or issuance without takeover,
+				// cannot authorize expiry of a paused publisher's intent.
+				expire = authorityErr == nil && issued > in.Epoch && h.Epoch > in.Epoch && h.Epoch <= issued
+			}
+			if expire {
+				expired = append(expired, gcIntent{r, in})
+			} else {
+				for _, key := range in.Keys {
+					dir, name, e := r.keyLocation(key)
+					if e != nil {
+						return result, e
+					}
+					roots[path.Join(dir, name)] = true
+				}
+			}
 		}
 		pageAfter := ""
 		for {
@@ -197,9 +216,12 @@ func (g *Collector) Run(ctx context.Context) (result GCResult, err error) {
 	for _, b := range bindings {
 		p := path.Join(g.cat.base, b.volume, keysDir, b.entry.Name)
 		if roots[p] {
-			if string(b.entry.Extended[extGCDeleted]) == "1" {
+			if len(b.entry.Extended[extGCDeleted]) != 0 {
 				return result, fmt.Errorf("chunkstore: root references reclaimed binding %s", p)
 			}
+			continue
+		}
+		if string(b.entry.Extended[extGCDeleted]) == "done" {
 			continue
 		}
 		created := time.Unix(b.entry.Attributes.Crtime, 0)
@@ -227,6 +249,11 @@ func (g *Collector) Run(ctx context.Context) (result GCResult, err error) {
 			}
 		}
 		if err = g.blobs.DeleteBlob(ctx, string(b.entry.Extended[extFid])); err != nil {
+			return result, err
+		}
+		e := proto.Clone(b.entry).(*filerpb.Entry)
+		e.Extended[extGCDeleted] = []byte("done")
+		if err = g.cat.f.UpdateEntry(ctx, path.Dir(p), e, map[string][]byte{extFid: b.entry.Extended[extFid], extGCDeleted: []byte("1")}); err != nil {
 			return result, err
 		}
 		result.Reclaimed++
