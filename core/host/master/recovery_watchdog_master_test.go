@@ -142,3 +142,24 @@ func TestRecoveryWatchdog_MasterUnhealthyFailsOverToQualifiedPeer(t *testing.T) 
 		t.Fatalf("unhealthy primary with a qualified peer: line=%+v want r2@2", line)
 	}
 }
+
+// A running primary that was ready and later reports not ready on the
+// same incarnation (no unhealthy reason) follows the normal failover
+// rules: no boot grace for that incarnation, so it fails over to the
+// qualified peer, and nothing is listed as unhealthy (claude05, 21:24Z).
+func TestRecoveryWatchdog_MasterLaterDegradationFollowsNormalRules(t *testing.T) {
+	h, svc := watchdogMaster(t)
+	defer closeTestMaster(t, h)
+	h.SetPromotionEvidenceProvider(&switchProbe{}) // r1 not ready, r2 ready with evidence
+
+	reportRF3(t, svc, wireSlot{"r1-a", false, ""}, wireSlot{"r2-a", true, ""}, wireSlot{"r3-a", false, ""})
+	if _, err := h.RunLifecycleProductTick(); err != nil {
+		t.Fatalf("product tick: %v", err)
+	}
+	if line := waitAuthorityReplica(t, h.Publisher(), "vol-rf3", "r2"); line.Epoch != 2 {
+		t.Fatalf("degraded running primary with a qualified peer: line=%+v want r2@2", line)
+	}
+	if got := unhealthyReplicas(t, svc); len(got) != 0 {
+		t.Fatalf("unhealthy replicas=%v; want none (no explicit unhealthy fact)", got)
+	}
+}

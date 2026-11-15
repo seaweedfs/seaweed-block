@@ -24,8 +24,10 @@ import (
 //     stays moved: the master decides that, not the volume.
 //   - It watches recovery after a primary assignment only: once the
 //     replica has been promotion-ready in that assignment, the watchdog
-//     is disarmed until the next primary epoch (a running primary that
-//     later degrades is not a boot-recovery stall).
+//     is disarmed until the next primary epoch or a new process
+//     incarnation (its state is per process). A running primary that
+//     later degrades is not a boot-recovery stall: it goes through the
+//     normal controller/gate failover.
 //   - role_admission_failed reports the G1 role-admission latch of a
 //     primary-assigned replica, for as long as the latch holds.
 //

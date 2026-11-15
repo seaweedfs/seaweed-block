@@ -140,3 +140,49 @@ func TestRecoveryWatchdog_StatusShowsReasonAndCatchUp(t *testing.T) {
 		t.Fatalf("supporting replica /status: reason=%q catchUp=%+v; want no reason and catch-up elapsed >= 20ms", st.UnhealthyReason, st.CatchUp)
 	}
 }
+
+// Once ready in this assignment, a later not-ready on the same
+// incarnation is a running primary degrading, not a boot-recovery stall:
+// no recovery_timeout, however long it lasts (claude05, 21:24Z).
+func TestRecoveryWatchdog_ReadyThenLaterNotReadyReportsNoTimeout(t *testing.T) {
+	h, clk := watchdogHost(t, 10*time.Second)
+	h.applyFact(selfPrimaryFact(1))
+	clk.advance(time.Second)
+	if r := h.unhealthyReason(true); r != "" {
+		t.Fatalf("ready: %q", r)
+	}
+	clk.advance(time.Hour)
+	if r := h.unhealthyReason(false); r != "" {
+		t.Fatalf("not ready an hour after being ready, same incarnation: %q; want no recovery_timeout", r)
+	}
+	h.applyFact(selfPrimaryFact(1)) // the same assignment replayed: still disarmed
+	clk.advance(time.Hour)
+	if r := h.unhealthyReason(false); r != "" {
+		t.Fatalf("same assignment replayed: %q; want still disarmed", r)
+	}
+}
+
+// A new process incarnation re-arms the watchdog: its state is per
+// process, so a restarted primary that stays not-ready past the timeout
+// reports recovery_timeout even for the same primary epoch.
+func TestRecoveryWatchdog_NewIncarnationRearms(t *testing.T) {
+	old, clk := watchdogHost(t, 10*time.Second)
+	old.applyFact(selfPrimaryFact(1))
+	if r := old.unhealthyReason(true); r != "" {
+		t.Fatalf("old process ready: %q", r)
+	}
+
+	restarted, clk2 := watchdogHost(t, 10*time.Second) // new process, same replica
+	if restarted.incarnation == old.incarnation {
+		t.Fatalf("restarted process kept incarnation %q", old.incarnation)
+	}
+	restarted.applyFact(selfPrimaryFact(1)) // same primary epoch
+	clk2.advance(11 * time.Second)
+	if s := reportSlot(t, restarted); s.Eligible || s.UnhealthyReason != UnhealthyRecoveryTimeout {
+		t.Fatalf("restarted process past timeout: eligible=%t reason=%q; want ineligible, %s", s.Eligible, s.UnhealthyReason, UnhealthyRecoveryTimeout)
+	}
+	clk.advance(time.Hour)
+	if r := old.unhealthyReason(false); r != "" {
+		t.Fatalf("old process stays disarmed: %q", r)
+	}
+}
