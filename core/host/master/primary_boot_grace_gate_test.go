@@ -19,6 +19,7 @@ type rf3Slot struct {
 	incarnation string
 	reachable   bool
 	eligible    bool
+	withdrawn   bool
 	ready       bool
 }
 
@@ -50,6 +51,7 @@ func ingestRF3Incarnations(t *testing.T, h *Host, r1, r2, r3 rf3Slot) {
 				Eligible:        s.slot.eligible,
 				EvidenceScore:   uint64(30 - i),
 				Incarnation:     s.slot.incarnation,
+				Withdrawn:       s.slot.withdrawn,
 			}},
 		}); err != nil {
 			t.Fatalf("ingest %s: %v", s.server, err)

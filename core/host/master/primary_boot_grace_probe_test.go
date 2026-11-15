@@ -169,3 +169,34 @@ func TestBootGrace_ProductionProbeEngineReadyButFrontendUnreadyFailsOver(t *test
 	productionHeldTick(t, h, r2, silent, engineReadyOnly(t, h, silent))
 	expectFailoverToR2(t, h, "engine-ready heartbeat but frontend still unready")
 }
+
+// Counter-controls (review of #130 r5): while the peer query is held,
+// the frontend finishes recovery but the newer heartbeat, though
+// engine-ready, excludes the current primary (ineligible, withdrawn or
+// unreachable). Frontend readiness must not preserve an excluded
+// primary: the failover stands.
+func TestBootGrace_ProductionProbeRecoveredButExcludedFailsOver(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mut  func(*rf3Slot)
+	}{
+		{"ineligible", func(s *rf3Slot) { s.eligible = false }},
+		{"withdrawn", func(s *rf3Slot) { s.withdrawn = true }},
+		{"unreachable", func(s *rf3Slot) { s.reachable = false }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newBootGraceMaster(t, Config{ControllerConfig: authority.TopologyControllerConfig{PrimaryBootGrace: time.Minute}})
+			defer closeTestMaster(t, h)
+			r1, r2 := useProductionProbe(t, h)
+			productionHeldTick(t, h, r2, silent, func() {
+				r1.set(currentStatus(true))
+				time.Sleep(5 * time.Millisecond)
+				excluded := restarting
+				excluded.ready = true
+				tc.mut(&excluded)
+				ingestRF3Incarnations(t, h, excluded, readySlot("r2-a"), silent)
+			})
+			expectFailoverToR2(t, h, "recovered frontend but "+tc.name+" heartbeat")
+		})
+	}
+}
