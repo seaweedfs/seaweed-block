@@ -256,3 +256,38 @@ func TestRecoveryWatchdog_MasterRejectedHeartbeatRecordsNothing(t *testing.T) {
 		t.Fatalf("r1 health events=%v; want only [replica_unhealthy]", got)
 	}
 }
+
+// Review of #134 r2: a heartbeat carrying the same slot twice is
+// refused at the RPC; volume status and the timeline stay unchanged.
+func TestRecoveryWatchdog_MasterDuplicateSlotHeartbeatRefused(t *testing.T) {
+	h, svc := watchdogMaster(t)
+	defer closeTestMaster(t, h)
+	t0 := time.Now()
+	reportR1(t, svc, wireSlot{"r1-b", false, "recovery_timeout"}, t0)
+	before := r1HealthEvents(t, svc)
+
+	slot := func(reason string) *control.HeartbeatSlot {
+		return &control.HeartbeatSlot{
+			VolumeId: "vol-rf3", ReplicaId: "r1", DataAddr: "127.0.0.1:19101", CtrlAddr: "127.0.0.1:19102",
+			Reachable: true, Eligible: reason == "", Incarnation: "r1-b", UnhealthyReason: reason,
+		}
+	}
+	for i, slots := range [][]*control.HeartbeatSlot{
+		{slot(""), slot("recovery_timeout")},                 // conflicting
+		{slot("recovery_timeout"), slot("recovery_timeout")}, // identical
+	} {
+		_, err := svc.ReportHeartbeat(context.Background(), &control.HeartbeatReport{
+			ServerId: "node-a", SentAt: timestamppb.New(t0.Add(time.Duration(i+1) * time.Millisecond)),
+			Reachable: true, Eligible: true, Slots: slots,
+		})
+		if err == nil {
+			t.Fatalf("duplicate-slot heartbeat %d accepted", i)
+		}
+	}
+	if got := r1HealthEvents(t, svc); len(got) != len(before) {
+		t.Fatalf("health events changed by refused heartbeats: %v -> %v", before, got)
+	}
+	if got := unhealthyReplicas(t, svc); got["r1"] != "recovery_timeout" {
+		t.Fatalf("volume status after refusal: %v; want r1=recovery_timeout", got)
+	}
+}
