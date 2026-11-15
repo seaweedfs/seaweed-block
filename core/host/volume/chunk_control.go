@@ -88,7 +88,8 @@ type chunkErrorBody struct {
 
 // The codes the routes add to the catalog's (B9 §2.2 plus the 2026-11-15
 // rulings: awaiting_assignment, reconciling, internal, lsn_behind, and the
-// transport errors bad_request, method_not_allowed, forbidden).
+// transport errors bad_request, method_not_allowed, forbidden; not_found
+// for an unknown /chunk path).
 const (
 	codeVolumeNotServed    = "volume_not_served"
 	codeNotPrimary         = "not_primary"
@@ -104,6 +105,7 @@ const (
 	codeBadRequest         = "bad_request"
 	codeMethodNotAllowed   = "method_not_allowed"
 	codeForbidden          = "forbidden"
+	codeNotFound           = "not_found"
 )
 
 const chunkBodyLimit = 64 << 10
@@ -132,6 +134,11 @@ func (s *StatusServer) chunkMux() http.Handler {
 	mux.HandleFunc("/chunk/snapshots", s.handleChunkSnapshots)
 	mux.HandleFunc("/chunk/snapshot/delete", s.handleChunkSnapshotDelete)
 	mux.HandleFunc("/chunk/detach", s.handleChunkDetach)
+	// Any other /chunk path: a typed JSON 404, like every other /chunk
+	// error, not net/http's plain-text page.
+	mux.HandleFunc("/chunk/", func(w http.ResponseWriter, r *http.Request) {
+		writeChunkErr(w, http.StatusNotFound, codeNotFound, false, "no /chunk route %q", r.URL.Path)
+	})
 	return mux
 }
 
