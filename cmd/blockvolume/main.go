@@ -174,7 +174,8 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.chunk.path, "chunk-path", defaultChunkPath, "walstore-chunk: filer directory holding one directory per volume (HEAD and chunk key bindings)")
 	fs.StringVar(&f.chunk.collection, "chunk-collection", "", "walstore-chunk: collection for chunk needles (empty = filer default / storage rule)")
 	fs.StringVar(&f.chunk.replication, "chunk-replication", "", "walstore-chunk: replication for chunk needles (empty = filer default / storage rule)")
-	fs.DurationVar(&f.chunk.captureInterval, "chunk-capture-interval", 0, "walstore-chunk: publish a cut every interval while healthy; 0 = only on demand")
+	fs.DurationVar(&f.chunk.captureInterval, "chunk-capture-interval", defaultChunkCaptureInterval, "walstore-chunk: automatic cut once this long has passed since the last successful cut; 0 disables the timer")
+	fs.IntVar(&f.chunk.dirtyThreshold, "chunk-dirty-threshold", defaultChunkDirtyThreshold, "walstore-chunk: automatic cut once this many chunks are dirty since the last HEAD; 0 disables the threshold")
 	fs.BoolVar(&f.chunk.controlEndpoint, "chunk-control-endpoint", false, "walstore-chunk: expose the /chunk/* control routes (cut, snapshot, snapshots, snapshot/delete, detach) on the status HTTP listener; off by default; loopback-only like the listener")
 	fs.UintVar(&f.durableBlocks, "durable-blocks", 2048, "number of blocks per volume on first create (ignored when opening existing)")
 	fs.UintVar(&f.durableBlockSize, "durable-blocksize", 4096, "block size in bytes on first create")
@@ -553,6 +554,7 @@ func run(f flags) int {
 			chunk, chunkErr = newChunkWiring(f.chunk)
 			cfg.ChunkCaptureInterval = f.chunk.captureInterval
 			cfg.ChunkHolder = chunkHolder(f)
+			cfg.ChunkDirtyThreshold = f.chunk.dirtyThreshold
 			if chunkErr == nil {
 				cfg.ChunkRemoteFor = chunk.remoteFor
 				cfg.ChunkAttachCheck = chunkAttachCheck(chunk.catalog)
