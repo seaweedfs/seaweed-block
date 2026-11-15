@@ -59,6 +59,7 @@ type Config struct {
 	// sketch §11.L2 requires. Off by default (so T0 tests keep
 	// their documented non-healthy projection).
 	EnableT1Readiness bool
+	WorkspaceLease    bool // Opt-in: require a workspace lease before I/O or capture.
 
 	// ReplicationVolume, when non-nil, receives peer-set updates on
 	// every self-replica AssignmentFact. The Host calls
@@ -142,9 +143,10 @@ type Host struct {
 	wg      sync.WaitGroup
 	started atomic.Bool
 
-	readyOnce            atomic.Bool
-	readyMarkerMu        sync.Mutex
-	supportingReadyMarks map[string]struct{}
+	workspaceLeaseStarted atomic.Bool
+	readyOnce             atomic.Bool
+	readyMarkerMu         sync.Mutex
+	supportingReadyMarks  map[string]struct{}
 
 	localReadinessBlocked atomic.Bool
 	localReadinessReason  atomic.Value // string
@@ -255,6 +257,7 @@ func New(cfg Config) (*Host, error) {
 	// View wires host as the SupersedeProbe so fail-closed kicks
 	// in when master names another replica at a newer lineage.
 	h.view = NewAdapterProjectionView(adpt, cfg.VolumeID, cfg.ReplicaID, h)
+	h.view.workspaceRequired = cfg.WorkspaceLease
 	return h, nil
 }
 
@@ -535,6 +538,7 @@ func (h *Host) Start() context.Context {
 
 // Close stops loops, closes the gRPC connection. Idempotent.
 func (h *Host) Close() error {
+	h.FenceWorkspaceLease()
 	if h.cancel != nil {
 		h.cancel()
 	}

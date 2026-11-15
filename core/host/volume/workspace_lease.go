@@ -48,14 +48,19 @@ func NewWorkspaceLeaseGuard(base frontend.ProjectionView, client WorkspaceLeaseC
 
 func (g *WorkspaceLeaseGuard) Projection() frontend.Projection {
 	p := g.base.Projection()
+	p.Healthy = p.Healthy && g.permits(p)
+	return p
+}
+
+// permits does not call the base view, so the host's shared projection can
+// apply this lease gate without recursion. Never hold mu across RPC/drain.
+func (g *WorkspaceLeaseGuard) permits(p frontend.Projection) bool {
 	g.mu.Lock()
+	defer g.mu.Unlock()
 	if !g.until.IsZero() && !g.now().Before(g.until) {
 		g.fenced = true
 	}
-	allowed := !g.fenced && !g.until.IsZero()
-	g.mu.Unlock()
-	p.Healthy = p.Healthy && allowed && p.VolumeID == g.id.VolumeId && p.ReplicaID == g.id.ReplicaId && p.Epoch == g.id.Epoch
-	return p
+	return !g.fenced && !g.until.IsZero() && p.VolumeID == g.id.VolumeId && p.ReplicaID == g.id.ReplicaId && p.Epoch == g.id.Epoch
 }
 
 // Refresh anchors validity to the request START. Reply latency can only shorten
@@ -71,7 +76,7 @@ func (g *WorkspaceLeaseGuard) Refresh(ctx context.Context) error {
 	fenced, until := g.fenced, g.until
 	g.mu.Unlock()
 	if fenced {
-		return g.drain(g.revoked)
+		return g.drain(ctx, g.revoked)
 	}
 	rpcCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	if !until.IsZero() {
@@ -89,7 +94,7 @@ func (g *WorkspaceLeaseGuard) Refresh(ctx context.Context) error {
 		}
 		g.mu.Unlock()
 		if expired {
-			_ = g.drain(false)
+			_ = g.drain(ctx, false)
 		}
 		return err
 	}
@@ -97,7 +102,7 @@ func (g *WorkspaceLeaseGuard) Refresh(ctx context.Context) error {
 		g.mu.Lock()
 		g.fenced = true
 		g.mu.Unlock()
-		_ = g.drain(false)
+		_ = g.drain(ctx, false)
 		return fmt.Errorf("invalid workspace lease reply")
 	}
 	g.mu.Lock()
@@ -116,12 +121,12 @@ func (g *WorkspaceLeaseGuard) Refresh(ctx context.Context) error {
 	closed := g.fenced
 	g.mu.Unlock()
 	if closed {
-		return g.drain(reply.Revoking)
+		return g.drain(ctx, reply.Revoking)
 	}
 	return nil
 }
 
-func (g *WorkspaceLeaseGuard) drain(ack bool) error {
+func (g *WorkspaceLeaseGuard) drain(parent context.Context, ack bool) error {
 	if !g.stopped {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		gen, err := g.stop(ctx)
@@ -132,10 +137,22 @@ func (g *WorkspaceLeaseGuard) drain(ack bool) error {
 		g.headGen, g.stopped = gen, true
 	}
 	if ack {
+		if err := parent.Err(); err != nil {
+			return err
+		}
+		g.mu.Lock()
+		until := g.until
+		valid := !until.IsZero() && g.now().Before(until)
+		g.mu.Unlock()
+		if !valid {
+			return fmt.Errorf("workspace lease expired before clean ACK")
+		}
 		if g.headGen == 0 {
 			return fmt.Errorf("revocation drained without a committed HEAD gen")
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		leaseCtx, leaseCancel := context.WithDeadline(parent, until)
+		defer leaseCancel()
+		ctx, cancel := context.WithTimeout(leaseCtx, 2*time.Second)
 		defer cancel()
 		_, err := g.client.AckWorkspaceRevoked(ctx, &control.WorkspaceRevocationAck{Identity: &g.id, HeadGen: g.headGen})
 		return err
@@ -156,6 +173,9 @@ func (g *WorkspaceLeaseGuard) Run(ctx context.Context) error {
 		}
 		g.mu.Lock()
 		delay := g.until.Sub(g.now()) / 3
+		if g.until.IsZero() {
+			delay = time.Second
+		}
 		g.mu.Unlock()
 		if delay < 50*time.Millisecond {
 			delay = 50 * time.Millisecond
@@ -169,7 +189,7 @@ func (g *WorkspaceLeaseGuard) Run(ctx context.Context) error {
 			g.mu.Lock()
 			g.fenced = true
 			g.mu.Unlock()
-			err := g.drain(false)
+			err := g.drain(ctx, false)
 			g.operation.Unlock()
 			return err
 		case <-time.After(delay):
