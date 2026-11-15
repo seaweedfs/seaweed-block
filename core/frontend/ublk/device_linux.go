@@ -171,12 +171,18 @@ func (d *Device) teardown(added bool) error {
 	for i, q := range d.queues {
 		qs[i] = q
 	}
-	note(settleQueues(qs, queueStopTimeout))
+	settleErr := settleQueues(qs, queueStopTimeout)
+	note(settleErr)
 	if d.charFD >= 0 {
 		note(unix.Close(d.charFD))
 		d.charFD = -1
 	}
-	if d.path != "" {
+	if d.path != "" && settleErr != nil {
+		// A queue's mappings are kept (it may still run), which holds the
+		// char device open: DEL_DEV would wait for its release forever.
+		// The device stays (it fails I/O); the error above reports it.
+		note(fmt.Errorf("ublk: device %d left in place: a queue did not stop", d.devID))
+	} else if d.path != "" {
 		if _, err := d.ctrlCommand(uCmdDelDev, d.devID, nil, 0); err != nil {
 			note(fmt.Errorf("ublk: delete device: %w", err))
 		}

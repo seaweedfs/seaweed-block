@@ -1,5 +1,7 @@
 package ublk
 
+import "unsafe"
+
 // Kernel ABI of the ublk driver (include/uapi/linux/ublk_cmd.h). The
 // struct layouts and ioctl encodings are checked by uapi_test.go.
 
@@ -112,6 +114,12 @@ type params struct {
 	Len   uint32
 	Types uint32
 	Basic paramBasic
+}
+
+// bytesOf views a fixed-size struct as bytes (an inline command or a
+// command buffer the kernel reads or fills).
+func bytesOf[T any](v *T) []byte {
+	return unsafe.Slice((*byte)(unsafe.Pointer(v)), unsafe.Sizeof(*v))
 }
 
 // iowr and ior encode a ublk command number like the kernel's _IOWR and

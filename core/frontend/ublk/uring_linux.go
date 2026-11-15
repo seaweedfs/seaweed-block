@@ -142,26 +142,41 @@ func (r *uring) prepare(op uint8, fd int, cmdOp uint32, cmd []byte, userData uin
 	return nil
 }
 
-// submitAndWait publishes the prepared SQEs and waits for at least
-// minComplete completions.
+// submitAndWait publishes the prepared SQEs, makes sure the kernel has
+// consumed every one of them (a short io_uring_enter leaves the rest in
+// the ring: they are offered again), then waits for at least minComplete
+// completions. A call that consumes nothing is an error: the unsubmitted
+// SQEs would otherwise be reported as submitted.
 func (r *uring) submitAndWait(minComplete uint32) error {
-	toSubmit := r.pending
-	atomic.StoreUint32(r.sqTail, *r.sqTail+toSubmit)
+	atomic.StoreUint32(r.sqTail, *r.sqTail+r.pending)
 	r.pending = 0
-	var flags uintptr
-	if minComplete > 0 {
-		flags = enterGetEvents
+	for {
+		outstanding := atomic.LoadUint32(r.sqTail) - atomic.LoadUint32(r.sqHead)
+		if outstanding == 0 {
+			break
+		}
+		n, errno := r.enter(r.fd, outstanding, 0, 0)
+		switch {
+		case errno == unix.EINTR:
+			continue
+		case errno != 0:
+			return fmt.Errorf("ublk: io_uring_enter: %w", errno)
+		case n == 0 && atomic.LoadUint32(r.sqTail)-atomic.LoadUint32(r.sqHead) == outstanding:
+			return fmt.Errorf("ublk: io_uring_enter consumed none of %d SQEs", outstanding)
+		}
+	}
+	if minComplete == 0 {
+		return nil
 	}
 	for {
-		_, errno := r.enter(r.fd, toSubmit, minComplete, flags)
+		_, errno := r.enter(r.fd, 0, minComplete, enterGetEvents)
 		switch errno {
 		case 0:
 			return nil
 		case unix.EINTR:
-			toSubmit = 0 // the kernel consumed the SQEs before the interrupt
 			continue
 		default:
-			return fmt.Errorf("ublk: io_uring_enter: %w", errno)
+			return fmt.Errorf("ublk: io_uring_enter wait: %w", errno)
 		}
 	}
 }
@@ -200,9 +215,4 @@ func (r *uring) close() error {
 		return err
 	}
 	return nil
-}
-
-// bytesOf views a fixed-size struct as bytes for an inline command.
-func bytesOf[T any](v *T) []byte {
-	return unsafe.Slice((*byte)(unsafe.Pointer(v)), unsafe.Sizeof(*v))
 }
