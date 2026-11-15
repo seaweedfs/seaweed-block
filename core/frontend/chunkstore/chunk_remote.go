@@ -220,6 +220,8 @@ type intentDoc struct {
 	Holder    string   `json:"holder"`
 	Keys      []string `json:"keys"`
 	CreatedNs int64    `json:"created_ns"`
+	// DeadlineNs: a copy intent's publication deadline (0: a capture intent).
+	DeadlineNs int64 `json:"deadline_ns,omitempty"`
 }
 
 func (r *ChunkRemote) intentDir() string { return path.Join(r.root, intentsDir) }
@@ -244,7 +246,7 @@ func putIntent(ctx context.Context, f Filer, root string, in storage.ChunkIntent
 		return "", err
 	}
 	now := time.Now()
-	body, err := json.Marshal(intentDoc{Format: intentFormat, Gen: in.Gen, Epoch: in.Epoch, Holder: in.Holder, Keys: in.Keys, CreatedNs: now.UnixNano()})
+	body, err := json.Marshal(intentDoc{Format: intentFormat, Gen: in.Gen, Epoch: in.Epoch, Holder: in.Holder, Keys: in.Keys, CreatedNs: now.UnixNano(), DeadlineNs: in.DeadlineNs})
 	if err != nil {
 		return "", err
 	}
@@ -323,7 +325,7 @@ func decodeIntent(p string, e *filerpb.Entry) (storage.ChunkIntent, error) {
 		return fail("name or extended gen/epoch/holder disagree with the document")
 	}
 	return storage.ChunkIntent{ID: e.GetName(), Gen: doc.Gen, Epoch: doc.Epoch, Holder: doc.Holder,
-		Keys: append([]string(nil), doc.Keys...), CreatedNs: doc.CreatedNs}, nil
+		Keys: append([]string(nil), doc.Keys...), CreatedNs: doc.CreatedNs, DeadlineNs: doc.DeadlineNs}, nil
 }
 
 type headDoc struct {
@@ -479,6 +481,11 @@ func decodeHeadDoc(p string, content []byte) (storage.ChunkHead, error) {
 	case "", storage.ChunkHeadActive:
 		if doc.DetachedBy != nil {
 			return fail("detachedBy on a HEAD that is not detached")
+		}
+	case storage.ChunkHeadAborted:
+		// A sweep's tombstone over a dead fork's HEAD (gen 1, no chunks).
+		if doc.DetachedBy != nil || len(doc.Chunks) != 0 {
+			return fail("an aborted HEAD with content")
 		}
 	case storage.ChunkHeadDetached:
 		d := doc.DetachedBy

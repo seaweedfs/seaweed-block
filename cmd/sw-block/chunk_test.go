@@ -87,14 +87,57 @@ func TestOpsChunk_HTTPCommandsSendSpecRequests(t *testing.T) {
 func TestOpsChunk_HTTPFailureIsTyped(t *testing.T) {
 	srv, _ := chunkServer(t, 409, `{"code":"not_primary","message":"volume v1 is not a healthy primary here","retryable":false}`)
 	code, out, errs := runChunk("cut", "--volume", "v1", "--status-addr", srv.URL)
-	if code != chunkExitFailed || out != "" || !strings.Contains(errs, "not_primary: volume v1 is not a healthy primary here (retryable=false)") {
-		t.Fatalf("refused cut: %d %q %q", code, out, errs)
+	if e := chunkErrorOut(t, out); code != chunkExitFailed || e.Code != "not_primary" || e.Message != "volume v1 is not a healthy primary here" || e.Retryable ||
+		!strings.Contains(errs, "not_primary: volume v1 is not a healthy primary here") {
+		t.Fatalf("refused cut: %d %q %q; want the route's error body on stdout", code, out, errs)
 	}
-	if code, _, _ := runChunk("cut", "--volume", "v1"); code != 2 {
-		t.Fatalf("cut without --status-addr: exit %d, want 2", code)
+	if code, out, _ := runChunk("cut", "--volume", "v1"); code != 2 || chunkErrorOut(t, out).Code != "bad_request" {
+		t.Fatalf("cut without --status-addr: exit %d %q, want 2 and bad_request", code, out)
 	}
-	if code, _, _ := runChunk("snapshot", "--volume", "v1", "--status-addr", srv.URL, "--name", "s1", "--label", "nokey"); code != 2 {
-		t.Fatalf("a label without '=': exit %d, want 2", code)
+	if code, out, _ := runChunk("snapshot", "--volume", "v1", "--status-addr", srv.URL, "--name", "s1", "--label", "nokey"); code != 2 || chunkErrorOut(t, out).Code != "bad_request" {
+		t.Fatalf("a label without '=': exit %d %q, want 2 and bad_request", code, out)
+	}
+}
+
+// chunkErrorOut decodes the CLI's error body from stdout.
+func chunkErrorOut(t *testing.T, out string) chunkErrBody {
+	t.Helper()
+	var e chunkErrBody
+	if err := json.Unmarshal([]byte(out), &e); err != nil || e.Code == "" {
+		t.Fatalf("stdout is not an error body: %q (%v)", out, err)
+	}
+	if strings.Contains(e.Message, e.Code) {
+		t.Fatalf("the error message repeats its code: %+v", e)
+	}
+	return e
+}
+
+// Every failure is the error body on stdout and a non-zero exit (appendix
+// 14:30Z): usage, an unreachable blockvolume, a catalog refusal.
+func TestOpsChunk_ErrorsAreJSONOnStdout(t *testing.T) {
+	if code, out, _ := runChunk("nope"); code != 2 || chunkErrorOut(t, out).Code != "bad_request" {
+		t.Fatalf("unknown subcommand: exit %d %q", code, out)
+	}
+	if code, out, _ := runChunk("cut", "--bogus"); code != 2 || chunkErrorOut(t, out).Code != "bad_request" {
+		t.Fatalf("unknown flag: exit %d %q", code, out)
+	}
+	dead := httptest.NewServer(http.NotFoundHandler())
+	addr := dead.URL
+	dead.Close()
+	if code, out, _ := runChunk("cut", "--volume", "v1", "--status-addr", addr); code != chunkExitFailed {
+		t.Fatalf("unreachable blockvolume: exit %d %q", code, out)
+	} else if e := chunkErrorOut(t, out); e.Code != "remote_unavailable" || !e.Retryable {
+		t.Fatalf("unreachable blockvolume: %+v, want remote_unavailable and retryable", e)
+	}
+
+	mem := chunkstore.NewMemFiler()
+	prev := dialChunkFiler
+	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return mem, func() error { return nil }, nil }
+	t.Cleanup(func() { dialChunkFiler = prev })
+	if code, out, _ := runChunk("fork", "--chunk-filer", "f:1", "--source", "v1", "--snapshot", "s9", "--target", "v2", "--request-id", "r"); code != chunkExitFailed {
+		t.Fatalf("fork of a missing snapshot: exit %d %q", code, out)
+	} else if e := chunkErrorOut(t, out); e.Code != "snapshot_not_found" || e.Retryable {
+		t.Fatalf("fork of a missing snapshot: %+v", e)
 	}
 }
 
@@ -135,10 +178,11 @@ func TestOpsChunk_FilerCommands(t *testing.T) {
 	if code, _, errs := runChunk("fork", "--chunk-filer", "filer:18888", "--source", "v1", "--snapshot", "s1", "--target", "v2", "--request-id", "other"); code != chunkExitFailed || !strings.Contains(errs, "target_exists") {
 		t.Fatalf("fork with another request id: %d %q", code, errs)
 	}
-	for i := 0; i < 2; i++ {
+	// The first delete frees the name; a repeated one finds it absent.
+	for i, want := range []string{`"state":"deleting"`, `"state":"absent"`} {
 		code, out, errs = runChunk("snapshot-delete", "--volume", "v1", "--name", "s1", "--chunk-filer", "filer:18888")
-		if code != 0 || !strings.Contains(out, `"state":"deleting"`) {
-			t.Fatalf("snapshot-delete #%d: %d %q %q", i+1, code, out, errs)
+		if code != 0 || !strings.Contains(out, want) {
+			t.Fatalf("snapshot-delete #%d: %d %q %q, want %s", i+1, code, out, errs, want)
 		}
 	}
 	if code, _, _ := runChunk("snapshots", "--volume", "v1"); code != 2 {

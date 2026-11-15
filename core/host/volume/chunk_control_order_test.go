@@ -86,3 +86,13 @@ func TestChunkControl_CutToUnwrittenMinLSNPublishesNothing(t *testing.T) {
 		t.Fatalf("cut to the last written LSN: %+v %v", r, err)
 	}
 }
+
+// A snapshot request with invalid labels is refused with invalid_label before
+// any cut.
+func TestChunkControl_InvalidLabelRefusedBeforeCutting(t *testing.T) {
+	fp, ctl := adapterFixture(t)
+	_, err := ctl.Snapshot(context.Background(), "v1", ChunkSnapshotRequest{Name: "s1", RequestID: "r", Labels: map[string]string{"Bad Key": "x"}})
+	if chunkstore.CodeOf(err) != chunkstore.CodeInvalidLabel || fp.cuts != 0 {
+		t.Fatalf("snapshot with an invalid label: %v (cuts %d); want invalid_label without a cut", err, fp.cuts)
+	}
+}

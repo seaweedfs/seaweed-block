@@ -45,6 +45,10 @@ const (
 
 	volumeName = "VOLUME"
 	snapsDir   = "snaps"
+	// snapNamesDir holds one name record per snapshot name: the request and
+	// the attempt that own the name (W5 ruling, 2026-11-15 17:30Z).
+	snapNamesDir = "snapnames"
+	kindSnapName = "chunksnapname"
 
 	extReq           = "swb.req"
 	extAttempt       = "swb.attempt" // the id of the intent of the attempt that wrote the entry
@@ -93,6 +97,7 @@ const (
 	CodeDeadlineExceeded  = "deadline_exceeded"
 	CodeRemoteUnavailable = "remote_unavailable"
 	CodeOutcomeUnknown    = "outcome_unknown"
+	CodeInvalidLabel      = "invalid_label"
 )
 
 // CatalogError is a typed control-plane failure.
@@ -111,6 +116,15 @@ func (e *CatalogError) Error() string {
 }
 
 func (e *CatalogError) Unwrap() error { return e.Err }
+
+// Detail is the error without its code: the message, and the cause if any
+// (an error body carries the code in its own field).
+func (e *CatalogError) Detail() string {
+	if e.Err != nil {
+		return fmt.Sprintf("%s: %v", e.Message, e.Err)
+	}
+	return e.Message
+}
 
 // CodeOf returns the control-plane code of err, or "" when it has none.
 func CodeOf(err error) string {
@@ -298,7 +312,7 @@ func CheckSnapshotName(name string) error {
 		return catErr(CodeInvalidName, false, nil, "snapshot name %q: 1-%d characters, not starting with '.'", name, maxSnapName)
 	}
 	switch name {
-	case headName, volumeName, keysDir, snapsDir, intentsDir:
+	case headName, volumeName, keysDir, snapsDir, snapNamesDir, intentsDir:
 		return catErr(CodeInvalidName, false, nil, "snapshot name %q is reserved", name)
 	}
 	for _, r := range name {
@@ -311,15 +325,15 @@ func CheckSnapshotName(name string) error {
 
 func checkLabels(labels map[string]string) error {
 	if len(labels) > maxLabels {
-		return catErr(CodeInvalidName, false, nil, "%d labels, at most %d", len(labels), maxLabels)
+		return catErr(CodeInvalidLabel, false, nil, "%d labels, at most %d", len(labels), maxLabels)
 	}
 	for k, v := range labels {
 		if k == "" || len(k) > maxLabelKey || len(v) > maxLabelValue {
-			return catErr(CodeInvalidName, false, nil, "label %q: key 1-%d characters, value at most %d bytes", k, maxLabelKey, maxLabelValue)
+			return catErr(CodeInvalidLabel, false, nil, "label %q: key 1-%d characters, value at most %d bytes", k, maxLabelKey, maxLabelValue)
 		}
 		for _, r := range k {
 			if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-') {
-				return catErr(CodeInvalidName, false, nil, "label key %q: only [a-z0-9._-]", k)
+				return catErr(CodeInvalidLabel, false, nil, "label key %q: only [a-z0-9._-]", k)
 			}
 		}
 	}
@@ -400,6 +414,45 @@ func (c *Catalog) headExists(ctx context.Context, root string) (bool, error) {
 	return true, nil
 }
 
+// ensureInitialHead creates vol's initial empty HEAD unless a HEAD exists.
+func (c *Catalog) ensureInitialHead(ctx context.Context, vol, root string) error {
+	has, err := c.headExists(ctx, root)
+	if err != nil {
+		return remoteErr(err, "read HEAD of %s", vol)
+	}
+	if has {
+		return nil
+	}
+	he, err := headEntry(storage.ChunkHead{Gen: 1, Chunks: map[uint64]storage.ChunkRef{}, State: storage.ChunkHeadActive})
+	if err != nil {
+		return err
+	}
+	if err := c.f.CreateEntry(ctx, root, he, true); err != nil && !errors.Is(err, ErrExists) {
+		return remoteErr(err, "create the initial HEAD of %s", vol)
+	}
+	return nil
+}
+
+// ReadHead returns vol's HEAD, and false when no HEAD was ever published.
+func (c *Catalog) ReadHead(ctx context.Context, vol string) (storage.ChunkHead, bool, error) {
+	root, err := c.volRoot(vol)
+	if err != nil {
+		return storage.ChunkHead{}, false, err
+	}
+	e, err := c.f.LookupEntry(ctx, root, headName)
+	if errors.Is(err, ErrNotFound) {
+		return storage.ChunkHead{}, false, nil
+	}
+	if err != nil {
+		return storage.ChunkHead{}, false, remoteErr(err, "read HEAD of %s", vol)
+	}
+	h, err := decodeHead(path.Join(root, headName), e)
+	if err != nil {
+		return storage.ChunkHead{}, false, err
+	}
+	return h, true, nil
+}
+
 // EnsureVolume applies the attach rules of spec §4.2 for a volume served
 // with geometry g: it creates a missing VOLUME entry (origin create), and
 // refuses with geometry_mismatch when VOLUME disagrees with g, or with
@@ -432,34 +485,135 @@ func (c *Catalog) EnsureVolume(ctx context.Context, vol string, g Geometry) (Vol
 	if v.Geometry != g {
 		return VolumeInfo{}, catErr(CodeGeometryMismatch, false, nil, "volume %s: VOLUME geometry %+v, this host serves %+v", vol, v.Geometry, g)
 	}
-	if v.Origin == OriginFork {
-		has, err := c.headExists(ctx, root)
-		if err != nil {
-			return VolumeInfo{}, remoteErr(err, "read HEAD of %s", vol)
+	if v.Origin == OriginCreate {
+		// A created volume gets its initial HEAD with VOLUME (integration
+		// ruling F1): gen 1, epoch 0, no holder, remote_lsn 0, no chunks
+		// (all zero). An exclusive create: an existing HEAD (a volume made
+		// before VOLUME entries, or an earlier attach) is kept.
+		if err := c.ensureInitialHead(ctx, vol, root); err != nil {
+			return VolumeInfo{}, err
 		}
-		if !has {
+	}
+	if v.Origin == OriginFork {
+		// One read of HEAD decides both: absent and aborted never attach.
+		h, has, err := c.ReadHead(ctx, vol)
+		switch {
+		case err != nil:
+			return VolumeInfo{}, err
+		case !has:
 			return VolumeInfo{}, catErr(CodeForkIncomplete, false, nil, "volume %s is a fork whose HEAD is not written yet", vol)
+		case h.State == storage.ChunkHeadAborted:
+			return VolumeInfo{}, catErr(CodeForkIncomplete, false, nil, "volume %s: its fork was aborted (HEAD is a tombstone); it never attaches", vol)
 		}
 	}
 	return v, nil
 }
 
 // ---- snapshots ----
+//
+// A snapshot name is owned by a name record snapnames/<name> {request,
+// attempt}, created exclusively; the snapshot itself is published by an
+// exclusive create at the attempt's own path snaps/<name>/<attempt>, which
+// is never removed (W5 ruling, 2026-11-15 17:30Z). A GC sweep settles a
+// dead attempt by claiming its path with an aborted tombstone; a retry of
+// the same request publishes to the same attempt path. DeleteSnapshot
+// marks the attempt deleting and removes the name record, freeing the name.
 
-func (c *Catalog) readSnap(ctx context.Context, vol, name string) (SnapshotInfo, string, *filerpb.Entry, error) {
+// SnapAborted marks an attempt path a GC sweep claimed for a dead attempt.
+const SnapAborted = "aborted"
+
+type nameRecord struct {
+	Format    int    `json:"format"`
+	VolumeID  string `json:"volume_id"`
+	Name      string `json:"name"`
+	RequestID string `json:"request_id"`
+	Attempt   string `json:"attempt"`
+	CreatedNs int64  `json:"created_ns"`
+}
+
+func nameRecordEntry(rec nameRecord) (*filerpb.Entry, error) {
+	body, err := json.Marshal(rec)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().Unix()
+	return &filerpb.Entry{
+		Name:       rec.Name,
+		Attributes: &filerpb.FuseAttributes{FileSize: uint64(len(body)), Mtime: now, Crtime: now, FileMode: 0o644, Mime: "application/json"},
+		Extended:   map[string][]byte{extKind: []byte(kindSnapName), extReq: []byte(rec.RequestID), extAttempt: []byte(rec.Attempt)},
+		Content:    body,
+	}, nil
+}
+
+func decodeNameRecord(p string, e *filerpb.Entry) (nameRecord, error) {
+	var rec nameRecord
+	if k := string(e.Extended[extKind]); k != kindSnapName {
+		return rec, fmt.Errorf("chunkstore: snapshot name %s: kind %q, want %q", p, k, kindSnapName)
+	}
+	if err := json.Unmarshal(e.GetContent(), &rec); err != nil {
+		return rec, fmt.Errorf("chunkstore: snapshot name %s: decode: %v", p, err)
+	}
+	if rec.Format != snapFormat || rec.Attempt == "" || rec.RequestID == "" ||
+		string(e.Extended[extAttempt]) != rec.Attempt || string(e.Extended[extReq]) != rec.RequestID {
+		return rec, fmt.Errorf("chunkstore: snapshot name %s: malformed record", p)
+	}
+	return rec, nil
+}
+
+// snapRef is a name resolved through its record: the record, and the
+// attempt's entry when it exists (nil: the attempt has not published).
+type snapRef struct {
+	rec   nameRecord
+	entry *filerpb.Entry
+	info  SnapshotInfo
+}
+
+// resolveSnap reads snapnames/<name> and the attempt it names. ok is false
+// when no record holds the name.
+func (c *Catalog) resolveSnap(ctx context.Context, vol, name string) (snapRef, bool, error) {
 	root, err := c.volRoot(vol)
 	if err != nil {
-		return SnapshotInfo{}, "", nil, err
+		return snapRef{}, false, err
 	}
-	e, err := c.f.LookupEntry(ctx, path.Join(root, snapsDir), name)
+	re, err := c.f.LookupEntry(ctx, path.Join(root, snapNamesDir), name)
 	if errors.Is(err, ErrNotFound) {
-		return SnapshotInfo{}, "", nil, catErr(CodeSnapshotNotFound, false, nil, "snapshot %s/%s", vol, name)
+		return snapRef{}, false, nil
 	}
 	if err != nil {
-		return SnapshotInfo{}, "", nil, remoteErr(err, "read snapshot %s/%s", vol, name)
+		return snapRef{}, false, remoteErr(err, "read snapshot name %s/%s", vol, name)
 	}
-	info, req, err := decodeSnap(path.Join(root, snapsDir, name), e)
-	return info, req, e, err
+	rec, err := decodeNameRecord(path.Join(root, snapNamesDir, name), re)
+	if err != nil {
+		return snapRef{}, false, err
+	}
+	ref := snapRef{rec: rec}
+	dir := path.Join(root, snapsDir, name)
+	e, err := c.f.LookupEntry(ctx, dir, rec.Attempt)
+	switch {
+	case errors.Is(err, ErrNotFound):
+		return ref, true, nil // the attempt has not published (in flight, or dead)
+	case err != nil:
+		return snapRef{}, false, remoteErr(err, "read snapshot %s/%s", vol, name)
+	}
+	info, _, err := decodeSnap(path.Join(dir, rec.Attempt), e)
+	if err != nil {
+		return snapRef{}, false, err
+	}
+	ref.entry, ref.info = e, info
+	return ref, true, nil
+}
+
+// readSnap returns the published, not aborted snapshot named name, or
+// snapshot_not_found.
+func (c *Catalog) readSnap(ctx context.Context, vol, name string) (SnapshotInfo, error) {
+	ref, ok, err := c.resolveSnap(ctx, vol, name)
+	if err != nil {
+		return SnapshotInfo{}, err
+	}
+	if !ok || ref.entry == nil || ref.info.State == SnapAborted {
+		return SnapshotInfo{}, catErr(CodeSnapshotNotFound, false, nil, "snapshot %s/%s", vol, name)
+	}
+	return ref.info, nil
 }
 
 func decodeSnap(p string, e *filerpb.Entry) (SnapshotInfo, string, error) {
@@ -478,6 +632,9 @@ func decodeSnap(p string, e *filerpb.Entry) (SnapshotInfo, string, error) {
 	}
 	if doc.Format != snapFormat {
 		return fail("format %d not supported", doc.Format)
+	}
+	if string(e.Extended[extSnapState]) == SnapAborted {
+		return SnapshotInfo{VolumeID: doc.VolumeID, Name: doc.Name, CreatedNs: doc.CreatedNs, State: SnapAborted}, "", nil
 	}
 	head, err := decodeHeadDoc(p+"#head", doc.Head)
 	if err != nil {
@@ -498,6 +655,57 @@ func decodeSnap(p string, e *filerpb.Entry) (SnapshotInfo, string, error) {
 	}, doc.RequestID, nil
 }
 
+// abortedSnapEntry is the tombstone a sweep writes at an attempt path.
+func (c *Catalog) abortedSnapEntry(vol, name, attempt string) (*filerpb.Entry, error) {
+	body, err := json.Marshal(snapDoc{Format: snapFormat, VolumeID: vol, Name: name, CreatedNs: c.now().UnixNano()})
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().Unix()
+	return &filerpb.Entry{
+		Name:       attempt,
+		Attributes: &filerpb.FuseAttributes{FileSize: uint64(len(body)), Mtime: now, Crtime: now, FileMode: 0o644, Mime: "application/json"},
+		Extended:   map[string][]byte{extKind: []byte(kindChunkSnap), extSnapState: []byte(SnapAborted)},
+		Content:    body,
+	}, nil
+}
+
+// AbortSnapshot settles a dead snapshot attempt for a GC sweep (W5 ruling,
+// 2026-11-15 17:30Z): it claims the attempt path snaps/<name>/<attempt>
+// with an exclusive create of an aborted tombstone. claimed is true when
+// the path holds a tombstone (this one or an earlier one): the attempt can
+// never publish. false: the attempt published, and its keys are reachable
+// through that snapshot. Either way its copy intent can then be deleted.
+// The attempt is the one in the intent's holder "snapshot:<vol>/<name>/<attempt>".
+func (c *Catalog) AbortSnapshot(ctx context.Context, vol, name, attempt string) (claimed bool, err error) {
+	root, err := c.volRoot(vol)
+	if err != nil {
+		return false, err
+	}
+	if err := CheckSnapshotName(name); err != nil {
+		return false, err
+	}
+	if !storage.ValidChunkIntentID(attempt) {
+		return false, catErr(CodeInvalidName, false, nil, "attempt %q", attempt)
+	}
+	e, err := c.abortedSnapEntry(vol, name, attempt)
+	if err != nil {
+		return false, err
+	}
+	dir := path.Join(root, snapsDir, name)
+	switch err := c.f.CreateEntry(ctx, dir, e, true); {
+	case err == nil:
+		return true, nil
+	case !errors.Is(err, ErrExists):
+		return false, remoteErr(err, "aborted tombstone %s/%s/%s", vol, name, attempt)
+	}
+	got, err := c.f.LookupEntry(ctx, dir, attempt)
+	if err != nil {
+		return false, remoteErr(err, "read %s/%s/%s", vol, name, attempt)
+	}
+	return string(got.Extended[extSnapState]) == SnapAborted, nil
+}
+
 // dropIntent deletes one attempt's own intent, once that attempt's create
 // is confirmed or can never apply. It never touches another attempt's
 // intent, even under the same operation: an earlier attempt's create may
@@ -515,18 +723,27 @@ const (
 	createUnsettled                      // no answer: it may still apply, even later
 )
 
+// publishCtx bounds a publishing create by the operation's deadline
+// (catalog clock), so the RPC cannot outlive the deadline its intent
+// records (W5 ruling, 2026-11-15 17:06Z).
+func (c *Catalog) publishCtx(ctx context.Context, deadline time.Time) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, deadline.Sub(c.now()))
+}
+
 // createResolved makes this attempt's exclusive create of e under dir and
 // returns its outcome and the entry now under the name (nil if unread).
+// The create runs under publish (bounded by the operation's deadline); the
+// re-read that settles an ambiguous failure under ctx.
 // attempt, when not empty, is stored in e as extAttempt; a re-read that
 // finds it confirms this attempt's create. Only the filer's own "already
 // exists" answer settles a failure as refused; any other failure leaves
 // the create unsettled, whatever entry the re-read finds (that entry may
 // be another attempt's, and this one may still land after it is gone).
-func (c *Catalog) createResolved(ctx context.Context, dir string, e *filerpb.Entry, attempt string) (createOutcome, *filerpb.Entry, error) {
+func (c *Catalog) createResolved(ctx, publish context.Context, dir string, e *filerpb.Entry, attempt string) (createOutcome, *filerpb.Entry, error) {
 	if attempt != "" {
 		e.Extended[extAttempt] = []byte(attempt)
 	}
-	err := c.f.CreateEntry(ctx, dir, e, true)
+	err := c.f.CreateEntry(publish, dir, e, true)
 	if err == nil {
 		return createdNow, e, nil
 	}
@@ -561,10 +778,13 @@ func headKeys(h storage.ChunkHead) []string {
 }
 
 // CreateSnapshot stores head, which must be the HEAD a cut of vol installed
-// (ChunkCutResult.Head), as snaps/<req.Name>. A retry with the same
+// (ChunkCutResult.Head), as the snapshot req.Name. A retry with the same
 // RequestID returns the existing snapshot (Replayed); another RequestID
-// gets snapshot_exists. An intent names the snapshot's keys from before
-// the entry is written until after.
+// gets snapshot_exists. The name is taken with an exclusive name record
+// {request, attempt}; an intent names the snapshot's keys and the attempt
+// (holder "snapshot:<vol>/<name>/<attempt>") before the exclusive create at
+// the attempt path snaps/<name>/<attempt>, which only that request's
+// attempts ever write.
 func (c *Catalog) CreateSnapshot(ctx context.Context, vol string, req SnapshotRequest, head storage.ChunkHead) (SnapshotInfo, error) {
 	readAt := req.SourceReadAt
 	if readAt.IsZero() {
@@ -574,27 +794,15 @@ func (c *Catalog) CreateSnapshot(ctx context.Context, vol string, req SnapshotRe
 	if err != nil {
 		return SnapshotInfo{}, err
 	}
-	if err := CheckSnapshotName(req.Name); err != nil {
-		return SnapshotInfo{}, err
-	}
-	if req.RequestID == "" {
-		return SnapshotInfo{}, catErr(CodeInvalidName, false, nil, "snapshot %s/%s: a request id is required", vol, req.Name)
-	}
-	if err := checkLabels(req.Labels); err != nil {
-		return SnapshotInfo{}, err
+	if existing, replayed, err := c.SnapshotReplay(ctx, vol, req); err != nil || replayed {
+		return existing, err
 	}
 	consistency := req.Consistency
 	if consistency == "" {
 		consistency = "crash"
 	}
-	if consistency != "crash" && consistency != "app" {
-		return SnapshotInfo{}, catErr(CodeInvalidName, false, nil, "consistency %q: crash or app", consistency)
-	}
 	if head.Gen == 0 {
 		return SnapshotInfo{}, catErr(CodeNotChunkVolume, false, nil, "volume %s has no published HEAD to snapshot", vol)
-	}
-	if existing, replayed, err := c.SnapshotReplay(ctx, vol, req); err != nil || replayed {
-		return existing, err
 	}
 	v, ok, err := c.ReadVolume(ctx, vol)
 	if err != nil {
@@ -602,6 +810,12 @@ func (c *Catalog) CreateSnapshot(ctx context.Context, vol string, req SnapshotRe
 	}
 	if !ok {
 		return SnapshotInfo{}, catErr(CodeNotChunkVolume, false, nil, "volume %s has no VOLUME entry", vol)
+	}
+
+	// Take the name: this request's record, or an earlier attempt's of it.
+	attempt, err := c.claimName(ctx, vol, root, req, head.Gen)
+	if err != nil {
+		return SnapshotInfo{}, err
 	}
 
 	headEnt, err := headEntry(head)
@@ -617,7 +831,7 @@ func (c *Catalog) CreateSnapshot(ctx context.Context, vol string, req SnapshotRe
 	}
 	now := time.Now().Unix()
 	e := &filerpb.Entry{
-		Name:       req.Name,
+		Name:       attempt,
 		Attributes: &filerpb.FuseAttributes{FileSize: uint64(len(body)), Mtime: now, Crtime: now, FileMode: 0o644, Mime: "application/json"},
 		Extended: map[string][]byte{
 			extKind:      []byte(kindChunkSnap),
@@ -630,49 +844,85 @@ func (c *Catalog) CreateSnapshot(ctx context.Context, vol string, req SnapshotRe
 		Content: body,
 	}
 
-	tag := "snapshot:" + vol + "/" + req.Name + "/" + req.RequestID
-	id, err := putIntent(ctx, c.f, root, storage.ChunkIntent{Gen: head.Gen, Epoch: head.Epoch, Holder: tag, Keys: headKeys(head)})
+	tag := "snapshot:" + vol + "/" + req.Name + "/" + attempt
+	deadline := readAt.Add(c.deadline())
+	id, err := putIntent(ctx, c.f, root, storage.ChunkIntent{Gen: head.Gen, Epoch: head.Epoch, Holder: tag, Keys: headKeys(head),
+		DeadlineNs: deadline.UnixNano()})
 	if err != nil {
 		return SnapshotInfo{}, remoteErr(err, "intent for snapshot %s/%s", vol, req.Name)
 	}
-	if c.now().Sub(readAt) > c.deadline() {
+	if !c.now().Before(deadline) { // re-checked immediately before publishing
 		// Clean abort: the snapshot entry was never sent.
 		c.dropIntent(ctx, root, id)
 		return SnapshotInfo{}, catErr(CodeDeadlineExceeded, true, nil, "snapshot %s/%s: %v since the cut, over the %v deadline; nothing written", vol, req.Name, c.now().Sub(readAt), c.deadline())
 	}
-	dir := path.Join(root, snapsDir)
-	outcome, got, cerr := c.createResolved(ctx, dir, e, id)
-	if outcome != createUnsettled {
-		c.dropIntent(ctx, root, id) // confirmed, or refused for good
-	}
-	if outcome == createdNow {
-		info, _, _, err := c.readSnap(ctx, vol, req.Name)
-		return info, err
-	}
-	// Not this attempt's entry. When unsettled, its intent stays: this
-	// create may still land after the entry found here is removed.
-	if got == nil && outcome == createUnsettled {
+	dir := path.Join(root, snapsDir, req.Name)
+	pctx, cancel := c.publishCtx(ctx, deadline)
+	outcome, got, cerr := c.createResolved(ctx, pctx, dir, e, attempt)
+	cancel()
+	switch {
+	case outcome == createdNow:
+		// This request's snapshot is at the attempt path (this create, or
+		// an earlier attempt's of the same request). Judge it from that
+		// entry, never by resolving the name again (the name can be freed
+		// and reused meanwhile).
+		c.dropIntent(ctx, root, id)
+		info, _, err := decodeSnap(path.Join(dir, attempt), got)
+		if err != nil {
+			return SnapshotInfo{}, err
+		}
+		if info.State == SnapAborted {
+			return SnapshotInfo{}, catErr(CodeSnapshotExists, false, nil, "snapshot %s/%s: this request's attempt was aborted; delete the name to reuse it", vol, req.Name)
+		}
+		return info, nil
+	case got != nil:
+		// The attempt path holds a sweep's tombstone, which is permanent:
+		// this create can never land.
+		c.dropIntent(ctx, root, id)
+		return SnapshotInfo{}, catErr(CodeSnapshotExists, false, nil, "snapshot %s/%s: this request's attempt was aborted; delete the name to reuse it", vol, req.Name)
+	case outcome == createRefused:
+		c.dropIntent(ctx, root, id)
+		return SnapshotInfo{}, remoteErr(cerr, "snapshot %s/%s: the attempt path exists but could not be read; retry with the same request id", vol, req.Name)
+	default:
+		// Unsettled: the create may still land; its intent stays.
 		return SnapshotInfo{}, catErr(CodeOutcomeUnknown, true, cerr, "snapshot %s/%s: create outcome unknown; its intent is kept, retry with the same request id", vol, req.Name)
 	}
-	if got == nil {
-		return SnapshotInfo{}, remoteErr(cerr, "snapshot %s/%s exists but could not be read; retry with the same request id", vol, req.Name)
-	}
-	if string(got.Extended[extReq]) != req.RequestID {
-		return SnapshotInfo{}, catErr(CodeSnapshotExists, false, nil, "snapshot %s/%s exists (another request)", vol, req.Name)
-	}
-	info, _, err := decodeSnap(path.Join(dir, req.Name), got)
+}
+
+// claimName returns the attempt that publishes req: a new attempt whose
+// name record this call created, or the attempt of this request's earlier
+// record (a retry publishes to the same attempt path).
+func (c *Catalog) claimName(ctx context.Context, vol, root string, req SnapshotRequest, gen uint64) (string, error) {
+	attempt, err := storage.NewChunkIntentID(gen)
 	if err != nil {
-		return SnapshotInfo{}, err
+		return "", err
 	}
-	info.Replayed = true // another attempt of this request wrote it
-	return info, nil
+	re, err := nameRecordEntry(nameRecord{Format: snapFormat, VolumeID: vol, Name: req.Name, RequestID: req.RequestID, Attempt: attempt, CreatedNs: c.now().UnixNano()})
+	if err != nil {
+		return "", err
+	}
+	cerr := c.f.CreateEntry(ctx, path.Join(root, snapNamesDir), re, true)
+	if cerr == nil {
+		return attempt, nil
+	}
+	// Taken, or an ambiguous create: the record now under the name decides.
+	ref, ok, err := c.resolveSnap(ctx, vol, req.Name)
+	if err != nil || !ok {
+		return "", catErr(CodeOutcomeUnknown, true, cerr, "snapshot %s/%s: name record outcome unknown; retry with the same request id", vol, req.Name)
+	}
+	if ref.rec.RequestID != req.RequestID {
+		return "", catErr(CodeSnapshotExists, false, nil, "snapshot %s/%s exists (another request)", vol, req.Name)
+	}
+	return ref.rec.Attempt, nil
 }
 
 // SnapshotReplay resolves a snapshot request against the catalog before
-// the caller cuts (B9 W2 §3.2 step 1): when snaps/<req.Name> exists with
-// req's request id it returns that snapshot (Replayed, true); with another
-// request id, snapshot_exists; when the name is free, (zero, false, nil).
-// It validates the name and the request id first.
+// the caller cuts (B9 W2 §3.2 step 1): when the name is held by req's
+// request and its attempt published, it returns that snapshot (Replayed,
+// true); held by another request, snapshot_exists; free, or held by req's
+// unpublished attempt, (zero, false, nil). It validates the whole request
+// first (name, request id, labels, consistency), so a caller can refuse a
+// bad request before it cuts.
 func (c *Catalog) SnapshotReplay(ctx context.Context, vol string, req SnapshotRequest) (SnapshotInfo, bool, error) {
 	if _, err := c.volRoot(vol); err != nil {
 		return SnapshotInfo{}, false, err
@@ -683,22 +933,34 @@ func (c *Catalog) SnapshotReplay(ctx context.Context, vol string, req SnapshotRe
 	if req.RequestID == "" {
 		return SnapshotInfo{}, false, catErr(CodeInvalidName, false, nil, "snapshot %s/%s: a request id is required", vol, req.Name)
 	}
-	existing, prev, _, err := c.readSnap(ctx, vol, req.Name)
-	switch {
-	case err == nil && prev == req.RequestID:
-		existing.Replayed = true
-		return existing, true, nil
-	case err == nil:
-		return SnapshotInfo{}, false, catErr(CodeSnapshotExists, false, nil, "snapshot %s/%s exists (another request)", vol, req.Name)
-	case CodeOf(err) == CodeSnapshotNotFound:
-		return SnapshotInfo{}, false, nil
-	default:
+	if err := checkLabels(req.Labels); err != nil {
 		return SnapshotInfo{}, false, err
 	}
+	if cs := req.Consistency; cs != "" && cs != "crash" && cs != "app" {
+		return SnapshotInfo{}, false, catErr(CodeInvalidName, false, nil, "consistency %q: crash or app", cs)
+	}
+	ref, ok, err := c.resolveSnap(ctx, vol, req.Name)
+	switch {
+	case err != nil:
+		return SnapshotInfo{}, false, err
+	case !ok:
+		return SnapshotInfo{}, false, nil
+	case ref.rec.RequestID != req.RequestID:
+		return SnapshotInfo{}, false, catErr(CodeSnapshotExists, false, nil, "snapshot %s/%s exists (another request)", vol, req.Name)
+	case ref.entry == nil:
+		return SnapshotInfo{}, false, nil // this request's attempt has not published: publish it
+	case ref.info.State == SnapAborted:
+		return SnapshotInfo{}, false, catErr(CodeSnapshotExists, false, nil, "snapshot %s/%s: this request's attempt was aborted; delete the name to reuse it", vol, req.Name)
+	}
+	ref.info.Replayed = true
+	return ref.info, true, nil
 }
 
-// ListSnapshots lists vol's snapshots in name order, after opts.StartAfter.
-// next is the last name returned when more may follow, else "".
+// ListSnapshots lists vol's named snapshots in name order, after
+// opts.StartAfter: names whose attempt published and was not aborted. A
+// deleted snapshot no longer holds its name (opts.IncludeDeleting adds the
+// ones marked deleting that still do). next is the last name returned when
+// more may follow, else "".
 func (c *Catalog) ListSnapshots(ctx context.Context, vol string, opts ListOptions) ([]SnapshotInfo, string, error) {
 	root, err := c.volRoot(vol)
 	if err != nil {
@@ -711,7 +973,7 @@ func (c *Catalog) ListSnapshots(ctx context.Context, vol string, opts ListOption
 	if limit > maxListLimit {
 		limit = maxListLimit
 	}
-	dir := path.Join(root, snapsDir)
+	dir := path.Join(root, snapNamesDir)
 	var out []SnapshotInfo
 	after := opts.StartAfter
 	for {
@@ -720,15 +982,15 @@ func (c *Catalog) ListSnapshots(ctx context.Context, vol string, opts ListOption
 			return nil, "", remoteErr(err, "list snapshots of %s", vol)
 		}
 		for _, e := range page {
-			info, _, err := decodeSnap(path.Join(dir, e.GetName()), e)
+			after = e.GetName()
+			ref, ok, err := c.resolveSnap(ctx, vol, e.GetName())
 			if err != nil {
 				return nil, "", err
 			}
-			after = e.GetName()
-			if info.State == SnapDeleting && !opts.IncludeDeleting {
+			if !ok || ref.entry == nil || ref.info.State == SnapAborted || (ref.info.State == SnapDeleting && !opts.IncludeDeleting) {
 				continue
 			}
-			out = append(out, info)
+			out = append(out, ref.info)
 			if len(out) == limit {
 				return out, after, nil
 			}
@@ -739,9 +1001,12 @@ func (c *Catalog) ListSnapshots(ctx context.Context, vol string, opts ListOption
 	}
 }
 
-// DeleteSnapshot marks snaps/<name> deleting; GC removes it later (spec
-// §3.4). It returns SnapDeleting, or SnapAbsent when there is no such
-// snapshot; both are success, so a retry is always safe.
+// DeleteSnapshot frees the name (spec §3.4, W5 ruling 2026-11-15 17:30Z):
+// it marks the attempt deleting (or, when the attempt never published,
+// claims its path with an aborted tombstone so a late insert cannot land),
+// then removes the name record. The attempt path is never removed. It
+// returns SnapDeleting, or SnapAbsent when no snapshot holds the name; both
+// are success, so a retry is always safe.
 func (c *Catalog) DeleteSnapshot(ctx context.Context, vol, name string) (string, error) {
 	root, err := c.volRoot(vol)
 	if err != nil {
@@ -750,33 +1015,48 @@ func (c *Catalog) DeleteSnapshot(ctx context.Context, vol, name string) (string,
 	if err := CheckSnapshotName(name); err != nil {
 		return "", err
 	}
-	for attempt := 0; attempt < 2; attempt++ {
-		info, _, e, err := c.readSnap(ctx, vol, name)
-		if CodeOf(err) == CodeSnapshotNotFound {
-			return SnapAbsent, nil
-		}
+	dir := path.Join(root, snapsDir, name)
+	for try := 0; try < 3; try++ {
+		ref, ok, err := c.resolveSnap(ctx, vol, name)
 		if err != nil {
 			return "", err
 		}
-		if info.State == SnapDeleting {
-			return SnapDeleting, nil
+		if !ok {
+			return SnapAbsent, nil
 		}
-		e.Extended[extSnapState] = []byte(SnapDeleting)
-		e.Extended[extSnapDeletedNs] = []byte(strconv.FormatInt(c.now().UnixNano(), 10))
-		err = c.f.UpdateEntry(ctx, path.Join(root, snapsDir), e, map[string][]byte{
-			extSnapState: []byte(SnapActive),
-			extSnapGen:   []byte(strconv.FormatUint(info.HeadGen, 10)),
-		})
 		switch {
-		case err == nil:
-			return SnapDeleting, nil
-		case errors.Is(err, ErrPrecondition), errors.Is(err, ErrNotFound):
-			continue // re-read once
-		default:
-			return "", remoteErr(err, "mark snapshot %s/%s deleting", vol, name)
+		case ref.entry == nil:
+			tomb, err := c.abortedSnapEntry(vol, name, ref.rec.Attempt)
+			if err != nil {
+				return "", err
+			}
+			if err := c.f.CreateEntry(ctx, dir, tomb, true); err != nil && !errors.Is(err, ErrExists) {
+				return "", remoteErr(err, "claim the unpublished attempt of %s/%s", vol, name)
+			}
+			continue // re-read: the path now holds a tombstone or the late snapshot
+		case ref.info.State == SnapActive:
+			e := ref.entry
+			e.Extended[extSnapState] = []byte(SnapDeleting)
+			e.Extended[extSnapDeletedNs] = []byte(strconv.FormatInt(c.now().UnixNano(), 10))
+			err := c.f.UpdateEntry(ctx, dir, e, map[string][]byte{
+				extSnapState: []byte(SnapActive),
+				extSnapGen:   []byte(strconv.FormatUint(ref.info.HeadGen, 10)),
+			})
+			if errors.Is(err, ErrPrecondition) || errors.Is(err, ErrNotFound) {
+				continue
+			}
+			if err != nil {
+				return "", remoteErr(err, "mark snapshot %s/%s deleting", vol, name)
+			}
 		}
+		// The attempt is deleting or aborted: free the name.
+		err = c.f.DeleteEntry(ctx, path.Join(root, snapNamesDir), name, map[string][]byte{extAttempt: []byte(ref.rec.Attempt)})
+		if err != nil && !errors.Is(err, ErrNotFound) && !errors.Is(err, ErrPrecondition) {
+			return "", remoteErr(err, "remove the name record %s/%s", vol, name)
+		}
+		return SnapDeleting, nil
 	}
-	return "", remoteErr(nil, "mark snapshot %s/%s deleting: it kept changing", vol, name)
+	return "", remoteErr(nil, "delete snapshot %s/%s: it kept changing", vol, name)
 }
 
 // ListVolumes returns the ids of every volume directory under the base (GC).
@@ -858,9 +1138,12 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 		if err := c.checkForkRecord(existing, req); err != nil {
 			return ForkResult{}, err
 		}
-		has, err := c.headExists(ctx, dstRoot)
+		h, has, err := c.ReadHead(ctx, req.Target)
 		if err != nil {
-			return ForkResult{}, remoteErr(err, "read HEAD of %s", req.Target)
+			return ForkResult{}, err
+		}
+		if has && h.State == storage.ChunkHeadAborted {
+			return ForkResult{}, catErr(CodeTargetExists, false, nil, "fork %s was aborted (its HEAD is a tombstone); fork to a new volume id", req.Target)
 		}
 		if has {
 			return forkResult(existing, true), nil
@@ -868,7 +1151,7 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 	}
 
 	readAt := c.now()
-	snap, _, _, err := c.readSnap(ctx, req.Source, req.Snapshot)
+	snap, err := c.readSnap(ctx, req.Source, req.Snapshot)
 	if err != nil {
 		return ForkResult{}, err
 	}
@@ -911,7 +1194,7 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 		}
 		// VOLUME names no chunk keys, so it needs no intent; a found VOLUME
 		// is this request's when it binds the same request and image.
-		outcome, got, cerr := c.createResolved(ctx, dstRoot, ve, "")
+		outcome, got, cerr := c.createResolved(ctx, ctx, dstRoot, ve, "")
 		if outcome != createdNow {
 			if got == nil {
 				return ForkResult{}, catErr(CodeOutcomeUnknown, true, cerr, "fork %s: VOLUME create outcome unknown; retry with the same request id", req.Target)
@@ -929,11 +1212,13 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 		return ForkResult{}, err
 	}
 	he.Extended[extReq] = []byte(req.RequestID)
-	id, err := putIntent(ctx, c.f, dstRoot, storage.ChunkIntent{Gen: 0, Epoch: 0, Holder: tag, Keys: headKeys(head)})
+	deadline := readAt.Add(c.deadline())
+	id, err := putIntent(ctx, c.f, dstRoot, storage.ChunkIntent{Gen: 0, Epoch: 0, Holder: tag, Keys: headKeys(head),
+		DeadlineNs: deadline.UnixNano()})
 	if err != nil {
 		return ForkResult{}, remoteErr(err, "intent for fork %s", req.Target)
 	}
-	if c.now().Sub(readAt) > c.deadline() {
+	if !c.now().Before(deadline) { // re-checked immediately before publishing
 		// Clean abort: HEAD was never sent.
 		c.dropIntent(ctx, dstRoot, id)
 		return ForkResult{}, catErr(CodeDeadlineExceeded, true, nil, "fork %s: %v since reading the snapshot, over the %v deadline; HEAD not written", req.Target, c.now().Sub(readAt), c.deadline())
@@ -942,14 +1227,61 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 	// (attach refuses a fork without HEAD), so a HEAD found there completes
 	// the fork; if it is another attempt's and this create is unsettled,
 	// this attempt's intent stays (the create may land after HEAD is gone).
-	outcome, got, cerr := c.createResolved(ctx, dstRoot, he, id)
+	pctx, cancel := c.publishCtx(ctx, deadline)
+	outcome, got, cerr := c.createResolved(ctx, pctx, dstRoot, he, id)
+	cancel()
+	// The HEAD now at the target decides, from that one read: a real HEAD
+	// completes the fork; an aborted tombstone means a sweep claimed the
+	// target first, so this fork lost and its create can never land.
+	if got == nil {
+		if outcome == createUnsettled {
+			return ForkResult{}, catErr(CodeOutcomeUnknown, true, cerr, "fork %s: HEAD create outcome unknown; its intent is kept, retry with the same request id", req.Target)
+		}
+		c.dropIntent(ctx, dstRoot, id) // refused for good, but HEAD could not be read
+		return ForkResult{}, remoteErr(cerr, "fork %s: HEAD exists but could not be read; retry with the same request id", req.Target)
+	}
+	h, err := decodeHead(path.Join(dstRoot, headName), got)
+	if err != nil {
+		return ForkResult{}, err
+	}
+	if h.State == storage.ChunkHeadAborted {
+		c.dropIntent(ctx, dstRoot, id) // the tombstone is permanent: this create never lands
+		return ForkResult{}, catErr(CodeTargetExists, false, nil, "fork %s lost to a sweep: its HEAD is an aborted tombstone; fork to a new volume id", req.Target)
+	}
 	if outcome != createUnsettled {
 		c.dropIntent(ctx, dstRoot, id) // confirmed, or refused for good
 	}
-	if outcome == createUnsettled && got == nil {
-		return ForkResult{}, catErr(CodeOutcomeUnknown, true, cerr, "fork %s: HEAD create outcome unknown; its intent is kept, retry with the same request id", req.Target)
+	return forkResult(existing, outcome != createdNow), nil
+}
+
+// AbortFork settles a dead fork for a GC sweep (W5 ruling, 2026-11-15
+// 17:30Z): it claims the target's HEAD, the fork's publishing entry, with
+// an exclusive create of an aborted HEAD tombstone. claimed is true when
+// HEAD is a tombstone (this one or an earlier one): the fork can never
+// publish, and the target never attaches. false: the fork published, and
+// its keys are reachable through that HEAD. Either way the fork's copy
+// intent can then be deleted. Volume ids are never reused, so the
+// tombstone stays.
+func (c *Catalog) AbortFork(ctx context.Context, target string) (claimed bool, err error) {
+	root, err := c.volRoot(target)
+	if err != nil {
+		return false, err
 	}
-	return forkResult(existing, outcome != createdNow), nil // refused: the filer says HEAD exists
+	he, err := headEntry(storage.ChunkHead{Gen: 1, Chunks: map[uint64]storage.ChunkRef{}, State: storage.ChunkHeadAborted})
+	if err != nil {
+		return false, err
+	}
+	switch err := c.f.CreateEntry(ctx, root, he, true); {
+	case err == nil:
+		return true, nil
+	case !errors.Is(err, ErrExists):
+		return false, remoteErr(err, "aborted HEAD of %s", target)
+	}
+	h, _, err := c.ReadHead(ctx, target)
+	if err != nil {
+		return false, err
+	}
+	return h.State == storage.ChunkHeadAborted, nil
 }
 
 // checkForkRecord refuses a target VOLUME that is not this fork request's.

@@ -35,21 +35,15 @@ type ChunkControl interface {
 
 // ChunkCutResponse is the body of a successful POST /chunk/cut (§3.1).
 type ChunkCutResponse struct {
-	VolumeID        string `json:"volumeID"`
-	CutLSN          uint64 `json:"cutLSN"`
-	HeadGen         uint64 `json:"headGen"`
-	HeadEpoch       uint64 `json:"headEpoch"`
-	Holder          string `json:"holder"`
-	Noop            bool   `json:"noop"`
-	FullHash        bool   `json:"fullHash"`
-	CandidateChunks int    `json:"candidateChunks"`
-	UploadedChunks  int    `json:"uploadedChunks"`
-	UploadedBytes   int64  `json:"uploadedBytes"`
-	ZeroedChunks    int    `json:"zeroedChunks"`
-	BarrierPauseNs  int64  `json:"barrierPauseNs"`
-	UploadNs        int64  `json:"uploadNs"`
-	CasNs           int64  `json:"casNs"`
-	TotalNs         int64  `json:"totalNs"`
+	VolumeID  string `json:"volumeID"`
+	CutLSN    uint64 `json:"cutLSN"`
+	HeadGen   uint64 `json:"headGen"`
+	HeadEpoch uint64 `json:"headEpoch"`
+	Holder    string `json:"holder"`
+	Noop      bool   `json:"noop"`
+	FullHash  bool   `json:"fullHash"`
+	// The cut statistics (§3.1) are added when W3 fills them; until then
+	// the body omits them rather than report zeros (appendix 14:30Z).
 }
 
 // ChunkSnapshotRequest is POST /chunk/snapshot's request (§3.2), without
@@ -93,8 +87,8 @@ type chunkErrorBody struct {
 }
 
 // The codes the routes add to the catalog's (B9 §2.2 plus the 2026-11-15
-// rulings: awaiting_assignment, internal, and the transport errors
-// bad_request, method_not_allowed, forbidden).
+// rulings: awaiting_assignment, internal, lsn_behind, and the transport
+// errors bad_request, method_not_allowed, forbidden).
 const (
 	codeVolumeNotServed    = "volume_not_served"
 	codeNotPrimary         = "not_primary"
@@ -104,6 +98,7 @@ const (
 	codeFenced             = "fenced"
 	codeHeadConflict       = "head_conflict"
 	codeClosing            = "closing"
+	codeLSNBehind          = "lsn_behind"
 	codeInternal           = "internal"
 	codeBadRequest         = "bad_request"
 	codeMethodNotAllowed   = "method_not_allowed"
@@ -152,7 +147,12 @@ func writeChunkErr(w http.ResponseWriter, status int, code string, retryable boo
 // writeChunkFailure answers err with its B9 code and HTTP status.
 func writeChunkFailure(w http.ResponseWriter, err error) {
 	status, code, retryable := chunkErrorCode(err)
-	writeChunkJSON(w, status, chunkErrorBody{Code: code, Message: err.Error(), Retryable: retryable})
+	msg := err.Error()
+	var ce *chunkstore.CatalogError
+	if errors.As(err, &ce) {
+		msg = ce.Detail() // the code is in its own field
+	}
+	writeChunkJSON(w, status, chunkErrorBody{Code: code, Message: msg, Retryable: retryable})
 }
 
 // chunkErrorCode maps an operation's error to (HTTP status, code,
@@ -170,6 +170,8 @@ func chunkErrorCode(err error) (int, string, bool) {
 		// An earlier CAS may still land: report that even when this
 		// attempt was also refused (the re-proposal re-checks admission).
 		return http.StatusServiceUnavailable, chunkstore.CodeOutcomeUnknown, true
+	case errors.Is(err, storage.ErrChunkLSNBehind):
+		return http.StatusConflict, codeLSNBehind, false
 	case errors.Is(err, durable.ErrChunkAwaitingAuthority):
 		return http.StatusConflict, codeAwaitingAssignment, true
 	case errors.Is(err, durable.ErrChunkNotPrimary):
@@ -182,8 +184,10 @@ func chunkErrorCode(err error) (int, string, bool) {
 		return http.StatusConflict, codeHeadConflict, true
 	case errors.Is(err, storage.ErrChunkRemoteUnavailable):
 		return http.StatusServiceUnavailable, chunkstore.CodeRemoteUnavailable, true
-	case errors.Is(err, storage.ErrChunkLayerClosed), errors.Is(err, storage.ErrChunkLayerDetached):
-		return http.StatusServiceUnavailable, codeClosing, false
+	case errors.Is(err, storage.ErrChunkLayerDetached):
+		return http.StatusConflict, codeClosing, false // stays closed until a new attach
+	case errors.Is(err, storage.ErrChunkLayerClosed):
+		return http.StatusServiceUnavailable, codeClosing, false // the process is shutting down
 	case errors.Is(err, durable.ErrNotChunkVolume), errors.Is(err, durable.ErrVolumeNotOpen):
 		return http.StatusConflict, chunkstore.CodeNotChunkVolume, false
 	case errors.Is(err, context.DeadlineExceeded):
@@ -195,7 +199,7 @@ func chunkErrorCode(err error) (int, string, bool) {
 
 func catalogStatus(code string) int {
 	switch code {
-	case chunkstore.CodeInvalidName:
+	case chunkstore.CodeInvalidName, chunkstore.CodeInvalidLabel:
 		return http.StatusBadRequest
 	case chunkstore.CodeSnapshotNotFound:
 		return http.StatusNotFound
@@ -434,11 +438,8 @@ func (c *chunkControl) Cut(ctx context.Context, volumeID string, minLSN uint64) 
 	if err != nil {
 		return ChunkCutResponse{}, err
 	}
-	st := r.Stats
 	return ChunkCutResponse{VolumeID: volumeID, CutLSN: r.H, HeadGen: r.Head.Gen, HeadEpoch: r.Head.Epoch, Holder: r.Head.Holder,
-		Noop: r.Noop, FullHash: r.FullHash, CandidateChunks: st.CandidateChunks, UploadedChunks: st.UploadedChunks,
-		UploadedBytes: st.UploadedBytes, ZeroedChunks: st.ZeroedChunks, BarrierPauseNs: st.BarrierPauseNs,
-		UploadNs: st.UploadNs, CasNs: st.CASNs, TotalNs: st.TotalNs}, nil
+		Noop: r.Noop, FullHash: r.FullHash}, nil
 }
 
 // Snapshot resolves the request against the catalog first (§3.2 step 1):

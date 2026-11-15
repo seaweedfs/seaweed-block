@@ -25,6 +25,7 @@ type (
 const (
 	ChunkHeadActive   = chunkHeadActive
 	ChunkHeadDetached = chunkHeadDetached
+	ChunkHeadAborted  = chunkHeadAborted
 )
 
 // NewChunkIntentID returns a fresh intent id "<gen>-<nonce>" for a remote
@@ -51,6 +52,7 @@ var (
 	ErrChunkLayerClosed       = errChunkLayerClosed
 	ErrChunkBaseInstalling    = errChunkBaseInstalling
 	ErrChunkRemoteUnavailable = errChunkRemoteUnavailable
+	ErrChunkLSNBehind         = errChunkLSNBehind
 )
 
 // ValidChunkKey enforces the chunk key domain (non-empty valid UTF-8); a

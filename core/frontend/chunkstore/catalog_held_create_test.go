@@ -3,6 +3,7 @@ package chunkstore
 import (
 	"context"
 	"path"
+	"strings"
 	"testing"
 
 	"google.golang.org/protobuf/proto"
@@ -16,11 +17,12 @@ import (
 // confirmed or can never apply; never another attempt's, even under the same
 // request, since that attempt's create may still land.
 
-// holdFirst makes the filer hold the first create of p.
+// holdFirst makes the filer hold the first create of p (p ending in "/":
+// the first create under it).
 func holdFirst(f *fakeFiler, p string) {
 	held := false
 	f.deferCreate = func(q string, _ *filerpb.Entry) bool {
-		if q != p || held {
+		if held || !(q == p || strings.HasSuffix(p, "/") && strings.HasPrefix(q, p)) {
 			return false
 		}
 		held = true
@@ -92,15 +94,15 @@ func lateHeadKeys(t *testing.T, f *fakeFiler, b *fakeBlobs, vol string) []string
 	return sortedKeysOf(h, "")
 }
 
-// Attempt A's snapshot create is held; retry B of the same request publishes
-// the snapshot and deletes only B's intent. The snapshot is deleted and GC
-// removes it; then A's held create lands. Its keys are still protected by
-// A's intent.
+// Attempt A's snapshot create is held. Retry B of the same request takes
+// over A's attempt path (the name record names it) and publishes there,
+// deleting only B's intent. A's held insert can never land: the path is
+// taken, and attempt paths are never removed, not even by DeleteSnapshot.
+// A sweep then finds A's attempt published.
 func TestCatalog_HeldSnapshotCreateKeepsItsIntent(t *testing.T) {
 	f, _, c, h := catalogFixture(t)
 	ctx := context.Background()
-	p := catBase + "/v1/snaps/s1"
-	holdFirst(f, p)
+	holdFirst(f, catBase+"/v1/snaps/s1/")
 	req := SnapshotRequest{Name: "s1", RequestID: "r"}
 	if _, err := c.CreateSnapshot(ctx, "v1", req, h); CodeOf(err) != CodeOutcomeUnknown {
 		t.Fatalf("attempt A, create held: %v, want outcome_unknown", err)
@@ -109,68 +111,89 @@ func TestCatalog_HeldSnapshotCreateKeepsItsIntent(t *testing.T) {
 	if len(a) != 1 {
 		t.Fatalf("attempt A left %d intents, want its own", len(a))
 	}
-	if info, err := c.CreateSnapshot(ctx, "v1", req, h); err != nil || info.Replayed {
+	attempt := path.Base(snapPath(t, f, "v1", "s1"))
+	if a[0].Holder != "snapshot:v1/s1/"+attempt {
+		t.Fatalf("intent holder %q, want it to name the attempt %s", a[0].Holder, attempt)
+	}
+	if info, err := c.CreateSnapshot(ctx, "v1", req, h); err != nil || info.State != SnapActive {
 		t.Fatalf("retry B: %+v %v", info, err)
 	}
 	if in := intentsOf(t, f, "v1"); len(in) != 1 || in[0].ID != a[0].ID {
-		t.Fatalf("after B: intents %+v, want only A's %s (A's create is still held)", in, a[0].ID)
+		t.Fatalf("after B: intents %+v, want only A's %s", in, a[0].ID)
 	}
 	if _, err := c.DeleteSnapshot(ctx, "v1", "s1"); err != nil {
 		t.Fatal(err)
 	}
-	gcRemove(f, p)
-	if n := f.releaseDeferredCreates(); n != 1 {
-		t.Fatalf("A's held create applied %d times, want 1", n)
+	if n := f.releaseDeferredCreates(); n != 0 {
+		t.Fatalf("A's held insert landed (%d applied); its attempt path is held for good", n)
 	}
-	assertKeysProtected(t, f, "v1", lateSnapshotKeys(t, f, "v1", "s1"))
+	if claimed, err := c.AbortSnapshot(ctx, "v1", "s1", attempt); err != nil || claimed {
+		t.Fatalf("sweep over A's published attempt: claimed=%v %v; want published", claimed, err)
+	}
 }
 
-// Attempt A's create is held while another attempt of the same request
-// writes the snapshot. A reports the snapshot but keeps its own intent; when
-// the snapshot is later removed, A's create lands with its keys protected.
-func TestCatalog_HeldSnapshotCreateBehindAnotherAttempt(t *testing.T) {
+// A sweep settles a dead attempt by claiming its path with an aborted
+// tombstone: the late insert fails, the name reads as aborted until it is
+// deleted, and then the name can be reused.
+func TestCatalog_SweepTombstonesADeadSnapshotAttempt(t *testing.T) {
 	f, _, c, h := catalogFixture(t)
 	ctx := context.Background()
-	p := catBase + "/v1/snaps/s1"
-	holdFirstBehindAnother(f, p)
-	info, err := c.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: "s1", RequestID: "r"}, h)
-	if in := intentsOf(t, f, "v1"); len(in) != 1 {
-		t.Fatalf("attempt A (err %v) left %d intents; its held create needs its own", err, len(in))
+	holdFirst(f, catBase+"/v1/snaps/s1/")
+	if _, err := c.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: "s1", RequestID: "r"}, h); CodeOf(err) != CodeOutcomeUnknown {
+		t.Fatalf("attempt with a held create: %v", err)
 	}
-	if err != nil || !info.Replayed || info.HeadGen != h.Gen {
-		t.Fatalf("attempt A behind another attempt: %+v %v, want the replayed snapshot", info, err)
+	attempt := path.Base(snapPath(t, f, "v1", "s1"))
+	if claimed, err := c.AbortSnapshot(ctx, "v1", "s1", attempt); err != nil || !claimed {
+		t.Fatalf("sweep over the dead attempt: claimed=%v %v", claimed, err)
 	}
-	if _, err := c.DeleteSnapshot(ctx, "v1", "s1"); err != nil {
-		t.Fatal(err)
+	if n := f.releaseDeferredCreates(); n != 0 {
+		t.Fatalf("the dead attempt's late insert landed over the tombstone (%d applied)", n)
 	}
-	gcRemove(f, p)
-	if n := f.releaseDeferredCreates(); n != 1 {
-		t.Fatalf("A's held create applied %d times, want 1", n)
+	if again, err := c.AbortSnapshot(ctx, "v1", "s1", attempt); err != nil || !again {
+		t.Fatalf("a repeated sweep: claimed=%v %v; want the tombstone found", again, err)
 	}
-	assertKeysProtected(t, f, "v1", lateSnapshotKeys(t, f, "v1", "s1"))
-}
-
-// The filer's own "already exists" answer refuses the create for good: the
-// attempt deletes its own intent and leaks none.
-func TestCatalog_RefusedSnapshotCreateDropsItsIntent(t *testing.T) {
-	f, _, c, h := catalogFixture(t)
-	ctx := context.Background()
-	if _, err := c.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: "s1", RequestID: "other"}, h); err != nil {
-		t.Fatal(err)
-	}
-	// The name is taken after this request's read and before its create.
-	taken := f.entries[catBase+"/v1/snaps/s1"]
-	gcRemove(f, catBase+"/v1/snaps/s1")
-	f.beforeCreate = func(p string) {
-		if path.Dir(p) == catBase+"/v1/intents" {
-			f.entries[catBase+"/v1/snaps/s1"] = taken
+	for _, include := range []bool{false, true} {
+		if list, _, err := c.ListSnapshots(ctx, "v1", ListOptions{IncludeDeleting: include}); err != nil || len(list) != 0 {
+			t.Fatalf("list (includeDeleting=%v) shows the aborted attempt: %+v %v", include, list, err)
 		}
 	}
+	if _, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s1", Target: "v2", RequestID: "f"}); CodeOf(err) != CodeSnapshotNotFound {
+		t.Fatalf("fork from the aborted attempt: %v; want snapshot_not_found", err)
+	}
 	if _, err := c.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: "s1", RequestID: "r"}, h); CodeOf(err) != CodeSnapshotExists {
-		t.Fatalf("refused create: %v, want snapshot_exists", err)
+		t.Fatalf("retry of the aborted request: %v; want snapshot_exists until the name is deleted", err)
+	}
+	if st, err := c.DeleteSnapshot(ctx, "v1", "s1"); err != nil || st != SnapDeleting {
+		t.Fatalf("delete of the aborted name: %q %v", st, err)
+	}
+	info, err := c.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: "s1", RequestID: "r2"}, h)
+	if err != nil || info.State != SnapActive {
+		t.Fatalf("snapshot after the name was freed: %+v %v", info, err)
+	}
+	if p := snapPath(t, f, "v1", "s1"); path.Base(p) == attempt {
+		t.Fatal("the new snapshot reused the aborted attempt's path")
+	}
+}
+
+// Another request holding the name refuses before any intent is written.
+func TestCatalog_NameHeldByAnotherRequestWritesNoIntent(t *testing.T) {
+	f, _, c, h := catalogFixture(t)
+	ctx := context.Background()
+	// Another request takes the name between this request's check and its
+	// name record create.
+	f.failCreate = func(p string) error {
+		if p != catBase+"/v1/"+snapNamesDir+"/s1" {
+			return nil
+		}
+		other, _ := nameRecordEntry(nameRecord{Format: snapFormat, VolumeID: "v1", Name: "s1", RequestID: "other", Attempt: "1-00000000000000aa"})
+		f.entries[p] = other
+		return ErrExists
+	}
+	if _, err := c.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: "s1", RequestID: "r"}, h); CodeOf(err) != CodeSnapshotExists {
+		t.Fatalf("name held by another request: %v, want snapshot_exists", err)
 	}
 	if in := intentsOf(t, f, "v1"); len(in) != 0 {
-		t.Fatalf("a refused create left %d intents", len(in))
+		t.Fatalf("a refused name left %d intents", len(in))
 	}
 }
 

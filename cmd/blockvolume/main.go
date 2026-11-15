@@ -552,6 +552,7 @@ func run(f flags) int {
 		if cfg.Impl == durable.ImplWALStoreChunk {
 			chunk, chunkErr = newChunkWiring(f.chunk)
 			cfg.ChunkCaptureInterval = f.chunk.captureInterval
+			cfg.ChunkHolder = chunkHolder(f)
 			if chunkErr == nil {
 				cfg.ChunkRemoteFor = chunk.remoteFor
 				cfg.ChunkAttachCheck = chunkAttachCheck(chunk.catalog)

@@ -278,6 +278,7 @@ func TestChunkLayer_C3_WriteDuringCopyWaitsForTheCut(t *testing.T) {
 	f := newFakeChunkRemote()
 	f.seedHead(t, src, 10, 1)
 	s, _ := newChunkTestStore(t)
+	s.AdvanceFrontier(10) // the log continues from HEAD's remote_lsn (W4b's job in production)
 	cfg := ctConfig(2)
 	cfg.FreshFromHead = true
 	layer := mustAttach(t, s, f, cfg)

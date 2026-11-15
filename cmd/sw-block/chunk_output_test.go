@@ -45,8 +45,11 @@ func sizedServer(t *testing.T, n int) *httptest.Server {
 func TestOpsChunk_OversizedResponseIsRefused(t *testing.T) {
 	var out, errb bytes.Buffer
 	code := run([]string{"ops", "chunk", "cut", "--volume", "v1", "--status-addr", sizedServer(t, chunkResponseLimit+1).URL}, &out, &errb)
-	if code != chunkExitFailed || out.Len() != 0 || !strings.Contains(errb.String(), "exceeds") {
-		t.Fatalf("200 body one byte over the limit: exit %d, %d bytes relayed, stderr %q; want a refusal and nothing relayed", code, out.Len(), errb.String())
+	if code != chunkExitFailed || out.Len() > 1024 || !strings.Contains(errb.String(), "exceeds") {
+		t.Fatalf("200 body one byte over the limit: exit %d, %d bytes on stdout, stderr %q; want a refusal, not the body", code, out.Len(), errb.String())
+	}
+	if e := chunkErrorOut(t, out.String()); e.Code != "internal" {
+		t.Fatalf("200 body one byte over the limit: %+v, want the internal error body", e)
 	}
 	out.Reset()
 	errb.Reset()
