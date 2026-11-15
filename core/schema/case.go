@@ -36,9 +36,14 @@ type EventInput struct {
 	TargetLSN   uint64 `yaml:"target_lsn,omitempty"`
 	AchievedLSN uint64 `yaml:"achieved_lsn,omitempty"`
 
+	// Durable ack
+	DurableLSN     uint64 `yaml:"durable_lsn,omitempty"`
+	PrimaryTailLSN uint64 `yaml:"primary_tail_lsn,omitempty"`
+	PrimaryHeadLSN uint64 `yaml:"primary_head_lsn,omitempty"`
+
 	// Failure
-	Reason          string `yaml:"reason,omitempty"`
-	TransportEpoch  uint64 `yaml:"transport_epoch,omitempty"`
+	Reason         string `yaml:"reason,omitempty"`
+	TransportEpoch uint64 `yaml:"transport_epoch,omitempty"`
 }
 
 // Expectation defines what the engine should produce after all events.
