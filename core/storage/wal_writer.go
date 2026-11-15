@@ -32,6 +32,9 @@ type walWriter struct {
 	logicalHead uint64 // monotonic write position
 	logicalTail uint64 // monotonic flush position
 	instr       *writeInstrumentation
+
+	// Optional batch pwrite fault seam; nil uses the real file.
+	batchWriteAt func([]byte, int64) (int, error)
 }
 
 // newWALWriter constructs a writer over an open file. logicalHead and
@@ -148,7 +151,11 @@ func (w *walWriter) appendBatch(entries []walEntry) ([]uint64, error) {
 			return nil
 		}
 		writeStart := time.Now()
-		if _, err := w.fd.WriteAt(pending, int64(w.walOffset+pendingStart)); err != nil {
+		writeAt := w.fd.WriteAt
+		if w.batchWriteAt != nil {
+			writeAt = w.batchWriteAt
+		}
+		if _, err := writeAt(pending, int64(w.walOffset+pendingStart)); err != nil {
 			return fmt.Errorf("walWriter.appendBatch: pwrite at %d: %w", w.walOffset+pendingStart, err)
 		}
 		if w.instr != nil {

@@ -1,7 +1,9 @@
 package storage
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -218,5 +220,102 @@ func TestWALGenerationBatchPublication(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// An actual partial pwrite leaves a valid first record and a torn second record,
+// but appendBatch returns before publishing its planned head. Same-open Recover
+// must not let the prefix reuse the pre-failure durable generation.
+func TestWALGenerationPartialAppendRecoverySync(t *testing.T) {
+	for _, recoverFirst := range []bool{false, true} {
+		t.Run(map[bool]string{false: "failed append without recovery", true: "same-open recovery"}[recoverFirst], func(t *testing.T) {
+			s := newGenerationStore(t)
+			if _, err := s.Sync(); err != nil {
+				t.Fatal(err)
+			}
+			beforeHead := s.wal.logicalHeadValue()
+			want := makeBlock(4096, 0xa7)
+			pwriteCalls := 0
+			s.wal.batchWriteAt = func(data []byte, off int64) (int, error) {
+				pwriteCalls++
+				limit := walEntryHeaderSize + 4096 + walEntryHeaderSize + 17
+				if len(data) <= limit {
+					return 0, errors.New("fixture needs two whole records")
+				}
+				n, err := s.fd.WriteAt(data[:limit], off)
+				if err != nil {
+					return n, err
+				}
+				return n, io.ErrShortWrite
+			}
+			_, err := s.WriteBatch(0, [][]byte{want, makeBlock(4096, 0xb8)})
+			s.wal.batchWriteAt = nil
+			if !errors.Is(err, io.ErrShortWrite) || pwriteCalls != 1 {
+				t.Fatalf("partial batch err=%v pwrite calls=%d", err, pwriteCalls)
+			}
+			if got := s.wal.logicalHeadValue(); got != beforeHead {
+				t.Fatalf("failed batch published head=%d want %d", got, beforeHead)
+			}
+			if recoverFirst {
+				if n, err := s.Recover(); err != nil || n != 1 {
+					t.Fatalf("same-open Recover=%d err=%v want1,nil", n, err)
+				}
+				if got, err := s.Read(0); err != nil || !bytes.Equal(got, want) {
+					t.Fatalf("valid prefix not recovered: err=%v", err)
+				}
+			}
+			realSync := s.syncWALFile
+			fault := errors.New("next physical sync failed")
+			attempts := 0
+			s.syncWALFile = func() error { attempts++; return fault }
+			_, err = s.Sync()
+			s.syncWALFile = realSync
+			if !errors.Is(err, fault) || attempts != 1 {
+				t.Fatalf("next Sync skipped required physical I/O/error: err=%v attempts=%d", err, attempts)
+			}
+			before := s.WALSyncCount()
+			if _, err := s.Sync(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.Sync(); err != nil {
+				t.Fatal(err)
+			}
+			if n := s.WALSyncCount() - before; n != 1 {
+				t.Fatalf("retry+duplicate physical syncs=%d want1", n)
+			}
+		})
+	}
+}
+
+// Even unchanged recovery must invalidate the prior open-instance coverage;
+// its next successful sync may then be reused normally, not permanently bypassed.
+func TestWALGenerationSameOpenRecoverInvalidatesCoverage(t *testing.T) {
+	s := newGenerationStore(t)
+	if _, err := s.Write(0, makeBlock(4096, 0x92)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	realSync := s.syncWALFile
+	attempts := 0
+	fault := errors.New("post-recovery fsync error")
+	s.syncWALFile = func() error { attempts++; return fault }
+	_, err := s.Sync()
+	s.syncWALFile = realSync
+	if !errors.Is(err, fault) || attempts != 1 {
+		t.Fatalf("Recover reused old sync coverage: err=%v attempts=%d", err, attempts)
+	}
+	before := s.WALSyncCount()
+	for i := 0; i < 2; i++ {
+		if _, err := s.Sync(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := s.WALSyncCount() - before; n != 1 {
+		t.Fatalf("Recover permanently disabled dedup: syncs=%d want1", n)
 	}
 }

@@ -18,8 +18,8 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
-	"github.com/seaweedfs/seaweed-block/core/frontend/testback"
 	"github.com/seaweedfs/seaweed-block/core/storage"
+	"strings"
 )
 
 type syncPairView struct{ id frontend.Identity }
@@ -49,16 +49,25 @@ func (o *syncPairObserver) Sync(_ context.Context, target uint64) error {
 
 func newSyncPairFixture(t *testing.T, path string) (*storage.WALStore, *durable.StorageBackend, *nvmeClient) {
 	t.Helper()
-	s, err := storage.CreateWALStore(path, 32, 4096)
+	id := frontend.Identity{VolumeID: strings.TrimSuffix(filepath.Base(path), ".bin"), ReplicaID: "r1", Epoch: 1, EndpointVersion: 1}
+	provider, err := durable.NewDurableProvider(durable.ProviderConfig{
+		Impl: durable.ImplWALStore, StorageRoot: filepath.Dir(path), NumBlocks: 32, BlockSize: 4096,
+		WALRecoveryTestDisableFlusher: true,
+	}, syncPairView{id})
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = s.Close() })
-	s.DisableAutoFlushForRecoveryTest()
-	id := frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1}
-	backend := durable.NewStorageBackend(s, syncPairView{id}, id)
-	backend.SetOperational(true, "test recovered store")
-	tg := nvme.NewTarget(nvme.TargetConfig{Listen: "127.0.0.1:0", SubsysNQN: "nqn.2026-04.example.v3:subsys", VolumeID: "v1", Provider: testback.NewStaticProvider(backend)})
+	t.Cleanup(func() { _ = provider.Close() })
+	rawBackend, err := provider.Open(context.Background(), id.VolumeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.RecoverVolume(context.Background(), id.VolumeID); err != nil {
+		t.Fatal(err)
+	}
+	s := provider.LogicalStorage(id.VolumeID).(*storage.WALStore)
+	backend := rawBackend.(*durable.StorageBackend)
+	tg := nvme.NewTarget(nvme.TargetConfig{Listen: "127.0.0.1:0", SubsysNQN: "nqn.2026-04.example.v3:subsys", VolumeID: id.VolumeID, Provider: provider})
 	addr, err := tg.Start()
 	if err != nil {
 		t.Fatal(err)
