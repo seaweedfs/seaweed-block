@@ -169,9 +169,18 @@ type StorageBackend struct {
 	drainMu sync.Mutex
 	drain   chan struct{}
 
-	mu            sync.Mutex
-	closed        bool
-	chunkFenced   func() bool   // installed under mu; called only after releasing mu
+	mu          sync.Mutex
+	closed      bool
+	chunkFenced func() bool // installed under mu; called only after releasing mu
+	// observerErr is a refused write-observer install (its ship order
+	// could not follow the store's next LSN). While set, every I/O is
+	// refused, so a volume never serves without its observer. Under mu.
+	observerErr error
+	// observerMu serializes moving the store's next LSN (the frontier
+	// seed) together with rebasing the observer, against installing an
+	// observer together with its rebase: whichever runs second sees the
+	// other's result. Lock order: observerMu, then mu.
+	observerMu    sync.Mutex
 	observer      WriteObserver // optional; nil = no replication fan-out
 	writeAck      WriteAckPolicy
 	profile       writeProfile
@@ -333,19 +342,40 @@ func (b *StorageBackend) Close() error {
 // Owns: observer pointer under b.mu.
 // Borrows: the observer — caller retains ownership; StorageBackend
 // does not close or otherwise tear down the observer.
-func (b *StorageBackend) SetWriteObserver(obs WriteObserver) {
-	b.mu.Lock()
-	b.observer = obs
-	b.mu.Unlock()
-	// The store's frontier may have been seeded before the observer was
-	// installed: start its ship order at the store's next LSN.
-	if err := b.rebaseShipLSN(); err != nil {
-		log.Printf("durable: write observer ship LSN: %v", err)
+//
+// An observer that orders writes by LSN (ShipLSNRebaser) is first rebased
+// to the store's next LSN: the frontier may have been seeded before the
+// install. If that rebase is refused, the observer is NOT installed, the
+// error is returned, and the backend refuses all I/O until an install
+// succeeds: a volume never serves writes its observer would mis-order.
+func (b *StorageBackend) SetWriteObserver(obs WriteObserver) error {
+	b.observerMu.Lock()
+	defer b.observerMu.Unlock()
+	if r, ok := obs.(ShipLSNRebaser); ok {
+		if err := r.RebaseShipLSN(b.storage.NextLSN()); err != nil {
+			err = fmt.Errorf("durable: write observer not installed: ship LSN: %w", err)
+			b.mu.Lock()
+			b.observerErr = err
+			b.mu.Unlock()
+			return err
+		}
 	}
+	b.mu.Lock()
+	b.observer, b.observerErr = obs, nil
+	b.mu.Unlock()
+	return nil
 }
 
 // rebaseShipLSN moves an LSN-ordering observer to the store's next LSN.
-func (b *StorageBackend) rebaseShipLSN() error {
+// seedAndRebase moves the store's next LSN with seed and, in the same
+// critical section as observer installs, rebases the installed observer
+// to it. A refused rebase also closes I/O (as a refused install does).
+func (b *StorageBackend) seedAndRebase(seed func() error) error {
+	b.observerMu.Lock()
+	defer b.observerMu.Unlock()
+	if err := seed(); err != nil {
+		return err
+	}
 	b.mu.Lock()
 	obs := b.observer
 	b.mu.Unlock()
@@ -353,7 +383,14 @@ func (b *StorageBackend) rebaseShipLSN() error {
 	if !ok {
 		return nil
 	}
-	return r.RebaseShipLSN(b.storage.NextLSN())
+	if err := r.RebaseShipLSN(b.storage.NextLSN()); err != nil {
+		err = fmt.Errorf("durable: write observer ship LSN after the frontier seed: %w", err)
+		b.mu.Lock()
+		b.observerErr = err
+		b.mu.Unlock()
+		return err
+	}
+	return nil
 }
 
 // SetWriteAckPolicy configures whether observer acknowledgement participates
@@ -553,9 +590,13 @@ func (b *StorageBackend) readyCheck() error {
 	b.mu.Lock()
 	closed := b.closed
 	chunkFenced := b.chunkFenced
+	observerErr := b.observerErr
 	b.mu.Unlock()
 	if closed {
 		return frontend.ErrBackendClosed
+	}
+	if observerErr != nil {
+		return fmt.Errorf("%w: %v", frontend.ErrNotReady, observerErr)
 	}
 	if chunkFenced != nil && chunkFenced() {
 		return frontend.ErrStalePrimary

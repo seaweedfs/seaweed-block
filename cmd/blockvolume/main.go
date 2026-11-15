@@ -804,7 +804,10 @@ func run(f flags) int {
 		// for primary-role frontend bind). Without this hook, primary
 		// writes would land locally but never ship to peers.
 		if sb := durableProv.Backend(f.volumeID); sb != nil {
-			sb.SetWriteObserver(replVolume)
+			if err := sb.SetWriteObserver(replVolume); err != nil {
+				// The backend now refuses all I/O; the volume cannot serve.
+				fmt.Fprintln(os.Stderr, "blockvolume: write-observer wire:", err)
+			}
 			sb.SetWriteAckPolicy(writeAck)
 		} else {
 			fmt.Fprintln(os.Stderr, "blockvolume: write-observer wire: Backend(", f.volumeID, ") returned nil; replication fan-out disabled")

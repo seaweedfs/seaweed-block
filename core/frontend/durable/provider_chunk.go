@@ -283,13 +283,11 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 		// recovery may already contain writes accepted by the storage seam
 		// before assignment; do not replace their frontier with zero.
 		if head.Gen != 0 {
-			if err := ws.SeedChunkFrontier(head.RemoteLSN); err != nil {
-				return nil, err
-			}
 			// Every component that cached the next LSN learns the seeded
-			// one before the volume serves I/O.
-			if err := h.backend.rebaseShipLSN(); err != nil {
-				return nil, fmt.Errorf("durable: rebase ship LSN after the frontier seed: %w", err)
+			// one before the volume serves I/O, serialized with observer
+			// installs.
+			if err := h.backend.seedAndRebase(func() error { return ws.SeedChunkFrontier(head.RemoteLSN) }); err != nil {
+				return nil, err
 			}
 		}
 	}
