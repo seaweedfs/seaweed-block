@@ -35,6 +35,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // chunkSink receives walstore events.
@@ -173,7 +174,9 @@ type chunkHead struct {
 	Chunks    map[uint64]chunkRef
 }
 
-// chunkRemote is the remote store. Keys are immutable: Put of a key that
+// chunkRemote is the remote store. Keys are non-empty valid UTF-8 strings
+// (validChunkKey); Put and PutIntent refuse any other key before writing
+// anything. Keys are immutable: Put of a key that
 // exists, or once existed, fails with errChunkKeyExists and never replaces
 // stored bytes. CASHead installs next only when the stored HEAD matches
 // expected and returns the new generation; a mismatch fails with
@@ -222,6 +225,18 @@ func newChunkIntentID(gen uint64) (string, error) {
 		return "", fmt.Errorf("storage: intent nonce: %w", err)
 	}
 	return strconv.FormatUint(gen, 10) + "-" + hex.EncodeToString(b[:]), nil
+}
+
+// validChunkKey is the chunk key domain: a non-empty, valid UTF-8 string.
+// Every remote refuses any other key at Put and at PutIntent, before it
+// persists anything, so a key protected by an intent always lists back
+// byte-identical to the key stored (an encoding that replaced invalid
+// bytes would otherwise protect a different key than the one stored).
+func validChunkKey(key string) error {
+	if key == "" || !utf8.ValidString(key) {
+		return fmt.Errorf("%w: %q", errChunkKeyInvalid, key)
+	}
+	return nil
 }
 
 // validChunkIntentID accepts exactly the ids newChunkIntentID produces.
@@ -335,6 +350,7 @@ var (
 	errChunkLayerFenced         = errors.New("storage: chunk layer fenced")
 	errChunkEvictRefused        = errors.New("storage: chunk eviction refused")
 	errChunkCaptureRefused      = errors.New("storage: chunk capture refused")
+	errChunkKeyInvalid          = errors.New("storage: chunk key is not non-empty valid UTF-8")
 )
 
 // attachChunkLayer attaches a chunk layer to an open store (chunk_layer.go).

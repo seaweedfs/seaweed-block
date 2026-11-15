@@ -38,7 +38,12 @@ var (
 	ErrChunkLayerFenced      = errChunkLayerFenced
 	ErrChunkEvictRefused     = errChunkEvictRefused
 	ErrChunkCaptureRefused   = errChunkCaptureRefused
+	ErrChunkKeyInvalid       = errChunkKeyInvalid
 )
+
+// ValidChunkKey enforces the chunk key domain (non-empty valid UTF-8); a
+// remote implementation calls it in Put and, for every key, in PutIntent.
+func ValidChunkKey(key string) error { return validChunkKey(key) }
 
 // AttachChunkLayer attaches a chunk layer to an open, recovered WALStore.
 // Attach after Recover: the dirty set and the restart rules read the

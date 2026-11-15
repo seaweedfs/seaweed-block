@@ -79,6 +79,11 @@ func newFakeChunkRemote() *fakeChunkRemote {
 }
 
 func (f *fakeChunkRemote) PutIntent(ctx context.Context, in chunkIntent) (string, error) {
+	for _, k := range in.Keys {
+		if err := validChunkKey(k); err != nil {
+			return "", err
+		}
+	}
 	id, err := newChunkIntentID(in.Gen)
 	if err != nil {
 		return "", err
@@ -111,6 +116,9 @@ func (f *fakeChunkRemote) ListIntents(ctx context.Context) ([]chunkIntent, error
 }
 
 func (f *fakeChunkRemote) Put(ctx context.Context, key string, data []byte) error {
+	if err := validChunkKey(key); err != nil {
+		return err
+	}
 	entry := append([]byte(nil), data...)
 	f.mu.Lock()
 	f.ops = append(f.ops, "put:"+key)

@@ -32,6 +32,11 @@ func (m *MemChunkRemote) PutIntent(ctx context.Context, in chunkIntent) (string,
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
+	for _, k := range in.Keys {
+		if err := validChunkKey(k); err != nil {
+			return "", err
+		}
+	}
 	id, err := newChunkIntentID(in.Gen)
 	if err != nil {
 		return "", err
@@ -70,6 +75,9 @@ func (m *MemChunkRemote) ListIntents(ctx context.Context) ([]chunkIntent, error)
 
 func (m *MemChunkRemote) Put(ctx context.Context, key string, data []byte) error {
 	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validChunkKey(key); err != nil {
 		return err
 	}
 	m.mu.Lock()

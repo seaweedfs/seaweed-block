@@ -125,6 +125,9 @@ func CheckVolumeID(id string) error {
 // keyLocation returns the directory and entry name holding key's binding:
 // the owner's keys/ directory for "@<owner>/<key>", this volume's otherwise.
 func (r *ChunkRemote) keyLocation(key string) (dir, name string, err error) {
+	if err := storage.ValidChunkKey(key); err != nil {
+		return "", "", fmt.Errorf("%w: %v", ErrInvalidKey, err)
+	}
 	if !strings.HasPrefix(key, "@") {
 		name, err := keyName(key)
 		return r.keyDir(), name, err
@@ -143,6 +146,9 @@ func (r *ChunkRemote) keyLocation(key string) (dir, name string, err error) {
 // create. A key that is already bound fails with storage.ErrChunkKeyExists
 // and its bytes are untouched.
 func (r *ChunkRemote) Put(ctx context.Context, key string, data []byte) error {
+	if err := storage.ValidChunkKey(key); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidKey, err)
+	}
 	if strings.HasPrefix(key, "@") {
 		return fmt.Errorf("%w: %q is owner-qualified; a volume writes only its own keys", ErrInvalidKey, key)
 	}
@@ -222,6 +228,11 @@ func (r *ChunkRemote) intentDir() string { return path.Join(r.root, intentsDir) 
 // The entry is durable when the filer's fsync rule covers the chunk path,
 // the same condition as for HEAD.
 func (r *ChunkRemote) PutIntent(ctx context.Context, in storage.ChunkIntent) (string, error) {
+	for _, k := range in.Keys {
+		if err := storage.ValidChunkKey(k); err != nil {
+			return "", fmt.Errorf("%w: %v", ErrInvalidKey, err)
+		}
+	}
 	id, err := storage.NewChunkIntentID(in.Gen)
 	if err != nil {
 		return "", err
