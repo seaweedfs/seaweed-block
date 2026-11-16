@@ -122,6 +122,15 @@ func BackendExit(ctx context.Context) {
 		r.backendEnd = time.Now()
 	}
 }
+
+// IncludeReceive includes a lazy provider lookup preceding the delegated Begin.
+// Called by the owning synchronous dispatcher before any backend call.
+func (r *Request) IncludeReceive(received time.Time) {
+	if r != nil && received.Before(r.start) {
+		r.start = received
+	}
+}
+
 func (r *Request) Finish(failed bool) {
 	if r == nil {
 		return

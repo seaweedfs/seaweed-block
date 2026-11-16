@@ -2,6 +2,7 @@ package ublk
 
 import (
 	"context"
+	"errors"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"testing"
@@ -61,5 +62,43 @@ func TestTargetDurabilityLatencyThroughProviderBackend(t *testing.T) {
 	}
 	if s.WAL == nil || s.WAL.FileSync.Count == 0 || s.BackendSync.Count != 2 {
 		t.Fatal("storage stages missing", s)
+	}
+}
+
+type retryLatencyProvider struct {
+	inner frontend.Provider
+	calls int
+}
+
+func (p *retryLatencyProvider) Open(ctx context.Context, id string) (frontend.Backend, error) {
+	p.calls++
+	if p.calls == 1 {
+		return nil, errors.New("first open refused")
+	}
+	return p.inner.Open(ctx, id)
+}
+func TestTargetLatencyOpenFailureIsNotRetriedInsideRequest(t *testing.T) {
+	p := &retryLatencyProvider{inner: failingProvider{err: errors.New("still refused")}}
+	tg := NewTarget(TargetConfig{Provider: p, VolumeID: "v1", VolumeSize: 4096, BlockSize: 4096})
+	var h handler
+	tg.startDevice = func(cfg Config) (targetDevice, error) {
+		h = handler{backend: cfg.Backend, size: cfg.Size}
+		return &latencyDevice{h: h}, nil
+	}
+	if _, err := tg.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer tg.Close()
+	if n := h.handle(context.Background(), request{op: ioOpFlush}, nil); n >= 0 {
+		t.Fatal("open failure acknowledged")
+	}
+	if p.calls != 1 {
+		t.Fatalf("timing caused %d open attempts in one request", p.calls)
+	}
+	if n := h.handle(context.Background(), request{op: ioOpFlush}, nil); n >= 0 {
+		t.Fatal("retry failure acknowledged")
+	}
+	if p.calls != 2 {
+		t.Fatalf("next request did not retry exactly once: %d", p.calls)
 	}
 }
