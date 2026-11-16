@@ -44,6 +44,7 @@ type clusterSpecPlacementSlot struct {
 }
 
 type clusterSpecImport struct {
+	Volumes    []lifecycle.VolumeSpec
 	Topology   topologyFile
 	Nodes      []lifecycle.NodeRegistration
 	Placements []lifecycle.PlacementIntent
@@ -98,6 +99,11 @@ func clusterSpecToImports(spec clusterSpecFile) (clusterSpecImport, error) {
 		}
 		if len(vol.Placements) != vol.ReplicationFactor {
 			return clusterSpecImport{}, fmt.Errorf("cluster spec: volume %q placements %d != replication_factor %d", vol.ID, len(vol.Placements), vol.ReplicationFactor)
+		}
+		// Placement-only legacy specifications cannot supply a capacity. They
+		// retain the explicit CreateVolume prerequisite rather than inventing one.
+		if vol.SizeBytes > 0 {
+			out.Volumes = append(out.Volumes, lifecycle.VolumeSpec{VolumeID: vol.ID, SizeBytes: vol.SizeBytes, ReplicationFactor: vol.ReplicationFactor})
 		}
 		topVol := topologyVolume{VolumeID: vol.ID}
 		intent := lifecycle.PlacementIntent{
