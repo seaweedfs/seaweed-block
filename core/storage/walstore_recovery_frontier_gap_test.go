@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -18,6 +19,12 @@ func TestWALStoreRecoverKeepsSyncedEntriesAboveAnUnpersistedFrontierJump(t *test
 	path := filepath.Join(t.TempDir(), "store.bin")
 	s := createWALStoreWithWALSizeForTest(t, path, 64, blockSize, 24*1024)
 	s.DisableAutoFlushForRecoveryTest()
+	crashed := false
+	t.Cleanup(func() {
+		if !crashed {
+			_ = s.Close()
+		}
+	})
 	if err := s.WriteExtentDirect(0, makeBlock(blockSize, 0xBA)); err != nil { // BASE, no LSN
 		t.Fatal(err)
 	}
@@ -36,6 +43,7 @@ func TestWALStoreRecoverKeepsSyncedEntriesAboveAnUnpersistedFrontierJump(t *test
 		t.Fatalf("Sync frontier %d; want 102 (the applied entries are synced)", synced)
 	}
 	crashRecoveryHardeningStore(t, s)
+	crashed = true
 	if sb := diskSuperblockForGapTest(t, path); sb.WALCheckpointLSN != 0 {
 		t.Fatalf("persisted checkpoint %d; want 0 (the frontier jump is not persisted)", sb.WALCheckpointLSN)
 	}
@@ -52,14 +60,18 @@ func TestWALStoreRecoverKeepsSyncedEntriesAboveAnUnpersistedFrontierJump(t *test
 	assertRecoveryHardeningBlock(t, r, 4, makeBlock(blockSize, 0x66))
 }
 
+// diskSuperblockForGapTest reads the on-disk superblock with a plain file
+// read: no store, no flusher or committer.
 func diskSuperblockForGapTest(t *testing.T, path string) superblock {
 	t.Helper()
-	r, err := OpenWALStore(path)
+	f, err := os.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sb := *r.sb
-	r.committer.Stop()
-	_ = r.fd.Close()
+	defer f.Close()
+	sb, err := readSuperblock(f)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return sb
 }
