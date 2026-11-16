@@ -168,3 +168,91 @@ func TestProviderBackendOpenHasBoundAndHonorsCancellation(t *testing.T) {
 		t.Fatal("caller cancellation ignored")
 	}
 }
+
+// A held readiness Open must not serialize other callers' cancellation budgets.
+func TestProviderBackendQueuedOpenCancellation(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	var opens atomic.Int32
+	b := &providerBackend{provider: reopenProviderFunc(func(ctx context.Context, _ string) (frontend.Backend, error) {
+		if opens.Add(1) == 1 {
+			close(entered)
+		}
+		select {
+		case <-release:
+			return &reopenScriptBackend{}, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	})}
+	first := make(chan error, 1)
+	go func() { _, _, err := b.get(context.Background()); first <- err }()
+	t.Cleanup(func() {
+		once.Do(func() { close(release) })
+		select {
+		case <-first:
+		case <-time.After(6 * time.Second):
+			t.Error("opener unsettled")
+		}
+	})
+	<-entered
+	const callers = 8
+	results := make(chan error, callers)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	for i := 0; i < callers; i++ {
+		go func() { _, _, err := b.get(ctx); results <- err }()
+	}
+	cancel()
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	for i := 0; i < callers; i++ {
+		select {
+		case err := <-results:
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("queued error %v", err)
+			}
+		case <-timer.C:
+			t.Fatal("queued callers blocked behind Open instead of their own cancellation")
+		}
+	}
+	if opens.Load() != 1 {
+		t.Fatalf("concurrent opens: %d", opens.Load())
+	}
+}
+
+func TestProviderBackendQueuedOpenSharesDeadline(t *testing.T) {
+	entered := make(chan struct{})
+	var opens atomic.Int32
+	b := &providerBackend{provider: reopenProviderFunc(func(ctx context.Context, _ string) (frontend.Backend, error) {
+		if opens.Add(1) == 1 {
+			close(entered)
+		}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})}
+	const callers = 8
+	results := make(chan error, callers+1)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	go func() { _, _, err := b.get(ctx); results <- err }()
+	<-entered
+	for i := 0; i < callers; i++ {
+		go func() { _, _, err := b.get(ctx); results <- err }()
+	}
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	for i := 0; i <= callers; i++ {
+		select {
+		case err := <-results:
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("deadline: %v", err)
+			}
+		case <-timer.C:
+			t.Fatal("queued budgets accumulated")
+		}
+	}
+	if opens.Load() != 1 {
+		t.Fatalf("waiters opened serially: %d", opens.Load())
+	}
+}

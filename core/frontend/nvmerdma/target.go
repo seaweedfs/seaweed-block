@@ -82,29 +82,68 @@ type providerBackend struct {
 	mu         sync.Mutex
 	backend    frontend.Backend
 	generation uint64
+	opening    *backendOpen
+}
+
+// backendOpen publishes its result by closing done. Only the opener writes it.
+type backendOpen struct {
+	done       chan struct{}
+	backend    frontend.Backend
+	generation uint64
+	err        error
 }
 
 func (b *providerBackend) get(ctx context.Context) (frontend.Backend, uint64, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.backend != nil {
-		return b.backend, b.generation, nil
-	}
-	// NBD supplies a target-lifetime context, not a per-request deadline.
-	// Bound readiness waits even while this target is demoted.
+	// Start the readiness budget before coordination, never after waiting for a lock.
 	openCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	backend, err := b.provider.Open(openCtx, b.volumeID)
-	if err != nil {
-		return nil, 0, fmt.Errorf("nvmerdma: open backend: %w", err)
+	if err := openCtx.Err(); err != nil {
+		return nil, 0, err
 	}
-	b.backend = backend
-	b.generation++
-	return backend, b.generation, nil
+	b.mu.Lock()
+	if b.backend != nil {
+		backend, generation := b.backend, b.generation
+		b.mu.Unlock()
+		return backend, generation, nil
+	}
+	flight := b.opening
+	if flight == nil {
+		flight = &backendOpen{done: make(chan struct{})}
+		b.opening = flight
+		// Provider.Open may wait for readiness. Never hold the cache lock across it.
+		// One flight owns that wait; other callers retain their own cancellation.
+		go func() {
+			backend, err := b.provider.Open(openCtx, b.volumeID)
+			b.mu.Lock()
+			if err == nil {
+				b.backend = backend
+				b.generation++
+				flight.backend = backend
+				flight.generation = b.generation
+			} else {
+				flight.err = fmt.Errorf("nvmerdma: open backend: %w", err)
+			}
+			b.opening = nil
+			close(flight.done)
+			b.mu.Unlock()
+		}()
+	}
+	b.mu.Unlock()
+	select {
+	case <-openCtx.Done():
+		return nil, 0, openCtx.Err()
+	case <-flight.done:
+		if err := openCtx.Err(); err != nil {
+			return nil, 0, err
+		}
+		return flight.backend, flight.generation, flight.err
+	}
 }
 
 func (b *providerBackend) Read(ctx context.Context, offset int64, p []byte) (int, error) {
-	backend, generation, err := b.get(ctx)
+	readinessCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	backend, generation, err := b.get(readinessCtx)
 	if err != nil {
 		return 0, err
 	}
@@ -112,7 +151,7 @@ func (b *providerBackend) Read(ctx context.Context, offset int64, p []byte) (int
 	if n != 0 || !errors.Is(err, frontend.ErrStalePrimary) {
 		return n, err
 	}
-	backend, err = b.reopen(ctx, generation)
+	backend, err = b.reopen(readinessCtx, generation)
 	if err != nil {
 		return 0, err
 	}
@@ -120,7 +159,9 @@ func (b *providerBackend) Read(ctx context.Context, offset int64, p []byte) (int
 }
 
 func (b *providerBackend) Write(ctx context.Context, offset int64, p []byte) (int, error) {
-	backend, generation, err := b.get(ctx)
+	readinessCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	backend, generation, err := b.get(readinessCtx)
 	if err != nil {
 		return 0, err
 	}
@@ -128,7 +169,7 @@ func (b *providerBackend) Write(ctx context.Context, offset int64, p []byte) (in
 	if n != 0 || !errors.Is(err, frontend.ErrStalePrimary) {
 		return n, err
 	}
-	backend, err = b.reopen(ctx, generation)
+	backend, err = b.reopen(readinessCtx, generation)
 	if err != nil {
 		return 0, err
 	}
@@ -136,7 +177,9 @@ func (b *providerBackend) Write(ctx context.Context, offset int64, p []byte) (in
 }
 
 func (b *providerBackend) Sync(ctx context.Context) error {
-	backend, generation, err := b.get(ctx)
+	readinessCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	backend, generation, err := b.get(readinessCtx)
 	if err != nil {
 		return err
 	}
@@ -144,7 +187,7 @@ func (b *providerBackend) Sync(ctx context.Context) error {
 	if !errors.Is(err, frontend.ErrStalePrimary) {
 		return err
 	}
-	backend, err = b.reopen(ctx, generation)
+	backend, err = b.reopen(readinessCtx, generation)
 	if err != nil {
 		return err
 	}

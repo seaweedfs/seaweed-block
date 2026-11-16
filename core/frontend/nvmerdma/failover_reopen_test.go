@@ -107,7 +107,7 @@ func TestProviderBackendReopensAfterRealMasterFailover(t *testing.T) {
 	if err == nil || n != 0 {
 		t.Fatalf("demoted backend wrote bytes: %d %v", n, err)
 	}
-	if !errors.Is(err, frontend.ErrStalePrimary) && !errors.Is(err, frontend.ErrNotReady) {
+	if !errors.Is(err, frontend.ErrStalePrimary) && !errors.Is(err, frontend.ErrNotReady) && !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatal("unexpected refusal", err)
 	}
 	transition(true, false, "r1", 3)
