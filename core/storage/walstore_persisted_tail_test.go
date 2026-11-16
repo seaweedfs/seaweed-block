@@ -204,3 +204,62 @@ func TestWALWriterReuseIsBoundedByTheDurableTail(t *testing.T) {
 		t.Fatalf("append into bytes released only in memory: err=%v; want errWALFull until the tail is persisted", err)
 	}
 }
+
+// A full flush persists head == tail (an empty WAL at that position). Sync
+// does not persist the head, so synced appends follow it there; recovery must
+// scan from the persisted position, not from offset 0 (claude05's S3 trace:
+// a torn unsynced record wrapped to 0 must not hide the synced run).
+func TestWALStoreFullFlushThenTornWrapKeepsSyncedRecords(t *testing.T) {
+	const (
+		blockSize = 4096
+		walSize   = 24 * 1024
+	)
+	S := uint64(walEntryHeaderSize + blockSize)
+	path := filepath.Join(t.TempDir(), "store.bin")
+	s := createWALStoreWithWALSizeForTest(t, path, 64, blockSize, walSize)
+	s.DisableAutoFlushForRecoveryTest()
+	if _, err := s.Write(0, makeBlock(blockSize, 0x10)); err != nil { // LSN 1
+		t.Fatal(err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.flusher.flushOnce(); err != nil {
+		t.Fatal(err)
+	}
+	for lba := uint32(1); lba <= 4; lba++ { // LSN 2..5, synced
+		if _, err := s.Write(lba, makeBlock(blockSize, byte(0x10+lba))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Write(5, makeBlock(blockSize, 0x66)); err != nil { // LSN 6, unsynced, wraps
+		t.Fatal(err)
+	}
+	ents := recoverySnapshotEntriesByLBA(s.dm.snapshot())
+	if ents[5].WALOffset != 0 || ents[1].WALOffset != S {
+		t.Fatalf("layout: LSN 6 at %d, LSN 2 at %d; want 0 and S", ents[5].WALOffset, ents[1].WALOffset)
+	}
+	walOff := s.sb.WALOffset
+	if _, err := s.fd.WriteAt(make([]byte, walSize-5*S), int64(walOff+5*S)); err != nil { // padding not on disk
+		t.Fatal(err)
+	}
+	if _, err := s.fd.WriteAt(make([]byte, blockSize/2), int64(walOff+S-blockSize/2)); err != nil { // LSN 6 torn
+		t.Fatal(err)
+	}
+	crashRecoveryHardeningStore(t, s)
+	r, err := OpenWALStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.DisableAutoFlushForRecoveryTest()
+	t.Cleanup(func() { _ = r.Close() })
+	if _, err := r.Recover(); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	for lba := uint32(1); lba <= 4; lba++ {
+		assertRecoveryHardeningBlock(t, r, lba, makeBlock(blockSize, byte(0x10+lba)))
+	}
+}
