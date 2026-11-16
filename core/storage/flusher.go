@@ -51,6 +51,11 @@ type flusher struct {
 	flushes  atomic.Uint64 // diagnostic
 	bytesOut atomic.Uint64 // diagnostic
 	instr    flusherInstrumentation
+
+	// afterSnapshotForTest, when set, runs after the dirty-map snapshot is
+	// taken and the publication lock released: the window in which a
+	// concurrent append is not in this cycle's checkpoint. Tests only.
+	afterSnapshotForTest func()
 }
 
 type flusherConfig struct {
@@ -163,6 +168,9 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 	store.mu.RUnlock()
 	if len(entries) == 0 {
 		return nil
+	}
+	if f.afterSnapshotForTest != nil {
+		f.afterSnapshotForTest()
 	}
 	finishCycle := f.instr.recordCycle(
 		cycleStart, time.Since(snapshotStart), entries, store.sb.BlockSize,
