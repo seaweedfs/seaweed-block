@@ -62,9 +62,6 @@ func chunkVolumeDelete(args []string, stdout, stderr io.Writer) int {
 	defer cancel()
 	res, err := cat.DeleteVolume(ctx, volumeID, admit)
 	if err != nil {
-		if red := true; red { // RED: partial effects dropped
-			return chunkResult("volume-delete", nil, err, stdout, stderr)
-		}
 		return volumeDeletePartial(res, err, stdout, stderr)
 	}
 	return chunkResult("volume-delete", res, nil, stdout, stderr)

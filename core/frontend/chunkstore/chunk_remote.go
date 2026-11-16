@@ -384,7 +384,7 @@ func (r *ChunkRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVer
 	if err != nil {
 		return 0, err
 	}
-	if false && (current.State == storage.ChunkHeadDeleting || current.State == storage.ChunkHeadDeleted) { // RED: nothing refuses a deleting HEAD
+	if current.State == storage.ChunkHeadDeleting || current.State == storage.ChunkHeadDeleted {
 		// A delete passed its linearization point: nothing moves this HEAD
 		// again (the catalog writes the delete's own transitions).
 		return 0, fmt.Errorf("%w: %w", storage.ErrChunkHeadPrecondition, storage.ErrChunkHeadDeleted)

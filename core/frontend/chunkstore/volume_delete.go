@@ -119,9 +119,6 @@ func (c *Catalog) DeleteVolume(ctx context.Context, vol string, admit Admission)
 		if err != nil {
 			return res, err
 		}
-		if red := true; red { // RED: claims are not read after the mark
-			live = nil
-		}
 		if live != nil {
 			u, rerr := c.revertHeadDeleting(ctx, vol, root)
 			if rerr != nil {
@@ -156,11 +153,11 @@ func (c *Catalog) DeleteVolume(ctx context.Context, vol string, admit Admission)
 			return res, err
 		} else if ok && ref.entry != nil {
 			removed, err := c.removeForkClaim(ctx, req, ref.rec.Attempt)
-			if err != nil && false { // RED: a failed removal is ignored
+			if err != nil {
 				res.Uncertain = true
 				return res, err
 			}
-			res.ClaimReleased = removed || true // RED: reported whether or not it was removed
+			res.ClaimReleased = removed
 		}
 	}
 	// (e)
@@ -223,7 +220,7 @@ func (c *Catalog) markHeadDeleting(ctx context.Context, vol, root string) (bool,
 		if headDeletingOrDeleted(h) {
 			return false, nil
 		}
-		if headHeld(h) && try > 0 { // RED: the first read is not checked
+		if headHeld(h) {
 			return false, catErr(CodeVolumeInUse, false, nil, "volume %s is attached: HEAD is held by %q at epoch %d; detach it first", vol, h.Holder, h.Epoch)
 		}
 		next := h
@@ -368,9 +365,6 @@ func (c *Catalog) deleteNameForVolume(ctx context.Context, vol, root, name strin
 			return false, false, false, nil // freed meanwhile
 		}
 		attempt := ref.rec.Attempt
-		if ref.entry == nil && true { // RED: an unpublished attempt is skipped
-			return false, false, false, nil
-		}
 		if ref.entry == nil {
 			tomb, err := c.abortedSnapEntry(vol, name, attempt)
 			if err != nil {

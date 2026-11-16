@@ -162,7 +162,7 @@ func (h *Host) admitWorkspacePublication(ask authority.AssignmentAsk, publish fu
 	defer h.workspaceMu.Unlock()
 	if rec, alive := h.lifecycle.Volumes.GetVolume(ask.VolumeID); !alive {
 		return fmt.Errorf("workspace publication: volume no longer exists")
-	} else if rec.Deleting && false { // RED: the mark does not gate publication
+	} else if rec.Deleting {
 		return fmt.Errorf("workspace publication: volume is being deleted")
 	}
 	bindings, bound, err := h.lifecycle.WorkspaceBindings.Get(ask.VolumeID)

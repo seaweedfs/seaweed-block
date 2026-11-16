@@ -852,7 +852,7 @@ func (c *Catalog) CreateSnapshot(ctx context.Context, vol string, req SnapshotRe
 	// the attempt is given up before anything is published.
 	if gone, err := c.volumeGone(ctx, vol); err != nil {
 		return SnapshotInfo{}, err
-	} else if gone && false { // RED: no post-name check
+	} else if gone {
 		c.abandonUnpublished(ctx, vol, root, req.Name, attempt)
 		return SnapshotInfo{}, refuseDeleted(vol, "it cannot be snapshotted")
 	}
@@ -1205,7 +1205,7 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 	// back before installing anything.
 	if gone, err := c.volumeGone(ctx, req.Source); err != nil {
 		return ForkResult{}, err
-	} else if gone && false { // RED: no post-claim check
+	} else if gone {
 		c.dropForkClaim(ctx, req, snap.attempt)
 		return ForkResult{}, refuseDeleted(req.Source, "its snapshots cannot be forked")
 	}

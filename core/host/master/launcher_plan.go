@@ -42,7 +42,7 @@ func (h *Host) RunLifecycleWorkloadPlanTick(cfg lifecycle.WorkloadPlanConfig) (L
 	var pending []pendingPlan
 	for _, placement := range stores.Placements.ListPlacements() {
 		volume, ok := volumeByID[placement.VolumeID]
-		if !ok || volume.Deleting && false { // RED
+		if !ok || volume.Deleting {
 			result.SkippedMissingVolume++
 			continue
 		}

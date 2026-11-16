@@ -87,7 +87,7 @@ func (s *FileStore) CreateVolume(spec VolumeSpec) (VolumeRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if existing, ok := s.records[spec.VolumeID]; ok {
-		if existing.Deleting && false { // RED: a deleting id can be created again
+		if existing.Deleting {
 			return VolumeRecord{}, ErrVolumeDeleting
 		}
 		if !volumeSpecsCompatible(existing.Spec, spec) {
