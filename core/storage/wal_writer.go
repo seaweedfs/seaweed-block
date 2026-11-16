@@ -31,7 +31,16 @@ type walWriter struct {
 	walSize     uint64 // size of the WAL region in bytes
 	logicalHead uint64 // monotonic write position
 	logicalTail uint64 // monotonic flush position
-	instr       *writeInstrumentation
+	// durableTail is the tail in the last fsynced superblock. The writer
+	// overwrites only bytes released by it (claude05's S3 ruling,
+	// 2026-11-16): bytes the on-disk superblock still declares retained
+	// are never reused, so a torn new record cannot land inside the
+	// persisted [tail, head) and hide a record recovery needs.
+	// durablePending: the bounds were rebuilt by recovery and are not yet
+	// persisted; nothing is reusable until they are.
+	durableTail    uint64
+	durablePending bool
+	instr          *writeInstrumentation
 
 	// Optional batch pwrite fault seam; nil uses the real file.
 	batchWriteAt func([]byte, int64) (int, error)
@@ -47,6 +56,7 @@ func newWALWriter(fd *os.File, walOffset, walSize, head, tail uint64, instr *wri
 		walSize:     walSize,
 		logicalHead: head,
 		logicalTail: tail,
+		durableTail: tail,
 		instr:       instr,
 	}
 }
@@ -54,6 +64,15 @@ func newWALWriter(fd *os.File, walOffset, walSize, head, tail uint64, instr *wri
 func (w *walWriter) physicalPos(logical uint64) uint64 { return logical % w.walSize }
 
 func (w *walWriter) used() uint64 { return w.logicalHead - w.logicalTail }
+
+// spaceUsed is what the space checks count: everything from the durable
+// tail on. Bytes released only in memory are not reusable yet.
+func (w *walWriter) spaceUsed() uint64 {
+	if w.durablePending || w.durableTail > w.logicalHead {
+		return w.walSize
+	}
+	return w.logicalHead - w.durableTail
+}
 
 // append writes one entry and returns the WAL-relative offset where
 // it was placed. If the entry would straddle the end of the WAL
@@ -83,7 +102,7 @@ func (w *walWriter) append(entry *walEntry) (walRelOffset uint64, err error) {
 	remaining := w.walSize - physHead
 	if remaining < entryLen {
 		// Pad to end of region and wrap.
-		if w.used()+remaining+entryLen > w.walSize {
+		if w.spaceUsed()+remaining+entryLen > w.walSize {
 			return 0, errWALFull
 		}
 		if err := w.writePadding(remaining, physHead); err != nil {
@@ -95,7 +114,7 @@ func (w *walWriter) append(entry *walEntry) (walRelOffset uint64, err error) {
 		w.logicalHead += remaining
 		physHead = 0
 	}
-	if w.used()+entryLen > w.walSize {
+	if w.spaceUsed()+entryLen > w.walSize {
 		return 0, errWALFull
 	}
 	absOffset := int64(w.walOffset + physHead)
@@ -253,7 +272,12 @@ func boundedPendingCapacity(lengths []uint64) int {
 func (w *walWriter) planAppendBatchLengths(lengths []uint64) ([]uint64, uint64, error) {
 	localHead := w.logicalHead
 	offsets := make([]uint64, 0, len(lengths))
-	used := func() uint64 { return localHead - w.logicalTail }
+	used := func() uint64 {
+		if w.durablePending || w.durableTail > localHead {
+			return w.walSize
+		}
+		return localHead - w.durableTail
+	}
 	for _, entryLen := range lengths {
 		physHead := w.physicalPos(localHead)
 		remaining := w.walSize - physHead
@@ -368,6 +392,8 @@ func (w *walWriter) reset() {
 	defer w.mu.Unlock()
 	w.logicalHead = 0
 	w.logicalTail = 0
+	w.durableTail = 0
+	w.durablePending = false
 }
 
 func (w *walWriter) restoreRecoveredBounds(head, tail uint64) error {
@@ -381,7 +407,47 @@ func (w *walWriter) restoreRecoveredBounds(head, tail uint64) error {
 	}
 	w.logicalHead = head
 	w.logicalTail = tail
+	w.durablePending = true // until the caller persists these bounds
 	return nil
+}
+
+// bounds returns head and tail from one snapshot.
+func (w *walWriter) bounds() (head, tail uint64) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.logicalHead, w.logicalTail
+}
+
+// tailPastEntry is the tail that advanceTailPastEntry would set, without
+// moving it (the caller persists it first).
+func (w *walWriter) tailPastEntry(entryPhys, entryLen uint64) uint64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	physTail := w.physicalPos(w.logicalTail)
+	var distanceToEntry uint64
+	if entryPhys >= physTail {
+		distanceToEntry = entryPhys - physTail
+	} else {
+		distanceToEntry = w.walSize - physTail + entryPhys
+	}
+	advance := distanceToEntry + entryLen
+	if advance > w.used() {
+		return w.logicalTail
+	}
+	return w.logicalTail + advance
+}
+
+// tailPersisted records that a superblock with WAL tail = tail is fsynced:
+// the writer's tail moves there (never backward) and the bytes before it
+// become reusable.
+func (w *walWriter) tailPersisted(tail uint64) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if tail > w.logicalTail {
+		w.logicalTail = tail
+	}
+	w.durableTail = tail
+	w.durablePending = false
 }
 
 func (w *walWriter) head() uint64 {
@@ -420,5 +486,5 @@ func (w *walWriter) usedFraction() float64 {
 	if w.walSize == 0 {
 		return 0
 	}
-	return float64(w.used()) / float64(w.walSize)
+	return float64(w.spaceUsed()) / float64(w.walSize)
 }
