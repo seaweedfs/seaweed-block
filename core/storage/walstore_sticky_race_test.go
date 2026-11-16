@@ -330,3 +330,110 @@ func TestWALStoreWALFsyncFaultDuringCheckpointPublication(t *testing.T) {
 		t.Fatalf("superblock checkpoint %d -> %d after the fault", diskBefore, got)
 	}
 }
+
+// extentHeldMetadata blocks the first OnExtentWrite (the flusher after its
+// snapshot, before its extent fsync) and, once armed, BeforeCheckpointAdvance.
+type extentHeldMetadata struct {
+	extent  *gate
+	barrier *gate
+	armed   atomic.Bool
+	seen    atomic.Bool
+}
+
+func (m *extentHeldMetadata) OnExtentWrite(uint32, []byte) error {
+	if m.seen.CompareAndSwap(false, true) {
+		m.extent.block()
+	}
+	return nil
+}
+func (m *extentHeldMetadata) VerifyExtent(uint32, []byte) error { return nil }
+func (m *extentHeldMetadata) BeforeCheckpointAdvance(uint64) error {
+	if m.armed.Load() {
+		m.barrier.block()
+	}
+	return nil
+}
+
+// The fault check at the publication's own superblock fsync: a direct-
+// frontier Sync is already in its metadata barrier (past every earlier
+// check) when the flusher's extent fsync fails; its superblock publication
+// must be refused.
+func TestWALStoreExtentFsyncFaultAfterThePublicationCheck(t *testing.T) {
+	s, path := heldStore(t)
+	meta := &extentHeldMetadata{extent: newGate(t), barrier: newGate(t)}
+	s.metadata = meta
+	if _, err := s.Write(1, makeBlock(4096, 0x11)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	ckptBefore, diskBefore := s.CheckpointLSN(), diskCheckpoint(t, path)
+
+	errFlush := make(chan error, 1)
+	go func() { errFlush <- s.flusher.flushOnce() }()
+	meta.extent.waitEntered(t, "the flusher's extent write") // before its extent fsync
+
+	meta.armed.Store(true)
+	s.AdvanceFrontier(10)
+	errSync := make(chan error, 1)
+	go func() { _, err := s.Sync(); errSync <- err }()
+	meta.barrier.waitEntered(t, "the Sync's metadata barrier") // past the store-lock check
+
+	eio := errors.New("injected extent fsync failure")
+	s.syncExtentFile = func() error { return eio }
+	meta.extent.open()
+	if err := recvErr(t, errFlush, "the flush"); !errors.Is(err, eio) {
+		t.Fatalf("flush: %v; want the injected extent fault", err)
+	}
+	meta.barrier.open()
+	if err := recvErr(t, errSync, "the direct-frontier Sync"); !errors.Is(err, ErrFsyncFailed) {
+		t.Fatalf("Sync whose barrier outlived the extent fault: %v; want ErrFsyncFailed", err)
+	}
+	if got := s.CheckpointLSN(); got != ckptBefore {
+		t.Fatalf("checkpoint %d -> %d after the fault", ckptBefore, got)
+	}
+	if got := diskCheckpoint(t, path); got != diskBefore {
+		t.Fatalf("superblock checkpoint %d -> %d after the fault", diskBefore, got)
+	}
+}
+
+// No two fsyncs of the store's file overlap: an extent fsync waits for a
+// WAL fsync in flight (so a failure of either is latched before the other
+// can complete as a success).
+func TestWALStoreFsyncsOfTheFileAreSerialized(t *testing.T) {
+	s, _ := heldStore(t)
+	if _, err := s.Write(0, makeBlock(4096, 0x10)); err != nil {
+		t.Fatal(err)
+	}
+	walGate := newGate(t)
+	real := s.syncWALFile
+	s.syncWALFile = func() error { walGate.block(); return real() }
+	errSync := make(chan error, 1)
+	go func() { _, err := s.Sync(); errSync <- err }()
+	walGate.waitEntered(t, "the WAL fsync")
+
+	extentEntered := make(chan struct{})
+	var once sync.Once
+	realExtent := s.syncExtentFile
+	s.syncExtentFile = func() error { once.Do(func() { close(extentEntered) }); return realExtent() }
+	errFlush := make(chan error, 1)
+	go func() { errFlush <- s.flusher.flushOnce() }()
+	select {
+	case <-extentEntered:
+		t.Fatal("the extent fsync ran while a WAL fsync of the same file was in flight")
+	case <-time.After(300 * time.Millisecond):
+	}
+	walGate.open()
+	if err := recvErr(t, errSync, "the Sync"); err != nil {
+		t.Fatal(err)
+	}
+	if err := recvErr(t, errFlush, "the flush"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-extentEntered:
+	default:
+		t.Fatal("the extent fsync never ran")
+	}
+}
