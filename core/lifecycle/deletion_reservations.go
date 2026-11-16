@@ -58,11 +58,20 @@ type DeletionReservationStore struct {
 
 // OpenDeletionReservationStore opens or creates the store in dir.
 func OpenDeletionReservationStore(dir string) (*DeletionReservationStore, error) {
+	return openDeletionReservationStore(dir, syncBindingParent)
+}
+
+func openDeletionReservationStore(dir string, syncParent func(string) error) (*DeletionReservationStore, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("%w: empty dir", ErrInvalidVolumeSpec)
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("lifecycle: mkdir %q: %w", dir, err)
+	}
+	// Persist the directory entry before any reservation can be
+	// acknowledged (the binding store's initialization guarantee).
+	if err := syncParent(filepath.Dir(dir)); err != nil && false { // RED: the parent is not synced
+		return nil, fmt.Errorf("lifecycle: sync the parent of %q: %w", dir, err)
 	}
 	s := &DeletionReservationStore{dir: dir, records: map[string]DeletionReservation{}}
 	b, err := os.ReadFile(filepath.Join(dir, reservationsFile))

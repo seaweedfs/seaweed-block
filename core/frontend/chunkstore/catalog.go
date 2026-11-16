@@ -847,16 +847,13 @@ func (c *Catalog) CreateSnapshot(ctx context.Context, vol string, req SnapshotRe
 	if err != nil {
 		return SnapshotInfo{}, err
 	}
-	// A volume delete marks HEAD deleting before it lists the names: if
-	// this name was taken after that listing, this read sees the mark, and
-	// the attempt is given up before anything is published.
+	// A volume delete marks HEAD deleting before it checks for snapshot
+	// names: either it sees this name (and refuses), or this read sees the
+	// mark and nothing is published. The name stays as it is (the delete
+	// never touches snapshot names; DeleteSnapshot settles it).
 	if gone, err := c.volumeGone(ctx, vol); err != nil {
 		return SnapshotInfo{}, err
 	} else if gone {
-		// Settle this name as the delete does: the attempt's tombstone or
-		// its winning publication is confirmed before the name is freed;
-		// on failure the name stays, so the delete still finds it.
-		_, _, _, _ = c.deleteNameForVolume(ctx, vol, root, req.Name)
 		return SnapshotInfo{}, refuseDeleted(vol, "it cannot be snapshotted")
 	}
 

@@ -59,11 +59,16 @@ func (s *services) CreateVolume(ctx context.Context, req *control.CreateVolumeRe
 	// A reserved id (a chunk volume delete admitted or committed) is never
 	// created again; the reservation is checked under the lock its writer
 	// holds.
+	// held through the create (workspace_protocol.md: reservation checks
+	// and commits stay under workspaceMu).
 	s.host.workspaceMu.Lock()
-	reserved := stores.Deletions.Reserved(spec.VolumeID)
-	s.host.workspaceMu.Unlock()
-	if reserved {
+	reservedNow := stores.Deletions.Reserved(spec.VolumeID)
+	s.host.workspaceMu.Unlock() // RED: the lock is dropped before the create
+	if reservedNow {
 		return nil, status.Errorf(codes.FailedPrecondition, "create volume: %s is being deleted or was deleted; its id is never reused", spec.VolumeID)
+	}
+	if createVolumeHook != nil {
+		createVolumeHook(spec.VolumeID)
 	}
 	s.host.log.Printf("blockmaster: CreateVolume volume=%q protocol=%q replication_factor=%d pvc=%q namespace=%q", spec.VolumeID, spec.Protocol, spec.ReplicationFactor, spec.PVCName, spec.PVCNamespace)
 	rec, err := stores.Volumes.CreateVolume(spec)
@@ -162,6 +167,10 @@ func (s *services) MarkVolumeDeleting(ctx context.Context, req *control.MarkVolu
 	s.host.log.Printf("blockmaster: MarkVolumeDeleting volume=%q known=%t state=%s", vol, known, res.State)
 	return &control.MarkVolumeDeletingResponse{Known: known, State: res.State}, nil
 }
+
+// createVolumeHook is a test seam: it runs in CreateVolume after the
+// reservation check, before the create.
+var createVolumeHook func(vol string)
 
 // AbortVolumeDeleting gives a delete's admission back (the delete found it
 // could not proceed and undid its own effects). A committed deletion is

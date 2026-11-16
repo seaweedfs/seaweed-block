@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path"
 	"strconv"
+	"strings"
 
 	"google.golang.org/protobuf/proto"
 
@@ -12,8 +13,8 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
-// Volume delete (claude05's item, 2026-11-16 02:39Z; one linearization
-// point per codex01's review of 7c43367).
+// Volume delete (claude05's item, 2026-11-16 02:39Z; claude05's 04:08Z
+// cut: no snapshot cascade).
 //
 //	(a) Admission: the caller's Admission (the CLI's: the blockmaster's
 //	    durable deletion reservation, MarkVolumeDeleting; refused while the
@@ -21,35 +22,36 @@ import (
 //	    placement or binding is admitted and the id is not created again).
 //	    Every give-back below aborts this delete's admission (restoring the
 //	    volume's usability); the commit point commits it (permanent).
-//	(b) The linearization point: one conditional write of HEAD from the
-//	    HEAD read (active or detached, NOT held: an active HEAD that names a
-//	    holder belongs to an attached server) to state deleting, chunks
-//	    kept. ChunkRemote.CASHead refuses to move a deleting or deleted
-//	    HEAD, so no attach, claim or restore can revive it; EnsureVolume
-//	    refuses it; Fork and CreateSnapshot check HEAD again after taking
-//	    their claim or name and back out when it is deleting.
-//	(c) Claims are read after (b): a live fork claim reverts HEAD to its
-//	    previous state (nothing irreversible was done) and refuses
-//	    (snapshot_claimed). A fork claiming later sees the deleting HEAD
-//	    and gives its claim back.
-//	(c') The commit point: HEAD deleting -> purging, conditioned on the
-//	    HEAD read, then the admission is committed. A revert and a commit
-//	    race on the same conditional write, so a delete that sampled a
-//	    claim can never undo another delete's irreversible steps, and a
-//	    delete whose mark was given back never starts them.
-//	(d) Only then the irreversible steps: every snapshot name, published or
-//	    not (an unpublished attempt gets an aborted tombstone so its late
-//	    publish cannot land), is marked through markDeleting (the one mark
-//	    path) and freed; the volume's own fork claim is released.
-//	(e) Finally HEAD becomes deleted (no chunks: nothing it held stays a GC
-//	    root) and VOLUME is marked deleted. GC reclaims.
+//	(b) One HEAD write from the HEAD read (active or detached, NOT held: an
+//	    active HEAD that names a holder belongs to an attached server) to
+//	    state deleting, chunks kept: a new incarnation of the delete mark
+//	    (its generation). ChunkRemote.CASHead refuses to move a deleting,
+//	    purging or deleted HEAD, so no attach, claim or restore can revive
+//	    it; EnsureVolume refuses it; CreateSnapshot and Fork check the
+//	    volume after taking their name or claim and refuse.
+//	(c) Under that incarnation, the volume must have no snapshot at all: no
+//	    snapshot name record (a published snapshot, one being deleted, or an
+//	    attempt still in flight). Any is volume_has_snapshots: HEAD is
+//	    reverted and the admission given back. The operator deletes the
+//	    snapshots first (DeleteSnapshot); a delete never touches snapshot
+//	    names, attempts or their roots. (A fork claim lives on a named
+//	    snapshot, so it is covered too.)
+//	(c') The commit point: HEAD deleting -> purging for that same
+//	    incarnation only (conditioned on its generation); if HEAD moved (a
+//	    revert and re-mark by another delete), the check is made again on
+//	    the incarnation found. A revert is bound the same way, so no delete
+//	    can undo another's commit, nor commit an incarnation it did not
+//	    check. Then the admission is committed.
+//	(e) HEAD becomes deleted (no chunks: nothing it held stays a GC root) and
+//	    VOLUME is marked deleted. GC reclaims.
 //
 // A call that fails reports what it did (VolumeDeleteResult) with the
 // error; a rerun resumes from the state it finds.
 
 const (
-	CodeVolumeInUse   = "volume_in_use"
-	CodeVolumeDeleted = "volume_deleted"
+	CodeVolumeInUse        = "volume_in_use"
+	CodeVolumeDeleted      = "volume_deleted"
+	CodeVolumeHasSnapshots = "volume_has_snapshots"
 
 	// VolumeDeleted is the state of a deleted volume's VOLUME entry.
 	VolumeDeleted = "deleted"
@@ -59,7 +61,7 @@ const (
 
 	// Test seams (retainHook stages) in a DeleteVolume.
 	hookHeadMarked    = "head-marked"    // after (b)
-	hookClaimFound    = "claim-found"    // (c) found a live claim, before the revert
+	hookBlocked       = "blocked"        // (c) found a snapshot, before the revert
 	hookClaimsChecked = "claims-checked" // after (c), before the commit point
 )
 
@@ -86,15 +88,12 @@ type VolumeDeleteResult struct {
 	// AdmissionUncertain: the admission call failed with an unknown
 	// outcome (it may have been recorded); AdmissionAborted: this delete
 	// gave its admission back; Committed: the admission is permanent.
-	AdmissionUncertain bool     `json:"admissionUncertain"`
-	AdmissionAborted   bool     `json:"admissionAborted"`
-	Committed          bool     `json:"committed"`
-	HeadMarked         bool     `json:"headMarked"` // HEAD is deleting or deleted
-	Reverted           bool     `json:"reverted"`   // (c) gave the HEAD mark back
-	SnapshotsDeleted   []string `json:"snapshotsDeleted"`
-	AttemptsAborted    []string `json:"attemptsAborted"` // unpublished attempts tombstoned
-	ClaimReleased      bool     `json:"claimReleased"`   // its fork claim was confirmed removed
-	Completed          bool     `json:"completed"`       // HEAD and VOLUME are deleted
+	AdmissionUncertain bool `json:"admissionUncertain"`
+	AdmissionAborted   bool `json:"admissionAborted"`
+	Committed          bool `json:"committed"`
+	HeadMarked         bool `json:"headMarked"` // HEAD is deleting or deleted
+	Reverted           bool `json:"reverted"`   // (c) gave the HEAD mark back
+	Completed          bool `json:"completed"`  // HEAD and VOLUME are deleted
 	// Uncertain is set when the failing call was a write whose outcome is
 	// unknown; a rerun settles it.
 	Uncertain bool `json:"uncertain"`
@@ -103,7 +102,7 @@ type VolumeDeleteResult struct {
 // DeleteVolume deletes vol (see the header). admit may be nil (a catalog-
 // only delete, e.g. in tests): (b) still refuses a held HEAD.
 func (c *Catalog) DeleteVolume(ctx context.Context, vol string, admit Admission) (VolumeDeleteResult, error) {
-	res := VolumeDeleteResult{VolumeID: vol, SnapshotsDeleted: []string{}, AttemptsAborted: []string{}}
+	res := VolumeDeleteResult{VolumeID: vol}
 	root, err := c.volRoot(vol)
 	if err != nil {
 		return res, err
@@ -142,9 +141,15 @@ func (c *Catalog) DeleteVolume(ctx context.Context, vol string, admit Admission)
 		}
 		return res, cause
 	}
-	// (b)
-	if h.State != storage.ChunkHeadPurging && h.State != storage.ChunkHeadDeleted {
-		u, err := c.markHeadDeleting(ctx, vol, root)
+	// (b), (c), (c'), each bound to one deleting incarnation (the HEAD
+	// generation the mark produced or joined): a claim check is only valid
+	// for the generation it ran under, so if HEAD moved (another delete
+	// reverted and re-marked it) the check is run again on the new one.
+	for incarnation := 0; h.State != storage.ChunkHeadPurging && h.State != storage.ChunkHeadDeleted; incarnation++ {
+		if incarnation == 5 {
+			return res, remoteErr(nil, "volume %s: the delete mark kept changing", vol)
+		}
+		gen, u, err := c.markHeadDeleting(ctx, vol, root)
 		if err != nil {
 			if u {
 				res.Uncertain = true
@@ -155,18 +160,23 @@ func (c *Catalog) DeleteVolume(ctx context.Context, vol string, admit Admission)
 		res.HeadMarked = true
 		c.hook(hookHeadMarked, vol)
 		// (c)
-		live, err := c.anyLiveClaim(ctx, vol)
+		live, err := c.snapshotsBlock(ctx, vol, root)
 		if err != nil {
 			return res, err
 		}
 		if live != nil {
-			c.hook(hookClaimFound, vol)
-			reverted, u, rerr := c.revertHeadDeleting(ctx, vol, root)
+			c.hook(hookBlocked, vol)
+			out, u, rerr := c.revertHeadDeleting(ctx, vol, root, gen)
 			switch {
 			case rerr != nil:
 				res.Uncertain = u
 				return res, rerr
-			case !reverted:
+			case out == incarnationMoved:
+				if h, _, err = c.ReadHead(ctx, vol); err != nil {
+					return res, err
+				}
+				continue // decide again on what HEAD is now
+			case out == incarnationCommitted:
 				// Another delete committed meanwhile: its irreversible steps
 				// stand; this call neither reverts nor gives back.
 				return res, catErr(CodeOutcomeUnknown, true, nil, "volume %s: another delete committed while this one found %v; rerun the delete", vol, live)
@@ -175,15 +185,21 @@ func (c *Catalog) DeleteVolume(ctx context.Context, vol string, admit Admission)
 			return giveBack(live)
 		}
 		c.hook(hookClaimsChecked, vol)
-		// (c') the commit point
-		committed, u, err := c.commitHeadPurging(ctx, vol, root)
+		// (c') the commit point, on the incarnation the check ran under
+		out, u, err := c.commitHeadPurging(ctx, vol, root, gen)
 		if err != nil {
 			res.Uncertain = u
 			return res, err
 		}
-		if !committed {
+		if out == incarnationDone {
+			break
+		}
+		if out == incarnationGivenBack {
 			res.HeadMarked = false
 			return giveBack(catErr(CodeOutcomeUnknown, true, nil, "volume %s: a concurrent delete gave the mark back; rerun the delete", vol))
+		}
+		if h, _, err = c.ReadHead(ctx, vol); err != nil { // moved: validate again
+			return res, err
 		}
 	}
 	res.HeadMarked = true
@@ -194,36 +210,6 @@ func (c *Catalog) DeleteVolume(ctx context.Context, vol string, admit Admission)
 		}
 	}
 	res.Committed = true
-	// (d)
-	names, err := c.listNames(ctx, root)
-	if err != nil {
-		return res, err
-	}
-	for _, name := range names {
-		gone, aborted, u, err := c.deleteNameForVolume(ctx, vol, root, name)
-		if err != nil {
-			res.Uncertain = u
-			return res, err
-		}
-		if aborted {
-			res.AttemptsAborted = append(res.AttemptsAborted, name)
-		} else if gone {
-			res.SnapshotsDeleted = append(res.SnapshotsDeleted, name)
-		}
-	}
-	if v.Fork != nil {
-		req := ForkRequest{Source: v.Fork.Source, Snapshot: v.Fork.Snapshot, Target: vol, RequestID: v.Fork.RequestID}
-		if ref, ok, err := c.resolveSnap(ctx, req.Source, req.Snapshot); err != nil {
-			return res, err
-		} else if ok && ref.entry != nil {
-			removed, err := c.removeForkClaim(ctx, req, ref.rec.Attempt)
-			if err != nil {
-				res.Uncertain = true
-				return res, err
-			}
-			res.ClaimReleased = removed
-		}
-	}
 	// (e)
 	if u, err := c.finishHeadDeleted(ctx, vol, root); err != nil {
 		res.Uncertain = u
@@ -274,18 +260,22 @@ func lostCondition(err error) bool {
 
 // markHeadDeleting is (b): every read decides afresh whether the HEAD is
 // held, so an attach that landed before this read is refused, and one that
-// lands after it makes the write's condition fail.
-func (c *Catalog) markHeadDeleting(ctx context.Context, vol, root string) (bool, error) {
+// lands after it makes the write's condition fail. gen is the generation of
+// the deleting HEAD this call produced or joined (its incarnation).
+func (c *Catalog) markHeadDeleting(ctx context.Context, vol, root string) (gen uint64, uncertain bool, err error) {
 	for try := 0; try < 5; try++ {
 		h, _, err := c.ReadHead(ctx, vol)
 		if err != nil {
-			return false, err
+			return 0, false, err
+		}
+		if h.State == storage.ChunkHeadDeleting {
+			return h.Gen, false, nil // join this incarnation
 		}
 		if headDeletingOrDeleted(h) {
-			return false, nil
+			return h.Gen, false, nil
 		}
 		if headHeld(h) {
-			return false, catErr(CodeVolumeInUse, false, nil, "volume %s is attached: HEAD is held by %q at epoch %d; detach it first", vol, h.Holder, h.Epoch)
+			return 0, false, catErr(CodeVolumeInUse, false, nil, "volume %s is attached: HEAD is held by %q at epoch %d; detach it first", vol, h.Holder, h.Epoch)
 		}
 		next := h
 		next.State = storage.ChunkHeadDeleting
@@ -297,74 +287,82 @@ func (c *Catalog) markHeadDeleting(ctx context.Context, vol, root string) (bool,
 			continue
 		}
 		if err != nil {
-			return true, catErr(CodeOutcomeUnknown, true, err, "mark HEAD of %s deleting: outcome unknown; rerun the delete", vol)
+			return 0, true, catErr(CodeOutcomeUnknown, true, err, "mark HEAD of %s deleting: outcome unknown; rerun the delete", vol)
 		}
-		return false, nil
+		return h.Gen + 1, false, nil
 	}
-	return false, remoteErr(nil, "HEAD of %s kept changing", vol)
+	return 0, false, remoteErr(nil, "HEAD of %s kept changing", vol)
 }
 
-// revertHeadDeleting gives (b) back: deleting returns to detached when the
-// HEAD carries its holder's detach record, else to active. reverted is
-// false when the HEAD is no longer deleting (another delete committed, or
-// already gave it back).
-func (c *Catalog) revertHeadDeleting(ctx context.Context, vol, root string) (reverted, uncertain bool, err error) {
-	for try := 0; try < 5; try++ {
-		h, _, err := c.ReadHead(ctx, vol)
-		if err != nil {
-			return false, false, err
-		}
-		if h.State != storage.ChunkHeadDeleting {
-			return h.State == storage.ChunkHeadActive || h.State == storage.ChunkHeadDetached || h.State == "", false, nil
-		}
-		next := h
-		next.State = storage.ChunkHeadActive
-		if h.DetachedBy != nil {
-			next.State = storage.ChunkHeadDetached
-			d := *h.DetachedBy
-			d.Gen = h.Gen + 1
-			next.DetachedBy = &d
-		}
-		err = c.writeHead(ctx, root, h, next)
-		if lostCondition(err) {
-			continue
-		}
-		if err != nil {
-			return false, true, catErr(CodeOutcomeUnknown, true, err, "revert the delete mark on HEAD of %s: outcome unknown; rerun the delete", vol)
-		}
-		return true, false, nil
+// What a revert or commit found of the incarnation it was bound to.
+type incarnationOutcome int
+
+const (
+	incarnationDone      incarnationOutcome = iota // reverted / committed by this call, or committed already
+	incarnationMoved                               // HEAD is another deleting incarnation now: validate again
+	incarnationCommitted                           // past the commit point (by another delete)
+	incarnationGivenBack                           // active or detached again (another delete reverted)
+)
+
+// revertHeadDeleting gives (b) back for incarnation gen only: deleting
+// returns to detached when the HEAD carries its holder's detach record,
+// else to active.
+func (c *Catalog) revertHeadDeleting(ctx context.Context, vol, root string, gen uint64) (incarnationOutcome, bool, error) {
+	h, _, err := c.ReadHead(ctx, vol)
+	if err != nil {
+		return 0, false, err
 	}
-	return false, false, remoteErr(nil, "HEAD of %s kept changing", vol)
+	switch {
+	case h.State == storage.ChunkHeadPurging || h.State == storage.ChunkHeadDeleted:
+		return incarnationCommitted, false, nil
+	case h.State != storage.ChunkHeadDeleting:
+		return incarnationGivenBack, false, nil // already given back: nothing to do
+	case h.Gen != gen:
+		return incarnationMoved, false, nil
+	}
+	next := h
+	next.State = storage.ChunkHeadActive
+	if h.DetachedBy != nil {
+		next.State = storage.ChunkHeadDetached
+		d := *h.DetachedBy
+		d.Gen = h.Gen + 1
+		next.DetachedBy = &d
+	}
+	err = c.writeHead(ctx, root, h, next)
+	if lostCondition(err) {
+		return incarnationMoved, false, nil // HEAD moved under the write: decide again
+	}
+	if err != nil {
+		return 0, true, catErr(CodeOutcomeUnknown, true, err, "revert the delete mark on HEAD of %s: outcome unknown; rerun the delete", vol)
+	}
+	return incarnationDone, false, nil
 }
 
-// commitHeadPurging is the commit point: deleting -> purging, conditioned
-// on the HEAD read. committed is false when the mark was given back (the
-// HEAD is active or detached again).
-func (c *Catalog) commitHeadPurging(ctx context.Context, vol, root string) (committed, uncertain bool, err error) {
-	for try := 0; try < 5; try++ {
-		h, _, err := c.ReadHead(ctx, vol)
-		if err != nil {
-			return false, false, err
-		}
-		switch h.State {
-		case storage.ChunkHeadPurging, storage.ChunkHeadDeleted:
-			return true, false, nil // committed (by this call's earlier try or another delete)
-		case storage.ChunkHeadDeleting:
-		default:
-			return false, false, nil
-		}
-		next := h
-		next.State = storage.ChunkHeadPurging
-		err = c.writeHead(ctx, root, h, next)
-		if lostCondition(err) {
-			continue
-		}
-		if err != nil {
-			return false, true, catErr(CodeOutcomeUnknown, true, err, "commit the delete of %s: outcome unknown; rerun the delete", vol)
-		}
-		return true, false, nil
+// commitHeadPurging is the commit point for incarnation gen only: deleting
+// -> purging, conditioned on that exact HEAD.
+func (c *Catalog) commitHeadPurging(ctx context.Context, vol, root string, gen uint64) (incarnationOutcome, bool, error) {
+	h, _, err := c.ReadHead(ctx, vol)
+	if err != nil {
+		return 0, false, err
 	}
-	return false, false, remoteErr(nil, "HEAD of %s kept changing", vol)
+	switch {
+	case h.State == storage.ChunkHeadPurging || h.State == storage.ChunkHeadDeleted:
+		return incarnationDone, false, nil // committed (by another delete of the same mark)
+	case h.State != storage.ChunkHeadDeleting:
+		return incarnationGivenBack, false, nil
+	case h.Gen != gen && false: // RED: any deleting incarnation is committed
+		return incarnationMoved, false, nil
+	}
+	next := h
+	next.State = storage.ChunkHeadPurging
+	err = c.writeHead(ctx, root, h, next)
+	if lostCondition(err) {
+		return incarnationMoved, false, nil
+	}
+	if err != nil {
+		return 0, true, catErr(CodeOutcomeUnknown, true, err, "commit the delete of %s: outcome unknown; rerun the delete", vol)
+	}
+	return incarnationDone, false, nil
 }
 
 // finishHeadDeleted is (e) for HEAD: deleting becomes deleted, no chunks.
@@ -393,32 +391,15 @@ func (c *Catalog) finishHeadDeleted(ctx context.Context, vol, root string) (bool
 	return false, remoteErr(nil, "HEAD of %s kept changing", vol)
 }
 
-// anyLiveClaim returns snapshot_claimed for the first published snapshot of
-// vol a live fork claims, or nil.
-func (c *Catalog) anyLiveClaim(ctx context.Context, vol string) (error, error) {
-	root, err := c.volRoot(vol)
-	if err != nil {
-		return nil, err
-	}
+// snapshotsBlock returns volume_has_snapshots when vol has any snapshot
+// name record (published, being deleted, or an attempt in flight), or nil.
+func (c *Catalog) snapshotsBlock(ctx context.Context, vol, root string) (error, error) {
 	names, err := c.listNames(ctx, root)
 	if err != nil {
 		return nil, err
 	}
-	for _, name := range names {
-		ref, ok, err := c.resolveSnap(ctx, vol, name)
-		if err != nil {
-			return nil, err
-		}
-		if !ok || ref.entry == nil || ref.info.State != SnapActive {
-			continue
-		}
-		live, err := c.liveClaims(ctx, vol, name, decodeClaims(ref.entry))
-		if err != nil {
-			return nil, err
-		}
-		if len(live) > 0 {
-			return claimedErr(vol, name, live), nil
-		}
+	if len(names) > 0 && false { // RED: snapshots do not block the delete
+		return catErr(CodeVolumeHasSnapshots, false, nil, "volume %s has snapshots (%s); delete them first", vol, strings.Join(names, ", ")), nil
 	}
 	return nil, nil
 }
@@ -446,49 +427,6 @@ func (c *Catalog) listNames(ctx context.Context, root string) ([]string, error) 
 			return out, nil
 		}
 	}
-}
-
-// deleteNameForVolume is (d) for one name: a published attempt goes through
-// markDeleting; an unpublished one gets an aborted tombstone at its path
-// (so its late publish can never land); then the name is freed.
-func (c *Catalog) deleteNameForVolume(ctx context.Context, vol, root, name string) (gone, aborted, uncertain bool, err error) {
-	for try := 0; try < 5; try++ {
-		ref, ok, err := c.resolveSnap(ctx, vol, name)
-		if err != nil {
-			return false, false, false, err
-		}
-		if !ok {
-			return false, false, false, nil // freed meanwhile
-		}
-		attempt := ref.rec.Attempt
-		if ref.entry == nil {
-			tomb, err := c.abortedSnapEntry(vol, name, attempt)
-			if err != nil {
-				return false, false, false, err
-			}
-			if err := c.f.CreateEntry(ctx, path.Join(root, snapsDir, name), tomb, true); err != nil && !errors.Is(err, ErrExists) {
-				return false, false, true, remoteErr(err, "abort the unpublished attempt of %s/%s", vol, name)
-			}
-			continue // re-read: the tombstone, or the attempt that won
-		}
-		wasAborted := ref.info.State == SnapAborted
-		m, live, u, err := c.markDeleting(ctx, vol, name, attempt)
-		if err != nil {
-			return false, false, u, err
-		}
-		if m == markClaimed {
-			// A fork claimed after (c); it backs out on the deleting HEAD.
-			if try < 4 {
-				continue
-			}
-			return false, false, false, claimedErr(vol, name, live)
-		}
-		if _, u, err := c.freeName(ctx, root, name, attempt); err != nil {
-			return false, false, u, err
-		}
-		return !wasAborted, wasAborted, false, nil
-	}
-	return false, false, false, remoteErr(nil, "snapshot %s/%s kept changing", vol, name)
 }
 
 // markVolumeDeleted marks vol's VOLUME entry deleted, conditioned on it not

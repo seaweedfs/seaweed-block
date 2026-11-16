@@ -150,3 +150,56 @@ func TestMarkVolumeDeleting_StopsLaterAssignmentPlacementAndBinding(t *testing.T
 		t.Fatalf("binding of a reserved volume: %v; want FailedPrecondition", err)
 	}
 }
+
+// P2: CreateVolume keeps workspaceMu from its reservation check through the
+// create: a Mark/Commit arriving while a create is past its check waits,
+// so no create can succeed for an id reserved after its check.
+func TestMarkVolumeDeleting_CreateHoldsTheReservationLock(t *testing.T) {
+	_, lc, stop := hostOn(t, t.TempDir(), t.TempDir())
+	defer stop()
+	ctx := context.Background()
+	inCreate, release := make(chan struct{}), make(chan struct{})
+	createVolumeHook = func(vol string) {
+		if vol == "held" {
+			close(inCreate)
+			<-release
+		}
+	}
+	defer func() { createVolumeHook = nil }()
+	created := make(chan error, 1)
+	go func() {
+		_, err := lc.CreateVolume(ctx, createReq("held"))
+		created <- err
+	}()
+	<-inCreate
+	marked := make(chan error, 1)
+	go func() {
+		if _, err := lc.MarkVolumeDeleting(ctx, markReq("held", "d1")); err != nil {
+			marked <- err
+			return
+		}
+		_, err := lc.CommitVolumeDeleting(ctx, markReq("held", "d1"))
+		marked <- err
+	}()
+	var early error
+	raced := false
+	select {
+	case early = <-marked:
+		raced = true
+	case <-time.After(300 * time.Millisecond):
+	}
+	close(release) // never leave the create parked, even on failure
+	if raced {
+		<-created
+		t.Fatalf("the mark completed while a create was past its check (%v)", early)
+	}
+	if err := <-created; err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := <-marked; err != nil {
+		t.Fatalf("mark/commit after the create: %v", err)
+	}
+	if _, err := lc.CreateVolume(ctx, createReq("held")); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("create after the commit: %v; want FailedPrecondition", err)
+	}
+}

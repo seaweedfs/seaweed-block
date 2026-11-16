@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,9 +26,10 @@ import (
 func chunkVolumeDelete(args []string, stdout, stderr io.Writer) int {
 	fs := chunkFlagSet("volume-delete", stderr)
 	var (
-		volumeID, filer, base, master string
-		timeout                       time.Duration
+		volumeID, filer, base, master, requestID string
+		timeout                                  time.Duration
 	)
+	fs.StringVar(&requestID, "request-id", "", "this delete's operation id; a rerun with the same id resumes (or gives back) its earlier admission")
 	fs.StringVar(&volumeID, "volume", "", "volume id (or the first argument)")
 	fs.StringVar(&filer, "chunk-filer", "", "SeaweedFS filer gRPC address host:port")
 	fs.StringVar(&base, "chunk-path", defaultChunkPathCLI, "filer directory holding one directory per volume")
@@ -44,8 +43,8 @@ func chunkVolumeDelete(args []string, stdout, stderr io.Writer) int {
 	} else if fs.NArg() != 0 {
 		return chunkFail("volume-delete", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "give the volume once, as an argument or --volume", false)
 	}
-	if volumeID == "" || master == "" || timeout <= 0 {
-		return chunkFail("volume-delete", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "a volume and --master are required; --timeout must be positive", false)
+	if volumeID == "" || master == "" || requestID == "" || timeout <= 0 {
+		return chunkFail("volume-delete", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "a volume, --master and --request-id are required; --timeout must be positive", false)
 	}
 	cat, closeFn, exit := chunkCatalog("volume-delete", filer, base, stdout, stderr)
 	if exit >= 0 {
@@ -57,10 +56,7 @@ func chunkVolumeDelete(args []string, stdout, stderr io.Writer) int {
 		return chunkResult("volume-delete", nil, err, stdout, stderr)
 	}
 	defer conn.Close()
-	admit, err := newMasterAdmission(control.NewLifecycleServiceClient(conn))
-	if err != nil {
-		return chunkResult("volume-delete", nil, err, stdout, stderr)
-	}
+	admit := &masterAdmission{lc: control.NewLifecycleServiceClient(conn), token: requestID + "-" + fmt.Sprint(time.Now().UnixNano())} // RED: a fresh token per invocation
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	res, err := cat.DeleteVolume(ctx, volumeID, admit)
@@ -70,19 +66,13 @@ func chunkVolumeDelete(args []string, stdout, stderr io.Writer) int {
 	return chunkResult("volume-delete", res, nil, stdout, stderr)
 }
 
-// masterAdmission is the delete's reservation at the blockmaster, under
-// one random token per delete.
+// masterAdmission is the delete's reservation at the blockmaster, held
+// under the operation's request id: a rerun with the same id adopts the
+// hold an earlier run left (e.g. after a lost response), so its give-back
+// releases it, while another operation's hold stays.
 type masterAdmission struct {
 	lc    control.LifecycleServiceClient
 	token string
-}
-
-func newMasterAdmission(lc control.LifecycleServiceClient) (*masterAdmission, error) {
-	var b [12]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return nil, err
-	}
-	return &masterAdmission{lc: lc, token: hex.EncodeToString(b[:])}, nil
 }
 
 func (m *masterAdmission) req(vol string) *control.MarkVolumeDeletingRequest {

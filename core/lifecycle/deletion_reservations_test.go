@@ -96,3 +96,24 @@ func TestDeletionReservations_PersistenceFaultsFailClosed(t *testing.T) {
 		t.Fatal("a successfully written reservation is lost on restart")
 	}
 }
+
+// The store's directory entry is made durable in its parent before any
+// reservation is acknowledged; a failing parent sync refuses to open.
+func TestDeletionReservations_ParentSyncBeforeUse(t *testing.T) {
+	parent := t.TempDir()
+	fail := errors.New("injected")
+	var synced []string
+	if _, err := openDeletionReservationStore(parent+"/r", func(dir string) error { synced = append(synced, dir); return fail }); !errors.Is(err, fail) {
+		t.Fatalf("open with a failing parent sync: %v; want the error", err)
+	}
+	if len(synced) != 1 || synced[0] != parent {
+		t.Fatalf("synced %v; want the parent %s", synced, parent)
+	}
+	s, err := openDeletionReservationStore(parent+"/r", syncBindingParent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Admit("v", "d"); err != nil {
+		t.Fatal(err)
+	}
+}
