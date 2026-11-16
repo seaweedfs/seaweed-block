@@ -33,7 +33,6 @@ func TestSeedChunkFrontierMetadataFailureRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reopened.Close()
 	if _, err := reopened.Recover(); err != nil {
 		t.Fatal(err)
 	}
@@ -42,5 +41,18 @@ func TestSeedChunkFrontierMetadataFailureRetry(t *testing.T) {
 	}
 	if reopened.NextLSN() != 8 {
 		t.Fatal("seed after a reopen not applied")
+	}
+	reopened.committer.Stop()
+	_ = reopened.fd.Close() // crash
+	again, err := OpenWALStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer again.Close()
+	if _, err := again.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	if r, _, h := again.Boundaries(); again.CheckpointLSN() != 7 || r != 7 || h != 7 || again.NextLSN() != 8 {
+		t.Fatalf("seed after a crash: checkpoint=%d R=%d H=%d next=%d want 7/7/7/8", again.CheckpointLSN(), r, h, again.NextLSN())
 	}
 }

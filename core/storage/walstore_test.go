@@ -155,17 +155,42 @@ func TestWALStore_DirectFrontierMetadataFailureRetainsRetryState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = reopened.Close() })
+	reopenedOpen := true
+	t.Cleanup(func() {
+		if reopenedOpen {
+			_ = reopened.Close()
+		}
+	})
+	if _, err := reopened.Recover(); err != nil {
+		t.Fatal(err)
+	}
 	if got := reopened.CheckpointLSN(); got != 0 {
 		t.Fatalf("reopened checkpointLSN=%d want 0 (the frontier was never durable)", got)
+	}
+	if reopened.wal.logicalHeadValue() == 0 {
+		t.Fatal("recovery did not reconstruct the WAL head of the LSN 1 record")
 	}
 	reopened.AdvanceFrontier(10)
 	frontier, err := reopened.Sync()
 	if err != nil || frontier != 10 || reopened.CheckpointLSN() != 10 {
 		t.Fatalf("frontier after a reopen=%d checkpoint=%d err=%v want 10/10", frontier, reopened.CheckpointLSN(), err)
 	}
-	if got, want := reopened.sb.WALHead, reopened.wal.logicalHeadValue(); got != want {
-		t.Fatalf("superblock WALHead byte cursor=%d want %d", got, want)
+	if got, want := reopened.sb.WALHead, reopened.wal.logicalHeadValue(); got != want || got == 0 {
+		t.Fatalf("superblock WALHead byte cursor=%d want %d (nonzero)", got, want)
+	}
+	reopened.committer.Stop()
+	_ = reopened.fd.Close() // crash
+	reopenedOpen = false
+	again, err := OpenWALStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = again.Close() })
+	if _, err := again.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	if got := again.CheckpointLSN(); got != 10 {
+		t.Fatalf("checkpoint after a crash=%d want the durable frontier 10", got)
 	}
 }
 
