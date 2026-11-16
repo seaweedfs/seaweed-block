@@ -7,11 +7,14 @@ import (
 )
 
 // B5 (independent review): a batch append whose pwrite lands every record
-// and then reports an error leaves nextLSN and the head unchanged. The next
-// write reuses the batch's first LSN and offset, overwriting only the first
-// stale record; the batch's later record (a higher LSN) stays on disk past
-// it. After an acknowledged Sync and a crash, recovery must serve the
-// acknowledged write, not the failed batch's stale record.
+// and then reports an error left nextLSN and the head unchanged, so the next
+// write reused the batch's first LSN and offset while the batch's later
+// record (a higher LSN) stayed on disk past it; after that write's Sync was
+// acknowledged and the process crashed, recovery served the failed batch's
+// stale record. A failed append is now sticky for the open store: no further
+// append (so no LSN reuse) until a reopen. Recovery of the reopen may replay
+// the failed, never-acknowledged records; an acknowledged write is never
+// replaced by one of them.
 func TestWALStoreFailedBatchAppendDoesNotRevertALaterAckedWrite(t *testing.T) {
 	const blockSize = 4096
 	path := filepath.Join(t.TempDir(), "store.bin")
@@ -35,32 +38,55 @@ func TestWALStoreFailedBatchAppendDoesNotRevertALaterAckedWrite(t *testing.T) {
 	}
 	s.wal.batchWriteAt = nil
 
+	// The failed append is sticky: no write reuses its LSNs, nothing is acked.
 	acked := makeBlock(blockSize, 0xAC)
-	lsn, err := s.Write(11, acked)
-	if err != nil {
-		t.Fatal(err)
+	if _, err := s.Write(11, acked); !errors.Is(err, ErrAppendFailed) {
+		t.Fatalf("write after a failed append: %v; want the sticky ErrAppendFailed", err)
+	} else {
+		var rf *RecoveryFailure
+		if !errors.As(err, &rf) || rf.Kind != StorageRecoveryFailureSubstrateIO {
+			t.Fatalf("write after a failed append: %v; want a SubstrateIO RecoveryFailure (io_error)", err)
+		}
 	}
-	if _, err := s.Sync(); err != nil {
-		t.Fatal(err)
+	if _, err := s.Sync(); !errors.Is(err, ErrAppendFailed) {
+		t.Fatalf("Sync after a failed append: %v; want ErrAppendFailed", err)
 	}
-	t.Logf("acked write of LBA 11 got LSN %d", lsn)
-
 	crashRecoveryHardeningStore(t, s)
 	crashed = true
-	r, err := OpenWALStore(path)
+
+	// Reopen: recovery may replay the failed batch (never acked). A write
+	// acknowledged now must survive the next crash.
+	r := reopenForB5(t, path)
+	lsn, err := r.Write(11, acked)
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.DisableAutoFlushForRecoveryTest()
-	t.Cleanup(func() { _ = r.Close() })
-	if _, err := r.Recover(); err != nil {
-		t.Fatalf("Recover: %v", err)
+	if _, err := r.Sync(); err != nil {
+		t.Fatal(err)
 	}
-	got, err := r.Read(11)
+	t.Logf("acked write of LBA 11 after the reopen got LSN %d", lsn)
+	crashRecoveryHardeningStore(t, r)
+
+	q := reopenForB5(t, path)
+	t.Cleanup(func() { _ = q.Close() })
+	got, err := q.Read(11)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got[0] != acked[0] {
 		t.Fatalf("LBA 11 after recovery = %02x; want the acknowledged %02x (the failed batch's stale record is %02x)", got[0], acked[0], stale[0])
 	}
+}
+
+func reopenForB5(t *testing.T, path string) *WALStore {
+	t.Helper()
+	r, err := OpenWALStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.DisableAutoFlushForRecoveryTest()
+	if _, err := r.Recover(); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	return r
 }

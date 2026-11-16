@@ -192,6 +192,9 @@ func NewWALRecycledFailure(cause error, detail string) *RecoveryFailure {
 // SubstrateIO RecoveryFailure, so hosts report it as io_error.
 var ErrFsyncFailed = errors.New("storage: fsync failed earlier on this open store; reopen to recover")
 
+// ErrAppendFailed: declared for the RED test; nothing returns it yet.
+var ErrAppendFailed = errors.New("storage: a WAL append failed earlier on this open store; reopen to recover")
+
 func NewSubstrateIOFailure(cause error, detail string) *RecoveryFailure {
 	return &RecoveryFailure{
 		Kind:   StorageRecoveryFailureSubstrateIO,
