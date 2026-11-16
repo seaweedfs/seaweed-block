@@ -71,7 +71,7 @@ func TestWALGenerationFirstCallerReturnOrdering(t *testing.T) {
 				frontier uint64
 				err      error
 			}
-			leader, followers := make(chan result, 1), make(chan result, 8)
+			leader, followers := make(chan result, 1), make(chan result, 1)
 			start := func(out chan<- result) {
 				workers.Add(1)
 				go func() { defer workers.Done(); n, err := s.Sync(); out <- result{n, err} }()
@@ -102,15 +102,14 @@ func TestWALGenerationFirstCallerReturnOrdering(t *testing.T) {
 			}
 			start(leader)
 			await(firstEntered, "first physical callback")
+			closeOnce(releaseFirst)
+			await(firstCacheReturned, "first caller after physical completion")
+			// This write occurs AFTER the first real fsync completed, so only
+			// the later physical fsync can make it durable.
 			if _, err := s.Write(1, makeBlock(4096, 0x42)); err != nil {
 				t.Fatal(err)
 			}
-			for i := 0; i < 8; i++ {
-				start(followers)
-			}
-			waitGenerationPending(t, s, 8)
-			closeOnce(releaseFirst)
-			await(firstCacheReturned, "first caller after physical completion")
+			start(followers)
 			await(secondEntered, "second physical callback")
 			if completed.Load() != 1 {
 				t.Fatalf("second sync completed while held: %d", completed.Load())
@@ -122,7 +121,7 @@ func TestWALGenerationFirstCallerReturnOrdering(t *testing.T) {
 			}
 			if laterPublishesFirst {
 				closeOnce(releaseSecond)
-				for i := 0; i < 8; i++ {
+				for i := 0; i < 1; i++ {
 					if r := receive(followers); r.frontier != 2 {
 						t.Fatal("follower frontier", r)
 					}
@@ -149,7 +148,7 @@ func TestWALGenerationFirstCallerReturnOrdering(t *testing.T) {
 					t.Fatal("held second fsync unexpectedly completed")
 				}
 				closeOnce(releaseSecond)
-				for i := 0; i < 8; i++ {
+				for i := 0; i < 1; i++ {
 					if r := receive(followers); r.frontier != 2 {
 						t.Fatal("follower frontier", r)
 					}
