@@ -68,6 +68,7 @@ func NewGroupCommitter(cfg GroupCommitterConfig) *GroupCommitter {
 // run drives the batching loop. Call this once in a goroutine.
 func (gc *GroupCommitter) Run() {
 	defer close(gc.done)
+	var lastSyncCompleted time.Time
 	for {
 		select {
 		case <-gc.stopCh:
@@ -82,10 +83,13 @@ func (gc *GroupCommitter) Run() {
 		for {
 			gc.mu.Lock()
 			n := len(gc.pending)
+			// Requests already waiting when the previous sync completed have
+			// had an I/O interval to accumulate; do not delay that batch again.
+			followup := n > 0 && !lastSyncCompleted.IsZero() && gc.pending[0].queued.Before(lastSyncCompleted)
 			gc.mu.Unlock()
 			// A lone caller has nobody to batch with. Followers arriving during
 			// this physical sync remain queued for the next batch.
-			if n == 1 || n >= gc.maxBatch {
+			if n == 1 || followup || n >= gc.maxBatch {
 				break
 			}
 			select {
@@ -115,6 +119,7 @@ func (gc *GroupCommitter) Run() {
 			gc.waitLatency.Observe(started.Sub(w.queued))
 		}
 		err := gc.fsyncSafe()
+		lastSyncCompleted = time.Now()
 		gc.syncCount.Add(1)
 		for _, ch := range batch {
 			ch.done <- err
