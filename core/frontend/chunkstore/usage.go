@@ -119,9 +119,6 @@ func (c *Catalog) UsageWithGC(ctx context.Context, vol string, gc *Collector) (V
 
 // protectedNow reads the keys vol's intents and HEAD name now.
 func (c *Catalog) protectedNow(ctx context.Context, vol string) (map[string]bool, error) {
-	if red := true; red { // RED: no revalidation
-		return map[string]bool{}, nil
-	}
 	r, err := NewChunkRemote(c.f, nilBlobs{}, path.Join(c.base, vol))
 	if err != nil {
 		return nil, err
