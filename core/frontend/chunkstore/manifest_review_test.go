@@ -133,3 +133,18 @@ func TestManifest_UsageCountsOwnedClippedChunksAndForkHolders(t *testing.T) {
 		t.Fatalf("snapshot exclusivity must use clipped owner bytes: %+v %v", u, err)
 	}
 }
+
+func TestManifest_RejectsFieldAliases(t *testing.T) {
+	for _, field := range []string{`"segments":null`, `"Segments":null`, `"CHUNK_BYTES":0`, `"chunk_count":0`} {
+		body := []byte(`{"format":1,"gen":1,"epoch":1,"holder":"h","chunks":{},` + field + `}`)
+		if _, err := DecodeHeadDocument("mixed", body); err == nil {
+			t.Errorf("format1 accepted residual field %s", field)
+		}
+	}
+	for _, field := range []string{`"chunks":{}`, `"Chunks":null`} {
+		body := []byte(`{"format":2,"gen":1,"epoch":1,"holder":"h","chunk_bytes":32768,"chunk_count":0,"segments":{},` + field + `}`)
+		if _, err := DecodeHeadDocument("mixed", body); err == nil {
+			t.Errorf("format2 accepted residual field %s", field)
+		}
+	}
+}
