@@ -1034,6 +1034,15 @@ func (l *chunkLayerImpl) supersededBy(cur chunkHead) bool {
 }
 
 func sameProposal(cur, next chunkHead) bool {
+	if (cur.Segments == nil) != (next.Segments == nil) || cur.ChunkBytes != next.ChunkBytes || cur.ManifestChunkCount != next.ManifestChunkCount || len(cur.Segments) != len(next.Segments) {
+		return false
+	}
+	for k, v := range next.Segments {
+		if cur.Segments[k] != v {
+			return false
+		}
+	}
+
 	if cur.Epoch != next.Epoch || cur.Holder != next.Holder || cur.RemoteLSN != next.RemoteLSN || len(cur.Chunks) != len(next.Chunks) {
 		return false
 	}

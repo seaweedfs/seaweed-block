@@ -77,7 +77,7 @@ func TestManifestPerf_64DirtyChunks(t *testing.T) {
 				}
 			}
 			start := time.Now()
-			if err = s.Sync(); err != nil {
+			if _, err = s.Sync(); err != nil {
 				t.Fatal(err)
 			}
 			syncTime := time.Since(start)

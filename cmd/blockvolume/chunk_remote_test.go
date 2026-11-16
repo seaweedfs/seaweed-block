@@ -54,9 +54,11 @@ func TestWALStoreChunkFlags(t *testing.T) {
 			"--chunk-control-endpoint"),
 		"control endpoint without a status listener": base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk",
 			"--chunk-filer=x:1", "--chunk-control-endpoint"),
-		"negative threshold":    base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-dirty-threshold=-1"),
-		"threshold on walstore": base("--durable-root=/tmp/sw-block", "--durable-impl=walstore", "--chunk-dirty-threshold=8"),
-		"interval on walstore":  base("--durable-root=/tmp/sw-block", "--durable-impl=walstore", "--chunk-capture-interval=5s"),
+		"zero upload concurrency": base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-upload-concurrency=0"),
+		"too many uploads":        base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-upload-concurrency=65"),
+		"negative threshold":      base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-dirty-threshold=-1"),
+		"threshold on walstore":   base("--durable-root=/tmp/sw-block", "--durable-impl=walstore", "--chunk-dirty-threshold=8"),
+		"interval on walstore":    base("--durable-root=/tmp/sw-block", "--durable-impl=walstore", "--chunk-capture-interval=5s"),
 	}
 	for name, args := range refused {
 		if _, err := parseFlags(args); err == nil {

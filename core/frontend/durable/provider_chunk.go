@@ -255,9 +255,13 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 	if holder == "" {
 		holder = proj.ReplicaID
 	}
-	remote := &closeBoundRemote{ChunkRemote: inner, done: p.closeCtx}
-	remote.setAttach(ctx) // the attach's calls also end with the caller's ctx
-	defer remote.setAttach(nil)
+	bound := &closeBoundRemote{ChunkRemote: inner, done: p.closeCtx}
+	bound.setAttach(ctx) // the attach's calls also end with the caller's ctx
+	defer bound.setAttach(nil)
+	var remote storage.ChunkRemote = bound
+	if builder, ok := inner.(storage.ChunkManifestBuilder); ok {
+		remote = &manifestBoundRemote{closeBoundRemote: bound, builder: builder}
+	}
 	cfg := storage.ChunkLayerConfig{
 		ChunkBlocks:       p.cfg.ChunkBlocks,
 		Epoch:             lin.epoch,
@@ -698,4 +702,17 @@ func (p *DurableProvider) DetachVolume(ctx context.Context, volumeID string) (st
 		return storage.ChunkCutResult{}, 0, err
 	}
 	return r, h.storage.NextLSN() - 1, nil
+}
+
+// Preserve the optional manifest capability only when the inner remote has it;
+// legacy in-memory/flat remotes keep their existing no-op cut behavior.
+type manifestBoundRemote struct {
+	*closeBoundRemote
+	builder storage.ChunkManifestBuilder
+}
+
+func (r *manifestBoundRemote) PrepareManifest(ctx context.Context, base, next storage.ChunkHead, chunkBytes uint64) (storage.ChunkHead, []string, error) {
+	c, end := r.bind(ctx)
+	defer end()
+	return r.builder.PrepareManifest(c, base, next, chunkBytes)
 }
