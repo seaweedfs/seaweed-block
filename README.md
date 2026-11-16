@@ -149,7 +149,8 @@ default, a release claim or a production path.
   is still open, and it has no chunk-snapshot support. New volumes use
   `walstore`; `blockvolume --durable-impl` defaults to auto, which creates
   new volumes as `walstore` and opens an existing volume with its on-disk
-  format.
+  format. A `walstore-chunk` volume is refused under auto and needs
+  `--durable-impl=walstore-chunk` with its remote configuration.
 
 ## Kubernetes block storage (alpha)
 

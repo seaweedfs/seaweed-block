@@ -186,7 +186,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.IntVar(&f.ublkQueues, "ublk-queues", 0, "ublk hardware queues (one server thread each); 0 = default 1. Requires --ublk-device")
 	fs.IntVar(&f.ublkQueueDepth, "ublk-queue-depth", 0, "ublk in-flight requests per queue; 0 = default 64. Requires --ublk-device")
 	fs.StringVar(&f.durableRoot, "durable-root", "", "directory for persistent storage files; empty = memback (non-durable)")
-	fs.StringVar(&f.durableImpl, "durable-impl", "", "LogicalStorage impl: empty (default) = auto: an existing volume opens with its on-disk format, a new volume is created as walstore; or walstore, smartwal (experimental), opt-in parallel-walstore, or opt-in walstore-chunk (walstore published to SeaweedFS; proof of concept); ignored unless --durable-root is set")
+	fs.StringVar(&f.durableImpl, "durable-impl", "", "LogicalStorage impl: empty (default) = auto: an existing volume opens with its on-disk format (a walstore-chunk root needs the explicit walstore-chunk selector), a new volume is created as walstore; or walstore, smartwal (experimental), opt-in parallel-walstore, or opt-in walstore-chunk (walstore published to SeaweedFS; proof of concept); ignored unless --durable-root is set")
 	fs.StringVar(&f.chunk.filer, "chunk-filer", "", "walstore-chunk: SeaweedFS filer gRPC address host:port")
 	fs.StringVar(&f.chunk.path, "chunk-path", defaultChunkPath, "walstore-chunk: filer directory holding one directory per volume (HEAD and chunk key bindings)")
 	fs.StringVar(&f.chunk.collection, "chunk-collection", "", "walstore-chunk: collection for chunk needles (empty = filer default / storage rule)")
