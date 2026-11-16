@@ -384,7 +384,7 @@ func (r *ChunkRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVer
 	if err != nil {
 		return 0, err
 	}
-	if current.State == storage.ChunkHeadDeleting || current.State == storage.ChunkHeadDeleted {
+	if current.State == storage.ChunkHeadDeleting || current.State == storage.ChunkHeadPurging || current.State == storage.ChunkHeadDeleted {
 		// A delete passed its linearization point: nothing moves this HEAD
 		// again (the catalog writes the delete's own transitions).
 		return 0, fmt.Errorf("%w: %w", storage.ErrChunkHeadPrecondition, storage.ErrChunkHeadDeleted)
@@ -502,9 +502,9 @@ func decodeHeadDoc(p string, content []byte) (storage.ChunkHead, error) {
 		if doc.DetachedBy != nil || len(doc.Chunks) != 0 {
 			return fail("an aborted HEAD with content")
 		}
-	case storage.ChunkHeadDeleting:
-		// A delete's linearization mark over the HEAD it read: content and
-		// any detach record kept (a revert restores them).
+	case storage.ChunkHeadDeleting, storage.ChunkHeadPurging:
+		// A delete's mark over the HEAD it read (deleting: still revertible;
+		// purging: committed): content and any detach record kept.
 	case storage.ChunkHeadDeleted:
 		// A deleted volume's tombstone (no chunks, no holder).
 		if doc.DetachedBy != nil || len(doc.Chunks) != 0 || doc.Holder != "" {

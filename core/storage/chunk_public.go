@@ -28,6 +28,7 @@ const (
 	ChunkHeadDetached = chunkHeadDetached
 	ChunkHeadAborted  = chunkHeadAborted
 	ChunkHeadDeleting = chunkHeadDeleting
+	ChunkHeadPurging  = chunkHeadPurging
 	ChunkHeadDeleted  = chunkHeadDeleted
 )
 

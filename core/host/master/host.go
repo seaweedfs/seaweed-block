@@ -89,6 +89,8 @@ type LifecycleStores struct {
 	Nodes             *lifecycle.NodeInventoryStore
 	Placements        *lifecycle.PlacementIntentStore
 	WorkspaceBindings *lifecycle.WorkspaceBindingStore
+	// Deletions holds the chunk-volume deletion reservations.
+	Deletions *lifecycle.DeletionReservationStore
 }
 
 // Host is the composed master-side block product daemon. Lifecycle
@@ -311,11 +313,16 @@ func openLifecycleStores(dir string) (*LifecycleStores, error) {
 	if err != nil {
 		return nil, err
 	}
+	deletions, err := lifecycle.OpenDeletionReservationStore(filepath.Join(dir, "deletion-reservations"))
+	if err != nil {
+		return nil, err
+	}
 	return &LifecycleStores{
 		Volumes:           volumes,
 		Nodes:             nodes,
 		Placements:        placements,
 		WorkspaceBindings: bindings,
+		Deletions:         deletions,
 	}, nil
 }
 

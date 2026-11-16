@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,7 +11,9 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
 	"github.com/seaweedfs/seaweed-block/core/ops"
@@ -53,10 +57,9 @@ func chunkVolumeDelete(args []string, stdout, stderr io.Writer) int {
 		return chunkResult("volume-delete", nil, err, stdout, stderr)
 	}
 	defer conn.Close()
-	lifecycle := control.NewLifecycleServiceClient(conn)
-	admit := func(ctx context.Context, vol string) error {
-		_, err := lifecycle.MarkVolumeDeleting(ctx, &control.MarkVolumeDeletingRequest{VolumeId: vol})
-		return err
+	admit, err := newMasterAdmission(control.NewLifecycleServiceClient(conn))
+	if err != nil {
+		return chunkResult("volume-delete", nil, err, stdout, stderr)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -65,6 +68,53 @@ func chunkVolumeDelete(args []string, stdout, stderr io.Writer) int {
 		return volumeDeletePartial(res, err, stdout, stderr)
 	}
 	return chunkResult("volume-delete", res, nil, stdout, stderr)
+}
+
+// masterAdmission is the delete's reservation at the blockmaster, under
+// one random token per delete.
+type masterAdmission struct {
+	lc    control.LifecycleServiceClient
+	token string
+}
+
+func newMasterAdmission(lc control.LifecycleServiceClient) (*masterAdmission, error) {
+	var b [12]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return nil, err
+	}
+	return &masterAdmission{lc: lc, token: hex.EncodeToString(b[:])}, nil
+}
+
+func (m *masterAdmission) req(vol string) *control.MarkVolumeDeletingRequest {
+	return &control.MarkVolumeDeletingRequest{VolumeId: vol, Token: m.token}
+}
+
+// admissionErr: FailedPrecondition and InvalidArgument are definite
+// refusals; anything else (unavailable, deadline, a lost response) leaves
+// the outcome unknown.
+func admissionErr(err error) error {
+	switch status.Code(err) {
+	case codes.OK:
+		return nil
+	case codes.FailedPrecondition, codes.InvalidArgument:
+		return fmt.Errorf("%w: %v", chunkstore.ErrNotAdmitted, err)
+	}
+	return err
+}
+
+func (m *masterAdmission) Admit(ctx context.Context, vol string) error {
+	_, err := m.lc.MarkVolumeDeleting(ctx, m.req(vol))
+	return admissionErr(err)
+}
+
+func (m *masterAdmission) Commit(ctx context.Context, vol string) error {
+	_, err := m.lc.CommitVolumeDeleting(ctx, m.req(vol))
+	return err
+}
+
+func (m *masterAdmission) Abort(ctx context.Context, vol string) error {
+	_, err := m.lc.AbortVolumeDeleting(ctx, m.req(vol))
+	return err
 }
 
 // volumeDeletePartial prints what a failed delete did, with the error, and

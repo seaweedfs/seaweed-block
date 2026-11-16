@@ -3,8 +3,10 @@ package chunkstore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/filerpb"
@@ -88,10 +90,9 @@ func TestCatalog_DeleteVolumeRefusesAVolumeInUse(t *testing.T) {
 	}
 	detachHead(t, f, b, "v1")
 	before = len(f.allWritten())
-	refuse := func(context.Context, string) error { return errors.New("assigned to r1") }
-	res, err := c.DeleteVolume(ctx, "v1", refuse)
+	res, err := c.DeleteVolume(ctx, "v1", (&fakeReservation{refuse: true}).admission("d1"))
 	var ce *CatalogError
-	if !errors.As(err, &ce) || ce.Code != CodeVolumeInUse || ce.Retryable || !strings.Contains(ce.Detail(), "assigned to r1") || res.Admitted {
+	if !errors.As(err, &ce) || ce.Code != CodeVolumeInUse || ce.Retryable || !strings.Contains(ce.Detail(), "assigned to r1") || res.Admitted || res.AdmissionUncertain {
 		t.Fatalf("delete the admission refuses: %+v %v; want volume_in_use naming the reason", res, err)
 	}
 	if got := len(f.allWritten()); got != before {
@@ -218,9 +219,13 @@ func TestCatalog_DeleteVolumeGivesBackOnALiveClaim(t *testing.T) {
 			}
 		}
 	}
-	res, err := c.DeleteVolume(ctx, "v1", nil)
-	if CodeOf(err) != CodeSnapshotClaimed || !res.Reverted || res.HeadMarked || len(res.SnapshotsDeleted) != 0 {
-		t.Fatalf("delete under a live claim: %+v %v; want snapshot_claimed, reverted", res, err)
+	rsv := &fakeReservation{}
+	res, err := c.DeleteVolume(ctx, "v1", rsv.admission("d1"))
+	if CodeOf(err) != CodeSnapshotClaimed || !res.Reverted || res.HeadMarked || len(res.SnapshotsDeleted) != 0 || !res.AdmissionAborted || res.Committed {
+		t.Fatalf("delete under a live claim: %+v %v; want snapshot_claimed, reverted, admission given back", res, err)
+	}
+	if rsv.state != "" {
+		t.Fatalf("reservation after the give-back: %q; want none (the volume is usable again)", rsv.state)
 	}
 	after := headState(t, c, "v1")
 	if after.State != storage.ChunkHeadDetached || after.DetachedBy == nil || after.Holder != before.Holder || len(after.Chunks) != len(before.Chunks) {
@@ -359,8 +364,9 @@ func TestCatalog_DeleteVolumeTombstonesAndReleases(t *testing.T) {
 		t.Fatalf("delete w3 with a failing claim removal: %+v %v; want an error, claim not released, uncertain", res, err)
 	}
 	f.failUpdate = nil
-	res, err = c.DeleteVolume(ctx, "w3", nil)
-	if err != nil || !res.ClaimReleased || !res.Completed {
+	rsv := &fakeReservation{}
+	res, err = c.DeleteVolume(ctx, "w3", rsv.admission("d3"))
+	if err != nil || !res.ClaimReleased || !res.Completed || !res.Committed || rsv.state != reservationCommitted {
 		t.Fatalf("delete w3 rerun: %+v %v; want its claim released", res, err)
 	}
 	if got := claimsOf(t, c, "s2"); len(got) != 0 {
@@ -368,6 +374,202 @@ func TestCatalog_DeleteVolumeTombstonesAndReleases(t *testing.T) {
 	}
 	if _, err := c.DeleteSnapshot(ctx, "v1", "s2"); err != nil {
 		t.Fatalf("delete s2 after w3 was deleted: %v", err)
+	}
+}
+
+// fakeReservation mirrors the blockmaster's deletion reservation (tokens,
+// admitted/committed) for the catalog's Admission.
+type fakeReservation struct {
+	mu        sync.Mutex
+	state     string
+	holders   map[string]bool
+	refuse    bool // Admit refuses (nothing recorded)
+	loseAdmit bool // Admit records, then its response is lost
+}
+
+const (
+	reservationAdmitted  = "admitted"
+	reservationCommitted = "committed"
+)
+
+type fakeAdmit struct {
+	r   *fakeReservation
+	tok string
+}
+
+func (r *fakeReservation) admission(tok string) Admission { return &fakeAdmit{r, tok} }
+
+func (a *fakeAdmit) Admit(context.Context, string) error {
+	a.r.mu.Lock()
+	defer a.r.mu.Unlock()
+	if a.r.refuse {
+		return fmt.Errorf("%w: assigned to r1", ErrNotAdmitted)
+	}
+	if a.r.holders == nil {
+		a.r.holders = map[string]bool{}
+	}
+	a.r.holders[a.tok] = true
+	if a.r.state == "" {
+		a.r.state = reservationAdmitted
+	}
+	if a.r.loseAdmit {
+		return errors.New("response lost")
+	}
+	return nil
+}
+
+func (a *fakeAdmit) Commit(context.Context, string) error {
+	a.r.mu.Lock()
+	defer a.r.mu.Unlock()
+	if a.r.state != reservationCommitted && !a.r.holders[a.tok] {
+		return errors.New("token holds nothing")
+	}
+	a.r.state = reservationCommitted
+	return nil
+}
+
+func (a *fakeAdmit) Abort(context.Context, string) error {
+	a.r.mu.Lock()
+	defer a.r.mu.Unlock()
+	if a.r.state == reservationCommitted {
+		return errors.New("committed")
+	}
+	delete(a.r.holders, a.tok)
+	if len(a.r.holders) == 0 {
+		a.r.state = ""
+	}
+	return nil
+}
+
+// A held HEAD found after the admission gives the admission back.
+func TestCatalog_DeleteVolumeHeldAfterAdmissionGivesBack(t *testing.T) {
+	_, _, c, _ := deleteFixture(t) // v1 is attached
+	rsv := &fakeReservation{}
+	res, err := c.DeleteVolume(context.Background(), "v1", rsv.admission("d1"))
+	if CodeOf(err) != CodeVolumeInUse || !res.Admitted || !res.AdmissionAborted || rsv.state != "" {
+		t.Fatalf("held after admission: %+v %v reservation=%q; want volume_in_use and the admission given back", res, err, rsv.state)
+	}
+}
+
+// A lost admission response is reported as an unknown outcome (it may be
+// recorded), never as a plain refusal, and nothing is written.
+func TestCatalog_DeleteVolumeLostAdmissionResponse(t *testing.T) {
+	f, b, c, _ := deleteFixture(t)
+	detachHead(t, f, b, "v1")
+	before := len(f.allWritten())
+	rsv := &fakeReservation{loseAdmit: true}
+	res, err := c.DeleteVolume(context.Background(), "v1", rsv.admission("d1"))
+	var ce *CatalogError
+	if !errors.As(err, &ce) || ce.Code != CodeOutcomeUnknown || !ce.Retryable || !res.AdmissionUncertain || !res.Uncertain || res.Admitted {
+		t.Fatalf("lost admission response: %+v %v; want outcome_unknown, admission uncertain", res, err)
+	}
+	if got := len(f.allWritten()); got != before || rsv.state != reservationAdmitted {
+		t.Fatalf("wrote %d entries; reservation %q (the lost admission did land)", got-before, rsv.state)
+	}
+}
+
+// P2 (concurrent deletes): D1 samples a live claim and pauses before its
+// revert; the fork completes, D2 joins the deleting HEAD, finds no claim,
+// commits and deletes. D1's revert then finds the HEAD past the commit
+// point: it neither reverts nor gives its admission back, and the
+// reservation stays committed.
+func TestCatalog_ConcurrentDeleteCannotRollBackACommittedOne(t *testing.T) {
+	f, b, c, _ := deleteFixture(t)
+	ctx := context.Background()
+	detachHead(t, f, b, "v1")
+	holdFirst(f, catBase+"/w3/HEAD")
+	if _, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s2", Target: "w3", RequestID: "f3"}); CodeOf(err) != CodeOutcomeUnknown {
+		t.Fatalf("fork w3: %v", err)
+	}
+	rsv := &fakeReservation{}
+	var d2 VolumeDeleteResult
+	var d2err error
+	c.retainHook = func(stage, _ string) {
+		if stage != hookClaimFound {
+			return
+		}
+		c.retainHook = nil
+		// The fork completes (its claim is no longer live), then D2 runs.
+		if _, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s2", Target: "w3", RequestID: "f3"}); CodeOf(err) != CodeVolumeDeleted {
+			// Its retry sees the deleting source and backs out; give the
+			// target a real HEAD as a completed fork would have.
+			t.Logf("fork retry during the delete: %v", err)
+		}
+		forceHead(t, f, b, "w3")
+		d2, d2err = c.DeleteVolume(ctx, "v1", rsv.admission("d2"))
+	}
+	d1, err := c.DeleteVolume(ctx, "v1", rsv.admission("d1"))
+	if d2err != nil || !d2.Completed {
+		t.Fatalf("D2: %+v %v; want completed", d2, d2err)
+	}
+	if err == nil || d1.Reverted || d1.AdmissionAborted {
+		t.Fatalf("D1 after D2 committed: %+v %v; want an error, no revert, no give-back", d1, err)
+	}
+	if h := headState(t, c, "v1"); h.State != storage.ChunkHeadDeleted {
+		t.Fatalf("HEAD after both: %+v; want deleted", h)
+	}
+	if rsv.state != reservationCommitted {
+		t.Fatalf("reservation %q; want committed", rsv.state)
+	}
+}
+
+// forceHead installs a real active HEAD for vol (a completed fork's).
+func forceHead(t *testing.T, f *fakeFiler, b *fakeBlobs, vol string) {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	e, err := headEntry(storage.ChunkHead{Gen: 1, Chunks: map[uint64]storage.ChunkRef{}, State: storage.ChunkHeadActive})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.entries[path.Join(catBase, vol, headName)] = e
+	_ = b
+}
+
+// P2 (failed abort, late publication): snapshot A takes name s5 and parks
+// before publishing; the delete marks HEAD; A's same-request retry B sees
+// the mark and tries to abort the attempt, but the tombstone write fails:
+// the name must stay (not freed), so the delete still finds and settles it
+// and the late publication cannot leave an active root.
+func TestCatalog_FailedAbortCannotHideALatePublication(t *testing.T) {
+	f, b, c, h := deleteFixture(t)
+	ctx := context.Background()
+	detachHead(t, f, b, "v1")
+	held := catBase + "/v1/" + snapsDir + "/s5/"
+	f.deferCreate = func(p string, _ *filerpb.Entry) bool { return strings.HasPrefix(p, held) }
+	if _, err := c.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: "s5", RequestID: "r-s5"}, h); err == nil {
+		t.Fatal("A's held publication reported success")
+	}
+	f.deferCreate = nil
+	c.retainHook = func(stage, _ string) {
+		if stage != hookHeadMarked {
+			return
+		}
+		c.retainHook = nil
+		f.failCreate = func(p string) error {
+			if strings.HasPrefix(p, held) {
+				return errors.New("filer unavailable")
+			}
+			return nil
+		}
+		if _, err := c.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: "s5", RequestID: "r-s5"}, h); CodeOf(err) != CodeVolumeDeleted {
+			t.Fatalf("B, the same request after the mark: %v; want volume_deleted", err)
+		}
+		f.failCreate = nil
+		if _, ok, _ := c.resolveSnap(ctx, "v1", "s5"); !ok {
+			t.Fatal("B freed s5's name although its abort failed")
+		}
+	}
+	res, err := c.DeleteVolume(ctx, "v1", nil)
+	if err != nil || !res.Completed {
+		t.Fatalf("delete: %+v %v", res, err)
+	}
+	f.releaseDeferredCreates() // A's publish finally runs
+	attempts, _ := f.ListEntries(ctx, held[:len(held)-1], "", "", 0)
+	for _, e := range attempts {
+		if s := string(e.Extended[extSnapState]); s == SnapActive {
+			t.Fatalf("an active s5 attempt %s survived the completed delete", e.GetName())
+		}
 	}
 }
 

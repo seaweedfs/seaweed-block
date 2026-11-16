@@ -7,8 +7,14 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
+
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
 	"github.com/seaweedfs/seaweed-block/core/host/master"
+	"github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -73,8 +79,44 @@ func TestOpsChunk_VolumeDelete(t *testing.T) {
 		chunkstore.VolumeDeleteResult
 		Error *chunkErrBody `json:"error"`
 	}
-	if code == 0 || json.Unmarshal([]byte(out), &partial) != nil || partial.Error == nil || partial.Error.Code != chunkstore.CodeVolumeInUse || !partial.Admitted || partial.HeadMarked || partial.Completed {
-		t.Fatalf("delete of attached v2: %d %q; want volume_in_use with the partial result", code, out)
+	if code == 0 || json.Unmarshal([]byte(out), &partial) != nil || partial.Error == nil || partial.Error.Code != chunkstore.CodeVolumeInUse || !partial.Admitted || !partial.AdmissionAborted || partial.HeadMarked || partial.Completed {
+		t.Fatalf("delete of attached v2: %d %q; want volume_in_use with the partial result, admission given back", code, out)
+	}
+	lc := lifecycleClient(t, h.Addr())
+	// The given-back id is usable at the master again.
+	if _, err := lc.CreateVolume(ctx, &control.CreateVolumeRequest{VolumeId: "v2", SizeBytes: 1 << 20, ReplicationFactor: 1}); err != nil {
+		t.Fatalf("create v2 after its delete gave back: %v", err)
+	}
+
+	// Integrated claim refusal: v3 has a snapshot a real, incomplete fork
+	// claims (VOLUME published, stopped before HEAD by its deadline).
+	if _, err := cat.EnsureVolume(ctx, "v3", geo); err != nil {
+		t.Fatal(err)
+	}
+	h3, _, err := cat.ReadHead(ctx, "v3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cat.CreateSnapshot(ctx, "v3", chunkstore.SnapshotRequest{Name: "s", RequestID: "rs"}, h3); err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Now()
+	cat.SetClock(func() time.Time { clock = clock.Add(time.Second); return clock })
+	cat.OpDeadline = time.Nanosecond
+	if _, err := cat.Fork(ctx, chunkstore.ForkRequest{Source: "v3", Snapshot: "s", Target: "w3", RequestID: "f"}); chunkstore.CodeOf(err) != chunkstore.CodeDeadlineExceeded {
+		t.Fatalf("stopped fork: %v", err)
+	}
+	cat.OpDeadline = 0
+	code, out, _ = runChunk("volume-delete", "--chunk-filer", "f:1", "--master", h.Addr(), "v3")
+	partial.Error = nil
+	if code == 0 || json.Unmarshal([]byte(out), &partial) != nil || partial.Error == nil || partial.Error.Code != chunkstore.CodeSnapshotClaimed || !partial.Reverted || !partial.AdmissionAborted {
+		t.Fatalf("delete of claimed v3: %d %q; want snapshot_claimed, reverted, admission given back", code, out)
+	}
+	if _, err := lc.CreateVolume(ctx, &control.CreateVolumeRequest{VolumeId: "v3", SizeBytes: 1 << 20, ReplicationFactor: 1}); err != nil {
+		t.Fatalf("create v3 after the claim refusal: %v; want usable again", err)
+	}
+	if _, err := cat.EnsureVolume(ctx, "v3", geo); err != nil {
+		t.Fatalf("attach v3 after the claim refusal: %v; want usable again", err)
 	}
 	code, out, errs := runChunk("volume-delete", "--chunk-filer", "f:1", "--master", h.Addr(), "v1")
 	var res chunkstore.VolumeDeleteResult
@@ -84,4 +126,20 @@ func TestOpsChunk_VolumeDelete(t *testing.T) {
 	if _, err := cat.EnsureVolume(ctx, "v1", geo); chunkstore.CodeOf(err) != chunkstore.CodeVolumeDeleted {
 		t.Fatalf("recreate v1: %v; want volume_deleted", err)
 	}
+	if !res.Committed {
+		t.Fatalf("delete v1: %+v; want committed", res)
+	}
+	if _, err := lc.CreateVolume(ctx, &control.CreateVolumeRequest{VolumeId: "v1", SizeBytes: 1 << 20, ReplicationFactor: 1}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("create v1 after its committed delete: %v; want FailedPrecondition", err)
+	}
+}
+
+func lifecycleClient(t *testing.T, addr string) control.LifecycleServiceClient {
+	t.Helper()
+	c, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	return control.NewLifecycleServiceClient(c)
 }

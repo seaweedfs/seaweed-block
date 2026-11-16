@@ -84,13 +84,18 @@ service ClusterEvidenceService {
 service LifecycleService {
     rpc CreateVolume(CreateVolumeRequest) returns (CreateVolumeResponse);
     rpc DeleteVolume(DeleteVolumeRequest) returns (DeleteVolumeResponse);
-    // MarkVolumeDeleting is the admission of a chunk volume delete: under
-    // the same locks as every assignment, placement and binding write it
-    // refuses (FAILED_PRECONDITION) a volume with live or pending authority,
-    // and otherwise marks the lifecycle record deleting, after which no new
-    // assignment, placement or binding is admitted and the id is never
-    // created again.
+    // MarkVolumeDeleting admits a chunk volume delete: under the same locks
+    // as every assignment, placement and binding write it refuses
+    // (FAILED_PRECONDITION) a volume with live or pending authority, and
+    // otherwise records the delete's token in a durable deletion
+    // reservation, independent of the volume record. While reserved, no
+    // new assignment, placement or binding is admitted and the id is not
+    // created again. AbortVolumeDeleting gives a token back (the
+    // reservation goes with its last token); CommitVolumeDeleting makes it
+    // permanent (never given back).
     rpc MarkVolumeDeleting(MarkVolumeDeletingRequest) returns (MarkVolumeDeletingResponse);
+    rpc AbortVolumeDeleting(MarkVolumeDeletingRequest) returns (MarkVolumeDeletingResponse);
+    rpc CommitVolumeDeleting(MarkVolumeDeletingRequest) returns (MarkVolumeDeletingResponse);
 }
 
 // FailbackService — disabled-by-default authority failback endpoint.
@@ -413,12 +418,17 @@ message DeleteVolumeResponse {
 
 message MarkVolumeDeletingRequest {
     string volume_id = 1;
+    // token identifies one delete operation (chosen by the caller).
+    string token = 2;
 }
 
 message MarkVolumeDeletingResponse {
-    // known is false when the master has no lifecycle record for the volume
-    // (it then only checked that no authority is live or pending).
+    // known is true when the master also has a lifecycle record for the
+    // volume (the reservation applies either way).
     bool known = 1;
+    // state is the reservation after the call: "admitted", "committed" or
+    // "" (none left).
+    string state = 2;
 }
 
 message FailbackRequest {

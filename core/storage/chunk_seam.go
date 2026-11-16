@@ -207,8 +207,11 @@ const chunkHeadAborted = "aborted"
 // the delete can still be given back); chunkHeadDeleted is the final
 // tombstone (no chunks, so nothing it held stays a GC root). Neither is
 // ever moved by CASHead, so no attach, claim or restore can revive them.
+// chunkHeadPurging is the delete's irreversible boundary (chunks still
+// kept until the final tombstone).
 const (
 	chunkHeadDeleting = "deleting"
+	chunkHeadPurging  = "purging"
 	chunkHeadDeleted  = "deleted"
 )
 

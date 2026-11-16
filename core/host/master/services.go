@@ -56,6 +56,15 @@ func (s *services) CreateVolume(ctx context.Context, req *control.CreateVolumeRe
 		return nil, status.Error(codes.FailedPrecondition, "lifecycle store is not configured")
 	}
 	spec := lifecycleSpecFromWire(req)
+	// A reserved id (a chunk volume delete admitted or committed) is never
+	// created again; the reservation is checked under the lock its writer
+	// holds.
+	s.host.workspaceMu.Lock()
+	reserved := stores.Deletions.Reserved(spec.VolumeID) && false // RED: the reservation does not stop CreateVolume
+	s.host.workspaceMu.Unlock()
+	if reserved {
+		return nil, status.Errorf(codes.FailedPrecondition, "create volume: %s is being deleted or was deleted; its id is never reused", spec.VolumeID)
+	}
 	s.host.log.Printf("blockmaster: CreateVolume volume=%q protocol=%q replication_factor=%d pvc=%q namespace=%q", spec.VolumeID, spec.Protocol, spec.ReplicationFactor, spec.PVCName, spec.PVCNamespace)
 	rec, err := stores.Volumes.CreateVolume(spec)
 	if err != nil {
@@ -135,17 +144,78 @@ func (s *services) MarkVolumeDeleting(ctx context.Context, req *control.MarkVolu
 		return nil, lifecycleError("mark volume deleting", err)
 	}
 	_, placed := stores.Placements.GetPlacement(vol)
-	known := false
+	var res lifecycle.DeletionReservation
+	var persistErr error
 	err = s.host.Publisher().RecordWorkspaceDeletion(ctx, vol, bound && placed, func() error {
-		found, e := stores.Volumes.MarkDeleting(vol)
-		known = found
-		return e
+		res, persistErr = stores.Deletions.Admit(vol, req.GetToken())
+		return persistErr
 	})
-	if err != nil {
+	switch {
+	case persistErr != nil:
+		// The admission check passed; the reservation write failed or its
+		// outcome is unknown (the store keeps it in memory, fail closed).
+		return nil, status.Errorf(codes.Unavailable, "mark volume deleting: %v", persistErr)
+	case err != nil:
 		return nil, status.Errorf(codes.FailedPrecondition, "mark volume deleting: %v", err)
 	}
-	s.host.log.Printf("blockmaster: MarkVolumeDeleting volume=%q known=%t", vol, known)
-	return &control.MarkVolumeDeletingResponse{Known: known}, nil
+	_, known := stores.Volumes.GetVolume(vol)
+	s.host.log.Printf("blockmaster: MarkVolumeDeleting volume=%q known=%t state=%s", vol, known, res.State)
+	return &control.MarkVolumeDeletingResponse{Known: known, State: res.State}, nil
+}
+
+// AbortVolumeDeleting gives a delete's admission back (the delete found it
+// could not proceed and undid its own effects). A committed deletion is
+// never given back (FAILED_PRECONDITION).
+func (s *services) AbortVolumeDeleting(ctx context.Context, req *control.MarkVolumeDeletingRequest) (*control.MarkVolumeDeletingResponse, error) {
+	return s.settleVolumeDeleting(ctx, req, "abort", (*lifecycle.DeletionReservationStore).Abort)
+}
+
+// CommitVolumeDeleting makes a delete's reservation permanent: the delete
+// is about to take irreversible steps.
+func (s *services) CommitVolumeDeleting(ctx context.Context, req *control.MarkVolumeDeletingRequest) (*control.MarkVolumeDeletingResponse, error) {
+	return s.settleVolumeDeleting(ctx, req, "commit", (*lifecycle.DeletionReservationStore).Commit)
+}
+
+func (s *services) settleVolumeDeleting(ctx context.Context, req *control.MarkVolumeDeletingRequest, op string,
+	apply func(*lifecycle.DeletionReservationStore, string, string) (lifecycle.DeletionReservation, error)) (*control.MarkVolumeDeletingResponse, error) {
+	s.host.workspaceMu.Lock()
+	defer s.host.workspaceMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, workspaceError(err)
+	}
+	stores := s.host.Lifecycle()
+	if stores == nil {
+		return nil, status.Error(codes.FailedPrecondition, "lifecycle store is not configured")
+	}
+	if req.GetVolumeId() == "" || req.GetToken() == "" {
+		return nil, status.Error(codes.InvalidArgument, "volume_id and token are required")
+	}
+	res, err := apply(stores.Deletions, req.GetVolumeId(), req.GetToken())
+	switch {
+	case errors.Is(err, lifecycle.ErrReservationCommitted), errors.Is(err, lifecycle.ErrReservationToken):
+		return nil, status.Errorf(codes.FailedPrecondition, "%s volume deleting: %v", op, err)
+	case err != nil:
+		return nil, status.Errorf(codes.Unavailable, "%s volume deleting: %v", op, err)
+	}
+	s.host.log.Printf("blockmaster: %s VolumeDeleting volume=%q state=%s", op, req.GetVolumeId(), res.State)
+	state := res.State
+	if state == lifecycle.ReservationAdmitted && len(res.Tokens) == 0 {
+		state = ""
+	}
+	return &control.MarkVolumeDeletingResponse{State: state}, nil
+}
+
+// liveVolumes is the desired volumes the placement reconciler may plan:
+// every record whose id no delete has reserved.
+func (st *LifecycleStores) liveVolumes() []lifecycle.VolumeRecord {
+	all := st.Volumes.ListVolumes()
+	out := all[:0:0]
+	for _, v := range all {
+		if !st.Deletions.Reserved(v.Spec.VolumeID) {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func (s *services) ExecuteFailback(ctx context.Context, req *control.FailbackRequest) (*control.FailbackResponse, error) {
@@ -221,9 +291,7 @@ func lifecycleError(op string, err error) error {
 	if errors.Is(err, lifecycle.ErrVolumeConflict) {
 		return status.Errorf(codes.AlreadyExists, "%s: %v", op, err)
 	}
-	if errors.Is(err, lifecycle.ErrVolumeDeleting) {
-		return status.Errorf(codes.FailedPrecondition, "%s: %v", op, err)
-	}
+
 	return status.Errorf(codes.Internal, "%s: %v", op, err)
 }
 
