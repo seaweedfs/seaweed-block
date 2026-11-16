@@ -149,6 +149,11 @@ func (r *WALStoreReader) readFromExtent(lba uint32) ([]byte, error) {
 	if _, err := r.fd.ReadAt(buf, off); err != nil {
 		return nil, fmt.Errorf("storage: OpenReadOnly extent read lba=%d: %w", lba, err)
 	}
+	if r.metadata != nil {
+		if err := r.metadata.VerifyExtent(lba, buf); err != nil {
+			return nil, err
+		}
+	}
 	return buf, nil
 }
 

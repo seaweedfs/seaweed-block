@@ -355,6 +355,9 @@ func (s *WALStore) writeExtentUnlocked(lba uint32, data []byte) error {
 	if _, err := s.fd.WriteAt(data, off); err != nil {
 		return fmt.Errorf("storage: write extent LBA %d: %w", lba, err)
 	}
+	if s.metadata != nil {
+		return s.metadata.OnExtentWrite(lba, data)
+	}
 	return nil
 }
 
@@ -382,6 +385,11 @@ func (s *WALStore) persistCheckpoint(highestLSN uint64) error {
 	}
 	if highestLSN <= s.checkpointLSN {
 		return nil
+	}
+	if s.metadata != nil {
+		if err := s.metadata.BeforeCheckpointAdvance(highestLSN); err != nil {
+			return fmt.Errorf("storage: block metadata before checkpoint %d: %w", highestLSN, err)
+		}
 	}
 	// The chunk layer's dirty bitmap must be durable before the checkpoint
 	// (and so the WAL tail) can pass the entries it covers.
@@ -815,6 +823,11 @@ func (s *WALStore) readFromExtent(lba uint32) ([]byte, error) {
 	if _, err := s.fd.ReadAt(data, off); err != nil {
 		return nil, fmt.Errorf("storage: extent read LBA %d: %w", lba, err)
 	}
+	if s.metadata != nil {
+		if err := s.metadata.VerifyExtent(lba, data); err != nil {
+			return nil, err
+		}
+	}
 	return data, nil
 }
 
@@ -851,6 +864,12 @@ func (s *WALStore) Sync() (uint64, error) {
 
 	s.mu.Lock()
 	if targetDirectFrontier > s.checkpointLSN && targetDirectFrontier <= targetHead {
+		if s.metadata != nil {
+			if err := s.metadata.BeforeCheckpointAdvance(targetDirectFrontier); err != nil {
+				s.mu.Unlock()
+				return 0, fmt.Errorf("storage: block metadata before direct frontier %d: %w", targetDirectFrontier, err)
+			}
+		}
 		if h := s.chunk.Load(); h != nil {
 			if err := h.sink.BeforeCheckpointAdvance(targetDirectFrontier); err != nil {
 				s.mu.Unlock()
