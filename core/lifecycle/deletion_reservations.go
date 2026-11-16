@@ -189,9 +189,6 @@ func (s *DeletionReservationStore) update(vol string, protective bool, change fu
 }
 
 func (s *DeletionReservationStore) persist(next map[string]DeletionReservation, protective bool) error {
-	if red := true; red { // RED: intent-only, nothing written or synced
-		return nil
-	}
 	b, err := json.Marshal(next)
 	if err != nil {
 		return err

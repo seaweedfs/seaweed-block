@@ -124,7 +124,7 @@ func (c *Catalog) DeleteVolume(ctx context.Context, vol string, admit Admission)
 	// commit an earlier run may have lost).
 	if admit != nil {
 		if err := admit.Admit(ctx, vol); err != nil {
-			if errors.Is(err, ErrNotAdmitted) || true { // RED: any admission error reads as a refusal
+			if errors.Is(err, ErrNotAdmitted) {
 				return res, catErr(CodeVolumeInUse, false, err, "volume %s: delete not admitted", vol)
 			}
 			res.AdmissionUncertain, res.Uncertain = true, true
@@ -133,9 +133,6 @@ func (c *Catalog) DeleteVolume(ctx context.Context, vol string, admit Admission)
 	}
 	res.Admitted = true
 	giveBack := func(cause error) (VolumeDeleteResult, error) {
-		if red := true; red { // RED: a give-back leaves the admission in place
-			return res, cause
-		}
 		if admit != nil {
 			if err := admit.Abort(ctx, vol); err != nil {
 				res.Uncertain = true
@@ -169,7 +166,7 @@ func (c *Catalog) DeleteVolume(ctx context.Context, vol string, admit Admission)
 			case rerr != nil:
 				res.Uncertain = u
 				return res, rerr
-			case !reverted && false: // RED: a revert that found the HEAD committed still counts as given back
+			case !reverted:
 				// Another delete committed meanwhile: its irreversible steps
 				// stand; this call neither reverts nor gives back.
 				return res, catErr(CodeOutcomeUnknown, true, nil, "volume %s: another delete committed while this one found %v; rerun the delete", vol, live)

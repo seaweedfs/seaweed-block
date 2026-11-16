@@ -856,14 +856,7 @@ func (c *Catalog) CreateSnapshot(ctx context.Context, vol string, req SnapshotRe
 		// Settle this name as the delete does: the attempt's tombstone or
 		// its winning publication is confirmed before the name is freed;
 		// on failure the name stays, so the delete still finds it.
-		if red := true; red { // RED: the name is freed even when the abort write failed
-			if tomb, err := c.abortedSnapEntry(vol, req.Name, attempt); err == nil {
-				_ = c.f.CreateEntry(ctx, path.Join(root, snapsDir, req.Name), tomb, true)
-			}
-			_, _, _ = c.freeName(ctx, root, req.Name, attempt)
-		} else {
-			_, _, _, _ = c.deleteNameForVolume(ctx, vol, root, req.Name)
-		}
+		_, _, _, _ = c.deleteNameForVolume(ctx, vol, root, req.Name)
 		return SnapshotInfo{}, refuseDeleted(vol, "it cannot be snapshotted")
 	}
 

@@ -60,7 +60,7 @@ func (s *services) CreateVolume(ctx context.Context, req *control.CreateVolumeRe
 	// created again; the reservation is checked under the lock its writer
 	// holds.
 	s.host.workspaceMu.Lock()
-	reserved := stores.Deletions.Reserved(spec.VolumeID) && false // RED: the reservation does not stop CreateVolume
+	reserved := stores.Deletions.Reserved(spec.VolumeID)
 	s.host.workspaceMu.Unlock()
 	if reserved {
 		return nil, status.Errorf(codes.FailedPrecondition, "create volume: %s is being deleted or was deleted; its id is never reused", spec.VolumeID)
