@@ -106,16 +106,33 @@ func TestDurableStartup_Issue51_CorruptNewerSlotIsWALCorrupt(t *testing.T) {
 	}
 }
 
-// claude05's ruling (1) for smartwal: a corrupted committed record with a
-// later valid record after it (a mid-history hole) fails closed:
-// wal_corrupt, readiness blocked.
-func TestDurableStartup_Issue51_SmartWALMidHistoryHoleIsWALCorrupt(t *testing.T) {
+// claude05's ruling (A), 06:47Z: detection only for smartwal too. A
+// corrupted committed slot with later valid records starts as before
+// (ready), and the durable status carries the counted warning.
+func TestDurableStartup_Issue51_SmartWALHoleIsAWarningNotAnOutage(t *testing.T) {
 	cfg := durable.ProviderConfig{Impl: durable.ImplSmartWAL, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: 16}
 	path := writeSmartWAL(t, cfg, []uint32{0, 1, 2, 3})
 	corruptSlotCRC(t, path, 1) // LSN 2; LSN 3 and 4 stay valid
-	outcome, h := startAfterCorruption(t, cfg)
-	if outcome != durableStartupFaulted || len(h.reported) != 1 || h.reported[0] != volume.UnhealthyWALCorrupt || len(h.blocked) == 0 {
-		t.Fatalf("mid-history hole: outcome=%v reported=%v blocked=%v; want faulted, wal_corrupt, readiness blocked", outcome, h.reported, h.blocked)
+	dp, err := durable.NewDurableProvider(cfg, healthyView{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dp.Close()
+	h := &spyHost{}
+	outcome, evidence, err := openAndRecoverDurable(dp, h, "v1", 5*time.Second)
+	if outcome != durableStartupReady || len(h.reported) != 0 {
+		t.Fatalf("smartwal hole: outcome=%v reported=%v evidence=%q err=%v; want ready", outcome, h.reported, evidence, err)
+	}
+	warned := false
+	for _, st := range dp.DurableStatuses() {
+		for _, w := range st.Warnings {
+			if strings.HasPrefix(w, storage.WarningWALHoleSuspected+":") && st.HolesSuspected == 1 {
+				warned = true
+			}
+		}
+	}
+	if !warned {
+		t.Fatalf("durable statuses %+v; want the counted %s warning", dp.DurableStatuses(), storage.WarningWALHoleSuspected)
 	}
 }
 

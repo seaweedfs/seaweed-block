@@ -528,3 +528,9 @@ func (s *Store) SyncCount() uint64 { return s.syncs.Load() }
 
 // Compile-time assertion: Store satisfies the LogicalStorage contract.
 var _ storage.LogicalStorage = (*Store)(nil)
+
+// RecoveryWarnings: RED stub (the reviewed head reports none).
+func (s *Store) RecoveryWarnings() []string { return nil }
+
+// HolesSuspected: RED stub.
+func (s *Store) HolesSuspected() uint64 { return 0 }

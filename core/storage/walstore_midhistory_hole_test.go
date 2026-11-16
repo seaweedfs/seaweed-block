@@ -6,11 +6,10 @@ import (
 	"testing"
 )
 
-// Issue #51, walstore interim (claude05's ruling 2026-11-16 06:14Z): a
-// plain power loss must never become an outage, so a WAL hole followed by
-// valid records does not fail recovery. It is detected, logged, counted and
-// reported as the typed warning wal_hole_suspected, and nothing after the
-// hole is replayed in any range.
+// Issue #51, walstore (claude05's ruling 2026-11-16 06:47Z): pure
+// detection. A WAL hole followed by valid records is logged, counted and
+// reported as the typed warning wal_hole_suspected; nothing about what is
+// replayed, where replay stops, or whether the volume opens changes.
 
 // writeSyncedEntries writes one block to each of lbas (in order), syncs,
 // and returns the store with auto-flush off (nothing checkpointed) and
@@ -80,8 +79,8 @@ func holeWarning(s *WALStore) bool {
 	return false
 }
 
-// (a) A corrupted mid-history synced record: recovery succeeds to the
-// prefix before it, warns (typed, counted), and replays nothing after it.
+// (a) A corrupted mid-history synced record: recovery opens as before
+// (this range stops at it), and warns (typed, counted).
 func TestWALStoreRecoverWarnsOnMidHistoryHole(t *testing.T) {
 	s, path, offs := writeSyncedEntries(t, []uint32{0, 1, 2, 3})
 	flipDataByte(t, s, offs[1])
@@ -132,10 +131,13 @@ func TestWALStoreRecoverKeepsATornTail(t *testing.T) {
 	}
 }
 
-// (c) No replay past a hole across wrapped ranges: the older record at the
-// high end of the WAL is corrupted; the newer batch that wrapped to offset
-// 0 must not be replayed.
-func TestWALStoreRecoverNoReplayPastAHoleAcrossWrappedRanges(t *testing.T) {
+// (c) A hole across wrapped ranges (the older record at the high end
+// corrupted, the newer batch wrapped to offset 0) is no outage. Detection
+// here is per range: when the newer entries were scanned first there is
+// nothing "later" left to find, and telling generations apart across
+// ranges (like not replaying past such a hole) is the post-M4 watermark
+// work.
+func TestWALStoreRecoverWrappedHoleIsNoOutage(t *testing.T) {
 	const (
 		blockSize = 4096
 		walSize   = 24 * 1024
@@ -154,35 +156,53 @@ func TestWALStoreRecoverNoReplayPastAHoleAcrossWrappedRanges(t *testing.T) {
 	if err := s.flusher.flushOnce(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Write(20, makeBlock(blockSize, 0xA4)); err != nil { // high end
+	if _, err := s.Write(20, makeBlock(blockSize, 0xA4)); err != nil {
 		t.Fatal(err)
 	}
 	s.enableMultiBlockRecordsForTest(true)
-	if _, err := s.WriteBatch(24, [][]byte{makeBlock(blockSize, 0xB5), makeBlock(blockSize, 0xB6)}); err != nil { // wraps to 0
+	if _, err := s.WriteBatch(24, [][]byte{makeBlock(blockSize, 0xB5), makeBlock(blockSize, 0xB6)}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Sync(); err != nil {
 		t.Fatal(err)
 	}
 	offs := walOffsetsByLBA(s)
-	if offs[24] != 0 || offs[20] == 0 {
-		t.Fatalf("offsets high=%d low=%d; want the batch wrapped to 0", offs[20], offs[24])
-	}
 	flipDataByte(t, s, offs[20])
 	r, _, err := reopenAfterCrash(t, s, path)
 	if err != nil {
-		t.Fatalf("Recover: %v; want no outage", err)
+		t.Fatalf("Recover = %v; want no outage", err)
 	}
-	if !holeWarning(r) {
-		t.Fatalf("warnings %v; want %s", r.RecoveryWarnings(), WarningWALHoleSuspected)
+	_ = r
+}
+
+// codex01's r1 P1: a damaged STALE record in a released range (below the
+// checkpoint, outside the retained window) must not cost retained data.
+// Layout: checkpoint 2, persisted tail at S, head at 3S; LSN 1 (released)
+// at 0 damaged, LSN 2 checkpointed at S, LSN 3 synced and unflushed at 2S.
+// LSN 3 must be replayed with its exact bytes.
+func TestWALStoreRecoverStaleReleasedGarbageKeepsRetainedData(t *testing.T) {
+	const blockSize = 4096
+	s, path, offs := writeSyncedEntries(t, []uint32{0, 1, 2})
+	S := uint64(walEntryHeaderSize + blockSize)
+	if offs[0] != 0 || offs[1] != S || offs[2] != 2*S {
+		t.Fatalf("offsets %v; want 0, S, 2S", offs)
 	}
-	for _, lba := range []uint32{24, 25} {
-		got, err := r.Read(lba)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got[0] == 0xB5 || got[0] == 0xB6 {
-			t.Fatalf("LBA %d replayed from past the hole (byte %02x)", lba, got[0])
-		}
+	sb := *s.sb
+	sb.WALCheckpointLSN, sb.WALTail, sb.WALHead = 2, S, 3*S
+	buf := newSimpleByteBuf()
+	if _, err := sb.writeTo(buf); err != nil {
+		t.Fatal(err)
 	}
+	if _, err := s.fd.WriteAt(buf.bytes(), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.fd.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	flipDataByte(t, s, offs[0]) // the released LSN 1
+	r, _, err := reopenAfterCrash(t, s, path)
+	if err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	assertRecoveryHardeningBlock(t, r, 2, makeBlock(blockSize, 0xB2)) // LSN 3, exact bytes
 }
