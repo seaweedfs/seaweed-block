@@ -1,7 +1,10 @@
 package storage
 
 import (
+	"bytes"
 	"errors"
+	"os"
+	"path/filepath"
 	"runtime"
 	"sync/atomic"
 	"testing"
@@ -112,5 +115,45 @@ func TestGroupCommitSingletonFollowersRequireNextPhysicalSync(t *testing.T) {
 	}
 	if calls.Load() != 2 {
 		t.Fatalf("physical syncs=%d", calls.Load())
+	}
+}
+
+func TestGroupCommitQD1EveryAckFollowsPhysicalSync(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wal")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	var syncs atomic.Int32
+	gc := NewGroupCommitter(GroupCommitterConfig{SyncFunc: func() error {
+		if err := f.Sync(); err != nil {
+			return err
+		}
+		syncs.Add(1)
+		return nil
+	}})
+	go gc.Run()
+	defer gc.Stop()
+	want := make([]byte, 32*4096)
+	for i := 0; i < 32; i++ {
+		block := bytes.Repeat([]byte{byte(i + 1)}, 4096)
+		copy(want[i*4096:], block)
+		if _, err := f.WriteAt(block, int64(i*4096)); err != nil {
+			t.Fatal(err)
+		}
+		if err := gc.SyncCache(); err != nil {
+			t.Fatal(err)
+		}
+		if n := syncs.Load(); n != int32(i+1) {
+			t.Fatalf("ack without physical fsync: request=%d syncs=%d", i+1, n)
+		}
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatal("fsynced bytes differ on reopen", err)
 	}
 }
