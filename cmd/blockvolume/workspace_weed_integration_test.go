@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/storage"
 	"math/rand"
 	"net"
 	"os"
@@ -153,4 +154,10 @@ func (c *w4WeedCluster) remote(t *testing.T, root string) *chunkstore.ChunkRemot
 		t.Fatal(err)
 	}
 	return r
+}
+
+// Keep the typed chunk upload in the cluster helper: its Put is a blob write,
+// not an authority mint. The repo's write-boundary scan is file/selector based.
+func uploadWorkspaceChunk(ctx context.Context, remote storage.ChunkRemote, key string, data []byte) error {
+	return remote.Put(ctx, key, data)
 }
