@@ -30,6 +30,7 @@ func autoProvider(t *testing.T, root string, impl durable.ImplName) *durable.Dur
 	if err != nil {
 		t.Fatalf("NewDurableProvider(%q): %v", impl, err)
 	}
+	t.Cleanup(func() { _ = p.Close() })
 	return p
 }
 

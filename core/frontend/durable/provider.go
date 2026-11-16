@@ -33,6 +33,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -557,6 +558,19 @@ func (p *DurableProvider) openOrCreate(volumeID string) (*volHandle, error) {
 	if err != nil {
 		return nil, fmt.Errorf("durable: stat %s: %w", path, err)
 	}
+	if p.cfg.Impl == ImplAuto {
+		// A walstore-chunk volume shares walstore's on-disk format, and its
+		// authoritative bytes may live only in the remote HEAD. Opened as
+		// plain walstore it would serve local (possibly absent) extents, so
+		// auto refuses any root carrying chunk metadata; it never deletes
+		// or converts it.
+		if side, err := chunkSidecars(path); err != nil {
+			return nil, err
+		} else if len(side) > 0 {
+			return nil, fmt.Errorf("%w: %s is a chunk-managed volume (%s present); auto cannot open it: set --durable-impl=walstore-chunk with its remote configuration",
+				ErrImplKindMismatch, path, strings.Join(side, ", "))
+		}
+	}
 
 	if exists {
 		impl, err := p.verifyImplOnDisk(path)
@@ -856,6 +870,30 @@ func fileExists(path string) (bool, error) {
 		return false, nil
 	}
 	return false, err
+}
+
+// chunkSidecars lists the walstore-chunk metadata files beside a volume
+// file: everything named <volume file>.chunk* (the fresh marker, the dirty
+// bitmap and its deltas, the presence map). Directories are ignored.
+func chunkSidecars(path string) ([]string, error) {
+	dir, base := filepath.Split(path)
+	if dir == "" {
+		dir = "."
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("durable: list %s for chunk metadata: %w", dir, err)
+	}
+	var out []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasPrefix(e.Name(), base+".chunk") {
+			out = append(out, e.Name())
+		}
+	}
+	return out, nil
 }
 
 // Compile-time check.
