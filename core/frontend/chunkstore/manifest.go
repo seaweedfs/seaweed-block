@@ -113,7 +113,7 @@ func (r *ChunkRemote) PrepareManifest(ctx context.Context, base, next storage.Ch
 		if _, err := rand.Read(nonce); err != nil {
 			return next, nil, err
 		}
-		key := fmt.Sprintf("manifests/%x", nonce)
+		key := fmt.Sprintf("seg/%x", nonce)
 		next.Segments[group] = storage.ChunkSegment{Key: qualifyManifestKey(owner, key), SHA256: sha256.Sum256(body), Owner: owner, Count: len(chunks)}
 		uploads = append(uploads, upload{key, body})
 	}
