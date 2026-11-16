@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/iolatency"
 )
 
 // TargetConfig wires a ublk device to a volume through a Provider.
@@ -27,6 +29,9 @@ type Target struct {
 
 	mu     sync.Mutex
 	device targetDevice
+	// startDevice replaces only the kernel device constructor in caller tests.
+	// Nil uses the production Start path.
+	startDevice func(Config) (targetDevice, error)
 
 	closeOnce sync.Once
 	closeErr  error
@@ -58,7 +63,11 @@ func (t *Target) Start() (string, error) {
 	if t.device != nil {
 		return "", errors.New("ublk: target already started")
 	}
-	d, err := Start(Config{
+	startDevice := t.startDevice
+	if startDevice == nil {
+		startDevice = func(cfg Config) (targetDevice, error) { return Start(cfg) }
+	}
+	d, err := startDevice(Config{
 		Backend:    &providerBackend{provider: t.cfg.Provider, volumeID: t.cfg.VolumeID},
 		Size:       t.cfg.VolumeSize,
 		BlockSize:  t.cfg.BlockSize,
@@ -112,7 +121,33 @@ type providerBackend struct {
 	backend frontend.Backend
 }
 
+// An open attempted by the timing hook must not be retried by this same I/O.
+// A later request gets a fresh context and retains the original retry behavior.
+type providerOpenFailure struct {
+	owner *providerBackend
+	err   error
+}
+type providerOpenFailureKey struct{}
+
+func (b *providerBackend) BeginDurabilityRequest(ctx context.Context, kind string) (context.Context, *iolatency.Request) {
+	if kind != "write" && kind != "fua" && kind != "flush" {
+		return ctx, nil
+	}
+	received := time.Now()
+	backend, err := b.get(ctx)
+	if err != nil {
+		return context.WithValue(ctx, providerOpenFailureKey{}, providerOpenFailure{b, err}), nil
+	}
+	ctx, trace := frontend.BeginDurabilityRequest(ctx, backend, kind)
+	trace.IncludeReceive(received)
+	return ctx, trace
+}
+
 func (b *providerBackend) get(ctx context.Context) (frontend.Backend, error) {
+	if failed, ok := ctx.Value(providerOpenFailureKey{}).(providerOpenFailure); ok && failed.owner == b {
+		return nil, failed.err
+	}
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.backend != nil {

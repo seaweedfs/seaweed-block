@@ -8,6 +8,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/iolatency"
 )
 
 // WALStore is a crash-safe block store backed by one preallocated
@@ -48,7 +50,8 @@ type WALStore struct {
 	recoveryWarnings []string
 	holesSuspected   uint64
 
-	metadata BlockMetadata // immutable before publication
+	fileSyncLatency iolatency.Histogram
+	metadata        BlockMetadata // immutable before publication
 
 	path                       string
 	fd                         *os.File
@@ -642,7 +645,9 @@ func (s *WALStore) Write(lba uint32, data []byte) (uint64, error) {
 		Length: uint32(len(data)),
 		Data:   data,
 	}
+	appendStart := time.Now()
 	walRelOff, err := s.wal.append(entry)
+	s.instr.appendLatency.Observe(time.Since(appendStart))
 	// A failed pwrite may still leave complete records or padding in the file.
 	s.walMutation.Add(1)
 	if err != nil {
@@ -719,7 +724,9 @@ func (s *WALStore) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error
 			Data:   data,
 		}
 	}
+	appendStart := time.Now()
 	offsets, err := s.wal.appendBatch(entries)
+	s.instr.appendLatency.Observe(time.Since(appendStart))
 	// A failed pwrite may still leave complete records or padding in the file.
 	s.walMutation.Add(1)
 	if err != nil {
@@ -764,7 +771,9 @@ func (s *WALStore) writeBatchMultiBlockLocked(startLBA uint32, blocks [][]byte, 
 		Length:   uint32(len(payload)),
 		Data:     payload,
 	}
+	appendStart := time.Now()
 	walRelOff, err := s.wal.append(entry)
+	s.instr.appendLatency.Observe(time.Since(appendStart))
 	// A failed pwrite may still leave complete records or padding in the file.
 	s.walMutation.Add(1)
 	if err != nil {
@@ -1184,7 +1193,9 @@ func (s *WALStore) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
 		Length: uint32(len(dataCopy)),
 		Data:   dataCopy,
 	}
+	appendStart := time.Now()
 	walRelOff, err := s.wal.append(entry)
+	s.instr.appendLatency.Observe(time.Since(appendStart))
 	// A failed pwrite may still leave complete records or padding in the file.
 	s.walMutation.Add(1)
 	if err != nil {
@@ -1370,6 +1381,8 @@ func (s *WALStore) syncWALBatch() error {
 	if !s.bypassSyncDedup.Load() && s.chunk.Load() == nil && cut <= s.durableMutation.Load() {
 		return nil
 	}
+	start := time.Now()
+	defer func() { s.fileSyncLatency.Observe(time.Since(start)) }()
 	if err := s.syncWALFile(); err != nil {
 		return err
 	}

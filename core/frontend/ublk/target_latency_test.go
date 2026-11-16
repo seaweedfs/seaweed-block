@@ -1,0 +1,151 @@
+package ublk
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"syscall"
+	"testing"
+
+	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+)
+
+type latencyView struct{}
+
+func (latencyView) Projection() frontend.Projection {
+	return frontend.Projection{VolumeID: "v1", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1, Healthy: true}
+}
+
+type latencyDevice struct{ h handler }
+
+func (d *latencyDevice) Path() string { return "/test-kernel-boundary" }
+func (d *latencyDevice) Stats() Stats { return Stats{} }
+func (d *latencyDevice) Close() error { return nil }
+func TestTargetDurabilityLatencyThroughProviderBackend(t *testing.T) {
+	p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStore, StorageRoot: t.TempDir(), NumBlocks: 32, BlockSize: 4096}, latencyView{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	if _, err := p.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.RecoverVolume(context.Background(), "v1"); err != nil {
+		t.Fatal(err)
+	}
+	tg := NewTarget(TargetConfig{Provider: p, VolumeID: "v1", VolumeSize: 32 * 4096, BlockSize: 4096, DevID: -1})
+	var dev *latencyDevice
+	tg.startDevice = func(cfg Config) (targetDevice, error) {
+		// Only the kernel constructor is replaced; Target.Start must select the
+		// actual production providerBackend and pass it through this Config.
+		if _, ok := cfg.Backend.(*providerBackend); !ok {
+			t.Fatalf("wrong production backend %T", cfg.Backend)
+		}
+		dev = &latencyDevice{h: handler{backend: cfg.Backend, size: cfg.Size}}
+		return dev, nil
+	}
+	if _, err := tg.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer tg.Close()
+	if n := dev.h.handle(context.Background(), request{op: ioOpWrite, flags: ioFlagFUA, nrSectors: 8}, make([]byte, 4096)); n != 4096 {
+		t.Fatal(n)
+	}
+	if n := dev.h.handle(context.Background(), request{op: ioOpFlush}, nil); n != 0 {
+		t.Fatal(n)
+	}
+	statuses := p.DurableStatuses()
+	if len(statuses) != 1 {
+		t.Fatal(statuses)
+	}
+	s := statuses[0].WriteProfile.DurabilityLatency
+	if s.Frontend.Writes != 1 || s.Frontend.FUAWrites != 1 || s.Frontend.Flushes != 1 || s.Frontend.RequestTotal.Count != 2 || s.Frontend.ReceiveToBackend.Count != 2 || s.Frontend.AckDispatch.Count != 2 || s.Frontend.FUATotal.Count != 1 || s.Frontend.FlushTotal.Count != 1 {
+		t.Fatalf("production Target frontend stages missing: %+v", s.Frontend)
+	}
+	if s.WAL == nil || s.WAL.FileSync.Count == 0 || s.BackendSync.Count != 2 {
+		t.Fatal("storage stages missing", s)
+	}
+}
+
+type retryLatencyProvider struct {
+	inner frontend.Provider
+	calls int
+}
+
+func (p *retryLatencyProvider) Open(ctx context.Context, id string) (frontend.Backend, error) {
+	p.calls++
+	if p.calls == 1 {
+		return nil, errors.New("first open refused")
+	}
+	return p.inner.Open(ctx, id)
+}
+func TestTargetLatencyOpenFailureIsNotRetriedInsideRequest(t *testing.T) {
+	p := &retryLatencyProvider{inner: failingProvider{err: errors.New("still refused")}}
+	tg := NewTarget(TargetConfig{Provider: p, VolumeID: "v1", VolumeSize: 4096, BlockSize: 4096})
+	var h handler
+	tg.startDevice = func(cfg Config) (targetDevice, error) {
+		h = handler{backend: cfg.Backend, size: cfg.Size}
+		return &latencyDevice{h: h}, nil
+	}
+	if _, err := tg.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer tg.Close()
+	if n := h.handle(context.Background(), request{op: ioOpFlush}, nil); n >= 0 {
+		t.Fatal("open failure acknowledged")
+	}
+	if p.calls != 1 {
+		t.Fatalf("timing caused %d open attempts in one request", p.calls)
+	}
+	if n := h.handle(context.Background(), request{op: ioOpFlush}, nil); n >= 0 {
+		t.Fatal("retry failure acknowledged")
+	}
+	if p.calls != 2 {
+		t.Fatalf("next request did not retry exactly once: %d", p.calls)
+	}
+}
+
+func TestTargetInvalidWriteDoesNotOpenProvider(t *testing.T) {
+	for _, flags := range []uint32{0, ioFlagFUA} {
+		for _, tc := range []struct {
+			name    string
+			sector  uint64
+			sectors uint32
+			buffer  int
+		}{
+			{"start beyond device", 9, 1, 512},
+			{"range crosses end", 8, 1, 512},
+			{"short buffer", 0, 8, 1},
+			{"sector shift overflow", ^uint64(0), 1, 512},
+		} {
+			t.Run(fmt.Sprintf("%s/fua=%t", tc.name, flags != 0), func(t *testing.T) {
+				p := &retryLatencyProvider{inner: failingProvider{err: errors.New("must never open")}}
+				tg := NewTarget(TargetConfig{Provider: p, VolumeID: "v1", VolumeSize: 4096, BlockSize: 4096})
+				var h handler
+				var glue *providerBackend
+				counts := &counters{}
+				tg.startDevice = func(cfg Config) (targetDevice, error) {
+					glue = cfg.Backend.(*providerBackend)
+					h = handler{backend: cfg.Backend, size: cfg.Size, stats: counts}
+					return &latencyDevice{h: h}, nil
+				}
+				if _, err := tg.Start(); err != nil {
+					t.Fatal(err)
+				}
+				defer tg.Close()
+				got := h.handle(context.Background(), request{op: ioOpWrite, flags: flags, startSector: tc.sector, nrSectors: tc.sectors}, make([]byte, tc.buffer))
+				if got != -int32(syscall.EINVAL) {
+					t.Fatalf("result=%d want EINVAL", got)
+				}
+				if p.calls != 0 || glue.backend != nil {
+					t.Fatalf("invalid request touched fresh provider: opens=%d cached=%t", p.calls, glue.backend != nil)
+				}
+				stats := counts.snapshot()
+				if stats.WriteRequests != 1 || stats.Errors != 1 {
+					t.Fatalf("device refusal accounting %+v", stats)
+				}
+			})
+		}
+	}
+}

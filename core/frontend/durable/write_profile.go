@@ -3,12 +3,16 @@ package durable
 import (
 	"sync/atomic"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/iolatency"
+	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 // WriteProfileStatus is a read-only diagnostic snapshot for write-path gates.
 // It is not a performance API; callers use it to prove which product-owned
 // path observed the write and roughly where time accumulated.
 type WriteProfileStatus struct {
+	DurabilityLatency           DurabilityLatencyStatus
 	TargetWriteOps              uint64
 	TargetWriteBytes            uint64
 	TargetWriteRequestMaxBytes  uint64
@@ -53,7 +57,15 @@ type WriteProfileStatus struct {
 	BackendSyncDurationNanos    uint64
 }
 
+type DurabilityLatencyStatus struct {
+	Frontend    iolatency.RequestStatus
+	BackendSync iolatency.Distribution
+	WAL         *storage.DurabilityLatencyStatus `json:",omitempty"`
+}
+
 type writeProfile struct {
+	requests                  iolatency.Requests
+	syncLatency               iolatency.Histogram
 	targetWriteOps            atomic.Uint64
 	targetWriteBytes          atomic.Uint64
 	targetWriteRequestMax     atomic.Uint64
@@ -153,6 +165,7 @@ func (p *writeProfile) snapshot() WriteProfileStatus {
 		return WriteProfileStatus{}
 	}
 	return WriteProfileStatus{
+		DurabilityLatency:           DurabilityLatencyStatus{Frontend: p.requests.Snapshot(), BackendSync: p.syncLatency.Snapshot()},
 		TargetWriteOps:              p.targetWriteOps.Load(),
 		TargetWriteBytes:            p.targetWriteBytes.Load(),
 		TargetWriteRequestMaxBytes:  p.targetWriteRequestMax.Load(),

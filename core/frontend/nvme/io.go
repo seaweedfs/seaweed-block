@@ -167,7 +167,19 @@ func (h *IOHandler) ANAProvider() ANAProvider {
 
 // Handle dispatches one IOCommand. Minimal T2 opcode set:
 // Read, Write, Flush. Everything else → Invalid Opcode.
-func (h *IOHandler) Handle(ctx context.Context, cmd IOCommand) IOResult {
+func (h *IOHandler) Handle(ctx context.Context, cmd IOCommand) (result IOResult) {
+	kind := ""
+	if cmd.Opcode == ioFlush {
+		kind = "flush"
+	} else if cmd.Opcode == ioWrite {
+		kind = "write"
+		if cmd.FUA {
+			kind = "fua"
+		}
+	}
+	ctx, trace := frontend.BeginDurabilityRequest(ctx, h.backend, kind)
+	defer func() { trace.Finish(result.SC != SCSuccess) }()
+
 	if cmd.NSID != h.nsid {
 		// Invalid Namespace or Format (SCT=0 SC=0x0B is the
 		// spec'd code, but we use InvalidField 0x02 for T2

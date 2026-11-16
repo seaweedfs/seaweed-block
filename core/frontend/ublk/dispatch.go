@@ -4,6 +4,9 @@ import (
 	"context"
 	"sync/atomic"
 	"syscall"
+	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/frontend"
 )
 
 // ublk request operations and flags (include/uapi/linux/ublk_cmd.h).
@@ -100,9 +103,17 @@ func (h handler) handle(ctx context.Context, r request, buf []byte) int32 {
 	return res
 }
 
-func (h handler) serve(ctx context.Context, r request, buf []byte) int32 {
+func (h handler) serve(ctx context.Context, r request, buf []byte) (result int32) {
+	var received time.Time
+	if r.op == ioOpWrite || r.op == ioOpFlush {
+		received = time.Now()
+	}
+
 	switch r.op {
 	case ioOpFlush:
+		ctx, trace := frontend.BeginDurabilityRequest(ctx, h.backend, "flush")
+		trace.IncludeReceive(received)
+		defer func() { trace.Finish(result < 0) }()
 		if err := h.backend.Sync(ctx); err != nil {
 			return errno(syscall.EIO)
 		}
@@ -129,6 +140,14 @@ func (h handler) serve(ctx context.Context, r request, buf []byte) int32 {
 		}
 		return int32(n)
 	}
+	// Only validated writes may open the lazy provider through the timing hook.
+	kind := "write"
+	if r.flags&ioFlagFUA != 0 {
+		kind = "fua"
+	}
+	ctx, trace := frontend.BeginDurabilityRequest(ctx, h.backend, kind)
+	trace.IncludeReceive(received)
+	defer func() { trace.Finish(result < 0) }()
 	n, err := h.backend.Write(ctx, int64(offset), data)
 	if err != nil || n != len(data) {
 		return errno(syscall.EIO)

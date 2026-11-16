@@ -3,6 +3,8 @@ package storage
 import (
 	"sync/atomic"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/iolatency"
 )
 
 // WriteInstrumentationStatus is a read-only snapshot of storage-internal write
@@ -40,6 +42,7 @@ type WriteInstrumented interface {
 }
 
 type writeInstrumentation struct {
+	appendLatency               iolatency.Histogram
 	walCopyOps                  atomic.Uint64
 	walCopyBytes                atomic.Uint64
 	walCopyDurationNanos        atomic.Uint64

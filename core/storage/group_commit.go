@@ -5,6 +5,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/iolatency"
 )
 
 var ErrGroupCommitShutdown = errors.New("storage: group committer shut down")
@@ -17,13 +19,19 @@ var ErrGroupCommitShutdown = errors.New("storage: group committer shut down")
 // Lifetime: NewGroupCommitter() → Run() in a goroutine →
 // SyncCache() from any number of writers → Stop() shuts the loop down
 // and fails any waiters that arrive after.
+type commitWaiter struct {
+	done   chan error
+	queued time.Time
+}
+
 type GroupCommitter struct {
-	syncFunc func() error
-	maxDelay time.Duration
-	maxBatch int
+	waitLatency iolatency.Histogram
+	syncFunc    func() error
+	maxDelay    time.Duration
+	maxBatch    int
 
 	mu       sync.Mutex
-	pending  []chan error
+	pending  []commitWaiter
 	stopped  bool
 	notifyCh chan struct{}
 	stopCh   chan struct{}
@@ -100,10 +108,14 @@ func (gc *GroupCommitter) Run() {
 			continue
 		}
 
+		started := time.Now()
+		for _, w := range batch {
+			gc.waitLatency.Observe(started.Sub(w.queued))
+		}
 		err := gc.fsyncSafe()
 		gc.syncCount.Add(1)
 		for _, ch := range batch {
-			ch <- err
+			ch.done <- err
 		}
 	}
 }
@@ -126,7 +138,7 @@ func (gc *GroupCommitter) markStoppedAndDrain() {
 	gc.pending = nil
 	gc.mu.Unlock()
 	for _, ch := range pending {
-		ch <- ErrGroupCommitShutdown
+		ch.done <- ErrGroupCommitShutdown
 	}
 }
 
@@ -139,7 +151,7 @@ func (gc *GroupCommitter) SyncCache() error {
 		gc.mu.Unlock()
 		return ErrGroupCommitShutdown
 	}
-	gc.pending = append(gc.pending, ch)
+	gc.pending = append(gc.pending, commitWaiter{done: ch, queued: time.Now()})
 	gc.mu.Unlock()
 
 	// Nudge the run loop. notifyCh has buffer 1; a stale notification is harmless.
