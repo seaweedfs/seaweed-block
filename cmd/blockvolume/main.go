@@ -103,12 +103,13 @@ type flags struct {
 
 	// Durable-backend flags. When --durable-root is set, the iSCSI
 	// and NVMe providers use DurableProvider instead of memback.
-	// --durable-impl selects smartwal, walstore, or the explicit
-	// parallel-walstore candidate (default smartwal).
+	// --durable-impl selects walstore, smartwal (experimental), or the
+	// explicit parallel-walstore candidate. Empty (default) = auto: an
+	// existing volume opens with its on-disk format, a new one is walstore.
 	// --durable-blocks + --durable-blocksize are used on first-time
 	// storage create.
 	durableRoot string
-	durableImpl string // "smartwal" | "walstore" | "parallel-walstore" | "walstore-chunk"
+	durableImpl string // "" (auto) | "walstore" | "smartwal" | "parallel-walstore" | "walstore-chunk"
 	// --chunk-*: the SeaweedFS remote of --durable-impl=walstore-chunk.
 	chunk                                chunkFlags
 	durableBlocks                        uint
@@ -185,7 +186,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.IntVar(&f.ublkQueues, "ublk-queues", 0, "ublk hardware queues (one server thread each); 0 = default 1. Requires --ublk-device")
 	fs.IntVar(&f.ublkQueueDepth, "ublk-queue-depth", 0, "ublk in-flight requests per queue; 0 = default 64. Requires --ublk-device")
 	fs.StringVar(&f.durableRoot, "durable-root", "", "directory for persistent storage files; empty = memback (non-durable)")
-	fs.StringVar(&f.durableImpl, "durable-impl", "smartwal", "LogicalStorage impl: smartwal (default), walstore, opt-in parallel-walstore, or opt-in walstore-chunk (walstore published to SeaweedFS; proof of concept); ignored unless --durable-root is set")
+	fs.StringVar(&f.durableImpl, "durable-impl", "", "LogicalStorage impl: empty (default) = auto: an existing volume opens with its on-disk format (a walstore-chunk root needs the explicit walstore-chunk selector), a new volume is created as walstore; or walstore, smartwal (experimental), opt-in parallel-walstore, or opt-in walstore-chunk (walstore published to SeaweedFS; proof of concept); ignored unless --durable-root is set")
 	fs.StringVar(&f.chunk.filer, "chunk-filer", "", "walstore-chunk: SeaweedFS filer gRPC address host:port")
 	fs.StringVar(&f.chunk.path, "chunk-path", defaultChunkPath, "walstore-chunk: filer directory holding one directory per volume (HEAD and chunk key bindings)")
 	fs.StringVar(&f.chunk.collection, "chunk-collection", "", "walstore-chunk: collection for chunk needles (empty = filer default / storage rule)")
@@ -243,9 +244,9 @@ func parseFlags(args []string) (flags, error) {
 		return flags{}, err
 	}
 	switch f.durableImpl {
-	case "smartwal", "walstore", "parallel-walstore", "walstore-chunk":
+	case "", "walstore", "smartwal", "parallel-walstore", "walstore-chunk":
 	default:
-		return flags{}, fmt.Errorf("--durable-impl=%q invalid; want smartwal, walstore, parallel-walstore, or walstore-chunk", f.durableImpl)
+		return flags{}, fmt.Errorf("--durable-impl=%q invalid; want empty (auto), walstore, smartwal, parallel-walstore, or walstore-chunk", f.durableImpl)
 	}
 	if f.workspaceLease && (f.durableRoot == "" || f.durableImpl != "walstore-chunk") {
 		return flags{}, fmt.Errorf("--workspace-lease requires --durable-root and --durable-impl=walstore-chunk")

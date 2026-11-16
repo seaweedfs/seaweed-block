@@ -143,6 +143,14 @@ default, a release claim or a production path.
   control broker, which is not done.
 - Crash-restart recovery of a ublk server. A crashed server fails closed.
 - Multi-replica workspaces combined with chunk snapshots.
+- The `smartwal` storage engine. It is experimental: in-place overwrites
+  have no rollback on a torn write, blocks lose their per-block CRC once
+  their ring records recycle, the handling of a corrupted committed record
+  is still open, and it has no chunk-snapshot support. New volumes use
+  `walstore`; `blockvolume --durable-impl` defaults to auto, which creates
+  new volumes as `walstore` and opens an existing volume with its on-disk
+  format. A `walstore-chunk` volume is refused under auto and needs
+  `--durable-impl=walstore-chunk` with its remote configuration.
 
 ## Kubernetes block storage (alpha)
 
