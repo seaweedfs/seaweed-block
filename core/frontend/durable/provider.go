@@ -228,6 +228,11 @@ type VolumeStatus struct {
 	// Chunk is the chunk layer's state and cut counters; walstore-chunk
 	// volumes only.
 	Chunk *ChunkStatus
+	// Warnings are the store's typed recovery warnings (e.g.
+	// wal_hole_suspected, issue #51); they do not change readiness.
+	// HolesSuspected counts the recoveries that found a WAL hole.
+	Warnings       []string `json:",omitempty"`
+	HolesSuspected uint64   `json:",omitempty"`
 }
 
 // ChunkStatus is one walstore-chunk volume's chunk layer (B9 7.2-7.3).

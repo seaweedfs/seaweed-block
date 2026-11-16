@@ -37,13 +37,16 @@ import (
 //   - per-block CRC stored alongside extent (extent stays raw blocks)
 //   - cross-checking against any external snapshot
 func runRecovery(r *ring, fd *os.File, extentBase int64, blockSize int) (uint64, error) {
-	records, err := r.scanValid()
+	records, bad, err := r.scanSlots()
 	if err != nil {
 		return 0, fmt.Errorf("smartwal: recovery scan: %w", err)
 	}
 	if len(records) == 0 {
 		log.Printf("smartwal: recovery: ring empty; nothing to verify")
 		return 0, nil
+	}
+	if err := midHistoryHole(bad, records[len(records)-1].LSN, r.capacity); err != nil {
+		return 0, err
 	}
 
 	// Last-writer-wins map. Records arrive sorted by LSN ascending,
@@ -100,4 +103,31 @@ func runRecovery(r *ring, fd *os.File, extentBase int64, blockSize int) (uint64,
 	log.Printf("smartwal: recovery: %d LBAs verified, frontier=%d",
 		recovered, highestVerifiedLSN)
 	return highestVerifiedLSN, nil
+}
+
+// midHistoryHole fails closed on a corrupted committed slot (issue #51;
+// claude05's ruling 2026-11-16 06:10Z/06:14Z). Slot i holds LSN i mod
+// capacity, so with H the highest valid LSN a bad slot at distance d
+// (1 <= d < capacity-1) behind H's slot implies LSN H-d: a record a later
+// valid record (H) follows, i.e. a mid-history hole. The slot right after
+// H's (d = capacity-1) is where LSN H+1 goes: a torn tail, which still
+// recovers; so is a slot whose implied LSN was never written.
+func midHistoryHole(bad []uint64, highest, capacity uint64) error {
+	if red := true; red { // RED: a bad slot is always a torn slot
+		return nil
+	}
+	if capacity < 2 {
+		return nil
+	}
+	hs := highest % capacity
+	for _, i := range bad {
+		d := (hs + capacity - i) % capacity
+		if d == 0 || d == capacity-1 || d >= highest {
+			continue // H's own slot (impossible), the torn-tail position, or never written
+		}
+		detail := fmt.Sprintf("corrupted record in slot %d (implied LSN %d) below the valid LSN %d: mid-history hole", i, highest-d, highest)
+		log.Printf("smartwal: recovery %s — failing closed", detail)
+		return storage.NewWALIntegrityFailure(nil, detail)
+	}
+	return nil
 }
