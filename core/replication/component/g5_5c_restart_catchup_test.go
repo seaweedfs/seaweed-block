@@ -172,6 +172,27 @@ func writeOneBlock(t *testing.T, c *Cluster, lba uint32, fillByte byte) {
 	}
 }
 
+// logRecoveryStateOnFailure records the recovery state that a failed
+// convergence wait leaves behind: both frontiers, the peer status, and the
+// replica-0 engine projection and trace. WaitForConverge only reports which
+// LBAs differ; this shows where the probe -> catch-up loop stopped.
+// Registered after Start, it runs before the cluster's own cleanups.
+func logRecoveryStateOnFailure(t *testing.T, c *Cluster) {
+	t.Helper()
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		_, _, pH := c.primary.Store.Boundaries()
+		_, _, rH := c.Replica(0).Store.Boundaries()
+		t.Logf("on failure: primary H=%d replica H=%d peers=%+v", pH, rH, c.primary.RepVol.PeerStatuses())
+		if a := c.Adapter(0); a != nil {
+			t.Logf("on failure: projection=%+v", a.Projection())
+			t.Logf("on failure: trace=%+v", a.Trace())
+		}
+	})
+}
+
 // markReplicaDegradedAfterFailedShip waits up to a short bounded
 // deadline for the peer state to reach ReplicaDegraded after a ship
 // failure. The peer transitions in ShipEntry's error path
@@ -231,6 +252,7 @@ func TestG5_5C_RestartCatchUp_Convergence(t *testing.T) {
 		WithLiveShip().
 		WithEngineDrivenRecovery().
 		Start()
+	logRecoveryStateOnFailure(t, c)
 
 	// Step 1: admit replica + initial probe → engine Healthy.
 	drivePeerAdmit(t, c)

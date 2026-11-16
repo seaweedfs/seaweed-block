@@ -55,7 +55,10 @@ func TestSurfaceIndex_WordingIsSingleNode(t *testing.T) {
 	url, cleanup := newTestServer(t, NewState())
 	defer cleanup()
 
-	resp, _ := http.Get(url + "/")
+	resp, err := http.Get(url + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	text := strings.ToLower(string(body))
@@ -105,7 +108,10 @@ func TestDiagnose_OnlyReadsLowerTruth(t *testing.T) {
 	url, cleanup := newTestServer(t, NewState())
 	defer cleanup()
 
-	resp, _ := http.Get(url + "/diagnose")
+	resp, err := http.Get(url + "/diagnose")
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer resp.Body.Close()
 	var body diagnoseBody
 	_ = json.NewDecoder(resp.Body).Decode(&body)
