@@ -2,8 +2,11 @@ package storage
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -66,11 +69,28 @@ func recvErr(t *testing.T, ch <-chan error, what string) error {
 	}
 }
 
+// workerTB is the part of testing.TB startWorker uses (a recorder stands in
+// for it in the control below).
+type workerTB interface {
+	Helper()
+	Cleanup(func())
+	Errorf(format string, args ...any)
+}
+
+// joinBound bounds startWorker's join; the leak control shortens it.
+var joinBound = holdBound
+
+// leakedStores marks the tests whose held worker never settled: their store
+// is left open rather than closed under a live worker.
+var leakedStores sync.Map // workerTB -> struct{}
+
 // startWorker runs fn on its own goroutine and returns its result channel.
 // Its cleanup, which runs before the store's Close (registered later than
-// heldStore's), opens the given gates and joins the worker within a bound,
-// so a failing test never closes the store under a live worker.
-func startWorker(t *testing.T, fn func() error, gates ...*gate) <-chan error {
+// heldStore's), opens the given gates and joins the worker within
+// joinBound. If the worker does not settle, it fails the test with every
+// goroutine's stack and marks the store leaked: the store is never closed
+// under a live worker (that Close could block on the worker's locks).
+func startWorker(t workerTB, fn func() error, gates ...*gate) <-chan error {
 	t.Helper()
 	res := make(chan error, 1)
 	done := make(chan struct{})
@@ -84,8 +104,11 @@ func startWorker(t *testing.T, fn func() error, gates ...*gate) <-chan error {
 		}
 		select {
 		case <-done:
-		case <-time.After(holdBound):
-			t.Errorf("a held worker did not settle within %v; the store closes under it", holdBound)
+		case <-time.After(joinBound):
+			leakedStores.Store(t, struct{}{})
+			buf := make([]byte, 1<<20)
+			buf = buf[:runtime.Stack(buf, true)]
+			t.Errorf("a held worker did not settle within %v; the store is left open (not closed under it). goroutines:\n%s", joinBound, buf)
 		}
 	})
 	return res
@@ -96,7 +119,12 @@ func heldStore(t *testing.T) (*WALStore, string) {
 	path := filepath.Join(t.TempDir(), "store.bin")
 	s := createWALStoreWithWALSizeForTest(t, path, 64, 4096, 64*1024)
 	s.DisableAutoFlushForRecoveryTest()
-	t.Cleanup(func() { _ = s.Close() }) // runs after the gates' cleanups (LIFO)
+	t.Cleanup(func() { // runs after the workers' and gates' cleanups (LIFO)
+		if _, leaked := leakedStores.LoadAndDelete(t); leaked {
+			return // a worker is still inside the store: never close under it
+		}
+		_ = s.Close()
+	})
 	return s, path
 }
 
@@ -511,3 +539,63 @@ func TestWALStoreHeldWorkersSettleOnAFailurePath(t *testing.T) {
 		t.Fatal("cleanup did not close the store")
 	}
 }
+
+// leakRecorder records cleanups and errors in place of a *testing.T.
+type leakRecorder struct {
+	mu       sync.Mutex
+	cleanups []func()
+	errs     []string
+}
+
+func (r *leakRecorder) Helper() {}
+func (r *leakRecorder) Cleanup(f func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.cleanups = append(r.cleanups, f)
+}
+func (r *leakRecorder) Errorf(format string, args ...any) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.errs = append(r.errs, fmt.Sprintf(format, args...))
+}
+
+// A worker that never returns fails the test, with every goroutine's stack,
+// within the join bound, and marks the store leaked instead of closing it
+// under the worker; nothing hangs.
+func TestWALStoreStartWorkerReportsAWorkerThatNeverSettles(t *testing.T) {
+	old := joinBound
+	joinBound = 200 * time.Millisecond
+	defer func() { joinBound = old }()
+	stuck := make(chan struct{})
+	defer close(stuck) // release the stuck worker when the control ends
+	rec := &leakRecorder{}
+	startWorker(rec, func() error { <-stuck; return nil })
+
+	start := time.Now()
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		for i := len(rec.cleanups) - 1; i >= 0; i-- {
+			rec.cleanups[i]()
+		}
+	}()
+	select {
+	case <-finished:
+	case <-holdBoundTimer():
+		t.Fatal("startWorker's cleanup hung on a worker that never returns")
+	}
+	if d := time.Since(start); d > 5*joinBound {
+		t.Fatalf("cleanup took %v, bound %v", d, joinBound)
+	}
+	rec.mu.Lock()
+	errs := append([]string(nil), rec.errs...)
+	rec.mu.Unlock()
+	if len(errs) != 1 || !strings.Contains(errs[0], "did not settle") || !strings.Contains(errs[0], "goroutine ") {
+		t.Fatalf("errors %q; want one 'did not settle' error with a goroutine dump", errs)
+	}
+	if _, leaked := leakedStores.LoadAndDelete(rec); !leaked {
+		t.Fatal("the store was not marked leaked")
+	}
+}
+
+func holdBoundTimer() <-chan time.Time { return time.After(holdBound) }
