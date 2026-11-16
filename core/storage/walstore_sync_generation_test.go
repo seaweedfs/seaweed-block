@@ -136,17 +136,25 @@ func TestWALGenerationSyncFailureAndShutdown(t *testing.T) {
 	if r, _, _ := s.Boundaries(); r != 0 {
 		t.Fatalf("failed sync published R=%d", r)
 	}
-	if n, err := s.Sync(); err != nil || n != 1 {
-		t.Fatalf("retry frontier=%d err=%v", n, err)
+	// A failed fsync is sticky (ErrFsyncFailed): the retry is refused
+	// without another physical fsync, and nothing is published.
+	if n, err := s.Sync(); !errors.Is(err, ErrFsyncFailed) || n != 0 {
+		t.Fatalf("retry after a failed fsync frontier=%d err=%v; want ErrFsyncFailed", n, err)
 	}
-	if attempts.Load() != 2 {
-		t.Fatalf("error was cached: attempts=%d", attempts.Load())
+	if attempts.Load() != 1 {
+		t.Fatalf("a retry after a failed fsync fsynced again: attempts=%d", attempts.Load())
 	}
-	if _, err := s.Sync(); err != nil {
+	if r, _, _ := s.Boundaries(); r != 0 {
+		t.Fatalf("refused retry published R=%d", r)
+	}
+	_ = s.Close()
+
+	s = newGenerationStore(t)
+	if _, err := s.Write(0, makeBlock(4096, 0x61)); err != nil {
 		t.Fatal(err)
 	}
-	if attempts.Load() != 2 {
-		t.Fatal("durable duplicate resynced")
+	if n, err := s.Sync(); err != nil || n != 1 {
+		t.Fatalf("sync frontier=%d err=%v", n, err)
 	}
 	s.committer.Stop()
 	if _, err := s.Sync(); !errors.Is(err, ErrGroupCommitShutdown) {
@@ -273,15 +281,14 @@ func TestWALGenerationPartialAppendRecoverySync(t *testing.T) {
 			if !errors.Is(err, fault) || attempts != 1 {
 				t.Fatalf("next Sync skipped required physical I/O/error: err=%v attempts=%d", err, attempts)
 			}
+			// The failed fsync is sticky (ErrFsyncFailed): no retry ack and
+			// no further physical fsync on this open store.
 			before := s.WALSyncCount()
-			if _, err := s.Sync(); err != nil {
-				t.Fatal(err)
+			if _, err := s.Sync(); !errors.Is(err, ErrFsyncFailed) {
+				t.Fatalf("retry after a failed fsync: %v; want ErrFsyncFailed", err)
 			}
-			if _, err := s.Sync(); err != nil {
-				t.Fatal(err)
-			}
-			if n := s.WALSyncCount() - before; n != 1 {
-				t.Fatalf("retry+duplicate physical syncs=%d want1", n)
+			if n := s.WALSyncCount() - before; n != 0 {
+				t.Fatalf("a refused retry fsynced %d times", n)
 			}
 		})
 	}
@@ -309,13 +316,28 @@ func TestWALGenerationSameOpenRecoverInvalidatesCoverage(t *testing.T) {
 	if !errors.Is(err, fault) || attempts != 1 {
 		t.Fatalf("Recover reused old sync coverage: err=%v attempts=%d", err, attempts)
 	}
-	before := s.WALSyncCount()
-	for i := 0; i < 2; i++ {
-		if _, err := s.Sync(); err != nil {
+	// The failed fsync is sticky (ErrFsyncFailed); dedup after a Recover is
+	// checked on a store whose syncs succeed.
+	if _, err := s.Sync(); !errors.Is(err, ErrFsyncFailed) {
+		t.Fatalf("retry after a failed fsync: %v; want ErrFsyncFailed", err)
+	}
+	s2 := newGenerationStore(t)
+	if _, err := s2.Write(0, makeBlock(4096, 0x92)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s2.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s2.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	before := s2.WALSyncCount()
+	for i := 0; i < 3; i++ {
+		if _, err := s2.Sync(); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if n := s.WALSyncCount() - before; n != 1 {
+	if n := s2.WALSyncCount() - before; n != 1 {
 		t.Fatalf("Recover permanently disabled dedup: syncs=%d want1", n)
 	}
 }

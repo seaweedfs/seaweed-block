@@ -427,21 +427,43 @@ func TestWALStoreRecoverBoundsPersistFailureRefusesAppendsUntilRetry(t *testing.
 			}
 
 			r.writeSuperblockMetadata, r.syncSuperblockMetadata = realWrite, realSync
-			if _, err := r.Recover(); err != nil {
-				t.Fatalf("same-instance Recover retry: %v", err)
+			live := r
+			if seam == "sync" {
+				// A failed fsync is sticky (ErrFsyncFailed): no same-instance
+				// retry; the bounds are persisted by the recovery of a reopen.
+				if _, err := r.Recover(); !errors.Is(err, ErrFsyncFailed) {
+					t.Fatalf("same-instance Recover after a failed fsync: %v; want ErrFsyncFailed", err)
+				}
+				crashRecoveryHardeningStore(t, r)
+				rClosed = true
+				r2, err := OpenWALStore(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				r2.DisableAutoFlushForRecoveryTest()
+				t.Cleanup(func() {
+					if live == r2 && !rClosed {
+						_ = r2.Close()
+					}
+				})
+				rClosed = false
+				live = r2
+			}
+			if _, err := live.Recover(); err != nil {
+				t.Fatalf("Recover retry: %v", err)
 			}
 			disk := diskSuperblockForTest(t, path)
-			if tail, h := r.wal.logicalTailValue(), r.wal.logicalHeadValue(); disk.WALTail != tail || disk.WALHead != h {
+			if tail, h := live.wal.logicalTailValue(), live.wal.logicalHeadValue(); disk.WALTail != tail || disk.WALHead != h {
 				t.Fatalf("after the retry: persisted tail=%d head=%d, writer tail=%d head=%d", disk.WALTail, disk.WALHead, tail, h)
 			}
-			r.admissionTimeout = 30 * time.Second
-			if _, err := r.Write(5, makeBlock(blockSize, 0x55)); err != nil {
+			live.admissionTimeout = 30 * time.Second
+			if _, err := live.Write(5, makeBlock(blockSize, 0x55)); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := r.Sync(); err != nil {
+			if _, err := live.Sync(); err != nil {
 				t.Fatal(err)
 			}
-			crashRecoveryHardeningStore(t, r)
+			crashRecoveryHardeningStore(t, live)
 			rClosed = true
 
 			q, err := OpenWALStore(path)

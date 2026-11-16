@@ -184,7 +184,12 @@ func NewWALRecycledFailure(cause error, detail string) *RecoveryFailure {
 
 // NewSubstrateIOFailure wraps a substrate IO error in the typed
 // envelope. Use when ScanLBAs failed mid-scan with a read/decode error.
-// ErrFsyncFailed: declared for the RED tests; nothing returns it yet.
+// ErrFsyncFailed is the sticky fault of an open store after any fsync of
+// its file failed. The kernel may already have dropped the dirty pages, so a
+// later successful fsync proves nothing about them: the store acknowledges
+// no further Sync, accepts no write and advances no checkpoint until it is
+// reopened (and recovered from what is on disk). It comes wrapped in a
+// SubstrateIO RecoveryFailure, so hosts report it as io_error.
 var ErrFsyncFailed = errors.New("storage: fsync failed earlier on this open store; reopen to recover")
 
 func NewSubstrateIOFailure(cause error, detail string) *RecoveryFailure {

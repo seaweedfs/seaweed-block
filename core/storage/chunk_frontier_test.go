@@ -19,19 +19,16 @@ func TestSeedChunkFrontierMetadataFailureRetry(t *testing.T) {
 	if r, _, h := s.Boundaries(); r != 0 || h != 0 {
 		t.Fatal("failed seed published frontier", r, h)
 	}
-	if _, err := s.Recover(); err != nil {
-		t.Fatal(err)
-	}
+	// The failed fsync is sticky for this open store (ErrFsyncFailed):
+	// neither a same-store Recover nor a seed retry may run on it.
 	s.syncDirectFrontierMetadata = syncMetadata
-	if err := s.SeedChunkFrontier(7); err != nil {
-		t.Fatal(err)
+	if _, err := s.Recover(); !errors.Is(err, ErrFsyncFailed) {
+		t.Fatalf("same-store Recover after a failed fsync: %v; want ErrFsyncFailed", err)
 	}
-	if s.NextLSN() != 8 {
-		t.Fatal("retry not seeded")
+	if err := s.SeedChunkFrontier(7); !errors.Is(err, ErrFsyncFailed) {
+		t.Fatalf("same-store seed retry after a failed fsync: %v; want ErrFsyncFailed", err)
 	}
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
+	_ = s.Close()
 	reopened, err := OpenWALStore(path)
 	if err != nil {
 		t.Fatal(err)
@@ -40,7 +37,10 @@ func TestSeedChunkFrontierMetadataFailureRetry(t *testing.T) {
 	if _, err := reopened.Recover(); err != nil {
 		t.Fatal(err)
 	}
+	if err := reopened.SeedChunkFrontier(7); err != nil {
+		t.Fatalf("seed after a reopen: %v", err)
+	}
 	if reopened.NextLSN() != 8 {
-		t.Fatal("durable seed missing after reopen")
+		t.Fatal("seed after a reopen not applied")
 	}
 }

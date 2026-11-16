@@ -20,6 +20,9 @@ func (s *WALStore) SeedChunkFrontier(lsn uint64) error {
 	if s.closed || s.chunk.Load() != nil {
 		return errors.New("storage: seed frontier requires an open, unattached store")
 	}
+	if err := s.stickyFsyncFault(); err != nil {
+		return err
+	}
 	if lsn == ^uint64(0) || lsn < s.checkpointLSN || s.walHead > s.checkpointLSN || s.nextLSN > lsn+1 {
 		return errors.New("storage: seed frontier cannot replace local writes or wrap LSN")
 	}
@@ -41,7 +44,7 @@ func (s *WALStore) SeedChunkFrontier(lsn uint64) error {
 	if _, err := next.writeTo(buf); err != nil {
 		return err
 	}
-	if err := s.syncDirectFrontierMetadata(buf.bytes()); err != nil {
+	if err := s.noteFsyncFailure(s.syncDirectFrontierMetadata(buf.bytes())); err != nil {
 		return fmt.Errorf("storage: seed metadata sync: %w", err)
 	}
 	*s.sb = next
