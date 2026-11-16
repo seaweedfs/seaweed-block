@@ -2,6 +2,7 @@ package volume
 
 import (
 	"context"
+	"net"
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/adapter"
@@ -74,17 +75,18 @@ func TestProductionProbeFn_RouterReturnsNil_ReturnsErr(t *testing.T) {
 // this, the per-peer-adapter wiring could regress to "always pick
 // the same adapter" and engine.checkReplicaID would drop events.
 func TestProductionProbeFn_RouterPicksByReplicaID(t *testing.T) {
+	dead := closedLoopbackAddr(t)
 	r1Adpt := adapter.NewVolumeReplicaAdapter(fakeExecutorAdapter())
 	r1Adpt.OnAssignment(adapter.AssignmentInfo{
 		VolumeID: "vol1", ReplicaID: "r1",
 		Epoch: 1, EndpointVersion: 1,
-		DataAddr: "127.0.0.1:1", CtrlAddr: "127.0.0.1:1",
+		DataAddr: dead, CtrlAddr: dead,
 	})
 	r2Adpt := adapter.NewVolumeReplicaAdapter(fakeExecutorAdapter())
 	r2Adpt.OnAssignment(adapter.AssignmentInfo{
 		VolumeID: "vol1", ReplicaID: "r2",
 		Epoch: 1, EndpointVersion: 1,
-		DataAddr: "127.0.0.1:1", CtrlAddr: "127.0.0.1:1",
+		DataAddr: dead, CtrlAddr: dead,
 	})
 
 	router := keyedRouter(map[string]*adapter.VolumeReplicaAdapter{
@@ -93,10 +95,10 @@ func TestProductionProbeFn_RouterPicksByReplicaID(t *testing.T) {
 	})
 	fn := ProductionProbeFn(router)
 
-	// Probe transport will fail for both (unreachable :1) — that's
+	// Probe transport will fail for both (closed listener) — that's
 	// fine; we're verifying routing happened, not transport success.
-	peer1 := newPeerForWiringTest(t, "r1", "127.0.0.1:1", "127.0.0.1:1", 1, 1)
-	peer2 := newPeerForWiringTest(t, "r2", "127.0.0.1:1", "127.0.0.1:1", 1, 1)
+	peer1 := newPeerForWiringTest(t, "r1", dead, dead, 1, 1)
+	peer2 := newPeerForWiringTest(t, "r2", dead, dead, 1, 1)
 
 	if err := fn(context.Background(), peer1); err == nil {
 		t.Fatal("expected probe transport failure")
@@ -116,6 +118,19 @@ func TestProductionProbeFn_RouterPicksByReplicaID(t *testing.T) {
 	if len(r2Log) == 0 {
 		t.Errorf("r2 adapter: expected commands logged after probe, got none")
 	}
+}
+
+// closedLoopbackAddr returns a loopback address whose listener has been
+// closed, so nothing accepts on it for the rest of the test.
+func closedLoopbackAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+	return addr
 }
 
 // newPeerForWiringTest builds a real *ReplicaPeer with valid lineage
@@ -156,16 +171,19 @@ func TestProductionProbeFn_TransportFailure_ReturnsErr(t *testing.T) {
 	adpt := adapter.NewVolumeReplicaAdapter(fakeExecutorAdapter())
 	// Prime the adapter with an assignment so OnProbeResult has a
 	// known peer to associate with.
+	dead := closedLoopbackAddr(t)
 	adpt.OnAssignment(adapter.AssignmentInfo{
 		VolumeID: "vol1", ReplicaID: "r1",
 		Epoch: 1, EndpointVersion: 1,
-		DataAddr: "127.0.0.1:1", CtrlAddr: "127.0.0.1:1",
+		DataAddr: dead, CtrlAddr: dead,
 	})
 	fn := ProductionProbeFn(staticRouter(adpt))
 
-	// Use a definitely-unreachable address. 127.0.0.1:1 is reserved
-	// (TCPMUX) and almost always closed; the dial will fail fast.
-	peer := newPeerForWiringTest(t, "r1", "127.0.0.1:1", "127.0.0.1:1", 1, 1)
+	// Use an address whose listener this test opened and closed, rather
+	// than a well-known port that the host may filter or forward. The
+	// probe dial is bounded, so it fails either at once (refused) or at
+	// the dial timeout; it can never succeed.
+	peer := newPeerForWiringTest(t, "r1", dead, dead, 1, 1)
 
 	err := fn(context.Background(), peer)
 	if err == nil {

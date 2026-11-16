@@ -163,13 +163,32 @@ func ingressWireClosed(t *testing.T, c net.Conn) {
 }
 func ingressClosedPort(t *testing.T, addr string) {
 	t.Helper()
+	if err := ingressPortReleased(addr); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// ingressPortReleased returns nil once nothing listens on addr any more.
+// A connect that succeeds is always a failure. A refused connect is the
+// fast path. Some network stacks do not refuse promptly (a filtered or
+// forwarded loopback can drop or delay the SYN, so the dial times out
+// instead), so any other dial failure is accepted only if addr can be bound
+// again, which proves the withdrawn listener released it.
+func ingressPortReleased(addr string) error {
 	c, e := net.DialTimeout("tcp", addr, time.Second)
-	if c != nil {
+	if e == nil {
 		c.Close()
+		return fmt.Errorf("withdrawn endpoint %s accepted a connection", addr)
 	}
-	if !errors.Is(e, syscall.ECONNREFUSED) {
-		t.Fatalf("withdrawn endpoint %s accepted connection: %v", addr, e)
+	if errors.Is(e, syscall.ECONNREFUSED) {
+		return nil
 	}
+	ln, le := net.Listen("tcp", addr)
+	if le != nil {
+		return fmt.Errorf("withdrawn endpoint %s: dial failed without refusal (%v) and the address is still bound (%v)", addr, e, le)
+	}
+	_ = ln.Close()
+	return nil
 }
 
 // Each acquired resource is attached to this owner before the next fallible
@@ -280,12 +299,8 @@ func (o *ingressTestOwner) cleanup() error {
 				return
 			}
 			for _, addr := range []string{o.addr, o.dual} {
-				c, e := net.DialTimeout("tcp", addr, time.Second)
-				if c != nil {
-					c.Close()
-				}
-				if !errors.Is(e, syscall.ECONNREFUSED) {
-					o.cleanupErr = fmt.Errorf("cleanup port remains open: %s %v", addr, e)
+				if e := ingressPortReleased(addr); e != nil {
+					o.cleanupErr = fmt.Errorf("cleanup port remains open: %w", e)
 					return
 				}
 			}

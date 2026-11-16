@@ -14,6 +14,7 @@ func TestG9A_BestEffortWriteStillFeedsLaggingReplicaRecovery(t *testing.T) {
 		WithLiveShip().
 		WithEngineDrivenRecovery().
 		Start()
+	logRecoveryStateOnFailure(t, c)
 	c.primary.RepVol.SetDurabilityMode(replication.DurabilityBestEffort)
 
 	drivePeerAdmit(t, c)
