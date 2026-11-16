@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 )
@@ -78,26 +79,40 @@ type providerBackend struct {
 	provider frontend.Provider
 	volumeID string
 
-	mu      sync.Mutex
-	backend frontend.Backend
+	mu         sync.Mutex
+	backend    frontend.Backend
+	generation uint64
 }
 
-func (b *providerBackend) get(ctx context.Context) (frontend.Backend, error) {
+func (b *providerBackend) get(ctx context.Context) (frontend.Backend, uint64, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.backend != nil {
-		return b.backend, nil
+		return b.backend, b.generation, nil
 	}
-	backend, err := b.provider.Open(ctx, b.volumeID)
+	// NBD supplies a target-lifetime context, not a per-request deadline.
+	// Bound readiness waits even while this target is demoted.
+	openCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	backend, err := b.provider.Open(openCtx, b.volumeID)
 	if err != nil {
-		return nil, fmt.Errorf("nvmerdma: open backend: %w", err)
+		return nil, 0, fmt.Errorf("nvmerdma: open backend: %w", err)
 	}
 	b.backend = backend
-	return backend, nil
+	b.generation++
+	return backend, b.generation, nil
 }
 
 func (b *providerBackend) Read(ctx context.Context, offset int64, p []byte) (int, error) {
-	backend, err := b.get(ctx)
+	backend, generation, err := b.get(ctx)
+	if err != nil {
+		return 0, err
+	}
+	n, err := backend.Read(ctx, offset, p)
+	if n != 0 || !errors.Is(err, frontend.ErrStalePrimary) {
+		return n, err
+	}
+	backend, err = b.reopen(ctx, generation)
 	if err != nil {
 		return 0, err
 	}
@@ -105,7 +120,15 @@ func (b *providerBackend) Read(ctx context.Context, offset int64, p []byte) (int
 }
 
 func (b *providerBackend) Write(ctx context.Context, offset int64, p []byte) (int, error) {
-	backend, err := b.get(ctx)
+	backend, generation, err := b.get(ctx)
+	if err != nil {
+		return 0, err
+	}
+	n, err := backend.Write(ctx, offset, p)
+	if n != 0 || !errors.Is(err, frontend.ErrStalePrimary) {
+		return n, err
+	}
+	backend, err = b.reopen(ctx, generation)
 	if err != nil {
 		return 0, err
 	}
@@ -113,9 +136,30 @@ func (b *providerBackend) Write(ctx context.Context, offset int64, p []byte) (in
 }
 
 func (b *providerBackend) Sync(ctx context.Context) error {
-	backend, err := b.get(ctx)
+	backend, generation, err := b.get(ctx)
+	if err != nil {
+		return err
+	}
+	err = backend.Sync(ctx)
+	if !errors.Is(err, frontend.ErrStalePrimary) {
+		return err
+	}
+	backend, err = b.reopen(ctx, generation)
 	if err != nil {
 		return err
 	}
 	return backend.Sync(ctx)
+}
+
+// Stale-primary is a pre-effect lineage refusal. Retry once through Provider's
+// current readiness/identity gate; never close the borrowed backend. Generation
+// matching prevents a delayed old refusal from evicting a newer open handle.
+func (b *providerBackend) reopen(ctx context.Context, generation uint64) (frontend.Backend, error) {
+	b.mu.Lock()
+	if b.generation == generation {
+		b.backend = nil
+	}
+	b.mu.Unlock()
+	backend, _, err := b.get(ctx)
+	return backend, err
 }
