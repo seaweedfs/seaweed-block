@@ -55,7 +55,18 @@ func recoverWAL(fd *os.File, sb *superblock, dm *dirtyMap) (recoveryResult, erro
 	}
 	var ranges []scanRange
 
-	if logicalHead == logicalTail {
+	if logicalHead == logicalTail && logicalHead%walSize != 0 {
+		// The superblock records an empty WAL at this position (a full
+		// checkpoint persists head == tail). Sync does not persist the
+		// head, so later appends continue contiguously from here: scan
+		// from it. Scanning from offset 0 would let a torn record wrapped
+		// there hide the synced run behind it.
+		start := logicalHead % walSize
+		ranges = append(ranges, scanRange{start, walSize}, scanRange{0, start})
+		result.DefensiveScan = true
+		log.Printf("storage: recovery from an empty superblock window (head==tail=%d checkpoint=%d)",
+			logicalHead, checkpointLSN)
+	} else if logicalHead == logicalTail {
 		// A pre-boundary-persistence crash can leave a wrapped retained
 		// window while the superblock still says empty. Find the high
 		// physical run from record footers, then scan high and low as
