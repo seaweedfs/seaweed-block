@@ -27,6 +27,9 @@ type Target struct {
 
 	mu     sync.Mutex
 	device targetDevice
+	// startDevice replaces only the kernel device constructor in caller tests.
+	// Nil uses the production Start path.
+	startDevice func(Config) (targetDevice, error)
 
 	closeOnce sync.Once
 	closeErr  error
@@ -58,7 +61,11 @@ func (t *Target) Start() (string, error) {
 	if t.device != nil {
 		return "", errors.New("ublk: target already started")
 	}
-	d, err := Start(Config{
+	startDevice := t.startDevice
+	if startDevice == nil {
+		startDevice = func(cfg Config) (targetDevice, error) { return Start(cfg) }
+	}
+	d, err := startDevice(Config{
 		Backend:    &providerBackend{provider: t.cfg.Provider, volumeID: t.cfg.VolumeID},
 		Size:       t.cfg.VolumeSize,
 		BlockSize:  t.cfg.BlockSize,
