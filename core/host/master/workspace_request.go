@@ -46,16 +46,14 @@ func (h *Host) workspaceMutation(ctx context.Context, q any, info *grpc.UnarySer
 	case *control.WorkspacePlacement:
 		id, volume = v.RequestId, v.VolumeId
 		reply = &control.WorkspaceEmpty{}
-	case *control.WorkspaceIdentity:
-		volume = v.VolumeId
-	case *control.WorkspaceRevocationAck:
-		volume = v.GetIdentity().GetVolumeId()
 	case *control.DeleteVolumeRequest:
 		volume = v.VolumeId
 	case *control.WorkspaceMove:
 		id, volume = v.RequestId, v.VolumeId
 		reply = &control.WorkspaceGrant{}
 	default:
+		// Lease Renew/Revoke/ACK remain independent of endpoint preparation.
+		// Their existing Publisher epoch/expiry/move checks are authoritative.
 		return call(ctx, q)
 	}
 	// Older RPC callers remain compatible; the workspace CLI requires an ID.

@@ -17,7 +17,11 @@ import (
 )
 
 func TestWorkspaceMoveRequestReplayAfterMasterRestart(t *testing.T) {
-	forced := false
+	for _, forced := range []bool{false, true} {
+		t.Run(fmt.Sprintf("forced=%v", forced), func(t *testing.T) { workspaceMoveRequestReplay(t, forced) })
+	}
+}
+func workspaceMoveRequestReplay(t *testing.T, forced bool) {
 	cfg := Config{Listen: "127.0.0.1:0", AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), WorkspaceRPC: true, WorkspaceHeadReader: func(context.Context, string) (authority.WorkspaceHead, error) {
 		return authority.WorkspaceHead{Gen: 9, Epoch: 1, Holder: "node-a/r1", RemoteLSN: 42, Detached: true}, nil
 	}}
@@ -148,7 +152,7 @@ func TestWorkspaceMoveRequestReplayAfterMasterRestart(t *testing.T) {
 		if e != nil {
 			t.Fatal(e)
 		}
-		q := &control.WorkspaceMove{RequestId: v + "-move", VolumeId: v, ExpectedReplicaId: "r1", ExpectedEpoch: 1, TargetReplicaId: "r1", TargetServerId: "node-b", TargetDataAddr: state.Moves[0].NewHost, Kind: "clean"}
+		q := &control.WorkspaceMove{RequestId: v + "-move", VolumeId: v, ExpectedReplicaId: "r1", ExpectedEpoch: 1, TargetReplicaId: "r1", TargetServerId: "node-b", TargetDataAddr: state.Moves[0].NewHost, Kind: state.Moves[0].Kind, Force: forced}
 		for _, b := range state.Bindings {
 			if b.ServerId == "node-b" {
 				q.TargetDataAddr = b.DataAddr
