@@ -696,8 +696,8 @@ func run(f flags) int {
 
 	// Bind the replication stack — ReplicationVolume for outbound peer
 	// fan-out (primary role) + ReplicaListener for incoming WAL traffic
-	// (replica role). Both code paths are bound at startup; whichever
-	// role the master assignment selects is the active one. Construction
+	// (replica role). Incoming listeners are bound only when the master
+	// assignment includes replica slots; RF=1 never opens either lane. Construction
 	// is post-dp.RecoverVolume because both borrow the same
 	// LogicalStorage the durable Backend wraps; the LogicalStorage
 	// isn't usable until recovery completes.
@@ -711,7 +711,7 @@ func run(f flags) int {
 	// control-plane split (no current binder).
 	var (
 		replVolume *replication.ReplicationVolume
-		replListen *transport.ReplicaListener
+		replListen *replicationIngress
 	)
 	if durableProv != nil {
 		store := durableProv.LogicalStorage(f.volumeID)
@@ -868,13 +868,13 @@ func run(f flags) int {
 			fmt.Fprintln(os.Stderr, "blockvolume: write-observer wire: Backend(", f.volumeID, ") returned nil; replication fan-out disabled")
 		}
 
-		// G1: the replica's epoch floor lives beside the volume's durable
-		// files so it survives a restart; non-durable (memback) runs keep it
-		// in memory only. Either way the listener refuses every mutation
-		// until the host's role call succeeds.
-		listener, err := transport.NewReplicaListenerWithFloor(f.dataAddr, store, f.volumeID, replicaFloorPath(f))
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "blockvolume: replica listener:", err)
+		// No replication socket exists until a master assignment includes
+		// replica slots. The role gate starts/fences both lanes before admission.
+		replListen = &replicationIngress{addr: f.dataAddr, store: store,
+			volumeID: f.volumeID, floorPath: replicaFloorPath(f), dualLane: f.recoveryMode == "dual-lane"}
+		if err := h.SetSelfFence(replListen); err != nil {
+			fmt.Fprintln(os.Stderr, "blockvolume: replica listener role:", err)
+			replListen.Stop()
 			_ = replVolume.Close()
 			_ = durableProv.Close()
 			if status != nil {
@@ -884,70 +884,6 @@ func run(f flags) int {
 			}
 			_ = h.Close()
 			return 1
-		}
-		// G2: fence the listener with the role the host already holds
-		// (the assignment stream started above) before it serves. G1: if
-		// that role cannot be made durable, do not serve at all.
-		if fErr := h.SetSelfFence(listener); fErr != nil {
-			fmt.Fprintln(os.Stderr, "blockvolume: replica listener role:", fErr)
-			listener.Stop()
-			_ = replVolume.Close()
-			_ = durableProv.Close()
-			if status != nil {
-				shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
-				_ = status.Close(shutCtx)
-				shutCancel()
-			}
-			_ = h.Close()
-			return 1
-		}
-		listener.Serve()
-		replListen = listener
-
-		// When --recovery-mode=dual-lane, also bind a separate listener
-		// at port=data-addr-port+1 for inbound dual-lane recover-session
-		// connections. Each accepted conn is handed to a fresh
-		// recovery.Receiver via ReplicaBridge.AcceptDualLaneLoop.
-		// Listener lifecycle is goroutine-scoped here; daemon shutdown
-		// closes the underlying net.Listener via the deferred close
-		// added below.
-		if f.recoveryMode == "dual-lane" {
-			dualLaneAddr, err := deriveDualLaneAddr(f.dataAddr)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "blockvolume: dual-lane listen addr derive:", err)
-				replListen.Stop()
-				_ = replVolume.Close()
-				_ = durableProv.Close()
-				if status != nil {
-					shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
-					_ = status.Close(shutCtx)
-					shutCancel()
-				}
-				_ = h.Close()
-				return 1
-			}
-			dlLn, err := net.Listen("tcp", dualLaneAddr)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "blockvolume: dual-lane listen:", err)
-				replListen.Stop()
-				_ = replVolume.Close()
-				_ = durableProv.Close()
-				if status != nil {
-					shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
-					_ = status.Close(shutCtx)
-					shutCancel()
-				}
-				_ = h.Close()
-				return 1
-			}
-			replicaBridge := recovery.NewReplicaBridgeWithGate(store, replListen)
-			dualLaneCtx, dualLaneCancel := context.WithCancel(context.Background())
-			go replicaBridge.AcceptDualLaneLoop(dualLaneCtx, dlLn)
-			defer func() {
-				dualLaneCancel()
-				_ = dlLn.Close()
-			}()
-			fmt.Fprintf(os.Stderr, "blockvolume: dual-lane listener bound at %s\n", dualLaneAddr)
 		}
 	}
 
