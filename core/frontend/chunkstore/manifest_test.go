@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/filerpb"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -90,6 +91,9 @@ func TestManifest_ForkAfterParentSnapshotDelete(t *testing.T) {
 	ctx := context.Background()
 	r, h := publishSegmented(t, f, b)
 	if _, err := c.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: "s1", RequestID: "snap"}, h); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.CreateEntry(ctx, catBase, &filerpb.Entry{Name: "v2", IsDirectory: true}, true); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s1", Target: "v2", RequestID: "fork"}); err != nil {

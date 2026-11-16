@@ -259,13 +259,14 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 	remote.setAttach(ctx) // the attach's calls also end with the caller's ctx
 	defer remote.setAttach(nil)
 	cfg := storage.ChunkLayerConfig{
-		ChunkBlocks:     p.cfg.ChunkBlocks,
-		Epoch:           lin.epoch,
-		Holder:          holder,
-		FreshFromHead:   h.fresh,
-		ReadMissTimeout: p.cfg.ChunkReadMissTimeout,
-		Bitmap:          storage.NewFileChunkBitmapStore(h.path + ".chunkbitmap"),
-		BarrierBound:    p.cfg.ChunkDirtyThreshold,
+		ChunkBlocks:       p.cfg.ChunkBlocks,
+		Epoch:             lin.epoch,
+		Holder:            holder,
+		FreshFromHead:     h.fresh,
+		ReadMissTimeout:   p.cfg.ChunkReadMissTimeout,
+		Bitmap:            storage.NewFileChunkBitmapStore(h.path + ".chunkbitmap"),
+		BarrierBound:      p.cfg.ChunkDirtyThreshold,
+		UploadConcurrency: p.cfg.ChunkUploadConcurrency,
 		CaptureAllowed: func() error {
 			cur := p.view.Projection()
 			if !cur.Healthy || cur.VolumeID != volumeID || lin.volumeID != volumeID {
