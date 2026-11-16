@@ -333,6 +333,9 @@ type chunkLayerConfig struct {
 	// Zero: unbounded, no staging.
 	BarrierBound int
 
+	// UploadConcurrency bounds capture/pre-copy Put calls (0 defaults to 8).
+	UploadConcurrency int
+
 	// testReconcileHold, set only by this package's tests, holds the
 	// reconciler before each slice until a token is received or the
 	// channel is closed.

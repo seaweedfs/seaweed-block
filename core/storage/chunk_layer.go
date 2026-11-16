@@ -134,6 +134,12 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 	if remote == nil || cfg.Bitmap == nil || cfg.ChunkBlocks == 0 {
 		return nil, errors.New("storage: chunk layer needs a remote, a bitmap store and ChunkBlocks > 0")
 	}
+	if cfg.UploadConcurrency < 0 || cfg.UploadConcurrency > 64 {
+		return nil, errors.New("storage: upload concurrency must be between 1 and 64 (0 defaults to 8)")
+	}
+	if cfg.UploadConcurrency == 0 {
+		cfg.UploadConcurrency = 8
+	}
 	if cfg.ReadMissTimeout <= 0 {
 		cfg.ReadMissTimeout = defaultReadMissTimeout
 	}
@@ -846,12 +852,15 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		}
 		intents = append(intents, id)
 	}
+	if err := l.uploadBatch(ctx, len(uploads), func(ctx context.Context, i int) error {
+		u := uploads[i]
+		return l.remote.Put(ctx, u.key, u.c.data)
+	}); err != nil {
+		l.abortCut(all)
+		l.dropIntents(ctx, intents)
+		return chunkCutResult{}, fmt.Errorf("storage: capture upload: %w: %w", errChunkRemoteUnavailable, err)
+	}
 	for _, u := range uploads {
-		if err := l.remote.Put(ctx, u.key, u.c.data); err != nil {
-			l.abortCut(all)
-			l.dropIntents(ctx, intents)
-			return chunkCutResult{}, fmt.Errorf("storage: capture upload chunk %d: %w: %w", u.c.idx, errChunkRemoteUnavailable, err)
-		}
 		next.Chunks[u.c.idx] = chunkRef{Key: u.key, SHA256: u.c.sum}
 		newKeys[u.c.idx] = u.key
 		changed = append(changed, u.c.idx)
@@ -1454,10 +1463,13 @@ func (l *chunkLayerImpl) stage(ctx context.Context, st *chunkCutStats) (map[uint
 				return nil, intents, fmt.Errorf("storage: capture stage intent: %w: %w", errChunkRemoteUnavailable, err)
 			}
 			intents = append(intents, id)
+			if err := l.uploadBatch(ctx, len(uploads), func(ctx context.Context, i int) error {
+				u := uploads[i]
+				return l.remote.Put(ctx, u.key, u.data)
+			}); err != nil {
+				return nil, intents, fmt.Errorf("storage: capture stage upload: %w: %w", errChunkRemoteUnavailable, err)
+			}
 			for _, u := range uploads {
-				if err := l.remote.Put(ctx, u.key, u.data); err != nil {
-					return nil, intents, fmt.Errorf("storage: capture stage chunk %d: %w: %w", u.idx, errChunkRemoteUnavailable, err)
-				}
 				st.UploadedChunks++
 				st.UploadedBytes += int64(len(u.data))
 				u.data = nil
