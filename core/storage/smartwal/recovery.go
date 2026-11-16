@@ -37,16 +37,21 @@ import (
 //   - per-block CRC stored alongside extent (extent stays raw blocks)
 //   - cross-checking against any external snapshot
 func runRecovery(r *ring, fd *os.File, extentBase int64, blockSize int) (uint64, error) {
+	frontier, _, err := runRecoveryCounting(r, fd, extentBase, blockSize)
+	return frontier, err
+}
+
+// runRecoveryCounting is runRecovery that also reports how many populated
+// slots fail their record CRC (issue #51, detection only: they are
+// skipped exactly as before; see Store.Recover's warning).
+func runRecoveryCounting(r *ring, fd *os.File, extentBase int64, blockSize int) (uint64, int, error) {
 	records, bad, err := r.scanSlots()
 	if err != nil {
-		return 0, fmt.Errorf("smartwal: recovery scan: %w", err)
+		return 0, 0, fmt.Errorf("smartwal: recovery scan: %w", err)
 	}
 	if len(records) == 0 {
 		log.Printf("smartwal: recovery: ring empty; nothing to verify")
-		return 0, nil
-	}
-	if err := midHistoryHole(bad, records[len(records)-1].LSN, r.capacity); err != nil {
-		return 0, err
+		return 0, len(bad), nil
 	}
 
 	// Last-writer-wins map. Records arrive sorted by LSN ascending,
@@ -68,12 +73,12 @@ func runRecovery(r *ring, fd *os.File, extentBase int64, blockSize int) (uint64,
 			data := make([]byte, blockSize)
 			off := extentBase + int64(rec.LBA)*int64(blockSize)
 			if _, err := fd.ReadAt(data, off); err != nil {
-				return 0, fmt.Errorf("smartwal: recovery read trim LBA %d: %w", rec.LBA, err)
+				return 0, 0, fmt.Errorf("smartwal: recovery read trim LBA %d: %w", rec.LBA, err)
 			}
 			if crc32.ChecksumIEEE(data) != rec.DataCRC32 {
 				detail := fmt.Sprintf("trim CRC mismatch LSN=%d LBA=%d", rec.LSN, rec.LBA)
 				log.Printf("smartwal: recovery %s — failing closed", detail)
-				return 0, storage.NewWALIntegrityFailure(nil, detail)
+				return 0, 0, storage.NewWALIntegrityFailure(nil, detail)
 			}
 			recovered++
 			if rec.LSN > highestVerifiedLSN {
@@ -85,14 +90,14 @@ func runRecovery(r *ring, fd *os.File, extentBase int64, blockSize int) (uint64,
 		data := make([]byte, blockSize)
 		off := extentBase + int64(rec.LBA)*int64(blockSize)
 		if _, err := fd.ReadAt(data, off); err != nil {
-			return 0, fmt.Errorf("smartwal: recovery read LBA %d: %w", rec.LBA, err)
+			return 0, 0, fmt.Errorf("smartwal: recovery read LBA %d: %w", rec.LBA, err)
 		}
 		actual := crc32.ChecksumIEEE(data)
 		if actual != rec.DataCRC32 {
 			detail := fmt.Sprintf("CRC mismatch LSN=%d LBA=%d expected=%08x actual=%08x",
 				rec.LSN, rec.LBA, rec.DataCRC32, actual)
 			log.Printf("smartwal: recovery %s — failing closed", detail)
-			return 0, storage.NewWALIntegrityFailure(nil, detail)
+			return 0, 0, storage.NewWALIntegrityFailure(nil, detail)
 		}
 		recovered++
 		if rec.LSN > highestVerifiedLSN {
@@ -102,29 +107,5 @@ func runRecovery(r *ring, fd *os.File, extentBase int64, blockSize int) (uint64,
 
 	log.Printf("smartwal: recovery: %d LBAs verified, frontier=%d",
 		recovered, highestVerifiedLSN)
-	return highestVerifiedLSN, nil
-}
-
-// midHistoryHole fails closed on a corrupted committed slot (issue #51;
-// claude05's ruling 2026-11-16 06:10Z/06:14Z). Slot i holds LSN i mod
-// capacity, so with H the highest valid LSN a bad slot at distance d
-// (1 <= d < capacity-1) behind H's slot implies LSN H-d: a record a later
-// valid record (H) follows, i.e. a mid-history hole. The slot right after
-// H's (d = capacity-1) is where LSN H+1 goes: a torn tail, which still
-// recovers; so is a slot whose implied LSN was never written.
-func midHistoryHole(bad []uint64, highest, capacity uint64) error {
-	if capacity < 2 {
-		return nil
-	}
-	hs := highest % capacity
-	for _, i := range bad {
-		d := (hs + capacity - i) % capacity
-		if d == 0 || d == capacity-1 || d >= highest {
-			continue // H's own slot (impossible), the torn-tail position, or never written
-		}
-		detail := fmt.Sprintf("corrupted record in slot %d (implied LSN %d) below the valid LSN %d: mid-history hole", i, highest-d, highest)
-		log.Printf("smartwal: recovery %s — failing closed", detail)
-		return storage.NewWALIntegrityFailure(nil, detail)
-	}
-	return nil
+	return highestVerifiedLSN, len(bad), nil
 }
