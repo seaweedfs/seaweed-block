@@ -135,13 +135,18 @@ func (g *Collector) gcEntries(ctx context.Context, dir string) ([]*filerpb.Entry
 // Attempt entries are permanent. A deleting attempt stops rooting its keys
 // only after its deleting timestamp ages past grace; ordinary two marks
 // still apply afterward. An aborted attempt roots no keys.
-func (g *Collector) snapshotAttemptHeads(ctx context.Context, vol string, now time.Time) ([]storage.ChunkHead, error) {
+type gcSnapshotHead struct {
+	Head storage.ChunkHead
+	Name string
+}
+
+func (g *Collector) snapshotAttemptHeads(ctx context.Context, vol string, now time.Time) ([]gcSnapshotHead, error) {
 	root := path.Join(g.cat.base, vol, snapsDir)
 	dirs, err := g.gcEntries(ctx, root)
 	if err != nil {
 		return nil, err
 	}
-	var heads []storage.ChunkHead
+	var heads []gcSnapshotHead
 	for _, dir := range dirs {
 		if !dir.GetIsDirectory() || CheckSnapshotName(dir.Name) != nil {
 			return nil, errors.New("chunkstore: invalid snapshot attempt directory")
@@ -173,7 +178,7 @@ func (g *Collector) snapshotAttemptHeads(ctx context.Context, vol string, now ti
 					continue
 				}
 			}
-			heads = append(heads, info.Head())
+			heads = append(heads, gcSnapshotHead{info.Head(), path.Join(dir.Name, e.Name)})
 		}
 	}
 	return heads, nil

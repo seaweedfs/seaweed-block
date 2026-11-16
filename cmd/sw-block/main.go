@@ -2292,6 +2292,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  sw-block ops chunk snapshots|snapshot-delete --volume <id> [--name <name>] --chunk-filer <host:port> [--chunk-path /swblock/chunks]")
 	fmt.Fprintln(w, "  sw-block ops chunk fork --chunk-filer <host:port> [--chunk-path /swblock/chunks] --source <id> --snapshot <name> --target <id> [--request-id <id>] [--label k=v]...")
 	fmt.Fprintln(w, "  sw-block ops chunk show --volume <id> --chunk-filer <host:port> [--chunk-path /swblock/chunks]")
+	fmt.Fprintln(w, "  sw-block ops chunk gc --chunk-filer <host:port> --master <blockmaster-grpc> [--chunk-path /swblock/chunks] [--apply] [--grace 1h] [--intent-ttl 1h] [--timeout 1m]")
 }
 
 func emptyCLI(value string) string {

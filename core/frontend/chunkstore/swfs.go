@@ -323,6 +323,7 @@ var (
 // DeleteBlob removes an immutable needle from every resolved replica. A
 // partial/unknown result is an error, so GC retains its binding tombstone
 // and retries later; no response body is used to infer success.
+// SeaweedFS writeDeleteResult returns 202 after ReplicatedDelete completes.
 func (c *SWFS) DeleteBlob(ctx context.Context, fid string) error {
 	vid, needle, ok := strings.Cut(fid, ",")
 	if !ok || vid == "" || needle == "" || strings.ContainsAny(fid, "/\\?#% \r\n") {
@@ -342,7 +343,7 @@ func (c *SWFS) DeleteBlob(ctx context.Context, fid string) error {
 			return err
 		}
 		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
 			return fmt.Errorf("chunkstore: delete %s: http %d", fid, resp.StatusCode)
 		}
 	}
