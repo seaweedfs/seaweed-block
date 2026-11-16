@@ -175,13 +175,16 @@ type chunkHeadVersion struct {
 // move). Every normal cut publishes State = active and no DetachedBy; a new
 // holder's takeover does the same.
 type chunkHead struct {
-	Gen        uint64
-	Epoch      uint64
-	Holder     string
-	RemoteLSN  uint64
-	Chunks     map[uint64]chunkRef
-	State      string
-	DetachedBy *chunkDetachedBy
+	Gen                uint64
+	Epoch              uint64
+	Holder             string
+	RemoteLSN          uint64
+	Chunks             map[uint64]chunkRef
+	Segments           map[uint64]ChunkSegment
+	ChunkBytes         uint64
+	ManifestChunkCount int
+	State              string
+	DetachedBy         *chunkDetachedBy
 }
 
 // HEAD states.

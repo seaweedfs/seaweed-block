@@ -329,12 +329,15 @@ func decodeIntent(p string, e *filerpb.Entry) (storage.ChunkIntent, error) {
 }
 
 type headDoc struct {
-	Format    int               `json:"format"`
-	Gen       uint64            `json:"gen"`
-	Epoch     uint64            `json:"epoch"`
-	Holder    string            `json:"holder"`
-	RemoteLSN uint64            `json:"remote_lsn"`
-	Chunks    map[uint64]refDoc `json:"chunks"`
+	Segments   map[uint64]storage.ChunkSegment `json:"segments,omitempty"`
+	ChunkBytes uint64                          `json:"chunk_bytes,omitempty"`
+	ChunkCount int                             `json:"chunk_count,omitempty"`
+	Format     int                             `json:"format"`
+	Gen        uint64                          `json:"gen"`
+	Epoch      uint64                          `json:"epoch"`
+	Holder     string                          `json:"holder"`
+	RemoteLSN  uint64                          `json:"remote_lsn"`
+	Chunks     map[uint64]refDoc               `json:"chunks,omitempty"`
 	// State is "active" or "detached"; a document without it is active.
 	// DetachedBy names the holder whose final cut (this generation) a
 	// detached HEAD is; it is absent unless State is detached.
@@ -364,7 +367,11 @@ func (r *ChunkRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
 	if err != nil {
 		return storage.ChunkHead{}, err
 	}
-	return decodeHead(path.Join(r.root, headName), e)
+	h, err := decodeHead(path.Join(r.root, headName), e)
+	if err != nil {
+		return h, err
+	}
+	return r.resolveManifest(ctx, h)
 }
 
 // CASHead installs next, at generation expected.Gen+1, only if the stored
@@ -421,6 +428,13 @@ func headEntry(h storage.ChunkHead) (*filerpb.Entry, error) {
 			return nil, fmt.Errorf("chunkstore: HEAD chunk %d has no key", idx)
 		}
 		doc.Chunks[idx] = refDoc{Key: ref.Key, SHA256: hex.EncodeToString(ref.SHA256[:])}
+	}
+	if h.Segments != nil {
+		doc.Format = 2
+		doc.Chunks = nil
+		doc.Segments = h.Segments
+		doc.ChunkBytes = h.ChunkBytes
+		doc.ChunkCount = h.ManifestChunkCount
 	}
 	body, err := json.Marshal(doc)
 	if err != nil {
@@ -481,7 +495,7 @@ func decodeHeadDoc(p string, content []byte) (storage.ChunkHead, error) {
 	if err := json.Unmarshal(content, &doc); err != nil {
 		return fail("decode: %v", err)
 	}
-	if doc.Format != headFormat {
+	if doc.Format != headFormat && doc.Format != 2 {
 		return fail("format %d not supported (want %d)", doc.Format, headFormat)
 	}
 	if doc.Gen == 0 {
@@ -518,6 +532,20 @@ func decodeHeadDoc(p string, content []byte) (storage.ChunkHead, error) {
 		cr := storage.ChunkRef{Key: ref.Key}
 		copy(cr.SHA256[:], sum)
 		h.Chunks[idx] = cr
+	}
+	if doc.Format == 2 {
+		if len(doc.Chunks) != 0 {
+			return fail("segmented root contains flat chunks")
+		}
+		h.Segments = doc.Segments
+		if h.Segments == nil {
+			h.Segments = map[uint64]storage.ChunkSegment{}
+		}
+		h.ChunkBytes = doc.ChunkBytes
+		h.ManifestChunkCount = doc.ChunkCount
+		if err := validateRoot(h); err != nil {
+			return h, err
+		}
 	}
 	return h, nil
 }

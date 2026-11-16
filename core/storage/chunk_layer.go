@@ -266,6 +266,12 @@ func copyHead(h chunkHead) chunkHead {
 		d := *h.DetachedBy
 		out.DetachedBy = &d
 	}
+	if h.Segments != nil {
+		out.Segments = make(map[uint64]ChunkSegment, len(h.Segments))
+		for k, v := range h.Segments {
+			out.Segments[k] = v
+		}
+	}
 	out.Chunks = make(map[uint64]chunkRef, len(h.Chunks))
 	for k, v := range h.Chunks {
 		out.Chunks[k] = v
@@ -867,8 +873,21 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		st.UploadedChunks++
 		st.UploadedBytes += int64(len(u.c.data))
 	}
+	upgrade := false
+	if builder, ok := l.remote.(ChunkManifestBuilder); ok {
+		upgrade = baseHead.Segments == nil
+		var ids []string
+		var err error
+		next, ids, err = builder.PrepareManifest(ctx, baseHead, next, uint64(l.blockSize)*l.chunkBlocks)
+		intents = append(intents, ids...)
+		if err != nil {
+			l.abortCut(all)
+			l.dropIntents(ctx, intents)
+			return chunkCutResult{}, err
+		}
+	}
 	st.UploadNs = time.Since(uploadStart).Nanoseconds()
-	if !detach && len(changed) == 0 && h == baseHead.RemoteLSN && baseHead.Gen != 0 && !chunkHeadIsDetached(baseHead) {
+	if !upgrade && !detach && len(changed) == 0 && h == baseHead.RemoteLSN && baseHead.Gen != 0 && !chunkHeadIsDetached(baseHead) {
 		// A no-op cut still observes authority: a fresh host may have
 		// claimed HEAD without uploading a single chunk since our last cut.
 		cur, err := l.remote.GetHead(ctx)
