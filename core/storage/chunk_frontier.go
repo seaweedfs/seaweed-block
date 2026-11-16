@@ -44,7 +44,7 @@ func (s *WALStore) SeedChunkFrontier(lsn uint64) error {
 	if _, err := next.writeTo(buf); err != nil {
 		return err
 	}
-	if err := s.noteFsyncFailure(s.syncDirectFrontierMetadata(buf.bytes())); err != nil {
+	if err := s.syncFile(nil, func() error { return s.syncDirectFrontierMetadata(buf.bytes()) }); err != nil {
 		return fmt.Errorf("storage: seed metadata sync: %w", err)
 	}
 	*s.sb = next

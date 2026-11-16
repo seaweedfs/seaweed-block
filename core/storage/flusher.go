@@ -219,7 +219,7 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 	// Step 2: one fsync covers all extent writes in this batch
 	// (and any other in-flight WAL writes since they share a file).
 	syncStart := time.Now()
-	syncErr := store.noteFsyncFailure(store.syncExtentFile())
+	syncErr := store.syncFile(nil, func() error { return store.syncExtentFile() })
 	f.instr.recordExtentSync(time.Since(syncStart), syncErr)
 	if syncErr != nil {
 		return fmt.Errorf("flusher: fsync after extent writes: %w", syncErr)

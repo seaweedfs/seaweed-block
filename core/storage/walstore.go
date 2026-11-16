@@ -144,6 +144,12 @@ type WALStore struct {
 	// ioFault latches the first fsync failure of the file (ErrFsyncFailed)
 	// or the first failed WAL append (ErrAppendFailed).
 	ioFault atomic.Pointer[RecoveryFailure]
+	// fileSyncMu serializes every fsync of the store's file (WAL, extent,
+	// superblock) with the latching of its failure, and each superblock
+	// publication holds it across its pwrite and fsync: a publication that
+	// passes the fault check cannot complete after another path's fsync
+	// failed. Leaf lock: taken last, nothing is acquired under it.
+	fileSyncMu sync.Mutex
 	// testAfterAdmit, when set, runs in Write, WriteBatch and ApplyEntry
 	// after their entry checks and before the append lock. Tests only.
 	testAfterAdmit func()
@@ -454,18 +460,24 @@ func (s *WALStore) persistCheckpointReleasing(highestLSN, entryPhys, entryLen ui
 	if _, err := sbCopy.writeTo(buf); err != nil {
 		return fmt.Errorf("storage: encode superblock: %w", err)
 	}
-	checkpointWriteStart := time.Now()
-	err := s.writeSuperblockMetadata(buf.bytes())
-	if s.flusher != nil {
-		s.flusher.instr.recordCheckpointWrite(len(buf.bytes()), time.Since(checkpointWriteStart), err)
-	}
-	if err != nil {
-		return fmt.Errorf("storage: pwrite superblock: %w", err)
-	}
-	checkpointSyncStart := time.Now()
-	err = s.noteFsyncFailure(s.syncSuperblockMetadata())
-	if s.flusher != nil {
-		s.flusher.instr.recordCheckpointSync(time.Since(checkpointSyncStart), err)
+	var writeErr error
+	err := s.syncFile(func() error {
+		checkpointWriteStart := time.Now()
+		writeErr = s.writeSuperblockMetadata(buf.bytes())
+		if s.flusher != nil {
+			s.flusher.instr.recordCheckpointWrite(len(buf.bytes()), time.Since(checkpointWriteStart), writeErr)
+		}
+		return writeErr
+	}, func() error {
+		checkpointSyncStart := time.Now()
+		err := s.syncSuperblockMetadata()
+		if s.flusher != nil {
+			s.flusher.instr.recordCheckpointSync(time.Since(checkpointSyncStart), err)
+		}
+		return err
+	})
+	if writeErr != nil {
+		return fmt.Errorf("storage: pwrite superblock: %w", writeErr)
 	}
 	if err != nil {
 		return fmt.Errorf("storage: fsync checkpoint superblock: %w", err)
@@ -583,11 +595,16 @@ func (s *WALStore) Recover() (uint64, error) {
 			s.dm.clear()
 			return 0, fmt.Errorf("storage: encode recovered superblock: %w", err)
 		}
-		if err := s.writeSuperblockMetadata(buf.bytes()); err != nil {
+		var writeErr error
+		err := s.syncFile(func() error {
+			writeErr = s.writeSuperblockMetadata(buf.bytes())
+			return writeErr
+		}, func() error { return s.syncSuperblockMetadata() })
+		if writeErr != nil {
 			s.dm.clear()
-			return 0, fmt.Errorf("storage: pwrite recovered superblock: %w", err)
+			return 0, fmt.Errorf("storage: pwrite recovered superblock: %w", writeErr)
 		}
-		if err := s.noteFsyncFailure(s.syncSuperblockMetadata()); err != nil {
+		if err != nil {
 			s.dm.clear()
 			return 0, fmt.Errorf("storage: fsync recovered superblock: %w", err)
 		}
@@ -1030,7 +1047,7 @@ func (s *WALStore) Sync() (uint64, error) {
 			s.mu.Unlock()
 			return 0, fmt.Errorf("storage: encode superblock: %w", err)
 		}
-		if err := s.noteFsyncFailure(s.syncDirectFrontierMetadata(buf.bytes())); err != nil {
+		if err := s.syncFile(nil, func() error { return s.syncDirectFrontierMetadata(buf.bytes()) }); err != nil {
 			s.mu.Unlock()
 			return 0, err
 		}
@@ -1458,8 +1475,8 @@ func (s *WALStore) syncWALBatch() error {
 	}
 	start := time.Now()
 	defer func() { s.fileSyncLatency.Observe(time.Since(start)) }()
-	if err := s.syncWALFile(); err != nil {
-		return s.noteFsyncFailure(err)
+	if err := s.syncFile(nil, func() error { return s.syncWALFile() }); err != nil {
+		return err
 	}
 	s.durableMutation.Store(cut)
 	return nil
@@ -1492,6 +1509,26 @@ func (s *WALStore) noteAppendFailure(err error) error {
 		"WAL append failed; the open store refuses further appends and Syncs",
 	))
 	return err
+}
+
+// syncFile runs one fsync of the store's file under fileSyncMu, optionally
+// preceded by the pwrite it makes durable (a superblock publication). It is
+// refused if a fault is latched, and an fsync failure latches the fault
+// before the lock is released, so no publication passes the check and then
+// completes after another path's fsync failed. A pwrite failure is returned
+// as is (it does not latch: nothing was fsynced).
+func (s *WALStore) syncFile(write, sync func() error) error {
+	s.fileSyncMu.Lock()
+	defer s.fileSyncMu.Unlock()
+	if err := s.stickyIOFault(); err != nil {
+		return err
+	}
+	if write != nil {
+		if err := write(); err != nil {
+			return err
+		}
+	}
+	return s.noteFsyncFailure(sync())
 }
 
 // stickyIOFault reports the latched I/O fault (fsync or append), if any.
