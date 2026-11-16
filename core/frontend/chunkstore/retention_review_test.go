@@ -354,3 +354,44 @@ func TestCatalog_UsageCountsForkHolders(t *testing.T) {
 		t.Fatalf("s1 after v1's HEAD moved, v2 forked from it: %+v; want 0 exclusive (v2 holds both chunks)", u.Snapshots)
 	}
 }
+
+// claude05's ruling (23:58Z): an explicit delete of a snapshot an
+// incomplete fork claims is refused (snapshot_claimed, not retryable,
+// naming the fork); once the fork completes or is aborted the delete goes
+// through. Retention and delete share the check (markDeleting).
+func TestCatalog_DeleteRefusesAClaimedParent(t *testing.T) {
+	f, c := forkFixture(t)
+	ctx := context.Background()
+	holdFirst(f, catBase+"/v2/HEAD")
+	if _, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s01", Target: "v2", RequestID: "f"}); CodeOf(err) != CodeOutcomeUnknown {
+		t.Fatalf("fork v2: %v", err)
+	}
+	holdFirst(f, catBase+"/v3/HEAD")
+	if _, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s02", Target: "v3", RequestID: "g"}); CodeOf(err) != CodeOutcomeUnknown {
+		t.Fatalf("fork v3: %v", err)
+	}
+	for _, tc := range []struct{ snap, target string }{{"s01", "v2"}, {"s02", "v3"}} {
+		_, err := c.DeleteSnapshot(ctx, "v1", tc.snap)
+		var ce *CatalogError
+		if !errors.As(err, &ce) || ce.Code != CodeSnapshotClaimed || ce.Retryable || !strings.Contains(ce.Detail(), tc.target) {
+			t.Fatalf("delete %s claimed by %s: %v; want snapshot_claimed, not retryable, naming %s", tc.snap, tc.target, err, tc.target)
+		}
+		if s, err := c.readSnap(ctx, "v1", tc.snap); err != nil || s.State != SnapActive {
+			t.Fatalf("%s after the refused delete: %+v %v; want active", tc.snap, s, err)
+		}
+	}
+	// Completed fork: its claim no longer blocks.
+	if _, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s01", Target: "v2", RequestID: "f"}); err != nil {
+		t.Fatalf("fork v2 retry: %v", err)
+	}
+	if got, err := c.DeleteSnapshot(ctx, "v1", "s01"); err != nil || got != SnapDeleting {
+		t.Fatalf("delete after the fork completed: %q %v", got, err)
+	}
+	// Aborted fork (a sweep's tombstone): neither does its claim.
+	if claimed, err := c.AbortFork(ctx, "v3"); err != nil || !claimed {
+		t.Fatalf("abort v3: claimed=%t %v", claimed, err)
+	}
+	if got, err := c.DeleteSnapshot(ctx, "v1", "s02"); err != nil || got != SnapDeleting {
+		t.Fatalf("delete after the fork was aborted: %q %v", got, err)
+	}
+}

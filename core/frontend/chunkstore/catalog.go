@@ -1053,18 +1053,33 @@ func (c *Catalog) DeleteSnapshot(ctx context.Context, vol, name string) (string,
 			}
 			continue // re-read: the path now holds a tombstone or the late snapshot
 		case ref.info.State == SnapActive:
-			e := ref.entry
-			e.Extended[extSnapState] = []byte(SnapDeleting)
-			e.Extended[extSnapDeletedNs] = []byte(strconv.FormatInt(c.now().UnixNano(), 10))
-			err := c.f.UpdateEntry(ctx, dir, e, map[string][]byte{
-				extSnapState: []byte(SnapActive),
-				extSnapGen:   []byte(strconv.FormatUint(ref.info.HeadGen, 10)),
-			})
-			if errors.Is(err, ErrPrecondition) || errors.Is(err, ErrNotFound) {
-				continue
+			// The one mark path shared with retention: a live fork claim
+			// refuses (claude05's ruling, 23:58Z).
+			if red := true; red { // RED: the old mark, blind to claims
+				e := ref.entry
+				e.Extended[extSnapState] = []byte(SnapDeleting)
+				e.Extended[extSnapDeletedNs] = []byte(strconv.FormatInt(c.now().UnixNano(), 10))
+				err := c.f.UpdateEntry(ctx, dir, e, map[string][]byte{
+					extSnapState: []byte(SnapActive),
+					extSnapGen:   []byte(strconv.FormatUint(ref.info.HeadGen, 10)),
+				})
+				if errors.Is(err, ErrPrecondition) || errors.Is(err, ErrNotFound) {
+					continue
+				}
+				if err != nil {
+					return "", remoteErr(err, "mark snapshot %s/%s deleting", vol, name)
+				}
+				break
 			}
+			m, live, _, err := c.markDeleting(ctx, vol, name, ref.rec.Attempt)
 			if err != nil {
-				return "", remoteErr(err, "mark snapshot %s/%s deleting", vol, name)
+				return "", err
+			}
+			switch m {
+			case markClaimed:
+				return "", claimedErr(vol, name, live)
+			case markGone:
+				continue
 			}
 		}
 		// The attempt is deleting or aborted: free the name.

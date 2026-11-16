@@ -72,6 +72,9 @@ import (
 // settled by AbortFork. Forks published before claims existed are still
 // found by the fork-record scan (forkParentsNeeded).
 //
+// An explicit DeleteSnapshot goes through the same check and mark
+// (markDeleting): it refuses a live claim with snapshot_claimed.
+//
 // A pass stopped after a mark (e.g. a lost response) leaves the attempt
 // deleting with its name still held; the next pass (and its dry run) lists
 // it and frees the name. A deleting attempt cannot gain claims.
@@ -82,6 +85,10 @@ const (
 
 	CodeInvalidClass  = "invalid_class"
 	CodeInvalidPolicy = "invalid_policy"
+	// CodeSnapshotClaimed: an explicit delete of a snapshot a fork still
+	// claims (claude05's ruling, 23:58Z). Not retryable as such: it clears
+	// when the fork publishes its HEAD or is aborted.
+	CodeSnapshotClaimed = "snapshot_claimed"
 
 	DefaultKeepNewest  = 10
 	DefaultKeepYounger = time.Hour
@@ -413,27 +420,56 @@ func (c *Catalog) deleteRetainedAttempt(ctx context.Context, vol, name, attempt 
 	if err != nil {
 		return 0, false, err
 	}
+	m, _, uncertain, err := c.markDeleting(ctx, vol, name, attempt)
+	if err != nil {
+		return 0, uncertain, err
+	}
+	if m == markClaimed {
+		return retainForkHeld, false, nil
+	}
+	return c.freeName(ctx, root, name, attempt)
+}
+
+type markResult int
+
+const (
+	markDone    markResult = iota // this call marked the attempt deleting
+	markGone                      // the attempt's entry is gone
+	markSettled                   // already deleting or aborted (no fork can claim it)
+	markClaimed                   // a live fork claim is on it: nothing written
+)
+
+// markDeleting marks attempt of vol/name deleting under the fork-claim
+// rule, the one path for retention and explicit delete: the mark is
+// conditioned on {state active, gen, no claims}; dead claims are cleared
+// conditionally first; a lost condition re-reads and decides again. live
+// lists the live claims when the result is markClaimed. uncertain
+// reports, with an error, a mutation whose outcome is unknown.
+func (c *Catalog) markDeleting(ctx context.Context, vol, name, attempt string) (markResult, []string, bool, error) {
+	root, err := c.volRoot(vol)
+	if err != nil {
+		return 0, nil, false, err
+	}
 	dir := path.Join(root, snapsDir, name)
 	for try := 0; try < 5; try++ {
 		e, err := c.f.LookupEntry(ctx, dir, attempt)
 		if errors.Is(err, ErrNotFound) {
-			return c.freeName(ctx, root, name, attempt)
+			return markGone, nil, false, nil
 		}
 		if err != nil {
-			return 0, false, remoteErr(err, "read snapshot %s/%s attempt %s", vol, name, attempt)
+			return 0, nil, false, remoteErr(err, "read snapshot %s/%s attempt %s", vol, name, attempt)
 		}
 		if string(e.Extended[extSnapState]) != SnapActive {
-			// Deleting (a stopped pass) or aborted: no fork can claim it.
-			return c.freeName(ctx, root, name, attempt)
+			return markSettled, nil, false, nil
 		}
 		raw := string(e.Extended[extSnapClaims])
 		claims := decodeClaims(e)
 		live, err := c.liveClaims(ctx, vol, name, claims)
 		if err != nil {
-			return 0, false, err
+			return 0, nil, false, err
 		}
 		if len(live) > 0 {
-			return retainForkHeld, false, nil
+			return markClaimed, live, false, nil
 		}
 		c.hook(hookChecked, name)
 		next := proto.Clone(e).(*filerpb.Entry)
@@ -441,11 +477,8 @@ func (c *Catalog) deleteRetainedAttempt(ctx context.Context, vol, name, attempt 
 			// Every claim is dead: clear them, then decide again.
 			delete(next.Extended, extSnapClaims)
 			err := c.f.UpdateEntry(ctx, dir, next, map[string][]byte{extSnapState: []byte(SnapActive), extSnapClaims: []byte(raw)})
-			if errors.Is(err, ErrPrecondition) || errors.Is(err, ErrNotFound) {
-				continue
-			}
-			if err != nil {
-				return 0, true, remoteErr(err, "clear the dead fork claims of %s/%s attempt %s", vol, name, attempt)
+			if err != nil && !errors.Is(err, ErrPrecondition) && !errors.Is(err, ErrNotFound) {
+				return 0, nil, true, remoteErr(err, "clear the dead fork claims of %s/%s attempt %s", vol, name, attempt)
 			}
 			continue
 		}
@@ -460,12 +493,22 @@ func (c *Catalog) deleteRetainedAttempt(ctx context.Context, vol, name, attempt 
 			continue // a claim, a delete or a replacement landed: decide again
 		}
 		if err != nil {
-			return 0, true, remoteErr(err, "mark snapshot %s/%s attempt %s deleting", vol, name, attempt)
+			return 0, nil, true, remoteErr(err, "mark snapshot %s/%s attempt %s deleting", vol, name, attempt)
 		}
 		c.hook(hookMarked, name)
-		return c.freeName(ctx, root, name, attempt)
+		return markDone, nil, false, nil
 	}
-	return 0, false, remoteErr(nil, "snapshot %s/%s attempt %s kept changing", vol, name, attempt)
+	return 0, nil, false, remoteErr(nil, "snapshot %s/%s attempt %s kept changing", vol, name, attempt)
+}
+
+// claimedErr is snapshot_claimed naming the claiming fork volumes.
+func claimedErr(vol, name string, live []string) error {
+	targets := make([]string, 0, len(live))
+	for _, cl := range live {
+		t, _, _ := strings.Cut(cl, "/")
+		targets = append(targets, t)
+	}
+	return catErr(CodeSnapshotClaimed, false, nil, "snapshot %s/%s is the parent of incomplete fork %s; it can be deleted once that fork completes or is aborted", vol, name, strings.Join(targets, ", "))
 }
 
 // Test seams: hook stages in a Retain pass.

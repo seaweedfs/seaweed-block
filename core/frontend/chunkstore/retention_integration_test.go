@@ -229,6 +229,10 @@ func TestIntegration_RetainHeldSchedules(t *testing.T) {
 	if err != nil || b.attempt != pinnedAttempt || b.State != SnapActive || b.Class != SnapshotClassPinned {
 		t.Fatalf("pinned replacement: %+v %v (attempt %s, want %s)", b, err, b.attempt, pinnedAttempt)
 	}
+	// An explicit delete of a claimed parent is refused (claude05, 23:58Z).
+	if _, err := cat.DeleteSnapshot(ctx, "v1", "s01"); CodeOf(err) != CodeSnapshotClaimed {
+		t.Fatalf("delete of the claimed s01: %v; want snapshot_claimed", err)
+	}
 	for _, fk := range []struct{ snap, target string }{{"s01", "v2"}, {"s02", "v3"}} {
 		if s, err := cat.readSnap(ctx, "v1", fk.snap); err != nil || s.State != SnapActive {
 			t.Fatalf("fork parent %s: %+v %v; want active", fk.snap, s, err)
