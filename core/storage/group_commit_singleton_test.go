@@ -45,7 +45,7 @@ func TestGroupCommitSingletonFollowersRequireNextPhysicalSync(t *testing.T) {
 	releaseFirst, releaseSecond := make(chan struct{}), make(chan struct{})
 	failed := errors.New("second physical sync failed")
 	var calls atomic.Int32
-	gc := NewGroupCommitter(GroupCommitterConfig{MaxDelay: 10 * time.Millisecond, SyncFunc: func() error {
+	gc := NewGroupCommitter(GroupCommitterConfig{MaxDelay: 5 * time.Second, SyncFunc: func() error {
 		switch calls.Add(1) {
 		case 1:
 			close(firstStarted)
