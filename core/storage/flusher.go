@@ -228,11 +228,12 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 	// with LSN <= maxLSN is in extent or superseded by a retained newer
 	// WAL record. Concurrent writes remain dirty for the next cycle.
 	if maxLSN > 0 {
-		if err := store.persistCheckpoint(maxLSN); err != nil {
+		// The released tail is persisted with the checkpoint, before the
+		// writer may reuse those bytes.
+		if err := store.persistCheckpointAndRelease(maxLSN, maxLSNPhys, maxLSNEntrySize); err != nil {
 			return fmt.Errorf("flusher: persist checkpoint %d: %w", maxLSN, err)
 		}
 		if store.CheckpointLSN() >= maxLSN {
-			store.wal.advanceTailPastEntry(maxLSNPhys, maxLSNEntrySize)
 			store.mu.Lock()
 			if maxLSN+1 > store.walTail {
 				store.walTail = maxLSN + 1
