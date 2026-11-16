@@ -102,9 +102,6 @@ func (i *writeInstrumentation) recordWALChecksum(bytes int, d time.Duration) {
 }
 
 func (i *writeInstrumentation) recordWALAppend(bytes int, d time.Duration) {
-	if i != nil {
-		i.appendLatency.Observe(d)
-	}
 	if i == nil || bytes <= 0 {
 		return
 	}

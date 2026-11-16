@@ -3,8 +3,9 @@ package durable_test
 import (
 	"context"
 	"encoding/json"
-	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
 	"testing"
+
+	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
 )
 
 func TestDurabilityLatencyStatusPresent(t *testing.T) {

@@ -561,7 +561,9 @@ func (s *WALStore) Write(lba uint32, data []byte) (uint64, error) {
 		Length: uint32(len(data)),
 		Data:   data,
 	}
+	appendStart := time.Now()
 	walRelOff, err := s.wal.append(entry)
+	s.instr.appendLatency.Observe(time.Since(appendStart))
 	// A failed pwrite may still leave complete records or padding in the file.
 	s.walMutation.Add(1)
 	if err != nil {
@@ -638,7 +640,9 @@ func (s *WALStore) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error
 			Data:   data,
 		}
 	}
+	appendStart := time.Now()
 	offsets, err := s.wal.appendBatch(entries)
+	s.instr.appendLatency.Observe(time.Since(appendStart))
 	// A failed pwrite may still leave complete records or padding in the file.
 	s.walMutation.Add(1)
 	if err != nil {
@@ -683,7 +687,9 @@ func (s *WALStore) writeBatchMultiBlockLocked(startLBA uint32, blocks [][]byte, 
 		Length:   uint32(len(payload)),
 		Data:     payload,
 	}
+	appendStart := time.Now()
 	walRelOff, err := s.wal.append(entry)
+	s.instr.appendLatency.Observe(time.Since(appendStart))
 	// A failed pwrite may still leave complete records or padding in the file.
 	s.walMutation.Add(1)
 	if err != nil {
@@ -1103,7 +1109,9 @@ func (s *WALStore) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
 		Length: uint32(len(dataCopy)),
 		Data:   dataCopy,
 	}
+	appendStart := time.Now()
 	walRelOff, err := s.wal.append(entry)
+	s.instr.appendLatency.Observe(time.Since(appendStart))
 	// A failed pwrite may still leave complete records or padding in the file.
 	s.walMutation.Add(1)
 	if err != nil {
