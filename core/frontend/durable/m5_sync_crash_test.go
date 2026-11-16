@@ -26,6 +26,12 @@ func qd1CrashProvider(t *testing.T, impl durable.ImplName, root string) (*durabl
 	if err != nil {
 		t.Fatal(err)
 	}
+	setupComplete := false
+	defer func() {
+		if !setupComplete {
+			_ = p.Close()
+		}
+	}()
 	raw, err := p.Open(context.Background(), "v1")
 	if err != nil {
 		t.Fatal(err)
@@ -33,7 +39,9 @@ func qd1CrashProvider(t *testing.T, impl durable.ImplName, root string) (*durabl
 	if _, err := p.RecoverVolume(context.Background(), "v1"); err != nil {
 		t.Fatal(err)
 	}
-	return p, raw.(*durable.StorageBackend)
+	backend := raw.(*durable.StorageBackend)
+	setupComplete = true
+	return p, backend
 }
 
 func TestQD1BackendSyncCrashWriter(t *testing.T) {

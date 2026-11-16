@@ -38,36 +38,13 @@ func BenchmarkConcurrentBackendSync(b *testing.B) {
 				}
 				backend := raw.(*durable.StorageBackend)
 				profile := backend.WriteProfile()
-				start := make(chan struct{})
-				errs := make(chan error, qd)
-				var wg sync.WaitGroup
-				for w := 0; w < qd; w++ {
-					wg.Add(1)
-					go func(w int) {
-						defer wg.Done()
-						<-start
-						payload := bytes.Repeat([]byte{byte(w + 1)}, 4096)
-						for i := 0; i < b.N; i++ {
-							if _, err := backend.Write(context.Background(), int64(w)*4096, payload); err != nil {
-								errs <- err
-								return
-							}
-							if err := backend.Sync(context.Background()); err != nil {
-								errs <- err
-								return
-							}
-						}
-					}(w)
-				}
+				workloadCtx, cancelWorkload := context.WithTimeout(context.Background(), 30*time.Second)
 				b.ResetTimer()
-				started := time.Now()
-				close(start)
-				wg.Wait()
-				elapsed := time.Since(started)
+				elapsed, workloadErr := runConcurrentSyncProxy(workloadCtx, backend, qd, b.N)
 				b.StopTimer()
-				close(errs)
-				for err := range errs {
-					b.Fatal(err)
+				cancelWorkload()
+				if workloadErr != nil {
+					b.Fatal(workloadErr)
 				}
 				post := backend.WriteProfile()
 				n := uint64(qd * b.N)
@@ -87,4 +64,56 @@ func BenchmarkConcurrentBackendSync(b *testing.B) {
 			})
 		}
 	}
+}
+
+// Local file I/O is not interruptible by context. Cancellation stops new work
+// between operations; every started worker is joined after in-flight I/O settles.
+// Do not wrap wg.Wait in a select that abandons workers on timeout.
+type concurrentSyncProxyBackend interface {
+	Write(context.Context, int64, []byte) (int, error)
+	Sync(context.Context) error
+}
+
+func runConcurrentSyncProxy(ctx context.Context, backend concurrentSyncProxyBackend, qd, iterations int) (time.Duration, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	start := make(chan struct{})
+	errs := make(chan error, qd)
+	var wg sync.WaitGroup
+	for w := 0; w < qd; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			<-start
+			fail := func(err error) { errs <- err; cancel() }
+			payload := bytes.Repeat([]byte{byte(w + 1)}, 4096)
+			for i := 0; i < iterations; i++ {
+				if err := ctx.Err(); err != nil {
+					fail(err)
+					return
+				}
+				if _, err := backend.Write(ctx, int64(w)*4096, payload); err != nil {
+					fail(err)
+					return
+				}
+				if err := ctx.Err(); err != nil {
+					fail(err)
+					return
+				}
+				if err := backend.Sync(ctx); err != nil {
+					fail(err)
+					return
+				}
+			}
+		}(w)
+	}
+	started := time.Now()
+	close(start)
+	wg.Wait()
+	elapsed := time.Since(started)
+	close(errs)
+	for err := range errs {
+		return elapsed, err
+	}
+	return elapsed, ctx.Err()
 }
