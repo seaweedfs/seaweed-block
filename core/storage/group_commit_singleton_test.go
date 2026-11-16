@@ -23,7 +23,7 @@ func TestGroupCommitSingletonStartsWithoutCollectionDelay(t *testing.T) {
 	case <-time.After(250 * time.Millisecond):
 		t.Fatal("singleton waited for collection timer before physical sync")
 	}
-	if err := <-result; err != nil {
+	if err := receiveCommitResult(t, result, time.After(2*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -94,7 +94,7 @@ func TestGroupCommitSingletonFollowersRequireNextPhysicalSync(t *testing.T) {
 	default:
 	}
 	close(releaseFirst)
-	if err := <-leader; err != nil {
+	if err := receiveCommitResult(t, leader, time.After(2*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -108,8 +108,10 @@ func TestGroupCommitSingletonFollowersRequireNextPhysicalSync(t *testing.T) {
 	default:
 	}
 	close(releaseSecond)
+	completionDeadline := time.NewTimer(2 * time.Second)
+	defer completionDeadline.Stop()
 	for i := 0; i < 8; i++ {
-		if err := <-followers; !errors.Is(err, failed) {
+		if err := receiveCommitResult(t, followers, completionDeadline.C); !errors.Is(err, failed) {
 			t.Fatal("physical error not propagated", err)
 		}
 	}
@@ -155,5 +157,16 @@ func TestGroupCommitQD1EveryAckFollowsPhysicalSync(t *testing.T) {
 	got, err := os.ReadFile(path)
 	if err != nil || !bytes.Equal(got, want) {
 		t.Fatal("fsynced bytes differ on reopen", err)
+	}
+}
+
+func receiveCommitResult(t *testing.T, result <-chan error, deadline <-chan time.Time) error {
+	t.Helper()
+	select {
+	case err := <-result:
+		return err
+	case <-deadline:
+		t.Fatal("physical sync started but completion did not settle within deadline")
+		return nil
 	}
 }

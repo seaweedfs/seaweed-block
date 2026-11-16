@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"testing"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
@@ -65,7 +66,10 @@ func TestQD1BackendSyncCrashReopen(t *testing.T) {
 	for _, impl := range []durable.ImplName{durable.ImplSmartWAL, durable.ImplWALStoreChunk} {
 		t.Run(string(impl), func(t *testing.T) {
 			root := t.TempDir()
-			cmd := exec.Command(os.Args[0], "-test.run=^TestQD1BackendSyncCrashWriter$", "-test.v")
+			childCtx, cancelChild := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancelChild()
+			cmd := exec.CommandContext(childCtx, os.Args[0], "-test.run=^TestQD1BackendSyncCrashWriter$", "-test.v")
+			cmd.WaitDelay = 2 * time.Second
 			cmd.Env = append(os.Environ(), "QD1_CRASH_IMPL="+string(impl), "QD1_CRASH_ROOT="+root)
 			out, err := cmd.CombinedOutput()
 			t.Logf("%s", out)

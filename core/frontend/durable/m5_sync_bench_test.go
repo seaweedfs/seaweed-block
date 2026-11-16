@@ -20,7 +20,10 @@ func BenchmarkQD1PairedBackendSync(b *testing.B) {
 		b.Run(string(impl), func(b *testing.B) {
 			id := frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1}
 			root := b.TempDir()
-			if out, err := exec.Command("findmnt", "-T", root, "-no", "SOURCE,FSTYPE,TARGET").CombinedOutput(); err == nil {
+			diagnosticCtx, cancelDiagnostic := context.WithTimeout(context.Background(), 2*time.Second)
+			out, diagnosticErr := exec.CommandContext(diagnosticCtx, "findmnt", "-T", root, "-no", "SOURCE,FSTYPE,TARGET").CombinedOutput()
+			cancelDiagnostic()
+			if diagnosticErr == nil {
 				fmt.Printf("STUDY_FS %s", out)
 			}
 			cfg := durable.ProviderConfig{Impl: impl, StorageRoot: root, NumBlocks: 32768, BlockSize: 4096, ChunkBlocks: 1024}

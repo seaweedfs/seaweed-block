@@ -2,6 +2,7 @@ package storage
 
 import (
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -42,13 +43,16 @@ func TestDurabilityLatencyCountsSharedPhysicalSyncAndDedup(t *testing.T) {
 func TestDurabilityLatencyGroupWaitIsPerRequest(t *testing.T) {
 	var calls atomic.Uint64
 	gc := NewGroupCommitter(GroupCommitterConfig{MaxBatch: 2, MaxDelay: time.Second, SyncFunc: func() error { calls.Add(1); return nil }})
+	var runner sync.Once
+	startRunner := func() { runner.Do(func() { go gc.Run() }) }
+	// Failure in prequeue admission must still start a consumer and drain callers.
+	t.Cleanup(func() { startRunner(); gc.Stop() })
 	result := make(chan error, 2)
 	for i := 0; i < 2; i++ {
 		go func() { result <- gc.SyncCache() }()
 	}
 	waitCommitPending(t, gc, 2)
-	go gc.Run()
-	defer gc.Stop()
+	startRunner()
 	for i := 0; i < 2; i++ {
 		select {
 		case err := <-result:
