@@ -130,7 +130,7 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 	}
 	result.Volumes = len(volumes)
 	for _, vol := range volumes {
-		r, e := NewChunkRemote(g.cat.f, nilBlobs{}, path.Join(g.cat.base, vol))
+		r, e := NewChunkRemote(g.cat.f, gcBlobReader{g.blobs}, path.Join(g.cat.base, vol))
 		if e != nil {
 			return result, e
 		}
@@ -139,6 +139,19 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 			return result, e
 		}
 		addHead := func(kind, id string, head storage.ChunkHead) error {
+			var err error
+			head, err = r.resolveManifest(ctx, head)
+			if err != nil {
+				return err
+			}
+			for _, ref := range head.Segments {
+				dir, name, err := r.keyLocation(ref.Key)
+				if err != nil {
+					return err
+				}
+				roots[path.Join(dir, name)] = true
+			}
+
 			keys := make([]string, 0, len(head.Chunks))
 			for _, ref := range head.Chunks {
 				keys = append(keys, ref.Key)
@@ -211,6 +224,15 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 				kind := "capture_intent"
 				if strings.HasPrefix(in.Holder, "snapshot:") || strings.HasPrefix(in.Holder, "fork:") {
 					kind = "retained_copy_intent"
+				}
+				if in.Segments != nil {
+					h := storage.ChunkHead{Segments: in.Segments, ChunkBytes: in.ChunkBytes}
+					for _, ref := range in.Segments {
+						h.ManifestChunkCount += ref.Count
+					}
+					if err := addHead(kind, in.ID, h); err != nil {
+						return result, err
+					}
 				}
 				result.Roots = append(result.Roots, GCRoot{Kind: kind, Volume: vol, ID: in.ID, Keys: append([]string{}, in.Keys...), Epoch: in.Epoch, Holder: in.Holder})
 				for _, key := range in.Keys {
@@ -337,3 +359,20 @@ func (nilBlobs) Get(context.Context, string) ([]byte, error) {
 
 // The binding name was already validated before reclamation admission.
 func mustUnescapeGCKey(name string) string { k, _ := url.PathUnescape(name); return k }
+
+// GC needs immutable segment bytes as well as deletion. Flat-only legacy
+// adapters remain usable; a segmented root without a reader refuses the mark.
+type gcBlobReader struct{ BlobDeleter }
+
+func (b gcBlobReader) Put(context.Context, []byte) (string, error) {
+	return "", errors.New("chunkstore: GC is read-only during mark")
+}
+func (b gcBlobReader) Get(ctx context.Context, fid string) ([]byte, error) {
+	reader, ok := b.BlobDeleter.(interface {
+		Get(context.Context, string) ([]byte, error)
+	})
+	if !ok {
+		return nil, errors.New("chunkstore: GC segment reader unavailable")
+	}
+	return reader.Get(ctx, fid)
+}

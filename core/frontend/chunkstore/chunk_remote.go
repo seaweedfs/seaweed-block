@@ -214,12 +214,14 @@ func (r *ChunkRemote) Get(ctx context.Context, key string) ([]byte, error) {
 func (r *ChunkRemote) Delete(context.Context, string) error { return ErrDeleteUnsupported }
 
 type intentDoc struct {
-	Format    int      `json:"format"`
-	Gen       uint64   `json:"gen"`
-	Epoch     uint64   `json:"epoch"`
-	Holder    string   `json:"holder"`
-	Keys      []string `json:"keys"`
-	CreatedNs int64    `json:"created_ns"`
+	Segments   map[uint64]storage.ChunkSegment `json:"segments,omitempty"`
+	ChunkBytes uint64                          `json:"chunk_bytes,omitempty"`
+	Format     int                             `json:"format"`
+	Gen        uint64                          `json:"gen"`
+	Epoch      uint64                          `json:"epoch"`
+	Holder     string                          `json:"holder"`
+	Keys       []string                        `json:"keys"`
+	CreatedNs  int64                           `json:"created_ns"`
 	// DeadlineNs: a copy intent's publication deadline (0: a capture intent).
 	DeadlineNs int64 `json:"deadline_ns,omitempty"`
 }
@@ -246,7 +248,7 @@ func putIntent(ctx context.Context, f Filer, root string, in storage.ChunkIntent
 		return "", err
 	}
 	now := time.Now()
-	body, err := json.Marshal(intentDoc{Format: intentFormat, Gen: in.Gen, Epoch: in.Epoch, Holder: in.Holder, Keys: in.Keys, CreatedNs: now.UnixNano(), DeadlineNs: in.DeadlineNs})
+	body, err := json.Marshal(intentDoc{Format: intentFormat, Gen: in.Gen, Epoch: in.Epoch, Holder: in.Holder, Keys: in.Keys, CreatedNs: now.UnixNano(), DeadlineNs: in.DeadlineNs, Segments: in.Segments, ChunkBytes: in.ChunkBytes})
 	if err != nil {
 		return "", err
 	}
@@ -325,7 +327,7 @@ func decodeIntent(p string, e *filerpb.Entry) (storage.ChunkIntent, error) {
 		return fail("name or extended gen/epoch/holder disagree with the document")
 	}
 	return storage.ChunkIntent{ID: e.GetName(), Gen: doc.Gen, Epoch: doc.Epoch, Holder: doc.Holder,
-		Keys: append([]string(nil), doc.Keys...), CreatedNs: doc.CreatedNs, DeadlineNs: doc.DeadlineNs}, nil
+		Keys: append([]string(nil), doc.Keys...), CreatedNs: doc.CreatedNs, DeadlineNs: doc.DeadlineNs, Segments: doc.Segments, ChunkBytes: doc.ChunkBytes}, nil
 }
 
 type headDoc struct {

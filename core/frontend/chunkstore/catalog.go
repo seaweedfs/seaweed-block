@@ -664,7 +664,7 @@ func decodeSnap(p string, e *filerpb.Entry) (SnapshotInfo, string, error) {
 	}
 	return SnapshotInfo{
 		VolumeID: doc.VolumeID, Name: doc.Name, HeadGen: head.Gen, HeadEpoch: head.Epoch, CutLSN: head.RemoteLSN,
-		CreatedNs: doc.CreatedNs, State: state, ChunkCount: len(head.Chunks), ManifestBytes: len(e.GetContent()),
+		CreatedNs: doc.CreatedNs, State: state, ChunkCount: manifestCount(head), ManifestBytes: len(e.GetContent()),
 		Consistency: doc.Consistency, Labels: doc.Labels, Parent: doc.Parent, ExpiresAtNs: doc.ExpiresAtNs,
 		Class: doc.Class, head: head, geo: doc.Geometry,
 	}, doc.RequestID, nil
@@ -785,6 +785,13 @@ func headDigest(h storage.ChunkHead) (string, error) {
 }
 
 func headKeys(h storage.ChunkHead) []string {
+	if h.Segments != nil {
+		keys := make([]string, 0, len(h.Segments))
+		for _, ref := range h.Segments {
+			keys = append(keys, ref.Key)
+		}
+		return keys
+	}
 	keys := make([]string, 0, len(h.Chunks))
 	for _, ref := range h.Chunks {
 		keys = append(keys, ref.Key)
@@ -864,7 +871,7 @@ func (c *Catalog) CreateSnapshot(ctx context.Context, vol string, req SnapshotRe
 
 	tag := "snapshot:" + vol + "/" + req.Name + "/" + attempt
 	deadline := readAt.Add(c.deadline())
-	id, err := putIntent(ctx, c.f, root, storage.ChunkIntent{Gen: head.Gen, Epoch: head.Epoch, Holder: tag, Keys: headKeys(head),
+	id, err := putIntent(ctx, c.f, root, storage.ChunkIntent{Gen: head.Gen, Epoch: head.Epoch, Holder: tag, Keys: headKeys(head), Segments: head.Segments, ChunkBytes: head.ChunkBytes,
 		DeadlineNs: deadline.UnixNano()})
 	if err != nil {
 		return SnapshotInfo{}, remoteErr(err, "intent for snapshot %s/%s", vol, req.Name)
@@ -1185,6 +1192,15 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 	}
 	head := storage.ChunkHead{Gen: 1, Epoch: 0, Holder: "", RemoteLSN: src.RemoteLSN, Chunks: make(map[uint64]storage.ChunkRef, len(src.Chunks)), State: storage.ChunkHeadActive}
 	qualified := 0
+	if src.Segments != nil {
+		head.Segments = make(map[uint64]storage.ChunkSegment, len(src.Segments))
+		head.ChunkBytes, head.ManifestChunkCount = src.ChunkBytes, src.ManifestChunkCount
+		for idx, ref := range src.Segments {
+			ref.Key = qualifyManifestKey(req.Source, ref.Key)
+			head.Segments[idx] = ref
+			qualified++
+		}
+	}
 	for idx, ref := range src.Chunks {
 		if !strings.HasPrefix(ref.Key, "@") {
 			ref.Key = "@" + req.Source + "/" + ref.Key
@@ -1193,7 +1209,7 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 		head.Chunks[idx] = ref
 	}
 	record := &ForkRecord{RequestID: req.RequestID, Source: req.Source, Snapshot: req.Snapshot, SourceGen: snap.HeadGen,
-		HeadSHA256: digest, RemoteLSN: head.RemoteLSN, ChunkCount: len(head.Chunks), QualifiedRefs: qualified}
+		HeadSHA256: digest, RemoteLSN: head.RemoteLSN, ChunkCount: manifestCount(head), QualifiedRefs: qualified}
 
 	if ok {
 		// An incomplete fork of this request resumes only on the same image.
@@ -1230,7 +1246,7 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 	}
 	he.Extended[extReq] = []byte(req.RequestID)
 	deadline := readAt.Add(c.deadline())
-	id, err := putIntent(ctx, c.f, dstRoot, storage.ChunkIntent{Gen: 0, Epoch: 0, Holder: tag, Keys: headKeys(head),
+	id, err := putIntent(ctx, c.f, dstRoot, storage.ChunkIntent{Gen: 0, Epoch: 0, Holder: tag, Keys: headKeys(head), Segments: head.Segments, ChunkBytes: head.ChunkBytes,
 		DeadlineNs: deadline.UnixNano()})
 	if err != nil {
 		return ForkResult{}, remoteErr(err, "intent for fork %s", req.Target)

@@ -26,7 +26,7 @@ type segmentDoc struct {
 	Chunks     map[uint64]storage.ChunkRef `json:"chunks"`
 }
 
-func qualified(owner, key string) string {
+func qualifyManifestKey(owner, key string) string {
 	if strings.HasPrefix(key, "@") {
 		return key
 	}
@@ -71,7 +71,7 @@ func (r *ChunkRemote) PrepareManifest(ctx context.Context, base, next storage.Ch
 	groups := map[uint64]map[uint64]storage.ChunkRef{}
 	canonical := make(map[uint64]storage.ChunkRef, len(next.Chunks))
 	for idx, ref := range next.Chunks {
-		ref.Key = qualified(owner, ref.Key)
+		ref.Key = qualifyManifestKey(owner, ref.Key)
 		canonical[idx] = ref
 		group := idx / per
 		if groups[group] == nil {
@@ -89,7 +89,7 @@ func (r *ChunkRemote) PrepareManifest(ctx context.Context, base, next storage.Ch
 		old := map[uint64]storage.ChunkRef{}
 		for idx, ref := range base.Chunks {
 			if idx/per == group {
-				ref.Key = qualified(owner, ref.Key)
+				ref.Key = qualifyManifestKey(owner, ref.Key)
 				old[idx] = ref
 			}
 		}
@@ -109,7 +109,7 @@ func (r *ChunkRemote) PrepareManifest(ctx context.Context, base, next storage.Ch
 			return next, nil, err
 		}
 		key := fmt.Sprintf("manifests/%x", nonce)
-		next.Segments[group] = storage.ChunkSegment{Key: qualified(owner, key), SHA256: sha256.Sum256(body), Owner: owner, Count: len(chunks)}
+		next.Segments[group] = storage.ChunkSegment{Key: qualifyManifestKey(owner, key), SHA256: sha256.Sum256(body), Owner: owner, Count: len(chunks)}
 		uploads = append(uploads, upload{key, body})
 	}
 	if err := validateRoot(next); err != nil {
@@ -162,7 +162,7 @@ func (r *ChunkRemote) resolveManifest(ctx context.Context, h storage.ChunkHead) 
 			if idx/(manifestSegmentBytes/h.ChunkBytes) != group || storage.ValidChunkKey(cr.Key) != nil {
 				return h, errors.New("chunkstore: segment index/key invalid")
 			}
-			cr.Key = qualified(ref.Owner, cr.Key)
+			cr.Key = qualifyManifestKey(ref.Owner, cr.Key)
 			h.Chunks[idx] = cr
 		}
 	}

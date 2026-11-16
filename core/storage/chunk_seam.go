@@ -243,12 +243,14 @@ type chunkRemote interface {
 // chunkIntent is one live intent: the keys a holder at HEAD generation Gen
 // and epoch Epoch is about to publish.
 type chunkIntent struct {
-	ID        string // "<Gen>-<nonce>"; assigned by PutIntent
-	Gen       uint64
-	Epoch     uint64
-	Holder    string
-	Keys      []string
-	CreatedNs int64 // assigned by PutIntent
+	Segments   map[uint64]ChunkSegment
+	ChunkBytes uint64
+	ID         string // "<Gen>-<nonce>"; assigned by PutIntent
+	Gen        uint64
+	Epoch      uint64
+	Holder     string
+	Keys       []string
+	CreatedNs  int64 // assigned by PutIntent
 	// DeadlineNs (unix ns) is a copy intent's publication deadline, kept as
 	// metadata: a GC sweep settles a dead copy attempt by claiming its
 	// publishing entry with a tombstone, never by the deadline alone (W5
