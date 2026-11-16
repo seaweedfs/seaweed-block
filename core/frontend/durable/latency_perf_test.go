@@ -24,7 +24,7 @@ func TestDurabilityLatencyPerf(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			var b *durable.StorageBackend
 			if kind == "walstore" {
-				b = openDurableBackend(t, durable.ImplWALStore, 256, 4096)
+				b = openDurableBackend(t, durable.ImplWALStore, 256, 4096).(*durable.StorageBackend)
 			} else {
 				p := chunkProvider(t, t.TempDir(), storage.NewMemChunkRemote(), v1View(), 0)
 				openRecovered(t, p)
