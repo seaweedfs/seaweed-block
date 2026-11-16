@@ -1,10 +1,12 @@
 package storage
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // The WAL writer may only overwrite bytes that the PERSISTED superblock tail
@@ -261,5 +263,198 @@ func TestWALStoreFullFlushThenTornWrapKeepsSyncedRecords(t *testing.T) {
 	}
 	for lba := uint32(1); lba <= 4; lba++ {
 		assertRecoveryHardeningBlock(t, r, lba, makeBlock(blockSize, byte(0x10+lba)))
+	}
+}
+
+// codex01 #159 P2-S2: the batch planner (with a padding wrap) counts from the
+// durable tail too: refused while the release is only in memory or the
+// bounds are recovery-pending, accepted once the tail is persisted.
+func TestWALWriterBatchReuseIsBoundedByTheDurableTail(t *testing.T) {
+	const walSize = 4096
+	mk := func(lsn uint64) walEntry {
+		return walEntry{LSN: lsn, Type: walEntryWrite, LBA: lsn, Length: 64, Data: make([]byte, 64)}
+	}
+	e0 := mk(0)
+	size, err := e0.encodedSize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sz := uint64(size)
+	n := uint64(walSize) / sz // the last walSize%sz bytes force a padding wrap
+	fill := func(t *testing.T) (*walWriter, *os.File) {
+		f, err := os.CreateTemp(t.TempDir(), "wal")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = f.Close() })
+		if err := f.Truncate(walSize); err != nil {
+			t.Fatal(err)
+		}
+		w := newWALWriter(f, 0, walSize, 0, 0, nil)
+		for i := uint64(0); i < n; i++ {
+			e := mk(i + 1)
+			if _, err := w.append(&e); err != nil {
+				t.Fatalf("fill %d: %v", i, err)
+			}
+		}
+		return w, f
+	}
+	batch := func() []walEntry { return []walEntry{mk(n + 1), mk(n + 2)} }
+	refused := func(t *testing.T, w *walWriter, f *os.File, why string) {
+		t.Helper()
+		head := w.logicalHeadValue()
+		tailBytes := make([]byte, walSize-n*sz)
+		if _, err := f.ReadAt(tailBytes, int64(n*sz)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.appendBatch(batch()); !errors.Is(err, errWALFull) {
+			t.Fatalf("%s: appendBatch err=%v; want errWALFull", why, err)
+		}
+		after := make([]byte, len(tailBytes))
+		if _, err := f.ReadAt(after, int64(n*sz)); err != nil {
+			t.Fatal(err)
+		}
+		if w.logicalHeadValue() != head || !bytes.Equal(after, tailBytes) {
+			t.Fatalf("%s: a refused batch moved the head or wrote padding", why)
+		}
+	}
+	accepted := func(t *testing.T, w *walWriter) {
+		t.Helper()
+		offs, err := w.appendBatch(batch())
+		if err != nil {
+			t.Fatalf("after the tail is persisted: appendBatch: %v", err)
+		}
+		if len(offs) != 2 || offs[0] != 0 || offs[1] != sz {
+			t.Fatalf("offsets %v; want the batch wrapped to [0 %d]", offs, sz)
+		}
+	}
+
+	t.Run("released in memory only", func(t *testing.T) {
+		w, f := fill(t)
+		w.advanceTailPastEntry(0, 2*sz)
+		refused(t, w, f, "in-memory release")
+		w.tailPersisted(2 * sz)
+		accepted(t, w)
+	})
+	t.Run("recovered bounds pending", func(t *testing.T) {
+		w, f := fill(t)
+		w.tailPersisted(2 * sz) // the space is free on disk; only the pending flag refuses it
+		if err := w.restoreRecoveredBounds(n*sz, 2*sz); err != nil {
+			t.Fatal(err)
+		}
+		refused(t, w, f, "durablePending")
+		single := mk(n + 1)
+		if _, err := w.append(&single); !errors.Is(err, errWALFull) {
+			t.Fatalf("durablePending: append err=%v; want errWALFull", err)
+		}
+		w.tailPersisted(2 * sz)
+		accepted(t, w)
+	})
+}
+
+// codex01 #159 P2-S3: when Recover cannot persist the rebuilt bounds (the
+// superblock write or its fsync fails), it fails, admits no append, and a
+// same-instance retry persists them; later writes survive a reopen exactly.
+func TestWALStoreRecoverBoundsPersistFailureRefusesAppendsUntilRetry(t *testing.T) {
+	const blockSize = 4096
+	S := uint64(walEntryHeaderSize + blockSize)
+	errInjected := errors.New("injected superblock failure")
+	for _, seam := range []string{"write", "sync"} {
+		t.Run(seam, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "store.bin")
+			s := createWALStoreWithWALSizeForTest(t, path, 64, blockSize, 24*1024)
+			s.DisableAutoFlushForRecoveryTest()
+			crashed := false
+			t.Cleanup(func() {
+				if !crashed {
+					_ = s.Close()
+				}
+			})
+			if _, err := s.Write(0, makeBlock(blockSize, 0x30)); err != nil { // LSN 1
+				t.Fatal(err)
+			}
+			if _, err := s.Sync(); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.flusher.flushOnce(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.Write(1, makeBlock(blockSize, 0x31)); err != nil { // LSN 2, synced, unflushed
+				t.Fatal(err)
+			}
+			if _, err := s.Sync(); err != nil {
+				t.Fatal(err)
+			}
+			sb := *s.sb // an older flush's superblock: the bounds Recover must rebuild and persist
+			sb.WALCheckpointLSN, sb.WALTail, sb.WALHead = 1, 0, S
+			buf := newSimpleByteBuf()
+			if _, err := sb.writeTo(buf); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.fd.WriteAt(buf.bytes(), 0); err != nil {
+				t.Fatal(err)
+			}
+			crashRecoveryHardeningStore(t, s)
+			crashed = true
+
+			r, err := OpenWALStore(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.DisableAutoFlushForRecoveryTest()
+			rClosed := false
+			t.Cleanup(func() {
+				if !rClosed {
+					_ = r.Close()
+				}
+			})
+			realWrite, realSync := r.writeSuperblockMetadata, r.syncSuperblockMetadata
+			if seam == "write" {
+				r.writeSuperblockMetadata = func([]byte) error { return errInjected }
+			} else {
+				r.syncSuperblockMetadata = func() error { return errInjected }
+			}
+			if _, err := r.Recover(); !errors.Is(err, errInjected) {
+				t.Fatalf("Recover with a failing superblock %s: err=%v; want the injected failure", seam, err)
+			}
+			head := r.wal.logicalHeadValue()
+			r.admissionTimeout = 200 * time.Millisecond
+			if _, err := r.Write(5, makeBlock(blockSize, 0x55)); err == nil {
+				t.Fatal("Write after a failed Recover succeeded; want it refused until the bounds are persisted")
+			}
+			if r.wal.logicalHeadValue() != head {
+				t.Fatalf("refused Write moved the WAL head %d -> %d", head, r.wal.logicalHeadValue())
+			}
+
+			r.writeSuperblockMetadata, r.syncSuperblockMetadata = realWrite, realSync
+			if _, err := r.Recover(); err != nil {
+				t.Fatalf("same-instance Recover retry: %v", err)
+			}
+			disk := diskSuperblockForTest(t, path)
+			if tail, h := r.wal.logicalTailValue(), r.wal.logicalHeadValue(); disk.WALTail != tail || disk.WALHead != h {
+				t.Fatalf("after the retry: persisted tail=%d head=%d, writer tail=%d head=%d", disk.WALTail, disk.WALHead, tail, h)
+			}
+			r.admissionTimeout = 30 * time.Second
+			if _, err := r.Write(5, makeBlock(blockSize, 0x55)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := r.Sync(); err != nil {
+				t.Fatal(err)
+			}
+			crashRecoveryHardeningStore(t, r)
+			rClosed = true
+
+			q, err := OpenWALStore(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			q.DisableAutoFlushForRecoveryTest()
+			t.Cleanup(func() { _ = q.Close() })
+			if _, err := q.Recover(); err != nil {
+				t.Fatalf("reopen Recover: %v", err)
+			}
+			assertRecoveryHardeningBlock(t, q, 1, makeBlock(blockSize, 0x31))
+			assertRecoveryHardeningBlock(t, q, 5, makeBlock(blockSize, 0x55))
+		})
 	}
 }
