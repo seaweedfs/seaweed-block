@@ -421,11 +421,12 @@ func (r *ChunkRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVer
 
 func headEntry(h storage.ChunkHead) (*filerpb.Entry, error) {
 	doc := headDoc{Format: headFormat, Gen: h.Gen, Epoch: h.Epoch, Holder: h.Holder, RemoteLSN: h.RemoteLSN,
-		Chunks: make(map[uint64]refDoc, len(h.Chunks)), State: h.State}
+		State: h.State}
 	if h.DetachedBy != nil {
 		doc.DetachedBy = &detachedByDoc{Holder: h.DetachedBy.Holder, Epoch: h.DetachedBy.Epoch, Gen: h.DetachedBy.Gen}
 	}
 	if h.Segments == nil {
+		doc.Chunks = make(map[uint64]refDoc, len(h.Chunks))
 		for idx, ref := range h.Chunks {
 			if ref.Key == "" {
 				return nil, fmt.Errorf("chunkstore: HEAD chunk %d has no key", idx)

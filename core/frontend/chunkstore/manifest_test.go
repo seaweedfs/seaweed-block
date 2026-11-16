@@ -250,3 +250,43 @@ func TestManifest_CopyIntentProtectsChildrenWithoutHead(t *testing.T) {
 		}
 	}
 }
+
+func TestManifest_NoopFlatUpgradeUsesOneNormalGeneration(t *testing.T) {
+	f, b, _, _, _ := gcFixture(t)
+	ctx := context.Background()
+	r, _ := NewChunkRemote(f, b, path.Join(catBase, "v1"))
+	old, err := r.GetHead(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(t.TempDir(), "store")
+	s, err := storage.CreateWALStore(p, 64, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err = s.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	l, err := storage.AttachChunkLayer(s, r, storage.ChunkLayerConfig{ChunkBlocks: 8, Epoch: 1, Holder: "h1", FreshFromHead: true, Bitmap: storage.NewFileChunkBitmapStore(p + ".bitmap")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = l.Capture(ctx); err != nil {
+		t.Fatal(err)
+	}
+	h, err := r.GetHead(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.Segments == nil || h.Gen != old.Gen+1 || h.Epoch != 1 || h.RemoteLSN != old.RemoteLSN {
+		t.Fatalf("upgrade changed normal-cut lineage: old=%+v new=%+v", old, h)
+	}
+	if _, err = l.Capture(ctx); err != nil {
+		t.Fatal(err)
+	}
+	again, err := r.GetHead(ctx)
+	if err != nil || again.Gen != h.Gen || again.Epoch != h.Epoch {
+		t.Fatalf("second no-op advanced lineage: %+v %v", again, err)
+	}
+}

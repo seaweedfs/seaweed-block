@@ -310,7 +310,7 @@ func TestChunkRemote_ChunkLayerCaptureThenFreshHost(t *testing.T) {
 			t.Fatalf("fresh host block %d = %x...; want %x...", lba, got[:4], exp[:4])
 		}
 	}
-	if _, gets, _ := b.counts(); gets != 4 { // each published chunk fetched once
+	if _, gets, _ := b.counts(); gets != 5 { // four data chunks and one manifest fetched once
 		t.Fatalf("fresh host fetched %d needles; want 4 data chunks plus one manifest", gets)
 	}
 }
