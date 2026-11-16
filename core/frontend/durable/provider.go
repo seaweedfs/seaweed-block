@@ -48,7 +48,15 @@ import (
 type ImplName string
 
 const (
-	ImplSmartWAL ImplName = "smartwal" // production default per PM direction
+	// ImplAuto (the zero value) opens an existing volume with the
+	// implementation its on-disk superblock names, and creates a new
+	// volume as ImplWALStore.
+	ImplAuto ImplName = ""
+	// ImplSmartWAL is experimental: in-place overwrites have no rollback
+	// on a torn write, blocks lose their per-block CRC once their ring
+	// records recycle, and it has no chunk-snapshot support. Selected only
+	// explicitly, or by auto for an existing smartwal volume.
+	ImplSmartWAL ImplName = "smartwal"
 	ImplWALStore ImplName = "walstore"
 	// ImplParallelWALStore is the explicit Phase 167 candidate. It remains
 	// opt-in until the full recovery, replication, and mounted close gates pass.
@@ -75,7 +83,8 @@ var ErrVolumeNotOpen = errors.New("durable: volume not opened")
 // ProviderConfig configures a DurableProvider.
 type ProviderConfig struct {
 	// Impl selects which LogicalStorage implementation to open or
-	// create. Zero value (""): ImplSmartWAL (production default).
+	// create. Zero value (ImplAuto): an existing volume opens with its
+	// on-disk implementation, and a new volume is created as walstore.
 	Impl ImplName
 
 	// StorageRoot is the directory under which per-volume files
@@ -182,6 +191,7 @@ type volHandle struct {
 	storage storage.LogicalStorage
 	backend *StorageBackend
 	path    string
+	impl    ImplName // the resolved implementation, never ImplAuto
 
 	// ImplWALStoreChunk. fresh: the local volume is new and starts from
 	// the remote HEAD. It mirrors the durable fresh marker beside the
@@ -253,11 +263,8 @@ func NewDurableProvider(cfg ProviderConfig, view frontend.ProjectionView) (*Dura
 	if cfg.StorageRoot == "" {
 		return nil, fmt.Errorf("durable: ProviderConfig.StorageRoot required")
 	}
-	if cfg.Impl == "" {
-		cfg.Impl = ImplSmartWAL
-	}
-	if cfg.Impl != ImplSmartWAL && cfg.Impl != ImplWALStore && cfg.Impl != ImplParallelWALStore && cfg.Impl != ImplWALStoreChunk {
-		return nil, fmt.Errorf("durable: unknown impl %q (want %q, %q, %q, or %q)",
+	if cfg.Impl != ImplAuto && cfg.Impl != ImplSmartWAL && cfg.Impl != ImplWALStore && cfg.Impl != ImplParallelWALStore && cfg.Impl != ImplWALStoreChunk {
+		return nil, fmt.Errorf("durable: unknown impl %q (want auto (empty), %q, %q, %q, or %q)",
 			cfg.Impl, ImplSmartWAL, ImplWALStore, ImplParallelWALStore, ImplWALStoreChunk)
 	}
 	if cfg.Impl == ImplWALStoreChunk && cfg.ChunkRemoteFor == nil {
@@ -503,12 +510,11 @@ func (p *DurableProvider) DurableStatuses() []VolumeStatus {
 			chunks[volumeID] = chunkView{layer: h.chunk, awaiting: h.waitGen != 0}
 		}
 	}
-	impl := string(p.cfg.Impl)
 	p.mu.Unlock()
 
 	out := make([]VolumeStatus, 0, len(handles))
 	for volumeID, h := range handles {
-		st := h.backend.durableStatus(volumeID, h.path, impl)
+		st := h.backend.durableStatus(volumeID, h.path, string(h.impl))
 		if cv, ok := chunks[volumeID]; ok {
 			cs := &ChunkStatus{AwaitingAuthority: cv.awaiting}
 			if cv.layer != nil {
@@ -553,10 +559,11 @@ func (p *DurableProvider) openOrCreate(volumeID string) (*volHandle, error) {
 	}
 
 	if exists {
-		if err := p.verifyImplOnDisk(path); err != nil {
+		impl, err := p.verifyImplOnDisk(path)
+		if err != nil {
 			return nil, err
 		}
-		h, err := p.openExisting(volumeID, path)
+		h, err := p.openExisting(volumeID, path, impl)
 		if err != nil || p.cfg.Impl != ImplWALStoreChunk {
 			return h, err
 		}
@@ -573,26 +580,31 @@ func (p *DurableProvider) openOrCreate(volumeID string) (*volHandle, error) {
 			return nil, err
 		}
 	}
-	h, err := p.createFresh(volumeID, path)
+	impl := p.cfg.Impl
+	if impl == ImplAuto {
+		impl = ImplWALStore
+	}
+	h, err := p.createFresh(volumeID, path, impl)
 	if err == nil && p.cfg.Impl == ImplWALStoreChunk {
 		h.fresh = true
 	}
 	return h, err
 }
 
-// verifyImplOnDisk peeks the 4-byte magic at offset 0 and returns
-// ErrImplKindMismatch if it doesn't match the configured selector.
-// Runs BEFORE the storage-level Open so the error message is
-// selector-aware instead of cryptic magic-mismatch.
-func (p *DurableProvider) verifyImplOnDisk(path string) error {
+// verifyImplOnDisk peeks the 4-byte magic at offset 0 and returns the
+// implementation to open the volume with: the on-disk one under
+// ImplAuto, else the configured selector, with ErrImplKindMismatch if
+// the two differ. Runs BEFORE the storage-level Open so the error
+// message is selector-aware instead of cryptic magic-mismatch.
+func (p *DurableProvider) verifyImplOnDisk(path string) (ImplName, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return fmt.Errorf("durable: open for magic peek: %w", err)
+		return "", fmt.Errorf("durable: open for magic peek: %w", err)
 	}
 	defer f.Close()
 	magic := make([]byte, 4)
 	if _, err := io.ReadFull(f, magic); err != nil {
-		return fmt.Errorf("durable: read magic: %w", err)
+		return "", fmt.Errorf("durable: read magic: %w", err)
 	}
 	diskImpl, ok := magicToImpl(string(magic))
 	if !ok {
@@ -604,17 +616,20 @@ func (p *DurableProvider) verifyImplOnDisk(path string) error {
 		}
 	}
 	if !ok {
-		return fmt.Errorf("%w: unrecognized magic %q at %s",
+		return "", fmt.Errorf("%w: unrecognized magic %q at %s",
 			ErrImplKindMismatch, string(magic), path)
 	}
+	if p.cfg.Impl == ImplAuto {
+		return diskImpl, nil
+	}
 	if diskImpl == ImplWALStore && p.cfg.Impl == ImplWALStoreChunk {
-		return nil // a chunk volume is a walstore file
+		return ImplWALStoreChunk, nil // a chunk volume is a walstore file
 	}
 	if diskImpl != p.cfg.Impl {
-		return fmt.Errorf("%w: selector=%s on-disk=%s at %s",
+		return "", fmt.Errorf("%w: selector=%s on-disk=%s at %s",
 			ErrImplKindMismatch, p.cfg.Impl, diskImpl, path)
 	}
-	return nil
+	return diskImpl, nil
 }
 
 // magicToImpl maps a 4-byte magic to ImplName. Hardcoded per
@@ -633,10 +648,11 @@ func magicToImpl(magic string) (ImplName, bool) {
 	}
 }
 
-// openExisting dispatches to the selector-matching Open function.
-func (p *DurableProvider) openExisting(volumeID, path string) (*volHandle, error) {
+// openExisting dispatches to the Open function of impl, the volume's
+// resolved implementation.
+func (p *DurableProvider) openExisting(volumeID, path string, impl ImplName) (*volHandle, error) {
 	var s storage.LogicalStorage
-	switch p.cfg.Impl {
+	switch impl {
 	case ImplWALStore, ImplWALStoreChunk:
 		ws, err := storage.OpenWALStore(path)
 		if err != nil {
@@ -668,21 +684,21 @@ func (p *DurableProvider) openExisting(volumeID, path string) (*volHandle, error
 		}
 		s = pw
 	default:
-		return nil, fmt.Errorf("durable: unknown impl %q", p.cfg.Impl)
+		return nil, fmt.Errorf("durable: unknown impl %q", impl)
 	}
-	return p.wrap(volumeID, path, s)
+	return p.wrap(volumeID, path, impl, s)
 }
 
-// createFresh dispatches to the selector-matching Create function.
-// Requires cfg.NumBlocks to be non-zero (can't create without
-// knowing geometry).
-func (p *DurableProvider) createFresh(volumeID, path string) (*volHandle, error) {
+// createFresh dispatches to the Create function of impl, the volume's
+// resolved implementation. Requires cfg.NumBlocks to be non-zero
+// (can't create without knowing geometry).
+func (p *DurableProvider) createFresh(volumeID, path string, impl ImplName) (*volHandle, error) {
 	if p.cfg.NumBlocks == 0 {
 		return nil, fmt.Errorf("durable: NumBlocks=0; cannot create storage for %s (use open-existing mode)",
 			volumeID)
 	}
 	var s storage.LogicalStorage
-	switch p.cfg.Impl {
+	switch impl {
 	case ImplWALStore, ImplWALStoreChunk:
 		ws, err := storage.CreateWALStore(path, p.cfg.NumBlocks, p.cfg.BlockSize)
 		if err != nil {
@@ -712,15 +728,15 @@ func (p *DurableProvider) createFresh(volumeID, path string) (*volHandle, error)
 		}
 		s = pw
 	default:
-		return nil, fmt.Errorf("durable: unknown impl %q", p.cfg.Impl)
+		return nil, fmt.Errorf("durable: unknown impl %q", impl)
 	}
-	return p.wrap(volumeID, path, s)
+	return p.wrap(volumeID, path, impl, s)
 }
 
 // wrap builds a StorageBackend around an opened LogicalStorage
 // using the current projection's Identity. Backend starts
 // operational=false; the caller flips via RecoverVolume.
-func (p *DurableProvider) wrap(volumeID, path string, s storage.LogicalStorage) (*volHandle, error) {
+func (p *DurableProvider) wrap(volumeID, path string, impl ImplName, s storage.LogicalStorage) (*volHandle, error) {
 	proj := p.view.Projection()
 	id := frontend.Identity{
 		VolumeID:        proj.VolumeID,
@@ -729,7 +745,7 @@ func (p *DurableProvider) wrap(volumeID, path string, s storage.LogicalStorage) 
 		EndpointVersion: proj.EndpointVersion,
 	}
 	b := NewStorageBackend(s, p.view, id)
-	return &volHandle{storage: s, backend: b, path: path}, nil
+	return &volHandle{storage: s, backend: b, path: path, impl: impl}, nil
 }
 
 // RecoverVolume runs LogicalStorage.Recover for an open volume
