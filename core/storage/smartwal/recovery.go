@@ -37,13 +37,21 @@ import (
 //   - per-block CRC stored alongside extent (extent stays raw blocks)
 //   - cross-checking against any external snapshot
 func runRecovery(r *ring, fd *os.File, extentBase int64, blockSize int) (uint64, error) {
-	records, err := r.scanValid()
+	frontier, _, err := runRecoveryCounting(r, fd, extentBase, blockSize)
+	return frontier, err
+}
+
+// runRecoveryCounting is runRecovery that also reports how many populated
+// slots fail their record CRC (issue #51, detection only: they are
+// skipped exactly as before; see Store.Recover's warning).
+func runRecoveryCounting(r *ring, fd *os.File, extentBase int64, blockSize int) (uint64, int, error) {
+	records, bad, err := r.scanSlots()
 	if err != nil {
-		return 0, fmt.Errorf("smartwal: recovery scan: %w", err)
+		return 0, 0, fmt.Errorf("smartwal: recovery scan: %w", err)
 	}
 	if len(records) == 0 {
 		log.Printf("smartwal: recovery: ring empty; nothing to verify")
-		return 0, nil
+		return 0, len(bad), nil
 	}
 
 	// Last-writer-wins map. Records arrive sorted by LSN ascending,
@@ -65,12 +73,12 @@ func runRecovery(r *ring, fd *os.File, extentBase int64, blockSize int) (uint64,
 			data := make([]byte, blockSize)
 			off := extentBase + int64(rec.LBA)*int64(blockSize)
 			if _, err := fd.ReadAt(data, off); err != nil {
-				return 0, fmt.Errorf("smartwal: recovery read trim LBA %d: %w", rec.LBA, err)
+				return 0, 0, fmt.Errorf("smartwal: recovery read trim LBA %d: %w", rec.LBA, err)
 			}
 			if crc32.ChecksumIEEE(data) != rec.DataCRC32 {
 				detail := fmt.Sprintf("trim CRC mismatch LSN=%d LBA=%d", rec.LSN, rec.LBA)
 				log.Printf("smartwal: recovery %s — failing closed", detail)
-				return 0, storage.NewWALIntegrityFailure(nil, detail)
+				return 0, 0, storage.NewWALIntegrityFailure(nil, detail)
 			}
 			recovered++
 			if rec.LSN > highestVerifiedLSN {
@@ -82,14 +90,14 @@ func runRecovery(r *ring, fd *os.File, extentBase int64, blockSize int) (uint64,
 		data := make([]byte, blockSize)
 		off := extentBase + int64(rec.LBA)*int64(blockSize)
 		if _, err := fd.ReadAt(data, off); err != nil {
-			return 0, fmt.Errorf("smartwal: recovery read LBA %d: %w", rec.LBA, err)
+			return 0, 0, fmt.Errorf("smartwal: recovery read LBA %d: %w", rec.LBA, err)
 		}
 		actual := crc32.ChecksumIEEE(data)
 		if actual != rec.DataCRC32 {
 			detail := fmt.Sprintf("CRC mismatch LSN=%d LBA=%d expected=%08x actual=%08x",
 				rec.LSN, rec.LBA, rec.DataCRC32, actual)
 			log.Printf("smartwal: recovery %s — failing closed", detail)
-			return 0, storage.NewWALIntegrityFailure(nil, detail)
+			return 0, 0, storage.NewWALIntegrityFailure(nil, detail)
 		}
 		recovered++
 		if rec.LSN > highestVerifiedLSN {
@@ -99,5 +107,5 @@ func runRecovery(r *ring, fd *os.File, extentBase int64, blockSize int) (uint64,
 
 	log.Printf("smartwal: recovery: %d LBAs verified, frontier=%d",
 		recovered, highestVerifiedLSN)
-	return highestVerifiedLSN, nil
+	return highestVerifiedLSN, len(bad), nil
 }

@@ -16,6 +16,11 @@ type recoveryResult struct {
 	WALTail         uint64 // reconstructed logical byte tail of retained WAL
 	TornEntries     int    // entries discarded due to CRC failure or truncation
 	DefensiveScan   bool   // true when the superblock was empty and we scanned the whole region
+	// HoleSuspected: a bad entry was followed by a valid later entry
+	// (issue #51). Detection only: it changes nothing about what is
+	// replayed. HoleDetail says where.
+	HoleSuspected bool
+	HoleDetail    string
 }
 
 // recoverWAL scans the WAL region and replays any entries that have
@@ -50,10 +55,10 @@ func recoverWAL(fd *os.File, sb *superblock, dm *dirtyMap) (recoveryResult, erro
 	walSize := sb.WALSize
 	checkpointLSN := sb.WALCheckpointLSN
 
-	type scanRange struct {
-		start, end uint64 // physical positions within WAL
-	}
+	type scanRange = recoveryScanRange
 	var ranges []scanRange
+	// lastLSN is the highest LSN decoded so far (detection only).
+	var lastLSN uint64
 
 	if logicalHead == logicalTail {
 		// A pre-boundary-persistence crash can leave a wrapped retained
@@ -93,7 +98,7 @@ func recoverWAL(fd *os.File, sb *superblock, dm *dirtyMap) (recoveryResult, erro
 		}
 	}
 
-	for _, r := range ranges {
+	for ri, r := range ranges {
 		pos := r.start
 		for pos < r.end {
 			remaining := r.end - pos
@@ -119,6 +124,9 @@ func recoverWAL(fd *os.File, sb *superblock, dm *dirtyMap) (recoveryResult, erro
 			entrySize := uint64(walEntryHeaderSize) + payloadLen
 			if entrySize > remaining {
 				result.TornEntries++
+				if err := detectHole(&result, fd, walOffset, ranges, ri, pos, headerBuf, max(lastLSN, checkpointLSN), sb.BlockSize, nil); err != nil {
+					return result, err
+				}
 				break
 			}
 			fullBuf := make([]byte, entrySize)
@@ -129,6 +137,9 @@ func recoverWAL(fd *os.File, sb *superblock, dm *dirtyMap) (recoveryResult, erro
 			if err != nil {
 				// Torn write or trailing zeros — stop scanning this range.
 				result.TornEntries++
+				if herr := detectHole(&result, fd, walOffset, ranges, ri, pos, headerBuf, max(lastLSN, checkpointLSN), sb.BlockSize, err); herr != nil {
+					return result, herr
+				}
 				break
 			}
 			highestEntryLSN := entry.LSN
@@ -147,6 +158,9 @@ func recoverWAL(fd *os.File, sb *superblock, dm *dirtyMap) (recoveryResult, erro
 					)
 				}
 				highestEntryLSN = entry.LSN + entry.Reserved - 1
+			}
+			if highestEntryLSN > lastLSN {
+				lastLSN = highestEntryLSN
 			}
 			if highestEntryLSN <= checkpointLSN {
 				pos += entrySize
@@ -322,4 +336,112 @@ func previousValidWALRecord(
 	default:
 		return 0, walEntry{}, false
 	}
+}
+
+// recoveryScanRange is a physical [start, end) span of the WAL region.
+type recoveryScanRange struct {
+	start, end uint64
+}
+
+func allZeroBytes(b []byte) bool {
+	for _, c := range b {
+		if c != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// laterValidEntry looks, from pos in ranges[ri] through the later ranges,
+// for an offset holding a valid WAL entry (it decodes, CRC included) whose
+// LSN is above minLSN. It runs only after a bad entry, so a linear resync
+// over the remaining WAL is acceptable; a cheap header prefilter keeps the
+// full decodes to plausible candidates.
+func laterValidEntry(fd *os.File, walOffset uint64, ranges []recoveryScanRange, ri int, pos, minLSN uint64, blockSize uint32) (bool, uint64, error) {
+	const window = 1 << 20
+	hdr := uint64(walEntryHeaderSize)
+	for i := ri; i < len(ranges); i++ {
+		start, end := ranges[i].start, ranges[i].end
+		if i == ri {
+			start = pos
+		}
+		for p := start; p+hdr <= end; p += window {
+			n := min(window+hdr, end-p)
+			buf := make([]byte, n)
+			if _, err := fd.ReadAt(buf, int64(walOffset+p)); err != nil {
+				return false, 0, fmt.Errorf("storage: recovery resync read at %d: %w", p, err)
+			}
+			for q := uint64(0); q+hdr <= n && q < window; q++ {
+				size, ok := plausibleEntryHeader(buf[q:q+hdr], minLSN, end-(p+q), blockSize)
+				if !ok {
+					continue
+				}
+				full := make([]byte, size)
+				if _, err := fd.ReadAt(full, int64(walOffset+p+q)); err != nil {
+					return false, 0, fmt.Errorf("storage: recovery resync read entry at %d: %w", p+q, err)
+				}
+				if _, err := decodeWALEntry(full); err == nil {
+					return true, p + q, nil
+				}
+			}
+		}
+	}
+	return false, 0, nil
+}
+
+// plausibleEntryHeader is the resync prefilter: a known record type, an
+// LSN above minLSN, and a length that fits in what remains.
+func plausibleEntryHeader(h []byte, minLSN, remaining uint64, blockSize uint32) (uint64, bool) {
+	lsn := binary.LittleEndian.Uint64(h[0:8])
+	if lsn <= minLSN {
+		return 0, false
+	}
+	length := uint64(parseLengthFromHeader(h))
+	size := uint64(walEntryHeaderSize)
+	switch h[16] {
+	case walEntryWrite, walEntryWriteBatch:
+		if length == 0 || blockSize == 0 || length%uint64(blockSize) != 0 {
+			return 0, false
+		}
+		size += length
+	case walEntryTrim, walEntryBarrier:
+	default:
+		return 0, false
+	}
+	if size > remaining {
+		return 0, false
+	}
+	return size, true
+}
+
+// detectHole notes a suspected WAL hole at a bad entry (issue #51;
+// claude05's ruling 2026-11-16 06:47Z: detection only). An all-zero
+// header is just the end of what was written. Otherwise, if a valid entry
+// with an LSN above minLSN (the highest decoded so far, or the checkpoint)
+// follows it, the hole is recorded as the typed warning
+// WarningWALHoleSuspected and logged. Nothing about the replay changes:
+// the caller stops this range exactly as before. A torn tail and a
+// corrupted record cannot be told apart without a synced watermark, hence
+// "suspected".
+func detectHole(result *recoveryResult, fd *os.File, walOffset uint64, ranges []recoveryScanRange, ri int, pos uint64, header []byte, minLSN uint64, blockSize uint32, cause error) error {
+	if allZeroBytes(header) || result.HoleSuspected {
+		return nil
+	}
+	found, at, err := laterValidEntry(fd, walOffset, ranges, ri, pos+1, minLSN, blockSize)
+	if err != nil {
+		// Detection never changes the outcome: a failed look-ahead read
+		// is logged, and recovery goes on exactly as before.
+		log.Printf("storage: recovery hole detection at offset=%d skipped: %v", pos, err)
+		return nil
+	}
+	if !found {
+		return nil
+	}
+	result.HoleSuspected = true
+	result.HoleDetail = fmt.Sprintf("WAL entry at offset=%d fails its check and a valid later entry (LSN > %d) follows at offset=%d", pos, minLSN, at)
+	if cause != nil {
+		result.HoleDetail += " (" + cause.Error() + ")"
+	}
+	log.Printf("storage: recovery %s: %s", WarningWALHoleSuspected, result.HoleDetail)
+	return nil
 }

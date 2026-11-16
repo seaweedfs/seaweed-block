@@ -60,23 +60,34 @@ func (r *ring) appendAt(lsn uint64, rec record) error {
 //
 // Used during recovery to rebuild the in-memory view.
 func (r *ring) scanValid() ([]record, error) {
+	records, _, err := r.scanSlots()
+	return records, err
+}
+
+// scanSlots is scanValid that also returns the indexes of populated slots
+// (magic present) whose record CRC fails: torn or corrupted.
+func (r *ring) scanSlots() ([]record, []uint64, error) {
 	totalSize := r.capacity * recordSize
 	buf := make([]byte, totalSize)
 	r.mu.Lock()
 	_, err := r.fd.ReadAt(buf, r.base)
 	r.mu.Unlock()
 	if err != nil {
-		return nil, fmt.Errorf("smartwal: ring scan read: %w", err)
+		return nil, nil, fmt.Errorf("smartwal: ring scan read: %w", err)
 	}
 	var out []record
+	var bad []uint64
 	for i := uint64(0); i < r.capacity; i++ {
 		off := i * recordSize
 		rec, ok := decode(buf[off : off+recordSize])
 		if !ok {
+			if buf[off] == recordMagic {
+				bad = append(bad, i)
+			}
 			continue
 		}
 		out = append(out, rec)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].LSN < out[j].LSN })
-	return out, nil
+	return out, bad, nil
 }

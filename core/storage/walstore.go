@@ -43,6 +43,11 @@ import (
 //   - Online resize
 //   - Compaction (the WAL is bounded but periodic checkpoints free space)
 type WALStore struct {
+	// recoveryWarnings and holesSuspected: the last Recover's typed
+	// warnings, and how many recoveries found a WAL hole (issue #51).
+	recoveryWarnings []string
+	holesSuspected   uint64
+
 	metadata BlockMetadata // immutable before publication
 
 	path                       string
@@ -456,6 +461,32 @@ func (s *WALStore) FlusherInstrumentation() FlusherInstrumentationStatus {
 	return s.flusher.instr.snapshot()
 }
 
+// WarningWALHoleSuspected is the typed recovery warning for a WAL hole
+// followed by valid records (issue #51): reported on /status, it does not
+// change readiness.
+const WarningWALHoleSuspected = "wal_hole_suspected"
+
+// RecoveryWarner is a store that reports warnings from its last Recover.
+type RecoveryWarner interface {
+	RecoveryWarnings() []string
+}
+
+// RecoveryWarnings returns the warnings of the last Recover (nil when it
+// found nothing to warn about).
+func (s *WALStore) RecoveryWarnings() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.recoveryWarnings...)
+}
+
+// HolesSuspected counts the recoveries of this store that found a WAL hole
+// followed by valid records.
+func (s *WALStore) HolesSuspected() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.holesSuspected
+}
+
 // Recover replays WAL entries past the last checkpoint into the dirty
 // map. After Recover, the in-memory state matches what an aborted
 // process would have left durably on disk.
@@ -497,6 +528,11 @@ func (s *WALStore) Recover() (uint64, error) {
 	}
 	s.sb.WALHead = res.WALHead
 	s.sb.WALTail = res.WALTail
+	s.recoveryWarnings = nil
+	if res.HoleSuspected {
+		s.holesSuspected++
+		s.recoveryWarnings = []string{WarningWALHoleSuspected + ": " + res.HoleDetail}
+	}
 	recoveredHead := s.checkpointLSN
 	if res.HighestLSN > recoveredHead {
 		recoveredHead = res.HighestLSN

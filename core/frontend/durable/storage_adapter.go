@@ -275,6 +275,14 @@ func (b *StorageBackend) durableStatus(volumeID, path, impl string) VolumeStatus
 	b.mu.Unlock()
 	durableLSN, retainedLSN, headLSN := b.storage.Boundaries()
 	evidence, _ := b.opEvidence.Load().(string)
+	var warnings []string
+	var holes uint64
+	if w, ok := b.storage.(storage.RecoveryWarner); ok {
+		warnings = w.RecoveryWarnings()
+	}
+	if c, ok := b.storage.(interface{ HolesSuspected() uint64 }); ok {
+		holes = c.HolesSuspected()
+	}
 	writeProfile := b.profile.snapshot()
 	if instrumented, ok := b.storage.(storage.WriteInstrumented); ok {
 		storageProfile := instrumented.WriteInstrumentation()
@@ -303,6 +311,8 @@ func (b *StorageBackend) durableStatus(volumeID, path, impl string) VolumeStatus
 		writeProfile.DirtyMapUpdateDurationNanos = storageProfile.DirtyMapUpdateDurationNanos
 	}
 	return VolumeStatus{
+		Warnings:        warnings,
+		HolesSuspected:  holes,
 		VolumeID:        volumeID,
 		Path:            path,
 		Impl:            impl,
