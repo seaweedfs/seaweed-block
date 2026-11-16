@@ -35,6 +35,8 @@ import (
 	"strings"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/filerpb"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
@@ -206,6 +208,9 @@ type snapDoc struct {
 	Parent      *Parent           `json:"parent"`
 	Labels      map[string]string `json:"labels"`
 	ExpiresAtNs int64             `json:"expires_at_ns"`
+	// Class is the retention class: "semantic", "pinned", or "" for a
+	// snapshot made before classes existed (see retention.go).
+	Class string `json:"class,omitempty"`
 }
 
 // SnapshotInfo describes one snapshot, with the field names of the HTTP API
@@ -226,6 +231,9 @@ type SnapshotInfo struct {
 	Parent        *Parent           `json:"parent"`
 	ExpiresAtNs   int64             `json:"expiresAtNs"`
 	Replayed      bool              `json:"replayed"`
+	Class         string            `json:"class"`
+
+	attempt string // the attempt the name resolved to, when read by name
 
 	head storage.ChunkHead
 	geo  Geometry
@@ -242,6 +250,9 @@ type SnapshotRequest struct {
 	Consistency string // "crash" (default) or "app"
 	ExpiresAtNs int64
 	CreatedBy   string
+	// Class is the retention class: "semantic" or "pinned" ("" leaves it
+	// unset, which retention treats as unpinned).
+	Class string
 	// SourceReadAt is when the caller obtained the HEAD it snapshots (the
 	// cut's return); OpDeadline counts from it. Zero means now.
 	SourceReadAt time.Time
@@ -286,6 +297,9 @@ type Catalog struct {
 	// OpDeadline bounds a snapshot or fork (DefaultOpDeadline when zero).
 	OpDeadline time.Duration
 	now        func() time.Time
+	// retainHook, when set, runs at the named stages of a Retain pass (a
+	// test seam for interleavings; see hookPlanned).
+	retainHook func(stage, name string)
 }
 
 // NewCatalog returns the catalog for the chunk base directory base (the
@@ -623,6 +637,7 @@ func (c *Catalog) resolveSnap(ctx context.Context, vol, name string) (snapRef, b
 	if err != nil {
 		return snapRef{}, false, err
 	}
+	info.attempt = rec.Attempt
 	ref.entry, ref.info = e, info
 	return ref, true, nil
 }
@@ -675,7 +690,7 @@ func decodeSnap(p string, e *filerpb.Entry) (SnapshotInfo, string, error) {
 		VolumeID: doc.VolumeID, Name: doc.Name, HeadGen: head.Gen, HeadEpoch: head.Epoch, CutLSN: head.RemoteLSN,
 		CreatedNs: doc.CreatedNs, State: state, ChunkCount: len(head.Chunks), ManifestBytes: len(e.GetContent()),
 		Consistency: doc.Consistency, Labels: doc.Labels, Parent: doc.Parent, ExpiresAtNs: doc.ExpiresAtNs,
-		head: head, geo: doc.Geometry, VolumeProtection: doc.VolumeProtection,
+		Class: doc.Class, head: head, geo: doc.Geometry, VolumeProtection: doc.VolumeProtection,
 	}, doc.RequestID, nil
 }
 
@@ -825,6 +840,9 @@ func (c *Catalog) CreateSnapshot(ctx context.Context, vol string, req SnapshotRe
 	if consistency == "" {
 		consistency = "crash"
 	}
+	if err := ValidateSnapshotClass(req.Class); err != nil {
+		return SnapshotInfo{}, err
+	}
 	if head.Gen == 0 {
 		return SnapshotInfo{}, catErr(CodeNotChunkVolume, false, nil, "volume %s has no published HEAD to snapshot", vol)
 	}
@@ -848,7 +866,7 @@ func (c *Catalog) CreateSnapshot(ctx context.Context, vol string, req SnapshotRe
 	}
 	doc := snapDoc{Format: snapFormat, VolumeID: vol, Name: req.Name, RequestID: req.RequestID, CreatedNs: c.now().UnixNano(),
 		CreatedBy: req.CreatedBy, Consistency: consistency, Head: headEnt.Content, Geometry: v.Geometry, Parent: v.Parent, VolumeProtection: v.VolumeProtection,
-		Labels: req.Labels, ExpiresAtNs: req.ExpiresAtNs}
+		Labels: req.Labels, ExpiresAtNs: req.ExpiresAtNs, Class: req.Class}
 	body, err := json.Marshal(doc)
 	if err != nil {
 		return SnapshotInfo{}, err
@@ -1059,18 +1077,17 @@ func (c *Catalog) DeleteSnapshot(ctx context.Context, vol, name string) (string,
 			}
 			continue // re-read: the path now holds a tombstone or the late snapshot
 		case ref.info.State == SnapActive:
-			e := ref.entry
-			e.Extended[extSnapState] = []byte(SnapDeleting)
-			e.Extended[extSnapDeletedNs] = []byte(strconv.FormatInt(c.now().UnixNano(), 10))
-			err := c.f.UpdateEntry(ctx, dir, e, map[string][]byte{
-				extSnapState: []byte(SnapActive),
-				extSnapGen:   []byte(strconv.FormatUint(ref.info.HeadGen, 10)),
-			})
-			if errors.Is(err, ErrPrecondition) || errors.Is(err, ErrNotFound) {
-				continue
-			}
+			// The one mark path shared with retention: a live fork claim
+			// refuses (claude05's ruling, 23:58Z).
+			m, live, _, err := c.markDeleting(ctx, vol, name, ref.rec.Attempt)
 			if err != nil {
-				return "", remoteErr(err, "mark snapshot %s/%s deleting", vol, name)
+				return "", err
+			}
+			switch m {
+			case markClaimed:
+				return "", claimedErr(vol, name, live)
+			case markGone:
+				continue
 			}
 		}
 		// The attempt is deleting or aborted: free the name.
@@ -1174,13 +1191,13 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 		}
 	}
 
+	// Claim the parent before using it (review of #142): one conditional
+	// write on the parent attempt's entry, which retention's delete mark
+	// is conditioned against (see retention.go).
 	readAt := c.now()
-	snap, err := c.readSnap(ctx, req.Source, req.Snapshot)
+	snap, err := c.claimForkParent(ctx, req)
 	if err != nil {
 		return ForkResult{}, err
-	}
-	if snap.State == SnapDeleting {
-		return ForkResult{}, catErr(CodeSnapshotDeleting, false, nil, "snapshot %s/%s is being deleted", req.Source, req.Snapshot)
 	}
 	if snap.geo == (Geometry{}) {
 		return ForkResult{}, fmt.Errorf("chunkstore: snapshot %s/%s has no geometry", req.Source, req.Snapshot)
@@ -1269,13 +1286,97 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 		return ForkResult{}, err
 	}
 	if h.State == storage.ChunkHeadAborted {
-		c.dropIntent(ctx, dstRoot, id) // the tombstone is permanent: this create never lands
+		c.dropIntent(ctx, dstRoot, id)          // the tombstone is permanent: this create never lands
+		c.dropForkClaim(ctx, req, snap.attempt) // and this fork never needs the parent again
 		return ForkResult{}, catErr(CodeTargetExists, false, nil, "fork %s lost to a sweep: its HEAD is an aborted tombstone; fork to a new volume id", req.Target)
 	}
 	if outcome != createUnsettled {
 		c.dropIntent(ctx, dstRoot, id) // confirmed, or refused for good
 	}
+	c.dropForkClaim(ctx, req, snap.attempt) // the fork has its HEAD: the parent is no longer needed for it
 	return forkResult(existing, outcome != createdNow), nil
+}
+
+// claimForkParent adds fork req's claim to the parent attempt its
+// snapshot name resolves to, conditioned on the entry being active with
+// the claims read, and returns that snapshot. A parent deleting is
+// refused (snapshot_deleting); a claim already there is reused.
+func (c *Catalog) claimForkParent(ctx context.Context, req ForkRequest) (SnapshotInfo, error) {
+	root, err := c.volRoot(req.Source)
+	if err != nil {
+		return SnapshotInfo{}, err
+	}
+	token := forkClaim(req.Target, req.RequestID)
+	dir := path.Join(root, snapsDir, req.Snapshot)
+	for try := 0; try < 5; try++ {
+		ref, ok, err := c.resolveSnap(ctx, req.Source, req.Snapshot)
+		if err != nil {
+			return SnapshotInfo{}, err
+		}
+		if !ok || ref.entry == nil || ref.info.State == SnapAborted {
+			return SnapshotInfo{}, catErr(CodeSnapshotNotFound, false, nil, "snapshot %s/%s", req.Source, req.Snapshot)
+		}
+		if ref.info.State == SnapDeleting {
+			return SnapshotInfo{}, catErr(CodeSnapshotDeleting, false, nil, "snapshot %s/%s is being deleted", req.Source, req.Snapshot)
+		}
+		claims := decodeClaims(ref.entry)
+		for _, cl := range claims {
+			if cl == token {
+				return ref.info, nil
+			}
+		}
+		raw := ref.entry.Extended[extSnapClaims]
+		next := proto.Clone(ref.entry).(*filerpb.Entry)
+		setClaims(next, append(claims, token))
+		err = c.f.UpdateEntry(ctx, dir, next, map[string][]byte{extSnapState: []byte(SnapActive), extSnapClaims: raw})
+		if errors.Is(err, ErrPrecondition) || errors.Is(err, ErrNotFound) {
+			continue // a mark, another claim or a delete landed: read again
+		}
+		if err != nil {
+			// The claim may have landed; a retry finds and reuses it.
+			return SnapshotInfo{}, catErr(CodeOutcomeUnknown, true, err, "fork %s: claim on %s/%s outcome unknown; retry with the same request id", req.Target, req.Source, req.Snapshot)
+		}
+		return ref.info, nil
+	}
+	return SnapshotInfo{}, catErr(CodeOutcomeUnknown, true, nil, "fork %s: snapshot %s/%s kept changing; retry", req.Target, req.Source, req.Snapshot)
+}
+
+// dropForkClaim removes fork req's claim from its parent attempt once the
+// fork no longer needs it (best effort: retention treats a claim whose
+// target has a HEAD as dead anyway).
+func (c *Catalog) dropForkClaim(ctx context.Context, req ForkRequest, attempt string) {
+	root, err := c.volRoot(req.Source)
+	if err != nil || attempt == "" {
+		return
+	}
+	token := forkClaim(req.Target, req.RequestID)
+	dir := path.Join(root, snapsDir, req.Snapshot)
+	for try := 0; try < 3; try++ {
+		e, err := c.f.LookupEntry(ctx, dir, attempt)
+		if err != nil {
+			return
+		}
+		claims := decodeClaims(e)
+		kept := claims[:0:0]
+		for _, cl := range claims {
+			if cl != token {
+				kept = append(kept, cl)
+			}
+		}
+		if len(kept) == len(claims) {
+			return
+		}
+		c.hook(hookClaimDrop, req.Snapshot)
+		// Conditioned on the state read too (review of f42e723): a
+		// delete that marked the entry meanwhile must never be undone by
+		// this stale copy. A lost condition re-reads a fresh copy.
+		raw := e.Extended[extSnapClaims]
+		next := proto.Clone(e).(*filerpb.Entry)
+		setClaims(next, kept)
+		if err := c.f.UpdateEntry(ctx, dir, next, map[string][]byte{extSnapState: e.Extended[extSnapState], extSnapClaims: raw}); !errors.Is(err, ErrPrecondition) {
+			return
+		}
+	}
 }
 
 // AbortFork settles a dead fork for a GC sweep (W5 ruling, 2026-11-15

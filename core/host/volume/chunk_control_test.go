@@ -27,6 +27,7 @@ type fakeChunkControl struct {
 	next     string
 	state    string
 	detach   ChunkDetachResponse
+	usage    chunkstore.VolumeUsage
 	lastOpts chunkstore.ListOptions
 	lastSnap ChunkSnapshotRequest
 	lastMin  uint64
@@ -61,6 +62,12 @@ func (f *fakeChunkControl) DeleteSnapshot(ctx context.Context, vol, name string)
 	f.calls++
 	return f.state, f.err
 }
+func (f *fakeChunkControl) Usage(ctx context.Context, vol string) (chunkstore.VolumeUsage, error) {
+	f.calls++
+	f.remember(ctx)
+	return f.usage, f.err
+}
+
 func (f *fakeChunkControl) Detach(ctx context.Context, vol string) (ChunkDetachResponse, error) {
 	f.calls++
 	f.remember(ctx)
