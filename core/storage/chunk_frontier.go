@@ -29,6 +29,11 @@ func (s *WALStore) SeedChunkFrontier(lsn uint64) error {
 	if err := s.syncCache(); err != nil {
 		return fmt.Errorf("storage: seed data sync: %w", err)
 	}
+	if s.metadata != nil {
+		if err := s.metadata.BeforeCheckpointAdvance(lsn); err != nil {
+			return fmt.Errorf("storage: block metadata before seed frontier %d: %w", lsn, err)
+		}
+	}
 	next := *s.sb
 	next.WALCheckpointLSN = lsn
 	next.WALHead = s.wal.logicalHeadValue()
