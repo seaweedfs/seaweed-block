@@ -330,7 +330,7 @@ func importLifecyclePlacementIntents(h *master.Host, intents []lifecycle.Placeme
 		return fmt.Errorf("lifecycle placement import requires --lifecycle-store")
 	}
 	for _, intent := range intents {
-		if stores.Deletions.Reserved(intent.VolumeID) && false { // RED
+		if stores.Deletions.Reserved(intent.VolumeID) {
 			continue // never placed again (see importLifecycleVolumes)
 		}
 		plan := lifecycle.PlacementPlan{

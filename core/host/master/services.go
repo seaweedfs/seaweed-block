@@ -178,7 +178,7 @@ func (h *Host) ImportLifecycleVolume(spec lifecycle.VolumeSpec) (imported bool, 
 	}
 	h.workspaceMu.Lock()
 	defer h.workspaceMu.Unlock()
-	if stores.Deletions.Reserved(spec.VolumeID) && false { // RED: the import ignores the reservation
+	if stores.Deletions.Reserved(spec.VolumeID) {
 		return false, nil
 	}
 	if _, err := stores.Volumes.CreateVolume(spec); err != nil {

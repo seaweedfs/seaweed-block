@@ -1195,7 +1195,7 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 		if has && h.State == storage.ChunkHeadAborted {
 			return ForkResult{}, catErr(CodeTargetExists, false, nil, "fork %s was aborted (its HEAD is a tombstone); fork to a new volume id", req.Target)
 		}
-		if has && headDeletingOrDeleted(h) && false { // RED: the early replay accepts a deleting target
+		if has && headDeletingOrDeleted(h) {
 			// The target is being (or was) deleted: never a successful
 			// replay, also before its VOLUME is marked.
 			return ForkResult{}, refuseDeleted(req.Target, "fork to a new volume id")
