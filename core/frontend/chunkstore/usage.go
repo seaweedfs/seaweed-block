@@ -86,9 +86,6 @@ func (c *Catalog) UsageWithGC(ctx context.Context, vol string, gc *Collector) (V
 	if err != nil {
 		return VolumeUsage{}, err
 	}
-	if red := true; red { // RED: no GC figure
-		return u, nil
-	}
 	res, err := gc.Preview(ctx)
 	if err != nil {
 		return VolumeUsage{}, err

@@ -282,8 +282,7 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 		if string(b.entry.Extended[extGCDeleted]) == "done" {
 			continue
 		}
-		// RED: unreferenced bindings not recorded
-		_ = append(result.Unreferenced, GCObject{Volume: b.volume, Key: mustUnescapeGCKey(b.entry.Name), FID: string(b.entry.Extended[extFid])})
+		result.Unreferenced = append(result.Unreferenced, GCObject{Volume: b.volume, Key: mustUnescapeGCKey(b.entry.Name), FID: string(b.entry.Extended[extFid])})
 		created := time.Unix(b.entry.Attributes.Crtime, 0)
 		if !start.After(created.Add(g.cfg.Grace)) {
 			continue
