@@ -196,6 +196,10 @@ type StatusProjection struct {
 	// CatchUp shows a supporting replica's catch-up progress while it is
 	// not yet replica_ready; it is visible without being an alert.
 	CatchUp *CatchUpStatus `json:",omitempty"`
+	// Warnings are the durable store's typed recovery warnings (e.g.
+	// wal_hole_suspected, issue #51). Visible, not an alert: they do not
+	// change Healthy or the frontend's readiness.
+	Warnings []string `json:",omitempty"`
 }
 
 // CatchUpStatus is a supporting replica's catch-up state.
@@ -477,7 +481,15 @@ func (s *StatusServer) statusProjection() StatusProjection {
 	s.mu.Lock()
 	p.Healthy = p.Healthy && !s.nvmePending
 	p.FrontendPrimaryReady = p.FrontendPrimaryReady && !s.nvmePending
+	src := s.durableSource
 	s.mu.Unlock()
+	if src != nil { // outside s.mu: the provider takes its own lock
+		for _, st := range src.DurableStatuses() {
+			if st.VolumeID == p.VolumeID {
+				p.Warnings = append(p.Warnings, st.Warnings...)
+			}
+		}
+	}
 	return p
 }
 

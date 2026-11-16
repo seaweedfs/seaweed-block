@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -52,6 +53,11 @@ const defaultWALSlots = 65536
 // the same LBA from different goroutines are NOT serialized at this
 // layer — callers must order their own per-LBA writes.
 type Store struct {
+	// recoveryWarnings and holesSuspected: the last Recover's typed
+	// warnings, and how many recoveries saw bad slots (issue #51).
+	recoveryWarnings []string
+	holesSuspected   uint64
+
 	path      string
 	fd        *os.File
 	hdr       *header
@@ -176,15 +182,40 @@ func openInitialized(path string, f *os.File, hdr *header) (*Store, error) {
 // Recover rebuilds the in-memory LSN counter from the ring buffer.
 // Idempotent: calling twice on the same on-disk state yields the
 // same result.
+// RecoveryWarnings returns the last Recover's typed warnings.
+func (s *Store) RecoveryWarnings() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]string(nil), s.recoveryWarnings...)
+}
+
+// HolesSuspected counts the recoveries that saw populated slots failing
+// their record CRC.
+func (s *Store) HolesSuspected() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.holesSuspected
+}
+
 func (s *Store) Recover() (uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return 0, errors.New("smartwal: Recover after Close")
 	}
-	frontier, err := runRecovery(s.ring, s.fd, s.extentBase, int(s.hdr.BlockSize))
+	frontier, bad, err := runRecoveryCounting(s.ring, s.fd, s.extentBase, int(s.hdr.BlockSize))
 	if err != nil {
 		return 0, err
+	}
+	// Detection only (issue #51): populated slots whose record CRC fails
+	// were skipped as before. Without a synced watermark a torn tail and
+	// a corrupted committed record cannot be told apart, so this is a
+	// "suspected" warning that changes nothing else.
+	s.recoveryWarnings = nil
+	if bad > 0 {
+		s.holesSuspected++
+		s.recoveryWarnings = []string{fmt.Sprintf("%s: %d populated WAL slot(s) fail their record CRC (a torn tail or a corrupted record; not distinguishable without a synced watermark)", storage.WarningWALHoleSuspected, bad)}
+		log.Printf("smartwal: recovery %s", s.recoveryWarnings[0])
 	}
 	if frontier >= s.nextLSN {
 		s.nextLSN = frontier + 1

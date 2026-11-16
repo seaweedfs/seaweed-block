@@ -43,8 +43,14 @@ func workspaceError(err error) error {
 
 func leaseFact(volume string, l authority.WorkspaceLease) *control.WorkspaceLeaseFact {
 	// Client anchors this duration to its request START, not response arrival.
+	// The host fences half a skew bound before the stored master expiry.
 	// Never grant more than the server's configured 30s TTL after a restart.
-	remaining := time.Until(time.Unix(0, l.ExpiresAtNS))
+	skew := time.Duration(l.MaxClockSkewNS)
+	// Older persisted leases predate the bound; use the production default.
+	if skew <= 0 {
+		skew = 20 * time.Second
+	}
+	remaining := time.Until(time.Unix(0, l.ExpiresAtNS).Add(-skew / 2))
 	if remaining > 30*time.Second {
 		remaining = 30 * time.Second
 	}

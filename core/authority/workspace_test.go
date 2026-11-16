@@ -70,6 +70,10 @@ func TestWorkspaceCrashAfterJournalBeforeEpochResumesSameGrant(t *testing.T) {
 	if len(state.Moves) != 1 || state.Moves[0].Issued || state.Moves[0].NewEpoch != 2 {
 		t.Fatalf("grant not durable before epoch: %+v", state)
 	}
+	if _, err := loaded.MoveWorkspace(context.Background(), req, head); err == nil {
+		t.Fatal("restart resumed forced reservation before conservative skew barrier")
+	}
+	now = now.Add(2 * time.Second)
 	r, err := loaded.MoveWorkspace(context.Background(), req, head)
 	if err != nil {
 		t.Fatal(err)

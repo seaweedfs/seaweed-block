@@ -51,6 +51,11 @@ type flusher struct {
 	flushes  atomic.Uint64 // diagnostic
 	bytesOut atomic.Uint64 // diagnostic
 	instr    flusherInstrumentation
+
+	// afterSnapshotForTest, when set, runs after the dirty-map snapshot is
+	// taken and the publication lock released: the window in which a
+	// concurrent append is not in this cycle's checkpoint. Tests only.
+	afterSnapshotForTest func()
 }
 
 type flusherConfig struct {
@@ -164,6 +169,9 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 	if len(entries) == 0 {
 		return nil
 	}
+	if f.afterSnapshotForTest != nil {
+		f.afterSnapshotForTest()
+	}
 	finishCycle := f.instr.recordCycle(
 		cycleStart, time.Since(snapshotStart), entries, store.sb.BlockSize,
 	)
@@ -220,11 +228,12 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 	// with LSN <= maxLSN is in extent or superseded by a retained newer
 	// WAL record. Concurrent writes remain dirty for the next cycle.
 	if maxLSN > 0 {
-		if err := store.persistCheckpoint(maxLSN); err != nil {
+		// The released tail is persisted with the checkpoint, before the
+		// writer may reuse those bytes.
+		if err := store.persistCheckpointAndRelease(maxLSN, maxLSNPhys, maxLSNEntrySize); err != nil {
 			return fmt.Errorf("flusher: persist checkpoint %d: %w", maxLSN, err)
 		}
 		if store.CheckpointLSN() >= maxLSN {
-			store.wal.advanceTailPastEntry(maxLSNPhys, maxLSNEntrySize)
 			store.mu.Lock()
 			if maxLSN+1 > store.walTail {
 				store.walTail = maxLSN + 1

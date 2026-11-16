@@ -161,6 +161,7 @@ type Publisher struct {
 	workspaceUncertain     map[string]bool
 	workspaceNow           func() time.Time
 	workspaceTTL           time.Duration
+	workspaceMaxClockSkew  time.Duration
 	workspaceLeaseDeadline map[string]time.Time
 }
 

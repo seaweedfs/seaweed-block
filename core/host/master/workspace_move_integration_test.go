@@ -57,7 +57,7 @@ func TestIntegrationWorkspaceProductionDetachAndForcedMove(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			h, err := New(Config{AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), Listen: "127.0.0.1:0", WorkspaceRPC: true, WorkspaceHeadReader: reader})
+			h, err := New(Config{WorkspaceMaxClockSkew: 100 * time.Millisecond, AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), Listen: "127.0.0.1:0", WorkspaceRPC: true, WorkspaceHeadReader: reader})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -169,7 +169,7 @@ func TestIntegrationWorkspaceProductionDetachAndForcedMove(t *testing.T) {
 				}
 			} else {
 				// Actual master lease expiry, no test clock and no revocation ACK.
-				timer := time.NewTimer(time.Until(time.Unix(0, lease.ExpiresAtNs)) + 20*time.Millisecond)
+				timer := time.NewTimer(time.Until(time.Unix(0, lease.ExpiresAtNs)) + 100*time.Millisecond + 20*time.Millisecond)
 				defer timer.Stop()
 				select {
 				case <-timer.C:

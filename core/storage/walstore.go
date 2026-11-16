@@ -45,6 +45,11 @@ import (
 //   - Online resize
 //   - Compaction (the WAL is bounded but periodic checkpoints free space)
 type WALStore struct {
+	// recoveryWarnings and holesSuspected: the last Recover's typed
+	// warnings, and how many recoveries found a WAL hole (issue #51).
+	recoveryWarnings []string
+	holesSuspected   uint64
+
 	fileSyncLatency iolatency.Histogram
 	metadata        BlockMetadata // immutable before publication
 
@@ -371,8 +376,21 @@ func (s *WALStore) writeExtentUnlocked(lba uint32, data []byte) error {
 // the in-memory checkpoint advances, because the caller may recycle
 // the corresponding WAL bytes immediately after this method returns.
 func (s *WALStore) persistCheckpoint(highestLSN uint64) error {
+	return s.persistCheckpointReleasing(highestLSN, 0, 0, false)
+}
+
+// persistCheckpointAndRelease is persistCheckpoint that also releases the
+// WAL bytes through the entry at entryPhys (entryLen bytes long) when the
+// checkpoint reaches highestLSN. The released tail is persisted in the
+// same superblock before the writer may reuse those bytes.
+func (s *WALStore) persistCheckpointAndRelease(highestLSN, entryPhys, entryLen uint64) error {
+	return s.persistCheckpointReleasing(highestLSN, entryPhys, entryLen, true)
+}
+
+func (s *WALStore) persistCheckpointReleasing(highestLSN, entryPhys, entryLen uint64, release bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	requested := highestLSN
 	// Clamp the proposed checkpoint to the recycle floor reported
 	// by an external coordinator (e.g., the recovery package's
 	// PeerShipCoordinator). When a replica is in an active rebuild
@@ -386,26 +404,39 @@ func (s *WALStore) persistCheckpoint(highestLSN uint64) error {
 			}
 		}
 	}
-	if highestLSN <= s.checkpointLSN {
+	advance := highestLSN > s.checkpointLSN
+	checkpoint := s.checkpointLSN
+	if advance {
+		checkpoint = highestLSN
+	}
+	// One snapshot of head and tail; the tail this flush releases is
+	// persisted here, before the writer may reuse its bytes.
+	head, tail := s.wal.bounds()
+	if release && checkpoint >= requested {
+		tail = s.wal.tailPastEntry(entryPhys, entryLen)
+	}
+	if !advance && tail == s.sb.WALTail {
 		return nil
 	}
-	if s.metadata != nil {
-		if err := s.metadata.BeforeCheckpointAdvance(highestLSN); err != nil {
-			return fmt.Errorf("storage: block metadata before checkpoint %d: %w", highestLSN, err)
+	if advance {
+		if s.metadata != nil {
+			if err := s.metadata.BeforeCheckpointAdvance(highestLSN); err != nil {
+				return fmt.Errorf("storage: block metadata before checkpoint %d: %w", highestLSN, err)
+			}
 		}
-	}
-	// The chunk layer's dirty bitmap must be durable before the checkpoint
-	// (and so the WAL tail) can pass the entries it covers.
-	if h := s.chunk.Load(); h != nil {
-		if err := h.sink.BeforeCheckpointAdvance(highestLSN); err != nil {
-			return fmt.Errorf("storage: chunk bitmap before checkpoint %d: %w", highestLSN, err)
+		// The chunk layer's dirty bitmap must be durable before the checkpoint
+		// (and so the WAL tail) can pass the entries it covers.
+		if h := s.chunk.Load(); h != nil {
+			if err := h.sink.BeforeCheckpointAdvance(highestLSN); err != nil {
+				return fmt.Errorf("storage: chunk bitmap before checkpoint %d: %w", highestLSN, err)
+			}
 		}
 	}
 
 	sbCopy := *s.sb
-	sbCopy.WALCheckpointLSN = highestLSN
-	sbCopy.WALHead = s.wal.logicalHeadValue()
-	sbCopy.WALTail = s.wal.logicalTailValue()
+	sbCopy.WALCheckpointLSN = checkpoint
+	sbCopy.WALHead = head
+	sbCopy.WALTail = tail
 	buf := newSimpleByteBuf()
 	if _, err := sbCopy.writeTo(buf); err != nil {
 		return fmt.Errorf("storage: encode superblock: %w", err)
@@ -426,10 +457,11 @@ func (s *WALStore) persistCheckpoint(highestLSN uint64) error {
 	if err != nil {
 		return fmt.Errorf("storage: fsync checkpoint superblock: %w", err)
 	}
-	s.checkpointLSN = highestLSN
-	s.sb.WALCheckpointLSN = highestLSN
+	s.checkpointLSN = checkpoint
+	s.sb.WALCheckpointLSN = checkpoint
 	s.sb.WALHead = sbCopy.WALHead
 	s.sb.WALTail = sbCopy.WALTail
+	s.wal.tailPersisted(sbCopy.WALTail)
 	return nil
 }
 
@@ -457,6 +489,32 @@ func (s *WALStore) FlusherInstrumentation() FlusherInstrumentationStatus {
 		return FlusherInstrumentationStatus{}
 	}
 	return s.flusher.instr.snapshot()
+}
+
+// WarningWALHoleSuspected is the typed recovery warning for a WAL hole
+// followed by valid records (issue #51): reported on /status, it does not
+// change readiness.
+const WarningWALHoleSuspected = "wal_hole_suspected"
+
+// RecoveryWarner is a store that reports warnings from its last Recover.
+type RecoveryWarner interface {
+	RecoveryWarnings() []string
+}
+
+// RecoveryWarnings returns the warnings of the last Recover (nil when it
+// found nothing to warn about).
+func (s *WALStore) RecoveryWarnings() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.recoveryWarnings...)
+}
+
+// HolesSuspected counts the recoveries of this store that found a WAL hole
+// followed by valid records.
+func (s *WALStore) HolesSuspected() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.holesSuspected
 }
 
 // Recover replays WAL entries past the last checkpoint into the dirty
@@ -498,8 +556,33 @@ func (s *WALStore) Recover() (uint64, error) {
 		s.dm.clear()
 		return 0, NewWALIntegrityFailure(err, "restore walstore recovery bounds")
 	}
+	if res.WALHead != s.sb.WALHead || res.WALTail != s.sb.WALTail {
+		// Persist the rebuilt bounds before any append: the writer never
+		// reuses bytes the on-disk superblock still declares retained.
+		sbCopy := *s.sb
+		sbCopy.WALHead, sbCopy.WALTail = res.WALHead, res.WALTail
+		buf := newSimpleByteBuf()
+		if _, err := sbCopy.writeTo(buf); err != nil {
+			s.dm.clear()
+			return 0, fmt.Errorf("storage: encode recovered superblock: %w", err)
+		}
+		if err := s.writeSuperblockMetadata(buf.bytes()); err != nil {
+			s.dm.clear()
+			return 0, fmt.Errorf("storage: pwrite recovered superblock: %w", err)
+		}
+		if err := s.syncSuperblockMetadata(); err != nil {
+			s.dm.clear()
+			return 0, fmt.Errorf("storage: fsync recovered superblock: %w", err)
+		}
+	}
+	s.wal.tailPersisted(res.WALTail)
 	s.sb.WALHead = res.WALHead
 	s.sb.WALTail = res.WALTail
+	s.recoveryWarnings = nil
+	if res.HoleSuspected {
+		s.holesSuspected++
+		s.recoveryWarnings = []string{WarningWALHoleSuspected + ": " + res.HoleDetail}
+	}
 	recoveredHead := s.checkpointLSN
 	if res.HighestLSN > recoveredHead {
 		recoveredHead = res.HighestLSN
@@ -1254,8 +1337,7 @@ func (s *WALStore) Close() error {
 		// Persist current head/tail back into the superblock so a
 		// subsequent OpenWALStore can find the WAL bounds without
 		// relying solely on the defensive scan.
-		s.sb.WALHead = s.wal.logicalHeadValue()
-		s.sb.WALTail = s.wal.logicalTailValue()
+		s.sb.WALHead, s.sb.WALTail = s.wal.bounds()
 		buf := newSimpleByteBuf()
 		if _, err := s.sb.writeTo(buf); err != nil {
 			closeErrors = append(closeErrors, fmt.Errorf("storage: encode final superblock: %w", err))
