@@ -17,6 +17,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/engine"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
+	"github.com/seaweedfs/seaweed-block/core/frontend/ublk"
 	"github.com/seaweedfs/seaweed-block/core/replication"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 )
@@ -1132,4 +1133,47 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+type stubUblkStatusSource struct{ stats ublk.Stats }
+
+func (s stubUblkStatusSource) Stats() ublk.Stats { return s.stats }
+
+func TestStatusServer_UblkStatusEndpoint(t *testing.T) {
+	s := NewStatusServer(NewAdapterProjectionView(stubProjector{}, "v1", "r1", nil))
+	addr, err := s.Start("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = s.Close(context.Background()) }()
+	resp, err := http.Get("http://" + addr + "/status/ublk?volume=v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("without a ublk device: %d, want 404", resp.StatusCode)
+	}
+	s.SetUblkStatusSource(stubUblkStatusSource{stats: ublk.Stats{FlushRequests: 4002, FUAWrites: 3, WriteRequests: 9}})
+	for _, tc := range []struct {
+		vol  string
+		code int
+	}{{"v2", http.StatusNotFound}, {"v1", http.StatusOK}} {
+		resp, err := http.Get("http://" + addr + "/status/ublk?volume=" + tc.vol)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != tc.code {
+			resp.Body.Close()
+			t.Fatalf("volume %s: %d, want %d", tc.vol, resp.StatusCode, tc.code)
+		}
+		if tc.code == http.StatusOK {
+			var body UblkStatus
+			err := json.NewDecoder(resp.Body).Decode(&body)
+			if err != nil || body.VolumeID != "v1" || body.Stats.FlushRequests != 4002 || body.Stats.FUAWrites != 3 {
+				t.Fatalf("body %+v err %v", body, err)
+			}
+		}
+		resp.Body.Close()
+	}
 }
