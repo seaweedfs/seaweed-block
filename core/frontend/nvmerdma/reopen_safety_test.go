@@ -236,7 +236,13 @@ func TestProviderBackendQueuedOpenSharesDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	go func() { _, _, err := b.get(ctx); results <- err }()
-	<-entered
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatalf("initial Open did not enter before caller deadline: %v", ctx.Err())
+	case <-time.After(2 * time.Second):
+		t.Fatal("initial Open did not enter")
+	}
 	for i := 0; i < callers; i++ {
 		go func() { _, _, err := b.get(ctx); results <- err }()
 	}
