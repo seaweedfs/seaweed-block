@@ -24,6 +24,9 @@ func TestTargetDurabilityLatencyThroughProviderBackend(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer p.Close()
+	if _, err := p.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := p.RecoverVolume(context.Background(), "v1"); err != nil {
 		t.Fatal(err)
 	}
