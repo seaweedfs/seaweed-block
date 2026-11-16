@@ -66,6 +66,31 @@ func recvErr(t *testing.T, ch <-chan error, what string) error {
 	}
 }
 
+// startWorker runs fn on its own goroutine and returns its result channel.
+// Its cleanup, which runs before the store's Close (registered later than
+// heldStore's), opens the given gates and joins the worker within a bound,
+// so a failing test never closes the store under a live worker.
+func startWorker(t *testing.T, fn func() error, gates ...*gate) <-chan error {
+	t.Helper()
+	res := make(chan error, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		res <- fn()
+	}()
+	t.Cleanup(func() {
+		for _, g := range gates {
+			g.open()
+		}
+		select {
+		case <-done:
+		case <-time.After(holdBound):
+			t.Errorf("a held worker did not settle within %v; the store closes under it", holdBound)
+		}
+	})
+	return res
+}
+
 func heldStore(t *testing.T) (*WALStore, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "store.bin")
@@ -108,14 +133,18 @@ func TestWALStoreQueuedSyncAfterAFailedFsyncIsRefused(t *testing.T) {
 		return real() // a later fsync would "succeed"
 	}
 
-	errA := make(chan error, 1)
-	go func() { _, err := s.Sync(); errA <- err }()
+	errA := startWorker(t, func() error {
+		_, err := s.Sync()
+		return err
+	}, g)
 	g.waitEntered(t, "Sync A's fsync")
 	if _, err := s.Write(1, makeBlock(4096, 0x11)); err != nil {
 		t.Fatal(err)
 	}
-	errB := make(chan error, 1)
-	go func() { _, err := s.Sync(); errB <- err }()
+	errB := startWorker(t, func() error {
+		_, err := s.Sync()
+		return err
+	}, g)
 	waitQueuedSync(t, s, 1) // B passed the entry check and waits in the committer
 	g.open()
 
@@ -183,11 +212,10 @@ func TestWALStoreWritersQueuedBehindAFailedAppendAreRefused(t *testing.T) {
 			nextBefore := s.NextLSN()
 			headBefore := s.wal.logicalHeadValue()
 
-			errA := make(chan error, 1)
-			go func() {
+			errA := startWorker(t, func() error {
 				_, err := s.WriteBatch(10, [][]byte{makeBlock(4096, 0x5B), makeBlock(4096, 0x5A)})
-				errA <- err
-			}()
+				return err
+			}, appendGate)
 			appendGate.waitEntered(t, "the failing batch append")
 
 			// The queued writer acknowledges that it passed its entry check
@@ -195,8 +223,7 @@ func TestWALStoreWritersQueuedBehindAFailedAppendAreRefused(t *testing.T) {
 			admitted := make(chan struct{})
 			var admitOnce sync.Once
 			s.testAfterAdmit = func() { admitOnce.Do(func() { close(admitted) }) }
-			errB := make(chan error, 1)
-			go func() { errB <- p.run(s, nextBefore) }()
+			errB := startWorker(t, func() error { return p.run(s, nextBefore) }, appendGate)
 			select {
 			case <-admitted:
 			case <-time.After(holdBound):
@@ -257,14 +284,15 @@ func TestWALStoreExtentFsyncFaultDuringDirectFrontierPublication(t *testing.T) {
 	extentGate := newGate(t)
 	eio := errors.New("injected extent fsync failure")
 	s.syncExtentFile = func() error { extentGate.block(); return eio }
-	errFlush := make(chan error, 1)
-	go func() { errFlush <- s.flusher.flushOnce() }()
+	errFlush := startWorker(t, func() error { return s.flusher.flushOnce() }, extentGate, meta.g)
 	extentGate.waitEntered(t, "the flusher's extent fsync")
 
 	meta.armed.Store(true)
 	s.AdvanceFrontier(10)
-	errSync := make(chan error, 1)
-	go func() { _, err := s.Sync(); errSync <- err }()
+	errSync := startWorker(t, func() error {
+		_, err := s.Sync()
+		return err
+	}, extentGate, meta.g)
 	inBarrier := meta.g.enteredWithin(300 * time.Millisecond)
 	extentGate.open() // the extent fsync fails and latches the fault
 	if err := recvErr(t, errFlush, "the flush"); !errors.Is(err, eio) {
@@ -305,13 +333,14 @@ func TestWALStoreWALFsyncFaultDuringCheckpointPublication(t *testing.T) {
 	walGate := newGate(t)
 	fault := errors.New("injected WAL fsync failure")
 	s.syncWALFile = func() error { walGate.block(); return fault }
-	errSync := make(chan error, 1)
-	go func() { _, err := s.Sync(); errSync <- err }()
+	errSync := startWorker(t, func() error {
+		_, err := s.Sync()
+		return err
+	}, walGate, meta.g)
 	walGate.waitEntered(t, "the WAL fsync")
 
 	meta.armed.Store(true)
-	errFlush := make(chan error, 1)
-	go func() { errFlush <- s.flusher.flushOnce() }()
+	errFlush := startWorker(t, func() error { return s.flusher.flushOnce() }, walGate, meta.g)
 	inBarrier := meta.g.enteredWithin(300 * time.Millisecond)
 	walGate.open() // the WAL fsync fails and latches the fault
 	if err := recvErr(t, errSync, "the Sync"); !errors.Is(err, fault) {
@@ -370,14 +399,15 @@ func TestWALStoreExtentFsyncFaultAfterThePublicationCheck(t *testing.T) {
 	}
 	ckptBefore, diskBefore := s.CheckpointLSN(), diskCheckpoint(t, path)
 
-	errFlush := make(chan error, 1)
-	go func() { errFlush <- s.flusher.flushOnce() }()
+	errFlush := startWorker(t, func() error { return s.flusher.flushOnce() }, meta.extent, meta.barrier)
 	meta.extent.waitEntered(t, "the flusher's extent write") // before its extent fsync
 
 	meta.armed.Store(true)
 	s.AdvanceFrontier(10)
-	errSync := make(chan error, 1)
-	go func() { _, err := s.Sync(); errSync <- err }()
+	errSync := startWorker(t, func() error {
+		_, err := s.Sync()
+		return err
+	}, meta.extent, meta.barrier)
 	meta.barrier.waitEntered(t, "the Sync's metadata barrier") // past the store-lock check
 
 	eio := errors.New("injected extent fsync failure")
@@ -409,20 +439,29 @@ func TestWALStoreFsyncsOfTheFileAreSerialized(t *testing.T) {
 	walGate := newGate(t)
 	real := s.syncWALFile
 	s.syncWALFile = func() error { walGate.block(); return real() }
-	errSync := make(chan error, 1)
-	go func() { _, err := s.Sync(); errSync <- err }()
+	errSync := startWorker(t, func() error {
+		_, err := s.Sync()
+		return err
+	}, walGate)
 	walGate.waitEntered(t, "the WAL fsync")
 
 	extentEntered := make(chan struct{})
 	var once sync.Once
 	realExtent := s.syncExtentFile
 	s.syncExtentFile = func() error { once.Do(func() { close(extentEntered) }); return realExtent() }
-	errFlush := make(chan error, 1)
-	go func() { errFlush <- s.flusher.flushOnce() }()
-	select {
+	arrived := make(chan struct{})
+	var arriveOnce sync.Once
+	s.testBeforeFileSync = func() { arriveOnce.Do(func() { close(arrived) }) } // the next syncFile caller: the flusher
+	errFlush := startWorker(t, func() error { return s.flusher.flushOnce() }, walGate)
+	select { // the flusher reached the serialization boundary...
+	case <-arrived:
+	case <-time.After(holdBound):
+		t.Fatal("the flusher never reached the file sync boundary")
+	}
+	select { // ...and does not pass it while the WAL fsync is in flight
 	case <-extentEntered:
 		t.Fatal("the extent fsync ran while a WAL fsync of the same file was in flight")
-	case <-time.After(300 * time.Millisecond):
+	case <-time.After(100 * time.Millisecond):
 	}
 	walGate.open()
 	if err := recvErr(t, errSync, "the Sync"); err != nil {
@@ -435,5 +474,40 @@ func TestWALStoreFsyncsOfTheFileAreSerialized(t *testing.T) {
 	case <-extentEntered:
 	default:
 		t.Fatal("the extent fsync never ran")
+	}
+}
+
+// The failure path's cleanup settles: a test that stops (here SkipNow, which
+// ends the test the same way as Fatal) while a worker is held inside the
+// store still opens the gate, joins the worker and then closes the store.
+func TestWALStoreHeldWorkersSettleOnAFailurePath(t *testing.T) {
+	var s *WALStore
+	var res <-chan error
+	t.Run("stops-while-held", func(t *testing.T) {
+		s, _ = heldStore(t)
+		if _, err := s.Write(0, makeBlock(4096, 0x10)); err != nil {
+			t.Fatal(err)
+		}
+		g := newGate(t)
+		// After its gate opens the flush still takes a while, so only a
+		// cleanup that joins it (not one that just opens the gate) sees it end.
+		s.syncExtentFile = func() error { g.block(); time.Sleep(200 * time.Millisecond); return nil }
+		res = startWorker(t, func() error { return s.flusher.flushOnce() }, g)
+		g.waitEntered(t, "the held flush")
+		t.SkipNow() // leaves the flush held inside the store
+	})
+	select {
+	case err := <-res:
+		if err != nil {
+			t.Fatalf("held flush after cleanup: %v", err)
+		}
+	default:
+		t.Fatal("cleanup returned while the held flush was still running")
+	}
+	s.mu.RLock()
+	closed := s.closed
+	s.mu.RUnlock()
+	if !closed {
+		t.Fatal("cleanup did not close the store")
 	}
 }

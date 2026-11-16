@@ -153,6 +153,9 @@ type WALStore struct {
 	// testAfterAdmit, when set, runs in Write, WriteBatch and ApplyEntry
 	// after their entry checks and before the append lock. Tests only.
 	testAfterAdmit func()
+	// testBeforeFileSync, when set, runs in syncFile just before fileSyncMu
+	// is taken. Tests only.
+	testBeforeFileSync func()
 	// Generations cover completed append attempts and recovery publication.
 	walMutation     atomic.Uint64
 	durableMutation atomic.Uint64
@@ -1518,6 +1521,9 @@ func (s *WALStore) noteAppendFailure(err error) error {
 // completes after another path's fsync failed. A pwrite failure is returned
 // as is (it does not latch: nothing was fsynced).
 func (s *WALStore) syncFile(write, sync func() error) error {
+	if h := s.testBeforeFileSync; h != nil {
+		h()
+	}
 	s.fileSyncMu.Lock()
 	defer s.fileSyncMu.Unlock()
 	if err := s.stickyIOFault(); err != nil {
