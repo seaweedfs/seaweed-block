@@ -3,8 +3,10 @@ package ublk
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"syscall"
 	"testing"
 )
 
@@ -100,5 +102,49 @@ func TestTargetLatencyOpenFailureIsNotRetriedInsideRequest(t *testing.T) {
 	}
 	if p.calls != 2 {
 		t.Fatalf("next request did not retry exactly once: %d", p.calls)
+	}
+}
+
+func TestTargetInvalidWriteDoesNotOpenProvider(t *testing.T) {
+	for _, flags := range []uint32{0, ioFlagFUA} {
+		for _, tc := range []struct {
+			name    string
+			sector  uint64
+			sectors uint32
+			buffer  int
+		}{
+			{"start beyond device", 9, 1, 512},
+			{"range crosses end", 8, 1, 512},
+			{"short buffer", 0, 8, 1},
+			{"sector shift overflow", ^uint64(0), 1, 512},
+		} {
+			t.Run(fmt.Sprintf("%s/fua=%t", tc.name, flags != 0), func(t *testing.T) {
+				p := &retryLatencyProvider{inner: failingProvider{err: errors.New("must never open")}}
+				tg := NewTarget(TargetConfig{Provider: p, VolumeID: "v1", VolumeSize: 4096, BlockSize: 4096})
+				var h handler
+				var glue *providerBackend
+				counts := &counters{}
+				tg.startDevice = func(cfg Config) (targetDevice, error) {
+					glue = cfg.Backend.(*providerBackend)
+					h = handler{backend: cfg.Backend, size: cfg.Size, stats: counts}
+					return &latencyDevice{h: h}, nil
+				}
+				if _, err := tg.Start(); err != nil {
+					t.Fatal(err)
+				}
+				defer tg.Close()
+				got := h.handle(context.Background(), request{op: ioOpWrite, flags: flags, startSector: tc.sector, nrSectors: tc.sectors}, make([]byte, tc.buffer))
+				if got != -int32(syscall.EINVAL) {
+					t.Fatalf("result=%d want EINVAL", got)
+				}
+				if p.calls != 0 || glue.backend != nil {
+					t.Fatalf("invalid request touched fresh provider: opens=%d cached=%t", p.calls, glue.backend != nil)
+				}
+				stats := counts.snapshot()
+				if stats.WriteRequests != 1 || stats.Errors != 1 {
+					t.Fatalf("device refusal accounting %+v", stats)
+				}
+			})
+		}
 	}
 }
