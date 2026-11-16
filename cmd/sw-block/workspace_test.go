@@ -73,8 +73,8 @@ func TestOpsWorkspaceJSONRequestsReachRPCs(t *testing.T) {
 		want     proto.Message
 		reply    proto.Message
 	}{
-		{"bind", `{"volumeId":"v","serverId":"node-a","dataAddr":"127.0.0.1:9200","ctrlAddr":"127.0.0.1:9100"}`, nil, &control.WorkspaceBinding{VolumeId: "v", ServerId: "node-a", DataAddr: "127.0.0.1:9200", CtrlAddr: "127.0.0.1:9100"}, &control.WorkspaceBinding{}},
-		{"place", `{"volume_id":"v","server_id":"node-a","replica_id":"r1"}`, nil, &control.WorkspacePlacement{VolumeId: "v", ServerId: "node-a", ReplicaId: "r1"}, &control.WorkspaceEmpty{}},
+		{"bind", `{"requestId":"bind-1","volumeId":"v","serverId":"node-a","dataAddr":"127.0.0.1:9200","ctrlAddr":"127.0.0.1:9100"}`, nil, &control.WorkspaceBinding{RequestId: "bind-1", VolumeId: "v", ServerId: "node-a", DataAddr: "127.0.0.1:9200", CtrlAddr: "127.0.0.1:9100"}, &control.WorkspaceBinding{}},
+		{"place", `{"request_id":"place-1","volume_id":"v","server_id":"node-a","replica_id":"r1"}`, nil, &control.WorkspacePlacement{RequestId: "place-1", VolumeId: "v", ServerId: "node-a", ReplicaId: "r1"}, &control.WorkspaceEmpty{}},
 		{"move", `{"requestId":"clean-1","volumeId":"v","expectedReplicaId":"r1","expectedEpoch":"1","targetReplicaId":"r1","targetServerId":"node-b","targetDataAddr":"127.0.0.1:9201","targetCtrlAddr":"127.0.0.1:9101"}`, nil, &control.WorkspaceMove{RequestId: "clean-1", VolumeId: "v", ExpectedReplicaId: "r1", ExpectedEpoch: 1, TargetReplicaId: "r1", TargetServerId: "node-b", TargetDataAddr: "127.0.0.1:9201", TargetCtrlAddr: "127.0.0.1:9101", Kind: "clean"}, &control.WorkspaceGrant{}},
 		{"move", `{"requestId":"forced-1","volumeId":"v","expectedReplicaId":"r1","expectedEpoch":"1","targetReplicaId":"r1","targetServerId":"node-b","targetDataAddr":"127.0.0.1:9201","targetCtrlAddr":"127.0.0.1:9101"}`, []string{"--force"}, &control.WorkspaceMove{RequestId: "forced-1", VolumeId: "v", ExpectedReplicaId: "r1", ExpectedEpoch: 1, TargetReplicaId: "r1", TargetServerId: "node-b", TargetDataAddr: "127.0.0.1:9201", TargetCtrlAddr: "127.0.0.1:9101", Kind: "forced", Force: true}, &control.WorkspaceGrant{}},
 		{"journal", `{"volumeId":"v"}`, nil, &control.WorkspaceVolume{VolumeId: "v"}, &control.WorkspaceStatus{}},
@@ -113,7 +113,7 @@ func TestOpsWorkspaceInvalidInputNeverMutates(t *testing.T) {
 	} {
 		rc, out, _ := workspaceRun(t, addr, tc.op, tc.body, tc.extra...)
 		var e chunkErrBody
-		if rc != 2 || json.Unmarshal([]byte(out), &e) != nil || e.Code != "bad_request" || e.Retryable {
+		if rc != 1 || json.Unmarshal([]byte(out), &e) != nil || e.Code != "bad_request" || e.Retryable {
 			t.Fatalf("invalid input: rc=%d out=%s", rc, out)
 		}
 	}
@@ -128,13 +128,30 @@ func TestOpsWorkspaceTypedErrorsAndSingleAttempt(t *testing.T) {
 		retry bool
 	}{{codes.FailedPrecondition, "failed_precondition", false}, {codes.Unavailable, "remote_unavailable", true}, {codes.DeadlineExceeded, "outcome_unknown", true}} {
 		addr, s := workspaceServer(t, status.Error(tc.grpc, "caller must inspect journal"))
-		rc, out, errs := workspaceRun(t, addr, "bind", `{"volumeId":"v","serverId":"a","dataAddr":"127.0.0.1:9200","ctrlAddr":"127.0.0.1:9100"}`)
+		rc, out, errs := workspaceRun(t, addr, "bind", `{"requestId":"bind-1","volumeId":"v","serverId":"a","dataAddr":"127.0.0.1:9200","ctrlAddr":"127.0.0.1:9100"}`)
 		var e chunkErrBody
-		if rc != 1 || json.Unmarshal([]byte(out), &e) != nil || e.Code != tc.code || e.Retryable != tc.retry || !strings.Contains(errs, "ops workspace") {
+		wantExit := 1
+		if tc.grpc == codes.Unavailable || tc.grpc == codes.DeadlineExceeded {
+			wantExit = 2
+		}
+		if rc != wantExit || json.Unmarshal([]byte(out), &e) != nil || e.Code != tc.code || e.Retryable != tc.retry || !strings.Contains(errs, "ops workspace") {
 			t.Fatalf("typed error: %d %s %s", rc, out, errs)
 		}
 		if len(s.calls) != 1 {
 			t.Fatal("ambiguous mutation replayed", len(s.calls))
 		}
+	}
+}
+
+func TestOpsWorkspaceJournalLookupFlags(t *testing.T) {
+	addr, server := workspaceServer(t, nil)
+	var out, errs bytes.Buffer
+	rc := run([]string{"ops", "workspace", "journal", "--master", addr, "--volume", "v", "--request-id", "move-1"}, &out, &errs)
+	if rc != 0 {
+		t.Fatalf("journal flags: %d %s %s", rc, out.String(), errs.String())
+	}
+	q := (<-server.calls).(*control.WorkspaceVolume)
+	if q.VolumeId != "v" || q.RequestId != "move-1" {
+		t.Fatal(q)
 	}
 }

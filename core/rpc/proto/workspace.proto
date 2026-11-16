@@ -15,7 +15,7 @@ service WorkspaceService {
   rpc QueryWorkspace(WorkspaceVolume) returns (WorkspaceStatus);
 }
 message WorkspaceIdentity { string volume_id = 1; string replica_id = 2; uint64 epoch = 3; }
-message WorkspaceVolume { string volume_id = 1; }
+message WorkspaceVolume { string volume_id = 1; string request_id = 2; }
 message WorkspaceEmpty {}
 message WorkspaceLeaseFact {
   string volume_id = 1; string replica_id = 2; uint64 epoch = 3;
@@ -34,6 +34,7 @@ message WorkspaceGrant {
   string kind = 5; uint64 old_epoch = 6; uint64 new_epoch = 7;
   uint64 head_gen = 8; uint64 remote_lsn = 9; bool issued = 10;
   string old_host = 11; string new_host = 12;
+  string new_holder = 13; string journal_record_id = 14;
 }
 message WorkspaceStatus {
   WorkspaceLeaseFact lease = 1; WorkspaceRevocationAck revocation_ack = 2;
@@ -44,7 +45,8 @@ message WorkspaceBinding {
   string volume_id = 1; string server_id = 2;
   string data_addr = 3; string ctrl_addr = 4;
   bool retired = 5; // server output only
+  string request_id = 6;
 }
 message WorkspacePlacement {
-  string volume_id = 1; string server_id = 2; string replica_id = 3;
+  string volume_id = 1; string server_id = 2; string replica_id = 3; string request_id = 4;
 }

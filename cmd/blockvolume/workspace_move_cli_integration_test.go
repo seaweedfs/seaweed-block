@@ -233,9 +233,9 @@ func TestWorkspaceCLIThreeVolumesCleanAndForcedMove(t *testing.T) {
 			if j == 1 {
 				p = targets[i]
 			}
-			must("bind", &control.WorkspaceBinding{VolumeId: vol, ServerId: node, DataAddr: p.data, CtrlAddr: p.ctrl}, false, &control.WorkspaceBinding{})
+			must("bind", &control.WorkspaceBinding{RequestId: "bind-" + vol + "-" + node, VolumeId: vol, ServerId: node, DataAddr: p.data, CtrlAddr: p.ctrl}, false, &control.WorkspaceBinding{})
 		}
-		must("place", &control.WorkspacePlacement{VolumeId: vol, ServerId: "node-a", ReplicaId: "r1"}, false, &control.WorkspaceEmpty{})
+		must("place", &control.WorkspacePlacement{RequestId: "place-" + vol, VolumeId: vol, ServerId: "node-a", ReplicaId: "r1"}, false, &control.WorkspaceEmpty{})
 		start(sources[i], vol, "node-a")
 		wait("source not ready "+vol, func() bool {
 			if _, e := h.RunLifecycleProductTick(); e != nil {

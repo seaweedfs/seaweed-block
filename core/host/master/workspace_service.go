@@ -94,12 +94,24 @@ func (s *services) AckWorkspaceRevoked(ctx context.Context, q *control.Workspace
 
 func grantFact(r authority.WorkspaceMoveRecord) *control.WorkspaceGrant {
 	return &control.WorkspaceGrant{RequestId: r.RequestID, VolumeId: r.VolumeID, OldReplicaId: r.OldReplicaID, NewReplicaId: r.NewReplicaID, Kind: r.Kind,
-		OldEpoch: r.OldEpoch, NewEpoch: r.NewEpoch, HeadGen: r.HeadGen, RemoteLsn: r.RemoteLSN, Issued: r.Issued, OldHost: r.OldHost, NewHost: r.NewHost}
+		OldEpoch: r.OldEpoch, NewEpoch: r.NewEpoch, HeadGen: r.HeadGen, RemoteLsn: r.RemoteLSN, Issued: r.Issued, OldHost: r.OldHost, NewHost: r.NewHost, NewHolder: r.NewHost + "/" + r.NewReplicaID, JournalRecordId: r.RequestID}
 }
 
 func (s *services) MoveWorkspace(ctx context.Context, q *control.WorkspaceMove) (*control.WorkspaceGrant, error) {
 	if err := s.workspaceVolume(q.GetVolumeId()); err != nil {
 		return nil, err
+	}
+	// An issued move is the durable answer even after HEAD, lease or source
+	// placement has moved on. Check the complete request before remote probes.
+	if st := s.host.Publisher().WorkspaceState(q.GetVolumeId()); st != nil {
+		for _, r := range st.Moves {
+			if r.RequestID == q.GetRequestId() && r.Issued {
+				if r.OldReplicaID != q.GetExpectedReplicaId() || r.OldEpoch != q.GetExpectedEpoch() || r.NewReplicaID != q.GetTargetReplicaId() || r.NewHost != q.GetTargetServerId() || r.TargetDataAddr != q.GetTargetDataAddr() || r.TargetCtrlAddr != q.GetTargetCtrlAddr() || r.Kind != q.GetKind() || q.GetForce() != (r.Kind == "forced") {
+					return nil, status.Error(codes.AlreadyExists, "move request_id reused")
+				}
+				return finishWorkspaceMutation(ctx, grantFact(r))
+			}
+		}
 	}
 	// Always bound the configured reader, even when the caller omitted a deadline.
 	readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -144,7 +156,7 @@ func (s *services) MoveWorkspace(ctx context.Context, q *control.WorkspaceMove) 
 	if err = s.host.reconcileWorkspaceBindings(); err != nil {
 		return nil, workspaceError(err)
 	}
-	return grantFact(r), nil
+	return finishWorkspaceMutation(ctx, grantFact(r))
 }
 
 func (s *services) QueryWorkspace(ctx context.Context, q *control.WorkspaceVolume) (*control.WorkspaceStatus, error) {
@@ -172,7 +184,9 @@ func (s *services) QueryWorkspace(ctx context.Context, q *control.WorkspaceVolum
 		out.RevocationAck = &control.WorkspaceRevocationAck{Identity: &control.WorkspaceIdentity{VolumeId: q.GetVolumeId(), ReplicaId: state.Ack.ReplicaID, Epoch: state.Ack.Epoch}, HeadGen: state.Ack.HeadGen}
 	}
 	for _, r := range state.Moves {
-		out.Moves = append(out.Moves, grantFact(r))
+		if q.GetRequestId() == "" || q.GetRequestId() == r.RequestID {
+			out.Moves = append(out.Moves, grantFact(r))
+		}
 	}
 	return out, nil
 }

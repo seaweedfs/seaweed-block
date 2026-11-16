@@ -108,12 +108,13 @@ type Host struct {
 	lifecycle           *LifecycleStores
 	// RPC registration/place/move/ACK/delete and product ticks serialize here.
 	// Order: workspaceMu -> publisher or lifecycle store locks (not reversed).
-	workspaceMu     sync.Mutex
-	events          *eventRing
-	promotionMu     sync.RWMutex
-	promotionProber PromotionEvidenceProvider
-	cancel          context.CancelFunc
-	wg              sync.WaitGroup
+	workspaceRequests workspaceRequestStore
+	workspaceMu       sync.Mutex
+	events            *eventRing
+	promotionMu       sync.RWMutex
+	promotionProber   PromotionEvidenceProvider
+	cancel            context.CancelFunc
+	wg                sync.WaitGroup
 
 	started atomic.Bool
 }
@@ -269,7 +270,7 @@ func New(cfg Config) (*Host, error) {
 		h.frontendRuntimeHTTP = &http.Server{Handler: h.frontendPublicationRuntimeHandler()}
 	}
 
-	grpcSrv := grpc.NewServer()
+	grpcSrv := grpc.NewServer(grpc.UnaryInterceptor(h.workspaceMutation))
 	svc := newServices(h)
 	control.RegisterObservationServiceServer(grpcSrv, svc)
 	control.RegisterAssignmentServiceServer(grpcSrv, svc)

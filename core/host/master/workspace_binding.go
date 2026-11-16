@@ -35,7 +35,7 @@ func (s *services) RegisterWorkspaceBinding(ctx context.Context, q *control.Work
 	if err := s.host.lifecycle.WorkspaceBindings.Register(b); err != nil {
 		return nil, workspaceError(err)
 	}
-	return bindingFact(b), nil
+	return finishWorkspaceMutation(ctx, bindingFact(b))
 }
 
 // Caller holds workspaceMu through the subsequent local commit. Check both
@@ -136,6 +136,9 @@ func (s *services) PlaceWorkspace(ctx context.Context, q *control.WorkspacePlace
 	if _, ok := s.host.lifecycle.Nodes.GetNode(q.GetServerId()); !ok {
 		return nil, workspaceError(fmt.Errorf("workspace placement: unknown server"))
 	}
+	if p, ok := s.host.lifecycle.Placements.GetPlacement(q.GetVolumeId()); ok && len(p.Slots) == 1 && p.Slots[0].ServerID == binding.ServerID && p.Slots[0].ReplicaID == q.GetReplicaId() && p.Slots[0].DataAddr == binding.DataAddr && p.Slots[0].CtrlAddr == binding.CtrlAddr {
+		return finishWorkspaceMutation(ctx, &control.WorkspaceEmpty{})
+	}
 	err = s.host.Publisher().RecordWorkspacePlacement(ctx, q.GetVolumeId(), func() error {
 		if p, ok := s.host.lifecycle.Placements.GetPlacement(q.GetVolumeId()); ok {
 			if len(p.Slots) == 1 && p.Slots[0].ServerID == binding.ServerID && p.Slots[0].ReplicaID == q.GetReplicaId() && p.Slots[0].DataAddr == binding.DataAddr && p.Slots[0].CtrlAddr == binding.CtrlAddr {
@@ -149,7 +152,7 @@ func (s *services) PlaceWorkspace(ctx context.Context, q *control.WorkspacePlace
 	if err != nil {
 		return nil, workspaceError(err)
 	}
-	return &control.WorkspaceEmpty{}, nil
+	return finishWorkspaceMutation(ctx, &control.WorkspaceEmpty{})
 }
 
 // admitWorkspacePublication owns the last local boundary before an ordinary

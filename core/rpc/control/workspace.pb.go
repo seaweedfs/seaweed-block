@@ -84,6 +84,7 @@ func (x *WorkspaceIdentity) GetEpoch() uint64 {
 type WorkspaceVolume struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	VolumeId      string                 `protobuf:"bytes,1,opt,name=volume_id,json=volumeId,proto3" json:"volume_id,omitempty"`
+	RequestId     string                 `protobuf:"bytes,2,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -121,6 +122,13 @@ func (*WorkspaceVolume) Descriptor() ([]byte, []int) {
 func (x *WorkspaceVolume) GetVolumeId() string {
 	if x != nil {
 		return x.VolumeId
+	}
+	return ""
+}
+
+func (x *WorkspaceVolume) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
 	}
 	return ""
 }
@@ -414,21 +422,23 @@ func (x *WorkspaceMove) GetTargetServerId() string {
 }
 
 type WorkspaceGrant struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	RequestId     string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
-	VolumeId      string                 `protobuf:"bytes,2,opt,name=volume_id,json=volumeId,proto3" json:"volume_id,omitempty"`
-	OldReplicaId  string                 `protobuf:"bytes,3,opt,name=old_replica_id,json=oldReplicaId,proto3" json:"old_replica_id,omitempty"`
-	NewReplicaId  string                 `protobuf:"bytes,4,opt,name=new_replica_id,json=newReplicaId,proto3" json:"new_replica_id,omitempty"`
-	Kind          string                 `protobuf:"bytes,5,opt,name=kind,proto3" json:"kind,omitempty"`
-	OldEpoch      uint64                 `protobuf:"varint,6,opt,name=old_epoch,json=oldEpoch,proto3" json:"old_epoch,omitempty"`
-	NewEpoch      uint64                 `protobuf:"varint,7,opt,name=new_epoch,json=newEpoch,proto3" json:"new_epoch,omitempty"`
-	HeadGen       uint64                 `protobuf:"varint,8,opt,name=head_gen,json=headGen,proto3" json:"head_gen,omitempty"`
-	RemoteLsn     uint64                 `protobuf:"varint,9,opt,name=remote_lsn,json=remoteLsn,proto3" json:"remote_lsn,omitempty"`
-	Issued        bool                   `protobuf:"varint,10,opt,name=issued,proto3" json:"issued,omitempty"`
-	OldHost       string                 `protobuf:"bytes,11,opt,name=old_host,json=oldHost,proto3" json:"old_host,omitempty"`
-	NewHost       string                 `protobuf:"bytes,12,opt,name=new_host,json=newHost,proto3" json:"new_host,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	RequestId       string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	VolumeId        string                 `protobuf:"bytes,2,opt,name=volume_id,json=volumeId,proto3" json:"volume_id,omitempty"`
+	OldReplicaId    string                 `protobuf:"bytes,3,opt,name=old_replica_id,json=oldReplicaId,proto3" json:"old_replica_id,omitempty"`
+	NewReplicaId    string                 `protobuf:"bytes,4,opt,name=new_replica_id,json=newReplicaId,proto3" json:"new_replica_id,omitempty"`
+	Kind            string                 `protobuf:"bytes,5,opt,name=kind,proto3" json:"kind,omitempty"`
+	OldEpoch        uint64                 `protobuf:"varint,6,opt,name=old_epoch,json=oldEpoch,proto3" json:"old_epoch,omitempty"`
+	NewEpoch        uint64                 `protobuf:"varint,7,opt,name=new_epoch,json=newEpoch,proto3" json:"new_epoch,omitempty"`
+	HeadGen         uint64                 `protobuf:"varint,8,opt,name=head_gen,json=headGen,proto3" json:"head_gen,omitempty"`
+	RemoteLsn       uint64                 `protobuf:"varint,9,opt,name=remote_lsn,json=remoteLsn,proto3" json:"remote_lsn,omitempty"`
+	Issued          bool                   `protobuf:"varint,10,opt,name=issued,proto3" json:"issued,omitempty"`
+	OldHost         string                 `protobuf:"bytes,11,opt,name=old_host,json=oldHost,proto3" json:"old_host,omitempty"`
+	NewHost         string                 `protobuf:"bytes,12,opt,name=new_host,json=newHost,proto3" json:"new_host,omitempty"`
+	NewHolder       string                 `protobuf:"bytes,13,opt,name=new_holder,json=newHolder,proto3" json:"new_holder,omitempty"`
+	JournalRecordId string                 `protobuf:"bytes,14,opt,name=journal_record_id,json=journalRecordId,proto3" json:"journal_record_id,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *WorkspaceGrant) Reset() {
@@ -545,6 +555,20 @@ func (x *WorkspaceGrant) GetNewHost() string {
 	return ""
 }
 
+func (x *WorkspaceGrant) GetNewHolder() string {
+	if x != nil {
+		return x.NewHolder
+	}
+	return ""
+}
+
+func (x *WorkspaceGrant) GetJournalRecordId() string {
+	if x != nil {
+		return x.JournalRecordId
+	}
+	return ""
+}
+
 type WorkspaceStatus struct {
 	state         protoimpl.MessageState  `protogen:"open.v1"`
 	Lease         *WorkspaceLeaseFact     `protobuf:"bytes,1,opt,name=lease,proto3" json:"lease,omitempty"`
@@ -620,6 +644,7 @@ type WorkspaceBinding struct {
 	DataAddr      string                 `protobuf:"bytes,3,opt,name=data_addr,json=dataAddr,proto3" json:"data_addr,omitempty"`
 	CtrlAddr      string                 `protobuf:"bytes,4,opt,name=ctrl_addr,json=ctrlAddr,proto3" json:"ctrl_addr,omitempty"`
 	Retired       bool                   `protobuf:"varint,5,opt,name=retired,proto3" json:"retired,omitempty"` // server output only
+	RequestId     string                 `protobuf:"bytes,6,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -689,11 +714,19 @@ func (x *WorkspaceBinding) GetRetired() bool {
 	return false
 }
 
+func (x *WorkspaceBinding) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
 type WorkspacePlacement struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	VolumeId      string                 `protobuf:"bytes,1,opt,name=volume_id,json=volumeId,proto3" json:"volume_id,omitempty"`
 	ServerId      string                 `protobuf:"bytes,2,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
 	ReplicaId     string                 `protobuf:"bytes,3,opt,name=replica_id,json=replicaId,proto3" json:"replica_id,omitempty"`
+	RequestId     string                 `protobuf:"bytes,4,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -749,6 +782,13 @@ func (x *WorkspacePlacement) GetReplicaId() string {
 	return ""
 }
 
+func (x *WorkspacePlacement) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
 var File_workspace_proto protoreflect.FileDescriptor
 
 const file_workspace_proto_rawDesc = "" +
@@ -758,9 +798,11 @@ const file_workspace_proto_rawDesc = "" +
 	"\tvolume_id\x18\x01 \x01(\tR\bvolumeId\x12\x1d\n" +
 	"\n" +
 	"replica_id\x18\x02 \x01(\tR\treplicaId\x12\x14\n" +
-	"\x05epoch\x18\x03 \x01(\x04R\x05epoch\".\n" +
+	"\x05epoch\x18\x03 \x01(\x04R\x05epoch\"M\n" +
 	"\x0fWorkspaceVolume\x12\x1b\n" +
-	"\tvolume_id\x18\x01 \x01(\tR\bvolumeId\"\x10\n" +
+	"\tvolume_id\x18\x01 \x01(\tR\bvolumeId\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x02 \x01(\tR\trequestId\"\x10\n" +
 	"\x0eWorkspaceEmpty\"\xc8\x01\n" +
 	"\x12WorkspaceLeaseFact\x12\x1b\n" +
 	"\tvolume_id\x18\x01 \x01(\tR\bvolumeId\x12\x1d\n" +
@@ -786,7 +828,7 @@ const file_workspace_proto_rawDesc = "" +
 	"\x04kind\x18\b \x01(\tR\x04kind\x12\x14\n" +
 	"\x05force\x18\t \x01(\bR\x05force\x12(\n" +
 	"\x10target_server_id\x18\n" +
-	" \x01(\tR\x0etargetServerId\"\xee\x02\n" +
+	" \x01(\tR\x0etargetServerId\"\xb9\x03\n" +
 	"\x0eWorkspaceGrant\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x1b\n" +
@@ -802,23 +844,30 @@ const file_workspace_proto_rawDesc = "" +
 	"\x06issued\x18\n" +
 	" \x01(\bR\x06issued\x12\x19\n" +
 	"\bold_host\x18\v \x01(\tR\aoldHost\x12\x19\n" +
-	"\bnew_host\x18\f \x01(\tR\anewHost\"\xb2\x02\n" +
+	"\bnew_host\x18\f \x01(\tR\anewHost\x12\x1d\n" +
+	"\n" +
+	"new_holder\x18\r \x01(\tR\tnewHolder\x12*\n" +
+	"\x11journal_record_id\x18\x0e \x01(\tR\x0fjournalRecordId\"\xb2\x02\n" +
 	"\x0fWorkspaceStatus\x12A\n" +
 	"\x05lease\x18\x01 \x01(\v2+.seaweedfs.block.control.WorkspaceLeaseFactR\x05lease\x12V\n" +
 	"\x0erevocation_ack\x18\x02 \x01(\v2/.seaweedfs.block.control.WorkspaceRevocationAckR\rrevocationAck\x12=\n" +
 	"\x05moves\x18\x03 \x03(\v2'.seaweedfs.block.control.WorkspaceGrantR\x05moves\x12E\n" +
-	"\bbindings\x18\x04 \x03(\v2).seaweedfs.block.control.WorkspaceBindingR\bbindings\"\xa0\x01\n" +
+	"\bbindings\x18\x04 \x03(\v2).seaweedfs.block.control.WorkspaceBindingR\bbindings\"\xbf\x01\n" +
 	"\x10WorkspaceBinding\x12\x1b\n" +
 	"\tvolume_id\x18\x01 \x01(\tR\bvolumeId\x12\x1b\n" +
 	"\tserver_id\x18\x02 \x01(\tR\bserverId\x12\x1b\n" +
 	"\tdata_addr\x18\x03 \x01(\tR\bdataAddr\x12\x1b\n" +
 	"\tctrl_addr\x18\x04 \x01(\tR\bctrlAddr\x12\x18\n" +
-	"\aretired\x18\x05 \x01(\bR\aretired\"m\n" +
+	"\aretired\x18\x05 \x01(\bR\aretired\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x06 \x01(\tR\trequestId\"\x8c\x01\n" +
 	"\x12WorkspacePlacement\x12\x1b\n" +
 	"\tvolume_id\x18\x01 \x01(\tR\bvolumeId\x12\x1b\n" +
 	"\tserver_id\x18\x02 \x01(\tR\bserverId\x12\x1d\n" +
 	"\n" +
-	"replica_id\x18\x03 \x01(\tR\treplicaId2\x81\x06\n" +
+	"replica_id\x18\x03 \x01(\tR\treplicaId\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x04 \x01(\tR\trequestId2\x81\x06\n" +
 	"\x10WorkspaceService\x12p\n" +
 	"\x18RegisterWorkspaceBinding\x12).seaweedfs.block.control.WorkspaceBinding\x1a).seaweedfs.block.control.WorkspaceBinding\x12f\n" +
 	"\x0ePlaceWorkspace\x12+.seaweedfs.block.control.WorkspacePlacement\x1a'.seaweedfs.block.control.WorkspaceEmpty\x12n\n" +

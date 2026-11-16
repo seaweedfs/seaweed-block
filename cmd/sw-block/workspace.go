@@ -26,12 +26,12 @@ func workspaceFail(stdout, stderr io.Writer, exit int, code, message string, ret
 	b, _ := json.Marshal(chunkErrBody{Code: code, Message: message, Retryable: retryable})
 	if e := writeAll(stdout, append(b, '\n')); e != nil {
 		fmt.Fprintf(stderr, "sw-block ops workspace: write error result: %v\n", e)
-		return 1
+		return 2
 	}
 	return exit
 }
 func runOpsWorkspace(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	bad := func(message string) int { return workspaceFail(stdout, stderr, 2, "bad_request", message, false) }
+	bad := func(message string) int { return workspaceFail(stdout, stderr, 1, "bad_request", message, false) }
 	if len(args) == 0 {
 		return bad("expected bind|place|move|journal")
 	}
@@ -54,6 +54,8 @@ func runOpsWorkspace(args []string, stdin io.Reader, stdout, stderr io.Writer) i
 	master := fs.String("master", "", "blockmaster gRPC host:port")
 	input := fs.String("input", "-", "request JSON file, or - for stdin")
 	timeout := fs.Duration("timeout", 30*time.Second, "RPC deadline (positive, at most 5m)")
+	volume := fs.String("volume", "", "journal volume id")
+	requestID := fs.String("request-id", "", "journal request id filter")
 	force := fs.Bool("force", false, "explicitly permit a FORCED move; master still requires expired lease")
 	if e := fs.Parse(args[1:]); e != nil {
 		return bad(e.Error())
@@ -63,6 +65,9 @@ func runOpsWorkspace(args []string, stdin io.Reader, stdout, stderr io.Writer) i
 	}
 	if *force && op != "move" {
 		return bad("--force is only valid for move")
+	}
+	if op != "journal" && (*volume != "" || *requestID != "") {
+		return bad("--volume/--request-id are journal-only")
 	}
 	reader := stdin
 	if *input != "-" {
@@ -74,7 +79,19 @@ func runOpsWorkspace(args []string, stdin io.Reader, stdout, stderr io.Writer) i
 		reader = f
 	}
 	const limit = 64 << 10
-	body, e := io.ReadAll(io.LimitReader(reader, limit+1))
+	var body []byte
+	var e error
+	if op == "journal" && *volume != "" {
+		if *input != "-" {
+			return bad("journal flags cannot be combined with --input")
+		}
+		body, e = protojson.Marshal(&control.WorkspaceVolume{VolumeId: *volume, RequestId: *requestID})
+	} else {
+		if *requestID != "" {
+			return bad("--request-id requires --volume")
+		}
+		body, e = io.ReadAll(io.LimitReader(reader, limit+1))
+	}
 	if e != nil {
 		return bad("read input: " + e.Error())
 	}
@@ -86,12 +103,12 @@ func runOpsWorkspace(args []string, stdin io.Reader, stdout, stderr io.Writer) i
 	}
 	switch q := request.(type) {
 	case *control.WorkspaceBinding:
-		if q.VolumeId == "" || q.ServerId == "" || q.DataAddr == "" || q.CtrlAddr == "" || q.Retired {
-			return bad("bind requires volumeId, serverId, dataAddr, ctrlAddr; retired is output-only")
+		if q.RequestId == "" || q.VolumeId == "" || q.ServerId == "" || q.DataAddr == "" || q.CtrlAddr == "" || q.Retired {
+			return bad("bind requires requestId, volumeId, serverId, dataAddr, ctrlAddr; retired is output-only")
 		}
 	case *control.WorkspacePlacement:
-		if q.VolumeId == "" || q.ServerId == "" || q.ReplicaId == "" {
-			return bad("place requires volumeId, serverId, replicaId")
+		if q.RequestId == "" || q.VolumeId == "" || q.ServerId == "" || q.ReplicaId == "" {
+			return bad("place requires requestId, volumeId, serverId, replicaId")
 		}
 	case *control.WorkspaceMove:
 		if *force {
@@ -160,15 +177,20 @@ func runOpsWorkspace(args []string, stdin io.Reader, stdout, stderr io.Writer) i
 				code = "remote_unavailable"
 			}
 		}
-		return workspaceFail(stdout, stderr, 1, code, status.Convert(e).Message(), retry)
+		exit := 1
+		switch status.Code(e) {
+		case codes.Unavailable, codes.DeadlineExceeded, codes.Canceled, codes.Unknown, codes.Internal, codes.DataLoss:
+			exit = 2
+		}
+		return workspaceFail(stdout, stderr, exit, code, status.Convert(e).Message(), retry)
 	}
 	out, e := protojson.Marshal(reply)
 	if e != nil {
-		return workspaceFail(stdout, stderr, 1, "internal", e.Error(), false)
+		return workspaceFail(stdout, stderr, 2, "internal", e.Error(), false)
 	}
 	if e = writeAll(stdout, append(out, '\n')); e != nil {
 		fmt.Fprintf(stderr, "sw-block ops workspace: write result: %v\n", e)
-		return 1
+		return 2
 	}
 	return 0
 }

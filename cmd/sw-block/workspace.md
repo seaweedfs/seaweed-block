@@ -10,8 +10,8 @@ lifecycle volume and register its servers first. The caller allocates distinct d
 ports for every workspace on a host.
 
 ```sh
-printf '%s' '{"volumeId":"ws1","serverId":"host-a","dataAddr":"127.0.0.1:19200","ctrlAddr":"127.0.0.1:19100"}' | sw-block ops workspace bind --master 127.0.0.1:9330
-printf '%s' '{"volumeId":"ws1","serverId":"host-a","replicaId":"r1"}' | sw-block ops workspace place --master 127.0.0.1:9330
+printf '%s' '{"requestId":"bind-ws1-001","volumeId":"ws1","serverId":"host-a","dataAddr":"127.0.0.1:19200","ctrlAddr":"127.0.0.1:19100"}' | sw-block ops workspace bind --master 127.0.0.1:9330
+printf '%s' '{"requestId":"place-ws1-001","volumeId":"ws1","serverId":"host-a","replicaId":"r1"}' | sw-block ops workspace place --master 127.0.0.1:9330
 printf '%s' '{"volumeId":"ws1"}' | sw-block ops workspace journal --master 127.0.0.1:9330
 ```
 
@@ -33,7 +33,8 @@ replica ID; only the host, endpoints and epoch change.
 
 Success prints protobuf JSON (64-bit integers are strings) and exits 0. Failure
 prints `{code,message,retryable}` JSON on stdout and diagnostics on stderr:
-exit 2 for invalid CLI/input, exit 1 for RPC/output failure. Codes are derived
+exit 1 for typed refusals (including invalid CLI/input); exit 2 for transport,
+unknown outcome, internal or output failure. Codes are derived
 from gRPC status, never from message substring matching: `failed_precondition`,
 `not_found`, `already_exists`, `conflict`, `remote_unavailable`, `outcome_unknown`,
 `permission_denied`, `unauthenticated`, `resource_exhausted`, `internal`.
@@ -42,3 +43,18 @@ The client makes one mutation RPC and never automatically replays it. A deadline
 or cancellation after dispatch is `outcome_unknown`. Inspect `journal` before
 retrying an ambiguous move, and reuse its exact requestId and target. The journal
 returns bindings, current lease/revocation state and issued or pending move records.
+
+Every mutation requires a caller-chosen `requestId` (or `request_id`). The master
+persists the request before applying it and the original result before replying.
+The same ID and canonical protobuf body returns that result across master restart;
+a different body or operation with that ID is refused as `already_exists`.
+Keep the ID stable after an unknown response; never generate a new ID as a retry.
+IDs are shared across bind/place/move. Older direct RPC callers without IDs remain
+compatible but do not gain this replay contract. Bind returns the confirmed data
+and control addresses; it does not allocate ports.
+
+`journal --volume ws1 [--request-id move-ws1-001] --master HOST:PORT` needs no JSON
+input. A request filter returns only matching move records (an empty list means
+no matching record). Move results include `newEpoch`, qualified `newHolder`,
+`kind`, `headGen`, `remoteLsn` and `journalRecordId` (the caller's move request ID).
+These are the grant's durable facts, not a claim that the new host has attached.
