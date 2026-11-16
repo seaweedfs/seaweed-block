@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/host/bootstrap"
@@ -67,8 +68,9 @@ type Config struct {
 
 	// WorkspaceRPC enables the RF1 lease/revoke/move surface. HEAD must be
 	// obtained from the configured remote source, never from operator flags.
-	WorkspaceRPC        bool
-	WorkspaceHeadReader func(context.Context, string) (authority.WorkspaceHead, error)
+	WorkspaceMaxClockSkew time.Duration
+	WorkspaceRPC          bool
+	WorkspaceHeadReader   func(context.Context, string) (authority.WorkspaceHead, error)
 
 	// FrontendPublicationRuntimeHTTP enables the frontend publication runtime
 	// HTTP surface. It is disabled by default and only confirms a post-failback
@@ -170,6 +172,9 @@ func (h *publisherHolder) VolumeAuthorityLine(vid string) (authority.AuthorityBa
 //
 // Live loops (publisher.Run, host.Start, grpc.Serve) run in Start.
 func New(cfg Config) (*Host, error) {
+	if cfg.WorkspaceMaxClockSkew < 0 || cfg.WorkspaceMaxClockSkew >= 60*time.Second {
+		return nil, fmt.Errorf("master.New: workspace max clock skew must be positive and less than 60s (zero selects default)")
+	}
 	if cfg.WorkspaceRPC && (cfg.WorkspaceHeadReader == nil || cfg.LifecycleStoreDir == "") {
 		return nil, fmt.Errorf("master.New: workspace RPC requires HEAD reader and lifecycle store")
 	}
@@ -208,8 +213,9 @@ func New(cfg Config) (*Host, error) {
 	}
 
 	boot, err := bootstrap.BootstrapWithOptions(cfg.AuthorityStoreDir, ctrl, bootstrap.Options{
-		PublishObserver:      h.recordAuthorityPublishedEvent,
-		PublicationAdmission: h.admitWorkspacePublication,
+		WorkspaceMaxClockSkew: cfg.WorkspaceMaxClockSkew,
+		PublishObserver:       h.recordAuthorityPublishedEvent,
+		PublicationAdmission:  h.admitWorkspacePublication,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("master.New: Bootstrap: %w", err)

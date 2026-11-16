@@ -73,7 +73,7 @@ func TestWorkspaceBindingsForcedRetiresOnlyAfterIssue(t *testing.T) {
 }
 
 func workspaceBindingsMove(t *testing.T, forced bool) {
-	cfg := Config{Listen: "127.0.0.1:0", AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), WorkspaceRPC: true, WorkspaceHeadReader: func(context.Context, string) (authority.WorkspaceHead, error) {
+	cfg := Config{WorkspaceMaxClockSkew: 100 * time.Millisecond, Listen: "127.0.0.1:0", AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), WorkspaceRPC: true, WorkspaceHeadReader: func(context.Context, string) (authority.WorkspaceHead, error) {
 		return authority.WorkspaceHead{Gen: 9, Epoch: 1, Holder: "node-a/r1", RemoteLSN: 42, Detached: true}, nil
 	}}
 	h, err := New(cfg)
@@ -127,7 +127,7 @@ func workspaceBindingsMove(t *testing.T, forced bool) {
 		}
 		if forced {
 			select {
-			case <-time.After(time.Until(time.Unix(0, lease.ExpiresAtNs)) + 20*time.Millisecond):
+			case <-time.After(time.Until(time.Unix(0, lease.ExpiresAtNs)) + 100*time.Millisecond + 20*time.Millisecond):
 			case <-ctx.Done():
 				t.Fatal(ctx.Err())
 			}

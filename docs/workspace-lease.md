@@ -28,3 +28,16 @@ for its result before ACK. Host shutdown fences admission synchronously.
 The host installation mutex latches this terminal fence even before a guard
 exists; a later-installed guard is born fenced. Its lock order is installation
 mutex then guard state mutex. Canceled renewal replies cannot publish a grant.
+
+## Clock skew
+
+`blockmaster --workspace-max-clock-skew` defaults to 20s (two nominal 10s
+renewal intervals for the 30s lease). Set a positive bound below 60s that
+covers the deployment's clock drift. The bound is persisted with each lease;
+a restart or smaller setting cannot shorten an outstanding grant's bound.
+The master grants a FORCED move only after both the stored expiry and its
+conservative restart deadline plus the full bound. `ValidForNs` in lease
+replies excludes half the bound. Hosts anchor that shortened duration to
+request start, self-fencing early without comparing remote wall-clock times.
+Delayed replies cannot extend admission. The bound is an operational clock
+assumption; arbitrarily stopped or unbounded clocks are not covered.

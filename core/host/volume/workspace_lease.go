@@ -65,6 +65,8 @@ func (g *WorkspaceLeaseGuard) permits(p frontend.Projection) bool {
 
 // Refresh anchors validity to the request START. Reply latency can only shorten
 // the client's usable lease, never extend it past the master's grant window.
+// ValidForNs already excludes half the master-configured clock-skew margin;
+// until is the early self-fence deadline, not the raw ExpiresAtNs wall clock.
 func (g *WorkspaceLeaseGuard) Refresh(ctx context.Context) error {
 	g.operation.Lock()
 	defer g.operation.Unlock()

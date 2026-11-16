@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/authority"
 )
@@ -14,14 +15,14 @@ import (
 // reload capability existed only in unit tests.
 //
 // Startup order matches sketch §7:
-//   1. acquire the single-owner store lock (refuse to start if held)
-//   2. open the file-per-volume store under the same directory
-//   3. construct the Publisher with WithStore(store), which runs
-//      reload synchronously — surviving records populate
-//      Publisher state, corrupt records go to LoadErrors()
-//   4. log any LoadErrors() at startup so operators see
-//      reload-corruption events rather than having them stranded
-//      inside the Publisher
+//  1. acquire the single-owner store lock (refuse to start if held)
+//  2. open the file-per-volume store under the same directory
+//  3. construct the Publisher with WithStore(store), which runs
+//     reload synchronously — surviving records populate
+//     Publisher state, corrupt records go to LoadErrors()
+//  4. log any LoadErrors() at startup so operators see
+//     reload-corruption events rather than having them stranded
+//     inside the Publisher
 //
 // The caller owns lifecycle: invoke Close() on process exit (or
 // via defer) to release the lock and close the store cleanly.
@@ -43,8 +44,9 @@ type DurableAuthorityBootstrap struct {
 
 // Options customizes durable-authority bootstrap wiring.
 type Options struct {
-	PublishObserver      authority.PublishObserver
-	PublicationAdmission authority.PublicationAdmission
+	WorkspaceMaxClockSkew time.Duration
+	PublishObserver       authority.PublishObserver
+	PublicationAdmission  authority.PublicationAdmission
 }
 
 // Bootstrap performs the durable-authority startup sequence and
@@ -53,9 +55,10 @@ type Options struct {
 // acquired or the store directory cannot be enumerated.
 //
 // Startup logs:
-//   "durable authority lock acquired"
-//   "durable authority reload: N records"
-//   "durable authority reload skip: %v" (one per skip)
+//
+//	"durable authority lock acquired"
+//	"durable authority reload: N records"
+//	"durable authority reload skip: %v" (one per skip)
 //
 // The logs are the promised operator/startup visibility of
 // LoadErrors() — architect round-5 finding #3.
@@ -117,7 +120,7 @@ func bootstrapFromStoreLocked(storeDir string, lock *authority.StoreLock, store 
 	if opts.PublishObserver != nil {
 		pubOpts = append(pubOpts, authority.WithPublishObserver(opts.PublishObserver))
 	}
-	pubOpts = append(pubOpts, authority.WithPublicationAdmission(opts.PublicationAdmission))
+	pubOpts = append(pubOpts, authority.WithPublicationAdmission(opts.PublicationAdmission), authority.WithWorkspaceMaxClockSkew(opts.WorkspaceMaxClockSkew))
 	pub := authority.NewPublisher(directive, pubOpts...)
 
 	// Publisher's LoadErrors is the canonical source; prefer it

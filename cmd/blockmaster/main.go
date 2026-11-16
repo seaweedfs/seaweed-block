@@ -55,6 +55,7 @@ type flags struct {
 	launcherCHAPUserKey                   string
 	launcherCHAPSecretKey                 string
 	failbackRuntimeRPC                    bool
+	workspaceMaxClockSkew                 time.Duration
 	workspaceRPC                          bool
 	workspaceHEADBase                     string
 	frontendPublicationRuntimeHTTP        bool
@@ -104,6 +105,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.launcherCHAPUserKey, "launcher-iscsi-chap-username-key", "chapUsername", "Kubernetes Secret key for generated blockvolume iSCSI CHAP username")
 	fs.StringVar(&f.launcherCHAPSecretKey, "launcher-iscsi-chap-secret-key", "chapSecret", "Kubernetes Secret key for generated blockvolume iSCSI CHAP secret")
 	fs.BoolVar(&f.failbackRuntimeRPC, "failback-runtime-rpc", false, "enable disabled-by-default authority failback RPC; requires expected-current and terminal evidence")
+	fs.DurationVar(&f.workspaceMaxClockSkew, "workspace-max-clock-skew", 20*time.Second, "maximum workspace clock skew; host lease shortens by half, forced moves wait the full bound")
 	fs.BoolVar(&f.workspaceRPC, "workspace-rpc", false, "enable RF1 workspace lease/revocation/move RPCs")
 	fs.StringVar(&f.workspaceHEADBase, "workspace-head-base-url", "", "filer HTTP directory containing per-volume HEAD files; required with --workspace-rpc")
 	fs.BoolVar(&f.frontendPublicationRuntimeHTTP, "frontend-publication-runtime-http", false, "enable disabled-by-default frontend publication HTTP runtime; confirms post-failback authority publication only")
@@ -122,6 +124,9 @@ func parseFlags(args []string) (flags, error) {
 	}
 	if err := nvme.ValidateMaxH2CDataLength(uint32(f.launcherNVMeMaxH2CDataLength)); err != nil {
 		return flags{}, fmt.Errorf("--launcher-nvme-max-h2c-data-length=%d invalid: %w", f.launcherNVMeMaxH2CDataLength, err)
+	}
+	if f.workspaceMaxClockSkew <= 0 || f.workspaceMaxClockSkew >= 60*time.Second {
+		return flags{}, fmt.Errorf("--workspace-max-clock-skew must be positive and less than 60s")
 	}
 	if f.authorityStore == "" {
 		return flags{}, fmt.Errorf("--authority-store is required")
@@ -173,6 +178,7 @@ func run(f flags) int {
 		Topology:                         topo,
 		Freshness:                        authority.FreshnessConfig{FreshnessWindow: f.freshnessWindow, PendingGrace: f.pendingGrace},
 		ControllerConfig:                 authority.TopologyControllerConfig{ExpectedSlotsPerVolume: f.expectedSlotsPerVol},
+		WorkspaceMaxClockSkew:            f.workspaceMaxClockSkew,
 		FailbackRuntimeRPC:               f.failbackRuntimeRPC,
 		FrontendPublicationRuntimeHTTP:   f.frontendPublicationRuntimeHTTP,
 		FrontendPublicationRuntimeListen: f.frontendPublicationRuntimeListen,
