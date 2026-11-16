@@ -1,0 +1,84 @@
+# Example unit for one blockvolume (one volume replica) serving NVMe/TCP or
+# iSCSI as the unprivileged sw-block user. Settings:
+# /etc/sw-block/blockvolume.env (deploy/config/blockvolume.env). For more
+# volumes on one host, copy this unit with its own env file, state directory,
+# ports and NQN.
+#
+# For ublk (needs root) do not edit this unit: use
+# sw-blockvolume-ublk.service, which has its own state directory.
+[Unit]
+Description=Seaweed Block volume (one replica)
+Documentation=https://github.com/seaweedfs/seaweed-block
+After=network-online.target sw-blockmaster.service
+Wants=network-online.target sw-blockmaster.service
+
+[Service]
+Type=simple
+User=sw-block
+Group=sw-block
+EnvironmentFile=/etc/sw-block/blockvolume.env
+# systemd creates /var/lib/sw-block-volume owned by User/Group; SWB_DURABLE_ROOT
+# must be inside it. It is separate from blockmaster's state directory.
+StateDirectory=sw-block-volume
+StateDirectoryMode=0750
+ExecStart=/usr/local/bin/blockvolume \
+  --master=${SWB_MASTER_ADDR} \
+  --server-id=${SWB_SERVER_ID} \
+  --volume-id=${SWB_VOLUME_ID} \
+  --replica-id=${SWB_REPLICA_ID} \
+  --data-addr=${SWB_DATA_ADDR} \
+  --ctrl-addr=${SWB_CTRL_ADDR} \
+  --status-addr=${SWB_STATUS_ADDR} \
+  --heartbeat-interval=${SWB_HEARTBEAT_INTERVAL} \
+  --recover-timeout=${SWB_RECOVER_TIMEOUT} \
+  --durable-root=${SWB_DURABLE_ROOT} \
+  --durable-impl=${SWB_DURABLE_IMPL} \
+  --durable-blocks=${SWB_DURABLE_BLOCKS} \
+  --durable-blocksize=${SWB_DURABLE_BLOCKSIZE} \
+  --nvme-listen=${SWB_NVME_LISTEN} \
+  --nvme-subsysnqn=${SWB_NVME_SUBSYSNQN} \
+  --nvme-ns=${SWB_NVME_NS} \
+  --nvme-max-h2c-data-length=${SWB_NVME_MAX_H2C_DATA_LENGTH} \
+  --ublk-device=${SWB_UBLK_DEVICE} \
+  --ublk-queues=${SWB_UBLK_QUEUES} \
+  --ublk-queue-depth=${SWB_UBLK_QUEUE_DEPTH} \
+  --iscsi-listen=${SWB_ISCSI_LISTEN} \
+  --iscsi-iqn=${SWB_ISCSI_IQN} \
+  --iscsi-portal-addr=${SWB_ISCSI_PORTAL_ADDR} \
+  --iscsi-lun=${SWB_ISCSI_LUN} \
+  --iscsi-dataout-timeout=${SWB_ISCSI_DATAOUT_TIMEOUT} \
+  --replication-ack=${SWB_REPLICATION_ACK} \
+  --wal-retention-lsns=${SWB_WAL_RETENTION_LSNS} \
+  --recovery-mode=${SWB_RECOVERY_MODE} \
+  --degraded-probe-interval=${SWB_DEGRADED_PROBE_INTERVAL} \
+  --degraded-probe-cooldown-base=${SWB_DEGRADED_PROBE_COOLDOWN_BASE} \
+  --degraded-probe-cooldown-cap=${SWB_DEGRADED_PROBE_COOLDOWN_CAP} \
+  --chunk-filer=${SWB_CHUNK_FILER} \
+  --chunk-path=${SWB_CHUNK_PATH} \
+  --chunk-collection=${SWB_CHUNK_COLLECTION} \
+  --chunk-replication=${SWB_CHUNK_REPLICATION} \
+  --chunk-capture-interval=${SWB_CHUNK_CAPTURE_INTERVAL} \
+  --chunk-upload-concurrency=${SWB_CHUNK_UPLOAD_CONCURRENCY} \
+  --chunk-dirty-threshold=${SWB_CHUNK_DIRTY_THRESHOLD} \
+  --chunk-control-endpoint=${SWB_CHUNK_CONTROL_ENDPOINT} \
+  --workspace-lease=${SWB_WORKSPACE_LEASE} \
+  $SWB_VOLUME_EXTRA_ARGS
+# blockvolume drains and closes on SIGTERM (a workspace lease closeout waits
+# up to 3s).
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+Restart=on-failure
+RestartSec=5s
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

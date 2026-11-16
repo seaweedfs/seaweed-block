@@ -6,7 +6,7 @@ This is the design reference for Seaweed Block. It describes how the code works,
 - **Part 2** describes agent workspace disks. They are a composition of core parts plus a SeaweedFS chunk backend.
 - **Part 3** covers verification across the codebase, lessons learned, and known issues.
 
-Code references name a file and a function, not a line number, so they stay valid as the code changes. Test references name the test function and its file. "Model-checked" means the protocol was specified in TLA+ and checked exhaustively with TLC at small scale. The specifications are not in this repository; Go regression tests are the in-repo evidence for every counterexample found that way.
+Code references name a file and a function, not a line number, so they stay valid as the code changes. Test references name the test function and its file. "Model-checked" means the protocol was specified in TLA+ and checked exhaustively with TLC at small scale. The specifications are in [`docs/spec/`](../spec/README.md); Go regression tests are the in-repo evidence for every counterexample found that way.
 
 ## Contents
 
@@ -134,7 +134,7 @@ stateDiagram-v2
 | Synced entries above an intentional LSN gap (a rebuild's frontier jump) are kept | `recovery.go` (replay keyed on the checkpoint, not on a contiguous prefix) | `TestWALStoreRecoverKeepsSyncedEntriesAboveAnUnpersistedFrontierJump` (`core/storage/walstore_recovery_frontier_gap_test.go`) | yes |
 | A failed checkpoint metadata write neither publishes nor recycles | `persistCheckpointReleasing` | `TestFlusherCheckpointMetadataFailureDoesNotPublishOrRecycle` (`core/storage/walstore_checkpoint_safety_test.go`) | — |
 
-**Tests and coverage.** Unit tests with hand-built torn and corrupted bytes; fault seams for append and metadata writes; a Linux SIGKILL crash test over checkpoint windows. Not covered: real power loss (dropped or reordered page-cache writes) at the device level, fuzzing of recovery inputs, and crash-point enumeration.
+**Tests and coverage.** Unit tests with hand-built torn and corrupted bytes; fault seams for append and metadata writes; a Linux SIGKILL crash test over checkpoint windows. Not covered: real power loss (dropped or reordered page-cache writes) at the device level, fuzzing of the recovery scan as a whole (the WAL record decoder is fuzzed, see 3.2), and crash-point enumeration.
 
 **Review directions.**
 - Any change to recovery must say what it does for: a torn tail, a torn record inside the retained window, a wrapped log, an empty window, and a corrupted synced record.
@@ -149,7 +149,7 @@ stateDiagram-v2
 
 ## 1.3 smartwal: in-place writes plus a metadata ring
 
-**Status: experimental.** It shows that `LogicalStorage` admits more than one implementation. It is not a default: `blockvolume --durable-impl` defaults to auto, which creates new volumes as walstore and opens an existing volume with its on-disk format, so smartwal is used only when chosen explicitly or found on disk. Open issues:
+**Status: experimental.** It shows that `LogicalStorage` admits more than one implementation. It is not a default: `blockvolume --durable-impl` defaults to auto, which creates new volumes as walstore and opens an existing volume with its on-disk format, so smartwal is used only when chosen explicitly or found on disk. Auto refuses a root that carries chunk metadata (a `walstore-chunk` volume) instead of opening it as plain walstore; such a volume needs `--durable-impl=walstore-chunk` with its remote configuration (`core/frontend/durable/provider.go` `openOrCreate`). Open issues:
 
 - in-place overwrites have no rollback on a torn write (see the crash window in Open items);
 - a block loses its per-block CRC once its ring record recycles;
@@ -447,7 +447,7 @@ The attempt path is never removed, so a late create can never land after a delet
 
 - Contract tests C1–C11 for the chunk layer (`core/storage/chunk_layer_contract_test.go`, `chunk_layer_c11_test.go`), with a fake remote that can hold a CAS or create and complete it after the caller gave up.
 - Real SeaweedFS (build tag `chunkstore_integration`, real master, volume and filer processes): `TestIntegration_ChunkRemoteContract` (`core/frontend/chunkstore/chunk_remote_integration_test.go`), `TestIntegration_DeleteVolumeThenGC` (`core/frontend/chunkstore/volume_delete_integration_test.go`), `TestIntegration_RetainAndUsage` (`core/frontend/chunkstore/retention_integration_test.go`), and `TestIntegration_OpsChunkGC_RealMasterAndStore` (`cmd/sw-block/chunk_gc_integration_test.go`).
-- Two-host lab lifecycle with Firecracker microVMs: create, write, snapshots, fork, clean move, stale-holder replay refused, delete, GC; 35 of 35 checks passed, GC reclaimed 38 of 38 candidates and every reclaimed chunk returned 404 (`README.md`, "Workspace lifecycle on two hosts").
+- Two-host lab lifecycle with Firecracker microVMs: create, write, snapshots, fork, clean move, stale-holder replay refused, delete, GC; 35 of 35 checks passed, GC reclaimed 38 of 38 candidates and every reclaimed chunk returned 404 ([workspace measurements](../workspace-measurements.md), "Workspace lifecycle on two hosts").
 
 ## 2.8 Workspace review directions
 
@@ -492,15 +492,15 @@ The attempt path is never removed, so a late create can never land after a delet
 | Binary tests | Real `blockvolume` and `blockmaster` binaries | `TestBinaryWorkspaceLeaseOptInOwnsCLEANShutdown` (`cmd/blockvolume/workspace_lease_binary_test.go`) |
 | Lab packets | Sealed scripts and expected results, run on lab hosts, with automatic teardown that reports a run as not clean if anything is left behind | the two-host lifecycle run (Part 2.7) |
 | Scenario runner (soak, chaos) | Test intent lives in YAML in this repo (`testops/`); the open-source `sw-test-runner` handles orchestration, cleanup and artifacts | `testops/README.md`, `testops/scenarios/` |
-| Model checking | TLA+ specifications for the chunk lifecycle, host takeover, WAL crash recovery, cut capture, the authority store, RF=2 failover, GC timing and hibernate/migrate ordering; each guard has a "remove it and get a counterexample" check | found the #152 issues, the torn-wrap loss (#159/#156) and the clock-skew gap (#158) |
+| Model checking | TLA+ specifications for the chunk lifecycle, host takeover, WAL crash recovery, cut capture, the authority store, RF=2 failover and GC timing (the specifications in [`docs/spec/`](../spec/README.md)); each guard has a "remove it and get a counterexample" check | found the #152 issues, the torn-wrap loss (#159/#156) and the clock-skew gap (#158) |
 | Review | Independent review rounds per PR, each finding turned into a failing test first; an independent repository-wide review | see Known issues |
 
 ## 3.2 What is not covered
 
-- **No test CI yet.** The repository workflow publishes images only; tests run on development and Linux test hosts.
-- **No fuzzing**, including the NVMe/TCP and iSCSI wire parsers and the recovery decoders.
+- **CI runs the short suite only.** The test workflow (`.github/workflows/test.yml`) runs `go build`, `go vet` and `go test -short` on pull requests and on `main`. Integration (`chunkstore_integration`), kernel (ublk, NVMe initiator) and lab tests run on development and Linux test hosts.
+- **Fuzzing covers the on-disk and remote decoders, not the wire parsers.** #175 added Go fuzz targets: `FuzzDecodeWALEntry`, `FuzzWALEntryRoundTrip`, `FuzzDecodeWALEntryFields` (`core/storage/wal_entry_fuzz_test.go`); `FuzzSmartWALDecode`, `FuzzSmartWALRecordFields`, `FuzzSmartWALRoundTrip` (`core/storage/smartwal/record_fuzz_test.go`); `FuzzParallelWALDecodeRecord`, `FuzzParallelWALRecordRoundTrip`, `FuzzParallelWALDecodeHeader` (`core/storage/parallelwal/codec_fuzz_test.go`); `FuzzDecodeManifestJSON`, `FuzzDecodeHeadDocument` (`core/frontend/chunkstore/decode_fuzz_test.go`). Their seed corpora run as ordinary tests; open-ended runs use `go test -fuzz`. The NVMe/TCP and iSCSI PDU parsers are not fuzzed.
 - **No power-loss simulation.** Every crash test keeps the page cache (SIGKILL or closing the file). Record-and-replay of block writes (in the style of dm-log-writes) is the planned next step.
-- **No direct test of the filer's conditional update under concurrency.** The real-filer test's stale-holder CAS is refused by the client-side pre-read before the filer's condition is exercised.
+- **The filer's conditional update is tested against one pinned filer only.** #163 added `TestIntegration_ConcurrentHEADCASRealFiler` (`core/frontend/chunkstore/concurrent_cas_integration_test.go`, build tag `chunkstore_integration`): concurrent HEAD updates are held until every client pre-read is done, then sent to a real filer, so the server's `expected_extended` check decides. It requires a `weed` binary whose SHA-256 matches the pinned build. Several filers sharing a store, and a capability probe for filers that predate the field, are not covered.
 - **Environment-sensitive tests:** Linux-only tests, tests that need a SeaweedFS binary, and tests that need the kernel ublk driver. Two frontend process tests are flaky on `main`.
 - **Model checking is small-scale and design-level:** 2–3 volumes or hosts, 4–6 LSNs, bounded clocks. The specifications are mapped to code by reading, so every counterexample must also become a Go test.
 
@@ -522,11 +522,11 @@ The attempt path is never removed, so a late create can never land after a delet
 
 These are tracked for fixes. Most were raised by an independent review of this repository.
 
-- **Moving a workspace back to a host with a surviving local file.** Only a fresh volume (with the fresh marker) claims HEAD before serving (`core/frontend/durable/provider.go`, `provider_chunk.go`). An existing local file attaches without claiming, and if its local LSN is not below HEAD's `RemoteLSN`, it can serve and later publish a stale image. **Planned fix:** a non-fresh attach must claim HEAD, or be refused, when HEAD's holder is not this holder.
+- **Moving a workspace back to a host with a surviving local file.** A fresh volume claims HEAD before serving. Since #167, a non-fresh attach reads HEAD first; if another holder published it, the attach fails closed with `ErrChunkStaleLocalRoot` (`core/frontend/durable/provider_chunk.go`): the volume is not served, and one log line and the status evidence name the local root to remove or quarantine, after which the next attach starts fresh from HEAD. **Follow-up:** recreate the local root from HEAD automatically instead of refusing.
 - **`fsync` errors are not sticky.** After a failed physical sync, the next `Sync` retries `fsync` and acknowledges on success (`walstore.go` `syncWALBatch`). On Linux the dirty pages may already be gone. **Planned fix:** a failed `fsync` puts the store into a terminal error state.
 - **NVMe/TCP H2CData offset overflow.** The `DATAO + length` bound check is done in 32-bit arithmetic and can wrap, so one malformed PDU can panic the process (`core/frontend/nvme/session.go` `recvH2CData`). Reachable from loopback by default. **Planned fix:** 64-bit arithmetic, offset and R2T consistency checks, and bounds on wire-supplied allocations.
-- **Process notes in source comments.** Some comments carry internal review attributions and timestamps. **Planned:** replace them with neutral design rationale.
-- **No direct test of the filer's conditional update.** Reading the open-source SeaweedFS filer: `UpdateEntry` takes an exclusive lock on the path before it validates `expected_extended`. No test in this repository exercises that path under concurrency or across several filers sharing a store, and there is no capability probe for a filer that predates the field. **Planned:** a concurrent test that bypasses the client-side pre-read, and a probe.
+- **Process notes in source comments.** #162 removed reviewer names and decision timestamps from code comments. A few comments still cite internal review labels (for example "ruling F1") where a neutral design rationale would be clearer.
+- **Filer conditional update: multi-filer and old-filer cases.** Reading the open-source SeaweedFS filer: `UpdateEntry` takes an exclusive lock on the path before it validates `expected_extended`. The concurrent case against one pinned filer is tested (#163, see 3.2). Not tested: several filers sharing a store, and a filer that predates the field (there is no capability probe). **Planned:** a multi-filer test and a probe.
 - **fsync latency (about 7 ms against 3 ms local).** Leads to measure with the `/status/durable` histograms:
   - the group committer waits a full 1 ms unless 64 waiters are queued, so at queue depth 1 every `fsync` pays at least 1 ms;
   - the checkpoint superblock `fsync` runs under the exclusive store lock, stalling reads and writes each flush cycle.

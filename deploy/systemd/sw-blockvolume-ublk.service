@@ -1,0 +1,85 @@
+# Root variant of sw-blockvolume.service for ublk (/dev/ublkbN). ublk needs
+# root, so this unit runs as root with its own state directory
+# (/var/lib/sw-block-volume-ublk); it cannot chown blockmaster's or the
+# unprivileged volume's state. Settings: /etc/sw-block/blockvolume.env, then
+# /etc/sw-block/blockvolume-ublk.env (overrides).
+#
+# Not a data migration: this unit does not move or reopen a volume created by
+# sw-blockvolume.service; it starts a new, empty volume in its own directory.
+#
+# Load the module at boot: echo ublk_drv | sudo tee /etc/modules-load.d/ublk.conf
+[Unit]
+Description=Seaweed Block volume over ublk (one replica, root)
+Documentation=https://github.com/seaweedfs/seaweed-block
+After=network-online.target sw-blockmaster.service
+Wants=network-online.target sw-blockmaster.service
+Conflicts=sw-blockvolume.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/sw-block/blockvolume.env
+EnvironmentFile=/etc/sw-block/blockvolume-ublk.env
+# Root-owned state, separate from every other unit's.
+StateDirectory=sw-block-volume-ublk
+StateDirectoryMode=0700
+ExecStart=/usr/local/bin/blockvolume \
+  --master=${SWB_MASTER_ADDR} \
+  --server-id=${SWB_SERVER_ID} \
+  --volume-id=${SWB_VOLUME_ID} \
+  --replica-id=${SWB_REPLICA_ID} \
+  --data-addr=${SWB_DATA_ADDR} \
+  --ctrl-addr=${SWB_CTRL_ADDR} \
+  --status-addr=${SWB_STATUS_ADDR} \
+  --heartbeat-interval=${SWB_HEARTBEAT_INTERVAL} \
+  --recover-timeout=${SWB_RECOVER_TIMEOUT} \
+  --durable-root=${SWB_DURABLE_ROOT} \
+  --durable-impl=${SWB_DURABLE_IMPL} \
+  --durable-blocks=${SWB_DURABLE_BLOCKS} \
+  --durable-blocksize=${SWB_DURABLE_BLOCKSIZE} \
+  --nvme-listen=${SWB_NVME_LISTEN} \
+  --nvme-subsysnqn=${SWB_NVME_SUBSYSNQN} \
+  --nvme-ns=${SWB_NVME_NS} \
+  --nvme-max-h2c-data-length=${SWB_NVME_MAX_H2C_DATA_LENGTH} \
+  --ublk-device=${SWB_UBLK_DEVICE} \
+  --ublk-queues=${SWB_UBLK_QUEUES} \
+  --ublk-queue-depth=${SWB_UBLK_QUEUE_DEPTH} \
+  --iscsi-listen=${SWB_ISCSI_LISTEN} \
+  --iscsi-iqn=${SWB_ISCSI_IQN} \
+  --iscsi-portal-addr=${SWB_ISCSI_PORTAL_ADDR} \
+  --iscsi-lun=${SWB_ISCSI_LUN} \
+  --iscsi-dataout-timeout=${SWB_ISCSI_DATAOUT_TIMEOUT} \
+  --replication-ack=${SWB_REPLICATION_ACK} \
+  --wal-retention-lsns=${SWB_WAL_RETENTION_LSNS} \
+  --recovery-mode=${SWB_RECOVERY_MODE} \
+  --degraded-probe-interval=${SWB_DEGRADED_PROBE_INTERVAL} \
+  --degraded-probe-cooldown-base=${SWB_DEGRADED_PROBE_COOLDOWN_BASE} \
+  --degraded-probe-cooldown-cap=${SWB_DEGRADED_PROBE_COOLDOWN_CAP} \
+  --chunk-filer=${SWB_CHUNK_FILER} \
+  --chunk-path=${SWB_CHUNK_PATH} \
+  --chunk-collection=${SWB_CHUNK_COLLECTION} \
+  --chunk-replication=${SWB_CHUNK_REPLICATION} \
+  --chunk-capture-interval=${SWB_CHUNK_CAPTURE_INTERVAL} \
+  --chunk-upload-concurrency=${SWB_CHUNK_UPLOAD_CONCURRENCY} \
+  --chunk-dirty-threshold=${SWB_CHUNK_DIRTY_THRESHOLD} \
+  --chunk-control-endpoint=${SWB_CHUNK_CONTROL_ENDPOINT} \
+  --workspace-lease=${SWB_WORKSPACE_LEASE} \
+  $SWB_VOLUME_EXTRA_ARGS
+# blockvolume drains and closes on SIGTERM (a workspace lease closeout waits
+# up to 3s).
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+Restart=on-failure
+RestartSec=5s
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+# PrivateDevices= is off: the server needs /dev/ublk-control and /dev/ublkcN.
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
