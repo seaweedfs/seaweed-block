@@ -42,12 +42,13 @@ func TestDurabilityLatencyCountsSharedPhysicalSyncAndDedup(t *testing.T) {
 func TestDurabilityLatencyGroupWaitIsPerRequest(t *testing.T) {
 	var calls atomic.Uint64
 	gc := NewGroupCommitter(GroupCommitterConfig{MaxBatch: 2, MaxDelay: time.Second, SyncFunc: func() error { calls.Add(1); return nil }})
-	go gc.Run()
-	defer gc.Stop()
 	result := make(chan error, 2)
 	for i := 0; i < 2; i++ {
 		go func() { result <- gc.SyncCache() }()
 	}
+	waitCommitPending(t, gc, 2)
+	go gc.Run()
+	defer gc.Stop()
 	for i := 0; i < 2; i++ {
 		select {
 		case err := <-result:

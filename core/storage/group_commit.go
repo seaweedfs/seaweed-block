@@ -83,7 +83,9 @@ func (gc *GroupCommitter) Run() {
 			gc.mu.Lock()
 			n := len(gc.pending)
 			gc.mu.Unlock()
-			if n >= gc.maxBatch {
+			// A lone caller has nobody to batch with. Followers arriving during
+			// this physical sync remain queued for the next batch.
+			if n == 1 || n >= gc.maxBatch {
 				break
 			}
 			select {
