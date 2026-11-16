@@ -138,6 +138,9 @@ type WALStore struct {
 	// Physical WAL sync attempts exclude the separate metadata/checkpoint syncs.
 	syncWALFile  func() error
 	walSyncCalls atomic.Uint64
+	// syncExtentFile is the flusher's fsync after extent writes (the same
+	// file as the WAL); a seam for fault injection.
+	syncExtentFile func() error
 	// Generations cover completed append attempts and recovery publication.
 	walMutation     atomic.Uint64
 	durableMutation atomic.Uint64
@@ -271,6 +274,7 @@ func openInitializedWithMetadata(path string, f *os.File, sb *superblock, metada
 		s.walSyncCalls.Add(1)
 		return f.Sync()
 	}
+	s.syncExtentFile = f.Sync
 	committer := NewGroupCommitter(GroupCommitterConfig{
 		SyncFunc: s.syncWALBatch,
 		MaxDelay: 1 * time.Millisecond,
