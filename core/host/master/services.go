@@ -62,9 +62,8 @@ func (s *services) CreateVolume(ctx context.Context, req *control.CreateVolumeRe
 	// held through the create (workspace_protocol.md: reservation checks
 	// and commits stay under workspaceMu).
 	s.host.workspaceMu.Lock()
-	reservedNow := stores.Deletions.Reserved(spec.VolumeID)
-	s.host.workspaceMu.Unlock() // RED: the lock is dropped before the create
-	if reservedNow {
+	defer s.host.workspaceMu.Unlock()
+	if stores.Deletions.Reserved(spec.VolumeID) {
 		return nil, status.Errorf(codes.FailedPrecondition, "create volume: %s is being deleted or was deleted; its id is never reused", spec.VolumeID)
 	}
 	if createVolumeHook != nil {

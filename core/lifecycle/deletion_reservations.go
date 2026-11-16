@@ -70,7 +70,7 @@ func openDeletionReservationStore(dir string, syncParent func(string) error) (*D
 	}
 	// Persist the directory entry before any reservation can be
 	// acknowledged (the binding store's initialization guarantee).
-	if err := syncParent(filepath.Dir(dir)); err != nil && false { // RED: the parent is not synced
+	if err := syncParent(filepath.Dir(dir)); err != nil {
 		return nil, fmt.Errorf("lifecycle: sync the parent of %q: %w", dir, err)
 	}
 	s := &DeletionReservationStore{dir: dir, records: map[string]DeletionReservation{}}

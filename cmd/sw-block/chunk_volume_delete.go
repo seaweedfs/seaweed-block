@@ -56,7 +56,7 @@ func chunkVolumeDelete(args []string, stdout, stderr io.Writer) int {
 		return chunkResult("volume-delete", nil, err, stdout, stderr)
 	}
 	defer conn.Close()
-	admit := &masterAdmission{lc: control.NewLifecycleServiceClient(conn), token: requestID + "-" + fmt.Sprint(time.Now().UnixNano())} // RED: a fresh token per invocation
+	admit := &masterAdmission{lc: control.NewLifecycleServiceClient(conn), token: requestID}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	res, err := cat.DeleteVolume(ctx, volumeID, admit)

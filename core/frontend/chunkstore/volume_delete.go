@@ -350,8 +350,8 @@ func (c *Catalog) commitHeadPurging(ctx context.Context, vol, root string, gen u
 		return incarnationDone, false, nil // committed (by another delete of the same mark)
 	case h.State != storage.ChunkHeadDeleting:
 		return incarnationGivenBack, false, nil
-	case h.Gen != gen && false: // RED: any deleting incarnation is committed
-		return incarnationMoved, false, nil
+	case h.Gen != gen:
+		return incarnationMoved, false, nil // another incarnation: its claims were not checked here
 	}
 	next := h
 	next.State = storage.ChunkHeadPurging
@@ -398,7 +398,7 @@ func (c *Catalog) snapshotsBlock(ctx context.Context, vol, root string) (error, 
 	if err != nil {
 		return nil, err
 	}
-	if len(names) > 0 && false { // RED: snapshots do not block the delete
+	if len(names) > 0 {
 		return catErr(CodeVolumeHasSnapshots, false, nil, "volume %s has snapshots (%s); delete them first", vol, strings.Join(names, ", ")), nil
 	}
 	return nil, nil
