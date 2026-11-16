@@ -665,8 +665,11 @@ var ClusterEvidenceService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	LifecycleService_CreateVolume_FullMethodName = "/seaweedfs.block.control.LifecycleService/CreateVolume"
-	LifecycleService_DeleteVolume_FullMethodName = "/seaweedfs.block.control.LifecycleService/DeleteVolume"
+	LifecycleService_CreateVolume_FullMethodName         = "/seaweedfs.block.control.LifecycleService/CreateVolume"
+	LifecycleService_DeleteVolume_FullMethodName         = "/seaweedfs.block.control.LifecycleService/DeleteVolume"
+	LifecycleService_MarkVolumeDeleting_FullMethodName   = "/seaweedfs.block.control.LifecycleService/MarkVolumeDeleting"
+	LifecycleService_AbortVolumeDeleting_FullMethodName  = "/seaweedfs.block.control.LifecycleService/AbortVolumeDeleting"
+	LifecycleService_CommitVolumeDeleting_FullMethodName = "/seaweedfs.block.control.LifecycleService/CommitVolumeDeleting"
 )
 
 // LifecycleServiceClient is the client API for LifecycleService service.
@@ -675,6 +678,18 @@ const (
 type LifecycleServiceClient interface {
 	CreateVolume(ctx context.Context, in *CreateVolumeRequest, opts ...grpc.CallOption) (*CreateVolumeResponse, error)
 	DeleteVolume(ctx context.Context, in *DeleteVolumeRequest, opts ...grpc.CallOption) (*DeleteVolumeResponse, error)
+	// MarkVolumeDeleting admits a chunk volume delete: under the same locks
+	// as every assignment, placement and binding write it refuses
+	// (FAILED_PRECONDITION) a volume with live or pending authority, and
+	// otherwise records the delete's token in a durable deletion
+	// reservation, independent of the volume record. While reserved, no
+	// new assignment, placement or binding is admitted and the id is not
+	// created again. AbortVolumeDeleting gives a token back (the
+	// reservation goes with its last token); CommitVolumeDeleting makes it
+	// permanent (never given back).
+	MarkVolumeDeleting(ctx context.Context, in *MarkVolumeDeletingRequest, opts ...grpc.CallOption) (*MarkVolumeDeletingResponse, error)
+	AbortVolumeDeleting(ctx context.Context, in *MarkVolumeDeletingRequest, opts ...grpc.CallOption) (*MarkVolumeDeletingResponse, error)
+	CommitVolumeDeleting(ctx context.Context, in *MarkVolumeDeletingRequest, opts ...grpc.CallOption) (*MarkVolumeDeletingResponse, error)
 }
 
 type lifecycleServiceClient struct {
@@ -703,12 +718,51 @@ func (c *lifecycleServiceClient) DeleteVolume(ctx context.Context, in *DeleteVol
 	return out, nil
 }
 
+func (c *lifecycleServiceClient) MarkVolumeDeleting(ctx context.Context, in *MarkVolumeDeletingRequest, opts ...grpc.CallOption) (*MarkVolumeDeletingResponse, error) {
+	out := new(MarkVolumeDeletingResponse)
+	err := c.cc.Invoke(ctx, LifecycleService_MarkVolumeDeleting_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *lifecycleServiceClient) AbortVolumeDeleting(ctx context.Context, in *MarkVolumeDeletingRequest, opts ...grpc.CallOption) (*MarkVolumeDeletingResponse, error) {
+	out := new(MarkVolumeDeletingResponse)
+	err := c.cc.Invoke(ctx, LifecycleService_AbortVolumeDeleting_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *lifecycleServiceClient) CommitVolumeDeleting(ctx context.Context, in *MarkVolumeDeletingRequest, opts ...grpc.CallOption) (*MarkVolumeDeletingResponse, error) {
+	out := new(MarkVolumeDeletingResponse)
+	err := c.cc.Invoke(ctx, LifecycleService_CommitVolumeDeleting_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // LifecycleServiceServer is the server API for LifecycleService service.
 // All implementations must embed UnimplementedLifecycleServiceServer
 // for forward compatibility
 type LifecycleServiceServer interface {
 	CreateVolume(context.Context, *CreateVolumeRequest) (*CreateVolumeResponse, error)
 	DeleteVolume(context.Context, *DeleteVolumeRequest) (*DeleteVolumeResponse, error)
+	// MarkVolumeDeleting admits a chunk volume delete: under the same locks
+	// as every assignment, placement and binding write it refuses
+	// (FAILED_PRECONDITION) a volume with live or pending authority, and
+	// otherwise records the delete's token in a durable deletion
+	// reservation, independent of the volume record. While reserved, no
+	// new assignment, placement or binding is admitted and the id is not
+	// created again. AbortVolumeDeleting gives a token back (the
+	// reservation goes with its last token); CommitVolumeDeleting makes it
+	// permanent (never given back).
+	MarkVolumeDeleting(context.Context, *MarkVolumeDeletingRequest) (*MarkVolumeDeletingResponse, error)
+	AbortVolumeDeleting(context.Context, *MarkVolumeDeletingRequest) (*MarkVolumeDeletingResponse, error)
+	CommitVolumeDeleting(context.Context, *MarkVolumeDeletingRequest) (*MarkVolumeDeletingResponse, error)
 	mustEmbedUnimplementedLifecycleServiceServer()
 }
 
@@ -721,6 +775,15 @@ func (UnimplementedLifecycleServiceServer) CreateVolume(context.Context, *Create
 }
 func (UnimplementedLifecycleServiceServer) DeleteVolume(context.Context, *DeleteVolumeRequest) (*DeleteVolumeResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method DeleteVolume not implemented")
+}
+func (UnimplementedLifecycleServiceServer) MarkVolumeDeleting(context.Context, *MarkVolumeDeletingRequest) (*MarkVolumeDeletingResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method MarkVolumeDeleting not implemented")
+}
+func (UnimplementedLifecycleServiceServer) AbortVolumeDeleting(context.Context, *MarkVolumeDeletingRequest) (*MarkVolumeDeletingResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AbortVolumeDeleting not implemented")
+}
+func (UnimplementedLifecycleServiceServer) CommitVolumeDeleting(context.Context, *MarkVolumeDeletingRequest) (*MarkVolumeDeletingResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CommitVolumeDeleting not implemented")
 }
 func (UnimplementedLifecycleServiceServer) mustEmbedUnimplementedLifecycleServiceServer() {}
 
@@ -771,6 +834,60 @@ func _LifecycleService_DeleteVolume_Handler(srv interface{}, ctx context.Context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _LifecycleService_MarkVolumeDeleting_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MarkVolumeDeletingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(LifecycleServiceServer).MarkVolumeDeleting(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: LifecycleService_MarkVolumeDeleting_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(LifecycleServiceServer).MarkVolumeDeleting(ctx, req.(*MarkVolumeDeletingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _LifecycleService_AbortVolumeDeleting_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MarkVolumeDeletingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(LifecycleServiceServer).AbortVolumeDeleting(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: LifecycleService_AbortVolumeDeleting_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(LifecycleServiceServer).AbortVolumeDeleting(ctx, req.(*MarkVolumeDeletingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _LifecycleService_CommitVolumeDeleting_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MarkVolumeDeletingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(LifecycleServiceServer).CommitVolumeDeleting(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: LifecycleService_CommitVolumeDeleting_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(LifecycleServiceServer).CommitVolumeDeleting(ctx, req.(*MarkVolumeDeletingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // LifecycleService_ServiceDesc is the grpc.ServiceDesc for LifecycleService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -785,6 +902,18 @@ var LifecycleService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteVolume",
 			Handler:    _LifecycleService_DeleteVolume_Handler,
+		},
+		{
+			MethodName: "MarkVolumeDeleting",
+			Handler:    _LifecycleService_MarkVolumeDeleting_Handler,
+		},
+		{
+			MethodName: "AbortVolumeDeleting",
+			Handler:    _LifecycleService_AbortVolumeDeleting_Handler,
+		},
+		{
+			MethodName: "CommitVolumeDeleting",
+			Handler:    _LifecycleService_CommitVolumeDeleting_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

@@ -282,8 +282,14 @@ func importLifecycleVolumes(h *master.Host, volumes []lifecycle.VolumeSpec) erro
 			merged.ReplicationFactor = spec.ReplicationFactor
 			spec = merged
 		}
-		if _, err := stores.Volumes.CreateVolume(spec); err != nil {
+		imported, err := h.ImportLifecycleVolume(spec)
+		if err != nil {
 			return fmt.Errorf("register lifecycle volume %s: %w", spec.VolumeID, err)
+		}
+		if !imported {
+			// A chunk volume delete reserved this id: it is never created
+			// again, also when the cluster spec still lists it.
+			fmt.Fprintf(os.Stderr, "blockmaster: cluster spec volume %s not imported: its id is reserved by a volume delete\n", spec.VolumeID)
 		}
 	}
 	return nil
@@ -324,6 +330,9 @@ func importLifecyclePlacementIntents(h *master.Host, intents []lifecycle.Placeme
 		return fmt.Errorf("lifecycle placement import requires --lifecycle-store")
 	}
 	for _, intent := range intents {
+		if stores.Deletions.Reserved(intent.VolumeID) {
+			continue // never placed again (see importLifecycleVolumes)
+		}
 		plan := lifecycle.PlacementPlan{
 			VolumeID:   intent.VolumeID,
 			DesiredRF:  intent.DesiredRF,
