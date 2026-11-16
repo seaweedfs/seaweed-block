@@ -48,9 +48,13 @@ type GCObject struct {
 	FID    string `json:"fid"`
 }
 type GCResult struct {
-	Roots                                                   []GCRoot   `json:"roots"`
-	WouldDelete                                             []GCObject `json:"would_delete"`
-	WouldExpireIntents                                      []string   `json:"would_expire_intents"`
+	Roots              []GCRoot   `json:"roots"`
+	WouldDelete        []GCObject `json:"would_delete"`
+	WouldExpireIntents []string   `json:"would_expire_intents"`
+	// Unreferenced lists every binding no root references and GC has not
+	// finished reclaiming, within its grace or not: what is stored but no
+	// longer needed (space accounting reads it from Preview).
+	Unreferenced                                            []GCObject `json:"unreferenced"`
 	Volumes, Intents, ExpiredIntents, Candidates, Reclaimed int
 	// Pre-binding needles cannot be enumerated by this API. They are retained;
 	// UnknownUnbound is true rather than inventing a report-only count.
@@ -112,6 +116,7 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 	result.Roots = []GCRoot{}
 	result.WouldDelete = []GCObject{}
 	result.WouldExpireIntents = []string{}
+	result.Unreferenced = []GCObject{}
 	defer func() {
 		if err != nil && apply {
 			g.candidates = map[string]gcCandidate{}
@@ -277,6 +282,8 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 		if string(b.entry.Extended[extGCDeleted]) == "done" {
 			continue
 		}
+		// RED: unreferenced bindings not recorded
+		_ = append(result.Unreferenced, GCObject{Volume: b.volume, Key: mustUnescapeGCKey(b.entry.Name), FID: string(b.entry.Extended[extFid])})
 		created := time.Unix(b.entry.Attributes.Crtime, 0)
 		if !start.After(created.Add(g.cfg.Grace)) {
 			continue

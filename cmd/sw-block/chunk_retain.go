@@ -13,32 +13,44 @@ import (
 )
 
 // chunkUsage: sw-block ops chunk usage --volume v --chunk-filer host:port
-// prints the volume's space accounting and retention policy (from
-// manifests and filer listings; no chunk data reads).
+// --master host:port prints the volume's space accounting and retention
+// policy (from manifests and filer listings; no chunk data reads), with
+// the unreferenced-not-yet-collected bindings from a read-only GC preview
+// (which needs the blockmaster's epoch authority, as gc does).
 func chunkUsage(args []string, stdout, stderr io.Writer) int {
 	fs := chunkFlagSet("usage", stderr)
 	var (
-		volumeID, filer, base string
-		timeout               time.Duration
+		volumeID, filer, base, master string
+		timeout                       time.Duration
 	)
 	fs.StringVar(&volumeID, "volume", "", "volume id")
+	fs.StringVar(&master, "master", "", "authoritative blockmaster gRPC address (for the GC preview)")
 	fs.StringVar(&filer, "chunk-filer", "", "SeaweedFS filer gRPC address host:port")
 	fs.StringVar(&base, "chunk-path", defaultChunkPathCLI, "filer directory holding one directory per volume")
 	fs.DurationVar(&timeout, "timeout", 60*time.Second, "filer timeout")
 	if err := fs.Parse(args); err != nil {
 		return chunkFail(chunkName(fs), stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, err.Error(), false)
 	}
-	if volumeID == "" {
-		return chunkFail("usage", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--volume is required", false)
+	if volumeID == "" || master == "" {
+		return chunkFail("usage", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--volume and --master are required", false)
 	}
 	cat, closeFn, exit := chunkCatalog("usage", filer, base, stdout, stderr)
 	if exit >= 0 {
 		return exit
 	}
 	defer closeFn()
+	issuedEpoch, closeMaster, err := masterIssuedEpoch(master)
+	if err != nil {
+		return chunkResult("usage", nil, err, stdout, stderr)
+	}
+	defer closeMaster()
+	gc, err := chunkstore.NewCollector(cat, refuseBlobDeletes{}, chunkstore.GCConfig{Grace: time.Hour, IntentTTL: time.Hour, IssuedEpoch: issuedEpoch})
+	if err != nil {
+		return chunkResult("usage", nil, err, stdout, stderr)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	u, err := cat.Usage(ctx, volumeID)
+	u, err := cat.UsageWithGC(ctx, volumeID, gc)
 	return chunkResult("usage", u, err, stdout, stderr)
 }
 
@@ -124,4 +136,12 @@ func retainPartial(res chunkstore.RetentionResult, err error, stdout, stderr io.
 		fmt.Fprintf(stderr, "sw-block ops chunk retain: write the result: %v\n", wErr)
 	}
 	return chunkExitFailed
+}
+
+// refuseBlobDeletes backs the usage preview's collector: a preview never
+// deletes, and this makes any attempt fail instead of deleting.
+type refuseBlobDeletes struct{}
+
+func (refuseBlobDeletes) DeleteBlob(context.Context, string) error {
+	return errors.New("ops chunk usage: a preview never deletes blobs")
 }

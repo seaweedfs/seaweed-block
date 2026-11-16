@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/host/master"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -79,10 +80,27 @@ func TestOpsChunk_UsageAndRetain(t *testing.T) {
 	if code != 0 || json.Unmarshal([]byte(out), &applied) != nil || len(applied.Deleted) != 3 || applied.Kept != 2 {
 		t.Fatalf("retain: %d %q %q", code, out, errs)
 	}
-	code, out, errs = runChunk(append([]string{"usage"}, filer...)...)
+	// usage needs the blockmaster for its GC preview, as gc does.
+	if code, out, _ := runChunk(append([]string{"usage"}, filer...)...); code == 0 || !strings.Contains(out, codeBadRequestCLI) {
+		t.Fatalf("usage without --master: %d %q; want a bad request", code, out)
+	}
+	h, err := master.New(gcTestMasterConfig(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.Start()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = h.Close(ctx)
+	})
+	code, out, errs = runChunk(append([]string{"usage", "--master", h.Addr()}, filer...)...)
 	var u chunkstore.VolumeUsage
 	if code != 0 || json.Unmarshal([]byte(out), &u) != nil || len(u.Snapshots) != 2 || u.Policy.KeepNewest != 2 || !u.PolicySet {
 		t.Fatalf("usage: %d %q %q", code, out, errs)
+	}
+	if u.Unreferenced == nil || u.Unreferenced.Bindings != 0 || !u.Unreferenced.UnknownUnbound {
+		t.Fatalf("usage unreferenced: %+v; want the GC preview figure (0 bindings here)", u.Unreferenced)
 	}
 	if code, out, _ := runChunk("retain", "--volume", "v1", "--chunk-filer", "f:1", "--set-policy", "--dry-run"); code == 0 || !strings.Contains(out, codeBadRequestCLI) {
 		t.Fatalf("--set-policy --dry-run: %d %q; want a bad request", code, out)

@@ -32,8 +32,16 @@ import (
 //     StoredUpperBound is set.
 //
 // "Bytes uploaded since creation" needs a counter nothing records today (a
-// follow-up). The unreferenced-not-yet-collected bytes come from GC's
-// preview once that lands (#140).
+// follow-up).
+//
+// UsageWithGC adds the unreferenced-not-yet-collected bindings from a GC
+// Preview (#140): GC's own mark over every root of every volume (HEADs,
+// active and deleting snapshots, unpublished snapshot attempts, retained
+// intents), so the accounting and the collector agree by construction.
+// Preview writes nothing. An unreferenced key has no manifest size, so its
+// bytes are an upper bound (a full chunk each). Needles uploaded before
+// their binding was written cannot be listed (GC's UnknownUnbound) and are
+// not counted.
 
 // SnapshotUsage is one snapshot's share of a volume's space.
 type SnapshotUsage struct {
@@ -57,6 +65,43 @@ type VolumeUsage struct {
 	StoredUpperBound bool            `json:"storedUpperBound"`
 	Policy           RetentionPolicy `json:"policy"`
 	PolicySet        bool            `json:"policySet"`
+	// Unreferenced is set only by UsageWithGC.
+	Unreferenced *UnreferencedUsage `json:"unreferenced,omitempty"`
+}
+
+// UnreferencedUsage is what a volume stores that no root references and GC
+// has not yet reclaimed.
+type UnreferencedUsage struct {
+	Bindings        int    `json:"bindings"`
+	BytesUpperBound uint64 `json:"bytesUpperBound"` // a full chunk per binding
+	// UnknownUnbound: needles without a binding are not enumerable and not
+	// counted (GCResult.UnknownUnbound).
+	UnknownUnbound bool `json:"unknownUnbound"`
+}
+
+// UsageWithGC is Usage plus the unreferenced-not-yet-collected bindings of
+// vol from gc.Preview (read-only).
+func (c *Catalog) UsageWithGC(ctx context.Context, vol string, gc *Collector) (VolumeUsage, error) {
+	u, err := c.Usage(ctx, vol)
+	if err != nil {
+		return VolumeUsage{}, err
+	}
+	if red := true; red { // RED: no GC figure
+		return u, nil
+	}
+	res, err := gc.Preview(ctx)
+	if err != nil {
+		return VolumeUsage{}, err
+	}
+	un := &UnreferencedUsage{UnknownUnbound: res.UnknownUnbound}
+	for _, o := range res.Unreferenced {
+		if o.Volume == vol {
+			un.Bindings++
+			un.BytesUpperBound += u.ChunkBytes
+		}
+	}
+	u.Unreferenced = un
+	return u, nil
 }
 
 // chunkSize is the byte size of chunk index idx under g.

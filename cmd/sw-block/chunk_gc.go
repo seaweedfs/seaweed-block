@@ -49,13 +49,26 @@ func chunkGC(args []string, stdout, stderr io.Writer) int {
 	if e != nil {
 		return chunkFail("gc", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, e.Error(), false)
 	}
-	conn, e := grpc.NewClient(master, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	issuedEpoch, closeMaster, e := masterIssuedEpoch(master)
 	if e != nil {
 		return chunkResult("gc", nil, e, stdout, stderr)
 	}
-	defer conn.Close()
+	defer closeMaster()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	out, e := cat.ExecuteGC(ctx, blobs, chunkstore.GCConfig{Grace: grace, IntentTTL: ttl, Now: chunkGCNow, IssuedEpoch: issuedEpoch}, apply)
+	return chunkGCResult(out, e, stdout, stderr)
+}
+
+// masterIssuedEpoch reads the highest epoch the blockmaster at master has
+// issued for a volume (GCConfig.IssuedEpoch); gc and usage share it.
+func masterIssuedEpoch(master string) (func(context.Context, string) (uint64, error), func() error, error) {
+	conn, e := grpc.NewClient(master, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if e != nil {
+		return nil, nil, e
+	}
 	evidence := control.NewEvidenceServiceClient(conn)
-	issuedEpoch := func(ctx context.Context, vol string) (uint64, error) {
+	return func(ctx context.Context, vol string) (uint64, error) {
 		reply, e := evidence.QueryVolumeStatus(ctx, &control.StatusRequest{VolumeId: vol})
 		if e != nil {
 			return 0, e
@@ -64,11 +77,7 @@ func chunkGC(args []string, stdout, stderr io.Writer) int {
 			return 0, fmt.Errorf("blockmaster has no issued authority for %s", vol)
 		}
 		return reply.Epoch, nil
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	out, e := cat.ExecuteGC(ctx, blobs, chunkstore.GCConfig{Grace: grace, IntentTTL: ttl, Now: chunkGCNow, IssuedEpoch: issuedEpoch}, apply)
-	return chunkGCResult(out, e, stdout, stderr)
+	}, conn.Close, nil
 }
 
 // Error status and code remain failures, but a failure must not erase known
