@@ -43,6 +43,8 @@ import (
 //   - Online resize
 //   - Compaction (the WAL is bounded but periodic checkpoints free space)
 type WALStore struct {
+	metadata BlockMetadata // immutable before publication
+
 	path                       string
 	fd                         *os.File
 	sb                         *superblock
@@ -142,6 +144,10 @@ type WALStore struct {
 // unit (default 4096 if zero). The on-disk file is preallocated to
 // hold the superblock + WAL region + a fully addressable extent.
 func CreateWALStore(path string, numBlocks uint32, blockSize int) (*WALStore, error) {
+	return CreateWALStoreWithOptions(path, numBlocks, blockSize, WALStoreOptions{})
+}
+
+func CreateWALStoreWithOptions(path string, numBlocks uint32, blockSize int, opts WALStoreOptions) (*WALStore, error) {
 	if blockSize == 0 {
 		blockSize = DefaultBlockSize
 	}
@@ -166,7 +172,11 @@ func CreateWALStore(path string, numBlocks uint32, blockSize int) (*WALStore, er
 	}
 	sb.CreatedAt = uint64(time.Now().UnixNano())
 
-	totalSize := int64(superblockSize) + int64(sb.WALSize) + int64(sb.VolumeSize)
+	metadata, totalSize, err := bindBlockMetadata(f, &sb, opts, true, false)
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
 	if err := f.Truncate(totalSize); err != nil {
 		_ = f.Close()
 		return nil, fmt.Errorf("storage: preallocate %d bytes: %w", totalSize, err)
@@ -183,12 +193,16 @@ func CreateWALStore(path string, numBlocks uint32, blockSize int) (*WALStore, er
 		_ = f.Close()
 		return nil, fmt.Errorf("storage: fsync after create: %w", err)
 	}
-	return openInitialized(path, f, &sb)
+	return openInitializedWithMetadata(path, f, &sb, metadata)
 }
 
 // OpenWALStore opens an existing store file WITHOUT recovering it.
 // Call Recover() before any Read/Write to replay the WAL.
 func OpenWALStore(path string) (*WALStore, error) {
+	return OpenWALStoreWithOptions(path, WALStoreOptions{})
+}
+
+func OpenWALStoreWithOptions(path string, opts WALStoreOptions) (*WALStore, error) {
 	f, err := os.OpenFile(path, os.O_RDWR, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("storage: open %s: %w", path, err)
@@ -206,7 +220,12 @@ func OpenWALStore(path string) (*WALStore, error) {
 		_ = f.Close()
 		return nil, err
 	}
-	return openInitialized(path, f, &sb)
+	metadata, _, err := bindBlockMetadata(f, &sb, opts, false, false)
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return openInitializedWithMetadata(path, f, &sb, metadata)
 }
 
 // openInitialized is the shared constructor body used by both Create
@@ -214,9 +233,14 @@ func OpenWALStore(path string) (*WALStore, error) {
 // the dirty map, and the group committer; it does NOT replay the WAL
 // (that is Recover's job).
 func openInitialized(path string, f *os.File, sb *superblock) (*WALStore, error) {
+	return openInitializedWithMetadata(path, f, sb, nil)
+}
+
+func openInitializedWithMetadata(path string, f *os.File, sb *superblock, metadata BlockMetadata) (*WALStore, error) {
 	dm := newDirtyMap(64) // 64 shards is plenty for Phase 07 demo workloads
 
 	s := &WALStore{
+		metadata:      metadata,
 		path:          path,
 		fd:            f,
 		sb:            sb,

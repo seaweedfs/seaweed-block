@@ -36,6 +36,8 @@ import (
 // methods (Write, Sync, Recover, Trim) are exposed; callers that
 // need them must use OpenWALStore + Recover.
 type WALStoreReader struct {
+	metadata BlockMetadata
+
 	mu     sync.Mutex
 	fd     *os.File
 	sb     *superblock
@@ -57,6 +59,10 @@ type WALStoreReader struct {
 // would race the dirty-map snapshot. Typical use: stop the daemon
 // (or pause writes) before invoking OpenReadOnly.
 func OpenReadOnly(path string) (*WALStoreReader, error) {
+	return OpenReadOnlyWithOptions(path, WALStoreOptions{})
+}
+
+func OpenReadOnlyWithOptions(path string, opts WALStoreOptions) (*WALStoreReader, error) {
 	f, err := os.OpenFile(path, os.O_RDONLY, 0)
 	if err != nil {
 		return nil, fmt.Errorf("storage: OpenReadOnly %s: %w", path, err)
@@ -74,6 +80,11 @@ func OpenReadOnly(path string) (*WALStoreReader, error) {
 		_ = f.Close()
 		return nil, err
 	}
+	metadata, _, err := bindBlockMetadata(f, &sb, opts, false, true)
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
 	dm := newDirtyMap(64)
 	// Replay WAL into the dirty map. recoverWAL is a pure read pass
 	// over the WAL frames — no writes back to the fd.
@@ -81,7 +92,7 @@ func OpenReadOnly(path string) (*WALStoreReader, error) {
 		_ = f.Close()
 		return nil, fmt.Errorf("storage: OpenReadOnly recover: %w", err)
 	}
-	return &WALStoreReader{fd: f, sb: &sb, dm: dm}, nil
+	return &WALStoreReader{metadata: metadata, fd: f, sb: &sb, dm: dm}, nil
 }
 
 // Read returns the current bytes at lba — same merge logic the
