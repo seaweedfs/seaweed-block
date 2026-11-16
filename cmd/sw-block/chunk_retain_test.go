@@ -99,7 +99,7 @@ func TestOpsChunk_UsageAndRetain(t *testing.T) {
 	if code != 0 || json.Unmarshal([]byte(out), &u) != nil || len(u.Snapshots) != 2 || u.Policy.KeepNewest != 2 || !u.PolicySet {
 		t.Fatalf("usage: %d %q %q", code, out, errs)
 	}
-	if u.Unreferenced == nil || u.Unreferenced.Bindings != 0 || !u.Unreferenced.UnknownUnbound {
+	if u.Unreferenced == nil || u.Unreferenced.BindingsUpperBound != 0 || !u.Unreferenced.UnknownUnbound {
 		t.Fatalf("usage unreferenced: %+v; want the GC preview figure (0 bindings here)", u.Unreferenced)
 	}
 	if code, out, _ := runChunk("retain", "--volume", "v1", "--chunk-filer", "f:1", "--set-policy", "--dry-run"); code == 0 || !strings.Contains(out, codeBadRequestCLI) {

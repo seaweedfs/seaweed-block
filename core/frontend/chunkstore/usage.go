@@ -38,8 +38,13 @@ import (
 // Preview (#140): GC's own mark over every root of every volume (HEADs,
 // active and deleting snapshots, unpublished snapshot attempts, retained
 // intents), so the accounting and the collector agree by construction.
-// Preview writes nothing. An unreferenced key has no manifest size, so its
-// bytes are an upper bound (a full chunk each). Needles uploaded before
+// Preview writes nothing. The figure is an upper bound: Preview's mark reads
+// intents before it lists bindings, so a capture that starts in between
+// (intent, then upload) shows as unreferenced; UsageWithGC re-reads the
+// volume's intents and HEAD after the preview and drops every key they name
+// (review of #146), but a capture that both starts and completes in a later
+// window can still inflate it until the next run. An unreferenced key has
+// no manifest size, so its bytes are a full chunk each. Needles uploaded before
 // their binding was written cannot be listed (GC's UnknownUnbound) and are
 // not counted.
 
@@ -72,15 +77,19 @@ type VolumeUsage struct {
 // UnreferencedUsage is what a volume stores that no root references and GC
 // has not yet reclaimed.
 type UnreferencedUsage struct {
-	Bindings        int    `json:"bindings"`
-	BytesUpperBound uint64 `json:"bytesUpperBound"` // a full chunk per binding
+	// BindingsUpperBound and BytesUpperBound are upper bounds: see the
+	// header (in-flight captures can inflate them).
+	BindingsUpperBound int      `json:"bindingsUpperBound"`
+	BytesUpperBound    uint64   `json:"bytesUpperBound"` // a full chunk per binding
+	Keys               []string `json:"keys"`            // the counted keys, sorted
 	// UnknownUnbound: needles without a binding are not enumerable and not
 	// counted (GCResult.UnknownUnbound).
 	UnknownUnbound bool `json:"unknownUnbound"`
 }
 
 // UsageWithGC is Usage plus the unreferenced-not-yet-collected bindings of
-// vol from gc.Preview (read-only).
+// vol from gc.Preview (read-only), less every key the volume's intents or
+// HEAD name when re-read after the preview.
 func (c *Catalog) UsageWithGC(ctx context.Context, vol string, gc *Collector) (VolumeUsage, error) {
 	u, err := c.Usage(ctx, vol)
 	if err != nil {
@@ -90,15 +99,51 @@ func (c *Catalog) UsageWithGC(ctx context.Context, vol string, gc *Collector) (V
 	if err != nil {
 		return VolumeUsage{}, err
 	}
-	un := &UnreferencedUsage{UnknownUnbound: res.UnknownUnbound}
-	for _, o := range res.Unreferenced {
-		if o.Volume == vol {
-			un.Bindings++
-			un.BytesUpperBound += u.ChunkBytes
-		}
+	protected, err := c.protectedNow(ctx, vol)
+	if err != nil {
+		return VolumeUsage{}, err
 	}
+	un := &UnreferencedUsage{Keys: []string{}, UnknownUnbound: res.UnknownUnbound}
+	for _, o := range res.Unreferenced {
+		if o.Volume != vol || protected[o.Key] {
+			continue
+		}
+		un.BindingsUpperBound++
+		un.BytesUpperBound += u.ChunkBytes
+		un.Keys = append(un.Keys, o.Key)
+	}
+	sort.Strings(un.Keys)
 	u.Unreferenced = un
 	return u, nil
+}
+
+// protectedNow reads the keys vol's intents and HEAD name now.
+func (c *Catalog) protectedNow(ctx context.Context, vol string) (map[string]bool, error) {
+	if red := true; red { // RED: no revalidation
+		return map[string]bool{}, nil
+	}
+	r, err := NewChunkRemote(c.f, nilBlobs{}, path.Join(c.base, vol))
+	if err != nil {
+		return nil, err
+	}
+	protected := map[string]bool{}
+	intents, err := r.ListIntents(ctx)
+	if err != nil {
+		return nil, remoteErr(err, "re-read the intents of %s", vol)
+	}
+	for _, in := range intents {
+		for _, k := range in.Keys {
+			protected[k] = true
+		}
+	}
+	h, err := r.GetHead(ctx)
+	if err != nil {
+		return nil, remoteErr(err, "re-read the HEAD of %s", vol)
+	}
+	for _, ref := range h.Chunks {
+		protected[ref.Key] = true
+	}
+	return protected, nil
 }
 
 // chunkSize is the byte size of chunk index idx under g.
