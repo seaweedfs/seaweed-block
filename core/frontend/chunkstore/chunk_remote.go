@@ -497,6 +497,11 @@ func decodeHeadDoc(p string, content []byte) (storage.ChunkHead, error) {
 		if doc.DetachedBy != nil || len(doc.Chunks) != 0 {
 			return fail("an aborted HEAD with content")
 		}
+	case storage.ChunkHeadDeleted:
+		// A deleted volume's tombstone (no chunks, no holder).
+		if doc.DetachedBy != nil || len(doc.Chunks) != 0 || doc.Holder != "" {
+			return fail("a deleted HEAD with content")
+		}
 	case storage.ChunkHeadDetached:
 		d := doc.DetachedBy
 		if d == nil || d.Gen != doc.Gen || d.Holder != doc.Holder || d.Epoch != doc.Epoch {

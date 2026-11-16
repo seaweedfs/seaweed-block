@@ -203,6 +203,10 @@ type chunkDetachedBy struct {
 // 2026-11-15 17:30Z). Such a volume never attaches.
 const chunkHeadAborted = "aborted"
 
+// chunkHeadDeleted marks a deleted volume's HEAD tombstone (no chunks, so
+// nothing it held stays a GC root). Such a volume never attaches again.
+const chunkHeadDeleted = "deleted"
+
 func chunkHeadIsDetached(h chunkHead) bool { return h.State == chunkHeadDetached }
 
 // chunkRemote is the remote store. Keys are non-empty valid UTF-8 strings

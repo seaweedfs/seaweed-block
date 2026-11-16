@@ -171,6 +171,9 @@ type VolumeInfo struct {
 	// Fork records the fork operation that made this volume (origin fork):
 	// a retry is bound to it, and a completed fork replays it.
 	Fork *ForkRecord `json:"fork,omitempty"`
+	// State is VolumeDeleted for a deleted volume, read from the entry's
+	// extended attributes (never from the stored document).
+	State string `json:"state,omitempty"`
 }
 
 // ForkRecord is the operation identity and original result of a fork.
@@ -394,6 +397,7 @@ func decodeVolume(p string, e *filerpb.Entry) (VolumeInfo, error) {
 	if v.Origin == OriginFork && (v.Fork == nil || v.Fork.RequestID == "") {
 		return VolumeInfo{}, fmt.Errorf("chunkstore: VOLUME %s: a fork without its fork record", p)
 	}
+	v.State = string(e.Extended[extVolState])
 	return v, nil
 }
 
@@ -495,6 +499,14 @@ func (c *Catalog) EnsureVolume(ctx context.Context, vol string, g Geometry) (Vol
 				return VolumeInfo{}, remoteErr(err, "re-read VOLUME of %s", vol)
 			}
 		}
+	}
+	if v.State == VolumeDeleted {
+		return VolumeInfo{}, refuseDeleted(vol, "it cannot be attached or created again")
+	}
+	if h, has, err := c.ReadHead(ctx, vol); err != nil {
+		return VolumeInfo{}, err
+	} else if has && h.State == storage.ChunkHeadDeleted {
+		return VolumeInfo{}, refuseDeleted(vol, "its HEAD is a tombstone; it cannot be attached")
 	}
 	if v.Geometry != g {
 		return VolumeInfo{}, catErr(CodeGeometryMismatch, false, nil, "volume %s: VOLUME geometry %+v, this host serves %+v", vol, v.Geometry, g)
@@ -1151,6 +1163,9 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 	if err != nil {
 		return ForkResult{}, err
 	}
+	if ok && existing.State == VolumeDeleted {
+		return ForkResult{}, refuseDeleted(req.Target, "fork to a new volume id")
+	}
 	if ok {
 		if err := c.checkForkRecord(existing, req); err != nil {
 			return ForkResult{}, err
@@ -1174,6 +1189,15 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 	snap, err := c.claimForkParent(ctx, req)
 	if err != nil {
 		return ForkResult{}, err
+	}
+	// Read after the claim: a delete of the source marks VOLUME before it
+	// marks the snapshots, so a fork that sees it live is protected by its
+	// claim, and one that sees it deleted gives the claim back.
+	if src, ok, err := c.ReadVolume(ctx, req.Source); err != nil {
+		return ForkResult{}, err
+	} else if ok && src.State == VolumeDeleted {
+		c.dropForkClaim(ctx, req, snap.attempt)
+		return ForkResult{}, refuseDeleted(req.Source, "its snapshots cannot be forked")
 	}
 	if snap.geo == (Geometry{}) {
 		return ForkResult{}, fmt.Errorf("chunkstore: snapshot %s/%s has no geometry", req.Source, req.Snapshot)

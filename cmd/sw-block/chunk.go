@@ -44,7 +44,7 @@ var dialChunkFiler = func(addr string) (chunkstore.Filer, func() error, error) {
 
 func runOpsChunk(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		return chunkFail("", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "expected cut|snapshot|snapshots|snapshot-delete|fork|detach|show|gc|usage|retain", false)
+		return chunkFail("", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "expected cut|snapshot|snapshots|snapshot-delete|fork|detach|show|gc|usage|retain|volume-delete", false)
 	}
 	switch args[0] {
 	case "gc":
@@ -67,6 +67,8 @@ func runOpsChunk(args []string, stdout, stderr io.Writer) int {
 		return chunkUsage(args[1:], stdout, stderr)
 	case "retain":
 		return chunkRetain(args[1:], stdout, stderr)
+	case "volume-delete":
+		return chunkVolumeDelete(args[1:], stdout, stderr)
 	default:
 		return chunkFail("", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, fmt.Sprintf("unknown subcommand %q", args[0]), false)
 	}

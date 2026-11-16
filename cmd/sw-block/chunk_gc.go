@@ -49,12 +49,11 @@ func chunkGC(args []string, stdout, stderr io.Writer) int {
 	if e != nil {
 		return chunkFail("gc", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, e.Error(), false)
 	}
-	conn, e := grpc.NewClient(master, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	evidence, closeMaster, e := masterEvidence(master)
 	if e != nil {
 		return chunkResult("gc", nil, e, stdout, stderr)
 	}
-	defer conn.Close()
-	evidence := control.NewEvidenceServiceClient(conn)
+	defer closeMaster()
 	issuedEpoch := func(ctx context.Context, vol string) (uint64, error) {
 		reply, e := evidence.QueryVolumeStatus(ctx, &control.StatusRequest{VolumeId: vol})
 		if e != nil {
@@ -69,6 +68,16 @@ func chunkGC(args []string, stdout, stderr io.Writer) int {
 	defer cancel()
 	out, e := cat.ExecuteGC(ctx, blobs, chunkstore.GCConfig{Grace: grace, IntentTTL: ttl, Now: chunkGCNow, IssuedEpoch: issuedEpoch}, apply)
 	return chunkGCResult(out, e, stdout, stderr)
+}
+
+// masterEvidence dials the blockmaster's evidence service (gc and
+// volume-delete read volume status from it).
+func masterEvidence(master string) (control.EvidenceServiceClient, func() error, error) {
+	conn, e := grpc.NewClient(master, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if e != nil {
+		return nil, nil, e
+	}
+	return control.NewEvidenceServiceClient(conn), conn.Close, nil
 }
 
 // Error status and code remain failures, but a failure must not erase known
