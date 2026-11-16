@@ -2,9 +2,10 @@ package ublk
 
 import (
 	"context"
-	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"sync/atomic"
 	"syscall"
+
+	"github.com/seaweedfs/seaweed-block/core/frontend"
 )
 
 // ublk request operations and flags (include/uapi/linux/ublk_cmd.h).

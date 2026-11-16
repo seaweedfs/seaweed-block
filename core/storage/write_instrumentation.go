@@ -1,9 +1,10 @@
 package storage
 
 import (
-	"github.com/seaweedfs/seaweed-block/core/iolatency"
 	"sync/atomic"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/iolatency"
 )
 
 // WriteInstrumentationStatus is a read-only snapshot of storage-internal write

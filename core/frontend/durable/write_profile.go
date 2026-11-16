@@ -1,10 +1,11 @@
 package durable
 
 import (
-	"github.com/seaweedfs/seaweed-block/core/iolatency"
-	"github.com/seaweedfs/seaweed-block/core/storage"
 	"sync/atomic"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/iolatency"
+	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 // WriteProfileStatus is a read-only diagnostic snapshot for write-path gates.

@@ -2,10 +2,11 @@ package storage
 
 import (
 	"errors"
-	"github.com/seaweedfs/seaweed-block/core/iolatency"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/iolatency"
 )
 
 var ErrGroupCommitShutdown = errors.New("storage: group committer shut down")

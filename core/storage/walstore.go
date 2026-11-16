@@ -3,12 +3,13 @@ package storage
 import (
 	"errors"
 	"fmt"
-	"github.com/seaweedfs/seaweed-block/core/iolatency"
 	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/iolatency"
 )
 
 // WALStore is a crash-safe block store backed by one preallocated
