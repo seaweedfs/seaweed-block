@@ -12,7 +12,8 @@ import (
 )
 
 // Space accounting (claude05's rulings, 2026-11-15 22:53Z). Everything is
-// computed from manifests and filer listings; no chunk data is read.
+// computed from manifests and filer listings; segment objects are verified,
+// but data chunks are not read.
 //
 // A chunk's bytes are ChunkBlocks x BlockSize, the last chunk clipped to
 // NumBlocks (ChunkRef carries no size).
@@ -52,6 +53,8 @@ type VolumeUsage struct {
 	LiveChunks       int             `json:"liveChunks"`
 	LiveBytes        uint64          `json:"liveBytes"`
 	Snapshots        []SnapshotUsage `json:"snapshots"`
+	ManifestBindings int             `json:"manifestBindings"`
+	ManifestBytes    uint64          `json:"manifestBytes"`
 	StoredBindings   int             `json:"storedBindings"`
 	StoredBytes      uint64          `json:"storedBytes"`
 	StoredUpperBound bool            `json:"storedUpperBound"`
@@ -99,6 +102,16 @@ func (c *Catalog) Usage(ctx context.Context, vol string) (VolumeUsage, error) {
 		return VolumeUsage{}, err
 	}
 
+	head, err = c.usageHead(ctx, vol, head)
+	if err != nil {
+		return VolumeUsage{}, err
+	}
+	for i := range snaps {
+		snaps[i].head, err = c.usageHead(ctx, vol, snaps[i].head)
+		if err != nil {
+			return VolumeUsage{}, err
+		}
+	}
 	// holders counts, per chunk identity (owner volume + key), how many
 	// HEADs and live snapshots of any volume reference it; size is each
 	// identity's byte size as this volume's geometry indexes it.
@@ -138,6 +151,10 @@ func (c *Catalog) Usage(ctx context.Context, vol string) (VolumeUsage, error) {
 			return VolumeUsage{}, err
 		}
 		if has {
+			oh, err = c.usageHead(ctx, other, oh)
+			if err != nil {
+				return VolumeUsage{}, err
+			}
 			addHolder(other, oh, false)
 		}
 		osnaps, err := c.allSnapshots(ctx, other)
@@ -145,7 +162,11 @@ func (c *Catalog) Usage(ctx context.Context, vol string) (VolumeUsage, error) {
 			return VolumeUsage{}, err
 		}
 		for _, s := range osnaps {
-			addHolder(other, s.Head(), false)
+			otherHead, err := c.usageHead(ctx, other, s.Head())
+			if err != nil {
+				return VolumeUsage{}, err
+			}
+			addHolder(other, otherHead, false)
 		}
 	}
 	for _, s := range snaps {
@@ -194,6 +215,16 @@ func (c *Catalog) Usage(ctx context.Context, vol string) (VolumeUsage, error) {
 				continue
 			}
 			u.StoredBindings++
+			if string(e.Extended["swb.object"]) == "segment" {
+				if e.Attributes == nil || e.Attributes.FileSize == 0 || e.Attributes.FileSize > maxManifestBytes {
+					return VolumeUsage{}, errors.New("chunkstore: invalid manifest binding size")
+				}
+				u.ManifestBindings++
+				u.ManifestBytes += e.Attributes.FileSize
+				u.StoredBytes += e.Attributes.FileSize
+				continue
+			}
+
 			if n, ok := size[chunkIdentity(vol, key)]; ok {
 				u.StoredBytes += n
 			} else {
@@ -217,4 +248,35 @@ func chunkIdentity(vol, key string) string {
 		}
 	}
 	return vol + "\x00" + key
+}
+
+func (c *Catalog) usageHead(ctx context.Context, vol string, h storage.ChunkHead) (storage.ChunkHead, error) {
+	if h.Segments == nil {
+		return h, nil
+	}
+	var blobs Blobs = c.blobs
+	if blobs == nil {
+		return h, errors.New("chunkstore: usage segment reader unavailable")
+	}
+	r, err := NewChunkRemote(c.f, blobs, path.Join(c.base, vol))
+	if err != nil {
+		return h, err
+	}
+	resolved, err := r.resolveManifest(ctx, h)
+	if err != nil {
+		return h, err
+	}
+	v, ok, err := c.ReadVolume(ctx, vol)
+	if err != nil {
+		return h, err
+	}
+	if !ok || h.ChunkBytes != uint64(v.Geometry.ChunkBlocks)*uint64(v.Geometry.BlockSize) {
+		return h, errors.New("chunkstore: usage manifest/volume geometry mismatch")
+	}
+	for idx := range resolved.Chunks {
+		if idx >= (v.Geometry.NumBlocks+uint64(v.Geometry.ChunkBlocks)-1)/uint64(v.Geometry.ChunkBlocks) {
+			return h, errors.New("chunkstore: usage chunk outside volume")
+		}
+	}
+	return resolved, nil
 }

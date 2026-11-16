@@ -175,13 +175,16 @@ type chunkHeadVersion struct {
 // move). Every normal cut publishes State = active and no DetachedBy; a new
 // holder's takeover does the same.
 type chunkHead struct {
-	Gen        uint64
-	Epoch      uint64
-	Holder     string
-	RemoteLSN  uint64
-	Chunks     map[uint64]chunkRef
-	State      string
-	DetachedBy *chunkDetachedBy
+	Gen                uint64
+	Epoch              uint64
+	Holder             string
+	RemoteLSN          uint64
+	Chunks             map[uint64]chunkRef
+	Segments           map[uint64]ChunkSegment
+	ChunkBytes         uint64
+	ManifestChunkCount int
+	State              string
+	DetachedBy         *chunkDetachedBy
 }
 
 // HEAD states.
@@ -240,12 +243,14 @@ type chunkRemote interface {
 // chunkIntent is one live intent: the keys a holder at HEAD generation Gen
 // and epoch Epoch is about to publish.
 type chunkIntent struct {
-	ID        string // "<Gen>-<nonce>"; assigned by PutIntent
-	Gen       uint64
-	Epoch     uint64
-	Holder    string
-	Keys      []string
-	CreatedNs int64 // assigned by PutIntent
+	Segments   map[uint64]ChunkSegment
+	ChunkBytes uint64
+	ID         string // "<Gen>-<nonce>"; assigned by PutIntent
+	Gen        uint64
+	Epoch      uint64
+	Holder     string
+	Keys       []string
+	CreatedNs  int64 // assigned by PutIntent
 	// DeadlineNs (unix ns) is a copy intent's publication deadline, kept as
 	// metadata: a GC sweep settles a dead copy attempt by claiming its
 	// publishing entry with a tombstone, never by the deadline alone (W5
@@ -332,6 +337,9 @@ type chunkLayerConfig struct {
 	// rounds (at most chunkStageRounds; then the barrier takes the rest).
 	// Zero: unbounded, no staging.
 	BarrierBound int
+
+	// UploadConcurrency bounds capture/pre-copy Put calls (0 defaults to 8).
+	UploadConcurrency int
 
 	// testReconcileHold, set only by this package's tests, holds the
 	// reconciler before each slice until a token is received or the

@@ -134,6 +134,12 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 	if remote == nil || cfg.Bitmap == nil || cfg.ChunkBlocks == 0 {
 		return nil, errors.New("storage: chunk layer needs a remote, a bitmap store and ChunkBlocks > 0")
 	}
+	if cfg.UploadConcurrency < 0 || cfg.UploadConcurrency > 64 {
+		return nil, errors.New("storage: upload concurrency must be between 1 and 64 (0 defaults to 8)")
+	}
+	if cfg.UploadConcurrency == 0 {
+		cfg.UploadConcurrency = 8
+	}
 	if cfg.ReadMissTimeout <= 0 {
 		cfg.ReadMissTimeout = defaultReadMissTimeout
 	}
@@ -259,6 +265,12 @@ func copyHead(h chunkHead) chunkHead {
 	if h.DetachedBy != nil {
 		d := *h.DetachedBy
 		out.DetachedBy = &d
+	}
+	if h.Segments != nil {
+		out.Segments = make(map[uint64]ChunkSegment, len(h.Segments))
+		for k, v := range h.Segments {
+			out.Segments[k] = v
+		}
 	}
 	out.Chunks = make(map[uint64]chunkRef, len(h.Chunks))
 	for k, v := range h.Chunks {
@@ -846,20 +858,36 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		}
 		intents = append(intents, id)
 	}
+	if err := l.uploadBatch(ctx, len(uploads), func(ctx context.Context, i int) error {
+		u := uploads[i]
+		return l.remote.Put(ctx, u.key, u.c.data)
+	}); err != nil {
+		l.abortCut(all)
+		l.dropIntents(ctx, intents)
+		return chunkCutResult{}, fmt.Errorf("storage: capture upload: %w: %w", errChunkRemoteUnavailable, err)
+	}
 	for _, u := range uploads {
-		if err := l.remote.Put(ctx, u.key, u.c.data); err != nil {
-			l.abortCut(all)
-			l.dropIntents(ctx, intents)
-			return chunkCutResult{}, fmt.Errorf("storage: capture upload chunk %d: %w: %w", u.c.idx, errChunkRemoteUnavailable, err)
-		}
 		next.Chunks[u.c.idx] = chunkRef{Key: u.key, SHA256: u.c.sum}
 		newKeys[u.c.idx] = u.key
 		changed = append(changed, u.c.idx)
 		st.UploadedChunks++
 		st.UploadedBytes += int64(len(u.c.data))
 	}
+	upgrade := false
+	if builder, ok := l.remote.(ChunkManifestBuilder); ok {
+		upgrade = baseHead.Segments == nil
+		var ids []string
+		var err error
+		next, ids, err = builder.PrepareManifest(ctx, baseHead, next, uint64(l.blockSize)*l.chunkBlocks)
+		intents = append(intents, ids...)
+		if err != nil {
+			l.abortCut(all)
+			l.dropIntents(ctx, intents)
+			return chunkCutResult{}, err
+		}
+	}
 	st.UploadNs = time.Since(uploadStart).Nanoseconds()
-	if !detach && len(changed) == 0 && h == baseHead.RemoteLSN && baseHead.Gen != 0 && !chunkHeadIsDetached(baseHead) {
+	if !upgrade && !detach && len(changed) == 0 && h == baseHead.RemoteLSN && baseHead.Gen != 0 && !chunkHeadIsDetached(baseHead) {
 		// A no-op cut still observes authority: a fresh host may have
 		// claimed HEAD without uploading a single chunk since our last cut.
 		cur, err := l.remote.GetHead(ctx)
@@ -1006,6 +1034,15 @@ func (l *chunkLayerImpl) supersededBy(cur chunkHead) bool {
 }
 
 func sameProposal(cur, next chunkHead) bool {
+	if (cur.Segments == nil) != (next.Segments == nil) || cur.ChunkBytes != next.ChunkBytes || cur.ManifestChunkCount != next.ManifestChunkCount || len(cur.Segments) != len(next.Segments) {
+		return false
+	}
+	for k, v := range next.Segments {
+		if cur.Segments[k] != v {
+			return false
+		}
+	}
+
 	if cur.Epoch != next.Epoch || cur.Holder != next.Holder || cur.RemoteLSN != next.RemoteLSN || len(cur.Chunks) != len(next.Chunks) {
 		return false
 	}
@@ -1454,10 +1491,13 @@ func (l *chunkLayerImpl) stage(ctx context.Context, st *chunkCutStats) (map[uint
 				return nil, intents, fmt.Errorf("storage: capture stage intent: %w: %w", errChunkRemoteUnavailable, err)
 			}
 			intents = append(intents, id)
+			if err := l.uploadBatch(ctx, len(uploads), func(ctx context.Context, i int) error {
+				u := uploads[i]
+				return l.remote.Put(ctx, u.key, u.data)
+			}); err != nil {
+				return nil, intents, fmt.Errorf("storage: capture stage upload: %w: %w", errChunkRemoteUnavailable, err)
+			}
 			for _, u := range uploads {
-				if err := l.remote.Put(ctx, u.key, u.data); err != nil {
-					return nil, intents, fmt.Errorf("storage: capture stage chunk %d: %w: %w", u.idx, errChunkRemoteUnavailable, err)
-				}
 				st.UploadedChunks++
 				st.UploadedBytes += int64(len(u.data))
 				u.data = nil

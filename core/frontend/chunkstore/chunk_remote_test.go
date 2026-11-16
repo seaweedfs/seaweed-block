@@ -290,8 +290,8 @@ func TestChunkRemote_ChunkLayerCaptureThenFreshHost(t *testing.T) {
 		t.Fatalf("RemoteLSN %d after capture at %d", layer.RemoteLSN(), h)
 	}
 	puts, _, _ := b.counts()
-	if puts != 4 { // chunks 0, 1, 2 and 7
-		t.Fatalf("capture stored %d needles; want 4", puts)
+	if puts != 5 { // chunks 0, 1, 2 and 7, plus their manifest segment
+		t.Fatalf("capture stored %d needles; want 4 data chunks plus one manifest", puts)
 	}
 	_ = src.Close()
 
@@ -310,7 +310,7 @@ func TestChunkRemote_ChunkLayerCaptureThenFreshHost(t *testing.T) {
 			t.Fatalf("fresh host block %d = %x...; want %x...", lba, got[:4], exp[:4])
 		}
 	}
-	if _, gets, _ := b.counts(); gets != 4 { // each published chunk fetched once
-		t.Fatalf("fresh host fetched %d needles; want 4", gets)
+	if _, gets, _ := b.counts(); gets != 5 { // four data chunks and one manifest fetched once
+		t.Fatalf("fresh host fetched %d needles; want 4 data chunks plus one manifest", gets)
 	}
 }
