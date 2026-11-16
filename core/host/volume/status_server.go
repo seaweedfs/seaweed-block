@@ -483,7 +483,7 @@ func (s *StatusServer) statusProjection() StatusProjection {
 	p.FrontendPrimaryReady = p.FrontendPrimaryReady && !s.nvmePending
 	src := s.durableSource
 	s.mu.Unlock()
-	if src != nil && false { // RED: /status carries no warnings
+	if src != nil { // outside s.mu: the provider takes its own lock
 		for _, st := range src.DurableStatuses() {
 			if st.VolumeID == p.VolumeID {
 				p.Warnings = append(p.Warnings, st.Warnings...)

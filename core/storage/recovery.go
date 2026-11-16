@@ -243,9 +243,6 @@ func recoverWAL(fd *os.File, sb *superblock, dm *dirtyMap) (recoveryResult, erro
 			}
 		}
 	}
-	if red := true; red { // RED: no hole bound, no warning
-		hole, holeLSN = false, ^uint64(0)
-	}
 	if hole {
 		result.HoleSuspected = true
 		result.HoleDetail = fmt.Sprintf("WAL entry at offset=%d fails its check and valid entries from LSN %d on follow it; recovered the entries below LSN %d", holeAt, holeLSN, holeLSN)

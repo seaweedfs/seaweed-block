@@ -277,7 +277,7 @@ func (b *StorageBackend) durableStatus(volumeID, path, impl string) VolumeStatus
 	evidence, _ := b.opEvidence.Load().(string)
 	var warnings []string
 	var holes uint64
-	if w, ok := b.storage.(storage.RecoveryWarner); ok && false { // RED: warnings not reported
+	if w, ok := b.storage.(storage.RecoveryWarner); ok {
 		warnings = w.RecoveryWarnings()
 	}
 	if c, ok := b.storage.(interface{ HolesSuspected() uint64 }); ok {

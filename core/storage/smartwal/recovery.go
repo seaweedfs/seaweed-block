@@ -113,9 +113,6 @@ func runRecovery(r *ring, fd *os.File, extentBase int64, blockSize int) (uint64,
 // H's (d = capacity-1) is where LSN H+1 goes: a torn tail, which still
 // recovers; so is a slot whose implied LSN was never written.
 func midHistoryHole(bad []uint64, highest, capacity uint64) error {
-	if red := true; red { // RED: a bad slot is always a torn slot
-		return nil
-	}
 	if capacity < 2 {
 		return nil
 	}
