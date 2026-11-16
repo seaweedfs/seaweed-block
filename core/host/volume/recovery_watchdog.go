@@ -53,6 +53,7 @@ const (
 	UnhealthyRoleAdmission   = "role_admission_failed"
 	UnhealthyWALCorrupt      = "wal_corrupt"
 	UnhealthyIOError         = "io_error"
+	UnhealthyDataChecksum    = "data_checksum"
 
 	// DefaultRecoverTimeout matches blockmaster's default freshness
 	// window.
@@ -205,10 +206,11 @@ func (h *Host) CatchUpSince() time.Time {
 	return h.wd.catchUpSince()
 }
 
-// LocalRecoveryHealthReason classifies a local durable open or replay
+// LocalRecoveryHealthReason classifies a local durable open, replay or runtime
 // failure into a typed unhealthy reason (#133). It returns "" for an
 // error it cannot classify (the watchdog's timeout still covers that).
 //
+//   - data_checksum: checked extent or manifest bytes differ.
 //   - wal_corrupt: the substrate found a WAL/extent integrity fault
 //     (storage.RecoveryFailure kind WALIntegrity, or ErrWALIntegrityFault).
 //   - io_error: the local storage could not be opened or read at startup:
@@ -220,6 +222,11 @@ func (h *Host) CatchUpSince() time.Time {
 func LocalRecoveryHealthReason(err error) string {
 	if err == nil {
 		return ""
+	}
+	// A checksum mismatch is EIO too; preserve its specific classification
+	// before broader wrapper and substrate-IO handling.
+	if errors.Is(err, storage.ErrDataChecksum) {
+		return UnhealthyDataChecksum
 	}
 	var rf *storage.RecoveryFailure
 	if errors.As(err, &rf) {
@@ -248,7 +255,7 @@ func (h *Host) ReportLocalRecoveryFailure(err error) string {
 	reason := LocalRecoveryHealthReason(err)
 	h.localRecoveryReason.Store(reason)
 	if reason != "" {
-		h.log.Printf("blockvolume: volume %s local durable open/recovery failed (%s): %v; a primary assignment reports it as unhealthy", h.cfg.VolumeID, reason, err)
+		h.log.Printf("blockvolume: volume %s local durable storage failed (%s): %v; a primary assignment reports it as unhealthy", h.cfg.VolumeID, reason, err)
 	}
 	return reason
 }

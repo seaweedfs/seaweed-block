@@ -26,8 +26,11 @@ any block, and classify a mismatch as a data-checksum error.
 
 The backend refuses subsequent IO after a runtime read or read-modify-write
 checksum fault. Its optional host-report callback runs after releasing the
-backend IO lock. Host heartbeat classification is pending integration with
-the typed-recovery-reason change; this Draft does not claim that wiring yet.
+backend IO lock. The blockvolume callback blocks local readiness and reports the typed
+`data_checksum` unhealthy reason through the host heartbeat, including a
+primary that was already ready before the runtime fault. This specific reason
+takes precedence over the generic EIO classification. A later clean recovery
+uses the existing readiness-clear path.
 
 ## Durability and lock order
 

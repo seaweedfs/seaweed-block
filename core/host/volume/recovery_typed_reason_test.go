@@ -26,6 +26,8 @@ func TestLocalRecoveryHealthReason_Classifies(t *testing.T) {
 		want string
 	}{
 		{"nil", nil, ""},
+		{"extent checksum", &storage.DataChecksumFailure{LBA: 3, Detail: "CRC mismatch"}, UnhealthyDataChecksum},
+		{"checksum wrapped as substrate IO", storage.NewSubstrateIOFailure(storage.ErrDataChecksum, "read"), UnhealthyDataChecksum},
 		{"wal integrity", storage.NewWALIntegrityFailure(nil, "crc mismatch"), UnhealthyWALCorrupt},
 		{"wal integrity wrapped", fmt.Errorf("recover: %w", storage.NewWALIntegrityFailure(nil, "x")), UnhealthyWALCorrupt},
 		{"integrity sentinel", fmt.Errorf("x: %w", storage.ErrWALIntegrityFault), UnhealthyWALCorrupt},
