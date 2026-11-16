@@ -58,7 +58,7 @@ func (h *Host) RunLifecycleProductTick() (LifecycleProductTickResult, error) {
 		return LifecycleProductTickResult{}, nil
 	}
 	nodes := stores.Nodes.ListNodes()
-	reconciled := lifecycle.ReconcilePlacement(stores.Volumes.ListVolumes(), nodes, stores.Placements)
+	reconciled := lifecycle.ReconcilePlacement(stores.liveVolumes(), nodes, stores.Placements)
 	placements := stores.Placements.ListPlacements()
 	verified := h.verifyPlacements(placements, nodes)
 	result := LifecycleProductTickResult{

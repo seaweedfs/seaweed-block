@@ -56,6 +56,19 @@ func (s *services) CreateVolume(ctx context.Context, req *control.CreateVolumeRe
 		return nil, status.Error(codes.FailedPrecondition, "lifecycle store is not configured")
 	}
 	spec := lifecycleSpecFromWire(req)
+	// A reserved id (a chunk volume delete admitted or committed) is never
+	// created again; the reservation is checked under the lock its writer
+	// holds.
+	// held through the create (workspace_protocol.md: reservation checks
+	// and commits stay under workspaceMu).
+	s.host.workspaceMu.Lock()
+	defer s.host.workspaceMu.Unlock()
+	if stores.Deletions.Reserved(spec.VolumeID) {
+		return nil, status.Errorf(codes.FailedPrecondition, "create volume: %s is being deleted or was deleted; its id is never reused", spec.VolumeID)
+	}
+	if createVolumeHook != nil {
+		createVolumeHook(spec.VolumeID)
+	}
 	s.host.log.Printf("blockmaster: CreateVolume volume=%q protocol=%q replication_factor=%d pvc=%q namespace=%q", spec.VolumeID, spec.Protocol, spec.ReplicationFactor, spec.PVCName, spec.PVCNamespace)
 	rec, err := stores.Volumes.CreateVolume(spec)
 	if err != nil {
@@ -105,6 +118,132 @@ func (s *services) DeleteVolume(ctx context.Context, req *control.DeleteVolumeRe
 		return nil, workspaceError(err)
 	}
 	return &control.DeleteVolumeResponse{}, nil
+}
+
+// MarkVolumeDeleting admits a chunk volume delete (sw-block ops chunk
+// volume-delete). It holds workspaceMu, the lock every assignment,
+// placement and binding write takes, and runs the mark inside
+// RecordWorkspaceDeletion's check under the publisher lock: a volume with a
+// live authority line (and no clean revocation ACK), a pending move or a
+// queued placement is refused; otherwise the record is marked deleting, and
+// from then on publication admission, the placement reconciler, the
+// workload planner, binding/placement/move RPCs and CreateVolume all refuse
+// it.
+func (s *services) MarkVolumeDeleting(ctx context.Context, req *control.MarkVolumeDeletingRequest) (*control.MarkVolumeDeletingResponse, error) {
+	s.host.workspaceMu.Lock()
+	defer s.host.workspaceMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, workspaceError(err)
+	}
+	stores := s.host.Lifecycle()
+	if stores == nil {
+		return nil, status.Error(codes.FailedPrecondition, "lifecycle store is not configured")
+	}
+	vol := req.GetVolumeId()
+	if vol == "" {
+		return nil, status.Error(codes.InvalidArgument, "volume_id is required")
+	}
+	_, bound, err := stores.WorkspaceBindings.Get(vol)
+	if err != nil {
+		return nil, lifecycleError("mark volume deleting", err)
+	}
+	_, placed := stores.Placements.GetPlacement(vol)
+	var res lifecycle.DeletionReservation
+	var persistErr error
+	err = s.host.Publisher().RecordWorkspaceDeletion(ctx, vol, bound && placed, func() error {
+		res, persistErr = stores.Deletions.Admit(vol, req.GetToken())
+		return persistErr
+	})
+	switch {
+	case persistErr != nil:
+		// The admission check passed; the reservation write failed or its
+		// outcome is unknown (the store keeps it in memory, fail closed).
+		return nil, status.Errorf(codes.Unavailable, "mark volume deleting: %v", persistErr)
+	case err != nil:
+		return nil, status.Errorf(codes.FailedPrecondition, "mark volume deleting: %v", err)
+	}
+	_, known := stores.Volumes.GetVolume(vol)
+	s.host.log.Printf("blockmaster: MarkVolumeDeleting volume=%q known=%t state=%s", vol, known, res.State)
+	return &control.MarkVolumeDeletingResponse{Known: known, State: res.State}, nil
+}
+
+// ImportLifecycleVolume registers a desired volume from the cluster spec
+// (blockmaster startup), under the same boundary as the CreateVolume RPC:
+// a reserved id (a chunk volume delete admitted or committed) is skipped,
+// never created again. imported is false for a skipped id.
+func (h *Host) ImportLifecycleVolume(spec lifecycle.VolumeSpec) (imported bool, err error) {
+	stores := h.Lifecycle()
+	if stores == nil {
+		return false, fmt.Errorf("cluster volume import requires --lifecycle-store")
+	}
+	h.workspaceMu.Lock()
+	defer h.workspaceMu.Unlock()
+	if stores.Deletions.Reserved(spec.VolumeID) {
+		return false, nil
+	}
+	if _, err := stores.Volumes.CreateVolume(spec); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// createVolumeHook is a test seam: it runs in CreateVolume after the
+// reservation check, before the create.
+var createVolumeHook func(vol string)
+
+// AbortVolumeDeleting gives a delete's admission back (the delete found it
+// could not proceed and undid its own effects). A committed deletion is
+// never given back (FAILED_PRECONDITION).
+func (s *services) AbortVolumeDeleting(ctx context.Context, req *control.MarkVolumeDeletingRequest) (*control.MarkVolumeDeletingResponse, error) {
+	return s.settleVolumeDeleting(ctx, req, "abort", (*lifecycle.DeletionReservationStore).Abort)
+}
+
+// CommitVolumeDeleting makes a delete's reservation permanent: the delete
+// is about to take irreversible steps.
+func (s *services) CommitVolumeDeleting(ctx context.Context, req *control.MarkVolumeDeletingRequest) (*control.MarkVolumeDeletingResponse, error) {
+	return s.settleVolumeDeleting(ctx, req, "commit", (*lifecycle.DeletionReservationStore).Commit)
+}
+
+func (s *services) settleVolumeDeleting(ctx context.Context, req *control.MarkVolumeDeletingRequest, op string,
+	apply func(*lifecycle.DeletionReservationStore, string, string) (lifecycle.DeletionReservation, error)) (*control.MarkVolumeDeletingResponse, error) {
+	s.host.workspaceMu.Lock()
+	defer s.host.workspaceMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, workspaceError(err)
+	}
+	stores := s.host.Lifecycle()
+	if stores == nil {
+		return nil, status.Error(codes.FailedPrecondition, "lifecycle store is not configured")
+	}
+	if req.GetVolumeId() == "" || req.GetToken() == "" {
+		return nil, status.Error(codes.InvalidArgument, "volume_id and token are required")
+	}
+	res, err := apply(stores.Deletions, req.GetVolumeId(), req.GetToken())
+	switch {
+	case errors.Is(err, lifecycle.ErrReservationCommitted), errors.Is(err, lifecycle.ErrReservationToken):
+		return nil, status.Errorf(codes.FailedPrecondition, "%s volume deleting: %v", op, err)
+	case err != nil:
+		return nil, status.Errorf(codes.Unavailable, "%s volume deleting: %v", op, err)
+	}
+	s.host.log.Printf("blockmaster: %s VolumeDeleting volume=%q state=%s", op, req.GetVolumeId(), res.State)
+	state := res.State
+	if state == lifecycle.ReservationAdmitted && len(res.Tokens) == 0 {
+		state = ""
+	}
+	return &control.MarkVolumeDeletingResponse{State: state}, nil
+}
+
+// liveVolumes is the desired volumes the placement reconciler may plan:
+// every record whose id no delete has reserved.
+func (st *LifecycleStores) liveVolumes() []lifecycle.VolumeRecord {
+	all := st.Volumes.ListVolumes()
+	out := all[:0:0]
+	for _, v := range all {
+		if !st.Deletions.Reserved(v.Spec.VolumeID) {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func (s *services) ExecuteFailback(ctx context.Context, req *control.FailbackRequest) (*control.FailbackResponse, error) {
@@ -180,6 +319,7 @@ func lifecycleError(op string, err error) error {
 	if errors.Is(err, lifecycle.ErrVolumeConflict) {
 		return status.Errorf(codes.AlreadyExists, "%s: %v", op, err)
 	}
+
 	return status.Errorf(codes.Internal, "%s: %v", op, err)
 }
 

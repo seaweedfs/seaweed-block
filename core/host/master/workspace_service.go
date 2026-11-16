@@ -22,6 +22,9 @@ func (s *services) workspaceVolume(volume string) error {
 	if !ok || r.Spec.ReplicationFactor != 1 {
 		return status.Error(codes.FailedPrecondition, "workspace move requires an existing RF1 volume")
 	}
+	if s.host.lifecycle.Deletions.Reserved(volume) {
+		return status.Error(codes.FailedPrecondition, "workspace: volume is being deleted")
+	}
 	return nil
 }
 

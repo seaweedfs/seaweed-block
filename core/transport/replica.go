@@ -239,6 +239,8 @@ func (r *ReplicaListener) Stop() {
 // FIN/RST conns from a dead process; on localhost in-process tests,
 // nothing closes them, and Stop's wg.Wait would block forever.
 //
+// Role withdrawal may also use this after FenceAsPrimary has drained all
+// admitted mutations: idle peer connections must not hold a withdrawn endpoint.
 // Safe to call multiple times. Idempotent.
 //
 // This seam exists to make the restart-catch-up component test
@@ -279,6 +281,15 @@ func (r *ReplicaListener) acceptLoop() {
 			}
 		}
 		r.mu.Lock()
+		// Join admission with StopHard's connection snapshot. A connection
+		// accepted just before Close must not escape the shutdown snapshot.
+		select {
+		case <-r.stopCh:
+			r.mu.Unlock()
+			_ = conn.Close()
+			return
+		default:
+		}
 		r.conns[conn] = struct{}{}
 		r.mu.Unlock()
 		r.wg.Add(1)
