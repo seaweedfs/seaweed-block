@@ -132,10 +132,11 @@ type Host struct {
 	// admitted as a supporting replica it re-admits replication at that
 	// epoch. selfRole/selfEpoch remember the last decision so a listener
 	// wired after the first fact (the binary path) is fenced on install.
-	selfFenceMu sync.Mutex
-	selfFence   selfFencer
-	selfRole    selfRole
-	selfEpoch   uint64
+	selfFenceMu  sync.Mutex
+	selfFence    selfFencer
+	selfRole     selfRole
+	selfEpoch    uint64
+	selfHasPeers bool
 	// roleAdmissionFailed (G1) latches a failed role call on the listener
 	// (a floor that could not be persisted, or a fence that did not drain).
 	// While set, the frontend projection is not Healthy, so writes refuse
@@ -404,7 +405,7 @@ func (h *Host) SetSelfFence(f selfFencer) error {
 	if f == nil {
 		return nil
 	}
-	err := applySelfRole(f, h.selfRole, h.selfEpoch)
+	err := applySelfRoleWithPeers(f, h.selfRole, h.selfEpoch, h.selfHasPeers)
 	h.latchRoleAdmission(h.selfRole, h.selfEpoch, err)
 	return err
 }
@@ -440,23 +441,32 @@ func (h *Host) RoleAdmissionFailure() (bool, string) {
 // desired role or touching the admission latch, so a stale success can never
 // reconcile a newer failure (codex01 R1 on #83).
 func (h *Host) fenceSelf(role selfRole, epoch uint64) error {
+	return h.fenceSelfWithPeers(role, epoch, true)
+}
+
+func (h *Host) fenceSelfWithPeers(role selfRole, epoch uint64, hasPeers bool) error {
 	h.selfFenceMu.Lock()
 	defer h.selfFenceMu.Unlock()
 	if epoch < h.selfEpoch {
 		return fmt.Errorf("stale role call at epoch %d (current desired epoch %d)", epoch, h.selfEpoch)
 	}
-	h.selfRole, h.selfEpoch = role, epoch
+	h.selfRole, h.selfEpoch, h.selfHasPeers = role, epoch, hasPeers
 	if h.selfFence == nil {
 		return nil
 	}
-	err := applySelfRole(h.selfFence, role, epoch)
+	err := applySelfRoleWithPeers(h.selfFence, role, epoch, hasPeers)
 	h.latchRoleAdmission(role, epoch, err)
 	return err
 }
 
-func applySelfRole(f selfFencer, role selfRole, epoch uint64) error {
+// Optional listener lifecycle policy consumes only master-assigned peer slots.
+// Called under selfFenceMu, before role admission; legacy fencers are unchanged.
+func applySelfRoleWithPeers(f selfFencer, role selfRole, epoch uint64, hasPeers bool) error {
 	switch role {
 	case selfRolePrimary:
+		if gated, ok := f.(interface{ FenceAsPrimaryWithPeers(uint64, bool) error }); ok {
+			return gated.FenceAsPrimaryWithPeers(epoch, hasPeers)
+		}
 		return f.FenceAsPrimary(epoch)
 	case selfRoleReplica:
 		return f.AdmitAsReplica(epoch)
@@ -787,6 +797,11 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 			h.emitSupportingReadyMarker(info)
 			return
 		}
+		// The new authoritative set excludes us: close assignment-gated
+		// ingress as well as withdrawing the frontend through recordOtherLine.
+		if err := h.fenceSelfWithPeers(selfRolePrimary, fact.Epoch, false); err != nil {
+			h.log.Printf("blockvolume: excluded replica ingress fence: %v", err)
+		}
 		h.log.Printf("blockvolume: volume %s authority is now %s@%d (not this replica %s); recording supersede, not applying to adapter",
 			h.cfg.VolumeID, fact.ReplicaId, fact.Epoch, h.cfg.ReplicaID)
 		return
@@ -833,7 +848,7 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 	// G2: fence our own replica listener at this epoch before the adapter
 	// can turn Healthy and the frontend serves IO, so a deposed primary that
 	// still reaches us cannot get its writes applied (or counted) here.
-	if err := h.fenceSelf(selfRolePrimary, info.Epoch); err != nil {
+	if err := h.fenceSelfWithPeers(selfRolePrimary, info.Epoch, len(fact.Peers) > 0); err != nil {
 		// Fail closed, as for an UpdateReplicaSet failure: the frontend
 		// stays gated and master's stream replay redelivers the fact.
 		h.log.Printf("blockvolume: volume %s could not fence its own replica listener at epoch %d: %v — NOT applying to adapter (fail-closed)",

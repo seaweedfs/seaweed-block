@@ -27,6 +27,9 @@ const (
 	ChunkHeadActive   = chunkHeadActive
 	ChunkHeadDetached = chunkHeadDetached
 	ChunkHeadAborted  = chunkHeadAborted
+	ChunkHeadDeleting = chunkHeadDeleting
+	ChunkHeadPurging  = chunkHeadPurging
+	ChunkHeadDeleted  = chunkHeadDeleted
 )
 
 // NewChunkIntentID returns a fresh intent id "<gen>-<nonce>" for a remote
@@ -44,6 +47,7 @@ const (
 var (
 	ErrChunkKeyExists         = errChunkKeyExists
 	ErrChunkHeadPrecondition  = errChunkHeadPrecondition
+	ErrChunkHeadDeleted       = errChunkHeadDeleted
 	ErrChunkLayerFenced       = errChunkLayerFenced
 	ErrChunkEvictRefused      = errChunkEvictRefused
 	ErrChunkCaptureRefused    = errChunkCaptureRefused

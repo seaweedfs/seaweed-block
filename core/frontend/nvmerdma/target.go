@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 )
@@ -78,26 +79,79 @@ type providerBackend struct {
 	provider frontend.Provider
 	volumeID string
 
-	mu      sync.Mutex
-	backend frontend.Backend
+	mu         sync.Mutex
+	backend    frontend.Backend
+	generation uint64
+	opening    *backendOpen
 }
 
-func (b *providerBackend) get(ctx context.Context) (frontend.Backend, error) {
+// backendOpen publishes its result by closing done. Only the opener writes it.
+type backendOpen struct {
+	done       chan struct{}
+	backend    frontend.Backend
+	generation uint64
+	err        error
+}
+
+func (b *providerBackend) get(ctx context.Context) (frontend.Backend, uint64, error) {
+	// Start the readiness budget before coordination, never after waiting for a lock.
+	openCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := openCtx.Err(); err != nil {
+		return nil, 0, err
+	}
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if b.backend != nil {
-		return b.backend, nil
+		backend, generation := b.backend, b.generation
+		b.mu.Unlock()
+		return backend, generation, nil
 	}
-	backend, err := b.provider.Open(ctx, b.volumeID)
-	if err != nil {
-		return nil, fmt.Errorf("nvmerdma: open backend: %w", err)
+	flight := b.opening
+	if flight == nil {
+		flight = &backendOpen{done: make(chan struct{})}
+		b.opening = flight
+		// Provider.Open may wait for readiness. Never hold the cache lock across it.
+		// One flight owns that wait; other callers retain their own cancellation.
+		go func() {
+			backend, err := b.provider.Open(openCtx, b.volumeID)
+			b.mu.Lock()
+			if err == nil {
+				b.backend = backend
+				b.generation++
+				flight.backend = backend
+				flight.generation = b.generation
+			} else {
+				flight.err = fmt.Errorf("nvmerdma: open backend: %w", err)
+			}
+			b.opening = nil
+			close(flight.done)
+			b.mu.Unlock()
+		}()
 	}
-	b.backend = backend
-	return backend, nil
+	b.mu.Unlock()
+	select {
+	case <-openCtx.Done():
+		return nil, 0, openCtx.Err()
+	case <-flight.done:
+		if err := openCtx.Err(); err != nil {
+			return nil, 0, err
+		}
+		return flight.backend, flight.generation, flight.err
+	}
 }
 
 func (b *providerBackend) Read(ctx context.Context, offset int64, p []byte) (int, error) {
-	backend, err := b.get(ctx)
+	readinessCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	backend, generation, err := b.get(readinessCtx)
+	if err != nil {
+		return 0, err
+	}
+	n, err := backend.Read(ctx, offset, p)
+	if n != 0 || !errors.Is(err, frontend.ErrStalePrimary) {
+		return n, err
+	}
+	backend, err = b.reopen(readinessCtx, generation)
 	if err != nil {
 		return 0, err
 	}
@@ -105,7 +159,17 @@ func (b *providerBackend) Read(ctx context.Context, offset int64, p []byte) (int
 }
 
 func (b *providerBackend) Write(ctx context.Context, offset int64, p []byte) (int, error) {
-	backend, err := b.get(ctx)
+	readinessCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	backend, generation, err := b.get(readinessCtx)
+	if err != nil {
+		return 0, err
+	}
+	n, err := backend.Write(ctx, offset, p)
+	if n != 0 || !errors.Is(err, frontend.ErrStalePrimary) {
+		return n, err
+	}
+	backend, err = b.reopen(readinessCtx, generation)
 	if err != nil {
 		return 0, err
 	}
@@ -113,9 +177,32 @@ func (b *providerBackend) Write(ctx context.Context, offset int64, p []byte) (in
 }
 
 func (b *providerBackend) Sync(ctx context.Context) error {
-	backend, err := b.get(ctx)
+	readinessCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	backend, generation, err := b.get(readinessCtx)
+	if err != nil {
+		return err
+	}
+	err = backend.Sync(ctx)
+	if !errors.Is(err, frontend.ErrStalePrimary) {
+		return err
+	}
+	backend, err = b.reopen(readinessCtx, generation)
 	if err != nil {
 		return err
 	}
 	return backend.Sync(ctx)
+}
+
+// Stale-primary is a pre-effect lineage refusal. Retry once through Provider's
+// current readiness/identity gate; never close the borrowed backend. Generation
+// matching prevents a delayed old refusal from evicting a newer open handle.
+func (b *providerBackend) reopen(ctx context.Context, generation uint64) (frontend.Backend, error) {
+	b.mu.Lock()
+	if b.generation == generation {
+		b.backend = nil
+	}
+	b.mu.Unlock()
+	backend, _, err := b.get(ctx)
+	return backend, err
 }
