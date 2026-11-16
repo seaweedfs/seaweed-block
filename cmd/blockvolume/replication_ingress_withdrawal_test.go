@@ -2,12 +2,16 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -168,6 +172,177 @@ func ingressClosedPort(t *testing.T, addr string) {
 	}
 }
 
+// Each acquired resource is attached to this owner before the next fallible
+// operation. Cleanup unblocks first, joins all started callers, then releases
+// storage and restores the logger. Unknown settlement retains both resources.
+type ingressTestOwner struct {
+	t                *testing.T
+	store            *ingressParkedStore
+	ingress          *replicationIngress
+	conn             net.Conn
+	witness          *ingressExitWitness
+	addr, dual, lane string
+	withdrawalDone   chan struct{}
+	withdrawalErr    error
+	workerID         string
+	cleanupOnce      sync.Once
+	cleanupErr       error
+}
+
+func newIngressTestOwner(t *testing.T, operation, lane string) *ingressTestOwner {
+	t.Helper()
+	s := &ingressParkedStore{LogicalStorage: storage.NewBlockStore(4, 4096), operation: operation, entered: make(chan struct{}), resume: make(chan struct{}), finished: make(chan struct{})}
+	o := &ingressTestOwner{t: t, store: s, lane: lane}
+	t.Cleanup(func() {
+		if err := o.cleanup(); err != nil {
+			t.Error(err)
+		}
+	})
+	o.addr, o.dual = ingressPair(t)
+	o.ingress = &replicationIngress{addr: o.addr, store: s, dualLane: true}
+	if err := o.ingress.AdmitAsReplica(1); err != nil {
+		t.Fatal(err)
+	}
+	return o
+}
+func (o *ingressTestOwner) dial() {
+	target := o.addr
+	if o.lane == "dual" {
+		target = o.dual
+	}
+	c, err := net.DialTimeout("tcp", target, time.Second)
+	if err != nil {
+		o.t.Fatal(err)
+	}
+	o.conn = c // ownership recorded immediately, before deadlines or assertions
+	_ = c.SetDeadline(time.Now().Add(8 * time.Second))
+	if o.lane == "dual" {
+		o.witness = &ingressExitWitness{Writer: log.Writer(), peer: c.LocalAddr().String(), done: make(chan struct{})}
+		log.SetOutput(o.witness)
+	}
+}
+func (o *ingressTestOwner) withdraw() {
+	o.withdrawalDone = make(chan struct{})
+	id := make(chan string, 1)
+	go func() {
+		var b [128]byte
+		n := runtime.Stack(b[:], false)
+		id <- strings.Fields(string(b[:n]))[1]
+		o.withdrawalErr = o.ingress.FenceAsPrimaryWithPeers(2, false)
+		close(o.withdrawalDone)
+	}()
+	o.workerID = <-id
+}
+func (o *ingressTestOwner) waitWithdrawal() {
+	ingressAwait(o.t, "withdrawal did not settle", o.withdrawalDone)
+	if o.withdrawalErr != nil {
+		o.t.Fatal(o.withdrawalErr)
+	}
+}
+func (o *ingressTestOwner) cleanup() error {
+	o.cleanupOnce.Do(func() {
+		o.store.unblock()
+		if o.conn != nil {
+			_ = o.conn.Close()
+		}
+		await := func(c <-chan struct{}, what string) bool {
+			select {
+			case <-c:
+				return true
+			case <-time.After(4 * time.Second):
+				o.cleanupErr = fmt.Errorf("UNKNOWN cleanup: %s; store/logger retained", what)
+				return false
+			}
+		}
+		if o.withdrawalDone != nil && !await(o.withdrawalDone, "withdrawal worker") {
+			return
+		}
+		if o.ingress != nil {
+			stopped := make(chan struct{})
+			go func() { o.ingress.Stop(); close(stopped) }()
+			if !await(stopped, "ingress Stop") {
+				return
+			}
+		}
+		if o.witness != nil && !await(o.witness.done, "dual Serve exit") {
+			return
+		}
+		if err := o.store.Close(); err != nil {
+			o.cleanupErr = err
+			return
+		}
+		if o.witness != nil {
+			log.SetOutput(o.witness.Writer)
+		}
+		if os.Getenv("INGRESS_FAILURE_CASE") != "" {
+			if o.store.active.Load() != 0 || !o.store.closed.Load() {
+				o.cleanupErr = fmt.Errorf("cleanup did not release settled store")
+				return
+			}
+			for _, addr := range []string{o.addr, o.dual} {
+				c, e := net.DialTimeout("tcp", addr, time.Second)
+				if c != nil {
+					c.Close()
+				}
+				if !errors.Is(e, syscall.ECONNREFUSED) {
+					o.cleanupErr = fmt.Errorf("cleanup port remains open: %s %v", addr, e)
+					return
+				}
+			}
+			if o.witness != nil && log.Writer() != o.witness.Writer {
+				o.cleanupErr = fmt.Errorf("logger not restored")
+				return
+			}
+			fmt.Println("CLEANUP_SETTLED store_closed=true active=0 logger_restored=true ports_closed=true")
+		}
+	})
+	return o.cleanupErr
+}
+func (o *ingressTestOwner) parked(payload []byte) {
+	if o.lane == "legacy" {
+		l := transport.RecoveryLineage{Epoch: 1, SessionID: 1, EndpointVersion: 1, FrontierHint: 1}
+		if err := transport.WriteMsg(o.conn, transport.MsgShipEntry, transport.EncodeShipEntry(transport.ShipEntry{Lineage: l, LBA: 0, LSN: 1, Data: payload})); err != nil {
+			o.t.Fatal(err)
+		}
+	} else {
+		ingressStart(o.t, o.conn)
+		ingressBase(o.t, o.conn, payload)
+		if o.store.operation == "sync" {
+			ingressFrame(o.t, o.conn, 3, nil)
+		}
+	}
+	ingressAwait(o.t, "storage operation was not admitted", o.store.entered)
+}
+
+// No public wait-arrival seam exists. Observe ONLY this caller's actual
+// sync.Cond wait in the production fence, using runtime's diagnostic stack.
+// A skip-drain mutant must return (and fail) before we ever release the effect;
+// merely closing admission is no longer accepted as a wait witness.
+func ingressRequireDrainWait(t *testing.T, o *ingressTestOwner) {
+	t.Helper()
+	end := time.Now().Add(4 * time.Second)
+	for {
+		select {
+		case <-o.withdrawalDone:
+			t.Fatalf("drain skipped: withdrawal returned while admitted effect is held (active=%d)", o.store.active.Load())
+		default:
+		}
+		b := make([]byte, 1<<20)
+		n := runtime.Stack(b, true)
+		for _, stack := range strings.Split(string(b[:n]), "\n\n") {
+			if strings.HasPrefix(stack, "goroutine "+o.workerID+" ") &&
+				((strings.Contains(stack, "(*ReplicaListener).fenceAndDrain") && strings.Contains(stack, "sync.(*Cond).Wait")) ||
+					(o.lane == "legacy" && strings.Contains(stack, "(*ReplicaListener).StopHard") && strings.Contains(stack, "sync.(*WaitGroup).Wait"))) {
+				t.Log("withdrawal caller reached production effect drain/join wait")
+				return
+			}
+		}
+		if time.Now().After(end) {
+			t.Fatal("no production drain-wait witness")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
 func TestReplicationIngressWithdrawalDrainsAdmittedEffects(t *testing.T) {
 	for _, lane := range []string{"legacy", "dual"} {
 		t.Run(lane, func(t *testing.T) {
@@ -175,52 +350,16 @@ func TestReplicationIngressWithdrawalDrainsAdmittedEffects(t *testing.T) {
 			if lane == "dual" {
 				op = "base"
 			}
-			s := &ingressParkedStore{LogicalStorage: storage.NewBlockStore(4, 4096), operation: op, entered: make(chan struct{}), resume: make(chan struct{}), finished: make(chan struct{})}
-			addr, dual := ingressPair(t)
-			r := &replicationIngress{addr: addr, store: s, dualLane: true}
-			if err := r.AdmitAsReplica(1); err != nil {
-				t.Fatal(err)
-			}
-			target := addr
-			if lane == "dual" {
-				target = dual
-			}
-			c, err := net.DialTimeout("tcp", target, time.Second)
-			if err != nil {
-				t.Fatal(err)
-			}
-			_ = c.SetDeadline(time.Now().Add(8 * time.Second))
-			witness := &ingressExitWitness{Writer: log.Writer(), peer: c.LocalAddr().String(), done: make(chan struct{})}
-			if lane == "dual" {
-				log.SetOutput(witness)
-				defer log.SetOutput(witness.Writer)
-			}
-			defer func() {
-				s.unblock()
-				c.Close()
-				r.Stop()
-				if !s.closed.Load() {
-					_ = s.Close()
-				}
-			}()
+			o := newIngressTestOwner(t, op, lane)
+			o.dial()
+			s, r, c := o.store, o.ingress, o.conn
 			payload := bytes.Repeat([]byte{0xD3}, 4096)
+			o.parked(payload)
 			listener := r.listener
-			if lane == "legacy" {
-				l := transport.RecoveryLineage{Epoch: 1, SessionID: 1, EndpointVersion: 1, FrontierHint: 1}
-				if err = transport.WriteMsg(c, transport.MsgShipEntry, transport.EncodeShipEntry(transport.ShipEntry{Lineage: l, LBA: 0, LSN: 1, Data: payload})); err != nil {
-					t.Fatal(err)
-				}
-			} else {
-				ingressStart(t, c)
-				ingressBase(t, c, payload)
-			}
-			ingressAwait(t, "storage operation was not admitted", s.entered)
-			// Queue a second mutation on the already-open connection. It must
-			// never reach storage after the first admitted effect drains.
 			later := bytes.Repeat([]byte{0xF5}, 4096)
 			if lane == "legacy" {
 				l := transport.RecoveryLineage{Epoch: 1, SessionID: 1, EndpointVersion: 1, FrontierHint: 1}
-				if err = transport.WriteMsg(c, transport.MsgShipEntry, transport.EncodeShipEntry(transport.ShipEntry{Lineage: l, LBA: 1, LSN: 2, Data: later})); err != nil {
+				if err := transport.WriteMsg(c, transport.MsgShipEntry, transport.EncodeShipEntry(transport.ShipEntry{Lineage: l, LBA: 1, LSN: 2, Data: later})); err != nil {
 					t.Fatal(err)
 				}
 			} else {
@@ -229,47 +368,24 @@ func TestReplicationIngressWithdrawalDrainsAdmittedEffects(t *testing.T) {
 				copy(p[4:], later)
 				ingressFrame(t, c, 2, p)
 			}
-
-			withdrawn := make(chan error, 1)
-			go func() { withdrawn <- r.FenceAsPrimaryWithPeers(2, false) }()
-			// Public gate refusal is the fence-arrival witness. This cannot be a
-			// scheduler-only negative: the new role is installed while our effect lives.
-			end := time.Now().Add(3 * time.Second)
-			for {
-				release, err := listener.EnterDualLane(1)
-				if err != nil {
-					break
-				}
+			o.withdraw()
+			ingressRequireDrainWait(t, o)
+			if release, err := listener.EnterDualLane(1); err == nil {
 				release()
-				if time.Now().After(end) {
-					t.Fatal("withdrawal never closed admission")
-				}
-				time.Sleep(time.Millisecond)
-			}
-			select {
-			case e := <-withdrawn:
-				t.Fatalf("withdrawal completed before effect release: %v", e)
-			default:
+				t.Fatal("drain wait did not close admission")
 			}
 			if s.active.Load() != 1 {
 				t.Fatal("effect no longer parked")
 			}
 			s.unblock()
 			ingressAwait(t, "effect did not return", s.finished)
-			select {
-			case err = <-withdrawn:
-				if err != nil {
-					t.Fatal(err)
-				}
-			case <-time.After(4 * time.Second):
-				t.Fatal("withdrawal did not settle")
-			}
+			o.waitWithdrawal()
 			ingressWireClosed(t, c)
-			if lane == "dual" {
-				ingressAwait(t, "dual receiver did not exit after cancellation", witness.done)
+			if o.witness != nil {
+				ingressAwait(t, "receiver did not exit", o.witness.done)
 			}
-			ingressClosedPort(t, addr)
-			ingressClosedPort(t, dual)
+			ingressClosedPort(t, o.addr)
+			ingressClosedPort(t, o.dual)
 			if release, e := listener.EnterDualLane(1); e == nil {
 				release()
 				t.Fatal("old gate accepted another frame")
@@ -278,79 +394,91 @@ func TestReplicationIngressWithdrawalDrainsAdmittedEffects(t *testing.T) {
 			if err != nil || !bytes.Equal(got, payload) {
 				t.Fatal("admitted bytes differ", err)
 			}
-			untouched, e := s.Read(1)
-			if e != nil || !bytes.Equal(untouched, make([]byte, 4096)) {
-				t.Fatal("queued post-withdrawal mutation reached storage", e)
+			got, err = s.Read(1)
+			if err != nil || !bytes.Equal(got, make([]byte, 4096)) {
+				t.Fatal("queued mutation reached storage", err)
 			}
-			if err = s.Close(); err != nil {
+			if err = o.cleanup(); err != nil {
 				t.Fatal(err)
 			}
-			t.Log("admitted exact effect drained; wire failed explicitly; worker settled before store release")
+			t.Log("actual wait witnessed; exact effect drained; wire failed; callers settled before store/logger release")
 		})
 	}
 }
 
-// This bounded reproducer records the inherited distinction: sendAck's Sync
-// is outside the counted frame. The test owner must await the receiver exit;
-// ingress withdrawal alone is NOT proof that this Sync has stopped.
+// Inherited sendAck Sync remains outside counted effects. The owner still
+// joins the observed caller before releasing store/logger, on every exit.
 func TestReplicationIngressDualAckSyncNeedsOwnerSettlement(t *testing.T) {
-	s := &ingressParkedStore{LogicalStorage: storage.NewBlockStore(4, 4096), operation: "sync", entered: make(chan struct{}), resume: make(chan struct{}), finished: make(chan struct{})}
-	addr, dual := ingressPair(t)
-	r := &replicationIngress{addr: addr, store: s, dualLane: true}
-	if err := r.AdmitAsReplica(1); err != nil {
-		t.Fatal(err)
-	}
-	c, err := net.DialTimeout("tcp", dual, time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = c.SetDeadline(time.Now().Add(8 * time.Second))
-	witness := &ingressExitWitness{Writer: log.Writer(), peer: c.LocalAddr().String(), done: make(chan struct{})}
-	log.SetOutput(witness)
-	defer log.SetOutput(witness.Writer)
-	defer func() {
-		s.unblock()
-		c.Close()
-		r.Stop()
-		if !s.closed.Load() {
-			_ = s.Close()
-		}
-	}()
+	o := newIngressTestOwner(t, "sync", "dual")
+	o.dial()
 	payload := bytes.Repeat([]byte{0xE4}, 4096)
-	ingressStart(t, c)
-	ingressBase(t, c, payload)
-	ingressFrame(t, c, 3, nil)
-	ingressAwait(t, "uncounted acknowledgement Sync did not start", s.entered)
-	withdrawn := make(chan error, 1)
-	go func() { withdrawn <- r.FenceAsPrimaryWithPeers(2, false) }()
-	select {
-	case err = <-withdrawn:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("inherited uncounted Sync became a counted drain")
-	}
-	if s.active.Load() != 1 {
-		t.Fatal("no outstanding Sync at withdrawal return")
+	o.parked(payload)
+	o.withdraw()
+	o.waitWithdrawal()
+	if o.store.active.Load() != 1 {
+		t.Fatal("Sync not held at withdrawal return")
 	}
 	select {
-	case <-witness.done:
-		t.Fatal("receiver exited while Sync held")
+	case <-o.witness.done:
+		t.Fatal("receiver exited with Sync held")
 	default:
 	}
-	ingressWireClosed(t, c)
-	// Explicit owner disposition: release the parked Sync and wait for the
-	// caller's actual Serve-exit witness before releasing the store.
-	s.unblock()
-	ingressAwait(t, "Sync did not return", s.finished)
-	ingressAwait(t, "receiver did not settle", witness.done)
-	got, err := s.Read(0)
+	ingressWireClosed(t, o.conn)
+	o.store.unblock()
+	ingressAwait(t, "Sync did not return", o.store.finished)
+	ingressAwait(t, "receiver did not settle", o.witness.done)
+	got, err := o.store.Read(0)
 	if err != nil || !bytes.Equal(got, payload) {
 		t.Fatal("base bytes differ", err)
 	}
-	if err = s.Close(); err != nil {
+	if err = o.cleanup(); err != nil {
 		t.Fatal(err)
 	}
-	t.Log("INHERITED LIMIT reproduced: withdrawal returned with sendAck Sync live; test owner waited for receiver exit before store release")
+	t.Log("INHERITED LIMIT: withdrawal returned with uncounted Sync live; owner joined before release")
+}
+func TestReplicationIngressCleanupFailureHelper(t *testing.T) {
+	stage := os.Getenv("INGRESS_FAILURE_CASE")
+	if stage == "" {
+		return
+	}
+	lane, op := "dual", "base"
+	if stage == "held-legacy" {
+		lane, op = "legacy", "apply"
+	}
+	if stage == "held-sync" {
+		op = "sync"
+	}
+	o := newIngressTestOwner(t, op, lane)
+	if stage == "pre-dial" {
+		t.Fatal("FORCED_FAILURE pre-dial")
+	}
+	o.dial()
+	o.parked(bytes.Repeat([]byte{0x67}, 4096))
+	o.withdraw()
+	if op == "sync" {
+		o.waitWithdrawal()
+	} else {
+		ingressRequireDrainWait(t, o)
+	}
+	t.Fatal("FORCED_FAILURE " + stage)
+}
+func TestReplicationIngressCleanupOnForcedFailure(t *testing.T) {
+	for _, stage := range []string{"pre-dial", "held-legacy", "held-dual", "held-sync"} {
+		t.Run(stage, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestReplicationIngressCleanupFailureHelper$", "-test.v")
+			cmd.Env = append(os.Environ(), "INGRESS_FAILURE_CASE="+stage)
+			b, err := cmd.CombinedOutput()
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 1 || ctx.Err() != nil {
+				t.Fatalf("forced failure status: %v %s", err, b)
+			}
+			out := string(b)
+			if !strings.Contains(out, "FORCED_FAILURE "+stage) || !strings.Contains(out, "CLEANUP_SETTLED store_closed=true active=0 logger_restored=true ports_closed=true") || strings.Contains(out, "UNKNOWN cleanup") {
+				t.Fatalf("unsafe failure cleanup: %s", b)
+			}
+			t.Logf("%s expected Fatal; owned cleanup settled before process exit:\n%s", stage, b)
+		})
+	}
 }
