@@ -74,7 +74,6 @@ func BenchmarkConcurrentBackendSync(b *testing.B) {
 				if post.BackendSyncOps-profile.BackendSyncOps != n {
 					b.Fatal("Sync count changed")
 				}
-				}
 				for w := 0; w < qd; w++ {
 					got := make([]byte, 4096)
 					if _, err := backend.Read(context.Background(), int64(w)*4096, got); err != nil || !bytes.Equal(got, bytes.Repeat([]byte{byte(w + 1)}, 4096)) {
