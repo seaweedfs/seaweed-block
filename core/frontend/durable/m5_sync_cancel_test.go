@@ -1,53 +1,72 @@
 package durable_test
 
 import (
+	"bytes"
 	"context"
-	"errors"
+	"fmt"
+	"os"
+	"os/exec"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-type cancelSyncProxy struct {
-	entered chan struct{}
+type stalledSyncProxy struct {
+	release chan struct{}
+	done    chan struct{}
 	exited  atomic.Int32
-	syncs   atomic.Int32
 }
 
-func (p *cancelSyncProxy) Write(ctx context.Context, _ int64, _ []byte) (int, error) {
-	p.entered <- struct{}{}
-	<-ctx.Done()
-	p.exited.Add(1)
-	return 0, ctx.Err()
+func (p *stalledSyncProxy) Write(_ context.Context, _ int64, data []byte) (int, error) {
+	return len(data), nil
 }
-func (p *cancelSyncProxy) Sync(context.Context) error { p.syncs.Add(1); return nil }
+func (p *stalledSyncProxy) Sync(context.Context) error {
+	// Match contextless LogicalStorage.Sync: cancellation cannot release it.
+	<-p.release
+	if p.exited.Add(1) == 8 {
+		close(p.done)
+	}
+	return nil
+}
 
-func TestConcurrentSyncProxyCancellationJoinsEveryWorker(t *testing.T) {
-	const workers = 8
-	backend := &cancelSyncProxy{entered: make(chan struct{}, workers)}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	result := make(chan error, 1)
-	go func() { _, err := runConcurrentSyncProxy(ctx, backend, workers, 100000); result <- err }()
-	started := time.NewTimer(time.Second)
-	defer started.Stop()
-	for i := 0; i < workers; i++ {
+func TestConcurrentSyncProxyStallChild(t *testing.T) {
+	if os.Getenv("SYNC_PROXY_STALL_CHILD") != "1" {
+		t.Skip("subprocess failure control only")
+	}
+	backend := &stalledSyncProxy{release: make(chan struct{}), done: make(chan struct{})}
+	t.Cleanup(func() {
+		close(backend.release)
 		select {
-		case <-backend.entered:
-		case <-started.C:
-			t.Fatal("workers not started")
+		case <-backend.done:
+			fmt.Println("STALL_CONTROL_CLEANUP all8 Sync workers released")
+		case <-time.After(time.Second):
+			t.Error("stalled workers did not settle during cleanup")
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, _ = runConcurrentSyncProxy(t, ctx, backend, 8, 100000)
+	t.Fatal("stalled real-style Sync unexpectedly completed")
+}
+
+func TestConcurrentSyncProxyStallFailsWithinDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestConcurrentSyncProxyStallChild$", "-test.v")
+	cmd.Env = append(os.Environ(), "SYNC_PROXY_STALL_CHILD=1")
+	cmd.WaitDelay = time.Second
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("local wait bound failed; subprocess deadline reached: %v\n%s", ctx.Err(), out)
+	}
+	exit, ok := err.(*exec.ExitError)
+	if !ok || exit.ExitCode() != 1 {
+		t.Fatalf("expected deliberate test failure exit1: %v\n%s", err, out)
+	}
+	for _, marker := range []string{"timed out waiting for backend Sync workers", "goroutine ", "stalledSyncProxy).Sync", "STALL_CONTROL_CLEANUP all8 Sync workers released"} {
+		if !bytes.Contains(out, []byte(marker)) {
+			t.Fatalf("missing %q in bounded stall receipt\n%s", marker, out)
 		}
 	}
-	cancel()
-	select {
-	case err := <-result:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatal(err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("cancellation did not join workers")
-	}
-	if backend.exited.Load() != workers || backend.syncs.Load() != 0 {
-		t.Fatalf("abandoned workers or sync after cancellation: exited=%d syncs=%d", backend.exited.Load(), backend.syncs.Load())
-	}
+	t.Logf("context-ignoring Sync produced bounded failure, stack dump and cleanup: %d receipt bytes", len(out))
 }

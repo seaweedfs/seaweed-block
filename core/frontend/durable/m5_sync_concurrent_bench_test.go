@@ -9,6 +9,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"os"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -40,7 +41,7 @@ func BenchmarkConcurrentBackendSync(b *testing.B) {
 				profile := backend.WriteProfile()
 				workloadCtx, cancelWorkload := context.WithTimeout(context.Background(), 30*time.Second)
 				b.ResetTimer()
-				elapsed, workloadErr := runConcurrentSyncProxy(workloadCtx, backend, qd, b.N)
+				elapsed, workloadErr := runConcurrentSyncProxy(b, workloadCtx, backend, qd, b.N)
 				b.StopTimer()
 				cancelWorkload()
 				if workloadErr != nil {
@@ -66,15 +67,16 @@ func BenchmarkConcurrentBackendSync(b *testing.B) {
 	}
 }
 
-// Local file I/O is not interruptible by context. Cancellation stops new work
-// between operations; every started worker is joined after in-flight I/O settles.
-// Do not wrap wg.Wait in a select that abandons workers on timeout.
+// Local file I/O is not interruptible by context. Bound the completion wait;
+// a stalled operation fails the benchmark with its goroutine stacks. The caller
+// registers backend cleanup before starting this workload.
 type concurrentSyncProxyBackend interface {
 	Write(context.Context, int64, []byte) (int, error)
 	Sync(context.Context) error
 }
 
-func runConcurrentSyncProxy(ctx context.Context, backend concurrentSyncProxyBackend, qd, iterations int) (time.Duration, error) {
+func runConcurrentSyncProxy(tb testing.TB, ctx context.Context, backend concurrentSyncProxyBackend, qd, iterations int) (time.Duration, error) {
+	tb.Helper()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	start := make(chan struct{})
@@ -109,7 +111,15 @@ func runConcurrentSyncProxy(ctx context.Context, backend concurrentSyncProxyBack
 	}
 	started := time.Now()
 	close(start)
-	wg.Wait()
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		dump := make([]byte, 1<<20)
+		n := runtime.Stack(dump, true)
+		tb.Fatalf("timed out waiting for backend Sync workers: %v\n%s", ctx.Err(), dump[:n])
+	}
 	elapsed := time.Since(started)
 	close(errs)
 	for err := range errs {
