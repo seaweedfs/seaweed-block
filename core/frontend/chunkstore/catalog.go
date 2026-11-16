@@ -281,8 +281,9 @@ type ForkResult struct {
 
 // Catalog reads and writes the control-plane entries under one chunk base.
 type Catalog struct {
-	f    Filer
-	base string
+	blobs Blobs // optional immutable-object reader; SWFS supplies it directly
+	f     Filer
+	base  string
 	// OpDeadline bounds a snapshot or fork (DefaultOpDeadline when zero).
 	OpDeadline time.Duration
 	now        func() time.Time
@@ -300,7 +301,8 @@ func NewCatalog(f Filer, base string) (*Catalog, error) {
 	if !path.IsAbs(base) || path.Clean(base) != base || base == "/" {
 		return nil, fmt.Errorf("chunkstore: chunk base %q must be a clean absolute directory other than /", base)
 	}
-	return &Catalog{f: f, base: base, now: time.Now}, nil
+	blobs, _ := f.(Blobs)
+	return &Catalog{f: f, blobs: blobs, base: base, now: time.Now}, nil
 }
 
 // SetClock replaces the catalog's clock (tests).

@@ -503,6 +503,22 @@ func decodeHeadDoc(p string, content []byte) (storage.ChunkHead, error) {
 	if err := decodeManifestJSON(content, &doc); err != nil {
 		return fail("decode: %v", err)
 	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(content, &fields); err != nil {
+		return fail("decode representation: %v", err)
+	}
+	if doc.Format == 1 {
+		for _, name := range []string{"segments", "chunk_bytes", "chunk_count"} {
+			if _, present := fields[name]; present {
+				return fail("flat HEAD contains segment field %s", name)
+			}
+		}
+	}
+	if doc.Format == 2 {
+		if _, present := fields["chunks"]; present {
+			return fail("segmented HEAD contains flat chunks field")
+		}
+	}
 	if doc.Format != headFormat && doc.Format != 2 {
 		return fail("format %d not supported (want %d)", doc.Format, headFormat)
 	}
@@ -565,3 +581,9 @@ func NewSWFSChunkRemote(c *SWFS, root string) (*ChunkRemote, error) {
 }
 
 var _ storage.ChunkRemote = (*ChunkRemote)(nil)
+
+// DecodeHeadDocument validates a persisted flat or segmented root without
+// fetching data. Control-plane readers share the same representation checks.
+func DecodeHeadDocument(name string, body []byte) (storage.ChunkHead, error) {
+	return decodeHeadDoc(name, body)
+}
