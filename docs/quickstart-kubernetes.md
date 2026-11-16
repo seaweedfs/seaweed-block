@@ -16,8 +16,8 @@ generate Helm values
 
 The current quickstart is for supported test clusters, not production. For
 the release boundary and exact QA evidence, see
-[`docs/releases/README.md`](releases/README.md). The top-level README contains
-the current operations command matrix.
+[`docs/releases/README.md`](releases/README.md). [`user-capabilities.md`](user-capabilities.md)
+contains the current operations command matrix.
 
 ## What This Proves
 

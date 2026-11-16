@@ -1,0 +1,47 @@
+# Example unit for blockmaster. Settings: /etc/sw-block/blockmaster.env
+# (deploy/config/blockmaster.env). Create the user once:
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin sw-block
+[Unit]
+Description=Seaweed Block master (epoch authority)
+Documentation=https://github.com/seaweedfs/seaweed-block
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sw-block
+Group=sw-block
+EnvironmentFile=/etc/sw-block/blockmaster.env
+# systemd creates /var/lib/sw-block-master owned by User/Group. blockvolume
+# units use their own state directories, never this one.
+StateDirectory=sw-block-master
+StateDirectoryMode=0750
+ExecStart=/usr/local/bin/blockmaster \
+  --authority-store=${SWB_MASTER_AUTHORITY_STORE} \
+  --listen=${SWB_MASTER_LISTEN} \
+  --topology=${SWB_MASTER_TOPOLOGY} \
+  --expected-slots-per-volume=${SWB_MASTER_EXPECTED_SLOTS} \
+  --freshness-window=${SWB_MASTER_FRESHNESS_WINDOW} \
+  --pending-grace=${SWB_MASTER_PENDING_GRACE} \
+  --workspace-rpc=${SWB_MASTER_WORKSPACE_RPC} \
+  --workspace-head-base-url=${SWB_MASTER_WORKSPACE_HEAD_BASE_URL} \
+  --workspace-max-clock-skew=${SWB_MASTER_WORKSPACE_MAX_CLOCK_SKEW} \
+  $SWB_MASTER_EXTRA_ARGS
+# blockmaster stops on SIGTERM.
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+Restart=on-failure
+RestartSec=5s
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,8 @@
+# Accepted topology for blockmaster --topology: one volume, one replica slot.
+# replica_id and server_id must match blockvolume --replica-id / --server-id.
+# blockmaster does not infer topology from heartbeats; this file is the input.
+volumes:
+  - volume_id: v1
+    slots:
+      - replica_id: r1
+        server_id: s1
