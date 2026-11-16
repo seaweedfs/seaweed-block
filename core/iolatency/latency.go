@@ -64,10 +64,14 @@ func (h *Histogram) Snapshot() Distribution {
 // Requests is the common frontend-to-backend boundary, shared by ublk and NVMe.
 // AckDispatch ends before the handler returns a result, not at guest receipt.
 type Requests struct {
-	receive, ack, total          Histogram
-	writes, flushes, fua, failed atomic.Uint64
+	writeTotal, flushTotal, fuaTotal Histogram
+	receive, ack, total              Histogram
+	writes, flushes, fua, failed     atomic.Uint64
 }
 type RequestStatus struct {
+	WriteTotal       Distribution
+	FlushTotal       Distribution
+	FUATotal         Distribution
 	ReceiveToBackend Distribution
 	AckDispatch      Distribution
 	RequestTotal     Distribution
@@ -78,7 +82,7 @@ type RequestStatus struct {
 }
 
 func (c *Requests) Snapshot() RequestStatus {
-	return RequestStatus{c.receive.Snapshot(), c.ack.Snapshot(), c.total.Snapshot(), c.writes.Load(), c.flushes.Load(), c.fua.Load(), c.failed.Load()}
+	return RequestStatus{WriteTotal: c.writeTotal.Snapshot(), FlushTotal: c.flushTotal.Snapshot(), FUATotal: c.fuaTotal.Snapshot(), ReceiveToBackend: c.receive.Snapshot(), AckDispatch: c.ack.Snapshot(), RequestTotal: c.total.Snapshot(), Writes: c.writes.Load(), Flushes: c.flushes.Load(), FUAWrites: c.fua.Load(), Failed: c.failed.Load()}
 }
 
 type requestKey struct{}
@@ -86,6 +90,7 @@ type requestKey struct{}
 // Request is owned by one synchronous frontend dispatch. No request IDs, payloads
 // or unbounded sample buffers are retained.
 type Request struct {
+	kind              string
 	owner             *Requests
 	start, backendEnd time.Time
 	entered           bool
@@ -103,7 +108,7 @@ func (c *Requests) Begin(ctx context.Context, kind string) (context.Context, *Re
 	default:
 		return ctx, nil
 	}
-	r := &Request{owner: c, start: time.Now()}
+	r := &Request{owner: c, start: time.Now(), kind: kind}
 	return context.WithValue(ctx, requestKey{}, r), r
 }
 func BackendEnter(ctx context.Context) {
@@ -123,6 +128,14 @@ func (r *Request) Finish(failed bool) {
 	}
 	end := time.Now()
 	r.owner.total.Observe(end.Sub(r.start))
+	switch r.kind {
+	case "write":
+		r.owner.writeTotal.Observe(end.Sub(r.start))
+	case "flush":
+		r.owner.flushTotal.Observe(end.Sub(r.start))
+	case "fua":
+		r.owner.fuaTotal.Observe(end.Sub(r.start))
+	}
 	if !r.backendEnd.IsZero() {
 		r.owner.ack.Observe(end.Sub(r.backendEnd))
 	}

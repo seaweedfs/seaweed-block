@@ -56,7 +56,7 @@ func TestRequestKindsAndMissingBackend(t *testing.T) {
 	}
 	r.Finish(false)
 	s := c.Snapshot()
-	if s.Writes != 2 || s.Flushes != 1 || s.FUAWrites != 1 || s.Failed != 1 || s.RequestTotal.Count != 3 || s.ReceiveToBackend.Count != 3 || s.AckDispatch.Count != 3 {
+	if s.Writes != 2 || s.Flushes != 1 || s.FUAWrites != 1 || s.Failed != 1 || s.RequestTotal.Count != 3 || s.FlushTotal.Count != 1 || s.FUATotal.Count != 1 || s.WriteTotal.Count != 1 || s.ReceiveToBackend.Count != 3 || s.AckDispatch.Count != 3 {
 		t.Fatal(s)
 	}
 	_, r = c.Begin(context.Background(), "flush")
