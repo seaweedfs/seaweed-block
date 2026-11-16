@@ -26,6 +26,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend/memback"
 	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
 	"github.com/seaweedfs/seaweed-block/core/frontend/nvmerdma"
+	"github.com/seaweedfs/seaweed-block/core/frontend/ublk"
 	"github.com/seaweedfs/seaweed-block/core/host/volume"
 	"github.com/seaweedfs/seaweed-block/core/recovery"
 	"github.com/seaweedfs/seaweed-block/core/replication"
@@ -93,6 +94,12 @@ type flags struct {
 	// authentication. Phase 106 uses it for controlled Kubernetes cross-node
 	// gates; default installs remain loopback-only.
 	allowExternalNVMeBind bool
+
+	// ublk frontend: serve the volume as the local block device
+	// /dev/ublkbN (Linux ublk_drv, root). -1 disables.
+	ublkDevice     int
+	ublkQueues     int
+	ublkQueueDepth int
 
 	// Durable-backend flags. When --durable-root is set, the iSCSI
 	// and NVMe providers use DurableProvider instead of memback.
@@ -174,6 +181,9 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.nvmeTransport, "nvme-transport", "tcp", "NVMe-oF transport: tcp or the explicit Linux-only standalone rdma target")
 	fs.UintVar(&f.nvmeMaxH2C, "nvme-max-h2c-data-length", 0, "NVMe/TCP MaxH2CDataLength in bytes. 0 preserves the target default")
 	fs.BoolVar(&f.allowExternalNVMeBind, "allow-external-nvme-bind", false, "allow NVMe to bind a non-loopback address; unauthenticated, intended only for explicit gates")
+	fs.IntVar(&f.ublkDevice, "ublk-device", -1, "serve the volume as the local block device /dev/ublkbN (Linux ublk_drv, root); -1 disables. Same-host alternative to the NVMe/TCP loopback")
+	fs.IntVar(&f.ublkQueues, "ublk-queues", 0, "ublk hardware queues (one server thread each); 0 = default 1. Requires --ublk-device")
+	fs.IntVar(&f.ublkQueueDepth, "ublk-queue-depth", 0, "ublk in-flight requests per queue; 0 = default 64. Requires --ublk-device")
 	fs.StringVar(&f.durableRoot, "durable-root", "", "directory for persistent storage files; empty = memback (non-durable)")
 	fs.StringVar(&f.durableImpl, "durable-impl", "smartwal", "LogicalStorage impl: smartwal (default), walstore, opt-in parallel-walstore, or opt-in walstore-chunk (walstore published to SeaweedFS; proof of concept); ignored unless --durable-root is set")
 	fs.StringVar(&f.chunk.filer, "chunk-filer", "", "walstore-chunk: SeaweedFS filer gRPC address host:port")
@@ -334,6 +344,24 @@ func parseFlags(args []string) (flags, error) {
 	} else if f.nvmeMaxH2C != 0 {
 		return flags{}, fmt.Errorf("--nvme-max-h2c-data-length requires --nvme-listen")
 	}
+	if f.ublkDevice >= 0 {
+		if f.ublkQueues < 0 || f.ublkQueues > 64 {
+			return flags{}, fmt.Errorf("--ublk-queues=%d, want 0..64", f.ublkQueues)
+		}
+		if f.ublkQueueDepth < 0 || f.ublkQueueDepth > 4096 {
+			return flags{}, fmt.Errorf("--ublk-queue-depth=%d, want 0..4096", f.ublkQueueDepth)
+		}
+		// Like iSCSI and NVMe: the device serves only through a healthy
+		// projection.
+		if !f.enableT1Readiness {
+			fmt.Fprintln(os.Stderr, "blockvolume: ublk enabled: t1-readiness auto-enabled")
+		}
+		f.enableT1Readiness = true
+	} else if f.ublkDevice < -1 {
+		return flags{}, fmt.Errorf("--ublk-device=%d, want -1 (off) or a device id >= 0", f.ublkDevice)
+	} else if f.ublkQueues != 0 || f.ublkQueueDepth != 0 {
+		return flags{}, fmt.Errorf("--ublk-queues/--ublk-queue-depth require --ublk-device")
+	}
 	return f, nil
 }
 
@@ -477,6 +505,13 @@ type iscsiReadyLine struct {
 	Phase     string `json:"phase"`
 	IscsiAddr string `json:"iscsi_addr"`
 	IQN       string `json:"iqn"`
+}
+
+// ublkReadyLine reports the ublk block device once it serves.
+type ublkReadyLine struct {
+	Component string `json:"component"`
+	Phase     string `json:"phase"`
+	Device    string `json:"device"`
 }
 
 type nvmeReadyLine struct {
@@ -628,7 +663,12 @@ func run(f flags) int {
 			_ = h.Close()
 			return 1
 		}
-		if _, sErr := dp.EnsureStorage(f.volumeID); sErr != nil {
+		// Open and replay (#133): a classifiable failure in either step
+		// (wal_corrupt / io_error) faults fail-closed and is reported at
+		// once by a primary assignment; see openAndRecoverDurable.
+		outcome, evidence, sErr := openAndRecoverDurable(dp, h, f.volumeID, 10*time.Second)
+		switch outcome {
+		case durableStartupFatal:
 			fmt.Fprintln(os.Stderr, "blockvolume: durable storage open:", sErr)
 			_ = dp.Close()
 			if status != nil {
@@ -638,17 +678,11 @@ func run(f flags) int {
 			}
 			_ = h.Close()
 			return 1
-		}
-		recCtx, recCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		report, recErr := dp.RecoverVolume(recCtx, f.volumeID)
-		recCancel()
-		if recErr != nil {
-			fmt.Fprintln(os.Stderr, "blockvolume: durable recovery failed:", report.Evidence)
-			h.BlockLocalReadiness(report.Evidence)
-			return waitFaultedDurableRecovery(h, status, durableProv, report.Evidence)
-		} else {
-			fmt.Fprintln(os.Stderr, "blockvolume: durable recovered:", report.Evidence)
-			h.ClearLocalReadinessBlock()
+		case durableStartupFaulted:
+			fmt.Fprintln(os.Stderr, "blockvolume: durable recovery failed:", evidence)
+			return waitFaultedDurableRecovery(h, status, durableProv, evidence)
+		default:
+			fmt.Fprintln(os.Stderr, "blockvolume: durable recovered:", evidence)
 		}
 	} else {
 		// memback fallback — wraps the volume's AdapterProjectionView
@@ -1129,6 +1163,61 @@ func run(f flags) int {
 		}
 	}
 
+	var ublkTarget *ublk.Target
+	if f.ublkDevice >= 0 {
+		blockSize := frontendBlockSize
+		volumeSize := frontendVolumeSize
+		if blockSize == 0 {
+			blockSize = nvme.DefaultBlockSize
+		}
+		if volumeSize == 0 {
+			volumeSize = nvme.DefaultVolumeBlocks * uint64(blockSize)
+		}
+		ublkTarget = ublk.NewTarget(ublk.TargetConfig{
+			VolumeID:   f.volumeID,
+			Provider:   provider,
+			DevID:      f.ublkDevice,
+			BlockSize:  blockSize,
+			VolumeSize: volumeSize,
+			Queues:     f.ublkQueues,
+			QueueDepth: f.ublkQueueDepth,
+		})
+		ublkPath, err := ublkTarget.Start()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "blockvolume: ublk device:", err)
+			if nvmeTarget != nil {
+				_ = nvmeTarget.Close()
+			}
+			if iscsiTarget != nil {
+				_ = iscsiTarget.Close()
+			}
+			if replListen != nil {
+				replListen.Stop()
+			}
+			if replVolume != nil {
+				_ = replVolume.Close()
+			}
+			if durableProv != nil {
+				_ = durableProv.Close()
+			}
+			if status != nil {
+				shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
+				_ = status.Close(shutCtx)
+				shutCancel()
+			}
+			_ = h.Close()
+			return 1
+		}
+		if status != nil {
+			status.SetUblkStatusSource(ublkTarget)
+		}
+		_ = json.NewEncoder(os.Stdout).Encode(ublkReadyLine{
+			Component: "blockvolume",
+			Phase:     "ublk-ready",
+			Device:    ublkPath,
+		})
+	}
+
 	shutdownCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
 	var leaseRequests <-chan workspaceStopRequest
@@ -1153,6 +1242,11 @@ func run(f flags) int {
 		drainErr = durableProv.Backend(f.volumeID).StopIO(leaseStop.ctx, "workspace lease fenced")
 	}
 	h.SetFrontendTargets(nil)
+	// The ublk device drains with the other frontends: its Close (STOP_DEV,
+	// queue join, DEL_DEV) is part of the drain the lease ACK waits for.
+	if ublkTarget != nil {
+		drainErr = errors.Join(drainErr, ublkTarget.Close())
+	}
 	if nvmeTarget != nil {
 		if status != nil {
 			status.SetNVMeListenerReady(false)

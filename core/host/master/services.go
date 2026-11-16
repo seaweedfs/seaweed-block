@@ -75,6 +75,11 @@ func (s *services) CreateVolume(ctx context.Context, req *control.CreateVolumeRe
 }
 
 func (s *services) DeleteVolume(ctx context.Context, req *control.DeleteVolumeRequest) (*control.DeleteVolumeResponse, error) {
+	s.host.workspaceMu.Lock()
+	defer s.host.workspaceMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, workspaceError(err)
+	}
 	stores := s.host.Lifecycle()
 	if stores == nil {
 		return nil, status.Error(codes.FailedPrecondition, "lifecycle store is not configured")
@@ -82,11 +87,22 @@ func (s *services) DeleteVolume(ctx context.Context, req *control.DeleteVolumeRe
 	if req.GetVolumeId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "volume_id is required")
 	}
-	if err := stores.Placements.DeletePlacement(req.GetVolumeId()); err != nil {
-		return nil, lifecycleError("delete placement", err)
+	_, bound, err := stores.WorkspaceBindings.Get(req.GetVolumeId())
+	if err != nil {
+		return nil, lifecycleError("delete workspace bindings", err)
 	}
-	if err := stores.Volumes.DeleteVolume(req.GetVolumeId()); err != nil {
-		return nil, lifecycleError("delete volume", err)
+	_, placed := stores.Placements.GetPlacement(req.GetVolumeId())
+	err = s.host.Publisher().RecordWorkspaceDeletion(ctx, req.GetVolumeId(), bound && placed, func() error {
+		if e := stores.Placements.DeletePlacement(req.GetVolumeId()); e != nil {
+			return e
+		}
+		if e := stores.Volumes.DeleteVolume(req.GetVolumeId()); e != nil {
+			return e
+		}
+		return stores.WorkspaceBindings.DeleteVolume(req.GetVolumeId())
+	})
+	if err != nil {
+		return nil, workspaceError(err)
 	}
 	return &control.DeleteVolumeResponse{}, nil
 }

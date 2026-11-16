@@ -86,26 +86,26 @@ func TestRecoveryWatchdog_ReadyClearsAndDisarmsNewEpochRearms(t *testing.T) {
 
 	w.primaryAssigned(1)
 	clk.advance(11 * time.Second)
-	if r, fired := w.reason(false, 0, false); r != UnhealthyRecoveryTimeout || !fired {
+	if r, fired := w.reason(false, 0, false, ""); r != UnhealthyRecoveryTimeout || !fired {
 		t.Fatalf("past timeout: %q fired=%t", r, fired)
 	}
-	if r, fired := w.reason(false, 0, false); r != UnhealthyRecoveryTimeout || fired {
+	if r, fired := w.reason(false, 0, false, ""); r != UnhealthyRecoveryTimeout || fired {
 		t.Fatalf("latched: %q fired=%t; want the reason, fired only once", r, fired)
 	}
-	if r, _ := w.reason(true, 1, false); r != "" {
+	if r, _ := w.reason(true, 1, false, ""); r != "" {
 		t.Fatalf("ready: %q; want cleared", r)
 	}
-	if r, _ := w.reason(false, 0, false); r != "" {
+	if r, _ := w.reason(false, 0, false, ""); r != "" {
 		t.Fatalf("unready again in the same assignment: %q; want disarmed", r)
 	}
 
 	w.primaryAssigned(2) // new primary epoch: fresh clock
 	clk.advance(9 * time.Second)
-	if r, _ := w.reason(false, 0, false); r != "" {
+	if r, _ := w.reason(false, 0, false, ""); r != "" {
 		t.Fatalf("new epoch inside timeout: %q", r)
 	}
 	clk.advance(2 * time.Second)
-	if r, _ := w.reason(false, 0, false); r != UnhealthyRecoveryTimeout {
+	if r, _ := w.reason(false, 0, false, ""); r != UnhealthyRecoveryTimeout {
 		t.Fatalf("new epoch past timeout: %q", r)
 	}
 }
@@ -114,11 +114,11 @@ func TestRecoveryWatchdog_ReadyClearsAndDisarmsNewEpochRearms(t *testing.T) {
 // at once; it never applies to a replica without the primary assignment.
 func TestRecoveryWatchdog_RoleAdmissionFailure(t *testing.T) {
 	w := newRecoveryWatchdog(time.Hour)
-	if r, _ := w.reason(false, 0, true); r != "" {
+	if r, _ := w.reason(false, 0, true, ""); r != "" {
 		t.Fatalf("not primary-assigned: %q", r)
 	}
 	w.primaryAssigned(1)
-	if r, _ := w.reason(false, 0, true); r != UnhealthyRoleAdmission {
+	if r, _ := w.reason(false, 0, true, ""); r != UnhealthyRoleAdmission {
 		t.Fatalf("primary-assigned with the G1 latch: %q; want %s", r, UnhealthyRoleAdmission)
 	}
 }

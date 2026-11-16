@@ -19,11 +19,13 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	WorkspaceService_RenewWorkspaceLease_FullMethodName = "/seaweedfs.block.control.WorkspaceService/RenewWorkspaceLease"
-	WorkspaceService_RevokeWorkspace_FullMethodName     = "/seaweedfs.block.control.WorkspaceService/RevokeWorkspace"
-	WorkspaceService_AckWorkspaceRevoked_FullMethodName = "/seaweedfs.block.control.WorkspaceService/AckWorkspaceRevoked"
-	WorkspaceService_MoveWorkspace_FullMethodName       = "/seaweedfs.block.control.WorkspaceService/MoveWorkspace"
-	WorkspaceService_QueryWorkspace_FullMethodName      = "/seaweedfs.block.control.WorkspaceService/QueryWorkspace"
+	WorkspaceService_RegisterWorkspaceBinding_FullMethodName = "/seaweedfs.block.control.WorkspaceService/RegisterWorkspaceBinding"
+	WorkspaceService_PlaceWorkspace_FullMethodName           = "/seaweedfs.block.control.WorkspaceService/PlaceWorkspace"
+	WorkspaceService_RenewWorkspaceLease_FullMethodName      = "/seaweedfs.block.control.WorkspaceService/RenewWorkspaceLease"
+	WorkspaceService_RevokeWorkspace_FullMethodName          = "/seaweedfs.block.control.WorkspaceService/RevokeWorkspace"
+	WorkspaceService_AckWorkspaceRevoked_FullMethodName      = "/seaweedfs.block.control.WorkspaceService/AckWorkspaceRevoked"
+	WorkspaceService_MoveWorkspace_FullMethodName            = "/seaweedfs.block.control.WorkspaceService/MoveWorkspace"
+	WorkspaceService_QueryWorkspace_FullMethodName           = "/seaweedfs.block.control.WorkspaceService/QueryWorkspace"
 )
 
 // WorkspaceServiceClient is the client API for WorkspaceService service.
@@ -32,6 +34,10 @@ const (
 //
 // Opt-in RF=1 workspace authority protocol. Epochs are minted only by Publisher.
 type WorkspaceServiceClient interface {
+	// Register a caller-allocated per-volume pair before placement or move.
+	RegisterWorkspaceBinding(ctx context.Context, in *WorkspaceBinding, opts ...grpc.CallOption) (*WorkspaceBinding, error)
+	// Desired chosen-node intent only; this never directly mints authority.
+	PlaceWorkspace(ctx context.Context, in *WorkspacePlacement, opts ...grpc.CallOption) (*WorkspaceEmpty, error)
 	RenewWorkspaceLease(ctx context.Context, in *WorkspaceIdentity, opts ...grpc.CallOption) (*WorkspaceLeaseFact, error)
 	RevokeWorkspace(ctx context.Context, in *WorkspaceIdentity, opts ...grpc.CallOption) (*WorkspaceLeaseFact, error)
 	AckWorkspaceRevoked(ctx context.Context, in *WorkspaceRevocationAck, opts ...grpc.CallOption) (*WorkspaceEmpty, error)
@@ -45,6 +51,26 @@ type workspaceServiceClient struct {
 
 func NewWorkspaceServiceClient(cc grpc.ClientConnInterface) WorkspaceServiceClient {
 	return &workspaceServiceClient{cc}
+}
+
+func (c *workspaceServiceClient) RegisterWorkspaceBinding(ctx context.Context, in *WorkspaceBinding, opts ...grpc.CallOption) (*WorkspaceBinding, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WorkspaceBinding)
+	err := c.cc.Invoke(ctx, WorkspaceService_RegisterWorkspaceBinding_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *workspaceServiceClient) PlaceWorkspace(ctx context.Context, in *WorkspacePlacement, opts ...grpc.CallOption) (*WorkspaceEmpty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WorkspaceEmpty)
+	err := c.cc.Invoke(ctx, WorkspaceService_PlaceWorkspace_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (c *workspaceServiceClient) RenewWorkspaceLease(ctx context.Context, in *WorkspaceIdentity, opts ...grpc.CallOption) (*WorkspaceLeaseFact, error) {
@@ -103,6 +129,10 @@ func (c *workspaceServiceClient) QueryWorkspace(ctx context.Context, in *Workspa
 //
 // Opt-in RF=1 workspace authority protocol. Epochs are minted only by Publisher.
 type WorkspaceServiceServer interface {
+	// Register a caller-allocated per-volume pair before placement or move.
+	RegisterWorkspaceBinding(context.Context, *WorkspaceBinding) (*WorkspaceBinding, error)
+	// Desired chosen-node intent only; this never directly mints authority.
+	PlaceWorkspace(context.Context, *WorkspacePlacement) (*WorkspaceEmpty, error)
 	RenewWorkspaceLease(context.Context, *WorkspaceIdentity) (*WorkspaceLeaseFact, error)
 	RevokeWorkspace(context.Context, *WorkspaceIdentity) (*WorkspaceLeaseFact, error)
 	AckWorkspaceRevoked(context.Context, *WorkspaceRevocationAck) (*WorkspaceEmpty, error)
@@ -118,6 +148,12 @@ type WorkspaceServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedWorkspaceServiceServer struct{}
 
+func (UnimplementedWorkspaceServiceServer) RegisterWorkspaceBinding(context.Context, *WorkspaceBinding) (*WorkspaceBinding, error) {
+	return nil, status.Error(codes.Unimplemented, "method RegisterWorkspaceBinding not implemented")
+}
+func (UnimplementedWorkspaceServiceServer) PlaceWorkspace(context.Context, *WorkspacePlacement) (*WorkspaceEmpty, error) {
+	return nil, status.Error(codes.Unimplemented, "method PlaceWorkspace not implemented")
+}
 func (UnimplementedWorkspaceServiceServer) RenewWorkspaceLease(context.Context, *WorkspaceIdentity) (*WorkspaceLeaseFact, error) {
 	return nil, status.Error(codes.Unimplemented, "method RenewWorkspaceLease not implemented")
 }
@@ -152,6 +188,42 @@ func RegisterWorkspaceServiceServer(s grpc.ServiceRegistrar, srv WorkspaceServic
 		t.testEmbeddedByValue()
 	}
 	s.RegisterService(&WorkspaceService_ServiceDesc, srv)
+}
+
+func _WorkspaceService_RegisterWorkspaceBinding_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(WorkspaceBinding)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkspaceServiceServer).RegisterWorkspaceBinding(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkspaceService_RegisterWorkspaceBinding_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkspaceServiceServer).RegisterWorkspaceBinding(ctx, req.(*WorkspaceBinding))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _WorkspaceService_PlaceWorkspace_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(WorkspacePlacement)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkspaceServiceServer).PlaceWorkspace(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkspaceService_PlaceWorkspace_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkspaceServiceServer).PlaceWorkspace(ctx, req.(*WorkspacePlacement))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 func _WorkspaceService_RenewWorkspaceLease_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
@@ -251,6 +323,14 @@ var WorkspaceService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "seaweedfs.block.control.WorkspaceService",
 	HandlerType: (*WorkspaceServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "RegisterWorkspaceBinding",
+			Handler:    _WorkspaceService_RegisterWorkspaceBinding_Handler,
+		},
+		{
+			MethodName: "PlaceWorkspace",
+			Handler:    _WorkspaceService_PlaceWorkspace_Handler,
+		},
 		{
 			MethodName: "RenewWorkspaceLease",
 			Handler:    _WorkspaceService_RenewWorkspaceLease_Handler,

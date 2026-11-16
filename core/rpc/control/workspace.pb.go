@@ -550,6 +550,7 @@ type WorkspaceStatus struct {
 	Lease         *WorkspaceLeaseFact     `protobuf:"bytes,1,opt,name=lease,proto3" json:"lease,omitempty"`
 	RevocationAck *WorkspaceRevocationAck `protobuf:"bytes,2,opt,name=revocation_ack,json=revocationAck,proto3" json:"revocation_ack,omitempty"`
 	Moves         []*WorkspaceGrant       `protobuf:"bytes,3,rep,name=moves,proto3" json:"moves,omitempty"`
+	Bindings      []*WorkspaceBinding     `protobuf:"bytes,4,rep,name=bindings,proto3" json:"bindings,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -605,6 +606,149 @@ func (x *WorkspaceStatus) GetMoves() []*WorkspaceGrant {
 	return nil
 }
 
+func (x *WorkspaceStatus) GetBindings() []*WorkspaceBinding {
+	if x != nil {
+		return x.Bindings
+	}
+	return nil
+}
+
+type WorkspaceBinding struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	VolumeId      string                 `protobuf:"bytes,1,opt,name=volume_id,json=volumeId,proto3" json:"volume_id,omitempty"`
+	ServerId      string                 `protobuf:"bytes,2,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
+	DataAddr      string                 `protobuf:"bytes,3,opt,name=data_addr,json=dataAddr,proto3" json:"data_addr,omitempty"`
+	CtrlAddr      string                 `protobuf:"bytes,4,opt,name=ctrl_addr,json=ctrlAddr,proto3" json:"ctrl_addr,omitempty"`
+	Retired       bool                   `protobuf:"varint,5,opt,name=retired,proto3" json:"retired,omitempty"` // server output only
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WorkspaceBinding) Reset() {
+	*x = WorkspaceBinding{}
+	mi := &file_workspace_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WorkspaceBinding) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WorkspaceBinding) ProtoMessage() {}
+
+func (x *WorkspaceBinding) ProtoReflect() protoreflect.Message {
+	mi := &file_workspace_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WorkspaceBinding.ProtoReflect.Descriptor instead.
+func (*WorkspaceBinding) Descriptor() ([]byte, []int) {
+	return file_workspace_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *WorkspaceBinding) GetVolumeId() string {
+	if x != nil {
+		return x.VolumeId
+	}
+	return ""
+}
+
+func (x *WorkspaceBinding) GetServerId() string {
+	if x != nil {
+		return x.ServerId
+	}
+	return ""
+}
+
+func (x *WorkspaceBinding) GetDataAddr() string {
+	if x != nil {
+		return x.DataAddr
+	}
+	return ""
+}
+
+func (x *WorkspaceBinding) GetCtrlAddr() string {
+	if x != nil {
+		return x.CtrlAddr
+	}
+	return ""
+}
+
+func (x *WorkspaceBinding) GetRetired() bool {
+	if x != nil {
+		return x.Retired
+	}
+	return false
+}
+
+type WorkspacePlacement struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	VolumeId      string                 `protobuf:"bytes,1,opt,name=volume_id,json=volumeId,proto3" json:"volume_id,omitempty"`
+	ServerId      string                 `protobuf:"bytes,2,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
+	ReplicaId     string                 `protobuf:"bytes,3,opt,name=replica_id,json=replicaId,proto3" json:"replica_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WorkspacePlacement) Reset() {
+	*x = WorkspacePlacement{}
+	mi := &file_workspace_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WorkspacePlacement) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WorkspacePlacement) ProtoMessage() {}
+
+func (x *WorkspacePlacement) ProtoReflect() protoreflect.Message {
+	mi := &file_workspace_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WorkspacePlacement.ProtoReflect.Descriptor instead.
+func (*WorkspacePlacement) Descriptor() ([]byte, []int) {
+	return file_workspace_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *WorkspacePlacement) GetVolumeId() string {
+	if x != nil {
+		return x.VolumeId
+	}
+	return ""
+}
+
+func (x *WorkspacePlacement) GetServerId() string {
+	if x != nil {
+		return x.ServerId
+	}
+	return ""
+}
+
+func (x *WorkspacePlacement) GetReplicaId() string {
+	if x != nil {
+		return x.ReplicaId
+	}
+	return ""
+}
+
 var File_workspace_proto protoreflect.FileDescriptor
 
 const file_workspace_proto_rawDesc = "" +
@@ -658,12 +802,26 @@ const file_workspace_proto_rawDesc = "" +
 	"\x06issued\x18\n" +
 	" \x01(\bR\x06issued\x12\x19\n" +
 	"\bold_host\x18\v \x01(\tR\aoldHost\x12\x19\n" +
-	"\bnew_host\x18\f \x01(\tR\anewHost\"\xeb\x01\n" +
+	"\bnew_host\x18\f \x01(\tR\anewHost\"\xb2\x02\n" +
 	"\x0fWorkspaceStatus\x12A\n" +
 	"\x05lease\x18\x01 \x01(\v2+.seaweedfs.block.control.WorkspaceLeaseFactR\x05lease\x12V\n" +
 	"\x0erevocation_ack\x18\x02 \x01(\v2/.seaweedfs.block.control.WorkspaceRevocationAckR\rrevocationAck\x12=\n" +
-	"\x05moves\x18\x03 \x03(\v2'.seaweedfs.block.control.WorkspaceGrantR\x05moves2\xa7\x04\n" +
-	"\x10WorkspaceService\x12n\n" +
+	"\x05moves\x18\x03 \x03(\v2'.seaweedfs.block.control.WorkspaceGrantR\x05moves\x12E\n" +
+	"\bbindings\x18\x04 \x03(\v2).seaweedfs.block.control.WorkspaceBindingR\bbindings\"\xa0\x01\n" +
+	"\x10WorkspaceBinding\x12\x1b\n" +
+	"\tvolume_id\x18\x01 \x01(\tR\bvolumeId\x12\x1b\n" +
+	"\tserver_id\x18\x02 \x01(\tR\bserverId\x12\x1b\n" +
+	"\tdata_addr\x18\x03 \x01(\tR\bdataAddr\x12\x1b\n" +
+	"\tctrl_addr\x18\x04 \x01(\tR\bctrlAddr\x12\x18\n" +
+	"\aretired\x18\x05 \x01(\bR\aretired\"m\n" +
+	"\x12WorkspacePlacement\x12\x1b\n" +
+	"\tvolume_id\x18\x01 \x01(\tR\bvolumeId\x12\x1b\n" +
+	"\tserver_id\x18\x02 \x01(\tR\bserverId\x12\x1d\n" +
+	"\n" +
+	"replica_id\x18\x03 \x01(\tR\treplicaId2\x81\x06\n" +
+	"\x10WorkspaceService\x12p\n" +
+	"\x18RegisterWorkspaceBinding\x12).seaweedfs.block.control.WorkspaceBinding\x1a).seaweedfs.block.control.WorkspaceBinding\x12f\n" +
+	"\x0ePlaceWorkspace\x12+.seaweedfs.block.control.WorkspacePlacement\x1a'.seaweedfs.block.control.WorkspaceEmpty\x12n\n" +
 	"\x13RenewWorkspaceLease\x12*.seaweedfs.block.control.WorkspaceIdentity\x1a+.seaweedfs.block.control.WorkspaceLeaseFact\x12j\n" +
 	"\x0fRevokeWorkspace\x12*.seaweedfs.block.control.WorkspaceIdentity\x1a+.seaweedfs.block.control.WorkspaceLeaseFact\x12o\n" +
 	"\x13AckWorkspaceRevoked\x12/.seaweedfs.block.control.WorkspaceRevocationAck\x1a'.seaweedfs.block.control.WorkspaceEmpty\x12`\n" +
@@ -682,7 +840,7 @@ func file_workspace_proto_rawDescGZIP() []byte {
 	return file_workspace_proto_rawDescData
 }
 
-var file_workspace_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_workspace_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_workspace_proto_goTypes = []any{
 	(*WorkspaceIdentity)(nil),      // 0: seaweedfs.block.control.WorkspaceIdentity
 	(*WorkspaceVolume)(nil),        // 1: seaweedfs.block.control.WorkspaceVolume
@@ -692,27 +850,34 @@ var file_workspace_proto_goTypes = []any{
 	(*WorkspaceMove)(nil),          // 5: seaweedfs.block.control.WorkspaceMove
 	(*WorkspaceGrant)(nil),         // 6: seaweedfs.block.control.WorkspaceGrant
 	(*WorkspaceStatus)(nil),        // 7: seaweedfs.block.control.WorkspaceStatus
+	(*WorkspaceBinding)(nil),       // 8: seaweedfs.block.control.WorkspaceBinding
+	(*WorkspacePlacement)(nil),     // 9: seaweedfs.block.control.WorkspacePlacement
 }
 var file_workspace_proto_depIdxs = []int32{
-	0, // 0: seaweedfs.block.control.WorkspaceRevocationAck.identity:type_name -> seaweedfs.block.control.WorkspaceIdentity
-	3, // 1: seaweedfs.block.control.WorkspaceStatus.lease:type_name -> seaweedfs.block.control.WorkspaceLeaseFact
-	4, // 2: seaweedfs.block.control.WorkspaceStatus.revocation_ack:type_name -> seaweedfs.block.control.WorkspaceRevocationAck
-	6, // 3: seaweedfs.block.control.WorkspaceStatus.moves:type_name -> seaweedfs.block.control.WorkspaceGrant
-	0, // 4: seaweedfs.block.control.WorkspaceService.RenewWorkspaceLease:input_type -> seaweedfs.block.control.WorkspaceIdentity
-	0, // 5: seaweedfs.block.control.WorkspaceService.RevokeWorkspace:input_type -> seaweedfs.block.control.WorkspaceIdentity
-	4, // 6: seaweedfs.block.control.WorkspaceService.AckWorkspaceRevoked:input_type -> seaweedfs.block.control.WorkspaceRevocationAck
-	5, // 7: seaweedfs.block.control.WorkspaceService.MoveWorkspace:input_type -> seaweedfs.block.control.WorkspaceMove
-	1, // 8: seaweedfs.block.control.WorkspaceService.QueryWorkspace:input_type -> seaweedfs.block.control.WorkspaceVolume
-	3, // 9: seaweedfs.block.control.WorkspaceService.RenewWorkspaceLease:output_type -> seaweedfs.block.control.WorkspaceLeaseFact
-	3, // 10: seaweedfs.block.control.WorkspaceService.RevokeWorkspace:output_type -> seaweedfs.block.control.WorkspaceLeaseFact
-	2, // 11: seaweedfs.block.control.WorkspaceService.AckWorkspaceRevoked:output_type -> seaweedfs.block.control.WorkspaceEmpty
-	6, // 12: seaweedfs.block.control.WorkspaceService.MoveWorkspace:output_type -> seaweedfs.block.control.WorkspaceGrant
-	7, // 13: seaweedfs.block.control.WorkspaceService.QueryWorkspace:output_type -> seaweedfs.block.control.WorkspaceStatus
-	9, // [9:14] is the sub-list for method output_type
-	4, // [4:9] is the sub-list for method input_type
-	4, // [4:4] is the sub-list for extension type_name
-	4, // [4:4] is the sub-list for extension extendee
-	0, // [0:4] is the sub-list for field type_name
+	0,  // 0: seaweedfs.block.control.WorkspaceRevocationAck.identity:type_name -> seaweedfs.block.control.WorkspaceIdentity
+	3,  // 1: seaweedfs.block.control.WorkspaceStatus.lease:type_name -> seaweedfs.block.control.WorkspaceLeaseFact
+	4,  // 2: seaweedfs.block.control.WorkspaceStatus.revocation_ack:type_name -> seaweedfs.block.control.WorkspaceRevocationAck
+	6,  // 3: seaweedfs.block.control.WorkspaceStatus.moves:type_name -> seaweedfs.block.control.WorkspaceGrant
+	8,  // 4: seaweedfs.block.control.WorkspaceStatus.bindings:type_name -> seaweedfs.block.control.WorkspaceBinding
+	8,  // 5: seaweedfs.block.control.WorkspaceService.RegisterWorkspaceBinding:input_type -> seaweedfs.block.control.WorkspaceBinding
+	9,  // 6: seaweedfs.block.control.WorkspaceService.PlaceWorkspace:input_type -> seaweedfs.block.control.WorkspacePlacement
+	0,  // 7: seaweedfs.block.control.WorkspaceService.RenewWorkspaceLease:input_type -> seaweedfs.block.control.WorkspaceIdentity
+	0,  // 8: seaweedfs.block.control.WorkspaceService.RevokeWorkspace:input_type -> seaweedfs.block.control.WorkspaceIdentity
+	4,  // 9: seaweedfs.block.control.WorkspaceService.AckWorkspaceRevoked:input_type -> seaweedfs.block.control.WorkspaceRevocationAck
+	5,  // 10: seaweedfs.block.control.WorkspaceService.MoveWorkspace:input_type -> seaweedfs.block.control.WorkspaceMove
+	1,  // 11: seaweedfs.block.control.WorkspaceService.QueryWorkspace:input_type -> seaweedfs.block.control.WorkspaceVolume
+	8,  // 12: seaweedfs.block.control.WorkspaceService.RegisterWorkspaceBinding:output_type -> seaweedfs.block.control.WorkspaceBinding
+	2,  // 13: seaweedfs.block.control.WorkspaceService.PlaceWorkspace:output_type -> seaweedfs.block.control.WorkspaceEmpty
+	3,  // 14: seaweedfs.block.control.WorkspaceService.RenewWorkspaceLease:output_type -> seaweedfs.block.control.WorkspaceLeaseFact
+	3,  // 15: seaweedfs.block.control.WorkspaceService.RevokeWorkspace:output_type -> seaweedfs.block.control.WorkspaceLeaseFact
+	2,  // 16: seaweedfs.block.control.WorkspaceService.AckWorkspaceRevoked:output_type -> seaweedfs.block.control.WorkspaceEmpty
+	6,  // 17: seaweedfs.block.control.WorkspaceService.MoveWorkspace:output_type -> seaweedfs.block.control.WorkspaceGrant
+	7,  // 18: seaweedfs.block.control.WorkspaceService.QueryWorkspace:output_type -> seaweedfs.block.control.WorkspaceStatus
+	12, // [12:19] is the sub-list for method output_type
+	5,  // [5:12] is the sub-list for method input_type
+	5,  // [5:5] is the sub-list for extension type_name
+	5,  // [5:5] is the sub-list for extension extendee
+	0,  // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_workspace_proto_init() }
@@ -726,7 +891,7 @@ func file_workspace_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_workspace_proto_rawDesc), len(file_workspace_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   8,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

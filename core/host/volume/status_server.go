@@ -14,6 +14,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
+	"github.com/seaweedfs/seaweed-block/core/frontend/ublk"
 	"github.com/seaweedfs/seaweed-block/core/replication"
 )
 
@@ -45,6 +46,10 @@ import (
 //	  -> 200 JSON read-only NVMe target counters (when a TCP target is wired)
 //	  -> 404                                  (wrong volume or no TCP source)
 //
+//	GET /status/ublk?volume=<id>
+//	  -> 200 JSON read-only ublk device request counters (when wired)
+//	  -> 404                                  (wrong volume or no ublk device)
+//
 // The server binds on a caller-supplied addr (":0" for tests);
 // the actual bound addr is available via Addr() after Start.
 type StatusServer struct {
@@ -60,6 +65,7 @@ type StatusServer struct {
 	peerSource      peerStatusSource
 	durableSource   durableStatusSource
 	nvmeSource      nvmeStatusSource
+	ublkSource      ublkStatusSource
 	runtimeSource   runtimeRecoverySource
 	frontendCaps    []FrontendTransportCapability
 	nvmePending     bool         // configured listener has not started (or is stopping)
@@ -87,6 +93,10 @@ type durableStatusSource interface {
 
 type nvmeStatusSource interface {
 	Stats() nvme.Stats
+}
+
+type ublkStatusSource interface {
+	Stats() ublk.Stats
 }
 
 type runtimeRecoverySource interface {
@@ -148,6 +158,12 @@ type FrontendCapabilitiesStatus struct {
 type NVMeStatus struct {
 	VolumeID string     `json:"volumeID"`
 	Stats    nvme.Stats `json:"stats"`
+}
+
+// UblkStatus is the /status/ublk body: the ublk device's request counters.
+type UblkStatus struct {
+	VolumeID string     `json:"volumeID"`
+	Stats    ublk.Stats `json:"stats"`
 }
 
 const (
@@ -255,6 +271,14 @@ func (s *StatusServer) SetDurableStatusSource(src durableStatusSource) {
 	s.durableSource = src
 }
 
+// SetUblkStatusSource enables /status/ublk with the ublk device's counters.
+// It may be called before or after Start.
+func (s *StatusServer) SetUblkStatusSource(src ublkStatusSource) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ublkSource = src
+}
+
 // SetNVMeStatusSource enables /status/nvme with a read-only target snapshot.
 // It may be called before or after Start.
 func (s *StatusServer) SetNVMeStatusSource(src nvmeStatusSource) {
@@ -307,6 +331,7 @@ func (s *StatusServer) Start(addr string) (string, error) {
 	mux.HandleFunc("/status/peers", s.handleStatusPeers)
 	mux.HandleFunc("/status/durable", s.handleStatusDurable)
 	mux.HandleFunc("/status/nvme", s.handleStatusNVMe)
+	mux.HandleFunc("/status/ublk", s.handleStatusUblk)
 	mux.HandleFunc("/status/frontend-capabilities", s.handleFrontendCapabilities)
 	if s.recoveryEnabled {
 		mux.HandleFunc("/status/recovery", s.handleStatusRecovery)
@@ -393,6 +418,32 @@ func (s *StatusServer) handleFrontendCapabilities(w http.ResponseWriter, r *http
 		HostCapabilityIsProductClaim: false,
 		FrontendTransports:           caps,
 	})
+}
+
+func (s *StatusServer) handleStatusUblk(w http.ResponseWriter, r *http.Request) {
+	if !s.externalAccessAllowed() && !isLoopbackRemote(r.RemoteAddr) {
+		http.Error(w, "status endpoint restricted to loopback", http.StatusForbidden)
+		return
+	}
+	vol := r.URL.Query().Get("volume")
+	if vol == "" {
+		http.Error(w, "missing volume query param", http.StatusBadRequest)
+		return
+	}
+	p := s.statusProjection()
+	if p.VolumeID != vol {
+		http.Error(w, fmt.Sprintf("volume %q not served by this host (serves %q)", vol, p.VolumeID), http.StatusNotFound)
+		return
+	}
+	s.mu.Lock()
+	src := s.ublkSource
+	s.mu.Unlock()
+	if src == nil {
+		http.Error(w, "ublk status source unavailable", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(UblkStatus{VolumeID: p.VolumeID, Stats: src.Stats()})
 }
 
 func (s *StatusServer) handleStatusNVMe(w http.ResponseWriter, r *http.Request) {

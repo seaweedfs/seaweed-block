@@ -4,6 +4,10 @@ option go_package = "github.com/seaweedfs/seaweed-block/core/rpc/control;control
 
 // Opt-in RF=1 workspace authority protocol. Epochs are minted only by Publisher.
 service WorkspaceService {
+  // Register a caller-allocated per-volume pair before placement or move.
+  rpc RegisterWorkspaceBinding(WorkspaceBinding) returns (WorkspaceBinding);
+  // Desired chosen-node intent only; this never directly mints authority.
+  rpc PlaceWorkspace(WorkspacePlacement) returns (WorkspaceEmpty);
   rpc RenewWorkspaceLease(WorkspaceIdentity) returns (WorkspaceLeaseFact);
   rpc RevokeWorkspace(WorkspaceIdentity) returns (WorkspaceLeaseFact);
   rpc AckWorkspaceRevoked(WorkspaceRevocationAck) returns (WorkspaceEmpty);
@@ -34,4 +38,13 @@ message WorkspaceGrant {
 message WorkspaceStatus {
   WorkspaceLeaseFact lease = 1; WorkspaceRevocationAck revocation_ack = 2;
   repeated WorkspaceGrant moves = 3;
+  repeated WorkspaceBinding bindings = 4;
+}
+message WorkspaceBinding {
+  string volume_id = 1; string server_id = 2;
+  string data_addr = 3; string ctrl_addr = 4;
+  bool retired = 5; // server output only
+}
+message WorkspacePlacement {
+  string volume_id = 1; string server_id = 2; string replica_id = 3;
 }

@@ -118,6 +118,42 @@ type WorkspaceMoveRequest struct {
 
 // MoveWorkspace is the authority-owned guarded RF1 move seam. The host layer
 // validates volume eligibility and reads HEAD before calling this boundary.
+// RecordWorkspacePlacement serializes initial desired placement persistence
+// against authority publication. persist must not call back into Publisher.
+func (p *Publisher) RecordWorkspacePlacement(ctx context.Context, volume string, persist func() error) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if _, _, ok := p.workspaceLineLocked(volume); ok {
+		return fmt.Errorf("workspace placement: volume already assigned; use move")
+	}
+	return persist()
+}
+
+// RecordWorkspaceDeletion protects reservation release against live or pending
+// authority. A current clean ACK is proof of drain; a lease alone is not.
+func (p *Publisher) RecordWorkspaceDeletion(ctx context.Context, volume string, pendingPlacement bool, persist func() error) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s := p.workspace[volume]
+	if s != nil && len(s.Moves) > 0 && !s.Moves[len(s.Moves)-1].Issued {
+		return fmt.Errorf("workspace delete: move pending")
+	}
+	if _, line, ok := p.workspaceLineLocked(volume); ok {
+		if s == nil || s.Ack == nil || s.Ack.Epoch != line.info.Epoch || s.Ack.ReplicaID != line.info.ReplicaID {
+			return fmt.Errorf("workspace delete: live authority requires clean revocation ACK")
+		}
+	} else if pendingPlacement {
+		return fmt.Errorf("workspace delete: placement may have queued authority")
+	}
+	return persist()
+}
+
 func (p *Publisher) MoveWorkspace(ctx context.Context, req WorkspaceMoveRequest, head WorkspaceHead) (WorkspaceMoveRecord, error) {
 	if err := ctx.Err(); err != nil {
 		return WorkspaceMoveRecord{}, err
