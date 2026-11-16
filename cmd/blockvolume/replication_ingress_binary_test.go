@@ -3,9 +3,12 @@
 package main_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -15,7 +18,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/recovery"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"github.com/seaweedfs/seaweed-block/core/storage"
 	"github.com/seaweedfs/seaweed-block/core/transport"
 	"google.golang.org/grpc"
 )
@@ -119,16 +124,19 @@ func TestBinaryReplicationIngressFollowsAssignedSlots(t *testing.T) {
 			}
 			done := make(chan error, 1)
 			go func() { done <- child.Wait() }()
+			exited := false
 			t.Cleanup(func() {
-				child.Process.Signal(syscall.SIGTERM)
-				select {
-				case <-done:
-				case <-time.After(5 * time.Second):
-					child.Process.Kill()
+				if !exited {
+					child.Process.Signal(syscall.SIGTERM)
 					select {
 					case <-done:
-					case <-time.After(3 * time.Second):
-						t.Error("child reap timeout")
+					case <-time.After(5 * time.Second):
+						child.Process.Kill()
+						select {
+						case <-done:
+						case <-time.After(3 * time.Second):
+							t.Error("child reap timeout")
+						}
 					}
 				}
 				log.Close()
@@ -214,6 +222,7 @@ func TestBinaryReplicationIngressFollowsAssignedSlots(t *testing.T) {
 				}
 				c.Close()
 			}
+			want := ingressProtocolPositive(t, data, dual, mode)
 			excluded := fact(5, nil)
 			excluded.ReplicaId = "r2"
 			m.facts <- excluded
@@ -225,6 +234,132 @@ func TestBinaryReplicationIngressFollowsAssignedSlots(t *testing.T) {
 				return errors.Is(e, syscall.ECONNREFUSED)
 			})
 			ingressRefused(t, dual)
+			// Reopen through the public recovery API only after the binary has
+			// fully stopped. Exact bytes must survive the wire barrier and close.
+			_ = child.Process.Signal(syscall.SIGTERM)
+			select {
+			case err := <-done:
+				exited = true
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(8 * time.Second):
+				t.Fatal("binary close did not settle")
+			}
+			store, err := storage.OpenWALStore(filepath.Join(root, "v1.bin"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			if _, err = store.Recover(); err != nil {
+				t.Fatal(err)
+			}
+			for lba, payload := range want {
+				got, err := store.Read(lba)
+				if err != nil || !bytes.Equal(got, payload) {
+					t.Fatalf("recovered LBA%d bytes differ: %v", lba, err)
+				}
+			}
+			t.Logf("%s supporting protocol/barrier and exact recovered bytes PASS", mode)
 		})
+	}
+}
+
+func ingressProtocolPositive(t *testing.T, data, dual, mode string) map[uint32][]byte {
+	t.Helper()
+	a := bytes.Repeat([]byte{0xA7}, 4096)
+	want := map[uint32][]byte{0: a, 1: make([]byte, 4096), 2: make([]byte, 4096)}
+	c, err := net.DialTimeout("tcp", data, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+	lineage := transport.RecoveryLineage{Epoch: 4, SessionID: 1, EndpointVersion: 4, FrontierHint: 1}
+	if err = transport.WriteMsg(c, transport.MsgShipEntry, transport.EncodeShipEntry(transport.ShipEntry{Lineage: lineage, LBA: 0, LSN: 1, Data: a})); err != nil {
+		t.Fatal(err)
+	}
+	if err = transport.WriteMsg(c, transport.MsgBarrierReq, transport.EncodeLineage(lineage)); err != nil {
+		t.Fatal(err)
+	}
+	kind, payload, err := transport.ReadMsg(c)
+	if err != nil || kind != transport.MsgBarrierResp {
+		t.Fatalf("legacy barrier kind=%d err=%v", kind, err)
+	}
+	ack, err := transport.DecodeBarrierResp(payload)
+	if err != nil || !ack.Lineage.Equivalent(lineage) || ack.AchievedLSN != 1 {
+		t.Fatalf("legacy barrier %+v %v", ack, err)
+	}
+	if mode != "dual-lane" {
+		return want
+	}
+	d, err := net.DialTimeout("tcp", dual, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	_ = d.SetDeadline(time.Now().Add(5 * time.Second))
+	start := make([]byte, 36)
+	binary.BigEndian.PutUint64(start, 2)
+	binary.BigEndian.PutUint64(start[8:], 1)
+	binary.BigEndian.PutUint64(start[16:], 2)
+	binary.BigEndian.PutUint32(start[24:], 64)
+	binary.BigEndian.PutUint64(start[28:], 4)
+	ingressDualWrite(t, d, 1, start)
+	want[1] = bytes.Repeat([]byte{0xB8}, 4096)
+	want[2] = bytes.Repeat([]byte{0xC9}, 4096)
+	for lba := uint32(0); lba < 64; lba++ {
+		block := make([]byte, 4096)
+		if lba == 0 {
+			copy(block, a)
+		}
+		if lba == 1 {
+			copy(block, want[1])
+		}
+		p := make([]byte, 4+4096)
+		binary.BigEndian.PutUint32(p, lba)
+		copy(p[4:], block)
+		ingressDualWrite(t, d, 2, p)
+	}
+	ingressDualWrite(t, d, 3, nil)
+	if err = recovery.WriteWALEntryFrame(d, recovery.WALKindSessionLive, 2, 2, want[2]); err != nil {
+		t.Fatal(err)
+	}
+	ingressDualWrite(t, d, 5, nil)
+	for i := 0; i < 4; i++ {
+		var hdr [5]byte
+		if _, err = io.ReadFull(d, hdr[:]); err != nil {
+			t.Fatal(err)
+		}
+		n := binary.BigEndian.Uint32(hdr[1:])
+		if n > 1024 {
+			t.Fatal("oversize recovery response")
+		}
+		p := make([]byte, n)
+		if _, err = io.ReadFull(d, p); err != nil {
+			t.Fatal(err)
+		}
+		if hdr[0] == 7 {
+			if len(p) != 20 || binary.BigEndian.Uint64(p) != 2 {
+				t.Fatal("invalid base batch ack")
+			}
+			continue
+		}
+		if hdr[0] != 6 || len(p) != 8 || binary.BigEndian.Uint64(p) != 2 {
+			t.Fatalf("invalid recovery completion %d %x", hdr[0], p)
+		}
+		return want
+	}
+	t.Fatal("no recovery completion")
+	return nil
+}
+func ingressDualWrite(t *testing.T, c net.Conn, kind byte, p []byte) {
+	t.Helper()
+	b := make([]byte, 5+len(p))
+	b[0] = kind
+	binary.BigEndian.PutUint32(b[1:], uint32(len(p)))
+	copy(b[5:], p)
+	if _, err := c.Write(b); err != nil {
+		t.Fatal(err)
 	}
 }
