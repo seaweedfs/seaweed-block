@@ -146,6 +146,10 @@ func (r *ChunkRemote) keyLocation(key string) (dir, name string, err error) {
 // create. A key that is already bound fails with storage.ErrChunkKeyExists
 // and its bytes are untouched.
 func (r *ChunkRemote) Put(ctx context.Context, key string, data []byte) error {
+	return r.putObject(ctx, key, data, "")
+}
+
+func (r *ChunkRemote) putObject(ctx context.Context, key string, data []byte, object string) error {
 	if err := storage.ValidChunkKey(key); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidKey, err)
 	}
@@ -171,6 +175,10 @@ func (r *ChunkRemote) Put(ctx context.Context, key string, data []byte) error {
 		Name:       name,
 		Attributes: &filerpb.FuseAttributes{Mtime: now, Crtime: now, FileMode: 0o644},
 		Extended:   map[string][]byte{extKind: []byte(kindChunkKey), extFid: []byte(fid)},
+	}
+	if object == "segment" {
+		e.Extended["swb.object"] = []byte("segment")
+		e.Attributes.FileSize = uint64(len(data))
 	}
 	if err := r.f.CreateEntry(ctx, r.keyDir(), e, true); err != nil {
 		if errors.Is(err, ErrExists) {
@@ -214,12 +222,14 @@ func (r *ChunkRemote) Get(ctx context.Context, key string) ([]byte, error) {
 func (r *ChunkRemote) Delete(context.Context, string) error { return ErrDeleteUnsupported }
 
 type intentDoc struct {
-	Format    int      `json:"format"`
-	Gen       uint64   `json:"gen"`
-	Epoch     uint64   `json:"epoch"`
-	Holder    string   `json:"holder"`
-	Keys      []string `json:"keys"`
-	CreatedNs int64    `json:"created_ns"`
+	Segments   map[uint64]storage.ChunkSegment `json:"segments,omitempty"`
+	ChunkBytes uint64                          `json:"chunk_bytes,omitempty"`
+	Format     int                             `json:"format"`
+	Gen        uint64                          `json:"gen"`
+	Epoch      uint64                          `json:"epoch"`
+	Holder     string                          `json:"holder"`
+	Keys       []string                        `json:"keys"`
+	CreatedNs  int64                           `json:"created_ns"`
 	// DeadlineNs: a copy intent's publication deadline (0: a capture intent).
 	DeadlineNs int64 `json:"deadline_ns,omitempty"`
 }
@@ -246,7 +256,7 @@ func putIntent(ctx context.Context, f Filer, root string, in storage.ChunkIntent
 		return "", err
 	}
 	now := time.Now()
-	body, err := json.Marshal(intentDoc{Format: intentFormat, Gen: in.Gen, Epoch: in.Epoch, Holder: in.Holder, Keys: in.Keys, CreatedNs: now.UnixNano(), DeadlineNs: in.DeadlineNs})
+	body, err := json.Marshal(intentDoc{Format: intentFormat, Gen: in.Gen, Epoch: in.Epoch, Holder: in.Holder, Keys: in.Keys, CreatedNs: now.UnixNano(), DeadlineNs: in.DeadlineNs, Segments: in.Segments, ChunkBytes: in.ChunkBytes})
 	if err != nil {
 		return "", err
 	}
@@ -325,16 +335,19 @@ func decodeIntent(p string, e *filerpb.Entry) (storage.ChunkIntent, error) {
 		return fail("name or extended gen/epoch/holder disagree with the document")
 	}
 	return storage.ChunkIntent{ID: e.GetName(), Gen: doc.Gen, Epoch: doc.Epoch, Holder: doc.Holder,
-		Keys: append([]string(nil), doc.Keys...), CreatedNs: doc.CreatedNs, DeadlineNs: doc.DeadlineNs}, nil
+		Keys: append([]string(nil), doc.Keys...), CreatedNs: doc.CreatedNs, DeadlineNs: doc.DeadlineNs, Segments: doc.Segments, ChunkBytes: doc.ChunkBytes}, nil
 }
 
 type headDoc struct {
-	Format    int               `json:"format"`
-	Gen       uint64            `json:"gen"`
-	Epoch     uint64            `json:"epoch"`
-	Holder    string            `json:"holder"`
-	RemoteLSN uint64            `json:"remote_lsn"`
-	Chunks    map[uint64]refDoc `json:"chunks"`
+	Segments   map[uint64]storage.ChunkSegment `json:"segments,omitempty"`
+	ChunkBytes uint64                          `json:"chunk_bytes,omitempty"`
+	ChunkCount int                             `json:"chunk_count,omitempty"`
+	Format     int                             `json:"format"`
+	Gen        uint64                          `json:"gen"`
+	Epoch      uint64                          `json:"epoch"`
+	Holder     string                          `json:"holder"`
+	RemoteLSN  uint64                          `json:"remote_lsn"`
+	Chunks     map[uint64]refDoc               `json:"chunks,omitempty"`
 	// State is "active" or "detached"; a document without it is active.
 	// DetachedBy names the holder whose final cut (this generation) a
 	// detached HEAD is; it is absent unless State is detached.
@@ -364,7 +377,11 @@ func (r *ChunkRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
 	if err != nil {
 		return storage.ChunkHead{}, err
 	}
-	return decodeHead(path.Join(r.root, headName), e)
+	h, err := decodeHead(path.Join(r.root, headName), e)
+	if err != nil {
+		return h, err
+	}
+	return r.resolveManifest(ctx, h)
 }
 
 // CASHead installs next, at generation expected.Gen+1, only if the stored
@@ -417,15 +434,28 @@ func (r *ChunkRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVer
 
 func headEntry(h storage.ChunkHead) (*filerpb.Entry, error) {
 	doc := headDoc{Format: headFormat, Gen: h.Gen, Epoch: h.Epoch, Holder: h.Holder, RemoteLSN: h.RemoteLSN,
-		Chunks: make(map[uint64]refDoc, len(h.Chunks)), State: h.State}
+		State: h.State}
 	if h.DetachedBy != nil {
 		doc.DetachedBy = &detachedByDoc{Holder: h.DetachedBy.Holder, Epoch: h.DetachedBy.Epoch, Gen: h.DetachedBy.Gen}
 	}
-	for idx, ref := range h.Chunks {
-		if ref.Key == "" {
-			return nil, fmt.Errorf("chunkstore: HEAD chunk %d has no key", idx)
+	if h.Segments == nil {
+		doc.Chunks = make(map[uint64]refDoc, len(h.Chunks))
+		for idx, ref := range h.Chunks {
+			if ref.Key == "" {
+				return nil, fmt.Errorf("chunkstore: HEAD chunk %d has no key", idx)
+			}
+			doc.Chunks[idx] = refDoc{Key: ref.Key, SHA256: hex.EncodeToString(ref.SHA256[:])}
 		}
-		doc.Chunks[idx] = refDoc{Key: ref.Key, SHA256: hex.EncodeToString(ref.SHA256[:])}
+	}
+	if h.Segments != nil {
+		if err := validateRoot(h); err != nil {
+			return nil, err
+		}
+		doc.Format = 2
+		doc.Chunks = nil
+		doc.Segments = h.Segments
+		doc.ChunkBytes = h.ChunkBytes
+		doc.ChunkCount = h.ManifestChunkCount
 	}
 	body, err := json.Marshal(doc)
 	if err != nil {
@@ -482,12 +512,9 @@ func decodeHeadDoc(p string, content []byte) (storage.ChunkHead, error) {
 	fail := func(format string, a ...any) (storage.ChunkHead, error) {
 		return storage.ChunkHead{}, fmt.Errorf("chunkstore: HEAD %s: "+format, append([]any{p}, a...)...)
 	}
-	var doc headDoc
-	if err := json.Unmarshal(content, &doc); err != nil {
+	doc, err := decodeFormatHead(content)
+	if err != nil {
 		return fail("decode: %v", err)
-	}
-	if doc.Format != headFormat {
-		return fail("format %d not supported (want %d)", doc.Format, headFormat)
 	}
 	if doc.Gen == 0 {
 		return fail("generation 0")
@@ -532,6 +559,20 @@ func decodeHeadDoc(p string, content []byte) (storage.ChunkHead, error) {
 		copy(cr.SHA256[:], sum)
 		h.Chunks[idx] = cr
 	}
+	if doc.Format == 2 {
+		if len(doc.Chunks) != 0 {
+			return fail("segmented root contains flat chunks")
+		}
+		h.Segments = doc.Segments
+		if h.Segments == nil {
+			h.Segments = map[uint64]storage.ChunkSegment{}
+		}
+		h.ChunkBytes = doc.ChunkBytes
+		h.ManifestChunkCount = doc.ChunkCount
+		if err := validateRoot(h); err != nil {
+			return h, err
+		}
+	}
 	return h, nil
 }
 
@@ -542,3 +583,9 @@ func NewSWFSChunkRemote(c *SWFS, root string) (*ChunkRemote, error) {
 }
 
 var _ storage.ChunkRemote = (*ChunkRemote)(nil)
+
+// DecodeHeadDocument validates a persisted flat or segmented root without
+// fetching data. Control-plane readers share the same representation checks.
+func DecodeHeadDocument(name string, body []byte) (storage.ChunkHead, error) {
+	return decodeHeadDoc(name, body)
+}

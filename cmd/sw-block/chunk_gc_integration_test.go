@@ -102,7 +102,24 @@ func TestIntegration_OpsChunkGC_RealMasterAndStore(t *testing.T) {
 	h.Holder = "holder-a"
 	h.RemoteLSN = 1
 	h.Chunks = map[uint64]storage.ChunkRef{0: {Key: "live", SHA256: sha256.Sum256(data)}}
+	flat := h
+	segmented, segmentIntents, err := remote.PrepareManifest(ctx, flat, h, 8*4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h = segmented
 	h.Gen, err = remote.CASHead(ctx, storage.ChunkHeadVersion{Gen: h.Gen, Epoch: 0}, h)
+	if err == nil {
+		for _, id := range segmentIntents {
+			if err = remote.DeleteIntent(ctx, id); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if h.Segments == nil || len(h.Segments) != 1 {
+		t.Fatal("real-service acceptance requires a segmented root")
+	}
+
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,6 +147,11 @@ func TestIntegration_OpsChunkGC_RealMasterAndStore(t *testing.T) {
 			t.Error(err)
 		}
 	})
+	// The remote catalog VOLUME is distinct from the master's desired-volume
+	// registry. Register the live RF1 volume before observations mint authority.
+	if _, err = m.Lifecycle().Volumes.CreateVolume(lifecycle.VolumeSpec{VolumeID: "vol-a", SizeBytes: 64 * 4096, ReplicationFactor: 1}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err = m.Lifecycle().Placements.ApplyPlan(lifecycle.PlacementPlan{VolumeID: "vol-a", DesiredRF: 1, Candidates: []lifecycle.PlacementCandidate{{VolumeID: "vol-a", ServerID: "node-a", ReplicaID: "r2", Source: lifecycle.PlacementSourceExistingReplica}}}); err != nil {
 		t.Fatal(err)
 	}

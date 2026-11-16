@@ -489,8 +489,8 @@ func TestFork_ThenFreshHostReadsSnapshotImage(t *testing.T) {
 	if len(keysAfter) != len(keysBefore) {
 		t.Fatalf("the fork's cut wrote %d keys into the source volume", len(keysAfter)-len(keysBefore))
 	}
-	if own, _ := f.ListEntries(ctx, catBase+"/v2/keys", "", "", 0); len(own) != 1 {
-		t.Fatalf("the fork's cut wrote %d keys of its own, want 1", len(own))
+	if own, _ := f.ListEntries(ctx, catBase+"/v2/keys", "", "", 0); len(own) != 2 {
+		t.Fatalf("the fork's cut wrote %d keys of its own, want one data chunk and one manifest", len(own))
 	}
 }
 

@@ -164,7 +164,7 @@ func (h *Host) admitWorkspacePublication(ask authority.AssignmentAsk, publish fu
 		return fmt.Errorf("workspace publication: volume is being deleted")
 	}
 	if _, alive := h.lifecycle.Volumes.GetVolume(ask.VolumeID); !alive {
-		return fmt.Errorf("workspace publication: volume no longer exists")
+		return fmt.Errorf("workspace publication: no lifecycle VolumeRecord for %s; register it (CreateVolume) before publishing", ask.VolumeID)
 	}
 	bindings, bound, err := h.lifecycle.WorkspaceBindings.Get(ask.VolumeID)
 	if err != nil {

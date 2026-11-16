@@ -1,4 +1,4 @@
-// Command blockmaster is the block master daemon — the product
+// Command blockmaster is the block master daemon â€” the product
 // host for authority components + master-volume control RPC.
 package main
 
@@ -72,8 +72,8 @@ func parseFlags(args []string) (flags, error) {
 	fs := flag.NewFlagSet("blockmaster", flag.ContinueOnError)
 	fs.StringVar(&f.authorityStore, "authority-store", "", "durable authority store directory (required)")
 	fs.StringVar(&f.lifecycleStore, "lifecycle-store", "", "optional G9D product lifecycle registration store directory (desired volumes, node inventory, placement intents); read-only with respect to assignment publication")
-	fs.StringVar(&f.lifecyclePlacementSeed, "lifecycle-placement-seed", "", "optional G9G seed JSON file containing placement intents to import into --lifecycle-store before the product loop starts")
-	fs.StringVar(&f.clusterSpec, "cluster-spec", "", "optional G9G-3 cluster spec YAML facade; imports accepted topology and lifecycle placement intent")
+	fs.StringVar(&f.lifecyclePlacementSeed, "lifecycle-placement-seed", "", "placement-only seed JSON; lifecycle volumes must already be registered (CreateVolume)")
+	fs.StringVar(&f.clusterSpec, "cluster-spec", "", "cluster spec YAML; positive size_bytes imports desired volumes before topology/placement publication")
 	fs.StringVar(&f.listen, "listen", "127.0.0.1:0", "gRPC listen address (e.g. 127.0.0.1:9180)")
 	fs.StringVar(&f.topology, "topology", "", "path to accepted-topology YAML (required for assignment to mint)")
 	fs.IntVar(&f.expectedSlotsPerVol, "expected-slots-per-volume", 3, "RF/expected slot count per volume; the controller rejects observation snapshots whose slot count differs (default 3, set to 2 for 2-node smoke clusters)")
@@ -161,7 +161,7 @@ func run(f flags) int {
 		// Without a topology the observation host classifies every
 		// volume UnknownReplicaClaim; controller can never mint.
 		// That is a valid "empty cluster" startup state and not an
-		// error, but operators should know — log a prominent line.
+		// error, but operators should know â€” log a prominent line.
 		fmt.Fprintln(os.Stderr, "blockmaster: WARNING: --topology not supplied or empty; controller will not mint assignments until topology is provided")
 	} else if len(topo.Volumes) == 0 {
 		fmt.Fprintln(os.Stderr, "blockmaster: dynamic lifecycle topology enabled by cluster-spec node inventory; assignments will be derived from verified placement intents")
@@ -190,6 +190,13 @@ func run(f flags) int {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "blockmaster:", err)
 		return 1
+	}
+	if len(clusterImport.Volumes) > 0 {
+		if err := importLifecycleVolumes(h, clusterImport.Volumes); err != nil {
+			fmt.Fprintln(os.Stderr, "blockmaster:", err)
+			_ = h.Close(context.Background())
+			return 1
+		}
 	}
 	if len(clusterImport.Nodes) > 0 {
 		if err := importLifecycleNodeInventory(h, clusterImport.Nodes); err != nil {
@@ -259,6 +266,27 @@ func loadProductInputs(f flags) (authority.AcceptedTopology, clusterSpecImport, 
 		return authority.AcceptedTopology{}, clusterSpecImport{}, err
 	}
 	return topo, imports, nil
+}
+
+// Import only the geometry/RF that the cluster specification owns. Preserve
+// existing protocol and Kubernetes metadata; the store rejects geometry drift.
+func importLifecycleVolumes(h *master.Host, volumes []lifecycle.VolumeSpec) error {
+	stores := h.Lifecycle()
+	if stores == nil {
+		return fmt.Errorf("cluster volume import requires --lifecycle-store")
+	}
+	for _, spec := range volumes {
+		if old, ok := stores.Volumes.GetVolume(spec.VolumeID); ok {
+			merged := old.Spec
+			merged.SizeBytes = spec.SizeBytes
+			merged.ReplicationFactor = spec.ReplicationFactor
+			spec = merged
+		}
+		if _, err := stores.Volumes.CreateVolume(spec); err != nil {
+			return fmt.Errorf("register lifecycle volume %s: %w", spec.VolumeID, err)
+		}
+	}
+	return nil
 }
 
 func importLifecycleNodeInventory(h *master.Host, nodes []lifecycle.NodeRegistration) error {

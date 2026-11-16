@@ -5,6 +5,7 @@ package master
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"sync/atomic"
 	"testing"
@@ -142,6 +143,14 @@ func TestIntegrationWorkspaceProductionDetachAndForcedMove(t *testing.T) {
 					t.Fatal(err)
 				}
 				t.Logf("producer HEAD persisted by filer: %s", stored.Content)
+				var root struct {
+					Format   int                        `json:"format"`
+					Segments map[string]json.RawMessage `json:"segments"`
+				}
+				if err = json.Unmarshal(stored.Content, &root); err != nil || root.Format != 2 || len(root.Segments) == 0 {
+					t.Fatalf("CLEAN move must exercise upgraded segmented root: %s %v", stored.Content, err)
+				}
+
 				if _, err = backend.Write(ctx, 0, want); err == nil {
 					t.Fatal("W2 detach left frontend writable")
 				}

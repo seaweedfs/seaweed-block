@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/authority"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
 )
 
 // NewWorkspaceHEADReader reads inline HEAD content from the configured filer
@@ -63,7 +64,10 @@ func NewWorkspaceHEADReader(base string) (func(context.Context, string) (authori
 		if err := json.Unmarshal(raw, &doc); err != nil {
 			return authority.WorkspaceHead{}, err
 		}
-		if doc.Format != 1 || doc.Gen == 0 || doc.Epoch == 0 || doc.Holder == "" || doc.LegacyDetached != nil || (doc.State != "" && doc.State != "active" && doc.State != "detached") {
+		if _, err := chunkstore.DecodeHeadDocument("workspace/"+volume, raw); err != nil {
+			return authority.WorkspaceHead{}, err
+		}
+		if (doc.Format != 1 && doc.Format != 2) || doc.Gen == 0 || doc.Epoch == 0 || doc.Holder == "" || doc.LegacyDetached != nil || (doc.State != "" && doc.State != "active" && doc.State != "detached") {
 			return authority.WorkspaceHead{}, fmt.Errorf("invalid HEAD identity/state")
 		}
 		// Missing state is the legacy active representation. Only a final-cut

@@ -152,6 +152,8 @@ type ProviderConfig struct {
 	// cuts are published only by CaptureVolume, MakeVolumeRemoteDurable
 	// (snapshot, detach) and the timer. Zero: unbounded.
 	ChunkDirtyThreshold int
+	// ChunkUploadConcurrency bounds remote uploads; zero defaults to 8.
+	ChunkUploadConcurrency int
 }
 
 // DurableProvider is the production frontend.Provider implementation.
