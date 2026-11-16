@@ -20,6 +20,7 @@ package transport
 //      drain handles the pending entry correctly.
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -164,6 +165,13 @@ func TestC2_PriorityOldFirst(t *testing.T) {
 // exactly 1 entry beyond cursor; drain catches it. Pins the
 // dense-single-LSN case (the user's example: cursor=10, head=11
 // with one entry pending).
+//
+// The timer drain is disabled and the initial backlog is drained with
+// DrainBacklog: with the timer running, a tick landing between
+// primary.Write and NotifyAppend ships lsn 11 from substrate as
+// EmitKindBacklog first (correct debt-first behavior, pinned by
+// TestC2_DenseLSNEdge_TimerWinsRace_ShipsOnce), and the Live assertion
+// below would depend on scheduling.
 func TestC2_NoGapDenseLSNEdge(t *testing.T) {
 	primary := memorywal.NewStore(128, 64)
 	// Seed with 10 entries — drain will scan all of them.
@@ -173,7 +181,7 @@ func TestC2_NoGapDenseLSNEdge(t *testing.T) {
 	_, _ = primary.Sync()
 
 	rec := &recordedDrain{}
-	cfg := WalShipperConfig{IdleSleep: 2 * time.Millisecond}
+	cfg := WalShipperConfig{IdleSleep: 2 * time.Millisecond, DisableTimerDrain: true}
 	s := NewWalShipperWithOptions("r1", HeadSourceFromStorage(primary), primary, rec.Func(), cfg)
 	defer s.Stop()
 
@@ -181,13 +189,11 @@ func TestC2_NoGapDenseLSNEdge(t *testing.T) {
 		t.Fatalf("StartSession: %v", err)
 	}
 
-	// Wait for drain to clear the initial 10 entries + transition.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if rec.Count() == 10 && s.Mode() == ModeRealtime {
-			break
-		}
-		time.Sleep(2 * time.Millisecond)
+	// Drain the initial 10 entries; R1 transitions to Realtime.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := s.DrainBacklog(ctx); err != nil {
+		t.Fatalf("DrainBacklog: %v", err)
 	}
 	if rec.Count() != 10 || s.Mode() != ModeRealtime {
 		t.Fatalf("drain didn't catch up: count=%d mode=%s", rec.Count(), s.Mode())
@@ -206,7 +212,7 @@ func TestC2_NoGapDenseLSNEdge(t *testing.T) {
 
 	// The 11th emit must have arrived; it's the new entry.
 	if rec.Count() != 11 {
-		t.Errorf("after Realtime NotifyAppend: emit count=%d want 11", rec.Count())
+		t.Fatalf("after Realtime NotifyAppend: emit count=%d want 11", rec.Count())
 	}
 	last := rec.Snapshot()[10]
 	if last.lba != 99 || last.lsn != lsn {
@@ -215,6 +221,60 @@ func TestC2_NoGapDenseLSNEdge(t *testing.T) {
 	// Realtime emits are EmitKindLive.
 	if last.kind != EmitKindLive {
 		t.Errorf("Realtime emit kind=%d want EmitKindLive", last.kind)
+	}
+}
+
+// TestC2_DenseLSNEdge_TimerWinsRace_ShipsOnce — the other order of the
+// same dense edge, made deterministic: in Realtime the entry is written,
+// and the timer tick ships it from substrate (EmitKindBacklog, debt-first)
+// BEFORE the producer's NotifyAppend arrives. NotifyAppend must then be
+// an idempotent no-op: no error, no second emit. Exactly-once at the
+// right LSN is the invariant; the kind tag is observability only.
+func TestC2_DenseLSNEdge_TimerWinsRace_ShipsOnce(t *testing.T) {
+	primary := memorywal.NewStore(128, 64)
+	for lba := uint32(0); lba < 10; lba++ {
+		_, _ = primary.Write(lba, makeBytesC2(64, byte(lba)))
+	}
+	_, _ = primary.Sync()
+
+	rec := &recordedDrain{}
+	cfg := WalShipperConfig{IdleSleep: 2 * time.Millisecond}
+	s := NewWalShipperWithOptions("r1", HeadSourceFromStorage(primary), primary, rec.Func(), cfg)
+	defer s.Stop()
+
+	if err := s.StartSession(0); err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	waitFor := func(what string, cond func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if cond() {
+				return
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+		t.Fatalf("timer drain did not %s: count=%d mode=%s", what, rec.Count(), s.Mode())
+	}
+	waitFor("catch up", func() bool { return rec.Count() == 10 && s.Mode() == ModeRealtime })
+
+	lsn, err := primary.Write(99, makeBytesC2(64, 0x99))
+	if err != nil {
+		t.Fatalf("realtime Write: %v", err)
+	}
+	// The timer ships the new entry on its own (§6.8 #4: no dependence on NotifyAppend).
+	waitFor("ship the new entry", func() bool { return rec.Count() == 11 })
+
+	if err := s.NotifyAppend(99, lsn, makeBytesC2(64, 0x99)); err != nil {
+		t.Fatalf("NotifyAppend after timer shipped lsn %d: %v", lsn, err)
+	}
+	emits := rec.Snapshot()
+	if len(emits) != 11 {
+		t.Fatalf("emit count=%d want 11 (NotifyAppend must not re-emit lsn %d)", len(emits), lsn)
+	}
+	last := emits[10]
+	if last.lba != 99 || last.lsn != lsn || last.kind != EmitKindBacklog {
+		t.Errorf("last emit lba=%d lsn=%d kind=%d want 99/%d/EmitKindBacklog", last.lba, last.lsn, last.kind, lsn)
 	}
 }
 
