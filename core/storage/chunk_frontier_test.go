@@ -33,6 +33,12 @@ func TestSeedChunkFrontierMetadataFailureRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	reopenedOpen := true
+	t.Cleanup(func() {
+		if reopenedOpen {
+			_ = reopened.Close()
+		}
+	})
 	if _, err := reopened.Recover(); err != nil {
 		t.Fatal(err)
 	}
@@ -44,6 +50,7 @@ func TestSeedChunkFrontierMetadataFailureRetry(t *testing.T) {
 	}
 	reopened.committer.Stop()
 	_ = reopened.fd.Close() // crash
+	reopenedOpen = false
 	again, err := OpenWALStore(path)
 	if err != nil {
 		t.Fatal(err)

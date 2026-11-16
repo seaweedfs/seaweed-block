@@ -144,6 +144,9 @@ type WALStore struct {
 	// ioFault latches the first fsync failure of the file (ErrFsyncFailed)
 	// or the first failed WAL append (ErrAppendFailed).
 	ioFault atomic.Pointer[RecoveryFailure]
+	// testAfterAdmit, when set, runs in Write, WriteBatch and ApplyEntry
+	// after their entry checks and before the append lock. Tests only.
+	testAfterAdmit func()
 	// Generations cover completed append attempts and recovery publication.
 	walMutation     atomic.Uint64
 	durableMutation atomic.Uint64
@@ -645,6 +648,9 @@ func (s *WALStore) Write(lba uint32, data []byte) (uint64, error) {
 		}
 		defer s.admission.Release()
 	}
+	if h := s.testAfterAdmit; h != nil {
+		h()
+	}
 
 	commitLockStart := time.Now()
 	s.mu.Lock()
@@ -720,6 +726,9 @@ func (s *WALStore) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error
 			return nil, fmt.Errorf("storage: WAL admission: %w", err)
 		}
 		defer s.admission.Release()
+	}
+	if h := s.testAfterAdmit; h != nil {
+		h()
 	}
 
 	commitLockStart := time.Now()
@@ -1225,6 +1234,9 @@ func (s *WALStore) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
 	}
 	if len(data) != int(s.sb.BlockSize) {
 		return fmt.Errorf("storage: apply data size %d != block size %d", len(data), s.sb.BlockSize)
+	}
+	if h := s.testAfterAdmit; h != nil {
+		h()
 	}
 	// Publish under the same lock as Write/WriteBatch and the flusher's
 	// cross-shard snapshot, including supplied LSNs below nextLSN.
