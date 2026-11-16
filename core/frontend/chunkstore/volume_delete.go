@@ -61,9 +61,6 @@ type VolumeDeleteResult struct {
 // DeleteVolume deletes vol (see the header). inUse may be nil.
 func (c *Catalog) DeleteVolume(ctx context.Context, vol string, inUse InUseCheck) (VolumeDeleteResult, error) {
 	res := VolumeDeleteResult{VolumeID: vol, SnapshotsDeleted: []string{}}
-	if red := true; red { // RED: deletes nothing
-		return res, nil
-	}
 	root, err := c.volRoot(vol)
 	if err != nil {
 		return res, err
