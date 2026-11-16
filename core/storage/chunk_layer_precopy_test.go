@@ -9,7 +9,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io"
 	"strings"
 	"testing"
 	"time"
@@ -298,9 +297,9 @@ func TestChunkPrecopy_BarrierSyncFailureSettlesStagedIntents(t *testing.T) {
 	assertNoIntentsLeft(t, f)
 }
 
-// Recover republishes the dirty map outside the write path: a partial
-// batch append leaves a complete newer record (and a torn one) that
-// same-open Recover publishes. A chunk staged before it must not be reused:
+// Recover republishes the dirty map outside the write path: a complete newer
+// record past the head (what a failed append can leave) is published by a
+// same-open Recover. A chunk staged before it must not be reused:
 // HEAD at the recovered H has the recovered bytes.
 func TestChunkPrecopy_RecoverAfterStagingInvalidatesTheStage(t *testing.T) {
 	s, f, l, _ := precopyLayer(t, 1, 3) // chunk 0 staged in round 0; bound 1
@@ -310,23 +309,7 @@ func TestChunkPrecopy_RecoverAfterStagingInvalidatesTheStage(t *testing.T) {
 		if round != 0 {
 			return
 		}
-		limit := walEntryHeaderSize + ctBlockSize + walEntryHeaderSize + 17
-		s.wal.batchWriteAt = func(data []byte, off int64) (int, error) {
-			if len(data) <= limit {
-				return 0, errors.New("fixture needs two whole records")
-			}
-			n, err := s.fd.WriteAt(data[:limit], off) // a real partial pwrite
-			if err != nil {
-				return n, err
-			}
-			return n, io.ErrShortWrite
-		}
-		_, err := s.WriteBatch(0, [][]byte{want, makeBlock(ctBlockSize, 0xb8)})
-		s.wal.batchWriteAt = nil
-		if !errors.Is(err, io.ErrShortWrite) {
-			t.Errorf("partial batch: %v", err)
-			return
-		}
+		plantRecordPastHead(t, s, 0, want)
 		if _, err := s.Recover(); err != nil { // same open, before the barrier
 			t.Errorf("same-open Recover: %v", err)
 			return
@@ -352,25 +335,26 @@ func TestChunkPrecopy_RecoverAfterStagingInvalidatesTheStage(t *testing.T) {
 }
 
 // partialBatchPrefix leaves a complete, CRC-valid record for want at the
-// next LSN plus a torn second record through a real partial pwrite; the
-// failed batch publishes neither (same-open Recover would).
+// next LSN past the head, the bytes a failed append can leave behind, without
+// failing an append (which latches the open store): same-open Recover
+// republishes it.
 func partialBatchPrefix(t *testing.T, s *WALStore, want []byte) {
 	t.Helper()
-	limit := walEntryHeaderSize + ctBlockSize + walEntryHeaderSize + 17
-	s.wal.batchWriteAt = func(data []byte, off int64) (int, error) {
-		if len(data) <= limit {
-			return 0, errors.New("fixture needs two whole records")
-		}
-		n, err := s.fd.WriteAt(data[:limit], off)
-		if err != nil {
-			return n, err
-		}
-		return n, io.ErrShortWrite
+	plantRecordPastHead(t, s, 0, want)
+}
+
+// plantRecordPastHead writes a complete write record for lba at the next LSN
+// at the WAL head, without publishing it.
+func plantRecordPastHead(t *testing.T, s *WALStore, lba uint64, data []byte) {
+	t.Helper()
+	e := walEntry{LSN: s.NextLSN(), Type: walEntryWrite, LBA: lba, Length: uint32(len(data)), Data: data}
+	buf, err := e.encode()
+	if err != nil {
+		t.Fatal(err)
 	}
-	_, err := s.WriteBatch(0, [][]byte{want, makeBlock(ctBlockSize, 0xb8)})
-	s.wal.batchWriteAt = nil
-	if !errors.Is(err, io.ErrShortWrite) {
-		t.Fatalf("partial batch: %v", err)
+	off := int64(s.sb.WALOffset + s.wal.physicalPos(s.wal.logicalHeadValue()))
+	if _, err := s.fd.WriteAt(buf, off); err != nil {
+		t.Fatal(err)
 	}
 }
 

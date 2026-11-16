@@ -20,7 +20,7 @@ func (s *WALStore) SeedChunkFrontier(lsn uint64) error {
 	if s.closed || s.chunk.Load() != nil {
 		return errors.New("storage: seed frontier requires an open, unattached store")
 	}
-	if err := s.stickyFsyncFault(); err != nil {
+	if err := s.stickyIOFault(); err != nil {
 		return err
 	}
 	if lsn == ^uint64(0) || lsn < s.checkpointLSN || s.walHead > s.checkpointLSN || s.nextLSN > lsn+1 {

@@ -9,7 +9,8 @@ import (
 )
 
 func TestWALStore_FailedAppendDoesNotConsumeLSN(t *testing.T) {
-	s, err := CreateWALStore(filepath.Join(t.TempDir(), "store.bin"), 16, 4096)
+	path := filepath.Join(t.TempDir(), "store.bin")
+	s, err := CreateWALStore(path, 16, 4096)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,36 +31,37 @@ func TestWALStore_FailedAppendDoesNotConsumeLSN(t *testing.T) {
 		t.Fatalf("NextLSN after failed append=%d want 1", got)
 	}
 
+	// A failed append is sticky (ErrAppendFailed): no later write reuses
+	// its LSN on this open store, single or batch.
 	s.wal.fd = s.fd
-	lsn, err := s.Write(0, makeBlock(4096, 0xA2))
+	if _, err := s.Write(0, makeBlock(4096, 0xA2)); !errors.Is(err, ErrAppendFailed) {
+		t.Fatalf("Write after a failed append: %v; want ErrAppendFailed", err)
+	}
+	if _, err := s.WriteBatch(1, [][]byte{makeBlock(4096, 0xC1), makeBlock(4096, 0xC2)}); !errors.Is(err, ErrAppendFailed) {
+		t.Fatalf("WriteBatch after a failed append: %v; want ErrAppendFailed", err)
+	}
+	if got := s.NextLSN(); got != 1 {
+		t.Fatalf("NextLSN after refused appends=%d want 1", got)
+	}
+	_ = s.Close()
+
+	// A reopen starts from what is on disk (nothing of the failed append):
+	// the first write gets LSN 1, the next batch LSNs 2 and 3.
+	r, err := OpenWALStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lsn != 1 {
-		t.Fatalf("successful Write LSN=%d want reused LSN 1", lsn)
-	}
-
-	s.wal.fd = bad
-	if _, err := s.WriteBatch(1, [][]byte{
-		makeBlock(4096, 0xB1),
-		makeBlock(4096, 0xB2),
-	}); err == nil {
-		t.Fatal("WriteBatch with closed WAL fd succeeded")
-	}
-	if got := s.NextLSN(); got != 2 {
-		t.Fatalf("NextLSN after failed batch=%d want 2", got)
-	}
-
-	s.wal.fd = s.fd
-	lsns, err := s.WriteBatch(1, [][]byte{
-		makeBlock(4096, 0xC1),
-		makeBlock(4096, 0xC2),
-	})
-	if err != nil {
+	t.Cleanup(func() { _ = r.Close() })
+	if _, err := r.Recover(); err != nil {
 		t.Fatal(err)
 	}
-	if len(lsns) != 2 || lsns[0] != 2 || lsns[1] != 3 {
-		t.Fatalf("successful batch LSNs=%v want [2 3]", lsns)
+	lsn, err := r.Write(0, makeBlock(4096, 0xA2))
+	if err != nil || lsn != 1 {
+		t.Fatalf("first write after a reopen LSN=%d err=%v want 1", lsn, err)
+	}
+	lsns, err := r.WriteBatch(1, [][]byte{makeBlock(4096, 0xC1), makeBlock(4096, 0xC2)})
+	if err != nil || len(lsns) != 2 || lsns[0] != 2 || lsns[1] != 3 {
+		t.Fatalf("batch after a reopen LSNs=%v err=%v want [2 3]", lsns, err)
 	}
 }
 

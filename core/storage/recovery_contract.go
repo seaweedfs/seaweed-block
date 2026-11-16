@@ -192,7 +192,13 @@ func NewWALRecycledFailure(cause error, detail string) *RecoveryFailure {
 // SubstrateIO RecoveryFailure, so hosts report it as io_error.
 var ErrFsyncFailed = errors.New("storage: fsync failed earlier on this open store; reopen to recover")
 
-// ErrAppendFailed: declared for the RED test; nothing returns it yet.
+// ErrAppendFailed is the sticky fault of an open store after a WAL append
+// failed while writing: its records may be on disk although nextLSN and the
+// head did not move, so a later append would reuse their LSNs (and a crash
+// would then let recovery replay the failed records over an acknowledged
+// write). The store refuses further appends and Syncs until it is reopened;
+// recovery of the reopen may replay the failed, never-acknowledged records.
+// It comes wrapped in a SubstrateIO RecoveryFailure (io_error).
 var ErrAppendFailed = errors.New("storage: a WAL append failed earlier on this open store; reopen to recover")
 
 func NewSubstrateIOFailure(cause error, detail string) *RecoveryFailure {

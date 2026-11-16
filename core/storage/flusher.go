@@ -155,7 +155,7 @@ func (f *flusher) flushOnceAllowClosed() error {
 func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 	cycleStart := time.Now()
 	store := f.store
-	if err := store.stickyFsyncFault(); err != nil {
+	if err := store.stickyIOFault(); err != nil {
 		return err // no checkpoint advance after a failed fsync
 	}
 	store.mu.RLock()

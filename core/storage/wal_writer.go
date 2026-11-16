@@ -17,6 +17,10 @@ var (
 	errWALFull = errors.New("storage: WAL region full")
 )
 
+// errWALPwrite marks an append that failed while writing to the file:
+// part or all of its bytes may be on disk (see WALStore.noteAppendFailure).
+var errWALPwrite = errors.New("storage: WAL pwrite failed")
+
 // walWriter appends entries to the circular WAL region of a store
 // file. It tracks position with monotonically-increasing logical
 // counters so head==tail unambiguously means empty (used = head-tail).
@@ -106,7 +110,7 @@ func (w *walWriter) append(entry *walEntry) (walRelOffset uint64, err error) {
 			return 0, errWALFull
 		}
 		if err := w.writePadding(remaining, physHead); err != nil {
-			return 0, fmt.Errorf("walWriter.append: padding: %w", err)
+			return 0, fmt.Errorf("%w: walWriter.append: padding: %w", errWALPwrite, err)
 		}
 		if w.instr != nil {
 			w.instr.recordWALAppendWrap(remaining)
@@ -120,7 +124,7 @@ func (w *walWriter) append(entry *walEntry) (walRelOffset uint64, err error) {
 	absOffset := int64(w.walOffset + physHead)
 	writeStart := time.Now()
 	if _, err := w.fd.WriteAt(buf, absOffset); err != nil {
-		return 0, fmt.Errorf("walWriter.append: pwrite at %d: %w", absOffset, err)
+		return 0, fmt.Errorf("%w: walWriter.append: pwrite at %d: %w", errWALPwrite, absOffset, err)
 	}
 	if w.instr != nil {
 		w.instr.recordWALAppend(len(buf), time.Since(writeStart))
@@ -175,7 +179,7 @@ func (w *walWriter) appendBatch(entries []walEntry) ([]uint64, error) {
 			writeAt = w.batchWriteAt
 		}
 		if _, err := writeAt(pending, int64(w.walOffset+pendingStart)); err != nil {
-			return fmt.Errorf("walWriter.appendBatch: pwrite at %d: %w", w.walOffset+pendingStart, err)
+			return fmt.Errorf("%w: walWriter.appendBatch: pwrite at %d: %w", errWALPwrite, w.walOffset+pendingStart, err)
 		}
 		if w.instr != nil {
 			w.instr.recordWALAppend(len(pending), time.Since(writeStart))

@@ -237,7 +237,9 @@ func TestWALGenerationBatchPublication(t *testing.T) {
 func TestWALGenerationPartialAppendRecoverySync(t *testing.T) {
 	for _, recoverFirst := range []bool{false, true} {
 		t.Run(map[bool]string{false: "failed append without recovery", true: "same-open recovery"}[recoverFirst], func(t *testing.T) {
-			s := newGenerationStore(t)
+			path := filepath.Join(t.TempDir(), "store.bin")
+			s := createWALStoreWithWALSizeForTest(t, path, 64, 4096, 1<<20)
+			s.DisableAutoFlushForRecoveryTest()
 			if _, err := s.Sync(); err != nil {
 				t.Fatal(err)
 			}
@@ -264,31 +266,38 @@ func TestWALGenerationPartialAppendRecoverySync(t *testing.T) {
 			if got := s.wal.logicalHeadValue(); got != beforeHead {
 				t.Fatalf("failed batch published head=%d want %d", got, beforeHead)
 			}
+			// The failed append is sticky (ErrAppendFailed): no same-open
+			// recovery, and no Sync acknowledges anything, without an fsync.
 			if recoverFirst {
-				if n, err := s.Recover(); err != nil || n != 1 {
-					t.Fatalf("same-open Recover=%d err=%v want1,nil", n, err)
-				}
-				if got, err := s.Read(0); err != nil || !bytes.Equal(got, want) {
-					t.Fatalf("valid prefix not recovered: err=%v", err)
+				if _, err := s.Recover(); !errors.Is(err, ErrAppendFailed) {
+					t.Fatalf("same-open Recover after a failed append: %v; want ErrAppendFailed", err)
 				}
 			}
-			realSync := s.syncWALFile
-			fault := errors.New("next physical sync failed")
-			attempts := 0
-			s.syncWALFile = func() error { attempts++; return fault }
-			_, err = s.Sync()
-			s.syncWALFile = realSync
-			if !errors.Is(err, fault) || attempts != 1 {
-				t.Fatalf("next Sync skipped required physical I/O/error: err=%v attempts=%d", err, attempts)
-			}
-			// The failed fsync is sticky (ErrFsyncFailed): no retry ack and
-			// no further physical fsync on this open store.
 			before := s.WALSyncCount()
-			if _, err := s.Sync(); !errors.Is(err, ErrFsyncFailed) {
-				t.Fatalf("retry after a failed fsync: %v; want ErrFsyncFailed", err)
+			if _, err := s.Sync(); !errors.Is(err, ErrAppendFailed) {
+				t.Fatalf("Sync after a failed append: %v; want ErrAppendFailed", err)
 			}
 			if n := s.WALSyncCount() - before; n != 0 {
-				t.Fatalf("a refused retry fsynced %d times", n)
+				t.Fatalf("a refused Sync fsynced %d times", n)
+			}
+			crashRecoveryHardeningStore(t, s)
+
+			// A reopen may republish the failed batch's complete prefix (it
+			// was never acknowledged) and serves normally again.
+			r, err := OpenWALStore(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.DisableAutoFlushForRecoveryTest()
+			t.Cleanup(func() { _ = r.Close() })
+			if n, err := r.Recover(); err != nil || n != 1 {
+				t.Fatalf("reopen Recover=%d err=%v want 1,nil", n, err)
+			}
+			if got, err := r.Read(0); err != nil || !bytes.Equal(got, want) {
+				t.Fatalf("valid prefix not recovered: err=%v", err)
+			}
+			if _, err := r.Sync(); err != nil {
+				t.Fatalf("Sync after a reopen: %v", err)
 			}
 		})
 	}
