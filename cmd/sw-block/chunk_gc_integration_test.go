@@ -130,6 +130,11 @@ func TestIntegration_OpsChunkGC_RealMasterAndStore(t *testing.T) {
 			t.Error(err)
 		}
 	})
+	// The remote catalog VOLUME is distinct from the master's desired-volume
+	// registry. Register the live RF1 volume before observations mint authority.
+	if _, err = m.Lifecycle().Volumes.CreateVolume(lifecycle.VolumeSpec{VolumeID: "vol-a", SizeBytes: 64 * 4096, ReplicationFactor: 1}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err = m.Lifecycle().Placements.ApplyPlan(lifecycle.PlacementPlan{VolumeID: "vol-a", DesiredRF: 1, Candidates: []lifecycle.PlacementCandidate{{VolumeID: "vol-a", ServerID: "node-a", ReplicaID: "r2", Source: lifecycle.PlacementSourceExistingReplica}}}); err != nil {
 		t.Fatal(err)
 	}
