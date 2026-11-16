@@ -165,7 +165,7 @@ func recoverWAL(fd *os.File, sb *superblock, dm *dirtyMap) (recoveryResult, erro
 			case walEntryWrite:
 				blocks := entry.Length / sb.BlockSize
 				for i := uint32(0); i < blocks; i++ {
-					dm.putAt(
+					dm.putAtIfNewer(
 						entry.LBA+uint64(i), pos, i*sb.BlockSize,
 						entry.LSN, sb.BlockSize,
 					)
@@ -178,7 +178,7 @@ func recoverWAL(fd *os.File, sb *superblock, dm *dirtyMap) (recoveryResult, erro
 					if lsn <= checkpointLSN {
 						continue
 					}
-					dm.putAt(
+					dm.putAtIfNewer(
 						entry.LBA+uint64(i), pos, i*sb.BlockSize,
 						lsn, sb.BlockSize,
 					)
@@ -190,7 +190,7 @@ func recoverWAL(fd *os.File, sb *superblock, dm *dirtyMap) (recoveryResult, erro
 					blocks = 1
 				}
 				for i := uint32(0); i < blocks; i++ {
-					dm.putAt(
+					dm.putAtIfNewer(
 						entry.LBA+uint64(i), pos, i*sb.BlockSize,
 						entry.LSN, sb.BlockSize,
 					)
