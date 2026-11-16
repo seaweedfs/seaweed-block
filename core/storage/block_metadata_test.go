@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"os"
 	"path/filepath"
@@ -174,5 +175,66 @@ func TestBlockMetadata_UnsupportedFormatRequiresFactory(t *testing.T) {
 	if x, err := OpenWALStoreWithOptions(p, recordingOptions(&recordingMetadata{}, 78)); err == nil {
 		x.Close()
 		t.Fatal("factory accepted a different stored version")
+	}
+}
+
+func TestBlockMetadata_SeedFailureRetry(t *testing.T) {
+	sentinel := errors.New("deferred metadata not durable")
+	hook := &recordingMetadata{barrierErr: sentinel}
+	s, path := metadataStore(t, hook)
+	if err := s.WriteExtentDirect(3, makeBlock(4096, 0x45)); err != nil {
+		t.Fatal(err)
+	}
+	persist := s.syncDirectFrontierMetadata
+	s.syncDirectFrontierMetadata = func(data []byte) error {
+		if hook.barriers != 2 {
+			t.Errorf("seed persistence before retry barrier: %d", hook.barriers)
+		}
+		marker := []byte{0}
+		if _, err := s.fd.ReadAt(marker, hook.end); err != nil || marker[0] != 1 {
+			t.Errorf("seed persisted before deferred marker: %v %v", marker, err)
+		}
+		return persist(data)
+	}
+	if err := s.SeedChunkFrontier(7); !errors.Is(err, sentinel) {
+		t.Fatalf("seed bypassed deferred metadata error: %v", err)
+	}
+	if s.NextLSN() != 1 || s.CheckpointLSN() != 0 {
+		t.Fatal("failed seed published next/checkpoint")
+	}
+	if r, _, h := s.Boundaries(); r != 0 || h != 0 {
+		t.Fatalf("failed seed published boundaries: %d %d", r, h)
+	}
+	header := make([]byte, 4096)
+	if _, err := s.fd.ReadAt(header, 0); err != nil {
+		t.Fatal(err)
+	}
+	if binary.LittleEndian.Uint64(header[72:80]) != 0 {
+		t.Fatal("failed seed persisted checkpoint")
+	}
+	hook.barrierErr = nil
+	if err := s.SeedChunkFrontier(7); err != nil {
+		t.Fatal(err)
+	}
+	if hook.barriers != 2 || s.NextLSN() != 8 || s.CheckpointLSN() != 7 {
+		t.Fatalf("retry failed: calls=%d next=%d cp=%d", hook.barriers, s.NextLSN(), s.CheckpointLSN())
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenWALStoreWithOptions(path, recordingOptions(&recordingMetadata{}, WALStoreImplVersion))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	reopened.flusher.Stop()
+	if _, err = reopened.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	if reopened.NextLSN() != 8 {
+		t.Fatal("seed retry not durable after reopen")
+	}
+	if data, err := reopened.Read(3); err != nil || !bytes.Equal(data, makeBlock(4096, 0x45)) {
+		t.Fatalf("seed data changed: %v", err)
 	}
 }
