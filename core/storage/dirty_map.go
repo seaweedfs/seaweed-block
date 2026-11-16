@@ -50,6 +50,28 @@ func (d *dirtyMap) put(lba, walOffset, lsn uint64, length uint32) {
 	d.putAt(lba, walOffset, 0, lsn, length)
 }
 
+// putAtIfNewer is putAt for recovery replay: last writer wins by LSN, so
+// an older version of an LBA scanned after a newer one (range scan order
+// is physical, not LSN order) never replaces it.
+func (d *dirtyMap) putAtIfNewer(
+	lba, walOffset uint64,
+	dataOffset uint32,
+	lsn uint64,
+	length uint32,
+) {
+	s := d.shard(lba)
+	s.mu.Lock()
+	if cur, ok := s.m[lba]; !ok || cur.lsn < lsn {
+		s.m[lba] = dirtyEntry{
+			walOffset:  walOffset,
+			dataOffset: dataOffset,
+			lsn:        lsn,
+			length:     length,
+		}
+	}
+	s.mu.Unlock()
+}
+
 func (d *dirtyMap) putAt(
 	lba, walOffset uint64,
 	dataOffset uint32,
