@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"path"
+	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/filerpb"
 	"github.com/seaweedfs/seaweed-block/core/storage"
@@ -146,5 +148,90 @@ func TestManifest_RejectsFieldAliases(t *testing.T) {
 		if _, err := DecodeHeadDocument("mixed", body); err == nil {
 			t.Errorf("format2 accepted residual field %s", field)
 		}
+	}
+}
+
+func TestManifest_FormatSpecificFoldedFields(t *testing.T) {
+	for _, tc := range []struct {
+		format int
+		name   string
+	}{{1, "segments"}, {1, "chunk_bytes"}, {1, "chunk_count"}, {2, "chunks"}} {
+		variants := map[string]bool{tc.name: true, strings.ToUpper(tc.name): true}
+		original := []rune(tc.name)
+		for i, r := range original {
+			for folded := unicode.SimpleFold(r); folded != r; folded = unicode.SimpleFold(folded) {
+				key := append([]rune(nil), original...)
+				key[i] = folded
+				variants[string(key)] = true
+			}
+		}
+		for key := range variants {
+			encoded, _ := json.Marshal(key)
+			suffix := string(encoded) + `:null`
+			root := `{"format":1,"gen":1,"epoch":1,"holder":"h",` + suffix + `}`
+			if tc.format == 2 {
+				root = `{"format":2,"gen":1,"epoch":1,"holder":"h","chunk_bytes":32768,"segments":{},` + suffix + `}`
+			}
+			if _, err := DecodeHeadDocument("folded", []byte(root)); err == nil {
+				t.Errorf("format%d accepted folded residual %s", tc.format, key)
+			}
+		}
+	}
+	for _, root := range []string{
+		`{"format":1,"gen":1,"epoch":1,"holder":"h","\u017fegments":null}`,
+		`{"format":2,"gen":1,"epoch":1,"holder":"h","chunk_bytes":32768,"segments":{},"chun\u212as":null}`,
+	} {
+		if _, err := DecodeHeadDocument("escaped", []byte(root)); err == nil {
+			t.Errorf("accepted escaped mixed root: %s", root)
+		}
+	}
+}
+
+func TestManifest_LongSDiscriminatorCorruptionRefusesReadAndGC(t *testing.T) {
+	f, b, c, g, now := gcFixture(t)
+	ctx := context.Background()
+	r, _ := publishSegmented(t, f, b)
+	if err := r.Put(ctx, "orphan", []byte("do not delete after bad mark")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	*now = now.Add(2 * time.Hour)
+	e, err := f.LookupEntry(ctx, path.Join(catBase, "v1"), headName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err = json.Unmarshal(e.Content, &fields); err != nil {
+		t.Fatal(err)
+	}
+	fields["format"] = json.RawMessage("1")
+	fields["\u017fegments"] = fields["segments"]
+	delete(fields, "segments")
+	delete(fields, "chunk_bytes")
+	delete(fields, "chunk_count")
+	e.Content, err = json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.UpdateEntry(ctx, path.Join(catBase, "v1"), e, nil); err != nil {
+		t.Fatal(err)
+	}
+	if h, err := r.GetHead(ctx); err == nil {
+		t.Errorf("Unicode mixed root became readable empty image: %+v", h)
+	}
+	if h, _, err := c.ReadHead(ctx, "v1"); err == nil {
+		t.Errorf("catalog accepted Unicode mixed root: %+v", h)
+	}
+	_, _, before := b.counts()
+	for _, apply := range []bool{false, true} {
+		if _, err := g.run(ctx, apply); err == nil {
+			t.Errorf("Unicode mixed root accepted by GC apply=%v", apply)
+		}
+	}
+	_, _, after := b.counts()
+	if before != after {
+		t.Fatal("Unicode mixed root allowed partial delete")
 	}
 }
