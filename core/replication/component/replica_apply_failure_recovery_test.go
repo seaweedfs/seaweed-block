@@ -86,6 +86,12 @@ func TestReplicaApplyFailure_PrimaryDegradesRecoversAndReplaysFailedLSN(t *testi
 	var replica *transientApplyFailStore
 	factory := func(t *testing.T, dir, label string, blocks uint32, blockSize int) (storage.LogicalStorage, func()) {
 		st, cleanup := Walstore(t, dir, label, blocks, blockSize)
+		if label == "primary" {
+			// This control requires WAL replay of the failed LSN. A primary
+			// checkpoint may otherwise retire the WAL before recovery starts,
+			// legitimately selecting BASE rebuild rather than ApplyEntry replay.
+			st.(*storage.WALStore).DisableAutoFlushForRecoveryTest()
+		}
 		if label == "replica-0" {
 			replica = &transientApplyFailStore{LogicalStorage: st}
 			return replica, cleanup
@@ -143,6 +149,9 @@ func TestReplicaApplyFailure_PrimaryDegradesRecoversAndReplaysFailedLSN(t *testi
 	}
 	t.Logf("injected failure at LSN %d; peer degraded; replica frontier before recovery H=%d; primary head %d", failedLSN, rH, head)
 
+	if _, retained, _ := c.primary.Store.Boundaries(); retained > failedLSN {
+		t.Fatalf("WAL replay fixture retired failed LSN %d (retained=%d)", failedLSN, retained)
+	}
 	cfg := replication.ProbeLoopConfig{Interval: 30 * time.Millisecond, MaxConcurrent: 1, CooldownBase: 20 * time.Millisecond, CooldownCap: 200 * time.Millisecond}
 	if err := c.primary.RepVol.ConfigureProbeLoop(cfg, volume.ProductionProbeFn(registry.AdapterFor), time.Now); err != nil {
 		t.Fatalf("ConfigureProbeLoop: %v", err)
