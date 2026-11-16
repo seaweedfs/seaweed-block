@@ -43,6 +43,9 @@ var (
 	ErrChunkEpochStale = errors.New("durable: chunk layer lineage moved since attach")
 )
 
+// ErrChunkStaleLocalRoot: declared for the RED tests; nothing returns it yet.
+var ErrChunkStaleLocalRoot = errors.New("durable: local volume predates a HEAD published by another holder")
+
 var (
 	errProviderClosed   = errors.New("durable: provider closed")
 	errChunkNoAuthority = errors.New("durable: projection carries no master authority for the chunk layer")
