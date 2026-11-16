@@ -152,7 +152,10 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 				roots[path.Join(dir, name)] = true
 			}
 
-			keys := make([]string, 0, len(head.Chunks))
+			keys := make([]string, 0, len(head.Chunks)+len(head.Segments))
+			for _, ref := range head.Segments {
+				keys = append(keys, ref.Key)
+			}
 			for _, ref := range head.Chunks {
 				keys = append(keys, ref.Key)
 			}

@@ -3,7 +3,9 @@ package chunkstore
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"path"
 	"path/filepath"
 	"testing"
@@ -137,5 +139,114 @@ func TestManifest_GCReadsPublishedSegments(t *testing.T) {
 	out, err := g.Preview(context.Background())
 	if err != nil || len(out.Roots) == 0 {
 		t.Fatalf("GC cannot trace published segment: %+v %v", out, err)
+	}
+}
+
+func TestManifest_ReusesUnchangedRangeAndCrashKeepsOldRoot(t *testing.T) {
+	f, b, _, _, _ := gcFixture(t)
+	ctx := context.Background()
+	r, h := publishSegmented(t, f, b)
+	// A second logical GiB uses a different immutable range; no local 1GiB
+	// allocation is needed to exercise remote manifest publication.
+	per := manifestSegmentBytes / h.ChunkBytes
+	key := "second-range"
+	data := chunkBytes(0x77)
+	if err := r.Put(ctx, key, data); err != nil {
+		t.Fatal(err)
+	}
+	h.Chunks[per] = storage.ChunkRef{Key: key, SHA256: sha256.Sum256(data)}
+	next, ids, err := r.PrepareManifest(ctx, h, h, h.ChunkBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.Segments[0] != h.Segments[0] {
+		t.Fatal("unchanged range rewritten")
+	}
+	// Simulate death after immutable upload, with no CAS or cleanup.
+	old, err := r.GetHead(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(old.Chunks) != 2 || len(old.Segments) != 1 {
+		t.Fatal("unpublished segment changed old root")
+	}
+	intents, err := r.ListIntents(ctx)
+	if err != nil || len(intents) != len(ids) {
+		t.Fatalf("uploaded segment unprotected: %v", err)
+	}
+	for _, ref := range old.Chunks {
+		if _, err := r.Get(ctx, ref.Key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gen, err := r.CASHead(ctx, storage.ChunkHeadVersion{Gen: old.Gen, Epoch: old.Epoch}, next)
+	if err != nil || gen != old.Gen+1 {
+		t.Fatalf("normal CAS semantics: %d %v", gen, err)
+	}
+}
+
+func TestManifest_UnreadablePublishedSegmentRefusesWholeGC(t *testing.T) {
+	for _, apply := range []bool{false, true} {
+		t.Run(fmt.Sprint(apply), func(t *testing.T) {
+			f, b, _, g, now := gcFixture(t)
+			ctx := context.Background()
+			r, h := publishSegmented(t, f, b)
+			if err := r.Put(ctx, "unreachable", []byte("orphan")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := g.Run(ctx); err != nil {
+				t.Fatal(err)
+			}
+			*now = now.Add(2 * time.Hour)
+			var ref storage.ChunkSegment
+			for _, v := range h.Segments {
+				ref = v
+				break
+			}
+			dir, name, err := r.keyLocation(ref.Key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			entry, err := f.LookupEntry(ctx, dir, name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b.mu.Lock()
+			b.data[string(entry.Extended[extFid])] = []byte("corrupted segment")
+			before := len(b.data)
+			b.mu.Unlock()
+			if _, err := g.run(ctx, apply); err == nil {
+				t.Fatal("unreadable published segment accepted")
+			}
+			b.mu.Lock()
+			after := len(b.data)
+			b.mu.Unlock()
+			if before != after {
+				t.Fatal("failed mark partially deleted data")
+			}
+		})
+	}
+}
+
+func TestManifest_CopyIntentProtectsChildrenWithoutHead(t *testing.T) {
+	f, b, _, g, now := gcFixture(t)
+	ctx := context.Background()
+	r, h := publishSegmented(t, f, b)
+	if _, err := r.PutIntent(ctx, storage.ChunkIntent{Gen: h.Gen, Epoch: h.Epoch, Holder: "snapshot:v1/unpublished/attempt", Keys: headKeys(h), Segments: h.Segments, ChunkBytes: h.ChunkBytes}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.CASHead(ctx, storage.ChunkHeadVersion{Gen: h.Gen, Epoch: h.Epoch}, storage.ChunkHead{Epoch: h.Epoch, Holder: h.Holder, RemoteLSN: h.RemoteLSN}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if out, err := g.Run(ctx); err != nil || out.Reclaimed != 0 {
+			t.Fatalf("copy intent lost transitive children: %+v %v", out, err)
+		}
+		*now = now.Add(2 * time.Hour)
+	}
+	for _, ref := range h.Chunks {
+		if _, err := r.Get(ctx, ref.Key); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

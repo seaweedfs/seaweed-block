@@ -1,12 +1,14 @@
 package chunkstore
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"path"
 	"reflect"
 	"strings"
@@ -50,6 +52,9 @@ func validateRoot(h storage.ChunkHead) error {
 			return errors.New("chunkstore: invalid segment reference")
 		}
 		count += ref.Count
+	}
+	if h.State == storage.ChunkHeadAborted && len(h.Segments) != 0 {
+		return errors.New("chunkstore: aborted HEAD contains segments")
 	}
 	if count != h.ManifestChunkCount {
 		return errors.New("chunkstore: manifest count mismatch")
@@ -152,7 +157,7 @@ func (r *ChunkRemote) resolveManifest(ctx context.Context, h storage.ChunkHead) 
 			return h, errors.New("chunkstore: segment hash/size mismatch")
 		}
 		var doc segmentDoc
-		if err := json.Unmarshal(body, &doc); err != nil {
+		if err := decodeManifestJSON(body, &doc); err != nil {
 			return h, err
 		}
 		if doc.Format != 1 || doc.Range != group || doc.ChunkBytes != h.ChunkBytes || doc.Owner != ref.Owner || len(doc.Chunks) != ref.Count {
@@ -167,4 +172,63 @@ func (r *ChunkRemote) resolveManifest(ctx context.Context, h storage.ChunkHead) 
 		}
 	}
 	return h, nil
+}
+
+// Reject duplicate object keys instead of accepting a last-wins manifest.
+func decodeManifestJSON(body []byte, out any) error {
+	if len(body) > maxManifestBytes {
+		return errors.New("chunkstore: manifest exceeds byte bound")
+	}
+	d := json.NewDecoder(bytes.NewReader(body))
+	var value func(int) error
+	value = func(depth int) error {
+		if depth > 8 {
+			return errors.New("chunkstore: manifest nesting exceeds bound")
+		}
+		tok, err := d.Token()
+		if err != nil {
+			return err
+		}
+		delim, ok := tok.(json.Delim)
+		if !ok {
+			return nil
+		}
+		switch delim {
+		case '{':
+			keys := map[string]bool{}
+			for d.More() {
+				t, err := d.Token()
+				if err != nil {
+					return err
+				}
+				k, ok := t.(string)
+				if !ok || keys[k] {
+					return errors.New("chunkstore: duplicate manifest key")
+				}
+				keys[k] = true
+				if err := value(depth + 1); err != nil {
+					return err
+				}
+			}
+			_, err = d.Token()
+			return err
+		case '[':
+			for d.More() {
+				if err := value(depth + 1); err != nil {
+					return err
+				}
+			}
+			_, err = d.Token()
+			return err
+		default:
+			return errors.New("chunkstore: invalid manifest delimiter")
+		}
+	}
+	if err := value(0); err != nil {
+		return err
+	}
+	if _, err := d.Token(); err != io.EOF {
+		return errors.New("chunkstore: trailing manifest bytes")
+	}
+	return json.Unmarshal(body, out)
 }

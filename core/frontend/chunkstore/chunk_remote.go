@@ -425,11 +425,13 @@ func headEntry(h storage.ChunkHead) (*filerpb.Entry, error) {
 	if h.DetachedBy != nil {
 		doc.DetachedBy = &detachedByDoc{Holder: h.DetachedBy.Holder, Epoch: h.DetachedBy.Epoch, Gen: h.DetachedBy.Gen}
 	}
-	for idx, ref := range h.Chunks {
-		if ref.Key == "" {
-			return nil, fmt.Errorf("chunkstore: HEAD chunk %d has no key", idx)
+	if h.Segments == nil {
+		for idx, ref := range h.Chunks {
+			if ref.Key == "" {
+				return nil, fmt.Errorf("chunkstore: HEAD chunk %d has no key", idx)
+			}
+			doc.Chunks[idx] = refDoc{Key: ref.Key, SHA256: hex.EncodeToString(ref.SHA256[:])}
 		}
-		doc.Chunks[idx] = refDoc{Key: ref.Key, SHA256: hex.EncodeToString(ref.SHA256[:])}
 	}
 	if h.Segments != nil {
 		doc.Format = 2
@@ -494,7 +496,7 @@ func decodeHeadDoc(p string, content []byte) (storage.ChunkHead, error) {
 		return storage.ChunkHead{}, fmt.Errorf("chunkstore: HEAD %s: "+format, append([]any{p}, a...)...)
 	}
 	var doc headDoc
-	if err := json.Unmarshal(content, &doc); err != nil {
+	if err := decodeManifestJSON(content, &doc); err != nil {
 		return fail("decode: %v", err)
 	}
 	if doc.Format != headFormat && doc.Format != 2 {
