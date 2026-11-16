@@ -44,7 +44,7 @@ var dialChunkFiler = func(addr string) (chunkstore.Filer, func() error, error) {
 
 func runOpsChunk(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		return chunkFail("", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "expected cut|snapshot|snapshots|snapshot-delete|fork|detach|show|gc", false)
+		return chunkFail("", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "expected cut|snapshot|snapshots|snapshot-delete|fork|detach|show|gc|usage|retain", false)
 	}
 	switch args[0] {
 	case "gc":
@@ -63,6 +63,10 @@ func runOpsChunk(args []string, stdout, stderr io.Writer) int {
 		return chunkFork(args[1:], stdout, stderr)
 	case "show":
 		return chunkShow(args[1:], stdout, stderr)
+	case "usage":
+		return chunkUsage(args[1:], stdout, stderr)
+	case "retain":
+		return chunkRetain(args[1:], stdout, stderr)
 	default:
 		return chunkFail("", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, fmt.Sprintf("unknown subcommand %q", args[0]), false)
 	}
@@ -170,9 +174,10 @@ func chunkCut(args []string, stdout, stderr io.Writer) int {
 func chunkSnapshot(args []string, stdout, stderr io.Writer) int {
 	fs := chunkFlagSet("snapshot", stderr)
 	var (
-		volumeID, statusAddr, name, requestID, consistency string
-		expiresAtNs                                        int64
-		timeout                                            time.Duration
+		volumeID, statusAddr, name, requestID, consistency, class string
+		expiresAtNs                                               int64
+		timeout, expires                                          time.Duration
+		pin                                                       bool
 	)
 	labels := labelFlags{}
 	fs.StringVar(&volumeID, "volume", "", "volume id")
@@ -180,7 +185,10 @@ func chunkSnapshot(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&name, "name", "", "snapshot name")
 	fs.StringVar(&requestID, "request-id", "", "idempotency id; generated and printed when empty (reuse it to retry)")
 	fs.StringVar(&consistency, "consistency", "crash", "crash, or app when the guest was frozen by the caller")
-	fs.Int64Var(&expiresAtNs, "expires-at-ns", 0, "stored for the retention policy; not enforced here")
+	fs.Int64Var(&expiresAtNs, "expires-at-ns", 0, "pins the snapshot until this time (unix ns); retention expires it afterwards")
+	fs.DurationVar(&expires, "expires", 0, "pins the snapshot for this long from now (sets --expires-at-ns)")
+	fs.StringVar(&class, "class", "", "retention class: semantic (an automatic checkpoint, expired by the policy) or pinned (kept until deleted)")
+	fs.BoolVar(&pin, "pin", false, "shorthand for --class pinned")
 	fs.Var(labels, "label", "key=value label (repeatable)")
 	fs.DurationVar(&timeout, "timeout", 60*time.Second, "operation bound (capped at the server's OpDeadline)")
 	if err := fs.Parse(args); err != nil {
@@ -189,12 +197,28 @@ func chunkSnapshot(args []string, stdout, stderr io.Writer) int {
 	if volumeID == "" || statusAddr == "" || name == "" {
 		return chunkFail("snapshot", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--volume, --status-addr and --name are required", false)
 	}
+	if pin {
+		if class != "" && class != chunkstore.SnapshotClassPinned {
+			return chunkFail("snapshot", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--pin conflicts with --class "+class, false)
+		}
+		class = chunkstore.SnapshotClassPinned
+	}
+	if expires < 0 || expires > 0 && expiresAtNs != 0 {
+		return chunkFail("snapshot", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--expires must be positive and does not combine with --expires-at-ns", false)
+	}
+	if expires > 0 {
+		expiresAtNs = time.Now().Add(expires).UnixNano()
+	}
 	if requestID == "" {
 		requestID = newRequestID()
 		fmt.Fprintf(stderr, "sw-block ops chunk snapshot: request id %s (reuse it to retry)\n", requestID)
 	}
-	return chunkPost("snapshot", statusAddr, "/chunk/snapshot", timeout, map[string]any{"volumeID": volumeID, "name": name,
-		"requestID": requestID, "labels": map[string]string(labels), "consistency": consistency, "expiresAtNs": expiresAtNs}, stdout, stderr)
+	body := map[string]any{"volumeID": volumeID, "name": name,
+		"requestID": requestID, "labels": map[string]string(labels), "consistency": consistency, "expiresAtNs": expiresAtNs}
+	if class != "" {
+		body["class"] = class // only when set: the request otherwise keeps its spec fields
+	}
+	return chunkPost("snapshot", statusAddr, "/chunk/snapshot", timeout, body, stdout, stderr)
 }
 
 func chunkDetach(args []string, stdout, stderr io.Writer) int {
