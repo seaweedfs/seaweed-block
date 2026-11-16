@@ -11,7 +11,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
-// Space accounting (claude05's rulings, 2026-11-15 22:53Z). Everything is
+// Space accounting. Everything is
 // computed from manifests and filer listings; segment objects are verified,
 // but data chunks are not read.
 //

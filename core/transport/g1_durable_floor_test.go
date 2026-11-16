@@ -117,7 +117,7 @@ func g1Persisted(t *testing.T, path string) uint64 {
 }
 
 // TestG1_RestartedReplicaRefusesShipBelowItsAcknowledgedEpoch — the red test,
-// revised per the accepted contract (codex01 R3):
+// revised per the accepted contract:
 //
 //	(a) admitted at epoch 1, a ship raises it to 2 and a real epoch-2 barrier
 //	    is ACKed; restart on the same floor record;
@@ -186,7 +186,7 @@ func TestG1_BarrierOnlyEpochSurvivesRestart(t *testing.T) {
 
 // A freshly created volume loads its bootstrap floor (epoch 0) at restart,
 // stays unassigned and refuses every mutation, and a successful current
-// assignment then admits valid traffic (codex01 round 3 positive).
+// assignment then admits valid traffic (the positive case).
 func TestG1_FreshVolumeRestartBeforeAssignment(t *testing.T) {
 	store := storage.NewBlockStore(16, 4096)
 	floor := g1Fresh(t)
@@ -242,7 +242,7 @@ func TestG1_InvalidOrMissingRecordRefusesTheListener(t *testing.T) {
 		"missing field": `{"schema":"seaweed-block.replica-floor/v1","volume_id":"vol1"}`,
 		"bad epoch":     `{"schema":"seaweed-block.replica-floor/v1","volume_id":"vol1","epoch":-1}`,
 		"oversized":     ok + string(bytes.Repeat([]byte(" "), floorRecordMaxBytes)),
-		// codex01 R2 on #83: case variants are not the same key.
+		// Review of #83: case variants are not the same key.
 		"uppercase keys":            `{"SCHEMA":"seaweed-block.replica-floor/v1","VOLUME_ID":"vol1","EPOCH":3}`,
 		"case-folded duplicate":     `{"schema":"seaweed-block.replica-floor/v1","volume_id":"vol1","epoch":7,"EPOCH":0}`,
 		"case-folded duplicate rev": `{"schema":"seaweed-block.replica-floor/v1","volume_id":"vol1","Epoch":0,"epoch":7}`,

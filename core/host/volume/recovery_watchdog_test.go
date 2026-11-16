@@ -145,7 +145,7 @@ func TestRecoveryWatchdog_StatusShowsReasonAndCatchUp(t *testing.T) {
 
 // Once ready in this assignment, a later not-ready on the same
 // incarnation is a running primary degrading, not a boot-recovery stall:
-// no recovery_timeout, however long it lasts (claude05, 21:24Z).
+// no recovery_timeout, however long it lasts.
 func TestRecoveryWatchdog_ReadyThenLaterNotReadyReportsNoTimeout(t *testing.T) {
 	h, clk := watchdogHost(t, 10*time.Second)
 	h.applyFact(selfPrimaryFact(1))

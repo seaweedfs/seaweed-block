@@ -112,8 +112,8 @@ func chunkErrorOut(t *testing.T, out string) chunkErrBody {
 	return e
 }
 
-// Every failure is the error body on stdout and a non-zero exit (appendix
-// 14:30Z): usage, an unreachable blockvolume, a catalog refusal.
+// Every failure is the error body on stdout and a non-zero exit (B9 W2
+// appendix): usage, an unreachable blockvolume, a catalog refusal.
 func TestOpsChunk_ErrorsAreJSONOnStdout(t *testing.T) {
 	if code, out, _ := runChunk("nope"); code != 2 || chunkErrorOut(t, out).Code != "bad_request" {
 		t.Fatalf("unknown subcommand: exit %d %q", code, out)

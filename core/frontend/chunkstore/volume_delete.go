@@ -13,8 +13,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
-// Volume delete (claude05's item, 2026-11-16 02:39Z; claude05's 04:08Z
-// cut: no snapshot cascade).
+// Volume delete (no snapshot cascade).
 //
 //	(a) Admission: the caller's Admission (the CLI's: the blockmaster's
 //	    durable deletion reservation, MarkVolumeDeleting; refused while the

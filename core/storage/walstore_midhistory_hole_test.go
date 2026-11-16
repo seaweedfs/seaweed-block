@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// Issue #51, walstore (claude05's ruling 2026-11-16 06:47Z): pure
+// Issue #51, walstore: pure
 // detection. A WAL hole followed by valid records is logged, counted and
 // reported as the typed warning wal_hole_suspected; nothing about what is
 // replayed, where replay stops, or whether the volume opens changes.
@@ -175,7 +175,7 @@ func TestWALStoreRecoverWrappedHoleIsNoOutage(t *testing.T) {
 	_ = r
 }
 
-// codex01's r1 P1: a damaged STALE record in a released range (below the
+// Review finding: a damaged STALE record in a released range (below the
 // checkpoint, outside the retained window) must not cost retained data.
 // Layout: checkpoint 2, persisted tail at S, head at 3S; LSN 1 (released)
 // at 0 damaged, LSN 2 checkpointed at S, LSN 3 synced and unflushed at 2S.

@@ -439,7 +439,7 @@ func (h *Host) RoleAdmissionFailure() (bool, string) {
 // The desired role is monotonic in epoch: a call below the current desired
 // epoch is a stale fact (master replay) and is refused without replacing the
 // desired role or touching the admission latch, so a stale success can never
-// reconcile a newer failure (codex01 R1 on #83).
+// reconcile a newer failure (review of #83).
 func (h *Host) fenceSelf(role selfRole, epoch uint64) error {
 	return h.fenceSelfWithPeers(role, epoch, true)
 }

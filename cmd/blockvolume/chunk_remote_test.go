@@ -110,7 +110,7 @@ func TestChunkAttachCheckAppliesVolumeRules(t *testing.T) {
 }
 
 // HEAD names a host as <server-id>/<replica-id>: two servers serving the same
-// replica id are different holders (B9 W2 appendix, 2026-11-15 14:30Z).
+// replica id are different holders (B9 W2 appendix).
 func TestChunkHolderIsServerAndReplica(t *testing.T) {
 	f, err := parseFlags(append(phase150RequiredBlockvolumeArgs(), "--durable-root=/tmp/sw-block",
 		"--durable-impl=walstore-chunk", "--chunk-filer=x:1"))

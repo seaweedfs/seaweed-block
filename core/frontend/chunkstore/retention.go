@@ -17,7 +17,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
-// Snapshot retention (claude05's rulings, 2026-11-15 22:53Z).
+// Snapshot retention.
 //
 // A snapshot has a class, stored with it:
 //   - "semantic": an automatic checkpoint (e.g. an agent's per-step
@@ -50,7 +50,7 @@ import (
 // record is removed only while it still names that attempt, so a
 // same-name replacement made after planning is never touched.
 //
-// Fork parents (codex01's design, review of #142 round 2). Protection is
+// Fork parents (design from the review of #142). Protection is
 // one conditional write on the parent attempt's own entry, nothing else:
 //
 //   - Fork, before it reads the parent, adds its claim (target/request)
@@ -86,7 +86,7 @@ const (
 	CodeInvalidClass  = "invalid_class"
 	CodeInvalidPolicy = "invalid_policy"
 	// CodeSnapshotClaimed: an explicit delete of a snapshot a fork still
-	// claims (claude05's ruling, 23:58Z). Not retryable as such: it clears
+	// claims. Not retryable as such: it clears
 	// when the fork publishes its HEAD or is aborted.
 	CodeSnapshotClaimed = "snapshot_claimed"
 

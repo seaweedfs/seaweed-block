@@ -330,7 +330,7 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 
 		// G2: a mutating frame is counted from before its gate check until its
 		// effect is done, so FenceAsPrimary can wait out every frame that may
-		// already have passed the gate (claude03 review of #82).
+		// already have passed the gate (review of #82).
 		mutating := isMutationMsg(msgType)
 		if mutating {
 			r.beginMutationFrame()

@@ -13,8 +13,8 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
-// Snapshot retention and space accounting (claude05's rulings
-// 2026-11-15 22:53Z): policy edges, dry run, forks, accounting.
+// Snapshot retention and space accounting: policy edges, dry run, forks,
+// accounting.
 
 var retBase = time.Unix(1_000_000, 0)
 

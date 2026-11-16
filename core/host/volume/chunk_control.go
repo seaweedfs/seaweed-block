@@ -46,7 +46,7 @@ type ChunkCutResponse struct {
 	Noop      bool   `json:"noop"`
 	FullHash  bool   `json:"fullHash"`
 	// The cut statistics (§3.1) are added when W3 fills them; until then
-	// the body omits them rather than report zeros (appendix 14:30Z).
+	// the body omits them rather than report zeros (B9 W2 appendix).
 }
 
 // ChunkSnapshotRequest is POST /chunk/snapshot's request (§3.2), without

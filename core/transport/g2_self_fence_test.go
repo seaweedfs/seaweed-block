@@ -87,7 +87,7 @@ func TestG2_FloorStaysWhenThePrimaryLaterSupportsAnother(t *testing.T) {
 
 // pausingStore holds ApplyEntry inside the store until released, to put a
 // ship frame "past the gate but not yet applied" at the moment of promotion
-// (claude03's review control for #82).
+// (the review control for #82).
 type pausingStore struct {
 	storage.LogicalStorage
 	entered chan struct{}
@@ -133,7 +133,7 @@ func g2PausedShip(t *testing.T) (*ReplicaListener, *pausingStore) {
 // An epoch-1 ship admitted just before promotion is inside ApplyEntry when
 // FenceAsPrimary(2) is called. The fence must not return until that apply has
 // finished: nothing from the deposed primary is applied after the host serves
-// as primary (claude03 P2-1 on #82; before the fix it was applied ~18 µs after
+// as primary (review of #82; before the fix it was applied ~18 µs after
 // the fence returned).
 func TestG2_FenceWaitsForAShipAlreadyPastTheGate(t *testing.T) {
 	listener, store := g2PausedShip(t)

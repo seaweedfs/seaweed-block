@@ -333,7 +333,7 @@ func TestPillar2B_LiveWrites_HighPressure_BarrierIntegrity(t *testing.T) {
 		t.Fatal("OnSessionStart did not fire within 2s")
 	}
 
-	// §6.3 / Path B (architect ruling 2026-04-30): pushes are
+	// §6.3 / Path B: pushes are
 	// SERIALIZED. Pre-§6.3 this test ran 16×8=128 concurrent pushers
 	// to stress the atomic-seal contract; under §6.3 single drive()
 	// dispatch, concurrent pushes during session can race against

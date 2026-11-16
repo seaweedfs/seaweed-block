@@ -106,7 +106,7 @@ func TestDurableStartup_Issue51_CorruptNewerSlotIsWALCorrupt(t *testing.T) {
 	}
 }
 
-// claude05's ruling (A), 06:47Z: detection only for smartwal too. A
+// Detection only, for smartwal too. A
 // corrupted committed slot with later valid records starts as before
 // (ready), and the durable status carries the counted warning.
 func TestDurableStartup_Issue51_SmartWALHoleIsAWarningNotAnOutage(t *testing.T) {
@@ -148,7 +148,7 @@ func TestDurableStartup_Issue51_SmartWALTornTailRecovers(t *testing.T) {
 	}
 }
 
-// walstore interim (claude05's ruling 06:14Z): the same mid-history
+// walstore interim: the same mid-history
 // corruption on a walstore volume does not become an outage: startup is
 // ready, and the durable status carries the typed warning.
 func TestDurableStartup_Issue51_WALStoreHoleIsAWarningNotAnOutage(t *testing.T) {

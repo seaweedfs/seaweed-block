@@ -148,7 +148,7 @@ func TestRecoveryWatchdog_MasterUnhealthyFailsOverToQualifiedPeer(t *testing.T) 
 // A running primary that was ready and later reports not ready on the
 // same incarnation (no unhealthy reason) follows the normal failover
 // rules: no boot grace for that incarnation, so it fails over to the
-// qualified peer, and nothing is listed as unhealthy (claude05, 21:24Z).
+// qualified peer, and nothing is listed as unhealthy.
 func TestRecoveryWatchdog_MasterLaterDegradationFollowsNormalRules(t *testing.T) {
 	h, svc := watchdogMaster(t)
 	defer closeTestMaster(t, h)

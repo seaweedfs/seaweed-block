@@ -356,7 +356,7 @@ func TestCatalog_UsageCountsForkHolders(t *testing.T) {
 	}
 }
 
-// claude05's ruling (23:58Z): an explicit delete of a snapshot an
+// An explicit delete of a snapshot an
 // incomplete fork claims is refused (snapshot_claimed, not retryable,
 // naming the fork); once the fork completes or is aborted the delete goes
 // through. Retention and delete share the check (markDeleting).

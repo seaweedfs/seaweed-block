@@ -21,7 +21,7 @@ func (stubBackend) SetOperational(_ bool, _ string)                         {}
 func (stubBackend) Identity() frontend.Identity                             { return frontend.Identity{} }
 func (stubBackend) Close() error                                            { return nil }
 
-// G5-5C addendum (P0 product fix, architect ruling 2026-04-28):
+// G5-5C addendum (P0 product fix):
 // frontend volume capacity MUST derive from --durable-blocks ×
 // --durable-blocksize, not silently fall back to frontend defaults.
 //
