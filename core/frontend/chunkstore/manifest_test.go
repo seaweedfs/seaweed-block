@@ -183,6 +183,27 @@ func TestManifest_ReusesUnchangedRangeAndCrashKeepsOldRoot(t *testing.T) {
 	if err != nil || gen != old.Gen+1 {
 		t.Fatalf("normal CAS semantics: %d %v", gen, err)
 	}
+
+	published, err := r.GetHead(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := published
+	changed.Chunks = make(map[uint64]storage.ChunkRef, len(published.Chunks))
+	for idx, ref := range published.Chunks {
+		changed.Chunks[idx] = ref
+	}
+	if err = r.Put(ctx, "changed-range-zero", data); err != nil {
+		t.Fatal(err)
+	}
+	changed.Chunks[0] = storage.ChunkRef{Key: "changed-range-zero", SHA256: sha256.Sum256(data)}
+	rewritten, _, err := r.PrepareManifest(ctx, published, changed, published.ChunkBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rewritten.Segments[0] == published.Segments[0] || rewritten.Segments[1] != published.Segments[1] {
+		t.Fatal("cut must rewrite only the changed range")
+	}
 }
 
 func TestManifest_UnreadablePublishedSegmentRefusesWholeGC(t *testing.T) {

@@ -435,6 +435,9 @@ func headEntry(h storage.ChunkHead) (*filerpb.Entry, error) {
 		}
 	}
 	if h.Segments != nil {
+		if err := validateRoot(h); err != nil {
+			return nil, err
+		}
 		doc.Format = 2
 		doc.Chunks = nil
 		doc.Segments = h.Segments
