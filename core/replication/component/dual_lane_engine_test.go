@@ -455,7 +455,10 @@ func TestPillar3Slice2_EngineDriven_SameLBAArbitration(t *testing.T) {
 		// this test flaky when a 12-LBA rebuild finished first.
 		hold := &staleBaseHold{lba: 5, captured: make(chan struct{}), release: make(chan struct{})}
 		releaseHold := sync.OnceFunc(func() { close(hold.release) })
-		t.Cleanup(releaseHold)
+		// A defer, not t.Cleanup: defers run before every t.Cleanup (LIFO),
+		// including the executor shutdown that Start registers, so a t.Fatal
+		// while the base frame is held cannot deadlock that shutdown.
+		defer releaseHold()
 
 		c.WithReplicas(1).
 			WithEngineDrivenRecovery().
