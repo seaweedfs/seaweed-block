@@ -124,7 +124,7 @@ func chunkAttachCheck(cat *chunkstore.Catalog) func(context.Context, string, dur
 }
 
 // chunkHolder is how this host names itself in HEAD: <server-id>/<replica-id>
-// (B9 W2 appendix, 2026-11-15 14:30Z). The replica id alone is not enough:
+// (B9 W2 appendix). The replica id alone is not enough:
 // two hosts that both serve replica r1 would look like the same holder
 // returning, and the later one would not be fenced.
 func chunkHolder(f flags) string { return f.serverID + "/" + f.replicaID }

@@ -10,8 +10,8 @@ import (
 )
 
 // The WAL writer may only overwrite bytes that the PERSISTED superblock tail
-// has released (claude05's ruling on the S3 torn-wrap finding, 2026-11-16
-// 07:33Z). Otherwise a torn new record can land inside the persisted
+// has released (the torn-wrap finding). Otherwise a torn new record can
+// land inside the persisted
 // [tail, head) and stop recovery's scan before a synced record behind it.
 
 func diskSuperblockForTest(t *testing.T, path string) superblock {
@@ -209,8 +209,8 @@ func TestWALWriterReuseIsBoundedByTheDurableTail(t *testing.T) {
 
 // A full flush persists head == tail (an empty WAL at that position). Sync
 // does not persist the head, so synced appends follow it there; recovery must
-// scan from the persisted position, not from offset 0 (claude05's S3 trace:
-// a torn unsynced record wrapped to 0 must not hide the synced run).
+// scan from the persisted position, not from offset 0 (a torn unsynced
+// record wrapped to 0 must not hide the synced run).
 func TestWALStoreFullFlushThenTornWrapKeepsSyncedRecords(t *testing.T) {
 	const (
 		blockSize = 4096
@@ -266,7 +266,7 @@ func TestWALStoreFullFlushThenTornWrapKeepsSyncedRecords(t *testing.T) {
 	}
 }
 
-// codex01 #159 P2-S2: the batch planner (with a padding wrap) counts from the
+// Review of #159: the batch planner (with a padding wrap) counts from the
 // durable tail too: refused while the release is only in memory or the
 // bounds are recovery-pending, accepted once the tail is persisted.
 func TestWALWriterBatchReuseIsBoundedByTheDurableTail(t *testing.T) {
@@ -352,7 +352,7 @@ func TestWALWriterBatchReuseIsBoundedByTheDurableTail(t *testing.T) {
 	})
 }
 
-// codex01 #159 P2-S3: when Recover cannot persist the rebuilt bounds (the
+// Review of #159: when Recover cannot persist the rebuilt bounds (the
 // superblock write or its fsync fails), it fails, admits no append, and a
 // same-instance retry persists them; later writes survive a reopen exactly.
 func TestWALStoreRecoverBoundsPersistFailureRefusesAppendsUntilRetry(t *testing.T) {

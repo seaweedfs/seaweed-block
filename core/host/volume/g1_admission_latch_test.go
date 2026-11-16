@@ -13,7 +13,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage/memorywal"
 )
 
-// G1 admission latch (codex01 R1): a role call on the host's own replica
+// G1 admission latch: a role call on the host's own replica
 // listener that fails (its floor could not be made durable) must not leave a
 // previously healthy frontend serving: the projection turns unhealthy and the
 // durable backend refuses writes, until a later role call succeeds.
@@ -163,7 +163,7 @@ func supportingFact(epoch uint64) *control.AssignmentFact {
 	}
 }
 
-// codex01 R1 on #83: after the epoch-3 role call fails, a stale epoch-2 replay
+// Review of #83: after the epoch-3 role call fails, a stale epoch-2 replay
 // whose role call would succeed must not clear the latch or reopen writes on
 // the real StorageBackend; only the current epoch's success reconciles.
 func TestG1_StaleReplayDoesNotClearANewerAdmissionFailure(t *testing.T) {

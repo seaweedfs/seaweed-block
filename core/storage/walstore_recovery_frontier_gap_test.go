@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-// claude05's condition (1) for any prefix-cut recovery rule (2026-11-16
-// 07:33Z): an intentional LSN gap must not drop synced entries above it. A
+// Condition (1) for any prefix-cut recovery rule: an intentional LSN gap
+// must not drop synced entries above it. A
 // rebuild installs BASE through WriteExtentDirect (no LSN) and applies
 // WAL-lane entries with their real LSNs through ApplyEntry; the frontier
 // jump (AdvanceFrontier at MarkBaseComplete) is not persisted before them.

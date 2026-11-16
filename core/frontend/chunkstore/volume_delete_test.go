@@ -13,8 +13,8 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
-// Volume delete: one linearization point, no snapshot cascade (claude05,
-// 04:08Z). One control per review schedule.
+// Volume delete: one linearization point, no snapshot cascade. One
+// control per review schedule.
 
 // detachHead publishes vol's HEAD as a clean detach by its holder (what a
 // volume server's Detach writes).
@@ -291,7 +291,7 @@ func TestCatalog_DeleteVolumeRefusesWhileSnapshotsExist(t *testing.T) {
 	}
 }
 
-// claude05's test: a snapshot attempt in flight (name taken, publication
+// A snapshot attempt in flight (name taken, publication
 // held) when the delete marks HEAD: the delete refuses and reverts, and the
 // snapshot then publishes cleanly. A snapshot started after the mark
 // refuses itself.

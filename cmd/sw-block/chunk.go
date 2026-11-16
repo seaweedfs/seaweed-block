@@ -298,7 +298,7 @@ type chunkErrBody struct {
 	Retryable bool   `json:"retryable"`
 }
 
-// chunkFail reports a failure (appendix 14:30Z): the error body
+// chunkFail reports a failure (B9 W2 appendix): the error body
 // {code,message,retryable} on stdout, as the routes answer it, a log line on
 // stderr, and the exit code. The message does not repeat the code.
 func chunkFail(name string, stdout, stderr io.Writer, exit int, code, message string, retryable bool) int {

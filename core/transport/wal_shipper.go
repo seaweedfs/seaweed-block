@@ -209,7 +209,7 @@ type WalShipperConfig struct {
 
 // DefaultWalShipperConfig returns production defaults.
 //
-// SLICE-2 (architect ruling 2026-04-30): LegacyOutOfOrderEmit
+// SLICE-2: LegacyOutOfOrderEmit
 // defaults to FALSE — §6.3 normative tail-gap fail-closed. The
 // shipper does NOT silently emit input bytes for a missing-LSN
 // case; the engine MUST escalate to rebuild on tail gap.

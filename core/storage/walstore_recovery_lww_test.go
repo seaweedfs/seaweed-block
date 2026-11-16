@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-// Recovery is last-writer-wins by LSN (claude05's ruling (B), 2026-11-16
-// 06:47Z). Two valid versions of one LBA survive in the WAL; the persisted
+// Recovery is last-writer-wins by LSN. Two valid versions of one LBA
+// survive in the WAL; the persisted
 // head/tail predate the wrap, so the range scanned first holds the newer
 // version (wrapped to offset 0) and the range scanned later the older one.
 // Recovery must still serve the newer bytes.

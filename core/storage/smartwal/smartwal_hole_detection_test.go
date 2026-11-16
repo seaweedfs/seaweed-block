@@ -46,7 +46,7 @@ func warnsHole(s *Store) bool {
 	return false
 }
 
-// codex01's r1 P1, under claude05's 06:47Z ruling (detection only): a torn
+// Review finding, under the detection-only rule: a torn
 // slot accepted by one recovery stays a recoverable warning after a
 // frontier jump and a new synced write; nothing infers its generation from
 // its position in the ring.

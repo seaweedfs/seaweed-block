@@ -426,7 +426,7 @@ func plausibleEntryHeader(h []byte, minLSN, remaining uint64, blockSize uint32) 
 }
 
 // detectHole notes a suspected WAL hole at a bad entry (issue #51;
-// claude05's ruling 2026-11-16 06:47Z: detection only). An all-zero
+// detection only). An all-zero
 // header is just the end of what was written. Otherwise, if a valid entry
 // with an LSN above minLSN (the highest decoded so far, or the checkpoint)
 // follows it, the hole is recorded as the typed warning

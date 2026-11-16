@@ -10,7 +10,7 @@ import (
 )
 
 // ops chunk show prints a volume's VOLUME entry and HEAD from the filer;
-// either is null when it does not exist (B9 W2 appendix, 2026-11-15 14:30Z).
+// either is null when it does not exist (B9 W2 appendix).
 func TestOpsChunk_Show(t *testing.T) {
 	ctx := context.Background()
 	mem := chunkstore.NewMemFiler()

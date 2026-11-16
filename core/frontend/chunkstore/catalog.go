@@ -48,7 +48,7 @@ const (
 	volumeName = "VOLUME"
 	snapsDir   = "snaps"
 	// snapNamesDir holds one name record per snapshot name: the request and
-	// the attempt that own the name (W5 ruling, 2026-11-15 17:30Z).
+	// the attempt that own the name (W5).
 	snapNamesDir = "snapnames"
 	kindSnapName = "chunksnapname"
 
@@ -542,7 +542,7 @@ func (c *Catalog) EnsureVolume(ctx context.Context, vol string, g Geometry) (Vol
 // A snapshot name is owned by a name record snapnames/<name> {request,
 // attempt}, created exclusively; the snapshot itself is published by an
 // exclusive create at the attempt's own path snaps/<name>/<attempt>, which
-// is never removed (W5 ruling, 2026-11-15 17:30Z). A GC sweep settles a
+// is never removed (W5). A GC sweep settles a
 // dead attempt by claiming its path with an aborted tombstone; a retry of
 // the same request publishes to the same attempt path. DeleteSnapshot
 // marks the attempt deleting and removes the name record, freeing the name.
@@ -699,8 +699,8 @@ func (c *Catalog) abortedSnapEntry(vol, name, attempt string) (*filerpb.Entry, e
 	}, nil
 }
 
-// AbortSnapshot settles a dead snapshot attempt for a GC sweep (W5 ruling,
-// 2026-11-15 17:30Z): it claims the attempt path snaps/<name>/<attempt>
+// AbortSnapshot settles a dead snapshot attempt for a GC sweep (W5): it
+// claims the attempt path snaps/<name>/<attempt>
 // with an exclusive create of an aborted tombstone. claimed is true when
 // the path holds a tombstone (this one or an earlier one): the attempt can
 // never publish. false: the attempt published, and its keys are reachable
@@ -754,7 +754,7 @@ const (
 
 // publishCtx bounds a publishing create by the operation's deadline
 // (catalog clock), so the RPC cannot outlive the deadline its intent
-// records (W5 ruling, 2026-11-15 17:06Z).
+// records (W5).
 func (c *Catalog) publishCtx(ctx context.Context, deadline time.Time) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, deadline.Sub(c.now()))
 }
@@ -1049,7 +1049,7 @@ func (c *Catalog) ListSnapshots(ctx context.Context, vol string, opts ListOption
 	}
 }
 
-// DeleteSnapshot frees the name (spec §3.4, W5 ruling 2026-11-15 17:30Z):
+// DeleteSnapshot frees the name (spec §3.4, W5):
 // it marks the attempt deleting (or, when the attempt never published,
 // claims its path with an aborted tombstone so a late insert cannot land),
 // then removes the name record. The attempt path is never removed. It
@@ -1084,7 +1084,7 @@ func (c *Catalog) DeleteSnapshot(ctx context.Context, vol, name string) (string,
 			continue // re-read: the path now holds a tombstone or the late snapshot
 		case ref.info.State == SnapActive:
 			// The one mark path shared with retention: a live fork claim
-			// refuses (claude05's ruling, 23:58Z).
+			// refuses.
 			m, live, _, err := c.markDeleting(ctx, vol, name, ref.rec.Attempt)
 			if err != nil {
 				return "", err
@@ -1427,8 +1427,8 @@ func (c *Catalog) removeForkClaim(ctx context.Context, req ForkRequest, attempt 
 	return false, remoteErr(nil, "claim of %s on %s/%s kept changing", req.Target, req.Source, req.Snapshot)
 }
 
-// AbortFork settles a dead fork for a GC sweep (W5 ruling, 2026-11-15
-// 17:30Z): it claims the target's HEAD, the fork's publishing entry, with
+// AbortFork settles a dead fork for a GC sweep (W5): it claims the
+// target's HEAD, the fork's publishing entry, with
 // an exclusive create of an aborted HEAD tombstone. claimed is true when
 // HEAD is a tombstone (this one or an earlier one): the fork can never
 // publish, and the target never attaches. false: the fork published, and

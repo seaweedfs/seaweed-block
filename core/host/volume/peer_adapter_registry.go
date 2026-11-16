@@ -13,7 +13,7 @@ import (
 // tracks the primary's OWN slot; the registry tracks each PEER. They
 // are independent ReplicaState instances.
 //
-// G5-5C Batch #7 rationale (architect ruling 2026-04-27): without
+// G5-5C Batch #7 rationale: without
 // per-peer adapter state, engine.checkReplicaID drops probe results
 // for peer X as wrong_replica because the host's single adapter
 // tracks Identity.ReplicaID = primary's-own-slot. This registry fixes

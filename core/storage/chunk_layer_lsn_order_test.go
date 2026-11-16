@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// HEAD's remote_lsn never decreases (B9 W2 appendix, 2026-11-15 14:30Z): a
+// HEAD's remote_lsn never decreases (B9 W2 appendix): a
 // host whose log is behind HEAD (a fresh or migrated host before W4b carries
 // LSN continuity) cannot cut or detach; nothing is uploaded and no CAS is
 // sent. Once its log continues from HEAD's remote_lsn, it cuts.

@@ -15,7 +15,7 @@ import (
 )
 
 // Volume delete against a real SeaweedFS (CHUNKSTORE_WEED), with a real GC
-// (claude05's acceptance, 2026-11-16 02:39Z): fork w2 from S1, delete w2,
+// (the acceptance case): fork w2 from S1, delete w2,
 // then DeleteSnapshot S1 succeeds and GC reclaims exactly the chunks only
 // w2 and S1 reach, while w1 (HEAD, S2) stays intact; deleting an attached
 // volume is refused; a deleted id cannot be recreated.

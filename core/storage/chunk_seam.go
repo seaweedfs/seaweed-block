@@ -202,8 +202,8 @@ type chunkDetachedBy struct {
 
 // chunkHeadIsDetached reports whether h is a detached HEAD.
 // chunkHeadAborted marks a fork target's HEAD tombstone: a GC sweep claimed
-// the HEAD of a dead fork so its late create can never land (W5 ruling,
-// 2026-11-15 17:30Z). Such a volume never attaches.
+// the HEAD of a dead fork so its late create can never land (W5). Such a
+// volume never attaches.
 const chunkHeadAborted = "aborted"
 
 // chunkHeadDeleting marks a volume a delete has admitted (chunks kept, so
@@ -265,8 +265,8 @@ type chunkIntent struct {
 	CreatedNs  int64 // assigned by PutIntent
 	// DeadlineNs (unix ns) is a copy intent's publication deadline, kept as
 	// metadata: a GC sweep settles a dead copy attempt by claiming its
-	// publishing entry with a tombstone, never by the deadline alone (W5
-	// ruling, 2026-11-15 17:30Z). 0 for capture intents.
+	// publishing entry with a tombstone, never by the deadline alone (W5).
+	// 0 for capture intents.
 	DeadlineNs int64
 }
 
@@ -499,8 +499,8 @@ var (
 	errChunkBaseInstalling    = errors.New("storage: chunk BASE install in progress")
 	errChunkRemoteUnavailable = errors.New("storage: chunk remote unavailable")
 	// errChunkLSNBehind: this host's log has not reached the HEAD's
-	// remote_lsn, so a cut would move remote_lsn backwards (B9 W2 appendix,
-	// 2026-11-15 14:30Z; LSN continuity across hosts is W4b's).
+	// remote_lsn, so a cut would move remote_lsn backwards (B9 W2 appendix;
+	// LSN continuity across hosts is W4b's).
 	errChunkLSNBehind = errors.New("storage: cut LSN is behind the HEAD's remote_lsn")
 	// errChunkReconciling: the layer is still reconciling its dirty set
 	// against HEAD (bitmap lost or mismatched, or a BASE install just

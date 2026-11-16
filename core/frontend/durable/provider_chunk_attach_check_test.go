@@ -1,6 +1,6 @@
 package durable_test
 
-// The attach-time check (B9 W2 §4.2, ruling 2026-11-15): one provider hook
+// The attach-time check (B9 W2 §4.2): one provider hook
 // that runs before the chunk layer attaches, ahead of any remote read or
 // CAS, with the local geometry; its refusal stops the attach.
 

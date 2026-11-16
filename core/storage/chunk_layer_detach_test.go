@@ -7,7 +7,7 @@ import (
 
 // Detach publishes its final cut with State = detached and DetachedBy =
 // {holder, epoch, the generation that CAS installs} in that one CAS (HEAD
-// schema ruling, 2026-11-15). Afterwards the layer refuses every cut; a
+// schema). Afterwards the layer refuses every cut; a
 // repeated Detach returns the first result.
 func TestChunkDetach_OneCASPublishesDetachedFinalCut(t *testing.T) {
 	s, _ := newChunkTestStore(t)

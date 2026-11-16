@@ -167,8 +167,8 @@ func TestFork_IncompleteRetryBoundToOriginalImage(t *testing.T) {
 		t.Fatalf("request id reused for another snapshot: %v, want target_exists", err)
 	}
 
-	// The fork claims s1, so an explicit delete is refused (claude05's
-	// ruling, 2026-11-15 23:58Z). The image binding below still guards a
+	// The fork claims s1, so an explicit delete is refused. The image
+	// binding below still guards a
 	// fork made before claims existed: drop the claim as such a fork would
 	// never have written one.
 	if _, err := c.DeleteSnapshot(ctx, "v1", "s1"); CodeOf(err) != CodeSnapshotClaimed {

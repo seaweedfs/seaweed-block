@@ -8,8 +8,8 @@ import (
 )
 
 // A sweep settles a dead fork by claiming the target's HEAD, the fork's
-// publishing entry, with an aborted HEAD tombstone (W5 ruling, 2026-11-15
-// 17:30Z): the late HEAD insert fails, a retry is refused, and the volume
+// publishing entry, with an aborted HEAD tombstone (W5): the late HEAD
+// insert fails, a retry is refused, and the volume
 // never attaches.
 func TestFork_SweepTombstonesADeadFork(t *testing.T) {
 	f, _, c, h := catalogFixture(t)

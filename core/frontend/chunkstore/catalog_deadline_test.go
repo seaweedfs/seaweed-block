@@ -8,8 +8,8 @@ import (
 )
 
 // A snapshot or fork copy intent records its publication deadline, and the
-// publishing create runs under a context bounded by that deadline (W5
-// ruling, 2026-11-15 17:06Z). Since 17:30Z the deadline is metadata only:
+// publishing create runs under a context bounded by that deadline (W5).
+// The deadline is now metadata only:
 // a sweep settles a dead attempt by a tombstone claim (catalog_tombstone).
 
 func TestCatalog_CopyIntentRecordsItsDeadline(t *testing.T) {

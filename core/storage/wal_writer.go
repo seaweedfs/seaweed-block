@@ -32,8 +32,8 @@ type walWriter struct {
 	logicalHead uint64 // monotonic write position
 	logicalTail uint64 // monotonic flush position
 	// durableTail is the tail in the last fsynced superblock. The writer
-	// overwrites only bytes released by it (claude05's S3 ruling,
-	// 2026-11-16): bytes the on-disk superblock still declares retained
+	// overwrites only bytes released by it: bytes the on-disk superblock
+	// still declares retained
 	// are never reused, so a torn new record cannot land inside the
 	// persisted [tail, head) and hide a record recovery needs.
 	// durablePending: the bounds were rebuilt by recovery and are not yet

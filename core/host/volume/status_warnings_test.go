@@ -17,7 +17,7 @@ func TestStatusServer_StatusCarriesRecoveryWarningsWithoutChangingHealth(t *test
 		statusWarningsCase(t, NewAdapterProjectionView(stubProjector{}, "v1", "r1", nil), false)
 	})
 	t.Run("healthy primary", func(t *testing.T) {
-		// codex01's advisory: a healthy primary stays healthy with a warning.
+		// A healthy primary stays healthy with a warning.
 		p := stubProjector{p: engine.ReplicaProjection{Mode: engine.ModeHealthy, Epoch: 1, EndpointVersion: 1}}
 		statusWarningsCase(t, NewAdapterProjectionView(p, "v1", "r1", stubProbe{yes: false}), true)
 	})

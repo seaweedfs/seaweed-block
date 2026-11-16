@@ -304,7 +304,7 @@ func TestT4a6_BestEffort_DisconnectThenReassign(t *testing.T) {
 		"all written entries through reassign, OR (b) wiring the test to " +
 		"observe the engine's rebuild-on-recycled-WAL path. Both are out " +
 		"of slice-2B scope; tracked in §11.9 follow-ups.")
-	// §6.3 collapse + Path B (architect ruling 2026-04-30):
+	// §6.3 collapse + Path B:
 	//
 	// Pre-§6.3 this test asserted that a peer degraded mid-stream +
 	// reassign-to-fresh-replica does NOT silently catch up the
