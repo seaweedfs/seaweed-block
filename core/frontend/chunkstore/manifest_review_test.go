@@ -96,6 +96,17 @@ func TestManifest_UsageCountsOwnedClippedChunksAndForkHolders(t *testing.T) {
 	if u.LiveChunks != 2 || u.LiveBytes != 40960 || len(u.Snapshots) != 1 || u.Snapshots[0].Chunks != 2 || u.Snapshots[0].ExclusiveBytes != 0 {
 		t.Fatalf("segmented clipped usage: %+v", u)
 	}
+	segmentBytes := uint64(0)
+	for _, ref := range h.Segments {
+		body, e := r.Get(ctx, ref.Key)
+		if e != nil {
+			t.Fatal(e)
+		}
+		segmentBytes += uint64(len(body))
+	}
+	if u.ManifestBindings != 1 || u.ManifestBytes != segmentBytes || u.StoredBytes != 40960+segmentBytes || u.StoredUpperBound {
+		t.Fatalf("manifest bytes must not be charged as a full data chunk: %+v", u)
+	}
 	if _, err = c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s", Target: "v2", RequestID: "fork"}); err != nil {
 		t.Fatal(err)
 	}

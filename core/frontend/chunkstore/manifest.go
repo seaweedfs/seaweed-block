@@ -133,7 +133,7 @@ func (r *ChunkRemote) PrepareManifest(ctx context.Context, base, next storage.Ch
 	}
 	ids := []string{id}
 	for _, u := range uploads {
-		if err := r.Put(ctx, u.key, u.data); err != nil {
+		if err := r.putObject(ctx, u.key, u.data, "segment"); err != nil {
 			return next, ids, err
 		}
 	}

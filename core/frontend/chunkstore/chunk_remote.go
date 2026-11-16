@@ -146,6 +146,10 @@ func (r *ChunkRemote) keyLocation(key string) (dir, name string, err error) {
 // create. A key that is already bound fails with storage.ErrChunkKeyExists
 // and its bytes are untouched.
 func (r *ChunkRemote) Put(ctx context.Context, key string, data []byte) error {
+	return r.putObject(ctx, key, data, "")
+}
+
+func (r *ChunkRemote) putObject(ctx context.Context, key string, data []byte, object string) error {
 	if err := storage.ValidChunkKey(key); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidKey, err)
 	}
@@ -171,6 +175,10 @@ func (r *ChunkRemote) Put(ctx context.Context, key string, data []byte) error {
 		Name:       name,
 		Attributes: &filerpb.FuseAttributes{Mtime: now, Crtime: now, FileMode: 0o644},
 		Extended:   map[string][]byte{extKind: []byte(kindChunkKey), extFid: []byte(fid)},
+	}
+	if object == "segment" {
+		e.Extended["swb.object"] = []byte("segment")
+		e.Attributes.FileSize = uint64(len(data))
 	}
 	if err := r.f.CreateEntry(ctx, r.keyDir(), e, true); err != nil {
 		if errors.Is(err, ErrExists) {

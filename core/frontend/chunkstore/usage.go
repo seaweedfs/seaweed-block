@@ -53,6 +53,8 @@ type VolumeUsage struct {
 	LiveChunks       int             `json:"liveChunks"`
 	LiveBytes        uint64          `json:"liveBytes"`
 	Snapshots        []SnapshotUsage `json:"snapshots"`
+	ManifestBindings int             `json:"manifestBindings"`
+	ManifestBytes    uint64          `json:"manifestBytes"`
 	StoredBindings   int             `json:"storedBindings"`
 	StoredBytes      uint64          `json:"storedBytes"`
 	StoredUpperBound bool            `json:"storedUpperBound"`
@@ -213,6 +215,16 @@ func (c *Catalog) Usage(ctx context.Context, vol string) (VolumeUsage, error) {
 				continue
 			}
 			u.StoredBindings++
+			if string(e.Extended["swb.object"]) == "segment" {
+				if e.Attributes == nil || e.Attributes.FileSize == 0 || e.Attributes.FileSize > maxManifestBytes {
+					return VolumeUsage{}, errors.New("chunkstore: invalid manifest binding size")
+				}
+				u.ManifestBindings++
+				u.ManifestBytes += e.Attributes.FileSize
+				u.StoredBytes += e.Attributes.FileSize
+				continue
+			}
+
 			if n, ok := size[chunkIdentity(vol, key)]; ok {
 				u.StoredBytes += n
 			} else {
