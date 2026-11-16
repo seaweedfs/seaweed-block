@@ -397,6 +397,9 @@ func (s *WALStore) persistCheckpointAndRelease(highestLSN, entryPhys, entryLen u
 func (s *WALStore) persistCheckpointReleasing(highestLSN, entryPhys, entryLen uint64, release bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.stickyIOFault(); err != nil {
+		return err // no checkpoint advance after a fault, whenever it latched
+	}
 	requested := highestLSN
 	// Clamp the proposed checkpoint to the recycle floor reported
 	// by an external coordinator (e.g., the recovery package's
@@ -650,6 +653,12 @@ func (s *WALStore) Write(lba uint32, data []byte) (uint64, error) {
 		s.mu.Unlock()
 		return 0, errors.New("storage: Write after Close")
 	}
+	// Recheck under the append lock: an append that failed while this call
+	// waited latched the fault and left nextLSN and the head unmoved.
+	if err := s.stickyIOFault(); err != nil {
+		s.mu.Unlock()
+		return 0, err
+	}
 	lsn := s.nextLSN
 
 	entry := &walEntry{
@@ -719,6 +728,10 @@ func (s *WALStore) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error
 	if s.closed {
 		s.mu.Unlock()
 		return nil, errors.New("storage: WriteBatch after Close")
+	}
+	if err := s.stickyIOFault(); err != nil { // recheck under the append lock
+		s.mu.Unlock()
+		return nil, err
 	}
 	firstLSN := s.nextLSN
 	useMultiBlock := s.multiBlockRecords && len(blocks) > 1
@@ -979,6 +992,12 @@ func (s *WALStore) Sync() (uint64, error) {
 	s.syncs.Add(1)
 
 	s.mu.Lock()
+	// A fault latched while this Sync waited (another caller's fsync or
+	// append, or a flusher fsync) refuses it: nothing is acknowledged.
+	if err := s.stickyIOFault(); err != nil {
+		s.mu.Unlock()
+		return 0, err
+	}
 	if targetDirectFrontier > s.checkpointLSN && targetDirectFrontier <= targetHead {
 		if s.metadata != nil {
 			if err := s.metadata.BeforeCheckpointAdvance(targetDirectFrontier); err != nil {
@@ -1214,6 +1233,9 @@ func (s *WALStore) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
 	if s.closed {
 		return errors.New("storage: ApplyEntry after Close")
 	}
+	if err := s.stickyIOFault(); err != nil { // recheck under the append lock
+		return err
+	}
 	dataCopy := make([]byte, len(data))
 	copy(dataCopy, data)
 	entry := &walEntry{
@@ -1413,6 +1435,11 @@ func (s *WALStore) walSyncCovered() bool {
 // Requests queued during a sync can reuse it only if their mutations predate its
 // captured cut. Failure leaves the previous durable generation unchanged.
 func (s *WALStore) syncWALBatch() error {
+	// A batch queued behind a failed fsync must not fsync again (or report
+	// a covered cut as durable): the failed fsync may have dropped pages.
+	if err := s.stickyIOFault(); err != nil {
+		return err
+	}
 	cut := s.walMutation.Load()
 	if !s.bypassSyncDedup.Load() && s.chunk.Load() == nil && cut <= s.durableMutation.Load() {
 		return nil
