@@ -2,6 +2,7 @@ package ublk
 
 import (
 	"context"
+	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"sync/atomic"
 	"syscall"
 )
@@ -91,7 +92,19 @@ func (c *counters) count(r request) {
 // handle serves one request against buf (len >= nrSectors<<9 for reads
 // and writes) and returns the ublk result: bytes transferred, 0 for a
 // flush, or a negative errno.
-func (h handler) handle(ctx context.Context, r request, buf []byte) int32 {
+func (h handler) handle(ctx context.Context, r request, buf []byte) (result int32) {
+	kind := ""
+	if r.op == ioOpFlush {
+		kind = "flush"
+	} else if r.op == ioOpWrite {
+		kind = "write"
+		if r.flags&ioFlagFUA != 0 {
+			kind = "fua"
+		}
+	}
+	ctx, trace := frontend.BeginDurabilityRequest(ctx, h.backend, kind)
+	defer func() { trace.Finish(result < 0) }()
+
 	h.stats.count(r)
 	res := h.serve(ctx, r, buf)
 	if res < 0 && h.stats != nil {

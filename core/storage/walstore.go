@@ -3,6 +3,7 @@ package storage
 import (
 	"errors"
 	"fmt"
+	"github.com/seaweedfs/seaweed-block/core/iolatency"
 	"os"
 	"path/filepath"
 	"sync"
@@ -43,7 +44,8 @@ import (
 //   - Online resize
 //   - Compaction (the WAL is bounded but periodic checkpoints free space)
 type WALStore struct {
-	metadata BlockMetadata // immutable before publication
+	fileSyncLatency iolatency.Histogram
+	metadata        BlockMetadata // immutable before publication
 
 	path                       string
 	fd                         *os.File
@@ -261,6 +263,8 @@ func openInitializedWithMetadata(path string, f *os.File, sb *superblock, metada
 	s.walMutation.Store(1)
 	s.syncWALFile = func() error {
 		s.walSyncCalls.Add(1)
+		start := time.Now()
+		defer func() { s.fileSyncLatency.Observe(time.Since(start)) }()
 		return f.Sync()
 	}
 	committer := NewGroupCommitter(GroupCommitterConfig{

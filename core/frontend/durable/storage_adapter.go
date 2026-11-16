@@ -48,6 +48,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/iolatency"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -275,7 +276,7 @@ func (b *StorageBackend) durableStatus(volumeID, path, impl string) VolumeStatus
 	b.mu.Unlock()
 	durableLSN, retainedLSN, headLSN := b.storage.Boundaries()
 	evidence, _ := b.opEvidence.Load().(string)
-	writeProfile := b.profile.snapshot()
+	writeProfile := b.WriteProfile()
 	if instrumented, ok := b.storage.(storage.WriteInstrumented); ok {
 		storageProfile := instrumented.WriteInstrumentation()
 		writeProfile.WALCopyOps = storageProfile.WALCopyOps
@@ -404,7 +405,14 @@ func (b *StorageBackend) SetWriteAckPolicy(policy WriteAckPolicy) {
 // cumulative write counters. It does not enable instrumentation or alter the
 // write path.
 func (b *StorageBackend) WriteProfile() WriteProfileStatus {
-	return b.profile.snapshot()
+	s := b.profile.snapshot()
+	if source, ok := b.storage.(interface {
+		DurabilityLatency() storage.DurabilityLatencyStatus
+	}); ok {
+		v := source.DurabilityLatency()
+		s.DurabilityLatency.WAL = &v
+	}
+	return s
 }
 
 // SetOperational flips the readiness gate. evidence is surfaced
@@ -463,6 +471,10 @@ func (b *StorageBackend) StopIO(ctx context.Context, evidence string) error {
 // BackendClosed, non-operational → ErrNotReady, lineage drift →
 // ErrStalePrimary.
 func (b *StorageBackend) Sync(ctx context.Context) error {
+	iolatency.BackendEnter(ctx)
+	defer iolatency.BackendExit(ctx)
+	latencyStart := time.Now()
+	defer func() { b.profile.syncLatency.Observe(time.Since(latencyStart)) }()
 	release, err := b.admit()
 	if err != nil {
 		return err
@@ -521,6 +533,8 @@ func (b *StorageBackend) Read(ctx context.Context, offset int64, p []byte) (int,
 // overlay the partial range, write the full block back.
 // Every write is gated.
 func (b *StorageBackend) Write(ctx context.Context, offset int64, p []byte) (int, error) {
+	iolatency.BackendEnter(ctx)
+	defer iolatency.BackendExit(ctx)
 	release, err := b.admit()
 	if err != nil {
 		log.Printf("durable: StorageBackend.Write gate-rejected offset=%d: %v", offset, err)
@@ -537,6 +551,10 @@ func (b *StorageBackend) Write(ctx context.Context, offset int64, p []byte) (int
 		b.profile.recordBackendWrite(n, time.Since(start))
 	}
 	return n, err
+}
+
+func (b *StorageBackend) BeginDurabilityRequest(ctx context.Context, kind string) (context.Context, *iolatency.Request) {
+	return b.profile.requests.Begin(ctx, kind)
 }
 
 // RecordTargetWrite records a successful frontend-target write that reached

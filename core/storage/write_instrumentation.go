@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"github.com/seaweedfs/seaweed-block/core/iolatency"
 	"sync/atomic"
 	"time"
 )
@@ -40,6 +41,7 @@ type WriteInstrumented interface {
 }
 
 type writeInstrumentation struct {
+	appendLatency               iolatency.Histogram
 	walCopyOps                  atomic.Uint64
 	walCopyBytes                atomic.Uint64
 	walCopyDurationNanos        atomic.Uint64
@@ -100,6 +102,9 @@ func (i *writeInstrumentation) recordWALChecksum(bytes int, d time.Duration) {
 }
 
 func (i *writeInstrumentation) recordWALAppend(bytes int, d time.Duration) {
+	if i != nil {
+		i.appendLatency.Observe(d)
+	}
 	if i == nil || bytes <= 0 {
 		return
 	}
