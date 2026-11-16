@@ -149,7 +149,12 @@ stateDiagram-v2
 
 ## 1.3 smartwal: in-place writes plus a metadata ring
 
-**Status: experimental.** It shows that `LogicalStorage` admits more than one implementation. It does not support the chunk layer, so it has no snapshots, forks or host moves.
+**Status: experimental.** It shows that `LogicalStorage` admits more than one implementation. It is not a default: `blockvolume --durable-impl` defaults to auto, which creates new volumes as walstore and opens an existing volume with its on-disk format, so smartwal is used only when chosen explicitly or found on disk. Open issues:
+
+- in-place overwrites have no rollback on a torn write (see the crash window in Open items);
+- a block loses its per-block CRC once its ring record recycles;
+- the handling of a corrupted committed record is still open;
+- it does not support the chunk layer, so it has no snapshots, forks or host moves.
 
 **Layout.** A 4 KB header, a ring of 32-byte records, and the extent (`core/storage/smartwal/store.go`). A record holds magic, flags, LBA, LSN, the CRC32 of the 4 KB data block, and a record CRC (`core/storage/smartwal/record.go`). Slot = LSN mod capacity (`ring.go` `appendAt`).
 
@@ -525,7 +530,7 @@ These are tracked for fixes. Most were raised by an independent review of this r
 - **fsync latency (about 7 ms against 3 ms local).** Leads to measure with the `/status/durable` histograms:
   - the group committer waits a full 1 ms unless 64 waiters are queued, so at queue depth 1 every `fsync` pays at least 1 ms;
   - the checkpoint superblock `fsync` runs under the exclusive store lock, stalling reads and writes each flush cycle.
-- **smartwal crash window.** A crash between the in-place write and the ring append can leave the volume unopenable (§1.3). The standalone `blockvolume` default engine is still `smartwal`; Kubernetes and workspaces use walstore. **Planned:** change the default and fix the ordering.
+- **smartwal crash window.** A crash between the in-place write and the ring append can leave the volume unopenable (§1.3). smartwal is experimental and not a default: standalone `blockvolume` creates new volumes as walstore (auto), and Kubernetes and workspaces use walstore. **Planned:** fix the ordering.
 - **Forged records in user data.** WAL records are not bound to a store incarnation or lap, so bytes inside user data that happen to decode as a valid record could be replayed by the defensive scan. **Planned:** an incarnation nonce and lap in the next format, plus a clean-shutdown marker in the meantime.
 - **Mid-history WAL corruption only warns** (§1.2 step 2). Fixing it needs the synced watermark in the next format.
 - **No authentication** on the control plane, the replication channel or the filer client. Frontends bind to loopback by default. **Planned:** mTLS and role checks for destructive operations.
