@@ -32,13 +32,17 @@ func TestWorkspaceSkewSeparatesOldServingFromForcedGrant(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer store.Close()
-			if err := store.Put(authority.DurableRecord{VolumeID: "v", ReplicaID: "r", Epoch: 1, EndpointVersion: 1, DataAddr: "d", CtrlAddr: "c", WriteSeq: 1}); err != nil {
-				t.Fatal(err)
-			}
+			t.Cleanup(func() {
+				if err := store.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+
 			start := time.Now()
 			masterNow, hostNow := start, start
-			p := authority.NewPublisher(nil, authority.WithStore(store), authority.WithWorkspaceLeaseConfig(3*time.Second, func() time.Time { return masterNow }))
+			dir := &skewDirective{asks: make(chan authority.AssignmentAsk, 1)}
+			p := authority.NewPublisher(dir, authority.WithStore(store), authority.WithWorkspaceLeaseConfig(3*time.Second, func() time.Time { return masterNow }))
+			seedSkewPublisher(t, p, dir)
 			g, err := volume.NewWorkspaceLeaseGuard(workspaceRPCView{frontend.Projection{VolumeID: "v", ReplicaID: "r", Epoch: 1, Healthy: true}}, skewLeaseClient{p}, &control.WorkspaceIdentity{VolumeId: "v", ReplicaId: "r", Epoch: 1}, func(context.Context) (uint64, error) { return 7, nil }, func() time.Time { return hostNow })
 			if err != nil {
 				t.Fatal(err)
@@ -80,32 +84,62 @@ func TestWorkspaceSkewSeparatesOldServingFromForcedGrant(t *testing.T) {
 	}
 }
 
+type skewDirective struct{ asks chan authority.AssignmentAsk }
+
+func (d *skewDirective) Next(ctx context.Context) (authority.AssignmentAsk, error) {
+	select {
+	case a := <-d.asks:
+		return a, nil
+	case <-ctx.Done():
+		return authority.AssignmentAsk{}, ctx.Err()
+	}
+}
+func seedSkewPublisher(t *testing.T, p *authority.Publisher, d *skewDirective) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- p.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Error("publisher unsettled")
+		}
+	})
+	ch, unsub := p.Subscribe("v", "r")
+	defer unsub()
+	d.asks <- authority.AssignmentAsk{VolumeID: "v", ReplicaID: "r", DataAddr: "d", CtrlAddr: "c", Intent: authority.IntentBind}
+	select {
+	case info := <-ch:
+		if info.Epoch != 1 {
+			t.Fatal(info)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("initial authority not published")
+	}
+}
+
 func TestWorkspaceClockSkewConfigReachesLeaseReply(t *testing.T) {
-	dir := t.TempDir()
-	store, err := authority.NewFileAuthorityStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Put(authority.DurableRecord{VolumeID: "v", ReplicaID: "r", Epoch: 1, EndpointVersion: 1, DataAddr: "d", CtrlAddr: "c", WriteSeq: 1}); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	h, err := New(Config{AuthorityStoreDir: dir, LifecycleStoreDir: t.TempDir(), Listen: "127.0.0.1:0", WorkspaceRPC: true, WorkspaceMaxClockSkew: 4 * time.Second, WorkspaceHeadReader: func(context.Context, string) (authority.WorkspaceHead, error) { return authority.WorkspaceHead{}, nil }})
+	h, err := New(Config{AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), Listen: "127.0.0.1:0", WorkspaceRPC: true, WorkspaceMaxClockSkew: 4 * time.Second, WorkspaceHeadReader: func(context.Context, string) (authority.WorkspaceHead, error) { return authority.WorkspaceHead{}, nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
 	h.Start()
 	defer closeTestMaster(t, h)
-	if _, err := h.Lifecycle().Volumes.CreateVolume(lifecycle.VolumeSpec{VolumeID: "v", SizeBytes: 1 << 20, ReplicationFactor: 1}); err != nil {
+	if _, err := h.Lifecycle().Volumes.CreateVolume(lifecycle.VolumeSpec{VolumeID: "vol-a", SizeBytes: 1 << 20, ReplicationFactor: 1}); err != nil {
 		t.Fatal(err)
 	}
-	reply, err := (&services{host: h}).RenewWorkspaceLease(context.Background(), &control.WorkspaceIdentity{VolumeId: "v", ReplicaId: "r", Epoch: 1})
+	seedVerifiedExistingReplicaPlacement(t, h)
+	if _, err := h.RunLifecycleProductTick(); err != nil {
+		t.Fatal(err)
+	}
+	line := waitAuthorityLine(t, h.Publisher(), "vol-a")
+	reply, err := (&services{host: h}).RenewWorkspaceLease(context.Background(), &control.WorkspaceIdentity{VolumeId: "vol-a", ReplicaId: line.ReplicaID, Epoch: line.Epoch})
 	if err != nil {
 		t.Fatal(err)
 	}
-	lease := h.Publisher().WorkspaceState("v").Lease
+	lease := h.Publisher().WorkspaceState("vol-a").Lease
 	if lease.MaxClockSkewNS != int64(4*time.Second) || reply.ValidForNs <= 0 || reply.ValidForNs > int64(28*time.Second) {
 		t.Fatal("configuration not applied to host validity", lease, reply)
 	}
