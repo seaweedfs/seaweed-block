@@ -130,6 +130,23 @@ func (s *ObservationStore) SlotFact(volumeID, replicaID string) (SlotFact, bool)
 	return best, found
 }
 
+// SlotFactOnServer never substitutes a same-replica claim from another host.
+func (s *ObservationStore) SlotFactOnServer(serverID, volumeID, replicaID string) (SlotFact, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	obs, ok := s.observations[serverID]
+	now := s.now()
+	if !ok || (!obs.ExpiresAt.IsZero() && now.After(obs.ExpiresAt)) {
+		return SlotFact{}, false
+	}
+	for _, slot := range obs.Slots {
+		if slot.VolumeID == volumeID && slot.ReplicaID == replicaID && !slotExpired(slot, obs, now) && slot.DataAddr != "" && slot.CtrlAddr != "" {
+			return cloneSlot(slot), true
+		}
+	}
+	return SlotFact{}, false
+}
+
 // ReplicaIDsForVolume returns fresh, usable replica IDs currently
 // observed for a volume. It is a read-only evidence helper for
 // dynamic-lifecycle status surfaces; callers that own a static

@@ -730,6 +730,7 @@ func TestG15c_ProductLoopReconcilesCreatedVolumeBeforePublishing(t *testing.T) {
 }
 
 func seedVerifiedExistingReplicaPlacement(t *testing.T, h *Host) {
+	ensureProductVolume(t, h, "vol-a", 1)
 	t.Helper()
 	stores := h.Lifecycle()
 	if _, err := stores.Placements.ApplyPlan(lifecycle.PlacementPlan{
@@ -774,6 +775,7 @@ func seedRF2PlacementFor(t *testing.T, h *Host, volumeID string) {
 }
 
 func seedRF2PlacementForServers(t *testing.T, h *Host, volumeID, r1ServerID, r2ServerID string) {
+	ensureProductVolume(t, h, volumeID, 2)
 	t.Helper()
 	stores := h.Lifecycle()
 	if _, err := stores.Placements.ApplyPlan(lifecycle.PlacementPlan{
@@ -855,6 +857,7 @@ func ingestRF2ObservationForServers(t *testing.T, h *Host, volumeID, r1ServerID,
 }
 
 func seedRF3PlacementForServers(t *testing.T, h *Host, volumeID, r1ServerID, r2ServerID, r3ServerID string) {
+	ensureProductVolume(t, h, volumeID, 3)
 	t.Helper()
 	stores := h.Lifecycle()
 	if _, err := stores.Placements.ApplyPlan(lifecycle.PlacementPlan{
@@ -871,6 +874,7 @@ func seedRF3PlacementForServers(t *testing.T, h *Host, volumeID, r1ServerID, r2S
 }
 
 func seedRF3PlacementForServersWithAddrs(t *testing.T, h *Host, volumeID, r1ServerID, r2ServerID, r3ServerID string) {
+	ensureProductVolume(t, h, volumeID, 3)
 	t.Helper()
 	stores := h.Lifecycle()
 	if _, err := stores.Placements.ApplyPlan(lifecycle.PlacementPlan{
@@ -992,5 +996,17 @@ func recvAssignmentInfo(t *testing.T, ch <-chan adapter.AssignmentInfo) adapter.
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for assignment")
 		return adapter.AssignmentInfo{}
+	}
+}
+
+// Placement fixtures represent live lifecycle volumes, just as production
+// CreateVolume/ReconcilePlacement do before asking Publisher to mint authority.
+func ensureProductVolume(t *testing.T, h *Host, volume string, rf int) {
+	t.Helper()
+	if _, ok := h.Lifecycle().Volumes.GetVolume(volume); ok {
+		return
+	}
+	if _, err := h.Lifecycle().Volumes.CreateVolume(lifecycle.VolumeSpec{VolumeID: volume, SizeBytes: 1 << 20, ReplicationFactor: rf}); err != nil {
+		t.Fatal(err)
 	}
 }

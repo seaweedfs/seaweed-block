@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/authority"
+	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -76,11 +77,16 @@ func (s *services) RevokeWorkspace(ctx context.Context, q *control.WorkspaceIden
 }
 
 func (s *services) AckWorkspaceRevoked(ctx context.Context, q *control.WorkspaceRevocationAck) (*control.WorkspaceEmpty, error) {
+	s.host.workspaceMu.Lock()
+	defer s.host.workspaceMu.Unlock()
 	id := q.GetIdentity()
 	if err := s.workspaceVolume(id.GetVolumeId()); err != nil {
 		return nil, err
 	}
 	if err := s.host.Publisher().AckWorkspaceRevocation(ctx, id.GetVolumeId(), authority.WorkspaceRevokeAck{ReplicaID: id.GetReplicaId(), Epoch: id.GetEpoch(), HeadGen: q.GetHeadGen()}); err != nil {
+		return nil, workspaceError(err)
+	}
+	if err := s.host.reconcileWorkspaceBindings(); err != nil {
 		return nil, workspaceError(err)
 	}
 	return &control.WorkspaceEmpty{}, nil
@@ -95,27 +101,6 @@ func (s *services) MoveWorkspace(ctx context.Context, q *control.WorkspaceMove) 
 	if err := s.workspaceVolume(q.GetVolumeId()); err != nil {
 		return nil, err
 	}
-	oldHost := ""
-	if state := s.host.Publisher().WorkspaceState(q.GetVolumeId()); state != nil {
-		for _, r := range state.Moves {
-			if r.Issued && r.NewReplicaID == q.GetExpectedReplicaId() && r.NewEpoch == q.GetExpectedEpoch() {
-				oldHost = r.NewHost
-			}
-		}
-	}
-	if oldHost == "" {
-		if placement, ok := s.host.lifecycle.Placements.GetPlacement(q.GetVolumeId()); ok {
-			for _, slot := range placement.Slots {
-				if slot.ReplicaID == q.GetExpectedReplicaId() {
-					oldHost = slot.ServerID
-				}
-			}
-		}
-	}
-	target, ok := s.host.lifecycle.Nodes.GetNode(q.GetTargetServerId())
-	if oldHost == "" || !ok || target.ServerID == oldHost || target.DataAddr != q.GetTargetDataAddr() || target.CtrlAddr != q.GetTargetCtrlAddr() {
-		return nil, status.Error(codes.FailedPrecondition, "move needs known source slot and registered target endpoints")
-	}
 	// Always bound the configured reader, even when the caller omitted a deadline.
 	readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -123,19 +108,59 @@ func (s *services) MoveWorkspace(ctx context.Context, q *control.WorkspaceMove) 
 	if err != nil {
 		return nil, workspaceError(err)
 	}
+	// Remote reads never hold the workspace mutation lock. Re-read every
+	// local precondition below; Publisher checks the expected epoch atomically.
+	s.host.workspaceMu.Lock()
+	defer s.host.workspaceMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, workspaceError(err)
+	}
+	if err := s.workspaceVolume(q.GetVolumeId()); err != nil {
+		return nil, err
+	}
+	oldHost := s.host.workspaceSourceHost(q.GetVolumeId(), q.GetExpectedReplicaId(), q.GetExpectedEpoch())
+	target, ok := s.host.lifecycle.Nodes.GetNode(q.GetTargetServerId())
+	bindings, explicit, err := s.host.lifecycle.WorkspaceBindings.Get(q.GetVolumeId())
+	if err != nil {
+		return nil, workspaceError(err)
+	}
+	matched := !explicit && target.DataAddr == q.GetTargetDataAddr() && target.CtrlAddr == q.GetTargetCtrlAddr()
+	for _, b := range bindings {
+		if !b.Retired && b.ServerID == q.GetTargetServerId() && b.DataAddr == q.GetTargetDataAddr() && b.CtrlAddr == q.GetTargetCtrlAddr() {
+			matched = true
+		}
+	}
+	if oldHost == "" || !ok || target.ServerID == oldHost || !matched {
+		return nil, status.Error(codes.FailedPrecondition, "move needs known source slot and registered target endpoints")
+	}
+	if err = s.host.workspaceEndpointsAvailable(lifecycle.WorkspaceBinding{VolumeID: q.GetVolumeId(), ServerID: target.ServerID, DataAddr: q.GetTargetDataAddr(), CtrlAddr: q.GetTargetCtrlAddr()}); err != nil {
+		return nil, workspaceError(err)
+	}
 	r, err := s.host.Publisher().MoveWorkspace(ctx, authority.WorkspaceMoveRequest{RequestID: q.GetRequestId(), VolumeID: q.GetVolumeId(), ExpectedReplicaID: q.GetExpectedReplicaId(), ExpectedHost: oldHost, TargetHost: target.ServerID,
 		ExpectedEpoch: q.GetExpectedEpoch(), TargetReplicaID: q.GetTargetReplicaId(), TargetDataAddr: q.GetTargetDataAddr(), TargetCtrlAddr: q.GetTargetCtrlAddr(), Kind: q.GetKind(), Force: q.GetForce()}, head)
 	if err != nil {
+		return nil, workspaceError(err)
+	}
+	if err = s.host.reconcileWorkspaceBindings(); err != nil {
 		return nil, workspaceError(err)
 	}
 	return grantFact(r), nil
 }
 
 func (s *services) QueryWorkspace(ctx context.Context, q *control.WorkspaceVolume) (*control.WorkspaceStatus, error) {
+	s.host.workspaceMu.Lock()
+	defer s.host.workspaceMu.Unlock()
 	if err := s.workspaceVolume(q.GetVolumeId()); err != nil {
 		return nil, err
 	}
 	out := &control.WorkspaceStatus{}
+	bindings, _, err := s.host.lifecycle.WorkspaceBindings.Get(q.GetVolumeId())
+	if err != nil {
+		return nil, workspaceError(err)
+	}
+	for _, b := range bindings {
+		out.Bindings = append(out.Bindings, bindingFact(b))
+	}
 	state := s.host.Publisher().WorkspaceState(q.GetVolumeId())
 	if state == nil {
 		return out, nil

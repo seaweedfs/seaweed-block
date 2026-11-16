@@ -4,8 +4,62 @@ The opt-in master surface is `WorkspaceService` in `workspace.proto`. Enable it
 with `blockmaster --workspace-rpc --workspace-head-base-url <filer directory URL>`
 and a lifecycle store. Other volumes continue using the existing assignment
 protocol. Workspace operations require an existing RF=1 volume. The target node
-must be registered with matching data/control endpoints; the source node comes
+must be registered; explicit volumes use their prepared per-volume endpoints,
+while volumes with no binding retain node-pair compatibility. The source comes
 from its placement or the previous issued move, not a caller's evidence flag.
+
+## Per-volume endpoint preparation and placement
+
+W6 allocates listener ports and calls `RegisterWorkspaceBinding` with volume,
+registered server ID, data address and control address before placement or move.
+The binding is a durable endpoint reservation, not authority or readiness.
+Registration is idempotent for the same pair; changing a live binding or taking
+another live volume's endpoint is refused. Prepared pairs also reserve their
+ports. Numeric IP/port spellings are normalized for collision checks without
+performing DNS lookup. Callers must use consistent DNS names for endpoints.
+
+`PlaceWorkspace {volume_id, server_id, replica_id}` records chosen-node intent
+for an existing, unassigned RF=1 volume with an active prepared binding. It does
+not create a volume or mint an epoch. Existing different placement intent is
+refused rather than silently replacing a queued plan. Observation and the
+existing controller/publisher path still establish the assignment. Repeated
+identical intent is allowed before assignment; assigned volumes use Move.
+
+Move validates the PREPARED target binding and leaves the source placement
+unchanged. Once a volume has any explicit binding, it never uses the legacy
+node-level pair, even if all its bindings are retired. CLEAN retires the source
+binding only after its durable clean ACK. FORCED retires it only after the new
+epoch is issued. Retirement carries the old epoch, making crash recovery and
+old-request replay harmless to a later re-prepared binding. Registration may
+reuse retired ports; a live target must be prepared again before another move.
+Volume deletion removes its binding marker and reservations only after a clean
+revocation ACK for current authority. Pending moves and queued unassigned explicit
+placement refuse deletion. Canceled queued deletes do not mutate state. Failed
+deletion can be retried. Retirement watermarks are retained even before the first
+explicit binding, without switching a legacy volume to explicit mode.
+
+Bindings are a file-synced, atomic snapshot with directory fsync. Opening the
+store also syncs its parent after directory creation, before admitting writes. Ambiguous
+publication errors fence binding reads/mutations until restart. Startup and
+registration reconcile retirement from persisted ACK/issued move records, so
+a crash between authority persistence and binding retirement is recoverable.
+`QueryWorkspace` returns the per-volume bindings including their retired state.
+
+Host workspace mutations serialize with `workspaceMu`. Remote HEAD reads and
+promotion probes run outside it; local intent, binding and reservation checks are
+repeated under the lock before queueing or committing their results. Ordinary
+Publisher mints also acquire that same host lock before checking the live volume,
+current binding owner/pair and reservations, and retain it through authority
+persistence/commit. The existing already-current product check is repeated for
+ordinary Reassign asks here, so a snapshot plus its direct promotion fallback
+cannot mint duplicate epochs after both were dequeued. Dequeued legacy asks therefore cannot bypass a later binding
+or publish after successful deletion. Hosts without lifecycle stores retain their
+static authority path. Guarded Move already holds this boundary and does not
+recursively acquire it.
+Lock order is host workspace mutex, then Publisher or lifecycle-store locks.
+Initial placement persists under a Publisher unassigned guard; its callback
+must never call Publisher. Store reads do not hold their mutex while calling
+Publisher. Lease renewal remains independent of the host workspace mutex.
 
 The RPCs grant/renew a lease, request revocation, record the old holder's ACK,
 request a move, and query persisted state. Leases bind volume, holder and epoch.

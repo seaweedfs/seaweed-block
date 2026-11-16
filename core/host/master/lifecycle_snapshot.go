@@ -41,6 +41,26 @@ func (h *Host) verifyPlacements(placements []lifecycle.PlacementIntent, nodes []
 	}
 	if obsStore != nil {
 		for _, placement := range placements {
+			bindings, bound, err := h.lifecycle.WorkspaceBindings.Get(placement.VolumeID)
+			if bound || err != nil {
+				out := lifecycle.VerifiedPlacement{VolumeID: placement.VolumeID, Reason: lifecycle.VerifyReasonMissingObservation}
+				if err == nil && len(placement.Slots) == 1 {
+					slot := placement.Slots[0]
+					for _, b := range bindings {
+						if b.Retired || b.ServerID != slot.ServerID || b.DataAddr != slot.DataAddr || b.CtrlAddr != slot.CtrlAddr {
+							continue
+						}
+						fact, ok := obsStore.SlotFactOnServer(b.ServerID, placement.VolumeID, slot.ReplicaID)
+						if ok && fact.DataAddr == b.DataAddr && fact.CtrlAddr == b.CtrlAddr {
+							out.Verified = true
+							out.Reason = lifecycle.VerifyReasonOK
+							out.Slots = []lifecycle.VerifiedPlacementSlot{{ServerID: b.ServerID, ReplicaID: slot.ReplicaID, Source: slot.Source, DataAddr: b.DataAddr, CtrlAddr: b.CtrlAddr, VerifiedBy: "bound_server_observation"}}
+						}
+					}
+				}
+				verified = append(verified, out)
+				continue
+			}
 			verified = append(verified, verifyPlacementWithObservationStore(placement, obsStore))
 		}
 		return verified

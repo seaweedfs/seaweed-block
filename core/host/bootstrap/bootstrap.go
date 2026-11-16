@@ -43,7 +43,8 @@ type DurableAuthorityBootstrap struct {
 
 // Options customizes durable-authority bootstrap wiring.
 type Options struct {
-	PublishObserver authority.PublishObserver
+	PublishObserver      authority.PublishObserver
+	PublicationAdmission authority.PublicationAdmission
 }
 
 // Bootstrap performs the durable-authority startup sequence and
@@ -116,6 +117,7 @@ func bootstrapFromStoreLocked(storeDir string, lock *authority.StoreLock, store 
 	if opts.PublishObserver != nil {
 		pubOpts = append(pubOpts, authority.WithPublishObserver(opts.PublishObserver))
 	}
+	pubOpts = append(pubOpts, authority.WithPublicationAdmission(opts.PublicationAdmission))
 	pub := authority.NewPublisher(directive, pubOpts...)
 
 	// Publisher's LoadErrors is the canonical source; prefer it

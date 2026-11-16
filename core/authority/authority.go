@@ -152,7 +152,8 @@ type Publisher struct {
 	// behaves as "never bound" until a new mint.
 	loadErrs []error
 
-	observer PublishObserver
+	observer             PublishObserver
+	publicationAdmission PublicationAdmission
 
 	// Workspace state is serialized with assignment minting under mu. Remote
 	// HEAD reads and subscriber delivery never run under this lock.
@@ -161,6 +162,15 @@ type Publisher struct {
 	workspaceNow           func() time.Time
 	workspaceTTL           time.Duration
 	workspaceLeaseDeadline map[string]time.Time
+}
+
+// PublicationAdmission surrounds an ordinary mint with local ownership/lifetime
+// admission. It must call publish synchronously, at most once, and must not do
+// remote I/O. Configure only before Run. Guarded moves already own host admission.
+type PublicationAdmission func(AssignmentAsk, func() error) error
+
+func WithPublicationAdmission(admit PublicationAdmission) PublisherOption {
+	return func(p *Publisher) { p.publicationAdmission = admit }
 }
 
 // PublisherOption configures a Publisher at construction.
@@ -416,6 +426,9 @@ func (p *Publisher) closeAllSubscriptions() {
 // non-zero Epoch. The structural non-forgeability test in
 // authority_test.go enforces this boundary at repo scope.
 func (p *Publisher) apply(ask AssignmentAsk) error {
+	if p.publicationAdmission != nil {
+		return p.publicationAdmission(ask, func() error { return p.applyWithWorkspaceMove(ask, nil) })
+	}
 	return p.applyWithWorkspaceMove(ask, nil)
 }
 
