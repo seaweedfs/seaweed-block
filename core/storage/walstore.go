@@ -263,8 +263,6 @@ func openInitializedWithMetadata(path string, f *os.File, sb *superblock, metada
 	s.walMutation.Store(1)
 	s.syncWALFile = func() error {
 		s.walSyncCalls.Add(1)
-		start := time.Now()
-		defer func() { s.fileSyncLatency.Observe(time.Since(start)) }()
 		return f.Sync()
 	}
 	committer := NewGroupCommitter(GroupCommitterConfig{
@@ -1292,6 +1290,8 @@ func (s *WALStore) syncWALBatch() error {
 	if !s.bypassSyncDedup.Load() && s.chunk.Load() == nil && cut <= s.durableMutation.Load() {
 		return nil
 	}
+	start := time.Now()
+	defer func() { s.fileSyncLatency.Observe(time.Since(start)) }()
 	if err := s.syncWALFile(); err != nil {
 		return err
 	}
