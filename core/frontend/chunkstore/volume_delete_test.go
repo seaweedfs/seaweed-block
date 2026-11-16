@@ -514,3 +514,40 @@ func TestCatalog_DeleteVolumeTombstonesAndRefusesReuse(t *testing.T) {
 		t.Fatalf("delete s2 after w3 was deleted (its claim is dead): %v", err)
 	}
 }
+
+// r4 P2: the original fork request's early replay never reports success
+// for a target past the delete mark, in every window (deleting, purging,
+// HEAD deleted before VOLUME is marked) and after; a completed fork still
+// replays before its delete.
+func TestCatalog_ForkReplayRefusesADeletingTarget(t *testing.T) {
+	_, _, c, h := deleteFixture(t)
+	ctx := context.Background()
+	if _, err := c.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: "s1", RequestID: "r-s1"}, h); err != nil {
+		t.Fatal(err)
+	}
+	req := ForkRequest{Source: "v1", Snapshot: "s1", Target: "w2", RequestID: "f2"}
+	if _, err := c.Fork(ctx, req); err != nil {
+		t.Fatalf("fork w2: %v", err)
+	}
+	if res, err := c.Fork(ctx, req); err != nil || !res.Replayed {
+		t.Fatalf("replay before the delete: %+v %v; want a successful replay", res, err)
+	}
+	seen := map[string]bool{}
+	c.retainHook = func(stage, _ string) {
+		switch stage {
+		case hookHeadMarked, hookCommitted, hookHeadDeleted:
+			seen[stage] = true
+			if _, err := c.Fork(ctx, req); CodeOf(err) != CodeVolumeDeleted {
+				t.Fatalf("replay at %s: %v; want volume_deleted", stage, err)
+			}
+		}
+	}
+	res, err := c.DeleteVolume(ctx, "w2", nil)
+	c.retainHook = nil
+	if err != nil || !res.Completed || len(seen) != 3 {
+		t.Fatalf("delete w2: %+v %v; windows seen %v", res, err, seen)
+	}
+	if _, err := c.Fork(ctx, req); CodeOf(err) != CodeVolumeDeleted {
+		t.Fatalf("replay after the delete: %v; want volume_deleted", err)
+	}
+}

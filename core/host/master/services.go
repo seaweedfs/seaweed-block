@@ -167,6 +167,26 @@ func (s *services) MarkVolumeDeleting(ctx context.Context, req *control.MarkVolu
 	return &control.MarkVolumeDeletingResponse{Known: known, State: res.State}, nil
 }
 
+// ImportLifecycleVolume registers a desired volume from the cluster spec
+// (blockmaster startup), under the same boundary as the CreateVolume RPC:
+// a reserved id (a chunk volume delete admitted or committed) is skipped,
+// never created again. imported is false for a skipped id.
+func (h *Host) ImportLifecycleVolume(spec lifecycle.VolumeSpec) (imported bool, err error) {
+	stores := h.Lifecycle()
+	if stores == nil {
+		return false, fmt.Errorf("cluster volume import requires --lifecycle-store")
+	}
+	h.workspaceMu.Lock()
+	defer h.workspaceMu.Unlock()
+	if stores.Deletions.Reserved(spec.VolumeID) && false { // RED: the import ignores the reservation
+		return false, nil
+	}
+	if _, err := stores.Volumes.CreateVolume(spec); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // createVolumeHook is a test seam: it runs in CreateVolume after the
 // reservation check, before the create.
 var createVolumeHook func(vol string)

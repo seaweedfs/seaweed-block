@@ -63,6 +63,8 @@ const (
 	hookHeadMarked    = "head-marked"    // after (b)
 	hookBlocked       = "blocked"        // (c) found a snapshot, before the revert
 	hookClaimsChecked = "claims-checked" // after (c), before the commit point
+	hookCommitted     = "committed"      // after the commit point (HEAD purging)
+	hookHeadDeleted   = "head-deleted"   // HEAD deleted, VOLUME not yet marked
 )
 
 // ErrNotAdmitted marks an Admission error that is a definite refusal
@@ -203,6 +205,7 @@ func (c *Catalog) DeleteVolume(ctx context.Context, vol string, admit Admission)
 		}
 	}
 	res.HeadMarked = true
+	c.hook(hookCommitted, vol)
 	if admit != nil {
 		if err := admit.Commit(ctx, vol); err != nil {
 			res.Uncertain = true
@@ -215,6 +218,7 @@ func (c *Catalog) DeleteVolume(ctx context.Context, vol string, admit Admission)
 		res.Uncertain = u
 		return res, err
 	}
+	c.hook(hookHeadDeleted, vol)
 	if err := c.markVolumeDeleted(ctx, vol, root); err != nil {
 		res.Uncertain = true
 		return res, err
