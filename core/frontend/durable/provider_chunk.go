@@ -43,7 +43,13 @@ var (
 	ErrChunkEpochStale = errors.New("durable: chunk layer lineage moved since attach")
 )
 
-// ErrChunkStaleLocalRoot: declared for the RED tests; nothing returns it yet.
+// ErrChunkStaleLocalRoot refuses to attach an existing local volume whose
+// HEAD another holder has published: the local image predates that HEAD
+// (a workspace that moved away and back), so serving or cutting it would
+// lose the other holder's acknowledged writes. It wraps
+// storage.ErrChunkLayerFenced: the volume is not served and the attach is
+// not retried. Removing the local volume lets the next attach start fresh
+// from HEAD.
 var ErrChunkStaleLocalRoot = errors.New("durable: local volume predates a HEAD published by another holder")
 
 var (
@@ -174,6 +180,13 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 			return
 		case errors.Is(err, storage.ErrChunkLayerFenced):
 			log.Printf("durable: chunk layer for volume=%s: %v (not serving)", volumeID, err)
+			if errors.Is(err, ErrChunkStaleLocalRoot) {
+				h.attachMu.Lock()
+				if p.current(h, gen) && h.chunk == nil {
+					h.backend.SetOperational(false, "chunk layer attach refused: "+err.Error())
+				}
+				h.attachMu.Unlock()
+			}
 			return
 		case errors.Is(err, errChunkNoAuthority):
 			continue
@@ -285,6 +298,23 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 			}
 			return nil
 		},
+	}
+	if !h.fresh {
+		// An existing local volume is this holder's image only while HEAD is
+		// still this holder's publication. Another holder's HEAD means the
+		// workspace moved away and back: refuse rather than serve, or cut
+		// over, the newer image with the stale one.
+		head, err := remote.GetHead(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("durable: read HEAD before attaching existing volume %s: %w", volumeID, err)
+		}
+		if head.Gen != 0 && head.Holder != holder {
+			err := fmt.Errorf("%w: %w: volume %s local root %s, HEAD holder %q gen %d epoch %d, local holder %q; remove or quarantine the local root to attach fresh from HEAD",
+				ErrChunkStaleLocalRoot, storage.ErrChunkLayerFenced, volumeID, h.path, head.Holder, head.Gen, head.Epoch, holder)
+			log.Printf("durable: refusing to attach volume=%s root=%s: HEAD holder=%q gen=%d epoch=%d is not this holder %q (remove or quarantine the local root)",
+				volumeID, h.path, head.Holder, head.Gen, head.Epoch, holder)
+			return nil, err
+		}
 	}
 	if h.fresh {
 		// Attach preparation is gated. Seed the exact observed HEAD before
