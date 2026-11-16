@@ -1,17 +1,148 @@
-# Seaweed Block (Alpha)
+# Seaweed Block
 
 <p align="center">
-  <img src="docs/assets/seaweed-block-hero.svg" alt="Seaweed Block alpha architecture: Kubernetes PVC to CSI, blockmaster, blockvolume, iSCSI, and WAL-backed recovery" width="100%">
+  <img src="docs/assets/seaweed-block-agent-workspace.svg" alt="Seaweed Block agent workspace disks: a local-speed disk per agent microVM, incremental snapshots to SeaweedFS, fork and resume on any host" width="100%">
 </p>
 
-Seaweed Block is an experimental Kubernetes block storage service built around:
+Seaweed Block is a block storage service written in Go. It has two uses:
 
-- normal Kubernetes PVC workflow,
-- a CSI driver,
-- Seaweed block components,
-- read-only operations evidence.
+1. **Agent workspace disks (new).** Each agent sandbox or microVM gets a
+   local-speed block device. Snapshots, forks and host moves are cheap because
+   the data is stored as content chunks in [SeaweedFS](https://github.com/seaweedfs/seaweedfs).
+2. **Kubernetes block volumes (alpha).** PVC-backed volumes through a CSI driver,
+   with RF=3 replication, iSCSI or NVMe/TCP, and read-only operations evidence.
+   See [Kubernetes block storage](#kubernetes-block-storage-alpha).
 
-The current alpha is focused on one user-visible loop:
+## Agent workspace disks
+
+An agent sandbox needs a disk that works like a laptop disk (`npm ci`,
+`git clone`, compilers, SQLite), and it also needs snapshot, fork, rollback and
+restore-on-another-host. Seaweed Block gives each workspace:
+
+- **A local-speed disk.** The volume runs next to the VM. The guest sees a
+  plain virtio block device through NVMe/TCP loopback or a ublk device. Writes
+  and `fsync` complete against a local write-ahead log, and nothing waits on
+  the network.
+- **Durable, incremental snapshots in SeaweedFS.** A cut uploads only the 4 MiB
+  chunks changed since the last cut. Chunks are immutable. The volume's state
+  is a small HEAD manifest, a root of about 2 KB that points at segment
+  manifests, and every publish is a fenced, conditional update of that root.
+- **Cheap snapshot and fork.** A snapshot or fork copies only the HEAD root;
+  chunks are shared. Unreferenced chunks are reclaimed by a two-phase, graced
+  GC.
+- **Move to any host.** Detach on one host. Another host takes over with a
+  higher epoch, starts from the HEAD alone and fetches chunks lazily on first
+  read. A stale holder cannot publish after takeover, because every HEAD
+  update is conditional on `{gen, epoch}`.
+- **Single replica by design.** Workspaces run with one local replica, and
+  durability comes from SeaweedFS snapshots, so there is no synchronous
+  replication on the write path. Losing a host loses at most the writes since
+  the last cut. Cut on semantic points: after an agent step, before a risky
+  command, on detach.
+
+```text
+agent microVM ──virtio-blk──> blockvolume (local WAL + extent)
+                                   │  cut: changed chunks only
+                                   ▼
+                          SeaweedFS (immutable chunks + HEAD manifest)
+                                   │  snapshot / fork = copy HEAD root
+                                   ▼
+                  another host: take over HEAD (epoch+1), lazy-load chunks
+```
+
+### Measured
+
+All numbers come from lab runs with Firecracker microVMs (4 vCPU, 4 GiB, guest
+kernel 6.1). Each one is the median of 3 runs. They are measurements, not SLOs.
+
+**Workspace workloads, Seaweed Block disk vs a local file-backed disk** (one
+bare-metal host; NVMe/TCP loopback; seconds):
+
+| Workload | Seaweed Block | Local disk |
+|---|---|---|
+| `npm ci` (617 packages, offline) | 2.14 | 2.14 |
+| `git clone` (Go 1.23 repository, local) | 7.10 | 6.99 |
+| Untar 5,000 files | 0.31 | 0.31 |
+| Untar a 100,000-file tree | 1.10 | 1.06 |
+| `find` + `stat` over 100,000 files (cold) | 0.32 | 0.33 |
+| 2,000 × create + write + `fsync` | 14.33 | 6.09 |
+
+- Metadata-heavy agent workloads run at local-disk speed, because the guest
+  kernel absorbs metadata and the block device only sees batched writes.
+- Every guest `fsync` was verified to reach the backend sync: about 2 NVMe
+  flushes per `fsync`, and zero in an unsafe-cache control.
+- The cost today is `fsync` latency, about 7 ms against 3 ms local. Work in
+  progress to close that gap: the ublk frontend, group commit, and a per-stage
+  `fsync` latency breakdown (`/status` histograms).
+- The same comparison on an Azure `D16s_v5` nested-virtualization host gives
+  the same picture.
+
+**Snapshot and fork cost** (a 10 GiB volume written as 2,560 chunks of 4 MiB;
+median of 3; storage on a native Linux host; filer metadata calls replaced by a
+deterministic model, so network latency is excluded):
+
+| | Flat manifest | Two-level manifest (current) |
+|---|---|---|
+| HEAD size | 261,531 B | 2,172 B |
+| Snapshot | 5.79 ms | 0.18 ms |
+| Fork | 10.67 ms | 0.29 ms |
+
+A cut that uploads 64 dirty chunks (256 MiB) took a median 624 ms with one
+upload at a time and 434 ms with 8 parallel uploads.
+
+**Workspace lifecycle on two hosts** (Firecracker VMs, SeaweedFS chunk backend):
+
+- 35 of 35 checks passed:
+  - create;
+  - write;
+  - snapshot S1 and S2;
+  - fork from S1, which is independent of its parent;
+  - a clean move to the second host;
+  - a stale-holder replay, which is refused;
+  - delete the fork and S1, then GC.
+- GC reclaimed 38 of 38 candidate chunks, and every reclaimed chunk returns 404.
+- Everything still referenced read back byte-identical, including the moved
+  workspace's digest before and after GC.
+
+### Try the chunk lifecycle
+
+The `sw-block ops chunk` commands drive the workspace lifecycle against a
+running blockmaster and blockvolume (`--durable-impl=walstore-chunk`,
+`--chunk-filer <filer>`):
+
+| Command | What it does |
+|---|---|
+| `sw-block ops chunk cut` | Publish the changed chunks and advance HEAD |
+| `sw-block ops chunk snapshot` / `snapshots` | Name a snapshot / list snapshots |
+| `sw-block ops chunk fork` | Create a new volume from a snapshot (root copy only) |
+| `sw-block ops chunk detach` | Final cut and release, ready to resume elsewhere |
+| `sw-block ops chunk volume-delete` | Delete a volume; refused while it is attached or has snapshots |
+| `sw-block ops chunk gc` | Preview or apply two-phase GC of unreferenced chunks |
+
+The chunk path (`walstore-chunk`) is a proof of concept. It is not yet a
+default, a release claim or a production path.
+
+### Correctness work
+
+- **Formal models.** The chunk lifecycle, host takeover, and WAL crash
+  recovery protocols are model-checked with TLA+ and TLC. Counterexamples found
+  this way became fixes and regression tests, for example the persisted-tail
+  WAL reuse fix and last-writer-wins recovery replay.
+- **Fail closed.** Recovery reports typed reasons such as `wal_corrupt` and
+  `io_error` instead of serving uncertain data.
+
+### Not claimed yet
+
+- Production readiness, SLOs, or a published performance claim.
+- `fsync` parity with local disk. That is work in progress, as described above.
+- ublk at high density. Unprivileged per-volume servers need a privileged
+  control broker, which is not done.
+- Crash-restart recovery of a ublk server. A crashed server fails closed.
+- Multi-replica workspaces combined with chunk snapshots.
+
+## Kubernetes block storage (alpha)
+
+The Kubernetes path is focused on one user-visible loop:
 
 ```text
 install on Kubernetes
@@ -24,7 +155,11 @@ install on Kubernetes
 
 This is an **alpha** product path for supported lab clusters, not production.
 
-## Feature & Status
+<p align="center">
+  <img src="docs/assets/seaweed-block-hero.svg" alt="Seaweed Block alpha architecture: Kubernetes PVC to CSI, blockmaster, blockvolume, iSCSI, and WAL-backed recovery" width="100%">
+</p>
+
+### Kubernetes feature & status
 
 | Feature | Status | Feature | Status |
 |---|---|---|---|
@@ -41,7 +176,7 @@ This is an **alpha** product path for supported lab clusters, not production.
 | Backup/snapshot/restore | Planned | NVMe/RDMA failover or performance SLO | Not claimed |
 | Production SLO/performance claims | Not claimed | Hosted production UI | Not claimed |
 
-## What You Can Do Today
+### What You Can Do Today
 
 - Install Seaweed Block through Helm on a supported Kubernetes/k3s lab.
 - Create and mount PVC-backed block volumes through normal Kubernetes PVCs.
@@ -99,7 +234,7 @@ This is an **alpha** product path for supported lab clusters, not production.
 These are narrow alpha claims tied to documented gates. See
 [release notes](docs/releases/README.md) for exact run evidence.
 
-## What You Should Not Expect Yet
+### What You Should Not Expect Yet
 
 - Production readiness or production SLOs.
 - A production-grade operator or broad mutating admin workflow. The current
@@ -123,7 +258,7 @@ These are narrow alpha claims tied to documented gates. See
 - Upgrade or rollback execution. The status layer can report install drift, but
   it does not run Helm or kubectl mutations.
 
-## Five-Minute Quick Start
+### Five-Minute Quick Start
 
 From the repository root:
 
@@ -176,7 +311,7 @@ and `seaweed-block-csi` images are published and pass the NVMe release smoke.
 
 Mutable `:alpha` is a smoke/demo tag only; it can drift from the source tree.
 
-## Operations
+### Operations
 
 Port-forward blockmaster when reading live cluster state:
 
@@ -215,7 +350,7 @@ The status surface is negative-first. If evidence is missing or stale, the
 system reports `Ready=Unknown` / `EvidenceStale=True` rather than claiming a
 false ready state.
 
-## Cleanup
+### Cleanup
 
 ```bash
 helm uninstall sw-block --namespace kube-system
