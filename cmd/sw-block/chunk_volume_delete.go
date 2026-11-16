@@ -2,9 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"time"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
 	"github.com/seaweedfs/seaweed-block/core/ops"
@@ -12,9 +17,10 @@ import (
 )
 
 // chunkVolumeDelete: sw-block ops chunk volume-delete <vol> --chunk-filer
-// host:port --master host:port deletes a chunk volume (Catalog.DeleteVolume):
-// refused while it is attached, assigned or served (volume_in_use) or while
-// a live fork claims one of its snapshots (snapshot_claimed); GC reclaims.
+// host:port --master host:port deletes a chunk volume (Catalog.DeleteVolume)
+// after the blockmaster admits it (MarkVolumeDeleting: refused while the
+// volume has live or pending authority; afterwards nothing assigns, places
+// or binds it again). A failure prints what was done with the error.
 func chunkVolumeDelete(args []string, stdout, stderr io.Writer) int {
 	fs := chunkFlagSet("volume-delete", stderr)
 	var (
@@ -24,7 +30,7 @@ func chunkVolumeDelete(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&volumeID, "volume", "", "volume id (or the first argument)")
 	fs.StringVar(&filer, "chunk-filer", "", "SeaweedFS filer gRPC address host:port")
 	fs.StringVar(&base, "chunk-path", defaultChunkPathCLI, "filer directory holding one directory per volume")
-	fs.StringVar(&master, "master", "", "authoritative blockmaster gRPC address (refuses an assigned or served volume)")
+	fs.StringVar(&master, "master", "", "authoritative blockmaster gRPC address (admits the delete)")
 	fs.DurationVar(&timeout, "timeout", time.Minute, "bound for this delete")
 	if err := fs.Parse(args); err != nil {
 		return chunkFail(chunkName(fs), stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, err.Error(), false)
@@ -42,31 +48,45 @@ func chunkVolumeDelete(args []string, stdout, stderr io.Writer) int {
 		return exit
 	}
 	defer closeFn()
-	evidence, closeMaster, err := masterEvidence(master)
+	conn, err := grpc.NewClient(master, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return chunkResult("volume-delete", nil, err, stdout, stderr)
 	}
-	defer closeMaster()
+	defer conn.Close()
+	lifecycle := control.NewLifecycleServiceClient(conn)
+	admit := func(ctx context.Context, vol string) error {
+		_, err := lifecycle.MarkVolumeDeleting(ctx, &control.MarkVolumeDeletingRequest{VolumeId: vol})
+		return err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	res, err := cat.DeleteVolume(ctx, volumeID, masterInUse(evidence))
-	return chunkResult("volume-delete", res, err, stdout, stderr)
+	res, err := cat.DeleteVolume(ctx, volumeID, admit)
+	if err != nil {
+		if red := true; red { // RED: partial effects dropped
+			return chunkResult("volume-delete", nil, err, stdout, stderr)
+		}
+		return volumeDeletePartial(res, err, stdout, stderr)
+	}
+	return chunkResult("volume-delete", res, nil, stdout, stderr)
 }
 
-// masterInUse: the blockmaster has the volume assigned, or a frontend
-// serves it.
-func masterInUse(evidence control.EvidenceServiceClient) chunkstore.InUseCheck {
-	return func(ctx context.Context, vol string) (bool, string, error) {
-		st, err := evidence.QueryVolumeStatus(ctx, &control.StatusRequest{VolumeId: vol})
-		if err != nil {
-			return false, "", err
-		}
-		if st.GetAssigned() {
-			return true, fmt.Sprintf("the blockmaster has it assigned (replica %q, epoch %d)", st.GetReplicaId(), st.GetEpoch()), nil
-		}
-		if n := len(st.GetFrontends()); n > 0 {
-			return true, fmt.Sprintf("%d frontend(s) serve it", n), nil
-		}
-		return false, "", nil
+// volumeDeletePartial prints what a failed delete did, with the error, and
+// fails.
+func volumeDeletePartial(res chunkstore.VolumeDeleteResult, err error, stdout, stderr io.Writer) int {
+	body := chunkErrBody{Code: codeInternalCLI, Message: err.Error()}
+	var ce *chunkstore.CatalogError
+	if errors.As(err, &ce) {
+		body = chunkErrBody{Code: ce.Code, Message: ce.Detail(), Retryable: ce.Retryable}
 	}
+	fmt.Fprintf(stderr, "sw-block ops chunk volume-delete: %s: %s (headMarked=%t completed=%t uncertain=%t)\n", body.Code, body.Message, res.HeadMarked, res.Completed, res.Uncertain)
+	out, mErr := json.Marshal(struct {
+		chunkstore.VolumeDeleteResult
+		Error *chunkErrBody `json:"error"`
+	}{res, &body})
+	if mErr == nil {
+		if wErr := writeAll(stdout, append(out, '\n')); wErr != nil {
+			fmt.Fprintf(stderr, "sw-block ops chunk volume-delete: write the result: %v\n", wErr)
+		}
+	}
+	return chunkExitFailed
 }

@@ -84,6 +84,13 @@ service ClusterEvidenceService {
 service LifecycleService {
     rpc CreateVolume(CreateVolumeRequest) returns (CreateVolumeResponse);
     rpc DeleteVolume(DeleteVolumeRequest) returns (DeleteVolumeResponse);
+    // MarkVolumeDeleting is the admission of a chunk volume delete: under
+    // the same locks as every assignment, placement and binding write it
+    // refuses (FAILED_PRECONDITION) a volume with live or pending authority,
+    // and otherwise marks the lifecycle record deleting, after which no new
+    // assignment, placement or binding is admitted and the id is never
+    // created again.
+    rpc MarkVolumeDeleting(MarkVolumeDeletingRequest) returns (MarkVolumeDeletingResponse);
 }
 
 // FailbackService — disabled-by-default authority failback endpoint.
@@ -402,6 +409,16 @@ message DeleteVolumeRequest {
 }
 
 message DeleteVolumeResponse {
+}
+
+message MarkVolumeDeletingRequest {
+    string volume_id = 1;
+}
+
+message MarkVolumeDeletingResponse {
+    // known is false when the master has no lifecycle record for the volume
+    // (it then only checked that no authority is live or pending).
+    bool known = 1;
 }
 
 message FailbackRequest {

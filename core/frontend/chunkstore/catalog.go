@@ -505,8 +505,8 @@ func (c *Catalog) EnsureVolume(ctx context.Context, vol string, g Geometry) (Vol
 	}
 	if h, has, err := c.ReadHead(ctx, vol); err != nil {
 		return VolumeInfo{}, err
-	} else if has && h.State == storage.ChunkHeadDeleted {
-		return VolumeInfo{}, refuseDeleted(vol, "its HEAD is a tombstone; it cannot be attached")
+	} else if has && headDeletingOrDeleted(h) {
+		return VolumeInfo{}, refuseDeleted(vol, "it cannot be attached")
 	}
 	if v.Geometry != g {
 		return VolumeInfo{}, catErr(CodeGeometryMismatch, false, nil, "volume %s: VOLUME geometry %+v, this host serves %+v", vol, v.Geometry, g)
@@ -846,6 +846,15 @@ func (c *Catalog) CreateSnapshot(ctx context.Context, vol string, req SnapshotRe
 	attempt, err := c.claimName(ctx, vol, root, req, head.Gen)
 	if err != nil {
 		return SnapshotInfo{}, err
+	}
+	// A volume delete marks HEAD deleting before it lists the names: if
+	// this name was taken after that listing, this read sees the mark, and
+	// the attempt is given up before anything is published.
+	if gone, err := c.volumeGone(ctx, vol); err != nil {
+		return SnapshotInfo{}, err
+	} else if gone && false { // RED: no post-name check
+		c.abandonUnpublished(ctx, vol, root, req.Name, attempt)
+		return SnapshotInfo{}, refuseDeleted(vol, "it cannot be snapshotted")
 	}
 
 	headEnt, err := headEntry(head)
@@ -1190,12 +1199,13 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 	if err != nil {
 		return ForkResult{}, err
 	}
-	// Read after the claim: a delete of the source marks VOLUME before it
-	// marks the snapshots, so a fork that sees it live is protected by its
-	// claim, and one that sees it deleted gives the claim back.
-	if src, ok, err := c.ReadVolume(ctx, req.Source); err != nil {
+	// Read after the claim: a delete of the source marks its HEAD deleting
+	// before it reads claims, so either it sees this claim (and gives its
+	// mark back) or this read sees the mark and the fork gives the claim
+	// back before installing anything.
+	if gone, err := c.volumeGone(ctx, req.Source); err != nil {
 		return ForkResult{}, err
-	} else if ok && src.State == VolumeDeleted {
+	} else if gone && false { // RED: no post-claim check
 		c.dropForkClaim(ctx, req, snap.attempt)
 		return ForkResult{}, refuseDeleted(req.Source, "its snapshots cannot be forked")
 	}
@@ -1285,7 +1295,7 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 	if err != nil {
 		return ForkResult{}, err
 	}
-	if h.State == storage.ChunkHeadAborted {
+	if h.State == storage.ChunkHeadAborted || headDeletingOrDeleted(h) {
 		c.dropIntent(ctx, dstRoot, id)          // the tombstone is permanent: this create never lands
 		c.dropForkClaim(ctx, req, snap.attempt) // and this fork never needs the parent again
 		return ForkResult{}, catErr(CodeTargetExists, false, nil, "fork %s lost to a sweep: its HEAD is an aborted tombstone; fork to a new volume id", req.Target)
@@ -1345,16 +1355,37 @@ func (c *Catalog) claimForkParent(ctx context.Context, req ForkRequest) (Snapsho
 // fork no longer needs it (best effort: retention treats a claim whose
 // target has a HEAD as dead anyway).
 func (c *Catalog) dropForkClaim(ctx context.Context, req ForkRequest, attempt string) {
+	_, _ = c.removeForkClaim(ctx, req, attempt)
+}
+
+// abandonUnpublished gives up an attempt that was never published: an
+// aborted tombstone at its path (so a late create cannot land), then the
+// name freed while it names that attempt (best effort; a delete's own pass
+// does the same).
+func (c *Catalog) abandonUnpublished(ctx context.Context, vol, root, name, attempt string) {
+	if tomb, err := c.abortedSnapEntry(vol, name, attempt); err == nil {
+		_ = c.f.CreateEntry(ctx, path.Join(root, snapsDir, name), tomb, true)
+	}
+	_, _, _ = c.freeName(ctx, root, name, attempt)
+}
+
+// removeForkClaim removes fork req's claim from its parent attempt and
+// reports whether this call confirmed its removal (false with no error:
+// the claim was not there).
+func (c *Catalog) removeForkClaim(ctx context.Context, req ForkRequest, attempt string) (bool, error) {
 	root, err := c.volRoot(req.Source)
 	if err != nil || attempt == "" {
-		return
+		return false, err
 	}
 	token := forkClaim(req.Target, req.RequestID)
 	dir := path.Join(root, snapsDir, req.Snapshot)
 	for try := 0; try < 3; try++ {
 		e, err := c.f.LookupEntry(ctx, dir, attempt)
+		if errors.Is(err, ErrNotFound) {
+			return false, nil
+		}
 		if err != nil {
-			return
+			return false, remoteErr(err, "read %s/%s attempt %s", req.Source, req.Snapshot, attempt)
 		}
 		claims := decodeClaims(e)
 		kept := claims[:0:0]
@@ -1364,7 +1395,7 @@ func (c *Catalog) dropForkClaim(ctx context.Context, req ForkRequest, attempt st
 			}
 		}
 		if len(kept) == len(claims) {
-			return
+			return false, nil
 		}
 		c.hook(hookClaimDrop, req.Snapshot)
 		// Conditioned on the state read too (review of f42e723): a
@@ -1373,10 +1404,15 @@ func (c *Catalog) dropForkClaim(ctx context.Context, req ForkRequest, attempt st
 		raw := e.Extended[extSnapClaims]
 		next := proto.Clone(e).(*filerpb.Entry)
 		setClaims(next, kept)
-		if err := c.f.UpdateEntry(ctx, dir, next, map[string][]byte{extSnapState: e.Extended[extSnapState], extSnapClaims: raw}); !errors.Is(err, ErrPrecondition) {
-			return
+		err = c.f.UpdateEntry(ctx, dir, next, map[string][]byte{extSnapState: e.Extended[extSnapState], extSnapClaims: raw})
+		if err == nil {
+			return true, nil
+		}
+		if !errors.Is(err, ErrPrecondition) {
+			return false, remoteErr(err, "remove the claim of %s on %s/%s", req.Target, req.Source, req.Snapshot)
 		}
 	}
+	return false, remoteErr(nil, "claim of %s on %s/%s kept changing", req.Target, req.Source, req.Snapshot)
 }
 
 // AbortFork settles a dead fork for a GC sweep (W5 ruling, 2026-11-15

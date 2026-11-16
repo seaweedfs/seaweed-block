@@ -17,6 +17,9 @@ func ReconcilePlacement(volumes []VolumeRecord, nodes []NodeRegistration, placem
 	nodes = append([]NodeRegistration(nil), nodes...)
 	results := make([]ReconcileResult, 0, len(volumes))
 	for _, volume := range volumes {
+		if volume.Deleting && false { // RED: deleting volumes are placed
+			continue // never placed again
+		}
 		plan := PlanPlacement(volume, nodes)
 		result := ReconcileResult{
 			VolumeID: volume.Spec.VolumeID,

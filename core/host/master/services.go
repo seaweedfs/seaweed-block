@@ -107,6 +107,47 @@ func (s *services) DeleteVolume(ctx context.Context, req *control.DeleteVolumeRe
 	return &control.DeleteVolumeResponse{}, nil
 }
 
+// MarkVolumeDeleting admits a chunk volume delete (sw-block ops chunk
+// volume-delete). It holds workspaceMu, the lock every assignment,
+// placement and binding write takes, and runs the mark inside
+// RecordWorkspaceDeletion's check under the publisher lock: a volume with a
+// live authority line (and no clean revocation ACK), a pending move or a
+// queued placement is refused; otherwise the record is marked deleting, and
+// from then on publication admission, the placement reconciler, the
+// workload planner, binding/placement/move RPCs and CreateVolume all refuse
+// it.
+func (s *services) MarkVolumeDeleting(ctx context.Context, req *control.MarkVolumeDeletingRequest) (*control.MarkVolumeDeletingResponse, error) {
+	s.host.workspaceMu.Lock()
+	defer s.host.workspaceMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, workspaceError(err)
+	}
+	stores := s.host.Lifecycle()
+	if stores == nil {
+		return nil, status.Error(codes.FailedPrecondition, "lifecycle store is not configured")
+	}
+	vol := req.GetVolumeId()
+	if vol == "" {
+		return nil, status.Error(codes.InvalidArgument, "volume_id is required")
+	}
+	_, bound, err := stores.WorkspaceBindings.Get(vol)
+	if err != nil {
+		return nil, lifecycleError("mark volume deleting", err)
+	}
+	_, placed := stores.Placements.GetPlacement(vol)
+	known := false
+	err = s.host.Publisher().RecordWorkspaceDeletion(ctx, vol, bound && placed, func() error {
+		found, e := stores.Volumes.MarkDeleting(vol)
+		known = found
+		return e
+	})
+	if err != nil {
+		return nil, status.Errorf(codes.FailedPrecondition, "mark volume deleting: %v", err)
+	}
+	s.host.log.Printf("blockmaster: MarkVolumeDeleting volume=%q known=%t", vol, known)
+	return &control.MarkVolumeDeletingResponse{Known: known}, nil
+}
+
 func (s *services) ExecuteFailback(ctx context.Context, req *control.FailbackRequest) (*control.FailbackResponse, error) {
 	if !s.host.cfg.FailbackRuntimeRPC {
 		return nil, status.Error(codes.FailedPrecondition, "failback runtime RPC is disabled")
@@ -179,6 +220,9 @@ func lifecycleError(op string, err error) error {
 	}
 	if errors.Is(err, lifecycle.ErrVolumeConflict) {
 		return status.Errorf(codes.AlreadyExists, "%s: %v", op, err)
+	}
+	if errors.Is(err, lifecycle.ErrVolumeDeleting) {
+		return status.Errorf(codes.FailedPrecondition, "%s: %v", op, err)
 	}
 	return status.Errorf(codes.Internal, "%s: %v", op, err)
 }

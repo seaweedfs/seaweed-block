@@ -23,6 +23,9 @@ var (
 	ErrVolumeNotFound    = errors.New("lifecycle: volume not found")
 	ErrAlreadyAttached   = errors.New("lifecycle: volume already attached to another node")
 	ErrAttachedElsewhere = errors.New("lifecycle: volume attached to another node")
+	// ErrVolumeDeleting: the volume is being deleted (or was); its id is
+	// never created, placed, bound or assigned again.
+	ErrVolumeDeleting = errors.New("lifecycle: volume is being deleted")
 )
 
 var volumeIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
@@ -45,6 +48,8 @@ type VolumeSpec struct {
 type VolumeRecord struct {
 	Spec       VolumeSpec `json:"spec"`
 	AttachedTo string     `json:"attached_to,omitempty"`
+	// Deleting is set once by MarkDeleting and never cleared.
+	Deleting bool `json:"deleting,omitempty"`
 }
 
 // FileStore persists one JSON record per volume ID.
@@ -82,6 +87,9 @@ func (s *FileStore) CreateVolume(spec VolumeSpec) (VolumeRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if existing, ok := s.records[spec.VolumeID]; ok {
+		if existing.Deleting && false { // RED: a deleting id can be created again
+			return VolumeRecord{}, ErrVolumeDeleting
+		}
 		if !volumeSpecsCompatible(existing.Spec, spec) {
 			return VolumeRecord{}, ErrVolumeConflict
 		}
@@ -129,6 +137,29 @@ func mergeVolumeSpecMetadata(existing, incoming VolumeSpec) VolumeSpec {
 		out.PVName = incoming.PVName
 	}
 	return out
+}
+
+// MarkDeleting marks volumeID's record deleting (idempotent). found is
+// false when there is no record (nothing is written).
+func (s *FileStore) MarkDeleting(volumeID string) (found bool, err error) {
+	if err := validateVolumeID(volumeID); err != nil {
+		return false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.records[volumeID]
+	if !ok {
+		return false, nil
+	}
+	if rec.Deleting {
+		return true, nil
+	}
+	rec.Deleting = true
+	if err := s.putLocked(rec); err != nil {
+		return true, err
+	}
+	s.records[volumeID] = rec
+	return true, nil
 }
 
 // DeleteVolume removes a desired volume record. Missing volumes are a

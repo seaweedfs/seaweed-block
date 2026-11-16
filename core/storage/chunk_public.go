@@ -27,6 +27,7 @@ const (
 	ChunkHeadActive   = chunkHeadActive
 	ChunkHeadDetached = chunkHeadDetached
 	ChunkHeadAborted  = chunkHeadAborted
+	ChunkHeadDeleting = chunkHeadDeleting
 	ChunkHeadDeleted  = chunkHeadDeleted
 )
 
@@ -45,6 +46,7 @@ const (
 var (
 	ErrChunkKeyExists         = errChunkKeyExists
 	ErrChunkHeadPrecondition  = errChunkHeadPrecondition
+	ErrChunkHeadDeleted       = errChunkHeadDeleted
 	ErrChunkLayerFenced       = errChunkLayerFenced
 	ErrChunkEvictRefused      = errChunkEvictRefused
 	ErrChunkCaptureRefused    = errChunkCaptureRefused

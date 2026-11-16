@@ -54,7 +54,9 @@ func TestOpsChunk_VolumeDelete(t *testing.T) {
 		}
 	}
 
-	h, err := master.New(gcTestMasterConfig(t))
+	cfg := gcTestMasterConfig(t)
+	cfg.LifecycleStoreDir = t.TempDir() // MarkVolumeDeleting admits the delete
+	h, err := master.New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,12 +66,19 @@ func TestOpsChunk_VolumeDelete(t *testing.T) {
 		defer cancel()
 		_ = h.Close(ctx)
 	})
-	if code, out, _ := runChunk("volume-delete", "--chunk-filer", "f:1", "--master", h.Addr(), "v2"); code == 0 || !strings.Contains(out, chunkstore.CodeVolumeInUse) {
-		t.Fatalf("delete of attached v2: %d %q; want volume_in_use", code, out)
+	// v2 is admitted by the master (it has no authority) but held in the
+	// catalog: refused, and the partial result says what was done.
+	code, out, _ := runChunk("volume-delete", "--chunk-filer", "f:1", "--master", h.Addr(), "v2")
+	var partial struct {
+		chunkstore.VolumeDeleteResult
+		Error *chunkErrBody `json:"error"`
+	}
+	if code == 0 || json.Unmarshal([]byte(out), &partial) != nil || partial.Error == nil || partial.Error.Code != chunkstore.CodeVolumeInUse || !partial.Admitted || partial.HeadMarked || partial.Completed {
+		t.Fatalf("delete of attached v2: %d %q; want volume_in_use with the partial result", code, out)
 	}
 	code, out, errs := runChunk("volume-delete", "--chunk-filer", "f:1", "--master", h.Addr(), "v1")
 	var res chunkstore.VolumeDeleteResult
-	if code != 0 || json.Unmarshal([]byte(out), &res) != nil || res.VolumeID != "v1" || res.Replayed {
+	if code != 0 || json.Unmarshal([]byte(out), &res) != nil || res.VolumeID != "v1" || res.Replayed || !res.Completed {
 		t.Fatalf("delete v1: %d %q %q", code, out, errs)
 	}
 	if _, err := cat.EnsureVolume(ctx, "v1", geo); chunkstore.CodeOf(err) != chunkstore.CodeVolumeDeleted {

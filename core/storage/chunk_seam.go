@@ -203,9 +203,14 @@ type chunkDetachedBy struct {
 // 2026-11-15 17:30Z). Such a volume never attaches.
 const chunkHeadAborted = "aborted"
 
-// chunkHeadDeleted marks a deleted volume's HEAD tombstone (no chunks, so
-// nothing it held stays a GC root). Such a volume never attaches again.
-const chunkHeadDeleted = "deleted"
+// chunkHeadDeleting marks a volume a delete has admitted (chunks kept, so
+// the delete can still be given back); chunkHeadDeleted is the final
+// tombstone (no chunks, so nothing it held stays a GC root). Neither is
+// ever moved by CASHead, so no attach, claim or restore can revive them.
+const (
+	chunkHeadDeleting = "deleting"
+	chunkHeadDeleted  = "deleted"
+)
 
 func chunkHeadIsDetached(h chunkHead) bool { return h.State == chunkHeadDetached }
 
@@ -471,6 +476,7 @@ var (
 	errChunkLayerNotImplemented = errors.New("storage: chunk layer not implemented")
 	errChunkKeyExists           = errors.New("storage: chunk key already exists")
 	errChunkHeadPrecondition    = errors.New("storage: chunk HEAD precondition failed")
+	errChunkHeadDeleted         = errors.New("storage: chunk HEAD is being deleted or deleted")
 	errChunkLayerFenced         = errors.New("storage: chunk layer fenced")
 	errChunkEvictRefused        = errors.New("storage: chunk eviction refused")
 	errChunkCaptureRefused      = errors.New("storage: chunk capture refused")
