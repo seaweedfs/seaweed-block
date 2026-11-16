@@ -252,3 +252,14 @@ func (h *Host) ReportLocalRecoveryFailure(err error) string {
 	}
 	return reason
 }
+
+// ReportDataChecksumFailure is the durable backend runtime-fault callback.
+// The caller releases its IO lock first. The block prevents future local
+// readiness publication; the typed reason also overrides an older ready fact.
+func (h *Host) ReportDataChecksumFailure(err error) {
+	if !errors.Is(err, storage.ErrDataChecksum) {
+		return
+	}
+	h.BlockLocalReadiness("data checksum failure: " + err.Error())
+	h.ReportLocalRecoveryFailure(err)
+}

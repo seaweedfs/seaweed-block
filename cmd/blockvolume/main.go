@@ -598,6 +598,7 @@ func run(f flags) int {
 			Impl:                          durable.ImplName(f.durableImpl),
 			StorageRoot:                   f.durableRoot,
 			RequireDataChecksums:          f.requireDataChecksums,
+			ReportDataChecksumFailure:     h.ReportDataChecksumFailure,
 			BlockSize:                     int(f.durableBlockSize),
 			NumBlocks:                     uint32(f.durableBlocks),
 			WALRetentionLSNs:              f.walRetentionLSNs,
