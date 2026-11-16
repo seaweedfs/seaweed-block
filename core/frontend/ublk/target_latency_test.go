@@ -4,10 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/seaweedfs/seaweed-block/core/frontend"
-	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"syscall"
 	"testing"
+
+	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 )
 
 type latencyView struct{}

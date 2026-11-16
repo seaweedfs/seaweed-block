@@ -34,7 +34,7 @@ func TestUblkDurabilityLatency(t *testing.T) {
 	h.handle(context.Background(), request{op: ioOpFlush}, nil)
 	h.handle(context.Background(), request{op: ioOpWrite, startSector: 1 << 30, nrSectors: 8}, make([]byte, 4096))
 	s := b.requests.Snapshot()
-	if s.Writes != 2 || s.FUAWrites != 1 || s.Flushes != 1 || s.Failed != 1 || s.RequestTotal.Count != 3 || s.ReceiveToBackend.Count != 2 || s.AckDispatch.Count != 2 {
+	if s.Writes != 1 || s.FUAWrites != 1 || s.Flushes != 1 || s.Failed != 0 || s.RequestTotal.Count != 2 || s.ReceiveToBackend.Count != 2 || s.AckDispatch.Count != 2 {
 		t.Fatal(s)
 	}
 	if b.SyncCount() != 2 || b.WriteCount() != 1 {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 )
@@ -93,19 +94,7 @@ func (c *counters) count(r request) {
 // handle serves one request against buf (len >= nrSectors<<9 for reads
 // and writes) and returns the ublk result: bytes transferred, 0 for a
 // flush, or a negative errno.
-func (h handler) handle(ctx context.Context, r request, buf []byte) (result int32) {
-	kind := ""
-	if r.op == ioOpFlush {
-		kind = "flush"
-	} else if r.op == ioOpWrite {
-		kind = "write"
-		if r.flags&ioFlagFUA != 0 {
-			kind = "fua"
-		}
-	}
-	ctx, trace := frontend.BeginDurabilityRequest(ctx, h.backend, kind)
-	defer func() { trace.Finish(result < 0) }()
-
+func (h handler) handle(ctx context.Context, r request, buf []byte) int32 {
 	h.stats.count(r)
 	res := h.serve(ctx, r, buf)
 	if res < 0 && h.stats != nil {
@@ -114,9 +103,17 @@ func (h handler) handle(ctx context.Context, r request, buf []byte) (result int3
 	return res
 }
 
-func (h handler) serve(ctx context.Context, r request, buf []byte) int32 {
+func (h handler) serve(ctx context.Context, r request, buf []byte) (result int32) {
+	var received time.Time
+	if r.op == ioOpWrite || r.op == ioOpFlush {
+		received = time.Now()
+	}
+
 	switch r.op {
 	case ioOpFlush:
+		ctx, trace := frontend.BeginDurabilityRequest(ctx, h.backend, "flush")
+		trace.IncludeReceive(received)
+		defer func() { trace.Finish(result < 0) }()
 		if err := h.backend.Sync(ctx); err != nil {
 			return errno(syscall.EIO)
 		}
@@ -143,6 +140,14 @@ func (h handler) serve(ctx context.Context, r request, buf []byte) int32 {
 		}
 		return int32(n)
 	}
+	// Only validated writes may open the lazy provider through the timing hook.
+	kind := "write"
+	if r.flags&ioFlagFUA != 0 {
+		kind = "fua"
+	}
+	ctx, trace := frontend.BeginDurabilityRequest(ctx, h.backend, kind)
+	trace.IncludeReceive(received)
+	defer func() { trace.Finish(result < 0) }()
 	n, err := h.backend.Write(ctx, int64(offset), data)
 	if err != nil || n != len(data) {
 		return errno(syscall.EIO)
