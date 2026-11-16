@@ -162,8 +162,11 @@ type Host struct {
 
 	localReadinessBlocked atomic.Bool
 	localReadinessReason  atomic.Value // string
-	readinessReplayMu     sync.Mutex
-	readinessReplayFact   *control.AssignmentFact
+	// localRecoveryReason is the typed reason local durable recovery
+	// failed (#133); empty when none or unclassified.
+	localRecoveryReason atomic.Value // string
+	readinessReplayMu   sync.Mutex
+	readinessReplayFact *control.AssignmentFact
 
 	// lastOtherLine captures the most recent AssignmentFact that
 	// named a REPLICA OTHER than self for this host's VolumeID.
@@ -291,6 +294,7 @@ func (h *Host) BlockLocalReadiness(reason string) {
 func (h *Host) ClearLocalReadinessBlock() {
 	h.localReadinessReason.Store("")
 	h.localReadinessBlocked.Store(false)
+	h.localRecoveryReason.Store("")
 }
 
 func (h *Host) localReadinessBlock() (bool, string) {
