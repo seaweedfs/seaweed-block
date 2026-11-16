@@ -139,16 +139,26 @@ func TestRestoreFailedSeedSyncRetryCaptureAndReopen(t *testing.T) {
 	if got := ws.NextLSN(); got != 1 {
 		t.Errorf("failed seed published allocator watermark %d, want 1", got)
 	}
-	if _, err := p.RecoverVolume(ctx, "v1"); err != nil {
-		t.Fatal("same-handle retry:", err)
+	// The failed fsync is sticky for the open store (storage.ErrFsyncFailed,
+	// io_error): no same-handle retry; a reopen restores from HEAD.
+	if _, err := p.RecoverVolume(ctx, "v1"); !errors.Is(err, storage.ErrFsyncFailed) {
+		t.Fatalf("same-handle retry after a failed fsync: %v; want ErrFsyncFailed", err)
 	}
-	if r, _, h := ws.Boundaries(); r != 7 || h != 7 {
-		t.Errorf("retry did not durably seed HEAD: R=%d H=%d", r, h)
+	if r, _, h := ws.Boundaries(); r != 0 || h != 0 {
+		t.Errorf("refused retry published R=%d H=%d", r, h)
 	}
-	if cut, err := p.CaptureVolume(ctx, "v1"); err != nil || cut != 7 {
-		t.Errorf("retry cut=%d err=%v, want 7", cut, err)
+	_ = p.Close()
+	p1 := makeProvider(remote)
+	if _, err := p1.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
 	}
-	if err := p.Close(); err != nil {
+	if _, err := p1.RecoverVolume(ctx, "v1"); err != nil {
+		t.Fatal("restore after a reopen:", err)
+	}
+	if cut, err := p1.CaptureVolume(ctx, "v1"); err != nil || cut != 7 {
+		t.Errorf("cut after a reopen=%d err=%v, want 7", cut, err)
+	}
+	if err := p1.Close(); err != nil {
 		t.Fatal(err)
 	}
 	p2 := makeProvider(remote)
@@ -219,10 +229,28 @@ func TestRestoreFailedSeedNeverTakesOwnership(t *testing.T) {
 	if _, err := p.Backend("v1").Read(ctx, 0, make([]byte, 4096)); !errors.Is(err, frontend.ErrNotReady) {
 		t.Fatal("failed seed admitted I/O", err)
 	}
-	if _, err := p.RecoverVolume(ctx, "v1"); err != nil {
-		t.Fatal("same-store retry", err)
+	// The failed fsync is sticky (storage.ErrFsyncFailed): the same-store
+	// retry refuses and still takes no ownership; a reopen takes it once.
+	if _, err := p.RecoverVolume(ctx, "v1"); !errors.Is(err, storage.ErrFsyncFailed) {
+		t.Fatalf("same-store retry after a failed fsync: %v; want ErrFsyncFailed", err)
+	}
+	if calls != 0 {
+		t.Fatal("a refused retry took ownership", calls)
+	}
+	_ = p.Close()
+	p2, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: root, NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, WALRecoveryTestDisableFlusher: true,
+		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return watched, nil }}, v1View())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p2.Close()
+	if _, err = p2.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p2.RecoverVolume(ctx, "v1"); err != nil {
+		t.Fatal("restore after a reopen", err)
 	}
 	if calls != 1 {
-		t.Fatal("successful retry must take ownership exactly once", calls)
+		t.Fatal("restore after a reopen must take ownership exactly once", calls)
 	}
 }

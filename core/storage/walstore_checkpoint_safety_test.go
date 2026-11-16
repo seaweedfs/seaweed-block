@@ -73,6 +73,17 @@ func TestFlusherCheckpointMetadataFailureDoesNotPublishOrRecycle(t *testing.T) {
 
 			s.writeSuperblockMetadata = savedWrite
 			s.syncSuperblockMetadata = savedSync
+			if tt.name == "sync" {
+				// A failed fsync is sticky (ErrFsyncFailed): no checkpoint
+				// retry on this open store.
+				if err := s.flusher.flushOnce(); !errors.Is(err, ErrFsyncFailed) {
+					t.Fatalf("retry flush after a failed fsync: %v; want ErrFsyncFailed", err)
+				}
+				if got := s.CheckpointLSN(); got != 0 {
+					t.Fatalf("checkpoint after a refused retry=%d want 0", got)
+				}
+				return
+			}
 			if err := s.flusher.flushOnce(); err != nil {
 				t.Fatalf("retry flush: %v", err)
 			}

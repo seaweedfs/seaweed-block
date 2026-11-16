@@ -9,7 +9,8 @@ import (
 )
 
 func TestWALStore_FailedAppendDoesNotConsumeLSN(t *testing.T) {
-	s, err := CreateWALStore(filepath.Join(t.TempDir(), "store.bin"), 16, 4096)
+	path := filepath.Join(t.TempDir(), "store.bin")
+	s, err := CreateWALStore(path, 16, 4096)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,36 +31,37 @@ func TestWALStore_FailedAppendDoesNotConsumeLSN(t *testing.T) {
 		t.Fatalf("NextLSN after failed append=%d want 1", got)
 	}
 
+	// A failed append is sticky (ErrAppendFailed): no later write reuses
+	// its LSN on this open store, single or batch.
 	s.wal.fd = s.fd
-	lsn, err := s.Write(0, makeBlock(4096, 0xA2))
+	if _, err := s.Write(0, makeBlock(4096, 0xA2)); !errors.Is(err, ErrAppendFailed) {
+		t.Fatalf("Write after a failed append: %v; want ErrAppendFailed", err)
+	}
+	if _, err := s.WriteBatch(1, [][]byte{makeBlock(4096, 0xC1), makeBlock(4096, 0xC2)}); !errors.Is(err, ErrAppendFailed) {
+		t.Fatalf("WriteBatch after a failed append: %v; want ErrAppendFailed", err)
+	}
+	if got := s.NextLSN(); got != 1 {
+		t.Fatalf("NextLSN after refused appends=%d want 1", got)
+	}
+	_ = s.Close()
+
+	// A reopen starts from what is on disk (nothing of the failed append):
+	// the first write gets LSN 1, the next batch LSNs 2 and 3.
+	r, err := OpenWALStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lsn != 1 {
-		t.Fatalf("successful Write LSN=%d want reused LSN 1", lsn)
-	}
-
-	s.wal.fd = bad
-	if _, err := s.WriteBatch(1, [][]byte{
-		makeBlock(4096, 0xB1),
-		makeBlock(4096, 0xB2),
-	}); err == nil {
-		t.Fatal("WriteBatch with closed WAL fd succeeded")
-	}
-	if got := s.NextLSN(); got != 2 {
-		t.Fatalf("NextLSN after failed batch=%d want 2", got)
-	}
-
-	s.wal.fd = s.fd
-	lsns, err := s.WriteBatch(1, [][]byte{
-		makeBlock(4096, 0xC1),
-		makeBlock(4096, 0xC2),
-	})
-	if err != nil {
+	t.Cleanup(func() { _ = r.Close() })
+	if _, err := r.Recover(); err != nil {
 		t.Fatal(err)
 	}
-	if len(lsns) != 2 || lsns[0] != 2 || lsns[1] != 3 {
-		t.Fatalf("successful batch LSNs=%v want [2 3]", lsns)
+	lsn, err := r.Write(0, makeBlock(4096, 0xA2))
+	if err != nil || lsn != 1 {
+		t.Fatalf("first write after a reopen LSN=%d err=%v want 1", lsn, err)
+	}
+	lsns, err := r.WriteBatch(1, [][]byte{makeBlock(4096, 0xC1), makeBlock(4096, 0xC2)})
+	if err != nil || len(lsns) != 2 || lsns[0] != 2 || lsns[1] != 3 {
+		t.Fatalf("batch after a reopen LSNs=%v err=%v want [2 3]", lsns, err)
 	}
 }
 
@@ -138,31 +140,57 @@ func TestWALStore_DirectFrontierMetadataFailureRetainsRetryState(t *testing.T) {
 		t.Fatalf("durable frontier=%d want 0 after failed metadata sync", R)
 	}
 
+	// The failed fsync is sticky (ErrFsyncFailed): the retry is refused, the
+	// in-memory frontier is never published, and a reopen starts from what
+	// is on disk.
 	s.syncDirectFrontierMetadata = savedSync
-	frontier, err := s.Sync()
-	if err != nil {
-		t.Fatal(err)
+	if _, err := s.Sync(); !errors.Is(err, ErrFsyncFailed) {
+		t.Fatalf("retry after a failed metadata fsync: %v; want ErrFsyncFailed", err)
 	}
-	if frontier != 10 || s.checkpointLSN != 10 || s.pendingDirectFrontierLSN != 0 {
-		t.Fatalf("retry frontier=%d checkpoint=%d pending=%d want 10/10/0",
-			frontier, s.checkpointLSN, s.pendingDirectFrontierLSN)
+	if s.checkpointLSN != 0 {
+		t.Fatalf("refused retry published checkpoint %d", s.checkpointLSN)
 	}
-	if got, want := s.sb.WALHead, s.wal.logicalHeadValue(); got != want {
-		t.Fatalf("superblock WALHead byte cursor=%d want %d", got, want)
-	}
-	if s.sb.WALHead == frontier {
-		t.Fatalf("superblock WALHead=%d incorrectly stores LSN frontier", s.sb.WALHead)
-	}
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
+	_ = s.Close()
 	reopened, err := OpenWALStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = reopened.Close() })
-	if got := reopened.CheckpointLSN(); got != 10 {
-		t.Fatalf("reopened checkpointLSN=%d want 10", got)
+	reopenedOpen := true
+	t.Cleanup(func() {
+		if reopenedOpen {
+			_ = reopened.Close()
+		}
+	})
+	if _, err := reopened.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	if got := reopened.CheckpointLSN(); got != 0 {
+		t.Fatalf("reopened checkpointLSN=%d want 0 (the frontier was never durable)", got)
+	}
+	if reopened.wal.logicalHeadValue() == 0 {
+		t.Fatal("recovery did not reconstruct the WAL head of the LSN 1 record")
+	}
+	reopened.AdvanceFrontier(10)
+	frontier, err := reopened.Sync()
+	if err != nil || frontier != 10 || reopened.CheckpointLSN() != 10 {
+		t.Fatalf("frontier after a reopen=%d checkpoint=%d err=%v want 10/10", frontier, reopened.CheckpointLSN(), err)
+	}
+	if got, want := reopened.sb.WALHead, reopened.wal.logicalHeadValue(); got != want || got == 0 {
+		t.Fatalf("superblock WALHead byte cursor=%d want %d (nonzero)", got, want)
+	}
+	reopened.committer.Stop()
+	_ = reopened.fd.Close() // crash
+	reopenedOpen = false
+	again, err := OpenWALStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = again.Close() })
+	if _, err := again.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	if got := again.CheckpointLSN(); got != 10 {
+		t.Fatalf("checkpoint after a crash=%d want the durable frontier 10", got)
 	}
 }
 
