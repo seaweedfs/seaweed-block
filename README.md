@@ -52,8 +52,10 @@ agent microVM ──virtio-blk──> blockvolume (local WAL + extent)
 
 ### Measured
 
-All numbers come from lab runs with Firecracker microVMs (4 vCPU, 4 GiB, guest
-kernel 6.1). Each one is the median of 3 runs. They are measurements, not SLOs.
+The workload and lifecycle numbers come from lab runs with Firecracker
+microVMs (4 vCPU, 4 GiB, guest kernel 6.1). The snapshot, fork and cut numbers
+come from a host-side proxy, described with their table. Each number is the
+median of 3 runs. They are measurements, not SLOs.
 
 **Workspace workloads, Seaweed Block disk vs a local file-backed disk** (one
 bare-metal host; NVMe/TCP loopback; seconds):
@@ -78,8 +80,10 @@ bare-metal host; NVMe/TCP loopback; seconds):
   the same picture.
 
 **Snapshot and fork cost** (a 10 GiB volume written as 2,560 chunks of 4 MiB;
-median of 3; storage on a native Linux host; filer metadata calls replaced by a
-deterministic model, so network latency is excluded):
+median of 3). This is a host-side proxy, not a guest or network run: chunks are
+local files on a native Linux host, and filer metadata calls use a
+deterministic model, so network latency, guest `fsync` and the block frontend
+are excluded.
 
 | | Flat manifest | Two-level manifest (current) |
 |---|---|---|
@@ -87,8 +91,8 @@ deterministic model, so network latency is excluded):
 | Snapshot | 5.79 ms | 0.18 ms |
 | Fork | 10.67 ms | 0.29 ms |
 
-A cut that uploads 64 dirty chunks (256 MiB) took a median 624 ms with one
-upload at a time and 434 ms with 8 parallel uploads.
+In the same proxy, a cut that writes 64 dirty chunks (256 MiB) took a median
+624 ms with one upload at a time and 434 ms with 8 parallel uploads.
 
 **Workspace lifecycle on two hosts** (Firecracker VMs, SeaweedFS chunk backend):
 
