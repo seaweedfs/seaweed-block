@@ -3,6 +3,7 @@ package chunkstore
 import (
 	"context"
 	"errors"
+	"path"
 	"strings"
 	"testing"
 	"time"
@@ -393,5 +394,45 @@ func TestCatalog_DeleteRefusesAClaimedParent(t *testing.T) {
 	}
 	if got, err := c.DeleteSnapshot(ctx, "v1", "s02"); err != nil || got != SnapDeleting {
 		t.Fatalf("delete after the fork was aborted: %q %v", got, err)
+	}
+}
+
+// Review of f42e723: a completed fork's claim cleanup that read the parent
+// entry, then paused while an explicit delete marked it, must not write
+// its stale copy back (resurrecting an unnamed snapshot as a GC root).
+func TestCatalog_ClaimCleanupNeverUndoesADelete(t *testing.T) {
+	f, c := forkFixture(t)
+	ctx := context.Background()
+	holdFirst(f, catBase+"/v2/HEAD")
+	if _, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s01", Target: "v2", RequestID: "f"}); CodeOf(err) != CodeOutcomeUnknown {
+		t.Fatalf("fork: %v", err)
+	}
+	parent, err := c.readSnap(ctx, "v1", "s01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ran := false
+	c.retainHook = func(stage, name string) {
+		if stage != hookClaimDrop || name != "s01" || ran {
+			return
+		}
+		ran = true // the fork's HEAD exists now: its claim is dead
+		if _, err := c.DeleteSnapshot(ctx, "v1", "s01"); err != nil {
+			t.Fatalf("delete during the claim cleanup: %v", err)
+		}
+	}
+	if _, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s01", Target: "v2", RequestID: "f"}); err != nil {
+		t.Fatalf("fork retry: %v", err)
+	}
+	c.retainHook = nil
+	e, err := f.LookupEntry(ctx, path.Join(catBase, "v1", snapsDir, "s01"), parent.attempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ran || string(e.Extended[extSnapState]) != SnapDeleting || len(e.Extended[extSnapDeletedNs]) == 0 {
+		t.Fatalf("ran=%t state=%q deleted_ns=%q; want the delete mark kept", ran, e.Extended[extSnapState], e.Extended[extSnapDeletedNs])
+	}
+	if _, ok, err := c.resolveSnap(ctx, "v1", "s01"); ok || err != nil {
+		t.Fatalf("s01's name is back (%v)", err)
 	}
 }

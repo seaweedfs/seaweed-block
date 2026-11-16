@@ -516,6 +516,9 @@ const (
 	hookPlanned = "planned" // after planning, before any deletion
 	hookChecked = "checked" // an attempt's claims were read and none is live, before its mark
 	hookMarked  = "marked"  // an attempt is marked deleting, before its name is freed
+	// hookClaimDrop: a completed fork read its parent entry to drop its
+	// claim, before the conditional write.
+	hookClaimDrop = "claim-drop"
 )
 
 func (c *Catalog) hook(stage, name string) {
