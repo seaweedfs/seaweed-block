@@ -515,15 +515,14 @@ func decodeHeadDoc(p string, content []byte) (storage.ChunkHead, error) {
 	if err := json.Unmarshal(content, &fields); err != nil {
 		return fail("decode representation: %v", err)
 	}
-	if doc.Format == 1 {
-		for _, name := range []string{"segments", "chunk_bytes", "chunk_count"} {
-			if _, present := fields[name]; present {
-				return fail("flat HEAD contains segment field %s", name)
-			}
+	for name := range fields {
+		// encoding/json also matches tagged names case-insensitively; reject
+		// every such alias rather than let it bypass representation checks.
+		field := strings.ToLower(name)
+		if doc.Format == 1 && (field == "segments" || field == "chunk_bytes" || field == "chunk_count") {
+			return fail("flat HEAD contains segment field %s", name)
 		}
-	}
-	if doc.Format == 2 {
-		if _, present := fields["chunks"]; present {
+		if doc.Format == 2 && field == "chunks" {
 			return fail("segmented HEAD contains flat chunks field")
 		}
 	}
