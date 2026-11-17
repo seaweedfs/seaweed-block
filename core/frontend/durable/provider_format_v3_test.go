@@ -369,3 +369,54 @@ func exerciseMappedHEADRestoreV3(t *testing.T, loseClaimResponse bool) {
 	check(reopened, 5, next)
 	check(reopened, 12, second)
 }
+
+// Exercise the same snapshots consumed by the host status endpoint, not a
+// separately constructed status object.
+func TestDurableProviderV3_StatusTracksRecoverSyncAndCapture(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	p := mappedProviderV3(t, t.TempDir(), storage.NewMemChunkRemote())
+	st, err := p.EnsureStorage("v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := func() VolumeStatus {
+		t.Helper()
+		all := p.DurableStatuses()
+		if len(all) != 1 {
+			t.Fatalf("statuses=%+v", all)
+		}
+		v := all[0]
+		if v.VolumeID != "v1" || v.ReplicaID != "r1" || v.Epoch != 3 || !v.Latched || !v.FrontierKnown {
+			t.Fatalf("lineage/frontier=%+v", v)
+		}
+		return v
+	}
+	if v := status(); v.Operational || v.Chunk == nil || v.Chunk.Attached {
+		t.Fatalf("before recover=%+v", v)
+	}
+	if _, err = p.RecoverVolume(ctx, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	if v := status(); !v.Operational || v.Chunk == nil || !v.Chunk.Attached || v.Chunk.Fenced {
+		t.Fatalf("after recover=%+v", v)
+	}
+	if n, e := p.Backend("v1").Write(ctx, 5*4096, bytes.Repeat([]byte{0x77}, 4096)); e != nil || n != 4096 {
+		t.Fatal(n, e)
+	}
+	if err = p.Backend("v1").Sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if v := status(); v.DurableLSN != 1 || v.HeadLSN != 1 || v.Chunk.RemoteLSN != 0 {
+		t.Fatalf("after Sync=%+v", v)
+	}
+	if err = storage.FlushMappedWALStoreV3Test(st.(*storage.WALStore)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = p.CaptureVolume(ctx, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	if v := status(); v.DurableLSN != 1 || v.Chunk.RemoteLSN != 1 || !v.Operational {
+		t.Fatalf("after capture=%+v", v)
+	}
+}
