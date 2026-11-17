@@ -59,12 +59,12 @@ storageClass:
   nvmeTransport: rdma
 network:
   externalNVMe: true
-  frontendNetworkClass: 100gbe_roce
-  blockNodes:
-    - name: node-b
-      kubernetesNode: node-b
-      internalIP: 192.0.2.12
-      frontendIP: 198.51.100.12
+blockNodes:
+  - name: node-b
+    kubernetesNode: node-b
+    internalIP: 192.0.2.12
+    frontendIP: 198.51.100.12
+    frontendNetworkClass: 100gbe_roce
 ```
 
 RDMA requires a non-loopback RoCE frontend address and host `nvme-rdma`,
