@@ -29,8 +29,13 @@ type PromotionCandidateEvidence struct {
 }
 
 type PromotionProbeResult struct {
-	AckProfile   string
-	SyncAckLSN   uint64
+	AckProfile string
+	SyncAckLSN uint64
+	// SyncAckKnown reports that SyncAckLSN is a known required
+	// acknowledgement frontier, which may be zero. A nonzero SyncAckLSN
+	// is always a known frontier; a zero SyncAckLSN without SyncAckKnown
+	// is unknown and is never read as "nothing was acknowledged".
+	SyncAckKnown bool
 	CurrentKnown bool
 	Current      PromotionCandidateEvidence
 	Candidates   []PromotionCandidateEvidence
@@ -220,7 +225,7 @@ func (h *Host) applyPromotionEvidenceGate(snap *authority.ClusterSnapshot) (int,
 		}
 		probeCount++
 		result, ok := h.probePromotionCandidatesCurrent(vol.VolumeID, vol.Authority, candidates)
-		allowed := promotionAllowedReplicas(result, ok)
+		allowed := promotionAllowedReplicas(result, ok, len(candidates), h.freshPromotionPeers(vol.VolumeID, candidates))
 		if ok {
 			h.log.Printf("blockmaster: promotion gate volume=%s current=%s current_known=%t current_ready=%t ack_profile=%s required_lsn=%d candidates=%v allowed=%v",
 				vol.VolumeID, vol.Authority.ReplicaID, result.CurrentKnown, result.Current.Ready, result.AckProfile, result.SyncAckLSN, result.Candidates, allowed)
@@ -313,7 +318,7 @@ func (h *Host) applyUnsupportedPromotionEvidenceGate(placements []lifecycle.Plac
 		}
 		probeCount++
 		result, probeOK := h.probePromotionCandidatesCurrent(vol.VolumeID, current, candidates)
-		allowed := promotionAllowedReplicas(result, probeOK)
+		allowed := promotionAllowedReplicas(result, probeOK, len(candidates), h.freshPromotionPeers(vol.VolumeID, candidates))
 		if probeOK {
 			h.log.Printf("blockmaster: promotion gate unsupported volume=%s current=%s reasons=%v current_known=%t current_ready=%t ack_profile=%s required_lsn=%d candidates=%v allowed=%v",
 				vol.VolumeID, current.ReplicaID, evidence.Reasons, result.CurrentKnown, result.Current.Ready, result.AckProfile, result.SyncAckLSN, result.Candidates, allowed)
@@ -565,13 +570,72 @@ func (h *Host) probePromotionCandidatesCurrent(volumeID string, current authorit
 	return h.probePromotionCandidates(volumeID, current, candidates)
 }
 
-func promotionAllowedReplicas(result PromotionProbeResult, ok bool) map[string]bool {
+// freshPromotionPeers returns the peers that have a fresh heartbeat slot
+// now, by the observation store's own freshness rule (FreshSlotCandidate),
+// and report themselves reachable. Only these may count toward the
+// unknown-frontier survivor rule in promotionAllowedReplicas.
+func (h *Host) freshPromotionPeers(volumeID string, peers []authority.ReplicaCandidate) map[string]bool {
+	fresh := make(map[string]bool, len(peers))
+	for _, peer := range peers {
+		if slot, ok := h.freshCurrentSlot(volumeID, peer.ReplicaID); ok && slot.Reachable {
+			fresh[peer.ReplicaID] = true
+		}
+	}
+	return fresh
+}
+
+// unknownFrontierSurvivorsNeeded is how many of peerCount peers must be
+// probed ready, with a known durable frontier, before the highest durable
+// candidate may be promoted while the required acknowledgement frontier is
+// unknown. It mirrors replication.waitForSyncAcks
+// (core/replication/async_ack.go): a write is acknowledged only after the
+// primary's local sync and K peer acks, K = peerCount for sync_all and
+// K = (peerCount+1)/2 for sync_quorum. An acknowledged write therefore lives
+// on at least K of the peerCount peers, so any peerCount-K+1 peers include at
+// least one of them, and the highest durable frontier among those peers
+// covers every acknowledged write. With fewer, an acknowledged write may
+// live only on the peers that were not seen. RF3 sync_quorum: 2 of 2;
+// RF3 sync_all: 1 of 2.
+func unknownFrontierSurvivorsNeeded(ackProfile string, peerCount int) int {
+	required := peerCount
+	if strings.ToLower(strings.ReplaceAll(ackProfile, "-", "_")) == "sync_quorum" {
+		required = (peerCount + 1) / 2
+	}
+	return peerCount - required + 1
+}
+
+// promotionAllowedReplicas returns the candidates that may be promoted.
+// peerCount is the number of replicas other than the current primary, and
+// freshPeers holds those of them with a fresh heartbeat now.
+//
+// With a quorum ack profile and a known required frontier (SyncAckKnown or
+// a nonzero SyncAckLSN), a candidate must cover it: durable >= required.
+// With a quorum ack profile and an unknown frontier, coverage must be
+// proven from the survivors instead: at least
+// unknownFrontierSurvivorsNeeded peers must be probed ready in this probe
+// (ready implies a known durable frontier) and be fresh; otherwise nothing
+// is allowed. An unknown frontier is never read as zero. best_effort keeps
+// its rule: no required frontier can be covered, so a nonzero one refuses,
+// and otherwise the highest durable ready candidate is allowed.
+func promotionAllowedReplicas(result PromotionProbeResult, ok bool, peerCount int, freshPeers map[string]bool) map[string]bool {
 	allowed := map[string]bool{}
 	if !ok || !isKnownAckProfile(result.AckProfile) {
 		return allowed
 	}
 	if result.SyncAckLSN > 0 && !isQuorumAckProfile(result.AckProfile) {
 		return allowed
+	}
+	frontierKnown := result.SyncAckKnown || result.SyncAckLSN > 0
+	if isQuorumAckProfile(result.AckProfile) && !frontierKnown {
+		seen := map[string]bool{}
+		for _, candidate := range result.Candidates {
+			if candidate.ReplicaID != "" && candidate.Ready && freshPeers[candidate.ReplicaID] {
+				seen[candidate.ReplicaID] = true
+			}
+		}
+		if len(seen) < unknownFrontierSurvivorsNeeded(result.AckProfile, peerCount) {
+			return allowed
+		}
 	}
 	var bestLSN uint64
 	for _, candidate := range result.Candidates {
