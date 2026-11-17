@@ -24,9 +24,11 @@ import (
 // install paths (ApplyEntry, WriteExtentDirect, AdvanceFrontier; rows 9 to
 // 11) and the checkpoint/tail advance, which needs the row-7 map candidate.
 type walStoreV3State struct {
-	pub      *descriptorPublisherV3
-	w        *walWriterV3
-	ownedMap *chunkLSNMapV3
+	pub        *descriptorPublisherV3
+	w          *walWriterV3
+	ownedMap   *chunkLSNMapV3
+	mapEntries []chunkLSNEntryV3 // guarded by WALStore.mu; UNKNOWN is never cleared here
+	mapProof   *mapProofEpochV3
 
 	appended atomic.Uint64 // highest LSN pwritten to the WAL
 	wack     atomic.Uint64 // highest acknowledged LSN (Sync completed)
@@ -110,7 +112,7 @@ var testSkipFenceOnRecoverV3 bool
 func (s *WALStore) latchV3(err error) {
 	if err != nil {
 		s.ioFault.CompareAndSwap(nil, NewSubstrateIOFailure(err,
-			"v3 WAL append or descriptor publication failed; the open store refuses further Syncs, writes and checkpoints"))
+			"v3 durable persistence failed; the open store refuses further Syncs, writes and checkpoints"))
 	}
 }
 
@@ -298,10 +300,13 @@ func openWALStoreV3MapInternalForTest(path string, requireMap bool) (*WALStore, 
 		}
 		v.wack.Store(d.W)
 		if ownedMap != nil {
-			if err := v.pub.bindMapV3(mapCurrent, newMapProofEpochV3()); err != nil {
+			v.mapProof = newMapProofEpochV3()
+			if err := v.pub.bindMapV3(mapCurrent, v.mapProof); err != nil {
 				return err
 			}
 			v.ownedMap = ownedMap
+			v.mapEntries = append([]chunkLSNEntryV3(nil), mapCurrent.entries...)
+			ownedMap.latchPersistence = s.latchV3
 		}
 		s.v3 = v
 		return nil
@@ -351,6 +356,14 @@ func (s *WALStore) recoverV3() (uint64, error) {
 	if o.Installing {
 		return 0, installingErrorV3(o)
 	}
+	// Reconstruct volatile map coverage from the authoritative immutable root,
+	// then replay only the retained prefix. A same-open Recover must not keep
+	// speculative cache changes from a dropped suffix.
+	if v.ownedMap != nil {
+		v.pub.descMu.Lock()
+		v.mapEntries = append(v.mapEntries[:0], v.pub.mapCurrent.entries...)
+		v.pub.descMu.Unlock()
+	}
 	// Replay the records <= R into the dirty map (last writer wins); the
 	// rest are dropped and fenced below.
 	for _, r := range scan.Records {
@@ -365,6 +378,7 @@ func (s *WALStore) recoverV3() (uint64, error) {
 		size := uint64(walEntryHeaderSizeV3 + len(e.Data))
 		phys := (r.End - size) % d.WALSize
 		s.dm.putAtIfNewer(e.LBA, phys, 0, e.LSN, d.BlockSize)
+		s.recordMapWriteV3(e.LBA, e.LSN)
 	}
 	if h := v.testRecoverHold; h != nil {
 		h()
@@ -447,6 +461,13 @@ func (s *WALStore) appendWriteV3(lba uint32, data []byte, lsn uint64) (uint64, e
 	if s.v3.w == nil {
 		return 0, errWALBindingV3 // a half-published reset before its Recover
 	}
+	// Reserve proof invalidation before the WAL can change. This is under
+	// the existing store lock; a refused append only causes conservative retry.
+	if s.v3.mapProof != nil {
+		if err := s.v3.mapProof.mutatedV3(); err != nil {
+			return 0, err
+		}
+	}
 	phys, err := s.v3.w.append(e, s.v3.wack.Load())
 	if err != nil {
 		if errors.Is(err, errWALPwrite) {
@@ -454,6 +475,7 @@ func (s *WALStore) appendWriteV3(lba uint32, data []byte, lsn uint64) (uint64, e
 		}
 		return 0, err
 	}
+	s.recordMapWriteV3(uint64(lba), lsn)
 	s.v3.appended.Store(lsn)
 	return phys, nil
 }
@@ -674,6 +696,9 @@ func (f *flusher) readDirtyRecordV3(e snapshotEntry) ([]byte, uint64, error) {
 // prepared candidate meanwhile, this cycle publishes nothing.
 func (s *WALStore) persistCheckpointV3(highestLSN uint64) error {
 	v := s.v3
+	if v.ownedMap != nil {
+		return s.persistOwnedMapCheckpointV3(highestLSN)
+	}
 	if v.mapCandidate == nil {
 		return nil
 	}

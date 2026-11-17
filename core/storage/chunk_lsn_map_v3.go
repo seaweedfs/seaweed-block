@@ -233,14 +233,15 @@ func (c *chunkMapCandidateV3) descriptor(d descriptorV3) descriptorV3 {
 }
 
 type chunkLSNMapV3 struct {
-	mu             sync.Mutex
-	fd             *os.File
-	identity       descriptorV3
-	chunkBlocks    uint64
-	failed         error
-	lastGeneration uint64
-	syncFile       func() error
-	syncDirectory  func() error
+	mu               sync.Mutex
+	fd               *os.File
+	identity         descriptorV3
+	chunkBlocks      uint64
+	failed           error
+	lastGeneration   uint64
+	syncFile         func() error
+	syncDirectory    func() error
+	latchPersistence func(error)
 }
 
 func createChunkLSNMapV3(path string, d descriptorV3, cb uint64) (*chunkLSNMapV3, error) {
@@ -294,6 +295,21 @@ func openChunkLSNMapV3(path string, d descriptorV3, cb uint64) (*chunkLSNMapV3, 
 func (m *chunkLSNMapV3) Prepare(g, C uint64, entries []chunkLSNEntryV3, prior *chunkMapCandidateV3) (out *chunkMapCandidateV3, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.prepareLockedV3(g, C, entries, prior)
+}
+
+// Generation reservation and persistence share the existing sidecar mutex.
+// Concurrent preparers cannot select the same generation; no new lock or
+// scheduler is introduced, and aborted candidates remain immutable orphans.
+func (m *chunkLSNMapV3) prepareNextV3(C uint64, entries []chunkLSNEntryV3, prior *chunkMapCandidateV3) (*chunkMapCandidateV3, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.lastGeneration >= counterMaxV3 {
+		return nil, ErrCounterExhausted
+	}
+	return m.prepareLockedV3(m.lastGeneration+1, C, entries, prior)
+}
+func (m *chunkLSNMapV3) prepareLockedV3(g, C uint64, entries []chunkLSNEntryV3, prior *chunkMapCandidateV3) (out *chunkMapCandidateV3, err error) {
 	if m.failed != nil {
 		return nil, m.failed
 	}
@@ -331,6 +347,9 @@ func (m *chunkLSNMapV3) Prepare(g, C uint64, entries []chunkLSNEntryV3, prior *c
 	defer func() {
 		if err != nil {
 			m.failed = err
+			if m.latchPersistence != nil {
+				m.latchPersistence(err)
+			}
 		}
 	}()
 	write := func(b []byte) (uint64, error) {
