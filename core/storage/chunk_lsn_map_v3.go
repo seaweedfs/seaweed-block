@@ -350,9 +350,7 @@ func (m *chunkLSNMapV3) prepareLockedV3(g, C uint64, entries []chunkLSNEntryV3, 
 	defer func() {
 		if err != nil {
 			m.failed = err
-			if m.latchPersistence != nil {
-				m.latchPersistence(err)
-			}
+
 		}
 	}()
 	write := func(b []byte) (uint64, error) {
