@@ -1,0 +1,29 @@
+Slot vectors for DESIGN r12 (raw c9c652cbe846822dff5c08ce95081b0156e1df0582e6b9766b62e1742ddc1adf), section 2.
+Each file is one 4096-byte slot; CRC32C (Castagnoli) LE at 4092 unless the case says otherwise.
+Map-dependent predicates assume the map fixture vectors/reference-root.bin (rootBodyDigest b47d24af..., C=7, gen 1).
+
+slot-ref.bin crc32c=d91cb6ba: valid, selectable (2.1-2.3)
+slot-installing.bin crc32c=e4e97a9f: valid: installing with BaseCursor within [tail, head], nonzero ID (2.1)
+slot-strict.bin crc32c=3f9c7de6: valid: WMode A (2.1, 6.1)
+slot-prepared.bin crc32c=7b225d6f: valid but NEVER selectable: prepared, slotGen 1, BaseState none (2.3, 10.1)
+neg-crc.bin crc32c=d91cb6bb: INVALID: CRC32C mismatch / torn (2.2.1)
+neg-reserved-88.bin crc32c=17d37bf9: INVALID: nonzero reserved byte in 88..127 (2.2.1)
+neg-reserved-306.bin crc32c=dbbd4458: INVALID: nonzero reserved byte in 306..319 (2.1)
+neg-reserved-320.bin crc32c=78c27673: INVALID: nonzero reserved byte in 320..4091 (2.1)
+neg-flags.bin crc32c=4d19b714: INVALID: nonzero flags (2.2.1)
+neg-gen0.bin crc32c=befbd3b6: INVALID: slotGen 0 (2.2.2)
+neg-nonce0.bin crc32c=2420b892: INVALID: all-zero nonce (2.2.2)
+neg-walofs.bin crc32c=03e94503: INVALID: WALOffset != 8192 (2.2.3)
+neg-head.bin crc32c=37068518: INVALID: head > tail + WALSize (2.2.3)
+neg-wmode2.bin crc32c=11f156f3: INVALID: WMode not 0/1 (2.1)
+neg-phase2.bin crc32c=988d17e1: INVALID: MigrationPhase not 0/1 (2.1)
+neg-phase1-gen2.bin crc32c=d30bf27b: INVALID: prepared slot with slotGen != 1 (2.1)
+neg-phase1-installing.bin crc32c=46d7914a: INVALID: prepared slot with BaseState != none (2.1)
+neg-basestate3.bin crc32c=82cac0e2: INVALID: BaseState not 0/1/2 (2.1)
+neg-none-with-id.bin crc32c=7b0cd4b1: INVALID: BaseState none with nonzero BaseInstallID (2.1 BASE rules)
+neg-installing-zero-id.bin crc32c=46f91894: INVALID: installing with zero BaseInstallID (2.1 BASE rules)
+neg-implv1.bin crc32c=2eeac46d: INVALID: v3 with impl 1 (1, combinations)
+neg-coverage.bin crc32c=9ede57a3: INVALID: CheckpointLSN 8 > mapCoveredCheckpoint 7 (9.1 predicate 2)
+neg-covered-mismatch.bin crc32c=6c40d7e8: INVALID: descriptor mapCoveredCheckpoint != root coveredCheckpoint 7 (9.1 predicate 1)
+pair-equal-gen-A.bin crc32c=436d547b: with pair-equal-gen-B: equal slotGen, different bytes -> refuse errSuperblockInvalid (2.3)
+pair-equal-gen-B.bin crc32c=7d6e3c65: see pair-equal-gen-A
