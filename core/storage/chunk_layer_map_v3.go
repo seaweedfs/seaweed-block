@@ -21,7 +21,7 @@ func (l *chunkLayerImpl) persistCapturedMapV3(versions map[uint64]uint64) {
 	}
 	var clear []uint64
 	for idx, version := range versions {
-		if idx < uint64(len(v.mapEntries)) && v.mapEntries[idx].Unknown && l.chunkVersion(idx) == version {
+		if idx < uint64(len(v.mapEntries)) && v.mapEntries[idx].Unknown && l.chunkVersion(idx) >= version {
 			clear = append(clear, idx)
 		}
 	}
