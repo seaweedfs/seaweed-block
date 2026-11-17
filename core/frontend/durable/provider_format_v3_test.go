@@ -186,3 +186,49 @@ func TestDurableProviderV3_DefaultSelectorStillCreatesLegacy(t *testing.T) {
 		t.Fatal("default provider activated v3")
 	}
 }
+
+// This remains a refusal control until the owner seed/install transaction
+// replaces the legacy path. A failed preparation must not claim remote HEAD.
+func TestDurableProviderV3_UnwiredHEADRestoreRefusesBeforeClaim(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	remote := storage.NewMemChunkRemote()
+	if _, err := remote.CASHead(ctx, storage.ChunkHeadVersion{}, storage.ChunkHead{Epoch: 2, Holder: "old", RemoteLSN: 7}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := remote.GetHead(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := mappedProviderV3(t, t.TempDir(), remote)
+	if _, err = p.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(p.volumePath("v1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = p.RecoverVolume(ctx, "v1"); err == nil {
+		t.Fatal("unwired HEAD restore accepted")
+	}
+	after, err := remote.GetHead(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Gen != before.Gen || after.Epoch != before.Epoch || after.Holder != before.Holder {
+		t.Fatal("failed seed claimed HEAD")
+	}
+	now, err := os.ReadFile(p.volumePath("v1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Recover may publish the serving scan's descriptor. It must never serialize
+	// a legacy header or advance the inherited logical frontier.
+	if binary.LittleEndian.Uint16(now[4:6]) != 3 || binary.LittleEndian.Uint16(raw[4:6]) != 3 {
+		t.Fatal("restore serialized a legacy header")
+	}
+	var buf [4096]byte
+	if _, err := p.Backend("v1").Read(ctx, 0, buf[:]); err == nil {
+		t.Fatal("failed restore left backend operational")
+	}
+}

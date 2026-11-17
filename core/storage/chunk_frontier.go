@@ -11,6 +11,9 @@ import (
 // attaching the chunk layer or admitting writes. Repeating after failure is safe.
 // Order: captureMu -> lifecycleMu -> mu; no remote call or layer callback.
 func (s *WALStore) SeedChunkFrontier(lsn uint64) error {
+	if s.v3 != nil {
+		return fmt.Errorf("%w: seed requires the v3 descriptor install transaction", errV3NotYet)
+	}
 	s.captureMu.Lock()
 	defer s.captureMu.Unlock()
 	s.lifecycleMu.RLock()
