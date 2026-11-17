@@ -28,14 +28,36 @@ bare-metal host; NVMe/TCP loopback; seconds):
   kernel absorbs metadata and the block device only sees batched writes.
 - Every guest `fsync` was verified to reach the backend sync: about 2 NVMe
   flushes per `fsync`, and zero in an unsafe-cache control.
-- The cost in these runs is `fsync` latency, about 7 ms against 3 ms local.
-  The runs used the NVMe/TCP loopback frontend. The ublk frontend
-  (`--ublk-device`) and the per-stage `fsync` histograms (`/status/durable`,
-  see [fsync latency](fsync-latency.md)) are on `main` now; reducing the
-  latency, including group-commit tuning, is in progress. The numbers here
-  record those runs, not a measurement of current `main`.
+- The cost in these runs was `fsync` latency, about 7 ms against 3 ms local,
+  over the NVMe/TCP loopback frontend. These are the original runs, kept as
+  history; the next section measures `fsync` after the group-commit fix.
 - The same comparison on an Azure `D16s_v5` nested-virtualization host gives
   the same picture.
+
+**`fsync` after the group-commit fix** ([#173](https://github.com/seaweedfs/seaweed-block/pull/173);
+one bare-metal lab host; Firecracker guest; fio 4 KiB random write, one request
+at a time, `fsync` after every write, 60 s; median of 3 boots per setup):
+
+| Setup | `fsync` p50 | `fsync` p99 | Write IOPS | 2,000 × create + write + `fsync` |
+|---|---|---|---|---|
+| ublk, `walstore-chunk` | 3.23 ms | 9.11 ms | 283 | 8.48 s |
+| ublk, `smartwal` (experimental) | 3.26 ms | 5.21 ms | 299 | 8.29 s |
+| NVMe/TCP loopback, `walstore-chunk` | 3.59 ms | 9.63 ms | 258 | 9.27 s |
+| NVMe/TCP loopback, `smartwal` (experimental) | 3.59 ms | 7.57 ms | 263 | 8.68 s |
+| Local file-backed disk | 2.74 ms | 4.42 ms | 357 | 6.11 s |
+
+- Before the fix, on the same pack and host, guest `fsync` p50 was 5.54 ms
+  (ublk) and 5.87 ms (NVMe/TCP) against 2.74 ms local.
+- The fix removed an idle wait: a lone `Sync` used to sit out the group-commit
+  collection delay with nobody to batch with. On `walstore-chunk` the
+  group-commit wait fell to about 8 µs (histogram p50 bucket), and a backend
+  `Sync` now takes about 1.2 ms on average (mean over the gate window). Each guest `fsync` causes two backend syncs.
+- All four Seaweed Block setups passed a gate that every guest `fsync` reaches the backend sync
+  (at least 2,000 flushes and 2,000 backend syncs per run); an unsafe-cache
+  control showed zero.
+- The other workloads (`npm ci`, `git clone`, untar, `find` + `stat`) stayed at
+  local-disk speed.
+- One time window, 3 runs per setup: descriptive, not a performance gate.
 
 **Snapshot and fork cost** (a 10 GiB volume written as 2,560 chunks of 4 MiB;
 median of 3). This is a host-side proxy, not a guest or network run: chunks are

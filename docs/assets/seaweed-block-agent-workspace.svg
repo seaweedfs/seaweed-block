@@ -86,5 +86,5 @@
   <text x="70" y="474" font-size="14" font-weight="700" fill="#e2e8f0">Measured on lab hosts: workloads in Firecracker microVMs; snapshot/fork in a host-side proxy (not an SLO)</text>
   <text x="70" y="502" font-size="13" fill="#cbd5e1">npm ci · git clone · untar · find+stat: same as a local disk</text>
   <text x="560" y="502" font-size="13" fill="#cbd5e1">snapshot 0.18 ms · fork 0.29 ms (10 GiB volume) · two-host lifecycle 35/35</text>
-  <text x="70" y="522" font-size="12" fill="#94a3b8">fsync: ~7 ms vs ~3 ms local today; ublk frontend and per-stage breakdown in progress</text>
+  <text x="70" y="522" font-size="12" fill="#94a3b8">fsync (ublk): 3.2 ms vs 2.7 ms local · every guest fsync reaches the backend sync</text>
 </svg>
