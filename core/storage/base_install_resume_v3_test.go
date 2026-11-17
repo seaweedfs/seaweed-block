@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"errors"
+	"os"
 	"testing"
 )
 
@@ -118,4 +119,74 @@ func TestBaseInstallV3EBelowThePersistedHead(t *testing.T) {
 	if _, err := q.resumeBaseInstallV3(idB); err != nil {
 		t.Fatalf("resume of the covering install: %v", err)
 	}
+}
+
+// codex01 row 11b P1: a same-open Recover while this open's install is live
+// must not leave a resumable cut behind. The old handle stays valid
+// (r17.4) and applies and acknowledges LSN 12 after the Recover; a resume
+// then refuses before any I/O, so the acknowledged record's bytes are
+// unchanged, and a crash and a physical reopen still resume the same ID and
+// serve LSN 12. Mutant: recording the recovered bounds on a same-open
+// Recover lets the resume fence from the stale E and erase the acknowledged
+// LSN 12, failing here.
+func TestBaseInstallV3SameOpenRecoverLeavesNoStaleResumeCut(t *testing.T) {
+	s, path := newStoreV3(t, WModeStrict)
+	writeSynced(t, s, 1, 2)
+	h := beginV3(t, s, 10, idA)
+	if err := h.ApplyInstallEntry(1, blk(11), 11); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Recover(); !errors.Is(err, ErrBaseIncomplete) {
+		t.Fatalf("same-open Recover while installing: err = %v, want ErrBaseIncomplete", err)
+	}
+	if err := h.ApplyInstallEntry(2, blk(12), 12); err != nil {
+		t.Fatalf("the live handle after a same-open Recover: %v", err)
+	}
+	if H, err := s.SyncInstallLog(idA); err != nil || H != 12 {
+		t.Fatalf("ack of LSN 12 = (%d, %v)", H, err)
+	}
+	off := recordOffset(t, path, 12)
+	before := readRawV3(t, path, off, walEntryHeaderSizeV3+v3TestBlock)
+	if _, err := s.resumeBaseInstallV3(idA); err == nil {
+		t.Fatal("a resume after a same-open Recover proceeded")
+	}
+	if got := readRawV3(t, path, off, walEntryHeaderSizeV3+v3TestBlock); !bytes.Equal(got, before) {
+		t.Fatal("the refused resume changed the acknowledged LSN 12 record")
+	}
+	crashRecoveryHardeningStore(t, s)
+	r, err := openUnmappedWALStoreV3ForTest(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.DisableAutoFlushForRecoveryTest()
+	if _, err := r.Recover(); !errors.Is(err, ErrBaseIncomplete) || errors.Is(err, ErrInstallSuffixDamaged) {
+		t.Fatalf("physical reopen: err = %v, want an intact ErrBaseIncomplete", err)
+	}
+	hr, err := r.resumeBaseInstallV3(idA)
+	if err != nil {
+		t.Fatalf("resume after the physical reopen: %v", err)
+	}
+	if err := hr.MarkBaseComplete(); err != nil {
+		t.Fatal(err)
+	}
+	q := reopenServingV3(t, r, path)
+	for lba, want := range map[uint32]byte{1: 11, 2: 12} {
+		if got := readV3(t, q, lba); !bytes.Equal(got, blk(want)) {
+			t.Fatalf("LBA %d = %x..., want %x", lba, got[0], want)
+		}
+	}
+}
+
+func readRawV3(t *testing.T, path string, off int64, n int) []byte {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	b := make([]byte, n)
+	if _, err := f.ReadAt(b, off); err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
