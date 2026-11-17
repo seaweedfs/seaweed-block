@@ -131,3 +131,58 @@ func TestDurableProviderV3_MappedCheckpointCaptureAndReopen(t *testing.T) {
 	}
 	check(next)
 }
+
+// The selector must not turn a missing owned map into a legacy bitmap path.
+func TestDurableProviderV3_MissingMapRefusesBeforeBackend(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	root := t.TempDir()
+	remote := storage.NewMemChunkRemote()
+	p := mappedProviderV3(t, root, remote)
+	if _, err := p.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.RecoverVolume(ctx, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	path := p.volumePath("v1")
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path + ".chunkmap"); err != nil {
+		t.Fatal(err)
+	}
+	p2 := mappedProviderV3(t, root, remote)
+	if st, err := p2.EnsureStorage("v1"); err == nil || st != nil {
+		t.Fatalf("accepted missing map: store=%v err=%v", st, err)
+	}
+	if p2.Backend("v1") != nil {
+		t.Fatal("failed open cached a backend")
+	}
+	if _, err := os.Stat(path + ".chunkbitmap"); !os.IsNotExist(err) {
+		t.Fatalf("legacy fallback created a bitmap: %v", err)
+	}
+}
+
+func TestDurableProviderV3_DefaultSelectorStillCreatesLegacy(t *testing.T) {
+	p, err := NewDurableProvider(ProviderConfig{Impl: ImplWALStore, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096}, formatV3View{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	if _, err = p.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(p.volumePath("v1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	var hdr [16]byte
+	if _, err = f.ReadAt(hdr[:], 0); err != nil {
+		t.Fatal(err)
+	}
+	if binary.LittleEndian.Uint32(hdr[12:16]) != 1 {
+		t.Fatal("default provider activated v3")
+	}
+}
