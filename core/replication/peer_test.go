@@ -306,18 +306,17 @@ func TestReplicaPeer_ShipEntry_DegradedWithActiveSession_RoutesSessionLane(t *te
 func TestReplicaPeer_RefreshLiveShipSessionAfter_RotatesPastRecoverySession(t *testing.T) {
 	peer, _, _ := setupPeerWithRealReplica(t)
 	oldSessionID := peer.sessionID
-	if oldSessionID >= 500 {
-		t.Fatalf("precondition: live session already beyond recovery marker: %d", oldSessionID)
-	}
+	// Session IDs are process-wide and keep advancing across -count runs.
+	recoverySessionID := oldSessionID + 500
 	if !peer.executor.HasSession(oldSessionID) {
 		t.Fatalf("precondition: old live session %d not registered", oldSessionID)
 	}
 
-	if err := peer.RefreshLiveShipSessionAfter(500, 6001, "test recovery completed"); err != nil {
+	if err := peer.RefreshLiveShipSessionAfter(recoverySessionID, 6001, "test recovery completed"); err != nil {
 		t.Fatalf("RefreshLiveShipSessionAfter: %v", err)
 	}
-	if peer.sessionID <= 500 {
-		t.Fatalf("new live sessionID=%d want > recovery session 500", peer.sessionID)
+	if peer.sessionID <= recoverySessionID {
+		t.Fatalf("new live sessionID=%d want > recovery session %d", peer.sessionID, recoverySessionID)
 	}
 	if peer.lineage.SessionID != peer.sessionID {
 		t.Fatalf("lineage SessionID=%d does not match peer sessionID=%d", peer.lineage.SessionID, peer.sessionID)

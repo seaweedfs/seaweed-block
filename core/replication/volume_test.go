@@ -155,10 +155,12 @@ func TestReplicationVolume_RuntimeRecoveryStatus_ReportsTerminalFrontier(t *test
 	if err := v.OnLocalWrite(context.Background(), LocalWrite{LBA: 1, Data: data, LSN: 1}); err != nil {
 		t.Fatalf("OnLocalWrite: %v", err)
 	}
+	// Recovery must supersede this run's live session, not a fixed process-wide ID.
+	recoverySessionID := v.PeerStatuses()[0].SessionID + 2000
 	req := RuntimeRecoveryRequest{
 		ReplicaID:       "r1",
 		TargetDataAddr:  addr,
-		SessionID:       2001,
+		SessionID:       recoverySessionID,
 		Epoch:           3,
 		EndpointVersion: 2,
 		BasePinLSN:      1,
