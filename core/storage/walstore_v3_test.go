@@ -367,9 +367,14 @@ func TestWALStoreV3FlusherWritesTheExtentButHoldsTheCheckpointUntilTheMap(t *tes
 		t.Fatalf("checkpoint/tail advanced without a map candidate: %d/%d -> %d/%d",
 			before.CheckpointLSN, before.RetainedTail, after.CheckpointLSN, after.RetainedTail)
 	}
-	// The data reads back (now from the extent) and survives a crash (from
-	// the still-retained WAL).
+	// Uncovered dirty entries now remain retry work. Check the extent
+	// explicitly, so a WAL-first Read cannot mask a missing extent write.
+	// The data also survives a crash through the still-retained WAL.
 	for lba := uint32(1); lba <= 3; lba++ {
+		extent, err := s.readFromExtent(lba)
+		if err != nil || !bytes.Equal(extent, blk(byte(lba))) {
+			t.Fatalf("LBA %d not materialized in the extent: %v", lba, err)
+		}
 		if !bytes.Equal(readV3(t, s, lba), blk(byte(lba))) {
 			t.Fatalf("LBA %d unreadable after the v3 flush", lba)
 		}
