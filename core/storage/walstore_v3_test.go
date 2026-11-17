@@ -480,7 +480,7 @@ func TestWALStoreV3RecoversAHistoryEndingAtTheLastRepresentableCursor(t *testing
 // acknowledges under C before SetWMode(A) publishes the new mode.
 func TestWALStoreV3SetWModeWaitsForAHeldBatch(t *testing.T) {
 	s, _ := newStoreV3(t, WModeLagged)
-	defer crashRecoveryHardeningStore(t, s)
+	t.Cleanup(func() { crashRecoveryHardeningStore(t, s) })
 	writeSynced(t, s, 1, 1)
 	if _, err := s.Write(2, blk(2)); err != nil {
 		t.Fatal(err)
@@ -526,7 +526,7 @@ func TestWALStoreV3SetWModeWaitsForAHeldBatch(t *testing.T) {
 // once SetWMode has committed.
 func TestWALStoreV3NoBatchAcksUnderAStaleModeAfterSetWMode(t *testing.T) {
 	s, _ := newStoreV3(t, WModeLagged)
-	defer crashRecoveryHardeningStore(t, s)
+	t.Cleanup(func() { crashRecoveryHardeningStore(t, s) })
 	writeSynced(t, s, 1, 1)
 	parked, release := make(chan struct{}), make(chan struct{})
 	rel := sync.OnceFunc(func() { close(release) })
@@ -705,5 +705,56 @@ func TestWALStoreV3FlusherCycleRunsTheIdleRefresh(t *testing.T) {
 	damageRecord(t, path, 3)
 	if _, err := reopenV3(t, path); !isWALCorrupt(err) {
 		t.Fatalf("after the flusher's refresh: err = %v, want wal_corrupt", err)
+	}
+}
+
+// codex01 row 5c P1: a refresh that read the acknowledged W before a
+// same-open recovery lowered it must not publish it afterwards. Real
+// flusher cycle: it flushes, enters the idle refresh, caches W 2 and parks;
+// record 2 is then damaged and the same instance recovers to R 1; the
+// refresh resumes and must publish nothing, so the next Recover succeeds.
+func TestWALStoreV3RefreshCachedAcrossARecoveryPublishesNothing(t *testing.T) {
+	s, path := newStoreV3(t, WModeLagged)
+	t.Cleanup(func() { crashRecoveryHardeningStore(t, s) })
+	writeSynced(t, s, 1, 2) // slot W 1 (lagged), acknowledged W 2
+	parked, release := make(chan struct{}), make(chan struct{})
+	rel := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(rel)
+	var once sync.Once
+	s.v3.testRefreshCached = func() { once.Do(func() { close(parked); <-release }) }
+	flushErr := make(chan error, 1)
+	go func() { flushErr <- s.flusher.flushOnceInternal(false) }()
+	waitV3(t, parked, "the refresh holding a cached W")
+	damageRecord(t, path, 2)
+	if _, err := s.Recover(); err != nil {
+		t.Fatalf("same-open Recover: %v", err)
+	}
+	if got := s.v3.wack.Load(); got != 1 {
+		t.Fatalf("acknowledged W after recovery = %d, want 1", got)
+	}
+	rel()
+	if err := recvErrV3(t, flushErr, "the flusher cycle"); err != nil {
+		t.Fatalf("flusher cycle: %v", err)
+	}
+	if w := s.v3.pub.current().W; w > 1 {
+		t.Fatalf("the stale refresh published W %d after the recovery to R 1", w)
+	}
+	if _, err := s.Recover(); err != nil {
+		t.Fatalf("second Recover: %v (a false wal_corrupt from a stale refresh)", err)
+	}
+}
+
+// codex01 row 5c P2: the empty-dirty-set branch of the flusher cycle runs the
+// idle refresh on its own (discriminated separately from the flush branch).
+func TestWALStoreV3FlusherEmptyCycleRunsTheIdleRefresh(t *testing.T) {
+	s, _ := newStoreV3(t, WModeLagged)
+	t.Cleanup(func() { crashRecoveryHardeningStore(t, s) })
+	writeSynced(t, s, 1, 2) // slot W 1 (lagged), acknowledged W 2
+	s.dm.clear()            // nothing dirty: the cycle takes the empty branch
+	if err := s.flusher.flushOnceInternal(false); err != nil {
+		t.Fatal(err)
+	}
+	if w := s.v3.pub.current().W; w != 2 {
+		t.Fatalf("slot W after an empty flusher cycle = %d, want 2 (the idle refresh)", w)
 	}
 }

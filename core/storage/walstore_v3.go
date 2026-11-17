@@ -31,6 +31,16 @@ type walStoreV3State struct {
 	appended atomic.Uint64 // highest LSN pwritten to the WAL
 	wack     atomic.Uint64 // highest acknowledged LSN (Sync completed)
 
+	// recoverEpoch is bumped first thing by every recovery, under s.mu and
+	// before it reads the descriptor. Every publication that carries a W
+	// derived from the cached wack/appended values (a Sync batch, the idle
+	// refresh, SetWMode) captures it with those values and rechecks it in
+	// its publication mutate, under descMu. A recovery that lowered the
+	// frontier in between therefore makes that publication a no-op, and a
+	// publication that won the race finished before the recovery read the
+	// descriptor (codex01 row 5c). No lock edge is added.
+	recoverEpoch atomic.Uint64
+
 	// syncMu is the group-commit leader role for the v3-only publications
 	// that run outside the committer (refreshW, SetWMode).
 	syncMu sync.Mutex
@@ -49,6 +59,25 @@ type walStoreV3State struct {
 	// testSetWModeHoldingRole runs in SetWMode after it has taken the leader
 	// role and before it publishes the new mode.
 	testSetWModeHoldingRole func()
+	// testRefreshCached runs in refreshW after it has read the acknowledged
+	// W and before it publishes.
+	testRefreshCached func()
+}
+
+// errV3RecoveredMeanwhile: a recovery ran between reading the acknowledged
+// frontier and publishing it; nothing is published.
+var errV3RecoveredMeanwhile = errors.New("storage: v3 recovery ran meanwhile; stale publication dropped")
+
+// publishCachedW publishes a W derived from values read at recovery epoch
+// ep, unless a recovery has run since (checked under descMu).
+func (v *walStoreV3State) publishCachedW(ep uint64, set func(n *descriptorV3)) (descriptorV3, error) {
+	return v.pub.publish(nil, nil, func(n *descriptorV3) error {
+		if v.recoverEpoch.Load() != ep {
+			return errV3RecoveredMeanwhile
+		}
+		set(n)
+		return nil
+	})
 }
 
 var errV3NotYet = errors.New("storage: operation not yet supported on a v3 store (later plan row)")
@@ -201,6 +230,7 @@ func openWALStoreV3ForTest(path string) (*WALStore, error) {
 // captureMu, lifecycleMu and s.mu, as v2 Recover does.
 func (s *WALStore) recoverV3() (uint64, error) {
 	v := s.v3
+	v.recoverEpoch.Add(1) // before the descriptor is read (see recoverEpoch)
 	d := v.pub.current()
 	s.dm.clear()
 	scan, err := scanWALV3(s.fd, d)
@@ -338,6 +368,7 @@ func (s *WALStore) syncWALBatchV3() error {
 	}
 	v.syncMu.Lock()
 	defer v.syncMu.Unlock()
+	ep := v.recoverEpoch.Load()
 	H, prev := v.appended.Load(), v.wack.Load()
 	switch v.pub.current().WMode {
 	case WModeStrict:
@@ -345,7 +376,7 @@ func (s *WALStore) syncWALBatchV3() error {
 		if err := s.syncFile(nil, func() error { return s.syncWALFile() }); err != nil {
 			return err
 		}
-		if _, err := v.pub.publish(nil, nil, func(n *descriptorV3) error { n.W = H; return nil }); err != nil {
+		if _, err := v.publishCachedW(ep, func(n *descriptorV3) { n.W = H }); err != nil {
 			return err
 		}
 	default:
@@ -353,7 +384,7 @@ func (s *WALStore) syncWALBatchV3() error {
 		// W, and the publication's one fsync covers this batch's records
 		// and the slot. The slot never names an LSN beyond a completed fsync.
 		s.walSyncCalls.Add(1)
-		if _, err := v.pub.publish(nil, nil, func(n *descriptorV3) error { n.W = prev; return nil }); err != nil {
+		if _, err := v.publishCachedW(ep, func(n *descriptorV3) { n.W = prev }); err != nil {
 			return err
 		}
 	}
@@ -382,11 +413,18 @@ func (s *WALStore) refreshW() error {
 	}
 	v.syncMu.Lock()
 	defer v.syncMu.Unlock()
+	ep := v.recoverEpoch.Load()
 	wack := v.wack.Load()
 	if wack <= v.pub.current().W {
 		return nil
 	}
-	_, err := v.pub.publish(nil, nil, func(n *descriptorV3) error { n.W = wack; return nil })
+	if h := v.testRefreshCached; h != nil {
+		h()
+	}
+	_, err := v.publishCachedW(ep, func(n *descriptorV3) { n.W = wack })
+	if errors.Is(err, errV3RecoveredMeanwhile) {
+		return nil // the refresh is best effort; the recovery superseded it
+	}
 	return err
 }
 
@@ -407,11 +445,9 @@ func (s *WALStore) SetWMode(m WMode) error {
 	if h := v.testSetWModeHoldingRole; h != nil {
 		h()
 	}
+	ep := v.recoverEpoch.Load()
 	wack := v.wack.Load()
-	_, err := v.pub.publish(nil, nil, func(n *descriptorV3) error {
-		n.WMode, n.W = m, wack
-		return nil
-	})
+	_, err := v.publishCachedW(ep, func(n *descriptorV3) { n.WMode, n.W = m, wack })
 	return err
 }
 
