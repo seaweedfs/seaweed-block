@@ -59,13 +59,23 @@ func TestWALStoreV3_AutomaticMapCheckpoint(t *testing.T) {
 	}
 }
 func TestWALStoreV3_AutomaticMapPersistenceFailureLatchesStore(t *testing.T) {
-	for _, stage := range []string{"file", "directory"} {
+	for _, stage := range []string{"file", "root", "directory"} {
 		t.Run(stage, func(t *testing.T) {
 			s, _ := newMappedCheckpointStoreV3(t)
 			writeSynced(t, s, 1, 1)
 			before := s.v3.pub.current()
 			injected := errors.New("injected map persistence failure")
-			if stage == "file" {
+			if stage == "root" {
+				realSync := s.v3.ownedMap.syncFile
+				calls := 0
+				s.v3.ownedMap.syncFile = func() error {
+					calls++
+					if calls == 2 {
+						return injected
+					}
+					return realSync()
+				}
+			} else if stage == "file" {
 				s.v3.ownedMap.syncFile = func() error { return injected }
 			} else {
 				s.v3.ownedMap.syncDirectory = func() error { return injected }
@@ -242,5 +252,99 @@ func TestWALStoreV3_UncertainMapCheckpointPinsDependencies(t *testing.T) {
 	}
 	if !bytes.Equal(readV3(t, r, 1), blk(1)) {
 		t.Fatal("resolved checkpoint lost extent data")
+	}
+}
+
+type checkpointOrderMetadataV3 struct{ before func(uint64) error }
+
+func (*checkpointOrderMetadataV3) OnExtentWrite(uint32, []byte) error        { return nil }
+func (*checkpointOrderMetadataV3) VerifyExtent(uint32, []byte) error         { return nil }
+func (h *checkpointOrderMetadataV3) BeforeCheckpointAdvance(cp uint64) error { return h.before(cp) }
+func TestWALStoreV3_AutomaticCheckpointMetadataOrderAndRetry(t *testing.T) {
+	s, _ := newMappedCheckpointStoreV3(t)
+	writeSynced(t, s, 1, 1)
+	dataDurable, metadataDone, mapDurable := false, false, false
+	failBarrier := true
+	injected := errors.New("metadata barrier refused")
+	s.metadata = &checkpointOrderMetadataV3{before: func(cp uint64) error {
+		if !dataDurable || cp != 1 || s.CheckpointLSN() != 0 {
+			t.Error("metadata callback not between data sync and checkpoint")
+		}
+		if failBarrier {
+			return injected
+		}
+		metadataDone = true
+		return nil
+	}}
+	realExtentSync := s.syncExtentFile
+	s.syncExtentFile = func() error {
+		err := realExtentSync()
+		if err == nil {
+			dataDurable = true
+		}
+		return err
+	}
+	m := s.v3.ownedMap
+	realMapSync, realDirectory := m.syncFile, m.syncDirectory
+	m.syncFile = func() error {
+		if !metadataDone {
+			t.Error("map persisted before metadata barrier")
+		}
+		return realMapSync()
+	}
+	m.syncDirectory = func() error {
+		err := realDirectory()
+		if err == nil {
+			mapDurable = true
+		}
+		return err
+	}
+	s.v3.testBeforeSlotWrite = func() error {
+		if !metadataDone || !mapDurable {
+			t.Error("descriptor published before map/metadata durability")
+		}
+		return nil
+	}
+	initial := s.v3.pub.current()
+	if err := s.flusher.flushOnce(); !errors.Is(err, injected) {
+		t.Fatalf("metadata failure=%v", err)
+	}
+	if s.v3.pub.current() != initial || m.lastGeneration != initial.MapGeneration || s.dm.len() != 1 {
+		t.Fatal("metadata refusal published/retired progress or prepared a map")
+	}
+	failBarrier = false
+	dataDurable = false
+	if err := s.flusher.flushOnce(); err != nil {
+		t.Fatal(err)
+	}
+	if !metadataDone || !mapDurable || s.CheckpointLSN() != 1 {
+		t.Fatal("retry did not complete ordered checkpoint")
+	}
+}
+func TestWALStoreV3_AutomaticMapRecoverRebuildsCoverage(t *testing.T) {
+	s, path := newMappedCheckpointStoreV3(t)
+	writeSynced(t, s, 5, 5)
+	crashRecoveryHardeningStore(t, s)
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
+	r, err := openWALStoreV3ForTest(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.DisableAutoFlushForRecoveryTest()
+	t.Cleanup(func() { r.Close() })
+	if _, err = r.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	if err = r.flusher.flushOnce(); err != nil {
+		t.Fatal(err)
+	}
+	es, _, err := readChunkLSNMapV3(r.v3.ownedMap.fd, r.v3.pub.current(), 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if es[1].LSN != 1 {
+		t.Fatalf("replayed write omitted from map: %+v", es[1])
 	}
 }
