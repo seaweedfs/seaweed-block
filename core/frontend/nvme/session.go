@@ -402,11 +402,12 @@ func (s *Session) recvH2CData(totalBytes uint32) ([]byte, error) {
 		if dataLen == 0 {
 			return nil, fmt.Errorf("recvH2CData: H2CData PDU has no payload")
 		}
-		if h2c.DATAO+dataLen > totalBytes {
+		end := uint64(h2c.DATAO) + uint64(dataLen)
+		if end > uint64(totalBytes) {
 			return nil, fmt.Errorf("recvH2CData: data exceeds expected size (%d+%d > %d)",
 				h2c.DATAO, dataLen, totalBytes)
 		}
-		if err := s.wire.ReceiveData(buf[h2c.DATAO : h2c.DATAO+dataLen]); err != nil {
+		if err := s.wire.ReceiveData(buf[uint64(h2c.DATAO):end]); err != nil {
 			return nil, fmt.Errorf("recvH2CData: receive data: %w", err)
 		}
 		s.recordH2CData(dataLen)

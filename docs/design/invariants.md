@@ -411,6 +411,13 @@ Notes:
 
 ---
 
+
+### B.8 NVMe/TCP receive bounds
+
+| ID | Statement | Machine / transition | Enforced in | Test | TLA+ property | Status |
+|---|---|---|---|---|---|---|
+| `INV-NVME-H2C-RANGE-001` | An H2CData range exceeding the expected transfer size is refused before slicing, including a uint32 offset-plus-length overflow; an exact-bound payload is preserved. | Frontend H2C receive validation; no storage state transition | `core/frontend/nvme/session.go` `recvH2CData` | `TestRecvH2CDataRangeBounds` (`core/frontend/nvme/h2c_bounds_test.go`) | — | ACTIVE |
+
 ## Part C. Change rules
 
 How a fix or a feature is calibrated against this model:
