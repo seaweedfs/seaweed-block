@@ -96,8 +96,9 @@ type walStoreV3State struct {
 
 	// installMu is the install admission lock (DESIGN 8.7), the topmost lock
 	// of section 4: begin and complete hold it exclusive, a handle mutation
-	// shared. liveInstallID is the ID this open began (guarded by
-	// installMu); an installing ID from before the open is plan row 11's.
+	// shared. liveInstallID is the ID this open began (written under
+	// installMu and s.mu, so either guards a read); an installing ID from
+	// before the open is a physical reopen's (plan row 11).
 	installMu     sync.RWMutex
 	liveInstallID [16]byte
 	// installEpoch counts the begins of this open (guarded by installMu): a
@@ -387,16 +388,25 @@ func (s *WALStore) recoverV3() (uint64, error) {
 		// Nothing is fenced, published or admitted here; the allocator
 		// state continues above every trusted record so a later install
 		// never reuses an LSN the WAL still holds.
-		ro := &installReopenV3{id: d.BaseInstallID, E: o.E, R: o.R, damaged: o.Damaged, walSize: d.WALSize}
-		for _, r := range scan.Records {
-			if r.Entry.LSN > o.R {
-				break
+		//
+		// Only a physical reopen records them: when this open began the
+		// installing ID, its handle stays valid (DESIGN r17.4: until the next
+		// begin) and may append and acknowledge past this cut, so a cached E
+		// would be stale and fencing from it could erase acknowledged
+		// records (codex01 row 11b P1). A resume or a fenced supersession
+		// then refuses before any I/O; the live install continues.
+		if d.BaseInstallID != v.liveInstallID {
+			ro := &installReopenV3{id: d.BaseInstallID, E: o.E, R: o.R, damaged: o.Damaged, walSize: d.WALSize}
+			for _, r := range scan.Records {
+				if r.Entry.LSN > o.R {
+					break
+				}
+				if r.Entry.Type == walEntryWrite {
+					ro.records = append(ro.records, r)
+				}
 			}
-			if r.Entry.Type == walEntryWrite {
-				ro.records = append(ro.records, r)
-			}
+			v.installReopen = ro
 		}
-		v.installReopen = ro
 		v.appended.Store(max(v.appended.Load(), o.R))
 		s.nextLSN = max(s.nextLSN, o.R+1)
 		s.walHead = max(s.walHead, o.R)
