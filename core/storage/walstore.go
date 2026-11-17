@@ -273,7 +273,7 @@ func openInitializedWithMetadata(path string, f *os.File, sb *superblock, metada
 // openInitializedInternal is openInitializedWithMetadata with an optional
 // init hook that runs before the committer and flusher goroutines start
 // (the v3 store attaches its state there).
-func openInitializedInternal(path string, f *os.File, sb *superblock, metadata BlockMetadata, init func(*WALStore)) (*WALStore, error) {
+func openInitializedInternal(path string, f *os.File, sb *superblock, metadata BlockMetadata, init func(*WALStore) error) (*WALStore, error) {
 	dm := newDirtyMap(64) // 64 shards is plenty for Phase 07 demo workloads
 
 	s := &WALStore{
@@ -302,7 +302,9 @@ func openInitializedInternal(path string, f *os.File, sb *superblock, metadata B
 	}
 	s.syncExtentFile = f.Sync
 	if init != nil {
-		init(s)
+		if err := init(s); err != nil {
+			return nil, err
+		}
 	}
 	committer := NewGroupCommitter(GroupCommitterConfig{
 		SyncFunc: s.syncWALBatch,
@@ -1519,6 +1521,12 @@ func (s *WALStore) Close() error {
 				closeErrors = append(closeErrors, fmt.Errorf("storage: fsync final superblock: %w", err))
 			}
 		}
+	}
+	if s.v3 != nil && s.v3.ownedMap != nil {
+		if err := s.v3.ownedMap.Close(); err != nil {
+			closeErrors = append(closeErrors, err)
+		}
+		s.v3.ownedMap = nil
 	}
 	if s.fd != nil {
 		closeErr := s.fd.Close()

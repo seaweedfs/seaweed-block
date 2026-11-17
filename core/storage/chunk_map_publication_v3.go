@@ -4,7 +4,10 @@ package storage
 // integration: the row-5b real WALStore must call the lifecycle invalidations
 // and prepare from its permitted quiesced mutation snapshot before activation.
 import (
+	"encoding/binary"
 	"errors"
+	"math"
+	"os"
 	"sync"
 	"sync/atomic"
 )
@@ -156,4 +159,40 @@ func (p *descriptorPublisherV3) invalidateMapProofV3() error {
 		return nil
 	}
 	return p.mapDomain.invalidateV3()
+}
+
+// openDescriptorMapV3 validates geometry from the root and both valid slot
+// dependencies before any store background worker is started. Geometry is
+// subsequently checked by the chunk/provider caller against its configuration.
+func openDescriptorMapV3(path string, selected descriptorV3, fallback *descriptorV3) (*chunkLSNMapV3, *chunkMapCandidateV3, error) {
+	if selected.MapRootLocator > math.MaxInt64-64 {
+		return nil, nil, ErrMapInvalid
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	var raw [8]byte
+	_, err = f.ReadAt(raw[:], int64(selected.MapRootLocator)+56)
+	err = errors.Join(err, f.Close())
+	if err != nil {
+		return nil, nil, err
+	}
+	cb := binary.LittleEndian.Uint64(raw[:])
+	m, c, err := openChunkLSNMapV3(path, selected, cb)
+	if err != nil {
+		return nil, nil, err
+	}
+	if fallback != nil {
+		if fallback.UUID != selected.UUID || fallback.MapLineage != selected.MapLineage || !sameGeometryV3(*fallback, selected) {
+			err = ErrMapInvalid
+		} else {
+			_, _, err = readChunkLSNMapV3(m.fd, *fallback, cb)
+		}
+		if err != nil {
+			_ = m.Close()
+			return nil, nil, err
+		}
+	}
+	return m, c, nil
 }

@@ -2,7 +2,6 @@ package storage
 
 import (
 	"bytes"
-	"path/filepath"
 	"sync"
 	"testing"
 )
@@ -15,7 +14,7 @@ func TestWALStoreV3_FlushedProgressRetriesAfterLaterSync(t *testing.T) {
 			crash := func() { once.Do(func() { crashRecoveryHardeningStore(t, s) }) }
 			t.Cleanup(crash) // own the file/committer even when setup or an assertion fails
 			d := s.v3.pub.current()
-			m, err := createChunkLSNMapV3(filepath.Join(t.TempDir(), "map"), d, 1)
+			m, err := createChunkLSNMapV3(path+".chunkmap", d, 1)
 			if err != nil {
 				t.Fatal(err)
 			}

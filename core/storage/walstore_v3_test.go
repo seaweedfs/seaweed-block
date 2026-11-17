@@ -34,7 +34,7 @@ func newStoreV3(t *testing.T, mode WMode) (*WALStore, string) {
 // reopenV3 opens and recovers, as a restart would.
 func reopenV3(t *testing.T, path string) (*WALStore, error) {
 	t.Helper()
-	s, err := openWALStoreV3ForTest(path)
+	s, err := openUnmappedWALStoreV3ForTest(path)
 	if err != nil {
 		return nil, err
 	}
@@ -919,7 +919,32 @@ func TestWALStoreV3FlusherCheckpointIsClampedToTheAcknowledgedW(t *testing.T) {
 	var crashOnce sync.Once
 	crash := func() { crashOnce.Do(func() { crashRecoveryHardeningStore(t, s) }) }
 	t.Cleanup(crash)
-	s.v3.mapCandidate = stubMapCandidateV3
+	m, err := createChunkLSNMapV3(path+".chunkmap", s.v3.pub.current(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { m.Close() })
+	entries := make([]chunkLSNEntryV3, s.NumBlocks())
+	for i := range entries {
+		entries[i].Unknown = true
+	}
+	initial, err := m.Prepare(s.v3.pub.current().MapGeneration+1, 0, entries, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.v3.pub.publish(&s.mu, nil, func(d *descriptorV3) error { *d = initial.descriptor(*d); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.v3.pub.publish(&s.mu, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	s.v3.mapCandidate = func(cp uint64) (func(*descriptorV3) error, error) {
+		c, e := m.Prepare(s.v3.pub.current().MapGeneration+1, cp, entries, nil)
+		if e != nil {
+			return nil, e
+		}
+		return func(d *descriptorV3) error { *d = c.descriptor(*d); return nil }, nil
+	}
 	writeSynced(t, s, 1, 1)                       // acknowledged W 1
 	if _, err := s.Write(2, blk(2)); err != nil { // dirty, unsynced
 		t.Fatal(err)

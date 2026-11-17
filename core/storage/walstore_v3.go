@@ -25,8 +25,9 @@ import (
 // install paths (ApplyEntry, WriteExtentDirect, AdvanceFrontier; rows 9 to
 // 11) and the checkpoint/tail advance, which needs the row-7 map candidate.
 type walStoreV3State struct {
-	pub *descriptorPublisherV3
-	w   *walWriterV3
+	pub      *descriptorPublisherV3
+	w        *walWriterV3
+	ownedMap *chunkLSNMapV3
 
 	appended atomic.Uint64 // highest LSN pwritten to the WAL
 	wack     atomic.Uint64 // highest acknowledged LSN (Sync completed)
@@ -103,6 +104,18 @@ func createWALStoreV3ForTest(path string, numBlocks uint32, blockSize uint32, wa
 // logical cursor (tail = head) starting at cursor, to exercise the last
 // representable cursors.
 func createWALStoreV3AtCursorForTest(path string, numBlocks uint32, blockSize uint32, walSize uint64, mode WMode, cursor uint64) (*WALStore, error) {
+	return createWALStoreV3MapAtCursorForTest(path, numBlocks, blockSize, walSize, mode, cursor, 0)
+}
+
+// Explicit geometry selector for dark row7 caller controls. Zero is reserved
+// for earlier unmapped row5 fixtures; production activation must never use it.
+func createMappedWALStoreV3ForTest(path string, numBlocks, blockSize uint32, walSize uint64, mode WMode, chunkBlocks uint64) (*WALStore, error) {
+	if chunkBlocks == 0 {
+		return nil, ErrMapInvalid
+	}
+	return createWALStoreV3MapAtCursorForTest(path, numBlocks, blockSize, walSize, mode, 0, chunkBlocks)
+}
+func createWALStoreV3MapAtCursorForTest(path string, numBlocks, blockSize uint32, walSize uint64, mode WMode, cursor, chunkBlocks uint64) (*WALStore, error) {
 	d := descriptorV3{
 		ImplKind: ImplKindWALStore, ImplVersion: walStoreImplVersion3,
 		VolumeSize: uint64(numBlocks) * uint64(blockSize), ExtentSize: 64 * 1024, BlockSize: blockSize,
@@ -123,6 +136,29 @@ func createWALStoreV3AtCursorForTest(path string, numBlocks uint32, blockSize ui
 		return nil, err
 	}
 	err = fd.Truncate(int64(d.WALOffset + d.WALSize + d.VolumeSize))
+	if err == nil && chunkBlocks != 0 {
+		var m *chunkLSNMapV3
+		m, err = createChunkLSNMapV3(path+".chunkmap", d, chunkBlocks)
+		if err == nil {
+			shape, e := mapShapeForV3(d, chunkBlocks)
+			if e != nil {
+				err = e
+			} else if shape.chunks > uint64(int(^uint(0)>>1))/16 {
+				err = ErrMapInvalid
+			} else {
+				entries := make([]chunkLSNEntryV3, int(shape.chunks))
+				for i := range entries {
+					entries[i].Unknown = true
+				}
+				var c *chunkMapCandidateV3
+				c, err = m.Prepare(1, 0, entries, nil)
+				if err == nil {
+					d = c.descriptor(d)
+				}
+			}
+			err = errors.Join(err, m.Close())
+		}
+	}
 	if err == nil {
 		_, err = fd.WriteAt(d.encode(), slotAOffsetV3)
 	}
@@ -135,7 +171,12 @@ func createWALStoreV3AtCursorForTest(path string, numBlocks uint32, blockSize ui
 	if err != nil {
 		return nil, err
 	}
-	s, err := openWALStoreV3ForTest(path)
+	var s *WALStore
+	if chunkBlocks == 0 {
+		s, err = openUnmappedWALStoreV3ForTest(path)
+	} else {
+		s, err = openWALStoreV3ForTest(path)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -149,6 +190,15 @@ func createWALStoreV3AtCursorForTest(path string, numBlocks uint32, blockSize ui
 // openWALStoreV3ForTest opens a v3 file WITHOUT recovering it, like
 // OpenWALStore: call Recover before any Read or Write.
 func openWALStoreV3ForTest(path string) (*WALStore, error) {
+	return openWALStoreV3MapInternalForTest(path, true)
+}
+
+// Only pre-row7 dark fixtures can opt out of requiring a map. Even these
+// fixtures must validate a non-placeholder root; production has no opt-out.
+func openUnmappedWALStoreV3ForTest(path string) (*WALStore, error) {
+	return openWALStoreV3MapInternalForTest(path, false)
+}
+func openWALStoreV3MapInternalForTest(path string, requireMap bool) (*WALStore, error) {
 	f, err := os.OpenFile(path, os.O_RDWR, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("storage: open %s: %w", path, err)
@@ -174,6 +224,17 @@ func openWALStoreV3ForTest(path string) (*WALStore, error) {
 	if od, oerr := decodeSlotV3(otherRaw, nil); oerr == nil && od.MigrationPhase == MigrationNormal {
 		other = &od
 	}
+	var ownedMap *chunkLSNMapV3
+	var mapCurrent *chunkMapCandidateV3
+	// Earlier dark row5 fixtures have no map tuple. A real immutable root is
+	// never optional: missing metadata is not a clean map.
+	if requireMap || d.MapRootHash != [32]byte{} {
+		ownedMap, mapCurrent, err = openDescriptorMapV3(path+".chunkmap", d, other)
+		if err != nil {
+			_ = f.Close()
+			return nil, err
+		}
+	}
 	// The shared store reads its geometry from sb; WAL bounds and the
 	// checkpoint come from the selected descriptor.
 	sb := superblock{
@@ -183,8 +244,7 @@ func openWALStoreV3ForTest(path string) (*WALStore, error) {
 		CreatedAt: d.CreatedAt, ImplKind: d.ImplKind, ImplVersion: d.ImplVersion,
 	}
 	copy(sb.Magic[:], superblockMagic)
-	var initErr error
-	s, err := openInitializedInternal(path, f, &sb, nil, func(s *WALStore) {
+	s, err := openInitializedInternal(path, f, &sb, nil, func(s *WALStore) error {
 		v := &walStoreV3State{}
 		v.pub = newDescriptorPublisherV3(d, id, other, descriptorIOV3{
 			writeSlot: func(off int64, buf []byte) error {
@@ -206,20 +266,25 @@ func openWALStoreV3ForTest(path string) (*WALStore, error) {
 		})
 		w, err := newWALWriterV3(f, v.pub)
 		if err != nil {
-			initErr = err
-			return
+			return err
 		}
 		v.w = w
 		v.wack.Store(d.W)
+		if ownedMap != nil {
+			if err := v.pub.bindMapV3(mapCurrent, newMapProofEpochV3()); err != nil {
+				return err
+			}
+			v.ownedMap = ownedMap
+		}
 		s.v3 = v
+		return nil
 	})
 	if err != nil {
+		if ownedMap != nil {
+			_ = ownedMap.Close()
+		}
 		_ = f.Close()
 		return nil, err
-	}
-	if initErr != nil {
-		_ = s.Close()
-		return nil, initErr
 	}
 	return s, nil
 }
