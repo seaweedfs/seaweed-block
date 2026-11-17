@@ -348,3 +348,56 @@ func TestWALStoreV3_AutomaticMapRecoverRebuildsCoverage(t *testing.T) {
 		t.Fatalf("replayed write omitted from map: %+v", es[1])
 	}
 }
+
+func TestWALStoreV3_MapFailureRefusesQueuedSync(t *testing.T) {
+	s, _ := newMappedCheckpointStoreV3(t)
+	writeSynced(t, s, 1, 1)
+	if _, err := s.Write(2, blk(2)); err != nil {
+		t.Fatal(err)
+	}
+	waiting, joined := make(chan struct{}), make(chan struct{})
+	done := make(chan error, 1)
+	var once sync.Once
+	s.v3.syncMu.Lock()
+	release := func() { once.Do(func() { s.v3.syncMu.Unlock() }) }
+	s.v3.testLeaderWaiting = func() { close(waiting) }
+	t.Cleanup(func() {
+		release()
+		select {
+		case <-joined:
+		case <-time.After(5 * time.Second):
+			t.Error("queued Sync did not join")
+		}
+	})
+	go func() { defer close(joined); _, err := s.Sync(); done <- err }()
+	select {
+	case <-waiting:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Sync did not queue for leader role")
+	}
+	injected := errors.New("map fsync failed while Sync queued")
+	s.v3.ownedMap.syncFile = func() error { return injected }
+	// Preparation is outside syncMu, so this failure must surface while the
+	// later Sync remains queued behind the held leader role.
+	if err := s.flusher.flushOnce(); !errors.Is(err, injected) {
+		t.Fatalf("map failure=%v", err)
+	}
+	if s.stickyIOFault() == nil {
+		t.Error("map failure not globally latched before releasing Sync")
+	}
+	release()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("queued Sync acknowledged after map failure")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("queued Sync did not return")
+	}
+	select {
+	case <-joined:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Sync result without join")
+	}
+	s.v3.testLeaderWaiting = nil
+}
