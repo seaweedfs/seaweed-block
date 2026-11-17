@@ -406,6 +406,29 @@ func (s *WALStore) recoverV3() (uint64, error) {
 				}
 			}
 			v.installReopen = ro
+		} else if o.Damaged || v.w == nil || o.E != v.w.logicalHeadV3() {
+			// A same-open Recover of this open's live install that finds the
+			// WAL cut short of the live writer (damage under a live install):
+			// the handle cannot safely continue past it, so the store fails
+			// closed; a physical reopen then decides intact or damaged.
+			s.latchV3(fmt.Errorf("storage: v3 same-open installing recovery: recovered cut E %d is not the live writer head", o.E))
+		} else {
+			// The live install continues (r17.4). Its trusted install-lane
+			// records are republished in the dirty map, which this Recover
+			// cleared, so the completed image serves them and not older BASE
+			// bytes; the volatile map coverage (the BASE writes' UNKNOWN) is
+			// kept as it is (codex01 04180c33 P1).
+			for _, r := range scan.Records {
+				e := r.Entry
+				if e.LSN > o.R {
+					break
+				}
+				if e.Type != walEntryWrite {
+					continue
+				}
+				size := uint64(walEntryHeaderSizeV3 + len(e.Data))
+				s.dm.putAtIfNewer(e.LBA, (r.End-size)%d.WALSize, 0, e.LSN, d.BlockSize)
+			}
 		}
 		v.appended.Store(max(v.appended.Load(), o.R))
 		s.nextLSN = max(s.nextLSN, o.R+1)
