@@ -474,6 +474,15 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 			p.mu.Unlock()
 			return ErrBindAlreadyBound
 		}
+		// Bind is genesis for the VOLUME, not only for this slot: once
+		// any slot of the volume holds an authority line, a Bind for
+		// another slot would mint a second epoch-1 line beside it.
+		// Moving authority to another slot is IntentReassign.
+		if bound, ok := boundReplicaForVolume(p.state, ask.VolumeID); ok {
+			p.mu.Unlock()
+			return fmt.Errorf("%w: volume %s is already bound to replica %s; use Reassign",
+				ErrBindAlreadyBound, ask.VolumeID, bound)
+		}
 		next = adapter.AssignmentInfo{
 			VolumeID:        ask.VolumeID,
 			ReplicaID:       ask.ReplicaID,
@@ -610,6 +619,22 @@ func safeInvokePublishObserver(observer func(PublishEvent), event PublishEvent) 
 // treat that as "no per-volume authority line to advance".
 //
 // Must be called with p.mu held; reads p.state.
+// boundReplicaForVolume reports whether any slot of volumeID holds a
+// published authority line, and names one (the lowest replica id, so the
+// error text is deterministic). Presence, not the epoch value, decides.
+func boundReplicaForVolume(state map[subKey]assignmentState, volumeID string) (string, bool) {
+	bound, found := "", false
+	for k, st := range state {
+		if !st.present || k.volumeID != volumeID {
+			continue
+		}
+		if !found || k.replicaID < bound {
+			bound, found = k.replicaID, true
+		}
+	}
+	return bound, found
+}
+
 func maxPublishedEpochForVolume(state map[subKey]assignmentState, volumeID string) uint64 {
 	var max uint64
 	for k, st := range state {
