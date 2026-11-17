@@ -700,10 +700,16 @@ func (f *flusher) readDirtyRecordV3(e snapshotEntry) ([]byte, uint64, error) {
 // leader role (syncMu), like Sync, refreshW and SetWMode, and cannot
 // straddle a recovery. If a recovery lowered the acknowledged W below the
 // prepared candidate meanwhile, this cycle publishes nothing.
-func (s *WALStore) persistCheckpointV3(highestLSN uint64) error {
+// flushLifetimeValidV3 is checked under syncMu at publication and store.mu
+// at retirement. Recover/reset advance the same start/end generation.
+func (v *walStoreV3State) flushLifetimeValidV3(gen uint64) bool {
+	return gen%2 == 0 && v.recoverGen.Load() == gen
+}
+
+func (s *WALStore) persistCheckpointV3(highestLSN, recoveryGen uint64) error {
 	v := s.v3
 	if v.ownedMap != nil {
-		return s.persistOwnedMapCheckpointV3(highestLSN)
+		return s.persistOwnedMapCheckpointV3(highestLSN, recoveryGen)
 	}
 	if v.mapCandidate == nil {
 		return nil
@@ -718,6 +724,9 @@ func (s *WALStore) persistCheckpointV3(highestLSN uint64) error {
 	}
 	v.syncMu.Lock()
 	defer v.syncMu.Unlock()
+	if !v.flushLifetimeValidV3(recoveryGen) {
+		return ErrMapCoverageStale
+	}
 	wack := v.wack.Load()
 	if wack < checkpoint {
 		return nil // a recovery lowered the frontier; retry next cycle

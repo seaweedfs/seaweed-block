@@ -49,7 +49,7 @@ func (s *WALStore) prepareOwnedMapCheckpointV3(cp uint64) (*preparedMapPublicati
 	return &preparedMapPublicationV3{candidate: c, proof: proof}, nil
 }
 
-func (s *WALStore) persistOwnedMapCheckpointV3(highestLSN uint64) error {
+func (s *WALStore) persistOwnedMapCheckpointV3(highestLSN, recoveryGen uint64) error {
 	v := s.v3
 	if err := s.stickyIOFault(); err != nil {
 		return err
@@ -87,6 +87,11 @@ func (s *WALStore) persistOwnedMapCheckpointV3(highestLSN uint64) error {
 	}
 	v.syncMu.Lock()
 	defer v.syncMu.Unlock()
+	// The candidate proof alone is insufficient: it was prepared after extent
+	// I/O and could belong to a newer Recover lifetime than those bytes.
+	if !v.flushLifetimeValidV3(recoveryGen) {
+		return ErrMapCoverageStale
+	}
 	wack := v.wack.Load()
 	if wack < cp {
 		return ErrMapCoverageStale

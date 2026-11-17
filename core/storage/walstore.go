@@ -433,7 +433,7 @@ func (s *WALStore) persistCheckpointAndRelease(highestLSN, entryPhys, entryLen u
 
 func (s *WALStore) persistCheckpointReleasing(highestLSN, entryPhys, entryLen uint64, release bool) error {
 	if s.v3 != nil {
-		return s.persistCheckpointV3(highestLSN)
+		return s.persistCheckpointV3(highestLSN, s.v3.recoverGen.Load())
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
