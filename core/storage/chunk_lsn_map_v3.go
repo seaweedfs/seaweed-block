@@ -152,6 +152,10 @@ func readChunkLSNMapV3(f *os.File, d descriptorV3, cb uint64) ([]chunkLSNEntryV3
 	if d.MapGeneration == 0 || d.MapGeneration > counterMaxV3 || d.MapCoveredCheckpoint > counterMaxV3 || d.UUID == [16]byte{} || d.MapLineage == [16]byte{} {
 		return nil, nil, ErrMapInvalid
 	}
+	// Reject an impossible entry allocation before root allocation or file I/O.
+	if s.chunks > uint64(int(^uint(0)>>1))/16 {
+		return nil, nil, ErrMapInvalid
+	}
 	info, e := f.Stat()
 	if e != nil {
 		return nil, nil, e
@@ -174,7 +178,7 @@ func readChunkLSNMapV3(f *os.File, d descriptorV3, cb uint64) ([]chunkLSNEntryV3
 	}
 	// Root is file-bounded before page and entry allocations; every page needs
 	// 4096 distinct bytes. Reject impossible geometry before allocating entries.
-	if s.pages > size/4096 || s.chunks > uint64(int(^uint(0)>>1))/16 {
+	if s.pages > size/4096 {
 		return nil, nil, ErrMapInvalid
 	}
 	entries := make([]chunkLSNEntryV3, 0, int(s.chunks))
@@ -284,6 +288,8 @@ func openChunkLSNMapV3(path string, d descriptorV3, cb uint64) (*chunkLSNMapV3, 
 
 // Prepare persists pages -> page fsync -> root -> root fsync -> directory fsync.
 // It returns a pinned tuple, never a descriptor publication or reuse authority.
+// Preflight and Stat errors do not latch. Once the append transaction starts,
+// an error latches and refuses subsequent persistence I/O until reopen.
 // No pages are reclaimed in this append-only implementation.
 func (m *chunkLSNMapV3) Prepare(g, C uint64, entries []chunkLSNEntryV3, prior *chunkMapCandidateV3) (out *chunkMapCandidateV3, err error) {
 	m.mu.Lock()
