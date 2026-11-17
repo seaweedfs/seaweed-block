@@ -95,7 +95,10 @@ func (p *switchProbe) ProbePromotionCandidates(volumeID string, current authorit
 	}
 	defer p.mu.Unlock()
 	return PromotionProbeResult{
-		AckProfile:   "sync-quorum",
+		AckProfile: "sync-quorum",
+		// Only r2 is seen, so its promotion needs a known frontier
+		// it covers (#181); r3 is silent in these tests.
+		SyncAckLSN:   70,
 		CurrentKnown: true,
 		Current:      PromotionCandidateEvidence{ReplicaID: "r1", Ready: p.currentReady, DurableLSN: 70},
 		Candidates:   []PromotionCandidateEvidence{{ReplicaID: "r2", Ready: true, DurableLSN: 70}},
