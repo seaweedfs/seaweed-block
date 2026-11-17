@@ -89,9 +89,10 @@ func TestWALStoreV3_FlushMaterializationBoundToRecoveryLifetime(t *testing.T) {
 	if _, err := s.fd.ReadAt(extent, int64(s.extentBase+5*4096)); err != nil || !bytes.Equal(extent, blk(0xB8)) {
 		t.Fatalf("fresh retry did not materialize B: %v", err)
 	}
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
+	crashRecoveryHardeningStore(t, s) // no Close or final flush
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
 	r, err := openWALStoreV3ForTest(path)
 	if err != nil {
 		t.Fatal(err)
