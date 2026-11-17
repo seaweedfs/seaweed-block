@@ -127,6 +127,10 @@ var errV3NotYet = errors.New("storage: operation not yet supported on a v3 store
 // tests.
 var testSkipFenceOnRecoverV3 bool
 
+// FormatV3 reports whether the store runs the dark v3 format (only test
+// constructors build one before activation, plan row 12b).
+func (s *WALStore) FormatV3() bool { return s.v3 != nil }
+
 func (s *WALStore) latchV3(err error) {
 	if err != nil {
 		s.ioFault.CompareAndSwap(nil, NewSubstrateIOFailure(err,

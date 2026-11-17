@@ -341,6 +341,12 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 			// one before the takeover CAS and before the volume serves I/O,
 			// serialized with observer installs. A refused rebase fails the
 			// restore here, so HEAD is never claimed for a mis-ordered ship.
+			if ws.FormatV3() {
+				// The v3 seed exists (plan row 9c), but the v3 chunk layer's
+				// FreshFromHead restore on the owned map is codex03's to prove;
+				// until then a dark v3 restore refuses before any seed or claim.
+				return errV3RestoreNotYet
+			}
 			return h.backend.seedAndRebase(func() error { return ws.SeedChunkFrontier(head.RemoteLSN) })
 		}
 		head, err := storage.ClaimChunkHead(ctx, remote, cfg)
@@ -352,6 +358,12 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 
 	return storage.AttachChunkLayer(ws, remote, cfg)
 }
+
+// errV3RestoreNotYet: a HEAD restore onto a dark v3 store is refused until
+// the v3 FreshFromHead restore on the owned map lands with its own positive
+// control (codex03, chunk layer/provider; DESIGN 8.7 and plan row 9c). The
+// v3 SeedChunkFrontier itself is wired.
+var errV3RestoreNotYet = errors.New("durable: HEAD restore onto a v3 store awaits the v3 FreshFromHead restore")
 
 // closeBoundRemote ends every remote call when the provider closes, so a
 // shutdown never waits on the remote for an attach or a cut. While an

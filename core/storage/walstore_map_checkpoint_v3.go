@@ -66,21 +66,40 @@ func (s *WALStore) persistOwnedMapCheckpointV3(highestLSN, recoveryGen uint64) e
 	if cp <= v.pub.current().CheckpointLSN {
 		return nil
 	}
-	// The extent was fsynced by the flusher. Optional metadata and chunk
-	// callbacks settle before map persistence and the sole slot publisher.
+	// The extent was fsynced by the flusher.
+	d, err := s.publishCheckpointV3(cp, false, recoveryGen)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.checkpointLSN = d.CheckpointLSN
+	s.mu.Unlock()
+	return nil
+}
+
+// publishCheckpointV3 is the one v3 checkpoint publication (plan row 9: the
+// flusher's checkpoint and SeedChunkFrontier both use it). The optional
+// metadata and chunk callbacks settle first, then the owned-map candidate
+// is persisted outside every lock, then the sole slot publisher runs under
+// the leader role (syncMu), refusing a candidate from another recovery
+// lifetime or one above the acknowledged W. seed raises the acknowledged W
+// to cp in the same leader section (the inherited remote frontier). The
+// caller has made the extent durable. Nothing is published on any error.
+func (s *WALStore) publishCheckpointV3(cp uint64, seed bool, recoveryGen uint64) (descriptorV3, error) {
+	v := s.v3
 	if s.metadata != nil {
 		if err := s.metadata.BeforeCheckpointAdvance(cp); err != nil {
-			return err
+			return descriptorV3{}, err
 		}
 	}
 	if h := s.chunk.Load(); h != nil {
 		if err := h.sink.BeforeCheckpointAdvance(cp); err != nil {
-			return err
+			return descriptorV3{}, err
 		}
 	}
 	prepared, err := s.prepareOwnedMapCheckpointV3(cp)
 	if err != nil {
-		return err
+		return descriptorV3{}, err
 	}
 	if h := v.testMapPrepared; h != nil {
 		h()
@@ -90,11 +109,14 @@ func (s *WALStore) persistOwnedMapCheckpointV3(highestLSN, recoveryGen uint64) e
 	// The candidate proof alone is insufficient: it was prepared after extent
 	// I/O and could belong to a newer Recover lifetime than those bytes.
 	if !v.flushLifetimeValidV3(recoveryGen) {
-		return ErrMapCoverageStale
+		return descriptorV3{}, ErrMapCoverageStale
 	}
 	wack := v.wack.Load()
+	if seed {
+		wack = max(wack, cp)
+	}
 	if wack < cp {
-		return ErrMapCoverageStale
+		return descriptorV3{}, ErrMapCoverageStale
 	}
 	d, err := v.pub.publishMapV3(&s.mu, nil, prepared, func(n *descriptorV3) error {
 		n.W = max(n.W, wack)
@@ -102,10 +124,11 @@ func (s *WALStore) persistOwnedMapCheckpointV3(highestLSN, recoveryGen uint64) e
 		return nil
 	})
 	if err != nil {
-		return err
+		return descriptorV3{}, err
 	}
-	s.mu.Lock()
-	s.checkpointLSN = d.CheckpointLSN
-	s.mu.Unlock()
-	return nil
+	if seed {
+		v.appended.Store(max(v.appended.Load(), cp))
+		v.wack.Store(wack)
+	}
+	return d, nil
 }
