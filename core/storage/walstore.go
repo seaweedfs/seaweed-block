@@ -583,11 +583,6 @@ func (s *WALStore) Recover() (frontier uint64, err error) {
 		// The store lock orders both epoch boundaries with real map publishers.
 		// START invalidates old candidates; END also invalidates candidates
 		// prepared while this Recover was in flight, including on failure.
-		defer func() {
-			if endErr := s.v3.pub.invalidateMapProofV3(); endErr != nil {
-				frontier, err = 0, errors.Join(err, endErr)
-			}
-		}()
 		if err := s.v3.pub.invalidateMapProofV3(); err != nil {
 			return 0, err
 		}
