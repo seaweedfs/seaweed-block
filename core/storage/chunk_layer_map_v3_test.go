@@ -99,6 +99,10 @@ func TestChunkLayerV3_MaxLSNSelectsAfterReopenWithCleanLegacyBitmap(t *testing.T
 		t.Fatalf("setup needs known map maxLSN2 and no WAL dirt: %+v", es[1])
 	}
 	secondLayer := attachCleanMapFixtureV3(t, r, f, first.Head)
+	if err := secondLayer.EvictChunk(1); !errors.Is(err, errChunkEvictRefused) {
+		t.Errorf("eviction ignored owned-map dirt: %v", err)
+	}
+
 	second, err := secondLayer.Cut(ctTimeout(t))
 	if err != nil {
 		t.Fatal(err)

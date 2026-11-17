@@ -1638,16 +1638,12 @@ func (l *chunkLayerImpl) EvictChunk(idx uint64) error {
 	if idx >= l.numChunks {
 		return fmt.Errorf("%w: chunk %d out of range", errChunkEvictRefused, idx)
 	}
-	walDirty := false
-	for _, e := range l.s.dm.snapshot() {
-		if l.chunkOf(e.LBA) == idx {
-			walDirty = true
-			break
-		}
-	}
+	// The same owned-map/WAL dirt that capture must publish also forbids
+	// eviction: a later fill from the older HEAD must not overwrite it.
+	dirtyCandidate := l.captureCandidates()[idx]
 	l.stMu.Lock()
 	switch {
-	case l.head.Gen == 0, l.hashMode, l.allDirty, l.hdr.Base != chunkBaseNone, l.dirty[idx], l.inflight[idx], walDirty:
+	case l.head.Gen == 0, l.hashMode, l.allDirty, l.hdr.Base != chunkBaseNone, l.dirty[idx], l.inflight[idx], dirtyCandidate:
 		l.stMu.Unlock()
 		return fmt.Errorf("%w: chunk %d is dirty since HEAD or HEAD is unknown", errChunkEvictRefused, idx)
 	}
