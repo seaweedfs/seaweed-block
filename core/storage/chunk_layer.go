@@ -134,6 +134,9 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 	if remote == nil || cfg.Bitmap == nil || cfg.ChunkBlocks == 0 {
 		return nil, errors.New("storage: chunk layer needs a remote, a bitmap store and ChunkBlocks > 0")
 	}
+	if s.v3 != nil && s.v3.ownedMap != nil && uint64(cfg.ChunkBlocks) != s.v3.ownedMap.chunkBlocks {
+		return nil, fmt.Errorf("%w: chunk layer geometry differs from owned map", ErrMapInvalid)
+	}
 	if cfg.UploadConcurrency < 0 || cfg.UploadConcurrency > 64 {
 		return nil, errors.New("storage: upload concurrency must be between 1 and 64 (0 defaults to 8)")
 	}
@@ -336,11 +339,32 @@ func (l *chunkLayerImpl) noteAllMutated() {
 	}
 }
 
-// walChunks returns the chunks with entries in the WAL dirty map.
-func (l *chunkLayerImpl) walChunks() map[uint64]bool {
+// captureCandidates includes current WAL entries and impl3 owned-map dirt.
+// UNKNOWN never certifies clean; a max LSN beyond HEAD must be captured even
+// after the WAL entry has checkpointed and the legacy bitmap says clean.
+func (l *chunkLayerImpl) captureCandidates() map[uint64]bool {
 	out := map[uint64]bool{}
 	for _, e := range l.s.dm.snapshot() {
 		out[l.chunkOf(e.LBA)] = true
+	}
+	if l.s.v3 != nil && l.s.v3.ownedMap != nil {
+		l.stMu.Lock()
+		base := l.remoteLSN
+		absent := map[uint64]bool{}
+		for idx := range l.absent {
+			if !l.chunkHasLocalLocked(idx) {
+				absent[idx] = true
+			}
+		}
+		l.stMu.Unlock()
+		l.s.mu.RLock()
+		for idx, e := range l.s.v3.mapEntries {
+			i := uint64(idx)
+			if !absent[i] && (e.Unknown || e.LSN > base) {
+				out[i] = true
+			}
+		}
+		l.s.mu.RUnlock()
 	}
 	return out
 }
@@ -735,7 +759,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		return chunkCutResult{}, fmt.Errorf("storage: capture sync: %w", err)
 	}
 	candidates := map[uint64]bool{}
-	for idx := range l.walChunks() {
+	for idx := range l.captureCandidates() {
 		candidates[idx] = true
 	}
 	l.stMu.Lock()
@@ -757,8 +781,15 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	// it since staging (its version is unchanged) and HEAD is the one it
 	// was compared against.
 	var captured []capturedChunk
+	var capturedVersions map[uint64]uint64
+	if l.s.v3 != nil && l.s.v3.ownedMap != nil {
+		capturedVersions = make(map[uint64]uint64, len(candidates))
+	}
 	useStaged := map[uint64]bool{}
 	for idx := range candidates {
+		if capturedVersions != nil {
+			capturedVersions[idx] = l.chunkVersion(idx)
+		}
 		if sc, ok := staged[idx]; ok && sc.ver == l.chunkVersion(idx) && sc.headGen == l.head.Gen {
 			useStaged[idx] = true
 			captured = append(captured, sc.capturedChunk)
@@ -905,7 +936,8 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 			return chunkCutResult{}, errChunkLayerFenced
 		}
 		l.finishCut(baseHead, h, nil, nil) // nothing new: no CAS
-		l.dropIntents(ctx, intents)        // superseded staged uploads only
+		l.persistCapturedMapV3(capturedVersions)
+		l.dropIntents(ctx, intents) // superseded staged uploads only
 		return chunkCutResult{H: h, Head: copyHead(baseHead), Noop: true, FullHash: all}, nil
 	}
 	if err := l.admit(); err != nil { // admission re-checked right before the CAS
@@ -934,6 +966,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	if casErr == nil {
 		next.Gen = gen
 		l.finishCut(next, h, changed, newKeys)
+		l.persistCapturedMapV3(capturedVersions)
 		l.dropIntents(ctx, intents)
 		return l.cutDone(chunkCutResult{H: h, Head: copyHead(next), FullHash: all}, detach), nil
 	}
@@ -963,6 +996,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	if sameProposal(cur, next) {
 		st.CASResult = "resolved-by-reread"
 		l.finishCut(cur, h, changed, newKeys)
+		l.persistCapturedMapV3(capturedVersions)
 		l.dropIntents(ctx, intents)
 		return l.cutDone(chunkCutResult{H: h, Head: copyHead(cur), FullHash: all}, detach), nil
 	}
@@ -1428,7 +1462,7 @@ func (l *chunkLayerImpl) stage(ctx context.Context, st *chunkCutStats) (map[uint
 	staged := map[uint64]stagedChunk{}
 	var intents []string
 	for round := 0; round < chunkStageRounds; round++ {
-		wal := l.walChunks()
+		wal := l.captureCandidates()
 		l.stMu.Lock()
 		need := map[uint64]bool{}
 		consider := func(idx uint64) {
