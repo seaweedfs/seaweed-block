@@ -68,7 +68,7 @@ func TestWALLSNOrderV3_RestoreUsesKeptNotDroppedFrontier(t *testing.T) {
 		t.Fatalf("setup scan=%+v", r)
 	}
 	// The owner discards unacked104 and durably fences the exact remaining lap.
-	s := &walStoreV3{fd: f}
+	s := &WALStore{fd: f}
 	if e = s.fenceV3(70, 0, d.WALSize, true, d.WALOffset); e != nil {
 		t.Fatal(e)
 	}
