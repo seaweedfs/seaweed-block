@@ -37,6 +37,12 @@ func bindRecoveryMapV3(t *testing.T, s *WALStore) (*chunkLSNMapV3, *mapProofEpoc
 	if _, err = s.v3.pub.publish(&s.mu, nil, func(n *descriptorV3) error { *n = c.descriptor(*n); return nil }); err != nil {
 		t.Fatal(err)
 	}
+	// Bootstrap both slots to the durable initial map before binding. The
+	// older dark row-5 placeholder has no sidecar dependency and cannot remain
+	// a valid fallback once the real map binding is installed.
+	if _, err = s.v3.pub.publish(&s.mu, nil, nil); err != nil {
+		t.Fatal(err)
+	}
 	proof := newMapProofEpochV3()
 	if err = s.v3.pub.bindMapV3(c, proof); err != nil {
 		t.Fatal(err)

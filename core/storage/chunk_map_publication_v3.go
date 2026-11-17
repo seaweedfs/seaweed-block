@@ -74,19 +74,34 @@ func sameMapTupleV3(d descriptorV3, c *chunkMapCandidateV3) bool {
 	return d.UUID == id.UUID && sameGeometryV3(d, id) && d.MapLineage == id.MapLineage && d.MapFormatID == mapFormatIDV1 && d.MapGeneration == c.generation && d.MapCoveredCheckpoint == c.covered && d.MapRootLocator == c.rootOffset && d.MapRootHash == c.hash
 }
 
-// bindMapV3 is used only while opening/quiesced. Dependencies are read before
-// descMu. The final descriptor comparison under descMu prevents a stale bind.
+// bindMapV3 is used only while opening/quiesced. Snapshot both slots under
+// descMu, validate all dependencies without store/desc locks, then recheck the
+// snapshot before installing the open proof domain. A fallback remains a root
+// even when none of its pages belong to the selected generation.
 func (p *descriptorPublisherV3) bindMapV3(c *chunkMapCandidateV3, d *mapProofEpochV3) error {
 	if c == nil || c.owner == nil || d == nil {
 		return ErrMapCoverageStale
 	}
-	tuple := c.descriptor(c.owner.identity)
-	if _, _, e := readChunkLSNMapV3(c.owner.fd, tuple, c.owner.chunkBlocks); e != nil {
+	p.descMu.Lock()
+	current, other, otherValid := p.cur, p.other, p.otherValid
+	p.descMu.Unlock()
+	if !sameMapTupleV3(current, c) {
+		return ErrMapCoverageStale
+	}
+	if _, _, e := readChunkLSNMapV3(c.owner.fd, current, c.owner.chunkBlocks); e != nil {
 		return e
+	}
+	if otherValid {
+		if other.UUID != current.UUID || other.MapLineage != current.MapLineage || !sameGeometryV3(other, current) {
+			return ErrMapInvalid
+		}
+		if _, _, e := readChunkLSNMapV3(c.owner.fd, other, c.owner.chunkBlocks); e != nil {
+			return e
+		}
 	}
 	p.descMu.Lock()
 	defer p.descMu.Unlock()
-	if !sameMapTupleV3(p.cur, c) {
+	if p.cur != current || p.otherValid != otherValid || (otherValid && p.other != other) {
 		return ErrMapCoverageStale
 	}
 	p.mapCurrent = c
