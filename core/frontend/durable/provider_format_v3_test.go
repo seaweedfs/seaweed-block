@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -239,7 +240,32 @@ type formatV3TakeoverView struct{}
 func (formatV3TakeoverView) Projection() frontend.Projection {
 	return frontend.Projection{VolumeID: "v1", ReplicaID: "r2", Epoch: 4, EndpointVersion: 1, Healthy: true}
 }
+
+type formatV3RestoreRemote struct {
+	storage.ChunkRemote
+	beforeClaim       func() error
+	loseClaimResponse bool
+}
+
+func (r *formatV3RestoreRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVersion, next storage.ChunkHead) (uint64, error) {
+	if expected.Epoch == 3 {
+		if err := r.beforeClaim(); err != nil {
+			return 0, err
+		}
+	}
+	gen, err := r.ChunkRemote.CASHead(ctx, expected, next)
+	if err == nil && expected.Epoch == 3 && r.loseClaimResponse {
+		return 0, errors.New("claim response lost after commit")
+	}
+	return gen, err
+}
 func TestDurableProviderV3_HEADRestorePreservesRemoteImageAndNextLSN(t *testing.T) {
+	exerciseMappedHEADRestoreV3(t, false)
+}
+func TestDurableProviderV3_HEADRestoreAfterLostClaimResponse(t *testing.T) {
+	exerciseMappedHEADRestoreV3(t, true)
+}
+func exerciseMappedHEADRestoreV3(t *testing.T, loseClaimResponse bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	remote := storage.NewMemChunkRemote()
@@ -270,11 +296,18 @@ func TestDurableProviderV3_HEADRestorePreservesRemoteImageAndNextLSN(t *testing.
 		t.Fatal(err)
 	}
 	root := t.TempDir()
-	target := mappedProviderV3(t, root, remote)
+	probe := &formatV3RestoreRemote{ChunkRemote: remote, loseClaimResponse: loseClaimResponse}
+	target := mappedProviderV3(t, root, probe)
 	target.view = formatV3TakeoverView{}
 	restored, err := target.EnsureStorage("v1")
 	if err != nil {
 		t.Fatal(err)
+	}
+	probe.beforeClaim = func() error {
+		if restored.NextLSN() != 3 {
+			return errors.New("HEAD takeover attempted before durable seed/rebase")
+		}
+		return nil
 	}
 	if _, err = target.RecoverVolume(ctx, "v1"); err != nil {
 		t.Fatalf("actual mapped HEAD restore refused: %v", err)
