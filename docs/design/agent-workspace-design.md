@@ -127,7 +127,7 @@ Per volume, under the chunk base directory in the filer (`core/frontend/chunksto
 
 `ChunkRemote.CASHead` (`core/frontend/chunkstore/chunk_remote.go`) refuses a lower epoch, any move of a `deleting`, `purging` or `deleted` HEAD, a `{gen, epoch}` mismatch and a lower `RemoteLSN`, then issues the filer's conditional `UpdateEntry` with `expected_extended = {swb.gen, swb.epoch}`. Only a definite refusal is a precondition failure; any other error is an unknown outcome.
 
-**Reads after a move.** A block absent locally is fetched from the chunk named in HEAD, bounded by `ReadMissTimeout` (default 30 s), and installed only if no newer local version exists; the dirty map is consulted again after the fetch, so a newer local write always wins (`OnReadMiss`; walstore `readFromExtent`).
+**Reads after a move.** A block absent locally is fetched from the chunk named in HEAD, bounded by `ReadMissTimeout` (default 30 s), and installed only if it does not overwrite a newer local extent version; the dirty map is consulted again after the fetch, so a newer WAL-only write still wins on reads, and HEAD's value may sit beneath it as the backing value, which is correct if a crash loses that unsynced write (`OnReadMiss`; walstore `readFromExtent`).
 
 ## 6. Snapshots, forks, retention, GC, volume delete
 
