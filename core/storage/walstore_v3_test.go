@@ -911,6 +911,9 @@ func stubMapCandidateV3(cp uint64) (func(n *descriptorV3) error, error) {
 // in the WAL and survives a crash.
 func TestWALStoreV3FlusherCheckpointIsClampedToTheAcknowledgedW(t *testing.T) {
 	s, path := newStoreV3(t, WModeLagged)
+	var crashOnce sync.Once
+	crash := func() { crashOnce.Do(func() { crashRecoveryHardeningStore(t, s) }) }
+	t.Cleanup(crash)
 	s.v3.mapCandidate = stubMapCandidateV3
 	writeSynced(t, s, 1, 1)                       // acknowledged W 1
 	if _, err := s.Write(2, blk(2)); err != nil { // dirty, unsynced
@@ -927,7 +930,7 @@ func TestWALStoreV3FlusherCheckpointIsClampedToTheAcknowledgedW(t *testing.T) {
 	if d.RetainedTail != 0 {
 		t.Fatalf("retainedTail %d: the unsynced record must stay retained", d.RetainedTail)
 	}
-	crashRecoveryHardeningStore(t, s)
+	crash()
 	r := mustReopenV3(t, path)
 	defer r.Close()
 	for lba := uint32(1); lba <= 2; lba++ {

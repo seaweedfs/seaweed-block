@@ -251,7 +251,18 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 	// Step 4: remove flushed entries from the dirty map using
 	// compare-and-delete. If a concurrent Write() bumped an entry's
 	// LSN after our snapshot, this leaves the newer entry alone.
+	// V3 may have clamped its checkpoint to Wack (or held it for a map).
+	// Keep the uncovered entries as retry work even though their extent
+	// bytes were fsynced: a later Sync plus cycle must advance checkpoint
+	// AND coverage, rather than merely refreshing W on an empty dirty map.
+	checkpoint := maxLSN // legacy behavior: remove the whole flushed snapshot
+	if store.v3 != nil {
+		checkpoint = store.CheckpointLSN()
+	}
 	for _, e := range entries {
+		if e.LSN > checkpoint {
+			continue
+		}
 		store.dm.compareAndDelete(e.LBA, e.LSN)
 	}
 	f.flushes.Add(1)
