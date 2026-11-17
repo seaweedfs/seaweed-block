@@ -1,6 +1,7 @@
 package recovery
 
 import (
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -50,7 +51,6 @@ type Receiver struct {
 	blocksSinceLastAck uint32
 	lastAckTime        time.Time
 	baseInstalledUpper uint32 // highest base LBA installed; advisory only in BaseBatchAck
-	basePrepared       bool
 
 	gate  DualLaneGate // nil only in tests that exercise the protocol alone
 	epoch uint64       // from SessionStart; checked by gate on every mutating frame
@@ -171,7 +171,15 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 			if gateErr != nil {
 				return 0, gateErr
 			}
+			// The BASE install begins here, before any BASE block or WAL
+			// entry, at the session's BASE frontier under a fresh random ID
+			// (DESIGN r17.3.1 section 8.7). The begin is a mutation, so it
+			// stays inside the counted section.
+			install, beginErr := r.beginInstall(s.FromLSN)
 			release()
+			if beginErr != nil {
+				return 0, newFailure(FailureSubstrate, PhaseRecvApply, beginErr)
+			}
 			r.sessionID = s.SessionID
 			// Wire compat: sessionStart still carries TargetLSN in
 			// the legacy fourth slot, but BASE frontier comes from
@@ -181,6 +189,7 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 			// as a compat/frontier-hint band and MUST NOT drive BASE
 			// AdvanceFrontier.
 			r.session = NewRebuildSession(r.store, s.FromLSN)
+			r.session.SetInstallHandle(install)
 			// Seed walApplied with fromLSN so AchievedLSN remains a
 			// monotonic observation even when no WAL frames arrive.
 			// Completion itself is baseDone + BarrierReq witness; the
@@ -188,7 +197,6 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 			r.session.SeedWalApplied(s.FromLSN)
 			r.recvFromLSN = s.FromLSN
 			r.appliedWalLSN = s.FromLSN
-			r.basePrepared = false
 			log.Printf("g7-debug: Receiver.Run frameSessionStart sessionID=%d fromLSN=%d targetLSN=%d numBlocks=%d", s.SessionID, s.FromLSN, s.TargetLSN, s.NumBlocks)
 
 		case frameBaseBlock:
@@ -204,15 +212,8 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 			if gateErr != nil {
 				return 0, gateErr
 			}
-			prepErr := r.prepareBaseInstall()
-			var applyErr error
-			if prepErr == nil {
-				_, applyErr = r.session.ApplyBaseBlock(lba, data)
-			}
+			_, applyErr := r.session.ApplyBaseBlock(lba, data)
 			release()
-			if prepErr != nil {
-				return 0, newFailure(FailureSubstrate, PhaseRecvApply, prepErr)
-			}
 			if applyErr != nil {
 				log.Printf("g7-debug: Receiver.Run ApplyBaseBlock err lba=%d err=%v", lba, applyErr)
 				return 0, newFailure(FailureSubstrate, PhaseRecvApply,
@@ -274,16 +275,15 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 			if gateErr != nil {
 				return 0, gateErr
 			}
-			prepErr := r.prepareBaseInstall()
-			if prepErr != nil {
-				release()
-				return 0, newFailure(FailureSubstrate, PhaseRecvApply, prepErr)
-			}
 			log.Printf("g7-debug: Receiver.Run frameBaseDone baseCount=%d walCount=%d", baseCount, walCount)
-			// The frontier advance is a mutation too: it stays inside the
-			// counted section, so a fence cannot return while it is pending.
-			r.session.MarkBaseComplete()
+			// The completion (and the frontier advance) is a mutation too: it
+			// stays inside the counted section, so a fence cannot return while
+			// it is pending. Its error propagates (DESIGN 8.2 step 4).
+			doneErr := r.session.MarkBaseComplete()
 			release()
+			if doneErr != nil {
+				return 0, newFailure(FailureSubstrate, PhaseRecvApply, doneErr)
+			}
 			// Mandatory final base-lane ack — base done means primary
 			// expects to know our base-installed cursor before drain
 			// even if cadence wouldn't have triggered yet.
@@ -353,17 +353,20 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 	}
 }
 
-func (r *Receiver) prepareBaseInstall() error {
-	if r.basePrepared {
-		return nil
-	}
-	if preparer, ok := r.store.(storage.BaseInstallPreparer); ok {
-		if err := preparer.BeginBaseInstall(); err != nil {
-			return fmt.Errorf("prepare BASE install: %w", err)
+// beginInstall begins this session's BASE install at baseLSN under a fresh
+// random, nonzero install ID (DESIGN 8.1, 8.7).
+func (r *Receiver) beginInstall(baseLSN uint64) (storage.InstallHandle, error) {
+	var id [16]byte
+	for id == ([16]byte{}) {
+		if _, err := rand.Read(id[:]); err != nil {
+			return nil, fmt.Errorf("BASE install ID: %w", err)
 		}
 	}
-	r.basePrepared = true
-	return nil
+	h, err := storage.BeginInstall(r.store, baseLSN, id)
+	if err != nil {
+		return nil, fmt.Errorf("begin BASE install: %w", err)
+	}
+	return h, nil
 }
 
 // shouldAck evaluates the cadence rule per docs/recovery-pin-floor-wire.md §3.

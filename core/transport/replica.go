@@ -313,8 +313,8 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 		if basePrepared {
 			return nil
 		}
-		if preparer, ok := r.store.(storage.BaseInstallPreparer); ok {
-			if err := preparer.BeginBaseInstall(); err != nil {
+		if stager, ok := r.store.(storage.BaseStager); ok {
+			if err := stager.BeginBaseStage(); err != nil {
 				return err
 			}
 		}

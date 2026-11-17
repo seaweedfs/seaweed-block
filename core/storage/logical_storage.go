@@ -1,5 +1,7 @@
 package storage
 
+import "fmt"
+
 // LogicalStorage is the V3 persistence-seam contract. It separates the
 // "what data exists, what frontier is durable" question (storage) from
 // the "what does the engine decide" question (semantic core). The
@@ -211,11 +213,86 @@ type LogicalStorage interface {
 	Close() error
 }
 
-// BaseInstallPreparer is an optional rebuild capability for substrates that
-// stage BASE snapshots before making them authoritative. Recovery callers
-// invoke it once before the first BASE block (or an empty BASE completion).
+// InstallHandle is the only path for one BASE install's mutations (format
+// bump v3, DESIGN r17.3.1 section 8.7): the BASE extent writes, the
+// install-lane WAL applies and the completion, all bound to the install's
+// ID. On a v3 store a handle whose ID has been superseded changes nothing
+// and returns ErrInstallSuperseded.
+type InstallHandle interface {
+	WriteBase(lba uint32, data []byte) error
+	ApplyInstallEntry(lba uint32, data []byte, lsn uint64) error
+	// MarkBaseComplete is DESIGN 8.2: on any error the install stays
+	// incomplete and the error propagates.
+	MarkBaseComplete() error
+}
+
+// BaseInstallPreparer is the BASE install seam (DESIGN 8.1, 8.7): the begin
+// of one install at baseLSN under a fresh, random, nonzero installID.
 type BaseInstallPreparer interface {
-	BeginBaseInstall() error
+	BeginBaseInstall(baseLSN uint64, installID [16]byte) (InstallHandle, error)
+}
+
+// BaseStager is the legacy optional rebuild capability for substrates that
+// stage BASE snapshots before making them authoritative (parallelwal). The
+// legacy install handle invokes it once, before the first BASE block or an
+// empty BASE completion, exactly when callers invoked it before the seam.
+type BaseStager interface {
+	BeginBaseStage() error
+}
+
+// BeginInstall begins one BASE install on store: through its seam when it
+// has one, otherwise with the legacy handle.
+func BeginInstall(store LogicalStorage, baseLSN uint64, installID [16]byte) (InstallHandle, error) {
+	if p, ok := store.(BaseInstallPreparer); ok {
+		return p.BeginBaseInstall(baseLSN, installID)
+	}
+	return NewLegacyInstallHandle(store, baseLSN), nil
+}
+
+// NewLegacyInstallHandle returns the pre-v3 install behaviour behind the
+// handle: WriteBase is WriteExtentDirect, ApplyInstallEntry is ApplyEntry and
+// MarkBaseComplete is AdvanceFrontier(baseLSN). A BaseStager store stages
+// lazily, before the first WriteBase or MarkBaseComplete.
+func NewLegacyInstallHandle(store LogicalStorage, baseLSN uint64) InstallHandle {
+	return &legacyInstallHandle{store: store, baseLSN: baseLSN}
+}
+
+type legacyInstallHandle struct {
+	store   LogicalStorage
+	baseLSN uint64
+	staged  bool
+}
+
+func (h *legacyInstallHandle) stage() error {
+	if h.staged {
+		return nil
+	}
+	if st, ok := h.store.(BaseStager); ok {
+		if err := st.BeginBaseStage(); err != nil {
+			return fmt.Errorf("prepare BASE install: %w", err)
+		}
+	}
+	h.staged = true
+	return nil
+}
+
+func (h *legacyInstallHandle) WriteBase(lba uint32, data []byte) error {
+	if err := h.stage(); err != nil {
+		return err
+	}
+	return h.store.WriteExtentDirect(lba, data)
+}
+
+func (h *legacyInstallHandle) ApplyInstallEntry(lba uint32, data []byte, lsn uint64) error {
+	return h.store.ApplyEntry(lba, data, lsn)
+}
+
+func (h *legacyInstallHandle) MarkBaseComplete() error {
+	if err := h.stage(); err != nil {
+		return err
+	}
+	h.store.AdvanceFrontier(h.baseLSN)
+	return nil
 }
 
 // WriteBatcher is an optional LogicalStorage extension for contiguous

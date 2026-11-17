@@ -90,7 +90,7 @@ type basePreparingStore struct {
 	prepareCalls int
 }
 
-func (s *basePreparingStore) BeginBaseInstall() error {
+func (s *basePreparingStore) BeginBaseStage() error {
 	s.prepareCalls++
 	return nil
 }

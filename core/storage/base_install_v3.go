@@ -75,6 +75,13 @@ func (s *WALStore) beginBaseInstallV3(baseLSN uint64, id [16]byte) (*installHand
 	if v.w == nil {
 		return nil, errWALBindingV3 // a half-published reset before its Recover
 	}
+	if s.chunk.Load() != nil {
+		// The v3 chunk layer refuses BASE state writes and attachment while
+		// installing; its side of the install protocol (the install
+		// generation bump, no capture of a partly installed image) is not
+		// wired yet, so an install with a layer attached fails closed.
+		return nil, fmt.Errorf("%w: BASE install with an attached chunk layer", errV3NotYet)
+	}
 	d := v.pub.current()
 	switch d.BaseState {
 	case BaseInstalled:
@@ -126,6 +133,25 @@ func (s *WALStore) beginBaseInstallV3(baseLSN uint64, id [16]byte) (*installHand
 	}
 	return &installHandleV3{s: s, id: id}, nil
 }
+
+// BeginBaseInstall is the BASE install seam (DESIGN 8.7). A v3 store runs
+// the section 8.1 begin; a v2 store keeps its pre-seam behaviour behind the
+// legacy handle (it had no begin step).
+func (s *WALStore) BeginBaseInstall(baseLSN uint64, installID [16]byte) (InstallHandle, error) {
+	if s.v3 == nil {
+		return NewLegacyInstallHandle(s, baseLSN), nil
+	}
+	h, err := s.beginBaseInstallV3(baseLSN, installID)
+	if err != nil {
+		return nil, err
+	}
+	return h, nil
+}
+
+// MarkBaseComplete completes this handle's install (DESIGN 8.2).
+func (h *installHandleV3) MarkBaseComplete() error { return h.s.markBaseCompleteV3(h.id) }
+
+var _ BaseInstallPreparer = (*WALStore)(nil)
 
 // admitV3 takes installMu shared and checks, under it, that the volume is
 // installing under h's ID (DESIGN 8.7). The caller releases it only after

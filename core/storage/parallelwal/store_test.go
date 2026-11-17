@@ -1095,7 +1095,7 @@ func TestBaseExtentHeaderFailureKeepsPriorAcknowledgedExtent(t *testing.T) {
 		t.Fatalf("baseline checkpoint=%d activeExtent=%d want=(2,0)", s.checkpointLSN, s.activeExtent)
 	}
 
-	if err := s.BeginBaseInstall(); err != nil {
+	if err := s.BeginBaseStage(); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.WriteExtentDirect(0, testBlock(0x77, s.BlockSize())); err != nil {
@@ -1132,13 +1132,13 @@ func TestBaseExtentHeaderFailureKeepsPriorAcknowledgedExtent(t *testing.T) {
 
 func TestBeginBaseInstallClearsAbortedStage(t *testing.T) {
 	s, path := createTestStore(t)
-	if err := s.BeginBaseInstall(); err != nil {
+	if err := s.BeginBaseStage(); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.WriteExtentDirect(3, testBlock(0x55, s.BlockSize())); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.BeginBaseInstall(); err != nil {
+	if err := s.BeginBaseStage(); err != nil {
 		t.Fatal(err)
 	}
 	s.AdvanceFrontier(10)
@@ -1208,7 +1208,7 @@ func TestAdvanceFrontierWithoutBaseStageKeepsExistingData(t *testing.T) {
 
 func TestNextBaseStagePreservesHeaderFallbackToCurrentExtent(t *testing.T) {
 	s, path := createTestStore(t)
-	if err := s.BeginBaseInstall(); err != nil {
+	if err := s.BeginBaseStage(); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.WriteExtentDirect(4, testBlock(0x66, s.BlockSize())); err != nil {
@@ -1222,7 +1222,7 @@ func TestNextBaseStagePreservesHeaderFallbackToCurrentExtent(t *testing.T) {
 		t.Fatalf("first BASE activeExtent=%d want=1", s.activeExtent)
 	}
 
-	if err := s.BeginBaseInstall(); err != nil {
+	if err := s.BeginBaseStage(); err != nil {
 		t.Fatal(err)
 	}
 	s.mu.RLock()

@@ -1205,10 +1205,10 @@ func (s *Store) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
 	return err
 }
 
-// BeginBaseInstall resets the inactive extent used for the next rebuild.
+// BeginBaseStage resets the inactive extent used for the next rebuild.
 // The active extent remains authoritative until Sync publishes a header that
 // atomically switches ActiveExtent.
-func (s *Store) BeginBaseInstall() error {
+func (s *Store) BeginBaseStage() error {
 	s.syncMu.Lock()
 	defer s.syncMu.Unlock()
 	return s.resetBaseStageUnderSync()
@@ -1418,6 +1418,6 @@ func (s *Store) extentOffsetFor(extent int, lba uint32) int64 {
 }
 
 var (
-	_ storage.LogicalStorage      = (*Store)(nil)
-	_ storage.BaseInstallPreparer = (*Store)(nil)
+	_ storage.LogicalStorage = (*Store)(nil)
+	_ storage.BaseStager     = (*Store)(nil)
 )

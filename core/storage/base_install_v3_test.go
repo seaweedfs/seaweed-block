@@ -452,3 +452,22 @@ func TestBaseInstallV3CompletePersistsTheMapUnknownOfBaseWrites(t *testing.T) {
 		t.Fatal("chunk 2 reopened clean: the BASE write's UNKNOWN was lost at complete")
 	}
 }
+
+// Until the chunk layer's side of the v3 install protocol lands (codex03),
+// a begin with an attached chunk layer fails closed, writing nothing, so
+// no capture can upload a partly installed image. Mutant: dropping the
+// refusal begins the install with the layer attached and fails here.
+func TestBaseInstallV3BeginRefusesWithAnAttachedChunkLayer(t *testing.T) {
+	s, path := newMappedCheckpointStoreV3(t)
+	cfg := ctConfig(1)
+	cfg.Bitmap = nil
+	cfg.BarrierBound = 1
+	mustAttach(t, s, newFakeChunkRemote(), cfg)
+	a0, b0 := slotsV3(t, path)
+	if _, err := s.beginBaseInstallV3(0, idA); !errors.Is(err, errV3NotYet) {
+		t.Fatalf("begin with a chunk layer attached: err = %v, want errV3NotYet", err)
+	}
+	if a, b := slotsV3(t, path); a != a0 || b != b0 {
+		t.Fatal("a refused begin wrote a descriptor slot")
+	}
+}
