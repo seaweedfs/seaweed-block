@@ -232,3 +232,108 @@ func TestDurableProviderV3_UnwiredHEADRestoreRefusesBeforeClaim(t *testing.T) {
 		t.Fatal("failed restore left backend operational")
 	}
 }
+
+// This exercises the row7 caller seam without enabling production v3. The
+// owner seed/install transaction must make this pass before restore is claimed.
+type formatV3TakeoverView struct{}
+
+func (formatV3TakeoverView) Projection() frontend.Projection {
+	return frontend.Projection{VolumeID: "v1", ReplicaID: "r2", Epoch: 4, EndpointVersion: 1, Healthy: true}
+}
+func TestDurableProviderV3_HEADRestorePreservesRemoteImageAndNextLSN(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	remote := storage.NewMemChunkRemote()
+	source := mappedProviderV3(t, t.TempDir(), remote)
+	st, err := source.EnsureStorage("v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = source.RecoverVolume(ctx, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	first, second := bytes.Repeat([]byte{0x51}, 4096), bytes.Repeat([]byte{0xC2}, 4096)
+	for lba, data := range map[int64][]byte{5: first, 12: second} {
+		if _, err = source.Backend("v1").Write(ctx, lba*4096, data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = source.Backend("v1").Sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err = storage.FlushMappedWALStoreV3Test(st.(*storage.WALStore)); err != nil {
+		t.Fatal(err)
+	}
+	if h, err := source.CaptureVolume(ctx, "v1"); err != nil || h != 2 {
+		t.Fatalf("source capture H=%d err=%v", h, err)
+	}
+	if err = source.Close(); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	target := mappedProviderV3(t, root, remote)
+	target.view = formatV3TakeoverView{}
+	restored, err := target.EnsureStorage("v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = target.RecoverVolume(ctx, "v1"); err != nil {
+		t.Fatalf("actual mapped HEAD restore refused: %v", err)
+	}
+	if restored.NextLSN() != 3 {
+		t.Fatalf("restored nextLSN=%d want3", restored.NextLSN())
+	}
+	head, err := remote.GetHead(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if head.RemoteLSN != 2 || head.Epoch != 4 || head.Holder != "r2" {
+		t.Fatalf("takeover changed image/frontier: %+v", head)
+	}
+	before := remote.Puts()
+	check := func(p *DurableProvider, lba int64, want []byte) {
+		t.Helper()
+		got := make([]byte, 4096)
+		if n, e := p.Backend("v1").Read(ctx, lba*4096, got); e != nil || n != len(got) || !bytes.Equal(got, want) {
+			t.Fatalf("LBA%d n=%d err=%v equal=%v", lba, n, e, bytes.Equal(got, want))
+		}
+	}
+	check(target, 5, first)
+	check(target, 12, second)
+	check(target, 0, make([]byte, 4096))
+	if remote.Puts() != before {
+		t.Fatal("lazy read uploaded remote chunks")
+	}
+	next := bytes.Repeat([]byte{0x83}, 4096)
+	if _, err = target.Backend("v1").Write(ctx, 5*4096, next); err != nil {
+		t.Fatal(err)
+	}
+	if restored.NextLSN() != 4 {
+		t.Fatalf("restored write reused inherited LSN: next=%d", restored.NextLSN())
+	}
+	if err = target.Backend("v1").Sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err = storage.FlushMappedWALStoreV3Test(restored.(*storage.WALStore)); err != nil {
+		t.Fatal(err)
+	}
+	if h, err := target.CaptureVolume(ctx, "v1"); err != nil || h != 3 {
+		t.Fatalf("restored capture H=%d err=%v", h, err)
+	}
+	if _, err = os.Stat(target.volumePath("v1") + ".chunkbitmap"); !os.IsNotExist(err) {
+		t.Fatalf("restore used legacy bitmap: %v", err)
+	}
+	if err = target.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := mappedProviderV3(t, root, remote)
+	reopened.view = formatV3TakeoverView{}
+	if _, err = reopened.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = reopened.RecoverVolume(ctx, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	check(reopened, 5, next)
+	check(reopened, 12, second)
+}
