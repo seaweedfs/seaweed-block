@@ -464,11 +464,7 @@ func (s *WALStore) appendWriteV3(lba uint32, data []byte, lsn uint64) (uint64, e
 	}
 	// Reserve proof invalidation before the WAL can change. This is under
 	// the existing store lock; a refused append only causes conservative retry.
-	if s.v3.mapProof != nil {
-		if err := s.v3.mapProof.mutatedV3(); err != nil {
-			return 0, err
-		}
-	}
+
 	phys, err := s.v3.w.append(e, s.v3.wack.Load())
 	if err != nil {
 		if errors.Is(err, errWALPwrite) {
