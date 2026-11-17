@@ -50,9 +50,9 @@ at a time, `fsync` after every write, 60 s; median of 3 boots per setup):
   (ublk) and 5.87 ms (NVMe/TCP) against 2.74 ms local.
 - The fix removed an idle wait: a lone `Sync` used to sit out the group-commit
   collection delay with nobody to batch with. On `walstore-chunk` the
-  group-commit wait fell to about 8 µs (histogram p50 bucket), and one backend
-  `Sync` now takes about 1.2 ms. Each guest `fsync` causes two backend syncs.
-- Every setup passed a gate that every guest `fsync` reaches the backend sync
+  group-commit wait fell to about 8 µs (histogram p50 bucket), and a backend
+  `Sync` now takes about 1.2 ms on average (mean over the gate window). Each guest `fsync` causes two backend syncs.
+- All four Seaweed Block setups passed a gate that every guest `fsync` reaches the backend sync
   (at least 2,000 flushes and 2,000 backend syncs per run); an unsafe-cache
   control showed zero.
 - The other workloads (`npm ci`, `git clone`, untar, `find` + `stat`) stayed at
