@@ -190,3 +190,66 @@ func readRawV3(t *testing.T, path string, off int64, n int) []byte {
 	}
 	return b
 }
+
+// codex01 04180c33 P1 (live continuation): BASE writes LBA 1 = B0, then the
+// install lane applies and acknowledges LSN 11 at LBA 1; a same-open
+// Recover clears the dirty map; the ORIGINAL handle then applies and
+// acknowledges LSN 12 at LBA 2 and completes; reads in the same open must
+// serve LSN 11 at LBA 1, not the older BASE bytes. Mutant: a same-open
+// Recover that does not replay the live install's records serves B0.
+func TestBaseInstallV3SameOpenRecoverKeepsTheLiveInstallServed(t *testing.T) {
+	s, _ := newStoreV3(t, WModeStrict)
+	t.Cleanup(func() { crashRecoveryHardeningStore(t, s) })
+	h := beginV3(t, s, 0, idA)
+	if err := h.WriteBase(1, blk(0xB0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.ApplyInstallEntry(1, blk(11), 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SyncInstallLog(idA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Recover(); !errors.Is(err, ErrBaseIncomplete) {
+		t.Fatalf("same-open Recover: err = %v", err)
+	}
+	if err := h.ApplyInstallEntry(2, blk(12), 2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SyncInstallLog(idA); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.MarkBaseComplete(); err != nil {
+		t.Fatal(err)
+	}
+	for lba, want := range map[uint32]byte{1: 11, 2: 12} {
+		if got := readV3(t, s, lba); !bytes.Equal(got, blk(want)) {
+			t.Fatalf("same-open read LBA %d = %x..., want %x", lba, got[0], want)
+		}
+	}
+}
+
+// A same-open Recover that finds the live install's WAL cut short of the
+// writer (a record damaged under the live install) fails closed: the store
+// latches and the handle cannot append past the damage. Mutant: without
+// the latch the handle appends behind the gap and fails here.
+func TestBaseInstallV3SameOpenRecoverOverDamageFailsClosed(t *testing.T) {
+	s, path := newStoreV3(t, WModeStrict)
+	t.Cleanup(func() { crashRecoveryHardeningStore(t, s) })
+	h := beginV3(t, s, 0, idA)
+	for lsn := uint64(1); lsn <= 2; lsn++ {
+		if err := h.ApplyInstallEntry(uint32(lsn), blk(byte(lsn)), lsn); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.syncFile(nil, s.fd.Sync); err != nil {
+		t.Fatal(err)
+	}
+	damageRecord(t, path, 2)
+	if _, err := s.Recover(); !errors.Is(err, ErrBaseIncomplete) {
+		t.Fatalf("same-open Recover: err = %v", err)
+	}
+	if err := h.ApplyInstallEntry(3, blk(3), 3); err == nil {
+		t.Fatal("the live handle appended behind a damaged record after a same-open Recover")
+	}
+}
