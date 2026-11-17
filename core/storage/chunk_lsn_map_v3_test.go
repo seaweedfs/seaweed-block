@@ -323,3 +323,32 @@ func TestChunkLSNMapV3_RejectsRehashedMalformedRecords(t *testing.T) {
 		})
 	}
 }
+
+func TestChunkLSNMapV3_CounterAndGeometryRefusal(t *testing.T) {
+	d := mapDescriptorV3(t)
+	if _, e := encodeMapPageV3(d, ^uint64(0), 0, []chunkLSNEntryV3{{}}); !errors.Is(e, ErrCounterExhausted) {
+		t.Fatalf("page counter=%v", e)
+	}
+	if _, e := encodeMapRootV3(d, 1, 1, ^uint64(0), []mapPageRefV3{{}}); !errors.Is(e, ErrCounterExhausted) {
+		t.Fatalf("root counter=%v", e)
+	}
+	m, e := createChunkLSNMapV3(filepath.Join(t.TempDir(), "map"), d, 1)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer m.Close()
+	if _, e = m.Prepare(^uint64(0), 7, []chunkLSNEntryV3{{}}, nil); !errors.Is(e, ErrCounterExhausted) {
+		t.Fatalf("prepare counter=%v", e)
+	}
+	stat, _ := m.fd.Stat()
+	if stat.Size() != 0 {
+		t.Fatal("invalid counter wrote bytes")
+	}
+	if _, e = mapShapeForV3(d, 0); e == nil {
+		t.Fatal("zero chunk geometry accepted")
+	}
+	d.VolumeSize++
+	if _, e = mapShapeForV3(d, 1); e == nil {
+		t.Fatal("nonintegral block geometry accepted")
+	}
+}

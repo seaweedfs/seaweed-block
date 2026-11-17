@@ -68,7 +68,10 @@ func mapDigestV3(domain string, b []byte) [32]byte {
 	return out
 }
 func encodeMapPageV3(d descriptorV3, g, index uint64, es []chunkLSNEntryV3) ([]byte, error) {
-	if g == 0 || g > counterMaxV3 || len(es) == 0 || len(es) > 250 {
+	if g > counterMaxV3 {
+		return nil, ErrCounterExhausted
+	}
+	if g == 0 || len(es) == 0 || len(es) > 250 {
 		return nil, ErrMapInvalid
 	}
 	b := make([]byte, 4096)
@@ -98,7 +101,10 @@ func encodeMapRootV3(d descriptorV3, g, cb, C uint64, refs []mapPageRefV3) ([]by
 	if e != nil {
 		return nil, e
 	}
-	if g == 0 || g > counterMaxV3 || C > counterMaxV3 || uint64(len(refs)) != s.pages {
+	if g > counterMaxV3 || C > counterMaxV3 {
+		return nil, ErrCounterExhausted
+	}
+	if g == 0 || uint64(len(refs)) != s.pages {
 		return nil, ErrMapInvalid
 	}
 	b := make([]byte, int(s.aligned))
@@ -289,7 +295,10 @@ func (m *chunkLSNMapV3) Prepare(g, C uint64, entries []chunkLSNEntryV3, prior *c
 	if e != nil {
 		return nil, e
 	}
-	if uint64(len(entries)) != s.chunks || g == 0 || g <= m.lastGeneration || g > counterMaxV3 || C > counterMaxV3 {
+	if g > counterMaxV3 || C > counterMaxV3 {
+		return nil, ErrCounterExhausted
+	}
+	if uint64(len(entries)) != s.chunks || g == 0 || g <= m.lastGeneration {
 		return nil, ErrMapInvalid
 	}
 	if prior != nil && (prior.owner != m || prior.generation >= g) {
