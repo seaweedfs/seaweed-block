@@ -90,3 +90,34 @@ func TestInstallLogV3IsModeAAndSurvivesACrash(t *testing.T) {
 		t.Fatalf("reopen: err = %v, want an intact ErrBaseIncomplete", err)
 	}
 }
+
+// codex01 row 10a P1 (the #172 ack boundary): an append of the same install
+// that fails and latches the store after SyncInstallLog's publication and
+// before its ack refuses the ack: no H, no volatile acknowledged frontier.
+// The held hook runs that append with a failing pwrite (the real latch). Mutant: no
+// final locked sticky check returns H and fails here.
+func TestInstallLogV3AFaultLatchedBeforeTheAckRefusesIt(t *testing.T) {
+	s, _ := newStoreV3(t, WModeStrict)
+	t.Cleanup(func() { crashRecoveryHardeningStore(t, s) })
+	h := beginV3(t, s, 0, idA)
+	if err := h.ApplyInstallEntry(1, blk(1), 1); err != nil {
+		t.Fatal(err)
+	}
+	var appendErr error
+	s.v3.testInstallLogBeforeAck = func() {
+		// The queued same-ID append runs here, and its pwrite fails.
+		s.v3.w.writeAt = func([]byte, int64) (int, error) { return 0, errors.New("injected pwrite failure") }
+		appendErr = h.ApplyInstallEntry(2, blk(2), 2)
+	}
+	wack := s.v3.wack.Load()
+	H, err := s.SyncInstallLog(idA)
+	if err == nil || H != 0 {
+		t.Fatalf("SyncInstallLog across a latched fault = (%d, %v), want (0, the fault)", H, err)
+	}
+	if !errors.Is(appendErr, errWALPwrite) {
+		t.Fatalf("setup: the held append returned %v, want a pwrite failure", appendErr)
+	}
+	if s.v3.wack.Load() != wack {
+		t.Fatalf("acknowledged frontier moved to %d across the fault", s.v3.wack.Load())
+	}
+}

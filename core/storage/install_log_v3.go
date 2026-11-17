@@ -72,12 +72,20 @@ func (s *WALStore) SyncInstallLog(installID [16]byte) (uint64, error) {
 	}); err != nil {
 		return 0, err
 	}
+	if hook := v.testInstallLogBeforeAck; hook != nil {
+		hook()
+	}
+	// The #172 ack boundary: a fault latched after the publisher's final
+	// check (a queued append of this ID failing under s.mu) refuses the ack.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.stickyIOFault(); err != nil {
+		return 0, err
+	}
 	if H > v.wack.Load() {
 		v.wack.Store(H)
 	}
-	s.mu.Lock()
 	s.syncedLSN = max(s.syncedLSN, H)
-	s.mu.Unlock()
 	return H, nil
 }
 

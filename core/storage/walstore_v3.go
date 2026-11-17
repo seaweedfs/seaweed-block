@@ -110,6 +110,9 @@ type walStoreV3State struct {
 	// installMu; testInstallAdmitted after its ID check, before the write.
 	testInstallBeforeAdmit func()
 	testInstallAdmitted    func()
+	// testInstallLogBeforeAck runs in SyncInstallLog after its publication
+	// and before its final ack-boundary check.
+	testInstallLogBeforeAck func()
 }
 
 // errV3RecoveredMeanwhile: a recovery ran between an outer Sync's capture
