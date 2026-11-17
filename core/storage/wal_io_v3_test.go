@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"hash/crc32"
 	"io"
 	"os"
@@ -370,4 +371,39 @@ func TestWALIOV3_RestoreCursorDoesNotPublishOrResetNonce(t *testing.T) {
 		t.Fatal("refused cursor restore changed E")
 	}
 	// No append is attempted here: fence/publication admission is row5/11.
+}
+
+// The amended row-3 publisher and the existing row-4 writer share one
+// refusal boundary even when the caller has not yet wired a global latch.
+func TestWALIOV3_UncertainPublisherStopsExistingAndNewWriters(t *testing.T) {
+	for _, partial := range []bool{false, true} {
+		t.Run(fmt.Sprintf("partial=%v", partial), func(t *testing.T) {
+			f, p, w := newWALIOTestV3(t, 0, 0)
+			boom := errors.New("slot response lost")
+			p.io.writeSlot = func(off int64, b []byte) error {
+				if partial {
+					b = b[:len(b)/2]
+				}
+				if _, err := f.WriteAt(b, off); err != nil {
+					return err
+				}
+				return boom
+			}
+			_, err := p.publish(nil, nil, func(d *descriptorV3) error { d.W = 1; return nil })
+			if !errors.Is(err, ErrDescriptorPublishUncertain) {
+				t.Fatalf("publish=%v", err)
+			}
+			writes := 0
+			w.writeAt = func(b []byte, off int64) (int, error) { writes++; return f.WriteAt(b, off) }
+			if _, err := w.append(walEntryV3{LSN: 1, Type: walEntryBarrier}, 0); err == nil {
+				t.Fatal("existing writer accepted uncertain publication")
+			}
+			if writes != 0 {
+				t.Fatalf("physical writes after uncertainty=%d", writes)
+			}
+			if _, err := newWALWriterV3(f, p); err == nil {
+				t.Fatal("new writer accepted uncertain publication")
+			}
+		})
+	}
 }
