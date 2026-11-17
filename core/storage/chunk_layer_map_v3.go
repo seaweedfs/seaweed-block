@@ -1,5 +1,10 @@
 package storage
 
+// mapProof is an immutable discriminator for this open store. ownedMap may
+// be cleared by Close, so callers such as Stats must not use that cleanup
+// pointer to decide which metadata format this layer implements.
+func (l *chunkLayerImpl) usesOwnedMapV3() bool { return l.s.v3 != nil && l.s.v3.mapProof != nil }
+
 // persistCapturedMapV3 is called only after HEAD's publication is definite
 // (or an authority-checked no-op), outside bmMu/stMu and the capture barrier.
 // The capture's mutation versions were sampled under the quiesced barrier.
