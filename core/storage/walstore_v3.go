@@ -79,6 +79,10 @@ type walStoreV3State struct {
 // of its target and its completion; nothing is acknowledged.
 var errV3RecoveredMeanwhile = errors.New("storage: v3 recovery ran meanwhile; the Sync is not acknowledged")
 
+// errV3LegacySuperblockWrite: a legacy superblock write (offset 0, which is
+// descriptor slot A on a v3 file) was attempted on a v3 store.
+var errV3LegacySuperblockWrite = errors.New("storage: legacy superblock write refused on a v3 store (offset 0 is descriptor slot A)")
+
 var errV3NotYet = errors.New("storage: operation not yet supported on a v3 store (later plan row)")
 
 // testSkipFenceOnRecoverV3 is a test-only mutant switch for the G1 control

@@ -314,7 +314,13 @@ func openInitializedInternal(path string, f *os.File, sb *superblock, metadata B
 	go committer.Run()
 	s.committer = committer
 	s.syncCache = committer.SyncCache
+	// The two legacy superblock writers pwrite offset 0, which on a v3 file
+	// is descriptor slot A: they refuse on v3 (codex01 row 7 slice 4 P1).
+	// A v3 store publishes metadata only through its descriptor publisher.
 	s.syncDirectFrontierMetadata = func(data []byte) error {
+		if s.v3 != nil {
+			return errV3LegacySuperblockWrite
+		}
 		if _, err := f.WriteAt(data, 0); err != nil {
 			return fmt.Errorf("storage: pwrite direct frontier superblock: %w", err)
 		}
@@ -324,6 +330,9 @@ func openInitializedInternal(path string, f *os.File, sb *superblock, metadata B
 		return nil
 	}
 	s.writeSuperblockMetadata = func(data []byte) error {
+		if s.v3 != nil {
+			return errV3LegacySuperblockWrite
+		}
 		if _, err := f.WriteAt(data, 0); err != nil {
 			return err
 		}
@@ -1505,7 +1514,10 @@ func (s *WALStore) Close() error {
 	if fault := s.stickyIOFault(); fault != nil {
 		closeErrors = append(closeErrors, fault)
 	}
-	if s.fd != nil && s.stickyIOFault() == nil {
+	if s.fd != nil && s.v3 == nil && s.stickyIOFault() == nil {
+		// v2 only: a v3 Close writes nothing; its acknowledged state is
+		// already durable in the descriptor slots and the WAL, and a
+		// lagged mode-C W is recovered from the WAL scan on reopen.
 		// Persist current head/tail back into the superblock so a
 		// subsequent OpenWALStore can find the WAL bounds without
 		// relying solely on the defensive scan.
