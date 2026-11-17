@@ -379,7 +379,12 @@ func (s *WALStore) recoverV3() (uint64, error) {
 		size := uint64(walEntryHeaderSizeV3 + len(e.Data))
 		phys := (r.End - size) % d.WALSize
 		s.dm.putAtIfNewer(e.LBA, phys, 0, e.LSN, d.BlockSize)
-		s.recordMapWriteV3(e.LBA, e.LSN)
+		// Records at/below the selected checkpoint are already represented by
+		// its durable map. Re-resolving those same logical bytes is not a new
+		// lower/equal mutation; conservatively account only the retained suffix.
+		if e.LSN > d.CheckpointLSN {
+			s.recordMapWriteV3(e.LBA, e.LSN)
+		}
 	}
 	if h := v.testRecoverHold; h != nil {
 		h()
