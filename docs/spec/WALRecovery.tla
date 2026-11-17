@@ -29,6 +29,10 @@
 (* framing, CRC32C, type/size bounds and allocation order are code-test     *)
 (* obligations, abstracted as record validity here, NOT proved by this model.*)
 (* No production state/transition or model action changes in codec row 2.  *)
+(* Impl-3 row4 adds dark nonce/cursor-bound file writer and scan muscles.  *)
+(* They return evidence, not readiness: R<W*, fencing and BASE decisions  *)
+(* remain the integrating owner. Physical cursor/slack/binding checks use *)
+(* code controls; composed record-position receipts retain their scope.   *)
 EXTENDS Integers, FiniteSets, Sequences, TLC
 
 CONSTANTS K, MaxLSN, LBAs, Rule, CorruptOn, MaxCkpt,
