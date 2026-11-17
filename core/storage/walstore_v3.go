@@ -387,7 +387,16 @@ func (s *WALStore) recoverV3() (uint64, error) {
 		// Nothing is fenced, published or admitted here; the allocator
 		// state continues above every trusted record so a later install
 		// never reuses an LSN the WAL still holds.
-		v.installReopen = &installReopenV3{id: d.BaseInstallID, E: o.E, R: o.R, damaged: o.Damaged}
+		ro := &installReopenV3{id: d.BaseInstallID, E: o.E, R: o.R, damaged: o.Damaged, walSize: d.WALSize}
+		for _, r := range scan.Records {
+			if r.Entry.LSN > o.R {
+				break
+			}
+			if r.Entry.Type == walEntryWrite {
+				ro.records = append(ro.records, r)
+			}
+		}
+		v.installReopen = ro
 		v.appended.Store(max(v.appended.Load(), o.R))
 		s.nextLSN = max(s.nextLSN, o.R+1)
 		s.walHead = max(s.walHead, o.R)

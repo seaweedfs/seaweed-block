@@ -41,6 +41,83 @@ type installReopenV3 struct {
 	id      [16]byte
 	E, R    uint64
 	damaged bool
+	walSize uint64
+	records []walScannedRecordV3 // the trusted write records <= R, for a resume
+}
+
+// resumeBaseInstallV3 resumes the installing ID after a reopen (DESIGN
+// 8.3, "Resume (same ID)"). Under installMu exclusive it appends nothing
+// until all three hold: the trusted-through-W check (the recovered suffix
+// is intact, R >= W*, and E >= the persisted retainedHead), the 6.6 fence
+// of [E, floor + WALSize) with fsync, and a publication of retainedHead = E
+// (G3). Otherwise it refuses with ErrInstallSuffixDamaged, writing nothing;
+// the volume stays installing and not ready. The writer continues at E,
+// the live position after this open's recovery; the recovered install-lane
+// records are replayed so the completed image serves them.
+func (s *WALStore) resumeBaseInstallV3(id [16]byte) (*installHandleV3, error) {
+	v := s.v3
+	if v == nil {
+		return nil, errors.New("storage: v3 BASE resume on a non-v3 store")
+	}
+	v.installMu.Lock()
+	defer v.installMu.Unlock()
+	s.captureMu.Lock()
+	defer s.captureMu.Unlock()
+	s.lifecycleMu.RLock()
+	defer s.lifecycleMu.RUnlock()
+	v.syncMu.Lock()
+	defer v.syncMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errors.New("storage: BASE resume after Close")
+	}
+	if err := s.stickyIOFault(); err != nil {
+		return nil, err
+	}
+	d := v.pub.current()
+	ro := v.installReopen
+	if d.BaseState != BaseInstalling || d.BaseInstallID != id {
+		return nil, ErrInstallSuperseded
+	}
+	if ro == nil || ro.id != id || v.w == nil {
+		return nil, fmt.Errorf("%w: resume without this open's recovered bounds", errV3NotYet)
+	}
+	if ro.damaged || ro.E < d.RetainedHead {
+		return nil, fmt.Errorf("%w: R %d, E %d, persisted retainedHead %d", ErrInstallSuffixDamaged, ro.R, ro.E, d.RetainedHead)
+	}
+	v.recoverGen.Add(1)
+	defer v.recoverGen.Add(1)
+	floor, sameNonce := v.pub.reuseFloor()
+	if err := s.fenceV3(ro.E, floor, d.WALSize, sameNonce, d.WALOffset); err != nil {
+		return nil, err
+	}
+	if _, err := v.pub.publish(nil, nil, func(n *descriptorV3) error {
+		if n.BaseState != BaseInstalling || n.BaseInstallID != id {
+			return ErrInstallSuperseded
+		}
+		n.RetainedHead = ro.E
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	if err := v.w.advanceHeadV3(ro.E); err != nil {
+		return nil, err
+	}
+	for _, r := range ro.records {
+		e := r.Entry
+		size := uint64(walEntryHeaderSizeV3 + len(e.Data))
+		s.dm.putAtIfNewer(e.LBA, (r.End-size)%ro.walSize, 0, e.LSN, d.BlockSize)
+		s.recordMapWriteV3(e.LBA, e.LSN)
+	}
+	v.installReopen = nil
+	v.liveInstallID = id
+	v.installEpoch++
+	v.preBaseHighest = 0 // every recovered record is of this install
+	if err := v.pub.invalidateMapProofV3(); err != nil {
+		return nil, err
+	}
+	return &installHandleV3{s: s, id: id, epoch: v.installEpoch}, nil
 }
 
 // installHandleV3 is the only path for BASE extent writes and install-lane
