@@ -480,7 +480,7 @@ func TestWALStoreV3RecoversAHistoryEndingAtTheLastRepresentableCursor(t *testing
 // acknowledges under C before SetWMode(A) publishes the new mode.
 func TestWALStoreV3SetWModeWaitsForAHeldBatch(t *testing.T) {
 	s, _ := newStoreV3(t, WModeLagged)
-	defer crashRecoveryHardeningStore(t, s)
+	t.Cleanup(func() { crashRecoveryHardeningStore(t, s) })
 	writeSynced(t, s, 1, 1)
 	if _, err := s.Write(2, blk(2)); err != nil {
 		t.Fatal(err)
@@ -526,7 +526,7 @@ func TestWALStoreV3SetWModeWaitsForAHeldBatch(t *testing.T) {
 // once SetWMode has committed.
 func TestWALStoreV3NoBatchAcksUnderAStaleModeAfterSetWMode(t *testing.T) {
 	s, _ := newStoreV3(t, WModeLagged)
-	defer crashRecoveryHardeningStore(t, s)
+	t.Cleanup(func() { crashRecoveryHardeningStore(t, s) })
 	writeSynced(t, s, 1, 1)
 	parked, release := make(chan struct{}), make(chan struct{})
 	rel := sync.OnceFunc(func() { close(release) })
@@ -705,5 +705,234 @@ func TestWALStoreV3FlusherCycleRunsTheIdleRefresh(t *testing.T) {
 	damageRecord(t, path, 3)
 	if _, err := reopenV3(t, path); !isWALCorrupt(err) {
 		t.Fatalf("after the flusher's refresh: err = %v, want wal_corrupt", err)
+	}
+}
+
+// heldV3 owns a parked hook and the workers a held control starts. Its
+// cleanup, registered before any worker starts and after the store crash
+// cleanup, first releases the hold, then joins every worker with a bound,
+// so an early Fatal never strands store shutdown (codex01 row 5d P2).
+type heldV3 struct {
+	t       *testing.T
+	parked  chan struct{}
+	release chan struct{}
+	rel     func()
+	once    sync.Once
+	workers []chan error
+}
+
+func newHeldV3(t *testing.T) *heldV3 {
+	h := &heldV3{t: t, parked: make(chan struct{}), release: make(chan struct{})}
+	h.rel = sync.OnceFunc(func() { close(h.release) })
+	t.Cleanup(func() {
+		h.rel()
+		for _, w := range h.workers {
+			select {
+			case <-w:
+			case <-time.After(10 * time.Second):
+				t.Errorf("a held worker did not finish within 10s")
+			}
+		}
+	})
+	return h
+}
+
+// hold parks the caller the first time it runs.
+func (h *heldV3) hold() { h.once.Do(func() { close(h.parked); <-h.release }) }
+
+// start runs f on a worker whose result is joined at cleanup.
+func (h *heldV3) start(f func() error) chan error {
+	c := make(chan error, 1)
+	h.workers = append(h.workers, c)
+	go func() { c <- f() }()
+	return c
+}
+
+// result takes a worker's result with a bound, and leaves a copy so the
+// cleanup join does not wait on a consumed channel.
+func (h *heldV3) result(c chan error, what string) error {
+	h.t.Helper()
+	err := recvErrV3(h.t, c, what)
+	c <- err
+	return err
+}
+
+// notDoneV3 asserts a worker is still waiting on the leader role. It waits
+// up to 300ms for the worker to (wrongly) finish: the wait only gives a
+// broken implementation time to show itself, so a mutant that lets the
+// worker run is caught reliably; a correct implementation passes whatever
+// the timing.
+func notDoneV3(t *testing.T, c chan error, what string) {
+	t.Helper()
+	select {
+	case err := <-c:
+		c <- err
+		t.Fatalf("%s returned (%v) while it should be waiting on the leader role", what, err)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// codex01 row 5d schedule A: a refresh attempted DURING a same-open
+// recovery waits for it (Recover holds the leader role), then sees the
+// recovered frontier and publishes nothing.
+func TestWALStoreV3RefreshDuringRecoverWaitsAndPublishesNothing(t *testing.T) {
+	s, path := newStoreV3(t, WModeLagged)
+	t.Cleanup(func() { crashRecoveryHardeningStore(t, s) })
+	h := newHeldV3(t)
+	writeSynced(t, s, 1, 2) // slot W 1 (lagged), acknowledged W 2
+	damageRecord(t, path, 2)
+	s.v3.testRecoverHold = h.hold
+	rec := h.start(func() error { _, err := s.Recover(); return err })
+	waitV3(t, h.parked, "Recover after its decision")
+	ref := h.start(s.refreshW)
+	notDoneV3(t, ref, "refreshW")
+	h.rel()
+	if err := h.result(rec, "Recover"); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	if err := h.result(ref, "refreshW"); err != nil {
+		t.Fatalf("refreshW: %v", err)
+	}
+	if w := s.v3.pub.current().W; w > 1 {
+		t.Fatalf("a refresh during recovery published W %d over the recovered prefix 1", w)
+	}
+	if _, err := s.Recover(); err != nil {
+		t.Fatalf("next Recover: %v (a false wal_corrupt)", err)
+	}
+}
+
+// codex01 row 5d schedule B: a recovery attempted while a C batch is parked
+// after its publication and before its acknowledgement waits for the batch;
+// the recovery then lowers the frontier and nothing revives the dropped cut.
+func TestWALStoreV3RecoverWaitsForABatchAckAndNothingRevivesTheCut(t *testing.T) {
+	s, path := newStoreV3(t, WModeLagged)
+	t.Cleanup(func() { crashRecoveryHardeningStore(t, s) })
+	h := newHeldV3(t)
+	writeSynced(t, s, 1, 1)
+	if _, err := s.Write(2, blk(2)); err != nil {
+		t.Fatal(err)
+	}
+	s.v3.testBatchBeforeAck = h.hold
+	syn := h.start(func() error { _, err := s.Sync(); return err })
+	waitV3(t, h.parked, "the batch before its acknowledgement")
+	s.v3.testBatchBeforeAck = nil
+	damageRecord(t, path, 2)
+	rec := h.start(func() error { _, err := s.Recover(); return err })
+	notDoneV3(t, rec, "Recover")
+	h.rel()
+	// The batch acknowledged before the recovery. The outer Sync either
+	// completed before the recovery took the leader role, or found the
+	// recovery generation moved and refused its ack: both are correct.
+	if err := h.result(syn, "Sync"); err != nil && !errors.Is(err, errV3RecoveredMeanwhile) {
+		t.Fatalf("Sync: %v", err)
+	}
+	if err := h.result(rec, "Recover"); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	if got := s.v3.wack.Load(); got != 1 {
+		t.Fatalf("acknowledged W after the recovery = %d, want R = 1 (the dropped cut revived)", got)
+	}
+	if err := s.refreshW(); err != nil {
+		t.Fatal(err)
+	}
+	if w := s.v3.pub.current().W; w > 1 {
+		t.Fatalf("W %d covers the fenced suffix", w)
+	}
+	if _, err := s.Recover(); err != nil {
+		t.Fatalf("next Recover: %v (a false wal_corrupt)", err)
+	}
+}
+
+// codex01 row 5d: the outer Sync() completion is validated against the
+// recovery generation. A Sync whose batch finished, then waits while a
+// recovery drops its cut, must not acknowledge it; a fresh Sync after the
+// recovery acknowledges normally.
+func TestWALStoreV3OuterSyncCompletionIsRefusedAcrossARecovery(t *testing.T) {
+	s, path := newStoreV3(t, WModeLagged)
+	t.Cleanup(func() { crashRecoveryHardeningStore(t, s) })
+	h := newHeldV3(t)
+	writeSynced(t, s, 1, 1)
+	if _, err := s.Write(2, blk(2)); err != nil {
+		t.Fatal(err)
+	}
+	s.v3.testSyncBeforeCompletion = h.hold
+	syn := h.start(func() error { _, err := s.Sync(); return err })
+	waitV3(t, h.parked, "the outer Sync before its completion")
+	s.v3.testSyncBeforeCompletion = nil
+	damageRecord(t, path, 2)
+	if _, err := s.Recover(); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	h.rel()
+	if err := h.result(syn, "Sync"); !errors.Is(err, errV3RecoveredMeanwhile) {
+		t.Fatalf("outer Sync across a recovery: err = %v, want errV3RecoveredMeanwhile", err)
+	}
+	if R, _, _ := s.Boundaries(); R > 1 {
+		t.Fatalf("synced frontier %d revived past the recovered prefix 1", R)
+	}
+	// Fresh lifetime: a new write and Sync after the recovery acknowledge.
+	if _, err := s.Write(3, blk(3)); err != nil {
+		t.Fatal(err)
+	}
+	if lsn, err := s.Sync(); err != nil || lsn < 2 {
+		t.Fatalf("fresh Sync after the recovery: %d, %v", lsn, err)
+	}
+}
+
+// codex01 row 5c P2: the empty-dirty-set branch of the flusher cycle runs the
+// idle refresh on its own (discriminated separately from the flush branch).
+func TestWALStoreV3FlusherEmptyCycleRunsTheIdleRefresh(t *testing.T) {
+	s, _ := newStoreV3(t, WModeLagged)
+	t.Cleanup(func() { crashRecoveryHardeningStore(t, s) })
+	writeSynced(t, s, 1, 2) // slot W 1 (lagged), acknowledged W 2
+	s.dm.clear()            // nothing dirty: the cycle takes the empty branch
+	if err := s.flusher.flushOnceInternal(false); err != nil {
+		t.Fatal(err)
+	}
+	if w := s.v3.pub.current().W; w != 2 {
+		t.Fatalf("slot W after an empty flusher cycle = %d, want 2 (the idle refresh)", w)
+	}
+}
+
+// stubMapCandidateV3 is a test map candidate that covers exactly the
+// checkpoint it is asked for (row 7 supplies the real one).
+func stubMapCandidateV3(cp uint64) (func(n *descriptorV3) error, error) {
+	return func(n *descriptorV3) error {
+		n.MapGeneration++
+		n.MapRootHash[0]++
+		n.MapCoveredCheckpoint = cp
+		return nil
+	}, nil
+}
+
+// A v3 checkpoint never exceeds the acknowledged W (DESIGN 2.2, 9.1): the
+// flusher may flush a dirty entry no Sync has acknowledged, and its
+// checkpoint candidate is clamped to W; the unsynced record stays retained
+// in the WAL and survives a crash.
+func TestWALStoreV3FlusherCheckpointIsClampedToTheAcknowledgedW(t *testing.T) {
+	s, path := newStoreV3(t, WModeLagged)
+	s.v3.mapCandidate = stubMapCandidateV3
+	writeSynced(t, s, 1, 1)                       // acknowledged W 1
+	if _, err := s.Write(2, blk(2)); err != nil { // dirty, unsynced
+		t.Fatal(err)
+	}
+	if err := s.flusher.flushOnceInternal(false); err != nil {
+		t.Fatalf("flusher cycle: %v (a checkpoint above W is refused at publication)", err)
+	}
+	d := s.v3.pub.current()
+	if d.CheckpointLSN != 1 || d.MapCoveredCheckpoint != 1 || d.W < 1 {
+		t.Fatalf("checkpoint %d, covered %d, W %d: want the checkpoint clamped to the acknowledged W 1",
+			d.CheckpointLSN, d.MapCoveredCheckpoint, d.W)
+	}
+	if d.RetainedTail != 0 {
+		t.Fatalf("retainedTail %d: the unsynced record must stay retained", d.RetainedTail)
+	}
+	crashRecoveryHardeningStore(t, s)
+	r := mustReopenV3(t, path)
+	defer r.Close()
+	for lba := uint32(1); lba <= 2; lba++ {
+		if !bytes.Equal(readV3(t, r, lba), blk(byte(lba))) {
+			t.Fatalf("LBA %d lost after a clamped checkpoint and a crash", lba)
+		}
 	}
 }

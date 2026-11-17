@@ -31,6 +31,19 @@ type walStoreV3State struct {
 	appended atomic.Uint64 // highest LSN pwritten to the WAL
 	wack     atomic.Uint64 // highest acknowledged LSN (Sync completed)
 
+	// recoverGen is the recovery generation. A v3 Recover holds syncMu (the
+	// leader role) for its whole run, between lifecycleMu and s.mu, and bumps
+	// recoverGen first, under syncMu and s.mu. Every W publisher (the Sync
+	// batch, refreshW, SetWMode) holds syncMu across capture -> publish ->
+	// acknowledgement, so no publication straddles a recovery (codex01 row
+	// 5d; Claude01's structural seam). The one boundary that cannot hold
+	// syncMu across its wait, the outer Sync() completion, captures
+	// recoverGen with its target and rechecks it under syncMu -> s.mu.
+	//
+	// Lock graph: captureMu -> lifecycleMu -> syncMu -> s.mu -> descMu ->
+	// fileSyncMu; nothing takes syncMu while holding s.mu or descMu.
+	recoverGen atomic.Uint64
+
 	// syncMu is the group-commit leader role for the v3-only publications
 	// that run outside the committer (refreshW, SetWMode).
 	syncMu sync.Mutex
@@ -49,7 +62,21 @@ type walStoreV3State struct {
 	// testSetWModeHoldingRole runs in SetWMode after it has taken the leader
 	// role and before it publishes the new mode.
 	testSetWModeHoldingRole func()
+	// testRefreshCached runs in refreshW after it has read the acknowledged
+	// W and before it publishes; testRecoverHold runs in recoverV3 after the
+	// scan and decision, before the fence; testBatchBeforeAck runs in a
+	// committer batch after its publication and before its final
+	// acknowledgement; testSyncBeforeCompletion runs in the outer Sync()
+	// after the committer returned and before its completion.
+	testRefreshCached        func()
+	testRecoverHold          func()
+	testBatchBeforeAck       func()
+	testSyncBeforeCompletion func()
 }
+
+// errV3RecoveredMeanwhile: a recovery ran between an outer Sync's capture
+// of its target and its completion; nothing is acknowledged.
+var errV3RecoveredMeanwhile = errors.New("storage: v3 recovery ran meanwhile; the Sync is not acknowledged")
 
 var errV3NotYet = errors.New("storage: operation not yet supported on a v3 store (later plan row)")
 
@@ -201,6 +228,7 @@ func openWALStoreV3ForTest(path string) (*WALStore, error) {
 // captureMu, lifecycleMu and s.mu, as v2 Recover does.
 func (s *WALStore) recoverV3() (uint64, error) {
 	v := s.v3
+	v.recoverGen.Add(1) // under syncMu and s.mu (see recoverGen)
 	d := v.pub.current()
 	s.dm.clear()
 	scan, err := scanWALV3(s.fd, d)
@@ -241,6 +269,9 @@ func (s *WALStore) recoverV3() (uint64, error) {
 		size := uint64(walEntryHeaderSizeV3 + len(e.Data))
 		phys := (r.End - size) % d.WALSize
 		s.dm.putAtIfNewer(e.LBA, phys, 0, e.LSN, d.BlockSize)
+	}
+	if h := v.testRecoverHold; h != nil {
+		h()
 	}
 	// The drop fence, then the recovered head, then the writer and admission.
 	floor, sameNonce := v.pub.reuseFloor()
@@ -357,6 +388,9 @@ func (s *WALStore) syncWALBatchV3() error {
 			return err
 		}
 	}
+	if h := v.testBatchBeforeAck; h != nil {
+		h()
+	}
 	// The acknowledgement boundary (codex01 row 5 P1): a queued append may
 	// have failed and latched the store fault while this batch's slot I/O
 	// was in flight. Recheck under the store lock, which that append holds
@@ -386,6 +420,9 @@ func (s *WALStore) refreshW() error {
 	if wack <= v.pub.current().W {
 		return nil
 	}
+	if h := v.testRefreshCached; h != nil {
+		h()
+	}
 	_, err := v.pub.publish(nil, nil, func(n *descriptorV3) error { n.W = wack; return nil })
 	return err
 }
@@ -408,10 +445,7 @@ func (s *WALStore) SetWMode(m WMode) error {
 		h()
 	}
 	wack := v.wack.Load()
-	_, err := v.pub.publish(nil, nil, func(n *descriptorV3) error {
-		n.WMode, n.W = m, wack
-		return nil
-	})
+	_, err := v.pub.publish(nil, nil, func(n *descriptorV3) error { n.WMode, n.W = m, wack; return nil })
 	return err
 }
 
@@ -462,17 +496,38 @@ func (f *flusher) readDirtyRecordV3(e snapshotEntry) ([]byte, uint64, error) {
 // through the row-3 publisher with the row-7 map candidate; without one,
 // the checkpoint and tail do not move (no coverage is fabricated) and the
 // flushed bytes stay retained in the WAL.
+//
+// A v3 checkpoint never exceeds W (DESIGN 2.2 item 5, 9.1 predicate 2:
+// CheckpointLSN <= mapCoveredCheckpoint <= W). The flusher may have flushed
+// dirty entries that no Sync has acknowledged yet, so the candidate is
+// clamped to the acknowledged W; those records stay retained in the WAL
+// until a Sync covers them. The map candidate is prepared first, outside
+// every lock; the publication is a W publisher, so it runs under the v3
+// leader role (syncMu), like Sync, refreshW and SetWMode, and cannot
+// straddle a recovery. If a recovery lowered the acknowledged W below the
+// prepared candidate meanwhile, this cycle publishes nothing.
 func (s *WALStore) persistCheckpointV3(highestLSN uint64) error {
 	v := s.v3
 	if v.mapCandidate == nil {
 		return nil
 	}
-	mutateMap, err := v.mapCandidate(highestLSN)
+	checkpoint := min(highestLSN, v.wack.Load())
+	if checkpoint <= v.pub.current().CheckpointLSN {
+		return nil
+	}
+	mutateMap, err := v.mapCandidate(checkpoint)
 	if err != nil {
 		return err
 	}
+	v.syncMu.Lock()
+	defer v.syncMu.Unlock()
+	wack := v.wack.Load()
+	if wack < checkpoint {
+		return nil // a recovery lowered the frontier; retry next cycle
+	}
 	d, err := v.pub.publish(&s.mu, nil, func(n *descriptorV3) error {
-		n.CheckpointLSN = highestLSN
+		n.W = max(n.W, wack)
+		n.CheckpointLSN = checkpoint
 		return mutateMap(n)
 	})
 	if err != nil {
