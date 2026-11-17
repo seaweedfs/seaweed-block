@@ -12,7 +12,7 @@ The three design documents:
 | [Agent workspace design](agent-workspace-design.md) | Agent workspace disks (proof of concept): one local replica per workspace, cuts to SeaweedFS, snapshots, forks, GC, host moves |
 | Kubernetes block design (this document) | The product view of Kubernetes volumes: CSI, Helm and the operator controllers, replication and failover, multipath, promotion, readiness, the operation layer |
 
-The replication engine itself (shipping by LSN, barriers, durability modes, replica fencing, catch-up and rebuild decisions) is a core component and is described in [core §1.6](block-design.md#16-replication-and-failover). Conventions are those of the core document: code references name a file and a function; test references name the test function and its file.
+The replication engine itself (shipping by LSN, barriers, durability modes, replica fencing, catch-up and rebuild decisions) is a core component and is described in [core §1.6](block-design.md#16-replication-and-failover). Conventions are those of the core document: code references name a file and a function; test references name the test function and its file. The state machines and invariants of this document are also in the shared ledger, [Invariants and state machines](invariants.md).
 
 ## Contents
 

@@ -71,3 +71,19 @@ Strong success criteria let agents loop independently. Weak criteria such as
 These guidelines are working if there are fewer unnecessary changes in diffs,
 fewer rewrites due to overcomplication, and clarifying questions come before
 implementation rather than after mistakes.
+
+## Protocol contract
+
+Seaweed Block's state machines and invariants are in
+[`docs/design/invariants.md`](docs/design/invariants.md). Read it before
+changing a protocol path: the storage engines, durability and `Sync`,
+authority and epochs, replication and replica roles, the chunk layer and the
+cut, the catalog, GC and volume delete, or the workspace lease.
+
+- Find the machine and transition (Part A) and the invariant IDs (Part B)
+  your change touches, and name them in the PR.
+- Follow the change rules (Part C): a new or changed state or transition
+  updates Part A, the design-doc diagram, the ledger and the TLA+ spec that
+  covers it; an ACTIVE row never loses its test; a bug found by tests, soak
+  or TLA+ becomes a regression test plus a ledger row.
+- Do not weaken a guard listed under "Enforced in" without updating its row.

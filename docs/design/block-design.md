@@ -12,6 +12,8 @@ The design is split into three documents: this shared core and one document per 
 
 Code references name a file and a function, not a line number, so they stay valid as the code changes. Test references name the test function and its file. "Model-checked" means the protocol was specified in TLA+ and checked exhaustively with TLC at small scale. The specifications are in [`docs/spec/`](../spec/README.md); Go regression tests are the in-repo evidence for every counterexample found that way.
 
+The state machines and the invariant ledger of all three documents, with the rules for changing them, are collected in [Invariants and state machines](invariants.md).
+
 ## Contents
 
 - [Part 1. Core block service](#part-1-core-block-service)

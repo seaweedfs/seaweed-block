@@ -12,7 +12,7 @@ The three design documents:
 | Agent workspace design (this document) | Agent workspace disks: one local replica per workspace, cuts to SeaweedFS, snapshots, forks, GC, host moves |
 | [Kubernetes block design](kubernetes-block-design.md) | Kubernetes block volumes (alpha): CSI, Helm, RF=2/3 replication and failover, multipath, readiness |
 
-Conventions are those of the core document: code references name a file and a function, not a line number; test references name the test function and its file; "Model-checked" means the protocol was specified in TLA+ and checked exhaustively with TLC at small scale (the specifications are in [`docs/spec/`](../spec/README.md)).
+Conventions are those of the core document: code references name a file and a function, not a line number; test references name the test function and its file; "Model-checked" means the protocol was specified in TLA+ and checked exhaustively with TLC at small scale (the specifications are in [`docs/spec/`](../spec/README.md)). The state machines and invariants of this document are also in the shared ledger, [Invariants and state machines](invariants.md).
 
 ## Contents
 
