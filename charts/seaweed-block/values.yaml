@@ -115,8 +115,10 @@ nvme:
 # `kubectl get nodes` so node names and InternalIPs are verified against the
 # live cluster.
 blockNodes:
-  - name: m02
-    serverID: m02
+  # Placeholder for a single-node render. Replace with your own node (name =
+  # Kubernetes node name); see examples/values-3node.yaml.
+  - name: block-node-1
+    serverID: block-node-1
     internalIP: 127.0.0.1
     # Optional frontend/data-plane bind address. When set, cluster-spec data_addr
     # and frontend publish targets use this IP while ctrl_addr keeps internalIP.

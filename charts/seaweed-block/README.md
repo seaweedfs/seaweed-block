@@ -34,49 +34,14 @@ plain `helm install sw-block charts/seaweed-block` as a release-gated install:
 it does not run preflight, does not discover the live Kubernetes node set, and
 can leave placement/launcher evidence incomplete on real labs.
 
-Example `values.day1.yaml`:
+A complete three-node example is in
+[`examples/values-3node.yaml`](examples/values-3node.yaml): image tags, network
+and compat settings, CHAP, the StorageClass replication factor, and three
+`blockNodes` (`node-a`, `node-b`, `node-c`, with RFC 5737 documentation
+addresses). Copy it and replace the node names and addresses with your own:
 
-```yaml
-image:
-  tag: sha-<commit>
-csiImage:
-  tag: sha-<commit>
-
-network:
-  externalISCSI: true
-  externalNVMe: false
-  externalStatus: true
-  rejectLoopbackPublishTargets: true
-
-compat:
-  launcherDurableImplFlag: false
-  launcherReplicationAckFlag: false
-  launcherRejectLoopbackFlag: false
-
-chap:
-  enabled: true
-  username: swblock
-  secret: replace-with-a-real-secret
-
-storageClass:
-  replicationFactor: 1
-
-blockNodes:
-  - name: m01
-    kubernetesNode: m01
-    internalIP: 192.168.1.181
-    frontendIP: 10.0.0.181
-    frontendNetworkClass: 100gbe_tcp
-  - name: m02
-    kubernetesNode: m02
-    internalIP: 192.168.1.184
-    frontendIP: 10.0.0.184
-    frontendNetworkClass: 100gbe_tcp
-  - name: tp01
-    kubernetesNode: tp01
-    internalIP: 192.168.1.188
-    frontendIP: 10.0.0.188
-    frontendNetworkClass: 100gbe_tcp
+```bash
+helm install sw-block charts/seaweed-block -f my-values.yaml
 ```
 
 `blockNodes[*].kubernetesNode` must match a real Kubernetes node name. The
@@ -94,12 +59,12 @@ storageClass:
   nvmeTransport: rdma
 network:
   externalNVMe: true
-  frontendNetworkClass: 100gbe_roce
-  blockNodes:
-    - name: m02
-      kubernetesNode: m02
-      internalIP: 192.168.1.184
-      frontendIP: 10.0.0.3
+blockNodes:
+  - name: node-b
+    kubernetesNode: node-b
+    internalIP: 192.0.2.12
+    frontendIP: 198.51.100.12
+    frontendNetworkClass: 100gbe_roce
 ```
 
 RDMA requires a non-loopback RoCE frontend address and host `nvme-rdma`,

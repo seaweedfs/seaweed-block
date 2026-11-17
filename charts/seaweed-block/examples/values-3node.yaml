@@ -1,0 +1,48 @@
+# Example values for a three-node install (see ../README.md).
+#
+# Node names and addresses are placeholders. The addresses come from the
+# RFC 5737 documentation ranges: 192.0.2.0/24 stands for the internal
+# (management/control-plane) network and 198.51.100.0/24 for the frontend
+# (data-plane) network. Replace them with your own Kubernetes node names and
+# addresses; `sw-block ops generate-helm-values` derives them from the live
+# cluster.
+image:
+  tag: sha-<commit>
+csiImage:
+  tag: sha-<commit>
+
+network:
+  externalISCSI: true
+  externalNVMe: false
+  externalStatus: true
+  rejectLoopbackPublishTargets: true
+
+compat:
+  launcherDurableImplFlag: false
+  launcherReplicationAckFlag: false
+  launcherRejectLoopbackFlag: false
+
+chap:
+  enabled: true
+  username: swblock
+  secret: replace-with-a-real-secret
+
+storageClass:
+  replicationFactor: 1
+
+blockNodes:
+  - name: node-a
+    kubernetesNode: node-a
+    internalIP: 192.0.2.11
+    frontendIP: 198.51.100.11
+    frontendNetworkClass: 100gbe_tcp
+  - name: node-b
+    kubernetesNode: node-b
+    internalIP: 192.0.2.12
+    frontendIP: 198.51.100.12
+    frontendNetworkClass: 100gbe_tcp
+  - name: node-c
+    kubernetesNode: node-c
+    internalIP: 192.0.2.13
+    frontendIP: 198.51.100.13
+    frontendNetworkClass: 100gbe_tcp
