@@ -69,3 +69,45 @@ func TestFormatV3_RedCrossVolumeRecordCannotReplay(t *testing.T) {
 		t.Fatal("foreign-incarnation WAL record replayed: target served donor bytes")
 	}
 }
+
+// Positive control: rejecting every recovery suffix is not a fix.
+func TestFormatV3_RedControlOwnRecordSurvivesReopen(t *testing.T) {
+	const blockSize = 4096
+	path := filepath.Join(t.TempDir(), "own")
+	s, err := CreateWALStore(path, 32, blockSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.DisableAutoFlushForRecoveryTest()
+	closed := false
+	t.Cleanup(func() {
+		if !closed {
+			_ = s.Close()
+		}
+	})
+	want := makeBlock(blockSize, 0x57)
+	if _, err := s.Write(3, want); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	crashRecoveryHardeningStore(t, s)
+	closed = true
+	r, err := OpenWALStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.DisableAutoFlushForRecoveryTest()
+	t.Cleanup(func() { _ = r.Close() })
+	if _, err := r.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := r.Read(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatal("own acknowledged WAL data did not survive reopen")
+	}
+}
