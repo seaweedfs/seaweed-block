@@ -205,6 +205,11 @@ func (s *WALStore) recoverV3() (uint64, error) {
 	s.dm.clear()
 	scan, err := scanWALV3(s.fd, d)
 	if err != nil {
+		if d.BaseState == BaseInstalling {
+			// Installing keeps its typed not-ready outcome; the cause is a
+			// substrate error, not proven install-log damage (codex01 5b P2).
+			return 0, fmt.Errorf("%w: scan: %w", ErrBaseIncomplete, err)
+		}
 		return 0, err
 	}
 	recs := make([]trustedRecordV3, 0, len(scan.Records))
@@ -262,8 +267,12 @@ func (s *WALStore) recoverV3() (uint64, error) {
 	if s.walTail == 0 && o.R > 0 {
 		s.walTail = 1
 	}
+	// The volatile acknowledged frontier is the recovered prefix, never an
+	// older in-memory maximum: a same-open recovery that dropped mode C's
+	// newest batch must not let a later refresh publish a W the WAL no
+	// longer holds (codex01 5b P1).
 	v.appended.Store(o.R)
-	v.wack.Store(max(v.wack.Load(), o.R))
+	v.wack.Store(o.R)
 	return s.syncedLSN, nil
 }
 

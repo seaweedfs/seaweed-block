@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"sync"
 	"testing"
+	"time"
 )
 
 // Row 5/5b store-level controls on the REAL *WALStore in its v3 mode
@@ -411,6 +412,8 @@ func TestWALStoreV3SyncRechecksTheFaultAtTheAckBoundary(t *testing.T) {
 		}
 		prev := s.v3.wack.Load()
 		parked, release := make(chan struct{}), make(chan struct{})
+		rel := sync.OnceFunc(func() { close(release) })
+		t.Cleanup(rel)
 		var once sync.Once
 		s.v3.testBeforeSlotWrite = func() error {
 			once.Do(func() { close(parked); <-release })
@@ -418,20 +421,24 @@ func TestWALStoreV3SyncRechecksTheFaultAtTheAckBoundary(t *testing.T) {
 		}
 		aErr := make(chan error, 1)
 		go func() { _, err := s.Sync(); aErr <- err }()
-		<-parked
+		waitV3(t, parked, "the parked publication")
 		boom := errors.New("injected append write error")
 		s.v3.w.writeAt = func([]byte, int64) (int, error) { return 0, boom }
 		bErr := make(chan error, 1)
 		go func() { _, err := s.Write(3, blk(3)); bErr <- err }()
+		deadline := time.Now().Add(10 * time.Second)
 		for s.mu.TryLock() { // wait until B holds s.mu (it then blocks on descMu)
 			s.mu.Unlock()
+			if time.Now().After(deadline) {
+				t.Fatal("timed out waiting for B to take s.mu")
+			}
 			runtime.Gosched()
 		}
-		close(release)
-		if err := <-bErr; !errors.Is(err, boom) {
+		rel()
+		if err := recvErrV3(t, bErr, "B"); !errors.Is(err, boom) {
 			t.Fatalf("mode %d: B: err = %v, want the append write error", mode, err)
 		}
-		if err := <-aErr; err == nil {
+		if err := recvErrV3(t, aErr, "A"); err == nil {
 			t.Fatalf("mode %d: A acknowledged after B latched the store fault", mode)
 		}
 		if got := s.v3.wack.Load(); got != prev {
@@ -479,6 +486,8 @@ func TestWALStoreV3SetWModeWaitsForAHeldBatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	parked, release := make(chan struct{}), make(chan struct{})
+	rel := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(rel)
 	var once sync.Once
 	s.v3.testBeforeSlotWrite = func() error {
 		once.Do(func() { close(parked); <-release })
@@ -486,7 +495,7 @@ func TestWALStoreV3SetWModeWaitsForAHeldBatch(t *testing.T) {
 	}
 	aErr := make(chan error, 1)
 	go func() { _, err := s.Sync(); aErr <- err }()
-	<-parked
+	waitV3(t, parked, "the parked publication")
 	setErr := make(chan error, 1)
 	go func() { setErr <- s.SetWMode(WModeStrict) }()
 	select {
@@ -494,11 +503,11 @@ func TestWALStoreV3SetWModeWaitsForAHeldBatch(t *testing.T) {
 		t.Fatalf("SetWMode returned (%v) while a C batch was held", err)
 	default:
 	}
-	close(release)
-	if err := <-aErr; err != nil {
+	rel()
+	if err := recvErrV3(t, aErr, "A"); err != nil {
 		t.Fatal(err)
 	}
-	if err := <-setErr; err != nil {
+	if err := recvErrV3(t, setErr, "SetWMode"); err != nil {
 		t.Fatal(err)
 	}
 	cur := s.v3.pub.current()
@@ -520,10 +529,12 @@ func TestWALStoreV3NoBatchAcksUnderAStaleModeAfterSetWMode(t *testing.T) {
 	defer crashRecoveryHardeningStore(t, s)
 	writeSynced(t, s, 1, 1)
 	parked, release := make(chan struct{}), make(chan struct{})
+	rel := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(rel)
 	s.v3.testSetWModeHoldingRole = func() { close(parked); <-release }
 	setErr := make(chan error, 1)
 	go func() { setErr <- s.SetWMode(WModeStrict) }() // parks holding the leader role, before publishing
-	<-parked
+	waitV3(t, parked, "the parked publication")
 	if _, err := s.Write(2, blk(2)); err != nil {
 		t.Fatal(err)
 	}
@@ -532,12 +543,12 @@ func TestWALStoreV3NoBatchAcksUnderAStaleModeAfterSetWMode(t *testing.T) {
 	s.v3.testLeaderWaiting = func() { wonce.Do(func() { close(waiting) }) }
 	bErr := make(chan error, 1)
 	go func() { _, err := s.Sync(); bErr <- err }()
-	<-waiting // B is about to take the leader role SetWMode holds
-	close(release)
-	if err := <-setErr; err != nil {
+	waitV3(t, waiting, "B at the leader role") // B is about to take the leader role SetWMode holds
+	rel()
+	if err := recvErrV3(t, setErr, "SetWMode"); err != nil {
 		t.Fatal(err)
 	}
-	if err := <-bErr; err != nil {
+	if err := recvErrV3(t, bErr, "B"); err != nil {
 		t.Fatal(err)
 	}
 	if cur := s.v3.pub.current(); cur.WMode != WModeStrict || cur.W != 2 {
@@ -575,5 +586,124 @@ func TestWALStoreV3SetWModeCrashCases(t *testing.T) {
 	defer r2.Close()
 	if m := r2.v3.pub.current().WMode; m != WModeLagged {
 		t.Fatalf("a failed SetWMode changed the mode on disk: %d", m)
+	}
+}
+
+func waitV3(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
+func recvErrV3(t *testing.T, ch <-chan error, what string) error {
+	t.Helper()
+	select {
+	case err := <-ch:
+		return err
+	case <-time.After(10 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+		return nil
+	}
+}
+
+// codex01 5b P1: a SAME-instance recovery that drops mode C's newest batch
+// resets the acknowledged frontier to R, so a later refresh cannot publish
+// a W the WAL no longer holds and the next Recover does not report a false
+// corruption. Fresh-open tests mask this (they start from the slot W).
+func TestWALStoreV3SameOpenRecoverResetsTheAcknowledgedFrontier(t *testing.T) {
+	s, path := newStoreV3(t, WModeLagged)
+	defer crashRecoveryHardeningStore(t, s)
+	writeSynced(t, s, 1, 2) // slot W 1 (lagged), acknowledged W 2
+	damageRecord(t, path, 2)
+	rec1 := recordOffset(t, path, 1)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Recover(); err != nil {
+		t.Fatalf("same-open Recover with the newest C batch damaged: %v (want the documented truncation)", err)
+	}
+	if got := s.v3.wack.Load(); got != 1 {
+		t.Fatalf("acknowledged W after the same-open recovery = %d, want R = 1", got)
+	}
+	if err := s.refreshW(); err != nil {
+		t.Fatal(err)
+	}
+	if w := s.v3.pub.current().W; w > 1 {
+		t.Fatalf("refresh published W %d over a recovered prefix of 1", w)
+	}
+	if _, err := s.Recover(); err != nil {
+		t.Fatalf("second same-open Recover: %v (a false wal_corrupt from a stale W)", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	end1 := rec1 + int64(walEntryHeaderSizeV3+v3TestBlock)
+	if !bytes.Equal(before[rec1:end1], after[rec1:end1]) {
+		t.Fatal("the kept record 1 changed")
+	}
+	if !bytes.Equal(after[end1:walOffsetV3+v3TestWAL], make([]byte, walOffsetV3+v3TestWAL-int(end1))) {
+		t.Fatal("the dropped record 2 was not fenced")
+	}
+	if !bytes.Equal(readV3(t, s, 1), blk(1)) {
+		t.Fatal("LBA 1 lost")
+	}
+}
+
+// codex01 5b P2: a scan failure under an installing descriptor keeps the
+// typed not-ready outcome and leaves the file unchanged.
+func TestWALStoreV3InstallingScanErrorIsTypedNotReady(t *testing.T) {
+	s, path := newStoreV3(t, WModeLagged)
+	if _, err := s.v3.pub.publish(nil, nil, func(n *descriptorV3) error {
+		n.BaseState, n.BaseLSN = BaseInstalling, 0
+		n.BaseCursor = n.RetainedHead
+		n.BaseInstallID[0] = 7
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	crashRecoveryHardeningStore(t, s)
+	if err := os.Truncate(path, walOffsetV3+100); err != nil { // the WAL region is now short
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = reopenV3(t, path)
+	if !errors.Is(err, ErrBaseIncomplete) || errors.Is(err, ErrInstallSuffixDamaged) {
+		t.Fatalf("installing scan error: err = %v, want ErrBaseIncomplete (not labelled damaged)", err)
+	}
+	after, err2 := os.ReadFile(path)
+	if err2 != nil {
+		t.Fatal(err2)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("a refused installing recovery changed the file")
+	}
+}
+
+// codex01 5b P2: the real flusher cycle performs the mode-C idle refresh,
+// also when no dirty entries remain, so the window closes without a Sync.
+func TestWALStoreV3FlusherCycleRunsTheIdleRefresh(t *testing.T) {
+	s, path := newStoreV3(t, WModeLagged)
+	writeSynced(t, s, 1, 3) // slot W 2 (lagged), acknowledged W 3
+	if err := s.flusher.flushOnceInternal(false); err != nil {
+		t.Fatal(err)
+	}
+	if w := s.v3.pub.current().W; w != 3 {
+		t.Fatalf("slot W after a flusher cycle = %d, want 3 (the idle refresh)", w)
+	}
+	if err := s.flusher.flushOnceInternal(false); err != nil { // now no dirty entries
+		t.Fatal(err)
+	}
+	crashRecoveryHardeningStore(t, s)
+	damageRecord(t, path, 3)
+	if _, err := reopenV3(t, path); !isWALCorrupt(err) {
+		t.Fatalf("after the flusher's refresh: err = %v, want wal_corrupt", err)
 	}
 }
