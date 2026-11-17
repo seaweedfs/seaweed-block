@@ -202,7 +202,14 @@ func (p *descriptorPublisherV3) publishLocked(mutate func(next *descriptorV3) er
 	err = p.io.syncFile(func() error {
 		p.note("hold fileSyncMu")
 		wrote = true
-		return p.io.writeSlot(off, buf)
+		werr := p.io.writeSlot(off, buf)
+		if werr != nil && p.io.latch != nil {
+			// Latch inside the leaf, before fileSyncMu is released: a store
+			// Sync queued on fileSyncMu must not fsync and acknowledge
+			// through this uncertain slot (codex01 row 3 round 2).
+			p.io.latch(fmt.Errorf("%w: %w", ErrDescriptorPublishUncertain, werr))
+		}
+		return werr
 	}, p.io.fsync)
 	if err != nil {
 		if wrote {
@@ -212,6 +219,8 @@ func (p *descriptorPublisherV3) publishLocked(mutate func(next *descriptorV3) er
 			uncertain := next
 			p.uncertain = &uncertain
 			p.failed = fmt.Errorf("%w: %w", ErrDescriptorPublishUncertain, err)
+			// The store fault was latched inside the leaf (write error) or by
+			// the leaf itself (fsync error); latching again is a no-op.
 			if p.io.latch != nil {
 				p.io.latch(p.failed)
 			}

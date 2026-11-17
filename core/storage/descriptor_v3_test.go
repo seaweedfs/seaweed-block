@@ -24,8 +24,11 @@ type descHarnessV3 struct {
 	// partial write followed by an error).
 	writeHook func(off int64, b []byte) error
 	writes    atomic.Int64
-	storeMu   sync.Mutex
-	pub       *descriptorPublisherV3
+	// afterUnlock, when set, runs in the leaf right after fileSyncMu is
+	// released (to let a queued store sync run before the caller resumes).
+	afterUnlock func()
+	storeMu     sync.Mutex
+	pub         *descriptorPublisherV3
 }
 
 func newDescHarnessV3(t *testing.T) *descHarnessV3 {
@@ -64,22 +67,11 @@ func newDescHarnessV3(t *testing.T) *descHarnessV3 {
 			return f.Sync()
 		},
 		syncFile: func(write, sync func() error) error {
-			h.fileSyncMu.Lock()
-			defer h.fileSyncMu.Unlock()
-			if e := h.fault.Load(); e != nil {
-				return *e
+			err := h.leaf(write, sync)
+			if h.afterUnlock != nil {
+				h.afterUnlock()
 			}
-			if err := write(); err != nil {
-				return err
-			}
-			if err := sync(); err != nil {
-				h.fault.CompareAndSwap(nil, &err)
-				return err
-			}
-			if h.afterFsync != nil {
-				h.afterFsync()
-			}
-			return nil
+			return err
 		},
 		sticky: func() error {
 			if e := h.fault.Load(); e != nil {
@@ -89,6 +81,29 @@ func newDescHarnessV3(t *testing.T) *descHarnessV3 {
 		},
 	})
 	return h
+}
+
+// leaf is the harness syncFile body: one pwrite+fsync under fileSyncMu,
+// refused when a fault is latched, latching an fsync failure.
+func (h *descHarnessV3) leaf(write, sync func() error) error {
+	h.fileSyncMu.Lock()
+	defer h.fileSyncMu.Unlock()
+	if e := h.fault.Load(); e != nil {
+		return *e
+	}
+	if write != nil {
+		if err := write(); err != nil {
+			return err
+		}
+	}
+	if err := sync(); err != nil {
+		h.fault.CompareAndSwap(nil, &err)
+		return err
+	}
+	if h.afterFsync != nil {
+		h.afterFsync()
+	}
+	return nil
 }
 
 // onDisk selects from the file's two slots, as a reopen would.
@@ -489,6 +504,52 @@ func TestDescriptorV3PublicationCounterExhaustion(t *testing.T) {
 			}
 			if h.writes.Load() != writes {
 				t.Fatal("an exhausted publication wrote a slot")
+			}
+		})
+	}
+}
+
+// codex01 row 3 round 2 P1: the store fault for a slot write error is
+// latched inside the leaf, before fileSyncMu is released. An independent
+// store Sync B queued on fileSyncMu behind A's failing slot write must be
+// refused and must not fsync or acknowledge. The harness lets B run right
+// after the leaf unlocks and before A's publisher resumes, so a latch taken
+// after the unlock would let B succeed.
+func TestDescriptorV3QueuedStoreSyncCannotAckAfterSlotWriteError(t *testing.T) {
+	for _, partial := range []bool{true, false} {
+		name := "full write then error"
+		if partial {
+			name = "partial write then error"
+		}
+		t.Run(name, func(t *testing.T) {
+			h := newDescHarnessV3(t)
+			boom := errors.New("injected slot write error")
+			bResult := make(chan error, 1)
+			var bFsyncs atomic.Int64
+			h.writeHook = func(off int64, b []byte) error {
+				n := len(b)
+				if partial {
+					n = 1000
+				}
+				if _, err := h.f.WriteAt(b[:n], off); err != nil {
+					t.Error(err)
+				}
+				// B queues on fileSyncMu while A still holds it.
+				go func() {
+					bResult <- h.leaf(nil, func() error { bFsyncs.Add(1); return nil })
+				}()
+				return boom
+			}
+			var bErr error
+			h.afterUnlock = func() { bErr = <-bResult }
+			if _, err := h.pub.publish(&h.storeMu, nil, setW(30)); !errors.Is(err, ErrDescriptorPublishUncertain) {
+				t.Fatalf("A: err = %v, want ErrDescriptorPublishUncertain", err)
+			}
+			if bErr == nil || bFsyncs.Load() != 0 {
+				t.Fatalf("queued store sync B acknowledged after A's slot write failed (err %v, fsyncs %d)", bErr, bFsyncs.Load())
+			}
+			if !errors.Is(bErr, ErrDescriptorPublishUncertain) {
+				t.Fatalf("B refused with %v, want the latched ErrDescriptorPublishUncertain", bErr)
 			}
 		})
 	}
