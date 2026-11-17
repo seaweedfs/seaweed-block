@@ -335,3 +335,39 @@ func TestWALIOV3_LastRepresentableRecordStillRecovers(t *testing.T) {
 		t.Fatalf("next append=%v", err)
 	}
 }
+
+func TestWALIOV3_RestoreCursorDoesNotPublishOrResetNonce(t *testing.T) {
+	f, p, w := newWALIOTestV3(t, 0, 0)
+	if _, err := w.append(walEntryV3{LSN: 1, Type: walEntryBarrier}, 0); err != nil {
+		t.Fatal(err)
+	}
+	r, err := scanWALV3(f, p.current())
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := p.current()
+	reopened, err := newWALWriterV3(f, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.restoreScanV3(r); err != nil {
+		t.Fatal(err)
+	}
+	if reopened.logicalHeadV3() != r.End || p.current() != before {
+		t.Fatal("cursor restore either lost E or published descriptor")
+	}
+	wrong := r
+	wrong.Nonce[0] ^= 1
+	if err := reopened.restoreScanV3(wrong); !errors.Is(err, errWALBindingV3) {
+		t.Fatalf("wrong incarnation restore=%v", err)
+	}
+	wrong = r
+	wrong.End = before.RetainedTail + before.WALSize + 1
+	if err := reopened.restoreScanV3(wrong); !errors.Is(err, errWALBindingV3) {
+		t.Fatalf("out-of-window restore=%v", err)
+	}
+	if reopened.logicalHeadV3() != r.End {
+		t.Fatal("refused cursor restore changed E")
+	}
+	// No append is attempted here: fence/publication admission is row5/11.
+}
