@@ -213,3 +213,42 @@ func FuzzWALEntryV3_DecodeNeverPanics(f *testing.F) {
 		_, _ = decodeWALEntryV3(b, v3TestBlockSize, v3TestNumBlocks)
 	})
 }
+
+// Nonzero count/LBA/Length vectors keep a mutually-wrong encoder and decoder
+// from passing solely by roundtrip. Expected bytes use the independent fixture.
+func TestWALEntryV3_CanonicalBatchAndTrimBytes(t *testing.T) {
+	for _, name := range []string{"batch", "trim"} {
+		t.Run(name, func(t *testing.T) {
+			e := v3TestBarrier()
+			if name == "batch" {
+				e.Type = walEntryWriteBatch
+				e.BatchCount = 2
+				e.LBA = 3
+				e.Length = 8192
+				e.Data = bytes.Repeat([]byte{0x72}, 8192)
+			} else {
+				e.Type = walEntryTrim
+				e.LBA = 5
+				e.Length = 65536
+			}
+			want, err := os.ReadFile("testdata/format_v3/" + name + ".bin")
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := encodeWALEntryV3(e, v3TestBlockSize, v3TestNumBlocks)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Fatal("record differs from independent count/LBA/length vector")
+			}
+			decoded, err := decodeWALEntryV3(want, v3TestBlockSize, v3TestNumBlocks)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(decoded, e) {
+				t.Fatalf("decoded vector differs: %+v", decoded)
+			}
+		})
+	}
+}

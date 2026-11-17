@@ -5,3 +5,5 @@ The barrier vector is a literal worked example of DESIGN r12 (SHA in barrier.jso
 The custody test checks bytes against literals and the standard library CRC32C. It is new-format FIXTURE coverage only, not a parent behavioral RED, product codec acceptance, or v3 recovery PASS. After code GO, the real encoder/decoder must consume this same vector; mutating nonce/cursor/type/count/CRC/footer and lap-placement controls must exercise the product path, not this fixture checker.
 
 Existing-caller REDs are in walstore_incarnation_red_test.go and chunk_lsn_map_red_test.go. They intentionally fail on the authorized base. Do not include those failing heads as a green integration claim.
+
+Row 2 also adds independently constructed batch.bin (count2, LBA3, 8192 bytes of 0x72) and trim.bin (LBA5, affected65536 bytes, no payload), with LSN7/DurableLSN6/cursor128 and the same nonce. Their literal fields, CRC32C and SHA256 are in additional-vectors.json. These vectors exercise nonzero count/LBA/length beyond the barrier. No product encoder generated them.
