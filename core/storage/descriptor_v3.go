@@ -195,6 +195,7 @@ func (p *descriptorPublisherV3) publishLockedCoreV3(mutate func(next *descriptor
 			return descriptorV3{}, err
 		}
 	}
+	retireBaseV3(&p.cur, &next)
 	if err := mergeDescriptorV3Mode(&p.cur, &next, reset); err != nil {
 		return descriptorV3{}, err
 	}
@@ -326,6 +327,20 @@ func mergeDescriptorV3Mode(cur, next *descriptorV3, reset bool) error {
 	return baseTransitionAllowedV3(cur, next)
 }
 
+// retireBaseV3 is the installed -> none retirement (DESIGN 8.4, 8.5): a
+// later normal publication of an installed descriptor zeroes the three BASE
+// fields once the checkpoint covers BaseLSN and both slots (the current one,
+// which becomes the fallback, and the new one) carry retainedTail >=
+// BaseCursor. Before that, recovery still needs the BASE scan start.
+func retireBaseV3(cur, next *descriptorV3) {
+	if cur.BaseState != BaseInstalled || next.BaseState != BaseInstalled ||
+		next.BaseInstallID != cur.BaseInstallID || next.CheckpointLSN < next.BaseLSN ||
+		cur.RetainedTail < cur.BaseCursor || next.RetainedTail < cur.BaseCursor {
+		return
+	}
+	next.BaseState, next.BaseLSN, next.BaseCursor, next.BaseInstallID = BaseNone, 0, 0, [16]byte{}
+}
+
 // baseTransitionAllowedV3 is the DESIGN 8.5 edge table. The conditions an
 // edge needs (coverage, destructive mutation, drain) are enforced by the
 // install callers (plan rows 9 to 11); this refuses every other edge.
@@ -346,7 +361,7 @@ func baseTransitionAllowedV3(cur, next *descriptorV3) error {
 		case BaseInstalled:
 			ok = next.BaseInstallID == cur.BaseInstallID && next.BaseLSN == cur.BaseLSN
 		case BaseNone:
-			ok = true // abort; its preconditions are the caller's (8.5)
+			ok = false // never: there is no abort (DESIGN r17, 8.5)
 		}
 	case BaseInstalled:
 		switch next.BaseState {
@@ -355,7 +370,11 @@ func baseTransitionAllowedV3(cur, next *descriptorV3) error {
 			// BaseLSN stay.
 			ok = next.BaseInstallID == cur.BaseInstallID && next.BaseLSN == cur.BaseLSN
 		case BaseNone:
-			ok = next.BaseLSN == 0 && next.CheckpointLSN >= cur.BaseLSN
+			// Retirement (8.4, 8.5): the checkpoint covers the BASE and the
+			// published tail is at or past BaseCursor; the publisher also
+			// requires it of the other slot (retireBaseLockedV3).
+			ok = next.BaseLSN == 0 && next.CheckpointLSN >= cur.BaseLSN &&
+				cur.RetainedTail >= cur.BaseCursor && next.RetainedTail >= cur.BaseCursor
 			// installed -> installing is not an 8.5 edge: a new install
 			// begins only after installed -> none (retire, then begin).
 		}

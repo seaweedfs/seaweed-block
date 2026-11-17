@@ -93,6 +93,20 @@ type walStoreV3State struct {
 	// bump and before the dirty map is cleared.
 	testReadAdmitted     func()
 	testRecoverAfterBump func()
+
+	// installMu is the install admission lock (DESIGN 8.7), the topmost lock
+	// of section 4: begin and complete hold it exclusive, a handle mutation
+	// shared. liveInstallID is the ID this open began (guarded by
+	// installMu); an installing ID from before the open is plan row 11's.
+	installMu     sync.RWMutex
+	liveInstallID [16]byte
+	// preBaseHighest is the highest appended LSN when the live install
+	// began (guarded by installMu): the records before its BaseCursor.
+	preBaseHighest uint64
+	// testInstallBeforeAdmit runs in a handle mutation before it acquires
+	// installMu; testInstallAdmitted after its ID check, before the write.
+	testInstallBeforeAdmit func()
+	testInstallAdmitted    func()
 }
 
 // errV3RecoveredMeanwhile: a recovery ran between an outer Sync's capture
