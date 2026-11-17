@@ -1,4 +1,6 @@
 ----------------------------- MODULE WALRecovery -----------------------------
+(* V3 map publication controls test merged C/checkpoint/W and volatile proof *)
+(* tokens. Real Recover lifecycle wiring is separate from those dark tests. *)
 (* V3 row 6: COW map digest domains and pages/root/directory persistence are *)
 (* code-test obligations. The composed WALFormatR5 model abstracts validated *)
 (* map dependencies; this legacy model is not a proof of the byte codec.     *)
