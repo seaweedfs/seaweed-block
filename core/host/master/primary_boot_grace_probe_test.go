@@ -93,7 +93,12 @@ func useProductionProbe(t *testing.T, h *Host) (r1, r2 *fakeStatus) {
 			{ServerID: "node-c", ReplicaID: "r3"},
 		},
 	}}
-	h.SetPromotionEvidenceProvider(NewWorkloadPlanPromotionEvidenceProvider(plans, WorkloadPlanPromotionProbeConfig{AckProfile: "sync-quorum"}))
+	// r3 has no status server, so r2's promotion needs a known frontier
+	// it covers (#181): r2 reports durable 70.
+	h.SetPromotionEvidenceProvider(NewWorkloadPlanPromotionEvidenceProvider(plans, WorkloadPlanPromotionProbeConfig{
+		AckProfile:          "sync-quorum",
+		RequiredLSNByVolume: map[string]uint64{"vol-rf3": 70},
+	}))
 	return r1, r2
 }
 
