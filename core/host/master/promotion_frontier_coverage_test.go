@@ -20,7 +20,7 @@ func TestUnknownFrontierSurvivorsNeeded(t *testing.T) {
 	}{
 		{"sync-quorum", 2, 2}, // RF3: K=1, every acked write is on >=1 of 2 peers
 		{"sync_quorum", 2, 2},
-		{"sync-all", 2, 1}, // RF3: K=2, every acked write is on both peers
+		{"sync-all", 2, 1},    // RF3: K=2, every acked write is on both peers
 		{"sync-quorum", 4, 3}, // RF5: K=2
 		{"sync-all", 4, 1},
 	} {
