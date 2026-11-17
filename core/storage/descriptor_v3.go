@@ -74,6 +74,10 @@ type descriptorPublisherV3 struct {
 	failed    error
 	uncertain *descriptorV3
 
+	// Immutable map dependencies and volatile proof domain, bound before serving.
+	mapCurrent *chunkMapCandidateV3
+	mapDomain  *mapProofEpochV3
+
 	// trace, when set by a test, records lock acquisitions and releases
 	// in order (the section 11 item 9 lock recorder).
 	trace func(event string)
@@ -131,6 +135,10 @@ func (p *descriptorPublisherV3) reuseFloorLocked() (uint64, bool) {
 // and the transition rules, validates the whole result and writes it into
 // the fallback slot with slotGen+1.
 func (p *descriptorPublisherV3) publish(storeMu sync.Locker, snap func(), mutate func(next *descriptorV3) error) (descriptorV3, error) {
+	return p.publishWithMapV3(storeMu, snap, mutate, nil)
+}
+
+func (p *descriptorPublisherV3) publishWithMapV3(storeMu sync.Locker, snap func(), mutate func(next *descriptorV3) error, prepared *preparedMapPublicationV3) (descriptorV3, error) {
 	if storeMu != nil {
 		storeMu.Lock()
 		p.note("lock WALStore.mu")
@@ -149,7 +157,7 @@ func (p *descriptorPublisherV3) publish(storeMu sync.Locker, snap func(), mutate
 		p.note("unlock descMu")
 		p.descMu.Unlock()
 	}()
-	return p.publishLocked(mutate)
+	return p.publishLockedWithMapV3(mutate, prepared)
 }
 
 // uncertainCandidate returns the candidate whose publication failed, if
@@ -165,6 +173,10 @@ func (p *descriptorPublisherV3) uncertainCandidate() (descriptorV3, bool) {
 }
 
 func (p *descriptorPublisherV3) publishLocked(mutate func(next *descriptorV3) error) (descriptorV3, error) {
+	return p.publishLockedWithMapV3(mutate, nil)
+}
+
+func (p *descriptorPublisherV3) publishLockedWithMapV3(mutate func(next *descriptorV3) error, prepared *preparedMapPublicationV3) (descriptorV3, error) {
 	if p.failed != nil {
 		return descriptorV3{}, p.failed
 	}
@@ -178,6 +190,9 @@ func (p *descriptorPublisherV3) publishLocked(mutate func(next *descriptorV3) er
 		}
 	}
 	if err := mergeDescriptorV3(&p.cur, &next); err != nil {
+		return descriptorV3{}, err
+	}
+	if err := p.validateMapPublicationV3(next, prepared); err != nil {
 		return descriptorV3{}, err
 	}
 	if err := checkCountersV3(&next); err != nil {
@@ -235,6 +250,9 @@ func (p *descriptorPublisherV3) publishLocked(mutate func(next *descriptorV3) er
 	}
 	p.other, p.otherValid = p.cur, true
 	p.cur, p.curSlot = next, target
+	if prepared != nil {
+		p.mapCurrent = prepared.candidate
+	}
 	return next, nil
 }
 
@@ -282,8 +300,8 @@ func mergeDescriptorV3(cur, next *descriptorV3) error {
 		next.MapRootHash != cur.MapRootHash || next.MapCoveredCheckpoint != cur.MapCoveredCheckpoint ||
 		next.MapLineage != cur.MapLineage || next.MapFormatID != cur.MapFormatID {
 		if next.MapGeneration <= cur.MapGeneration {
-			return fmt.Errorf("%w: map root change without a higher generation (%d -> %d)",
-				errDescriptorTransition, cur.MapGeneration, next.MapGeneration)
+			return fmt.Errorf("%w: %w: map root change without a higher generation (%d -> %d)",
+				ErrMapCoverageStale, errDescriptorTransition, cur.MapGeneration, next.MapGeneration)
 		}
 		if next.MapLineage != cur.MapLineage {
 			return fmt.Errorf("%w: map lineage change outside an install or reset", errDescriptorTransition)
