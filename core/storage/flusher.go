@@ -56,6 +56,8 @@ type flusher struct {
 	// taken and the publication lock released: the window in which a
 	// concurrent append is not in this cycle's checkpoint. Tests only.
 	afterSnapshotForTest func()
+	// Pauses after materialization/fsync, before map proof preparation. Tests only.
+	afterExtentSyncForTest func()
 }
 
 type flusherConfig struct {
@@ -226,6 +228,10 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 	f.instr.recordExtentSync(time.Since(syncStart), syncErr)
 	if syncErr != nil {
 		return fmt.Errorf("flusher: fsync after extent writes: %w", syncErr)
+	}
+
+	if f.afterExtentSyncForTest != nil {
+		f.afterExtentSyncForTest()
 	}
 
 	// Step 3: advance the on-disk checkpoint to the highest LSN
