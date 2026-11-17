@@ -568,7 +568,7 @@ func (s *WALStore) HolesSuspected() uint64 {
 //
 // Idempotent: calling Recover twice on the same on-disk state yields
 // identical results.
-func (s *WALStore) Recover() (uint64, error) {
+func (s *WALStore) Recover() (frontier uint64, err error) {
 	// Recover republishes the dirty map like a write: it holds the capture
 	// barrier shared, so it can never publish bytes between a quiesced
 	// cut's Sync (which fixes H) and that cut's copy.
@@ -579,6 +579,19 @@ func (s *WALStore) Recover() (uint64, error) {
 	defer s.lifecycleMu.RUnlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.v3 != nil {
+		// The store lock orders both epoch boundaries with real map publishers.
+		// START invalidates old candidates; END also invalidates candidates
+		// prepared while this Recover was in flight, including on failure.
+		defer func() {
+			if endErr := s.v3.pub.invalidateMapProofV3(); endErr != nil {
+				frontier, err = 0, errors.Join(err, endErr)
+			}
+		}()
+		if err := s.v3.pub.invalidateMapProofV3(); err != nil {
+			return 0, err
+		}
+	}
 	if s.closed {
 		return 0, errors.New("storage: Recover after Close")
 	}

@@ -129,3 +129,16 @@ func (p *descriptorPublisherV3) publishMapV3(storeMu sync.Locker, snap func(), p
 		return nil
 	}, prepared)
 }
+
+// invalidateMapProofV3 is called under WALStore.mu at a lifecycle boundary.
+// Taking the existing descMu orders the epoch change after any publication
+// already inside descriptor I/O. It performs no callback, allocation or I/O.
+// A not-yet-bound dark store has no candidate domain to invalidate.
+func (p *descriptorPublisherV3) invalidateMapProofV3() error {
+	p.descMu.Lock()
+	defer p.descMu.Unlock()
+	if p.mapDomain == nil {
+		return nil
+	}
+	return p.mapDomain.invalidateV3()
+}
