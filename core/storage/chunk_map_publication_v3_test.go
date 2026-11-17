@@ -173,7 +173,7 @@ func TestMapPublicationV3_IsolatedMergedCoverageAndWPositive(t *testing.T) {
 	}
 }
 func TestMapPublicationV3_ProofEpochAndMutationRefusal(t *testing.T) {
-	for _, event := range []string{"recover_start", "recover_end_success", "recover_end_failure", "reset", "install_begin", "install_complete", "install_abort", "mutation", "new_open"} {
+	for _, event := range []string{"recover_start", "recover_end_success", "recover_end_failure", "reset", "install_begin", "install_complete", "install_abort", "mutation", "domain_identity", "new_open"} {
 		t.Run(event, func(t *testing.T) {
 			x := newMapPublicationHarnessV3(t, 12)
 			if event == "recover_end_success" || event == "recover_end_failure" {
@@ -184,6 +184,11 @@ func TestMapPublicationV3_ProofEpochAndMutationRefusal(t *testing.T) {
 			c := x.prepare(t, 13, 110)
 			if event == "mutation" {
 				if e := x.domain.mutatedV3(); e != nil {
+					t.Fatal(e)
+				}
+			} else if event == "domain_identity" {
+				x.domain = newMapProofEpochV3()
+				if e := x.h.pub.bindMapV3(x.initial, x.domain); e != nil {
 					t.Fatal(e)
 				}
 			} else if event == "new_open" {
@@ -253,5 +258,35 @@ func TestMapPublicationV3_CoverageWAndNoUnpreparedRoot(t *testing.T) {
 	}
 	if _, e := x.h.pub.publish(&x.h.storeMu, nil, func(d *descriptorV3) error { *d = c.candidate.descriptor(*d); return nil }); !errors.Is(e, ErrMapCoverageStale) {
 		t.Fatalf("unprepared root bypass=%v", e)
+	}
+}
+
+func TestMapPublicationV3_ProofChangedDuringPersistenceRefuses(t *testing.T) {
+	x := newMapPublicationHarnessV3(t, 12)
+	before := mapSlotsV3(t, x.h)
+	x.m.syncDirectory = func() error { return x.domain.invalidateV3() }
+	if c, e := prepareMapPublicationV3(x.m, x.domain, 13, 110, []chunkLSNEntryV3{{LSN: 110}}, x.initial); !errors.Is(e, ErrMapCoverageStale) || c != nil {
+		t.Fatalf("overlapping invalidation yielded candidate: %v %v", c, e)
+	}
+	if !bytes.Equal(before, mapSlotsV3(t, x.h)) {
+		t.Fatal("preparation changed slots")
+	}
+}
+func TestMapPublicationV3_ProofCountersNeverWrap(t *testing.T) {
+	d := newMapProofEpochV3()
+	d.epoch.Store(counterMaxV3)
+	if e := d.invalidateV3(); !errors.Is(e, ErrCounterExhausted) {
+		t.Fatal(e)
+	}
+	if d.snapshotV3().validV3(d) {
+		t.Fatal("exhausted epoch accepted")
+	}
+	d = newMapProofEpochV3()
+	d.mutation.Store(counterMaxV3)
+	if e := d.mutatedV3(); !errors.Is(e, ErrCounterExhausted) {
+		t.Fatal(e)
+	}
+	if d.snapshotV3().validV3(d) {
+		t.Fatal("exhausted mutation version accepted")
 	}
 }
