@@ -56,7 +56,7 @@ func TestWALGenerationSyncFollowersAndNewWrite(t *testing.T) {
 			// Release before store close even if an assertion fails.
 			defer close(release)
 			realSync := s.syncWALFile
-			var attempts atomic.Int32
+			var attempts, completed atomic.Int32
 			s.syncWALFile = func() error {
 				s.committer.mu.Lock()
 				s.committer.mu.Unlock()
@@ -64,7 +64,11 @@ func TestWALGenerationSyncFollowersAndNewWrite(t *testing.T) {
 					close(entered)
 					<-release
 				}
-				return realSync()
+				err := realSync()
+				if err == nil {
+					completed.Add(1)
+				}
+				return err
 			}
 			results := make(chan uint64, 9)
 			firstResult := make(chan uint64, 1)
@@ -87,8 +91,12 @@ func TestWALGenerationSyncFollowersAndNewWrite(t *testing.T) {
 			waitGenerationPending(t, s, 8)
 			release <- struct{}{}
 			first := generationResult(t, firstResult)
-			if first != 1 {
-				t.Fatalf("first batch frontier=%d want 1", first)
+			// Sync returns the global stable frontier at publication. Its
+			// caller may resume after the next batch has already fsynced and
+			// published 2. Accept that widening only with independent physical
+			// completion evidence; never acknowledge an unflushed new write.
+			if first != 1 && !(newWrite && first == 2 && completed.Load() >= 2) {
+				t.Fatalf("first caller frontier=%d, newWrite=%v completed fsyncs=%d", first, newWrite, completed.Load())
 			}
 			for i := 0; i < 8; i++ {
 				n := generationResult(t, results)
