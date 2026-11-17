@@ -1,4 +1,7 @@
 ----------------------------- MODULE WALRecovery -----------------------------
+(* V3 writer admission is physically LSN-strict, including batch end LSN.  *)
+(* This code guard does not change the legacy model below; the r16 composed *)
+(* model correspondence and raw-recovery integrity policy are separate.     *)
 (* V3 row 6: COW map digest domains and pages/root/directory persistence are *)
 (* code-test obligations. The composed WALFormatR5 model abstracts validated *)
 (* map dependencies; this legacy model is not a proof of the byte codec.     *)

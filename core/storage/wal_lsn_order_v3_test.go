@@ -87,3 +87,22 @@ func TestWALLSNOrderV3_RestoreUsesKeptNotDroppedFrontier(t *testing.T) {
 		t.Fatalf("dropped104 pinned next102: %v", e)
 	}
 }
+
+func TestWALLSNOrderV3_DescriptorFloorIsAlreadyConsumed(t *testing.T) {
+	f, p, _ := newWALIOTestV3(t, 0, 0)
+	d := p.current()
+	d.CheckpointLSN = 100
+	d.MapCoveredCheckpoint = 100
+	d.W = 100
+	p.cur = d
+	w, e := newWALWriterV3(f, p)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = w.append(walEntryV3{LSN: 100, Type: walEntryBarrier}, 100); !errors.Is(e, ErrWALLSNOrder) {
+		t.Fatalf("descriptor floor100 not consumed: %v", e)
+	}
+	if _, e = w.append(walEntryV3{LSN: 101, Type: walEntryBarrier}, 100); e != nil {
+		t.Fatal(e)
+	}
+}
