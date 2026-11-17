@@ -132,7 +132,7 @@ stateDiagram-v2
 | any but `NeedsRebuild` | `Healthy` | recovered | `core/replication/peer.go` `replicaStateTransitionAllowed` | `INV-REPL-PEER-TRANSITIONS-001` |
 | `NeedsRebuild` | — | no successor through `SetState`; the rebuild runs as a separate dual-lane session | `core/replication/peer.go` `replicaStateTransitionAllowed` | `INV-REPL-PEER-TRANSITIONS-001` |
 
-`ReplicaPeer.Invalidate`, called on a ship, barrier or fence error, writes `Degraded` directly without consulting the table, so the "no successor" rule for `NeedsRebuild` holds for `SetState` only. A replicated `Sync` is judged per durability mode (`core/replication/durability.go` `EvaluateBarrierAcks`; `INV-REPL-DURABILITY-MODE-001`).
+`ReplicaPeer.Invalidate`, called on a ship, barrier or fence error, writes `Degraded` directly without consulting the table, so the "no successor" rule for `NeedsRebuild` holds for `SetState` only. Confirmed by a red test; open as [#182](https://github.com/seaweedfs/seaweed-block/issues/182). A replicated `Sync` is judged per durability mode (`core/replication/durability.go` `EvaluateBarrierAcks`; `INV-REPL-DURABILITY-MODE-001`).
 
 ### M4 Workspace HEAD holder and takeover
 
@@ -317,7 +317,7 @@ Notes:
 Notes:
 
 - `INV-REPL-INGRESS-SLOTS-001`: Binary test: builds and runs the real `blockvolume`; build tag `subprocess`, not on Windows.
-- `INV-REPL-PEER-TRANSITIONS-001`: `ReplicaPeer.Invalidate` writes `Degraded` directly and does not consult the table (see Part A, M3).
+- `INV-REPL-PEER-TRANSITIONS-001`: `ReplicaPeer.Invalidate` writes `Degraded` directly and does not consult the table (see Part A, M3). Confirmed by a red test; open as [#182](https://github.com/seaweedfs/seaweed-block/issues/182).
 
 ### B.4 Workspace: HEAD holder, lease and takeover
 
@@ -396,9 +396,9 @@ Notes:
 
 Notes:
 
-- `INV-AUTH-ONE-PRIMARY-001`: Narrowed. The lab evidence field `post_failure_primary_count=1` is not read by any Go test. `IntentBind` is keyed per volume and replica; a second slot of a bound volume is kept out by `decideVolume`, which binds only when the volume has no line (code reading, not tested).
+- `INV-AUTH-ONE-PRIMARY-001`: Narrowed. The lab evidence field `post_failure_primary_count=1` is not read by any Go test. `IntentBind` is keyed per volume and replica; a second slot of a bound volume is kept out by `decideVolume`, which binds only when the volume has no line. The Publisher itself accepts a second genesis `Bind` for an already bound volume; the normal `decideVolume` path does not emit one. Confirmed by a red test; open as [#183](https://github.com/seaweedfs/seaweed-block/issues/183).
 - `INV-FENCE-STALE-PRIMARY-001`: Narrowed. A primary cut off from blockmaster that has not seen the newer line keeps admitting I/O, and under `best_effort` its local `fsync` still acknowledges (no primary lease on the Kubernetes path; see the Kubernetes known gaps). The lab counter `old_primary_stale_io_success_count=0` is lab evidence only.
-- `INV-PROMOTE-FRONTIER-001`: Gate logic only. `cmd/blockmaster` does not set `RequiredLSNByVolume` at this revision, so in a deployment the required frontier is 0 and the rule is "ready, highest durable LSN" (a Kubernetes known gap). RF=2 relies on `INV-REPL-PROMOTION-READY-001`.
+- `INV-PROMOTE-FRONTIER-001`: Gate logic only. `cmd/blockmaster` does not set `RequiredLSNByVolume` at this revision, so in a deployment the required frontier is 0 and the rule is "ready, highest durable LSN" (a Kubernetes known gap). Confirmed by a red test; open as [#181](https://github.com/seaweedfs/seaweed-block/issues/181); no acknowledged-write loss has been shown. RF=2 relies on `INV-REPL-PROMOTION-READY-001`.
 - `INV-K8S-NONLOOPBACK-001`: Rejection is opt-in: the chart default for `network.rejectLoopbackPublishTargets` is false; the generator sets it for multi-node values.
 - `INV-OBS-PRODUCT-EVENTS-001`: Each event type has a unit test; all four together in one node-loss run is lab evidence only.
 - `INV-HOSTPATH-TRANSPARENT-001`: Narrowed to the classifier. It does not compare the host path target with the promoted target, and only the missing-multipath case has a negative test. The mounted-failover run is lab evidence.
