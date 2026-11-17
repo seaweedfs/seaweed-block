@@ -390,7 +390,7 @@ func TestDescriptorV3BaseTransitionTable(t *testing.T) {
 		{"installing -> installed other ID", mk(BaseInstalling, 50, id1), mk(BaseInstalled, 50, id2), false},
 		{"installing -> superseding installing", mk(BaseInstalling, 50, id1), mk(BaseInstalling, 60, id2), true},
 		{"installing -> installing same ID new BaseLSN", mk(BaseInstalling, 50, id1), mk(BaseInstalling, 60, id1), false},
-		{"installing -> none (abort)", mk(BaseInstalling, 50, id1), mk(BaseNone, 0, [16]byte{}), true},
+		{"installing -> none is refused (no abort, r17)", mk(BaseInstalling, 50, id1), mk(BaseNone, 0, [16]byte{}), false},
 		{"none -> installed", mk(BaseNone, 0, [16]byte{}), mk(BaseInstalled, 50, id1), false},
 		{"installed -> none needs checkpoint past BaseLSN", mk(BaseInstalled, 50, id1), mk(BaseNone, 0, [16]byte{}), false},
 		{"installed -> installing is not an 8.5 edge", mk(BaseInstalled, 50, id1), mk(BaseInstalling, 60, id2), false},
@@ -408,6 +408,15 @@ func TestDescriptorV3BaseTransitionTable(t *testing.T) {
 	nxt.CheckpointLSN = 50
 	if err := baseTransitionAllowedV3(&cur, &nxt); err != nil {
 		t.Fatalf("installed -> none with the checkpoint at BaseLSN refused: %v", err)
+	}
+	// Retirement also needs both slots' tails at or past BaseCursor (8.4).
+	cur.BaseCursor, cur.RetainedTail, nxt.RetainedTail = 100, 100, 99
+	if err := baseTransitionAllowedV3(&cur, &nxt); err == nil {
+		t.Fatal("installed -> none with the new tail below BaseCursor allowed")
+	}
+	cur.RetainedTail, nxt.RetainedTail = 99, 100
+	if err := baseTransitionAllowedV3(&cur, &nxt); err == nil {
+		t.Fatal("installed -> none with the fallback tail below BaseCursor allowed")
 	}
 }
 
