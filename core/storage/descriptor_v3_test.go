@@ -20,8 +20,12 @@ type descHarnessV3 struct {
 	fault      atomic.Pointer[error]
 	fsyncErr   atomic.Pointer[error]
 	afterFsync func() // test hook inside the leaf, after a successful fsync
-	storeMu    sync.Mutex
-	pub        *descriptorPublisherV3
+	// writeHook, when set, replaces the slot pwrite (to inject a full or
+	// partial write followed by an error).
+	writeHook func(off int64, b []byte) error
+	writes    atomic.Int64
+	storeMu   sync.Mutex
+	pub       *descriptorPublisherV3
 }
 
 func newDescHarnessV3(t *testing.T) *descHarnessV3 {
@@ -44,7 +48,15 @@ func newDescHarnessV3(t *testing.T) *descHarnessV3 {
 	}
 	h := &descHarnessV3{t: t, f: f}
 	h.pub = newDescriptorPublisherV3(d, slotA, nil, descriptorIOV3{
-		writeSlot: func(off int64, b []byte) error { _, err := f.WriteAt(b, off); return err },
+		writeSlot: func(off int64, b []byte) error {
+			h.writes.Add(1)
+			if h.writeHook != nil {
+				return h.writeHook(off, b)
+			}
+			_, err := f.WriteAt(b, off)
+			return err
+		},
+		latch: func(err error) { h.fault.CompareAndSwap(nil, &err) },
 		fsync: func() error {
 			if e := h.fsyncErr.Load(); e != nil {
 				return *e
@@ -366,6 +378,7 @@ func TestDescriptorV3BaseTransitionTable(t *testing.T) {
 		{"installing -> none (abort)", mk(BaseInstalling, 50, id1), mk(BaseNone, 0, [16]byte{}), true},
 		{"none -> installed", mk(BaseNone, 0, [16]byte{}), mk(BaseInstalled, 50, id1), false},
 		{"installed -> none needs checkpoint past BaseLSN", mk(BaseInstalled, 50, id1), mk(BaseNone, 0, [16]byte{}), false},
+		{"installed -> installing is not an 8.5 edge", mk(BaseInstalled, 50, id1), mk(BaseInstalling, 60, id2), false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -380,5 +393,103 @@ func TestDescriptorV3BaseTransitionTable(t *testing.T) {
 	nxt.CheckpointLSN = 50
 	if err := baseTransitionAllowedV3(&cur, &nxt); err != nil {
 		t.Fatalf("installed -> none with the checkpoint at BaseLSN refused: %v", err)
+	}
+}
+
+// codex01 row 3 review P1: a slot write error (full or partial), like an
+// fsync error, latches the store, keeps the candidate pinned and refuses
+// every further publication, rollover and reuse with no further I/O.
+// Reopen (read back and select) is the positive control.
+func TestDescriptorV3SlotWriteErrorLatchesAndPinsTheCandidate(t *testing.T) {
+	for _, partial := range []bool{true, false} {
+		name := "full write then error"
+		if partial {
+			name = "partial write then error"
+		}
+		t.Run(name, func(t *testing.T) {
+			h := newDescHarnessV3(t)
+			// A checkpoint first, so the fallback pins tail 0 and a
+			// rollover would otherwise be due.
+			if _, err := h.pub.publish(&h.storeMu, nil, func(n *descriptorV3) error {
+				n.RetainedTail, n.RetainedHead = 100, 100
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			before := h.pub.current()
+			boom := errors.New("injected slot write error")
+			h.writeHook = func(off int64, b []byte) error {
+				n := len(b)
+				if partial {
+					n = 1000
+				}
+				if _, err := h.f.WriteAt(b[:n], off); err != nil {
+					t.Fatal(err)
+				}
+				return boom
+			}
+			_, err := h.pub.publish(&h.storeMu, nil, setW(30))
+			if !errors.Is(err, ErrDescriptorPublishUncertain) || !errors.Is(err, boom) {
+				t.Fatalf("err = %v, want ErrDescriptorPublishUncertain wrapping the write error", err)
+			}
+			if h.pub.current() != before {
+				t.Fatal("a failed publication changed the authoritative descriptor")
+			}
+			if cand, ok := h.pub.uncertainCandidate(); !ok || cand.W != 30 || cand.SlotGen != before.SlotGen+1 {
+				t.Fatalf("uncertain candidate not retained: ok %v %+v", ok, cand)
+			}
+			if h.fault.Load() == nil {
+				t.Fatal("the store fault was not latched: other store paths could still acknowledge or reclaim")
+			}
+			h.writeHook = nil
+			writes := h.writes.Load()
+			if _, err := h.pub.publish(&h.storeMu, nil, setW(31)); !errors.Is(err, ErrDescriptorPublishUncertain) {
+				t.Fatalf("publication after the failure: err = %v, want ErrDescriptorPublishUncertain", err)
+			}
+			if _, err := h.pub.rolloverIfPinned(); !errors.Is(err, ErrDescriptorPublishUncertain) {
+				t.Fatalf("rollover after the failure: err = %v, want ErrDescriptorPublishUncertain", err)
+			}
+			if _, ok := h.pub.reuseFloor(); ok {
+				t.Fatal("reuse allowed while a publication outcome is uncertain")
+			}
+			if got := h.writes.Load(); got != writes {
+				t.Fatalf("%d further slot writes after the failure, want none", got-writes)
+			}
+			// Reopen resolves it: a torn slot fails its CRC and the
+			// previous generation is selected; a complete slot is the new one.
+			got, _ := h.onDisk()
+			if partial && got != before {
+				t.Fatalf("reopen after a torn write selected gen %d W %d, want the previous gen %d", got.SlotGen, got.W, before.SlotGen)
+			}
+			if !partial && (got.SlotGen != before.SlotGen+1 || got.W != 30) {
+				t.Fatalf("reopen after a complete write selected gen %d W %d, want gen %d W 30", got.SlotGen, got.W, before.SlotGen+1)
+			}
+		})
+	}
+}
+
+// codex01 row 3 review P2: counters beyond 2^64-2 are refused at
+// publication with ErrCounterExhausted, before any write.
+func TestDescriptorV3PublicationCounterExhaustion(t *testing.T) {
+	const over = counterMaxV3 + 1
+	for _, c := range []struct {
+		name string
+		set  func(*descriptorV3)
+	}{
+		{"W", func(n *descriptorV3) { n.W = over }},
+		{"CheckpointLSN", func(n *descriptorV3) { n.CheckpointLSN = over }},
+		{"retainedHead", func(n *descriptorV3) { n.RetainedHead = over }},
+		{"mapGeneration", func(n *descriptorV3) { n.MapGeneration = over; n.MapRootHash[0] ^= 1 }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newDescHarnessV3(t)
+			writes := h.writes.Load()
+			if _, err := h.pub.publish(&h.storeMu, nil, func(n *descriptorV3) error { c.set(n); return nil }); !errors.Is(err, ErrCounterExhausted) {
+				t.Fatalf("err = %v, want ErrCounterExhausted", err)
+			}
+			if h.writes.Load() != writes {
+				t.Fatal("an exhausted publication wrote a slot")
+			}
+		})
 	}
 }

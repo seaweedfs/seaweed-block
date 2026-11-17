@@ -35,14 +35,25 @@ var (
 
 // descriptorIOV3 is the store I/O the publisher needs. writeSlot does one
 // pwrite of a whole slot; syncFile runs the store's leaf (pwrite + fsync
-// under fileSyncMu, latching the sticky fault on fsync failure); sticky
-// reports a latched fault.
+// under fileSyncMu); sticky reports a latched store fault; latch records a
+// fault in the store so every other store path (appends, Sync, reuse) is
+// refused too. The publisher latches on a slot write error as well as on an
+// fsync error (DESIGN 5): the v2 leaf does not latch pwrite errors, so the
+// v3 publisher does it itself.
 type descriptorIOV3 struct {
 	writeSlot func(off int64, b []byte) error
 	fsync     func() error
 	syncFile  func(write, sync func() error) error
 	sticky    func() error
+	latch     func(err error)
 }
+
+// ErrDescriptorPublishUncertain: a descriptor slot write or fsync failed, so
+// the slot on disk may hold the new generation, the old one, or a torn mix.
+// The open store refuses every further publication and all reuse; only a
+// reopen, which reads back and selects the actual slots, resolves it
+// (DESIGN 5, failure rule).
+var ErrDescriptorPublishUncertain = errors.New("storage: v3 descriptor publication outcome uncertain; reopen required")
 
 // descriptorPublisherV3 holds the authoritative in-memory descriptor and
 // the contents of the fallback slot, which pins reuse (DESIGN 5).
@@ -56,6 +67,12 @@ type descriptorPublisherV3 struct {
 
 	io     descriptorIOV3
 	accept slotImplAcceptor
+
+	// failed is set by the first slot write or fsync failure. uncertain is
+	// the candidate that may be on disk: it stays pinned (its tail bounds
+	// reuse, and its map dependencies stay referenced) until reopen.
+	failed    error
+	uncertain *descriptorV3
 
 	// trace, when set by a test, records lock acquisitions and releases
 	// in order (the section 11 item 9 lock recorder).
@@ -94,6 +111,9 @@ func (p *descriptorPublisherV3) reuseFloor() (floor uint64, ok bool) {
 }
 
 func (p *descriptorPublisherV3) reuseFloorLocked() (uint64, bool) {
+	if p.failed != nil {
+		return 0, false // an uncertain slot may reference anything: no reuse until reopen
+	}
 	if !p.otherValid {
 		return p.cur.RetainedTail, true
 	}
@@ -132,7 +152,22 @@ func (p *descriptorPublisherV3) publish(storeMu sync.Locker, snap func(), mutate
 	return p.publishLocked(mutate)
 }
 
+// uncertainCandidate returns the candidate whose publication failed, if
+// any. Its dependencies (WAL bytes from its tail, its map root and pages)
+// stay pinned until reopen.
+func (p *descriptorPublisherV3) uncertainCandidate() (descriptorV3, bool) {
+	p.descMu.Lock()
+	defer p.descMu.Unlock()
+	if p.uncertain == nil {
+		return descriptorV3{}, false
+	}
+	return *p.uncertain, true
+}
+
 func (p *descriptorPublisherV3) publishLocked(mutate func(next *descriptorV3) error) (descriptorV3, error) {
+	if p.failed != nil {
+		return descriptorV3{}, p.failed
+	}
 	if err := p.io.sticky(); err != nil {
 		return descriptorV3{}, err
 	}
@@ -143,6 +178,9 @@ func (p *descriptorPublisherV3) publishLocked(mutate func(next *descriptorV3) er
 		}
 	}
 	if err := mergeDescriptorV3(&p.cur, &next); err != nil {
+		return descriptorV3{}, err
+	}
+	if err := checkCountersV3(&next); err != nil {
 		return descriptorV3{}, err
 	}
 	gen, err := nextSlotGenV3(p.cur.SlotGen)
@@ -160,12 +198,26 @@ func (p *descriptorPublisherV3) publishLocked(mutate func(next *descriptorV3) er
 		target, off = slotA, slotAOffsetV3
 	}
 	buf := next.encode()
+	wrote := false
 	err = p.io.syncFile(func() error {
 		p.note("hold fileSyncMu")
+		wrote = true
 		return p.io.writeSlot(off, buf)
 	}, p.io.fsync)
 	if err != nil {
-		return descriptorV3{}, err
+		if wrote {
+			// The slot write or its fsync failed: the fallback slot may hold
+			// the new generation, the old one or a torn mix. Latch, keep the
+			// candidate pinned, and refuse everything until reopen.
+			uncertain := next
+			p.uncertain = &uncertain
+			p.failed = fmt.Errorf("%w: %w", ErrDescriptorPublishUncertain, err)
+			if p.io.latch != nil {
+				p.io.latch(p.failed)
+			}
+			return descriptorV3{}, p.failed
+		}
+		return descriptorV3{}, err // refused before any I/O (a latched fault)
 	}
 	// Success boundary: a fault latched by another path while this
 	// publication was in flight still refuses it (#172).
@@ -175,6 +227,26 @@ func (p *descriptorPublisherV3) publishLocked(mutate func(next *descriptorV3) er
 	p.other, p.otherValid = p.cur, true
 	p.cur, p.curSlot = next, target
 	return next, nil
+}
+
+// checkCountersV3 refuses a publication whose counters would exceed 2^64-2
+// (DESIGN 2.4) with ErrCounterExhausted, before any write. Slot decoding of
+// such a value stays errSuperblockInvalid.
+func checkCountersV3(d *descriptorV3) error {
+	for _, c := range []struct {
+		name string
+		v    uint64
+	}{
+		{"W", d.W}, {"CheckpointLSN", d.CheckpointLSN}, {"retainedTail", d.RetainedTail},
+		{"retainedHead", d.RetainedHead}, {"mapGeneration", d.MapGeneration},
+		{"mapCoveredCheckpoint", d.MapCoveredCheckpoint}, {"BaseLSN", d.BaseLSN},
+		{"BaseCursor", d.BaseCursor},
+	} {
+		if c.v > counterMaxV3 {
+			return fmt.Errorf("%w: %s %d", ErrCounterExhausted, c.name, c.v)
+		}
+	}
+	return nil
 }
 
 // mergeDescriptorV3 applies the monotonic merge and transition rules of
@@ -242,10 +314,10 @@ func baseTransitionAllowedV3(cur, next *descriptorV3) error {
 			// Retirement may clear BaseCursor below the tail; the ID and
 			// BaseLSN stay.
 			ok = next.BaseInstallID == cur.BaseInstallID && next.BaseLSN == cur.BaseLSN
-		case BaseInstalling:
-			ok = next.BaseInstallID != cur.BaseInstallID // a new install begins
 		case BaseNone:
 			ok = next.BaseLSN == 0 && next.CheckpointLSN >= cur.BaseLSN
+			// installed -> installing is not an 8.5 edge: a new install
+			// begins only after installed -> none (retire, then begin).
 		}
 	}
 	if !ok {
@@ -266,6 +338,9 @@ func (p *descriptorPublisherV3) rolloverIfPinned() (bool, error) {
 		p.note("unlock descMu")
 		p.descMu.Unlock()
 	}()
+	if p.failed != nil {
+		return false, p.failed
+	}
 	if !p.otherValid || p.other.Nonce != p.cur.Nonce || p.other.RetainedTail >= p.cur.RetainedTail {
 		return false, nil
 	}
