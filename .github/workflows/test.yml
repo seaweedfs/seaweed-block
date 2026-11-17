@@ -18,7 +18,10 @@ concurrency:
 jobs:
   test:
     name: go test (linux)
-    runs-on: ubuntu-latest
+    # Pushes and same-repo PRs run on the team's tp04 runner (seaweed.slice,
+    # capped at 8 cores / 8 GiB). Fork PRs never reach it: they stay on a
+    # GitHub-hosted runner.
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && 'tp04-seaweed-block' || 'ubuntu-latest' }}
     timeout-minutes: 25
     env:
       # Pure-Go build: no package in the default build needs cgo, and the
