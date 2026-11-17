@@ -107,7 +107,13 @@ func decideRecoveryV3(d descriptorV3, recs []trustedRecordV3, maxDurable uint64)
 	o := recoveryOutcomeV3{Start: scanStartV3(d), F: replayFloorV3(d)}
 	R, E, err := contiguousPrefixV3(o.Start, o.F, recs)
 	if err != nil {
-		return o, NewWALIntegrityFailure(err, err.Error())
+		ierr := NewWALIntegrityFailure(err, err.Error())
+		if d.BaseState == BaseInstalling {
+			// Installing keeps its outer not-ready outcome (DESIGN 8.3).
+			o.Installing, o.Damaged = true, true
+			return o, fmt.Errorf("%w: %w: %w", ErrBaseIncomplete, ErrInstallSuffixDamaged, ierr)
+		}
+		return o, ierr
 	}
 	o.R, o.E = R, E
 	o.WStar = max(d.W, maxDurable)
@@ -154,14 +160,15 @@ func fenceRangesV3(E, floor, walSize uint64, sameNonce bool) ([]fenceRangeV3, er
 	if E < floor {
 		return nil, fmt.Errorf("storage: v3 fence: head %d below the reuse floor %d", E, floor)
 	}
-	end, ok := checkedAddV3(floor, walSize)
-	if !ok {
-		return nil, fmt.Errorf("%w: fence end %d+%d", ErrCounterExhausted, floor, walSize)
-	}
-	if E >= end {
+	// Interval-length arithmetic: floor+walSize is never formed, so a
+	// history ending at the last representable cursor still recovers
+	// (codex01 row 5 P2). The logical end may exceed 2^64-2; only the
+	// physical bytes matter.
+	used := E - floor
+	if used >= walSize {
 		return nil, nil
 	}
-	n := end - E // at most walSize
+	n := walSize - used // at most walSize
 	start := E % walSize
 	if start+n <= walSize {
 		return []fenceRangeV3{{Off: start, Len: n}}, nil

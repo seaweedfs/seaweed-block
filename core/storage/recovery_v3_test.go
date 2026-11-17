@@ -98,6 +98,12 @@ func TestRecoveryV3Decision(t *testing.T) {
 	if !errors.Is(installingErrorV3(o), ErrBaseIncomplete) || errors.Is(installingErrorV3(o), ErrInstallSuffixDamaged) {
 		t.Fatal("intact installing error is not a plain ErrBaseIncomplete")
 	}
+	// A contradictory chain while installing keeps the outer not-ready
+	// outcome (codex01 row 5).
+	bad := []trustedRecordV3{rec(11, 11, 1100), rec(11, 11, 1200)}
+	if _, err := decideRecoveryV3(inst, bad, 11); !errors.Is(err, ErrBaseIncomplete) || !errors.Is(err, ErrInstallSuffixDamaged) {
+		t.Fatalf("contradictory installing chain: err = %v, want ErrBaseIncomplete wrapping ErrInstallSuffixDamaged", err)
+	}
 	o, err = decideRecoveryV3(inst, recs[:1], 12)
 	if err != nil || !o.Installing || !o.Damaged {
 		t.Fatalf("installing damaged: %+v %v (the check runs while installing)", o, err)
@@ -152,7 +158,13 @@ func TestRecoveryV3FenceRangesAreExact(t *testing.T) {
 	if _, err := fenceRangesV3(50, 100, 256, true); err == nil {
 		t.Fatal("a head below the floor was accepted")
 	}
-	if _, err := fenceRangesV3(counterMaxV3, counterMaxV3, 256, true); !errors.Is(err, ErrCounterExhausted) {
-		t.Fatalf("fence end overflow: err = %v, want ErrCounterExhausted", err)
+	// codex01 row 5 P2: a history ending at the last representable cursor
+	// still fences exactly; floor+WALSize is never formed.
+	got, err := fenceRangesV3(counterMaxV3, counterMaxV3-100, 256, true)
+	if err != nil {
+		t.Fatalf("terminal-cursor fence: %v", err)
+	}
+	if want := []fenceRangeV3{{254, 2}, {0, 154}}; !reflect.DeepEqual(got, want) { // 2^64-2 mod 256 = 254: wraps
+		t.Fatalf("terminal-cursor fence %v, want %v", got, want)
 	}
 }

@@ -2,126 +2,91 @@ package storage
 
 import (
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"sync"
 	"sync/atomic"
 )
 
-// walStoreV3 is the dark impl-3 store core (format bump v3, DESIGN r15
-// section 6; plan row 5). It composes the row-3 descriptor publisher, the
-// row-4 WAL writer and scan, and the row-5 recovery decisions:
+// Impl-3 internals of the real WALStore (format bump v3, DESIGN r15
+// section 6; plan rows 5 and 5b). A *WALStore whose v3 field is set runs
+// the v3 format: its descriptor publisher (row 3), its WAL writer and scan
+// (row 4), and the row-5 recovery (R < W*, the exact drop fence, head = E,
+// admission). Every other piece of the store is shared with v2: the group
+// committer, the dirty map, the flusher's extent writes, the syncFile leaf,
+// fileSyncMu and the sticky fault.
 //
-//   - open: select a slot, scan, decide R < W*, replay records <= R, fence
-//     [E, floor+WALSize) exactly, publish retainedHead = E, restore the
-//     writer to E, and only then admit appends;
-//   - Sync in mode C (default: the slot carries the previous batch's W and
-//     one fsync covers the WAL and the slot) or mode A (WAL fsync, then a
-//     slot publication with W = H and its own fsync);
-//   - the idle refresh, SetWMode, and the store-global fault latch for
-//     append and publication failures.
+// Dark until activation (plan row 12b): only createWALStoreV3ForTest and
+// openWALStoreV3ForTest build a v3 store; Create and Open stay v2.
 //
-// It is reachable only from tests until activation (plan row 12b). The
-// map, checkpoint and extent flush are later rows: this core keeps the
-// replayed and written blocks in memory for its read path.
-type walStoreV3 struct {
-	fd *os.File
-
-	fileSyncMu sync.Mutex
-	ioFault    atomic.Pointer[error] // store-global sticky fault
-
-	mu       sync.Mutex // the WALStore.mu analogue
-	nextLSN  uint64
-	appended uint64 // highest LSN appended
-	wack     uint64 // highest acknowledged LSN
-	data     map[uint64][]byte
-	admitted bool
-
-	syncMu sync.Mutex // group-commit leader role; SetWMode takes it too
-
+// Not yet v3 (refused with errV3NotYet until their rows): WriteBatch, the
+// install paths (ApplyEntry, WriteExtentDirect, AdvanceFrontier; rows 9 to
+// 11) and the checkpoint/tail advance, which needs the row-7 map candidate.
+type walStoreV3State struct {
 	pub *descriptorPublisherV3
 	w   *walWriterV3
 
-	// testBeforeFence, when set, runs just before the drop fence writes.
-	testBeforeFence func()
+	appended atomic.Uint64 // highest LSN pwritten to the WAL
+	wack     atomic.Uint64 // highest acknowledged LSN (Sync completed)
+
+	// syncMu is the group-commit leader role for the v3-only publications
+	// that run outside the committer (refreshW, SetWMode).
+	syncMu sync.Mutex
+
+	// mapCandidate, when set by plan row 7, prepares the map candidate a
+	// checkpoint advance needs (DESIGN 9.1). Until then the v3 checkpoint
+	// and tail do not move: coverage is never fabricated.
+	mapCandidate func(checkpoint uint64) (func(next *descriptorV3) error, error)
+
+	// Test hooks (never set in production). testBeforeSlotWrite runs inside
+	// the leaf just before a descriptor slot pwrite; a non-nil error fails
+	// that write. testLeaderWaiting runs in a committer batch just before it
+	// takes the leader role.
+	testBeforeSlotWrite func() error
+	testLeaderWaiting   func()
+	// testSetWModeHoldingRole runs in SetWMode after it has taken the leader
+	// role and before it publishes the new mode.
+	testSetWModeHoldingRole func()
 }
+
+var errV3NotYet = errors.New("storage: operation not yet supported on a v3 store (later plan row)")
 
 // testSkipFenceOnRecoverV3 is a test-only mutant switch for the G1 control
 // (it proves the schedule resurrects without the fence). Never set outside
 // tests.
 var testSkipFenceOnRecoverV3 bool
 
-var errStoreNotAdmittedV3 = errors.New("storage: v3 store not admitted (recovery incomplete)")
-
-func (s *walStoreV3) sticky() error {
-	if e := s.ioFault.Load(); e != nil {
-		return *e
-	}
-	return nil
-}
-
-func (s *walStoreV3) latch(err error) {
+func (s *WALStore) latchV3(err error) {
 	if err != nil {
-		s.ioFault.CompareAndSwap(nil, &err)
+		s.ioFault.CompareAndSwap(nil, NewSubstrateIOFailure(err,
+			"v3 WAL append or descriptor publication failed; the open store refuses further Syncs, writes and checkpoints"))
 	}
 }
 
-// syncFile is the leaf: one optional pwrite and one fsync under fileSyncMu,
-// refused when a fault is latched; an fsync failure latches before unlock.
-func (s *walStoreV3) syncFile(write, sync func() error) error {
-	s.fileSyncMu.Lock()
-	defer s.fileSyncMu.Unlock()
-	if err := s.sticky(); err != nil {
-		return err
-	}
-	if write != nil {
-		if err := write(); err != nil {
-			return err
-		}
-	}
-	if err := sync(); err != nil {
-		err = fmt.Errorf("%w: %w", ErrFsyncFailed, err)
-		s.latch(err)
-		return err
-	}
-	return nil
+// createWALStoreV3ForTest creates a v3 file (slot A at generation 1) and
+// returns it opened and recovered. It is the only v3 creator before
+// activation.
+func createWALStoreV3ForTest(path string, numBlocks uint32, blockSize uint32, walSize uint64, mode WMode) (*WALStore, error) {
+	return createWALStoreV3AtCursorForTest(path, numBlocks, blockSize, walSize, mode, 0)
 }
 
-func (s *walStoreV3) descriptorIO() descriptorIOV3 {
-	return descriptorIOV3{
-		writeSlot: func(off int64, b []byte) error {
-			n, err := s.fd.WriteAt(b, off)
-			if err == nil && n != len(b) {
-				err = io.ErrShortWrite
-			}
-			return err
-		},
-		fsync:    s.fd.Sync,
-		syncFile: s.syncFile,
-		sticky:   s.sticky,
-		latch:    s.latch,
-	}
-}
-
-// createWALStoreV3ForTest creates a v3 file with slot A at generation 1 and
-// opens it. It is the only constructor of a v3 store before activation.
-func createWALStoreV3ForTest(path string, numBlocks uint32, blockSize uint32, walSize uint64, mode WMode) (*walStoreV3, error) {
+// createWALStoreV3AtCursorForTest is createWALStoreV3ForTest with the WAL's
+// logical cursor (tail = head) starting at cursor, to exercise the last
+// representable cursors.
+func createWALStoreV3AtCursorForTest(path string, numBlocks uint32, blockSize uint32, walSize uint64, mode WMode, cursor uint64) (*WALStore, error) {
 	d := descriptorV3{
 		ImplKind: ImplKindWALStore, ImplVersion: walStoreImplVersion3,
 		VolumeSize: uint64(numBlocks) * uint64(blockSize), ExtentSize: 64 * 1024, BlockSize: blockSize,
 		WALOffset: walOffsetV3, WALSize: walSize, CreatedAt: 1, SlotGen: 1,
 		MapFormatID: mapFormatIDV1, MapGeneration: 1, WMode: mode,
+		RetainedTail: cursor, RetainedHead: cursor,
 	}
-	if _, err := rand.Read(d.UUID[:]); err != nil {
-		return nil, err
-	}
-	if _, err := rand.Read(d.Nonce[:]); err != nil {
-		return nil, err
-	}
-	if _, err := rand.Read(d.MapLineage[:]); err != nil {
-		return nil, err
+	for _, b := range [][]byte{d.UUID[:], d.Nonce[:], d.MapLineage[:]} {
+		if _, err := rand.Read(b); err != nil {
+			return nil, err
+		}
 	}
 	if err := d.validate(nil); err != nil {
 		return nil, err
@@ -143,36 +108,35 @@ func createWALStoreV3ForTest(path string, numBlocks uint32, blockSize uint32, wa
 	if err != nil {
 		return nil, err
 	}
-	return openWALStoreV3(path)
-}
-
-// openWALStoreV3 opens and recovers a v3 file (DESIGN 6.5, 6.6). An
-// installing descriptor returns the typed not-ready error (rows 9 to 11
-// own the install paths).
-func openWALStoreV3(path string) (*walStoreV3, error) {
-	fd, err := os.OpenFile(path, os.O_RDWR, 0)
+	s, err := openWALStoreV3ForTest(path)
 	if err != nil {
 		return nil, err
 	}
-	s, err := recoverWALStoreV3(fd)
-	if err != nil {
-		_ = fd.Close()
+	if _, err := s.Recover(); err != nil {
+		_ = s.Close()
 		return nil, err
 	}
 	return s, nil
 }
 
-func recoverWALStoreV3(fd *os.File) (*walStoreV3, error) {
+// openWALStoreV3ForTest opens a v3 file WITHOUT recovering it, like
+// OpenWALStore: call Recover before any Read or Write.
+func openWALStoreV3ForTest(path string) (*WALStore, error) {
+	f, err := os.OpenFile(path, os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("storage: open %s: %w", path, err)
+	}
 	a := make([]byte, slotSizeV3)
 	b := make([]byte, slotSizeV3)
-	if _, err := fd.ReadAt(a, slotAOffsetV3); err != nil {
-		return nil, err
-	}
-	if _, err := fd.ReadAt(b, slotBOffsetV3); err != nil {
+	_, errA := f.ReadAt(a, slotAOffsetV3)
+	_, errB := f.ReadAt(b, slotBOffsetV3)
+	if err := errors.Join(errA, errB); err != nil {
+		_ = f.Close()
 		return nil, err
 	}
 	d, id, err := selectSlotV3(a, b, nil)
 	if err != nil {
+		_ = f.Close()
 		return nil, err
 	}
 	var other *descriptorV3
@@ -183,12 +147,65 @@ func recoverWALStoreV3(fd *os.File) (*walStoreV3, error) {
 	if od, oerr := decodeSlotV3(otherRaw, nil); oerr == nil && od.MigrationPhase == MigrationNormal {
 		other = &od
 	}
-	s := &walStoreV3{fd: fd, data: make(map[uint64][]byte)}
-	s.pub = newDescriptorPublisherV3(d, id, other, s.descriptorIO())
-
-	scan, err := scanWALV3(fd, d)
+	// The shared store reads its geometry from sb; WAL bounds and the
+	// checkpoint come from the selected descriptor.
+	sb := superblock{
+		Version: superblockVersionV3, UUID: d.UUID, VolumeSize: d.VolumeSize,
+		ExtentSize: d.ExtentSize, BlockSize: d.BlockSize, WALOffset: d.WALOffset, WALSize: d.WALSize,
+		WALHead: d.RetainedHead, WALTail: d.RetainedTail, WALCheckpointLSN: d.CheckpointLSN,
+		CreatedAt: d.CreatedAt, ImplKind: d.ImplKind, ImplVersion: d.ImplVersion,
+	}
+	copy(sb.Magic[:], superblockMagic)
+	var initErr error
+	s, err := openInitializedInternal(path, f, &sb, nil, func(s *WALStore) {
+		v := &walStoreV3State{}
+		v.pub = newDescriptorPublisherV3(d, id, other, descriptorIOV3{
+			writeSlot: func(off int64, buf []byte) error {
+				if h := s.v3.testBeforeSlotWrite; h != nil {
+					if err := h(); err != nil {
+						return err
+					}
+				}
+				n, err := f.WriteAt(buf, off)
+				if err == nil && n != len(buf) {
+					err = fmt.Errorf("storage: v3 slot short write %d of %d", n, len(buf))
+				}
+				return err
+			},
+			fsync:    f.Sync,
+			syncFile: s.syncFile,
+			sticky:   s.stickyIOFault,
+			latch:    s.latchV3,
+		})
+		w, err := newWALWriterV3(f, v.pub)
+		if err != nil {
+			initErr = err
+			return
+		}
+		v.w = w
+		v.wack.Store(d.W)
+		s.v3 = v
+	})
 	if err != nil {
+		_ = f.Close()
 		return nil, err
+	}
+	if initErr != nil {
+		_ = s.Close()
+		return nil, initErr
+	}
+	return s, nil
+}
+
+// recoverV3 is Recover for a v3 store (DESIGN 6.5, 6.6). The caller holds
+// captureMu, lifecycleMu and s.mu, as v2 Recover does.
+func (s *WALStore) recoverV3() (uint64, error) {
+	v := s.v3
+	d := v.pub.current()
+	s.dm.clear()
+	scan, err := scanWALV3(s.fd, d)
+	if err != nil {
+		return 0, err
 	}
 	recs := make([]trustedRecordV3, 0, len(scan.Records))
 	for _, r := range scan.Records {
@@ -200,81 +217,65 @@ func recoverWALStoreV3(fd *os.File) (*walStoreV3, error) {
 	}
 	o, err := decideRecoveryV3(d, recs, scan.MaxDurableLSN)
 	if err != nil {
-		return nil, err // R < W*: fail closed (wal_corrupt)
+		return 0, err // R < W*: fail closed (wal_corrupt)
 	}
 	if o.Installing {
-		return nil, installingErrorV3(o)
+		return 0, installingErrorV3(o)
 	}
-	// Replay the records <= R by LSN (last writer wins); drop the rest.
-	lsnOf := make(map[uint64]uint64)
+	// Replay the records <= R into the dirty map (last writer wins); the
+	// rest are dropped and fenced below.
 	for _, r := range scan.Records {
 		e := r.Entry
 		if e.LSN > o.R {
 			break
 		}
-		s.replayV3(e, d.BlockSize, lsnOf)
+		if e.Type != walEntryWrite {
+			s.dm.clear()
+			return 0, fmt.Errorf("%w: replay of v3 record type %#x", errV3NotYet, e.Type)
+		}
+		size := uint64(walEntryHeaderSizeV3 + len(e.Data))
+		phys := (r.End - size) % d.WALSize
+		s.dm.putAtIfNewer(e.LBA, phys, 0, e.LSN, d.BlockSize)
 	}
-	// The drop fence (6.6), then the recovered head, then admission.
-	floor, sameNonce := s.pub.reuseFloor()
+	// The drop fence, then the recovered head, then the writer and admission.
+	floor, sameNonce := v.pub.reuseFloor()
 	if err := s.fenceV3(o.E, floor, d.WALSize, sameNonce, d.WALOffset); err != nil {
-		return nil, err
+		s.dm.clear()
+		return 0, err
 	}
-	if _, err := s.pub.publish(&s.mu, nil, func(n *descriptorV3) error {
+	if _, err := v.pub.publish(nil, nil, func(n *descriptorV3) error {
 		n.RetainedHead = o.E
 		return nil
 	}); err != nil {
-		return nil, err
-	}
-	w, err := newWALWriterV3(fd, s.pub)
-	if err != nil {
-		return nil, err
+		s.dm.clear()
+		return 0, err
 	}
 	restore := scan
 	restore.End = o.E
-	if err := w.restoreScanV3(restore); err != nil {
-		return nil, err
+	if err := v.w.restoreScanV3(restore); err != nil {
+		s.dm.clear()
+		return 0, err
 	}
-	s.w = w
+	s.checkpointLSN = d.CheckpointLSN
 	s.nextLSN = o.R + 1
-	s.appended, s.wack = o.R, o.R
-	s.admitted = true
-	return s, nil
-}
-
-func (s *walStoreV3) replayV3(e walEntryV3, blockSize uint32, lsnOf map[uint64]uint64) {
-	put := func(lba, lsn uint64, b []byte) {
-		if prev, ok := lsnOf[lba]; ok && prev > lsn {
-			return
-		}
-		lsnOf[lba] = lsn
-		s.data[lba] = b
+	s.walHead, s.syncedLSN = o.R, o.R
+	if s.walTail == 0 && o.R > 0 {
+		s.walTail = 1
 	}
-	switch e.Type {
-	case walEntryWrite:
-		put(e.LBA, e.LSN, append([]byte(nil), e.Data...))
-	case walEntryWriteBatch:
-		for i := uint64(0); i < e.BatchCount; i++ {
-			put(e.LBA+i, e.LSN+i, append([]byte(nil), e.Data[i*uint64(blockSize):(i+1)*uint64(blockSize)]...))
-		}
-	case walEntryTrim:
-		for i := uint64(0); i < uint64(e.Length)/uint64(blockSize); i++ {
-			put(e.LBA+i, e.LSN, nil)
-		}
-	}
+	v.appended.Store(o.R)
+	v.wack.Store(max(v.wack.Load(), o.R))
+	return s.syncedLSN, nil
 }
 
 // fenceV3 zeroes exactly the fence ranges and fsyncs them through the leaf
-// before any admission (DESIGN 6.6).
-func (s *walStoreV3) fenceV3(E, floor, walSize uint64, sameNonce bool, walOffset uint64) error {
+// before any admission (DESIGN 6.6). A write error latches inside the leaf.
+func (s *WALStore) fenceV3(E, floor, walSize uint64, sameNonce bool, walOffset uint64) error {
 	ranges, err := fenceRangesV3(E, floor, walSize, sameNonce)
 	if err != nil {
 		return err
 	}
 	if len(ranges) == 0 || testSkipFenceOnRecoverV3 {
 		return nil
-	}
-	if s.testBeforeFence != nil {
-		s.testBeforeFence()
 	}
 	return s.syncFile(func() error {
 		const chunk = 64 * 1024
@@ -284,7 +285,7 @@ func (s *walStoreV3) fenceV3(E, floor, walSize uint64, sameNonce bool, walOffset
 				n := min(r.Len-done, chunk)
 				if _, err := s.fd.WriteAt(zero[:n], int64(walOffset+r.Off+done)); err != nil {
 					err = fmt.Errorf("storage: v3 drop fence: %w", err)
-					s.latch(err) // inside the leaf, before fileSyncMu unlocks
+					s.latchV3(err)
 					return err
 				}
 				done += n
@@ -294,107 +295,182 @@ func (s *walStoreV3) fenceV3(E, floor, walSize uint64, sameNonce bool, walOffset
 	}, s.fd.Sync)
 }
 
-// Write appends one single-block record. DurableLSN is the acknowledged W
-// at append time. A pwrite failure latches the store-global fault.
-func (s *walStoreV3) Write(lba uint32, data []byte) (uint64, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.admitted {
-		return 0, errStoreNotAdmittedV3
-	}
-	if err := s.sticky(); err != nil {
-		return 0, err
-	}
-	lsn := s.nextLSN
+// appendWriteV3 is the v3 body of Write's append, under s.mu. DurableLSN is
+// the acknowledged W at append time; a pwrite failure latches the store.
+func (s *WALStore) appendWriteV3(lba uint32, data []byte, lsn uint64) (uint64, error) {
 	e := walEntryV3{LSN: lsn, Type: walEntryWrite, LBA: uint64(lba), Length: uint32(len(data)), Data: data}
-	if _, err := s.w.append(e, s.wack); err != nil {
+	phys, err := s.v3.w.append(e, s.v3.wack.Load())
+	if err != nil {
 		if errors.Is(err, errWALPwrite) {
-			s.latch(err)
+			s.latchV3(err)
 		}
 		return 0, err
 	}
-	s.nextLSN++
-	s.appended = lsn
-	s.data[uint64(lba)] = append([]byte(nil), data...)
-	return lsn, nil
+	s.v3.appended.Store(lsn)
+	return phys, nil
 }
 
-// Read returns the current block (dark read path for tests).
-func (s *walStoreV3) Read(lba uint32) []byte {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.data[uint64(lba)]
-}
-
-// Sync acknowledges every write appended before it was called (DESIGN 6.1
-// to 6.3). It returns the acknowledged W.
-func (s *walStoreV3) Sync() (uint64, error) {
-	s.syncMu.Lock()
-	defer s.syncMu.Unlock()
-	s.mu.Lock()
-	H, prev := s.appended, s.wack
-	err := s.sticky()
-	s.mu.Unlock()
-	if err != nil {
-		return 0, err
+// syncWALBatchV3 is the committer leader's batch for a v3 store (DESIGN 6.2,
+// 6.3). The cut H is every record pwritten before the leader starts.
+func (s *WALStore) syncWALBatchV3() error {
+	if err := s.stickyIOFault(); err != nil {
+		return err
 	}
-	if H <= prev {
-		return prev, nil
+	cut := s.walMutation.Load()
+	if !s.bypassSyncDedup.Load() && s.chunk.Load() == nil && cut <= s.durableMutation.Load() {
+		return nil
 	}
-	switch s.pub.current().WMode {
+	v := s.v3
+	// The leader role: SetWMode holds it while it changes the mode, so no
+	// batch acknowledges under a stale mode selection (the mode is read
+	// only after the role is taken).
+	if h := v.testLeaderWaiting; h != nil {
+		h()
+	}
+	v.syncMu.Lock()
+	defer v.syncMu.Unlock()
+	H, prev := v.appended.Load(), v.wack.Load()
+	switch v.pub.current().WMode {
 	case WModeStrict:
 		// A: fsync the WAL, then publish W = H with its own fsync.
-		if err := s.syncFile(nil, s.fd.Sync); err != nil {
-			return 0, err
+		if err := s.syncFile(nil, func() error { return s.syncWALFile() }); err != nil {
+			return err
 		}
-		if _, err := s.pub.publish(&s.mu, nil, func(n *descriptorV3) error { n.W = H; return nil }); err != nil {
-			return 0, err
+		if _, err := v.pub.publish(nil, nil, func(n *descriptorV3) error { n.W = H; return nil }); err != nil {
+			return err
 		}
 	default:
-		// C: the fallback slot carries the PREVIOUS batch's acknowledged W;
-		// the publication's one fsync covers this batch's records and the
-		// slot. The slot never names an LSN beyond a completed fsync.
-		if _, err := s.pub.publish(&s.mu, nil, func(n *descriptorV3) error { n.W = prev; return nil }); err != nil {
-			return 0, err
+		// C: the fallback slot carries the PREVIOUS batch's acknowledged
+		// W, and the publication's one fsync covers this batch's records
+		// and the slot. The slot never names an LSN beyond a completed fsync.
+		s.walSyncCalls.Add(1)
+		if _, err := v.pub.publish(nil, nil, func(n *descriptorV3) error { n.W = prev; return nil }); err != nil {
+			return err
 		}
 	}
+	// The acknowledgement boundary (codex01 row 5 P1): a queued append may
+	// have failed and latched the store fault while this batch's slot I/O
+	// was in flight. Recheck under the store lock, which that append holds
+	// until it has latched, before acknowledging anything.
 	s.mu.Lock()
-	s.wack = max(s.wack, H)
-	s.mu.Unlock()
-	return H, nil
+	defer s.mu.Unlock()
+	if err := s.stickyIOFault(); err != nil {
+		return err
+	}
+	if H > prev {
+		v.wack.Store(H)
+	}
+	s.durableMutation.Store(cut)
+	return nil
 }
 
 // refreshW is the mode-C idle refresh (DESIGN 6.2): publish W = the
-// acknowledged W when the slot lags it. The flusher calls it after the
-// refresh interval; tests call it directly (no timing oracle).
-func (s *walStoreV3) refreshW() error {
-	s.syncMu.Lock()
-	defer s.syncMu.Unlock()
-	s.mu.Lock()
-	wack := s.wack
-	s.mu.Unlock()
-	if wack <= s.pub.current().W {
+// acknowledged W when the slot lags it.
+func (s *WALStore) refreshW() error {
+	v := s.v3
+	if v == nil {
+		return errV3NotYet
+	}
+	v.syncMu.Lock()
+	defer v.syncMu.Unlock()
+	wack := v.wack.Load()
+	if wack <= v.pub.current().W {
 		return nil
 	}
-	_, err := s.pub.publish(&s.mu, nil, func(n *descriptorV3) error { n.W = wack; return nil })
+	_, err := v.pub.publish(nil, nil, func(n *descriptorV3) error { n.W = wack; return nil })
 	return err
 }
 
-// SetWMode changes the W mode (DESIGN 6.4). It takes the group-commit
-// leader role, so every batch admitted before it has been acknowledged
-// under the old mode, and publishes the new mode with W = the actual
-// acknowledged W. Every later batch uses the new mode.
-func (s *walStoreV3) SetWMode(m WMode) error {
-	s.syncMu.Lock()
-	defer s.syncMu.Unlock()
-	s.mu.Lock()
-	wack := s.wack
-	s.mu.Unlock()
-	_, err := s.pub.publish(&s.mu, nil, func(n *descriptorV3) error {
+// SetWMode changes the W mode (DESIGN 6.4). It runs a Sync first, so every
+// write admitted before it is acknowledged under the old mode, then
+// publishes the new mode with W = the actual acknowledged W while holding
+// the v3 leader role. Every later batch uses the new mode.
+func (s *WALStore) SetWMode(m WMode) error {
+	v := s.v3
+	if v == nil {
+		return errV3NotYet
+	}
+	if _, err := s.Sync(); err != nil {
+		return err
+	}
+	v.syncMu.Lock()
+	defer v.syncMu.Unlock()
+	if h := v.testSetWModeHoldingRole; h != nil {
+		h()
+	}
+	wack := v.wack.Load()
+	_, err := v.pub.publish(nil, nil, func(n *descriptorV3) error {
 		n.WMode, n.W = m, wack
 		return nil
 	})
 	return err
 }
 
-func (s *walStoreV3) Close() error { return s.fd.Close() }
+// readFromWALV3 reads one block of a v3 write record at a WAL offset.
+func (s *WALStore) readFromWALV3(walRelOff uint64) ([]byte, error) {
+	absOff := int64(s.sb.WALOffset + walRelOff)
+	header := make([]byte, walEntryPrefixSizeV3)
+	if _, err := s.fd.ReadAt(header, absOff); err != nil {
+		return nil, fmt.Errorf("storage: v3 WAL read header: %w", err)
+	}
+	if header[16] != walEntryWrite || binary.LittleEndian.Uint32(header[26:30]) != s.sb.BlockSize {
+		return nil, fmt.Errorf("storage: v3 WAL read: unexpected record type %#x", header[16])
+	}
+	data := make([]byte, s.sb.BlockSize)
+	if _, err := s.fd.ReadAt(data, absOff+int64(walEntryPrefixSizeV3)); err != nil {
+		return nil, fmt.Errorf("storage: v3 WAL read data: %w", err)
+	}
+	return data, nil
+}
+
+// readDirtyRecordV3 is the flusher's record read for a v3 store: it decodes
+// and validates the whole record before its data may reach the extent.
+func (f *flusher) readDirtyRecordV3(e snapshotEntry) ([]byte, uint64, error) {
+	store := f.store
+	d := store.v3.pub.current()
+	absOff := int64(store.sb.WALOffset + e.WALOffset)
+	size := uint64(walEntryHeaderSizeV3) + uint64(store.sb.BlockSize)
+	if e.WALOffset+size > store.sb.WALSize {
+		return nil, 0, fmt.Errorf("flusher: v3 record LBA %d offset %d crosses the ring end", e.LBA, e.WALOffset)
+	}
+	full := make([]byte, size)
+	if _, err := store.fd.ReadAt(full, absOff); err != nil {
+		return nil, 0, fmt.Errorf("flusher: read v3 WAL record at %d: %w", e.WALOffset, err)
+	}
+	entry, err := decodeWALEntryV3(full, d.BlockSize, d.VolumeSize/uint64(d.BlockSize))
+	if err != nil {
+		return nil, 0, fmt.Errorf("flusher: invalid v3 WAL record LBA %d offset %d: %w", e.LBA, e.WALOffset, err)
+	}
+	if entry.Type != walEntryWrite || entry.LSN != e.LSN || entry.LBA != e.LBA || entry.Nonce != d.Nonce ||
+		e.DataOffset != 0 || e.Length != store.sb.BlockSize {
+		return nil, 0, fmt.Errorf("flusher: v3 WAL slot mismatch LBA %d offset %d dirty LSN %d record LSN %d",
+			e.LBA, e.WALOffset, e.LSN, entry.LSN)
+	}
+	return entry.Data, size, nil
+}
+
+// persistCheckpointV3 is the v3 checkpoint/tail publication. It goes
+// through the row-3 publisher with the row-7 map candidate; without one,
+// the checkpoint and tail do not move (no coverage is fabricated) and the
+// flushed bytes stay retained in the WAL.
+func (s *WALStore) persistCheckpointV3(highestLSN uint64) error {
+	v := s.v3
+	if v.mapCandidate == nil {
+		return nil
+	}
+	mutateMap, err := v.mapCandidate(highestLSN)
+	if err != nil {
+		return err
+	}
+	d, err := v.pub.publish(&s.mu, nil, func(n *descriptorV3) error {
+		n.CheckpointLSN = highestLSN
+		return mutateMap(n)
+	})
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.checkpointLSN = d.CheckpointLSN
+	s.mu.Unlock()
+	return nil
+}

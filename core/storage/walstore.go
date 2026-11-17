@@ -135,6 +135,10 @@ type WALStore struct {
 	// gates and mounted NVMe/TCP profiling pass.
 	multiBlockRecords bool
 
+	// v3 is non-nil for a format-v3 store (walstore_v3.go). Dark until
+	// activation: only createWALStoreV3ForTest/openWALStoreV3ForTest set it.
+	v3 *walStoreV3State
+
 	// Physical WAL sync attempts exclude the separate metadata/checkpoint syncs.
 	syncWALFile  func() error
 	walSyncCalls atomic.Uint64
@@ -263,6 +267,13 @@ func openInitialized(path string, f *os.File, sb *superblock) (*WALStore, error)
 }
 
 func openInitializedWithMetadata(path string, f *os.File, sb *superblock, metadata BlockMetadata) (*WALStore, error) {
+	return openInitializedInternal(path, f, sb, metadata, nil)
+}
+
+// openInitializedInternal is openInitializedWithMetadata with an optional
+// init hook that runs before the committer and flusher goroutines start
+// (the v3 store attaches its state there).
+func openInitializedInternal(path string, f *os.File, sb *superblock, metadata BlockMetadata, init func(*WALStore)) (*WALStore, error) {
 	dm := newDirtyMap(64) // 64 shards is plenty for Phase 07 demo workloads
 
 	s := &WALStore{
@@ -290,6 +301,9 @@ func openInitializedWithMetadata(path string, f *os.File, sb *superblock, metada
 		return f.Sync()
 	}
 	s.syncExtentFile = f.Sync
+	if init != nil {
+		init(s)
+	}
 	committer := NewGroupCommitter(GroupCommitterConfig{
 		SyncFunc: s.syncWALBatch,
 		MaxDelay: 1 * time.Millisecond,
@@ -407,6 +421,9 @@ func (s *WALStore) persistCheckpointAndRelease(highestLSN, entryPhys, entryLen u
 }
 
 func (s *WALStore) persistCheckpointReleasing(highestLSN, entryPhys, entryLen uint64, release bool) error {
+	if s.v3 != nil {
+		return s.persistCheckpointV3(highestLSN)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.stickyIOFault(); err != nil {
@@ -578,6 +595,9 @@ func (s *WALStore) Recover() (uint64, error) {
 	// are never reused across it), also on a failed or partial scan. Runs
 	// before s.mu is released, so no read sees recovered bytes first.
 	defer s.noteChunkRecovery()
+	if s.v3 != nil {
+		return s.recoverV3()
+	}
 	s.dm.clear()
 	res, err := recoverWAL(s.fd, s.sb, s.dm)
 	if err != nil {
@@ -695,12 +715,20 @@ func (s *WALStore) Write(lba uint32, data []byte) (uint64, error) {
 		Data:   data,
 	}
 	appendStart := time.Now()
-	walRelOff, err := s.wal.append(entry)
+	var walRelOff uint64
+	var err error
+	if s.v3 != nil {
+		walRelOff, err = s.appendWriteV3(lba, data, lsn)
+	} else {
+		walRelOff, err = s.wal.append(entry)
+	}
 	s.instr.appendLatency.Observe(time.Since(appendStart))
 	// A failed pwrite may still leave complete records or padding in the file.
 	s.walMutation.Add(1)
 	if err != nil {
-		s.noteAppendFailure(err)
+		if s.v3 == nil {
+			s.noteAppendFailure(err)
+		}
 		s.mu.Unlock()
 		return 0, fmt.Errorf("storage: WAL append: %w", err)
 	}
@@ -721,6 +749,9 @@ func (s *WALStore) Write(lba uint32, data []byte) (uint64, error) {
 }
 
 func (s *WALStore) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error) {
+	if s.v3 != nil {
+		return nil, errV3NotYet
+	}
 	s.captureMu.RLock()
 	defer s.captureMu.RUnlock()
 	s.lifecycleMu.RLock()
@@ -888,6 +919,9 @@ func (s *WALStore) Read(lba uint32) ([]byte, error) {
 	s.mu.RUnlock()
 
 	if walRelOff, dataOffset, _, _, ok := s.dm.get(uint64(lba)); ok {
+		if s.v3 != nil {
+			return s.readFromWALV3(walRelOff)
+		}
 		return s.readFromWAL(walRelOff, dataOffset)
 	}
 	return s.readFromExtent(lba)
@@ -1135,6 +1169,9 @@ func (s *WALStore) RecoveryRetentionLSNs() uint64 {
 // Used by the rebuild server to declare the replica's frontier
 // matches the primary's head once base blocks are installed.
 func (s *WALStore) AdvanceFrontier(lsn uint64) {
+	if s.v3 != nil {
+		return // v3 frontier jumps happen only inside MarkBaseComplete (rows 9 to 11)
+	}
 	s.bypassSyncDedup.Store(true)
 	s.lifecycleMu.RLock()
 	defer s.lifecycleMu.RUnlock()
@@ -1183,6 +1220,9 @@ func (s *WALStore) AdvanceWALTail(newTail uint64) {
 // Durability follows the same rule as Write: bytes become durable
 // only on the next successful Sync (the extent fsync covers them).
 func (s *WALStore) WriteExtentDirect(lba uint32, data []byte) error {
+	if s.v3 != nil {
+		return errV3NotYet // v3 BASE writes go through an install handle (rows 9 to 11)
+	}
 	s.bypassSyncDedup.Store(true)
 	s.captureMu.RLock()
 	defer s.captureMu.RUnlock()
@@ -1240,6 +1280,9 @@ func (s *WALStore) noteChunkMutation(lba uint64) {
 }
 
 func (s *WALStore) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
+	if s.v3 != nil {
+		return errV3NotYet // the install-lane apply is plan rows 9 to 11
+	}
 	s.bypassSyncDedup.Store(true)
 	s.captureMu.RLock()
 	defer s.captureMu.RUnlock()
@@ -1467,6 +1510,9 @@ func (s *WALStore) walSyncCovered() bool {
 // Requests queued during a sync can reuse it only if their mutations predate its
 // captured cut. Failure leaves the previous durable generation unchanged.
 func (s *WALStore) syncWALBatch() error {
+	if s.v3 != nil {
+		return s.syncWALBatchV3()
+	}
 	// A batch queued behind a failed fsync must not fsync again (or report
 	// a covered cut as durable): the failed fsync may have dropped pages.
 	if err := s.stickyIOFault(); err != nil {

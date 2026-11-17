@@ -256,6 +256,9 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 }
 
 func (f *flusher) readDirtyRecord(e snapshotEntry) (data []byte, entrySize uint64, err error) {
+	if f.store.v3 != nil {
+		return f.readDirtyRecordV3(e)
+	}
 	store := f.store
 	readFailed := false
 	defer func() {
