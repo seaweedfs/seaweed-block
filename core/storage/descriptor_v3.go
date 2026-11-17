@@ -177,6 +177,12 @@ func (p *descriptorPublisherV3) publishLocked(mutate func(next *descriptorV3) er
 }
 
 func (p *descriptorPublisherV3) publishLockedWithMapV3(mutate func(next *descriptorV3) error, prepared *preparedMapPublicationV3) (descriptorV3, error) {
+	return p.publishLockedCoreV3(mutate, prepared, false)
+}
+
+// publishLockedCoreV3 is the publication body; reset permits the nonce and
+// cursor change of the reset transaction (DESIGN 8.6) and nothing else.
+func (p *descriptorPublisherV3) publishLockedCoreV3(mutate func(next *descriptorV3) error, prepared *preparedMapPublicationV3, reset bool) (descriptorV3, error) {
 	if p.failed != nil {
 		return descriptorV3{}, p.failed
 	}
@@ -189,7 +195,7 @@ func (p *descriptorPublisherV3) publishLockedWithMapV3(mutate func(next *descrip
 			return descriptorV3{}, err
 		}
 	}
-	if err := mergeDescriptorV3(&p.cur, &next); err != nil {
+	if err := mergeDescriptorV3Mode(&p.cur, &next, reset); err != nil {
 		return descriptorV3{}, err
 	}
 	if err := p.validateMapPublicationV3(next, prepared); err != nil {
@@ -278,7 +284,9 @@ func checkCountersV3(d *descriptorV3) error {
 
 // mergeDescriptorV3 applies the monotonic merge and transition rules of
 // DESIGN 5 and 8.5 to next, a mutated copy of cur.
-func mergeDescriptorV3(cur, next *descriptorV3) error {
+func mergeDescriptorV3(cur, next *descriptorV3) error { return mergeDescriptorV3Mode(cur, next, false) }
+
+func mergeDescriptorV3Mode(cur, next *descriptorV3, reset bool) error {
 	if next.ImplKind != cur.ImplKind || next.ImplVersion != cur.ImplVersion || next.UUID != cur.UUID ||
 		next.CreatedAt != cur.CreatedAt || !sameGeometryV3(*cur, *next) {
 		return errDescriptorIdentityChange
@@ -288,10 +296,15 @@ func mergeDescriptorV3(cur, next *descriptorV3) error {
 	next.CheckpointLSN = max(cur.CheckpointLSN, next.CheckpointLSN)
 	// The nonce changes only through the reset transaction (DESIGN 8.6,
 	// plan row 8); within one nonce the retained bounds never move back.
-	if next.Nonce != cur.Nonce {
+	if reset {
+		// The reset publication (DESIGN 8.6): a new nonce and a fresh,
+		// empty cursor space; everything else follows the ordinary rules.
+		if next.Nonce == cur.Nonce || next.Nonce == ([16]byte{}) || next.RetainedTail != next.RetainedHead {
+			return fmt.Errorf("%w: a reset needs a new nonzero nonce and an empty cursor space", errDescriptorTransition)
+		}
+	} else if next.Nonce != cur.Nonce {
 		return fmt.Errorf("%w: nonce change outside a reset", errDescriptorTransition)
-	}
-	if next.RetainedTail < cur.RetainedTail {
+	} else if next.RetainedTail < cur.RetainedTail {
 		return fmt.Errorf("%w: retainedTail %d below %d", errDescriptorTransition, next.RetainedTail, cur.RetainedTail)
 	}
 	// The map root changes only to a strictly higher generation; the full

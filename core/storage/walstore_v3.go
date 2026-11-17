@@ -264,11 +264,17 @@ func openWALStoreV3MapInternalForTest(path string, requireMap bool) (*WALStore, 
 			sticky:   s.stickyIOFault,
 			latch:    s.latchV3,
 		})
-		w, err := newWALWriterV3(f, v.pub)
-		if err != nil {
-			return err
+		// A reset stopped between its two publications (DESIGN 8.6) binds no
+		// writer across the two nonces: Recover's head publication completes
+		// the new incarnation in the other slot and creates the writer then;
+		// until then every append is refused.
+		if !v.pub.halfResetV3() {
+			w, err := newWALWriterV3(f, v.pub)
+			if err != nil {
+				return err
+			}
+			v.w = w
 		}
-		v.w = w
 		v.wack.Store(d.W)
 		if ownedMap != nil {
 			if err := v.pub.bindMapV3(mapCurrent, newMapProofEpochV3()); err != nil {
@@ -351,6 +357,15 @@ func (s *WALStore) recoverV3() (uint64, error) {
 		s.dm.clear()
 		return 0, err
 	}
+	if v.w == nil {
+		// A half-published reset, resolved by the head publication above.
+		w, err := newWALWriterV3(s.fd, v.pub)
+		if err != nil {
+			s.dm.clear()
+			return 0, err
+		}
+		v.w = w
+	}
 	restore := scan
 	restore.End = o.E
 	if err := v.w.restoreScanV3(restore); err != nil {
@@ -404,6 +419,9 @@ func (s *WALStore) fenceV3(E, floor, walSize uint64, sameNonce bool, walOffset u
 // the acknowledged W at append time; a pwrite failure latches the store.
 func (s *WALStore) appendWriteV3(lba uint32, data []byte, lsn uint64) (uint64, error) {
 	e := walEntryV3{LSN: lsn, Type: walEntryWrite, LBA: uint64(lba), Length: uint32(len(data)), Data: data}
+	if s.v3.w == nil {
+		return 0, errWALBindingV3 // a half-published reset before its Recover
+	}
 	phys, err := s.v3.w.append(e, s.v3.wack.Load())
 	if err != nil {
 		if errors.Is(err, errWALPwrite) {
