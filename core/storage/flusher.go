@@ -170,6 +170,9 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 	entries := store.dm.snapshot()
 	store.mu.RUnlock()
 	if len(entries) == 0 {
+		if store.v3 != nil {
+			return store.refreshW() // the mode-C idle refresh (DESIGN 6.2)
+		}
 		return nil
 	}
 	if f.afterSnapshotForTest != nil {
@@ -252,6 +255,9 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 		store.dm.compareAndDelete(e.LBA, e.LSN)
 	}
 	f.flushes.Add(1)
+	if store.v3 != nil {
+		return store.refreshW() // the mode-C idle refresh (DESIGN 6.2)
+	}
 	return nil
 }
 

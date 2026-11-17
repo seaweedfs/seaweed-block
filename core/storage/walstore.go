@@ -1000,6 +1000,9 @@ func (s *WALStore) readFromExtent(lba uint32) ([]byte, error) {
 		// written: re-resolve through the normal path (dirty map/WAL first)
 		// before the extent. No lock is held here.
 		if walRelOff, dataOffset, _, _, ok := s.dm.get(uint64(lba)); ok {
+			if s.v3 != nil {
+				return s.readFromWALV3(walRelOff)
+			}
 			return s.readFromWAL(walRelOff, dataOffset)
 		}
 	}
