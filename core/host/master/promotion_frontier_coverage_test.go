@@ -2,6 +2,7 @@ package master
 
 import (
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -160,6 +161,81 @@ func TestFreshPromotionPeers_UsesObservationFreshness(t *testing.T) {
 	got := h.freshPromotionPeers("vol-rf3", []authority.ReplicaCandidate{{ReplicaID: "r2"}, {ReplicaID: "r3"}})
 	if !reflect.DeepEqual(got, map[string]bool{"r2": true}) {
 		t.Fatalf("fresh peers=%v want only r2 (r3 never observed)", got)
+	}
+}
+
+type swapPromotionProbe struct {
+	mu     sync.Mutex
+	result PromotionProbeResult
+}
+
+func (p *swapPromotionProbe) set(r PromotionProbeResult) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.result = r
+}
+
+func (p *swapPromotionProbe) ProbePromotionCandidates(string, authority.AuthorityBasis, []authority.ReplicaCandidate) (PromotionProbeResult, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.result, nil
+}
+
+// Survivors count only from this tick's probe: r3 was probed ready on the
+// previous tick, but this tick its probe is missing, so with an unknown
+// frontier r2 alone cannot be promoted.
+func TestProductLoop_UnknownFrontierSurvivorReadyLastTickMissingNowRefused(t *testing.T) {
+	h := newTestMasterWithControllerConfig(t, t.TempDir(), authority.TopologyControllerConfig{ExpectedSlotsPerVolume: 3})
+	defer closeTestMaster(t, h)
+	probe := &swapPromotionProbe{}
+	h.SetPromotionEvidenceProvider(probe)
+	seedRF3Placement(t, h)
+	ingestRF3Observation(t, h, true, true, true)
+	if _, err := h.RunLifecycleProductTick(); err != nil {
+		t.Fatal(err)
+	}
+	if initial := waitAuthorityLine(t, h.Publisher(), "vol-rf3"); initial.ReplicaID != "r1" {
+		t.Fatalf("initial line=%+v want r1", initial)
+	}
+
+	// Previous tick: both survivors probed ready, current primary ready.
+	probe.set(PromotionProbeResult{
+		AckProfile:   "sync-quorum",
+		CurrentKnown: true,
+		Current:      PromotionCandidateEvidence{ReplicaID: "r1", Ready: true, DurableLSN: 90},
+		Candidates: []PromotionCandidateEvidence{
+			{ReplicaID: "r2", Ready: true, DurableLSN: 90},
+			{ReplicaID: "r3", Ready: true, DurableLSN: 90},
+		},
+	})
+	ingestRF3Observation(t, h, true, true, true)
+	prev, err := h.RunLifecycleProductTick()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prev.PromotionProbes != 1 || prev.PromotionBlocked != 0 {
+		t.Fatalf("previous tick=%+v want one probe that admits both survivors", prev)
+	}
+
+	// This tick: the primary is lost and r3's probe is missing.
+	probe.set(PromotionProbeResult{
+		AckProfile: "sync-quorum",
+		Candidates: []PromotionCandidateEvidence{
+			{ReplicaID: "r2", Ready: true, DurableLSN: 90},
+			{ReplicaID: "r3", ProbeAddr: "missing"},
+		},
+	})
+	ingestRF3Observation(t, h, false, true, true)
+	now, err := h.RunLifecycleProductTick()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if now.PromotionProbes != 1 || now.PromotionBlocked != 1 {
+		t.Fatalf("this tick=%+v want the promotion blocked: r3 is not seen this tick", now)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if line, _ := h.Publisher().VolumeAuthorityLine("vol-rf3"); line.ReplicaID != "r1" {
+		t.Fatalf("authority moved to %+v on a partial view", line)
 	}
 }
 

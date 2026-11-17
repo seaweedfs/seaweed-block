@@ -627,6 +627,10 @@ func promotionAllowedReplicas(result PromotionProbeResult, ok bool, peerCount in
 	}
 	frontierKnown := result.SyncAckKnown || result.SyncAckLSN > 0
 	if isQuorumAckProfile(result.AckProfile) && !frontierKnown {
+		// Survivors are counted only from result, the probe run for this
+		// tick, and freshPeers, read for this tick. Nothing from an
+		// earlier tick is kept: a survivor seen ready last tick and not
+		// seen now does not count.
 		seen := map[string]bool{}
 		for _, candidate := range result.Candidates {
 			if candidate.ReplicaID != "" && candidate.Ready && freshPeers[candidate.ReplicaID] {
