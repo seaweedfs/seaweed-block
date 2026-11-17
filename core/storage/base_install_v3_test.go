@@ -3,6 +3,8 @@ package storage
 import (
 	"bytes"
 	"errors"
+	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -240,16 +242,22 @@ func TestBaseInstallV3ApplyInstallEntryOrderAndGap(t *testing.T) {
 	}
 }
 
-// holdOnce returns a hook that parks the first call until release is
-// closed, and reports through parked when it has parked.
-func holdOnce() (hook func(), parked, release chan struct{}) {
-	parked, release = make(chan struct{}), make(chan struct{})
+// holdOnce returns a hook that parks the first call until release runs,
+// and reports through parked when it has parked. The test's cleanup always
+// releases, so a failing test never leaves a parked goroutine behind
+// (codex01 row 9a P2).
+func holdOnce(t *testing.T) (hook func(), parked chan struct{}, release func()) {
+	parked = make(chan struct{})
+	gate := make(chan struct{})
+	var once sync.Once
+	release = func() { once.Do(func() { close(gate) }) }
+	t.Cleanup(release)
 	var armed atomic.Bool
 	armed.Store(true)
 	return func() {
 		if armed.CompareAndSwap(true, false) {
 			close(parked)
-			<-release
+			<-gate
 		}
 	}, parked, release
 }
@@ -263,7 +271,7 @@ func TestBaseInstallV3HeldOldWriteDrainsBeforeANewBegin(t *testing.T) {
 	s, _ := newStoreV3(t, WModeStrict)
 	t.Cleanup(func() { crashRecoveryHardeningStore(t, s) })
 	hA := beginV3(t, s, 0, idA)
-	hook, parked, release := holdOnce()
+	hook, parked, release := holdOnce(t)
 	s.v3.testInstallAdmitted = hook
 	aDone := make(chan error, 1)
 	go func() { aDone <- hA.WriteBase(7, blk(0xAA)) }()
@@ -284,7 +292,7 @@ func TestBaseInstallV3HeldOldWriteDrainsBeforeANewBegin(t *testing.T) {
 		bDone <- err
 	case <-time.After(300 * time.Millisecond):
 	}
-	close(release)
+	release()
 	if err := <-aDone; err != nil {
 		t.Fatalf("A's admitted write: %v", err)
 	}
@@ -318,7 +326,7 @@ func TestBaseInstallV3ParkedOldFrameIsRefusedAfterASupersession(t *testing.T) {
 			s, _ := newStoreV3(t, WModeStrict)
 			t.Cleanup(func() { crashRecoveryHardeningStore(t, s) })
 			hA := beginV3(t, s, 0, idA)
-			hook, parked, release := holdOnce()
+			hook, parked, release := holdOnce(t)
 			s.v3.testInstallBeforeAdmit = hook
 			aDone := make(chan error, 1)
 			go func() {
@@ -333,7 +341,7 @@ func TestBaseInstallV3ParkedOldFrameIsRefusedAfterASupersession(t *testing.T) {
 			if err := hB.WriteBase(7, blk(0xBB)); err != nil {
 				t.Fatal(err)
 			}
-			close(release)
+			release()
 			if err := <-aDone; !errors.Is(err, ErrInstallSuperseded) {
 				t.Fatalf("parked A %s: err = %v, want ErrInstallSuperseded", op, err)
 			}
@@ -344,5 +352,103 @@ func TestBaseInstallV3ParkedOldFrameIsRefusedAfterASupersession(t *testing.T) {
 				t.Fatalf("state %d id %x, want installing under B", d.BaseState, d.BaseInstallID[0])
 			}
 		})
+	}
+}
+
+// codex01 row 9a P1-1: W 1 with unacknowledged LSNs 2 and 3 appended. A
+// begin at BaseLSN 1 would put 2 and 3 behind BaseCursor while the
+// allocator continues at 4: after complete, an acknowledged write 4 and a
+// reopen from F = 1 meet the hole (strict: R 1 < W 4; lagged: 4 dropped).
+// The begin is refused, writing nothing; a begin covering the appended
+// LSNs installs, and the acknowledged write after it survives a crash.
+// Mutant: bounding BaseLSN by W and the checkpoint only fails here.
+func TestBaseInstallV3BeginRefusesBelowTheHighestAppendedLSN(t *testing.T) {
+	s, path := newStoreV3(t, WModeStrict)
+	writeSynced(t, s, 1, 1)
+	for lba := uint32(2); lba <= 3; lba++ {
+		if _, err := s.Write(lba, blk(byte(lba))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if w, a := s.v3.wack.Load(), s.v3.appended.Load(); w != 1 || a != 3 {
+		t.Fatalf("setup: acknowledged %d appended %d, want 1 and 3", w, a)
+	}
+	writes := countSlotWritesV3(s)
+	if _, err := s.beginBaseInstallV3(1, idA); !errors.Is(err, ErrInstallBaseUncovered) {
+		t.Fatalf("begin at BaseLSN 1 below appended 3: err = %v, want ErrInstallBaseUncovered", err)
+	}
+	if writes.Load() != 0 {
+		t.Fatal("a refused begin wrote a descriptor slot")
+	}
+	s.v3.testBeforeSlotWrite = nil
+	h := beginV3(t, s, 3, idA)
+	for lba := uint32(1); lba <= 3; lba++ {
+		if err := h.WriteBase(lba, blk(0x10+byte(lba))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.markBaseCompleteV3(idA); err != nil {
+		t.Fatal(err)
+	}
+	lsn, err := s.Write(4, blk(4))
+	if err != nil || lsn != 4 {
+		t.Fatalf("write after complete: LSN %d err %v, want 4", lsn, err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	crashRecoveryHardeningStore(t, s)
+	r := mustReopenV3(t, path)
+	t.Cleanup(func() { crashRecoveryHardeningStore(t, r) })
+	for lba, want := range map[uint32]byte{1: 0x11, 2: 0x12, 3: 0x13, 4: 4} {
+		if got := readV3(t, r, lba); !bytes.Equal(got, blk(want)) {
+			t.Fatalf("after reopen LBA %d = %x..., want %x", lba, got[0], want)
+		}
+	}
+}
+
+// codex01 row 9a P1-2: a BASE write makes its chunk's coverage UNKNOWN only
+// in memory. Complete settles the map like a checkpoint: the installed
+// publication carries a fresh root with that UNKNOWN, so a crash and a
+// mapped reopen keep it. Setup: chunk 2 is clean in the durable root (as a
+// capture would leave it; set white-box, then checkpointed). Mutant: a
+// complete that publishes installed without the map candidate reopens with
+// chunk 2 clean and fails here.
+func TestBaseInstallV3CompletePersistsTheMapUnknownOfBaseWrites(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mapped.v3")
+	s, err := createMappedWALStoreV3ForTest(path, 64, v3TestBlock, v3TestWAL, WModeStrict, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.DisableAutoFlushForRecoveryTest()
+	writeSynced(t, s, 1, 1)
+	s.mu.Lock()
+	s.v3.mapEntries[2] = chunkLSNEntryV3{}
+	s.mu.Unlock()
+	if err := s.flusher.flushOnceInternal(false); err != nil {
+		t.Fatal(err)
+	}
+	if e := s.v3.pub.mapCurrent.entries[2]; e.Unknown {
+		t.Fatal("setup: chunk 2 is not clean in the durable root")
+	}
+	h := beginV3(t, s, 1, idA)
+	if err := h.WriteBase(9, blk(9)); err != nil { // LBA 9 is in chunk 2
+		t.Fatal(err)
+	}
+	if err := s.markBaseCompleteV3(idA); err != nil {
+		t.Fatal(err)
+	}
+	crashRecoveryHardeningStore(t, s)
+	r, err := openWALStoreV3ForTest(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.DisableAutoFlushForRecoveryTest()
+	t.Cleanup(func() { crashRecoveryHardeningStore(t, r) })
+	if st := r.v3.pub.current().BaseState; st != BaseInstalled {
+		t.Fatalf("reopen state %d, want installed", st)
+	}
+	if e := r.v3.pub.mapCurrent.entries[2]; !e.Unknown {
+		t.Fatal("chunk 2 reopened clean: the BASE write's UNKNOWN was lost at complete")
 	}
 }

@@ -91,13 +91,20 @@ func (s *WALStore) beginBaseInstallV3(baseLSN uint64, id [16]byte) (*installHand
 		}
 	}
 	// W includes every acknowledged LSN, published or not yet (mode C).
+	// BaseLSN must also cover every appended LSN: an unacknowledged record
+	// above BaseLSN would lie behind BaseCursor, so recovery from
+	// max(CheckpointLSN, BaseLSN) would meet a hole where the allocator
+	// continued (codex01 row 9a P1-1). Such a begin is refused, writing
+	// nothing; the records are never rewound or dropped to make room.
 	w := max(d.W, v.wack.Load())
-	if baseLSN < w || baseLSN < d.CheckpointLSN {
+	appended := v.appended.Load()
+	if baseLSN < w || baseLSN < d.CheckpointLSN || baseLSN < appended {
 		refusal := ErrInstallBaseUncovered
 		if d.BaseState == BaseInstalling {
 			refusal = ErrInstallSupersedeUncovered
 		}
-		return nil, fmt.Errorf("%w: BaseLSN %d, W %d, CheckpointLSN %d", refusal, baseLSN, w, d.CheckpointLSN)
+		return nil, fmt.Errorf("%w: BaseLSN %d, W %d, CheckpointLSN %d, appended %d",
+			refusal, baseLSN, w, d.CheckpointLSN, appended)
 	}
 	P := v.w.logicalHeadV3() // 8.1 step 2: the serialized writer's head
 	// Step 3: installing into the fallback slot.
@@ -113,7 +120,7 @@ func (s *WALStore) beginBaseInstallV3(baseLSN uint64, id [16]byte) (*installHand
 		return nil, err
 	}
 	v.liveInstallID = id
-	v.preBaseHighest = v.appended.Load()
+	v.preBaseHighest = appended
 	if err := v.pub.invalidateMapProofV3(); err != nil { // an install transition (9.1)
 		return nil, err
 	}
@@ -242,11 +249,17 @@ func (h *installHandleV3) ApplyInstallEntry(lba uint32, data []byte, lsn uint64)
 	return nil
 }
 
-// markBaseCompleteV3 is DESIGN 8.2. Under installMu exclusive it validates
-// the ID, makes the BASE extent bytes and the install-lane suffix durable,
-// publishes installed with the same ID (retainedTail = max(retainedTail,
-// P), 8.4) and then moves the in-memory frontier to BaseLSN. On any error
-// the volume stays installing and the error propagates.
+// markBaseCompleteV3 is DESIGN 8.2. Under installMu exclusive (no handle
+// mutation is admitted) it validates the ID, then settles step 2 exactly as
+// a checkpoint does: one fsync for the BASE extent bytes and the
+// install-lane suffix (they share the file), the optional metadata and
+// chunk barriers, and a fresh owned-map candidate that carries the UNKNOWN
+// coverage the BASE writes set (codex01 row 9a P1-2). It then publishes
+// installed with the same ID and that candidate in one publication
+// (retainedTail = max(retainedTail, P), 8.4), stops serving the superseded
+// pre-BASE records and moves the frontier to BaseLSN. A guest write that
+// changes the map meanwhile makes the candidate stale and the completion
+// fails. On any error the volume stays installing and the error propagates.
 func (s *WALStore) markBaseCompleteV3(id [16]byte) error {
 	v := s.v3
 	if v == nil {
@@ -258,36 +271,80 @@ func (s *WALStore) markBaseCompleteV3(id [16]byte) error {
 	defer s.captureMu.Unlock()
 	s.lifecycleMu.RLock()
 	defer s.lifecycleMu.RUnlock()
-	v.syncMu.Lock()
-	defer v.syncMu.Unlock()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
+	s.mu.RLock()
+	closed := s.closed
+	gen := v.recoverGen.Load()
+	s.mu.RUnlock()
+	if closed {
 		return errors.New("storage: MarkBaseComplete after Close")
 	}
 	d := v.pub.current()
 	if d.BaseState != BaseInstalling || d.BaseInstallID != id {
 		return ErrInstallSuperseded
 	}
-	// Step 2: the BASE extent bytes and the install-lane WAL suffix share the
-	// file; one fsync through the leaf makes both durable.
+	// Step 2.
 	if err := s.syncFile(nil, s.fd.Sync); err != nil {
 		return err
 	}
-	// Step 3: installed, same ID.
-	if _, err := v.pub.publish(nil, nil, func(n *descriptorV3) error {
+	cp := d.CheckpointLSN // the checkpoint does not move here
+	if s.metadata != nil {
+		if err := s.metadata.BeforeCheckpointAdvance(cp); err != nil {
+			return err
+		}
+	}
+	if h := s.chunk.Load(); h != nil {
+		if err := h.sink.BeforeCheckpointAdvance(cp); err != nil {
+			return err
+		}
+	}
+	var prepared *preparedMapPublicationV3
+	var mutateMap func(*descriptorV3) error
+	if v.ownedMap != nil {
+		var err error
+		if prepared, err = s.prepareOwnedMapCheckpointV3(cp); err != nil {
+			return err
+		}
+	} else if v.mapCandidate != nil {
+		var err error
+		if mutateMap, err = v.mapCandidate(cp); err != nil {
+			return err
+		}
+	}
+	// Step 3: installed, same ID, with the candidate, under the leader role.
+	v.syncMu.Lock()
+	defer v.syncMu.Unlock()
+	if !v.flushLifetimeValidV3(gen) {
+		return ErrMapCoverageStale // a recovery or reset ran meanwhile
+	}
+	installed := func(n *descriptorV3) error {
+		if n.BaseState != BaseInstalling || n.BaseInstallID != id {
+			return ErrInstallSuperseded
+		}
 		n.BaseState = BaseInstalled
 		n.RetainedTail = max(n.RetainedTail, d.BaseCursor)
+		if mutateMap != nil {
+			return mutateMap(n)
+		}
 		return nil
-	}); err != nil {
+	}
+	var err error
+	if prepared != nil {
+		_, err = v.pub.publishMapV3(&s.mu, nil, prepared, installed)
+	} else {
+		_, err = v.pub.publish(&s.mu, nil, installed)
+	}
+	if err != nil {
 		return err
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := v.pub.invalidateMapProofV3(); err != nil {
 		return err
 	}
-	// Records before P (LSN <= the highest appended at begin) are behind the
-	// installed BaseCursor and superseded by the BASE image: recovery never
-	// scans them, so the open store stops serving or flushing them too.
+	// Records before P (LSN <= the highest appended at begin, which the
+	// begin bounded by BaseLSN) are behind the installed BaseCursor and
+	// superseded by the BASE image: recovery never scans them, so the open
+	// store stops serving or flushing them too.
 	for _, e := range s.dm.snapshot() {
 		if e.LSN <= v.preBaseHighest {
 			s.dm.compareAndDelete(e.LBA, e.LSN)
