@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"io"
 	"path/filepath"
 	"testing"
 )
@@ -26,7 +27,11 @@ func TestMultiBlockRecordsRequireDistinctOnDiskImplVersion(t *testing.T) {
 	if header[16] != walEntryWriteBatch {
 		t.Fatalf("setup record type=%d, want batch", header[16])
 	}
-	if s.sb.ImplVersion == 1 {
+	disk, err := readSuperblock(io.NewSectionReader(s.fd, 0, superblockSize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if disk.ImplVersion == 1 {
 		t.Fatal("synced type0x04 multi-block record still advertises legacy impl version1; a pre-multiblock opener cannot reject the incompatible file by version")
 	}
 }
