@@ -577,6 +577,13 @@ func (s *WALStore) Recover() (uint64, error) {
 	defer s.captureMu.RUnlock()
 	s.lifecycleMu.RLock()
 	defer s.lifecycleMu.RUnlock()
+	if s.v3 != nil {
+		// A v3 recovery holds the leader role for its whole run, so no W
+		// publication or acknowledgement straddles it (walstore_v3.go
+		// recoverGen). Order: lifecycleMu -> syncMu -> s.mu.
+		s.v3.syncMu.Lock()
+		defer s.v3.syncMu.Unlock()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -1043,6 +1050,10 @@ func (s *WALStore) Sync() (uint64, error) {
 	}
 	targetHead := s.walHead
 	targetDirectFrontier := s.pendingDirectFrontierLSN
+	var targetGen uint64
+	if s.v3 != nil {
+		targetGen = s.v3.recoverGen.Load() // captured with targetHead (Recover holds s.mu)
+	}
 	s.mu.RUnlock()
 
 	if s.walSyncCovered() {
@@ -1057,6 +1068,18 @@ func (s *WALStore) Sync() (uint64, error) {
 	}
 	s.syncs.Add(1)
 
+	if v := s.v3; v != nil {
+		if h := v.testSyncBeforeCompletion; h != nil {
+			h()
+		}
+		// The completion is validated against the recovery generation under
+		// the leader role: a recovery since the capture refuses the ack.
+		v.syncMu.Lock()
+		defer v.syncMu.Unlock()
+		if v.recoverGen.Load() != targetGen {
+			return 0, errV3RecoveredMeanwhile
+		}
+	}
 	s.mu.Lock()
 	// A fault latched while this Sync waited (another caller's fsync or
 	// append, or a flusher fsync) refuses it: nothing is acknowledged.
