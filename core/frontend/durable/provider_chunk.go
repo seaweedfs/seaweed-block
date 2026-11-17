@@ -299,6 +299,10 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 			return nil
 		},
 	}
+	if p.testWALStoreFactory != nil {
+		// Dark mapped caller controls must not rely on the legacy C11 sidecar.
+		cfg.Bitmap = nil
+	}
 	if !h.fresh {
 		// An existing local volume is this holder's image only while HEAD is
 		// still this holder's publication. Another holder's HEAD means the

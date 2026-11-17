@@ -180,6 +180,10 @@ type DurableProvider struct {
 	// volume's handle and layer are resolved.
 	testAfterChunkResolve func()
 
+	// testWALStoreFactory selects a dark store only in provider caller controls.
+	// No production option, flag or environment variable installs it.
+	testWALStoreFactory func(path string, create bool) (*storage.WALStore, error)
+
 	// walstore-chunk: closeCtx ends with Close and cancels in-flight
 	// remote attachment; inflight counts RecoverVolume calls admitted
 	// before Close, which Close waits for before closing any store.
@@ -668,7 +672,13 @@ func (p *DurableProvider) openExisting(volumeID, path string, impl ImplName) (*v
 	var s storage.LogicalStorage
 	switch impl {
 	case ImplWALStore, ImplWALStoreChunk:
-		ws, err := storage.OpenWALStore(path)
+		var ws *storage.WALStore
+		var err error
+		if p.testWALStoreFactory != nil {
+			ws, err = p.testWALStoreFactory(path, false)
+		} else {
+			ws, err = storage.OpenWALStore(path)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("durable: OpenWALStore %s: %w", path, err)
 		}
@@ -714,7 +724,13 @@ func (p *DurableProvider) createFresh(volumeID, path string, impl ImplName) (*vo
 	var s storage.LogicalStorage
 	switch impl {
 	case ImplWALStore, ImplWALStoreChunk:
-		ws, err := storage.CreateWALStore(path, p.cfg.NumBlocks, p.cfg.BlockSize)
+		var ws *storage.WALStore
+		var err error
+		if p.testWALStoreFactory != nil {
+			ws, err = p.testWALStoreFactory(path, true)
+		} else {
+			ws, err = storage.CreateWALStore(path, p.cfg.NumBlocks, p.cfg.BlockSize)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("durable: CreateWALStore %s: %w", path, err)
 		}
