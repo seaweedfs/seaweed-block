@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"sort"
 	"sync"
@@ -29,7 +30,6 @@ func (p *descriptorPublisherV3) walSnapshotV3() (descriptorV3, uint64, bool) {
 type walWriterV3 struct {
 	mu      sync.Mutex
 	pub     *descriptorPublisherV3
-	fd      *os.File
 	nonce   [16]byte
 	head    uint64
 	failed  error
@@ -41,10 +41,13 @@ func newWALWriterV3(fd *os.File, pub *descriptorPublisherV3) (*walWriterV3, erro
 	if err := d.validate(pub.accept); err != nil {
 		return nil, err
 	}
+	if d.WALSize > uint64(math.MaxInt64)-d.WALOffset {
+		return nil, ErrCounterExhausted
+	}
 	if !ok || d.MigrationPhase != MigrationNormal {
 		return nil, errWALBindingV3
 	}
-	return &walWriterV3{pub: pub, fd: fd, nonce: d.Nonce, head: d.RetainedHead, writeAt: fd.WriteAt}, nil
+	return &walWriterV3{pub: pub, nonce: d.Nonce, head: d.RetainedHead, writeAt: fd.WriteAt}, nil
 }
 
 func (w *walWriterV3) append(e walEntryV3, durableLSN uint64) (uint64, error) {
@@ -161,10 +164,17 @@ type walScanResultV3 struct {
 	StopCause                           error
 }
 
-func scanWALV3(fd io.ReaderAt, d descriptorV3) (walScanResultV3, error) {
+func scanWALV3(fd *os.File, d descriptorV3) (walScanResultV3, error) {
 	r := walScanResultV3{Nonce: d.Nonce}
 	if err := d.validate(nil); err != nil {
 		return r, err
+	}
+	info, err := fd.Stat()
+	if err != nil {
+		return r, err
+	}
+	if info.Size() < 0 || d.WALSize > uint64(info.Size()) || d.WALOffset > uint64(info.Size())-d.WALSize {
+		return r, io.ErrUnexpectedEOF
 	}
 	if d.MigrationPhase != MigrationNormal {
 		return r, ErrMigrationIncomplete
@@ -219,7 +229,7 @@ func scanWALV3(fd io.ReaderAt, d descriptorV3) (walScanResultV3, error) {
 			break
 		}
 		size := uint64(walEntryHeaderSizeV3) + n
-		if size > remaining || size > limit-cursor {
+		if (e.Type == walEntryPadding && size != remaining) || size > remaining || size > limit-cursor {
 			r.StopCause = errEntryTruncated
 			break
 		}

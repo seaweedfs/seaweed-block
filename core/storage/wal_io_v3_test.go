@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 )
 
 // A real file with row-1 slots and row-3 publisher; no v2 constructor or
@@ -244,5 +245,74 @@ func TestWALIOV3_FloorAndPwriteFailureRefuse(t *testing.T) {
 	}
 	if _, err := w.append(walEntryV3{LSN: 1, Type: walEntryBarrier}, 0); !errors.Is(err, errWALPwrite) || calls != 1 {
 		t.Fatal("failed append retried physical I/O")
+	}
+}
+
+func TestWALIOV3_EmbeddedRecordInPayloadIsNotScanned(t *testing.T) {
+	f, p, w := newWALIOTestV3(t, 0, 0)
+	d := p.current()
+	inner, err := encodeWALEntryV3(walEntryV3{LSN: 99, Type: walEntryBarrier, DurableLSN: 88, LogicalStart: 100, Nonce: d.Nonce}, d.BlockSize, d.VolumeSize/uint64(d.BlockSize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := make([]byte, d.BlockSize)
+	copy(data[100:], inner)
+	if _, err := w.append(walEntryV3{LSN: 1, Type: walEntryWrite, LBA: 4, Length: d.BlockSize, Data: data}, 0); err != nil {
+		t.Fatal(err)
+	}
+	r, err := scanWALV3(f, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Records) != 1 || r.Frontier != 1 || r.HighestLSN != 1 || r.MaxDurableLSN != 0 || !bytes.Equal(r.Records[0].Entry.Data, data) {
+		t.Fatalf("embedded payload interpreted as WAL: %+v", r)
+	}
+}
+
+func TestWALIOV3_ConcurrentAppendsHaveUniqueCursors(t *testing.T) {
+	f, p, w := newWALIOTestV3(t, 0, 0)
+	d := p.current()
+	done := make(chan error, 40)
+	for n := uint64(1); n <= 40; n++ {
+		go func(lsn uint64) { _, err := w.append(walEntryV3{LSN: lsn, Type: walEntryBarrier}, 0); done <- err }(n)
+	}
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	for n := 0; n < 40; n++ {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-deadline.C:
+			t.Fatal("bounded append completion timed out")
+		}
+	}
+	r, err := scanWALV3(f, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Records) != 40 || r.Frontier != 40 || r.End != 40*70 {
+		t.Fatalf("concurrent scan=%+v", r)
+	}
+}
+
+func TestWALIOV3_CounterRefusalBeforePwrite(t *testing.T) {
+	_, _, w := newWALIOTestV3(t, counterMaxV3-30, counterMaxV3-30)
+	calls := 0
+	w.writeAt = func(b []byte, off int64) (int, error) { calls++; return len(b), nil }
+	if _, err := w.append(walEntryV3{LSN: 1, Type: walEntryBarrier}, 0); !errors.Is(err, ErrCounterExhausted) || calls != 0 {
+		t.Fatalf("counter error=%v writes=%d", err, calls)
+	}
+}
+
+func TestWALIOV3_ScanRequiresActualSourceBounds(t *testing.T) {
+	f, p, _ := newWALIOTestV3(t, 0, 0)
+	d := p.current()
+	if err := f.Truncate(int64(d.WALOffset + walEntryPrefixSizeV3)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := scanWALV3(f, d); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("truncated source bounds error=%v", err)
 	}
 }
