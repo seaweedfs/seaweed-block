@@ -2,7 +2,6 @@ package storage
 
 import (
 	"crypto/rand"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -73,6 +72,9 @@ type walStoreV3State struct {
 	testRecoverHold          func()
 	testBatchBeforeAck       func()
 	testSyncBeforeCompletion func()
+	// testReadResolved runs in a v3 read after the dirty map resolved the
+	// LBA's WAL position and before the record is read.
+	testReadResolved func()
 }
 
 // errV3RecoveredMeanwhile: a recovery ran between an outer Sync's capture
@@ -536,21 +538,56 @@ func (s *WALStore) SetWMode(m WMode) error {
 	return err
 }
 
-// readFromWALV3 reads one block of a v3 write record at a WAL offset.
-func (s *WALStore) readFromWALV3(walRelOff uint64) ([]byte, error) {
-	absOff := int64(s.sb.WALOffset + walRelOff)
-	header := make([]byte, walEntryPrefixSizeV3)
-	if _, err := s.fd.ReadAt(header, absOff); err != nil {
-		return nil, fmt.Errorf("storage: v3 WAL read header: %w", err)
+// readDirtyV3 serves a v3 read from the dirty map, if the LBA has an entry
+// (handled false: read the extent). A reader holds no lock across its WAL
+// read, so the position it resolved may be reused before the pread: after a
+// reset (cursor 0 again, codex01 row 8 P1) or a same-open recovery. The
+// read therefore validates the WHOLE record it read, payload included
+// (CRC, footer, write type, LBA and LSN against the resolving entry), and
+// re-resolves on a mismatch. An LSN is never at two live positions with
+// the same LBA, so a matching record is the resolved write. If the entry
+// is unchanged and the record still does not match, the WAL is damaged.
+// No lock is taken: lock graph unchanged.
+func (s *WALStore) readDirtyV3(lba uint32) (data []byte, handled bool, err error) {
+	const attempts = 8
+	for i := 0; i < attempts; i++ {
+		off, _, lsn, _, ok := s.dm.get(uint64(lba))
+		if !ok {
+			return nil, false, nil
+		}
+		if h := s.v3.testReadResolved; h != nil {
+			h()
+		}
+		data, rerr := s.readRecordV3(lba, off, lsn)
+		if rerr == nil {
+			return data, true, nil
+		}
+		if off2, _, lsn2, _, ok2 := s.dm.get(uint64(lba)); ok2 && off2 == off && lsn2 == lsn {
+			return nil, true, NewWALIntegrityFailure(rerr, "v3 WAL read of a live dirty entry")
+		}
 	}
-	if header[16] != walEntryWrite || binary.LittleEndian.Uint32(header[26:30]) != s.sb.BlockSize {
-		return nil, fmt.Errorf("storage: v3 WAL read: unexpected record type %#x", header[16])
+	return nil, true, fmt.Errorf("storage: v3 WAL read of LBA %d did not settle in %d attempts", lba, attempts)
+}
+
+// readRecordV3 reads and validates the whole v3 write record at walRelOff.
+func (s *WALStore) readRecordV3(lba uint32, walRelOff, lsn uint64) ([]byte, error) {
+	size := uint64(walEntryHeaderSizeV3) + uint64(s.sb.BlockSize)
+	if walRelOff+size > s.sb.WALSize {
+		return nil, fmt.Errorf("storage: v3 WAL read: record at %d crosses the ring end", walRelOff)
 	}
-	data := make([]byte, s.sb.BlockSize)
-	if _, err := s.fd.ReadAt(data, absOff+int64(walEntryPrefixSizeV3)); err != nil {
-		return nil, fmt.Errorf("storage: v3 WAL read data: %w", err)
+	full := make([]byte, size)
+	if _, err := s.fd.ReadAt(full, int64(s.sb.WALOffset+walRelOff)); err != nil {
+		return nil, fmt.Errorf("storage: v3 WAL read: %w", err)
 	}
-	return data, nil
+	e, err := decodeWALEntryV3(full, s.sb.BlockSize, s.sb.VolumeSize/uint64(s.sb.BlockSize))
+	if err != nil {
+		return nil, err
+	}
+	if e.Type != walEntryWrite || e.LBA != uint64(lba) || e.LSN != lsn || uint32(len(e.Data)) != s.sb.BlockSize {
+		return nil, fmt.Errorf("storage: v3 WAL read: record at %d is LBA %d LSN %d, want LBA %d LSN %d",
+			walRelOff, e.LBA, e.LSN, lba, lsn)
+	}
+	return e.Data, nil
 }
 
 // readDirtyRecordV3 is the flusher's record read for a v3 store: it decodes

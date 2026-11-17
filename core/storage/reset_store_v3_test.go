@@ -271,3 +271,107 @@ func TestWALStoreV3HalfResetRefusesWritesUntilRecover(t *testing.T) {
 	writeSynced(t, r, 3, 3)
 	readAllV3(t, r, 1, 3)
 }
+
+// codex01 row 8 P1: a Read that resolved LBA 1's WAL position (cursor 0)
+// parks before its pread; the real flusher checkpoints and releases the
+// entry, the reset starts the new incarnation at cursor 0, and Write(2, B)
+// reuses that position. The resumed Read must not return B for LBA 1: it
+// validates the whole record against the resolving entry and re-resolves,
+// reading A from the extent.
+func TestWALStoreV3ReadParkedAcrossAResetAndOverwriteReturnsItsOwnBlock(t *testing.T) {
+	s, _, _ := checkpointedStoreV3(t, 0)
+	h := newHeldV3(t)
+	writeSynced(t, s, 1, 1) // LBA 1 = A at cursor 0
+	if off, _, _, _, ok := s.dm.get(1); !ok || off != 0 {
+		t.Fatalf("setup: LBA 1 dirty at %d (%v), want cursor 0", off, ok)
+	}
+	s.v3.testReadResolved = h.hold
+	rd := make(chan []byte, 1)
+	res := h.start(func() error {
+		b, err := s.Read(1)
+		rd <- b
+		return err
+	})
+	waitV3(t, h.parked, "Read after resolving cursor 0")
+	s.v3.testReadResolved = nil
+	if err := s.flusher.flushOnceInternal(false); err != nil {
+		t.Fatal(err)
+	}
+	if s.dm.len() != 0 {
+		t.Fatal("setup: the flusher did not release the entry")
+	}
+	if err := s.resetIncarnationV3(); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+	if _, err := s.Write(2, blk(2)); err != nil {
+		t.Fatal(err)
+	}
+	if off, _, _, _, ok := s.dm.get(2); !ok || off != 0 {
+		t.Fatalf("setup: LBA 2 at %d (%v), want the reused cursor 0", off, ok)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	h.rel()
+	if err := h.result(res, "Read"); err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if got := <-rd; !bytes.Equal(got, blk(1)) {
+		t.Fatalf("Read(1) across a reset and overwrite returned %x..., want LBA 1's own block %x...", got[0], byte(1))
+	}
+}
+
+// The same schedule through the post-OnReadMiss recheck: the read missed the
+// dirty map, A was written while the miss was held, the recheck resolved
+// cursor 0 and parks there across the flush, reset and overwrite.
+func TestWALStoreV3ReadMissRecheckParkedAcrossAResetReturnsItsOwnBlock(t *testing.T) {
+	s, _, _ := checkpointedStoreV3(t, 0)
+	h := newHeldV3(t)
+	miss := &heldWALReadMiss{entered: make(chan struct{}), release: make(chan struct{})}
+	releaseMiss := sync.OnceFunc(func() { close(miss.release) })
+	t.Cleanup(releaseMiss) // registered after heldV3's join: runs first
+	s.chunk.Store(&chunkHooks{sink: miss, closer: func() error { return nil }})
+	rd := make(chan []byte, 1)
+	res := h.start(func() error {
+		b, err := s.Read(1)
+		rd <- b
+		return err
+	})
+	waitV3(t, miss.entered, "Read in OnReadMiss")
+	writeSynced(t, s, 1, 1) // LBA 1 = A at cursor 0, while the miss is held
+	s.v3.testReadResolved = h.hold
+	releaseMiss()
+	waitV3(t, h.parked, "the post-miss recheck after resolving cursor 0")
+	s.v3.testReadResolved = nil
+	s.chunk.Store(nil)
+	if err := s.flusher.flushOnceInternal(false); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.resetIncarnationV3(); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+	writeSynced(t, s, 2, 2) // reuses cursor 0
+	if off, _, _, _, ok := s.dm.get(2); !ok || off != 0 {
+		t.Fatalf("setup: LBA 2 at %d (%v), want the reused cursor 0", off, ok)
+	}
+	h.rel()
+	if err := h.result(res, "Read"); err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if got := <-rd; !bytes.Equal(got, blk(1)) {
+		t.Fatalf("post-miss Read(1) across a reset and overwrite returned %x..., want %x...", got[0], byte(1))
+	}
+}
+
+// A live dirty entry whose record no longer validates (the entry unchanged
+// on re-resolution) is WAL damage: the read fails with a WAL integrity
+// fault instead of returning the damaged bytes or retrying forever.
+func TestWALStoreV3ReadOfADamagedLiveRecordIsAnIntegrityFault(t *testing.T) {
+	s, path := newStoreV3(t, WModeStrict)
+	t.Cleanup(func() { crashRecoveryHardeningStore(t, s) })
+	writeSynced(t, s, 1, 1)
+	damageRecord(t, path, 1)
+	if _, err := s.Read(1); !isWALCorrupt(err) {
+		t.Fatalf("Read of a damaged live record: err = %v, want a WAL integrity failure", err)
+	}
+}

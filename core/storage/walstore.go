@@ -949,10 +949,13 @@ func (s *WALStore) Read(lba uint32) ([]byte, error) {
 	}
 	s.mu.RUnlock()
 
-	if walRelOff, dataOffset, _, _, ok := s.dm.get(uint64(lba)); ok {
-		if s.v3 != nil {
-			return s.readFromWALV3(walRelOff)
+	if s.v3 != nil {
+		if data, handled, err := s.readDirtyV3(lba); handled {
+			return data, err
 		}
+		return s.readFromExtent(lba)
+	}
+	if walRelOff, dataOffset, _, _, ok := s.dm.get(uint64(lba)); ok {
 		return s.readFromWAL(walRelOff, dataOffset)
 	}
 	return s.readFromExtent(lba)
@@ -1030,10 +1033,11 @@ func (s *WALStore) readFromExtent(lba uint32) ([]byte, error) {
 		// The miss may have waited on a remote fetch while this block was
 		// written: re-resolve through the normal path (dirty map/WAL first)
 		// before the extent. No lock is held here.
-		if walRelOff, dataOffset, _, _, ok := s.dm.get(uint64(lba)); ok {
-			if s.v3 != nil {
-				return s.readFromWALV3(walRelOff)
+		if s.v3 != nil {
+			if data, handled, err := s.readDirtyV3(lba); handled {
+				return data, err
 			}
+		} else if walRelOff, dataOffset, _, _, ok := s.dm.get(uint64(lba)); ok {
 			return s.readFromWAL(walRelOff, dataOffset)
 		}
 	}
