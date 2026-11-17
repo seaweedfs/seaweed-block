@@ -209,7 +209,8 @@ run evidence: [release notes](docs/releases/README.md).
 ## Documentation
 
 - Design: [core](docs/design/block-design.md), [agent workspace](docs/design/agent-workspace-design.md),
-  [Kubernetes block](docs/design/kubernetes-block-design.md), [TLA+ specifications](docs/spec/README.md),
+  [Kubernetes block](docs/design/kubernetes-block-design.md), [invariants and state machines](docs/design/invariants.md),
+  [TLA+ specifications](docs/spec/README.md),
   [workspace measurements](docs/workspace-measurements.md)
 - Operations: [standalone deployment](docs/standalone-deployment.md),
   [Kubernetes quickstart](docs/quickstart-kubernetes.md), [user capabilities](docs/user-capabilities.md)

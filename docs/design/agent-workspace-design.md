@@ -12,7 +12,7 @@ The three design documents:
 | Agent workspace design (this document) | Agent workspace disks: one local replica per workspace, cuts to SeaweedFS, snapshots, forks, GC, host moves |
 | [Kubernetes block design](kubernetes-block-design.md) | Kubernetes block volumes (alpha): CSI, Helm, RF=2/3 replication and failover, multipath, readiness |
 
-Conventions are those of the core document: code references name a file and a function, not a line number; test references name the test function and its file; "Model-checked" means the protocol was specified in TLA+ and checked exhaustively with TLC at small scale (the specifications are in [`docs/spec/`](../spec/README.md)).
+Conventions are those of the core document: code references name a file and a function, not a line number; test references name the test function and its file; "Model-checked" means the protocol was specified in TLA+ and checked exhaustively with TLC at small scale (the specifications are in [`docs/spec/`](../spec/README.md)). The state machines and invariants of this document are also in the shared ledger, [Invariants and state machines](invariants.md).
 
 ## Contents
 
@@ -127,7 +127,7 @@ Per volume, under the chunk base directory in the filer (`core/frontend/chunksto
 
 `ChunkRemote.CASHead` (`core/frontend/chunkstore/chunk_remote.go`) refuses a lower epoch, any move of a `deleting`, `purging` or `deleted` HEAD, a `{gen, epoch}` mismatch and a lower `RemoteLSN`, then issues the filer's conditional `UpdateEntry` with `expected_extended = {swb.gen, swb.epoch}`. Only a definite refusal is a precondition failure; any other error is an unknown outcome.
 
-**Reads after a move.** A block absent locally is fetched from the chunk named in HEAD, bounded by `ReadMissTimeout` (default 30 s), and installed only if no newer local version exists; the dirty map is consulted again after the fetch, so a newer local write always wins (`OnReadMiss`; walstore `readFromExtent`).
+**Reads after a move.** A block absent locally is fetched from the chunk named in HEAD, bounded by `ReadMissTimeout` (default 30 s), and installed only if it does not overwrite a newer local extent version; the dirty map is consulted again after the fetch, so a newer WAL-only write still wins on reads, and HEAD's value may sit beneath it as the backing value, which is correct if a crash loses that unsynced write (`OnReadMiss`; walstore `readFromExtent`).
 
 ## 6. Snapshots, forks, retention, GC, volume delete
 
