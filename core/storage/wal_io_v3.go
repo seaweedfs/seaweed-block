@@ -179,10 +179,13 @@ func scanWALV3(fd *os.File, d descriptorV3) (walScanResultV3, error) {
 	if d.MigrationPhase != MigrationNormal {
 		return r, ErrMigrationIncomplete
 	}
-	if d.WALSize > counterMaxV3-d.RetainedTail {
-		return r, ErrCounterExhausted
+	// The mathematical lap end may exceed the last representable cursor.
+	// Clamp the scan, not the acknowledged history: exhaustion refuses NEW
+	// appends but must not make a valid last record unrecoverable.
+	limit := uint64(counterMaxV3)
+	if d.WALSize <= counterMaxV3-d.RetainedTail {
+		limit = d.RetainedTail + d.WALSize
 	}
-	limit := d.RetainedTail + d.WALSize
 	start := d.RetainedTail
 	base := d.CheckpointLSN
 	if d.BaseState != BaseNone {

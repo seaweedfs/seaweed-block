@@ -316,3 +316,22 @@ func TestWALIOV3_ScanRequiresActualSourceBounds(t *testing.T) {
 		t.Fatalf("truncated source bounds error=%v", err)
 	}
 }
+
+func TestWALIOV3_LastRepresentableRecordStillRecovers(t *testing.T) {
+	start := uint64(counterMaxV3) - 70
+	f, p, w := newWALIOTestV3(t, start, start)
+	d := p.current()
+	if _, err := w.append(walEntryV3{LSN: 1, Type: walEntryBarrier}, 0); err != nil {
+		t.Fatal(err)
+	}
+	r, err := scanWALV3(f, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Records) != 1 || r.Frontier != 1 || r.End != counterMaxV3 {
+		t.Fatalf("last representable scan=%+v", r)
+	}
+	if _, err := w.append(walEntryV3{LSN: 2, Type: walEntryBarrier}, 0); !errors.Is(err, ErrCounterExhausted) {
+		t.Fatalf("next append=%v", err)
+	}
+}
