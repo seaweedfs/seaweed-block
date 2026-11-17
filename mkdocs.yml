@@ -1,5 +1,5 @@
 site_name: Seaweed Block Engineering Wiki
-site_description: Internal engineering knowledge base for Seaweed Block.
+site_description: Engineering documentation for Seaweed Block.
 repo_url: https://github.com/seaweedfs/seaweed-block
 docs_dir: docs
 site_dir: site
@@ -31,20 +31,13 @@ markdown_extensions:
 
 nav:
   - Home: wiki/index.md
-  - Wiki Links:
-      - Block Wiki: http://192.168.1.135:8010/wiki/
-      - RDMA Wiki: http://192.168.1.135:8011/wiki/
-      - TestOps Wiki: http://192.168.1.135:8012/wiki/
-  - Developer Guide:
-      - Wiki Structure: wiki/developer-guide.md
-      - Coverage Matrix: wiki/coverage-matrix.md
-      - Topic Inventory: wiki/topic-inventory.md
-      - Historical Sources: wiki/historical-sources.md
+  - Design:
+      - Design Reference: design/block-design.md
+      - TLA+ Specifications: spec/README.md
+      - Workspace Measurements: workspace-measurements.md
+  - Wiki:
       - Code Map: wiki/code-map.md
       - State Machines: wiki/state-machines.md
-      - Protocol Catalog: wiki/protocol-catalog.md
-      - Phase Map: wiki/phase-map.md
-      - Phase Recap: wiki/phase-recap.md
       - QA and TestOps Map: wiki/testops-map.md
       - Deep Dives:
           - Template: wiki/deep-dives/template.md
@@ -61,17 +54,23 @@ nav:
           - Support Bundle Cold Reader: wiki/deep-dives/support-bundle-cold-reader.md
           - Release Engineering Image Skew: wiki/deep-dives/release-engineering-image-skew.md
           - Returned Replica Rebuild: wiki/deep-dives/returned-replica-rebuild.md
+          - Returned Replica Failback: wiki/deep-dives/returned-replica-failback.md
           - Read-Write Control Plane: wiki/deep-dives/read-write-control-plane-roadmap.md
-          - GPUDirect cuFile cuObject: wiki/deep-dives/gpudirect-cufile-cuobject.md
           - TestOps Authoring: wiki/deep-dives/testops-authoring.md
   - Product:
       - Overview: overview.md
+      - Kubernetes Status: kubernetes-status.md
       - User Capabilities: user-capabilities.md
-      - Roadmap: roadmap.md
       - Releases: releases/README.md
+  - Operations:
+      - Standalone Deployment: standalone-deployment.md
+      - Kubernetes Quickstart: quickstart-kubernetes.md
+      - Kubernetes App Demo: kubernetes-app-demo.md
+      - Chunk Manifests: chunk-manifests.md
+      - Workspace Lease: workspace-lease.md
+      - Fsync Latency: fsync-latency.md
   - Architecture:
       - Architecture: architecture.md
       - Developer Architecture: developer-architecture.md
       - Runtime State Machines: runtime-state-machines.md
       - Operations v1: operations-v1.md
-  - Quickstart: quickstart-kubernetes.md

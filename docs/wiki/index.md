@@ -1,53 +1,23 @@
 # Seaweed Block Engineering Wiki
 
-This wiki is the engineering map for Seaweed Block development. It is not a
-replacement for finished plans, QA sign-offs, or release notes. It is the entry
-point that explains how those documents fit together.
+This wiki explains how the Kubernetes line of Seaweed Block works, for
+developers changing it. It is not a release-claim source: the
+[release notes](../releases/README.md) and
+[Kubernetes status](../kubernetes-status.md) hold the claims, and the
+design documents are the canonical description: the
+[core design](../design/block-design.md) (core block service, verification,
+known issues), the [agent workspace design](../design/agent-workspace-design.md)
+and the [Kubernetes block design](../design/kubernetes-block-design.md).
 
-Seaweed Block has passed through more than ninety phases. A single architecture
-document cannot explain the accumulated product model. The useful structure is:
+## Pages
 
-```text
-problem background
--> industry pattern
--> Seaweed Block implementation
--> state machine / invariant
--> code entry points
--> QA gates and failure evidence
--> current limits and next work
-```
-
-## How To Read This Wiki
-
-Start here:
-
-- [Developer Guide](developer-guide.md) - what belongs in the wiki and what
-  remains in source evidence.
-- [Coverage Matrix](coverage-matrix.md) - whether the wiki covers the major
-  months-long engineering domains and where deeper docs are still needed.
-- [Topic Inventory](topic-inventory.md) - full topic backlog and whether each
-  topic is implementation-grade, summary-level, mapped, missing, or future.
-- [Historical Sources](historical-sources.md) - older tutorial and methodology
-  material that explains the block-storage method behind the current design.
-- [Code Map](code-map.md) - main packages, commands, and responsibility
+- [Code Map](code-map.md) - main commands, packages and responsibility
   boundaries.
 - [State Machines](state-machines.md) - the product states developers must not
   violate.
-- [Protocol Catalog](protocol-catalog.md) - the current catalog of mini
-  protocols and state machines that deserve Mermaid diagrams.
-- [Phase Map](phase-map.md) - how the early storage phases, operation-layer
-  closure, and returned-replica failback line connect.
-- [Phase Recap](phase-recap.md) - what each phase solved and how the feature
-  logic accumulated.
 - [QA and TestOps Map](testops-map.md) - which gates prove which claims.
-
-Related local docs:
-
-- [Seaweed RDMA Engineering Wiki](http://192.168.1.135:8011/wiki/) - Rust RDMA
-  data path, native RC/DC, UCX, pull-RDMA, and future GPU-style destinations.
-- [sw-test-runner TestOps Wiki](http://192.168.1.135:8012/wiki/) -
-  cross-product scenario runner, product testing guides, and live run
-  dashboard docs.
+- [Runtime State Machines](../runtime-state-machines.md) - control-plane, CSI
+  and frontend loops.
 
 ## Current Product Loop
 
@@ -68,33 +38,52 @@ Helm install
 This is a bounded operation-layer capability. It is not automatic cleanup, not a
 production operator, and not backup/NVMe expansion.
 
-Recent returned-replica work adds a separately gated, opt-in failback runtime
-path. See [Returned Replica Failback Runtime](deep-dives/returned-replica-failback.md)
+Returned-replica work adds a separately gated, opt-in failback runtime path.
+See [Returned Replica Failback Runtime](deep-dives/returned-replica-failback.md)
 for the authority owner, target CR, executor, gRPC service, terminal evidence,
-and non-claims. As of Phase 97, that line can plan a frontend-publication
-target from terminal failback evidence and invoke the publication runtime only
-under explicit policy; workload-visible path switching remains a separate gate.
+and non-claims. That line can plan a frontend-publication target from terminal
+failback evidence and invoke the publication runtime only under explicit
+policy; workload-visible path switching remains a separate gate.
+
+## Deep Dives
+
+New pages follow the [deep-dive template](deep-dives/template.md). A page is
+deep only if a developer could use it to make a correct code change, write the
+right gate and diagnose a failed run.
+
+- [CSI Lifecycle](deep-dives/csi-lifecycle.md)
+- [Operation Layer v0.5](deep-dives/operation-layer-v05.md)
+- [Status Writer Conformance](deep-dives/status-writer-conformance.md)
+- [ManagedVolume Readiness](deep-dives/managed-volume-readiness.md)
+- [SmartWAL Dirty Failure](deep-dives/smartwal-dirty-failure.md)
+- [WAL Frontier Recovery](deep-dives/wal-frontier-recovery.md)
+- [blockvolume Process Readiness](deep-dives/blockvolume-process-readiness.md)
+- [Authority And Promotion](deep-dives/authority-promotion.md)
+- [iSCSI ALUA Multipath](deep-dives/iscsi-alua-multipath.md)
+- [Live Node Evidence](deep-dives/live-node-evidence.md)
+- [Support Bundle Cold Reader](deep-dives/support-bundle-cold-reader.md)
+- [Release Engineering Image Skew](deep-dives/release-engineering-image-skew.md)
+- [Returned Replica Rebuild](deep-dives/returned-replica-rebuild.md)
+- [Returned Replica Failback](deep-dives/returned-replica-failback.md)
+- [Read-Write Control Plane](deep-dives/read-write-control-plane-roadmap.md)
+- [TestOps Authoring](deep-dives/testops-authoring.md)
 
 ## Source Evidence
 
-The wiki links to these source areas:
-
 - `docs/` - public and user-facing docs.
-- `internal/docs/finished-plans/` - phase-by-phase completion records.
-- `internal/docs/ref/` - design references and product contracts.
-- `internal/docs/protocol/` - control-model and invariant documents.
-- `internal/docs/qa-assignments/` - gate assignments and QA sign-offs.
+- `internal/docs/` - phase plans, design references and QA sign-offs.
 - `testops/` - scenario definitions and suite structure.
 
-When a wiki page conflicts with a finished plan or QA sign-off, the finished
-plan or QA sign-off wins.
+When a wiki page conflicts with the code, a release note or a QA sign-off, the
+wiki page is wrong.
 
-## Depth Standard
+## Local Preview
 
-For storage/control-plane topics, a page is only considered deep if it can guide
-a code change and a QA gate. It should include protocol or domain background,
-product contract, ownership model, state machine, publish/API shape, code
-entry points, evidence contract, failure taxonomy, implementation checklist,
-QA history, and non-claims.
+```bash
+pip install mkdocs-material
+mkdocs serve        # http://127.0.0.1:8000
+```
 
-A correct summary is still useful, but it is not enough for feature work.
+Use Mermaid for state machines and sequence diagrams. Link Markdown pages under
+`docs/` with relative links, and source code with GitHub links, since MkDocs
+serves only files under `docs/`.

@@ -1,6 +1,7 @@
 # Kubernetes Quick Start
 
-This guide is the current alpha path for Seaweed Block on Kubernetes.
+**Use this when:** you install the Kubernetes alpha with Helm on a supported
+test cluster and want to create, verify and clean up a first PVC-backed volume.
 
 It shows the user loop:
 
@@ -37,10 +38,8 @@ The quickstart proves:
 - The example resources and host-side residue are cleaned up.
 
 It does not prove production HA, backup/restore, broad upgrade safety, broad
-platform compatibility, broad mutating operator lifecycle, mutating admin
-workflows, or production UI. The separate v0.5 beta-candidate lifecycle-owner
-path is limited to the Seaweed Block `SwBlockVolume` protection finalizer and
-requires matching release images.
+platform compatibility, a mutating operator, or a production UI; see
+[what you should not expect yet](kubernetes-status.md#what-you-should-not-expect-yet).
 
 ## Prerequisites
 
@@ -140,12 +139,8 @@ sw-block ops generate-helm-values \
 ```
 
 Current validated published quickstart image tag:
-`sha-dc2972d0059b`.
-
-This tag covers the v0.4 read-only/status foundation path. The v0.5
-bounded lifecycle-owner path requires matching `sw-block` and `sw-block-csi`
-images published from the Phase 44 release commit; do not use the older
-quickstart tag to validate lifecycle-owner behavior.
+`sha-dc2972d0059b`. It covers the v0.4 read-only/status path; later paths
+need matching images, see [release images](kubernetes-status.md#release-images).
 
 Published image digests:
 
@@ -351,8 +346,7 @@ bash scripts/run-basic-app-example.sh "$PWD"
 
 The `"$PWD"` argument is the repository root for both helper scripts.
 
-Use Helm for the v0.3 alpha release path unless you are specifically testing
-local script activation.
+Use Helm unless you are specifically testing local script activation.
 
 ## Troubleshooting
 
@@ -425,14 +419,8 @@ other run owns the resources.
 
 ## Current Alpha Limitations
 
-- This is an alpha Helm path, not a production installer or operator.
-- The dashboard is local and read-only, not a production hosted UI.
-- Mutating admin workflows are not exposed: no promote, repair, rebuild,
-  failback, delete, backup, restore, or cleanup button.
-- Broad upgrade and rollback safety are not claimed beyond the gated alpha
-  smoke path.
-- Backup, snapshot, and restore are not claimed.
-- Broad distro/kernel/initiator compatibility is not claimed.
-- Performance, RTO, and SLO numbers are not claimed.
-- Transparent Kubernetes node-loss without pod recreate is not claimed by this
-  quickstart.
+This is an alpha Helm path, not a production installer or operator. The
+dashboard is local and read-only. Broad upgrade and rollback safety are not
+claimed beyond the gated alpha smoke path, and performance, RTO and SLO numbers
+are not claimed. The full list is in
+[what you should not expect yet](kubernetes-status.md#what-you-should-not-expect-yet).

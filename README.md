@@ -31,9 +31,11 @@ current: a deposed primary refuses I/O once it observes the new assignment or
 a fence, or once its workspace lease expires. That is a local admission rule,
 not an instant global revocation. Separately, every remote HEAD publish is a
 conditional update on `{gen, epoch}`, so the store refuses a stale holder's
-publish even before that holder notices it was replaced. The [design
-reference](docs/design/block-design.md) covers each part, its invariants, the
-tests behind them and the known issues.
+publish even before that holder notices it was replaced. The design is in
+three documents: the [core design](docs/design/block-design.md), the [agent
+workspace design](docs/design/agent-workspace-design.md) and the [Kubernetes
+block design](docs/design/kubernetes-block-design.md). Each covers its parts,
+their invariants, the tests behind them and the known issues.
 
 ## Highlights
 
@@ -195,7 +197,7 @@ run evidence: [release notes](docs/releases/README.md).
 - **CI** runs `go build`, `go vet` and `go test -short` on every pull request
   and push to `main` ([workflow](.github/workflows/test.yml)). Crash,
   mutation, real-SeaweedFS and binary tests are described in the
-  [design reference, Part 3](docs/design/block-design.md#part-3-verification-lessons-known-issues),
+  [core design, Part 2](docs/design/block-design.md#part-2-verification-lessons-known-issues),
   with the known issues.
 - **Formal models**: [TLA+ specifications](docs/spec/README.md) of the
   protocols where a bug would lose data. Counterexamples became fixes and
@@ -206,12 +208,14 @@ run evidence: [release notes](docs/releases/README.md).
 
 ## Documentation
 
-- Design: [design reference](docs/design/block-design.md), [TLA+ specifications](docs/spec/README.md),
+- Design: [core](docs/design/block-design.md), [agent workspace](docs/design/agent-workspace-design.md),
+  [Kubernetes block](docs/design/kubernetes-block-design.md), [TLA+ specifications](docs/spec/README.md),
   [workspace measurements](docs/workspace-measurements.md)
 - Operations: [standalone deployment](docs/standalone-deployment.md),
   [Kubernetes quickstart](docs/quickstart-kubernetes.md), [user capabilities](docs/user-capabilities.md)
 - Claims: [Kubernetes status](docs/kubernetes-status.md), [release notes](docs/releases/README.md),
-  [NVMe/TCP supported-lab claim](docs/releases/nvme-tcp-supported-lab.md), [roadmap](docs/roadmap.md)
+  [NVMe/TCP supported-lab claim](docs/releases/nvme-tcp-supported-lab.md),
+  [known issues and work in progress](docs/design/block-design.md#24-known-issues-and-work-in-progress)
 - Engineering references, not release-claim sources: [architecture](docs/architecture.md),
   [developer architecture](docs/developer-architecture.md), [runtime state machines](docs/runtime-state-machines.md)
 

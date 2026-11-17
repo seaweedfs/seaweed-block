@@ -8,9 +8,6 @@ matches which release line.
 evidence for every claim below. [User capabilities](user-capabilities.md)
 describes current behavior and the read-only operations commands.
 
-This page holds the detailed Kubernetes claim lists that used to be in the
-top-level README. The text is unchanged.
-
 The Kubernetes path is focused on one user-visible loop:
 
 ```text

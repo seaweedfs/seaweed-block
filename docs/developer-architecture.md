@@ -288,7 +288,7 @@ For a new contributor:
 2. `deploy/k8s/alpha/README.md`
 3. `docs/architecture.md`
 4. this document
-5. `docs/roadmap.md`
+5. `docs/design/block-design.md`, `docs/design/kubernetes-block-design.md`
 
 For implementation work:
 

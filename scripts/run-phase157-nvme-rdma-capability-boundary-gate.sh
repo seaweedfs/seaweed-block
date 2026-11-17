@@ -51,7 +51,6 @@ require_grep "docs/releases/nvme-rdma-capability-boundary.md" "read-only capabil
 
 require_grep "docs/releases/README.md" "NVMe/RDMA Capability Boundary" "release_index_links_rdma_boundary_doc"
 require_grep "docs/releases/nvme-tcp-supported-lab.md" "RoCE or NVMe/RDMA data path" "nvme_tcp_doc_keeps_rdma_non_claim"
-require_grep "docs/roadmap.md" "Phase 157 keeps RoCE/NVMe-RDMA as a product non-claim" "roadmap_phase157_boundary_documented"
 require_grep "internal/docs/product-roadmap.md" "Phase 157 keeps RoCE/NVMe-RDMA as a product non-claim" "product_roadmap_phase157_boundary_documented"
 
 write_summary "rdma_host_capability_inputs_documented=true"

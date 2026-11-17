@@ -19,8 +19,8 @@ compatibility, performance improvement, and production SLOs remain non-claims.
 ## Implemented Standalone Path
 
 ```text
-Linux nvme-rdma initiator on m01
--> RoCE data-plane address 10.0.0.3 on m02
+Linux nvme-rdma initiator on lab host A
+-> RoCE data-plane address 10.0.0.3 on lab host B
 -> Linux kernel nvmet-rdma target
 -> configfs namespace backed by /dev/nbdX
 -> Seaweed Block NBD request bridge
@@ -130,7 +130,7 @@ cleanup_status=ok
 
 TestOps run `20260718-025048-9d6a` passed 14/14 actions with fresh matching
 product and CSI images. A dynamic PVC selected `nvmeTransport: rdma`, the target
-published `10.0.0.3:4420`, CSI mounted it on m01, and writer/reader verification
+published `10.0.0.3:4420`, CSI mounted it on lab host A, and writer/reader verification
 passed.
 
 ```text
@@ -178,6 +178,6 @@ must not be described as an acceleration path or used for an SLO claim.
 
 ## Related External RDMA Work
 
-`C:\work\rdma\seaweed-mono-rdma-refresh` and `C:\work\rdma\sra-next` provide
-useful VFS/object/RustVolume/RDMA/NIXL evidence. They do not implement the
-standard Linux NVMe/RDMA target used here and remain separate product surfaces.
+Other SeaweedFS RDMA work (file, object and volume-server data paths) is
+separate. It does not implement the standard Linux NVMe/RDMA target used here
+and remains a separate product surface.
