@@ -377,9 +377,7 @@ These are tracked for fixes. Most were raised by an independent review of this r
 
 - **NVMe/TCP H2CData offset overflow.** The `DATAO + length` bound check is done in 32-bit arithmetic and can wrap, so one malformed PDU can panic the process (`core/frontend/nvme/session.go` `recvH2CData`). Reachable from loopback by default. **Planned fix:** 64-bit arithmetic, offset and R2T consistency checks, and bounds on wire-supplied allocations.
 - **Process notes in source comments.** #162 removed reviewer names and decision timestamps from code comments. A few comments still cite internal review labels (for example "ruling F1") where a neutral design rationale would be clearer.
-- **fsync latency (about 7 ms against 3 ms local).** Leads to measure with the `/status/durable` histograms:
-  - the group committer waits a full 1 ms unless 64 waiters are queued, so at queue depth 1 every `fsync` pays at least 1 ms;
-  - the checkpoint superblock `fsync` runs under the exclusive store lock, stalling reads and writes each flush cycle.
+- **fsync latency.** #173 removed the idle group-commit wait: a lone `Sync` no longer waits out the collection delay, and guest `fsync` fell from about 5.5 ms to a median of 3.23 ms against 2.74 ms local (ublk; see [workspace measurements](../workspace-measurements.md)). Remaining lead: the checkpoint superblock `fsync` runs under the exclusive store lock, stalling reads and writes each flush cycle.
 - **smartwal crash window.** A crash between the in-place write and the ring append can leave the volume unopenable (§1.3). smartwal is experimental and not a default: standalone `blockvolume` creates new volumes as walstore (auto), and Kubernetes and workspaces use walstore. **Planned:** fix the ordering.
 - **Forged records in user data.** WAL records are not bound to a store incarnation or lap, so bytes inside user data that happen to decode as a valid record could be replayed by the defensive scan. **Planned:** an incarnation nonce and lap in the next format, plus a clean-shutdown marker in the meantime.
 - **Mid-history WAL corruption only warns** (§1.2 step 2). Fixing it needs the synced watermark in the next format.
