@@ -100,6 +100,9 @@ type walStoreV3State struct {
 	// installMu); an installing ID from before the open is plan row 11's.
 	installMu     sync.RWMutex
 	liveInstallID [16]byte
+	// installEpoch counts the begins of this open (guarded by installMu): a
+	// handle is valid only while no later begin has run.
+	installEpoch uint64
 	// preBaseHighest is the highest appended LSN when the live install
 	// began (guarded by installMu): the records before its BaseCursor.
 	preBaseHighest uint64

@@ -39,3 +39,22 @@ func BaseStateV3Test(s *WALStore) (BaseState, [16]byte) {
 	d := s.v3.pub.current()
 	return d.BaseState, d.BaseInstallID
 }
+
+// CrashReopenV3Test simulates a crash (no flush, no Close) of an unmapped
+// dark v3 store and reopens and recovers it, as a restart would.
+func CrashReopenV3Test(s *WALStore, path string) (*WALStore, error) {
+	s.committer.Stop()
+	if err := s.fd.Close(); err != nil {
+		return nil, err
+	}
+	r, err := openUnmappedWALStoreV3ForTest(path)
+	if err != nil {
+		return nil, err
+	}
+	r.DisableAutoFlushForRecoveryTest()
+	if _, err := r.Recover(); err != nil {
+		_ = r.Close()
+		return nil, err
+	}
+	return r, nil
+}

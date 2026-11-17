@@ -27,12 +27,19 @@ const v3RecvBlock = 4096
 
 func v3RecvStore(t *testing.T) *storage.WALStore {
 	t.Helper()
-	s, err := storage.CreateWALStoreV3Test(filepath.Join(t.TempDir(), "recv.v3"), 64, v3RecvBlock)
+	s, _ := v3RecvStoreAt(t)
+	t.Cleanup(func() { _ = s.Close() })
+	return s
+}
+
+func v3RecvStoreAt(t *testing.T) (*storage.WALStore, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "recv.v3")
+	s, err := storage.CreateWALStoreV3Test(path, 64, v3RecvBlock)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = s.Close() })
-	return s
+	return s, path
 }
 
 func v3Blk(b byte) []byte { return bytes.Repeat([]byte{b}, v3RecvBlock) }
@@ -278,5 +285,62 @@ func TestReceiverV3SupersededBaseDoneFailsWithoutAnAck(t *testing.T) {
 	}
 	if st, _ := storage.BaseStateV3Test(s); st != storage.BaseInstalling {
 		t.Fatalf("state %d, want installing", st)
+	}
+}
+
+// codex01 row 9b P1: the real Sender sends BaseDone from its base lane while
+// its WAL lane is still sending (sender.go base goroutine). A WAL entry of
+// the same session after BaseDone must still apply, and the barrier then
+// completes with both lanes' bytes. Mutant: admitting install-lane WAL
+// only while installing fails here (the entry after BaseDone is refused).
+func TestReceiverV3WALAfterBaseDoneStillApplies(t *testing.T) {
+	s := v3RecvStore(t)
+	p := startV3Receiver(t, s)
+	p.start(t, 5)
+	p.send(t, frameBaseBlock, encodeBaseBlock(3, v3Blk(0x33)))
+	p.want(t, frameBaseBatchAck)
+	p.send(t, frameWALEntry, encodeWALEntry(WALKindBacklog, 4, 6, v3Blk(0x44)))
+	p.send(t, frameBaseDone, nil)
+	p.want(t, frameBaseBatchAck)
+	p.send(t, frameWALEntry, encodeWALEntry(WALKindSessionLive, 5, 7, v3Blk(0x55)))
+	p.send(t, frameBarrierReq, nil)
+	p.want(t, frameBarrierResp)
+	if err := p.runErr(t); err != nil {
+		t.Fatalf("receiver: %v", err)
+	}
+	for lba, want := range map[uint32]byte{3: 0x33, 4: 0x44, 5: 0x55} {
+		if got := readV3Recv(t, s, lba); !bytes.Equal(got, v3Blk(want)) {
+			t.Fatalf("LBA %d = %x..., want %x", lba, got[0], want)
+		}
+	}
+}
+
+// The same Sender order with a crash after the barrier: every byte of both
+// lanes, including the WAL entry sent after BaseDone, survives a crash and
+// a reopen (DESIGN r17.4, section 11).
+func TestReceiverV3WALAfterBaseDoneSurvivesACrash(t *testing.T) {
+	s, path := v3RecvStoreAt(t)
+	p := startV3Receiver(t, s)
+	p.start(t, 5)
+	p.send(t, frameBaseBlock, encodeBaseBlock(3, v3Blk(0x33)))
+	p.want(t, frameBaseBatchAck)
+	p.send(t, frameWALEntry, encodeWALEntry(WALKindBacklog, 4, 6, v3Blk(0x44)))
+	p.send(t, frameBaseDone, nil)
+	p.want(t, frameBaseBatchAck)
+	p.send(t, frameWALEntry, encodeWALEntry(WALKindSessionLive, 5, 7, v3Blk(0x55)))
+	p.send(t, frameBarrierReq, nil)
+	p.want(t, frameBarrierResp)
+	if err := p.runErr(t); err != nil {
+		t.Fatalf("receiver: %v", err)
+	}
+	r, err := storage.CrashReopenV3Test(s, path)
+	if err != nil {
+		t.Fatalf("crash and reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+	for lba, want := range map[uint32]byte{3: 0x33, 4: 0x44, 5: 0x55} {
+		if got := readV3Recv(t, r, lba); !bytes.Equal(got, v3Blk(want)) {
+			t.Fatalf("after reopen LBA %d = %x..., want %x", lba, got[0], want)
+		}
 	}
 }

@@ -471,3 +471,79 @@ func TestBaseInstallV3BeginRefusesWithAnAttachedChunkLayer(t *testing.T) {
 		t.Fatal("a refused begin wrote a descriptor slot")
 	}
 }
+
+// codex01 row 9b P1, store part: a completed handle keeps admitting
+// install-lane applies (the session's WAL lane outlives its BaseDone) while
+// installed and after its retirement, until the next begin; a BASE write
+// after complete is refused; once a later begin has run (here after the
+// retirement, so the ID check alone cannot tell), the old handle is
+// refused with ErrInstallSuperseded. Mutants: admitting only while
+// installing (the apply after complete fails) and dropping the epoch check
+// (the stale apply lands in the new install).
+func TestBaseInstallV3CompletedHandleAppliesUntilTheNextBegin(t *testing.T) {
+	s, _, _ := checkpointedStoreV3(t, 2)
+	h := beginV3(t, s, 4, idA)
+	if err := h.WriteBase(3, blk(3)); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.MarkBaseComplete(); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.ApplyInstallEntry(5, blk(5), 5); err != nil {
+		t.Fatalf("apply after complete (installed): %v", err)
+	}
+	if err := h.WriteBase(6, blk(6)); !errors.Is(err, ErrInstallSuperseded) {
+		t.Fatalf("WriteBase after complete: err = %v, want ErrInstallSuperseded", err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.flusher.flushOnceInternal(false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.v3.pub.publish(&s.mu, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if st := s.v3.pub.current().BaseState; st != BaseNone {
+		t.Fatalf("setup: state %d, want retired", st)
+	}
+	if err := h.ApplyInstallEntry(6, blk(6), 6); err != nil {
+		t.Fatalf("apply after retirement: %v", err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	hB := beginV3(t, s, 6, idB)
+	if err := h.ApplyInstallEntry(7, blk(0xAA), 7); !errors.Is(err, ErrInstallSuperseded) {
+		t.Fatalf("old handle after a later begin: err = %v, want ErrInstallSuperseded", err)
+	}
+	for lba := uint32(5); lba <= 6; lba++ { // B's BASE image at 6
+		if err := hB.WriteBase(lba, blk(byte(lba))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := hB.ApplyInstallEntry(7, blk(7), 7); err != nil {
+		t.Fatal(err)
+	}
+	// B completes and retires too: the state is none again, which the old
+	// completed handle would accept without the epoch check.
+	if err := hB.MarkBaseComplete(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.flusher.flushOnceInternal(false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.v3.pub.publish(&s.mu, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if st := s.v3.pub.current().BaseState; st != BaseNone {
+		t.Fatalf("setup: state %d after B, want retired", st)
+	}
+	if err := h.ApplyInstallEntry(8, blk(0xAA), 8); !errors.Is(err, ErrInstallSuperseded) {
+		t.Fatalf("old handle after a later install retired: err = %v, want ErrInstallSuperseded", err)
+	}
+	readAllV3(t, s, 5, 7)
+}

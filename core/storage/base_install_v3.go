@@ -3,6 +3,7 @@ package storage
 import (
 	"errors"
 	"fmt"
+	"sync/atomic"
 )
 
 // The v3 BASE install protocol, store part (format bump v3, DESIGN r17.3.1
@@ -38,8 +39,14 @@ var (
 // installHandleV3 is the only path for BASE extent writes and install-lane
 // WAL applies on a v3 store (DESIGN 8.7).
 type installHandleV3 struct {
-	s  *WALStore
-	id [16]byte
+	s     *WALStore
+	id    [16]byte
+	epoch uint64 // the store's install epoch at this handle's begin
+	// completed is set once this handle's own MarkBaseComplete succeeded:
+	// the session's WAL lane may still be sending (the Sender sends BaseDone
+	// from its base lane), so install-lane applies stay admitted until the
+	// next begin (codex01 row 9b P1).
+	completed atomic.Bool
 }
 
 // beginBaseInstallV3 is the DESIGN 8.1 begin. It refuses, before any
@@ -127,11 +134,12 @@ func (s *WALStore) beginBaseInstallV3(baseLSN uint64, id [16]byte) (*installHand
 		return nil, err
 	}
 	v.liveInstallID = id
+	v.installEpoch++
 	v.preBaseHighest = appended
 	if err := v.pub.invalidateMapProofV3(); err != nil { // an install transition (9.1)
 		return nil, err
 	}
-	return &installHandleV3{s: s, id: id}, nil
+	return &installHandleV3{s: s, id: id, epoch: v.installEpoch}, nil
 }
 
 // BeginBaseInstall is the BASE install seam (DESIGN 8.7). A v3 store runs
@@ -149,21 +157,26 @@ func (s *WALStore) BeginBaseInstall(baseLSN uint64, installID [16]byte) (Install
 }
 
 // MarkBaseComplete completes this handle's install (DESIGN 8.2).
-func (h *installHandleV3) MarkBaseComplete() error { return h.s.markBaseCompleteV3(h.id) }
+func (h *installHandleV3) MarkBaseComplete() error {
+	if err := h.s.markBaseCompleteV3(h.id); err != nil {
+		return err
+	}
+	h.completed.Store(true)
+	return nil
+}
 
 var _ BaseInstallPreparer = (*WALStore)(nil)
 
 // admitV3 takes installMu shared and checks, under it, that the volume is
 // installing under h's ID (DESIGN 8.7). The caller releases it only after
 // its whole mutation.
-func (h *installHandleV3) admitV3() (release func(), err error) {
+func (h *installHandleV3) admitV3(baseWrite bool) (release func(), err error) {
 	v := h.s.v3
 	if hook := v.testInstallBeforeAdmit; hook != nil {
 		hook()
 	}
 	v.installMu.RLock()
-	d := v.pub.current()
-	if d.BaseState != BaseInstalling || d.BaseInstallID != h.id {
+	if !h.admissibleV3(baseWrite) {
 		v.installMu.RUnlock()
 		return nil, ErrInstallSuperseded
 	}
@@ -173,11 +186,30 @@ func (h *installHandleV3) admitV3() (release func(), err error) {
 	return v.installMu.RUnlock, nil
 }
 
+// admissibleV3 is the admission predicate, under installMu shared: no begin
+// has run since this handle's own, and either the volume is installing
+// under the handle's ID, or (install-lane applies only) the handle has
+// completed and the volume is installed under its ID or retired since.
+func (h *installHandleV3) admissibleV3(baseWrite bool) bool {
+	v := h.s.v3
+	if v.installEpoch != h.epoch {
+		return false
+	}
+	d := v.pub.current()
+	if d.BaseState == BaseInstalling && d.BaseInstallID == h.id {
+		return true
+	}
+	if baseWrite || !h.completed.Load() {
+		return false
+	}
+	return (d.BaseState == BaseInstalled && d.BaseInstallID == h.id) || d.BaseState == BaseNone
+}
+
 // WriteBase installs one BASE block into the extent (the v3 replacement of
 // WriteExtentDirect). No LSN is recorded; the chunk's map coverage becomes
 // UNKNOWN, and a dirty entry for the LBA no longer flushes over it.
 func (h *installHandleV3) WriteBase(lba uint32, data []byte) error {
-	release, err := h.admitV3()
+	release, err := h.admitV3(true)
 	if err != nil {
 		return err
 	}
@@ -224,7 +256,7 @@ func (h *installHandleV3) WriteBase(lba uint32, data []byte) error {
 // ApplyInstallEntry appends one install-lane record with the source's LSN
 // (DESIGN 8.1 order and gap rules, 8.4 no space).
 func (h *installHandleV3) ApplyInstallEntry(lba uint32, data []byte, lsn uint64) error {
-	release, err := h.admitV3()
+	release, err := h.admitV3(false)
 	if err != nil {
 		return err
 	}
