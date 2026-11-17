@@ -37,7 +37,6 @@ require_text "wiki_names_terminal_evidence" "docs/wiki/deep-dives/returned-repli
 require_text "wiki_names_code_entry_points" "docs/wiki/deep-dives/returned-replica-failback.md" "core/ops/failback_executor_controller.go"
 require_text "wiki_names_current_limits" "docs/wiki/deep-dives/returned-replica-failback.md" "automatic deployed Kubernetes failback"
 require_text "wiki_index_links_failback" "docs/wiki/index.md" "deep-dives/returned-replica-failback.md"
-require_text "topic_inventory_classifies_failback" "docs/wiki/topic-inventory.md" "returned-replica failback runtime | deep"
 require_text "product_roadmap_names_phase86" "internal/docs/product-roadmap.md" "Phases 74-86 add"
 require_text "product_roadmap_names_opt_in" "internal/docs/product-roadmap.md" "opt-in/source-gated failback"
 require_text "product_roadmap_defers_automatic" "internal/docs/product-roadmap.md" "automatic deployed failback"

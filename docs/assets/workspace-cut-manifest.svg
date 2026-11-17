@@ -1,0 +1,171 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="960" viewBox="0 0 1200 960" font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif">
+  <title>Agent workspace cut: the dirty chunk bitmap over 4 MiB chunk slots, the quiesced cut, immutable chunk uploads, the two-level manifest and the HEAD conditional update; a snapshot or fork copies only the HEAD root</title>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+    <marker id="arrowG" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#0f766e"/>
+    </marker>
+    <marker id="arrowI" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6366f1"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="960" rx="18" fill="#f8fafc"/>
+
+  <text x="40" y="52" font-size="26" font-weight="700" fill="#0f172a">Agent workspace · dirty bitmap → cut → chunks → HEAD</text>
+  <text x="40" y="80" font-size="15" fill="#475569">core/storage/chunk_layer.go (captureLocked), chunk_seam.go · core/frontend/chunkstore/manifest.go, chunk_remote.go, catalog.go</text>
+
+  <!-- Row 1: volume and dirty set -->
+  <rect x="40" y="100" width="1120" height="200" rx="14" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="60" y="128" font-size="15" font-weight="700" fill="#0f172a">Local volume (walstore), split into chunk slots</text>
+  <text x="60" y="148" font-size="12" fill="#475569">chunk = 1024 blocks × 4 KiB = 4 MiB (defaultChunkBlocks × BlockSize) · chunk i holds blocks [1024·i, 1024·i + 1024)</text>
+
+  <g font-size="11.5" text-anchor="middle">
+    <rect x="60"  y="162" width="80" height="40" rx="4" fill="#f1f5f9" stroke="#cbd5e1"/><text x="100" y="187" fill="#475569">c0</text>
+    <rect x="144" y="162" width="80" height="40" rx="4" fill="#fde68a" stroke="#f59e0b"/><text x="184" y="187" fill="#92400e" font-weight="600">c1</text>
+    <rect x="228" y="162" width="80" height="40" rx="4" fill="#f1f5f9" stroke="#cbd5e1"/><text x="268" y="187" fill="#475569">c2</text>
+    <rect x="312" y="162" width="80" height="40" rx="4" fill="#f1f5f9" stroke="#cbd5e1"/><text x="352" y="187" fill="#475569">c3</text>
+    <rect x="396" y="162" width="80" height="40" rx="4" fill="#fde68a" stroke="#f59e0b"/><text x="436" y="187" fill="#92400e" font-weight="600">c4</text>
+    <rect x="480" y="162" width="80" height="40" rx="4" fill="#fde68a" stroke="#f59e0b"/><text x="520" y="187" fill="#92400e" font-weight="600">c5</text>
+    <rect x="564" y="162" width="80" height="40" rx="4" fill="#f1f5f9" stroke="#cbd5e1"/><text x="604" y="187" fill="#475569">c6</text>
+    <rect x="648" y="162" width="80" height="40" rx="4" fill="#f1f5f9" stroke="#cbd5e1"/><text x="688" y="187" fill="#475569">c7</text>
+    <rect x="732" y="162" width="80" height="40" rx="4" fill="#fde68a" stroke="#f59e0b"/><text x="772" y="187" fill="#92400e" font-weight="600">c8</text>
+    <text x="842" y="187" fill="#64748b">…</text>
+    <rect x="872" y="162" width="80" height="40" rx="4" fill="#f1f5f9" stroke="#cbd5e1"/><text x="912" y="187" fill="#475569">c256</text>
+    <text x="982" y="187" fill="#64748b">…</text>
+  </g>
+  <g font-size="13" font-weight="700" text-anchor="middle" font-family="Consolas, Menlo, monospace">
+    <text x="100" y="228" fill="#94a3b8">0</text><text x="184" y="228" fill="#b45309">1</text><text x="268" y="228" fill="#94a3b8">0</text>
+    <text x="352" y="228" fill="#94a3b8">0</text><text x="436" y="228" fill="#b45309">1</text><text x="520" y="228" fill="#b45309">1</text>
+    <text x="604" y="228" fill="#94a3b8">0</text><text x="688" y="228" fill="#94a3b8">0</text><text x="772" y="228" fill="#b45309">1</text>
+    <text x="912" y="228" fill="#94a3b8">0</text>
+  </g>
+  <text x="1012" y="190" font-size="12" font-weight="600" fill="#0f172a">chunk slots</text>
+  <text x="1012" y="228" font-size="12" font-weight="600" fill="#b45309">dirty bitmap</text>
+  <text x="60" y="256" font-size="12" fill="#334155">An extent write marks its chunk in memory, O(1), no I/O (OnExtentWrite). Dirty set = persisted bitmap ∪ chunks of WAL entries above the checkpoint.</text>
+  <text x="60" y="276" font-size="12" fill="#334155">The bitmap is made durable before the checkpoint passes those WAL entries (BeforeCheckpointAdvance). It may over-report, never under-report.</text>
+
+  <!-- Row 2: cut pipeline -->
+  <text x="40" y="334" font-size="15" font-weight="700" fill="#0f172a">The cut (captureLocked)</text>
+  <g>
+    <rect x="40" y="346" width="210" height="108" rx="10" fill="#eef2ff" stroke="#6366f1" stroke-width="1.5"/>
+    <text x="54" y="370" font-size="13" font-weight="700" fill="#312e81">1 · quiesce</text>
+    <text x="54" y="392" font-size="12" fill="#334155">capture barrier (exclusive),</text>
+    <text x="54" y="410" font-size="12" fill="#334155">Sync: H = synced LSN</text>
+    <text x="54" y="436" font-size="11" fill="#64748b">large dirty sets pre-copy first</text>
+
+    <rect x="268" y="346" width="210" height="108" rx="10" fill="#fffbeb" stroke="#f59e0b" stroke-width="1.5"/>
+    <text x="282" y="370" font-size="13" font-weight="700" fill="#92400e">2 · copy</text>
+    <text x="282" y="392" font-size="12" fill="#334155">read dirty chunks into</text>
+    <text x="282" y="410" font-size="12" fill="#334155">buffers, SHA-256; release</text>
+    <text x="282" y="436" font-size="11" fill="#64748b">pause = Sync + this copy</text>
+
+    <rect x="496" y="346" width="210" height="108" rx="10" fill="#ecfdf5" stroke="#10b981" stroke-width="1.5"/>
+    <text x="510" y="370" font-size="13" font-weight="700" fill="#065f46">3 · upload changed</text>
+    <text x="510" y="392" font-size="12" fill="#334155">intent first, then new keys</text>
+    <text x="510" y="410" font-size="12" fill="#334155">(8 parallel by default)</text>
+    <text x="510" y="436" font-size="11" fill="#64748b">same hash or all-zero: no upload</text>
+
+    <rect x="724" y="346" width="210" height="108" rx="10" fill="#ecfdf5" stroke="#10b981" stroke-width="1.5"/>
+    <text x="738" y="370" font-size="13" font-weight="700" fill="#065f46">4 · segments</text>
+    <text x="738" y="392" font-size="12" fill="#334155">rewrite only segments with</text>
+    <text x="738" y="410" font-size="12" fill="#334155">changed chunks (intent first)</text>
+    <text x="738" y="436" font-size="11" fill="#64748b">unchanged segments keep keys</text>
+
+    <rect x="952" y="346" width="208" height="108" rx="10" fill="#eef2ff" stroke="#6366f1" stroke-width="1.5"/>
+    <text x="966" y="370" font-size="13" font-weight="700" fill="#312e81">5 · CAS HEAD</text>
+    <text x="966" y="392" font-size="12" fill="#334155">on {gen, epoch}; then drop</text>
+    <text x="966" y="410" font-size="12" fill="#334155">intents, reset the bitmap</text>
+    <text x="966" y="436" font-size="11" fill="#64748b">post-cut dirt stays set</text>
+
+    <line x1="251" y1="400" x2="266" y2="400" stroke="#475569" stroke-width="1.6" marker-end="url(#arrow)"/>
+    <line x1="479" y1="400" x2="494" y2="400" stroke="#475569" stroke-width="1.6" marker-end="url(#arrow)"/>
+    <line x1="707" y1="400" x2="722" y2="400" stroke="#475569" stroke-width="1.6" marker-end="url(#arrow)"/>
+    <line x1="935" y1="400" x2="950" y2="400" stroke="#475569" stroke-width="1.6" marker-end="url(#arrow)"/>
+  </g>
+
+  <!-- Row 3: remote layout -->
+  <rect x="40" y="480" width="1120" height="456" rx="14" fill="#ecfdf5" stroke="#10b981" stroke-width="1.5"/>
+  <text x="60" y="508" font-size="15" font-weight="700" fill="#065f46">SeaweedFS: filer entries and immutable chunk objects</text>
+
+  <!-- HEAD v1 -->
+  <rect x="60" y="524" width="300" height="214" rx="10" fill="#ffffff" stroke="#6366f1" stroke-width="1.8"/>
+  <text x="76" y="548" font-size="13.5" font-weight="700" fill="#312e81">v1/HEAD (root, format 2)</text>
+  <text x="76" y="572" font-size="12" fill="#334155">Gen g+1 · Epoch e · Holder A</text>
+  <text x="76" y="592" font-size="12" fill="#334155">RemoteLSN H · State active</text>
+  <text x="76" y="612" font-size="12" fill="#334155">ChunkBytes 4 MiB · ManifestChunkCount</text>
+  <text x="76" y="636" font-size="12" font-weight="600" fill="#0f172a">Segments:</text>
+  <text x="90" y="656" font-size="12" fill="#334155">0 → @v1/seg/n2 (new)</text>
+  <text x="90" y="676" font-size="12" fill="#334155">1 → @v1/seg/n1 (unchanged)</text>
+  <text x="76" y="702" font-size="11" fill="#64748b">{gen, epoch, holder} mirrored in</text>
+  <text x="76" y="718" font-size="11" fill="#64748b">extended attributes for the CAS</text>
+
+  <!-- segments -->
+  <rect x="420" y="524" width="330" height="104" rx="10" fill="#ffffff" stroke="#10b981" stroke-width="1.5"/>
+  <text x="436" y="548" font-size="13" font-weight="700" fill="#065f46">segment 0: @v1/seg/n2 (new)</text>
+  <text x="436" y="568" font-size="11.5" fill="#047857">chunks 0–255 (1 GiB = 256 chunks)</text>
+  <text x="436" y="588" font-size="11.5" fill="#334155">1 → k1', 4 → k4', 5 → k5', 8 → k8' (new keys)</text>
+  <text x="436" y="606" font-size="11.5" fill="#334155">others → previous keys · absent index = zeros</text>
+
+  <rect x="420" y="640" width="330" height="98" rx="10" fill="#ffffff" stroke="#10b981" stroke-width="1.5"/>
+  <text x="436" y="664" font-size="13" font-weight="700" fill="#065f46">segment 1: @v1/seg/n1 (unchanged)</text>
+  <text x="436" y="684" font-size="11.5" fill="#047857">chunks 256–511</text>
+  <text x="436" y="704" font-size="11.5" fill="#334155">each entry: chunk key + SHA-256</text>
+  <text x="436" y="722" font-size="11.5" fill="#334155">same object, same key as before the cut</text>
+
+  <line x1="361" y1="656" x2="418" y2="580" stroke="#0f766e" stroke-width="1.6" marker-end="url(#arrowG)"/>
+  <line x1="361" y1="676" x2="418" y2="686" stroke="#0f766e" stroke-width="1.6" marker-end="url(#arrowG)"/>
+
+  <!-- chunk objects -->
+  <text x="800" y="548" font-size="13" font-weight="700" fill="#065f46">Chunk objects (write-once)</text>
+  <g>
+    <rect x="800" y="560" width="54" height="30" rx="4" fill="#6ee7b7"/><text x="827" y="580" font-size="11" fill="#065f46" text-anchor="middle">k1'</text>
+    <rect x="860" y="560" width="54" height="30" rx="4" fill="#6ee7b7"/><text x="887" y="580" font-size="11" fill="#065f46" text-anchor="middle">k4'</text>
+    <rect x="920" y="560" width="54" height="30" rx="4" fill="#6ee7b7"/><text x="947" y="580" font-size="11" fill="#065f46" text-anchor="middle">k5'</text>
+    <rect x="980" y="560" width="54" height="30" rx="4" fill="#6ee7b7"/><text x="1007" y="580" font-size="11" fill="#065f46" text-anchor="middle">k8'</text>
+    <rect x="800" y="598" width="54" height="30" rx="4" fill="#a7f3d0"/><text x="827" y="618" font-size="11" fill="#065f46" text-anchor="middle">k1</text>
+    <rect x="860" y="598" width="54" height="30" rx="4" fill="#a7f3d0"/><text x="887" y="618" font-size="11" fill="#065f46" text-anchor="middle">k4</text>
+    <rect x="920" y="598" width="54" height="30" rx="4" fill="#a7f3d0"/><text x="947" y="618" font-size="11" fill="#065f46" text-anchor="middle">k2</text>
+    <rect x="980" y="598" width="54" height="30" rx="4" fill="#a7f3d0"/><text x="1007" y="618" font-size="11" fill="#065f46" text-anchor="middle">…</text>
+  </g>
+  <text x="1046" y="580" font-size="11" fill="#047857">this cut</text>
+  <text x="1046" y="618" font-size="11" fill="#047857">earlier cuts</text>
+  <text x="800" y="652" font-size="11.5" fill="#334155">key: chunks/e&lt;epoch&gt;/c&lt;idx&gt;/&lt;nonce&gt;-&lt;seq&gt; (newKey)</text>
+  <text x="800" y="670" font-size="11.5" fill="#334155">keys/&lt;key&gt; binds it to a needle; never rebound</text>
+  <text x="800" y="688" font-size="11.5" fill="#334155">old versions stay while a snapshot or fork</text>
+  <text x="800" y="706" font-size="11.5" fill="#334155">reaches them; GC reclaims the rest</text>
+  <line x1="751" y1="588" x2="796" y2="576" stroke="#0f766e" stroke-width="1.4" marker-end="url(#arrowG)"/>
+  <line x1="751" y1="700" x2="796" y2="616" stroke="#0f766e" stroke-width="1.4" marker-end="url(#arrowG)"/>
+
+  <!-- snapshot and fork -->
+  <rect x="60" y="760" width="300" height="160" rx="10" fill="#ffffff" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="76" y="784" font-size="13.5" font-weight="700" fill="#0f172a">Snapshot: v1/snaps/s1/&lt;attempt&gt;</text>
+  <text x="76" y="806" font-size="12" fill="#334155">an exclusive create holding a copy</text>
+  <text x="76" y="824" font-size="12" fill="#334155">of the HEAD root; name claimed in</text>
+  <text x="76" y="842" font-size="12" fill="#334155">snapnames/s1 first</text>
+  <text x="76" y="870" font-size="12" font-weight="600" fill="#065f46">no segment or chunk is copied</text>
+
+  <rect x="420" y="760" width="330" height="160" rx="10" fill="#ffffff" stroke="#6366f1" stroke-width="1.8" stroke-dasharray="6 4"/>
+  <text x="436" y="784" font-size="13.5" font-weight="700" fill="#312e81">Fork: v2/VOLUME + v2/HEAD</text>
+  <text x="436" y="806" font-size="12" fill="#334155">VOLUME: origin fork, parent v1@s1</text>
+  <text x="436" y="824" font-size="12" fill="#334155">HEAD: Gen 1 · Epoch 0 · no holder</text>
+  <text x="436" y="842" font-size="12" fill="#334155">RemoteLSN and Segments copied from s1:</text>
+  <text x="450" y="862" font-size="12" fill="#334155">0 → @v1/seg/n2 · 1 → @v1/seg/n1</text>
+  <text x="436" y="890" font-size="12" font-weight="600" fill="#065f46">owner-qualified keys: v2 shares v1's objects</text>
+
+  <line x1="361" y1="840" x2="418" y2="840" stroke="#475569" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text x="389" y="832" font-size="11" fill="#475569" text-anchor="middle">fork</text>
+  <path d="M600,758 C600,746 560,746 560,732" fill="none" stroke="#6366f1" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#arrowI)"/>
+  <path d="M210,758 C210,748 210,748 210,740" fill="none" stroke="#94a3b8" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#arrow)"/>
+  <text x="222" y="752" font-size="11" fill="#64748b">copy of root</text>
+
+  <rect x="800" y="760" width="340" height="160" rx="10" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="816" y="784" font-size="13.5" font-weight="700" fill="#0f172a">Other filer entries per volume</text>
+  <text x="816" y="808" font-size="12" fill="#334155">intents/&lt;id&gt;: keys about to be published;</text>
+  <text x="816" y="826" font-size="12" fill="#334155">GC roots until the CAS outcome is known</text>
+  <text x="816" y="850" font-size="12" fill="#334155">VOLUME: identity, geometry, lineage;</text>
+  <text x="816" y="868" font-size="12" fill="#334155">write-once</text>
+  <text x="816" y="892" font-size="12" fill="#334155">snapnames/&lt;name&gt;: name records</text>
+</svg>

@@ -1,10 +1,14 @@
-# Seaweed Block design
+# Seaweed Block design: core
 
-This is the design reference for Seaweed Block. It describes how the code works, which invariants it maintains, where each invariant is enforced, which tests cover it, and what is not covered yet.
+This is the design reference for the core of Seaweed Block. It describes how the code works, which invariants it maintains, where each invariant is enforced, which tests cover it, and what is not covered yet.
 
-- **Part 1** describes the core block service: frontends, storage engines, durability, the authority model, replication for the Kubernetes line, and recovery.
-- **Part 2** describes agent workspace disks. They are a composition of core parts plus a SeaweedFS chunk backend.
-- **Part 3** covers verification across the codebase, lessons learned, and known issues.
+The design is split into three documents: this shared core and one document per product line.
+
+| Document | Covers |
+|---|---|
+| Core design (this document) | **Part 1**, the core block service: frontends and the Backend contract, walstore, smartwal (experimental), durability and `Sync`, the authority model, the replication engine, recovery. **Part 2**, verification, lessons and known issues across the codebase. |
+| [Agent workspace design](agent-workspace-design.md) | Agent workspace disks (proof of concept): a frontend, local walstore and a SeaweedFS chunk backend; one replica per workspace with durability from snapshots; the cut, the two-level manifest, snapshots, forks, GC, leases and host moves; the security model. |
+| [Kubernetes block design](kubernetes-block-design.md) | Kubernetes block volumes (alpha): the CSI driver, Helm and the operator controllers, RF=2/3 replication and failover from the product view, iSCSI ALUA, multipath and NVMe/TCP ANA, authority promotion, readiness, the operation layer. |
 
 Code references name a file and a function, not a line number, so they stay valid as the code changes. Test references name the test function and its file. "Model-checked" means the protocol was specified in TLA+ and checked exhaustively with TLC at small scale. The specifications are in [`docs/spec/`](../spec/README.md); Go regression tests are the in-repo evidence for every counterexample found that way.
 
@@ -16,10 +20,13 @@ Code references name a file and a function, not a line number, so they stay vali
   - [1.3 smartwal: in-place writes plus a metadata ring](#13-smartwal-in-place-writes-plus-a-metadata-ring)
   - [1.4 Durability and Sync](#14-durability-and-sync)
   - [1.5 Authority: blockmaster, assignments, epochs, leases](#15-authority-blockmaster-assignments-epochs-leases)
-  - [1.6 Replication and failover (Kubernetes line)](#16-replication-and-failover-kubernetes-line)
+  - [1.6 Replication and failover](#16-replication-and-failover)
   - [1.7 Recovery and typed fail-closed reasons](#17-recovery-and-typed-fail-closed-reasons)
-- [Part 2. Agent workspace disks](#part-2-agent-workspace-disks)
-- [Part 3. Verification, lessons, known issues](#part-3-verification-lessons-known-issues)
+- [Part 2. Verification, lessons, known issues](#part-2-verification-lessons-known-issues)
+  - [2.1 Test methods](#21-test-methods)
+  - [2.2 What is not covered](#22-what-is-not-covered)
+  - [2.3 Lessons learned](#23-lessons-learned)
+  - [2.4 Known issues and work in progress](#24-known-issues-and-work-in-progress)
 
 ---
 
@@ -91,6 +98,12 @@ stateDiagram-v2
 - A WAL record is a 30-byte header (LSN, reserved, type, flags, LBA, length), the data, and an 8-byte trailer (CRC32, record size) (`core/storage/wal_entry.go`). A record that does not fit at the end of the region is preceded by a padding record and starts at offset 0 (`core/storage/wal_writer.go` `walWriter.append`).
 - An in-memory dirty map maps each LBA to its newest WAL record and LSN (`core/storage/dirty_map.go`).
 
+<p align="center">
+  <img src="../assets/walstore-layout.svg" alt="walstore file: a 4 KiB superblock, a circular WAL of 64 MiB by default, and the extent; the superblock fields; the WAL ring with head, durable tail and a padding record before the wrap; the record format with a 30-byte prefix and an 8-byte trailer; the five steps Write, Sync, flusher, checkpoint and reuse; and recovery from the superblock" width="100%">
+</p>
+
+Numbers in the figure, all from the code: the superblock is 4096 bytes and the WAL starts at offset 4096 (`superblock.go` `superblockSize`, `newSuperblock`, `validate`), and 96 bytes of it are encoded (`superblock.writeTo`); the WAL region is 64 MiB (the `newSuperblock` default, which walstore does not override), and the extent starts at `WALOffset + WALSize` with one slot per block (`walstore.go` `CreateWALStoreWithOptions`, `openInitializedWithMetadata`); a record has a 30-byte prefix and an 8-byte trailer (`wal_entry.go` `walEntryPrefixSize`, `walEntryHeaderSize`); the group committer waits up to 1 ms or 64 waiters (`openInitializedWithMetadata`, `NewGroupCommitter`); the flusher runs every 100 ms (`flusher.go` `newFlusher`). A store may also bind an optional metadata region after the extent through a metadata factory (`block_metadata.go` `bindBlockMetadata`); it is not shown.
+
 **Write.** `WALStore.Write` takes the capture barrier (shared), the lifecycle lock and WAL admission (back-pressure when the WAL is full), assigns the next LSN under `mu`, appends the record with `pwrite` only, updates the dirty map and notifies an attached chunk layer. The write is not durable until a covering `Sync` returns.
 
 **Sync.** `WALStore.Sync` records the current head, runs a group-committed `fsync` (`core/storage/group_commit.go`), and returns the new durable frontier. A request whose writes are already covered by a completed physical sync reuses it (`walSyncCovered`, `syncWALBatch`); reuse is disabled when a chunk layer is attached or after replica apply and direct extent writes.
@@ -108,8 +121,14 @@ stateDiagram-v2
 1. Derive scan ranges from the persisted `[tail, head)`. An empty window (head == tail) is scanned from its own position, not from offset 0.
 2. Decode each range until a record fails CRC or is truncated. If a valid record with a higher LSN follows a bad one, record a `wal_hole_suspected` warning (detection only).
 3. Skip records at or below the checkpoint. Replay the rest by last writer wins on LSN (`dirtyMap.putAtIfNewer`), not by physical order.
-4. Rebuild and validate the retained bounds; an inconsistent order or size is a `WALIntegrityFailure` and the store does not open.
+4. Rebuild and validate the retained bounds; an inconsistent order or size is a WAL integrity failure (`NewWALIntegrityFailure`) and the store does not open.
 5. `Recover` persists rebuilt bounds before any append.
+
+<p align="center">
+  <img src="../assets/walstore-lsn-watermarks.svg" alt="LSN timeline with the checkpoint, the synced frontier and the newest written LSN: writes at or below the checkpoint are in the extent, writes up to the synced frontier are fsynced in the WAL and replayed after a crash, writes above it were never acknowledged and may be lost" width="100%">
+</p>
+
+The watermarks are `WALStore.checkpointLSN` (persisted as the superblock's `WALCheckpointLSN`), `syncedLSN` (returned by `Sync`) and `walHead` (the newest written LSN; `nextLSN` is one above it). Only the checkpoint and the WAL bytes are on disk. After a crash, `Recover` sets the synced frontier to the higher of the checkpoint and the highest valid record it replays.
 
 ```mermaid
 stateDiagram-v2
@@ -134,7 +153,7 @@ stateDiagram-v2
 | Synced entries above an intentional LSN gap (a rebuild's frontier jump) are kept | `recovery.go` (replay keyed on the checkpoint, not on a contiguous prefix) | `TestWALStoreRecoverKeepsSyncedEntriesAboveAnUnpersistedFrontierJump` (`core/storage/walstore_recovery_frontier_gap_test.go`) | yes |
 | A failed checkpoint metadata write neither publishes nor recycles | `persistCheckpointReleasing` | `TestFlusherCheckpointMetadataFailureDoesNotPublishOrRecycle` (`core/storage/walstore_checkpoint_safety_test.go`) | — |
 
-**Tests and coverage.** Unit tests with hand-built torn and corrupted bytes; fault seams for append and metadata writes; a Linux SIGKILL crash test over checkpoint windows. Not covered: real power loss (dropped or reordered page-cache writes) at the device level, fuzzing of the recovery scan as a whole (the WAL record decoder is fuzzed, see 3.2), and crash-point enumeration.
+**Tests and coverage.** Unit tests with hand-built torn and corrupted bytes; fault seams for append and metadata writes; a Linux SIGKILL crash test over checkpoint windows. Not covered: real power loss (dropped or reordered page-cache writes) at the device level, fuzzing of the recovery scan as a whole (the WAL record decoder is fuzzed, see 2.2), and crash-point enumeration.
 
 **Review directions.**
 - Any change to recovery must say what it does for: a torn tail, a torn record inside the retained window, a wrapped log, an empty window, and a corrupted synced record.
@@ -158,9 +177,15 @@ stateDiagram-v2
 
 **Layout.** A 4 KB header, a ring of 32-byte records, and the extent (`core/storage/smartwal/store.go`). A record holds magic, flags, LBA, LSN, the CRC32 of the 4 KB data block, and a record CRC (`core/storage/smartwal/record.go`). Slot = LSN mod capacity (`ring.go` `appendAt`).
 
+<p align="center">
+  <img src="../assets/smartwal-layout.svg" alt="smartwal file: a 4 KiB header, a ring of 32-byte records and the extent; the byte layout of one record; the write order read old block, write in place, append record, Sync; the crash window between the in-place write and the append; recovery" width="100%">
+</p>
+
+Numbers in the figure: the header is 4096 bytes (`smartwal/superblock.go` `headerSize`); a record is 32 bytes with the byte offsets of `record.go` `encode` (magic 0xAC; flags write 0x01, trim 0x02, barrier 0x04); the default ring has 65,536 slots, 2 MiB (`store.go` `defaultWALSlots`). On a data CRC mismatch, recovery fails closed (`recovery.go` `runRecoveryCounting`); the comment on the `Store` type still says such a record is skipped, which the code no longer does.
+
 **Write, read, Sync.** `Store.writeAt` reads the old block (kept for rollback), writes the new data in place, then appends the record; if the append fails, the old block is written back. Reads always come from the extent. `Sync` is one `fsync` of the file.
 
-**Recovery.** `runRecoveryCounting` (`core/storage/smartwal/recovery.go`): scan slots (record-CRC failures are skipped and counted as a warning), keep the highest-LSN record per LBA, check the extent block against its data CRC, and fail closed with `WALIntegrityFailure` on a mismatch. The frontier is the highest verified LSN.
+**Recovery.** `runRecoveryCounting` (`core/storage/smartwal/recovery.go`): scan slots (record-CRC failures are skipped and counted as a warning), keep the highest-LSN record per LBA, check the extent block against its data CRC, and fail closed with a WAL integrity failure (`NewWALIntegrityFailure`) on a mismatch. The frontier is the highest verified LSN.
 
 ```mermaid
 stateDiagram-v2
@@ -184,18 +209,19 @@ stateDiagram-v2
 
 **Review directions.** Any fix must define the order between the record and the data and say how a torn pair is classified (torn and unsynced, versus corrupted and synced). A synced watermark persisted outside the ring is the planned way to tell them apart.
 
-**Lessons.** #51 (open): a CRC-failed committed record is skipped and the volume reports ready. #155 made this visible as a warning; the fix needs the format change described in Part 3.
+**Lessons.** #51 (open): a CRC-failed committed record is skipped and the volume reports ready. #155 made this visible as a warning; the fix needs the format change described in Part 2.
 
 ## 1.4 Durability and Sync
 
 - **One durability point.** A write is durable only when a `Sync` covering its LSN returns nil. `Sync` returns the durable frontier.
 - **Group commit.** Concurrent `Sync` callers share one `fsync`. The committer waits up to `MaxDelay` (1 ms) or until 64 waiters are queued (`core/storage/group_commit.go` `NewGroupCommitter`, `Run`).
 - **Deduplication.** A sync that started after the last mutation covers later `Sync` requests with no new writes (`walstore.go` `walSyncCovered`).
+- **A failed `fsync` is sticky.** The first failed `fsync` of the store's file (WAL, extent or superblock), or a failed WAL append, latches a typed `io_error` fault; the open store then refuses every later `Sync`, write and checkpoint until it is reopened and recovered (`walstore.go` `noteFsyncFailure`, `noteAppendFailure`, `syncFile`, `stickyIOFault`). Every `fsync` of the file is serialized with that latch, so no publication can pass the check and complete after another path's `fsync` failed (#172).
 - **With replication.** `ReplicationVolume.Sync` queues a barrier behind every shipped write, runs the local `fsync` in parallel, and applies the volume's durability mode (§1.6).
 - **Observability.** Per-stage power-of-two histograms (frontend receive, WAL append, group-commit wait, physical sync, return) are exposed under `/status/durable` (`docs/fsync-latency.md`).
 
 **Review directions.**
-- `fsync` failure semantics: after a failed `fsync`, the kernel may have dropped the dirty pages. A later successful `fsync` does not prove the earlier data is durable (see Known issues).
+- `fsync` failure semantics: after a failed `fsync`, the kernel may have dropped the dirty pages, so a later successful `fsync` proves nothing about them. Any new path that `fsync`s the store's file must go through `syncFile`, so the fault latches.
 - Do not add a stage's p99 to another's; the populations differ.
 
 ## 1.5 Authority: blockmaster, assignments, epochs, leases
@@ -204,7 +230,7 @@ stateDiagram-v2
 - blockmaster is the only component that mints epochs. A reassignment takes the maximum epoch published for the volume plus one (`core/authority/authority.go` `applyWithWorkspaceMove`, `IntentReassign` case). A workspace move reserves its epoch the same way and journals the move before the epoch is published (`core/authority/workspace.go` `prepareWorkspaceMoveLocked`).
 - If a durable authority write fails, the publisher marks the volume uncertain and refuses further writes for it, so a later write cannot go backwards (`workspace.go` `persistWorkspaceLocked`).
 - blockvolume never elects itself; it serves under the assignment it was given, and every I/O re-checks that assignment (§1.1).
-- Workspace volumes add a lease (§2.5).
+- Workspace volumes add a lease ([agent workspace design §7](agent-workspace-design.md#7-lease-takeover-and-host-moves)).
 
 ```mermaid
 stateDiagram-v2
@@ -228,9 +254,9 @@ stateDiagram-v2
 
 **Review directions.** Any new way to publish an assignment must go through the publisher's epoch rule; nothing else may construct an epoch. The control plane has no authentication today (see Known issues), so every destructive RPC is reachable by anyone who can reach the port.
 
-## 1.6 Replication and failover (Kubernetes line)
+## 1.6 Replication and failover
 
-Agent workspaces do not use this path (they run RF=1); Kubernetes volumes use RF=2 or RF=3.
+This section is the replication engine as a core component. Kubernetes volumes use it when their StorageClass sets `replicationFactor` to 2 or 3 (the default is 1); agent workspaces do not use it (they run RF=1). The product view (StorageClass and Helm settings, failure detection, the promotion gate, multipath, readiness) is in the [Kubernetes block design](kubernetes-block-design.md).
 
 **Shipping.** The primary writes locally first, then ships each write to every replica in LSN order (`core/replication/volume.go` `OnLocalWrite`), through a per-peer FIFO.
 
@@ -254,12 +280,14 @@ stateDiagram-v2
   Healthy --> Degraded: barrier or ship failure
   Degraded --> CatchingUp: gap within the primary's WAL
   CatchingUp --> Healthy: caught up to the target
+  CatchingUp --> Degraded: catch-up fails
+  Degraded --> Healthy: recovers
   Degraded --> NeedsRebuild: gap beyond WAL retention or retries exhausted
   CatchingUp --> NeedsRebuild: WAL recycled
-  NeedsRebuild --> Healthy: dual-lane rebuild completes and acks durably
+  NeedsRebuild --> [*]: terminal for this peer
 ```
 
-(Peer states are in `core/replication/peer.go` `ReplicaState`.)
+(Peer states and allowed transitions are in `core/replication/peer.go` `ReplicaState`, `replicaStateTransitionAllowed`. `NeedsRebuild` is terminal in this state machine; the rebuild itself runs as a separate dual-lane session, and the Kubernetes line drives it through an opt-in operator path, see the [Kubernetes block design](kubernetes-block-design.md#4-replication-and-failover).)
 
 **Invariants.**
 
@@ -302,185 +330,9 @@ The reason is an unhealthy, not-eligible fact; blockmaster does not promote or s
 
 ---
 
-# Part 2. Agent workspace disks
+# Part 2. Verification, lessons, known issues
 
-An agent workspace disk is a composition of core parts:
-
-```mermaid
-flowchart LR
-  G["guest microVM"] -->|"virtio-blk"| F["frontend: NVMe/TCP loopback or ublk (1.1)"]
-  F -->|"Read / Write / Sync"| W["local engine: walstore (1.2)"]
-  W -->|"dirty chunk bitmap"| C["chunk layer: quiesced cut"]
-  C -->|"upload changed 4 MiB chunks, intents first"| S[("SeaweedFS: immutable chunks + segment manifests")]
-  C -->|"CAS HEAD on {gen, epoch}"| H["HEAD root (about 2 KB)"]
-  H -->|"snapshot / fork = copy the root"| H2["snapshot or forked volume"]
-  M["blockmaster: epoch + lease (1.5)"] -->|"higher epoch"| T["another host: claim HEAD, lazy-load chunks"]
-  T --> H
-```
-
-- **Frontend:** the same NVMe/TCP and ublk code as the Kubernetes line, bound to loopback.
-- **Local engine:** walstore only (`--durable-impl=walstore-chunk`). `Sync` still means local durability; nothing on the write path waits for the network.
-- **Backend:** SeaweedFS. Chunks live in volume servers; HEAD, key bindings, intents and snapshot records live in the filer.
-- **Single replica by design.** Durability against host loss comes from cuts to SeaweedFS. A host restart loses nothing (local WAL); a permanent host loss loses the writes since the last cut.
-- **Host moves** reuse the epoch from §1.5: the new host claims HEAD with a higher epoch.
-
-## 2.1 Remote layout
-
-Per volume, in the filer (`core/frontend/chunkstore/catalog.go` header, `chunk_remote.go` header):
-- `HEAD`: the published state as JSON, with `{gen, epoch, holder}` mirrored in extended attributes for the conditional update.
-- `keys/<key>`: one write-once entry per chunk key, naming the needle that holds the bytes.
-- `intents/<id>`: live publication intents (GC roots).
-- `VOLUME`: identity, geometry, origin (create or fork) and parent; write-once.
-- `snapnames/<name>`: name records; `snaps/<name>/<attempt>`: snapshots.
-
-HEAD fields: `Gen`, `Epoch`, `Holder`, `RemoteLSN`, chunk or segment references, `State`, `DetachedBy` (`core/storage/chunk_seam.go` `chunkHead`). A chunk index missing from HEAD reads as zeros. A chunk is 4 MiB (1024 blocks of 4 KiB). Chunk keys are `chunks/e<epoch>/c<idx>/<nonce>-<seq>` and are never reused (`chunk_layer.go` `newKey`).
-
-**Two-level manifest.** The HEAD root lists segment references, not chunks. Each segment covers 1 GiB of logical range and lists that range's chunk references with SHA-256 (`core/frontend/chunkstore/manifest.go`). Unchanged segments keep their keys. A flat (format 1) HEAD is upgraded at its next cut (`docs/chunk-manifests.md`).
-
-## 2.2 Dirty tracking (bitmap)
-
-- Every extent write marks its chunk dirty in memory, in O(1), with no I/O (`chunk_layer.go` `OnExtentWrite`).
-- The dirty set is the persisted bitmap plus the chunks of WAL entries above the checkpoint, so the bitmap is off the write path. It is made durable before the checkpoint advances (`BeforeCheckpointAdvance`, called from `persistCheckpointReleasing`).
-- The bitmap may over-report, never under-report. A lost bitmap, or a header that does not match HEAD, falls back to a background per-chunk SHA-256 comparison; cuts are refused until it finishes (`startReconcile`, `errChunkReconciling`).
-
-## 2.3 The cut
-
-`chunkLayerImpl.captureLocked` (`core/storage/chunk_layer.go`; contract in the `chunk_seam.go` header):
-1. **Admit:** refuse when closed, fenced, detached, during a base install, or when `CaptureAllowed` fails (healthy primary, unchanged lineage, valid lease).
-2. **Pre-copy:** if many chunks are dirty, stage them outside the barrier in rounds.
-3. **Quiesce:** take the capture barrier exclusively, `Sync`; H is the synced LSN.
-4. **Copy:** read every candidate chunk through the normal read path into immutable buffers and hash them; release the barrier. A staged copy is reused only if its chunk was not written since and HEAD is unchanged.
-5. **LSN guard:** if H is below HEAD's `RemoteLSN`, refuse (`lsn_behind`).
-6. **Diff:** upload only chunks whose SHA-256 differs from HEAD; drop all-zero chunks from the map.
-7. **Intent first:** write an intent naming every key, then upload in parallel (default 8).
-8. **Manifest:** build segments; new segments are also covered by an intent before upload.
-9. **Re-admit** right before the CAS; fence if a superseding holder owns HEAD.
-10. **CAS** HEAD on `{gen, epoch}`. On success, drop the intents and reset the bitmap, keeping post-cut dirt.
-11. **Unknown outcome:** re-read HEAD; never retry blindly. If unresolved, keep the proposal pending and keep the intents.
-
-`ChunkRemote.CASHead` (`core/frontend/chunkstore/chunk_remote.go`) refuses a lower epoch, any move of a deleting, purging or deleted HEAD, a `{gen, epoch}` mismatch and a lower `RemoteLSN`, then issues the filer's conditional `UpdateEntry` with `expected_extended = {swb.gen, swb.epoch}` (the first HEAD is an exclusive create). Only a definite refusal is a precondition failure; any other error is an unknown outcome.
-
-## 2.4 Snapshots, forks, retention, GC, volume delete
-
-- **Snapshot** (`Catalog.CreateSnapshot`): claim the name with an exclusive name record `{request, attempt}` (a retry gets its own attempt back); check the volume is not being deleted; write an intent with a deadline; re-check the deadline; exclusively create `snaps/<name>/<attempt>` holding a copy of the HEAD root. An unknown outcome keeps the intent; the caller retries with the same request id.
-- **Fork** (`Catalog.Fork`): claim the parent snapshot, check the source is not being deleted, write the target `VOLUME` (origin fork), then a HEAD at gen 1, epoch 0, no holder, with the parent's `RemoteLSN` and references. No chunk is copied.
-- **Retention** (`retention.go`): classes `semantic` and `pinned`; newest N, recent window and log-spaced keeps; a snapshot with a live fork claim is always kept; deletion uses the same conditional mark as `DeleteSnapshot`.
-- **GC** (`gc.go` `Collector.run`, operator-driven through `sw-block ops chunk gc`, preview by default):
-  - roots: every HEAD, every snapshot (including deleting ones), snapshot attempts, live intents, and segment objects; an unreadable segment aborts the mark;
-  - a capture intent expires only if it is older than the TTL, blockmaster has issued a higher epoch, and the remote HEAD has moved to a higher epoch; copy intents are settled only by a permanent tombstone at their publication target;
-  - the whole mark must finish within the grace period minus the operation deadline, and the collector requires grace greater than the deadline;
-  - a binding is deleted only if it is older than the grace period and was unrooted in two marks at least one grace period apart with unchanged binding bytes;
-  - deletion tombstones the binding (`swb.gc.deleted=1`), deletes the needle, then marks it `done`; bindings are never removed, so a key is never rebound.
-- **Volume delete** (`volume_delete.go` `DeleteVolume`): (a) a blockmaster deletion reservation; (b) one HEAD write to `deleting` (refused while HEAD is held); (c) refuse and revert if any snapshot name record exists; (c') commit `deleting → purging` bound to the same incarnation; (e) HEAD becomes `deleted` with no chunks and `VOLUME` is marked deleted. A deleted id is never attached or created again.
-
-## 2.5 Lease, takeover and host moves
-
-**Host guard** (`core/host/volume/workspace_lease.go` `WorkspaceLeaseGuard`): frontend I/O and cuts are admitted only with a granted, unexpired lease for the exact `{volume, replica, epoch}`. Validity is anchored to the renewal request's start time, and blockmaster's `ValidForNs` already subtracts half the clock-skew bound (`core/host/master/workspace_service.go` `leaseFact`). A late reply cannot extend admission. A fenced guard never reopens.
-
-**CLEAN move:** Detach publishes the final cut with `State = detached` in one CAS → revoke → the host drains frontend, replication and provider and acknowledges the stored detached HEAD generation → blockmaster checks the detached HEAD and the matching acknowledgement → new epoch → the new host claims HEAD.
-
-**FORCED move:** blockmaster waits until both the stored expiry and its conservative restart deadline plus the full skew bound have passed (`core/authority/workspace.go` `prepareWorkspaceMoveLocked`); the default bound is 20 s against a 30 s lease. The old host's late CAS fails on the epoch; its uploads become orphans for GC. Writes since the old host's last cut are lost.
-
-**Takeover** (`core/storage/chunk_restore.go` `ClaimChunkHead`, called before the chunk layer attaches in `core/frontend/durable/provider_chunk.go`): read HEAD; fence if HEAD has a higher epoch or another holder at the same epoch; seed the local LSN frontier from HEAD; CAS HEAD to the new epoch and holder; on an unknown outcome, succeed only if a re-read shows the exact proposal. I/O opens afterwards; blocks load lazily on first read.
-
-```mermaid
-stateDiagram-v2
-  [*] --> active: initial HEAD (gen 1, epoch 0) or fork HEAD
-  active --> active: holder's cut CAS (gen+1)
-  active --> detached: Detach final cut
-  detached --> active: takeover CAS (higher epoch, new holder)
-  active --> active: forced takeover (higher epoch)
-  active --> deleting: delete mark (HEAD not held)
-  detached --> deleting: delete mark
-  deleting --> active: snapshots exist, delete reverts
-  deleting --> detached: snapshots exist, delete reverts
-  deleting --> purging: commit point (same incarnation)
-  purging --> deleted: chunks dropped, VOLUME marked deleted
-  deleted --> [*]
-  [*] --> aborted: GC tombstones a dead fork's HEAD
-```
-
-```mermaid
-stateDiagram-v2
-  state "Lease (blockmaster)" as L {
-    [*] --> Granted: Renew
-    Granted --> Granted: Renew before expiry
-    Granted --> Revoking: BeginWorkspaceRevocation
-    Revoking --> Acked: host acks detached HEAD gen while the lease is valid
-    Acked --> Moved: CLEAN move
-    Granted --> Expired: expiry
-    Expired --> Moved: FORCED move after expiry + skew bound
-  }
-```
-
-```mermaid
-stateDiagram-v2
-  [*] --> NameHeld: exclusive name record {request, attempt}
-  NameHeld --> Published: exclusive create snaps/name/attempt
-  NameHeld --> Aborted: DeleteSnapshot or GC tombstones the attempt path
-  Published --> Deleting: DeleteSnapshot or retention (no live fork claim)
-  Deleting --> NameFreed: name record removed
-  Aborted --> NameFreed: name record removed
-  NameFreed --> [*]
-```
-
-The attempt path is never removed, so a late create can never land after a delete.
-
-## 2.6 Workspace invariants
-
-| Invariant | Enforced in | Test | Model-checked |
-|---|---|---|---|
-| Only one holder can publish HEAD: every publish is a CAS on `{gen, epoch}`; a superseded holder fences itself | `chunk_remote.go` `CASHead`; `chunk_layer.go` `supersededBy` | `TestChunkRemote_TakeoverRefusesOldHolder` (`core/frontend/chunkstore/chunk_remote_test.go`); `TestChunkLayer_C6_FencedOnTakeover` (`core/storage/chunk_layer_contract_test.go`) | yes |
-| HEAD epoch and `RemoteLSN` never decrease | `CASHead`; `captureLocked` LSN guard | `TestChunkRemote_EpochNeverLowers` (`core/frontend/chunkstore/chunk_remote_test.go`); `TestChunkCut_RemoteLSNNeverDecreases` (`core/storage/chunk_layer_lsn_order_test.go`); `TestHEADRefusesLSNRegressionAcrossMove` (`core/frontend/chunkstore/restore_lsn_test.go`) | yes |
-| HEAD is exactly the image at a quiesced cut H, and H is a synced LSN | `captureLocked` | `TestChunkLayer_C1_HeadIsQuiescedCutImage`, `TestChunkLayer_C3_EveryHeadIsExactUnderConcurrentWrites` (`core/storage/chunk_layer_contract_test.go`) | yes |
-| The dirty bitmap never under-reports; it is durable before the checkpoint passes its entries and reset only after a successful CAS | `BeforeCheckpointAdvance`; `finishCut` | `TestChunkLayer_C11_BitmapPersistedBeforeWALRecycle`, `TestChunkLayer_C11_RolloverKeepsPostCutDirt` (`core/storage/chunk_layer_c11_test.go`) | yes |
-| Chunks and segments are write-once; keys are never rebound | `chunk_remote.go` `putObject`; `gc.go` tombstones | `TestChunkRemote_KeysAreWriteOnce` (`core/frontend/chunkstore/chunk_remote_test.go`); `TestChunkLayer_C5_ChunksAreImmutable` (`core/storage/chunk_layer_contract_test.go`) | yes |
-| Intents are durable before the first upload and removed only after the CAS outcome is known | `captureLocked` | `TestChunkIntent_WrittenBeforeFirstUploadAndDeletedAfterCAS`, `TestChunkIntent_UncertainCASKeepsIntentUntilSettled` (`core/storage/chunk_layer_intent_test.go`) | yes |
-| GC never deletes a chunk reachable from a HEAD, snapshot, attempt or intent, and deletes only after two graced marks | `gc.go` `Collector.run` | `TestGC_UnreachableRequiresTwoMarksAndUploadAge`, `TestGC_StalledCutRemainsReadableAfterTwoMarks`, `TestGC_IntentExpiryNeedsTTLAuthorityAndRemoteFence` (`core/frontend/chunkstore/gc_test.go`) | yes |
-| A published snapshot is removed only by `DeleteSnapshot` or retention for the planned attempt, never while a fork claim is live | `catalog.go` `DeleteSnapshot`; `retention.go` `markDeleting` | `TestCatalog_DeleteMarksThenIdempotent` (`core/frontend/chunkstore/catalog_test.go`); `TestCatalog_ClaimBetweenCheckAndMarkWins` (`core/frontend/chunkstore/retention_review_test.go`) | yes |
-| Volume delete commits only with no snapshot name records; past the commit point it is irreversible | `volume_delete.go` | `TestCatalog_DeleteVolumeRefusesWhileSnapshotsExist`, `TestCatalog_ConcurrentDeleteCannotRollBackACommittedOne`, `TestCatalog_DeletedHeadCannotBeRevivedByAClaim` (`core/frontend/chunkstore/volume_delete_test.go`) | yes |
-| Volume ids are never reused | `services.go`; `catalog.go` `EnsureVolume` | `TestCatalog_DeleteVolumeTombstonesAndRefusesReuse` (`core/frontend/chunkstore/volume_delete_test.go`) | yes |
-| A host serves and cuts only under a valid lease; a fenced guard never reopens | `workspace_lease.go` | `TestWorkspaceLeaseExpiryFencesWithoutTimerAndCannotReopen`, `TestWorkspaceDelayedRenewalCannotUndoExpiry` (`core/host/volume/workspace_lease_test.go`); `TestWorkspaceHostRequiresLeaseBeforeFrontendAndCut` (`core/host/volume/workspace_runtime_test.go`) | yes |
-| A forced move waits for expiry plus the skew bound; a clean move needs a detached HEAD and a matching acknowledgement; a new host claims HEAD before serving | `workspace.go` `prepareWorkspaceMoveLocked`; `provider_chunk.go` | `TestWorkspaceSkewSeparatesOldServingFromForcedGrant` (`core/host/master/workspace_skew_test.go`); `TestWorkspaceCleanMoveNeedsDetachedHEADAndRevocationAck` (`core/authority/workspace_test.go`); `TestWorkspaceMoveRestoresLazilyAndFencesOldHost` (`core/host/master/workspace_restore_test.go`) | yes |
-
-## 2.7 Workspace tests
-
-- Contract tests C1–C11 for the chunk layer (`core/storage/chunk_layer_contract_test.go`, `chunk_layer_c11_test.go`), with a fake remote that can hold a CAS or create and complete it after the caller gave up.
-- Real SeaweedFS (build tag `chunkstore_integration`, real master, volume and filer processes): `TestIntegration_ChunkRemoteContract` (`core/frontend/chunkstore/chunk_remote_integration_test.go`), `TestIntegration_DeleteVolumeThenGC` (`core/frontend/chunkstore/volume_delete_integration_test.go`), `TestIntegration_RetainAndUsage` (`core/frontend/chunkstore/retention_integration_test.go`), and `TestIntegration_OpsChunkGC_RealMasterAndStore` (`cmd/sw-block/chunk_gc_integration_test.go`).
-- Two-host lab lifecycle with Firecracker microVMs: create, write, snapshots, fork, clean move, stale-holder replay refused, delete, GC; 35 of 35 checks passed, GC reclaimed 38 of 38 candidates and every reclaimed chunk returned 404 ([workspace measurements](../workspace-measurements.md), "Workspace lifecycle on two hosts").
-
-## 2.8 Workspace review directions
-
-- **Every remote write must be either write-once or a CAS.** Name the precondition and say what happens on an unknown outcome.
-- **Every new publication must be covered by an intent** before its first object is written, and the intent must survive an unknown outcome.
-- **Nothing may move a HEAD in `deleting`, `purging` or `deleted`** except the delete's own transitions.
-- **Anything that changes GC roots must also change `Collector.run`.** That includes a new manifest level or a new kind of reference.
-- **Attach paths must decide** whether the local file or HEAD is authoritative, and claim HEAD when it is not this holder's.
-- **Cut cost:** check barrier pause, RAM held, and amplification for any change to chunk size, staging or copy.
-
-## 2.9 Workspace lessons
-
-- **#152, found before merge.** Model checking reproduced four concurrency issues from a review round, each in seconds:
-  - a snapshot back-out marked another caller's published snapshot as deleting;
-  - a claim check suffered an ABA across delete incarnations;
-  - a lost CLI token left a reservation held;
-  - CreateVolume released a lock before the create.
-  - **Fix:** incarnation-bound commit, no snapshot cascade, request ids, and lock scope.
-  - **Guards:** `TestCatalog_ConcurrentDeleteCannotRollBackACommittedOne` and `TestCatalog_DeleteVolumeLosesToAnAttachAtTheMark`.
-- **#157, clock skew (fixed in #158).** A forced move had no clock-skew margin, so with a slow host clock the old and new hosts could serve together. HEAD stayed safe.
-  - **Fix:** blockmaster waits for expiry plus the skew bound; hosts fence half a bound early.
-  - **Guard:** `TestWorkspaceSkewSeparatesOldServingFromForcedGrant`.
-- **#102 review, read-miss race.** A read miss that waited on a remote fetch could return a stale zero block while a WAL write landed.
-  - **Fix:** re-resolve through the dirty map after the fetch.
-  - **Guard:** `TestChunkLayer_WALOnlyOverlapReadNeverReturnsUntouchedZero` (`core/storage/chunk_layer_races_test.go`).
-- **#118 review, Recover and the barrier.** Recover must take the capture barrier. Otherwise a record at H+1 could be copied into a HEAD labelled H.
-  - **Guard:** `TestChunkCut_RecoverWaitsForTheCaptureBarrier` (`core/storage/chunk_layer_precopy_test.go`).
-
----
-
-# Part 3. Verification, lessons, known issues
-
-## 3.1 Test methods
+## 2.1 Test methods
 
 | Layer | Method | Example |
 |---|---|---|
@@ -490,12 +342,12 @@ The attempt path is never removed, so a late create can never land after a delet
 | Crash tests | Real process SIGKILL, then reopen and compare | `TestWALStoreCheckpointSIGKILLCrashWindows` |
 | Real-service integration | Build tag `chunkstore_integration`; real SeaweedFS processes | `TestIntegration_DeleteVolumeThenGC` |
 | Binary tests | Real `blockvolume` and `blockmaster` binaries | `TestBinaryWorkspaceLeaseOptInOwnsCLEANShutdown` (`cmd/blockvolume/workspace_lease_binary_test.go`) |
-| Lab packets | Sealed scripts and expected results, run on lab hosts, with automatic teardown that reports a run as not clean if anything is left behind | the two-host lifecycle run (Part 2.7) |
+| Lab packets | Sealed scripts and expected results, run on lab hosts, with automatic teardown that reports a run as not clean if anything is left behind | the two-host lifecycle run ([agent workspace design §10](agent-workspace-design.md#10-tests)) |
 | Scenario runner (soak, chaos) | Test intent lives in YAML in this repo (`testops/`); the open-source `sw-test-runner` handles orchestration, cleanup and artifacts | `testops/README.md`, `testops/scenarios/` |
 | Model checking | TLA+ specifications for the chunk lifecycle, host takeover, WAL crash recovery, cut capture, the authority store, RF=2 failover and GC timing (the specifications in [`docs/spec/`](../spec/README.md)); each guard has a "remove it and get a counterexample" check | found the #152 issues, the torn-wrap loss (#159/#156) and the clock-skew gap (#158) |
 | Review | Independent review rounds per PR, each finding turned into a failing test first; an independent repository-wide review | see Known issues |
 
-## 3.2 What is not covered
+## 2.2 What is not covered
 
 - **CI runs the short suite only.** The test workflow (`.github/workflows/test.yml`) runs `go build`, `go vet` and `go test -short` on pull requests and on `main`. Integration (`chunkstore_integration`), kernel (ublk, NVMe initiator) and lab tests run on development and Linux test hosts.
 - **Fuzzing covers the on-disk and remote decoders, not the wire parsers.** #175 added Go fuzz targets: `FuzzDecodeWALEntry`, `FuzzWALEntryRoundTrip`, `FuzzDecodeWALEntryFields` (`core/storage/wal_entry_fuzz_test.go`); `FuzzSmartWALDecode`, `FuzzSmartWALRecordFields`, `FuzzSmartWALRoundTrip` (`core/storage/smartwal/record_fuzz_test.go`); `FuzzParallelWALDecodeRecord`, `FuzzParallelWALRecordRoundTrip`, `FuzzParallelWALDecodeHeader` (`core/storage/parallelwal/codec_fuzz_test.go`); `FuzzDecodeManifestJSON`, `FuzzDecodeHeadDocument` (`core/frontend/chunkstore/decode_fuzz_test.go`). Their seed corpora run as ordinary tests; open-ended runs use `go test -fuzz`. The NVMe/TCP and iSCSI PDU parsers are not fuzzed.
@@ -504,7 +356,7 @@ The attempt path is never removed, so a late create can never land after a delet
 - **Environment-sensitive tests:** Linux-only tests, tests that need a SeaweedFS binary, and tests that need the kernel ublk driver. Two frontend process tests are flaky on `main`.
 - **Model checking is small-scale and design-level:** 2–3 volumes or hosts, 4–6 LSNs, bounded clocks. The specifications are mapped to code by reading, so every counterexample must also become a Go test.
 
-## 3.3 Lessons learned
+## 2.3 Lessons learned
 
 | Issue | Symptom | Root cause | Fix | Guard test |
 |---|---|---|---|---|
@@ -517,16 +369,14 @@ The attempt path is never removed, so a late create can never land after a delet
 | torn wrap | Synced writes lost after a plain power cut | the WAL writer reused bytes the persisted superblock still retained, and replay used physical order | #159 (reuse only persisted-released bytes) and #156 (replay by LSN) | `TestWALStoreAppendDuringFlushThenTornWrapKeepsSyncedRecords`, `TestWALStoreRecoverLastWriterWinsAcrossScanOrder` |
 | #152 | Four concurrency bugs in volume delete, caught before merge | rollback and claim checks not bound to one delete incarnation; a lost token; a lock released early | incarnation-bound commit, no cascade, request ids | `TestCatalog_ConcurrentDeleteCannotRollBackACommittedOne` |
 | #157 | Old and new hosts could serve together after a forced move | no clock-skew margin between the master's grant and the host's self-fence | #158: skew bound on both sides | `TestWorkspaceSkewSeparatesOldServingFromForcedGrant` |
+| #172 | After a failed `fsync`, the next `Sync` retried and acknowledged on success, although the kernel may have dropped the pages | `fsync` errors were not sticky | #172: the first failure latches a terminal fault for the open store | `TestWALStoreWALFsyncFailureIsSticky`, `TestWALStoreQueuedSyncAfterAFailedFsyncIsRefused` |
 
-## 3.4 Known issues and work in progress
+## 2.4 Known issues and work in progress
 
-These are tracked for fixes. Most were raised by an independent review of this repository.
+These are tracked for fixes. Most were raised by an independent review of this repository. Gaps specific to one product line are in that line's document: [agent workspace known gaps](agent-workspace-design.md#14-known-gaps) and [Kubernetes known gaps](kubernetes-block-design.md#12-known-gaps).
 
-- **Moving a workspace back to a host with a surviving local file.** A fresh volume claims HEAD before serving. Since #167, a non-fresh attach reads HEAD first; if another holder published it, the attach fails closed with `ErrChunkStaleLocalRoot` (`core/frontend/durable/provider_chunk.go`): the volume is not served, and one log line and the status evidence name the local root to remove or quarantine, after which the next attach starts fresh from HEAD. **Follow-up:** recreate the local root from HEAD automatically instead of refusing.
-- **`fsync` errors are not sticky.** After a failed physical sync, the next `Sync` retries `fsync` and acknowledges on success (`walstore.go` `syncWALBatch`). On Linux the dirty pages may already be gone. **Planned fix:** a failed `fsync` puts the store into a terminal error state.
 - **NVMe/TCP H2CData offset overflow.** The `DATAO + length` bound check is done in 32-bit arithmetic and can wrap, so one malformed PDU can panic the process (`core/frontend/nvme/session.go` `recvH2CData`). Reachable from loopback by default. **Planned fix:** 64-bit arithmetic, offset and R2T consistency checks, and bounds on wire-supplied allocations.
 - **Process notes in source comments.** #162 removed reviewer names and decision timestamps from code comments. A few comments still cite internal review labels (for example "ruling F1") where a neutral design rationale would be clearer.
-- **Filer conditional update: multi-filer and old-filer cases.** Reading the open-source SeaweedFS filer: `UpdateEntry` takes an exclusive lock on the path before it validates `expected_extended`. The concurrent case against one pinned filer is tested (#163, see 3.2). Not tested: several filers sharing a store, and a filer that predates the field (there is no capability probe). **Planned:** a multi-filer test and a probe.
 - **fsync latency (about 7 ms against 3 ms local).** Leads to measure with the `/status/durable` histograms:
   - the group committer waits a full 1 ms unless 64 waiters are queued, so at queue depth 1 every `fsync` pays at least 1 ms;
   - the checkpoint superblock `fsync` runs under the exclusive store lock, stalling reads and writes each flush cycle.
@@ -534,8 +384,5 @@ These are tracked for fixes. Most were raised by an independent review of this r
 - **Forged records in user data.** WAL records are not bound to a store incarnation or lap, so bytes inside user data that happen to decode as a valid record could be replayed by the defensive scan. **Planned:** an incarnation nonce and lap in the next format, plus a clean-shutdown marker in the meantime.
 - **Mid-history WAL corruption only warns** (§1.2 step 2). Fixing it needs the synced watermark in the next format.
 - **No authentication** on the control plane, the replication channel or the filer client. Frontends bind to loopback by default. **Planned:** mTLS and role checks for destructive operations.
-- **Default RPO is unbounded.** No automatic cut is enabled by default; the integrator cuts at semantic points (after an agent step, before a risky command, on detach).
-- **The master is a single point of failure.** A master outage longer than the lease stops I/O on every workspace, and recovery is a forced move.
-- **Cut cost.** The barrier pause includes copying every non-staged candidate chunk (up to the dirty threshold, 512 chunks by default), held in RAM until upload. A 4 KiB write re-uploads its 4 MiB chunk, and a read miss after a move fetches the whole chunk with no request coalescing.
-- **GC is manual.** Needles uploaded without a persisted key binding are never reclaimed. An intent stamped by a host clock running ahead of the GC runner fails the whole pass (liveness, not safety).
+- **blockmaster is a single instance.** There is no master high availability. A master outage longer than the lease stops I/O on every workspace, and recovery is then a forced move; Kubernetes volumes cannot fail over while it is down.
 - **Formats are exact-version.** The superblock, HEAD and segment formats are checked exactly and fail closed; the walstore superblock has no CRC. A format change needs a dual-reader release.

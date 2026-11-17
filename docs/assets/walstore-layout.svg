@@ -1,0 +1,177 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="940" viewBox="0 0 1200 940" font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif">
+  <title>walstore on-disk layout: a 4 KiB superblock, a circular WAL and a block-indexed extent in one file, the WAL record format, and the write, Sync, flush, checkpoint and recovery path</title>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+    <marker id="arrowG" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#0f766e"/>
+    </marker>
+    <pattern id="pad" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect width="8" height="8" fill="#fef3c7"/>
+      <line x1="0" y1="0" x2="0" y2="8" stroke="#f59e0b" stroke-width="3"/>
+    </pattern>
+  </defs>
+
+  <rect width="1200" height="940" rx="18" fill="#f8fafc"/>
+
+  <text x="40" y="52" font-size="26" font-weight="700" fill="#0f172a">walstore · on-disk layout and write path</text>
+  <text x="40" y="80" font-size="15" fill="#475569">One preallocated file per volume replica · core/storage/walstore.go (WALStore), superblock.go, wal_entry.go, wal_writer.go</text>
+
+  <!-- Band A: file regions -->
+  <text x="40" y="122" font-size="14" font-weight="700" fill="#0f172a">File regions (not to scale)</text>
+  <rect x="40" y="134" width="170" height="74" rx="8" fill="#eef2ff" stroke="#6366f1" stroke-width="1.5"/>
+  <text x="125" y="164" font-size="14" font-weight="600" fill="#312e81" text-anchor="middle">superblock</text>
+  <text x="125" y="184" font-size="12" fill="#4338ca" text-anchor="middle">4 KiB · offset 0</text>
+  <rect x="214" y="134" width="420" height="74" rx="8" fill="#fffbeb" stroke="#f59e0b" stroke-width="1.5"/>
+  <text x="424" y="164" font-size="14" font-weight="600" fill="#92400e" text-anchor="middle">circular WAL</text>
+  <text x="424" y="184" font-size="12" fill="#b45309" text-anchor="middle">WALSize bytes (64 MiB default) · offset 4096</text>
+  <rect x="638" y="134" width="522" height="74" rx="8" fill="#ecfdf5" stroke="#10b981" stroke-width="1.5"/>
+  <text x="899" y="164" font-size="14" font-weight="600" fill="#065f46" text-anchor="middle">extent</text>
+  <text x="899" y="184" font-size="12" fill="#047857" text-anchor="middle">VolumeSize bytes · offset 4096 + WALSize · one slot per block (LBA × BlockSize)</text>
+
+  <!-- Band B left: superblock fields -->
+  <rect x="40" y="232" width="360" height="300" rx="14" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="60" y="260" font-size="15" font-weight="700" fill="#0f172a">Superblock fields</text>
+  <text x="60" y="284" font-size="12.5" fill="#334155">Magic "SWBK" · Version 2 · Flags · UUID</text>
+  <text x="60" y="306" font-size="12.5" fill="#334155">VolumeSize · ExtentSize · BlockSize (4096)</text>
+  <text x="60" y="328" font-size="12.5" fill="#334155">WALOffset (must be 4096) · WALSize</text>
+  <text x="60" y="350" font-size="12.5" font-weight="600" fill="#92400e">WALHead · WALTail</text>
+  <text x="60" y="368" font-size="11.5" fill="#64748b">monotonic logical byte cursors; position = cursor mod WALSize</text>
+  <text x="60" y="392" font-size="12.5" font-weight="600" fill="#065f46">WALCheckpointLSN</text>
+  <text x="60" y="410" font-size="11.5" fill="#64748b">highest LSN durably in the extent; replay skips LSN ≤ it</text>
+  <text x="60" y="434" font-size="12.5" fill="#334155">CreatedAt · ImplKind (1 = walstore) · ImplVersion</text>
+  <line x1="60" y1="452" x2="380" y2="452" stroke="#e2e8f0"/>
+  <text x="60" y="474" font-size="11.5" fill="#64748b">96 bytes encoded, rest of the 4 KiB is zero (writeTo).</text>
+  <text x="60" y="492" font-size="11.5" fill="#64748b">Wrong magic, version or ImplKind refuses to open.</text>
+  <text x="60" y="510" font-size="11.5" fill="#64748b">No checksum over the superblock (known issue).</text>
+
+  <!-- Band B right: WAL ring -->
+  <rect x="420" y="232" width="740" height="300" rx="14" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="440" y="260" font-size="15" font-weight="700" fill="#0f172a">WAL region, physical view [0, WALSize)</text>
+
+  <!-- ring strip y 284..324 -->
+  <rect x="440" y="304" width="50" height="40" fill="#fde68a" stroke="#f59e0b"/>
+  <text x="465" y="329" font-size="11.5" fill="#92400e" text-anchor="middle">r9</text>
+  <rect x="490" y="304" width="50" height="40" fill="#fde68a" stroke="#f59e0b"/>
+  <text x="515" y="329" font-size="11.5" fill="#92400e" text-anchor="middle">r10</text>
+  <rect x="540" y="304" width="210" height="40" fill="#f1f5f9" stroke="#cbd5e1"/>
+  <text x="645" y="329" font-size="11.5" fill="#64748b" text-anchor="middle">reusable (released)</text>
+  <rect x="750" y="304" width="60" height="40" fill="#fde68a" stroke="#f59e0b"/>
+  <text x="780" y="329" font-size="11.5" fill="#92400e" text-anchor="middle">r4</text>
+  <rect x="810" y="304" width="60" height="40" fill="#fde68a" stroke="#f59e0b"/>
+  <text x="840" y="329" font-size="11.5" fill="#92400e" text-anchor="middle">r5</text>
+  <rect x="870" y="304" width="60" height="40" fill="#fde68a" stroke="#f59e0b"/>
+  <text x="900" y="329" font-size="11.5" fill="#92400e" text-anchor="middle">r6</text>
+  <rect x="930" y="304" width="60" height="40" fill="#fde68a" stroke="#f59e0b"/>
+  <text x="960" y="329" font-size="11.5" fill="#92400e" text-anchor="middle">r7</text>
+  <rect x="990" y="304" width="60" height="40" fill="#fde68a" stroke="#f59e0b"/>
+  <text x="1020" y="329" font-size="11.5" fill="#92400e" text-anchor="middle">r8</text>
+  <rect x="1050" y="304" width="90" height="40" fill="url(#pad)" stroke="#f59e0b"/>
+  <text x="1095" y="329" font-size="11.5" font-weight="600" fill="#92400e" text-anchor="middle">padding</text>
+
+  <!-- markers -->
+  <line x1="540" y1="296" x2="540" y2="356" stroke="#0f172a" stroke-width="2"/>
+  <text x="540" y="372" font-size="12" font-weight="700" fill="#0f172a" text-anchor="middle">head</text>
+  <line x1="750" y1="296" x2="750" y2="356" stroke="#0f172a" stroke-width="2"/>
+  <text x="750" y="372" font-size="12" font-weight="700" fill="#0f172a" text-anchor="middle">durable tail</text>
+  <!-- wrap arrow -->
+  <path d="M1140,302 C1150,286 1000,288 800,290 C600,292 470,286 448,300" fill="none" stroke="#475569" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#arrow)"/>
+  <text x="1140" y="284" font-size="11" fill="#64748b" text-anchor="end">wrap: a record that does not fit at the end is preceded by padding and starts at 0</text>
+
+  <text x="440" y="398" font-size="12.5" fill="#334155">Retained window [tail, head): records recovery may still need. Space used = head − durable tail.</text>
+  <text x="440" y="418" font-size="12.5" fill="#334155">Bytes are reused only after an fsynced superblock releases them (walWriter.spaceUsed, tailPersisted).</text>
+
+  <!-- record format -->
+  <text x="440" y="444" font-size="13" font-weight="700" fill="#0f172a">One WAL record (wal_entry.go)</text>
+  <rect x="440" y="454" width="56" height="32" fill="#fef3c7" stroke="#f59e0b"/>
+  <text x="468" y="474" font-size="11" fill="#92400e" text-anchor="middle">LSN 8</text>
+  <rect x="496" y="454" width="76" height="32" fill="#fef3c7" stroke="#f59e0b"/>
+  <text x="534" y="474" font-size="11" fill="#92400e" text-anchor="middle">Reserved 8</text>
+  <rect x="572" y="454" width="52" height="32" fill="#fef3c7" stroke="#f59e0b"/>
+  <text x="598" y="474" font-size="11" fill="#92400e" text-anchor="middle">Type 1</text>
+  <rect x="624" y="454" width="54" height="32" fill="#fef3c7" stroke="#f59e0b"/>
+  <text x="651" y="474" font-size="11" fill="#92400e" text-anchor="middle">Flags 1</text>
+  <rect x="678" y="454" width="54" height="32" fill="#fef3c7" stroke="#f59e0b"/>
+  <text x="705" y="474" font-size="11" fill="#92400e" text-anchor="middle">LBA 8</text>
+  <rect x="732" y="454" width="68" height="32" fill="#fef3c7" stroke="#f59e0b"/>
+  <text x="766" y="474" font-size="11" fill="#92400e" text-anchor="middle">Length 4</text>
+  <rect x="800" y="454" width="200" height="32" fill="#ecfdf5" stroke="#10b981"/>
+  <text x="900" y="474" font-size="11.5" fill="#065f46" text-anchor="middle">data (Length bytes)</text>
+  <rect x="1000" y="454" width="64" height="32" fill="#eef2ff" stroke="#6366f1"/>
+  <text x="1032" y="474" font-size="11" fill="#312e81" text-anchor="middle">CRC32 4</text>
+  <rect x="1064" y="454" width="76" height="32" fill="#eef2ff" stroke="#6366f1"/>
+  <text x="1102" y="474" font-size="11" fill="#312e81" text-anchor="middle">EntrySize 4</text>
+  <text x="605" y="499" font-size="11" fill="#64748b" text-anchor="middle">prefix: 30 bytes</text>
+  <text x="1070" y="499" font-size="11" fill="#64748b" text-anchor="middle">trailer: 8 bytes</text>
+  <text x="440" y="520" font-size="11.5" fill="#64748b">Fixed overhead 38 bytes; CRC32 covers prefix and data; a one-block (4 KiB) write is a 4,134-byte record.</text>
+
+  <!-- Band C: write path -->
+  <text x="40" y="572" font-size="15" font-weight="700" fill="#0f172a">Write path (Sync is the only durability point)</text>
+
+  <rect x="40" y="586" width="208" height="150" rx="10" fill="#fffbeb" stroke="#f59e0b" stroke-width="1.5"/>
+  <text x="56" y="610" font-size="13.5" font-weight="700" fill="#92400e">1 · Write</text>
+  <text x="56" y="632" font-size="12" fill="#334155">assign the next LSN</text>
+  <text x="56" y="652" font-size="12" fill="#334155">pwrite the record at head</text>
+  <text x="56" y="672" font-size="12" fill="#334155">dirty map: LBA → record, LSN</text>
+  <text x="56" y="700" font-size="11.5" fill="#b45309">not durable yet</text>
+  <text x="56" y="718" font-size="11" fill="#64748b">WALStore.Write</text>
+
+  <rect x="268" y="586" width="208" height="150" rx="10" fill="#eef2ff" stroke="#6366f1" stroke-width="1.5"/>
+  <text x="284" y="610" font-size="13.5" font-weight="700" fill="#312e81">2 · Sync (FLUSH / FUA)</text>
+  <text x="284" y="632" font-size="12" fill="#334155">group commit: one fsync</text>
+  <text x="284" y="652" font-size="12" fill="#334155">for many callers (wait ≤ 1 ms</text>
+  <text x="284" y="672" font-size="12" fill="#334155">or 64 waiters); no extent copy</text>
+  <text x="284" y="700" font-size="11.5" fill="#4338ca">returns the synced frontier</text>
+  <text x="284" y="718" font-size="11" fill="#64748b">WALStore.Sync, group_commit.go</text>
+
+  <rect x="496" y="586" width="208" height="150" rx="10" fill="#ecfdf5" stroke="#10b981" stroke-width="1.5"/>
+  <text x="512" y="610" font-size="13.5" font-weight="700" fill="#065f46">3 · Flusher (100 ms)</text>
+  <text x="512" y="632" font-size="12" fill="#334155">snapshot the whole dirty map</text>
+  <text x="512" y="652" font-size="12" fill="#334155">copy each still-current record</text>
+  <text x="512" y="672" font-size="12" fill="#334155">to its extent slot; one fsync</text>
+  <text x="512" y="700" font-size="11.5" fill="#047857">extent now holds the batch</text>
+  <text x="512" y="718" font-size="11" fill="#64748b">flusher.flushOnceInternal</text>
+
+  <rect x="724" y="586" width="208" height="150" rx="10" fill="#eef2ff" stroke="#6366f1" stroke-width="1.5"/>
+  <text x="740" y="610" font-size="13.5" font-weight="700" fill="#312e81">4 · Checkpoint</text>
+  <text x="740" y="632" font-size="12" fill="#334155">bitmap / metadata hooks first</text>
+  <text x="740" y="652" font-size="12" fill="#334155">superblock: CheckpointLSN,</text>
+  <text x="740" y="672" font-size="12" fill="#334155">head, released tail; fsync</text>
+  <text x="740" y="700" font-size="11.5" fill="#4338ca">replay now starts later</text>
+  <text x="740" y="718" font-size="11" fill="#64748b">persistCheckpointReleasing</text>
+
+  <rect x="952" y="586" width="208" height="150" rx="10" fill="#f1f5f9" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="968" y="610" font-size="13.5" font-weight="700" fill="#0f172a">5 · Reuse</text>
+  <text x="968" y="632" font-size="12" fill="#334155">writer may overwrite the</text>
+  <text x="968" y="652" font-size="12" fill="#334155">released WAL bytes; flushed</text>
+  <text x="968" y="672" font-size="12" fill="#334155">entries compare-and-deleted</text>
+  <text x="968" y="700" font-size="11.5" fill="#475569">a newer write survives</text>
+  <text x="968" y="718" font-size="11" fill="#64748b">tailPersisted, compareAndDelete</text>
+
+  <line x1="249" y1="660" x2="266" y2="660" stroke="#475569" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <line x1="477" y1="660" x2="494" y2="660" stroke="#475569" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <line x1="705" y1="660" x2="722" y2="660" stroke="#475569" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <line x1="933" y1="660" x2="950" y2="660" stroke="#475569" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+  <text x="40" y="760" font-size="12" fill="#475569">Read: a dirty-map hit reads the WAL record, otherwise the extent slot (WALStore.Read). A failed fsync is sticky: no later Sync, write or checkpoint until reopen.</text>
+
+  <!-- Band D: recovery -->
+  <rect x="40" y="780" width="1120" height="134" rx="14" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="60" y="808" font-size="15" font-weight="700" fill="#0f172a">Recovery after a crash (recovery.go recoverWAL, WALStore.Recover)</text>
+  <rect x="60" y="822" width="248" height="72" rx="8" fill="#eef2ff" stroke="#6366f1"/>
+  <text x="184" y="850" font-size="12.5" font-weight="600" fill="#312e81" text-anchor="middle">read the superblock</text>
+  <text x="184" y="870" font-size="11.5" fill="#4338ca" text-anchor="middle">persisted tail, head, checkpoint</text>
+  <rect x="332" y="822" width="248" height="72" rx="8" fill="#fffbeb" stroke="#f59e0b"/>
+  <text x="456" y="850" font-size="12.5" font-weight="600" fill="#92400e" text-anchor="middle">scan [tail, head)</text>
+  <text x="456" y="870" font-size="11.5" fill="#b45309" text-anchor="middle">stop at a bad CRC or a truncated record</text>
+  <rect x="604" y="822" width="248" height="72" rx="8" fill="#ecfdf5" stroke="#10b981"/>
+  <text x="728" y="850" font-size="12.5" font-weight="600" fill="#065f46" text-anchor="middle">skip LSN ≤ checkpoint</text>
+  <text x="728" y="870" font-size="11.5" fill="#047857" text-anchor="middle">replay the rest by LSN (last writer wins)</text>
+  <rect x="876" y="822" width="264" height="72" rx="8" fill="#f1f5f9" stroke="#94a3b8"/>
+  <text x="1008" y="850" font-size="12.5" font-weight="600" fill="#0f172a" text-anchor="middle">persist rebuilt bounds</text>
+  <text x="1008" y="870" font-size="11.5" fill="#475569" text-anchor="middle">before the first append; bad bounds fail closed</text>
+  <line x1="309" y1="858" x2="330" y2="858" stroke="#0f766e" stroke-width="1.8" marker-end="url(#arrowG)"/>
+  <line x1="581" y1="858" x2="602" y2="858" stroke="#0f766e" stroke-width="1.8" marker-end="url(#arrowG)"/>
+  <line x1="853" y1="858" x2="874" y2="858" stroke="#0f766e" stroke-width="1.8" marker-end="url(#arrowG)"/>
+</svg>

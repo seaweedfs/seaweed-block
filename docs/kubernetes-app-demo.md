@@ -1,5 +1,10 @@
 # Kubernetes App Demo
 
+**Use this when:** you present Seaweed Block on Kubernetes with local images
+and want viewers to see an ordinary app pod write a PVC and a replacement pod
+read it back. For the supported install path, use the
+[Kubernetes quickstart](quickstart-kubernetes.md).
+
 This demo shows `seaweed-block` from the application's point of view.
 
 The app is a normal Kubernetes pod using a normal PVC. The storage stack is the
@@ -109,6 +114,8 @@ This demo does not claim:
 
 - multi-node production readiness,
 - failover while the app remains mounted,
-- durable state across blockvolume pod restart,
+- durable state across blockvolume pod restart (restart persistence with a
+  hostPath state root is a separate gated path, see
+  [Kubernetes status](kubernetes-status.md)),
 - real operator reconciliation,
 - performance or soak readiness.

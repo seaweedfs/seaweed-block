@@ -5,8 +5,7 @@ summary: the workload comparison, `fsync` behavior, snapshot and fork cost, cut
 upload time, and the two-host lifecycle run, with how each was measured.
 
 **Source of truth:** lab runs on Firecracker microVMs and a host-side proxy, as
-described below. This text moved from the top-level README; only the `fsync`
-bullet was updated to say which frontend the runs used.
+described below.
 
 The workload and lifecycle numbers come from lab runs with Firecracker
 microVMs (4 vCPU, 4 GiB, guest kernel 6.1). The snapshot, fork and cut numbers
@@ -69,4 +68,4 @@ In the same proxy, a cut that writes 64 dirty chunks (256 MiB) took a median
 
 These results cover the chunk path (`walstore-chunk`), which is a proof of
 concept: not yet a default, a release claim or a production path. The
-[design reference](design/block-design.md), Part 2, describes how it works.
+[agent workspace design](design/agent-workspace-design.md) describes how it works.

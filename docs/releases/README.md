@@ -20,6 +20,11 @@ is still outside the supported boundary.
 - [NVMe/RDMA Capability Boundary](nvme-rdma-capability-boundary.md)
 - [WAL Multi-Block Record Opt-In Boundary](wal-multiblock-opt-in.md)
 
+Agent workspace disks (`walstore-chunk`) are not part of any release yet; they
+are a proof of concept. Their measurements are in
+[workspace measurements](../workspace-measurements.md) and their design in the
+[agent workspace design](../design/agent-workspace-design.md).
+
 ## Version Boundary
 
 - `v0.1-alpha` is the engineering alpha foundation: CSI/PVC plumbing,

@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="600" viewBox="0 0 1200 600" font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif">
+  <title>walstore LSN watermarks on a timeline: checkpoint, synced frontier and newest written LSN, and which writes survive a crash</title>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+    <pattern id="unsynced" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect width="8" height="8" fill="#f1f5f9"/>
+      <line x1="0" y1="0" x2="0" y2="8" stroke="#cbd5e1" stroke-width="3"/>
+    </pattern>
+  </defs>
+
+  <rect width="1200" height="600" rx="18" fill="#f8fafc"/>
+
+  <text x="40" y="52" font-size="26" font-weight="700" fill="#0f172a">walstore · LSN watermarks and what survives a crash</text>
+  <text x="40" y="80" font-size="15" fill="#475569">Frontiers kept by WALStore (core/storage/walstore.go); on disk are only the WAL bytes and the superblock's WALCheckpointLSN</text>
+
+  <!-- markers above the line -->
+  <line x1="470" y1="120" x2="470" y2="244" stroke="#065f46" stroke-width="2.2"/>
+  <text x="470" y="112" font-size="13" font-weight="700" fill="#065f46" text-anchor="middle">checkpointLSN</text>
+  <line x1="800" y1="140" x2="800" y2="244" stroke="#92400e" stroke-width="2.2"/>
+  <text x="800" y="132" font-size="13" font-weight="700" fill="#92400e" text-anchor="middle">syncedLSN</text>
+  <line x1="1010" y1="120" x2="1010" y2="244" stroke="#334155" stroke-width="2.2"/>
+  <text x="1010" y="112" font-size="13" font-weight="700" fill="#334155" text-anchor="middle">walHead (newest written)</text>
+
+  <!-- LSN band -->
+  <rect x="80" y="170" width="390" height="56" fill="#d1fae5" stroke="#10b981"/>
+  <text x="275" y="196" font-size="13" font-weight="600" fill="#065f46" text-anchor="middle">1 … checkpoint</text>
+  <text x="275" y="214" font-size="11.5" fill="#047857" text-anchor="middle">in the extent</text>
+  <rect x="470" y="170" width="330" height="56" fill="#fde68a" stroke="#f59e0b"/>
+  <text x="635" y="196" font-size="13" font-weight="600" fill="#92400e" text-anchor="middle">checkpoint … synced</text>
+  <text x="635" y="214" font-size="11.5" fill="#b45309" text-anchor="middle">in the WAL, fsynced</text>
+  <rect x="800" y="170" width="210" height="56" fill="url(#unsynced)" stroke="#94a3b8" stroke-dasharray="5 3"/>
+  <text x="905" y="196" font-size="13" font-weight="600" fill="#334155" text-anchor="middle">synced … head</text>
+  <text x="905" y="214" font-size="11.5" fill="#475569" text-anchor="middle">pwrite only</text>
+  <line x1="80" y1="250" x2="1140" y2="250" stroke="#475569" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text x="1140" y="272" font-size="12" fill="#475569" text-anchor="end">LSN</text>
+  <text x="1075" y="204" font-size="12" fill="#64748b" text-anchor="middle">nextLSN →</text>
+
+  <!-- flush in progress bracket -->
+  <path d="M470,262 L470,272 L690,272 L690,262" fill="none" stroke="#0f766e" stroke-width="1.6"/>
+  <text x="580" y="290" font-size="12" font-weight="600" fill="#0f766e" text-anchor="middle">flush in progress</text>
+  <text x="580" y="306" font-size="11" fill="#0f766e" text-anchor="middle">extent written and fsynced,</text>
+  <text x="580" y="320" font-size="11" fill="#0f766e" text-anchor="middle">checkpoint not yet persisted</text>
+
+  <!-- RemoteLSN marker (workspace) -->
+  <line x1="740" y1="226" x2="740" y2="262" stroke="#6366f1" stroke-width="2" stroke-dasharray="4 3"/>
+  <text x="760" y="290" font-size="12" font-weight="600" fill="#4338ca">HEAD RemoteLSN (workspace only)</text>
+  <text x="760" y="306" font-size="11" fill="#4338ca">the last cut H: always a synced LSN,</text>
+  <text x="760" y="320" font-size="11" fill="#4338ca">independent of the checkpoint</text>
+
+  <!-- survival table -->
+  <rect x="40" y="346" width="1120" height="230" rx="14" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="60" y="376" font-size="15" font-weight="700" fill="#0f172a">After a crash (process kill or power cut without media corruption)</text>
+
+  <rect x="60" y="392" width="16" height="16" fill="#d1fae5" stroke="#10b981"/>
+  <text x="88" y="405" font-size="13" font-weight="600" fill="#065f46">≤ checkpoint: survives.</text>
+  <text x="270" y="405" font-size="12.5" fill="#334155">Read from the extent; recovery skips these records; their WAL bytes are released once that superblock is fsynced.</text>
+
+  <rect x="60" y="424" width="16" height="16" fill="#fde68a" stroke="#f59e0b"/>
+  <text x="88" y="437" font-size="13" font-weight="600" fill="#92400e">≤ synced: survives.</text>
+  <text x="270" y="437" font-size="12.5" fill="#334155">Acknowledged by Sync. Recovery replays them from the WAL into the dirty map by LSN (last writer wins).</text>
+
+  <rect x="60" y="456" width="16" height="16" fill="url(#unsynced)" stroke="#94a3b8"/>
+  <text x="88" y="469" font-size="13" font-weight="600" fill="#334155">&gt; synced: may be lost.</text>
+  <text x="270" y="469" font-size="12.5" fill="#334155">Never acknowledged. A record that reached the disk intact is replayed; a torn one ends the scan of its range.</text>
+
+  <line x1="60" y1="488" x2="1140" y2="488" stroke="#e2e8f0"/>
+  <text x="60" y="510" font-size="12" fill="#475569">A crash during a flush replays the same records again from the WAL: the tail was not released, so nothing is lost and replay is idempotent.</text>
+  <text x="60" y="530" font-size="12" fill="#475569">The checkpoint is not ordered against syncedLSN: the flusher's own fsync also makes the records it copies durable (flusher.flushOnceInternal).</text>
+  <text x="60" y="550" font-size="12" fill="#475569">After recovery, the synced frontier is the higher of the checkpoint and the highest valid record LSN; new writes continue above it (WALStore.Recover).</text>
+</svg>

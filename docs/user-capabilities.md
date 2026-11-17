@@ -1,8 +1,15 @@
-# Seaweed Block User Capabilities
+# Seaweed Block User Capabilities (Kubernetes)
 
-This page describes what a user can do with the current Seaweed Block alpha,
-what evidence is available, and what is still outside the product boundary.
-For the exact release evidence, see [`releases/README.md`](releases/README.md).
+**Use this when:** you operate the Kubernetes alpha and need to know what it
+does today, which read-only operations commands exist, and what its status
+vocabulary means.
+
+This page covers Kubernetes block volumes. Agent workspace disks (chunk
+snapshots, forks and host moves, a proof of concept) are described in the
+[README](../README.md#agent-workspace-disks-chunk-lifecycle) and the
+[standalone deployment](standalone-deployment.md) guide. Feature status is in
+[Kubernetes status](kubernetes-status.md); the exact release evidence is in
+[`releases/README.md`](releases/README.md).
 
 ## Primary User Loop
 
@@ -233,15 +240,9 @@ The current status model is negative-first:
 
 ## Cleanup
 
-The documented cleanup path is:
-
-```bash
-helm uninstall sw-block --namespace kube-system
-bash scripts/uninstall-k8s-alpha.sh "$PWD"
-bash scripts/verify-helm-cleanup.sh
-```
-
-The verifier checks:
+The cleanup commands and the expected clean output are in the
+[quickstart](quickstart-kubernetes.md#cleanup). `scripts/verify-helm-cleanup.sh`
+checks:
 
 - Helm and Kubernetes resources,
 - iSCSI sessions,
@@ -250,17 +251,6 @@ The verifier checks:
 - `dmsetup` devices,
 - product processes,
 - hostPath residue.
-
-Expected clean shape:
-
-```text
-cleanup_status=ok
-k8s_residue_count=0
-iscsi_residue_count=0
-multipath_residue_count=0
-process_residue_count=0
-hostpath_residue_count=0
-```
 
 ## Recommended Learning Path
 
@@ -275,21 +265,13 @@ hostpath_residue_count=0
 
 ## Explicit Non-Claims
 
-- Not production-ready.
-- No production-grade operator or controller-manager lifecycle.
-- No broad mutating admin/dashboard workflow. The current bounded mutations are
-  limited to lifecycle-owner finalizer ownership and authority-executor ACK
-  eligibility target status.
-- No finalizer ownership by operator-status.
-- No automatic cleanup execution.
-- No upgrade or rollback execution.
-- No promote, repair, rebuild, failback, delete, backup, restore, or cleanup
+The full list is in
+[what you should not expect yet](kubernetes-status.md#what-you-should-not-expect-yet).
+In addition:
+
+- The current bounded mutations are limited to lifecycle-owner finalizer
+  ownership and authority-executor ACK eligibility target status. There is no
+  promote, repair, rebuild, failback, delete, backup, restore, or cleanup
   mutation through UI/API/operator.
-- No backup/snapshot/restore workflow.
-- No returned-replica rebuild traffic, frontend publication, or automated
-  failback.
-- No transparent Kubernetes node-loss failover without pod recreate.
 - No NVMe ANA parity for the transparent failover path.
-- No broad distro/kernel/initiator compatibility matrix.
-- No upgrade or rollback execution.
 - No performance, RTO, RPO, or SLO claim.

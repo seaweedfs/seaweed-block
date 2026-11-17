@@ -1,6 +1,9 @@
 # Fsync latency breakdown
 
-For walstore and walstore-chunk, read the existing volume-host endpoint:
+**Use this when:** you need to find where `fsync` time goes on a walstore or
+walstore-chunk volume, stage by stage, from the volume host's status endpoint.
+
+Read the volume-host endpoint:
 
 ```sh
 curl -fsS 'http://127.0.0.1:PORT/status/durable?volume=VOLUME'
@@ -22,12 +25,12 @@ Each distribution exposes `Count`, `SumNanos`, 64 non-cumulative `Buckets`, `P50
 
 `Frontend.Writes` includes FUA, `FUAWrites` is its subset, `Flushes` counts Flush commands and `Failed` counts unsuccessful handler results. Invalid ublk range/buffer requests are rejected before the timing hook or provider lookup: they remain counted by the device-level error/request counters, but add no backend-owned frontend sample. NVMe handler refusal counts retain their existing instrumentation. Non-durable backends retain their existing dispatch behavior. ublk and NVMe/TCP use the same optional backend timing seam; no guest filesystem or hardware is required for accounting tests.
 
-A guest fsync may produce two Flush commands; compare command counts and physical Sync samples before attributing two disk syncs. Shared physical Sync and per-request queue samples have different populations. Do not add p50/p99 values, or subtract one stage's p99 from another's. Large queue time suggests batching/scheduling; large FileSync suggests local file/disk latency; large BackendSync with small local stages can include replication or metadata work. This diagnostic does not separately time each replication/checkpoint operation. Kernel transport completion and guest scheduling require the M5 external measurement. No frontend tuning or durability-policy change is included.
+A guest fsync may produce two Flush commands; compare command counts and physical Sync samples before attributing two disk syncs. Shared physical Sync and per-request queue samples have different populations. Do not add p50/p99 values, or subtract one stage's p99 from another's. Large queue time suggests batching/scheduling; large FileSync suggests local file/disk latency; large BackendSync with small local stages can include replication or metadata work. This diagnostic does not separately time each replication/checkpoint operation. Kernel transport completion and guest scheduling are outside these histograms and need an external measurement.
 
 ## Verification and overhead scope
 
-Unit controls cover known histogram quantiles, concurrent counters, failed/refused requests, both frontend dispatchers, batch waiter-versus-physical counts and dedup. The initial status contract test fails on unmodified main because the existing JSON has no durability histograms.
+Unit tests cover known histogram quantiles, concurrent counters, failed/refused requests, both frontend dispatchers, batch waiter-versus-physical counts and dedup.
 
-The PR records an interleaved main-versus-instrumented comparison of the existing file-backed TCP paired-Flush proxy (`SW_BLOCK_SYNC_PERF=1`, `TestNVMePairedFlushLatency`), using prebuilt binaries on tp04. It measures request-path default-on overhead; it is not mounted fio, a guest fsync result, or a device-specific latency promise. M5 may proceed independently if this PR has not landed.
+Default-on overhead was checked with an interleaved before-versus-after comparison of the file-backed TCP paired-Flush proxy (`SW_BLOCK_SYNC_PERF=1`, `TestNVMePairedFlushLatency`). That measures request-path overhead only; it is not mounted fio, a guest fsync result, or a device-specific latency promise.
 
 The ublk Target forwards the optional timing hook through its lazy providerBackend to the actual durable backend. Initial provider lookup is included in ReceiveToBackend. If provider open fails before a durable backend is available, the request returns that error without a second open attempt, and no backend-owned frontend histogram exists for that failure. The device-level error counters remain the source for such failures. A later request may retry normally. Caller tests start the real Target with only the kernel device constructor replaced; NVMe uses a real TCP target and FUA capsule.

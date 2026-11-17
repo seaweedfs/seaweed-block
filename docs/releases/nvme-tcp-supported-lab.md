@@ -763,6 +763,31 @@ report_dashboard_agree=true
 cleanup_status=ok
 ```
 
+## Later Write-Path Experiments (Not Adopted)
+
+Results of the experiments that followed Phase 165.
+None of them changes a claim on this page.
+
+- Phase 166 implements the RF2 NVMe/RDMA reconnect and exact path-replacement
+  contract, but its live close gate is blocked by lab topology: a third remote
+  RoCE-capable Kubernetes initiator is required before mounted RDMA multipath
+  survival or reconnect can be claimed.
+- Phase 167 (`parallel-walstore`, a parallel write engine) preserves its tested
+  global LSN/frontier, crash recovery and catch-up/rebuild semantics, but
+  remains explicit and opt-in because its 4 KiB throughput/scaling gate failed.
+- Phase 168 tested a bounded Linux `io_uring` submission/completion owner.
+  Correctness passed, but native execution reached only 0.96x the legacy
+  single-writer path and 0.96x four-writer scaling, so the candidate was
+  removed.
+- Phase 169 changed the persistence unit to checksummed multi-entry segments.
+  Format, recovery, Sync and failure semantics passed, but the optimistic gate
+  measured four-writer scaling of only `0.772x` its one-writer rate and
+  `0.990x` the positioned control, so the candidate was removed before
+  checkpoint/rebuild integration.
+- Phase 170 moved performance work back to the default `walstore` path and its
+  existing-format `appendBatch` seam. Direct I/O, fixed buffers, FUA and device
+  atomic-write support remain evidence-gated follow-ups.
+
 ## Representative Release Smoke
 
 When matching release images exist, the smoke should use the exact image pair:
@@ -824,8 +849,8 @@ This evidence does not claim:
 - Performance, throughput, latency, or production SLO.
 - Broad Linux distro, kernel, initiator, or cloud compatibility.
 - Production HA, node-loss survival, or arbitrary unbounded path churn.
-- Broad Linux host AER/ANA notification compatibility beyond the m02 supported
-  lab gate.
+- Broad Linux host AER/ANA notification compatibility beyond the supported
+  lab host gate.
 - Published-image Kubernetes dynamic NVMe reconnect after control-plane desired
   path-set replacement/failover until matching release images pass a release
   smoke. The current evidence is source-gated.
