@@ -50,7 +50,8 @@ type Receiver struct {
 	cadenceT           time.Duration
 	blocksSinceLastAck uint32
 	lastAckTime        time.Time
-	baseInstalledUpper uint32 // highest base LBA installed; advisory only in BaseBatchAck
+	baseInstalledUpper uint32   // highest base LBA installed; advisory only in BaseBatchAck
+	installID          [16]byte // this session's BASE install ID (DESIGN 7, 8.7)
 
 	gate  DualLaneGate // nil only in tests that exercise the protocol alone
 	epoch uint64       // from SessionStart; checked by gate on every mutating frame
@@ -366,6 +367,7 @@ func (r *Receiver) beginInstall(baseLSN uint64) (storage.InstallHandle, error) {
 	if err != nil {
 		return nil, fmt.Errorf("begin BASE install: %w", err)
 	}
+	r.installID = id
 	return h, nil
 }
 
@@ -413,7 +415,17 @@ func (r *Receiver) sendAck() error {
 			errors.New("sendAck before SessionStart"))
 	}
 	st := r.session.Status()
-	syncedLSN, err := r.store.Sync()
+	// While installing, the durable claim is the install log's
+	// (SyncInstallLog, DESIGN 7); the logical Sync is gated there. After this
+	// session's own completion the logical Sync is ordinary again (8.7 done
+	// path), and the WAL lane may still be sending.
+	var syncedLSN uint64
+	var err error
+	if syncer, ok := r.store.(storage.InstallLogSyncer); ok && !st.BaseDone {
+		syncedLSN, err = syncer.SyncInstallLog(r.installID)
+	} else {
+		syncedLSN, err = r.store.Sync()
+	}
 	if err != nil {
 		return newFailure(FailureSubstrate, PhaseRecvAckWrite, err)
 	}

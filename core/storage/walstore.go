@@ -1080,6 +1080,12 @@ func (s *WALStore) Sync() (uint64, error) {
 	targetDirectFrontier := s.pendingDirectFrontierLSN
 	var targetGen uint64
 	if s.v3 != nil {
+		// The logical Sync is gated while installing (DESIGN 7): exactly
+		// (0, ErrBaseInstalling), no batch, no new W.
+		if s.v3.pub.current().BaseState == BaseInstalling {
+			s.mu.RUnlock()
+			return 0, ErrBaseInstalling
+		}
 		targetGen = s.v3.recoverGen.Load() // captured with targetHead (Recover holds s.mu)
 	}
 	s.mu.RUnlock()
@@ -1106,6 +1112,9 @@ func (s *WALStore) Sync() (uint64, error) {
 		defer v.syncMu.Unlock()
 		if v.recoverGen.Load() != targetGen {
 			return 0, errV3RecoveredMeanwhile
+		}
+		if v.pub.current().BaseState == BaseInstalling {
+			return 0, ErrBaseInstalling // an install began meanwhile
 		}
 	}
 	s.mu.Lock()

@@ -50,6 +50,7 @@ func v3Blk(b byte) []byte { return bytes.Repeat([]byte{b}, v3RecvBlock) }
 type v3Peer struct {
 	conn   net.Conn
 	frames chan frameType
+	acks   chan uint64 // AcknowledgedLSN of every BaseBatchAck, in order
 	done   chan error
 }
 
@@ -57,15 +58,20 @@ func startV3Receiver(t *testing.T, store storage.LogicalStorage) *v3Peer {
 	t.Helper()
 	primary, replica := net.Pipe()
 	t.Cleanup(func() { primary.Close(); replica.Close() })
-	p := &v3Peer{conn: primary, frames: make(chan frameType, 64), done: make(chan error, 1)}
+	p := &v3Peer{conn: primary, frames: make(chan frameType, 64), acks: make(chan uint64, 64), done: make(chan error, 1)}
 	r := NewReceiverWithCadence(store, replica, 1, time.Hour) // an ack after every BASE block
 	go func() { _, err := r.Run(); p.done <- err; replica.Close() }()
 	go func() {
 		for {
-			ft, _, err := readFrame(primary)
+			ft, payload, err := readFrame(primary)
 			if err != nil {
 				close(p.frames)
 				return
+			}
+			if ft == frameBaseBatchAck {
+				if a, err := decodeBaseBatchAck(payload); err == nil {
+					p.acks <- a.AcknowledgedLSN
+				}
 			}
 			p.frames <- ft
 		}
@@ -207,15 +213,32 @@ func TestReceiverV3HeldOldBaseWriteDrainsBeforeANewSession(t *testing.T) {
 	case <-time.After(300 * time.Millisecond):
 	}
 	release()
-	a.want(t, frameBaseBatchAck)
+	// A's write finishes; its progress ack (SyncInstallLog, row 10) either
+	// runs before B's begin, or queues behind B's exclusive begin and fails
+	// with ErrInstallIDMismatch. Either way A cannot write again.
+	aAcked := false
+	select {
+	case ft, ok := <-a.frames:
+		if !ok || ft != frameBaseBatchAck {
+			if err := a.runErr(t); !errors.Is(err, storage.ErrInstallIDMismatch) {
+				t.Fatalf("A's ack after the drain: %v, want ErrInstallIDMismatch", err)
+			}
+		} else {
+			aAcked = true
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("A neither acked nor ended")
+	}
 	<-bSent
 	b.want(t, frameBaseBatchAck)
 	if got := readV3Recv(t, s, 7); !bytes.Equal(got, v3Blk(0xBB)) {
 		t.Fatalf("LBA 7 = %x..., want B's bytes", got[0])
 	}
-	a.send(t, frameBaseBlock, encodeBaseBlock(7, v3Blk(0xAA)))
-	if err := a.runErr(t); !errors.Is(err, storage.ErrInstallSuperseded) {
-		t.Fatalf("A after the supersession: %v, want ErrInstallSuperseded", err)
+	if aAcked {
+		a.send(t, frameBaseBlock, encodeBaseBlock(7, v3Blk(0xAA)))
+		if err := a.runErr(t); !errors.Is(err, storage.ErrInstallSuperseded) {
+			t.Fatalf("A after the supersession: %v, want ErrInstallSuperseded", err)
+		}
 	}
 	if got := readV3Recv(t, s, 7); !bytes.Equal(got, v3Blk(0xBB)) {
 		t.Fatalf("LBA 7 = %x... after A's stale frame, want B's bytes", got[0])
@@ -342,5 +365,31 @@ func TestReceiverV3WALAfterBaseDoneSurvivesACrash(t *testing.T) {
 		if got := readV3Recv(t, r, lba); !bytes.Equal(got, v3Blk(want)) {
 			t.Fatalf("after reopen LBA %d = %x..., want %x", lba, got[0], want)
 		}
+	}
+}
+
+// Row 10a: a progress ack during the install is the install log's durable
+// claim (SyncInstallLog, DESIGN 7): it reports min(WALApplied, H) and the
+// slot carries W = H with the volume still installing; the logical Sync
+// stays gated. Mutant: sendAck through the gated logical Sync fails the
+// session at its first ack.
+func TestReceiverV3ProgressAckIsTheInstallLog(t *testing.T) {
+	s := v3RecvStore(t)
+	p := startV3Receiver(t, s)
+	p.start(t, 5)
+	p.send(t, frameBaseBlock, encodeBaseBlock(3, v3Blk(0x33)))
+	p.want(t, frameBaseBatchAck)
+	p.send(t, frameWALEntry, encodeWALEntry(WALKindBacklog, 4, 6, v3Blk(0x44)))
+	p.send(t, frameBaseBlock, encodeBaseBlock(2, v3Blk(0x22)))
+	p.want(t, frameBaseBatchAck)
+	<-p.acks // the first ack, before the WAL entry
+	if got := <-p.acks; got != 6 {
+		t.Fatalf("progress ack AcknowledgedLSN %d, want 6", got)
+	}
+	if st, _ := storage.BaseStateV3Test(s); st != storage.BaseInstalling {
+		t.Fatalf("state %d after a progress ack, want installing", st)
+	}
+	if f, err := s.Sync(); f != 0 || !errors.Is(err, storage.ErrBaseInstalling) {
+		t.Fatalf("logical Sync during the install = (%d, %v), want (0, ErrBaseInstalling)", f, err)
 	}
 }
