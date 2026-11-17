@@ -25,6 +25,10 @@
 (*   "watermarkFull" watermarkSB, and recovery decodes every page position *)
 (*                 instead of stopping a range at its first bad entry.     *)
 (***************************************************************************)
+(* Impl-3 row 2 adds a DARK byte codec in wal_entry_v3.go. Its 62/70-byte *)
+(* framing, CRC32C, type/size bounds and allocation order are code-test     *)
+(* obligations, abstracted as record validity here, NOT proved by this model.*)
+(* No production state/transition or model action changes in codec row 2.  *)
 EXTENDS Integers, FiniteSets, Sequences, TLC
 
 CONSTANTS K, MaxLSN, LBAs, Rule, CorruptOn, MaxCkpt,
