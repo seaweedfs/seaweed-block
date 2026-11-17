@@ -496,17 +496,38 @@ func (f *flusher) readDirtyRecordV3(e snapshotEntry) ([]byte, uint64, error) {
 // through the row-3 publisher with the row-7 map candidate; without one,
 // the checkpoint and tail do not move (no coverage is fabricated) and the
 // flushed bytes stay retained in the WAL.
+//
+// A v3 checkpoint never exceeds W (DESIGN 2.2 item 5, 9.1 predicate 2:
+// CheckpointLSN <= mapCoveredCheckpoint <= W). The flusher may have flushed
+// dirty entries that no Sync has acknowledged yet, so the candidate is
+// clamped to the acknowledged W; those records stay retained in the WAL
+// until a Sync covers them. The map candidate is prepared first, outside
+// every lock; the publication is a W publisher, so it runs under the v3
+// leader role (syncMu), like Sync, refreshW and SetWMode, and cannot
+// straddle a recovery. If a recovery lowered the acknowledged W below the
+// prepared candidate meanwhile, this cycle publishes nothing.
 func (s *WALStore) persistCheckpointV3(highestLSN uint64) error {
 	v := s.v3
 	if v.mapCandidate == nil {
 		return nil
 	}
-	mutateMap, err := v.mapCandidate(highestLSN)
+	checkpoint := min(highestLSN, v.wack.Load())
+	if checkpoint <= v.pub.current().CheckpointLSN {
+		return nil
+	}
+	mutateMap, err := v.mapCandidate(checkpoint)
 	if err != nil {
 		return err
 	}
+	v.syncMu.Lock()
+	defer v.syncMu.Unlock()
+	wack := v.wack.Load()
+	if wack < checkpoint {
+		return nil // a recovery lowered the frontier; retry next cycle
+	}
 	d, err := v.pub.publish(&s.mu, nil, func(n *descriptorV3) error {
-		n.CheckpointLSN = highestLSN
+		n.W = max(n.W, wack)
+		n.CheckpointLSN = checkpoint
 		return mutateMap(n)
 	})
 	if err != nil {

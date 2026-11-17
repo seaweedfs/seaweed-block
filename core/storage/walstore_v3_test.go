@@ -893,3 +893,46 @@ func TestWALStoreV3FlusherEmptyCycleRunsTheIdleRefresh(t *testing.T) {
 		t.Fatalf("slot W after an empty flusher cycle = %d, want 2 (the idle refresh)", w)
 	}
 }
+
+// stubMapCandidateV3 is a test map candidate that covers exactly the
+// checkpoint it is asked for (row 7 supplies the real one).
+func stubMapCandidateV3(cp uint64) (func(n *descriptorV3) error, error) {
+	return func(n *descriptorV3) error {
+		n.MapGeneration++
+		n.MapRootHash[0]++
+		n.MapCoveredCheckpoint = cp
+		return nil
+	}, nil
+}
+
+// A v3 checkpoint never exceeds the acknowledged W (DESIGN 2.2, 9.1): the
+// flusher may flush a dirty entry no Sync has acknowledged, and its
+// checkpoint candidate is clamped to W; the unsynced record stays retained
+// in the WAL and survives a crash.
+func TestWALStoreV3FlusherCheckpointIsClampedToTheAcknowledgedW(t *testing.T) {
+	s, path := newStoreV3(t, WModeLagged)
+	s.v3.mapCandidate = stubMapCandidateV3
+	writeSynced(t, s, 1, 1)                       // acknowledged W 1
+	if _, err := s.Write(2, blk(2)); err != nil { // dirty, unsynced
+		t.Fatal(err)
+	}
+	if err := s.flusher.flushOnceInternal(false); err != nil {
+		t.Fatalf("flusher cycle: %v (a checkpoint above W is refused at publication)", err)
+	}
+	d := s.v3.pub.current()
+	if d.CheckpointLSN != 1 || d.MapCoveredCheckpoint != 1 || d.W < 1 {
+		t.Fatalf("checkpoint %d, covered %d, W %d: want the checkpoint clamped to the acknowledged W 1",
+			d.CheckpointLSN, d.MapCoveredCheckpoint, d.W)
+	}
+	if d.RetainedTail != 0 {
+		t.Fatalf("retainedTail %d: the unsynced record must stay retained", d.RetainedTail)
+	}
+	crashRecoveryHardeningStore(t, s)
+	r := mustReopenV3(t, path)
+	defer r.Close()
+	for lba := uint32(1); lba <= 2; lba++ {
+		if !bytes.Equal(readV3(t, r, lba), blk(byte(lba))) {
+			t.Fatalf("LBA %d lost after a clamped checkpoint and a crash", lba)
+		}
+	}
+}
