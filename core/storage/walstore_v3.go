@@ -103,6 +103,9 @@ type walStoreV3State struct {
 	// installEpoch counts the begins of this open (guarded by installMu): a
 	// handle is valid only while no later begin has run.
 	installEpoch uint64
+	// installReopen is the last Recover's installing outcome (guarded by
+	// installMu and s.mu), consumed by a covering superseding begin.
+	installReopen *installReopenV3
 	// preBaseHighest is the highest appended LSN when the live install
 	// began (guarded by installMu): the records before its BaseCursor.
 	preBaseHighest uint64
@@ -379,6 +382,15 @@ func (s *WALStore) recoverV3() (uint64, error) {
 		return 0, err // R < W*: fail closed (wal_corrupt)
 	}
 	if o.Installing {
+		// The recovered bounds of an installing reopen (DESIGN 8.3), kept for
+		// a covering supersession: E, R and whether the suffix is damaged.
+		// Nothing is fenced, published or admitted here; the allocator
+		// state continues above every trusted record so a later install
+		// never reuses an LSN the WAL still holds.
+		v.installReopen = &installReopenV3{id: d.BaseInstallID, E: o.E, R: o.R, damaged: o.Damaged}
+		v.appended.Store(max(v.appended.Load(), o.R))
+		s.nextLSN = max(s.nextLSN, o.R+1)
+		s.walHead = max(s.walHead, o.R)
 		return 0, installingErrorV3(o)
 	}
 	// Reconstruct volatile map coverage from the authoritative immutable root,

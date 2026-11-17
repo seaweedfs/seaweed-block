@@ -143,6 +143,20 @@ func (w *walWriterV3) append(e walEntryV3, durableLSN uint64) (uint64, error) {
 
 func (w *walWriterV3) logicalHeadV3() uint64 { w.mu.Lock(); defer w.mu.Unlock(); return w.head }
 
+// advanceHeadV3 moves the writer forward to p, never back. Plan row 11: a
+// covering supersession after an installing reopen restarts the writer at
+// P = max(E, persisted retainedHead) after the drop fence zeroed [E, ...).
+// It is not a restore: no LSN state changes.
+func (w *walWriterV3) advanceHeadV3(p uint64) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if p < w.head {
+		return fmt.Errorf("%w: writer head %d cannot move back to %d", errWALBindingV3, w.head, p)
+	}
+	w.head = p
+	return nil
+}
+
 // restoreScanV3 restores only the validated cursor. It does not grant admission:
 // the owner must complete the durable drop fence and descriptor publication
 // before another append. No ring/nonce reset or floor waiver occurs here.

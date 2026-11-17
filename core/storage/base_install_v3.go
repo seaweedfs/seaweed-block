@@ -36,6 +36,13 @@ var (
 	ErrInstallLSNGap = errors.New("storage: v3 install-lane entry leaves an LSN gap")
 )
 
+// installReopenV3 is an installing reopen's recovered bounds (DESIGN 8.3).
+type installReopenV3 struct {
+	id      [16]byte
+	E, R    uint64
+	damaged bool
+}
+
 // installHandleV3 is the only path for BASE extent writes and install-lane
 // WAL applies on a v3 store (DESIGN 8.7).
 type installHandleV3 struct {
@@ -95,13 +102,15 @@ func (s *WALStore) beginBaseInstallV3(baseLSN uint64, id [16]byte) (*installHand
 		// installed -> installing is not an 8.5 edge: retire first.
 		return nil, fmt.Errorf("%w: begin while installed (retire first)", errDescriptorTransition)
 	case BaseInstalling:
-		if d.BaseInstallID != v.liveInstallID {
-			// A superseding begin after an installing reopen needs the 6.6
-			// fence and P = max(E, persisted head) first (plan row 11).
-			return nil, fmt.Errorf("%w: superseding begin after an installing reopen", errV3NotYet)
-		}
 		if d.BaseInstallID == id {
 			return nil, fmt.Errorf("%w: begin with the installing ID", errDescriptorTransition)
+		}
+		if d.BaseInstallID != v.liveInstallID {
+			// A superseding begin after an installing reopen (DESIGN 8.3)
+			// needs that reopen's recovered bounds.
+			if ro := v.installReopen; ro == nil || ro.id != d.BaseInstallID {
+				return nil, fmt.Errorf("%w: superseding begin without the installing reopen's recovered bounds", errV3NotYet)
+			}
 		}
 	}
 	// W includes every acknowledged LSN, published or not yet (mode C).
@@ -121,6 +130,25 @@ func (s *WALStore) beginBaseInstallV3(baseLSN uint64, id [16]byte) (*installHand
 			refusal, baseLSN, w, d.CheckpointLSN, appended)
 	}
 	P := v.w.logicalHeadV3() // 8.1 step 2: the serialized writer's head
+	if ro := v.installReopen; ro != nil && d.BaseState == BaseInstalling && ro.id == d.BaseInstallID {
+		// Covering supersession after an installing reopen (DESIGN 8.3, 6.6,
+		// G3): fence [E, floor + WALSize) and fsync before the installing
+		// publication, so no record of the old install beyond E re-chains;
+		// anchor at P = max(E, the persisted retainedHead), never lowering
+		// retainedHead; the writer restarts at P. Reads and the flusher see
+		// a recovery-like boundary.
+		v.recoverGen.Add(1)
+		defer v.recoverGen.Add(1)
+		floor, sameNonce := v.pub.reuseFloor()
+		if err := s.fenceV3(ro.E, floor, d.WALSize, sameNonce, d.WALOffset); err != nil {
+			return nil, err
+		}
+		P = max(ro.E, d.RetainedHead)
+		if err := v.w.advanceHeadV3(P); err != nil {
+			return nil, err
+		}
+		s.dm.clear()
+	}
 	// Step 3: installing into the fallback slot.
 	if _, err := v.pub.publish(nil, nil, func(n *descriptorV3) error {
 		n.BaseState, n.BaseLSN, n.BaseCursor, n.BaseInstallID = BaseInstalling, baseLSN, P, id
@@ -135,6 +163,7 @@ func (s *WALStore) beginBaseInstallV3(baseLSN uint64, id [16]byte) (*installHand
 	}
 	v.liveInstallID = id
 	v.installEpoch++
+	v.installReopen = nil
 	v.preBaseHighest = appended
 	if err := v.pub.invalidateMapProofV3(); err != nil { // an install transition (9.1)
 		return nil, err
