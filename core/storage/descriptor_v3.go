@@ -1,0 +1,276 @@
+package storage
+
+import (
+	"errors"
+	"fmt"
+	"sync"
+)
+
+// The single v3 descriptor publisher (format bump v3, DESIGN r15 sections
+// 4, 5 and 5.1; plan row 3).
+//
+// Every v3 descriptor change goes through descriptorPublisherV3.publish:
+// Sync W, checkpoint, metadata-only rollover, seed, BASE transitions and
+// reset. It is dark until the v3 store is wired in (plan rows 4 and 5) and
+// activated (row 12b); the v2 checkpoint path in walstore.go is unchanged.
+//
+// Lock graph (DESIGN 4), the only order:
+//
+//	metadata callbacks (run by the caller first, holding none of these)
+//	  -> WALStore.mu (snapshot only, released before slot I/O)
+//	  -> descMu
+//	  -> fileSyncMu (leaf, inside syncFile)
+//
+// Nothing below descMu is ever held while acquiring WALStore.mu, and no
+// callback runs under descMu or fileSyncMu.
+
+var (
+	// errDescriptorIdentityChange: a publication tried to change the
+	// store identity or geometry, which no v3 publication may do.
+	errDescriptorIdentityChange = errors.New("storage: v3 descriptor identity or geometry change refused")
+	// errDescriptorTransition: a publication asked for a BASE, map, nonce
+	// or bounds change that DESIGN 5/8.5 does not allow.
+	errDescriptorTransition = errors.New("storage: v3 descriptor transition refused")
+)
+
+// descriptorIOV3 is the store I/O the publisher needs. writeSlot does one
+// pwrite of a whole slot; syncFile runs the store's leaf (pwrite + fsync
+// under fileSyncMu, latching the sticky fault on fsync failure); sticky
+// reports a latched fault.
+type descriptorIOV3 struct {
+	writeSlot func(off int64, b []byte) error
+	fsync     func() error
+	syncFile  func(write, sync func() error) error
+	sticky    func() error
+}
+
+// descriptorPublisherV3 holds the authoritative in-memory descriptor and
+// the contents of the fallback slot, which pins reuse (DESIGN 5).
+type descriptorPublisherV3 struct {
+	descMu sync.Mutex
+
+	cur        descriptorV3 // selected slot: authoritative
+	curSlot    slotIDV3
+	other      descriptorV3 // fallback slot, when valid
+	otherValid bool
+
+	io     descriptorIOV3
+	accept slotImplAcceptor
+
+	// trace, when set by a test, records lock acquisitions and releases
+	// in order (the section 11 item 9 lock recorder).
+	trace func(event string)
+}
+
+func newDescriptorPublisherV3(cur descriptorV3, curSlot slotIDV3, other *descriptorV3, io descriptorIOV3) *descriptorPublisherV3 {
+	p := &descriptorPublisherV3{cur: cur, curSlot: curSlot, io: io}
+	if other != nil {
+		p.other, p.otherValid = *other, true
+	}
+	return p
+}
+
+func (p *descriptorPublisherV3) note(event string) {
+	if p.trace != nil {
+		p.trace(event)
+	}
+}
+
+// current returns the authoritative descriptor.
+func (p *descriptorPublisherV3) current() descriptorV3 {
+	p.descMu.Lock()
+	defer p.descMu.Unlock()
+	return p.cur
+}
+
+// reuseFloor is the lowest logical WAL position still referenced by a valid
+// slot (DESIGN 5): min of both tails when both carry the same nonce. With
+// mixed nonces (a reset between its two publications, DESIGN 8.6) tails are
+// not comparable and ok is false: nothing may be reused.
+func (p *descriptorPublisherV3) reuseFloor() (floor uint64, ok bool) {
+	p.descMu.Lock()
+	defer p.descMu.Unlock()
+	return p.reuseFloorLocked()
+}
+
+func (p *descriptorPublisherV3) reuseFloorLocked() (uint64, bool) {
+	if !p.otherValid {
+		return p.cur.RetainedTail, true
+	}
+	if p.other.Nonce != p.cur.Nonce {
+		return 0, false
+	}
+	return min(p.cur.RetainedTail, p.other.RetainedTail), true
+}
+
+// publish is publishDescriptor (DESIGN 5). Callers run their metadata
+// callbacks before calling it. If storeMu is non-nil it is taken first,
+// snap runs under it, then descMu is taken and storeMu released before any
+// slot I/O. mutate edits a copy of the CURRENT authoritative descriptor,
+// never a caller's snapshot; the publisher then applies the monotonic merge
+// and the transition rules, validates the whole result and writes it into
+// the fallback slot with slotGen+1.
+func (p *descriptorPublisherV3) publish(storeMu sync.Locker, snap func(), mutate func(next *descriptorV3) error) (descriptorV3, error) {
+	if storeMu != nil {
+		storeMu.Lock()
+		p.note("lock WALStore.mu")
+		if snap != nil {
+			snap()
+		}
+		p.descMu.Lock()
+		p.note("lock descMu")
+		storeMu.Unlock()
+		p.note("unlock WALStore.mu")
+	} else {
+		p.descMu.Lock()
+		p.note("lock descMu")
+	}
+	defer func() {
+		p.note("unlock descMu")
+		p.descMu.Unlock()
+	}()
+	return p.publishLocked(mutate)
+}
+
+func (p *descriptorPublisherV3) publishLocked(mutate func(next *descriptorV3) error) (descriptorV3, error) {
+	if err := p.io.sticky(); err != nil {
+		return descriptorV3{}, err
+	}
+	next := p.cur
+	if mutate != nil {
+		if err := mutate(&next); err != nil {
+			return descriptorV3{}, err
+		}
+	}
+	if err := mergeDescriptorV3(&p.cur, &next); err != nil {
+		return descriptorV3{}, err
+	}
+	gen, err := nextSlotGenV3(p.cur.SlotGen)
+	if err != nil {
+		return descriptorV3{}, err
+	}
+	next.SlotGen = gen
+	next.MigrationPhase = MigrationNormal
+	if err := next.validate(p.accept); err != nil {
+		return descriptorV3{}, err
+	}
+	target := slotB
+	off := int64(slotBOffsetV3)
+	if p.curSlot == slotB {
+		target, off = slotA, slotAOffsetV3
+	}
+	buf := next.encode()
+	err = p.io.syncFile(func() error {
+		p.note("hold fileSyncMu")
+		return p.io.writeSlot(off, buf)
+	}, p.io.fsync)
+	if err != nil {
+		return descriptorV3{}, err
+	}
+	// Success boundary: a fault latched by another path while this
+	// publication was in flight still refuses it (#172).
+	if err := p.io.sticky(); err != nil {
+		return descriptorV3{}, err
+	}
+	p.other, p.otherValid = p.cur, true
+	p.cur, p.curSlot = next, target
+	return next, nil
+}
+
+// mergeDescriptorV3 applies the monotonic merge and transition rules of
+// DESIGN 5 and 8.5 to next, a mutated copy of cur.
+func mergeDescriptorV3(cur, next *descriptorV3) error {
+	if next.ImplKind != cur.ImplKind || next.ImplVersion != cur.ImplVersion || next.UUID != cur.UUID ||
+		next.CreatedAt != cur.CreatedAt || !sameGeometryV3(*cur, *next) {
+		return errDescriptorIdentityChange
+	}
+	// W and CheckpointLSN are max-merged: a stale request never lowers them.
+	next.W = max(cur.W, next.W)
+	next.CheckpointLSN = max(cur.CheckpointLSN, next.CheckpointLSN)
+	// The nonce changes only through the reset transaction (DESIGN 8.6,
+	// plan row 8); within one nonce the retained bounds never move back.
+	if next.Nonce != cur.Nonce {
+		return fmt.Errorf("%w: nonce change outside a reset", errDescriptorTransition)
+	}
+	if next.RetainedTail < cur.RetainedTail {
+		return fmt.Errorf("%w: retainedTail %d below %d", errDescriptorTransition, next.RetainedTail, cur.RetainedTail)
+	}
+	// The map root changes only to a strictly higher generation; the full
+	// coverage predicates against the root are added by plan row 7.
+	if next.MapGeneration != cur.MapGeneration || next.MapRootLocator != cur.MapRootLocator ||
+		next.MapRootHash != cur.MapRootHash || next.MapCoveredCheckpoint != cur.MapCoveredCheckpoint ||
+		next.MapLineage != cur.MapLineage || next.MapFormatID != cur.MapFormatID {
+		if next.MapGeneration <= cur.MapGeneration {
+			return fmt.Errorf("%w: map root change without a higher generation (%d -> %d)",
+				errDescriptorTransition, cur.MapGeneration, next.MapGeneration)
+		}
+		if next.MapLineage != cur.MapLineage {
+			return fmt.Errorf("%w: map lineage change outside an install or reset", errDescriptorTransition)
+		}
+	}
+	if next.WMode != cur.WMode && next.WMode != WModeLagged && next.WMode != WModeStrict {
+		return fmt.Errorf("%w: WMode %d", errDescriptorTransition, next.WMode)
+	}
+	return baseTransitionAllowedV3(cur, next)
+}
+
+// baseTransitionAllowedV3 is the DESIGN 8.5 edge table. The conditions an
+// edge needs (coverage, destructive mutation, drain) are enforced by the
+// install callers (plan rows 9 to 11); this refuses every other edge.
+func baseTransitionAllowedV3(cur, next *descriptorV3) error {
+	same := next.BaseState == cur.BaseState && next.BaseLSN == cur.BaseLSN &&
+		next.BaseCursor == cur.BaseCursor && next.BaseInstallID == cur.BaseInstallID
+	if same {
+		return nil
+	}
+	ok := false
+	switch cur.BaseState {
+	case BaseNone:
+		ok = next.BaseState == BaseInstalling
+	case BaseInstalling:
+		switch next.BaseState {
+		case BaseInstalling:
+			ok = next.BaseInstallID != cur.BaseInstallID // superseding begin
+		case BaseInstalled:
+			ok = next.BaseInstallID == cur.BaseInstallID && next.BaseLSN == cur.BaseLSN
+		case BaseNone:
+			ok = true // abort; its preconditions are the caller's (8.5)
+		}
+	case BaseInstalled:
+		switch next.BaseState {
+		case BaseInstalled:
+			// Retirement may clear BaseCursor below the tail; the ID and
+			// BaseLSN stay.
+			ok = next.BaseInstallID == cur.BaseInstallID && next.BaseLSN == cur.BaseLSN
+		case BaseInstalling:
+			ok = next.BaseInstallID != cur.BaseInstallID // a new install begins
+		case BaseNone:
+			ok = next.BaseLSN == 0 && next.CheckpointLSN >= cur.BaseLSN
+		}
+	}
+	if !ok {
+		return fmt.Errorf("%w: BASE %d -> %d", errDescriptorTransition, cur.BaseState, next.BaseState)
+	}
+	return nil
+}
+
+// rolloverIfPinned is the metadata-only rollover (DESIGN 5.1): when the
+// fallback slot still pins reuse below the selected tail, republish the
+// current descriptor unchanged into the fallback slot so both carry the new
+// tail. It needs no record, Sync, guest write or checkpoint change. It
+// reports whether it published.
+func (p *descriptorPublisherV3) rolloverIfPinned() (bool, error) {
+	p.note("lock descMu")
+	p.descMu.Lock()
+	defer func() {
+		p.note("unlock descMu")
+		p.descMu.Unlock()
+	}()
+	if !p.otherValid || p.other.Nonce != p.cur.Nonce || p.other.RetainedTail >= p.cur.RetainedTail {
+		return false, nil
+	}
+	if _, err := p.publishLocked(nil); err != nil {
+		return false, err
+	}
+	return true, nil
+}
