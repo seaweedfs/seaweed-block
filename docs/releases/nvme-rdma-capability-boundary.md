@@ -5,6 +5,9 @@ path**. Seaweed Block can serve one explicitly selected NVMe/RDMA target and
 mount it through CSI in the supported RoCE lab. Multipath/failover, broad
 compatibility, performance improvement, and production SLOs remain non-claims.
 
+> Addresses in this record use RFC 5737 documentation ranges (192.0.2.0/24
+> internal, 198.51.100.0/24 frontend) in place of the lab's own addresses.
+
 ## Claim Matrix
 
 | Capability | Current status |
@@ -20,7 +23,7 @@ compatibility, performance improvement, and production SLOs remain non-claims.
 
 ```text
 Linux nvme-rdma initiator on lab host A
--> RoCE data-plane address 10.0.0.3 on lab host B
+-> RoCE data-plane address 198.51.100.12 on lab host B
 -> Linux kernel nvmet-rdma target
 -> configfs namespace backed by /dev/nbdX
 -> Seaweed Block NBD request bridge
@@ -80,7 +83,7 @@ TestOps run `20260718-011316-dc5b` passed 16/16 actions:
 
 ```text
 rdma_implementation_path=kernel_nvmet_rdma_nbd_bridge
-rdma_bind_ip=10.0.0.3
+rdma_bind_ip=198.51.100.12
 rdma_device=rocep1s0
 rdma_netdev=enp1s0np0
 linux_nvme_connect_rdma_succeeded=true
@@ -130,14 +133,14 @@ cleanup_status=ok
 
 TestOps run `20260718-025048-9d6a` passed 14/14 actions with fresh matching
 product and CSI images. A dynamic PVC selected `nvmeTransport: rdma`, the target
-published `10.0.0.3:4420`, CSI mounted it on lab host A, and writer/reader verification
+published `198.51.100.12:4420`, CSI mounted it on lab host A, and writer/reader verification
 passed.
 
 ```text
 phase165_nvme_rdma_k8s_publish_attach_status=ok
 csi_publish_context_transport=rdma
 active_host_controller_transport=rdma
-active_host_controller_traddr=10.0.0.3
+active_host_controller_traddr=198.51.100.12
 swblockvolume_status_transport=rdma
 writer_verified=true
 reader_verified=true

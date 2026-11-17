@@ -4,6 +4,9 @@ Status: source-gated. Matching published `seaweed-block` and
 `seaweed-block-csi` images still need a release-smoke run before this becomes a
 public image claim.
 
+> Addresses in this record use RFC 5737 documentation ranges (192.0.2.0/24
+> internal, 198.51.100.0/24 frontend) in place of the lab's own addresses.
+
 ## Claim
 
 Seaweed Block can run an opt-in NVMe/TCP Kubernetes CSI path in the supported
@@ -163,7 +166,7 @@ Phase 122 is the current supported-lab baseline for the configured 100GbE TCP
 frontend path:
 
 ```text
-publish_target=10.0.0.1:4420
+publish_target=198.51.100.11:4420
 publish_target_network_class=100gbe_tcp
 publish_target_route_dev=enp1s0np0
 seq_write_mibps=115.11
@@ -747,8 +750,8 @@ Phase 133 closes the stale host-path gap left by Phase 132:
 ```text
 phase133_nvme_k8s_stale_path_prune_status=ok
 initial_path_count=2
-old_desired_path=192.168.1.184:4420
-new_desired_path=192.168.1.184:4520
+old_desired_path=192.0.2.12:4420
+new_desired_path=192.0.2.12:4520
 desired_path_set_changed=true
 reconnect_owner=csi-node
 reconnect_invoked=true
