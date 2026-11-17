@@ -13,6 +13,10 @@ import (
 
 var errWALBindingV3 = errors.New("storage: v3 WAL nonce/cursor binding refused")
 
+// ErrWALLSNOrder refuses a v3 append whose first LSN does not exceed every
+// previously appended LSN. This keeps the physical and logical prefixes aligned.
+var ErrWALLSNOrder = errors.New("storage: v3 WAL LSN must strictly increase")
+
 // walSnapshotV3 takes the descriptor and its reuse floor in one snapshot.
 // It releases descMu before any writer lock, pwrite or callback is acquired.
 func (p *descriptorPublisherV3) walSnapshotV3() (descriptorV3, uint64, bool) {
@@ -28,12 +32,13 @@ func (p *descriptorPublisherV3) walSnapshotV3() (descriptorV3, uint64, bool) {
 // not Sync. A pwrite failure is terminal here and must also latch the store's
 // append fault when integrated. No descriptor publication is hidden in append.
 type walWriterV3 struct {
-	mu      sync.Mutex
-	pub     *descriptorPublisherV3
-	nonce   [16]byte
-	head    uint64
-	failed  error
-	writeAt func([]byte, int64) (int, error)
+	mu         sync.Mutex
+	pub        *descriptorPublisherV3
+	nonce      [16]byte
+	head       uint64
+	highestLSN uint64 // includes the last LSN consumed by a batch
+	failed     error
+	writeAt    func([]byte, int64) (int, error)
 }
 
 func newWALWriterV3(fd *os.File, pub *descriptorPublisherV3) (*walWriterV3, error) {
@@ -47,7 +52,7 @@ func newWALWriterV3(fd *os.File, pub *descriptorPublisherV3) (*walWriterV3, erro
 	if !ok || d.MigrationPhase != MigrationNormal {
 		return nil, errWALBindingV3
 	}
-	return &walWriterV3{pub: pub, nonce: d.Nonce, head: d.RetainedHead, writeAt: fd.WriteAt}, nil
+	return &walWriterV3{pub: pub, nonce: d.Nonce, head: d.RetainedHead, highestLSN: max(d.CheckpointLSN, d.BaseLSN), writeAt: fd.WriteAt}, nil
 }
 
 func (w *walWriterV3) append(e walEntryV3, durableLSN uint64) (uint64, error) {
@@ -65,6 +70,10 @@ func (w *walWriterV3) append(e walEntryV3, durableLSN uint64) (uint64, error) {
 	if !ok || d.Nonce != w.nonce || w.head < floor || w.head-floor > d.WALSize {
 		return 0, errWALBindingV3
 	}
+	if e.LSN <= w.highestLSN {
+		return 0, fmt.Errorf("%w: first %d after %d", ErrWALLSNOrder, e.LSN, w.highestLSN)
+	}
+
 	e.Nonce = w.nonce
 	e.LogicalStart = w.head
 	e.DurableLSN = durableLSN
@@ -125,6 +134,10 @@ func (w *walWriterV3) append(e walEntryV3, durableLSN uint64) (uint64, error) {
 		return 0, err
 	}
 	w.head = start + size
+	w.highestLSN = e.LSN
+	if e.Type == walEntryWriteBatch {
+		w.highestLSN += e.BatchCount - 1
+	}
 	return start % d.WALSize, nil
 }
 
@@ -140,10 +153,16 @@ func (w *walWriterV3) restoreScanV3(r walScanResultV3) error {
 	if !ok || r.Nonce != w.nonce || d.Nonce != w.nonce || r.End < floor || r.End-floor > d.WALSize {
 		return errWALBindingV3
 	}
-	if r.End > counterMaxV3 {
+	if r.End > counterMaxV3 || r.Frontier > counterMaxV3 {
 		return ErrCounterExhausted
 	}
+	if r.Frontier < max(d.CheckpointLSN, d.BaseLSN) {
+		return errWALBindingV3
+	}
 	w.head = r.End
+	// The owner fences any dropped suffix first. Its raw HighestLSN must not
+	// pin the allocator after that suffix has been discarded.
+	w.highestLSN = r.Frontier
 	return nil
 }
 

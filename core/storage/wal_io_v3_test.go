@@ -202,21 +202,33 @@ func TestWALIOV3_InstalledScanBeginsAtMaxTail(t *testing.T) {
 func TestWALIOV3_ValidatedFrontierIntervals(t *testing.T) {
 	f, p, w := newWALIOTestV3(t, 0, 0)
 	d := p.current()
-	// A gap above BASE must remain a gap; no allocation proportional to LSN.
+	// A physical 102,101,104 chain must never be created. Gaps are legal,
+	// but a later append cannot fill a gap behind the physical highest LSN.
 	d.BaseState = BaseInstalling
 	d.BaseInstallID = [16]byte{1}
 	d.BaseLSN = 100
-	for _, lsn := range []uint64{102, 101, 104} {
-		if _, err := w.append(walEntryV3{LSN: lsn, Type: walEntryBarrier}, 100); err != nil {
-			t.Fatal(err)
-		}
+	if _, err := w.append(walEntryV3{LSN: 102, Type: walEntryBarrier}, 100); err != nil {
+		t.Fatal(err)
+	}
+	before := w.logicalHeadV3()
+	if _, err := w.append(walEntryV3{LSN: 101, Type: walEntryBarrier}, 100); !errors.Is(err, ErrWALLSNOrder) {
+		t.Fatalf("non-monotone101=%v", err)
+	}
+	if w.logicalHeadV3() != before {
+		t.Fatal("refused101 advanced cursor")
+	}
+	if _, err := w.append(walEntryV3{LSN: 104, Type: walEntryBarrier}, 100); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.append(walEntryV3{LSN: 103, Type: walEntryBarrier}, 100); !errors.Is(err, ErrWALLSNOrder) {
+		t.Fatalf("late gap fill103=%v", err)
 	}
 	r, err := scanWALV3(f, d)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Frontier != 102 || r.HighestLSN != 104 || r.MaxDurableLSN != 100 || len(r.Records) != 3 {
-		t.Fatalf("interval scan=%+v", r)
+	if r.Frontier != 100 || r.HighestLSN != 104 || r.MaxDurableLSN != 100 || len(r.Records) != 2 {
+		t.Fatalf("ordered gap scan=%+v", r)
 	}
 }
 
@@ -274,19 +286,32 @@ func TestWALIOV3_ConcurrentAppendsHaveUniqueCursors(t *testing.T) {
 	f, p, w := newWALIOTestV3(t, 0, 0)
 	d := p.current()
 	done := make(chan error, 40)
-	for n := uint64(1); n <= 40; n++ {
-		go func(lsn uint64) { _, err := w.append(walEntryV3{LSN: lsn, Type: walEntryBarrier}, 0); done <- err }(n)
+	// Forty callers race the same first LSN: exactly one may consume it.
+	for n := 0; n < 40; n++ {
+		go func() { _, err := w.append(walEntryV3{LSN: 1, Type: walEntryBarrier}, 0); done <- err }()
 	}
 	deadline := time.NewTimer(5 * time.Second)
 	defer deadline.Stop()
+	accepted := 0
 	for n := 0; n < 40; n++ {
 		select {
 		case err := <-done:
-			if err != nil {
-				t.Fatal(err)
+			if err == nil {
+				accepted++
+			} else if !errors.Is(err, ErrWALLSNOrder) {
+				t.Errorf("concurrent append=%v", err)
 			}
 		case <-deadline.C:
 			t.Fatal("bounded append completion timed out")
+		}
+	}
+	if accepted != 1 {
+		t.Fatalf("same LSN admitted %d times", accepted)
+	}
+	// The caller's allocator serializes the subsequent increasing stream.
+	for lsn := uint64(2); lsn <= 40; lsn++ {
+		if _, err := w.append(walEntryV3{LSN: lsn, Type: walEntryBarrier}, 0); err != nil {
+			t.Fatal(err)
 		}
 	}
 	r, err := scanWALV3(f, d)
