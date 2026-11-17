@@ -75,6 +75,9 @@ type walStoreV3State struct {
 	// testReadResolved runs in a v3 read after the dirty map resolved the
 	// LBA's WAL position and before the record is read.
 	testReadResolved func()
+	// testReadInvalid runs in a v3 read after a record failed validation and
+	// before the entry is re-resolved.
+	testReadInvalid func()
 }
 
 // errV3RecoveredMeanwhile: a recovery ran between an outer Sync's capture
@@ -541,16 +544,22 @@ func (s *WALStore) SetWMode(m WMode) error {
 // readDirtyV3 serves a v3 read from the dirty map, if the LBA has an entry
 // (handled false: read the extent). A reader holds no lock across its WAL
 // read, so the position it resolved may be reused before the pread: after a
-// reset (cursor 0 again, codex01 row 8 P1) or a same-open recovery. The
-// read therefore validates the WHOLE record it read, payload included
-// (CRC, footer, write type, LBA and LSN against the resolving entry), and
-// re-resolves on a mismatch. An LSN is never at two live positions with
-// the same LBA, so a matching record is the resolved write. If the entry
-// is unchanged and the record still does not match, the WAL is damaged.
-// No lock is taken: lock graph unchanged.
+// reset (cursor 0 again, codex01 row 8 P1) or a same-open recovery that
+// fenced and reused it. The read therefore validates the WHOLE record it
+// read, payload included (CRC, footer, write type, LBA and LSN against the
+// resolving entry), and re-resolves on a mismatch. LSN allocation runs on
+// across a reset, so a matching LBA and LSN identify the resolved write;
+// no nonce is checked. A same-open recovery can re-allocate a dropped LSN
+// to the same LBA at the same position, so the "entry unchanged" damage
+// verdict also requires the same recovery generation (a reset bumps it
+// too) across the whole attempt (codex01 e72acd40 P2). A pread error is a
+// substrate I/O failure, never WAL integrity: only a record that fails
+// validation within one stable lifetime is damage. No lock is taken: the
+// lock graph is unchanged.
 func (s *WALStore) readDirtyV3(lba uint32) (data []byte, handled bool, err error) {
 	const attempts = 8
 	for i := 0; i < attempts; i++ {
+		gen := s.v3.recoverGen.Load()
 		off, _, lsn, _, ok := s.dm.get(uint64(lba))
 		if !ok {
 			return nil, false, nil
@@ -558,36 +567,46 @@ func (s *WALStore) readDirtyV3(lba uint32) (data []byte, handled bool, err error
 		if h := s.v3.testReadResolved; h != nil {
 			h()
 		}
-		data, rerr := s.readRecordV3(lba, off, lsn)
-		if rerr == nil {
+		data, ioErr, verr := s.readRecordV3(lba, off, lsn)
+		if ioErr != nil {
+			return nil, true, NewSubstrateIOFailure(ioErr, "v3 WAL read")
+		}
+		if verr == nil {
 			return data, true, nil
 		}
-		if off2, _, lsn2, _, ok2 := s.dm.get(uint64(lba)); ok2 && off2 == off && lsn2 == lsn {
-			return nil, true, NewWALIntegrityFailure(rerr, "v3 WAL read of a live dirty entry")
+		if h := s.v3.testReadInvalid; h != nil {
+			h()
+		}
+		off2, _, lsn2, _, ok2 := s.dm.get(uint64(lba))
+		if ok2 && off2 == off && lsn2 == lsn && s.v3.recoverGen.Load() == gen {
+			return nil, true, NewWALIntegrityFailure(verr, "v3 WAL read of a live dirty entry")
 		}
 	}
 	return nil, true, fmt.Errorf("storage: v3 WAL read of LBA %d did not settle in %d attempts", lba, attempts)
 }
 
 // readRecordV3 reads and validates the whole v3 write record at walRelOff.
-func (s *WALStore) readRecordV3(lba uint32, walRelOff, lsn uint64) ([]byte, error) {
+// ioErr is a failed or short pread: the WAL region lies inside the file, so
+// io.EOF (a file shorter than its geometry) is substrate I/O too. verr is a
+// record that was read but does not validate as the resolved write.
+func (s *WALStore) readRecordV3(lba uint32, walRelOff, lsn uint64) (data []byte, ioErr, verr error) {
 	size := uint64(walEntryHeaderSizeV3) + uint64(s.sb.BlockSize)
 	if walRelOff+size > s.sb.WALSize {
-		return nil, fmt.Errorf("storage: v3 WAL read: record at %d crosses the ring end", walRelOff)
+		return nil, nil, fmt.Errorf("storage: v3 WAL read: record at %d crosses the ring end", walRelOff)
 	}
 	full := make([]byte, size)
 	if _, err := s.fd.ReadAt(full, int64(s.sb.WALOffset+walRelOff)); err != nil {
-		return nil, fmt.Errorf("storage: v3 WAL read: %w", err)
+		return nil, fmt.Errorf("storage: v3 WAL read at %d: %w", walRelOff, err), nil
 	}
 	e, err := decodeWALEntryV3(full, s.sb.BlockSize, s.sb.VolumeSize/uint64(s.sb.BlockSize))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if e.Type != walEntryWrite || e.LBA != uint64(lba) || e.LSN != lsn || uint32(len(e.Data)) != s.sb.BlockSize {
-		return nil, fmt.Errorf("storage: v3 WAL read: record at %d is LBA %d LSN %d, want LBA %d LSN %d",
+		return nil, nil, fmt.Errorf("storage: v3 WAL read: record at %d is LBA %d LSN %d, want LBA %d LSN %d",
 			walRelOff, e.LBA, e.LSN, lba, lsn)
 	}
-	return e.Data, nil
+	return e.Data, nil, nil
 }
 
 // readDirtyRecordV3 is the flusher's record read for a v3 store: it decodes

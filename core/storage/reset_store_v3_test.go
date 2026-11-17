@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -374,4 +375,87 @@ func TestWALStoreV3ReadOfADamagedLiveRecordIsAnIntegrityFault(t *testing.T) {
 	if _, err := s.Read(1); !isWALCorrupt(err) {
 		t.Fatalf("Read of a damaged live record: err = %v, want a WAL integrity failure", err)
 	}
+}
+
+// codex01 e72acd40 P2 (1): a same-open Recover can fence a dropped record
+// and re-allocate its LSN to the same LBA at the same position. A read
+// parked across that saw the fenced bytes; on re-resolution the entry looks
+// unchanged (same position and LSN), but it is a new write: the read must
+// retry and return it, not report WAL damage.
+func TestWALStoreV3ReadAcrossARecoveryThatReusesTheSamePositionAndLSNIsNotDamage(t *testing.T) {
+	s, path := newStoreV3(t, WModeStrict)
+	t.Cleanup(func() { crashRecoveryHardeningStore(t, s) })
+	resolved, invalid := newHeldV3(t), newHeldV3(t)
+	writeSynced(t, s, 1, 1)                          // LSN 1
+	if _, err := s.Write(1, blk(0xC1)); err != nil { // LSN 2, not acknowledged
+		t.Fatal(err)
+	}
+	off, _, lsn, _, _ := s.dm.get(1)
+	if lsn != 2 {
+		t.Fatalf("setup: LBA 1 dirty LSN %d, want 2", lsn)
+	}
+	s.v3.testReadResolved = resolved.hold
+	rd := make(chan []byte, 1)
+	res := resolved.start(func() error {
+		b, err := s.Read(1)
+		rd <- b
+		return err
+	})
+	waitV3(t, resolved.parked, "Read after resolving LSN 2")
+	s.v3.testReadResolved = nil
+	damageRecord(t, path, 2)
+	if _, err := s.Recover(); err != nil { // drops LSN 2 and fences its bytes
+		t.Fatalf("Recover: %v", err)
+	}
+	s.v3.testReadInvalid = invalid.hold
+	resolved.rel() // the pread sees the fenced bytes and fails validation
+	waitV3(t, invalid.parked, "Read after the failed validation")
+	s.v3.testReadInvalid = nil
+	if _, err := s.Write(1, blk(0xC2)); err != nil { // LSN 2 again, same LBA
+		t.Fatal(err)
+	}
+	if off2, _, lsn2, _, _ := s.dm.get(1); off2 != off || lsn2 != 2 {
+		t.Fatalf("setup: the new write is at %d LSN %d, want the reused %d LSN 2", off2, lsn2, off)
+	}
+	invalid.rel()
+	if err := resolved.result(res, "Read"); err != nil {
+		t.Fatalf("Read across a reusing recovery: %v (a false WAL integrity failure)", err)
+	}
+	if got := <-rd; !bytes.Equal(got, blk(0xC2)) {
+		t.Fatalf("Read returned %x..., want the current write %x...", got[0], byte(0xC2))
+	}
+}
+
+// codex01 e72acd40 P2 (2): a failed pread is substrate I/O, never WAL
+// integrity. EOF policy: the WAL region lies inside the file, so a file
+// shorter than its geometry (io.EOF) is substrate I/O too.
+func TestWALStoreV3ReadIOErrorsAreSubstrateIONotWALIntegrity(t *testing.T) {
+	isIO := func(err error) bool {
+		var rf *RecoveryFailure
+		return errors.As(err, &rf) && rf.Kind == StorageRecoveryFailureSubstrateIO
+	}
+	t.Run("short file (EOF)", func(t *testing.T) {
+		s, path := newStoreV3(t, WModeStrict)
+		t.Cleanup(func() { crashRecoveryHardeningStore(t, s) })
+		writeSynced(t, s, 1, 1)
+		if err := os.Truncate(path, int64(walOffsetV3)); err != nil {
+			t.Fatal(err)
+		}
+		_, err := s.Read(1)
+		if !isIO(err) || isWALCorrupt(err) || !errors.Is(err, io.EOF) {
+			t.Fatalf("Read past the end of a truncated file: err = %v, want a substrate I/O failure wrapping io.EOF", err)
+		}
+	})
+	t.Run("read error", func(t *testing.T) {
+		s, _ := newStoreV3(t, WModeStrict)
+		writeSynced(t, s, 1, 1)
+		s.committer.Stop()
+		if err := s.fd.Close(); err != nil { // every later pread fails
+			t.Fatal(err)
+		}
+		_, err := s.Read(1)
+		if !isIO(err) || isWALCorrupt(err) || !errors.Is(err, os.ErrClosed) {
+			t.Fatalf("Read on a failing file: err = %v, want a substrate I/O failure", err)
+		}
+	})
 }
