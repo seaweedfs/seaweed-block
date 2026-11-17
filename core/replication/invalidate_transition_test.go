@@ -7,23 +7,21 @@ import (
 	"testing"
 )
 
-// #182: Invalidate still moves every non-terminal state to Degraded.
+// #182: Invalidate still moves every non-terminal state to Degraded. A new
+// peer starts Healthy; Unknown is only set by Close, after which Invalidate
+// returns early, so it is not a reachable starting state here.
 func TestReplicaPeer_InvalidateNonTerminalStatesBecomeDegraded(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		setup []ReplicaState
 		want  ReplicaState // state before Invalidate
 	}{
-		{"unknown", nil, ReplicaUnknown},
 		{"healthy", []ReplicaState{ReplicaHealthy}, ReplicaHealthy},
 		{"degraded", []ReplicaState{ReplicaHealthy, ReplicaDegraded}, ReplicaDegraded},
 		{"catching_up", []ReplicaState{ReplicaHealthy, ReplicaCatchingUp}, ReplicaCatchingUp},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			peer, _, _ := setupPeerWithRealReplica(t)
-			if tc.setup == nil && peer.State() != ReplicaUnknown {
-				t.Skipf("new peer starts in %s, not Unknown", peer.State())
-			}
 			for _, s := range tc.setup {
 				peer.SetState(s)
 			}
