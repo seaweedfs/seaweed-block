@@ -304,6 +304,9 @@ func (m *chunkLSNMapV3) Prepare(g, C uint64, entries []chunkLSNEntryV3, prior *c
 func (m *chunkLSNMapV3) prepareNextV3(C uint64, entries []chunkLSNEntryV3, prior *chunkMapCandidateV3) (*chunkMapCandidateV3, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.failed != nil {
+		return nil, m.failed
+	}
 	if m.lastGeneration >= counterMaxV3 {
 		return nil, ErrCounterExhausted
 	}

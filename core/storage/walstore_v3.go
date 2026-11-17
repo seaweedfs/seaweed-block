@@ -81,6 +81,7 @@ type walStoreV3State struct {
 	testRecoverHold          func()
 	testBatchBeforeAck       func()
 	testSyncBeforeCompletion func()
+	testMapPrepared          func() // outside all publication locks, after owned-map persistence
 	// testReadResolved runs in a v3 read after the dirty map resolved the
 	// LBA's WAL position and before the record is read.
 	testReadResolved func()

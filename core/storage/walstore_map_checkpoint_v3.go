@@ -51,6 +51,9 @@ func (s *WALStore) prepareOwnedMapCheckpointV3(cp uint64) (*preparedMapPublicati
 
 func (s *WALStore) persistOwnedMapCheckpointV3(highestLSN uint64) error {
 	v := s.v3
+	if err := s.stickyIOFault(); err != nil {
+		return err
+	}
 	cp := min(highestLSN, v.wack.Load())
 	s.mu.RLock()
 	floorSource := s.recycleFloorSrc
@@ -78,6 +81,9 @@ func (s *WALStore) persistOwnedMapCheckpointV3(highestLSN uint64) error {
 	prepared, err := s.prepareOwnedMapCheckpointV3(cp)
 	if err != nil {
 		return err
+	}
+	if h := v.testMapPrepared; h != nil {
+		h()
 	}
 	v.syncMu.Lock()
 	defer v.syncMu.Unlock()
