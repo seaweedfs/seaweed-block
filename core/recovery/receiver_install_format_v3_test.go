@@ -280,3 +280,30 @@ func TestReceiverV3SupersededBaseDoneFailsWithoutAnAck(t *testing.T) {
 		t.Fatalf("state %d, want installing", st)
 	}
 }
+
+// codex01 row 9b P1: the real Sender sends BaseDone from its base lane while
+// its WAL lane is still sending (sender.go base goroutine). A WAL entry of
+// the same session after BaseDone must still apply, and the barrier then
+// completes with both lanes' bytes. Mutant: admitting install-lane WAL
+// only while installing fails here (the entry after BaseDone is refused).
+func TestReceiverV3WALAfterBaseDoneStillApplies(t *testing.T) {
+	s := v3RecvStore(t)
+	p := startV3Receiver(t, s)
+	p.start(t, 5)
+	p.send(t, frameBaseBlock, encodeBaseBlock(3, v3Blk(0x33)))
+	p.want(t, frameBaseBatchAck)
+	p.send(t, frameWALEntry, encodeWALEntry(WALKindBacklog, 4, 6, v3Blk(0x44)))
+	p.send(t, frameBaseDone, nil)
+	p.want(t, frameBaseBatchAck)
+	p.send(t, frameWALEntry, encodeWALEntry(WALKindSessionLive, 5, 7, v3Blk(0x55)))
+	p.send(t, frameBarrierReq, nil)
+	p.want(t, frameBarrierResp)
+	if err := p.runErr(t); err != nil {
+		t.Fatalf("receiver: %v", err)
+	}
+	for lba, want := range map[uint32]byte{3: 0x33, 4: 0x44, 5: 0x55} {
+		if got := readV3Recv(t, s, lba); !bytes.Equal(got, v3Blk(want)) {
+			t.Fatalf("LBA %d = %x..., want %x", lba, got[0], want)
+		}
+	}
+}
