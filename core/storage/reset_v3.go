@@ -107,7 +107,8 @@ func (s *WALStore) resetIncarnationV3() error {
 			return err
 		}
 	}
-	v.recoverGen.Add(1)
+	v.recoverGen.Add(1)       // odd while the reset runs (see recoverGen)
+	defer v.recoverGen.Add(1) // even again at the end, on every path
 	if _, err := v.pub.resetIncarnationV3(nonce, 0); err != nil {
 		return err
 	}

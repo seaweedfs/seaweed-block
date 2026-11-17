@@ -40,6 +40,13 @@ type walStoreV3State struct {
 	// syncMu across its wait, the outer Sync() completion, captures
 	// recoverGen with its target and rechecks it under syncMu -> s.mu.
 	//
+	// recoverGen is bumped at the start AND at the end of every recovery
+	// and reset, the start+end pattern of the map proof epoch: a lock-free
+	// reader whose attempt saw the same value before and after was not cut
+	// by a recovery's end (codex01 2fa56078 P2: a read admitted between the
+	// start bump and the dirty-map clear captured the new value with an old
+	// entry, then a same-tuple rewrite after the recovery).
+	//
 	// Lock graph: captureMu -> lifecycleMu -> syncMu -> s.mu -> descMu ->
 	// fileSyncMu; nothing takes syncMu while holding s.mu or descMu.
 	recoverGen atomic.Uint64
@@ -78,6 +85,11 @@ type walStoreV3State struct {
 	// testReadInvalid runs in a v3 read after a record failed validation and
 	// before the entry is re-resolved.
 	testReadInvalid func()
+	// testReadAdmitted runs in a v3 read before it captures the recovery
+	// generation; testRecoverAfterBump runs in recoverV3 after the start
+	// bump and before the dirty map is cleared.
+	testReadAdmitted     func()
+	testRecoverAfterBump func()
 }
 
 // errV3RecoveredMeanwhile: a recovery ran between an outer Sync's capture
@@ -308,7 +320,11 @@ func openWALStoreV3MapInternalForTest(path string, requireMap bool) (*WALStore, 
 // captureMu, lifecycleMu and s.mu, as v2 Recover does.
 func (s *WALStore) recoverV3() (uint64, error) {
 	v := s.v3
-	v.recoverGen.Add(1) // under syncMu and s.mu (see recoverGen)
+	v.recoverGen.Add(1)       // under syncMu and s.mu (see recoverGen); odd now
+	defer v.recoverGen.Add(1) // even again at the end, on every path
+	if h := v.testRecoverAfterBump; h != nil {
+		h()
+	}
 	d := v.pub.current()
 	s.dm.clear()
 	scan, err := scanWALV3(s.fd, d)
@@ -551,14 +567,21 @@ func (s *WALStore) SetWMode(m WMode) error {
 // across a reset, so a matching LBA and LSN identify the resolved write;
 // no nonce is checked. A same-open recovery can re-allocate a dropped LSN
 // to the same LBA at the same position, so the "entry unchanged" damage
-// verdict also requires the same recovery generation (a reset bumps it
-// too) across the whole attempt (codex01 e72acd40 P2). A pread error is a
+// verdict also requires the same recovery generation before and after the
+// whole attempt. A recovery bumps it at its start and its end, so any
+// overlap changes it (codex01 e72acd40 and 2fa56078 P2s; see recoverGen).
+// A generation captured while a recovery runs can match only if the
+// verdict also falls inside that recovery, which holds s.mu: no write can
+// re-allocate the tuple, and the replay installs only validated records. A pread error is a
 // substrate I/O failure, never WAL integrity: only a record that fails
 // validation within one stable lifetime is damage. No lock is taken: the
 // lock graph is unchanged.
 func (s *WALStore) readDirtyV3(lba uint32) (data []byte, handled bool, err error) {
 	const attempts = 8
 	for i := 0; i < attempts; i++ {
+		if h := s.v3.testReadAdmitted; h != nil {
+			h()
+		}
 		gen := s.v3.recoverGen.Load()
 		off, _, lsn, _, ok := s.dm.get(uint64(lba))
 		if !ok {

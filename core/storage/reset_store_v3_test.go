@@ -459,3 +459,59 @@ func TestWALStoreV3ReadIOErrorsAreSubstrateIONotWALIntegrity(t *testing.T) {
 		}
 	})
 }
+
+// codex01 2fa56078 P2: a read already admitted (past Read's close check)
+// captures the recovery generation AFTER a Recover's start bump and the OLD
+// dirty entry BEFORE its clear; the recovery fences the dropped record and
+// a same-LBA write re-allocates the same position and LSN. Tuple and a
+// start-only generation would both match: the end bump (and the odd value
+// while a recovery runs) makes the read retry and return the new write.
+func TestWALStoreV3ReadAdmittedBetweenRecoverBumpAndClearIsNotDamage(t *testing.T) {
+	s, path := newStoreV3(t, WModeStrict)
+	t.Cleanup(func() { crashRecoveryHardeningStore(t, s) })
+	admitted, resolved, invalid, rec := newHeldV3(t), newHeldV3(t), newHeldV3(t), newHeldV3(t)
+	writeSynced(t, s, 1, 1)                          // LSN 1
+	if _, err := s.Write(1, blk(0xC1)); err != nil { // LSN 2, not acknowledged
+		t.Fatal(err)
+	}
+	off, _, _, _, _ := s.dm.get(1)
+	damageRecord(t, path, 2)
+	s.v3.testReadAdmitted = admitted.hold
+	rd := make(chan []byte, 1)
+	res := admitted.start(func() error {
+		b, err := s.Read(1)
+		rd <- b
+		return err
+	})
+	waitV3(t, admitted.parked, "Read admitted, before its generation capture")
+	s.v3.testReadAdmitted = nil
+	s.v3.testRecoverAfterBump = rec.hold
+	recDone := rec.start(func() error { _, err := s.Recover(); return err })
+	waitV3(t, rec.parked, "Recover after its start bump, before the clear")
+	s.v3.testRecoverAfterBump = nil
+	s.v3.testReadResolved = resolved.hold
+	admitted.rel() // captures the bumped generation and the old entry
+	waitV3(t, resolved.parked, "Read after resolving the old entry")
+	s.v3.testReadResolved = nil
+	rec.rel()
+	if err := rec.result(recDone, "Recover"); err != nil { // drops LSN 2, fences it
+		t.Fatalf("Recover: %v", err)
+	}
+	s.v3.testReadInvalid = invalid.hold
+	resolved.rel() // the pread sees the fenced bytes
+	waitV3(t, invalid.parked, "Read after the failed validation")
+	s.v3.testReadInvalid = nil
+	if _, err := s.Write(1, blk(0xC2)); err != nil { // LSN 2 again, same LBA
+		t.Fatal(err)
+	}
+	if off2, _, lsn2, _, _ := s.dm.get(1); off2 != off || lsn2 != 2 {
+		t.Fatalf("setup: the new write is at %d LSN %d, want the reused %d LSN 2", off2, lsn2, off)
+	}
+	invalid.rel()
+	if err := admitted.result(res, "Read"); err != nil {
+		t.Fatalf("Read admitted inside a recovery: %v (a false WAL integrity failure)", err)
+	}
+	if got := <-rd; !bytes.Equal(got, blk(0xC2)) {
+		t.Fatalf("Read returned %x..., want the current write %x...", got[0], byte(0xC2))
+	}
+}
