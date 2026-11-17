@@ -804,6 +804,9 @@ func replicaStateTransitionAllowed(prev, next ReplicaState) bool {
 // transitions (CatchingUp, NeedsRebuild) flow through SetState.
 // Calling Invalidate on an already-Degraded peer is a no-op (beyond
 // the log line — still useful because the reason string may be new).
+// Calling it on a NeedsRebuild peer keeps NeedsRebuild: Invalidate obeys
+// replicaStateTransitionAllowed like SetState, and NeedsRebuild is
+// terminal.
 //
 // Called by: ShipEntry on transport error; ReplicationVolume on
 // explicit peer-down from authority updates.
@@ -816,6 +819,17 @@ func (p *ReplicaPeer) Invalidate(reason string) {
 		return
 	}
 	prev := p.state
+	// Invalidate goes through the same transition gate as SetState, so
+	// it can never move a peer out of a terminal state (NeedsRebuild).
+	// Every other state may move to Degraded, so their behaviour is
+	// unchanged. The log line is Invalidate's only other effect and is
+	// kept either way: the reason may be new.
+	if !replicaStateTransitionAllowed(prev, ReplicaDegraded) {
+		p.mu.Unlock()
+		log.Printf("replication: peer %s invalidated, state kept (prev=%s is terminal, reason=%s)",
+			p.target.ReplicaID, prev, reason)
+		return
+	}
 	p.state = ReplicaDegraded
 	p.mu.Unlock()
 	log.Printf("replication: peer %s invalidated (prev=%s, reason=%s)",
