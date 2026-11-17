@@ -588,9 +588,6 @@ func (s *WALStore) Recover() (frontier uint64, err error) {
 				frontier, err = 0, errors.Join(err, endErr)
 			}
 		}()
-		if err := s.v3.pub.invalidateMapProofV3(); err != nil {
-			return 0, err
-		}
 	}
 	if s.closed {
 		return 0, errors.New("storage: Recover after Close")
