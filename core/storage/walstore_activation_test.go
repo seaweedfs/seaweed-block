@@ -112,7 +112,9 @@ func TestWALStoreV3InstrumentationIncludesBatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	i := s.WriteInstrumentation()
-	if i.WALCopyOps != 2 || i.WALCopyBytes != 3*4096 || i.WALEncodeOps != 2 || i.WALChecksumOps != 2 ||
+	// A batch first aggregates its blocks, then copies that payload into
+	// the encoded frame: both real copies belong in the cost profile.
+	if i.WALCopyOps != 3 || i.WALCopyBytes != 5*4096 || i.WALEncodeOps != 2 || i.WALChecksumOps != 2 ||
 		i.WALAppendOps != 2 || i.WALAppendWriteAtCalls != 2 || i.DirtyMapUpdateOps != 3 || s.DurabilityLatency().WALAppend.Count != 2 {
 		t.Fatalf("v3 single+8KiB batch instrumentation incomplete: %+v latency=%+v", i, s.DurabilityLatency())
 	}
