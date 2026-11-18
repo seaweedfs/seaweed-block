@@ -58,6 +58,8 @@ type flusher struct {
 	afterSnapshotForTest func()
 	// Pauses after materialization/fsync, before map proof preparation. Tests only.
 	afterExtentSyncForTest func()
+	// Pauses after checkpoint/reuse publication, before the outer DM cleanup.
+	afterCheckpointForTest func()
 }
 
 type flusherConfig struct {
@@ -264,6 +266,10 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 			}
 			store.mu.Unlock()
 		}
+	}
+
+	if f.afterCheckpointForTest != nil {
+		f.afterCheckpointForTest()
 	}
 
 	// Step 4: remove flushed entries from the dirty map using

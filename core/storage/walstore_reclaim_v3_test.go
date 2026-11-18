@@ -195,3 +195,34 @@ func TestWALStoreV3ReclaimAfterInstallingPhysicalReopen(t *testing.T) {
 		t.Fatalf("recovered install bytes: %v", err)
 	}
 }
+
+// Hold the actual flusher after its durable publication, before its outer
+// cleanup, then make the writer reuse the old dirty entry's physical slot.
+func TestWALStoreV3ReclaimRetiresReferencesBeforeReuse(t *testing.T) {
+	s, err := createMappedWALStoreV3ForTest(filepath.Join(t.TempDir(), "volume"), 32, 4096, 64*1024, WModeStrict, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.DisableAutoFlushForRecoveryTest()
+	t.Cleanup(func() { _ = s.Close() })
+	for i := uint32(0); i < 15; i++ {
+		if _, err := s.Write(i, blk(byte(i+1))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	s.flusher.afterCheckpointForTest = func() {
+		s.flusher.afterCheckpointForTest = nil
+		if _, err := s.Write(15, blk(16)); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := s.Read(0); err != nil || !bytes.Equal(got, blk(1)) {
+			t.Fatalf("durable old extent must remain readable during physical WAL reuse: %v", err)
+		}
+	}
+	if err := s.flusher.flushOnce(); err != nil {
+		t.Fatal(err)
+	}
+}
