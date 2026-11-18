@@ -14,7 +14,6 @@ func (l *chunkLayerImpl) holdBaseTransitionV3() (func(), error) {
 	if hook := l.testBaseTransitionBeforeLock; hook != nil {
 		hook()
 	}
-	l.capMu.Lock()
 	l.stMu.Lock()
 	var refusal error
 	switch {
@@ -29,7 +28,6 @@ func (l *chunkLayerImpl) holdBaseTransitionV3() (func(), error) {
 	}
 	l.stMu.Unlock()
 	if refusal != nil {
-		l.capMu.Unlock()
 		done()
 		return nil, fmt.Errorf("storage: BASE transition refused: %w", refusal)
 	}
@@ -57,7 +55,6 @@ func (l *chunkLayerImpl) holdBaseTransitionV3() (func(), error) {
 			l.hdr.Base = chunkBaseNone
 		}
 		l.stMu.Unlock()
-		l.capMu.Unlock()
 		done()
 	}, nil
 }
