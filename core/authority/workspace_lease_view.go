@@ -217,9 +217,13 @@ func (p *Publisher) firstWorkspaceGrant(ctx context.Context, volume, holder stri
 		p.mu.Unlock()
 		return WorkspaceLease{}, fmt.Errorf("workspace lease: move pending")
 	}
-	if s.Lease != nil { // another writer created it: retry the memory path, holding nothing
+	if s.Lease != nil {
+		// Another writer created the lease after the view was read. Do not
+		// re-enter the memory path from here (no mutual recursion): the host has
+		// no deadline yet, so a failed first renewal does not fence it, and its
+		// retry takes the memory path.
 		p.mu.Unlock()
-		return p.RenewWorkspaceLease(ctx, volume, holder, epoch)
+		return WorkspaceLease{}, fmt.Errorf("workspace lease: created concurrently; retry")
 	}
 	now := p.workspaceNow()
 	skew := int64(p.workspaceSkew(nil))
