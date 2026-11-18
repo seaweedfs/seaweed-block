@@ -66,6 +66,7 @@ type chunkLayerImpl struct {
 
 	cowMu          sync.Mutex // window admission only; never held during reads or joins
 	cow            *cutCOWWindow
+	cowActive      atomic.Pointer[cutCOWWindow]
 	cowTransitions int
 	cowClosed      bool
 
@@ -122,6 +123,8 @@ type chunkLayerImpl struct {
 	keySeq   uint64
 
 	// Test-only scheduling hooks; nil in production.
+	testCOWWait                  func()
+	testCOWRead                  func(idx uint64, saved bool)
 	testCOWSave                  func() error
 	testPresenceSnapshotHook     func()                 // after a presence snapshot, before it is written
 	testBaseTransitionBeforeLock func()                 // test handshake before capMu drain

@@ -11,6 +11,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -42,10 +43,11 @@ type cutCOWWindow struct {
 	err        error
 	ended      chan struct{}
 	refs       sync.WaitGroup // Add under mu, only while OPEN; Wait only after terminal
+	sideReady  chan struct{}
+	cleanupErr error
 	entries    map[uint64]*cutCOWEntry
 	memory     int64
 	chunkBytes int64
-	sideOnce   sync.Once
 	side       *os.File
 	sideErr    error
 	cleanup    sync.Once
@@ -134,6 +136,7 @@ func (l *chunkLayerImpl) installCOWWindow(candidates, staged map[uint64]bool) (*
 		return nil, errCutCOWAborted
 	}
 	l.cow = w
+	l.cowActive.Store(w)
 	return w, nil
 }
 
@@ -145,19 +148,19 @@ func (w *cutCOWWindow) abort(err error) {
 	}
 	w.mu.Unlock()
 }
-func (w *cutCOWWindow) join() {
+func (w *cutCOWWindow) join() error {
 	w.refs.Wait()
 	// Only terminal windows are joined. Saved readers never outlive their ref.
 	w.cleanup.Do(func() {
 		if w.side != nil {
 			name := w.side.Name()
-			_ = w.side.Close()
-			_ = os.Remove(name)
+			w.cleanupErr = errors.Join(w.side.Close(), os.Remove(name))
 		}
 		for _, e := range w.entries {
 			e.data = nil
 		}
 	})
+	return w.cleanupErr
 }
 func (w *cutCOWWindow) status() error { w.mu.Lock(); defer w.mu.Unlock(); return w.err }
 
@@ -212,6 +215,9 @@ func (w *cutCOWWindow) finish(e *cutCOWEntry, state uint8) bool {
 }
 func (w *cutCOWWindow) wait(ch <-chan struct{}) {
 	start := time.Now()
+	if hook := w.layer.testCOWWait; hook != nil {
+		hook()
+	}
 	select {
 	case <-ch:
 	case <-w.ended:
@@ -220,9 +226,7 @@ func (w *cutCOWWindow) wait(ch <-chan struct{}) {
 }
 
 func (l *chunkLayerImpl) beforeCOWMutation(first, count uint64) {
-	l.cowMu.Lock()
-	w := l.cow
-	l.cowMu.Unlock()
+	w := l.cowActive.Load()
 	if w == nil || count == 0 {
 		return
 	}
@@ -275,9 +279,9 @@ func (w *cutCOWWindow) save(e *cutCOWEntry, data []byte) error {
 		e.data = data
 		return nil
 	}
-	w.sideOnce.Do(func() {
-		w.side, w.sideErr = os.CreateTemp(filepath.Dir(w.layer.s.path), filepath.Base(w.layer.s.path)+".cut-cow-*")
-	})
+	if err := w.openSide(); err != nil {
+		return err
+	}
 	if w.sideErr != nil {
 		return w.sideErr
 	}
@@ -324,6 +328,9 @@ func (l *chunkLayerImpl) copyCOWEntry(w *cutCOWWindow, idx uint64) (capturedChun
 		if e == nil {
 			return capturedChunk{}, false, w.status()
 		}
+		if hook := l.testCOWRead; hook != nil {
+			hook(idx, state == cowSaved)
+		}
 		var data []byte
 		var err error
 		if state == cowSaved {
@@ -363,6 +370,7 @@ func (l *chunkLayerImpl) copyCOWWindow(ctx context.Context, w *cutCOWWindow) ([]
 		l.cowMu.Lock()
 		if l.cow == w {
 			l.cow = nil
+			l.cowActive.Store(nil)
 		}
 		l.cowMu.Unlock()
 	}()
@@ -400,7 +408,10 @@ func (l *chunkLayerImpl) copyCOWWindow(ctx context.Context, w *cutCOWWindow) ([]
 	}
 	err := w.err
 	w.mu.Unlock()
-	w.join()
+	cleanupErr := w.join()
+	if err == nil {
+		err = cleanupErr
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -411,4 +422,55 @@ func (l *chunkLayerImpl) copyCOWWindow(ctx context.Context, w *cutCOWWindow) ([]
 		}
 	}
 	return result, nil
+}
+
+// Creation is single-owner, but no allocation/lifetime lock spans filesystem I/O.
+func (w *cutCOWWindow) openSide() error {
+	w.mu.Lock()
+	if w.sideReady != nil {
+		ready := w.sideReady
+		w.mu.Unlock()
+		select {
+		case <-ready:
+			return w.sideErr
+		case <-w.ended:
+			return errCutCOWAborted
+		}
+	}
+	w.sideReady = make(chan struct{})
+	w.mu.Unlock()
+	side, err := os.CreateTemp(filepath.Dir(w.layer.s.path), filepath.Base(w.layer.s.path)+".cut-cow-")
+	w.mu.Lock()
+	w.side, w.sideErr = side, err
+	close(w.sideReady)
+	w.mu.Unlock()
+	return err
+}
+
+// Called only by an exclusive, locked RW open. Side payloads are never decoded
+// or imported, and directories/symlinks/other volume prefixes are untouched.
+func discardCutCOWFiles(path string) error {
+	dir := filepath.Dir(path)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	prefix := filepath.Base(path) + ".cut-cow-"
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), prefix) || !e.Type().IsRegular() {
+			continue
+		}
+		// Type zero includes regular files only; Info also protects unknown dir types.
+		info, err := e.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, e.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
 }
