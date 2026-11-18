@@ -216,6 +216,8 @@ type volHandle struct {
 	recoverGen uint64
 	waitGen    uint64
 	chunk      storage.ChunkLayer // after RecoverVolume
+	// Private until the owner commit succeeds; retained for attach retry.
+	chunkPending storage.ChunkLayer
 	// chunkDetach is set (under attachMu) when DetachVolume starts and
 	// never cleared in this process: frontend I/O stays stopped, through
 	// any later RecoverVolume, until a new lifetime attaches the volume.

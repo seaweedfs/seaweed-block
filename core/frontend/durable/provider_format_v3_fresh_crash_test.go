@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -60,6 +61,10 @@ func TestDurableProviderV3_FreshMarkerCompletionCrashKeepsCompletedBASE(t *testi
 	freshMarkerCrashKeepsCompletedBASE(t, "complete")
 }
 
+func TestDurableProviderV3_FreshMarkerCaptureCrashKeepsCompletedBASE(t *testing.T) {
+	freshMarkerCrashKeepsCompletedBASE(t, "capture")
+}
+
 func freshMarkerCrashKeepsCompletedBASE(t *testing.T, mode string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -67,6 +72,9 @@ func freshMarkerCrashKeepsCompletedBASE(t *testing.T, mode string) {
 	if root := os.Getenv("SWBLOCK_V3_FRESH_CRASH_ROOT"); root != "" {
 		remote := freshCrashRemote(t, filepath.Join(root, "remote.json"))
 		p := mappedProviderV3(t, root, remote)
+		if os.Getenv("SWBLOCK_V3_FRESH_CRASH_MODE") == "capture" {
+			p.cfg.ChunkCaptureInterval = time.Hour
+		}
 		st, err := p.EnsureStorage("v1")
 		if err != nil {
 			t.Fatal(err)
@@ -119,6 +127,49 @@ func freshMarkerCrashKeepsCompletedBASE(t *testing.T, mode string) {
 			}
 			if _, err := ws.Sync(); err != nil {
 				t.Fatal(err)
+			}
+			if mode == "capture" {
+				before, err := remote.GetHead(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				beforeBytes, err := json.Marshal(before)
+				if err != nil {
+					t.Fatal(err)
+				}
+				puts := remote.Puts()
+				if _, err := p.CaptureVolume(ctx, "v1"); !errors.Is(err, ErrNotChunkVolume) {
+					t.Fatal("precommit CaptureVolume published before durable owner commit")
+				}
+				if _, err := p.CutVolume(ctx, "v1", 9); !errors.Is(err, ErrNotChunkVolume) {
+					t.Fatal("precommit CutVolume was admitted")
+				}
+				if err := p.MakeVolumeRemoteDurable(ctx, "v1", 9); !errors.Is(err, ErrNotChunkVolume) {
+					t.Fatal("precommit MakeVolumeRemoteDurable was admitted")
+				}
+				after, err := remote.GetHead(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				afterBytes, err := json.Marshal(after)
+				if err != nil {
+					t.Fatal(err)
+				}
+				intents, err := remote.ListIntents(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(beforeBytes, afterBytes) || remote.Puts() != puts || len(intents) != 0 {
+					t.Fatal("refused precommit publication changed remote state")
+				}
+				p.mu.Lock()
+				handle := p.volumes["v1"]
+				exposed := handle.chunk != nil || handle.chunkStop != nil || handle.chunkDone != nil
+				p.mu.Unlock()
+				if exposed {
+					t.Fatal("precommit layer or scheduler was exposed")
+				}
+				fmt.Println("FRESH_CAPTURE_REFUSED no_remote_effect=true scheduler_hidden=true")
 			}
 			fmt.Println("FRESH_CRASH_READY presence_saved=true marker_present=true ack=9 no_Close=true")
 			os.Exit(0)
@@ -197,5 +248,53 @@ func freshMarkerCrashKeepsCompletedBASE(t *testing.T, mode string) {
 		if n, err := p.Backend("v1").Read(ctx, lba*4096, got); err != nil || n != 4096 || !bytes.Equal(got, want) {
 			t.Fatalf("crash BASE bytes lba=%d n=%d err=%v equal=%v", lba, n, err, bytes.Equal(got, want))
 		}
+	}
+}
+
+// A failed owner commit keeps the layer private without leaking or trying
+// to attach it twice. Success publishes it and starts its scheduler once.
+func TestDurableProviderV3_AttachCommitRetryKeepsLayerPrivate(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	remote := storage.NewMemChunkRemote()
+	p := mappedProviderV3(t, t.TempDir(), remote)
+	p.cfg.ChunkCaptureInterval = time.Hour
+	if _, err := p.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
+	}
+	injected := errors.New("hold durable owner commit")
+	p.testBeforeChunkFreshRetire = func() error { return injected }
+	if _, err := p.RecoverVolume(ctx, "v1"); !errors.Is(err, injected) {
+		t.Fatal(err)
+	}
+	p.mu.Lock()
+	h := p.volumes["v1"]
+	pending := h.chunkPending
+	exposed := h.chunk != nil || h.chunkStop != nil || h.chunkDone != nil
+	p.mu.Unlock()
+	if pending == nil || exposed {
+		t.Fatal("failed commit exposed or lost pending layer")
+	}
+	if _, err := p.CaptureVolume(ctx, "v1"); !errors.Is(err, ErrNotChunkVolume) {
+		t.Fatal("failed commit capture", err)
+	}
+	if _, err := os.Stat(chunkFreshMarker(p.volumePath("v1"))); err != nil {
+		t.Fatal(err)
+	}
+	p.testBeforeChunkFreshRetire = nil
+	if _, err := p.RecoverVolume(ctx, "v1"); err != nil {
+		t.Fatal("commit retry", err)
+	}
+	p.mu.Lock()
+	correct := h.chunk == pending && h.chunkPending == nil && h.chunkStop != nil && h.chunkDone != nil
+	p.mu.Unlock()
+	if !correct {
+		t.Fatal("commit did not publish the same pending layer and scheduler")
+	}
+	if _, err := os.Stat(chunkFreshMarker(p.volumePath("v1"))); !os.IsNotExist(err) {
+		t.Fatal("committed marker remains", err)
+	}
+	if _, err := p.CaptureVolume(ctx, "v1"); err != nil {
+		t.Fatal("postcommit capture", err)
 	}
 }

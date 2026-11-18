@@ -207,6 +207,9 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 func (p *DurableProvider) attachChunk(ctx context.Context, volumeID string, h *volHandle) error {
 	p.mu.Lock()
 	layer := h.chunk
+	if layer == nil {
+		layer = h.chunkPending
+	}
 	p.mu.Unlock()
 	if layer == nil {
 		var err error
@@ -215,20 +218,12 @@ func (p *DurableProvider) attachChunk(ctx context.Context, volumeID string, h *v
 		}
 		p.mu.Lock()
 		if p.closed {
-			// Not published: the store still owns the layer and closes it
-			// in WALStore.Close, which Close runs after this call settles.
+			// The store owns this unpublished layer and closes it after
+			// the admitted attach settles.
 			p.mu.Unlock()
 			return errProviderClosed
 		}
-		h.chunk = layer
-		h.backend.mu.Lock()
-		h.backend.chunkFenced = layer.Fenced
-		h.backend.mu.Unlock()
-		if p.cfg.ChunkCaptureInterval > 0 {
-			ctx, cancel := context.WithCancel(context.Background())
-			h.chunkStop, h.chunkDone = cancel, make(chan struct{})
-			go p.chunkLoop(ctx, volumeID, layer, h.chunkDone)
-		}
+		h.chunkPending = layer
 		p.mu.Unlock()
 	}
 	// The owner commit is serialized with a later BASE begin. The callback
@@ -253,8 +248,26 @@ func (p *DurableProvider) attachChunk(ctx context.Context, volumeID string, h *v
 	} else if err := commit(); err != nil {
 		return err
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return errProviderClosed
+	}
 	h.fresh = false
-
+	if h.chunk == nil {
+		// No explicit operation can resolve the layer, and no scheduler
+		// can publish, until marker retirement is durably committed.
+		h.chunk = layer
+		h.chunkPending = nil
+		h.backend.mu.Lock()
+		h.backend.chunkFenced = layer.Fenced
+		h.backend.mu.Unlock()
+		if p.cfg.ChunkCaptureInterval > 0 {
+			loopCtx, cancel := context.WithCancel(context.Background())
+			h.chunkStop, h.chunkDone = cancel, make(chan struct{})
+			go p.chunkLoop(loopCtx, volumeID, layer, h.chunkDone)
+		}
+	}
 	return nil
 }
 
