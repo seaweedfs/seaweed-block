@@ -87,7 +87,7 @@ func TestWALStoreAppendDuringFlushThenTornWrapKeepsSyncedRecords(t *testing.T) {
 		t.Fatal(err)
 	}
 	crashRecoveryHardeningStore(t, s)
-	r, err := OpenWALStore(path)
+	r, err := openLegacyWALStoreForTest(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +162,7 @@ func TestWALStoreRecoverPersistsTheRecoveredBounds(t *testing.T) {
 		t.Fatal(err)
 	}
 	crashRecoveryHardeningStore(t, s)
-	r, err := OpenWALStore(path)
+	r, err := openLegacyWALStoreForTest(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +252,7 @@ func TestWALStoreFullFlushThenTornWrapKeepsSyncedRecords(t *testing.T) {
 		t.Fatal(err)
 	}
 	crashRecoveryHardeningStore(t, s)
-	r, err := OpenWALStore(path)
+	r, err := openLegacyWALStoreForTest(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +397,7 @@ func TestWALStoreRecoverBoundsPersistFailureRefusesAppendsUntilRetry(t *testing.
 			crashRecoveryHardeningStore(t, s)
 			crashed = true
 
-			r, err := OpenWALStore(path)
+			r, err := openLegacyWALStoreForTest(path)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -436,7 +436,7 @@ func TestWALStoreRecoverBoundsPersistFailureRefusesAppendsUntilRetry(t *testing.
 				}
 				crashRecoveryHardeningStore(t, r)
 				rClosed = true
-				r2, err := OpenWALStore(path)
+				r2, err := openLegacyWALStoreForTest(path)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -466,7 +466,7 @@ func TestWALStoreRecoverBoundsPersistFailureRefusesAppendsUntilRetry(t *testing.
 			crashRecoveryHardeningStore(t, live)
 			rClosed = true
 
-			q, err := OpenWALStore(path)
+			q, err := openLegacyWALStoreForTest(path)
 			if err != nil {
 				t.Fatal(err)
 			}

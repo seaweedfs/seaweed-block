@@ -18,7 +18,7 @@ func writeSyncedEntries(t *testing.T, lbas []uint32) (*WALStore, string, map[uin
 	t.Helper()
 	const blockSize = 4096
 	path := filepath.Join(t.TempDir(), "store.bin")
-	s, err := CreateWALStore(path, 16, blockSize)
+	s, err := createLegacyWALStoreForTest(path, 16, blockSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func flipDataByte(t *testing.T, s *WALStore, walOffset uint64) {
 func reopenAfterCrash(t *testing.T, s *WALStore, path string) (*WALStore, uint64, error) {
 	t.Helper()
 	crashRecoveryHardeningStore(t, s)
-	r, err := OpenWALStore(path)
+	r, err := openLegacyWALStoreForTest(path)
 	if err != nil {
 		t.Fatal(err)
 	}

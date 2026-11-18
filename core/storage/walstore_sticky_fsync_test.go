@@ -63,7 +63,7 @@ func assertRefusesAfterFault(t *testing.T, s *WALStore, path string) {
 		t.Fatalf("the flusher advanced the checkpoint %d -> %d after an fsync failure", ckpt, got)
 	}
 	_ = s.Close()
-	r, err := OpenWALStore(path)
+	r, err := openLegacyWALStoreForTest(path)
 	if err != nil {
 		t.Fatal(err)
 	}

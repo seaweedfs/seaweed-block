@@ -80,7 +80,7 @@ func TestWALStoreFailedBatchAppendDoesNotRevertALaterAckedWrite(t *testing.T) {
 
 func reopenForB5(t *testing.T, path string) *WALStore {
 	t.Helper()
-	r, err := OpenWALStore(path)
+	r, err := openLegacyWALStoreForTest(path)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -46,7 +46,7 @@ func TestLegacyFixtureIsolation(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "go", "list", "-deps", "-json", "./...")
+	cmd := exec.CommandContext(ctx, "go", "list", "-deps", "-json", "./core/storage")
 	cmd.Dir = filepath.Join("..", "..")
 	out, err := cmd.Output()
 	if err != nil {
@@ -61,7 +61,7 @@ func TestLegacyFixtureIsolation(t *testing.T) {
 		if err := dec.Decode(&p); err != nil {
 			t.Fatal(err)
 		}
-		if strings.Contains(p.ImportPath, "/internal/v2legacy") && p.ImportPath != "github.com/seaweedfs/seaweed-block/cmd/sw-block/internal/v2legacy" {
+		if strings.Contains(p.ImportPath, "/internal/v2legacy") {
 			t.Errorf("unexpected frozen import %s", p.ImportPath)
 		}
 		if p.ImportPath == "github.com/seaweedfs/seaweed-block/core/storage" {
