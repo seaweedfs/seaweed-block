@@ -299,7 +299,7 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 	hooks := &chunkHooks{sink: l, closer: l.Close, mutated: l.noteMutation, recovered: l.noteAllMutated}
 	if mapped {
 		hooks.baseTransitionV3 = l.holdBaseTransitionV3
-		hooks.beforeMutation = l.beforeCOWMutation
+		hooks.beforeMutation = nil
 		hooks.beforeDestructive = l.holdCOWDestructive
 	}
 	if !s.chunk.CompareAndSwap(nil, hooks) {
