@@ -144,9 +144,6 @@ func (s *WALStore) publishCheckpointV3(cp uint64, seed bool, recoveryGen uint64)
 	// Reuse still waits for BOTH valid slots. This uses the same sole
 	// publisher and existing immutable map; failure keeps the old slot pin
 	// and latches the store before the flusher retires dirty entries.
-	if _, err := v.pub.rolloverIfPinned(); err != nil {
-		return descriptorV3{}, err
-	}
 	if seed {
 		v.appended.Store(max(v.appended.Load(), cp))
 		v.wack.Store(wack)
