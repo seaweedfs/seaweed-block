@@ -193,6 +193,7 @@ func TestChunkLayerV3_BASEDrainJoinsClose(t *testing.T) {
 
 func TestChunkLayerV3_BASEPresenceBarrierFailureKeepsInstalling(t *testing.T) {
 	s, f, l := mappedBASELayerV3(t)
+	s.DeferBaseRetirementV3()
 	if _, e := s.Write(5, blk(0x11)); e != nil {
 		t.Fatal(e)
 	}
@@ -229,9 +230,15 @@ func TestChunkLayerV3_BASEPresenceBarrierFailureKeepsInstalling(t *testing.T) {
 	if _, e = l.Cut(ctTimeout(t)); !errors.Is(e, errChunkBaseInstalling) {
 		t.Fatal("failed BASE became capturable", e)
 	}
+	if gate := s.v3.pub.retireGate.Load(); gate != retireDeferredV3 {
+		t.Fatalf("failed presence barrier released gate: %d", gate)
+	}
 	l.syncDirFn = realSync
 	if e = h.MarkBaseComplete(); e != nil {
 		t.Fatal("completion retry", e)
+	}
+	if gate := s.v3.pub.retireGate.Load(); gate != retireAllowedV3 {
+		t.Fatalf("durable completion did not release gate: %d", gate)
 	}
 	r, e := l.Cut(ctTimeout(t))
 	if e != nil {
