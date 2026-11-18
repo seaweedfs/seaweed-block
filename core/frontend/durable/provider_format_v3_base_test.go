@@ -93,7 +93,7 @@ func TestDurableProviderV3_CompletedBASEDoesNotRestoreOlderHEAD(t *testing.T) {
 	completedBASEDoesNotRestoreOlderHEAD(t, false)
 }
 
-func TestDurableProviderV3_RetiredBASEDoesNotRestoreOlderHEAD(t *testing.T) {
+func TestDurableProviderV3_DefersBASERetirementUntilLocalPresence(t *testing.T) {
 	completedBASEDoesNotRestoreOlderHEAD(t, true)
 }
 
@@ -161,8 +161,18 @@ func completedBASEDoesNotRestoreOlderHEAD(t *testing.T, retire bool) {
 			t.Fatal(e)
 		}
 		state, _ := storage.BaseStateV3Test(st.(*storage.WALStore))
-		if _, ok := st.(*storage.WALStore).InstalledBaseLSN(); ok || state != storage.BaseNone || st.(*storage.WALStore).CheckpointLSN() < 8 {
-			t.Fatalf("BASE did not retire: state=%v checkpoint=%d", state, st.(*storage.WALStore).CheckpointLSN())
+		if _, ok := st.(*storage.WALStore).InstalledBaseLSN(); !ok || state != storage.BaseInstalled || st.(*storage.WALStore).CheckpointLSN() < 8 {
+			t.Fatalf("BASE retired before durable local presence: state=%v checkpoint=%d", state, st.(*storage.WALStore).CheckpointLSN())
+		}
+		// The provider must restore the opt-in gate before recovery can
+		// publish a descriptor on a reopened store.
+		if e = target.Close(); e != nil {
+			t.Fatal(e)
+		}
+		target = mappedProviderV3(t, root, remote)
+		st, e = target.EnsureStorage("v1")
+		if e != nil {
+			t.Fatal(e)
 		}
 	}
 	if _, e = target.RecoverVolume(ctx, "v1"); e != nil {
@@ -179,6 +189,18 @@ func completedBASEDoesNotRestoreOlderHEAD(t *testing.T, retire bool) {
 
 	}
 	check()
+	if retire {
+		if _, e = st.Sync(); e != nil {
+			t.Fatal(e)
+		}
+		if e = storage.FlushMappedWALStoreV3Test(st.(*storage.WALStore)); e != nil {
+			t.Fatal(e)
+		}
+		state, _ := storage.BaseStateV3Test(st.(*storage.WALStore))
+		if state != storage.BaseNone {
+			t.Fatalf("durable local presence did not release retirement: %v", state)
+		}
+	}
 	if e = target.Close(); e != nil {
 		t.Fatal(e)
 	}

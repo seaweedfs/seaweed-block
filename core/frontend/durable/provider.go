@@ -685,6 +685,10 @@ func (p *DurableProvider) openExisting(volumeID, path string, impl ImplName) (*v
 		// G6 §1.A α: plumb operator-tunable retention into walstore.
 		// Zero (pre-G6 default) preserves strict checkpoint-driven
 		// recycle.
+		// Defer before Recover can publish a completed BASE away.
+		if impl == ImplWALStoreChunk && p.cfg.ChunkRemoteFor != nil {
+			ws.DeferBaseRetirementV3()
+		}
 		if p.cfg.WALRetentionLSNs > 0 {
 			ws.SetRecoveryRetentionLSNs(p.cfg.WALRetentionLSNs)
 		}
@@ -735,6 +739,10 @@ func (p *DurableProvider) createFresh(volumeID, path string, impl ImplName) (*vo
 			return nil, fmt.Errorf("durable: CreateWALStore %s: %w", path, err)
 		}
 		// G6 §1.A α (see openExisting comment for semantics).
+		// Defer before Recover can publish a completed BASE away.
+		if impl == ImplWALStoreChunk && p.cfg.ChunkRemoteFor != nil {
+			ws.DeferBaseRetirementV3()
+		}
 		if p.cfg.WALRetentionLSNs > 0 {
 			ws.SetRecoveryRetentionLSNs(p.cfg.WALRetentionLSNs)
 		}
