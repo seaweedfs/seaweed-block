@@ -383,7 +383,7 @@ func openInitializedInternal(path string, f *os.File, sb *superblock, metadata B
 		MaxConcurrent: 64,
 		SoftWatermark: 0.70,
 		HardWatermark: 0.90,
-		WALUsedFn:     s.walUsedFraction,
+		WALUsedFn:     func() float64 { return s.wal.usedFraction() },
 		NotifyFn: func() {
 			if s.flusher != nil {
 				s.flusher.NotifyUrgent()
