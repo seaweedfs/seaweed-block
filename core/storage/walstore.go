@@ -383,9 +383,7 @@ func openInitializedInternal(path string, f *os.File, sb *superblock, metadata B
 		MaxConcurrent: 64,
 		SoftWatermark: 0.70,
 		HardWatermark: 0.90,
-		WALUsedFn: func() float64 {
-			return s.wal.usedFraction()
-		},
+		WALUsedFn:     s.walUsedFraction,
 		NotifyFn: func() {
 			if s.flusher != nil {
 				s.flusher.NotifyUrgent()
@@ -399,6 +397,28 @@ func openInitializedInternal(path string, f *os.File, sb *superblock, metadata B
 	})
 
 	return s, nil
+}
+
+// walUsedFraction samples the active format's writer. The legacy writer is
+// still present on a v3 store but receives no appends, so its occupancy is zero.
+// Store admission is held only for this snapshot, never across a pressure wait.
+func (s *WALStore) walUsedFraction() float64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.v3 == nil {
+		return s.wal.usedFraction()
+	}
+	w := s.v3.w
+	if w == nil {
+		return 1
+	} // recovery/reset has not admitted a writer yet
+	d, floor, valid := s.v3.pub.walSnapshotV3()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !valid || d.WALSize == 0 || d.Nonce != w.nonce || w.head < floor {
+		return 1 // uncertain space is not admission headroom
+	}
+	return float64(w.head-floor) / float64(d.WALSize)
 }
 
 func retainedLSNFromCheckpoint(checkpointLSN uint64) uint64 {
