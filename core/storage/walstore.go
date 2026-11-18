@@ -135,8 +135,8 @@ type WALStore struct {
 	// gates and mounted NVMe/TCP profiling pass.
 	multiBlockRecords bool
 
-	// v3 is non-nil for a format-v3 store (walstore_v3.go). Dark until
-	// activation: only createWALStoreV3ForTest/openWALStoreV3ForTest set it.
+	// v3 is non-nil for a format-v3 store (walstore_v3.go). Production
+	// selectors use v3; legacy formats require explicit offline migration.
 	v3 *walStoreV3State
 
 	// Physical WAL sync attempts exclude the separate metadata/checkpoint syncs.
