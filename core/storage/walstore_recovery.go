@@ -272,7 +272,6 @@ func (s *WALStore) scanLBAsV3(fromLSN uint64, fn func(RecoveryEntry) error) erro
 	for attempt := 0; attempt < attempts; attempt++ {
 		s.mu.RLock()
 		gen := v.recoverGen.Load()
-		installEpoch := v.installEpoch
 		d := v.pub.current()
 		headLSN := s.nextLSN
 		checkpointLSN, retentionLSNs := s.checkpointLSN, s.recoveryRetentionLSNs
@@ -311,7 +310,7 @@ func (s *WALStore) scanLBAsV3(fromLSN uint64, fn func(RecoveryEntry) error) erro
 		}
 		s.mu.RLock()
 		now := v.pub.current()
-		stable := v.recoverGen.Load() == gen && v.installEpoch == installEpoch &&
+		stable := v.recoverGen.Load() == gen &&
 			now.Nonce == d.Nonce && now.BaseState == d.BaseState &&
 			now.BaseInstallID == d.BaseInstallID
 		s.mu.RUnlock()
