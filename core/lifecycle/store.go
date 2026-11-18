@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"sort"
 	"sync"
+	"sync/atomic"
 )
 
 var (
@@ -52,6 +53,31 @@ type FileStore struct {
 	mu      sync.Mutex
 	dir     string
 	records map[string]VolumeRecord
+	// snap mirrors records as an immutable copy, republished at every change
+	// of records, for lock-free renewal-path reads.
+	snap atomic.Pointer[map[string]VolumeRecord]
+}
+
+// publishLocked republishes the immutable snapshot of records. Caller holds
+// mu or owns s.
+func (s *FileStore) publishLocked() {
+	m := make(map[string]VolumeRecord, len(s.records))
+	for k, r := range s.records {
+		m[k] = r
+	}
+	s.snap.Store(&m)
+}
+
+// GetVolumeSnapshot is GetVolume without the store mutex, for the lease
+// renewal path: it reads the last published records, never waiting on a
+// write in flight.
+func (s *FileStore) GetVolumeSnapshot(volumeID string) (VolumeRecord, bool) {
+	m := s.snap.Load()
+	if m == nil {
+		return VolumeRecord{}, false
+	}
+	rec, ok := (*m)[volumeID]
+	return rec, ok
 }
 
 // OpenFileStore opens or creates a lifecycle intent store.
@@ -69,6 +95,7 @@ func OpenFileStore(dir string) (*FileStore, error) {
 	if err := s.load(); err != nil {
 		return nil, err
 	}
+	s.publishLocked()
 	return s, nil
 }
 
@@ -92,6 +119,7 @@ func (s *FileStore) CreateVolume(spec VolumeSpec) (VolumeRecord, error) {
 				return VolumeRecord{}, err
 			}
 			s.records[spec.VolumeID] = merged
+			s.publishLocked()
 			return merged, nil
 		}
 		return existing, nil
@@ -101,6 +129,7 @@ func (s *FileStore) CreateVolume(spec VolumeSpec) (VolumeRecord, error) {
 		return VolumeRecord{}, err
 	}
 	s.records[spec.VolumeID] = rec
+	s.publishLocked()
 	return rec, nil
 }
 
@@ -140,6 +169,7 @@ func (s *FileStore) DeleteVolume(volumeID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.records, volumeID)
+	s.publishLocked()
 	if err := os.Remove(s.path(volumeID)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("lifecycle: remove %s: %w", volumeID, err)
 	}
@@ -169,6 +199,7 @@ func (s *FileStore) AttachVolume(volumeID, nodeID string) (VolumeRecord, error) 
 		return VolumeRecord{}, err
 	}
 	s.records[volumeID] = rec
+	s.publishLocked()
 	return rec, nil
 }
 
@@ -192,6 +223,7 @@ func (s *FileStore) DetachVolume(volumeID, nodeID string) (VolumeRecord, error) 
 		return VolumeRecord{}, err
 	}
 	s.records[volumeID] = rec
+	s.publishLocked()
 	return rec, nil
 }
 

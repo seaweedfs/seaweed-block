@@ -28,6 +28,29 @@ func (s *services) workspaceVolume(volume string) error {
 	return nil
 }
 
+// workspaceVolumeForRenewal is workspaceVolume for lease renewal: it reads
+// the published snapshots of the lifecycle stores instead of taking their
+// mutexes, which writers hold across file I/O. A renewal during an in-flight
+// lifecycle write sees the last published state; deletion admission itself
+// stays in the publisher (RecordWorkspaceDeletion needs a clean revocation
+// ACK for a live authority line).
+func (s *services) workspaceVolumeForRenewal(volume string) error {
+	if !s.host.cfg.WorkspaceRPC {
+		return status.Error(codes.FailedPrecondition, "workspace RPC disabled")
+	}
+	if s.host.lifecycle == nil {
+		return status.Error(codes.FailedPrecondition, "lifecycle store unavailable")
+	}
+	r, ok := s.host.lifecycle.Volumes.GetVolumeSnapshot(volume)
+	if !ok || r.Spec.ReplicationFactor != 1 {
+		return status.Error(codes.FailedPrecondition, "workspace move requires an existing RF1 volume")
+	}
+	if s.host.lifecycle.Deletions.ReservedSnapshot(volume) {
+		return status.Error(codes.FailedPrecondition, "workspace: volume is being deleted")
+	}
+	return nil
+}
+
 func workspaceError(err error) error {
 	if err == nil {
 		return nil
@@ -61,7 +84,7 @@ func leaseFact(volume string, l authority.WorkspaceLease) *control.WorkspaceLeas
 }
 
 func (s *services) RenewWorkspaceLease(ctx context.Context, q *control.WorkspaceIdentity) (*control.WorkspaceLeaseFact, error) {
-	if err := s.workspaceVolume(q.GetVolumeId()); err != nil {
+	if err := s.workspaceVolumeForRenewal(q.GetVolumeId()); err != nil {
 		return nil, err
 	}
 	l, err := s.host.Publisher().RenewWorkspaceLease(ctx, q.GetVolumeId(), q.GetReplicaId(), q.GetEpoch())
@@ -78,11 +101,12 @@ func (s *services) RevokeWorkspace(ctx context.Context, q *control.WorkspaceIden
 	if err := s.host.Publisher().BeginWorkspaceRevocation(ctx, q.GetVolumeId(), q.GetReplicaId(), q.GetEpoch()); err != nil {
 		return nil, workspaceError(err)
 	}
-	state := s.host.Publisher().WorkspaceState(q.GetVolumeId())
-	if state == nil || state.Lease == nil {
+	// Report what was granted, never the durable horizon.
+	lease, ok := s.host.Publisher().WorkspaceLeaseReply(q.GetVolumeId())
+	if !ok {
 		return nil, status.Error(codes.FailedPrecondition, "workspace moved during revocation")
 	}
-	return leaseFact(q.GetVolumeId(), *state.Lease), nil
+	return leaseFact(q.GetVolumeId(), lease), nil
 }
 
 func (s *services) AckWorkspaceRevoked(ctx context.Context, q *control.WorkspaceRevocationAck) (*control.WorkspaceEmpty, error) {
@@ -174,8 +198,8 @@ func (s *services) QueryWorkspace(ctx context.Context, q *control.WorkspaceVolum
 	if state == nil {
 		return out, nil
 	}
-	if state.Lease != nil {
-		out.Lease = leaseFact(q.GetVolumeId(), *state.Lease)
+	if lease, ok := s.host.Publisher().WorkspaceLeaseReply(q.GetVolumeId()); ok {
+		out.Lease = leaseFact(q.GetVolumeId(), lease) // granted expiry, not the durable horizon
 	}
 	if state.Ack != nil {
 		out.RevocationAck = &control.WorkspaceRevocationAck{Identity: &control.WorkspaceIdentity{VolumeId: q.GetVolumeId(), ReplicaId: state.Ack.ReplicaID, Epoch: state.Ack.Epoch}, HeadGen: state.Ack.HeadGen}

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 )
 
 // Deletion reservations (review of #152 r2): the master-side exclusion of a
@@ -51,6 +52,9 @@ type DeletionReservationStore struct {
 	mu      sync.Mutex
 	dir     string
 	records map[string]DeletionReservation
+	// snap mirrors records as an immutable copy, republished at every
+	// assignment of records, for lock-free renewal-path reads.
+	snap atomic.Pointer[map[string]DeletionReservation]
 
 	// Test seams for persistence faults (nil in production).
 	failWrite, failRename, failDirSync func() error
@@ -89,6 +93,7 @@ func openDeletionReservationStore(dir string, syncParent func(string) error) (*D
 	b, err := os.ReadFile(filepath.Join(dir, reservationsFile))
 	switch {
 	case errors.Is(err, os.ErrNotExist):
+		s.publishLocked()
 		return s, nil
 	case err != nil:
 		return nil, fmt.Errorf("lifecycle: read deletion reservations: %w", err)
@@ -101,7 +106,32 @@ func openDeletionReservationStore(dir string, syncParent func(string) error) (*D
 			return nil, fmt.Errorf("lifecycle: deletion reservation %q is invalid", v)
 		}
 	}
+	s.publishLocked()
 	return s, nil
+}
+
+// publishLocked republishes the immutable snapshot of records (token slices
+// copied). Called wherever records is assigned; caller holds mu or owns s.
+func (s *DeletionReservationStore) publishLocked() {
+	m := make(map[string]DeletionReservation, len(s.records))
+	for k, r := range s.records {
+		r.Tokens = append([]string(nil), r.Tokens...)
+		m[k] = r
+	}
+	s.snap.Store(&m)
+}
+
+// ReservedSnapshot is Reserved without the store mutex, for the lease
+// renewal path: it reads the last published records (after a durable write,
+// or a protective change kept in memory on an unknown outcome), never waiting
+// on a write in flight.
+func (s *DeletionReservationStore) ReservedSnapshot(vol string) bool {
+	m := s.snap.Load()
+	if m == nil {
+		return false
+	}
+	_, ok := (*m)[vol]
+	return ok
 }
 
 // Get returns vol's reservation.
@@ -206,6 +236,7 @@ func (s *DeletionReservationStore) update(vol string, protective bool, change fu
 		return r, err
 	}
 	s.records = next
+	s.publishLocked()
 	return r, nil
 }
 
@@ -237,6 +268,7 @@ func (s *DeletionReservationStore) persist(next map[string]DeletionReservation, 
 	unknown := func(err error) error {
 		if protective {
 			s.records = next // may be on disk: keep the exclusion
+			s.publishLocked()
 		}
 		return fmt.Errorf("lifecycle: deletion reservation outcome unknown: %w", err)
 	}

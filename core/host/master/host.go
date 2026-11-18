@@ -480,5 +480,9 @@ func (h *Host) Close(ctx context.Context) error {
 	}
 
 	h.wg.Wait()
+	// Join lease extenders (authority writers) before the store closes.
+	if h.boot != nil && h.boot.Publisher != nil {
+		h.boot.Publisher.CloseWorkspaceExtenders()
+	}
 	return h.boot.Close()
 }
