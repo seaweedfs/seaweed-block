@@ -232,6 +232,11 @@ func (p *DurableProvider) attachChunk(ctx context.Context, volumeID string, h *v
 		p.mu.Unlock()
 	}
 	if h.fresh {
+		if hook := p.testBeforeChunkFreshRetire; hook != nil {
+			if err := hook(); err != nil {
+				return err
+			}
+		}
 		// The attach persisted the absence of every HEAD chunk; only now
 		// may a restart treat the local volume as authoritative.
 		if err := removeChunkFreshMarker(h.path); err != nil {

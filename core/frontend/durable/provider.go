@@ -180,6 +180,9 @@ type DurableProvider struct {
 	// volume's handle and layer are resolved.
 	testAfterChunkResolve func()
 
+	// testBeforeChunkFreshRetire holds the real post-presence/pre-marker boundary.
+	testBeforeChunkFreshRetire func() error
+
 	// testWALStoreFactory selects a dark store only in provider caller controls.
 	// No production option, flag or environment variable installs it.
 	testWALStoreFactory func(path string, create bool) (*storage.WALStore, error)
