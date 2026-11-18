@@ -9,6 +9,7 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Impl-3 internals of the real WALStore (format bump v3, DESIGN r15
@@ -395,6 +396,7 @@ func openWALStoreV3File(path string, f *os.File, requireMap bool, opts WALStoreO
 				return err
 			}
 			v.w = w
+			v.w.instr = &s.instr
 		}
 		v.wack.Store(d.W)
 		if ownedMap != nil {
@@ -555,6 +557,7 @@ func (s *WALStore) recoverV3() (uint64, error) {
 			return 0, err
 		}
 		v.w = w
+		v.w.instr = &s.instr
 	}
 	restore := scan
 	restore.End = o.E
@@ -638,13 +641,17 @@ func (s *WALStore) appendWriteV3(lba uint32, data []byte, lsn uint64) (uint64, e
 // r16). A single block is an ordinary write record. Each block's dirty
 // entry names its data offset inside the record.
 func (s *WALStore) writeBatchV3Locked(startLBA uint32, blocks [][]byte, firstLSN uint64) ([]uint64, error) {
+	start := time.Now()
 	if len(blocks) == 1 {
 		phys, err := s.appendWriteV3(startLBA, blocks[0], firstLSN)
+		s.instr.appendLatency.Observe(time.Since(start))
 		s.walMutation.Add(1)
 		if err != nil {
 			return nil, fmt.Errorf("storage: WAL append: %w", err)
 		}
+		dirtyStart := time.Now()
 		s.dm.put(uint64(startLBA), phys, firstLSN, uint32(len(blocks[0])))
+		s.instr.recordDirtyMapUpdate(1, time.Since(dirtyStart))
 		s.noteChunkMutation(uint64(startLBA))
 		s.advanceAfterAppendV3(firstLSN, firstLSN)
 		return []uint64{firstLSN}, nil
@@ -666,6 +673,7 @@ func (s *WALStore) writeBatchV3Locked(startLBA uint32, blocks [][]byte, firstLSN
 	}
 	e := walEntryV3{LSN: firstLSN, BatchCount: n, Type: walEntryWriteBatch, LBA: uint64(startLBA), Length: uint32(len(payload)), Data: payload}
 	phys, err := s.v3.w.append(e, s.v3.wack.Load())
+	s.instr.appendLatency.Observe(time.Since(start))
 	s.walMutation.Add(1)
 	if err != nil {
 		if errors.Is(err, errWALPwrite) {
@@ -674,6 +682,7 @@ func (s *WALStore) writeBatchV3Locked(startLBA uint32, blocks [][]byte, firstLSN
 		return nil, fmt.Errorf("storage: WAL batch append: %w", err)
 	}
 	lsns := make([]uint64, n)
+	dirtyStart := time.Now()
 	for i := uint64(0); i < n; i++ {
 		lba := uint64(startLBA) + i
 		lsns[i] = firstLSN + i
@@ -681,6 +690,7 @@ func (s *WALStore) writeBatchV3Locked(startLBA uint32, blocks [][]byte, firstLSN
 		s.dm.putAt(lba, phys, uint32(i)*uint32(bs), lsns[i], uint32(bs))
 		s.noteChunkMutation(lba)
 	}
+	s.instr.recordDirtyMapUpdate(len(blocks), time.Since(dirtyStart))
 	s.v3.appended.Store(lastLSN)
 	s.advanceAfterAppendV3(firstLSN, lastLSN)
 	return lsns, nil

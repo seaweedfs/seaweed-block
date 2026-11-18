@@ -9,6 +9,7 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"time"
 )
 
 var errWALBindingV3 = errors.New("storage: v3 WAL nonce/cursor binding refused")
@@ -39,6 +40,7 @@ type walWriterV3 struct {
 	highestLSN uint64 // includes the last LSN consumed by a batch
 	failed     error
 	writeAt    func([]byte, int64) (int, error)
+	instr      *writeInstrumentation
 }
 
 func newWALWriterV3(fd *os.File, pub *descriptorPublisherV3) (*walWriterV3, error) {
@@ -59,7 +61,11 @@ func (w *walWriterV3) append(e walEntryV3, durableLSN uint64) (uint64, error) {
 	// Descriptor snapshot precedes the writer lock. A concurrent floor advance
 	// makes this snapshot conservative; reset must quiesce/recreate the writer.
 	d, floor, ok := w.pub.walSnapshotV3()
+	lockStart := time.Now()
 	w.mu.Lock()
+	if w.instr != nil {
+		w.instr.recordWALAppendLockWait(time.Since(lockStart))
+	}
 	defer w.mu.Unlock()
 	if w.failed != nil {
 		return 0, w.failed
@@ -99,7 +105,7 @@ func (w *walWriterV3) append(e walEntryV3, durableLSN uint64) (uint64, error) {
 	}
 	start := w.head + gap
 	e.LogicalStart = start
-	buf, err := encodeWALEntryV3(e, d.BlockSize, d.VolumeSize/uint64(d.BlockSize))
+	buf, err := encodeWALEntryV3Instrumented(e, d.BlockSize, d.VolumeSize/uint64(d.BlockSize), w.instr)
 	if err != nil {
 		return 0, err
 	}
@@ -114,7 +120,11 @@ func (w *walWriterV3) append(e walEntryV3, durableLSN uint64) (uint64, error) {
 		}
 	}
 	write := func(b []byte, pos uint64) error {
+		start := time.Now()
 		n, err := w.writeAt(b, int64(d.WALOffset+pos%d.WALSize))
+		if w.instr != nil {
+			w.instr.recordWALAppend(n, time.Since(start))
+		}
 		if err == nil && n != len(b) {
 			err = io.ErrShortWrite
 		}
@@ -128,6 +138,9 @@ func (w *walWriterV3) append(e walEntryV3, durableLSN uint64) (uint64, error) {
 		if err := write(pad, w.head); err != nil {
 			return 0, err
 		}
+	}
+	if gap > 0 && w.instr != nil {
+		w.instr.recordWALAppendWrap(gap)
 	}
 	// A suffix shorter than 70 is skipped geometrically, never decoded as a record.
 	if err := write(buf, start); err != nil {
