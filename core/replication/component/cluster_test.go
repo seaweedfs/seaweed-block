@@ -115,6 +115,12 @@ func TestComponent_ProbeHappy(t *testing.T) {
 func TestComponent_TwoReplicas_BothConverge(t *testing.T) {
 	component.RunMatrix(t, func(t *testing.T, c *component.Cluster) {
 		c.WithReplicas(2).Start()
+		// Both catch-ups replay from LSN1, including after checkpoint10.
+		// Retain that history until the two independent sessions finish.
+		if s, ok := c.Primary().Store.(*storage.WALStore); ok {
+			s.SetRecoveryRetentionLSNs(10)
+		}
+
 		c.PrimaryWriteN(10)
 		c.PrimarySync()
 
