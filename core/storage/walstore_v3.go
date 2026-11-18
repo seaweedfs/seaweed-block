@@ -263,6 +263,10 @@ func openWALStoreV3MapInternalForTest(path string, requireMap bool) (*WALStore, 
 	if err != nil {
 		return nil, fmt.Errorf("storage: open %s: %w", path, err)
 	}
+	if err := LockWALStoreFile(f); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
 	a := make([]byte, slotSizeV3)
 	b := make([]byte, slotSizeV3)
 	_, errA := f.ReadAt(a, slotAOffsetV3)

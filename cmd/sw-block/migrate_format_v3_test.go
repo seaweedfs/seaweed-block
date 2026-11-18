@@ -5,10 +5,95 @@ package main
 import (
 	"bytes"
 	"errors"
+	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
+
+func TestMigrateV3ExcludesOpenUntilCommitFinishes(t *testing.T) {
+	path := v2Volume(t, true)
+	parked, resume := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(resume) }) }
+	defer release()
+	migrateStepHook = func(step string) error {
+		if step == "committed" {
+			close(parked)
+			<-resume
+		}
+		return nil
+	}
+	finished := make(chan error, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		finished <- migrateV3(path, 4, &bytes.Buffer{})
+	}()
+	t.Cleanup(func() {
+		release()
+		select {
+		case <-done:
+			migrateStepHook = nil
+		case <-time.After(10 * time.Second):
+			t.Error("migration worker did not stop during cleanup")
+		}
+	})
+	select {
+	case <-parked:
+	case err := <-finished:
+		t.Fatalf("migration stopped before the held commit: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("migration did not reach the held commit")
+	}
+	if s, err := storage.OpenMappedWALStoreV3Test(path); !errors.Is(err, storage.ErrWALStoreLocked) {
+		if s != nil {
+			_ = s.Close()
+		}
+		t.Fatalf("open during migration: %v, want volume locked", err)
+	}
+	release()
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("migration did not release its lock")
+	}
+	s, err := storage.OpenMappedWALStoreV3Test(path)
+	if err != nil {
+		t.Fatalf("open after migration: %v", err)
+	}
+	_ = s.Close()
+}
+
+func TestMigrateV3RefusesAnOpenV3Volume(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "volume")
+	s, err := storage.CreateMappedWALStoreV3Test(path, 64, migBlock, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	s.DisableAutoFlushForRecoveryTest()
+	before := snapshotFiles(t, path)
+	code, msg := migrate(t, path)
+	if code != 1 || !strings.Contains(msg, "locked") {
+		t.Fatalf("migration must refuse an open v3 volume: exit=%d message=%s", code, msg)
+	}
+	if !sameFiles(before, snapshotFiles(t, path)) {
+		t.Fatal("refused migration modified the open volume")
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if code, msg := migrate(t, path); code != 0 {
+		t.Fatalf("migration after owner close: exit=%d message=%s", code, msg)
+	}
+}
 
 // Row 13b through the actual v3 open (tag swblock_format_v3_test).
 

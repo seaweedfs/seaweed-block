@@ -58,6 +58,9 @@ func migrateV3(path string, chunkBlocks uint64, out io.Writer) error {
 		return err
 	}
 	defer f.Close()
+	if err := storage.LockWALStoreFile(f); err != nil {
+		return err
+	}
 	head := make([]byte, 2*storage.MigrationSlotSize)
 	if _, err := f.ReadAt(head, 0); err != nil {
 		return fmt.Errorf("migrate-v3: read the descriptor region: %w", err)

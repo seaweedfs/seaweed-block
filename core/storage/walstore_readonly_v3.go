@@ -43,6 +43,9 @@ func openReadOnlyV3ForTest(path string, opts WALStoreOptions) (_ *WALStoreReader
 			_ = f.Close()
 		}
 	}()
+	if err := LockWALStoreFile(f); err != nil {
+		return nil, err
+	}
 	a, b := make([]byte, slotSizeV3), make([]byte, slotSizeV3)
 	if _, err = f.ReadAt(a, slotAOffsetV3); err != nil {
 		return nil, err
