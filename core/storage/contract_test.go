@@ -424,8 +424,8 @@ func TestContract_WriteExtentDirect(t *testing.T) {
 		// effect), so H bumped — this is the receiver's existing
 		// side-effect contract for ApplyEntry, unrelated to BASE.
 		_, _, h2 := store.Boundaries()
-		if h2 < 5 {
-			t.Errorf("after ApplyEntry(lsn=5) H=%d want >= 5", h2)
+		if h2 != walLSN {
+			t.Errorf("after ApplyEntry(lsn=%d) H=%d want %d", walLSN, h2, walLSN)
 		}
 	})
 }
