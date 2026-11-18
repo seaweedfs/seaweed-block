@@ -135,8 +135,10 @@ func TestCutCOWV3_MutationCompletesWhileEarlierChunkCopyIsHeld(t *testing.T) {
 			}()
 			// Require positive completion while the extent-read handshake is held.
 			// The deadline bounds a liveness requirement, not a sleep proving entry.
+			writeResultRead := false
 			select {
 			case e := <-writeErr:
+				writeResultRead = true
 				if e != nil {
 					t.Fatalf("post-H mutation: %v", e)
 				}
@@ -146,6 +148,11 @@ func TestCutCOWV3_MutationCompletesWhileEarlierChunkCopyIsHeld(t *testing.T) {
 			gate.unblock()
 			cowWaitSignal(t, cutDone, "cut after read release")
 			cowWaitSignal(t, writeDone, "mutation after read release")
+			if !writeResultRead {
+				if e := <-writeErr; e != nil {
+					t.Fatalf("post-release mutation: %v", e)
+				}
+			}
 			result := <-cutResultCh
 			if result.err != nil {
 				t.Fatal(result.err)
@@ -177,6 +184,7 @@ func TestCutCOWV3_MutationCompletesWhileEarlierChunkCopyIsHeld(t *testing.T) {
 				t.Fatal("next cut omitted post-H mutation")
 			}
 			assertNoRemoteMisuse(t, remote)
+			t.Logf("image controls passed: first H=%d has pre-H bytes, second H=%d has %s bytes", result.cut.H, second.H, method)
 		})
 	}
 }
