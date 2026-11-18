@@ -199,6 +199,10 @@ func createWALStoreV3MapAtCursorForTest(path string, numBlocks, blockSize uint32
 	if err != nil {
 		return nil, err
 	}
+	if err := LockWALStoreFile(fd); err != nil {
+		_ = fd.Close()
+		return nil, err
+	}
 	if h := testCreateOwnerV3; h != nil {
 		h(fd, false)
 	}
@@ -237,18 +241,11 @@ func createWALStoreV3MapAtCursorForTest(path string, numBlocks, blockSize uint32
 			h(fd, true)
 		}
 	}
-	if cerr := fd.Close(); err == nil {
-		err = cerr
-	}
 	if err != nil {
+		_ = fd.Close()
 		return nil, err
 	}
-	var s *WALStore
-	if chunkBlocks == 0 {
-		s, err = openUnmappedWALStoreV3ForTest(path)
-	} else {
-		s, err = openWALStoreV3ForTest(path)
-	}
+	s, err := openWALStoreV3File(path, fd, chunkBlocks != 0)
 	if err != nil {
 		return nil, err
 	}
@@ -279,6 +276,12 @@ func openWALStoreV3MapInternalForTest(path string, requireMap bool) (*WALStore, 
 		_ = f.Close()
 		return nil, err
 	}
+	return openWALStoreV3File(path, f, requireMap)
+}
+
+// openWALStoreV3File consumes an already locked descriptor, including on error.
+// Creation transfers ownership directly: no selectable-slot close/reopen gap.
+func openWALStoreV3File(path string, f *os.File, requireMap bool) (*WALStore, error) {
 	a := make([]byte, slotSizeV3)
 	b := make([]byte, slotSizeV3)
 	_, errA := f.ReadAt(a, slotAOffsetV3)
