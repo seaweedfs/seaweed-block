@@ -40,11 +40,13 @@ func TestLegacyFixtureIsolation(t *testing.T) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "go", "list", "-deps", "-json", "./core/storage")
 	cmd.Dir = filepath.Join("..", "..")
+	cmd.WaitDelay = 2 * time.Second
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("default production transitive import graph: %v", err)
 	}
 	dec := json.NewDecoder(strings.NewReader(string(out)))
+	foundStorage := false
 	for dec.More() {
 		var p struct {
 			ImportPath string
@@ -57,12 +59,16 @@ func TestLegacyFixtureIsolation(t *testing.T) {
 			t.Errorf("unexpected frozen import %s", p.ImportPath)
 		}
 		if p.ImportPath == "github.com/seaweedfs/seaweed-block/core/storage" {
+			foundStorage = true
 			for _, n := range p.GoFiles {
-				if n == "format_v3_test_support.go" {
+				if n == "format_v3_test_support.go" || n == "legacy_c11_file_fixture_test.go" {
 					t.Fatal("test constructors entered default production import closure")
 				}
 			}
 		}
+	}
+	if !foundStorage {
+		t.Fatal("production dependency graph did not contain core/storage")
 	}
 }
 
