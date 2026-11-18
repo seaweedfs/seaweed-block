@@ -381,12 +381,22 @@ func (l *chunkLayerImpl) noteAllMutated() {
 // after the WAL entry has checkpointed and the legacy bitmap says clean.
 func (l *chunkLayerImpl) captureCandidates() map[uint64]bool {
 	out := map[uint64]bool{}
-	for _, e := range l.s.dm.snapshot() {
-		out[l.chunkOf(e.LBA)] = true
-	}
-	if l.usesOwnedMapV3() {
+	mapped := l.usesOwnedMapV3()
+	var base uint64
+	if mapped {
 		l.stMu.Lock()
-		base := l.remoteLSN
+		base = l.remoteLSN
+		l.stMu.Unlock()
+	}
+	for _, e := range l.s.dm.snapshot() {
+		// Retention in the local WAL is not dirt since HEAD. Lower-LSN
+		// BASE/direct changes remain conservative through UNKNOWN below.
+		if !mapped || e.LSN > base {
+			out[l.chunkOf(e.LBA)] = true
+		}
+	}
+	if mapped {
+		l.stMu.Lock()
 		absent := map[uint64]bool{}
 		for idx := range l.absent {
 			if !l.chunkHasLocalLocked(idx) {
