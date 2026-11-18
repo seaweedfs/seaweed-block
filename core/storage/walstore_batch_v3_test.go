@@ -281,3 +281,50 @@ func TestWALStoreV3ReplicatedApply(t *testing.T) {
 	}
 	crashRecoveryHardeningStore(t, r)
 }
+
+// v3 ScanLBAs, the primary's catch-up source: single and batch records in
+// LSN order (a batch one entry per block), from the start and from the
+// middle of a batch; a fromLSN the retention gate has recycled is refused
+// with the typed WALRecycled failure. Mutants: the v2 scan on a v3 store
+// (emits nothing), a batch emitting only its first block, no ordering.
+func TestWALStoreV3ScanLBAs(t *testing.T) {
+	s, _ := newStoreV3(t, WModeStrict)
+	t.Cleanup(func() { crashRecoveryHardeningStore(t, s) })
+	writeSynced(t, s, 1, 3)                                           // LSNs 1..3 at LBAs 1..3
+	if _, err := s.WriteBatch(10, batchBlocks(0x40, 4)); err != nil { // LSNs 4..7
+		t.Fatal(err)
+	}
+	collect := func(from uint64) []RecoveryEntry {
+		var out []RecoveryEntry
+		if err := s.ScanLBAs(from, func(e RecoveryEntry) error {
+			out = append(out, RecoveryEntry{LSN: e.LSN, LBA: e.LBA, Flags: e.Flags, Data: append([]byte(nil), e.Data...)})
+			return nil
+		}); err != nil {
+			t.Fatalf("ScanLBAs(%d): %v", from, err)
+		}
+		return out
+	}
+	all := collect(1)
+	if len(all) != 7 {
+		t.Fatalf("ScanLBAs(1) emitted %d entries, want 7", len(all))
+	}
+	for i, e := range all {
+		lsn := uint64(i + 1)
+		wantLBA, want := uint32(lsn), blk(byte(lsn))
+		if lsn >= 4 {
+			wantLBA, want = 10+uint32(lsn-4), blk(0x40+byte(lsn-4))
+		}
+		if e.LSN != lsn || e.LBA != wantLBA || !bytes.Equal(e.Data, want) || e.Flags != RecoveryEntryWrite {
+			t.Fatalf("entry %d: LSN %d LBA %d data %x..., want LSN %d LBA %d", i, e.LSN, e.LBA, e.Data[0], lsn, wantLBA)
+		}
+	}
+	mid := collect(6)
+	if len(mid) != 2 || mid[0].LSN != 6 || mid[0].LBA != 12 || mid[1].LSN != 7 {
+		t.Fatalf("ScanLBAs(6) = %+v, want LSNs 6 and 7 at LBAs 12 and 13", mid)
+	}
+	c, _, _ := checkpointedStoreV3(t, 4)
+	err := c.ScanLBAs(1, func(RecoveryEntry) error { return nil })
+	if !errors.Is(err, ErrWALRecycled) {
+		t.Fatalf("ScanLBAs below the checkpoint: err = %v, want ErrWALRecycled", err)
+	}
+}

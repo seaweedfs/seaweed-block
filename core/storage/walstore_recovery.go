@@ -82,6 +82,9 @@ func (s *WALStore) ScanLBAs(fromLSN uint64, fn func(RecoveryEntry) error) error 
 	if fromLSN >= headLSN {
 		return nil // caller is at-or-ahead of head; nothing to ship
 	}
+	if s.v3 != nil {
+		return s.scanLBAsV3(fromLSN, headLSN, checkpointLSN, fn)
+	}
 
 	// Snapshot WAL writer's logical head/tail under its own lock,
 	// then walk the active region. Wraparound handled the same way
@@ -248,4 +251,64 @@ func (s *WALStore) WALCapacityBytes() uint64 {
 // public for diagnostics) — sibling name documents POC use.
 func (s *WALStore) CheckpointLSNForPOC() uint64 {
 	return s.CheckpointLSN()
+}
+
+// scanLBAsV3 is ScanLBAs on a v3 store (the primary's catch-up source):
+// the trusted v3 chain from the selected descriptor's scan start, each write
+// record as one entry and each batch record as one entry per block with
+// consecutive LSNs, every LSN in [fromLSN, headLSN). Records are scanned in
+// cursor (= LSN) order. If the WAL no longer holds fromLSN (checkpointed
+// and its bytes released), the scan refuses with the typed WALRecycled
+// failure, so the caller escalates to a rebuild instead of skipping a range.
+// Callers hold lifecycleMu shared; nothing is mutated.
+func (s *WALStore) scanLBAsV3(fromLSN, headLSN, checkpointLSN uint64, fn func(RecoveryEntry) error) error {
+	d := s.v3.pub.current()
+	scan, err := scanWALV3(s.fd, d)
+	if err != nil {
+		return fmt.Errorf("storage: walstore ScanLBAs (v3): %w", err)
+	}
+	blockSize := uint64(d.BlockSize)
+	next := fromLSN // the next LSN the stream must carry
+	for _, r := range scan.Records {
+		e := r.Entry
+		count := uint64(1)
+		switch e.Type {
+		case walEntryWrite:
+		case walEntryWriteBatch:
+			count = e.BatchCount
+		default:
+			continue // padding
+		}
+		if e.LSN+count-1 < next {
+			continue
+		}
+		if e.LSN > next {
+			return NewWALRecycledFailure(ErrWALRecycled, fmt.Sprintf(
+				"v3 WAL starts at LSN %d, after the requested %d (checkpoint %d, head %d)", e.LSN, next, checkpointLSN, headLSN))
+		}
+		for i := uint64(0); i < count; i++ {
+			lsn := e.LSN + i
+			if lsn < next || lsn >= headLSN {
+				continue
+			}
+			emit := RecoveryEntry{
+				LSN:   lsn,
+				LBA:   uint32(e.LBA + i),
+				Flags: RecoveryEntryWrite,
+				Data:  e.Data[i*blockSize : (i+1)*blockSize],
+			}
+			if err := fn(emit); err != nil {
+				return err
+			}
+			next = lsn + 1
+		}
+		if next >= headLSN {
+			return nil
+		}
+	}
+	if next < headLSN && next == fromLSN {
+		return NewWALRecycledFailure(ErrWALRecycled, fmt.Sprintf(
+			"v3 WAL holds no record at LSN %d (checkpoint %d, head %d)", fromLSN, checkpointLSN, headLSN))
+	}
+	return nil
 }
