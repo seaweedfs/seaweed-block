@@ -318,3 +318,67 @@ func TestCatchUpV3CompletedBASESuffix(t *testing.T) {
 		})
 	}
 }
+
+func TestCatchUpV3ScanOverlappingCheckpointReuseIsRecycled(t *testing.T) {
+	primary, err := storage.CreateMappedWALStoreV3Test(filepath.Join(t.TempDir(), "primary.v3"), 64, v3RepBlock, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = primary.Close() })
+	primary.DisableAutoFlushForRecoveryTest()
+	for i := 1; i <= 250; i++ {
+		if _, err := primary.Write(0, v3RepBlk(byte(i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := primary.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	parked, resume := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(resume) }) }
+	defer release()
+	var scans atomic.Int32
+	storage.SetScanBeforeReadV3Test(primary, func() {
+		if scans.Add(1) == 1 {
+			close(parked)
+			<-resume
+		}
+	})
+	replica := v3Rep(t)
+	l := v3Listen(t, replica)
+	exec := NewBlockExecutor(primary, l.Addr())
+	closed := make(chan adapter.SessionCloseResult, 1)
+	exec.SetOnSessionClose(func(r adapter.SessionCloseResult) { closed <- r })
+	if err := exec.StartCatchUp("r1", 1, 1, 1, 1, 251); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-parked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("sender did not capture old tail")
+	}
+	if err := storage.FlushMappedWALStoreV3Test(primary); err != nil {
+		t.Fatal(err)
+	}
+	for i := 251; i <= 270; i++ {
+		if _, err := primary.Write(0, v3RepBlk(byte(i%256))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := primary.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	select {
+	case result := <-closed:
+		if result.Success || result.FailureKind != engine.RecoveryFailureWALRecycled {
+			t.Fatalf("overlapped real reuse must route to rebuild, never false corruption: %+v", result)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("sender did not finish")
+	}
+	if got := v3Read(t, replica, 0); !bytes.Equal(got, make([]byte, v3RepBlock)) {
+		t.Fatal("failed catch-up emitted a partial replay")
+	}
+}

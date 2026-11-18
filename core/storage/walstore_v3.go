@@ -126,6 +126,8 @@ type walStoreV3State struct {
 	// testScanRead runs in a v3 ScanLBAs after its scan and before its
 	// revalidation.
 	testScanRead func()
+	// Pauses after the capture, before physical scan I/O. Tests only.
+	testScanBeforeRead func()
 }
 
 // errV3RecoveredMeanwhile: a recovery ran between an outer Sync's capture
