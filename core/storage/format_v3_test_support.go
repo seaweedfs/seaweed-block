@@ -43,6 +43,9 @@ func SetInstallHooksV3Test(s *WALStore, beforeAdmit, admitted func()) {
 // scan, before source-lifetime revalidation. Set before starting the sender.
 func SetScanReadV3Test(s *WALStore, hook func()) { s.v3.testScanRead = hook }
 
+// SetScanBeforeReadV3Test parks a real sender after capture, before WAL I/O.
+func SetScanBeforeReadV3Test(s *WALStore, hook func()) { s.v3.testScanBeforeRead = hook }
+
 // BaseStateV3Test reports the selected descriptor's BASE state and ID.
 func BaseStateV3Test(s *WALStore) (BaseState, [16]byte) {
 	d := s.v3.pub.current()

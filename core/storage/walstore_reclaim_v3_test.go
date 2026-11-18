@@ -123,8 +123,19 @@ func TestWALStoreV3ReclaimSecondSlotFailureKeepsOldPin(t *testing.T) {
 		}
 		return writeSlot(off, data)
 	}
+	before := s.dm.snapshot()
 	if err := s.flusher.flushOnce(); !errors.Is(err, ErrDescriptorPublishUncertain) || writes != 2 {
 		t.Fatalf("rollover failure was not surfaced: writes=%d err=%v", writes, err)
+	}
+	after := s.dm.snapshot()
+	if len(before) == 0 || len(after) != len(before) {
+		t.Fatalf("failed rollover changed dirty retry count: before=%+v after=%+v", before, after)
+	}
+	for _, e := range before {
+		off, dataOff, lsn, length, ok := s.dm.get(e.LBA)
+		if !ok || off != e.WALOffset || dataOff != e.DataOffset || lsn != e.LSN || length != e.Length {
+			t.Fatalf("failed rollover changed retry identity for %+v", e)
+		}
 	}
 	if floor, valid := s.v3.pub.reuseFloor(); valid && floor != 0 {
 		t.Fatalf("failed rollover granted reuse over the old slot: floor=%d", floor)
@@ -193,5 +204,110 @@ func TestWALStoreV3ReclaimAfterInstallingPhysicalReopen(t *testing.T) {
 	}
 	if got, err := r.Read(3); err != nil || !bytes.Equal(got, blk(3)) {
 		t.Fatalf("recovered install bytes: %v", err)
+	}
+}
+
+// Hold the actual flusher after its durable publication, before its outer
+// cleanup, then make the writer reuse the old dirty entry's physical slot.
+func TestWALStoreV3ReclaimRetiresReferencesBeforeReuse(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "volume")
+	s, err := createMappedWALStoreV3ForTest(path, 32, 4096, 64*1024, WModeStrict, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.DisableAutoFlushForRecoveryTest()
+	t.Cleanup(func() { _ = s.Close() })
+	for i := uint32(0); i < 15; i++ {
+		if _, err := s.Write(i, blk(byte(i+1))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	s.flusher.afterCheckpointForTest = func() {
+		s.flusher.afterCheckpointForTest = nil
+		if _, err := s.Write(15, blk(16)); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := s.Read(0); err != nil || !bytes.Equal(got, blk(1)) {
+			t.Fatalf("durable old extent must remain readable during physical WAL reuse: %v", err)
+		}
+	}
+	if err := s.flusher.flushOnce(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.Read(15); err != nil || !bytes.Equal(got, blk(16)) {
+		t.Fatalf("new dirty version was not preserved: %v", err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	crashReadOnlyStoreV3(t, s)
+	r, err := openWALStoreV3ForTest(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if _, err := r.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	for lba, want := range map[uint32][]byte{0: blk(1), 15: blk(16)} {
+		if got, err := r.Read(lba); err != nil || !bytes.Equal(got, want) {
+			t.Fatalf("post-reuse crash-style reopen LBA%d: %v", lba, err)
+		}
+	}
+}
+
+func TestWALStoreV3ReclaimRolloverProgressWithoutNewCheckpoint(t *testing.T) {
+	for _, trigger := range []string{"idle", "unchanged-checkpoint", "admission", "batch-admission"} {
+		t.Run(trigger, func(t *testing.T) {
+			s, _ := newMappedCheckpointStoreV3(t)
+			s.SetRecoveryRetentionLSNs(2)
+			writeSynced(t, s, 0, 1)
+			writeSynced(t, s, 1, 2)
+			if err := s.flusher.flushOnce(); err != nil {
+				t.Fatal(err)
+			}
+			d := s.v3.pub.current()
+			s.SetRecoveryRetentionLSNs(1)
+			tail := s.v3.w.reclaimThroughV3(d.CheckpointLSN - 1)
+			// Model a completed first-slot checkpoint publication before its idle
+			// fallback rollover, with already-durable map/checkpoint and extent.
+			if _, err := s.v3.pub.publish(nil, nil, func(n *descriptorV3) error {
+				n.RetainedTail = tail
+				n.RetainedHead = max(n.RetainedHead, tail)
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if floor, ok := s.v3.pub.reuseFloor(); !ok || floor >= tail {
+				t.Fatal("setup lacks a pinned fallback")
+			}
+			switch trigger {
+			case "idle":
+				if err := s.flusher.flushOnce(); err != nil {
+					t.Fatal(err)
+				}
+			case "unchanged-checkpoint":
+				if err := s.persistOwnedMapCheckpointV3(d.CheckpointLSN, s.v3.recoverGen.Load()); err != nil {
+					t.Fatal(err)
+				}
+			case "batch-admission":
+				if _, err := s.WriteBatch(2, [][]byte{blk(3), blk(4)}); err != nil {
+					t.Fatal(err)
+				}
+			case "admission":
+				if _, err := s.Write(2, blk(3)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if floor, ok := s.v3.pub.reuseFloor(); !ok || floor != tail {
+				t.Fatalf("%s did not settle old-slot pin without a new checkpoint: floor=%d want=%d valid=%v", trigger, floor, tail, ok)
+			}
+			if got := s.v3.pub.current().CheckpointLSN; got != d.CheckpointLSN {
+				t.Fatalf("trigger fabricated checkpoint progress: %d", got)
+			}
+		})
 	}
 }

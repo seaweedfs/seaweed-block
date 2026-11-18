@@ -64,7 +64,14 @@ func (s *WALStore) persistOwnedMapCheckpointV3(highestLSN, recoveryGen uint64) e
 		}
 	}
 	if cp <= v.pub.current().CheckpointLSN {
-		return nil
+		v.syncMu.Lock()
+		defer v.syncMu.Unlock()
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if !v.flushLifetimeValidV3(recoveryGen) {
+			return ErrMapCoverageStale
+		}
+		return s.rolloverCheckpointV3Locked()
 	}
 	// The extent was fsynced by the flusher.
 	d, err := s.publishCheckpointV3(cp, false, recoveryGen)
@@ -131,7 +138,12 @@ func (s *WALStore) publishCheckpointV3(cp uint64, seed bool, recoveryGen uint64)
 		// An incomplete BASE still needs its entire install-lane suffix.
 		tail = min(tail, current.BaseCursor)
 	}
-	d, err := v.pub.publishMapV3(&s.mu, nil, prepared, func(n *descriptorV3) error {
+	// Keep writer admission excluded until both durable publications AND the
+	// old dirty references are settled. The ordinary publisher releases a
+	// supplied store lock before I/O, so acquire it here and pass nil instead.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d, err := v.pub.publishMapV3(nil, nil, prepared, func(n *descriptorV3) error {
 		n.W = max(n.W, wack)
 		n.CheckpointLSN = cp
 		n.RetainedTail = max(n.RetainedTail, tail)
@@ -147,9 +159,44 @@ func (s *WALStore) publishCheckpointV3(cp uint64, seed bool, recoveryGen uint64)
 	if _, err := v.pub.rolloverIfPinned(); err != nil {
 		return descriptorV3{}, err
 	}
+	// Only a successful checkpoint plus rollover may retire retry ownership.
+	// Every current entry <= cp is durable in extent (a newer concurrent write
+	// has a higher LSN and survives). No writer can reuse a released slot until
+	// this store lock is released, after these references have disappeared.
+	s.retireCheckpointDirtyV3Locked(d.CheckpointLSN)
 	if seed {
 		v.appended.Store(max(v.appended.Load(), cp))
 		v.wack.Store(wack)
 	}
 	return d, nil
+}
+
+// Caller holds store.mu; the successful durable checkpoint proves the current
+// versions at/below cp are in extent. Each shard preserves newer WAL entries.
+func (s *WALStore) retireCheckpointDirtyV3Locked(cp uint64) {
+	for i := range s.dm.shards {
+		shard := &s.dm.shards[i]
+		shard.mu.Lock()
+		for lba, e := range shard.m {
+			if e.lsn <= cp {
+				delete(shard.m, lba)
+			}
+		}
+		shard.mu.Unlock()
+	}
+}
+
+// Caller holds store.mu (and, except write admission, the leader role).
+// No writer may use the newly released floor until its obsolete dirty
+// references are retired. On failure keep those exact retry entries.
+func (s *WALStore) rolloverCheckpointV3Locked() error {
+	d, floor, valid := s.v3.pub.walSnapshotV3()
+	if valid && floor >= d.RetainedTail {
+		return nil
+	}
+	if _, err := s.v3.pub.rolloverIfPinned(); err != nil {
+		return err
+	}
+	s.retireCheckpointDirtyV3Locked(d.CheckpointLSN)
+	return nil
 }

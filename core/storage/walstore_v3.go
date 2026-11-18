@@ -126,6 +126,8 @@ type walStoreV3State struct {
 	// testScanRead runs in a v3 ScanLBAs after its scan and before its
 	// revalidation.
 	testScanRead func()
+	// Pauses after the capture, before physical scan I/O. Tests only.
+	testScanBeforeRead func()
 }
 
 // errV3RecoveredMeanwhile: a recovery ran between an outer Sync's capture
@@ -585,6 +587,9 @@ func (s *WALStore) appendWriteV3(lba uint32, data []byte, lsn uint64) (uint64, e
 			return 0, err
 		}
 	}
+	if err := s.rolloverCheckpointV3Locked(); err != nil {
+		return 0, err
+	}
 	phys, err := s.v3.w.append(e, s.v3.wack.Load())
 	if err != nil {
 		if errors.Is(err, errWALPwrite) {
@@ -631,6 +636,9 @@ func (s *WALStore) writeBatchV3Locked(startLBA uint32, blocks [][]byte, firstLSN
 		}
 	}
 	e := walEntryV3{LSN: firstLSN, BatchCount: n, Type: walEntryWriteBatch, LBA: uint64(startLBA), Length: uint32(len(payload)), Data: payload}
+	if err := s.rolloverCheckpointV3Locked(); err != nil {
+		return nil, err
+	}
 	phys, err := s.v3.w.append(e, s.v3.wack.Load())
 	s.walMutation.Add(1)
 	if err != nil {
@@ -750,6 +758,12 @@ func (s *WALStore) refreshW() error {
 	}
 	v.syncMu.Lock()
 	defer v.syncMu.Unlock()
+	s.mu.Lock()
+	rolloverErr := s.rolloverCheckpointV3Locked()
+	s.mu.Unlock()
+	if rolloverErr != nil {
+		return rolloverErr
+	}
 	wack := v.wack.Load()
 	if wack <= v.pub.current().W {
 		return nil

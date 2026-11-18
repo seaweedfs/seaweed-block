@@ -275,7 +275,7 @@ func (s *WALStore) scanLBAsV3(fromLSN uint64, fn func(RecoveryEntry) error) erro
 		installEpoch := v.installEpoch
 		d := v.pub.current()
 		headLSN := s.nextLSN
-		checkpointLSN, retentionLSNs := s.checkpointLSN, s.recoveryRetentionLSNs
+		checkpointLSN, retentionLSNs := d.CheckpointLSN, s.recoveryRetentionLSNs
 		s.mu.RUnlock()
 		if d.BaseState == BaseInstalling {
 			return fmt.Errorf("%w: catch-up from an installing source", ErrBaseInstalling)
@@ -302,6 +302,9 @@ func (s *WALStore) scanLBAsV3(fromLSN uint64, fn func(RecoveryEntry) error) erro
 		if fromLSN >= headLSN {
 			return nil
 		}
+		if h := v.testScanBeforeRead; h != nil {
+			h()
+		}
 		scan, err := scanWALV3(s.fd, d)
 		if err != nil {
 			return fmt.Errorf("storage: walstore ScanLBAs (v3): %w", err)
@@ -313,7 +316,9 @@ func (s *WALStore) scanLBAsV3(fromLSN uint64, fn func(RecoveryEntry) error) erro
 		now := v.pub.current()
 		stable := v.recoverGen.Load() == gen && v.installEpoch == installEpoch &&
 			now.Nonce == d.Nonce && now.BaseState == d.BaseState &&
-			now.BaseInstallID == d.BaseInstallID
+			now.BaseInstallID == d.BaseInstallID && now.BaseCursor == d.BaseCursor &&
+			now.RetainedTail == d.RetainedTail && now.CheckpointLSN == d.CheckpointLSN &&
+			s.recoveryRetentionLSNs == retentionLSNs
 		s.mu.RUnlock()
 		if !stable {
 			if now.BaseState == BaseInstalling {
