@@ -8,6 +8,7 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Impl-3 internals of the real WALStore (format bump v3, DESIGN r15
@@ -861,13 +862,25 @@ type recordGeometryV3 struct {
 	VolumeSize         uint64
 }
 
-func readWholeRecordV3(fd *os.File, sb recordGeometryV3, walRelOff uint64) (e walEntryV3, size uint64, ioErr, verr error) {
+func readWholeRecordV3(fd *os.File, sb recordGeometryV3, walRelOff uint64) (walEntryV3, uint64, error, error) {
+	return readWholeRecordProfiledV3(fd, sb, walRelOff, nil)
+}
+
+func readWholeRecordProfiledV3(fd *os.File, sb recordGeometryV3, walRelOff uint64, profile *flusherInstrumentation) (e walEntryV3, size uint64, ioErr, verr error) {
 	if walRelOff+walEntryHeaderSizeV3 > sb.WALSize {
 		return e, 0, nil, fmt.Errorf("storage: v3 WAL record at %d crosses the ring end", walRelOff)
 	}
 	prefix := make([]byte, walEntryPrefixSizeV3)
-	if _, err := fd.ReadAt(prefix, int64(sb.WALOffset+walRelOff)); err != nil {
-		return e, 0, fmt.Errorf("storage: v3 WAL read at %d: %w", walRelOff, err), nil
+	var start time.Time
+	if profile != nil {
+		start = time.Now()
+	}
+	n, readErr := fd.ReadAt(prefix, int64(sb.WALOffset+walRelOff))
+	if profile != nil {
+		profile.recordWALHeaderRead(n, time.Since(start), readErr)
+	}
+	if readErr != nil {
+		return e, 0, fmt.Errorf("storage: v3 WAL read at %d: %w", walRelOff, readErr), nil
 	}
 	size = uint64(walEntryHeaderSizeV3)
 	switch prefix[16] {
@@ -880,10 +893,23 @@ func readWholeRecordV3(fd *os.File, sb recordGeometryV3, walRelOff uint64) (e wa
 		return e, 0, nil, fmt.Errorf("storage: v3 WAL record at %d crosses the ring end", walRelOff)
 	}
 	full := make([]byte, size)
-	if _, err := fd.ReadAt(full, int64(sb.WALOffset+walRelOff)); err != nil {
-		return e, 0, fmt.Errorf("storage: v3 WAL read at %d: %w", walRelOff, err), nil
+	if profile != nil {
+		start = time.Now()
+	}
+	n, readErr = fd.ReadAt(full, int64(sb.WALOffset+walRelOff))
+	if profile != nil {
+		profile.recordWALRecordRead(n, time.Since(start), readErr)
+	}
+	if readErr != nil {
+		return e, 0, fmt.Errorf("storage: v3 WAL read at %d: %w", walRelOff, readErr), nil
+	}
+	if profile != nil {
+		start = time.Now()
 	}
 	e, err := decodeWALEntryV3(full, sb.BlockSize, sb.VolumeSize/uint64(sb.BlockSize))
+	if profile != nil {
+		profile.recordWALRecordDecode(len(full), time.Since(start), err)
+	}
 	if err != nil {
 		return e, 0, nil, err
 	}
@@ -916,11 +942,20 @@ func blockOfRecordV3(e walEntryV3, lba uint64, dataOff uint32, lsn uint64, block
 
 // readDirtyRecordV3 is the flusher's record read for a v3 store: it decodes
 // and validates the whole record before its data may reach the extent.
-func (f *flusher) readDirtyRecordV3(e snapshotEntry) ([]byte, uint64, error) {
+func (f *flusher) readDirtyRecordV3(e snapshotEntry) (data []byte, entrySize uint64, err error) {
+	readFailed := false
+	defer func() {
+		if err == nil {
+			f.instr.recordValidatedRecord()
+		} else if !readFailed {
+			f.instr.recordValidationFailure()
+		}
+	}()
 	store := f.store
 	d := store.v3.pub.current()
-	entry, size, ioErr, verr := readWholeRecordV3(store.fd, recordGeometryV3{store.sb.WALOffset, store.sb.WALSize, store.sb.BlockSize, store.sb.VolumeSize}, e.WALOffset)
+	entry, size, ioErr, verr := readWholeRecordProfiledV3(store.fd, recordGeometryV3{store.sb.WALOffset, store.sb.WALSize, store.sb.BlockSize, store.sb.VolumeSize}, e.WALOffset, &f.instr)
 	if ioErr != nil {
+		readFailed = true
 		return nil, 0, fmt.Errorf("flusher: read v3 WAL record at %d: %w", e.WALOffset, ioErr)
 	}
 	if verr != nil {
@@ -929,7 +964,7 @@ func (f *flusher) readDirtyRecordV3(e snapshotEntry) ([]byte, uint64, error) {
 	if entry.Nonce != d.Nonce || e.Length != store.sb.BlockSize {
 		return nil, 0, fmt.Errorf("flusher: v3 WAL slot mismatch LBA %d offset %d", e.LBA, e.WALOffset)
 	}
-	data, err := blockOfRecordV3(entry, e.LBA, e.DataOffset, e.LSN, store.sb.BlockSize)
+	data, err = blockOfRecordV3(entry, e.LBA, e.DataOffset, e.LSN, store.sb.BlockSize)
 	if err != nil {
 		return nil, 0, fmt.Errorf("flusher: v3 WAL slot mismatch LBA %d offset %d: %w", e.LBA, e.WALOffset, err)
 	}
