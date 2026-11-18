@@ -308,3 +308,129 @@ func TestCutCOWV3_SpillIsEphemeralAndCleanupIsPrefixScoped(t *testing.T) {
 		t.Fatal("reopen trusted side payload or lost synced bytes", err)
 	}
 }
+
+func TestCutCOWV3_TwoWritersOneSaveAndCloseJoinsSavedReader(t *testing.T) {
+	s, l, f, gate := cowFixture(t)
+	saved, releaseSave := make(chan struct{}), make(chan struct{})
+	reader, releaseReader := make(chan struct{}), make(chan struct{})
+	waiting := make(chan struct{})
+	var waitOnce, saveOnce, readerOnce sync.Once
+	var saves atomic.Int32
+	unblockSave := func() { saveOnce.Do(func() { close(releaseSave) }) }
+	unblockReader := func() { readerOnce.Do(func() { close(releaseReader) }) }
+	l.testCOWSave = func() error { saves.Add(1); close(saved); <-releaseSave; return nil }
+	l.testCOWWait = func() { waitOnce.Do(func() { close(waiting) }) }
+	l.testCOWRead = func(idx uint64, side bool) {
+		if idx == 1 && side {
+			close(reader)
+			<-releaseReader
+		}
+	}
+	cutDone, cutErr := cowStartCut(t, l, gate)
+	w := l.cowActive.Load()
+	w.mu.Lock()
+	w.memory = cutCOWMemoryLimit
+	w.mu.Unlock()
+	first, second, closeDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var err1, err2, closeErr error
+	closeStarted := false
+	t.Cleanup(func() {
+		unblockSave()
+		unblockReader()
+		gate.unblock()
+		cowWaitSignal(t, first, "first writer")
+		cowWaitSignal(t, second, "second writer")
+		if closeStarted {
+			cowWaitSignal(t, closeDone, "saved reader close")
+		}
+	})
+	go func() { defer close(first); _, err1 = s.Write(5, makeBlock(ctBlockSize, 0xe1)) }()
+	cowWaitSignal(t, saved, "single saving owner")
+	go func() { defer close(second); _, err2 = s.Write(6, makeBlock(ctBlockSize, 0xe2)) }()
+	cowWaitSignal(t, waiting, "second writer waits on same chunk")
+	select {
+	case <-second:
+		t.Fatal("second writer bypassed saving owner")
+	default:
+	}
+	unblockSave()
+	cowWaitSignal(t, first, "first write")
+	cowWaitSignal(t, second, "second write")
+	if err1 != nil || err2 != nil || saves.Load() != 1 {
+		t.Fatalf("single owner: %v %v saves=%d", err1, err2, saves.Load())
+	}
+	w.mu.Lock()
+	side := w.side
+	w.mu.Unlock()
+	if side == nil {
+		t.Fatal("saved read must use real spill file")
+	}
+	name := side.Name()
+	gate.unblock()
+	cowWaitSignal(t, reader, "actual saved-file read completed, reference held")
+	closeStarted = true
+	go func() { defer close(closeDone); closeErr = l.Close() }()
+	cowWaitSignal(t, w.ended, "close aborts saved-reader window")
+	select {
+	case <-closeDone:
+		t.Fatal("Close returned before saved reader released")
+	default:
+	}
+	if _, err := os.Stat(name); err != nil {
+		t.Fatal("side removed before reader reference drained", err)
+	}
+	unblockReader()
+	cowWaitSignal(t, closeDone, "saved reader drain")
+	cowWaitSignal(t, cutDone, "aborted saved-read cut")
+	if closeErr != nil || <-cutErr == nil {
+		t.Fatal("Close/cut result", closeErr)
+	}
+	if _, err := os.Stat(name); !os.IsNotExist(err) {
+		t.Fatal("side survived saved-reader drain", err)
+	}
+	if f.stats().head.RemoteLSN >= s.NextLSN()-1 {
+		t.Fatal("aborted cut published post-H mutations")
+	}
+}
+
+func TestCutCOWV3_ObservedFenceAbortsAndWakesWriters(t *testing.T) {
+	s, l, f, gate := cowFixture(t)
+	var fenced atomic.Bool
+	l.cfg.CaptureAllowed = func() error {
+		if fenced.Load() {
+			return errChunkLayerFenced
+		}
+		return nil
+	}
+	l.cfg.UploadConcurrency = 2
+	other, releaseOther := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(releaseOther) }) }
+	l.testCOWRead = func(idx uint64, _ bool) {
+		if idx == 1 {
+			close(other)
+			<-releaseOther
+		}
+	}
+	cutDone, cutErr := cowStartCut(t, l, gate)
+	t.Cleanup(unblock)
+	cowWaitSignal(t, other, "second copier before ordinary authority recheck")
+	w := l.cowActive.Load()
+	before := f.stats().head.Gen
+	fenced.Store(true)
+	unblock()
+	cowWaitSignal(t, w.ended, "ordinary capture gate observes fence")
+	if _, err := s.Write(1, makeBlock(ctBlockSize, 0xf1)); err != nil {
+		t.Fatalf("COW fence refused ordinary write: %v", err)
+	}
+	select {
+	case <-cutDone:
+		t.Fatal("cut returned while live read reference held")
+	default:
+	}
+	gate.unblock()
+	cowWaitSignal(t, cutDone, "fenced cut drain")
+	if !errors.Is(<-cutErr, errCutCOWAborted) || f.stats().head.Gen != before {
+		t.Fatal("fenced window published")
+	}
+}

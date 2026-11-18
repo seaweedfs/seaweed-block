@@ -328,9 +328,6 @@ func (l *chunkLayerImpl) copyCOWEntry(w *cutCOWWindow, idx uint64) (capturedChun
 		if e == nil {
 			return capturedChunk{}, false, w.status()
 		}
-		if hook := l.testCOWRead; hook != nil {
-			hook(idx, state == cowSaved)
-		}
 		var data []byte
 		var err error
 		if state == cowSaved {
@@ -342,6 +339,9 @@ func (l *chunkLayerImpl) copyCOWEntry(w *cutCOWWindow, idx uint64) (capturedChun
 			}
 		} else {
 			data, err = l.readCOWChunk(w, idx)
+		}
+		if hook := l.testCOWRead; hook != nil {
+			hook(idx, state == cowSaved)
 		}
 		if err == nil {
 			err = l.admit()

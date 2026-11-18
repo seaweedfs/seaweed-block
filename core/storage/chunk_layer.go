@@ -896,6 +896,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		w, copyErr = l.installCOWWindow(candidates, useStaged)
 		l.s.captureMu.Unlock()
 		st.BarrierPauseNs = time.Since(barrier).Nanoseconds()
+		copyStart = time.Now()
 		if copyErr == nil {
 			var copied []capturedChunk
 			copied, copyErr = l.copyCOWWindow(ctx, w)

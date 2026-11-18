@@ -338,6 +338,7 @@ type chunkLayerConfig struct {
 	// that last check and the CAS. Publication safety across a demotion
 	// rests on the epoch: a new primary's takeover raises the HEAD epoch, so
 	// the old primary's CAS fails and it fences (C6). Nil allows capture.
+	// COW workers may call this concurrently, between chunk claims.
 	CaptureAllowed func() error
 	// ReadMissTimeout bounds one OnReadMiss remote fetch.
 	ReadMissTimeout time.Duration

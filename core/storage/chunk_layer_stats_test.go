@@ -32,8 +32,8 @@ func TestChunkCutStats_PublishedZeroedUnchangedAndNoop(t *testing.T) {
 	if st.CASResult != "ok" || st.CASNs < 0 || st.UploadNs < 0 || st.TotalNs <= 0 {
 		t.Fatalf("first cut timings/result %+v", st)
 	}
-	if st.BarrierPauseNs <= 0 || st.BarrierPauseNs < st.SyncNs || st.BarrierPauseNs < st.CopyNs {
-		t.Fatalf("barrier %d ns must cover sync %d and copy %d", st.BarrierPauseNs, st.SyncNs, st.CopyNs)
+	if st.BarrierPauseNs <= 0 || st.BarrierPauseNs < st.SyncNs {
+		t.Fatalf("barrier %d ns must cover sync %d; copy %d is outside it", st.BarrierPauseNs, st.SyncNs, st.CopyNs)
 	}
 	if st.TotalNs < st.BarrierPauseNs+st.UploadNs+st.CASNs {
 		t.Fatalf("total %d ns shorter than barrier %d + upload %d + CAS %d", st.TotalNs, st.BarrierPauseNs, st.UploadNs, st.CASNs)
