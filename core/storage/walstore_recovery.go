@@ -50,6 +50,9 @@ func (s *WALStore) ScanLBAs(fromLSN uint64, fn func(RecoveryEntry) error) error 
 	s.mu.RUnlock()
 	if s.v3 != nil {
 		// The v3 source-state gate must precede even an empty scan.
+		if fromLSN >= headLSN {
+			return nil
+		}
 		return s.scanLBAsV3(fromLSN, fn)
 	}
 
