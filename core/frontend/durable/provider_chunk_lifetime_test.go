@@ -609,6 +609,15 @@ func TestWALStoreChunk_StaleWaiterCannotOverrideFailedRecovery(t *testing.T) {
 	if _, err := s.Write(5, block(0xA7)); err != nil {
 		t.Fatal(err)
 	}
+	// This oracle requires corruption below a persisted W. Default mode C
+	// intentionally permits losing its newest uncheckpointed batch instead.
+	ws, ok := s.(*storage.WALStore)
+	if !ok {
+		t.Fatalf("unexpected native store %T", s)
+	}
+	if err := ws.SetWMode(storage.WModeStrict); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.Sync(); err != nil {
 		t.Fatal(err)
 	}
@@ -681,6 +690,15 @@ func TestWALStoreChunk_FailedRecoveryRetiresAuthorityWait(t *testing.T) {
 		t.Fatalf("after recovery without authority: %v; want the volume awaiting authority", err)
 	}
 	if _, err := s.Write(5, block(0xA7)); err != nil {
+		t.Fatal(err)
+	}
+	// This oracle requires corruption below a persisted W. Default mode C
+	// intentionally permits losing its newest uncheckpointed batch instead.
+	ws, ok := s.(*storage.WALStore)
+	if !ok {
+		t.Fatalf("unexpected native store %T", s)
+	}
+	if err := ws.SetWMode(storage.WModeStrict); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Sync(); err != nil {
@@ -774,6 +792,15 @@ func TestWALStoreChunk_StaleWaiterPastTickCheckCannotAttach(t *testing.T) {
 	if _, err := s.Write(5, block(0xA7)); err != nil {
 		t.Fatal(err)
 	}
+	// This oracle requires corruption below a persisted W. Default mode C
+	// intentionally permits losing its newest uncheckpointed batch instead.
+	ws, ok := s.(*storage.WALStore)
+	if !ok {
+		t.Fatalf("unexpected native store %T", s)
+	}
+	if err := ws.SetWMode(storage.WModeStrict); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.Sync(); err != nil {
 		t.Fatal(err)
 	}
@@ -781,6 +808,7 @@ func TestWALStoreChunk_StaleWaiterPastTickCheckCannotAttach(t *testing.T) {
 
 	// Park A's wait inside its projection read, after its tick check.
 	view.arm()
+	t.Cleanup(func() { close(view.release) })
 	select {
 	case <-view.parked:
 	case <-time.After(10 * time.Second):
