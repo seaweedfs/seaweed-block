@@ -21,7 +21,7 @@ func TestWALStoreV3RecycleFloorCompatibilityMatrix(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s, _ := newMappedCheckpointStoreV3(t)
 			for i := 1; i <= 5; i++ {
-				writeSynced(t, s, uint32(i), byte(i))
+				writeSynced(t, s, uint32(i), uint32(i))
 				if tc.prior && i == 3 {
 					if err := s.flusher.flushOnce(); err != nil {
 						t.Fatal(err)
@@ -55,7 +55,7 @@ func TestWALStoreV3RetentionCompatibilityMatrix(t *testing.T) {
 		s, _ := newMappedCheckpointStoreV3(t)
 		s.SetRecoveryRetentionLSNs(tc.retain)
 		for i := 1; i <= 5; i++ {
-			writeSynced(t, s, uint32(i), byte(i))
+			writeSynced(t, s, uint32(i), uint32(i))
 		}
 		if err := s.flusher.flushOnce(); err != nil {
 			t.Fatal(err)
