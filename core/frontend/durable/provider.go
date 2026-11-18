@@ -738,7 +738,7 @@ func (p *DurableProvider) createFresh(volumeID, path string, impl ImplName) (*vo
 		if p.testWALStoreFactory != nil {
 			ws, err = p.testWALStoreFactory(path, true)
 		} else {
-			ws, err = storage.CreateWALStore(path, p.cfg.NumBlocks, p.cfg.BlockSize)
+			ws, err = storage.CreateWALStoreWithOptions(path, p.cfg.NumBlocks, p.cfg.BlockSize, storage.WALStoreOptions{ChunkBlocks: p.cfg.ChunkBlocks})
 		}
 		if err != nil {
 			return nil, fmt.Errorf("durable: CreateWALStore %s: %w", path, err)

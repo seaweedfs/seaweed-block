@@ -46,6 +46,10 @@ func openReadOnlyV3ForTest(path string, opts WALStoreOptions) (_ *WALStoreReader
 	if err := LockWALStoreFile(f); err != nil {
 		return nil, err
 	}
+	if err := refuseLegacyWALStore(f); err != nil {
+		return nil, err
+	}
+	accept := metadataSlotAcceptorV3(opts)
 	a, b := make([]byte, slotSizeV3), make([]byte, slotSizeV3)
 	if _, err = f.ReadAt(a, slotAOffsetV3); err != nil {
 		return nil, err
@@ -53,7 +57,7 @@ func openReadOnlyV3ForTest(path string, opts WALStoreOptions) (_ *WALStoreReader
 	if _, err = f.ReadAt(b, slotBOffsetV3); err != nil {
 		return nil, err
 	}
-	d, id, err := selectSlotV3(a, b, nil)
+	d, id, err := selectSlotV3(a, b, accept)
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +66,7 @@ func openReadOnlyV3ForTest(path string, opts WALStoreOptions) (_ *WALStoreReader
 		otherRaw = a
 	}
 	var fallback *descriptorV3
-	if od, e := decodeSlotV3(otherRaw, nil); e == nil && od.MigrationPhase == MigrationNormal {
+	if od, e := decodeSlotV3(otherRaw, accept); e == nil && od.MigrationPhase == MigrationNormal {
 		fallback = &od
 	}
 	cb, err := validateReadOnlyMapV3(path+".chunkmap", d, fallback)

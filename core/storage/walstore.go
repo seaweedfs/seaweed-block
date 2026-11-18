@@ -181,6 +181,25 @@ func CreateWALStoreWithOptions(path string, numBlocks uint32, blockSize int, opt
 	if blockSize == 0 {
 		blockSize = DefaultBlockSize
 	}
+	if blockSize < 0 || uint64(blockSize) > uint64(^uint32(0)) {
+		return nil, errSuperblockBadVolume
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
+	}
+	cb := opts.ChunkBlocks
+	if cb == 0 {
+		cb = 1024
+	}
+	return createWALStoreV3Configured(path, numBlocks, uint32(blockSize), 64*1024*1024, opts.WMode, 0, uint64(cb), opts)
+}
+
+// Frozen constructor for legacy-format regression fixtures; public Create
+// never reaches it after activation. Removed from production in row 14a.
+func createLegacyWALStoreWithOptions(path string, numBlocks uint32, blockSize int, opts WALStoreOptions) (*WALStore, error) {
+	if blockSize == 0 {
+		blockSize = DefaultBlockSize
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("storage: mkdir %s: %w", filepath.Dir(path), err)
 	}
@@ -194,7 +213,7 @@ func CreateWALStoreWithOptions(path string, numBlocks uint32, blockSize int, opt
 		BlockSize:   uint32(blockSize),
 		ExtentSize:  uint32(blockSize), // one block per extent slot keeps math trivial
 		ImplKind:    ImplKindWALStore,
-		ImplVersion: WALStoreImplVersion,
+		ImplVersion: 1,
 	})
 	if err != nil {
 		_ = f.Close()
@@ -233,6 +252,10 @@ func OpenWALStore(path string) (*WALStore, error) {
 }
 
 func OpenWALStoreWithOptions(path string, opts WALStoreOptions) (*WALStore, error) {
+	return openWALStoreV3WithOptions(path, true, opts)
+}
+
+func openLegacyWALStoreWithOptions(path string, opts WALStoreOptions) (*WALStore, error) {
 	f, err := os.OpenFile(path, os.O_RDWR, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("storage: open %s: %w", path, err)

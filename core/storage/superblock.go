@@ -40,7 +40,7 @@ const (
 // files. Independent from superblockVersion (which is the shared
 // superblock-format version) — walstore and smartwal evolve their
 // WAL+extent layouts on independent clocks.
-const WALStoreImplVersion uint32 = 1
+const WALStoreImplVersion uint32 = 3
 
 var (
 	errSuperblockNotOurs     = errors.New("storage: not a store file (bad magic)")

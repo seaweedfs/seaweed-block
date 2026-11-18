@@ -64,6 +64,10 @@ func OpenReadOnly(path string) (*WALStoreReader, error) {
 }
 
 func OpenReadOnlyWithOptions(path string, opts WALStoreOptions) (*WALStoreReader, error) {
+	return openReadOnlyV3ForTest(path, opts)
+}
+
+func openLegacyReadOnlyWithOptions(path string, opts WALStoreOptions) (*WALStoreReader, error) {
 	f, err := os.OpenFile(path, os.O_RDONLY, 0)
 	if err != nil {
 		return nil, fmt.Errorf("storage: OpenReadOnly %s: %w", path, err)
