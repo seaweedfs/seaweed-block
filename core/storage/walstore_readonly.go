@@ -64,7 +64,7 @@ func OpenReadOnly(path string) (*WALStoreReader, error) {
 }
 
 func OpenReadOnlyWithOptions(path string, opts WALStoreOptions) (*WALStoreReader, error) {
-	return openReadOnlyV3ForTest(path, opts)
+	return openReadOnlyV3(path, opts)
 }
 
 func openLegacyReadOnlyWithOptions(path string, opts WALStoreOptions) (*WALStoreReader, error) {

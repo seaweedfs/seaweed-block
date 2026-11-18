@@ -29,10 +29,9 @@ type walStoreReaderV3 struct {
 	absent      map[uint64]bool
 }
 
-// Dark row12a selector. Public OpenReadOnly still selects the legacy reader;
-// activation changes that selector only after all named callers are accepted.
+// The production readonly selector validates v3 slots and their dependencies.
 // No worker, recovery fence, descriptor publication or writable fd is created.
-func openReadOnlyV3ForTest(path string, opts WALStoreOptions) (_ *WALStoreReader, err error) {
+func openReadOnlyV3(path string, opts WALStoreOptions) (_ *WALStoreReader, err error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err

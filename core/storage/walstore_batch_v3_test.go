@@ -213,7 +213,7 @@ func TestWALStoreV3ReadOnlyReaderServesBatchBlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 	crashRecoveryHardeningStore(t, s)
-	reader, err := openReadOnlyV3ForTest(path, WALStoreOptions{})
+	reader, err := openReadOnlyV3(path, WALStoreOptions{})
 	if err != nil {
 		t.Fatalf("readonly open: %v", err)
 	}

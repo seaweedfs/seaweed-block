@@ -20,12 +20,9 @@ import (
 // committer, the dirty map, the flusher's extent writes, the syncFile leaf,
 // fileSyncMu and the sticky fault.
 //
-// Dark until activation (plan row 12b): only createWALStoreV3ForTest and
-// openWALStoreV3ForTest build a v3 store; Create and Open stay v2.
-//
-// Not yet v3 (refused with errV3NotYet until their rows): WriteBatch, the
-// install paths (ApplyEntry, WriteExtentDirect, AdvanceFrontier; rows 9 to
-// 11) and the checkpoint/tail advance, which needs the row-7 map candidate.
+// Production Create/Open select this format. Legacy formats require the offline
+// migration tool or restore into a newly created volume. BASE mutations use
+// install handles; raw extent writes and frontier jumps remain refused.
 type walStoreV3State struct {
 	pub        *descriptorPublisherV3
 	w          *walWriterV3
@@ -223,7 +220,7 @@ func createWALStoreV3Configured(path string, numBlocks, blockSize uint32, walSiz
 	d := descriptorV3{
 		ImplKind: ImplKindWALStore, ImplVersion: walStoreImplVersion3,
 		VolumeSize: uint64(numBlocks) * uint64(blockSize), ExtentSize: 64 * 1024, BlockSize: blockSize,
-		WALOffset: walOffsetV3, WALSize: walSize, CreatedAt: 1, SlotGen: 1,
+		WALOffset: walOffsetV3, WALSize: walSize, CreatedAt: uint64(time.Now().UnixNano()), SlotGen: 1,
 		MapFormatID: mapFormatIDV1, MapGeneration: 1, WMode: mode,
 		RetainedTail: cursor, RetainedHead: cursor,
 	}
