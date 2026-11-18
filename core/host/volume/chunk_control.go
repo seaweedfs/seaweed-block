@@ -45,8 +45,55 @@ type ChunkCutResponse struct {
 	Holder    string `json:"holder"`
 	Noop      bool   `json:"noop"`
 	FullHash  bool   `json:"fullHash"`
-	// The cut statistics (§3.1) are added when W3 fills them; until then
-	// the body omits them rather than report zeros (B9 W2 appendix).
+	// Stats are the statistics the chunk layer measured for this cut
+	// (§3.1). A zero field is "not measured" or "none" (a Noop cut
+	// uploads nothing).
+	Stats ChunkCutStatsBody `json:"stats"`
+}
+
+// ChunkCutStatsBody is one cut's statistics in the /chunk/cut body. It
+// mirrors storage.ChunkCutStats field for field (a test keeps the two in
+// step); every duration is in nanoseconds.
+type ChunkCutStatsBody struct {
+	BarrierPauseNs    int64  `json:"barrierPauseNs"`
+	SyncNs            int64  `json:"syncNs"`
+	CopyNs            int64  `json:"copyNs"`
+	CandidateChunks   int    `json:"candidateChunks"`
+	UploadedChunks    int    `json:"uploadedChunks"`
+	UploadedBytes     int64  `json:"uploadedBytes"`
+	ZeroedChunks      int    `json:"zeroedChunks"`
+	UnchangedChunks   int    `json:"unchangedChunks"`
+	UploadNs          int64  `json:"uploadNs"`
+	CASNs             int64  `json:"casNs"`
+	CASResult         string `json:"casResult"`
+	TotalNs           int64  `json:"totalNs"`
+	StageRounds       int    `json:"stageRounds"`
+	StagedChunks      int    `json:"stagedChunks"`
+	StagedChunksUsed  int    `json:"stagedChunksUsed"`
+	BarrierCopyChunks int    `json:"barrierCopyChunks"`
+	BarrierOverBound  bool   `json:"barrierOverBound"`
+}
+
+func cutStatsBody(s storage.ChunkCutStats) ChunkCutStatsBody {
+	return ChunkCutStatsBody{
+		BarrierPauseNs:    s.BarrierPauseNs,
+		SyncNs:            s.SyncNs,
+		CopyNs:            s.CopyNs,
+		CandidateChunks:   s.CandidateChunks,
+		UploadedChunks:    s.UploadedChunks,
+		UploadedBytes:     s.UploadedBytes,
+		ZeroedChunks:      s.ZeroedChunks,
+		UnchangedChunks:   s.UnchangedChunks,
+		UploadNs:          s.UploadNs,
+		CASNs:             s.CASNs,
+		CASResult:         s.CASResult,
+		TotalNs:           s.TotalNs,
+		StageRounds:       s.StageRounds,
+		StagedChunks:      s.StagedChunks,
+		StagedChunksUsed:  s.StagedChunksUsed,
+		BarrierCopyChunks: s.BarrierCopyChunks,
+		BarrierOverBound:  s.BarrierOverBound,
+	}
 }
 
 // ChunkSnapshotRequest is POST /chunk/snapshot's request (§3.2), without
@@ -455,7 +502,7 @@ func (c *chunkControl) Cut(ctx context.Context, volumeID string, minLSN uint64) 
 		return ChunkCutResponse{}, err
 	}
 	return ChunkCutResponse{VolumeID: volumeID, CutLSN: r.H, HeadGen: r.Head.Gen, HeadEpoch: r.Head.Epoch, Holder: r.Head.Holder,
-		Noop: r.Noop, FullHash: r.FullHash}, nil
+		Noop: r.Noop, FullHash: r.FullHash, Stats: cutStatsBody(r.Stats)}, nil
 }
 
 // Snapshot resolves the request against the catalog first (§3.2 step 1):

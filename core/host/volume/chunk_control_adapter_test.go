@@ -3,6 +3,7 @@ package volume
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
@@ -108,6 +109,43 @@ func TestChunkControl_CutReturnsTheLayerStats(t *testing.T) {
 	for k, v := range want {
 		if body.Stats[k] != v {
 			t.Fatalf("cut body stats[%q] = %v, want %v (body %s)", k, body.Stats[k], v, raw)
+		}
+	}
+}
+
+// ChunkCutStatsBody mirrors storage.ChunkCutStats: a field added to the
+// layer's statistics must also reach the body.
+func TestChunkCutStatsBody_MirrorsTheLayerStats(t *testing.T) {
+	layer, body := reflect.TypeOf(storage.ChunkCutStats{}), reflect.TypeOf(ChunkCutStatsBody{})
+	if layer.NumField() != body.NumField() {
+		t.Fatalf("storage.ChunkCutStats has %d fields, ChunkCutStatsBody %d", layer.NumField(), body.NumField())
+	}
+	for i := 0; i < layer.NumField(); i++ {
+		lf, ok := body.FieldByName(layer.Field(i).Name)
+		if !ok || lf.Type != layer.Field(i).Type {
+			t.Fatalf("ChunkCutStatsBody lacks %s %s", layer.Field(i).Name, layer.Field(i).Type)
+		}
+	}
+	// Every field is copied: set each one to a distinct value and compare.
+	var s storage.ChunkCutStats
+	v := reflect.ValueOf(&s).Elem()
+	for i := 0; i < v.NumField(); i++ {
+		switch f := v.Field(i); f.Kind() {
+		case reflect.Int, reflect.Int64:
+			f.SetInt(int64(i + 1))
+		case reflect.String:
+			f.SetString("s")
+		case reflect.Bool:
+			f.SetBool(true)
+		default:
+			t.Fatalf("field %s: unhandled kind %s", v.Type().Field(i).Name, f.Kind())
+		}
+	}
+	got := reflect.ValueOf(cutStatsBody(s))
+	for i := 0; i < v.NumField(); i++ {
+		name := v.Type().Field(i).Name
+		if !reflect.DeepEqual(got.FieldByName(name).Interface(), v.Field(i).Interface()) {
+			t.Fatalf("cutStatsBody drops %s: got %v, want %v", name, got.FieldByName(name).Interface(), v.Field(i).Interface())
 		}
 	}
 }
