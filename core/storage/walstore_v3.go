@@ -108,6 +108,9 @@ type walStoreV3State struct {
 	// installReopen is the last Recover's installing outcome (guarded by
 	// installMu and s.mu), consumed by a covering superseding begin.
 	installReopen *installReopenV3
+	// ownerAttachDurable: this open's chunk attach was durably committed
+	// by the provider (CommitChunkAttachV3); false at open.
+	ownerAttachDurable atomic.Bool
 	// preBaseHighest is the highest appended LSN when the live install
 	// began (guarded by installMu): the records before its BaseCursor.
 	preBaseHighest uint64

@@ -616,3 +616,68 @@ func TestBaseInstallV3RetirementWaitsForTheGate(t *testing.T) {
 		t.Fatalf("second install: checkpoint %d state %d, want installed under B (re-armed)", d.CheckpointLSN, d.BaseState)
 	}
 }
+
+// CommitChunkAttachV3 (row 12a retirement timing): the provider's commit
+// runs under installMu exclusive; a failing commit changes nothing (no
+// durable flag, the deferral holds, the volume stays installed); a
+// successful one records the durable attach and lifts the deferral of an
+// installed volume, which then retires on the next publication; Defer
+// resets the flag at the next open. Mutants: lifting on a failed commit,
+// not recording the flag, running the commit outside installMu.
+func TestBaseInstallV3CommitChunkAttach(t *testing.T) {
+	s, _, _ := checkpointedStoreV3(t, 2)
+	s.DeferBaseRetirementV3()
+	h := beginV3(t, s, 4, idA)
+	if err := h.WriteBase(3, blk(3)); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.ApplyInstallEntry(5, blk(5), 5); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.MarkBaseComplete(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.flusher.flushOnceInternal(false); err != nil {
+		t.Fatal(err)
+	}
+	exclusive := false
+	err := s.CommitChunkAttachV3(func() error {
+		if s.v3.installMu.TryRLock() {
+			s.v3.installMu.RUnlock()
+		} else {
+			exclusive = true
+		}
+		return errors.New("injected marker fsync failure")
+	})
+	if err == nil || !exclusive {
+		t.Fatalf("failing commit: err %v, ran under installMu exclusive %v", err, exclusive)
+	}
+	if s.OwnerChunkAttachDurableV3() {
+		t.Fatal("a failed commit recorded a durable attach")
+	}
+	if _, err := s.v3.pub.publish(&s.mu, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if st := s.v3.pub.current().BaseState; st != BaseInstalled {
+		t.Fatalf("state %d after a failed commit, want installed", st)
+	}
+	if err := s.CommitChunkAttachV3(func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if !s.OwnerChunkAttachDurableV3() {
+		t.Fatal("a successful commit did not record the durable attach")
+	}
+	if _, err := s.v3.pub.publish(&s.mu, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if st := s.v3.pub.current().BaseState; st != BaseNone {
+		t.Fatalf("state %d after the commit, want retired", st)
+	}
+	s.DeferBaseRetirementV3()
+	if s.OwnerChunkAttachDurableV3() {
+		t.Fatal("Defer (the next open) did not reset the durable attach flag")
+	}
+}

@@ -563,8 +563,40 @@ func (s *WALStore) checkInstallBlockV3(lba uint32, data []byte) error {
 // open, before Recover and before any publication. Not a v3 store: no-op.
 func (s *WALStore) DeferBaseRetirementV3() {
 	if s.v3 != nil {
+		s.v3.ownerAttachDurable.Store(false)
 		s.v3.pub.retireGate.CompareAndSwap(retireNoGateV3, retireDeferredV3)
 	}
+}
+
+// CommitChunkAttachV3 is the provider's durable attach commit (row 12a
+// retirement timing): under installMu exclusive it runs commit (the
+// provider removes its fresh-from-HEAD marker and fsyncs the directory; it
+// must not re-enter the store), and only when commit succeeds it records
+// that this open's chunk attach is durable and, if the volume is installed,
+// lifts the retirement deferral. On a commit error nothing changes. So a
+// completed BASE never retires while the provider could still read the
+// volume as fresh from HEAD. Not a v3 store: commit only.
+func (s *WALStore) CommitChunkAttachV3(commit func() error) error {
+	v := s.v3
+	if v == nil {
+		return commit()
+	}
+	v.installMu.Lock()
+	defer v.installMu.Unlock()
+	if err := commit(); err != nil {
+		return err
+	}
+	v.ownerAttachDurable.Store(true)
+	if v.pub.current().BaseState == BaseInstalled {
+		v.pub.retireGate.Store(retireAllowedV3)
+	}
+	return nil
+}
+
+// OwnerChunkAttachDurableV3 reports whether this open's chunk attach was
+// durably committed (CommitChunkAttachV3); it resets at every open.
+func (s *WALStore) OwnerChunkAttachDurableV3() bool {
+	return s.v3 != nil && s.v3.ownerAttachDurable.Load()
 }
 
 // AllowBaseRetirementV3 lifts the deferral once the chunk layer has durably
