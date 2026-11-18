@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -137,6 +138,24 @@ var errV3LegacySuperblockWrite = errors.New("storage: legacy superblock write re
 
 var errV3NotYet = errors.New("storage: operation not yet supported on a v3 store (later plan row)")
 
+// ErrUnsupportedLegacyFormat requires offline migration or workspace restore;
+// a production open never interprets a v2 volume as v3.
+var ErrUnsupportedLegacyFormat = errors.New("storage: unsupported legacy walstore format; migrate offline or restore into a new volume")
+
+func refuseLegacyWALStore(f *os.File) error {
+	if sb, err := readSuperblock(io.NewSectionReader(f, 0, superblockSize)); err == nil && sb.Version == 2 {
+		return ErrUnsupportedLegacyFormat
+	}
+	return nil
+}
+
+func metadataSlotAcceptorV3(opts WALStoreOptions) slotImplAcceptor {
+	return func(kind ImplKind, version uint32) bool {
+		return ossSlotImplAcceptor(kind, version) ||
+			(kind == ImplKindWALStore && version >= walStoreImplVersion3 && opts.MetadataFactory != nil)
+	}
+}
+
 // testSkipFenceOnRecoverV3 is a test-only mutant switch for the G1 control
 // (it proves the schedule resurrects without the fence). Never set outside
 // tests.
@@ -176,6 +195,10 @@ func createMappedWALStoreV3ForTest(path string, numBlocks, blockSize uint32, wal
 	return createWALStoreV3MapAtCursorForTest(path, numBlocks, blockSize, walSize, mode, 0, chunkBlocks)
 }
 func createWALStoreV3MapAtCursorForTest(path string, numBlocks, blockSize uint32, walSize uint64, mode WMode, cursor, chunkBlocks uint64) (*WALStore, error) {
+	return createWALStoreV3Configured(path, numBlocks, blockSize, walSize, mode, cursor, chunkBlocks, WALStoreOptions{})
+}
+
+func createWALStoreV3Configured(path string, numBlocks, blockSize uint32, walSize uint64, mode WMode, cursor, chunkBlocks uint64, opts WALStoreOptions) (*WALStore, error) {
 	d := descriptorV3{
 		ImplKind: ImplKindWALStore, ImplVersion: walStoreImplVersion3,
 		VolumeSize: uint64(numBlocks) * uint64(blockSize), ExtentSize: 64 * 1024, BlockSize: blockSize,
@@ -195,7 +218,22 @@ func createWALStoreV3MapAtCursorForTest(path string, numBlocks, blockSize uint32
 	if err != nil {
 		return nil, err
 	}
-	err = fd.Truncate(int64(d.WALOffset + d.WALSize + d.VolumeSize))
+	if err := LockWALStoreFile(fd); err != nil {
+		_ = fd.Close()
+		return nil, err
+	}
+	sb := superblock{Version: superblockVersionV3, ImplVersion: d.ImplVersion, BlockSize: d.BlockSize, VolumeSize: d.VolumeSize, WALOffset: d.WALOffset, WALSize: d.WALSize}
+	metadata, totalSize, err := bindBlockMetadata(fd, &sb, opts, true, false)
+	if err != nil {
+		_ = fd.Close()
+		return nil, err
+	}
+	d.ImplVersion = sb.ImplVersion
+	if err := d.validate(metadataSlotAcceptorV3(opts)); err != nil {
+		_ = fd.Close()
+		return nil, err
+	}
+	err = fd.Truncate(totalSize)
 	if err == nil && chunkBlocks != 0 {
 		var m *chunkLSNMapV3
 		m, err = createChunkLSNMapV3(path+".chunkmap", d, chunkBlocks)
@@ -225,18 +263,11 @@ func createWALStoreV3MapAtCursorForTest(path string, numBlocks, blockSize uint32
 	if err == nil {
 		err = fd.Sync()
 	}
-	if cerr := fd.Close(); err == nil {
-		err = cerr
-	}
 	if err != nil {
+		_ = fd.Close()
 		return nil, err
 	}
-	var s *WALStore
-	if chunkBlocks == 0 {
-		s, err = openUnmappedWALStoreV3ForTest(path)
-	} else {
-		s, err = openWALStoreV3ForTest(path)
-	}
+	s, err := openWALStoreV3File(path, fd, chunkBlocks != 0, opts, metadata, true)
 	if err != nil {
 		return nil, err
 	}
@@ -259,6 +290,10 @@ func openUnmappedWALStoreV3ForTest(path string) (*WALStore, error) {
 	return openWALStoreV3MapInternalForTest(path, false)
 }
 func openWALStoreV3MapInternalForTest(path string, requireMap bool) (*WALStore, error) {
+	return openWALStoreV3WithOptions(path, requireMap, WALStoreOptions{})
+}
+
+func openWALStoreV3WithOptions(path string, requireMap bool, opts WALStoreOptions) (*WALStore, error) {
 	f, err := os.OpenFile(path, os.O_RDWR, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("storage: open %s: %w", path, err)
@@ -267,6 +302,17 @@ func openWALStoreV3MapInternalForTest(path string, requireMap bool) (*WALStore, 
 		_ = f.Close()
 		return nil, err
 	}
+	return openWALStoreV3File(path, f, requireMap, opts, nil, false)
+}
+
+// f is already locked. Creation retains this same descriptor and metadata
+// binding throughout initialization, so there is no close/reopen owner gap.
+func openWALStoreV3File(path string, f *os.File, requireMap bool, opts WALStoreOptions, metadata BlockMetadata, creating bool) (*WALStore, error) {
+	if err := refuseLegacyWALStore(f); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	accept := metadataSlotAcceptorV3(opts)
 	a := make([]byte, slotSizeV3)
 	b := make([]byte, slotSizeV3)
 	_, errA := f.ReadAt(a, slotAOffsetV3)
@@ -275,7 +321,7 @@ func openWALStoreV3MapInternalForTest(path string, requireMap bool) (*WALStore, 
 		_ = f.Close()
 		return nil, err
 	}
-	d, id, err := selectSlotV3(a, b, nil)
+	d, id, err := selectSlotV3(a, b, accept)
 	if err != nil {
 		_ = f.Close()
 		return nil, err
@@ -285,7 +331,7 @@ func openWALStoreV3MapInternalForTest(path string, requireMap bool) (*WALStore, 
 	if id == slotB {
 		otherRaw = a
 	}
-	if od, oerr := decodeSlotV3(otherRaw, nil); oerr == nil && od.MigrationPhase == MigrationNormal {
+	if od, oerr := decodeSlotV3(otherRaw, accept); oerr == nil && od.MigrationPhase == MigrationNormal {
 		other = &od
 	}
 	var ownedMap *chunkLSNMapV3
@@ -308,7 +354,17 @@ func openWALStoreV3MapInternalForTest(path string, requireMap bool) (*WALStore, 
 		CreatedAt: d.CreatedAt, ImplKind: d.ImplKind, ImplVersion: d.ImplVersion,
 	}
 	copy(sb.Magic[:], superblockMagic)
-	s, err := openInitializedInternal(path, f, &sb, nil, func(s *WALStore) error {
+	if !creating {
+		metadata, _, err = bindBlockMetadata(f, &sb, opts, false, false)
+		if err != nil {
+			if ownedMap != nil {
+				_ = ownedMap.Close()
+			}
+			_ = f.Close()
+			return nil, err
+		}
+	}
+	s, err := openInitializedInternal(path, f, &sb, metadata, func(s *WALStore) error {
 		v := &walStoreV3State{}
 		v.pub = newDescriptorPublisherV3(d, id, other, descriptorIOV3{
 			writeSlot: func(off int64, buf []byte) error {
@@ -328,6 +384,7 @@ func openWALStoreV3MapInternalForTest(path string, requireMap bool) (*WALStore, 
 			sticky:   s.stickyIOFault,
 			latch:    s.latchV3,
 		})
+		v.pub.accept = accept
 		// A reset stopped between its two publications (DESIGN 8.6) binds no
 		// writer across the two nonces: Recover's head publication completes
 		// the new incarnation in the other slot and creates the writer then;
