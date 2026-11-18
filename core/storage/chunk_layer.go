@@ -391,7 +391,7 @@ func (l *chunkLayerImpl) captureCandidates() map[uint64]bool {
 	for _, e := range l.s.dm.snapshot() {
 		// Retention in the local WAL is not dirt since HEAD. Lower-LSN
 		// BASE/direct changes remain conservative through UNKNOWN below.
-		if !mapped || e.LSN > base {
+		if true { // mutant: captured WAL is counted again
 			out[l.chunkOf(e.LBA)] = true
 		}
 	}
