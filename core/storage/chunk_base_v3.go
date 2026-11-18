@@ -61,7 +61,7 @@ func (l *chunkLayerImpl) holdBaseTransitionV3() (func(), error) {
 		presenceDurable := l.presenceVer == l.savedPresVer && len(l.absent) == 0 && len(l.localBlocks) == 0
 		l.stMu.Unlock()
 		if d.BaseState == BaseInstalled && presenceDurable {
-			l.s.AllowBaseRetirementV3()
+			// mutant: omit completion retirement release
 		}
 		l.capMu.Unlock()
 		done()
