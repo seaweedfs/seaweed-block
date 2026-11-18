@@ -410,8 +410,10 @@ func (s *WALStore) walUsedFraction() float64 {
 	}
 	w := s.v3.w
 	if w == nil {
-		return 1
-	} // recovery/reset has not admitted a writer yet
+		// Not a capacity decision: append must retain its typed binding refusal
+		// without waiting for pressure that cannot be relieved before Recover.
+		return 0
+	}
 	d, floor, valid := s.v3.pub.walSnapshotV3()
 	w.mu.Lock()
 	defer w.mu.Unlock()
