@@ -142,7 +142,7 @@ func TestWALStoreV3ReclaimSecondSlotFailureKeepsOldPin(t *testing.T) {
 	if _, err := r.Recover(); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := r.Read(0); err != nil || !bytes.Equal(got, blk(1)) {
+	if got, err := r.Read(1); err != nil || !bytes.Equal(got, blk(1)) {
 		t.Fatalf("acknowledged bytes lost at the fallback failure window: %v", err)
 	}
 }
