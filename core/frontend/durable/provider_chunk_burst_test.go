@@ -64,12 +64,13 @@ func TestWALStoreChunkV3_SequentialBurstFlush(t *testing.T) {
 	}
 	// The expected bytes come from the submitted pattern, not another reader.
 	for off := 0; off < total; off += transfer {
-		got, err := be.Read(ctx, uint64(off), transfer)
+		got := make([]byte, transfer)
+		n, err := be.Read(ctx, int64(off), got)
 		if err != nil {
 			t.Fatalf("readback at%d: %v", off, err)
 		}
-		if len(got) != transfer {
-			t.Fatalf("short readback at%d: %d", off, len(got))
+		if n != transfer {
+			t.Fatalf("short readback at%d: %d", off, n)
 		}
 		for i, b := range got {
 			if want := byte(off/transfer) + byte(i); b != want {
