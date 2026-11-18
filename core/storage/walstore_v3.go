@@ -144,7 +144,7 @@ var errV3NotYet = errors.New("storage: operation not yet supported on a v3 store
 var ErrUnsupportedLegacyFormat = errors.New("storage: unsupported legacy walstore format; migrate offline or restore into a new volume")
 
 func refuseLegacyWALStore(f *os.File) error {
-	if sb, err := readSuperblock(io.NewSectionReader(f, 0, superblockSize)); err == nil && sb.Version == 2 {
+	if sb, err := readSuperblock(io.NewSectionReader(f, 0, superblockSize)); err == nil && sb.Version == 2 && sb.validate() == nil {
 		return ErrUnsupportedLegacyFormat
 	}
 	return nil
