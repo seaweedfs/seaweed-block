@@ -92,7 +92,8 @@ Two kinds of config are **expected to violate**:
 | `WALReplica.tla` | `cfg/S3_rep_*` | |
 | `CutCapture.tla` | `cfg/S4_*` | |
 | `CutPipeline.tla` | `cfg/S4b_*` | |
-| `CutCOW.tla` | `cfg/S4c_*` | proposed design (copy-before-write), not implemented |
+| `CutCOW.tla` | `cfg/S4c_*` | earlier copy-window abstraction |
+| `CutCOW2.tla` | `cfg/S4r2_*` | selected native COW: save I/O and abort/drain |
 | `ControlPlane.tla` | `cfg/S5_*` | |
 | `ReplicationFailover.tla` | `cfg/S6_*` | design-level |
 | `RetentionGCTiming.tla` | `cfg/S9_*` | |
@@ -224,3 +225,25 @@ TLC runs of these specs; comment-only edits were made since.
 The public selector now reaches the mapped impl3 paths in `walstore_v3.go`, `descriptor_v3.go`, `wal_io_v3.go` and `walstore_map_checkpoint_v3.go`. This is activation of the previously reviewed format contract, not a new abstract transition. Its canonical signed design is r17.4 (`e2a5304ef8fdc29f7e109883b8664a5c93d37a559e7b93e1d24964cb09cb7824`), with the composed external S3/BASE/install/map TLC receipts referenced by that design. The in-repository `WALRecovery.tla` remains an abstraction and is not a proof of every physical nonce/cursor/map/dual-slot rule. Pending external bounded runs remain pending; activation tests and source correspondence do not turn them into exhaustive proof.
 
 Native Go controls and the temporary frozen-v2 fixture disposition are listed in [the activation inventory](../design/format-v3-legacy-test-inventory.md). Old-codec tests are preserved, and both default and tagged migration/caller suites are validation gates. No model equation is changed by the selector wiring; a new counterexample still requires an amendment before affected integration.
+
+## Cut-window implementation correspondence
+
+The mapped v3 cut now uses `chunk_cut_cow.go`. `CutCOW2.tla` is the unchanged
+S4c r2 model (SHA-256 `0b9bc89a9aed6c42dda6b1d23ba8515c406b1c2cb265cd83e78122238df6bcca`);
+its header records its pre-implementation status at the time of the run.
+The existing bounded verdict is not a new run: Chunks={a,b,c}, MaxLSN=6,
+MaxCuts=2, MaxCrash=1, MaxAborts=1. `S4r2_cow_safe` checked seven invariants,
+252,733,280 states, depth 36; barrier checked 27,790,736, depth 31.
+`abortNoJoin` violates SideOnlyInCut at 31,835 states; `noChunkLock` and
+`noCopy` violate BufFrozen at 6,982 and 7,484. The three witness configs
+reach AbortWhileSaving (1,682), SaveUsedByCopier (28,250), CASAfterAbort
+(614,292); their exit 12 is expected reachability, not a safe-config pass.
+
+SaveStart/SaveFinish correspond to the saving owner's validated read and
+side-store publication. AbortStart is terminal invalidation/wakeup; AbortFinish
+is reference drain followed by one cleanup. The model has one copier and
+whole-chunk writes. Actual multi-writer/batch ownership, first-attach/Close,
+Recover/reset snapshot recheck and saved-file readers are covered by the
+native `TestCutCOWV3_*` caller controls, not claimed as model proofs.
+The earlier thirteen-spec parse statement above predates this imported model;
+no new independent TLC/parse or cloud run is claimed here.

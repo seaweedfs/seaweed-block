@@ -218,6 +218,7 @@ func TestStatusServer_ChunkErrorBodyIsTyped(t *testing.T) {
 		{fmt.Errorf("%w: %w", storage.ErrChunkReconciling, context.DeadlineExceeded), "reconciling", 409, true},
 		{fmt.Errorf("x: %w", storage.ErrChunkCASOutcomeUnknown), "outcome_unknown", 503, true},
 		{fmt.Errorf("x: %w", storage.ErrChunkHeadPrecondition), "head_conflict", 409, true},
+		{fmt.Errorf("save: %w", storage.ErrCutCOWAborted), "cut_aborted", 503, true},
 		{fmt.Errorf("x: %w", storage.ErrChunkRemoteUnavailable), "remote_unavailable", 503, true},
 		{fmt.Errorf("x: %w", storage.ErrChunkLayerClosed), "closing", 503, false},
 		{fmt.Errorf("x: %w", storage.ErrChunkLayerDetached), "closing", 409, false},
