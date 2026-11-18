@@ -60,7 +60,7 @@ func (l *chunkLayerImpl) holdBaseTransitionV3() (func(), error) {
 		// installed publication only after all lower locks were released.
 		presenceDurable := l.presenceVer == l.savedPresVer && len(l.absent) == 0 && len(l.localBlocks) == 0
 		l.stMu.Unlock()
-		if d.BaseState == BaseInstalled && presenceDurable && l.s.OwnerChunkAttachDurableV3() {
+		if d.BaseState == BaseInstalled && presenceDurable {
 			l.s.AllowBaseRetirementV3()
 		}
 		l.capMu.Unlock()
