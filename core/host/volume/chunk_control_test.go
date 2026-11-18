@@ -159,8 +159,8 @@ func TestStatusServer_ChunkSuccessBodiesUseSpecFields(t *testing.T) {
 		ctl.deadline < chunkstore.DefaultOpDeadline-time.Minute || ctl.deadline > chunkstore.DefaultOpDeadline {
 		t.Fatalf("cut with a huge timeoutMs: %d (deadline %v), want OpDeadline", w.Code, ctl.deadline)
 	}
-	// The cut statistics are omitted until W3 fills them (B9 W2 appendix).
-	wantKeys(t, "cut", jsonKeys(t, w.Body.Bytes()), "volumeID", "cutLSN", "headGen", "headEpoch", "holder", "noop", "fullHash")
+	// The chunk layer fills the cut statistics (§3.1), so the body carries them.
+	wantKeys(t, "cut", jsonKeys(t, w.Body.Bytes()), "volumeID", "cutLSN", "headGen", "headEpoch", "holder", "noop", "fullHash", "stats")
 
 	w = serve(t, s, http.MethodPost, "/chunk/snapshot", `{"volumeID":"v1","name":"s1","requestID":"r","labels":{"agent.step":"x"},"consistency":"app","expiresAtNs":9}`, "")
 	if w.Code != 200 || ctl.lastSnap.Name != "s1" || ctl.lastSnap.RequestID != "r" || ctl.lastSnap.Consistency != "app" || ctl.lastSnap.Labels["agent.step"] != "x" || ctl.lastSnap.ExpiresAtNs != 9 {
