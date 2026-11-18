@@ -1168,6 +1168,9 @@ func run(f flags) int {
 	select {
 	case <-shutdownCtx.Done():
 	case request := <-leaseRequests:
+		// The lease guard fenced and asks for the drain; it logs its cause as
+		// "workspace lease: fenced ...". Say here that this is why we stop (#205).
+		fmt.Fprintln(os.Stderr, "blockvolume: stopping: the workspace lease guard fenced and requested the drain")
 		leaseStop = &request
 	case err := <-leaseDone:
 		fmt.Fprintln(os.Stderr, "blockvolume: workspace lease stopped:", err)
