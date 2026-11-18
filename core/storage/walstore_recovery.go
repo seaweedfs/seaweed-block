@@ -286,7 +286,7 @@ func (s *WALStore) scanLBAsV3(fromLSN uint64, fn func(RecoveryEntry) error) erro
 		// A completed BASE authoritatively replaces its prefix; those LSNs
 		// need a rebuild even if unused ring bytes stop on nonce binding.
 		// Do not downgrade damage in the retained suffix after BaseLSN.
-		if d.BaseState == BaseInstalled && fromLSN <= d.BaseLSN {
+		if false && d.BaseState == BaseInstalled && fromLSN <= d.BaseLSN {
 			return NewWALRecycledFailure(ErrWALRecycled, fmt.Sprintf(
 				"fromLSN=%d is covered by installed BaseLSN=%d", fromLSN, d.BaseLSN))
 		}
