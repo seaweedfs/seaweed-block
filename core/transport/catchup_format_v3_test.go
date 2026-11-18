@@ -326,7 +326,9 @@ func TestCatchUpV3ScanOverlappingCheckpointReuseIsRecycled(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = primary.Close() })
 	primary.DisableAutoFlushForRecoveryTest()
-	for i := 1; i <= 250; i++ {
+	// Leave admission headroom while the flusher is deliberately disabled.
+	// The post-checkpoint writes still cross the physical 1 MiB ring boundary.
+	for i := 1; i <= 200; i++ {
 		if _, err := primary.Write(0, v3RepBlk(byte(i))); err != nil {
 			t.Fatal(err)
 		}
@@ -350,7 +352,7 @@ func TestCatchUpV3ScanOverlappingCheckpointReuseIsRecycled(t *testing.T) {
 	exec := NewBlockExecutor(primary, l.Addr())
 	closed := make(chan adapter.SessionCloseResult, 1)
 	exec.SetOnSessionClose(func(r adapter.SessionCloseResult) { closed <- r })
-	if err := exec.StartCatchUp("r1", 1, 1, 1, 1, 251); err != nil {
+	if err := exec.StartCatchUp("r1", 1, 1, 1, 1, 201); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -361,7 +363,7 @@ func TestCatchUpV3ScanOverlappingCheckpointReuseIsRecycled(t *testing.T) {
 	if err := storage.FlushMappedWALStoreV3Test(primary); err != nil {
 		t.Fatal(err)
 	}
-	for i := 251; i <= 270; i++ {
+	for i := 201; i <= 270; i++ {
 		if _, err := primary.Write(0, v3RepBlk(byte(i%256))); err != nil {
 			t.Fatal(err)
 		}
