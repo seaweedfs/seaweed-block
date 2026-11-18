@@ -118,6 +118,17 @@ func TestComponent_TwoReplicas_BothConverge(t *testing.T) {
 		c.PrimaryWriteN(10)
 		c.PrimarySync()
 
+		// Force the real checkpoint before either fromLSN=1 catch-up.
+		if s, ok := c.Primary().Store.(*storage.WALStore); ok {
+			deadline := time.Now().Add(10 * time.Second)
+			for s.CheckpointLSN() < 10 && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			if s.CheckpointLSN() < 10 {
+				t.Fatal("primary did not checkpoint the scenario writes")
+			}
+		}
+
 		for i := 0; i < c.ReplicaCount(); i++ {
 			r := c.CatchUpReplica(i)
 			if !r.Success {
