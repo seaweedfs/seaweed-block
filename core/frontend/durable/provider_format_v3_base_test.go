@@ -90,6 +90,15 @@ func TestDurableProviderV3_AttachesCompletedChunkBASE(t *testing.T) {
 // A complete local BASE is not an empty fresh restore, even while the
 // provider's first-attach marker exists and HEAD still names an older image.
 func TestDurableProviderV3_CompletedBASEDoesNotRestoreOlderHEAD(t *testing.T) {
+	completedBASEDoesNotRestoreOlderHEAD(t, false)
+}
+
+func TestDurableProviderV3_DefersBASERetirementUntilLocalPresence(t *testing.T) {
+	completedBASEDoesNotRestoreOlderHEAD(t, true)
+}
+
+func completedBASEDoesNotRestoreOlderHEAD(t *testing.T, retire bool) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	remote := storage.NewMemChunkRemote()
@@ -136,8 +145,35 @@ func TestDurableProviderV3_CompletedBASEDoesNotRestoreOlderHEAD(t *testing.T) {
 	if e = h.WriteBase(9, make([]byte, 4096)); e != nil {
 		t.Fatal(e)
 	}
+	if retire {
+		if e = h.ApplyInstallEntry(5, want, 8); e != nil {
+			t.Fatal(e)
+		}
+	}
 	if e = h.MarkBaseComplete(); e != nil {
 		t.Fatal(e)
+	}
+	if retire {
+		if _, e = st.Sync(); e != nil {
+			t.Fatal(e)
+		}
+		if e = storage.FlushMappedWALStoreV3Test(st.(*storage.WALStore)); e != nil {
+			t.Fatal(e)
+		}
+		state, _ := storage.BaseStateV3Test(st.(*storage.WALStore))
+		if _, ok := st.(*storage.WALStore).InstalledBaseLSN(); !ok || state != storage.BaseInstalled || st.(*storage.WALStore).CheckpointLSN() < 8 {
+			t.Fatalf("BASE retired before durable local presence: state=%v checkpoint=%d", state, st.(*storage.WALStore).CheckpointLSN())
+		}
+		// The provider must restore the opt-in gate before recovery can
+		// publish a descriptor on a reopened store.
+		if e = target.Close(); e != nil {
+			t.Fatal(e)
+		}
+		target = mappedProviderV3(t, root, remote)
+		st, e = target.EnsureStorage("v1")
+		if e != nil {
+			t.Fatal(e)
+		}
 	}
 	if _, e = target.RecoverVolume(ctx, "v1"); e != nil {
 		t.Fatalf("completed local BASE was treated as empty remote restore: %v", e)
@@ -153,6 +189,18 @@ func TestDurableProviderV3_CompletedBASEDoesNotRestoreOlderHEAD(t *testing.T) {
 
 	}
 	check()
+	if retire {
+		if _, e = st.Sync(); e != nil {
+			t.Fatal(e)
+		}
+		if e = storage.FlushMappedWALStoreV3Test(st.(*storage.WALStore)); e != nil {
+			t.Fatal(e)
+		}
+		state, _ := storage.BaseStateV3Test(st.(*storage.WALStore))
+		if state != storage.BaseNone {
+			t.Fatalf("durable local presence did not release retirement: %v", state)
+		}
+	}
 	if e = target.Close(); e != nil {
 		t.Fatal(e)
 	}
@@ -164,4 +212,59 @@ func TestDurableProviderV3_CompletedBASEDoesNotRestoreOlderHEAD(t *testing.T) {
 		t.Fatal(e)
 	}
 	check()
+}
+
+// A seeded checkpoint is not proof that any extent data was materialized.
+func TestDurableProviderV3_SeedOnlyCheckpointStillRestoresHEAD(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	remote := storage.NewMemChunkRemote()
+	source := mappedProviderV3(t, t.TempDir(), remote)
+	if _, err := source.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.RecoverVolume(ctx, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	want := bytes.Repeat([]byte{0x4d}, 4096)
+	if n, err := source.Backend("v1").Write(ctx, 5*4096, want); err != nil || n != len(want) {
+		t.Fatal(n, err)
+	}
+	if err := source.Backend("v1").Sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.CaptureVolume(ctx, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Close(); err != nil {
+		t.Fatal(err)
+	}
+	head, err := remote.GetHead(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := mappedProviderV3(t, t.TempDir(), remote)
+	st, err := target.EnsureStorage("v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = st.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	if err = st.(*storage.WALStore).SeedChunkFrontier(head.RemoteLSN); err != nil {
+		t.Fatal(err)
+	}
+	if st.(*storage.WALStore).CheckpointLSN() == 0 || st.NextLSN() <= 1 {
+		t.Fatal("seed did not establish the ambiguous frontier")
+	}
+	if _, ok := st.(*storage.WALStore).InstalledBaseLSN(); ok {
+		t.Fatal("seed became a completed BASE")
+	}
+	if _, err = target.RecoverVolume(ctx, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, 4096)
+	if n, err := target.Backend("v1").Read(ctx, 5*4096, got); err != nil || n != len(got) || !bytes.Equal(got, want) {
+		t.Fatalf("seed-only restore lost remote bytes: n=%d err=%v equal=%v", n, err, bytes.Equal(got, want))
+	}
 }

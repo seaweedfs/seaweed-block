@@ -294,6 +294,9 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 		l.cancel()
 		return nil, err
 	}
+	if localBase {
+		s.AllowBaseRetirementV3()
+	} // local presence is durable above
 	if l.hashMode {
 		l.startReconcile()
 	}
