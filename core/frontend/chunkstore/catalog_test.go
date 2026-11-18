@@ -403,7 +403,7 @@ func TestFork_ThenFreshHostReadsSnapshotImage(t *testing.T) {
 			t.Fatal(err)
 		}
 		p := filepath.Join(dir, vol)
-		s, err := storage.CreateWALStore(p, blocks, 4096)
+		s, err := storage.CreateWALStoreWithOptions(p, blocks, 4096, storage.WALStoreOptions{ChunkBlocks: chunkBlocks})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -577,7 +577,7 @@ func TestDetach_ProductionSerializedHead(t *testing.T) {
 	ctx := context.Background()
 	f, b := newFakeFiler(), newFakeBlobs()
 	p := filepath.Join(t.TempDir(), "v1")
-	s, err := storage.CreateWALStore(p, 64, 4096)
+	s, err := storage.CreateWALStoreWithOptions(p, 64, 4096, storage.WALStoreOptions{ChunkBlocks: 8})
 	if err != nil {
 		t.Fatal(err)
 	}
