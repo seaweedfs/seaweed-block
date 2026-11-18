@@ -60,6 +60,10 @@ func TestDurableProviderV3_FreshMarkerCompletionCrashKeepsCompletedBASE(t *testi
 	freshMarkerCrashKeepsCompletedBASE(t, "complete")
 }
 
+func TestDurableProviderV3_FreshMarkerCaptureCrashKeepsCompletedBASE(t *testing.T) {
+	freshMarkerCrashKeepsCompletedBASE(t, "capture")
+}
+
 func freshMarkerCrashKeepsCompletedBASE(t *testing.T, mode string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -119,6 +123,49 @@ func freshMarkerCrashKeepsCompletedBASE(t *testing.T, mode string) {
 			}
 			if _, err := ws.Sync(); err != nil {
 				t.Fatal(err)
+			}
+			if mode == "capture" {
+				before, err := remote.GetHead(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				beforeBytes, err := json.Marshal(before)
+				if err != nil {
+					t.Fatal(err)
+				}
+				puts := remote.Puts()
+				if _, err := p.CaptureVolume(ctx, "v1"); err == nil {
+					t.Fatal("precommit CaptureVolume published before durable owner commit")
+				}
+				if _, err := p.CutVolume(ctx, "v1", 9); err == nil {
+					t.Fatal("precommit CutVolume was admitted")
+				}
+				if err := p.MakeVolumeRemoteDurable(ctx, "v1", 9); err == nil {
+					t.Fatal("precommit MakeVolumeRemoteDurable was admitted")
+				}
+				after, err := remote.GetHead(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				afterBytes, err := json.Marshal(after)
+				if err != nil {
+					t.Fatal(err)
+				}
+				intents, err := remote.ListIntents(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(beforeBytes, afterBytes) || remote.Puts() != puts || len(intents) != 0 {
+					t.Fatal("refused precommit publication changed remote state")
+				}
+				p.mu.Lock()
+				handle := p.volumes["v1"]
+				exposed := handle.chunk != nil || handle.chunkStop != nil || handle.chunkDone != nil
+				p.mu.Unlock()
+				if exposed {
+					t.Fatal("precommit layer or scheduler was exposed")
+				}
+				fmt.Println("FRESH_CAPTURE_REFUSED no_remote_effect=true scheduler_hidden=true")
 			}
 			fmt.Println("FRESH_CRASH_READY presence_saved=true marker_present=true ack=9 no_Close=true")
 			os.Exit(0)
