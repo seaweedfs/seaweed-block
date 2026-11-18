@@ -152,7 +152,7 @@ func (w *cutCOWWindow) abort(err error) {
 	w.mu.Unlock()
 }
 func (w *cutCOWWindow) join() error {
-	w.refs.Wait()
+	// MUTANT: omit actual owner/reference drain
 	// Only terminal windows are joined. Saved readers never outlive their ref.
 	w.cleanup.Do(func() {
 		if w.side != nil {
