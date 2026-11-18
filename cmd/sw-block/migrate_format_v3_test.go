@@ -25,7 +25,9 @@ func TestMigrateV3RefusesAnOpenV3Volume(t *testing.T) {
 	if code != 1 || !strings.Contains(msg, "locked") {
 		t.Fatalf("migration must refuse an open v3 volume: exit=%d message=%s", code, msg)
 	}
-	assertFilesEqual(t, before, snapshotFiles(t, path))
+	if !sameFiles(before, snapshotFiles(t, path)) {
+		t.Fatal("refused migration modified the open volume")
+	}
 }
 
 // Row 13b through the actual v3 open (tag swblock_format_v3_test).
