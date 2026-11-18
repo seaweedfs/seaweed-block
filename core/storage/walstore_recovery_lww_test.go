@@ -45,7 +45,7 @@ func TestWALStoreRecoverLastWriterWinsAcrossScanOrder(t *testing.T) {
 		t.Fatalf("newest LBA 20 entry at offset %d LSN %d; want the wrapped batch at 0, LSN 5", e.WALOffset, e.LSN)
 	}
 	crashRecoveryHardeningStore(t, s)
-	r, err := OpenWALStore(path)
+	r, err := openLegacyWALStoreForTest(path)
 	if err != nil {
 		t.Fatal(err)
 	}

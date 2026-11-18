@@ -1133,3 +1133,67 @@ func waitReconciledForTest(t *testing.T, layer chunkLayer) {
 		time.Sleep(time.Millisecond)
 	}
 }
+
+// TODO(format-v3 row 14a): explicit C11 bitmap-engine fixtures only.
+func newLegacyChunkTestStore(t *testing.T) (*WALStore, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "vol.bin")
+	s, err := createLegacyWALStoreWithOptions(path, ctNumBlocks, ctBlockSize, WALStoreOptions{ChunkBlocks: ctChunkBlocks})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.DisableAutoFlushForRecoveryTest()
+	t.Cleanup(func() { closeBounded(t, s) })
+	return s, path
+}
+
+// crashableStore is a store a test may crash; it is closed at cleanup only
+// if it was not crashed.
+func legacyCrashableStore(t *testing.T) (*WALStore, string, func()) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "vol.bin")
+	s, err := createLegacyWALStoreWithOptions(path, ctNumBlocks, ctBlockSize, WALStoreOptions{ChunkBlocks: ctChunkBlocks})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.DisableAutoFlushForRecoveryTest()
+	crashed := false
+	t.Cleanup(func() {
+		if !crashed {
+			closeBounded(t, s)
+		}
+	})
+	return s, path, func() {
+		crashed = true
+		s.committer.Stop()
+		if err := s.fd.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// reopen opens and recovers a crashed store; it may be crashed again.
+func legacyReopen(t *testing.T, path string) (*WALStore, func()) {
+	t.Helper()
+	s, err := openLegacyWALStoreForTest(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	crashed := false
+	t.Cleanup(func() {
+		if !crashed {
+			closeBounded(t, s)
+		}
+	})
+	s.DisableAutoFlushForRecoveryTest()
+	if _, err := s.Recover(); err != nil {
+		t.Fatalf("local recovery: %v", err)
+	}
+	return s, func() {
+		crashed = true
+		s.committer.Stop()
+		if err := s.fd.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}

@@ -47,7 +47,7 @@ func TestWALStoreRecoverKeepsSyncedEntriesAboveAnUnpersistedFrontierJump(t *test
 	if sb := diskSuperblockForGapTest(t, path); sb.WALCheckpointLSN != 0 {
 		t.Fatalf("persisted checkpoint %d; want 0 (the frontier jump is not persisted)", sb.WALCheckpointLSN)
 	}
-	r, err := OpenWALStore(path)
+	r, err := openLegacyWALStoreForTest(path)
 	if err != nil {
 		t.Fatal(err)
 	}

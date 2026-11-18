@@ -122,3 +122,12 @@ func DamageV3RecordTest(path string, lsn uint64) error {
 	}
 	return fmt.Errorf("no v3 record with LSN %d", lsn)
 }
+
+// Legacy fixtures only; unavailable in production builds.
+// TODO(format-v3 row 14a): replace with captured migration fixtures.
+func CreateLegacyWALStoreTest(path string, blocks uint32, blockSize int) (*WALStore, error) {
+	return createLegacyWALStoreWithOptions(path, blocks, blockSize, WALStoreOptions{})
+}
+func OpenLegacyWALStoreTest(path string) (*WALStore, error) {
+	return openLegacyWALStoreWithOptions(path, WALStoreOptions{})
+}

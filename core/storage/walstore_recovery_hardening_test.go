@@ -12,7 +12,7 @@ import (
 func TestWALStoreRecoverRetainsMultiBlockSuffixAcrossRestart(t *testing.T) {
 	const blockSize = 4096
 	path := filepath.Join(t.TempDir(), "store.bin")
-	s, err := CreateWALStore(path, 32, blockSize)
+	s, err := createLegacyWALStoreForTest(path, 32, blockSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +55,7 @@ func TestWALStoreRecoverRetainsMultiBlockSuffixAcrossRestart(t *testing.T) {
 	}
 	crashRecoveryHardeningStore(t, s)
 
-	reopened, err := OpenWALStore(path)
+	reopened, err := openLegacyWALStoreForTest(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestWALStoreRecoverRejectsOverflowingBatchGeometry(t *testing.T) {
 				blocks    = 3
 			)
 			path := filepath.Join(t.TempDir(), "store.bin")
-			s, err := CreateWALStore(path, 16, blockSize)
+			s, err := createLegacyWALStoreForTest(path, 16, blockSize)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -149,7 +149,7 @@ func TestWALStoreRecoverRejectsOverflowingBatchGeometry(t *testing.T) {
 			)
 			crashRecoveryHardeningStore(t, s)
 
-			reopened, err := OpenWALStore(path)
+			reopened, err := openLegacyWALStoreForTest(path)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -228,7 +228,7 @@ func TestWALStoreRecoverReconstructsLegacyWrappedRetainedWindow(t *testing.T) {
 	}
 	crashRecoveryHardeningStore(t, s)
 
-	reopened, err := OpenWALStore(path)
+	reopened, err := openLegacyWALStoreForTest(path)
 	if err != nil {
 		t.Fatal(err)
 	}
