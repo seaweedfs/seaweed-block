@@ -548,3 +548,71 @@ func TestBaseInstallV3CompletedHandleAppliesUntilTheNextBegin(t *testing.T) {
 	}
 	readAllV3(t, s, 5, 7)
 }
+
+// The retirement gate (row 12a retired-BASE ruling): a deferred store keeps
+// a completed BASE installed through publications whose 8.4 conditions hold,
+// and retires on the first publication after AllowBaseRetirementV3. A store
+// that never set the gate retires as before (TestBaseInstallV3Retires...).
+// Mutant: a publisher that ignores the gate retires early and fails here.
+func TestBaseInstallV3RetirementWaitsForTheGate(t *testing.T) {
+	s, _, _ := checkpointedStoreV3(t, 2)
+	s.DeferBaseRetirementV3()
+	h := beginV3(t, s, 4, idA)
+	if err := h.WriteBase(3, blk(3)); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.ApplyInstallEntry(5, blk(5), 5); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.MarkBaseComplete(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.flusher.flushOnceInternal(false); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := s.v3.pub.publish(&s.mu, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if d := s.v3.pub.current(); d.CheckpointLSN < 4 || d.BaseState != BaseInstalled {
+		t.Fatalf("deferred: checkpoint %d state %d, want installed with the 8.4 conditions holding", d.CheckpointLSN, d.BaseState)
+	}
+	s.AllowBaseRetirementV3()
+	if _, err := s.v3.pub.publish(&s.mu, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if d := s.v3.pub.current(); d.BaseState != BaseNone {
+		t.Fatalf("after Allow: state %d, want retired", d.BaseState)
+	}
+	// A second install in the same open is deferred again: the earlier
+	// Allow covered the first image only. Mutant: a begin that does not
+	// re-arm the gate retires the second install early and fails here.
+	h2 := beginV3(t, s, 6, idB)
+	if err := h2.WriteBase(3, blk(0x33)); err != nil {
+		t.Fatal(err)
+	}
+	if err := h2.ApplyInstallEntry(5, blk(0x55), 7); err != nil {
+		t.Fatal(err)
+	}
+	if err := h2.MarkBaseComplete(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.flusher.flushOnceInternal(false); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := s.v3.pub.publish(&s.mu, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if d := s.v3.pub.current(); d.CheckpointLSN < 6 || d.BaseState != BaseInstalled || d.BaseInstallID != idB {
+		t.Fatalf("second install: checkpoint %d state %d, want installed under B (re-armed)", d.CheckpointLSN, d.BaseState)
+	}
+}

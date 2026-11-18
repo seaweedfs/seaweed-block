@@ -250,6 +250,9 @@ func (s *WALStore) beginBaseInstallV3(baseLSN uint64, id [16]byte) (*installHand
 	v.liveInstallID = id
 	v.installEpoch++
 	v.installReopen = nil
+	// A new install re-arms a lifted retirement deferral: its own image
+	// needs its own durable local presence before it may retire.
+	v.pub.retireGate.CompareAndSwap(retireAllowedV3, retireDeferredV3)
 	v.preBaseHighest = appended
 	if err := v.pub.invalidateMapProofV3(); err != nil { // an install transition (9.1)
 		return nil, err
@@ -553,6 +556,24 @@ func (s *WALStore) checkInstallBlockV3(lba uint32, data []byte) error {
 		return fmt.Errorf("storage: install data size %d != block size %d", len(data), s.sb.BlockSize)
 	}
 	return nil
+}
+
+// DeferBaseRetirementV3 keeps a completed BASE installed (no retirement to
+// none) until AllowBaseRetirementV3. A chunk-managed provider calls it at
+// open, before Recover and before any publication. Not a v3 store: no-op.
+func (s *WALStore) DeferBaseRetirementV3() {
+	if s.v3 != nil {
+		s.v3.pub.retireGate.CompareAndSwap(retireNoGateV3, retireDeferredV3)
+	}
+}
+
+// AllowBaseRetirementV3 lifts the deferral once the chunk layer has durably
+// recorded local presence for the installed image; retirement then happens
+// on the next ordinary publication whose 8.4 conditions hold.
+func (s *WALStore) AllowBaseRetirementV3() {
+	if s.v3 != nil {
+		s.v3.pub.retireGate.Store(retireAllowedV3)
+	}
 }
 
 // markMapUnknownV3: an effective direct extent/BASE mutation makes its

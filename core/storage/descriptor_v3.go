@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 )
 
 // The single v3 descriptor publisher (format bump v3, DESIGN r15 sections
@@ -59,6 +60,9 @@ var ErrDescriptorPublishUncertain = errors.New("storage: v3 descriptor publicati
 // the contents of the fallback slot, which pins reuse (DESIGN 5).
 type descriptorPublisherV3 struct {
 	descMu sync.Mutex
+	// retireGate defers the installed -> none retirement (retireNoGateV3,
+	// retireDeferredV3, retireAllowedV3); read without a lock.
+	retireGate atomic.Uint32
 
 	cur        descriptorV3 // selected slot: authoritative
 	curSlot    slotIDV3
@@ -195,7 +199,9 @@ func (p *descriptorPublisherV3) publishLockedCoreV3(mutate func(next *descriptor
 			return descriptorV3{}, err
 		}
 	}
-	retireBaseV3(&p.cur, &next)
+	if p.retireGate.Load() != retireDeferredV3 {
+		retireBaseV3(&p.cur, &next)
+	}
 	if err := mergeDescriptorV3Mode(&p.cur, &next, reset); err != nil {
 		return descriptorV3{}, err
 	}
@@ -326,6 +332,17 @@ func mergeDescriptorV3Mode(cur, next *descriptorV3, reset bool) error {
 	}
 	return baseTransitionAllowedV3(cur, next)
 }
+
+// The retirement gate (row 12a retired-BASE ruling): a chunk-managed store
+// defers retirement until its chunk layer has durably recorded local
+// presence for the installed image, so the installed descriptor, the
+// provider's evidence that the local image is complete, is not erased
+// first. Stores that never set it retire as before.
+const (
+	retireNoGateV3   uint32 = iota // retire when the 8.4 conditions hold
+	retireDeferredV3               // keep installed even when they hold
+	retireAllowedV3                // the deferral was lifted for this open
+)
 
 // retireBaseV3 is the installed -> none retirement (DESIGN 8.4, 8.5): a
 // later normal publication of an installed descriptor zeroes the three BASE
