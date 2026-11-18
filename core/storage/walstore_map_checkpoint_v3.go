@@ -189,14 +189,5 @@ func (s *WALStore) retireCheckpointDirtyV3Locked(cp uint64) {
 // Caller holds store.mu (and, except write admission, the leader role).
 // No writer may use the newly released floor until its obsolete dirty
 // references are retired. On failure keep those exact retry entries.
-func (s *WALStore) rolloverCheckpointV3Locked() error {
-	d, floor, valid := s.v3.pub.walSnapshotV3()
-	if valid && floor >= d.RetainedTail {
-		return nil
-	}
-	if _, err := s.v3.pub.rolloverIfPinned(); err != nil {
-		return err
-	}
-	s.retireCheckpointDirtyV3Locked(d.CheckpointLSN)
-	return nil
+func (s *WALStore) rolloverCheckpointV3Locked() error { return nil
 }
