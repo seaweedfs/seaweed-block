@@ -44,7 +44,12 @@ func TestChunkLayerV3_BASEIncompleteCaptureGuard(t *testing.T) {
 
 func TestChunkLayerV3_BASEBeginDrainsWholeCut(t *testing.T) {
 	s, f, l := mappedBASELayerV3(t)
-	writeSynced(t, s, 5, 0x11)
+	if _, e := s.Write(5, blk(0x11)); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := s.Sync(); e != nil {
+		t.Fatal(e)
+	}
 	entered, release := holdPuts(t, f)
 	cutDone := startCapture(t, l)
 	waitKey(t, entered, "held cut upload after barrier")
@@ -116,7 +121,12 @@ func TestChunkLayerV3_BASEBeginDrainsWholeCut(t *testing.T) {
 
 func TestChunkLayerV3_BASEBeginRefusesUnsettledCAS(t *testing.T) {
 	s, f, l := mappedBASELayerV3(t)
-	writeSynced(t, s, 5, 0x11)
+	if _, e := s.Write(5, blk(0x11)); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := s.Sync(); e != nil {
+		t.Fatal(e)
+	}
 	f.mu.Lock()
 	f.casModes = []fakeCASMode{casDeferred}
 	f.mu.Unlock()
