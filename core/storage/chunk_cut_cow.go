@@ -167,7 +167,8 @@ func (w *cutCOWWindow) join() error {
 }
 func (w *cutCOWWindow) status() error { w.mu.Lock(); defer w.mu.Unlock(); return w.err }
 
-// A nil result means done or terminal. Waiters own no entry or I/O reference.
+// A nil result without a notification means done/terminal. Waiters own a
+// lifetime reference through wakeup/accounting, never an entry or I/O lock.
 func (w *cutCOWWindow) claim(idx uint64, saving bool) (*cutCOWEntry, uint8, <-chan struct{}) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -198,6 +199,9 @@ func (w *cutCOWWindow) claim(idx uint64, saving bool) (*cutCOWEntry, uint8, <-ch
 		}
 		return nil, cowDone, nil
 	case cowSaving, cowCopying:
+		// Waiters acquire while OPEN too: drain includes their accounting
+		// before the coordinator snapshots aggregate wait time.
+		w.refs.Add(1)
 		return nil, state, e.ready
 	default:
 		return nil, cowDone, nil
@@ -217,6 +221,7 @@ func (w *cutCOWWindow) finish(e *cutCOWEntry, state uint8) bool {
 	return true
 }
 func (w *cutCOWWindow) wait(ch <-chan struct{}) {
+	defer w.refs.Done()
 	start := time.Now()
 	if hook := w.layer.testCOWWait; hook != nil {
 		hook()

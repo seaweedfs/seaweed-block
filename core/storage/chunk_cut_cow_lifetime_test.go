@@ -93,6 +93,9 @@ func TestCutCOWV3_CopyingChunkWaitsButPendingChunkSaves(t *testing.T) {
 	if err := <-cutErr; err != nil {
 		t.Fatal(err)
 	}
+	if l.Stats().LastCut.COWWaitNs <= 0 {
+		t.Fatal("drained window omitted its real wait time")
+	}
 	image := f.imageOf(t, f.stats().head)
 	if !bytes.Equal(image[ctBlockSize:2*ctBlockSize], makeBlock(ctBlockSize, 1)) || !bytes.Equal(image[5*ctBlockSize:6*ctBlockSize], makeBlock(ctBlockSize, 5)) {
 		t.Fatal("torn or post-H cut image")
