@@ -156,8 +156,14 @@ func (g *WorkspaceLeaseGuard) Refresh(ctx context.Context) error {
 	switch {
 	case ctx.Err() != nil:
 		g.fenceLocked("shutdown while a renewal was in flight")
-	case rpcCtx.Err() != nil || (!g.until.IsZero() && !g.now().Before(g.until)) || !g.now().Before(start.Add(time.Duration(reply.ValidForNs))):
+	// A late reply is refused in all three cases; the cause names which limit
+	// it missed, so a valid lease is not reported as an expired one.
+	case !g.until.IsZero() && !g.now().Before(g.until):
 		g.fenceLocked(fmt.Sprintf("renewal reply arrived after the lease deadline (renewal took %s)", g.now().Sub(start).Round(time.Millisecond)))
+	case !g.now().Before(start.Add(time.Duration(reply.ValidForNs))):
+		g.fenceLocked(fmt.Sprintf("renewal reply arrived after its own grant ended (renewal took %s)", g.now().Sub(start).Round(time.Millisecond)))
+	case rpcCtx.Err() != nil:
+		g.fenceLocked(fmt.Sprintf("renewal reply arrived after the renewal call's context ended (renewal took %s; lease still valid until %s)", g.now().Sub(start).Round(time.Millisecond), g.until.UTC().Format(time.RFC3339Nano)))
 	}
 	if !g.fenced {
 		g.until = start.Add(time.Duration(reply.ValidForNs))

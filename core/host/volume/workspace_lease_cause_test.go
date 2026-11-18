@@ -11,6 +11,7 @@ import (
 	"time"
 
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"google.golang.org/grpc"
 )
 
 // lockedBuffer collects log output from the guard (log.Printf may be called
@@ -241,4 +242,71 @@ func TestWorkspaceLeaseFailedStopKeepsTheCause(t *testing.T) {
 	if !errors.Is(err, errStop) || !strings.Contains(err.Error(), "lease expired after a failed renewal") {
 		t.Fatalf("the retried stop lost the cause: %v", err)
 	}
+}
+
+// ctxLeaseClient answers a renewal only once the call's context has ended,
+// like a reply that lands just after the 2s per-call timeout.
+type ctxLeaseClient struct{ validFor time.Duration }
+
+func (c ctxLeaseClient) RenewWorkspaceLease(ctx context.Context, _ *control.WorkspaceIdentity, _ ...grpc.CallOption) (*control.WorkspaceLeaseFact, error) {
+	if ctx.Err() == nil {
+		select {
+		case <-ctx.Done():
+		case <-time.After(5 * time.Second): // bound: the 2s call timeout ends it first
+		}
+	}
+	return &control.WorkspaceLeaseFact{VolumeId: "v", ReplicaId: "r", Epoch: 1, ValidForNs: int64(c.validFor)}, nil
+}
+
+func (ctxLeaseClient) AckWorkspaceRevoked(context.Context, *control.WorkspaceRevocationAck, ...grpc.CallOption) (*control.WorkspaceEmpty, error) {
+	return &control.WorkspaceEmpty{}, nil
+}
+
+// A valid reply that arrives after the renewal call's 2s context ended, while
+// the old lease and the new grant are both still valid, is still refused, but
+// its cause must say the call's context ended, not that the lease expired.
+func TestWorkspaceLeaseReplyAfterCallTimeoutIsNotCalledAnExpiry(t *testing.T) {
+	captureLog(t)
+	first := true
+	slow := ctxLeaseClient{validFor: 20 * time.Second}
+	renew := func(ctx context.Context, id *control.WorkspaceIdentity, o ...grpc.CallOption) (*control.WorkspaceLeaseFact, error) {
+		if first {
+			first = false
+			return &control.WorkspaceLeaseFact{VolumeId: "v", ReplicaId: "r", Epoch: 1, ValidForNs: int64(20 * time.Second)}, nil
+		}
+		return slow.RenewWorkspaceLease(ctx, id, o...)
+	}
+	stops := 0
+	g, err := NewWorkspaceLeaseGuard(workspaceTestView{}, funcLeaseClient(renew), &control.WorkspaceIdentity{VolumeId: "v", ReplicaId: "r", Epoch: 1}, func(context.Context) (uint64, error) { stops++; return 7, nil }, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	began := time.Now()
+	if err := g.Refresh(context.Background()); err == nil {
+		t.Fatal("a reply after the call's context ended was accepted")
+	}
+	if took := time.Since(began); took > 4*time.Second {
+		t.Fatalf("the late call was not bounded by the 2s timeout: %s", took)
+	}
+	if stops != 1 {
+		t.Fatalf("stops=%d, want 1 (the refusal is unchanged)", stops)
+	}
+	cause := g.FenceCause()
+	if !strings.HasPrefix(cause, "renewal reply arrived after the renewal call's context ended") || strings.Contains(cause, "lease deadline") {
+		t.Fatalf("FenceCause = %q, want the call-context cause, not an expiry", cause)
+	}
+}
+
+// funcLeaseClient adapts a function to WorkspaceLeaseClient (renewals only).
+type funcLeaseClient func(context.Context, *control.WorkspaceIdentity, ...grpc.CallOption) (*control.WorkspaceLeaseFact, error)
+
+func (f funcLeaseClient) RenewWorkspaceLease(ctx context.Context, id *control.WorkspaceIdentity, o ...grpc.CallOption) (*control.WorkspaceLeaseFact, error) {
+	return f(ctx, id, o...)
+}
+
+func (funcLeaseClient) AckWorkspaceRevoked(context.Context, *control.WorkspaceRevocationAck, ...grpc.CallOption) (*control.WorkspaceEmpty, error) {
+	return &control.WorkspaceEmpty{}, nil
 }
