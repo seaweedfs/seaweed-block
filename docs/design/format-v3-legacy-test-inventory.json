@@ -713,8 +713,8 @@
     ],
     "reason": "v2 engine/layout, forced legacy fields or callback seams; v3 uses coherent descriptors",
     "v3_controls": [
-      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
-      "TestWALStoreV3_FlushMaterializationBoundToRecoveryLifetime"
+      "TestWALStoreV3AdmissionBurstFiveRings",
+      "TestWALStoreV3AdmissionUsesNativeOccupancy"
     ],
     "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
   },
@@ -767,8 +767,9 @@
     ],
     "reason": "v2 engine/layout, forced legacy fields or callback seams; v3 uses coherent descriptors",
     "v3_controls": [
-      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
-      "TestWALStoreV3_FlushMaterializationBoundToRecoveryLifetime"
+      "TestWALStoreV3AdmissionUsesNativeOccupancy",
+      "TestWALStoreV3AdmissionStallDeadlineAndResume",
+      "TestWALStoreV3AdmissionBurstFiveRings"
     ],
     "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
   },
@@ -1156,10 +1157,8 @@
     ],
     "reason": "raw v2 header/window/IEEE-CRC/permissive scan assumptions; native v3 refuses holes below W and fences rolled-back suffixes",
     "v3_controls": [
-      "TestWALIOV3_RealWriterReopenScan",
-      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
-      "TestWALStoreV3DroppedRecordsNeverResurfaceAfterASecondCrash",
-      "TestDurableStartup_Issue51_WALStoreV3CommittedHoleBlocksReadiness"
+      "TestDescriptorV3SlotWriteErrorLatchesAndPinsTheCandidate",
+      "TestWALStoreV3HalfResetRefusesWritesUntilRecover"
     ],
     "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
   },
@@ -1711,10 +1710,8 @@
     ],
     "reason": "raw v2 header/window/IEEE-CRC/permissive scan assumptions; native v3 refuses holes below W and fences rolled-back suffixes",
     "v3_controls": [
-      "TestWALIOV3_RealWriterReopenScan",
-      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
-      "TestWALStoreV3DroppedRecordsNeverResurfaceAfterASecondCrash",
-      "TestDurableStartup_Issue51_WALStoreV3CommittedHoleBlocksReadiness"
+      "TestWALStoreV3ReclaimKeepsPartialBatchAndRetention",
+      "TestWALStoreV3ReclaimRolloverProgressWithoutNewCheckpoint"
     ],
     "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
   },
@@ -1726,10 +1723,8 @@
     ],
     "reason": "raw v2 header/window/IEEE-CRC/permissive scan assumptions; native v3 refuses holes below W and fences rolled-back suffixes",
     "v3_controls": [
-      "TestWALIOV3_RealWriterReopenScan",
-      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
-      "TestWALStoreV3DroppedRecordsNeverResurfaceAfterASecondCrash",
-      "TestDurableStartup_Issue51_WALStoreV3CommittedHoleBlocksReadiness"
+      "TestWALIOV3_FloorAndPwriteFailureRefuse",
+      "TestWALStoreV3ReclaimSecondSlotFailureKeepsOldPin"
     ],
     "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
   },
