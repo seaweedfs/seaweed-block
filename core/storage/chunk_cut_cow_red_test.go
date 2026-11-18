@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"context"
+	"errors"
 	"path/filepath"
 	"runtime"
 	"sync"
@@ -203,6 +204,159 @@ func TestCutCOWV3_MutationCompletesWhileEarlierChunkCopyIsHeld(t *testing.T) {
 			}
 			assertNoRemoteMisuse(t, remote)
 			t.Logf("image controls passed: first H=%d has pre-H bytes, second H=%d has %s bytes", result.cut.H, second.H, method)
+		})
+	}
+}
+
+// R8 first-attachment race through the real Close/Attach callers. Holding
+// lifecycle shared lets us observe Close queued at lifecycle exclusive:
+// its initial nil hook snapshot has already happened on the parent. This
+// arm does not claim a live copier can start after that writer is queued.
+func TestCutCOWV3_CloseCannotMissFirstAttachment(t *testing.T) {
+	s, _ := newChunkTestStore(t)
+	if _, err := s.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	if s.chunk.Load() != nil {
+		t.Fatal("fixture must start unattached")
+	}
+	s.lifecycleMu.RLock()
+	var unlockOnce sync.Once
+	unlock := func() { unlockOnce.Do(s.lifecycleMu.RUnlock) }
+	closeDone := make(chan struct{})
+	closeErr := make(chan error, 1)
+	t.Cleanup(func() { unlock(); cowWaitSignal(t, closeDone, "Close cleanup") })
+	go func() { defer close(closeDone); closeErr <- s.Close() }()
+	deadline := time.NewTimer(ctLocalBound)
+	defer deadline.Stop()
+	for {
+		if !s.lifecycleMu.TryRLock() {
+			break
+		}
+		s.lifecycleMu.RUnlock()
+		select {
+		case <-deadline.C:
+			t.Fatal("Close did not reach actual lifecycle-exclusive admission")
+		case <-closeDone:
+			t.Fatal("Close returned through a held lifecycle reader")
+		default:
+			runtime.Gosched()
+		}
+	}
+	cfg := ctConfig(1)
+	cfg.Bitmap = nil
+	layer, err := attachChunkLayer(s, newFakeChunkRemote(), cfg)
+	if err != nil && !errors.Is(err, errChunkLayerClosed) {
+		t.Fatalf("unexpected first-attach refusal: %v", err)
+	}
+	if err == nil {
+		t.Cleanup(func() { _ = layer.Close() })
+	}
+	unlock()
+	cowWaitSignal(t, closeDone, "Close after lifecycle release")
+	if err = <-closeErr; err != nil {
+		t.Fatal(err)
+	}
+	if layer != nil {
+		impl := layer.(*chunkLayerImpl)
+		impl.stMu.Lock()
+		drained := impl.closed
+		impl.stMu.Unlock()
+		if !drained {
+			t.Error("RED: first attach succeeded after Close's nil snapshot and Close returned without closing that layer")
+		}
+	}
+}
+
+// R8 live-copy arm: unlike the first-attach test, the real copier is already
+// inside its validated extent read. Close must not complete while it is held.
+// This is a preservation control on the barrier parent, not a claimed COW RED.
+func TestCutCOWV3_CloseJoinsHeldLiveCopy(t *testing.T) {
+	for _, which := range []string{"Layer", "Store"} {
+		t.Run(which, func(t *testing.T) {
+			gate := &cowReadGate{entered: make(chan struct{}), release: make(chan struct{})}
+			opts := WALStoreOptions{ChunkBlocks: ctChunkBlocks, MetadataFactory: func(_ BlockMetadataFile, layout BlockMetadataLayout) (BlockMetadataBinding, error) {
+				return BlockMetadataBinding{ImplVersion: layout.ImplVersion, Hook: gate}, nil
+			}}
+			s, err := CreateWALStoreWithOptions(filepath.Join(t.TempDir(), "volume"), ctNumBlocks, ctBlockSize, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = s.Close() })
+			s.DisableAutoFlushForRecoveryTest()
+			if _, err = s.Recover(); err != nil {
+				t.Fatal(err)
+			}
+			cfg := ctConfig(1)
+			cfg.Bitmap = nil
+			cfg.BarrierBound = 0
+			cfg.UploadConcurrency = 1
+			layer := mustAttach(t, s, newFakeChunkRemote(), cfg)
+			gate.mu.Lock()
+			gate.armed = true
+			gate.mu.Unlock()
+			cutDone, closeDone := make(chan struct{}), make(chan struct{})
+			cutErr := make(chan error, 1)
+			closeErr := make(chan error, 1)
+			early := make(chan bool, 1)
+			closeStarted := false
+			t.Cleanup(func() {
+				gate.unblock()
+				cowWaitSignal(t, cutDone, "live-copy cut cleanup")
+				if closeStarted {
+					cowWaitSignal(t, closeDone, "live-copy Close cleanup")
+				}
+			})
+			go func() { defer close(cutDone); _, e := layer.Cut(context.Background()); cutErr <- e }()
+			cowWaitSignal(t, gate.entered, "actual held live-copy read")
+			closeStarted = true
+			go func() {
+				defer close(closeDone)
+				var e error
+				if which == "Layer" {
+					e = layer.Close()
+				} else {
+					e = s.Close()
+				}
+				// Check actual event order rather than assuming an attempted call
+				// reached Close based only on goroutine scheduling or a sleep.
+				select {
+				case <-gate.release:
+					early <- false
+				default:
+					early <- true
+				}
+				closeErr <- e
+			}()
+			impl := layer.(*chunkLayerImpl)
+			deadline := time.NewTimer(ctLocalBound)
+			defer deadline.Stop()
+			for {
+				impl.stMu.Lock()
+				closing := impl.closed
+				impl.stMu.Unlock()
+				if closing {
+					break
+				}
+				select {
+				case <-deadline.C:
+					t.Fatal("Close did not enter actual layer shutdown")
+				default:
+					runtime.Gosched()
+				}
+			}
+			gate.unblock()
+			cowWaitSignal(t, cutDone, "cut after live read release")
+			cowWaitSignal(t, closeDone, "Close after live read release")
+			if <-early {
+				t.Error("Close returned before the live-copy read completed")
+			}
+			if e := <-closeErr; e != nil {
+				t.Fatal(e)
+			}
+			if e := <-cutErr; e == nil {
+				t.Error("closed layer's cut unexpectedly published")
+			}
 		})
 	}
 }
