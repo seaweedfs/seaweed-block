@@ -1181,12 +1181,11 @@
     "legacy_roots": [
       "createLegacyWALStoreWithOptions"
     ],
-    "reason": "v2 engine/layout, forced legacy fields or callback seams; v3 uses coherent descriptors",
+    "reason": "legacy input construction for the native public-refusal control itself; the production test stays on v3",
     "v3_controls": [
-      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
-      "TestWALStoreV3_FlushMaterializationBoundToRecoveryLifetime"
+      "TestWALStoreProductionRefusesLegacyWithoutMutation"
     ],
-    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+    "todo": "row 14a: replace only old input construction with frozen bytes; retain the production refusal control"
   },
   {
     "file": "core/storage/walstore_sticky_race_test.go",
