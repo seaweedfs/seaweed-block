@@ -86,3 +86,65 @@ func TestDurableProviderV3_AttachesCompletedChunkBASE(t *testing.T) {
 		t.Fatalf("completed BASE read n=%d err=%v", n, e)
 	}
 }
+
+// A complete local BASE is not an empty fresh restore, even while the
+// provider's first-attach marker exists and HEAD still names an older image.
+func TestDurableProviderV3_CompletedBASEDoesNotRestoreOlderHEAD(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	remote := storage.NewMemChunkRemote()
+	source := mappedProviderV3(t, t.TempDir(), remote)
+	if _, e := source.EnsureStorage("v1"); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := source.RecoverVolume(ctx, "v1"); e != nil {
+		t.Fatal(e)
+	}
+	for _, lba := range []int64{5, 9} {
+		if n, e := source.Backend("v1").Write(ctx, lba*4096, bytes.Repeat([]byte{0x11}, 4096)); e != nil || n != 4096 {
+			t.Fatal(n, e)
+		}
+	}
+	if e := source.Backend("v1").Sync(ctx); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := source.CaptureVolume(ctx, "v1"); e != nil {
+		t.Fatal(e)
+	}
+	if e := source.Close(); e != nil {
+		t.Fatal(e)
+	}
+	target := mappedProviderV3(t, t.TempDir(), remote)
+	st, e := target.EnsureStorage("v1")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = st.Recover(); e != nil {
+		t.Fatal(e)
+	}
+	var id [16]byte
+	id[0] = 3
+	h, e := storage.BeginInstall(st, 7, id)
+	if e != nil {
+		t.Fatal(e)
+	}
+	want := bytes.Repeat([]byte{0x78}, 4096)
+	if e = h.WriteBase(5, want); e != nil {
+		t.Fatal(e)
+	}
+	if e = h.WriteBase(9, make([]byte, 4096)); e != nil {
+		t.Fatal(e)
+	}
+	if e = h.MarkBaseComplete(); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = target.RecoverVolume(ctx, "v1"); e != nil {
+		t.Fatalf("completed local BASE was treated as empty remote restore: %v", e)
+	}
+	for lba, expected := range map[int64][]byte{5: want, 9: make([]byte, 4096)} {
+		got := make([]byte, 4096)
+		if n, e := target.Backend("v1").Read(ctx, lba*4096, got); e != nil || n != 4096 || !bytes.Equal(got, expected) {
+			t.Fatalf("local BASE lba%d bytes lost: n%d err%v", lba, n, e)
+		}
+	}
+}
