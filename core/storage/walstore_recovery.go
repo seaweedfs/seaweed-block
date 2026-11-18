@@ -380,8 +380,7 @@ func v3CatchUpEntries(scan walScanResultV3, d descriptorV3, fromLSN, headLSN uin
 			return nil, NewWALRecycledFailure(ErrWALRecycled, fmt.Sprintf(
 				"v3 WAL holds no record at LSN %d (head %d)", fromLSN, headLSN))
 		}
-		return nil, NewWALIntegrityFailure(scan.StopCause, fmt.Sprintf(
-			"v3 catch-up stopped at LSN %d, short of the captured head %d", next, headLSN))
+		return out, nil
 	}
 	return out, nil
 }
