@@ -677,9 +677,6 @@ func (l *chunkLayerImpl) register() (done func(), err error) {
 }
 
 func (l *chunkLayerImpl) admit() error {
-	if l.usesOwnedMapV3() && l.s.v3.pub.current().BaseState == BaseInstalling {
-		return fmt.Errorf("%w: %w", errChunkCaptureRefused, errChunkBaseInstalling)
-	}
 	l.stMu.Lock()
 	closed, fenced, base, detached := l.closed, l.fenced, l.hdr.Base, l.detached != nil
 	l.stMu.Unlock()
