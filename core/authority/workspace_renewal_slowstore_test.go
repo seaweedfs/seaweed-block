@@ -107,3 +107,81 @@ func TestWorkspaceConcurrentRenewalsDoNotSerializeOnStore(t *testing.T) {
 		t.Fatalf("slowest of %d concurrent renewals took %s (all: %v); renewals serialize behind each other's store writes", n, slowest.Round(time.Millisecond), took)
 	}
 }
+
+// heldWriteStore blocks the first Put that matches hold until release closes,
+// standing in for one slow synchronous authority write.
+type heldWriteStore struct {
+	AuthorityStore
+	hold    func(DurableRecord) bool
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *heldWriteStore) Put(r DurableRecord) error {
+	if s.hold != nil && s.hold(r) {
+		held := false
+		s.once.Do(func() { held = true })
+		if held {
+			close(s.entered)
+			<-s.release
+		}
+	}
+	return s.AuthorityStore.Put(r)
+}
+
+// A slow synchronous write of one volume (here the revocation of a) must not
+// block the renewal of an unrelated volume b: renewal needs no write of its
+// own, so it must not wait on a's store I/O (issue #205).
+func TestWorkspaceRenewalDoesNotWaitForUnrelatedHeldWrite(t *testing.T) {
+	disk, _ := newTempStore(t)
+	held := &heldWriteStore{AuthorityStore: disk, entered: make(chan struct{}), release: make(chan struct{}),
+		hold: func(r DurableRecord) bool {
+			return r.VolumeID == "a" && r.Workspace != nil && r.Workspace.Lease != nil && r.Workspace.Lease.Revoking
+		}}
+	var nowNS atomic.Int64
+	nowNS.Store(time.Unix(1000, 0).UnixNano())
+	p := NewPublisher(nil, WithStore(held), WithWorkspaceLeaseConfig(30*time.Second, func() time.Time { return time.Unix(0, nowNS.Load()) }))
+	for _, v := range []string{"a", "b"} {
+		if err := p.apply(AssignmentAsk{VolumeID: v, ReplicaID: "r", DataAddr: "d", CtrlAddr: "c", Intent: IntentBind}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := p.RenewWorkspaceLease(context.Background(), v, "r", 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(held.release) }) }
+	revoked := make(chan error, 1)
+	go func() { revoked <- p.BeginWorkspaceRevocation(context.Background(), "a", "r", 1) }()
+	t.Cleanup(func() {
+		release()
+		select {
+		case <-revoked:
+		case <-time.After(5 * time.Second):
+			t.Error("held revocation of a did not settle")
+		}
+	})
+	select {
+	case <-held.entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("revocation of a never reached the store")
+	}
+	nowNS.Add(int64(10 * time.Second))
+	renewed := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		_, err := p.RenewWorkspaceLease(context.Background(), "b", "r", 1)
+		renewed <- err
+	}()
+	select {
+	case err := <-renewed:
+		if err != nil {
+			t.Fatalf("renewal of b: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		release()
+		err := <-renewed
+		t.Fatalf("renewal of b was still blocked %s behind the held store write of a (it returned only after a was released, err=%v)", time.Since(start).Round(time.Millisecond), err)
+	}
+}
