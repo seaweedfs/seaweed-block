@@ -401,9 +401,52 @@ func TestWALStoreChunk_ConcurrentRecoverAttachesOnce(t *testing.T) {
 	}
 }
 
-// The caller's recovery deadline governs the attach's first remote call,
-// with no Close and no hold release.
+// A caller deadline can expire during local recovery, before the first
+// remote call, or while that call is held. Both must return the deadline
+// error without Close or releasing the remote hold.
 func TestWALStoreChunk_RecoverHonoursCallerDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		timeout time.Duration
+	}{
+		{"during_recovery_or_attach", 300 * time.Millisecond},
+		{"before_recovery", -time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newGated(storage.NewMemChunkRemote())
+			g.holdGetHead = make(chan struct{})
+			g.honourCtx = true
+			t.Cleanup(g.release)
+			p := chunkProvider(t, t.TempDir(), g, v1View(), 0)
+			if _, err := p.EnsureStorage("v1"); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), tc.timeout)
+			defer cancel()
+			recErr := make(chan error, 1)
+			go func() { _, err := p.RecoverVolume(ctx, "v1"); recErr <- err }()
+			var err error
+			select {
+			case what := <-g.entered:
+				if what != "gethead" {
+					t.Fatalf("held call %q, want gethead", what)
+				}
+				err = recvErr(t, recErr, "RecoverVolume past its caller deadline")
+			case err = <-recErr:
+				// Local recovery may consume the deadline before attach starts.
+			case <-time.After(10 * time.Second):
+				t.Fatal("RecoverVolume neither returned nor reached the held remote")
+			}
+			if !errors.Is(err, context.DeadlineExceeded) || ctx.Err() != context.DeadlineExceeded {
+				t.Fatalf("RecoverVolume=%v caller=%v, want deadline exceeded", err, ctx.Err())
+			}
+		})
+	}
+}
+
+// This handshake separately guarantees that the caller's cancellation is
+// tested with a remote call already in flight, independent of local I/O speed.
+func TestWALStoreChunk_RecoverHonoursCallerCancellationAfterRemoteEntry(t *testing.T) {
 	g := newGated(storage.NewMemChunkRemote())
 	g.holdGetHead = make(chan struct{})
 	g.honourCtx = true
@@ -412,13 +455,14 @@ func TestWALStoreChunk_RecoverHonoursCallerDeadline(t *testing.T) {
 	if _, err := p.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	recErr := make(chan error, 1)
 	go func() { _, err := p.RecoverVolume(ctx, "v1"); recErr <- err }()
 	waitEntered(t, g, "gethead")
-	if err := recvErr(t, recErr, "RecoverVolume past its caller deadline"); err == nil {
-		t.Fatal("RecoverVolume succeeded although its deadline expired during attach")
+	cancel()
+	if err := recvErr(t, recErr, "RecoverVolume after caller cancellation"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("RecoverVolume=%v, want caller cancellation", err)
 	}
 }
 
