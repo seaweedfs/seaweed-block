@@ -15,7 +15,7 @@ func TestChunkCut_RemoteLSNNeverDecreases(t *testing.T) {
 	copy(src, makeBlock(ctBlockSize, 0x44))
 	f := newFakeChunkRemote()
 	f.seedHead(t, src, 10, 1)
-	s, _ := newChunkTestStore(t)
+	s, _ := newLegacyChunkTestStore(t)
 	cfg := ctConfig(2)
 	cfg.FreshFromHead = true
 	layer := mustAttach(t, s, f, cfg)

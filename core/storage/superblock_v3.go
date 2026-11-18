@@ -14,9 +14,8 @@ import (
 // A v3 file holds two 4096-byte descriptor slots, A at offset 0 and B at
 // 4096; the WAL starts at 8192. Each slot is one complete generation
 // descriptor sealed by a CRC32C (Castagnoli). This file holds only the
-// slot codec, its validity rules and the A/B selection. It is not reached
-// by any production open or create path until the activation commit; v2
-// files keep using superblock.go unchanged.
+// slot codec, its validity rules and the production A/B selection. Legacy
+// decoding is retained for the explicit offline migration boundary.
 
 const (
 	slotSizeV3           = 4096

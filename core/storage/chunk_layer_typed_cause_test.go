@@ -9,7 +9,7 @@ import (
 // reachable with errors.Is through the layer's errors.
 
 func TestChunkCut_BaseInstallRefusalIsTyped(t *testing.T) {
-	s, _ := newChunkTestStore(t)
+	s, _ := newLegacyChunkTestStore(t)
 	layer := mustAttach(t, s, newFakeChunkRemote(), ctConfig(1))
 	newWriteLog().write(t, s, 2, 0x22)
 	if err := layer.BeginBaseInstall(); err != nil {
@@ -21,7 +21,7 @@ func TestChunkCut_BaseInstallRefusalIsTyped(t *testing.T) {
 }
 
 func TestChunkCut_UploadFailureIsRemoteUnavailable(t *testing.T) {
-	s, _ := newChunkTestStore(t)
+	s, _ := newLegacyChunkTestStore(t)
 	f := newFakeChunkRemote()
 	layer := mustAttach(t, s, f, ctConfig(1))
 	newWriteLog().write(t, s, 2, 0x22)
@@ -34,7 +34,7 @@ func TestChunkCut_UploadFailureIsRemoteUnavailable(t *testing.T) {
 }
 
 func TestChunkCut_ClosedLayerIsTyped(t *testing.T) {
-	s, _ := newChunkTestStore(t)
+	s, _ := newLegacyChunkTestStore(t)
 	layer := mustAttach(t, s, newFakeChunkRemote(), ctConfig(1))
 	if err := layer.Close(); err != nil {
 		t.Fatal(err)
@@ -47,7 +47,7 @@ func TestChunkCut_ClosedLayerIsTyped(t *testing.T) {
 // A CAS that returned no definite answer, after which HEAD reads a newer
 // generation from the same holder, did not apply: a head conflict.
 func TestChunkCut_CASLostToMovedHeadIsHeadConflict(t *testing.T) {
-	s, _ := newChunkTestStore(t)
+	s, _ := newLegacyChunkTestStore(t)
 	f := newFakeChunkRemote()
 	layer := mustAttach(t, s, f, ctConfig(1))
 	w := newWriteLog()

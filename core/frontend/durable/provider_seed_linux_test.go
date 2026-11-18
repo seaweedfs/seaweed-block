@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -47,7 +46,7 @@ func failSeedFD(t *testing.T, root string) func() {
 	fd := -1
 	for _, e := range entries {
 		name, err := os.Readlink("/proc/self/fd/" + e.Name())
-		if err == nil && strings.HasPrefix(name, root+string(os.PathSeparator)) {
+		if err == nil && name == filepath.Join(root, "v1.bin") {
 			if fd != -1 {
 				t.Fatal("more than one fixture WAL descriptor")
 			}

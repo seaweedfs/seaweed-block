@@ -17,8 +17,8 @@ func TestChunkCutStats_PublishedZeroedUnchangedAndNoop(t *testing.T) {
 	if err := flushWithin(t, s, "flush before the cut"); err != nil { // the bitmap counts flushed writes
 		t.Fatal(err)
 	}
-	if d := layer.Stats().DirtyChunks; d != 2 {
-		t.Fatalf("dirty chunks before the cut: %d, want 2", d)
+	if d := layer.Stats().DirtyChunks; d != ctNumBlocks/ctChunkBlocks {
+		t.Fatalf("dirty chunks before the first cut: %d, want all UNKNOWN chunks", d)
 	}
 
 	r, err := layer.Cut(ctTimeout(t))
@@ -26,8 +26,8 @@ func TestChunkCutStats_PublishedZeroedUnchangedAndNoop(t *testing.T) {
 		t.Fatal(err)
 	}
 	st := r.Stats
-	if st.UploadedChunks != 2 || st.UploadedBytes != 2*ctChunkBytes || st.ZeroedChunks != 0 || st.CandidateChunks < 2 {
-		t.Fatalf("first cut stats %+v: want 2 uploaded chunks (%d bytes), 0 zeroed, >=2 candidates", st, 2*ctChunkBytes)
+	if st.UploadedChunks != 2 || st.UploadedBytes != 2*ctChunkBytes || st.ZeroedChunks != 0 || st.UnchangedChunks != ctNumBlocks/ctChunkBlocks-2 || st.CandidateChunks != ctNumBlocks/ctChunkBlocks {
+		t.Fatalf("first cut stats %+v: want 2 uploaded chunks (%d bytes), remaining UNKNOWN zero chunks unchanged, all chunks candidates", st, 2*ctChunkBytes)
 	}
 	if st.CASResult != "ok" || st.CASNs < 0 || st.UploadNs < 0 || st.TotalNs <= 0 {
 		t.Fatalf("first cut timings/result %+v", st)

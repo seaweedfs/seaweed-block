@@ -134,7 +134,7 @@ func TestComponent_TwoReplicas_BothConverge(t *testing.T) {
 // pre-existing replica state.
 func TestComponent_PartialReplicaThenCatchUp(t *testing.T) {
 	component.RunMatrix(t, func(t *testing.T, c *component.Cluster) {
-		c.WithReplicas(1).Start()
+		c.WithReplicas(1).WithApplyGate().Start()
 		// Stage 1: primary + replica both have LBAs 0..4.
 		for i := 0; i < 5; i++ {
 			data := make([]byte, component.DefaultBlockSize)

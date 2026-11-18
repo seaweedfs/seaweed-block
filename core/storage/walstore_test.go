@@ -10,7 +10,7 @@ import (
 
 func TestWALStore_FailedAppendDoesNotConsumeLSN(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "store.bin")
-	s, err := CreateWALStore(path, 16, 4096)
+	s, err := createLegacyWALStoreForTest(path, 16, 4096)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestWALStore_FailedAppendDoesNotConsumeLSN(t *testing.T) {
 
 	// A reopen starts from what is on disk (nothing of the failed append):
 	// the first write gets LSN 1, the next batch LSNs 2 and 3.
-	r, err := OpenWALStore(path)
+	r, err := openLegacyWALStoreForTest(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestWALStore_SyncDoesNotClaimConcurrentWrite(t *testing.T) {
 
 func TestWALStore_DirectFrontierMetadataFailureRetainsRetryState(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "store.bin")
-	s, err := CreateWALStore(path, 16, 4096)
+	s, err := createLegacyWALStoreForTest(path, 16, 4096)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func TestWALStore_DirectFrontierMetadataFailureRetainsRetryState(t *testing.T) {
 		t.Fatalf("refused retry published checkpoint %d", s.checkpointLSN)
 	}
 	_ = s.Close()
-	reopened, err := OpenWALStore(path)
+	reopened, err := openLegacyWALStoreForTest(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,7 @@ func TestWALStore_DirectFrontierMetadataFailureRetainsRetryState(t *testing.T) {
 	reopened.committer.Stop()
 	_ = reopened.fd.Close() // crash
 	reopenedOpen = false
-	again, err := OpenWALStore(path)
+	again, err := openLegacyWALStoreForTest(path)
 	if err != nil {
 		t.Fatal(err)
 	}

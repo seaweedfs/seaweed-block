@@ -111,7 +111,11 @@ func TestChunkCut_NewHolderClearsDetachedState(t *testing.T) {
 	f.mu.Unlock()
 
 	s, _ := newChunkTestStore(t)
-	s.AdvanceFrontier(10) // the log continues from HEAD's remote_lsn (W4b's job in production)
+	func() {
+		if err := s.SeedChunkFrontier(10); err != nil {
+			t.Fatal(err)
+		}
+	}() // the log continues from HEAD's remote_lsn (W4b's job in production)
 	cfg := ctConfig(2)
 	cfg.FreshFromHead = true
 	layer := mustAttach(t, s, f, cfg)

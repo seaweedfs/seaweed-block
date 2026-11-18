@@ -71,8 +71,8 @@ func TestPhase150_DurableProviderWALMultiBlockOptIn(t *testing.T) {
 
 	single := run(t, false)
 	multi := run(t, true)
-	if single != 16 {
-		t.Fatalf("single encode ops=%d want 16", single)
+	if single != 4 {
+		t.Fatalf("native v3 batch encode ops=%d want 4 regardless of legacy option", single)
 	}
 	if multi != 4 {
 		t.Fatalf("multi encode ops=%d want 4", multi)

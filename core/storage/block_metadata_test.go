@@ -2,7 +2,6 @@ package storage
 
 import (
 	"bytes"
-	"encoding/binary"
 	"errors"
 	"os"
 	"path/filepath"
@@ -83,11 +82,16 @@ func TestBlockMetadata_BarrierErrorBlocksCheckpointAndDirectFrontier(t *testing.
 			h := &recordingMetadata{barrierErr: sentinel}
 			s, _ := metadataStore(t, h)
 			cp, tail := s.CheckpointLSN(), walLogicalTail(s)
+			var install InstallHandle
 			if direct {
-				if err := s.WriteExtentDirect(3, makeBlock(4096, 0x32)); err != nil {
+				var err error
+				install, err = s.BeginBaseInstall(7, [16]byte{1})
+				if err != nil {
 					t.Fatal(err)
 				}
-				s.AdvanceFrontier(7)
+				if err := install.WriteBase(3, makeBlock(4096, 0x32)); err != nil {
+					t.Fatal(err)
+				}
 			} else {
 				if _, err := s.Write(3, makeBlock(4096, 0x32)); err != nil {
 					t.Fatal(err)
@@ -98,7 +102,7 @@ func TestBlockMetadata_BarrierErrorBlocksCheckpointAndDirectFrontier(t *testing.
 			}
 			var err error
 			if direct {
-				_, err = s.Sync()
+				err = install.MarkBaseComplete()
 			} else {
 				err = s.flusher.flushOnce()
 			}
@@ -112,12 +116,19 @@ func TestBlockMetadata_WriteAndVerifyRouting(t *testing.T) {
 	h := &recordingMetadata{}
 	s, p := metadataStore(t, h)
 	sentinel := errors.New("metadata refusal")
+	install, err := s.BeginBaseInstall(0, [16]byte{1})
+	if err != nil {
+		t.Fatal(err)
+	}
 	h.writeErr = sentinel
-	if err := s.WriteExtentDirect(3, makeBlock(4096, 0x33)); !errors.Is(err, sentinel) {
+	if err := install.WriteBase(3, makeBlock(4096, 0x33)); !errors.Is(err, sentinel) {
 		t.Fatalf("write hook bypassed: %v", err)
 	}
 	h.writeErr = nil
-	if err := s.WriteExtentDirect(3, makeBlock(4096, 0x33)); err != nil {
+	if err := install.WriteBase(3, makeBlock(4096, 0x33)); err != nil {
+		t.Fatal(err)
+	}
+	if err := install.MarkBaseComplete(); err != nil {
 		t.Fatal(err)
 	}
 	h.readErr = sentinel
@@ -182,11 +193,12 @@ func TestBlockMetadata_SeedFailureRetry(t *testing.T) {
 	sentinel := errors.New("deferred metadata not durable")
 	hook := &recordingMetadata{barrierErr: sentinel}
 	s, path := metadataStore(t, hook)
-	if err := s.WriteExtentDirect(3, makeBlock(4096, 0x45)); err != nil {
+	// Quiescent pre-seed image bytes, not an admitted direct-BASE mutation.
+	if err := s.writeExtentUnlocked(3, makeBlock(4096, 0x45)); err != nil {
 		t.Fatal(err)
 	}
-	persist := s.syncDirectFrontierMetadata
-	s.syncDirectFrontierMetadata = func(data []byte) error {
+	persist := s.v3.pub.io.writeSlot
+	s.v3.pub.io.writeSlot = func(off int64, data []byte) error {
 		if hook.barriers != 2 {
 			t.Errorf("seed persistence before retry barrier: %d", hook.barriers)
 		}
@@ -194,7 +206,7 @@ func TestBlockMetadata_SeedFailureRetry(t *testing.T) {
 		if _, err := s.fd.ReadAt(marker, hook.end); err != nil || marker[0] != 1 {
 			t.Errorf("seed persisted before deferred marker: %v %v", marker, err)
 		}
-		return persist(data)
+		return persist(off, data)
 	}
 	if err := s.SeedChunkFrontier(7); !errors.Is(err, sentinel) {
 		t.Fatalf("seed bypassed deferred metadata error: %v", err)
@@ -205,11 +217,7 @@ func TestBlockMetadata_SeedFailureRetry(t *testing.T) {
 	if r, _, h := s.Boundaries(); r != 0 || h != 0 {
 		t.Fatalf("failed seed published boundaries: %d %d", r, h)
 	}
-	header := make([]byte, 4096)
-	if _, err := s.fd.ReadAt(header, 0); err != nil {
-		t.Fatal(err)
-	}
-	if binary.LittleEndian.Uint64(header[72:80]) != 0 {
+	if s.v3.pub.current().CheckpointLSN != 0 {
 		t.Fatal("failed seed persisted checkpoint")
 	}
 	hook.barrierErr = nil

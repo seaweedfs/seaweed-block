@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -148,60 +150,54 @@ func TestDurableStartup_Issue51_SmartWALTornTailRecovers(t *testing.T) {
 	}
 }
 
-// walstore interim: the same mid-history
-// corruption on a walstore volume does not become an outage: startup is
-// ready, and the durable status carries the typed warning.
-func TestDurableStartup_Issue51_WALStoreHoleIsAWarningNotAnOutage(t *testing.T) {
-	root := t.TempDir()
-	cfg := durable.ProviderConfig{Impl: durable.ImplWALStore, StorageRoot: root, BlockSize: 4096, NumBlocks: 16}
-	path := filepath.Join(root, "v1.bin")
-	// A crashed walstore: entries synced, nothing checkpointed (the file
-	// as it is right after Sync; a clean close would checkpoint).
-	s, err := storage.CreateWALStore(path, 16, 4096)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s.DisableAutoFlushForRecoveryTest()
-	for i := uint32(0); i < 4; i++ {
-		data := make([]byte, 4096)
-		data[0] = byte(0xD0 + i)
-		if _, err := s.Write(i, data); err != nil {
+// V3 replaces the legacy warning-only recovery policy with nonce-bound,
+// contiguous WAL recovery. Corruption below strict W must block readiness.
+// The old v2 warning control is retained in walstore_midhistory_hole_test.go.
+func TestDurableStartup_Issue51_WALStoreV3CommittedHoleBlocksReadiness(t *testing.T) {
+	const childEnv = "SWBLOCK_V3_STARTUP_CRASH_PATH"
+	if path := os.Getenv(childEnv); path != "" {
+		s, err := storage.CreateWALStoreWithOptions(path, 16, 4096, storage.WALStoreOptions{WMode: storage.WModeStrict})
+		if err != nil {
 			t.Fatal(err)
 		}
-	}
-	if _, err := s.Sync(); err != nil {
-		t.Fatal(err)
-	}
-	crashed, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = s.Close()
-	// Corrupt a payload byte of the second entry (walstore's WAL starts at
-	// 4096; a one-block entry is 38+4096 bytes).
-	crashed[4096+(38+4096)+38+100] ^= 0xFF
-	if err := os.WriteFile(path, crashed, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	dp, err := durable.NewDurableProvider(cfg, healthyView{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer dp.Close()
-	h := &spyHost{}
-	outcome, evidence, err := openAndRecoverDurable(dp, h, "v1", 5*time.Second)
-	if outcome != durableStartupReady || len(h.reported) != 0 {
-		t.Fatalf("walstore hole: outcome=%v reported=%v evidence=%q err=%v; want ready (no outage)", outcome, h.reported, evidence, err)
-	}
-	warned := false
-	for _, st := range dp.DurableStatuses() {
-		for _, w := range st.Warnings {
-			if strings.HasPrefix(w, storage.WarningWALHoleSuspected+":") {
-				warned = st.HolesSuspected == 1
+		s.DisableAutoFlushForRecoveryTest()
+		for i := uint32(0); i < 4; i++ {
+			data := make([]byte, 4096)
+			data[0] = byte(0xd0 + i)
+			if _, err := s.Write(i, data); err != nil {
+				t.Fatal(err)
 			}
 		}
+		if _, err := s.Sync(); err != nil {
+			t.Fatal(err)
+		}
+		os.Exit(0) // deliberately no Close/checkpoint; OS releases the owner lock
 	}
-	if !warned {
-		t.Fatalf("durable statuses %+v; want the %s warning, counted once", dp.DurableStatuses(), storage.WarningWALHoleSuspected)
+	root := t.TempDir()
+	path := filepath.Join(root, "v1.bin")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestDurableStartup_Issue51_WALStoreV3CommittedHoleBlocksReadiness$")
+	cmd.Env = append(os.Environ(), childEnv+"="+path)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("crash fixture: %v\n%s", err, out)
+	}
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := int64(8192 + (70 + 4096) + 62 + 100) // v3 second record payload
+	b := make([]byte, 1)
+	_, re := f.ReadAt(b, at)
+	b[0] ^= 0xff
+	_, we := f.WriteAt(b, at)
+	ce := f.Close()
+	if re != nil || we != nil || ce != nil {
+		t.Fatal(re, we, ce)
+	}
+	cfg := durable.ProviderConfig{Impl: durable.ImplWALStore, StorageRoot: root, BlockSize: 4096, NumBlocks: 16}
+	outcome, h := startAfterCorruption(t, cfg)
+	if outcome != durableStartupFaulted || len(h.reported) != 1 || h.reported[0] != volume.UnhealthyWALCorrupt || len(h.blocked) == 0 {
+		t.Fatalf("committed hole: outcome=%v reported=%v blocked=%v; want wal_corrupt and blocked", outcome, h.reported, h.blocked)
 	}
 }

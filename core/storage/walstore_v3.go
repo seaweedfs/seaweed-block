@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -19,12 +20,9 @@ import (
 // committer, the dirty map, the flusher's extent writes, the syncFile leaf,
 // fileSyncMu and the sticky fault.
 //
-// Dark until activation (plan row 12b): only createWALStoreV3ForTest and
-// openWALStoreV3ForTest build a v3 store; Create and Open stay v2.
-//
-// Not yet v3 (refused with errV3NotYet until their rows): WriteBatch, the
-// install paths (ApplyEntry, WriteExtentDirect, AdvanceFrontier; rows 9 to
-// 11) and the checkpoint/tail advance, which needs the row-7 map candidate.
+// Production Create/Open select this format. Legacy formats require the offline
+// migration tool or restore into a newly created volume. BASE mutations use
+// install handles; raw extent writes and frontier jumps remain refused.
 type walStoreV3State struct {
 	pub        *descriptorPublisherV3
 	w          *walWriterV3
@@ -140,13 +138,50 @@ var errV3LegacySuperblockWrite = errors.New("storage: legacy superblock write re
 
 var errV3NotYet = errors.New("storage: operation not yet supported on a v3 store (later plan row)")
 
+// ErrUnsupportedLegacyFormat requires offline migration or workspace restore;
+// a production open never interprets a v2 volume as v3.
+var ErrUnsupportedLegacyFormat = errors.New("storage: unsupported legacy walstore format; migrate offline or restore into a new volume")
+
+func refuseLegacyWALStore(f *os.File) error {
+	if sb, err := readSuperblock(io.NewSectionReader(f, 0, superblockSize)); err == nil && sb.Version == 2 && sb.validate() == nil {
+		return ErrUnsupportedLegacyFormat
+	}
+	return nil
+}
+
+func metadataSlotAcceptorV3(opts WALStoreOptions) slotImplAcceptor {
+	return func(kind ImplKind, version uint32) bool {
+		return ossSlotImplAcceptor(kind, version) ||
+			(kind == ImplKindWALStore && version >= walStoreImplVersion3 && opts.MetadataFactory != nil)
+	}
+}
+
+// ProbeWALStoreV3 identifies a valid OSS descriptor through the same A/B
+// selector as open. It grants no ownership or serving permission; Open
+// acquires the file lock and validates all map dependencies afresh.
+func ProbeWALStoreV3(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	a, b := make([]byte, slotSizeV3), make([]byte, slotSizeV3)
+	if _, err := f.ReadAt(a, 0); err != nil {
+		return err
+	}
+	if _, err := f.ReadAt(b, slotBOffsetV3); err != nil {
+		return err
+	}
+	_, _, err = selectSlotV3(a, b, nil)
+	return err
+}
+
 // testSkipFenceOnRecoverV3 is a test-only mutant switch for the G1 control
 // (it proves the schedule resurrects without the fence). Never set outside
 // tests.
 var testSkipFenceOnRecoverV3 bool
 
-// FormatV3 reports whether the store runs the dark v3 format (only test
-// constructors build one before activation, plan row 12b).
+// FormatV3 reports whether the store uses the v3 format.
 func (s *WALStore) FormatV3() bool { return s.v3 != nil }
 
 func (s *WALStore) latchV3(err error) {
@@ -183,10 +218,14 @@ func createMappedWALStoreV3ForTest(path string, numBlocks, blockSize uint32, wal
 var testCreateOwnerV3 func(*os.File, bool)
 
 func createWALStoreV3MapAtCursorForTest(path string, numBlocks, blockSize uint32, walSize uint64, mode WMode, cursor, chunkBlocks uint64) (*WALStore, error) {
+	return createWALStoreV3Configured(path, numBlocks, blockSize, walSize, mode, cursor, chunkBlocks, WALStoreOptions{})
+}
+
+func createWALStoreV3Configured(path string, numBlocks, blockSize uint32, walSize uint64, mode WMode, cursor, chunkBlocks uint64, opts WALStoreOptions) (*WALStore, error) {
 	d := descriptorV3{
 		ImplKind: ImplKindWALStore, ImplVersion: walStoreImplVersion3,
 		VolumeSize: uint64(numBlocks) * uint64(blockSize), ExtentSize: 64 * 1024, BlockSize: blockSize,
-		WALOffset: walOffsetV3, WALSize: walSize, CreatedAt: 1, SlotGen: 1,
+		WALOffset: walOffsetV3, WALSize: walSize, CreatedAt: uint64(time.Now().UnixNano()), SlotGen: 1,
 		MapFormatID: mapFormatIDV1, MapGeneration: 1, WMode: mode,
 		RetainedTail: cursor, RetainedHead: cursor,
 	}
@@ -209,7 +248,18 @@ func createWALStoreV3MapAtCursorForTest(path string, numBlocks, blockSize uint32
 	if h := testCreateOwnerV3; h != nil {
 		h(fd, false)
 	}
-	err = fd.Truncate(int64(d.WALOffset + d.WALSize + d.VolumeSize))
+	sb := superblock{Version: superblockVersionV3, ImplVersion: d.ImplVersion, BlockSize: d.BlockSize, VolumeSize: d.VolumeSize, WALOffset: d.WALOffset, WALSize: d.WALSize}
+	metadata, totalSize, err := bindBlockMetadata(fd, &sb, opts, true, false)
+	if err != nil {
+		_ = fd.Close()
+		return nil, err
+	}
+	d.ImplVersion = sb.ImplVersion
+	if err := d.validate(metadataSlotAcceptorV3(opts)); err != nil {
+		_ = fd.Close()
+		return nil, err
+	}
+	err = fd.Truncate(totalSize)
 	if err == nil && chunkBlocks != 0 {
 		var m *chunkLSNMapV3
 		m, err = createChunkLSNMapV3(path+".chunkmap", d, chunkBlocks)
@@ -239,16 +289,14 @@ func createWALStoreV3MapAtCursorForTest(path string, numBlocks, blockSize uint32
 	if err == nil {
 		err = fd.Sync()
 	}
-	if err == nil {
-		if h := testCreateOwnerV3; h != nil {
-			h(fd, true)
-		}
-	}
 	if err != nil {
 		_ = fd.Close()
 		return nil, err
 	}
-	s, err := openWALStoreV3File(path, fd, chunkBlocks != 0)
+	if h := testCreateOwnerV3; h != nil {
+		h(fd, true)
+	}
+	s, err := openWALStoreV3File(path, fd, chunkBlocks != 0, opts, metadata, true)
 	if err != nil {
 		return nil, err
 	}
@@ -271,6 +319,10 @@ func openUnmappedWALStoreV3ForTest(path string) (*WALStore, error) {
 	return openWALStoreV3MapInternalForTest(path, false)
 }
 func openWALStoreV3MapInternalForTest(path string, requireMap bool) (*WALStore, error) {
+	return openWALStoreV3WithOptions(path, requireMap, WALStoreOptions{})
+}
+
+func openWALStoreV3WithOptions(path string, requireMap bool, opts WALStoreOptions) (*WALStore, error) {
 	f, err := os.OpenFile(path, os.O_RDWR, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("storage: open %s: %w", path, err)
@@ -279,12 +331,17 @@ func openWALStoreV3MapInternalForTest(path string, requireMap bool) (*WALStore, 
 		_ = f.Close()
 		return nil, err
 	}
-	return openWALStoreV3File(path, f, requireMap)
+	return openWALStoreV3File(path, f, requireMap, opts, nil, false)
 }
 
-// openWALStoreV3File consumes an already locked descriptor, including on error.
-// Creation transfers ownership directly: no selectable-slot close/reopen gap.
-func openWALStoreV3File(path string, f *os.File, requireMap bool) (*WALStore, error) {
+// f is already locked. Creation retains this same descriptor and metadata
+// binding throughout initialization, so there is no close/reopen owner gap.
+func openWALStoreV3File(path string, f *os.File, requireMap bool, opts WALStoreOptions, metadata BlockMetadata, creating bool) (*WALStore, error) {
+	if err := refuseLegacyWALStore(f); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	accept := metadataSlotAcceptorV3(opts)
 	a := make([]byte, slotSizeV3)
 	b := make([]byte, slotSizeV3)
 	_, errA := f.ReadAt(a, slotAOffsetV3)
@@ -293,7 +350,7 @@ func openWALStoreV3File(path string, f *os.File, requireMap bool) (*WALStore, er
 		_ = f.Close()
 		return nil, err
 	}
-	d, id, err := selectSlotV3(a, b, nil)
+	d, id, err := selectSlotV3(a, b, accept)
 	if err != nil {
 		_ = f.Close()
 		return nil, err
@@ -303,7 +360,7 @@ func openWALStoreV3File(path string, f *os.File, requireMap bool) (*WALStore, er
 	if id == slotB {
 		otherRaw = a
 	}
-	if od, oerr := decodeSlotV3(otherRaw, nil); oerr == nil && od.MigrationPhase == MigrationNormal {
+	if od, oerr := decodeSlotV3(otherRaw, accept); oerr == nil && od.MigrationPhase == MigrationNormal {
 		other = &od
 	}
 	var ownedMap *chunkLSNMapV3
@@ -326,7 +383,17 @@ func openWALStoreV3File(path string, f *os.File, requireMap bool) (*WALStore, er
 		CreatedAt: d.CreatedAt, ImplKind: d.ImplKind, ImplVersion: d.ImplVersion,
 	}
 	copy(sb.Magic[:], superblockMagic)
-	s, err := openInitializedInternal(path, f, &sb, nil, func(s *WALStore) error {
+	if !creating && opts.MetadataFactory != nil {
+		metadata, _, err = bindBlockMetadata(f, &sb, opts, false, false)
+		if err != nil {
+			if ownedMap != nil {
+				_ = ownedMap.Close()
+			}
+			_ = f.Close()
+			return nil, err
+		}
+	}
+	s, err := openInitializedInternal(path, f, &sb, metadata, func(s *WALStore) error {
 		v := &walStoreV3State{}
 		v.pub = newDescriptorPublisherV3(d, id, other, descriptorIOV3{
 			writeSlot: func(off int64, buf []byte) error {
@@ -346,6 +413,7 @@ func openWALStoreV3File(path string, f *os.File, requireMap bool) (*WALStore, er
 			sticky:   s.stickyIOFault,
 			latch:    s.latchV3,
 		})
+		v.pub.accept = accept
 		// A reset stopped between its two publications (DESIGN 8.6) binds no
 		// writer across the two nonces: Recover's head publication completes
 		// the new incarnation in the other slot and creates the writer then;
@@ -356,6 +424,7 @@ func openWALStoreV3File(path string, f *os.File, requireMap bool) (*WALStore, er
 				return err
 			}
 			v.w = w
+			v.w.instr = &s.instr
 		}
 		v.wack.Store(d.W)
 		if ownedMap != nil {
@@ -391,7 +460,7 @@ func (s *WALStore) recoverV3() (uint64, error) {
 	}
 	d := v.pub.current()
 	s.dm.clear()
-	scan, err := scanWALV3(s.fd, d)
+	scan, err := scanWALV3Accepted(s.fd, d, v.pub.accept)
 	if err != nil {
 		if d.BaseState == BaseInstalling {
 			// Installing keeps its typed not-ready outcome; the cause is a
@@ -523,6 +592,7 @@ func (s *WALStore) recoverV3() (uint64, error) {
 			return 0, err
 		}
 		v.w = w
+		v.w.instr = &s.instr
 	}
 	restore := scan
 	restore.End = o.E
@@ -609,13 +679,17 @@ func (s *WALStore) appendWriteV3(lba uint32, data []byte, lsn uint64) (uint64, e
 // r16). A single block is an ordinary write record. Each block's dirty
 // entry names its data offset inside the record.
 func (s *WALStore) writeBatchV3Locked(startLBA uint32, blocks [][]byte, firstLSN uint64) ([]uint64, error) {
+	start := time.Now()
 	if len(blocks) == 1 {
 		phys, err := s.appendWriteV3(startLBA, blocks[0], firstLSN)
+		s.instr.appendLatency.Observe(time.Since(start))
 		s.walMutation.Add(1)
 		if err != nil {
 			return nil, fmt.Errorf("storage: WAL append: %w", err)
 		}
+		dirtyStart := time.Now()
 		s.dm.put(uint64(startLBA), phys, firstLSN, uint32(len(blocks[0])))
+		s.instr.recordDirtyMapUpdate(1, time.Since(dirtyStart))
 		s.noteChunkMutation(uint64(startLBA))
 		s.advanceAfterAppendV3(firstLSN, firstLSN)
 		return []uint64{firstLSN}, nil
@@ -625,9 +699,11 @@ func (s *WALStore) writeBatchV3Locked(startLBA uint32, blocks [][]byte, firstLSN
 	}
 	bs := int(s.sb.BlockSize)
 	payload := make([]byte, 0, len(blocks)*bs)
+	copyStart := time.Now()
 	for _, b := range blocks {
 		payload = append(payload, b...)
 	}
+	s.instr.recordWALCopy(len(payload), time.Since(copyStart))
 	n := uint64(len(blocks))
 	lastLSN := firstLSN + n - 1
 	if s.v3.mapProof != nil {
@@ -640,6 +716,7 @@ func (s *WALStore) writeBatchV3Locked(startLBA uint32, blocks [][]byte, firstLSN
 		return nil, err
 	}
 	phys, err := s.v3.w.append(e, s.v3.wack.Load())
+	s.instr.appendLatency.Observe(time.Since(start))
 	s.walMutation.Add(1)
 	if err != nil {
 		if errors.Is(err, errWALPwrite) {
@@ -648,6 +725,7 @@ func (s *WALStore) writeBatchV3Locked(startLBA uint32, blocks [][]byte, firstLSN
 		return nil, fmt.Errorf("storage: WAL batch append: %w", err)
 	}
 	lsns := make([]uint64, n)
+	dirtyStart := time.Now()
 	for i := uint64(0); i < n; i++ {
 		lba := uint64(startLBA) + i
 		lsns[i] = firstLSN + i
@@ -655,6 +733,7 @@ func (s *WALStore) writeBatchV3Locked(startLBA uint32, blocks [][]byte, firstLSN
 		s.dm.putAt(lba, phys, uint32(i)*uint32(bs), lsns[i], uint32(bs))
 		s.noteChunkMutation(lba)
 	}
+	s.instr.recordDirtyMapUpdate(len(blocks), time.Since(dirtyStart))
 	s.v3.appended.Store(lastLSN)
 	s.advanceAfterAppendV3(firstLSN, lastLSN)
 	return lsns, nil
@@ -712,6 +791,10 @@ func (s *WALStore) syncWALBatchV3() error {
 	v.syncMu.Lock()
 	defer v.syncMu.Unlock()
 	H, prev := v.appended.Load(), v.wack.Load()
+	// One sample per covering WAL batch, as on v2. In mode C the slot
+	// publication is the physical sync; mode A also settles its W slot.
+	syncStart := time.Now()
+	defer func() { s.fileSyncLatency.Observe(time.Since(syncStart)) }()
 	switch v.pub.current().WMode {
 	case WModeStrict:
 		// A: fsync the WAL, then publish W = H with its own fsync.

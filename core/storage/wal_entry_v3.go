@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"math"
+	"time"
 )
 
 // The impl-3 codec is deliberately separate from the 38-byte impl-1 codec.
@@ -98,6 +99,11 @@ func (e walEntryV3) payloadSizeV3(blockSize uint32, numBlocks uint64) (uint64, e
 }
 
 func encodeWALEntryV3(e walEntryV3, blockSize uint32, numBlocks uint64) ([]byte, error) {
+	return encodeWALEntryV3Instrumented(e, blockSize, numBlocks, nil)
+}
+
+func encodeWALEntryV3Instrumented(e walEntryV3, blockSize uint32, numBlocks uint64, instr *writeInstrumentation) ([]byte, error) {
+	start := time.Now()
 	n, err := e.payloadSizeV3(blockSize, numBlocks)
 	if err != nil {
 		return nil, err
@@ -124,9 +130,20 @@ func encodeWALEntryV3(e walEntryV3, blockSize uint32, numBlocks uint64) ([]byte,
 	le.PutUint64(buf[38:46], e.LogicalStart)
 	copy(buf[46:62], e.Nonce[:])
 	end := walEntryPrefixSizeV3 + int(n)
+	copyStart := time.Now()
 	copy(buf[walEntryPrefixSizeV3:end], e.Data)
+	if instr != nil {
+		instr.recordWALCopy(len(e.Data), time.Since(copyStart))
+	}
+	checksumStart := time.Now()
 	le.PutUint32(buf[end:end+4], crc32.Checksum(buf[:end], walEntryCRC32CV3))
+	if instr != nil {
+		instr.recordWALChecksum(end, time.Since(checksumStart))
+	}
 	le.PutUint32(buf[end+4:end+8], uint32(len(buf)))
+	if instr != nil {
+		instr.recordWALEncode(len(buf), time.Since(start))
+	}
 	return buf, nil
 }
 

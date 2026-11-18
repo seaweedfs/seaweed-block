@@ -193,7 +193,11 @@ func TestChunkLayer_StaleAttachDoesNotPublishOverNewerHolder(t *testing.T) {
 			f.heads[len(f.heads)-1].Holder = tc.headHolder
 			f.mu.Unlock()
 			s, _ := newChunkTestStore(t)
-			s.AdvanceFrontier(5)                                                // the log continues from HEAD's remote_lsn (W4b's job in production)
+			func() {
+				if err := s.SeedChunkFrontier(5); err != nil {
+					t.Fatal(err)
+				}
+			}() // the log continues from HEAD's remote_lsn (W4b's job in production)
 			if _, err := s.Write(3, makeBlock(ctBlockSize, 0x33)); err != nil { // stale local change
 				t.Fatal(err)
 			}
@@ -328,7 +332,11 @@ func TestChunkLayer_StaleFillNeverAuthorizesUnresolvedExtentRead(t *testing.T) {
 	f := newFakeChunkRemote()
 	f.seedHead(t, src, 5, 1)
 	s, _ := newChunkTestStore(t)
-	s.AdvanceFrontier(5) // the log continues from HEAD's remote_lsn (W4b's job in production)
+	func() {
+		if err := s.SeedChunkFrontier(5); err != nil {
+			t.Fatal(err)
+		}
+	}() // the log continues from HEAD's remote_lsn (W4b's job in production)
 	cfg := ctConfig(2)
 	cfg.FreshFromHead = true
 	layer := mustAttach(t, s, f, cfg)
@@ -409,7 +417,11 @@ func TestChunkLayer_FreshHostHashCutFetchesNoUntouchedChunk(t *testing.T) {
 	f := newFakeChunkRemote()
 	f.seedHead(t, src, 5, 1)
 	s, _ := newChunkTestStore(t)
-	s.AdvanceFrontier(5) // the log continues from HEAD's remote_lsn (W4b's job in production)
+	func() {
+		if err := s.SeedChunkFrontier(5); err != nil {
+			t.Fatal(err)
+		}
+	}() // the log continues from HEAD's remote_lsn (W4b's job in production)
 	cfg := ctConfig(2)
 	cfg.FreshFromHead = true
 	layer := mustAttach(t, s, f, cfg)

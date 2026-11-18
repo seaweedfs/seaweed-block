@@ -10,11 +10,10 @@ import (
 
 // File-format identity. Bumped only on incompatible layout changes.
 //
-// Version history:
-//   1: initial layout (magic+version+geometry+WAL state+CreatedAt)
-//   2: T3a Addendum A — added ImplKind + ImplVersion at end of
-//      layout. Opening a v1 store with v2 code returns
-//      errSuperblockBadVer (one-way bump; no compat read path).
+// Version 1 used magic, version, geometry, WAL state and CreatedAt.
+// Version 2 (T3a Addendum A) added ImplKind and ImplVersion. Opening
+// a v1 store with v2 code returns errSuperblockBadVer; there is no
+// compatible read path.
 const (
 	superblockSize    = 4096
 	superblockMagic   = "SWBK"
@@ -40,7 +39,7 @@ const (
 // files. Independent from superblockVersion (which is the shared
 // superblock-format version) — walstore and smartwal evolve their
 // WAL+extent layouts on independent clocks.
-const WALStoreImplVersion uint32 = 1
+const WALStoreImplVersion uint32 = 3
 
 var (
 	errSuperblockNotOurs     = errors.New("storage: not a store file (bad magic)")

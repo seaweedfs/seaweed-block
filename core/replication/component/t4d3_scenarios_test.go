@@ -215,6 +215,7 @@ func TestT4d3_RecoveryTargetLSN1_RoutesByConnectionContext(t *testing.T) {
 		// the catch-up session fails. Recovery lane must stale-skip.
 		replicaData := make([]byte, component.DefaultBlockSize)
 		replicaData[0] = 0x22
+		primeReplicaZeroBase(t, c, 1)
 		c.ReplicaApply(0, 0, replicaData, 2)
 
 		result := c.CatchUpReplica(0)

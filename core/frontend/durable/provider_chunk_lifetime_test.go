@@ -542,24 +542,41 @@ func TestWALStoreChunk_CloseSettlesDeferredAttach(t *testing.T) {
 // recovery refuses as a WAL integrity fault. It returns a restore func.
 func corruptWALWrite(t *testing.T, path string, fill byte) func() {
 	t.Helper()
-	raw, err := os.ReadFile(path)
+	// Read the known fixture geometry without touching the owner's locked
+	// byte zero, and search only the WAL (the extent may contain a copy).
+	source, err := os.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload := bytes.Repeat([]byte{fill}, 4096)
-	at := bytes.Index(raw, payload)
-	if at < 30 || bytes.Index(raw[at+1:], payload) >= 0 {
-		t.Fatalf("WAL record for fill %#x not found exactly once", fill)
+	defer source.Close()
+	var geometry [16]byte
+	if _, err := source.ReadAt(geometry[:], 48); err != nil {
+		t.Fatal(err)
 	}
-	const hdr = 30 // LSN 8, Reserved 8, Type 1, Flags 1, LBA 8, Length 4
-	start := at - hdr
-	rec := append([]byte(nil), raw[start:at+4096+8]...)
+	walStart := binary.LittleEndian.Uint64(geometry[:8])
+	walSize := binary.LittleEndian.Uint64(geometry[8:])
+	if walStart != 8192 || walSize > 64*1024*1024 || walSize < 4096+70 {
+		t.Fatalf("unexpected v3 fixture geometry %d/%d", walStart, walSize)
+	}
+	wal := make([]byte, int(walSize))
+	if _, err := source.ReadAt(wal, int64(walStart)); err != nil {
+		t.Fatal(err)
+	}
+	payload := bytes.Repeat([]byte{fill}, 4096)
+	at := bytes.Index(wal, payload)
+	// Ignore overlapping matches if the first CRC byte happens to equal fill.
+	if at < 62 || bytes.Index(wal[at+len(payload):], payload) >= 0 {
+		t.Fatalf("WAL payload %#x not found exactly once", fill)
+	}
+	const hdr = 62
+	start := int64(walStart) + int64(at-hdr)
+	rec := append([]byte(nil), wal[at-hdr:at+4096+8]...)
 	orig := append([]byte(nil), rec...)
 	if rec[16] != 0x01 || binary.LittleEndian.Uint64(rec[8:]) != 0 {
 		t.Fatalf("unexpected WAL record header % x", rec[:hdr])
 	}
-	rec[16] = 0x04 // write batch, Reserved stays 0: invalid
-	binary.LittleEndian.PutUint32(rec[hdr+4096:], crc32.ChecksumIEEE(rec[:hdr+4096]))
+	rec[16] = 0x04 // invalid native batch: BatchCount remains zero
+	binary.LittleEndian.PutUint32(rec[hdr+4096:], crc32.Checksum(rec[:hdr+4096], crc32.MakeTable(crc32.Castagnoli)))
 	f, err := os.OpenFile(path, os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -607,6 +624,15 @@ func TestWALStoreChunk_StaleWaiterCannotOverrideFailedRecovery(t *testing.T) {
 		t.Fatalf("recovery A: %v", err)
 	}
 	if _, err := s.Write(5, block(0xA7)); err != nil {
+		t.Fatal(err)
+	}
+	// This oracle requires corruption below a persisted W. Default mode C
+	// intentionally permits losing its newest uncheckpointed batch instead.
+	ws, ok := s.(*storage.WALStore)
+	if !ok {
+		t.Fatalf("unexpected native store %T", s)
+	}
+	if err := ws.SetWMode(storage.WModeStrict); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Sync(); err != nil {
@@ -681,6 +707,15 @@ func TestWALStoreChunk_FailedRecoveryRetiresAuthorityWait(t *testing.T) {
 		t.Fatalf("after recovery without authority: %v; want the volume awaiting authority", err)
 	}
 	if _, err := s.Write(5, block(0xA7)); err != nil {
+		t.Fatal(err)
+	}
+	// This oracle requires corruption below a persisted W. Default mode C
+	// intentionally permits losing its newest uncheckpointed batch instead.
+	ws, ok := s.(*storage.WALStore)
+	if !ok {
+		t.Fatalf("unexpected native store %T", s)
+	}
+	if err := ws.SetWMode(storage.WModeStrict); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Sync(); err != nil {
@@ -774,6 +809,15 @@ func TestWALStoreChunk_StaleWaiterPastTickCheckCannotAttach(t *testing.T) {
 	if _, err := s.Write(5, block(0xA7)); err != nil {
 		t.Fatal(err)
 	}
+	// This oracle requires corruption below a persisted W. Default mode C
+	// intentionally permits losing its newest uncheckpointed batch instead.
+	ws, ok := s.(*storage.WALStore)
+	if !ok {
+		t.Fatalf("unexpected native store %T", s)
+	}
+	if err := ws.SetWMode(storage.WModeStrict); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.Sync(); err != nil {
 		t.Fatal(err)
 	}
@@ -781,6 +825,7 @@ func TestWALStoreChunk_StaleWaiterPastTickCheckCannotAttach(t *testing.T) {
 
 	// Park A's wait inside its projection read, after its tick check.
 	view.arm()
+	t.Cleanup(func() { close(view.release) })
 	select {
 	case <-view.parked:
 	case <-time.After(10 * time.Second):

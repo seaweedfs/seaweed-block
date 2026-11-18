@@ -95,6 +95,22 @@ stateDiagram-v2
 
 ## 1.2 walstore: WAL plus extent
 
+**Production format v3.** Create writes impl3; v2/impl1 and v2/impl2 require explicit offline migration or recreation/HEAD restore. Chunk geometry is fixed at create from the provider configuration. Mode C is the default; mode A is an explicit create option. Both descriptor slots and their owned immutable map dependencies are validated at open, under exclusive file ownership. The creator holds that same fd from O_EXCL through slot publication and store construction.
+
+```mermaid
+flowchart LR
+  A["slot A: 0..4095"] --- B["slot B: 4096..8191"] --- W["WAL: starts 8192"] --- E["block extent"]
+  A -. "root hash / lineage" .-> M["owned COW chunk LSN map sidecar"]
+  B -. "both valid slots pin dependencies" .-> M
+  F["extent fsync + metadata barrier"] --> C["COW map durable"] --> P["single descriptor publisher"] --> R["reuse only above both-slot floor"]
+```
+
+The native record is a 62-byte prefix (LSN, batch count, type/flags, LBA/length, DurableLSN, absolute logical start and 128-bit WAL nonce) plus payload and an 8-byte CRC32C/size trailer: 70 bytes overhead. Appends are physically LSN-strict within an incarnation. Reads validate the entire containing record before returning a block. Recovery uses the physical trusted prefix and the mode/BASE watermark rules, then fences dropped byte ranges before reuse. Same-open Recover invalidates map proofs at both entry and exit. All runtime descriptor mutations converge through `descriptorPublisherV3.publishLockedCoreV3`; initial creation and the explicitly offline migration tool are the pre-serving exceptions.
+
+The flusher prepares map coverage within its original recovery lifetime, syncs extent and metadata, and publishes checkpoint/map/W/tail together; fallback rollover releases no bytes until both slots permit it. Installed/installing BASE uses install handles; logical Sync while installing is refused, while receiver-only SyncInstallLog follows strict durability. Mode C physically syncs each covering batch but can persist the previous acknowledged W; A persists the current covering W before acknowledgment. The final mode-C window and corruption oracles are specified by the canonical format contract; this summary does not weaken its gates.
+
+The [exact temporary legacy test inventory](format-v3-legacy-test-inventory.md) pairs old-format controls with native replacements. The following original diagrams and scan explanation describe the **legacy v2 fixture/offline-input format**, retained until row 14a; they are not the active production byte layout or recovery algorithm.
+
 **Layout.** One preallocated file with a 4 KB superblock, a circular WAL, and a block-indexed extent (`core/storage/walstore.go`, type comment of `WALStore`).
 - The superblock holds geometry, `WALHead` and `WALTail` (monotonic logical byte cursors), `WALCheckpointLSN` (the highest LSN durably in the extent) and the engine kind; opening a file of the wrong kind is refused (`core/storage/superblock.go`).
 - A WAL record is a 30-byte header (LSN, reserved, type, flags, LBA, length), the data, and an 8-byte trailer (CRC32, record size) (`core/storage/wal_entry.go`). A record that does not fit at the end of the region is preceded by a padding record and starts at offset 0 (`core/storage/wal_writer.go` `walWriter.append`).

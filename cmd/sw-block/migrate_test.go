@@ -1,3 +1,5 @@
+//go:build swblock_format_v3_test
+
 package main
 
 import (
@@ -24,7 +26,7 @@ func migBlk(b byte) []byte { return bytes.Repeat([]byte{b}, migBlock) }
 func v2Volume(t *testing.T, clean bool) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "vol")
-	s, err := storage.CreateWALStore(path, 64, migBlock)
+	s, err := storage.CreateLegacyWALStoreTest(path, 64, migBlock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +128,7 @@ func TestMigrateV3CleanVolume(t *testing.T) {
 	if _, err := os.Stat(path + ".v2-chunkbitmap.bak"); err != nil {
 		t.Fatalf("retired bitmap: %v", err)
 	}
-	if s, err := storage.OpenWALStore(path); err == nil {
+	if s, err := storage.OpenLegacyWALStoreTest(path); err == nil {
 		_ = s.Close()
 		t.Fatal("the old binary opened a migrated volume")
 	}
@@ -245,7 +247,7 @@ func TestMigrateV3OldBinaryAfterPreparation(t *testing.T) {
 	}
 	migrate(t, path)
 	migrateStepHook = nil
-	s, err := storage.OpenWALStore(path)
+	s, err := storage.OpenLegacyWALStoreTest(path)
 	if err != nil {
 		t.Fatalf("the old binary refused a prepared-only volume: %v", err)
 	}
@@ -268,7 +270,7 @@ func TestMigrateV3OldBinaryAfterPreparation(t *testing.T) {
 		t.Fatal("the rerun migrated a volume the old binary left unflushed")
 	}
 	// The operator remedy: open with the old binary, flush, close cleanly.
-	s2, err := storage.OpenWALStore(path)
+	s2, err := storage.OpenLegacyWALStoreTest(path)
 	if err != nil {
 		t.Fatal(err)
 	}
