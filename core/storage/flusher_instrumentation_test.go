@@ -34,7 +34,7 @@ func TestBoundedExtentWriteOpportunity(t *testing.T) {
 }
 
 func TestFlusherInstrumentationCountsCompleteCycle(t *testing.T) {
-	s, err := CreateWALStore(filepath.Join(t.TempDir(), "store.bin"), 16, 4096)
+	s, err := createLegacyWALStoreForTest(filepath.Join(t.TempDir(), "store.bin"), 16, 4096)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +176,7 @@ func TestFlusherInstrumentationCountsCheckpointFailure(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s, err := CreateWALStore(filepath.Join(t.TempDir(), "store.bin"), 16, 4096)
+			s, err := createLegacyWALStoreForTest(filepath.Join(t.TempDir(), "store.bin"), 16, 4096)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -291,7 +291,7 @@ func TestFlusherInstrumentationCountsWALReadFailures(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s, err := CreateWALStore(filepath.Join(t.TempDir(), "store.bin"), 16, 4096)
+			s, err := createLegacyWALStoreForTest(filepath.Join(t.TempDir(), "store.bin"), 16, 4096)
 			if err != nil {
 				t.Fatal(err)
 			}

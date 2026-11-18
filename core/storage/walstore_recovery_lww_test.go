@@ -16,7 +16,7 @@ func TestWALStoreRecoverLastWriterWinsAcrossScanOrder(t *testing.T) {
 		walSize   = 24 * 1024
 	)
 	path := filepath.Join(t.TempDir(), "store.bin")
-	s := createWALStoreWithWALSizeForTest(t, path, 64, blockSize, walSize)
+	s := createLegacyWALStoreWithWALSizeForTest(t, path, 64, blockSize, walSize)
 	s.DisableAutoFlushForRecoveryTest()
 	for lba := uint32(0); lba < 3; lba++ {
 		if _, err := s.Write(lba, makeBlock(blockSize, byte(0x10+lba))); err != nil {
@@ -45,7 +45,7 @@ func TestWALStoreRecoverLastWriterWinsAcrossScanOrder(t *testing.T) {
 		t.Fatalf("newest LBA 20 entry at offset %d LSN %d; want the wrapped batch at 0, LSN 5", e.WALOffset, e.LSN)
 	}
 	crashRecoveryHardeningStore(t, s)
-	r, err := OpenWALStore(path)
+	r, err := openLegacyWALStoreForTest(path)
 	if err != nil {
 		t.Fatal(err)
 	}

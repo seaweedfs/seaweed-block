@@ -223,6 +223,17 @@ func TestContract_BoundariesReflectWrites(t *testing.T) {
 
 func TestContract_ApplyEntryUsesSuppliedLSN(t *testing.T) {
 	runForEachImpl(t, func(t *testing.T, store LogicalStorage) {
+		if ws, ok := store.(*storage.WALStore); ok && ws.FormatV3() {
+			// v3 forbids an unanchored jump: establish the source's BASE
+			// before applying its next supplied LSN, as the receiver does.
+			h, err := ws.BeginBaseInstall(99, [16]byte{1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := h.MarkBaseComplete(); err != nil {
+				t.Fatal(err)
+			}
+		}
 		want := makeBlock(store.BlockSize(), 0xCD)
 		// ApplyEntry is the replication path — the LSN comes from the
 		// source, not from the local allocator.
@@ -255,6 +266,18 @@ func TestContract_ApplyEntryUsesSuppliedLSN(t *testing.T) {
 func TestContract_AdvanceFrontierBumpsH(t *testing.T) {
 	runForEachImpl(t, func(t *testing.T, store LogicalStorage) {
 		store.AdvanceFrontier(50)
+		if ws, ok := store.(*storage.WALStore); ok && ws.FormatV3() {
+			if _, _, head := store.Boundaries(); head != 0 {
+				t.Fatal("v3 allowed an unowned legacy frontier jump")
+			}
+			h, err := ws.BeginBaseInstall(50, [16]byte{1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := h.MarkBaseComplete(); err != nil {
+				t.Fatal(err)
+			}
+		}
 		_, _, H := store.Boundaries()
 		if H != 50 {
 			t.Fatalf("AdvanceFrontier(50) should set H=50, got %d", H)
@@ -344,7 +367,23 @@ func TestContract_WriteExtentDirect(t *testing.T) {
 		}
 
 		// WriteExtentDirect must succeed and become readable.
-		if err := store.WriteExtentDirect(3, baseBytes); err != nil {
+		walLSN := uint64(5)
+		if ws, ok := store.(*storage.WALStore); ok && ws.FormatV3() {
+			if err := store.WriteExtentDirect(3, baseBytes); err == nil {
+				t.Fatal("v3 allowed a direct extent write outside its install handle")
+			}
+			h, err := ws.BeginBaseInstall(0, [16]byte{1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := h.WriteBase(3, baseBytes); err != nil {
+				t.Fatal(err)
+			}
+			if err := h.MarkBaseComplete(); err != nil {
+				t.Fatal(err)
+			}
+			walLSN = 1 // the first contiguous WAL LSN after BASE0
+		} else if err := store.WriteExtentDirect(3, baseBytes); err != nil {
 			t.Fatalf("WriteExtentDirect: %v", err)
 		}
 		got, err := store.Read(3)
@@ -370,7 +409,7 @@ func TestContract_WriteExtentDirect(t *testing.T) {
 		// bytes — this matches the recovery flow where WAL frames
 		// at higher LSNs naturally overwrite the BASE snapshot.
 		walBytes := makeBlock(bs, 0xBB)
-		if err := store.ApplyEntry(3, walBytes, 5); err != nil {
+		if err := store.ApplyEntry(3, walBytes, walLSN); err != nil {
 			t.Fatalf("ApplyEntry after WriteExtentDirect: %v", err)
 		}
 		got2, err := store.Read(3)
@@ -385,8 +424,8 @@ func TestContract_WriteExtentDirect(t *testing.T) {
 		// effect), so H bumped — this is the receiver's existing
 		// side-effect contract for ApplyEntry, unrelated to BASE.
 		_, _, h2 := store.Boundaries()
-		if h2 < 5 {
-			t.Errorf("after ApplyEntry(lsn=5) H=%d want >= 5", h2)
+		if h2 != walLSN {
+			t.Errorf("after ApplyEntry(lsn=%d) H=%d want %d", walLSN, h2, walLSN)
 		}
 	})
 }

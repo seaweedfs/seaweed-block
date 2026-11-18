@@ -218,3 +218,9 @@ All 13 specs parse and pass SANY's semantic check with `tla2tools.jar` v1.7.4
 `CutCOW`, `CutPipeline`, `ReplicationFailover`, `RetentionGCMulti`, `RetentionGCTiming`,
 `SmartWALRecovery`, `WALRecovery`, `WALReplica`, `WorkspaceTakeover`. The state counts above come from earlier
 TLC runs of these specs; comment-only edits were made since.
+
+## Format-v3 activation correspondence
+
+The public selector now reaches the mapped impl3 paths in `walstore_v3.go`, `descriptor_v3.go`, `wal_io_v3.go` and `walstore_map_checkpoint_v3.go`. This is activation of the previously reviewed format contract, not a new abstract transition. Its canonical signed design is r17.4 (`e2a5304ef8fdc29f7e109883b8664a5c93d37a559e7b93e1d24964cb09cb7824`), with the composed external S3/BASE/install/map TLC receipts referenced by that design. The in-repository `WALRecovery.tla` remains an abstraction and is not a proof of every physical nonce/cursor/map/dual-slot rule. Pending external bounded runs remain pending; activation tests and source correspondence do not turn them into exhaustive proof.
+
+Native Go controls and the temporary frozen-v2 fixture disposition are listed in [the activation inventory](../design/format-v3-legacy-test-inventory.md). Old-codec tests are preserved, and both default and tagged migration/caller suites are validation gates. No model equation is changed by the selector wiring; a new counterexample still requires an amendment before affected integration.

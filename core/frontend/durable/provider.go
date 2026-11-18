@@ -180,6 +180,13 @@ type DurableProvider struct {
 	// volume's handle and layer are resolved.
 	testAfterChunkResolve func()
 
+	// testBeforeChunkFreshRetire holds the real post-presence/pre-marker boundary.
+	testBeforeChunkFreshRetire func() error
+
+	// testWALStoreFactory selects a dark store only in provider caller controls.
+	// No production option, flag or environment variable installs it.
+	testWALStoreFactory func(path string, create bool) (*storage.WALStore, error)
+
 	// walstore-chunk: closeCtx ends with Close and cancels in-flight
 	// remote attachment; inflight counts RecoverVolume calls admitted
 	// before Close, which Close waits for before closing any store.
@@ -209,6 +216,8 @@ type volHandle struct {
 	recoverGen uint64
 	waitGen    uint64
 	chunk      storage.ChunkLayer // after RecoverVolume
+	// Private until the owner commit succeeds; retained for attach retry.
+	chunkPending storage.ChunkLayer
 	// chunkDetach is set (under attachMu) when DetachVolume starts and
 	// never cleared in this process: frontend I/O stays stopped, through
 	// any later RecoverVolume, until a new lifetime attaches the volume.
@@ -627,6 +636,8 @@ func (p *DurableProvider) verifyImplOnDisk(path string) (ImplName, error) {
 		// the format's real header selector instead of rejecting on byte 0.
 		if err := parallelwal.ProbeStore(path); err == nil {
 			diskImpl, ok = ImplParallelWALStore, true
+		} else if err := storage.ProbeWALStoreV3(path); err == nil {
+			diskImpl, ok = ImplWALStore, true
 		}
 	}
 	if !ok {
@@ -668,13 +679,23 @@ func (p *DurableProvider) openExisting(volumeID, path string, impl ImplName) (*v
 	var s storage.LogicalStorage
 	switch impl {
 	case ImplWALStore, ImplWALStoreChunk:
-		ws, err := storage.OpenWALStore(path)
+		var ws *storage.WALStore
+		var err error
+		if p.testWALStoreFactory != nil {
+			ws, err = p.testWALStoreFactory(path, false)
+		} else {
+			ws, err = storage.OpenWALStore(path)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("durable: OpenWALStore %s: %w", path, err)
 		}
 		// G6 §1.A α: plumb operator-tunable retention into walstore.
 		// Zero (pre-G6 default) preserves strict checkpoint-driven
 		// recycle.
+		// Defer before Recover can publish a completed BASE away.
+		if impl == ImplWALStoreChunk && p.cfg.ChunkRemoteFor != nil {
+			ws.DeferBaseRetirementV3()
+		}
 		if p.cfg.WALRetentionLSNs > 0 {
 			ws.SetRecoveryRetentionLSNs(p.cfg.WALRetentionLSNs)
 		}
@@ -714,11 +735,21 @@ func (p *DurableProvider) createFresh(volumeID, path string, impl ImplName) (*vo
 	var s storage.LogicalStorage
 	switch impl {
 	case ImplWALStore, ImplWALStoreChunk:
-		ws, err := storage.CreateWALStore(path, p.cfg.NumBlocks, p.cfg.BlockSize)
+		var ws *storage.WALStore
+		var err error
+		if p.testWALStoreFactory != nil {
+			ws, err = p.testWALStoreFactory(path, true)
+		} else {
+			ws, err = storage.CreateWALStoreWithOptions(path, p.cfg.NumBlocks, p.cfg.BlockSize, storage.WALStoreOptions{ChunkBlocks: p.cfg.ChunkBlocks})
+		}
 		if err != nil {
 			return nil, fmt.Errorf("durable: CreateWALStore %s: %w", path, err)
 		}
 		// G6 §1.A α (see openExisting comment for semantics).
+		// Defer before Recover can publish a completed BASE away.
+		if impl == ImplWALStoreChunk && p.cfg.ChunkRemoteFor != nil {
+			ws.DeferBaseRetirementV3()
+		}
 		if p.cfg.WALRetentionLSNs > 0 {
 			ws.SetRecoveryRetentionLSNs(p.cfg.WALRetentionLSNs)
 		}
@@ -889,6 +920,11 @@ func chunkSidecars(path string) ([]string, error) {
 	}
 	var out []string
 	for _, e := range entries {
+		// The owned v3 LSN map belongs to plain walstore as well. Remote
+		// chunk identity still has its own presence/fresh/HEAD sidecars.
+		if e.Name() == base+".chunkmap" {
+			continue
+		}
 		if !e.IsDir() && strings.HasPrefix(e.Name(), base+".chunk") {
 			out = append(out, e.Name())
 		}

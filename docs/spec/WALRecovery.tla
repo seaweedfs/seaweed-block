@@ -1,4 +1,12 @@
 ----------------------------- MODULE WALRecovery -----------------------------
+(* V3 writer admission is physically LSN-strict, including batch end LSN.  *)
+(* This code guard does not change the legacy model below; the r16 composed *)
+(* model correspondence and raw-recovery integrity policy are separate.     *)
+(* V3 map publication controls test merged C/checkpoint/W and volatile proof *)
+(* tokens. Real Recover lifecycle wiring is separate from those dark tests. *)
+(* V3 row 6: COW map digest domains and pages/root/directory persistence are *)
+(* code-test obligations. The composed WALFormatR5 model abstracts validated *)
+(* map dependencies; this legacy model is not a proof of the byte codec.     *)
 (***************************************************************************)
 (* S3, walstore layout: a ring WAL of K pages in front of an extent.       *)
 (* Records of 1 or 2 pages are appended to the page cache, written back to *)
@@ -25,6 +33,14 @@
 (*   "watermarkFull" watermarkSB, and recovery decodes every page position *)
 (*                 instead of stopping a range at its first bad entry.     *)
 (***************************************************************************)
+(* Impl-3 row 2 adds a DARK byte codec in wal_entry_v3.go. Its 62/70-byte *)
+(* framing, CRC32C, type/size bounds and allocation order are code-test     *)
+(* obligations, abstracted as record validity here, NOT proved by this model.*)
+(* No production state/transition or model action changes in codec row 2.  *)
+(* Impl-3 row4 adds dark nonce/cursor-bound file writer and scan muscles.  *)
+(* They return evidence, not readiness: R<W*, fencing and BASE decisions  *)
+(* remain the integrating owner. Physical cursor/slack/binding checks use *)
+(* code controls; composed record-position receipts retain their scope.   *)
 EXTENDS Integers, FiniteSets, Sequences, TLC
 
 CONSTANTS K, MaxLSN, LBAs, Rule, CorruptOn, MaxCkpt,

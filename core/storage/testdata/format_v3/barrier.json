@@ -1,0 +1,13 @@
+{
+  "design_sha256": "c9c652cbe846822dff5c08ce95081b0156e1df0582e6b9766b62e1742ddc1adf",
+  "kind": "barrier",
+  "lsn": 7,
+  "batch_count": 0,
+  "durable_lsn": 6,
+  "logical_start": 128,
+  "nonce_hex": "000102030405060708090a0b0c0d0e0f",
+  "prefix_bytes": 62,
+  "entry_size": 70,
+  "crc32c_hex": "5d1aabd6",
+  "sha256": "10056856c951fe00bc95a63ccfe021601fb36aaeb08806511066db438304f493"
+}

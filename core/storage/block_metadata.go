@@ -45,14 +45,24 @@ type BlockMetadataBinding struct {
 // or recovery begins. On create it declares a layout without writing bytes;
 // on open it must accept exactly the stored version. No registry or hook chain.
 type BlockMetadataFactory func(BlockMetadataFile, BlockMetadataLayout) (BlockMetadataBinding, error)
-type WALStoreOptions struct{ MetadataFactory BlockMetadataFactory }
+type WALStoreOptions struct {
+	MetadataFactory BlockMetadataFactory
+	// ChunkBlocks fixes the owned map geometry at create. Zero uses 1024.
+	ChunkBlocks uint32
+	// WMode is C (lagged) by default; A (strict) is an opt-in per volume.
+	WMode WMode
+}
 
 func bindBlockMetadata(f *os.File, sb *superblock, opts WALStoreOptions, creating, readonly bool) (BlockMetadata, int64, error) {
 	if sb.WALOffset > math.MaxInt64 || sb.WALSize > math.MaxInt64-sb.WALOffset || sb.VolumeSize > math.MaxInt64-sb.WALOffset-sb.WALSize {
 		return nil, 0, fmt.Errorf("storage: extent size overflow")
 	}
 	base := sb.WALOffset + sb.WALSize + sb.VolumeSize
-	binding := BlockMetadataBinding{ImplVersion: WALStoreImplVersion}
+	nativeVersion := uint32(1) // frozen v2 metadata seam
+	if sb.Version == superblockVersionV3 {
+		nativeVersion = walStoreImplVersion3
+	}
+	binding := BlockMetadataBinding{ImplVersion: nativeVersion}
 	if opts.MetadataFactory != nil {
 		var err error
 		binding, err = opts.MetadataFactory(f, BlockMetadataLayout{ImplVersion: sb.ImplVersion, BlockSize: sb.BlockSize, NumBlocks: uint32(sb.VolumeSize / uint64(sb.BlockSize)), ExtentEnd: int64(base), Creating: creating, ReadOnly: readonly})
@@ -60,7 +70,7 @@ func bindBlockMetadata(f *os.File, sb *superblock, opts WALStoreOptions, creatin
 			return nil, 0, fmt.Errorf("storage: bind block metadata: %w", err)
 		}
 	}
-	if binding.ImplVersion == 0 || (!creating && binding.ImplVersion != sb.ImplVersion) || (binding.ImplVersion != WALStoreImplVersion && binding.Hook == nil) {
+	if binding.ImplVersion == 0 || (!creating && binding.ImplVersion != sb.ImplVersion) || (binding.ImplVersion != nativeVersion && binding.Hook == nil) {
 		return nil, 0, fmt.Errorf("storage: unsupported walstore implementation version %d without accepting metadata factory", sb.ImplVersion)
 	}
 	if binding.AppendedBytes > math.MaxInt64-base {

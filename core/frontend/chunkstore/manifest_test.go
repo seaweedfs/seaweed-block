@@ -23,7 +23,7 @@ func TestManifest_CapturePublishesSegmentRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := filepath.Join(t.TempDir(), "volume")
-	s, err := storage.CreateWALStore(p, 64, 4096)
+	s, err := storage.CreateWALStoreWithOptions(p, 64, 4096, storage.WALStoreOptions{ChunkBlocks: 8})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +281,7 @@ func TestManifest_NoopFlatUpgradeUsesOneNormalGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := filepath.Join(t.TempDir(), "store")
-	s, err := storage.CreateWALStore(p, 64, 4096)
+	s, err := storage.CreateWALStoreWithOptions(p, 64, 4096, storage.WALStoreOptions{ChunkBlocks: 8})
 	if err != nil {
 		t.Fatal(err)
 	}

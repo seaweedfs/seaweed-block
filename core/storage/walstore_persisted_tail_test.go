@@ -41,7 +41,7 @@ func TestWALStoreAppendDuringFlushThenTornWrapKeepsSyncedRecords(t *testing.T) {
 	)
 	S := uint64(walEntryHeaderSize + blockSize)
 	path := filepath.Join(t.TempDir(), "store.bin")
-	s := createWALStoreWithWALSizeForTest(t, path, 64, blockSize, walSize)
+	s := createLegacyWALStoreWithWALSizeForTest(t, path, 64, blockSize, walSize)
 	s.DisableAutoFlushForRecoveryTest()
 	if _, err := s.Write(0, makeBlock(blockSize, 0x10)); err != nil { // LSN 1
 		t.Fatal(err)
@@ -87,7 +87,7 @@ func TestWALStoreAppendDuringFlushThenTornWrapKeepsSyncedRecords(t *testing.T) {
 		t.Fatal(err)
 	}
 	crashRecoveryHardeningStore(t, s)
-	r, err := OpenWALStore(path)
+	r, err := openLegacyWALStoreForTest(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestWALStoreAppendDuringFlushThenTornWrapKeepsSyncedRecords(t *testing.T) {
 func TestWALStoreFlushPersistsTheReleasedTail(t *testing.T) {
 	const blockSize = 4096
 	path := filepath.Join(t.TempDir(), "store.bin")
-	s := createWALStoreWithWALSizeForTest(t, path, 64, blockSize, 24*1024)
+	s := createLegacyWALStoreWithWALSizeForTest(t, path, 64, blockSize, 24*1024)
 	s.DisableAutoFlushForRecoveryTest()
 	t.Cleanup(func() { _ = s.Close() })
 	for round := 0; round < 3; round++ {
@@ -134,7 +134,7 @@ func TestWALStoreFlushPersistsTheReleasedTail(t *testing.T) {
 func TestWALStoreRecoverPersistsTheRecoveredBounds(t *testing.T) {
 	const blockSize = 4096
 	path := filepath.Join(t.TempDir(), "store.bin")
-	s := createWALStoreWithWALSizeForTest(t, path, 64, blockSize, 24*1024)
+	s := createLegacyWALStoreWithWALSizeForTest(t, path, 64, blockSize, 24*1024)
 	s.DisableAutoFlushForRecoveryTest()
 	if _, err := s.Write(0, makeBlock(blockSize, 0x30)); err != nil { // LSN 1
 		t.Fatal(err)
@@ -162,7 +162,7 @@ func TestWALStoreRecoverPersistsTheRecoveredBounds(t *testing.T) {
 		t.Fatal(err)
 	}
 	crashRecoveryHardeningStore(t, s)
-	r, err := OpenWALStore(path)
+	r, err := openLegacyWALStoreForTest(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +218,7 @@ func TestWALStoreFullFlushThenTornWrapKeepsSyncedRecords(t *testing.T) {
 	)
 	S := uint64(walEntryHeaderSize + blockSize)
 	path := filepath.Join(t.TempDir(), "store.bin")
-	s := createWALStoreWithWALSizeForTest(t, path, 64, blockSize, walSize)
+	s := createLegacyWALStoreWithWALSizeForTest(t, path, 64, blockSize, walSize)
 	s.DisableAutoFlushForRecoveryTest()
 	if _, err := s.Write(0, makeBlock(blockSize, 0x10)); err != nil { // LSN 1
 		t.Fatal(err)
@@ -252,7 +252,7 @@ func TestWALStoreFullFlushThenTornWrapKeepsSyncedRecords(t *testing.T) {
 		t.Fatal(err)
 	}
 	crashRecoveryHardeningStore(t, s)
-	r, err := OpenWALStore(path)
+	r, err := openLegacyWALStoreForTest(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -362,7 +362,7 @@ func TestWALStoreRecoverBoundsPersistFailureRefusesAppendsUntilRetry(t *testing.
 	for _, seam := range []string{"write", "sync"} {
 		t.Run(seam, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "store.bin")
-			s := createWALStoreWithWALSizeForTest(t, path, 64, blockSize, 24*1024)
+			s := createLegacyWALStoreWithWALSizeForTest(t, path, 64, blockSize, 24*1024)
 			s.DisableAutoFlushForRecoveryTest()
 			crashed := false
 			t.Cleanup(func() {
@@ -397,7 +397,7 @@ func TestWALStoreRecoverBoundsPersistFailureRefusesAppendsUntilRetry(t *testing.
 			crashRecoveryHardeningStore(t, s)
 			crashed = true
 
-			r, err := OpenWALStore(path)
+			r, err := openLegacyWALStoreForTest(path)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -436,7 +436,7 @@ func TestWALStoreRecoverBoundsPersistFailureRefusesAppendsUntilRetry(t *testing.
 				}
 				crashRecoveryHardeningStore(t, r)
 				rClosed = true
-				r2, err := OpenWALStore(path)
+				r2, err := openLegacyWALStoreForTest(path)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -466,7 +466,7 @@ func TestWALStoreRecoverBoundsPersistFailureRefusesAppendsUntilRetry(t *testing.
 			crashRecoveryHardeningStore(t, live)
 			rClosed = true
 
-			q, err := OpenWALStore(path)
+			q, err := openLegacyWALStoreForTest(path)
 			if err != nil {
 				t.Fatal(err)
 			}

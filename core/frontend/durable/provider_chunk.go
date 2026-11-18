@@ -207,6 +207,9 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 func (p *DurableProvider) attachChunk(ctx context.Context, volumeID string, h *volHandle) error {
 	p.mu.Lock()
 	layer := h.chunk
+	if layer == nil {
+		layer = h.chunkPending
+	}
 	p.mu.Unlock()
 	if layer == nil {
 		var err error
@@ -215,29 +218,55 @@ func (p *DurableProvider) attachChunk(ctx context.Context, volumeID string, h *v
 		}
 		p.mu.Lock()
 		if p.closed {
-			// Not published: the store still owns the layer and closes it
-			// in WALStore.Close, which Close runs after this call settles.
+			// The store owns this unpublished layer and closes it after
+			// the admitted attach settles.
 			p.mu.Unlock()
 			return errProviderClosed
 		}
+		h.chunkPending = layer
+		p.mu.Unlock()
+	}
+	// The owner commit is serialized with a later BASE begin. The callback
+	// does marker I/O only: no store/layer reentry while installMu is held.
+	commit := func() error {
+		if h.fresh {
+			return removeChunkFreshMarker(h.path)
+		}
+		return nil
+	}
+	if h.fresh {
+		if hook := p.testBeforeChunkFreshRetire; hook != nil {
+			if err := hook(); err != nil {
+				return err
+			}
+		}
+	}
+	if ws, ok := h.storage.(*storage.WALStore); ok {
+		if err := ws.CommitChunkAttachV3(commit); err != nil {
+			return err
+		}
+	} else if err := commit(); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return errProviderClosed
+	}
+	h.fresh = false
+	if h.chunk == nil {
+		// No explicit operation can resolve the layer, and no scheduler
+		// can publish, until marker retirement is durably committed.
 		h.chunk = layer
+		h.chunkPending = nil
 		h.backend.mu.Lock()
 		h.backend.chunkFenced = layer.Fenced
 		h.backend.mu.Unlock()
 		if p.cfg.ChunkCaptureInterval > 0 {
-			ctx, cancel := context.WithCancel(context.Background())
+			loopCtx, cancel := context.WithCancel(context.Background())
 			h.chunkStop, h.chunkDone = cancel, make(chan struct{})
-			go p.chunkLoop(ctx, volumeID, layer, h.chunkDone)
+			go p.chunkLoop(loopCtx, volumeID, layer, h.chunkDone)
 		}
-		p.mu.Unlock()
-	}
-	if h.fresh {
-		// The attach persisted the absence of every HEAD chunk; only now
-		// may a restart treat the local volume as authoritative.
-		if err := removeChunkFreshMarker(h.path); err != nil {
-			return err
-		}
-		h.fresh = false
 	}
 	return nil
 }
@@ -299,6 +328,10 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 			return nil
 		},
 	}
+	if p.testWALStoreFactory != nil {
+		// Dark mapped caller controls must not rely on the legacy C11 sidecar.
+		cfg.Bitmap = nil
+	}
 	if !h.fresh {
 		// An existing local volume is this holder's image only while HEAD is
 		// still this holder's publication. Another holder's HEAD means the
@@ -320,6 +353,15 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 		// Attach preparation is gated. Seed the exact observed HEAD before
 		// its takeover CAS; only then finalize lazy attachment and expose I/O.
 		cfg.PrepareRestore = func(head storage.ChunkHead) error {
+			if baseLSN, complete := ws.InstalledBaseLSN(); complete {
+				// The fresh marker can outlive a full local BASE. It is not
+				// permission to seed backwards or to fill from an older HEAD.
+				if head.RemoteLSN > baseLSN {
+					return fmt.Errorf("durable: completed BASE frontier %d is behind HEAD %d", baseLSN, head.RemoteLSN)
+				}
+				cfg.FreshFromHead = false
+				return nil
+			}
 			// No HEAD is a new lineage; preserve any pre-assignment local
 			// writes instead of replacing their frontier with zero.
 			if head.Gen == 0 {

@@ -69,7 +69,7 @@ func TestGC_StalledCutRemainsReadableAfterTwoMarks(t *testing.T) {
 	}
 	held := &heldGCRemote{remote, make(chan struct{}), make(chan struct{})}
 	p := filepath.Join(t.TempDir(), "volume")
-	s, e := storage.CreateWALStore(p, 64, 4096)
+	s, e := storage.CreateWALStoreWithOptions(p, 64, 4096, storage.WALStoreOptions{ChunkBlocks: 8})
 	if e != nil {
 		t.Fatal(e)
 	}

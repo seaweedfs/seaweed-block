@@ -341,7 +341,8 @@ type chunkLayerConfig struct {
 	CaptureAllowed func() error
 	// ReadMissTimeout bounds one OnReadMiss remote fetch.
 	ReadMissTimeout time.Duration
-	// Bitmap persists the dirty-since-HEAD bitmap. Required.
+	// Bitmap persists the legacy dirty-since-HEAD bitmap. Required for v2;
+	// impl3 uses its owned LSN map and never calls this optional legacy object.
 	Bitmap chunkBitmapStore
 
 	// BarrierBound bounds how many chunks a cut copies under its barrier:

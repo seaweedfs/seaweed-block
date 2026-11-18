@@ -252,7 +252,7 @@ func TestChunkRemote_ChunkLayerCaptureThenFreshHost(t *testing.T) {
 
 	attach := func(name string, fresh bool) (*storage.WALStore, storage.ChunkLayer) {
 		p := filepath.Join(dir, name)
-		s, err := storage.CreateWALStore(p, blocks, 4096)
+		s, err := storage.CreateWALStoreWithOptions(p, blocks, 4096, storage.WALStoreOptions{ChunkBlocks: chunkBlocks})
 		if err != nil {
 			t.Fatal(err)
 		}

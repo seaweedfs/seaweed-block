@@ -56,6 +56,10 @@ type flusher struct {
 	// taken and the publication lock released: the window in which a
 	// concurrent append is not in this cycle's checkpoint. Tests only.
 	afterSnapshotForTest func()
+	// Pauses after materialization/fsync, before map proof preparation. Tests only.
+	afterExtentSyncForTest func()
+	// Pauses after checkpoint/reuse publication, before the outer DM cleanup.
+	afterCheckpointForTest func()
 }
 
 type flusherConfig struct {
@@ -167,9 +171,18 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 	// Hold the publication lock across all shards: a later shard must not
 	// include a write whose predecessor was omitted from an earlier shard.
 	// Release before WAL reads, extent writes or fsync.
+	// Bind materialization to the same Recover lifetime as this snapshot.
+	// Recover holds store.mu at both generation boundaries.
+	var recoveryGen uint64
+	if store.v3 != nil {
+		recoveryGen = store.v3.recoverGen.Load()
+	}
 	entries := store.dm.snapshot()
 	store.mu.RUnlock()
 	if len(entries) == 0 {
+		if store.v3 != nil {
+			return store.refreshW() // the mode-C idle refresh (DESIGN 6.2)
+		}
 		return nil
 	}
 	if f.afterSnapshotForTest != nil {
@@ -225,6 +238,10 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 		return fmt.Errorf("flusher: fsync after extent writes: %w", syncErr)
 	}
 
+	if f.afterExtentSyncForTest != nil {
+		f.afterExtentSyncForTest()
+	}
+
 	// Step 3: advance the on-disk checkpoint to the highest LSN
 	// that was successfully flushed in this cycle. Because we
 	// processed the entire consistent snapshot, every entry
@@ -233,10 +250,16 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 	if maxLSN > 0 {
 		// The released tail is persisted with the checkpoint, before the
 		// writer may reuse those bytes.
-		if err := store.persistCheckpointAndRelease(maxLSN, maxLSNPhys, maxLSNEntrySize); err != nil {
+		var publishErr error
+		if store.v3 != nil {
+			publishErr = store.persistCheckpointV3(maxLSN, recoveryGen)
+		} else {
+			publishErr = store.persistCheckpointAndRelease(maxLSN, maxLSNPhys, maxLSNEntrySize)
+		}
+		if err := publishErr; err != nil {
 			return fmt.Errorf("flusher: persist checkpoint %d: %w", maxLSN, err)
 		}
-		if store.CheckpointLSN() >= maxLSN {
+		if store.v3 == nil && store.CheckpointLSN() >= maxLSN {
 			store.mu.Lock()
 			if maxLSN+1 > store.walTail {
 				store.walTail = maxLSN + 1
@@ -245,17 +268,51 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 		}
 	}
 
+	if f.afterCheckpointForTest != nil {
+		f.afterCheckpointForTest()
+	}
+
 	// Step 4: remove flushed entries from the dirty map using
 	// compare-and-delete. If a concurrent Write() bumped an entry's
 	// LSN after our snapshot, this leaves the newer entry alone.
+	// V3 may have clamped its checkpoint to Wack (or held it for a map).
+	// Keep the uncovered entries as retry work even though their extent
+	// bytes were fsynced: a later Sync plus cycle must advance checkpoint
+	// AND coverage, rather than merely refreshing W on an empty dirty map.
+	checkpoint := maxLSN // legacy behavior: remove the whole flushed snapshot
+	if store.v3 != nil {
+		// Serialize validation and LSN-only retirement with Recover. A new
+		// lifetime can reuse the same LBA, physical offset and LSN.
+		store.mu.Lock()
+		if !store.v3.flushLifetimeValidV3(recoveryGen) {
+			store.mu.Unlock()
+			return ErrMapCoverageStale
+		}
+		checkpoint = store.checkpointLSN
+		if checkpoint >= maxLSN && maxLSN+1 > store.walTail {
+			store.walTail = maxLSN + 1
+		}
+	}
 	for _, e := range entries {
+		if e.LSN > checkpoint {
+			continue
+		}
 		store.dm.compareAndDelete(e.LBA, e.LSN)
 	}
+	if store.v3 != nil {
+		store.mu.Unlock()
+	}
 	f.flushes.Add(1)
+	if store.v3 != nil {
+		return store.refreshW() // the mode-C idle refresh (DESIGN 6.2)
+	}
 	return nil
 }
 
 func (f *flusher) readDirtyRecord(e snapshotEntry) (data []byte, entrySize uint64, err error) {
+	if f.store.v3 != nil {
+		return f.readDirtyRecordV3(e)
+	}
 	store := f.store
 	readFailed := false
 	defer func() {

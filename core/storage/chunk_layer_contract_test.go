@@ -214,6 +214,11 @@ func TestChunkLayer_C3_EveryHeadIsExactUnderConcurrentWrites(t *testing.T) {
 			}
 			if err == nil {
 				err = s.flusher.flushOnce()
+				// A concurrent cut can invalidate a prepared checkpoint map;
+				// the production worker retries this explicit stale-proof outcome.
+				if errors.Is(err, ErrMapCoverageStale) {
+					err = nil
+				}
 			}
 			if err != nil {
 				werr <- err
@@ -278,7 +283,11 @@ func TestChunkLayer_C3_WriteDuringCopyWaitsForTheCut(t *testing.T) {
 	f := newFakeChunkRemote()
 	f.seedHead(t, src, 10, 1)
 	s, _ := newChunkTestStore(t)
-	s.AdvanceFrontier(10) // the log continues from HEAD's remote_lsn (W4b's job in production)
+	func() {
+		if err := s.SeedChunkFrontier(10); err != nil {
+			t.Fatal(err)
+		}
+	}() // the log continues from HEAD's remote_lsn (W4b's job in production)
 	cfg := ctConfig(2)
 	cfg.FreshFromHead = true
 	layer := mustAttach(t, s, f, cfg)
@@ -382,29 +391,38 @@ func TestChunkLayer_C4_WritesDuringUploadAndBaseAreCapturedNext(t *testing.T) {
 		t.Fatalf("second HEAD remote_lsn %d still misses the mid-upload write %d", h.RemoteLSN, during)
 	}
 
-	// Rebuild BASE, bracketed: no cut runs between Begin and End.
-	if err := layer.BeginBaseInstall(); err != nil {
-		t.Fatalf("BeginBaseInstall: %v", err)
-	}
+	// Rebuild through the v3 store handle. The admitted BASE is the full
+	// image at the last cut, plus the replacement block, at a new floor.
+	image := f.imageOf(t, f.stats().head)
 	base := makeBlock(ctBlockSize, 0xBA)
-	if err := s.WriteExtentDirect(20, base); err != nil {
+	copy(image[20*ctBlockSize:21*ctBlockSize], base)
+	frontier := during + 10
+	handle, err := s.BeginBaseInstall(frontier, [16]byte{0x44})
+	if err != nil {
 		t.Fatal(err)
 	}
-	frontier := during + 10
-	s.AdvanceFrontier(frontier)
+	for lba := uint32(0); lba < ctNumBlocks; lba++ {
+		data := image[int(lba)*ctBlockSize : int(lba+1)*ctBlockSize]
+		if err := handle.WriteBase(lba, data); err != nil {
+			t.Fatal(err)
+		}
+	}
 	w.record(frontier, 20, base)
-	if _, err := s.Sync(); err != nil {
-		t.Fatal(err)
+	if _, err := s.Sync(); !errors.Is(err, ErrBaseInstalling) {
+		t.Fatalf("logical Sync during install: %v", err)
 	}
 	before := f.stats()
 	if _, err := layer.Capture(ctTimeout(t)); !errors.Is(err, errChunkCaptureRefused) {
-		t.Fatalf("Capture during a BASE install: got %v, want errChunkCaptureRefused", err)
+		t.Fatalf("capture while installing: %v", err)
 	}
 	if after := f.stats(); after.puts != before.puts || after.cas != before.cas {
-		t.Fatalf("capture during a BASE install made %d puts and %d CAS calls", after.puts-before.puts, after.cas-before.cas)
+		t.Fatal("capture during install made remote effects")
 	}
-	if err := layer.EndBaseInstall(frontier); err != nil {
-		t.Fatalf("EndBaseInstall after the durable frontier: %v", err)
+	if err := handle.MarkBaseComplete(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
 	}
 	waitReconciledForTest(t, layer) // the BASE is reconciled against HEAD first
 	if _, err := layer.Capture(ctTimeout(t)); err != nil {

@@ -11,6 +11,9 @@ import (
 // attaching the chunk layer or admitting writes. Repeating after failure is safe.
 // Order: captureMu -> lifecycleMu -> mu; no remote call or layer callback.
 func (s *WALStore) SeedChunkFrontier(lsn uint64) error {
+	if s.v3 != nil {
+		return s.seedChunkFrontierV3(lsn)
+	}
 	s.captureMu.Lock()
 	defer s.captureMu.Unlock()
 	s.lifecycleMu.RLock()
@@ -48,6 +51,59 @@ func (s *WALStore) SeedChunkFrontier(lsn uint64) error {
 		return fmt.Errorf("storage: seed metadata sync: %w", err)
 	}
 	*s.sb = next
+	s.checkpointLSN, s.syncedLSN, s.walHead, s.nextLSN = lsn, lsn, lsn, lsn+1
+	s.pendingDirectFrontierLSN = 0
+	return nil
+}
+
+// seedChunkFrontierV3 is SeedChunkFrontier on a dark v3 store (plan row 9):
+// the same preconditions (an open, unattached store with no local writes
+// beyond its checkpoint), a data fsync, and then the one checkpoint
+// publication (publishCheckpointV3): the metadata barrier, the owned-map
+// candidate at lsn and the sole slot publisher, which raises W and the
+// checkpoint to lsn together. The volatile frontier moves only after that
+// publication succeeded; any failure publishes nothing and may be retried.
+// An unmapped v3 store has no map candidate for the new checkpoint and is
+// refused. Order: captureMu -> lifecycleMu -> (syncMu ->) mu.
+func (s *WALStore) seedChunkFrontierV3(lsn uint64) error {
+	v := s.v3
+	s.captureMu.Lock()
+	defer s.captureMu.Unlock()
+	s.lifecycleMu.RLock()
+	defer s.lifecycleMu.RUnlock()
+	s.mu.Lock()
+	if s.closed || s.chunk.Load() != nil {
+		s.mu.Unlock()
+		return errors.New("storage: seed frontier requires an open, unattached store")
+	}
+	if err := s.stickyIOFault(); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	d := v.pub.current()
+	if lsn == ^uint64(0) || lsn < d.CheckpointLSN || v.appended.Load() > d.CheckpointLSN ||
+		s.walHead > s.checkpointLSN || s.nextLSN > lsn+1 || d.BaseState != BaseNone {
+		s.mu.Unlock()
+		return errors.New("storage: seed frontier cannot replace local writes, an install or wrap LSN")
+	}
+	if v.ownedMap == nil {
+		s.mu.Unlock()
+		return fmt.Errorf("%w: a v3 seed needs the owned map for its checkpoint coverage", errV3NotYet)
+	}
+	if d.CheckpointLSN == lsn && d.W >= lsn && s.nextLSN == lsn+1 {
+		s.mu.Unlock()
+		return nil
+	}
+	gen := v.recoverGen.Load()
+	s.mu.Unlock()
+	if err := s.syncFile(nil, s.fd.Sync); err != nil {
+		return fmt.Errorf("storage: seed data sync: %w", err)
+	}
+	if _, err := s.publishCheckpointV3(lsn, true, gen); err != nil {
+		return fmt.Errorf("storage: seed frontier %d: %w", lsn, err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.checkpointLSN, s.syncedLSN, s.walHead, s.nextLSN = lsn, lsn, lsn, lsn+1
 	s.pendingDirectFrontierLSN = 0
 	return nil

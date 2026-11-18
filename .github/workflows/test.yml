@@ -49,5 +49,11 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      - name: Test
-        run: go test -short -count=1 -timeout 10m ./...
+      - name: Test default configuration
+        run: go test -p=1 -short -count=1 -timeout 10m ./...
+
+      - name: Test legacy-fixture configuration
+        # Legacy-input fixtures and native caller controls stay executable after
+        # their constructors move behind the explicit test-only build tag.
+        # Bound package concurrency for existing short wall-clock assertions.
+        run: go test -p=1 -short -tags=swblock_format_v3_test -count=1 -timeout 10m ./...
