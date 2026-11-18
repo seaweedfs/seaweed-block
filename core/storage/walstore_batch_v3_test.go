@@ -241,3 +241,43 @@ func TestWALStoreV3BatchRecordsMapCoverage(t *testing.T) {
 		}
 	}
 }
+
+// Ordinary replicated ApplyEntry on v3 (DESIGN 8.1, 6.7, r16.1; codex03
+// 12a inventory): applies append in LSN order and survive a crash; an LSN
+// at or below the highest is a superseded no-op when the LBA holds a higher
+// LSN and ErrWALLSNOrder otherwise; an unanchored gap is refused; an
+// ordinary apply while installing is refused (the install lane is the
+// handle's). Mutants: no order check, no gap check, no installing refusal.
+func TestWALStoreV3ReplicatedApply(t *testing.T) {
+	s, path := newStoreV3(t, WModeStrict)
+	for lsn := uint64(1); lsn <= 3; lsn++ {
+		if err := s.ApplyEntry(uint32(lsn), blk(byte(lsn)), lsn); err != nil {
+			t.Fatalf("apply %d: %v", lsn, err)
+		}
+	}
+	if err := s.ApplyEntry(2, blk(0x22), 3); err != nil {
+		// LBA 2 holds LSN 2 < 3, but 3 is already appended (on LBA 3).
+		if !errors.Is(err, ErrWALLSNOrder) {
+			t.Fatalf("an appended LSN on another LBA: err = %v, want ErrWALLSNOrder", err)
+		}
+	} else {
+		t.Fatal("an LSN at the highest appended was applied again")
+	}
+	if err := s.ApplyEntry(3, blk(0x33), 2); err != nil {
+		t.Fatalf("a superseded lower LSN for an LBA that holds a higher one: %v, want a no-op", err)
+	}
+	if err := s.ApplyEntry(9, blk(9), 9); !errors.Is(err, ErrInstallLSNGap) {
+		t.Fatalf("a gap above 3: err = %v, want the gap refusal", err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	crashRecoveryHardeningStore(t, s)
+	r := mustReopenV3(t, path)
+	readAllV3(t, r, 1, 3)
+	beginV3(t, r, 3, idA)
+	if err := r.ApplyEntry(4, blk(4), 4); !errors.Is(err, ErrBaseInstalling) {
+		t.Fatalf("an ordinary apply while installing: err = %v, want ErrBaseInstalling", err)
+	}
+	crashRecoveryHardeningStore(t, r)
+}

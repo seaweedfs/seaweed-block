@@ -31,9 +31,9 @@ var (
 	// ErrBaseInstallNoSpace: an install-lane append found no WAL space; the
 	// session fails and is retried, nothing waits (DESIGN 8.4).
 	ErrBaseInstallNoSpace = errors.New("storage: v3 install-lane append found no WAL space")
-	// ErrInstallLSNGap: an install-lane entry would leave an unanchored LSN
-	// gap (DESIGN 8.1, ApplyEntry gap rule).
-	ErrInstallLSNGap = errors.New("storage: v3 install-lane entry leaves an LSN gap")
+	// ErrInstallLSNGap: a replicated or install-lane entry would leave an
+	// unanchored LSN gap (DESIGN 8.1, ApplyEntry gap rule).
+	ErrInstallLSNGap = errors.New("storage: v3 replicated entry leaves an unanchored LSN gap")
 )
 
 // installReopenV3 is an installing reopen's recovered bounds (DESIGN 8.3).
@@ -379,7 +379,18 @@ func (h *installHandleV3) ApplyInstallEntry(lba uint32, data []byte, lsn uint64)
 		return err
 	}
 	defer release()
-	s := h.s
+	return h.s.applyEntryV3(lba, data, lsn, true)
+}
+
+// applyEntryV3 appends one replicated entry with the source's LSN on a v3
+// store (DESIGN 8.1 and 6.7, r16/r16.1): through the v3 writer in LSN
+// order; an LSN at or below the highest appended is a superseded no-op when
+// the LBA already holds a higher LSN and ErrWALLSNOrder otherwise; an LSN
+// that would leave an unanchored gap above max(CheckpointLSN, BaseLSN,
+// highest) is refused (recovery needs a contiguous prefix). installLane is
+// the install handle's apply (its admission ran already); an ordinary
+// replicated apply is refused while installing (that lane is the handle's).
+func (s *WALStore) applyEntryV3(lba uint32, data []byte, lsn uint64, installLane bool) error {
 	v := s.v3
 	s.captureMu.RLock()
 	defer s.captureMu.RUnlock()
@@ -391,18 +402,21 @@ func (h *installHandleV3) ApplyInstallEntry(lba uint32, data []byte, lsn uint64)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return errors.New("storage: ApplyInstallEntry after Close")
+		return errors.New("storage: ApplyEntry after Close")
 	}
 	if err := s.stickyIOFault(); err != nil {
 		return err
 	}
 	d := v.pub.current()
+	if !installLane && d.BaseState == BaseInstalling {
+		return fmt.Errorf("%w: an ordinary replicated apply while installing", ErrBaseInstalling)
+	}
 	highest := v.appended.Load()
 	if lsn <= highest {
 		if _, _, held, _, ok := s.dm.get(uint64(lba)); ok && held > lsn {
 			return nil // superseded no-op: the LBA already holds a higher LSN
 		}
-		return fmt.Errorf("%w: install-lane %d at or below %d", ErrWALLSNOrder, lsn, highest)
+		return fmt.Errorf("%w: replicated %d at or below %d", ErrWALLSNOrder, lsn, highest)
 	}
 	if anchor := max(d.CheckpointLSN, d.BaseLSN, highest); lsn > anchor+1 {
 		return fmt.Errorf("%w: %d above %d", ErrInstallLSNGap, lsn, anchor)
@@ -411,7 +425,7 @@ func (h *installHandleV3) ApplyInstallEntry(lba uint32, data []byte, lsn uint64)
 	phys, err := s.appendWriteV3(lba, dataCopy, lsn)
 	s.walMutation.Add(1)
 	if err != nil {
-		if errors.Is(err, errWALFull) {
+		if installLane && errors.Is(err, errWALFull) {
 			return fmt.Errorf("%w: %w", ErrBaseInstallNoSpace, err)
 		}
 		return err
@@ -422,6 +436,9 @@ func (h *installHandleV3) ApplyInstallEntry(lba uint32, data []byte, lsn uint64)
 		s.nextLSN = lsn + 1
 	}
 	s.walHead = max(s.walHead, lsn)
+	if s.walTail == 0 {
+		s.walTail = lsn
+	}
 	return nil
 }
 

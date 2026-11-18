@@ -1346,7 +1346,7 @@ func (s *WALStore) noteChunkMutation(lba uint64) {
 
 func (s *WALStore) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
 	if s.v3 != nil {
-		return errV3NotYet // the install-lane apply is plan rows 9 to 11
+		return s.applyEntryV3(lba, data, lsn, false)
 	}
 	s.bypassSyncDedup.Store(true)
 	s.captureMu.RLock()

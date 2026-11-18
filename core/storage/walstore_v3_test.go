@@ -393,9 +393,8 @@ func TestWALStoreV3RefusesPathsOfLaterRows(t *testing.T) {
 	s, _ := newStoreV3(t, WModeLagged)
 	defer s.Close()
 	// WriteBatch is supported since the v3 batch slice (TestWALStoreV3Batch*).
-	if err := s.ApplyEntry(0, blk(1), 10); !errors.Is(err, errV3NotYet) {
-		t.Fatalf("ApplyEntry: err = %v, want errV3NotYet", err)
-	}
+	// ApplyEntry is supported since the v3 replicated-apply slice
+	// (TestWALStoreV3ReplicatedApply*).
 	if err := s.WriteExtentDirect(0, blk(1)); !errors.Is(err, errV3NotYet) {
 		t.Fatalf("WriteExtentDirect: err = %v, want errV3NotYet", err)
 	}
