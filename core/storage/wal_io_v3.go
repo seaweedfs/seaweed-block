@@ -164,7 +164,7 @@ func (w *walWriterV3) reclaimThroughV3(lsn uint64) uint64 {
 	defer w.mu.Unlock()
 	var end uint64
 	for _, point := range w.reclaim {
-		if point.lastLSN > lsn {
+		if point.lastLSN > lsn+1 {
 			break
 		}
 		end = point.end
