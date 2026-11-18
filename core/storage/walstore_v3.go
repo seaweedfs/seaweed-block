@@ -375,7 +375,7 @@ func openWALStoreV3File(path string, f *os.File, requireMap bool, opts WALStoreO
 		CreatedAt: d.CreatedAt, ImplKind: d.ImplKind, ImplVersion: d.ImplVersion,
 	}
 	copy(sb.Magic[:], superblockMagic)
-	if !creating {
+	if !creating && opts.MetadataFactory != nil {
 		metadata, _, err = bindBlockMetadata(f, &sb, opts, false, false)
 		if err != nil {
 			if ownedMap != nil {
