@@ -55,6 +55,9 @@ type ChunkCutResponse struct {
 // mirrors storage.ChunkCutStats field for field (a test keeps the two in
 // step); every duration is in nanoseconds.
 type ChunkCutStatsBody struct {
+	COWSavedChunks    int    `json:"cowSavedChunks"`
+	COWSaveNs         int64  `json:"cowSaveNs"`
+	COWWaitNs         int64  `json:"cowWaitNs"`
 	BarrierPauseNs    int64  `json:"barrierPauseNs"`
 	SyncNs            int64  `json:"syncNs"`
 	CopyNs            int64  `json:"copyNs"`
@@ -79,6 +82,9 @@ func cutStatsBody(s storage.ChunkCutStats) ChunkCutStatsBody {
 		BarrierPauseNs:    s.BarrierPauseNs,
 		SyncNs:            s.SyncNs,
 		CopyNs:            s.CopyNs,
+		COWSavedChunks:    s.COWSavedChunks,
+		COWSaveNs:         s.COWSaveNs,
+		COWWaitNs:         s.COWWaitNs,
 		CandidateChunks:   s.CandidateChunks,
 		UploadedChunks:    s.UploadedChunks,
 		UploadedBytes:     s.UploadedBytes,

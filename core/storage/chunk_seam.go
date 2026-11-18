@@ -368,6 +368,9 @@ type chunkLayerConfig struct {
 // chunkCutStats describes one cut. The periodic-cut work fills it; a zero
 // value means "not measured".
 type chunkCutStats struct {
+	COWSavedChunks  int
+	COWSaveNs       int64
+	COWWaitNs       int64
 	BarrierPauseNs  int64
 	SyncNs          int64
 	CopyNs          int64

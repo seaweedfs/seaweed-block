@@ -81,8 +81,8 @@ func (s *WALStore) resetIncarnationV3() error {
 	if v == nil {
 		return errors.New("storage: reset on a non-v3 store")
 	}
-	s.captureMu.Lock()
-	defer s.captureMu.Unlock()
+	release := s.holdChunkDestructive(true)
+	defer release()
 	s.lifecycleMu.RLock()
 	defer s.lifecycleMu.RUnlock()
 	v.syncMu.Lock()

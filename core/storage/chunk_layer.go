@@ -33,6 +33,9 @@ import (
 
 // chunkHooks is what the WALStore holds for an attached layer.
 type chunkHooks struct {
+	beforeMutation    func(first, count uint64)
+	beforeDestructive func() func()
+
 	sink   chunkSink
 	closer func() error
 	// mutated runs after every dirty-map insert (a write, a batch write,
@@ -60,6 +63,11 @@ type chunkLayerImpl struct {
 	ctx    context.Context // cancelled by Close
 	cancel context.CancelFunc
 	wg     sync.WaitGroup // captures and fills in flight
+
+	cowMu          sync.Mutex // window admission only; never held during reads or joins
+	cow            *cutCOWWindow
+	cowTransitions int
+	cowClosed      bool
 
 	capMu  sync.Mutex // serializes Capture, Evict, Begin/EndBaseInstall
 	bmMu   sync.Mutex // serializes bitmap store calls
@@ -114,6 +122,7 @@ type chunkLayerImpl struct {
 	keySeq   uint64
 
 	// Test-only scheduling hooks; nil in production.
+	testCOWSave                  func() error
 	testPresenceSnapshotHook     func()                 // after a presence snapshot, before it is written
 	testBaseTransitionBeforeLock func()                 // test handshake before capMu drain
 	testAfterAdmitHook           func()                 // right after a capture is admitted
@@ -139,11 +148,14 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 		return nil, errors.New("storage: chunk layer needs a remote, ChunkBlocks > 0 and a legacy bitmap unless the store owns an impl3 map")
 	}
 	var localBase bool
+	s.captureMu.Lock()
+	defer s.captureMu.Unlock()
+	if s.attachClosed {
+		return nil, errChunkLayerClosed
+	}
 	if mapped {
 		// Serialize hook publication with begin/complete. Their outer hook
 		// snapshot is rechecked after taking this same barrier.
-		s.captureMu.Lock()
-		defer s.captureMu.Unlock()
 		d := s.v3.pub.current()
 		if d.BaseState == BaseInstalling {
 			return nil, ErrBaseIncomplete
@@ -284,6 +296,8 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 	hooks := &chunkHooks{sink: l, closer: l.Close, mutated: l.noteMutation, recovered: l.noteAllMutated}
 	if mapped {
 		hooks.baseTransitionV3 = l.holdBaseTransitionV3
+		hooks.beforeMutation = l.beforeCOWMutation
+		hooks.beforeDestructive = l.holdCOWDestructive
 	}
 	if !s.chunk.CompareAndSwap(nil, hooks) {
 		l.cancel()
@@ -872,23 +886,37 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	l.stMu.Unlock()
 
 	st.CandidateChunks = len(candidates)
-	st.BarrierCopyChunks = len(candidates) - len(useStaged)
 	var copyErr error
 	copyStart := time.Now()
-	for _, idx := range sortedKeys(candidates) {
-		if useStaged[idx] {
-			continue
+	if l.usesOwnedMapV3() {
+		var w *cutCOWWindow
+		w, copyErr = l.installCOWWindow(candidates, useStaged)
+		l.s.captureMu.Unlock()
+		st.BarrierPauseNs = time.Since(barrier).Nanoseconds()
+		if copyErr == nil {
+			var copied []capturedChunk
+			copied, copyErr = l.copyCOWWindow(ctx, w)
+			captured = append(captured, copied...)
+			st.COWSavedChunks = int(w.saved.Load())
+			st.COWSaveNs, st.COWWaitNs = w.saveNs.Load(), w.waitNs.Load()
 		}
-		buf, err := l.readChunk(idx)
-		if err != nil {
-			copyErr = err
-			break
+	} else {
+		st.BarrierCopyChunks = len(candidates) - len(useStaged)
+		for _, idx := range sortedKeys(candidates) {
+			if useStaged[idx] {
+				continue
+			}
+			buf, err := l.readChunk(idx)
+			if err != nil {
+				copyErr = err
+				break
+			}
+			captured = append(captured, capturedChunk{idx: idx, data: buf, sum: sha256.Sum256(buf), zero: isAllZero(buf)})
 		}
-		captured = append(captured, capturedChunk{idx: idx, data: buf, sum: sha256.Sum256(buf), zero: isAllZero(buf)})
+		l.s.captureMu.Unlock()
+		st.BarrierPauseNs = time.Since(barrier).Nanoseconds()
 	}
 	st.CopyNs = time.Since(copyStart).Nanoseconds()
-	l.s.captureMu.Unlock()
-	st.BarrierPauseNs = time.Since(barrier).Nanoseconds()
 	if copyErr != nil {
 		l.abortCut(all)
 		l.dropIntents(ctx, intents)
@@ -1877,7 +1905,17 @@ func (l *chunkLayerImpl) Close() error {
 	}
 	l.closed = true
 	l.stMu.Unlock()
+	l.cowMu.Lock()
+	l.cowClosed = true
+	w := l.cow
+	if w != nil {
+		w.abort(errChunkLayerClosed)
+	}
+	l.cowMu.Unlock()
 	l.cancel()
+	if w != nil {
+		w.join()
+	}
 	l.wg.Wait()
 	close(l.closeDone)
 	return nil

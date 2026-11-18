@@ -394,11 +394,12 @@ func (s *WALStore) applyEntryV3(lba uint32, data []byte, lsn uint64, installLane
 	v := s.v3
 	s.captureMu.RLock()
 	defer s.captureMu.RUnlock()
-	s.lifecycleMu.RLock()
-	defer s.lifecycleMu.RUnlock()
 	if err := s.checkInstallBlockV3(lba, data); err != nil {
 		return err
 	}
+	s.beforeChunkMutation(uint64(lba), 1)
+	s.lifecycleMu.RLock()
+	defer s.lifecycleMu.RUnlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
