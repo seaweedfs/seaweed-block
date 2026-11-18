@@ -182,6 +182,12 @@ func TestCutCOWV3_MutationCompletesWhileEarlierChunkCopyIsHeld(t *testing.T) {
 			if result.err != nil {
 				t.Fatal(result.err)
 			}
+			if method != "WriteOutsideD" && (result.cut.Stats.COWSavedChunks != 1 || result.cut.Stats.COWSaveNs <= 0) {
+				t.Fatalf("real cut did not report its save: %+v", result.cut.Stats)
+			}
+			if result.cut.Stats.BarrierCopyChunks != 0 {
+				t.Fatal("native cut reports data copied under barrier")
+			}
 			if result.cut.H != nextLSN-1 {
 				t.Fatalf("cut H=%d want %d", result.cut.H, nextLSN-1)
 			}

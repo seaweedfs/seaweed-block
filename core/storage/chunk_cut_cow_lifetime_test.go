@@ -181,10 +181,13 @@ func TestCutCOWV3_RecoveryAndCloseDrainSavingOwner(t *testing.T) {
 			}
 			cowWaitSignal(t, w.ended, "terminal notification")
 			if action != "StoreClose" {
+				// ended is the real abort handshake, not a scheduling guess.
+				// Keep actual I/O held for this bounded non-completion check;
+				// an immediate default select could miss a no-join mutant.
 				select {
 				case <-actionDone:
 					t.Fatal("transition returned with saver/live copy still held")
-				default:
+				case <-time.After(100 * time.Millisecond):
 				}
 			}
 			releaseSave()
@@ -401,7 +404,7 @@ func TestCutCOWV3_TwoWritersOneSaveAndCloseJoinsSavedReader(t *testing.T) {
 	select {
 	case <-closeDone:
 		t.Fatal("Close returned before saved reader released")
-	default:
+	case <-time.After(100 * time.Millisecond):
 	}
 	if _, err := os.Stat(name); err != nil {
 		t.Fatal("side removed before reader reference drained", err)
