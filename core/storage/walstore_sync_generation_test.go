@@ -12,7 +12,9 @@ import (
 
 func newGenerationStore(t *testing.T) *WALStore {
 	t.Helper()
-	s, err := CreateWALStore(filepath.Join(t.TempDir(), "store.bin"), 32, 4096)
+	// This control holds the standalone WAL fsync seam. Mode A retains
+	// that phase; mode C combines WAL durability with descriptor publication.
+	s, err := CreateWALStoreWithOptions(filepath.Join(t.TempDir(), "store.bin"), 32, 4096, WALStoreOptions{WMode: WModeStrict})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +181,7 @@ func TestWALGenerationSyncFailureAndShutdown(t *testing.T) {
 func TestWALGenerationBypassesUntrackedMutationPaths(t *testing.T) {
 	for _, kind := range []string{"old LSN apply", "direct extent", "direct frontier", "chunk layer"} {
 		t.Run(kind, func(t *testing.T) {
-			s := newGenerationStore(t)
+			s := newLegacyGenerationStore(t)
 			if _, err := s.Write(0, makeBlock(4096, 0x81)); err != nil {
 				t.Fatal(err)
 			}
@@ -246,7 +248,7 @@ func TestWALGenerationPartialAppendRecoverySync(t *testing.T) {
 	for _, recoverFirst := range []bool{false, true} {
 		t.Run(map[bool]string{false: "failed append without recovery", true: "same-open recovery"}[recoverFirst], func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "store.bin")
-			s := createWALStoreWithWALSizeForTest(t, path, 64, 4096, 1<<20)
+			s := createLegacyWALStoreWithWALSizeForTest(t, path, 64, 4096, 1<<20)
 			s.DisableAutoFlushForRecoveryTest()
 			if _, err := s.Sync(); err != nil {
 				t.Fatal(err)
@@ -292,7 +294,7 @@ func TestWALGenerationPartialAppendRecoverySync(t *testing.T) {
 
 			// A reopen may republish the failed batch's complete prefix (it
 			// was never acknowledged) and serves normally again.
-			r, err := OpenWALStore(path)
+			r, err := openLegacyWALStoreForTest(path)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -357,4 +359,18 @@ func TestWALGenerationSameOpenRecoverInvalidatesCoverage(t *testing.T) {
 	if n := s2.WALSyncCount() - before; n != 1 {
 		t.Fatalf("Recover permanently disabled dedup: syncs=%d want1", n)
 	}
+}
+
+// TODO(format-v3 row 14a): v2 callback-cache / direct-mutation controls only.
+func newLegacyGenerationStore(t *testing.T) *WALStore {
+	t.Helper()
+	// This control holds the standalone WAL fsync seam. Mode A retains
+	// that phase; mode C combines WAL durability with descriptor publication.
+	s, err := createLegacyWALStoreWithOptions(filepath.Join(t.TempDir(), "store.bin"), 32, 4096, WALStoreOptions{WMode: WModeStrict})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	s.DisableAutoFlushForRecoveryTest()
+	return s
 }

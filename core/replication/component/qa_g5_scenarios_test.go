@@ -43,6 +43,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/replication/component"
+	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 // TestG5_QA_LaneDiscipline_LiveAndRecoveryConcurrent_MultiReplica was
@@ -125,9 +126,27 @@ func TestG5_QA_RF2_BothReplicasReachByteEqual(t *testing.T) {
 	component.RunMatrix(t, func(t *testing.T, c *component.Cluster) {
 		c.WithReplicas(2).WithApplyGate().Start()
 
+		// This scenario requires WAL replay from genesis for both replicas.
+		// Retain those 30 records even when checkpointing wins the race.
+		if s, ok := c.Primary().Store.(*storage.WALStore); ok {
+			s.SetRecoveryRetentionLSNs(30)
+		}
+
 		// Write 30 LBAs on primary.
 		c.PrimaryWriteN(30)
 		c.PrimarySync()
+
+		// Exercise both WAL catch-ups after the real checkpoint, rather than
+		// depending on completion before the background flusher runs.
+		if s, ok := c.Primary().Store.(*storage.WALStore); ok {
+			deadline := time.Now().Add(5 * time.Second)
+			for s.CheckpointLSN() < 30 && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			if s.CheckpointLSN() < 30 {
+				t.Fatal("primary did not checkpoint the test writes")
+			}
+		}
 
 		// Both replicas catch up independently (single catch-up per
 		// replica avoids sessionID=1 collision per known carry).

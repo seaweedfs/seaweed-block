@@ -1,0 +1,1796 @@
+[
+  {
+    "file": "cmd/sw-block/migrate_test.go",
+    "test": "TestMigrateV3BadGeometryRefusedBeforeAnyWrite",
+    "legacy_roots": [
+      "CreateLegacyWALStoreTest"
+    ],
+    "reason": "real v2 input fixture for the frozen decoder/migration; row 14a replaces construction, not migration refusal coverage",
+    "v3_controls": [
+      "TestMigrateV3VolumeOpensAsV3",
+      "TestMigrateV3PreparedOnlyRefusedByV3Open"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "cmd/sw-block/migrate_test.go",
+    "test": "TestMigrateV3CleanVolume",
+    "legacy_roots": [
+      "CreateLegacyWALStoreTest",
+      "OpenLegacyWALStoreTest"
+    ],
+    "reason": "real v2 input fixture for the frozen decoder/migration; row 14a replaces construction, not migration refusal coverage",
+    "v3_controls": [
+      "TestMigrateV3VolumeOpensAsV3",
+      "TestMigrateV3PreparedOnlyRefusedByV3Open"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "cmd/sw-block/migrate_test.go",
+    "test": "TestMigrateV3CrashAfterEachStepIsResumable",
+    "legacy_roots": [
+      "CreateLegacyWALStoreTest"
+    ],
+    "reason": "real v2 input fixture for the frozen decoder/migration; row 14a replaces construction, not migration refusal coverage",
+    "v3_controls": [
+      "TestMigrateV3VolumeOpensAsV3",
+      "TestMigrateV3PreparedOnlyRefusedByV3Open"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "cmd/sw-block/migrate_format_v3_test.go",
+    "test": "TestMigrateV3ExcludesOpenUntilCommitFinishes",
+    "legacy_roots": [
+      "CreateLegacyWALStoreTest"
+    ],
+    "reason": "real v2 input fixture for the frozen decoder/migration; row 14a replaces construction, not migration refusal coverage",
+    "v3_controls": [
+      "TestMigrateV3VolumeOpensAsV3",
+      "TestMigrateV3PreparedOnlyRefusedByV3Open"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "cmd/sw-block/migrate_test.go",
+    "test": "TestMigrateV3NeverRestoresTheBackup",
+    "legacy_roots": [
+      "CreateLegacyWALStoreTest"
+    ],
+    "reason": "real v2 input fixture for the frozen decoder/migration; row 14a replaces construction, not migration refusal coverage",
+    "v3_controls": [
+      "TestMigrateV3VolumeOpensAsV3",
+      "TestMigrateV3PreparedOnlyRefusedByV3Open"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "cmd/sw-block/migrate_test.go",
+    "test": "TestMigrateV3OldBinaryAfterPreparation",
+    "legacy_roots": [
+      "CreateLegacyWALStoreTest",
+      "OpenLegacyWALStoreTest"
+    ],
+    "reason": "real v2 input fixture for the frozen decoder/migration; row 14a replaces construction, not migration refusal coverage",
+    "v3_controls": [
+      "TestMigrateV3VolumeOpensAsV3",
+      "TestMigrateV3PreparedOnlyRefusedByV3Open"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "cmd/sw-block/migrate_test.go",
+    "test": "TestMigrateV3OldWALOverwritesThePreparedSlot",
+    "legacy_roots": [
+      "CreateLegacyWALStoreTest"
+    ],
+    "reason": "real v2 input fixture for the frozen decoder/migration; row 14a replaces construction, not migration refusal coverage",
+    "v3_controls": [
+      "TestMigrateV3VolumeOpensAsV3",
+      "TestMigrateV3PreparedOnlyRefusedByV3Open"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "cmd/sw-block/migrate_format_v3_test.go",
+    "test": "TestMigrateV3PreparedOnlyRefusedByV3Open",
+    "legacy_roots": [
+      "CreateLegacyWALStoreTest"
+    ],
+    "reason": "real v2 input fixture for the frozen decoder/migration; row 14a replaces construction, not migration refusal coverage",
+    "v3_controls": [
+      "TestMigrateV3VolumeOpensAsV3",
+      "TestMigrateV3PreparedOnlyRefusedByV3Open"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "cmd/sw-block/migrate_test.go",
+    "test": "TestMigrateV3RefusalsChangeNothing",
+    "legacy_roots": [
+      "CreateLegacyWALStoreTest"
+    ],
+    "reason": "real v2 input fixture for the frozen decoder/migration; row 14a replaces construction, not migration refusal coverage",
+    "v3_controls": [
+      "TestMigrateV3VolumeOpensAsV3",
+      "TestMigrateV3PreparedOnlyRefusedByV3Open"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "cmd/sw-block/migrate_test.go",
+    "test": "TestMigrateV3RetirementRerunFsyncsTheDirectory",
+    "legacy_roots": [
+      "CreateLegacyWALStoreTest"
+    ],
+    "reason": "real v2 input fixture for the frozen decoder/migration; row 14a replaces construction, not migration refusal coverage",
+    "v3_controls": [
+      "TestMigrateV3VolumeOpensAsV3",
+      "TestMigrateV3PreparedOnlyRefusedByV3Open"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "cmd/sw-block/migrate_format_v3_test.go",
+    "test": "TestMigrateV3VolumeOpensAsV3",
+    "legacy_roots": [
+      "CreateLegacyWALStoreTest"
+    ],
+    "reason": "real v2 input fixture for the frozen decoder/migration; row 14a replaces construction, not migration refusal coverage",
+    "v3_controls": [
+      "TestMigrateV3VolumeOpensAsV3",
+      "TestMigrateV3PreparedOnlyRefusedByV3Open"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "cmd/sw-block/internal/v2legacy/real_store_legacy_test.go",
+    "test": "TestReadSuperblockRefusesOtherFormats",
+    "legacy_roots": [
+      "CreateLegacyWALStoreTest"
+    ],
+    "reason": "real v2 input fixture for the frozen decoder/migration; row 14a replaces construction, not migration refusal coverage",
+    "v3_controls": [
+      "TestMigrateV3VolumeOpensAsV3",
+      "TestMigrateV3PreparedOnlyRefusedByV3Open"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "cmd/sw-block/internal/v2legacy/real_store_legacy_test.go",
+    "test": "TestScanCleanOnRealV2Stores",
+    "legacy_roots": [
+      "CreateLegacyWALStoreTest"
+    ],
+    "reason": "real v2 input fixture for the frozen decoder/migration; row 14a replaces construction, not migration refusal coverage",
+    "v3_controls": [
+      "TestMigrateV3VolumeOpensAsV3",
+      "TestMigrateV3PreparedOnlyRefusedByV3Open"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/flusher_test.go",
+    "test": "TestAllBlocks_ReturnsBlocksAfterFlush",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest"
+    ],
+    "reason": "v2 engine/layout, forced legacy fields or callback seams; v3 uses coherent descriptors",
+    "v3_controls": [
+      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
+      "TestWALStoreV3_FlushMaterializationBoundToRecoveryLifetime"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_checkpoint_safety_test.go",
+    "test": "TestCheckpointPublicationCrashWindowsRemainRecoverable",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "v2 fd/callback/checkpoint injection or direct-extent API; v3 fails through the shared publisher/owned map and uses install handles",
+    "v3_controls": [
+      "TestDescriptorV3FsyncFailureIsStickyAndPublishesNothing",
+      "TestDescriptorV3SlotWriteErrorLatchesAndPinsTheCandidate",
+      "TestWALStoreV3_AutomaticMapPersistenceFailureLatchesStore",
+      "TestBaseInstallV3CompleteServesTheImageAcrossACrash"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/chunk_layer_typed_cause_test.go",
+    "test": "TestChunkCut_BaseInstallRefusalIsTyped",
+    "legacy_roots": [
+      "createLegacyWALStoreWithOptions"
+    ],
+    "reason": "legacy C11 bitmap persistence/reconciliation or pre-v3 permissive frontier/record surgery",
+    "v3_controls": [
+      "TestChunkLayerV3_CaptureUsesOwnedMapAfterCheckpoint",
+      "TestChunkLayerV3_IgnoresProvidedLegacyBitmap",
+      "TestChunkLayerV3_MapOnlyRefusesLegacyBASEHeaderMutation"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/chunk_layer_precopy_test.go",
+    "test": "TestChunkCut_RecoverWaitsForTheCaptureBarrier",
+    "legacy_roots": [
+      "createLegacyWALStoreWithOptions"
+    ],
+    "reason": "legacy C11 bitmap persistence/reconciliation or pre-v3 permissive frontier/record surgery",
+    "v3_controls": [
+      "TestChunkLayerV3_CaptureUsesOwnedMapAfterCheckpoint",
+      "TestChunkLayerV3_IgnoresProvidedLegacyBitmap",
+      "TestChunkLayerV3_MapOnlyRefusesLegacyBASEHeaderMutation"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/chunk_layer_lsn_order_test.go",
+    "test": "TestChunkCut_RemoteLSNNeverDecreases",
+    "legacy_roots": [
+      "createLegacyWALStoreWithOptions"
+    ],
+    "reason": "legacy C11 bitmap persistence/reconciliation or pre-v3 permissive frontier/record surgery",
+    "v3_controls": [
+      "TestChunkLayerV3_CaptureUsesOwnedMapAfterCheckpoint",
+      "TestChunkLayerV3_IgnoresProvidedLegacyBitmap",
+      "TestChunkLayerV3_MapOnlyRefusesLegacyBASEHeaderMutation"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/chunk_layer_c11_test.go",
+    "test": "TestChunkLayer_C11_BaseRebuildRecovery",
+    "legacy_roots": [
+      "createLegacyWALStoreWithOptions",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "legacy C11 bitmap persistence/reconciliation or pre-v3 permissive frontier/record surgery",
+    "v3_controls": [
+      "TestChunkLayerV3_CaptureUsesOwnedMapAfterCheckpoint",
+      "TestChunkLayerV3_IgnoresProvidedLegacyBitmap",
+      "TestChunkLayerV3_MapOnlyRefusesLegacyBASEHeaderMutation"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/chunk_layer_c11_test.go",
+    "test": "TestChunkLayer_C11_BitmapPersistedBeforeWALRecycle",
+    "legacy_roots": [
+      "createLegacyWALStoreWithOptions",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "legacy C11 bitmap persistence/reconciliation or pre-v3 permissive frontier/record surgery",
+    "v3_controls": [
+      "TestChunkLayerV3_CaptureUsesOwnedMapAfterCheckpoint",
+      "TestChunkLayerV3_IgnoresProvidedLegacyBitmap",
+      "TestChunkLayerV3_MapOnlyRefusesLegacyBASEHeaderMutation"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/chunk_layer_c11_test.go",
+    "test": "TestChunkLayer_C11_ExtentCallbackIsPureInMemory",
+    "legacy_roots": [
+      "createLegacyWALStoreWithOptions"
+    ],
+    "reason": "legacy C11 bitmap persistence/reconciliation or pre-v3 permissive frontier/record surgery",
+    "v3_controls": [
+      "TestChunkLayerV3_CaptureUsesOwnedMapAfterCheckpoint",
+      "TestChunkLayerV3_IgnoresProvidedLegacyBitmap",
+      "TestChunkLayerV3_MapOnlyRefusesLegacyBASEHeaderMutation"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/chunk_layer_c11_test.go",
+    "test": "TestChunkLayer_C11_IncrementalAfterRestart",
+    "legacy_roots": [
+      "createLegacyWALStoreWithOptions",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "legacy C11 bitmap persistence/reconciliation or pre-v3 permissive frontier/record surgery",
+    "v3_controls": [
+      "TestChunkLayerV3_CaptureUsesOwnedMapAfterCheckpoint",
+      "TestChunkLayerV3_IgnoresProvidedLegacyBitmap",
+      "TestChunkLayerV3_MapOnlyRefusesLegacyBASEHeaderMutation"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/chunk_layer_c11_test.go",
+    "test": "TestChunkLayer_C11_LostOrMismatchedBitmapFallsBackToHashCompare",
+    "legacy_roots": [
+      "createLegacyWALStoreWithOptions",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "legacy C11 bitmap persistence/reconciliation or pre-v3 permissive frontier/record surgery",
+    "v3_controls": [
+      "TestChunkLayerV3_CaptureUsesOwnedMapAfterCheckpoint",
+      "TestChunkLayerV3_IgnoresProvidedLegacyBitmap",
+      "TestChunkLayerV3_MapOnlyRefusesLegacyBASEHeaderMutation"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/chunk_layer_c11_test.go",
+    "test": "TestChunkLayer_C11_ReplicaApplyKeepsBitmap",
+    "legacy_roots": [
+      "createLegacyWALStoreWithOptions"
+    ],
+    "reason": "legacy C11 bitmap persistence/reconciliation or pre-v3 permissive frontier/record surgery",
+    "v3_controls": [
+      "TestChunkLayerV3_CaptureUsesOwnedMapAfterCheckpoint",
+      "TestChunkLayerV3_IgnoresProvidedLegacyBitmap",
+      "TestChunkLayerV3_MapOnlyRefusesLegacyBASEHeaderMutation"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/chunk_layer_c11_test.go",
+    "test": "TestChunkLayer_C11_RolloverKeepsPostCutDirt",
+    "legacy_roots": [
+      "createLegacyWALStoreWithOptions",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "legacy C11 bitmap persistence/reconciliation or pre-v3 permissive frontier/record surgery",
+    "v3_controls": [
+      "TestChunkLayerV3_CaptureUsesOwnedMapAfterCheckpoint",
+      "TestChunkLayerV3_IgnoresProvidedLegacyBitmap",
+      "TestChunkLayerV3_MapOnlyRefusesLegacyBASEHeaderMutation"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/chunk_layer_c11_test.go",
+    "test": "TestChunkLayer_C11_SaveThenCheckpointFailureOverReportsOnly",
+    "legacy_roots": [
+      "createLegacyWALStoreWithOptions",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "legacy C11 bitmap persistence/reconciliation or pre-v3 permissive frontier/record surgery",
+    "v3_controls": [
+      "TestChunkLayerV3_CaptureUsesOwnedMapAfterCheckpoint",
+      "TestChunkLayerV3_IgnoresProvidedLegacyBitmap",
+      "TestChunkLayerV3_MapOnlyRefusesLegacyBASEHeaderMutation"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/chunk_bitmap_file_test.go",
+    "test": "TestChunkLayer_FileBitmapIncrementalAfterRestart",
+    "legacy_roots": [
+      "NewFileChunkBitmapStore"
+    ],
+    "reason": "legacy C11 bitmap persistence/reconciliation or pre-v3 permissive frontier/record surgery",
+    "v3_controls": [
+      "TestChunkLayerV3_CaptureUsesOwnedMapAfterCheckpoint",
+      "TestChunkLayerV3_IgnoresProvidedLegacyBitmap",
+      "TestChunkLayerV3_MapOnlyRefusesLegacyBASEHeaderMutation"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/chunk_layer_fresh_bitmap_test.go",
+    "test": "TestChunkLayer_LostBitmapReconciles",
+    "legacy_roots": [
+      "createLegacyWALStoreWithOptions"
+    ],
+    "reason": "legacy C11 bitmap persistence/reconciliation or pre-v3 permissive frontier/record surgery",
+    "v3_controls": [
+      "TestChunkLayerV3_CaptureUsesOwnedMapAfterCheckpoint",
+      "TestChunkLayerV3_IgnoresProvidedLegacyBitmap",
+      "TestChunkLayerV3_MapOnlyRefusesLegacyBASEHeaderMutation"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/chunk_layer_precopy_test.go",
+    "test": "TestChunkPrecopy_LowerLSNApplyAfterStagingIsNotLost",
+    "legacy_roots": [
+      "createLegacyWALStoreWithOptions"
+    ],
+    "reason": "legacy C11 bitmap persistence/reconciliation or pre-v3 permissive frontier/record surgery",
+    "v3_controls": [
+      "TestChunkLayerV3_CaptureUsesOwnedMapAfterCheckpoint",
+      "TestChunkLayerV3_IgnoresProvidedLegacyBitmap",
+      "TestChunkLayerV3_MapOnlyRefusesLegacyBASEHeaderMutation"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/chunk_layer_precopy_test.go",
+    "test": "TestChunkPrecopy_RecoverAfterStagingInvalidatesTheStage",
+    "legacy_roots": [
+      "createLegacyWALStoreWithOptions"
+    ],
+    "reason": "legacy C11 bitmap persistence/reconciliation or pre-v3 permissive frontier/record surgery",
+    "v3_controls": [
+      "TestChunkLayerV3_CaptureUsesOwnedMapAfterCheckpoint",
+      "TestChunkLayerV3_IgnoresProvidedLegacyBitmap",
+      "TestChunkLayerV3_MapOnlyRefusesLegacyBASEHeaderMutation"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/chunk_layer_reconcile_test.go",
+    "test": "TestChunkReconcile_BaseInstallSupersedesRunningReconciliation",
+    "legacy_roots": [
+      "createLegacyWALStoreWithOptions",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "legacy C11 bitmap persistence/reconciliation or pre-v3 permissive frontier/record surgery",
+    "v3_controls": [
+      "TestChunkLayerV3_CaptureUsesOwnedMapAfterCheckpoint",
+      "TestChunkLayerV3_IgnoresProvidedLegacyBitmap",
+      "TestChunkLayerV3_MapOnlyRefusesLegacyBASEHeaderMutation"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/chunk_layer_reconcile_test.go",
+    "test": "TestChunkReconcile_DetachDeadlineWhileReconciling",
+    "legacy_roots": [
+      "createLegacyWALStoreWithOptions",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "legacy C11 bitmap persistence/reconciliation or pre-v3 permissive frontier/record surgery",
+    "v3_controls": [
+      "TestChunkLayerV3_CaptureUsesOwnedMapAfterCheckpoint",
+      "TestChunkLayerV3_IgnoresProvidedLegacyBitmap",
+      "TestChunkLayerV3_MapOnlyRefusesLegacyBASEHeaderMutation"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/chunk_layer_reconcile_test.go",
+    "test": "TestChunkReconcile_DetachWaitsForReconciliation",
+    "legacy_roots": [
+      "createLegacyWALStoreWithOptions",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "legacy C11 bitmap persistence/reconciliation or pre-v3 permissive frontier/record surgery",
+    "v3_controls": [
+      "TestChunkLayerV3_CaptureUsesOwnedMapAfterCheckpoint",
+      "TestChunkLayerV3_IgnoresProvidedLegacyBitmap",
+      "TestChunkLayerV3_MapOnlyRefusesLegacyBASEHeaderMutation"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/chunk_layer_reconcile_test.go",
+    "test": "TestChunkReconcile_NoHeadMovesWhileReconciling",
+    "legacy_roots": [
+      "createLegacyWALStoreWithOptions",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "legacy C11 bitmap persistence/reconciliation or pre-v3 permissive frontier/record surgery",
+    "v3_controls": [
+      "TestChunkLayerV3_CaptureUsesOwnedMapAfterCheckpoint",
+      "TestChunkLayerV3_IgnoresProvidedLegacyBitmap",
+      "TestChunkLayerV3_MapOnlyRefusesLegacyBASEHeaderMutation"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/chunk_layer_reconcile_test.go",
+    "test": "TestChunkReconcile_OldCompletionCannotCertifyReplacement",
+    "legacy_roots": [
+      "createLegacyWALStoreWithOptions",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "legacy C11 bitmap persistence/reconciliation or pre-v3 permissive frontier/record surgery",
+    "v3_controls": [
+      "TestChunkLayerV3_CaptureUsesOwnedMapAfterCheckpoint",
+      "TestChunkLayerV3_IgnoresProvidedLegacyBitmap",
+      "TestChunkLayerV3_MapOnlyRefusesLegacyBASEHeaderMutation"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/chunk_layer_reconcile_test.go",
+    "test": "TestChunkReconcile_OldWorkerCannotModifyReplacementSet",
+    "legacy_roots": [
+      "createLegacyWALStoreWithOptions",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "legacy C11 bitmap persistence/reconciliation or pre-v3 permissive frontier/record surgery",
+    "v3_controls": [
+      "TestChunkLayerV3_CaptureUsesOwnedMapAfterCheckpoint",
+      "TestChunkLayerV3_IgnoresProvidedLegacyBitmap",
+      "TestChunkLayerV3_MapOnlyRefusesLegacyBASEHeaderMutation"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/chunk_layer_reconcile_test.go",
+    "test": "TestChunkReconcile_ResultPersisted",
+    "legacy_roots": [
+      "createLegacyWALStoreWithOptions",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "legacy C11 bitmap persistence/reconciliation or pre-v3 permissive frontier/record surgery",
+    "v3_controls": [
+      "TestChunkLayerV3_CaptureUsesOwnedMapAfterCheckpoint",
+      "TestChunkLayerV3_IgnoresProvidedLegacyBitmap",
+      "TestChunkLayerV3_MapOnlyRefusesLegacyBASEHeaderMutation"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/chunk_layer_reconcile_test.go",
+    "test": "TestChunkReconcile_UnpersistedResultKeepsReconciling",
+    "legacy_roots": [
+      "createLegacyWALStoreWithOptions",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "legacy C11 bitmap persistence/reconciliation or pre-v3 permissive frontier/record surgery",
+    "v3_controls": [
+      "TestChunkLayerV3_CaptureUsesOwnedMapAfterCheckpoint",
+      "TestChunkLayerV3_IgnoresProvidedLegacyBitmap",
+      "TestChunkLayerV3_MapOnlyRefusesLegacyBASEHeaderMutation"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/chunk_layer_reconcile_test.go",
+    "test": "TestChunkReconcile_WritesProceedWhileReconciling",
+    "legacy_roots": [
+      "createLegacyWALStoreWithOptions",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "legacy C11 bitmap persistence/reconciliation or pre-v3 permissive frontier/record surgery",
+    "v3_controls": [
+      "TestChunkLayerV3_CaptureUsesOwnedMapAfterCheckpoint",
+      "TestChunkLayerV3_IgnoresProvidedLegacyBitmap",
+      "TestChunkLayerV3_MapOnlyRefusesLegacyBASEHeaderMutation"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/chunk_restore_test.go",
+    "test": "TestClaimChunkHeadClearsProductionDetachProof",
+    "legacy_roots": [
+      "NewFileChunkBitmapStore"
+    ],
+    "reason": "legacy C11 bitmap persistence/reconciliation or pre-v3 permissive frontier/record surgery",
+    "v3_controls": [
+      "TestChunkLayerV3_CaptureUsesOwnedMapAfterCheckpoint",
+      "TestChunkLayerV3_IgnoresProvidedLegacyBitmap",
+      "TestChunkLayerV3_MapOnlyRefusesLegacyBASEHeaderMutation"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/flusher_test.go",
+    "test": "TestCrashFamily_AbruptKillAtMultipleWindows",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "v2 engine/layout, forced legacy fields or callback seams; v3 uses coherent descriptors",
+    "v3_controls": [
+      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
+      "TestWALStoreV3_FlushMaterializationBoundToRecoveryLifetime"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/chunk_bitmap_file_test.go",
+    "test": "TestFileChunkBitmapStore_CorruptStateIsLost",
+    "legacy_roots": [
+      "NewFileChunkBitmapStore"
+    ],
+    "reason": "legacy C11 bitmap persistence/reconciliation or pre-v3 permissive frontier/record surgery",
+    "v3_controls": [
+      "TestChunkLayerV3_CaptureUsesOwnedMapAfterCheckpoint",
+      "TestChunkLayerV3_IgnoresProvidedLegacyBitmap",
+      "TestChunkLayerV3_MapOnlyRefusesLegacyBASEHeaderMutation"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/chunk_bitmap_file_test.go",
+    "test": "TestFileChunkBitmapStore_RoundTripAndReopen",
+    "legacy_roots": [
+      "NewFileChunkBitmapStore"
+    ],
+    "reason": "legacy C11 bitmap persistence/reconciliation or pre-v3 permissive frontier/record surgery",
+    "v3_controls": [
+      "TestChunkLayerV3_CaptureUsesOwnedMapAfterCheckpoint",
+      "TestChunkLayerV3_IgnoresProvidedLegacyBitmap",
+      "TestChunkLayerV3_MapOnlyRefusesLegacyBASEHeaderMutation"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_checkpoint_safety_test.go",
+    "test": "TestFlusherCheckpointMetadataFailureDoesNotPublishOrRecycle",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest"
+    ],
+    "reason": "v2 fd/callback/checkpoint injection or direct-extent API; v3 fails through the shared publisher/owned map and uses install handles",
+    "v3_controls": [
+      "TestDescriptorV3FsyncFailureIsStickyAndPublishesNothing",
+      "TestDescriptorV3SlotWriteErrorLatchesAndPinsTheCandidate",
+      "TestWALStoreV3_AutomaticMapPersistenceFailureLatchesStore",
+      "TestBaseInstallV3CompleteServesTheImageAcrossACrash"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/flusher_instrumentation_test.go",
+    "test": "TestFlusherInstrumentationCountsCheckpointFailure",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest"
+    ],
+    "reason": "v2 one-superblock-write/one-sync counters and its raw injection seams; v3 record-stage counters are separate, no numerical equivalence claimed for metadata counts",
+    "v3_controls": [
+      "TestFlusherV3ProfileCountsRealRecordStages",
+      "TestWALStoreV3_AutomaticCheckpointMetadataOrderAndRetry"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/flusher_instrumentation_test.go",
+    "test": "TestFlusherInstrumentationCountsCompleteCycle",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest"
+    ],
+    "reason": "v2 one-superblock-write/one-sync counters and its raw injection seams; v3 record-stage counters are separate, no numerical equivalence claimed for metadata counts",
+    "v3_controls": [
+      "TestFlusherV3ProfileCountsRealRecordStages",
+      "TestWALStoreV3_AutomaticCheckpointMetadataOrderAndRetry"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/flusher_instrumentation_test.go",
+    "test": "TestFlusherInstrumentationCountsWALReadFailures",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest"
+    ],
+    "reason": "v2 one-superblock-write/one-sync counters and its raw injection seams; v3 record-stage counters are separate, no numerical equivalence claimed for metadata counts",
+    "v3_controls": [
+      "TestFlusherV3ProfileCountsRealRecordStages",
+      "TestWALStoreV3_AutomaticCheckpointMetadataOrderAndRetry"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_checkpoint_safety_test.go",
+    "test": "TestFlusherRejectsCorruptOrUnsupportedDirtyRecord",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest"
+    ],
+    "reason": "v2 fd/callback/checkpoint injection or direct-extent API; v3 fails through the shared publisher/owned map and uses install handles",
+    "v3_controls": [
+      "TestDescriptorV3FsyncFailureIsStickyAndPublishesNothing",
+      "TestDescriptorV3SlotWriteErrorLatchesAndPinsTheCandidate",
+      "TestWALStoreV3_AutomaticMapPersistenceFailureLatchesStore",
+      "TestBaseInstallV3CompleteServesTheImageAcrossACrash"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_checkpoint_safety_test.go",
+    "test": "TestFlusherSnapshotCannotOverwriteLaterDirectBase",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest"
+    ],
+    "reason": "v2 fd/callback/checkpoint injection or direct-extent API; v3 fails through the shared publisher/owned map and uses install handles",
+    "v3_controls": [
+      "TestDescriptorV3FsyncFailureIsStickyAndPublishesNothing",
+      "TestDescriptorV3SlotWriteErrorLatchesAndPinsTheCandidate",
+      "TestWALStoreV3_AutomaticMapPersistenceFailureLatchesStore",
+      "TestBaseInstallV3CompleteServesTheImageAcrossACrash"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/flusher_snapshot_cut_test.go",
+    "test": "TestFlusherSnapshotCutPreservesSyncedWrites",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "v2 engine/layout, forced legacy fields or callback seams; v3 uses coherent descriptors",
+    "v3_controls": [
+      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
+      "TestWALStoreV3_FlushMaterializationBoundToRecoveryLifetime"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_checkpoint_safety_test.go",
+    "test": "TestFlusherWALSlotMismatchFailsClosed",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest"
+    ],
+    "reason": "v2 fd/callback/checkpoint injection or direct-extent API; v3 fails through the shared publisher/owned map and uses install handles",
+    "v3_controls": [
+      "TestDescriptorV3FsyncFailureIsStickyAndPublishesNothing",
+      "TestDescriptorV3SlotWriteErrorLatchesAndPinsTheCandidate",
+      "TestWALStoreV3_AutomaticMapPersistenceFailureLatchesStore",
+      "TestBaseInstallV3CompleteServesTheImageAcrossACrash"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/flusher_test.go",
+    "test": "TestFlusher_AdvancesCheckpointBeforeReadFromExtent",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest"
+    ],
+    "reason": "v2 engine/layout, forced legacy fields or callback seams; v3 uses coherent descriptors",
+    "v3_controls": [
+      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
+      "TestWALStoreV3_FlushMaterializationBoundToRecoveryLifetime"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/flusher_test.go",
+    "test": "TestFlusher_ConcurrentWriteRaceLBAStaysFresh",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest"
+    ],
+    "reason": "v2 engine/layout, forced legacy fields or callback seams; v3 uses coherent descriptors",
+    "v3_controls": [
+      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
+      "TestWALStoreV3_FlushMaterializationBoundToRecoveryLifetime"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/flusher_test.go",
+    "test": "TestFlusher_ManyDirtyEntriesCheckpointStaysCorrect",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "v2 engine/layout, forced legacy fields or callback seams; v3 uses coherent descriptors",
+    "v3_controls": [
+      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
+      "TestWALStoreV3_FlushMaterializationBoundToRecoveryLifetime"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/flusher_test.go",
+    "test": "TestFlusher_RecoveryHonorsCheckpoint",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "v2 engine/layout, forced legacy fields or callback seams; v3 uses coherent descriptors",
+    "v3_controls": [
+      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
+      "TestWALStoreV3_FlushMaterializationBoundToRecoveryLifetime"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/flusher_test.go",
+    "test": "TestFlusher_ReleasesWALPressureAfterCheckpoint",
+    "legacy_roots": [
+      "createLegacyWALStoreWithWALSizeForTest"
+    ],
+    "reason": "v2 engine/layout, forced legacy fields or callback seams; v3 uses coherent descriptors",
+    "v3_controls": [
+      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
+      "TestWALStoreV3_FlushMaterializationBoundToRecoveryLifetime"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/chunk_restore_test.go",
+    "test": "TestFreshRestoreBitmapStartsAtClaimedHEAD",
+    "legacy_roots": [
+      "createLegacyWALStoreWithOptions"
+    ],
+    "reason": "legacy C11 bitmap persistence/reconciliation or pre-v3 permissive frontier/record surgery",
+    "v3_controls": [
+      "TestChunkLayerV3_CaptureUsesOwnedMapAfterCheckpoint",
+      "TestChunkLayerV3_IgnoresProvidedLegacyBitmap",
+      "TestChunkLayerV3_MapOnlyRefusesLegacyBASEHeaderMutation"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/flusher_test.go",
+    "test": "TestRecovery_DeterministicAcrossMultipleOpens",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "v2 engine/layout, forced legacy fields or callback seams; v3 uses coherent descriptors",
+    "v3_controls": [
+      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
+      "TestWALStoreV3_FlushMaterializationBoundToRecoveryLifetime"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_checkpoint_safety_test.go",
+    "test": "TestRunningFlusherCannotOverwriteDirectBase",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest"
+    ],
+    "reason": "v2 fd/callback/checkpoint injection or direct-extent API; v3 fails through the shared publisher/owned map and uses install handles",
+    "v3_controls": [
+      "TestDescriptorV3FsyncFailureIsStickyAndPublishesNothing",
+      "TestDescriptorV3SlotWriteErrorLatchesAndPinsTheCandidate",
+      "TestWALStoreV3_AutomaticMapPersistenceFailureLatchesStore",
+      "TestBaseInstallV3CompleteServesTheImageAcrossACrash"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/chunk_frontier_test.go",
+    "test": "TestSeedChunkFrontierMetadataFailureRetry",
+    "legacy_roots": [
+      "createLegacyWALStoreWithOptions",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "v2 engine/layout, forced legacy fields or callback seams; v3 uses coherent descriptors",
+    "v3_controls": [
+      "TestWALStoreV3_AutomaticCheckpointMetadataOrderAndRetry",
+      "TestBlockMetadata_SeedFailureRetry"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_sync_generation_test.go",
+    "test": "TestWALGenerationBypassesUntrackedMutationPaths",
+    "legacy_roots": [
+      "createLegacyWALStoreWithOptions"
+    ],
+    "reason": "legacy sync cache/direct-mutation callback order; v3 success boundary is serialized and recovery-generation checked",
+    "v3_controls": [
+      "TestWALStoreV3SyncRechecksTheFaultAtTheAckBoundary",
+      "TestWALStoreV3OuterSyncCompletionIsRefusedAcrossARecovery",
+      "TestWALStoreV3RecoverWaitsForABatchAckAndNothingRevivesTheCut"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_sync_frontier_order_test.go",
+    "test": "TestWALGenerationFirstCallerReturnOrdering",
+    "legacy_roots": [
+      "createLegacyWALStoreWithOptions"
+    ],
+    "reason": "legacy sync cache/direct-mutation callback order; v3 success boundary is serialized and recovery-generation checked",
+    "v3_controls": [
+      "TestWALStoreV3SyncRechecksTheFaultAtTheAckBoundary",
+      "TestWALStoreV3OuterSyncCompletionIsRefusedAcrossARecovery",
+      "TestWALStoreV3RecoverWaitsForABatchAckAndNothingRevivesTheCut"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_sync_generation_test.go",
+    "test": "TestWALGenerationPartialAppendRecoverySync",
+    "legacy_roots": [
+      "createLegacyWALStoreWithWALSizeForTest",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "legacy sync cache/direct-mutation callback order; v3 success boundary is serialized and recovery-generation checked",
+    "v3_controls": [
+      "TestWALStoreV3SyncRechecksTheFaultAtTheAckBoundary",
+      "TestWALStoreV3OuterSyncCompletionIsRefusedAcrossARecovery",
+      "TestWALStoreV3RecoverWaitsForABatchAckAndNothingRevivesTheCut"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_multiblock_test.go",
+    "test": "TestWALMultiBlock_EncodeDecode",
+    "legacy_roots": [
+      "decodeWALEntry"
+    ],
+    "reason": "v2 opt-in batch framing/failure injection; v3 batch is native and nonce-bound",
+    "v3_controls": [
+      "TestWALStoreV3BatchRoundTripAcrossACrash",
+      "TestWALStoreV3TornBatchIsAllOrNothing",
+      "TestWALStoreV3InstrumentationIncludesBatch"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_persisted_tail_test.go",
+    "test": "TestWALStoreAppendDuringFlushThenTornWrapKeepsSyncedRecords",
+    "legacy_roots": [
+      "createLegacyWALStoreWithWALSizeForTest",
+      "openLegacyWALStoreForTest",
+      "readSuperblock"
+    ],
+    "reason": "raw v2 header/window/IEEE-CRC/permissive scan assumptions; native v3 refuses holes below W and fences rolled-back suffixes",
+    "v3_controls": [
+      "TestWALIOV3_RealWriterReopenScan",
+      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
+      "TestWALStoreV3DroppedRecordsNeverResurfaceAfterASecondCrash",
+      "TestDurableStartup_Issue51_WALStoreV3CommittedHoleBlocksReadiness"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_sticky_fsync_test.go",
+    "test": "TestWALStoreCheckpointFsyncFailureIsSticky",
+    "legacy_roots": [
+      "createLegacyWALStoreWithWALSizeForTest",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "v2 fd/callback/checkpoint injection or direct-extent API; v3 fails through the shared publisher/owned map and uses install handles",
+    "v3_controls": [
+      "TestDescriptorV3FsyncFailureIsStickyAndPublishesNothing",
+      "TestDescriptorV3SlotWriteErrorLatchesAndPinsTheCandidate",
+      "TestWALStoreV3_AutomaticMapPersistenceFailureLatchesStore",
+      "TestBaseInstallV3CompleteServesTheImageAcrossACrash"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_checkpoint_crash_linux_test.go",
+    "test": "TestWALStoreCheckpointSIGKILLCrashWindows",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "v2 engine/layout, forced legacy fields or callback seams; v3 uses coherent descriptors",
+    "v3_controls": [
+      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
+      "TestWALStoreV3_FlushMaterializationBoundToRecoveryLifetime"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_checkpoint_safety_test.go",
+    "test": "TestWALStoreClosePerformsFinalFlush",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "v2 fd/callback/checkpoint injection or direct-extent API; v3 fails through the shared publisher/owned map and uses install handles",
+    "v3_controls": [
+      "TestDescriptorV3FsyncFailureIsStickyAndPublishesNothing",
+      "TestDescriptorV3SlotWriteErrorLatchesAndPinsTheCandidate",
+      "TestWALStoreV3_AutomaticMapPersistenceFailureLatchesStore",
+      "TestBaseInstallV3CompleteServesTheImageAcrossACrash"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_checkpoint_safety_test.go",
+    "test": "TestWALStoreCloseReturnsFinalMetadataFailure",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest"
+    ],
+    "reason": "v2 fd/callback/checkpoint injection or direct-extent API; v3 fails through the shared publisher/owned map and uses install handles",
+    "v3_controls": [
+      "TestDescriptorV3FsyncFailureIsStickyAndPublishesNothing",
+      "TestDescriptorV3SlotWriteErrorLatchesAndPinsTheCandidate",
+      "TestWALStoreV3_AutomaticMapPersistenceFailureLatchesStore",
+      "TestBaseInstallV3CompleteServesTheImageAcrossACrash"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_checkpoint_safety_test.go",
+    "test": "TestWALStoreCloseWaitsForInflightSync",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest"
+    ],
+    "reason": "v2 fd/callback/checkpoint injection or direct-extent API; v3 fails through the shared publisher/owned map and uses install handles",
+    "v3_controls": [
+      "TestDescriptorV3FsyncFailureIsStickyAndPublishesNothing",
+      "TestDescriptorV3SlotWriteErrorLatchesAndPinsTheCandidate",
+      "TestWALStoreV3_AutomaticMapPersistenceFailureLatchesStore",
+      "TestBaseInstallV3CompleteServesTheImageAcrossACrash"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_sticky_fsync_test.go",
+    "test": "TestWALStoreExtentFsyncFailureIsSticky",
+    "legacy_roots": [
+      "createLegacyWALStoreWithWALSizeForTest",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "v2 fd/callback/checkpoint injection or direct-extent API; v3 fails through the shared publisher/owned map and uses install handles",
+    "v3_controls": [
+      "TestDescriptorV3FsyncFailureIsStickyAndPublishesNothing",
+      "TestDescriptorV3SlotWriteErrorLatchesAndPinsTheCandidate",
+      "TestWALStoreV3_AutomaticMapPersistenceFailureLatchesStore",
+      "TestBaseInstallV3CompleteServesTheImageAcrossACrash"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_sticky_race_test.go",
+    "test": "TestWALStoreExtentFsyncFaultAfterThePublicationCheck",
+    "legacy_roots": [
+      "createLegacyWALStoreWithWALSizeForTest",
+      "readSuperblock"
+    ],
+    "reason": "v2 fd/callback/checkpoint injection or direct-extent API; v3 fails through the shared publisher/owned map and uses install handles",
+    "v3_controls": [
+      "TestDescriptorV3FsyncFailureIsStickyAndPublishesNothing",
+      "TestDescriptorV3SlotWriteErrorLatchesAndPinsTheCandidate",
+      "TestWALStoreV3_AutomaticMapPersistenceFailureLatchesStore",
+      "TestBaseInstallV3CompleteServesTheImageAcrossACrash"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_sticky_race_test.go",
+    "test": "TestWALStoreExtentFsyncFaultDuringDirectFrontierPublication",
+    "legacy_roots": [
+      "createLegacyWALStoreWithWALSizeForTest",
+      "readSuperblock"
+    ],
+    "reason": "v2 fd/callback/checkpoint injection or direct-extent API; v3 fails through the shared publisher/owned map and uses install handles",
+    "v3_controls": [
+      "TestDescriptorV3FsyncFailureIsStickyAndPublishesNothing",
+      "TestDescriptorV3SlotWriteErrorLatchesAndPinsTheCandidate",
+      "TestWALStoreV3_AutomaticMapPersistenceFailureLatchesStore",
+      "TestBaseInstallV3CompleteServesTheImageAcrossACrash"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_batch_lsn_reuse_test.go",
+    "test": "TestWALStoreFailedBatchAppendDoesNotRevertALaterAckedWrite",
+    "legacy_roots": [
+      "createLegacyWALStoreWithWALSizeForTest",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "v2 opt-in batch framing/failure injection; v3 batch is native and nonce-bound",
+    "v3_controls": [
+      "TestWALStoreV3BatchRoundTripAcrossACrash",
+      "TestWALStoreV3TornBatchIsAllOrNothing",
+      "TestWALStoreV3InstrumentationIncludesBatch"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_persisted_tail_test.go",
+    "test": "TestWALStoreFlushPersistsTheReleasedTail",
+    "legacy_roots": [
+      "createLegacyWALStoreWithWALSizeForTest",
+      "readSuperblock"
+    ],
+    "reason": "raw v2 header/window/IEEE-CRC/permissive scan assumptions; native v3 refuses holes below W and fences rolled-back suffixes",
+    "v3_controls": [
+      "TestWALIOV3_RealWriterReopenScan",
+      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
+      "TestWALStoreV3DroppedRecordsNeverResurfaceAfterASecondCrash",
+      "TestDurableStartup_Issue51_WALStoreV3CommittedHoleBlocksReadiness"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_sticky_race_test.go",
+    "test": "TestWALStoreFsyncsOfTheFileAreSerialized",
+    "legacy_roots": [
+      "createLegacyWALStoreWithWALSizeForTest"
+    ],
+    "reason": "v2 fd/callback/checkpoint injection or direct-extent API; v3 fails through the shared publisher/owned map and uses install handles",
+    "v3_controls": [
+      "TestDescriptorV3FsyncFailureIsStickyAndPublishesNothing",
+      "TestDescriptorV3SlotWriteErrorLatchesAndPinsTheCandidate",
+      "TestWALStoreV3_AutomaticMapPersistenceFailureLatchesStore",
+      "TestBaseInstallV3CompleteServesTheImageAcrossACrash"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_persisted_tail_test.go",
+    "test": "TestWALStoreFullFlushThenTornWrapKeepsSyncedRecords",
+    "legacy_roots": [
+      "createLegacyWALStoreWithWALSizeForTest",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "raw v2 header/window/IEEE-CRC/permissive scan assumptions; native v3 refuses holes below W and fences rolled-back suffixes",
+    "v3_controls": [
+      "TestWALIOV3_RealWriterReopenScan",
+      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
+      "TestWALStoreV3DroppedRecordsNeverResurfaceAfterASecondCrash",
+      "TestDurableStartup_Issue51_WALStoreV3CommittedHoleBlocksReadiness"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_sticky_race_test.go",
+    "test": "TestWALStoreHeldWorkersSettleOnAFailurePath",
+    "legacy_roots": [
+      "createLegacyWALStoreWithWALSizeForTest"
+    ],
+    "reason": "v2 fd/callback/checkpoint injection or direct-extent API; v3 fails through the shared publisher/owned map and uses install handles",
+    "v3_controls": [
+      "TestDescriptorV3FsyncFailureIsStickyAndPublishesNothing",
+      "TestDescriptorV3SlotWriteErrorLatchesAndPinsTheCandidate",
+      "TestWALStoreV3_AutomaticMapPersistenceFailureLatchesStore",
+      "TestBaseInstallV3CompleteServesTheImageAcrossACrash"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_checkpoint_safety_test.go",
+    "test": "TestWALStoreMutationAPIsRejectAfterClose",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest"
+    ],
+    "reason": "v2 fd/callback/checkpoint injection or direct-extent API; v3 fails through the shared publisher/owned map and uses install handles",
+    "v3_controls": [
+      "TestDescriptorV3FsyncFailureIsStickyAndPublishesNothing",
+      "TestDescriptorV3SlotWriteErrorLatchesAndPinsTheCandidate",
+      "TestWALStoreV3_AutomaticMapPersistenceFailureLatchesStore",
+      "TestBaseInstallV3CompleteServesTheImageAcrossACrash"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_activation_test.go",
+    "test": "TestWALStoreProductionRefusesLegacyWithoutMutation",
+    "legacy_roots": [
+      "createLegacyWALStoreWithOptions"
+    ],
+    "reason": "legacy input construction for the native public-refusal control itself; the production test stays on v3",
+    "v3_controls": [
+      "TestWALStoreProductionRefusesLegacyWithoutMutation"
+    ],
+    "todo": "row 14a: replace only old input construction with frozen bytes; retain the production refusal control"
+  },
+  {
+    "file": "core/storage/walstore_sticky_race_test.go",
+    "test": "TestWALStoreQueuedSyncAfterAFailedFsyncIsRefused",
+    "legacy_roots": [
+      "createLegacyWALStoreWithWALSizeForTest"
+    ],
+    "reason": "v2 fd/callback/checkpoint injection or direct-extent API; v3 fails through the shared publisher/owned map and uses install handles",
+    "v3_controls": [
+      "TestDescriptorV3FsyncFailureIsStickyAndPublishesNothing",
+      "TestDescriptorV3SlotWriteErrorLatchesAndPinsTheCandidate",
+      "TestWALStoreV3_AutomaticMapPersistenceFailureLatchesStore",
+      "TestBaseInstallV3CompleteServesTheImageAcrossACrash"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_persisted_tail_test.go",
+    "test": "TestWALStoreRecoverBoundsPersistFailureRefusesAppendsUntilRetry",
+    "legacy_roots": [
+      "createLegacyWALStoreWithWALSizeForTest",
+      "openLegacyWALStoreForTest",
+      "readSuperblock"
+    ],
+    "reason": "raw v2 header/window/IEEE-CRC/permissive scan assumptions; native v3 refuses holes below W and fences rolled-back suffixes",
+    "v3_controls": [
+      "TestWALIOV3_RealWriterReopenScan",
+      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
+      "TestWALStoreV3DroppedRecordsNeverResurfaceAfterASecondCrash",
+      "TestDurableStartup_Issue51_WALStoreV3CommittedHoleBlocksReadiness"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_midhistory_hole_test.go",
+    "test": "TestWALStoreRecoverKeepsATornTail",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "raw v2 header/window/IEEE-CRC/permissive scan assumptions; native v3 refuses holes below W and fences rolled-back suffixes",
+    "v3_controls": [
+      "TestWALIOV3_RealWriterReopenScan",
+      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
+      "TestWALStoreV3DroppedRecordsNeverResurfaceAfterASecondCrash",
+      "TestDurableStartup_Issue51_WALStoreV3CommittedHoleBlocksReadiness"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_recovery_frontier_gap_test.go",
+    "test": "TestWALStoreRecoverKeepsSyncedEntriesAboveAnUnpersistedFrontierJump",
+    "legacy_roots": [
+      "createLegacyWALStoreWithWALSizeForTest",
+      "openLegacyWALStoreForTest",
+      "readSuperblock"
+    ],
+    "reason": "raw v2 header/window/IEEE-CRC/permissive scan assumptions; native v3 refuses holes below W and fences rolled-back suffixes",
+    "v3_controls": [
+      "TestWALIOV3_RealWriterReopenScan",
+      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
+      "TestWALStoreV3DroppedRecordsNeverResurfaceAfterASecondCrash",
+      "TestDurableStartup_Issue51_WALStoreV3CommittedHoleBlocksReadiness"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_recovery_lww_test.go",
+    "test": "TestWALStoreRecoverLastWriterWinsAcrossScanOrder",
+    "legacy_roots": [
+      "createLegacyWALStoreWithWALSizeForTest",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "raw v2 header/window/IEEE-CRC/permissive scan assumptions; native v3 refuses holes below W and fences rolled-back suffixes",
+    "v3_controls": [
+      "TestWALIOV3_RealWriterReopenScan",
+      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
+      "TestWALStoreV3DroppedRecordsNeverResurfaceAfterASecondCrash",
+      "TestDurableStartup_Issue51_WALStoreV3CommittedHoleBlocksReadiness"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_persisted_tail_test.go",
+    "test": "TestWALStoreRecoverPersistsTheRecoveredBounds",
+    "legacy_roots": [
+      "createLegacyWALStoreWithWALSizeForTest",
+      "openLegacyWALStoreForTest",
+      "readSuperblock"
+    ],
+    "reason": "raw v2 header/window/IEEE-CRC/permissive scan assumptions; native v3 refuses holes below W and fences rolled-back suffixes",
+    "v3_controls": [
+      "TestWALIOV3_RealWriterReopenScan",
+      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
+      "TestWALStoreV3DroppedRecordsNeverResurfaceAfterASecondCrash",
+      "TestDurableStartup_Issue51_WALStoreV3CommittedHoleBlocksReadiness"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_recovery_hardening_test.go",
+    "test": "TestWALStoreRecoverReconstructsLegacyWrappedRetainedWindow",
+    "legacy_roots": [
+      "createLegacyWALStoreWithWALSizeForTest",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "raw v2 header/window/IEEE-CRC/permissive scan assumptions; native v3 refuses holes below W and fences rolled-back suffixes",
+    "v3_controls": [
+      "TestWALIOV3_RealWriterReopenScan",
+      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
+      "TestWALStoreV3DroppedRecordsNeverResurfaceAfterASecondCrash",
+      "TestDurableStartup_Issue51_WALStoreV3CommittedHoleBlocksReadiness"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_recovery_hardening_test.go",
+    "test": "TestWALStoreRecoverRejectsOverflowingBatchGeometry",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "raw v2 header/window/IEEE-CRC/permissive scan assumptions; native v3 refuses holes below W and fences rolled-back suffixes",
+    "v3_controls": [
+      "TestWALIOV3_RealWriterReopenScan",
+      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
+      "TestWALStoreV3DroppedRecordsNeverResurfaceAfterASecondCrash",
+      "TestDurableStartup_Issue51_WALStoreV3CommittedHoleBlocksReadiness"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_legacy_trim_test.go",
+    "test": "TestWALStoreRecoverReplaysLegacyRangeTrim",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest",
+      "openLegacyReadOnlyForTest",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "v2 engine/layout, forced legacy fields or callback seams; v3 uses coherent descriptors",
+    "v3_controls": [
+      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
+      "TestWALStoreV3_FlushMaterializationBoundToRecoveryLifetime"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_recovery_hardening_test.go",
+    "test": "TestWALStoreRecoverRetainsMultiBlockSuffixAcrossRestart",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "raw v2 header/window/IEEE-CRC/permissive scan assumptions; native v3 refuses holes below W and fences rolled-back suffixes",
+    "v3_controls": [
+      "TestWALIOV3_RealWriterReopenScan",
+      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
+      "TestWALStoreV3DroppedRecordsNeverResurfaceAfterASecondCrash",
+      "TestDurableStartup_Issue51_WALStoreV3CommittedHoleBlocksReadiness"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_midhistory_hole_test.go",
+    "test": "TestWALStoreRecoverStaleReleasedGarbageKeepsRetainedData",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "raw v2 header/window/IEEE-CRC/permissive scan assumptions; native v3 refuses holes below W and fences rolled-back suffixes",
+    "v3_controls": [
+      "TestWALIOV3_RealWriterReopenScan",
+      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
+      "TestWALStoreV3DroppedRecordsNeverResurfaceAfterASecondCrash",
+      "TestDurableStartup_Issue51_WALStoreV3CommittedHoleBlocksReadiness"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_midhistory_hole_test.go",
+    "test": "TestWALStoreRecoverSurvivesAnOutOfOrderUnsyncedTail",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "raw v2 header/window/IEEE-CRC/permissive scan assumptions; native v3 refuses holes below W and fences rolled-back suffixes",
+    "v3_controls": [
+      "TestWALIOV3_RealWriterReopenScan",
+      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
+      "TestWALStoreV3DroppedRecordsNeverResurfaceAfterASecondCrash",
+      "TestDurableStartup_Issue51_WALStoreV3CommittedHoleBlocksReadiness"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_midhistory_hole_test.go",
+    "test": "TestWALStoreRecoverWarnsOnMidHistoryHole",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "raw v2 header/window/IEEE-CRC/permissive scan assumptions; native v3 refuses holes below W and fences rolled-back suffixes",
+    "v3_controls": [
+      "TestWALIOV3_RealWriterReopenScan",
+      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
+      "TestWALStoreV3DroppedRecordsNeverResurfaceAfterASecondCrash",
+      "TestDurableStartup_Issue51_WALStoreV3CommittedHoleBlocksReadiness"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_midhistory_hole_test.go",
+    "test": "TestWALStoreRecoverWrappedHoleIsNoOutage",
+    "legacy_roots": [
+      "createLegacyWALStoreWithWALSizeForTest",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "raw v2 header/window/IEEE-CRC/permissive scan assumptions; native v3 refuses holes below W and fences rolled-back suffixes",
+    "v3_controls": [
+      "TestWALIOV3_RealWriterReopenScan",
+      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
+      "TestWALStoreV3DroppedRecordsNeverResurfaceAfterASecondCrash",
+      "TestDurableStartup_Issue51_WALStoreV3CommittedHoleBlocksReadiness"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_sticky_fsync_test.go",
+    "test": "TestWALStoreWALFsyncFailureIsSticky",
+    "legacy_roots": [
+      "createLegacyWALStoreWithWALSizeForTest",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "v2 fd/callback/checkpoint injection or direct-extent API; v3 fails through the shared publisher/owned map and uses install handles",
+    "v3_controls": [
+      "TestDescriptorV3FsyncFailureIsStickyAndPublishesNothing",
+      "TestDescriptorV3SlotWriteErrorLatchesAndPinsTheCandidate",
+      "TestWALStoreV3_AutomaticMapPersistenceFailureLatchesStore",
+      "TestBaseInstallV3CompleteServesTheImageAcrossACrash"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_sticky_race_test.go",
+    "test": "TestWALStoreWALFsyncFaultDuringCheckpointPublication",
+    "legacy_roots": [
+      "createLegacyWALStoreWithWALSizeForTest",
+      "readSuperblock"
+    ],
+    "reason": "v2 fd/callback/checkpoint injection or direct-extent API; v3 fails through the shared publisher/owned map and uses install handles",
+    "v3_controls": [
+      "TestDescriptorV3FsyncFailureIsStickyAndPublishesNothing",
+      "TestDescriptorV3SlotWriteErrorLatchesAndPinsTheCandidate",
+      "TestWALStoreV3_AutomaticMapPersistenceFailureLatchesStore",
+      "TestBaseInstallV3CompleteServesTheImageAcrossACrash"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_sticky_race_test.go",
+    "test": "TestWALStoreWritersQueuedBehindAFailedAppendAreRefused",
+    "legacy_roots": [
+      "createLegacyWALStoreWithWALSizeForTest"
+    ],
+    "reason": "v2 fd/callback/checkpoint injection or direct-extent API; v3 fails through the shared publisher/owned map and uses install handles",
+    "v3_controls": [
+      "TestDescriptorV3FsyncFailureIsStickyAndPublishesNothing",
+      "TestDescriptorV3SlotWriteErrorLatchesAndPinsTheCandidate",
+      "TestWALStoreV3_AutomaticMapPersistenceFailureLatchesStore",
+      "TestBaseInstallV3CompleteServesTheImageAcrossACrash"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_test.go",
+    "test": "TestWALStore_DirectFrontierMetadataFailureRetainsRetryState",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "v2 engine/layout, forced legacy fields or callback seams; v3 uses coherent descriptors",
+    "v3_controls": [
+      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
+      "TestWALStoreV3_FlushMaterializationBoundToRecoveryLifetime"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_multiblock_test.go",
+    "test": "TestWALStore_DisableAutoFlushForRecoveryTestPreservesReplayAfterCrash",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "v2 opt-in batch framing/failure injection; v3 batch is native and nonce-bound",
+    "v3_controls": [
+      "TestWALStoreV3BatchRoundTripAcrossACrash",
+      "TestWALStoreV3TornBatchIsAllOrNothing",
+      "TestWALStoreV3InstrumentationIncludesBatch"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_test.go",
+    "test": "TestWALStore_FailedAppendDoesNotConsumeLSN",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "v2 engine/layout, forced legacy fields or callback seams; v3 uses coherent descriptors",
+    "v3_controls": [
+      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
+      "TestWALStoreV3_FlushMaterializationBoundToRecoveryLifetime"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_multiblock_test.go",
+    "test": "TestWALStore_MultiBlockDirtyRead",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest"
+    ],
+    "reason": "v2 opt-in batch framing/failure injection; v3 batch is native and nonce-bound",
+    "v3_controls": [
+      "TestWALStoreV3BatchRoundTripAcrossACrash",
+      "TestWALStoreV3TornBatchIsAllOrNothing",
+      "TestWALStoreV3InstrumentationIncludesBatch"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_multiblock_test.go",
+    "test": "TestWALStore_MultiBlockFeatureDisabledByDefault",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest"
+    ],
+    "reason": "v2 opt-in batch framing/failure injection; v3 batch is native and nonce-bound",
+    "v3_controls": [
+      "TestWALStoreV3BatchRoundTripAcrossACrash",
+      "TestWALStoreV3TornBatchIsAllOrNothing",
+      "TestWALStoreV3InstrumentationIncludesBatch"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_multiblock_test.go",
+    "test": "TestWALStore_MultiBlockFlusherSplitsPerBlock",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest"
+    ],
+    "reason": "v2 opt-in batch framing/failure injection; v3 batch is native and nonce-bound",
+    "v3_controls": [
+      "TestWALStoreV3BatchRoundTripAcrossACrash",
+      "TestWALStoreV3TornBatchIsAllOrNothing",
+      "TestWALStoreV3InstrumentationIncludesBatch"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_multiblock_profile_test.go",
+    "test": "TestWALStore_MultiBlockProfile_RecordCountReduction",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest"
+    ],
+    "reason": "v2 opt-in batch framing/failure injection; v3 batch is native and nonce-bound",
+    "v3_controls": [
+      "TestWALStoreV3BatchRoundTripAcrossACrash",
+      "TestWALStoreV3TornBatchIsAllOrNothing",
+      "TestWALStoreV3InstrumentationIncludesBatch"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_multiblock_test.go",
+    "test": "TestWALStore_MultiBlockRecoverSplitsPerBlock",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "v2 opt-in batch framing/failure injection; v3 batch is native and nonce-bound",
+    "v3_controls": [
+      "TestWALStoreV3BatchRoundTripAcrossACrash",
+      "TestWALStoreV3TornBatchIsAllOrNothing",
+      "TestWALStoreV3InstrumentationIncludesBatch"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_multiblock_test.go",
+    "test": "TestWALStore_MultiBlockRecoveryHeadLSNUsesRecoveredFrontier",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "v2 opt-in batch framing/failure injection; v3 batch is native and nonce-bound",
+    "v3_controls": [
+      "TestWALStoreV3BatchRoundTripAcrossACrash",
+      "TestWALStoreV3TornBatchIsAllOrNothing",
+      "TestWALStoreV3InstrumentationIncludesBatch"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_multiblock_test.go",
+    "test": "TestWALStore_MultiBlockScanLBAsSplitsPerLSN",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest"
+    ],
+    "reason": "v2 opt-in batch framing/failure injection; v3 batch is native and nonce-bound",
+    "v3_controls": [
+      "TestWALStoreV3BatchRoundTripAcrossACrash",
+      "TestWALStoreV3TornBatchIsAllOrNothing",
+      "TestWALStoreV3InstrumentationIncludesBatch"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_retention_test.go",
+    "test": "TestWALStore_RecoveryRetention_Default_StrictRecycle",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest"
+    ],
+    "reason": "fabricated v2 checkpoint/retention geometry; v3 replacement drives real acknowledged writes and both slots",
+    "v3_controls": [
+      "TestWALStoreV3RecycleFloorCompatibilityMatrix",
+      "TestWALStoreV3RetentionCompatibilityMatrix",
+      "TestWALStoreV3ReclaimKeepsPartialBatchAndRetention"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_retention_test.go",
+    "test": "TestWALStore_RecoveryRetention_LargerThanCheckpoint_ClampsToZero",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest"
+    ],
+    "reason": "fabricated v2 checkpoint/retention geometry; v3 replacement drives real acknowledged writes and both slots",
+    "v3_controls": [
+      "TestWALStoreV3RecycleFloorCompatibilityMatrix",
+      "TestWALStoreV3RetentionCompatibilityMatrix",
+      "TestWALStoreV3ReclaimKeepsPartialBatchAndRetention"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_retention_test.go",
+    "test": "TestWALStore_RecoveryRetention_NonZero_WidensWindow",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest"
+    ],
+    "reason": "fabricated v2 checkpoint/retention geometry; v3 replacement drives real acknowledged writes and both slots",
+    "v3_controls": [
+      "TestWALStoreV3RecycleFloorCompatibilityMatrix",
+      "TestWALStoreV3RetentionCompatibilityMatrix",
+      "TestWALStoreV3ReclaimKeepsPartialBatchAndRetention"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_retention_test.go",
+    "test": "TestWALStore_RecoveryRetention_TypedFailureKind",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest"
+    ],
+    "reason": "fabricated v2 checkpoint/retention geometry; v3 replacement drives real acknowledged writes and both slots",
+    "v3_controls": [
+      "TestWALStoreV3RecycleFloorCompatibilityMatrix",
+      "TestWALStoreV3RetentionCompatibilityMatrix",
+      "TestWALStoreV3ReclaimKeepsPartialBatchAndRetention"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_recycle_pin_test.go",
+    "test": "TestWALStore_RecycleGate_FloorAboveProposed_NoClamp",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest"
+    ],
+    "reason": "fabricated v2 checkpoint/retention geometry; v3 replacement drives real acknowledged writes and both slots",
+    "v3_controls": [
+      "TestWALStoreV3RecycleFloorCompatibilityMatrix",
+      "TestWALStoreV3RetentionCompatibilityMatrix",
+      "TestWALStoreV3ReclaimKeepsPartialBatchAndRetention"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_recycle_pin_test.go",
+    "test": "TestWALStore_RecycleGate_FloorBelowCurrentCheckpoint_NoRegress",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest"
+    ],
+    "reason": "fabricated v2 checkpoint/retention geometry; v3 replacement drives real acknowledged writes and both slots",
+    "v3_controls": [
+      "TestWALStoreV3RecycleFloorCompatibilityMatrix",
+      "TestWALStoreV3RetentionCompatibilityMatrix",
+      "TestWALStoreV3ReclaimKeepsPartialBatchAndRetention"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_recycle_pin_test.go",
+    "test": "TestWALStore_RecycleGate_NilSource_LegacyBehavior",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest"
+    ],
+    "reason": "fabricated v2 checkpoint/retention geometry; v3 replacement drives real acknowledged writes and both slots",
+    "v3_controls": [
+      "TestWALStoreV3RecycleFloorCompatibilityMatrix",
+      "TestWALStoreV3RetentionCompatibilityMatrix",
+      "TestWALStoreV3ReclaimKeepsPartialBatchAndRetention"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_recycle_pin_test.go",
+    "test": "TestWALStore_RecycleGate_SetRecycleFloorSourceNil_Disables",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest"
+    ],
+    "reason": "fabricated v2 checkpoint/retention geometry; v3 replacement drives real acknowledged writes and both slots",
+    "v3_controls": [
+      "TestWALStoreV3RecycleFloorCompatibilityMatrix",
+      "TestWALStoreV3RetentionCompatibilityMatrix",
+      "TestWALStoreV3ReclaimKeepsPartialBatchAndRetention"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_recycle_pin_test.go",
+    "test": "TestWALStore_RecycleGate_SourceActive_ClampsAtFloor",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest"
+    ],
+    "reason": "fabricated v2 checkpoint/retention geometry; v3 replacement drives real acknowledged writes and both slots",
+    "v3_controls": [
+      "TestWALStoreV3RecycleFloorCompatibilityMatrix",
+      "TestWALStoreV3RetentionCompatibilityMatrix",
+      "TestWALStoreV3ReclaimKeepsPartialBatchAndRetention"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_recycle_pin_test.go",
+    "test": "TestWALStore_RecycleGate_SourceInactive_LegacyBehavior",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest"
+    ],
+    "reason": "fabricated v2 checkpoint/retention geometry; v3 replacement drives real acknowledged writes and both slots",
+    "v3_controls": [
+      "TestWALStoreV3RecycleFloorCompatibilityMatrix",
+      "TestWALStoreV3RetentionCompatibilityMatrix",
+      "TestWALStoreV3ReclaimKeepsPartialBatchAndRetention"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_format_admission_test.go",
+    "test": "TestWALStore_UnknownFormatWithoutFactoryRefused",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest",
+      "openLegacyReadOnlyForTest",
+      "openLegacyWALStoreForTest",
+      "readSuperblock"
+    ],
+    "reason": "raw frozen v2 codec/format fixtures remain; v3 has a distinct CRC32C/binding/dual-slot byte contract",
+    "v3_controls": [
+      "TestWALIOV3_RealWriterReopenScan",
+      "TestDescriptorV3PublishAlternatesSlotsAndReopenSelectsNewest",
+      "TestWALStoreProductionRefusesLegacyWithoutMutation"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_persisted_tail_test.go",
+    "test": "TestWALWriterBatchReuseIsBoundedByTheDurableTail",
+    "legacy_roots": [
+      "newWALWriter"
+    ],
+    "reason": "raw v2 header/window/IEEE-CRC/permissive scan assumptions; native v3 refuses holes below W and fences rolled-back suffixes",
+    "v3_controls": [
+      "TestWALIOV3_RealWriterReopenScan",
+      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
+      "TestWALStoreV3DroppedRecordsNeverResurfaceAfterASecondCrash",
+      "TestDurableStartup_Issue51_WALStoreV3CommittedHoleBlocksReadiness"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_persisted_tail_test.go",
+    "test": "TestWALWriterReuseIsBoundedByTheDurableTail",
+    "legacy_roots": [
+      "newWALWriter"
+    ],
+    "reason": "raw v2 header/window/IEEE-CRC/permissive scan assumptions; native v3 refuses holes below W and fences rolled-back suffixes",
+    "v3_controls": [
+      "TestWALIOV3_RealWriterReopenScan",
+      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
+      "TestWALStoreV3DroppedRecordsNeverResurfaceAfterASecondCrash",
+      "TestDurableStartup_Issue51_WALStoreV3CommittedHoleBlocksReadiness"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_checkpoint_safety_test.go",
+    "test": "TestWriteExtentDirectFailureRetainsDirtyWAL",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest"
+    ],
+    "reason": "v2 fd/callback/checkpoint injection or direct-extent API; v3 fails through the shared publisher/owned map and uses install handles",
+    "v3_controls": [
+      "TestDescriptorV3FsyncFailureIsStickyAndPublishesNothing",
+      "TestDescriptorV3SlotWriteErrorLatchesAndPinsTheCandidate",
+      "TestWALStoreV3_AutomaticMapPersistenceFailureLatchesStore",
+      "TestBaseInstallV3CompleteServesTheImageAcrossACrash"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_checkpoint_safety_test.go",
+    "test": "TestWriteExtentDirectSupersededWALDoesNotReappearAfterRestart",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest",
+      "openLegacyWALStoreForTest"
+    ],
+    "reason": "v2 fd/callback/checkpoint injection or direct-extent API; v3 fails through the shared publisher/owned map and uses install handles",
+    "v3_controls": [
+      "TestDescriptorV3FsyncFailureIsStickyAndPublishesNothing",
+      "TestDescriptorV3SlotWriteErrorLatchesAndPinsTheCandidate",
+      "TestWALStoreV3_AutomaticMapPersistenceFailureLatchesStore",
+      "TestBaseInstallV3CompleteServesTheImageAcrossACrash"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  },
+  {
+    "file": "core/storage/walstore_checkpoint_safety_test.go",
+    "test": "TestWriteExtentDirectSupersedesPriorDirtyWAL",
+    "legacy_roots": [
+      "createLegacyWALStoreForTest"
+    ],
+    "reason": "v2 fd/callback/checkpoint injection or direct-extent API; v3 fails through the shared publisher/owned map and uses install handles",
+    "v3_controls": [
+      "TestDescriptorV3FsyncFailureIsStickyAndPublishesNothing",
+      "TestDescriptorV3SlotWriteErrorLatchesAndPinsTheCandidate",
+      "TestWALStoreV3_AutomaticMapPersistenceFailureLatchesStore",
+      "TestBaseInstallV3CompleteServesTheImageAcrossACrash"
+    ],
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+  }
+]

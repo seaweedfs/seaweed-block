@@ -305,7 +305,7 @@ func (s *WALStore) scanLBAsV3(fromLSN uint64, fn func(RecoveryEntry) error) erro
 		if h := v.testScanBeforeRead; h != nil {
 			h()
 		}
-		scan, err := scanWALV3(s.fd, d)
+		scan, err := scanWALV3Accepted(s.fd, d, v.pub.accept)
 		if err != nil {
 			return fmt.Errorf("storage: walstore ScanLBAs (v3): %w", err)
 		}

@@ -401,9 +401,52 @@ func TestWALStoreChunk_ConcurrentRecoverAttachesOnce(t *testing.T) {
 	}
 }
 
-// The caller's recovery deadline governs the attach's first remote call,
-// with no Close and no hold release.
+// A caller deadline can expire during local recovery, before the first
+// remote call, or while that call is held. Both must return the deadline
+// error without Close or releasing the remote hold.
 func TestWALStoreChunk_RecoverHonoursCallerDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		timeout time.Duration
+	}{
+		{"during_recovery_or_attach", 300 * time.Millisecond},
+		{"before_recovery", -time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newGated(storage.NewMemChunkRemote())
+			g.holdGetHead = make(chan struct{})
+			g.honourCtx = true
+			t.Cleanup(g.release)
+			p := chunkProvider(t, t.TempDir(), g, v1View(), 0)
+			if _, err := p.EnsureStorage("v1"); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), tc.timeout)
+			defer cancel()
+			recErr := make(chan error, 1)
+			go func() { _, err := p.RecoverVolume(ctx, "v1"); recErr <- err }()
+			var err error
+			select {
+			case what := <-g.entered:
+				if what != "gethead" {
+					t.Fatalf("held call %q, want gethead", what)
+				}
+				err = recvErr(t, recErr, "RecoverVolume past its caller deadline")
+			case err = <-recErr:
+				// Local recovery may consume the deadline before attach starts.
+			case <-time.After(10 * time.Second):
+				t.Fatal("RecoverVolume neither returned nor reached the held remote")
+			}
+			if !errors.Is(err, context.DeadlineExceeded) || ctx.Err() != context.DeadlineExceeded {
+				t.Fatalf("RecoverVolume=%v caller=%v, want deadline exceeded", err, ctx.Err())
+			}
+		})
+	}
+}
+
+// This handshake separately guarantees that the caller's cancellation is
+// tested with a remote call already in flight, independent of local I/O speed.
+func TestWALStoreChunk_RecoverHonoursCallerCancellationAfterRemoteEntry(t *testing.T) {
 	g := newGated(storage.NewMemChunkRemote())
 	g.holdGetHead = make(chan struct{})
 	g.honourCtx = true
@@ -412,13 +455,14 @@ func TestWALStoreChunk_RecoverHonoursCallerDeadline(t *testing.T) {
 	if _, err := p.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	recErr := make(chan error, 1)
 	go func() { _, err := p.RecoverVolume(ctx, "v1"); recErr <- err }()
 	waitEntered(t, g, "gethead")
-	if err := recvErr(t, recErr, "RecoverVolume past its caller deadline"); err == nil {
-		t.Fatal("RecoverVolume succeeded although its deadline expired during attach")
+	cancel()
+	if err := recvErr(t, recErr, "RecoverVolume after caller cancellation"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("RecoverVolume=%v, want caller cancellation", err)
 	}
 }
 
@@ -542,24 +586,41 @@ func TestWALStoreChunk_CloseSettlesDeferredAttach(t *testing.T) {
 // recovery refuses as a WAL integrity fault. It returns a restore func.
 func corruptWALWrite(t *testing.T, path string, fill byte) func() {
 	t.Helper()
-	raw, err := os.ReadFile(path)
+	// Read the known fixture geometry without touching the owner's locked
+	// byte zero, and search only the WAL (the extent may contain a copy).
+	source, err := os.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload := bytes.Repeat([]byte{fill}, 4096)
-	at := bytes.Index(raw, payload)
-	if at < 30 || bytes.Index(raw[at+1:], payload) >= 0 {
-		t.Fatalf("WAL record for fill %#x not found exactly once", fill)
+	defer source.Close()
+	var geometry [16]byte
+	if _, err := source.ReadAt(geometry[:], 48); err != nil {
+		t.Fatal(err)
 	}
-	const hdr = 30 // LSN 8, Reserved 8, Type 1, Flags 1, LBA 8, Length 4
-	start := at - hdr
-	rec := append([]byte(nil), raw[start:at+4096+8]...)
+	walStart := binary.LittleEndian.Uint64(geometry[:8])
+	walSize := binary.LittleEndian.Uint64(geometry[8:])
+	if walStart != 8192 || walSize > 64*1024*1024 || walSize < 4096+70 {
+		t.Fatalf("unexpected v3 fixture geometry %d/%d", walStart, walSize)
+	}
+	wal := make([]byte, int(walSize))
+	if _, err := source.ReadAt(wal, int64(walStart)); err != nil {
+		t.Fatal(err)
+	}
+	payload := bytes.Repeat([]byte{fill}, 4096)
+	at := bytes.Index(wal, payload)
+	// Ignore overlapping matches if the first CRC byte happens to equal fill.
+	if at < 62 || bytes.Index(wal[at+len(payload):], payload) >= 0 {
+		t.Fatalf("WAL payload %#x not found exactly once", fill)
+	}
+	const hdr = 62
+	start := int64(walStart) + int64(at-hdr)
+	rec := append([]byte(nil), wal[at-hdr:at+4096+8]...)
 	orig := append([]byte(nil), rec...)
 	if rec[16] != 0x01 || binary.LittleEndian.Uint64(rec[8:]) != 0 {
 		t.Fatalf("unexpected WAL record header % x", rec[:hdr])
 	}
-	rec[16] = 0x04 // write batch, Reserved stays 0: invalid
-	binary.LittleEndian.PutUint32(rec[hdr+4096:], crc32.ChecksumIEEE(rec[:hdr+4096]))
+	rec[16] = 0x04 // invalid native batch: BatchCount remains zero
+	binary.LittleEndian.PutUint32(rec[hdr+4096:], crc32.Checksum(rec[:hdr+4096], crc32.MakeTable(crc32.Castagnoli)))
 	f, err := os.OpenFile(path, os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -607,6 +668,15 @@ func TestWALStoreChunk_StaleWaiterCannotOverrideFailedRecovery(t *testing.T) {
 		t.Fatalf("recovery A: %v", err)
 	}
 	if _, err := s.Write(5, block(0xA7)); err != nil {
+		t.Fatal(err)
+	}
+	// This oracle requires corruption below a persisted W. Default mode C
+	// intentionally permits losing its newest uncheckpointed batch instead.
+	ws, ok := s.(*storage.WALStore)
+	if !ok {
+		t.Fatalf("unexpected native store %T", s)
+	}
+	if err := ws.SetWMode(storage.WModeStrict); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Sync(); err != nil {
@@ -681,6 +751,15 @@ func TestWALStoreChunk_FailedRecoveryRetiresAuthorityWait(t *testing.T) {
 		t.Fatalf("after recovery without authority: %v; want the volume awaiting authority", err)
 	}
 	if _, err := s.Write(5, block(0xA7)); err != nil {
+		t.Fatal(err)
+	}
+	// This oracle requires corruption below a persisted W. Default mode C
+	// intentionally permits losing its newest uncheckpointed batch instead.
+	ws, ok := s.(*storage.WALStore)
+	if !ok {
+		t.Fatalf("unexpected native store %T", s)
+	}
+	if err := ws.SetWMode(storage.WModeStrict); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Sync(); err != nil {
@@ -774,6 +853,15 @@ func TestWALStoreChunk_StaleWaiterPastTickCheckCannotAttach(t *testing.T) {
 	if _, err := s.Write(5, block(0xA7)); err != nil {
 		t.Fatal(err)
 	}
+	// This oracle requires corruption below a persisted W. Default mode C
+	// intentionally permits losing its newest uncheckpointed batch instead.
+	ws, ok := s.(*storage.WALStore)
+	if !ok {
+		t.Fatalf("unexpected native store %T", s)
+	}
+	if err := ws.SetWMode(storage.WModeStrict); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.Sync(); err != nil {
 		t.Fatal(err)
 	}
@@ -781,6 +869,7 @@ func TestWALStoreChunk_StaleWaiterPastTickCheckCannotAttach(t *testing.T) {
 
 	// Park A's wait inside its projection read, after its tick check.
 	view.arm()
+	t.Cleanup(func() { close(view.release) })
 	select {
 	case <-view.parked:
 	case <-time.After(10 * time.Second):

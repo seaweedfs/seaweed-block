@@ -1,6 +1,7 @@
 package durable_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -72,6 +73,41 @@ func TestDurableProvider_AutoCreatesWALStore(t *testing.T) {
 	}
 	if got := onDiskMagic(t, filepath.Join(root, "v1.bin")); got != "SWBK" {
 		t.Fatalf("on-disk magic=%q, want SWBK (walstore)", got)
+	}
+}
+
+func TestDurableProvider_AutoOpensV3FallbackSlot(t *testing.T) {
+	root := t.TempDir()
+	p := autoProvider(t, root, durable.ImplWALStore)
+	s, err := p.EnsureStorage("v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Write(3, bytes.Repeat([]byte{0x73}, 4096)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "v1.bin")
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.WriteAt([]byte{0xff}, 0)
+	ce := f.Close()
+	if err != nil || ce != nil {
+		t.Fatal(err, ce)
+	}
+	auto := autoProvider(t, root, durable.ImplAuto)
+	if _, err := auto.EnsureStorage("v1"); err != nil {
+		t.Fatalf("valid v3 fallback must pass the auto probe: %v", err)
+	}
+	if _, err := auto.RecoverVolume(context.Background(), "v1"); err != nil {
+		t.Fatal(err)
 	}
 }
 

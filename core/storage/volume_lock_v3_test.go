@@ -15,7 +15,7 @@ func TestWALStoreV3OwnerExcludesOpenAndReadOnly(t *testing.T) {
 		}
 		t.Fatalf("second writable owner: %v", err)
 	}
-	if reader, err := openReadOnlyV3ForTest(path, WALStoreOptions{}); !errors.Is(err, ErrWALStoreLocked) {
+	if reader, err := openReadOnlyV3(path, WALStoreOptions{}); !errors.Is(err, ErrWALStoreLocked) {
 		if reader != nil {
 			_ = reader.Close()
 		}
@@ -24,7 +24,7 @@ func TestWALStoreV3OwnerExcludesOpenAndReadOnly(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reader, err := openReadOnlyV3ForTest(path, WALStoreOptions{})
+	reader, err := openReadOnlyV3(path, WALStoreOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestWALStoreV3CreatorKeepsOwnershipThroughPublication(t *testing.T) {
 			}
 			t.Errorf("creation published=%v writable contender: %v", published, err)
 		}
-		if other, err := openReadOnlyV3ForTest(path, WALStoreOptions{}); !errors.Is(err, ErrWALStoreLocked) {
+		if other, err := openReadOnlyV3(path, WALStoreOptions{}); !errors.Is(err, ErrWALStoreLocked) {
 			if other != nil {
 				_ = other.Close()
 			}

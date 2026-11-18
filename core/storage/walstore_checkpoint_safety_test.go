@@ -34,7 +34,7 @@ func TestFlusherCheckpointMetadataFailureDoesNotPublishOrRecycle(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s, err := CreateWALStore(filepath.Join(t.TempDir(), "store.bin"), 16, 4096)
+			s, err := createLegacyWALStoreForTest(filepath.Join(t.TempDir(), "store.bin"), 16, 4096)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -145,7 +145,7 @@ func TestCheckpointPublicationCrashWindowsRemainRecoverable(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "store.bin")
-			s, err := CreateWALStore(path, 16, 4096)
+			s, err := createLegacyWALStoreForTest(path, 16, 4096)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -173,7 +173,7 @@ func TestCheckpointPublicationCrashWindowsRemainRecoverable(t *testing.T) {
 			}
 			s.fd = nil
 
-			reopened, err := OpenWALStore(path)
+			reopened, err := openLegacyWALStoreForTest(path)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -198,7 +198,7 @@ func TestCheckpointPublicationCrashWindowsRemainRecoverable(t *testing.T) {
 }
 
 func TestFlusherWALSlotMismatchFailsClosed(t *testing.T) {
-	s, err := CreateWALStore(filepath.Join(t.TempDir(), "store.bin"), 16, 4096)
+	s, err := createLegacyWALStoreForTest(filepath.Join(t.TempDir(), "store.bin"), 16, 4096)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +280,7 @@ func TestFlusherRejectsCorruptOrUnsupportedDirtyRecord(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s, err := CreateWALStore(filepath.Join(t.TempDir(), "store.bin"), 16, 4096)
+			s, err := createLegacyWALStoreForTest(filepath.Join(t.TempDir(), "store.bin"), 16, 4096)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -337,7 +337,7 @@ func TestFlusherRejectsCorruptOrUnsupportedDirtyRecord(t *testing.T) {
 
 func TestWALStoreClosePerformsFinalFlush(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "store.bin")
-	s, err := CreateWALStore(path, 16, 4096)
+	s, err := createLegacyWALStoreForTest(path, 16, 4096)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -352,7 +352,7 @@ func TestWALStoreClosePerformsFinalFlush(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reopened, err := OpenWALStore(path)
+	reopened, err := openLegacyWALStoreForTest(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,7 +373,7 @@ func TestWALStoreClosePerformsFinalFlush(t *testing.T) {
 }
 
 func TestWALStoreCloseWaitsForInflightSync(t *testing.T) {
-	s, err := CreateWALStore(filepath.Join(t.TempDir(), "store.bin"), 16, 4096)
+	s, err := createLegacyWALStoreForTest(filepath.Join(t.TempDir(), "store.bin"), 16, 4096)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -414,7 +414,7 @@ func TestWALStoreCloseWaitsForInflightSync(t *testing.T) {
 }
 
 func TestWALStoreMutationAPIsRejectAfterClose(t *testing.T) {
-	s, err := CreateWALStore(filepath.Join(t.TempDir(), "store.bin"), 16, 4096)
+	s, err := createLegacyWALStoreForTest(filepath.Join(t.TempDir(), "store.bin"), 16, 4096)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -454,7 +454,7 @@ func TestWALStoreCloseReturnsFinalMetadataFailure(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s, err := CreateWALStore(filepath.Join(t.TempDir(), "store.bin"), 16, 4096)
+			s, err := createLegacyWALStoreForTest(filepath.Join(t.TempDir(), "store.bin"), 16, 4096)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -475,7 +475,7 @@ func TestWALStoreCloseReturnsFinalMetadataFailure(t *testing.T) {
 }
 
 func TestWriteExtentDirectSupersedesPriorDirtyWAL(t *testing.T) {
-	s, err := CreateWALStore(filepath.Join(t.TempDir(), "store.bin"), 16, 4096)
+	s, err := createLegacyWALStoreForTest(filepath.Join(t.TempDir(), "store.bin"), 16, 4096)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -503,7 +503,7 @@ func TestWriteExtentDirectSupersedesPriorDirtyWAL(t *testing.T) {
 
 func TestWriteExtentDirectSupersededWALDoesNotReappearAfterRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "store.bin")
-	s, err := CreateWALStore(path, 16, 4096)
+	s, err := createLegacyWALStoreForTest(path, 16, 4096)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -527,7 +527,7 @@ func TestWriteExtentDirectSupersededWALDoesNotReappearAfterRestart(t *testing.T)
 		t.Fatal(err)
 	}
 
-	reopened, err := OpenWALStore(path)
+	reopened, err := openLegacyWALStoreForTest(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -545,7 +545,7 @@ func TestWriteExtentDirectSupersededWALDoesNotReappearAfterRestart(t *testing.T)
 }
 
 func TestRunningFlusherCannotOverwriteDirectBase(t *testing.T) {
-	s, err := CreateWALStore(filepath.Join(t.TempDir(), "store.bin"), 16, 4096)
+	s, err := createLegacyWALStoreForTest(filepath.Join(t.TempDir(), "store.bin"), 16, 4096)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -572,7 +572,7 @@ func TestRunningFlusherCannotOverwriteDirectBase(t *testing.T) {
 }
 
 func TestFlusherSnapshotCannotOverwriteLaterDirectBase(t *testing.T) {
-	s, err := CreateWALStore(filepath.Join(t.TempDir(), "store.bin"), 16, 4096)
+	s, err := createLegacyWALStoreForTest(filepath.Join(t.TempDir(), "store.bin"), 16, 4096)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -609,7 +609,7 @@ func TestFlusherSnapshotCannotOverwriteLaterDirectBase(t *testing.T) {
 }
 
 func TestWriteExtentDirectFailureRetainsDirtyWAL(t *testing.T) {
-	s, err := CreateWALStore(filepath.Join(t.TempDir(), "store.bin"), 16, 4096)
+	s, err := createLegacyWALStoreForTest(filepath.Join(t.TempDir(), "store.bin"), 16, 4096)
 	if err != nil {
 		t.Fatal(err)
 	}

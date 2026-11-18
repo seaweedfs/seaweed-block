@@ -137,7 +137,7 @@ func TestClaimChunkHeadFencesNoopCut(t *testing.T) {
 }
 
 func TestFreshRestoreBitmapStartsAtClaimedHEAD(t *testing.T) {
-	s, _ := newChunkTestStore(t)
+	s, _ := newLegacyChunkTestStore(t)
 	r := NewMemChunkRemote()
 	if _, err := r.CASHead(ctTimeout(t), ChunkHeadVersion{}, ChunkHead{Epoch: 2, Holder: "host-a", RemoteLSN: 42}); err != nil {
 		t.Fatal(err)

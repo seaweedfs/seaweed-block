@@ -53,7 +53,7 @@ func TestChunkLayer_LostBitmapReconciles(t *testing.T) {
 	copy(src, makeBlock(ctBlockSize, 0x44)) // HEAD's block 0 differs from the local image
 	f := newFakeChunkRemote()
 	f.seedHead(t, src, 0, 0) // an older epoch: this holder may publish over it
-	s, _ := newChunkTestStore(t)
+	s, _ := newLegacyChunkTestStore(t)
 	layer := mustAttach(t, s, f, ctConfig(1)) // waits for reconciliation
 	if st := layer.Stats(); st.Reconciling || st.ReconcileTotal == 0 || st.ReconcileDone != st.ReconcileTotal {
 		t.Fatalf("an existing volume without a bitmap did not reconcile: reconciling=%v done=%d/%d", st.Reconciling, st.ReconcileDone, st.ReconcileTotal)

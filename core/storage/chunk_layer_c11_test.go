@@ -28,6 +28,9 @@ func extentBytes(t *testing.T, s *WALStore, lba uint32) []byte {
 
 // walLogicalTail is the WAL writer's physical recycling position.
 func walLogicalTail(s *WALStore) uint64 {
+	if s.v3 != nil {
+		return s.v3.pub.current().RetainedTail
+	}
 	s.wal.mu.Lock()
 	defer s.wal.mu.Unlock()
 	return s.wal.logicalTail
@@ -96,7 +99,7 @@ func flushWithin(t *testing.T, s *WALStore, what string) error {
 // no WALStore re-entry. (A BASE mark must also be a constant-time flag; that
 // cost bound is measured in the implementation PR, not proven here.)
 func TestChunkLayer_C11_ExtentCallbackIsPureInMemory(t *testing.T) {
-	s, _ := newChunkTestStore(t)
+	s, _ := newLegacyChunkTestStore(t)
 	f := newFakeChunkRemote()
 	cfg := ctConfig(1)
 	bm := cfg.Bitmap.(*fakeBitmapStore)
@@ -141,7 +144,7 @@ func TestChunkLayer_C11_ExtentCallbackIsPureInMemory(t *testing.T) {
 // refuses the advance (checkpoint and WAL tail unchanged), and a restart
 // still captures the chunk from the WAL.
 func TestChunkLayer_C11_BitmapPersistedBeforeWALRecycle(t *testing.T) {
-	s, path, crash := crashableStore(t)
+	s, path, crash := legacyCrashableStore(t)
 	f := newFakeChunkRemote()
 	cfg := ctConfig(1)
 	bm := cfg.Bitmap.(*fakeBitmapStore)
@@ -216,7 +219,7 @@ func TestChunkLayer_C11_BitmapPersistedBeforeWALRecycle(t *testing.T) {
 	bm.failSave = nil
 	bm.mu.Unlock()
 	crash()
-	s2, _ := reopen(t, path)
+	s2, _ := legacyReopen(t, path)
 	layer2 := mustAttach(t, s2, f, cfg)
 	before := f.stats()
 	if _, err := layer2.Capture(ctTimeout(t)); err != nil {
@@ -232,7 +235,7 @@ func TestChunkLayer_C11_BitmapPersistedBeforeWALRecycle(t *testing.T) {
 // and its WAL recycled (so only the bitmap remembers it). The cut's Reset
 // must keep that chunk dirty, and after a crash the next capture uploads it.
 func TestChunkLayer_C11_RolloverKeepsPostCutDirt(t *testing.T) {
-	s, path, crash := crashableStore(t)
+	s, path, crash := legacyCrashableStore(t)
 	f := newFakeChunkRemote()
 	cfg := ctConfig(1)
 	bm := cfg.Bitmap.(*fakeBitmapStore)
@@ -266,7 +269,7 @@ func TestChunkLayer_C11_RolloverKeepsPostCutDirt(t *testing.T) {
 		t.Fatal("the cut's Reset kept chunk 1, which the cut captured")
 	}
 	crash()
-	s2, _ := reopen(t, path)
+	s2, _ := legacyReopen(t, path)
 	layer2 := mustAttach(t, s2, f, cfg)
 	before := f.stats()
 	if _, err := layer2.Capture(ctTimeout(t)); err != nil {
@@ -291,7 +294,7 @@ func TestChunkLayer_C11_RolloverKeepsPostCutDirt(t *testing.T) {
 // Then the host crashes.
 func c11BaseFixture(t *testing.T, failSave, complete bool) (path string, f *fakeChunkRemote, cfg chunkLayerConfig, frontier uint64) {
 	t.Helper()
-	s, path, crash := crashableStore(t)
+	s, path, crash := legacyCrashableStore(t)
 	f = newFakeChunkRemote()
 	cfg = ctConfig(1)
 	bm := cfg.Bitmap.(*fakeBitmapStore)
@@ -425,7 +428,7 @@ func rerunBase(t *testing.T, s *WALStore, layer chunkLayer, frontier uint64) {
 func TestChunkLayer_C11_BaseRebuildRecovery(t *testing.T) {
 	t.Run("interrupted install", func(t *testing.T) {
 		path, f, cfg, frontier := c11BaseFixture(t, false, false)
-		s2, _ := reopen(t, path)
+		s2, _ := legacyReopen(t, path)
 		layer2 := mustAttach(t, s2, f, cfg)
 		before := f.stats()
 		if _, err := layer2.Capture(ctTimeout(t)); !errors.Is(err, errChunkCaptureRefused) {
@@ -439,13 +442,13 @@ func TestChunkLayer_C11_BaseRebuildRecovery(t *testing.T) {
 	})
 	t.Run("completed install", func(t *testing.T) {
 		path, f, cfg, _ := c11BaseFixture(t, false, true)
-		s2, _ := reopen(t, path)
+		s2, _ := legacyReopen(t, path)
 		layer2 := mustAttach(t, s2, f, cfg)
 		assertBaseCutUploadsChangedChunks(t, layer2, f, cfg)
 	})
 	t.Run("bitmap save fails on the direct-frontier path", func(t *testing.T) {
 		path, f, cfg, frontier := c11BaseFixture(t, true, false)
-		s2, _ := reopen(t, path)
+		s2, _ := legacyReopen(t, path)
 		layer2 := mustAttach(t, s2, f, cfg)
 		if _, err := layer2.Capture(ctTimeout(t)); !errors.Is(err, errChunkCaptureRefused) {
 			t.Fatalf("cut after an install whose frontier never became durable: got %v, want errChunkCaptureRefused", err)
@@ -459,7 +462,7 @@ func TestChunkLayer_C11_BaseRebuildRecovery(t *testing.T) {
 // then fails; after a crash the next capture may over-report, but its image
 // is exact and nothing is missed.
 func TestChunkLayer_C11_SaveThenCheckpointFailureOverReportsOnly(t *testing.T) {
-	s, path, crash := crashableStore(t)
+	s, path, crash := legacyCrashableStore(t)
 	f := newFakeChunkRemote()
 	cfg := ctConfig(1)
 	layer := mustAttach(t, s, f, cfg)
@@ -477,7 +480,7 @@ func TestChunkLayer_C11_SaveThenCheckpointFailureOverReportsOnly(t *testing.T) {
 		t.Fatal("the flush succeeded although its checkpoint publish failed")
 	}
 	crash()
-	s2, _ := reopen(t, path)
+	s2, _ := legacyReopen(t, path)
 	layer2 := mustAttach(t, s2, f, cfg)
 	if _, err := layer2.Capture(ctTimeout(t)); err != nil {
 		t.Fatalf("capture after restart: %v", err)
@@ -493,7 +496,7 @@ func TestChunkLayer_C11_SaveThenCheckpointFailureOverReportsOnly(t *testing.T) {
 // and keep the refs of the unchanged chunks.
 func c11RestartFixture(t *testing.T, beforeReattach func(bm *fakeBitmapStore)) {
 	t.Helper()
-	s, path, crash := crashableStore(t)
+	s, path, crash := legacyCrashableStore(t)
 	f := newFakeChunkRemote()
 	cfg := ctConfig(1)
 	bm := cfg.Bitmap.(*fakeBitmapStore)
@@ -511,7 +514,7 @@ func c11RestartFixture(t *testing.T, beforeReattach func(bm *fakeBitmapStore)) {
 		t.Fatal(err)
 	}
 	crash()
-	s2, _ := reopen(t, path)
+	s2, _ := legacyReopen(t, path)
 	if beforeReattach != nil {
 		bm.mu.Lock()
 		beforeReattach(bm)
@@ -567,7 +570,7 @@ func TestChunkLayer_C11_LostOrMismatchedBitmapFallsBackToHashCompare(t *testing.
 // promoted replica's bitmap covers its applied chunks before their WAL
 // entries are recycled.
 func TestChunkLayer_C11_ReplicaApplyKeepsBitmap(t *testing.T) {
-	s, _ := newChunkTestStore(t)
+	s, _ := newLegacyChunkTestStore(t)
 	f := newFakeChunkRemote()
 	cfg := ctConfig(1)
 	bm := cfg.Bitmap.(*fakeBitmapStore)

@@ -44,7 +44,7 @@ func TestWALStoreCheckpointSIGKILLCrashWindows(t *testing.T) {
 				t.Fatalf("crash helper returned normally: %s", output)
 			}
 
-			reopened, err := OpenWALStore(path)
+			reopened, err := openLegacyWALStoreForTest(path)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -69,7 +69,7 @@ func TestWALStoreCheckpointSIGKILLCrashWindows(t *testing.T) {
 }
 
 func runCheckpointCrashHelper(window, path string) {
-	s, err := CreateWALStore(path, 16, 4096)
+	s, err := createLegacyWALStoreForTest(path, 16, 4096)
 	if err != nil {
 		panic(err)
 	}

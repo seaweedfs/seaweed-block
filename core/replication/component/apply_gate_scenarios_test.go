@@ -25,6 +25,7 @@ import (
 func TestComponent_RecoveryStaleSkip_CoverageStillAdvances(t *testing.T) {
 	component.RunSubstrate(t, "walstore", component.Walstore, func(t *testing.T, c *component.Cluster) {
 		c.WithReplicas(1).WithApplyGate().Start()
+		primeReplicaZeroBase(t, c, 49)
 
 		gate := c.ApplyGate(0)
 		if gate == nil {
@@ -67,6 +68,7 @@ func TestComponent_RecoveryStaleSkip_CoverageStillAdvances(t *testing.T) {
 func TestComponent_LiveLaneStaleEntry_FailsLoud(t *testing.T) {
 	component.RunSubstrate(t, "walstore", component.Walstore, func(t *testing.T, c *component.Cluster) {
 		c.WithReplicas(1).WithApplyGate().Start()
+		primeReplicaZeroBase(t, c, 49)
 
 		gate := c.ApplyGate(0)
 		// Live-lane lineage (TargetLSN == liveShipTargetLSN == 1).
@@ -114,6 +116,7 @@ func TestComponent_LiveLaneStaleEntry_FailsLoud(t *testing.T) {
 func TestComponent_LanePurity_CallerControlsDispatch(t *testing.T) {
 	component.RunSubstrate(t, "walstore", component.Walstore, func(t *testing.T, c *component.Cluster) {
 		c.WithReplicas(1).WithApplyGate().Start()
+		primeReplicaZeroBase(t, c, 49)
 
 		gate := c.ApplyGate(0)
 
@@ -156,6 +159,7 @@ func TestComponent_LanePurity_CallerControlsDispatch(t *testing.T) {
 func TestComponent_OptionCHybrid_WalstoreSeed(t *testing.T) {
 	component.RunSubstrate(t, "walstore", component.Walstore, func(t *testing.T, c *component.Cluster) {
 		c.WithReplicas(1).WithApplyGate().Start()
+		primeReplicaZeroBase(t, c, 49)
 
 		// Pre-apply on the replica's substrate directly to populate
 		// dirty map (which walstore's AppliedLSNs() reads).
@@ -170,7 +174,7 @@ func TestComponent_OptionCHybrid_WalstoreSeed(t *testing.T) {
 		}
 
 		// Trigger session init (any apply does it). Use unrelated LBA.
-		gate.ApplyRecovery(recov, 99, makeData(0xCC), 60)
+		gate.ApplyRecovery(recov, 99, makeData(0xCC), 51)
 
 		// Now LBA=5's seed should be visible.
 		seedLSN, ok := gate.SessionAppliedLSN(7, 5)
