@@ -688,9 +688,11 @@ func (s *WALStore) writeBatchV3Locked(startLBA uint32, blocks [][]byte, firstLSN
 	}
 	bs := int(s.sb.BlockSize)
 	payload := make([]byte, 0, len(blocks)*bs)
+	copyStart := time.Now()
 	for _, b := range blocks {
 		payload = append(payload, b...)
 	}
+	s.instr.recordWALCopy(len(payload), time.Since(copyStart))
 	n := uint64(len(blocks))
 	lastLSN := firstLSN + n - 1
 	if s.v3.mapProof != nil {
