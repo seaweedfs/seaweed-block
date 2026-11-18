@@ -39,6 +39,17 @@ func runPersistDemo(opts options) int {
 	}
 	path := filepath.Join(dir, "sparrow-persist.dat")
 
+	// The owned COW map is a file. Refuse an unexpected directory before
+	// changing the prior demo; never recursively remove a caller's directory.
+	mapPath := path + ".chunkmap"
+	if st, err := os.Lstat(mapPath); err == nil && st.IsDir() {
+		fmt.Fprintln(os.Stderr, "sparrow: persist demo: unexpected directory at map file path")
+		return 3
+	} else if err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "sparrow: persist demo: inspect map: %v\n", err)
+		return 3
+	}
+
 	// Demo is meant to be reproducible: every invocation creates a
 	// fresh file. If a previous demo left bytes behind, remove them
 	// before Round 1 so CreateWALStore's O_EXCL doesn't collide.
@@ -49,9 +60,9 @@ func runPersistDemo(opts options) int {
 		return 3
 	}
 
-	// V3 stores own immutable map objects in this exact sibling directory.
+	// V3 owns a COW map file at this exact sibling path.
 	// Removing only the volume would leave the next O_EXCL map create blocked.
-	if err := os.RemoveAll(path + ".chunkmap"); err != nil {
+	if err := os.Remove(mapPath); err != nil && !os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "sparrow: persist demo: cannot remove prior map: %v\n", err)
 		return 3
 	}
