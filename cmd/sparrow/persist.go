@@ -42,9 +42,17 @@ func runPersistDemo(opts options) int {
 	// Demo is meant to be reproducible: every invocation creates a
 	// fresh file. If a previous demo left bytes behind, remove them
 	// before Round 1 so CreateWALStore's O_EXCL doesn't collide.
-	// We only remove the demo file we know we own — never the dir.
+	// Only the named demo file and its owned map sidecar are retired; the
+	// supplied parent directory and unrelated siblings are preserved.
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "sparrow: persist demo: cannot remove prior file %s: %v\n", path, err)
+		return 3
+	}
+
+	// V3 stores own immutable map objects in this exact sibling directory.
+	// Removing only the volume would leave the next O_EXCL map create blocked.
+	if err := os.RemoveAll(path + ".chunkmap"); err != nil {
+		fmt.Fprintf(os.Stderr, "sparrow: persist demo: cannot remove prior map: %v\n", err)
 		return 3
 	}
 
