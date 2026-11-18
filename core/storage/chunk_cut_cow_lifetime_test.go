@@ -561,12 +561,10 @@ func TestCutCOWV3_OverlappingRealBatchesPreserveCut(t *testing.T) {
 	if !bytes.Equal(f.imageOf(t, f.stats().head), want) {
 		t.Fatal("batch published into the pre-H cut")
 	}
-	for lba := uint32(0); lba < ctNumBlocks; lba++ {
-		data, err := s.Read(lba)
-		if err != nil {
-			t.Fatal(err)
-		}
-		copy(want[int(lba)*ctBlockSize:], data)
+	// Both submitted batches assign the same literal bytes to overlapping
+	// LBAs (9). Derive the next HEAD oracle from those inputs, never local Read.
+	for lba := 5; lba <= 13; lba++ {
+		copy(want[lba*ctBlockSize:], makeBlock(ctBlockSize, byte(lba)+0x80))
 	}
 	r, err := l.Cut(context.Background())
 	if err != nil {
