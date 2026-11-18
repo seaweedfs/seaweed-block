@@ -114,12 +114,13 @@ type chunkLayerImpl struct {
 	keySeq   uint64
 
 	// Test-only scheduling hooks; nil in production.
-	testPresenceSnapshotHook func()                 // after a presence snapshot, before it is written
-	testAfterAdmitHook       func()                 // right after a capture is admitted
-	testAfterStageHook       func(round int)        // after each pre-copy staging round
-	testAfterStageReadHook   func(idx uint64)       // after a staging read, before its result is kept
-	testAfterBarrierSyncHook func(h uint64)         // under the capture barrier, right after Sync fixed H
-	syncDirFn                func(dir string) error // directory fsync after a rename; syncDir in production
+	testPresenceSnapshotHook     func()                 // after a presence snapshot, before it is written
+	testBaseTransitionBeforeLock func()                 // test handshake before capMu drain
+	testAfterAdmitHook           func()                 // right after a capture is admitted
+	testAfterStageHook           func(round int)        // after each pre-copy staging round
+	testAfterStageReadHook       func(idx uint64)       // after a staging read, before its result is kept
+	testAfterBarrierSyncHook     func(h uint64)         // under the capture barrier, right after Sync fixed H
+	syncDirFn                    func(dir string) error // directory fsync after a rename; syncDir in production
 
 	// Absence: chunks whose local bytes are not authoritative (fresh host,
 	// evicted), and blocks written locally inside such chunks since.
@@ -689,7 +690,7 @@ func (l *chunkLayerImpl) admit() error {
 		return errChunkLayerFenced
 	case detached:
 		return errChunkLayerDetached
-	case base == chunkBaseInstalling:
+	case base == chunkBaseInstalling && !l.usesOwnedMapV3():
 		return fmt.Errorf("%w: %w", errChunkCaptureRefused, errChunkBaseInstalling)
 	}
 	if gate := l.cfg.CaptureAllowed; gate != nil {

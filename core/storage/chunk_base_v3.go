@@ -11,6 +11,9 @@ func (l *chunkLayerImpl) holdBaseTransitionV3() (func(), error) {
 	if err != nil {
 		return nil, err
 	}
+	if hook := l.testBaseTransitionBeforeLock; hook != nil {
+		hook()
+	}
 	l.capMu.Lock()
 	l.stMu.Lock()
 	var refusal error
