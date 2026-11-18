@@ -389,3 +389,77 @@ func damageSlotA(t *testing.T, path string) {
 		t.Fatal(err)
 	}
 }
+
+func patchSuperblock(t *testing.T, path string, off int64, v uint64) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	var b [8]byte
+	for i := range b {
+		b[i] = byte(v >> (8 * i))
+	}
+	if _, err := f.WriteAt(b[:], off); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// codex01 row 13b P1 and P2: geometry the v3 slot validation would refuse
+// is refused before ANY write (no backup, no map, the volume unchanged):
+// an aligned VolumeSize whose extent end overflows, and a v2 WAL size that
+// extends past the file end (refused before the scan allocates it).
+// Mutants: no checked extent end in ValidateMigrationV3, no file-size
+// bound before the WAL read.
+func TestMigrateV3BadGeometryRefusedBeforeAnyWrite(t *testing.T) {
+	for name, patch := range map[string][2]uint64{
+		"extent end overflows":  {24, 1 << 63},           // VolumeSize, block aligned
+		"WAL past the file end": {48, 1<<45 + 4096},      // WALSize, v3 size aligned
+		"WAL region wraps":      {48, ^uint64(0) - 4095}, // WALSize 2^64-4096: every sum wraps
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := v2Volume(t, true)
+			patchSuperblock(t, path, int64(patch[0]), patch[1])
+			snap := snapshotFiles(t, path)
+			code, msg := migrate(t, path)
+			if code == 0 || !strings.Contains(msg, "cannot be migrated in place") {
+				t.Fatalf("exit %d: %s", code, msg)
+			}
+			if !sameFiles(snap, snapshotFiles(t, path)) {
+				t.Fatal("a geometry refusal wrote a backup, a map or volume bytes")
+			}
+		})
+	}
+}
+
+// codex01 row 13b P2: an earlier run renamed the v2 chunk bitmap but its
+// directory fsync failed; the rerun (source gone) still fsyncs the
+// directory so the rename is durable. Mutant: treating the missing source
+// as done without the fsync fails here.
+func TestMigrateV3RetirementRerunFsyncsTheDirectory(t *testing.T) {
+	path := v2Volume(t, true)
+	if err := os.WriteFile(path+".chunkbitmap", []byte("c11"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	failed := false
+	syncDirHook = func(string) error {
+		if _, err := os.Stat(path + ".v2-chunkbitmap.bak"); err == nil && !failed {
+			failed = true
+			return errors.New("injected directory fsync failure")
+		}
+		return nil
+	}
+	defer func() { syncDirHook = nil }()
+	if code, _ := migrate(t, path); code == 0 {
+		t.Fatal("the injected retirement fsync failure did not fail the tool")
+	}
+	calls := 0
+	syncDirHook = func(string) error { calls++; return nil }
+	if code, msg := migrate(t, path); code != 0 {
+		t.Fatalf("rerun: exit %d: %s", code, msg)
+	}
+	if calls == 0 {
+		t.Fatal("the rerun did not fsync the directory of the earlier rename")
+	}
+}

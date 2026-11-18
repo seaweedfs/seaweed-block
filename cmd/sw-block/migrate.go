@@ -30,6 +30,10 @@ var errMigrateNeitherSlot = errors.New("migrate-v3: no valid v2 superblock or v3
 // its name; returning an error stops the tool there (a simulated crash).
 var migrateStepHook func(step string) error
 
+// syncDirHook, when set by a test, runs at every directory fsync; an error
+// fails that fsync.
+var syncDirHook func(path string) error
+
 func runMigrateV3(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("migrate-v3", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -96,6 +100,23 @@ func migrateV3(path string, chunkBlocks uint64, out io.Writer) error {
 }
 
 func migrateFromV2(f *os.File, path string, sb v2legacy.Superblock, chunkBlocks uint64, out io.Writer) error {
+	src := storage.MigrationSourceV3{
+		UUID: sb.UUID, VolumeSize: sb.VolumeSize, ExtentSize: sb.ExtentSize, BlockSize: sb.BlockSize,
+		OldWALOffset: sb.WALOffset, OldWALSize: sb.WALSize, CreatedAt: sb.CreatedAt,
+		CheckpointLSN: sb.WALCheckpointLSN, ChunkBlocks: chunkBlocks,
+	}
+	// Precondition 4 first (read-only): the geometry, including the checked
+	// extent end, refuses before the WAL is read or anything is written.
+	if err := storage.ValidateMigrationV3(src); err != nil {
+		return err
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if size := uint64(fi.Size()); sb.WALOffset > size || sb.WALSize > size-sb.WALOffset { // no wrapping sum
+		return fmt.Errorf("%w: the v2 WAL [%d, %d) extends past the file end %d", storage.ErrMigrateGeometry, sb.WALOffset, sb.WALOffset+sb.WALSize, fi.Size())
+	}
 	// Step 1: precondition 3, read-only and before any write.
 	if sb.WALHead != sb.WALTail {
 		return fmt.Errorf("%w (WALHead %d != WALTail %d)", errMigrateNotClean, sb.WALHead, sb.WALTail)
@@ -106,14 +127,6 @@ func migrateFromV2(f *os.File, path string, sb v2legacy.Superblock, chunkBlocks 
 	}
 	if found := v2legacy.ScanClean(wal, sb.WALCheckpointLSN); len(found) > 0 {
 		return fmt.Errorf("%w (%d unflushed record(s); first at WAL offset %d: %s)", errMigrateNotClean, len(found), found[0].Offset, found[0].Reason)
-	}
-	src := storage.MigrationSourceV3{
-		UUID: sb.UUID, VolumeSize: sb.VolumeSize, ExtentSize: sb.ExtentSize, BlockSize: sb.BlockSize,
-		OldWALOffset: sb.WALOffset, OldWALSize: sb.WALSize, CreatedAt: sb.CreatedAt,
-		CheckpointLSN: sb.WALCheckpointLSN, ChunkBlocks: chunkBlocks,
-	}
-	if err := storage.ValidateMigrationV3(src); err != nil { // precondition 4
-		return err
 	}
 	if err := step("scanned"); err != nil {
 		return err
@@ -220,7 +233,12 @@ func writeFileAtomic(name string, b []byte) error {
 func retireC11(path string) error {
 	err := os.Rename(path+".chunkbitmap", path+".v2-chunkbitmap.bak")
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		if _, serr := os.Stat(path + ".v2-chunkbitmap.bak"); serr != nil {
+			return nil // there was no v2 bitmap
+		}
+		// An earlier run renamed it; its directory fsync may have failed, so
+		// make the rename durable now (codex01 row 13b P2).
+		return syncDirOf(path)
 	}
 	if err != nil {
 		return fmt.Errorf("migrate-v3: retire the v2 chunk bitmap: %w", err)
@@ -231,6 +249,11 @@ func retireC11(path string) error {
 // syncDirOf fsyncs the directory holding path. A directory cannot be
 // fsynced on Windows; there it is a no-op, as in the provider.
 func syncDirOf(path string) error {
+	if h := syncDirHook; h != nil {
+		if err := h(path); err != nil {
+			return err
+		}
+	}
 	if runtime.GOOS == "windows" {
 		return nil
 	}

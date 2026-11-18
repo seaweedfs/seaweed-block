@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 )
 
@@ -71,6 +72,16 @@ func migrationDescriptorV3(src MigrationSourceV3) (descriptorV3, error) {
 	}
 	if src.CheckpointLSN > counterMaxV3 {
 		return descriptorV3{}, fmt.Errorf("%w: checkpoint %d", ErrMigrateGeometry, src.CheckpointLSN)
+	}
+	// The checked extent end (codex01 row 13b P1): the same bounds the slot
+	// validation applies, here, before any backup or sidecar write.
+	if src.VolumeSize == 0 || src.ExtentSize == 0 || src.VolumeSize%uint64(src.BlockSize) != 0 {
+		return descriptorV3{}, fmt.Errorf("%w: volume %d, extent %d, block %d", ErrMigrateGeometry, src.VolumeSize, src.ExtentSize, src.BlockSize)
+	}
+	if end, ok := checkedAddV3(walOffsetV3, walSize); !ok {
+		return descriptorV3{}, fmt.Errorf("%w: the WAL region overflows", ErrMigrateGeometry)
+	} else if fileEnd, ok := checkedAddV3(end, src.VolumeSize); !ok || fileEnd > math.MaxInt64 {
+		return descriptorV3{}, fmt.Errorf("%w: the extent region overflows", ErrMigrateGeometry)
 	}
 	d := descriptorV3{
 		ImplKind: ImplKindWALStore, ImplVersion: walStoreImplVersion3, UUID: src.UUID,
