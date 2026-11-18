@@ -755,3 +755,88 @@ func TestCutCOWV3_ProcessCrashDropsSideAndRestoresSyncedImage(t *testing.T) {
 		t.Fatal("next cut imported stale side bytes")
 	}
 }
+
+func TestCutCOWV3_SaverUsesValidatedWALBatchAndLazyHEAD(t *testing.T) {
+	for _, flushed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "WAL-only-batch", true: "flushed-batch"}[flushed], func(t *testing.T) {
+			s, _ := newChunkTestStore(t)
+			source := make([]byte, ctNumBlocks*ctBlockSize)
+			for lba := 0; lba < 8; lba++ {
+				copy(source[lba*ctBlockSize:], makeBlock(ctBlockSize, byte(0x30+lba)))
+			}
+			f := newFakeChunkRemote()
+			f.seedHead(t, source, 0, 1)
+			cfg := ctConfig(2)
+			cfg.Bitmap = nil
+			cfg.FreshFromHead = true
+			cfg.BarrierBound = 0
+			cfg.UploadConcurrency = 1
+			l := mustAttach(t, s, f, cfg).(*chunkLayerImpl)
+			if _, err := s.Write(1, makeBlock(ctBlockSize, 0x51)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.WriteBatch(4, [][]byte{makeBlock(ctBlockSize, 0x54), makeBlock(ctBlockSize, 0x55)}); err != nil {
+				t.Fatal(err)
+			}
+			if flushed {
+				if _, err := s.Sync(); err != nil {
+					t.Fatal(err)
+				}
+				if err := s.flusher.flushOnce(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			live, releaseLive := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			unblockLive := func() { once.Do(func() { close(releaseLive) }) }
+			l.testCOWRead = func(idx uint64, _ bool) {
+				if idx == 0 {
+					close(live)
+					<-releaseLive
+				}
+			}
+			cutDone, writeDone := make(chan struct{}), make(chan struct{})
+			var cutErr, writeErr error
+			writeStarted := false
+			t.Cleanup(func() {
+				unblockLive()
+				cowWaitSignal(t, cutDone, "lazy cut cleanup")
+				if writeStarted {
+					cowWaitSignal(t, writeDone, "lazy saver cleanup")
+				}
+			})
+			go func() { defer close(cutDone); _, cutErr = l.Cut(context.Background()) }()
+			cowWaitSignal(t, live, "first actual copied chunk")
+			gets, releaseGet := holdGets(t, f) // only the pending chunk still needs HEAD bytes
+			writeStarted = true
+			go func() { defer close(writeDone); _, writeErr = s.Write(6, makeBlock(ctBlockSize, 0x96)) }()
+			waitKey(t, gets, "saving owner's actual lazy fetch")
+			releaseGet()
+			cowWaitSignal(t, writeDone, "lazy saving write")
+			if writeErr != nil {
+				t.Fatal(writeErr)
+			}
+			unblockLive()
+			cowWaitSignal(t, cutDone, "lazy cut")
+			if cutErr != nil {
+				t.Fatal(cutErr)
+			}
+			want := append([]byte(nil), source...)
+			for lba, value := range map[int]byte{1: 0x51, 4: 0x54, 5: 0x55} {
+				copy(want[lba*ctBlockSize:], makeBlock(ctBlockSize, value))
+			}
+			if !bytes.Equal(f.imageOf(t, f.stats().head), want) {
+				t.Fatal("COW saver lost WAL/batch bytes or lazy HEAD backing")
+			}
+			l.testCOWRead = nil
+			next, err := l.Cut(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			copy(want[6*ctBlockSize:], makeBlock(ctBlockSize, 0x96))
+			if !bytes.Equal(f.imageOf(t, next.Head), want) {
+				t.Fatal("post-save mutation omitted by next cut")
+			}
+		})
+	}
+}

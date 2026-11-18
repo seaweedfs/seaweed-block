@@ -412,10 +412,8 @@ func (l *chunkLayerImpl) copyCOWWindow(ctx context.Context, w *cutCOWWindow) ([]
 	err := w.err
 	w.mu.Unlock()
 	cleanupErr := w.join()
-	if err == nil {
-		if cleanupErr != nil {
-			err = errors.Join(errCutCOWAborted, cleanupErr)
-		}
+	if cleanupErr != nil {
+		err = errors.Join(err, errCutCOWAborted, cleanupErr)
 	}
 	if err != nil {
 		return nil, err
