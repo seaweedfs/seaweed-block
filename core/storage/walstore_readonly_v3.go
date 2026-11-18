@@ -79,7 +79,7 @@ func openReadOnlyV3ForTest(path string, opts WALStoreOptions) (_ *WALStoreReader
 	if err != nil {
 		return nil, err
 	}
-	scan, err := scanWALV3(f, d)
+	scan, err := scanWALV3Accepted(f, d, accept)
 	if err != nil {
 		return nil, err
 	}

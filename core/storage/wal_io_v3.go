@@ -275,8 +275,14 @@ type walScanResultV3 struct {
 }
 
 func scanWALV3(fd *os.File, d descriptorV3) (walScanResultV3, error) {
+	return scanWALV3Accepted(fd, d, nil)
+}
+
+// Only an already-bound metadata factory can authorize a companion format.
+// Standalone scans retain the OSS-only discriminator check.
+func scanWALV3Accepted(fd *os.File, d descriptorV3, accept slotImplAcceptor) (walScanResultV3, error) {
 	r := walScanResultV3{Nonce: d.Nonce}
-	if err := d.validate(nil); err != nil {
+	if err := d.validate(accept); err != nil {
 		return r, err
 	}
 	info, err := fd.Stat()

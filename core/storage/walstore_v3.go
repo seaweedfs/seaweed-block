@@ -452,7 +452,7 @@ func (s *WALStore) recoverV3() (uint64, error) {
 	}
 	d := v.pub.current()
 	s.dm.clear()
-	scan, err := scanWALV3(s.fd, d)
+	scan, err := scanWALV3Accepted(s.fd, d, v.pub.accept)
 	if err != nil {
 		if d.BaseState == BaseInstalling {
 			// Installing keeps its typed not-ready outcome; the cause is a
