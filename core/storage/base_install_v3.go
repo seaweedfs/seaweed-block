@@ -105,10 +105,15 @@ func (s *WALStore) resumeBaseInstallV3(id [16]byte) (*installHandleV3, error) {
 		return nil, err
 	}
 	for _, r := range ro.records {
+		s.replayRecordV3(r, ro.walSize, d.BlockSize)
 		e := r.Entry
-		size := uint64(walEntryHeaderSizeV3 + len(e.Data))
-		s.dm.putAtIfNewer(e.LBA, (r.End-size)%ro.walSize, 0, e.LSN, d.BlockSize)
-		s.recordMapWriteV3(e.LBA, e.LSN)
+		count := uint64(1)
+		if e.Type == walEntryWriteBatch {
+			count = e.BatchCount
+		}
+		for i := uint64(0); i < count; i++ {
+			s.recordMapWriteV3(e.LBA+i, e.LSN+i)
+		}
 	}
 	v.installReopen = nil
 	v.liveInstallID = id

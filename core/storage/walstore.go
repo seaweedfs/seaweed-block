@@ -780,9 +780,6 @@ func (s *WALStore) Write(lba uint32, data []byte) (uint64, error) {
 }
 
 func (s *WALStore) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error) {
-	if s.v3 != nil {
-		return nil, errV3NotYet
-	}
 	s.captureMu.RLock()
 	defer s.captureMu.RUnlock()
 	s.lifecycleMu.RLock()
@@ -825,6 +822,11 @@ func (s *WALStore) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error
 		return nil, err
 	}
 	firstLSN := s.nextLSN
+	if s.v3 != nil {
+		lsns, err := s.writeBatchV3Locked(startLBA, blocks, firstLSN)
+		s.mu.Unlock()
+		return lsns, err
+	}
 	useMultiBlock := s.multiBlockRecords && len(blocks) > 1
 
 	if useMultiBlock {

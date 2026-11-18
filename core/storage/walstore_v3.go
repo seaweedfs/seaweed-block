@@ -2,6 +2,7 @@ package storage
 
 import (
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -401,7 +402,7 @@ func (s *WALStore) recoverV3() (uint64, error) {
 				if r.Entry.LSN > o.R {
 					break
 				}
-				if r.Entry.Type == walEntryWrite {
+				if r.Entry.Type == walEntryWrite || r.Entry.Type == walEntryWriteBatch {
 					ro.records = append(ro.records, r)
 				}
 			}
@@ -419,15 +420,10 @@ func (s *WALStore) recoverV3() (uint64, error) {
 			// bytes; the volatile map coverage (the BASE writes' UNKNOWN) is
 			// kept as it is (codex01 04180c33 P1).
 			for _, r := range scan.Records {
-				e := r.Entry
-				if e.LSN > o.R {
+				if r.Entry.LSN > o.R {
 					break
 				}
-				if e.Type != walEntryWrite {
-					continue
-				}
-				size := uint64(walEntryHeaderSizeV3 + len(e.Data))
-				s.dm.putAtIfNewer(e.LBA, (r.End-size)%d.WALSize, 0, e.LSN, d.BlockSize)
+				s.replayRecordV3(r, d.WALSize, d.BlockSize)
 			}
 		}
 		v.appended.Store(max(v.appended.Load(), o.R))
@@ -450,18 +446,21 @@ func (s *WALStore) recoverV3() (uint64, error) {
 		if e.LSN > o.R {
 			break
 		}
-		if e.Type != walEntryWrite {
+		if !s.replayRecordV3(r, d.WALSize, d.BlockSize) {
 			s.dm.clear()
 			return 0, fmt.Errorf("%w: replay of v3 record type %#x", errV3NotYet, e.Type)
 		}
-		size := uint64(walEntryHeaderSizeV3 + len(e.Data))
-		phys := (r.End - size) % d.WALSize
-		s.dm.putAtIfNewer(e.LBA, phys, 0, e.LSN, d.BlockSize)
 		// Records at/below the selected checkpoint are already represented by
 		// its durable map. Re-resolving those same logical bytes is not a new
 		// lower/equal mutation; conservatively account only the retained suffix.
-		if e.LSN > d.CheckpointLSN {
-			s.recordMapWriteV3(e.LBA, e.LSN)
+		count := uint64(1)
+		if e.Type == walEntryWriteBatch {
+			count = e.BatchCount
+		}
+		for i := uint64(0); i < count; i++ {
+			if e.LSN+i > d.CheckpointLSN {
+				s.recordMapWriteV3(e.LBA+i, e.LSN+i)
+			}
 		}
 	}
 	if h := v.testRecoverHold; h != nil {
@@ -562,6 +561,93 @@ func (s *WALStore) appendWriteV3(lba uint32, data []byte, lsn uint64) (uint64, e
 	s.recordMapWriteV3(uint64(lba), lsn)
 	s.v3.appended.Store(lsn)
 	return phys, nil
+}
+
+// writeBatchV3Locked is WriteBatch on a v3 store, under WALStore.mu: one
+// multi-block record (type 0x04) of len(blocks) consecutive LBAs with the
+// LSNs firstLSN.. firstLSN+n-1, so a crash keeps the whole batch or none of
+// it (one CRC32C); the writer consumes the whole LSN range (DESIGN 6.7,
+// r16). A single block is an ordinary write record. Each block's dirty
+// entry names its data offset inside the record.
+func (s *WALStore) writeBatchV3Locked(startLBA uint32, blocks [][]byte, firstLSN uint64) ([]uint64, error) {
+	if len(blocks) == 1 {
+		phys, err := s.appendWriteV3(startLBA, blocks[0], firstLSN)
+		s.walMutation.Add(1)
+		if err != nil {
+			return nil, fmt.Errorf("storage: WAL append: %w", err)
+		}
+		s.dm.put(uint64(startLBA), phys, firstLSN, uint32(len(blocks[0])))
+		s.noteChunkMutation(uint64(startLBA))
+		s.advanceAfterAppendV3(firstLSN, firstLSN)
+		return []uint64{firstLSN}, nil
+	}
+	if s.v3.w == nil {
+		return nil, errWALBindingV3 // a half-published reset before its Recover
+	}
+	bs := int(s.sb.BlockSize)
+	payload := make([]byte, 0, len(blocks)*bs)
+	for _, b := range blocks {
+		payload = append(payload, b...)
+	}
+	n := uint64(len(blocks))
+	lastLSN := firstLSN + n - 1
+	if s.v3.mapProof != nil {
+		if err := s.v3.mapProof.mutatedV3(); err != nil {
+			return nil, err
+		}
+	}
+	e := walEntryV3{LSN: firstLSN, BatchCount: n, Type: walEntryWriteBatch, LBA: uint64(startLBA), Length: uint32(len(payload)), Data: payload}
+	phys, err := s.v3.w.append(e, s.v3.wack.Load())
+	s.walMutation.Add(1)
+	if err != nil {
+		if errors.Is(err, errWALPwrite) {
+			s.latchV3(err)
+		}
+		return nil, fmt.Errorf("storage: WAL batch append: %w", err)
+	}
+	lsns := make([]uint64, n)
+	for i := uint64(0); i < n; i++ {
+		lba := uint64(startLBA) + i
+		lsns[i] = firstLSN + i
+		s.recordMapWriteV3(lba, lsns[i])
+		s.dm.putAt(lba, phys, uint32(i)*uint32(bs), lsns[i], uint32(bs))
+		s.noteChunkMutation(lba)
+	}
+	s.v3.appended.Store(lastLSN)
+	s.advanceAfterAppendV3(firstLSN, lastLSN)
+	return lsns, nil
+}
+
+// advanceAfterAppendV3 moves the volatile frontier past an appended range.
+// Caller holds WALStore.mu.
+func (s *WALStore) advanceAfterAppendV3(first, last uint64) {
+	s.nextLSN = last + 1
+	if last > s.walHead {
+		s.walHead = last
+	}
+	if s.walTail == 0 {
+		s.walTail = first
+	}
+}
+
+// replayRecordV3 republishes one trusted write or batch record in the dirty
+// map (last writer wins per LBA). It reports false for other types.
+func (s *WALStore) replayRecordV3(r walScannedRecordV3, walSize uint64, blockSize uint32) bool {
+	e := r.Entry
+	count := uint64(1)
+	switch e.Type {
+	case walEntryWrite:
+	case walEntryWriteBatch:
+		count = e.BatchCount
+	default:
+		return false
+	}
+	size := uint64(walEntryHeaderSizeV3 + len(e.Data))
+	phys := (r.End - size) % walSize
+	for i := uint64(0); i < count; i++ {
+		s.dm.putAtIfNewer(e.LBA+i, phys, uint32(i)*blockSize, e.LSN+i, blockSize)
+	}
+	return true
 }
 
 // syncWALBatchV3 is the committer leader's batch for a v3 store (DESIGN 6.2,
@@ -689,14 +775,14 @@ func (s *WALStore) readDirtyV3(lba uint32) (data []byte, handled bool, err error
 			h()
 		}
 		gen := s.v3.recoverGen.Load()
-		off, _, lsn, _, ok := s.dm.get(uint64(lba))
+		off, dataOff, lsn, _, ok := s.dm.get(uint64(lba))
 		if !ok {
 			return nil, false, nil
 		}
 		if h := s.v3.testReadResolved; h != nil {
 			h()
 		}
-		data, ioErr, verr := s.readRecordV3(lba, off, lsn)
+		data, ioErr, verr := s.readRecordV3(lba, off, dataOff, lsn)
 		if ioErr != nil {
 			return nil, true, NewSubstrateIOFailure(ioErr, "v3 WAL read")
 		}
@@ -706,8 +792,8 @@ func (s *WALStore) readDirtyV3(lba uint32) (data []byte, handled bool, err error
 		if h := s.v3.testReadInvalid; h != nil {
 			h()
 		}
-		off2, _, lsn2, _, ok2 := s.dm.get(uint64(lba))
-		if ok2 && off2 == off && lsn2 == lsn && s.v3.recoverGen.Load() == gen {
+		off2, dataOff2, lsn2, _, ok2 := s.dm.get(uint64(lba))
+		if ok2 && off2 == off && dataOff2 == dataOff && lsn2 == lsn && s.v3.recoverGen.Load() == gen {
 			return nil, true, NewWALIntegrityFailure(verr, "v3 WAL read of a live dirty entry")
 		}
 	}
@@ -718,24 +804,81 @@ func (s *WALStore) readDirtyV3(lba uint32) (data []byte, handled bool, err error
 // ioErr is a failed or short pread: the WAL region lies inside the file, so
 // io.EOF (a file shorter than its geometry) is substrate I/O too. verr is a
 // record that was read but does not validate as the resolved write.
-func (s *WALStore) readRecordV3(lba uint32, walRelOff, lsn uint64) (data []byte, ioErr, verr error) {
-	size := uint64(walEntryHeaderSizeV3) + uint64(s.sb.BlockSize)
-	if walRelOff+size > s.sb.WALSize {
-		return nil, nil, fmt.Errorf("storage: v3 WAL read: record at %d crosses the ring end", walRelOff)
+func (s *WALStore) readRecordV3(lba uint32, walRelOff uint64, dataOff uint32, lsn uint64) (data []byte, ioErr, verr error) {
+	e, _, ioErr, verr := readWholeRecordV3(s.fd, recordGeometryV3{s.sb.WALOffset, s.sb.WALSize, s.sb.BlockSize, s.sb.VolumeSize}, walRelOff)
+	if ioErr != nil || verr != nil {
+		return nil, ioErr, verr
+	}
+	data, err := blockOfRecordV3(e, uint64(lba), dataOff, lsn, s.sb.BlockSize)
+	if err != nil {
+		return nil, nil, fmt.Errorf("storage: v3 WAL read at %d: %w", walRelOff, err)
+	}
+	return data, nil, nil
+}
+
+// readWholeRecordV3 reads the prefix at walRelOff, sizes the record from
+// its type and Length (a batch carries BatchCount blocks), reads and
+// decodes the whole record (CRC32C, footer, geometry). An append never lets
+// a record cross the ring end (padding fills the suffix), so one crossing
+// it is invalid. A pread error is substrate I/O (ioErr), never integrity.
+// recordGeometryV3 is what a whole-record read needs of the format.
+type recordGeometryV3 struct {
+	WALOffset, WALSize uint64
+	BlockSize          uint32
+	VolumeSize         uint64
+}
+
+func readWholeRecordV3(fd *os.File, sb recordGeometryV3, walRelOff uint64) (e walEntryV3, size uint64, ioErr, verr error) {
+	if walRelOff+walEntryHeaderSizeV3 > sb.WALSize {
+		return e, 0, nil, fmt.Errorf("storage: v3 WAL record at %d crosses the ring end", walRelOff)
+	}
+	prefix := make([]byte, walEntryPrefixSizeV3)
+	if _, err := fd.ReadAt(prefix, int64(sb.WALOffset+walRelOff)); err != nil {
+		return e, 0, fmt.Errorf("storage: v3 WAL read at %d: %w", walRelOff, err), nil
+	}
+	size = uint64(walEntryHeaderSizeV3)
+	switch prefix[16] {
+	case walEntryWrite, walEntryWriteBatch:
+		size += uint64(binary.LittleEndian.Uint32(prefix[26:30]))
+	default:
+		return e, 0, nil, fmt.Errorf("storage: v3 WAL record at %d has type %#x, not a write", walRelOff, prefix[16])
+	}
+	if walRelOff+size > sb.WALSize {
+		return e, 0, nil, fmt.Errorf("storage: v3 WAL record at %d crosses the ring end", walRelOff)
 	}
 	full := make([]byte, size)
-	if _, err := s.fd.ReadAt(full, int64(s.sb.WALOffset+walRelOff)); err != nil {
-		return nil, fmt.Errorf("storage: v3 WAL read at %d: %w", walRelOff, err), nil
+	if _, err := fd.ReadAt(full, int64(sb.WALOffset+walRelOff)); err != nil {
+		return e, 0, fmt.Errorf("storage: v3 WAL read at %d: %w", walRelOff, err), nil
 	}
-	e, err := decodeWALEntryV3(full, s.sb.BlockSize, s.sb.VolumeSize/uint64(s.sb.BlockSize))
+	e, err := decodeWALEntryV3(full, sb.BlockSize, sb.VolumeSize/uint64(sb.BlockSize))
 	if err != nil {
-		return nil, nil, err
+		return e, 0, nil, err
 	}
-	if e.Type != walEntryWrite || e.LBA != uint64(lba) || e.LSN != lsn || uint32(len(e.Data)) != s.sb.BlockSize {
-		return nil, nil, fmt.Errorf("storage: v3 WAL read: record at %d is LBA %d LSN %d, want LBA %d LSN %d",
-			walRelOff, e.LBA, e.LSN, lba, lsn)
+	return e, size, nil, nil
+}
+
+// blockOfRecordV3 returns the block of a validated write or batch record
+// that the dirty entry (lba, dataOff, lsn) names: a single write is block 0
+// at the record's LBA and LSN; a batch's block i is at LBA+i with LSN+i and
+// data offset i * blockSize.
+func blockOfRecordV3(e walEntryV3, lba uint64, dataOff uint32, lsn uint64, blockSize uint32) ([]byte, error) {
+	if dataOff%blockSize != 0 {
+		return nil, fmt.Errorf("data offset %d not block aligned", dataOff)
 	}
-	return e.Data, nil, nil
+	idx := uint64(dataOff / blockSize)
+	count := uint64(1)
+	switch e.Type {
+	case walEntryWrite:
+	case walEntryWriteBatch:
+		count = e.BatchCount
+	default:
+		return nil, fmt.Errorf("record type %#x is not a write", e.Type)
+	}
+	if idx >= count || e.LBA+idx != lba || e.LSN+idx != lsn || uint64(len(e.Data)) != count*uint64(blockSize) {
+		return nil, fmt.Errorf("record is LBA %d LSN %d count %d, want block %d at LBA %d LSN %d", e.LBA, e.LSN, count, idx, lba, lsn)
+	}
+	off := idx * uint64(blockSize)
+	return e.Data[off : off+uint64(blockSize)], nil
 }
 
 // readDirtyRecordV3 is the flusher's record read for a v3 store: it decodes
@@ -743,25 +886,21 @@ func (s *WALStore) readRecordV3(lba uint32, walRelOff, lsn uint64) (data []byte,
 func (f *flusher) readDirtyRecordV3(e snapshotEntry) ([]byte, uint64, error) {
 	store := f.store
 	d := store.v3.pub.current()
-	absOff := int64(store.sb.WALOffset + e.WALOffset)
-	size := uint64(walEntryHeaderSizeV3) + uint64(store.sb.BlockSize)
-	if e.WALOffset+size > store.sb.WALSize {
-		return nil, 0, fmt.Errorf("flusher: v3 record LBA %d offset %d crosses the ring end", e.LBA, e.WALOffset)
+	entry, size, ioErr, verr := readWholeRecordV3(store.fd, recordGeometryV3{store.sb.WALOffset, store.sb.WALSize, store.sb.BlockSize, store.sb.VolumeSize}, e.WALOffset)
+	if ioErr != nil {
+		return nil, 0, fmt.Errorf("flusher: read v3 WAL record at %d: %w", e.WALOffset, ioErr)
 	}
-	full := make([]byte, size)
-	if _, err := store.fd.ReadAt(full, absOff); err != nil {
-		return nil, 0, fmt.Errorf("flusher: read v3 WAL record at %d: %w", e.WALOffset, err)
+	if verr != nil {
+		return nil, 0, fmt.Errorf("flusher: invalid v3 WAL record LBA %d offset %d: %w", e.LBA, e.WALOffset, verr)
 	}
-	entry, err := decodeWALEntryV3(full, d.BlockSize, d.VolumeSize/uint64(d.BlockSize))
+	if entry.Nonce != d.Nonce || e.Length != store.sb.BlockSize {
+		return nil, 0, fmt.Errorf("flusher: v3 WAL slot mismatch LBA %d offset %d", e.LBA, e.WALOffset)
+	}
+	data, err := blockOfRecordV3(entry, e.LBA, e.DataOffset, e.LSN, store.sb.BlockSize)
 	if err != nil {
-		return nil, 0, fmt.Errorf("flusher: invalid v3 WAL record LBA %d offset %d: %w", e.LBA, e.WALOffset, err)
+		return nil, 0, fmt.Errorf("flusher: v3 WAL slot mismatch LBA %d offset %d: %w", e.LBA, e.WALOffset, err)
 	}
-	if entry.Type != walEntryWrite || entry.LSN != e.LSN || entry.LBA != e.LBA || entry.Nonce != d.Nonce ||
-		e.DataOffset != 0 || e.Length != store.sb.BlockSize {
-		return nil, 0, fmt.Errorf("flusher: v3 WAL slot mismatch LBA %d offset %d dirty LSN %d record LSN %d",
-			e.LBA, e.WALOffset, e.LSN, entry.LSN)
-	}
-	return entry.Data, size, nil
+	return data, size, nil
 }
 
 // persistCheckpointV3 is the v3 checkpoint/tail publication. It goes

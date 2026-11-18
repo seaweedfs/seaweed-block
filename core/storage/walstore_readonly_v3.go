@@ -16,9 +16,15 @@ import (
 // fill. A sparse local extent is not evidence that the logical block is ZERO.
 var ErrReadOnlyNotResident = errors.New("storage: readonly image needs remote materialization")
 
+// readOnlyBlockV3 names one block of a trusted write or batch record.
+type readOnlyBlockV3 struct {
+	record walScannedRecordV3
+	index  uint64 // block index inside a batch; 0 for a single write
+}
+
 type walStoreReaderV3 struct {
 	descriptor  descriptorV3
-	records     map[uint64]walScannedRecordV3
+	records     map[uint64]readOnlyBlockV3 // the WAL winner of each LBA above F
 	chunkBlocks uint64
 	absent      map[uint64]bool
 }
@@ -85,16 +91,23 @@ func openReadOnlyV3ForTest(path string, opts WALStoreOptions) (_ *WALStoreReader
 	if outcome.Installing {
 		return nil, installingErrorV3(outcome)
 	}
-	v := &walStoreReaderV3{descriptor: d, records: map[uint64]walScannedRecordV3{}, chunkBlocks: cb, absent: map[uint64]bool{}}
+	v := &walStoreReaderV3{descriptor: d, records: map[uint64]readOnlyBlockV3{}, chunkBlocks: cb, absent: map[uint64]bool{}}
 	for _, r := range scan.Records {
 		if r.Entry.LSN > outcome.R {
 			break
 		}
-		if r.Entry.Type != walEntryWrite {
+		count := uint64(1)
+		switch r.Entry.Type {
+		case walEntryWrite:
+		case walEntryWriteBatch:
+			count = r.Entry.BatchCount // a trusted batch is <= R as a whole
+		default:
 			return nil, fmt.Errorf("%w: readonly v3 record type %#x", errV3NotYet, r.Entry.Type)
 		}
-		if r.Entry.LSN > outcome.F {
-			v.records[r.Entry.LBA] = r
+		for i := uint64(0); i < count; i++ {
+			if r.Entry.LSN+i > outcome.F {
+				v.records[r.Entry.LBA+i] = readOnlyBlockV3{record: r, index: i}
+			}
 		}
 	}
 	if err = v.loadPresence(path); err != nil {
@@ -177,21 +190,24 @@ func (r *WALStoreReader) readV3(lba uint32) ([]byte, error) {
 	if uint64(lba) >= d.VolumeSize/uint64(d.BlockSize) {
 		return nil, fmt.Errorf("storage: readonly LBA %d out of range", lba)
 	}
-	if record, ok := v.records[uint64(lba)]; ok {
-		size := uint64(walEntryHeaderSizeV3) + uint64(d.BlockSize)
-		data := make([]byte, int(size))
+	if b, ok := v.records[uint64(lba)]; ok {
+		record := b.record
 		off := record.Entry.LogicalStart % d.WALSize
-		if _, err := r.fd.ReadAt(data, int64(d.WALOffset+off)); err != nil {
-			return nil, err
+		e, _, ioErr, verr := readWholeRecordV3(r.fd, recordGeometryV3{d.WALOffset, d.WALSize, d.BlockSize, d.VolumeSize}, off)
+		if ioErr != nil {
+			return nil, ioErr
 		}
-		e, err := decodeWALEntryV3(data, d.BlockSize, d.VolumeSize/uint64(d.BlockSize))
-		if err != nil {
-			return nil, NewWALIntegrityFailure(err, "readonly v3 WAL checksum/encoding")
+		if verr != nil {
+			return nil, NewWALIntegrityFailure(verr, "readonly v3 WAL checksum/encoding")
 		}
-		if e.Type != walEntryWrite || e.LBA != uint64(lba) || e.LSN != record.Entry.LSN || e.Nonce != d.Nonce || e.LogicalStart != record.Entry.LogicalStart {
+		if e.Nonce != d.Nonce || e.LogicalStart != record.Entry.LogicalStart || e.Type != record.Entry.Type {
 			return nil, NewWALIntegrityFailure(nil, "readonly v3 WAL binding changed")
 		}
-		return e.Data, nil
+		data, err := blockOfRecordV3(e, uint64(lba), uint32(b.index)*d.BlockSize, record.Entry.LSN+b.index, d.BlockSize)
+		if err != nil {
+			return nil, NewWALIntegrityFailure(err, "readonly v3 WAL binding changed")
+		}
+		return data, nil
 	}
 	// A WAL winner is self-contained. Otherwise an absent chunk needs the
 	// daemon's remote-aware read path, even if a stale local hint names a block.

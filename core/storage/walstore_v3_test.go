@@ -392,9 +392,7 @@ func TestWALStoreV3FlusherWritesTheExtentButHoldsTheCheckpointUntilTheMap(t *tes
 func TestWALStoreV3RefusesPathsOfLaterRows(t *testing.T) {
 	s, _ := newStoreV3(t, WModeLagged)
 	defer s.Close()
-	if _, err := s.WriteBatch(0, [][]byte{blk(1)}); !errors.Is(err, errV3NotYet) {
-		t.Fatalf("WriteBatch: err = %v, want errV3NotYet", err)
-	}
+	// WriteBatch is supported since the v3 batch slice (TestWALStoreV3Batch*).
 	if err := s.ApplyEntry(0, blk(1), 10); !errors.Is(err, errV3NotYet) {
 		t.Fatalf("ApplyEntry: err = %v, want errV3NotYet", err)
 	}
