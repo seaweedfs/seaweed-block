@@ -163,7 +163,6 @@ func (s *WALStore) publishCheckpointV3(cp uint64, seed bool, recoveryGen uint64)
 	// Every current entry <= cp is durable in extent (a newer concurrent write
 	// has a higher LSN and survives). No writer can reuse a released slot until
 	// this store lock is released, after these references have disappeared.
-	s.retireCheckpointDirtyV3Locked(d.CheckpointLSN)
 	if seed {
 		v.appended.Store(max(v.appended.Load(), cp))
 		v.wack.Store(wack)
