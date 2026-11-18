@@ -12,7 +12,9 @@ import (
 
 func newGenerationStore(t *testing.T) *WALStore {
 	t.Helper()
-	s, err := CreateWALStore(filepath.Join(t.TempDir(), "store.bin"), 32, 4096)
+	// This control holds the standalone WAL fsync seam. Mode A retains
+	// that phase; mode C combines WAL durability with descriptor publication.
+	s, err := CreateWALStoreWithOptions(filepath.Join(t.TempDir(), "store.bin"), 32, 4096, WALStoreOptions{WMode: WModeStrict})
 	if err != nil {
 		t.Fatal(err)
 	}
