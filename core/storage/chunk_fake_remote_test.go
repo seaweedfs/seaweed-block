@@ -696,7 +696,7 @@ func closeBounded(t *testing.T, s *WALStore) {
 func newChunkTestStore(t *testing.T) (*WALStore, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "vol.bin")
-	s, err := CreateWALStore(path, ctNumBlocks, ctBlockSize)
+	s, err := CreateWALStoreWithOptions(path, ctNumBlocks, ctBlockSize, WALStoreOptions{ChunkBlocks: ctChunkBlocks})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -710,7 +710,7 @@ func newChunkTestStore(t *testing.T) (*WALStore, string) {
 func crashableStore(t *testing.T) (*WALStore, string, func()) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "vol.bin")
-	s, err := CreateWALStore(path, ctNumBlocks, ctBlockSize)
+	s, err := CreateWALStoreWithOptions(path, ctNumBlocks, ctBlockSize, WALStoreOptions{ChunkBlocks: ctChunkBlocks})
 	if err != nil {
 		t.Fatal(err)
 	}
