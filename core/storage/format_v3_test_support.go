@@ -58,3 +58,17 @@ func CrashReopenV3Test(s *WALStore, path string) (*WALStore, error) {
 	}
 	return r, nil
 }
+
+// MapCoverageV3Test reports the bound map root's covered checkpoint and
+// whether every chunk entry is UNKNOWN (the row 13 initial-map control).
+func MapCoverageV3Test(s *WALStore) (covered uint64, allUnknown bool) {
+	s.v3.pub.descMu.Lock()
+	defer s.v3.pub.descMu.Unlock()
+	allUnknown = true
+	for _, e := range s.v3.pub.mapCurrent.entries {
+		if !e.Unknown {
+			allUnknown = false
+		}
+	}
+	return s.v3.pub.cur.MapCoveredCheckpoint, allUnknown
+}
