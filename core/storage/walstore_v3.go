@@ -121,6 +121,9 @@ type walStoreV3State struct {
 	// testInstallLogBeforeAck runs in SyncInstallLog after its publication
 	// and before its final ack-boundary check.
 	testInstallLogBeforeAck func()
+	// testScanRead runs in a v3 ScanLBAs after its scan and before its
+	// revalidation.
+	testScanRead func()
 }
 
 // errV3RecoveredMeanwhile: a recovery ran between an outer Sync's capture

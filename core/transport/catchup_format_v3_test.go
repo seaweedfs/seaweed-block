@@ -50,3 +50,34 @@ func TestCatchUpV3PrimaryToV3Replica(t *testing.T) {
 		}
 	}
 }
+
+// codex01 4caac700 P1: a corrupt middle record on the v3 primary must not
+// let the actual catch-up sender complete at the prefix before it: the
+// session closes unsuccessfully. Mutant: accepting a short prefix fails
+// here.
+func TestCatchUpV3CorruptMiddleRecordFails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "primary.v3")
+	primary, err := storage.CreateWALStoreV3Test(path, 64, v3RepBlock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = primary.Close() })
+	for lba := uint32(0); lba < 3; lba++ {
+		if _, err := primary.Write(lba, v3RepBlk(0x10+byte(lba))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := primary.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.DamageV3RecordTest(path, 2); err != nil {
+		t.Fatal(err)
+	}
+	_, _, head := primary.Boundaries()
+	replica := v3Rep(t)
+	l := v3Listen(t, replica)
+	exec := NewBlockExecutor(primary, l.Addr())
+	if r := runCatchUp(t, exec, head); r.Success {
+		t.Fatalf("catch-up over a corrupt LSN 2 closed successfully: %+v", r)
+	}
+}

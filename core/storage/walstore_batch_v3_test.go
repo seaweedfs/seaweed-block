@@ -328,3 +328,83 @@ func TestWALStoreV3ScanLBAs(t *testing.T) {
 		t.Fatalf("ScanLBAs below the checkpoint: err = %v, want ErrWALRecycled", err)
 	}
 }
+
+// codex01 4caac700 P1s: v3 ScanLBAs is all or nothing. A corrupt middle
+// record makes the chain stop short of the head: a typed WAL integrity
+// failure carrying the scanner's stop cause, with nothing emitted (never
+// a short success, never WALRecycled). An installing
+// source is refused before emitting; a source that begins installing
+// during a held scan is refused at the revalidation; a Recover during a
+// held scan retries from a fresh capture and returns the full range.
+// Mutants: accepting a short prefix, ignoring the stop cause, no
+// installing refusal, no revalidation.
+func TestWALStoreV3ScanLBAsIsAllOrNothing(t *testing.T) {
+	count := func(s *WALStore, from uint64) (int, error) {
+		n := 0
+		err := s.ScanLBAs(from, func(RecoveryEntry) error { n++; return nil })
+		return n, err
+	}
+	t.Run("corrupt middle record", func(t *testing.T) {
+		s, path := newStoreV3(t, WModeStrict)
+		t.Cleanup(func() { crashRecoveryHardeningStore(t, s) })
+		writeSynced(t, s, 1, 3)
+		damageRecord(t, path, 2)
+		n, err := count(s, 1)
+		if !isWALCorrupt(err) || !errors.Is(err, errCRCMismatch) || n != 0 {
+			t.Fatalf("ScanLBAs over a corrupt LSN 2: emitted %d, err %v; want 0 and a CRC WAL integrity failure", n, err)
+		}
+	})
+	t.Run("corrupt first record", func(t *testing.T) {
+		// The scanner's stop cause decides the kind: a damaged first
+		// record is an integrity fault, never a recycled WAL.
+		s, path := newStoreV3(t, WModeStrict)
+		t.Cleanup(func() { crashRecoveryHardeningStore(t, s) })
+		writeSynced(t, s, 1, 3)
+		damageRecord(t, path, 1)
+		n, err := count(s, 1)
+		if !isWALCorrupt(err) || !errors.Is(err, errCRCMismatch) || n != 0 {
+			t.Fatalf("ScanLBAs over a corrupt LSN 1: emitted %d, err %v; want 0 and a CRC WAL integrity failure", n, err)
+		}
+	})
+	t.Run("installing source", func(t *testing.T) {
+		s, _ := newStoreV3(t, WModeStrict)
+		t.Cleanup(func() { crashRecoveryHardeningStore(t, s) })
+		writeSynced(t, s, 1, 2)
+		beginV3(t, s, 2, idA)
+		if n, err := count(s, 1); !errors.Is(err, ErrBaseInstalling) || n != 0 {
+			t.Fatalf("installing source: emitted %d, err %v", n, err)
+		}
+	})
+	t.Run("install begins during a held scan", func(t *testing.T) {
+		s, _ := newStoreV3(t, WModeStrict)
+		t.Cleanup(func() { crashRecoveryHardeningStore(t, s) })
+		writeSynced(t, s, 1, 2)
+		once := false
+		s.v3.testScanRead = func() {
+			if !once {
+				once = true
+				beginV3(t, s, 2, idA)
+			}
+		}
+		if n, err := count(s, 1); !errors.Is(err, ErrBaseInstalling) || n != 0 {
+			t.Fatalf("install during the scan: emitted %d, err %v", n, err)
+		}
+	})
+	t.Run("Recover during a held scan retries", func(t *testing.T) {
+		s, _ := newStoreV3(t, WModeStrict)
+		t.Cleanup(func() { crashRecoveryHardeningStore(t, s) })
+		writeSynced(t, s, 1, 3)
+		retried := 0
+		s.v3.testScanRead = func() {
+			retried++
+			if retried == 1 {
+				if _, err := s.Recover(); err != nil {
+					t.Error(err)
+				}
+			}
+		}
+		if n, err := count(s, 1); err != nil || n != 3 || retried < 2 {
+			t.Fatalf("Recover during the scan: emitted %d, err %v, scans %d; want 3 entries after a retry", n, err, retried)
+		}
+	})
+}

@@ -2,6 +2,11 @@
 
 package storage
 
+import (
+	"fmt"
+	"os"
+)
+
 // CreateMappedWALStoreV3Test is available only to tagged cross-package caller
 // controls. Production Create/Open remain unchanged until the activation gate.
 func CreateMappedWALStoreV3Test(path string, blocks, blockSize, chunkBlocks uint32) (*WALStore, error) {
@@ -71,4 +76,45 @@ func MapCoverageV3Test(s *WALStore) (covered uint64, allUnknown bool) {
 		}
 	}
 	return s.v3.pub.cur.MapCoveredCheckpoint, allUnknown
+}
+
+// DamageV3RecordTest flips one payload byte of the v3 WAL record carrying
+// lsn in the closed or open file at path (a cross-package corrupt-record
+// control).
+func DamageV3RecordTest(path string, lsn uint64) error {
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	a, b := make([]byte, slotSizeV3), make([]byte, slotSizeV3)
+	if _, err := f.ReadAt(a, 0); err != nil {
+		return err
+	}
+	if _, err := f.ReadAt(b, slotBOffsetV3); err != nil {
+		return err
+	}
+	d, _, err := selectSlotV3(a, b, nil)
+	if err != nil {
+		return err
+	}
+	r, err := scanWALV3(f, d)
+	if err != nil {
+		return err
+	}
+	for _, rec := range r.Records {
+		if rec.Entry.LSN != lsn {
+			continue
+		}
+		size := uint64(walEntryHeaderSizeV3 + len(rec.Entry.Data))
+		off := int64(d.WALOffset+(rec.End-size)%d.WALSize) + walEntryPrefixSizeV3 + 100
+		x := []byte{0}
+		if _, err := f.ReadAt(x, off); err != nil {
+			return err
+		}
+		x[0] ^= 0xFF
+		_, err = f.WriteAt(x, off)
+		return err
+	}
+	return fmt.Errorf("no v3 record with LSN %d", lsn)
 }
