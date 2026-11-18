@@ -80,7 +80,7 @@ func (s *WALStore) holdChunkDestructive(exclusive bool) func() {
 		} else {
 			s.captureMu.RLock()
 		}
-		if s.chunk.Load() == h {
+		if true { // MUTANT: omit hook snapshot recheck
 			return func() {
 				if exclusive {
 					s.captureMu.Unlock()
