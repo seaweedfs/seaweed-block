@@ -68,7 +68,7 @@ func TestDurableProviderV3_AttachesCompletedChunkBASE(t *testing.T) {
 	}
 	var id [16]byte
 	id[0] = 2
-	h, e := storage.BeginInstall(st, 0, id)
+	h, e := storage.BeginInstall(st, 7, id)
 	if e != nil {
 		t.Fatal(e)
 	}
