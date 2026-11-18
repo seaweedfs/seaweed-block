@@ -5,10 +5,28 @@ package main
 import (
 	"bytes"
 	"errors"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
+
+func TestMigrateV3RefusesAnOpenV3Volume(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "volume")
+	s, err := storage.CreateMappedWALStoreV3Test(path, 64, migBlock, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	s.DisableAutoFlushForRecoveryTest()
+	before := snapshotFiles(t, path)
+	code, msg := migrate(t, path)
+	if code != 1 || !strings.Contains(msg, "locked") {
+		t.Fatalf("migration must refuse an open v3 volume: exit=%d message=%s", code, msg)
+	}
+	assertFilesEqual(t, before, snapshotFiles(t, path))
+}
 
 // Row 13b through the actual v3 open (tag swblock_format_v3_test).
 
