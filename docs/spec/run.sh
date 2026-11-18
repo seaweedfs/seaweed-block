@@ -21,6 +21,7 @@ case $cfg in
   S3_sw*)                           spec=SmartWALRecovery ;;
   S3_rep_*)                         spec=WALReplica ;;
   S4b_*)                            spec=CutPipeline ;;
+  S4c_*)                            spec=CutCOW ;;
   S4_*)                             spec=CutCapture ;;
   S5_*)                             spec=ControlPlane ;;
   S6_*)                             spec=ReplicationFailover ;;
