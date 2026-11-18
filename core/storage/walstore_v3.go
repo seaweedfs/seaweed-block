@@ -199,10 +199,6 @@ func createWALStoreV3MapAtCursorForTest(path string, numBlocks, blockSize uint32
 	if err != nil {
 		return nil, err
 	}
-	if err := LockWALStoreFile(fd); err != nil {
-		_ = fd.Close()
-		return nil, err
-	}
 	if h := testCreateOwnerV3; h != nil {
 		h(fd, false)
 	}
