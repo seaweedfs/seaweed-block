@@ -49,3 +49,18 @@ func TestWALStoreProductionSelectorCreatesMappedV3(t *testing.T) {
 		t.Fatalf("production readonly after reopen: %v", err)
 	}
 }
+
+func TestWALStoreV3InstrumentationIncludesBatch(t *testing.T) {
+	s, _ := newMappedCheckpointStoreV3(t)
+	if _, err := s.Write(0, blk(1)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.WriteBatch(2, [][]byte{blk(2), blk(3)}); err != nil {
+		t.Fatal(err)
+	}
+	i := s.WriteInstrumentation()
+	if i.WALCopyOps != 2 || i.WALCopyBytes != 3*4096 || i.WALEncodeOps != 2 || i.WALChecksumOps != 2 ||
+		i.WALAppendOps != 2 || i.WALAppendWriteAtCalls != 2 || i.DirtyMapUpdateOps != 3 || s.DurabilityLatency().WALAppend.Count != 2 {
+		t.Fatalf("v3 single+8KiB batch instrumentation incomplete: %+v latency=%+v", i, s.DurabilityLatency())
+	}
+}
