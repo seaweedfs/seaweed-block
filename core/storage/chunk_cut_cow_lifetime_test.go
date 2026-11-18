@@ -227,7 +227,31 @@ func TestCutCOWV3_CloseSnapshotRejectsFirstAttachAndSharesCompletion(t *testing.
 	cfg.Bitmap = nil
 	layer, err := attachChunkLayer(s, newFakeChunkRemote(), cfg)
 	if err == nil {
-		_ = layer.Close()
+		// Isolated missing-gate negative: the real first layer installs an
+		// OPEN window while Close is parked after its nil snapshot. No fake
+		// sentinel hook stands in for that snapshot.
+		l := layer.(*chunkLayerImpl)
+		live, releaseLive := make(chan struct{}), make(chan struct{})
+		var liveOnce sync.Once
+		unblockLive := func() { liveOnce.Do(func() { close(releaseLive) }) }
+		l.testCOWRead = func(idx uint64, _ bool) {
+			if idx == 0 {
+				close(live)
+				<-releaseLive
+			}
+		}
+		cutDone := make(chan struct{})
+		t.Cleanup(func() { unblockLive(); cowWaitSignal(t, cutDone, "missed first-attach cut"); _ = l.Close() })
+		go func() { defer close(cutDone); _, _ = l.Cut(context.Background()) }()
+		cowWaitSignal(t, live, "missed first-attach live owner")
+		unblock()
+		cowWaitSignal(t, first, "Close after missing first attach")
+		select {
+		case <-cutDone:
+		default:
+			t.Error("Close returned before newly admitted live owner drained")
+		}
+		unblockLive()
 		t.Error("first attach admitted after permanent shutdown")
 	} else if !errors.Is(err, errChunkLayerClosed) {
 		t.Fatal(err)
@@ -432,5 +456,166 @@ func TestCutCOWV3_ObservedFenceAbortsAndWakesWriters(t *testing.T) {
 	cowWaitSignal(t, cutDone, "fenced cut drain")
 	if !errors.Is(<-cutErr, errCutCOWAborted) || f.stats().head.Gen != before {
 		t.Fatal("fenced window published")
+	}
+}
+
+func TestCutCOWV3_InvalidInputsDoNotSaveOrAbortWindow(t *testing.T) {
+	s, l, _, gate := cowFixture(t)
+	var saves atomic.Int32
+	l.testCOWSave = func() error { saves.Add(1); return errors.New("invalid input touched COW") }
+	cutDone, cutErr := cowStartCut(t, l, gate)
+	w := l.cowActive.Load()
+	if _, err := s.Write(ctNumBlocks, makeBlock(ctBlockSize, 1)); err == nil {
+		t.Fatal("invalid Write accepted")
+	}
+	if _, err := s.Write(5, []byte{1}); err == nil {
+		t.Fatal("short Write accepted")
+	}
+	if _, err := s.WriteBatch(ctNumBlocks-1, [][]byte{makeBlock(ctBlockSize, 1), makeBlock(ctBlockSize, 2)}); err == nil {
+		t.Fatal("invalid batch accepted")
+	}
+	if _, err := s.WriteBatch(5, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ApplyEntry(5, []byte{1}, s.NextLSN()); err == nil {
+		t.Fatal("short Apply accepted")
+	}
+	if saves.Load() != 0 {
+		t.Fatal("invalid caller performed COW I/O")
+	}
+	select {
+	case <-w.ended:
+		t.Fatal("invalid input aborted cut")
+	default:
+	}
+	gate.unblock()
+	cowWaitSignal(t, cutDone, "valid cut after invalid requests")
+	if err := <-cutErr; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCutCOWV3_OverlappingRealBatchesPreserveCut(t *testing.T) {
+	s, l, f, gate := cowFixture(t)
+	for _, lba := range []uint32{9, 13} {
+		if _, err := s.Write(lba, makeBlock(ctBlockSize, byte(lba))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.flusher.flushOnce(); err != nil {
+		t.Fatal(err)
+	}
+	cutDone, cutErr := cowStartCut(t, l, gate)
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	done := make(chan struct{})
+	t.Cleanup(func() { gate.unblock(); cowWaitSignal(t, done, "batch cleanup") })
+	for _, start := range []uint32{5, 9} {
+		wg.Add(1)
+		go func(start uint32) {
+			defer wg.Done()
+			blocks := make([][]byte, 5)
+			for i := range blocks {
+				blocks[i] = makeBlock(ctBlockSize, byte(start)+0x80+byte(i))
+			}
+			_, err := s.WriteBatch(start, blocks)
+			errs <- err
+		}(start)
+	}
+	go func() { wg.Wait(); close(done) }()
+	cowWaitSignal(t, done, "overlapping batches while earlier copy held")
+	for i := 0; i < 2; i++ {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	gate.unblock()
+	cowWaitSignal(t, cutDone, "batch cut")
+	if err := <-cutErr; err != nil {
+		t.Fatal(err)
+	}
+	want := make([]byte, ctNumBlocks*ctBlockSize)
+	for _, lba := range []int{1, 5, 9, 13} {
+		copy(want[lba*ctBlockSize:], makeBlock(ctBlockSize, byte(lba)))
+	}
+	if !bytes.Equal(f.imageOf(t, f.stats().head), want) {
+		t.Fatal("batch published into the pre-H cut")
+	}
+	for lba := uint32(0); lba < ctNumBlocks; lba++ {
+		data, err := s.Read(lba)
+		if err != nil {
+			t.Fatal(err)
+		}
+		copy(want[int(lba)*ctBlockSize:], data)
+	}
+	r, err := l.Cut(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(f.imageOf(t, r.Head), want) {
+		t.Fatal("following cut lost overlapping batch writes")
+	}
+}
+
+func TestCutCOWV3_DestructiveSnapshotRetriesFirstAttachment(t *testing.T) {
+	for _, reset := range []bool{false, true} {
+		t.Run(map[bool]string{false: "Recover", true: "Reset"}[reset], func(t *testing.T) {
+			s, _ := newChunkTestStore(t)
+			snapshot, release := make(chan struct{}), make(chan struct{})
+			var once, releaseOnce sync.Once
+			unblock := func() { releaseOnce.Do(func() { close(release) }) }
+			s.testDestructiveSnapshot = func() { once.Do(func() { close(snapshot); <-release }) }
+			done := make(chan struct{})
+			var transitionErr error
+			t.Cleanup(func() { unblock(); cowWaitSignal(t, done, "first-attach transition cleanup") })
+			go func() {
+				defer close(done)
+				if reset {
+					transitionErr = s.resetIncarnationV3()
+				} else {
+					_, transitionErr = s.Recover()
+				}
+			}()
+			cowWaitSignal(t, snapshot, "nil hook snapshot before barrier")
+			cfg := ctConfig(1)
+			cfg.Bitmap = nil
+			cfg.BarrierBound = 0
+			cfg.UploadConcurrency = 1
+			l := mustAttach(t, s, newFakeChunkRemote(), cfg).(*chunkLayerImpl)
+			live, releaseLive := make(chan struct{}), make(chan struct{})
+			var liveOnce sync.Once
+			unblockLive := func() { liveOnce.Do(func() { close(releaseLive) }) }
+			l.testCOWRead = func(idx uint64, _ bool) {
+				if idx == 0 {
+					close(live)
+					<-releaseLive
+				}
+			}
+			cutDone := make(chan struct{})
+			var cutErr error
+			t.Cleanup(func() { unblockLive(); cowWaitSignal(t, cutDone, "first attach cut cleanup") })
+			go func() { defer close(cutDone); _, cutErr = l.Cut(context.Background()) }()
+			cowWaitSignal(t, live, "newly attached OPEN live-copy owner")
+			w := l.cowActive.Load()
+			unblock()
+			cowWaitSignal(t, w.ended, "hook snapshot retry aborts new window")
+			select {
+			case <-done:
+				t.Fatal("destructive path missed first attach's owner")
+			default:
+			}
+			unblockLive()
+			cowWaitSignal(t, cutDone, "first attach cut drain")
+			cowWaitSignal(t, done, "destructive retry")
+			if cutErr == nil {
+				t.Fatal("first-attach window survived destructive transition")
+			}
+			if transitionErr != nil {
+				t.Fatal(transitionErr)
+			}
+		})
 	}
 }

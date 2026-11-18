@@ -82,10 +82,11 @@ type WALStore struct {
 	// captureMu -> lifecycleMu -> mu.
 	captureMu sync.RWMutex
 	// captureMu orders permanent attachment shutdown with hook publication.
-	attachClosed      bool
-	closeComplete     chan struct{}
-	closeResult       error
-	testCloseSnapshot func() // nil in production; called without captureMu
+	attachClosed            bool
+	closeComplete           chan struct{}
+	closeResult             error
+	testDestructiveSnapshot func() // nil scheduling control, before any capture lock
+	testCloseSnapshot       func() // nil in production; called without captureMu
 
 	// chunk is the attached chunk layer's hooks; nil when none.
 	chunk     atomic.Pointer[chunkHooks]
@@ -609,10 +610,10 @@ func (s *WALStore) HolesSuspected() uint64 {
 // Idempotent: calling Recover twice on the same on-disk state yields
 // identical results.
 func (s *WALStore) Recover() (frontier uint64, err error) {
-	// Recover republishes the dirty map like a write: it holds the capture
-	// barrier shared, so it can never publish bytes between a quiesced
-	// cut's Sync (which fixes H) and that cut's copy.
-	// Order: captureMu -> lifecycleMu -> mu.
+	// Drain an attached COW window before taking any lower lock. The lease
+	// blocks a replacement window and retries a racing first attachment.
+	// Legacy fixtures retain their shared barrier ordering with full copying.
+	// Order after drain: captureMu -> lifecycleMu -> syncMu -> mu.
 	release := s.holdChunkDestructive(false)
 	defer release() // also releases captureMu, after all lower locks
 	s.lifecycleMu.RLock()

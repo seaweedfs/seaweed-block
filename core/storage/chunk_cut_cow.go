@@ -68,6 +68,9 @@ func (s *WALStore) beforeChunkMutation(first, count uint64) {
 func (s *WALStore) holdChunkDestructive(exclusive bool) func() {
 	for {
 		h := s.chunk.Load()
+		if hook := s.testDestructiveSnapshot; hook != nil {
+			hook()
+		}
 		var release func()
 		if h != nil && h.beforeDestructive != nil {
 			release = h.beforeDestructive()
