@@ -198,6 +198,9 @@ func (w *cutCOWWindow) claim(idx uint64, saving bool) (*cutCOWEntry, uint8, <-ch
 		}
 		return nil, cowDone, nil
 	case cowSaving, cowCopying:
+		if saving && state == cowCopying {
+			return nil, cowDone, nil
+		}
 		return nil, state, e.ready
 	default:
 		return nil, cowDone, nil
