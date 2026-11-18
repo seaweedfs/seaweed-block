@@ -2,6 +2,7 @@ package volume
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
@@ -76,6 +77,38 @@ func TestChunkControl_SnapshotStoresTheCutHead(t *testing.T) {
 	}
 	if st, err := ctl.DeleteSnapshot(ctx, "v1", "s1"); err != nil || st != chunkstore.SnapDeleting {
 		t.Fatalf("delete: %q %v", st, err)
+	}
+}
+
+// The cut body carries the statistics the chunk layer measured for that
+// cut (§3.1), so a caller can see what one cut cost: the barrier pause,
+// the chunks and bytes it uploaded, the chunks it found unchanged.
+func TestChunkControl_CutReturnsTheLayerStats(t *testing.T) {
+	ctx := context.Background()
+	fp, ctl := adapterFixture(t)
+	fp.cut.Stats = storage.ChunkCutStats{BarrierPauseNs: 1500, SyncNs: 700, CandidateChunks: 4, UploadedChunks: 3,
+		UploadedBytes: 3 << 22, UnchangedChunks: 1, CASResult: "ok", TotalNs: 9000, BarrierCopyChunks: 2}
+	r, err := ctl.Cut(ctx, "v1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body struct {
+		Stats map[string]any `json:"stats"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{"barrierPauseNs": float64(1500), "syncNs": float64(700), "candidateChunks": float64(4),
+		"uploadedChunks": float64(3), "uploadedBytes": float64(3 << 22), "unchangedChunks": float64(1), "casResult": "ok",
+		"totalNs": float64(9000), "barrierCopyChunks": float64(2), "barrierOverBound": false}
+	for k, v := range want {
+		if body.Stats[k] != v {
+			t.Fatalf("cut body stats[%q] = %v, want %v (body %s)", k, body.Stats[k], v, raw)
+		}
 	}
 }
 
