@@ -110,28 +110,40 @@ func TestComponent_ProbeHappy(t *testing.T) {
 	})
 }
 
+// Pin the genesis replay window across both sessions. Unlike a logical
+// retention setting, this prevents the old impl1 checkpoint releasing it.
+type twoReplicaWALPin struct{}
+
+func (twoReplicaWALPin) MinPinAcrossActiveSessions() (uint64, bool) { return 0, true }
+
 // TestComponent_TwoReplicas_BothConverge — multi-replica scenario.
 // Demonstrates WithReplicas(N) + per-replica catch-up.
 func TestComponent_TwoReplicas_BothConverge(t *testing.T) {
 	component.RunMatrix(t, func(t *testing.T, c *component.Cluster) {
 		c.WithReplicas(2).Start()
-		// Both catch-ups replay from LSN1, including after checkpoint10.
-		// Retain that history until the two independent sessions finish.
+		var ws *storage.WALStore
+		var priorFlushes uint64
 		if s, ok := c.Primary().Store.(*storage.WALStore); ok {
-			s.SetRecoveryRetentionLSNs(10)
+			ws, priorFlushes = s, s.FlushCount()
+			s.SetRecycleFloorSource(twoReplicaWALPin{})
+			defer s.SetRecycleFloorSource(nil)
 		}
 
 		c.PrimaryWriteN(10)
 		c.PrimarySync()
 
-		// Force the real checkpoint before either fromLSN=1 catch-up.
-		if s, ok := c.Primary().Store.(*storage.WALStore); ok {
+		// Let the real flusher complete work before catch-up, so the pin
+		// (rather than winning a race with the timer) keeps WAL available.
+		if ws != nil {
 			deadline := time.Now().Add(10 * time.Second)
-			for s.CheckpointLSN() < 10 && time.Now().Before(deadline) {
+			for ws.FlushCount() == priorFlushes && time.Now().Before(deadline) {
 				time.Sleep(time.Millisecond)
 			}
-			if s.CheckpointLSN() < 10 {
-				t.Fatal("primary did not checkpoint the scenario writes")
+			if ws.FlushCount() == priorFlushes {
+				t.Fatal("primary did not complete a flush")
+			}
+			if cp := ws.CheckpointLSN(); cp != 0 {
+				t.Fatalf("active replay pin allowed checkpoint%d, want0", cp)
 			}
 		}
 
