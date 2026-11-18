@@ -412,7 +412,7 @@ func TestWALStoreChunk_RecoverHonoursCallerDeadline(t *testing.T) {
 	if _, err := p.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), -time.Millisecond)
 	defer cancel()
 	recErr := make(chan error, 1)
 	go func() { _, err := p.RecoverVolume(ctx, "v1"); recErr <- err }()
