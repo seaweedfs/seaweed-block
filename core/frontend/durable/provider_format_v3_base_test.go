@@ -154,15 +154,15 @@ func completedBASEDoesNotRestoreOlderHEAD(t *testing.T, retire bool) {
 		t.Fatal(e)
 	}
 	if retire {
-		if e = st.Sync(); e != nil {
+		if _, e = st.Sync(); e != nil {
 			t.Fatal(e)
 		}
-		if e = storage.FlushMappedWALStoreV3Test(st); e != nil {
+		if e = storage.FlushMappedWALStoreV3Test(st.(*storage.WALStore)); e != nil {
 			t.Fatal(e)
 		}
-		state, _ := storage.BaseStateV3Test(st)
-		if _, ok := st.InstalledBaseLSN(); ok || state != storage.BaseNone || st.CheckpointLSN() < 8 {
-			t.Fatalf("BASE did not retire: state=%v checkpoint=%d", state, st.CheckpointLSN())
+		state, _ := storage.BaseStateV3Test(st.(*storage.WALStore))
+		if _, ok := st.(*storage.WALStore).InstalledBaseLSN(); ok || state != storage.BaseNone || st.(*storage.WALStore).CheckpointLSN() < 8 {
+			t.Fatalf("BASE did not retire: state=%v checkpoint=%d", state, st.(*storage.WALStore).CheckpointLSN())
 		}
 	}
 	if _, e = target.RecoverVolume(ctx, "v1"); e != nil {
@@ -229,13 +229,13 @@ func TestDurableProviderV3_SeedOnlyCheckpointStillRestoresHEAD(t *testing.T) {
 	if _, err = st.Recover(); err != nil {
 		t.Fatal(err)
 	}
-	if err = st.SeedChunkFrontier(head.RemoteLSN); err != nil {
+	if err = st.(*storage.WALStore).SeedChunkFrontier(head.RemoteLSN); err != nil {
 		t.Fatal(err)
 	}
-	if st.CheckpointLSN() == 0 || st.NextLSN() <= 1 {
+	if st.(*storage.WALStore).CheckpointLSN() == 0 || st.NextLSN() <= 1 {
 		t.Fatal("seed did not establish the ambiguous frontier")
 	}
-	if _, ok := st.InstalledBaseLSN(); ok {
+	if _, ok := st.(*storage.WALStore).InstalledBaseLSN(); ok {
 		t.Fatal("seed became a completed BASE")
 	}
 	if _, err = target.RecoverVolume(ctx, "v1"); err != nil {
