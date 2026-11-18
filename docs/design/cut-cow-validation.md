@@ -94,3 +94,59 @@ owners, first attach vs Close, hook-snapshot races in Recover/reset, overlapping
 public batches, cancellation and observed fencing. They complement the
 bounded one-copier/whole-chunk S4c r2 verdict; they are not a substitute for the
 future real-mount run.
+
+## Caller closure
+
+| Caller/path | COW admission or exclusion | Control |
+|---|---|---|
+| Write, WriteBatch | after immutable argument checks and captureMu R; before lifecycle/admission/store publication | MutationCompletesWhileEarlierChunkCopyIsHeld (including a checkpointed post-H rewrite); OverlappingRealBatchesPreserveCut; InvalidInputsDoNotSaveOrAbortWindow |
+| ordinary ApplyEntry, completed handle ApplyInstallEntry | actual applyEntryV3 hook; completed handle's existing install admission stays outside it | MutationCompletesWhileEarlierChunkCopyIsHeld / ApplyEntry and ApplyInstallEntry |
+| pending/saving/copying collisions | one owner, wait on per-entry notification or terminal | CopyingChunkWaitsButPendingChunkSaves; TwoWritersOneSaveAndCloseJoinsSavedReader |
+| Cut, Capture, Detach, MakeRemoteDurable | same capMu/captureLocked path; immutable buffers after terminal/drain | existing C1/C3 image, staged reuse, Detach, MakeRemoteDurable and unknown-CAS/intent controls remain native |
+| Recover and reset | beforeDestructive lease, abort/join, capture barrier snapshot recheck | RecoveryAndCloseDrainSavingOwner; DestructiveSnapshotRetriesFirstAttachment |
+| Store Close / standalone layer.Close / second Close | permanent attachment gate + stable snapshot; terminal and actual owner/waitgroup drain | CloseCannotMissFirstAttachment; CloseSnapshotRejectsFirstAttachAndSharesCompletion; CloseJoinsHeldLiveCopy; RecoveryAndCloseDrainSavingOwner; TwoWritersOneSaveAndCloseJoinsSavedReader |
+| BASE begin/complete | existing installMu/capMu transition drains whole cut | existing attached BASE lifecycle/capture-generation controls |
+| BASE WriteBase / resume | installing state excludes a cut; resume is not capMu-drained | existing install-handle state/owner controls; native COW hook does not weaken them |
+| SeedChunkFrontier / WriteExtentDirect | attached seed refused; public v3 direct write refused | existing seed/direct caller controls |
+| Flusher / lazy fill | materialize existing visible bytes; no new read-visible mutation, no new hook | SaverUsesValidatedWALBatchAndLazyHEAD (WAL-only and flushed batch); existing PostReadMissRechecksWALFormat |
+| Temporary v2 fixture mutation paths | remain behind the full-copy barrier; no production C11 file | existing legacy fixture controls and production reachability guard |
+
+Test names above have prefix `TestCutCOWV3_` unless an existing control is named.
+The abrupt-process control `ProcessCrashDropsSideAndRestoresSyncedImage` exits
+with an OPEN spill and no cleanup, then the parent reopens, validates the
+synced post-H bytes, observes the actual old HEAD and publishes the next image.
+`SpillIsEphemeralAndCleanupIsPrefixScoped` additionally covers ignored corrupt
+side payloads and preservation of other-prefix files/directories.
+
+## Backend proxy result
+
+The source-identical `BenchmarkCutCOWProxy` was run parent/candidate interleaved
+three times, each row with three cuts, on tp04 (i7-13700, Go reports GOMAXPROCS
+24; actual work stays under the runner's quota). Parent is main d0e3895a plus
+only the benchmark, ref 3faecbd4. Candidate timing head is ee6c6f3b. Staging is
+disabled, copy/upload concurrency is 8, chunks are 4 MiB and each released
+writer performs one 4K write+Sync per cut. Writers start at the real Sync/H
+handshake. A memory ChunkRemote keeps identical upload work in both arms;
+this is file-backed storage with an in-process remote, not network, guest or
+mount performance. No throughput/fsync guarantee is inferred from it.
+
+The table reports medians of the three per-run values, in milliseconds. Each
+per-run p99 has only 3 samples at QD1 or 24 at QD8; these are sample percentiles,
+not estimates of a production tail. The full raw stage/timing rows are kept
+with the review receipts. Later source changes are fence-observation ordering,
+cleanup-error reporting and additional caller controls; they are not timed by
+these earlier-head measurements.
+
+| Geometry / writers | Barrier ms parent -> COW | Writer p50 ms parent -> COW | Writer p99 ms parent -> COW | Total cut ms parent -> COW |
+|---|---:|---:|---:|---:|
+| chunks8/QD1 | 41.15 -> 0.54 | 41.72 -> 8.38 | 44.79 -> 8.62 | 74.12 -> 45.44 |
+| chunks8/QD8 | 40.46 -> 0.47 | 43.24 -> 9.71 | 43.27 -> 12.48 | 71.84 -> 43.63 |
+| chunks64/QD1 | 312.68 -> 0.50 | 324.78 -> 8.35 | 346.51 -> 8.61 | 554.93 -> 356.54 |
+| chunks64/QD8 | 308.86 -> 0.54 | 309.59 -> 15.29 | 347.69 -> 20.42 | 531.13 -> 346.85 |
+
+Each 8-chunk cut uploads 32 MiB and each 64-chunk cut uploads 256 MiB in both
+arms. COW reduces the barrier/copy stall and parallelizes materialization;
+it does not reduce remote upload volume. The native mutation control reports
+one real save (and positive save time), zero barrier copies, and verifies
+post-H map dirt even after the new bytes have checkpointed. No mounted result
+is claimed; use the rehearsal above for that separate measurement.
