@@ -39,6 +39,10 @@ func SetInstallHooksV3Test(s *WALStore, beforeAdmit, admitted func()) {
 	s.v3.testInstallAdmitted = admitted
 }
 
+// SetScanReadV3Test parks a cross-package sender after its physical WAL
+// scan, before source-lifetime revalidation. Set before starting the sender.
+func SetScanReadV3Test(s *WALStore, hook func()) { s.v3.testScanRead = hook }
+
 // BaseStateV3Test reports the selected descriptor's BASE state and ID.
 func BaseStateV3Test(s *WALStore) (BaseState, [16]byte) {
 	d := s.v3.pub.current()

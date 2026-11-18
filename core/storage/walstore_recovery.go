@@ -48,6 +48,10 @@ func (s *WALStore) ScanLBAs(fromLSN uint64, fn func(RecoveryEntry) error) error 
 	headLSN := s.nextLSN
 	retentionLSNs := s.recoveryRetentionLSNs
 	s.mu.RUnlock()
+	if s.v3 != nil {
+		// The v3 source-state gate must precede even an empty scan.
+		return s.scanLBAsV3(fromLSN, fn)
+	}
 
 	// Retention gate: by default the recycle threshold is
 	// checkpointLSN; an operator-tunable retention window lets a
@@ -81,9 +85,6 @@ func (s *WALStore) ScanLBAs(fromLSN uint64, fn func(RecoveryEntry) error) error 
 	}
 	if fromLSN >= headLSN {
 		return nil // caller is at-or-ahead of head; nothing to ship
-	}
-	if s.v3 != nil {
-		return s.scanLBAsV3(fromLSN, headLSN, checkpointLSN, fn)
 	}
 
 	// Snapshot WAL writer's logical head/tail under its own lock,
@@ -265,20 +266,38 @@ func (s *WALStore) CheckpointLSNForPOC() uint64 {
 // no longer holds fromLSN a typed WALRecycled failure. Only then are the
 // entries emitted, from memory, with no store lock held across the
 // callbacks. A write record is one entry; a batch one entry per block.
-func (s *WALStore) scanLBAsV3(fromLSN, _, _ uint64, fn func(RecoveryEntry) error) error {
+func (s *WALStore) scanLBAsV3(fromLSN uint64, fn func(RecoveryEntry) error) error {
 	v := s.v3
 	const attempts = 8
 	for attempt := 0; attempt < attempts; attempt++ {
 		s.mu.RLock()
 		gen := v.recoverGen.Load()
+		installEpoch := v.installEpoch
 		d := v.pub.current()
 		headLSN := s.nextLSN
+		checkpointLSN, retentionLSNs := s.checkpointLSN, s.recoveryRetentionLSNs
 		s.mu.RUnlock()
 		if d.BaseState == BaseInstalling {
 			return fmt.Errorf("%w: catch-up from an installing source", ErrBaseInstalling)
 		}
 		if gen%2 != 0 {
 			continue // a recovery or reset is running; capture again
+		}
+		// A completed BASE authoritatively replaces its prefix; those LSNs
+		// need a rebuild even if unused ring bytes stop on nonce binding.
+		// Do not downgrade damage in the retained suffix after BaseLSN.
+		if d.BaseState == BaseInstalled && fromLSN <= d.BaseLSN {
+			return NewWALRecycledFailure(ErrWALRecycled, fmt.Sprintf(
+				"fromLSN=%d is covered by installed BaseLSN=%d", fromLSN, d.BaseLSN))
+		}
+		floor := uint64(0)
+		if checkpointLSN > retentionLSNs {
+			floor = checkpointLSN - retentionLSNs
+		}
+		if checkpointLSN > 0 && fromLSN <= floor {
+			return NewWALRecycledFailure(ErrWALRecycled, fmt.Sprintf(
+				"fromLSN=%d checkpointLSN=%d headLSN=%d retentionLSNs=%d floor=%d",
+				fromLSN, checkpointLSN, headLSN, retentionLSNs, floor))
 		}
 		if fromLSN >= headLSN {
 			return nil
@@ -292,7 +311,8 @@ func (s *WALStore) scanLBAsV3(fromLSN, _, _ uint64, fn func(RecoveryEntry) error
 		}
 		s.mu.RLock()
 		now := v.pub.current()
-		stable := v.recoverGen.Load() == gen && now.Nonce == d.Nonce && now.BaseState == d.BaseState &&
+		stable := v.recoverGen.Load() == gen && v.installEpoch == installEpoch &&
+			now.Nonce == d.Nonce && now.BaseState == d.BaseState &&
 			now.BaseInstallID == d.BaseInstallID
 		s.mu.RUnlock()
 		if !stable {

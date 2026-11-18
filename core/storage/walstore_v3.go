@@ -102,7 +102,8 @@ type walStoreV3State struct {
 	// before the open is a physical reopen's (plan row 11).
 	installMu     sync.RWMutex
 	liveInstallID [16]byte
-	// installEpoch counts the begins of this open (guarded by installMu): a
+	// installEpoch counts the begins of this open: mutators hold installMu
+	// and s.mu; a catch-up scan reads it under s.mu to detect BASE ABA. A
 	// handle is valid only while no later begin has run.
 	installEpoch uint64
 	// installReopen is the last Recover's installing outcome (guarded by
