@@ -8,8 +8,33 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/seaweedfs/seaweed-block/core/engine"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
+
+func TestCatchUpV3CompletedBASEUsesRebuild(t *testing.T) {
+	primary, err := storage.CreateWALStoreV3Test(filepath.Join(t.TempDir(), "primary.v3"), 64, v3RepBlock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = primary.Close() })
+	h, err := primary.BeginBaseInstall(100, [16]byte{1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.WriteBase(0, v3RepBlk(0x70)); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.MarkBaseComplete(); err != nil {
+		t.Fatal(err)
+	}
+	replica := v3Rep(t)
+	l := v3Listen(t, replica)
+	result := runCatchUpFrom(t, NewBlockExecutor(primary, l.Addr()), 3, 101)
+	if result.Success || result.FailureKind != engine.RecoveryFailureWALRecycled {
+		t.Fatalf("completed BASE without install WAL needs rebuild, not corruption: %+v", result)
+	}
+}
 
 func TestCatchUpV3InstallingAtHeadRefuses(t *testing.T) {
 	primary, err := storage.CreateWALStoreV3Test(filepath.Join(t.TempDir(), "primary.v3"), 64, v3RepBlock)
