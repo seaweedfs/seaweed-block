@@ -211,6 +211,10 @@ func createMappedWALStoreV3ForTest(path string, numBlocks, blockSize uint32, wal
 	}
 	return createWALStoreV3MapAtCursorForTest(path, numBlocks, blockSize, walSize, mode, 0, chunkBlocks)
 }
+
+// testCreateOwnerV3 parks creation at ownership boundaries; nil in production.
+var testCreateOwnerV3 func(*os.File, bool)
+
 func createWALStoreV3MapAtCursorForTest(path string, numBlocks, blockSize uint32, walSize uint64, mode WMode, cursor, chunkBlocks uint64) (*WALStore, error) {
 	return createWALStoreV3Configured(path, numBlocks, blockSize, walSize, mode, cursor, chunkBlocks, WALStoreOptions{})
 }
@@ -238,6 +242,9 @@ func createWALStoreV3Configured(path string, numBlocks, blockSize uint32, walSiz
 	if err := LockWALStoreFile(fd); err != nil {
 		_ = fd.Close()
 		return nil, err
+	}
+	if h := testCreateOwnerV3; h != nil {
+		h(fd, false)
 	}
 	sb := superblock{Version: superblockVersionV3, ImplVersion: d.ImplVersion, BlockSize: d.BlockSize, VolumeSize: d.VolumeSize, WALOffset: d.WALOffset, WALSize: d.WALSize}
 	metadata, totalSize, err := bindBlockMetadata(fd, &sb, opts, true, false)
@@ -283,6 +290,9 @@ func createWALStoreV3Configured(path string, numBlocks, blockSize uint32, walSiz
 	if err != nil {
 		_ = fd.Close()
 		return nil, err
+	}
+	if h := testCreateOwnerV3; h != nil {
+		h(fd, true)
 	}
 	s, err := openWALStoreV3File(path, fd, chunkBlocks != 0, opts, metadata, true)
 	if err != nil {
