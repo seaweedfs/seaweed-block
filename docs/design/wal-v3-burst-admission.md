@@ -16,7 +16,8 @@ place. The sampler holds store.mu shared while selecting the writer, snapshots
 the descriptor/floor, releases descMu, then samples head under writer.mu. It
 releases all these locks before admission can sleep or wait. Existing publication
 order is unchanged; there is no fsync, slot/map write, early acknowledgement or
-new reuse permission in this callback. A missing/unbound writer reports full.
+new reuse permission in this callback. A missing/unbound writer remains an append-binding refusal, not capacity pressure;
+the existing typed guard runs without a pressure wait.
 Legacy fixtures keep the original legacy occupancy. Very large batches,
 concurrent already-admitted requests or a fully unsynced ring can still exhaust
 space; this change is not a reservation scheme or a guarantee for every burst.
@@ -35,3 +36,10 @@ uses actual session dispatch, asserts error status, reason logging exactly once,
 and no failure log on success. INV-WAL-V3-ADMISSION-001 and
 INV-FE-FLUSH-SYNC-001 record these checks. The durability/format model is unchanged;
 no new TLC or mounted performance claim is made.
+
+The fault-at-ACK-boundary control parks writer B after existing capacity
+admission, before A's held slot publication, then requires B to own store.mu
+exclusively (TryRLock fails) before releasing A. A shared sampling lock cannot
+stand in for that handshake. Its injected failing append and no-W-advance
+assertions remain unchanged. The half-reset control keeps its original typed
+binding-refusal assertion.

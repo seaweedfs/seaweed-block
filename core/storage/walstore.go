@@ -415,8 +415,8 @@ func (s *WALStore) walUsedFraction() float64 {
 	d, floor, valid := s.v3.pub.walSnapshotV3()
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if !valid || d.WALSize == 0 || d.Nonce != w.nonce || w.head < floor {
-		return 1 // uncertain space is not admission headroom
+	if !valid || d.WALSize == 0 || d.Nonce != w.nonce || w.head < floor || w.head-floor > d.WALSize {
+		return 0 // append's binding validation still refuses; this grants no reuse
 	}
 	return float64(w.head-floor) / float64(d.WALSize)
 }
