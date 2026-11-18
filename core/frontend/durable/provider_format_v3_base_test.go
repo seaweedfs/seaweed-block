@@ -114,7 +114,8 @@ func TestDurableProviderV3_CompletedBASEDoesNotRestoreOlderHEAD(t *testing.T) {
 	if e := source.Close(); e != nil {
 		t.Fatal(e)
 	}
-	target := mappedProviderV3(t, t.TempDir(), remote)
+	root := t.TempDir()
+	target := mappedProviderV3(t, root, remote)
 	st, e := target.EnsureStorage("v1")
 	if e != nil {
 		t.Fatal(e)
@@ -141,10 +142,26 @@ func TestDurableProviderV3_CompletedBASEDoesNotRestoreOlderHEAD(t *testing.T) {
 	if _, e = target.RecoverVolume(ctx, "v1"); e != nil {
 		t.Fatalf("completed local BASE was treated as empty remote restore: %v", e)
 	}
-	for lba, expected := range map[int64][]byte{5: want, 9: make([]byte, 4096)} {
-		got := make([]byte, 4096)
-		if n, e := target.Backend("v1").Read(ctx, lba*4096, got); e != nil || n != 4096 || !bytes.Equal(got, expected) {
-			t.Fatalf("local BASE lba%d bytes lost: n%d err%v", lba, n, e)
+	check := func() {
+		t.Helper()
+		for lba, expected := range map[int64][]byte{5: want, 9: make([]byte, 4096)} {
+			got := make([]byte, 4096)
+			if n, e := target.Backend("v1").Read(ctx, lba*4096, got); e != nil || n != 4096 || !bytes.Equal(got, expected) {
+				t.Fatalf("local BASE lba%d bytes lost: n%d err%v", lba, n, e)
+			}
 		}
+
 	}
+	check()
+	if e = target.Close(); e != nil {
+		t.Fatal(e)
+	}
+	target = mappedProviderV3(t, root, remote)
+	if _, e = target.EnsureStorage("v1"); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = target.RecoverVolume(ctx, "v1"); e != nil {
+		t.Fatal(e)
+	}
+	check()
 }

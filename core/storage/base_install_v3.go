@@ -15,7 +15,7 @@ import (
 // exclusive, which drains every already-admitted mutation of the old ID; a
 // handle mutation takes it shared and checks, under it, that the volume is
 // still installing under the handle's ID. Below it the order is the store's
-// usual captureMu -> lifecycleMu -> syncMu -> s.mu -> descMu -> fileSyncMu,
+// optional chunk capMu -> captureMu -> lifecycleMu -> syncMu -> s.mu -> descMu -> fileSyncMu,
 // and nothing below ever waits for installMu.
 
 var (

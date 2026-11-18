@@ -420,3 +420,45 @@ func TestDurableProviderV3_StatusTracksRecoverSyncAndCapture(t *testing.T) {
 		t.Fatalf("after capture=%+v", v)
 	}
 }
+
+func TestDurableProviderV3_ContiguousWriteSurvivesCheckpointAndReopen(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	root := t.TempDir()
+	remote := storage.NewMemChunkRemote()
+	p := mappedProviderV3(t, root, remote)
+	st, e := p.EnsureStorage("v1")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = p.RecoverVolume(ctx, "v1"); e != nil {
+		t.Fatal(e)
+	}
+	want := append(bytes.Repeat([]byte{0x31}, 4096), bytes.Repeat([]byte{0x72}, 4096)...)
+	if n, e := p.Backend("v1").Write(ctx, 4*4096, want); e != nil || n != len(want) {
+		t.Fatalf("actual provider contiguous Write: n=%d err=%v", n, e)
+	}
+	if e = p.Backend("v1").Sync(ctx); e != nil {
+		t.Fatal(e)
+	}
+	if e = storage.FlushMappedWALStoreV3Test(st.(*storage.WALStore)); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = p.CaptureVolume(ctx, "v1"); e != nil {
+		t.Fatal(e)
+	}
+	if e = p.Close(); e != nil {
+		t.Fatal(e)
+	}
+	q := mappedProviderV3(t, root, remote)
+	if _, e = q.EnsureStorage("v1"); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = q.RecoverVolume(ctx, "v1"); e != nil {
+		t.Fatal(e)
+	}
+	got := make([]byte, len(want))
+	if n, e := q.Backend("v1").Read(ctx, 4*4096, got); e != nil || n != len(want) || !bytes.Equal(got, want) {
+		t.Fatalf("reopen n=%d err=%v equal=%v", n, e, bytes.Equal(got, want))
+	}
+}
