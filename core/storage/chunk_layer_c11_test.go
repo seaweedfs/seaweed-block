@@ -28,6 +28,9 @@ func extentBytes(t *testing.T, s *WALStore, lba uint32) []byte {
 
 // walLogicalTail is the WAL writer's physical recycling position.
 func walLogicalTail(s *WALStore) uint64 {
+	if s.v3 != nil {
+		return s.v3.pub.current().RetainedTail
+	}
 	s.wal.mu.Lock()
 	defer s.wal.mu.Unlock()
 	return s.wal.logicalTail
