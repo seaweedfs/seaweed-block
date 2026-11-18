@@ -226,6 +226,23 @@ func (p *DurableProvider) attachChunk(ctx context.Context, volumeID string, h *v
 		h.chunkPending = layer
 		p.mu.Unlock()
 	}
+	// mutant: expose exactly the same publication before owner commit
+	p.mu.Lock()
+	if h.chunk == nil {
+		// No explicit operation can resolve the layer, and no scheduler
+		// can publish, until marker retirement is durably committed.
+		h.chunk = layer
+		h.chunkPending = nil
+		h.backend.mu.Lock()
+		h.backend.chunkFenced = layer.Fenced
+		h.backend.mu.Unlock()
+		if p.cfg.ChunkCaptureInterval > 0 {
+			loopCtx, cancel := context.WithCancel(context.Background())
+			h.chunkStop, h.chunkDone = cancel, make(chan struct{})
+			go p.chunkLoop(loopCtx, volumeID, layer, h.chunkDone)
+		}
+	}
+	p.mu.Unlock()
 	// The owner commit is serialized with a later BASE begin. The callback
 	// does marker I/O only: no store/layer reentry while installMu is held.
 	commit := func() error {
