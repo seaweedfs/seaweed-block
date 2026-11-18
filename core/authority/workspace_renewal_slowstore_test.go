@@ -57,7 +57,7 @@ func TestWorkspaceRenewalDoesNotWaitForSlowStore(t *testing.T) {
 	if took >= 2*time.Second {
 		t.Fatalf("renewal of a live lease took %s behind a 2.5 s store write; the host's renewal RPC times out at 2 s", took.Round(time.Millisecond))
 	}
-	t.Logf("renewal took %s", took.Round(time.Millisecond))
+	t.Logf("renewal took %s", took)
 	waitExtenders(t, p)
 	if slow.puts.Load() == 0 {
 		t.Fatal("no lease write went through the 2.5 s stall: the test did not exercise it")
@@ -115,7 +115,7 @@ func TestWorkspaceConcurrentRenewalsDoNotSerializeOnStore(t *testing.T) {
 	if slowest >= 2*time.Second {
 		t.Fatalf("slowest of %d concurrent renewals took %s (all: %v); renewals serialize behind each other's store writes", n, slowest.Round(time.Millisecond), took)
 	}
-	t.Logf("slowest of %d concurrent renewals took %s", n, slowest.Round(time.Millisecond))
+	t.Logf("slowest of %d concurrent renewals took %s", n, slowest)
 	waitExtenders(t, p)
 	if slow.puts.Load() == 0 {
 		t.Fatal("no lease write went through the 0.5 s stall: the test did not exercise it")
@@ -195,7 +195,7 @@ func TestWorkspaceRenewalDoesNotWaitForUnrelatedHeldWrite(t *testing.T) {
 		if err != nil {
 			t.Fatalf("renewal of b: %v", err)
 		}
-		t.Logf("renewal of b took %s while a's write was held", time.Since(start).Round(time.Millisecond))
+		t.Logf("renewal of b took %s while a's write was held", time.Since(start))
 	case <-time.After(2 * time.Second):
 		blocked := time.Since(start).Round(time.Millisecond)
 		release()

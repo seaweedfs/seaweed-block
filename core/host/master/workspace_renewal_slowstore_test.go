@@ -191,7 +191,7 @@ func TestWorkspaceRenewalRPCDoesNotWaitForHeldReservationWrite(t *testing.T) {
 		if err != nil {
 			t.Fatalf("renewal of vol-b: %v", err)
 		}
-		t.Logf("renewal RPC of vol-b took %s while vol-x's reservation write was held", time.Since(start).Round(time.Millisecond))
+		t.Logf("renewal RPC of vol-b took %s while vol-x's reservation write was held", time.Since(start))
 	case <-time.After(2 * time.Second):
 		t.Fatalf("renewal RPC of vol-b was still blocked %s behind the held reservation write of vol-x", time.Since(start).Round(time.Millisecond))
 	}
