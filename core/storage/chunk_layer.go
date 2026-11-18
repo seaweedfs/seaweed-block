@@ -1202,7 +1202,13 @@ func sameProposal(cur, next chunkHead) bool {
 }
 
 // resolvePending re-reads HEAD when an earlier CAS outcome is unresolved.
-func (l *chunkLayerImpl) resolvePending(ctx context.Context) error {
+func (l *chunkLayerImpl) resolvePending(ctx context.Context) (err error) {
+	// Registered before the state unlock, so invalidation runs without stMu.
+	defer func() {
+		if errors.Is(err, errChunkLayerFenced) {
+			l.abortCOW(err)
+		}
+	}()
 	l.stMu.Lock()
 	pending, base, intents := l.pending, l.pendingBase, l.pendingIntents
 	l.stMu.Unlock()
@@ -1265,7 +1271,6 @@ func (l *chunkLayerImpl) resolvePending(ctx context.Context) error {
 func (l *chunkLayerImpl) recordCut(r chunkCutResult, st chunkCutStats, err error) {
 	l.stMu.Lock()
 	defer l.stMu.Unlock()
-	l.abortCOW(errChunkLayerFenced)
 	switch st.CASResult {
 	case "precondition":
 		l.stats.CASConflicts++
