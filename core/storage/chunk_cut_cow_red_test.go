@@ -52,7 +52,7 @@ func cowWaitSignal(t *testing.T, ch <-chan struct{}, what string) {
 // second chunk is still pending. The first HEAD stays at H; the next cut
 // publishes the post-H mutation. Main's full-copy barrier fails progress.
 func TestCutCOWV3_MutationCompletesWhileEarlierChunkCopyIsHeld(t *testing.T) {
-	for _, method := range []string{"Write", "WriteBatch", "ApplyEntry"} {
+	for _, method := range []string{"Write", "WriteBatch", "ApplyEntry", "ApplyInstallEntry", "WriteOutsideD"} {
 		t.Run(method, func(t *testing.T) {
 			gate := &cowReadGate{entered: make(chan struct{}), release: make(chan struct{})}
 			opts := WALStoreOptions{ChunkBlocks: ctChunkBlocks, MetadataFactory: func(_ BlockMetadataFile, layout BlockMetadataLayout) (BlockMetadataBinding, error) {
@@ -70,6 +70,16 @@ func TestCutCOWV3_MutationCompletesWhileEarlierChunkCopyIsHeld(t *testing.T) {
 			s.DisableAutoFlushForRecoveryTest()
 			if _, err = s.Recover(); err != nil {
 				t.Fatal(err)
+			}
+			var completed InstallHandle
+			if method == "ApplyInstallEntry" {
+				completed, err = s.BeginBaseInstall(7, [16]byte{0xc1})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err = completed.MarkBaseComplete(); err != nil {
+					t.Fatal(err)
+				}
 			}
 			remote := newFakeChunkRemote()
 			cfg := ctConfig(1)
@@ -130,6 +140,10 @@ func TestCutCOWV3_MutationCompletesWhileEarlierChunkCopyIsHeld(t *testing.T) {
 					_, e = s.WriteBatch(5, [][]byte{makeBlock(ctBlockSize, 0xa5), makeBlock(ctBlockSize, 0xa6), makeBlock(ctBlockSize, 0xa7), makeBlock(ctBlockSize, 0xa8)})
 				case "ApplyEntry":
 					e = s.ApplyEntry(5, makeBlock(ctBlockSize, 0xa5), nextLSN)
+				case "ApplyInstallEntry":
+					e = completed.ApplyInstallEntry(5, makeBlock(ctBlockSize, 0xa5), nextLSN)
+				case "WriteOutsideD":
+					_, e = s.Write(21, makeBlock(ctBlockSize, 0xa5))
 				}
 				writeErr <- e
 			}()
@@ -167,14 +181,18 @@ func TestCutCOWV3_MutationCompletesWhileEarlierChunkCopyIsHeld(t *testing.T) {
 			if !bytes.Equal(image, want) {
 				t.Fatal("first HEAD is not the literal pre-H image")
 			}
-			if got, e := s.Read(5); e != nil || !bytes.Equal(got, makeBlock(ctBlockSize, 0xa5)) {
+			changedLBA := 5
+			if method == "WriteOutsideD" {
+				changedLBA = 21
+			}
+			if got, e := s.Read(uint32(changedLBA)); e != nil || !bytes.Equal(got, makeBlock(ctBlockSize, 0xa5)) {
 				t.Fatalf("local post-H image: %v", e)
 			}
 			second, e := layer.Cut(context.Background())
 			if e != nil {
 				t.Fatal(e)
 			}
-			copy(want[5*ctBlockSize:6*ctBlockSize], makeBlock(ctBlockSize, 0xa5))
+			copy(want[changedLBA*ctBlockSize:(changedLBA+1)*ctBlockSize], makeBlock(ctBlockSize, 0xa5))
 			if method == "WriteBatch" {
 				for i, value := range []byte{0xa6, 0xa7, 0xa8} {
 					copy(want[(6+i)*ctBlockSize:(7+i)*ctBlockSize], makeBlock(ctBlockSize, value))

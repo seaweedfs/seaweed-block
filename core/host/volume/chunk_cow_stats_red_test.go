@@ -37,14 +37,12 @@ func TestChunkCutStatsBody_ExposesCOWCounters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var body map[string]int64
 	// Other cut-body fields include strings/bools, so decode only the named
 	// integer counters from RawMessage rather than accepting a partial decode.
 	var members map[string]json.RawMessage
 	if err = json.Unmarshal(raw, &members); err != nil {
 		t.Fatal(err)
 	}
-	body = make(map[string]int64)
 	for _, field := range fields {
 		member, exists := members[field.jsonName]
 		if !exists {
@@ -55,7 +53,6 @@ func TestChunkCutStatsBody_ExposesCOWCounters(t *testing.T) {
 		if err = json.Unmarshal(member, &number); err != nil {
 			t.Fatalf("counter %s: %v", field.jsonName, err)
 		}
-		body[field.jsonName] = number
 		if number != field.value {
 			t.Errorf("counter %s=%d want %d", field.jsonName, number, field.value)
 		}
