@@ -114,7 +114,7 @@ func TestComponent_ProbeHappy(t *testing.T) {
 // retention setting, this prevents the old impl1 checkpoint releasing it.
 type twoReplicaWALPin struct{}
 
-func (twoReplicaWALPin) MinPinAcrossActiveSessions() (uint64, bool) { return 0, true }
+func (twoReplicaWALPin) MinPinAcrossActiveSessions() (uint64, bool) { return 0, false }
 
 // TestComponent_TwoReplicas_BothConverge — multi-replica scenario.
 // Demonstrates WithReplicas(N) + per-replica catch-up.
