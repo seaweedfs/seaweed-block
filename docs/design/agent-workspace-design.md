@@ -137,6 +137,31 @@ Per volume, under the chunk base directory in the filer (`core/frontend/chunksto
 
 **Reads after a move.** A block absent locally is fetched from the chunk named in HEAD, bounded by `ReadMissTimeout` (default 30 s), and installed only if it does not overwrite a newer local extent version; the dirty map is consulted again after the fetch, so a newer WAL-only write still wins on reads, and HEAD's value may sit beneath it as the backing value, which is correct if a crash loses that unsynced write (`OnReadMiss`; walstore `readFromExtent`).
 
+
+### Copy-before-write in the cut window (proposed, not implemented)
+
+**Problem.** Steps 3–4 hold `captureMu` exclusively while every non-staged candidate chunk is copied; `Write`, `WriteBatch`, `ApplyEntry` and `WriteExtentDirect` take `captureMu` shared, so every write waits for the whole copy. A cut-stall measurement on two lab hosts gave a maximum stall of 1.50 s with 3 GiB dirty and 0.67 s with 512 MiB (p99 15–20 ms). Pre-copy staging shortens it only when the staging rounds converge.
+
+**Design.**
+1. **Short barrier.** Under `captureMu` exclusive, the cut's `Sync` fixes H and the candidate set D is fixed as today (the dirty bitmap plus the chunks of WAL entries above the checkpoint). A COW window `{H, D, state per chunk}` is installed in the chunk layer, then `captureMu` is released. The stall becomes `Sync` plus fixing D, independent of the bytes to copy.
+2. **Per-chunk state** for each chunk of D: `pending → copying → done` or `pending → saved → done`, changed under a small per-chunk mutex.
+3. **Write hook.** Every mutation that can change what a read returns (`Write`, `WriteBatch`, `ApplyEntry`) checks the chunk of each LBA before the entry becomes visible to the read path. `WriteExtentDirect` (a BASE install) must not run inside an open window: today `BeginBaseInstall` only makes later cuts refuse, so it must also wait for an open window to close (open point, to be specified with the code).
+   - not in D, or `done` or `saved`: proceed;
+   - `pending`: save the chunk's current content, which is still its content at H, read through the normal read path, into the side store; mark it `saved`; proceed;
+   - `copying`: wait until the copier marks it `done`. A chunk copy reads 1,024 blocks; without this wait a write landing mid-copy makes the uploaded chunk a mix of old and new blocks.
+4. **Copier**, outside the barrier and parallel: for each chunk of D, take `pending → copying` (or find `saved`), read the live chunk (or the saved bytes), hash it, mark `done`. Upload, manifest and CAS are unchanged (steps 5–11).
+5. **Side store.** Local and per cut: memory up to a bound, then a file in the volume's local root; at most |D| × 4 MiB, in practice the chunks written during the window. It is dropped after the CAS and after any cut failure. Recovery never reads it: after a crash the cut is gone, HEAD is unchanged, and the dirty set is rebuilt from the bitmap and the WAL as today.
+6. **No flusher hook.** The flusher moves WAL content to the extent and does not change what a read returns; saving at the flusher instead of at the write is wrong (it misses writes still in the WAL).
+7. **After the CAS** the dirty set keeps every chunk written after H, as `finishCut` does today, so the next cut uploads them.
+
+**What it does not change.** The bytes a cut uploads (whole 4 MiB chunks whose content changed), the manifest work and the load on SeaweedFS stay the same; COW moves the copy out of the write stall, it does not reduce upload volume. Per-cut statistics (`barrierPauseNs`, `uploadedChunks`, `uploadedBytes` in the `/chunk/cut` body) measure both.
+
+**Alternatives.** Holding the flusher for candidate chunks (reading the at-H content back from the extent and WAL entries up to H) needs no side store, but the WAL cannot be released for those chunks during the window, and a long upload fills it. Raising `BarrierBound` staging does not bound the stall when writes keep re-dirtying staged chunks. Redirect-on-write at the extent changes the on-disk layout and is out of scope for the current format work.
+
+**Model.** [`docs/spec/CutCOW.tla`](../spec/CutCOW.tla) (S4c in the [spec README](../spec/README.md)) checks today's barrier cut and this design with one crash: every uploaded chunk equals the image at H (`HeadImage`, `BufFrozen`), reads return the newest write, and the side store never outlives its cut. Both pass exhaustively at MaxLSN 6 with 2 cuts. Each rule above is necessary: a saved copy taken after the write, no save, admitting writes before D is fixed, saving at the flusher, reusing the side store in the next cut, or skipping the per-chunk wait each uploads a chunk that is not the image at H.
+
+**Tests to write with the code.** RED first: a write during the window to an uncopied candidate, with the hook absent, must upload new bytes. Then: a write racing the copier on the same chunk (the per-chunk wait); a crash during the window (reopen, no side store read, HEAD unchanged, next cut correct); the barrier pause no longer grows with dirty bytes; new statistics (`cowSavedChunks`, `cowSaveNs`, `cowWaitNs`) in `ChunkCutStats`, which the cut-body mirror test then forces into `/chunk/cut`.
+
 ## 6. Snapshots, forks, retention, GC, volume delete
 
 - **Snapshot** (`Catalog.CreateSnapshot`): claim the name with an exclusive name record `{request, attempt}` (a retry gets its own attempt back); check the volume is not being deleted; write an intent with a deadline; re-check the deadline; exclusively create `snaps/<name>/<attempt>` holding a copy of the HEAD root. An unknown outcome keeps the intent; the caller retries with the same request id.
@@ -332,7 +357,7 @@ These are tracked for fixes. Gaps that apply to the whole codebase (authenticati
 - **Moving back to a host with a surviving local file** fails closed with `ErrChunkStaleLocalRoot` (§7). **Follow-up:** recreate the local root from HEAD automatically instead of refusing.
 - **Default RPO is unbounded.** No automatic cut is enabled by default (§2).
 - **The master is a single point of failure.** A master outage longer than the lease stops I/O on every workspace, and recovery is a forced move.
-- **Cut cost.** The barrier pause includes copying every non-staged candidate chunk (up to the dirty threshold, 512 chunks by default), held in RAM until upload. A 4 KiB write re-uploads its 4 MiB chunk, and a read miss after a move fetches the whole chunk with no request coalescing.
+- **Cut cost.** The barrier pause includes copying every non-staged candidate chunk (up to the dirty threshold, 512 chunks by default), held in RAM until upload. A 4 KiB write re-uploads its 4 MiB chunk, and a read miss after a move fetches the whole chunk with no request coalescing. **Proposed:** copy-before-write takes the copy out of the barrier (§5); it does not change the upload volume.
 - **GC is manual.** Needles uploaded without a persisted key binding are never reclaimed. An intent stamped by a host clock running ahead of the GC runner fails the whole pass (liveness, not safety).
 - **Filer conditional update: multi-filer and old-filer cases.** Reading the open-source SeaweedFS filer: `UpdateEntry` takes an exclusive lock on the path before it validates `expected_extended`. The concurrent case against one pinned filer is tested (#163). Not tested: several filers sharing a store, and a filer that predates the field (there is no capability probe). **Planned:** a multi-filer test and a probe.
 - **No multi-replica workspaces with chunk snapshots**, and no crash-restart recovery of a ublk server (a crashed server fails closed).
