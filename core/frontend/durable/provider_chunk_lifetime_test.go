@@ -641,6 +641,47 @@ func corruptWALWrite(t *testing.T, path string, fill byte) func() {
 	}
 }
 
+// The nonce ends immediately before the payload. A matching last nonce byte
+// must not shift the corruption target one byte into the header.
+func TestCorruptWALWrite_NoncePayloadOverlap(t *testing.T) {
+	const prefix, payloadSize, walStart, walSize = 62, 4096, 8192, 16384
+	path := filepath.Join(t.TempDir(), "overlap.bin")
+	image := make([]byte, walStart+walSize)
+	binary.LittleEndian.PutUint64(image[48:56], walStart)
+	binary.LittleEndian.PutUint64(image[56:64], walSize)
+	rec := image[walStart : walStart+prefix+payloadSize+8]
+	binary.LittleEndian.PutUint64(rec[:8], 1)
+	rec[16] = 0x01
+	binary.LittleEndian.PutUint64(rec[18:26], 5)
+	binary.LittleEndian.PutUint32(rec[26:30], payloadSize)
+	rec[61] = 0xa7 // legal nonce: old bytes.Index reports 61, not payload offset 62
+	copy(rec[prefix:], bytes.Repeat([]byte{0xa7}, payloadSize))
+	binary.LittleEndian.PutUint32(rec[prefix+payloadSize:], crc32.Checksum(rec[:prefix+payloadSize], crc32.MakeTable(crc32.Castagnoli)))
+	binary.LittleEndian.PutUint32(rec[prefix+payloadSize+4:], uint32(len(rec)))
+	if err := os.WriteFile(path, image, 0600); err != nil {
+		t.Fatal(err)
+	}
+	restore := corruptWALWrite(t, path, 0xa7)
+	changed, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := append([]byte(nil), image...)
+	want[walStart+16] = 0x04
+	binary.LittleEndian.PutUint32(want[walStart+prefix+payloadSize:], crc32.Checksum(want[walStart:walStart+prefix+payloadSize], crc32.MakeTable(crc32.Castagnoli)))
+	if !bytes.Equal(changed, want) {
+		t.Fatal("corruption changed bytes outside the intended type/CRC")
+	}
+	restore()
+	repaired, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(repaired, image) {
+		t.Fatal("restore did not recover the exact original image")
+	}
+}
+
 // A deferred attach belongs to the recovery that registered it. Recovery
 // A succeeds before authority; recovery B then fails on a real WAL
 // integrity fault; when authority arrives, A's wait must neither attach
