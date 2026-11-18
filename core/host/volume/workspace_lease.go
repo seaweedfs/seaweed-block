@@ -114,7 +114,7 @@ func (g *WorkspaceLeaseGuard) Refresh(ctx context.Context) error {
 		g.logFence()
 		return g.drain(ctx, g.revoked)
 	}
-	rpcCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	rpcCtx, cancel := context.WithTimeout(ctx, renewalRPCTimeout)
 	if !until.IsZero() {
 		var c context.CancelFunc
 		rpcCtx, c = context.WithDeadline(rpcCtx, until)
@@ -123,21 +123,23 @@ func (g *WorkspaceLeaseGuard) Refresh(ctx context.Context) error {
 	defer cancel()
 	reply, err := g.client.RenewWorkspaceLease(rpcCtx, &g.id)
 	if err != nil {
-		elapsed := g.now().Sub(start).Round(time.Millisecond)
+		end := g.now()
+		elapsed := end.Sub(start).Round(time.Millisecond)
+		hit := renewalLimitHit(start, end, until)
 		g.mu.Lock()
-		expired := !g.until.IsZero() && !g.now().Before(g.until)
+		expired := !g.until.IsZero() && !end.Before(g.until)
 		if expired {
-			g.fenceLocked(fmt.Sprintf("lease expired after a failed renewal (renewal failed after %s: %v)", elapsed, err))
+			g.fenceLocked(fmt.Sprintf("lease expired after a failed renewal (renewal failed after %s, %s: %v)", elapsed, hit, err))
 		}
 		g.mu.Unlock()
-		// Every failed renewal is visible with its latency: a run of them is the
-		// warning before an expiry fence (issue #205).
-		log.Printf("workspace lease: renewal failed after %s volume=%s epoch=%d (lease valid until %s): %v",
-			elapsed, g.id.VolumeId, g.id.Epoch, until.UTC().Format(time.RFC3339Nano), err)
+		// Every failed renewal is visible with its latency and with which limit,
+		// if any, the call reached: a run of them is the warning before an expiry
+		// fence (issue #205).
+		log.Printf("workspace lease: renewal failed after %s volume=%s epoch=%d (%s; lease valid until %s): %v",
+			elapsed, g.id.VolumeId, g.id.Epoch, hit, until.UTC().Format(time.RFC3339Nano), err)
 		if expired {
 			g.logFence()
-			_ = g.drain(ctx, false)
-			return fmt.Errorf("workspace lease expired: renewal failed after %s: %w", elapsed, err)
+			return g.drainAfterFence(ctx, fmt.Errorf("workspace lease expired: renewal failed after %s (%s): %w", elapsed, hit, err))
 		}
 		return err
 	}
@@ -146,8 +148,7 @@ func (g *WorkspaceLeaseGuard) Refresh(ctx context.Context) error {
 		g.fenceLocked(fmt.Sprintf("invalid lease reply (volume=%q replica=%q epoch=%d validForNs=%d)", reply.GetVolumeId(), reply.GetReplicaId(), reply.GetEpoch(), reply.GetValidForNs()))
 		g.mu.Unlock()
 		g.logFence()
-		_ = g.drain(ctx, false)
-		return fmt.Errorf("invalid workspace lease reply")
+		return g.drainAfterFence(ctx, fmt.Errorf("invalid workspace lease reply"))
 	}
 	g.mu.Lock()
 	// Check the OLD deadline before accepting a newer grant. In particular a
@@ -174,13 +175,47 @@ func (g *WorkspaceLeaseGuard) Refresh(ctx context.Context) error {
 	return nil
 }
 
+// renewalRPCTimeout bounds one renewal call; the lease deadline may bound it
+// sooner (Refresh).
+const renewalRPCTimeout = 2 * time.Second
+
+// renewalLimitHit says which limit a failed renewal call had reached when it
+// returned, on the guard's clock: the lease deadline (when it came before the
+// per-call timeout), the 2 s per-call timeout, or neither (the call failed
+// for another reason). It separates a slow master from a dead lease.
+func renewalLimitHit(start, end, until time.Time) string {
+	callLimit := start.Add(renewalRPCTimeout)
+	switch {
+	case !until.IsZero() && until.Before(callLimit) && !end.Before(until):
+		return "the call reached the lease deadline"
+	case !end.Before(callLimit):
+		return "the call reached the 2s renewal timeout"
+	default:
+		return "the call failed before any deadline"
+	}
+}
+
+// drainAfterFence drains after a fence and returns err. If the stop itself
+// failed, its error (which names the fence cause) is kept next to err.
+// Caller holds operation.
+func (g *WorkspaceLeaseGuard) drainAfterFence(ctx context.Context, err error) error {
+	derr := g.drain(ctx, false)
+	if !g.stopped {
+		return fmt.Errorf("%w; %w", err, derr)
+	}
+	return err
+}
+
 func (g *WorkspaceLeaseGuard) drain(parent context.Context, ack bool) error {
 	if !g.stopped {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		gen, err := g.stop(ctx)
 		cancel()
 		if err != nil {
-			return err
+			g.mu.Lock()
+			cause := g.cause
+			g.mu.Unlock()
+			return fmt.Errorf("workspace lease fenced (%s): stop failed: %w", cause, err)
 		}
 		g.headGen, g.stopped = gen, true
 	}

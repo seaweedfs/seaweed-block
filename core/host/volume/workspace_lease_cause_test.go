@@ -41,10 +41,11 @@ func captureLog(t *testing.T) *lockedBuffer {
 	return buf
 }
 
-// Issue #205: under sustained write load a volume fenced because its lease
-// renewals kept failing until the lease expired, and nothing said so: the
-// shutdown path logged nothing and the only trace was the raw RPC error at
-// closeout. The fence is correct; it must name its cause.
+// Issue #205: under sustained write load a volume stopped and nothing said
+// why: the shutdown path logged nothing and the only trace was a raw
+// DeadlineExceeded at closeout. Renewals failing until the lease expired is a
+// hypothesis that matches the code path, not something the logs proved. A
+// fence must name its cause so the next occurrence settles it.
 func TestWorkspaceLeaseRenewalTimeoutFenceNamesItsCause(t *testing.T) {
 	logs := captureLog(t)
 	now := time.Unix(1000, 0)
@@ -82,6 +83,14 @@ func TestWorkspaceLeaseRenewalTimeoutFenceNamesItsCause(t *testing.T) {
 	if !strings.Contains(out, "workspace lease: fenced") || !strings.Contains(out, "renewal failed") {
 		t.Fatalf("the fence and its cause were not logged; log=%q", out)
 	}
+	// The lease (1s) ended before the 2s per-call timeout: the log must say the
+	// call ran into the lease deadline, not that the RPC timed out on its own.
+	if !strings.Contains(out, "reached the lease deadline") || strings.Contains(out, "2s renewal timeout") {
+		t.Fatalf("the log does not say which limit the call reached; log=%q", out)
+	}
+	if !strings.Contains(g.FenceCause(), "lease expired after a failed renewal") {
+		t.Fatalf("FenceCause = %q", g.FenceCause())
+	}
 }
 
 // A renewal that fails while the lease is still valid does not fence, but it
@@ -114,5 +123,122 @@ func TestWorkspaceLeaseRenewalFailureIsLoggedWithLatency(t *testing.T) {
 	out := logs.String()
 	if !strings.Contains(out, "renewal failed after 2s") {
 		t.Fatalf("the failed renewal and its latency were not logged; log=%q", out)
+	}
+	// The lease (10s) outlives the call: this failure is the 2s per-call
+	// timeout, a slow master, not a lease that ran out.
+	if !strings.Contains(out, "reached the 2s renewal timeout") || strings.Contains(out, "lease deadline") {
+		t.Fatalf("the log does not say the 2s call timeout was reached; log=%q", out)
+	}
+	if g.FenceCause() != "" {
+		t.Fatalf("a failure inside the lease recorded a fence cause: %q", g.FenceCause())
+	}
+}
+
+// The first cause wins and is logged once: a frontend that notices expiry
+// latches the cause with the exact deadline; the later drain, and a second
+// Refresh, keep it and do not log the fence again.
+func TestWorkspaceLeaseFirstFenceCauseWinsAndIsLoggedOnce(t *testing.T) {
+	logs := captureLog(t)
+	now := time.Unix(1000, 0)
+	renewals, stops := 0, 0
+	client := workspaceTestClient{renew: func() (*control.WorkspaceLeaseFact, error) {
+		renewals++
+		return &control.WorkspaceLeaseFact{VolumeId: "v", ReplicaId: "r", Epoch: 1, ValidForNs: int64(time.Second)}, nil
+	}}
+	g, err := NewWorkspaceLeaseGuard(workspaceTestView{}, client, &control.WorkspaceIdentity{VolumeId: "v", ReplicaId: "r", Epoch: 1}, func(context.Context) (uint64, error) { stops++; return 7, nil }, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(2 * time.Second)
+	if g.Projection().Healthy {
+		t.Fatal("expired lease served")
+	}
+	const first = "lease expired at 1970-01-01T00:16:41Z without a successful renewal"
+	if got := g.FenceCause(); got != first {
+		t.Fatalf("FenceCause = %q, want %q", got, first)
+	}
+	err = g.Refresh(context.Background())
+	if err == nil || !strings.Contains(err.Error(), first) {
+		t.Fatalf("drain error does not carry the first cause: %v", err)
+	}
+	if err := g.Refresh(context.Background()); err == nil {
+		t.Fatal("fenced guard reopened")
+	}
+	if got := g.FenceCause(); got != first {
+		t.Fatalf("the first cause was replaced: %q", got)
+	}
+	if renewals != 1 || stops != 1 {
+		t.Fatalf("renewals=%d stops=%d, want 1 and 1", renewals, stops)
+	}
+	if n := strings.Count(logs.String(), "workspace lease: fenced"); n != 1 {
+		t.Fatalf("fence logged %d times, want once; log=%q", n, logs.String())
+	}
+}
+
+// A late reply that also carries a revocation keeps the first cause (the late
+// reply), not the revocation that arrived with it.
+func TestWorkspaceLeaseLateRevokingReplyKeepsTheFirstCause(t *testing.T) {
+	captureLog(t)
+	now := time.Unix(1000, 0)
+	renewals := 0
+	client := workspaceTestClient{renew: func() (*control.WorkspaceLeaseFact, error) {
+		renewals++
+		if renewals > 1 {
+			now = now.Add(3 * time.Second) // the reply arrives after the 1s lease ended
+			return &control.WorkspaceLeaseFact{VolumeId: "v", ReplicaId: "r", Epoch: 1, ValidForNs: int64(time.Second), Revoking: true}, nil
+		}
+		return &control.WorkspaceLeaseFact{VolumeId: "v", ReplicaId: "r", Epoch: 1, ValidForNs: int64(time.Second)}, nil
+	}, ack: func() error { t.Fatal("an expired lease must not ACK"); return nil }}
+	g, err := NewWorkspaceLeaseGuard(workspaceTestView{}, client, &control.WorkspaceIdentity{VolumeId: "v", ReplicaId: "r", Epoch: 1}, func(context.Context) (uint64, error) { return 7, nil }, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Refresh(context.Background()); err == nil {
+		t.Fatal("a late reply did not fence")
+	}
+	if got := g.FenceCause(); !strings.HasPrefix(got, "renewal reply arrived after the lease deadline") {
+		t.Fatalf("FenceCause = %q, want the late reply", got)
+	}
+}
+
+// A stop that fails after a fence must not hide the cause: the returned error
+// names the cause and keeps both the stop error and the renewal error.
+func TestWorkspaceLeaseFailedStopKeepsTheCause(t *testing.T) {
+	captureLog(t)
+	errStop := errors.New("frontend close failed")
+	now := time.Unix(1000, 0)
+	calls := 0
+	client := workspaceTestClient{renew: func() (*control.WorkspaceLeaseFact, error) {
+		calls++
+		if calls == 1 {
+			return &control.WorkspaceLeaseFact{VolumeId: "v", ReplicaId: "r", Epoch: 1, ValidForNs: int64(time.Second)}, nil
+		}
+		now = now.Add(3 * time.Second)
+		return nil, context.DeadlineExceeded
+	}}
+	g, err := NewWorkspaceLeaseGuard(workspaceTestView{}, client, &control.WorkspaceIdentity{VolumeId: "v", ReplicaId: "r", Epoch: 1}, func(context.Context) (uint64, error) { return 0, errStop }, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	err = g.Refresh(context.Background())
+	if !errors.Is(err, errStop) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("the stop or renewal error was lost: %v", err)
+	}
+	if !strings.Contains(err.Error(), "stop failed") || !strings.Contains(err.Error(), "lease expired after a failed renewal") {
+		t.Fatalf("the error does not name the cause and the failed stop: %q", err)
+	}
+	// The next Refresh retries the stop through the fenced path: same cause.
+	err = g.Refresh(context.Background())
+	if !errors.Is(err, errStop) || !strings.Contains(err.Error(), "lease expired after a failed renewal") {
+		t.Fatalf("the retried stop lost the cause: %v", err)
 	}
 }
