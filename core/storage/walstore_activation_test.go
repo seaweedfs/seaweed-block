@@ -50,6 +50,17 @@ func TestWALStoreProductionSelectorCreatesMappedV3(t *testing.T) {
 	}
 }
 
+func TestWALStoreProductionCreateOptions(t *testing.T) {
+	s, err := CreateWALStoreWithOptions(filepath.Join(t.TempDir(), "volume"), 64, 4096, WALStoreOptions{ChunkBlocks: 4, WMode: WModeStrict})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if s.v3.pub.current().WMode != WModeStrict || s.v3.ownedMap.chunkBlocks != 4 || len(s.v3.mapEntries) != 16 {
+		t.Fatal("production create lost the strict mode or map geometry option")
+	}
+}
+
 func TestWALStoreV3InstrumentationIncludesBatch(t *testing.T) {
 	s, _ := newMappedCheckpointStoreV3(t)
 	if _, err := s.Write(0, blk(1)); err != nil {
