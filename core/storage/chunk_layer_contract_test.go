@@ -406,8 +406,8 @@ func TestChunkLayer_C4_WritesDuringUploadAndBaseAreCapturedNext(t *testing.T) {
 		if err := handle.WriteBase(lba, data); err != nil {
 			t.Fatal(err)
 		}
-		w.record(frontier, lba, data)
 	}
+	w.record(frontier, 20, base)
 	if _, err := s.Sync(); !errors.Is(err, ErrBaseInstalling) {
 		t.Fatalf("logical Sync during install: %v", err)
 	}

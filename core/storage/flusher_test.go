@@ -69,7 +69,7 @@ func TestFlusher_ReleasesWALPressureAfterCheckpoint(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "store.bin")
 
-	s := createWALStoreWithWALSizeForTest(t, path, 128, 4096, 256*1024)
+	s := createLegacyWALStoreWithWALSizeForTest(t, path, 128, 4096, 256*1024)
 	defer s.Close()
 
 	for i := uint32(0); i < 32; i++ {
@@ -130,7 +130,7 @@ func TestWALWriter_AdvanceTailPastWrappedEntry(t *testing.T) {
 	}
 }
 
-func createWALStoreWithWALSizeForTest(t *testing.T, path string, numBlocks uint32, blockSize int, walSize uint64) *WALStore {
+func createLegacyWALStoreWithWALSizeForTest(t *testing.T, path string, numBlocks uint32, blockSize int, walSize uint64) *WALStore {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)

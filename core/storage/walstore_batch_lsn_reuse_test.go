@@ -18,7 +18,7 @@ import (
 func TestWALStoreFailedBatchAppendDoesNotRevertALaterAckedWrite(t *testing.T) {
 	const blockSize = 4096
 	path := filepath.Join(t.TempDir(), "store.bin")
-	s := createWALStoreWithWALSizeForTest(t, path, 64, blockSize, 64*1024)
+	s := createLegacyWALStoreWithWALSizeForTest(t, path, 64, blockSize, 64*1024)
 	s.DisableAutoFlushForRecoveryTest()
 	crashed := false
 	t.Cleanup(func() {

@@ -248,7 +248,7 @@ func TestWALGenerationPartialAppendRecoverySync(t *testing.T) {
 	for _, recoverFirst := range []bool{false, true} {
 		t.Run(map[bool]string{false: "failed append without recovery", true: "same-open recovery"}[recoverFirst], func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "store.bin")
-			s := createWALStoreWithWALSizeForTest(t, path, 64, 4096, 1<<20)
+			s := createLegacyWALStoreWithWALSizeForTest(t, path, 64, 4096, 1<<20)
 			s.DisableAutoFlushForRecoveryTest()
 			if _, err := s.Sync(); err != nil {
 				t.Fatal(err)

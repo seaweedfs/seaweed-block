@@ -26,8 +26,8 @@ func TestChunkCutStats_PublishedZeroedUnchangedAndNoop(t *testing.T) {
 		t.Fatal(err)
 	}
 	st := r.Stats
-	if st.UploadedChunks != 2 || st.UploadedBytes != 2*ctChunkBytes || st.ZeroedChunks != ctNumBlocks/ctChunkBlocks-2 || st.CandidateChunks != ctNumBlocks/ctChunkBlocks {
-		t.Fatalf("first cut stats %+v: want 2 uploaded chunks (%d bytes), remaining UNKNOWN chunks zeroed, all chunks candidates", st, 2*ctChunkBytes)
+	if st.UploadedChunks != 2 || st.UploadedBytes != 2*ctChunkBytes || st.ZeroedChunks != 0 || st.UnchangedChunks != ctNumBlocks/ctChunkBlocks-2 || st.CandidateChunks != ctNumBlocks/ctChunkBlocks {
+		t.Fatalf("first cut stats %+v: want 2 uploaded chunks (%d bytes), remaining UNKNOWN zero chunks unchanged, all chunks candidates", st, 2*ctChunkBytes)
 	}
 	if st.CASResult != "ok" || st.CASNs < 0 || st.UploadNs < 0 || st.TotalNs <= 0 {
 		t.Fatalf("first cut timings/result %+v", st)

@@ -551,7 +551,7 @@ func corruptWALWrite(t *testing.T, path string, fill byte) func() {
 	if at < 30 || bytes.Index(raw[at+1:], payload) >= 0 {
 		t.Fatalf("WAL record for fill %#x not found exactly once", fill)
 	}
-	const hdr = 30 // LSN 8, Reserved 8, Type 1, Flags 1, LBA 8, Length 4
+	const hdr = 62 // native v3 prefix includes durable LSN, cursor and nonce
 	start := at - hdr
 	rec := append([]byte(nil), raw[start:at+4096+8]...)
 	orig := append([]byte(nil), rec...)
@@ -559,7 +559,7 @@ func corruptWALWrite(t *testing.T, path string, fill byte) func() {
 		t.Fatalf("unexpected WAL record header % x", rec[:hdr])
 	}
 	rec[16] = 0x04 // write batch, Reserved stays 0: invalid
-	binary.LittleEndian.PutUint32(rec[hdr+4096:], crc32.ChecksumIEEE(rec[:hdr+4096]))
+	binary.LittleEndian.PutUint32(rec[hdr+4096:], crc32.Checksum(rec[:hdr+4096], crc32.MakeTable(crc32.Castagnoli)))
 	f, err := os.OpenFile(path, os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)

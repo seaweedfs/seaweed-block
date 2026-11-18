@@ -11,6 +11,7 @@ import (
 
 func TestChunkUploads_DefaultOverlapsBeforeCAS(t *testing.T) {
 	_, f, l, w := precopyLayer(t, 0, 3)
+	baselineCAS := f.stats().cas
 	f.mu.Lock()
 	f.putGate = make(chan struct{})
 	gate := f.putGate
@@ -33,7 +34,7 @@ func TestChunkUploads_DefaultOverlapsBeforeCAS(t *testing.T) {
 		}
 	}
 	f.mu.Lock()
-	if len(f.intents) == 0 || f.casCalls != 0 {
+	if len(f.intents) == 0 || f.casCalls != baselineCAS {
 		t.Error("overlapping uploads require a durable intent and no root CAS")
 	}
 	f.mu.Unlock()

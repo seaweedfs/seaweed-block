@@ -176,7 +176,7 @@ func TestWALStoreRecoverReconstructsLegacyWrappedRetainedWindow(t *testing.T) {
 		lowRecordSize = uint64(walEntryHeaderSize + 2*blockSize)
 	)
 	path := filepath.Join(t.TempDir(), "store.bin")
-	s := createWALStoreWithWALSizeForTest(t, path, 64, blockSize, walSize)
+	s := createLegacyWALStoreWithWALSizeForTest(t, path, 64, blockSize, walSize)
 	s.DisableAutoFlushForRecoveryTest()
 	for lba := uint32(0); lba < 3; lba++ {
 		if _, err := s.Write(lba, makeBlock(blockSize, byte(0x10+lba))); err != nil {
