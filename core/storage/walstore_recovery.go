@@ -282,6 +282,13 @@ func (s *WALStore) scanLBAsV3(fromLSN uint64, fn func(RecoveryEntry) error) erro
 		if gen%2 != 0 {
 			continue // a recovery or reset is running; capture again
 		}
+		// A completed BASE authoritatively replaces its prefix; those LSNs
+		// need a rebuild even if unused ring bytes stop on nonce binding.
+		// Do not downgrade damage in the retained suffix after BaseLSN.
+		if d.BaseState == BaseInstalled && fromLSN <= d.BaseLSN {
+			return NewWALRecycledFailure(ErrWALRecycled, fmt.Sprintf(
+				"fromLSN=%d is covered by installed BaseLSN=%d", fromLSN, d.BaseLSN))
+		}
 		floor := uint64(0)
 		if checkpointLSN > retentionLSNs {
 			floor = checkpointLSN - retentionLSNs
