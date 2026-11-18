@@ -81,6 +81,11 @@ func TestWALStoreV3_ReadOnlyRefusesIncompleteOrCorruptDependencies(t *testing.T)
 	for _, fault := range []string{"installing", "acknowledged_wal", "missing_map", "fallback_page", "presence", "fresh"} {
 		t.Run(fault, func(t *testing.T) {
 			s, path := newMappedCheckpointStoreV3(t)
+			if fault == "fallback_page" {
+				// Keep a genuinely referenced prior map in the fallback slot.
+				// Otherwise tail advance immediately rolls both slots forward.
+				s.SetRecoveryRetentionLSNs(1)
+			}
 			oldPage := s.v3.pub.mapCurrent.refs[0].Offset
 			writeSynced(t, s, 1, 1)
 			if err := s.flusher.flushOnce(); err != nil {

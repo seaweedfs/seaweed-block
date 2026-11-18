@@ -418,6 +418,13 @@ func (s *WALStore) recoverV3() (uint64, error) {
 				}
 			}
 			v.installReopen = ro
+			if v.w != nil {
+				kept := scan
+				kept.End, kept.Frontier = o.E, o.R
+				if err := v.w.rememberReclaimScanV3(kept); err != nil {
+					return 0, err
+				}
+			}
 		} else if o.Damaged || v.w == nil || o.E != v.w.logicalHeadV3() {
 			// A same-open Recover of this open's live install that finds the
 			// WAL cut short of the live writer (damage under a live install):

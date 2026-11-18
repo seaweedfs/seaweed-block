@@ -16,6 +16,51 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
+func TestCatchUpV3AfterCheckpointRingReuse(t *testing.T) {
+	primary, err := storage.CreateMappedWALStoreV3Test(filepath.Join(t.TempDir(), "primary.v3"), 64, v3RepBlock, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = primary.Close() })
+	primary.DisableAutoFlushForRecoveryTest()
+	primary.SetRecoveryRetentionLSNs(1)
+	const last = 270 // more than one lap of the real 1MiB test WAL
+	for i := 1; i <= last; i++ {
+		if _, err := primary.Write(0, v3RepBlk(byte(i))); err != nil {
+			t.Fatalf("cycle %d: %v", i, err)
+		}
+		if _, err := primary.Sync(); err != nil {
+			t.Fatal(err)
+		}
+		if err := storage.FlushMappedWALStoreV3Test(primary); err != nil {
+			t.Fatal(err)
+		}
+	}
+	replica := v3Rep(t)
+	h, err := replica.BeginBaseInstall(last-1, [16]byte{1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.WriteBase(0, v3RepBlk(byte((last-1)%256))); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.MarkBaseComplete(); err != nil {
+		t.Fatal(err)
+	}
+	l := v3Listen(t, replica)
+	r := runCatchUpFrom(t, NewBlockExecutor(primary, l.Addr()), last, last+1)
+	if !r.Success || r.AchievedLSN != last {
+		t.Fatalf("retained post-wrap record did not catch up: %+v", r)
+	}
+	if got := v3Read(t, replica, 0); !bytes.Equal(got, v3RepBlk(byte(last%256))) {
+		t.Fatal("catch-up after physical reuse returned wrong bytes")
+	}
+	r = runCatchUpFrom(t, NewBlockExecutor(primary, l.Addr()), last-1, last+1)
+	if r.Success || r.FailureKind != engine.RecoveryFailureWALRecycled {
+		t.Fatalf("released prefix must route to rebuild: %+v", r)
+	}
+}
+
 func TestCatchUpV3InstallRetireABARefusesOldScan(t *testing.T) {
 	primary, err := storage.CreateMappedWALStoreV3Test(filepath.Join(t.TempDir(), "primary.v3"), 64, v3RepBlock, 4)
 	if err != nil {
