@@ -41,6 +41,8 @@ type chunkHooks struct {
 	// recovered runs when Recover republished the dirty map (any chunk
 	// may have changed), before reads resume.
 	recovered func()
+	// Acquired only under installMu exclusive, before every lower store lock.
+	baseTransitionV3 func() (release func(), err error)
 }
 
 const defaultReadMissTimeout = 30 * time.Second
@@ -135,8 +137,20 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 	if remote == nil || cfg.ChunkBlocks == 0 || (!mapped && cfg.Bitmap == nil) {
 		return nil, errors.New("storage: chunk layer needs a remote, ChunkBlocks > 0 and a legacy bitmap unless the store owns an impl3 map")
 	}
-	if mapped && s.v3.pub.current().BaseState != BaseNone {
-		return nil, fmt.Errorf("%w: mapped BASE attachment awaits the descriptor install protocol", errV3NotYet)
+	var localBase bool
+	if mapped {
+		// Serialize hook publication with begin/complete. Their outer hook
+		// snapshot is rechecked after taking this same barrier.
+		s.captureMu.Lock()
+		defer s.captureMu.Unlock()
+		d := s.v3.pub.current()
+		if d.BaseState == BaseInstalling {
+			return nil, ErrBaseIncomplete
+		}
+		localBase = d.BaseState == BaseInstalled
+		if localBase {
+			cfg.FreshFromHead = false
+		}
 	}
 	if s.v3 != nil && s.v3.ownedMap != nil && uint64(cfg.ChunkBlocks) != s.v3.ownedMap.chunkBlocks {
 		return nil, fmt.Errorf("%w: chunk layer geometry differs from owned map", ErrMapInvalid)
@@ -230,7 +244,13 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 
 	}
 
-	if cfg.FreshFromHead {
+	if localBase {
+		// The completed BASE image is local authority, including ZERO blocks.
+		// Never revive old HEAD absence after a crash before its first cut.
+		l.hdr.Base = chunkBaseInstalledAwaitingCut
+		l.allDirty = true
+		l.presenceVer++
+	} else if cfg.FreshFromHead {
 		// An existing HEAD defines the fresh host's lazy image. With no HEAD,
 		// local writes may already have checkpointed out of the WAL dirty map:
 		// preserve ALL chunks as candidates for the first hash-comparing cut.
@@ -261,6 +281,9 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 		return nil, err
 	}
 	hooks := &chunkHooks{sink: l, closer: l.Close, mutated: l.noteMutation, recovered: l.noteAllMutated}
+	if mapped {
+		hooks.baseTransitionV3 = l.holdBaseTransitionV3
+	}
 	if !s.chunk.CompareAndSwap(nil, hooks) {
 		l.cancel()
 		return nil, errors.New("storage: a chunk layer is already attached")
@@ -391,6 +414,16 @@ func (l *chunkLayerImpl) chunkVersion(idx uint64) uint64 {
 // frontier path, under WALStore.mu: it makes the dirty set (and any changed
 // absence state) durable before the checkpoint can pass the entries.
 func (l *chunkLayerImpl) BeforeCheckpointAdvance(lsn uint64) error {
+	if l.usesOwnedMapV3() && l.s.v3.pub.current().BaseState == BaseInstalling {
+		// Serving/capture remain blocked by the installing descriptor. Settle
+		// local BASE authority before the installed descriptor can publish;
+		// a failure leaves the volume installing, never serving a partial image.
+		l.stMu.Lock()
+		l.absent = map[uint64]bool{}
+		l.localBlocks = map[uint64]bool{}
+		l.presenceVer++
+		l.stMu.Unlock()
+	}
 	if err := l.saveDirty(); err != nil {
 		return err
 	}
@@ -643,6 +676,9 @@ func (l *chunkLayerImpl) register() (done func(), err error) {
 }
 
 func (l *chunkLayerImpl) admit() error {
+	if l.usesOwnedMapV3() && l.s.v3.pub.current().BaseState == BaseInstalling {
+		return fmt.Errorf("%w: %w", errChunkCaptureRefused, errChunkBaseInstalling)
+	}
 	l.stMu.Lock()
 	closed, fenced, base, detached := l.closed, l.fenced, l.hdr.Base, l.detached != nil
 	l.stMu.Unlock()

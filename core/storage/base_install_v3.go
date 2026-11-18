@@ -154,6 +154,12 @@ func (s *WALStore) beginBaseInstallV3(baseLSN uint64, id [16]byte) (*installHand
 	}
 	v.installMu.Lock() // exclusive: drains the old ID's admitted mutations
 	defer v.installMu.Unlock()
+	hooks := s.chunk.Load()
+	release, err := holdChunkBaseTransitionV3(hooks)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	s.captureMu.Lock() // quiesce the install/capture boundary (8.1 step 1)
 	defer s.captureMu.Unlock()
 	s.lifecycleMu.RLock()
@@ -171,12 +177,10 @@ func (s *WALStore) beginBaseInstallV3(baseLSN uint64, id [16]byte) (*installHand
 	if v.w == nil {
 		return nil, errWALBindingV3 // a half-published reset before its Recover
 	}
-	if s.chunk.Load() != nil {
-		// The v3 chunk layer refuses BASE state writes and attachment while
-		// installing; its side of the install protocol (the install
-		// generation bump, no capture of a partly installed image) is not
-		// wired yet, so an install with a layer attached fails closed.
-		return nil, fmt.Errorf("%w: BASE install with an attached chunk layer", errV3NotYet)
+	// Attachment takes captureMu too. A layer installed after the outer
+	// snapshot was not drained by this transition: retry without mutation.
+	if s.chunk.Load() != hooks {
+		return nil, ErrMapCoverageStale
 	}
 	d := v.pub.current()
 	switch d.BaseState {
@@ -436,8 +440,17 @@ func (s *WALStore) markBaseCompleteV3(id [16]byte) error {
 	}
 	v.installMu.Lock()
 	defer v.installMu.Unlock()
+	hooks := s.chunk.Load()
+	release, err := holdChunkBaseTransitionV3(hooks)
+	if err != nil {
+		return err
+	}
+	defer release()
 	s.captureMu.Lock()
 	defer s.captureMu.Unlock()
+	if s.chunk.Load() != hooks {
+		return ErrMapCoverageStale
+	}
 	s.lifecycleMu.RLock()
 	defer s.lifecycleMu.RUnlock()
 	s.mu.RLock()
@@ -496,7 +509,6 @@ func (s *WALStore) markBaseCompleteV3(id [16]byte) error {
 		}
 		return nil
 	}
-	var err error
 	if prepared != nil {
 		_, err = v.pub.publishMapV3(&s.mu, nil, prepared, installed)
 	} else {
@@ -551,4 +563,26 @@ func (s *WALStore) markMapUnknownV3(lba uint64) {
 		return
 	}
 	v.mapEntries[lba/v.ownedMap.chunkBlocks].Unknown = true
+}
+
+// InstalledBaseLSN reports a completed local BASE obligation, not a normal
+// checkpoint. A caller must still revalidate under its attachment admission.
+func (s *WALStore) InstalledBaseLSN() (uint64, bool) {
+	if s.v3 == nil {
+		return 0, false
+	}
+	d := s.v3.pub.current()
+	return d.BaseLSN, d.BaseState == BaseInstalled
+}
+
+// Caller holds installMu exclusively and no lower lock. The returned release
+// must be deferred before acquiring captureMu, so it runs after lower unlocks.
+func holdChunkBaseTransitionV3(h *chunkHooks) (func(), error) {
+	if h == nil {
+		return func() {}, nil
+	}
+	if h.baseTransitionV3 == nil {
+		return nil, fmt.Errorf("%w: BASE transition with an unsupported attached chunk layer", errV3NotYet)
+	}
+	return h.baseTransitionV3()
 }
