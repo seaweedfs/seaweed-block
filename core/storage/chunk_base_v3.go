@@ -24,8 +24,6 @@ func (l *chunkLayerImpl) holdBaseTransitionV3() (func(), error) {
 		refusal = errChunkLayerFenced
 	case l.detached != nil:
 		refusal = errChunkLayerDetached
-	case l.pending != nil:
-		refusal = errChunkCASOutcomeUnknown
 	}
 	l.stMu.Unlock()
 	if refusal != nil {
