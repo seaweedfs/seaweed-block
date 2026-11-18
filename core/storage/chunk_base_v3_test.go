@@ -31,7 +31,7 @@ func TestChunkLayerV3_BASEIncompleteCaptureGuard(t *testing.T) {
 		t.Fatalf("missing early typed incomplete capture guard: %v", e)
 	}
 	after := f.stats()
-	if after.put != before.put || after.cas != before.cas {
+	if after.puts != before.puts || after.cas != before.cas {
 		t.Fatal("incomplete capture performed remote writes")
 	}
 	if e = h.MarkBaseComplete(); e != nil {
