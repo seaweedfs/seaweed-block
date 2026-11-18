@@ -31,7 +31,7 @@ func TestManifest_CapturePublishesSegmentRoot(t *testing.T) {
 	if _, err = s.Recover(); err != nil {
 		t.Fatal(err)
 	}
-	l, err := storage.AttachChunkLayer(s, r, storage.ChunkLayerConfig{ChunkBlocks: 8, Epoch: 1, Holder: "h1", FreshFromHead: true, Bitmap: storage.NewFileChunkBitmapStore(p + ".bitmap")})
+	l, err := storage.AttachChunkLayer(s, r, storage.ChunkLayerConfig{ChunkBlocks: 8, Epoch: 1, Holder: "h1", FreshFromHead: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +289,7 @@ func TestManifest_NoopFlatUpgradeUsesOneNormalGeneration(t *testing.T) {
 	if _, err = s.Recover(); err != nil {
 		t.Fatal(err)
 	}
-	l, err := storage.AttachChunkLayer(s, r, storage.ChunkLayerConfig{ChunkBlocks: 8, Epoch: 1, Holder: "h1", FreshFromHead: true, Bitmap: storage.NewFileChunkBitmapStore(p + ".bitmap")})
+	l, err := storage.AttachChunkLayer(s, r, storage.ChunkLayerConfig{ChunkBlocks: 8, Epoch: 1, Holder: "h1", FreshFromHead: true})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -262,7 +262,6 @@ func TestChunkRemote_ChunkLayerCaptureThenFreshHost(t *testing.T) {
 		r := newTestRemote(t, f, b)
 		l, err := storage.AttachChunkLayer(s, r, storage.ChunkLayerConfig{
 			ChunkBlocks: chunkBlocks, Epoch: 1, Holder: name, FreshFromHead: fresh,
-			Bitmap: storage.NewFileChunkBitmapStore(p + ".chunkbitmap"),
 		})
 		if err != nil {
 			t.Fatal(err)

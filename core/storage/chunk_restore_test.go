@@ -8,12 +8,12 @@ import (
 )
 
 func TestClaimChunkHeadClearsProductionDetachProof(t *testing.T) {
-	s, path := newChunkTestStore(t)
+	s, _ := newChunkTestStore(t)
 	if _, err := s.Recover(); err != nil {
 		t.Fatal(err)
 	}
 	remote := NewMemChunkRemote()
-	layer, err := AttachChunkLayer(s, remote, ChunkLayerConfig{ChunkBlocks: 4, Epoch: 1, Holder: "old", Bitmap: NewFileChunkBitmapStore(path + ".bitmap")})
+	layer, err := AttachChunkLayer(s, remote, ChunkLayerConfig{ChunkBlocks: 4, Epoch: 1, Holder: "old"})
 	if err != nil {
 		t.Fatal(err)
 	}
