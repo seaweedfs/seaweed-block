@@ -14,10 +14,12 @@ import (
 type slowLeaseStore struct {
 	AuthorityStore
 	delayNS atomic.Int64
+	puts    atomic.Int64 // delayed (armed) lease writes: proves the stall was exercised
 }
 
 func (s *slowLeaseStore) Put(r DurableRecord) error {
 	if d := time.Duration(s.delayNS.Load()); d > 0 && r.Workspace != nil && r.Workspace.Lease != nil {
+		s.puts.Add(1)
 		time.Sleep(d)
 	}
 	return s.AuthorityStore.Put(r)
@@ -32,6 +34,7 @@ func TestWorkspaceRenewalDoesNotWaitForSlowStore(t *testing.T) {
 	var nowNS atomic.Int64
 	nowNS.Store(time.Unix(1000, 0).UnixNano())
 	p := NewPublisher(nil, WithStore(slow), WithWorkspaceLeaseConfig(30*time.Second, func() time.Time { return time.Unix(0, nowNS.Load()) }))
+	t.Cleanup(p.CloseWorkspaceExtenders) // join extenders before the store closes
 	if err := p.apply(AssignmentAsk{VolumeID: "v", ReplicaID: "old", DataAddr: "d", CtrlAddr: "c", Intent: IntentBind}); err != nil {
 		t.Fatal(err)
 	}
@@ -54,6 +57,11 @@ func TestWorkspaceRenewalDoesNotWaitForSlowStore(t *testing.T) {
 	if took >= 2*time.Second {
 		t.Fatalf("renewal of a live lease took %s behind a 2.5 s store write; the host's renewal RPC times out at 2 s", took.Round(time.Millisecond))
 	}
+	t.Logf("renewal took %s", took.Round(time.Millisecond))
+	waitExtenders(t, p)
+	if slow.puts.Load() == 0 {
+		t.Fatal("no lease write went through the 2.5 s stall: the test did not exercise it")
+	}
 }
 
 // Renewals of different volumes must not queue behind each other's store
@@ -65,6 +73,7 @@ func TestWorkspaceConcurrentRenewalsDoNotSerializeOnStore(t *testing.T) {
 	var nowNS atomic.Int64
 	nowNS.Store(time.Unix(1000, 0).UnixNano())
 	p := NewPublisher(nil, WithStore(slow), WithWorkspaceLeaseConfig(30*time.Second, func() time.Time { return time.Unix(0, nowNS.Load()) }))
+	t.Cleanup(p.CloseWorkspaceExtenders) // join extenders before the store closes
 	const n = 6
 	for i := 0; i < n; i++ {
 		v := fmt.Sprintf("v%d", i)
@@ -106,6 +115,11 @@ func TestWorkspaceConcurrentRenewalsDoNotSerializeOnStore(t *testing.T) {
 	if slowest >= 2*time.Second {
 		t.Fatalf("slowest of %d concurrent renewals took %s (all: %v); renewals serialize behind each other's store writes", n, slowest.Round(time.Millisecond), took)
 	}
+	t.Logf("slowest of %d concurrent renewals took %s", n, slowest.Round(time.Millisecond))
+	waitExtenders(t, p)
+	if slow.puts.Load() == 0 {
+		t.Fatal("no lease write went through the 0.5 s stall: the test did not exercise it")
+	}
 }
 
 // heldWriteStore blocks the first Put that matches hold until release closes,
@@ -142,6 +156,7 @@ func TestWorkspaceRenewalDoesNotWaitForUnrelatedHeldWrite(t *testing.T) {
 	var nowNS atomic.Int64
 	nowNS.Store(time.Unix(1000, 0).UnixNano())
 	p := NewPublisher(nil, WithStore(held), WithWorkspaceLeaseConfig(30*time.Second, func() time.Time { return time.Unix(0, nowNS.Load()) }))
+	t.Cleanup(p.CloseWorkspaceExtenders) // join extenders before the store closes
 	for _, v := range []string{"a", "b"} {
 		if err := p.apply(AssignmentAsk{VolumeID: v, ReplicaID: "r", DataAddr: "d", CtrlAddr: "c", Intent: IntentBind}); err != nil {
 			t.Fatal(err)
@@ -180,6 +195,7 @@ func TestWorkspaceRenewalDoesNotWaitForUnrelatedHeldWrite(t *testing.T) {
 		if err != nil {
 			t.Fatalf("renewal of b: %v", err)
 		}
+		t.Logf("renewal of b took %s while a's write was held", time.Since(start).Round(time.Millisecond))
 	case <-time.After(2 * time.Second):
 		blocked := time.Since(start).Round(time.Millisecond)
 		release()

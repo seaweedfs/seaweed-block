@@ -1,0 +1,780 @@
+package authority
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+// GREEN-gating controls for the #205 fix (design r1 section 8).
+
+// hookStore runs before (an error is a known no-write) and after (an error
+// after the real Put is an unknown outcome: the record landed) hooks.
+type hookStore struct {
+	AuthorityStore
+	before atomic.Pointer[func(DurableRecord) error]
+	after  atomic.Pointer[func(DurableRecord) error]
+}
+
+func (s *hookStore) Put(r DurableRecord) error {
+	if f := s.before.Load(); f != nil {
+		if err := (*f)(r); err != nil {
+			return err
+		}
+	}
+	if err := s.AuthorityStore.Put(r); err != nil {
+		return err
+	}
+	if f := s.after.Load(); f != nil {
+		return (*f)(r)
+	}
+	return nil
+}
+
+func (s *hookStore) setBefore(f func(DurableRecord) error) { s.before.Store(&f) }
+func (s *hookStore) setAfter(f func(DurableRecord) error)  { s.after.Store(&f) }
+
+// isExtension reports a lease write that raises the horizon above firstH and
+// is not a revocation: the extender's write.
+func isExtension(r DurableRecord, volume string, firstH int64) bool {
+	return r.VolumeID == volume && r.Workspace != nil && r.Workspace.Lease != nil && !r.Workspace.Lease.Revoking && r.Workspace.Lease.ExpiresAtNS > firstH
+}
+
+type testClock struct{ ns atomic.Int64 }
+
+func newTestClock() *testClock {
+	c := &testClock{}
+	c.ns.Store(time.Unix(1000, 0).UnixNano())
+	return c
+}
+func (c *testClock) now() time.Time { return time.Unix(0, c.ns.Load()) }
+func (c *testClock) at(sec float64) {
+	c.ns.Store(time.Unix(1000, 0).Add(time.Duration(sec * float64(time.Second))).UnixNano())
+}
+func (c *testClock) sec(sec float64) time.Time {
+	return time.Unix(1000, 0).Add(time.Duration(sec * float64(time.Second)))
+}
+
+// newLeasePublisher joins extenders on cleanup, before the store closes
+// (newTempStore registers its Close first, so it runs later).
+func newLeasePublisher(t *testing.T, store AuthorityStore, ttl time.Duration, c *testClock) *Publisher {
+	t.Helper()
+	p := NewPublisher(nil, WithStore(store), WithWorkspaceLeaseConfig(ttl, c.now))
+	t.Cleanup(p.CloseWorkspaceExtenders)
+	return p
+}
+
+func bindAndGrant(t *testing.T, p *Publisher, volume, replica string) WorkspaceLease {
+	t.Helper()
+	if err := p.apply(AssignmentAsk{VolumeID: volume, ReplicaID: replica, DataAddr: "d", CtrlAddr: "c", Intent: IntentBind}); err != nil {
+		t.Fatal(err)
+	}
+	l, err := p.RenewWorkspaceLease(context.Background(), volume, replica, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return l
+}
+
+// waitExtenders joins every admitted extender (tests only; no concurrent
+// admission while waiting).
+func waitExtenders(t *testing.T, p *Publisher) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { p.extWG.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("extenders did not finish")
+	}
+}
+
+// assertLeaseViewMatches checks INV-LEASE-VIEW-001: with p.mu held, every
+// volume's view equals derive(published state).
+func assertLeaseViewMatches(t *testing.T, p *Publisher, what string) {
+	t.Helper()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	vols := map[string]bool{}
+	for k := range p.state {
+		vols[k.volumeID] = true
+	}
+	for v := range p.workspace {
+		vols[v] = true
+	}
+	for v := range p.workspaceUncertain {
+		vols[v] = true
+	}
+	p.leaseMu.Lock()
+	for v := range p.leaseViews {
+		vols[v] = true
+	}
+	p.leaseMu.Unlock()
+	for v := range vols {
+		want := p.deriveLeaseLocked(v)
+		p.leaseMu.Lock()
+		var got leaseDerived
+		if lv := p.leaseViews[v]; lv != nil {
+			got = lv.d
+		}
+		p.leaseMu.Unlock()
+		if got != want {
+			t.Fatalf("%s: INV-LEASE-VIEW-001 broken for %s:\n view   %+v\n derive %+v", what, v, got, want)
+		}
+	}
+}
+
+func forcedMove(volume, id string) (WorkspaceMoveRequest, WorkspaceHead) {
+	return WorkspaceMoveRequest{RequestID: id, VolumeID: volume, ExpectedReplicaID: "r", TargetReplicaID: "r", ExpectedHost: "old", TargetHost: "new", ExpectedEpoch: 1, TargetDataAddr: "nd", TargetCtrlAddr: "nc", Kind: "forced", Force: true},
+		WorkspaceHead{Gen: 7, Epoch: 1, Holder: "old/r", RemoteLSN: 42}
+}
+
+// The view equals derive(published) after every writer kind: bind, first
+// grant, extension, endpoint refresh, revocation, ACK, clean move issue, a
+// move reservation whose issue write fails (uncertain via apply), a failed
+// extension (uncertain via persistWorkspaceLocked), reload and close.
+func TestWorkspaceLeaseViewMatchesDeriveAfterEveryWriter(t *testing.T) {
+	disk, _ := newTempStore(t)
+	hs := &hookStore{AuthorityStore: disk}
+	c := newTestClock()
+	p := newLeasePublisher(t, hs, 30*time.Second, c)
+	check := func(what string) { t.Helper(); assertLeaseViewMatches(t, p, what) }
+	ctx := context.Background()
+	check("empty")
+	for _, v := range []string{"v", "w", "x"} {
+		if err := p.apply(AssignmentAsk{VolumeID: v, ReplicaID: "r", DataAddr: "d", CtrlAddr: "c", Intent: IntentBind}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check("bind")
+	if err := p.apply(AssignmentAsk{VolumeID: "x", ReplicaID: "r", DataAddr: "d1", CtrlAddr: "c", Intent: IntentRefreshEndpoint}); err != nil {
+		t.Fatal(err)
+	}
+	check("endpoint refresh, not enrolled")
+	for _, v := range []string{"v", "w", "x"} {
+		if _, err := p.RenewWorkspaceLease(ctx, v, "r", 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check("first grants")
+	firstH := p.WorkspaceState("v").Lease.ExpiresAtNS
+	c.at(10)
+	if _, err := p.RenewWorkspaceLease(ctx, "v", "r", 1); err != nil {
+		t.Fatal(err)
+	}
+	waitExtenders(t, p)
+	if got := p.WorkspaceState("v").Lease.ExpiresAtNS; got != c.sec(55).UnixNano() || got <= firstH {
+		t.Fatalf("extension did not publish trigger+1.5*TTL: %d", got)
+	}
+	check("extension")
+	if err := p.apply(AssignmentAsk{VolumeID: "v", ReplicaID: "r", DataAddr: "d2", CtrlAddr: "c", Intent: IntentRefreshEndpoint}); err != nil {
+		t.Fatal(err)
+	}
+	check("endpoint refresh, enrolled")
+	if err := p.BeginWorkspaceRevocation(ctx, "v", "r", 1); err != nil {
+		t.Fatal(err)
+	}
+	check("revocation")
+	if err := p.AckWorkspaceRevocation(ctx, "v", WorkspaceRevokeAck{ReplicaID: "r", Epoch: 1, HeadGen: 7}); err != nil {
+		t.Fatal(err)
+	}
+	check("ack")
+	clean := WorkspaceMoveRequest{RequestID: "clean", VolumeID: "v", ExpectedReplicaID: "r", TargetReplicaID: "r", ExpectedHost: "old", TargetHost: "new", ExpectedEpoch: 1, TargetDataAddr: "nd", TargetCtrlAddr: "nc", Kind: "clean"}
+	if _, err := p.MoveWorkspace(ctx, clean, WorkspaceHead{Gen: 7, Epoch: 1, Holder: "old/r", RemoteLSN: 42, Detached: true}); err != nil {
+		t.Fatal(err)
+	}
+	check("clean move issued")
+	if p.leaseDeadlineLockedForTest("v") != (time.Time{}) {
+		t.Fatal("move issue kept the old deadline")
+	}
+	// w: forced move whose issue write fails after the reservation persisted.
+	c.at(30 + 15 + 20 + 1) // past w's horizon (45) + skew (20)
+	hs.setBefore(func(r DurableRecord) error {
+		if r.VolumeID == "w" && r.Workspace != nil && len(r.Workspace.Moves) > 0 && r.Workspace.Moves[len(r.Workspace.Moves)-1].Issued {
+			return errors.New("injected issue write failure")
+		}
+		return nil
+	})
+	q, h := forcedMove("w", "forced-w")
+	if _, err := p.MoveWorkspace(ctx, q, h); err == nil {
+		t.Fatal("injected issue failure ignored")
+	}
+	check("move reservation, failed issue (uncertain via apply)")
+	if st := p.WorkspaceState("w"); len(st.Moves) != 1 || st.Moves[0].Issued {
+		t.Fatalf("reservation not published: %+v", st)
+	}
+	// x: a failed extension latches uncertainty.
+	c.at(0)
+	p2Disk, _ := newTempStore(t)
+	hs2 := &hookStore{AuthorityStore: p2Disk}
+	p2 := newLeasePublisher(t, hs2, 30*time.Second, c)
+	bindAndGrant(t, p2, "x", "r")
+	firstX := p2.WorkspaceState("x").Lease.ExpiresAtNS
+	hs2.setBefore(func(r DurableRecord) error {
+		if isExtension(r, "x", firstX) {
+			return errors.New("injected extension write failure")
+		}
+		return nil
+	})
+	c.at(10)
+	if _, err := p2.RenewWorkspaceLease(ctx, "x", "r", 1); err != nil {
+		t.Fatal(err)
+	}
+	waitExtenders(t, p2)
+	assertLeaseViewMatches(t, p2, "failed extension (uncertain via persistWorkspaceLocked)")
+	if !p2.workspaceUncertainForTest("x") {
+		t.Fatal("failed extension did not latch uncertainty")
+	}
+	p.CloseWorkspaceExtenders()
+	check("close")
+	reloaded := newLeasePublisher(t, disk, 30*time.Second, c)
+	assertLeaseViewMatches(t, reloaded, "reload")
+}
+
+func (p *Publisher) leaseDeadlineLockedForTest(v string) time.Time {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.leaseDeadlineLocked(v)
+}
+
+func (p *Publisher) workspaceUncertainForTest(v string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.workspaceUncertain[v]
+}
+
+// Control 1: with the store stalled for good, grants shrink to the durable
+// horizon, a renewal that would leave no host validity is refused, and a
+// renewal at the horizon is refused. The stall is exercised by the extender
+// (puts > 0), so a green cannot bypass it.
+func TestWorkspaceLeaseClampsToHorizonUnderStalledStore(t *testing.T) {
+	disk, _ := newTempStore(t)
+	hs := &hookStore{AuthorityStore: disk}
+	c := newTestClock()
+	p := newLeasePublisher(t, hs, 30*time.Second, c)
+	bindAndGrant(t, p, "v", "r")
+	horizon := p.WorkspaceState("v").Lease.ExpiresAtNS // 1045
+	var puts atomic.Int64
+	entered, release := make(chan struct{}), make(chan struct{})
+	var enterOnce, releaseOnce sync.Once
+	hs.setBefore(func(r DurableRecord) error {
+		if isExtension(r, "v", horizon) {
+			puts.Add(1)
+			enterOnce.Do(func() { close(entered) })
+			<-release
+		}
+		return nil
+	})
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) }) // before Close joins
+	ctx := context.Background()
+	c.at(10)
+	if _, err := p.RenewWorkspaceLease(ctx, "v", "r", 1); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("extender never reached the store")
+	}
+	c.at(20)
+	start := time.Now()
+	l, err := p.RenewWorkspaceLease(ctx, "v", "r", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("renewal waited %s behind the stalled extender", took)
+	}
+	if l.ExpiresAtNS > horizon {
+		t.Fatalf("grant %s beyond the durable horizon %s", time.Unix(0, l.ExpiresAtNS), time.Unix(0, horizon))
+	}
+	if l.ExpiresAtNS != horizon {
+		t.Fatalf("grant not clamped to the horizon: %s", time.Unix(0, l.ExpiresAtNS))
+	}
+	c.at(35) // horizon - skew/2 = 1035: no positive host validity
+	if _, err := p.RenewWorkspaceLease(ctx, "v", "r", 1); err == nil || !strings.Contains(err.Error(), "no host validity") {
+		t.Fatalf("renewal without host validity: %v", err)
+	}
+	c.at(45)
+	if _, err := p.RenewWorkspaceLease(ctx, "v", "r", 1); err == nil {
+		t.Fatal("renewal at the durable horizon accepted")
+	}
+	if puts.Load() == 0 {
+		t.Fatal("the stall was never exercised by an extender write")
+	}
+}
+
+// Control 2: a restarted master honours the persisted (extended) horizon in
+// the forced barrier: max(horizon, restart+TTL) + skew.
+func TestWorkspaceRestartForcedBarrierHonoursHorizon(t *testing.T) {
+	disk, _ := newTempStore(t)
+	c := newTestClock()
+	p := newLeasePublisher(t, disk, 30*time.Second, c)
+	bindAndGrant(t, p, "v", "r")
+	c.at(10)
+	if _, err := p.RenewWorkspaceLease(context.Background(), "v", "r", 1); err != nil {
+		t.Fatal(err)
+	}
+	waitExtenders(t, p)
+	if got := p.WorkspaceState("v").Lease.ExpiresAtNS; got != c.sec(55).UnixNano() {
+		t.Fatalf("extension not durable: %s", time.Unix(0, got))
+	}
+	p.CloseWorkspaceExtenders()
+	c.at(12)
+	r := newLeasePublisher(t, disk, 30*time.Second, c) // reload deadline 1042 < horizon 1055
+	q, h := forcedMove("v", "forced")
+	c.ns.Store(c.sec(75).UnixNano() - 1)
+	if _, err := r.MoveWorkspace(context.Background(), q, h); err == nil {
+		t.Fatal("forced move before persisted horizon + skew after restart")
+	}
+	c.at(75)
+	if _, err := r.MoveWorkspace(context.Background(), q, h); err != nil {
+		t.Fatal("forced move at horizon + skew refused:", err)
+	}
+}
+
+// Control 3: an extension whose rename landed but whose directory sync
+// failed is an unknown write: the volume is uncertain, the next renewal is
+// refused (INV-AUTH-UNCERTAIN-001), and a reload finds the landed horizon and
+// bars a forced move until that horizon + skew.
+func TestWorkspaceAmbiguousExtensionLatchesUncertainty(t *testing.T) {
+	disk, _ := newTempStore(t)
+	hs := &hookStore{AuthorityStore: disk}
+	c := newTestClock()
+	p := newLeasePublisher(t, hs, 30*time.Second, c)
+	bindAndGrant(t, p, "v", "r")
+	first := p.WorkspaceState("v").Lease.ExpiresAtNS
+	hs.setAfter(func(r DurableRecord) error {
+		if isExtension(r, "v", first) {
+			return errors.New("injected: directory sync failed after rename")
+		}
+		return nil
+	})
+	c.at(10)
+	if _, err := p.RenewWorkspaceLease(context.Background(), "v", "r", 1); err != nil {
+		t.Fatal(err)
+	}
+	waitExtenders(t, p)
+	if got := p.WorkspaceState("v").Lease.ExpiresAtNS; got != first {
+		t.Fatalf("an unknown write was published: %s", time.Unix(0, got))
+	}
+	c.at(11)
+	if _, err := p.RenewWorkspaceLease(context.Background(), "v", "r", 1); err == nil || !strings.Contains(err.Error(), "uncertain") {
+		t.Fatalf("renewal after an unknown write: %v; want refused as uncertain", err)
+	}
+	p.CloseWorkspaceExtenders()
+	c.at(12)
+	r := newLeasePublisher(t, disk, 30*time.Second, c)
+	landed := r.WorkspaceState("v").Lease.ExpiresAtNS
+	if landed != c.sec(55).UnixNano() {
+		t.Fatalf("reload did not find the landed horizon: %s", time.Unix(0, landed))
+	}
+	q, h := forcedMove("v", "forced")
+	c.ns.Store(time.Unix(0, landed).Add(20*time.Second).UnixNano() - 1)
+	if _, err := r.MoveWorkspace(context.Background(), q, h); err == nil {
+		t.Fatal("forced move before the landed horizon + skew")
+	}
+	c.ns.Store(time.Unix(0, landed).Add(20 * time.Second).UnixNano())
+	if _, err := r.MoveWorkspace(context.Background(), q, h); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Control 4: an extender held inside its Put holds p.mu; a revocation or a
+// forced move of the same volume waits, then runs after the extension is
+// published, so its record carries the extended horizon (ordered).
+func TestWorkspaceExtenderHeldOrdersSameVolumeWriters(t *testing.T) {
+	for _, op := range []string{"revocation", "forced-move"} {
+		t.Run(op, func(t *testing.T) {
+			disk, _ := newTempStore(t)
+			hs := &hookStore{AuthorityStore: disk}
+			c := newTestClock()
+			p := newLeasePublisher(t, hs, 30*time.Second, c)
+			bindAndGrant(t, p, "v", "r")
+			first := p.WorkspaceState("v").Lease.ExpiresAtNS
+			entered, release := make(chan struct{}), make(chan struct{})
+			var enterOnce, releaseOnce sync.Once
+			releaseFn := func() { releaseOnce.Do(func() { close(release) }) }
+			hs.setBefore(func(r DurableRecord) error {
+				if isExtension(r, "v", first) {
+					enterOnce.Do(func() { close(entered) })
+					<-release
+				}
+				return nil
+			})
+			c.at(10)
+			if _, err := p.RenewWorkspaceLease(context.Background(), "v", "r", 1); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-entered:
+			case <-time.After(3 * time.Second):
+				t.Fatal("extender never reached the store")
+			}
+			done := make(chan error, 1)
+			if op == "revocation" {
+				go func() { done <- p.BeginWorkspaceRevocation(context.Background(), "v", "r", 1) }()
+			} else {
+				c.at(66) // past the OLD barrier max(1045, 1040) + 20
+				q, h := forcedMove("v", "forced")
+				go func() { _, err := p.MoveWorkspace(context.Background(), q, h); done <- err }()
+			}
+			t.Cleanup(func() {
+				releaseFn()
+				select {
+				case <-done:
+				case <-time.After(5 * time.Second):
+					t.Error("writer did not settle")
+				}
+			})
+			select {
+			case err := <-done:
+				t.Fatalf("%s ran while the extender held p.mu: %v", op, err)
+			case <-time.After(200 * time.Millisecond):
+			}
+			releaseFn()
+			var err error
+			select {
+			case err = <-done:
+				done <- err
+			case <-time.After(5 * time.Second):
+				t.Fatalf("%s did not finish after the extender", op)
+			}
+			want := c.sec(55).UnixNano()
+			st := p.WorkspaceState("v")
+			if op == "revocation" {
+				if err != nil || st.Lease == nil || !st.Lease.Revoking || st.Lease.ExpiresAtNS != want {
+					t.Fatalf("revocation not ordered after the extension: %v %+v", err, st.Lease)
+				}
+			} else if err == nil || len(st.Moves) != 0 || st.Lease.ExpiresAtNS != want {
+				t.Fatalf("forced move did not see the extended horizon: %v %+v", err, st)
+			}
+			p.CloseWorkspaceExtenders()
+			r := newLeasePublisher(t, disk, 30*time.Second, c)
+			if got := r.WorkspaceState("v").Lease; got.ExpiresAtNS != want || got.Revoking != (op == "revocation") {
+				t.Fatalf("reload: %+v", got)
+			}
+		})
+	}
+}
+
+// Control 5: a renewal of the same volume during a held revocation write sees
+// the last published state (a grant under the horizon), then the revoking
+// lease with the granted expiry and no extension. During a held forced-move
+// write (barrier passed) a renewal is refused.
+func TestWorkspaceSameVolumeRenewalDuringHeldWrite(t *testing.T) {
+	t.Run("revocation", func(t *testing.T) {
+		disk, _ := newTempStore(t)
+		hs := &hookStore{AuthorityStore: disk}
+		c := newTestClock()
+		p := newLeasePublisher(t, hs, 30*time.Second, c)
+		bindAndGrant(t, p, "v", "r")
+		horizon := p.WorkspaceState("v").Lease.ExpiresAtNS
+		entered, release := make(chan struct{}), make(chan struct{})
+		var enterOnce, releaseOnce sync.Once
+		releaseFn := func() { releaseOnce.Do(func() { close(release) }) }
+		hs.setBefore(func(r DurableRecord) error {
+			if r.VolumeID == "v" && r.Workspace != nil && r.Workspace.Lease != nil && r.Workspace.Lease.Revoking {
+				enterOnce.Do(func() { close(entered) })
+				<-release
+			}
+			return nil
+		})
+		done := make(chan error, 1)
+		go func() { done <- p.BeginWorkspaceRevocation(context.Background(), "v", "r", 1) }()
+		t.Cleanup(func() {
+			releaseFn()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Error("revocation did not settle")
+			}
+		})
+		<-entered
+		c.at(5)
+		l, err := p.RenewWorkspaceLease(context.Background(), "v", "r", 1)
+		if err != nil || l.Revoking || l.ExpiresAtNS != c.sec(35).UnixNano() || l.ExpiresAtNS > horizon {
+			t.Fatalf("renewal during the held revocation write: %+v %v", l, err)
+		}
+		releaseFn()
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+		done <- nil
+		for _, at := range []float64{6, 7} {
+			c.at(at)
+			l, err = p.RenewWorkspaceLease(context.Background(), "v", "r", 1)
+			if err != nil || !l.Revoking || l.ExpiresAtNS != c.sec(35).UnixNano() {
+				t.Fatalf("revoking renewal at %v: %+v %v; want the granted expiry, never extended", at, l, err)
+			}
+		}
+	})
+	t.Run("forced-move", func(t *testing.T) {
+		disk, _ := newTempStore(t)
+		hs := &hookStore{AuthorityStore: disk}
+		c := newTestClock()
+		p := newLeasePublisher(t, hs, 30*time.Second, c)
+		bindAndGrant(t, p, "v", "r")
+		entered, release := make(chan struct{}), make(chan struct{})
+		var enterOnce, releaseOnce sync.Once
+		releaseFn := func() { releaseOnce.Do(func() { close(release) }) }
+		hs.setBefore(func(r DurableRecord) error {
+			if r.VolumeID == "v" && r.Workspace != nil && len(r.Workspace.Moves) > 0 && !r.Workspace.Moves[len(r.Workspace.Moves)-1].Issued {
+				enterOnce.Do(func() { close(entered) })
+				<-release
+			}
+			return nil
+		})
+		c.at(66) // past horizon 1045 + skew 20
+		q, h := forcedMove("v", "forced")
+		done := make(chan error, 1)
+		go func() { _, err := p.MoveWorkspace(context.Background(), q, h); done <- err }()
+		t.Cleanup(func() {
+			releaseFn()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Error("forced move did not settle")
+			}
+		})
+		<-entered
+		start := time.Now()
+		if _, err := p.RenewWorkspaceLease(context.Background(), "v", "r", 1); err == nil {
+			t.Fatal("renewal granted during a forced move past the barrier")
+		}
+		if took := time.Since(start); took > time.Second {
+			t.Fatalf("renewal waited %s on the held move", took)
+		}
+		releaseFn()
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+		done <- nil
+		if _, err := p.RenewWorkspaceLease(context.Background(), "v", "r", 1); err == nil {
+			t.Fatal("old-epoch renewal after the move")
+		}
+	})
+}
+
+// Control 7 (run with -race): N volumes renew while apply, revocation, ACK, a
+// clean move, extenders and Close run. No renewal waits 2 s, nothing
+// deadlocks, and afterwards every live lease keeps disk >= published horizon
+// >= every grant (S1), and the view equals derive.
+func TestWorkspaceLeaseConcurrentRenewalsWritersExtendersClose(t *testing.T) {
+	disk, _ := newTempStore(t)
+	hs := &hookStore{AuthorityStore: disk}
+	var puts atomic.Int64
+	hs.setBefore(func(r DurableRecord) error {
+		puts.Add(1)
+		time.Sleep(20 * time.Millisecond)
+		return nil
+	})
+	const n = 8
+	p := NewPublisher(nil, WithStore(hs), WithWorkspaceLeaseConfig(2*time.Second, nil))
+	t.Cleanup(p.CloseWorkspaceExtenders)
+	ctx := context.Background()
+	vol := func(i int) string { return fmt.Sprintf("v%d", i) }
+	for i := 0; i < n; i++ {
+		bindAndGrant(t, p, vol(i), "r")
+	}
+	putsBefore := puts.Load()
+	var maxGrant [n]atomic.Int64
+	var slowest atomic.Int64
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				start := time.Now()
+				l, err := p.RenewWorkspaceLease(ctx, vol(i), "r", 1)
+				if d := int64(time.Since(start)); d > slowest.Load() {
+					slowest.Store(d)
+				}
+				if err == nil && !l.Revoking && l.ExpiresAtNS > maxGrant[i].Load() {
+					maxGrant[i].Store(l.ExpiresAtNS)
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+		}(i)
+	}
+	writersDone := make(chan error, 1)
+	go func() {
+		for k := 0; k < 10; k++ {
+			if err := p.apply(AssignmentAsk{VolumeID: vol(0), ReplicaID: "r", DataAddr: fmt.Sprintf("d%d", k), CtrlAddr: "c", Intent: IntentRefreshEndpoint}); err != nil {
+				writersDone <- err
+				return
+			}
+		}
+		if err := p.BeginWorkspaceRevocation(ctx, vol(1), "r", 1); err != nil {
+			writersDone <- err
+			return
+		}
+		if err := p.AckWorkspaceRevocation(ctx, vol(1), WorkspaceRevokeAck{ReplicaID: "r", Epoch: 1, HeadGen: 7}); err != nil {
+			writersDone <- err
+			return
+		}
+		clean := WorkspaceMoveRequest{RequestID: "clean", VolumeID: vol(1), ExpectedReplicaID: "r", TargetReplicaID: "r", ExpectedHost: "old", TargetHost: "new", ExpectedEpoch: 1, TargetDataAddr: "nd", TargetCtrlAddr: "nc", Kind: "clean"}
+		_, err := p.MoveWorkspace(ctx, clean, WorkspaceHead{Gen: 7, Epoch: 1, Holder: "old/r", RemoteLSN: 42, Detached: true})
+		writersDone <- err
+	}()
+	time.Sleep(1500 * time.Millisecond) // > TTL/4: extensions for every volume
+	closed := make(chan struct{})
+	go func() { p.CloseWorkspaceExtenders(); close(closed) }()
+	time.Sleep(100 * time.Millisecond)
+	close(stop)
+	all := make(chan struct{})
+	go func() { wg.Wait(); <-closed; close(all) }()
+	select {
+	case <-all:
+	case <-time.After(20 * time.Second):
+		t.Fatal("deadlock: renewers or Close did not finish")
+	}
+	select {
+	case err := <-writersDone:
+		if err != nil {
+			t.Fatal("writer:", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("deadlock: writers did not finish")
+	}
+	if s := time.Duration(slowest.Load()); s >= 2*time.Second {
+		t.Fatalf("slowest renewal %s", s)
+	}
+	if puts.Load() == putsBefore {
+		t.Fatal("no extender or writer Put during the run")
+	}
+	assertLeaseViewMatches(t, p, "after concurrency")
+	recs, err := disk.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	onDisk := map[string]int64{}
+	for _, r := range recs {
+		if r.Workspace != nil && r.Workspace.Lease != nil {
+			onDisk[r.VolumeID] = r.Workspace.Lease.ExpiresAtNS
+		}
+	}
+	for i := 0; i < n; i++ {
+		st := p.WorkspaceState(vol(i))
+		if st == nil || st.Lease == nil {
+			continue // a completed clean move cleared the lease (out of S1's scope)
+		}
+		if onDisk[vol(i)] < st.Lease.ExpiresAtNS || st.Lease.ExpiresAtNS < maxGrant[i].Load() {
+			t.Fatalf("%s: S1 broken: disk %d, published horizon %d, max grant %d", vol(i), onDisk[vol(i)], st.Lease.ExpiresAtNS, maxGrant[i].Load())
+		}
+	}
+}
+
+// Control 10a: Close waits for an extender held inside its Put; after Close
+// no extension is admitted or written.
+func TestWorkspaceCloseJoinsHeldExtender(t *testing.T) {
+	disk, _ := newTempStore(t)
+	hs := &hookStore{AuthorityStore: disk}
+	c := newTestClock()
+	p := newLeasePublisher(t, hs, 30*time.Second, c)
+	bindAndGrant(t, p, "v", "r")
+	first := p.WorkspaceState("v").Lease.ExpiresAtNS
+	var puts atomic.Int64
+	entered, release := make(chan struct{}), make(chan struct{})
+	var enterOnce, releaseOnce sync.Once
+	releaseFn := func() { releaseOnce.Do(func() { close(release) }) }
+	hs.setBefore(func(r DurableRecord) error {
+		if isExtension(r, "v", first) {
+			puts.Add(1)
+			enterOnce.Do(func() { close(entered) })
+			<-release
+		}
+		return nil
+	})
+	t.Cleanup(releaseFn)
+	c.at(10)
+	if _, err := p.RenewWorkspaceLease(context.Background(), "v", "r", 1); err != nil {
+		t.Fatal(err)
+	}
+	<-entered
+	closed := make(chan struct{})
+	go func() { p.CloseWorkspaceExtenders(); close(closed) }()
+	select {
+	case <-closed:
+		t.Fatal("Close returned while an extender was inside its write")
+	case <-time.After(200 * time.Millisecond):
+	}
+	releaseFn()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return after the extender finished")
+	}
+	before := puts.Load()
+	c.at(20) // would trigger an extension (horizon 1055 < 1020 + 37.5)
+	if _, err := p.RenewWorkspaceLease(context.Background(), "v", "r", 1); err != nil {
+		t.Fatal(err)
+	}
+	waitExtenders(t, p)
+	if puts.Load() != before {
+		t.Fatal("an extension was written after Close")
+	}
+}
+
+// Control 10b: an extender admitted before Close that reaches p.mu after
+// closing is set aborts with a known no-write. The test holds p.mu itself, so
+// the renewal also shows it never needs p.mu.
+func TestWorkspaceExtenderAdmittedBeforeCloseDoesNotWrite(t *testing.T) {
+	disk, _ := newTempStore(t)
+	hs := &hookStore{AuthorityStore: disk}
+	c := newTestClock()
+	p := newLeasePublisher(t, hs, 30*time.Second, c)
+	bindAndGrant(t, p, "v", "r")
+	first := p.WorkspaceState("v").Lease.ExpiresAtNS
+	var puts atomic.Int64
+	hs.setBefore(func(r DurableRecord) error {
+		if isExtension(r, "v", first) {
+			puts.Add(1)
+		}
+		return nil
+	})
+	c.at(10)
+	p.mu.Lock()
+	renewed := make(chan error, 1)
+	go func() { _, err := p.RenewWorkspaceLease(context.Background(), "v", "r", 1); renewed <- err }()
+	select {
+	case err := <-renewed:
+		if err != nil {
+			p.mu.Unlock()
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		p.mu.Unlock()
+		t.Fatal("renewal waited on p.mu")
+	}
+	p.leaseMu.Lock()
+	admitted := p.leaseViews["v"].extending
+	p.leaseClosing = true // Close's first step, while the extender waits for p.mu
+	p.leaseMu.Unlock()
+	p.mu.Unlock()
+	if !admitted {
+		t.Fatal("no extender was admitted")
+	}
+	waitExtenders(t, p)
+	if puts.Load() != 0 || p.WorkspaceState("v").Lease.ExpiresAtNS != first {
+		t.Fatal("an extender admitted before closing wrote after closing")
+	}
+	p.leaseMu.Lock()
+	extending := p.leaseViews["v"].extending
+	p.leaseMu.Unlock()
+	if extending {
+		t.Fatal("aborted extender left the single-flight flag set")
+	}
+}

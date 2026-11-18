@@ -18,10 +18,12 @@ import (
 type slowGuardStore struct {
 	authority.AuthorityStore
 	delayNS atomic.Int64
+	puts    atomic.Int64 // delayed (armed) lease writes: proves the stall was exercised
 }
 
 func (s *slowGuardStore) Put(r authority.DurableRecord) error {
 	if d := time.Duration(s.delayNS.Load()); d > 0 && r.Workspace != nil && r.Workspace.Lease != nil {
+		s.puts.Add(1)
 		time.Sleep(d)
 	}
 	return s.AuthorityStore.Put(r)
@@ -83,6 +85,7 @@ func TestWorkspaceLeaseGuardSurvivesSlowAuthorityStore(t *testing.T) {
 	})
 	dir := &skewDirective{asks: make(chan authority.AssignmentAsk, 1)}
 	p := authority.NewPublisher(dir, authority.WithStore(slow), authority.WithWorkspaceLeaseConfig(6*time.Second, nil))
+	t.Cleanup(p.CloseWorkspaceExtenders) // join extenders before the store closes
 	seedSkewPublisher(t, p, dir)
 	var stops atomic.Int32
 	g, err := volume.NewWorkspaceLeaseGuard(workspaceRPCView{frontend.Projection{VolumeID: "v", ReplicaID: "r", Epoch: 1, Healthy: true}},
@@ -115,6 +118,10 @@ func TestWorkspaceLeaseGuardSurvivesSlowAuthorityStore(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+	if slow.puts.Load() == 0 {
+		t.Fatal("no lease write went through the 2.5 s stall: the test did not exercise it")
+	}
+	t.Logf("guard stayed healthy for 10 s; %d lease writes took 2.5 s each", slow.puts.Load())
 }
 
 // A durable deletion-reservation write of an unrelated volume must not block
@@ -184,6 +191,7 @@ func TestWorkspaceRenewalRPCDoesNotWaitForHeldReservationWrite(t *testing.T) {
 		if err != nil {
 			t.Fatalf("renewal of vol-b: %v", err)
 		}
+		t.Logf("renewal RPC of vol-b took %s while vol-x's reservation write was held", time.Since(start).Round(time.Millisecond))
 	case <-time.After(2 * time.Second):
 		t.Fatalf("renewal RPC of vol-b was still blocked %s behind the held reservation write of vol-x", time.Since(start).Round(time.Millisecond))
 	}
