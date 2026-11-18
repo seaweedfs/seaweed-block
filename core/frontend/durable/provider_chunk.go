@@ -324,15 +324,7 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 		// Attach preparation is gated. Seed the exact observed HEAD before
 		// its takeover CAS; only then finalize lazy attachment and expose I/O.
 		cfg.PrepareRestore = func(head storage.ChunkHead) error {
-			if baseLSN, complete := ws.InstalledBaseLSN(); complete {
-				// The fresh marker can outlive a full local BASE. It is not
-				// permission to seed backwards or to fill from an older HEAD.
-				if head.RemoteLSN > baseLSN {
-					return fmt.Errorf("durable: completed BASE frontier %d is behind HEAD %d", baseLSN, head.RemoteLSN)
-				}
-				cfg.FreshFromHead = false
-				return nil
-			}
+
 			// No HEAD is a new lineage; preserve any pre-assignment local
 			// writes instead of replacing their frontier with zero.
 			if head.Gen == 0 {
