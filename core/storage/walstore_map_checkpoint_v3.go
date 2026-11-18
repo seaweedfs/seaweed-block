@@ -125,7 +125,8 @@ func (s *WALStore) publishCheckpointV3(cp uint64, seed bool, recoveryGen uint64)
 	if cp > retention {
 		releaseLSN = cp - retention
 	}
-	tail := v.w.reclaimThroughV3(releaseLSN)
+	_ = releaseLSN
+	tail := uint64(0)
 	current := v.pub.current()
 	if current.BaseState == BaseInstalling {
 		// An incomplete BASE still needs its entire install-lane suffix.
