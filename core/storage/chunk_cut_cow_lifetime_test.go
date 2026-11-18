@@ -3,12 +3,15 @@ package storage
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // These fixtures use the public v3 factory, real reads/WAL/flusher, and actual
@@ -617,5 +620,135 @@ func TestCutCOWV3_DestructiveSnapshotRetriesFirstAttachment(t *testing.T) {
 				t.Fatal(transitionErr)
 			}
 		})
+	}
+}
+
+// A process stop while OPEN deliberately bypasses all Close/abort cleanups.
+// The parent gets the actual last remote HEAD, not a reconstructed proposal.
+func TestCutCOWV3_ProcessCrashDropsSideAndRestoresSyncedImage(t *testing.T) {
+	if path := os.Getenv("SWBLOCK_COW_CRASH_PATH"); path != "" {
+		gate := &cowReadGate{entered: make(chan struct{}), release: make(chan struct{})}
+		s, err := CreateWALStoreWithOptions(path, ctNumBlocks, ctBlockSize, WALStoreOptions{ChunkBlocks: ctChunkBlocks, MetadataFactory: func(_ BlockMetadataFile, layout BlockMetadataLayout) (BlockMetadataBinding, error) {
+			return BlockMetadataBinding{ImplVersion: layout.ImplVersion, Hook: gate}, nil
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { gate.unblock(); _ = s.Close() })
+		s.DisableAutoFlushForRecoveryTest()
+		if _, err = s.Recover(); err != nil {
+			t.Fatal(err)
+		}
+		f := newFakeChunkRemote()
+		cfg := ctConfig(1)
+		cfg.Bitmap = nil
+		cfg.BarrierBound = 0
+		cfg.UploadConcurrency = 1
+		l := mustAttach(t, s, f, cfg).(*chunkLayerImpl)
+		baseline, err := l.Cut(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, lba := range []uint32{1, 5} {
+			if _, err = s.Write(lba, makeBlock(ctBlockSize, byte(lba))); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err = s.Sync(); err != nil {
+			t.Fatal(err)
+		}
+		if err = s.flusher.flushOnce(); err != nil {
+			t.Fatal(err)
+		}
+		gate.mu.Lock()
+		gate.armed = true
+		gate.mu.Unlock()
+		cutDone, _ := cowStartCut(t, l, gate)
+		w := l.cowActive.Load()
+		w.mu.Lock()
+		w.memory = cutCOWMemoryLimit
+		w.mu.Unlock()
+		if _, err = s.Write(5, makeBlock(ctBlockSize, 0x77)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = s.Sync(); err != nil {
+			t.Fatal(err)
+		}
+		if w.side == nil {
+			t.Fatal("child has no live side file")
+		}
+		head := f.stats().head
+		if head.Gen != baseline.Head.Gen {
+			t.Fatal("OPEN cut already moved HEAD")
+		}
+		raw, err := json.Marshal(head)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = os.WriteFile(path+".remote-head.json", raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-cutDone:
+			t.Fatal("cut not OPEN at crash")
+		default:
+		}
+		os.Exit(0) // intentional process crash: no cleanup runs
+	}
+	path := filepath.Join(t.TempDir(), "volume")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestCutCOWV3_ProcessCrashDropsSideAndRestoresSyncedImage$", "-test.timeout=20s")
+	cmd.Env = append(os.Environ(), "SWBLOCK_COW_CRASH_PATH="+path)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("crash child: %v: %s", err, output)
+	}
+	stale, err := filepath.Glob(path + ".cut-cow-*")
+	if err != nil || len(stale) != 1 {
+		t.Fatalf("OPEN crash did not leave one spill: %v %v", stale, err)
+	}
+	raw, err := os.ReadFile(path + ".remote-head.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var head chunkHead
+	if err = json.Unmarshal(raw, &head); err != nil {
+		t.Fatal(err)
+	}
+	if head.RemoteLSN != 0 || len(head.Chunks) != 0 {
+		t.Fatal("OPEN crash changed old HEAD")
+	}
+	s, err := OpenWALStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	s.DisableAutoFlushForRecoveryTest()
+	if _, err = s.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.Read(5); err != nil || !bytes.Equal(got, makeBlock(ctBlockSize, 0x77)) {
+		t.Fatal("synced post-H write lost on reopen", err)
+	}
+	for _, name := range stale {
+		if _, err = os.Stat(name); !os.IsNotExist(err) {
+			t.Fatal("crash side not discarded", err)
+		}
+	}
+	f := newFakeChunkRemote()
+	f.head = head
+	cfg := ctConfig(1)
+	cfg.Bitmap = nil
+	cfg.BarrierBound = 0
+	l := mustAttach(t, s, f, cfg)
+	r, err := l.Cut(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := make([]byte, ctNumBlocks*ctBlockSize)
+	copy(want[ctBlockSize:], makeBlock(ctBlockSize, 1))
+	copy(want[5*ctBlockSize:], makeBlock(ctBlockSize, 0x77))
+	if !bytes.Equal(f.imageOf(t, r.Head), want) {
+		t.Fatal("next cut imported stale side bytes")
 	}
 }

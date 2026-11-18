@@ -413,7 +413,9 @@ func (l *chunkLayerImpl) copyCOWWindow(ctx context.Context, w *cutCOWWindow) ([]
 	w.mu.Unlock()
 	cleanupErr := w.join()
 	if err == nil {
-		err = cleanupErr
+		if cleanupErr != nil {
+			err = errors.Join(errCutCOWAborted, cleanupErr)
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -476,4 +478,11 @@ func discardCutCOWFiles(path string) error {
 		}
 	}
 	return nil
+}
+
+// Called only after releasing stMu; it invalidates without joining its caller.
+func (l *chunkLayerImpl) abortCOW(err error) {
+	if w := l.cowActive.Load(); w != nil {
+		w.abort(err)
+	}
 }

@@ -703,7 +703,12 @@ func (l *chunkLayerImpl) register() (done func(), err error) {
 	return l.wg.Done, nil
 }
 
-func (l *chunkLayerImpl) admit() error {
+func (l *chunkLayerImpl) admit() (err error) {
+	defer func() {
+		if err != nil {
+			l.abortCOW(err)
+		}
+	}()
 	if l.usesOwnedMapV3() && l.s.v3.pub.current().BaseState == BaseInstalling {
 		return fmt.Errorf("%w: %w", errChunkCaptureRefused, errChunkBaseInstalling)
 	}
@@ -1034,6 +1039,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 			l.stMu.Lock()
 			l.fenced, l.head = true, copyHead(cur)
 			l.stMu.Unlock()
+			l.abortCOW(errChunkLayerFenced)
 			return chunkCutResult{}, errChunkLayerFenced
 		}
 		l.finishCut(baseHead, h, nil, nil) // nothing new: no CAS
@@ -1052,6 +1058,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		l.stMu.Lock()
 		l.fenced = true
 		l.stMu.Unlock()
+		l.abortCOW(errChunkLayerFenced)
 		return chunkCutResult{}, errChunkLayerFenced
 	}
 	expected := chunkHeadVersion{Gen: baseHead.Gen, Epoch: baseHead.Epoch}
@@ -1109,6 +1116,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		l.fenced = true
 		l.head = copyHead(cur)
 		l.stMu.Unlock()
+		l.abortCOW(errChunkLayerFenced)
 		return chunkCutResult{}, errors.Join(errChunkLayerFenced, casErr)
 	}
 	l.stMu.Lock()
@@ -1257,6 +1265,7 @@ func (l *chunkLayerImpl) resolvePending(ctx context.Context) error {
 func (l *chunkLayerImpl) recordCut(r chunkCutResult, st chunkCutStats, err error) {
 	l.stMu.Lock()
 	defer l.stMu.Unlock()
+	l.abortCOW(errChunkLayerFenced)
 	switch st.CASResult {
 	case "precondition":
 		l.stats.CASConflicts++

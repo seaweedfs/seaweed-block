@@ -260,6 +260,8 @@ func chunkErrorCode(err error) (int, string, bool) {
 		return http.StatusConflict, chunkstore.CodeNotChunkVolume, false
 	case errors.Is(err, context.DeadlineExceeded):
 		return http.StatusServiceUnavailable, chunkstore.CodeDeadlineExceeded, true
+	case errors.Is(err, storage.ErrCutCOWAborted):
+		return http.StatusServiceUnavailable, "cut_aborted", true
 	default:
 		return http.StatusInternalServerError, codeInternal, false
 	}

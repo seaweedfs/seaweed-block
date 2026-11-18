@@ -160,6 +160,16 @@ func TestCutCOWV3_MutationCompletesWhileEarlierChunkCopyIsHeld(t *testing.T) {
 			case <-time.After(ctLocalBound):
 				t.Error("RED: mutation blocked behind another chunk's held copy; capture barrier still covers chunk I/O")
 			}
+			if writeResultRead {
+				// Post-H bytes may checkpoint before this cut settles. Captured
+				// versions must not certify that newer owned-map state as clean.
+				if _, e := s.Sync(); e != nil {
+					t.Fatal(e)
+				}
+				if e := s.flusher.flushOnce(); e != nil {
+					t.Fatal(e)
+				}
+			}
 			gate.unblock()
 			cowWaitSignal(t, cutDone, "cut after read release")
 			cowWaitSignal(t, writeDone, "mutation after read release")
