@@ -194,6 +194,10 @@ func TestChunkLayerV3_BASEDrainJoinsClose(t *testing.T) {
 func TestChunkLayerV3_BASEPresenceBarrierFailureKeepsInstalling(t *testing.T) {
 	s, f, l := mappedBASELayerV3(t)
 	s.DeferBaseRetirementV3()
+	// Model an already committed provider owner before a later BASE.
+	if err := s.CommitChunkAttachV3(func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
 	if _, e := s.Write(5, blk(0x11)); e != nil {
 		t.Fatal(e)
 	}

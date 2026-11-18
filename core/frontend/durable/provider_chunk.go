@@ -231,14 +231,30 @@ func (p *DurableProvider) attachChunk(ctx context.Context, volumeID string, h *v
 		}
 		p.mu.Unlock()
 	}
+	// The owner commit is serialized with a later BASE begin. The callback
+	// does marker I/O only: no store/layer reentry while installMu is held.
+	commit := func() error {
+		if h.fresh {
+			return removeChunkFreshMarker(h.path)
+		}
+		return nil
+	}
 	if h.fresh {
-		// The attach persisted the absence of every HEAD chunk; only now
-		// may a restart treat the local volume as authoritative.
-		if err := removeChunkFreshMarker(h.path); err != nil {
+		if hook := p.testBeforeChunkFreshRetire; hook != nil {
+			if err := hook(); err != nil {
+				return err
+			}
+		}
+	}
+	if ws, ok := h.storage.(*storage.WALStore); ok {
+		if err := ws.CommitChunkAttachV3(commit); err != nil {
 			return err
 		}
-		h.fresh = false
+	} else if err := commit(); err != nil {
+		return err
 	}
+	h.fresh = false
+
 	return nil
 }
 
