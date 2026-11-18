@@ -317,7 +317,6 @@ func (s *WALStore) scanLBAsV3(fromLSN uint64, fn func(RecoveryEntry) error) erro
 		stable := v.recoverGen.Load() == gen && v.installEpoch == installEpoch &&
 			now.Nonce == d.Nonce && now.BaseState == d.BaseState &&
 			now.BaseInstallID == d.BaseInstallID && now.BaseCursor == d.BaseCursor &&
-			now.RetainedTail == d.RetainedTail && now.CheckpointLSN == d.CheckpointLSN &&
 			s.recoveryRetentionLSNs == retentionLSNs
 		s.mu.RUnlock()
 		if !stable {
