@@ -822,9 +822,7 @@ func (s *WALStore) syncWALBatchV3() error {
 	// until it has latched, before acknowledging anything.
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.stickyIOFault(); err != nil {
-		return err
-	}
+
 	if H > prev {
 		v.wack.Store(H)
 	}
