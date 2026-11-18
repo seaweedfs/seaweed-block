@@ -131,7 +131,12 @@ func (s *WALStore) publishCheckpointV3(cp uint64, seed bool, recoveryGen uint64)
 		// An incomplete BASE still needs its entire install-lane suffix.
 		tail = min(tail, current.BaseCursor)
 	}
-	d, err := v.pub.publishMapV3(&s.mu, nil, prepared, func(n *descriptorV3) error {
+	// Keep writer admission excluded until both durable publications AND the
+	// old dirty references are settled. The ordinary publisher releases a
+	// supplied store lock before I/O, so acquire it here and pass nil instead.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d, err := v.pub.publishMapV3(nil, nil, prepared, func(n *descriptorV3) error {
 		n.W = max(n.W, wack)
 		n.CheckpointLSN = cp
 		n.RetainedTail = max(n.RetainedTail, tail)
@@ -147,9 +152,24 @@ func (s *WALStore) publishCheckpointV3(cp uint64, seed bool, recoveryGen uint64)
 	if _, err := v.pub.rolloverIfPinned(); err != nil {
 		return descriptorV3{}, err
 	}
+	// Only a successful checkpoint plus rollover may retire retry ownership.
+	// Every current entry <= cp is durable in extent (a newer concurrent write
+	// has a higher LSN and survives). No writer can reuse a released slot until
+	// this store lock is released, after these references have disappeared.
+	s.retireCheckpointDirtyV3Locked(d.CheckpointLSN)
 	if seed {
 		v.appended.Store(max(v.appended.Load(), cp))
 		v.wack.Store(wack)
 	}
 	return d, nil
+}
+
+// Caller holds store.mu; the successful durable checkpoint proves the current
+// versions at/below cp are in extent. compare-and-delete preserves newer WAL.
+func (s *WALStore) retireCheckpointDirtyV3Locked(cp uint64) {
+	for _, e := range s.dm.snapshot() {
+		if e.LSN <= cp {
+			s.dm.compareAndDelete(e.LBA, e.LSN)
+		}
+	}
 }
