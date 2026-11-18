@@ -79,16 +79,25 @@ func TestMigrateV3RefusesAnOpenV3Volume(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = s.Close() })
 	s.DisableAutoFlushForRecoveryTest()
+	// Windows byte-range locks reject reads through a second handle. Snapshot
+	// only while no owner is open, then hold the real owner for the CLI call.
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
 	before := snapshotFiles(t, path)
+	s, err = storage.OpenMappedWALStoreV3Test(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	code, msg := migrate(t, path)
 	if code != 1 || !strings.Contains(msg, "locked") {
 		t.Fatalf("migration must refuse an open v3 volume: exit=%d message=%s", code, msg)
 	}
-	if !sameFiles(before, snapshotFiles(t, path)) {
-		t.Fatal("refused migration modified the open volume")
-	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
+	}
+	if !sameFiles(before, snapshotFiles(t, path)) {
+		t.Fatal("refused migration modified the open volume")
 	}
 	if code, msg := migrate(t, path); code != 0 {
 		t.Fatalf("migration after owner close: exit=%d message=%s", code, msg)

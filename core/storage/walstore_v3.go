@@ -175,6 +175,10 @@ func createMappedWALStoreV3ForTest(path string, numBlocks, blockSize uint32, wal
 	}
 	return createWALStoreV3MapAtCursorForTest(path, numBlocks, blockSize, walSize, mode, 0, chunkBlocks)
 }
+
+// testCreateOwnerV3 parks creation at ownership boundaries; nil in production.
+var testCreateOwnerV3 func(*os.File, bool)
+
 func createWALStoreV3MapAtCursorForTest(path string, numBlocks, blockSize uint32, walSize uint64, mode WMode, cursor, chunkBlocks uint64) (*WALStore, error) {
 	d := descriptorV3{
 		ImplKind: ImplKindWALStore, ImplVersion: walStoreImplVersion3,
@@ -194,6 +198,13 @@ func createWALStoreV3MapAtCursorForTest(path string, numBlocks, blockSize uint32
 	fd, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
 		return nil, err
+	}
+	if err := LockWALStoreFile(fd); err != nil {
+		_ = fd.Close()
+		return nil, err
+	}
+	if h := testCreateOwnerV3; h != nil {
+		h(fd, false)
 	}
 	err = fd.Truncate(int64(d.WALOffset + d.WALSize + d.VolumeSize))
 	if err == nil && chunkBlocks != 0 {
@@ -225,18 +236,16 @@ func createWALStoreV3MapAtCursorForTest(path string, numBlocks, blockSize uint32
 	if err == nil {
 		err = fd.Sync()
 	}
-	if cerr := fd.Close(); err == nil {
-		err = cerr
+	if err == nil {
+		if h := testCreateOwnerV3; h != nil {
+			h(fd, true)
+		}
 	}
 	if err != nil {
+		_ = fd.Close()
 		return nil, err
 	}
-	var s *WALStore
-	if chunkBlocks == 0 {
-		s, err = openUnmappedWALStoreV3ForTest(path)
-	} else {
-		s, err = openWALStoreV3ForTest(path)
-	}
+	s, err := openWALStoreV3File(path, fd, chunkBlocks != 0)
 	if err != nil {
 		return nil, err
 	}
@@ -267,6 +276,12 @@ func openWALStoreV3MapInternalForTest(path string, requireMap bool) (*WALStore, 
 		_ = f.Close()
 		return nil, err
 	}
+	return openWALStoreV3File(path, f, requireMap)
+}
+
+// openWALStoreV3File consumes an already locked descriptor, including on error.
+// Creation transfers ownership directly: no selectable-slot close/reopen gap.
+func openWALStoreV3File(path string, f *os.File, requireMap bool) (*WALStore, error) {
 	a := make([]byte, slotSizeV3)
 	b := make([]byte, slotSizeV3)
 	_, errA := f.ReadAt(a, slotAOffsetV3)
