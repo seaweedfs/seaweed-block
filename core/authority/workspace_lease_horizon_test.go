@@ -367,6 +367,14 @@ func TestWorkspaceAmbiguousExtensionLatchesUncertainty(t *testing.T) {
 	if _, err := p.RenewWorkspaceLease(context.Background(), "v", "r", 1); err == nil || !strings.Contains(err.Error(), "uncertain") {
 		t.Fatalf("renewal after an unknown write: %v; want refused as uncertain", err)
 	}
+	// INV-AUTH-UNCERTAIN-001: every further authority change of the volume
+	// is refused until a restart.
+	if err := p.BeginWorkspaceRevocation(context.Background(), "v", "r", 1); err == nil {
+		t.Fatal("revocation accepted on an uncertain volume")
+	}
+	if err := p.apply(AssignmentAsk{VolumeID: "v", ReplicaID: "r", DataAddr: "d2", CtrlAddr: "c", Intent: IntentRefreshEndpoint}); err == nil {
+		t.Fatal("authority change accepted on an uncertain volume")
+	}
 	p.CloseWorkspaceExtenders()
 	c.at(12)
 	r := newLeasePublisher(t, disk, 30*time.Second, c)

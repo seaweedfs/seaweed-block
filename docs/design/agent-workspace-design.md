@@ -193,9 +193,11 @@ The attempt path is never removed, so a late create can never land after a delet
 
 **Host guard** (`core/host/volume/workspace_lease.go` `WorkspaceLeaseGuard`, enabled with `blockvolume --workspace-lease`; see [workspace lease](../workspace-lease.md)): frontend I/O and cuts are admitted only with a granted, unexpired lease for the exact `{volume, replica, epoch}`. Validity is anchored to the renewal request's start time, and blockmaster's `ValidForNs` already subtracts half the clock-skew bound (`core/host/master/workspace_service.go` `leaseFact`). A late reply cannot extend admission. A fenced guard never reopens. The lease is 30 s (`core/authority/authority.go`, `workspaceTTL`); the skew bound defaults to 20 s (`blockmaster --workspace-max-clock-skew`).
 
+**Master side of a renewal** (`core/authority/workspace_lease_view.go`): blockmaster answers a renewal of an established lease from memory, under a small leaf lock, with no disk write and without waiting for other authority writes. The grant is min(now + TTL, durable horizon), where the horizon is the lease expiry stored on disk; a background extension, an ordinary authority write, keeps the horizon about 1.5·TTL ahead of the last renewal that triggered it. Only the first grant of a lease is written synchronously. If extensions fall behind, grants shrink and the host fences by the horizon minus half the skew bound; a failed extension write makes the volume uncertain and refuses its renewals.
+
 **CLEAN move:** Detach publishes the final cut with `State = detached` in one CAS → revoke → the host drains frontend, replication and provider and acknowledges the stored detached HEAD generation → blockmaster checks the detached HEAD and the matching acknowledgement → new epoch → the new host claims HEAD.
 
-**FORCED move:** blockmaster waits until both the stored expiry and its conservative restart deadline plus the full skew bound have passed (`core/authority/workspace.go` `prepareWorkspaceMoveLocked`). The old host's late CAS fails on the epoch; its uploads become orphans for GC. Writes since the old host's last cut are lost.
+**FORCED move:** blockmaster waits until both the persisted lease horizon (at least every grant, so at most TTL/2 later than the last grant) and the granted or conservative restart deadline, plus the full skew bound, have passed (`core/authority/workspace.go` `prepareWorkspaceMoveLocked`). The old host's late CAS fails on the epoch; its uploads become orphans for GC. Writes since the old host's last cut are lost.
 
 **Takeover** (`core/storage/chunk_restore.go` `ClaimChunkHead`, called before the chunk layer attaches in `core/frontend/durable/provider_chunk.go`): read HEAD; fence if HEAD has a higher epoch or another holder at the same epoch; seed the local LSN frontier from HEAD (`PrepareRestore`); CAS HEAD to the new epoch and holder with `State = active`; on an unknown outcome, succeed only if a re-read shows the exact proposal. I/O opens afterwards; blocks load lazily on first read.
 
@@ -237,11 +239,11 @@ Lease states:
 stateDiagram-v2
   state "Lease (blockmaster)" as L {
     [*] --> Granted: Renew
-    Granted --> Granted: Renew before expiry
+    Granted --> Granted: Renew before horizon and deadline (from memory)
     Granted --> Revoking: BeginWorkspaceRevocation
     Revoking --> Acked: host acks detached HEAD gen while the lease is valid
     Acked --> Moved: CLEAN move
-    Granted --> Expired: expiry
+    Granted --> Expired: horizon or deadline passes
     Expired --> Moved: FORCED move after expiry + skew bound
   }
 ```
