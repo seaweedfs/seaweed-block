@@ -953,7 +953,7 @@ func (f *flusher) readDirtyRecordV3(e snapshotEntry) (data []byte, entrySize uin
 	}()
 	store := f.store
 	d := store.v3.pub.current()
-	entry, size, ioErr, verr := readWholeRecordProfiledV3(store.fd, recordGeometryV3{store.sb.WALOffset, store.sb.WALSize, store.sb.BlockSize, store.sb.VolumeSize}, e.WALOffset, &f.instr)
+	entry, size, ioErr, verr := readWholeRecordProfiledV3(store.fd, recordGeometryV3{store.sb.WALOffset, store.sb.WALSize, store.sb.BlockSize, store.sb.VolumeSize}, e.WALOffset, nil)
 	if ioErr != nil {
 		readFailed = true
 		return nil, 0, fmt.Errorf("flusher: read v3 WAL record at %d: %w", e.WALOffset, ioErr)
