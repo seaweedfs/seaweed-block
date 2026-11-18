@@ -56,6 +56,18 @@ type DeletionReservationStore struct {
 	failWrite, failRename, failDirSync func() error
 }
 
+// SetPersistHookForTest installs (nil clears) a callback that each later
+// reservation write of this store runs under the store mutex, after its
+// temporary file is created and before the write. A non-nil error fails that
+// write with nothing replaced. Tests only: install it before any concurrent
+// writer starts; the callback must not call back into the store or into this
+// setter. Never call it while a write may still be held by the callback.
+func (s *DeletionReservationStore) SetPersistHookForTest(hook func() error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failWrite = hook
+}
+
 // OpenDeletionReservationStore opens or creates the store in dir.
 func OpenDeletionReservationStore(dir string) (*DeletionReservationStore, error) {
 	return openDeletionReservationStore(dir, syncBindingParent)

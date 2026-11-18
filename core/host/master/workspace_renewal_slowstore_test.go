@@ -116,3 +116,75 @@ func TestWorkspaceLeaseGuardSurvivesSlowAuthorityStore(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 }
+
+// A durable deletion-reservation write of an unrelated volume must not block
+// a lease renewal: the renewal RPC checks Deletions.Reserved and the volume
+// record, and both lifecycle stores hold their mutex across file I/O
+// (issue #205).
+func TestWorkspaceRenewalRPCDoesNotWaitForHeldReservationWrite(t *testing.T) {
+	h, c, ctx := reviewBindingHost(t)
+	reviewLegacyBind(t, h, c, ctx, "vol-b")
+	line := waitAuthorityLine(t, h.Publisher(), "vol-b")
+	svc := &services{host: h}
+	id := &control.WorkspaceIdentity{VolumeId: "vol-b", ReplicaId: line.ReplicaID, Epoch: line.Epoch}
+	if _, err := svc.RenewWorkspaceLease(ctx, id); err != nil {
+		t.Fatal(err) // first grant
+	}
+	deletions := h.Lifecycle().Deletions
+	entered, release := make(chan struct{}), make(chan struct{})
+	var enterOnce, releaseOnce sync.Once
+	releaseHook := func() { releaseOnce.Do(func() { close(release) }) }
+	deletions.SetPersistHookForTest(func() error {
+		enterOnce.Do(func() { close(entered) })
+		<-release
+		return nil
+	})
+	admitted := make(chan error, 1)
+	go func() {
+		_, err := deletions.Admit("vol-x", "tok") // an unrelated volume, a real durable write
+		admitted <- err
+	}()
+	renewed := make(chan error, 1)
+	renewStarted := false
+	// Bounded cleanup: release the hook first, settle BOTH workers, and only
+	// then clear the hook. Never call the setter after a timed-out join: the
+	// store mutex may still be held.
+	t.Cleanup(func() {
+		releaseHook()
+		settled := true
+		select {
+		case <-admitted:
+		case <-time.After(5 * time.Second):
+			settled = false
+			t.Error("held reservation write did not settle within 5 s after release")
+		}
+		if renewStarted {
+			select {
+			case <-renewed:
+			case <-time.After(5 * time.Second):
+				settled = false
+				t.Error("renewal did not settle within 5 s after release")
+			}
+		}
+		if settled {
+			deletions.SetPersistHookForTest(nil)
+		}
+	})
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("reservation write never reached the store")
+	}
+	start := time.Now()
+	renewStarted = true
+	go func() { _, err := svc.RenewWorkspaceLease(ctx, id); renewed <- err }()
+	select {
+	case err := <-renewed:
+		renewed <- err // keep it for the cleanup join
+		if err != nil {
+			t.Fatalf("renewal of vol-b: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("renewal RPC of vol-b was still blocked %s behind the held reservation write of vol-x", time.Since(start).Round(time.Millisecond))
+	}
+}

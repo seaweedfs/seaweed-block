@@ -154,12 +154,13 @@ func TestWorkspaceRenewalDoesNotWaitForUnrelatedHeldWrite(t *testing.T) {
 	release := func() { releaseOnce.Do(func() { close(held.release) }) }
 	revoked := make(chan error, 1)
 	go func() { revoked <- p.BeginWorkspaceRevocation(context.Background(), "a", "r", 1) }()
+	// Bounded cleanup: release the held write first, then settle the worker.
 	t.Cleanup(func() {
 		release()
 		select {
 		case <-revoked:
 		case <-time.After(5 * time.Second):
-			t.Error("held revocation of a did not settle")
+			t.Error("held revocation of a did not settle within 5 s after release")
 		}
 	})
 	select {
@@ -180,8 +181,13 @@ func TestWorkspaceRenewalDoesNotWaitForUnrelatedHeldWrite(t *testing.T) {
 			t.Fatalf("renewal of b: %v", err)
 		}
 	case <-time.After(2 * time.Second):
+		blocked := time.Since(start).Round(time.Millisecond)
 		release()
-		err := <-renewed
-		t.Fatalf("renewal of b was still blocked %s behind the held store write of a (it returned only after a was released, err=%v)", time.Since(start).Round(time.Millisecond), err)
+		select {
+		case err := <-renewed:
+			t.Fatalf("renewal of b was still blocked %s behind the held store write of a (it returned only after a was released, err=%v)", blocked, err)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("renewal of b was still blocked %s behind the held store write of a, and did not settle within 5 s after release", blocked)
+		}
 	}
 }
