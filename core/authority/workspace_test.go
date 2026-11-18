@@ -35,7 +35,8 @@ func TestWorkspaceCrashAfterJournalBeforeEpochResumesSameGrant(t *testing.T) {
 	if _, err := p.RenewWorkspaceLease(context.Background(), "v", "old", 1); err != nil {
 		t.Fatal(err)
 	}
-	now = now.Add(2 * time.Second)
+	// Past the durable horizon (1.5*TTL) plus skew, not only the grant (#205).
+	now = now.Add(3 * time.Second)
 	req := WorkspaceMoveRequest{RequestID: "m", VolumeID: "v", ExpectedReplicaID: "old", ExpectedHost: "old-node", TargetHost: "new-node", ExpectedEpoch: 1, TargetReplicaID: "old", TargetDataAddr: "nd", TargetCtrlAddr: "nc", Kind: "forced", Force: true}
 	head := WorkspaceHead{Gen: 7, Epoch: 1, Holder: "old-node/old", RemoteLSN: 42}
 	fault.failIssue = true
@@ -224,7 +225,8 @@ func TestWorkspaceMoveUsesQualifiedHEADHolder(t *testing.T) {
 	if _, err := p.RenewWorkspaceLease(ctx, "v", "same", 1); err != nil {
 		t.Fatal(err)
 	}
-	now = now.Add(2 * time.Second)
+	// Past the durable horizon (1.5*TTL) plus skew, not only the grant (#205).
+	now = now.Add(3 * time.Second)
 	q := WorkspaceMoveRequest{RequestID: "qualified", VolumeID: "v", ExpectedReplicaID: "same", TargetReplicaID: "same", ExpectedHost: "old-node", TargetHost: "new-node", ExpectedEpoch: 1, TargetDataAddr: "nd", TargetCtrlAddr: "nc", Kind: "forced", Force: true}
 	for _, holder := range []string{"same", "other-node/same", "old-node/other"} {
 		if _, err := p.MoveWorkspace(ctx, q, WorkspaceHead{Gen: 7, Epoch: 1, Holder: holder, RemoteLSN: 42}); err == nil {

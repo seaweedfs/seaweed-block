@@ -92,41 +92,6 @@ func (p *Publisher) workspaceSkew(lease *WorkspaceLease) time.Duration {
 	return skew
 }
 
-func (p *Publisher) RenewWorkspaceLease(ctx context.Context, volume, holder string, epoch uint64) (WorkspaceLease, error) {
-	if err := ctx.Err(); err != nil {
-		return WorkspaceLease{}, err
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	_, line, ok := p.workspaceLineLocked(volume)
-	if !ok || line.info.ReplicaID != holder || line.info.Epoch != epoch {
-		return WorkspaceLease{}, fmt.Errorf("workspace lease: stale authority")
-	}
-	s := cloneWorkspace(p.workspace[volume])
-	if s == nil {
-		s = &WorkspaceState{}
-	}
-	if len(s.Moves) > 0 && !s.Moves[len(s.Moves)-1].Issued {
-		return WorkspaceLease{}, fmt.Errorf("workspace lease: move pending")
-	}
-	now := p.workspaceNow()
-	if s.Lease != nil {
-		if s.Lease.Revoking {
-			return *s.Lease, nil
-		} // tell the host to drain; never extend
-		if now.UnixNano() >= s.Lease.ExpiresAtNS || !now.Before(p.workspaceLeaseDeadline[volume]) {
-			return WorkspaceLease{}, fmt.Errorf("workspace lease expired or revoking")
-		}
-	}
-	lease := WorkspaceLease{ReplicaID: holder, Epoch: epoch, ExpiresAtNS: now.Add(p.workspaceTTL).UnixNano(), MaxClockSkewNS: int64(p.workspaceSkew(s.Lease))}
-	s.Lease = &lease
-	if err := p.persistWorkspaceLocked(volume, s); err != nil {
-		return WorkspaceLease{}, err
-	}
-	p.workspaceLeaseDeadline[volume] = now.Add(p.workspaceTTL)
-	return lease, nil
-}
-
 // Replica IDs are logical assignment identities; HEAD.Holder is qualified
 // as <server-id>/<replica-id> and is checked separately against ExpectedHost.
 type WorkspaceMoveRequest struct {
@@ -246,7 +211,7 @@ func (p *Publisher) AckWorkspaceRevocation(ctx context.Context, volume string, a
 		return fmt.Errorf("workspace revoke ACK: stale or unsolicited")
 	}
 	now := p.workspaceNow()
-	if now.UnixNano() >= s.Lease.ExpiresAtNS || !now.Before(p.workspaceLeaseDeadline[volume]) {
+	if now.UnixNano() >= s.Lease.ExpiresAtNS || !now.Before(p.leaseDeadlineLocked(volume)) {
 		return fmt.Errorf("workspace revoke ACK: lease expired; forced move required")
 	}
 	if s.Ack != nil && *s.Ack != ack {
@@ -286,10 +251,12 @@ func (p *Publisher) persistWorkspaceLocked(volume string, s *WorkspaceState) err
 		WriteSeq: p.writeSeqByVolume[volume] + 1, Workspace: cloneWorkspace(s)}
 	if err := p.store.Put(record); err != nil {
 		p.workspaceUncertain[volume] = true
+		p.refreshLeaseViewLocked(volume)
 		return err
 	}
 	p.writeSeqByVolume[volume] = record.WriteSeq
 	p.workspace[volume] = cloneWorkspace(s)
+	p.refreshLeaseViewLocked(volume)
 	return nil
 }
 
@@ -316,7 +283,7 @@ func (p *Publisher) prepareWorkspaceMoveLocked(ask AssignmentAsk, g workspaceGra
 	if q.Kind == "forced" {
 		now := p.workspaceNow()
 		skew := p.workspaceSkew(s.Lease)
-		if now.Before(time.Unix(0, s.Lease.ExpiresAtNS).Add(skew)) || now.Before(p.workspaceLeaseDeadline[q.VolumeID].Add(skew)) {
+		if now.Before(time.Unix(0, s.Lease.ExpiresAtNS).Add(skew)) || now.Before(p.leaseDeadlineLocked(q.VolumeID).Add(skew)) {
 			return nil, 0, fmt.Errorf("workspace forced move lease expiry plus clock-skew margin has not elapsed")
 		}
 	}
