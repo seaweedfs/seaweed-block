@@ -474,11 +474,6 @@ func (s *WALStore) markBaseCompleteV3(id [16]byte) error {
 			return err
 		}
 	}
-	if h := s.chunk.Load(); h != nil {
-		if err := h.sink.BeforeCheckpointAdvance(cp); err != nil {
-			return err
-		}
-	}
 	var prepared *preparedMapPublicationV3
 	var mutateMap func(*descriptorV3) error
 	if v.ownedMap != nil {
