@@ -123,8 +123,13 @@ func TestWALStoreV3ReclaimSecondSlotFailureKeepsOldPin(t *testing.T) {
 		}
 		return writeSlot(off, data)
 	}
+	before := s.dm.snapshot()
 	if err := s.flusher.flushOnce(); !errors.Is(err, ErrDescriptorPublishUncertain) || writes != 2 {
 		t.Fatalf("rollover failure was not surfaced: writes=%d err=%v", writes, err)
+	}
+	after := s.dm.snapshot()
+	if len(before) != 1 || len(after) != 1 || before[0] != after[0] {
+		t.Fatalf("failed rollover changed exact dirty retry identity: before=%+v after=%+v", before, after)
 	}
 	if floor, valid := s.v3.pub.reuseFloor(); valid && floor != 0 {
 		t.Fatalf("failed rollover granted reuse over the old slot: floor=%d", floor)
@@ -224,5 +229,53 @@ func TestWALStoreV3ReclaimRetiresReferencesBeforeReuse(t *testing.T) {
 	}
 	if err := s.flusher.flushOnce(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestWALStoreV3ReclaimRolloverProgressWithoutNewCheckpoint(t *testing.T) {
+	for _, trigger := range []string{"idle", "unchanged-checkpoint", "admission"} {
+		t.Run(trigger, func(t *testing.T) {
+			s, _ := newMappedCheckpointStoreV3(t)
+			s.SetRecoveryRetentionLSNs(1)
+			writeSynced(t, s, 0, 1)
+			writeSynced(t, s, 1, 2)
+			if err := s.flusher.flushOnce(); err != nil {
+				t.Fatal(err)
+			}
+			d := s.v3.pub.current()
+			tail := s.v3.w.logicalHeadV3()
+			// Model a completed first-slot checkpoint publication before its idle
+			// fallback rollover, with already-durable map/checkpoint and extent.
+			if _, err := s.v3.pub.publish(nil, nil, func(n *descriptorV3) error {
+				n.RetainedTail = tail
+				n.RetainedHead = max(n.RetainedHead, tail)
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if floor, ok := s.v3.pub.reuseFloor(); !ok || floor >= tail {
+				t.Fatal("setup lacks a pinned fallback")
+			}
+			switch trigger {
+			case "idle":
+				if err := s.flusher.flushOnce(); err != nil {
+					t.Fatal(err)
+				}
+			case "unchanged-checkpoint":
+				if err := s.persistOwnedMapCheckpointV3(d.CheckpointLSN, s.v3.recoverGen.Load()); err != nil {
+					t.Fatal(err)
+				}
+			case "admission":
+				if _, err := s.Write(2, blk(3)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if floor, ok := s.v3.pub.reuseFloor(); !ok || floor != tail {
+				t.Fatalf("%s did not settle old-slot pin without a new checkpoint: floor=%d want=%d valid=%v", trigger, floor, tail, ok)
+			}
+			if got := s.v3.pub.current().CheckpointLSN; got != d.CheckpointLSN {
+				t.Fatalf("trigger fabricated checkpoint progress: %d", got)
+			}
+		})
 	}
 }
