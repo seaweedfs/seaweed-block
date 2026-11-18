@@ -453,16 +453,17 @@ func TestBaseInstallV3CompletePersistsTheMapUnknownOfBaseWrites(t *testing.T) {
 	}
 }
 
-// Until the chunk layer's side of the v3 install protocol lands (codex03),
-// a begin with an attached chunk layer fails closed, writing nothing, so
-// no capture can upload a partly installed image. Mutant: dropping the
-// refusal begins the install with the layer attached and fails here.
-func TestBaseInstallV3BeginRefusesWithAnAttachedChunkLayer(t *testing.T) {
+// An attached layer without the transition protocol still refuses, writing
+// nothing. Actual supported layers are covered by the chunk/provider controls.
+func TestBaseInstallV3BeginRefusesWithAnUnsupportedAttachedChunkLayer(t *testing.T) {
 	s, path := newMappedCheckpointStoreV3(t)
 	cfg := ctConfig(1)
 	cfg.Bitmap = nil
 	cfg.BarrierBound = 1
 	mustAttach(t, s, newFakeChunkRemote(), cfg)
+	hooks := *s.chunk.Load()
+	hooks.baseTransitionV3 = nil
+	s.chunk.Store(&hooks)
 	a0, b0 := slotsV3(t, path)
 	if _, err := s.beginBaseInstallV3(0, idA); !errors.Is(err, errV3NotYet) {
 		t.Fatalf("begin with a chunk layer attached: err = %v, want errV3NotYet", err)
