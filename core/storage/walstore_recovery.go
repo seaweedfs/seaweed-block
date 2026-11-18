@@ -253,23 +253,79 @@ func (s *WALStore) CheckpointLSNForPOC() uint64 {
 	return s.CheckpointLSN()
 }
 
-// scanLBAsV3 is ScanLBAs on a v3 store (the primary's catch-up source):
-// the trusted v3 chain from the selected descriptor's scan start, each write
-// record as one entry and each batch record as one entry per block with
-// consecutive LSNs, every LSN in [fromLSN, headLSN). Records are scanned in
-// cursor (= LSN) order. If the WAL no longer holds fromLSN (checkpointed
-// and its bytes released), the scan refuses with the typed WALRecycled
-// failure, so the caller escalates to a rebuild instead of skipping a range.
-// Callers hold lifecycleMu shared; nothing is mutated.
-func (s *WALStore) scanLBAsV3(fromLSN, headLSN, checkpointLSN uint64, fn func(RecoveryEntry) error) error {
-	d := s.v3.pub.current()
-	scan, err := scanWALV3(s.fd, d)
-	if err != nil {
-		return fmt.Errorf("storage: walstore ScanLBAs (v3): %w", err)
+// scanLBAsV3 is ScanLBAs on a v3 store (the primary's catch-up source).
+// It is all or nothing (codex01 4caac700 P1s): it captures the recovery
+// generation, the descriptor and the head, refuses an installing source
+// (ErrBaseInstalling) before emitting anything, scans the trusted v3 chain
+// into memory, revalidates the capture (a Recover, reset or BASE transition
+// meanwhile retries the whole scan, or refuses if the source is now
+// installing), and requires the trusted records to cover every LSN of
+// [fromLSN, head): a chain that stops short (the scanner's CRC, binding or
+// truncation stop cause) is a typed WAL integrity failure, and a WAL that
+// no longer holds fromLSN a typed WALRecycled failure. Only then are the
+// entries emitted, from memory, with no store lock held across the
+// callbacks. A write record is one entry; a batch one entry per block.
+func (s *WALStore) scanLBAsV3(fromLSN, _, _ uint64, fn func(RecoveryEntry) error) error {
+	v := s.v3
+	const attempts = 8
+	for attempt := 0; attempt < attempts; attempt++ {
+		s.mu.RLock()
+		gen := v.recoverGen.Load()
+		d := v.pub.current()
+		headLSN := s.nextLSN
+		s.mu.RUnlock()
+		if d.BaseState == BaseInstalling {
+			return fmt.Errorf("%w: catch-up from an installing source", ErrBaseInstalling)
+		}
+		if gen%2 != 0 {
+			continue // a recovery or reset is running; capture again
+		}
+		if fromLSN >= headLSN {
+			return nil
+		}
+		scan, err := scanWALV3(s.fd, d)
+		if err != nil {
+			return fmt.Errorf("storage: walstore ScanLBAs (v3): %w", err)
+		}
+		if h := v.testScanRead; h != nil {
+			h()
+		}
+		s.mu.RLock()
+		now := v.pub.current()
+		stable := v.recoverGen.Load() == gen && now.Nonce == d.Nonce && now.BaseState == d.BaseState &&
+			now.BaseInstallID == d.BaseInstallID
+		s.mu.RUnlock()
+		if !stable {
+			if now.BaseState == BaseInstalling {
+				return fmt.Errorf("%w: catch-up source began installing", ErrBaseInstalling)
+			}
+			continue // a transition ran meanwhile: scan again from a fresh capture
+		}
+		entries, err := v3CatchUpEntries(scan, d, fromLSN, headLSN)
+		if err != nil {
+			return err
+		}
+		for _, e := range entries {
+			if err := fn(e); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
+	return fmt.Errorf("storage: walstore ScanLBAs (v3) did not get a stable capture in %d attempts", attempts)
+}
+
+// v3CatchUpEntries cuts [fromLSN, headLSN) out of a trusted scan, or fails:
+// WALRecycled when the chain starts after fromLSN, WAL integrity (with the
+// scanner's stop cause) when it ends before headLSN.
+func v3CatchUpEntries(scan walScanResultV3, d descriptorV3, fromLSN, headLSN uint64) ([]RecoveryEntry, error) {
 	blockSize := uint64(d.BlockSize)
-	next := fromLSN // the next LSN the stream must carry
+	next := fromLSN
+	var out []RecoveryEntry
 	for _, r := range scan.Records {
+		if next >= headLSN {
+			break
+		}
 		e := r.Entry
 		count := uint64(1)
 		switch e.Type {
@@ -283,32 +339,29 @@ func (s *WALStore) scanLBAsV3(fromLSN, headLSN, checkpointLSN uint64, fn func(Re
 			continue
 		}
 		if e.LSN > next {
-			return NewWALRecycledFailure(ErrWALRecycled, fmt.Sprintf(
-				"v3 WAL starts at LSN %d, after the requested %d (checkpoint %d, head %d)", e.LSN, next, checkpointLSN, headLSN))
+			if next == fromLSN {
+				return nil, NewWALRecycledFailure(ErrWALRecycled, fmt.Sprintf(
+					"v3 WAL starts at LSN %d, after the requested %d (head %d)", e.LSN, fromLSN, headLSN))
+			}
+			return nil, NewWALIntegrityFailure(nil, fmt.Sprintf("v3 catch-up: LSN %d missing before %d", next, e.LSN))
 		}
 		for i := uint64(0); i < count; i++ {
 			lsn := e.LSN + i
 			if lsn < next || lsn >= headLSN {
 				continue
 			}
-			emit := RecoveryEntry{
-				LSN:   lsn,
-				LBA:   uint32(e.LBA + i),
-				Flags: RecoveryEntryWrite,
-				Data:  e.Data[i*blockSize : (i+1)*blockSize],
-			}
-			if err := fn(emit); err != nil {
-				return err
-			}
+			out = append(out, RecoveryEntry{LSN: lsn, LBA: uint32(e.LBA + i), Flags: RecoveryEntryWrite,
+				Data: e.Data[i*blockSize : (i+1)*blockSize]})
 			next = lsn + 1
 		}
-		if next >= headLSN {
-			return nil
+	}
+	if next < headLSN {
+		if next == fromLSN && len(out) == 0 && scan.StopCause == nil {
+			return nil, NewWALRecycledFailure(ErrWALRecycled, fmt.Sprintf(
+				"v3 WAL holds no record at LSN %d (head %d)", fromLSN, headLSN))
 		}
+		return nil, NewWALIntegrityFailure(scan.StopCause, fmt.Sprintf(
+			"v3 catch-up stopped at LSN %d, short of the captured head %d", next, headLSN))
 	}
-	if next < headLSN && next == fromLSN {
-		return NewWALRecycledFailure(ErrWALRecycled, fmt.Sprintf(
-			"v3 WAL holds no record at LSN %d (checkpoint %d, head %d)", fromLSN, checkpointLSN, headLSN))
-	}
-	return nil
+	return out, nil
 }
