@@ -57,8 +57,9 @@ of now plus 1.5 times the TTL. When a renewal finds the horizon less than
 1.25 times the TTL ahead, it starts one background extension for that volume.
 The extension is an ordinary authority write under the publisher lock and
 stores the renewal time plus 1.5 times the TTL. A failed extension write is
-an unknown outcome: the volume becomes uncertain, its renewals are refused,
-and its host fences within its current validity. A restart reloads the stored
+an unknown outcome: the volume becomes uncertain, renewals that would issue a
+new or extended grant are refused, and its host fences within its current
+validity. A Revoking lease still gets its bounded drain reply, never extended. A restart reloads the stored
 horizon, and a FORCED move waits for that horizon plus the skew bound.
 
 All authority writes stay serialized. With N live leases and store write time

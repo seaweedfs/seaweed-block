@@ -415,6 +415,21 @@ func TestWorkspaceExtenderHeldOrdersSameVolumeWriters(t *testing.T) {
 				}
 				return nil
 			})
+			done := make(chan error, 1)
+			started := false
+			// Installed before the extender is triggered: on any failure the
+			// held write is released and the writer settled (bounded) before
+			// the publisher joins its extenders and the store closes.
+			t.Cleanup(func() {
+				releaseFn()
+				if started {
+					select {
+					case <-done:
+					case <-time.After(5 * time.Second):
+						t.Error("writer did not settle")
+					}
+				}
+			})
 			c.at(10)
 			if _, err := p.RenewWorkspaceLease(context.Background(), "v", "r", 1); err != nil {
 				t.Fatal(err)
@@ -424,7 +439,7 @@ func TestWorkspaceExtenderHeldOrdersSameVolumeWriters(t *testing.T) {
 			case <-time.After(3 * time.Second):
 				t.Fatal("extender never reached the store")
 			}
-			done := make(chan error, 1)
+			started = true
 			if op == "revocation" {
 				go func() { done <- p.BeginWorkspaceRevocation(context.Background(), "v", "r", 1) }()
 			} else {
@@ -432,16 +447,9 @@ func TestWorkspaceExtenderHeldOrdersSameVolumeWriters(t *testing.T) {
 				q, h := forcedMove("v", "forced")
 				go func() { _, err := p.MoveWorkspace(context.Background(), q, h); done <- err }()
 			}
-			t.Cleanup(func() {
-				releaseFn()
-				select {
-				case <-done:
-				case <-time.After(5 * time.Second):
-					t.Error("writer did not settle")
-				}
-			})
 			select {
 			case err := <-done:
+				done <- err // keep it for the cleanup join
 				t.Fatalf("%s ran while the extender held p.mu: %v", op, err)
 			case <-time.After(200 * time.Millisecond):
 			}
@@ -503,17 +511,26 @@ func TestWorkspaceSameVolumeRenewalDuringHeldWrite(t *testing.T) {
 				t.Error("revocation did not settle")
 			}
 		})
-		<-entered
+		select {
+		case <-entered:
+		case <-time.After(3 * time.Second):
+			t.Fatal("revocation write never reached the store")
+		}
 		c.at(5)
 		l, err := p.RenewWorkspaceLease(context.Background(), "v", "r", 1)
 		if err != nil || l.Revoking || l.ExpiresAtNS != c.sec(35).UnixNano() || l.ExpiresAtNS > horizon {
 			t.Fatalf("renewal during the held revocation write: %+v %v", l, err)
 		}
 		releaseFn()
-		if err := <-done; err != nil {
-			t.Fatal(err)
+		select {
+		case err := <-done:
+			done <- err
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("revocation did not finish after the release")
 		}
-		done <- nil
 		for _, at := range []float64{6, 7} {
 			c.at(at)
 			l, err = p.RenewWorkspaceLease(context.Background(), "v", "r", 1)
@@ -550,7 +567,11 @@ func TestWorkspaceSameVolumeRenewalDuringHeldWrite(t *testing.T) {
 				t.Error("forced move did not settle")
 			}
 		})
-		<-entered
+		select {
+		case <-entered:
+		case <-time.After(3 * time.Second):
+			t.Fatal("move reservation write never reached the store")
+		}
 		start := time.Now()
 		if _, err := p.RenewWorkspaceLease(context.Background(), "v", "r", 1); err == nil {
 			t.Fatal("renewal granted during a forced move past the barrier")
@@ -559,43 +580,131 @@ func TestWorkspaceSameVolumeRenewalDuringHeldWrite(t *testing.T) {
 			t.Fatalf("renewal waited %s on the held move", took)
 		}
 		releaseFn()
-		if err := <-done; err != nil {
-			t.Fatal(err)
+		select {
+		case err := <-done:
+			done <- err
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("forced move did not finish after the release")
 		}
-		done <- nil
 		if _, err := p.RenewWorkspaceLease(context.Background(), "v", "r", 1); err == nil {
 			t.Fatal("old-epoch renewal after the move")
 		}
 	})
 }
 
-// Control 7 (run with -race): N volumes renew while apply, revocation, ACK, a
-// clean move, extenders and Close run. No renewal waits 2 s, nothing
-// deadlocks, and afterwards every live lease keeps disk >= published horizon
-// >= every grant (S1), and the view equals derive.
+// Control 7 (run with -race): N volumes renew while apply, revocation, ACK,
+// a clean move, a forced move, extenders and Close run. A bounded handshake
+// holds the first horizon-extension write inside the store while renewals
+// keep succeeding and the writers and Close are in flight (queued on the
+// publisher lock behind it); then it is released. Required afterwards: every
+// eligible volume had successful grants, at least one extension write was
+// observed (classified by content: a raised horizon at the same epoch, not
+// an ordinary writer's record), no renewal waited 2 s, nothing deadlocked,
+// every live lease keeps disk >= published horizon >= every grant (S1), and
+// the view equals derive.
 func TestWorkspaceLeaseConcurrentRenewalsWritersExtendersClose(t *testing.T) {
+	const n = 8
+	vol := func(i int) string { return fmt.Sprintf("v%d", i) }
+	const forcedVol, cleanVol = 2, 1
+	eligible := []int{0, 3, 4, 5, 6, 7} // stay leased throughout; v0 also takes endpoint refreshes
 	disk, _ := newTempStore(t)
 	hs := &hookStore{AuthorityStore: disk}
-	var puts atomic.Int64
+
+	// Extension classification and the overlap hold.
+	var classMu sync.Mutex
+	lastH := map[string]int64{}
+	lastEpoch := map[string]uint64{}
+	var extensions atomic.Int64
+	heldEntered, heldRelease := make(chan struct{}), make(chan struct{})
+	var holdOnce, releaseOnce sync.Once
+	releaseHold := func() { releaseOnce.Do(func() { close(heldRelease) }) }
+	var classifying atomic.Bool
 	hs.setBefore(func(r DurableRecord) error {
-		puts.Add(1)
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond) // a slow store
+		if !classifying.Load() || r.Workspace == nil || r.Workspace.Lease == nil {
+			return nil
+		}
+		l := r.Workspace.Lease
+		pending := len(r.Workspace.Moves) > 0 && !r.Workspace.Moves[len(r.Workspace.Moves)-1].Issued
+		classMu.Lock()
+		ext := !l.Revoking && !pending && l.Epoch == lastEpoch[r.VolumeID] && l.ExpiresAtNS > lastH[r.VolumeID]
+		if ext {
+			lastH[r.VolumeID] = l.ExpiresAtNS
+		}
+		classMu.Unlock()
+		if ext {
+			extensions.Add(1)
+			first := false
+			holdOnce.Do(func() { first = true })
+			if first {
+				close(heldEntered)
+				<-heldRelease
+			}
+		}
 		return nil
 	})
-	const n = 8
-	p := NewPublisher(nil, WithStore(hs), WithWorkspaceLeaseConfig(2*time.Second, nil))
+	// The publisher clock is real time plus an offset. The forced-move volume
+	// is granted at offset -10 s, so by offset 0 its horizon + skew barrier has
+	// passed; the clock only moves forward.
+	var offNS atomic.Int64
+	offNS.Store(int64(-10 * time.Second))
+	p := NewPublisher(nil, WithStore(hs), WithWorkspaceLeaseConfig(2*time.Second, func() time.Time { return time.Now().Add(time.Duration(offNS.Load())) }))
 	t.Cleanup(p.CloseWorkspaceExtenders)
 	ctx := context.Background()
-	vol := func(i int) string { return fmt.Sprintf("v%d", i) }
+	bindAndGrant(t, p, vol(forcedVol), "r") // never renewed again
+	offNS.Store(0)
 	for i := 0; i < n; i++ {
-		bindAndGrant(t, p, vol(i), "r")
+		if i != forcedVol {
+			bindAndGrant(t, p, vol(i), "r")
+		}
 	}
-	putsBefore := puts.Load()
+	for i := 0; i < n; i++ {
+		st := p.WorkspaceState(vol(i))
+		lastH[vol(i)], lastEpoch[vol(i)] = st.Lease.ExpiresAtNS, st.Lease.Epoch
+	}
+	classifying.Store(true)
+
+	var grants [n]atomic.Int64
 	var maxGrant [n]atomic.Int64
 	var slowest atomic.Int64
 	stop := make(chan struct{})
+	var stopOnce sync.Once
+	stopRenewers := func() { stopOnce.Do(func() { close(stop) }) }
 	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
+	writersDone := make(chan error, 1)
+	closed := make(chan struct{})
+	writersStarted, closeStarted := false, false
+	// Bounded cleanup on every path: release the hold, stop renewers, settle
+	// every worker, and only then let the fixtures close.
+	t.Cleanup(func() {
+		releaseHold()
+		stopRenewers()
+		settled := make(chan struct{})
+		go func() { wg.Wait(); close(settled) }()
+		select {
+		case <-settled:
+		case <-time.After(10 * time.Second):
+			t.Error("renewers did not settle")
+		}
+		if writersStarted {
+			select {
+			case <-writersDone:
+			case <-time.After(10 * time.Second):
+				t.Error("writers did not settle")
+			}
+		}
+		if closeStarted {
+			select {
+			case <-closed:
+			case <-time.After(10 * time.Second):
+				t.Error("Close did not settle")
+			}
+		}
+	})
+	for _, i := range append(append([]int{}, eligible...), cleanVol) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -610,58 +719,123 @@ func TestWorkspaceLeaseConcurrentRenewalsWritersExtendersClose(t *testing.T) {
 				if d := int64(time.Since(start)); d > slowest.Load() {
 					slowest.Store(d)
 				}
-				if err == nil && !l.Revoking && l.ExpiresAtNS > maxGrant[i].Load() {
-					maxGrant[i].Store(l.ExpiresAtNS)
+				if err == nil && !l.Revoking {
+					grants[i].Add(1)
+					if l.ExpiresAtNS > maxGrant[i].Load() {
+						maxGrant[i].Store(l.ExpiresAtNS)
+					}
 				}
 				time.Sleep(5 * time.Millisecond)
 			}
 		}(i)
 	}
-	writersDone := make(chan error, 1)
+
+	// Handshake 1: the first extension write is held inside the store.
+	select {
+	case <-heldEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no horizon-extension write reached the store within 5 s")
+	}
+	// Handshake 2: renewals keep succeeding while it is held.
+	var atHold [n]int64
+	for _, i := range eligible {
+		atHold[i] = grants[i].Load()
+	}
+	for wait := time.Now().Add(2 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		all := true
+		for _, i := range eligible {
+			if grants[i].Load() <= atHold[i] {
+				all = false
+			}
+		}
+		if all {
+			break
+		}
+		if time.Now().After(wait) {
+			t.Fatal("renewals did not succeed while an extension write was held")
+		}
+	}
+	// Writers and Close start while the extension write is held.
+	writersStarted = true
 	go func() {
-		for k := 0; k < 10; k++ {
+		for k := 0; k < 5; k++ {
 			if err := p.apply(AssignmentAsk{VolumeID: vol(0), ReplicaID: "r", DataAddr: fmt.Sprintf("d%d", k), CtrlAddr: "c", Intent: IntentRefreshEndpoint}); err != nil {
-				writersDone <- err
+				writersDone <- fmt.Errorf("endpoint refresh: %w", err)
 				return
 			}
 		}
-		if err := p.BeginWorkspaceRevocation(ctx, vol(1), "r", 1); err != nil {
-			writersDone <- err
+		if err := p.BeginWorkspaceRevocation(ctx, vol(cleanVol), "r", 1); err != nil {
+			writersDone <- fmt.Errorf("revocation: %w", err)
 			return
 		}
-		if err := p.AckWorkspaceRevocation(ctx, vol(1), WorkspaceRevokeAck{ReplicaID: "r", Epoch: 1, HeadGen: 7}); err != nil {
-			writersDone <- err
+		if err := p.AckWorkspaceRevocation(ctx, vol(cleanVol), WorkspaceRevokeAck{ReplicaID: "r", Epoch: 1, HeadGen: 7}); err != nil {
+			writersDone <- fmt.Errorf("ack: %w", err)
 			return
 		}
-		clean := WorkspaceMoveRequest{RequestID: "clean", VolumeID: vol(1), ExpectedReplicaID: "r", TargetReplicaID: "r", ExpectedHost: "old", TargetHost: "new", ExpectedEpoch: 1, TargetDataAddr: "nd", TargetCtrlAddr: "nc", Kind: "clean"}
-		_, err := p.MoveWorkspace(ctx, clean, WorkspaceHead{Gen: 7, Epoch: 1, Holder: "old/r", RemoteLSN: 42, Detached: true})
-		writersDone <- err
+		clean := WorkspaceMoveRequest{RequestID: "clean", VolumeID: vol(cleanVol), ExpectedReplicaID: "r", TargetReplicaID: "r", ExpectedHost: "old", TargetHost: "new", ExpectedEpoch: 1, TargetDataAddr: "nd", TargetCtrlAddr: "nc", Kind: "clean"}
+		if _, err := p.MoveWorkspace(ctx, clean, WorkspaceHead{Gen: 7, Epoch: 1, Holder: "old/r", RemoteLSN: 42, Detached: true}); err != nil {
+			writersDone <- fmt.Errorf("clean move: %w", err)
+			return
+		}
+		q, h := forcedMove(vol(forcedVol), "forced")
+		if _, err := p.MoveWorkspace(ctx, q, h); err != nil {
+			writersDone <- fmt.Errorf("forced move: %w", err)
+			return
+		}
+		writersDone <- nil
 	}()
-	time.Sleep(1500 * time.Millisecond) // > TTL/4: extensions for every volume
-	closed := make(chan struct{})
+	closeStarted = true
 	go func() { p.CloseWorkspaceExtenders(); close(closed) }()
-	time.Sleep(100 * time.Millisecond)
-	close(stop)
-	all := make(chan struct{})
-	go func() { wg.Wait(); <-closed; close(all) }()
-	select {
-	case <-all:
-	case <-time.After(20 * time.Second):
-		t.Fatal("deadlock: renewers or Close did not finish")
-	}
 	select {
 	case err := <-writersDone:
-		if err != nil {
-			t.Fatal("writer:", err)
-		}
-	case <-time.After(20 * time.Second):
-		t.Fatal("deadlock: writers did not finish")
+		writersDone <- err // keep it for the cleanup join
+		t.Fatalf("writers finished while the extension write held the publisher lock: %v", err)
+	case <-closed:
+		t.Fatal("Close finished while an extension write was held")
+	case <-time.After(150 * time.Millisecond):
 	}
+	releaseHold()
+	var werr error
+	select {
+	case werr = <-writersDone:
+		writersDone <- werr // keep it for the cleanup join
+	case <-time.After(20 * time.Second):
+		t.Fatal("deadlock: writers did not finish after the release")
+	}
+	if werr != nil {
+		t.Fatal("writer:", werr)
+	}
+	select {
+	case <-closed:
+	case <-time.After(20 * time.Second):
+		t.Fatal("deadlock: Close did not finish after the release")
+	}
+	time.Sleep(50 * time.Millisecond) // renewals continue after Close
+	stopRenewers()
+	settled := make(chan struct{})
+	go func() { wg.Wait(); close(settled) }()
+	select {
+	case <-settled:
+	case <-time.After(20 * time.Second):
+		t.Fatal("deadlock: renewers did not finish")
+	}
+
 	if s := time.Duration(slowest.Load()); s >= 2*time.Second {
 		t.Fatalf("slowest renewal %s", s)
 	}
-	if puts.Load() == putsBefore {
-		t.Fatal("no extender or writer Put during the run")
+	for _, i := range eligible {
+		if grants[i].Load() == 0 {
+			t.Fatalf("%s had no successful grant", vol(i))
+		}
+	}
+	if extensions.Load() == 0 {
+		t.Fatal("no horizon-extension write was observed")
+	}
+	if st := p.WorkspaceState(vol(forcedVol)); st == nil || st.Lease != nil || len(st.Moves) != 1 || !st.Moves[0].Issued || st.Moves[0].Kind != "forced" {
+		t.Fatalf("forced move not issued: %+v", st)
+	}
+	if st := p.WorkspaceState(vol(cleanVol)); st == nil || st.Lease != nil || len(st.Moves) != 1 || st.Moves[0].Kind != "clean" {
+		t.Fatalf("clean move not issued: %+v", st)
 	}
 	assertLeaseViewMatches(t, p, "after concurrency")
 	recs, err := disk.Load()
@@ -677,12 +851,19 @@ func TestWorkspaceLeaseConcurrentRenewalsWritersExtendersClose(t *testing.T) {
 	for i := 0; i < n; i++ {
 		st := p.WorkspaceState(vol(i))
 		if st == nil || st.Lease == nil {
-			continue // a completed clean move cleared the lease (out of S1's scope)
+			continue // a completed move cleared the lease (out of S1's scope)
 		}
 		if onDisk[vol(i)] < st.Lease.ExpiresAtNS || st.Lease.ExpiresAtNS < maxGrant[i].Load() {
 			t.Fatalf("%s: S1 broken: disk %d, published horizon %d, max grant %d", vol(i), onDisk[vol(i)], st.Lease.ExpiresAtNS, maxGrant[i].Load())
 		}
 	}
+	t.Logf("extension writes %d; grants per eligible volume %v", extensions.Load(), func() []int64 {
+		out := []int64{}
+		for _, i := range eligible {
+			out = append(out, grants[i].Load())
+		}
+		return out
+	}())
 }
 
 // Control 10a: Close waits for an extender held inside its Put; after Close
@@ -706,13 +887,28 @@ func TestWorkspaceCloseJoinsHeldExtender(t *testing.T) {
 		}
 		return nil
 	})
-	t.Cleanup(releaseFn)
+	closed := make(chan struct{})
+	closeStarted := false
+	t.Cleanup(func() { // bounded: release, then settle Close before the store closes
+		releaseFn()
+		if closeStarted {
+			select {
+			case <-closed:
+			case <-time.After(5 * time.Second):
+				t.Error("Close did not settle")
+			}
+		}
+	})
 	c.at(10)
 	if _, err := p.RenewWorkspaceLease(context.Background(), "v", "r", 1); err != nil {
 		t.Fatal(err)
 	}
-	<-entered
-	closed := make(chan struct{})
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("extender never reached the store")
+	}
+	closeStarted = true
 	go func() { p.CloseWorkspaceExtenders(); close(closed) }()
 	select {
 	case <-closed:
