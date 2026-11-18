@@ -775,6 +775,10 @@ func (s *WALStore) syncWALBatchV3() error {
 	v.syncMu.Lock()
 	defer v.syncMu.Unlock()
 	H, prev := v.appended.Load(), v.wack.Load()
+	// One sample per covering WAL batch, as on v2. In mode C the slot
+	// publication is the physical sync; mode A also settles its W slot.
+	syncStart := time.Now()
+	defer func() { s.fileSyncLatency.Observe(time.Since(syncStart)) }()
 	switch v.pub.current().WMode {
 	case WModeStrict:
 		// A: fsync the WAL, then publish W = H with its own fsync.
