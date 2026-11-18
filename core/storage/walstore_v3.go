@@ -157,6 +157,26 @@ func metadataSlotAcceptorV3(opts WALStoreOptions) slotImplAcceptor {
 	}
 }
 
+// ProbeWALStoreV3 identifies a valid OSS descriptor through the same A/B
+// selector as open. It grants no ownership or serving permission; Open
+// acquires the file lock and validates all map dependencies afresh.
+func ProbeWALStoreV3(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	a, b := make([]byte, slotSizeV3), make([]byte, slotSizeV3)
+	if _, err := f.ReadAt(a, 0); err != nil {
+		return err
+	}
+	if _, err := f.ReadAt(b, slotBOffsetV3); err != nil {
+		return err
+	}
+	_, _, err = selectSlotV3(a, b, nil)
+	return err
+}
+
 // testSkipFenceOnRecoverV3 is a test-only mutant switch for the G1 control
 // (it proves the schedule resurrects without the fence). Never set outside
 // tests.

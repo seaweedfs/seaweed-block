@@ -636,6 +636,8 @@ func (p *DurableProvider) verifyImplOnDisk(path string) (ImplName, error) {
 		// the format's real header selector instead of rejecting on byte 0.
 		if err := parallelwal.ProbeStore(path); err == nil {
 			diskImpl, ok = ImplParallelWALStore, true
+		} else if err := storage.ProbeWALStoreV3(path); err == nil {
+			diskImpl, ok = ImplWALStore, true
 		}
 	}
 	if !ok {
@@ -918,6 +920,11 @@ func chunkSidecars(path string) ([]string, error) {
 	}
 	var out []string
 	for _, e := range entries {
+		// The owned v3 LSN map belongs to plain walstore as well. Remote
+		// chunk identity still has its own presence/fresh/HEAD sidecars.
+		if e.Name() == base+".chunkmap" {
+			continue
+		}
 		if !e.IsDir() && strings.HasPrefix(e.Name(), base+".chunk") {
 			out = append(out, e.Name())
 		}
