@@ -208,7 +208,6 @@ func (w *walWriterV3) restoreScanV3(r walScanResultV3) error {
 	// The owner fences any dropped suffix first. Its raw HighestLSN must not
 	// pin the allocator after that suffix has been discarded.
 	w.highestLSN = r.Frontier
-	w.indexReclaimScanLockedV3(r)
 	return nil
 }
 
@@ -221,7 +220,6 @@ func (w *walWriterV3) rememberReclaimScanV3(r walScanResultV3) error {
 	if r.Nonce != w.nonce {
 		return errWALBindingV3
 	}
-	w.indexReclaimScanLockedV3(r)
 	return nil
 }
 
