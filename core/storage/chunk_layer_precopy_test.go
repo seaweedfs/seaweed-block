@@ -24,6 +24,11 @@ func precopyLayer(t *testing.T, bound, n int) (*WALStore, *fakeChunkRemote, *chu
 	cfg.FreshFromHead = true
 	cfg.BarrierBound = bound
 	l := mustAttach(t, s, f, cfg).(*chunkLayerImpl)
+	// A new v3 map is conservatively UNKNOWN. Publish the zero baseline
+	// first so this control isolates subsequent pre-copy redirty behavior.
+	if _, err := l.Cut(ctTimeout(t)); err != nil {
+		t.Fatal(err)
+	}
 	w := newWriteLog()
 	for c := 0; c < n; c++ {
 		w.write(t, s, uint32(c*ctChunkBlocks+1), byte(0x10+c))
