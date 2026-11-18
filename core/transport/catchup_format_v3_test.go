@@ -6,11 +6,93 @@ import (
 	"bytes"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/adapter"
 	"github.com/seaweedfs/seaweed-block/core/engine"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
+
+func TestCatchUpV3InstallRetireABARefusesOldScan(t *testing.T) {
+	primary, err := storage.CreateMappedWALStoreV3Test(filepath.Join(t.TempDir(), "primary.v3"), 64, v3RepBlock, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = primary.Close() })
+	primary.DisableAutoFlushForRecoveryTest()
+	for lba := uint32(0); lba < 2; lba++ {
+		if _, err := primary.Write(lba, v3RepBlk(0x10+byte(lba))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := primary.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	parked, resume := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(resume) }) }
+	t.Cleanup(release)
+	var scans atomic.Int32
+	storage.SetScanReadV3Test(primary, func() {
+		if scans.Add(1) == 1 {
+			close(parked)
+			<-resume
+		}
+	})
+	replica := v3Rep(t)
+	l := v3Listen(t, replica)
+	exec := NewBlockExecutor(primary, l.Addr())
+	closed := make(chan adapter.SessionCloseResult, 1)
+	exec.SetOnSessionClose(func(r adapter.SessionCloseResult) { closed <- r })
+	if err := exec.StartCatchUp("r1", 1, 1, 1, 1, 3); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-parked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("sender did not park after reading the original WAL")
+	}
+	h, err := primary.BeginBaseInstall(2, [16]byte{1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.WriteBase(0, v3RepBlk(0x70)); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.ApplyInstallEntry(2, v3RepBlk(0x73), 3); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.MarkBaseComplete(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := primary.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.FlushMappedWALStoreV3Test(primary); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := primary.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if state, id := storage.BaseStateV3Test(primary); state != storage.BaseNone || id != [16]byte{} {
+		t.Fatalf("setup must finish the BASE ABA: state=%v id=%x", state, id)
+	}
+	release()
+	select {
+	case result := <-closed:
+		if result.Success || result.FailureKind != engine.RecoveryFailureWALRecycled {
+			t.Fatalf("old pre-BASE WAL must not be shipped after retirement: %+v", result)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("sender did not finish after scan release")
+	}
+	if got := v3Read(t, replica, 0); !bytes.Equal(got, make([]byte, v3RepBlock)) {
+		t.Fatal("sender published superseded pre-BASE bytes to the replica")
+	}
+}
 
 func TestCatchUpV3CompletedBASEUsesRebuild(t *testing.T) {
 	primary, err := storage.CreateWALStoreV3Test(filepath.Join(t.TempDir(), "primary.v3"), 64, v3RepBlock)
