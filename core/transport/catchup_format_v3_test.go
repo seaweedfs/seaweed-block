@@ -5,10 +5,33 @@ package transport
 import (
 	"bytes"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
+
+func TestCatchUpV3InstallingAtHeadRefuses(t *testing.T) {
+	primary, err := storage.CreateWALStoreV3Test(filepath.Join(t.TempDir(), "primary.v3"), 64, v3RepBlock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = primary.Close() })
+	for lba := uint32(0); lba < 2; lba++ {
+		if _, err := primary.Write(lba, v3RepBlk(0x10+byte(lba))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := primary.BeginBaseInstall(2, [16]byte{1}); err != nil {
+		t.Fatal(err)
+	}
+	replica := v3Rep(t)
+	l := v3Listen(t, replica)
+	result := runCatchUpFrom(t, NewBlockExecutor(primary, l.Addr()), 3, 3)
+	if result.Success || !strings.Contains(result.FailReason, storage.ErrBaseInstalling.Error()) {
+		t.Fatalf("installing source at head must refuse catch-up: %+v", result)
+	}
+}
 
 // The actual catch-up sender (BlockExecutor.StartCatchUp -> the primary's
 // ScanLBAs -> the replica's ship handler) from a dark v3 primary to an empty
