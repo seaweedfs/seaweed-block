@@ -39,7 +39,12 @@ type walWriterV3 struct {
 	highestLSN uint64 // includes the last LSN consumed by a batch
 	failed     error
 	writeAt    func([]byte, int64) (int, error)
+	// Volatile record boundaries, never payloads. Recovery reconstructs
+	// only the trusted kept prefix; a batch is one indivisible point.
+	reclaim []walReclaimPointV3
 }
+
+type walReclaimPointV3 struct{ lastLSN, end uint64 }
 
 func newWALWriterV3(fd *os.File, pub *descriptorPublisherV3) (*walWriterV3, error) {
 	d, _, ok := pub.walSnapshotV3()
@@ -69,6 +74,15 @@ func (w *walWriterV3) append(e walEntryV3, durableLSN uint64) (uint64, error) {
 	}
 	if !ok || d.Nonce != w.nonce || w.head < floor || w.head-floor > d.WALSize {
 		return 0, errWALBindingV3
+	}
+	// Only both-slot-released points may leave the bounded index.
+	nReleased := 0
+	for nReleased < len(w.reclaim) && w.reclaim[nReleased].end <= floor {
+		nReleased++
+	}
+	if nReleased > 0 {
+		copy(w.reclaim, w.reclaim[nReleased:])
+		w.reclaim = w.reclaim[:len(w.reclaim)-nReleased]
 	}
 	if e.LSN <= w.highestLSN {
 		return 0, fmt.Errorf("%w: first %d after %d", ErrWALLSNOrder, e.LSN, w.highestLSN)
@@ -138,7 +152,24 @@ func (w *walWriterV3) append(e walEntryV3, durableLSN uint64) (uint64, error) {
 	if e.Type == walEntryWriteBatch {
 		w.highestLSN += e.BatchCount - 1
 	}
+	w.reclaim = append(w.reclaim, walReclaimPointV3{w.highestLSN, w.head})
 	return start % d.WALSize, nil
+}
+
+// reclaimThroughV3 returns only a complete, validated record boundary.
+// Caller serializes recovery/reset with syncMu; appends can only extend
+// the index with higher LSNs. No descriptor lock or I/O is taken here.
+func (w *walWriterV3) reclaimThroughV3(lsn uint64) uint64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	var end uint64
+	for _, point := range w.reclaim {
+		if point.lastLSN > lsn {
+			break
+		}
+		end = point.end
+	}
+	return end
 }
 
 func (w *walWriterV3) logicalHeadV3() uint64 { w.mu.Lock(); defer w.mu.Unlock(); return w.head }
@@ -177,6 +208,22 @@ func (w *walWriterV3) restoreScanV3(r walScanResultV3) error {
 	// The owner fences any dropped suffix first. Its raw HighestLSN must not
 	// pin the allocator after that suffix has been discarded.
 	w.highestLSN = r.Frontier
+	w.reclaim = w.reclaim[:0]
+	for _, rec := range r.Records {
+		if rec.End > r.End {
+			break
+		}
+		last := rec.Entry.LSN
+		if rec.Entry.Type == walEntryWriteBatch {
+			last += rec.Entry.BatchCount - 1
+		}
+		if last > r.Frontier {
+			break
+		}
+		if rec.Entry.Type == walEntryWrite || rec.Entry.Type == walEntryWriteBatch {
+			w.reclaim = append(w.reclaim, walReclaimPointV3{last, rec.End})
+		}
+	}
 	return nil
 }
 

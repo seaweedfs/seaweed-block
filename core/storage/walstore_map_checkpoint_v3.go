@@ -118,12 +118,33 @@ func (s *WALStore) publishCheckpointV3(cp uint64, seed bool, recoveryGen uint64)
 	if wack < cp {
 		return descriptorV3{}, ErrMapCoverageStale
 	}
+	s.mu.RLock()
+	retention := s.recoveryRetentionLSNs
+	s.mu.RUnlock()
+	releaseLSN := uint64(0)
+	if cp > retention {
+		releaseLSN = cp - retention
+	}
+	tail := v.w.reclaimThroughV3(releaseLSN)
+	current := v.pub.current()
+	if current.BaseState == BaseInstalling {
+		// An incomplete BASE still needs its entire install-lane suffix.
+		tail = min(tail, current.BaseCursor)
+	}
 	d, err := v.pub.publishMapV3(&s.mu, nil, prepared, func(n *descriptorV3) error {
 		n.W = max(n.W, wack)
 		n.CheckpointLSN = cp
+		n.RetainedTail = max(n.RetainedTail, tail)
+		n.RetainedHead = max(n.RetainedHead, n.RetainedTail)
 		return nil
 	})
 	if err != nil {
+		return descriptorV3{}, err
+	}
+	// Reuse still waits for BOTH valid slots. This uses the same sole
+	// publisher and existing immutable map; failure keeps the old slot pin
+	// and latches the store before the flusher retires dirty entries.
+	if _, err := v.pub.rolloverIfPinned(); err != nil {
 		return descriptorV3{}, err
 	}
 	if seed {
