@@ -152,3 +152,92 @@ func TestChunkLayerV3_BASEBeginRefusesUnsettledCAS(t *testing.T) {
 		t.Fatal(e)
 	}
 }
+
+func TestChunkLayerV3_BASEDrainJoinsClose(t *testing.T) {
+	s, f, l := mappedBASELayerV3(t)
+	if _, e := s.Write(5, blk(0x11)); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := s.Sync(); e != nil {
+		t.Fatal(e)
+	}
+	entered, release := holdPuts(t, f)
+	cutDone := startCapture(t, l)
+	waitKey(t, entered, "upload before Close")
+	attempted := make(chan struct{})
+	l.testBaseTransitionBeforeLock = func() { close(attempted) }
+	beginDone := make(chan error, 1)
+	joined := make(chan struct{})
+	t.Cleanup(func() {
+		release()
+		select {
+		case <-joined:
+		case <-time.After(ctLocalBound):
+			t.Error("BASE worker not joined after Close")
+		}
+	})
+	go func() { defer close(joined); _, e := s.BeginBaseInstall(7, idA); beginDone <- e }()
+	select {
+	case <-attempted:
+	case <-time.After(ctLocalBound):
+		t.Fatal("BASE never registered for drain")
+	}
+	within(t, "store Close cancels cut and joins BASE drain", s.Close)
+	if e := waitErr(t, beginDone, "BASE after Close"); !errors.Is(e, errChunkLayerClosed) {
+		t.Fatalf("BASE ignored closing layer: %v", e)
+	}
+	if e := waitErr(t, cutDone, "cancelled cut after Close"); e == nil {
+		t.Fatal("cancelled upload cut succeeded")
+	}
+}
+
+func TestChunkLayerV3_BASEPresenceBarrierFailureKeepsInstalling(t *testing.T) {
+	s, f, l := mappedBASELayerV3(t)
+	if _, e := s.Write(5, blk(0x11)); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := s.Sync(); e != nil {
+		t.Fatal(e)
+	}
+	if e := s.flusher.flushOnce(); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := l.Cut(ctTimeout(t)); e != nil {
+		t.Fatal(e)
+	}
+	if e := l.EvictChunk(1); e != nil {
+		t.Fatal(e)
+	}
+	h, e := s.BeginBaseInstall(7, idA)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = h.WriteBase(5, blk(0x77)); e != nil {
+		t.Fatal(e)
+	}
+	before := s.v3.pub.current()
+	injected := errors.New("injected BASE presence directory barrier")
+	realSync := l.syncDirFn
+	l.syncDirFn = func(string) error { return injected }
+	t.Cleanup(func() { l.syncDirFn = realSync })
+	if e = h.MarkBaseComplete(); !errors.Is(e, injected) {
+		t.Fatalf("missing presence barrier error: %v", e)
+	}
+	if after := s.v3.pub.current(); after != before || after.BaseState != BaseInstalling {
+		t.Fatal("failed presence barrier published installed")
+	}
+	if _, e = l.Cut(ctTimeout(t)); !errors.Is(e, errChunkBaseInstalling) {
+		t.Fatal("failed BASE became capturable", e)
+	}
+	l.syncDirFn = realSync
+	if e = h.MarkBaseComplete(); e != nil {
+		t.Fatal("completion retry", e)
+	}
+	r, e := l.Cut(ctTimeout(t))
+	if e != nil {
+		t.Fatal(e)
+	}
+	if !bytes.Equal(f.imageOf(t, r.Head)[5*ctBlockSize:6*ctBlockSize], blk(0x77)) {
+		t.Fatal("retry installed an older remote block")
+	}
+}

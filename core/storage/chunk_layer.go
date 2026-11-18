@@ -4,7 +4,7 @@ package storage
 //
 // Lock order (never reversed):
 //
-//	capMu -> WALStore.captureMu -> WALStore.lifecycleMu -> WALStore.mu
+//	installMu (BASE transitions only) -> capMu -> WALStore.captureMu -> WALStore.lifecycleMu -> WALStore.mu
 //	extentMu[i] -> stMu
 //	WALStore.mu -> bmMu -> stMu (BeforeCheckpointAdvance runs under mu)
 //
