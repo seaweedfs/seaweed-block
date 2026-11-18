@@ -175,6 +175,10 @@ func createMappedWALStoreV3ForTest(path string, numBlocks, blockSize uint32, wal
 	}
 	return createWALStoreV3MapAtCursorForTest(path, numBlocks, blockSize, walSize, mode, 0, chunkBlocks)
 }
+
+// testCreateOwnerV3 parks creation at ownership boundaries; nil in production.
+var testCreateOwnerV3 func(*os.File, bool)
+
 func createWALStoreV3MapAtCursorForTest(path string, numBlocks, blockSize uint32, walSize uint64, mode WMode, cursor, chunkBlocks uint64) (*WALStore, error) {
 	d := descriptorV3{
 		ImplKind: ImplKindWALStore, ImplVersion: walStoreImplVersion3,
@@ -194,6 +198,9 @@ func createWALStoreV3MapAtCursorForTest(path string, numBlocks, blockSize uint32
 	fd, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
 		return nil, err
+	}
+	if h := testCreateOwnerV3; h != nil {
+		h(fd, false)
 	}
 	err = fd.Truncate(int64(d.WALOffset + d.WALSize + d.VolumeSize))
 	if err == nil && chunkBlocks != 0 {
@@ -224,6 +231,11 @@ func createWALStoreV3MapAtCursorForTest(path string, numBlocks, blockSize uint32
 	}
 	if err == nil {
 		err = fd.Sync()
+	}
+	if err == nil {
+		if h := testCreateOwnerV3; h != nil {
+			h(fd, true)
+		}
 	}
 	if cerr := fd.Close(); err == nil {
 		err = cerr
