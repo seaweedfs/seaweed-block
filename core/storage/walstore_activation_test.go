@@ -53,6 +53,43 @@ func TestWALStoreProductionSelectorCreatesMappedV3(t *testing.T) {
 	}
 }
 
+func TestWALStoreProductionFallsBackWhenDamagedSlotOnlyLooksLegacy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "volume")
+	s, err := CreateWALStore(path, 16, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Write(3, blk(0x73)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.WriteAt([]byte{2, 0}, 4) // corrupt A's discriminator, not a valid v2 header
+	ce := f.Close()
+	if err != nil || ce != nil {
+		t.Fatal(err, ce)
+	}
+	r, err := OpenWALStore(path)
+	if err != nil {
+		t.Fatalf("valid B was masked by a damaged v3 A: %v", err)
+	}
+	defer r.Close()
+	if _, err := r.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := r.Read(3); err != nil || !bytes.Equal(got, blk(0x73)) {
+		t.Fatalf("fallback bytes: %v", err)
+	}
+}
+
 func TestWALStoreProductionRefusesLegacyWithoutMutation(t *testing.T) {
 	for _, version := range []uint32{1, 2} {
 		t.Run(fmt.Sprint(version), func(t *testing.T) {
