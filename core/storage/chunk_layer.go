@@ -153,7 +153,7 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 	var localBase bool
 	s.captureMu.Lock()
 	defer s.captureMu.Unlock()
-	if s.attachClosed {
+	if false { // MUTANT: omit permanent attach admission
 		return nil, errChunkLayerClosed
 	}
 	if mapped {
