@@ -32,12 +32,7 @@ func mappedProviderV3(t *testing.T, root string, remote storage.ChunkRemote) *Du
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = p.Close() })
-	p.testWALStoreFactory = func(path string, create bool) (*storage.WALStore, error) {
-		if create {
-			return storage.CreateMappedWALStoreV3Test(path, 64, 4096, 4)
-		}
-		return storage.OpenMappedWALStoreV3Test(path)
-	}
+	// Activation closure: use the production selector and provider geometry.
 	return p
 }
 
@@ -165,7 +160,7 @@ func TestDurableProviderV3_MissingMapRefusesBeforeBackend(t *testing.T) {
 	}
 }
 
-func TestDurableProviderV3_DefaultSelectorStillCreatesLegacy(t *testing.T) {
+func TestDurableProviderV3_DefaultSelectorCreatesV3(t *testing.T) {
 	p, err := NewDurableProvider(ProviderConfig{Impl: ImplWALStore, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096}, formatV3View{})
 	if err != nil {
 		t.Fatal(err)
@@ -183,8 +178,8 @@ func TestDurableProviderV3_DefaultSelectorStillCreatesLegacy(t *testing.T) {
 	if _, err = f.ReadAt(hdr[:], 0); err != nil {
 		t.Fatal(err)
 	}
-	if binary.LittleEndian.Uint16(hdr[4:6]) != 2 {
-		t.Fatal("default provider activated v3")
+	if binary.LittleEndian.Uint16(hdr[4:6]) != 3 || binary.LittleEndian.Uint32(hdr[12:16]) != 3 {
+		t.Fatal("default provider did not select v3/impl3")
 	}
 }
 

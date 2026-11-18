@@ -45,14 +45,20 @@ type BlockMetadataBinding struct {
 // or recovery begins. On create it declares a layout without writing bytes;
 // on open it must accept exactly the stored version. No registry or hook chain.
 type BlockMetadataFactory func(BlockMetadataFile, BlockMetadataLayout) (BlockMetadataBinding, error)
-type WALStoreOptions struct{ MetadataFactory BlockMetadataFactory }
+type WALStoreOptions struct {
+	MetadataFactory BlockMetadataFactory
+	// ChunkBlocks fixes the owned map geometry at create. Zero uses 1024.
+	ChunkBlocks uint32
+	// WMode is C (lagged) by default; A (strict) is an opt-in per volume.
+	WMode WMode
+}
 
 func bindBlockMetadata(f *os.File, sb *superblock, opts WALStoreOptions, creating, readonly bool) (BlockMetadata, int64, error) {
 	if sb.WALOffset > math.MaxInt64 || sb.WALSize > math.MaxInt64-sb.WALOffset || sb.VolumeSize > math.MaxInt64-sb.WALOffset-sb.WALSize {
 		return nil, 0, fmt.Errorf("storage: extent size overflow")
 	}
 	base := sb.WALOffset + sb.WALSize + sb.VolumeSize
-	nativeVersion := uint32(WALStoreImplVersion)
+	nativeVersion := uint32(1) // frozen v2 metadata seam
 	if sb.Version == superblockVersionV3 {
 		nativeVersion = walStoreImplVersion3
 	}

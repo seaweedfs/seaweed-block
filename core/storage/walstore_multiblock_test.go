@@ -42,7 +42,7 @@ func TestWALMultiBlock_EncodeDecode(t *testing.T) {
 
 func TestWALStore_MultiBlockFeatureDisabledByDefault(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "store.bin")
-	s, err := CreateWALStore(path, 16, 4096)
+	s, err := createLegacyWALStoreForTest(path, 16, 4096)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestWALStore_MultiBlockFeatureDisabledByDefault(t *testing.T) {
 
 func TestWALStore_MultiBlockDirtyRead(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "store.bin")
-	s, err := CreateWALStore(path, 16, 4096)
+	s, err := createLegacyWALStoreForTest(path, 16, 4096)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ func TestWALStore_MultiBlockDirtyRead(t *testing.T) {
 func TestWALStore_MultiBlockRecoverSplitsPerBlock(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "store.bin")
 	func() {
-		s, err := CreateWALStore(path, 16, 4096)
+		s, err := createLegacyWALStoreForTest(path, 16, 4096)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -147,7 +147,7 @@ func TestWALStore_MultiBlockRecoverSplitsPerBlock(t *testing.T) {
 		_ = s.fd.Close()
 	}()
 
-	s, err := OpenWALStore(path)
+	s, err := openLegacyWALStoreForTest(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +176,7 @@ func TestWALStore_DisableAutoFlushForRecoveryTestPreservesReplayAfterCrash(t *te
 	}
 
 	func() {
-		s, err := CreateWALStore(path, 16, 4096)
+		s, err := createLegacyWALStoreForTest(path, 16, 4096)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -197,7 +197,7 @@ func TestWALStore_DisableAutoFlushForRecoveryTestPreservesReplayAfterCrash(t *te
 		}
 	}()
 
-	s, err := OpenWALStore(path)
+	s, err := openLegacyWALStoreForTest(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +230,7 @@ func TestWALStore_MultiBlockRecoveryHeadLSNUsesRecoveredFrontier(t *testing.T) {
 	var persistedWALHeadBytes uint64
 
 	func() {
-		s, err := CreateWALStore(path, 16, 4096)
+		s, err := createLegacyWALStoreForTest(path, 16, 4096)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -255,7 +255,7 @@ func TestWALStore_MultiBlockRecoveryHeadLSNUsesRecoveredFrontier(t *testing.T) {
 		}
 	}()
 
-	s, err := OpenWALStore(path)
+	s, err := openLegacyWALStoreForTest(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,7 +278,7 @@ func TestWALStore_MultiBlockRecoveryHeadLSNUsesRecoveredFrontier(t *testing.T) {
 
 func TestWALStore_MultiBlockFlusherSplitsPerBlock(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "store.bin")
-	s, err := CreateWALStore(path, 16, 4096)
+	s, err := createLegacyWALStoreForTest(path, 16, 4096)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,7 +322,7 @@ func TestWALStore_MultiBlockFlusherSplitsPerBlock(t *testing.T) {
 
 func TestWALStore_MultiBlockScanLBAsSplitsPerLSN(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "store.bin")
-	s, err := CreateWALStore(path, 16, 4096)
+	s, err := createLegacyWALStoreForTest(path, 16, 4096)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -14,7 +14,7 @@ func TestWALStoreRecoverReplaysLegacyRangeTrim(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "store.bin")
 
 	func() {
-		s, err := CreateWALStore(path, 16, blockSize)
+		s, err := createLegacyWALStoreForTest(path, 16, blockSize)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -47,7 +47,7 @@ func TestWALStoreRecoverReplaysLegacyRangeTrim(t *testing.T) {
 		crashRecoveryHardeningStore(t, s)
 	}()
 
-	reader, err := OpenReadOnly(path)
+	reader, err := openLegacyReadOnlyForTest(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestWALStoreRecoverReplaysLegacyRangeTrim(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s, err := OpenWALStore(path)
+	s, err := openLegacyWALStoreForTest(path)
 	if err != nil {
 		t.Fatal(err)
 	}

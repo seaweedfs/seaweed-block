@@ -37,7 +37,7 @@ func TestWALStoreV3_ReadOnlyMergesWALAndExtentWithoutWrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reader, err := openReadOnlyV3ForTest(path, WALStoreOptions{})
+	reader, err := OpenReadOnlyWithOptions(path, WALStoreOptions{})
 	if err != nil {
 		t.Fatalf("actual readonly v3 open refused: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestWALStoreV3_ReadOnlyRefusesIncompleteOrCorruptDependencies(t *testing.T)
 			if e != nil {
 				t.Fatal(e)
 			}
-			reader, e := openReadOnlyV3ForTest(path, WALStoreOptions{})
+			reader, e := OpenReadOnlyWithOptions(path, WALStoreOptions{})
 			if reader != nil {
 				_ = reader.Close()
 				t.Error("refused readonly returned a reader")
@@ -175,7 +175,7 @@ func TestWALStoreV3_ReadOnlyNeverReturnsUnfilledExtentZeros(t *testing.T) {
 	if e := os.WriteFile(path+".chunkpresence", []byte("absent 1\nlocal 4\n"), 0600); e != nil {
 		t.Fatal(e)
 	}
-	r, e := openReadOnlyV3ForTest(path, WALStoreOptions{})
+	r, e := OpenReadOnlyWithOptions(path, WALStoreOptions{})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -209,7 +209,7 @@ func TestWALStoreV3_ReadOnlyRevalidatesWALAndBindsReadonlyMetadata(t *testing.T)
 		h.file = f
 		return BlockMetadataBinding{ImplVersion: 3, Hook: h}, nil
 	}}
-	r, e := openReadOnlyV3ForTest(path, opts)
+	r, e := OpenReadOnlyWithOptions(path, opts)
 	if e != nil {
 		t.Fatal(e)
 	}

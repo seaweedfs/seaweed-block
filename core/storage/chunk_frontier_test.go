@@ -6,7 +6,7 @@ import (
 )
 
 func TestSeedChunkFrontierMetadataFailureRetry(t *testing.T) {
-	s, path := newChunkTestStore(t)
+	s, path := newLegacyChunkTestStore(t)
 	s.DisableAutoFlushForRecoveryTest()
 	syncMetadata := s.syncDirectFrontierMetadata
 	s.syncDirectFrontierMetadata = func([]byte) error { return errors.New("injected metadata fsync failure") }
@@ -29,7 +29,7 @@ func TestSeedChunkFrontierMetadataFailureRetry(t *testing.T) {
 		t.Fatalf("same-store seed retry after a failed fsync: %v; want ErrFsyncFailed", err)
 	}
 	_ = s.Close()
-	reopened, err := OpenWALStore(path)
+	reopened, err := openLegacyWALStoreForTest(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestSeedChunkFrontierMetadataFailureRetry(t *testing.T) {
 	reopened.committer.Stop()
 	_ = reopened.fd.Close() // crash
 	reopenedOpen = false
-	again, err := OpenWALStore(path)
+	again, err := openLegacyWALStoreForTest(path)
 	if err != nil {
 		t.Fatal(err)
 	}

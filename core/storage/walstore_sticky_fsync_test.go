@@ -28,7 +28,7 @@ func assertStickyFsync(t *testing.T, err error) {
 func stickyStore(t *testing.T) (*WALStore, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "store.bin")
-	s := createWALStoreWithWALSizeForTest(t, path, 64, 4096, 64*1024)
+	s := createLegacyWALStoreWithWALSizeForTest(t, path, 64, 4096, 64*1024)
 	s.DisableAutoFlushForRecoveryTest()
 	if _, err := s.Write(0, makeBlock(4096, 0x10)); err != nil { // acked before the fault
 		t.Fatal(err)
@@ -63,7 +63,7 @@ func assertRefusesAfterFault(t *testing.T, s *WALStore, path string) {
 		t.Fatalf("the flusher advanced the checkpoint %d -> %d after an fsync failure", ckpt, got)
 	}
 	_ = s.Close()
-	r, err := OpenWALStore(path)
+	r, err := openLegacyWALStoreForTest(path)
 	if err != nil {
 		t.Fatal(err)
 	}

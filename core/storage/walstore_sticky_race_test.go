@@ -117,7 +117,7 @@ func startWorker(t workerTB, fn func() error, gates ...*gate) <-chan error {
 func heldStore(t *testing.T) (*WALStore, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "store.bin")
-	s := createWALStoreWithWALSizeForTest(t, path, 64, 4096, 64*1024)
+	s := createLegacyWALStoreWithWALSizeForTest(t, path, 64, 4096, 64*1024)
 	s.DisableAutoFlushForRecoveryTest()
 	t.Cleanup(func() { // runs after the workers' and gates' cleanups (LIFO)
 		if _, leaked := leakedStores.LoadAndDelete(t); leaked {

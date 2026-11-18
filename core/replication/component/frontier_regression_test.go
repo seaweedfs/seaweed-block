@@ -35,7 +35,7 @@ import (
 // INV-REPL-CATCHUP-FRONTIER-MONOTONIC-UNDER-OVER-SCAN.
 func TestComponent_CatchupFromBelowReplicaLSN_NoFrontierRegression(t *testing.T) {
 	component.RunMatrix(t, func(t *testing.T, c *component.Cluster) {
-		c.WithReplicas(1).Start()
+		c.WithReplicas(1).WithApplyGate().Start()
 
 		// Stage 1: prime replica with LBAs 0..4 at LSNs 1..5.
 		// (Use ReplicaApply to install state directly — bypasses

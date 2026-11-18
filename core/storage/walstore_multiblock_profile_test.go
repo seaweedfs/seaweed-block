@@ -21,7 +21,7 @@ func TestWALStore_MultiBlockProfile_RecordCountReduction(t *testing.T) {
 	run := func(t *testing.T, multiblock bool) profile {
 		t.Helper()
 		path := filepath.Join(t.TempDir(), "store.bin")
-		s, err := CreateWALStore(path, numBlocks, blockSize)
+		s, err := createLegacyWALStoreForTest(path, numBlocks, blockSize)
 		if err != nil {
 			t.Fatalf("CreateWALStore: %v", err)
 		}
