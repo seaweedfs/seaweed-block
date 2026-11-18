@@ -146,3 +146,48 @@ func TestWALStoreV3ReclaimSecondSlotFailureKeepsOldPin(t *testing.T) {
 		t.Fatalf("acknowledged bytes lost at the fallback failure window: %v", err)
 	}
 }
+
+func TestWALStoreV3ReclaimAfterInstallingPhysicalReopen(t *testing.T) {
+	s, path := newMappedCheckpointStoreV3(t)
+	h, err := s.BeginBaseInstall(0, idA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := uint64(1); i <= 3; i++ {
+		if err := h.ApplyInstallEntry(uint32(i), blk(byte(i)), i); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.SyncInstallLog(idA); err != nil {
+		t.Fatal(err)
+	}
+	crashReadOnlyStoreV3(t, s)
+	r, err := openWALStoreV3ForTest(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+	r.DisableAutoFlushForRecoveryTest()
+	if _, err := r.Recover(); !errors.Is(err, ErrBaseIncomplete) {
+		t.Fatalf("installing reopen: %v", err)
+	}
+	h, err = r.resumeBaseInstallV3(idA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.MarkBaseComplete(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.flusher.flushOnce(); err != nil {
+		t.Fatal(err)
+	}
+	if floor, ok := r.v3.pub.reuseFloor(); !ok || floor == 0 {
+		t.Fatalf("completed recovered install suffix cannot be reclaimed: floor=%d valid=%v", floor, ok)
+	}
+	if got, err := r.Read(3); err != nil || !bytes.Equal(got, blk(3)) {
+		t.Fatalf("recovered install bytes: %v", err)
+	}
+}
