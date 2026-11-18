@@ -8,9 +8,9 @@ import (
 	"testing"
 )
 
-func TestFileChunkBitmapStore_RoundTripAndReopen(t *testing.T) {
+func TestLegacyC11FileCodec_RoundTripAndReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "vol.chunkbitmap")
-	b := NewFileChunkBitmapStore(path)
+	b := newLegacyC11FileStore(path)
 	if _, _, ok, err := b.Load(); ok || err != nil {
 		t.Fatalf("empty store: ok %v err %v", ok, err)
 	}
@@ -30,7 +30,7 @@ func TestFileChunkBitmapStore_RoundTripAndReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A new instance reads exactly the durable state.
-	b2 := NewFileChunkBitmapStore(path)
+	b2 := newLegacyC11FileStore(path)
 	hdr, dirty, ok, err = b2.Load()
 	if !ok || err != nil || hdr != want || !reflect.DeepEqual(dirty, []uint64{7}) {
 		t.Fatalf("reopened: ok %v err %v hdr %+v dirty %v", ok, err, hdr, dirty)
@@ -41,9 +41,9 @@ func TestFileChunkBitmapStore_RoundTripAndReopen(t *testing.T) {
 	}
 }
 
-func TestFileChunkBitmapStore_CorruptStateIsLost(t *testing.T) {
+func TestLegacyC11FileCodec_CorruptStateIsLost(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "vol.chunkbitmap")
-	b := NewFileChunkBitmapStore(path)
+	b := newLegacyC11FileStore(path)
 	if err := b.Save([]uint64{1}); err != nil {
 		t.Fatal(err)
 	}
@@ -55,17 +55,17 @@ func TestFileChunkBitmapStore_CorruptStateIsLost(t *testing.T) {
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, ok, err := NewFileChunkBitmapStore(path).Load(); ok || err != nil {
+	if _, _, ok, err := newLegacyC11FileStore(path).Load(); ok || err != nil {
 		t.Fatalf("corrupt state: ok %v err %v, want ok=false (hash-compare fallback) and no error", ok, err)
 	}
 }
 
-// The layer with the production file bitmap and the in-memory remote:
-// after a crash the first cut is incremental and exact.
-func TestChunkLayer_FileBitmapIncrementalAfterRestart(t *testing.T) {
+// The mapped layer and the in-memory remote: after a crash the owned map
+// makes the first cut incremental and exact, without a C11 file sidecar.
+func TestChunkLayer_OwnedMapIncrementalAfterRestart(t *testing.T) {
 	s, path, crash := crashableStore(t)
 	remote := NewMemChunkRemote()
-	cfg := chunkLayerConfig{ChunkBlocks: ctChunkBlocks, Epoch: 1, Holder: "h", Bitmap: NewFileChunkBitmapStore(path + ".chunkbitmap")}
+	cfg := chunkLayerConfig{ChunkBlocks: ctChunkBlocks, Epoch: 1, Holder: "h"}
 	layer := mustAttach(t, s, remote, cfg)
 	w := newWriteLog()
 	w.write(t, s, 1, 0x01)  // chunk 0
@@ -73,15 +73,15 @@ func TestChunkLayer_FileBitmapIncrementalAfterRestart(t *testing.T) {
 	if _, err := layer.Capture(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	w.write(t, s, 24, 0x24) // chunk 6, flushed: only the bitmap remembers it
+	w.write(t, s, 24, 0x24) // chunk 6, flushed: the owned map remembers it
 	mustSyncFlush(t, s)
 	w.write(t, s, 28, 0x28) // chunk 7, WAL only
 	if _, err := s.Sync(); err != nil {
 		t.Fatal(err)
 	}
+	assertNoC11Sidecars(t, path)
 	crash()
 	s2, _ := reopen(t, path)
-	cfg.Bitmap = NewFileChunkBitmapStore(path + ".chunkbitmap") // a fresh instance reads the file
 	layer2 := mustAttach(t, s2, remote, cfg)
 	before := remote.Puts()
 	h, err := layer2.Capture(context.Background())
@@ -104,4 +104,14 @@ func TestChunkLayer_FileBitmapIncrementalAfterRestart(t *testing.T) {
 		copy(img[int(idx)*ctChunkBytes:], b)
 	}
 	assertImage(t, "HEAD image after restart", img, w.imageAt(h))
+	assertNoC11Sidecars(t, path)
+}
+
+func assertNoC11Sidecars(t *testing.T, path string) {
+	t.Helper()
+	for _, suffix := range []string{".chunkbitmap", ".chunkbitmap.deltas"} {
+		if _, err := os.Stat(path + suffix); !os.IsNotExist(err) {
+			t.Fatalf("C11 sidecar %s: got %v, want absent", suffix, err)
+		}
+	}
 }

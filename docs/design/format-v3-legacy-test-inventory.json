@@ -360,20 +360,6 @@
     "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
   },
   {
-    "file": "core/storage/chunk_bitmap_file_test.go",
-    "test": "TestChunkLayer_FileBitmapIncrementalAfterRestart",
-    "legacy_roots": [
-      "NewFileChunkBitmapStore"
-    ],
-    "reason": "legacy C11 bitmap persistence/reconciliation or pre-v3 permissive frontier/record surgery",
-    "v3_controls": [
-      "TestChunkLayerV3_CaptureUsesOwnedMapAfterCheckpoint",
-      "TestChunkLayerV3_IgnoresProvidedLegacyBitmap",
-      "TestChunkLayerV3_MapOnlyRefusesLegacyBASEHeaderMutation"
-    ],
-    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
-  },
-  {
     "file": "core/storage/chunk_layer_fresh_bitmap_test.go",
     "test": "TestChunkLayer_LostBitmapReconciles",
     "legacy_roots": [
@@ -580,31 +566,31 @@
   },
   {
     "file": "core/storage/chunk_bitmap_file_test.go",
-    "test": "TestFileChunkBitmapStore_CorruptStateIsLost",
+    "test": "TestLegacyC11FileCodec_CorruptStateIsLost",
     "legacy_roots": [
-      "NewFileChunkBitmapStore"
+      "newLegacyC11FileStore"
     ],
-    "reason": "legacy C11 bitmap persistence/reconciliation or pre-v3 permissive frontier/record surgery",
+    "reason": "retired C11 file codec retained only in legacy_c11_file_fixture_test.go; no production constructor or file store",
     "v3_controls": [
       "TestChunkLayerV3_CaptureUsesOwnedMapAfterCheckpoint",
       "TestChunkLayerV3_IgnoresProvidedLegacyBitmap",
       "TestChunkLayerV3_MapOnlyRefusesLegacyBASEHeaderMutation"
     ],
-    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+    "todo": "row 14a: review historical fixture disposition; row 14b removed the production file store without deleting these codec assertions"
   },
   {
     "file": "core/storage/chunk_bitmap_file_test.go",
-    "test": "TestFileChunkBitmapStore_RoundTripAndReopen",
+    "test": "TestLegacyC11FileCodec_RoundTripAndReopen",
     "legacy_roots": [
-      "NewFileChunkBitmapStore"
+      "newLegacyC11FileStore"
     ],
-    "reason": "legacy C11 bitmap persistence/reconciliation or pre-v3 permissive frontier/record surgery",
+    "reason": "retired C11 file codec retained only in legacy_c11_file_fixture_test.go; no production constructor or file store",
     "v3_controls": [
       "TestChunkLayerV3_CaptureUsesOwnedMapAfterCheckpoint",
       "TestChunkLayerV3_IgnoresProvidedLegacyBitmap",
       "TestChunkLayerV3_MapOnlyRefusesLegacyBASEHeaderMutation"
     ],
-    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+    "todo": "row 14a: review historical fixture disposition; row 14b removed the production file store without deleting these codec assertions"
   },
   {
     "file": "core/storage/walstore_checkpoint_safety_test.go",
