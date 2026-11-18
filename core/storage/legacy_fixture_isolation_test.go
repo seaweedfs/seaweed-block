@@ -32,17 +32,9 @@ func TestLegacyFixtureIsolation(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		ast.Inspect(f, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			id, ok := call.Fun.(*ast.Ident)
-			if ok && forbidden[id.Name] {
-				t.Errorf("production source %s calls legacy fixture %s", e.Name(), id.Name)
-			}
-			return true
-		})
+		for _, name := range legacyConstructorReferences(f, forbidden) {
+			t.Errorf("production source %s references legacy fixture %s", e.Name(), name)
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -71,5 +63,51 @@ func TestLegacyFixtureIsolation(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func legacyConstructorReferences(f *ast.File, forbidden map[string]bool) []string {
+	var refs []string
+	// A constructor declaration is retained for test linking, but every use
+	// (including function values, aliases and arguments) is forbidden.
+	declarations := map[*ast.Ident]bool{}
+	for _, decl := range f.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok {
+			declarations[fn.Name] = true
+		}
+	}
+	ast.Inspect(f, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok && forbidden[id.Name] && !declarations[id] {
+			refs = append(refs, id.Name)
+		}
+		return true
+	})
+	return refs
+}
+
+func TestLegacyFixtureIsolationRejectsFunctionValues(t *testing.T) {
+	const name = "createLegacyWALStoreWithOptions"
+	for _, body := range []string{
+		"func use() { createLegacyWALStoreWithOptions() }",
+		"var constructor = createLegacyWALStoreWithOptions",
+		"func use() { constructor := createLegacyWALStoreWithOptions; constructor() }",
+		"func use() { accept(createLegacyWALStoreWithOptions) }",
+	} {
+		t.Run(body, func(t *testing.T) {
+			f, err := parser.ParseFile(token.NewFileSet(), "production.go", "package storage\n"+body, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if refs := legacyConstructorReferences(f, map[string]bool{name: true}); len(refs) != 1 {
+				t.Fatalf("legacy constructor reference escaped guard: %v", refs)
+			}
+		})
+	}
+	f, err := parser.ParseFile(token.NewFileSet(), "legacy.go", "package storage\nfunc createLegacyWALStoreWithOptions() {}", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refs := legacyConstructorReferences(f, map[string]bool{name: true}); len(refs) != 0 {
+		t.Fatalf("declaration is not a use: %v", refs)
 	}
 }

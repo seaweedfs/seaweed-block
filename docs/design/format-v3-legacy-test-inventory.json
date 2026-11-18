@@ -214,34 +214,6 @@
     "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
   },
   {
-    "file": "core/storage/chunk_layer_typed_cause_test.go",
-    "test": "TestChunkCut_CASLostToMovedHeadIsHeadConflict",
-    "legacy_roots": [
-      "createLegacyWALStoreWithOptions"
-    ],
-    "reason": "legacy C11 bitmap persistence/reconciliation or pre-v3 permissive frontier/record surgery",
-    "v3_controls": [
-      "TestChunkLayerV3_CaptureUsesOwnedMapAfterCheckpoint",
-      "TestChunkLayerV3_IgnoresProvidedLegacyBitmap",
-      "TestChunkLayerV3_MapOnlyRefusesLegacyBASEHeaderMutation"
-    ],
-    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
-  },
-  {
-    "file": "core/storage/chunk_layer_typed_cause_test.go",
-    "test": "TestChunkCut_ClosedLayerIsTyped",
-    "legacy_roots": [
-      "createLegacyWALStoreWithOptions"
-    ],
-    "reason": "legacy C11 bitmap persistence/reconciliation or pre-v3 permissive frontier/record surgery",
-    "v3_controls": [
-      "TestChunkLayerV3_CaptureUsesOwnedMapAfterCheckpoint",
-      "TestChunkLayerV3_IgnoresProvidedLegacyBitmap",
-      "TestChunkLayerV3_MapOnlyRefusesLegacyBASEHeaderMutation"
-    ],
-    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
-  },
-  {
     "file": "core/storage/chunk_layer_precopy_test.go",
     "test": "TestChunkCut_RecoverWaitsForTheCaptureBarrier",
     "legacy_roots": [
@@ -258,20 +230,6 @@
   {
     "file": "core/storage/chunk_layer_lsn_order_test.go",
     "test": "TestChunkCut_RemoteLSNNeverDecreases",
-    "legacy_roots": [
-      "createLegacyWALStoreWithOptions"
-    ],
-    "reason": "legacy C11 bitmap persistence/reconciliation or pre-v3 permissive frontier/record surgery",
-    "v3_controls": [
-      "TestChunkLayerV3_CaptureUsesOwnedMapAfterCheckpoint",
-      "TestChunkLayerV3_IgnoresProvidedLegacyBitmap",
-      "TestChunkLayerV3_MapOnlyRefusesLegacyBASEHeaderMutation"
-    ],
-    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
-  },
-  {
-    "file": "core/storage/chunk_layer_typed_cause_test.go",
-    "test": "TestChunkCut_UploadFailureIsRemoteUnavailable",
     "legacy_roots": [
       "createLegacyWALStoreWithOptions"
     ],
