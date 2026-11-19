@@ -274,3 +274,31 @@ Recover/reset snapshot recheck and saved-file readers are covered by the
 native `TestCutCOWV3_*` caller controls, not claimed as model proofs.
 The earlier thirteen-spec parse statement above predates this imported model;
 no new independent TLC/parse or cloud run is claimed here.
+
+
+### WAL pressure progress without guest Sync
+
+`WALReclaim.tla` models native local pressure persistence and checkpoint/reuse
+progress. `InternalSync` is weakly fair and does not take the capture lock;
+`GuestSync` has no fairness requirement. `REC_safe.cfg` and `REC_safe_big.cfg`
+check I1/I2/I3, ring/pin safety, `AllWritten` and `NoStuckWaiter`. Removing internal
+sync (`REC_red_noInternalSync.cfg`) violates liveness; removing the durable clamp
+violates I2. The capture-lock mutant and permanently held pin also violate
+liveness. The Go implementation bounds a permanent pin with retryable admission
+expiry rather than assuming that it always releases.
+
+Run, from `docs/spec`, with the existing TLC tool:
+
+```sh
+java -cp /path/to/tla2tools.jar tlc2.TLC -deadlock -config cfg/REC_safe.cfg WALReclaim
+java -cp /path/to/tla2tools.jar tlc2.TLC -deadlock -config cfg/REC_red_noInternalSync.cfg WALReclaim
+```
+
+The authored LIGHT receipts report exhaustive safe searches at 2,700 and 25,550
+states, plus the expected mutant/witness failures. Source and configs are copied
+from the sealed `claude05-walreclaim-tla-r0-20261119` artifact with line-ending
+normalization only. Those are prior author runs, not a claim that this PR reran
+TLC. This is an abstraction: physical fsync success, byte layout, crash recovery,
+both-slot retirement, timing and multiple writers remain covered by their other
+models and actual Go controls. Do not treat finite liveness checking as an
+end-to-end wall-clock latency guarantee. Keep long model runs off tp04.

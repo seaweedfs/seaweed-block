@@ -283,9 +283,10 @@ snapshot lifetime; local persistence does not bypass it.
   `TestWALStoreV3PressureSyncFaultDoesNotPublishFrontiers`,
   `TestWALStoreV3PressureSyncSkipsInstalling`,
   `TestWALStoreV3PressureProgressWithPendingCutOrClose` and
-  `TestWALStoreV3PressureWaitBudgetAndPin`. Model correspondence/receipt is pending
-  the parallel LIGHT internal-sync/reclaim liveness review; no model PASS is
-  claimed by this source change.
+  `TestWALStoreV3PressureWaitBudgetAndPin`. Model correspondence: `WALReclaim.tla` I1/I2/I3 and
+  `AllWritten`/`NoStuckWaiter` in `REC_safe`/`REC_safe_big`; the no-internal-sync
+  mutant violates liveness. Prior authored LIGHT receipts are referenced in
+  `docs/spec/README.md`; this change does not claim a new TLC execution.
 - The v3 pressure admission budget is four seconds of cooperative waiting. It
   cannot preempt a blocking occupancy/closed callback, lock acquisition or
   physical file I/O. An unresolved pin or local stall returns
