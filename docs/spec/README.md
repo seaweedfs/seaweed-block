@@ -272,6 +272,13 @@ is reference drain followed by one cleanup. The model has one copier and
 whole-chunk writes. Actual multi-writer/batch ownership, first-attach/Close,
 Recover/reset snapshot recheck and saved-file readers are covered by the
 native `TestCutCOWV3_*` caller controls, not claimed as model proofs.
+The immutable cut image is represented by private local payload bytes and pinned
+HEAD references for lazily absent blocks. Local copy completion releases the
+window before remote materialization; the outer cut registration owns the payload
+file until all admitted local writes and uploads join. This preserves the modeled
+frozen image and drain ordering; payload byte limits and the private file are
+covered by native resource/lifetime controls, not by a new model run.
+
 The earlier thirteen-spec parse statement above predates this imported model;
 no new independent TLC/parse or cloud run is claimed here.
 
