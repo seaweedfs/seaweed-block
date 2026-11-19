@@ -8,6 +8,33 @@ import (
 	"time"
 )
 
+func TestChunkBirthLegacyEngineUsesCutFrontierUpperBound(t *testing.T) {
+	s, _ := newLegacyChunkTestStore(t)
+	f := newFakeChunkRemote()
+	cfg := ctConfig(1)
+	l := mustAttach(t, s, f, cfg)
+	if _, err := s.Write(0, makeBlock(ctBlockSize, 0x41)); err != nil {
+		t.Fatal(err)
+	}
+	last, err := s.Write(ctChunkBlocks, makeBlock(ctBlockSize, 0x42))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cut, err := l.Cut(ctTimeout(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, idx := range []uint64{0, 1} {
+		if cr := cut.Head.Chunks[idx]; cr.Encoding != "full" || cr.BirthLSN != last {
+			t.Fatalf("legacy chunk %d metadata %+v, want frontier %d", idx, cr, last)
+		}
+	}
+	want := make([]byte, ctNumBlocks*ctBlockSize)
+	copy(want, makeBlock(ctBlockSize, 0x41))
+	copy(want[ctChunkBlocks*ctBlockSize:], makeBlock(ctBlockSize, 0x42))
+	assertImage(t, "legacy inherited image", f.imageOf(t, cut.Head), want)
+}
+
 func TestChunkBirthBASEUsesInheritedFrontierIncludingZero(t *testing.T) {
 	for _, frontier := range []uint64{0, 7} {
 		t.Run(string(rune('0'+frontier)), func(t *testing.T) {
