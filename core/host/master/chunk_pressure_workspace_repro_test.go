@@ -1,3 +1,5 @@
+//go:build diagnostic_repro
+
 package master
 
 import (

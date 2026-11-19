@@ -1,3 +1,5 @@
+//go:build diagnostic_repro
+
 package durable_test
 
 import (

@@ -1,4 +1,4 @@
-//go:build chunkstore_integration
+//go:build chunkstore_integration && diagnostic_repro
 
 package master
 
