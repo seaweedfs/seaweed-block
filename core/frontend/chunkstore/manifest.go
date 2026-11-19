@@ -90,14 +90,19 @@ func (r *ChunkRemote) PrepareManifest(ctx context.Context, base, next storage.Ch
 		data []byte
 	}
 	var uploads []upload
-	for group, chunks := range groups {
-		old := map[uint64]storage.ChunkRef{}
-		for idx, ref := range base.Chunks {
-			if idx/per == group {
-				ref.Key = qualifyManifestKey(owner, ref.Key)
-				old[idx] = ref
-			}
+	// Partition the base once, rather than scanning every base chunk for each
+	// segment group. Keep the same qualified-key comparison for segment reuse.
+	baseGroups := map[uint64]map[uint64]storage.ChunkRef{}
+	for idx, ref := range base.Chunks {
+		group := idx / per
+		if baseGroups[group] == nil {
+			baseGroups[group] = map[uint64]storage.ChunkRef{}
 		}
+		ref.Key = qualifyManifestKey(owner, ref.Key)
+		baseGroups[group][idx] = ref
+	}
+	for group, chunks := range groups {
+		old := baseGroups[group]
 		if previous, ok := base.Segments[group]; ok && base.ChunkBytes == chunkBytes && reflect.DeepEqual(chunks, old) {
 			next.Segments[group] = previous
 			continue

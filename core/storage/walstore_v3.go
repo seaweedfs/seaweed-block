@@ -778,22 +778,50 @@ func (s *WALStore) replayRecordV3(r walScannedRecordV3, walSize uint64, blockSiz
 // syncWALBatchV3 is the committer leader's batch for a v3 store (DESIGN 6.2,
 // 6.3). The cut H is every record pwritten before the leader starts.
 func (s *WALStore) syncWALBatchV3() error {
+	return s.syncWALBatchV3Internal(false)
+}
+
+// Called only by the flusher, without capture/lifecycle/store locks. Pressure
+// cannot depend on a guest Flush: persist locally before checkpointing, using
+// the same physical sync and final fault gate as an ordinary sync batch.
+func (s *WALStore) syncWALPressureV3() error {
+	return s.syncWALBatchV3Internal(true)
+}
+
+func (s *WALStore) syncWALBatchV3Internal(pressureOnly bool) error {
 	if err := s.stickyIOFault(); err != nil {
 		return err
+	}
+	v := s.v3
+	// An idle flusher must not queue behind an unrelated Sync leader before
+	// preparing its map. This is only a scheduling hint: pressure eligibility
+	// and the mutation/frontier cut are still rechecked together under syncMu.
+	// A concurrent append missed here is picked up by the next notified cycle.
+	if pressureOnly && s.walUsedFraction() < 0.70 {
+		return nil
+	}
+	// The leader role: SetWMode holds it while it changes the mode, so no
+	// batch acknowledges under a stale mode selection (the mode is read
+	// only after the role is taken).
+	if h := v.testLeaderWaiting; h != nil && !pressureOnly {
+		h()
+	}
+	v.syncMu.Lock()
+	defer v.syncMu.Unlock()
+	if pressureOnly {
+		// Recheck under the same leader interval as the mutation/frontier cut.
+		// Installing uses receiver-owned SyncInstallLog, never this normal path.
+		s.mu.RLock()
+		closed := s.closed
+		s.mu.RUnlock()
+		if closed || v.pub.current().BaseState == BaseInstalling || s.walUsedFraction() < 0.70 || v.appended.Load() <= v.wack.Load() {
+			return nil
+		}
 	}
 	cut := s.walMutation.Load()
 	if !s.bypassSyncDedup.Load() && s.chunk.Load() == nil && cut <= s.durableMutation.Load() {
 		return nil
 	}
-	v := s.v3
-	// The leader role: SetWMode holds it while it changes the mode, so no
-	// batch acknowledges under a stale mode selection (the mode is read
-	// only after the role is taken).
-	if h := v.testLeaderWaiting; h != nil {
-		h()
-	}
-	v.syncMu.Lock()
-	defer v.syncMu.Unlock()
 	H, prev := v.appended.Load(), v.wack.Load()
 	// One sample per covering WAL batch, as on v2. In mode C the slot
 	// publication is the physical sync; mode A also settles its W slot.
@@ -1043,7 +1071,18 @@ func blockOfRecordV3(e walEntryV3, lba uint64, dataOff uint32, lsn uint64, block
 
 // readDirtyRecordV3 is the flusher's record read for a v3 store: it decodes
 // and validates the whole record before its data may reach the extent.
-func (f *flusher) readDirtyRecordV3(e snapshotEntry) (data []byte, entrySize uint64, err error) {
+type flushRecordCacheV3 struct {
+	recoveryGen  uint64
+	offset, size uint64
+	entry        walEntryV3
+	valid        bool
+}
+
+func (f *flusher) readDirtyRecordV3(e snapshotEntry) ([]byte, uint64, error) {
+	return f.readDirtyRecordV3Cached(e, nil)
+}
+
+func (f *flusher) readDirtyRecordV3Cached(e snapshotEntry, cache *flushRecordCacheV3) (data []byte, entrySize uint64, err error) {
 	readFailed := false
 	defer func() {
 		if err == nil {
@@ -1054,13 +1093,26 @@ func (f *flusher) readDirtyRecordV3(e snapshotEntry) (data []byte, entrySize uin
 	}()
 	store := f.store
 	d := store.v3.pub.current()
-	entry, size, ioErr, verr := readWholeRecordProfiledV3(store.fd, recordGeometryV3{store.sb.WALOffset, store.sb.WALSize, store.sb.BlockSize, store.sb.VolumeSize}, e.WALOffset, &f.instr)
-	if ioErr != nil {
-		readFailed = true
-		return nil, 0, fmt.Errorf("flusher: read v3 WAL record at %d: %w", e.WALOffset, ioErr)
+	if cache != nil && !store.v3.flushLifetimeValidV3(cache.recoveryGen) {
+		return nil, 0, ErrMapCoverageStale
 	}
-	if verr != nil {
-		return nil, 0, fmt.Errorf("flusher: invalid v3 WAL record LBA %d offset %d: %w", e.LBA, e.WALOffset, verr)
+	var entry walEntryV3
+	var size uint64
+	if cache != nil && cache.valid && cache.offset == e.WALOffset {
+		entry, size = cache.entry, cache.size
+	} else {
+		var ioErr, verr error
+		entry, size, ioErr, verr = readWholeRecordProfiledV3(store.fd, recordGeometryV3{store.sb.WALOffset, store.sb.WALSize, store.sb.BlockSize, store.sb.VolumeSize}, e.WALOffset, &f.instr)
+		if ioErr != nil {
+			readFailed = true
+			return nil, 0, fmt.Errorf("flusher: read v3 WAL record at %d: %w", e.WALOffset, ioErr)
+		}
+		if verr != nil {
+			return nil, 0, fmt.Errorf("flusher: invalid v3 WAL record LBA %d offset %d: %w", e.LBA, e.WALOffset, verr)
+		}
+		if cache != nil {
+			cache.entry, cache.size, cache.offset, cache.valid = entry, size, e.WALOffset, true
+		}
 	}
 	if entry.Nonce != d.Nonce || e.Length != store.sb.BlockSize {
 		return nil, 0, fmt.Errorf("flusher: v3 WAL slot mismatch LBA %d offset %d", e.LBA, e.WALOffset)

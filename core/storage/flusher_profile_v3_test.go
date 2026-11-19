@@ -30,7 +30,7 @@ func TestFlusherV3ProfileCountsRealRecordStages(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if got.ValidatedRecords != 2 || got.WALHeaderReadOps != 2 || got.WALRecordReadOps != 2 || got.WALRecordDecodeOps != 2 || got.ValidationFailures != 0 || got.CyclesSucceeded != 1 {
+				if got.ValidatedRecords != 2 || got.WALHeaderReadOps != 1 || got.WALRecordReadOps != 1 || got.WALRecordDecodeOps != 1 || got.ValidationFailures != 0 || got.CyclesSucceeded != 1 {
 					t.Fatalf("successful batch stages: %+v", got)
 				}
 			} else {

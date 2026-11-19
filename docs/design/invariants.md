@@ -262,6 +262,46 @@ HEAD states, snapshots, forks, intents, key bindings, GC and volume delete in th
 
 ---
 
+### Local WAL-pressure durability progress
+
+A serving v3 store at the soft WAL watermark may perform an internal local
+sync from its existing flusher, before snapshotting dirty work. This transition
+uses the ordinary A/C physical-sync and final fault gate under one `syncMu`
+interval; it takes neither `captureMu` nor `lifecycleMu`. It is ineligible while
+BASE is installing or the store is closed. The leader is released before extent,
+map and checkpoint publication. Client Flush acknowledgements keep their own
+covering durability and observer requirements. Recovery invalidates the existing
+snapshot lifetime; local persistence does not bypass it.
+
+- `INV-WAL-V3-PRESSURE-001`: I1, within a recovery/reset lifetime `wack` advances
+  only after covering local persistence; I2, checkpoint remains at most `wack`
+  and the active-session pin floor; I3, record reuse remains below the durable
+  checkpoint, both-slot floor and dirty-reference retirement; I4, with healthy
+  local progress and no guest Sync, the reuse floor advances. Enforced by
+  `syncWALBatchV3Internal`, `persistOwnedMapCheckpointV3` and the existing reclaim
+  publisher. Tests: `TestWALStoreV3NoClientSyncSixRings`,
+  `TestWALStoreV3PressureSyncFaultDoesNotPublishFrontiers`,
+  `TestWALStoreV3PressureSyncSkipsInstalling`,
+  `TestWALStoreV3PressureProgressWithPendingCutOrClose` and
+  `TestWALStoreV3PressureWaitBudgetAndPin`. Model correspondence: `WALReclaim.tla` I1/I2/I3 and
+  `AllWritten`/`NoStuckWaiter` in `REC_safe`/`REC_safe_big`; the no-internal-sync
+  mutant violates liveness. Prior authored LIGHT receipts are referenced in
+  `docs/spec/README.md`; this change does not claim a new TLC execution.
+- The v3 pressure admission budget is four seconds of cooperative waiting. It
+  cannot preempt a blocking occupancy/closed callback, lock acquisition or
+  physical file I/O. An unresolved pin or local stall returns
+  `ErrWALPressureTimeout`, preserved as `frontend.ErrBackendBusy`; NVMe returns
+  Generic/Namespace Not Ready (SC0x82), DNR=0. Sticky faults retain their original
+  non-retryable mapping. This is a local pressure outcome, not a whole-I/O
+  deadline; the broader budget gap is tracked separately in issue221.
+- A flusher cycle sorts native snapshot entries by record offset and reuses at
+  most one fully validated record (bounded by WALSize). Every block still checks
+  its LBA/data offset/LSN/nonce; the cache is local to the snapshot recovery
+  generation and cannot publish or materialize after that lifetime changes.
+  `TestWALStoreV3FlushBatchCacheIsBoundToRecoveryLifetime` covers one batch decode
+  and refusal after Recover. Missing map coverage still forbids checkpoint
+  advancement; the earlier unmapped dark fixture is not a production geometry.
+
 ## Part B. Invariant ledger
 
 80 rows: 69 ACTIVE, 11 STUB; 15 kept from the internal ledger, 65 new.

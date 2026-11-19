@@ -2,12 +2,17 @@ package storage
 
 import (
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"time"
 )
 
 // errVolumeClosed is returned by walAdmission.Acquire if the store
 // closes while the caller is waiting.
+// ErrWALPressureTimeout is retryable local admission pressure, not a substrate
+// fault. Unwrap preserves existing WAL-full classification for callers.
+var ErrWALPressureTimeout = fmt.Errorf("storage: admission wait timed out: %w", errWALFull)
+
 var errVolumeClosed = errors.New("storage: volume closed during admission wait")
 
 // walAdmission controls write admission based on WAL pressure
@@ -117,7 +122,7 @@ func (a *walAdmission) Acquire(timeout time.Duration) error {
 				if err := a.terminalFault(); err != nil {
 					return err
 				}
-				return errWALFull
+				return ErrWALPressureTimeout
 			default:
 			}
 			a.sleepFn(2 * time.Millisecond)
@@ -156,7 +161,7 @@ func (a *walAdmission) Acquire(timeout time.Duration) error {
 			if err := a.terminalFault(); err != nil {
 				return err
 			}
-			return errWALFull
+			return ErrWALPressureTimeout
 		case <-closeTick.C:
 			if err := a.terminalFault(); err != nil {
 				return err

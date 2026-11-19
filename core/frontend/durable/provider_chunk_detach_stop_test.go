@@ -118,10 +118,11 @@ func TestWALStoreChunk_DetachDrainsAdmittedWrite(t *testing.T) {
 	}
 }
 
-// The drain is bounded by the caller's context: a detach that cannot drain
-// fails, publishes nothing and keeps I/O stopped, also through a recovery;
-// once the admitted write finishes, a retry settles the detach with it.
-func TestWALStoreChunk_DetachDrainIsBoundedAndStaysStopped(t *testing.T) {
+// The drain is bounded (the caller's context or the freeze bound): a detach
+// that cannot drain publishes nothing, so it aborts and the volume serves
+// again (MIGRATION E4; it used to stay stopped, review S6); once the admitted
+// write finishes, a retry detaches with every acknowledged write.
+func TestWALStoreChunk_DetachDrainTimeoutAbortsAndResumes(t *testing.T) {
 	ctx := context.Background()
 	remote := storage.NewMemChunkRemote()
 	p, view := parkedProvider(t, remote)
@@ -139,21 +140,54 @@ func TestWALStoreChunk_DetachDrainIsBoundedAndStaysStopped(t *testing.T) {
 	dctx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
 	_, _, err = p.DetachVolume(dctx, "v1")
 	cancel()
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("detach that cannot drain: %v; want the context's deadline", err)
+	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, durable.ErrDetachAborted) {
+		t.Fatalf("detach that cannot drain: %v; want an aborted detach on the context's deadline", err)
 	}
 	if head, _ := remote.GetHead(ctx); head.State == storage.ChunkHeadDetached {
 		t.Fatalf("a detach that did not drain published a detached HEAD: %+v", head)
 	}
-	if _, err := p.RecoverVolume(ctx, "v1"); !errors.Is(err, storage.ErrChunkLayerDetached) {
-		t.Fatalf("recovery after a failed detach: %v; want the volume to stay stopped", err)
+	// Serving resumes: a new write is accepted. The drain still pending from
+	// the aborted stop orders new I/O after the I/O admitted before it, so
+	// this write completes once that admitted write does (never on the
+	// detach itself).
+	arrived := make(chan struct{})
+	var arriveOnce sync.Once
+	durable.SetTestBeforeIOLock(b, func() { arriveOnce.Do(func() { close(arrived) }) })
+	nerr := make(chan error, 1)
+	go func() { _, err := b.Write(ctx, 8192, block(6)); nerr <- err }()
+	bounded := func(what string, ch <-chan struct{}) {
+		t.Helper()
+		select {
+		case <-ch:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s did not happen within 5s", what)
+		}
 	}
-	if _, err := b.Write(ctx, 8192, block(6)); !errors.Is(err, frontend.ErrNotReady) {
-		t.Fatalf("new write after a failed detach and a recovery: %v; want ErrNotReady", err)
+	bounded("the new write passing the operational gate (serving resumed)", arrived)
+	select {
+	case err := <-nerr:
+		t.Fatalf("new write completed (%v) ahead of the write admitted before the stop", err)
+	default: // queued behind the admitted write at the I/O lock, as the drain orders it
 	}
 
 	view.unpark()
-	acked := <-werr == nil
+	recv := func(what string, ch <-chan error) error {
+		t.Helper()
+		select {
+		case err := <-ch:
+			return err
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s did not complete within 5s", what)
+			return nil
+		}
+	}
+	acked := recv("the admitted write", werr) == nil
+	if err := recv("the new write", nerr); err != nil {
+		t.Fatalf("new write after an aborted detach: %v; want it accepted", err)
+	}
+	if _, err := p.RecoverVolume(ctx, "v1"); err != nil {
+		t.Fatalf("recovery after an aborted detach: %v; want it to succeed", err)
+	}
 	o := detachOutcome{}
 	o.r, o.last, o.err = p.DetachVolume(ctx, "v1")
 	if o.err != nil || o.r.Head.State != storage.ChunkHeadDetached {
@@ -161,6 +195,9 @@ func TestWALStoreChunk_DetachDrainIsBoundedAndStaysStopped(t *testing.T) {
 	}
 	if acked && !bytesEqual(headBlock(t, remote, 1), block(5)) {
 		t.Fatal("the write admitted before the stop was acknowledged but is not in the detached HEAD")
+	}
+	if !bytesEqual(headBlock(t, remote, 2), block(6)) {
+		t.Fatal("the write accepted after the aborted detach is not in the detached HEAD")
 	}
 }
 

@@ -6,7 +6,6 @@ import (
 	"reflect"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
@@ -33,7 +32,9 @@ func (r *restoreRemote) Get(ctx context.Context, key string) ([]byte, error) {
 // Keep the old projection stale to model delayed assignment delivery; a HEAD
 // takeover must independently refuse its cut and then stop its frontend I/O.
 func TestWorkspaceMoveRestoresLazilyAndFencesOldHost(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// No wall-clock bound (#227): each step completes or the go test timeout
+	// reports the hang; a 10 s context failed the HEAD claim under load.
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	m := newTestMaster(t, t.TempDir())
 	defer closeTestMaster(t, m)

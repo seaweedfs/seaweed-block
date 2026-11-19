@@ -170,8 +170,9 @@ func (p *Publisher) RenewWorkspaceLease(ctx context.Context, volume, holder stri
 	// bound, leaseFact) would make the host fence on an invalid reply and lose
 	// its remaining validity; refuse with an error instead.
 	if grant-lv.d.maxSkewNS/2 <= now.UnixNano() {
+		horizon := lv.d.horizon // the view is leaseMu's: read it before the unlock (#242)
 		p.leaseMu.Unlock()
-		return WorkspaceLease{}, fmt.Errorf("workspace lease: durable horizon %s leaves no host validity", time.Unix(0, lv.d.horizon).UTC().Format(time.RFC3339Nano))
+		return WorkspaceLease{}, fmt.Errorf("workspace lease: durable horizon %s leaves no host validity", time.Unix(0, horizon).UTC().Format(time.RFC3339Nano))
 	}
 	if g := time.Unix(0, grant); g.After(lv.deadline) {
 		lv.deadline = g

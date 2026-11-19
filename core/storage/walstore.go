@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/geometry"
 	"github.com/seaweedfs/seaweed-block/core/iolatency"
 )
 
@@ -190,6 +191,9 @@ func CreateWALStoreWithOptions(path string, numBlocks uint32, blockSize int, opt
 	}
 	if blockSize < 0 || uint64(blockSize) > uint64(^uint32(0)) {
 		return nil, errSuperblockBadVolume
+	}
+	if err := geometry.ValidateVolumeSize(uint64(numBlocks) * uint64(blockSize)); err != nil {
+		return nil, err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
@@ -386,6 +390,11 @@ func openInitializedInternal(path string, f *os.File, sb *superblock, metadata B
 	// flusher via NotifyUrgent — same seam V2 wires for pressure-
 	// driven flushes.
 	s.admissionTimeout = 30 * time.Second
+	if s.v3 != nil {
+		// WAL pressure gets a budget below the host's I/O timeout. This bounds
+		// cooperative admission waits, not a blocking callback or physical I/O.
+		s.admissionTimeout = 4 * time.Second
+	}
 	s.admission = newWALAdmission(walAdmissionConfig{
 		MaxConcurrent: 64,
 		SoftWatermark: 0.70,

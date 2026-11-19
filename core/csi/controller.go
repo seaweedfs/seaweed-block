@@ -8,6 +8,7 @@ import (
 	"time"
 
 	csipb "github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/seaweedfs/seaweed-block/core/geometry"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -247,6 +248,9 @@ func volumeSpecFromCreateRequest(req *csipb.CreateVolumeRequest) (VolumeSpec, er
 	}
 	if size <= 0 {
 		return VolumeSpec{}, status.Error(codes.InvalidArgument, "capacity is required")
+	}
+	if err := geometry.ValidateVolumeSize(uint64(size)); err != nil {
+		return VolumeSpec{}, status.Error(codes.InvalidArgument, err.Error())
 	}
 	if len(req.GetVolumeCapabilities()) == 0 {
 		return VolumeSpec{}, status.Error(codes.InvalidArgument, "volume capabilities are required")
