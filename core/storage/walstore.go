@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/geometry"
 	"github.com/seaweedfs/seaweed-block/core/iolatency"
 )
 
@@ -190,6 +191,9 @@ func CreateWALStoreWithOptions(path string, numBlocks uint32, blockSize int, opt
 	}
 	if blockSize < 0 || uint64(blockSize) > uint64(^uint32(0)) {
 		return nil, errSuperblockBadVolume
+	}
+	if err := geometry.ValidateVolumeSize(uint64(numBlocks) * uint64(blockSize)); err != nil {
+		return nil, err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
