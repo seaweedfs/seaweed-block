@@ -624,13 +624,12 @@ func TestCheckpointV3_HeldHydrationWithLocalWriteAndFlush(t *testing.T) {
 				if !errors.Is(err, ErrMapCoverageStale) || s.v3.pub.current() != before {
 					t.Fatalf("superseded candidate after flush: %v", err)
 				}
-			} else {
-				if err != nil {
-					t.Fatal(err)
-				}
-				if _, err := s.Sync(); err != nil {
-					t.Fatal(err)
-				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			// Cover the hydrated extent bytes too before the reopen oracle.
+			if _, err := s.Sync(); err != nil {
+				t.Fatal(err)
 			}
 			if !bytes.Equal(readV3(t, s, 8), blk(0xA8)) || !bytes.Equal(readV3(t, s, 9), blk(0xB9)) {
 				t.Fatal("HEAD fill or local write was overwritten")
