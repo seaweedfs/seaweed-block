@@ -25,9 +25,10 @@ func TestWALStoreV3NoClientSyncSixRings(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = s.Close() })
-			// Bound the RED and a genuinely stalled local flusher without a 30s test.
-			// The healthy background path must drain this small geometry before it.
-			s.admissionTimeout = 2 * time.Second
+			// Exercise the production cooperative pressure budget (four seconds).
+			if s.admissionTimeout >= 5*time.Second {
+				t.Fatalf("budget=%v", s.admissionTimeout)
+			}
 			for i := uint32(0); i < count; i++ {
 				if _, err := s.Write(i, blk(byte(i+1))); err != nil {
 					t.Fatalf("no-client-Sync write %d/%d: %v", i, count, err)
@@ -143,8 +144,9 @@ func TestWALStoreV3PressureWaitBudgetAndPin(t *testing.T) {
 // TryRLock refuses only once the pending exclusive operation is queued: the
 // parked Write still owns a read lock. No sleep guesses when the Lock queues.
 func TestWALStoreV3PressureProgressWithPendingCutOrClose(t *testing.T) {
-	for _, closing := range []bool{false, true} {
-		t.Run(fmt.Sprintf("close-%v", closing), func(t *testing.T) {
+	for _, kind := range []string{"cut", "close", "lifecycle"} {
+		closing := kind == "close"
+		t.Run(kind, func(t *testing.T) {
 			s := pressureStoreNoSync(t, 15)
 			s.admissionTimeout = 2 * time.Second
 			parked, resume := make(chan struct{}), make(chan struct{})
@@ -180,6 +182,10 @@ func TestWALStoreV3PressureProgressWithPendingCutOrClose(t *testing.T) {
 				defer close(exclusiveDone)
 				if closing {
 					_ = s.Close()
+				} else if kind == "lifecycle" {
+					s.lifecycleMu.Lock()
+					defer s.lifecycleMu.Unlock()
+					<-cutRelease
 				} else {
 					s.captureMu.Lock()
 					defer s.captureMu.Unlock()
@@ -189,7 +195,7 @@ func TestWALStoreV3PressureProgressWithPendingCutOrClose(t *testing.T) {
 			deadline := time.Now().Add(time.Second)
 			for {
 				var admitted bool
-				if closing {
+				if kind == "lifecycle" {
 					admitted = s.lifecycleMu.TryRLock()
 					if admitted {
 						s.lifecycleMu.RUnlock()
