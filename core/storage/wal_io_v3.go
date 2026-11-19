@@ -62,7 +62,11 @@ func newWALWriterV3(fd *os.File, pub *descriptorPublisherV3) (*walWriterV3, erro
 	return &walWriterV3{pub: pub, nonce: d.Nonce, head: d.RetainedHead, highestLSN: max(d.CheckpointLSN, d.BaseLSN), writeAt: fd.WriteAt}, nil
 }
 
-func (w *walWriterV3) append(e walEntryV3, durableLSN uint64) (uint64, error) {
+// budget (nil = none) is the guest command's budget: checked after the
+// descriptor snapshot, the writer lock wait and the encoding, before the first
+// physical write, so an expired command starts no new payload I/O (#252). It
+// never cancels a write already started.
+func (w *walWriterV3) append(e walEntryV3, durableLSN uint64, budget func() error) (uint64, error) {
 	// Descriptor snapshot precedes the writer lock. A concurrent floor advance
 	// makes this snapshot conservative; reset must quiesce/recreate the writer.
 	d, floor, ok := w.pub.walSnapshotV3()
@@ -147,6 +151,11 @@ func (w *walWriterV3) append(e walEntryV3, durableLSN uint64) (uint64, error) {
 			return w.failed
 		}
 		return nil
+	}
+	if budget != nil {
+		if err := budget(); err != nil {
+			return 0, err
+		}
 	}
 	if len(pad) > 0 {
 		if err := write(pad, w.head); err != nil {

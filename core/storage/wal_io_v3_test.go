@@ -77,7 +77,7 @@ func TestWALIOV3_RealWriterReopenScan(t *testing.T) {
 		// Caller binding fields are overwritten, not trusted.
 		e.Nonce = [16]byte{0xFF}
 		e.LogicalStart = 999
-		if _, err := w.append(e, i-1); err != nil {
+		if _, err := w.append(e, i-1, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -116,7 +116,7 @@ func TestWALIOV3_WrapPaddingAndSlack(t *testing.T) {
 			start := uint64(size) - remaining
 			f, p, w := newWALIOTestV3(t, start, start)
 			d := p.current()
-			if _, err := w.append(walEntryV3{LSN: 1, Type: walEntryWrite, LBA: 1, Length: d.BlockSize, Data: make([]byte, d.BlockSize)}, 0); err != nil {
+			if _, err := w.append(walEntryV3{LSN: 1, Type: walEntryWrite, LBA: 1, Length: d.BlockSize, Data: make([]byte, d.BlockSize)}, 0, nil); err != nil {
 				t.Fatal(err)
 			}
 			if err := f.Sync(); err != nil {
@@ -187,7 +187,7 @@ func TestWALIOV3_InstalledScanBeginsAtMaxTail(t *testing.T) {
 	d.CheckpointLSN = 5
 	d.W = 5
 	d.MapCoveredCheckpoint = 5
-	if _, err := w.append(walEntryV3{LSN: 6, Type: walEntryBarrier}, 5); err != nil {
+	if _, err := w.append(walEntryV3{LSN: 6, Type: walEntryBarrier}, 5, nil); err != nil {
 		t.Fatal(err)
 	}
 	r, err := scanWALV3(f, d)
@@ -207,20 +207,20 @@ func TestWALIOV3_ValidatedFrontierIntervals(t *testing.T) {
 	d.BaseState = BaseInstalling
 	d.BaseInstallID = [16]byte{1}
 	d.BaseLSN = 100
-	if _, err := w.append(walEntryV3{LSN: 102, Type: walEntryBarrier}, 100); err != nil {
+	if _, err := w.append(walEntryV3{LSN: 102, Type: walEntryBarrier}, 100, nil); err != nil {
 		t.Fatal(err)
 	}
 	before := w.logicalHeadV3()
-	if _, err := w.append(walEntryV3{LSN: 101, Type: walEntryBarrier}, 100); !errors.Is(err, ErrWALLSNOrder) {
+	if _, err := w.append(walEntryV3{LSN: 101, Type: walEntryBarrier}, 100, nil); !errors.Is(err, ErrWALLSNOrder) {
 		t.Fatalf("non-monotone101=%v", err)
 	}
 	if w.logicalHeadV3() != before {
 		t.Fatal("refused101 advanced cursor")
 	}
-	if _, err := w.append(walEntryV3{LSN: 104, Type: walEntryBarrier}, 100); err != nil {
+	if _, err := w.append(walEntryV3{LSN: 104, Type: walEntryBarrier}, 100, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := w.append(walEntryV3{LSN: 103, Type: walEntryBarrier}, 100); !errors.Is(err, ErrWALLSNOrder) {
+	if _, err := w.append(walEntryV3{LSN: 103, Type: walEntryBarrier}, 100, nil); !errors.Is(err, ErrWALLSNOrder) {
 		t.Fatalf("late gap fill103=%v", err)
 	}
 	r, err := scanWALV3(f, d)
@@ -236,7 +236,7 @@ func TestWALIOV3_FloorAndPwriteFailureRefuse(t *testing.T) {
 	f, p, w := newWALIOTestV3(t, 16*1024, 0)
 	_ = f
 	before := w.logicalHeadV3()
-	if _, err := w.append(walEntryV3{LSN: 1, Type: walEntryBarrier}, 0); !errors.Is(err, errWALFull) {
+	if _, err := w.append(walEntryV3{LSN: 1, Type: walEntryBarrier}, 0, nil); !errors.Is(err, errWALFull) {
 		t.Fatalf("full ring error=%v", err)
 	}
 	if w.logicalHeadV3() != before {
@@ -245,7 +245,7 @@ func TestWALIOV3_FloorAndPwriteFailureRefuse(t *testing.T) {
 	if _, err := p.publish(nil, nil, func(d *descriptorV3) error { d.RetainedTail = 16 * 1024; return nil }); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := w.append(walEntryV3{LSN: 1, Type: walEntryBarrier}, 0); !errors.Is(err, errWALFull) {
+	if _, err := w.append(walEntryV3{LSN: 1, Type: walEntryBarrier}, 0, nil); !errors.Is(err, errWALFull) {
 		t.Fatalf("fallback tail must still pin: %v", err)
 	}
 	if ok, err := p.rolloverIfPinned(); err != nil || !ok {
@@ -253,10 +253,10 @@ func TestWALIOV3_FloorAndPwriteFailureRefuse(t *testing.T) {
 	}
 	calls := 0
 	w.writeAt = func(b []byte, off int64) (int, error) { calls++; return 1, io.ErrShortWrite }
-	if _, err := w.append(walEntryV3{LSN: 1, Type: walEntryBarrier}, 0); !errors.Is(err, errWALPwrite) {
+	if _, err := w.append(walEntryV3{LSN: 1, Type: walEntryBarrier}, 0, nil); !errors.Is(err, errWALPwrite) {
 		t.Fatalf("append failure=%v", err)
 	}
-	if _, err := w.append(walEntryV3{LSN: 1, Type: walEntryBarrier}, 0); !errors.Is(err, errWALPwrite) || calls != 1 {
+	if _, err := w.append(walEntryV3{LSN: 1, Type: walEntryBarrier}, 0, nil); !errors.Is(err, errWALPwrite) || calls != 1 {
 		t.Fatal("failed append retried physical I/O")
 	}
 }
@@ -270,7 +270,7 @@ func TestWALIOV3_EmbeddedRecordInPayloadIsNotScanned(t *testing.T) {
 	}
 	data := make([]byte, d.BlockSize)
 	copy(data[100:], inner)
-	if _, err := w.append(walEntryV3{LSN: 1, Type: walEntryWrite, LBA: 4, Length: d.BlockSize, Data: data}, 0); err != nil {
+	if _, err := w.append(walEntryV3{LSN: 1, Type: walEntryWrite, LBA: 4, Length: d.BlockSize, Data: data}, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 	r, err := scanWALV3(f, d)
@@ -288,7 +288,7 @@ func TestWALIOV3_ConcurrentAppendsHaveUniqueCursors(t *testing.T) {
 	done := make(chan error, 40)
 	// Forty callers race the same first LSN: exactly one may consume it.
 	for n := 0; n < 40; n++ {
-		go func() { _, err := w.append(walEntryV3{LSN: 1, Type: walEntryBarrier}, 0); done <- err }()
+		go func() { _, err := w.append(walEntryV3{LSN: 1, Type: walEntryBarrier}, 0, nil); done <- err }()
 	}
 	deadline := time.NewTimer(5 * time.Second)
 	defer deadline.Stop()
@@ -310,7 +310,7 @@ func TestWALIOV3_ConcurrentAppendsHaveUniqueCursors(t *testing.T) {
 	}
 	// The caller's allocator serializes the subsequent increasing stream.
 	for lsn := uint64(2); lsn <= 40; lsn++ {
-		if _, err := w.append(walEntryV3{LSN: lsn, Type: walEntryBarrier}, 0); err != nil {
+		if _, err := w.append(walEntryV3{LSN: lsn, Type: walEntryBarrier}, 0, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -327,7 +327,7 @@ func TestWALIOV3_CounterRefusalBeforePwrite(t *testing.T) {
 	_, _, w := newWALIOTestV3(t, counterMaxV3-30, counterMaxV3-30)
 	calls := 0
 	w.writeAt = func(b []byte, off int64) (int, error) { calls++; return len(b), nil }
-	if _, err := w.append(walEntryV3{LSN: 1, Type: walEntryBarrier}, 0); !errors.Is(err, ErrCounterExhausted) || calls != 0 {
+	if _, err := w.append(walEntryV3{LSN: 1, Type: walEntryBarrier}, 0, nil); !errors.Is(err, ErrCounterExhausted) || calls != 0 {
 		t.Fatalf("counter error=%v writes=%d", err, calls)
 	}
 }
@@ -347,7 +347,7 @@ func TestWALIOV3_LastRepresentableRecordStillRecovers(t *testing.T) {
 	start := uint64(counterMaxV3) - 70
 	f, p, w := newWALIOTestV3(t, start, start)
 	d := p.current()
-	if _, err := w.append(walEntryV3{LSN: 1, Type: walEntryBarrier}, 0); err != nil {
+	if _, err := w.append(walEntryV3{LSN: 1, Type: walEntryBarrier}, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 	r, err := scanWALV3(f, d)
@@ -357,14 +357,14 @@ func TestWALIOV3_LastRepresentableRecordStillRecovers(t *testing.T) {
 	if len(r.Records) != 1 || r.Frontier != 1 || r.End != counterMaxV3 {
 		t.Fatalf("last representable scan=%+v", r)
 	}
-	if _, err := w.append(walEntryV3{LSN: 2, Type: walEntryBarrier}, 0); !errors.Is(err, ErrCounterExhausted) {
+	if _, err := w.append(walEntryV3{LSN: 2, Type: walEntryBarrier}, 0, nil); !errors.Is(err, ErrCounterExhausted) {
 		t.Fatalf("next append=%v", err)
 	}
 }
 
 func TestWALIOV3_RestoreCursorDoesNotPublishOrResetNonce(t *testing.T) {
 	f, p, w := newWALIOTestV3(t, 0, 0)
-	if _, err := w.append(walEntryV3{LSN: 1, Type: walEntryBarrier}, 0); err != nil {
+	if _, err := w.append(walEntryV3{LSN: 1, Type: walEntryBarrier}, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 	r, err := scanWALV3(f, p.current())
@@ -420,7 +420,7 @@ func TestWALIOV3_UncertainPublisherStopsExistingAndNewWriters(t *testing.T) {
 			}
 			writes := 0
 			w.writeAt = func(b []byte, off int64) (int, error) { writes++; return f.WriteAt(b, off) }
-			if _, err := w.append(walEntryV3{LSN: 1, Type: walEntryBarrier}, 0); err == nil {
+			if _, err := w.append(walEntryV3{LSN: 1, Type: walEntryBarrier}, 0, nil); err == nil {
 				t.Fatal("existing writer accepted uncertain publication")
 			}
 			if writes != 0 {
