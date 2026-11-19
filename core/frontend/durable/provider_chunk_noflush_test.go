@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
 	"github.com/seaweedfs/seaweed-block/core/recovery"
@@ -14,6 +16,19 @@ import (
 	"testing"
 	"time"
 )
+
+// Preserve the typed backend cause alongside the actual NVMe handler result.
+// This test submits writes synchronously, so lastError has one caller.
+type noFlushBackend struct {
+	frontend.Backend
+	lastError error
+}
+
+func (b *noFlushBackend) Write(ctx context.Context, offset int64, data []byte) (int, error) {
+	n, err := b.Backend.Write(ctx, offset, data)
+	b.lastError = err
+	return n, err
+}
 
 // Public provider + actual NVMe handler, file-backed v3 with the default
 // 64 MiB WAL. No injected I/O failures, private selector, or flusher control.
@@ -63,8 +78,10 @@ func runNoClientFlushBurst(t *testing.T, mode storage.WMode) {
 	}
 	syncsBefore := ws.WALSyncCount()
 	var durations []time.Duration
+	busyCount := 0
 	t.Logf("before HEAD gen=%d remoteLSN=%d cp=%d next=%d retention=%d", before.Gen, before.RemoteLSN, ws.CheckpointLSN(), ws.NextLSN(), ws.RecoveryRetentionLSNs())
-	h := nvme.NewIOHandler(nvme.HandlerConfig{Backend: be, BlockSize: 4096, VolumeSize: 1 << 30})
+	recorded := &noFlushBackend{Backend: be}
+	h := nvme.NewIOHandler(nvme.HandlerConfig{Backend: recorded, BlockSize: 4096, VolumeSize: 1 << 30})
 	data := make([]byte, transfer)
 	start := time.Now()
 	for off := 0; off < total; off += transfer {
@@ -73,14 +90,50 @@ func runNoClientFlushBurst(t *testing.T, mode storage.WMode) {
 				binary.LittleEndian.PutUint64(data[i:i+8], uint64(off+i))
 			}
 		}
-		writeStart := time.Now()
-		r := h.Handle(ctx, nvme.IOCommand{Opcode: 0x01, NSID: 1, SLBA: uint64(off / 4096), NLB: transfer / 4096, Data: data})
-		durations = append(durations, time.Since(writeStart))
-		if r.AsError() != nil {
-			dump := make([]byte, 2<<20)
-			n := runtime.Stack(dump, true)
-			t.Logf("TIMEOUT STACKS\n%s", dump[:n])
-			t.Fatalf("NO FLUSH write bytes=%d elapsed=%v result=%+v cp=%d next=%d", off, time.Since(start), r, ws.CheckpointLSN(), ws.NextLSN())
+		retryDeadline := time.Now().Add(30 * time.Second)
+		cpBefore := ws.CheckpointLSN()
+		retried := false
+		for {
+			writeStart := time.Now()
+			r := h.Handle(ctx, nvme.IOCommand{Opcode: 0x01, NSID: 1, SLBA: uint64(off / 4096), NLB: transfer / 4096, Data: data})
+			elapsed := time.Since(writeStart)
+			durations = append(durations, elapsed)
+			if elapsed >= 5*time.Second || time.Since(start) >= 2*time.Minute || time.Now().After(retryDeadline) {
+				dump := make([]byte, 2<<20)
+				n := runtime.Stack(dump, true)
+				t.Logf("TIMEOUT STACKS\n%s", dump[:n])
+				t.Fatalf("NO FLUSH exceeded wait bound bytes=%d attempt=%v total=%v busy=%d result=%+v cp=%d next=%d", off, elapsed, time.Since(start), busyCount, r, ws.CheckpointLSN(), ws.NextLSN())
+			}
+			if r.AsError() == nil {
+				if retried {
+					t.Logf("NO FLUSH resumed bytes=%d cp=%d->%d next=%d syncs=%d busy=%d", off, cpBefore, ws.CheckpointLSN(), ws.NextLSN(), ws.WALSyncCount(), busyCount)
+				}
+				break
+			}
+			if !errors.Is(recorded.lastError, frontend.ErrBackendBusy) || r.SCT != nvme.SCTGeneric || r.SC != nvme.SCNamespaceNotReady {
+				t.Fatalf("NO FLUSH non-retryable write bytes=%d result=%+v cause=%v", off, r, recorded.lastError)
+			}
+			busyCount++
+			retried = true
+			t.Logf("NO FLUSH retry bytes=%d busy=%d attempt=%v cp=%d next=%d syncs=%d", off, busyCount, elapsed, ws.CheckpointLSN(), ws.NextLSN(), ws.WALSyncCount())
+			if busyCount == 1 {
+				passiveStart := time.Now()
+				cpAtBusy := ws.CheckpointLSN()
+				target := ws.NextLSN() - 1
+				cpObserved := cpAtBusy
+				// Getters only: no Write, Sync, NotifyUrgent or Close may
+				// drive progress before the first retry.
+				for cpAtBusy < target && cpObserved <= cpAtBusy && time.Since(passiveStart) < 10*time.Second {
+					time.Sleep(25 * time.Millisecond)
+					cpObserved = ws.CheckpointLSN()
+				}
+				t.Logf("NO FLUSH passive bytes=%d wait=%v cpBefore=%d cpAtBusy=%d cpObserved=%d target=%d", off, time.Since(passiveStart), cpBefore, cpAtBusy, cpObserved, target)
+				if time.Since(passiveStart) >= 10*time.Second || (cpAtBusy < target && cpObserved <= cpAtBusy) {
+					t.Fatalf("NO FLUSH passive checkpoint did not advance without another write: bytes=%d cp=%d busy=%d", off, cpObserved, busyCount)
+				}
+			}
+			// Retry the identical command; no caller Flush drives reclamation.
+			time.Sleep(25 * time.Millisecond)
 		}
 		if (off+transfer)%(16*1024*1024) == 0 {
 			t.Logf("NO FLUSH progress bytes=%d elapsed=%v cp=%d next=%d", off+transfer, time.Since(start), ws.CheckpointLSN(), ws.NextLSN())
@@ -109,7 +162,7 @@ func runNoClientFlushBurst(t *testing.T, mode storage.WMode) {
 	if mode == storage.WModeStrict {
 		fsyncs *= 2
 	}
-	t.Logf("COST mode=%d bytes=%d pressureBatches=%d internalFsyncsPerGiB=%.2f writeP99=%v max=%v", mode, total, batches, float64(fsyncs)/(float64(total)/(1<<30)), durations[(len(durations)-1)*99/100], durations[len(durations)-1])
+	t.Logf("COST mode=%d bytes=%d busy=%d pressureBatches=%d internalFsyncsPerGiB=%.2f attemptP99=%v maxAttempt=%v", mode, total, busyCount, batches, float64(fsyncs)/(float64(total)/(1<<30)), durations[(len(durations)-1)*99/100], durations[len(durations)-1])
 	after, err := remote.GetHead(ctx)
 	if err != nil {
 		t.Fatal(err)

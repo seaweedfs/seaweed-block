@@ -279,7 +279,7 @@ snapshot lifetime; local persistence does not bypass it.
   checkpoint, both-slot floor and dirty-reference retirement; I4, with healthy
   local progress and no guest Sync, the reuse floor advances. Enforced by
   `syncWALBatchV3Internal`, `persistOwnedMapCheckpointV3` and the existing reclaim
-  publisher. Tests: `TestWALStoreV3NoClientSyncSixRings`,
+  publisher. Tests: `TestWALStoreV3WriteBudgetIncludesPostAdmissionWait`, `TestWALStoreV3WriteContextDeadlineIncludesCaptureWait`, `TestStorageBackendWriteKeepsOneDeadlineAcrossBatches`, `TestSessionWriteBudgetIncludesDispatchQueue`, `TestWALStoreV3NoClientSyncSixRings`,
   `TestWALStoreV3PressureSyncFaultDoesNotPublishFrontiers`,
   `TestWALStoreV3PressureSyncSkipsInstalling`,
   `TestWALStoreV3PressureProgressWithPendingCutOrClose` and

@@ -102,6 +102,9 @@ func (a *walAdmission) Acquire(timeout time.Duration) error {
 
 func (a *walAdmission) acquireContext(ctx context.Context, timeout time.Duration) error {
 	if err := ctx.Err(); err != nil {
+		if fault := a.terminalFault(); fault != nil {
+			return fault
+		}
 		return admissionContextError(err)
 	}
 	deadline := time.NewTimer(timeout)
@@ -126,6 +129,7 @@ func (a *walAdmission) acquireContext(ctx context.Context, timeout time.Duration
 			a.notifyFn()
 			select {
 			case <-ctx.Done():
+				a.hardPressureWaitNs.Add(time.Since(hardStart).Nanoseconds())
 				if err := a.terminalFault(); err != nil {
 					return err
 				}
