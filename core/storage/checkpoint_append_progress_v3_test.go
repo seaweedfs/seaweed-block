@@ -656,3 +656,37 @@ func TestCheckpointV3_HeldHydrationWithLocalWriteAndFlush(t *testing.T) {
 		})
 	}
 }
+
+func TestCheckpointV3_DefiniteCutClearInvalidatesHeldProof(t *testing.T) {
+	s, _ := newMappedCheckpointStoreV3(t)
+	layer := mustAttach(t, s, newFakeChunkRemote(), ctConfig(1))
+	writeSynced(t, s, 1, 1)
+	if err := s.flusher.flushOnce(); err != nil {
+		t.Fatal(err)
+	}
+	held, err := s.prepareOwnedMapCheckpointV3(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.v3.mapEntries[0].Unknown {
+		t.Fatal("setup: no UNKNOWN to clear")
+	}
+	if _, err := layer.Cut(ctTimeout(t)); err != nil {
+		t.Fatal(err)
+	}
+	if s.v3.mapEntries[0].Unknown {
+		t.Fatal("definite cut did not clear UNKNOWN")
+	}
+	// Inspect the proof itself so the newer map generation cannot mask a missing
+	// clear-invalidation guard in the publication refusal below.
+	if held.proof.validV3(s.v3.mapProof) {
+		t.Fatal("capture UNKNOWN clearing left the old proof valid")
+	}
+	before := s.v3.pub.current()
+	if _, err := s.v3.pub.publishMapV3(&s.mu, nil, held, nil); !errors.Is(err, ErrMapCoverageStale) {
+		t.Fatalf("old capture proof: %v", err)
+	}
+	if s.v3.pub.current() != before {
+		t.Fatal("capture-stale candidate changed a slot")
+	}
+}
