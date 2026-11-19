@@ -1048,9 +1048,15 @@ func (s *WALStore) WriteInstrumentation() WriteInstrumentationStatus {
 // from the WAL; clean LBAs are served from the extent.
 func (s *WALStore) Read(lba uint32) ([]byte, error) { return s.ReadContext(context.Background(), lba) }
 
-func (s *WALStore) ReadContext(ctx context.Context, lba uint32) ([]byte, error) {
+func (s *WALStore) ReadContext(ctx context.Context, lba uint32) (data []byte, err error) {
 	ctx, cancel := context.WithTimeout(ctx, defaultHydrationWait)
 	defer cancel()
+	defer func() {
+		if err == nil && ctx.Err() != nil {
+			data = nil
+			err = hydrationPending(ctx.Err())
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return nil, hydrationPending(err)
 	}

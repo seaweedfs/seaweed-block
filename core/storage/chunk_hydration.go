@@ -88,6 +88,11 @@ func (l *chunkLayerImpl) OnReadMissContext(ctx context.Context, lba uint64) ([]b
 			hook(idx)
 		}
 		select {
+		case <-l.ctx.Done():
+			l.stMu.Lock()
+			f.waiters--
+			l.stMu.Unlock()
+			return nil, errChunkLayerClosed
 		case <-f.done:
 		case <-ctx.Done():
 			// A completed fault wins a simultaneous caller deadline.
