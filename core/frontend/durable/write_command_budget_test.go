@@ -3,6 +3,7 @@ package durable_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -75,6 +76,68 @@ func TestStorageBackendExpiredWriteDoesNotAppend(t *testing.T) {
 		n, err := b.Write(ctx, 0, make([]byte, size))
 		if n != 0 || !errors.Is(err, frontend.ErrBackendBusy) || s.NextLSN() != before {
 			t.Fatalf("expired write n=%d err=%v next=%d", n, err, s.NextLSN())
+		}
+	}
+}
+
+type deadlineAckStore struct{ storage.LogicalStorage }
+
+func (s *deadlineAckStore) WriteContext(ctx context.Context, lba uint32, p []byte) (uint64, error) {
+	<-ctx.Done()
+	return s.LogicalStorage.Write(lba, p)
+}
+func (s *deadlineAckStore) WriteBatch(lba uint32, blocks [][]byte) ([]uint64, error) {
+	var lsns []uint64
+	for i, p := range blocks {
+		lsn, err := s.LogicalStorage.Write(lba+uint32(i), p)
+		if err != nil {
+			return lsns, err
+		}
+		lsns = append(lsns, lsn)
+	}
+	return lsns, nil
+}
+func (s *deadlineAckStore) WriteBatchContext(ctx context.Context, lba uint32, blocks [][]byte) ([]uint64, error) {
+	<-ctx.Done()
+	return s.WriteBatch(lba, blocks)
+}
+func TestStorageBackendRequiredObserverDeadlineStaysRetryable(t *testing.T) {
+	for _, batch := range []bool{false, true} {
+		for _, physical := range []bool{false, true} {
+			t.Run(fmt.Sprintf("batch=%t/physical=%t", batch, physical), func(t *testing.T) {
+				id := frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1}
+				s := &deadlineAckStore{storage.NewBlockStore(8, 4096)}
+				b := durable.NewStorageBackend(s, newStubView(healthyProj(id)), id)
+				b.SetOperational(true, "test")
+				injected := errors.New("physical observer failure")
+				outcome := func(ctx context.Context) error {
+					if physical {
+						return errors.Join(injected, ctx.Err())
+					}
+					return fmt.Errorf("ack wait: %w", ctx.Err())
+				}
+				b.SetWriteObserver(batchWriteObserverFunc{writeObserverFunc: writeObserverFunc{observe: func(ctx context.Context, _ uint32, _ uint64, _ []byte) error { return outcome(ctx) }}, observeBatch: func(ctx context.Context, _ uint32, _ []uint64, _ [][]byte) error { return outcome(ctx) }})
+				b.SetWriteAckPolicy(durable.WriteAckRequireObserverAck)
+				ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+				defer cancel()
+				size := 4096
+				if batch {
+					size *= 2
+				}
+				n, err := b.Write(ctx, 0, make([]byte, size))
+				if n != size || !errors.Is(err, durable.ErrReplicationAckUnavailable) {
+					t.Fatalf("committed error n=%d err=%v", n, err)
+				}
+				if physical {
+					if !errors.Is(err, injected) || errors.Is(err, frontend.ErrBackendBusy) {
+						t.Fatalf("physical fault masked: %v", err)
+					}
+				} else {
+					if !errors.Is(err, frontend.ErrBackendBusy) || !errors.Is(err, context.DeadlineExceeded) {
+						t.Fatalf("observer deadline lost retryability: %v", err)
+					}
+				}
+			})
 		}
 	}
 }
