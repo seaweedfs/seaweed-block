@@ -1,9 +1,7 @@
 package transport
 
 import (
-	"errors"
 	"net"
-	"os"
 	"testing"
 	"time"
 
@@ -25,16 +23,27 @@ func g2Dial(t *testing.T, addr string) net.Conn {
 }
 
 // g2Refused sends one mutating frame and reports whether the listener closed
-// the connection (refusal) rather than leaving it open (accepted).
-func g2Refused(t *testing.T, addr string, msgType byte, payload []byte) bool {
+// the connection (refusal) rather than accepting it. Handshake, no timer: a
+// probe at the same lineage follows on the same connection; the listener
+// handles frames in order, so it either closes the connection (refused) or
+// answers the probe after the frame's effect (accepted).
+func g2Refused(t *testing.T, addr string, msgType byte, payload []byte, l RecoveryLineage) bool {
 	t.Helper()
 	conn := g2Dial(t, addr)
 	if err := WriteMsg(conn, msgType, payload); err != nil {
 		t.Fatal(err)
 	}
-	_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
-	_, err := conn.Read(make([]byte, 1))
-	return err != nil && !errors.Is(err, os.ErrDeadlineExceeded)
+	if err := WriteMsg(conn, MsgProbeReq, EncodeProbeReq(ProbeRequest{Lineage: l})); err != nil {
+		return true // the listener already closed the connection
+	}
+	replyType, _, err := ReadMsg(conn)
+	if err != nil {
+		return true
+	}
+	if replyType != MsgProbeResp {
+		t.Fatalf("frame 0x%02x followed by a probe answered 0x%02x", msgType, replyType)
+	}
+	return false
 }
 
 func g2ShipPayload(l RecoveryLineage, lsn uint64) []byte {
@@ -46,13 +55,13 @@ func TestG2_PrimaryListenerRefusesMutationsButAnswersProbes(t *testing.T) {
 	listener.FenceAsPrimary(2)
 
 	newer := RecoveryLineage{SessionID: 9, Epoch: 3, EndpointVersion: 1, TargetLSN: 1}
-	if !g2Refused(t, listener.Addr(), MsgShipEntry, g2ShipPayload(newer, 1)) {
+	if !g2Refused(t, listener.Addr(), MsgShipEntry, g2ShipPayload(newer, 1), newer) {
 		t.Fatal("a primary applied an inbound ship (even at a higher epoch)")
 	}
-	if !g2Refused(t, listener.Addr(), MsgRecoveryLaneStart, EncodeLineage(newer)) {
+	if !g2Refused(t, listener.Addr(), MsgRecoveryLaneStart, EncodeLineage(newer), newer) {
 		t.Fatal("a primary accepted a recovery lane start")
 	}
-	if !g2Refused(t, listener.Addr(), MsgRebuildBlock, EncodeRebuildBlock(newer, 0, make([]byte, 4096))) {
+	if !g2Refused(t, listener.Addr(), MsgRebuildBlock, EncodeRebuildBlock(newer, 0, make([]byte, 4096)), newer) {
 		t.Fatal("a primary accepted a rebuild block")
 	}
 
@@ -72,15 +81,15 @@ func TestG2_FloorStaysWhenThePrimaryLaterSupportsAnother(t *testing.T) {
 	listener.FenceAsPrimary(2)
 	listener.AdmitAsReplica(3) // superseded, now supporting the epoch-3 primary
 
-	if !g2Refused(t, listener.Addr(), MsgShipEntry, g2ShipPayload(RecoveryLineage{SessionID: 1, Epoch: 2, EndpointVersion: 1, TargetLSN: 1}, 1)) {
+	if !g2Refused(t, listener.Addr(), MsgShipEntry, g2ShipPayload(RecoveryLineage{SessionID: 1, Epoch: 2, EndpointVersion: 1, TargetLSN: 1}, 1), RecoveryLineage{SessionID: 1, Epoch: 2, EndpointVersion: 1, TargetLSN: 1}) {
 		t.Fatal("a ship below the floor (epoch 2 < 3) was accepted")
 	}
-	if g2Refused(t, listener.Addr(), MsgShipEntry, g2ShipPayload(RecoveryLineage{SessionID: 2, Epoch: 3, EndpointVersion: 1, TargetLSN: 1}, 1)) {
+	if g2Refused(t, listener.Addr(), MsgShipEntry, g2ShipPayload(RecoveryLineage{SessionID: 2, Epoch: 3, EndpointVersion: 1, TargetLSN: 1}, 1), RecoveryLineage{SessionID: 2, Epoch: 3, EndpointVersion: 1, TargetLSN: 1}) {
 		t.Fatal("the epoch-3 primary's ship was refused by its supporting replica")
 	}
 
 	listener.AdmitAsReplica(1) // a stale, lower admission never lowers the floor
-	if !g2Refused(t, listener.Addr(), MsgShipEntry, g2ShipPayload(RecoveryLineage{SessionID: 3, Epoch: 2, EndpointVersion: 1, TargetLSN: 1}, 2)) {
+	if !g2Refused(t, listener.Addr(), MsgShipEntry, g2ShipPayload(RecoveryLineage{SessionID: 3, Epoch: 2, EndpointVersion: 1, TargetLSN: 1}, 2), RecoveryLineage{SessionID: 3, Epoch: 2, EndpointVersion: 1, TargetLSN: 1}) {
 		t.Fatal("the floor went down after a lower admission")
 	}
 }
@@ -180,7 +189,7 @@ func TestG2_FenceReportsAMutationStuckPastTheBound(t *testing.T) {
 		t.Fatal("FenceAsPrimary returned nil with a mutation still applying past the bound")
 	}
 	newer := RecoveryLineage{SessionID: 9, Epoch: 3, EndpointVersion: 1, TargetLSN: 1}
-	if !g2Refused(t, listener.Addr(), MsgShipEntry, g2ShipPayload(newer, 2)) {
+	if !g2Refused(t, listener.Addr(), MsgShipEntry, g2ShipPayload(newer, 2), newer) {
 		t.Fatal("after a timed-out fence the listener accepted a new ship")
 	}
 }
