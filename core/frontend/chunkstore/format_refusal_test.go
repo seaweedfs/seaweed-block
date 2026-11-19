@@ -26,6 +26,11 @@ func TestManifestFormatUpgradeRejectsUnsupportedOrInconsistentObjects(t *testing
 		{"segment-unknown", true, func(v map[string]any) { v["future"] = true }},
 		{"segment-max", true, func(v map[string]any) { v["max_birth_lsn"] = 41 }},
 		{"segment-max-missing", true, func(v map[string]any) { delete(v, "max_birth_lsn") }},
+		{"computed-max", true, func(v map[string]any) {
+			for _, entry := range v["chunks"].(map[string]any) {
+				entry.(map[string]any)["birth_lsn"] = 41
+			}
+		}},
 		{"encoding", true, func(v map[string]any) { v["chunks"].(map[string]any)["0"].(map[string]any)["enc"] = "zstd" }},
 		{"birth-future", true, func(v map[string]any) { v["chunks"].(map[string]any)["0"].(map[string]any)["birth_lsn"] = 43 }},
 		{"birth-missing", true, func(v map[string]any) { delete(v["chunks"].(map[string]any)["0"].(map[string]any), "birth_lsn") }},
