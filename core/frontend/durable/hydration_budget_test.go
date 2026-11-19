@@ -10,8 +10,49 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
+
+type faultyHydrationRemote struct {
+	storage.ChunkRemote
+	fault   error
+	corrupt bool
+}
+
+func (r *faultyHydrationRemote) Get(ctx context.Context, key string) ([]byte, error) {
+	if r.fault != nil {
+		return nil, r.fault
+	}
+	b, err := r.ChunkRemote.Get(ctx, key)
+	if err == nil && r.corrupt && len(b) > 0 {
+		b = append([]byte(nil), b...)
+		b[0] ^= 0xff
+	}
+	return b, err
+}
+
+func TestDurableHydration_NVMePreservesPhysicalAndHashErrors(t *testing.T) {
+	for _, corrupt := range []bool{false, true} {
+		t.Run(map[bool]string{false: "joined physical", true: "hash"}[corrupt], func(t *testing.T) {
+			r := &faultyHydrationRemote{ChunkRemote: seededRemote(t), corrupt: corrupt}
+			if !corrupt {
+				r.fault = errors.Join(context.DeadlineExceeded, errors.New("physical remote read failure"))
+			}
+			p := chunkProvider(t, t.TempDir(), r, v1View(), 0)
+			openRecovered(t, p)
+			b, err := p.Open(context.Background(), "v1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := nvme.NewIOHandler(nvme.HandlerConfig{Backend: b, BlockSize: 4096, VolumeSize: pcBlocks * 4096})
+			res := h.Handle(context.Background(), nvme.IOCommand{Opcode: 2, NSID: 1, SLBA: 33, NLB: 1})
+			if res.SC != nvme.SCInternalError || len(res.Data) != 0 {
+				t.Fatalf("terminal hydration failure: %+v", res)
+			}
+		})
+	}
+}
 
 type pacedHydrationRemote struct {
 	storage.ChunkRemote

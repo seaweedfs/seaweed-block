@@ -105,7 +105,7 @@ func TestChunkHydration_ConcurrentReadersShareOneGet(t *testing.T) {
 }
 
 func TestChunkHydration_QueueAndWorkerLimitsAreBounded(t *testing.T) {
-	s, _, remote, registered := hydrationFixture(t, 1, 2)
+	s, layer, remote, registered := hydrationFixture(t, 1, 2)
 	entered, release := holdGets(t, remote)
 	defer release()
 	first := startHydrationRead(t, s, context.Background(), 8)
@@ -124,6 +124,10 @@ func TestChunkHydration_QueueAndWorkerLimitsAreBounded(t *testing.T) {
 	}
 	if got := remote.stats().gets; got != 1 {
 		t.Fatalf("worker bound exceeded: Gets=%d", got)
+	}
+	stats := layer.Stats().Hydration
+	if stats.WorkerLimit != 1 || stats.QueueDepth != 2 || stats.Active != 1 || stats.Queued != 1 || stats.WaitRefusals != 2 || stats.Fetches != 1 {
+		t.Fatalf("hydration status does not reflect bounded pressure: %+v", stats)
 	}
 	release()
 	if r := hydrationOutcome(t, first); r.err != nil {
