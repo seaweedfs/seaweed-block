@@ -83,15 +83,12 @@ func bindAndGrant(t *testing.T, p *Publisher, volume, replica string) WorkspaceL
 
 // waitExtenders joins every admitted extender (tests only; no concurrent
 // admission while waiting).
+// waitExtenders joins every admitted extender. No wall-clock bound (#227):
+// extenders are finite (each makes at most one store write), so the join is
+// the progress condition; a hang is reported by the go test timeout.
 func waitExtenders(t *testing.T, p *Publisher) {
 	t.Helper()
-	done := make(chan struct{})
-	go func() { p.extWG.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("extenders did not finish")
-	}
+	p.extWG.Wait()
 }
 
 // assertLeaseViewMatches checks INV-LEASE-VIEW-001: with p.mu held, every
@@ -622,6 +619,7 @@ func TestWorkspaceLeaseConcurrentRenewalsWritersExtendersClose(t *testing.T) {
 	var holdOnce, releaseOnce sync.Once
 	releaseHold := func() { releaseOnce.Do(func() { close(heldRelease) }) }
 	var classifying atomic.Bool
+	var holding atomic.Bool // set when the extension write is held, before it blocks
 	hs.setBefore(func(r DurableRecord) error {
 		time.Sleep(5 * time.Millisecond) // a slow store
 		if !classifying.Load() || r.Workspace == nil || r.Workspace.Lease == nil {
@@ -640,6 +638,7 @@ func TestWorkspaceLeaseConcurrentRenewalsWritersExtendersClose(t *testing.T) {
 			first := false
 			holdOnce.Do(func() { first = true })
 			if first {
+				holding.Store(true) // before the hold: a renewal started after this saw it
 				close(heldEntered)
 				<-heldRelease
 			}
@@ -668,6 +667,7 @@ func TestWorkspaceLeaseConcurrentRenewalsWritersExtendersClose(t *testing.T) {
 	classifying.Store(true)
 
 	var grants [n]atomic.Int64
+	var underHold [n]atomic.Int64 // grants of calls that started while the extension write was held
 	var maxGrant [n]atomic.Int64
 	var slowest atomic.Int64
 	stop := make(chan struct{})
@@ -714,6 +714,7 @@ func TestWorkspaceLeaseConcurrentRenewalsWritersExtendersClose(t *testing.T) {
 					return
 				default:
 				}
+				fresh := holding.Load() // the call starts while the extension write is held
 				start := time.Now()
 				l, err := p.RenewWorkspaceLease(ctx, vol(i), "r", 1)
 				if d := int64(time.Since(start)); d > slowest.Load() {
@@ -721,6 +722,9 @@ func TestWorkspaceLeaseConcurrentRenewalsWritersExtendersClose(t *testing.T) {
 				}
 				if err == nil && !l.Revoking {
 					grants[i].Add(1)
+					if fresh {
+						underHold[i].Add(1)
+					}
 					if l.ExpiresAtNS > maxGrant[i].Load() {
 						maxGrant[i].Store(l.ExpiresAtNS)
 					}
@@ -731,29 +735,22 @@ func TestWorkspaceLeaseConcurrentRenewalsWritersExtendersClose(t *testing.T) {
 	}
 
 	// Handshake 1: the first extension write is held inside the store.
-	select {
-	case <-heldEntered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("no horizon-extension write reached the store within 5 s")
-	}
+	<-heldEntered // progress, no timer (#227): renewers keep triggering extensions
 	// Handshake 2: renewals keep succeeding while it is held.
-	var atHold [n]int64
-	for _, i := range eligible {
-		atHold[i] = grants[i].Load()
-	}
-	for wait := time.Now().Add(2 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+	// Progress, no timer (#227): every eligible volume gains a grant from a call
+	// that STARTED while the extension write was held (a reply computed before
+	// the hold does not count). Renewals that waited for it would never return.
+	for {
 		all := true
 		for _, i := range eligible {
-			if grants[i].Load() <= atHold[i] {
+			if underHold[i].Load() == 0 {
 				all = false
 			}
 		}
 		if all {
 			break
 		}
-		if time.Now().After(wait) {
-			t.Fatal("renewals did not succeed while an extension write was held")
-		}
+		time.Sleep(5 * time.Millisecond)
 	}
 	// Writers and Close start while the extension write is held.
 	writersStarted = true
