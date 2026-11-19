@@ -72,6 +72,7 @@ func TestCutCOWV3_RemoteUploadStartsAfterWindowCloses(t *testing.T) {
 	s, l, f, gate := cowFixture(t)
 	entered, release := holdPuts(t, f)
 	done, errs := cowStartCut(t, l, gate)
+	t.Cleanup(release) // unblock remote I/O before cowStartCut's failure join
 	gate.unblock()
 	waitKey(t, entered, "upload after local copy")
 	if l.cowActive.Load() != nil {
