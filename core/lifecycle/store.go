@@ -108,9 +108,6 @@ func (s *FileStore) CreateVolume(spec VolumeSpec) (VolumeRecord, error) {
 	if err := validateSpec(spec); err != nil {
 		return VolumeRecord{}, err
 	}
-	if err := geometry.ValidateVolumeSize(spec.SizeBytes); err != nil {
-		return VolumeRecord{}, fmt.Errorf("%w: %w", ErrInvalidVolumeSpec, err)
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if existing, ok := s.records[spec.VolumeID]; ok {
@@ -128,6 +125,9 @@ func (s *FileStore) CreateVolume(spec VolumeSpec) (VolumeRecord, error) {
 			return merged, nil
 		}
 		return existing, nil
+	}
+	if err := geometry.ValidateVolumeSize(spec.SizeBytes); err != nil {
+		return VolumeRecord{}, fmt.Errorf("%w: %w", ErrInvalidVolumeSpec, err)
 	}
 	rec := VolumeRecord{Spec: spec}
 	if err := s.putLocked(rec); err != nil {

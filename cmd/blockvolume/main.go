@@ -9,6 +9,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/seaweedfs/seaweed-block/core/geometry"
 	"net"
 	"os"
 	"os/exec"
@@ -268,6 +269,11 @@ func parseFlags(args []string) (flags, error) {
 		}
 		if f.durableImpl != "walstore" {
 			return flags{}, fmt.Errorf("--durable-wal-recovery-test-disable-flusher requires --durable-impl=walstore")
+		}
+	}
+	if f.durableRoot != "" {
+		if err := geometry.ValidateBlockGeometry(uint64(f.durableBlocks), uint64(f.durableBlockSize)); err != nil {
+			return flags{}, fmt.Errorf("--durable-blocks/--durable-blocksize: %w", err)
 		}
 	}
 	if f.iscsiCHAPUser == "" {

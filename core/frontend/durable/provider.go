@@ -28,6 +28,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/seaweedfs/seaweed-block/core/geometry"
 	"io"
 	"log"
 	"os"
@@ -595,6 +596,10 @@ func (p *DurableProvider) openOrCreate(volumeID string) (*volHandle, error) {
 			return nil, fmt.Errorf("durable: stat fresh marker: %w", err)
 		}
 		return h, nil
+	}
+	// Existing storage ignores create geometry; admission precedes all fresh sidecars.
+	if err := geometry.ValidateBlockGeometry(uint64(p.cfg.NumBlocks), uint64(p.cfg.BlockSize)); err != nil {
+		return nil, err
 	}
 	if p.cfg.Impl == ImplWALStoreChunk {
 		// Durable before the volume file exists: a crash anywhere between
