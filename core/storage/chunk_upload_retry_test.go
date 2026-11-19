@@ -164,6 +164,38 @@ func TestChunkCutUploadRetryHonorsDeadlineAndRetainsDirt(t *testing.T) {
 	assertEveryHeadIsPrefixImage(t, f, w)
 }
 
+func TestChunkCutUploadAttemptBoundRetainsDirt(t *testing.T) {
+	s, _ := newChunkTestStore(t)
+	f := newFakeChunkRemote()
+	r := &retryUploadRemote{fakeChunkRemote: f, mode: "down", calls: map[string]int{}}
+	layer := mustAttach(t, s, r, ctConfig(1))
+	w := newWriteLog()
+	w.write(t, s, 0, 0x51)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := layer.Cut(ctx); err == nil {
+		t.Fatal("persistent upload outage published")
+	}
+	r.mu.Lock()
+	if len(r.calls) != 1 {
+		t.Fatalf("retry changed object keys: %v", r.calls)
+	}
+	for _, n := range r.calls {
+		if n != 3 {
+			t.Errorf("single object attempted %d times, want bounded 3", n)
+		}
+	}
+	r.mode = "ok"
+	r.mu.Unlock()
+	if len(f.installedHeads()) != 0 {
+		t.Fatal("failed object published HEAD")
+	}
+	if _, err := layer.Cut(ctTimeout(t)); err != nil {
+		t.Fatal(err)
+	}
+	assertEveryHeadIsPrefixImage(t, f, w)
+}
+
 func TestChunkCutRetrySustainedWritesPastWALWithFlush(t *testing.T) {
 	const walBytes = 64 * 1024
 	s, err := createMappedWALStoreV3ForTest(filepath.Join(t.TempDir(), "volume"), ctNumBlocks, ctBlockSize, walBytes, WModeStrict, ctChunkBlocks)

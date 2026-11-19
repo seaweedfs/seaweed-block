@@ -41,7 +41,7 @@ func (r *cutBudgetRemote) Put(ctx context.Context, key string, data []byte) erro
 	return r.fakeChunkRemote.Put(ctx, key, data)
 }
 
-func TestChunkCutDefaultBudgetSharedAcrossStagesAndWritesProgress(t *testing.T) {
+func TestChunkCutCallerBudgetSharedAcrossStagesAndWritesProgress(t *testing.T) {
 	s, _ := newChunkTestStore(t)
 	f := newFakeChunkRemote()
 	r := &cutBudgetRemote{fakeChunkRemote: f, held: make(chan struct{})}
@@ -55,7 +55,7 @@ func TestChunkCutDefaultBudgetSharedAcrossStagesAndWritesProgress(t *testing.T) 
 			t.Fatal(err)
 		}
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	done := make(chan error, 1)
 	joined := make(chan struct{})
 	t.Cleanup(func() {
@@ -79,8 +79,9 @@ func TestChunkCutDefaultBudgetSharedAcrossStagesAndWritesProgress(t *testing.T) 
 	if len(deadlines) != 3 {
 		t.Fatalf("want two staged and one final upload: %v", deadlines)
 	}
-	if deadlines[0].IsZero() || deadlines[0].Sub(start) > 4*time.Second {
-		t.Fatalf("default cut budget exceeds sub-5s target: %v", deadlines[0].Sub(start))
+	wantDeadline, _ := ctx.Deadline()
+	if !deadlines[0].Equal(wantDeadline) {
+		t.Fatalf("cut replaced caller's deadline: %v, want %v", deadlines[0], wantDeadline)
 	}
 	for _, d := range deadlines {
 		if !d.Equal(deadlines[0]) {
@@ -118,7 +119,7 @@ func TestChunkCutDefaultBudgetSharedAcrossStagesAndWritesProgress(t *testing.T) 
 	select {
 	case err := <-done:
 		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("lost default deadline: %v", err)
+			t.Fatalf("lost caller deadline: %v", err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("cooperative cut did not settle")

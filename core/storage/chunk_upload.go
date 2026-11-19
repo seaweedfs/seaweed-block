@@ -11,10 +11,12 @@ import (
 // putCaptured retries one immutable object, never a whole batch or HEAD CAS.
 // A lost binding reply can turn the next attempt into KeyExists: only exact
 // bytes read from that binding prove completion; a collision is terminal.
+// Bound attempts per object, without imposing a deadline on legitimate work
+// across the whole cut. All attempts still obey the caller's context.
 func (l *chunkLayerImpl) putCaptured(ctx context.Context, key string, data []byte) error {
 	backoff := 100 * time.Millisecond
 	var lastErr error
-	for {
+	for attempt := 1; ; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return errors.Join(lastErr, err)
 		}
@@ -30,6 +32,9 @@ func (l *chunkLayerImpl) putCaptured(ctx context.Context, key string, data []byt
 				return nil
 			}
 			return errChunkKeyExists
+		}
+		if attempt == 3 {
+			return lastErr
 		}
 		timer := time.NewTimer(backoff)
 		select {
