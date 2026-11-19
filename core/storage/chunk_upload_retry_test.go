@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -114,4 +115,34 @@ func TestChunkCutUploadRetryHonorsDeadlineAndRetainsDirt(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertEveryHeadIsPrefixImage(t, f, w)
+}
+
+func TestChunkCutRetrySustainedWritesPastWALWithFlush(t *testing.T) {
+	const walBytes = 64 * 1024
+	s, err := createMappedWALStoreV3ForTest(filepath.Join(t.TempDir(), "volume"), ctNumBlocks, ctBlockSize, walBytes, WModeStrict, ctChunkBlocks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.DisableAutoFlushForRecoveryTest()
+	t.Cleanup(func() { closeBounded(t, s) })
+	f := newFakeChunkRemote()
+	r := &retryUploadRemote{fakeChunkRemote: f, mode: "transient", calls: map[string]int{}}
+	layer := mustAttach(t, s, r, ctConfig(1))
+	w := newWriteLog()
+	for i := 0; i < 96; i++ {
+		w.write(t, s, uint32(i%ctNumBlocks), byte(i+1))
+		if (i+1)%4 == 0 {
+			mustSyncFlush(t, s)
+		}
+		if (i+1)%16 == 0 {
+			if _, err := layer.Cut(ctTimeout(t)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	assertEveryHeadIsPrefixImage(t, f, w)
+	if len(f.installedHeads()) != 6 {
+		t.Fatalf("published %d HEADs", len(f.installedHeads()))
+	}
+	t.Logf("payload=%d > WAL=%d; 24 periodic flushes; 6 cuts with transient upload faults", 96*ctBlockSize, walBytes)
 }
