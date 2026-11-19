@@ -273,6 +273,10 @@ func TestChunkLayer_C3_EveryHeadIsExactUnderConcurrentWrites(t *testing.T) {
 
 // C3 barrier: a write issued while a cut is still copying its chunks does
 // not land until the copy is done, so it can never tear the captured image.
+// It waits for the LOCAL copy only, never for SeaweedFS (design rules 1/2):
+// the copy reads chunk 2's local blocks and releases the chunk; it fetches the
+// absent blocks from HEAD afterwards, so the write completes with every remote
+// fetch held.
 // The copy is held deterministically: on a fresh host the cut's copy of a
 // dirty chunk must fetch that chunk's absent blocks, and the fetch is held.
 func TestChunkLayer_C3_WriteDuringCopyWaitsForTheCut(t *testing.T) {
@@ -296,12 +300,25 @@ func TestChunkLayer_C3_WriteDuringCopyWaitsForTheCut(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	gEntered, gRelease := holdGets(t, f)
+	l := layer.(*chunkLayerImpl)
+	inCopy, releaseCopy := make(chan struct{}), make(chan struct{})
+	var copyOnce, releaseOnce sync.Once
+	unblockCopy := func() { releaseOnce.Do(func() { close(releaseCopy) }) }
+	l.testCOWRead = func(idx uint64, _ bool) {
+		if idx == 2 {
+			copyOnce.Do(func() { close(inCopy) })
+			<-releaseCopy
+		}
+	}
 	late := makeBlock(ctBlockSize, 0xDA)
 	wrote := make(chan error, 1)
 	joined := make(chan struct{})
+	var gRelease func()
 	t.Cleanup(func() {
-		gRelease()
+		unblockCopy()
+		if gRelease != nil {
+			gRelease()
+		}
 		select {
 		case <-joined:
 		case <-time.After(ctLocalBound):
@@ -309,7 +326,9 @@ func TestChunkLayer_C3_WriteDuringCopyWaitsForTheCut(t *testing.T) {
 		}
 	})
 	done := startCapture(t, layer)
-	waitKey(t, gEntered, "the cut's fetch of an absent block in chunk 2")
+	cowWaitSignal(t, inCopy, "the cut copying chunk 2 inside its window")
+	var gEntered chan string
+	gEntered, gRelease = holdGets(t, f) // from here any remote fetch blocks
 	go func() {
 		defer close(joined)
 		_, err := s.Write(10, late)
@@ -318,14 +337,18 @@ func TestChunkLayer_C3_WriteDuringCopyWaitsForTheCut(t *testing.T) {
 	select {
 	case err := <-wrote:
 		t.Fatalf("a write landed while the cut was still copying (err %v); the barrier was released before the copy", err)
-	case <-time.After(200 * time.Millisecond): // the copy is held indefinitely; the write must wait
+	case <-time.After(200 * time.Millisecond): // the copy is held; the write must wait for it
 	}
+	unblockCopy() // the remote stays held: the write may wait only for the local copy
+	if err := waitErr(t, wrote, "write after the local copy, with the remote held"); err != nil {
+		t.Fatal(err)
+	}
+	// The copier fetches chunk 2's absent blocks from HEAD only now, after it
+	// released the entry: the write above completed with that fetch held.
+	waitKey(t, gEntered, "the copier's HEAD fetch of chunk 2's absent blocks, off the write path")
 	gRelease()
 	if err := waitErr(t, done, "held cut"); err != nil {
 		t.Fatalf("held cut: %v", err)
-	}
-	if err := waitErr(t, wrote, "write after the cut"); err != nil {
-		t.Fatal(err)
 	}
 	img := f.imageOf(t, f.stats().head)
 	if !bytes.Equal(blockOf(img, 8), local) {
