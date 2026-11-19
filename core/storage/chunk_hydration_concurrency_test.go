@@ -282,9 +282,10 @@ func TestChunkHydration_CloseWakesCallerAndJoinsUninterruptibleGet(t *testing.T)
 // Only the old generation ignores cancellation; a spare worker can serve the new one.
 type staleHydrationRemote struct {
 	*fakeChunkRemote
-	oldKey           string
-	entered, release chan struct{}
-	once             sync.Once
+	oldKey                 string
+	newEntered, newRelease chan struct{}
+	entered, release       chan struct{}
+	once                   sync.Once
 }
 
 func (r *staleHydrationRemote) Get(ctx context.Context, key string) ([]byte, error) {
@@ -292,6 +293,17 @@ func (r *staleHydrationRemote) Get(ctx context.Context, key string) ([]byte, err
 		r.once.Do(func() { close(r.entered) })
 		<-r.release
 		return r.fakeChunkRemote.Get(context.Background(), key)
+	}
+	if r.newRelease != nil {
+		select {
+		case r.newEntered <- struct{}{}:
+		default:
+		}
+		select {
+		case <-r.newRelease:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 	return r.fakeChunkRemote.Get(ctx, key)
 }
@@ -332,5 +344,64 @@ func TestChunkHydration_NewGenerationDoesNotJoinStaleGet(t *testing.T) {
 	release()
 	if got := hydrationOutcome(t, old); got.err != nil || !bytes.Equal(got.data, makeBlock(ctBlockSize, 0x4c)) {
 		t.Fatalf("old waiter failed to follow new generation: %v", got.err)
+	}
+}
+
+func TestChunkHydration_StaleCompletionKeepsReplacement(t *testing.T) {
+	s, layer, remote, registered := hydrationFixture(t, 2, 64)
+	layer.stMu.Lock()
+	oldRef, newRef := layer.head.Chunks[2], layer.head.Chunks[3]
+	layer.stMu.Unlock()
+	r := &staleHydrationRemote{fakeChunkRemote: remote, oldKey: oldRef.Key, entered: make(chan struct{}), release: make(chan struct{}), newEntered: make(chan struct{}, 1), newRelease: make(chan struct{})}
+	layer.remote = r
+	var oldOnce, newOnce sync.Once
+	releaseOld := func() { oldOnce.Do(func() { close(r.release) }) }
+	releaseNew := func() { newOnce.Do(func() { close(r.newRelease) }) }
+	t.Cleanup(func() { releaseOld(); releaseNew() })
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	old := startHydrationRead(t, s, ctx, 8)
+	waitHydrationRegistration(t, registered, 1)
+	select {
+	case <-r.entered:
+	case <-time.After(ctLocalBound):
+		t.Fatal("old Get not entered")
+	}
+	layer.stMu.Lock()
+	layer.head.Chunks[2] = newRef
+	layer.absentGen[2]++
+	layer.stMu.Unlock()
+	newer := startHydrationRead(t, s, ctx, 8)
+	select {
+	case <-r.newEntered:
+	case <-time.After(ctLocalBound):
+		t.Fatal("replacement Get not entered")
+	}
+	layer.stMu.Lock()
+	replacement := layer.hydration[2]
+	layer.stMu.Unlock()
+	releaseOld()
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	for layer.Stats().Hydration.Active != 1 {
+		select {
+		case <-tick.C:
+		case <-deadline.C:
+			t.Fatal("stale worker did not settle")
+		}
+	}
+	layer.stMu.Lock()
+	kept := layer.hydration[2] == replacement
+	layer.stMu.Unlock()
+	if !kept {
+		t.Fatal("stale completion removed replacement promise")
+	}
+	releaseNew()
+	for _, result := range []<-chan hydrationResult{old, newer} {
+		if got := hydrationOutcome(t, result); got.err != nil || !bytes.Equal(got.data, makeBlock(ctBlockSize, 0x4c)) {
+			t.Fatalf("replacement data: %v", got.err)
+		}
 	}
 }
