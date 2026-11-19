@@ -449,13 +449,7 @@ func headEntry(h storage.ChunkHead) (*filerpb.Entry, error) {
 		if len(h.Chunks) != 0 {
 			return nil, errors.New("chunkstore: data HEAD requires a segmented manifest and geometry")
 		}
-		doc.Chunks = make(map[uint64]refDoc, len(h.Chunks))
-		for idx, ref := range h.Chunks {
-			if ref.Key == "" {
-				return nil, fmt.Errorf("chunkstore: HEAD chunk %d has no key", idx)
-			}
-			doc.Chunks[idx] = refDoc{Key: ref.Key, SHA256: hex.EncodeToString(ref.SHA256[:])}
-		}
+		doc.Chunks = map[uint64]refDoc{}
 	}
 	if h.Segments != nil {
 		if err := validateRoot(h); err != nil {
