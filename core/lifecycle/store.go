@@ -16,6 +16,8 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+
+	"github.com/seaweedfs/seaweed-block/core/geometry"
 )
 
 var (
@@ -123,6 +125,9 @@ func (s *FileStore) CreateVolume(spec VolumeSpec) (VolumeRecord, error) {
 			return merged, nil
 		}
 		return existing, nil
+	}
+	if err := geometry.ValidateVolumeSize(spec.SizeBytes); err != nil {
+		return VolumeRecord{}, fmt.Errorf("%w: %w", ErrInvalidVolumeSpec, err)
 	}
 	rec := VolumeRecord{Spec: spec}
 	if err := s.putLocked(rec); err != nil {

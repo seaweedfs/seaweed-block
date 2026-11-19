@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/geometry"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -134,6 +135,9 @@ func CreateStore(path string, numBlocks uint32, blockSize int) (*Store, error) {
 
 func CreateStoreWithConfig(path string, cfg Config) (*Store, error) {
 	cfg = normalizeConfig(cfg)
+	if err := geometry.ValidateBlockGeometry(uint64(cfg.NumBlocks), uint64(cfg.BlockSize)); err != nil {
+		return nil, err
+	}
 	h, err := headerForConfig(cfg)
 	if err != nil {
 		return nil, err

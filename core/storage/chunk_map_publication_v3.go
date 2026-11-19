@@ -65,6 +65,7 @@ func prepareMapPublicationV3(m *chunkLSNMapV3, d *mapProofEpochV3, g, C uint64, 
 		return nil, e
 	}
 	if !proof.validV3(d) {
+		m.abandonCandidateV3(c) // prepared but never publishable
 		return nil, ErrMapCoverageStale
 	}
 	return &preparedMapPublicationV3{candidate: c, proof: proof}, nil
@@ -137,7 +138,7 @@ func (p *descriptorPublisherV3) publishMapV3(storeMu sync.Locker, snap func(), p
 	if prepared == nil || prepared.candidate == nil {
 		return descriptorV3{}, ErrMapCoverageStale
 	}
-	return p.publishWithMapV3(storeMu, snap, func(d *descriptorV3) error {
+	d, err := p.publishWithMapV3(storeMu, snap, func(d *descriptorV3) error {
 		if mutate != nil {
 			if e := mutate(d); e != nil {
 				return e
@@ -146,6 +147,18 @@ func (p *descriptorPublisherV3) publishMapV3(storeMu sync.Locker, snap func(), p
 		*d = prepared.candidate.descriptor(*d)
 		return nil
 	}, prepared)
+	if err != nil {
+		// Definite abandon: unless the slot I/O started (the candidate is
+		// the uncertain one, pinned until reopen), no slot can name it.
+		c := prepared.candidate
+		p.descMu.Lock()
+		unc := p.uncertain
+		if unc == nil || unc.MapRootLocator != c.rootOffset || unc.MapGeneration != c.generation {
+			prepared.abandonV3()
+		}
+		p.descMu.Unlock()
+	}
+	return d, err
 }
 
 // invalidateMapProofV3 is called under WALStore.mu at a lifecycle boundary.
@@ -187,7 +200,12 @@ func openDescriptorMapV3(path string, selected descriptorV3, fallback *descripto
 		if fallback.UUID != selected.UUID || fallback.MapLineage != selected.MapLineage || !sameGeometryV3(*fallback, selected) {
 			err = ErrMapInvalid
 		} else {
-			_, _, err = readChunkLSNMapV3(m.fd, *fallback, cb)
+			var refs []mapPageRefV3
+			if _, refs, err = readChunkLSNMapV3(m.fd, *fallback, cb); err == nil {
+				if sh, e := mapShapeForV3(*fallback, cb); e == nil {
+					m.registerRootV3(fallback.MapGeneration, fallback.MapRootLocator, sh.aligned, refs)
+				}
+			}
 		}
 		if err != nil {
 			_ = m.Close()

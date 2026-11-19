@@ -27,6 +27,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
 	"github.com/seaweedfs/seaweed-block/core/frontend/nvmerdma"
 	"github.com/seaweedfs/seaweed-block/core/frontend/ublk"
+	"github.com/seaweedfs/seaweed-block/core/geometry"
 	"github.com/seaweedfs/seaweed-block/core/host/volume"
 	"github.com/seaweedfs/seaweed-block/core/recovery"
 	"github.com/seaweedfs/seaweed-block/core/replication"
@@ -193,7 +194,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.chunk.replication, "chunk-replication", "", "walstore-chunk: replication for chunk needles (empty = filer default / storage rule)")
 	fs.DurationVar(&f.chunk.captureInterval, "chunk-capture-interval", defaultChunkCaptureInterval, "walstore-chunk: automatic cut once this long has passed since the last successful cut; 0 (default) disables the timer, e.g. 15m as a host-loss safety net")
 	fs.IntVar(&f.chunk.uploadConcurrency, "chunk-upload-concurrency", 8, "walstore-chunk: maximum concurrent dirty-chunk uploads (1..64)")
-	fs.IntVar(&f.chunk.dirtyThreshold, "chunk-dirty-threshold", defaultChunkDirtyThreshold, "walstore-chunk: bound on one cut's barrier copy, in chunks; never triggers a cut; 0 = unbounded")
+	fs.IntVar(&f.chunk.dirtyThreshold, "chunk-dirty-threshold", defaultChunkDirtyThreshold, "walstore-chunk: number of candidate chunks above which a cut pre-copies (stages) chunks before its barrier, in rounds of this size; copy-before-write copies the rest outside the barrier; never triggers a cut; 0 = no pre-copy")
 	fs.BoolVar(&f.chunk.controlEndpoint, "chunk-control-endpoint", false, "walstore-chunk: expose the /chunk/* control routes (cut, snapshot, snapshots, snapshot/delete, detach) on the status HTTP listener; off by default; loopback-only like the listener")
 	fs.UintVar(&f.durableBlocks, "durable-blocks", 2048, "number of blocks per volume on first create (ignored when opening existing)")
 	fs.UintVar(&f.durableBlockSize, "durable-blocksize", 4096, "block size in bytes on first create")
@@ -268,6 +269,11 @@ func parseFlags(args []string) (flags, error) {
 		}
 		if f.durableImpl != "walstore" {
 			return flags{}, fmt.Errorf("--durable-wal-recovery-test-disable-flusher requires --durable-impl=walstore")
+		}
+	}
+	if f.durableRoot != "" {
+		if _, _, err := durableCreateGeometry(f); err != nil {
+			return flags{}, err
 		}
 	}
 	if f.iscsiCHAPUser == "" {
@@ -523,22 +529,26 @@ type nvmeReadyLine struct {
 	SubsysNQN string `json:"subsys_nqn"`
 }
 
+// durableCreateGeometry leaves existing volumes in open-only mode. If the
+// observed file disappears before Open, NumBlocks=0 prevents a replacement
+// from being created using narrowed or otherwise ignored CLI values.
+func durableCreateGeometry(f flags) (uint32, int, error) {
+	path := filepath.Join(f.durableRoot, f.volumeID+".bin")
+	if _, err := os.Stat(path); err == nil {
+		return 0, 0, nil
+	} else if !os.IsNotExist(err) {
+		return 0, 0, fmt.Errorf("durable volume geometry: %w", err)
+	}
+	if err := geometry.ValidateBlockGeometry(uint64(f.durableBlocks), uint64(f.durableBlockSize)); err != nil {
+		return 0, 0, fmt.Errorf("--durable-blocks/--durable-blocksize: %w", err)
+	}
+	return uint32(f.durableBlocks), int(f.durableBlockSize), nil
+}
+
 func run(f flags) int {
 	readyCh := make(chan adapter.AssignmentInfo, 16)
 
-	h, err := volume.New(volume.Config{
-		MasterAddr:        f.masterAddr,
-		ServerID:          f.serverID,
-		VolumeID:          f.volumeID,
-		ReplicaID:         f.replicaID,
-		DataAddr:          f.dataAddr,
-		CtrlAddr:          f.ctrlAddr,
-		HeartbeatInterval: f.hbInterval,
-		RecoverTimeout:    f.recoverTimeout,
-		ReadyMarker:       readyCh,
-		EnableT1Readiness: f.enableT1Readiness,
-		WorkspaceLease:    f.workspaceLease,
-	})
+	h, err := volume.New(hostConfig(f, readyCh))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "blockvolume:", err)
 		return 1
@@ -591,11 +601,12 @@ func run(f flags) int {
 	var durableProv *durable.DurableProvider
 	var workspaceRemoteFor func(string) (storage.ChunkRemote, error)
 	if f.durableRoot != "" {
+		blocks, blockSize, geometryErr := durableCreateGeometry(f)
 		cfg := durable.ProviderConfig{
 			Impl:                          durable.ImplName(f.durableImpl),
 			StorageRoot:                   f.durableRoot,
-			BlockSize:                     int(f.durableBlockSize),
-			NumBlocks:                     uint32(f.durableBlocks),
+			BlockSize:                     blockSize,
+			NumBlocks:                     blocks,
 			WALRetentionLSNs:              f.walRetentionLSNs,
 			WALMultiBlockRecords:          f.durableWALMultiBlockRecords,
 			WALRecoveryTestDisableFlusher: f.durableWALRecoveryTestDisableFlusher,
@@ -615,7 +626,11 @@ func run(f flags) int {
 				defer chunk.close()
 			}
 		}
-		dp, err := durable.NewDurableProvider(cfg, h.ProjectionView())
+		var dp *durable.DurableProvider
+		err := geometryErr
+		if err == nil {
+			dp, err = durable.NewDurableProvider(cfg, h.ProjectionView())
+		}
 		if chunkErr != nil {
 			err = chunkErr
 		}
@@ -871,8 +886,7 @@ func run(f flags) int {
 
 		// No replication socket exists until a master assignment includes
 		// replica slots. The role gate starts/fences both lanes before admission.
-		replListen = &replicationIngress{addr: f.dataAddr, store: store,
-			volumeID: f.volumeID, floorPath: replicaFloorPath(f), dualLane: f.recoveryMode == "dual-lane"}
+		replListen = newReplicationIngress(f, store)
 		if err := h.SetSelfFence(replListen); err != nil {
 			fmt.Fprintln(os.Stderr, "blockvolume: replica listener role:", err)
 			replListen.Stop()
@@ -1433,6 +1447,24 @@ func deriveDualLaneAddr(addr string) (string, error) {
 
 // replicaFloorPath is where the replica's epoch floor record lives (G1):
 // beside the volume's durable files, or "" for non-durable memback runs.
+// hostConfig is the volume host's configuration from the flags.
+func hostConfig(f flags, readyCh chan<- adapter.AssignmentInfo) volume.Config {
+	return volume.Config{
+		MasterAddr:        f.masterAddr,
+		ServerID:          f.serverID,
+		VolumeID:          f.volumeID,
+		ReplicaID:         f.replicaID,
+		DataAddr:          f.dataAddr,
+		CtrlAddr:          f.ctrlAddr,
+		HeartbeatInterval: f.hbInterval,
+		RecoverTimeout:    f.recoverTimeout,
+		ReadyMarker:       readyCh,
+		EnableT1Readiness: f.enableT1Readiness,
+		WorkspaceLease:    f.workspaceLease,
+		RF1Only:           rf1Only(f),
+	}
+}
+
 func replicaFloorPath(f flags) string {
 	if f.durableRoot == "" {
 		return ""

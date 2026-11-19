@@ -1012,7 +1012,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	}
 	if err := l.uploadBatch(ctx, len(uploads), func(ctx context.Context, i int) error {
 		u := uploads[i]
-		return l.remote.Put(ctx, u.key, u.c.data)
+		return l.putCaptured(ctx, u.key, u.c.data)
 	}); err != nil {
 		l.abortCut(all)
 		l.dropIntents(ctx, intents)
@@ -1731,7 +1731,7 @@ func (l *chunkLayerImpl) stage(ctx context.Context, st *chunkCutStats) (map[uint
 			intents = append(intents, id)
 			if err := l.uploadBatch(ctx, len(uploads), func(ctx context.Context, i int) error {
 				u := uploads[i]
-				return l.remote.Put(ctx, u.key, u.data)
+				return l.putCaptured(ctx, u.key, u.data)
 			}); err != nil {
 				return nil, intents, fmt.Errorf("storage: capture stage upload: %w: %w", errChunkRemoteUnavailable, err)
 			}

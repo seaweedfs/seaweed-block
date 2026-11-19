@@ -38,6 +38,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/geometry"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"github.com/seaweedfs/seaweed-block/core/storage/parallelwal"
 	"github.com/seaweedfs/seaweed-block/core/storage/smartwal"
@@ -172,10 +173,12 @@ type ProviderConfig struct {
 	// host's 30 s I/O timeout; a freeze past the 5 s target is logged as an
 	// alarm. Cooperative: a syscall that never returns is not bounded.
 	DetachFreezeTimeout time.Duration
-	// ChunkDirtyThreshold is the bound on one cut's barrier copy, in
-	// chunks. It never triggers a cut: the remote holds snapshots, and
-	// cuts are published only by CaptureVolume, MakeVolumeRemoteDurable
-	// (snapshot, detach) and the timer. Zero: unbounded.
+	// ChunkDirtyThreshold is the number of candidate chunks above which
+	// a cut pre-copies (stages) chunks before its barrier, in rounds of
+	// this size; copy-before-write copies the rest outside the barrier.
+	// It never triggers a cut: the remote holds snapshots, and cuts are
+	// published only by CaptureVolume, MakeVolumeRemoteDurable
+	// (snapshot, detach) and the timer. Zero: no pre-copy.
 	ChunkDirtyThreshold int
 	// ChunkUploadConcurrency bounds remote uploads; zero defaults to 8.
 	ChunkUploadConcurrency int
@@ -615,6 +618,13 @@ func (p *DurableProvider) openOrCreate(volumeID string) (*volHandle, error) {
 			return nil, fmt.Errorf("durable: stat fresh marker: %w", err)
 		}
 		return h, nil
+	}
+	// Existing storage ignores create geometry; admission precedes all fresh sidecars.
+	if p.cfg.NumBlocks == 0 {
+		return nil, fmt.Errorf("durable: NumBlocks=0; cannot create storage for %s (use open-existing mode)", volumeID)
+	}
+	if err := geometry.ValidateBlockGeometry(uint64(p.cfg.NumBlocks), uint64(p.cfg.BlockSize)); err != nil {
+		return nil, err
 	}
 	if p.cfg.Impl == ImplWALStoreChunk {
 		// Durable before the volume file exists: a crash anywhere between
