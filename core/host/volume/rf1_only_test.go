@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -248,21 +249,44 @@ func TestRF1Only_ParallelHeldReplayAndNewerRefusal(t *testing.T) {
 	f.h.setReplicationLocked(u)
 	f.h.replicationMu.Unlock()
 
-	replay := make(chan struct{})
+	// Registered before any worker starts: every exit path (including a Fatal
+	// below) releases the parked replay and joins both workers, bounded.
+	var once sync.Once
+	release := func() { once.Do(func() { close(u.release) }) }
+	replay, stream := make(chan struct{}), make(chan struct{})
+	replayStarted, streamStarted := false, false
+	t.Cleanup(func() {
+		release()
+		for _, w := range []struct {
+			started bool
+			done    chan struct{}
+			name    string
+		}{{replayStarted, replay, "replay"}, {streamStarted, stream, "stream"}} {
+			if !w.started {
+				continue
+			}
+			select {
+			case <-w.done:
+			case <-time.After(5 * time.Second):
+				t.Errorf("%s worker did not finish after release", w.name)
+			}
+		}
+	})
+	replayStarted = true
 	go func() { defer close(replay); f.h.applyFact(rf1Fact(2)) }()
 	select {
 	case <-u.entered:
 	case <-time.After(5 * time.Second):
 		t.Fatal("replay worker did not reach the peer-set update")
 	}
-	stream := make(chan struct{})
+	streamStarted = true
 	go func() { defer close(stream); f.h.applyFact(rf2PrimaryFact(3)) }()
 	select {
 	case <-stream:
 	case <-time.After(5 * time.Second):
 		t.Fatal("stream worker blocked behind the parked replay")
 	}
-	close(u.release)
+	release()
 	select {
 	case <-replay:
 	case <-time.After(5 * time.Second):
