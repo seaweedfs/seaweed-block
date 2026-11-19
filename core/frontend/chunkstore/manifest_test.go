@@ -54,7 +54,7 @@ func TestManifest_CapturePublishesSegmentRoot(t *testing.T) {
 	if err = json.Unmarshal(e.Content, &doc); err != nil {
 		t.Fatal(err)
 	}
-	if doc.Format != 2 || len(doc.Chunks) != 0 || len(doc.Segments) != 1 {
+	if doc.Format != 3 || len(doc.Chunks) != 0 || len(doc.Segments) != 1 {
 		t.Fatalf("cut did not publish a small segmented root: %s", e.Content)
 	}
 	h, err := r.GetHead(ctx)

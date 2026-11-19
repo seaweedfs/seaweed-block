@@ -157,6 +157,15 @@ func TestOpsChunk_FilerCommands(t *testing.T) {
 	}
 	head := storage.ChunkHead{Gen: 2, Epoch: 1, Holder: "r1", RemoteLSN: 42, State: storage.ChunkHeadActive,
 		Chunks: map[uint64]storage.ChunkRef{0: {Key: "chunks/e1/c0/k"}}}
+	manifestMem := newManifestFixtureFiler(mem)
+	cat, err = chunkstore.NewCatalog(manifestMem, defaultChunkPathCLI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) {
+		return manifestMem, func() error { return nil }, nil
+	}
+	head = prepareFixtureHead(t, manifestMem, head)
 	if _, err := cat.CreateSnapshot(ctx, "v1", chunkstore.SnapshotRequest{Name: "s1", RequestID: "r"}, head); err != nil {
 		t.Fatal(err)
 	}

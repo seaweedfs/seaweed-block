@@ -13,7 +13,7 @@ import (
 // either is null when it does not exist (B9 W2 appendix).
 func TestOpsChunk_Show(t *testing.T) {
 	ctx := context.Background()
-	mem := chunkstore.NewMemFiler()
+	mem := newManifestFixtureFiler(chunkstore.NewMemFiler())
 	prev := dialChunkFiler
 	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return mem, func() error { return nil }, nil }
 	t.Cleanup(func() { dialChunkFiler = prev })
@@ -27,6 +27,7 @@ func TestOpsChunk_Show(t *testing.T) {
 	}
 	head := storage.ChunkHead{Gen: 2, Epoch: 1, Holder: "s1/r1", RemoteLSN: 42, State: storage.ChunkHeadActive,
 		Chunks: map[uint64]storage.ChunkRef{0: {Key: "chunks/e1/c0/k"}}}
+	head = prepareFixtureHead(t, mem, head)
 	if _, err := cat.CreateSnapshot(ctx, "v1", chunkstore.SnapshotRequest{Name: "s1", RequestID: "r"}, head); err != nil {
 		t.Fatal(err)
 	}

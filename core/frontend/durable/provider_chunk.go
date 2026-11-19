@@ -365,6 +365,7 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 	}
 	cfg := storage.ChunkLayerConfig{
 		ChunkBlocks:       p.cfg.ChunkBlocks,
+		RestoreChunkBytes: uint64(ws.BlockSize()) * uint64(p.cfg.ChunkBlocks),
 		Epoch:             lin.epoch,
 		Holder:            holder,
 		FreshFromHead:     h.fresh,
