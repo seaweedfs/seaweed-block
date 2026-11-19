@@ -299,31 +299,10 @@ func (h *IOHandler) write(ctx context.Context, cmd IOCommand) IOResult {
 // Only a pure command-deadline cause is transient. A joined physical error
 // must retain its terminal mapping even when the command deadline also passed.
 func mapWriteBudgetError(ctx context.Context, err error, op string) IOResult {
-	if ctx.Err() == context.DeadlineExceeded && onlyDeadlineCause(err) {
+	if frontend.IsWriteDeadline(ctx, err) {
 		return IOResult{SCT: SCTGeneric, SC: SCNamespaceNotReady, retryable: true, Reason: "command deadline on " + op + ": " + err.Error()}
 	}
 	return mapBackendError(err, op)
-}
-func onlyDeadlineCause(err error) bool {
-	if err == context.DeadlineExceeded {
-		return true
-	}
-	if err == nil {
-		return false
-	}
-	if joined, ok := err.(interface{ Unwrap() []error }); ok {
-		causes := joined.Unwrap()
-		if len(causes) == 0 {
-			return false
-		}
-		for _, cause := range causes {
-			if !onlyDeadlineCause(cause) {
-				return false
-			}
-		}
-		return true
-	}
-	return onlyDeadlineCause(errors.Unwrap(err))
 }
 
 // mapBackendError translates frontend errors into NVMe CQE

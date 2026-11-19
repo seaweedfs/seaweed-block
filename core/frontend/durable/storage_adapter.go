@@ -816,7 +816,7 @@ func (b *StorageBackend) writeFullBlockBatch(ctx context.Context, startLBA uint3
 			log.Printf("durable: replication batch fan-out failed lba=%d blocks=%d: %v",
 				startLBA, len(lsns), obsErr)
 			if policy == WriteAckRequireObserverAck {
-				return len(lsns) * bs, fmt.Errorf("%w: %w", ErrReplicationAckUnavailable, obsErr)
+				return len(lsns) * bs, replicationWriteError(ctx, obsErr)
 			}
 		}
 	} else {
@@ -868,10 +868,20 @@ func (b *StorageBackend) observeWrite(ctx context.Context, lba uint32, lsn uint6
 		log.Printf("durable: replication fan-out failed lba=%d lsn=%d: %v",
 			lba, lsn, werr)
 		if policy == WriteAckRequireObserverAck {
-			return fmt.Errorf("%w: %w", ErrReplicationAckUnavailable, werr)
+			return replicationWriteError(ctx, werr)
 		}
 	}
 	return nil
+}
+
+// Classify the observer cause before adding the acknowledgement sentinel;
+// otherwise that sentinel would obscure a pure caller deadline at the target.
+func replicationWriteError(ctx context.Context, err error) error {
+	wrapped := fmt.Errorf("%w: %w", ErrReplicationAckUnavailable, err)
+	if frontend.IsWriteDeadline(ctx, err) {
+		return fmt.Errorf("%w: %w", frontend.ErrBackendBusy, wrapped)
+	}
+	return wrapped
 }
 
 // Compile-time check that StorageBackend satisfies frontend.Backend.
