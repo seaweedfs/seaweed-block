@@ -13,6 +13,11 @@
 (*    chunk is compared against HEAD; cuts are refused ("reconciling")     *)
 (*    until the compare finishes (chunk_layer.go:95);                     *)
 (*  - a crash before the root CAS leaves only orphan uploads.              *)
+(* Per-object upload retries retain the same key/bytes and intent. Failed *)
+(* attempts make no abstract state change (Spec permits stuttering); the  *)
+(* atomic Cut below still requires all objects before HEAD publication.  *)
+(* Backoff/deadline timing and ambiguous-reply byte checks are qualified  *)
+(* by native TestChunkCut*Upload* controls, not by this abstraction.       *)
 (* Chunk content = the LSN of the write it holds.                          *)
 (***************************************************************************)
 EXTENDS Integers, FiniteSets, Sequences, TLC

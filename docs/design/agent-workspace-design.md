@@ -126,6 +126,7 @@ Per volume, under the chunk base directory in the filer (`core/frontend/chunksto
 5. **LSN guard:** if H is below HEAD's `RemoteLSN`, refuse (`lsn_behind`).
 6. **Diff:** upload only chunks whose SHA-256 differs from HEAD; drop all-zero chunks from the map.
 7. **Intent first:** write an intent naming every key, then upload in parallel (`UploadConcurrency`, `--chunk-upload-concurrency`, default 8, 1 to 64).
+   Failed chunk uploads retry the same immutable key and captured bytes with 100 ms exponential backoff capped at 2 s. Resolve a possibly committed binding by exact-byte read-back before replay; a mismatch refuses the cut. All retries share a five-minute cut execution budget, shortened by the caller deadline. Queued lock wait and a remote ignoring cancellation are not forcibly terminated: workers remain joined before buffers/intents settle. Failure preserves dirt. HEAD CAS is never blindly replayed by this upload retry.
 8. **Manifest:** build segments; new segments are also covered by an intent before upload (`PrepareManifest`).
 9. **Re-admit** right before the CAS; fence if a superseding holder owns HEAD (`supersededBy`).
 10. **CAS** HEAD on `{gen, epoch}` with `RemoteLSN = H`. On success, drop the intents and settle unchanged owned-map versions, keeping post-cut dirt.
