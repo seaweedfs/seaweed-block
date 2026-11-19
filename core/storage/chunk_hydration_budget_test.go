@@ -79,3 +79,18 @@ func TestChunkHydration_ContextlessReadAllowsSlowFill(t *testing.T) {
 		t.Fatal("contextless reader did not settle after release")
 	}
 }
+
+func TestChunkHydration_SnapshotFailsOnReadError(t *testing.T) {
+	s, _, remote, _ := hydrationFixture(t, 2, 64)
+	if _, err := s.Write(0, makeBlock(ctBlockSize, 0x77)); err != nil {
+		t.Fatal(err)
+	}
+	fault := errors.New("remote snapshot read fault")
+	remote.mu.Lock()
+	remote.failGet = fault
+	remote.mu.Unlock()
+	got, err := s.AllBlocks()
+	if !errors.Is(err, fault) || got != nil {
+		t.Fatalf("snapshot silently lost unreadable blocks: entries=%d err=%v", len(got), err)
+	}
+}

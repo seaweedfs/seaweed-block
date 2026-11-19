@@ -154,8 +154,9 @@ type LogicalStorage interface {
 	WriteExtentDirect(lba uint32, data []byte) error
 
 	// AllBlocks snapshots every written LBA's current bytes. Used by
-	// the rebuild server to enumerate what to ship.
-	AllBlocks() map[uint32][]byte
+	// the rebuild server to enumerate what to ship. Any read error fails
+	// the whole snapshot; callers must not ship a partial image.
+	AllBlocks() (map[uint32][]byte, error)
 
 	// ScanLBAs is the T4c-2 tier-1 recovery contract. Emits a
 	// RecoveryEntry callback for each modification the substrate

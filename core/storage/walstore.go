@@ -1597,14 +1597,14 @@ func (s *WALStore) AppliedLSNs() (map[uint32]uint64, error) {
 // Linear scan over numBlocks. Acceptable for the rebuild path
 // (one-shot, off the hot read/write loop). Not appropriate for
 // a hot-path scan.
-func (s *WALStore) AllBlocks() map[uint32][]byte {
+func (s *WALStore) AllBlocks() (map[uint32][]byte, error) {
 	n := s.NumBlocks()
 	out := make(map[uint32][]byte)
 	zero := make([]byte, s.sb.BlockSize)
 	for lba := uint32(0); lba < n; lba++ {
 		data, err := s.Read(lba)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("snapshot LBA %d: %w", lba, err)
 		}
 		// Skip never-written / trimmed LBAs.
 		if bytesAllZero(data, zero) {
@@ -1612,7 +1612,7 @@ func (s *WALStore) AllBlocks() map[uint32][]byte {
 		}
 		out[lba] = data
 	}
-	return out
+	return out, nil
 }
 
 // bytesAllZero is a fast tight-loop equality against a zero slice.

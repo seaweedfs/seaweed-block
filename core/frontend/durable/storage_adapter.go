@@ -688,6 +688,11 @@ func (b *StorageBackend) Write(ctx context.Context, offset int64, p []byte) (int
 	b.profile.recordBackendWriteRequest(len(p))
 	start := time.Now()
 	n, err := b.writeBytes(ctx, offset, p)
+	if hydrationPendingOnly(err) {
+		if gateErr := b.gate(); gateErr != nil {
+			return 0, gateErr
+		}
+	}
 	if errors.Is(err, storage.ErrWALPressureTimeout) || hydrationPendingOnly(err) {
 		err = fmt.Errorf("%w: %w", frontend.ErrBackendBusy, err)
 	}

@@ -303,7 +303,7 @@ func (s *Store) WriteExtentDirect(lba uint32, data []byte) error {
 
 // AllBlocks returns last-writer-wins per LBA across retained records,
 // filtering out all-zero blocks (matches the LogicalStorage contract).
-func (s *Store) AllBlocks() map[uint32][]byte {
+func (s *Store) AllBlocks() (map[uint32][]byte, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	latest := make(map[uint32][]byte)
@@ -329,7 +329,7 @@ func (s *Store) AllBlocks() map[uint32][]byte {
 			delete(latest, lba)
 		}
 	}
-	return latest
+	return latest, nil
 }
 
 // ScanLBAs is V2-faithful: emits each retained WAL record with its

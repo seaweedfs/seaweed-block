@@ -26,15 +26,15 @@ type options struct {
 	calibrate      bool
 	persistDemo    bool
 	persistDir     string
-	authorityStore  string
-	s5Bootstrap     bool
-	s7RestartSmoke  bool
+	authorityStore string
+	s5Bootstrap    bool
+	s7RestartSmoke bool
 }
 
 type demoResult struct {
-	Demo       string                 `json:"demo"`
-	Pass       bool                   `json:"pass"`
-	Reason     string                 `json:"reason,omitempty"`
+	Demo       string                   `json:"demo"`
+	Pass       bool                     `json:"pass"`
+	Reason     string                   `json:"reason,omitempty"`
 	Projection engine.ReplicaProjection `json:"projection"`
 }
 
@@ -221,7 +221,10 @@ func runValidationPass(state *ops.State, volumeID string, pubOpts ...authority.P
 		_, _ = primaryStore.Write(i, data)
 	}
 	_, _ = primaryStore.Sync()
-	blocks := primaryStore.AllBlocks()
+	blocks, err := primaryStore.AllBlocks()
+	if err != nil {
+		return nil, fmt.Errorf("snapshot primary: %w", err)
+	}
 	_, _, pH := primaryStore.Boundaries()
 	for lba, data := range blocks {
 		_ = replicaStore.ApplyEntry(lba, data, pH)

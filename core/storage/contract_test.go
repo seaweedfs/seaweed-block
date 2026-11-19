@@ -316,7 +316,10 @@ func TestContract_AllBlocksReturnsCurrentSnapshot(t *testing.T) {
 		_, _ = store.Write(0, makeBlock(store.BlockSize(), 0x01))
 		_, _ = store.Write(2, makeBlock(store.BlockSize(), 0x02))
 		_, _ = store.Write(5, makeBlock(store.BlockSize(), 0x05))
-		all := store.AllBlocks()
+		all, snapshotErr := store.AllBlocks()
+		if snapshotErr != nil {
+			t.Fatal(snapshotErr)
+		}
 		if len(all) != 3 {
 			t.Fatalf("AllBlocks: got %d entries, want 3", len(all))
 		}
