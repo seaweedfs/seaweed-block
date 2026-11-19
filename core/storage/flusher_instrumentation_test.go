@@ -61,10 +61,14 @@ func TestFlusherInstrumentationCountsCompleteCycle(t *testing.T) {
 		t.Fatalf("snapshot/validated/superseded=%d/%d/%d want 4/4/0",
 			got.SnapshotEntries, got.ValidatedRecords, got.SupersededEntries)
 	}
-	if got.WALHeaderReadOps != 4 || got.WALRecordReadOps != 4 ||
-		got.WALRecordDecodeOps != 4 || got.WALRecordDecodeBytes == 0 ||
+	wantRecords := uint64(4)
+	if s.FormatV3() {
+		wantRecords = 1
+	} // one full native batch decode, four validated blocks
+	if got.WALHeaderReadOps != wantRecords || got.WALRecordReadOps != wantRecords ||
+		got.WALRecordDecodeOps != wantRecords || got.WALRecordDecodeBytes == 0 ||
 		got.WALRecordDecodeDurationNanos == 0 {
-		t.Fatalf("header/record reads and decode ops/bytes/ns=%d/%d %d/%d/%d want 4/4 4/nonzero/nonzero",
+		t.Fatalf("header/record reads and decode ops/bytes/ns=%d/%d %d/%d/%d want actual unique-record counts/nonzero bytes and duration",
 			got.WALHeaderReadOps, got.WALRecordReadOps,
 			got.WALRecordDecodeOps, got.WALRecordDecodeBytes,
 			got.WALRecordDecodeDurationNanos)
