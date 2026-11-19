@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -417,7 +418,7 @@ func TestWALStore_WriteBatchCopiesCallerBuffersIntoWALRecords(t *testing.T) {
 //  1. Write blocks 0,1,2 + Sync (acked, must survive)
 //  2. Write blocks 3,4   (NOT followed by Sync — may or may not survive)
 //  3. Bypass Close — drop the file handle without finalizing
-//     anything (no superblock update, no fsync, no group-committer drain)
+//     anything (no superblock update, no fsync, no new commit batch)
 //  4. Reopen + Recover
 //  5. Acked blocks 0,1,2 MUST be present and intact
 //  6. Post-Sync blocks 3,4 may be present OR absent — never corrupt
@@ -432,6 +433,20 @@ func TestWALStore_AckedWritesSurviveSimulatedCrash(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// A simulated process crash cannot leave an old flusher using the
+		// descriptor. Stop it BEFORE writes: stopping after them could flush
+		// the very WAL replay this test is intended to exercise.
+		crash := sync.OnceFunc(func() {
+			s.DisableAutoFlushForRecoveryTest()
+			crashRecoveryHardeningStore(t, s)
+		})
+		t.Cleanup(crash)
+		s.DisableAutoFlushForRecoveryTest()
+		select {
+		case <-s.flusher.doneCh:
+		default:
+			t.Fatal("crash fixture flusher is still running before writes")
+		}
 		for i := uint32(0); i < 3; i++ {
 			if _, err := s.Write(i, makeBlock(4096, byte(0xA0+i))); err != nil {
 				t.Fatal(err)
@@ -441,18 +456,18 @@ func TestWALStore_AckedWritesSurviveSimulatedCrash(t *testing.T) {
 		if _, err := s.Sync(); err != nil {
 			t.Fatal(err)
 		}
+		if cp := s.CheckpointLSN(); cp != 0 {
+			t.Fatalf("crash fixture checkpoint=%d, want uncheckpointed WAL", cp)
+		}
 		// Unacked: may or may not survive.
 		for i := uint32(3); i < 5; i++ {
 			if _, err := s.Write(i, makeBlock(4096, byte(0xA0+i))); err != nil {
 				t.Fatal(err)
 			}
 		}
-		// Simulate crash: stop the group committer (so it doesn't
-		// race the file close), then drop the *os.File handle without
-		// going through Close(). The on-disk state is whatever was
-		// fsync'd by the Sync call above; nothing else.
-		s.committer.Stop()
-		_ = s.fd.Close()
+		// Drop descriptors without store.Close(), a final checkpoint or
+		// another Sync. Cleanup also runs on an earlier assertion failure.
+		crash()
 	}()
 
 	// Reopen + Recover. The acked blocks must be present.
