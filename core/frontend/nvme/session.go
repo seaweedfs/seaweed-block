@@ -470,6 +470,11 @@ func (s *Session) dispatchIO(ctx context.Context, req *Request) {
 			NSID:   req.capsule.NSID,
 		})
 		if res.AsError() != nil {
+			// CQEs carry status, not the backend's diagnostic. Keep the reason
+			// at the real session boundary so host fsync EIO can be attributed.
+			if s.logger != nil {
+				s.logger.Printf("nvme: Flush failed qid=%d nsid=%d sct=%#x sc=%#x reason=%s", s.qid, req.capsule.NSID, res.SCT, res.SC, res.Reason)
+			}
 			req.resp.Status = MakeStatusField(res.SCT, res.SC, true)
 		}
 		s.enqueueResponse(&response{resp: req.resp})

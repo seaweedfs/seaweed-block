@@ -402,8 +402,9 @@ func TestWALStoreV3RefusesPathsOfLaterRows(t *testing.T) {
 
 // codex01 row 5 P1-1: a batch's acknowledgement rechecks the store fault
 // under the store lock. Schedule, in both modes: batch A's slot write is
-// parked (A holds descMu); B's Write takes s.mu and waits on descMu in the
-// writer's snapshot; A is released, B's pwrite fails and latches while B
+// parked (A holds descMu); B's Write, already past capacity admission,
+// takes s.mu exclusively and waits on descMu in the writer's snapshot;
+// A is released, B's pwrite fails and latches while B
 // still holds s.mu; A must then refuse without advancing the acknowledged W.
 func TestWALStoreV3SyncRechecksTheFaultAtTheAckBoundary(t *testing.T) {
 	for _, mode := range []WMode{WModeLagged, WModeStrict} {
@@ -421,16 +422,24 @@ func TestWALStoreV3SyncRechecksTheFaultAtTheAckBoundary(t *testing.T) {
 			once.Do(func() { close(parked); <-release })
 			return nil
 		}
-		aErr := make(chan error, 1)
-		go func() { _, err := s.Sync(); aErr <- err }()
-		waitV3(t, parked, "the parked publication")
+		// Finish B's admission before A parks descMu. Native capacity sampling
+		// itself may briefly hold s.mu shared; that is not the append boundary.
+		admitted, appendB := make(chan struct{}), make(chan struct{})
+		resumeB := sync.OnceFunc(func() { close(appendB) })
+		t.Cleanup(resumeB)
+		s.testAfterAdmit = func() { close(admitted); <-appendB }
 		boom := errors.New("injected append write error")
 		s.v3.w.writeAt = func([]byte, int64) (int, error) { return 0, boom }
 		bErr := make(chan error, 1)
 		go func() { _, err := s.Write(3, blk(3)); bErr <- err }()
+		waitV3(t, admitted, "B after capacity admission")
+		aErr := make(chan error, 1)
+		go func() { _, err := s.Sync(); aErr <- err }()
+		waitV3(t, parked, "the parked publication")
+		resumeB()
 		deadline := time.Now().Add(10 * time.Second)
-		for s.mu.TryLock() { // wait until B holds s.mu (it then blocks on descMu)
-			s.mu.Unlock()
+		for s.mu.TryRLock() { // only an exclusive append owner defeats TryRLock
+			s.mu.RUnlock()
 			if time.Now().After(deadline) {
 				t.Fatal("timed out waiting for B to take s.mu")
 			}
