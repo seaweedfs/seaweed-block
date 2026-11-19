@@ -295,6 +295,9 @@ func (w *cutCOWWindow) save(e *cutCOWEntry, data []byte, missing []uint64) error
 		w.memory += w.chunkBytes
 	}
 	w.mu.Unlock()
+	// e.missing (and e.data / the spilled bytes) are published to readers by
+	// w.finish(e, cowSaved), which takes w.mu and e.mu after these writes: a
+	// copier reads them only after claiming the entry in state cowSaved.
 	e.missing = missing
 	if inMemory {
 		e.data = data

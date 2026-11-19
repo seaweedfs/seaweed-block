@@ -301,6 +301,9 @@ func TestChunkLayer_C3_WriteDuringCopyWaitsForTheCut(t *testing.T) {
 	}
 
 	l := layer.(*chunkLayerImpl)
+	writerParked := make(chan struct{})
+	var parkOnce sync.Once
+	l.testCOWWait = func() { parkOnce.Do(func() { close(writerParked) }) } // a writer is waiting on a COW entry
 	inCopy, releaseCopy := make(chan struct{}), make(chan struct{})
 	var copyOnce, releaseOnce sync.Once
 	unblockCopy := func() { releaseOnce.Do(func() { close(releaseCopy) }) }
@@ -334,10 +337,11 @@ func TestChunkLayer_C3_WriteDuringCopyWaitsForTheCut(t *testing.T) {
 		_, err := s.Write(10, late)
 		wrote <- err
 	}()
+	cowWaitSignal(t, writerParked, "the write parked on chunk 2's copy entry")
 	select {
 	case err := <-wrote:
 		t.Fatalf("a write landed while the cut was still copying (err %v); the barrier was released before the copy", err)
-	case <-time.After(200 * time.Millisecond): // the copy is held; the write must wait for it
+	default: // parked on the held copy's entry, as it must be
 	}
 	unblockCopy() // the remote stays held: the write may wait only for the local copy
 	if err := waitErr(t, wrote, "write after the local copy, with the remote held"); err != nil {

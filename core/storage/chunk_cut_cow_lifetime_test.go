@@ -817,8 +817,9 @@ func TestCutCOWV3_SaverUsesValidatedWALBatchAndLazyHEAD(t *testing.T) {
 			go func() { defer close(cutDone); _, cutErr = l.Cut(context.Background()) }()
 			cowWaitSignal(t, live, "first actual copied chunk")
 			// The window is open. No guest write may wait on SeaweedFS (design
-			// rules 1/2): the lazily-absent chunks with local writes were filled
-			// BEFORE the window, so from here every HEAD fetch is held and the
+			// rules 1/2): the saver captures only the chunk's LOCAL blocks and
+			// lists the lazily-absent ones as missing (the copier fills them from
+			// HEAD later, off the write path), so with every HEAD fetch held the
 			// saving write must finish without one.
 			gets, releaseGet := holdGets(t, f)
 			t.Cleanup(releaseGet)
