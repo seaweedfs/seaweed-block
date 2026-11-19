@@ -72,11 +72,14 @@ type IOCommand struct {
 // idiomatic error use AsError() — nil return means Status
 // was Success.
 type IOResult struct {
-	SCT    uint8
-	SC     uint8
-	Data   []byte // read payload (nil for writes / errors)
-	Reason string
+	SCT       uint8
+	SC        uint8
+	Data      []byte // read payload (nil for writes / errors)
+	Reason    string
+	retryable bool // only transient backend pressure clears wire DNR
 }
+
+func (r IOResult) completionStatus() uint16 { return MakeStatusField(r.SCT, r.SC, !r.retryable) }
 
 // AsError returns a non-nil *StatusError iff Status != Success.
 func (r IOResult) AsError() *StatusError {
@@ -297,6 +300,9 @@ func (h *IOHandler) write(ctx context.Context, cmd IOCommand) IOResult {
 // Error (fail-closed; real-backend-specific mapping lands with
 // T3).
 func mapBackendError(err error, op string) IOResult {
+	if errors.Is(err, frontend.ErrBackendBusy) {
+		return IOResult{SCT: SCTGeneric, SC: SCNamespaceNotReady, Reason: "local admission pressure on " + op + ": " + err.Error(), retryable: true}
+	}
 	if errors.Is(err, frontend.ErrStalePrimary) {
 		return IOResult{
 			SCT:    SCTPathRelated,
