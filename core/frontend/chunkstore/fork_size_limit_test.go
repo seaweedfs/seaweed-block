@@ -28,7 +28,7 @@ func TestForkRejectsLegacyOversizedGeometry(t *testing.T) {
 			t.Fatal(err)
 		}
 		h := publishSource(t, f, b.fakeBlobs, "v1", map[uint64][]byte{0: chunkBytes(0x41)})
-		snap, err := c.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: "s1", RequestID: "s"}, h)
+		_, err = c.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: "s1", RequestID: "s"}, h)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -52,9 +52,10 @@ func TestForkRejectsLegacyOversizedGeometry(t *testing.T) {
 		if _, ok, e := c.ReadVolume(ctx, "fork"); e != nil || ok {
 			t.Fatalf("oversized fork persisted target: %v %v", ok, e)
 		}
-		entry, lookupErr := f.LookupEntry(ctx, path.Join(catBase, "v1", snapsDir, "s1"), snap.attempt)
-		if lookupErr != nil || len(decodeClaims(entry)) != 0 {
-			t.Fatalf("capacity refusal left a parent claim: %v", lookupErr)
+		// Observe claim cleanup through the public retention operation: an
+		// uncompleted fork claim would make this snapshot undeletable.
+		if _, deleteErr := c.DeleteSnapshot(ctx, "v1", "s1"); deleteErr != nil {
+			t.Fatalf("capacity refusal blocked snapshot deletion: %v", deleteErr)
 		}
 	}
 }
