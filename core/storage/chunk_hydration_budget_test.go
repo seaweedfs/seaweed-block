@@ -56,3 +56,25 @@ func TestChunkHydration_DeadlineDetachesWithoutCancellingFill(t *testing.T) {
 		t.Fatalf("retry cancelled/restarted shared fetch: Gets=%d want1", n)
 	}
 }
+
+// Internal readers have no frontend command budget: the remote fill owns its timeout.
+func TestChunkHydration_ContextlessReadAllowsSlowFill(t *testing.T) {
+	s, _, remote, _ := hydrationFixture(t, 2, 64)
+	entered, release := holdGets(t, remote)
+	defer release()
+	result := make(chan hydrationResult, 1)
+	go func() { data, err := s.Read(8); result <- hydrationResult{data, err} }()
+	waitKey(t, entered, "contextless slow fill")
+	timer := time.NewTimer(6 * time.Second)
+	defer timer.Stop()
+	<-timer.C
+	release()
+	select {
+	case got := <-result:
+		if got.err != nil || !bytes.Equal(got.data, makeBlock(ctBlockSize, 0x48)) {
+			t.Fatalf("contextless reader lost slow fill: %v", got.err)
+		}
+	case <-time.After(ctLocalBound):
+		t.Fatal("contextless reader did not settle after release")
+	}
+}
