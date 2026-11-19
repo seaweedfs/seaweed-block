@@ -50,7 +50,7 @@ func (l *chunkLayerImpl) newCutPayloadStore() *cutPayloadStore {
 
 func (p *cutPayloadStore) keep(c capturedChunk, head map[uint64]chunkRef) (capturedChunk, error) {
 	ref, had := head[c.idx]
-	if c.zero || (had && c.sum == ref.SHA256) {
+	if len(c.missing) == 0 && (c.zero || (had && c.sum == ref.SHA256)) {
 		c.data = nil
 		return c, nil
 	}
@@ -84,6 +84,27 @@ func (p *cutPayloadStore) keep(c capturedChunk, head map[uint64]chunkRef) (captu
 		return capturedChunk{}, err
 	}
 	c.offset, c.size, c.data = offset, int(size), nil
+	return c, nil
+}
+
+// A pinned-HEAD fetch is deliberately after local owners have drained. A slow
+// remote cannot prolong the window or make guest overwrites keep saving.
+func (p *cutPayloadStore) complete(ctx context.Context, l *chunkLayerImpl, head map[uint64]chunkRef, c capturedChunk) (capturedChunk, error) {
+	data, err := p.read(c)
+	if err == nil {
+		data, err = l.fillMissing(ctx, head, c.idx, data, c.missing)
+	}
+	if err != nil {
+		return capturedChunk{}, errors.Join(errCutCOWAborted, err)
+	}
+	n, err := p.file.WriteAt(data, c.offset)
+	if err == nil && n != len(data) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		return capturedChunk{}, err
+	}
+	c.sum, c.zero, c.missing = sha256.Sum256(data), isAllZero(data), nil
 	return c, nil
 }
 

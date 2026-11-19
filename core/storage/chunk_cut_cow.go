@@ -418,22 +418,15 @@ func (l *chunkLayerImpl) readLocalBlock(lba uint64) ([]byte, bool, error) {
 }
 
 // fillMissing completes a COW capture: the blocks listed missing get the cut's
-// base HEAD bytes. It runs with no entry held (no guest waits on it), bounded
-// by ReadMissTimeout and the window's end.
-func (l *chunkLayerImpl) fillMissing(w *cutCOWWindow, idx uint64, data []byte, missing []uint64) ([]byte, error) {
-	ref, ok := w.head[idx]
+// base HEAD bytes. It runs after the local window has drained, bounded by
+// ReadMissTimeout and the owning cut's cancellation.
+func (l *chunkLayerImpl) fillMissing(ctx context.Context, base map[uint64]chunkRef, idx uint64, data []byte, missing []uint64) ([]byte, error) {
+	ref, ok := base[idx]
 	if !ok {
-		return nil, fmt.Errorf("storage: cut chunk %d: %d lazily absent block(s) but HEAD has no chunk", idx, len(missing))
+		return nil, fmt.Errorf("storage: cut chunk %d: lazily absent blocks but HEAD has no chunk", idx)
 	}
-	ctx, cancel := context.WithTimeout(l.ctx, l.cfg.ReadMissTimeout)
+	ctx, cancel := context.WithTimeout(ctx, l.cfg.ReadMissTimeout)
 	defer cancel()
-	go func() {
-		select {
-		case <-w.ended:
-			cancel()
-		case <-ctx.Done():
-		}
-	}()
 	head, err := l.remote.Get(ctx, ref.Key)
 	if err != nil {
 		return nil, fmt.Errorf("storage: cut chunk %d HEAD fetch: %w", idx, err)
@@ -489,18 +482,11 @@ func (l *chunkLayerImpl) copyCOWEntry(w *cutCOWWindow, idx uint64) (capturedChun
 		if err == nil {
 			kept = w.finish(e, cowDone)
 		}
-		if kept && len(missing) > 0 {
-			// The entry is released: guests no longer wait on this chunk.
-			if data, err = l.fillMissing(w, idx, data, missing); err != nil {
-				w.abort(err)
-				kept = false
-			}
-		}
 		w.refs.Done()
 		if !kept {
 			return capturedChunk{}, false, w.status()
 		}
-		return capturedChunk{idx: idx, data: data, sum: sha256.Sum256(data), zero: isAllZero(data)}, true, nil
+		return capturedChunk{idx: idx, data: data, sum: sha256.Sum256(data), zero: isAllZero(data), missing: missing}, true, nil
 	}
 }
 

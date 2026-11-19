@@ -755,14 +755,15 @@ func (l *chunkLayerImpl) MakeRemoteDurable(ctx context.Context, t uint64) error 
 }
 
 type capturedChunk struct {
-	idx    uint64
-	data   []byte
-	sum    [32]byte
-	zero   bool
-	key    string // staged: already uploaded under this key (data is nil)
-	birth  uint64
-	offset int64 // private local payload file, never a durable reference
-	size   int
+	idx     uint64
+	data    []byte
+	sum     [32]byte
+	zero    bool
+	key     string // staged: already uploaded under this key (data is nil)
+	birth   uint64
+	offset  int64 // private local payload file, never a durable reference
+	size    int
+	missing []uint64 // local copy awaits the pinned HEAD, after the window closes
 }
 
 // stagedChunk is a chunk pre-copied outside the barrier at chunk version
@@ -922,6 +923,17 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		}
 		l.s.captureMu.Unlock()
 		st.BarrierPauseNs = time.Since(pauseStart).Nanoseconds()
+	}
+	if copyErr == nil {
+		for i, c := range captured {
+			if len(c.missing) == 0 {
+				continue
+			}
+			captured[i], copyErr = payloads.complete(ctx, l, baseHead.Chunks, c)
+			if copyErr != nil {
+				break
+			}
+		}
 	}
 	st.CopyNs = time.Since(copyStart).Nanoseconds()
 	if copyErr != nil {
