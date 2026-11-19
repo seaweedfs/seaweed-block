@@ -463,6 +463,15 @@ type chunkCutResult struct {
 }
 
 // chunkLayer is what the store owner drives.
+// detachSettlement is how a failed Detach ended (SettleDetach).
+type detachSettlement int
+
+const (
+	detachNotPublished detachSettlement = iota
+	detachApplied
+	detachFenced
+)
+
 type chunkLayer interface {
 	chunkSink
 	// Cut takes a quiesced cut at H (the last written LSN), uploads the
@@ -481,6 +490,14 @@ type chunkLayer interface {
 	// Detach returns the first result. An unresolved detach CAS is settled
 	// like any other unresolved CAS, before the next capture or Detach.
 	Detach(ctx context.Context) (chunkCutResult, error)
+	// SettleDetach decides how a failed Detach ended, with the caller's I/O
+	// still stopped: detachNotPublished (HEAD does not and can never carry
+	// this layer's detach: serving may resume; the dirty set stays dirty),
+	// detachApplied (HEAD carries it: the detached result is returned) or
+	// detachFenced (HEAD belongs to a newer epoch or another holder). An
+	// error wrapping errChunkCASOutcomeUnknown leaves it undecided: stay
+	// stopped. It never resumes on top of a possibly detached HEAD.
+	SettleDetach(ctx context.Context) (detachSettlement, chunkCutResult, error)
 	// MakeRemoteDurable is the durability point for snapshot, detach and
 	// migrate: a Capture whose H >= t. Only a nil return makes t remote
 	// durable; it requires the local Sync to cover t first, and fails

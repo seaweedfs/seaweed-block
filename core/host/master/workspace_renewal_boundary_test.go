@@ -69,7 +69,9 @@ func TestWorkspaceHeldRenewalBoundary(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			// No wall-clock bound on the test context (#227): the held client
+			// is released by the test; only the guard's own RPC timeout remains.
+			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			if err := g.Refresh(ctx); err != nil {
 				t.Fatal(err)
