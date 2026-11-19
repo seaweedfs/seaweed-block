@@ -574,6 +574,12 @@ func (s *Session) enqueueResponse(resp *response) {
 // ---------- IO handlers (run in goroutines) ----------
 
 func (s *Session) handleRead(ctx context.Context, req *Request) {
+	arrival := req.receivedAt
+	if arrival.IsZero() {
+		arrival = req.dispatchReadyAt
+	}
+	ctx, cancel := frontend.WithReadBudget(ctx, arrival)
+	defer cancel()
 	s.recordReadCommand()
 	res := s.handler.Handle(ctx, IOCommand{
 		Opcode: req.capsule.OpCode,
