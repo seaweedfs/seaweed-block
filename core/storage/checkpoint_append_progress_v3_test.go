@@ -591,7 +591,19 @@ func TestCheckpointV3_HeldHydrationWithLocalWriteAndFlush(t *testing.T) {
 			}
 			entered, release := holdNextGet(t, remote)
 			done := make(chan error, 1)
+			joined := make(chan struct{})
+			// Release the fetch before joining, including failures before release().
+			// Register before launch so store/layer cleanup never precedes the join.
+			t.Cleanup(func() {
+				release()
+				select {
+				case <-joined:
+				case <-time.After(ctLocalBound):
+					t.Errorf("held hydration reader did not settle within %v after release", ctLocalBound)
+				}
+			})
 			go func() {
+				defer close(joined)
 				got, err := s.Read(9)
 				if err == nil && !bytes.Equal(got, blk(0xB9)) {
 					err = errors.New("held read did not return newer local bytes")
@@ -599,17 +611,18 @@ func TestCheckpointV3_HeldHydrationWithLocalWriteAndFlush(t *testing.T) {
 				done <- err
 			}()
 			waitKey(t, entered, "cold fill before a competing local write")
-			if _, err := s.Write(9, blk(0xB9)); err != nil {
-				t.Fatal(err)
-			}
-			if flush {
-				if _, err := s.Sync(); err != nil {
-					t.Fatal(err)
+			within(t, "local write and optional flush while hydration is held", func() error {
+				if _, err := s.Write(9, blk(0xB9)); err != nil {
+					return err
 				}
-				if err := s.flusher.flushOnce(); err != nil {
-					t.Fatal(err)
+				if flush {
+					if _, err := s.Sync(); err != nil {
+						return err
+					}
+					return s.flusher.flushOnce()
 				}
-			}
+				return nil
+			})
 			dirty := s.dm.len()
 			release()
 			if err := waitErr(t, done, "fill and post-miss WAL recheck"); err != nil {
