@@ -19,6 +19,10 @@ func TestCheckpointDiagnostics_RefusalThenSuccess(t *testing.T) {
 		if _, err := s.Write(2, blk(2)); err != nil {
 			t.Fatal(err)
 		}
+		// Simulate the effective-mutation class; newer WAL appends alone are safe.
+		if err := s.v3.mapProof.mutatedV3(); err != nil {
+			t.Fatal(err)
+		}
 	}
 	before := s.v3.pub.current()
 	err := s.flusher.flushOnce()
@@ -71,6 +75,9 @@ func TestCheckpointDiagnostics_PrepareRefusalAndIOFailure(t *testing.T) {
 				if !once {
 					once = true
 					if _, err := s.Write(2, blk(2)); err != nil {
+						t.Fatal(err)
+					}
+					if err := s.v3.mapProof.mutatedV3(); err != nil {
 						t.Fatal(err)
 					}
 				}

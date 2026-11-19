@@ -7,6 +7,8 @@ package storage
 
 // Caller holds WALStore.mu. Higher-LSN writes update the max; a reused or
 // lower/equal effective LSN is conservative UNKNOWN, independent of the max.
+// A reused ordered LSN below a speculative max can set UNKNOWN here without
+// invalidating a prefix proof; the max and retained suffix stay conservative.
 // Capture is the only future owner allowed to clear UNKNOWN after a version
 // check. Keeping it set here cannot manufacture a remotely clean chunk.
 func (s *WALStore) recordMapWriteV3(lba, lsn uint64) {
@@ -36,6 +38,8 @@ func (s *WALStore) prepareOwnedMapCheckpointV3(cp uint64) (*preparedMapPublicati
 		return nil, mapCoverageRefusal("map_binding_changed")
 	}
 	proof := domain.snapshotV3()
+	// Entries may already contain LSNs above cp or W from earlier appends: max-LSN
+	// entries are monotone and idempotent under retained-suffix replay.
 	entries := append([]chunkLSNEntryV3(nil), v.mapEntries...)
 	v.pub.descMu.Unlock()
 	s.mu.RUnlock()
