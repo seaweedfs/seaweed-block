@@ -9,7 +9,8 @@ import "errors"
 var ErrStalePrimary = errors.New("frontend: stale primary lineage")
 
 // ErrNotReady is returned by Provider.Open when the projection
-// never reports healthy before the context deadline.
+// never reports healthy before the context deadline, and by a Backend
+// while local recovery or chunk attachment is not yet operational.
 var ErrNotReady = errors.New("frontend: volume not ready")
 
 // ErrBackendClosed is returned by Backend.Read / Backend.Write
