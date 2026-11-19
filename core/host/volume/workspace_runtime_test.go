@@ -77,6 +77,7 @@ type runtimeLeaseServer struct {
 	mu                          sync.Mutex
 	ttl                         time.Duration
 	disabled, blocked, revoking bool
+	shortGrants                 int // grants served with ttl < 1 s
 	acks                        int
 	ackGen                      uint64
 	first                       chan struct{}
@@ -88,6 +89,9 @@ func (s *runtimeLeaseServer) RenewWorkspaceLease(ctx context.Context, id *contro
 	s.once.Do(func() { close(s.first) })
 	s.mu.Lock()
 	ttl, disabled, blocked, revoking := s.ttl, s.disabled, s.blocked, s.revoking
+	if !disabled && !blocked && ttl < time.Second {
+		s.shortGrants++
+	}
 	s.mu.Unlock()
 	if disabled {
 		return nil, status.Error(codes.FailedPrecondition, "workspace RPC disabled")
@@ -164,7 +168,10 @@ func TestWorkspaceHostLeaseExpiryAndRevokeCloseRealProvider(t *testing.T) {
 	for _, kind := range []string{"expiry-stalled-renewal", "detach-then-revoke", "cancel"} {
 		t.Run(kind, func(t *testing.T) {
 			var stopped atomic.Bool
-			wire := &runtimeLeaseServer{ttl: 300 * time.Millisecond, stopped: &stopped}
+			// A 3 s lease while the volume is set up (#227: a 300 ms lease could
+			// expire under load before the detach/cut steps ran); the expiry case
+			// switches to 300 ms below.
+			wire := &runtimeLeaseServer{ttl: 3 * time.Second, stopped: &stopped}
 			h := workspaceRuntimeHost(t, runtimeWire(t, wire), true)
 			p, remote := runtimeStore(t, h)
 			ctx, cancel := context.WithCancel(context.Background())
@@ -213,6 +220,16 @@ func TestWorkspaceHostLeaseExpiryAndRevokeCloseRealProvider(t *testing.T) {
 				wire.mu.Unlock()
 			}
 			if kind == "expiry-stalled-renewal" {
+				// Shorten the lease, wait (progress) until one 300 ms grant was
+				// served, then stall renewals: the lease expires 300 ms later.
+				wire.mu.Lock()
+				wire.ttl = 300 * time.Millisecond
+				wire.mu.Unlock()
+				runtimeAwait(t, "a 300 ms grant", func() bool {
+					wire.mu.Lock()
+					defer wire.mu.Unlock()
+					return wire.shortGrants > 0
+				})
 				wire.mu.Lock()
 				wire.blocked = true
 				wire.mu.Unlock()
