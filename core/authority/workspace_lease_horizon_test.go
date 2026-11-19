@@ -624,22 +624,19 @@ func TestWorkspaceLeaseConcurrentRenewalsWritersExtendersClose(t *testing.T) {
 	// progress condition never holds), or before the writers run after the
 	// release (a revoke ACK finds the lease expired). This test is about lock
 	// and store ordering, not about lease expiry.
-	var frozenNS atomic.Int64 // 0 = running
-	// At the release the clock resumes from the frozen instant (the offset takes
-	// back the time spent held), so it neither jumps over a horizon nor runs
-	// backwards; extensions then run in real time alongside writers and Close.
-	var offNS atomic.Int64
+	// At the release the clock resumes from the frozen instant, so it neither
+	// jumps over a horizon nor runs backwards; extensions then run in real time
+	// alongside writers and Close. Now/Freeze/Resume are one transaction each.
+	clock := &leaseTestClock{}
 	releaseHold := func() {
 		releaseOnce.Do(func() {
-			if f := frozenNS.Load(); f != 0 {
-				offNS.Add(-int64(time.Since(time.Unix(0, f))))
-				frozenNS.Store(0)
-			}
+			clock.Resume()
 			close(heldRelease)
 		})
 	}
 	var classifying atomic.Bool
-	var holding atomic.Bool // set when the extension write is held, before it blocks
+	var holding atomic.Bool  // set when the extension write is held, before it blocks
+	var heldVol atomic.Value // string: the volume whose extension write is held
 	hs.setBefore(func(r DurableRecord) error {
 		time.Sleep(5 * time.Millisecond) // a slow store
 		if !classifying.Load() || r.Workspace == nil || r.Workspace.Lease == nil {
@@ -658,8 +655,9 @@ func TestWorkspaceLeaseConcurrentRenewalsWritersExtendersClose(t *testing.T) {
 			first := false
 			holdOnce.Do(func() { first = true })
 			if first {
-				frozenNS.Store(time.Now().Add(time.Duration(offNS.Load())).UnixNano())
-				holding.Store(true) // before the hold: a renewal started after this saw it
+				clock.Freeze()
+				heldVol.Store(r.VolumeID) // the volume whose extension write is held
+				holding.Store(true)       // before the hold: a renewal started after this saw it
 				close(heldEntered)
 				<-heldRelease
 			}
@@ -669,17 +667,12 @@ func TestWorkspaceLeaseConcurrentRenewalsWritersExtendersClose(t *testing.T) {
 	// The publisher clock is real time plus an offset. The forced-move volume
 	// is granted at offset -10 s, so by offset 0 its horizon + skew barrier has
 	// passed; the clock only moves forward.
-	offNS.Store(int64(-10 * time.Second))
-	p := NewPublisher(nil, WithStore(hs), WithWorkspaceLeaseConfig(2*time.Second, func() time.Time {
-		if f := frozenNS.Load(); f != 0 {
-			return time.Unix(0, f)
-		}
-		return time.Now().Add(time.Duration(offNS.Load()))
-	}))
+	clock.SetOffset(-10 * time.Second)
+	p := NewPublisher(nil, WithStore(hs), WithWorkspaceLeaseConfig(2*time.Second, clock.Now))
 	t.Cleanup(p.CloseWorkspaceExtenders)
 	ctx := context.Background()
 	bindAndGrant(t, p, vol(forcedVol), "r") // never renewed again
-	offNS.Store(0)
+	clock.SetOffset(0)
 	for i := 0; i < n; i++ {
 		if i != forcedVol {
 			bindAndGrant(t, p, vol(i), "r")
@@ -692,7 +685,9 @@ func TestWorkspaceLeaseConcurrentRenewalsWritersExtendersClose(t *testing.T) {
 	classifying.Store(true)
 
 	var grants [n]atomic.Int64
-	var underHold [n]atomic.Int64 // grants of calls that started while the extension write was held
+	var underHold [n]atomic.Int64         // grants of calls that started while the extension write was held
+	var returnedUnderHold [n]atomic.Int64 // calls (any outcome) that started while the extension write was held
+	var otherRefusals atomic.Value        // string: a refusal under the hold that is not horizon exhaustion
 	var maxGrant [n]atomic.Int64
 	var slowest atomic.Int64
 	stop := make(chan struct{})
@@ -745,6 +740,16 @@ func TestWorkspaceLeaseConcurrentRenewalsWritersExtendersClose(t *testing.T) {
 				if d := int64(time.Since(start)); d > slowest.Load() {
 					slowest.Store(d)
 				}
+				if fresh {
+					returnedUnderHold[i].Add(1)
+					// With the clock frozen and every extension queued behind the
+					// held write, a horizon left without host validity is refused
+					// by design; any other refusal here is a failure.
+					if err != nil && !strings.Contains(err.Error(), "leaves no host validity") &&
+						!strings.Contains(err.Error(), "expired or revoking") {
+						otherRefusals.CompareAndSwap(nil, fmt.Sprintf("%s: %v", vol(i), err))
+					}
+				}
 				if err == nil && !l.Revoking {
 					grants[i].Add(1)
 					if fresh {
@@ -760,26 +765,44 @@ func TestWorkspaceLeaseConcurrentRenewalsWritersExtendersClose(t *testing.T) {
 	}
 
 	// Handshake 1: the first extension write is held inside the store.
-	<-heldEntered // progress, no timer (#227): renewers keep triggering extensions
+	// Progress handshakes (#227) with a real-time failure exit (never a pass):
+	// the cleanup releases the hold and joins every worker.
+	select {
+	case <-heldEntered: // renewers keep triggering extensions
+	case <-time.After(30 * time.Second):
+		t.Fatal("no extension write was held within 30 s")
+	}
 	// A late test goroutine (machine load), longer than a horizon (1.5 x TTL):
 	// with the clock frozen under the hold, no volume can lose its lease here.
 	time.Sleep(3500 * time.Millisecond)
-	// Handshake 2: renewals keep succeeding while it is held.
-	// Progress, no timer (#227): every eligible volume gains a grant from a call
-	// that STARTED while the extension write was held (a reply computed before
-	// the hold does not count). Renewals that waited for it would never return.
-	for {
+	// Handshake 2: renewals never wait for the held store write (#205).
+	// Progress, no timer (#227): every eligible volume has a call that STARTED
+	// while the extension write was held and returned (a reply computed before
+	// the hold does not count); renewals that waited for it would never return.
+	// Grants under the hold are clamped to each volume's durable horizon: under
+	// the frozen clock a volume whose horizon leaves no host validity is refused
+	// by design, so grants are reported, and only horizon refusals are allowed.
+	held, _ := heldVol.Load().(string)
+	for give := time.Now().Add(30 * time.Second); ; time.Sleep(5 * time.Millisecond) {
 		all := true
 		for _, i := range eligible {
-			if underHold[i].Load() == 0 {
+			if returnedUnderHold[i].Load() == 0 {
 				all = false
 			}
 		}
 		if all {
 			break
 		}
-		time.Sleep(5 * time.Millisecond)
+		if time.Now().After(give) {
+			t.Fatalf("under the held extension of %s within 30 s: grants %v, returned calls %v", held,
+				underHoldCounts(&underHold, eligible), underHoldCounts(&returnedUnderHold, eligible))
+		}
 	}
+	if r, _ := otherRefusals.Load().(string); r != "" {
+		t.Fatalf("under the held extension of %s: refusal other than horizon exhaustion: %s", held, r)
+	}
+	t.Logf("under the held extension of %s: grants %v, returned calls %v", held,
+		underHoldCounts(&underHold, eligible), underHoldCounts(&returnedUnderHold, eligible))
 	// Writers and Close start while the extension write is held.
 	writersStarted = true
 	go func() {
@@ -1005,5 +1028,115 @@ func TestWorkspaceExtenderAdmittedBeforeCloseDoesNotWrite(t *testing.T) {
 	p.leaseMu.Unlock()
 	if extending {
 		t.Fatal("aborted extender left the single-flight flag set")
+	}
+}
+
+// leaseTestClock is a test publisher clock: real time plus an offset, or a
+// frozen instant. Now, Freeze, Resume and SetOffset are each one transaction
+// under mu, and Now never returns an earlier time than a previous Now.
+type leaseTestClock struct {
+	mu     sync.Mutex
+	off    time.Duration
+	frozen time.Time // zero = running
+	last   time.Time
+}
+
+func (c *leaseTestClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	t := c.frozen
+	if t.IsZero() {
+		t = time.Now().Add(c.off)
+	}
+	if t.Before(c.last) {
+		t = c.last
+	}
+	c.last = t
+	return t
+}
+
+// Freeze stops the clock at its current reading.
+func (c *leaseTestClock) Freeze() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.frozen.IsZero() {
+		c.frozen = time.Now().Add(c.off)
+		if c.frozen.Before(c.last) {
+			c.frozen = c.last
+		}
+	}
+}
+
+// Resume restarts a frozen clock from its frozen instant.
+func (c *leaseTestClock) Resume() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.frozen.IsZero() {
+		c.off = c.frozen.Sub(time.Now())
+		c.frozen = time.Time{}
+	}
+}
+
+func (c *leaseTestClock) SetOffset(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.off = d
+}
+
+func underHoldCounts(u *[8]atomic.Int64, eligible []int) []int64 {
+	out := make([]int64, 0, len(eligible))
+	for _, i := range eligible {
+		out = append(out, u[i].Load())
+	}
+	return out
+}
+
+// Readers running across freeze/resume transitions never see the test clock
+// go backwards, and a resume does not jump forward over the frozen interval.
+func TestLeaseTestClockMonotonicAcrossFreezeResume(t *testing.T) {
+	c := &leaseTestClock{}
+	var stop atomic.Bool
+	var wg sync.WaitGroup
+	errs := make(chan string, 8)
+	for r := 0; r < 4; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			prev := c.Now()
+			for !stop.Load() {
+				now := c.Now()
+				if now.Before(prev) {
+					select {
+					case errs <- fmt.Sprintf("clock went backwards: %v after %v", now, prev):
+					default:
+					}
+					return
+				}
+				prev = now
+			}
+		}()
+	}
+	for k := 0; k < 50; k++ {
+		c.Freeze()
+		at := c.Now()
+		time.Sleep(2 * time.Millisecond)
+		if got := c.Now(); !got.Equal(at) {
+			t.Fatalf("frozen clock moved: %v -> %v", at, got)
+		}
+		r0 := time.Now()
+		c.Resume()
+		got := c.Now()
+		// After a resume the clock advances by at most the real time since the
+		// resume began (no jump over the frozen interval), and never backwards.
+		if got.Before(at) || got.Sub(at) > time.Since(r0) {
+			t.Fatalf("resume moved the clock by %v (real time since resume %v)", got.Sub(at), time.Since(r0))
+		}
+		time.Sleep(time.Millisecond)
+	}
+	stop.Store(true)
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		t.Fatal(e)
 	}
 }
