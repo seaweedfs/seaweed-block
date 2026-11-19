@@ -274,3 +274,7 @@ Recover/reset snapshot recheck and saved-file readers are covered by the
 native `TestCutCOWV3_*` caller controls, not claimed as model proofs.
 The earlier thirteen-spec parse statement above predates this imported model;
 no new independent TLC/parse or cloud run is claimed here.
+
+### Static volume create capacity
+
+`INV-VOLUME-CREATE-SIZE-001` bounds a new volume to 16 TiB - 4 KiB. The current ControlPlane/ChunkLifecycle models abstract volume identity and create/delete ordering, not byte capacity or block geometry; this admission bound is not a TLC property. The actual CSI, lifecycle, Catalog and WAL create caller controls in `volume_size_limit_test.go` establish the bound before side effects. No modeled state or action is changed.

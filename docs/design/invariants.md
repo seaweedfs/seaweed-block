@@ -229,7 +229,7 @@ HEAD states, snapshots, forks, intents, key bindings, GC and volume delete in th
 
 | From | To | Guard | Enforced in | Protects |
 |---|---|---|---|---|
-| — | `active` (gen 1, epoch 0) | the first HEAD is an exclusive create (`CASHead` with expected gen 0); a fork HEAD carries the parent's `RemoteLSN` and references | `core/frontend/chunkstore/chunk_remote.go` `CASHead`; `core/frontend/chunkstore/catalog.go` `EnsureVolume`, `Fork` | `INV-WS-HEAD-CAS-001` |
+| — | `active` (gen 1, epoch 0) | new volume capacity is at most 16 TiB - 4 KiB before creation; the first HEAD is an exclusive create (`CASHead` with expected gen 0); a fork HEAD carries the parent's `RemoteLSN` and references | `core/frontend/chunkstore/chunk_remote.go` `CASHead`; `core/frontend/chunkstore/catalog.go` `EnsureVolume`, `Fork` | `INV-WS-HEAD-CAS-001` |
 | `active` | `active` | a holder's cut or a takeover CAS (M4, M5) | `core/frontend/chunkstore/chunk_remote.go` `CASHead` | `INV-WS-HEAD-CAS-001`, `INV-WS-HEAD-MONOTONE-001` |
 | `active` | `detached` | `Detach` final cut | `core/storage/chunk_layer.go` `chunkLayerImpl.Detach` | `INV-WS-CLEAN-MOVE-001` |
 | `detached` | `active` | takeover CAS by a new holder at a higher epoch | `core/storage/chunk_restore.go` `ClaimChunkHead` | `INV-WS-CLAIM-BEFORE-SERVE-001` |
