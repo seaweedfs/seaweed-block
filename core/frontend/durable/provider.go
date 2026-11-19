@@ -251,21 +251,22 @@ type volHandle struct {
 // handle. It intentionally exposes lineage and readiness facts without giving
 // callers a control surface.
 type VolumeStatus struct {
-	VolumeID        string
-	Path            string
-	Impl            string
-	ReplicaID       string
-	Epoch           uint64
-	EndpointVersion uint64
-	Latched         bool
-	Operational     bool
-	FrontierKnown   bool
-	DurableLSN      uint64
-	RetainedLSN     uint64
-	HeadLSN         uint64
-	Evidence        string
-	Closed          bool
-	WriteProfile    WriteProfileStatus
+	VolumeID              string
+	Path                  string
+	Impl                  string
+	ReplicaID             string
+	Epoch                 uint64
+	EndpointVersion       uint64
+	Latched               bool
+	Operational           bool
+	FrontierKnown         bool
+	DurableLSN            uint64
+	RetainedLSN           uint64
+	HeadLSN               uint64
+	Evidence              string
+	Closed                bool
+	WriteProfile          WriteProfileStatus
+	CheckpointPersistence *storage.CheckpointPersistenceStatus `json:",omitempty"`
 	// Chunk is the chunk layer's state and cut counters; walstore-chunk
 	// volumes only.
 	Chunk *ChunkStatus
