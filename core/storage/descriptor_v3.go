@@ -266,6 +266,13 @@ func (p *descriptorPublisherV3) publishLockedCoreV3(mutate func(next *descriptor
 	if prepared != nil {
 		p.mapCurrent = prepared.candidate
 	}
+	// Report the slot tuples to the owned map (descMu -> liveMu): roots
+	// neither slot names any more, and superseded candidates, are released.
+	// A publication before the map is bound reports nothing; that only
+	// delays a release until the next report.
+	if p.mapCurrent != nil && p.mapCurrent.owner != nil {
+		p.mapCurrent.owner.slotsPublishedV3(p.cur, p.other, p.otherValid)
+	}
 	return next, nil
 }
 

@@ -116,6 +116,7 @@ func (s *WALStore) publishCheckpointV3(cp uint64, seed bool, recoveryGen uint64)
 	// The candidate proof alone is insufficient: it was prepared after extent
 	// I/O and could belong to a newer Recover lifetime than those bytes.
 	if !v.flushLifetimeValidV3(recoveryGen) {
+		prepared.abandonV3()
 		return descriptorV3{}, ErrMapCoverageStale
 	}
 	wack := v.wack.Load()
@@ -123,6 +124,7 @@ func (s *WALStore) publishCheckpointV3(cp uint64, seed bool, recoveryGen uint64)
 		wack = max(wack, cp)
 	}
 	if wack < cp {
+		prepared.abandonV3()
 		return descriptorV3{}, ErrMapCoverageStale
 	}
 	s.mu.RLock()
