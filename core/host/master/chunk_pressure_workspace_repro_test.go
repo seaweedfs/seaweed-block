@@ -3,6 +3,7 @@ package master
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
@@ -18,13 +19,21 @@ import (
 // Public provider and NVMe handler, actual master RPC/authority stores, no filer,
 // replication observer, kernel transport, guest filesystem, cut or four-VM load.
 func TestChunkPressureSmallRandomWithWorkspaceLeaseDiagnostic(t *testing.T) {
+	runChunkPressureRandomDiagnostic(t, []bool{false, true})
+}
+func TestChunkPressureFourLocalStreamsDiagnostic(t *testing.T) {
+	for i := 0; i < 4; i++ {
+		t.Run(fmt.Sprintf("stream-%d", i), func(t *testing.T) { t.Parallel(); runChunkPressureRandomDiagnostic(t, []bool{true}) })
+	}
+}
+func runChunkPressureRandomDiagnostic(t *testing.T, leaseValues []bool) {
 	h, conn, setupCtx := reviewBindingHost(t)
 	reviewLegacyBind(t, h, conn, setupCtx, "v1")
 	line, ok := h.Publisher().VolumeAuthorityLine("v1")
 	if !ok {
 		t.Fatal("missing authority")
 	}
-	for _, lease := range []bool{false, true} {
+	for _, lease := range leaseValues {
 		name := "without-lease"
 		if lease {
 			name = "with-real-master-lease"
