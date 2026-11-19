@@ -165,6 +165,11 @@ func (r *ChunkRemote) resolveManifest(ctx context.Context, h storage.ChunkHead) 
 		if err := decodeManifestJSON(body, &doc); err != nil {
 			return h, err
 		}
+		decoder := json.NewDecoder(bytes.NewReader(body))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&doc); err != nil {
+			return h, err
+		}
 		if doc.Format != 1 || doc.Range != group || doc.ChunkBytes != h.ChunkBytes || doc.Owner != ref.Owner || len(doc.Chunks) != ref.Count {
 			return h, errors.New("chunkstore: invalid segment contents")
 		}
