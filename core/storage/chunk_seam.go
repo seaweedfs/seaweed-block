@@ -372,7 +372,11 @@ type chunkCutStats struct {
 	COWSavedChunks  int
 	COWSaveNs       int64
 	COWWaitNs       int64
+	// BarrierPauseNs is the guest pause: from the capture barrier's Lock
+	// request until it is released. LockWaitNs is its first part, the wait for
+	// writers already holding the capture barrier shared.
 	BarrierPauseNs  int64
+	LockWaitNs      int64
 	SyncNs          int64
 	CopyNs          int64
 	CandidateChunks int

@@ -835,9 +835,14 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		return chunkCutResult{}, err
 	}
 
-	// Quiesced cut.
+	// Quiesced cut. The guest pause starts at the Lock REQUEST: a pending
+	// writer blocks new readers of captureMu, so a write arriving while the cut
+	// waits for writers already holding it (e.g. parked in WAL admission) is
+	// paused too. LockWaitNs reports that wait on its own.
+	pauseStart := time.Now()
 	l.s.captureMu.Lock()
 	barrier := time.Now()
+	st.LockWaitNs = barrier.Sub(pauseStart).Nanoseconds()
 	h, err := l.s.Sync()
 	st.SyncNs = time.Since(barrier).Nanoseconds()
 	if hook := l.testAfterBarrierSyncHook; hook != nil && err == nil {
@@ -845,7 +850,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	}
 	if err != nil {
 		l.s.captureMu.Unlock()
-		st.BarrierPauseNs = time.Since(barrier).Nanoseconds()
+		st.BarrierPauseNs = time.Since(pauseStart).Nanoseconds()
 		l.dropIntents(ctx, intents) // a clean abort: staged keys are released
 		return chunkCutResult{}, fmt.Errorf("storage: capture sync: %w", err)
 	}
@@ -900,7 +905,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		var w *cutCOWWindow
 		w, copyErr = l.installCOWWindow(candidates, useStaged)
 		l.s.captureMu.Unlock()
-		st.BarrierPauseNs = time.Since(barrier).Nanoseconds()
+		st.BarrierPauseNs = time.Since(pauseStart).Nanoseconds()
 		copyStart = time.Now()
 		if copyErr == nil {
 			var copied []capturedChunk
@@ -923,7 +928,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 			captured = append(captured, capturedChunk{idx: idx, data: buf, sum: sha256.Sum256(buf), zero: isAllZero(buf)})
 		}
 		l.s.captureMu.Unlock()
-		st.BarrierPauseNs = time.Since(barrier).Nanoseconds()
+		st.BarrierPauseNs = time.Since(pauseStart).Nanoseconds()
 	}
 	st.CopyNs = time.Since(copyStart).Nanoseconds()
 	if copyErr != nil {

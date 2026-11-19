@@ -59,6 +59,7 @@ type ChunkCutStatsBody struct {
 	COWSaveNs         int64  `json:"cowSaveNs"`
 	COWWaitNs         int64  `json:"cowWaitNs"`
 	BarrierPauseNs    int64  `json:"barrierPauseNs"`
+	LockWaitNs        int64  `json:"lockWaitNs"`
 	SyncNs            int64  `json:"syncNs"`
 	CopyNs            int64  `json:"copyNs"`
 	CandidateChunks   int    `json:"candidateChunks"`
@@ -80,6 +81,7 @@ type ChunkCutStatsBody struct {
 func cutStatsBody(s storage.ChunkCutStats) ChunkCutStatsBody {
 	return ChunkCutStatsBody{
 		BarrierPauseNs:    s.BarrierPauseNs,
+		LockWaitNs:        s.LockWaitNs,
 		SyncNs:            s.SyncNs,
 		CopyNs:            s.CopyNs,
 		COWSavedChunks:    s.COWSavedChunks,
