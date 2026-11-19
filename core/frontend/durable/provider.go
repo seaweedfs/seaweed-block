@@ -157,10 +157,12 @@ type ProviderConfig struct {
 	// passed since the volume's last successful cut (of any kind). Zero
 	// disables the timer.
 	ChunkCaptureInterval time.Duration
-	// ChunkDirtyThreshold is the bound on one cut's barrier copy, in
-	// chunks. It never triggers a cut: the remote holds snapshots, and
-	// cuts are published only by CaptureVolume, MakeVolumeRemoteDurable
-	// (snapshot, detach) and the timer. Zero: unbounded.
+	// ChunkDirtyThreshold is the number of candidate chunks above which
+	// a cut pre-copies (stages) chunks before its barrier, in rounds of
+	// this size; copy-before-write copies the rest outside the barrier.
+	// It never triggers a cut: the remote holds snapshots, and cuts are
+	// published only by CaptureVolume, MakeVolumeRemoteDurable
+	// (snapshot, detach) and the timer. Zero: no pre-copy.
 	ChunkDirtyThreshold int
 	// ChunkUploadConcurrency bounds remote uploads; zero defaults to 8.
 	ChunkUploadConcurrency int
