@@ -61,7 +61,6 @@ func TestChunkCutMixedSuccessDoesNotReplaySuccessfulKey(t *testing.T) {
 	if _, err := l.Cut(ctTimeout(t)); err != nil {
 		t.Fatal(err)
 	}
-	assertEveryHeadIsPrefixImage(t, f, w)
 	if len(f.installedHeads()) != 1 {
 		t.Fatal("must publish once")
 	}
@@ -88,6 +87,7 @@ func TestChunkCutMixedSuccessDoesNotReplaySuccessfulKey(t *testing.T) {
 	if len(seen) != 2 {
 		t.Fatal("did not exercise success and retry")
 	}
+	assertEveryHeadIsPrefixImage(t, f, w)
 }
 
 func TestChunkCutRetriesOnlyTheFailedUpload(t *testing.T) {
