@@ -45,7 +45,9 @@ this volume's reserved `.cut-cow-` prefix; other prefixes, directories and
 symlinks are left alone. Cleanup failure fails the cut diagnostically, without
 changing any guest write outcome.
 
-`barrierPauseNs` includes Sync/window setup, not chunk reads. `copyNs` is the
+`barrierPauseNs` runs from the capture barrier's Lock request (a pending Lock
+already blocks new writers) to its release: it includes `lockWaitNs`, the wait for
+writers already holding the barrier shared, and Sync/window setup, not chunk reads. `copyNs` is the
 outside-barrier copy and drain. Native `barrierCopyChunks`/`barrierOverBound`
 are zero; the configured threshold still bounds staging, not a hard COW-copy
 limit. `cowSavedChunks`, `cowSaveNs`, `cowWaitNs` are mirrored into the cut
