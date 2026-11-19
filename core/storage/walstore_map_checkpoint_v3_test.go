@@ -379,8 +379,18 @@ func TestWALStoreV3_MapFailureRefusesQueuedSync(t *testing.T) {
 	s.v3.ownedMap.syncFile = func() error { return injected }
 	// Preparation is outside syncMu, so this failure must surface while the
 	// later Sync remains queued behind the held leader role.
-	if err := s.flusher.flushOnce(); !errors.Is(err, injected) {
-		t.Fatalf("map failure=%v", err)
+	flushed := make(chan error, 1)
+	go func() { flushed <- s.flusher.flushOnce() }()
+	select {
+	case err := <-flushed:
+		if !errors.Is(err, injected) {
+			t.Fatalf("map failure=%v", err)
+		}
+	case <-time.After(5 * time.Second):
+		// Release and join before failing; never abandon the flusher worker.
+		release()
+		<-flushed
+		t.Fatal("idle pressure check blocked map preparation behind Sync")
 	}
 	if s.stickyIOFault() == nil {
 		t.Error("map failure not globally latched before releasing Sync")

@@ -59,6 +59,7 @@ type ChunkCutStatsBody struct {
 	COWSaveNs         int64  `json:"cowSaveNs"`
 	COWWaitNs         int64  `json:"cowWaitNs"`
 	BarrierPauseNs    int64  `json:"barrierPauseNs"`
+	LockWaitNs        int64  `json:"lockWaitNs"`
 	SyncNs            int64  `json:"syncNs"`
 	CopyNs            int64  `json:"copyNs"`
 	CandidateChunks   int    `json:"candidateChunks"`
@@ -80,6 +81,7 @@ type ChunkCutStatsBody struct {
 func cutStatsBody(s storage.ChunkCutStats) ChunkCutStatsBody {
 	return ChunkCutStatsBody{
 		BarrierPauseNs:    s.BarrierPauseNs,
+		LockWaitNs:        s.LockWaitNs,
 		SyncNs:            s.SyncNs,
 		CopyNs:            s.CopyNs,
 		COWSavedChunks:    s.COWSavedChunks,
@@ -157,6 +159,7 @@ const (
 	codeFenced             = "fenced"
 	codeHeadConflict       = "head_conflict"
 	codeClosing            = "closing"
+	codeDetachAborted      = "detach_aborted" // the detach did not happen; the volume keeps serving here
 	codeLSNBehind          = "lsn_behind"
 	codeInternal           = "internal"
 	codeBadRequest         = "bad_request"
@@ -227,6 +230,13 @@ func writeChunkFailure(w http.ResponseWriter, err error) {
 func chunkErrorCode(err error) (int, string, bool) {
 	var ce *chunkstore.CatalogError
 	switch {
+	case errors.Is(err, durable.ErrDetachAborted):
+		// Before any cause (a catalog error included): nothing was
+		// published and serving resumed here.
+		return http.StatusConflict, codeDetachAborted, true
+	case errors.Is(err, durable.ErrDetachOutcomeUnknown):
+		// Before any cause: the detach may still have landed; I/O stays stopped.
+		return http.StatusServiceUnavailable, chunkstore.CodeOutcomeUnknown, true
 	case errors.As(err, &ce):
 		return catalogStatus(ce.Code), ce.Code, ce.Retryable
 	case errors.Is(err, storage.ErrChunkLayerFenced):

@@ -475,7 +475,7 @@ func (s *Session) dispatchIO(ctx context.Context, req *Request) {
 			if s.logger != nil {
 				s.logger.Printf("nvme: Flush failed qid=%d nsid=%d sct=%#x sc=%#x reason=%s", s.qid, req.capsule.NSID, res.SCT, res.SC, res.Reason)
 			}
-			req.resp.Status = MakeStatusField(res.SCT, res.SC, true)
+			req.resp.Status = res.completionStatus()
 		}
 		s.enqueueResponse(&response{resp: req.resp})
 	default:
@@ -580,7 +580,7 @@ func (s *Session) handleRead(ctx context.Context, req *Request) {
 		NLB:    req.capsule.LbaLength(),
 	})
 	if res.AsError() != nil {
-		req.resp.Status = MakeStatusField(res.SCT, res.SC, true)
+		req.resp.Status = res.completionStatus()
 		s.enqueueResponse(&response{resp: req.resp})
 		return
 	}
@@ -601,7 +601,7 @@ func (s *Session) handleWrite(ctx context.Context, req *Request) {
 	})
 	s.recordWriteHandler(time.Since(handlerStart))
 	if res.AsError() != nil {
-		req.resp.Status = MakeStatusField(res.SCT, res.SC, true)
+		req.resp.Status = res.completionStatus()
 	}
 	s.enqueueResponse(&response{resp: req.resp, writeCompletion: true, queuedAt: time.Now()})
 }

@@ -18,6 +18,9 @@ import (
 )
 
 const cutCOWMemoryLimit = 64 << 20
+
+// defaultCOWSpillLimit caps a copy window's side-file bytes by default.
+const defaultCOWSpillLimit = 1 << 30
 const (
 	cowPending uint8 = iota
 	cowCopying
@@ -53,6 +56,8 @@ type cutCOWWindow struct {
 	entries    map[uint64]*cutCOWEntry
 	head       map[uint64]chunkRef // the cut's base HEAD: the source of missing blocks
 	memory     int64
+	spillBytes int64 // bytes written to the side file; at most spillLimit
+	spillLimit int64
 	chunkBytes int64
 	side       *os.File
 	sideErr    error
@@ -129,7 +134,7 @@ func (l *chunkLayerImpl) installCOWWindow(candidates, staged map[uint64]bool, he
 	if size == 0 || size > math.MaxInt64 || uint64(len(candidates)) > math.MaxInt64/size {
 		return nil, fmt.Errorf("%w: side-store geometry", errCutCOWAborted)
 	}
-	w := &cutCOWWindow{layer: l, ended: make(chan struct{}), entries: make(map[uint64]*cutCOWEntry), head: head, chunkBytes: int64(size)}
+	w := &cutCOWWindow{layer: l, ended: make(chan struct{}), entries: make(map[uint64]*cutCOWEntry), head: head, spillLimit: l.cfg.COWSpillLimit, chunkBytes: int64(size)}
 	var slot int64
 	for _, idx := range sortedKeys(candidates) {
 		state := cowPending
@@ -293,6 +298,13 @@ func (w *cutCOWWindow) save(e *cutCOWEntry, data []byte, missing []uint64) error
 	inMemory := w.memory+w.chunkBytes <= cutCOWMemoryLimit
 	if inMemory {
 		w.memory += w.chunkBytes
+	} else if w.spillBytes+w.chunkBytes > w.spillLimit {
+		// The side file is sparse but its saved chunks are real bytes on the
+		// volume's filesystem: abort the cut (retried) instead of filling it.
+		w.mu.Unlock()
+		return fmt.Errorf("%w: COW spill would exceed its cap of %d bytes", errCutCOWAborted, w.spillLimit)
+	} else {
+		w.spillBytes += w.chunkBytes
 	}
 	w.mu.Unlock()
 	// e.missing (and e.data / the spilled bytes) are published to readers by

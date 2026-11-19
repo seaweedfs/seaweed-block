@@ -355,6 +355,12 @@ type chunkLayerConfig struct {
 	// UploadConcurrency bounds capture/pre-copy Put calls (0 defaults to 8).
 	UploadConcurrency int
 
+	// COWSpillLimit caps the bytes a cut's copy window may spill to its side
+	// file once the in-memory budget is used: a save beyond it aborts the cut
+	// (the caller retries) instead of growing the file under the WAL/extent.
+	// 0 defaults to defaultCOWSpillLimit; negative is refused.
+	COWSpillLimit int64
+
 	// testReconcileHold, set only by this package's tests, holds the
 	// reconciler before each slice until a token is received or the
 	// channel is closed.
@@ -369,10 +375,14 @@ type chunkLayerConfig struct {
 // chunkCutStats describes one cut. The periodic-cut work fills it; a zero
 // value means "not measured".
 type chunkCutStats struct {
-	COWSavedChunks  int
-	COWSaveNs       int64
-	COWWaitNs       int64
+	COWSavedChunks int
+	COWSaveNs      int64
+	COWWaitNs      int64
+	// BarrierPauseNs is the guest pause: from the capture barrier's Lock
+	// request until it is released. LockWaitNs is its first part, the wait for
+	// writers already holding the capture barrier shared.
 	BarrierPauseNs  int64
+	LockWaitNs      int64
 	SyncNs          int64
 	CopyNs          int64
 	CandidateChunks int
@@ -453,6 +463,15 @@ type chunkCutResult struct {
 }
 
 // chunkLayer is what the store owner drives.
+// detachSettlement is how a failed Detach ended (SettleDetach).
+type detachSettlement int
+
+const (
+	detachNotPublished detachSettlement = iota
+	detachApplied
+	detachFenced
+)
+
 type chunkLayer interface {
 	chunkSink
 	// Cut takes a quiesced cut at H (the last written LSN), uploads the
@@ -471,6 +490,14 @@ type chunkLayer interface {
 	// Detach returns the first result. An unresolved detach CAS is settled
 	// like any other unresolved CAS, before the next capture or Detach.
 	Detach(ctx context.Context) (chunkCutResult, error)
+	// SettleDetach decides how a failed Detach ended, with the caller's I/O
+	// still stopped: detachNotPublished (HEAD does not and can never carry
+	// this layer's detach: serving may resume; the dirty set stays dirty),
+	// detachApplied (HEAD carries it: the detached result is returned) or
+	// detachFenced (HEAD belongs to a newer epoch or another holder). An
+	// error wrapping errChunkCASOutcomeUnknown leaves it undecided: stay
+	// stopped. It never resumes on top of a possibly detached HEAD.
+	SettleDetach(ctx context.Context) (detachSettlement, chunkCutResult, error)
 	// MakeRemoteDurable is the durability point for snapshot, detach and
 	// migrate: a Capture whose H >= t. Only a nil return makes t remote
 	// durable; it requires the local Sync to cover t first, and fails
