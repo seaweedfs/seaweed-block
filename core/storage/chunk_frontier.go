@@ -3,6 +3,8 @@ package storage
 import (
 	"errors"
 	"fmt"
+	"log"
+	"time"
 )
 
 // SeedChunkFrontier installs an empty fresh host's inherited remote frontier.
@@ -65,12 +67,28 @@ func (s *WALStore) SeedChunkFrontier(lsn uint64) error {
 // publication succeeded; any failure publishes nothing and may be retried.
 // An unmapped v3 store has no map candidate for the new checkpoint and is
 // refused. Order: captureMu -> lifecycleMu -> (syncMu ->) mu.
-func (s *WALStore) seedChunkFrontierV3(lsn uint64) error {
+func (s *WALStore) seedChunkFrontierV3(lsn uint64) (err error) {
 	v := s.v3
+	start := time.Now()
 	s.captureMu.Lock()
 	defer s.captureMu.Unlock()
 	s.lifecycleMu.RLock()
 	defer s.lifecycleMu.RUnlock()
+	locked := time.Now()
+	var synced, published time.Time
+	defer func() {
+		if synced.IsZero() {
+			return // refused or already seeded: no I/O to time
+		}
+		stage := func(from, to time.Time) string {
+			if to.IsZero() {
+				return "-"
+			}
+			return to.Sub(from).String()
+		}
+		log.Printf("storage: seed frontier %d: lock wait %s, data fsync %s, checkpoint publish %s, err=%v",
+			lsn, locked.Sub(start), synced.Sub(locked), stage(synced, published), err)
+	}()
 	s.mu.Lock()
 	if s.closed || s.chunk.Load() != nil {
 		s.mu.Unlock()
@@ -96,10 +114,14 @@ func (s *WALStore) seedChunkFrontierV3(lsn uint64) error {
 	}
 	gen := v.recoverGen.Load()
 	s.mu.Unlock()
-	if err := s.syncFile(nil, s.fd.Sync); err != nil {
+	err = s.syncFile(nil, s.fd.Sync)
+	synced = time.Now()
+	if err != nil {
 		return fmt.Errorf("storage: seed data sync: %w", err)
 	}
-	if _, err := s.publishCheckpointV3(lsn, true, gen); err != nil {
+	_, err = s.publishCheckpointV3(lsn, true, gen)
+	published = time.Now()
+	if err != nil {
 		return fmt.Errorf("storage: seed frontier %d: %w", lsn, err)
 	}
 	s.mu.Lock()
