@@ -37,7 +37,7 @@ func TestChunkMetricsUsesTheStatusListener(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("metrics: %d %s", resp.StatusCode, b)
 	}
-	for _, want := range []string{`swblock_chunk_dirty_chunks{volume="v1"} 3`, `swblock_chunk_publish_time_known{volume="v1"} 0`, `swblock_chunk_upload_pending{volume="v1"} 0`} {
+	for _, want := range []string{`swblock_chunk_dirty_chunks{volume="v1"} 3`, `swblock_chunk_cut_time_known{volume="v1"} 0`, `swblock_chunk_upload_pending{volume="v1"} 0`} {
 		if !strings.Contains(string(b), want) {
 			t.Fatalf("missing %q in %s", want, b)
 		}

@@ -9,6 +9,8 @@ import (
 // No storage/publication lock is acquired by workers. Cancellation stops new
 // admission; a remote ignoring cancellation remains joined, never declared done.
 func (l *chunkLayerImpl) uploadBatch(ctx context.Context, n int, put func(context.Context, int) error) error {
+	l.uploadPending.Store(int64(n))
+	defer l.uploadPending.Store(0) // after the join, also on failed batches
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var mu sync.Mutex
@@ -38,6 +40,7 @@ func (l *chunkLayerImpl) uploadBatch(ctx context.Context, n int, put func(contex
 					mu.Unlock()
 					return
 				}
+				l.uploadPending.Add(-1)
 			}
 		}()
 	}

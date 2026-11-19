@@ -21,10 +21,10 @@ import (
 const (
 	defaultChunkPath = "/swblock/chunks"
 	// The remote holds snapshots, not live data: cuts are published at
-	// snapshots, at detach/stop and on explicit request. The timer is off
-	// by default (an operator may set one, e.g. 15m, as a host-loss safety
-	// net); the dirty threshold only bounds how large one cut can grow.
-	defaultChunkCaptureInterval = 0
+	// snapshots, detach and explicit requests, with a periodic host-loss
+	// safety net by default. Explicit 0 disables the timer. The first period
+	// has jitter; the dirty threshold only bounds how large one cut can grow.
+	defaultChunkCaptureInterval = 15 * time.Minute
 	defaultChunkDirtyThreshold  = 512 // chunks, 2 GiB at 4 MiB chunks
 )
 

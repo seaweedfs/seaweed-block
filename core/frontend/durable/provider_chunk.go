@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -545,6 +546,7 @@ type cutPolicy struct {
 }
 
 type cutSchedule struct {
+	firstDue    time.Time // initial random delay; cleared by any successful cut
 	lastSuccess time.Time // last successful cut of any kind
 	lastAuto    time.Time // start of the last automatic cut
 	failedAt    time.Time // end of the last failed automatic cut
@@ -560,6 +562,7 @@ func (s cutSchedule) observe(lastCutNs int64) cutSchedule {
 		c := time.Unix(0, lastCutNs)
 		if c.After(s.lastSuccess) {
 			s.lastSuccess = c
+			s.firstDue = time.Time{}
 		}
 		if !s.failedAt.IsZero() && c.After(s.failedAt) {
 			s.backoff, s.retryAt, s.failedAt = 0, time.Time{}, time.Time{}
@@ -572,7 +575,7 @@ func (s cutSchedule) observe(lastCutNs int64) cutSchedule {
 // due while the layer reconciles its dirty set: no HEAD moves until then,
 // and the skipped tick is not a failure (no backoff).
 func (pol cutPolicy) due(s cutSchedule, now time.Time, reconciling bool) (string, bool) {
-	if reconciling || now.Before(s.retryAt) {
+	if reconciling || now.Before(s.retryAt) || now.Before(s.firstDue) {
 		return "", false
 	}
 	if !s.lastAuto.IsZero() && now.Sub(s.lastAuto) < pol.minSpacing {
@@ -588,6 +591,7 @@ func (pol cutPolicy) due(s cutSchedule, now time.Time, reconciling bool) (string
 func (pol cutPolicy) after(s cutSchedule, start, end time.Time, err error) cutSchedule {
 	s.lastAuto = start
 	if err == nil {
+		s.firstDue = time.Time{}
 		s.backoff, s.retryAt, s.failedAt = 0, time.Time{}, time.Time{}
 		if end.After(s.lastSuccess) {
 			s.lastSuccess = end
@@ -618,7 +622,7 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 		backoffMin: chunkCutBackoffMin,
 		backoffMax: chunkCutBackoffMax,
 	}
-	s := cutSchedule{lastSuccess: time.Now()}
+	s := initialCutSchedule(pol.interval, time.Now(), rand.Int64N)
 	t := time.NewTicker(chunkSchedulePoll)
 	defer t.Stop()
 	for {
@@ -643,6 +647,16 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 			log.Printf("durable: %s chunk cut for volume=%s: %v (retry in %s)", reason, volumeID, err, s.backoff)
 		}
 	}
+}
+
+func initialCutSchedule(interval time.Duration, now time.Time, draw func(int64) int64) cutSchedule {
+	s := cutSchedule{lastSuccess: now}
+	if interval > 0 {
+		// Each volume process draws independently. Add durations separately
+		// to avoid overflowing interval+jitter for a large operator interval.
+		s.firstDue = now.Add(interval).Add(time.Duration(draw(int64(interval))))
+	}
+	return s
 }
 
 func (p *DurableProvider) stopChunkLoop(h *volHandle) {

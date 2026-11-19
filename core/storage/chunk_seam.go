@@ -434,12 +434,17 @@ type chunkLayerStats struct {
 	CASUnknown        uint64
 	PendingUnresolved bool
 	DirtyChunks       int
-	Reconciling       bool
-	ReconcileDone     int
-	ReconcileTotal    int
-	LastCut           chunkCutStats
-	LastCutH          uint64
-	LastCutNs         int64
+	// DirtyChunkBytes estimates full chunk coverage of known dirt, capped
+	// at volume size, not changed payload bytes. Reconciling means incomplete.
+	DirtyChunkBytes uint64
+	UploadPending   int64 // current chunk batch: queued plus in-flight, not manifests
+	AbsentChunks    int   // chunks still requiring lazy fill; no eager fill queue
+	Reconciling     bool
+	ReconcileDone   int
+	ReconcileTotal  int
+	LastCut         chunkCutStats
+	LastCutH        uint64
+	LastCutNs       int64
 	// BarrierOverBound counts cuts whose barrier copied more than the
 	// bound after the staging rounds.
 	BarrierOverBound uint64

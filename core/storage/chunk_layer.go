@@ -95,6 +95,9 @@ type chunkLayerImpl struct {
 	pendingIntents []string
 	// stats holds the cumulative cut counters (under stMu).
 	stats chunkLayerStats
+	// Queued plus in-flight chunk uploads in the current batch. A worker
+	// remains pending until its Put completes; cancellation is not settlement.
+	uploadPending atomic.Int64
 	// leftoverIntents are this layer's own intents whose delete failed
 	// after their cut was settled; every cut retries them.
 	leftoverIntents []string
@@ -1337,10 +1340,17 @@ func (l *chunkLayerImpl) Stats() chunkLayerStats {
 	out.Reconciling = l.hashMode
 	out.ReconcileTotal = l.reconcileTotal
 	out.ReconcileDone = l.reconcileTotal - len(l.reconcile)
+	for _, absent := range l.absent {
+		if absent {
+			out.AbsentChunks++
+		}
+	}
 	l.stMu.Unlock()
 	if l.usesOwnedMapV3() {
 		out.DirtyChunks = len(l.captureCandidates())
 	}
+	out.UploadPending = l.uploadPending.Load()
+	out.DirtyChunkBytes = min(uint64(out.DirtyChunks)*l.chunkBlocks*uint64(l.blockSize), uint64(l.s.NumBlocks())*uint64(l.blockSize))
 	return out
 }
 

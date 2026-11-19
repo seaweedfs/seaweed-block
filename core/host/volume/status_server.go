@@ -334,6 +334,7 @@ func (s *StatusServer) Start(addr string) (string, error) {
 	mux.HandleFunc("/status", s.handleStatus)
 	mux.HandleFunc("/status/peers", s.handleStatusPeers)
 	mux.HandleFunc("/status/durable", s.handleStatusDurable)
+	mux.HandleFunc("/metrics", s.handleChunkMetrics)
 	mux.HandleFunc("/status/nvme", s.handleStatusNVMe)
 	mux.HandleFunc("/status/ublk", s.handleStatusUblk)
 	mux.HandleFunc("/status/frontend-capabilities", s.handleFrontendCapabilities)
