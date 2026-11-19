@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"context"
+	"errors"
 	"sync"
 	"time"
 )
@@ -12,14 +13,16 @@ import (
 // bytes read from that binding prove completion; a collision is terminal.
 func (l *chunkLayerImpl) putCaptured(ctx context.Context, key string, data []byte) error {
 	backoff := 100 * time.Millisecond
+	var lastErr error
 	for {
 		if err := ctx.Err(); err != nil {
-			return err
+			return errors.Join(lastErr, err)
 		}
 		err := l.remote.Put(ctx, key, data)
 		if err == nil {
 			return nil
 		}
+		lastErr = err
 		// Resolve a possibly committed binding before replaying the Put.
 		got, readErr := l.remote.Get(ctx, key)
 		if readErr == nil {
@@ -32,7 +35,7 @@ func (l *chunkLayerImpl) putCaptured(ctx context.Context, key string, data []byt
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return ctx.Err()
+			return errors.Join(lastErr, ctx.Err())
 		case <-timer.C:
 		}
 		backoff = min(2*time.Second, 2*backoff)

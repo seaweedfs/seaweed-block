@@ -108,12 +108,16 @@ type unjoinedUploadRemote struct {
 }
 
 func (r *unjoinedUploadRemote) Put(ctx context.Context, key string, data []byte) error {
-	if r.calls.Add(1) == 1 {
+	switch r.calls.Add(1) {
+	case 1:
 		<-r.second
 		close(r.failed)
 		return errFakeRemoteDown
+	case 2:
+		close(r.second)
+	default:
+		return errFakeRemoteDown
 	}
-	close(r.second)
 	<-r.release
 	return r.fakeChunkRemote.Put(context.Background(), key, data)
 }
@@ -128,10 +132,13 @@ func TestChunkUploads_FailureJoinsBeforeIntentCleanup(t *testing.T) {
 	w := newWriteLog()
 	w.write(t, s, 0, 0x21)
 	w.write(t, s, ctChunkBlocks, 0x22)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan error, 1)
-	go func() { _, err := l.Cut(context.Background()); done <- err }()
+	go func() { _, err := l.Cut(ctx); done <- err }()
 	select {
 	case <-r.failed:
+		cancel() // retries are now allowed; terminate this cut explicitly
 	case <-time.After(time.Second):
 		close(r.release)
 		<-done
