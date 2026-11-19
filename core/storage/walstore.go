@@ -1100,6 +1100,12 @@ func (s *WALStore) readFromExtent(lba uint32) ([]byte, error) {
 			return s.readFromWAL(walRelOff, dataOffset)
 		}
 	}
+	return s.readExtentBlock(lba)
+}
+
+// readExtentBlock reads lba's extent bytes under its extent lock, without the
+// chunk layer's miss hook: the caller has resolved the block as local.
+func (s *WALStore) readExtentBlock(lba uint32) ([]byte, error) {
 	lock := &s.extentMu[uint64(lba)%uint64(len(s.extentMu))]
 	lock.RLock()
 	defer lock.RUnlock()

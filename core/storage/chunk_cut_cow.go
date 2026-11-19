@@ -36,6 +36,10 @@ type cutCOWEntry struct {
 	slot         int64
 	spilled      bool
 	readingSaved bool
+	// missing lists the block offsets that were lazily absent when the bytes
+	// were captured: their image at H is HEAD's, filled by the copier from the
+	// cut's base HEAD after it released the entry (never under a guest write).
+	missing []uint64
 }
 type cutCOWWindow struct {
 	layer      *chunkLayerImpl
@@ -47,6 +51,7 @@ type cutCOWWindow struct {
 	sideReady  chan struct{}
 	cleanupErr error
 	entries    map[uint64]*cutCOWEntry
+	head       map[uint64]chunkRef // the cut's base HEAD: the source of missing blocks
 	memory     int64
 	chunkBytes int64
 	side       *os.File
@@ -119,12 +124,12 @@ func (l *chunkLayerImpl) holdCOWDestructive() func() {
 }
 
 // The caller owns captureMu exclusive, so no writer can miss this publication.
-func (l *chunkLayerImpl) installCOWWindow(candidates, staged map[uint64]bool) (*cutCOWWindow, error) {
+func (l *chunkLayerImpl) installCOWWindow(candidates, staged map[uint64]bool, head map[uint64]chunkRef) (*cutCOWWindow, error) {
 	size := uint64(l.blockSize) * l.chunkBlocks
 	if size == 0 || size > math.MaxInt64 || uint64(len(candidates)) > math.MaxInt64/size {
 		return nil, fmt.Errorf("%w: side-store geometry", errCutCOWAborted)
 	}
-	w := &cutCOWWindow{layer: l, ended: make(chan struct{}), entries: make(map[uint64]*cutCOWEntry), chunkBytes: int64(size)}
+	w := &cutCOWWindow{layer: l, ended: make(chan struct{}), entries: make(map[uint64]*cutCOWEntry), head: head, chunkBytes: int64(size)}
 	var slot int64
 	for _, idx := range sortedKeys(candidates) {
 		state := cowPending
@@ -256,9 +261,10 @@ func (l *chunkLayerImpl) beforeCOWMutation(first, count uint64) {
 				break
 			}
 			start := time.Now()
-			data, err := l.readCOWChunk(w, idx)
+			// Local blocks only: a guest write never waits on SeaweedFS.
+			data, missing, err := l.readCOWChunk(w, idx)
 			if err == nil {
-				err = w.save(e, data)
+				err = w.save(e, data, missing)
 			}
 			if err != nil {
 				w.abort(err)
@@ -273,7 +279,7 @@ func (l *chunkLayerImpl) beforeCOWMutation(first, count uint64) {
 	}
 }
 
-func (w *cutCOWWindow) save(e *cutCOWEntry, data []byte) error {
+func (w *cutCOWWindow) save(e *cutCOWEntry, data []byte, missing []uint64) error {
 	if hook := w.layer.testCOWSave; hook != nil {
 		if err := hook(); err != nil {
 			return err
@@ -289,6 +295,10 @@ func (w *cutCOWWindow) save(e *cutCOWEntry, data []byte) error {
 		w.memory += w.chunkBytes
 	}
 	w.mu.Unlock()
+	// e.missing (and e.data / the spilled bytes) are published to readers by
+	// w.finish(e, cowSaved), which takes w.mu and e.mu after these writes: a
+	// copier reads them only after claiming the entry in state cowSaved.
+	e.missing = missing
 	if inMemory {
 		e.data = data
 		return nil
@@ -307,25 +317,95 @@ func (w *cutCOWWindow) save(e *cutCOWEntry, data []byte) error {
 	return err
 }
 
-func (l *chunkLayerImpl) readCOWChunk(w *cutCOWWindow, idx uint64) ([]byte, error) {
+// readCOWChunk reads chunk idx's LOCAL blocks and never fetches: a block that
+// is lazily absent (no local version, HEAD names the chunk) is left zero and
+// listed in missing; its image at H is HEAD's by definition.
+func (l *chunkLayerImpl) readCOWChunk(w *cutCOWWindow, idx uint64) ([]byte, []uint64, error) {
 	buf := make([]byte, int(w.chunkBytes))
+	var missing []uint64
 	for i := uint64(0); i < l.chunkBlocks; i++ {
 		select {
 		case <-w.ended:
-			return nil, errCutCOWAborted
+			return nil, nil, errCutCOWAborted
 		default:
 		}
 		lba := idx*l.chunkBlocks + i
 		if lba >= uint64(l.s.NumBlocks()) {
 			break
 		}
-		b, err := l.s.Read(uint32(lba))
+		b, local, err := l.readLocalBlock(lba)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
+		}
+		if !local {
+			missing = append(missing, i)
+			continue
 		}
 		copy(buf[int(i)*l.blockSize:], b)
 	}
-	return buf, nil
+	return buf, missing, nil
+}
+
+// readLocalBlock reads lba unless it is lazily absent (local=false): the dirty
+// map/WAL first, then the extent of a present block (or of a block written
+// since its chunk became absent), zeros for an absent chunk HEAD stores as
+// ZERO. It never calls the miss hook. The order is safe against a concurrent
+// flush (dirty map before presence) and fill (HEAD's bytes either way); a new
+// write of the block waits for the caller's COW entry.
+func (l *chunkLayerImpl) readLocalBlock(lba uint64) ([]byte, bool, error) {
+	s := l.s
+	if s.v3 != nil {
+		if data, handled, err := s.readDirtyV3(uint32(lba)); handled {
+			return data, err == nil, err
+		}
+	} else if walRelOff, dataOffset, _, _, ok := s.dm.get(lba); ok {
+		data, err := s.readFromWAL(walRelOff, dataOffset)
+		return data, err == nil, err
+	}
+	idx := l.chunkOf(lba)
+	l.stMu.Lock()
+	absent := l.absent[idx] && !l.localBlocks[lba]
+	_, inHead := l.head.Chunks[idx]
+	l.stMu.Unlock()
+	if absent && inHead {
+		return nil, false, nil
+	}
+	if absent {
+		return make([]byte, l.blockSize), true, nil
+	}
+	data, err := s.readExtentBlock(uint32(lba))
+	return data, err == nil, err
+}
+
+// fillMissing completes a COW capture: the blocks listed missing get the cut's
+// base HEAD bytes. It runs with no entry held (no guest waits on it), bounded
+// by ReadMissTimeout and the window's end.
+func (l *chunkLayerImpl) fillMissing(w *cutCOWWindow, idx uint64, data []byte, missing []uint64) ([]byte, error) {
+	ref, ok := w.head[idx]
+	if !ok {
+		return nil, fmt.Errorf("storage: cut chunk %d: %d lazily absent block(s) but HEAD has no chunk", idx, len(missing))
+	}
+	ctx, cancel := context.WithTimeout(l.ctx, l.cfg.ReadMissTimeout)
+	defer cancel()
+	go func() {
+		select {
+		case <-w.ended:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	head, err := l.remote.Get(ctx, ref.Key)
+	if err != nil {
+		return nil, fmt.Errorf("storage: cut chunk %d HEAD fetch: %w", idx, err)
+	}
+	if sha256.Sum256(head) != ref.SHA256 || len(head) != int(l.chunkBlocks)*l.blockSize {
+		return nil, fmt.Errorf("storage: cut chunk %d HEAD fetch: content does not match HEAD", idx)
+	}
+	out := append([]byte(nil), data...)
+	for _, i := range missing {
+		copy(out[int(i)*l.blockSize:int(i+1)*l.blockSize], head[int(i)*l.blockSize:int(i+1)*l.blockSize])
+	}
+	return out, nil
 }
 
 func (l *chunkLayerImpl) copyCOWEntry(w *cutCOWWindow, idx uint64) (capturedChunk, bool, error) {
@@ -343,8 +423,10 @@ func (l *chunkLayerImpl) copyCOWEntry(w *cutCOWWindow, idx uint64) (capturedChun
 			return capturedChunk{}, false, w.status()
 		}
 		var data []byte
+		var missing []uint64
 		var err error
 		if state == cowSaved {
+			missing = e.missing
 			if e.spilled {
 				data = make([]byte, int(w.chunkBytes))
 				_, err = w.side.ReadAt(data, e.slot*w.chunkBytes)
@@ -352,7 +434,7 @@ func (l *chunkLayerImpl) copyCOWEntry(w *cutCOWWindow, idx uint64) (capturedChun
 				data = e.data
 			}
 		} else {
-			data, err = l.readCOWChunk(w, idx)
+			data, missing, err = l.readCOWChunk(w, idx)
 		}
 		if hook := l.testCOWRead; hook != nil {
 			hook(idx, state == cowSaved)
@@ -366,6 +448,13 @@ func (l *chunkLayerImpl) copyCOWEntry(w *cutCOWWindow, idx uint64) (capturedChun
 		kept := false
 		if err == nil {
 			kept = w.finish(e, cowDone)
+		}
+		if kept && len(missing) > 0 {
+			// The entry is released: guests no longer wait on this chunk.
+			if data, err = l.fillMissing(w, idx, data, missing); err != nil {
+				w.abort(err)
+				kept = false
+			}
 		}
 		w.refs.Done()
 		if !kept {
