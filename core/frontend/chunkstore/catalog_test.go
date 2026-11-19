@@ -285,7 +285,7 @@ func TestFork_HeadIsEpochZeroWithQualifiedKeys(t *testing.T) {
 			t.Fatalf("chunk %d ref %+v, want @v1/%s with the same hash", idx, ref, src.Key)
 		}
 	}
-	if res.HeadGen != 1 || res.HeadEpoch != 0 || res.QualifiedRefs != 2 || res.SourceGen != h.Gen || res.RemoteLSN != 42 || res.Replayed {
+	if res.HeadGen != 1 || res.HeadEpoch != 0 || res.QualifiedRefs != 1 || res.ChunkCount != 2 || res.SourceGen != h.Gen || res.RemoteLSN != 42 || res.Replayed {
 		t.Fatalf("result %+v", res)
 	}
 	v, ok, err := c.ReadVolume(ctx, "v2")

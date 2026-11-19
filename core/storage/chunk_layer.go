@@ -780,11 +780,12 @@ func (l *chunkLayerImpl) MakeRemoteDurable(ctx context.Context, t uint64) error 
 }
 
 type capturedChunk struct {
-	idx  uint64
-	data []byte
-	sum  [32]byte
-	zero bool
-	key  string // staged: already uploaded under this key (data is nil)
+	idx   uint64
+	data  []byte
+	sum   [32]byte
+	zero  bool
+	key   string // staged: already uploaded under this key (data is nil)
+	birth uint64
 }
 
 // stagedChunk is a chunk pre-copied outside the barrier at chunk version
@@ -907,6 +908,9 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	l.cutLSN = h
 	baseHead := copyHead(l.head)
 	l.stMu.Unlock()
+	// Candidates, mutation versions and births belong to the same barrier.
+	// Do not sample the owned map after COW writers are admitted again.
+	births := l.captureBirths(candidates, h)
 
 	st.CandidateChunks = len(candidates)
 	var copyErr error
@@ -974,6 +978,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	}
 	var uploads []upload
 	for _, c := range captured {
+		c.birth = births[c.idx]
 		ref, had := baseHead.Chunks[c.idx]
 		switch {
 		case c.zero && !had, had && !c.zero && ref.SHA256 == c.sum:
@@ -986,7 +991,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 			continue
 		}
 		if c.key != "" { // staged: uploaded before the barrier
-			next.Chunks[c.idx] = chunkRef{Key: c.key, SHA256: c.sum}
+			next.Chunks[c.idx] = chunkRef{Key: c.key, SHA256: c.sum, Encoding: "full", BirthLSN: c.birth}
 			newKeys[c.idx] = c.key
 			changed = append(changed, c.idx)
 			st.StagedChunksUsed++
@@ -1019,7 +1024,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		return chunkCutResult{}, fmt.Errorf("storage: capture upload: %w: %w", errChunkRemoteUnavailable, err)
 	}
 	for _, u := range uploads {
-		next.Chunks[u.c.idx] = chunkRef{Key: u.key, SHA256: u.c.sum}
+		next.Chunks[u.c.idx] = chunkRef{Key: u.key, SHA256: u.c.sum, Encoding: "full", BirthLSN: u.c.birth}
 		newKeys[u.c.idx] = u.key
 		changed = append(changed, u.c.idx)
 		st.UploadedChunks++

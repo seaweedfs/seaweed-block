@@ -372,7 +372,7 @@ func TestCatalog_UsageFromManifests(t *testing.T) {
 	if u.LiveChunks != 2 || u.LiveBytes != 2*full || len(u.Snapshots) != 1 || u.Snapshots[0].ExclusiveBytes != 0 {
 		t.Fatalf("shared chunks: %+v", u)
 	}
-	if u.StoredBindings != 2 || u.StoredBytes != 2*full || u.StoredUpperBound {
+	if u.StoredBindings != 2+u.ManifestBindings || u.ManifestBindings != 1 || u.StoredBytes != 2*full+u.ManifestBytes || u.StoredUpperBound {
 		t.Fatalf("stored: %+v; want 2 bindings, exact", u)
 	}
 
@@ -386,7 +386,7 @@ func TestCatalog_UsageFromManifests(t *testing.T) {
 		// both of s1's chunks are now exclusive: the new HEAD uses e2 keys
 		t.Fatalf("after HEAD moved: s1 exclusive %d, want %d", u.Snapshots[0].ExclusiveBytes, 2*full)
 	}
-	if u.StoredBindings != 4 || u.StoredBytes != 4*full || u.StoredUpperBound {
+	if u.StoredBindings != 4+u.ManifestBindings || u.ManifestBindings != 2 || u.StoredBytes != 4*full+u.ManifestBytes || u.StoredUpperBound {
 		t.Fatalf("stored after HEAD moved: %+v; want 4 bindings, exact", u)
 	}
 
@@ -399,7 +399,7 @@ func TestCatalog_UsageFromManifests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(u.Snapshots) != 0 || u.StoredBindings != 4 || !u.StoredUpperBound {
+	if len(u.Snapshots) != 0 || u.StoredBindings != 4+u.ManifestBindings || !u.StoredUpperBound {
 		t.Fatalf("after delete: %+v; want no snapshots, 4 bindings, upper bound", u)
 	}
 }
