@@ -81,6 +81,13 @@ type WALStore struct {
 	// (before lifecycleMu); a quiesced cut holds it exclusively. Order:
 	// captureMu -> lifecycleMu -> mu.
 	captureMu sync.RWMutex
+	// captureMu orders permanent attachment shutdown with hook publication.
+	attachClosed            bool
+	closeComplete           chan struct{}
+	closeResult             error
+	testDestructiveSnapshot func() // nil scheduling control, before any capture lock
+	testCloseSnapshot       func() // nil in production; called without captureMu
+
 	// chunk is the attached chunk layer's hooks; nil when none.
 	chunk     atomic.Pointer[chunkHooks]
 	extentMu  [64]sync.RWMutex
@@ -631,12 +638,12 @@ func (s *WALStore) HolesSuspected() uint64 {
 // Idempotent: calling Recover twice on the same on-disk state yields
 // identical results.
 func (s *WALStore) Recover() (frontier uint64, err error) {
-	// Recover republishes the dirty map like a write: it holds the capture
-	// barrier shared, so it can never publish bytes between a quiesced
-	// cut's Sync (which fixes H) and that cut's copy.
-	// Order: captureMu -> lifecycleMu -> mu.
-	s.captureMu.RLock()
-	defer s.captureMu.RUnlock()
+	// Drain an attached COW window before taking any lower lock. The lease
+	// blocks a replacement window and retries a racing first attachment.
+	// Legacy fixtures retain their shared barrier ordering with full copying.
+	// Order after drain: captureMu -> lifecycleMu -> syncMu -> mu.
+	release := s.holdChunkDestructive(false)
+	defer release() // also releases captureMu, after all lower locks
 	s.lifecycleMu.RLock()
 	defer s.lifecycleMu.RUnlock()
 	if s.v3 != nil {
@@ -748,8 +755,6 @@ func (s *WALStore) Recover() (frontier uint64, err error) {
 func (s *WALStore) Write(lba uint32, data []byte) (uint64, error) {
 	s.captureMu.RLock()
 	defer s.captureMu.RUnlock()
-	s.lifecycleMu.RLock()
-	defer s.lifecycleMu.RUnlock()
 	if err := s.stickyIOFault(); err != nil {
 		return 0, err
 	}
@@ -764,6 +769,10 @@ func (s *WALStore) Write(lba uint32, data []byte) (uint64, error) {
 	// is disabled (admission==nil), Write proceeds immediately. The
 	// admission Acquire may block up to admissionTimeout — under
 	// hard pressure it spins waiting for the flusher to drain.
+	s.beforeChunkMutation(uint64(lba), 1)
+	s.lifecycleMu.RLock()
+	defer s.lifecycleMu.RUnlock()
+
 	if s.admission != nil {
 		if err := s.admission.Acquire(s.admissionTimeout); err != nil {
 			return 0, fmt.Errorf("storage: WAL admission: %w", err)
@@ -833,8 +842,6 @@ func (s *WALStore) Write(lba uint32, data []byte) (uint64, error) {
 func (s *WALStore) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error) {
 	s.captureMu.RLock()
 	defer s.captureMu.RUnlock()
-	s.lifecycleMu.RLock()
-	defer s.lifecycleMu.RUnlock()
 	if err := s.stickyIOFault(); err != nil {
 		return nil, err
 	}
@@ -850,6 +857,10 @@ func (s *WALStore) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error
 			return nil, fmt.Errorf("storage: batch block %d data size %d != block size %d", i, len(data), s.sb.BlockSize)
 		}
 	}
+
+	s.beforeChunkMutation(uint64(startLBA), uint64(len(blocks)))
+	s.lifecycleMu.RLock()
+	defer s.lifecycleMu.RUnlock()
 
 	if s.admission != nil {
 		if err := s.admission.Acquire(s.admissionTimeout); err != nil {
@@ -1544,12 +1555,27 @@ func bytesAllZero(data, zero []byte) bool {
 // Close persists current WAL boundaries into the superblock,
 // fsyncs the file, stops the group committer, and releases the
 // underlying file. Idempotent.
-func (s *WALStore) Close() error {
-	// Stop the chunk layer before taking the lifecycle lock: its captures
-	// and fills call back into the store.
-	if h := s.chunk.Load(); h != nil {
+func (s *WALStore) Close() (err error) {
+	s.captureMu.Lock()
+	if s.attachClosed {
+		done := s.closeComplete
+		s.captureMu.Unlock()
+		<-done
+		return s.closeResult
+	}
+	s.attachClosed = true
+	s.closeComplete = make(chan struct{})
+	h := s.chunk.Load()
+	s.captureMu.Unlock()
+	defer func() { s.closeResult = err; close(s.closeComplete) }()
+	if s.testCloseSnapshot != nil {
+		s.testCloseSnapshot()
+	}
+	// No capture or store lock is held while callbacks drain actual I/O.
+	if h != nil {
 		_ = h.closer()
 	}
+
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
 	s.mu.Lock()

@@ -45,6 +45,7 @@ const (
 )
 
 var (
+	ErrCutCOWAborted          = errCutCOWAborted
 	ErrChunkKeyExists         = errChunkKeyExists
 	ErrChunkHeadPrecondition  = errChunkHeadPrecondition
 	ErrChunkHeadDeleted       = errChunkHeadDeleted

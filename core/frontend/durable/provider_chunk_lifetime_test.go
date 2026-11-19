@@ -607,12 +607,36 @@ func corruptWALWrite(t *testing.T, path string, fill byte) func() {
 		t.Fatal(err)
 	}
 	payload := bytes.Repeat([]byte{fill}, 4096)
-	at := bytes.Index(wal, payload)
-	// Ignore overlapping matches if the first CRC byte happens to equal fill.
-	if at < 62 || bytes.Index(wal[at+len(payload):], payload) >= 0 {
-		t.Fatalf("WAL payload %#x not found exactly once", fill)
+	// Search every overlapping payload occurrence, accepting only a complete,
+	// CRC-valid single-write record. A nonce/trailer byte may equal fill, so
+	// the first bytes.Index match is not necessarily the payload boundary.
+	const hdr, recordSize = 62, 62 + 4096 + 8
+	table := crc32.MakeTable(crc32.Castagnoli)
+	at, matches := -1, 0
+	for search := 0; search <= len(wal)-len(payload); {
+		relative := bytes.Index(wal[search:], payload)
+		if relative < 0 {
+			break
+		}
+		candidate := search + relative
+		search = candidate + 1
+		if candidate < hdr || candidate+4096+8 > len(wal) {
+			continue
+		}
+		record := wal[candidate-hdr : candidate+4096+8]
+		if record[16] != 0x01 || record[17] != 0 ||
+			binary.LittleEndian.Uint64(record[8:16]) != 0 ||
+			binary.LittleEndian.Uint32(record[26:30]) != 4096 ||
+			binary.LittleEndian.Uint64(record[38:46])%walSize != uint64(candidate-hdr) ||
+			binary.LittleEndian.Uint32(record[hdr+4096:]) != crc32.Checksum(record[:hdr+4096], table) ||
+			binary.LittleEndian.Uint32(record[hdr+4096+4:]) != recordSize {
+			continue
+		}
+		at, matches = candidate, matches+1
 	}
-	const hdr = 62
+	if matches != 1 {
+		t.Fatalf("CRC-valid WAL write payload %#x matched %d records; want exactly one", fill, matches)
+	}
 	start := int64(walStart) + int64(at-hdr)
 	rec := append([]byte(nil), wal[at-hdr:at+4096+8]...)
 	orig := append([]byte(nil), rec...)
@@ -638,6 +662,47 @@ func corruptWALWrite(t *testing.T, path string, fill byte) func() {
 		if _, err := f.WriteAt(orig, int64(start)); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// The nonce ends immediately before the payload. A matching last nonce byte
+// must not shift the corruption target one byte into the header.
+func TestCorruptWALWrite_NoncePayloadOverlap(t *testing.T) {
+	const prefix, payloadSize, walStart, walSize = 62, 4096, 8192, 16384
+	path := filepath.Join(t.TempDir(), "overlap.bin")
+	image := make([]byte, walStart+walSize)
+	binary.LittleEndian.PutUint64(image[48:56], walStart)
+	binary.LittleEndian.PutUint64(image[56:64], walSize)
+	rec := image[walStart : walStart+prefix+payloadSize+8]
+	binary.LittleEndian.PutUint64(rec[:8], 1)
+	rec[16] = 0x01
+	binary.LittleEndian.PutUint64(rec[18:26], 5)
+	binary.LittleEndian.PutUint32(rec[26:30], payloadSize)
+	rec[61] = 0xa7 // legal nonce: old bytes.Index reports 61, not payload offset 62
+	copy(rec[prefix:], bytes.Repeat([]byte{0xa7}, payloadSize))
+	binary.LittleEndian.PutUint32(rec[prefix+payloadSize:], crc32.Checksum(rec[:prefix+payloadSize], crc32.MakeTable(crc32.Castagnoli)))
+	binary.LittleEndian.PutUint32(rec[prefix+payloadSize+4:], uint32(len(rec)))
+	if err := os.WriteFile(path, image, 0600); err != nil {
+		t.Fatal(err)
+	}
+	restore := corruptWALWrite(t, path, 0xa7)
+	changed, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := append([]byte(nil), image...)
+	want[walStart+16] = 0x04
+	binary.LittleEndian.PutUint32(want[walStart+prefix+payloadSize:], crc32.Checksum(want[walStart:walStart+prefix+payloadSize], crc32.MakeTable(crc32.Castagnoli)))
+	if !bytes.Equal(changed, want) {
+		t.Fatal("corruption changed bytes outside the intended type/CRC")
+	}
+	restore()
+	repaired, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(repaired, image) {
+		t.Fatal("restore did not recover the exact original image")
 	}
 }
 

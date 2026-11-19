@@ -331,6 +331,10 @@ func openWALStoreV3WithOptions(path string, requireMap bool, opts WALStoreOption
 		_ = f.Close()
 		return nil, err
 	}
+	if err := discardCutCOWFiles(path); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
 	return openWALStoreV3File(path, f, requireMap, opts, nil, false)
 }
 

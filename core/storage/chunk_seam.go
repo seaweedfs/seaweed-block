@@ -15,12 +15,12 @@ package storage
 //  1. blocks new writes at the store and waits for in-flight ones;
 //  2. Syncs; H is then the synced LSN (nextLSN-1) and no data newer than H
 //     exists in the WAL or the extent. The flusher is not drained;
-//  3. under that barrier reads every chunk dirtied since the last HEAD
-//     through the store's normal read path (dirty map/WAL entry if present,
-//     else extent) into immutable buffers; that is exactly the image at H.
-//     A chunk counts as dirty since HEAD whether its newer blocks are still
-//     in the WAL or already in the extent;
-//  4. releases the barrier (pause = Sync + copy of the dirty chunks);
+//  3. fixes the candidate set and installs an owned-map v3 COW window under
+//     that barrier, then releases it (pause = Sync + window installation);
+//  4. copies outside the barrier. Before publication, the first writer to a
+//     pending candidate saves its at-H chunk; writers wait for a copying or
+//     saving owner. Both paths use the validated store reader. Legacy test
+//     fixtures retain the full-copy barrier;
 //  5. uploads the buffers, outside every walstore lock;
 //  6. CASes HEAD {gen, epoch} with RemoteLSN = H.
 //
@@ -338,6 +338,7 @@ type chunkLayerConfig struct {
 	// that last check and the CAS. Publication safety across a demotion
 	// rests on the epoch: a new primary's takeover raises the HEAD epoch, so
 	// the old primary's CAS fails and it fences (C6). Nil allows capture.
+	// COW workers may call this concurrently, between chunk claims.
 	CaptureAllowed func() error
 	// ReadMissTimeout bounds one OnReadMiss remote fetch.
 	ReadMissTimeout time.Duration
@@ -368,6 +369,9 @@ type chunkLayerConfig struct {
 // chunkCutStats describes one cut. The periodic-cut work fills it; a zero
 // value means "not measured".
 type chunkCutStats struct {
+	COWSavedChunks  int
+	COWSaveNs       int64
+	COWWaitNs       int64
 	BarrierPauseNs  int64
 	SyncNs          int64
 	CopyNs          int64
