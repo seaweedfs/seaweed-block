@@ -283,17 +283,47 @@ func (h *IOHandler) write(ctx context.Context, cmd IOCommand) IOResult {
 	start := time.Now()
 	n, err := h.backend.Write(ctx, int64(cmd.SLBA)*int64(h.blockSize), cmd.Data[:expectedBytes])
 	if err != nil {
-		return mapBackendError(err, "write")
+		return mapWriteBudgetError(ctx, err, "write")
 	}
 	if rec, ok := h.backend.(targetWriteRecorder); ok {
 		rec.RecordTargetWrite(n, time.Since(start))
 	}
 	if cmd.FUA {
 		if err := h.backend.Sync(ctx); err != nil {
-			return mapBackendError(err, "FUA sync")
+			return mapWriteBudgetError(ctx, err, "FUA sync")
 		}
 	}
 	return IOResult{SCT: SCTGeneric, SC: SCSuccess}
+}
+
+// Only a pure command-deadline cause is transient. A joined physical error
+// must retain its terminal mapping even when the command deadline also passed.
+func mapWriteBudgetError(ctx context.Context, err error, op string) IOResult {
+	if ctx.Err() == context.DeadlineExceeded && onlyDeadlineCause(err) {
+		err = fmt.Errorf("%w: %w", frontend.ErrBackendBusy, err)
+	}
+	return mapBackendError(err, op)
+}
+func onlyDeadlineCause(err error) bool {
+	if err == context.DeadlineExceeded {
+		return true
+	}
+	if err == nil {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		causes := joined.Unwrap()
+		if len(causes) == 0 {
+			return false
+		}
+		for _, cause := range causes {
+			if !onlyDeadlineCause(cause) {
+				return false
+			}
+		}
+		return true
+	}
+	return onlyDeadlineCause(errors.Unwrap(err))
 }
 
 // mapBackendError translates frontend errors into NVMe CQE

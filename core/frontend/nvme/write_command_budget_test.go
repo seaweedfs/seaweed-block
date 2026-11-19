@@ -49,9 +49,9 @@ type joinedBudgetBackend struct {
 
 func (b *joinedBudgetBackend) result(ctx context.Context) error {
 	if b.physical {
-		return errors.New("physical fsync failure")
+		return errors.Join(errors.New("physical fsync failure"), ctx.Err())
 	}
-	return ctx.Err()
+	return fmt.Errorf("durability wait: %w", ctx.Err())
 }
 func (b *joinedBudgetBackend) Write(ctx context.Context, _ int64, p []byte) (int, error) {
 	<-ctx.Done()
