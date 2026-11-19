@@ -14,6 +14,8 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"google.golang.org/grpc"
 	"math/rand"
+	"os"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -46,7 +48,15 @@ func runChunkPressureRandomVolume(t *testing.T, h *Host, conn *grpc.ClientConn, 
 		}
 		t.Run(name, func(t *testing.T) {
 			const volumeBytes = 1 << 30
-			const writes = 160 * 1024 * 1024 / 4096
+			mib := 160
+			if raw := os.Getenv("DIAGNOSTIC_MIB"); raw != "" {
+				n, err := strconv.Atoi(raw)
+				if err != nil || n < 1 || n > 1024 {
+					t.Fatalf("invalid DIAGNOSTIC_MIB=%q", raw)
+				}
+				mib = n
+			}
+			writes := mib * 1024 * 1024 / 4096
 			ctx := context.Background()
 			var view frontend.ProjectionView = workspaceRPCView{frontend.Projection{VolumeID: volumeID, ReplicaID: line.ReplicaID, Epoch: line.Epoch, EndpointVersion: 1, Healthy: true}}
 			if lease {
