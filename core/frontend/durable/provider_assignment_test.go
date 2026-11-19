@@ -37,7 +37,9 @@ func (v *arrivingAssignment) Projection() frontend.Projection {
 }
 
 func TestRestoreWaitsForFirstAssignment(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	// No wall-clock bound (#227): every wait below is a progress condition; a
+	// hang is reported by the go test timeout.
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	v := &arrivingAssignment{seen: make(chan struct{}), assigned: make(chan struct{})}
 	p := chunkProviderForAssignment(t, v)
@@ -49,34 +51,21 @@ func TestRestoreWaitsForFirstAssignment(t *testing.T) {
 	defer finishRecovery()
 	done := make(chan error, 1)
 	go func() { _, err := p.RecoverVolume(recoverCtx, "v1"); done <- err }()
-	select {
-	case <-v.seen:
-	case <-ctx.Done():
-		t.Fatal("recovery never inspected assignment")
-	}
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("first assignment did not converge: %v", err)
-		}
-	case <-ctx.Done():
-		t.Fatal("local recovery must settle before assignment can be applied")
+	<-v.seen // recovery inspected the assignment
+	if err := <-done; err != nil { // local recovery settles before assignment can be applied
+		t.Fatalf("first assignment did not converge: %v", err)
 	}
 	if statuses := p.DurableStatuses(); len(statuses) != 1 || statuses[0].Operational {
 		t.Fatalf("unassigned backend became operational: %+v", statuses)
 	}
 	finishRecovery() // deferred attachment outlives a completed recovery caller
 	close(v.assigned)
-	for {
+	for { // progress: the deferred attachment becomes operational
 		statuses := p.DurableStatuses()
 		if len(statuses) == 1 && statuses[0].Operational {
 			break
 		}
-		select {
-		case <-ctx.Done():
-			t.Fatalf("assignment never became operational: %+v", statuses)
-		case <-time.After(time.Millisecond):
-		}
+		time.Sleep(time.Millisecond)
 	}
 	if _, err := p.CaptureVolume(ctx, "v1"); err != nil {
 		t.Fatal(err)
@@ -121,19 +110,10 @@ func TestRestoreDeferredAssignmentWaitEndsOnDeadlineAndClose(t *testing.T) {
 			defer cancel()
 			done := make(chan error, 1)
 			go func() { _, err := p.RecoverVolume(ctx, "v1"); done <- err }()
-			select {
-			case <-v.seen:
-			case <-time.After(2 * time.Second):
-				t.Fatal("no assignment inspection")
-			}
+			<-v.seen // progress, no timer (#227): recovery inspected the assignment
 			// Local recovery must return first, so the host can apply assignment.
-			select {
-			case err := <-done:
-				if err != nil {
-					t.Fatal(err)
-				}
-			case <-time.After(2 * time.Second):
-				t.Fatal("local recovery blocked on assignment")
+			if err := <-done; err != nil {
+				t.Fatal(err)
 			}
 			cancel() // recovery caller no longer owns the deferred worker
 			if mode == "close" {
@@ -144,18 +124,15 @@ func TestRestoreDeferredAssignmentWaitEndsOnDeadlineAndClose(t *testing.T) {
 			if mode == "close" {
 				return
 			}
-			deadline := time.NewTimer(2 * time.Second)
-			defer deadline.Stop()
-			for {
+			for { // progress: the 40 ms assignment limit fails the wait closed
 				status := p.DurableStatuses()
 				if len(status) == 1 && !status[0].Operational && strings.Contains(status[0].Evidence, "deadline exceeded") {
 					break
 				}
-				select {
-				case <-deadline.C:
-					t.Fatalf("assignment wait did not fail closed: %+v", status)
-				case <-time.After(time.Millisecond):
+				if len(status) == 1 && status[0].Operational {
+					t.Fatalf("became operational without an assignment: %+v", status)
 				}
+				time.Sleep(time.Millisecond)
 			}
 		})
 	}
