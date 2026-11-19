@@ -370,6 +370,16 @@ type refDoc struct {
 // was ever published. An entry that exists but does not decode is an
 // error, never the zero HEAD.
 func (r *ChunkRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
+	h, err := r.getHeadRoot(ctx)
+	if err != nil {
+		return h, err
+	}
+	return r.resolveManifest(ctx, h)
+}
+
+// getHeadRoot validates the root and its CAS attributes without reading any
+// immutable segment. CASHead only needs authority and lineage from this root.
+func (r *ChunkRemote) getHeadRoot(ctx context.Context) (storage.ChunkHead, error) {
 	e, err := r.f.LookupEntry(ctx, r.root, headName)
 	if errors.Is(err, ErrNotFound) {
 		return storage.ChunkHead{}, nil
@@ -377,11 +387,7 @@ func (r *ChunkRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
 	if err != nil {
 		return storage.ChunkHead{}, err
 	}
-	h, err := decodeHead(path.Join(r.root, headName), e)
-	if err != nil {
-		return h, err
-	}
-	return r.resolveManifest(ctx, h)
+	return decodeHead(path.Join(r.root, headName), e)
 }
 
 // CASHead installs next, at generation expected.Gen+1, only if the stored
@@ -397,7 +403,7 @@ func (r *ChunkRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVer
 	// Read the LSN under the same generation/epoch guard used by UpdateEntry.
 	// A competing write after this read makes the conditional update fail;
 	// no successful CAS can lower the committed lineage frontier.
-	current, err := r.GetHead(ctx)
+	current, err := r.getHeadRoot(ctx)
 	if err != nil {
 		return 0, err
 	}
