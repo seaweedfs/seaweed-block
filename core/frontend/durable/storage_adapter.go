@@ -582,7 +582,8 @@ func (b *StorageBackend) admitAfterAttach(ctx context.Context) (func(), error) {
 	pending := b.waitAttachReady
 	b.mu.Unlock()
 	if !pending {
-		return release, err
+		// Readiness may have published after the initial refusal.
+		return b.admit()
 	}
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
@@ -636,7 +637,7 @@ func (b *StorageBackend) awaitAttachAdmission(ctx context.Context) (func(), erro
 
 func (b *StorageBackend) attachReadyTimeout(cause error) error {
 	// A concurrent Close, fence or observer failure must retain its gate error.
-	err := b.readyCheck()
+	err := b.gate()
 	b.mu.Lock()
 	observerFailed := b.observerErr != nil
 	b.mu.Unlock()
