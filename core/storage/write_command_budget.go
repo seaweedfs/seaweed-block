@@ -38,8 +38,11 @@ func (s *WALStore) writeBudgetError(ctx context.Context, deadline time.Time) err
 	return nil
 }
 
-// A parked command owns no new physical I/O. Stop waiting for admission locks
-// on expiry without a helper goroutine that could acquire them after return.
+// A parked command owns no new physical I/O. Stop waiting for the long
+// admission locks (captureMu, lifecycleMu: held across a capture barrier or a
+// lifecycle transition) on expiry, without a helper goroutine that could
+// acquire them after return. Short locks (s.mu, descMu, writer.mu) are taken
+// blocking, so they keep RWMutex writer preference (#252).
 func (s *WALStore) acquireWriteLock(ctx context.Context, deadline time.Time, try func() bool, lock func()) error {
 	if deadline.IsZero() && ctx.Done() == nil {
 		lock()
@@ -76,10 +79,13 @@ func (s *WALStore) writePressureSample(ctx context.Context, deadline time.Time) 
 		return nil
 	}
 	return func() (float64, error) {
-		if err := s.acquireWriteLock(ctx, deadline, s.mu.TryRLock, s.mu.RLock); err != nil {
+		// Short locks block (RWMutex writer preference, #252); the budget is
+		// checked once they are held.
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		if err := s.writeBudgetError(ctx, deadline); err != nil {
 			return 0, err
 		}
-		defer s.mu.RUnlock()
 		if s.closed {
 			return 0, errVolumeClosed
 		}
@@ -89,15 +95,11 @@ func (s *WALStore) writePressureSample(ctx context.Context, deadline time.Time) 
 			return 0, nil
 		} // append still refuses the missing binding
 		p := v.pub
-		if err := s.acquireWriteLock(ctx, deadline, p.descMu.TryLock, p.descMu.Lock); err != nil {
-			return 0, err
-		}
+		p.descMu.Lock()
 		floor, valid := p.reuseFloorLocked()
 		d := p.cur
 		p.descMu.Unlock() // preserve snapshot ordering: no descriptor -> writer edge
-		if err := s.acquireWriteLock(ctx, deadline, w.mu.TryLock, w.mu.Lock); err != nil {
-			return 0, err
-		}
+		w.mu.Lock()
 		defer w.mu.Unlock()
 		if !valid || d.WALSize == 0 || d.Nonce != w.nonce || w.head < floor || w.head-floor > d.WALSize {
 			return 0, nil

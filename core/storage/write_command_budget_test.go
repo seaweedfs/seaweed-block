@@ -81,62 +81,8 @@ func TestWALStoreV3WriteBudgetKeepsTerminalFault(t *testing.T) {
 	}
 }
 
-func TestWALStoreV3WriteBudgetBoundsAppendLockWait(t *testing.T) {
-	s, _ := newMappedCheckpointStoreV3(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
-	defer cancel()
-	s.mu.Lock()
-	done := make(chan error, 1)
-	go func() { _, err := s.WriteContext(ctx, 0, blk(1)); done <- err }()
-	select {
-	case err := <-done:
-		if !errors.Is(err, ErrWALPressureTimeout) {
-			s.mu.Unlock()
-			t.Fatal(err)
-		}
-	case <-time.After(time.Second):
-		s.mu.Unlock()
-		t.Fatal("expired writer still waits for append lock")
-	}
-	s.mu.Unlock()
-	if s.NextLSN() != 1 || s.dm.len() != 0 {
-		t.Fatal("expired append waiter mutated")
-	}
-}
-
-func TestWALStoreV3WriteBudgetBoundsPressureLocks(t *testing.T) {
-	for _, name := range []string{"descriptor", "writer"} {
-		t.Run(name, func(t *testing.T) {
-			s, _ := newMappedCheckpointStoreV3(t)
-			var unlock func()
-			if name == "descriptor" {
-				s.v3.pub.descMu.Lock()
-				unlock = s.v3.pub.descMu.Unlock
-			} else {
-				s.v3.w.mu.Lock()
-				unlock = s.v3.w.mu.Unlock
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
-			defer cancel()
-			done := make(chan error, 1)
-			go func() { _, err := s.WriteContext(ctx, 0, blk(1)); done <- err }()
-			select {
-			case err := <-done:
-				if !errors.Is(err, ErrWALPressureTimeout) {
-					unlock()
-					t.Fatal(err)
-				}
-			case <-time.After(time.Second):
-				unlock()
-				t.Fatal("pressure snapshot did not respect command deadline")
-			}
-			unlock()
-			if s.NextLSN() != 1 || s.dm.len() != 0 {
-				t.Fatal("timed-out pressure sample granted a write")
-			}
-		})
-	}
-}
+// The polling-era append/pressure lock tests are replaced by
+// TestWALStoreV3ExpiredWriterRefusesAfterShortLockWait (short locks block, #252).
 
 func TestWALStoreV3WritePressureSampleMatchesOccupancy(t *testing.T) {
 	s, _ := newMappedCheckpointStoreV3(t)

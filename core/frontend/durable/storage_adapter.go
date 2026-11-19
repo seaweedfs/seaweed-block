@@ -761,7 +761,7 @@ func (b *StorageBackend) writeBytes(ctx context.Context, offset int64, p []byte)
 		var err error
 		if writer, ok := b.storage.(storage.ContextWriter); ok {
 			lsn, err = writer.WriteContext(ctx, lba, block)
-		} else {
+		} else if err = expiredCommand(ctx); err == nil {
 			lsn, err = b.storage.Write(lba, block)
 		}
 		writeLock.Unlock()
@@ -803,7 +803,7 @@ func (b *StorageBackend) writeFullBlockBatch(ctx context.Context, startLBA uint3
 	var err error
 	if writer, ok := batcher.(storage.ContextWriteBatcher); ok {
 		lsns, err = writer.WriteBatchContext(ctx, startLBA, blocks)
-	} else {
+	} else if err = expiredCommand(ctx); err == nil {
 		lsns, err = batcher.WriteBatch(startLBA, blocks)
 	}
 	unlock()
@@ -816,14 +816,14 @@ func (b *StorageBackend) writeFullBlockBatch(ctx context.Context, startLBA uint3
 			log.Printf("durable: replication batch fan-out failed lba=%d blocks=%d: %v",
 				startLBA, len(lsns), obsErr)
 			if policy == WriteAckRequireObserverAck {
-				return len(lsns) * bs, replicationWriteError(ctx, obsErr)
+				return len(lsns) * bs, replicationWriteError(ctx, withStorageCause(startLBA, blockCount, err, obsErr))
 			}
 		}
 	} else {
 		for i, lsn := range lsns {
 			block := blocks[i]
 			lba := startLBA + uint32(i)
-			if obsErr := b.observeWrite(ctx, lba, lsn, block, obs, policy); obsErr != nil {
+			if obsErr := b.observeWriteCause(ctx, lba, lsn, block, obs, policy, withStorageCause(startLBA, blockCount, err, nil)); obsErr != nil {
 				return (i + 1) * bs, obsErr
 			}
 		}
@@ -859,6 +859,13 @@ func (b *StorageBackend) lockLBARange(startLBA uint32, blockCount int) func() {
 }
 
 func (b *StorageBackend) observeWrite(ctx context.Context, lba uint32, lsn uint64, block []byte, obs WriteObserver, policy WriteAckPolicy) error {
+	return b.observeWriteCause(ctx, lba, lsn, block, obs, policy, nil)
+}
+
+// observeWriteCause is observeWrite with the storage failure of the same
+// command (nil if none): a required observer's error is classified together
+// with it, so a physical storage fault is never reclassified as retryable.
+func (b *StorageBackend) observeWriteCause(ctx context.Context, lba uint32, lsn uint64, block []byte, obs WriteObserver, policy WriteAckPolicy, storageErr error) error {
 	// Replication fan-out (T4a-6 hook). Error is logged best-effort
 	// unless the ack policy requires observer acknowledgement.
 	if obs == nil {
@@ -868,10 +875,27 @@ func (b *StorageBackend) observeWrite(ctx context.Context, lba uint32, lsn uint6
 		log.Printf("durable: replication fan-out failed lba=%d lsn=%d: %v",
 			lba, lsn, werr)
 		if policy == WriteAckRequireObserverAck {
+			if storageErr != nil {
+				werr = errors.Join(storageErr, werr)
+			}
 			return replicationWriteError(ctx, werr)
 		}
 	}
 	return nil
+}
+
+// withStorageCause joins a batch's storage error (nil if none) with an
+// observer error, so the classifier sees the complete error set (#252):
+// a committed prefix may come back together with a physical failure.
+func withStorageCause(startLBA uint32, blockCount int, storageErr, obsErr error) error {
+	if storageErr == nil {
+		return obsErr
+	}
+	se := fmt.Errorf("durable: write batch lba=%d blocks=%d: %w", startLBA, blockCount, storageErr)
+	if obsErr == nil {
+		return se
+	}
+	return errors.Join(se, obsErr)
 }
 
 // Classify the observer cause before adding the acknowledgement sentinel;
@@ -887,3 +911,17 @@ func replicationWriteError(ctx context.Context, err error) error {
 // Compile-time check that StorageBackend satisfies frontend.Backend.
 // Catches interface drift at build time rather than runtime.
 var _ frontend.Backend = (*StorageBackend)(nil)
+
+// expiredCommand refuses a fresh mutation through a contextless storage
+// fallback once the command is already expired or cancelled (#252); a pure
+// deadline is retryable busy, as on the context-aware path.
+func expiredCommand(ctx context.Context) error {
+	err := ctx.Err()
+	if err == nil {
+		return nil
+	}
+	if frontend.IsWriteDeadline(ctx, err) {
+		return fmt.Errorf("%w: %w", frontend.ErrBackendBusy, err)
+	}
+	return err
+}

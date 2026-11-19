@@ -801,9 +801,7 @@ func (s *WALStore) WriteContext(ctx context.Context, lba uint32, data []byte) (u
 	}
 
 	commitLockStart := time.Now()
-	if err := s.acquireWriteLock(ctx, deadline, s.mu.TryLock, s.mu.Lock); err != nil {
-		return 0, err
-	}
+	s.mu.Lock() // a short lock: blocking keeps RWMutex writer preference (#252); the budget is checked below
 	s.instr.recordWriteCommitLockWait(time.Since(commitLockStart))
 	if s.closed {
 		s.mu.Unlock()
@@ -832,7 +830,7 @@ func (s *WALStore) WriteContext(ctx context.Context, lba uint32, data []byte) (u
 	var walRelOff uint64
 	var err error
 	if s.v3 != nil {
-		walRelOff, err = s.appendWriteV3(lba, data, lsn)
+		walRelOff, err = s.appendWriteV3(lba, data, lsn, func() error { return s.writeBudgetError(ctx, deadline) })
 	} else {
 		walRelOff, err = s.wal.append(entry)
 	}
@@ -912,9 +910,7 @@ func (s *WALStore) WriteBatchContext(ctx context.Context, startLBA uint32, block
 	}
 
 	commitLockStart := time.Now()
-	if err := s.acquireWriteLock(ctx, deadline, s.mu.TryLock, s.mu.Lock); err != nil {
-		return nil, err
-	}
+	s.mu.Lock() // a short lock: blocking keeps RWMutex writer preference (#252); the budget is checked below
 	s.instr.recordWriteCommitLockWait(time.Since(commitLockStart))
 	if s.closed {
 		s.mu.Unlock()
@@ -930,7 +926,7 @@ func (s *WALStore) WriteBatchContext(ctx context.Context, startLBA uint32, block
 	}
 	firstLSN := s.nextLSN
 	if s.v3 != nil {
-		lsns, err := s.writeBatchV3Locked(startLBA, blocks, firstLSN)
+		lsns, err := s.writeBatchV3Locked(startLBA, blocks, firstLSN, func() error { return s.writeBudgetError(ctx, deadline) })
 		s.mu.Unlock()
 		return lsns, err
 	}
