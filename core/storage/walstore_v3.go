@@ -785,7 +785,7 @@ func (s *WALStore) syncWALBatchV3() error {
 // cannot depend on a guest Flush: persist locally before checkpointing, using
 // the same physical sync and final fault gate as an ordinary sync batch.
 func (s *WALStore) syncWALPressureV3() error {
-	return s.syncWALBatchV3Internal(true)
+	return nil // mutant: remove only the internal pressure-sync action
 }
 
 func (s *WALStore) syncWALBatchV3Internal(pressureOnly bool) error {
