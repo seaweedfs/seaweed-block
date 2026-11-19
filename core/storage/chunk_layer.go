@@ -132,6 +132,7 @@ type chunkLayerImpl struct {
 	testAfterStageHook           func(round int)        // after each pre-copy staging round
 	testAfterStageReadHook       func(idx uint64)       // after a staging read, before its result is kept
 	testAfterBarrierSyncHook     func(h uint64)         // under the capture barrier, right after Sync fixed H
+	testBeforeBarrierLockHook    func()                 // right before the capture barrier's Lock request
 	syncDirFn                    func(dir string) error // directory fsync after a rename; syncDir in production
 
 	// Absence: chunks whose local bytes are not authoritative (fresh host,
@@ -840,6 +841,9 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	// waits for writers already holding it (e.g. parked in WAL admission) is
 	// paused too. LockWaitNs reports that wait on its own.
 	pauseStart := time.Now()
+	if hook := l.testBeforeBarrierLockHook; hook != nil {
+		hook()
+	}
 	l.s.captureMu.Lock()
 	barrier := time.Now()
 	st.LockWaitNs = barrier.Sub(pauseStart).Nanoseconds()

@@ -177,7 +177,7 @@ stateDiagram-v2
   Cleanup --> Retry: ABORTED, merge all candidates back
 ```
 
-**Statistics.** `barrierPauseNs` covers Sync and window installation; native `barrierCopyChunks` is zero. `copyNs` covers outside-barrier materialization/drain. `cowSavedChunks` counts successful saves; `cowSaveNs` and `cowWaitNs` sum per-owner/per-wait elapsed time and are not wall-clock pause. These fields mirror into the actual cut response. Upload sizes and remote GC roots are unchanged.
+**Statistics.** `barrierPauseNs` runs from the capture barrier's Lock request to its release: `lockWaitNs` (the wait for writers already holding it shared), Sync and window installation; native `barrierCopyChunks` is zero. `copyNs` covers outside-barrier materialization/drain. `cowSavedChunks` counts successful saves; `cowSaveNs` and `cowWaitNs` sum per-owner/per-wait elapsed time and are not wall-clock pause. These fields mirror into the actual cut response. Upload sizes and remote GC roots are unchanged.
 
 **Model and tests.** The existing S4c r2 `CutCOW2` verdict and limits are bound in the [spec correspondence](../spec/README.md#cut-window-implementation-correspondence). One-copier whole-chunk modelling does not certify actual writer ownership, batches or Close/attach. `TestCutCOWV3_*` exercises real native mutation, abort, spill, recovery and close callers; earlier ACTIVE staging/image/intent/CAS controls remain. See [the implementation lock graph and mount rehearsal](cut-cow-validation.md).
 

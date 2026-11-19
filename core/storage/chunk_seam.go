@@ -369,9 +369,9 @@ type chunkLayerConfig struct {
 // chunkCutStats describes one cut. The periodic-cut work fills it; a zero
 // value means "not measured".
 type chunkCutStats struct {
-	COWSavedChunks  int
-	COWSaveNs       int64
-	COWWaitNs       int64
+	COWSavedChunks int
+	COWSaveNs      int64
+	COWWaitNs      int64
 	// BarrierPauseNs is the guest pause: from the capture barrier's Lock
 	// request until it is released. LockWaitNs is its first part, the wait for
 	// writers already holding the capture barrier shared.
