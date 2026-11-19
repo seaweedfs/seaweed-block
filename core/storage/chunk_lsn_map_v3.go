@@ -388,12 +388,12 @@ func (m *chunkLSNMapV3) prepareLockedV3(g, C uint64, entries []chunkLSNEntryV3, 
 			if e := m.fd.Truncate(int64(keep)); e != nil {
 				return nil, e
 			}
+			fileBytes = keep
+			m.live.fileBytes.Store(keep) // the file is shorter even if the fsync fails
+			m.live.truncations.Add(1)
 			if e := m.syncFile(); e != nil {
 				return nil, e
 			}
-			fileBytes = keep
-			m.live.fileBytes.Store(keep)
-			m.live.truncations.Add(1)
 		}
 	}
 	alloc := newExtentAllocatorV3(used, fileBytes)

@@ -23,7 +23,8 @@ import (
 // Lock order: WALStore.mu -> descMu -> liveMu (the publisher's report and
 // the definite-abandon path run under descMu), and chunkLSNMapV3.mu ->
 // liveMu (a prepare snapshots and registers under it). liveMu is held only
-// for map and slice bookkeeping, never across I/O, sorting or allocation,
+// for map and slice bookkeeping (it may allocate a slice or a map entry),
+// never across I/O, sorting or extent allocation,
 // and nothing holding liveMu takes another lock.
 
 type mapRootKeyV3 struct{ off, gen uint64 }

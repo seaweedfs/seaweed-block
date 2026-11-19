@@ -320,6 +320,9 @@ func TestChunkMapExtentsV3TruncationFaultKeepsTheSlotRoots(t *testing.T) {
 	if calls != 1 || mapFileSizeV3(t, path) >= before {
 		t.Fatalf("setup: %d fsyncs, file %d B -> %d B; want the truncation's fsync to fail", calls, before, mapFileSizeV3(t, path))
 	}
+	if got, want := m.Stats().FileBytes, uint64(mapFileSizeV3(t, path)); got != want {
+		t.Fatalf("stats after a truncation whose fsync failed: file bytes %d, file is %d B", got, want)
+	}
 	if _, err := m.Prepare(25, 7, []chunkLSNEntryV3{{LSN: 125}}, next); err == nil || calls != 1 {
 		t.Fatalf("the map did not latch: err %v, fsyncs %d", err, calls)
 	}
