@@ -11,6 +11,39 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
+func TestManifestFormatUpgradeFlatWriterNeverStoresData(t *testing.T) {
+	dataHead := storage.ChunkHead{Gen: 1, Epoch: 1, Holder: "h1", RemoteLSN: 1, Chunks: map[uint64]storage.ChunkRef{0: {Key: "k"}}}
+	if _, err := headEntry(dataHead); err == nil {
+		t.Fatal("flat writer accepted chunk-bearing HEAD without a manifest")
+	}
+	f, b, _, _, _ := gcFixture(t)
+	r, err := NewChunkRemote(f, b, path.Join(catBase, "v1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur, err := r.GetHead(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.CASHead(context.Background(), storage.ChunkHeadVersion{Gen: cur.Gen, Epoch: cur.Epoch}, dataHead); err == nil {
+		t.Fatal("direct CAS accepted geometry-free data")
+	}
+	after, err := r.GetHead(context.Background())
+	if err != nil || after.Gen != cur.Gen {
+		t.Fatal("refused flat CAS changed HEAD")
+	}
+	empty, err := headEntry(storage.ChunkHead{Gen: 1, State: storage.ChunkHeadActive})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var shape struct {
+		Format int `json:"format"`
+	}
+	if err := json.Unmarshal(empty.Content, &shape); err != nil || shape.Format != 1 {
+		t.Fatal("empty flat root must remain writable")
+	}
+}
+
 func TestManifestFormatUpgradeWritesVersionedStoredByteReferences(t *testing.T) {
 	f, b, _, _, _ := gcFixture(t)
 	r, h := publishSegmented(t, f, b)

@@ -41,11 +41,20 @@ func publishSource(t *testing.T, f *fakeFiler, b *fakeBlobs, vol string, chunks 
 	if err != nil {
 		t.Fatal(err)
 	}
+	h, intents, err := r.PrepareManifest(ctx, cur, h, uint64(catGeo.BlockSize)*uint64(catGeo.ChunkBlocks))
+	if err != nil {
+		t.Fatal(err)
+	}
 	gen, err := r.CASHead(ctx, storage.ChunkHeadVersion{Gen: cur.Gen, Epoch: cur.Epoch}, h)
 	if err != nil {
 		t.Fatal(err)
 	}
 	h.Gen = gen
+	for _, id := range intents {
+		if err := r.DeleteIntent(ctx, id); err != nil {
+			t.Fatal(err)
+		}
+	}
 	return h
 }
 

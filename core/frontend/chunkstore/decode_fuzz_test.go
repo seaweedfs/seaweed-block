@@ -25,6 +25,10 @@ func fuzzHeadSeeds(tb testing.TB) [][]byte {
 	}
 	var out [][]byte
 	for _, h := range heads {
+		if h.Segments == nil && len(h.Chunks) > 0 {
+			out = append(out, legacyHeadFixture(tb, h).Content)
+			continue
+		}
 		e, err := headEntry(h)
 		if err != nil {
 			tb.Fatalf("seed %+v: %v", h, err)
@@ -90,6 +94,12 @@ func FuzzDecodeHeadDocument(f *testing.F) {
 			return
 		}
 		e, err := headEntry(h)
+		if h.Segments == nil && len(h.Chunks) > 0 {
+			if err == nil {
+				t.Fatal("read-only legacy data was writable as flat HEAD")
+			}
+			return
+		}
 		if err != nil {
 			if gap := knownHeadEncodeGap(h); gap != "" {
 				return

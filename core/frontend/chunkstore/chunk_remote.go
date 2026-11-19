@@ -446,6 +446,9 @@ func headEntry(h storage.ChunkHead) (*filerpb.Entry, error) {
 		doc.DetachedBy = &detachedByDoc{Holder: h.DetachedBy.Holder, Epoch: h.DetachedBy.Epoch, Gen: h.DetachedBy.Gen}
 	}
 	if h.Segments == nil {
+		if len(h.Chunks) != 0 {
+			return nil, errors.New("chunkstore: data HEAD requires a segmented manifest and geometry")
+		}
 		doc.Chunks = make(map[uint64]refDoc, len(h.Chunks))
 		for idx, ref := range h.Chunks {
 			if ref.Key == "" {
