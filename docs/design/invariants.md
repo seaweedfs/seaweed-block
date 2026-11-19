@@ -469,12 +469,6 @@ Notes:
 |---|---|---|---|---|---|---|
 | `INV-NVME-H2C-RANGE-001` | An H2CData range exceeding the expected transfer size is refused before slicing, including a uint32 offset-plus-length overflow; an exact-bound payload is preserved. | Frontend H2C receive validation; no storage state transition | `core/frontend/nvme/session.go` `recvH2CData` | `TestRecvH2CDataRangeBounds` (`core/frontend/nvme/h2c_bounds_test.go`) | — | ACTIVE |
 
-### Manifest preparation scan cost
-
-| ID | Invariant | Transition | Enforced in | Regression/qualification | Model | Status |
-|---|---|---|---|---|---|---|
-| `INV-CUT-MANIFEST-SCAN-001` | PrepareManifest partitions base references once; each segment compares only its own base group. Unchanged segment identities remain reusable. | M5 Manifest | `core/frontend/chunkstore/manifest.go` `PrepareManifest` | `BenchmarkPrepareManifestUnchangedGroups`; `TestManifest_ReusesUnchangedRangeAndCrashKeepsOldRoot` | Algorithmic cost; no state/transition change to `CutPipeline` | ACTIVE |
-
 ## Part C. Change rules
 
 How a fix or a feature is calibrated against this model:
