@@ -10,6 +10,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/host/volume"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"github.com/seaweedfs/seaweed-block/core/storage"
+	"google.golang.org/grpc"
 	"math/rand"
 	"testing"
 	"time"
@@ -29,7 +30,10 @@ func TestChunkPressureFourLocalStreamsDiagnostic(t *testing.T) {
 func runChunkPressureRandomDiagnostic(t *testing.T, leaseValues []bool, remoteOverride storage.ChunkRemote) {
 	h, conn, setupCtx := reviewBindingHost(t)
 	reviewLegacyBind(t, h, conn, setupCtx, "v1")
-	line, ok := h.Publisher().VolumeAuthorityLine("v1")
+	runChunkPressureRandomVolume(t, h, conn, "v1", leaseValues, remoteOverride)
+}
+func runChunkPressureRandomVolume(t *testing.T, h *Host, conn *grpc.ClientConn, volumeID string, leaseValues []bool, remoteOverride storage.ChunkRemote) {
+	line, ok := h.Publisher().VolumeAuthorityLine(volumeID)
 	if !ok {
 		t.Fatal("missing authority")
 	}
@@ -42,9 +46,9 @@ func runChunkPressureRandomDiagnostic(t *testing.T, leaseValues []bool, remoteOv
 			const volumeBytes = 1 << 30
 			const writes = 160 * 1024 * 1024 / 4096
 			ctx := context.Background()
-			var view frontend.ProjectionView = workspaceRPCView{frontend.Projection{VolumeID: "v1", ReplicaID: line.ReplicaID, Epoch: line.Epoch, EndpointVersion: 1, Healthy: true}}
+			var view frontend.ProjectionView = workspaceRPCView{frontend.Projection{VolumeID: volumeID, ReplicaID: line.ReplicaID, Epoch: line.Epoch, EndpointVersion: 1, Healthy: true}}
 			if lease {
-				g, err := volume.NewWorkspaceLeaseGuard(view, control.NewWorkspaceServiceClient(conn), &control.WorkspaceIdentity{VolumeId: "v1", ReplicaId: line.ReplicaID, Epoch: line.Epoch}, func(context.Context) (uint64, error) { return 0, nil }, nil)
+				g, err := volume.NewWorkspaceLeaseGuard(view, control.NewWorkspaceServiceClient(conn), &control.WorkspaceIdentity{VolumeId: volumeID, ReplicaId: line.ReplicaID, Epoch: line.Epoch}, func(context.Context) (uint64, error) { return 0, nil }, nil)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -77,14 +81,14 @@ func runChunkPressureRandomDiagnostic(t *testing.T, leaseValues []bool, remoteOv
 					t.Logf("close: %v", err)
 				}
 			})
-			s, err := p.EnsureStorage("v1")
+			s, err := p.EnsureStorage(volumeID)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err = p.RecoverVolume(ctx, "v1"); err != nil {
+			if _, err = p.RecoverVolume(ctx, volumeID); err != nil {
 				t.Fatal(err)
 			}
-			be, err := p.Open(ctx, "v1")
+			be, err := p.Open(ctx, volumeID)
 			if err != nil {
 				t.Fatal(err)
 			}
