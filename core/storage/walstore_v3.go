@@ -774,12 +774,19 @@ func (s *WALStore) replayRecordV3(r walScannedRecordV3, walSize uint64, blockSiz
 // syncWALBatchV3 is the committer leader's batch for a v3 store (DESIGN 6.2,
 // 6.3). The cut H is every record pwritten before the leader starts.
 func (s *WALStore) syncWALBatchV3() error {
+	return s.syncWALBatchV3Internal(false)
+}
+
+// Called only by the flusher, without capture/lifecycle/store locks. Pressure
+// cannot depend on a guest Flush: persist locally before checkpointing, using
+// the same physical sync and final fault gate as an ordinary sync batch.
+func (s *WALStore) syncWALPressureV3() error {
+	return s.syncWALBatchV3Internal(true)
+}
+
+func (s *WALStore) syncWALBatchV3Internal(pressureOnly bool) error {
 	if err := s.stickyIOFault(); err != nil {
 		return err
-	}
-	cut := s.walMutation.Load()
-	if !s.bypassSyncDedup.Load() && s.chunk.Load() == nil && cut <= s.durableMutation.Load() {
-		return nil
 	}
 	v := s.v3
 	// The leader role: SetWMode holds it while it changes the mode, so no
@@ -790,6 +797,20 @@ func (s *WALStore) syncWALBatchV3() error {
 	}
 	v.syncMu.Lock()
 	defer v.syncMu.Unlock()
+	if pressureOnly {
+		// Recheck under the same leader interval as the mutation/frontier cut.
+		// Installing uses receiver-owned SyncInstallLog, never this normal path.
+		s.mu.RLock()
+		closed := s.closed
+		s.mu.RUnlock()
+		if closed || v.pub.current().BaseState == BaseInstalling || s.walUsedFraction() < 0.70 || v.appended.Load() <= v.wack.Load() {
+			return nil
+		}
+	}
+	cut := s.walMutation.Load()
+	if !s.bypassSyncDedup.Load() && s.chunk.Load() == nil && cut <= s.durableMutation.Load() {
+		return nil
+	}
 	H, prev := v.appended.Load(), v.wack.Load()
 	// One sample per covering WAL batch, as on v2. In mode C the slot
 	// publication is the physical sync; mode A also settles its W slot.

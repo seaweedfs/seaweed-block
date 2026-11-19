@@ -162,6 +162,13 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 	if err := store.stickyIOFault(); err != nil {
 		return err // no checkpoint advance after a failed fsync
 	}
+	// Do not acquire lifecycleMu here: Close holds it while joining Stop.
+	// The pressure leader is released before snapshot/materialization/checkpoint.
+	if store.v3 != nil {
+		if err := store.syncWALPressureV3(); err != nil {
+			return fmt.Errorf("flusher: pressure WAL sync: %w", err)
+		}
+	}
 	store.mu.RLock()
 	if store.closed && !allowClosed {
 		store.mu.RUnlock()

@@ -379,6 +379,11 @@ func openInitializedInternal(path string, f *os.File, sb *superblock, metadata B
 	// flusher via NotifyUrgent — same seam V2 wires for pressure-
 	// driven flushes.
 	s.admissionTimeout = 30 * time.Second
+	if s.v3 != nil {
+		// WAL pressure gets a budget below the host's I/O timeout. This bounds
+		// cooperative admission waits, not a blocking callback or physical I/O.
+		s.admissionTimeout = 4 * time.Second
+	}
 	s.admission = newWALAdmission(walAdmissionConfig{
 		MaxConcurrent: 64,
 		SoftWatermark: 0.70,
