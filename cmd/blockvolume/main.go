@@ -194,7 +194,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.chunk.replication, "chunk-replication", "", "walstore-chunk: replication for chunk needles (empty = filer default / storage rule)")
 	fs.DurationVar(&f.chunk.captureInterval, "chunk-capture-interval", defaultChunkCaptureInterval, "walstore-chunk: automatic cut once this long has passed since the last successful cut; 0 (default) disables the timer, e.g. 15m as a host-loss safety net")
 	fs.IntVar(&f.chunk.uploadConcurrency, "chunk-upload-concurrency", 8, "walstore-chunk: maximum concurrent dirty-chunk uploads (1..64)")
-	fs.IntVar(&f.chunk.dirtyThreshold, "chunk-dirty-threshold", defaultChunkDirtyThreshold, "walstore-chunk: bound on one cut's barrier copy, in chunks; never triggers a cut; 0 = unbounded")
+	fs.IntVar(&f.chunk.dirtyThreshold, "chunk-dirty-threshold", defaultChunkDirtyThreshold, "walstore-chunk: number of candidate chunks above which a cut pre-copies (stages) chunks before its barrier, in rounds of this size; copy-before-write copies the rest outside the barrier; never triggers a cut; 0 = no pre-copy")
 	fs.BoolVar(&f.chunk.controlEndpoint, "chunk-control-endpoint", false, "walstore-chunk: expose the /chunk/* control routes (cut, snapshot, snapshots, snapshot/delete, detach) on the status HTTP listener; off by default; loopback-only like the listener")
 	fs.UintVar(&f.durableBlocks, "durable-blocks", 2048, "number of blocks per volume on first create (ignored when opening existing)")
 	fs.UintVar(&f.durableBlockSize, "durable-blocksize", 4096, "block size in bytes on first create")
