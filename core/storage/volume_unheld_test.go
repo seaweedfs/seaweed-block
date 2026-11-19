@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -107,7 +108,8 @@ func TestProbeVolumeUnheldHolderProcessDies(t *testing.T) {
 		t.Fatal(err)
 	}
 	exited := make(chan struct{})
-	t.Cleanup(func() { // kill and reap the holder, bounded
+	go func() { _ = cmd.Wait(); close(exited) }() // reaped on every path
+	t.Cleanup(func() { // kill the holder and join its reaper, bounded
 		_ = cmd.Process.Kill()
 		select {
 		case <-exited:
@@ -132,7 +134,6 @@ func TestProbeVolumeUnheldHolderProcessDies(t *testing.T) {
 	if err := ProbeVolumeUnheld(path); !errors.Is(err, ErrVolumeHeld) {
 		t.Fatalf("held by a live process: %v; want ErrVolumeHeld", err)
 	}
-	go func() { _ = cmd.Wait(); close(exited) }()
 	if err := cmd.Process.Kill(); err != nil {
 		t.Fatal(err)
 	}
@@ -143,5 +144,36 @@ func TestProbeVolumeUnheldHolderProcessDies(t *testing.T) {
 	}
 	if err := ProbeVolumeUnheld(path); err != nil {
 		t.Fatalf("after the holder died: %v; want unheld", err)
+	}
+}
+
+// The answer is about the file the probe opened: a held volume whose path is
+// replaced (by an unlocked non-v3 file) between the probe's open and its lock
+// is still reported held, never unheld.
+func TestProbeVolumeUnheldDecidesOnTheOpenedFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("an open file cannot be renamed over on Windows")
+	}
+	path := createClosedV3Volume(t)
+	s, err := OpenWALStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	junk := filepath.Join(filepath.Dir(path), "junk.bin")
+	if err := os.WriteFile(junk, make([]byte, 64<<10), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	replaced := false
+	testProbeUnheldAfterOpen = func() {
+		replaced = os.Rename(junk, path) == nil
+	}
+	t.Cleanup(func() { testProbeUnheldAfterOpen = nil })
+	err = ProbeVolumeUnheld(path)
+	if !replaced {
+		t.Fatal("fixture: the path was not replaced after the open")
+	}
+	if !errors.Is(err, ErrVolumeHeld) {
+		t.Fatalf("held volume replaced at its path mid-probe: %v; want ErrVolumeHeld", err)
 	}
 }

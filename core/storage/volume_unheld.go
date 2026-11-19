@@ -19,26 +19,38 @@ var ErrVolumeHeld = errors.New("storage: volume held by a live owner on this hos
 //
 // The proof is per host and for local filesystems only: it says nothing
 // about a process on another host, and nothing on a network or shared mount,
-// where advisory lock semantics vary. It is not proof the owner process is
-// dead; host cleanup must check that separately. The probe holds the lock
-// only for an instant, but an owner opening the volume in that instant is
+// where advisory lock semantics vary. It covers the file at path when the
+// probe opens it, not a file renamed away earlier. It is not proof the owner
+// process is dead; host cleanup must check that separately. The probe holds
+// the lock only for an instant and leaves no reservation behind, so it does
+// not keep a new owner out; an owner opening the volume in that instant is
 // refused with ErrWALStoreLocked: probe only when the owner is believed gone.
 func ProbeVolumeUnheld(path string) error {
-	// Only a v3 owner takes the lock; for any other file a free lock proves
-	// nothing.
-	if err := ProbeWALStoreV3(path); err != nil {
-		return fmt.Errorf("storage: %s is not a v3 volume, unheld cannot be proven: %w", path, err)
-	}
+	// One descriptor for both steps, locked first: the answer is about the
+	// file this descriptor opened, whatever the path names afterwards, and
+	// on Windows an owner's byte lock would refuse a read made before ours.
 	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer f.Close() // closing releases the probe's lock
+	if hook := testProbeUnheldAfterOpen; hook != nil {
+		hook()
+	}
 	switch err := LockWALStoreFile(f); {
 	case errors.Is(err, ErrWALStoreLocked):
-		return ErrVolumeHeld
+		return ErrVolumeHeld // held, whatever the file is: the safe answer
 	case err != nil:
 		return err
 	}
+	// Only a v3 owner takes the lock; for any other file a free lock proves
+	// nothing.
+	if err := probeWALStoreV3At(f); err != nil {
+		return fmt.Errorf("storage: %s is not a v3 volume, unheld cannot be proven: %w", path, err)
+	}
 	return nil
 }
+
+// testProbeUnheldAfterOpen, test-only, runs in ProbeVolumeUnheld after the
+// open, before the lock.
+var testProbeUnheldAfterOpen func()

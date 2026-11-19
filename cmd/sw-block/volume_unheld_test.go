@@ -19,6 +19,12 @@ func TestOpsVolumeUnheldExitCodes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	closed := false
+	t.Cleanup(func() {
+		if !closed {
+			_ = s.Close()
+		}
+	})
 	junk := filepath.Join(t.TempDir(), "junk.bin")
 	if err := os.WriteFile(junk, make([]byte, 64<<10), 0o644); err != nil {
 		t.Fatal(err)
@@ -31,6 +37,7 @@ func TestOpsVolumeUnheldExitCodes(t *testing.T) {
 	if code, out, _ := runIt("--path", path); code != 1 || !strings.HasPrefix(out, "held:") {
 		t.Fatalf("open store: exit %d %q; want 1 held", code, out)
 	}
+	closed = true
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +55,7 @@ func TestOpsVolumeUnheldExitCodes(t *testing.T) {
 		}
 	}
 	_, _, usage := runIt()
-	for _, want := range []string{"per host", "local filesystems only", "network or shared mount", "BOTH"} {
+	for _, want := range []string{"per host", "local filesystems only", "network or shared mount", "BOTH", "reserves nothing", "is refused"} {
 		if !strings.Contains(usage, want) {
 			t.Fatalf("usage lacks %q:\n%s", want, usage)
 		}

@@ -21,6 +21,10 @@ This proof is per host and for local filesystems only. It says nothing about
 another host, and nothing on a network or shared mount. It does not prove the
 owner process is dead: host cleanup must require BOTH this command's exit 0
 AND the host tooling's own check that the recorded owner process is gone.
+
+The probe holds the lock only for an instant and reserves nothing: it does not
+keep a new owner out after it returns, and an owner opening the volume at that
+instant is refused. Run it only when the owner is believed gone.
 `
 
 // runOpsVolumeUnheld is `sw-block ops volume-unheld`.
