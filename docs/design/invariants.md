@@ -229,7 +229,7 @@ HEAD states, snapshots, forks, intents, key bindings, GC and volume delete in th
 
 | From | To | Guard | Enforced in | Protects |
 |---|---|---|---|---|
-| — | `active` (gen 1, epoch 0) | new volume capacity is at most 16 TiB - 4 KiB before creation; the first HEAD is an exclusive create (`CASHead` with expected gen 0); a fork HEAD carries the parent's `RemoteLSN` and references | `core/frontend/chunkstore/chunk_remote.go` `CASHead`; `core/frontend/chunkstore/catalog.go` `EnsureVolume`, `Fork` | `INV-WS-HEAD-CAS-001` |
+| — | `active` (gen 1, epoch 0) | the first HEAD is an exclusive create (`CASHead` with expected gen 0); a fork HEAD carries the parent's `RemoteLSN` and references | `core/frontend/chunkstore/chunk_remote.go` `CASHead`; `core/frontend/chunkstore/catalog.go` `EnsureVolume`, `Fork` | `INV-WS-HEAD-CAS-001` |
 | `active` | `active` | a holder's cut or a takeover CAS (M4, M5) | `core/frontend/chunkstore/chunk_remote.go` `CASHead` | `INV-WS-HEAD-CAS-001`, `INV-WS-HEAD-MONOTONE-001` |
 | `active` | `detached` | `Detach` final cut | `core/storage/chunk_layer.go` `chunkLayerImpl.Detach` | `INV-WS-CLEAN-MOVE-001` |
 | `detached` | `active` | takeover CAS by a new holder at a higher epoch | `core/storage/chunk_restore.go` `ClaimChunkHead` | `INV-WS-CLAIM-BEFORE-SERVE-001` |
@@ -247,7 +247,7 @@ HEAD states, snapshots, forks, intents, key bindings, GC and volume delete in th
 | — | name held | exclusive name record `{request, attempt}`; a retry with the same request id gets its own attempt back | `core/frontend/chunkstore/catalog.go` `CreateSnapshot`, `claimName` | `INV-SNAP-EXPLICIT-DELETE-001` |
 | name held | published | the volume is not being deleted; an intent with a deadline is written and the deadline is re-checked; exclusive create of the attempt path | `core/frontend/chunkstore/catalog.go` `CreateSnapshot` | `INV-SNAP-EXPLICIT-DELETE-001` |
 | published | deleting | `DeleteSnapshot` or retention for this attempt, never while a fork claim is live | `core/frontend/chunkstore/catalog.go` `DeleteSnapshot`; `core/frontend/chunkstore/retention.go` `markDeleting` | `INV-SNAP-EXPLICIT-DELETE-001` |
-| published | fork | require inherited geometry within the create capacity bound; require inherited geometry within the create capacity bound; claim the parent snapshot, check the source is not being deleted, write the target `VOLUME`, then its HEAD; no chunk is copied | `core/frontend/chunkstore/catalog.go` `Fork`, `claimForkParent` | `INV-GC-REACHABLE-001` |
+| published | fork | claim the parent snapshot, check the source is not being deleted, write the target `VOLUME`, then its HEAD; no chunk is copied | `core/frontend/chunkstore/catalog.go` `Fork`, `claimForkParent` | `INV-GC-REACHABLE-001` |
 
 **Intents and key bindings.**
 
@@ -468,12 +468,6 @@ Notes:
 | ID | Statement | Machine / transition | Enforced in | Test | TLA+ property | Status |
 |---|---|---|---|---|---|---|
 | `INV-NVME-H2C-RANGE-001` | An H2CData range exceeding the expected transfer size is refused before slicing, including a uint32 offset-plus-length overflow; an exact-bound payload is preserved. | Frontend H2C receive validation; no storage state transition | `core/frontend/nvme/session.go` `recvH2CData` | `TestRecvH2CDataRangeBounds` (`core/frontend/nvme/h2c_bounds_test.go`) | — | ACTIVE |
-
-### Volume create capacity
-
-| ID | Invariant | Transition | Enforced in | Regression tests | Model | Status |
-|---|---|---|---|---|---|---|
-| `INV-VOLUME-CREATE-SIZE-001` | Creation refuses capacity above 16 TiB - 4 KiB before provisioning, allocating a WAL, or persisting a volume record. Geometry checks cannot overflow. | M6 initial create (static parameter admission) | `core/geometry/volume_size.go`; lifecycle `CreateVolume`, CSI `volumeSpecFromCreateRequest`, catalog `EnsureVolume`, `claimForkParent`, storage `CreateWALStoreWithOptions` | `TestCreateVolumeRejectsBeyondUint32LBACap`, `TestCSICreateVolumeCapacityCapBeforeProvision`, `TestEnsureVolumeRejectsBeyondUint32LBACap`, `TestCreateWALStoreRefusesOversizeBeforeFilesystem`, `TestForkRejectsLegacyOversizedGeometry` | Static geometry bound; no protocol state or transition added | ACTIVE |
 
 ## Part C. Change rules
 
