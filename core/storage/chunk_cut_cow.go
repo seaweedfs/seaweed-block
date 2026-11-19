@@ -139,7 +139,7 @@ func (l *chunkLayerImpl) installCOWWindow(candidates, staged map[uint64]bool, he
 	}
 	w := &cutCOWWindow{layer: l, ended: make(chan struct{}), entries: make(map[uint64]*cutCOWEntry), head: head, spillLimit: l.cfg.COWSpillLimit, chunkBytes: int64(size)}
 	c, _, reserved, limit := l.cutPayloadWorkers()
-	savers := min(l.cfg.UploadConcurrency, max(1, int((16<<20)/int64(size))))
+	savers := max(1, int((16<<20)/int64(size)))
 	reserved += int64(2*savers) * int64(size)
 	w.copyWorkers, w.memory, w.memoryLimit = c, reserved, max(limit, reserved)
 	w.saverSlots = make(chan struct{}, savers)

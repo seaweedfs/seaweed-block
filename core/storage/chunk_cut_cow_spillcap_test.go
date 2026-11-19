@@ -23,6 +23,8 @@ func TestCutCOWV3_SaverCapacityAbortsWithoutParkingGuest(t *testing.T) {
 	t.Cleanup(free)
 	before := f.stats().head.Gen
 	done, errs := cowStartCut(t, l, gate)
+	w := l.cowActive.Load()
+	w.saverSlots = make(chan struct{}, 1) // witness exhaustion of a fixed saver budget
 	writer := make(chan error, 1)
 	go func() { _, err := s.Write(5, makeBlock(ctBlockSize, 0x45)); writer <- err }()
 	t.Cleanup(func() { free(); gate.unblock() })
