@@ -878,7 +878,7 @@ func (p *DurableProvider) RecoverVolume(ctx context.Context, volumeID string) (R
 			// Recovered; I/O stays refused until the layer attaches under
 			// the master's assignment (the authority wait flips it).
 			report.Evidence += "; chunk layer awaiting master authority"
-			h.backend.SetOperational(false, report.Evidence)
+			h.backend.setChunkAttachPending(report.Evidence)
 			return report, nil
 		}
 		if err := chunkFenced(volumeID, h); err != nil {

@@ -76,7 +76,7 @@ type IOResult struct {
 	SC        uint8
 	Data      []byte // read payload (nil for writes / errors)
 	Reason    string
-	retryable bool // only transient backend pressure clears wire DNR
+	retryable bool // transient pressure or readiness refusal clears wire DNR
 }
 
 func (r IOResult) completionStatus() uint16 { return MakeStatusField(r.SCT, r.SC, !r.retryable) }
@@ -307,7 +307,8 @@ func mapWriteBudgetError(ctx context.Context, err error, op string) IOResult {
 
 // mapBackendError translates frontend errors into NVMe CQE
 // status tuples. ErrStalePrimary → ANA Transition;
-// ErrBackendClosed → ANA Inaccessible; anything else → Internal
+// ErrBackendClosed → ANA Inaccessible; ErrNotReady → retryable Namespace
+// Not Ready; anything else → Internal
 // Error (fail-closed; real-backend-specific mapping lands with
 // T3).
 func mapBackendError(err error, op string) IOResult {
@@ -327,6 +328,9 @@ func mapBackendError(err error, op string) IOResult {
 			SC:     SCPathAsymAccessInaccessible,
 			Reason: "backend closed on " + op,
 		}
+	}
+	if errors.Is(err, frontend.ErrNotReady) {
+		return IOResult{SCT: SCTGeneric, SC: SCNamespaceNotReady, Reason: "backend not ready on " + op + ": " + err.Error(), retryable: true}
 	}
 	return IOResult{
 		SCT:    SCTGeneric,

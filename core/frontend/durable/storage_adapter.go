@@ -149,6 +149,9 @@ type StorageBackend struct {
 	// testBeforeIOLock, test-only, runs in admit after the readiness check,
 	// right before the I/O lock (an arrival handshake for queued I/O).
 	testBeforeIOLock func()
+	// Runs outside locks after a read registers its readiness notification.
+	testBeforeReadReadyWait func()
+	testAfterAttachRefusal  func()
 
 	storage   storage.LogicalStorage
 	view      frontend.ProjectionView
@@ -159,8 +162,12 @@ type StorageBackend struct {
 	// false; provider flips true after Recover() succeeds (T3b).
 	// opEvidence is the reason reported when operational=false
 	// (e.g., "awaiting recovery", "local epoch ahead of assignment").
-	operational atomic.Bool
-	opEvidence  atomic.Value // string
+	// Only a successfully recovered chunk volume awaiting attachment may wait.
+	// waitAttachReady and readyChanged are protected by mu.
+	waitAttachReady bool
+	readyChanged    chan struct{}
+	operational     atomic.Bool
+	opEvidence      atomic.Value // string
 
 	// ioMu is the I/O admission boundary: every Read, Write and Sync holds
 	// its read side for the whole operation, gate included, so StopIO can
@@ -351,6 +358,7 @@ func (b *StorageBackend) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.closed = true
+	b.notifyReadReadyLocked()
 	return nil
 }
 
@@ -379,12 +387,14 @@ func (b *StorageBackend) SetWriteObserver(obs WriteObserver) error {
 			err = fmt.Errorf("durable: write observer not installed: ship LSN: %w", err)
 			b.mu.Lock()
 			b.observerErr = err
+			b.notifyReadReadyLocked()
 			b.mu.Unlock()
 			return err
 		}
 	}
 	b.mu.Lock()
 	b.observer, b.observerErr = obs, nil
+	b.notifyReadReadyLocked()
 	b.mu.Unlock()
 	return nil
 }
@@ -409,6 +419,7 @@ func (b *StorageBackend) seedAndRebase(seed func() error) error {
 		err = fmt.Errorf("durable: write observer ship LSN after the frontier seed: %w", err)
 		b.mu.Lock()
 		b.observerErr = err
+		b.notifyReadReadyLocked()
 		b.mu.Unlock()
 		return err
 	}
@@ -452,8 +463,12 @@ func (b *StorageBackend) SetOperational(ok bool, evidence string) {
 			evidence = "not operational"
 		}
 	}
+	b.mu.Lock()
 	b.opEvidence.Store(evidence)
 	b.operational.Store(ok)
+	b.waitAttachReady = false
+	b.notifyReadReadyLocked()
+	b.mu.Unlock()
 }
 
 // StopIO makes the backend refuse every new Read, Write and Sync with
@@ -539,7 +554,7 @@ func (b *StorageBackend) Sync(ctx context.Context) error {
 // Read copies up to len(p) bytes starting at offset. Reads past
 // end-of-volume return zero bytes (no error). Every read is gated.
 func (b *StorageBackend) Read(ctx context.Context, offset int64, p []byte) (int, error) {
-	release, err := b.admit()
+	release, err := b.admitAfterAttach(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -547,7 +562,97 @@ func (b *StorageBackend) Read(ctx context.Context, offset int64, p []byte) (int,
 	if len(p) == 0 {
 		return 0, nil
 	}
+	if ctx.Err() != nil {
+		return 0, b.attachReadyTimeout(ctx.Err())
+	}
 	return b.readBytes(offset, p)
+}
+
+// setChunkAttachPending is used only after successful local recovery.
+func (b *StorageBackend) setChunkAttachPending(evidence string) {
+	b.mu.Lock()
+	b.opEvidence.Store(evidence)
+	b.operational.Store(false)
+	b.waitAttachReady = true
+	b.notifyReadReadyLocked()
+	b.mu.Unlock()
+}
+
+func (b *StorageBackend) admitAfterAttach(ctx context.Context) (func(), error) {
+	release, err := b.admit()
+	if !errors.Is(err, frontend.ErrNotReady) {
+		return release, err
+	}
+	if hook := b.testAfterAttachRefusal; hook != nil {
+		hook()
+	}
+	b.mu.Lock()
+	pending := b.waitAttachReady
+	b.mu.Unlock()
+	if !pending {
+		// Readiness may have published after the initial refusal.
+		return b.admit()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	return b.awaitAttachAdmission(ctx)
+}
+
+// notifyReadReadyLocked wakes waiting I/O without making them hold ioMu while
+// the provider is attaching or draining the backend. Caller holds mu.
+func (b *StorageBackend) notifyReadReadyLocked() {
+	if b.readyChanged != nil {
+		close(b.readyChanged)
+		b.readyChanged = nil
+	}
+}
+
+// awaitAttachAdmission waits only after a gate refusal, before any storage I/O.
+// The three-second readiness allowance is capped by an earlier caller deadline.
+func (b *StorageBackend) awaitAttachAdmission(ctx context.Context) (func(), error) {
+	for {
+		b.mu.Lock()
+		if b.readyChanged == nil {
+			b.readyChanged = make(chan struct{})
+		}
+		changed := b.readyChanged
+		terminal := b.closed || b.observerErr != nil || !b.waitAttachReady
+		b.mu.Unlock()
+		if err := ctx.Err(); err != nil {
+			return nil, b.attachReadyTimeout(err)
+		}
+		release, err := b.admit()
+		if err == nil {
+			if cause := ctx.Err(); cause != nil {
+				release()
+				return nil, b.attachReadyTimeout(cause)
+			}
+			return release, nil
+		}
+		if !errors.Is(err, frontend.ErrNotReady) || terminal || b.operational.Load() {
+			return release, err
+		}
+		if hook := b.testBeforeReadReadyWait; hook != nil {
+			hook()
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return nil, b.attachReadyTimeout(ctx.Err())
+		}
+	}
+}
+
+func (b *StorageBackend) attachReadyTimeout(cause error) error {
+	// A concurrent Close, fence or observer failure must retain its gate error.
+	err := b.gate()
+	b.mu.Lock()
+	observerFailed := b.observerErr != nil
+	b.mu.Unlock()
+	if err != nil && (!errors.Is(err, frontend.ErrNotReady) || observerFailed) {
+		return err
+	}
+	return fmt.Errorf("%w: %w: chunk attachment readiness: %w", frontend.ErrNotReady, frontend.ErrBackendBusy, cause)
 }
 
 // Write persists up to len(p) bytes at offset. Partial-block
@@ -559,7 +664,7 @@ func (b *StorageBackend) Write(ctx context.Context, offset int64, p []byte) (int
 	defer cancel()
 	iolatency.BackendEnter(ctx)
 	defer iolatency.BackendExit(ctx)
-	release, err := b.admit()
+	release, err := b.admitAfterAttach(ctx)
 	if err != nil {
 		log.Printf("durable: StorageBackend.Write gate-rejected offset=%d: %v", offset, err)
 		return 0, err
@@ -567,6 +672,9 @@ func (b *StorageBackend) Write(ctx context.Context, offset int64, p []byte) (int
 	defer release()
 	if len(p) == 0 {
 		return 0, nil
+	}
+	if ctx.Err() != nil {
+		return 0, b.attachReadyTimeout(ctx.Err())
 	}
 	b.profile.recordBackendWriteRequest(len(p))
 	start := time.Now()
