@@ -67,3 +67,50 @@ func TestWALStoreV3AdmissionReturnsFaultLatchedDuringPressureWait(t *testing.T) 
 		})
 	}
 }
+
+// The same terminal cause must survive a saturated writer semaphore even
+// without hard WAL pressure; the store's normal append guard is too late there.
+func TestWALStoreV3AdmissionReturnsFaultWhileWaitingForWriterSlot(t *testing.T) {
+	s := admissionPressureV3(t, 0)
+	s.admissionTimeout = 40 * time.Millisecond
+	for i := 0; i < cap(s.admission.sem); i++ {
+		s.admission.sem <- struct{}{}
+	}
+	t.Cleanup(func() {
+		for i := 0; i < cap(s.admission.sem); i++ {
+			<-s.admission.sem
+		}
+	})
+	entered, resume := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(resume) }) }
+	t.Cleanup(release)
+	sample := s.admission.walUsed
+	s.admission.walUsed = func() float64 {
+		used := sample() // its store/descriptor/writer locks have all released
+		close(entered)
+		<-resume
+		return used
+	}
+	done := make(chan error, 1)
+	go func() { _, err := s.Write(0, blk(1)); done <- err }()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("write never reached admission")
+	}
+	fault := errors.New("terminal persistence fault while writer slots are full")
+	s.latchV3(fault)
+	release()
+	select {
+	case err := <-done:
+		if !errors.Is(err, fault) || errors.Is(err, errWALFull) {
+			t.Fatalf("slot waiter lost cause: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("fault did not release slot waiter")
+	}
+	if s.NextLSN() != 1 {
+		t.Fatal("faulted slot waiter appended")
+	}
+}

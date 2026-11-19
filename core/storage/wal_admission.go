@@ -53,7 +53,7 @@ type walAdmissionConfig struct {
 }
 
 // newWALAdmission constructs an admission controller. Caller must
-// set every field of cfg — there are no defaults. Behavior mirrors
+// set every capacity/lifetime field of cfg; FaultFn is optional. Behavior mirrors
 // V2's weed/storage/blockvol/wal_admission.go NewWALAdmission:
 // passing a zero watermark or nil NotifyFn/ClosedFn is a bug, not
 // a shortcut.
