@@ -673,7 +673,7 @@ func (s *WALStore) appendWriteV3(lba uint32, data []byte, lsn uint64, budget fun
 	if err := s.v3BudgetAfterRollover(budget); err != nil {
 		return 0, err
 	}
-	phys, err := s.v3.w.append(e, s.v3.wack.Load())
+	phys, err := s.v3.w.append(e, s.v3.wack.Load(), budget)
 	if err != nil {
 		if errors.Is(err, errWALPwrite) {
 			s.latchV3(err)
@@ -731,7 +731,7 @@ func (s *WALStore) writeBatchV3Locked(startLBA uint32, blocks [][]byte, firstLSN
 	if err := s.v3BudgetAfterRollover(budget); err != nil {
 		return nil, err
 	}
-	phys, err := s.v3.w.append(e, s.v3.wack.Load())
+	phys, err := s.v3.w.append(e, s.v3.wack.Load(), budget)
 	s.instr.appendLatency.Observe(time.Since(start))
 	s.walMutation.Add(1)
 	if err != nil {
