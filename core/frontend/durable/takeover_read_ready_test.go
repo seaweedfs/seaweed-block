@@ -22,6 +22,7 @@ type heldTakeoverClaim struct {
 	release           chan struct{}
 	once, releaseOnce sync.Once
 	holdFor           time.Duration
+	readRegistered    chan struct{}
 }
 
 func (r *heldTakeoverClaim) unblock() { r.releaseOnce.Do(func() { close(r.release) }) }
@@ -33,6 +34,13 @@ func (r *heldTakeoverClaim) CASHead(ctx context.Context, expected storage.ChunkH
 	r.once.Do(func() { close(r.claimed) })
 	var expired <-chan time.Time
 	if r.holdFor > 0 {
+		select {
+		case <-r.readRegistered:
+		case <-r.release:
+			return gen, nil
+		case <-ctx.Done():
+			return gen, ctx.Err()
+		}
 		timer := time.NewTimer(r.holdFor)
 		defer timer.Stop()
 		expired = timer.C
@@ -49,7 +57,7 @@ func (r *heldTakeoverClaim) CASHead(ctx context.Context, expected storage.ChunkH
 
 func pendingTakeoverRead(t *testing.T, hold time.Duration) (*durable.DurableProvider, frontend.Backend, *nvme.IOHandler) {
 	t.Helper()
-	remote := &heldTakeoverClaim{ChunkRemote: seededRemote(t), claimed: make(chan struct{}), release: make(chan struct{}), holdFor: hold}
+	remote := &heldTakeoverClaim{ChunkRemote: seededRemote(t), claimed: make(chan struct{}), release: make(chan struct{}), holdFor: hold, readRegistered: make(chan struct{})}
 	view := newStubView(frontend.Projection{VolumeID: "v1", ReplicaID: "r1"})
 	p := chunkProvider(t, t.TempDir(), remote, view, 0)
 	// Registered after provider cleanup, so release precedes its worker join.
@@ -74,6 +82,8 @@ func pendingTakeoverRead(t *testing.T, hold time.Duration) (*durable.DurableProv
 	if err != nil {
 		t.Fatal(err)
 	}
+	var firstWait sync.Once
+	durable.SetTestBeforeAttachWait(backend, func() { firstWait.Do(func() { close(remote.readRegistered) }) })
 	handler := nvme.NewIOHandler(nvme.HandlerConfig{Backend: backend, BlockSize: 4096, VolumeSize: pcBlocks * 4096, NSID: 1})
 	return p, backend, handler
 }

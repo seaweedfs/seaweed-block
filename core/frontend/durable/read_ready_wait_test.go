@@ -83,3 +83,30 @@ func TestReadReadinessWaitDoesNotHoldAdmissionAndCloseWakesIt(t *testing.T) {
 		})
 	}
 }
+
+type readinessProjection frontend.Projection
+
+func (p readinessProjection) Projection() frontend.Projection { return frontend.Projection(p) }
+
+func TestAttachReadinessTimeoutPreservesStaleLineage(t *testing.T) {
+	id := frontend.Identity{VolumeID: "v", ReplicaID: "r", Epoch: 1, EndpointVersion: 1}
+	b := &StorageBackend{id: id, view: readinessProjection{VolumeID: "v", ReplicaID: "r", Epoch: 2, EndpointVersion: 1, Healthy: true}}
+	b.setChunkAttachPending("pending")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b.testBeforeReadReadyWait = func() { b.SetOperational(true, "attached under another epoch"); cancel() }
+	_, err := b.Read(ctx, 0, make([]byte, 4096))
+	if !errors.Is(err, frontend.ErrStalePrimary) {
+		t.Fatalf("timeout lost stale lineage: %v", err)
+	}
+}
+
+func TestAttachReadinessPublicationRetriesAdmission(t *testing.T) {
+	id := frontend.Identity{VolumeID: "v", ReplicaID: "r", Epoch: 1, EndpointVersion: 1}
+	b := &StorageBackend{id: id, view: readinessProjection{VolumeID: "v", ReplicaID: "r", Epoch: 1, EndpointVersion: 1, Healthy: true}}
+	b.setChunkAttachPending("pending")
+	b.testAfterAttachRefusal = func() { b.SetOperational(true, "attached") }
+	if _, err := b.Read(context.Background(), 0, nil); err != nil {
+		t.Fatalf("readiness publication returned the old refusal: %v", err)
+	}
+}

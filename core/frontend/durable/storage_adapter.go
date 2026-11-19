@@ -151,6 +151,7 @@ type StorageBackend struct {
 	testBeforeIOLock func()
 	// Runs outside locks after a read registers its readiness notification.
 	testBeforeReadReadyWait func()
+	testAfterAttachRefusal  func()
 
 	storage   storage.LogicalStorage
 	view      frontend.ProjectionView
@@ -573,6 +574,9 @@ func (b *StorageBackend) admitAfterAttach(ctx context.Context) (func(), error) {
 	release, err := b.admit()
 	if !errors.Is(err, frontend.ErrNotReady) {
 		return release, err
+	}
+	if hook := b.testAfterAttachRefusal; hook != nil {
+		hook()
 	}
 	b.mu.Lock()
 	pending := b.waitAttachReady
