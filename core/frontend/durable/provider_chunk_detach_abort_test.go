@@ -301,9 +301,12 @@ func TestWALStoreChunk_RepeatDetachWithCancelledContextNeverResumes(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	cctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	r2, _, err := p.DetachVolume(cctx, "v1")
+	forced := false
+	durable.SetTestDetachStopIO(p, func(context.Context) error { forced = true; return context.Canceled }) // the drain fails
+	r2, _, err := p.DetachVolume(context.Background(), "v1")
+	if !forced {
+		t.Fatal("the failed-drain branch was not taken")
+	}
 	if err != nil || r2.Head.Gen != r1.Head.Gen || r2.Head.State != storage.ChunkHeadDetached {
 		t.Fatalf("repeated detach with a cancelled context: %+v %v; want the first result %+v", r2, err, r1)
 	}
@@ -321,9 +324,13 @@ func TestWALStoreChunk_RetryAfterUndecidableDetachNeverResumes(t *testing.T) {
 	if _, _, err := p.DetachVolume(context.Background(), "v1"); !errors.Is(err, durable.ErrDetachOutcomeUnknown) {
 		t.Fatalf("first detach: %v; want ErrDetachOutcomeUnknown", err)
 	}
-	cctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, _, err := p.DetachVolume(cctx, "v1"); !errors.Is(err, durable.ErrDetachOutcomeUnknown) || errors.Is(err, durable.ErrDetachAborted) {
+	forced := false
+	durable.SetTestDetachStopIO(p, func(context.Context) error { forced = true; return context.Canceled }) // the drain fails
+	_, _, err := p.DetachVolume(context.Background(), "v1")
+	if !forced {
+		t.Fatal("the failed-drain branch was not taken")
+	}
+	if !errors.Is(err, durable.ErrDetachOutcomeUnknown) || errors.Is(err, durable.ErrDetachAborted) {
 		t.Fatalf("retry over an unresolved detach CAS: %v; want still unknown, never aborted", err)
 	}
 	if _, err := b.Write(context.Background(), 12288, block(3)); !errors.Is(err, frontend.ErrNotReady) {
@@ -355,9 +362,15 @@ func TestWALStoreChunk_DetachFreezeBoundCoversTheSettle(t *testing.T) {
 		t.Fatal(err)
 	}
 	remote.set(func(r *faultRemote) { r.casMode = "hold"; r.getHeadHold = true })
+	deadlines := map[string]time.Time{}
+	durable.SetTestDetachTrace(p, func(stage string, d time.Time) { deadlines[stage] = d })
 	start := time.Now()
 	_, _, err = p.DetachVolume(context.Background(), "v1")
 	took := time.Since(start)
+	cutAt, settleAt := deadlines["cut"].Sub(start), deadlines["settle"].Sub(start)
+	if cutAt < freeze*3/4-50*time.Millisecond || cutAt > freeze*3/4+50*time.Millisecond || settleAt < freeze-50*time.Millisecond || settleAt > freeze+50*time.Millisecond {
+		t.Fatalf("deadlines: cut %v, settle %v after the start; want three quarters of the %v freeze, then the bound", cutAt, settleAt, freeze)
+	}
 	if !errors.Is(err, durable.ErrDetachOutcomeUnknown) {
 		t.Fatalf("detach with a hung CAS and hung HEAD reads: %v; want the outcome unknown", err)
 	}
@@ -377,14 +390,31 @@ func TestWALStoreChunk_DelayedDetachCASCannotLandAfterTheCancel(t *testing.T) {
 	release, delayed := make(chan struct{}), make(chan error, 1)
 	var once sync.Once
 	unblock := func() { once.Do(func() { close(release) }) }
-	t.Cleanup(unblock)
+	joined := false
+	t.Cleanup(func() { // join the delayed CAS worker, bounded
+		unblock()
+		if !joined {
+			select {
+			case <-delayed:
+			case <-time.After(5 * time.Second):
+				t.Error("delayed CAS worker not joined")
+			}
+		}
+	})
 	remote.set(func(r *faultRemote) { r.casMode = "delayed"; r.release, r.delayedErr = release, delayed })
 	if _, _, err := p.DetachVolume(context.Background(), "v1"); !errors.Is(err, durable.ErrDetachAborted) {
 		t.Fatalf("detach with a delayed CAS: %v; want ErrDetachAborted after the cancel", err)
 	}
 	unblock()
-	if err := <-delayed; !errors.Is(err, storage.ErrChunkHeadPrecondition) {
-		t.Fatalf("the delayed detach CAS after the cancel: %v; want a precondition failure", err)
+	var derr error
+	select {
+	case derr = <-delayed:
+		joined = true
+	case <-time.After(5 * time.Second):
+		t.Fatal("the delayed detach CAS did not complete after its release")
+	}
+	if !errors.Is(derr, storage.ErrChunkHeadPrecondition) {
+		t.Fatalf("the delayed detach CAS after the cancel: %v; want a precondition failure", derr)
 	}
 	if head, _ := remote.MemChunkRemote.GetHead(context.Background()); head.State == storage.ChunkHeadDetached {
 		t.Fatal("the delayed detach CAS landed after the cancel")

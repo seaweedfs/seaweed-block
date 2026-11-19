@@ -791,8 +791,16 @@ func (p *DurableProvider) DetachVolume(ctx context.Context, volumeID string) (st
 			log.Printf("durable: ALARM detach of volume=%s held guest I/O for %s (target %s, bound %s)", volumeID, d.Round(time.Millisecond), detachFreezeTarget, freeze)
 		}
 	}()
+	if trace := p.testDetachTrace; trace != nil {
+		dl, _ := cutCtx.Deadline()
+		trace("cut", dl)
+	}
 	h.chunkDetach = true
-	err = h.backend.StopIO(cutCtx, "chunk detach: I/O stopped until a new attach")
+	if stop := p.testDetachStopIO; stop != nil {
+		err = stop(cutCtx)
+	} else {
+		err = h.backend.StopIO(cutCtx, "chunk detach: I/O stopped until a new attach")
+	}
 	if err == nil {
 		p.stopChunkLoop(h)
 		var r storage.ChunkCutResult
@@ -806,6 +814,10 @@ func (p *DurableProvider) DetachVolume(ctx context.Context, volumeID string) (st
 	// of the freeze budget even when the caller's context is gone.
 	sctx, scancel := context.WithDeadline(context.WithoutCancel(ctx), start.Add(freeze))
 	defer scancel()
+	if trace := p.testDetachTrace; trace != nil {
+		dl, _ := sctx.Deadline()
+		trace("settle", dl)
+	}
 	how, dr, serr := layer.SettleDetach(sctx)
 	switch {
 	case serr != nil:

@@ -230,14 +230,15 @@ func writeChunkFailure(w http.ResponseWriter, err error) {
 func chunkErrorCode(err error) (int, string, bool) {
 	var ce *chunkstore.CatalogError
 	switch {
-	case errors.As(err, &ce):
-		return catalogStatus(ce.Code), ce.Code, ce.Retryable
 	case errors.Is(err, durable.ErrDetachAborted):
-		// Before its cause: nothing was published and serving resumed here.
+		// Before any cause (a catalog error included): nothing was
+		// published and serving resumed here.
 		return http.StatusConflict, codeDetachAborted, true
 	case errors.Is(err, durable.ErrDetachOutcomeUnknown):
-		// Before its cause: the detach may still have landed; I/O stays stopped.
+		// Before any cause: the detach may still have landed; I/O stays stopped.
 		return http.StatusServiceUnavailable, chunkstore.CodeOutcomeUnknown, true
+	case errors.As(err, &ce):
+		return catalogStatus(ce.Code), ce.Code, ce.Retryable
 	case errors.Is(err, storage.ErrChunkLayerFenced):
 		return http.StatusConflict, codeFenced, false
 	case errors.Is(err, storage.ErrChunkCASOutcomeUnknown):

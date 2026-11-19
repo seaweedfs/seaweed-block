@@ -150,17 +150,39 @@ func TestWALStoreChunk_DetachDrainTimeoutAbortsAndResumes(t *testing.T) {
 	// the aborted stop orders new I/O after the I/O admitted before it, so
 	// this write completes once that admitted write does (never on the
 	// detach itself).
+	arrived := make(chan struct{})
+	var arriveOnce sync.Once
+	durable.SetTestBeforeIOLock(b, func() { arriveOnce.Do(func() { close(arrived) }) })
 	nerr := make(chan error, 1)
 	go func() { _, err := b.Write(ctx, 8192, block(6)); nerr <- err }()
+	bounded := func(what string, ch <-chan struct{}) {
+		t.Helper()
+		select {
+		case <-ch:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s did not happen within 5s", what)
+		}
+	}
+	bounded("the new write passing the operational gate (serving resumed)", arrived)
 	select {
 	case err := <-nerr:
 		t.Fatalf("new write completed (%v) ahead of the write admitted before the stop", err)
-	case <-time.After(100 * time.Millisecond): // queued behind the admitted write, as the drain orders it
+	default: // queued behind the admitted write at the I/O lock, as the drain orders it
 	}
 
 	view.unpark()
-	acked := <-werr == nil
-	if err := <-nerr; err != nil {
+	recv := func(what string, ch <-chan error) error {
+		t.Helper()
+		select {
+		case err := <-ch:
+			return err
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s did not complete within 5s", what)
+			return nil
+		}
+	}
+	acked := recv("the admitted write", werr) == nil
+	if err := recv("the new write", nerr); err != nil {
 		t.Fatalf("new write after an aborted detach: %v; want it accepted", err)
 	}
 	if _, err := p.RecoverVolume(ctx, "v1"); err != nil {

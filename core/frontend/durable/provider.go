@@ -194,6 +194,11 @@ type DurableProvider struct {
 	// testAfterChunkResolve, test-only, runs in CutVolume right after the
 	// volume's handle and layer are resolved.
 	testAfterChunkResolve func()
+	// testDetachStopIO, test-only, replaces DetachVolume's StopIO call (so a
+	// test can force the failed-drain branch); testDetachTrace, test-only,
+	// observes the detach's stages and their deadlines ("cut", "settle").
+	testDetachStopIO func(ctx context.Context) error
+	testDetachTrace  func(stage string, deadline time.Time)
 
 	// testBeforeChunkFreshRetire holds the real post-presence/pre-marker boundary.
 	testBeforeChunkFreshRetire func() error
