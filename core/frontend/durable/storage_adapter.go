@@ -146,6 +146,10 @@ const maxFullBlockBatchBlocks = 64
 
 // StorageBackend adapts a LogicalStorage into frontend.Backend.
 type StorageBackend struct {
+	// testBeforeIOLock, test-only, runs in admit after the readiness check,
+	// right before the I/O lock (an arrival handshake for queued I/O).
+	testBeforeIOLock func()
+
 	storage   storage.LogicalStorage
 	view      frontend.ProjectionView
 	id        frontend.Identity
@@ -584,6 +588,9 @@ func (b *StorageBackend) RecordTargetWrite(bytes int, d time.Duration) {
 func (b *StorageBackend) admit() (func(), error) {
 	if err := b.readyCheck(); err != nil {
 		return nil, err
+	}
+	if hook := b.testBeforeIOLock; hook != nil {
+		hook()
 	}
 	b.ioMu.RLock()
 	if err := b.gate(); err != nil {

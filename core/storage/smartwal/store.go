@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/geometry"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -89,6 +90,9 @@ func CreateStore(path string, numBlocks uint32, blockSize int) (*Store, error) {
 func CreateStoreWithSlots(path string, numBlocks uint32, blockSize int, walSlots uint64) (*Store, error) {
 	if blockSize == 0 {
 		blockSize = storage.DefaultBlockSize
+	}
+	if err := geometry.ValidateBlockGeometry(uint64(numBlocks), uint64(blockSize)); err != nil {
+		return nil, err
 	}
 	if walSlots == 0 {
 		walSlots = defaultWALSlots
