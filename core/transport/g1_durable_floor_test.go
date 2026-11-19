@@ -55,11 +55,11 @@ func g1Lineage(sess, epoch uint64) RecoveryLineage {
 
 // g1Ship sends one ship on a fresh connection and reports whether it was
 // applied or refused (g2Refused's probe handshake: an accepted ship is applied
-// before the probe is answered).
+// before the probe is answered), and checks the effect agrees.
 func g1Ship(t *testing.T, ln *ReplicaListener, store storage.LogicalStorage, l RecoveryLineage, lsn uint64, fill byte) bool {
 	t.Helper()
 	want := bytes.Repeat([]byte{fill}, 4096)
-	refused := g2Refused(t, ln.Addr(), MsgShipEntry, EncodeShipEntry(ShipEntry{Lineage: l, LBA: 0, LSN: lsn, Data: want}), l)
+	refused := g2Refused(t, ln.Addr(), MsgShipEntry, EncodeShipEntry(ShipEntry{Lineage: l, LBA: 0, LSN: lsn, Data: want}))
 	applied := bytes.Equal(g1Block(t, store), want)
 	if refused && applied {
 		t.Fatalf("epoch-%d ship refused yet its bytes were applied", l.Epoch)
@@ -95,7 +95,7 @@ func g1Barrier(t *testing.T, ln *ReplicaListener, l RecoveryLineage) bool {
 func g1Rebuild(t *testing.T, ln *ReplicaListener, store storage.LogicalStorage, l RecoveryLineage, fill byte) bool {
 	t.Helper()
 	data := bytes.Repeat([]byte{fill}, 4096)
-	refused := g2Refused(t, ln.Addr(), MsgRebuildBlock, EncodeRebuildBlock(l, 0, data), l)
+	refused := g2Refused(t, ln.Addr(), MsgRebuildBlock, EncodeRebuildBlock(l, 0, data))
 	if refused && bytes.Equal(g1Block(t, store), data) {
 		t.Fatalf("epoch-%d rebuild refused yet its bytes were written", l.Epoch)
 	}
@@ -345,6 +345,27 @@ func TestG1_SlowPersistFailureIsStillARefusal(t *testing.T) {
 	t.Cleanup(func() { floorFS = osFloorOps })
 	if g1Ship(t, ln, store, g1Lineage(1, 2), 1, 's') {
 		t.Fatal("a slow refused ship was classified as applied")
+	}
+}
+
+// The probe handshake classifies by effect: an accepted ship's bytes are
+// visible after the probe answer, a refused ship's never are, including a
+// refused ship below an accepted higher epoch (the probe stays admissible).
+func TestG1_ProbeHandshakeClassifiesByEffect(t *testing.T) {
+	store := storage.NewBlockStore(16, 4096)
+	floor := g1Fresh(t)
+	ln := g1Listener(t, store, floor)
+	if err := ln.AdmitAsReplica(3); err != nil {
+		t.Fatal(err)
+	}
+	if !g1Ship(t, ln, store, g1Lineage(1, 3), 1, 'a') {
+		t.Fatal("an epoch-3 ship at the admitted epoch was classified refused")
+	}
+	if g1Ship(t, ln, store, g1Lineage(2, 2), 2, 'b') {
+		t.Fatal("an epoch-2 ship below the admitted epoch was classified accepted")
+	}
+	if !bytes.Equal(g1Block(t, store), bytes.Repeat([]byte{'a'}, 4096)) {
+		t.Fatal("the refused ship changed the block")
 	}
 }
 

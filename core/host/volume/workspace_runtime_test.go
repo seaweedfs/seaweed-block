@@ -78,6 +78,7 @@ type runtimeLeaseServer struct {
 	ttl                         time.Duration
 	disabled, blocked, revoking bool
 	shortGrants                 int // grants served with ttl < 1 s
+	blockedCalls                int // renewals that arrived while blocked
 	acks                        int
 	ackGen                      uint64
 	first                       chan struct{}
@@ -97,6 +98,9 @@ func (s *runtimeLeaseServer) RenewWorkspaceLease(ctx context.Context, id *contro
 		return nil, status.Error(codes.FailedPrecondition, "workspace RPC disabled")
 	}
 	if blocked {
+		s.mu.Lock()
+		s.blockedCalls++
+		s.mu.Unlock()
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
@@ -220,8 +224,11 @@ func TestWorkspaceHostLeaseExpiryAndRevokeCloseRealProvider(t *testing.T) {
 				wire.mu.Unlock()
 			}
 			if kind == "expiry-stalled-renewal" {
-				// Shorten the lease, wait (progress) until one 300 ms grant was
-				// served, then stall renewals: the lease expires 300 ms later.
+				// Shorten the lease and wait (progress) until a 300 ms grant was
+				// served; then stall renewals and wait until a renewal arrived
+				// blocked. The guard renews serially, so that blocked call was
+				// issued after the client accepted the reply before it, which was
+				// a 300 ms grant: the client holds a short lease with no renewal.
 				wire.mu.Lock()
 				wire.ttl = 300 * time.Millisecond
 				wire.mu.Unlock()
@@ -233,6 +240,11 @@ func TestWorkspaceHostLeaseExpiryAndRevokeCloseRealProvider(t *testing.T) {
 				wire.mu.Lock()
 				wire.blocked = true
 				wire.mu.Unlock()
+				runtimeAwait(t, "a renewal stalled after a 300 ms grant", func() bool {
+					wire.mu.Lock()
+					defer wire.mu.Unlock()
+					return wire.blockedCalls > 0
+				})
 			}
 			if kind == "cancel" {
 				cancel()
