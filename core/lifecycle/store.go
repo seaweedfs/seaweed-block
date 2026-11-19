@@ -10,13 +10,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/seaweedfs/seaweed-block/core/geometry"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"sync"
 	"sync/atomic"
+
+	"github.com/seaweedfs/seaweed-block/core/geometry"
 )
 
 var (

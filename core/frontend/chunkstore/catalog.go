@@ -1,7 +1,7 @@
 package chunkstore
 
 // Catalog: the chunk control plane's filer metadata and Fork (B9 W2 spec
-// Â§3-Â§5). Under the chunk base directory, per volume:
+// §3-§5). Under the chunk base directory, per volume:
 //
 //	<base>/<vol>/HEAD          the published HEAD (ChunkRemote)
 //	<base>/<vol>/keys/<key>    chunk key bindings (ChunkRemote)
@@ -15,7 +15,7 @@ package chunkstore
 //
 // Snapshot and fork are read-then-write. Each writes an intent naming the
 // keys it references before its final manifest write, and refuses that
-// write once OpDeadline has passed since it read its source (spec Â§2.3).
+// write once OpDeadline has passed since it read its source (spec §2.3).
 // The operation's intents are removed only once its outcome is settled: the
 // manifest is confirmed published (re-read shows it), or the attempt
 // cleanly aborted (it never sent the write, or another entry already holds
@@ -30,12 +30,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/seaweedfs/seaweed-block/core/geometry"
 	"path"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/geometry"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/filerpb"
@@ -75,7 +75,7 @@ const (
 	OriginFork   = "fork"
 
 	// DefaultOpDeadline bounds a snapshot or fork from reading its source to
-	// its final write (spec Â§2.3).
+	// its final write (spec §2.3).
 	DefaultOpDeadline = 5 * time.Minute
 
 	defaultListLimit = 100
@@ -86,7 +86,7 @@ const (
 	maxSnapName      = 128
 )
 
-// Error codes of the control plane (spec Â§2.2), as the HTTP API and the CLI
+// Error codes of the control plane (spec §2.2), as the HTTP API and the CLI
 // report them.
 const (
 	CodeNotChunkVolume    = "not_chunk_volume"
@@ -161,7 +161,7 @@ type Parent struct {
 	Gen      uint64 `json:"gen"`
 }
 
-// VolumeInfo is the VOLUME entry (spec Â§4.2).
+// VolumeInfo is the VOLUME entry (spec §4.2).
 type VolumeInfo struct {
 	Format   int    `json:"format"`
 	VolumeID string `json:"volume_id"`
@@ -208,7 +208,7 @@ type snapDoc struct {
 }
 
 // SnapshotInfo describes one snapshot, with the field names of the HTTP API
-// (spec Â§3.2-Â§3.3).
+// (spec §3.2-§3.3).
 type SnapshotInfo struct {
 	VolumeID      string            `json:"volumeID"`
 	Name          string            `json:"name"`
@@ -269,7 +269,7 @@ type ForkRequest struct {
 }
 
 // ForkResult reports a fork, with the field names of the CLI output
-// (spec Â§3.5).
+// (spec §3.5).
 type ForkResult struct {
 	Target        string `json:"target"`
 	Source        string `json:"source"`
@@ -326,7 +326,7 @@ func (c *Catalog) volRoot(vol string) (string, error) {
 	return path.Join(c.base, vol), nil
 }
 
-// CheckSnapshotName enforces the snapshot name rule (spec Â§4.4).
+// CheckSnapshotName enforces the snapshot name rule (spec §4.4).
 func CheckSnapshotName(name string) error {
 	if name == "" || len(name) > maxSnapName || strings.HasPrefix(name, ".") {
 		return catErr(CodeInvalidName, false, nil, "snapshot name %q: 1-%d characters, not starting with '.'", name, maxSnapName)
@@ -474,7 +474,7 @@ func (c *Catalog) ReadHead(ctx context.Context, vol string) (storage.ChunkHead, 
 	return h, true, nil
 }
 
-// EnsureVolume applies the attach rules of spec Â§4.2 for a volume served
+// EnsureVolume applies the attach rules of spec §4.2 for a volume served
 // with geometry g: it creates a missing VOLUME entry (origin create), and
 // refuses with geometry_mismatch when VOLUME disagrees with g, or with
 // fork_incomplete when VOLUME is a fork whose HEAD is not written yet.
@@ -969,7 +969,7 @@ func (c *Catalog) claimName(ctx context.Context, vol, root string, req SnapshotR
 }
 
 // SnapshotReplay resolves a snapshot request against the catalog before
-// the caller cuts (B9 W2 Â§3.2 step 1): when the name is held by req's
+// the caller cuts (B9 W2 §3.2 step 1): when the name is held by req's
 // request and its attempt published, it returns that snapshot (Replayed,
 // true); held by another request, snapshot_exists; free, or held by req's
 // unpublished attempt, (zero, false, nil). It validates the whole request
@@ -1053,7 +1053,7 @@ func (c *Catalog) ListSnapshots(ctx context.Context, vol string, opts ListOption
 	}
 }
 
-// DeleteSnapshot frees the name (spec Â§3.4, W5):
+// DeleteSnapshot frees the name (spec §3.4, W5):
 // it marks the attempt deleting (or, when the attempt never published,
 // claims its path with an aborted tombstone so a late insert cannot land),
 // then removes the name record. The attempt path is never removed. It
