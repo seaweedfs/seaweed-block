@@ -119,6 +119,25 @@ func validateWorkspaceBinding(b WorkspaceBinding) error {
 	return nil
 }
 
+// ValidateWorkspaceEndpoints applies a binding's endpoint rules (host:port
+// with a numeric port 1..65535, data and ctrl distinct) without registering
+// anything.
+func ValidateWorkspaceEndpoints(b WorkspaceBinding) error { return validateWorkspaceBinding(b) }
+
+// WorkspaceEndpointHost returns addr's host in canonical form (equivalent IP
+// spellings compare equal; names lower-cased; no DNS), or "" if addr is not
+// host:port.
+func WorkspaceEndpointHost(addr string) string {
+	h, _, err := net.SplitHostPort(addr)
+	if err != nil || h == "" {
+		return ""
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		return ip.String()
+	}
+	return strings.ToLower(h)
+}
+
 // Compare numeric ports and equivalent IP spellings without DNS/network I/O.
 func workspaceEndpointKey(addr string) string {
 	h, p, err := net.SplitHostPort(addr)

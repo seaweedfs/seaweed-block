@@ -2,6 +2,8 @@ package master
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/authority"
@@ -143,6 +145,14 @@ func (s *services) MoveWorkspace(ctx context.Context, q *control.WorkspaceMove) 
 	}
 	// Remote reads never hold the workspace mutation lock. Re-read every
 	// local precondition below; Publisher checks the expected epoch atomically.
+	// A refusal is logged after the lock is released (deferred first, so it
+	// runs last): a slow log writer never holds workspaceMu.
+	var refusal string
+	defer func() {
+		if refusal != "" {
+			s.host.log.Printf("blockmaster: MoveWorkspace refused volume=%q request=%q: %s", q.GetVolumeId(), q.GetRequestId(), refusal)
+		}
+	}()
 	s.host.workspaceMu.Lock()
 	defer s.host.workspaceMu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -157,14 +167,32 @@ func (s *services) MoveWorkspace(ctx context.Context, q *control.WorkspaceMove) 
 	if err != nil {
 		return nil, workspaceError(err)
 	}
-	matched := !explicit && target.DataAddr == q.GetTargetDataAddr() && target.CtrlAddr == q.GetTargetCtrlAddr()
+	// A volume without per-volume bindings may move to any port on the
+	// target node's registered hosts (a host runs several slots): the host
+	// match ties the endpoints to that node's registration (it trusts the
+	// registration; it is not an identity proof). The collision check below
+	// still refuses endpoints another assignment or binding owns.
+	matched := !explicit && sameHost(q.GetTargetDataAddr(), target.DataAddr) && sameHost(q.GetTargetCtrlAddr(), target.CtrlAddr)
+	endpointErr := lifecycle.ValidateWorkspaceEndpoints(lifecycle.WorkspaceBinding{VolumeID: q.GetVolumeId(), ServerID: q.GetTargetServerId(), DataAddr: q.GetTargetDataAddr(), CtrlAddr: q.GetTargetCtrlAddr()})
 	for _, b := range bindings {
 		if !b.Retired && b.ServerID == q.GetTargetServerId() && b.DataAddr == q.GetTargetDataAddr() && b.CtrlAddr == q.GetTargetCtrlAddr() {
 			matched = true
 		}
 	}
-	if oldHost == "" || !ok || target.ServerID == oldHost || !matched {
-		return nil, status.Error(codes.FailedPrecondition, "move needs known source slot and registered target endpoints")
+	switch {
+	case endpointErr != nil:
+		refusal = fmt.Sprintf("move target endpoints invalid: %v", endpointErr)
+	case oldHost == "":
+		refusal = fmt.Sprintf("move source unknown: no issued move or placement names replica %q at epoch %d", q.GetExpectedReplicaId(), q.GetExpectedEpoch())
+	case !ok:
+		refusal = fmt.Sprintf("move target node %q is not registered", q.GetTargetServerId())
+	case target.ServerID == oldHost:
+		refusal = fmt.Sprintf("move target %q is the current source host", target.ServerID)
+	case !matched:
+		refusal = fmt.Sprintf("move target endpoints %s/%s on %q are not registered (%s)", q.GetTargetDataAddr(), q.GetTargetCtrlAddr(), target.ServerID, registeredTargetEndpoints(target, bindings, explicit))
+	}
+	if refusal != "" {
+		return nil, status.Error(codes.FailedPrecondition, refusal)
 	}
 	if err = s.host.workspaceEndpointsAvailable(lifecycle.WorkspaceBinding{VolumeID: q.GetVolumeId(), ServerID: target.ServerID, DataAddr: q.GetTargetDataAddr(), CtrlAddr: q.GetTargetCtrlAddr()}); err != nil {
 		return nil, workspaceError(err)
@@ -178,6 +206,32 @@ func (s *services) MoveWorkspace(ctx context.Context, q *control.WorkspaceMove) 
 		return nil, workspaceError(err)
 	}
 	return grantFact(r), nil
+}
+
+// sameHost reports whether two host:port addresses name the same host:
+// canonical host parts (equivalent IP spellings equal), no name resolution.
+func sameHost(a, b string) bool {
+	ha := lifecycle.WorkspaceEndpointHost(a)
+	return ha != "" && ha == lifecycle.WorkspaceEndpointHost(b)
+}
+
+// registeredTargetEndpoints describes what a move to target may name: the
+// node's own pair for a volume without explicit bindings, else its live
+// bindings on that node.
+func registeredTargetEndpoints(target lifecycle.NodeRegistration, bindings []lifecycle.WorkspaceBinding, explicit bool) string {
+	if !explicit {
+		return fmt.Sprintf("not on the node's hosts: it registers %s/%s; no per-volume binding is prepared", target.DataAddr, target.CtrlAddr)
+	}
+	var live []string
+	for _, b := range bindings {
+		if !b.Retired && b.ServerID == target.ServerID {
+			live = append(live, b.DataAddr+"/"+b.CtrlAddr)
+		}
+	}
+	if len(live) == 0 {
+		return "the volume has explicit bindings but none live on that node"
+	}
+	return "live bindings on that node: " + strings.Join(live, ", ")
 }
 
 func (s *services) QueryWorkspace(ctx context.Context, q *control.WorkspaceVolume) (*control.WorkspaceStatus, error) {
