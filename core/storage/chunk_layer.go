@@ -803,7 +803,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	// Retries share one cut budget, shortened by the caller's own deadline.
 	// As with every remote operation, an implementation ignoring cancellation
 	// is still joined before buffers and intents are settled.
-	ctx, deadlineCancel := context.WithTimeout(ctx, 5*time.Minute)
+	ctx, deadlineCancel := context.WithTimeout(ctx, 2*time.Second)
 	defer deadlineCancel()
 	done, err := l.register()
 	if err != nil {
