@@ -116,3 +116,45 @@ func TestCheckpointDiagnostics_LogRateLimit(t *testing.T) {
 		t.Fatalf("logs: %s", got)
 	}
 }
+
+// A starved checkpoint: flush cycles keep succeeding (clamped to the
+// acknowledged frontier, nothing persisted moves) while the persisted
+// CheckpointLSN and the last advance stay frozen. Only a real move of the
+// persisted checkpoint counts as an advance.
+func TestCheckpointDiagnostics_StarvedCheckpointIsVisible(t *testing.T) {
+	s, _ := newMappedCheckpointStoreV3(t)
+	mustAttach(t, s, newFakeChunkRemote(), ctConfig(1))
+	writeSynced(t, s, 1, 1)
+	if err := s.flusher.flushOnce(); err != nil {
+		t.Fatal(err)
+	}
+	first := s.CheckpointPersistence()
+	if first.CheckpointLSN != 1 || first.Advances != 1 || first.LastAdvance.IsZero() || first.Successes != 1 {
+		t.Fatalf("first checkpoint: %+v", first)
+	}
+	for i := uint32(0); i < 3; i++ { // written, never synced: the checkpoint is clamped at 1
+		if _, err := s.Write(2+i, blk(byte(2+i))); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.flusher.flushOnce(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	starved := s.CheckpointPersistence()
+	if starved.Successes <= first.Successes {
+		t.Fatalf("flush cycles did not keep succeeding: %+v", starved)
+	}
+	if starved.CheckpointLSN != 1 || starved.Advances != 1 || !starved.LastAdvance.Equal(first.LastAdvance) {
+		t.Fatalf("a clamped success counted as an advance: first %+v starved %+v", first, starved)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.flusher.flushOnce(); err != nil {
+		t.Fatal(err)
+	}
+	moved := s.CheckpointPersistence()
+	if moved.CheckpointLSN != s.CheckpointLSN() || moved.CheckpointLSN <= 1 || moved.Advances != 2 || moved.LastAdvance.Before(first.LastAdvance) {
+		t.Fatalf("after sync the checkpoint advance was not recorded: %+v", moved)
+	}
+}

@@ -8,25 +8,48 @@ import (
 
 // CheckpointPersistenceStatus counts flusher checkpoint calls in this open.
 // Success includes a safely clamped/unchanged checkpoint; it is not a slot-write
-// count. Fields are cumulative atomic observations, not a coherent frontier.
+// count. Advances counts only the successes that moved the persisted
+// CheckpointLSN, and LastAdvance is when the latest one did (zero: none in
+// this open), so a starved checkpoint shows Successes rising while
+// LastAdvance stays frozen. Fields are cumulative atomic observations, not a
+// coherent frontier.
 type CheckpointPersistenceStatus struct {
-	Successes uint64
-	Refusals  uint64
-	Failures  uint64
+	Successes     uint64
+	Refusals      uint64
+	Failures      uint64
+	CheckpointLSN uint64
+	Advances      uint64
+	LastAdvance   time.Time
 }
 
 func (s *WALStore) CheckpointPersistence() CheckpointPersistenceStatus {
 	if s.flusher == nil {
-		return CheckpointPersistenceStatus{}
+		return CheckpointPersistenceStatus{CheckpointLSN: s.CheckpointLSN()}
 	}
 	i := &s.flusher.instr
-	return CheckpointPersistenceStatus{i.checkpointSuccesses.Load(), i.checkpointRefusals.Load(), i.checkpointFailures.Load()}
+	st := CheckpointPersistenceStatus{
+		Successes:     i.checkpointSuccesses.Load(),
+		Refusals:      i.checkpointRefusals.Load(),
+		Failures:      i.checkpointFailures.Load(),
+		CheckpointLSN: s.CheckpointLSN(),
+		Advances:      i.checkpointAdvances.Load(),
+	}
+	if ns := i.checkpointLastAdvanceNanos.Load(); ns != 0 {
+		st.LastAdvance = time.Unix(0, ns)
+	}
+	return st
 }
 
-func (i *flusherInstrumentation) recordCheckpoint(err error) {
+// recordCheckpoint classifies one flusher checkpoint call; before and after
+// are the persisted CheckpointLSN around it.
+func (i *flusherInstrumentation) recordCheckpoint(err error, before, after uint64, now time.Time) {
 	switch {
 	case err == nil:
 		i.checkpointSuccesses.Add(1)
+		if after > before {
+			i.checkpointAdvances.Add(1)
+			i.checkpointLastAdvanceNanos.Store(now.UnixNano())
+		}
 	case errors.Is(err, ErrMapCoverageStale):
 		i.checkpointRefusals.Add(1)
 	default:

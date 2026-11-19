@@ -69,6 +69,8 @@ type flusherInstrumentation struct {
 	checkpointSuccesses             atomic.Uint64
 	checkpointRefusals              atomic.Uint64
 	checkpointFailures              atomic.Uint64
+	checkpointAdvances              atomic.Uint64
+	checkpointLastAdvanceNanos      atomic.Int64
 	cyclesStarted                   atomic.Uint64
 	cyclesSucceeded                 atomic.Uint64
 	cyclesFailed                    atomic.Uint64
