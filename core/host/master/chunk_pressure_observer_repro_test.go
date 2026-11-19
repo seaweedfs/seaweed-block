@@ -14,6 +14,8 @@ import (
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"math/rand"
+	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -71,8 +73,20 @@ func TestChunkPressureConcurrentObserverDiagnostic(t *testing.T) {
 				}
 			}
 			handler := nvme.NewIOHandler(nvme.HandlerConfig{Backend: be, BlockSize: 4096, VolumeSize: 1 << 30})
-			const qd = 8
-			const perWorker = 128 * 1024 * 1024 / 4096 / qd
+			qd, mib := 8, 128
+			for key, dst := range map[string]*int{"DIAGNOSTIC_QD": &qd, "DIAGNOSTIC_MIB": &mib} {
+				if raw := os.Getenv(key); raw != "" {
+					n, err := strconv.Atoi(raw)
+					if err != nil || n < 1 {
+						t.Fatalf("invalid %s=%q", key, raw)
+					}
+					*dst = n
+				}
+			}
+			if qd > 32 || mib > 1024 {
+				t.Fatal("diagnostic bounds exceeded")
+			}
+			perWorker := mib * 1024 * 1024 / 4096 / qd
 			var wg sync.WaitGroup
 			var maxWrite, maxFlush atomic.Int64
 			var completed atomic.Uint64
