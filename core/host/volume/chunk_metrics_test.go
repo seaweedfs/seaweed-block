@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -49,5 +50,31 @@ func TestChunkMetricsUsesTheStatusListener(t *testing.T) {
 	defer resp2.Body.Close()
 	if resp2.StatusCode != 404 {
 		t.Fatalf("wrong volume: %d", resp2.StatusCode)
+	}
+	if strings.Contains(string(b), "swblock_chunk_cut_age_seconds{") {
+		t.Fatal("unknown cut age fabricated")
+	}
+	s.SetDurableStatusSource(stubDurableStatusSource{vols: []durable.VolumeStatus{{VolumeID: "v1", Chunk: &durable.ChunkStatus{Attached: true, Stats: storage.ChunkLayerStats{LastCutNs: time.Now().Add(-2 * time.Second).UnixNano()}}}}})
+	known, err := client.Get("http://" + addr + "/metrics?volume=v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer known.Body.Close()
+	kb, err := io.ReadAll(known.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, line := range strings.Split(string(kb), "\n") {
+		if strings.HasPrefix(line, `swblock_chunk_cut_age_seconds{volume="v1"} `) {
+			v, err := strconv.ParseFloat(strings.Fields(line)[1], 64)
+			if err != nil || v < 0 {
+				t.Fatalf("invalid cut age %q", line)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("known cut age missing: %s", kb)
 	}
 }
