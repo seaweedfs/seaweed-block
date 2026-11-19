@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path"
+	"strings"
 	"testing"
 	"time"
 
@@ -109,7 +110,15 @@ func TestFormatUpgradeLegacyForkIdentityStillRefusesChangedImage(t *testing.T) {
 			if err := json.Unmarshal(s.Head, &h); err != nil {
 				t.Fatal(err)
 			}
-			h["remote_lsn"] = float64(8)
+			// Preserve generation/frontier: only immutable content identity changes.
+			if segmented {
+				ref := h["segments"].(map[string]any)["0"].(map[string]any)
+				sum := ref["sha256"].([]any)
+				sum[0] = float64((int(sum[0].(float64)) + 1) % 256)
+			} else {
+				ref := h["chunks"].(map[string]any)["0"].(map[string]any)
+				ref["sha256"] = strings.Repeat("0", 64)
+			}
 			s.Head, _ = json.Marshal(h)
 			f.entries[p].Content, _ = json.Marshal(s)
 			if _, err := c.Fork(context.Background(), ForkRequest{Source: "v1", Snapshot: "s1", Target: "v2", RequestID: "old-fork"}); CodeOf(err) != CodeTargetExists {
