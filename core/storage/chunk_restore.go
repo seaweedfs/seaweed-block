@@ -62,7 +62,7 @@ func ClaimChunkHead(ctx context.Context, remote ChunkRemote, cfg ChunkLayerConfi
 	defer func() {
 		if settled {
 			for _, id := range intents {
-				_ = remote.DeleteIntent(context.WithoutCancel(ctx), id)
+				_ = remote.DeleteIntent(ctx, id)
 			}
 		}
 	}()
