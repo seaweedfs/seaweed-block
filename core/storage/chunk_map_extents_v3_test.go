@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -430,7 +431,9 @@ func TestChunkMapExtentsV3ProofStalePreparesStayBounded(t *testing.T) {
 	}
 	cp := s.v3.pub.current().CheckpointLSN
 	for i := 0; i < 150; i++ {
-		if _, err := s.prepareOwnedMapCheckpointV3(cp); err != ErrMapCoverageStale {
+		_, err := s.prepareOwnedMapCheckpointV3(cp)
+		var reason mapCoverageRefusal
+		if !errors.Is(err, ErrMapCoverageStale) || !errors.As(err, &reason) || reason != "proof_changed_during_prepare" {
 			t.Fatalf("checkpoint prepare %d: err = %v, want ErrMapCoverageStale", i, err)
 		}
 	}
@@ -438,7 +441,9 @@ func TestChunkMapExtentsV3ProofStalePreparesStayBounded(t *testing.T) {
 	for i := 0; i < 150; i++ {
 		g += 1000
 		entries := append([]chunkLSNEntryV3(nil), s.v3.mapEntries...)
-		if _, err := prepareMapPublicationV3(m, s.v3.mapProof, g, cp, entries, nil); err != ErrMapCoverageStale {
+		_, err := prepareMapPublicationV3(m, s.v3.mapProof, g, cp, entries, nil)
+		var reason mapCoverageRefusal
+		if !errors.Is(err, ErrMapCoverageStale) || !errors.As(err, &reason) || reason != "proof_changed_during_prepare" {
 			t.Fatalf("publication prepare %d: err = %v, want ErrMapCoverageStale", i, err)
 		}
 	}
