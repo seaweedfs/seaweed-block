@@ -46,7 +46,11 @@ func TestWALStoreChunk_LedgerWriteAnonymousMemory(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
 	defer cancel()
 	r := &memoryDiskRemote{MemChunkRemote: storage.NewMemChunkRemote(), dir: t.TempDir(), hashes: make(map[string][32]byte)}
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: 1 << 18, ChunkBlocks: 1024, ChunkCaptureInterval: 0, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return r, nil }}, v1View())
+	cfg := durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: 1 << 18, ChunkBlocks: 1024, ChunkCaptureInterval: 0, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return r, nil }}
+	if os.Getenv("SWBLOCK_MEMORY_STAGE") != "" {
+		cfg.ChunkDirtyThreshold = 64
+	}
+	p, err := durable.NewDurableProvider(cfg, v1View())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -332,6 +336,7 @@ func TestWALStoreChunk_InitialWriteAnonymousMemory(t *testing.T) {
 		}
 	}
 	buf := make([]byte, 64<<10)
+	fillStart := int64(896 << 20)
 	fillEnd := int64(960 << 20)
 	workers := 32
 	if os.Getenv("SWBLOCK_MEMORY_MINIMAL") != "" {
@@ -339,10 +344,13 @@ func TestWALStoreChunk_InitialWriteAnonymousMemory(t *testing.T) {
 		fillEnd = 896<<20 + 4096
 		workers = 0
 	}
+	if os.Getenv("SWBLOCK_MEMORY_FULL") != "" {
+		fillStart, fillEnd, workers = 0, 1<<30, 0
+	}
 	for i := range buf {
 		buf[i] = byte(i*7 + 1)
 	}
-	for off := int64(896 << 20); off < fillEnd; off += int64(len(buf)) {
+	for off := fillStart; off < fillEnd; off += int64(len(buf)) {
 		if err = write(off, buf); err != nil {
 			t.Fatal(err)
 		}
