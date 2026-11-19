@@ -15,23 +15,42 @@ import (
 )
 
 // slowGuardStore holds every workspace-lease Put, once armed, until a lease
-// renewal has succeeded after the Put entered (issue #205): a slow store write,
-// with the slowness defined by progress instead of a fixed sleep.
+// renewal that STARTED after the Put entered has succeeded (issue #205): a slow
+// store write, with the slowness defined by progress instead of a fixed sleep.
+// Each held Put takes a generation; a renewal is credited with the generation
+// it observed before its call, so a reply computed before the hold never
+// releases it.
 type slowGuardStore struct {
 	authority.AuthorityStore
 	armed    atomic.Bool
+	gen      atomic.Int64  // generation of the latest held Put
+	credited atomic.Int64  // highest generation a fresh renewal was started under
 	renewals atomic.Int64  // successful renewals seen by the client
 	kick     chan struct{} // a renewal succeeded (buffered 1)
-	stop     chan struct{} // closed at cleanup: frees any held Put
-	held     atomic.Int64  // lease writes that were held and then completed
+	stop     chan struct{} // closed by release(): frees any held Put
+	stopOnce sync.Once
+	held     atomic.Int64 // lease writes that were held and then completed
 }
 
 func newSlowGuardStore(s authority.AuthorityStore) *slowGuardStore {
 	return &slowGuardStore{AuthorityStore: s, kick: make(chan struct{}, 1), stop: make(chan struct{})}
 }
 
-func (s *slowGuardStore) renewed() {
+// release disarms and frees every held Put; idempotent.
+func (s *slowGuardStore) release() {
+	s.armed.Store(false)
+	s.stopOnce.Do(func() { close(s.stop) })
+}
+
+// renewed credits a successful renewal that started under generation g.
+func (s *slowGuardStore) renewed(g int64) {
 	s.renewals.Add(1)
+	for {
+		c := s.credited.Load()
+		if g <= c || s.credited.CompareAndSwap(c, g) {
+			break
+		}
+	}
 	select {
 	case s.kick <- struct{}{}:
 	default:
@@ -40,8 +59,8 @@ func (s *slowGuardStore) renewed() {
 
 func (s *slowGuardStore) Put(r authority.DurableRecord) error {
 	if s.armed.Load() && r.Workspace != nil && r.Workspace.Lease != nil {
-		base := s.renewals.Load()
-		for s.renewals.Load() <= base {
+		g := s.gen.Add(1)
+		for s.credited.Load() < g {
 			select {
 			case <-s.kick:
 			case <-s.stop:
@@ -67,6 +86,10 @@ func (c deadlineLeaseClient) RenewWorkspaceLease(ctx context.Context, id *contro
 		fact *control.WorkspaceLeaseFact
 		err  error
 	}
+	var g int64
+	if c.slow != nil {
+		g = c.slow.gen.Load() // a reply can only release holds that entered before this call
+	}
 	done := make(chan result, 1)
 	c.inflight.Add(1)
 	go func() {
@@ -81,7 +104,7 @@ func (c deadlineLeaseClient) RenewWorkspaceLease(ctx context.Context, id *contro
 	select {
 	case r := <-done:
 		if r.err == nil && c.slow != nil {
-			c.slow.renewed()
+			c.slow.renewed(g)
 		}
 		return r.fact, r.err
 	case <-ctx.Done():
@@ -105,8 +128,7 @@ func TestWorkspaceLeaseGuardSurvivesSlowAuthorityStore(t *testing.T) {
 	slow := newSlowGuardStore(disk)
 	var inflight sync.WaitGroup
 	t.Cleanup(func() {
-		slow.armed.Store(false)
-		close(slow.stop)
+		slow.release()
 		inflight.Wait()
 		if err := disk.Close(); err != nil {
 			t.Error(err)
@@ -115,6 +137,7 @@ func TestWorkspaceLeaseGuardSurvivesSlowAuthorityStore(t *testing.T) {
 	dir := &skewDirective{asks: make(chan authority.AssignmentAsk, 1)}
 	p := authority.NewPublisher(dir, authority.WithStore(slow), authority.WithWorkspaceLeaseConfig(6*time.Second, nil))
 	t.Cleanup(p.CloseWorkspaceExtenders) // join extenders before the store closes
+	t.Cleanup(slow.release)               // runs before the join above: frees a held Put first
 	seedSkewPublisher(t, p, dir)
 	var stops atomic.Int32
 	g, err := volume.NewWorkspaceLeaseGuard(workspaceRPCView{frontend.Projection{VolumeID: "v", ReplicaID: "r", Epoch: 1, Healthy: true}},
@@ -130,6 +153,7 @@ func TestWorkspaceLeaseGuardSurvivesSlowAuthorityStore(t *testing.T) {
 		cancel()
 		<-runDone // Run returns on cancel; the go test timeout bounds a hang
 	})
+	t.Cleanup(slow.release) // first of all cleanups: a held Put never blocks the joins
 	for !g.Projection().Healthy { // progress: the first grant
 		time.Sleep(20 * time.Millisecond)
 	}
