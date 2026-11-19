@@ -31,7 +31,7 @@ func (r *retryUploadRemote) Put(ctx context.Context, key string, data []byte) er
 	}
 	n, mode := r.calls[key], r.mode
 	r.mu.Unlock()
-	if mode == "down" || mode == "transient" && n == 1 {
+	if mode == "down" || mode == "transient" && n == 1 || mode == "mixed" && n == 1 && len(data) > 0 && data[0] == 0x42 {
 		return errFakeRemoteDown
 	}
 	if mode == "lost" && n == 1 {
