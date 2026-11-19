@@ -72,9 +72,9 @@ func TestWALStoreChunkV3_SequentialBurstFlush(t *testing.T) {
 		if n != transfer {
 			t.Fatalf("short readback at%d: %d", off, n)
 		}
-		for i, b := range got {
-			if want := byte(off/transfer) + byte(i); b != want {
-				t.Fatalf("readback byte%d=%#x want%#x", off+i, b, want)
+		for i := 0; i < len(got); i += 8 {
+			if word := binary.LittleEndian.Uint64(got[i : i+8]); word != uint64(off+i) {
+				t.Fatalf("readback word at byte%d=%d want%d", off+i, word, off+i)
 			}
 		}
 	}
@@ -82,8 +82,8 @@ func TestWALStoreChunkV3_SequentialBurstFlush(t *testing.T) {
 }
 
 func fillBurstTransfer(data []byte, off int) {
-	for i := range data {
-		data[i] = byte(off/len(data)) + byte(i)
+	for i := 0; i < len(data); i += 8 {
+		binary.LittleEndian.PutUint64(data[i:i+8], uint64(off+i))
 	}
 }
 
