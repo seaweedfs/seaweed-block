@@ -100,7 +100,7 @@ func TestWALStoreV3PressureSyncSkipsInstalling(t *testing.T) {
 	t.Cleanup(func() { crashRecoveryHardeningStore(t, s) })
 	h := beginV3(t, s, 0, idA)
 	for i := uint64(1); i <= 12; i++ {
-		if err := h.ApplyInstallEntry(i, blk(byte(i)), i); err != nil {
+		if err := h.ApplyInstallEntry(uint32(i), blk(byte(i)), i); err != nil {
 			t.Fatal(err)
 		}
 	}

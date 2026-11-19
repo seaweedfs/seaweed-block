@@ -1064,7 +1064,18 @@ func blockOfRecordV3(e walEntryV3, lba uint64, dataOff uint32, lsn uint64, block
 
 // readDirtyRecordV3 is the flusher's record read for a v3 store: it decodes
 // and validates the whole record before its data may reach the extent.
-func (f *flusher) readDirtyRecordV3(e snapshotEntry) (data []byte, entrySize uint64, err error) {
+type flushRecordCacheV3 struct {
+	recoveryGen  uint64
+	offset, size uint64
+	entry        walEntryV3
+	valid        bool
+}
+
+func (f *flusher) readDirtyRecordV3(e snapshotEntry) ([]byte, uint64, error) {
+	return f.readDirtyRecordV3Cached(e, nil)
+}
+
+func (f *flusher) readDirtyRecordV3Cached(e snapshotEntry, cache *flushRecordCacheV3) (data []byte, entrySize uint64, err error) {
 	readFailed := false
 	defer func() {
 		if err == nil {
@@ -1075,13 +1086,26 @@ func (f *flusher) readDirtyRecordV3(e snapshotEntry) (data []byte, entrySize uin
 	}()
 	store := f.store
 	d := store.v3.pub.current()
-	entry, size, ioErr, verr := readWholeRecordProfiledV3(store.fd, recordGeometryV3{store.sb.WALOffset, store.sb.WALSize, store.sb.BlockSize, store.sb.VolumeSize}, e.WALOffset, &f.instr)
-	if ioErr != nil {
-		readFailed = true
-		return nil, 0, fmt.Errorf("flusher: read v3 WAL record at %d: %w", e.WALOffset, ioErr)
+	if cache != nil && !store.v3.flushLifetimeValidV3(cache.recoveryGen) {
+		return nil, 0, ErrMapCoverageStale
 	}
-	if verr != nil {
-		return nil, 0, fmt.Errorf("flusher: invalid v3 WAL record LBA %d offset %d: %w", e.LBA, e.WALOffset, verr)
+	var entry walEntryV3
+	var size uint64
+	if cache != nil && cache.valid && cache.offset == e.WALOffset {
+		entry, size = cache.entry, cache.size
+	} else {
+		var ioErr, verr error
+		entry, size, ioErr, verr = readWholeRecordProfiledV3(store.fd, recordGeometryV3{store.sb.WALOffset, store.sb.WALSize, store.sb.BlockSize, store.sb.VolumeSize}, e.WALOffset, &f.instr)
+		if ioErr != nil {
+			readFailed = true
+			return nil, 0, fmt.Errorf("flusher: read v3 WAL record at %d: %w", e.WALOffset, ioErr)
+		}
+		if verr != nil {
+			return nil, 0, fmt.Errorf("flusher: invalid v3 WAL record LBA %d offset %d: %w", e.LBA, e.WALOffset, verr)
+		}
+		if cache != nil {
+			cache.entry, cache.size, cache.offset, cache.valid = entry, size, e.WALOffset, true
+		}
 	}
 	if entry.Nonce != d.Nonce || e.Length != store.sb.BlockSize {
 		return nil, 0, fmt.Errorf("flusher: v3 WAL slot mismatch LBA %d offset %d", e.LBA, e.WALOffset)

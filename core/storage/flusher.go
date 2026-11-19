@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -211,8 +212,27 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 		f.instr.recordWrittenOpportunity(writtenEntries, store.sb.BlockSize)
 	}()
 
+	// Adjacent blocks of a native batch share one immutable, validated record.
+	// Keep only one record (at most WALSize bytes), scoped to this Recover lifetime.
+	var recordCache *flushRecordCacheV3
+	if store.v3 != nil {
+		sort.Slice(entries, func(i, j int) bool {
+			if entries[i].WALOffset == entries[j].WALOffset {
+				return entries[i].DataOffset < entries[j].DataOffset
+			}
+			return entries[i].WALOffset < entries[j].WALOffset
+		})
+		recordCache = &flushRecordCacheV3{recoveryGen: recoveryGen}
+	}
 	for _, e := range entries {
-		data, entrySize, err := f.readDirtyRecord(e)
+		var data []byte
+		var entrySize uint64
+		var err error
+		if recordCache != nil {
+			data, entrySize, err = f.readDirtyRecordV3Cached(e, recordCache)
+		} else {
+			data, entrySize, err = f.readDirtyRecord(e)
+		}
 		if err != nil {
 			return err
 		}
