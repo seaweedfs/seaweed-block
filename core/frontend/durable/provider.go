@@ -81,6 +81,14 @@ var ErrImplKindMismatch = errors.New("durable: impl kind mismatch between select
 // volumeID has not been Open'd.
 var ErrVolumeNotOpen = errors.New("durable: volume not opened")
 
+// ErrDetachAborted: the detach did not happen (its final cut provably did not
+// publish), so the volume resumed serving on this host (MIGRATION E4).
+var ErrDetachAborted = errors.New("durable: detach aborted; the volume keeps serving on this host")
+
+// ErrDetachOutcomeUnknown: whether the detach landed cannot be decided yet;
+// I/O stays stopped (never resumed on a possibly detached HEAD).
+var ErrDetachOutcomeUnknown = errors.New("durable: detach outcome unknown; I/O stays stopped")
+
 // ProviderConfig configures a DurableProvider.
 type ProviderConfig struct {
 	// Impl selects which LogicalStorage implementation to open or
@@ -157,6 +165,13 @@ type ProviderConfig struct {
 	// passed since the volume's last successful cut (of any kind). Zero
 	// disables the timer.
 	ChunkCaptureInterval time.Duration
+	// DetachFreezeTimeout bounds how long a failing DetachVolume keeps guest
+	// I/O stopped before it resumes or settles: the drain and final cut get
+	// three quarters of it, the settlement of a failed cut the rest (the
+	// caller's context can only shorten the cut part). Zero: 20 s, below the
+	// host's 30 s I/O timeout; a freeze past the 5 s target is logged as an
+	// alarm. Cooperative: a syscall that never returns is not bounded.
+	DetachFreezeTimeout time.Duration
 	// ChunkDirtyThreshold is the bound on one cut's barrier copy, in
 	// chunks. It never triggers a cut: the remote holds snapshots, and
 	// cuts are published only by CaptureVolume, MakeVolumeRemoteDurable
@@ -179,6 +194,11 @@ type DurableProvider struct {
 	// testAfterChunkResolve, test-only, runs in CutVolume right after the
 	// volume's handle and layer are resolved.
 	testAfterChunkResolve func()
+	// testDetachStopIO, test-only, replaces DetachVolume's StopIO call (so a
+	// test can force the failed-drain branch); testDetachTrace, test-only,
+	// observes the detach's stages and their deadlines ("cut", "settle").
+	testDetachStopIO func(ctx context.Context) error
+	testDetachTrace  func(stage string, deadline time.Time)
 
 	// testBeforeChunkFreshRetire holds the real post-presence/pre-marker boundary.
 	testBeforeChunkFreshRetire func() error
