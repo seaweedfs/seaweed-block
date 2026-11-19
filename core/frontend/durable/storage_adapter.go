@@ -149,6 +149,8 @@ type StorageBackend struct {
 	// testBeforeIOLock, test-only, runs in admit after the readiness check,
 	// right before the I/O lock (an arrival handshake for queued I/O).
 	testBeforeIOLock func()
+	// Runs outside locks after a read registers its readiness notification.
+	testBeforeReadReadyWait func()
 
 	storage   storage.LogicalStorage
 	view      frontend.ProjectionView
@@ -595,6 +597,9 @@ func (b *StorageBackend) awaitReadAdmission(ctx context.Context) (func(), error)
 		}
 		if !errors.Is(err, frontend.ErrNotReady) || terminal || b.operational.Load() {
 			return release, err
+		}
+		if hook := b.testBeforeReadReadyWait; hook != nil {
+			hook()
 		}
 		select {
 		case <-changed:
