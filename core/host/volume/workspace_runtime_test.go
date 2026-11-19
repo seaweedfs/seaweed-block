@@ -77,7 +77,6 @@ type runtimeLeaseServer struct {
 	mu                          sync.Mutex
 	ttl                         time.Duration
 	disabled, blocked, revoking bool
-	shortGrants                 int // grants served with ttl < 1 s
 	blockedCalls                int // renewals that arrived while blocked
 	acks                        int
 	ackGen                      uint64
@@ -90,9 +89,6 @@ func (s *runtimeLeaseServer) RenewWorkspaceLease(ctx context.Context, id *contro
 	s.once.Do(func() { close(s.first) })
 	s.mu.Lock()
 	ttl, disabled, blocked, revoking := s.ttl, s.disabled, s.blocked, s.revoking
-	if !disabled && !blocked && ttl < time.Second {
-		s.shortGrants++
-	}
 	s.mu.Unlock()
 	if disabled {
 		return nil, status.Error(codes.FailedPrecondition, "workspace RPC disabled")
@@ -224,18 +220,30 @@ func TestWorkspaceHostLeaseExpiryAndRevokeCloseRealProvider(t *testing.T) {
 				wire.mu.Unlock()
 			}
 			if kind == "expiry-stalled-renewal" {
-				// Shorten the lease and wait (progress) until a 300 ms grant was
-				// served; then stall renewals and wait until a renewal arrived
-				// blocked. The guard renews serially, so that blocked call was
-				// issued after the client accepted the reply before it, which was
-				// a 300 ms grant: the client holds a short lease with no renewal.
+				// Shorten the lease and wait (progress) until the client guard
+				// installed a 300 ms horizon; then stall renewals and wait until a
+				// renewal arrived blocked: the client holds a short lease that is
+				// not renewed.
+				guard := h.view.workspaceGuard.Load()
+				if guard == nil {
+					t.Fatal("no workspace lease guard")
+				}
+				guard.mu.Lock()
+				lastUntil := guard.until // the current 3 s horizon
+				guard.mu.Unlock()
 				wire.mu.Lock()
 				wire.ttl = 300 * time.Millisecond
 				wire.mu.Unlock()
-				runtimeAwait(t, "a 300 ms grant", func() bool {
-					wire.mu.Lock()
-					defer wire.mu.Unlock()
-					return wire.shortGrants > 0
+				// Witness on the client: the host's guard installed a 300 ms
+				// horizon (a newly installed deadline less than 1 s ahead; the 3 s
+				// grants install about 3 s ahead).
+				runtimeAwait(t, "the guard installed a 300 ms grant", func() bool {
+					guard.mu.Lock()
+					until, fenced := guard.until, guard.fenced
+					guard.mu.Unlock()
+					installed := !fenced && !until.Equal(lastUntil) && until.Sub(time.Now()) < time.Second
+					lastUntil = until
+					return installed
 				})
 				wire.mu.Lock()
 				wire.blocked = true
