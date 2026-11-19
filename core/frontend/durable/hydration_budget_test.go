@@ -118,20 +118,76 @@ func TestDurableHydration_MultipleChunksShareOneDeadline(t *testing.T) {
 
 type heldHydrationRemote struct {
 	storage.ChunkRemote
-	gate chan struct{}
-	once sync.Once
-	gets atomic.Int64
+	gate    chan struct{}
+	once    sync.Once
+	gets    atomic.Int64
+	entered chan struct{}
 }
 
 func (r *heldHydrationRemote) release() { r.once.Do(func() { close(r.gate) }) }
 func (r *heldHydrationRemote) Get(ctx context.Context, key string) ([]byte, error) {
 	r.gets.Add(1)
+	if r.entered != nil {
+		select {
+		case r.entered <- struct{}{}:
+		default:
+		}
+	}
 	select {
 	case <-r.gate:
 		return r.ChunkRemote.Get(ctx, key)
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+func TestDurableHydration_HostRetriesJoinOwnedFetch(t *testing.T) {
+	r := &heldHydrationRemote{ChunkRemote: seededRemote(t), gate: make(chan struct{}), entered: make(chan struct{}, 1)}
+	p := chunkProvider(t, t.TempDir(), r, v1View(), 0)
+	t.Cleanup(r.release)
+	openRecovered(t, p)
+	b, err := p.Open(context.Background(), "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := nvme.NewIOHandler(nvme.HandlerConfig{Backend: b, BlockSize: 4096, VolumeSize: pcBlocks * 4096})
+	// Start the hold only after the first actual Get. No setup time counts
+	// toward the delay that the host's retry sequence must bridge.
+	joined := make(chan struct{})
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop); r.release(); <-joined })
+	go func() {
+		defer close(joined)
+		select {
+		case <-r.entered:
+		case <-stop:
+			return
+		}
+		timer := time.NewTimer(120 * time.Millisecond)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			r.release()
+		case <-stop:
+		}
+	}()
+	busy := 0
+	for attempt := 0; attempt < 6; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		res := h.Handle(ctx, nvme.IOCommand{Opcode: 2, NSID: 1, SLBA: 33, NLB: 1})
+		cancel()
+		if res.SC == nvme.SCSuccess {
+			if busy == 0 || !bytes.Equal(res.Data, block(0x33)) || r.gets.Load() != 1 {
+				t.Fatalf("busy=%d Gets=%d bytes=%d", busy, r.gets.Load(), len(res.Data))
+			}
+			return
+		}
+		if res.SC != nvme.SCNamespaceNotReady || len(res.Data) != 0 {
+			t.Fatalf("attempt %d: %+v", attempt, res)
+		}
+		busy++
+	}
+	t.Fatal("six immediate host attempts exhausted despite surviving shared fill")
 }
 
 func TestDurableHydration_ReadAndRMWPreserveCallerBudget(t *testing.T) {
