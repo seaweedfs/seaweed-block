@@ -517,6 +517,7 @@ func (s *WALStore) markBaseCompleteV3(id [16]byte) error {
 	v.syncMu.Lock()
 	defer v.syncMu.Unlock()
 	if !v.flushLifetimeValidV3(gen) {
+		prepared.abandonV3()
 		return ErrMapCoverageStale // a recovery or reset ran meanwhile
 	}
 	installed := func(n *descriptorV3) error {

@@ -1,7 +1,9 @@
 package storage
 
-// Dark impl-3 COW map, DESIGN r15 9.2-9.5. All bytes are append-only;
-// neither fallback slots nor pending candidates can lose a dependency.
+// Impl-3 COW map. Pages and roots are immutable once written; their extents
+// are reused only after no live root references them
+// (chunk_map_extents_v3.go), so neither slot root nor a pending candidate can
+// lose a dependency.
 import (
 	"bytes"
 	"crypto/sha256"
@@ -242,6 +244,14 @@ type chunkLSNMapV3 struct {
 	syncFile         func() error
 	syncDirectory    func() error
 	latchPersistence func(error)
+	// liveMu guards live (chunk_map_extents_v3.go); never held across I/O.
+	liveMu sync.Mutex
+	live   chunkMapLiveV3
+}
+
+func (m *chunkLSNMapV3) initLiveV3() {
+	m.live.roots = map[mapRootKeyV3]mapRootExtentsV3{}
+	m.live.inflight = map[mapRootKeyV3]bool{}
 }
 
 func createChunkLSNMapV3(path string, d descriptorV3, cb uint64) (*chunkLSNMapV3, error) {
@@ -256,6 +266,7 @@ func createChunkLSNMapV3(path string, d descriptorV3, cb uint64) (*chunkLSNMapV3
 		return nil, e
 	}
 	m := &chunkLSNMapV3{fd: f, identity: d, chunkBlocks: cb}
+	m.initLiveV3()
 	m.syncFile = f.Sync
 	m.syncDirectory = func() error { return syncDir(filepath.Dir(path)) }
 	if e = m.syncFile(); e == nil {
@@ -281,6 +292,13 @@ func openChunkLSNMapV3(path string, d descriptorV3, cb uint64) (*chunkLSNMapV3, 
 		return nil, nil, e
 	}
 	m := &chunkLSNMapV3{fd: f, identity: d, chunkBlocks: cb, lastGeneration: d.MapGeneration}
+	m.initLiveV3()
+	if s, e := mapShapeForV3(d, cb); e == nil {
+		m.registerRootV3(d.MapGeneration, d.MapRootLocator, s.aligned, refs)
+	}
+	if info, e := f.Stat(); e == nil && info.Size() > 0 {
+		m.live.fileBytes.Store(uint64(info.Size()))
+	}
 	m.syncFile = f.Sync
 	m.syncDirectory = func() error { return syncDir(filepath.Dir(path)) }
 	c := &chunkMapCandidateV3{owner: m, generation: d.MapGeneration, covered: d.MapCoveredCheckpoint, rootOffset: d.MapRootLocator, hash: d.MapRootHash, refs: refs, entries: es}
@@ -291,7 +309,9 @@ func openChunkLSNMapV3(path string, d descriptorV3, cb uint64) (*chunkLSNMapV3, 
 // It returns a pinned tuple, never a descriptor publication or reuse authority.
 // Preflight and Stat errors do not latch. Once the append transaction starts,
 // an error latches and refuses subsequent persistence I/O until reopen.
-// No pages are reclaimed in this append-only implementation.
+// New pages and the root go into extents no live root references
+// (chunk_map_extents_v3.go); the candidate stays live until a publication
+// names it or supersedes it.
 func (m *chunkLSNMapV3) Prepare(g, C uint64, entries []chunkLSNEntryV3, prior *chunkMapCandidateV3) (out *chunkMapCandidateV3, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -300,7 +320,8 @@ func (m *chunkLSNMapV3) Prepare(g, C uint64, entries []chunkLSNEntryV3, prior *c
 
 // Generation reservation and persistence share the existing sidecar mutex.
 // Concurrent preparers cannot select the same generation; no new lock or
-// scheduler is introduced, and aborted candidates remain immutable orphans.
+// scheduler is introduced. A candidate known never to reach a slot is
+// released (abandonCandidateV3); an uncertain one stays pinned until reopen.
 func (m *chunkLSNMapV3) prepareNextV3(C uint64, entries []chunkLSNEntryV3, prior *chunkMapCandidateV3) (*chunkMapCandidateV3, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -342,11 +363,14 @@ func (m *chunkLSNMapV3) prepareLockedV3(g, C uint64, entries []chunkLSNEntryV3, 
 	if info.Size() < 0 {
 		return nil, ErrMapInvalid
 	}
-	off := uint64(info.Size())
-	if off > math.MaxInt64-4095 {
+	fileBytes := uint64(info.Size())
+	if fileBytes > math.MaxInt64-4095 {
 		return nil, ErrCounterExhausted
 	}
-	off = (off + 4095) &^ uint64(4095)
+	// The live set: every page and root extent a live root references.
+	// Roots are only added here (under m.mu); the publisher's report only
+	// removes them, so this snapshot is a superset for the whole prepare.
+	used, liveBytes := usedPagesV3(m.liveSnapshotV3())
 	defer func() {
 		if err != nil {
 			m.failed = err
@@ -355,19 +379,39 @@ func (m *chunkLSNMapV3) prepareLockedV3(g, C uint64, entries []chunkLSNEntryV3, 
 			}
 		}
 	}()
+	// Bounded file: truncate the free tail once the file exceeds 4 x the
+	// live bytes. Nothing at or below the highest live page is touched, so
+	// a root the fallback slot names stays readable.
+	if liveBytes > 0 && fileBytes > 4*liveBytes {
+		keep := (used[len(used)-1] + 1) * 4096
+		if keep < fileBytes {
+			if e := m.fd.Truncate(int64(keep)); e != nil {
+				return nil, e
+			}
+			fileBytes = keep
+			m.live.fileBytes.Store(keep) // the file is shorter even if the fsync fails
+			m.live.truncations.Add(1)
+			if e := m.syncFile(); e != nil {
+				return nil, e
+			}
+		}
+	}
+	alloc := newExtentAllocatorV3(used, fileBytes)
 	write := func(b []byte) (uint64, error) {
-		if uint64(len(b)) > math.MaxInt64-off {
+		at := alloc.alloc(uint64(len(b)+4095) / 4096)
+		if uint64(len(b)) > math.MaxInt64-at {
 			return 0, ErrCounterExhausted
 		}
-		at := off
 		n, e := m.fd.WriteAt(b, int64(at))
+		if end := at + uint64(n); end > m.live.fileBytes.Load() {
+			m.live.fileBytes.Store(end) // also on a failed or short write
+		}
 		if e == nil && n != len(b) {
 			e = io.ErrShortWrite
 		}
 		if e != nil {
 			return 0, e
 		}
-		off += uint64(len(b))
 		return at, nil
 	}
 	refs := make([]mapPageRefV3, s.pages)
@@ -416,6 +460,15 @@ func (m *chunkLSNMapV3) prepareLockedV3(g, C uint64, entries []chunkLSNEntryV3, 
 	}
 	m.lastGeneration = g
 	out = &chunkMapCandidateV3{owner: m, generation: g, covered: C, rootOffset: at, hash: mapDigestV3(mapRootDomainV3, root[:s.raw-32]), refs: refs, entries: append([]chunkLSNEntryV3(nil), entries...)}
+	// The candidate is live (in flight) until a publication names it or
+	// supersedes it.
+	x := rootExtentsV3(at, s.aligned, refs)
+	m.liveMu.Lock()
+	k := mapRootKeyV3{at, g}
+	m.live.roots[k] = x
+	m.live.inflight[k] = true
+	m.liveMu.Unlock()
+	m.live.fileBytes.Store(max(alloc.end*4096, fileBytes))
 	return out, nil
 }
 func (m *chunkLSNMapV3) Close() error {

@@ -35,6 +35,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/geometry"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/filerpb"
@@ -488,6 +489,9 @@ func (c *Catalog) EnsureVolume(ctx context.Context, vol string, g Geometry) (Vol
 		return VolumeInfo{}, err
 	}
 	if !ok {
+		if g.BlockSize != 0 && g.NumBlocks > geometry.MaxVolumeBytes/uint64(g.BlockSize) {
+			return VolumeInfo{}, catErr(CodeGeometryMismatch, false, nil, "volume size exceeds maximum %d bytes (16 TiB - 4 KiB; uint32 LBA)", geometry.MaxVolumeBytes)
+		}
 		v = VolumeInfo{Format: volumeFormat, VolumeID: vol, Geometry: g, Origin: OriginCreate, CreatedNs: c.now().UnixNano()}
 		e, err := volumeEntry(v, "")
 		if err != nil {
@@ -1363,6 +1367,9 @@ func (c *Catalog) claimForkParent(ctx context.Context, req ForkRequest) (Snapsho
 		}
 		if ref.info.State == SnapDeleting {
 			return SnapshotInfo{}, catErr(CodeSnapshotDeleting, false, nil, "snapshot %s/%s is being deleted", req.Source, req.Snapshot)
+		}
+		if ref.info.geo.BlockSize != 0 && ref.info.geo.NumBlocks > geometry.MaxVolumeBytes/uint64(ref.info.geo.BlockSize) {
+			return SnapshotInfo{}, catErr(CodeGeometryMismatch, false, nil, "fork size exceeds maximum %d bytes (16 TiB - 4 KiB; uint32 LBA)", geometry.MaxVolumeBytes)
 		}
 		claims := decodeClaims(ref.entry)
 		for _, cl := range claims {

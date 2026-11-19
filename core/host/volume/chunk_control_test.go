@@ -222,6 +222,11 @@ func TestStatusServer_ChunkErrorBodyIsTyped(t *testing.T) {
 		{fmt.Errorf("x: %w", storage.ErrChunkRemoteUnavailable), "remote_unavailable", 503, true},
 		{fmt.Errorf("x: %w", storage.ErrChunkLayerClosed), "closing", 503, false},
 		{fmt.Errorf("x: %w", storage.ErrChunkLayerDetached), "closing", 409, false},
+		{fmt.Errorf("%w: %w", durable.ErrDetachAborted, storage.ErrChunkRemoteUnavailable), "detach_aborted", 409, true},
+		// The detach sentinels decide even over a catalog-error cause (which
+		// alone maps to its own code), and without the storage CAS sentinel.
+		{fmt.Errorf("%w: %w", durable.ErrDetachAborted, &chunkstore.CatalogError{Code: chunkstore.CodeSnapshotExists, Message: "m"}), "detach_aborted", 409, true},
+		{fmt.Errorf("%w: %w", durable.ErrDetachOutcomeUnknown, &chunkstore.CatalogError{Code: chunkstore.CodeSnapshotExists, Message: "m"}), "outcome_unknown", 503, true},
 		{fmt.Errorf("%w: %w: cut LSN 1, HEAD remote_lsn 10", storage.ErrChunkCaptureRefused, storage.ErrChunkLSNBehind), "lsn_behind", 409, false},
 		{&chunkstore.CatalogError{Code: chunkstore.CodeInvalidLabel, Message: "m"}, "invalid_label", 400, false},
 		{fmt.Errorf("x: %w", durable.ErrNotChunkVolume), "not_chunk_volume", 409, false},
