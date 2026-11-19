@@ -469,6 +469,12 @@ Notes:
 |---|---|---|---|---|---|---|
 | `INV-NVME-H2C-RANGE-001` | An H2CData range exceeding the expected transfer size is refused before slicing, including a uint32 offset-plus-length overflow; an exact-bound payload is preserved. | Frontend H2C receive validation; no storage state transition | `core/frontend/nvme/session.go` `recvH2CData` | `TestRecvH2CDataRangeBounds` (`core/frontend/nvme/h2c_bounds_test.go`) | — | ACTIVE |
 
+### Volume create capacity
+
+| ID | Invariant | Transition | Enforced in | Regression tests | Model | Status |
+|---|---|---|---|---|---|---|
+| `INV-VOLUME-CREATE-SIZE-001` | Creation refuses capacity above 16 TiB - 4 KiB before provisioning, allocating a WAL, or persisting a volume record. Geometry checks cannot overflow. | M6 initial create (static parameter admission) | `core/geometry/volume_size.go`; lifecycle `CreateVolume`, CSI `volumeSpecFromCreateRequest`, catalog `EnsureVolume`, storage `CreateWALStoreWithOptions` | `TestCreateVolumeRejectsBeyondUint32LBACap`, `TestCSICreateVolumeCapacityCapBeforeProvision`, `TestEnsureVolumeRejectsBeyondUint32LBACap`, `TestCreateWALStoreRefusesOversizeBeforeFilesystem` | Static geometry bound; no protocol state or transition added | ACTIVE |
+
 ## Part C. Change rules
 
 How a fix or a feature is calibrated against this model:
