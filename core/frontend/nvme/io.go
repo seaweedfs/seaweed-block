@@ -300,7 +300,7 @@ func (h *IOHandler) write(ctx context.Context, cmd IOCommand) IOResult {
 // must retain its terminal mapping even when the command deadline also passed.
 func mapWriteBudgetError(ctx context.Context, err error, op string) IOResult {
 	if ctx.Err() == context.DeadlineExceeded && onlyDeadlineCause(err) {
-		err = fmt.Errorf("%w: %w", frontend.ErrBackendBusy, err)
+		return IOResult{SCT: SCTGeneric, SC: SCNamespaceNotReady, retryable: true, Reason: "command deadline on " + op + ": " + err.Error()}
 	}
 	return mapBackendError(err, op)
 }
