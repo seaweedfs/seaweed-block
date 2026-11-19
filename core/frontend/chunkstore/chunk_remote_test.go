@@ -55,6 +55,9 @@ func TestChunkRemote_HeadRoundTripAndCAS(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := head(1, "a", 42, map[uint64]storage.ChunkRef{3: ref("chunks/e1/c3/n-1", d)})
+	legacy := want.Chunks[3]
+	legacy.Encoding, legacy.BirthLSN = "full", want.RemoteLSN
+	want.Chunks[3] = legacy
 	gen, err := r.CASHead(ctx, storage.ChunkHeadVersion{}, want)
 	if err != nil || gen != 1 {
 		t.Fatalf("first CAS = %d, %v; want gen 1", gen, err)
