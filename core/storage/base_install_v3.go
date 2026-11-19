@@ -423,7 +423,7 @@ func (s *WALStore) applyEntryV3(lba uint32, data []byte, lsn uint64, installLane
 		return fmt.Errorf("%w: %d above %d", ErrInstallLSNGap, lsn, anchor)
 	}
 	dataCopy := append([]byte(nil), data...)
-	phys, err := s.appendWriteV3(lba, dataCopy, lsn)
+	phys, err := s.appendWriteV3(lba, dataCopy, lsn, nil)
 	s.walMutation.Add(1)
 	if err != nil {
 		if installLane && errors.Is(err, errWALFull) {

@@ -10,7 +10,7 @@ func TestWALLSNOrderV3_RefusesDuplicateAndLower(t *testing.T) {
 	for _, lsn := range []uint64{9, 10} {
 		t.Run(map[uint64]string{9: "lower", 10: "equal"}[lsn], func(t *testing.T) {
 			f, p, w := newWALIOTestV3(t, 0, 0)
-			if _, e := w.append(walEntryV3{LSN: 10, Type: walEntryBarrier}, 0); e != nil {
+			if _, e := w.append(walEntryV3{LSN: 10, Type: walEntryBarrier}, 0, nil); e != nil {
 				t.Fatal(e)
 			}
 			before := make([]byte, p.current().WALSize)
@@ -18,7 +18,7 @@ func TestWALLSNOrderV3_RefusesDuplicateAndLower(t *testing.T) {
 				t.Fatal(e)
 			}
 			head := w.logicalHeadV3()
-			if _, e := w.append(walEntryV3{LSN: lsn, Type: walEntryBarrier}, 0); !errors.Is(e, ErrWALLSNOrder) {
+			if _, e := w.append(walEntryV3{LSN: lsn, Type: walEntryBarrier}, 0, nil); !errors.Is(e, ErrWALLSNOrder) {
 				t.Fatalf("non-increasing LSN %d verdict after10: %v", lsn, e)
 			}
 			after := make([]byte, len(before))
@@ -34,13 +34,13 @@ func TestWALLSNOrderV3_RefusesDuplicateAndLower(t *testing.T) {
 func TestWALLSNOrderV3_BatchConsumesFullRange(t *testing.T) {
 	_, p, w := newWALIOTestV3(t, 0, 0)
 	bs := p.current().BlockSize
-	if _, e := w.append(walEntryV3{LSN: 10, BatchCount: 2, Type: walEntryWriteBatch, Length: 2 * bs, Data: make([]byte, 2*bs)}, 0); e != nil {
+	if _, e := w.append(walEntryV3{LSN: 10, BatchCount: 2, Type: walEntryWriteBatch, Length: 2 * bs, Data: make([]byte, 2*bs)}, 0, nil); e != nil {
 		t.Fatal(e)
 	}
-	if _, e := w.append(walEntryV3{LSN: 11, Type: walEntryBarrier}, 0); !errors.Is(e, ErrWALLSNOrder) {
+	if _, e := w.append(walEntryV3{LSN: 11, Type: walEntryBarrier}, 0, nil); !errors.Is(e, ErrWALLSNOrder) {
 		t.Fatalf("overlap with batch last LSN: %v", e)
 	}
-	if _, e := w.append(walEntryV3{LSN: 12, Type: walEntryBarrier}, 0); e != nil {
+	if _, e := w.append(walEntryV3{LSN: 12, Type: walEntryBarrier}, 0, nil); e != nil {
 		t.Fatal(e)
 	}
 }
@@ -56,7 +56,7 @@ func TestWALLSNOrderV3_RestoreUsesKeptNotDroppedFrontier(t *testing.T) {
 		t.Fatal(e)
 	}
 	for _, lsn := range []uint64{101, 104} {
-		if _, e = w.append(walEntryV3{LSN: lsn, Type: walEntryBarrier}, 100); e != nil {
+		if _, e = w.append(walEntryV3{LSN: lsn, Type: walEntryBarrier}, 100, nil); e != nil {
 			t.Fatal(e)
 		}
 	}
@@ -80,10 +80,10 @@ func TestWALLSNOrderV3_RestoreUsesKeptNotDroppedFrontier(t *testing.T) {
 	if e = recovered.restoreScanV3(r); e != nil {
 		t.Fatal(e)
 	}
-	if _, e = recovered.append(walEntryV3{LSN: 101, Type: walEntryBarrier}, 100); !errors.Is(e, ErrWALLSNOrder) {
+	if _, e = recovered.append(walEntryV3{LSN: 101, Type: walEntryBarrier}, 100, nil); !errors.Is(e, ErrWALLSNOrder) {
 		t.Fatalf("restored kept frontier duplicate: %v", e)
 	}
-	if _, e = recovered.append(walEntryV3{LSN: 102, Type: walEntryBarrier}, 100); e != nil {
+	if _, e = recovered.append(walEntryV3{LSN: 102, Type: walEntryBarrier}, 100, nil); e != nil {
 		t.Fatalf("dropped104 pinned next102: %v", e)
 	}
 }
@@ -99,10 +99,10 @@ func TestWALLSNOrderV3_DescriptorFloorIsAlreadyConsumed(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if _, e = w.append(walEntryV3{LSN: 100, Type: walEntryBarrier}, 100); !errors.Is(e, ErrWALLSNOrder) {
+	if _, e = w.append(walEntryV3{LSN: 100, Type: walEntryBarrier}, 100, nil); !errors.Is(e, ErrWALLSNOrder) {
 		t.Fatalf("descriptor floor100 not consumed: %v", e)
 	}
-	if _, e = w.append(walEntryV3{LSN: 101, Type: walEntryBarrier}, 100); e != nil {
+	if _, e = w.append(walEntryV3{LSN: 101, Type: walEntryBarrier}, 100, nil); e != nil {
 		t.Fatal(e)
 	}
 }
