@@ -331,7 +331,7 @@ func TestDurableHydration_RMWFenceWinsCallerExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := store.NextLSN()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	joined := make(chan struct{})
 	result := make(chan error, 1)
@@ -358,7 +358,6 @@ func TestDurableHydration_RMWFenceWinsCallerExpiry(t *testing.T) {
 		t.Fatal("cold read never reached Get")
 	}
 	view.set(healthyProj(frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 4, EndpointVersion: 1}))
-	cancel()
 	select {
 	case err := <-result:
 		if store.NextLSN() != before {
