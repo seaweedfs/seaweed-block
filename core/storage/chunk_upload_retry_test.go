@@ -14,14 +14,21 @@ import (
 // the real layer and the write-once fake remote.
 type retryUploadRemote struct {
 	*fakeChunkRemote
-	mu    sync.Mutex
-	mode  string
-	calls map[string]int
+	mu     sync.Mutex
+	mode   string
+	calls  map[string]int
+	values map[string]byte
 }
 
 func (r *retryUploadRemote) Put(ctx context.Context, key string, data []byte) error {
 	r.mu.Lock()
 	r.calls[key]++
+	if r.values == nil {
+		r.values = map[string]byte{}
+	}
+	if len(data) > 0 {
+		r.values[key] = data[0]
+	}
 	n, mode := r.calls[key], r.mode
 	r.mu.Unlock()
 	if mode == "down" || mode == "transient" && n == 1 {
@@ -41,6 +48,46 @@ func (r *retryUploadRemote) Put(ctx context.Context, key string, data []byte) er
 		return errChunkKeyExists
 	}
 	return r.fakeChunkRemote.Put(ctx, key, data)
+}
+
+func TestChunkCutMixedSuccessDoesNotReplaySuccessfulKey(t *testing.T) {
+	s, _ := newChunkTestStore(t)
+	f := newFakeChunkRemote()
+	r := &retryUploadRemote{fakeChunkRemote: f, mode: "mixed", calls: map[string]int{}}
+	l := mustAttach(t, s, r, ctConfig(1))
+	w := newWriteLog()
+	w.write(t, s, 0, 0x41)
+	w.write(t, s, ctChunkBlocks, 0x42)
+	if _, err := l.Cut(ctTimeout(t)); err != nil {
+		t.Fatal(err)
+	}
+	assertEveryHeadIsPrefixImage(t, f, w)
+	if len(f.installedHeads()) != 1 {
+		t.Fatal("must publish once")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.calls) != 2 {
+		t.Fatalf("changed immutable keys: %v", r.calls)
+	}
+	seen := map[byte]bool{}
+	for key, n := range r.calls {
+		value := r.values[key]
+		want := 1
+		if value == 0x42 {
+			want = 2
+		}
+		if value != 0x41 && value != 0x42 {
+			t.Fatalf("unexpected payload %x", value)
+		}
+		if n != want {
+			t.Fatalf("payload %x attempted %d times, want %d", value, n, want)
+		}
+		seen[value] = true
+	}
+	if len(seen) != 2 {
+		t.Fatal("did not exercise success and retry")
+	}
 }
 
 func TestChunkCutRetriesOnlyTheFailedUpload(t *testing.T) {
