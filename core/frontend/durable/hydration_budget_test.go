@@ -1,6 +1,7 @@
 package durable_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"sync"
@@ -11,6 +12,68 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
+
+type pacedHydrationRemote struct {
+	storage.ChunkRemote
+	gets   atomic.Int64
+	second chan struct{}
+	once   sync.Once
+}
+
+func (r *pacedHydrationRemote) release() { r.once.Do(func() { close(r.second) }) }
+func (r *pacedHydrationRemote) Get(ctx context.Context, key string) ([]byte, error) {
+	if r.gets.Add(1) == 1 {
+		timer := time.NewTimer(120 * time.Millisecond)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	} else {
+		select {
+		case <-r.second:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return r.ChunkRemote.Get(ctx, key)
+}
+
+func TestDurableHydration_MultipleChunksShareOneDeadline(t *testing.T) {
+	r := &pacedHydrationRemote{ChunkRemote: seededRemote(t), second: make(chan struct{})}
+	p := chunkProvider(t, t.TempDir(), r, v1View(), 0)
+	t.Cleanup(r.release)
+	openRecovered(t, p)
+	b, err := p.Open(context.Background(), "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 220*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	buf := make([]byte, (101-33)*4096)
+	n, err := b.Read(ctx, 33*4096, buf)
+	if !errors.Is(err, frontend.ErrBackendBusy) || !errors.Is(err, context.DeadlineExceeded) || n != (96-33)*4096 {
+		t.Fatalf("shared deadline n=%d err=%v gets=%d", n, err, r.gets.Load())
+	}
+	if elapsed := time.Since(start); elapsed >= 450*time.Millisecond {
+		t.Fatalf("read budget renewed: %s", elapsed)
+	}
+	if !bytes.Equal(buf[:4096], block(0x33)) {
+		t.Fatal("first chunk prefix changed")
+	}
+	r.release()
+	ctx2, cancel2 := context.WithTimeout(context.Background(), time.Second)
+	defer cancel2()
+	last := make([]byte, 4096)
+	if n, err := b.Read(ctx2, 100*4096, last); n != 4096 || err != nil || !bytes.Equal(last, block(0x64)) {
+		t.Fatalf("shared work after timeout: n=%d err=%v", n, err)
+	}
+	if r.gets.Load() != 2 {
+		t.Fatalf("retry restarted shared fetch: %d", r.gets.Load())
+	}
+}
 
 type heldHydrationRemote struct {
 	storage.ChunkRemote
