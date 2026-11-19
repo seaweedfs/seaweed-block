@@ -73,16 +73,18 @@ func TestChunkBirthMigrationCarriesImageFrontier(t *testing.T) {
 	}
 }
 
-func TestChunkBirthSeededFrontierAnchorsDirectImage(t *testing.T) {
+func TestChunkBirthSeededFrontierPreservesInheritedImage(t *testing.T) {
 	s, _ := newChunkTestStore(t)
 	if err := s.SeedChunkFrontier(7); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.WriteExtentDirect(5, makeBlock(ctBlockSize, 0x57)); err != nil {
-		t.Fatal(err)
-	}
 	f := newFakeChunkRemote()
-	l := mustAttach(t, s, f, ctConfig(1))
+	image := make([]byte, ctNumBlocks*ctBlockSize)
+	copy(image[ctChunkBlocks*ctBlockSize:], makeBlock(ctBlockSize, 0x57))
+	f.seedHead(t, image, 7, 1)
+	cfg := ctConfig(2)
+	cfg.FreshFromHead = true
+	l := mustAttach(t, s, f, cfg)
 	newest, err := s.Write(0, makeBlock(ctBlockSize, 0x41))
 	if err != nil {
 		t.Fatal(err)
