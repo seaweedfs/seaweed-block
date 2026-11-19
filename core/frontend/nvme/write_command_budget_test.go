@@ -27,7 +27,7 @@ func TestSessionWriteBudgetIncludesDispatchQueue(t *testing.T) {
 	b := &expiredDispatchBackend{Backend: testback.NewRecordingBackend(frontend.Identity{VolumeID: "v1"})}
 	s := &Session{handler: NewIOHandler(HandlerConfig{Backend: b}), respCh: make(chan *response, 1), done: make(chan struct{})}
 	arrived := time.Now().Add(-5 * time.Second)
-	req := &Request{payload: make([]byte, 512), dispatchReadyAt: arrived}
+	req := &Request{payload: make([]byte, 512), receivedAt: arrived, dispatchReadyAt: time.Now()}
 	req.capsule.OpCode = ioWrite
 	req.capsule.NSID = 1
 	s.handleWrite(context.Background(), req)
