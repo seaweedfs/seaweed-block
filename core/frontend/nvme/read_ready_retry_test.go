@@ -45,3 +45,21 @@ func TestSessionReadNotReadyIsRetryable(t *testing.T) {
 		})
 	}
 }
+
+func TestReadinessRetryDelayIsNotAdvertised(t *testing.T) {
+	s := &Session{target: &Target{cfg: TargetConfig{VolumeID: "v1"}}, handler: &IOHandler{}, ctrl: &adminController{}, respCh: make(chan *response, 1), done: make(chan struct{})}
+	controller := s.buildIdentifyController()
+	for offset := 128; offset < 134; offset++ {
+		if controller[offset] != 0 {
+			t.Fatalf("CRDT byte%d=%d; host-policy control assumes no retry delay", offset, controller[offset])
+		}
+	}
+	req := &Request{}
+	req.capsule.D10 = 0x16 // Host Behavior Support, including ACRE.
+	if err := s.handleSetFeatures(req); err != nil {
+		t.Fatal(err)
+	}
+	if got := (<-s.respCh).resp.Status; got != MakeStatusField(SCTGeneric, SCInvalidField, true) {
+		t.Fatalf("unsupported Host Behavior status=%#x", got)
+	}
+}
