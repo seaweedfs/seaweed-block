@@ -165,10 +165,12 @@ type ProviderConfig struct {
 	// passed since the volume's last successful cut (of any kind). Zero
 	// disables the timer.
 	ChunkCaptureInterval time.Duration
-	// DetachFreezeTimeout bounds how long DetachVolume keeps guest I/O
-	// stopped for its drain and final cut (the caller's context can only
-	// shorten it). Zero: 20 s, below the host's 30 s I/O timeout; a freeze
-	// past the 5 s target is logged as an alarm.
+	// DetachFreezeTimeout bounds how long a failing DetachVolume keeps guest
+	// I/O stopped before it resumes or settles: the drain and final cut get
+	// three quarters of it, the settlement of a failed cut the rest (the
+	// caller's context can only shorten the cut part). Zero: 20 s, below the
+	// host's 30 s I/O timeout; a freeze past the 5 s target is logged as an
+	// alarm. Cooperative: a syscall that never returns is not bounded.
 	DetachFreezeTimeout time.Duration
 	// ChunkDirtyThreshold is the bound on one cut's barrier copy, in
 	// chunks. It never triggers a cut: the remote holds snapshots, and

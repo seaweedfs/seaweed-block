@@ -152,14 +152,19 @@ func TestWALStoreChunk_DetachDrainTimeoutAbortsAndResumes(t *testing.T) {
 	// detach itself).
 	nerr := make(chan error, 1)
 	go func() { _, err := b.Write(ctx, 8192, block(6)); nerr <- err }()
+	select {
+	case err := <-nerr:
+		t.Fatalf("new write completed (%v) ahead of the write admitted before the stop", err)
+	case <-time.After(100 * time.Millisecond): // queued behind the admitted write, as the drain orders it
+	}
 
 	view.unpark()
 	acked := <-werr == nil
 	if err := <-nerr; err != nil {
 		t.Fatalf("new write after an aborted detach: %v; want it accepted", err)
 	}
-	if _, err := p.RecoverVolume(ctx, "v1"); errors.Is(err, storage.ErrChunkLayerDetached) {
-		t.Fatalf("recovery after an aborted detach: %v; want the volume serving", err)
+	if _, err := p.RecoverVolume(ctx, "v1"); err != nil {
+		t.Fatalf("recovery after an aborted detach: %v; want it to succeed", err)
 	}
 	o := detachOutcome{}
 	o.r, o.last, o.err = p.DetachVolume(ctx, "v1")

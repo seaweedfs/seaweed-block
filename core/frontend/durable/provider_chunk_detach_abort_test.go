@@ -28,6 +28,11 @@ type faultRemote struct {
 	casMode     string // "", "precondition", "lost" (not applied, error), "applied-lost" (applied, error), "hold"
 	getHeadErr  error  // returned by every GetHead while set
 	getHeadFail int    // the next N GetHead calls fail
+	getHeadHold bool   // every GetHead blocks until its caller gives up
+	// "delayed": the CAS's reply is lost now, the CAS itself reaches the
+	// remote only when release closes; its own result goes to delayedErr.
+	release    chan struct{}
+	delayedErr chan error
 }
 
 var errInjected = errors.New("injected remote fault")
@@ -46,12 +51,17 @@ func (r *faultRemote) Put(ctx context.Context, key string, data []byte) error {
 
 func (r *faultRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
 	r.mu.Lock()
+	hold := r.getHeadHold
 	err := r.getHeadErr
 	if err == nil && r.getHeadFail > 0 {
 		r.getHeadFail--
 		err = errInjected
 	}
 	r.mu.Unlock()
+	if hold {
+		<-ctx.Done()
+		return storage.ChunkHead{}, ctx.Err()
+	}
 	if err != nil {
 		return storage.ChunkHead{}, err
 	}
@@ -71,6 +81,16 @@ func (r *faultRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVer
 	case "hold": // held until the caller gives up: not applied
 		<-ctx.Done()
 		return 0, ctx.Err()
+	case "delayed":
+		r.mu.Lock()
+		release, out := r.release, r.delayedErr
+		r.mu.Unlock()
+		go func() {
+			<-release
+			_, err := r.MemChunkRemote.CASHead(context.Background(), expected, next)
+			out <- err
+		}()
+		return 0, errInjected
 	case "applied-lost":
 		if _, err := r.MemChunkRemote.CASHead(ctx, expected, next); err != nil {
 			return 0, err
@@ -243,8 +263,9 @@ func TestWALStoreChunk_DetachFreezeIsBoundedThenResumes(t *testing.T) {
 	if !errors.Is(err, durable.ErrDetachAborted) || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("detach with a hung CAS: %v; want an aborted detach at the freeze bound", err)
 	}
-	if took < 300*time.Millisecond || took > 3*time.Second {
-		t.Fatalf("detach with a hung CAS took %v; want about the 300 ms freeze bound", took)
+	// The cut gets three quarters of the bound, the settlement the rest.
+	if took < 225*time.Millisecond || took > 300*time.Millisecond+200*time.Millisecond {
+		t.Fatalf("detach with a hung CAS took %v; want the cut ended at 3/4 of the 300 ms freeze bound and the total within it", took)
 	}
 	assertServing(t, p, b, remote)
 }
@@ -269,4 +290,104 @@ func TestWALStoreChunk_DetachAgainstNewerEpochStaysStopped(t *testing.T) {
 	if _, err := b.Write(ctx, 12288, block(3)); !errors.Is(err, frontend.ErrNotReady) && !errors.Is(err, frontend.ErrStalePrimary) {
 		t.Fatalf("write after a fenced detach: %v; want it refused (not ready / stale primary)", err)
 	}
+}
+
+// P1 (review): a repeated detach after a successful one, with a cancelled
+// context (its StopIO fails at once), returns the first result and never
+// resumes serving.
+func TestWALStoreChunk_RepeatDetachWithCancelledContextNeverResumes(t *testing.T) {
+	_, p, b := detachFixture(t)
+	r1, _, err := p.DetachVolume(context.Background(), "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r2, _, err := p.DetachVolume(cctx, "v1")
+	if err != nil || r2.Head.Gen != r1.Head.Gen || r2.Head.State != storage.ChunkHeadDetached {
+		t.Fatalf("repeated detach with a cancelled context: %+v %v; want the first result %+v", r2, err, r1)
+	}
+	if _, err := b.Write(context.Background(), 12288, block(3)); !errors.Is(err, frontend.ErrNotReady) {
+		t.Fatalf("write after a repeated detach: %v; want ErrNotReady (never resumed)", err)
+	}
+}
+
+// P1 (review): after an undecidable detach, a retry whose StopIO fails (a
+// cancelled context) settles first and stays stopped while the outcome is
+// still unknown.
+func TestWALStoreChunk_RetryAfterUndecidableDetachNeverResumes(t *testing.T) {
+	remote, p, b := detachFixture(t)
+	remote.set(func(r *faultRemote) { r.casMode = "lost"; r.getHeadErr = errInjected })
+	if _, _, err := p.DetachVolume(context.Background(), "v1"); !errors.Is(err, durable.ErrDetachOutcomeUnknown) {
+		t.Fatalf("first detach: %v; want ErrDetachOutcomeUnknown", err)
+	}
+	cctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := p.DetachVolume(cctx, "v1"); !errors.Is(err, durable.ErrDetachOutcomeUnknown) || errors.Is(err, durable.ErrDetachAborted) {
+		t.Fatalf("retry over an unresolved detach CAS: %v; want still unknown, never aborted", err)
+	}
+	if _, err := b.Write(context.Background(), 12288, block(3)); !errors.Is(err, frontend.ErrNotReady) {
+		t.Fatalf("write after a retry over an unknown detach: %v; want ErrNotReady", err)
+	}
+}
+
+// P1 (review): one freeze budget covers the cut AND the settlement: with the
+// CAS and every HEAD read hung, DetachVolume returns within the bound (here
+// undecided, so the volume stays stopped).
+func TestWALStoreChunk_DetachFreezeBoundCoversTheSettle(t *testing.T) {
+	const freeze = 400 * time.Millisecond
+	remote := &faultRemote{MemChunkRemote: storage.NewMemChunkRemote()}
+	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
+		DetachFreezeTimeout: freeze,
+		ChunkRemoteFor:      func(string) (storage.ChunkRemote, error) { return remote, nil },
+	}, v1View())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	openRecovered(t, p)
+	b, err := p.Open(context.Background(), "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Write(context.Background(), 4096, block(1)); err != nil {
+		t.Fatal(err)
+	}
+	remote.set(func(r *faultRemote) { r.casMode = "hold"; r.getHeadHold = true })
+	start := time.Now()
+	_, _, err = p.DetachVolume(context.Background(), "v1")
+	took := time.Since(start)
+	if !errors.Is(err, durable.ErrDetachOutcomeUnknown) {
+		t.Fatalf("detach with a hung CAS and hung HEAD reads: %v; want the outcome unknown", err)
+	}
+	if took > freeze+200*time.Millisecond {
+		t.Fatalf("detach took %v; the %v freeze bound must cover the settlement too", took, freeze)
+	}
+	if _, err := b.Write(context.Background(), 8192, block(2)); !errors.Is(err, frontend.ErrNotReady) {
+		t.Fatalf("write after an undecided detach: %v; want ErrNotReady", err)
+	}
+}
+
+// P2 (review): the lost detach CAS really is in flight. It reaches the remote
+// only after the cancel landed, and then fails its precondition: HEAD stays
+// active.
+func TestWALStoreChunk_DelayedDetachCASCannotLandAfterTheCancel(t *testing.T) {
+	remote, p, b := detachFixture(t)
+	release, delayed := make(chan struct{}), make(chan error, 1)
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	remote.set(func(r *faultRemote) { r.casMode = "delayed"; r.release, r.delayedErr = release, delayed })
+	if _, _, err := p.DetachVolume(context.Background(), "v1"); !errors.Is(err, durable.ErrDetachAborted) {
+		t.Fatalf("detach with a delayed CAS: %v; want ErrDetachAborted after the cancel", err)
+	}
+	unblock()
+	if err := <-delayed; !errors.Is(err, storage.ErrChunkHeadPrecondition) {
+		t.Fatalf("the delayed detach CAS after the cancel: %v; want a precondition failure", err)
+	}
+	if head, _ := remote.MemChunkRemote.GetHead(context.Background()); head.State == storage.ChunkHeadDetached {
+		t.Fatal("the delayed detach CAS landed after the cancel")
+	}
+	assertServing(t, p, b, remote)
 }

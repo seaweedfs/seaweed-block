@@ -780,25 +780,31 @@ func (p *DurableProvider) DetachVolume(ctx context.Context, volumeID string) (st
 	if freeze <= 0 {
 		freeze = defaultDetachFreezeTimeout
 	}
-	fctx, cancel := context.WithTimeout(ctx, freeze)
-	defer cancel()
+	// One freeze budget covers the drain, the final cut AND the settlement:
+	// the cut gets three quarters, the settlement what is left. The bound is
+	// cooperative (contexts): a syscall that never returns is not bounded here.
 	start := time.Now()
+	cutCtx, cancel := context.WithDeadline(ctx, start.Add(freeze*3/4))
+	defer cancel()
 	defer func() {
 		if d := time.Since(start); d > detachFreezeTarget {
 			log.Printf("durable: ALARM detach of volume=%s held guest I/O for %s (target %s, bound %s)", volumeID, d.Round(time.Millisecond), detachFreezeTarget, freeze)
 		}
 	}()
 	h.chunkDetach = true
-	if err := h.backend.StopIO(fctx, "chunk detach: I/O stopped until a new attach"); err != nil {
-		return storage.ChunkCutResult{}, 0, p.resumeAfterDetach(volumeID, h, layer, err) // nothing was cut
-	}
-	p.stopChunkLoop(h)
-	r, err := layer.Detach(fctx)
+	err = h.backend.StopIO(cutCtx, "chunk detach: I/O stopped until a new attach")
 	if err == nil {
-		return r, h.storage.NextLSN() - 1, nil
+		p.stopChunkLoop(h)
+		var r storage.ChunkCutResult
+		if r, err = layer.Detach(cutCtx); err == nil {
+			return r, h.storage.NextLSN() - 1, nil
+		}
 	}
-	// Settle with time of its own: the freeze bound may be what ended the cut.
-	sctx, scancel := context.WithTimeout(context.WithoutCancel(ctx), detachSettleTimeout)
+	// Every failure, a failed drain included, is settled before anything
+	// resumes: an earlier detach that applied, an unresolved detach CAS or a
+	// fenced layer must never resume serving. The settlement keeps the rest
+	// of the freeze budget even when the caller's context is gone.
+	sctx, scancel := context.WithDeadline(context.WithoutCancel(ctx), start.Add(freeze))
 	defer scancel()
 	how, dr, serr := layer.SettleDetach(sctx)
 	switch {
@@ -816,17 +822,22 @@ func (p *DurableProvider) DetachVolume(ctx context.Context, volumeID string) (st
 const (
 	defaultDetachFreezeTimeout = 20 * time.Second
 	detachFreezeTarget         = 5 * time.Second
-	detachSettleTimeout        = 10 * time.Second
 )
 
 // resumeAfterDetach undoes a detach that provably did not happen: the
 // periodic cuts restart, the stop is lifted, and the volume serves again.
 // The caller holds h.attachMu.
 func (p *DurableProvider) resumeAfterDetach(volumeID string, h *volHandle, layer storage.ChunkLayer, cause error) error {
-	h.chunkDetach = false
 	p.mu.Lock()
-	p.startChunkLoop(volumeID, h, layer)
+	closed := p.closed || h.chunk != layer
+	if !closed {
+		p.startChunkLoop(volumeID, h, layer)
+	}
 	p.mu.Unlock()
+	if closed { // a concurrent Close or detach of the layer owns the volume now
+		return fmt.Errorf("durable: detach of %s aborted while the provider closed: %w", volumeID, cause)
+	}
+	h.chunkDetach = false
 	h.backend.SetOperational(true, "chunk detach aborted: serving resumed")
 	log.Printf("durable: detach of volume=%s aborted, nothing published; serving resumed: %v", volumeID, cause)
 	return fmt.Errorf("%w: %w", ErrDetachAborted, cause)
