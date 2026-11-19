@@ -791,7 +791,7 @@ func (s *WALStore) WriteContext(ctx context.Context, lba uint32, data []byte) (u
 		if !deadline.IsZero() {
 			wait = time.Until(deadline)
 		}
-		if err := s.admission.acquireContext(ctx, wait); err != nil {
+		if err := s.admission.acquireContext(ctx, wait, s.writePressureSample(ctx, deadline)); err != nil {
 			return 0, fmt.Errorf("storage: WAL admission: %w", err)
 		}
 		defer s.admission.Release()
@@ -902,7 +902,7 @@ func (s *WALStore) WriteBatchContext(ctx context.Context, startLBA uint32, block
 		if !deadline.IsZero() {
 			wait = time.Until(deadline)
 		}
-		if err := s.admission.acquireContext(ctx, wait); err != nil {
+		if err := s.admission.acquireContext(ctx, wait, s.writePressureSample(ctx, deadline)); err != nil {
 			return nil, fmt.Errorf("storage: WAL admission: %w", err)
 		}
 		defer s.admission.Release()

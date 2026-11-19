@@ -67,3 +67,41 @@ func (s *WALStore) acquireWriteLock(ctx context.Context, deadline time.Time, try
 		}
 	}
 }
+
+// The legacy controller's callbacks take blocking locks. A v3 guest write
+// samples the same descriptor/floor/writer tuple with its command deadline;
+// failure to acquire a lock refuses admission, never grants capacity or reuse.
+func (s *WALStore) writePressureSample(ctx context.Context, deadline time.Time) func() (float64, error) {
+	if s.v3 == nil {
+		return nil
+	}
+	return func() (float64, error) {
+		if err := s.acquireWriteLock(ctx, deadline, s.mu.TryRLock, s.mu.RLock); err != nil {
+			return 0, err
+		}
+		defer s.mu.RUnlock()
+		if s.closed {
+			return 0, errVolumeClosed
+		}
+		v := s.v3
+		w := v.w
+		if w == nil {
+			return 0, nil
+		} // append still refuses the missing binding
+		p := v.pub
+		if err := s.acquireWriteLock(ctx, deadline, p.descMu.TryLock, p.descMu.Lock); err != nil {
+			return 0, err
+		}
+		floor, valid := p.reuseFloorLocked()
+		d := p.cur
+		p.descMu.Unlock() // preserve snapshot ordering: no descriptor -> writer edge
+		if err := s.acquireWriteLock(ctx, deadline, w.mu.TryLock, w.mu.Lock); err != nil {
+			return 0, err
+		}
+		defer w.mu.Unlock()
+		if !valid || d.WALSize == 0 || d.Nonce != w.nonce || w.head < floor || w.head-floor > d.WALSize {
+			return 0, nil
+		}
+		return float64(w.head-floor) / float64(d.WALSize), nil
+	}
+}
