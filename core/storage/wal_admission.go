@@ -34,6 +34,7 @@ type walAdmission struct {
 	softMark float64
 	hardMark float64
 	closedFn func() bool
+	faultFn  func() error // lock-free terminal fault lookup; nil for controllers without a store
 
 	sleepFn func(time.Duration) // replaceable for tests
 
@@ -48,10 +49,11 @@ type walAdmissionConfig struct {
 	WALUsedFn     func() float64
 	NotifyFn      func()
 	ClosedFn      func() bool
+	FaultFn       func() error
 }
 
 // newWALAdmission constructs an admission controller. Caller must
-// set every field of cfg — there are no defaults. Behavior mirrors
+// set every capacity/lifetime field of cfg; FaultFn is optional. Behavior mirrors
 // V2's weed/storage/blockvol/wal_admission.go NewWALAdmission:
 // passing a zero watermark or nil NotifyFn/ClosedFn is a bug, not
 // a shortcut.
@@ -63,6 +65,7 @@ func newWALAdmission(cfg walAdmissionConfig) *walAdmission {
 		softMark: cfg.SoftWatermark,
 		hardMark: cfg.HardWatermark,
 		closedFn: cfg.ClosedFn,
+		faultFn:  cfg.FaultFn,
 		sleepFn:  time.Sleep,
 	}
 }
@@ -99,6 +102,10 @@ func (a *walAdmission) Acquire(timeout time.Duration) error {
 		a.notifyFn()
 		hardStart := time.Now()
 		for a.walUsed() >= a.hardMark {
+			if err := a.terminalFault(); err != nil {
+				a.hardPressureWaitNs.Add(time.Since(hardStart).Nanoseconds())
+				return err
+			}
 			if a.closedFn() {
 				a.hardPressureWaitNs.Add(time.Since(hardStart).Nanoseconds())
 				return errVolumeClosed
@@ -107,6 +114,9 @@ func (a *walAdmission) Acquire(timeout time.Duration) error {
 			select {
 			case <-deadline.C:
 				a.hardPressureWaitNs.Add(time.Since(hardStart).Nanoseconds())
+				if err := a.terminalFault(); err != nil {
+					return err
+				}
 				return errWALFull
 			default:
 			}
@@ -143,8 +153,14 @@ func (a *walAdmission) Acquire(timeout time.Duration) error {
 		case a.sem <- struct{}{}:
 			return nil
 		case <-deadline.C:
+			if err := a.terminalFault(); err != nil {
+				return err
+			}
 			return errWALFull
 		case <-closeTick.C:
+			if err := a.terminalFault(); err != nil {
+				return err
+			}
 			if a.closedFn() {
 				return errVolumeClosed
 			}
@@ -154,3 +170,12 @@ func (a *walAdmission) Acquire(timeout time.Duration) error {
 
 // Release returns a write slot to the semaphore.
 func (a *walAdmission) Release() { <-a.sem }
+
+// terminalFault is sampled only on waiting paths. The store supplies its atomic
+// latch lookup; this does not acquire a store lock or perform persistence I/O.
+func (a *walAdmission) terminalFault() error {
+	if a.faultFn != nil {
+		return a.faultFn()
+	}
+	return nil
+}
