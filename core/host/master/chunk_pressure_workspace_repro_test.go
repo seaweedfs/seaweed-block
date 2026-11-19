@@ -19,14 +19,14 @@ import (
 // Public provider and NVMe handler, actual master RPC/authority stores, no filer,
 // replication observer, kernel transport, guest filesystem, cut or four-VM load.
 func TestChunkPressureSmallRandomWithWorkspaceLeaseDiagnostic(t *testing.T) {
-	runChunkPressureRandomDiagnostic(t, []bool{false, true})
+	runChunkPressureRandomDiagnostic(t, []bool{false, true}, nil)
 }
 func TestChunkPressureFourLocalStreamsDiagnostic(t *testing.T) {
 	for i := 0; i < 4; i++ {
-		t.Run(fmt.Sprintf("stream-%d", i), func(t *testing.T) { t.Parallel(); runChunkPressureRandomDiagnostic(t, []bool{true}) })
+		t.Run(fmt.Sprintf("stream-%d", i), func(t *testing.T) { t.Parallel(); runChunkPressureRandomDiagnostic(t, []bool{true}, nil) })
 	}
 }
-func runChunkPressureRandomDiagnostic(t *testing.T, leaseValues []bool) {
+func runChunkPressureRandomDiagnostic(t *testing.T, leaseValues []bool, remoteOverride storage.ChunkRemote) {
 	h, conn, setupCtx := reviewBindingHost(t)
 	reviewLegacyBind(t, h, conn, setupCtx, "v1")
 	line, ok := h.Publisher().VolumeAuthorityLine("v1")
@@ -64,7 +64,10 @@ func runChunkPressureRandomDiagnostic(t *testing.T, leaseValues []bool) {
 				})
 				view = g
 			}
-			remote := storage.NewMemChunkRemote()
+			remote := remoteOverride
+			if remote == nil {
+				remote = storage.NewMemChunkRemote()
+			}
 			p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: volumeBytes / 4096, ChunkBlocks: 1024, ChunkCaptureInterval: 0, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil }}, view)
 			if err != nil {
 				t.Fatal(err)
