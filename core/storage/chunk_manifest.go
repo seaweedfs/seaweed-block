@@ -14,7 +14,7 @@ type ChunkSegment struct {
 }
 
 // ChunkManifestBuilder prepares immutable segments before the existing root
-// CAS. Returned intents belong to the cut and follow its settlement rules.
+// CAS. Returned intents belong to the publishing caller and follow its settlement rules.
 type ChunkManifestBuilder interface {
 	PrepareManifest(context.Context, ChunkHead, ChunkHead, uint64) (ChunkHead, []string, error)
 }

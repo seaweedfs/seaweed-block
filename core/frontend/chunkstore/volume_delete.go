@@ -244,17 +244,38 @@ func headDeletingOrDeleted(h storage.ChunkHead) bool {
 // refuses to anyone else.
 func (c *Catalog) writeHead(ctx context.Context, root string, cur, next storage.ChunkHead) error {
 	next.Gen = cur.Gen + 1
+	var ids []string
+	if next.Segments == nil && len(next.Chunks) != 0 {
+		v, ok, err := c.ReadVolume(ctx, path.Base(root))
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errors.New("chunkstore: legacy delete needs VOLUME geometry")
+		}
+		next, ids, err = c.prepareLegacyHead(ctx, root, cur, next, v.Geometry)
+		if err != nil {
+			c.dropManifestIntents(ctx, root, ids)
+			return err
+		}
+	}
 	e, err := headEntry(next)
 	if err != nil {
+		c.dropManifestIntents(ctx, root, ids)
 		return err
 	}
 	if cur.Gen == 0 {
-		return c.f.CreateEntry(ctx, root, e, true)
+		err = c.f.CreateEntry(ctx, root, e, true)
+	} else {
+		err = c.f.UpdateEntry(ctx, root, e, map[string][]byte{
+			extGen: []byte(strconv.FormatUint(cur.Gen, 10)), extEpoch: []byte(strconv.FormatUint(cur.Epoch, 10)),
+		})
 	}
-	return c.f.UpdateEntry(ctx, root, e, map[string][]byte{
-		extGen:   []byte(strconv.FormatUint(cur.Gen, 10)),
-		extEpoch: []byte(strconv.FormatUint(cur.Epoch, 10)),
-	})
+	// Unknown publication retains protection; a later sweep can settle it.
+	if err == nil || lostCondition(err) {
+		c.dropManifestIntents(ctx, root, ids)
+	}
+	return err
 }
 
 func lostCondition(err error) bool {
