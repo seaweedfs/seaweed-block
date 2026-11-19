@@ -59,7 +59,8 @@ func TestChunkHydration_DeadlineDetachesWithoutCancellingFill(t *testing.T) {
 
 // Internal readers have no frontend command budget: the remote fill owns its timeout.
 func TestChunkHydration_ContextlessReadAllowsSlowFill(t *testing.T) {
-	s, _, remote, _ := hydrationFixture(t, 2, 64)
+	s, layer, remote, _ := hydrationFixture(t, 2, 64)
+	layer.cfg.ReadMissTimeout = 30 * time.Second
 	entered, release := holdGets(t, remote)
 	defer release()
 	result := make(chan hydrationResult, 1)
