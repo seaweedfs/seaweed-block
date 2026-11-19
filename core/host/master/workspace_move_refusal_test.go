@@ -39,8 +39,7 @@ func (s *syncBuffer) String() string {
 // in the master log: an unknown source, an unregistered target node, a
 // target that is the source, or target endpoints that are not registered
 // (with what is registered: the node's pair, or the volume's live bindings
-// on that node). A slot-1 target on a node registered at slot 0 is the last
-// kind.
+// on that node).
 func TestWorkspaceMoveRefusalNamesTheMissingPrecondition(t *testing.T) {
 	logs := &syncBuffer{}
 	m, err := New(Config{Listen: "127.0.0.1:0", AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), WorkspaceRPC: true,
@@ -104,8 +103,8 @@ func TestWorkspaceMoveRefusalNamesTheMissingPrecondition(t *testing.T) {
 		{"unknown source", move("unplaced", "node-b", "127.0.0.1:19301", "127.0.0.1:19302"), `move source unknown: no issued move or placement names replica "r1" at epoch 1`},
 		{"unknown target node", move("placed", "node-z", "127.0.0.1:19301", "127.0.0.1:19302"), `move target node "node-z" is not registered`},
 		{"target is the source", move("placed", "node-a", "127.0.0.1:19101", "127.0.0.1:19102"), `move target "node-a" is the current source host`},
-		{"slot-1 target, node registered at slot 0", move("placed", "node-b", "127.0.0.1:19311", "127.0.0.1:19312"),
-			`move target endpoints 127.0.0.1:19311/127.0.0.1:19312 on "node-b" are not registered (the node registers 127.0.0.1:19301/127.0.0.1:19302; no per-volume binding is prepared)`},
+		{"target on another host", move("placed", "node-b", "10.9.9.9:19311", "127.0.0.1:19312"),
+			`move target endpoints 10.9.9.9:19311/127.0.0.1:19312 on "node-b" are not registered (not on the node's hosts: it registers 127.0.0.1:19301/127.0.0.1:19302; no per-volume binding is prepared)`},
 		{"explicit binding elsewhere", move("bound", "node-b", "127.0.0.1:19301", "127.0.0.1:19302"),
 			`move target endpoints 127.0.0.1:19301/127.0.0.1:19302 on "node-b" are not registered (live bindings on that node: 127.0.0.1:19321/127.0.0.1:19322)`},
 	} {
@@ -119,10 +118,12 @@ func TestWorkspaceMoveRefusalNamesTheMissingPrecondition(t *testing.T) {
 			}
 		})
 	}
-	// The slot-0 target passes these preconditions (it fails later, at the
-	// clean-move ACK check, for a different reason).
-	_, err = ws.MoveWorkspace(ctx, move("placed", "node-b", "127.0.0.1:19301", "127.0.0.1:19302"))
-	if err == nil || strings.Contains(err.Error(), "move target") || strings.Contains(err.Error(), "move source") {
-		t.Fatalf("slot-0 target: %v; want past the endpoint preconditions", err)
+	// Slot-0 and slot-1 targets on the node's host pass these preconditions
+	// (they fail later, at the clean-move ACK check, for a different reason).
+	for _, data := range []string{"127.0.0.1:19301", "127.0.0.1:19311"} {
+		_, err = ws.MoveWorkspace(ctx, move("placed", "node-b", data, "127.0.0.1:19312"))
+		if err == nil || strings.Contains(err.Error(), "move target") || strings.Contains(err.Error(), "move source") {
+			t.Fatalf("target %s on the node's host: %v; want past the endpoint preconditions", data, err)
+		}
 	}
 }

@@ -3,6 +3,7 @@ package master
 import (
 	"context"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -159,7 +160,11 @@ func (s *services) MoveWorkspace(ctx context.Context, q *control.WorkspaceMove) 
 	if err != nil {
 		return nil, workspaceError(err)
 	}
-	matched := !explicit && target.DataAddr == q.GetTargetDataAddr() && target.CtrlAddr == q.GetTargetCtrlAddr()
+	// A volume without per-volume bindings may move to any port on the
+	// target node's registered hosts (a host runs several slots); the
+	// collision check below still refuses endpoints another assignment or
+	// binding owns. The host match is the proof the endpoints are that node's.
+	matched := !explicit && sameHost(q.GetTargetDataAddr(), target.DataAddr) && sameHost(q.GetTargetCtrlAddr(), target.CtrlAddr)
 	for _, b := range bindings {
 		if !b.Retired && b.ServerID == q.GetTargetServerId() && b.DataAddr == q.GetTargetDataAddr() && b.CtrlAddr == q.GetTargetCtrlAddr() {
 			matched = true
@@ -194,12 +199,23 @@ func (s *services) MoveWorkspace(ctx context.Context, q *control.WorkspaceMove) 
 	return grantFact(r), nil
 }
 
+// sameHost reports whether two host:port addresses name the same host: the
+// literal host parts after SplitHostPort, no name resolution.
+func sameHost(a, b string) bool {
+	ha, _, err := net.SplitHostPort(a)
+	if err != nil {
+		return false
+	}
+	hb, _, err := net.SplitHostPort(b)
+	return err == nil && ha != "" && ha == hb
+}
+
 // registeredTargetEndpoints describes what a move to target may name: the
 // node's own pair for a volume without explicit bindings, else its live
 // bindings on that node.
 func registeredTargetEndpoints(target lifecycle.NodeRegistration, bindings []lifecycle.WorkspaceBinding, explicit bool) string {
 	if !explicit {
-		return fmt.Sprintf("the node registers %s/%s; no per-volume binding is prepared", target.DataAddr, target.CtrlAddr)
+		return fmt.Sprintf("not on the node's hosts: it registers %s/%s; no per-volume binding is prepared", target.DataAddr, target.CtrlAddr)
 	}
 	var live []string
 	for _, b := range bindings {
