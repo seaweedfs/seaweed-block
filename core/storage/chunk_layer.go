@@ -130,6 +130,7 @@ type chunkLayerImpl struct {
 	testCOWWait                  func()
 	testCOWRead                  func(idx uint64, saved bool)
 	testCOWSave                  func() error
+	testPayloadWrite             func()                 // before an admitted local payload WriteAt
 	testPresenceSnapshotHook     func()                 // after a presence snapshot, before it is written
 	testBaseTransitionBeforeLock func()                 // test handshake before capMu drain
 	testAfterAdmitHook           func()                 // right after a capture is admitted

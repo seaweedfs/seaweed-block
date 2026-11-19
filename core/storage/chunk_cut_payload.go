@@ -36,16 +36,17 @@ func (l *chunkLayerImpl) cutPayloadWorkers() (copyWorkers, uploadWorkers int, re
 // data: a crash discards them, never publishes them or reads them as recovery.
 // No fsync is needed: HEAD remains unchanged until remote objects are durable.
 type cutPayloadStore struct {
-	mu      sync.Mutex
-	path    string
-	file    *os.File
-	bytes   int64
-	limit   int64
-	reserve func(int64) error // shares the COW side-file cap when attached
+	mu          sync.Mutex
+	path        string
+	file        *os.File
+	bytes       int64
+	limit       int64
+	reserve     func(int64) error // shares the COW side-file cap when attached
+	beforeWrite func()
 }
 
 func (l *chunkLayerImpl) newCutPayloadStore() *cutPayloadStore {
-	return &cutPayloadStore{path: l.s.path, limit: l.cfg.COWSpillLimit}
+	return &cutPayloadStore{path: l.s.path, limit: l.cfg.COWSpillLimit, beforeWrite: l.testPayloadWrite}
 }
 
 func (p *cutPayloadStore) keep(c capturedChunk, head map[uint64]chunkRef) (capturedChunk, error) {
@@ -76,6 +77,9 @@ func (p *cutPayloadStore) keep(c capturedChunk, head map[uint64]chunkRef) (captu
 	f, offset := p.file, p.bytes
 	p.bytes += size
 	p.mu.Unlock()
+	if p.beforeWrite != nil {
+		p.beforeWrite()
+	}
 	n, err := f.WriteAt(c.data, offset)
 	if err == nil && int64(n) != size {
 		err = io.ErrShortWrite

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -177,6 +178,18 @@ func TestChunkUploads_FailureJoinsBeforeIntentCleanup(t *testing.T) {
 	if len(liveIntents(t, f)) == 0 {
 		t.Fatal("intent removed before join")
 	}
+	closed := make(chan struct{})
+	t.Cleanup(func() { release(); cowWaitSignal(t, closed, "upload close cleanup") })
+	go func() { defer close(closed); _ = l.Close() }()
+	select {
+	case <-closed:
+		t.Fatal("Close abandoned admitted upload")
+	case <-time.After(20 * time.Millisecond):
+	}
+	files, err := filepath.Glob(s.path + ".cut-cow-payload-*")
+	if err != nil || len(files) != 1 {
+		t.Fatalf("payload removed before upload join: %v %v", files, err)
+	}
 	release()
 	select {
 	case err := <-done:
@@ -190,4 +203,9 @@ func TestChunkUploads_FailureJoinsBeforeIntentCleanup(t *testing.T) {
 		t.Fatal("failed batch published")
 	}
 	assertNoIntentsLeft(t, f)
+	cowWaitSignal(t, closed, "upload close")
+	files, err = filepath.Glob(s.path + ".cut-cow-*")
+	if err != nil || len(files) != 0 {
+		t.Fatalf("payload files after join: %v %v", files, err)
+	}
 }
