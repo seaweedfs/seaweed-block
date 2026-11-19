@@ -3,10 +3,88 @@ package storage
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+func TestCutCOWV3_SaverCapacityAbortsWithoutParkingGuest(t *testing.T) {
+	s, l, f, gate := cowFixture(t)
+	if _, err := s.Write(9, makeBlock(ctBlockSize, 0x39)); err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	l.testCOWSave = func() error { once.Do(func() { close(entered) }); <-release; return nil }
+	var unblock sync.Once
+	free := func() { unblock.Do(func() { close(release) }) }
+	t.Cleanup(free)
+	before := f.stats().head.Gen
+	done, errs := cowStartCut(t, l, gate)
+	writer := make(chan error, 1)
+	go func() { _, err := s.Write(5, makeBlock(ctBlockSize, 0x45)); writer <- err }()
+	t.Cleanup(func() { free(); gate.unblock() })
+	cowWaitSignal(t, entered, "saving owner")
+	second := make(chan error, 1)
+	go func() { _, err := s.Write(9, makeBlock(ctBlockSize, 0x49)); second <- err }()
+	select {
+	case err := <-second:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(ctLocalBound):
+		t.Fatal("memory pressure parked guest")
+	}
+	free()
+	gate.unblock()
+	select {
+	case err := <-writer:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(ctLocalBound):
+		t.Fatal("saving writer did not settle")
+	}
+	cowWaitSignal(t, done, "capacity-refused cut")
+	if err := <-errs; !errors.Is(err, errCutCOWAborted) {
+		t.Fatalf("cut: %v", err)
+	}
+	if f.stats().head.Gen != before {
+		t.Fatal("capacity-refused cut published")
+	}
+}
+
+func TestCutCOWV3_RemoteUploadStartsAfterWindowCloses(t *testing.T) {
+	s, l, f, gate := cowFixture(t)
+	entered, release := holdPuts(t, f)
+	done, errs := cowStartCut(t, l, gate)
+	gate.unblock()
+	waitKey(t, entered, "upload after local copy")
+	if l.cowActive.Load() != nil {
+		t.Fatal("remote wait retained the COW window")
+	}
+	files, err := filepath.Glob(s.path + ".cut-cow-payload-*")
+	if err != nil || len(files) != 1 {
+		t.Fatalf("owned payload file during upload: %v %v", files, err)
+	}
+	if _, err = s.Write(5, makeBlock(ctBlockSize, 0xe5)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	cowWaitSignal(t, done, "uploaded cut")
+	if err = <-errs; err != nil {
+		t.Fatal(err)
+	}
+	files, err = filepath.Glob(s.path + ".cut-cow-*")
+	if err != nil || len(files) != 0 {
+		t.Fatalf("settled payload files: %v %v", files, err)
+	}
+}
 
 // P3: once the in-memory budget is used, a save that would take the side file
 // past its byte cap aborts the cut (retried) instead of growing the file; the
@@ -60,15 +138,15 @@ func TestChunkLayer_COWSpillLimitDefaultAndRefusal(t *testing.T) {
 	}
 }
 
-// A spill within the cap is accounted: with room for exactly one chunk the
-// save spills, the window counts that chunk, and the cut completes.
+// The shared cap covers one saver plus the two copied payloads. The saver is
+// counted before the held copier runs; the exact three-chunk cap then succeeds.
 func TestCutCOWV3_SpillWithinCapIsAccounted(t *testing.T) {
 	s, l, _, gate := cowFixture(t)
 	cutDone, cutErr := cowStartCut(t, l, gate)
 	w := l.cowActive.Load()
 	w.mu.Lock()
 	w.memory = cutCOWMemoryLimit
-	w.spillLimit = w.chunkBytes
+	w.spillLimit = 3 * w.chunkBytes
 	w.mu.Unlock()
 	if _, err := s.Write(5, makeBlock(ctBlockSize, 0xd5)); err != nil {
 		t.Fatal(err)
@@ -83,5 +161,34 @@ func TestCutCOWV3_SpillWithinCapIsAccounted(t *testing.T) {
 	cowWaitSignal(t, cutDone, "cut within the spill cap")
 	if err := <-cutErr; err != nil {
 		t.Fatal(err)
+	}
+	if w.spillBytes != 3*w.chunkBytes {
+		t.Fatalf("shared saver/payload bytes=%d, want %d", w.spillBytes, 3*w.chunkBytes)
+	}
+}
+
+func TestCutCOWV3_SharedPayloadCapRefusesBeforePublication(t *testing.T) {
+	s, l, f, gate := cowFixture(t)
+	before := f.stats().head.Gen
+	done, errs := cowStartCut(t, l, gate)
+	w := l.cowActive.Load()
+	w.mu.Lock()
+	w.memory = cutCOWMemoryLimit
+	w.spillLimit = 2 * w.chunkBytes
+	w.mu.Unlock()
+	if _, err := s.Write(5, makeBlock(ctBlockSize, 0xd6)); err != nil {
+		t.Fatal(err)
+	}
+	gate.unblock()
+	cowWaitSignal(t, done, "shared payload cap")
+	if err := <-errs; !errors.Is(err, errCutCOWAborted) {
+		t.Fatalf("over-cap cut: %v", err)
+	}
+	if f.stats().head.Gen != before {
+		t.Fatal("over-cap image published")
+	}
+	files, err := filepath.Glob(s.path + ".cut-cow-*")
+	if err != nil || len(files) != 0 {
+		t.Fatalf("scratch files after refused cut: %v %v", files, err)
 	}
 }
