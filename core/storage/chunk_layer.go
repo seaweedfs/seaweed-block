@@ -181,6 +181,12 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 	if cfg.ReadMissTimeout <= 0 {
 		cfg.ReadMissTimeout = defaultReadMissTimeout
 	}
+	if cfg.COWSpillLimit < 0 {
+		return nil, errors.New("storage: COW spill limit must not be negative (0 defaults to 1 GiB)")
+	}
+	if cfg.COWSpillLimit == 0 {
+		cfg.COWSpillLimit = defaultCOWSpillLimit
+	}
 	nb := uint64(s.NumBlocks())
 	l := &chunkLayerImpl{
 		s:           s,
