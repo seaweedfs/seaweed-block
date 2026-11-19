@@ -690,7 +690,7 @@ func (b *StorageBackend) Write(ctx context.Context, offset int64, p []byte) (int
 	n, err := b.writeBytes(ctx, offset, p)
 	if hydrationPendingOnly(err) {
 		if gateErr := b.gate(); gateErr != nil {
-			return 0, gateErr
+			err = gateErr
 		}
 	}
 	if errors.Is(err, storage.ErrWALPressureTimeout) || hydrationPendingOnly(err) {

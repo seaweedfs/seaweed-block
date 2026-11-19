@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -348,7 +347,7 @@ func TestDurableHydration_RMWFenceWinsCallerExpiry(t *testing.T) {
 		defer close(joined)
 		n, err := b.Write(ctx, 33*4096+1, []byte{0x74})
 		if n != 0 {
-			err = fmt.Errorf("unexpected RMW prefix %d: %w", n, err)
+			t.Errorf("unexpected RMW prefix %d: %v", n, err)
 		}
 		result <- err
 	}()
@@ -362,6 +361,61 @@ func TestDurableHydration_RMWFenceWinsCallerExpiry(t *testing.T) {
 	case err := <-result:
 		if store.NextLSN() != before {
 			t.Fatal("fenced RMW appended data")
+		}
+		if !errors.Is(err, frontend.ErrStalePrimary) || errors.Is(err, frontend.ErrBackendBusy) {
+			t.Fatalf("expiry hid fencing: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("fenced waiter did not detach")
+	}
+}
+
+func TestDurableHydration_RMWFenceKeepsCommittedPrefix(t *testing.T) {
+	r := &heldHydrationRemote{ChunkRemote: seededRemote(t), gate: make(chan struct{}), entered: make(chan struct{}, 1)}
+	view := v1View()
+	p := chunkProvider(t, t.TempDir(), r, view, 0)
+	t.Cleanup(r.release)
+	openRecovered(t, p)
+	b, err := p.Open(context.Background(), "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := p.EnsureStorage("v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := store.NextLSN()
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	joined := make(chan struct{})
+	result := make(chan error, 1)
+	t.Cleanup(func() {
+		cancel()
+		r.release()
+		select {
+		case <-joined:
+		case <-time.After(time.Second):
+			t.Error("fenced hydration waiter not joined")
+		}
+	})
+	go func() {
+		defer close(joined)
+		n, err := b.Write(ctx, 32*4096, bytes.Repeat([]byte{0x74}, 4097))
+		if n != 4096 {
+			t.Errorf("unexpected RMW prefix %d: %v", n, err)
+		}
+		result <- err
+	}()
+	select {
+	case <-r.entered:
+	case <-time.After(time.Second):
+		t.Fatal("cold read never reached Get")
+	}
+	view.set(healthyProj(frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 4, EndpointVersion: 1}))
+	select {
+	case err := <-result:
+		if store.NextLSN() != before+1 {
+			t.Fatal("fenced RMW lost its exact committed prefix")
 		}
 		if !errors.Is(err, frontend.ErrStalePrimary) || errors.Is(err, frontend.ErrBackendBusy) {
 			t.Fatalf("expiry hid fencing: %v", err)
