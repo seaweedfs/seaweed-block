@@ -796,7 +796,7 @@ func (s *WALStore) syncWALBatchV3Internal(pressureOnly bool) error {
 	// The leader role: SetWMode holds it while it changes the mode, so no
 	// batch acknowledges under a stale mode selection (the mode is read
 	// only after the role is taken).
-	if h := v.testLeaderWaiting; h != nil {
+	if h := v.testLeaderWaiting; h != nil && !pressureOnly {
 		h()
 	}
 	v.syncMu.Lock()
