@@ -34,6 +34,12 @@ type WorkspaceMoveRecord struct {
 	TargetDataAddr, TargetCtrlAddr              string
 	OldEpoch, NewEpoch, HeadGen, RemoteLSN      uint64
 	Issued                                      bool
+	// LostUntilNS, set only for Kind "forced", records the abandoned range:
+	// the old holder's writes after RemoteLSN (the HEAD frontier the move
+	// keeps) are lost, and none of them was acknowledged later than this
+	// master time (the forced barrier: the lease horizon plus skew). The
+	// lease carries no write frontier, so the upper bound is a time.
+	LostUntilNS int64 `json:",omitempty"`
 }
 
 type WorkspaceState struct {
@@ -280,12 +286,18 @@ func (p *Publisher) prepareWorkspaceMoveLocked(ask AssignmentAsk, g workspaceGra
 	if !ok || line.info.Epoch != q.ExpectedEpoch || line.info.ReplicaID != q.ExpectedReplicaID || s == nil || s.Lease == nil {
 		return nil, 0, fmt.Errorf("workspace move: missing or changed authority/lease")
 	}
+	var lostUntil int64
 	if q.Kind == "forced" {
 		now := p.workspaceNow()
 		skew := p.workspaceSkew(s.Lease)
-		if now.Before(time.Unix(0, s.Lease.ExpiresAtNS).Add(skew)) || now.Before(p.leaseDeadlineLocked(q.VolumeID).Add(skew)) {
+		barrier := time.Unix(0, s.Lease.ExpiresAtNS).Add(skew)
+		if d := p.leaseDeadlineLocked(q.VolumeID).Add(skew); d.After(barrier) {
+			barrier = d
+		}
+		if now.Before(barrier) {
 			return nil, 0, fmt.Errorf("workspace forced move lease expiry plus clock-skew margin has not elapsed")
 		}
+		lostUntil = barrier.UnixNano()
 	}
 	// A restart may resume the identical durable reservation; it never grants
 	// a different request the reserved epoch.
@@ -318,7 +330,7 @@ func (p *Publisher) prepareWorkspaceMoveLocked(ask AssignmentAsk, g workspaceGra
 		return nil, 0, fmt.Errorf("workspace epoch exhausted")
 	}
 	r := WorkspaceMoveRecord{RequestID: q.RequestID, VolumeID: q.VolumeID, OldHost: q.ExpectedHost, NewHost: q.TargetHost, OldReplicaID: q.ExpectedReplicaID, NewReplicaID: q.TargetReplicaID, Kind: q.Kind,
-		OldEpoch: q.ExpectedEpoch, NewEpoch: max + 1, HeadGen: h.Gen, RemoteLSN: h.RemoteLSN, TargetDataAddr: q.TargetDataAddr, TargetCtrlAddr: q.TargetCtrlAddr}
+		OldEpoch: q.ExpectedEpoch, NewEpoch: max + 1, HeadGen: h.Gen, RemoteLSN: h.RemoteLSN, TargetDataAddr: q.TargetDataAddr, TargetCtrlAddr: q.TargetCtrlAddr, LostUntilNS: lostUntil}
 	s.Moves = append(s.Moves, r)
 	if err := p.persistWorkspaceLocked(q.VolumeID, s); err != nil {
 		return nil, 0, err
