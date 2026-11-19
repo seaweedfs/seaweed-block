@@ -5,6 +5,12 @@ import (
 	"fmt"
 )
 
+// ContextReader is an optional request-aware read seam. One caller context
+// may cover several blocks, so implementations must not reset its deadline.
+type ContextReader interface {
+	ReadContext(context.Context, uint32) ([]byte, error)
+}
+
 // LogicalStorage is the V3 persistence-seam contract. It separates the
 // "what data exists, what frontier is durable" question (storage) from
 // the "what does the engine decide" question (semantic core). The

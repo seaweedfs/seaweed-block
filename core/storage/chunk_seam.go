@@ -347,6 +347,10 @@ type chunkLayerConfig struct {
 	CaptureAllowed func() error
 	// ReadMissTimeout bounds one OnReadMiss remote fetch.
 	ReadMissTimeout time.Duration
+	// HydrationWorkers bounds layer-owned fetches (0 defaults to 2).
+	HydrationWorkers int
+	// HydrationQueueDepth bounds distinct queued/in-flight chunks (0 defaults to 64).
+	HydrationQueueDepth int
 	// Bitmap persists the legacy dirty-since-HEAD bitmap. Required for v2;
 	// impl3 uses its owned LSN map and never calls this optional legacy object.
 	Bitmap chunkBitmapStore
