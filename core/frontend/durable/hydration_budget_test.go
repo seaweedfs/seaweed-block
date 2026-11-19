@@ -10,9 +10,37 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
+
+func TestDurableHydration_ConfiguredLimitsReachStatus(t *testing.T) {
+	for _, configured := range []bool{false, true} {
+		cfg := durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks}
+		r := storage.NewMemChunkRemote()
+		cfg.ChunkRemoteFor = func(string) (storage.ChunkRemote, error) { return r, nil }
+		wantWorkers, wantDepth := 2, 64
+		if configured {
+			cfg.ChunkHydrationWorkers, cfg.ChunkHydrationQueueDepth = 3, 17
+			wantWorkers, wantDepth = 3, 17
+		}
+		p, err := durable.NewDurableProvider(cfg, v1View())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = p.Close() })
+		openRecovered(t, p)
+		st := p.DurableStatuses()
+		if len(st) != 1 || st[0].Chunk == nil {
+			t.Fatalf("missing chunk status: %+v", st)
+		}
+		h := st[0].Chunk.Stats.Hydration
+		if h.WorkerLimit != wantWorkers || h.QueueDepth != wantDepth {
+			t.Fatalf("configured=%t hydration=%+v", configured, h)
+		}
+	}
+}
 
 type faultyHydrationRemote struct {
 	storage.ChunkRemote
