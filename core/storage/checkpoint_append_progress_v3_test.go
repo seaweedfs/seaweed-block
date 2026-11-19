@@ -451,8 +451,8 @@ func TestCheckpointV3_AppendRolloverFaultRefusesHeldCandidate(t *testing.T) {
 	if s.v3.pub.current() != before {
 		t.Fatal("rollover fault changed authoritative tuple")
 	}
-	if nextFloor, _ := s.v3.pub.reuseFloor(); nextFloor != floor {
-		t.Fatal("failed rollover released fallback floor")
+	if nextFloor, valid := s.v3.pub.reuseFloor(); valid || nextFloor != 0 {
+		t.Fatal("uncertain rollover must disable reuse until reopen")
 	}
 }
 
