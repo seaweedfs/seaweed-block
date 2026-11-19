@@ -364,9 +364,10 @@ type chunkLayerConfig struct {
 	// UploadConcurrency bounds capture/pre-copy Put calls (0 defaults to 8).
 	UploadConcurrency int
 
-	// COWSpillLimit caps the bytes a cut's copy window may spill to its side
-	// file once the in-memory budget is used: a save beyond it aborts the cut
-	// (the caller retries) instead of growing the file under the WAL/extent.
+	// COWSpillLimit caps private local cut payloads plus saved-before-write
+	// side bytes. Pre-copy rounds use the same cap and release their local
+	// files after uploads settle. Exceeding it aborts the cut (the caller
+	// retries), never publishes a partial image or refuses the guest mutation.
 	// 0 defaults to defaultCOWSpillLimit; negative is refused.
 	COWSpillLimit int64
 
