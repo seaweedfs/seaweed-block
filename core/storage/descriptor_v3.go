@@ -257,14 +257,25 @@ func (p *descriptorPublisherV3) publishLockedCoreV3(mutate func(next *descriptor
 		return descriptorV3{}, err // refused before any I/O (a latched fault)
 	}
 	// Success boundary: a fault latched by another path while this
-	// publication was in flight still refuses it (#172).
+	// publication was in flight still refuses it (#172). The slot write and
+	// its fsync did happen, so the slot on disk may name this generation:
+	// its dependencies stay pinned as an uncertain candidate until reopen.
 	if err := p.io.sticky(); err != nil {
+		uncertain := next
+		p.uncertain = &uncertain
 		return descriptorV3{}, err
 	}
 	p.other, p.otherValid = p.cur, true
 	p.cur, p.curSlot = next, target
 	if prepared != nil {
 		p.mapCurrent = prepared.candidate
+	}
+	// Report the slot tuples to the owned map (descMu -> liveMu): roots
+	// neither slot names any more, and superseded candidates, are released.
+	// A publication before the map is bound reports nothing; that only
+	// delays a release until the next report.
+	if p.mapCurrent != nil && p.mapCurrent.owner != nil {
+		p.mapCurrent.owner.slotsPublishedV3(p.cur, p.other, p.otherValid)
 	}
 	return next, nil
 }

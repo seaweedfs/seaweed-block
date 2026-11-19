@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -84,6 +85,25 @@ func chunkAuthority(proj frontend.Projection, volumeID string) bool {
 	return proj.VolumeID == volumeID && proj.Healthy && proj.Epoch > 0 && proj.ReplicaID != ""
 }
 
+// chunkAuthorityGap names the projection fields that fail chunkAuthority,
+// for the logs ("" when none fails).
+func chunkAuthorityGap(proj frontend.Projection, volumeID string) string {
+	var gap []string
+	if proj.VolumeID != volumeID {
+		gap = append(gap, fmt.Sprintf("volume=%q", proj.VolumeID))
+	}
+	if !proj.Healthy {
+		gap = append(gap, "healthy=false")
+	}
+	if proj.Epoch == 0 {
+		gap = append(gap, "epoch=0")
+	}
+	if proj.ReplicaID == "" {
+		gap = append(gap, `replica=""`)
+	}
+	return strings.Join(gap, " ")
+}
+
 // recoverChunk runs after a successful local Recover, generation gen. It
 // attaches the layer when the projection already carries master authority
 // and reports true. Otherwise it starts an authority wait bound to gen
@@ -126,6 +146,13 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 	if limit <= 0 {
 		limit = 30 * time.Second
 	}
+	start := time.Now()
+	log.Printf("durable: chunk layer for volume=%s waits for master authority (up to %s): projection lacks %s",
+		volumeID, limit, chunkAuthorityGap(p.view.Projection(), volumeID))
+	ended := "superseded by a later recovery"
+	defer func() {
+		log.Printf("durable: chunk authority wait for volume=%s ended after %s: %s", volumeID, time.Since(start), ended)
+	}()
 	waitCtx, endWait := context.WithTimeout(p.closeCtx, limit)
 	defer endWait()
 	defer func() {
@@ -136,6 +163,7 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 		h.attachMu.Lock()
 		defer h.attachMu.Unlock()
 		if p.current(h, gen) && h.chunk == nil {
+			ended = fmt.Sprintf("assignment unavailable, not serving (projection lacks %s)", chunkAuthorityGap(p.view.Projection(), volumeID))
 			h.backend.SetOperational(false, "chunk assignment unavailable: "+waitCtx.Err().Error())
 		}
 	}()
@@ -148,17 +176,27 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 	}()
 	t := time.NewTicker(chunkAuthorityPoll)
 	defer t.Stop()
+	attempts := 0
 	for {
 		select {
 		case <-waitCtx.Done():
+			ended = "provider closed"
+			if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
+				ended = "deadline"
+			}
 			return
 		case <-t.C:
 		}
 		if !p.current(h, gen) {
 			return // a later recovery (successful or failed) owns the volume
 		}
-		if !chunkAuthority(p.view.Projection(), volumeID) {
+		proj := p.view.Projection()
+		if !chunkAuthority(proj, volumeID) {
 			continue
+		}
+		if attempts++; attempts == 1 {
+			log.Printf("durable: chunk layer for volume=%s: master authority after %s (replica=%q epoch=%d endpoint=%d); first attach attempt",
+				volumeID, time.Since(start), proj.ReplicaID, proj.Epoch, proj.EndpointVersion)
 		}
 		h.attachMu.Lock()
 		if !p.current(h, gen) { // re-checked under the per-volume serialization
@@ -176,9 +214,14 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 		}
 		h.attachMu.Unlock()
 		switch {
-		case err == nil, errors.Is(err, errProviderClosed):
+		case err == nil:
+			ended = fmt.Sprintf("attached after %d attempt(s)", attempts)
+			return
+		case errors.Is(err, errProviderClosed):
+			ended = "provider closed"
 			return
 		case errors.Is(err, storage.ErrChunkLayerFenced):
+			ended = "fenced, not serving"
 			log.Printf("durable: chunk layer for volume=%s: %v (not serving)", volumeID, err)
 			if errors.Is(err, ErrChunkStaleLocalRoot) {
 				h.attachMu.Lock()
@@ -189,11 +232,17 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 			}
 			return
 		case errors.Is(err, errChunkNoAuthority):
+			log.Printf("durable: chunk layer attach for volume=%s: authority lost before attempt %d (projection lacks %s); waiting",
+				volumeID, attempts, chunkAuthorityGap(p.view.Projection(), volumeID))
 			continue
 		}
 		log.Printf("durable: chunk layer attach for volume=%s: %v (retrying)", volumeID, err)
 		select {
 		case <-waitCtx.Done():
+			ended = "provider closed during the retry backoff"
+			if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
+				ended = "deadline during the retry backoff"
+			}
 			return
 		case <-time.After(chunkAttachRetry):
 		}
@@ -262,13 +311,20 @@ func (p *DurableProvider) attachChunk(ctx context.Context, volumeID string, h *v
 		h.backend.mu.Lock()
 		h.backend.chunkFenced = layer.Fenced
 		h.backend.mu.Unlock()
-		if p.cfg.ChunkCaptureInterval > 0 {
-			loopCtx, cancel := context.WithCancel(context.Background())
-			h.chunkStop, h.chunkDone = cancel, make(chan struct{})
-			go p.chunkLoop(loopCtx, volumeID, layer, h.chunkDone)
-		}
+		p.startChunkLoop(volumeID, h, layer)
 	}
 	return nil
+}
+
+// startChunkLoop starts the periodic cuts of an attached layer, if configured
+// and not already running. The caller holds h.attachMu and p.mu.
+func (p *DurableProvider) startChunkLoop(volumeID string, h *volHandle, layer storage.ChunkLayer) {
+	if p.cfg.ChunkCaptureInterval <= 0 || h.chunkStop != nil {
+		return
+	}
+	loopCtx, cancel := context.WithCancel(context.Background())
+	h.chunkStop, h.chunkDone = cancel, make(chan struct{})
+	go p.chunkLoop(loopCtx, volumeID, layer, h.chunkDone)
 }
 
 func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h *volHandle) (storage.ChunkLayer, error) {
@@ -348,6 +404,8 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 		// Attach preparation is gated. Seed the exact observed HEAD before
 		// its takeover CAS; only then finalize lazy attachment and expose I/O.
 		cfg.PrepareRestore = func(head storage.ChunkHead) error {
+			log.Printf("durable: HEAD claim for volume=%s observed HEAD gen=%d epoch=%d holder=%q state=%v remote_lsn=%d; preparing",
+				volumeID, head.Gen, head.Epoch, head.Holder, head.State, head.RemoteLSN)
 			if baseLSN, complete := ws.InstalledBaseLSN(); complete {
 				// The fresh marker can outlive a full local BASE. It is not
 				// permission to seed backwards or to fill from an older HEAD.
@@ -376,10 +434,18 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 			// restore here, so HEAD is never claimed for a mis-ordered ship.
 			return h.backend.seedAndRebase(func() error { return ws.SeedChunkFrontier(head.RemoteLSN) })
 		}
+		claimStart := time.Now()
+		log.Printf("durable: HEAD claim for volume=%s starting: target epoch=%d holder=%q", volumeID, cfg.Epoch, cfg.Holder)
 		head, err := storage.ClaimChunkHead(ctx, remote, cfg)
 		if err != nil {
+			log.Printf("durable: HEAD claim for volume=%s failed after %s: %v", volumeID, time.Since(claimStart), err)
 			return nil, fmt.Errorf("durable: restore HEAD claim: %w", err)
 		}
+		claimed := "claimed"
+		if head.Gen == 0 {
+			claimed = "no HEAD to claim (new lineage)"
+		}
+		log.Printf("durable: HEAD claim for volume=%s done in %s: gen=%d epoch=%d holder=%q, %s", volumeID, time.Since(claimStart), head.Gen, head.Epoch, head.Holder, claimed)
 		cfg.RestoreGuard = &storage.ChunkHeadVersion{Gen: head.Gen, Epoch: head.Epoch}
 	}
 
@@ -743,12 +809,19 @@ func (p *DurableProvider) CutVolume(ctx context.Context, volumeID string, minLSN
 }
 
 // DetachVolume is a clean stop's final cut (B9 W2 Â§3.6): it stops the
-// volume's frontend I/O and waits (bounded by ctx) for the I/O already
-// admitted to finish, stops the periodic cuts, then publishes one cut with
-// HEAD state detached. It also returns the last LSN written. From its
-// start, the volume stays stopped for this process, through any later
-// RecoverVolume, even when the detach fails; a retry settles it and a
-// repeated call returns the first result.
+// volume's frontend I/O and waits for the I/O already admitted to finish,
+// stops the periodic cuts, then publishes one cut with HEAD state detached.
+// It also returns the last LSN written. The freeze (drain + final cut) is
+// bounded by DetachFreezeTimeout and ctx. After a successful detach the
+// volume stays stopped for this process, through any later RecoverVolume,
+// and a repeated call returns the first result. A failed detach never leaves
+// the guest frozen by a detach that did not happen (MIGRATION E4):
+//   - nothing published (the drain or the cut failed before its CAS, or the
+//     CAS was refused, or an unresolved detach CAS was cancelled): serving
+//     resumes and ErrDetachAborted is returned;
+//   - the detach CAS applied (its reply was lost): the detached result;
+//   - HEAD belongs to another holder: stays stopped (fenced);
+//   - undecidable (HEAD unreadable): stays stopped, ErrDetachOutcomeUnknown.
 func (p *DurableProvider) DetachVolume(ctx context.Context, volumeID string) (storage.ChunkCutResult, uint64, error) {
 	p.mu.Lock()
 	h, ok := p.volumes[volumeID]
@@ -762,16 +835,83 @@ func (p *DurableProvider) DetachVolume(ctx context.Context, volumeID string) (st
 	if err != nil {
 		return storage.ChunkCutResult{}, 0, err
 	}
+	freeze := p.cfg.DetachFreezeTimeout
+	if freeze <= 0 {
+		freeze = defaultDetachFreezeTimeout
+	}
+	// One freeze budget covers the drain, the final cut AND the settlement:
+	// the cut gets three quarters, the settlement what is left. The bound is
+	// cooperative (contexts): a syscall that never returns is not bounded here.
+	start := time.Now()
+	cutCtx, cancel := context.WithDeadline(ctx, start.Add(freeze*3/4))
+	defer cancel()
+	defer func() {
+		if d := time.Since(start); d > detachFreezeTarget {
+			log.Printf("durable: ALARM detach of volume=%s held guest I/O for %s (target %s, bound %s)", volumeID, d.Round(time.Millisecond), detachFreezeTarget, freeze)
+		}
+	}()
+	if trace := p.testDetachTrace; trace != nil {
+		dl, _ := cutCtx.Deadline()
+		trace("cut", dl)
+	}
 	h.chunkDetach = true
-	if err := h.backend.StopIO(ctx, "chunk detach: I/O stopped until a new attach"); err != nil {
-		return storage.ChunkCutResult{}, 0, err
+	if stop := p.testDetachStopIO; stop != nil {
+		err = stop(cutCtx)
+	} else {
+		err = h.backend.StopIO(cutCtx, "chunk detach: I/O stopped until a new attach")
 	}
-	p.stopChunkLoop(h)
-	r, err := layer.Detach(ctx)
-	if err != nil {
-		return storage.ChunkCutResult{}, 0, err
+	if err == nil {
+		p.stopChunkLoop(h)
+		var r storage.ChunkCutResult
+		if r, err = layer.Detach(cutCtx); err == nil {
+			return r, h.storage.NextLSN() - 1, nil
+		}
 	}
-	return r, h.storage.NextLSN() - 1, nil
+	// Every failure, a failed drain included, is settled before anything
+	// resumes: an earlier detach that applied, an unresolved detach CAS or a
+	// fenced layer must never resume serving. The settlement keeps the rest
+	// of the freeze budget even when the caller's context is gone.
+	sctx, scancel := context.WithDeadline(context.WithoutCancel(ctx), start.Add(freeze))
+	defer scancel()
+	if trace := p.testDetachTrace; trace != nil {
+		dl, _ := sctx.Deadline()
+		trace("settle", dl)
+	}
+	how, dr, serr := layer.SettleDetach(sctx)
+	switch {
+	case serr != nil:
+		return storage.ChunkCutResult{}, 0, fmt.Errorf("%w: %w (settle: %w)", ErrDetachOutcomeUnknown, err, serr)
+	case how == storage.DetachApplied:
+		return dr, h.storage.NextLSN() - 1, nil
+	case how == storage.DetachFenced:
+		return storage.ChunkCutResult{}, 0, fmt.Errorf("durable: detach of %s: HEAD belongs to a newer epoch or another holder; I/O stays stopped: %w: %w", volumeID, storage.ErrChunkLayerFenced, err)
+	default:
+		return storage.ChunkCutResult{}, 0, p.resumeAfterDetach(volumeID, h, layer, err)
+	}
+}
+
+const (
+	defaultDetachFreezeTimeout = 20 * time.Second
+	detachFreezeTarget         = 5 * time.Second
+)
+
+// resumeAfterDetach undoes a detach that provably did not happen: the
+// periodic cuts restart, the stop is lifted, and the volume serves again.
+// The caller holds h.attachMu.
+func (p *DurableProvider) resumeAfterDetach(volumeID string, h *volHandle, layer storage.ChunkLayer, cause error) error {
+	p.mu.Lock()
+	closed := p.closed || h.chunk != layer
+	if !closed {
+		p.startChunkLoop(volumeID, h, layer)
+	}
+	p.mu.Unlock()
+	if closed { // a concurrent Close or detach of the layer owns the volume now
+		return fmt.Errorf("durable: detach of %s aborted while the provider closed: %w", volumeID, cause)
+	}
+	h.chunkDetach = false
+	h.backend.SetOperational(true, "chunk detach aborted: serving resumed")
+	log.Printf("durable: detach of volume=%s aborted, nothing published; serving resumed: %v", volumeID, cause)
+	return fmt.Errorf("%w: %w", ErrDetachAborted, cause)
 }
 
 // Preserve the optional manifest capability only when the inner remote has it;

@@ -53,6 +53,9 @@ func validateChunkFlags(f flags) error {
 	if c.controlEndpoint && f.statusAddr == "" {
 		return errors.New("--chunk-control-endpoint requires --status-addr")
 	}
+	if f.replicationAck != "" && f.replicationAck != "best-effort" {
+		return fmt.Errorf("--durable-impl=walstore-chunk is single-replica: --replication-ack=%q needs replica peers (%s)", f.replicationAck, chunkRF1Reason)
+	}
 	if f.durableRoot == "" {
 		return errors.New("--durable-impl=walstore-chunk requires --durable-root")
 	}
@@ -73,6 +76,13 @@ func validateChunkFlags(f flags) error {
 	}
 	return nil
 }
+
+// chunkRF1Reason is why a walstore-chunk volume refuses replication, at start
+// and on every assignment with replica slots: a chunk cut takes its LSN from the
+// local WAL head, which no replica is guaranteed to hold, so a published HEAD
+// could be ahead of every replica. The master's workspace RPCs enforce RF1; this
+// is the same rule on the volume server, for a direct start.
+const chunkRF1Reason = "chunk snapshots take the cut LSN from the local WAL, which replicas may not hold; walstore-chunk is RF1 only"
 
 // chunkWiring is what --durable-impl=walstore-chunk dials once: the
 // provider's per-volume remotes, the catalog under the same base (VOLUME

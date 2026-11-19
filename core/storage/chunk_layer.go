@@ -1012,7 +1012,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	}
 	if err := l.uploadBatch(ctx, len(uploads), func(ctx context.Context, i int) error {
 		u := uploads[i]
-		return l.remote.Put(ctx, u.key, u.c.data)
+		return l.putCaptured(ctx, u.key, u.c.data)
 	}); err != nil {
 		l.abortCut(all)
 		l.dropIntents(ctx, intents)
@@ -1161,6 +1161,75 @@ func (l *chunkLayerImpl) Detach(ctx context.Context) (chunkCutResult, error) {
 		}
 	}
 	return r, err
+}
+
+// SettleDetach: see chunkLayer. Only an unresolved DETACH proposal needs a
+// remote decision: if HEAD is still that CAS's base, it is cancelled by a CAS
+// at the same base to the non-detached base image (this holder, this epoch),
+// so whichever lands first decides and the detach can never land after a
+// successful cancel. resolvePending would re-propose the detach instead.
+func (l *chunkLayerImpl) SettleDetach(ctx context.Context) (detachSettlement, chunkCutResult, error) {
+	l.capMu.Lock()
+	defer l.capMu.Unlock()
+	if r, ok := l.storedDetach(); ok {
+		return detachApplied, r, nil
+	}
+	l.stMu.Lock()
+	fenced, pending, isDetach, base, intents := l.fenced, l.pending, l.pendingDetach, l.pendingBase, l.pendingIntents
+	baseHead := copyHead(l.head)
+	l.stMu.Unlock()
+	if fenced {
+		return detachFenced, chunkCutResult{}, nil
+	}
+	if pending == nil || !isDetach {
+		// Nothing of this detach can land: it failed before its CAS or was
+		// definitely refused (an unresolved ordinary cut settles as usual).
+		return detachNotPublished, chunkCutResult{}, nil
+	}
+	cur, err := l.remote.GetHead(ctx)
+	if err != nil {
+		return 0, chunkCutResult{}, fmt.Errorf("storage: detach outcome unresolved: %w: %w", errChunkCASOutcomeUnknown, err)
+	}
+	if !sameProposal(cur, *pending) && !l.supersededBy(cur) && cur.Gen == base.Gen && cur.Epoch == base.Epoch {
+		if err := l.admit(); err != nil {
+			return 0, chunkCutResult{}, fmt.Errorf("storage: detach outcome unresolved (%w); cancel refused: %w", errChunkCASOutcomeUnknown, err)
+		}
+		cancel := copyHead(baseHead)
+		cancel.Epoch, cancel.Holder = l.cfg.Epoch, l.cfg.Holder
+		cancel.State, cancel.DetachedBy = chunkHeadActive, nil
+		gen, casErr := l.remote.CASHead(ctx, base, cancel)
+		if casErr == nil {
+			cancel.Gen = gen
+			cur = cancel
+		} else if cur, err = l.remote.GetHead(ctx); err != nil {
+			return 0, chunkCutResult{}, fmt.Errorf("storage: detach outcome unresolved (cancel: %v): %w: %w", casErr, errChunkCASOutcomeUnknown, err)
+		} else if !sameProposal(cur, *pending) && !l.supersededBy(cur) && cur.Gen == base.Gen && cur.Epoch == base.Epoch {
+			return 0, chunkCutResult{}, fmt.Errorf("storage: detach outcome unresolved (cancel: %v): HEAD unchanged: %w", casErr, errChunkCASOutcomeUnknown)
+		}
+	}
+	// Settled: the detach landed, or it can never land.
+	l.dropIntents(ctx, intents)
+	l.stMu.Lock()
+	defer l.stMu.Unlock()
+	cut := l.pendingCut
+	l.pending, l.pendingIntents = nil, nil
+	l.pendingDetach, l.pendingCut, l.pendingBase = false, chunkCutResult{}, chunkHeadVersion{}
+	switch {
+	case sameProposal(cur, *pending):
+		l.head, l.remoteLSN = copyHead(cur), cur.RemoteLSN
+		cut.Head = copyHead(cur)
+		l.detached = &cut
+		r := cut
+		r.Head = copyHead(cur)
+		return detachApplied, r, nil
+	case l.supersededBy(cur):
+		l.fenced = true
+		l.head = copyHead(cur)
+		return detachFenced, chunkCutResult{}, nil
+	default:
+		l.head = copyHead(cur)
+		return detachNotPublished, chunkCutResult{}, nil
+	}
 }
 
 func (l *chunkLayerImpl) storedDetach() (chunkCutResult, bool) {
@@ -1662,7 +1731,7 @@ func (l *chunkLayerImpl) stage(ctx context.Context, st *chunkCutStats) (map[uint
 			intents = append(intents, id)
 			if err := l.uploadBatch(ctx, len(uploads), func(ctx context.Context, i int) error {
 				u := uploads[i]
-				return l.remote.Put(ctx, u.key, u.data)
+				return l.putCaptured(ctx, u.key, u.data)
 			}); err != nil {
 				return nil, intents, fmt.Errorf("storage: capture stage upload: %w: %w", errChunkRemoteUnavailable, err)
 			}

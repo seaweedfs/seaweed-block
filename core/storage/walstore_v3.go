@@ -168,14 +168,19 @@ func ProbeWALStoreV3(path string) error {
 		return err
 	}
 	defer f.Close()
+	return probeWALStoreV3At(f)
+}
+
+// probeWALStoreV3At is ProbeWALStoreV3 on an already open file.
+func probeWALStoreV3At(r io.ReaderAt) error {
 	a, b := make([]byte, slotSizeV3), make([]byte, slotSizeV3)
-	if _, err := f.ReadAt(a, 0); err != nil {
+	if _, err := r.ReadAt(a, 0); err != nil {
 		return err
 	}
-	if _, err := f.ReadAt(b, slotBOffsetV3); err != nil {
+	if _, err := r.ReadAt(b, slotBOffsetV3); err != nil {
 		return err
 	}
-	_, _, err = selectSlotV3(a, b, nil)
+	_, _, err := selectSlotV3(a, b, nil)
 	return err
 }
 
