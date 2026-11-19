@@ -1,9 +1,43 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"sync"
+	"time"
 )
+
+// putCaptured retries one immutable object, never a whole batch or HEAD CAS.
+// A lost binding reply can turn the next attempt into KeyExists: only exact
+// bytes read from that binding prove completion; a collision is terminal.
+func (l *chunkLayerImpl) putCaptured(ctx context.Context, key string, data []byte) error {
+	backoff := 100 * time.Millisecond
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := l.remote.Put(ctx, key, data)
+		if err == nil {
+			return nil
+		}
+		// Resolve a possibly committed binding before replaying the Put.
+		got, readErr := l.remote.Get(ctx, key)
+		if readErr == nil {
+			if bytes.Equal(got, data) {
+				return nil
+			}
+			return errChunkKeyExists
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		backoff = min(2*time.Second, 2*backoff)
+	}
+}
 
 // uploadBatch owns and joins all Put calls before its caller settles intents.
 // No storage/publication lock is acquired by workers. Cancellation stops new

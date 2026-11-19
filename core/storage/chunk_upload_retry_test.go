@@ -65,8 +65,12 @@ func TestChunkCutRetriesOnlyTheFailedUpload(t *testing.T) {
 				t.Fatalf("new key generated on retry: %v", r.calls)
 			}
 			for key, n := range r.calls {
-				if n != 2 {
-					t.Fatalf("key %s attempted %d times, want 2", key, n)
+				want := 2
+				if mode == "lost" {
+					want = 1
+				}
+				if n != want {
+					t.Fatalf("key %s attempted %d times, want %d", key, n, want)
 				}
 			}
 		})
