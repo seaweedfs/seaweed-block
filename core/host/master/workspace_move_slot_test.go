@@ -100,6 +100,25 @@ func TestWorkspaceMoveToAnotherSlotOnTheTargetHost(t *testing.T) {
 	if _, err := ws.MoveWorkspace(ctx, move("ctrl-other-host", d1, "10.9.9.9:19112")); err == nil || !strings.Contains(err.Error(), `on "node-a" are not registered`) {
 		t.Fatalf("move with its ctrl endpoint on another host: %v; want the ownership refusal", err)
 	}
+	// Invalid endpoints on the right host are refused before anything is
+	// written: the epoch, the journal, the lease and the ACK stay as they were.
+	before := m.Publisher().WorkspaceState("a2")
+	for _, bad := range []struct{ name, data, ctrl string }{
+		{"non-numeric port", "127.0.0.1:bad", c1},
+		{"port 0", "127.0.0.1:0", c1},
+		{"port 65536", d1, "127.0.0.1:65536"},
+		{"empty port", "127.0.0.1:", c1},
+		{"data equals ctrl", d1, d1},
+	} {
+		if _, err := ws.MoveWorkspace(ctx, move("bad-"+bad.name, bad.data, bad.ctrl)); err == nil || !strings.Contains(err.Error(), "move target endpoints invalid") {
+			t.Fatalf("%s: %v; want the invalid-endpoint refusal", bad.name, err)
+		}
+		after := m.Publisher().WorkspaceState("a2")
+		line, _ := m.Publisher().VolumeAuthorityLine("a2")
+		if line.Epoch != a2.Epoch || after == nil || len(after.Moves) != 0 || after.Ack == nil || before.Ack == nil || *after.Ack != *before.Ack || after.Lease == nil || !after.Lease.Revoking {
+			t.Fatalf("%s: state changed by a refused move: line %+v state %+v", bad.name, line, after)
+		}
+	}
 	g, err := ws.MoveWorkspace(ctx, move("slot-1", d1, c1))
 	if err != nil {
 		t.Fatalf("move to node-a slot 1 while slot 0 is held: %v", err)

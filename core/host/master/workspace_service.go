@@ -3,7 +3,6 @@ package master
 import (
 	"context"
 	"fmt"
-	"net"
 	"strings"
 	"time"
 
@@ -146,6 +145,14 @@ func (s *services) MoveWorkspace(ctx context.Context, q *control.WorkspaceMove) 
 	}
 	// Remote reads never hold the workspace mutation lock. Re-read every
 	// local precondition below; Publisher checks the expected epoch atomically.
+	// A refusal is logged after the lock is released (deferred first, so it
+	// runs last): a slow log writer never holds workspaceMu.
+	var refusal string
+	defer func() {
+		if refusal != "" {
+			s.host.log.Printf("blockmaster: MoveWorkspace refused volume=%q request=%q: %s", q.GetVolumeId(), q.GetRequestId(), refusal)
+		}
+	}()
 	s.host.workspaceMu.Lock()
 	defer s.host.workspaceMu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -161,17 +168,20 @@ func (s *services) MoveWorkspace(ctx context.Context, q *control.WorkspaceMove) 
 		return nil, workspaceError(err)
 	}
 	// A volume without per-volume bindings may move to any port on the
-	// target node's registered hosts (a host runs several slots); the
-	// collision check below still refuses endpoints another assignment or
-	// binding owns. The host match is the proof the endpoints are that node's.
+	// target node's registered hosts (a host runs several slots): the host
+	// match ties the endpoints to that node's registration (it trusts the
+	// registration; it is not an identity proof). The collision check below
+	// still refuses endpoints another assignment or binding owns.
 	matched := !explicit && sameHost(q.GetTargetDataAddr(), target.DataAddr) && sameHost(q.GetTargetCtrlAddr(), target.CtrlAddr)
+	endpointErr := lifecycle.ValidateWorkspaceEndpoints(lifecycle.WorkspaceBinding{VolumeID: q.GetVolumeId(), ServerID: q.GetTargetServerId(), DataAddr: q.GetTargetDataAddr(), CtrlAddr: q.GetTargetCtrlAddr()})
 	for _, b := range bindings {
 		if !b.Retired && b.ServerID == q.GetTargetServerId() && b.DataAddr == q.GetTargetDataAddr() && b.CtrlAddr == q.GetTargetCtrlAddr() {
 			matched = true
 		}
 	}
-	var refusal string
 	switch {
+	case endpointErr != nil:
+		refusal = fmt.Sprintf("move target endpoints invalid: %v", endpointErr)
 	case oldHost == "":
 		refusal = fmt.Sprintf("move source unknown: no issued move or placement names replica %q at epoch %d", q.GetExpectedReplicaId(), q.GetExpectedEpoch())
 	case !ok:
@@ -182,7 +192,6 @@ func (s *services) MoveWorkspace(ctx context.Context, q *control.WorkspaceMove) 
 		refusal = fmt.Sprintf("move target endpoints %s/%s on %q are not registered (%s)", q.GetTargetDataAddr(), q.GetTargetCtrlAddr(), target.ServerID, registeredTargetEndpoints(target, bindings, explicit))
 	}
 	if refusal != "" {
-		s.host.log.Printf("blockmaster: MoveWorkspace refused volume=%q request=%q: %s", q.GetVolumeId(), q.GetRequestId(), refusal)
 		return nil, status.Error(codes.FailedPrecondition, refusal)
 	}
 	if err = s.host.workspaceEndpointsAvailable(lifecycle.WorkspaceBinding{VolumeID: q.GetVolumeId(), ServerID: target.ServerID, DataAddr: q.GetTargetDataAddr(), CtrlAddr: q.GetTargetCtrlAddr()}); err != nil {
@@ -199,15 +208,11 @@ func (s *services) MoveWorkspace(ctx context.Context, q *control.WorkspaceMove) 
 	return grantFact(r), nil
 }
 
-// sameHost reports whether two host:port addresses name the same host: the
-// literal host parts after SplitHostPort, no name resolution.
+// sameHost reports whether two host:port addresses name the same host:
+// canonical host parts (equivalent IP spellings equal), no name resolution.
 func sameHost(a, b string) bool {
-	ha, _, err := net.SplitHostPort(a)
-	if err != nil {
-		return false
-	}
-	hb, _, err := net.SplitHostPort(b)
-	return err == nil && ha != "" && ha == hb
+	ha := lifecycle.WorkspaceEndpointHost(a)
+	return ha != "" && ha == lifecycle.WorkspaceEndpointHost(b)
 }
 
 // registeredTargetEndpoints describes what a move to target may name: the

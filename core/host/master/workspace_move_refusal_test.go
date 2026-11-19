@@ -127,3 +127,76 @@ func TestWorkspaceMoveRefusalNamesTheMissingPrecondition(t *testing.T) {
 		}
 	}
 }
+
+// blockingWriter blocks the first write that contains marker until
+// released; other writes pass.
+type blockingWriter struct {
+	marker           string
+	entered, release chan struct{}
+	once             sync.Once
+}
+
+func (b *blockingWriter) Write(p []byte) (int, error) {
+	if !strings.Contains(string(p), b.marker) {
+		return len(p), nil
+	}
+	first := false
+	b.once.Do(func() { first = true })
+	if first {
+		close(b.entered)
+		<-b.release
+	}
+	return len(p), nil
+}
+
+// A refused move is logged after workspaceMu is released: while the log
+// writer is blocked, another workspace RPC still gets the lock.
+func TestWorkspaceMoveRefusalLogsOutsideTheWorkspaceLock(t *testing.T) {
+	w := &blockingWriter{marker: "MoveWorkspace refused", entered: make(chan struct{}), release: make(chan struct{})}
+	m, err := New(Config{Listen: "127.0.0.1:0", AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), WorkspaceRPC: true, Logger: log.New(w, "", 0),
+		WorkspaceHeadReader: func(context.Context, string) (authority.WorkspaceHead, error) { return authority.WorkspaceHead{}, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Start()
+	defer closeTestMaster(t, m)
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(w.release) }) }
+	defer release()
+	conn, err := grpc.NewClient(m.Addr(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	ws := control.NewWorkspaceServiceClient(conn)
+	if _, err := control.NewLifecycleServiceClient(conn).CreateVolume(ctx, &control.CreateVolumeRequest{VolumeId: "v", SizeBytes: 1 << 20, ReplicationFactor: 1}); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := ws.MoveWorkspace(ctx, &control.WorkspaceMove{RequestId: "r", VolumeId: "v", ExpectedReplicaId: "r1", ExpectedEpoch: 1, TargetReplicaId: "r1",
+			TargetServerId: "node-b", TargetDataAddr: "127.0.0.1:19301", TargetCtrlAddr: "127.0.0.1:19302", Kind: "clean"})
+		done <- err
+	}()
+	select {
+	case <-w.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the refusal was never logged")
+	}
+	qctx, qcancel := context.WithTimeout(ctx, 5*time.Second)
+	defer qcancel()
+	if _, err := ws.QueryWorkspace(qctx, &control.WorkspaceVolume{VolumeId: "v"}); err != nil {
+		t.Fatalf("workspace RPC while the refusal log is blocked: %v; want workspaceMu free", err)
+	}
+	release()
+	select {
+	case err := <-done:
+		if status.Code(err) != codes.FailedPrecondition {
+			t.Fatalf("move: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the move did not return after the log was released")
+	}
+}
