@@ -97,7 +97,7 @@ func TestWALStoreChunk_LedgerWriteAnonymousMemory(t *testing.T) {
 				var m runtime.MemStats
 				runtime.ReadMemStats(&m)
 				anon, _ := memoryAnonBytes()
-				t.Logf("LEDGER sample=%d elapsed=%v anonMiB=%d heapMiB=%d heapSysMiB=%d releasedMiB=%d GC=%d cp=%d next=%d", sample, time.Since(start), anon>>20, m.HeapAlloc>>20, m.HeapSys>>20, m.HeapReleased>>20, m.NumGC, s.CheckpointLSN(), s.NextLSN())
+				t.Logf("LEDGER sample=%d elapsed=%v anonMiB=%d heapMiB=%d heapSysMiB=%d releasedMiB=%d GC=%d cp=%d next=%d", sample, time.Since(start), anon>>20, m.HeapAlloc>>20, m.HeapSys>>20, m.HeapReleased>>20, m.NumGC, s.(*storage.WALStore).CheckpointLSN(), s.NextLSN())
 				f, e := os.Create(filepath.Join(profiles, fmt.Sprintf("ledger-%03d.pprof", sample)))
 				if e == nil {
 					_ = pprof.WriteHeapProfile(f)
@@ -152,7 +152,7 @@ func TestWALStoreChunk_LedgerWriteAnonymousMemory(t *testing.T) {
 			t.Fatal(err)
 		}
 		if (seq+1)%(64<<20/4096) == 0 {
-			t.Logf("LEDGER progress bytes=%d elapsed=%v cp=%d next=%d", (seq+1)*4096, time.Since(start), s.CheckpointLSN(), s.NextLSN())
+			t.Logf("LEDGER progress bytes=%d elapsed=%v cp=%d next=%d", (seq+1)*4096, time.Since(start), s.(*storage.WALStore).CheckpointLSN(), s.NextLSN())
 		}
 	}
 	if p.DurableStatuses()[0].Chunk.Stats.CutsOK != 0 {
