@@ -239,6 +239,10 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 		log.Printf("durable: chunk layer attach for volume=%s: %v (retrying)", volumeID, err)
 		select {
 		case <-waitCtx.Done():
+			ended = "provider closed during the retry backoff"
+			if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
+				ended = "deadline during the retry backoff"
+			}
 			return
 		case <-time.After(chunkAttachRetry):
 		}
@@ -393,8 +397,8 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 		// Attach preparation is gated. Seed the exact observed HEAD before
 		// its takeover CAS; only then finalize lazy attachment and expose I/O.
 		cfg.PrepareRestore = func(head storage.ChunkHead) error {
-			log.Printf("durable: claiming HEAD for volume=%s: gen=%d epoch=%d holder=%q state=%v remote_lsn=%d -> epoch=%d holder=%q",
-				volumeID, head.Gen, head.Epoch, head.Holder, head.State, head.RemoteLSN, cfg.Epoch, cfg.Holder)
+			log.Printf("durable: HEAD claim for volume=%s observed HEAD gen=%d epoch=%d holder=%q state=%v remote_lsn=%d; preparing",
+				volumeID, head.Gen, head.Epoch, head.Holder, head.State, head.RemoteLSN)
 			if baseLSN, complete := ws.InstalledBaseLSN(); complete {
 				// The fresh marker can outlive a full local BASE. It is not
 				// permission to seed backwards or to fill from an older HEAD.
@@ -424,8 +428,10 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 			return h.backend.seedAndRebase(func() error { return ws.SeedChunkFrontier(head.RemoteLSN) })
 		}
 		claimStart := time.Now()
+		log.Printf("durable: HEAD claim for volume=%s starting: target epoch=%d holder=%q", volumeID, cfg.Epoch, cfg.Holder)
 		head, err := storage.ClaimChunkHead(ctx, remote, cfg)
 		if err != nil {
+			log.Printf("durable: HEAD claim for volume=%s failed after %s: %v", volumeID, time.Since(claimStart), err)
 			return nil, fmt.Errorf("durable: restore HEAD claim: %w", err)
 		}
 		claimed := "claimed"

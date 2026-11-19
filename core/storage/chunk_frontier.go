@@ -67,28 +67,35 @@ func (s *WALStore) SeedChunkFrontier(lsn uint64) error {
 // publication succeeded; any failure publishes nothing and may be retried.
 // An unmapped v3 store has no map candidate for the new checkpoint and is
 // refused. Order: captureMu -> lifecycleMu -> (syncMu ->) mu.
-func (s *WALStore) seedChunkFrontierV3(lsn uint64) (err error) {
-	v := s.v3
-	start := time.Now()
-	s.captureMu.Lock()
-	defer s.captureMu.Unlock()
-	s.lifecycleMu.RLock()
-	defer s.lifecycleMu.RUnlock()
-	locked := time.Now()
-	var synced, published time.Time
-	defer func() {
-		if synced.IsZero() {
-			return // refused or already seeded: no I/O to time
-		}
+func (s *WALStore) seedChunkFrontierV3(lsn uint64) error {
+	var t seedTimes
+	err := s.seedChunkFrontierV3Locked(lsn, &t)
+	// Logged after the capture and lifecycle locks are released: a slow log
+	// writer never extends them. A refused or no-op seed did no I/O.
+	if !t.validated.IsZero() {
 		stage := func(from, to time.Time) string {
 			if to.IsZero() {
 				return "-"
 			}
 			return to.Sub(from).String()
 		}
-		log.Printf("storage: seed frontier %d: lock wait %s, data fsync %s, checkpoint publish %s, err=%v",
-			lsn, locked.Sub(start), synced.Sub(locked), stage(synced, published), err)
-	}()
+		log.Printf("storage: seed frontier %d: capture+lifecycle lock wait %s, store mutex+validation %s, data sync (incl. sync serialization) %s, checkpoint publish %s, err=%v",
+			lsn, t.locked.Sub(t.start), t.validated.Sub(t.locked), stage(t.validated, t.synced), stage(t.synced, t.published), err)
+	}
+	return err
+}
+
+// seedTimes are the stage boundaries of one v3 seed (zero: not reached).
+type seedTimes struct{ start, locked, validated, synced, published time.Time }
+
+func (s *WALStore) seedChunkFrontierV3Locked(lsn uint64, t *seedTimes) (err error) {
+	v := s.v3
+	t.start = time.Now()
+	s.captureMu.Lock()
+	defer s.captureMu.Unlock()
+	s.lifecycleMu.RLock()
+	defer s.lifecycleMu.RUnlock()
+	t.locked = time.Now()
 	s.mu.Lock()
 	if s.closed || s.chunk.Load() != nil {
 		s.mu.Unlock()
@@ -114,13 +121,14 @@ func (s *WALStore) seedChunkFrontierV3(lsn uint64) (err error) {
 	}
 	gen := v.recoverGen.Load()
 	s.mu.Unlock()
+	t.validated = time.Now()
 	err = s.syncFile(nil, s.fd.Sync)
-	synced = time.Now()
+	t.synced = time.Now()
 	if err != nil {
 		return fmt.Errorf("storage: seed data sync: %w", err)
 	}
 	_, err = s.publishCheckpointV3(lsn, true, gen)
-	published = time.Now()
+	t.published = time.Now()
 	if err != nil {
 		return fmt.Errorf("storage: seed frontier %d: %w", lsn, err)
 	}
