@@ -9,6 +9,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
 	"github.com/seaweedfs/seaweed-block/core/recovery"
 	"github.com/seaweedfs/seaweed-block/core/storage"
+	"runtime"
 	"sort"
 	"testing"
 	"time"
@@ -76,6 +77,9 @@ func runNoClientFlushBurst(t *testing.T, mode storage.WMode) {
 		r := h.Handle(ctx, nvme.IOCommand{Opcode: 0x01, NSID: 1, SLBA: uint64(off / 4096), NLB: transfer / 4096, Data: data})
 		durations = append(durations, time.Since(writeStart))
 		if r.AsError() != nil {
+			dump := make([]byte, 2<<20)
+			n := runtime.Stack(dump, true)
+			t.Logf("TIMEOUT STACKS\n%s", dump[:n])
 			t.Fatalf("NO FLUSH write bytes=%d elapsed=%v result=%+v cp=%d next=%d", off, time.Since(start), r, ws.CheckpointLSN(), ws.NextLSN())
 		}
 		if (off+transfer)%(16*1024*1024) == 0 {
