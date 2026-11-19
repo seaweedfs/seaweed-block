@@ -31,8 +31,8 @@ func TestWALStoreChunkFlags(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d.chunk.captureInterval != 0 || d.chunk.dirtyThreshold != 512 {
-		t.Fatalf("scheduler defaults interval %s threshold %d, want timer off and 512", d.chunk.captureInterval, d.chunk.dirtyThreshold)
+	if d.chunk.captureInterval != 15*time.Minute || d.chunk.dirtyThreshold != 512 {
+		t.Fatalf("scheduler defaults interval %s threshold %d, want 15m timer and 512", d.chunk.captureInterval, d.chunk.dirtyThreshold)
 	}
 	off, err := parseFlags(base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1",
 		"--chunk-capture-interval=0", "--chunk-dirty-threshold=0"))
