@@ -657,6 +657,9 @@ func (s *WALStore) appendWriteV3(lba uint32, data []byte, lsn uint64) (uint64, e
 	// A strictly newer append stays in the retained WAL suffix. It cannot
 	// invalidate coverage of an older checkpoint prefix; effective BASE and
 	// lifecycle mutations still invalidate the map proof at their own seams.
+	if p := s.v3.mapProof; p != nil && p.mutation.Load() >= counterMaxV3 {
+		return 0, ErrCounterExhausted
+	}
 	if err := s.rolloverCheckpointV3Locked(); err != nil {
 		return 0, err
 	}
@@ -706,6 +709,9 @@ func (s *WALStore) writeBatchV3Locked(startLBA uint32, blocks [][]byte, firstLSN
 	s.instr.recordWALCopy(len(payload), time.Since(copyStart))
 	n := uint64(len(blocks))
 	lastLSN := firstLSN + n - 1
+	if p := s.v3.mapProof; p != nil && p.mutation.Load() >= counterMaxV3 {
+		return nil, ErrCounterExhausted
+	}
 	e := walEntryV3{LSN: firstLSN, BatchCount: n, Type: walEntryWriteBatch, LBA: uint64(startLBA), Length: uint32(len(payload)), Data: payload}
 	if err := s.rolloverCheckpointV3Locked(); err != nil {
 		return nil, err

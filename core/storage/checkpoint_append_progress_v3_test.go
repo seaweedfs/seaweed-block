@@ -129,3 +129,21 @@ func TestCheckpointV3_EffectiveBaseWriteStillInvalidatesProof(t *testing.T) {
 		t.Fatal("stale BASE candidate changed slots")
 	}
 }
+
+// Removing append-driven increments must not bypass terminal exhaustion.
+func TestCheckpointV3_ExhaustedMutationCounterStillRefusesAppend(t *testing.T) {
+	for _, batch := range []bool{false, true} {
+		s, _ := newMappedCheckpointStoreV3(t)
+		before := s.NextLSN()
+		s.v3.mapProof.mutation.Store(counterMaxV3)
+		var err error
+		if batch {
+			_, err = s.WriteBatch(1, [][]byte{blk(1), blk(2)})
+		} else {
+			_, err = s.Write(1, blk(1))
+		}
+		if !errors.Is(err, ErrCounterExhausted) || s.NextLSN() != before || s.dm.len() != 0 {
+			t.Fatalf("exhaustion bypassed: batch=%t err=%v next=%d dirty=%d", batch, err, s.NextLSN(), s.dm.len())
+		}
+	}
+}
