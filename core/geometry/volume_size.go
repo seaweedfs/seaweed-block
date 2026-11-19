@@ -4,6 +4,8 @@ package geometry
 import "fmt"
 
 // MaxVolumeBytes is the uint32-LBA limit with the supported 4-KiB IO unit.
+// This byte cap assumes that IO unit: support for another block size must
+// enforce min(MaxVolumeBytes, (2^32-1)*blockSize) at creation as well.
 const MaxVolumeBytes uint64 = (16 << 40) - 4096
 
 // ValidateVolumeSize rejects an unsupported capacity before any allocation or
