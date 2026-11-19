@@ -108,8 +108,9 @@ func TestProbeVolumeUnheldHolderProcessDies(t *testing.T) {
 		t.Fatal(err)
 	}
 	exited := make(chan struct{})
-	go func() { _ = cmd.Wait(); close(exited) }() // reaped on every path
-	t.Cleanup(func() { // kill the holder and join its reaper, bounded
+	// Reaped on every path; the cleanup kills the holder and joins its reaper.
+	go func() { _ = cmd.Wait(); close(exited) }()
+	t.Cleanup(func() {
 		_ = cmd.Process.Kill()
 		select {
 		case <-exited:
