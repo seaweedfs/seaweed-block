@@ -63,6 +63,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"io"
 	"net"
 	"sync"
@@ -588,6 +589,8 @@ func (s *Session) handleRead(ctx context.Context, req *Request) {
 }
 
 func (s *Session) handleWrite(ctx context.Context, req *Request) {
+	ctx, cancel := frontend.WithWriteBudget(ctx, req.dispatchReadyAt)
+	defer cancel()
 	s.recordWriteCommand()
 	s.recordWriteDispatchWait(time.Since(req.dispatchReadyAt))
 	handlerStart := time.Now()

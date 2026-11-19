@@ -263,6 +263,8 @@ func (h *IOHandler) read(ctx context.Context, cmd IOCommand) IOResult {
 }
 
 func (h *IOHandler) write(ctx context.Context, cmd IOCommand) IOResult {
+	ctx, cancel := frontend.WithWriteBudget(ctx, time.Time{})
+	defer cancel()
 	if cmd.NLB == 0 {
 		return IOResult{SCT: SCTGeneric, SC: SCInvalidField, Reason: "NLB=0"}
 	}

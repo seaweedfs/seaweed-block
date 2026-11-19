@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -753,6 +754,11 @@ func (s *WALStore) Recover() (frontier uint64, err error) {
 // covers this LSN). Reads after this Write see the new bytes
 // immediately.
 func (s *WALStore) Write(lba uint32, data []byte) (uint64, error) {
+	return s.WriteContext(context.Background(), lba, data)
+}
+
+func (s *WALStore) WriteContext(ctx context.Context, lba uint32, data []byte) (uint64, error) {
+	deadline := s.writeAdmissionDeadline(ctx)
 	s.captureMu.RLock()
 	defer s.captureMu.RUnlock()
 	if err := s.stickyIOFault(); err != nil {
@@ -773,8 +779,15 @@ func (s *WALStore) Write(lba uint32, data []byte) (uint64, error) {
 	s.lifecycleMu.RLock()
 	defer s.lifecycleMu.RUnlock()
 
+	if err := s.writeBudgetError(ctx, deadline); err != nil {
+		return 0, err
+	}
 	if s.admission != nil {
-		if err := s.admission.Acquire(s.admissionTimeout); err != nil {
+		wait := s.admissionTimeout
+		if !deadline.IsZero() {
+			wait = time.Until(deadline)
+		}
+		if err := s.admission.acquireContext(ctx, wait); err != nil {
 			return 0, fmt.Errorf("storage: WAL admission: %w", err)
 		}
 		defer s.admission.Release()
@@ -793,6 +806,10 @@ func (s *WALStore) Write(lba uint32, data []byte) (uint64, error) {
 	// Recheck under the append lock: an append that failed while this call
 	// waited latched the fault and left nextLSN and the head unmoved.
 	if err := s.stickyIOFault(); err != nil {
+		s.mu.Unlock()
+		return 0, err
+	}
+	if err := s.writeBudgetError(ctx, deadline); err != nil {
 		s.mu.Unlock()
 		return 0, err
 	}
@@ -840,6 +857,11 @@ func (s *WALStore) Write(lba uint32, data []byte) (uint64, error) {
 }
 
 func (s *WALStore) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error) {
+	return s.WriteBatchContext(context.Background(), startLBA, blocks)
+}
+
+func (s *WALStore) WriteBatchContext(ctx context.Context, startLBA uint32, blocks [][]byte) ([]uint64, error) {
+	deadline := s.writeAdmissionDeadline(ctx)
 	s.captureMu.RLock()
 	defer s.captureMu.RUnlock()
 	if err := s.stickyIOFault(); err != nil {
@@ -862,8 +884,15 @@ func (s *WALStore) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error
 	s.lifecycleMu.RLock()
 	defer s.lifecycleMu.RUnlock()
 
+	if err := s.writeBudgetError(ctx, deadline); err != nil {
+		return nil, err
+	}
 	if s.admission != nil {
-		if err := s.admission.Acquire(s.admissionTimeout); err != nil {
+		wait := s.admissionTimeout
+		if !deadline.IsZero() {
+			wait = time.Until(deadline)
+		}
+		if err := s.admission.acquireContext(ctx, wait); err != nil {
 			return nil, fmt.Errorf("storage: WAL admission: %w", err)
 		}
 		defer s.admission.Release()
@@ -880,6 +909,10 @@ func (s *WALStore) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error
 		return nil, errors.New("storage: WriteBatch after Close")
 	}
 	if err := s.stickyIOFault(); err != nil { // recheck under the append lock
+		s.mu.Unlock()
+		return nil, err
+	}
+	if err := s.writeBudgetError(ctx, deadline); err != nil {
 		s.mu.Unlock()
 		return nil, err
 	}

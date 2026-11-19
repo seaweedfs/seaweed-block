@@ -543,6 +543,8 @@ func (b *StorageBackend) Read(ctx context.Context, offset int64, p []byte) (int,
 // overlay the partial range, write the full block back.
 // Every write is gated.
 func (b *StorageBackend) Write(ctx context.Context, offset int64, p []byte) (int, error) {
+	ctx, cancel := frontend.WithWriteBudget(ctx, time.Time{})
+	defer cancel()
 	iolatency.BackendEnter(ctx)
 	defer iolatency.BackendExit(ctx)
 	release, err := b.admit()
@@ -755,7 +757,13 @@ func (b *StorageBackend) writeBytes(ctx context.Context, offset int64, p []byte)
 			return total, fmt.Errorf("%w: no write observer installed", ErrReplicationAckUnavailable)
 		}
 
-		lsn, err := b.storage.Write(lba, block)
+		var lsn uint64
+		var err error
+		if writer, ok := b.storage.(storage.ContextWriter); ok {
+			lsn, err = writer.WriteContext(ctx, lba, block)
+		} else {
+			lsn, err = b.storage.Write(lba, block)
+		}
 		writeLock.Unlock()
 		if err != nil {
 			return total, fmt.Errorf("durable: write lba=%d: %w", lba, err)
@@ -791,7 +799,13 @@ func (b *StorageBackend) writeFullBlockBatch(ctx context.Context, startLBA uint3
 		blocks[i] = p[i*bs : (i+1)*bs]
 	}
 	unlock := b.lockLBARange(startLBA, blockCount)
-	lsns, err := batcher.WriteBatch(startLBA, blocks)
+	var lsns []uint64
+	var err error
+	if writer, ok := batcher.(storage.ContextWriteBatcher); ok {
+		lsns, err = writer.WriteBatchContext(ctx, startLBA, blocks)
+	} else {
+		lsns, err = batcher.WriteBatch(startLBA, blocks)
+	}
 	unlock()
 	if len(lsns) > 0 {
 		b.profile.recordBackendStorageWrite(len(lsns), true)

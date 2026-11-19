@@ -1,7 +1,9 @@
 package storage
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -32,5 +34,50 @@ func TestWALStoreV3WriteBudgetIncludesPostAdmissionWait(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestWALStoreV3WriteContextDeadlineIncludesCaptureWait(t *testing.T) {
+	for _, batch := range []bool{false, true} {
+		t.Run(fmt.Sprint(batch), func(t *testing.T) {
+			s, _ := newMappedCheckpointStoreV3(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+			defer cancel()
+			s.captureMu.Lock()
+			done := make(chan error, 1)
+			go func() {
+				var err error
+				if batch {
+					_, err = s.WriteBatchContext(ctx, 0, [][]byte{blk(1), blk(2)})
+				} else {
+					_, err = s.WriteContext(ctx, 0, blk(1))
+				}
+				done <- err
+			}()
+			<-ctx.Done()
+			s.captureMu.Unlock()
+			select {
+			case err := <-done:
+				if !errors.Is(err, ErrWALPressureTimeout) {
+					t.Fatal(err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("writer did not join")
+			}
+			if s.NextLSN() != 1 || s.dm.len() != 0 {
+				t.Fatal("expired capture waiter mutated")
+			}
+		})
+	}
+}
+
+func TestWALStoreV3WriteBudgetKeepsTerminalFault(t *testing.T) {
+	s, _ := newMappedCheckpointStoreV3(t)
+	injected := errors.New("terminal fsync fault")
+	s.latchV3(injected)
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	if _, err := s.WriteContext(ctx, 0, blk(1)); !errors.Is(err, injected) {
+		t.Fatalf("fault hidden by deadline: %v", err)
 	}
 }

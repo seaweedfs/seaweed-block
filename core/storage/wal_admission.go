@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync/atomic"
@@ -96,6 +97,13 @@ func (a *walAdmission) HardMark() float64         { return a.hardMark }
 // expires. Returns errWALFull on timeout, errVolumeClosed if the
 // store closes during the wait.
 func (a *walAdmission) Acquire(timeout time.Duration) error {
+	return a.acquireContext(context.Background(), timeout)
+}
+
+func (a *walAdmission) acquireContext(ctx context.Context, timeout time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return admissionContextError(err)
+	}
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 
@@ -117,6 +125,11 @@ func (a *walAdmission) Acquire(timeout time.Duration) error {
 			}
 			a.notifyFn()
 			select {
+			case <-ctx.Done():
+				if err := a.terminalFault(); err != nil {
+					return err
+				}
+				return admissionContextError(ctx.Err())
 			case <-deadline.C:
 				a.hardPressureWaitNs.Add(time.Since(hardStart).Nanoseconds())
 				if err := a.terminalFault(); err != nil {
@@ -157,6 +170,11 @@ func (a *walAdmission) Acquire(timeout time.Duration) error {
 		select {
 		case a.sem <- struct{}{}:
 			return nil
+		case <-ctx.Done():
+			if err := a.terminalFault(); err != nil {
+				return err
+			}
+			return admissionContextError(ctx.Err())
 		case <-deadline.C:
 			if err := a.terminalFault(); err != nil {
 				return err
@@ -183,4 +201,11 @@ func (a *walAdmission) terminalFault() error {
 		return a.faultFn()
 	}
 	return nil
+}
+
+func admissionContextError(err error) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return ErrWALPressureTimeout
+	}
+	return err
 }
