@@ -57,7 +57,7 @@ type preparedMapPublicationV3 struct {
 // Preparation takes the sidecar mutex and I/O only, before store/desc locks.
 func prepareMapPublicationV3(m *chunkLSNMapV3, d *mapProofEpochV3, g, C uint64, entries []chunkLSNEntryV3, prior *chunkMapCandidateV3) (*preparedMapPublicationV3, error) {
 	if m == nil || d == nil {
-		return nil, ErrMapCoverageStale
+		return nil, mapCoverageRefusal("map_binding_missing")
 	}
 	proof := d.snapshotV3()
 	c, e := m.Prepare(g, C, entries, prior)
@@ -65,7 +65,8 @@ func prepareMapPublicationV3(m *chunkLSNMapV3, d *mapProofEpochV3, g, C uint64, 
 		return nil, e
 	}
 	if !proof.validV3(d) {
-		return nil, ErrMapCoverageStale
+		m.abandonCandidateV3(c) // prepared but never publishable
+		return nil, mapCoverageRefusal("proof_changed_during_prepare")
 	}
 	return &preparedMapPublicationV3{candidate: c, proof: proof}, nil
 }
@@ -83,13 +84,13 @@ func sameMapTupleV3(d descriptorV3, c *chunkMapCandidateV3) bool {
 // even when none of its pages belong to the selected generation.
 func (p *descriptorPublisherV3) bindMapV3(c *chunkMapCandidateV3, d *mapProofEpochV3) error {
 	if c == nil || c.owner == nil || d == nil {
-		return ErrMapCoverageStale
+		return mapCoverageRefusal("map_binding_missing")
 	}
 	p.descMu.Lock()
 	current, other, otherValid := p.cur, p.other, p.otherValid
 	p.descMu.Unlock()
 	if !sameMapTupleV3(current, c) {
-		return ErrMapCoverageStale
+		return mapCoverageRefusal("map_tuple_changed")
 	}
 	if _, _, e := readChunkLSNMapV3(c.owner.fd, current, c.owner.chunkBlocks); e != nil {
 		return e
@@ -105,7 +106,7 @@ func (p *descriptorPublisherV3) bindMapV3(c *chunkMapCandidateV3, d *mapProofEpo
 	p.descMu.Lock()
 	defer p.descMu.Unlock()
 	if p.cur != current || p.otherValid != otherValid || (otherValid && p.other != other) {
-		return ErrMapCoverageStale
+		return mapCoverageRefusal("descriptor_changed_during_bind")
 	}
 	p.mapCurrent = c
 	p.mapDomain = d
@@ -114,7 +115,7 @@ func (p *descriptorPublisherV3) bindMapV3(c *chunkMapCandidateV3, d *mapProofEpo
 func (p *descriptorPublisherV3) validateMapPublicationV3(next descriptorV3, prepared *preparedMapPublicationV3) error {
 	if p.mapCurrent == nil {
 		if prepared != nil {
-			return ErrMapCoverageStale
+			return mapCoverageRefusal("map_not_bound")
 		}
 		return nil
 	} // dark core not bound yet
@@ -122,22 +123,22 @@ func (p *descriptorPublisherV3) validateMapPublicationV3(next descriptorV3, prep
 	if prepared != nil {
 		c = prepared.candidate
 		if c == nil || c.owner != p.mapCurrent.owner || !prepared.proof.validV3(p.mapDomain) {
-			return ErrMapCoverageStale
+			return mapCoverageRefusal("proof_changed")
 		}
 		if c.generation <= p.mapCurrent.generation || c.covered < p.mapCurrent.covered {
-			return ErrMapCoverageStale
+			return mapCoverageRefusal("candidate_superseded")
 		}
 	}
 	if !sameMapTupleV3(next, c) || c.covered < next.CheckpointLSN || c.covered > next.W {
-		return ErrMapCoverageStale
+		return mapCoverageRefusal("map_coverage_mismatch")
 	}
 	return nil
 }
 func (p *descriptorPublisherV3) publishMapV3(storeMu sync.Locker, snap func(), prepared *preparedMapPublicationV3, mutate func(*descriptorV3) error) (descriptorV3, error) {
 	if prepared == nil || prepared.candidate == nil {
-		return descriptorV3{}, ErrMapCoverageStale
+		return descriptorV3{}, mapCoverageRefusal("candidate_missing")
 	}
-	return p.publishWithMapV3(storeMu, snap, func(d *descriptorV3) error {
+	d, err := p.publishWithMapV3(storeMu, snap, func(d *descriptorV3) error {
 		if mutate != nil {
 			if e := mutate(d); e != nil {
 				return e
@@ -146,6 +147,18 @@ func (p *descriptorPublisherV3) publishMapV3(storeMu sync.Locker, snap func(), p
 		*d = prepared.candidate.descriptor(*d)
 		return nil
 	}, prepared)
+	if err != nil {
+		// Definite abandon: unless the slot I/O started (the candidate is
+		// the uncertain one, pinned until reopen), no slot can name it.
+		c := prepared.candidate
+		p.descMu.Lock()
+		unc := p.uncertain
+		if unc == nil || unc.MapRootLocator != c.rootOffset || unc.MapGeneration != c.generation {
+			prepared.abandonV3()
+		}
+		p.descMu.Unlock()
+	}
+	return d, err
 }
 
 // invalidateMapProofV3 is called under WALStore.mu at a lifecycle boundary.
@@ -187,7 +200,12 @@ func openDescriptorMapV3(path string, selected descriptorV3, fallback *descripto
 		if fallback.UUID != selected.UUID || fallback.MapLineage != selected.MapLineage || !sameGeometryV3(*fallback, selected) {
 			err = ErrMapInvalid
 		} else {
-			_, _, err = readChunkLSNMapV3(m.fd, *fallback, cb)
+			var refs []mapPageRefV3
+			if _, refs, err = readChunkLSNMapV3(m.fd, *fallback, cb); err == nil {
+				if sh, e := mapShapeForV3(*fallback, cb); e == nil {
+					m.registerRootV3(fallback.MapGeneration, fallback.MapRootLocator, sh.aligned, refs)
+				}
+			}
 		}
 		if err != nil {
 			_ = m.Close()

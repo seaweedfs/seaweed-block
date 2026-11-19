@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"github.com/seaweedfs/seaweed-block/core/storage"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -981,15 +982,16 @@ func TestStatusServer_DurableStatusEndpoint_EnabledAfterStart_ReturnsLineage(t *
 	}
 	defer func() { _ = s.Close(context.Background()) }()
 	s.SetDurableStatusSource(stubDurableStatusSource{vols: []durable.VolumeStatus{{
-		VolumeID:        "v1",
-		Path:            "/tmp/v1.bin",
-		Impl:            "smartwal",
-		ReplicaID:       "r1",
-		Epoch:           1,
-		EndpointVersion: 1,
-		Latched:         true,
-		Operational:     true,
-		Evidence:        "recovered LSN=0",
+		VolumeID:              "v1",
+		Path:                  "/tmp/v1.bin",
+		Impl:                  "smartwal",
+		ReplicaID:             "r1",
+		Epoch:                 1,
+		EndpointVersion:       1,
+		Latched:               true,
+		Operational:           true,
+		Evidence:              "recovered LSN=0",
+		CheckpointPersistence: &storage.CheckpointPersistenceStatus{Successes: 3, Refusals: 2, Failures: 1},
 	}}})
 
 	resp, err := http.Get("http://" + addr + "/status/durable?volume=v1")
@@ -1014,6 +1016,10 @@ func TestStatusServer_DurableStatusEndpoint_EnabledAfterStart_ReturnsLineage(t *
 	}
 	if len(body.Volumes) != 1 || !body.Volumes[0].Latched || !body.Volumes[0].Operational || body.Volumes[0].Epoch != 1 {
 		t.Fatalf("unexpected durable volume body: %+v", body.Volumes)
+	}
+	checkpoint := body.Volumes[0].CheckpointPersistence
+	if checkpoint == nil || checkpoint.Successes != 3 || checkpoint.Refusals != 2 || checkpoint.Failures != 1 {
+		t.Fatalf("checkpoint counters missing from HTTP response: %+v", checkpoint)
 	}
 }
 

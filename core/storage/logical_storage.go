@@ -1,6 +1,9 @@
 package storage
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 
 // LogicalStorage is the V3 persistence-seam contract. It separates the
 // "what data exists, what frontier is durable" question (storage) from
@@ -301,4 +304,13 @@ func (h *legacyInstallHandle) MarkBaseComplete() error {
 // per-LBA recovery semantics.
 type WriteBatcher interface {
 	WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error)
+}
+
+// ContextWriter and ContextWriteBatcher preserve one caller deadline across
+// storage admission. Implementations must not abandon already-started I/O.
+type ContextWriter interface {
+	WriteContext(context.Context, uint32, []byte) (uint64, error)
+}
+type ContextWriteBatcher interface {
+	WriteBatchContext(context.Context, uint32, [][]byte) ([]uint64, error)
 }

@@ -85,12 +85,13 @@ func TestWALStoreV3AdmissionReturnsFaultWhileWaitingForWriterSlot(t *testing.T) 
 	var once sync.Once
 	release := func() { once.Do(func() { close(resume) }) }
 	t.Cleanup(release)
-	sample := s.admission.walUsed
-	s.admission.walUsed = func() float64 {
-		used := sample() // its store/descriptor/writer locks have all released
-		close(entered)
+	var sampled sync.Once
+	// Observe the real semaphore wait's terminal check. Pressure sampling now
+	// uses the command-aware callback instead of the legacy float callback.
+	s.admission.faultFn = func() error {
+		sampled.Do(func() { close(entered) })
 		<-resume
-		return used
+		return s.stickyIOFault()
 	}
 	done := make(chan error, 1)
 	go func() { _, err := s.Write(0, blk(1)); done <- err }()

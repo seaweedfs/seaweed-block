@@ -7,6 +7,8 @@ package storage
 
 // Caller holds WALStore.mu. Higher-LSN writes update the max; a reused or
 // lower/equal effective LSN is conservative UNKNOWN, independent of the max.
+// A reused ordered LSN below a speculative max can set UNKNOWN here without
+// invalidating a prefix proof; the max and retained suffix stay conservative.
 // Capture is the only future owner allowed to clear UNKNOWN after a version
 // check. Keeping it set here cannot manufacture a remotely clean chunk.
 func (s *WALStore) recordMapWriteV3(lba, lsn uint64) {
@@ -33,9 +35,11 @@ func (s *WALStore) prepareOwnedMapCheckpointV3(cp uint64) (*preparedMapPublicati
 	if prior == nil || prior.owner != v.ownedMap || domain != v.mapProof {
 		v.pub.descMu.Unlock()
 		s.mu.RUnlock()
-		return nil, ErrMapCoverageStale
+		return nil, mapCoverageRefusal("map_binding_changed")
 	}
 	proof := domain.snapshotV3()
+	// Entries may already contain LSNs above cp or W from earlier appends: max-LSN
+	// entries are monotone and idempotent under retained-suffix replay.
 	entries := append([]chunkLSNEntryV3(nil), v.mapEntries...)
 	v.pub.descMu.Unlock()
 	s.mu.RUnlock()
@@ -44,7 +48,8 @@ func (s *WALStore) prepareOwnedMapCheckpointV3(cp uint64) (*preparedMapPublicati
 		return nil, err
 	}
 	if !proof.validV3(domain) {
-		return nil, ErrMapCoverageStale
+		v.ownedMap.abandonCandidateV3(c) // prepared but never publishable
+		return nil, mapCoverageRefusal("proof_changed_during_prepare")
 	}
 	return &preparedMapPublicationV3{candidate: c, proof: proof}, nil
 }
@@ -69,7 +74,7 @@ func (s *WALStore) persistOwnedMapCheckpointV3(highestLSN, recoveryGen uint64) e
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		if !v.flushLifetimeValidV3(recoveryGen) {
-			return ErrMapCoverageStale
+			return mapCoverageRefusal("recovery_lifetime_changed")
 		}
 		return s.rolloverCheckpointV3Locked()
 	}
@@ -116,14 +121,16 @@ func (s *WALStore) publishCheckpointV3(cp uint64, seed bool, recoveryGen uint64)
 	// The candidate proof alone is insufficient: it was prepared after extent
 	// I/O and could belong to a newer Recover lifetime than those bytes.
 	if !v.flushLifetimeValidV3(recoveryGen) {
-		return descriptorV3{}, ErrMapCoverageStale
+		prepared.abandonV3()
+		return descriptorV3{}, mapCoverageRefusal("recovery_lifetime_changed")
 	}
 	wack := v.wack.Load()
 	if seed {
 		wack = max(wack, cp)
 	}
 	if wack < cp {
-		return descriptorV3{}, ErrMapCoverageStale
+		prepared.abandonV3()
+		return descriptorV3{}, mapCoverageRefusal("checkpoint_above_wack")
 	}
 	s.mu.RLock()
 	retention := s.recoveryRetentionLSNs
