@@ -430,3 +430,10 @@ func TestBootstrap_Close_Idempotent(t *testing.T) {
 		t.Fatalf("second Close must be idempotent: %v", err)
 	}
 }
+
+func (s *indexFailingAuthorityStore) PutWorkspaceLostRanges(string, []authority.WorkspaceLostRange) error {
+	return nil
+}
+func (s *indexFailingAuthorityStore) LoadWorkspaceLostRanges() (map[string][]authority.WorkspaceLostRange, []error, error) {
+	return nil, nil, nil
+}

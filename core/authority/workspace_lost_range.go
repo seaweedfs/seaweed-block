@@ -25,15 +25,6 @@ type WorkspaceLostRange struct {
 	LostUntilNS  int64
 }
 
-// WorkspaceLostRangeStore is an optional AuthorityStore capability. The
-// ranges live beside the authority record, never in it, so the record body
-// and its checksum stay readable by binaries that predate them (those load
-// only *.v3auth.json). A store without it records no lost range.
-type WorkspaceLostRangeStore interface {
-	PutWorkspaceLostRanges(volumeID string, ranges []WorkspaceLostRange) error
-	LoadWorkspaceLostRanges() (map[string][]WorkspaceLostRange, []error, error)
-}
-
 // lostRangeFileExtension does not end in storeFileExtension: authority
 // loaders, old and new, never read these files.
 const lostRangeFileExtension = ".lostrange.json"
@@ -82,6 +73,9 @@ func (s *FileAuthorityStore) PutWorkspaceLostRanges(volumeID string, ranges []Wo
 	if werr == nil {
 		werr = f.Sync()
 	}
+	if werr == nil {
+		werr = testLostRangeFault("before-rename")
+	}
 	if cerr := f.Close(); werr == nil {
 		werr = cerr
 	}
@@ -98,6 +92,9 @@ func (s *FileAuthorityStore) PutWorkspaceLostRanges(volumeID string, ranges []Wo
 		return fmt.Errorf("authority_store: lost range directory open: %w", err)
 	}
 	serr := d.Sync()
+	if serr == nil {
+		serr = testLostRangeFault("directory-sync")
+	}
 	if cerr := d.Close(); serr == nil {
 		serr = cerr
 	}
@@ -149,14 +146,34 @@ func (s *FileAuthorityStore) LoadWorkspaceLostRanges() (map[string][]WorkspaceLo
 	return out, skips, nil
 }
 
+// testLostRangeFaultHook, test-only, fails PutWorkspaceLostRanges at a named
+// step ("before-rename", "directory-sync") when it returns an error.
+var testLostRangeFaultHook func(step string) error
+
+func testLostRangeFault(step string) error {
+	if h := testLostRangeFaultHook; h != nil {
+		return h(step)
+	}
+	return nil
+}
+
+// lostRangeLocked returns volume's recorded range for (requestID, newEpoch).
+// Called under p.mu.
+func (p *Publisher) lostRangeLocked(volume, requestID string, newEpoch uint64) (WorkspaceLostRange, bool) {
+	for _, e := range p.lostRanges[volume] {
+		if e.RequestID == requestID && e.NewEpoch == newEpoch {
+			return e, true
+		}
+	}
+	return WorkspaceLostRange{}, false
+}
+
 // recordLostRangeLocked durably records r for volume before the move record
-// that issues it is written; a store without the capability records nothing.
-// An entry whose move never issues is an orphan, ignored on read. Called
-// under p.mu.
+// that issues it is written. An entry whose move never issues is an orphan,
+// ignored on read. Called under p.mu.
 func (p *Publisher) recordLostRangeLocked(volume string, r WorkspaceLostRange) error {
-	ls, ok := p.store.(WorkspaceLostRangeStore)
-	if !ok {
-		return nil
+	if p.store == nil {
+		return fmt.Errorf("workspace forced move: no store to record the lost range")
 	}
 	next := make([]WorkspaceLostRange, 0, len(p.lostRanges[volume])+1)
 	for _, e := range p.lostRanges[volume] {
@@ -165,7 +182,7 @@ func (p *Publisher) recordLostRangeLocked(volume string, r WorkspaceLostRange) e
 		}
 	}
 	next = append(next, r)
-	if err := ls.PutWorkspaceLostRanges(volume, next); err != nil {
+	if err := p.store.PutWorkspaceLostRanges(volume, next); err != nil {
 		return fmt.Errorf("workspace forced move: record lost range: %w", err)
 	}
 	p.lostRanges[volume] = next

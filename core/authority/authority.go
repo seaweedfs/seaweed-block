@@ -285,14 +285,12 @@ func (p *Publisher) reloadFromStore() {
 		}
 	}
 	p.loadErrs = append(p.loadErrs, skips...)
-	if ls, ok := p.store.(WorkspaceLostRangeStore); ok {
-		ranges, lskips, lerr := ls.LoadWorkspaceLostRanges()
-		if lerr != nil {
-			panic(fmt.Sprintf("authority: lost range load failure: %v", lerr))
-		}
-		p.lostRanges = ranges
-		p.loadErrs = append(p.loadErrs, lskips...)
+	ranges, lskips, lerr := p.store.LoadWorkspaceLostRanges()
+	if lerr != nil {
+		panic(fmt.Sprintf("authority: lost range load failure: %v", lerr))
 	}
+	p.lostRanges = ranges
+	p.loadErrs = append(p.loadErrs, lskips...)
 	for _, rec := range records {
 		p.refreshLeaseViewLocked(rec.VolumeID)
 		if rec.Workspace != nil {

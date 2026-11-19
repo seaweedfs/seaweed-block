@@ -302,6 +302,15 @@ func (p *Publisher) prepareWorkspaceMoveLocked(ask AssignmentAsk, g workspaceGra
 			if r.Issued || !sameWorkspaceRequest(r, q) {
 				return nil, 0, fmt.Errorf("workspace move reservation differs")
 			}
+			// A forced reservation issues only with the exact range recorded
+			// before it; a missing one (a reservation older than lost ranges,
+			// or a skipped side file) is refused, never recomputed: a new
+			// request records a fresh range.
+			if r.Kind == "forced" {
+				if _, ok := p.lostRangeLocked(q.VolumeID, r.RequestID, r.NewEpoch); !ok {
+					return nil, 0, fmt.Errorf("workspace forced move reservation %s has no recorded lost range; retry with a new request id", r.RequestID)
+				}
+			}
 			s.Moves[idx].Issued = true
 			s.Lease = nil
 			s.Ack = nil
