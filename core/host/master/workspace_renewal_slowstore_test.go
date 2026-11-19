@@ -14,17 +14,41 @@ import (
 	"google.golang.org/grpc"
 )
 
-// slowGuardStore delays every workspace-lease Put once armed (issue #205).
+// slowGuardStore holds every workspace-lease Put, once armed, until a lease
+// renewal has succeeded after the Put entered (issue #205): a slow store write,
+// with the slowness defined by progress instead of a fixed sleep.
 type slowGuardStore struct {
 	authority.AuthorityStore
-	delayNS atomic.Int64
-	puts    atomic.Int64 // delayed (armed) lease writes: proves the stall was exercised
+	armed    atomic.Bool
+	renewals atomic.Int64  // successful renewals seen by the client
+	kick     chan struct{} // a renewal succeeded (buffered 1)
+	stop     chan struct{} // closed at cleanup: frees any held Put
+	held     atomic.Int64  // lease writes that were held and then completed
+}
+
+func newSlowGuardStore(s authority.AuthorityStore) *slowGuardStore {
+	return &slowGuardStore{AuthorityStore: s, kick: make(chan struct{}, 1), stop: make(chan struct{})}
+}
+
+func (s *slowGuardStore) renewed() {
+	s.renewals.Add(1)
+	select {
+	case s.kick <- struct{}{}:
+	default:
+	}
 }
 
 func (s *slowGuardStore) Put(r authority.DurableRecord) error {
-	if d := time.Duration(s.delayNS.Load()); d > 0 && r.Workspace != nil && r.Workspace.Lease != nil {
-		s.puts.Add(1)
-		time.Sleep(d)
+	if s.armed.Load() && r.Workspace != nil && r.Workspace.Lease != nil {
+		base := s.renewals.Load()
+		for s.renewals.Load() <= base {
+			select {
+			case <-s.kick:
+			case <-s.stop:
+				return s.AuthorityStore.Put(r)
+			}
+		}
+		defer s.held.Add(1)
 	}
 	return s.AuthorityStore.Put(r)
 }
@@ -35,6 +59,7 @@ func (s *slowGuardStore) Put(r authority.DurableRecord) error {
 type deadlineLeaseClient struct {
 	p        *authority.Publisher
 	inflight *sync.WaitGroup
+	slow     *slowGuardStore // optional: told about each successful renewal
 }
 
 func (c deadlineLeaseClient) RenewWorkspaceLease(ctx context.Context, id *control.WorkspaceIdentity, _ ...grpc.CallOption) (*control.WorkspaceLeaseFact, error) {
@@ -55,6 +80,9 @@ func (c deadlineLeaseClient) RenewWorkspaceLease(ctx context.Context, id *contro
 	}()
 	select {
 	case r := <-done:
+		if r.err == nil && c.slow != nil {
+			c.slow.renewed()
+		}
 		return r.fact, r.err
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -74,10 +102,11 @@ func TestWorkspaceLeaseGuardSurvivesSlowAuthorityStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	slow := &slowGuardStore{AuthorityStore: disk}
+	slow := newSlowGuardStore(disk)
 	var inflight sync.WaitGroup
 	t.Cleanup(func() {
-		slow.delayNS.Store(0)
+		slow.armed.Store(false)
+		close(slow.stop)
 		inflight.Wait()
 		if err := disk.Close(); err != nil {
 			t.Error(err)
@@ -89,7 +118,7 @@ func TestWorkspaceLeaseGuardSurvivesSlowAuthorityStore(t *testing.T) {
 	seedSkewPublisher(t, p, dir)
 	var stops atomic.Int32
 	g, err := volume.NewWorkspaceLeaseGuard(workspaceRPCView{frontend.Projection{VolumeID: "v", ReplicaID: "r", Epoch: 1, Healthy: true}},
-		deadlineLeaseClient{p: p, inflight: &inflight}, &control.WorkspaceIdentity{VolumeId: "v", ReplicaId: "r", Epoch: 1},
+		deadlineLeaseClient{p: p, inflight: &inflight, slow: slow}, &control.WorkspaceIdentity{VolumeId: "v", ReplicaId: "r", Epoch: 1},
 		func(context.Context) (uint64, error) { stops.Add(1); return 7, nil }, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -99,29 +128,39 @@ func TestWorkspaceLeaseGuardSurvivesSlowAuthorityStore(t *testing.T) {
 	go func() { runDone <- g.Run(ctx) }()
 	t.Cleanup(func() {
 		cancel()
-		select {
-		case <-runDone:
-		case <-time.After(10 * time.Second):
-			t.Error("guard did not settle")
-		}
+		<-runDone // Run returns on cancel; the go test timeout bounds a hang
 	})
-	for wait := time.Now().Add(3 * time.Second); !g.Projection().Healthy; time.Sleep(20 * time.Millisecond) {
-		if time.Now().After(wait) {
-			t.Fatal("first grant did not arrive")
+	for !g.Projection().Healthy { // progress: the first grant
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Every lease write is now held until a renewal succeeded during its hold,
+	// so a renewal that waited for the store would deadlock this test. The
+	// sampler records any fence while armed; three held writes must complete.
+	var fenced atomic.Bool
+	sampled := make(chan struct{})
+	slow.armed.Store(true)
+	go func() {
+		defer close(sampled)
+		for slow.armed.Load() {
+			if !g.Projection().Healthy || stops.Load() != 0 {
+				fenced.Store(true)
+			}
+			time.Sleep(20 * time.Millisecond)
 		}
-	}
-	slow.delayNS.Store(int64(2500 * time.Millisecond))
-	start := time.Now()
-	for time.Since(start) < 10*time.Second {
-		if !g.Projection().Healthy || stops.Load() != 0 {
-			t.Fatalf("guard fenced %s after the store slowed to 2.5 s per write (stop calls %d)", time.Since(start).Round(time.Millisecond), stops.Load())
+	}()
+	for slow.held.Load() < 3 {
+		if fenced.Load() {
+			break
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond)
 	}
-	if slow.puts.Load() == 0 {
-		t.Fatal("no lease write went through the 2.5 s stall: the test did not exercise it")
+	slow.armed.Store(false)
+	<-sampled
+	if fenced.Load() || !g.Projection().Healthy || stops.Load() != 0 {
+		t.Fatalf("guard fenced while lease writes were held behind renewals (held=%d renewals=%d stops=%d)", slow.held.Load(), slow.renewals.Load(), stops.Load())
 	}
-	t.Logf("guard stayed healthy for 10 s; %d lease writes took 2.5 s each", slow.puts.Load())
+	t.Logf("guard stayed healthy through %d held lease writes (%d renewals)", slow.held.Load(), slow.renewals.Load())
 }
 
 // A durable deletion-reservation write of an unrelated volume must not block
