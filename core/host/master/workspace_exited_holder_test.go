@@ -25,7 +25,9 @@ import (
 // and the delete is admitted. Real master runtime, real providers, the
 // in-memory ChunkRemote (read by the master through a HEAD reader).
 func TestWorkspaceExitedHolderForcedMoveThenCleanDelete(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	// The real lease horizon (1.5 x the 30 s TTL) plus skew takes ~45 s of
+	// this budget; the rest must cover the work after it under load and -race.
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 	remote := storage.NewMemChunkRemote()
 	reader := func(ctx context.Context, _ string) (authority.WorkspaceHead, error) {
