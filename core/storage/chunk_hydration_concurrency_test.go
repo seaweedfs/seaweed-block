@@ -278,3 +278,59 @@ func TestChunkHydration_CloseWakesCallerAndJoinsUninterruptibleGet(t *testing.T)
 		t.Fatal("Close did not settle after Get release")
 	}
 }
+
+// Only the old generation ignores cancellation; a spare worker can serve the new one.
+type staleHydrationRemote struct {
+	*fakeChunkRemote
+	oldKey           string
+	entered, release chan struct{}
+	once             sync.Once
+}
+
+func (r *staleHydrationRemote) Get(ctx context.Context, key string) ([]byte, error) {
+	if key == r.oldKey {
+		r.once.Do(func() { close(r.entered) })
+		<-r.release
+		return r.fakeChunkRemote.Get(context.Background(), key)
+	}
+	return r.fakeChunkRemote.Get(ctx, key)
+}
+func TestChunkHydration_NewGenerationDoesNotJoinStaleGet(t *testing.T) {
+	s, layer, remote, registered := hydrationFixture(t, 2, 64)
+	layer.stMu.Lock()
+	oldRef, newRef := layer.head.Chunks[2], layer.head.Chunks[3]
+	layer.stMu.Unlock()
+	r := &staleHydrationRemote{fakeChunkRemote: remote, oldKey: oldRef.Key, entered: make(chan struct{}), release: make(chan struct{})}
+	layer.remote = r
+	var once sync.Once
+	release := func() { once.Do(func() { close(r.release) }) }
+	t.Cleanup(release)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	old := startHydrationRead(t, s, ctx, 8)
+	waitHydrationRegistration(t, registered, 1)
+	select {
+	case <-r.entered:
+	case <-time.After(ctLocalBound):
+		t.Fatal("old Get not entered")
+	}
+	layer.stMu.Lock()
+	layer.head.Chunks[2] = newRef
+	layer.absentGen[2]++
+	layer.stMu.Unlock()
+	newer := startHydrationRead(t, s, ctx, 8)
+	waitHydrationRegistration(t, registered, 1)
+	select {
+	case got := <-newer:
+		if got.err != nil || !bytes.Equal(got.data, makeBlock(ctBlockSize, 0x4c)) {
+			t.Fatalf("new generation blocked by stale Get or wrong bytes: %v", got.err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		release()
+		t.Fatal("new generation joined cancellation-ignoring old Get")
+	}
+	release()
+	if got := hydrationOutcome(t, old); got.err != nil || !bytes.Equal(got.data, makeBlock(ctBlockSize, 0x4c)) {
+		t.Fatalf("old waiter failed to follow new generation: %v", got.err)
+	}
+}
