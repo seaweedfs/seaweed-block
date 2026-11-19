@@ -2,13 +2,14 @@ package durable_test
 
 import (
 	"context"
-	"github.com/seaweedfs/seaweed-block/core/frontend"
-	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
-	"github.com/seaweedfs/seaweed-block/core/storage"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 func TestProviderCreateCapacityPrecedesFreshMarker(t *testing.T) {
@@ -19,7 +20,7 @@ func TestProviderCreateCapacityPrecedesFreshMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { p.Close() })
-	// Invalid parent guarantees no giant allocation even when admission is removed.
+	// A blocked marker path prevents a giant allocation even without admission.
 	parent := filepath.Join(root, "v1.bin.chunkfresh")
 	if err := os.Mkdir(parent, 0700); err != nil {
 		t.Fatal(err)

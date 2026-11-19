@@ -3,7 +3,6 @@ package smartwal
 import (
 	"errors"
 	"fmt"
-	"github.com/seaweedfs/seaweed-block/core/geometry"
 	"hash/crc32"
 	"log"
 	"os"
@@ -12,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/geometry"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 

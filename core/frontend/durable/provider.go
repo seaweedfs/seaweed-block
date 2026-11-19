@@ -28,7 +28,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/seaweedfs/seaweed-block/core/geometry"
 	"io"
 	"log"
 	"os"
@@ -39,6 +38,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/geometry"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"github.com/seaweedfs/seaweed-block/core/storage/parallelwal"
 	"github.com/seaweedfs/seaweed-block/core/storage/smartwal"
