@@ -21,7 +21,7 @@ func TestWALStoreChunkV3_NoFlushPressureDiagnostic(t *testing.T) {
 	remote := storage.NewMemChunkRemote()
 	p, err := durable.NewDurableProvider(durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096,
-		NumBlocks: total / 4096, ChunkBlocks: 1024, ChunkCaptureInterval: 0,
+		NumBlocks: (1 << 30) / 4096, ChunkBlocks: 1024, ChunkCaptureInterval: 0,
 		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
 	}, v1View())
 	if err != nil {
@@ -49,7 +49,7 @@ func TestWALStoreChunkV3_NoFlushPressureDiagnostic(t *testing.T) {
 	}
 	ws := s.(*storage.WALStore)
 	t.Logf("before HEAD gen=%d remoteLSN=%d cp=%d next=%d retention=%d", before.Gen, before.RemoteLSN, ws.CheckpointLSN(), ws.NextLSN(), ws.RecoveryRetentionLSNs())
-	h := nvme.NewIOHandler(nvme.HandlerConfig{Backend: be, BlockSize: 4096, VolumeSize: total})
+	h := nvme.NewIOHandler(nvme.HandlerConfig{Backend: be, BlockSize: 4096, VolumeSize: 1 << 30})
 	data := make([]byte, transfer)
 	start := time.Now()
 	for off := 0; off < total; off += transfer {
