@@ -238,3 +238,42 @@ func TestWALStoreV3PressureProgressWithPendingCutOrClose(t *testing.T) {
 		})
 	}
 }
+
+func TestWALStoreV3FlushBatchCacheIsBoundToRecoveryLifetime(t *testing.T) {
+	s, err := createMappedWALStoreV3ForTest(filepath.Join(t.TempDir(), "volume"), 32, 4096, 64*1024, WModeStrict, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	s.DisableAutoFlushForRecoveryTest()
+	if _, err := s.WriteBatch(0, [][]byte{blk(1), blk(2), blk(3), blk(4)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	e := s.dm.snapshot()[0]
+	cache := &flushRecordCacheV3{recoveryGen: s.v3.recoverGen.Load()}
+	if _, _, err := s.flusher.readDirtyRecordV3Cached(e, cache); err != nil {
+		t.Fatal(err)
+	}
+	before := s.FlusherInstrumentation()
+	if err := s.flusher.flushOnce(); err != nil {
+		t.Fatal(err)
+	}
+	after := s.FlusherInstrumentation()
+	if got := after.WALRecordDecodeOps - before.WALRecordDecodeOps; got != 1 {
+		t.Fatalf("four-block batch decoded %d times, want1", got)
+	}
+	for i := uint32(0); i < 4; i++ {
+		if got, err := s.Read(i); err != nil || !bytes.Equal(got, blk(byte(i+1))) {
+			t.Fatalf("batch read%d: %v", i, err)
+		}
+	}
+	if _, err := s.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.flusher.readDirtyRecordV3Cached(e, cache); !errors.Is(err, ErrMapCoverageStale) {
+		t.Fatalf("old recovery lifetime cache accepted: %v", err)
+	}
+}
