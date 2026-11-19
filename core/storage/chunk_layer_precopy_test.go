@@ -44,8 +44,8 @@ func assertNoIntentsLeft(t *testing.T, f *fakeChunkRemote) {
 	}
 }
 
-// A chunk re-dirtied between staging and the barrier is copied again under
-// the barrier: HEAD has the newer bytes, never the stale stage. Both ways a
+// A chunk re-dirtied between staging and the barrier is copied again in
+// the COW window: HEAD has the newer bytes, never the stale stage. Both ways a
 // write can reach a staged chunk are covered: flushed to the extent (its
 // chunk version moves) and still in the WAL.
 func TestChunkPrecopy_RedirtiedStagedChunkIsRecopied(t *testing.T) {
@@ -68,8 +68,8 @@ func TestChunkPrecopy_RedirtiedStagedChunkIsRecopied(t *testing.T) {
 			if r.Stats.StageRounds != 1 || r.Stats.StagedChunks != 2 {
 				t.Fatalf("staging: %d rounds, %d chunks; want 1 round of 2", r.Stats.StageRounds, r.Stats.StagedChunks)
 			}
-			if r.Stats.StagedChunksUsed != 1 || r.Stats.BarrierCopyChunks != 2 || r.Stats.BarrierOverBound {
-				t.Fatalf("barrier: %d staged used, %d copied, over bound %v; want chunk 1 from staging, chunks 0 and 2 copied, within the bound",
+			if r.Stats.StagedChunksUsed != 1 || r.Stats.BarrierCopyChunks != 0 || r.Stats.CandidateChunks != 3 || r.Stats.BarrierOverBound {
+				t.Fatalf("barrier: %d staged used, %d copied, over bound %v; want chunk 1 from staging, chunks 0 and 2 copied outside the barrier",
 					r.Stats.StagedChunksUsed, r.Stats.BarrierCopyChunks, r.Stats.BarrierOverBound)
 			}
 			assertEveryHeadIsPrefixImage(t, f, w)
@@ -78,8 +78,8 @@ func TestChunkPrecopy_RedirtiedStagedChunkIsRecopied(t *testing.T) {
 	}
 }
 
-// Writes that outpace the staging: after three rounds the barrier copies
-// the rest even above the bound, counts it, and the image is still exact.
+// Writes that outpace staging: after three rounds the COW window copies
+// all remaining chunks outside the barrier, keeping the image exact.
 func TestChunkPrecopy_WritesOutpacingStagingGoOverBound(t *testing.T) {
 	s, f, l, w := precopyLayer(t, 2, 4)
 	l.testAfterStageHook = func(round int) {
@@ -94,11 +94,11 @@ func TestChunkPrecopy_WritesOutpacingStagingGoOverBound(t *testing.T) {
 	if r.Stats.StageRounds != 3 { // the ruling: at most three rounds
 		t.Fatalf("%d staging rounds, want 3", r.Stats.StageRounds)
 	}
-	if !r.Stats.BarrierOverBound || r.Stats.BarrierCopyChunks != 4 {
-		t.Fatalf("barrier copied %d chunks, over bound %v; want all 4, over the bound of 2", r.Stats.BarrierCopyChunks, r.Stats.BarrierOverBound)
+	if r.Stats.BarrierOverBound || r.Stats.BarrierCopyChunks != 0 || r.Stats.CandidateChunks != 4 {
+		t.Fatalf("barrier copied %d chunks, over bound %v; want all 4 candidates copied outside the barrier", r.Stats.BarrierCopyChunks, r.Stats.BarrierOverBound)
 	}
-	if got := l.Stats().BarrierOverBound; got != 1 {
-		t.Fatalf("BarrierOverBound counter %d, want 1", got)
+	if got := l.Stats().BarrierOverBound; got != 0 {
+		t.Fatalf("BarrierOverBound counter %d, want 0 for COW", got)
 	}
 	assertEveryHeadIsPrefixImage(t, f, w)
 	assertNoIntentsLeft(t, f)
@@ -112,8 +112,8 @@ func TestChunkPrecopy_NoStagingWithoutNeed(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if r.Stats.StageRounds != 0 || r.Stats.BarrierCopyChunks != tc.n || r.Stats.BarrierOverBound {
-			t.Fatalf("bound %d, %d dirty: %d rounds, %d copied, over %v; want no staging, all copied under the barrier",
+		if r.Stats.StageRounds != 0 || r.Stats.BarrierCopyChunks != 0 || r.Stats.CandidateChunks != tc.n || r.Stats.BarrierOverBound {
+			t.Fatalf("bound %d, %d dirty: %d rounds, %d copied, over %v; want no staging, all copied outside the barrier",
 				tc.bound, tc.n, r.Stats.StageRounds, r.Stats.BarrierCopyChunks, r.Stats.BarrierOverBound)
 		}
 		assertEveryHeadIsPrefixImage(t, f, w)
