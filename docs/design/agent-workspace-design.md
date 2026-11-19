@@ -51,6 +51,8 @@ flowchart LR
   H -->|"snapshot / fork = copy the root"| H2["snapshot or forked volume"]
   M["blockmaster: epoch + lease"] -->|"higher epoch"| T["another host: claim HEAD, lazy-load chunks"]
   T --> H
+  F -->|"one arrival deadline"| Q["bounded per-chunk shared hydration"]
+  Q -->|"owned fetch, caller may detach"| S
 ```
 
 - **Frontend:** the same ublk and NVMe/TCP code as the Kubernetes line ([core §1.1](block-design.md#11-frontends-and-the-backend-contract)). NVMe/TCP binds to loopback (`cmd/blockvolume/main.go` `enforceFrontendLoopbackBind`); ublk serves `/dev/ublkbN` on the same host (`--ublk-device`). The guest sees a plain virtio block device that the hypervisor attaches.
@@ -133,7 +135,7 @@ Per volume, under the chunk base directory in the filer (`core/frontend/chunksto
 
 `ChunkRemote.CASHead` (`core/frontend/chunkstore/chunk_remote.go`) refuses a lower epoch, any move of a `deleting`, `purging` or `deleted` HEAD, a `{gen, epoch}` mismatch and a lower `RemoteLSN`, then issues the filer's conditional `UpdateEntry` with `expected_extended = {swb.gen, swb.epoch}`. Only a definite refusal is a precondition failure; any other error is an unknown outcome.
 
-**Reads after a move.** A block absent locally is fetched from the chunk named in HEAD, bounded by `ReadMissTimeout` (default 30 s), and installed only if it does not overwrite a newer local extent version; the dirty map is consulted again after the fetch, so a newer WAL-only write still wins on reads, and HEAD's value may sit beneath it as the backing value, which is correct if a crash loses that unsynced write (`OnReadMiss`; walstore `readFromExtent`).
+**Reads after a move.** A block absent locally is fetched from the chunk named in HEAD, by a bounded per-chunk shared worker. Frontend callers share their arrival deadline across attach and all missing chunks; contextless internal readers retain `ReadMissTimeout` (default 30 s). Fetched bytes are installed only if it does not overwrite a newer local extent version; the dirty map is consulted again after the fetch, so a newer WAL-only write still wins on reads, and HEAD's value may sit beneath it as the backing value, which is correct if a crash loses that unsynced write (`OnReadMiss`; walstore `readFromExtent`).
 
 
 ### Copy-before-write in the cut window (native v3 implementation)
