@@ -159,6 +159,9 @@ func (l *chunkLayerImpl) hydrationWorker() {
 		cancel()
 		next.cancel()
 		l.stMu.Lock()
+		if hydrationContextCauseOnly(err) {
+			err = hydrationPending(err)
+		}
 		next.err = err
 		delete(l.hydration, next.idx)
 		close(next.done)
@@ -178,4 +181,28 @@ func (l *chunkLayerImpl) closeHydrationLocked() {
 			close(f.done)
 		}
 	}
+}
+
+// Joined physical/unknown errors must not become retryable just because they
+// also contain a context cause.
+func hydrationContextCauseOnly(err error) bool {
+	if err == context.DeadlineExceeded || err == context.Canceled {
+		return true
+	}
+	if err == nil {
+		return false
+	}
+	if j, ok := err.(interface{ Unwrap() []error }); ok {
+		causes := j.Unwrap()
+		if len(causes) == 0 {
+			return false
+		}
+		for _, cause := range causes {
+			if !hydrationContextCauseOnly(cause) {
+				return false
+			}
+		}
+		return true
+	}
+	return hydrationContextCauseOnly(errors.Unwrap(err))
 }

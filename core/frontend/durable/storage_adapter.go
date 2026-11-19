@@ -804,6 +804,10 @@ func (b *StorageBackend) readStorageBlock(ctx context.Context, lba uint32) ([]by
 }
 
 func hydrationPendingOnly(err error) bool {
+	return errors.Is(err, storage.ErrChunkHydrationPending) && hydrationPendingCauseOnly(err)
+}
+
+func hydrationPendingCauseOnly(err error) bool {
 	if err == storage.ErrChunkHydrationPending || err == context.DeadlineExceeded || err == context.Canceled {
 		return true
 	}
@@ -816,13 +820,13 @@ func hydrationPendingOnly(err error) bool {
 			return false
 		}
 		for _, cause := range causes {
-			if !hydrationPendingOnly(cause) {
+			if !hydrationPendingCauseOnly(cause) {
 				return false
 			}
 		}
 		return true
 	}
-	return hydrationPendingOnly(errors.Unwrap(err))
+	return hydrationPendingCauseOnly(errors.Unwrap(err))
 }
 
 // readBytes performs the byte-range → LBA-range fanout for Read.
