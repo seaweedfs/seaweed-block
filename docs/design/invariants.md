@@ -469,12 +469,6 @@ Notes:
 |---|---|---|---|---|---|---|
 | `INV-NVME-H2C-RANGE-001` | An H2CData range exceeding the expected transfer size is refused before slicing, including a uint32 offset-plus-length overflow; an exact-bound payload is preserved. | Frontend H2C receive validation; no storage state transition | `core/frontend/nvme/session.go` `recvH2CData` | `TestRecvH2CDataRangeBounds` (`core/frontend/nvme/h2c_bounds_test.go`) | — | ACTIVE |
 
-### HEAD publication metadata cost
-
-| ID | Invariant | Transition | Enforced in | Regression test | Model | Status |
-|---|---|---|---|---|---|---|
-| `INV-WS-HEAD-ROOT-READ-001` | A HEAD CAS reads and validates only the root entry; immutable segment availability does not gate publication. Normal GetHead still resolves and verifies segments. | M5 CAS | `core/frontend/chunkstore/chunk_remote.go` `getHeadRoot`, `CASHead` | `TestManifest_CASReadsOnlyRoot` | Cost/read-dependency property; no state or transition change to `CutPipeline` | ACTIVE |
-
 ## Part C. Change rules
 
 How a fix or a feature is calibrated against this model:
