@@ -54,8 +54,7 @@ func TestWALStoreV3WriteContextDeadlineIncludesCaptureWait(t *testing.T) {
 				}
 				done <- err
 			}()
-			<-ctx.Done()
-			s.captureMu.Unlock()
+			defer s.captureMu.Unlock()
 			select {
 			case err := <-done:
 				if !errors.Is(err, ErrWALPressureTimeout) {
@@ -79,5 +78,28 @@ func TestWALStoreV3WriteBudgetKeepsTerminalFault(t *testing.T) {
 	defer cancel()
 	if _, err := s.WriteContext(ctx, 0, blk(1)); !errors.Is(err, injected) {
 		t.Fatalf("fault hidden by deadline: %v", err)
+	}
+}
+
+func TestWALStoreV3WriteBudgetBoundsAppendLockWait(t *testing.T) {
+	s, _ := newMappedCheckpointStoreV3(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	s.mu.Lock()
+	done := make(chan error, 1)
+	go func() { _, err := s.WriteContext(ctx, 0, blk(1)); done <- err }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrWALPressureTimeout) {
+			s.mu.Unlock()
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		s.mu.Unlock()
+		t.Fatal("expired writer still waits for append lock")
+	}
+	s.mu.Unlock()
+	if s.NextLSN() != 1 || s.dm.len() != 0 {
+		t.Fatal("expired append waiter mutated")
 	}
 }

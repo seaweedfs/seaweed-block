@@ -37,3 +37,33 @@ func (s *WALStore) writeBudgetError(ctx context.Context, deadline time.Time) err
 	}
 	return nil
 }
+
+// A parked command owns no new physical I/O. Stop waiting for admission locks
+// on expiry without a helper goroutine that could acquire them after return.
+func (s *WALStore) acquireWriteLock(ctx context.Context, deadline time.Time, try func() bool, lock func()) error {
+	if deadline.IsZero() && ctx.Done() == nil {
+		lock()
+		return nil
+	}
+	if err := s.writeBudgetError(ctx, deadline); err != nil {
+		return err
+	}
+	if try() {
+		return nil
+	}
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	for {
+		if err := s.writeBudgetError(ctx, deadline); err != nil {
+			return err
+		}
+		if try() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return s.writeBudgetError(ctx, deadline)
+		case <-tick.C:
+		}
+	}
+}

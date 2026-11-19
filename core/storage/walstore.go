@@ -759,7 +759,9 @@ func (s *WALStore) Write(lba uint32, data []byte) (uint64, error) {
 
 func (s *WALStore) WriteContext(ctx context.Context, lba uint32, data []byte) (uint64, error) {
 	deadline := s.writeAdmissionDeadline(ctx)
-	s.captureMu.RLock()
+	if err := s.acquireWriteLock(ctx, deadline, s.captureMu.TryRLock, s.captureMu.RLock); err != nil {
+		return 0, err
+	}
 	defer s.captureMu.RUnlock()
 	if err := s.stickyIOFault(); err != nil {
 		return 0, err
@@ -776,7 +778,9 @@ func (s *WALStore) WriteContext(ctx context.Context, lba uint32, data []byte) (u
 	// admission Acquire may block up to admissionTimeout — under
 	// hard pressure it spins waiting for the flusher to drain.
 	s.beforeChunkMutation(uint64(lba), 1)
-	s.lifecycleMu.RLock()
+	if err := s.acquireWriteLock(ctx, deadline, s.lifecycleMu.TryRLock, s.lifecycleMu.RLock); err != nil {
+		return 0, err
+	}
 	defer s.lifecycleMu.RUnlock()
 
 	if err := s.writeBudgetError(ctx, deadline); err != nil {
@@ -797,7 +801,9 @@ func (s *WALStore) WriteContext(ctx context.Context, lba uint32, data []byte) (u
 	}
 
 	commitLockStart := time.Now()
-	s.mu.Lock()
+	if err := s.acquireWriteLock(ctx, deadline, s.mu.TryLock, s.mu.Lock); err != nil {
+		return 0, err
+	}
 	s.instr.recordWriteCommitLockWait(time.Since(commitLockStart))
 	if s.closed {
 		s.mu.Unlock()
@@ -862,7 +868,9 @@ func (s *WALStore) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error
 
 func (s *WALStore) WriteBatchContext(ctx context.Context, startLBA uint32, blocks [][]byte) ([]uint64, error) {
 	deadline := s.writeAdmissionDeadline(ctx)
-	s.captureMu.RLock()
+	if err := s.acquireWriteLock(ctx, deadline, s.captureMu.TryRLock, s.captureMu.RLock); err != nil {
+		return nil, err
+	}
 	defer s.captureMu.RUnlock()
 	if err := s.stickyIOFault(); err != nil {
 		return nil, err
@@ -881,7 +889,9 @@ func (s *WALStore) WriteBatchContext(ctx context.Context, startLBA uint32, block
 	}
 
 	s.beforeChunkMutation(uint64(startLBA), uint64(len(blocks)))
-	s.lifecycleMu.RLock()
+	if err := s.acquireWriteLock(ctx, deadline, s.lifecycleMu.TryRLock, s.lifecycleMu.RLock); err != nil {
+		return nil, err
+	}
 	defer s.lifecycleMu.RUnlock()
 
 	if err := s.writeBudgetError(ctx, deadline); err != nil {
@@ -902,7 +912,9 @@ func (s *WALStore) WriteBatchContext(ctx context.Context, startLBA uint32, block
 	}
 
 	commitLockStart := time.Now()
-	s.mu.Lock()
+	if err := s.acquireWriteLock(ctx, deadline, s.mu.TryLock, s.mu.Lock); err != nil {
+		return nil, err
+	}
 	s.instr.recordWriteCommitLockWait(time.Since(commitLockStart))
 	if s.closed {
 		s.mu.Unlock()
