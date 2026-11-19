@@ -21,6 +21,9 @@ func TestDurableProvider_CheckpointPersistenceStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { p.Close() })
+	if _, err := p.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := p.RecoverVolume(context.Background(), "v1"); err != nil {
 		t.Fatal(err)
 	}

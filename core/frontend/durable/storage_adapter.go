@@ -288,6 +288,13 @@ func (b *StorageBackend) durableStatus(volumeID, path, impl string) VolumeStatus
 	if c, ok := b.storage.(interface{ HolesSuspected() uint64 }); ok {
 		holes = c.HolesSuspected()
 	}
+	var checkpoint *storage.CheckpointPersistenceStatus
+	if reporter, ok := b.storage.(interface {
+		CheckpointPersistence() storage.CheckpointPersistenceStatus
+	}); ok {
+		snapshot := reporter.CheckpointPersistence()
+		checkpoint = &snapshot
+	}
 	writeProfile := b.WriteProfile()
 	if instrumented, ok := b.storage.(storage.WriteInstrumented); ok {
 		storageProfile := instrumented.WriteInstrumentation()
@@ -316,23 +323,24 @@ func (b *StorageBackend) durableStatus(volumeID, path, impl string) VolumeStatus
 		writeProfile.DirtyMapUpdateDurationNanos = storageProfile.DirtyMapUpdateDurationNanos
 	}
 	return VolumeStatus{
-		Warnings:        warnings,
-		HolesSuspected:  holes,
-		VolumeID:        volumeID,
-		Path:            path,
-		Impl:            impl,
-		ReplicaID:       id.ReplicaID,
-		Epoch:           id.Epoch,
-		EndpointVersion: id.EndpointVersion,
-		Latched:         id.Epoch > 0 && id.EndpointVersion > 0,
-		Operational:     b.operational.Load(),
-		FrontierKnown:   true,
-		DurableLSN:      durableLSN,
-		RetainedLSN:     retainedLSN,
-		HeadLSN:         headLSN,
-		Evidence:        evidence,
-		Closed:          closed,
-		WriteProfile:    writeProfile,
+		Warnings:              warnings,
+		HolesSuspected:        holes,
+		VolumeID:              volumeID,
+		Path:                  path,
+		Impl:                  impl,
+		ReplicaID:             id.ReplicaID,
+		Epoch:                 id.Epoch,
+		EndpointVersion:       id.EndpointVersion,
+		Latched:               id.Epoch > 0 && id.EndpointVersion > 0,
+		Operational:           b.operational.Load(),
+		FrontierKnown:         true,
+		DurableLSN:            durableLSN,
+		RetainedLSN:           retainedLSN,
+		HeadLSN:               headLSN,
+		Evidence:              evidence,
+		Closed:                closed,
+		WriteProfile:          writeProfile,
+		CheckpointPersistence: checkpoint,
 	}
 }
 

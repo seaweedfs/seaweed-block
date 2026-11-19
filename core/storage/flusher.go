@@ -3,7 +3,6 @@ package storage
 import (
 	"encoding/binary"
 	"fmt"
-	"log"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -111,6 +110,7 @@ func (f *flusher) runWithStartSignal(started chan<- struct{}) {
 	if started != nil {
 		close(started)
 	}
+	var diagnostics checkpointLogLimiter
 	for {
 		select {
 		case <-f.stopCh:
@@ -120,11 +120,11 @@ func (f *flusher) runWithStartSignal(started chan<- struct{}) {
 			return
 		case <-ticker.C:
 			if err := f.flushOnce(); err != nil {
-				log.Printf("storage: flusher: %v", err)
+				diagnostics.report(err, time.Now())
 			}
 		case <-f.notifyCh:
 			if err := f.flushOnce(); err != nil {
-				log.Printf("storage: flusher (notify): %v", err)
+				diagnostics.report(err, time.Now())
 			}
 		}
 	}
@@ -283,6 +283,7 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 		} else {
 			publishErr = store.persistCheckpointAndRelease(maxLSN, maxLSNPhys, maxLSNEntrySize)
 		}
+		f.instr.recordCheckpoint(publishErr)
 		if err := publishErr; err != nil {
 			return fmt.Errorf("flusher: persist checkpoint %d: %w", maxLSN, err)
 		}
@@ -313,7 +314,7 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 		store.mu.Lock()
 		if !store.v3.flushLifetimeValidV3(recoveryGen) {
 			store.mu.Unlock()
-			return ErrMapCoverageStale
+			return mapCoverageRefusal("recovery_lifetime_changed")
 		}
 		checkpoint = store.checkpointLSN
 		if checkpoint >= maxLSN && maxLSN+1 > store.walTail {
