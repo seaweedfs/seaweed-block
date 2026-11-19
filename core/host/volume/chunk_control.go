@@ -159,6 +159,7 @@ const (
 	codeFenced             = "fenced"
 	codeHeadConflict       = "head_conflict"
 	codeClosing            = "closing"
+	codeDetachAborted      = "detach_aborted" // the detach did not happen; the volume keeps serving here
 	codeLSNBehind          = "lsn_behind"
 	codeInternal           = "internal"
 	codeBadRequest         = "bad_request"
@@ -231,6 +232,9 @@ func chunkErrorCode(err error) (int, string, bool) {
 	switch {
 	case errors.As(err, &ce):
 		return catalogStatus(ce.Code), ce.Code, ce.Retryable
+	case errors.Is(err, durable.ErrDetachAborted):
+		// Before its cause: nothing was published and serving resumed here.
+		return http.StatusConflict, codeDetachAborted, true
 	case errors.Is(err, storage.ErrChunkLayerFenced):
 		return http.StatusConflict, codeFenced, false
 	case errors.Is(err, storage.ErrChunkCASOutcomeUnknown):

@@ -222,6 +222,8 @@ func TestStatusServer_ChunkErrorBodyIsTyped(t *testing.T) {
 		{fmt.Errorf("x: %w", storage.ErrChunkRemoteUnavailable), "remote_unavailable", 503, true},
 		{fmt.Errorf("x: %w", storage.ErrChunkLayerClosed), "closing", 503, false},
 		{fmt.Errorf("x: %w", storage.ErrChunkLayerDetached), "closing", 409, false},
+		{fmt.Errorf("%w: %w", durable.ErrDetachAborted, storage.ErrChunkRemoteUnavailable), "detach_aborted", 409, true},
+		{fmt.Errorf("%w: %w (settle: %w)", durable.ErrDetachOutcomeUnknown, storage.ErrChunkCASOutcomeUnknown, storage.ErrChunkRemoteUnavailable), "outcome_unknown", 503, true},
 		{fmt.Errorf("%w: %w: cut LSN 1, HEAD remote_lsn 10", storage.ErrChunkCaptureRefused, storage.ErrChunkLSNBehind), "lsn_behind", 409, false},
 		{&chunkstore.CatalogError{Code: chunkstore.CodeInvalidLabel, Message: "m"}, "invalid_label", 400, false},
 		{fmt.Errorf("x: %w", durable.ErrNotChunkVolume), "not_chunk_volume", 409, false},
