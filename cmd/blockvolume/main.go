@@ -272,8 +272,8 @@ func parseFlags(args []string) (flags, error) {
 		}
 	}
 	if f.durableRoot != "" {
-		if err := geometry.ValidateBlockGeometry(uint64(f.durableBlocks), uint64(f.durableBlockSize)); err != nil {
-			return flags{}, fmt.Errorf("--durable-blocks/--durable-blocksize: %w", err)
+		if _, _, err := durableCreateGeometry(f); err != nil {
+			return flags{}, err
 		}
 	}
 	if f.iscsiCHAPUser == "" {
@@ -529,6 +529,22 @@ type nvmeReadyLine struct {
 	SubsysNQN string `json:"subsys_nqn"`
 }
 
+// durableCreateGeometry leaves existing volumes in open-only mode. If the
+// observed file disappears before Open, NumBlocks=0 prevents a replacement
+// from being created using narrowed or otherwise ignored CLI values.
+func durableCreateGeometry(f flags) (uint32, int, error) {
+	path := filepath.Join(f.durableRoot, f.volumeID+".bin")
+	if _, err := os.Stat(path); err == nil {
+		return 0, 0, nil
+	} else if !os.IsNotExist(err) {
+		return 0, 0, fmt.Errorf("durable volume geometry: %w", err)
+	}
+	if err := geometry.ValidateBlockGeometry(uint64(f.durableBlocks), uint64(f.durableBlockSize)); err != nil {
+		return 0, 0, fmt.Errorf("--durable-blocks/--durable-blocksize: %w", err)
+	}
+	return uint32(f.durableBlocks), int(f.durableBlockSize), nil
+}
+
 func run(f flags) int {
 	readyCh := make(chan adapter.AssignmentInfo, 16)
 
@@ -597,11 +613,12 @@ func run(f flags) int {
 	var durableProv *durable.DurableProvider
 	var workspaceRemoteFor func(string) (storage.ChunkRemote, error)
 	if f.durableRoot != "" {
+		blocks, blockSize, geometryErr := durableCreateGeometry(f)
 		cfg := durable.ProviderConfig{
 			Impl:                          durable.ImplName(f.durableImpl),
 			StorageRoot:                   f.durableRoot,
-			BlockSize:                     int(f.durableBlockSize),
-			NumBlocks:                     uint32(f.durableBlocks),
+			BlockSize:                     blockSize,
+			NumBlocks:                     blocks,
 			WALRetentionLSNs:              f.walRetentionLSNs,
 			WALMultiBlockRecords:          f.durableWALMultiBlockRecords,
 			WALRecoveryTestDisableFlusher: f.durableWALRecoveryTestDisableFlusher,
@@ -621,7 +638,11 @@ func run(f flags) int {
 				defer chunk.close()
 			}
 		}
-		dp, err := durable.NewDurableProvider(cfg, h.ProjectionView())
+		var dp *durable.DurableProvider
+		err := geometryErr
+		if err == nil {
+			dp, err = durable.NewDurableProvider(cfg, h.ProjectionView())
+		}
 		if chunkErr != nil {
 			err = chunkErr
 		}
