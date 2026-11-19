@@ -655,7 +655,7 @@ func (s *WALStore) appendWriteV3(lba uint32, data []byte, lsn uint64) (uint64, e
 		return 0, errWALBindingV3 // a half-published reset before its Recover
 	}
 	// A strictly newer append stays in the retained WAL suffix. It cannot
-	// invalidate coverage of an older checkpoint prefix; effective BASE and
+	// invalidate coverage of an older checkpoint prefix; BASE writes, capture UNKNOWN clearing and
 	// lifecycle mutations still invalidate the map proof at their own seams.
 	if p := s.v3.mapProof; p != nil && p.mutation.Load() >= counterMaxV3 {
 		return 0, ErrCounterExhausted
