@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -312,5 +313,61 @@ func TestDurableHydration_ReadAndRMWPreserveCallerBudget(t *testing.T) {
 				t.Fatal("refused RMW appended data")
 			}
 		})
+	}
+}
+
+func TestDurableHydration_RMWFenceWinsCallerExpiry(t *testing.T) {
+	r := &heldHydrationRemote{ChunkRemote: seededRemote(t), gate: make(chan struct{}), entered: make(chan struct{}, 1)}
+	view := v1View()
+	p := chunkProvider(t, t.TempDir(), r, view, 0)
+	t.Cleanup(r.release)
+	openRecovered(t, p)
+	b, err := p.Open(context.Background(), "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := p.EnsureStorage("v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := store.NextLSN()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	joined := make(chan struct{})
+	result := make(chan error, 1)
+	t.Cleanup(func() {
+		cancel()
+		r.release()
+		select {
+		case <-joined:
+		case <-time.After(time.Second):
+			t.Error("fenced hydration waiter not joined")
+		}
+	})
+	go func() {
+		defer close(joined)
+		n, err := b.Write(ctx, 33*4096+1, []byte{0x74})
+		if n != 0 {
+			err = fmt.Errorf("unexpected RMW prefix %d: %w", n, err)
+		}
+		result <- err
+	}()
+	select {
+	case <-r.entered:
+	case <-time.After(time.Second):
+		t.Fatal("cold read never reached Get")
+	}
+	view.set(healthyProj(frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 4, EndpointVersion: 1}))
+	cancel()
+	select {
+	case err := <-result:
+		if store.NextLSN() != before {
+			t.Fatal("fenced RMW appended data")
+		}
+		if !errors.Is(err, frontend.ErrStalePrimary) || errors.Is(err, frontend.ErrBackendBusy) {
+			t.Fatalf("expiry hid fencing: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("fenced waiter did not detach")
 	}
 }
