@@ -44,10 +44,6 @@ func (l *chunkLayerImpl) OnReadMissContext(ctx context.Context, lba uint64) ([]b
 			l.stMu.Unlock()
 			return nil, errChunkLayerClosed
 		}
-		if l.fenced {
-			l.stMu.Unlock()
-			return nil, errChunkLayerFenced
-		}
 		if !l.absent[idx] || l.localBlocks[lba] {
 			l.stMu.Unlock()
 			return nil, nil
