@@ -36,6 +36,8 @@ func (s *WALStore) prepareOwnedMapCheckpointV3(cp uint64) (*preparedMapPublicati
 		return nil, ErrMapCoverageStale
 	}
 	proof := domain.snapshotV3()
+	// Entries may already contain LSNs above cp from earlier appends: max-LSN
+	// entries are monotone and idempotent under retained-suffix replay.
 	entries := append([]chunkLSNEntryV3(nil), v.mapEntries...)
 	v.pub.descMu.Unlock()
 	s.mu.RUnlock()
