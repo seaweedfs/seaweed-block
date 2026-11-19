@@ -19,10 +19,24 @@ type replicationIngress struct {
 	addr, volumeID, floorPath string
 	store                     storage.LogicalStorage
 	dualLane                  bool
-	listener                  *transport.ReplicaListener
-	dual                      net.Listener
-	cancel                    context.CancelFunc
-	closed                    bool
+	// rf1Only, when set, refuses every role with replica slots with this reason
+	// (walstore-chunk). The host latches the error: no role is adopted, not Healthy.
+	rf1Only  string
+	listener *transport.ReplicaListener
+	dual     net.Listener
+	cancel   context.CancelFunc
+	closed   bool
+}
+
+// newReplicationIngress is the volume's ingress from its flags; a walstore-chunk
+// volume refuses every role with replica slots (chunkRF1Reason).
+func newReplicationIngress(f flags, store storage.LogicalStorage) *replicationIngress {
+	r := &replicationIngress{addr: f.dataAddr, store: store, volumeID: f.volumeID,
+		floorPath: replicaFloorPath(f), dualLane: f.recoveryMode == "dual-lane"}
+	if f.durableImpl == "walstore-chunk" {
+		r.rf1Only = chunkRF1Reason
+	}
+	return r
 }
 
 func (r *replicationIngress) FenceAsPrimary(epoch uint64) error {
@@ -43,6 +57,9 @@ func (r *replicationIngress) FenceAsPrimaryWithPeers(epoch uint64, hasPeers bool
 		r.stopLocked(true)
 		return nil
 	}
+	if r.rf1Only != "" {
+		return fmt.Errorf("volume %s refuses a primary role with replica peers at epoch %d: %s", r.volumeID, epoch, r.rf1Only)
+	}
 	return r.roleLocked(epoch, true)
 }
 func (r *replicationIngress) AdmitAsReplica(epoch uint64) error {
@@ -50,6 +67,9 @@ func (r *replicationIngress) AdmitAsReplica(epoch uint64) error {
 	defer r.mu.Unlock()
 	if r.closed {
 		return fmt.Errorf("replication ingress closed")
+	}
+	if r.rf1Only != "" {
+		return fmt.Errorf("volume %s refuses a replica role at epoch %d: %s", r.volumeID, epoch, r.rf1Only)
 	}
 	return r.roleLocked(epoch, false)
 }

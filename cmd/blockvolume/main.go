@@ -871,8 +871,7 @@ func run(f flags) int {
 
 		// No replication socket exists until a master assignment includes
 		// replica slots. The role gate starts/fences both lanes before admission.
-		replListen = &replicationIngress{addr: f.dataAddr, store: store,
-			volumeID: f.volumeID, floorPath: replicaFloorPath(f), dualLane: f.recoveryMode == "dual-lane"}
+		replListen = newReplicationIngress(f, store)
 		if err := h.SetSelfFence(replListen); err != nil {
 			fmt.Fprintln(os.Stderr, "blockvolume: replica listener role:", err)
 			replListen.Stop()
