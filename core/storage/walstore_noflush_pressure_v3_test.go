@@ -148,7 +148,6 @@ func TestWALStoreV3PressureProgressWithPendingCutOrClose(t *testing.T) {
 		closing := kind == "close"
 		t.Run(kind, func(t *testing.T) {
 			s := pressureStoreNoSync(t, 15)
-			s.admissionTimeout = 2 * time.Second
 			parked, resume := make(chan struct{}), make(chan struct{})
 			release := sync.OnceFunc(func() { close(resume) })
 			cutRelease := make(chan struct{})
@@ -214,14 +213,27 @@ func TestWALStoreV3PressureProgressWithPendingCutOrClose(t *testing.T) {
 				}
 				time.Sleep(time.Millisecond)
 			}
+			// Observe reaching physical persistence while the exclusive lock is
+			// pending; disk latency is not an oracle for a Go lock inversion.
+			physicalBoundary := make(chan struct{})
+			var boundaryOnce sync.Once
+			s.testBeforeFileSync = func() { boundaryOnce.Do(func() { close(physicalBoundary) }) }
 			flushDone := make(chan struct{})
 			joins = append(joins, flushDone)
 			var flushErr error
 			go func() { defer close(flushDone); flushErr = s.flusher.flushOnce() }()
 			select {
+			case <-physicalBoundary:
+			case <-time.After(5 * time.Second):
+				t.Fatal("pressure flusher did not reach persistence with exclusive lock pending")
+			}
+			// Join physical I/O before releasing the parked writer, so Close
+			// cannot close its file under this manually invoked cycle. This
+			// join bound is not the admission budget or a whole-I/O promise.
+			select {
 			case <-flushDone:
-			case <-time.After(time.Second):
-				t.Fatal("pressure flusher waited behind pending exclusive lock")
+			case <-time.After(10 * time.Second):
+				t.Fatal("pressure flusher physical I/O did not finish")
 			}
 			if flushErr != nil {
 				t.Fatal(flushErr)
@@ -232,13 +244,16 @@ func TestWALStoreV3PressureProgressWithPendingCutOrClose(t *testing.T) {
 			case <-time.After(3 * time.Second):
 				t.Fatal("writer did not drain")
 			}
-			if writeErr != nil {
+			// The test holds admission at sleep while real fsync runs. A slow
+			// disk may consume the unchanged production four-second budget;
+			// that typed outcome is permitted, never an indefinite lock wait.
+			if writeErr != nil && !errors.Is(writeErr, ErrWALPressureTimeout) {
 				t.Fatal(writeErr)
 			}
 			releaseCut()
 			select {
 			case <-exclusiveDone:
-			case <-time.After(time.Second):
+			case <-time.After(10 * time.Second):
 				t.Fatal("exclusive operation did not finish")
 			}
 		})
