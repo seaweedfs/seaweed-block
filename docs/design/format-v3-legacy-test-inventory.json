@@ -1156,7 +1156,11 @@
       "TestDescriptorV3SlotWriteErrorLatchesAndPinsTheCandidate",
       "TestWALStoreV3HalfResetRefusesWritesUntilRecover"
     ],
-    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b",
+    "coverage_status": "partial",
+    "coverage_gaps": [
+      "Native real-Recover descriptor-publication write/fsync failure, refused append and subsequent safe recovery/reopen schedule is not established by standalone publisher-failure or half-reset controls."
+    ]
   },
   {
     "file": "core/storage/walstore_midhistory_hole_test.go",
@@ -1707,7 +1711,11 @@
       "TestWALStoreV3ReclaimKeepsPartialBatchAndRetention",
       "TestWALStoreV3ReclaimRolloverProgressWithoutNewCheckpoint"
     ],
-    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
+    "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b",
+    "coverage_status": "partial",
+    "coverage_gaps": [
+      "Native batch-refusal schedule must explicitly assert unchanged physical head and wrap/padding bytes; indivisible-record/retention controls do not establish that refusal oracle."
+    ]
   },
   {
     "file": "core/storage/walstore_persisted_tail_test.go",

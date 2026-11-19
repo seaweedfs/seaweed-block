@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -114,36 +115,23 @@ func TestWALStoreV3AdmissionStallDeadlineAndResume(t *testing.T) {
 		}
 		t.Fatalf("stalled flusher must reach bounded deadline: %v", err)
 	}
-	notified := make(chan struct{}, 1)
-	notify := s.admission.notifyFn
-	s.admission.notifyFn = func() {
-		select {
-		case notified <- struct{}{}:
-		default:
-		}
-		notify()
-	}
-	done := make(chan error, 1)
-	go func() {
-		err := s.admission.Acquire(time.Second)
-		if err == nil {
-			s.admission.Release()
-		}
-		done <- err
-	}()
+	parked, release, done := holdHardAdmissionWaitV3(t, s)
 	select {
-	case <-notified:
-	case <-time.After(time.Second):
-		t.Fatal("pressure did not wake flusher")
+	case <-parked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("admission never entered hard-pressure sleep")
 	}
 	select {
 	case err := <-done:
-		t.Fatalf("admitted before stalled flusher reclaimed: %v", err)
+		t.Fatalf("admitted before actual reclaim: %v", err)
 	default:
 	}
 	if err := s.flusher.flushOnce(); err != nil {
 		t.Fatal(err)
 	}
+	// This assertion budget starts AFTER disk fsync/checkpoint work. The
+	// controller retains the store's real admission deadline, not an artificial1s.
+	release()
 	select {
 	case err := <-done:
 		if err != nil {
@@ -159,13 +147,63 @@ func TestWALStoreV3AdmissionStallDeadlineAndResume(t *testing.T) {
 
 func TestWALStoreV3AdmissionCloseEndsPressureWait(t *testing.T) {
 	s := admissionPressureV3(t, 15)
+	parked, release, done := holdHardAdmissionWaitV3(t, s)
+	select {
+	case <-parked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no existing hard-pressure waiter")
+	}
+	// This is an existing controller waiter. An actual Write holds lifecycleMu
+	// through admission; this test does not claim to change that Close protocol.
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.admission.Acquire(time.Second); !errors.Is(err, errVolumeClosed) {
+	release()
+	select {
+	case err := <-done:
+		if !errors.Is(err, errVolumeClosed) {
+			t.Fatalf("existing pressured waiter after Close: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not release existing controller waiter")
+	}
+}
+
+// The first actual hard-pressure sleep is the barrier. Notify alone is earlier
+// than the loop's closed check and therefore cannot prove an existing waiter.
+func holdHardAdmissionWaitV3(t *testing.T, s *WALStore) (<-chan struct{}, func(), <-chan error) {
+	t.Helper()
+	if s.admission.PressureState() != "hard" {
+		t.Fatal("setup lacks native hard pressure")
+	}
+	parked, resume := make(chan struct{}), make(chan struct{})
+	var releaseOnce, parkOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(resume) }) }
+	sleep := s.admission.sleepFn
+	s.admission.sleepFn = func(d time.Duration) {
+		parkOnce.Do(func() { close(parked); <-resume })
+		sleep(d)
+	}
+	done := make(chan error, 1)
+	finished := make(chan struct{})
+	go func() {
+		err := s.admission.Acquire(s.admissionTimeout)
 		if err == nil {
 			s.admission.Release()
 		}
-		t.Fatalf("closed pressured store: %v", err)
-	}
+		done <- err
+		close(finished)
+	}()
+	t.Cleanup(func() {
+		release()
+		_ = s.Close()
+		// Even a broken close guard is bounded by the real controller deadline;
+		// join the worker instead of abandoning it when an assertion fails.
+		select {
+		case <-finished:
+		case <-time.After(s.admissionTimeout + time.Second):
+			t.Error("admission worker did not join")
+		}
+	})
+	return parked, release, done
 }
