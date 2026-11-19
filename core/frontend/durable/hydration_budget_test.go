@@ -218,6 +218,51 @@ func TestDurableHydration_HostRetriesJoinOwnedFetch(t *testing.T) {
 	t.Fatal("six immediate host attempts exhausted despite surviving shared fill")
 }
 
+func TestDurableHydration_FenceWinsCallerExpiry(t *testing.T) {
+	r := &heldHydrationRemote{ChunkRemote: seededRemote(t), gate: make(chan struct{}), entered: make(chan struct{}, 1)}
+	view := v1View()
+	p := chunkProvider(t, t.TempDir(), r, view, 0)
+	t.Cleanup(r.release)
+	openRecovered(t, p)
+	b, err := p.Open(context.Background(), "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	joined := make(chan struct{})
+	result := make(chan error, 1)
+	t.Cleanup(func() {
+		cancel()
+		r.release()
+		select {
+		case <-joined:
+		case <-time.After(time.Second):
+			t.Error("fenced hydration waiter not joined")
+		}
+	})
+	go func() {
+		defer close(joined)
+		_, err := b.Read(ctx, 33*4096, make([]byte, 4096))
+		result <- err
+	}()
+	select {
+	case <-r.entered:
+	case <-time.After(time.Second):
+		t.Fatal("cold read never reached Get")
+	}
+	view.set(healthyProj(frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 4, EndpointVersion: 1}))
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, frontend.ErrStalePrimary) || errors.Is(err, frontend.ErrBackendBusy) {
+			t.Fatalf("expiry hid fencing: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("fenced waiter did not detach")
+	}
+}
+
 func TestDurableHydration_ReadAndRMWPreserveCallerBudget(t *testing.T) {
 	for _, rmw := range []bool{false, true} {
 		name := "read"
