@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-const cutCOWMemoryLimit = 64 << 20
+const cutCOWMemoryLimit = DefaultCutPayloadMemoryBudget
 
 // defaultCOWSpillLimit caps a copy window's side-file bytes by default.
 const defaultCOWSpillLimit = 1 << 30
@@ -45,26 +45,29 @@ type cutCOWEntry struct {
 	missing []uint64
 }
 type cutCOWWindow struct {
-	layer      *chunkLayerImpl
-	mu         sync.Mutex
-	terminal   bool
-	err        error
-	ended      chan struct{}
-	refs       sync.WaitGroup // Add under mu, only while OPEN; Wait only after terminal
-	sideReady  chan struct{}
-	cleanupErr error
-	entries    map[uint64]*cutCOWEntry
-	head       map[uint64]chunkRef // the cut's base HEAD: the source of missing blocks
-	memory     int64
-	spillBytes int64 // bytes written to the side file; at most spillLimit
-	spillLimit int64
-	chunkBytes int64
-	side       *os.File
-	sideErr    error
-	cleanup    sync.Once
-	saved      atomic.Int64
-	saveNs     atomic.Int64
-	waitNs     atomic.Int64
+	layer       *chunkLayerImpl
+	mu          sync.Mutex
+	terminal    bool
+	err         error
+	ended       chan struct{}
+	refs        sync.WaitGroup // Add under mu, only while OPEN; Wait only after terminal
+	sideReady   chan struct{}
+	cleanupErr  error
+	entries     map[uint64]*cutCOWEntry
+	head        map[uint64]chunkRef // the cut's base HEAD: the source of missing blocks
+	memory      int64
+	spillBytes  int64 // bytes written to the side file; at most spillLimit
+	spillLimit  int64
+	chunkBytes  int64
+	memoryLimit int64
+	copyWorkers int
+	saverSlots  chan struct{}
+	side        *os.File
+	sideErr     error
+	cleanup     sync.Once
+	saved       atomic.Int64
+	saveNs      atomic.Int64
+	waitNs      atomic.Int64
 	// Scheduling/fault controls are nil in production and set before installation.
 }
 
@@ -135,6 +138,11 @@ func (l *chunkLayerImpl) installCOWWindow(candidates, staged map[uint64]bool, he
 		return nil, fmt.Errorf("%w: side-store geometry", errCutCOWAborted)
 	}
 	w := &cutCOWWindow{layer: l, ended: make(chan struct{}), entries: make(map[uint64]*cutCOWEntry), head: head, spillLimit: l.cfg.COWSpillLimit, chunkBytes: int64(size)}
+	c, _, reserved, limit := l.cutPayloadWorkers()
+	savers := min(l.cfg.UploadConcurrency, max(1, int((16<<20)/int64(size))))
+	reserved += int64(2*savers) * int64(size)
+	w.copyWorkers, w.memory, w.memoryLimit = c, reserved, max(limit, reserved)
+	w.saverSlots = make(chan struct{}, savers)
 	var slot int64
 	for _, idx := range sortedKeys(candidates) {
 		state := cowPending
@@ -265,6 +273,25 @@ func (l *chunkLayerImpl) beforeCOWMutation(first, count uint64) {
 			if e == nil {
 				break
 			}
+			// Never queue an unbounded number of full-chunk saver buffers behind
+			// local I/O. Refuse this cut, not the guest mutation, when its fixed
+			// saver slots are exhausted; no physical I/O has started for this owner.
+			acquired := false
+			select {
+			case w.saverSlots <- struct{}{}:
+				acquired = true
+			default:
+				w.abort(fmt.Errorf("%w: saver memory capacity", errCutCOWAborted))
+				w.refs.Done()
+			}
+			if !acquired {
+				break
+			}
+			if w.status() != nil {
+				<-w.saverSlots
+				w.refs.Done()
+				break
+			}
 			start := time.Now()
 			// Local blocks only: a guest write never waits on SeaweedFS.
 			data, missing, err := l.readCOWChunk(w, idx)
@@ -279,6 +306,7 @@ func (l *chunkLayerImpl) beforeCOWMutation(first, count uint64) {
 			w.saveNs.Add(time.Since(start).Nanoseconds())
 			// In particular an aborting saver releases itself BEFORE anyone joins.
 			w.refs.Done()
+			<-w.saverSlots
 			break
 		}
 	}
@@ -295,7 +323,7 @@ func (w *cutCOWWindow) save(e *cutCOWEntry, data []byte, missing []uint64) error
 		w.mu.Unlock()
 		return errCutCOWAborted
 	}
-	inMemory := w.memory+w.chunkBytes <= cutCOWMemoryLimit
+	inMemory := w.memory+w.chunkBytes <= w.memoryLimit
 	if inMemory {
 		w.memory += w.chunkBytes
 	} else if w.spillBytes+w.chunkBytes > w.spillLimit {
@@ -476,7 +504,19 @@ func (l *chunkLayerImpl) copyCOWEntry(w *cutCOWWindow, idx uint64) (capturedChun
 	}
 }
 
-func (l *chunkLayerImpl) copyCOWWindow(ctx context.Context, w *cutCOWWindow) ([]capturedChunk, error) {
+func (l *chunkLayerImpl) copyCOWWindow(ctx context.Context, w *cutCOWWindow, payloads *cutPayloadStore) ([]capturedChunk, error) {
+	payloads.reserve = func(size int64) error {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		if w.terminal {
+			return w.err
+		}
+		if size > w.spillLimit-w.spillBytes {
+			return fmt.Errorf("%w: local cut payload cap %d bytes", errCutCOWAborted, w.spillLimit)
+		}
+		w.spillBytes += size
+		return nil
+	}
 	stop := context.AfterFunc(ctx, func() { w.abort(ctx.Err()) })
 	defer stop()
 	defer func() {
@@ -498,7 +538,7 @@ func (l *chunkLayerImpl) copyCOWWindow(ctx context.Context, w *cutCOWWindow) ([]
 	kept := make([]bool, len(keys))
 	var next atomic.Int64
 	var workers sync.WaitGroup
-	for n := 0; n < min(l.cfg.UploadConcurrency, len(keys)); n++ {
+	for n := 0; n < min(w.copyWorkers, len(keys)); n++ {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
@@ -510,6 +550,13 @@ func (l *chunkLayerImpl) copyCOWWindow(ctx context.Context, w *cutCOWWindow) ([]
 				c, ok, err := l.copyCOWEntry(w, keys[i])
 				if err != nil {
 					return
+				}
+				if ok {
+					c, err = payloads.keep(c, w.head)
+					if err != nil {
+						w.abort(err)
+						return
+					}
 				}
 				out[i], kept[i] = c, ok
 			}

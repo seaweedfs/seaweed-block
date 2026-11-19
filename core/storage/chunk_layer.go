@@ -755,12 +755,14 @@ func (l *chunkLayerImpl) MakeRemoteDurable(ctx context.Context, t uint64) error 
 }
 
 type capturedChunk struct {
-	idx   uint64
-	data  []byte
-	sum   [32]byte
-	zero  bool
-	key   string // staged: already uploaded under this key (data is nil)
-	birth uint64
+	idx    uint64
+	data   []byte
+	sum    [32]byte
+	zero   bool
+	key    string // staged: already uploaded under this key (data is nil)
+	birth  uint64
+	offset int64 // private local payload file, never a durable reference
+	size   int
 }
 
 // stagedChunk is a chunk pre-copied outside the barrier at chunk version
@@ -888,6 +890,8 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	births := l.captureBirths(candidates, h)
 
 	st.CandidateChunks = len(candidates)
+	payloads := l.newCutPayloadStore()
+	defer func() { err = errors.Join(err, payloads.Close()) }()
 	var copyErr error
 	copyStart := time.Now()
 	if l.usesOwnedMapV3() {
@@ -898,7 +902,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		copyStart = time.Now()
 		if copyErr == nil {
 			var copied []capturedChunk
-			copied, copyErr = l.copyCOWWindow(ctx, w)
+			copied, copyErr = l.copyCOWWindow(ctx, w, payloads)
 			captured = append(captured, copied...)
 			st.COWSavedChunks = int(w.saved.Load())
 			st.COWSaveNs, st.COWWaitNs = w.saveNs.Load(), w.waitNs.Load()
@@ -992,7 +996,11 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	}
 	if err := l.uploadBatch(ctx, len(uploads), func(ctx context.Context, i int) error {
 		u := uploads[i]
-		return l.putCaptured(ctx, u.key, u.c.data)
+		data, err := payloads.read(u.c)
+		if err != nil {
+			return err
+		}
+		return l.putCaptured(ctx, u.key, data)
 	}); err != nil {
 		l.abortCut(all)
 		l.dropIntents(ctx, intents)
@@ -1003,7 +1011,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		newKeys[u.c.idx] = u.key
 		changed = append(changed, u.c.idx)
 		st.UploadedChunks++
-		st.UploadedBytes += int64(len(u.c.data))
+		st.UploadedBytes += int64(max(len(u.c.data), u.c.size))
 	}
 	upgrade := false
 	if builder, ok := l.remote.(ChunkManifestBuilder); ok {
@@ -1688,46 +1696,15 @@ func (l *chunkLayerImpl) stage(ctx context.Context, st *chunkCutStats) (map[uint
 		head := copyHead(l.head)
 		l.stMu.Unlock()
 		st.StageRounds++
-		var uploads []stagedChunk
-		for _, idx := range batch {
-			data, err := l.readChunk(idx)
-			if err != nil {
-				return nil, intents, fmt.Errorf("storage: capture stage chunk %d: %w", idx, err)
-			}
-			if hook := l.testAfterStageReadHook; hook != nil {
-				hook(idx)
-			}
-			sc := stagedChunk{capturedChunk: capturedChunk{idx: idx, sum: sha256.Sum256(data), zero: isAllZero(data)}, ver: vers[idx], headGen: head.Gen}
-			ref, had := head.Chunks[idx]
-			if !sc.zero && !(had && ref.SHA256 == sc.sum) {
-				sc.key, sc.data = l.newKey(idx), data
-				uploads = append(uploads, sc)
-				continue
-			}
-			staged[idx] = sc
-		}
-		if len(uploads) > 0 {
-			keys := make([]string, len(uploads))
-			for i, u := range uploads {
-				keys[i] = u.key
-			}
-			id, err := l.remote.PutIntent(ctx, chunkIntent{Gen: head.Gen, Epoch: l.cfg.Epoch, Holder: l.cfg.Holder, Keys: keys})
-			if err != nil {
-				return nil, intents, fmt.Errorf("storage: capture stage intent: %w: %w", errChunkRemoteUnavailable, err)
-			}
+		roundChunks, id, err := l.stagePayloadRound(ctx, batch, vers, head, st)
+		if id != "" {
 			intents = append(intents, id)
-			if err := l.uploadBatch(ctx, len(uploads), func(ctx context.Context, i int) error {
-				u := uploads[i]
-				return l.putCaptured(ctx, u.key, u.data)
-			}); err != nil {
-				return nil, intents, fmt.Errorf("storage: capture stage upload: %w: %w", errChunkRemoteUnavailable, err)
-			}
-			for _, u := range uploads {
-				st.UploadedChunks++
-				st.UploadedBytes += int64(len(u.data))
-				u.data = nil
-				staged[u.idx] = u
-			}
+		}
+		if err != nil {
+			return nil, intents, err
+		}
+		for idx, sc := range roundChunks {
+			staged[idx] = sc
 		}
 		st.StagedChunks += len(batch)
 		if hook := l.testAfterStageHook; hook != nil {
