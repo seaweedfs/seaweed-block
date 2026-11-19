@@ -80,7 +80,7 @@ func TestFormatUpgradeLegacyIncompleteFork(t *testing.T) {
 			if err != nil {
 				t.Fatalf("old incomplete fork retry: %v", err)
 			}
-			dst, err := NewChunkRemote(f, r.blobs, path.Join(catBase, "v2"))
+			dst, err := NewChunkRemote(f, r.b, path.Join(catBase, "v2"))
 			if err != nil {
 				t.Fatal(err)
 			}
