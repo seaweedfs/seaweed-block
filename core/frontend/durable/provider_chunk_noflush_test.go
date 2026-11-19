@@ -208,7 +208,8 @@ func TestWALStoreChunkV3NoFlushWithActiveRF2CatchupPin(t *testing.T) {
 		t.Fatal(err)
 	}
 	ws.SetRecycleFloorSource(c)
-	h := nvme.NewIOHandler(nvme.HandlerConfig{Backend: be, BlockSize: 4096, VolumeSize: 1 << 30})
+	recorded := &noFlushBackend{Backend: be}
+	h := nvme.NewIOHandler(nvme.HandlerConfig{Backend: recorded, BlockSize: 4096, VolumeSize: 1 << 30})
 	data := bytes.Repeat([]byte{0x5a}, 128*1024)
 	var stalled bool
 	for off := 0; off < 80*1024*1024; off += len(data) {
@@ -236,8 +237,29 @@ func TestWALStoreChunkV3NoFlushWithActiveRF2CatchupPin(t *testing.T) {
 		t.Fatalf("retained catch-up records=%d err=%v", count, err)
 	}
 	c.EndSession("r2")
-	r := h.Handle(ctx, nvme.IOCommand{Opcode: 1, NSID: 1, SLBA: 20000, NLB: 32, Data: data})
-	if err := r.AsError(); err != nil {
-		t.Fatalf("no-Flush progress after catch-up release: %v", err)
+	retryDeadline := time.Now().Add(30 * time.Second)
+	busy := 0
+	for {
+		start := time.Now()
+		r := h.Handle(ctx, nvme.IOCommand{Opcode: 1, NSID: 1, SLBA: 20000, NLB: 32, Data: data})
+		if time.Since(start) >= 5*time.Second || time.Now().After(retryDeadline) {
+			t.Fatalf("released pin exceeded bound: attempt=%v busy=%d result=%+v", time.Since(start), busy, r)
+		}
+		if r.AsError() == nil {
+			break
+		}
+		if !errors.Is(recorded.lastError, frontend.ErrBackendBusy) || r.SCT != nvme.SCTGeneric || r.SC != nvme.SCNamespaceNotReady {
+			t.Fatalf("non-retryable released-pin write: %+v cause=%v", r, recorded.lastError)
+		}
+		busy++
+		time.Sleep(25 * time.Millisecond)
 	}
+	got := make([]byte, len(data))
+	if n, err := be.Read(ctx, 20000*4096, got); err != nil || n != len(got) || !bytes.Equal(got, data) {
+		t.Fatalf("released-pin readback n=%d err=%v", n, err)
+	}
+	if ws.CheckpointLSN() == 0 {
+		t.Fatal("released pin did not permit checkpoint progress")
+	}
+	t.Logf("released pin completed: busy=%d checkpoint=%d", busy, ws.CheckpointLSN())
 }
