@@ -84,7 +84,7 @@ type walStoreV3State struct {
 	// testAfterRollover runs in a v3 write after the checkpoint rollover and
 	// before the payload append (write-command budget, #252).
 	testAfterRollover func()
-	testMapPrepared          func() // outside all publication locks, after owned-map persistence
+	testMapPrepared   func() // outside all publication locks, after owned-map persistence
 	// testReadResolved runs in a v3 read after the dirty map resolved the
 	// LBA's WAL position and before the record is read.
 	testReadResolved func()
@@ -1111,7 +1111,7 @@ func (f *flusher) readDirtyRecordV3Cached(e snapshotEntry, cache *flushRecordCac
 	store := f.store
 	d := store.v3.pub.current()
 	if cache != nil && !store.v3.flushLifetimeValidV3(cache.recoveryGen) {
-		return nil, 0, ErrMapCoverageStale
+		return nil, 0, mapCoverageRefusal("recovery_lifetime_changed")
 	}
 	var entry walEntryV3
 	var size uint64
@@ -1180,7 +1180,7 @@ func (s *WALStore) persistCheckpointV3(highestLSN, recoveryGen uint64) error {
 	v.syncMu.Lock()
 	defer v.syncMu.Unlock()
 	if !v.flushLifetimeValidV3(recoveryGen) {
-		return ErrMapCoverageStale
+		return mapCoverageRefusal("recovery_lifetime_changed")
 	}
 	wack := v.wack.Load()
 	if wack < checkpoint {

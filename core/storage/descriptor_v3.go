@@ -332,7 +332,7 @@ func mergeDescriptorV3Mode(cur, next *descriptorV3, reset bool) error {
 		next.MapLineage != cur.MapLineage || next.MapFormatID != cur.MapFormatID {
 		if next.MapGeneration <= cur.MapGeneration {
 			return fmt.Errorf("%w: %w: map root change without a higher generation (%d -> %d)",
-				ErrMapCoverageStale, errDescriptorTransition, cur.MapGeneration, next.MapGeneration)
+				mapCoverageRefusal("map_generation_not_increasing"), errDescriptorTransition, cur.MapGeneration, next.MapGeneration)
 		}
 		if next.MapLineage != cur.MapLineage {
 			return fmt.Errorf("%w: map lineage change outside an install or reset", errDescriptorTransition)
