@@ -617,7 +617,27 @@ func TestWorkspaceLeaseConcurrentRenewalsWritersExtendersClose(t *testing.T) {
 	var extensions atomic.Int64
 	heldEntered, heldRelease := make(chan struct{}), make(chan struct{})
 	var holdOnce, releaseOnce sync.Once
-	releaseHold := func() { releaseOnce.Do(func() { close(heldRelease) }) }
+	// The publisher clock is frozen while the extension write is held (#247
+	// hang): the held write holds p.mu, so every other volume's extender queues
+	// and no horizon can move. With a running clock a late test goroutine could
+	// let horizons expire before each volume got a grant under the hold (the
+	// progress condition never holds), or before the writers run after the
+	// release (a revoke ACK finds the lease expired). This test is about lock
+	// and store ordering, not about lease expiry.
+	var frozenNS atomic.Int64 // 0 = running
+	// At the release the clock resumes from the frozen instant (the offset takes
+	// back the time spent held), so it neither jumps over a horizon nor runs
+	// backwards; extensions then run in real time alongside writers and Close.
+	var offNS atomic.Int64
+	releaseHold := func() {
+		releaseOnce.Do(func() {
+			if f := frozenNS.Load(); f != 0 {
+				offNS.Add(-int64(time.Since(time.Unix(0, f))))
+				frozenNS.Store(0)
+			}
+			close(heldRelease)
+		})
+	}
 	var classifying atomic.Bool
 	var holding atomic.Bool // set when the extension write is held, before it blocks
 	hs.setBefore(func(r DurableRecord) error {
@@ -638,6 +658,7 @@ func TestWorkspaceLeaseConcurrentRenewalsWritersExtendersClose(t *testing.T) {
 			first := false
 			holdOnce.Do(func() { first = true })
 			if first {
+				frozenNS.Store(time.Now().Add(time.Duration(offNS.Load())).UnixNano())
 				holding.Store(true) // before the hold: a renewal started after this saw it
 				close(heldEntered)
 				<-heldRelease
@@ -648,9 +669,13 @@ func TestWorkspaceLeaseConcurrentRenewalsWritersExtendersClose(t *testing.T) {
 	// The publisher clock is real time plus an offset. The forced-move volume
 	// is granted at offset -10 s, so by offset 0 its horizon + skew barrier has
 	// passed; the clock only moves forward.
-	var offNS atomic.Int64
 	offNS.Store(int64(-10 * time.Second))
-	p := NewPublisher(nil, WithStore(hs), WithWorkspaceLeaseConfig(2*time.Second, func() time.Time { return time.Now().Add(time.Duration(offNS.Load())) }))
+	p := NewPublisher(nil, WithStore(hs), WithWorkspaceLeaseConfig(2*time.Second, func() time.Time {
+		if f := frozenNS.Load(); f != 0 {
+			return time.Unix(0, f)
+		}
+		return time.Now().Add(time.Duration(offNS.Load()))
+	}))
 	t.Cleanup(p.CloseWorkspaceExtenders)
 	ctx := context.Background()
 	bindAndGrant(t, p, vol(forcedVol), "r") // never renewed again
@@ -736,6 +761,9 @@ func TestWorkspaceLeaseConcurrentRenewalsWritersExtendersClose(t *testing.T) {
 
 	// Handshake 1: the first extension write is held inside the store.
 	<-heldEntered // progress, no timer (#227): renewers keep triggering extensions
+	// A late test goroutine (machine load), longer than a horizon (1.5 x TTL):
+	// with the clock frozen under the hold, no volume can lose its lease here.
+	time.Sleep(3500 * time.Millisecond)
 	// Handshake 2: renewals keep succeeding while it is held.
 	// Progress, no timer (#227): every eligible volume gains a grant from a call
 	// that STARTED while the extension write was held (a reply computed before
