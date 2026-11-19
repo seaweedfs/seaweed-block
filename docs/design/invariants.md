@@ -247,7 +247,7 @@ HEAD states, snapshots, forks, intents, key bindings, GC and volume delete in th
 | — | name held | exclusive name record `{request, attempt}`; a retry with the same request id gets its own attempt back | `core/frontend/chunkstore/catalog.go` `CreateSnapshot`, `claimName` | `INV-SNAP-EXPLICIT-DELETE-001` |
 | name held | published | the volume is not being deleted; an intent with a deadline is written and the deadline is re-checked; exclusive create of the attempt path | `core/frontend/chunkstore/catalog.go` `CreateSnapshot` | `INV-SNAP-EXPLICIT-DELETE-001` |
 | published | deleting | `DeleteSnapshot` or retention for this attempt, never while a fork claim is live | `core/frontend/chunkstore/catalog.go` `DeleteSnapshot`; `core/frontend/chunkstore/retention.go` `markDeleting` | `INV-SNAP-EXPLICIT-DELETE-001` |
-| published | fork | claim the parent snapshot, check the source is not being deleted, write the target `VOLUME`, then its HEAD; no chunk is copied | `core/frontend/chunkstore/catalog.go` `Fork`, `claimForkParent` | `INV-GC-REACHABLE-001` |
+| published | fork | require inherited geometry within the create capacity bound; require inherited geometry within the create capacity bound; claim the parent snapshot, check the source is not being deleted, write the target `VOLUME`, then its HEAD; no chunk is copied | `core/frontend/chunkstore/catalog.go` `Fork`, `claimForkParent` | `INV-GC-REACHABLE-001` |
 
 **Intents and key bindings.**
 
@@ -473,7 +473,7 @@ Notes:
 
 | ID | Invariant | Transition | Enforced in | Regression tests | Model | Status |
 |---|---|---|---|---|---|---|
-| `INV-VOLUME-CREATE-SIZE-001` | Creation refuses capacity above 16 TiB - 4 KiB before provisioning, allocating a WAL, or persisting a volume record. Geometry checks cannot overflow. | M6 initial create (static parameter admission) | `core/geometry/volume_size.go`; lifecycle `CreateVolume`, CSI `volumeSpecFromCreateRequest`, catalog `EnsureVolume`, storage `CreateWALStoreWithOptions` | `TestCreateVolumeRejectsBeyondUint32LBACap`, `TestCSICreateVolumeCapacityCapBeforeProvision`, `TestEnsureVolumeRejectsBeyondUint32LBACap`, `TestCreateWALStoreRefusesOversizeBeforeFilesystem` | Static geometry bound; no protocol state or transition added | ACTIVE |
+| `INV-VOLUME-CREATE-SIZE-001` | Creation refuses capacity above 16 TiB - 4 KiB before provisioning, allocating a WAL, or persisting a volume record. Geometry checks cannot overflow. | M6 initial create (static parameter admission) | `core/geometry/volume_size.go`; lifecycle `CreateVolume`, CSI `volumeSpecFromCreateRequest`, catalog `EnsureVolume`, `claimForkParent`, storage `CreateWALStoreWithOptions` | `TestCreateVolumeRejectsBeyondUint32LBACap`, `TestCSICreateVolumeCapacityCapBeforeProvision`, `TestEnsureVolumeRejectsBeyondUint32LBACap`, `TestCreateWALStoreRefusesOversizeBeforeFilesystem`, `TestForkRejectsLegacyOversizedGeometry` | Static geometry bound; no protocol state or transition added | ACTIVE |
 
 ## Part C. Change rules
 

@@ -183,7 +183,7 @@ stateDiagram-v2
 
 ## 6. Snapshots, forks, retention, GC, volume delete
 
-**Create capacity.** New volumes larger than 16 TiB - 4 KiB (17,592,186,040,320 bytes) are refused before provisioning, WAL allocation or durable VOLUME creation. CSI, lifecycle intent, Catalog and local WAL create share the same bound. A fork inherits the existing source geometry. Existing store-open formats are unchanged. This is static admission, not a new lifecycle state.
+**Create capacity.** New volumes larger than 16 TiB - 4 KiB (17,592,186,040,320 bytes) are refused before provisioning, WAL allocation or durable VOLUME creation. CSI, lifecycle intent, Catalog and local WAL create share the same bound. A fork inherits its source geometry only within the same capacity bound; refusal leaves no parent claim. Existing store-open formats are unchanged. This is static admission, not a new lifecycle state.
 
 
 - **Snapshot** (`Catalog.CreateSnapshot`): claim the name with an exclusive name record `{request, attempt}` (a retry gets its own attempt back); check the volume is not being deleted; write an intent with a deadline; re-check the deadline; exclusively create `snaps/<name>/<attempt>` holding a copy of the HEAD root. An unknown outcome keeps the intent; the caller retries with the same request id.
@@ -206,7 +206,7 @@ HEAD states:
 
 ```mermaid
 stateDiagram-v2
-  [*] --> active: create within capacity bound (gen 1, epoch 0) or inherited fork HEAD
+  [*] --> active: create within capacity bound (gen 1, epoch 0) or inherited fork HEAD within capacity bound
   active --> active: holder's cut CAS (gen+1)
   active --> detached: Detach final cut
   detached --> active: takeover CAS (higher epoch, new holder)

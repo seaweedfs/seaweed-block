@@ -1356,6 +1356,9 @@ func (c *Catalog) claimForkParent(ctx context.Context, req ForkRequest) (Snapsho
 		if ref.info.State == SnapDeleting {
 			return SnapshotInfo{}, catErr(CodeSnapshotDeleting, false, nil, "snapshot %s/%s is being deleted", req.Source, req.Snapshot)
 		}
+		if ref.info.geo.BlockSize != 0 && ref.info.geo.NumBlocks > geometry.MaxVolumeBytes/uint64(ref.info.geo.BlockSize) {
+			return SnapshotInfo{}, catErr(CodeGeometryMismatch, false, nil, "fork size exceeds maximum %d bytes (16 TiB - 4 KiB; uint32 LBA)", geometry.MaxVolumeBytes)
+		}
 		claims := decodeClaims(ref.entry)
 		for _, cl := range claims {
 			if cl == token {
