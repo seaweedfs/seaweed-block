@@ -147,8 +147,9 @@ type Host struct {
 	// While set, the frontend projection is not Healthy, so writes refuse
 	// even on a host that was healthy at its prior epoch; only a later
 	// successful role call for the current role and epoch clears it.
-	roleAdmissionFailed atomic.Value // string reason; "" = not failed
-	rf1Refused          atomic.Value // string reason (Config.RF1Only); "" = the last fact was RF1
+	roleAdmissionFailed atomic.Value  // string reason; "" = not failed
+	rf1Refused          atomic.Value  // string reason (Config.RF1Only); "" = not refused
+	rf1RefusedEpoch     atomic.Uint64 // highest epoch refused under RF1Only; a lower fact is stale
 
 	conn   *grpc.ClientConn
 	obsCli control.ObservationServiceClient
@@ -830,13 +831,18 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 		return
 	}
 
-	// An RF1-only volume refuses replica peers before anything is installed.
+	// An RF1-only volume refuses replica peers before anything is installed,
+	// and a fact below a refused epoch is stale: it neither adopts nor clears.
 	if h.cfg.RF1Only != "" {
 		if len(fact.Peers) > 0 {
 			h.refuseRF1(fmt.Sprintf("a primary role with %d replica peers", len(fact.Peers)), fact.Epoch)
 			return
 		}
-		h.rf1Refused.Store("")
+		if refused := h.rf1RefusedEpoch.Load(); fact.Epoch < refused {
+			h.log.Printf("blockvolume: volume %s stale RF1 assignment at epoch %d below refused epoch %d — NOT applying to adapter",
+				h.cfg.VolumeID, fact.Epoch, refused)
+			return
+		}
 	}
 
 	// Step (2a): install replication peer set first. Decoded via
@@ -877,6 +883,9 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 			h.cfg.VolumeID, info.Epoch, err)
 		return
 	}
+	if h.cfg.RF1Only != "" {
+		h.rf1Refused.Store("") // only a current-or-newer RF1 fact whose role was admitted clears the refusal
+	}
 	h.adpt.OnAssignment(info)
 	h.log.Printf("blockvolume: volume %s adopted as PRIMARY at %s@%d (EV=%d)",
 		h.cfg.VolumeID, info.ReplicaID, info.Epoch, info.EndpointVersion)
@@ -892,6 +901,12 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 // volume (Config.RF1Only): no peer set, role or readiness was installed.
 func (h *Host) refuseRF1(what string, epoch uint64) {
 	reason := fmt.Sprintf("volume %s refuses %s at epoch %d: %s", h.cfg.VolumeID, what, epoch, h.cfg.RF1Only)
+	for {
+		cur := h.rf1RefusedEpoch.Load()
+		if epoch <= cur || h.rf1RefusedEpoch.CompareAndSwap(cur, epoch) {
+			break
+		}
+	}
 	h.rf1Refused.Store(reason)
 	h.log.Printf("blockvolume: %s — NOT applying to adapter (fail-closed)", reason)
 }

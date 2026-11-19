@@ -1,11 +1,17 @@
 package volume
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/adapter"
+	"github.com/seaweedfs/seaweed-block/core/engine"
+	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"github.com/seaweedfs/seaweed-block/core/storage/memorywal"
 )
 
 func rf2PrimaryFact(epoch uint64) *control.AssignmentFact {
@@ -81,5 +87,62 @@ func TestRF1Only_UnsetKeepsReplicatedAdoption(t *testing.T) {
 	}
 	if failed, _ := h.RoleAdmissionFailure(); failed {
 		t.Fatal("latched without the rule")
+	}
+}
+
+// A refusal is bound to its epoch: RF1@2 healthy and writing, RF2@3 refused
+// (writes stop), then a stale RF1@2 replay must neither adopt nor clear the
+// refusal (writes stay refused, no peers installed); only RF1 at the refused
+// epoch or newer, once its role is admitted, clears it.
+func TestRF1Only_StaleRF1FactDoesNotClearANewerRefusal(t *testing.T) {
+	h, a, r := newStubbedHost(t, "vol1", "r1", &orderingRecorder{})
+	h.cfg.RF1Only = "chunk snapshots need RF1"
+	proj := &mutableProjector{p: engine.ReplicaProjection{Mode: engine.ModeHealthy, Epoch: 2, EndpointVersion: 1}}
+	h.view = NewAdapterProjectionView(proj, "vol1", "r1", h)
+	fencer := &switchFencer{}
+	if err := h.SetSelfFence(fencer); err != nil {
+		t.Fatal(err)
+	}
+	rf1 := func(epoch uint64) *control.AssignmentFact { f := rf2PrimaryFact(epoch); f.Peers = nil; return f }
+	h.applyFact(rf1(2))
+	if a.callCount.Load() != 1 {
+		t.Fatal("fixture: RF1@2 not adopted")
+	}
+	store := memorywal.NewStore(8, 4096)
+	t.Cleanup(func() { _ = store.Close() })
+	backend := durable.NewStorageBackend(store, h.view, frontend.Identity{VolumeID: "vol1", ReplicaID: "r1", Epoch: 2, EndpointVersion: 1})
+	backend.SetOperational(true, "rf1 baseline")
+	ctx := context.Background()
+	if _, err := backend.Write(ctx, 0, []byte("epoch-2")); err != nil {
+		t.Fatalf("baseline write: %v", err)
+	}
+
+	h.applyFact(rf2PrimaryFact(3))
+	if _, err := backend.Write(ctx, 0, []byte("x")); !errors.Is(err, frontend.ErrStalePrimary) {
+		t.Fatalf("write after the RF2@3 refusal: %v", err)
+	}
+	h.applyFact(rf1(2)) // stale replay below the refused epoch
+	if failed, reason := h.RoleAdmissionFailure(); !failed || !strings.Contains(reason, "at epoch 3") {
+		t.Fatalf("stale RF1@2 cleared the RF2@3 refusal: %v %q", failed, reason)
+	}
+	if _, err := backend.Write(ctx, 0, []byte("x")); !errors.Is(err, frontend.ErrStalePrimary) {
+		t.Fatalf("write reopened by a stale RF1@2: %v", err)
+	}
+	if a.callCount.Load() != 1 || r.callCount.Load() != 1 {
+		t.Fatalf("stale RF1@2 adopted or RF2 peers installed: adopt=%d peerSets=%d", a.callCount.Load(), r.callCount.Load())
+	}
+	if len(r.lastTargetIDs) != 0 {
+		t.Fatalf("forbidden peers installed: %v", r.lastTargetIDs)
+	}
+
+	fencer.fail.Store(true) // RF1@3 whose role fence fails: a failed attempt does not clear the refusal
+	h.applyFact(rf1(3))
+	if _, reason := h.RoleAdmissionFailure(); !strings.Contains(reason, "refuses a primary role") || a.callCount.Load() != 1 {
+		t.Fatalf("failed RF1@3 attempt cleared the refusal: %q adopt=%d", reason, a.callCount.Load())
+	}
+	fencer.fail.Store(false)
+	h.applyFact(rf1(3))
+	if failed, reason := h.RoleAdmissionFailure(); failed || a.callCount.Load() != 2 {
+		t.Fatalf("RF1@3 did not reconcile: %v %q adopt=%d", failed, reason, a.callCount.Load())
 	}
 }

@@ -32,10 +32,11 @@ func TestChunkVolumeRefusesReplicationAckAtStart(t *testing.T) {
 // ingress gate refuses them again and opens neither inbound lane (legacy and
 // dual-lane ports). A primary role without peers (RF1) is admitted.
 func TestChunkVolumeIngressRefusesReplicaSlots(t *testing.T) {
-	for _, impl := range []string{"walstore", "walstore-chunk"} {
-		t.Run(impl, func(t *testing.T) {
+	for _, row := range []struct{ impl, mode string }{{"walstore", "legacy"}, {"walstore", "dual-lane"}, {"walstore-chunk", "legacy"}, {"walstore-chunk", "dual-lane"}} {
+		impl, dualLane := row.impl, row.mode == "dual-lane"
+		t.Run(row.impl+"/"+row.mode, func(t *testing.T) {
 			addr, dual := ingressPair(t)
-			f := flags{dataAddr: addr, volumeID: "v1", durableImpl: impl, recoveryMode: "dual-lane"}
+			f := flags{dataAddr: addr, volumeID: "v1", durableImpl: impl, recoveryMode: row.mode}
 			if got, want := hostConfig(f, nil).RF1Only, map[string]string{"walstore": "", "walstore-chunk": chunkRF1Reason}[impl]; got != want {
 				t.Fatalf("host config RF1Only = %q, want %q", got, want)
 			}
@@ -43,8 +44,8 @@ func TestChunkVolumeIngressRefusesReplicaSlots(t *testing.T) {
 			defer r.Stop()
 			admitErr := r.AdmitAsReplica(1)
 			if impl == "walstore" {
-				if admitErr != nil || r.listener == nil || r.dual == nil {
-					t.Fatalf("walstore replica role (dual-lane): %v", admitErr)
+				if admitErr != nil || r.listener == nil || (r.dual != nil) != dualLane {
+					t.Fatalf("walstore replica role (%s): %v", row.mode, admitErr)
 				}
 				return
 			}
@@ -67,6 +68,9 @@ func TestChunkVolumeIngressRefusesReplicaSlots(t *testing.T) {
 			}
 			if err := r.FenceAsPrimaryWithPeers(4, false); err != nil {
 				t.Fatalf("RF1 primary refused: %v", err)
+			}
+			if r.listener != nil || r.dual != nil {
+				t.Fatal("the RF1 primary role opened an inbound listener")
 			}
 		})
 	}
