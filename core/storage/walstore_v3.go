@@ -793,6 +793,13 @@ func (s *WALStore) syncWALBatchV3Internal(pressureOnly bool) error {
 		return err
 	}
 	v := s.v3
+	// An idle flusher must not queue behind an unrelated Sync leader before
+	// preparing its map. This is only a scheduling hint: pressure eligibility
+	// and the mutation/frontier cut are still rechecked together under syncMu.
+	// A concurrent append missed here is picked up by the next notified cycle.
+	if pressureOnly && s.walUsedFraction() < 0.70 {
+		return nil
+	}
 	// The leader role: SetWMode holds it while it changes the mode, so no
 	// batch acknowledges under a stale mode selection (the mode is read
 	// only after the role is taken).
