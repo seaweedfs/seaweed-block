@@ -123,3 +123,71 @@ func TestCheckpointDiagnostics_LogRateLimit(t *testing.T) {
 		t.Fatalf("logs: %s", got)
 	}
 }
+
+// A starved checkpoint: flush cycles keep succeeding (clamped to the
+// acknowledged frontier, nothing persisted moves) while the persisted
+// CheckpointLSN and the last advance stay frozen. Only a real move of the
+// persisted checkpoint counts as an advance.
+func TestCheckpointDiagnostics_StarvedCheckpointIsVisible(t *testing.T) {
+	s, _ := newMappedCheckpointStoreV3(t)
+	mustAttach(t, s, newFakeChunkRemote(), ctConfig(1))
+	writeSynced(t, s, 1, 1)
+	if err := s.flusher.flushOnce(); err != nil {
+		t.Fatal(err)
+	}
+	first := s.CheckpointPersistence()
+	if first.CheckpointLSN != 1 || first.Advances != 1 || first.LastAdvance.IsZero() || first.Successes != 1 {
+		t.Fatalf("first checkpoint: %+v", first)
+	}
+	for i := uint32(0); i < 3; i++ { // written, never synced: the checkpoint is clamped at 1
+		if _, err := s.Write(2+i, blk(byte(2+i))); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.flusher.flushOnce(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	starved := s.CheckpointPersistence()
+	if starved.Successes <= first.Successes {
+		t.Fatalf("flush cycles did not keep succeeding: %+v", starved)
+	}
+	if starved.CheckpointLSN != 1 || starved.Advances != 1 || !starved.LastAdvance.Equal(first.LastAdvance) {
+		t.Fatalf("a clamped success counted as an advance: first %+v starved %+v", first, starved)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.flusher.flushOnce(); err != nil {
+		t.Fatal(err)
+	}
+	moved := s.CheckpointPersistence()
+	if moved.CheckpointLSN != s.CheckpointLSN() || moved.CheckpointLSN <= 1 || moved.Advances != 2 || !moved.LastAdvance.After(first.LastAdvance) {
+		t.Fatalf("after sync the checkpoint advance was not recorded: %+v", moved)
+	}
+}
+
+// Only an advancing success moves LastAdvance; an unchanged success, a
+// refusal and a failure leave the latest advance time as it was.
+func TestCheckpointDiagnostics_LastAdvanceFollowsOnlyAdvances(t *testing.T) {
+	var i flusherInstrumentation
+	t0 := time.Unix(1000, 0)
+	at := func() time.Time { return time.Unix(0, i.checkpointLastAdvanceNanos.Load()) }
+	i.recordCheckpoint(nil, 0, 5, t0)
+	if !at().Equal(t0) || i.checkpointAdvances.Load() != 1 {
+		t.Fatalf("first advance: %v %d", at(), i.checkpointAdvances.Load())
+	}
+	i.recordCheckpoint(nil, 5, 5, t0.Add(time.Second))
+	i.recordCheckpoint(mapCoverageRefusal("proof_changed"), 5, 5, t0.Add(2*time.Second))
+	i.recordCheckpoint(errors.New("fsync fault"), 5, 5, t0.Add(3*time.Second))
+	if !at().Equal(t0) || i.checkpointAdvances.Load() != 1 {
+		t.Fatalf("a non-advance moved LastAdvance: %v advances=%d", at(), i.checkpointAdvances.Load())
+	}
+	t1 := t0.Add(4 * time.Second)
+	i.recordCheckpoint(nil, 5, 9, t1)
+	if !at().Equal(t1) || i.checkpointAdvances.Load() != 2 {
+		t.Fatalf("second advance: %v %d", at(), i.checkpointAdvances.Load())
+	}
+	if i.checkpointSuccesses.Load() != 3 || i.checkpointRefusals.Load() != 1 || i.checkpointFailures.Load() != 1 {
+		t.Fatalf("classification: s=%d r=%d f=%d", i.checkpointSuccesses.Load(), i.checkpointRefusals.Load(), i.checkpointFailures.Load())
+	}
+}

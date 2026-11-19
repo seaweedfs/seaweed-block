@@ -278,12 +278,13 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 		// The released tail is persisted with the checkpoint, before the
 		// writer may reuse those bytes.
 		var publishErr error
+		cpBefore := store.CheckpointLSN()
 		if store.v3 != nil {
 			publishErr = store.persistCheckpointV3(maxLSN, recoveryGen)
 		} else {
 			publishErr = store.persistCheckpointAndRelease(maxLSN, maxLSNPhys, maxLSNEntrySize)
 		}
-		f.instr.recordCheckpoint(publishErr)
+		f.instr.recordCheckpoint(publishErr, cpBefore, store.CheckpointLSN(), time.Now())
 		if err := publishErr; err != nil {
 			return fmt.Errorf("flusher: persist checkpoint %d: %w", maxLSN, err)
 		}

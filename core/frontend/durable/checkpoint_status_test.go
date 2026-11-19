@@ -46,15 +46,20 @@ func TestDurableProvider_CheckpointPersistenceStatus(t *testing.T) {
 		}
 		var wire []struct {
 			CheckpointPersistence *struct {
-				Successes uint64
-				Refusals  uint64
-				Failures  uint64
+				Successes     uint64
+				Refusals      uint64
+				Failures      uint64
+				CheckpointLSN uint64
+				Advances      uint64
+				LastAdvance   time.Time
 			}
 		}
 		if err := json.Unmarshal(raw, &wire); err != nil {
 			t.Fatal(err)
 		}
-		if len(wire) == 1 && wire[0].CheckpointPersistence != nil && wire[0].CheckpointPersistence.Successes > 0 {
+		if len(wire) == 1 && wire[0].CheckpointPersistence != nil && wire[0].CheckpointPersistence.Successes > 0 &&
+			wire[0].CheckpointPersistence.CheckpointLSN > 0 && wire[0].CheckpointPersistence.Advances > 0 &&
+			!wire[0].CheckpointPersistence.LastAdvance.IsZero() {
 			return
 		}
 		if time.Now().After(deadline) {
