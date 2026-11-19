@@ -27,10 +27,12 @@ import (
 // worth of anonymous RSS in the process under measurement.
 type memoryDiskRemote struct {
 	*storage.MemChunkRemote
-	dir    string
-	mu     sync.Mutex
-	head   storage.ChunkHead
-	hashes map[string][32]byte
+	dir        string
+	mu         sync.Mutex
+	head       storage.ChunkHead
+	hashes     map[string][32]byte
+	firstPut   sync.Once
+	atFirstPut func()
 }
 
 func (r *memoryDiskRemote) path(key string) string {
@@ -38,6 +40,11 @@ func (r *memoryDiskRemote) path(key string) string {
 	return filepath.Join(r.dir, hex.EncodeToString(h[:]))
 }
 func (r *memoryDiskRemote) Put(ctx context.Context, key string, data []byte) error {
+	r.firstPut.Do(func() {
+		if r.atFirstPut != nil {
+			r.atFirstPut()
+		}
+	})
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -127,6 +134,20 @@ func TestWALStoreChunk_InitialWriteAnonymousMemory(t *testing.T) {
 	}
 	if err = os.MkdirAll(profileDir, 0700); err != nil {
 		t.Fatal(err)
+	}
+	r.atFirstPut = func() {
+		// The first upload is an external seam after the cut's copy phase.
+		// A GC here distinguishes live retained payloads from garbage awaiting GC.
+		runtime.GC()
+		var m runtime.MemStats
+		runtime.ReadMemStats(&m)
+		anon, _ := memoryAnonBytes()
+		t.Logf("first upload after GC anon=%d MiB liveHeap=%d MiB", anon>>20, m.HeapAlloc>>20)
+		f, e := os.Create(filepath.Join(profileDir, "first-upload.pprof"))
+		if e == nil {
+			_ = pprof.WriteHeapProfile(f)
+			_ = f.Close()
+		}
 	}
 	var peak uint64
 	stop, done := make(chan struct{}), make(chan struct{})
