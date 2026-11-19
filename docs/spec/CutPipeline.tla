@@ -13,10 +13,6 @@
 (*    chunk is compared against HEAD; cuts are refused ("reconciling")     *)
 (*    until the compare finishes (chunk_layer.go:95);                     *)
 (*  - a crash before the root CAS leaves only orphan uploads.              *)
-(* Automatic cut timer defaults and first-period jitter select when Cut  *)
-(* is requested; this model nondeterministically schedules that action. *)
-(* Timing and read-only backlog metrics are covered by native controls,  *)
-(* not by a new model safety/liveness claim.                             *)
 (* Chunk content = the LSN of the write it holds.                          *)
 (***************************************************************************)
 EXTENDS Integers, FiniteSets, Sequences, TLC
