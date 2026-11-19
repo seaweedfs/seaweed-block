@@ -146,3 +146,88 @@ func TestRF1Only_StaleRF1FactDoesNotClearANewerRefusal(t *testing.T) {
 		t.Fatalf("RF1@3 did not reconcile: %v %q adopt=%d", failed, reason, a.callCount.Load())
 	}
 }
+
+func newRF1BackendHost(t *testing.T) (*Host, *stubAdapter, *stubReplication, *durable.StorageBackend) {
+	t.Helper()
+	h, a, r := newStubbedHost(t, "vol1", "r1", &orderingRecorder{})
+	h.cfg.RF1Only = "chunk snapshots need RF1"
+	proj := &mutableProjector{p: engine.ReplicaProjection{Mode: engine.ModeHealthy, Epoch: 2, EndpointVersion: 1}}
+	h.view = NewAdapterProjectionView(proj, "vol1", "r1", h)
+	if err := h.SetSelfFence(&switchFencer{}); err != nil {
+		t.Fatal(err)
+	}
+	store := memorywal.NewStore(8, 4096)
+	t.Cleanup(func() { _ = store.Close() })
+	backend := durable.NewStorageBackend(store, h.view, frontend.Identity{VolumeID: "vol1", ReplicaID: "r1", Epoch: 2, EndpointVersion: 1})
+	backend.SetOperational(true, "rf1 baseline")
+	return h, a, r, backend
+}
+
+func rf1Fact(epoch uint64) *control.AssignmentFact {
+	f := rf2PrimaryFact(epoch)
+	f.Peers = nil
+	return f
+}
+
+// Concurrent schedule: an allowed RF1@2 replay passes the stale check, and
+// before it admits, the stream latches an RF2@3 refusal. The replay must not
+// clear that newer refusal nor adopt; writes stay refused. RF1@3 then admits.
+func TestRF1Only_HeldRF1ReplayDoesNotClearANewerRefusal(t *testing.T) {
+	h, a, r, backend := newRF1BackendHost(t)
+	ctx := context.Background()
+	h.applyFact(rf1Fact(2))
+	if _, err := backend.Write(ctx, 0, []byte("epoch-2")); err != nil || a.callCount.Load() != 1 {
+		t.Fatalf("baseline: adopt=%d write=%v", a.callCount.Load(), err)
+	}
+	fired := false
+	h.rf1BeforeAdmit = func() {
+		if !fired {
+			fired = true
+			h.applyFact(rf2PrimaryFact(3)) // the stream, between the replay's check and its admit
+		}
+	}
+	h.applyFact(rf1Fact(2)) // the held replay
+	h.rf1BeforeAdmit = nil
+	if !fired {
+		t.Fatal("fixture: the replay did not reach the admit point")
+	}
+	if failed, reason := h.RoleAdmissionFailure(); !failed || !strings.Contains(reason, "at epoch 3") {
+		t.Fatalf("held RF1@2 cleared the newer RF2@3 refusal: %v %q", failed, reason)
+	}
+	if a.callCount.Load() != 1 {
+		t.Fatalf("held RF1@2 adopted after the newer refusal: adopt=%d", a.callCount.Load())
+	}
+	if _, err := backend.Write(ctx, 0, []byte("x")); !errors.Is(err, frontend.ErrStalePrimary) {
+		t.Fatalf("write after the newer refusal: %v", err)
+	}
+	if len(r.lastTargetIDs) != 0 {
+		t.Fatalf("forbidden peers installed: %v", r.lastTargetIDs)
+	}
+	h.applyFact(rf1Fact(3))
+	if failed, reason := h.RoleAdmissionFailure(); failed || a.callCount.Load() != 2 {
+		t.Fatalf("current RF1@3 not admitted: %v %q adopt=%d", failed, reason, a.callCount.Load())
+	}
+}
+
+// A stale RF2 below an admitted RF1 epoch does not re-latch the refusal.
+func TestRF1Only_StaleRF2AfterNewerRF1DoesNotRelatch(t *testing.T) {
+	h, a, _, backend := newRF1BackendHost(t)
+	ctx := context.Background()
+	h.applyFact(rf1Fact(2))
+	h.applyFact(rf2PrimaryFact(3))
+	h.applyFact(rf1Fact(4))
+	if failed, reason := h.RoleAdmissionFailure(); failed || a.callCount.Load() != 2 {
+		t.Fatalf("RF1@4 not admitted: %v %q adopt=%d", failed, reason, a.callCount.Load())
+	}
+	h.applyFact(rf2PrimaryFact(3)) // stale replay
+	if failed, reason := h.RoleAdmissionFailure(); failed {
+		t.Fatalf("stale RF2@3 re-latched after RF1@4: %q", reason)
+	}
+	if _, err := backend.Write(ctx, 0, []byte("x")); errors.Is(err, frontend.ErrStalePrimary) {
+		t.Fatalf("stale RF2@3 stopped writes: %v", err)
+	}
+	h.applyFact(rf2PrimaryFact(4)) // same epoch, peers added: refused
+	if failed, _ := h.RoleAdmissionFailure(); !failed {
+		t.Fatal("RF2 at the admitted epoch not refused")
+	}
+}
