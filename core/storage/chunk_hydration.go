@@ -15,6 +15,21 @@ const defaultHydrationWorkers = 2
 const defaultHydrationQueueDepth = 64
 const defaultHydrationWait = 4 * time.Second
 
+// ChunkHydrationStats separates wait refusals from owned fetch outcomes.
+// A wait refusal is not necessarily a wire completion (a caller may cancel).
+type ChunkHydrationStats struct {
+	WorkerLimit  int
+	QueueDepth   int
+	Active       int
+	Queued       int
+	WaitCalls    uint64
+	Joined       uint64
+	WaitRefusals uint64
+	Fetches      uint64
+	Completed    uint64
+	FetchErrors  uint64
+}
+
 type chunkHydrationFlight struct {
 	idx, gen uint64
 	ref      chunkRef
@@ -38,6 +53,7 @@ func hydrationPending(cause error) error {
 // it (or a store/capture/lifecycle lock) while awaiting or fetching bytes.
 func (l *chunkLayerImpl) OnReadMissContext(ctx context.Context, lba uint64) ([]byte, error) {
 	idx := l.chunkOf(lba)
+	counted := false
 	for {
 		l.stMu.Lock()
 		if l.closed {
@@ -53,7 +69,12 @@ func (l *chunkLayerImpl) OnReadMissContext(ctx context.Context, lba uint64) ([]b
 			l.stMu.Unlock()
 			return make([]byte, l.blockSize), nil
 		}
+		if !counted {
+			l.stats.Hydration.WaitCalls++
+			counted = true
+		}
 		if err := ctx.Err(); err != nil {
+			l.stats.Hydration.WaitRefusals++
 			l.stMu.Unlock()
 			return nil, hydrationPending(err)
 		}
@@ -63,8 +84,12 @@ func (l *chunkLayerImpl) OnReadMissContext(ctx context.Context, lba uint64) ([]b
 		if stale {
 			f.cancel()
 		}
+		if f != nil && !stale {
+			l.stats.Hydration.Joined++
+		}
 		if f == nil {
 			if len(l.hydration) >= l.cfg.HydrationQueueDepth {
+				l.stats.Hydration.WaitRefusals++
 				l.stMu.Unlock()
 				return nil, hydrationPending(nil)
 			}
@@ -101,6 +126,7 @@ func (l *chunkLayerImpl) OnReadMissContext(ctx context.Context, lba uint64) ([]b
 			default:
 				l.stMu.Lock()
 				f.waiters--
+				l.stats.Hydration.WaitRefusals++
 				l.stMu.Unlock()
 				return nil, hydrationPending(ctx.Err())
 			}
@@ -110,6 +136,9 @@ func (l *chunkLayerImpl) OnReadMissContext(ctx context.Context, lba uint64) ([]b
 		closed := l.closed
 		changed := l.absentGen[idx] != f.gen || l.head.Chunks[idx] != f.ref
 		err := f.err
+		if !closed && !changed && errors.Is(err, ErrChunkHydrationPending) {
+			l.stats.Hydration.WaitRefusals++
+		}
 		l.stMu.Unlock()
 		if closed {
 			return nil, errChunkLayerClosed
@@ -156,15 +185,21 @@ func (l *chunkLayerImpl) hydrationWorker() {
 			}
 		}
 		next.running = true
+		l.stats.Hydration.Fetches++
 		l.wakeHydrationLocked()
 		l.stMu.Unlock()
 		fetch, cancel := context.WithTimeout(next.ctx, l.cfg.ReadMissTimeout)
-		_, err := l.fillOnce(fetch, next.idx, next.gen, next.ref)
+		resolved, err := l.fillOnce(fetch, next.idx, next.gen, next.ref)
 		cancel()
 		next.cancel()
 		l.stMu.Lock()
 		if hydrationContextCauseOnly(err) {
 			err = hydrationPending(err)
+		}
+		if err != nil {
+			l.stats.Hydration.FetchErrors++
+		} else if resolved {
+			l.stats.Hydration.Completed++
 		}
 		next.err = err
 		delete(l.hydration, next.idx)

@@ -1379,6 +1379,15 @@ func (l *chunkLayerImpl) recordCut(r chunkCutResult, st chunkCutStats, err error
 func (l *chunkLayerImpl) Stats() chunkLayerStats {
 	l.stMu.Lock()
 	out := l.stats
+	out.Hydration.WorkerLimit = l.cfg.HydrationWorkers
+	out.Hydration.QueueDepth = l.cfg.HydrationQueueDepth
+	for _, f := range l.hydration {
+		if f.running {
+			out.Hydration.Active++
+		} else {
+			out.Hydration.Queued++
+		}
+	}
 	out.CutsRefused = make(map[string]uint64, len(l.stats.CutsRefused))
 	for k, v := range l.stats.CutsRefused {
 		out.CutsRefused[k] = v

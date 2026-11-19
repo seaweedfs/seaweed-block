@@ -435,6 +435,7 @@ type chunkCutStats struct {
 //   - LastCut, LastCutH and LastCutNs (wall clock, Unix ns) describe the
 //     last successful cut, whatever triggered it.
 type chunkLayerStats struct {
+	Hydration         ChunkHydrationStats
 	CutsOK            uint64
 	CutsNoop          uint64
 	CutsFailed        uint64

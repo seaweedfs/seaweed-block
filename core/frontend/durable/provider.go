@@ -162,6 +162,9 @@ type ProviderConfig struct {
 	// ChunkReadMissTimeout bounds one remote fetch of an absent block.
 	// Zero: the storage default.
 	ChunkReadMissTimeout time.Duration
+	// Per-volume hydration bounds; zero selects 2 workers and 64 distinct chunks.
+	ChunkHydrationWorkers    int
+	ChunkHydrationQueueDepth int
 	// ChunkCaptureInterval: an automatic cut is due once this long has
 	// passed since the volume's last successful cut (of any kind). Zero
 	// disables the timer.
