@@ -526,19 +526,7 @@ type nvmeReadyLine struct {
 func run(f flags) int {
 	readyCh := make(chan adapter.AssignmentInfo, 16)
 
-	h, err := volume.New(volume.Config{
-		MasterAddr:        f.masterAddr,
-		ServerID:          f.serverID,
-		VolumeID:          f.volumeID,
-		ReplicaID:         f.replicaID,
-		DataAddr:          f.dataAddr,
-		CtrlAddr:          f.ctrlAddr,
-		HeartbeatInterval: f.hbInterval,
-		RecoverTimeout:    f.recoverTimeout,
-		ReadyMarker:       readyCh,
-		EnableT1Readiness: f.enableT1Readiness,
-		WorkspaceLease:    f.workspaceLease,
-	})
+	h, err := volume.New(hostConfig(f, readyCh))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "blockvolume:", err)
 		return 1
@@ -1432,6 +1420,24 @@ func deriveDualLaneAddr(addr string) (string, error) {
 
 // replicaFloorPath is where the replica's epoch floor record lives (G1):
 // beside the volume's durable files, or "" for non-durable memback runs.
+// hostConfig is the volume host's configuration from the flags.
+func hostConfig(f flags, readyCh chan<- adapter.AssignmentInfo) volume.Config {
+	return volume.Config{
+		MasterAddr:        f.masterAddr,
+		ServerID:          f.serverID,
+		VolumeID:          f.volumeID,
+		ReplicaID:         f.replicaID,
+		DataAddr:          f.dataAddr,
+		CtrlAddr:          f.ctrlAddr,
+		HeartbeatInterval: f.hbInterval,
+		RecoverTimeout:    f.recoverTimeout,
+		ReadyMarker:       readyCh,
+		EnableT1Readiness: f.enableT1Readiness,
+		WorkspaceLease:    f.workspaceLease,
+		RF1Only:           rf1Only(f),
+	}
+}
+
 func replicaFloorPath(f flags) string {
 	if f.durableRoot == "" {
 		return ""

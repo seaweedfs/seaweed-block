@@ -66,6 +66,11 @@ type Config struct {
 	// their documented non-healthy projection).
 	EnableT1Readiness bool
 	WorkspaceLease    bool // Opt-in: require a workspace lease before I/O or capture.
+	// RF1Only, when set, is why this volume serves single-replica only
+	// (walstore-chunk): every assignment with replica slots, primary with
+	// peers or supporting replica, is refused before any peer set, role or
+	// readiness is installed, and latched like a failed role admission.
+	RF1Only string
 
 	// ReplicationVolume, when non-nil, receives peer-set updates on
 	// every self-replica AssignmentFact. The Host calls
@@ -143,6 +148,7 @@ type Host struct {
 	// even on a host that was healthy at its prior epoch; only a later
 	// successful role call for the current role and epoch clears it.
 	roleAdmissionFailed atomic.Value // string reason; "" = not failed
+	rf1Refused          atomic.Value // string reason (Config.RF1Only); "" = the last fact was RF1
 
 	conn   *grpc.ClientConn
 	obsCli control.ObservationServiceClient
@@ -428,6 +434,9 @@ func (h *Host) latchRoleAdmission(role selfRole, epoch uint64, err error) {
 // call on this host's replica listener failed, and why. The projection view
 // treats a failure as not Healthy.
 func (h *Host) RoleAdmissionFailure() (bool, string) {
+	if reason, _ := h.rf1Refused.Load().(string); reason != "" {
+		return true, reason
+	}
 	reason, _ := h.roleAdmissionFailed.Load().(string)
 	return reason != "", reason
 }
@@ -780,6 +789,10 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 					h.cfg.VolumeID, reason, info.ReplicaID, info.Epoch, info.EndpointVersion)
 				return
 			}
+			if h.cfg.RF1Only != "" {
+				h.refuseRF1("a supporting replica role", info.Epoch)
+				return
+			}
 			if err := h.fenceSelf(selfRoleReplica, info.Epoch); err != nil {
 				// G1: fail closed, as for the primary path; stream replay
 				// redelivers the fact and a later success clears the latch.
@@ -815,6 +828,15 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 		h.log.Printf("blockvolume: volume %s local readiness blocked (%s); NOT applying primary assignment %s@%d to adapter",
 			h.cfg.VolumeID, reason, fact.ReplicaId, fact.Epoch)
 		return
+	}
+
+	// An RF1-only volume refuses replica peers before anything is installed.
+	if h.cfg.RF1Only != "" {
+		if len(fact.Peers) > 0 {
+			h.refuseRF1(fmt.Sprintf("a primary role with %d replica peers", len(fact.Peers)), fact.Epoch)
+			return
+		}
+		h.rf1Refused.Store("")
 	}
 
 	// Step (2a): install replication peer set first. Decoded via
@@ -864,6 +886,14 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 		default:
 		}
 	}
+}
+
+// refuseRF1 latches the refusal of a role with replica slots on an RF1-only
+// volume (Config.RF1Only): no peer set, role or readiness was installed.
+func (h *Host) refuseRF1(what string, epoch uint64) {
+	reason := fmt.Sprintf("volume %s refuses %s at epoch %d: %s", h.cfg.VolumeID, what, epoch, h.cfg.RF1Only)
+	h.rf1Refused.Store(reason)
+	h.log.Printf("blockvolume: %s — NOT applying to adapter (fail-closed)", reason)
 }
 
 func (h *Host) emitSupportingReadyMarker(info adapter.AssignmentInfo) {

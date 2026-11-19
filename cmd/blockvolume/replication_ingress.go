@@ -28,15 +28,24 @@ type replicationIngress struct {
 	closed   bool
 }
 
-// newReplicationIngress is the volume's ingress from its flags; a walstore-chunk
-// volume refuses every role with replica slots (chunkRF1Reason).
+// newReplicationIngress is the volume's ingress from its flags; an RF1-only
+// volume (walstore-chunk) refuses every role with replica slots.
 func newReplicationIngress(f flags, store storage.LogicalStorage) *replicationIngress {
 	r := &replicationIngress{addr: f.dataAddr, store: store, volumeID: f.volumeID,
 		floorPath: replicaFloorPath(f), dualLane: f.recoveryMode == "dual-lane"}
-	if f.durableImpl == "walstore-chunk" {
-		r.rf1Only = chunkRF1Reason
-	}
+	r.rf1Only = rf1Only(f)
 	return r
+}
+
+// rf1Only is the single-replica rule of this volume, "" when replication is
+// allowed. The host refuses assignments with replica slots (installed at
+// construction, before any fact is applied or replayed); the ingress gate
+// refuses the same roles again.
+func rf1Only(f flags) string {
+	if f.durableImpl == "walstore-chunk" {
+		return chunkRF1Reason
+	}
+	return ""
 }
 
 func (r *replicationIngress) FenceAsPrimary(epoch uint64) error {

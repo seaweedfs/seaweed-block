@@ -1,10 +1,8 @@
 package main
 
 import (
-	"net"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
@@ -29,19 +27,24 @@ func TestChunkVolumeRefusesReplicationAckAtStart(t *testing.T) {
 	}
 }
 
-// The replication factor arrives with the master's assignment, so the guard is
-// also on the role gate: every role with replica slots is refused and no socket
-// is opened; a primary role without peers (RF1) is admitted.
+// The replication factor arrives with the master's assignment. The host refuses
+// roles with replica slots (core/host/volume RF1Only, from hostConfig); the
+// ingress gate refuses them again and opens neither inbound lane (legacy and
+// dual-lane ports). A primary role without peers (RF1) is admitted.
 func TestChunkVolumeIngressRefusesReplicaSlots(t *testing.T) {
 	for _, impl := range []string{"walstore", "walstore-chunk"} {
 		t.Run(impl, func(t *testing.T) {
-			addr, _ := ingressPair(t)
-			r := newReplicationIngress(flags{dataAddr: addr, volumeID: "v1", durableImpl: impl, recoveryMode: "legacy"}, storage.NewBlockStore(4, 4096))
+			addr, dual := ingressPair(t)
+			f := flags{dataAddr: addr, volumeID: "v1", durableImpl: impl, recoveryMode: "dual-lane"}
+			if got, want := hostConfig(f, nil).RF1Only, map[string]string{"walstore": "", "walstore-chunk": chunkRF1Reason}[impl]; got != want {
+				t.Fatalf("host config RF1Only = %q, want %q", got, want)
+			}
+			r := newReplicationIngress(f, storage.NewBlockStore(4, 4096))
 			defer r.Stop()
 			admitErr := r.AdmitAsReplica(1)
 			if impl == "walstore" {
-				if admitErr != nil || r.listener == nil {
-					t.Fatalf("walstore replica role: %v", admitErr)
+				if admitErr != nil || r.listener == nil || r.dual == nil {
+					t.Fatalf("walstore replica role (dual-lane): %v", admitErr)
 				}
 				return
 			}
@@ -54,12 +57,13 @@ func TestChunkVolumeIngressRefusesReplicaSlots(t *testing.T) {
 			if err := r.FenceAsPrimary(3); err == nil {
 				t.Fatal("legacy primary fence (peers assumed) admitted")
 			}
-			if r.listener != nil {
-				t.Fatal("a replica listener was created")
+			if r.listener != nil || r.dual != nil {
+				t.Fatal("an inbound listener was created")
 			}
-			if c, err := net.DialTimeout("tcp", addr, 500*time.Millisecond); err == nil {
-				c.Close()
-				t.Fatal("the replication address accepts connections")
+			for _, a := range []string{addr, dual} {
+				if err := ingressPortReleased(a); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if err := r.FenceAsPrimaryWithPeers(4, false); err != nil {
 				t.Fatalf("RF1 primary refused: %v", err)
