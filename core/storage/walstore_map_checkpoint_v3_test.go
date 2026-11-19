@@ -144,8 +144,10 @@ func TestWALStoreV3_PreparedCheckpointRefusesChangedProof(t *testing.T) {
 			release()
 			select {
 			case err := <-done:
-				if !errors.Is(err, ErrMapCoverageStale) {
+				if event == "recover" && !errors.Is(err, ErrMapCoverageStale) {
 					t.Errorf("stale prepared checkpoint=%v", err)
+				} else if event == "write" && err != nil {
+					t.Errorf("newer retained append invalidated prefix coverage: %v", err)
 				}
 			case <-time.After(5 * time.Second):
 				t.Fatal("flusher did not settle")
@@ -156,8 +158,10 @@ func TestWALStoreV3_PreparedCheckpointRefusesChangedProof(t *testing.T) {
 				t.Fatal("flusher result without join")
 			}
 			s.v3.testMapPrepared = nil
-			if s.v3.pub.current() != before {
+			if event == "recover" && s.v3.pub.current() != before {
 				t.Error("stale proof published a checkpoint")
+			} else if event == "write" && s.CheckpointLSN() != 1 {
+				t.Error("newer retained append blocked the older checkpoint")
 			}
 			if s.stickyIOFault() != nil {
 				t.Error("proof refusal incorrectly latched a persistence fault")

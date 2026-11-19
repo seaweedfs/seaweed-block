@@ -9,7 +9,8 @@ func (l *chunkLayerImpl) usesOwnedMapV3() bool { return l.s.v3 != nil && l.s.v3.
 // (or an authority-checked no-op), outside bmMu/stMu and the capture barrier.
 // The capture's mutation versions were sampled under the quiesced barrier.
 // Store.mu prevents a WAL append from slipping between the version check and
-// the UNKNOWN update. A later write updates max LSN and invalidates proofs.
+// the UNKNOWN update. A later WAL append updates max LSN and stays retained;
+// an effective UNKNOWN change or lifecycle transition invalidates proofs.
 // A failed map publication leaves the old disk UNKNOWN conservative; a map
 // persistence failure also latches the store, while the remote HEAD remains
 // the successfully captured image. No remote durability claim is undone.
