@@ -1049,8 +1049,6 @@ func (s *WALStore) WriteInstrumentation() WriteInstrumentationStatus {
 func (s *WALStore) Read(lba uint32) ([]byte, error) { return s.ReadContext(context.Background(), lba) }
 
 func (s *WALStore) ReadContext(ctx context.Context, lba uint32) (data []byte, err error) {
-	ctx, cancel := context.WithTimeout(ctx, defaultHydrationWait)
-	defer cancel()
 	defer func() {
 		if err == nil && ctx.Err() != nil {
 			data = nil

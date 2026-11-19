@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 )
 
 // ErrChunkHydrationPending means no guest bytes were admitted: hydration
@@ -13,7 +12,6 @@ var ErrChunkHydrationPending = errors.New("storage: chunk hydration pending")
 
 const defaultHydrationWorkers = 2
 const defaultHydrationQueueDepth = 64
-const defaultHydrationWait = 4 * time.Second
 
 // ChunkHydrationStats separates wait refusals from owned fetch outcomes.
 // A wait refusal is not necessarily a wire completion (a caller may cancel).
@@ -83,6 +81,11 @@ func (l *chunkLayerImpl) OnReadMissContext(ctx context.Context, lba uint64) ([]b
 		stale := f != nil && (f.gen != gen || f.ref != ref)
 		if stale {
 			f.cancel()
+			// The old worker remains owned and joined, but cannot delay a
+			// new generation or remove its replacement when it finishes.
+			delete(l.hydration, idx)
+			close(f.done)
+			f = nil
 		}
 		if f != nil && !stale {
 			l.stats.Hydration.Joined++
@@ -185,6 +188,7 @@ func (l *chunkLayerImpl) hydrationWorker() {
 			}
 		}
 		next.running = true
+		l.stats.Hydration.Active++
 		l.stats.Hydration.Fetches++
 		l.wakeHydrationLocked()
 		l.stMu.Unlock()
@@ -201,9 +205,12 @@ func (l *chunkLayerImpl) hydrationWorker() {
 		} else if resolved {
 			l.stats.Hydration.Completed++
 		}
+		l.stats.Hydration.Active--
 		next.err = err
-		delete(l.hydration, next.idx)
-		close(next.done)
+		if l.hydration[next.idx] == next {
+			delete(l.hydration, next.idx)
+			close(next.done)
+		}
 		l.wakeHydrationLocked()
 		l.stMu.Unlock()
 	}

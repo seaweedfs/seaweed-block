@@ -547,9 +547,7 @@ func sortedKeys(m map[uint64]bool) []uint64 {
 // block that has no newer local version, then lets the store read its
 // extent. It runs with no walstore lock held.
 func (l *chunkLayerImpl) OnReadMiss(lba uint64) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), defaultHydrationWait)
-	defer cancel()
-	return l.OnReadMissContext(ctx, lba)
+	return l.OnReadMissContext(context.Background(), lba)
 }
 
 // fillOnce fetches one chunk version and installs every block that has no
@@ -1382,9 +1380,7 @@ func (l *chunkLayerImpl) Stats() chunkLayerStats {
 	out.Hydration.WorkerLimit = l.cfg.HydrationWorkers
 	out.Hydration.QueueDepth = l.cfg.HydrationQueueDepth
 	for _, f := range l.hydration {
-		if f.running {
-			out.Hydration.Active++
-		} else {
+		if !f.running {
 			out.Hydration.Queued++
 		}
 	}
