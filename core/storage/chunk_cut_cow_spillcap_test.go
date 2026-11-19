@@ -26,11 +26,21 @@ func TestCutCOWV3_SaverCapacityAbortsWithoutParkingGuest(t *testing.T) {
 	w := l.cowActive.Load()
 	w.saverSlots = make(chan struct{}, 1) // witness exhaustion of a fixed saver budget
 	writer := make(chan error, 1)
-	go func() { _, err := s.Write(5, makeBlock(ctBlockSize, 0x45)); writer <- err }()
-	t.Cleanup(func() { free(); gate.unblock() })
+	writerDone, secondDone := make(chan struct{}), make(chan struct{})
+	secondStarted := false
+	t.Cleanup(func() {
+		free()
+		gate.unblock()
+		cowWaitSignal(t, writerDone, "saving writer cleanup")
+		if secondStarted {
+			cowWaitSignal(t, secondDone, "second writer cleanup")
+		}
+	})
+	go func() { defer close(writerDone); _, err := s.Write(5, makeBlock(ctBlockSize, 0x45)); writer <- err }()
 	cowWaitSignal(t, entered, "saving owner")
 	second := make(chan error, 1)
-	go func() { _, err := s.Write(9, makeBlock(ctBlockSize, 0x49)); second <- err }()
+	secondStarted = true
+	go func() { defer close(secondDone); _, err := s.Write(9, makeBlock(ctBlockSize, 0x49)); second <- err }()
 	select {
 	case err := <-second:
 		if err != nil {

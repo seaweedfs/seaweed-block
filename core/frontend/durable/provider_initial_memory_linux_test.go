@@ -246,6 +246,18 @@ func TestWALStoreChunk_InitialWriteAnonymousMemory(t *testing.T) {
 	if os.Getenv("SWBLOCK_MEMORY_STAGE") != "" {
 		cfg.ChunkDirtyThreshold = 64
 	}
+	if raw := os.Getenv("SWBLOCK_MEMORY_CHUNKS"); raw != "" {
+		chunks, e := strconv.Atoi(raw)
+		if e != nil || chunks <= 0 {
+			t.Fatal("invalid chunk count")
+		}
+		cb, e := strconv.Atoi(os.Getenv("SWBLOCK_MEMORY_CHUNK_BLOCKS"))
+		if e != nil || cb <= 0 {
+			t.Fatal("invalid chunk blocks")
+		}
+		cfg.ChunkBlocks = uint32(cb)
+		cfg.NumBlocks = uint32(chunks * cb)
+	}
 	p, err := durable.NewDurableProvider(cfg, v1View())
 	if err != nil {
 		t.Fatal(err)
@@ -282,6 +294,14 @@ func TestWALStoreChunk_InitialWriteAnonymousMemory(t *testing.T) {
 			_ = f.Close()
 		}
 	}
+	bound := uint64(256 << 20)
+	if raw := os.Getenv("SWBLOCK_MEMORY_BOUND_MIB"); raw != "" {
+		n, e := strconv.ParseUint(raw, 10, 32)
+		if e != nil {
+			t.Fatal(e)
+		}
+		bound = n << 20
+	}
 	var peak uint64
 	stop, done := make(chan struct{}), make(chan struct{})
 	go func() {
@@ -316,8 +336,8 @@ func TestWALStoreChunk_InitialWriteAnonymousMemory(t *testing.T) {
 		close(stop)
 		<-done
 		t.Logf("peak anonymous RSS=%d MiB profiles=%s", peak>>20, profileDir)
-		if peak > 256<<20 {
-			t.Errorf("peak anonymous RSS %d exceeds 256 MiB", peak)
+		if peak > bound {
+			t.Errorf("peak anonymous RSS %d exceeds bound %d", peak, bound)
 		}
 	}()
 	write := func(off int64, data []byte) error {
@@ -349,7 +369,7 @@ func TestWALStoreChunk_InitialWriteAnonymousMemory(t *testing.T) {
 		workers = 0
 	}
 	if os.Getenv("SWBLOCK_MEMORY_FULL") != "" {
-		fillStart, fillEnd, workers = 0, 1<<30, 0
+		fillStart, fillEnd, workers = 0, int64(cfg.NumBlocks)*4096, 0
 	}
 	for i := range buf {
 		buf[i] = byte(i*7 + 1)
@@ -393,6 +413,29 @@ func TestWALStoreChunk_InitialWriteAnonymousMemory(t *testing.T) {
 	if os.Getenv("SWBLOCK_MEMORY_CUT") != "0" {
 		if _, err = p.CaptureVolume(ctx, "v1"); err != nil {
 			t.Fatal(err)
+		}
+		if os.Getenv("SWBLOCK_MEMORY_FULL") != "" {
+			head, e := r.GetHead(ctx)
+			if e != nil {
+				t.Fatal(e)
+			}
+			wantChunks := int(cfg.NumBlocks / cfg.ChunkBlocks)
+			if len(head.Chunks) != wantChunks {
+				t.Fatalf("full image references=%d, want %d", len(head.Chunks), wantChunks)
+			}
+			h := sha256.New()
+			for left := int(cfg.ChunkBlocks) * 4096; left > 0; {
+				n := min(left, len(buf))
+				_, _ = h.Write(buf[:n])
+				left -= n
+			}
+			var want [32]byte
+			copy(want[:], h.Sum(nil))
+			for idx, ref := range head.Chunks {
+				if ref.SHA256 != want {
+					t.Fatalf("chunk %d differs from submitted bytes", idx)
+				}
+			}
 		}
 	}
 	anon, _ = memoryAnonBytes()
