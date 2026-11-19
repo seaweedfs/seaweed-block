@@ -59,6 +59,6 @@ func (l *checkpointLogLimiter) report(err error, now time.Time) {
 	if !errors.As(err, &reason) {
 		reason = "unspecified"
 	}
-	log.Printf("storage: flusher: checkpoint deferred reason=%s suppressed=%d: %v", reason, l.suppressed, err)
+	log.Printf("storage: flusher: checkpoint deferred reason=%s suppressed=%d: %v", string(reason), l.suppressed, err)
 	l.last, l.suppressed = now, 0
 }
