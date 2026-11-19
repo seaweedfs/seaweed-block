@@ -76,6 +76,12 @@ func TestChunkUploadOutageSettlesBeforeQueuedBASE(t *testing.T) {
 	if len(f.installedHeads()) != 0 {
 		t.Fatal("failed upload published HEAD")
 	}
+	select {
+	case <-baseJoined:
+	case <-time.After(5 * time.Second):
+		t.Fatal("BASE begin worker not joined")
+	}
+	l.testBaseTransitionBeforeLock = nil
 	if err := got.h.MarkBaseComplete(); err != nil {
 		t.Fatal(err)
 	}
