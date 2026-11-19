@@ -158,6 +158,7 @@ type Publisher struct {
 	// Workspace state is serialized with assignment minting under mu. Remote
 	// HEAD reads and subscriber delivery never run under this lock.
 	workspace             map[string]*WorkspaceState
+	lostRanges            map[string][]WorkspaceLostRange // forced moves' abandoned ranges (side files)
 	workspaceUncertain    map[string]bool
 	workspaceNow          func() time.Time
 	workspaceTTL          time.Duration
@@ -234,6 +235,7 @@ func NewPublisher(dir Directive, opts ...PublisherOption) *Publisher {
 		subs:               make(map[subKey][]*subscription),
 		writeSeqByVolume:   map[string]uint64{},
 		workspace:          map[string]*WorkspaceState{},
+		lostRanges:         map[string][]WorkspaceLostRange{},
 		workspaceUncertain: map[string]bool{},
 		workspaceNow:       time.Now,
 		workspaceTTL:       30 * time.Second,
@@ -283,6 +285,12 @@ func (p *Publisher) reloadFromStore() {
 		}
 	}
 	p.loadErrs = append(p.loadErrs, skips...)
+	ranges, lskips, lerr := p.store.LoadWorkspaceLostRanges()
+	if lerr != nil {
+		panic(fmt.Sprintf("authority: lost range load failure: %v", lerr))
+	}
+	p.lostRanges = ranges
+	p.loadErrs = append(p.loadErrs, lskips...)
 	for _, rec := range records {
 		p.refreshLeaseViewLocked(rec.VolumeID)
 		if rec.Workspace != nil {

@@ -80,6 +80,16 @@ type AuthorityStore interface {
 	// Publisher.apply).
 	Put(record DurableRecord) error
 
+	// PutWorkspaceLostRanges replaces a volume's forced-move lost ranges
+	// atomically, beside (never inside) its authority record, so the record
+	// stays readable by binaries that predate them. Every store must record
+	// them: a forced move does not issue without its range.
+	PutWorkspaceLostRanges(volumeID string, ranges []WorkspaceLostRange) error
+
+	// LoadWorkspaceLostRanges returns every volume's lost ranges, with
+	// per-file skip errors; only an index-level failure returns err.
+	LoadWorkspaceLostRanges() (map[string][]WorkspaceLostRange, []error, error)
+
 	// Close releases store resources. Idempotent.
 	Close() error
 }
