@@ -207,7 +207,7 @@ stateDiagram-v2
 
 | Step | Guard | Enforced in | Protects |
 |---|---|---|---|
-| Admit | not closed, fenced, detached or installing a base; `CaptureAllowed` (healthy primary, unchanged lineage, valid lease); no cut while reconciling | `core/storage/chunk_layer.go` `admit`, `captureLocked`; `core/frontend/durable/provider_chunk.go` `newChunkLayer` (`CaptureAllowed`) | `INV-CUT-RECONCILING-001`, `INV-WS-LEASE-001` |
+| Admit | automatic triggers also wait for the configured interval and initial jitter; explicit cuts bypass scheduling. All cuts require not closed, fenced, detached or installing a base; `CaptureAllowed` (healthy primary, unchanged lineage, valid lease); no cut while reconciling | `core/storage/chunk_layer.go` `admit`, `captureLocked`; `core/frontend/durable/provider_chunk.go` `newChunkLayer` (`CaptureAllowed`) | `INV-CUT-RECONCILING-001`, `INV-WS-LEASE-001` |
 | Settle pending | an earlier unknown CAS is resolved by re-reading HEAD before any new proposal | `core/storage/chunk_layer.go` `resolvePending` | `INV-WS-CAS-UNKNOWN-001` |
 | Stage | while more than the barrier bound would be copied, pre-copy outside the barrier; new keys are covered by an intent first | `core/storage/chunk_layer.go` `stage` | `INV-CUT-INTENT-FIRST-001`, `INV-CUT-STAGED-REUSE-001` |
 | Quiesce | the capture barrier (`captureMu`) is held exclusively, then `Sync` fixes H; `Recover` and writes hold the barrier shared | `core/storage/chunk_layer.go` `captureLocked`; `core/storage/walstore.go` `WALStore.Recover`, `WALStore.Write` | `INV-CUT-QUIESCED-001`, `INV-CUT-RECOVER-BARRIER-001` |
@@ -468,6 +468,13 @@ Notes:
 | ID | Statement | Machine / transition | Enforced in | Test | TLA+ property | Status |
 |---|---|---|---|---|---|---|
 | `INV-NVME-H2C-RANGE-001` | An H2CData range exceeding the expected transfer size is refused before slicing, including a uint32 offset-plus-length overflow; an exact-bound payload is preserved. | Frontend H2C receive validation; no storage state transition | `core/frontend/nvme/session.go` `recvH2CData` | `TestRecvH2CDataRangeBounds` (`core/frontend/nvme/h2c_bounds_test.go`) | — | ACTIVE |
+
+### Automatic cut scheduling and observations
+
+| ID | Status | Invariant | Enforced in | Tests | Model |
+|---|---|---|---|---|---|
+| INV-CUT-SCHEDULE-JITTER-001 | ACTIVE | CLI defaults to a 15m timer; explicit 0 disables it; initial jitter defers the first automatic cut only, and a successful explicit cut restarts the interval. | `chunk_remote.go`, `provider_chunk.go` `initialCutSchedule`, `cutPolicy` | `TestWALStoreChunkFlags`, `TestCutInitialJitterAndExplicitReset`, existing scheduler controls | M5; trigger timing is outside the abstract cut in `CutPipeline`. |
+| INV-CUT-BACKLOG-OBSERVATION-001 | ACTIVE | Upload backlog includes queued and in-flight chunk workers until settled, and resets only after their join. Metrics never alter readiness and unknown cut age is omitted. | `chunk_upload.go` `uploadBatch`, `chunk_layer.go` `Stats`, `chunk_metrics.go` | `TestChunkStatsUploadBacklogDuringCut`, `TestChunkMetricsUsesTheStatusListener` | Read-only observations; no authority transition. |
 
 ## Part C. Change rules
 

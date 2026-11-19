@@ -70,7 +70,7 @@ A workspace runs one replica (RF=1). It does not use the replication engine of t
 | Permanent host loss | the image at the last successful cut (HEAD `RemoteLSN`); writes after it are lost |
 | Clean move (Detach) | everything written before Detach: guest I/O is stopped, then Detach publishes a final cut before the host releases the volume |
 
-- **When cuts happen.** At semantic points chosen by the integrator (after an agent step, before a risky command, on detach) and on explicit request (`sw-block ops chunk cut`). The periodic timer is off by default (`cmd/blockvolume/chunk_remote.go` `defaultChunkCaptureInterval = 0`); an operator may set one as a host-loss safety net. `--chunk-dirty-threshold` (default 512 chunks, 2 GiB) bounds pre-copy staging work; native COW copies the remainder outside its barrier. It never triggers a cut.
+- **When cuts happen.** At semantic points chosen by the integrator (after an agent step, before a risky command, on detach) and on explicit request (`sw-block ops chunk cut`). The CLI periodic timer defaults to 15 minutes (`--chunk-capture-interval`); explicit `0` disables it. Each volume draws an independent initial delay in [0, interval), so the first timer cut is due after interval plus that delay. Any successful explicit or automatic cut clears startup jitter and resets the ordinary interval. Library callers retain explicit interval configuration (zero stays off). `--chunk-dirty-threshold` (default 512 chunks, 2 GiB) bounds pre-copy staging work; native COW copies the remainder outside its barrier. It never triggers a cut.
 - **So the default RPO is unbounded** until the integrator cuts. This is a design choice for workspaces, where a cut at a semantic point is more useful than a timer.
 - Multi-replica workspaces combined with chunk snapshots are not supported.
 
@@ -382,3 +382,24 @@ These are tracked for fixes. Gaps that apply to the whole codebase (authenticati
 - **GC is manual.** Needles uploaded without a persisted key binding are never reclaimed. An intent stamped by a host clock running ahead of the GC runner fails the whole pass (liveness, not safety).
 - **Filer conditional update: multi-filer and old-filer cases.** Reading the open-source SeaweedFS filer: `UpdateEntry` takes an exclusive lock on the path before it validates `expected_extended`. The concurrent case against one pinned filer is tested (#163). Not tested: several filers sharing a store, and a filer that predates the field (there is no capability probe). **Planned:** a multi-filer test and a probe.
 - **No multi-replica workspaces with chunk snapshots**, and no crash-restart recovery of a ublk server (a crashed server fails closed).
+
+
+### Cut lag and backlog diagnostics
+
+`GET /metrics?volume=<id>` on the existing status listener emits Prometheus
+text with the same access policy and volume check as `/status/durable`. It
+does not open another listener, query remote storage or grant readiness.
+
+| Gauge | Meaning |
+|---|---|
+| `swblock_chunk_cut_time_known` | 1 after a successful cut in this attachment; 0 means unknown |
+| `swblock_chunk_cut_age_seconds` | seconds since that successful cut (including no-op); omitted when unknown |
+| `swblock_chunk_dirty_chunks` | reported known dirty chunks; incomplete while reconciling |
+| `swblock_chunk_dirty_chunk_bytes` | full-chunk coverage estimate of known dirt, capped at volume size; not modified payload bytes |
+| `swblock_chunk_upload_pending` | queued plus in-flight chunks in the current upload batch, including workers waiting on remote completion; excludes manifests |
+| `swblock_chunk_absent_chunks` | chunks requiring lazy fill; not an eager-fill queue |
+| `swblock_chunk_reconciling` | 1 while dirty-set coverage is incomplete |
+
+The JSON `ChunkLayerStats` also carries `DirtyChunkBytes`, `UploadPending`
+and `AbsentChunks`. Metrics are observations, not admission guards. There is
+no host token limiter yet, so no token-wait measurement is fabricated.
