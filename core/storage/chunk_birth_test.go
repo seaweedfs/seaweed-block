@@ -160,7 +160,7 @@ func TestChunkBirthTracksNewestLocalWriteAtCut(t *testing.T) {
 			if second.Head.Chunks[0] != first.Head.Chunks[0] || second.Head.Chunks[1].BirthLSN != z {
 				t.Fatal("rewrite changed a cold chunk birth or failed to advance the changed version")
 			}
-			for _, lba := range []uint64{ctChunkBlocks, ctChunkBlocks + 1} {
+			for _, lba := range []uint32{ctChunkBlocks, ctChunkBlocks + 1} {
 				if _, err := s.Write(lba, makeBlock(ctBlockSize, 0)); err != nil {
 					t.Fatal(err)
 				}
