@@ -94,7 +94,7 @@ TODO(row 14a): relocate or retire every listed legacy control explicitly; preser
 | `core/storage/walstore_checkpoint_safety_test.go::TestWALStoreMutationAPIsRejectAfterClose` | v2 fd/callback/checkpoint injection or direct-extent API; v3 fails through the shared publisher/owned map and uses install handles | `TestDescriptorV3FsyncFailureIsStickyAndPublishesNothing`, `TestDescriptorV3SlotWriteErrorLatchesAndPinsTheCandidate`, `TestWALStoreV3_AutomaticMapPersistenceFailureLatchesStore`, `TestBaseInstallV3CompleteServesTheImageAcrossACrash` |
 | `core/storage/walstore_activation_test.go::TestWALStoreProductionRefusesLegacyWithoutMutation` | legacy input construction for the native public-refusal control itself; the production test stays on v3 | `TestWALStoreProductionRefusesLegacyWithoutMutation` |
 | `core/storage/walstore_sticky_race_test.go::TestWALStoreQueuedSyncAfterAFailedFsyncIsRefused` | v2 fd/callback/checkpoint injection or direct-extent API; v3 fails through the shared publisher/owned map and uses install handles | `TestDescriptorV3FsyncFailureIsStickyAndPublishesNothing`, `TestDescriptorV3SlotWriteErrorLatchesAndPinsTheCandidate`, `TestWALStoreV3_AutomaticMapPersistenceFailureLatchesStore`, `TestBaseInstallV3CompleteServesTheImageAcrossACrash` |
-| `core/storage/walstore_persisted_tail_test.go::TestWALStoreRecoverBoundsPersistFailureRefusesAppendsUntilRetry` | raw v2 header/window/IEEE-CRC/permissive scan assumptions; native v3 refuses holes below W and fences rolled-back suffixes | `TestDescriptorV3SlotWriteErrorLatchesAndPinsTheCandidate`, `TestWALStoreV3HalfResetRefusesWritesUntilRecover` |
+| `core/storage/walstore_persisted_tail_test.go::TestWALStoreRecoverBoundsPersistFailureRefusesAppendsUntilRetry` | PARTIAL: Native real-Recover descriptor-publication write/fsync failure, refused append and subsequent safe recovery/reopen schedule is not established by standalone publisher-failure or half-reset controls. | `TestDescriptorV3SlotWriteErrorLatchesAndPinsTheCandidate`, `TestWALStoreV3HalfResetRefusesWritesUntilRecover` |
 | `core/storage/walstore_midhistory_hole_test.go::TestWALStoreRecoverKeepsATornTail` | raw v2 header/window/IEEE-CRC/permissive scan assumptions; native v3 refuses holes below W and fences rolled-back suffixes | `TestWALIOV3_RealWriterReopenScan`, `TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes`, `TestWALStoreV3DroppedRecordsNeverResurfaceAfterASecondCrash`, `TestDurableStartup_Issue51_WALStoreV3CommittedHoleBlocksReadiness` |
 | `core/storage/walstore_recovery_frontier_gap_test.go::TestWALStoreRecoverKeepsSyncedEntriesAboveAnUnpersistedFrontierJump` | raw v2 header/window/IEEE-CRC/permissive scan assumptions; native v3 refuses holes below W and fences rolled-back suffixes | `TestWALIOV3_RealWriterReopenScan`, `TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes`, `TestWALStoreV3DroppedRecordsNeverResurfaceAfterASecondCrash`, `TestDurableStartup_Issue51_WALStoreV3CommittedHoleBlocksReadiness` |
 | `core/storage/walstore_recovery_lww_test.go::TestWALStoreRecoverLastWriterWinsAcrossScanOrder` | raw v2 header/window/IEEE-CRC/permissive scan assumptions; native v3 refuses holes below W and fences rolled-back suffixes | `TestWALIOV3_RealWriterReopenScan`, `TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes`, `TestWALStoreV3DroppedRecordsNeverResurfaceAfterASecondCrash`, `TestDurableStartup_Issue51_WALStoreV3CommittedHoleBlocksReadiness` |
@@ -131,7 +131,7 @@ TODO(row 14a): relocate or retire every listed legacy control explicitly; preser
 | `core/storage/walstore_recycle_pin_test.go::TestWALStore_RecycleGate_SourceActive_ClampsAtFloor` | fabricated v2 checkpoint/retention geometry; v3 replacement drives real acknowledged writes and both slots | `TestWALStoreV3RecycleFloorCompatibilityMatrix`, `TestWALStoreV3RetentionCompatibilityMatrix`, `TestWALStoreV3ReclaimKeepsPartialBatchAndRetention` |
 | `core/storage/walstore_recycle_pin_test.go::TestWALStore_RecycleGate_SourceInactive_LegacyBehavior` | fabricated v2 checkpoint/retention geometry; v3 replacement drives real acknowledged writes and both slots | `TestWALStoreV3RecycleFloorCompatibilityMatrix`, `TestWALStoreV3RetentionCompatibilityMatrix`, `TestWALStoreV3ReclaimKeepsPartialBatchAndRetention` |
 | `core/storage/walstore_format_admission_test.go::TestWALStore_UnknownFormatWithoutFactoryRefused` | raw frozen v2 codec/format fixtures remain; v3 has a distinct CRC32C/binding/dual-slot byte contract | `TestWALIOV3_RealWriterReopenScan`, `TestDescriptorV3PublishAlternatesSlotsAndReopenSelectsNewest`, `TestWALStoreProductionRefusesLegacyWithoutMutation` |
-| `core/storage/walstore_persisted_tail_test.go::TestWALWriterBatchReuseIsBoundedByTheDurableTail` | raw v2 header/window/IEEE-CRC/permissive scan assumptions; native v3 refuses holes below W and fences rolled-back suffixes | `TestWALStoreV3ReclaimKeepsPartialBatchAndRetention`, `TestWALStoreV3ReclaimRolloverProgressWithoutNewCheckpoint` |
+| `core/storage/walstore_persisted_tail_test.go::TestWALWriterBatchReuseIsBoundedByTheDurableTail` | PARTIAL: Native batch-refusal schedule must explicitly assert unchanged physical head and wrap/padding bytes; indivisible-record/retention controls do not establish that refusal oracle. | `TestWALStoreV3ReclaimKeepsPartialBatchAndRetention`, `TestWALStoreV3ReclaimRolloverProgressWithoutNewCheckpoint` |
 | `core/storage/walstore_persisted_tail_test.go::TestWALWriterReuseIsBoundedByTheDurableTail` | raw v2 header/window/IEEE-CRC/permissive scan assumptions; native v3 refuses holes below W and fences rolled-back suffixes | `TestWALIOV3_FloorAndPwriteFailureRefuse`, `TestWALStoreV3ReclaimSecondSlotFailureKeepsOldPin` |
 | `core/storage/walstore_checkpoint_safety_test.go::TestWriteExtentDirectFailureRetainsDirtyWAL` | v2 fd/callback/checkpoint injection or direct-extent API; v3 fails through the shared publisher/owned map and uses install handles | `TestDescriptorV3FsyncFailureIsStickyAndPublishesNothing`, `TestDescriptorV3SlotWriteErrorLatchesAndPinsTheCandidate`, `TestWALStoreV3_AutomaticMapPersistenceFailureLatchesStore`, `TestBaseInstallV3CompleteServesTheImageAcrossACrash` |
 | `core/storage/walstore_checkpoint_safety_test.go::TestWriteExtentDirectSupersededWALDoesNotReappearAfterRestart` | v2 fd/callback/checkpoint injection or direct-extent API; v3 fails through the shared publisher/owned map and uses install handles | `TestDescriptorV3FsyncFailureIsStickyAndPublishesNothing`, `TestDescriptorV3SlotWriteErrorLatchesAndPinsTheCandidate`, `TestWALStoreV3_AutomaticMapPersistenceFailureLatchesStore`, `TestBaseInstallV3CompleteServesTheImageAcrossACrash` |
@@ -149,7 +149,7 @@ pressure relief. Codec, manual-flush and safety tests could all pass.
 
 The audit inspected the retained legacy constructor inventory and storage tests
 using admission, pressure, throttling, `errWALFull`, wait/timeout and stalled-flusher
-paths. The five concrete retained controls above now name their native counterparts:
+paths. The five concrete retained controls above name related native controls, not complete equivalent closure:
 `TestFlusher_AdvancesCheckpointBeforeReadFromExtent`,
 `TestFlusher_ReleasesWALPressureAfterCheckpoint`,
 `TestWALWriterReuseIsBoundedByTheDurableTail`,
@@ -168,8 +168,8 @@ Raw writer controls remain format-specific; no test is removed.
 | Production default geometry and frontend Flush | `TestWALStoreChunkV3_SequentialBurstFlush` | Public provider, 64 MiB WAL, 320 MiB via NVMe handler, periodic Flush and literal-byte readback |
 | Occupancy and checkpoint pressure reset | `TestWALStoreV3AdmissionUsesNativeOccupancy` | Actual append size and both-slot released floor, not a mocked pressure value |
 | Soft-watermark throttling | `TestWALStoreV3AdmissionSoftThrottles` | Real occupied v3 ring drives a positive bounded soft delay; only sleep is recorded |
-| Hard watermark, stopped flusher, timeout and resumed progress | `TestWALStoreV3AdmissionStallDeadlineAndResume` | Native occupied ring, bounded timeout, waiter remains blocked until actual checkpoint/reclaim then resumes |
-| Close during pressure | `TestWALStoreV3AdmissionCloseEndsPressureWait` | Closed pressured store refuses with the typed close error rather than admitting |
+| Hard watermark, stopped flusher, timeout and resumed progress | `TestWALStoreV3AdmissionStallDeadlineAndResume` | Native occupied ring and timeout; barrier at actual hard-pressure sleep, then checkpoint/reclaim and release. Post-release response timer excludes fsync; controller retains the real store admission deadline |
+| Close during pressure | `TestWALStoreV3AdmissionCloseEndsPressureWait` | Already-parked controller Acquire is released after actual store Close and returns typed close error; no claim that public Write lifecycle/Close behavior changed |
 | Idle/admission rollover without a new checkpoint | `TestWALStoreV3ReclaimRolloverProgressWithoutNewCheckpoint` | Both single/batch admission triggers plus idle and unchanged-checkpoint paths |
 | Flusher persistence fault | `TestWALStoreV3_AutomaticMapPersistenceFailureLatchesStore` | Real owned-map failure latches the store; no false progress or unsafe admission |
 
@@ -193,3 +193,27 @@ The scope of this audit is storage WAL capacity and pressure-driven progress;
 capacity waiter or flusher-stall oracle, and its old generic mapping must not be
 read as proving the native capacity behavior. Capture/BASE reconciliation waits
 likewise remain in their separate protocol inventory.
+
+## Partial replacement status (review P2 disposition)
+
+This matrix is **partial**, not a declaration of equivalent replacement or
+permission to remove the retained legacy tests. In particular:
+
+| Retained legacy control | Native references establish | Still missing native schedule |
+| --- | --- | --- |
+| `TestWALWriterBatchReuseIsBoundedByTheDurableTail` | complete-record/retention and rollover constraints | refused batch leaves physical head and all wrap/padding bytes unchanged |
+| `TestWALStoreRecoverBoundsPersistFailureRefusesAppendsUntilRetry` | publisher/half-reset fault refusal in their own callers | real Recover publication write/fsync failure, refused append and safe subsequent recovery/reopen |
+
+The JSON marks both rows `coverage_status: partial` and preserves their exact
+`coverage_gaps`. Existing references remain useful scoped safety evidence; they
+do not close these schedules. Keep their legacy fixtures until row14a disposition
+and do not claim 100% native liveness/replacement closure.
+
+The resumed-admission and Close controls now synchronize at the first actual
+hard-pressure sleep, not Notify (which precedes the loop's live close check).
+The resume response timeout starts only after the actual checkpoint/fsync and
+barrier release; the controller itself uses the store's normal30s admission
+policy. Close acts after the controller is already waiting. These are controller
+waiter controls, not a claim that Close interrupts a public Write holding the
+store lifecycle read lock. Cleanup releases and joins the worker, bounded by
+that real admission policy, even when an assertion fails.
