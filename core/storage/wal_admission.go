@@ -91,6 +91,7 @@ func (a *walAdmission) HardMark() float64         { return a.hardMark }
 // expires. Returns errWALFull on timeout, errVolumeClosed if the
 // store closes during the wait.
 func (a *walAdmission) Acquire(timeout time.Duration) error {
+	entryClosed := a.closedFn() // mutant: only the entry snapshot sees Close
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 
@@ -106,7 +107,7 @@ func (a *walAdmission) Acquire(timeout time.Duration) error {
 				a.hardPressureWaitNs.Add(time.Since(hardStart).Nanoseconds())
 				return err
 			}
-			if a.closedFn() {
+			if entryClosed {
 				a.hardPressureWaitNs.Add(time.Since(hardStart).Nanoseconds())
 				return errVolumeClosed
 			}
