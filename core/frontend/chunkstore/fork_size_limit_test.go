@@ -52,9 +52,9 @@ func TestForkRejectsLegacyOversizedGeometry(t *testing.T) {
 		if _, ok, e := c.ReadVolume(ctx, "fork"); e != nil || ok {
 			t.Fatalf("oversized fork persisted target: %v %v", ok, e)
 		}
-		entry, e := f.LookupEntry(ctx, path.Join(catBase, "v1", snapsDir, "s1"), snap.attempt)
-		if e != nil || len(decodeClaims(entry)) != 0 {
-			t.Fatalf("capacity refusal left a parent claim: %v", e)
+		entry, lookupErr := f.LookupEntry(ctx, path.Join(catBase, "v1", snapsDir, "s1"), snap.attempt)
+		if lookupErr != nil || len(decodeClaims(entry)) != 0 {
+			t.Fatalf("capacity refusal left a parent claim: %v", lookupErr)
 		}
 	}
 }
