@@ -44,6 +44,7 @@ func (s *WALStore) prepareOwnedMapCheckpointV3(cp uint64) (*preparedMapPublicati
 		return nil, err
 	}
 	if !proof.validV3(domain) {
+		v.ownedMap.abandonCandidateV3(c) // prepared but never publishable
 		return nil, ErrMapCoverageStale
 	}
 	return &preparedMapPublicationV3{candidate: c, proof: proof}, nil

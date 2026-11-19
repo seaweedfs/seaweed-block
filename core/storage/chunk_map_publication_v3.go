@@ -65,6 +65,7 @@ func prepareMapPublicationV3(m *chunkLSNMapV3, d *mapProofEpochV3, g, C uint64, 
 		return nil, e
 	}
 	if !proof.validV3(d) {
+		m.abandonCandidateV3(c) // prepared but never publishable
 		return nil, ErrMapCoverageStale
 	}
 	return &preparedMapPublicationV3{candidate: c, proof: proof}, nil

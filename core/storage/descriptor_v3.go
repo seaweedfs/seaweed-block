@@ -257,8 +257,12 @@ func (p *descriptorPublisherV3) publishLockedCoreV3(mutate func(next *descriptor
 		return descriptorV3{}, err // refused before any I/O (a latched fault)
 	}
 	// Success boundary: a fault latched by another path while this
-	// publication was in flight still refuses it (#172).
+	// publication was in flight still refuses it (#172). The slot write and
+	// its fsync did happen, so the slot on disk may name this generation:
+	// its dependencies stay pinned as an uncertain candidate until reopen.
 	if err := p.io.sticky(); err != nil {
+		uncertain := next
+		p.uncertain = &uncertain
 		return descriptorV3{}, err
 	}
 	p.other, p.otherValid = p.cur, true

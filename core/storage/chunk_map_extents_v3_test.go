@@ -288,9 +288,10 @@ func TestChunkMapExtentsV3ReopenRegistersTheFallbackRoot(t *testing.T) {
 	}
 }
 
-// A failed fsync after a tail truncation latches the map, and the slot
-// roots stay readable: the truncation only ever removes extents above the
-// highest live page.
+// A failed fsync of the tail truncation itself (the first fsync of the
+// prepare) latches the map: the prepare and every later one fail. The slot
+// roots stay readable, because the truncation only removes extents above
+// the highest live page.
 func TestChunkMapExtentsV3TruncationFaultKeepsTheSlotRoots(t *testing.T) {
 	m, d, path := extentsMapV3(t)
 	c := prepV3(t, m, 1, nil)
@@ -304,9 +305,23 @@ func TestChunkMapExtentsV3TruncationFaultKeepsTheSlotRoots(t *testing.T) {
 	publishV3(m, d, low, top)
 	next := prepV3(t, m, 23, low)
 	publishV3(m, d, next, low) // gen 21 released: the tail is free
-	m.syncFile = func() error { return os.ErrInvalid }
+	before := mapFileSizeV3(t, path)
+	orig, calls := m.syncFile, 0
+	m.syncFile = func() error {
+		calls++
+		if calls == 1 {
+			return os.ErrInvalid // the truncation's fsync
+		}
+		return orig()
+	}
 	if _, err := m.Prepare(24, 7, []chunkLSNEntryV3{{LSN: 124}}, next); err == nil {
 		t.Fatal("prepare across a failed truncation fsync succeeded")
+	}
+	if calls != 1 || mapFileSizeV3(t, path) >= before {
+		t.Fatalf("setup: %d fsyncs, file %d B -> %d B; want the truncation's fsync to fail", calls, before, mapFileSizeV3(t, path))
+	}
+	if _, err := m.Prepare(25, 7, []chunkLSNEntryV3{{LSN: 125}}, next); err == nil || calls != 1 {
+		t.Fatalf("the map did not latch: err %v, fsyncs %d", err, calls)
 	}
 	if err := m.Close(); err != nil {
 		t.Fatal(err)
@@ -387,5 +402,104 @@ func TestChunkMapExtentsV3StatsAfterReopen(t *testing.T) {
 	st := r.ChunkMapStatsV3()
 	if st.FileBytes != uint64(fi.Size()) || st.LiveBytes == 0 || st.LiveBytes > st.FileBytes {
 		t.Fatalf("stats after reopen: %+v, file %d B", st, fi.Size())
+	}
+}
+
+// A candidate that is prepared successfully but whose proof went stale
+// during its file I/O (a guest write changed the map meanwhile) is
+// refused before publication and must be released at once, so a steady
+// stream of such refusals keeps the file bounded. Both preparation paths
+// are covered: the checkpoint's and prepareMapPublicationV3. Mutant: not
+// abandoning after the proof check pins every refused candidate.
+func TestChunkMapExtentsV3ProofStalePreparesStayBounded(t *testing.T) {
+	s, path := newMappedCheckpointStoreV3(t)
+	writeSynced(t, s, 1, 1)
+	if err := s.flusher.flushOnceInternal(false); err != nil {
+		t.Fatal(err)
+	}
+	m := s.v3.ownedMap
+	orig := m.syncFile
+	m.syncFile = func() error { // the proof goes stale during the prepare's I/O
+		if err := s.v3.mapProof.mutatedV3(); err != nil {
+			return err
+		}
+		return orig()
+	}
+	cp := s.v3.pub.current().CheckpointLSN
+	for i := 0; i < 150; i++ {
+		if _, err := s.prepareOwnedMapCheckpointV3(cp); err != ErrMapCoverageStale {
+			t.Fatalf("checkpoint prepare %d: err = %v, want ErrMapCoverageStale", i, err)
+		}
+	}
+	g := s.v3.pub.current().MapGeneration
+	for i := 0; i < 150; i++ {
+		g += 1000
+		entries := append([]chunkLSNEntryV3(nil), s.v3.mapEntries...)
+		if _, err := prepareMapPublicationV3(m, s.v3.mapProof, g, cp, entries, nil); err != ErrMapCoverageStale {
+			t.Fatalf("publication prepare %d: err = %v, want ErrMapCoverageStale", i, err)
+		}
+	}
+	m.syncFile = orig
+	fi, err := os.Stat(path + ".chunkmap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := s.ChunkMapStatsV3(); fi.Size() > 8*2*4096 || st.LiveBytes > 4*2*4096 {
+		t.Fatalf("after 300 proof-stale prepares: file %d B, live %d B", fi.Size(), st.LiveBytes)
+	}
+}
+
+// A publication whose slot write and fsync both happened, but which a fault
+// latched meanwhile refuses at its success boundary, may be named by the
+// slot on disk. Its candidate stays pinned: an already admitted preparer
+// does not reuse its extents, and after a crash the reopen selects that
+// slot and its map validates. Mutant: treating that refusal like one before
+// slot I/O abandons the candidate and the preparer overwrites it.
+func TestChunkMapExtentsV3DurableButRefusedPublicationStaysPinned(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mapped")
+	s, err := createMappedWALStoreV3ForTest(path, 64, 4096, v3TestWAL, WModeStrict, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.DisableAutoFlushForRecoveryTest()
+	for i := uint32(0); i < 4; i++ {
+		writeSynced(t, s, i, i)
+		if err := s.flusher.flushOnceInternal(false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeSynced(t, s, 9, 9)
+	cp := s.v3.pub.current().CheckpointLSN
+	prepared, err := s.prepareOwnedMapCheckpointV3(cp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := s.v3.pub.io.fsync
+	s.v3.pub.io.fsync = func() error { // the slot reaches disk, then a fault latches
+		err := orig()
+		s.latchV3(os.ErrInvalid)
+		return err
+	}
+	if _, err := s.v3.pub.publishMapV3(&s.mu, nil, prepared, nil); err == nil {
+		t.Fatal("a publication refused at its success boundary returned no error")
+	}
+	s.v3.pub.io.fsync = orig
+	m := s.v3.ownedMap
+	for i := 0; i < 10; i++ { // an already admitted preparer keeps going
+		entries := append([]chunkLSNEntryV3(nil), s.v3.mapEntries...)
+		entries[0].LSN += uint64(i + 1)
+		if _, err := m.prepareNextV3(cp, entries, prepared.candidate); err != nil {
+			t.Fatalf("admitted prepare %d: %v", i, err)
+		}
+	}
+	crashRecoveryHardeningStore(t, s)
+	r, err := openWALStoreV3ForTest(path)
+	if err != nil {
+		t.Fatalf("reopen of the durable slot: %v", err)
+	}
+	r.DisableAutoFlushForRecoveryTest()
+	t.Cleanup(func() { crashRecoveryHardeningStore(t, r) })
+	if g := r.v3.pub.current().MapGeneration; g != prepared.candidate.generation {
+		t.Fatalf("reopen selected map generation %d, want the durable one %d", g, prepared.candidate.generation)
 	}
 }

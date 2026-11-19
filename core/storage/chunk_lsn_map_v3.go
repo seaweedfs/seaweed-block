@@ -392,6 +392,7 @@ func (m *chunkLSNMapV3) prepareLockedV3(g, C uint64, entries []chunkLSNEntryV3, 
 				return nil, e
 			}
 			fileBytes = keep
+			m.live.fileBytes.Store(keep)
 			m.live.truncations.Add(1)
 		}
 	}
@@ -402,6 +403,9 @@ func (m *chunkLSNMapV3) prepareLockedV3(g, C uint64, entries []chunkLSNEntryV3, 
 			return 0, ErrCounterExhausted
 		}
 		n, e := m.fd.WriteAt(b, int64(at))
+		if end := at + uint64(n); end > m.live.fileBytes.Load() {
+			m.live.fileBytes.Store(end) // also on a failed or short write
+		}
 		if e == nil && n != len(b) {
 			e = io.ErrShortWrite
 		}
