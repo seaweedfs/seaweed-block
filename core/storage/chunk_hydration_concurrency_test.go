@@ -1,0 +1,180 @@
+package storage
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"testing"
+	"time"
+)
+
+type hydrationResult struct {
+	data []byte
+	err  error
+}
+
+func hydrationFixture(t *testing.T, workers, depth int) (*WALStore, *chunkLayerImpl, *fakeChunkRemote, <-chan uint64) {
+	t.Helper()
+	image := make([]byte, ctNumBlocks*ctBlockSize)
+	for i := uint32(0); i < ctNumBlocks; i++ {
+		copy(image[int(i)*ctBlockSize:], makeBlock(ctBlockSize, byte(0x40+i)))
+	}
+	remote := newFakeChunkRemote()
+	remote.seedHead(t, image, 50, 1)
+	s, _ := newChunkTestStore(t)
+	if err := s.SeedChunkFrontier(50); err != nil {
+		t.Fatal(err)
+	}
+	cfg := ctConfig(2)
+	cfg.FreshFromHead = true
+	cfg.HydrationWorkers = workers
+	cfg.HydrationQueueDepth = depth
+	layer := mustAttach(t, s, remote, cfg).(*chunkLayerImpl)
+	registered := make(chan uint64, 128)
+	layer.testHydrationWait = func(idx uint64) { registered <- idx }
+	return s, layer, remote, registered
+}
+
+func startHydrationRead(t *testing.T, s *WALStore, parent context.Context, lba uint32) <-chan hydrationResult {
+	t.Helper()
+	ctx, cancel := context.WithCancel(parent)
+	result := make(chan hydrationResult, 1)
+	joined := make(chan struct{})
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-joined:
+		case <-time.After(ctLocalBound):
+			t.Error("hydration reader failed to settle")
+		}
+	})
+	go func() {
+		defer close(joined)
+		data, err := hydrationReadContext(s, ctx, lba)
+		result <- hydrationResult{data, err}
+	}()
+	return result
+}
+func waitHydrationRegistration(t *testing.T, c <-chan uint64, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		select {
+		case <-c:
+		case <-time.After(ctLocalBound):
+			t.Fatal("hydration waiter was not registered")
+		}
+	}
+}
+func hydrationOutcome(t *testing.T, c <-chan hydrationResult) hydrationResult {
+	t.Helper()
+	select {
+	case r := <-c:
+		return r
+	case <-time.After(ctLocalBound):
+		t.Fatal("hydration read did not finish")
+		return hydrationResult{}
+	}
+}
+
+func TestChunkHydration_ConcurrentReadersShareOneGet(t *testing.T) {
+	s, _, remote, registered := hydrationFixture(t, 2, 64)
+	entered, release := holdGets(t, remote)
+	defer release()
+	const readers = 12
+	results := make([]<-chan hydrationResult, readers)
+	for i := range results {
+		results[i] = startHydrationRead(t, s, context.Background(), 8)
+	}
+	waitHydrationRegistration(t, registered, readers)
+	waitKey(t, entered, "shared hydration")
+	if got := remote.stats().gets; got != 1 {
+		t.Fatalf("same-chunk readers started %d Gets", got)
+	}
+	release()
+	for _, c := range results {
+		r := hydrationOutcome(t, c)
+		if r.err != nil || !bytes.Equal(r.data, makeBlock(ctBlockSize, 0x48)) {
+			t.Fatalf("shared fill bytes: %v", r.err)
+		}
+	}
+	if got := remote.stats().gets; got != 1 {
+		t.Fatalf("shared fill restarted: Gets=%d", got)
+	}
+}
+
+func TestChunkHydration_QueueAndWorkerLimitsAreBounded(t *testing.T) {
+	s, _, remote, registered := hydrationFixture(t, 1, 2)
+	entered, release := holdGets(t, remote)
+	defer release()
+	first := startHydrationRead(t, s, context.Background(), 8)
+	waitKey(t, entered, "first worker")
+	waitHydrationRegistration(t, registered, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	second := startHydrationRead(t, s, ctx, 12)
+	waitHydrationRegistration(t, registered, 1)
+	if r := hydrationOutcome(t, second); !errors.Is(r.err, ErrChunkHydrationPending) {
+		t.Fatalf("queued timeout: %v", r.err)
+	}
+	_, err := hydrationReadContext(s, context.Background(), 16)
+	if !errors.Is(err, ErrChunkHydrationPending) {
+		t.Fatalf("full queue did not refuse: %v", err)
+	}
+	if got := remote.stats().gets; got != 1 {
+		t.Fatalf("worker bound exceeded: Gets=%d", got)
+	}
+	release()
+	if r := hydrationOutcome(t, first); r.err != nil {
+		t.Fatal(r.err)
+	}
+}
+
+func TestChunkHydration_ActiveDemandPrecedesExpiredWaiter(t *testing.T) {
+	s, _, remote, registered := hydrationFixture(t, 1, 3)
+	entered, release := holdGets(t, remote)
+	defer release()
+	first := startHydrationRead(t, s, context.Background(), 8)
+	waitKey(t, entered, "occupied worker")
+	waitHydrationRegistration(t, registered, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	expired := startHydrationRead(t, s, ctx, 12)
+	waitHydrationRegistration(t, registered, 1)
+	if r := hydrationOutcome(t, expired); !errors.Is(r.err, ErrChunkHydrationPending) {
+		t.Fatalf("expired queued read: %v", r.err)
+	}
+	demand := startHydrationRead(t, s, context.Background(), 16)
+	waitHydrationRegistration(t, registered, 1)
+	release()
+	next := waitKey(t, entered, "next fetch")
+	if want := remote.stats().head.Chunks[4].Key; next != want {
+		t.Fatalf("fetch %q ran before demand %q", next, want)
+	}
+	if r := hydrationOutcome(t, first); r.err != nil {
+		t.Fatal(r.err)
+	}
+	if r := hydrationOutcome(t, demand); r.err != nil || !bytes.Equal(r.data, makeBlock(ctBlockSize, 0x50)) {
+		t.Fatalf("demand: %v", r.err)
+	}
+}
+
+func TestChunkHydration_CloseSettlesQueuedAndRunningReaders(t *testing.T) {
+	s, layer, remote, registered := hydrationFixture(t, 1, 2)
+	entered, release := holdGets(t, remote)
+	defer release()
+	first := startHydrationRead(t, s, context.Background(), 8)
+	waitKey(t, entered, "running Get")
+	second := startHydrationRead(t, s, context.Background(), 12)
+	waitHydrationRegistration(t, registered, 2)
+	if err := layer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []<-chan hydrationResult{first, second} {
+		if r := hydrationOutcome(t, c); !errors.Is(r.err, errChunkLayerClosed) {
+			t.Fatalf("close outcome: %v", r.err)
+		}
+	}
+	if got := remote.stats().gets; got != 1 {
+		t.Fatalf("queued work started after Close: Gets=%d", got)
+	}
+}

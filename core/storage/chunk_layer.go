@@ -126,6 +126,7 @@ type chunkLayerImpl struct {
 	keySeq   uint64
 
 	// Test-only scheduling hooks; nil in production.
+	testHydrationWait            func(uint64) // after promise registration, outside locks
 	testCOWWait                  func()
 	testCOWRead                  func(idx uint64, saved bool)
 	testCOWSave                  func() error

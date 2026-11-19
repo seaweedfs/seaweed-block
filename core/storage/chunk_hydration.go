@@ -88,6 +88,9 @@ func (l *chunkLayerImpl) OnReadMissContext(ctx context.Context, lba uint64) ([]b
 		f.waiters++
 		l.wakeHydrationLocked()
 		l.stMu.Unlock()
+		if hook := l.testHydrationWait; hook != nil {
+			hook(idx)
+		}
 		select {
 		case <-f.done:
 		case <-ctx.Done():
