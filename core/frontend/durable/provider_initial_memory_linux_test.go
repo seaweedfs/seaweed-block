@@ -5,6 +5,7 @@ package durable_test
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -33,6 +34,130 @@ type memoryDiskRemote struct {
 	hashes     map[string][32]byte
 	firstPut   sync.Once
 	atFirstPut func()
+}
+
+// The ledger uses alternating hot/cold 4 KiB blocks and fsync after EVERY
+// block, not once per eight-block acknowledgement batch. Omit the packet's
+// 500 ms pacing so two volume-equivalents finish in a bounded diagnostic run.
+func TestWALStoreChunk_LedgerWriteAnonymousMemory(t *testing.T) {
+	if os.Getenv("SWBLOCK_LEDGER_MEMORY_REPRO") == "" {
+		t.Skip("isolated memory reproduction")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
+	defer cancel()
+	r := &memoryDiskRemote{MemChunkRemote: storage.NewMemChunkRemote(), dir: t.TempDir(), hashes: make(map[string][32]byte)}
+	p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: 1 << 18, ChunkBlocks: 1024, ChunkCaptureInterval: 0, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return r, nil }}, v1View())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	s, err := p.EnsureStorage("v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = p.RecoverVolume(ctx, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	be, err := p.Open(ctx, "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	profiles := os.Getenv("SWBLOCK_MEMORY_PROFILES")
+	if profiles == "" {
+		profiles = t.TempDir()
+	}
+	if err = os.MkdirAll(profiles, 0700); err != nil {
+		t.Fatal(err)
+	}
+	runtime.GC()
+	base, err := memoryAnonBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	peak := base
+	stop, done := make(chan struct{}), make(chan struct{})
+	start := time.Now()
+	go func() {
+		defer close(done)
+		fast := time.NewTicker(10 * time.Millisecond)
+		defer fast.Stop()
+		slow := time.NewTicker(5 * time.Second)
+		defer slow.Stop()
+		sample := 0
+		for {
+			select {
+			case <-stop:
+				return
+			case <-fast.C:
+				if anon, e := memoryAnonBytes(); e == nil && anon > peak {
+					peak = anon
+				}
+			case <-slow.C:
+				sample++
+				var m runtime.MemStats
+				runtime.ReadMemStats(&m)
+				anon, _ := memoryAnonBytes()
+				t.Logf("LEDGER sample=%d elapsed=%v anonMiB=%d heapMiB=%d heapSysMiB=%d releasedMiB=%d GC=%d cp=%d next=%d", sample, time.Since(start), anon>>20, m.HeapAlloc>>20, m.HeapSys>>20, m.HeapReleased>>20, m.NumGC, s.CheckpointLSN(), s.NextLSN())
+				f, e := os.Create(filepath.Join(profiles, fmt.Sprintf("ledger-%03d.pprof", sample)))
+				if e == nil {
+					_ = pprof.WriteHeapProfile(f)
+					_ = f.Close()
+				}
+			}
+		}
+	}()
+	defer func() {
+		close(stop)
+		<-done
+		t.Logf("LEDGER final elapsed=%v baseAnonMiB=%d peakAnonMiB=%d GOMEMLIMIT=%s", time.Since(start), base>>20, peak>>20, os.Getenv("GOMEMLIMIT"))
+		if peak > base+256<<20 {
+			t.Errorf("ledger anonymous RSS grew %d bytes above baseline; limit 256 MiB", peak-base)
+		}
+	}()
+	const blocks = 2 * (1 << 30) / 4096
+	data := make([]byte, 4096)
+	hot, cold := 0, 64
+	for seq := 0; seq < blocks; seq++ {
+		lba := hot % 64
+		if seq%2 == 0 {
+			hot++
+		} else {
+			lba = cold
+			cold++
+			if cold >= 128<<20/4096 {
+				cold = 64
+			}
+		}
+		for i := 0; i < len(data); i += 8 {
+			binary.LittleEndian.PutUint64(data[i:i+8], uint64(seq)*4096+uint64(i))
+		}
+		for {
+			n, e := be.Write(ctx, int64(lba)*4096, data)
+			if e == nil {
+				if n != len(data) {
+					t.Fatalf("short ledger write %d", n)
+				}
+				break
+			}
+			if !errors.Is(e, frontend.ErrBackendBusy) {
+				t.Fatal(e)
+			}
+			select {
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+		if err = be.Sync(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if (seq+1)%(64<<20/4096) == 0 {
+			t.Logf("LEDGER progress bytes=%d elapsed=%v cp=%d next=%d", (seq+1)*4096, time.Since(start), s.CheckpointLSN(), s.NextLSN())
+		}
+	}
+	if p.DurableStatuses()[0].Chunk.Stats.CutsOK != 0 {
+		t.Fatal("ledger-only arm unexpectedly ran a cut")
+	}
 }
 
 func (r *memoryDiskRemote) path(key string) string {
