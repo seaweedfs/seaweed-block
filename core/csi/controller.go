@@ -3,6 +3,7 @@ package csi
 import (
 	"context"
 	"errors"
+	"github.com/seaweedfs/seaweed-block/core/geometry"
 	"log"
 	"strconv"
 	"time"
@@ -247,6 +248,9 @@ func volumeSpecFromCreateRequest(req *csipb.CreateVolumeRequest) (VolumeSpec, er
 	}
 	if size <= 0 {
 		return VolumeSpec{}, status.Error(codes.InvalidArgument, "capacity is required")
+	}
+	if err := geometry.ValidateVolumeSize(uint64(size)); err != nil {
+		return VolumeSpec{}, status.Error(codes.InvalidArgument, err.Error())
 	}
 	if len(req.GetVolumeCapabilities()) == 0 {
 		return VolumeSpec{}, status.Error(codes.InvalidArgument, "volume capabilities are required")
