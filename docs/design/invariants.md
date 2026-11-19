@@ -194,8 +194,6 @@ stateDiagram-v2
   Aborted --> Refused: drain owners, cleanup, merge candidates
   Copy --> Refused: H below HEAD RemoteLSN
   Closed --> Upload: drain and cleanup; intent durable first
-  Upload --> Upload: retry one immutable key after backoff
-  Upload --> Refused: shared deadline/cancel or mismatching binding
   Upload --> Manifest
   Manifest --> Readmit
   Readmit --> Fenced: superseding HEAD
@@ -215,7 +213,7 @@ stateDiagram-v2
 | Quiesce | the capture barrier (`captureMu`) is held exclusively, then `Sync` fixes H; `Recover` and writes hold the barrier shared | `core/storage/chunk_layer.go` `captureLocked`; `core/storage/walstore.go` `WALStore.Recover`, `WALStore.Write` | `INV-CUT-QUIESCED-001`, `INV-CUT-RECOVER-BARRIER-001` |
 | Copy | every candidate chunk (native owned LSN map relative to HEAD plus retained WAL/in-memory dirt; legacy bitmap/hash mode) is read into buffers; a staged copy is reused only if unchanged since staging; native copy occurs after barrier release with pre-publication COW ownership | `core/storage/chunk_layer.go` `captureLocked` | `INV-CUT-QUIESCED-001`, `INV-CUT-STAGED-REUSE-001`, `INV-CUT-BITMAP-001` |
 | LSN guard | refuse when H is below HEAD's `RemoteLSN` (`lsn_behind`) | `core/storage/chunk_layer.go` `captureLocked` | `INV-WS-HEAD-MONOTONE-001` |
-| Upload | upload changed chunks after a durable intent names their write-once keys; retry one key under the shared five-minute cut execution deadline (or shorter caller deadline); resolve ambiguous bindings by exact-byte read-back before replay | `core/storage/chunk_layer.go` `captureLocked`; `core/frontend/chunkstore/chunk_remote.go` `putObject` | `INV-CUT-INTENT-FIRST-001`, `INV-CHUNK-WRITE-ONCE-001` |
+| Upload | upload only chunks whose SHA-256 differs from HEAD, under fresh write-once keys, after a durable intent names them | `core/storage/chunk_layer.go` `captureLocked`; `core/frontend/chunkstore/chunk_remote.go` `putObject` | `INV-CUT-INTENT-FIRST-001`, `INV-CHUNK-WRITE-ONCE-001` |
 | Manifest | rewrite only segments whose references changed; new segments are covered by an intent | `core/frontend/chunkstore/manifest.go` `PrepareManifest` | `INV-CUT-SEGMENT-REUSE-001`, `INV-CUT-INTENT-FIRST-001` |
 | No-op cut | when nothing changed since HEAD, no CAS is sent, but HEAD is re-read; a HEAD that moved fences the holder | `core/storage/chunk_layer.go` `captureLocked` | `INV-WS-HEAD-CAS-001` |
 | Readmit | admission is checked again right before the CAS; a superseding HEAD fences | `core/storage/chunk_layer.go` `admit`, `supersededBy` | `INV-WS-HEAD-CAS-001` |
@@ -470,12 +468,6 @@ Notes:
 | ID | Statement | Machine / transition | Enforced in | Test | TLA+ property | Status |
 |---|---|---|---|---|---|---|
 | `INV-NVME-H2C-RANGE-001` | An H2CData range exceeding the expected transfer size is refused before slicing, including a uint32 offset-plus-length overflow; an exact-bound payload is preserved. | Frontend H2C receive validation; no storage state transition | `core/frontend/nvme/session.go` `recvH2CData` | `TestRecvH2CDataRangeBounds` (`core/frontend/nvme/h2c_bounds_test.go`) | — | ACTIVE |
-
-### Cut upload retry
-
-| ID | Status | Invariant | Enforced in | Tests | Model |
-|---|---|---|---|---|---|
-| INV-CUT-UPLOAD-RETRY-001 | ACTIVE | A failed chunk upload retries the same key and captured bytes, keeps its intent, and cannot advance HEAD before completion; cancellation preserves dirt. | `chunk_upload.go` `putCaptured`; `chunk_layer.go` `captureLocked` | `TestChunkCutRetriesOnlyTheFailedUpload`, `TestChunkCutUploadCollisionNeverPublishes`, `TestChunkCutUploadRetryHonorsDeadlineAndRetainsDirt` | M5; retry stutters in abstract `CutPipeline`; timing and ambiguity are qualified by native tests. |
 
 ## Part C. Change rules
 
