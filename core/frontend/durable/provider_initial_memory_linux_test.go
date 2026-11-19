@@ -332,10 +332,17 @@ func TestWALStoreChunk_InitialWriteAnonymousMemory(t *testing.T) {
 		}
 	}
 	buf := make([]byte, 64<<10)
+	fillEnd := int64(960 << 20)
+	workers := 32
+	if os.Getenv("SWBLOCK_MEMORY_MINIMAL") != "" {
+		buf = make([]byte, 4096)
+		fillEnd = 896<<20 + 4096
+		workers = 0
+	}
 	for i := range buf {
 		buf[i] = byte(i*7 + 1)
 	}
-	for off := int64(896 << 20); off < 960<<20; off += int64(len(buf)) {
+	for off := int64(896 << 20); off < fillEnd; off += int64(len(buf)) {
 		if err = write(off, buf); err != nil {
 			t.Fatal(err)
 		}
@@ -349,7 +356,7 @@ func TestWALStoreChunk_InitialWriteAnonymousMemory(t *testing.T) {
 	}
 	var wg sync.WaitGroup
 	errs := make(chan error, 32)
-	for worker := 0; worker < 32; worker++ {
+	for worker := 0; worker < workers; worker++ {
 		wg.Add(1)
 		go func(w int) {
 			defer wg.Done()
