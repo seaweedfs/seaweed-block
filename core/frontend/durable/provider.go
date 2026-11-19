@@ -820,7 +820,6 @@ func (p *DurableProvider) wrap(volumeID, path string, impl ImplName, s storage.L
 		EndpointVersion: proj.EndpointVersion,
 	}
 	b := NewStorageBackend(s, p.view, id)
-	b.waitReadReady = p.cfg.Impl == ImplWALStoreChunk
 	return &volHandle{storage: s, backend: b, path: path, impl: impl}, nil
 }
 
@@ -878,7 +877,7 @@ func (p *DurableProvider) RecoverVolume(ctx context.Context, volumeID string) (R
 			// Recovered; I/O stays refused until the layer attaches under
 			// the master's assignment (the authority wait flips it).
 			report.Evidence += "; chunk layer awaiting master authority"
-			h.backend.SetOperational(false, report.Evidence)
+			h.backend.setChunkAttachPending(report.Evidence)
 			return report, nil
 		}
 		if err := chunkFenced(volumeID, h); err != nil {

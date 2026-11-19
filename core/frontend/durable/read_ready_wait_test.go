@@ -11,14 +11,11 @@ import (
 )
 
 func TestReadReadinessWaitDoesNotHoldAdmissionAndCloseWakesIt(t *testing.T) {
-	for _, drain := range []bool{false, true} {
-		name := "close"
-		if drain {
-			name = "drain-then-close"
-		}
+	for _, mode := range []string{"close", "drain-then-close", "fence", "write-close"} {
+		name := mode
 		t.Run(name, func(t *testing.T) {
 			// No storage is needed: this read must never pass the operational gate.
-			b := &StorageBackend{waitReadReady: true}
+			b := &StorageBackend{waitAttachReady: true}
 			b.opEvidence.Store("attachment pending")
 			registered := make(chan struct{}, 1)
 			resume := make(chan struct{})
@@ -44,7 +41,12 @@ func TestReadReadinessWaitDoesNotHoldAdmissionAndCloseWakesIt(t *testing.T) {
 			})
 			go func() {
 				defer close(joined)
-				_, err := b.Read(context.Background(), 0, make([]byte, 4096))
+				var err error
+				if mode == "write-close" {
+					_, err = b.Write(context.Background(), 0, make([]byte, 4096))
+				} else {
+					_, err = b.Read(context.Background(), 0, make([]byte, 4096))
+				}
 				done <- err
 			}()
 			select {
@@ -52,20 +54,27 @@ func TestReadReadinessWaitDoesNotHoldAdmissionAndCloseWakesIt(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("read did not register a readiness notification")
 			}
-			if drain {
+			if mode == "drain-then-close" {
 				ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 				defer cancel()
 				if err := b.StopIO(ctx, "attachment still pending"); err != nil {
 					t.Fatalf("waiting read held I/O admission: %v", err)
 				}
 			}
-			if err := b.Close(); err != nil {
+			want := frontend.ErrBackendClosed
+			if mode == "fence" {
+				b.mu.Lock()
+				b.chunkFenced = func() bool { return true }
+				b.mu.Unlock()
+				b.SetOperational(false, "fenced")
+				want = frontend.ErrStalePrimary
+			} else if err := b.Close(); err != nil {
 				t.Fatal(err)
 			}
 			release()
 			select {
 			case err := <-done:
-				if !errors.Is(err, frontend.ErrBackendClosed) {
+				if !errors.Is(err, want) {
 					t.Fatalf("Close wake error=%v", err)
 				}
 			case <-time.After(time.Second):

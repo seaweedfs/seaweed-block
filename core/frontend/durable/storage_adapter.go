@@ -161,12 +161,12 @@ type StorageBackend struct {
 	// false; provider flips true after Recover() succeeds (T3b).
 	// opEvidence is the reason reported when operational=false
 	// (e.g., "awaiting recovery", "local epoch ahead of assignment").
-	// Chunk-managed reads may wait before admission for attachment to finish.
-	// waitReadReady is fixed at provider construction; readyChanged is under mu.
-	waitReadReady bool
-	readyChanged  chan struct{}
-	operational   atomic.Bool
-	opEvidence    atomic.Value // string
+	// Only a successfully recovered chunk volume awaiting attachment may wait.
+	// waitAttachReady and readyChanged are protected by mu.
+	waitAttachReady bool
+	readyChanged    chan struct{}
+	operational     atomic.Bool
+	opEvidence      atomic.Value // string
 
 	// ioMu is the I/O admission boundary: every Read, Write and Sync holds
 	// its read side for the whole operation, gate included, so StopIO can
@@ -457,6 +457,7 @@ func (b *StorageBackend) SetOperational(ok bool, evidence string) {
 	b.mu.Lock()
 	b.opEvidence.Store(evidence)
 	b.operational.Store(ok)
+	b.waitAttachReady = false
 	b.notifyReadReadyLocked()
 	b.mu.Unlock()
 }
@@ -544,13 +545,7 @@ func (b *StorageBackend) Sync(ctx context.Context) error {
 // Read copies up to len(p) bytes starting at offset. Reads past
 // end-of-volume return zero bytes (no error). Every read is gated.
 func (b *StorageBackend) Read(ctx context.Context, offset int64, p []byte) (int, error) {
-	release, err := b.admit()
-	if err != nil && b.waitReadReady && errors.Is(err, frontend.ErrNotReady) {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, 4*time.Second)
-		defer cancel()
-		release, err = b.awaitReadAdmission(ctx)
-	}
+	release, err := b.admitAfterAttach(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -558,13 +553,39 @@ func (b *StorageBackend) Read(ctx context.Context, offset int64, p []byte) (int,
 	if len(p) == 0 {
 		return 0, nil
 	}
-	if b.waitReadReady && ctx.Err() != nil {
-		return 0, b.readReadyTimeout(ctx.Err())
+	if ctx.Err() != nil {
+		return 0, b.attachReadyTimeout(ctx.Err())
 	}
 	return b.readBytes(offset, p)
 }
 
-// notifyReadReadyLocked wakes readers without making them hold ioMu while
+// setChunkAttachPending is used only after successful local recovery.
+func (b *StorageBackend) setChunkAttachPending(evidence string) {
+	b.mu.Lock()
+	b.opEvidence.Store(evidence)
+	b.operational.Store(false)
+	b.waitAttachReady = true
+	b.notifyReadReadyLocked()
+	b.mu.Unlock()
+}
+
+func (b *StorageBackend) admitAfterAttach(ctx context.Context) (func(), error) {
+	release, err := b.admit()
+	if !errors.Is(err, frontend.ErrNotReady) {
+		return release, err
+	}
+	b.mu.Lock()
+	pending := b.waitAttachReady
+	b.mu.Unlock()
+	if !pending {
+		return release, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	return b.awaitAttachAdmission(ctx)
+}
+
+// notifyReadReadyLocked wakes waiting I/O without making them hold ioMu while
 // the provider is attaching or draining the backend. Caller holds mu.
 func (b *StorageBackend) notifyReadReadyLocked() {
 	if b.readyChanged != nil {
@@ -573,25 +594,25 @@ func (b *StorageBackend) notifyReadReadyLocked() {
 	}
 }
 
-// awaitReadAdmission waits only after a gate refusal, before any storage I/O.
-// The four-second readiness allowance is capped by an earlier caller deadline.
-func (b *StorageBackend) awaitReadAdmission(ctx context.Context) (func(), error) {
+// awaitAttachAdmission waits only after a gate refusal, before any storage I/O.
+// The three-second readiness allowance is capped by an earlier caller deadline.
+func (b *StorageBackend) awaitAttachAdmission(ctx context.Context) (func(), error) {
 	for {
 		b.mu.Lock()
 		if b.readyChanged == nil {
 			b.readyChanged = make(chan struct{})
 		}
 		changed := b.readyChanged
-		terminal := b.closed || b.observerErr != nil
+		terminal := b.closed || b.observerErr != nil || !b.waitAttachReady
 		b.mu.Unlock()
 		if err := ctx.Err(); err != nil {
-			return nil, b.readReadyTimeout(err)
+			return nil, b.attachReadyTimeout(err)
 		}
 		release, err := b.admit()
 		if err == nil {
 			if cause := ctx.Err(); cause != nil {
 				release()
-				return nil, b.readReadyTimeout(cause)
+				return nil, b.attachReadyTimeout(cause)
 			}
 			return release, nil
 		}
@@ -604,12 +625,12 @@ func (b *StorageBackend) awaitReadAdmission(ctx context.Context) (func(), error)
 		select {
 		case <-changed:
 		case <-ctx.Done():
-			return nil, b.readReadyTimeout(ctx.Err())
+			return nil, b.attachReadyTimeout(ctx.Err())
 		}
 	}
 }
 
-func (b *StorageBackend) readReadyTimeout(cause error) error {
+func (b *StorageBackend) attachReadyTimeout(cause error) error {
 	// A concurrent Close, fence or observer failure must retain its gate error.
 	err := b.readyCheck()
 	b.mu.Lock()
@@ -628,7 +649,7 @@ func (b *StorageBackend) readReadyTimeout(cause error) error {
 func (b *StorageBackend) Write(ctx context.Context, offset int64, p []byte) (int, error) {
 	iolatency.BackendEnter(ctx)
 	defer iolatency.BackendExit(ctx)
-	release, err := b.admit()
+	release, err := b.admitAfterAttach(ctx)
 	if err != nil {
 		log.Printf("durable: StorageBackend.Write gate-rejected offset=%d: %v", offset, err)
 		return 0, err
@@ -636,6 +657,9 @@ func (b *StorageBackend) Write(ctx context.Context, offset int64, p []byte) (int
 	defer release()
 	if len(p) == 0 {
 		return 0, nil
+	}
+	if ctx.Err() != nil {
+		return 0, b.attachReadyTimeout(ctx.Err())
 	}
 	b.profile.recordBackendWriteRequest(len(p))
 	start := time.Now()

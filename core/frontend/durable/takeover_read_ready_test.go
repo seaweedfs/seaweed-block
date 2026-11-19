@@ -111,7 +111,7 @@ func TestWALStoreChunk_PendingReadWaitIsBounded(t *testing.T) {
 	if result.SCT != nvme.SCTGeneric || result.SC != nvme.SCNamespaceNotReady || len(result.Data) != 0 {
 		t.Fatalf("pending read result: %+v", result)
 	}
-	if elapsed < 3500*time.Millisecond || elapsed >= 5*time.Second {
+	if elapsed < 2500*time.Millisecond || elapsed >= 5*time.Second {
 		t.Fatalf("pending read wait=%s; want bounded readiness wait below5s", elapsed)
 	}
 }
@@ -144,4 +144,30 @@ func TestWALStoreChunk_TakeoverWriteWaitsForAttach(t *testing.T) {
 	if n, err := backend.Read(context.Background(), 33*4096, got); err != nil || n != 4096 || !bytes.Equal(got, block(0x74)) {
 		t.Fatalf("attached write readback: n=%d err=%v", n, err)
 	}
+}
+
+func TestWALStoreChunk_PendingWriteHonoursEarlierDeadline(t *testing.T) {
+	_, backend, _ := pendingTakeoverRead(t, 0)
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	n, err := backend.Write(ctx, 33*4096, block(0x74))
+	if n != 0 || !errors.Is(err, frontend.ErrBackendBusy) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("pending write deadline: n=%d err=%v", n, err)
+	}
+}
+
+func TestWALStoreChunk_PendingAttachBeyondHostRetryBudget(t *testing.T) {
+	_, _, handler := pendingTakeoverRead(t, 0)
+	for attempt := 0; attempt <= 5; attempt++ {
+		start := time.Now()
+		result := handler.Handle(context.Background(), nvme.IOCommand{Opcode: 0x02, NSID: 1, SLBA: 33, NLB: 1})
+		if result.SCT != nvme.SCTGeneric || result.SC != nvme.SCNamespaceNotReady || len(result.Data) != 0 {
+			t.Fatalf("attempt%d exposed data or terminal status: %+v", attempt, result)
+		}
+		if elapsed := time.Since(start); elapsed < 2500*time.Millisecond || elapsed >= 5*time.Second {
+			t.Fatalf("attempt%d wait=%s", attempt, elapsed)
+		}
+	}
+	// A permanently unavailable backend still exhausts a finite host retry policy;
+	// this control promises retryable completions and no bytes, not infinite availability.
 }
