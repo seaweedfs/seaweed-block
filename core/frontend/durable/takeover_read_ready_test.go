@@ -129,3 +129,19 @@ func TestWALStoreChunk_PendingReadHonoursEarlierDeadline(t *testing.T) {
 		t.Fatal("read ignored earlier deadline")
 	}
 }
+
+func TestWALStoreChunk_TakeoverWriteWaitsForAttach(t *testing.T) {
+	_, backend, _ := pendingTakeoverRead(t, 2500*time.Millisecond)
+	start := time.Now()
+	n, err := backend.Write(context.Background(), 33*4096, block(0x74))
+	if err != nil || n != 4096 {
+		t.Fatalf("pending write: n=%d err=%v", n, err)
+	}
+	if elapsed := time.Since(start); elapsed >= 5*time.Second {
+		t.Fatalf("write waited %s", elapsed)
+	}
+	got := make([]byte, 4096)
+	if n, err := backend.Read(context.Background(), 33*4096, got); err != nil || n != 4096 || !bytes.Equal(got, block(0x74)) {
+		t.Fatalf("attached write readback: n=%d err=%v", n, err)
+	}
+}
