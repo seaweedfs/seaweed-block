@@ -820,6 +820,7 @@ func (p *DurableProvider) wrap(volumeID, path string, impl ImplName, s storage.L
 		EndpointVersion: proj.EndpointVersion,
 	}
 	b := NewStorageBackend(s, p.view, id)
+	b.waitReadReady = p.cfg.Impl == ImplWALStoreChunk
 	return &volHandle{storage: s, backend: b, path: path, impl: impl}, nil
 }
 
