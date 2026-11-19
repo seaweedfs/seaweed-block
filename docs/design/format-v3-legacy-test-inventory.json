@@ -1052,10 +1052,8 @@
     ],
     "reason": "raw v2 header/window/IEEE-CRC/permissive scan assumptions; native v3 refuses holes below W and fences rolled-back suffixes",
     "v3_controls": [
-      "TestWALIOV3_RealWriterReopenScan",
-      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
-      "TestWALStoreV3DroppedRecordsNeverResurfaceAfterASecondCrash",
-      "TestDurableStartup_Issue51_WALStoreV3CommittedHoleBlocksReadiness"
+      "TestWALStoreV3CheckpointReclaimsAcrossRingLaps",
+      "TestWALStoreV3ReclaimSecondSlotFailureKeepsOldPin"
     ],
     "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
   },
@@ -1083,10 +1081,8 @@
     ],
     "reason": "raw v2 header/window/IEEE-CRC/permissive scan assumptions; native v3 refuses holes below W and fences rolled-back suffixes",
     "v3_controls": [
-      "TestWALIOV3_RealWriterReopenScan",
-      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
-      "TestWALStoreV3DroppedRecordsNeverResurfaceAfterASecondCrash",
-      "TestDurableStartup_Issue51_WALStoreV3CommittedHoleBlocksReadiness"
+      "TestWALStoreV3ReclaimRetiresReferencesBeforeReuse",
+      "TestWALStoreV3CheckpointReclaimsAcrossRingLaps"
     ],
     "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
   },
@@ -1221,10 +1217,8 @@
     ],
     "reason": "raw v2 header/window/IEEE-CRC/permissive scan assumptions; native v3 refuses holes below W and fences rolled-back suffixes",
     "v3_controls": [
-      "TestWALIOV3_RealWriterReopenScan",
-      "TestWALStoreV3RecoversEveryAcknowledgedWriteInBothModes",
-      "TestWALStoreV3DroppedRecordsNeverResurfaceAfterASecondCrash",
-      "TestDurableStartup_Issue51_WALStoreV3CommittedHoleBlocksReadiness"
+      "TestWALStoreV3ReclaimRebuildsIndexAfterPhysicalRecovery",
+      "TestWALStoreV3FenceTouchesNoByteBeforeTheHead"
     ],
     "todo": "row 14a: move or retire explicitly only after replacement/migration review; no deletion in 12b"
   },
