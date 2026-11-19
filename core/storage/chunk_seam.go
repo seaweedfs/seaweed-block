@@ -151,10 +151,12 @@ type chunkBitmapStore interface {
 }
 
 // chunkRef names one published chunk: its immutable key and the SHA-256 of
-// its ChunkBlocks*BlockSize bytes.
+// its stored object bytes, verified before any encoding is decoded.
 type chunkRef struct {
-	Key    string
-	SHA256 [32]byte
+	Key      string
+	SHA256   [32]byte
+	Encoding string
+	BirthLSN uint64
 }
 
 // chunkHeadVersion is the CAS guard of HEAD.

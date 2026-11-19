@@ -339,6 +339,7 @@ func decodeIntent(p string, e *filerpb.Entry) (storage.ChunkIntent, error) {
 }
 
 type headDoc struct {
+	Levels     int                             `json:"levels,omitempty"`
 	Segments   map[uint64]storage.ChunkSegment `json:"segments,omitempty"`
 	ChunkBytes uint64                          `json:"chunk_bytes,omitempty"`
 	ChunkCount int                             `json:"chunk_count,omitempty"`
@@ -457,7 +458,8 @@ func headEntry(h storage.ChunkHead) (*filerpb.Entry, error) {
 		if err := validateRoot(h); err != nil {
 			return nil, err
 		}
-		doc.Format = 2
+		doc.Format = 3
+		doc.Levels = 1
 		doc.Chunks = nil
 		doc.Segments = h.Segments
 		doc.ChunkBytes = h.ChunkBytes
@@ -561,11 +563,11 @@ func decodeHeadDoc(p string, content []byte) (storage.ChunkHead, error) {
 		if err != nil || len(sum) != 32 || ref.Key == "" {
 			return fail("chunk %d ref invalid", idx)
 		}
-		cr := storage.ChunkRef{Key: ref.Key}
+		cr := storage.ChunkRef{Key: ref.Key, Encoding: "full", BirthLSN: doc.RemoteLSN}
 		copy(cr.SHA256[:], sum)
 		h.Chunks[idx] = cr
 	}
-	if doc.Format == 2 {
+	if doc.Format == 2 || doc.Format == 3 {
 		if len(doc.Chunks) != 0 {
 			return fail("segmented root contains flat chunks")
 		}
