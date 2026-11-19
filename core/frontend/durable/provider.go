@@ -598,6 +598,9 @@ func (p *DurableProvider) openOrCreate(volumeID string) (*volHandle, error) {
 		return h, nil
 	}
 	// Existing storage ignores create geometry; admission precedes all fresh sidecars.
+	if p.cfg.NumBlocks == 0 {
+		return nil, fmt.Errorf("durable: NumBlocks=0; cannot create storage for %s (use open-existing mode)", volumeID)
+	}
 	if err := geometry.ValidateBlockGeometry(uint64(p.cfg.NumBlocks), uint64(p.cfg.BlockSize)); err != nil {
 		return nil, err
 	}

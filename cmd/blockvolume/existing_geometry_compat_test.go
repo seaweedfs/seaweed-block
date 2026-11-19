@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -72,41 +74,57 @@ func TestExistingDurableVolumeIgnoresCreateGeometry(t *testing.T) {
 }
 
 func TestExistingDurableVolumeDisappearsDoesNotCreateFromIgnoredFlags(t *testing.T) {
-	root := t.TempDir()
-	path := filepath.Join(root, "v1.bin")
-	s, err := storage.CreateWALStore(path, 16, 4096)
-	if err != nil {
-		t.Fatal(err)
+	if strconv.IntSize < 64 {
+		t.Skip("64-bit CLI uint overflow case")
 	}
-	if err = s.Close(); err != nil {
-		t.Fatal(err)
-	}
-	f, err := parseFlags(append(phase150RequiredBlockvolumeArgs(), "--volume-id=v1", "--durable-root="+root, "--durable-impl=walstore", "--durable-blocks=4294967297"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	blocks, bs, err := durableCreateGeometry(f)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if blocks != 0 {
-		t.Fatal("not open-only")
-	}
-	if err = os.Remove(path); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err = durableCreateGeometry(f); err == nil {
-		t.Fatal("fresh recheck accepted original overflowing count")
-	}
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStore, StorageRoot: root, NumBlocks: blocks, BlockSize: bs}, healthyView{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { p.Close() })
-	if _, err = p.EnsureStorage("v1"); err == nil {
-		t.Fatal("created replacement from ignored flags")
-	}
-	if _, err = os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("replacement file exists: %v", err)
+	for _, impl := range []durable.ImplName{durable.ImplWALStore, durable.ImplWALStoreChunk} {
+		t.Run(string(impl), func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "v1.bin")
+			s, err := storage.CreateWALStore(path, 16, 4096)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = s.Close(); err != nil {
+				t.Fatal(err)
+			}
+			args := append(phase150RequiredBlockvolumeArgs(), "--volume-id=v1", "--durable-root="+root, "--durable-impl="+string(impl), "--durable-blocks=4294967297")
+			if impl == durable.ImplWALStoreChunk {
+				args = append(args, "--chunk-filer=127.0.0.1:18888")
+			}
+			f, err := parseFlags(args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			blocks, bs, err := durableCreateGeometry(f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if blocks != 0 {
+				t.Fatal("not open-only")
+			}
+			if err = os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err = durableCreateGeometry(f); err == nil {
+				t.Fatal("fresh recheck accepted original overflowing count")
+			}
+			p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: impl, StorageRoot: root, NumBlocks: blocks, BlockSize: bs, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) {
+				return nil, errors.New("unexpected remote access for missing open-only volume")
+			}}, healthyView{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { p.Close() })
+			if _, err = p.EnsureStorage("v1"); err == nil {
+				t.Fatal("created replacement from ignored flags")
+			}
+			if _, err = os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("replacement file exists: %v", err)
+			}
+			if _, err = os.Stat(path + ".chunkfresh"); !os.IsNotExist(err) {
+				t.Fatalf("open-only refusal left a fresh marker: %v", err)
+			}
+		})
 	}
 }
