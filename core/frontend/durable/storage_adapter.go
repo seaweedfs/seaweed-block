@@ -5,7 +5,7 @@
 // or any future impl) and exposes the `frontend.Backend` surface
 // iSCSI and NVMe consume. Responsibilities:
 //
-//  1. byte ↔ LBA translation (G-int.1).
+//  1. byte â†” LBA translation (G-int.1).
 //     Frontend layer speaks byte offsets + length; storage layer
 //     speaks LBA + full-block data. The adapter bridges: partial-
 //     block writes trigger read-modify-write; full-block writes
@@ -14,13 +14,13 @@
 //
 //  2. Per-I/O fence check (G-int.2).
 //     Re-reads `ProjectionView` on every operation; ANY drift
-//     (identity field mismatch or Healthy=false) → ErrStalePrimary.
+//     (identity field mismatch or Healthy=false) â†’ ErrStalePrimary.
 //     Preserves INV-FRONTEND-002.{EPOCH,EV,REPLICA,HEALTHY} under
 //     a durable backend.
 //
 //  3. Operational gate (G-int.3, Addendum A).
 //     Before SetOperational(true, _) is called, every I/O returns
-//     ErrNotReady with evidence. Starts non-operational — host/
+//     ErrNotReady with evidence. Starts non-operational â€” host/
 //     provider flips to true after recovery succeeds. This is
 //     local readiness only; NEVER advances epoch / mints authority.
 //
@@ -29,7 +29,7 @@
 //     verbatim. iSCSI SYNCHRONIZE CACHE + NVMe Flush wiring lands
 //     in T3b.
 //
-// StorageBackend does NOT own the LogicalStorage lifecycle — the
+// StorageBackend does NOT own the LogicalStorage lifecycle â€” the
 // Provider (T3b) opens and closes storage. Backend.Close marks the
 // handle closed but does not tear down storage.
 //
@@ -80,7 +80,7 @@ var ErrReplicationAckUnavailable = errors.New("durable: replication ack unavaila
 // core/frontend/durable from importing replication directly and lets
 // tests inject mocks.
 //
-// Observe contract (matches V2 BlockVol.shipMu → ShipAll invariant):
+// Observe contract (matches V2 BlockVol.shipMu â†’ ShipAll invariant):
 //   - StorageBackend calls Observe AFTER LogicalStorage.Write
 //     returns successfully, with the LBA + block data + LSN the
 //     storage layer just assigned.
@@ -96,9 +96,9 @@ var ErrReplicationAckUnavailable = errors.New("durable: replication ack unavaila
 //     ReplicationVolume resequences callbacks by storage-assigned LSN,
 //     then dispatches through one ordered queue per peer lineage.
 //
-// Sync contract (T4b-5 — matches V2 BlockVol.MakeDistributedSync):
+// Sync contract (T4b-5 â€” matches V2 BlockVol.MakeDistributedSync):
 //   - When an observer is installed, StorageBackend.Sync DELEGATES
-//     the full sync job to observer.Sync — the observer owns both
+//     the full sync job to observer.Sync â€” the observer owns both
 //     the local LogicalStorage.Sync call and the peer barriers, with
 //     barriers ordered behind prior writes in each peer queue.
 //   - targetLSN is the primary's current walHead at the moment the
@@ -164,10 +164,11 @@ type StorageBackend struct {
 	// (e.g., "awaiting recovery", "local epoch ahead of assignment").
 	// Only a successfully recovered chunk volume awaiting attachment may wait.
 	// waitAttachReady and readyChanged are protected by mu.
-	waitAttachReady bool
-	readyChanged    chan struct{}
-	operational     atomic.Bool
-	opEvidence      atomic.Value // string
+	waitAttachReady  bool
+	waitPrecopyReady bool // temporary pre-copy freeze; queued I/O has not reached storage
+	readyChanged     chan struct{}
+	operational      atomic.Bool
+	opEvidence       atomic.Value // string
 
 	// ioMu is the I/O admission boundary: every Read, Write and Sync holds
 	// its read side for the whole operation, gate included, so StopIO can
@@ -238,7 +239,7 @@ func (b *StorageBackend) Identity() frontend.Identity {
 // VolumeID/ReplicaID from CLI config (non-empty even pre-assignment)
 // but Epoch=0/EV=0 (engine state is zero-value until OnAssignment
 // runs). So a freshly-constructed backend has b.id = {v1, r1, 0, 0}
-// — partially-zero, not all-zero. The latch condition keys on
+// â€” partially-zero, not all-zero. The latch condition keys on
 // Epoch=0 (the meaningful "no authority line yet" indicator);
 // VolumeID/ReplicaID match is asserted but unchanged.
 //
@@ -247,7 +248,7 @@ func (b *StorageBackend) Identity() frontend.Identity {
 // master-minted advances for the SAME volume/replica are accepted
 // (epoch increase, or endpoint-version increase within the same
 // epoch). Cross-volume, cross-replica, or backward lineage changes
-// are rejected so old primaries still fail closed via lineageCheck →
+// are rejected so old primaries still fail closed via lineageCheck â†’
 // ErrStalePrimary.
 //
 // Returns true if the identity changed. Returns false on no-op and
@@ -257,7 +258,7 @@ func (b *StorageBackend) SetIdentity(id frontend.Identity) bool {
 	defer b.mu.Unlock()
 	// VolumeID/ReplicaID came from CLI config at backend construction
 	// time and don't change; refuse silently if caller tries to install
-	// a different volume/replica (paranoia — should never happen in
+	// a different volume/replica (paranoia â€” should never happen in
 	// production).
 	if (b.id.VolumeID != "" && b.id.VolumeID != id.VolumeID) ||
 		(b.id.ReplicaID != "" && b.id.ReplicaID != id.ReplicaID) {
@@ -353,7 +354,7 @@ func (b *StorageBackend) durableStatus(volumeID, path, impl string) VolumeStatus
 
 // Close marks the backend closed. All subsequent I/O + Sync
 // return ErrBackendClosed. Does NOT close the underlying
-// storage — the Provider owns LogicalStorage lifecycle.
+// storage â€” the Provider owns LogicalStorage lifecycle.
 func (b *StorageBackend) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -364,14 +365,14 @@ func (b *StorageBackend) Close() error {
 
 // SetWriteObserver installs the per-write notification seam used by
 // the replication layer. Safe to call only during setup (before
-// I/O begins) — the seam is intentionally not hot-swappable so a
+// I/O begins) â€” the seam is intentionally not hot-swappable so a
 // well-behaved caller cannot race replication wiring against live
 // writes. Pass nil to disable replication fan-out on this backend.
 //
 // Called by: Provider (T3b) / Host (T4a-5) during volume wiring,
 // once per backend lifetime.
 // Owns: observer pointer under b.mu.
-// Borrows: the observer — caller retains ownership; StorageBackend
+// Borrows: the observer â€” caller retains ownership; StorageBackend
 // does not close or otherwise tear down the observer.
 //
 // An observer that orders writes by LSN (ShipLSNRebaser) is first rebased
@@ -449,11 +450,11 @@ func (b *StorageBackend) WriteProfile() WriteProfileStatus {
 }
 
 // SetOperational flips the readiness gate. evidence is surfaced
-// in error strings and diagnostic logs — pass a short reason like
+// in error strings and diagnostic logs â€” pass a short reason like
 // "recovered LSN=123 epoch=4" or "superblock ahead of assignment".
 // Safe to call from any goroutine.
 //
-// Invariant: does NOT touch identity/lineage/epoch — see package
+// Invariant: does NOT touch identity/lineage/epoch â€” see package
 // godoc + INV-DURABLE-OPGATE-001.
 func (b *StorageBackend) SetOperational(ok bool, evidence string) {
 	if evidence == "" {
@@ -473,6 +474,7 @@ func (b *StorageBackend) setOperationalLocked(ok bool, evidence string) {
 	b.opEvidence.Store(evidence)
 	b.operational.Store(ok)
 	b.waitAttachReady = false
+	b.waitPrecopyReady = false
 	b.notifyReadReadyLocked()
 }
 
@@ -496,6 +498,7 @@ func (b *StorageBackend) TryStopIO(evidence string) bool {
 		evidence = "not operational"
 	}
 	b.setOperationalLocked(false, evidence)
+	b.waitPrecopyReady = true
 	return true
 }
 
@@ -532,29 +535,29 @@ func (b *StorageBackend) StopIO(ctx context.Context, evidence string) error {
 
 // Sync flushes everything the storage has to its durability
 // boundary. Returns nil iff the stable frontier advanced without
-// error. Subject to the same gate stack as I/O: closed → Err-
-// BackendClosed, non-operational → ErrNotReady, lineage drift →
+// error. Subject to the same gate stack as I/O: closed â†’ Err-
+// BackendClosed, non-operational â†’ ErrNotReady, lineage drift â†’
 // ErrStalePrimary.
 func (b *StorageBackend) Sync(ctx context.Context) error {
 	iolatency.BackendEnter(ctx)
 	defer iolatency.BackendExit(ctx)
 	latencyStart := time.Now()
 	defer func() { b.profile.syncLatency.Observe(time.Since(latencyStart)) }()
-	release, err := b.admit()
+	release, err := b.admitAfterPrecopy(ctx)
 	if err != nil {
 		return err
 	}
 	defer release()
 	start := time.Now()
 	// T4b-5: if an observer is installed, delegate the FULL sync
-	// job — the observer (ReplicationVolume) owns both the local
+	// job â€” the observer (ReplicationVolume) owns both the local
 	// LogicalStorage.Sync call and the peer barriers fanned out
 	// through the peer queues. Without this branch the
 	// local sync would run twice (once here, once inside the
 	// observer) which is both wasteful and semantically wrong
 	// (primary would be "durable" before peers were even queried).
 	//
-	// targetLSN is the primary's current walHead — the replica-facing
+	// targetLSN is the primary's current walHead â€” the replica-facing
 	// intent for what must be durable. Local sync's achieved LSN
 	// should meet or exceed this; per-peer barriers carry the
 	// session lineage (TargetLSN fixed per session per peer.Barrier
@@ -570,7 +573,7 @@ func (b *StorageBackend) Sync(ctx context.Context) error {
 		b.profile.recordBackendSync(time.Since(start))
 		return nil
 	}
-	// No observer installed — observer-free path runs local sync only
+	// No observer installed â€” observer-free path runs local sync only
 	// (T0 / bootstrap / single-replica dev configurations).
 	if _, err := b.storage.Sync(); err != nil {
 		return fmt.Errorf("durable: storage sync: %w", err)
@@ -624,7 +627,7 @@ func (b *StorageBackend) admitAfterAttach(ctx context.Context) (func(), error) {
 		hook()
 	}
 	b.mu.Lock()
-	pending := b.waitAttachReady
+	pending := b.waitAttachReady || b.waitPrecopyReady
 	b.mu.Unlock()
 	if !pending {
 		// Readiness may have published after the initial refusal.
@@ -633,6 +636,24 @@ func (b *StorageBackend) admitAfterAttach(ctx context.Context) (func(), error) {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	return b.awaitAttachAdmission(ctx)
+}
+
+// Sync keeps its immediate pre-attach refusal; only the pre-copy pause may wait.
+func (b *StorageBackend) admitAfterPrecopy(ctx context.Context) (func(), error) {
+	release, err := b.admit()
+	if !errors.Is(err, frontend.ErrNotReady) {
+		return release, err
+	}
+	b.mu.Lock()
+	pending := b.waitPrecopyReady
+	b.mu.Unlock()
+	if pending {
+		return b.admitAfterAttach(ctx)
+	}
+	if b.operational.Load() {
+		return b.admit()
+	}
+	return release, err
 }
 
 // notifyReadReadyLocked wakes waiting I/O without making them hold ioMu while
@@ -653,7 +674,7 @@ func (b *StorageBackend) awaitAttachAdmission(ctx context.Context) (func(), erro
 			b.readyChanged = make(chan struct{})
 		}
 		changed := b.readyChanged
-		terminal := b.closed || b.observerErr != nil || !b.waitAttachReady
+		terminal := b.closed || b.observerErr != nil || !(b.waitAttachReady || b.waitPrecopyReady)
 		b.mu.Unlock()
 		if err := ctx.Err(); err != nil {
 			return nil, b.attachReadyTimeout(err)
@@ -767,7 +788,7 @@ func (b *StorageBackend) admit() (func(), error) {
 //  3. lineage: tests that the captured Identity still matches
 //     the live projection; preserves INV-FRONTEND-002
 //
-// Returning ANY error short-circuits — no partial I/O.
+// Returning ANY error short-circuits â€” no partial I/O.
 func (b *StorageBackend) gate() error {
 	if err := b.readyCheck(); err != nil {
 		return err
@@ -782,6 +803,7 @@ func (b *StorageBackend) readyCheck() error {
 	closed := b.closed
 	chunkFenced := b.chunkFenced
 	observerErr := b.observerErr
+	precopyPending := b.waitPrecopyReady
 	b.mu.Unlock()
 	if closed {
 		return frontend.ErrBackendClosed
@@ -794,13 +816,16 @@ func (b *StorageBackend) readyCheck() error {
 	}
 	if !b.operational.Load() {
 		ev, _ := b.opEvidence.Load().(string)
+		if precopyPending {
+			return fmt.Errorf("%w: %w: %s", frontend.ErrNotReady, frontend.ErrBackendBusy, ev)
+		}
 		return fmt.Errorf("%w: %s", frontend.ErrNotReady, ev)
 	}
 	return nil
 }
 
 // lineageCheck re-reads the projection and compares all four
-// facets plus Healthy. Any drift → ErrStalePrimary.
+// facets plus Healthy. Any drift â†’ ErrStalePrimary.
 // INV-FRONTEND-002.{EPOCH,EV,REPLICA,HEALTHY}.
 func (b *StorageBackend) lineageCheck() error {
 	proj := b.view.Projection()
@@ -862,7 +887,7 @@ func hydrationPendingCauseOnly(err error) bool {
 	return hydrationPendingCauseOnly(errors.Unwrap(err))
 }
 
-// readBytes performs the byte-range → LBA-range fanout for Read.
+// readBytes performs the byte-range â†’ LBA-range fanout for Read.
 // Reads block-at-a-time, copying the sub-slice covered by the
 // current byte range. Handles three cases:
 //
@@ -886,7 +911,7 @@ func (b *StorageBackend) readBytes(ctx context.Context, offset int64, p []byte) 
 		inBlockOff := int(pos % bs)
 		if inBlockOff >= len(block) {
 			// Short block (shouldn't happen with fixed-size storage)
-			// — treat as zeros, advance.
+			// â€” treat as zeros, advance.
 			advance := int(bs) - inBlockOff
 			if advance > len(buf) {
 				advance = len(buf)
@@ -907,7 +932,7 @@ func (b *StorageBackend) readBytes(ctx context.Context, offset int64, p []byte) 
 	return total, nil
 }
 
-// writeBytes performs the byte-range → LBA-range fanout for Write.
+// writeBytes performs the byte-range â†’ LBA-range fanout for Write.
 // Full-block writes skip the read (optimization for the hot path);
 // partial-block writes read-modify-write to preserve the bytes
 // outside the range.
