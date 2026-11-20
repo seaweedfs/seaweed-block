@@ -20,7 +20,7 @@ func TestLegacyFixtureIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	forbidden := map[string]bool{"createLegacyWALStoreWithOptions": true, "openLegacyWALStoreWithOptions": true, "openLegacyReadOnlyWithOptions": true}
+	forbidden := map[string]bool{"createLegacyWALStoreWithOptions": true, "openLegacyWALStoreWithOptions": true, "openLegacyReadOnlyWithOptions": true, "newWALWriter": true, "decodeWALEntry": true, "encodeWALPadding": true, "recoverWAL": true, "walEntry": true}
 	for _, e := range entries {
 		n := e.Name()
 		if e.IsDir() || !strings.HasSuffix(n, ".go") || strings.HasSuffix(n, "_test.go") || n == "format_v3_test_support.go" {

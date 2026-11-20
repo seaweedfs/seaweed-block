@@ -2,7 +2,6 @@ package storage
 
 import (
 	"fmt"
-	"os"
 
 	"runtime"
 	"strings"
@@ -111,20 +110,6 @@ func startWorker(t workerTB, fn func() error, gates ...*gate) <-chan error {
 		}
 	})
 	return res
-}
-
-func diskCheckpoint(t *testing.T, path string) uint64 {
-	t.Helper()
-	f, err := os.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	sb, err := readSuperblock(f)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return sb.WALCheckpointLSN
 }
 
 func waitQueuedSync(t *testing.T, s *WALStore, n int) {
