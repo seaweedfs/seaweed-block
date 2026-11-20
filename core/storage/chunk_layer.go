@@ -101,12 +101,15 @@ type chunkLayerImpl struct {
 	// leftoverIntents are this layer's own intents whose delete failed
 	// after their cut was settled; every cut retries them.
 	leftoverIntents []string
-	remoteLSN       uint64
-	hdr             chunkBitmapHeader // last header written or loaded
-	dirty           map[uint64]bool   // chunks dirtied since the cut in progress or the last HEAD
-	inflight        map[uint64]bool   // chunks captured by a cut whose HEAD is not yet installed
-	allDirty        bool              // a BASE block landed: every chunk is dirty
-	hashMode        bool              // the dirty set is unknown: reconcile every chunk against HEAD before any cut
+	// Immutable completed uploads survive a refused point. Guarded by stMu;
+	// versions and HEAD generation prevent reuse across mutations/recovery.
+	reusable  map[uint64]stagedChunk
+	remoteLSN uint64
+	hdr       chunkBitmapHeader // last header written or loaded
+	dirty     map[uint64]bool   // chunks dirtied since the cut in progress or the last HEAD
+	inflight  map[uint64]bool   // chunks captured by a cut whose HEAD is not yet installed
+	allDirty  bool              // a BASE block landed: every chunk is dirty
+	hashMode  bool              // the dirty set is unknown: reconcile every chunk against HEAD before any cut
 	// reconcile holds the chunks the reconciler has not compared yet;
 	// reconcileTotal is the size of the current reconciliation, and
 	// reconciled is closed when it is done or replaced (under stMu).
@@ -755,6 +758,8 @@ func (l *chunkLayerImpl) MakeRemoteDurable(ctx context.Context, t uint64) error 
 }
 
 type capturedChunk struct {
+	version uint64
+	intent  string
 	idx     uint64
 	data    []byte
 	sum     [32]byte
@@ -912,7 +917,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		if copyErr == nil {
 			var copied []capturedChunk
 			var ids []string
-			copied, ids, copyErr = l.copyCOWWindow(ctx, w, births, baseHead)
+			copied, ids, copyErr = l.copyCOWWindow(ctx, w, births, capturedVersions, baseHead)
 			intents = append(intents, ids...)
 			for _, c := range copied {
 				if c.key != "" {
@@ -1622,6 +1627,19 @@ func (l *chunkLayerImpl) dropIntent(ctx context.Context, id string) {
 	if id == "" {
 		return
 	}
+	l.stMu.Lock()
+	keep := false
+	for idx, sc := range l.reusable {
+		if sc.ver != l.chunkVersion(idx) || sc.headGen != l.head.Gen {
+			delete(l.reusable, idx)
+			continue
+		}
+		keep = keep || sc.intent == id
+	}
+	l.stMu.Unlock()
+	if keep {
+		return
+	}
 	if err := l.remote.DeleteIntent(ctx, id); err != nil {
 		l.stMu.Lock()
 		l.leftoverIntents = append(l.leftoverIntents, id)
@@ -1665,12 +1683,26 @@ func (l *chunkLayerImpl) dropIntents(ctx context.Context, ids []string) {
 // state, so a failed cut simply leaves its staged keys to the intents.
 func (l *chunkLayerImpl) stage(ctx context.Context, st *chunkCutStats) (map[uint64]stagedChunk, []string, error) {
 	bound := l.cfg.BarrierBound
-	if bound <= 0 {
+	native := l.usesOwnedMapV3()
+	if native {
+		// Leave at most half the side budget exposed at the barrier. Streaming
+		// staging uses no local payload file, even for a much larger image.
+		bound = max(1, int(l.cfg.COWSpillLimit/(2*int64(l.blockSize)*int64(l.chunkBlocks))))
+	} else if bound <= 0 {
 		return nil, nil, nil
 	}
 	staged := map[uint64]stagedChunk{}
 	var intents []string
-	for round := 0; round < chunkStageRounds; round++ {
+	l.stMu.Lock()
+	for idx, sc := range l.reusable {
+		staged[idx] = sc
+		if sc.intent != "" {
+			intents = append(intents, sc.intent)
+		}
+	}
+	l.stMu.Unlock()
+	previous := int(^uint(0) >> 1)
+	for round := 0; ; round++ {
 		wal := l.captureCandidates()
 		l.stMu.Lock()
 		need := map[uint64]bool{}
@@ -1694,10 +1726,11 @@ func (l *chunkLayerImpl) stage(ctx context.Context, st *chunkCutStats) (map[uint
 				consider(i)
 			}
 		}
-		if len(need) <= bound {
+		if len(need) <= bound || (native && len(need) >= previous) || (!native && round >= chunkStageRounds) {
 			l.stMu.Unlock()
 			break
 		}
+		previous = len(need)
 		recent := make(map[uint64]uint64, len(need))
 		// Release layer state before sampling the store; never invert store -> stMu.
 		l.stMu.Unlock()
@@ -1709,7 +1742,10 @@ func (l *chunkLayerImpl) stage(ctx context.Context, st *chunkCutStats) (map[uint
 		}
 		l.s.mu.RUnlock()
 		l.stMu.Lock()
-		batch := hotChunkKeys(need, recent)[:bound]
+		batch := hotChunkKeys(need, recent)
+		if !native {
+			batch = batch[:bound]
+		}
 		vers := make(map[uint64]uint64, len(batch))
 		for _, idx := range batch {
 			vers[idx] = l.chunkVersion(idx) // before the read: a later mutation raises it
@@ -1780,6 +1816,7 @@ func (l *chunkLayerImpl) finishCut(head chunkHead, h uint64, changed []uint64, n
 	}
 	prevBase := l.hdr.BaseLSN
 	l.head, l.remoteLSN, l.pending = copyHead(head), h, nil
+	l.reusable = nil
 	l.inflight = map[uint64]bool{}
 	l.hashMode = false
 	hdr := chunkBitmapHeader{BaseLSN: h, HeadGen: head.Gen, Epoch: head.Epoch, Base: chunkBaseNone}

@@ -72,14 +72,22 @@ func (l *chunkLayerImpl) streamCutPayloads(ctx context.Context, batch []uint64, 
 				return nil, intents, fmt.Errorf("storage: capture intent: %w: %w", errChunkRemoteUnavailable, err)
 			}
 			intents = append(intents, id)
+			for _, i := range changed {
+				wave[i].intent = id
+			}
 			if err = l.uploadBatch(ctx, len(changed), func(ctx context.Context, i int) error {
 				c := wave[changed[i]]
-				return l.putCaptured(ctx, c.key, c.data)
+				if err := l.putCaptured(ctx, c.key, c.data); err != nil {
+					return err
+				}
+				l.rememberPayload(c, head.Gen)
+				return nil
 			}); err != nil {
 				return nil, intents, fmt.Errorf("storage: capture upload: %w: %w", errChunkRemoteUnavailable, err)
 			}
 		}
 		for i := range wave {
+			l.rememberPayload(wave[i], head.Gen)
 			wave[i].data = nil
 			out = append(out, wave[i])
 		}
@@ -96,7 +104,7 @@ func (l *chunkLayerImpl) stagePayloadRound(ctx context.Context, batch []uint64, 
 		if hook := l.testAfterStageReadHook; hook != nil {
 			hook(idx)
 		}
-		return capturedChunk{idx: idx, data: data, sum: sha256.Sum256(data), zero: isAllZero(data)}, nil
+		return capturedChunk{idx: idx, version: versions[idx], data: data, sum: sha256.Sum256(data), zero: isAllZero(data)}, nil
 	})
 	if err != nil {
 		return nil, intents, err
@@ -110,4 +118,19 @@ func (l *chunkLayerImpl) stagePayloadRound(ctx context.Context, batch []uint64, 
 		}
 	}
 	return chunks, intents, nil
+}
+
+// Only immutable metadata survives an attempt. The intent remains a GC root
+// until this version is superseded or a confirmed HEAD makes it reachable.
+func (l *chunkLayerImpl) rememberPayload(c capturedChunk, gen uint64) {
+	if !l.usesOwnedMapV3() {
+		return
+	}
+	c.data = nil
+	l.stMu.Lock()
+	defer l.stMu.Unlock()
+	if l.reusable == nil {
+		l.reusable = make(map[uint64]stagedChunk)
+	}
+	l.reusable[c.idx] = stagedChunk{capturedChunk: c, ver: c.version, headGen: gen}
 }

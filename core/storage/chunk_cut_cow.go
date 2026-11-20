@@ -498,7 +498,7 @@ func (l *chunkLayerImpl) copyCOWEntry(w *cutCOWWindow, idx uint64) (capturedChun
 // Each worker owns one immutable image from local read through remote Put.
 // Once copied, its entry is done: guest writes need not wait for remote I/O.
 // The window remains installed for candidates not yet read by a worker.
-func (l *chunkLayerImpl) copyCOWWindow(ctx context.Context, w *cutCOWWindow, recent map[uint64]uint64, head chunkHead) ([]capturedChunk, []string, error) {
+func (l *chunkLayerImpl) copyCOWWindow(ctx context.Context, w *cutCOWWindow, recent, versions map[uint64]uint64, head chunkHead) ([]capturedChunk, []string, error) {
 	parent := ctx
 	abortStop := context.AfterFunc(parent, func() { w.abort(parent.Err()) })
 	defer abortStop()
@@ -541,6 +541,7 @@ func (l *chunkLayerImpl) copyCOWWindow(ctx context.Context, w *cutCOWWindow, rec
 			}
 			c.sum, c.zero, c.missing = sha256.Sum256(c.data), isAllZero(c.data), nil
 		}
+		c.version = versions[idx]
 		return c, nil
 	})
 	w.mu.Lock()
