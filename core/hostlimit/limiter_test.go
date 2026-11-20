@@ -229,6 +229,7 @@ func TestKilledProcessReleasesButLiveHolderDoesNot(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
+	defer in.Close()
 	if e = cmd.Start(); e != nil {
 		t.Fatal(e)
 	}
