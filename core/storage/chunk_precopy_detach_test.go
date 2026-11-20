@@ -266,7 +266,10 @@ func TestPrecopyDetachQueuedCancellationReturnsWhileOtherCutOwnsPipeline(t *test
 }
 
 func TestPrecopyDetachExcludesServingPreparationFromFreezeCost(t *testing.T) {
-	_, _, l, _ := precopyLayer(t, 1024, 0)
+	store, _, l, _ := precopyLayer(t, 1024, 0)
+	if _, err := store.Write(1, makeBlock(ctBlockSize, 0x6e)); err != nil {
+		t.Fatal(err)
+	}
 	l.testAfterAdmitHook = func() { l.testAfterAdmitHook = nil; time.Sleep(1300 * time.Millisecond) }
 	if _, err := l.Cut(ctTimeout(t)); err != nil {
 		t.Fatal(err)
@@ -299,5 +302,33 @@ func TestPrecopyDetachRetryResolvesPreviouslyAppliedDetachedCut(t *testing.T) {
 	}
 	if !bytes.Equal(f.imageOf(t, r.Head)[ctBlockSize:2*ctBlockSize], makeBlock(ctBlockSize, 0x10)) {
 		t.Fatal("resolved detach lost bytes")
+	}
+}
+
+func TestPrecopyDetachColdNoopRequiresMeasuredCASCost(t *testing.T) {
+	s, _ := newChunkTestStore(t)
+	f := newFakeChunkRemote()
+	f.seedHead(t, make([]byte, ctNumBlocks*ctBlockSize), 0, 1)
+	cfg := ctConfig(1)
+	cfg.Holder = "seed"
+	cfg.FreshFromHead = true
+	l := mustAttach(t, s, f, cfg).(*chunkLayerImpl)
+	stopped := 0
+	_, err := l.PrecopyDetach(ctTimeout(t), func() bool { stopped++; return true })
+	if !errors.Is(err, ErrPrecopyUnknown) || stopped != 0 {
+		t.Fatalf("no-op read treated as measured CAS cost: stopped=%d err=%v", stopped, err)
+	}
+	if f.stats().head.Gen != 1 {
+		t.Fatal("unknown cost published a final detached HEAD")
+	}
+	if _, err := s.Write(1, makeBlock(ctBlockSize, 0x61)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.Cut(ctTimeout(t)); err != nil {
+		t.Fatal(err)
+	}
+	r, err := l.PrecopyDetach(ctTimeout(t), func() bool { stopped++; return true })
+	if err != nil || !r.Precopy.Frozen || stopped != 1 {
+		t.Fatalf("measured CAS did not enable empty-tail freeze: report=%+v stopped=%d err=%v", r.Precopy, stopped, err)
 	}
 }
