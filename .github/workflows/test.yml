@@ -57,11 +57,11 @@ jobs:
         run: go test -p=1 -short -count=1 -timeout 10m ./...
 
   test-legacy:
-    name: go test legacy-fixture (hosted)
-    # Second runner: the legacy-fixture pass runs on a GitHub-hosted runner in
-    # parallel with the default pass on tp04, so neither job queues behind the
-    # other on the single self-hosted runner.
-    runs-on: ubuntu-latest
+    name: go test legacy-fixture
+    # Same routing as the default job: same-repo PRs and pushes use the tp04
+    # runners (two instances, so both passes run in parallel); fork PRs stay on
+    # a GitHub-hosted runner, whose shared queue can wait for hours.
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && 'tp04-seaweed-block' || 'ubuntu-latest' }}
     timeout-minutes: 30
     env:
       CGO_ENABLED: "0"
