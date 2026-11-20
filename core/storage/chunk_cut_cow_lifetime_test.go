@@ -204,6 +204,9 @@ func TestCutCOWV3_RecoveryAndCloseDrainSavingOwner(t *testing.T) {
 			if cutErr == nil {
 				t.Fatal("terminal window published")
 			}
+			if action == "LayerClose" && (!errors.Is(cutErr, ErrCutCOWAborted) || !errors.Is(cutErr, ErrChunkLayerClosed)) {
+				t.Fatalf("real Close lost terminal cut cause: %v", cutErr)
+			}
 			if actionErr != nil && action != "Reset" {
 				t.Fatal(actionErr)
 			}
