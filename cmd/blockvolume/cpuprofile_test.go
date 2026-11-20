@@ -16,12 +16,21 @@ func TestCPUProfileDirFlagDefaultsFromEnv(t *testing.T) {
 	}
 	dir := t.TempDir()
 	t.Setenv(cpuProfileEnv, dir)
-	if f, err := parseFlags(base); err != nil || f.cpuProfileDir != dir {
+	f, err := parseFlags(base)
+	other := t.TempDir()
+	fx, errx := parseFlags(append(append([]string{}, base...), "--cpu-profile-dir", other))
+	if !cpuProfileSupported {
+		// No SIGUSR1 here: a set directory is refused in flag parsing.
+		if err == nil || errx == nil {
+			t.Fatalf("unsupported platform accepted a profile dir: env %v, flag %v", err, errx)
+		}
+		return
+	}
+	if err != nil || f.cpuProfileDir != dir {
 		t.Fatalf("from env: %q %v; want %q", f.cpuProfileDir, err, dir)
 	}
-	other := t.TempDir()
-	if f, err := parseFlags(append(append([]string{}, base...), "--cpu-profile-dir", other)); err != nil || f.cpuProfileDir != other {
-		t.Fatalf("explicit flag: %q %v; want %q", f.cpuProfileDir, err, other)
+	if errx != nil || fx.cpuProfileDir != other {
+		t.Fatalf("explicit flag: %q %v; want %q", fx.cpuProfileDir, errx, other)
 	}
 }
 
