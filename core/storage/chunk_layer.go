@@ -52,6 +52,10 @@ type chunkHooks struct {
 const defaultReadMissTimeout = 30 * time.Second
 
 type chunkLayerImpl struct {
+	// capMu serializes pre-copy admission and its recent measurements.
+	precopyFreeze  func(uint64) bool
+	precopySamples []precopySample
+
 	s      *WALStore
 	remote chunkRemote
 	cfg    chunkLayerConfig
@@ -806,6 +810,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		st.TotalNs = time.Since(start).Nanoseconds()
 		if err == nil {
 			res.Stats = st
+			l.samplePrecopy(st)
 		}
 		if errors.Is(err, errChunkLayerFenced) {
 			l.stMu.Lock()
@@ -949,6 +954,13 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	// Candidates, mutation versions and births belong to the same barrier.
 	// Do not sample the owned map after COW writers are admitted again.
 	births := l.captureBirths(candidates, h)
+	// The authoritative candidate set is fixed with mutation admission closed.
+	// The owner callback is nonblocking and may stop only an already drained
+	// frontend; rejected attempts remain ordinary COW cuts.
+	if freeze := l.precopyFreeze; freeze != nil {
+		tail := uint64(len(candidates)) * uint64(l.blockSize) * l.chunkBlocks
+		detach = freeze(tail)
+	}
 
 	if h < baseHead.RemoteLSN && !l.supersededBy(baseHead) {
 		l.s.captureMu.Unlock()

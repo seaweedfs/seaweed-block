@@ -482,6 +482,7 @@ type chunkLayerStats struct {
 //   - FullHash says the cut compared every chunk by hash (no usable bitmap,
 //     or the first cut after a BASE install).
 type chunkCutResult struct {
+	Precopy  PrecopyReport
 	H        uint64
 	Head     chunkHead
 	Noop     bool
