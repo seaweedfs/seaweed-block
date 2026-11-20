@@ -198,3 +198,18 @@ func TestPrecopyDetachSustainedWrapFlushAndFreshRestore(t *testing.T) {
 	}
 	t.Logf("wrote %d bytes > WAL %d with periodic Flush; fresh host exact readback", written, s.sb.WALSize)
 }
+
+func TestPrecopyDetachCanceledBarrierNeverStopsFrontend(t *testing.T) {
+	_, _, l, _ := precopyLayer(t, 1024, 0)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	l.testAfterBarrierSyncHook = func(uint64) { cancel() }
+	stopped := false
+	_, err := l.PrecopyDetach(ctx, func() bool { stopped = true; return true })
+	if stopped {
+		t.Fatal("cancellation at the tentative barrier still stopped the frontend")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled attempt: %v", err)
+	}
+}
