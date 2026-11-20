@@ -389,3 +389,17 @@ Native pre-copy streams logical reads directly to remote while remaining candida
 
 
 A cut does not pin WAL space or defer flushing. Local reads validate and re-resolve across dirty-map retirement and slot reuse. CopyFinish releases local chunk ownership; every PUT retry sends the same immutable slot, while lazy fills use the cut's fixed base HEAD.
+
+
+### Host background-cut budget
+
+```mermaid
+stateDiagram-v2
+    Free --> Admitted: OS slot before staging/barrier
+    Admitted --> Draining: cancellation or lease expiry
+    Admitted --> Joined: workers settle
+    Draining --> Joined: workers settle
+    Joined --> Free: descriptor closed
+```
+
+Guest I/O never acquires a slot. An unavailable pool skips background cuts; urgent and named seals may use per-process fallback with an alarm. Active coordinated reservations exclude orphaned crash spill. Upload pacing debt survives leases in one process, but a new process starts fresh, so arbitrary process turnover has no fixed host-rate bound.

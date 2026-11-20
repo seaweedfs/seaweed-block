@@ -191,7 +191,10 @@ type ProviderConfig struct {
 	// ChunkPayloadMemoryBudget bounds one volume's cut payloads; zero uses the storage default.
 	ChunkPayloadMemoryBudget int64
 	// ChunkBudget optionally admits cuts and accounts COW bytes through the host limiter.
-	ChunkBudget storage.Budget
+	ChunkBudget        storage.Budget
+	ChunkCOWSpillLimit int64
+	// ChunkStagger spreads automatic cuts by the stable volume-ID phase.
+	ChunkStagger bool
 }
 
 // DurableProvider is the production frontend.Provider implementation.
@@ -298,6 +301,7 @@ type ChunkStatus struct {
 	Fenced            bool
 	RemoteLSN         uint64
 	Stats             storage.ChunkLayerStats
+	HostBudget        any `json:",omitempty"`
 }
 
 // NewDurableProvider constructs a provider. view is the ONLY
@@ -563,6 +567,9 @@ func (p *DurableProvider) DurableStatuses() []VolumeStatus {
 			cs := &ChunkStatus{AwaitingAuthority: cv.awaiting}
 			if cv.layer != nil {
 				cs.Attached, cs.Fenced, cs.RemoteLSN, cs.Stats = true, cv.layer.Fenced(), cv.layer.RemoteLSN(), cv.layer.Stats()
+			}
+			if budget, ok := p.cfg.ChunkBudget.(interface{ Snapshot() any }); ok {
+				cs.HostBudget = budget.Snapshot()
 			}
 			st.Chunk = cs
 		}
