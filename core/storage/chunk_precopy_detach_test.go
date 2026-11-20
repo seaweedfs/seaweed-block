@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -38,4 +39,63 @@ func TestPrecopyDetachConvergesBeforeStoppingIO(t *testing.T) {
 		t.Fatal("detached HEAD differs from local image")
 	}
 	assertNoIntentsLeft(t, f)
+}
+
+func TestPrecopyDetachUnsettledRoundsKeepDirtyBytes(t *testing.T) {
+	s, f, l, w := precopyLayer(t, 1024, 1)
+	// Fail before publication, after a candidate image has been collected.
+	f.failPutIntent = errFakeRemoteDown
+	stopped := 0
+	_, err := l.PrecopyDetach(ctTimeout(t), func() bool { stopped++; return true })
+	if !errors.Is(err, ErrPrecopyUnknown) || stopped != 0 {
+		t.Fatalf("err=%v stopped=%d", err, stopped)
+	}
+	if f.stats().head.State == ChunkHeadDetached {
+		t.Fatal("failed rounds detached")
+	}
+	f.failPutIntent = nil
+	r, err := l.Cut(ctTimeout(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Stats.CandidateChunks == 0 {
+		t.Fatal("aborted rounds marked dirty chunks clean")
+	}
+	assertEveryHeadIsPrefixImage(t, f, w)
+	if !bytes.Equal(f.imageOf(t, r.Head)[ctBlockSize:2*ctBlockSize], makeBlock(ctBlockSize, 0x10)) {
+		t.Fatal("failed rounds lost acknowledged bytes")
+	}
+	if _, err := s.Write(2, makeBlock(ctBlockSize, 0x99)); err != nil {
+		t.Fatal("failed migration stopped old owner:", err)
+	}
+}
+
+func TestPrecopyDetachBusyOwnerExhaustsWithoutStopping(t *testing.T) {
+	s, f, l, _ := precopyLayer(t, 1024, 1)
+	calls := 0
+	r, err := l.PrecopyDetach(ctTimeout(t), func() bool { calls++; return false })
+	if !errors.Is(err, ErrPrecopyNotConverged) || r.Precopy.Attempts != 5 || r.Precopy.Frozen || calls == 0 {
+		t.Fatalf("report=%+v calls=%d err=%v", r.Precopy, calls, err)
+	}
+	if f.stats().head.State == ChunkHeadDetached {
+		t.Fatal("busy frontend detached")
+	}
+	if _, err := s.Write(2, makeBlock(ctBlockSize, 0x99)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPrecopyDetachCountsBurstAtNextBarrier(t *testing.T) {
+	s, _, l, _ := precopyLayer(t, 1024, 0)
+	writes := 0
+	l.testBeforeBarrierLockHook = func() {
+		writes++
+		if _, err := s.Write(1, makeBlock(ctBlockSize, byte(writes))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r, err := l.PrecopyDetach(ctTimeout(t), func() bool { return false })
+	if !errors.Is(err, ErrPrecopyNotConverged) || writes != 5 || r.Precopy.TailBytes != uint64(ctChunkBytes) {
+		t.Fatalf("writes=%d report=%+v err=%v", writes, r.Precopy, err)
+	}
 }
