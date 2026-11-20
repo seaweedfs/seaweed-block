@@ -3,10 +3,13 @@ package storage
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"path/filepath"
 	"runtime"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -150,5 +153,59 @@ func TestCutAbortReasonsAreCountedAndCopied(t *testing.T) {
 	raw, err := json.Marshal(l.Stats())
 	if err != nil || !bytes.Contains(raw, []byte(`"CutsAborted"`)) {
 		t.Fatalf("status: %s %v", raw, err)
+	}
+}
+
+type overlap271Remote struct {
+	*fakeChunkRemote
+	first   chan struct{}
+	release chan struct{}
+	calls   atomic.Int32
+}
+
+func (r *overlap271Remote) Put(ctx context.Context, key string, data []byte) error {
+	if r.calls.Add(1) == 1 {
+		close(r.first)
+		select {
+		case <-r.release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return r.fakeChunkRemote.Put(ctx, key, data)
+}
+func TestCutPayloadReadsOverlapEarlierUploadsWithinBudget(t *testing.T) {
+	_, _, l, _ := precopyLayer(t, 0, 1)
+	l.cfg.UploadConcurrency = 2
+	r := &overlap271Remote{fakeChunkRemote: newFakeChunkRemote(), first: make(chan struct{}), release: make(chan struct{})}
+	l.remote = r
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	readThird, done := make(chan struct{}), make(chan struct{})
+	errs := make(chan error, 1)
+	var once sync.Once
+	free := func() { once.Do(func() { close(r.release) }) }
+	t.Cleanup(func() { cancel(); free(); cowWaitSignal(t, done, "overlap cleanup") })
+	go func() {
+		defer close(done)
+		_, _, err := l.streamCutPayloads(ctx, []uint64{0, 1, 2}, chunkHead{}, func(_ context.Context, idx uint64) (capturedChunk, error) {
+			if idx == 2 {
+				close(readThird)
+			}
+			data := makeBlock(ctBlockSize, byte(idx+1))
+			return capturedChunk{idx: idx, data: data, sum: sha256.Sum256(data)}, nil
+		})
+		errs <- err
+	}()
+	cowWaitSignal(t, r.first, "held first PUT")
+	select {
+	case <-readThird:
+	case <-time.After(time.Second):
+		t.Fatal("next local read waited for earlier remote PUT")
+	}
+	free()
+	cowWaitSignal(t, done, "overlapping upload join")
+	if err := <-errs; err != nil {
+		t.Fatal(err)
 	}
 }
