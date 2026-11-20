@@ -33,17 +33,41 @@ type faultRemote struct {
 	// remote only when release closes; its own result goes to delayedErr.
 	release    chan struct{}
 	delayedErr chan error
-	// held records the CAS held by "hold-detach": the deadline of the context
-	// it was given and when that context ended.
+	// held records the CAS held by "hold-detach": when and why its context
+	// ended, and whether it had ended by the witness time (see witnessCut).
 	held heldCAS
 }
 
 type heldCAS struct {
-	entered     bool
-	deadline    time.Time
-	hasDeadline bool
-	ended       time.Time
+	entered bool
+	ctx     context.Context
+	ended   time.Time
+	cause   error // context.Cause once the context ended
+
+	witnessed    bool  // the witness time has passed
+	witnessCause error // context.Cause at the witness time (nil: still live)
 }
+
+// witnessCut arms the check that the held detach CAS was really cancelled at
+// the cut deadline the detach traced, not later: a timer at the deadline plus
+// half of a 100 ms shift records the CAS context's cause at that moment. A
+// CAS entered after that moment must find its context already cancelled.
+// done is closed once the witness has run.
+func (r *faultRemote) witnessCut(cut time.Time) (done <-chan struct{}, stop func() bool) {
+	ch := make(chan struct{})
+	tm := time.AfterFunc(time.Until(cut.Add(cutWitnessSlack)), func() {
+		r.set(func(r *faultRemote) {
+			r.held.witnessed = true
+			if r.held.ctx != nil {
+				r.held.witnessCause = context.Cause(r.held.ctx)
+			}
+		})
+		close(ch)
+	})
+	return ch, tm.Stop
+}
+
+const cutWitnessSlack = 50 * time.Millisecond
 
 var errInjected = errors.New("injected remote fault")
 
@@ -97,11 +121,15 @@ func (r *faultRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVer
 		<-ctx.Done()
 		return 0, ctx.Err()
 	case "hold-detach": // the detach CAS, held until its caller gives up; witnessed
-		dl, ok := ctx.Deadline()
-		r.set(func(r *faultRemote) { r.held = heldCAS{entered: true, deadline: dl, hasDeadline: ok} })
+		r.set(func(r *faultRemote) {
+			r.held.entered, r.held.ctx = true, ctx
+			if r.held.witnessed { // entered after the witness time
+				r.held.witnessCause = context.Cause(ctx)
+			}
+		})
 		<-ctx.Done()
 		ended := time.Now()
-		r.set(func(r *faultRemote) { r.held.ended = ended })
+		r.set(func(r *faultRemote) { r.held.ended, r.held.cause = ended, context.Cause(ctx) })
 		return 0, ctx.Err()
 	case "delayed":
 		r.mu.Lock()
@@ -284,9 +312,21 @@ func TestWALStoreChunk_DetachFreezeIsBoundedThenResumes(t *testing.T) {
 	}
 	remote.set(func(r *faultRemote) { r.casMode = "hold-detach" })
 	deadlines := map[string]time.Time{}
-	durable.SetTestDetachTrace(p, func(stage string, d time.Time) { deadlines[stage] = d })
+	var witnessed <-chan struct{}
+	durable.SetTestDetachTrace(p, func(stage string, d time.Time) {
+		deadlines[stage] = d
+		if stage == "cut" {
+			var stop func() bool
+			witnessed, stop = remote.witnessCut(d)
+			t.Cleanup(func() { stop() })
+		}
+	})
 	_, _, err = p.DetachVolume(context.Background(), "v1")
 	end := time.Now()
+	if witnessed == nil {
+		t.Fatal("the detach traced no cut deadline")
+	}
+	<-witnessed
 	if !errors.Is(err, durable.ErrDetachAborted) || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("detach with a hung CAS: %v; want an aborted detach at the freeze bound", err)
 	}
@@ -296,21 +336,24 @@ func TestWALStoreChunk_DetachFreezeIsBoundedThenResumes(t *testing.T) {
 	if gap := settle.Sub(cut); gap != freeze/4 {
 		t.Fatalf("settlement deadline %v after the cut deadline; want a quarter of the %v bound", gap, freeze)
 	}
-	// The held operation is the detach CAS itself: it ran under exactly the
-	// cut's deadline, and was released by that deadline expiring.
+	// The held operation is the detach CAS itself, released by the cut's
+	// expiry. Its context's own deadline proves nothing: a CAS carries its
+	// own operation timeout, and the cut may be a timer, not a deadline.
 	var held heldCAS
 	remote.set(func(r *faultRemote) { held = r.held })
 	if !held.entered {
 		t.Fatal("the detach CAS was never held")
 	}
-	// The cut may bound the CAS by a context deadline or by a timer that
-	// cancels it: a deadline, when there is one, must be the cut's exactly;
-	// either way the CAS must end no earlier than the cut deadline.
-	if held.hasDeadline && !held.deadline.Equal(cut) {
-		t.Fatalf("held detach CAS deadline %v; want the cut deadline %v", held.deadline, cut)
-	}
 	if held.ended.Before(cut) {
 		t.Fatalf("held detach CAS ended %v before its deadline", cut.Sub(held.ended))
+	}
+	// Deadline or timer, the CAS was cancelled for the cut's own expiry and
+	// by the traced cut deadline (plus the witness slack), not later.
+	if !errors.Is(held.cause, context.DeadlineExceeded) {
+		t.Fatalf("held detach CAS cancelled with cause %v; want the cut's deadline expiry", held.cause)
+	}
+	if !errors.Is(held.witnessCause, context.DeadlineExceeded) {
+		t.Fatalf("held detach CAS still live (cause %v) %v after the traced cut deadline", held.witnessCause, cutWitnessSlack)
 	}
 	if end.Before(held.ended) {
 		t.Fatal("detach returned before its held CAS ended")
