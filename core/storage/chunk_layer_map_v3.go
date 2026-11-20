@@ -6,7 +6,7 @@ package storage
 func (l *chunkLayerImpl) usesOwnedMapV3() bool { return l.s.v3 != nil && l.s.v3.mapProof != nil }
 
 // persistCapturedMapV3 is called only after HEAD's publication is definite
-// (or an authority-checked no-op), outside bmMu/stMu and the capture barrier.
+// (or an authority-checked no-op), outside stMu and the capture barrier.
 // The capture's mutation versions were sampled under the quiesced barrier.
 // Store.mu prevents a WAL append from slipping between the version check and
 // the UNKNOWN update. A later WAL append updates max LSN and stays retained;

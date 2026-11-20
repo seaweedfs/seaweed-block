@@ -14,9 +14,7 @@ import (
 	"time"
 )
 
-// The old engine remains only for explicit fixtures until row 14a. The
-// production import closure must not bring in its frozen tool/test package,
-// and no production source may call the legacy constructor chain.
+// The retired engine must not return through constructors or import aliases.
 func TestLegacyFixtureIsolation(t *testing.T) {
 	entries, err := os.ReadDir(".")
 	if err != nil {
@@ -74,16 +72,8 @@ func TestLegacyFixtureIsolation(t *testing.T) {
 
 func legacyConstructorReferences(f *ast.File, forbidden map[string]bool) []string {
 	var refs []string
-	// A constructor declaration is retained for test linking, but every use
-	// (including function values, aliases and arguments) is forbidden.
-	declarations := map[*ast.Ident]bool{}
-	for _, decl := range f.Decls {
-		if fn, ok := decl.(*ast.FuncDecl); ok {
-			declarations[fn.Name] = true
-		}
-	}
 	ast.Inspect(f, func(n ast.Node) bool {
-		if id, ok := n.(*ast.Ident); ok && forbidden[id.Name] && !declarations[id] {
+		if id, ok := n.(*ast.Ident); ok && forbidden[id.Name] {
 			refs = append(refs, id.Name)
 		}
 		return true
@@ -95,6 +85,7 @@ func TestLegacyFixtureIsolationRejectsFunctionValues(t *testing.T) {
 	const name = "createLegacyWALStoreWithOptions"
 	for _, body := range []string{
 		"func use() { createLegacyWALStoreWithOptions() }",
+		"func createLegacyWALStoreWithOptions() {}",
 		"var constructor = createLegacyWALStoreWithOptions",
 		"func use() { constructor := createLegacyWALStoreWithOptions; constructor() }",
 		"func use() { accept(createLegacyWALStoreWithOptions) }",

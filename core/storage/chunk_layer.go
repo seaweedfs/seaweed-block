@@ -135,13 +135,12 @@ type chunkLayerImpl struct {
 
 	// Absence: chunks whose local bytes are not authoritative (fresh host,
 	// evicted), and blocks written locally inside such chunks since.
-	absent        map[uint64]bool
-	absentGen     map[uint64]uint64 // bumped on every eviction; binds a fill to its generation
-	localBlocks   map[uint64]bool
-	presenceVer   uint64
-	savedPresVer  uint64
-	dirtyVer      uint64
-	savedDirtyVer uint64
+	absent       map[uint64]bool
+	absentGen    map[uint64]uint64 // bumped on every eviction; binds a fill to its generation
+	localBlocks  map[uint64]bool
+	presenceVer  uint64
+	savedPresVer uint64
+	dirtyVer     uint64
 }
 
 func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig) (chunkLayer, error) {
@@ -643,10 +642,6 @@ type stagedChunk struct {
 	ver     uint64
 	headGen uint64
 }
-
-// chunkStageRounds bounds the pre-copy: after this many staging rounds the
-// barrier copies whatever remains (correctness over pause).
-const chunkStageRounds = 3
 
 func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res chunkCutResult, err error) {
 	done, err := l.register()
@@ -1402,11 +1397,9 @@ func (l *chunkLayerImpl) dropIntents(ctx context.Context, ids []string) {
 // It stops when the spill-budget remainder is reached or a round makes no
 // progress. Versions/HEAD generation bind every reusable immutable result.
 func (l *chunkLayerImpl) stage(ctx context.Context, st *chunkCutStats) (map[uint64]stagedChunk, []string, error) {
-	bound := l.cfg.BarrierBound
-
 	// Leave at most half the side budget exposed at the barrier. Streaming
 	// staging uses no local payload file, even for a much larger image.
-	bound = int(l.cfg.COWSpillLimit / (2 * int64(l.blockSize) * int64(l.chunkBlocks)))
+	bound := int(l.cfg.COWSpillLimit / (2 * int64(l.blockSize) * int64(l.chunkBlocks)))
 
 	staged := map[uint64]stagedChunk{}
 	var intents []string
