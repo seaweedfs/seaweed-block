@@ -311,3 +311,7 @@ TLC. This is an abstraction: physical fsync success, byte layout, crash recovery
 both-slot retirement, timing and multiple writers remain covered by their other
 models and actual Go controls. Do not treat finite liveness checking as an
 end-to-end wall-clock latency guarantee. Keep long model runs off tp04.
+
+## HostBudget
+
+`HostBudget.tla` abstracts cooperating process slots, COW reservation and joined release. Config `HostBudget.cfg` checks three owners/two slots; `HostBudget_early_release.cfg` must violate HeldUntilJoined. It excludes degraded static fallback and does not prove filesystem locks, rates or physical-I/O deadlines. Native subprocess tests cover lock lifetime.
