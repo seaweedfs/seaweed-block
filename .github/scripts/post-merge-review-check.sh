@@ -34,11 +34,20 @@ fi
 
 denied=0
 checked=0
-while IFS= read -r -d '' status; do
-	if ! IFS= read -r -d '' path || [[ -z $status || -z $path ]]; then
-		echo "post-merge-review: malformed change list (status ${status@Q})" >&2
-		exit 2
+malformed() {
+	echo "post-merge-review: malformed change list: $1" >&2
+	exit 2
+}
+while :; do
+	# Every field ends in NUL: a field cut off at the end is malformed, not
+	# skipped, and only the statuses git diff --no-renames writes are known.
+	if ! IFS= read -r -d '' status; then
+		[[ -z $status ]] || malformed "unterminated status ${status@Q}"
+		break
 	fi
+	[[ $status == [ADMT] ]] || malformed "unknown status ${status@Q}"
+	IFS= read -r -d '' path || malformed "status $status without a terminated path"
+	[[ -n $path ]] || malformed "status $status with an empty path"
 	checked=$((checked + 1))
 	why="not on the allow list"
 	for p in "${allow[@]}"; do

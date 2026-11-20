@@ -86,9 +86,19 @@ expect_changes 1 "test type changed" T cmd/foo/guard_test.go
 expect_changes 1 "test moved (delete plus add)" D cmd/foo/guard_test.go A cmd/foo/renamed_test.go
 
 # A malformed change list or a missing or empty allow list fails closed.
-got=0
-printf 'M\0' | bash "$check" "$allow" >/dev/null 2>&1 || got=$?
-[[ $got == 2 ]] || { echo "FAIL change list without a path: exit $got, want 2"; fail=1; }
+malformed() { # malformed NAME PRINTF-FORMAT
+	local got=0
+	printf "$2" | bash "$check" "$allow" >/dev/null 2>&1 || got=$?
+	[[ $got == 2 ]] || { echo "FAIL malformed list, $1: exit $got, want 2"; fail=1; }
+}
+malformed "status without a path" 'M\0'
+malformed "bare unterminated status" 'M'
+malformed "trailing partial status after a valid pair" 'M\0docs/x.md\0D'
+malformed "unterminated path" 'M\0docs/x.md'
+malformed "unknown status" 'BOGUS\0docs/x.md\0'
+malformed "rename status (renames are off)" 'R100\0docs/x.md\0'
+malformed "empty status" '\0docs/x.md\0'
+malformed "empty path" 'M\0\0'
 empty=$(mktemp)
 for bad in "$empty" "/nonexistent/post-merge-review-allow.txt"; do
 	got=0
