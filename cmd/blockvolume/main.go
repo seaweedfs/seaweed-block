@@ -31,6 +31,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend/ublk"
 	"github.com/seaweedfs/seaweed-block/core/geometry"
 	"github.com/seaweedfs/seaweed-block/core/host/volume"
+	"github.com/seaweedfs/seaweed-block/core/hostlimit"
 	"github.com/seaweedfs/seaweed-block/core/recovery"
 	"github.com/seaweedfs/seaweed-block/core/replication"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
@@ -194,6 +195,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.IntVar(&f.ublkQueueDepth, "ublk-queue-depth", 0, "ublk in-flight requests per queue; 0 = default 64. Requires --ublk-device")
 	fs.StringVar(&f.durableRoot, "durable-root", "", "directory for persistent storage files; empty = memback (non-durable)")
 	fs.StringVar(&f.durableImpl, "durable-impl", "", "LogicalStorage impl: empty (default) = auto: an existing volume opens with its on-disk format (a walstore-chunk root needs the explicit walstore-chunk selector), a new volume is created as walstore; or walstore, smartwal (experimental), opt-in parallel-walstore, or opt-in walstore-chunk (walstore published to SeaweedFS; proof of concept); ignored unless --durable-root is set")
+	registerHostLimitFlags(fs, &f.chunk.hostLimit)
 	fs.StringVar(&f.chunk.filer, "chunk-filer", "", "walstore-chunk: SeaweedFS filer gRPC address host:port")
 	fs.StringVar(&f.chunk.path, "chunk-path", defaultChunkPath, "walstore-chunk: filer directory holding one directory per volume (HEAD and chunk key bindings)")
 	fs.StringVar(&f.chunk.collection, "chunk-collection", "", "walstore-chunk: collection for chunk needles (empty = filer default / storage rule)")
@@ -662,6 +664,23 @@ func run(f flags) int {
 			cfg.ChunkHydrationWorkers = f.chunk.hydrationWorkers
 			cfg.ChunkHydrationQueueDepth = f.chunk.hydrationQueueDepth
 			cfg.ChunkHolder = chunkHolder(f)
+			cfg.ChunkStagger = true
+			if f.chunk.hostLimit.Directory != "" {
+				limiter, limitErr := hostlimit.New(f.chunk.hostLimit)
+				if limitErr != nil {
+					chunkErr = errors.Join(chunkErr, limitErr)
+				} else {
+					defer limiter.Close()
+					cfg.ChunkBudget = limiter
+					cfg.ChunkPayloadMemoryBudget = f.chunk.hostLimit.PayloadBytes
+					cfg.ChunkCOWSpillLimit = f.chunk.hostLimit.COWBytes
+				}
+			}
+			// A detach is a graceful stop: the lease guard renews at a short
+			// cadence for the revocation that follows instead of waiting out
+			// its renewal delay, until the detach provably aborts and resumes.
+			cfg.OnChunkDetach = h.WorkspaceStopPending
+			cfg.OnChunkDetachResumed = h.WorkspaceStopResumed
 			if chunkErr == nil {
 				cfg.ChunkRemoteFor = chunk.remoteFor
 				workspaceRemoteFor = chunk.remoteFor

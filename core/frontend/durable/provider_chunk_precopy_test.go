@@ -69,12 +69,17 @@ func TestPrecopyFreezeDoesNotWaitForAdmittedIO(t *testing.T) {
 	}
 }
 
-func precopyProvider(t *testing.T, remote storage.ChunkRemote, view *parkView) *durable.DurableProvider {
+func precopyProvider(t *testing.T, remote storage.ChunkRemote, view *parkView, hooks ...*detachHooks) *durable.DurableProvider {
 	t.Helper()
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+	cfg := durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
 		ChunkDetachPrecopy: true, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
-	}, view)
+	}
+	if len(hooks) > 0 {
+		cfg.OnChunkDetach = hooks[0].detach
+		cfg.OnChunkDetachResumed = hooks[0].resume
+	}
+	p, err := durable.NewDurableProvider(cfg, view)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +117,8 @@ func TestPrecopyProviderPublishesExactDetachedImage(t *testing.T) {
 func TestPrecopyProviderBusyOwnerKeepsServing(t *testing.T) {
 	remote := storage.NewMemChunkRemote()
 	view := &parkView{stubView: v1View()}
-	p := precopyProvider(t, remote, view)
+	k := &detachHooks{}
+	p := precopyProvider(t, remote, view, k)
 	openRecovered(t, p)
 	b, err := p.Open(context.Background(), "v1")
 	if err != nil {
@@ -140,6 +146,9 @@ func TestPrecopyProviderBusyOwnerKeepsServing(t *testing.T) {
 	if !errors.Is(err, storage.ErrPrecopyNotConverged) || r.Precopy.Frozen {
 		t.Fatalf("report=%+v err=%v", r.Precopy, err)
 	}
+	if started, resumed := k.calls(); len(started) != 1 || len(resumed) != 1 {
+		t.Fatalf("nonconverged hooks: started=%v resumed=%v", started, resumed)
+	}
 	if h, _ := remote.GetHead(ctx); h.State == storage.ChunkHeadDetached {
 		t.Fatal("busy owner detached")
 	}
@@ -159,6 +168,9 @@ func TestPrecopyProviderBusyOwnerKeepsServing(t *testing.T) {
 	r, _, err = p.DetachVolume(ctx, "v1")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if started, resumed := k.calls(); len(started) != 2 || len(resumed) != 1 {
+		t.Fatalf("successful retry hooks: started=%v resumed=%v", started, resumed)
 	}
 	if !bytes.Equal(headBlock(t, remote, 1), block(0x8a)) || !bytes.Equal(headBlock(t, remote, 2), block(0x9b)) {
 		t.Fatal("retry lost admitted bytes")

@@ -182,6 +182,16 @@ type ProviderConfig struct {
 	// ChunkDetachPrecopy attempts bounded rolling cuts before stopping I/O.
 	// Nonconvergence leaves service live; no fallback to an unbounded tail.
 	ChunkDetachPrecopy bool
+	// OnChunkDetach, optional, is called with the volume id when DetachVolume
+	// starts a detach (a graceful stop), before the drain and final cut, so
+	// the host can watch for the coming lease revocation; it returns a token
+	// for this attempt. OnChunkDetachResumed, optional, is called with that
+	// token only when the detach provably did not happen and serving resumed;
+	// a detach that applied, fenced or whose outcome is unknown never calls
+	// it. Both run under the volume's attach lock: they must not block or
+	// call back into the provider.
+	OnChunkDetach        func(volumeID string) uint64
+	OnChunkDetachResumed func(volumeID string, attempt uint64)
 	// ChunkDirtyThreshold is the number of candidate chunks above which
 	// a cut pre-copies (stages) chunks before its barrier, in rounds of
 	// this size; copy-before-write copies the rest outside the barrier.
@@ -194,7 +204,10 @@ type ProviderConfig struct {
 	// ChunkPayloadMemoryBudget bounds one volume's cut payloads; zero uses the storage default.
 	ChunkPayloadMemoryBudget int64
 	// ChunkBudget optionally admits cuts and accounts COW bytes through the host limiter.
-	ChunkBudget storage.Budget
+	ChunkBudget        storage.Budget
+	ChunkCOWSpillLimit int64
+	// ChunkStagger spreads automatic cuts by the stable volume-ID phase.
+	ChunkStagger bool
 }
 
 // DurableProvider is the production frontend.Provider implementation.
@@ -301,6 +314,7 @@ type ChunkStatus struct {
 	Fenced            bool
 	RemoteLSN         uint64
 	Stats             storage.ChunkLayerStats
+	HostBudget        any `json:",omitempty"`
 }
 
 // NewDurableProvider constructs a provider. view is the ONLY
@@ -566,6 +580,9 @@ func (p *DurableProvider) DurableStatuses() []VolumeStatus {
 			cs := &ChunkStatus{AwaitingAuthority: cv.awaiting}
 			if cv.layer != nil {
 				cs.Attached, cs.Fenced, cs.RemoteLSN, cs.Stats = true, cv.layer.Fenced(), cv.layer.RemoteLSN(), cv.layer.Stats()
+			}
+			if budget, ok := p.cfg.ChunkBudget.(interface{ Snapshot() any }); ok {
+				cs.HostBudget = budget.Snapshot()
 			}
 			st.Chunk = cs
 		}
