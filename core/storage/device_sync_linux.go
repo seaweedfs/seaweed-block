@@ -25,13 +25,13 @@ func defaultDataSyncMode(f *os.File) (string, string) {
 }
 
 // Resolve the mounted filesystem's device, including partition parents and
-// stacked devices. Only an entirely known write-through backing set opts in.
+// stacked devices. Only an entirely known write-through stack opts in.
 func deviceDataSyncMode(root string, major, minor uint32) (string, string) {
 	path := filepath.Join(root, "dev", "block", fmt.Sprintf("%d:%d", major, minor))
 	if err := requireWriteThrough(path, make(map[string]bool), 0); err != nil {
 		return "fsync", fmt.Sprintf("device=%d:%d %v", major, minor, err)
 	}
-	return "fdatasync", fmt.Sprintf("device=%d:%d all backing devices write through", major, minor)
+	return "fdatasync", fmt.Sprintf("device=%d:%d all device nodes write through", major, minor)
 }
 
 func requireWriteThrough(path string, visiting map[string]bool, depth int) error {
@@ -51,6 +51,15 @@ func requireWriteThrough(path string, visiting map[string]bool, depth int) error
 		return requireWriteThrough(filepath.Dir(path), visiting, depth+1)
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("partition identity unavailable: %w", err)
+	}
+	// Every non-partition node must be known write-through, including the
+	// stacked device itself; passing slaves cannot override its cache policy.
+	cache, err := os.ReadFile(filepath.Join(path, "queue", "write_cache"))
+	if err != nil {
+		return fmt.Errorf("write_cache unavailable: %w", err)
+	}
+	if strings.TrimSpace(string(cache)) != "write through" {
+		return fmt.Errorf("device=%s write_cache=%q", filepath.Base(path), strings.TrimSpace(string(cache)))
 	}
 	slaves, err := os.ReadDir(filepath.Join(path, "slaves"))
 	if err != nil && !os.IsNotExist(err) {
@@ -72,12 +81,6 @@ func requireWriteThrough(path string, visiting map[string]bool, depth int) error
 			return fmt.Errorf("%s identity unavailable: %w", kind, err)
 		}
 	}
-	cache, err := os.ReadFile(filepath.Join(path, "queue", "write_cache"))
-	if err != nil {
-		return fmt.Errorf("write_cache unavailable: %w", err)
-	}
-	if strings.TrimSpace(string(cache)) != "write through" {
-		return fmt.Errorf("device=%s write_cache=%q", filepath.Base(path), strings.TrimSpace(string(cache)))
-	}
+
 	return nil
 }

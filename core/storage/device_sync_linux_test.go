@@ -109,6 +109,14 @@ func TestDeviceDataSyncMalformedTopology(t *testing.T) {
 			if err := os.MkdirAll(device, 0755); err != nil {
 				t.Fatal(err)
 			}
+			if shape != "unreadable-cache" {
+				if err := os.MkdirAll(filepath.Join(device, "queue"), 0755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(device, "queue/write_cache"), []byte("write through\n"), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
 			switch shape {
 			case "empty-dm", "empty-md":
 				kind := "dm"
@@ -133,6 +141,12 @@ func TestDeviceDataSyncMalformedTopology(t *testing.T) {
 			mode, reason := deviceDataSyncMode(root, 8, 1)
 			if mode != "fsync" || reason == "" {
 				t.Fatalf("unsafe fallback: %s %q", mode, reason)
+			}
+			if strings.HasPrefix(shape, "empty-") && !strings.Contains(reason, "backing devices unavailable") {
+				t.Fatalf("guard not witnessed: %q", reason)
+			}
+			if shape == "cycle" && !strings.Contains(reason, "cycle") {
+				t.Fatalf("cycle guard not witnessed: %q", reason)
 			}
 		})
 	}
@@ -161,5 +175,43 @@ func TestExplicitAutoDataSyncPolicy(t *testing.T) {
 	mode, reason, err := selectedDataSyncMode(f)
 	if err != nil || mode != "fsync" || !strings.Contains(reason, "unavailable") {
 		t.Fatalf("auto fallback: %s %q %v", mode, reason, err)
+	}
+}
+
+func TestDeviceDataSyncStackNodePolicy(t *testing.T) {
+	for _, kind := range []string{"dm", "md"} {
+		for _, cache := range []string{"write back", "unknown", "missing", "unreadable"} {
+			t.Run(kind+"/"+cache, func(t *testing.T) {
+				root := t.TempDir()
+				device := filepath.Join(root, "dev/block/8:1")
+				disk := filepath.Join(root, "devices/block/disk")
+				for _, dir := range []string{filepath.Join(device, kind), filepath.Join(device, "queue"), filepath.Join(device, "slaves"), filepath.Join(disk, "queue")} {
+					if err := os.MkdirAll(dir, 0755); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := os.WriteFile(filepath.Join(disk, "queue/write_cache"), []byte("write through\n"), 0644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(disk, filepath.Join(device, "slaves/disk")); err != nil {
+					t.Fatal(err)
+				}
+				switch cache {
+				case "missing":
+				case "unreadable":
+					if err := os.Mkdir(filepath.Join(device, "queue/write_cache"), 0755); err != nil {
+						t.Fatal(err)
+					}
+				default:
+					if err := os.WriteFile(filepath.Join(device, "queue/write_cache"), []byte(cache+"\n"), 0644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				mode, reason := deviceDataSyncMode(root, 8, 1)
+				if mode != "fsync" || !strings.Contains(reason, "write_cache") {
+					t.Fatalf("stack node bypassed: %s %q", mode, reason)
+				}
+			})
+		}
 	}
 }
