@@ -162,6 +162,9 @@ type ProviderConfig struct {
 	// ChunkReadMissTimeout bounds one remote fetch of an absent block.
 	// Zero: the storage default.
 	ChunkReadMissTimeout time.Duration
+	// Per-volume hydration bounds; zero selects 2 workers and 64 distinct chunks.
+	ChunkHydrationWorkers    int
+	ChunkHydrationQueueDepth int
 	// ChunkCaptureInterval: an automatic cut is due once this long has
 	// passed since the volume's last successful cut (of any kind). Zero
 	// disables the timer.
@@ -173,10 +176,12 @@ type ProviderConfig struct {
 	// host's 30 s I/O timeout; a freeze past the 5 s target is logged as an
 	// alarm. Cooperative: a syscall that never returns is not bounded.
 	DetachFreezeTimeout time.Duration
-	// ChunkDirtyThreshold is the bound on one cut's barrier copy, in
-	// chunks. It never triggers a cut: the remote holds snapshots, and
-	// cuts are published only by CaptureVolume, MakeVolumeRemoteDurable
-	// (snapshot, detach) and the timer. Zero: unbounded.
+	// ChunkDirtyThreshold is the number of candidate chunks above which
+	// a cut pre-copies (stages) chunks before its barrier, in rounds of
+	// this size; copy-before-write copies the rest outside the barrier.
+	// It never triggers a cut: the remote holds snapshots, and cuts are
+	// published only by CaptureVolume, MakeVolumeRemoteDurable
+	// (snapshot, detach) and the timer. Zero: no pre-copy.
 	ChunkDirtyThreshold int
 	// ChunkUploadConcurrency bounds remote uploads; zero defaults to 8.
 	ChunkUploadConcurrency int
@@ -251,21 +256,22 @@ type volHandle struct {
 // handle. It intentionally exposes lineage and readiness facts without giving
 // callers a control surface.
 type VolumeStatus struct {
-	VolumeID        string
-	Path            string
-	Impl            string
-	ReplicaID       string
-	Epoch           uint64
-	EndpointVersion uint64
-	Latched         bool
-	Operational     bool
-	FrontierKnown   bool
-	DurableLSN      uint64
-	RetainedLSN     uint64
-	HeadLSN         uint64
-	Evidence        string
-	Closed          bool
-	WriteProfile    WriteProfileStatus
+	VolumeID              string
+	Path                  string
+	Impl                  string
+	ReplicaID             string
+	Epoch                 uint64
+	EndpointVersion       uint64
+	Latched               bool
+	Operational           bool
+	FrontierKnown         bool
+	DurableLSN            uint64
+	RetainedLSN           uint64
+	HeadLSN               uint64
+	Evidence              string
+	Closed                bool
+	WriteProfile          WriteProfileStatus
+	CheckpointPersistence *storage.CheckpointPersistenceStatus `json:",omitempty"`
 	// Chunk is the chunk layer's state and cut counters; walstore-chunk
 	// volumes only.
 	Chunk *ChunkStatus
@@ -875,7 +881,7 @@ func (p *DurableProvider) RecoverVolume(ctx context.Context, volumeID string) (R
 			// Recovered; I/O stays refused until the layer attaches under
 			// the master's assignment (the authority wait flips it).
 			report.Evidence += "; chunk layer awaiting master authority"
-			h.backend.SetOperational(false, report.Evidence)
+			h.backend.setChunkAttachPending(report.Evidence)
 			return report, nil
 		}
 		if err := chunkFenced(volumeID, h); err != nil {

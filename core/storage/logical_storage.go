@@ -1,6 +1,15 @@
 package storage
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
+
+// ContextReader is an optional request-aware read seam. One caller context
+// may cover several blocks, so implementations must not reset its deadline.
+type ContextReader interface {
+	ReadContext(context.Context, uint32) ([]byte, error)
+}
 
 // LogicalStorage is the V3 persistence-seam contract. It separates the
 // "what data exists, what frontier is durable" question (storage) from
@@ -145,8 +154,9 @@ type LogicalStorage interface {
 	WriteExtentDirect(lba uint32, data []byte) error
 
 	// AllBlocks snapshots every written LBA's current bytes. Used by
-	// the rebuild server to enumerate what to ship.
-	AllBlocks() map[uint32][]byte
+	// the rebuild server to enumerate what to ship. Any read error fails
+	// the whole snapshot; callers must not ship a partial image.
+	AllBlocks() (map[uint32][]byte, error)
 
 	// ScanLBAs is the T4c-2 tier-1 recovery contract. Emits a
 	// RecoveryEntry callback for each modification the substrate
@@ -301,4 +311,13 @@ func (h *legacyInstallHandle) MarkBaseComplete() error {
 // per-LBA recovery semantics.
 type WriteBatcher interface {
 	WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error)
+}
+
+// ContextWriter and ContextWriteBatcher preserve one caller deadline across
+// storage admission. Implementations must not abandon already-started I/O.
+type ContextWriter interface {
+	WriteContext(context.Context, uint32, []byte) (uint64, error)
+}
+type ContextWriteBatcher interface {
+	WriteBatchContext(context.Context, uint32, [][]byte) ([]uint64, error)
 }

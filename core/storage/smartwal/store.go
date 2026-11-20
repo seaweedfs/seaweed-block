@@ -502,12 +502,12 @@ func (s *Store) AppliedLSNs() (map[uint32]uint64, error) {
 // AllBlocks snapshots every LBA's current bytes by reading directly
 // from the extent. Linear scan — N reads — but in practice the
 // rebuild server is the only caller and runs once per session.
-func (s *Store) AllBlocks() map[uint32][]byte {
+func (s *Store) AllBlocks() (map[uint32][]byte, error) {
 	out := make(map[uint32][]byte, s.hdr.NumBlocks)
 	for lba := uint32(0); lba < s.hdr.NumBlocks; lba++ {
 		data, err := s.Read(lba)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("snapshot LBA %d: %w", lba, err)
 		}
 		// Only include LBAs with non-zero content — preserves the
 		// "snapshot of dirty bits" semantics callers expect.
@@ -522,7 +522,7 @@ func (s *Store) AllBlocks() map[uint32][]byte {
 			out[lba] = data
 		}
 	}
-	return out
+	return out, nil
 }
 
 // Close fsyncs and releases the file. Idempotent.

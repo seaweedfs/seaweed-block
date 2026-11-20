@@ -151,10 +151,12 @@ type chunkBitmapStore interface {
 }
 
 // chunkRef names one published chunk: its immutable key and the SHA-256 of
-// its ChunkBlocks*BlockSize bytes.
+// its stored object bytes, verified before any encoding is decoded.
 type chunkRef struct {
-	Key    string
-	SHA256 [32]byte
+	Key      string
+	SHA256   [32]byte
+	Encoding string
+	BirthLSN uint64
 }
 
 // chunkHeadVersion is the CAS guard of HEAD.
@@ -331,6 +333,9 @@ type chunkLayerConfig struct {
 	// while its frontend is gated. An error leaves remote ownership unchanged.
 	// No store/layer/remote lock is held across the callback.
 	PrepareRestore func(head chunkHead) error
+	// RestoreChunkBytes is the local, validated geometry for upgrading a flat
+	// legacy image during an ownership claim; it is never inferred from data.
+	RestoreChunkBytes uint64
 	// CaptureAllowed is supplied by the store owner. It is an admission
 	// check, made when a capture starts and again right before its HEAD CAS:
 	// it refuses a cut during a BASE install or rebuild, or when this node is
@@ -342,6 +347,10 @@ type chunkLayerConfig struct {
 	CaptureAllowed func() error
 	// ReadMissTimeout bounds one OnReadMiss remote fetch.
 	ReadMissTimeout time.Duration
+	// HydrationWorkers bounds layer-owned fetches (0 defaults to 2).
+	HydrationWorkers int
+	// HydrationQueueDepth bounds distinct queued/in-flight chunks (0 defaults to 64).
+	HydrationQueueDepth int
 	// Bitmap persists the legacy dirty-since-HEAD bitmap. Required for v2;
 	// impl3 uses its owned LSN map and never calls this optional legacy object.
 	Bitmap chunkBitmapStore
@@ -426,6 +435,7 @@ type chunkCutStats struct {
 //   - LastCut, LastCutH and LastCutNs (wall clock, Unix ns) describe the
 //     last successful cut, whatever triggered it.
 type chunkLayerStats struct {
+	Hydration         ChunkHydrationStats
 	CutsOK            uint64
 	CutsNoop          uint64
 	CutsFailed        uint64

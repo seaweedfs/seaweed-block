@@ -12,6 +12,9 @@ const maxCheckpointWriteBytes = 1 << 20
 // checkpoint work. Operation counters include failed attempts; byte counters
 // include only successful writes.
 type FlusherInstrumentationStatus struct {
+	CheckpointSuccesses             uint64
+	CheckpointRefusals              uint64
+	CheckpointFailures              uint64
 	CyclesStarted                   uint64
 	CyclesSucceeded                 uint64
 	CyclesFailed                    uint64
@@ -63,6 +66,11 @@ type FlusherInstrumentationStatus struct {
 }
 
 type flusherInstrumentation struct {
+	checkpointSuccesses             atomic.Uint64
+	checkpointRefusals              atomic.Uint64
+	checkpointFailures              atomic.Uint64
+	checkpointAdvances              atomic.Uint64
+	checkpointLastAdvanceNanos      atomic.Int64
 	cyclesStarted                   atomic.Uint64
 	cyclesSucceeded                 atomic.Uint64
 	cyclesFailed                    atomic.Uint64
@@ -284,6 +292,9 @@ func updateAtomicMax(target *atomic.Uint64, value uint64) {
 
 func (i *flusherInstrumentation) snapshot() FlusherInstrumentationStatus {
 	return FlusherInstrumentationStatus{
+		CheckpointSuccesses:             i.checkpointSuccesses.Load(),
+		CheckpointRefusals:              i.checkpointRefusals.Load(),
+		CheckpointFailures:              i.checkpointFailures.Load(),
 		CyclesStarted:                   i.cyclesStarted.Load(),
 		CyclesSucceeded:                 i.cyclesSucceeded.Load(),
 		CyclesFailed:                    i.cyclesFailed.Load(),

@@ -63,6 +63,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"io"
 	"net"
 	"sync"
@@ -80,7 +81,8 @@ type Request struct {
 	capsule         CapsuleCommand
 	payload         []byte // inline/R2T-collected data for Write
 	resp            CapsuleResponse
-	c2hData         []byte // non-nil for Read/Identify responses
+	c2hData         []byte    // non-nil for Read/Identify responses
+	receivedAt      time.Time // capsule arrival, including queued/R2T time
 	dispatchReadyAt time.Time
 }
 
@@ -266,7 +268,7 @@ func (s *Session) parseCapsule() (*Request, error) {
 			return nil, err
 		}
 	}
-	req := &Request{capsule: capsule, payload: payload}
+	req := &Request{capsule: capsule, payload: payload, receivedAt: start}
 	req.resp.CID = capsule.CID
 	if s.qid > 0 && capsule.OpCode == ioWrite {
 		s.recordWriteCapsuleReceiveParse(time.Since(start))
@@ -572,6 +574,12 @@ func (s *Session) enqueueResponse(resp *response) {
 // ---------- IO handlers (run in goroutines) ----------
 
 func (s *Session) handleRead(ctx context.Context, req *Request) {
+	arrival := req.receivedAt
+	if arrival.IsZero() {
+		arrival = req.dispatchReadyAt
+	}
+	ctx, cancel := frontend.WithReadBudget(ctx, arrival)
+	defer cancel()
 	s.recordReadCommand()
 	res := s.handler.Handle(ctx, IOCommand{
 		Opcode: req.capsule.OpCode,
@@ -588,6 +596,12 @@ func (s *Session) handleRead(ctx context.Context, req *Request) {
 }
 
 func (s *Session) handleWrite(ctx context.Context, req *Request) {
+	arrival := req.receivedAt
+	if arrival.IsZero() {
+		arrival = req.dispatchReadyAt
+	}
+	ctx, cancel := frontend.WithWriteBudget(ctx, arrival)
+	defer cancel()
 	s.recordWriteCommand()
 	s.recordWriteDispatchWait(time.Since(req.dispatchReadyAt))
 	handlerStart := time.Now()

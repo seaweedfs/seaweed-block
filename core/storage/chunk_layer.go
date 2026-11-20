@@ -74,7 +74,10 @@ type chunkLayerImpl struct {
 	bmMu   sync.Mutex // serializes bitmap store calls
 	presMu sync.Mutex // serializes a whole presence save: snapshot, fsync, replace, version
 
-	closeDone chan struct{} // closed when Close has finished
+	hydration        map[uint64]*chunkHydrationFlight // under stMu
+	hydrationWake    chan struct{}
+	hydrationStarted bool
+	closeDone        chan struct{} // closed when Close has finished
 
 	stMu     sync.Mutex
 	closed   bool
@@ -123,6 +126,7 @@ type chunkLayerImpl struct {
 	keySeq   uint64
 
 	// Test-only scheduling hooks; nil in production.
+	testHydrationWait            func(uint64) // after promise registration, outside locks
 	testCOWWait                  func()
 	testCOWRead                  func(idx uint64, saved bool)
 	testCOWSave                  func() error
@@ -177,6 +181,15 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 	}
 	if cfg.UploadConcurrency == 0 {
 		cfg.UploadConcurrency = 8
+	}
+	if cfg.HydrationWorkers < 0 || cfg.HydrationWorkers > 64 || cfg.HydrationQueueDepth < 0 || cfg.HydrationQueueDepth > 65536 {
+		return nil, errors.New("storage: hydration workers must be 1..64 and queue depth 1..65536 (0 uses defaults)")
+	}
+	if cfg.HydrationWorkers == 0 {
+		cfg.HydrationWorkers = defaultHydrationWorkers
+	}
+	if cfg.HydrationQueueDepth == 0 {
+		cfg.HydrationQueueDepth = defaultHydrationQueueDepth
 	}
 	if cfg.ReadMissTimeout <= 0 {
 		cfg.ReadMissTimeout = defaultReadMissTimeout
@@ -534,45 +547,7 @@ func sortedKeys(m map[uint64]bool) []uint64 {
 // block that has no newer local version, then lets the store read its
 // extent. It runs with no walstore lock held.
 func (l *chunkLayerImpl) OnReadMiss(lba uint64) ([]byte, error) {
-	idx := l.chunkOf(lba)
-	l.stMu.Lock()
-	if l.closed || !l.absent[idx] || l.localBlocks[lba] {
-		l.stMu.Unlock()
-		return nil, nil
-	}
-	l.wg.Add(1)
-	l.stMu.Unlock()
-	defer l.wg.Done()
-	// One deadline covers every attempt. Each attempt fetches the chunk as
-	// the current HEAD names it; a fill that went stale (eviction generation
-	// or HEAD ref changed meanwhile) installs nothing and the read retries,
-	// so the extent is read only once the block is resolved: the chunk is no
-	// longer absent, or the block has a local version.
-	ctx, cancel := context.WithTimeout(l.ctx, l.cfg.ReadMissTimeout)
-	defer cancel()
-	for {
-		l.stMu.Lock()
-		if !l.absent[idx] || l.localBlocks[lba] {
-			l.stMu.Unlock()
-			return nil, nil
-		}
-		ref, ok := l.head.Chunks[idx]
-		gen := l.absentGen[idx]
-		l.stMu.Unlock()
-		if !ok { // ZERO in the current HEAD
-			return make([]byte, l.blockSize), nil
-		}
-		resolved, err := l.fillOnce(ctx, idx, gen, ref)
-		if err != nil {
-			return nil, err
-		}
-		if resolved {
-			return nil, nil
-		}
-		if err := ctx.Err(); err != nil {
-			return nil, fmt.Errorf("storage: chunk %d fetch: fill kept going stale: %w", idx, err)
-		}
-	}
+	return l.OnReadMissContext(context.Background(), lba)
 }
 
 // fillOnce fetches one chunk version and installs every block that has no
@@ -780,11 +755,12 @@ func (l *chunkLayerImpl) MakeRemoteDurable(ctx context.Context, t uint64) error 
 }
 
 type capturedChunk struct {
-	idx  uint64
-	data []byte
-	sum  [32]byte
-	zero bool
-	key  string // staged: already uploaded under this key (data is nil)
+	idx   uint64
+	data  []byte
+	sum   [32]byte
+	zero  bool
+	key   string // staged: already uploaded under this key (data is nil)
+	birth uint64
 }
 
 // stagedChunk is a chunk pre-copied outside the barrier at chunk version
@@ -907,6 +883,9 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	l.cutLSN = h
 	baseHead := copyHead(l.head)
 	l.stMu.Unlock()
+	// Candidates, mutation versions and births belong to the same barrier.
+	// Do not sample the owned map after COW writers are admitted again.
+	births := l.captureBirths(candidates, h)
 
 	st.CandidateChunks = len(candidates)
 	var copyErr error
@@ -974,6 +953,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	}
 	var uploads []upload
 	for _, c := range captured {
+		c.birth = births[c.idx]
 		ref, had := baseHead.Chunks[c.idx]
 		switch {
 		case c.zero && !had, had && !c.zero && ref.SHA256 == c.sum:
@@ -986,7 +966,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 			continue
 		}
 		if c.key != "" { // staged: uploaded before the barrier
-			next.Chunks[c.idx] = chunkRef{Key: c.key, SHA256: c.sum}
+			next.Chunks[c.idx] = chunkRef{Key: c.key, SHA256: c.sum, Encoding: "full", BirthLSN: c.birth}
 			newKeys[c.idx] = c.key
 			changed = append(changed, c.idx)
 			st.StagedChunksUsed++
@@ -1012,14 +992,14 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	}
 	if err := l.uploadBatch(ctx, len(uploads), func(ctx context.Context, i int) error {
 		u := uploads[i]
-		return l.remote.Put(ctx, u.key, u.c.data)
+		return l.putCaptured(ctx, u.key, u.c.data)
 	}); err != nil {
 		l.abortCut(all)
 		l.dropIntents(ctx, intents)
 		return chunkCutResult{}, fmt.Errorf("storage: capture upload: %w: %w", errChunkRemoteUnavailable, err)
 	}
 	for _, u := range uploads {
-		next.Chunks[u.c.idx] = chunkRef{Key: u.key, SHA256: u.c.sum}
+		next.Chunks[u.c.idx] = chunkRef{Key: u.key, SHA256: u.c.sum, Encoding: "full", BirthLSN: u.c.birth}
 		newKeys[u.c.idx] = u.key
 		changed = append(changed, u.c.idx)
 		st.UploadedChunks++
@@ -1397,6 +1377,13 @@ func (l *chunkLayerImpl) recordCut(r chunkCutResult, st chunkCutStats, err error
 func (l *chunkLayerImpl) Stats() chunkLayerStats {
 	l.stMu.Lock()
 	out := l.stats
+	out.Hydration.WorkerLimit = l.cfg.HydrationWorkers
+	out.Hydration.QueueDepth = l.cfg.HydrationQueueDepth
+	for _, f := range l.hydration {
+		if !f.running {
+			out.Hydration.Queued++
+		}
+	}
 	out.CutsRefused = make(map[string]uint64, len(l.stats.CutsRefused))
 	for k, v := range l.stats.CutsRefused {
 		out.CutsRefused[k] = v
@@ -1731,7 +1718,7 @@ func (l *chunkLayerImpl) stage(ctx context.Context, st *chunkCutStats) (map[uint
 			intents = append(intents, id)
 			if err := l.uploadBatch(ctx, len(uploads), func(ctx context.Context, i int) error {
 				u := uploads[i]
-				return l.remote.Put(ctx, u.key, u.data)
+				return l.putCaptured(ctx, u.key, u.data)
 			}); err != nil {
 				return nil, intents, fmt.Errorf("storage: capture stage upload: %w: %w", errChunkRemoteUnavailable, err)
 			}
@@ -2006,6 +1993,7 @@ func (l *chunkLayerImpl) Close() error {
 		return nil
 	}
 	l.closed = true
+	l.closeHydrationLocked()
 	l.stMu.Unlock()
 	l.cowMu.Lock()
 	l.cowClosed = true

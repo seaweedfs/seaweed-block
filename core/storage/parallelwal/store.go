@@ -1330,16 +1330,19 @@ func (s *Store) resetBaseStageUnderSync() error {
 	return nil
 }
 
-func (s *Store) AllBlocks() map[uint32][]byte {
+func (s *Store) AllBlocks() (map[uint32][]byte, error) {
 	out := make(map[uint32][]byte)
 	zero := make([]byte, s.blockSize)
 	for lba := uint32(0); lba < s.numBlocks; lba++ {
 		data, err := s.Read(lba)
-		if err == nil && !bytes.Equal(data, zero) {
+		if err != nil {
+			return nil, fmt.Errorf("snapshot LBA %d: %w", lba, err)
+		}
+		if !bytes.Equal(data, zero) {
 			out[lba] = data
 		}
 	}
-	return out
+	return out, nil
 }
 
 func (s *Store) ScanLBAs(fromLSN uint64, fn func(storage.RecoveryEntry) error) error {
