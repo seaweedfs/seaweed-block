@@ -264,6 +264,10 @@ func chunkErrorCode(err error) (int, string, bool) {
 		return http.StatusConflict, codeReconciling, true
 	case errors.Is(err, storage.ErrChunkHeadPrecondition):
 		return http.StatusConflict, codeHeadConflict, true
+	// A local window abort cancels its uploads; that cancellation is not
+	// a remote outage. Keep authority and uncertain-publication precedence.
+	case errors.Is(err, storage.ErrCutCOWAborted):
+		return http.StatusServiceUnavailable, "cut_aborted", true
 	case errors.Is(err, storage.ErrChunkRemoteUnavailable):
 		return http.StatusServiceUnavailable, chunkstore.CodeRemoteUnavailable, true
 	case errors.Is(err, storage.ErrChunkLayerDetached):
@@ -276,8 +280,6 @@ func chunkErrorCode(err error) (int, string, bool) {
 		return http.StatusServiceUnavailable, chunkstore.CodeDeadlineExceeded, true
 	case errors.Is(err, storage.ErrChunkCaptureRefused):
 		return http.StatusServiceUnavailable, "capture_refused", true
-	case errors.Is(err, storage.ErrCutCOWAborted):
-		return http.StatusServiceUnavailable, "cut_aborted", true
 	default:
 		return http.StatusInternalServerError, codeInternal, false
 	}
