@@ -179,6 +179,9 @@ type ProviderConfig struct {
 	// host's 30 s I/O timeout; a freeze past the 5 s target is logged as an
 	// alarm. Cooperative: a syscall that never returns is not bounded.
 	DetachFreezeTimeout time.Duration
+	// ChunkDetachPrecopy attempts bounded rolling cuts before stopping I/O.
+	// Nonconvergence leaves service live; no fallback to an unbounded tail.
+	ChunkDetachPrecopy bool
 	// ChunkDirtyThreshold is the number of candidate chunks above which
 	// a cut pre-copies (stages) chunks before its barrier, in rounds of
 	// this size; copy-before-write copies the rest outside the barrier.

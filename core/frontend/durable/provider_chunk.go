@@ -869,29 +869,70 @@ func (p *DurableProvider) DetachVolume(ctx context.Context, volumeID string) (st
 	// One freeze budget covers the drain, the final cut AND the settlement:
 	// the cut gets three quarters, the settlement what is left. The bound is
 	// cooperative (contexts): a syscall that never returns is not bounded here.
-	start := time.Now()
-	cutCtx, cancel := context.WithDeadline(ctx, start.Add(freeze*3/4))
+	var start time.Time
+	cutCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	var timer *time.Timer
+	beginFreeze := func() {
+		start = time.Now()
+		timer = time.AfterFunc(freeze*3/4, cancel)
+	}
 	defer func() {
-		if d := time.Since(start); d > detachFreezeTarget {
-			log.Printf("durable: ALARM detach of volume=%s held guest I/O for %s (target %s, bound %s)", volumeID, d.Round(time.Millisecond), detachFreezeTarget, freeze)
+		if timer != nil {
+			timer.Stop()
+		}
+		if !start.IsZero() {
+			if d := time.Since(start); d > detachFreezeTarget {
+				log.Printf("durable: ALARM detach of volume=%s held guest I/O for %s (target %s, bound %s)", volumeID, d.Round(time.Millisecond), detachFreezeTarget, freeze)
+			}
 		}
 	}()
-	if trace := p.testDetachTrace; trace != nil {
-		dl, _ := cutCtx.Deadline()
-		trace("cut", dl)
-	}
-	h.chunkDetach = true
-	if stop := p.testDetachStopIO; stop != nil {
-		err = stop(cutCtx)
-	} else {
-		err = h.backend.StopIO(cutCtx, "chunk detach: I/O stopped until a new attach")
-	}
-	if err == nil {
+	var r storage.ChunkCutResult
+	if p.cfg.ChunkDetachPrecopy {
+		// Cancel/join the periodic owner before any final freeze, while serving.
 		p.stopChunkLoop(h)
-		var r storage.ChunkCutResult
-		if r, err = layer.Detach(cutCtx); err == nil {
+		owner, ok := layer.(interface {
+			PrecopyDetach(context.Context, func() bool) (storage.ChunkCutResult, error)
+		})
+		if !ok {
+			return r, 0, fmt.Errorf("%w: layer lacks pre-copy", storage.ErrPrecopyUnknown)
+		}
+		r, err = owner.PrecopyDetach(cutCtx, func() bool {
+			if !h.backend.TryStopIO("chunk pre-copy: final detached cut") {
+				return false
+			}
+			h.chunkDetach = true
+			beginFreeze()
+			return true
+		})
+		log.Printf("durable: pre-copy volume=%s attempts=%d tail=%d rate=%.0f sample_age=%s fixed=%s estimate=%s frozen=%t reason=%s err=%v", volumeID, r.Precopy.Attempts, r.Precopy.TailBytes, r.Precopy.BytesPerSecond, r.Precopy.SampleAge, r.Precopy.Fixed, r.Precopy.Estimate, r.Precopy.Frozen, r.Precopy.Reason, err)
+		if err == nil {
 			return r, h.storage.NextLSN() - 1, nil
+		}
+		if !r.Precopy.Frozen {
+			p.mu.Lock()
+			if !p.closed && h.chunk == layer {
+				p.startChunkLoop(volumeID, h, layer)
+			}
+			p.mu.Unlock()
+			return r, 0, err
+		}
+	} else {
+		beginFreeze()
+		if trace := p.testDetachTrace; trace != nil {
+			trace("cut", start.Add(freeze*3/4))
+		}
+		h.chunkDetach = true
+		if stop := p.testDetachStopIO; stop != nil {
+			err = stop(cutCtx)
+		} else {
+			err = h.backend.StopIO(cutCtx, "chunk detach: I/O stopped until a new attach")
+		}
+		if err == nil {
+			p.stopChunkLoop(h)
+			if r, err = layer.Detach(cutCtx); err == nil {
+				return r, h.storage.NextLSN() - 1, nil
+			}
 		}
 	}
 	// Every failure, a failed drain included, is settled before anything

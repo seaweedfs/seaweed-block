@@ -234,6 +234,10 @@ func writeChunkFailure(w http.ResponseWriter, err error) {
 func chunkErrorCode(err error) (int, string, bool) {
 	var ce *chunkstore.CatalogError
 	switch {
+	case errors.Is(err, storage.ErrPrecopyUnknown):
+		return http.StatusConflict, "precopy_unknown", true
+	case errors.Is(err, storage.ErrPrecopyNotConverged):
+		return http.StatusConflict, "precopy_not_converged", true
 	case errors.Is(err, durable.ErrDetachAborted):
 		// Before any cause (a catalog error included): nothing was
 		// published and serving resumed here.

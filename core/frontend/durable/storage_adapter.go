@@ -471,6 +471,22 @@ func (b *StorageBackend) SetOperational(ok bool, evidence string) {
 	b.mu.Unlock()
 }
 
+// TryStopIO closes admission only if every admitted I/O has drained already.
+// Used under the capture barrier: never wait for ioMu there, since an I/O
+// holding its read side may itself be queued on that barrier. Failed attempts
+// leave the frontend unchanged. Lock order: try ioMu -> mu; no store calls.
+func (b *StorageBackend) TryStopIO(evidence string) bool {
+	if !b.ioMu.TryLock() {
+		return false
+	}
+	defer b.ioMu.Unlock()
+	if !b.operational.Load() {
+		return false
+	}
+	b.SetOperational(false, evidence)
+	return true
+}
+
 // StopIO makes the backend refuse every new Read, Write and Sync with
 // ErrNotReady (evidence), then waits, bounded by ctx, for the I/O admitted
 // before the stop to finish. After a nil return no I/O admitted before the
