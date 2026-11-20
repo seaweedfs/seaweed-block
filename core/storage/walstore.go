@@ -209,6 +209,9 @@ func CreateWALStoreWithOptions(path string, numBlocks uint32, blockSize int, opt
 // Frozen constructor for legacy-format regression fixtures; public Create
 // never reaches it after activation. Removed from production in row 14a.
 func createLegacyWALStoreWithOptions(path string, numBlocks uint32, blockSize int, opts WALStoreOptions) (*WALStore, error) {
+	if err := validateNewStorePolicy(); err != nil {
+		return nil, err
+	}
 	if blockSize == 0 {
 		blockSize = DefaultBlockSize
 	}
@@ -254,7 +257,11 @@ func createLegacyWALStoreWithOptions(path string, numBlocks uint32, blockSize in
 		_ = f.Close()
 		return nil, fmt.Errorf("storage: fsync after create: %w", err)
 	}
-	return openInitializedWithMetadata(path, f, &sb, metadata)
+	s, err := openInitializedWithMetadata(path, f, &sb, metadata)
+	if err != nil {
+		_ = f.Close()
+	}
+	return s, err
 }
 
 // OpenWALStore opens an existing store file WITHOUT recovering it.

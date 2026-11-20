@@ -231,6 +231,9 @@ func createWALStoreV3MapAtCursorForTest(path string, numBlocks, blockSize uint32
 }
 
 func createWALStoreV3Configured(path string, numBlocks, blockSize uint32, walSize uint64, mode WMode, cursor, chunkBlocks uint64, opts WALStoreOptions) (*WALStore, error) {
+	if err := validateNewStorePolicy(); err != nil {
+		return nil, err
+	}
 	d := descriptorV3{
 		ImplKind: ImplKindWALStore, ImplVersion: walStoreImplVersion3,
 		VolumeSize: uint64(numBlocks) * uint64(blockSize), ExtentSize: 64 * 1024, BlockSize: blockSize,

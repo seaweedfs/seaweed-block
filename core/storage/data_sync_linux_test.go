@@ -12,12 +12,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 )
 
 func TestPrezeroCreatesInitializedVolume(t *testing.T) {
+	t.Setenv("SWBLOCK_ALLOCATION", "")
 	t.Setenv("SWBLOCK_SYNC", "fdatasync")
 	t.Setenv("SWBLOCK_PREZERO", "1")
 	path := filepath.Join(t.TempDir(), "volume")
@@ -112,7 +114,7 @@ func TestFdatasyncAcknowledgedWritesSurviveSIGKILL(t *testing.T) {
 					ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 					defer cancel()
 					cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestFdatasyncAcknowledgedWritesSurviveSIGKILL$")
-					cmd.Env = append(os.Environ(), "SWBLOCK_SYNC=fdatasync", "SWBLOCK_PREZERO="+prezero, "SWBLOCK_TEST_SYNC_CRASH="+path, "SWBLOCK_TEST_EXTENT="+extent, "SWBLOCK_TEST_STRICT="+strict)
+					cmd.Env = append(os.Environ(), "SWBLOCK_ALLOCATION=", "SWBLOCK_SYNC=fdatasync", "SWBLOCK_PREZERO="+prezero, "SWBLOCK_TEST_SYNC_CRASH="+path, "SWBLOCK_TEST_EXTENT="+extent, "SWBLOCK_TEST_STRICT="+strict)
 					out, e := cmd.StdoutPipe()
 					if e != nil {
 						t.Fatal(e)
@@ -122,7 +124,10 @@ func TestFdatasyncAcknowledgedWritesSurviveSIGKILL(t *testing.T) {
 					if e = cmd.Start(); e != nil {
 						t.Fatal(e)
 					}
-					defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+					var waitOnce sync.Once
+					var waitErr error
+					wait := func() { waitOnce.Do(func() { waitErr = cmd.Wait() }) }
+					defer func() { _ = cmd.Process.Kill(); wait() }()
 					scan := bufio.NewScanner(out)
 					ready := false
 					for scan.Scan() {
@@ -132,20 +137,22 @@ func TestFdatasyncAcknowledgedWritesSurviveSIGKILL(t *testing.T) {
 						}
 					}
 					if !ready {
-						t.Fatalf("no sync ACK: %v %s", scan.Err(), stderr.String())
+						wait()
+						t.Fatalf("no sync ACK: scan=%v wait=%v %s", scan.Err(), waitErr, stderr.String())
 					}
 					if e = cmd.Process.Kill(); e != nil {
 						t.Fatal(e)
 					}
-					e = cmd.Wait()
-					exit, ok := e.(*exec.ExitError)
+					wait()
+					exit, ok := waitErr.(*exec.ExitError)
 					if !ok {
-						t.Fatalf("not killed: %v", e)
+						t.Fatalf("not killed: %v", waitErr)
 					}
 					status, ok := exit.Sys().(syscall.WaitStatus)
 					if !ok || status.Signal() != syscall.SIGKILL {
-						t.Fatalf("wrong exit: %v", e)
+						t.Fatalf("wrong exit: %v", waitErr)
 					}
+					t.Setenv("SWBLOCK_ALLOCATION", "")
 					t.Setenv("SWBLOCK_SYNC", "fdatasync")
 					t.Setenv("SWBLOCK_PREZERO", prezero)
 					s, e := OpenWALStore(path)
