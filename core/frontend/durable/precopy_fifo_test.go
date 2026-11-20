@@ -253,3 +253,126 @@ func TestPrecopyQueueUsesFiveSecondCutoverBudget(t *testing.T) {
 		t.Fatal("five-second queue budget was not enforced")
 	}
 }
+
+// The initial state-lock miss is witnessed while a real pause owns queued I/O.
+// Releasing that lock before the fallback must not replace the pause identity.
+func TestPrecopyStopFallbackPreservesQueuedPause(t *testing.T) {
+	for _, terminal := range []bool{false, true} {
+		name := "resume_fifo"
+		if terminal {
+			name = "close"
+		}
+		t.Run(name, func(t *testing.T) {
+			b := precopyMemoryBackend(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			queued := make(chan struct{}, 2)
+			b.testPrecopyQueued = func() { queued <- struct{}{} }
+			fallback, proceed := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			release := func() { once.Do(func() { close(proceed) }) }
+			b.testPrecopyStopFallback = func() { close(fallback); <-proceed }
+			seen := make(chan byte, 2)
+			if err := b.SetWriteObserver(precopyQueueObserver{observe: func(v byte) { seen <- v }}); err != nil {
+				t.Fatal(err)
+			}
+			resume, err := b.BeginPrecopyPause(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var wg sync.WaitGroup
+			results := make(chan error, 2)
+			stopDone := make(chan bool, 1)
+			locked := false
+			t.Cleanup(func() {
+				if locked {
+					b.mu.Unlock()
+				}
+				release()
+				cancel()
+				_ = b.Close()
+				joined := make(chan struct{})
+				go func() { wg.Wait(); close(joined) }()
+				select {
+				case <-joined:
+				case <-time.After(time.Second):
+					t.Error("queued writers did not settle")
+				}
+			})
+			for _, v := range []byte{1, 2} {
+				wg.Add(1)
+				go func(v byte) {
+					defer wg.Done()
+					_, err := b.Write(ctx, 0, bytes.Repeat([]byte{v}, 4096))
+					results <- err
+				}(v)
+				select {
+				case <-queued:
+				case <-ctx.Done():
+					t.Fatal("writer did not queue")
+				}
+			}
+			b.mu.Lock()
+			locked = true
+			original, started := b.precopy, b.precopy.started
+			wg.Add(1)
+			go func() { defer wg.Done(); stopDone <- b.TryStopIO("final cut") }()
+			select {
+			case <-fallback:
+			case <-ctx.Done():
+				t.Fatal("first state lock miss not witnessed")
+			}
+			b.mu.Unlock()
+			locked = false
+			release()
+			select {
+			case <-stopDone:
+			case <-ctx.Done():
+				t.Fatal("fallback did not settle")
+			}
+			b.mu.Lock()
+			same := b.precopy == original && b.precopy.started.Equal(started) && len(b.precopy.waiters) == 2
+			b.mu.Unlock()
+			if !same {
+				t.Fatal("fallback orphaned the original pause queue or reset its clock")
+			}
+			if terminal {
+				_ = b.Close()
+			} else {
+				b.SetOperational(true, "safe abort")
+				resume()
+			}
+			for i := 0; i < 2; i++ {
+				select {
+				case err := <-results:
+					if terminal && !errors.Is(err, frontend.ErrBackendClosed) {
+						t.Fatalf("Close result=%v", err)
+					}
+					if !terminal && err != nil {
+						t.Fatalf("resume result=%v", err)
+					}
+				case <-ctx.Done():
+					t.Fatal("original queue was unreachable by resume/Close")
+				}
+			}
+			if terminal {
+				select {
+				case v := <-seen:
+					t.Fatalf("closed queue issued write %d", v)
+				default:
+				}
+			} else {
+				for _, want := range []byte{1, 2} {
+					select {
+					case got := <-seen:
+						if got != want {
+							t.Fatalf("FIFO got %d want %d", got, want)
+						}
+					case <-ctx.Done():
+						t.Fatal("missing write")
+					}
+				}
+			}
+		})
+	}
+}
