@@ -28,8 +28,12 @@ func TestHostCOWCapAbortsCutAndRetainsPermitUntilJoin(t *testing.T) {
 	if _, err = s.Write(5, makeBlock(ctBlockSize, 0xeb)); err != nil {
 		t.Fatal("host cap failed guest write:", err)
 	}
-	if _, err = contender.Admit(context.Background(), 1, nil); !errors.Is(err, hostlimit.ErrBusy) {
-		t.Fatalf("revoked but unjoined cut lost permit: %v", err)
+	ticket, admitErr := contender.Admit(context.Background(), 1, nil)
+	if admitErr == nil {
+		contender.Release(ticket)
+	}
+	if !errors.Is(admitErr, hostlimit.ErrBusy) {
+		t.Fatalf("revoked but unjoined cut lost permit: %v", admitErr)
 	}
 	gate.unblock()
 	cowWaitSignal(t, done, "host-budget abort settlement")
