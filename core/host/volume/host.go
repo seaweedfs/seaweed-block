@@ -171,7 +171,11 @@ type Host struct {
 	// workspaceLeaseMu -> guard.mu; never hold either across RPC or drain.
 	workspaceLeaseMu     sync.Mutex
 	workspaceLeaseFenced bool
+	// workspaceStopPending is the guard's stop-pending mode, kept here for a
+	// guard installed later; workspaceStopAttempt numbers detach attempts so
+	// only the latest one's resume clears it.
 	workspaceStopPending bool
+	workspaceStopAttempt uint64
 	readyOnce            atomic.Bool
 	readyMarkerMu        sync.Mutex
 	supportingReadyMarks map[string]struct{}
