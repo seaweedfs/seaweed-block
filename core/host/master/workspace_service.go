@@ -136,6 +136,16 @@ func (s *services) MoveWorkspace(ctx context.Context, q *control.WorkspaceMove) 
 	if err := s.workspaceVolume(q.GetVolumeId()); err != nil {
 		return nil, err
 	}
+	// A forced move reads HEAD only after its lease admission holds: the
+	// expected holder's lease has then expired, so it starts no new claim or
+	// cut before this read. A claim it already sent may still land after it
+	// (WorkspaceForcedMoveAdmitted). The publisher re-checks admission when
+	// it issues the move.
+	if q.GetKind() == "forced" {
+		if err := s.host.Publisher().WorkspaceForcedMoveAdmitted(ctx, q.GetVolumeId(), q.GetRequestId(), q.GetExpectedReplicaId(), q.GetExpectedEpoch()); err != nil {
+			return nil, workspaceError(err)
+		}
+	}
 	// Always bound the configured reader, even when the caller omitted a deadline.
 	readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
