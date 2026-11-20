@@ -81,9 +81,15 @@ func ClaimChunkHead(ctx context.Context, remote ChunkRemote, cfg ChunkLayerConfi
 	settled = false // an ambiguous CAS keeps its segment intents
 	gen, casErr := remote.CASHead(ctx, ChunkHeadVersion{Gen: head.Gen, Epoch: head.Epoch}, next)
 	if casErr == nil {
-		settled = true
 		next.Gen = gen
-		return next, allowed()
+		if err := confirmChunkTakeover(ctx, remote, next); err != nil {
+			return ChunkHead{}, err
+		}
+		if err := allowed(); err != nil {
+			return ChunkHead{}, err
+		}
+		settled = true
+		return next, nil
 	}
 	// Never blindly replay a possibly committed takeover. A re-read must
 	// prove the exact proposal; otherwise the volume remains nonoperational.
@@ -91,9 +97,20 @@ func ClaimChunkHead(ctx context.Context, remote ChunkRemote, cfg ChunkLayerConfi
 	if readErr != nil {
 		return ChunkHead{}, fmt.Errorf("storage: HEAD claim unresolved: %w", errors.Join(casErr, readErr))
 	}
-	settled = errors.Is(casErr, ErrChunkHeadPrecondition) || current.Gen > head.Gen
 	if current.Gen > head.Gen && sameProposal(current, next) {
-		return current, allowed()
+		if err := confirmChunkTakeover(ctx, remote, current); err != nil {
+			return ChunkHead{}, err
+		}
+		if err := allowed(); err != nil {
+			return ChunkHead{}, err
+		}
+		settled = true
+		return current, nil
 	}
+	// A foreign publication is a fence, not permission to clean our roots.
+	if current.Gen != 0 && (current.Epoch != head.Epoch || current.Holder != head.Holder) {
+		return ChunkHead{}, fmt.Errorf("storage: HEAD claim displaced: %w", ErrChunkLayerFenced)
+	}
+	settled = errors.Is(casErr, ErrChunkHeadPrecondition) || current.Gen > head.Gen
 	return ChunkHead{}, fmt.Errorf("storage: HEAD claim not installed: %w", casErr)
 }
