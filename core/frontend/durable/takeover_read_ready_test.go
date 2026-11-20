@@ -23,6 +23,8 @@ type heldTakeoverClaim struct {
 	once, releaseOnce sync.Once
 	holdFor           time.Duration
 	readRegistered    chan struct{}
+	resolutionBlocked chan struct{}
+	resolutionOnce    sync.Once
 }
 
 func (r *heldTakeoverClaim) unblock() { r.releaseOnce.Do(func() { close(r.release) }) }
@@ -33,6 +35,7 @@ func (r *heldTakeoverClaim) GetHead(ctx context.Context) (storage.ChunkHead, err
 	if _, bounded := ctx.Deadline(); bounded && r.holdFor == 0 {
 		select {
 		case <-r.claimed:
+			r.resolutionOnce.Do(func() { close(r.resolutionBlocked) })
 			select {
 			case <-r.release:
 			case <-ctx.Done():
@@ -74,7 +77,7 @@ func (r *heldTakeoverClaim) CASHead(ctx context.Context, expected storage.ChunkH
 
 func pendingTakeoverRead(t *testing.T, hold time.Duration) (*durable.DurableProvider, frontend.Backend, *nvme.IOHandler) {
 	t.Helper()
-	remote := &heldTakeoverClaim{ChunkRemote: seededRemote(t), claimed: make(chan struct{}), release: make(chan struct{}), holdFor: hold, readRegistered: make(chan struct{})}
+	remote := &heldTakeoverClaim{ChunkRemote: seededRemote(t), claimed: make(chan struct{}), release: make(chan struct{}), holdFor: hold, readRegistered: make(chan struct{}), resolutionBlocked: make(chan struct{})}
 	view := newStubView(frontend.Projection{VolumeID: "v1", ReplicaID: "r1"})
 	p := chunkProvider(t, t.TempDir(), remote, view, 0)
 	// Registered after provider cleanup, so release precedes its worker join.
@@ -90,6 +93,13 @@ func pendingTakeoverRead(t *testing.T, hold time.Duration) (*durable.DurableProv
 	case <-remote.claimed:
 	case <-time.After(10 * time.Second):
 		t.Fatal("takeover CAS never became visible")
+	}
+	if hold == 0 {
+		select {
+		case <-remote.resolutionBlocked:
+		case <-time.After(30 * time.Second):
+			t.Fatal("permanent attach did not reach held outcome resolution")
+		}
 	}
 	head, err := remote.GetHead(context.Background())
 	if err != nil || head.Epoch != 4 || head.Holder != "r1" {
