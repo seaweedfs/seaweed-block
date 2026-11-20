@@ -834,6 +834,33 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	}
 	ctx, cancel := l.opCtx(ctx)
 	defer cancel()
+	var budget *cutBudgetReservation
+	if host := l.cfg.Budget; host != nil {
+		budgetCtx, abort := context.WithCancelCause(ctx)
+		ctx = budgetCtx
+		_, _, payload := l.cutPayloadWorkers()
+		ticket, admitErr := host.Admit(ctx, payload, func(cause error) {
+			if cause == nil {
+				cause = errChunkCaptureRefused
+			}
+			abort(fmt.Errorf("%w: budget revoked: %w", errCutCOWAborted, cause))
+		})
+		if admitErr != nil {
+			abort(nil)
+			return chunkCutResult{}, fmt.Errorf("%w: budget admission: %w", errChunkCaptureRefused, admitErr)
+		}
+		budget = &cutBudgetReservation{budget: host, ticket: ticket, ctx: ctx}
+		defer func() {
+			if err != nil {
+				err = errors.Join(err, context.Cause(budgetCtx))
+			}
+			abort(nil)
+			host.Release(ticket)
+		}()
+		if cause := context.Cause(ctx); cause != nil {
+			return chunkCutResult{}, cause
+		}
+	}
 
 	if err := l.resolvePending(ctx); err != nil {
 		return chunkCutResult{}, err
@@ -846,6 +873,11 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	if err != nil {
 		l.dropIntents(ctx, intents)
 		return chunkCutResult{}, err
+	}
+
+	if cause := context.Cause(ctx); cause != nil {
+		l.dropIntents(ctx, intents)
+		return chunkCutResult{}, cause
 	}
 
 	// Quiesced cut. The guest pause starts at the Lock REQUEST: a pending
@@ -934,6 +966,9 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	if l.usesOwnedMapV3() {
 		var w *cutCOWWindow
 		w, copyErr = l.installCOWWindow(candidates, useStaged, baseHead.Chunks)
+		if copyErr == nil {
+			w.budget = budget
+		}
 		l.s.captureMu.Unlock()
 		st.BarrierPauseNs = time.Since(pauseStart).Nanoseconds()
 		copyStart = time.Now()

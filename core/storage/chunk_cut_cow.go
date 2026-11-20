@@ -46,6 +46,7 @@ type cutCOWEntry struct {
 }
 type cutCOWWindow struct {
 	layer       *chunkLayerImpl
+	budget      *cutBudgetReservation // immutable before captureMu releases writers
 	mu          sync.Mutex
 	terminal    bool
 	err         error
@@ -320,6 +321,12 @@ func (l *chunkLayerImpl) beforeCOWMutation(first, count uint64) {
 }
 
 func (w *cutCOWWindow) save(e *cutCOWEntry, data []byte, missing []uint64) error {
+	// No window lock spans the host callback: it may revoke this or another cut.
+	if w.budget != nil {
+		if err := w.budget.reserve(w.chunkBytes); err != nil {
+			return fmt.Errorf("%w: COW budget reservation: %w", errCutCOWAborted, err)
+		}
+	}
 	if hook := w.layer.testCOWSave; hook != nil {
 		if err := hook(); err != nil {
 			return err

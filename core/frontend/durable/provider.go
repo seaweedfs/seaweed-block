@@ -187,6 +187,8 @@ type ProviderConfig struct {
 	ChunkUploadConcurrency int
 	// ChunkPayloadMemoryBudget bounds one volume's cut payloads; zero uses the storage default.
 	ChunkPayloadMemoryBudget int64
+	// ChunkBudget optionally admits cuts and accounts COW bytes through the host limiter.
+	ChunkBudget storage.Budget
 }
 
 // DurableProvider is the production frontend.Provider implementation.

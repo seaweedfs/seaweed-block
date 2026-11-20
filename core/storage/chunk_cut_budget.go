@@ -14,3 +14,19 @@ type Budget interface {
 	ReserveCOW(ticket uint64, bytes int64) error
 	Release(ticket uint64)
 }
+
+type cutBudgetReservation struct {
+	budget Budget
+	ticket uint64
+	ctx    context.Context
+}
+
+func (r *cutBudgetReservation) reserve(bytes int64) error {
+	if cause := context.Cause(r.ctx); cause != nil {
+		return cause
+	}
+	if err := r.budget.ReserveCOW(r.ticket, bytes); err != nil {
+		return err
+	}
+	return context.Cause(r.ctx)
+}
