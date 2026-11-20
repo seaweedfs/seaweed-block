@@ -3,17 +3,20 @@
 package main
 
 import (
-	"context"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
 )
 
-// startCPUProfileSignal makes SIGUSR1 toggle a CPU profile into dir until ctx
-// ends; the returned stop ends a running profile and removes the handler.
-// dir "" installs nothing.
-func startCPUProfileSignal(ctx context.Context, dir string) (stop func(), err error) {
+// cpuProfileSupported: SIGUSR1 exists here.
+const cpuProfileSupported = true
+
+// startCPUProfileSignal makes SIGUSR1 toggle a CPU profile into dir. The
+// returned stop removes the handler, stops and joins the worker (so no
+// buffered signal can start a profile after it), then writes out a running
+// profile. dir "" installs nothing.
+func startCPUProfileSignal(dir string) (stop func(), err error) {
 	if dir == "" {
 		return func() {}, nil
 	}
@@ -23,12 +26,12 @@ func startCPUProfileSignal(ctx context.Context, dir string) (stop func(), err er
 	p := &cpuProfiler{dir: dir}
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGUSR1)
-	done := make(chan struct{})
+	quit, done := make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(done)
 		for {
 			select {
-			case <-ctx.Done():
+			case <-quit:
 				return
 			case <-sig:
 				path, running, err := p.toggle()
@@ -46,6 +49,8 @@ func startCPUProfileSignal(ctx context.Context, dir string) (stop func(), err er
 	log.Printf("blockvolume: SIGUSR1 toggles a CPU profile into %s", dir)
 	return func() {
 		signal.Stop(sig)
+		close(quit)
+		<-done
 		p.stop()
 	}, nil
 }

@@ -255,6 +255,14 @@ func parseFlags(args []string) (flags, error) {
 	if f.memoryLimitMiB < 0 || f.memoryLimitMiB > math.MaxInt64>>20 {
 		return flags{}, fmt.Errorf("--memory-limit-mib out of range")
 	}
+	if f.cpuProfileDir != "" { // before anything starts: run() has no side effect yet
+		if !cpuProfileSupported {
+			return flags{}, fmt.Errorf("--cpu-profile-dir needs SIGUSR1 (unix only)")
+		}
+		if err := checkCPUProfileDir(f.cpuProfileDir); err != nil {
+			return flags{}, err
+		}
+	}
 	if f.version {
 		return f, nil
 	}
@@ -569,6 +577,14 @@ func durableCreateGeometry(f flags) (uint32, int, error) {
 }
 
 func run(f flags) int {
+	// Diagnostics first: parseFlags validated the directory, and nothing
+	// has been activated yet, so a failure here leaves nothing to clean up.
+	stopProfile, err := startCPUProfileSignal(f.cpuProfileDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "blockvolume:", err)
+		return 1
+	}
+	defer stopProfile()
 	readyCh := make(chan adapter.AssignmentInfo, 16)
 
 	h, err := volume.New(hostConfig(f, readyCh))
@@ -1198,12 +1214,6 @@ func run(f flags) int {
 
 	shutdownCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
-	stopProfile, err := startCPUProfileSignal(shutdownCtx, f.cpuProfileDir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "blockvolume: %v\n", err)
-		return 1
-	}
-	defer stopProfile()
 	var leaseRequests <-chan workspaceStopRequest
 	var leaseDone <-chan error
 	if f.workspaceLease {

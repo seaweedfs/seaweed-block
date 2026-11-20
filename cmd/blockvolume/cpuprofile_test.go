@@ -41,4 +41,9 @@ func TestCPUProfileDirMustBeAnExistingDirectory(t *testing.T) {
 	if err := checkCPUProfileDir(t.TempDir()); err != nil {
 		t.Fatalf("an existing directory was refused: %v", err)
 	}
+	// The refusal happens in parseFlags, before run() activates anything.
+	base := []string{"--master", "127.0.0.1:1", "--server-id", "h1", "--volume-id", "v1", "--replica-id", "r1", "--data-addr", "127.0.0.1:2", "--ctrl-addr", "127.0.0.1:3"}
+	if _, err := parseFlags(append(append([]string{}, base...), "--cpu-profile-dir", file)); err == nil {
+		t.Fatal("parseFlags accepted a file as the profile directory")
+	}
 }

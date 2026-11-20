@@ -2,12 +2,12 @@
 
 package main
 
-import (
-	"context"
-	"errors"
-)
+import "errors"
 
-func startCPUProfileSignal(_ context.Context, dir string) (stop func(), err error) {
+// cpuProfileSupported: no SIGUSR1 on this platform.
+const cpuProfileSupported = false
+
+func startCPUProfileSignal(dir string) (stop func(), err error) {
 	if dir == "" {
 		return func() {}, nil
 	}
