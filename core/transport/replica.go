@@ -42,6 +42,8 @@ const (
 // not derive source coverage from Sync. Admission is checked at the effect.
 type SessionRetirer interface{ CloseSession(sessionID uint64) }
 
+// RecoveryPrefixHook accepts explicit completed-prefix certificates. It does
+// not derive source coverage from Sync. Admission is checked at the effect.
 type RecoveryPrefixHook interface {
 	CertifyRecoveryPrefix(lineage RecoveryLineage) error
 	CertifiedPrefix() uint64

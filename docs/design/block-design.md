@@ -298,6 +298,7 @@ stateDiagram-v2
   Healthy --> Degraded: barrier or ship failure
   Degraded --> CatchingUp: gap within the primary's WAL
   CatchingUp --> CatchingUp: identical recovery facts retain the prepared session
+  CatchingUp --> CatchingUp: active session refuses promotion readiness
   Healthy --> Healthy: delayed probe retains completed durable R
   Healthy --> Healthy: completed recovery certifies P, prune version suffix
   CatchingUp --> Healthy: caught up to the target
