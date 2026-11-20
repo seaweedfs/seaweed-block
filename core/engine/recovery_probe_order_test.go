@@ -14,6 +14,21 @@ func TestRecoveryProbeKeepsCompletedRButAllowsNewWorkAndIdentity(t *testing.T) {
 	if st.Recovery.R != 100 {
 		t.Fatalf("old probe lowered completed R: %d", st.Recovery.R)
 	}
+	// An unknown probe must not turn the retained R into invented primary
+	// boundaries or publish healthy. A later valid observation recovers it.
+	r = Apply(st, RecoveryFactsObserved{ReplicaID: "r1", EndpointVersion: 1, TransportEpoch: 1})
+	if r.Projection.RecoveryDecision != DecisionUnknown {
+		t.Fatalf("retained R fabricated known boundaries: %+v", r.Projection)
+	}
+	r = Apply(st, ProbeSucceeded{ReplicaID: "r1", EndpointVersion: 1, TransportEpoch: 1})
+	if r.Projection.RecoveryDecision != DecisionUnknown {
+		t.Fatal("reachability fabricated missing recovery facts")
+	}
+	assertNoCommand(t, r, "PublishHealthy")
+	r = Apply(st, DurableAckObserved{ReplicaID: "r1", EndpointVersion: 1, TransportEpoch: 1, DurableLSN: 100, PrimaryTailLSN: 10, PrimaryHeadLSN: 100})
+	if r.Projection.RecoveryDecision != DecisionNone || st.Recovery.FactsMissing {
+		t.Fatalf("valid ack did not restore known facts: %+v", r.Projection)
+	}
 	// A higher primary head remains real new work, starting after durable R.
 	r = Apply(st, RecoveryFactsObserved{ReplicaID: "r1", EndpointVersion: 1, TransportEpoch: 1, R: 50, S: 10, H: 150})
 	start := findStartCatchUp(t, r.Commands)

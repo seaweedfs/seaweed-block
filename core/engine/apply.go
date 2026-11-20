@@ -298,6 +298,7 @@ func applyRecoveryFacts(st *ReplicaState, e RecoveryFactsObserved, r *ApplyResul
 	// Within one identity, delayed probes cannot undo completed durable work.
 	// An identity-changing assignment resets the recovery facts.
 	st.Recovery.R = max(st.Recovery.R, e.R)
+	st.Recovery.FactsMissing = !e.ProgressFact().PrimaryBoundsKnown
 	st.Recovery.S = e.S
 	st.Recovery.H = e.H
 
@@ -311,6 +312,10 @@ func applyDurableAck(st *ReplicaState, e DurableAckObserved, r *ApplyResult, tra
 		return
 	}
 	fact := e.ProgressFact()
+	if st.Recovery.FactsMissing {
+		st.Recovery.S, st.Recovery.H = fact.PrimaryS, fact.PrimaryH
+		st.Recovery.FactsMissing = false
+	}
 	updateDurableAckLagState(st, fact)
 	if fact.ReplicaR > st.Recovery.DurableAckR || !st.Recovery.DurableAckKnown {
 		st.Recovery.DurableAckR = fact.ReplicaR
@@ -441,6 +446,12 @@ func decide(st *ReplicaState, r *ApplyResult, trace func(string, string)) {
 		st.Recovery.Decision = DecisionUnknown
 		st.Recovery.DecisionReason = "not_reachable"
 		trace("decision", "unknown (not reachable)")
+		return
+	}
+	if st.Recovery.FactsMissing {
+		st.Recovery.Decision = DecisionUnknown
+		st.Recovery.DecisionReason = "no_boundaries"
+		trace("decision", "unknown (missing probe facts)")
 		return
 	}
 
