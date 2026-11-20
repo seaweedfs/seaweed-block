@@ -95,8 +95,8 @@ func precopyBusyOwnerControl(t *testing.T, slow bool) {
 	if calls == 0 {
 		assertPrecopyMeasuredRefusal(t, r.Precopy, err)
 	}
-	if slow && (calls != 0 || r.Precopy.Fixed < 1300*time.Millisecond) {
-		t.Fatalf("slow fixed cost did not refuse before stop: calls=%d report=%+v", calls, r.Precopy)
+	if slow && (calls == 0 || r.Precopy.Fixed < 1300*time.Millisecond) {
+		t.Fatalf("slow fixed cost did not reach the nonblocking stop gate: calls=%d report=%+v", calls, r.Precopy)
 	}
 	if f.stats().head.State != ChunkHeadActive {
 		t.Fatal("busy frontend lost its active HEAD")
@@ -159,8 +159,8 @@ func precopyRefusedFinalCutControl(t *testing.T, slow bool) {
 	} else {
 		assertPrecopyMeasuredRefusal(t, r.Precopy, err)
 	}
-	if slow && (r.Precopy.Frozen || r.Precopy.Fixed < 1300*time.Millisecond) {
-		t.Fatalf("slow fixed cost incorrectly admitted a final cut: report=%+v", r.Precopy)
+	if slow && r.Precopy.Fixed < 1300*time.Millisecond {
+		t.Fatalf("slow fixed sample was lost: report=%+v", r.Precopy)
 	}
 	if f.stats().head.State != ChunkHeadActive {
 		t.Fatal("refused final cut lost its active HEAD")
@@ -369,8 +369,8 @@ func precopyAppliedDetachRetryControl(t *testing.T, slow bool) {
 	f.casModes = []fakeCASMode{casAppliedLost}
 	f.afterCAS = func(f *fakeChunkRemote) { f.failGet = errFakeRemoteDown }
 	r, err := l.PrecopyDetach(ctTimeout(t), func() bool { return true })
-	if slow && (r.Precopy.Frozen || r.Precopy.Fixed < 1300*time.Millisecond) {
-		t.Fatalf("slow retry control bypassed measured admission: report=%+v", r.Precopy)
+	if slow && r.Precopy.Fixed < 1300*time.Millisecond {
+		t.Fatalf("slow retry control lost its measured fixed cost: report=%+v", r.Precopy)
 	}
 	if !r.Precopy.Frozen {
 		assertPrecopyMeasuredRefusal(t, r.Precopy, err)
@@ -525,11 +525,11 @@ func precopyAttemptDiagnosticsControl(t *testing.T, slow bool) {
 	if first.Attempt != 1 || first.Reason != "drain_timeout" || first.Frozen || second.Attempt != 2 {
 		t.Fatalf("attempt outcomes mixed: first=%+v second=%+v", first, second)
 	}
-	if slow && (r.Precopy.Frozen || r.Precopy.Fixed < 1300*time.Millisecond) {
-		t.Fatalf("slow diagnostics control bypassed measured admission: report=%+v", r.Precopy)
+	if slow && r.Precopy.Fixed < 1300*time.Millisecond {
+		t.Fatalf("slow diagnostics control lost its measured fixed cost: report=%+v", r.Precopy)
 	}
 	if r.Precopy.Frozen {
-		if err != nil || len(r.Precopy.Rounds) != 2 || second.Reason != "fit" || !second.Frozen {
+		if err != nil || len(r.Precopy.Rounds) != 2 || (second.Reason != "fit" && second.Reason != "fixed_cost_over_allowance") || !second.Frozen {
 			t.Fatalf("invalid fit after drain timeout: report=%+v err=%v", r.Precopy, err)
 		}
 	} else {

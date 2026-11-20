@@ -13,57 +13,84 @@ var (
 )
 
 const (
-	precopyAttempts   = 5
-	precopyDuration   = 60 * time.Second
-	precopyAllowance  = 1200 * time.Millisecond
-	precopyMargin     = 100 * time.Millisecond
-	precopyDrainBound = 100 * time.Millisecond
+	precopyAttempts    = 5
+	precopyDuration    = 60 * time.Second
+	precopyAllowance   = 1200 * time.Millisecond
+	precopyMargin      = 100 * time.Millisecond
+	precopyDrainBound  = 100 * time.Millisecond
+	precopyFreezeLimit = 5 * time.Second
 )
+
+// PrecopyFixedParts are disjoint terms of the same retained fixed-cost sample.
+type PrecopyFixedParts struct {
+	Drain        time.Duration `json:"drainNs"`
+	StoreLock    time.Duration `json:"storeLockNs"`
+	DataSync     time.Duration `json:"dataSyncNs"`
+	HeadCAS      time.Duration `json:"headCASNs"`
+	HeadReadback time.Duration `json:"headReadbackNs"`
+	Other        time.Duration `json:"otherNs"`
+}
+
+func precopyFixedParts(st chunkCutStats, fixed time.Duration) PrecopyFixedParts {
+	p := PrecopyFixedParts{Drain: time.Duration(st.DrainNs), StoreLock: time.Duration(max(int64(0), st.LockWaitNs-st.DrainNs)), DataSync: time.Duration(st.SyncNs), HeadCAS: time.Duration(st.CASWriteNs), HeadReadback: time.Duration(st.HeadReadbackNs)}
+	p.Other = max(time.Duration(0), fixed-p.Drain-p.StoreLock-p.DataSync-p.HeadCAS-p.HeadReadback)
+	return p
+}
 
 type precopySample struct {
 	at    time.Time
 	fixed time.Duration
+	parts PrecopyFixedParts
 	rate  float64
 }
 
 type PrecopyAttempt struct {
 	// Attempt is the physical round ordinal, including measurement rounds.
-	Attempt     int           `json:"attempt"`
-	Drain       time.Duration `json:"drainNs"`
-	Barrier     time.Duration `json:"barrierNs"`
-	Pause       time.Duration `json:"pauseNs"`
-	TailBytes   uint64        `json:"tailBytes"`
-	RateSamples int           `json:"rateSamples"`
-	Estimate    time.Duration `json:"estimateNs"`
-	Reason      string        `json:"reason"`
-	Frozen      bool          `json:"frozen"`
-	Error       string        `json:"error,omitempty"`
+	Attempt          int               `json:"attempt"`
+	Drain            time.Duration     `json:"drainNs"`
+	Barrier          time.Duration     `json:"barrierNs"`
+	Pause            time.Duration     `json:"pauseNs"`
+	Fixed            time.Duration     `json:"fixedNs"`
+	FixedParts       PrecopyFixedParts `json:"fixedParts"`
+	TailEstimate     time.Duration     `json:"tailEstimateNs"`
+	DeclaredFreeze   time.Duration     `json:"declaredFreezeNs"`
+	PreviousEstimate time.Duration     `json:"previousEstimateNs"`
+	TailBytes        uint64            `json:"tailBytes"`
+	RateSamples      int               `json:"rateSamples"`
+	Estimate         time.Duration     `json:"estimateNs"`
+	Reason           string            `json:"reason"`
+	Frozen           bool              `json:"frozen"`
+	Error            string            `json:"error,omitempty"`
 }
 
 // PrecopyReport records admission estimates, not a worst-case latency proof.
 type PrecopyReport struct {
-	Rounds                []PrecopyAttempt `json:"rounds,omitempty"`
-	Drain                 time.Duration    `json:"drainNs"`
-	DrainTimedOut         bool             `json:"drainTimedOut"`
-	Attempts              int              `json:"attempts"`
-	MeasurementRounds     int              `json:"measurementRounds"`
-	SamplesAtStart        int              `json:"samplesAtStart"`
-	TailBytes             uint64           `json:"tailBytes"`
-	Fixed                 time.Duration    `json:"fixedNs"`
-	Estimate              time.Duration    `json:"estimateNs"`
-	SampleAge             time.Duration    `json:"sampleAgeNs"`
-	BytesPerSecond        float64          `json:"bytesPerSecond"`
-	RateSamples           int              `json:"rateSamples"`
-	Reason                string           `json:"reason"`
-	Frozen                bool             `json:"frozen"`
-	FreezeElapsed         time.Duration    `json:"freezeElapsedNs"`
-	ExtraCASAttempts      uint64           `json:"extraCASAttempts"`
-	CASFailureTimeout     time.Duration    `json:"casFailureTimeoutNs"`
-	DeclaredWorst         time.Duration    `json:"declaredWorstNs"`
-	LatencyGateFailed     bool             `json:"latencyGateFailed"`
-	BarrierBeforeFreeze   time.Duration    `json:"barrierBeforeFreezeNs"`
-	TentativePauseTotal   time.Duration    `json:"tentativePauseTotalNs"`
-	LongestTentativePause time.Duration    `json:"longestTentativePauseNs"`
+	Rounds                []PrecopyAttempt  `json:"rounds,omitempty"`
+	Drain                 time.Duration     `json:"drainNs"`
+	DrainTimedOut         bool              `json:"drainTimedOut"`
+	Attempts              int               `json:"attempts"`
+	MeasurementRounds     int               `json:"measurementRounds"`
+	SamplesAtStart        int               `json:"samplesAtStart"`
+	TailBytes             uint64            `json:"tailBytes"`
+	FixedParts            PrecopyFixedParts `json:"fixedParts"`
+	TailEstimate          time.Duration     `json:"tailEstimateNs"`
+	DeclaredFreeze        time.Duration     `json:"declaredFreezeNs"`
+	PreviousEstimate      time.Duration     `json:"previousEstimateNs"`
+	Fixed                 time.Duration     `json:"fixedNs"`
+	Estimate              time.Duration     `json:"estimateNs"`
+	SampleAge             time.Duration     `json:"sampleAgeNs"`
+	BytesPerSecond        float64           `json:"bytesPerSecond"`
+	RateSamples           int               `json:"rateSamples"`
+	Reason                string            `json:"reason"`
+	Frozen                bool              `json:"frozen"`
+	FreezeElapsed         time.Duration     `json:"freezeElapsedNs"`
+	ExtraCASAttempts      uint64            `json:"extraCASAttempts"`
+	CASFailureTimeout     time.Duration     `json:"casFailureTimeoutNs"`
+	DeclaredWorst         time.Duration     `json:"declaredWorstNs"`
+	LatencyGateFailed     bool              `json:"latencyGateFailed"`
+	BarrierBeforeFreeze   time.Duration     `json:"barrierBeforeFreezeNs"`
+	TentativePauseTotal   time.Duration     `json:"tentativePauseTotalNs"`
+	LongestTentativePause time.Duration     `json:"longestTentativePauseNs"`
 }
 
 // Finish records the whole freeze, including any owner-driven settlement.
@@ -72,7 +99,11 @@ func (r *PrecopyReport) Finish(elapsed time.Duration, extraCAS uint64, failed bo
 	r.FreezeElapsed, r.ExtraCASAttempts = elapsed, extraCAS
 	r.CASFailureTimeout = chunkHeadOperationTimeout
 	r.DeclaredWorst = r.Estimate + time.Duration(extraCAS)*chunkHeadOperationTimeout
-	r.LatencyGateFailed = failed || elapsed > precopyAllowance
+	limit := precopyAllowance
+	if r.Reason == "fixed_cost_over_allowance" {
+		limit = min(r.DeclaredFreeze, precopyFreezeLimit)
+	}
+	r.LatencyGateFailed = failed || elapsed > limit
 }
 
 // PrecopyDetach runs rolling cuts before the final detached cut. stopIO is
@@ -150,14 +181,22 @@ func (l *chunkLayerImpl) precopyDetach(ctx context.Context, prepare func(context
 		}
 		spent := time.Since(barrierStart)
 		if spent > report.Fixed {
-			report.Estimate += spent - report.Fixed
+			extra := spent - report.Fixed
+			report.Estimate += extra
+			report.FixedParts.Other += extra
+			report.Fixed = spent
 		}
 		if report.Reason == "fit" && report.Estimate > precopyAllowance {
 			report.Reason = "barrier_over_budget"
 		}
-		if report.Reason != "fit" {
+		var previous *PrecopyAttempt
+		if len(rounds) > 0 {
+			previous = &rounds[len(rounds)-1]
+		}
+		if !report.admitPrecopy(previous) {
 			return false
 		}
+		report.DeclaredFreeze = report.Estimate
 		if !stopIO() {
 			report.Reason = "admitted_io"
 			return false
@@ -188,6 +227,7 @@ func (l *chunkLayerImpl) precopyDetach(ctx context.Context, prepare func(context
 			Attempt: attempt, Drain: drain, Pause: pauseTotal - pauseBefore,
 			TailBytes: report.TailBytes, RateSamples: report.RateSamples,
 			Estimate: report.Estimate, Reason: report.Reason, Frozen: report.Frozen,
+			Fixed: report.Fixed, FixedParts: report.FixedParts, TailEstimate: report.TailEstimate, DeclaredFreeze: report.DeclaredFreeze, PreviousEstimate: report.PreviousEstimate,
 		}
 		a.Barrier = max(time.Duration(0), a.Pause-a.Drain)
 		if a.Reason == "" {
@@ -249,6 +289,9 @@ func (l *chunkLayerImpl) precopyEstimate(tail uint64, attempts int) PrecopyRepor
 		// is already drained; metadata and CAS/read-back remain included.
 		if s.fixed > r.Fixed {
 			r.Fixed = s.fixed
+			r.FixedParts = s.parts
+			known := s.parts.Drain + s.parts.StoreLock + s.parts.DataSync + s.parts.HeadCAS + s.parts.HeadReadback
+			r.FixedParts.Other = max(time.Duration(0), s.fixed-known)
 		}
 		if s.rate > 0 {
 			rates = append(rates, s.rate)
@@ -274,9 +317,11 @@ func (l *chunkLayerImpl) precopyEstimate(tail uint64, attempts int) PrecopyRepor
 		if seconds > precopyDuration.Seconds() {
 			r.Reason = "tail_too_large"
 			r.Estimate = precopyDuration
+			r.TailEstimate = precopyDuration
 			return r
 		}
-		r.Estimate += time.Duration(seconds * float64(time.Second))
+		r.TailEstimate = time.Duration(seconds * float64(time.Second))
+		r.Estimate += r.TailEstimate
 	}
 	r.Reason = "tail_too_large"
 	if r.Estimate <= precopyAllowance {
@@ -285,12 +330,35 @@ func (l *chunkLayerImpl) precopyEstimate(tail uint64, attempts int) PrecopyRepor
 	return r
 }
 
+// More copying cannot reduce a fixed-bound plateau. Only the measured tail
+// may use at most a quarter of the normal allowance on this exception path.
+func (r *PrecopyReport) admitPrecopy(previous *PrecopyAttempt) bool {
+	if r.Reason == "fit" && r.Estimate <= precopyAllowance {
+		return true
+	}
+	if previous == nil || previous.Estimate <= 0 || r.Reason == "samples_unknown" {
+		return false
+	}
+	r.PreviousEstimate = previous.Estimate
+	if r.TailEstimate > precopyAllowance/4 || r.Estimate < previous.Estimate {
+		return false
+	}
+	// Preserve the frontend's existing five-second held-command ceiling.
+	if r.Estimate > precopyFreezeLimit {
+		r.Reason = "fixed_cost_exceeds_freeze_budget"
+		return false
+	}
+	r.Reason = "fixed_cost_over_allowance"
+	return true
+}
+
 func (l *chunkLayerImpl) samplePrecopy(st chunkCutStats, fixedNs int64) {
 	// A no-op root read is not a measurement of final CAS + confirmation.
 	if st.CASNs <= 0 {
 		return
 	}
 	s := precopySample{at: time.Now(), fixed: time.Duration(max(int64(1), fixedNs))}
+	s.parts = precopyFixedParts(st, s.fixed)
 	if st.UploadedBytes > 0 && st.PayloadNs > 0 {
 		s.rate = float64(st.UploadedBytes) / time.Duration(st.PayloadNs).Seconds()
 	}

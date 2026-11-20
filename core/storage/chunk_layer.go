@@ -754,6 +754,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	var releasePrecopy func()
 	if prepare := l.precopyPrepare; prepare != nil {
 		releasePrecopy, _ = prepare(ctx)
+		st.DrainNs = time.Since(pauseStart).Nanoseconds()
 	}
 	defer func() {
 		if releasePrecopy != nil && !detach {
@@ -1029,7 +1030,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	}
 	expected := chunkHeadVersion{Gen: baseHead.Gen, Epoch: baseHead.Epoch}
 	casStart := time.Now()
-	gen, casErr := casAndConfirmChunkHead(ctx, l.remote, expected, next)
+	gen, casErr := casAndConfirmChunkHeadMeasured(ctx, l.remote, expected, next, &st)
 	st.CASNs = time.Since(casStart).Nanoseconds()
 	st.CASResult = "ok"
 	if errors.Is(casErr, errChunkHeadPrecondition) {

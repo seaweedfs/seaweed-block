@@ -410,6 +410,9 @@ type chunkCutStats struct {
 	// writers already holding the capture barrier shared.
 	BarrierPauseNs  int64
 	LockWaitNs      int64
+	DrainNs         int64
+	CASWriteNs      int64
+	HeadReadbackNs  int64
 	SyncNs          int64
 	CopyNs          int64
 	CandidateChunks int
