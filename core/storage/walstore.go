@@ -209,6 +209,9 @@ func CreateWALStoreWithOptions(path string, numBlocks uint32, blockSize int, opt
 // Frozen constructor for legacy-format regression fixtures; public Create
 // never reaches it after activation. Removed from production in row 14a.
 func createLegacyWALStoreWithOptions(path string, numBlocks uint32, blockSize int, opts WALStoreOptions) (*WALStore, error) {
+	if err := validateNewStorePolicy(); err != nil {
+		return nil, err
+	}
 	if blockSize == 0 {
 		blockSize = DefaultBlockSize
 	}
@@ -254,7 +257,11 @@ func createLegacyWALStoreWithOptions(path string, numBlocks uint32, blockSize in
 		_ = f.Close()
 		return nil, fmt.Errorf("storage: fsync after create: %w", err)
 	}
-	return openInitializedWithMetadata(path, f, &sb, metadata)
+	s, err := openInitializedWithMetadata(path, f, &sb, metadata)
+	if err != nil {
+		_ = f.Close()
+	}
+	return s, err
 }
 
 // OpenWALStore opens an existing store file WITHOUT recovering it.
@@ -309,6 +316,10 @@ func openInitializedWithMetadata(path string, f *os.File, sb *superblock, metada
 // init hook that runs before the committer and flusher goroutines start
 // (the v3 store attaches its state there).
 func openInitializedInternal(path string, f *os.File, sb *superblock, metadata BlockMetadata, init func(*WALStore) error) (*WALStore, error) {
+	dataSync, err := newDataFileSync(f)
+	if err != nil {
+		return nil, err
+	}
 	dm := newDirtyMap(64) // 64 shards is plenty for Phase 07 demo workloads
 
 	s := &WALStore{
@@ -333,9 +344,9 @@ func openInitializedInternal(path string, f *os.File, sb *superblock, metadata B
 	s.walMutation.Store(1)
 	s.syncWALFile = func() error {
 		s.walSyncCalls.Add(1)
-		return f.Sync()
+		return dataSync()
 	}
-	s.syncExtentFile = f.Sync
+	s.syncExtentFile = dataSync
 	if init != nil {
 		if err := init(s); err != nil {
 			return nil, err

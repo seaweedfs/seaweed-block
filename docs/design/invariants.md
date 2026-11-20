@@ -559,6 +559,12 @@ Notes:
 |---|---|---|---|---|---|---|
 | `INV-NVME-H2C-RANGE-001` | An H2CData range exceeding the expected transfer size is refused before slicing, including a uint32 offset-plus-length overflow; an exact-bound payload is preserved. | Frontend H2C receive validation; no storage state transition | `core/frontend/nvme/session.go` `recvH2CData` | `TestRecvH2CDataRangeBounds` (`core/frontend/nvme/h2c_bounds_test.go`) | — | ACTIVE |
 
+### Experimental data-file synchronization
+
+| ID | Invariant | Machine / transition | Enforced in | Tests | TLA+ | Status |
+|---|---|---|---|---|---|---|
+| `INV-WAL-DATA-SYNC-001` | Linux WAL/extent sync defaults to fdatasync; `SWBLOCK_SYNC=fsync` explicitly restores full data-file sync (other platforms retain fsync). Descriptor/map/create/directory durability still uses fsync. `SWBLOCK_ALLOCATION=sparse|prezero` selects allocation at create; sparse is the default and fallocate is refused. `SWBLOCK_PREZERO=1` aliases prezero, which explicitly writes every byte only at create, fsyncs, then refuses holes/unwritten FIEMAP mappings. Existing files are never prezeroed. | M1 Create / Sync / Checkpoint | `data_sync.go`, `data_sync_linux.go`; `walstore_v3.go` Create; `walstore.go` data sync seams | `TestPrezeroCreatesInitializedVolume`, `TestInitializedFileRejectsSparseAndUnwritten`, `TestFallocateAllocationIsRefused`, `TestDefaultCreatedVolumeStaysSparse`, `TestFdatasyncAcknowledgedWritesSurviveSIGKILL`, `TestDataSyncSyscallProbe` (`core/storage/data_sync_linux_test.go`) | Same abstract durable sync action; syscall/extent initialization and process-crash versus power-loss limits are outside the model | ACTIVE |
+
 ## Part C. Change rules
 
 How a fix or a feature is calibrated against this model:
