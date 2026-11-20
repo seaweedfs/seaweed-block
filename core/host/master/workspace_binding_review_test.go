@@ -266,11 +266,20 @@ func TestWorkspaceBindingRemoteReadDoesNotBlockAck(t *testing.T) {
 			var releaseOnce sync.Once
 			releaseHeld := func() { releaseOnce.Do(func() { close(release) }) }
 			// Registered before either worker launches: every exit releases the
-			// held call and joins its worker under its own bound, not under the
-			// fixture context a blocked ACK has already used up.
+			// held call, and a worker that was launched is joined under its own
+			// bound, not under the fixture context a blocked ACK has already
+			// used up. A setup failure before the launch joins nothing.
+			launched := false
+			launch := func(worker func() error) {
+				launched = true
+				go func() { done <- worker() }()
+			}
 			var joinOnce sync.Once
 			var joined error
 			join := func() error {
+				if !launched {
+					return nil
+				}
 				joinOnce.Do(func() {
 					select {
 					case joined = <-done:
@@ -288,10 +297,10 @@ func TestWorkspaceBindingRemoteReadDoesNotBlockAck(t *testing.T) {
 			})
 			if mode == "head" {
 				reviewLegacyBind(t, h, c, ctx, "probe")
-				go func() {
+				launch(func() error {
 					_, e := client.MoveWorkspace(ctx, &control.WorkspaceMove{RequestId: "held", VolumeId: "probe", ExpectedReplicaId: "r1", ExpectedEpoch: 1, TargetReplicaId: "r1", TargetServerId: "node-b", TargetDataAddr: "127.0.0.1:9200", TargetCtrlAddr: "127.0.0.1:9100", Kind: "clean"})
-					done <- e
-				}()
+					return e
+				})
 			} else {
 				if _, e := h.Lifecycle().Volumes.CreateVolume(lifecycle.VolumeSpec{VolumeID: "vol-rf3", SizeBytes: 1 << 20, ReplicationFactor: 3}); e != nil {
 					t.Fatal(e)
@@ -304,7 +313,7 @@ func TestWorkspaceBindingRemoteReadDoesNotBlockAck(t *testing.T) {
 				waitAuthorityLine(t, h.Publisher(), "vol-rf3")
 				ingestRF3Observation(t, h, false, true, true)
 				h.SetPromotionEvidenceProvider(reviewHeldPromotion{arrived, release})
-				go func() { _, e := h.RunLifecycleProductTick(); done <- e }()
+				launch(func() error { _, e := h.RunLifecycleProductTick(); return e })
 			}
 			select {
 			case <-arrived:

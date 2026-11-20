@@ -303,8 +303,11 @@ func TestWALStoreChunk_DetachFreezeIsBoundedThenResumes(t *testing.T) {
 	if !held.entered {
 		t.Fatal("the detach CAS was never held")
 	}
-	if !held.hasDeadline || !held.deadline.Equal(cut) {
-		t.Fatalf("held detach CAS deadline %v (set %v); want the cut deadline %v", held.deadline, held.hasDeadline, cut)
+	// The cut may bound the CAS by a context deadline or by a timer that
+	// cancels it: a deadline, when there is one, must be the cut's exactly;
+	// either way the CAS must end no earlier than the cut deadline.
+	if held.hasDeadline && !held.deadline.Equal(cut) {
+		t.Fatalf("held detach CAS deadline %v; want the cut deadline %v", held.deadline, cut)
 	}
 	if held.ended.Before(cut) {
 		t.Fatalf("held detach CAS ended %v before its deadline", cut.Sub(held.ended))
