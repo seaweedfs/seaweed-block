@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"sort"
 )
@@ -35,13 +36,31 @@ func hotChunkKeys(indices map[uint64]bool, recent map[uint64]uint64) []uint64 {
 	return keys
 }
 
-// Each wave owns at most one image per uploader. Classify that bounded set,
-// durably name only its changed keys, then upload and discard its buffers.
+// Preallocate immutable keys and durably root the candidate set once per round.
+// Each wave owns at most one image per uploader; unused intent keys are harmless.
+// Classify that bounded set, then upload and discard its buffers.
 // Later waves remain protected by COW; no whole-round payload is retained.
 func (l *chunkLayerImpl) streamCutPayloads(ctx context.Context, batch []uint64, head chunkHead, read func(context.Context, uint64) (capturedChunk, error)) ([]capturedChunk, []string, error) {
 	workers, _, _ := l.cutPayloadWorkers()
 	out := make([]capturedChunk, 0, len(batch))
 	var intents []string
+	keys := make([]string, len(batch))
+	for i, idx := range batch {
+		keys[i] = l.newKey(idx)
+	}
+	intent := ""
+	ensureIntent := func() error {
+		if intent != "" {
+			return nil
+		}
+		id, err := l.remote.PutIntent(ctx, chunkIntent{Gen: head.Gen, Epoch: l.cfg.Epoch, Holder: l.cfg.Holder, Keys: keys})
+		if err != nil {
+			return fmt.Errorf("storage: capture intent: %w: %w", errChunkRemoteUnavailable, err)
+		}
+		intent = id
+		intents = append(intents, id)
+		return nil
+	}
 	for start := 0; start < len(batch); start += workers {
 		order := batch[start:min(len(batch), start+workers)]
 		wave := make([]capturedChunk, len(order))
@@ -52,7 +71,7 @@ func (l *chunkLayerImpl) streamCutPayloads(ctx context.Context, batch []uint64, 
 			}
 			ref, had := head.Chunks[c.idx]
 			if !c.zero && !(had && ref.SHA256 == c.sum) {
-				c.key = l.newKey(c.idx)
+				c.key = keys[start+i]
 				c.size = len(c.data)
 			}
 			wave[i] = c
@@ -61,22 +80,18 @@ func (l *chunkLayerImpl) streamCutPayloads(ctx context.Context, batch []uint64, 
 		if err != nil {
 			return nil, intents, err
 		}
-		var keys []string
 		var changed []int
 		for i, c := range wave {
 			if c.key != "" {
-				keys = append(keys, c.key)
 				changed = append(changed, i)
 			}
 		}
-		if len(keys) > 0 {
-			id, err := l.remote.PutIntent(ctx, chunkIntent{Gen: head.Gen, Epoch: l.cfg.Epoch, Holder: l.cfg.Holder, Keys: keys})
-			if err != nil {
-				return nil, intents, fmt.Errorf("storage: capture intent: %w: %w", errChunkRemoteUnavailable, err)
+		if len(changed) > 0 {
+			if err := ensureIntent(); err != nil {
+				return nil, intents, err
 			}
-			intents = append(intents, id)
 			for _, i := range changed {
-				wave[i].intent = id
+				wave[i].intent = intent
 			}
 			if err = l.uploadBatch(ctx, len(changed), func(ctx context.Context, i int) error {
 				c := wave[changed[i]]
@@ -86,7 +101,7 @@ func (l *chunkLayerImpl) streamCutPayloads(ctx context.Context, batch []uint64, 
 				l.rememberPayload(c, head.Gen)
 				return nil
 			}); err != nil {
-				return nil, intents, fmt.Errorf("storage: capture upload: %w: %w", errChunkRemoteUnavailable, err)
+				return nil, intents, fmt.Errorf("storage: capture upload: %w", errors.Join(errChunkRemoteUnavailable, errCutUpload, err))
 			}
 		}
 		for i := range wave {

@@ -492,7 +492,7 @@ func (l *chunkLayerImpl) BeforeCheckpointAdvance(lsn uint64) error {
 	return l.persistPresence()
 }
 
-// saveDirty persists dirty Ã¢Ë†Âª inflight Ã¢Ë†Âª the chunks of WAL entries still in
+// saveDirty persists dirty ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Â¹ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Âª inflight ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Â¹ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Âª the chunks of WAL entries still in
 // the dirty map (all chunks when a BASE block landed or the set is unknown).
 func (l *chunkLayerImpl) saveDirty() error {
 	// Impl3's actual checkpoint caller persists its owned map after this
@@ -843,7 +843,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 			if cause == nil {
 				cause = errChunkCaptureRefused
 			}
-			abort(fmt.Errorf("%w: budget revoked: %w", errCutCOWAborted, cause))
+			abort(errors.Join(errCutCOWAborted, errCutBudgetRevoked, cause))
 		})
 		if admitErr != nil {
 			abort(nil)
@@ -1078,7 +1078,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	}); err != nil {
 		l.abortCut(all)
 		l.dropIntents(ctx, intents)
-		return chunkCutResult{}, fmt.Errorf("storage: capture upload: %w: %w", errChunkRemoteUnavailable, err)
+		return chunkCutResult{}, fmt.Errorf("storage: capture upload: %w", errors.Join(errChunkRemoteUnavailable, errCutUpload, err))
 	}
 	for _, u := range uploads {
 		next.Chunks[u.c.idx] = chunkRef{Key: u.key, SHA256: u.c.sum, Encoding: "full", BirthLSN: u.c.birth}
@@ -1431,6 +1431,23 @@ func (l *chunkLayerImpl) recordCut(r chunkCutResult, st chunkCutStats, err error
 			l.stats.CASUnknown++
 		}
 	}
+	abortReason := ""
+	switch {
+	case errors.Is(err, errCutSaverCapacity):
+		abortReason = "saver_capacity"
+	case errors.Is(err, errCutCOWCapacity):
+		abortReason = "cow_capacity"
+	case errors.Is(err, errCutBudgetRevoked):
+		abortReason = "budget_revoked"
+	case errors.Is(err, errCutUpload):
+		abortReason = "upload"
+	}
+	if abortReason != "" {
+		if l.stats.CutsAborted == nil {
+			l.stats.CutsAborted = map[string]uint64{}
+		}
+		l.stats.CutsAborted[abortReason]++
+	}
 	reason := ""
 	switch {
 	case err == nil && r.Noop:
@@ -1475,6 +1492,10 @@ func (l *chunkLayerImpl) Stats() chunkLayerStats {
 	out.CutsRefused = make(map[string]uint64, len(l.stats.CutsRefused))
 	for k, v := range l.stats.CutsRefused {
 		out.CutsRefused[k] = v
+	}
+	out.CutsAborted = make(map[string]uint64, len(l.stats.CutsAborted))
+	for k, v := range l.stats.CutsAborted {
+		out.CutsAborted[k] = v
 	}
 	out.PendingUnresolved = l.pending != nil
 	out.DirtyChunks = len(l.dirty)
@@ -2102,6 +2123,32 @@ func (l *chunkLayerImpl) Close() error {
 		w.join()
 	}
 	l.wg.Wait()
+	l.stMu.Lock()
+	protected := make(map[string]bool, len(l.pendingIntents))
+	if l.pending != nil {
+		for _, id := range l.pendingIntents {
+			protected[id] = true
+		}
+	}
+	var settled []string
+	for _, sc := range l.reusable {
+		if !protected[sc.intent] {
+			settled = append(settled, sc.intent)
+		}
+	}
+	for _, id := range l.leftoverIntents {
+		if !protected[id] {
+			settled = append(settled, id)
+		}
+	}
+	l.reusable = nil
+	l.leftoverIntents = nil
+	l.stMu.Unlock()
+	// Layer cancellation has joined all owners. Cleanup has a separate bounded
+	// context; an unknown CAS retains its roots for later epoch fencing.
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	l.dropIntents(cleanupCtx, settled)
+	cleanupCancel()
 	close(l.closeDone)
 	return nil
 }

@@ -152,8 +152,7 @@ func decodeWALEntryV3(buf []byte, blockSize uint32, numBlocks uint64) (walEntryV
 		return walEntryV3{}, errEntryTruncated
 	}
 	le := binary.LittleEndian
-	e := walEntryV3{LSN: le.Uint64(buf[0:8]), BatchCount: le.Uint64(buf[8:16]), Type: buf[16], Flags: buf[17], LBA: le.Uint64(buf[18:26]), Length: le.Uint32(buf[26:30]), DurableLSN: le.Uint64(buf[30:38]), LogicalStart: le.Uint64(buf[38:46])}
-	copy(e.Nonce[:], buf[46:62])
+	e := entryPrefixV3(buf)
 	n, err := e.payloadSizeV3(blockSize, numBlocks)
 	if err != nil {
 		return walEntryV3{}, err
@@ -181,4 +180,13 @@ func decodeWALEntryV3(buf []byte, blockSize uint32, numBlocks uint64) (walEntryV
 		e.Data = append([]byte(nil), buf[walEntryPrefixSizeV3:end]...)
 	}
 	return e, nil
+}
+
+// entryPrefixV3 decodes only the fixed prefix; payloadSizeV3 validates all
+// geometry before either a whole-record allocation or a bounded block scan.
+func entryPrefixV3(buf []byte) walEntryV3 {
+	le := binary.LittleEndian
+	e := walEntryV3{LSN: le.Uint64(buf[0:8]), BatchCount: le.Uint64(buf[8:16]), Type: buf[16], Flags: buf[17], LBA: le.Uint64(buf[18:26]), Length: le.Uint32(buf[26:30]), DurableLSN: le.Uint64(buf[30:38]), LogicalStart: le.Uint64(buf[38:46])}
+	copy(e.Nonce[:], buf[46:62])
+	return e
 }

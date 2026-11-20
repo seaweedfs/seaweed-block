@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"runtime"
@@ -15,6 +16,7 @@ func TestCutPayloadIntentCountIndependentOfCandidates(t *testing.T) {
 		_, f, l, _ := precopyLayer(t, 0, n)
 		l.cfg.UploadConcurrency = 1
 		before := len(f.putIntents)
+		mark := len(f.stats().ops)
 		r, err := l.Cut(ctTimeout(t))
 		if err != nil {
 			t.Fatal(err)
@@ -118,5 +120,24 @@ func TestV3ReadLargeBatchScratchIsBlockBounded(t *testing.T) {
 	_, ioErr, verr = s.readRecordV3(3, off, dataOff, lsn)
 	if ioErr != nil || !errors.Is(verr, errCRCMismatch) {
 		t.Fatalf("unrequested payload corruption: io=%v validation=%v", ioErr, verr)
+	}
+}
+
+func TestCutAbortReasonsAreCountedAndCopied(t *testing.T) {
+	_, _, l, _ := precopyLayer(t, 0, 1)
+	for reason, cause := range map[string]error{"saver_capacity": errCutSaverCapacity, "cow_capacity": errCutCOWCapacity, "budget_revoked": errCutBudgetRevoked, "upload": errCutUpload} {
+		l.recordCut(chunkCutResult{}, chunkCutStats{}, errors.Join(errCutCOWAborted, cause))
+		st := l.Stats()
+		if st.CutsAborted[reason] != 1 {
+			t.Fatalf("%s: %+v", reason, st.CutsAborted)
+		}
+		st.CutsAborted[reason] = 100
+		if l.Stats().CutsAborted[reason] != 1 {
+			t.Fatal("Stats exposed mutable counter map")
+		}
+	}
+	raw, err := json.Marshal(l.Stats())
+	if err != nil || !bytes.Contains(raw, []byte(`"CutsAborted"`)) {
+		t.Fatalf("status: %s %v", raw, err)
 	}
 }
