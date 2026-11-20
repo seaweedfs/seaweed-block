@@ -164,11 +164,12 @@ type StorageBackend struct {
 	// (e.g., "awaiting recovery", "local epoch ahead of assignment").
 	// Readiness waits cover pending chunk attachment and temporary pre-copy freezes.
 	// Readiness flags and readyChanged are protected by mu.
-	waitAttachReady  bool
-	waitPrecopyReady bool // temporary pre-copy freeze; queued I/O has not reached storage
-	readyChanged     chan struct{}
-	operational      atomic.Bool
-	opEvidence       atomic.Value // string
+	waitAttachReady bool
+	precopy         *precopyAdmission // under mu; owns transient admission and FIFO waiters
+	admittedIO      int               // under mu; operations past the complete gate
+	readyChanged    chan struct{}
+	operational     atomic.Bool
+	opEvidence      atomic.Value // string
 
 	// ioMu is the I/O admission boundary: every Read, Write and Sync holds
 	// its read side for the whole operation, gate included, so StopIO can
@@ -359,6 +360,7 @@ func (b *StorageBackend) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.closed = true
+	b.finishPrecopyLocked(false)
 	b.notifyReadReadyLocked()
 	return nil
 }
@@ -474,7 +476,7 @@ func (b *StorageBackend) setOperationalLocked(ok bool, evidence string) {
 	b.opEvidence.Store(evidence)
 	b.operational.Store(ok)
 	b.waitAttachReady = false
-	b.waitPrecopyReady = false
+	b.finishPrecopyLocked(ok)
 	b.notifyReadReadyLocked()
 }
 
@@ -483,6 +485,22 @@ func (b *StorageBackend) setOperationalLocked(ok bool, evidence string) {
 // holding its read side may itself be queued on that barrier. Failed attempts
 // leave the frontend unchanged. Lock order: try ioMu -> try mu; neither lock waits, and no store calls.
 func (b *StorageBackend) TryStopIO(evidence string) bool {
+	// A drained admission pause excludes late gate callers even if they still
+	// hold ioMu's read side. Their final registration check cannot reach storage.
+	if b.mu.TryLock() {
+		if b.precopy != nil && b.precopy.active {
+			defer b.mu.Unlock()
+			if b.admittedIO != 0 || b.closed || !b.operational.Load() {
+				return false
+			}
+			b.opEvidence.Store(evidence)
+			b.operational.Store(false)
+			b.waitAttachReady = false
+			b.notifyReadReadyLocked()
+			return true
+		}
+		b.mu.Unlock()
+	}
 	if !b.ioMu.TryLock() {
 		return false
 	}
@@ -494,11 +512,13 @@ func (b *StorageBackend) TryStopIO(evidence string) bool {
 	if b.closed || !b.operational.Load() {
 		return false
 	}
-	if evidence == "" {
-		evidence = "not operational"
-	}
-	b.setOperationalLocked(false, evidence)
-	b.waitPrecopyReady = true
+	p := &precopyAdmission{active: true, started: time.Now(), drained: make(chan struct{}), drainDone: true}
+	close(p.drained)
+	b.precopy = p
+	b.opEvidence.Store(evidence)
+	b.operational.Store(false)
+	b.waitAttachReady = false
+	b.notifyReadReadyLocked()
 	return true
 }
 
@@ -543,7 +563,7 @@ func (b *StorageBackend) Sync(ctx context.Context) error {
 	defer iolatency.BackendExit(ctx)
 	latencyStart := time.Now()
 	defer func() { b.profile.syncLatency.Observe(time.Since(latencyStart)) }()
-	release, err := b.admitAfterPrecopy(ctx)
+	release, err := b.admitPrecopy(ctx, b.admit)
 	if err != nil {
 		return err
 	}
@@ -619,6 +639,10 @@ func (b *StorageBackend) setChunkAttachPending(evidence string) {
 }
 
 func (b *StorageBackend) admitAfterAttach(ctx context.Context) (func(), error) {
+	return b.admitPrecopy(ctx, func() (func(), error) { return b.admitAfterAttachUnqueued(ctx) })
+}
+
+func (b *StorageBackend) admitAfterAttachUnqueued(ctx context.Context) (func(), error) {
 	release, err := b.admit()
 	if !errors.Is(err, frontend.ErrNotReady) {
 		return release, err
@@ -627,7 +651,7 @@ func (b *StorageBackend) admitAfterAttach(ctx context.Context) (func(), error) {
 		hook()
 	}
 	b.mu.Lock()
-	pending := b.waitAttachReady || b.waitPrecopyReady
+	pending := b.waitAttachReady
 	b.mu.Unlock()
 	if !pending {
 		// Readiness may have published after the initial refusal.
@@ -636,24 +660,6 @@ func (b *StorageBackend) admitAfterAttach(ctx context.Context) (func(), error) {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	return b.awaitAttachAdmission(ctx)
-}
-
-// Sync keeps its immediate pre-attach refusal; only the pre-copy pause may wait.
-func (b *StorageBackend) admitAfterPrecopy(ctx context.Context) (func(), error) {
-	release, err := b.admit()
-	if !errors.Is(err, frontend.ErrNotReady) {
-		return release, err
-	}
-	b.mu.Lock()
-	pending := b.waitPrecopyReady
-	b.mu.Unlock()
-	if pending {
-		return b.admitAfterAttach(ctx)
-	}
-	if b.operational.Load() {
-		return b.admit()
-	}
-	return release, err
 }
 
 // notifyReadReadyLocked wakes waiting I/O without making them hold ioMu while
@@ -674,7 +680,7 @@ func (b *StorageBackend) awaitAttachAdmission(ctx context.Context) (func(), erro
 			b.readyChanged = make(chan struct{})
 		}
 		changed := b.readyChanged
-		terminal := b.closed || b.observerErr != nil || !(b.waitAttachReady || b.waitPrecopyReady)
+		terminal := b.closed || b.observerErr != nil || !b.waitAttachReady
 		b.mu.Unlock()
 		if err := ctx.Err(); err != nil {
 			return nil, b.attachReadyTimeout(err)
@@ -778,7 +784,24 @@ func (b *StorageBackend) admit() (func(), error) {
 		b.ioMu.RUnlock()
 		return nil, err
 	}
-	return b.ioMu.RUnlock, nil
+	b.mu.Lock()
+	if b.precopy != nil && b.precopy.active {
+		b.mu.Unlock()
+		b.ioMu.RUnlock()
+		return nil, fmt.Errorf("%w: %w: pre-copy admission paused", frontend.ErrNotReady, frontend.ErrBackendBusy)
+	}
+	b.admittedIO++
+	b.mu.Unlock()
+	return func() {
+		b.mu.Lock()
+		b.admittedIO--
+		if p := b.precopy; p != nil && p.active && b.admittedIO == 0 && !p.drainDone {
+			close(p.drained)
+			p.drainDone = true
+		}
+		b.mu.Unlock()
+		b.ioMu.RUnlock()
+	}, nil
 }
 
 // gate is the per-I/O precondition stack. Order matters:
@@ -803,7 +826,7 @@ func (b *StorageBackend) readyCheck() error {
 	closed := b.closed
 	chunkFenced := b.chunkFenced
 	observerErr := b.observerErr
-	precopyPending := b.waitPrecopyReady
+	precopyPending := b.precopy != nil && b.precopy.active
 	b.mu.Unlock()
 	if closed {
 		return frontend.ErrBackendClosed
@@ -814,11 +837,11 @@ func (b *StorageBackend) readyCheck() error {
 	if chunkFenced != nil && chunkFenced() {
 		return frontend.ErrStalePrimary
 	}
+	if precopyPending {
+		return fmt.Errorf("%w: %w: pre-copy admission paused", frontend.ErrNotReady, frontend.ErrBackendBusy)
+	}
 	if !b.operational.Load() {
 		ev, _ := b.opEvidence.Load().(string)
-		if precopyPending {
-			return fmt.Errorf("%w: %w: %s", frontend.ErrNotReady, frontend.ErrBackendBusy, ev)
-		}
 		return fmt.Errorf("%w: %s", frontend.ErrNotReady, ev)
 	}
 	return nil
