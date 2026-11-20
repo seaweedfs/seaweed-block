@@ -364,6 +364,12 @@ type chunkLayerConfig struct {
 	// UploadConcurrency bounds capture/pre-copy Put calls (0 defaults to 8).
 	UploadConcurrency int
 
+	// PayloadMemoryBudget bounds this layer's uploader, saver and cached payload
+	// bytes (0 uses 64 MiB, or six chunks for larger geometry). Host-wide
+	// admission belongs behind a single Budget interface in the host limiter;
+	// this per-process budget does not coordinate other blockvolume processes.
+	PayloadMemoryBudget int64
+
 	// COWSpillLimit caps saved-before-write
 	// side bytes. Native pre-copy is triggered when remaining candidate
 	// bytes exceed half this cap; it streams directly to remote, without a
