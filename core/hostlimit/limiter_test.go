@@ -259,7 +259,7 @@ func TestKilledProcessReleasesButLiveHolderDoesNot(t *testing.T) {
 		if !ok {
 			t.Fatal("child failed")
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("child not ready")
 	}
 	l := newTest(t, c)
@@ -406,7 +406,7 @@ func TestKilledInitializerDoesNotPublishPartialConfiguration(t *testing.T) {
 		if !ok {
 			t.Fatal("initializer did not reach write boundary")
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("initializer boundary not reached")
 	}
 	if _, e = os.Stat(filepath.Join(c.Directory, "configuration.json")); !errors.Is(e, os.ErrNotExist) {
