@@ -397,6 +397,8 @@ type chunkLayerConfig struct {
 // chunkCutStats describes one cut. The periodic-cut work fills it; a zero
 // value means "not measured".
 type chunkCutStats struct {
+	PayloadNs int64 // disjoint streaming/copy/upload wall intervals
+
 	// Local validated WAL attempts and local copy duration, including savers.
 	COWWALReadAttempts uint64
 	COWLocalReadNs     int64
@@ -482,6 +484,7 @@ type chunkLayerStats struct {
 //   - FullHash says the cut compared every chunk by hash (no usable bitmap,
 //     or the first cut after a BASE install).
 type chunkCutResult struct {
+	Precopy  PrecopyReport
 	H        uint64
 	Head     chunkHead
 	Noop     bool

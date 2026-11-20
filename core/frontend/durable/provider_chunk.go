@@ -902,49 +902,133 @@ func (p *DurableProvider) DetachVolume(ctx context.Context, volumeID string) (st
 	// One freeze budget covers the drain, the final cut AND the settlement:
 	// the cut gets three quarters, the settlement what is left. The bound is
 	// cooperative (contexts): a syscall that never returns is not bounded here.
-	start := time.Now()
-	cutCtx, cancel := context.WithDeadline(ctx, start.Add(freeze*3/4))
-	defer cancel()
+	var start time.Time
+	var stopIOReturned time.Time
 	defer func() {
-		if d := time.Since(start); d > detachFreezeTarget {
-			log.Printf("durable: ALARM detach of volume=%s held guest I/O for %s (target %s, bound %s)", volumeID, d.Round(time.Millisecond), detachFreezeTarget, freeze)
+		if !stopIOReturned.IsZero() {
+			// Emit after the cut releases its barrier, using the actual return time.
+			log.Printf("durable: volume=%s StopIO returned at %s", volumeID, stopIOReturned.UTC().Format(time.RFC3339Nano))
 		}
 	}()
-	if trace := p.testDetachTrace; trace != nil {
-		dl, _ := cutCtx.Deadline()
-		trace("cut", dl)
+	accountCtx, countCAS := storage.WithChunkCASAccounting(ctx)
+	var casAtFreeze uint64
+	cutCtx, cancel := context.WithCancelCause(accountCtx)
+	defer cancel(context.Canceled)
+	var timer *time.Timer
+	beginFreeze := func() {
+		start = time.Now()
+		casAtFreeze = countCAS()
+		timer = time.AfterFunc(freeze*3/4, func() { cancel(context.DeadlineExceeded) })
 	}
-	h.chunkDetach = true
-	var resumed func() // tells the host this attempt aborted and serving resumed
-	if hook := p.cfg.OnChunkDetach; hook != nil {
-		attempt := hook(volumeID)
-		if done := p.cfg.OnChunkDetachResumed; done != nil {
-			resumed = func() { done(volumeID, attempt) }
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+		if !start.IsZero() {
+			if d := time.Since(start); d > detachFreezeTarget {
+				log.Printf("durable: ALARM detach of volume=%s held guest I/O for %s (target %s, bound %s)", volumeID, d.Round(time.Millisecond), detachFreezeTarget, freeze)
+			}
+		}
+	}()
+	var resumed func()
+	notifyDetach := func() {
+		if hook := p.cfg.OnChunkDetach; hook != nil {
+			attempt := hook(volumeID)
+			if done := p.cfg.OnChunkDetachResumed; done != nil {
+				resumed = func() { done(volumeID, attempt) }
+			}
 		}
 	}
-	if stop := p.testDetachStopIO; stop != nil {
-		err = stop(cutCtx)
-	} else {
-		err = h.backend.StopIO(cutCtx, "chunk detach: I/O stopped until a new attach")
-	}
-	if err == nil {
+	var r storage.ChunkCutResult
+	if p.cfg.ChunkDetachPrecopy {
+		owner, ok := layer.(interface {
+			PrecopyDetachWithAdmission(context.Context, func(context.Context) (func(), error), func() bool) (storage.ChunkCutResult, error)
+		})
+		if !ok {
+			return r, 0, fmt.Errorf("%w: layer lacks pre-copy", storage.ErrPrecopyUnknown)
+		}
+		// Notify outside captureMu: the host callback may take its own state lock.
+		notifyDetach()
+		// Cancel/join the periodic owner before any final freeze, while serving.
 		p.stopChunkLoop(h)
-		var r storage.ChunkCutResult
-		if r, err = layer.Detach(hostlimit.WithClass(cutCtx, hostlimit.Urgent)); err == nil {
+		r, err = owner.PrecopyDetachWithAdmission(hostlimit.WithClass(cutCtx, hostlimit.Urgent), h.backend.BeginPrecopyPause, func() bool {
+			if !h.backend.TryStopIO("chunk pre-copy: final detached cut") {
+				return false
+			}
+			stopIOReturned = time.Now()
+			h.chunkDetach = true
+			beginFreeze()
+			return true
+		})
+		// Log only after capture releases its barrier; at most five records.
+		for _, a := range r.Precopy.Rounds {
+			log.Printf("durable: pre-copy attempt volume=%s attempt=%d drain_ms=%.3f barrier_ms=%.3f pause_ms=%.3f reason=%s tail=%d rate_samples=%d estimate_ms=%.3f frozen=%t err=%s", volumeID, a.Attempt, float64(a.Drain)/float64(time.Millisecond), float64(a.Barrier)/float64(time.Millisecond), float64(a.Pause)/float64(time.Millisecond), a.Reason, a.TailBytes, a.RateSamples, float64(a.Estimate)/float64(time.Millisecond), a.Frozen, a.Error)
+		}
+		log.Printf("durable: pre-copy volume=%s attempts=%d measurement_rounds=%d samples_at_start=%d tail=%d rate=%.0f sample_age=%s fixed=%s estimate=%s frozen=%t reason=%s err=%v", volumeID, r.Precopy.Attempts, r.Precopy.MeasurementRounds, r.Precopy.SamplesAtStart, r.Precopy.TailBytes, r.Precopy.BytesPerSecond, r.Precopy.SampleAge, r.Precopy.Fixed, r.Precopy.Estimate, r.Precopy.Frozen, r.Precopy.Reason, err)
+		if err == nil {
+			if !start.IsZero() {
+				r.Precopy.Finish(time.Since(start)+r.Precopy.BarrierBeforeFreeze, 0, false)
+			}
 			return r, h.storage.NextLSN() - 1, nil
 		}
+		if !r.Precopy.Frozen {
+			p.mu.Lock()
+			active := !p.closed && h.chunk == layer
+			if active {
+				p.startChunkLoop(volumeID, h, layer)
+			}
+			p.mu.Unlock()
+			// No final freeze occurred: clear only this still-serving attempt's
+			// fast-poll token. A prior stopped/unknown detach must remain pending.
+			if active && !h.chunkDetach && h.backend.operational.Load() && !layer.Fenced() && resumed != nil {
+				resumed()
+			}
+			return r, 0, err
+		}
+	} else {
+		beginFreeze()
+		if trace := p.testDetachTrace; trace != nil {
+			trace("cut", start.Add(freeze*3/4))
+		}
+		h.chunkDetach = true
+		notifyDetach()
+		if stop := p.testDetachStopIO; stop != nil {
+			err = stop(cutCtx)
+		} else {
+			err = h.backend.StopIO(cutCtx, "chunk detach: I/O stopped until a new attach")
+		}
+		if err == nil {
+			stopIOReturned = time.Now()
+		}
+		if err == nil {
+			p.stopChunkLoop(h)
+			if r, err = layer.Detach(hostlimit.WithClass(cutCtx, hostlimit.Urgent)); err == nil {
+				return r, h.storage.NextLSN() - 1, nil
+			}
+		}
 	}
+	err = errors.Join(err, context.Cause(cutCtx))
 	// Every failure, a failed drain included, is settled before anything
 	// resumes: an earlier detach that applied, an unresolved detach CAS or a
 	// fenced layer must never resume serving. The settlement keeps the rest
 	// of the freeze budget even when the caller's context is gone.
-	sctx, scancel := context.WithDeadline(context.WithoutCancel(ctx), start.Add(freeze))
+	sctx, scancel := context.WithDeadline(context.WithoutCancel(cutCtx), start.Add(freeze))
 	defer scancel()
 	if trace := p.testDetachTrace; trace != nil {
 		dl, _ := sctx.Deadline()
 		trace("settle", dl)
 	}
 	how, dr, serr := layer.SettleDetach(sctx)
+	if p.cfg.ChunkDetachPrecopy {
+		attempts := countCAS() - casAtFreeze
+		extra := uint64(0)
+		if attempts > 0 {
+			extra = attempts - 1
+		}
+		r.Precopy.Finish(time.Since(start)+r.Precopy.BarrierBeforeFreeze, extra, true)
+		log.Printf("durable: pre-copy settlement volume=%s elapsed=%s extra_cas=%d declared_worst=%s latency_gate_failed=%t outcome=%v err=%v", volumeID, r.Precopy.FreezeElapsed, extra, r.Precopy.DeclaredWorst, r.Precopy.LatencyGateFailed, how, serr)
+		dr.Precopy = r.Precopy
+	}
 	switch {
 	case serr != nil:
 		return storage.ChunkCutResult{}, 0, fmt.Errorf("%w: %w (settle: %w)", ErrDetachOutcomeUnknown, err, serr)
