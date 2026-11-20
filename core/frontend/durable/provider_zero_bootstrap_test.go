@@ -10,7 +10,6 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"sync"
 	"testing"
-	"time"
 )
 
 type bootstrapBlobs struct {
@@ -36,8 +35,7 @@ func (b *bootstrapBlobs) Get(_ context.Context, id string) ([]byte, error) {
 }
 
 func TestRestoreEnsureVolumeZeroHEADPreservesCheckpointedBootstrap(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-	defer cancel()
+	ctx := hangGuard(t)
 	filer := chunkstore.NewMemFiler()
 	catalog, err := chunkstore.NewCatalog(filer, "/bootstrap")
 	if err != nil {

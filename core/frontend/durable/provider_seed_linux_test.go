@@ -13,7 +13,6 @@ import (
 	"sync"
 	"syscall"
 	"testing"
-	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
@@ -87,8 +86,7 @@ func failSeedFD(t *testing.T, root string) func() {
 }
 
 func TestRestoreFailedSeedSyncRetryCaptureAndReopen(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	ctx := hangGuard(t)
 	root := filepath.Join(t.TempDir(), "provider")
 	remote := storage.NewMemChunkRemote()
 	data := bytes.Repeat([]byte{0xA7}, 4*4096)
@@ -191,8 +189,7 @@ func TestRestoreFailedSeedSyncRetryCaptureAndReopen(t *testing.T) {
 }
 
 func TestRestoreFailedSeedNeverTakesOwnership(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	ctx := hangGuard(t)
 	root := filepath.Join(t.TempDir(), "provider")
 	remote := storage.NewMemChunkRemote()
 	if _, err := remote.CASHead(ctx, storage.ChunkHeadVersion{}, storage.ChunkHead{Epoch: 1, Holder: "old", RemoteLSN: 7}); err != nil {

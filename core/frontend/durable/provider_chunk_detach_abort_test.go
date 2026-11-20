@@ -25,7 +25,7 @@ type faultRemote struct {
 	*storage.MemChunkRemote
 	mu          sync.Mutex
 	putErr      error  // returned by every Put while set
-	casMode     string // "", "precondition", "lost" (not applied, error), "applied-lost" (applied, error), "hold"
+	casMode     string // "", "precondition", "lost" (not applied, error), "applied-lost" (applied, error), "hold", "hold-detach"
 	getHeadErr  error  // returned by every GetHead while set
 	getHeadFail int    // the next N GetHead calls fail
 	getHeadHold bool   // every GetHead blocks until its caller gives up
@@ -33,6 +33,16 @@ type faultRemote struct {
 	// remote only when release closes; its own result goes to delayedErr.
 	release    chan struct{}
 	delayedErr chan error
+	// held records the CAS held by "hold-detach": the deadline of the context
+	// it was given and when that context ended.
+	held heldCAS
+}
+
+type heldCAS struct {
+	entered     bool
+	deadline    time.Time
+	hasDeadline bool
+	ended       time.Time
 }
 
 var errInjected = errors.New("injected remote fault")
@@ -71,7 +81,12 @@ func (r *faultRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
 func (r *faultRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVersion, next storage.ChunkHead) (uint64, error) {
 	r.mu.Lock()
 	mode := r.casMode
-	r.casMode = "" // one fault, on the next CAS only
+	switch {
+	case mode == "hold-detach" && next.State != storage.ChunkHeadDetached:
+		mode = "" // only the detach CAS is held; others (a running chunk loop) pass
+	default:
+		r.casMode = "" // one fault, on the next CAS only
+	}
 	r.mu.Unlock()
 	switch mode {
 	case "precondition":
@@ -80,6 +95,13 @@ func (r *faultRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVer
 		return 0, errInjected
 	case "hold": // held until the caller gives up: not applied
 		<-ctx.Done()
+		return 0, ctx.Err()
+	case "hold-detach": // the detach CAS, held until its caller gives up; witnessed
+		dl, ok := ctx.Deadline()
+		r.set(func(r *faultRemote) { r.held = heldCAS{entered: true, deadline: dl, hasDeadline: ok} })
+		<-ctx.Done()
+		ended := time.Now()
+		r.set(func(r *faultRemote) { r.held.ended = ended })
 		return 0, ctx.Err()
 	case "delayed":
 		r.mu.Lock()
@@ -224,10 +246,14 @@ func TestWALStoreChunk_UndecidableDetachStaysStopped(t *testing.T) {
 	}
 }
 
-// The freeze is bounded by DetachFreezeTimeout: a CAS that hangs ends there,
-// the outcome is settled (HEAD still at base: cancelled) and serving resumes,
-// all well inside bound + settle.
+// The freeze is bounded by DetachFreezeTimeout: a detach CAS that hangs ends at
+// the cut's deadline (three quarters of the bound), the outcome is settled
+// (HEAD still at base: cancelled) inside the bound, and serving resumes. The
+// test asserts against the deadlines the detach itself traced, so a loaded
+// host cannot turn the order into a timing failure; the settlement keeps a
+// quarter of a 2 s bound for its HEAD read and cancel.
 func TestWALStoreChunk_DetachFreezeIsBoundedThenResumes(t *testing.T) {
+	const freeze = 2 * time.Second
 	remote := &faultRemote{MemChunkRemote: storage.NewMemChunkRemote()}
 	p, err := durable.NewDurableProvider(durable.ProviderConfig{
 		Impl:                durable.ImplWALStoreChunk,
@@ -235,7 +261,7 @@ func TestWALStoreChunk_DetachFreezeIsBoundedThenResumes(t *testing.T) {
 		BlockSize:           4096,
 		NumBlocks:           pcBlocks,
 		ChunkBlocks:         pcChunkBlocks,
-		DetachFreezeTimeout: 300 * time.Millisecond,
+		DetachFreezeTimeout: freeze,
 		ChunkRemoteFor:      func(string) (storage.ChunkRemote, error) { return remote, nil },
 	}, v1View())
 	if err != nil {
@@ -256,16 +282,41 @@ func TestWALStoreChunk_DetachFreezeIsBoundedThenResumes(t *testing.T) {
 	if _, err := b.Write(context.Background(), 8192, block(2)); err != nil {
 		t.Fatal(err)
 	}
-	remote.set(func(r *faultRemote) { r.casMode = "hold" })
-	start := time.Now()
+	remote.set(func(r *faultRemote) { r.casMode = "hold-detach" })
+	deadlines := map[string]time.Time{}
+	durable.SetTestDetachTrace(p, func(stage string, d time.Time) { deadlines[stage] = d })
 	_, _, err = p.DetachVolume(context.Background(), "v1")
-	took := time.Since(start)
+	end := time.Now()
 	if !errors.Is(err, durable.ErrDetachAborted) || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("detach with a hung CAS: %v; want an aborted detach at the freeze bound", err)
 	}
-	// The cut gets three quarters of the bound, the settlement the rest.
-	if took < 225*time.Millisecond || took > 300*time.Millisecond+200*time.Millisecond {
-		t.Fatalf("detach with a hung CAS took %v; want the cut ended at 3/4 of the 300 ms freeze bound and the total within it", took)
+	// One budget from one origin: the cut ends at three quarters of it, the
+	// settlement at its end (exact, both derive from the same start).
+	cut, settle := deadlines["cut"], deadlines["settle"]
+	if gap := settle.Sub(cut); gap != freeze/4 {
+		t.Fatalf("settlement deadline %v after the cut deadline; want a quarter of the %v bound", gap, freeze)
+	}
+	// The held operation is the detach CAS itself: it ran under exactly the
+	// cut's deadline, and was released by that deadline expiring.
+	var held heldCAS
+	remote.set(func(r *faultRemote) { held = r.held })
+	if !held.entered {
+		t.Fatal("the detach CAS was never held")
+	}
+	// The cut may bound the CAS by a context deadline or by a timer that
+	// cancels it: a deadline, when there is one, must be the cut's exactly;
+	// either way the CAS must end no earlier than the cut deadline.
+	if held.hasDeadline && !held.deadline.Equal(cut) {
+		t.Fatalf("held detach CAS deadline %v; want the cut deadline %v", held.deadline, cut)
+	}
+	if held.ended.Before(cut) {
+		t.Fatalf("held detach CAS ended %v before its deadline", cut.Sub(held.ended))
+	}
+	if end.Before(held.ended) {
+		t.Fatal("detach returned before its held CAS ended")
+	}
+	if late := end.Sub(settle); late > 500*time.Millisecond {
+		t.Fatalf("detach returned %v after the freeze bound", late)
 	}
 	assertServing(t, p, b, remote)
 }

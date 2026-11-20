@@ -11,7 +11,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
@@ -49,8 +48,7 @@ func (o *countingRebaser) seen() []uint64 {
 // before the takeover CAS. Returns the recovery error.
 func restoreWithObserver(t *testing.T, obs *countingRebaser, atCAS func(p *durable.DurableProvider)) (storage.ChunkRemote, *durable.DurableProvider, *atomic.Int32, error) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	t.Cleanup(cancel)
+	ctx := hangGuard(t)
 	remote := storage.NewMemChunkRemote()
 	if _, err := remote.CASHead(ctx, storage.ChunkHeadVersion{}, storage.ChunkHead{Epoch: 1, Holder: "old", RemoteLSN: 7}); err != nil {
 		t.Fatal(err)
@@ -104,8 +102,7 @@ func TestRestoreRefusedShipRebaseKeepsHeadAndIOClosed(t *testing.T) {
 	if err == nil {
 		t.Fatal("restore succeeded although the observer refused the post-seed ship-LSN rebase")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	ctx := hangGuard(t)
 	h, herr := remote.GetHead(ctx)
 	if herr != nil || calls.Load() != 0 || h.Epoch != 1 || h.Holder != "old" {
 		t.Fatalf("HEAD claimed despite a refused ship rebase: CAS calls=%d head=%+v err=%v; want 0 calls, epoch 1 holder old", calls.Load(), h, herr)
