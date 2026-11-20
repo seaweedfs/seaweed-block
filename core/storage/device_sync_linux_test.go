@@ -11,8 +11,8 @@ import (
 
 func TestDeviceDataSyncPolicy(t *testing.T) {
 	for _, tc := range []struct {
-		name, cache, want    string
-		partition, dm, mixed bool
+		name, cache, want        string
+		partition, dm, md, mixed bool
 	}{
 		{name: "write-back", cache: "write back\n", want: "fsync"},
 		{name: "write-through", cache: "write through\n", want: "fdatasync"},
@@ -22,6 +22,9 @@ func TestDeviceDataSyncPolicy(t *testing.T) {
 		{name: "dm-through", cache: "write through\n", want: "fdatasync", dm: true},
 		{name: "dm-mixed", cache: "write through\n", want: "fsync", dm: true, mixed: true},
 		{name: "dm-missing", want: "fsync", dm: true},
+		{name: "md-through", cache: "write through\n", want: "fdatasync", md: true},
+		{name: "md-mixed", cache: "write through\n", want: "fsync", md: true, mixed: true},
+		{name: "md-missing", want: "fsync", md: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -54,9 +57,14 @@ func TestDeviceDataSyncPolicy(t *testing.T) {
 				put(disk+"/nvme0n1p1/partition", "1\n")
 				device = disk + "/nvme0n1p1"
 			}
-			if tc.dm {
+			if tc.dm || tc.md {
 				device = "devices/virtual/block/dm-0"
-				put(device+"/dm/name", "volume")
+				if tc.md {
+					device = "devices/virtual/block/md0"
+					put(device+"/md/level", "raid1")
+				} else {
+					put(device+"/dm/name", "volume")
+				}
 				// A virtual queue's advertised policy is not a backing-device proof.
 				put(device+"/queue/write_cache", "write through\n")
 				link(disk, device+"/slaves/nvme0n1")
@@ -65,7 +73,7 @@ func TestDeviceDataSyncPolicy(t *testing.T) {
 					link("devices/pci/block/nvme1n1", device+"/slaves/nvme1n1")
 				}
 			}
-			if tc.cache != "" || tc.dm {
+			if tc.cache != "" || tc.dm || tc.md {
 				link(device, "dev/block/8:1")
 			}
 			mode, reason := deviceDataSyncMode(root, 8, 1)
@@ -94,7 +102,7 @@ func TestExplicitDataSyncPolicyDoesNotInspectDevice(t *testing.T) {
 }
 
 func TestDeviceDataSyncMalformedTopology(t *testing.T) {
-	for _, shape := range []string{"empty-dm", "cycle", "unreadable-cache"} {
+	for _, shape := range []string{"empty-dm", "empty-md", "cycle", "unreadable-cache"} {
 		t.Run(shape, func(t *testing.T) {
 			root := t.TempDir()
 			device := filepath.Join(root, "dev/block/8:1")
@@ -102,8 +110,12 @@ func TestDeviceDataSyncMalformedTopology(t *testing.T) {
 				t.Fatal(err)
 			}
 			switch shape {
-			case "empty-dm":
-				if err := os.Mkdir(filepath.Join(device, "dm"), 0755); err != nil {
+			case "empty-dm", "empty-md":
+				kind := "dm"
+				if shape == "empty-md" {
+					kind = "md"
+				}
+				if err := os.Mkdir(filepath.Join(device, kind), 0755); err != nil {
 					t.Fatal(err)
 				}
 			case "cycle":
@@ -136,5 +148,18 @@ func TestDefaultDataSyncUnknownFileFallsBack(t *testing.T) {
 	mode, reason, err := selectedDataSyncMode(f)
 	if err != nil || mode != "fsync" || !strings.Contains(reason, "unavailable") {
 		t.Fatalf("fallback: %s %q %v", mode, reason, err)
+	}
+}
+
+func TestExplicitAutoDataSyncPolicy(t *testing.T) {
+	t.Setenv("SWBLOCK_SYNC", "auto")
+	f, err := os.CreateTemp(t.TempDir(), "volume")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	mode, reason, err := selectedDataSyncMode(f)
+	if err != nil || mode != "fsync" || !strings.Contains(reason, "unavailable") {
+		t.Fatalf("auto fallback: %s %q %v", mode, reason, err)
 	}
 }

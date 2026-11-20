@@ -64,11 +64,13 @@ func requireWriteThrough(path string, visiting map[string]bool, depth int) error
 		}
 		return nil
 	}
-	// A dm queue alone does not establish the physical cache policy.
-	if _, err := os.Stat(filepath.Join(path, "dm")); err == nil {
-		return fmt.Errorf("dm backing devices unavailable")
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("dm identity unavailable: %w", err)
+	// A virtual dm/md queue alone does not establish the physical cache policy.
+	for _, kind := range []string{"dm", "md"} {
+		if _, err := os.Stat(filepath.Join(path, kind)); err == nil {
+			return fmt.Errorf("%s backing devices unavailable", kind)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("%s identity unavailable: %w", kind, err)
+		}
 	}
 	cache, err := os.ReadFile(filepath.Join(path, "queue", "write_cache"))
 	if err != nil {
