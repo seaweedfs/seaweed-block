@@ -189,6 +189,123 @@ func TestNativeReplacementAllBlocksAfterCheckpoint(t *testing.T) {
 	}
 }
 
+func TestNativeReplacementCloseFinalCheckpoint(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(map[bool]string{false: "ok", true: "publication_fault"}[fail], func(t *testing.T) {
+			s, path := newMappedCheckpointStoreV3(t)
+			if _, err := s.Write(1, blk(0xA1)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.Sync(); err != nil {
+				t.Fatal(err)
+			}
+			boom := errors.New("final native checkpoint publication")
+			calls := 0
+			if fail {
+				s.v3.pub.io.fsync = func() error { calls++; return boom }
+			}
+			// The fixture's old flusher is already joined; install an idle
+			// production flusher so Close owns its one final flush.
+			s.flusher = newFlusher(s, flusherConfig{Interval: time.Hour})
+			go s.flusher.run()
+			err := s.Close()
+			if fail {
+				if calls == 0 || !errors.Is(err, boom) || s.CheckpointLSN() != 0 {
+					t.Fatalf("Close fault: calls=%d cp=%d err=%v", calls, s.CheckpointLSN(), err)
+				}
+			} else if err != nil || s.CheckpointLSN() != 1 || s.dm.len() != 0 {
+				t.Fatalf("Close checkpoint=%d dirty=%d err=%v", s.CheckpointLSN(), s.dm.len(), err)
+			}
+			r, err := OpenWALStore(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.DisableAutoFlushForRecoveryTest()
+			t.Cleanup(func() { _ = r.Close() })
+			if _, err := r.Recover(); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := r.Read(1); err != nil || !bytes.Equal(got, blk(0xA1)) {
+				t.Fatalf("Close lost acknowledged bytes: %v", err)
+			}
+		})
+	}
+}
+
+func TestNativeReplacementFlusherRejectsInvalidRecord(t *testing.T) {
+	for _, fault := range []string{"crc", "nonce", "lsn", "lba", "barrier"} {
+		t.Run(fault, func(t *testing.T) {
+			s, path := newMappedCheckpointStoreV3(t)
+			if _, err := s.Write(2, blk(0x22)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.Sync(); err != nil {
+				t.Fatal(err)
+			}
+			off, _, _, _, ok := s.dm.get(2)
+			if !ok {
+				t.Fatal("dirty record missing")
+			}
+			original := make([]byte, walEntryHeaderSizeV3+4096)
+			absolute := int64(s.sb.WALOffset + off)
+			if _, err := s.fd.ReadAt(original, absolute); err != nil {
+				t.Fatal(err)
+			}
+			e, err := decodeWALEntryV3(original, 4096, 64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch fault {
+			case "nonce":
+				e.Nonce[0] ^= 0x7f
+			case "lsn":
+				e.LSN++
+			case "lba":
+				e.LBA++
+			case "barrier":
+				e.Type, e.Length, e.Data = walEntryBarrier, 0, nil
+			}
+			bad, err := encodeWALEntryV3(e, 4096, 64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fault == "crc" {
+				bad[len(bad)-1] ^= 0x7f
+			}
+			if _, err := s.fd.WriteAt(bad, absolute); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.flusher.flushOnce(); err == nil {
+				t.Fatal("invalid record checkpointed")
+			}
+			if s.CheckpointLSN() != 0 || s.dm.len() != 1 {
+				t.Fatal("invalid record retired dirty state")
+			}
+			i := s.FlusherInstrumentation()
+			if i.ValidationFailures != 1 || i.ValidatedRecords != 0 || i.CyclesFailed != 1 || i.ExtentWriteOps != 0 {
+				t.Fatalf("invalid record instrumentation: %+v", i)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatalf("refused flush modified physical bytes: %v", err)
+			}
+			if _, err := s.fd.WriteAt(original, absolute); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.flusher.flushOnce(); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := s.Read(2); err != nil || !bytes.Equal(got, blk(0x22)) {
+				t.Fatalf("restored record bytes: %v", err)
+			}
+		})
+	}
+}
+
 func TestNativeReplacementMutationsAfterClose(t *testing.T) {
 	s, path := newMappedCheckpointStoreV3(t)
 	mapPath := s.v3.ownedMap.fd.Name()
