@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"sync"
 	"testing"
+	"time"
 )
 
 // The spill budget, rather than a fixed chunk count, determines when local
@@ -66,5 +68,56 @@ func TestChunkStageV3_AbortedPointReusesUploads(t *testing.T) {
 	if bytes.Equal(f.imageOf(t, r.Head), f.imageOf(t, before)) {
 		t.Fatal("retry did not publish the submitted changes")
 	}
+	assertNoIntentsLeft(t, f)
+}
+
+// The changed image is four times the spill cap; only one hot chunk keeps
+// changing while the cut runs. No guest Flush is needed for the write stream.
+func TestChunkStageV3_FourTimesCapConvergesUnderSteadyWrites(t *testing.T) {
+	s, f, l, w := precopyLayer(t, 1024, 8)
+	l.cfg.COWSpillLimit = 2 * ctChunkBytes
+	stop, done, started := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	errs := make(chan error, 1)
+	var once sync.Once
+	finish := func() { once.Do(func() { close(stop) }) }
+	t.Cleanup(func() { finish(); cowWaitSignal(t, done, "steady writer cleanup") })
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+		for i := 0; ; i++ {
+			data := makeBlock(ctBlockSize, byte(0x80+i%64))
+			lsn, err := s.Write(1, data)
+			if err != nil {
+				errs <- err
+				return
+			}
+			w.record(lsn, 1, data)
+			if i == 0 {
+				close(started)
+			}
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	cowWaitSignal(t, started, "steady writer admission")
+	result, err := l.Cut(ctTimeout(t))
+	finish()
+	cowWaitSignal(t, done, "steady writer completion")
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-errs:
+		t.Fatal(err)
+	default:
+	}
+	if result.Stats.StageRounds == 0 {
+		t.Fatal("large dirty image bypassed pre-copy")
+	}
+	assertEveryHeadIsPrefixImage(t, f, w)
 	assertNoIntentsLeft(t, f)
 }

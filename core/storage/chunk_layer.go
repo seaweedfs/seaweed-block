@@ -829,8 +829,8 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	}
 	l.retryLeftoverIntents(ctx)
 
-	// Pre-copy: while more chunks than the bound would be copied under the
-	// barrier, stage up to the bound per round outside it.
+	// Pre-copy large native dirty sets outside the barrier, bounded by the
+	// remaining COW exposure rather than a fixed candidate count.
 	staged, intents, err := l.stage(ctx, &st)
 	if err != nil {
 		l.dropIntents(ctx, intents)
@@ -1685,14 +1685,10 @@ func (l *chunkLayerImpl) dropIntents(ctx context.Context, ids []string) {
 	}
 }
 
-// stage pre-copies chunks outside the barrier (B9 W3 bound ruling): while
-// more than BarrierBound chunks would be copied under the barrier, it
-// stages up to BarrierBound per round, at most chunkStageRounds rounds.
-// Each staged chunk records its chunk version; a staged chunk whose bytes
-// differ from HEAD is uploaded under a fresh content key named by an
-// intent written before the round's first upload. It returns the staged
-// chunks and the intents to settle with the cut; it changes no dirty
-// state, so a failed cut simply leaves its staged keys to the intents.
+// stage uploads large native dirty sets through logical reads, before fixing H.
+// It stops when the spill-budget remainder is reached or a round makes no
+// progress. Versions/HEAD generation bind every reusable immutable result.
+// Legacy fixtures retain their bounded-count rounds.
 func (l *chunkLayerImpl) stage(ctx context.Context, st *chunkCutStats) (map[uint64]stagedChunk, []string, error) {
 	bound := l.cfg.BarrierBound
 	native := l.usesOwnedMapV3()

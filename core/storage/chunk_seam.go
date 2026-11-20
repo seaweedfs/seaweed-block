@@ -365,8 +365,9 @@ type chunkLayerConfig struct {
 	UploadConcurrency int
 
 	// COWSpillLimit caps saved-before-write
-	// side bytes. Pre-copy rounds use the same cap and release their local
-	// files after uploads settle. Exceeding it aborts the cut (the caller
+	// side bytes. Native pre-copy is triggered when remaining candidate
+	// bytes exceed half this cap; it streams directly to remote, without a
+	// local payload file. Exceeding it aborts the cut (the caller
 	// retries), never publishes a partial image or refuses the guest mutation.
 	// 0 defaults to defaultCOWSpillLimit; negative is refused.
 	COWSpillLimit int64

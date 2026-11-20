@@ -79,7 +79,10 @@ Cut == /\ cuts < MaxCuts /\ Len(hist) > head.lsn
        /\ cuts' = cuts + 1
        /\ UNCHANGED <<hist, mut, recon, pres, restarted>>
 
-Next == (\E c \in Chunks : Write(c) \/ Precopy(c) \/ Reconcile(c)) \/ Restart \/ Cut
+\* A refused point changes no published image. Completed pre-copy results
+\* survive in-process; Write changes their generation and Restart discards them.
+AbortPoint == UNCHANGED vars
+Next == (\E c \in Chunks : Write(c) \/ Precopy(c) \/ Reconcile(c)) \/ Restart \/ Cut \/ AbortPoint
 Spec == Init /\ [][Next]_vars
 
 \* HEAD (root and every segment) is the exact image of the history at HEAD.lsn
