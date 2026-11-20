@@ -228,6 +228,42 @@ func TestCheckSingleFilerRefusesAnotherOrSeveralFilers(t *testing.T) {
 	refusedAtOnce(t, "masters disagree on the sole filer, reversed", c, "10.9.9.9:8888")
 }
 
+// Distinct scoped IPv6 addresses are different filers; the zone counts, and
+// an address that does not parse never matches.
+func TestIsTargetComparesScopedAddresses(t *testing.T) {
+	for _, c := range []struct {
+		configured, listed string
+		want               bool
+	}{
+		{"[fe80::2%eth0]:18888", "[fe80::1%eth0]:8888.18888", false},
+		{"[fe80::1%eth0]:18888", "[fe80::1%eth1]:8888.18888", false},
+		{"[fe80::1%eth0]:18888", "[fe80::1%eth0]:8888.18888", true},
+		{"127.0.0.1:18888", "127.0.0.1:8888", true},
+		{"127.0.0.1:18888", "127.0.0.2:8888", false},
+		{"127.0.0.1:18888", "127.0.0.1:8889", false},
+		{"[::ffff:127.0.0.1]:18888", "127.0.0.1:8888", true},
+	} {
+		s := &SWFS{cfg: SWFSConfig{FilerGRPC: c.configured}}
+		if got := s.isTarget(context.Background(), c.listed); got != c.want {
+			t.Errorf("configured %s, listed %s: isTarget %v, want %v", c.configured, c.listed, got, c.want)
+		}
+	}
+}
+
+// A favourable first master does not pass once the bound has run out while
+// a later master is still being asked: that master's view is unknown.
+func TestCheckSingleFilerFavourableThenStalledRefuses(t *testing.T) {
+	w, r, a := singleFilerWait, singleFilerRetry, singleFilerAttempt
+	singleFilerWait, singleFilerRetry, singleFilerAttempt = 800*time.Millisecond, 100*time.Millisecond, 5*time.Second
+	t.Cleanup(func() { singleFilerWait, singleFilerRetry, singleFilerAttempt = w, r, a })
+	c, _ := cluster(t, "", lists("self"), func(string) *nodesMaster { return &nodesMaster{stall: true} })
+	start := time.Now()
+	err := c.CheckSingleFiler(context.Background())
+	if !errors.Is(err, ErrNotSingleFiler) || time.Since(start) < singleFilerWait {
+		t.Fatalf("favourable then stalled past the bound: %v after %s; want a refusal at the bound", err, time.Since(start))
+	}
+}
+
 // Fail closed at the bound, after retrying: no filer listed, an unreachable
 // master; and at once: a filer without configuration or without a master.
 func TestCheckSingleFilerFailsClosed(t *testing.T) {

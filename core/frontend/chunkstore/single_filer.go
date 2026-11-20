@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -100,12 +101,19 @@ func (c *SWFS) singleFilerRound(ctx context.Context, cfg *filerpb.GetFilerConfig
 			*tried = append(*tried, addr+": lists no filer in group "+strconv.Quote(group)+" yet")
 		}
 	}
+	if ctx.Err() != nil {
+		// The bound passed while a later master was still being asked:
+		// its view is unknown, so an earlier favourable answer does not
+		// count.
+		return false, nil
+	}
 	return sawTarget, nil
 }
 
 // isTarget reports whether a filer address listed by a master is the
 // configured filer: the same gRPC port, and the same host or hosts that
-// resolve to a common address.
+// resolve to a common address. Addresses compare with their IPv6 zone; an
+// address that does not parse never matches (fail closed).
 func (c *SWFS) isTarget(ctx context.Context, listed string) bool {
 	got, err := grpcAddress(listed)
 	if err != nil {
@@ -125,8 +133,12 @@ func (c *SWFS) isTarget(ctx context.Context, listed string) bool {
 		return false
 	}
 	for _, a := range ga {
+		pa, err := netip.ParseAddr(a)
+		if err != nil {
+			continue
+		}
 		for _, b := range wa {
-			if net.ParseIP(a).Equal(net.ParseIP(b)) {
+			if pb, err := netip.ParseAddr(b); err == nil && pa.Unmap() == pb.Unmap() {
 				return true
 			}
 		}
