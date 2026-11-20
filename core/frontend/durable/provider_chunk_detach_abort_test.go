@@ -25,7 +25,7 @@ type faultRemote struct {
 	*storage.MemChunkRemote
 	mu          sync.Mutex
 	putErr      error  // returned by every Put while set
-	casMode     string // "", "precondition", "lost" (not applied, error), "applied-lost" (applied, error), "hold"
+	casMode     string // "", "precondition", "lost" (not applied, error), "applied-lost" (applied, error), "hold", "hold-detach"
 	getHeadErr  error  // returned by every GetHead while set
 	getHeadFail int    // the next N GetHead calls fail
 	getHeadHold bool   // every GetHead blocks until its caller gives up
@@ -71,14 +71,19 @@ func (r *faultRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
 func (r *faultRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVersion, next storage.ChunkHead) (uint64, error) {
 	r.mu.Lock()
 	mode := r.casMode
-	r.casMode = "" // one fault, on the next CAS only
+	switch {
+	case mode == "hold-detach" && next.State != storage.ChunkHeadDetached:
+		mode = "" // only the detach CAS is held; others (a running chunk loop) pass
+	default:
+		r.casMode = "" // one fault, on the next CAS only
+	}
 	r.mu.Unlock()
 	switch mode {
 	case "precondition":
 		return 0, storage.ErrChunkHeadPrecondition
 	case "lost":
 		return 0, errInjected
-	case "hold": // held until the caller gives up: not applied
+	case "hold", "hold-detach": // held until the caller gives up: not applied
 		<-ctx.Done()
 		return 0, ctx.Err()
 	case "delayed":
@@ -224,10 +229,14 @@ func TestWALStoreChunk_UndecidableDetachStaysStopped(t *testing.T) {
 	}
 }
 
-// The freeze is bounded by DetachFreezeTimeout: a CAS that hangs ends there,
-// the outcome is settled (HEAD still at base: cancelled) and serving resumes,
-// all well inside bound + settle.
+// The freeze is bounded by DetachFreezeTimeout: a detach CAS that hangs ends at
+// the cut's deadline (three quarters of the bound), the outcome is settled
+// (HEAD still at base: cancelled) inside the bound, and serving resumes. The
+// test asserts against the deadlines the detach itself traced, so a loaded
+// host cannot turn the order into a timing failure; the settlement keeps a
+// quarter of a 2 s bound for its HEAD read and cancel.
 func TestWALStoreChunk_DetachFreezeIsBoundedThenResumes(t *testing.T) {
+	const freeze = 2 * time.Second
 	remote := &faultRemote{MemChunkRemote: storage.NewMemChunkRemote()}
 	p, err := durable.NewDurableProvider(durable.ProviderConfig{
 		Impl:                durable.ImplWALStoreChunk,
@@ -235,7 +244,7 @@ func TestWALStoreChunk_DetachFreezeIsBoundedThenResumes(t *testing.T) {
 		BlockSize:           4096,
 		NumBlocks:           pcBlocks,
 		ChunkBlocks:         pcChunkBlocks,
-		DetachFreezeTimeout: 300 * time.Millisecond,
+		DetachFreezeTimeout: freeze,
 		ChunkRemoteFor:      func(string) (storage.ChunkRemote, error) { return remote, nil },
 	}, v1View())
 	if err != nil {
@@ -256,16 +265,28 @@ func TestWALStoreChunk_DetachFreezeIsBoundedThenResumes(t *testing.T) {
 	if _, err := b.Write(context.Background(), 8192, block(2)); err != nil {
 		t.Fatal(err)
 	}
-	remote.set(func(r *faultRemote) { r.casMode = "hold" })
+	remote.set(func(r *faultRemote) { r.casMode = "hold-detach" })
+	deadlines := map[string]time.Time{}
+	durable.SetTestDetachTrace(p, func(stage string, d time.Time) { deadlines[stage] = d })
 	start := time.Now()
 	_, _, err = p.DetachVolume(context.Background(), "v1")
-	took := time.Since(start)
+	end := time.Now()
 	if !errors.Is(err, durable.ErrDetachAborted) || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("detach with a hung CAS: %v; want an aborted detach at the freeze bound", err)
 	}
 	// The cut gets three quarters of the bound, the settlement the rest.
-	if took < 225*time.Millisecond || took > 300*time.Millisecond+200*time.Millisecond {
-		t.Fatalf("detach with a hung CAS took %v; want the cut ended at 3/4 of the 300 ms freeze bound and the total within it", took)
+	cut, settle := deadlines["cut"], deadlines["settle"]
+	if cutAt, settleAt := cut.Sub(start), settle.Sub(start); cutAt < freeze*3/4-50*time.Millisecond || cutAt > freeze*3/4+50*time.Millisecond ||
+		settleAt < freeze-50*time.Millisecond || settleAt > freeze+50*time.Millisecond {
+		t.Fatalf("deadlines: cut %v, settle %v after the start; want three quarters of the %v freeze, then the bound", cutAt, settleAt, freeze)
+	}
+	// The abort happened at the cut's deadline, not before, and was settled
+	// inside the bound (scheduling slack only).
+	if end.Before(cut) {
+		t.Fatalf("detach aborted %v before its cut deadline", cut.Sub(end))
+	}
+	if late := end.Sub(settle); late > 500*time.Millisecond {
+		t.Fatalf("detach returned %v after the freeze bound", late)
 	}
 	assertServing(t, p, b, remote)
 }

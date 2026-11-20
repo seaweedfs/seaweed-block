@@ -6,7 +6,6 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
@@ -24,8 +23,7 @@ func (r *takeoverOrderRemote) CASHead(ctx context.Context, v storage.ChunkHeadVe
 }
 
 func TestRestoreSeedPrecedesTakeoverCAS(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	ctx := hangGuard(t)
 	remote := storage.NewMemChunkRemote()
 	if _, err := remote.CASHead(ctx, storage.ChunkHeadVersion{}, storage.ChunkHead{Epoch: 1, Holder: "old", RemoteLSN: 7}); err != nil {
 		t.Fatal(err)
@@ -81,8 +79,7 @@ func TestRestoreSeedPrecedesTakeoverCAS(t *testing.T) {
 // A restored restart under the same assignment must reactivate a detached
 // image before exposing I/O, not treat it as an already-settled active claim.
 func TestRestoreEqualOwnerDetachedHEADIsReactivated(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	ctx := hangGuard(t)
 	remote := storage.NewMemChunkRemote()
 	makeProvider := func() *durable.DurableProvider {
 		p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, ChunkHolder: "node-a/r1",
