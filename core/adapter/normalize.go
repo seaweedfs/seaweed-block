@@ -111,8 +111,11 @@ func NormalizeAssignment(a AssignmentInfo) engine.Event {
 
 // NormalizeProbe converts a probe result into engine events.
 // A successful probe produces up to 2 events:
-//  1. ProbeSucceeded (reachability)
-//  2. RecoveryFactsObserved (R/S/H boundaries)
+//  1. RecoveryFactsObserved (R/S/H boundaries)
+//  2. ProbeSucceeded (reachability)
+//
+// Fresh boundaries precede reachability so its decision cannot reserve a
+// recovery using the previous probe's retention window.
 //
 // A failed probe produces 1 event:
 //  1. ProbeFailed
@@ -132,21 +135,18 @@ func NormalizeProbe(p ProbeResult) []engine.Event {
 	}
 
 	events := []engine.Event{
+		engine.RecoveryFactsObserved{
+			ReplicaID:       p.ReplicaID,
+			EndpointVersion: p.EndpointVersion,
+			TransportEpoch:  p.TransportEpoch,
+			R:               p.ReplicaFlushedLSN, S: p.PrimaryTailLSN, H: p.PrimaryHeadLSN,
+		},
 		engine.ProbeSucceeded{
 			ReplicaID:       p.ReplicaID,
 			EndpointVersion: p.EndpointVersion,
 			TransportEpoch:  p.TransportEpoch,
 		},
 	}
-
-	events = append(events, engine.RecoveryFactsObserved{
-		ReplicaID:       p.ReplicaID,
-		EndpointVersion: p.EndpointVersion,
-		TransportEpoch:  p.TransportEpoch,
-		R:               p.ReplicaFlushedLSN,
-		S:               p.PrimaryTailLSN,
-		H:               p.PrimaryHeadLSN,
-	})
 
 	return events
 }

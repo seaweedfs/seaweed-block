@@ -317,3 +317,20 @@ end-to-end wall-clock latency guarantee. Keep long model runs off tp04.
 `HostBudget.tla` abstracts cooperating process slots, COW reservation and joined release. Config `HostBudget.cfg` checks three owners/two slots; `HostBudget_early_release.cfg` must violate HeldUntilJoined. It excludes degraded static fallback and does not prove filesystem locks, rates or physical-I/O deadlines. Native subprocess tests cover lock lifetime.
 
 HostBudget also models guarded configuration initialization: staged bytes are invisible until atomic publication; an initializer crash permits a successor. `HostBudget_partial_config.cfg` must violate NoPartialConfig. The syscall-level crash boundary is covered by TestKilledInitializerDoesNotPublishPartialConfiguration.
+## Replica apply ordering
+
+`ReplicaApplyOrder.tla` models two admitted sessions on one LBA with three versions, plus the two events of one probe and a delayed post-completion probe. `R292_safe` checks `NoRegression`, `NoDuplicateRecovery` and `NoFalseKnown`; the four `R292_red_*` configurations remove one guard each. It abstracts successful physical applies only: it does not establish restart persistence, authority, byte-level framing, or I/O deadlines.
+
+`ReplicaPrefixFloor.tla` checks two LBAs/three source versions with explicit
+covered-prefix certification, suffix pruning and stale checks against the floor.
+`R293_prefix_safe` checks `NoRegression`, `CertifiedCoverage`, and `OnlySuffix`;
+its two negative controls infer a prefix from the synced maximum or omit the
+floor after pruning. It does not establish the wire certificate's provenance,
+restart persistence, live-prefix extension, or a fixed memory cap without closes.
+
+`ReplicaReviewGuards.tla` checks two logical sessions with one admitted frame
+per session, settled-coverage retirement, active-recovery readiness refusal and
+one missing-probe/newer-ACK schedule. `R293_review_safe` checks four invariants;
+four negative controls separately remove retirement, the frame join, the
+readiness guard or ACK progress restoration. This abstracts successful admitted
+frames and does not prove physical-I/O, authority rollback or timing behavior.

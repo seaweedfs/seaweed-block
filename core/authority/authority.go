@@ -172,6 +172,10 @@ type Publisher struct {
 	leaseClosing   bool
 	extWG          sync.WaitGroup
 	extendFailures map[string]int // guarded by mu
+
+	// testAfterIssuePublish, when set by a test, runs under mu right after
+	// an issued move's lease view is published.
+	testAfterIssuePublish func(volume string)
 }
 
 // PublicationAdmission surrounds an ordinary mint with local ownership/lifetime
@@ -478,9 +482,10 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 	}
 	var issuedWorkspace *WorkspaceState
 	var reservedEpoch uint64
+	var issuedAt time.Time
 	if grant != nil {
 		var err error
-		issuedWorkspace, reservedEpoch, err = p.prepareWorkspaceMoveLocked(ask, *grant)
+		issuedWorkspace, reservedEpoch, issuedAt, err = p.prepareWorkspaceMoveLocked(ask, *grant)
 		if err != nil {
 			p.mu.Unlock()
 			return err
@@ -609,9 +614,14 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 	}
 
 	p.state[k] = assignmentState{info: next, present: true}
-	p.refreshLeaseViewLocked(ask.VolumeID)
 	if issuedWorkspace != nil {
-		p.setLeaseDeadlineLocked(ask.VolumeID, time.Time{}, false) // the issued move clears the lease
+		// The issued move starts the new holder's lease (issuedAt+TTL grant).
+		p.publishIssuedLeaseLocked(ask.VolumeID, issuedAt.Add(p.workspaceTTL))
+		if hook := p.testAfterIssuePublish; hook != nil {
+			hook(ask.VolumeID)
+		}
+	} else {
+		p.refreshLeaseViewLocked(ask.VolumeID)
 	}
 
 	// Snapshot subscribers under lock, release the lock BEFORE

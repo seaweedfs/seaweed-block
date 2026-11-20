@@ -1,6 +1,7 @@
 package calibration
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -302,6 +303,7 @@ func (*scenarioC5OrderStable) Expect() Expected {
 		DataIntegrityExpected: true,
 	}
 }
+
 // perturbation is one of the concrete interleaving patterns C5 runs.
 // Each produces the SAME underlying facts on the SAME replica (r1)
 // but delivers events to the adapter in a different order, timing, or
@@ -324,11 +326,11 @@ func (*scenarioC5OrderStable) Expect() Expected {
 type perturbation int
 
 const (
-	pertBaseline       perturbation = iota // assign + wait
-	pertPreAssignProbe                     // one valid pre-assign probe, wiped when identity arrives
-	pertPreAssignStorm                     // 8 concurrent pre-assign probes, then assign
-	pertRepeatAssign                       // assign twice with identical epoch/endpointVersion (idempotent)
-	pertStaggeredAssign                    // 5 concurrent assigns with identical identity, then wait
+	pertBaseline        perturbation = iota // assign + wait
+	pertPreAssignProbe                      // one valid pre-assign probe, wiped when identity arrives
+	pertPreAssignStorm                      // 8 concurrent pre-assign probes, then assign
+	pertRepeatAssign                        // assign twice with identical epoch/endpointVersion (idempotent)
+	pertStaggeredAssign                     // 5 concurrent assigns with identical identity, then wait
 )
 
 func (*scenarioC5OrderStable) Run() (Observed, error) {
@@ -345,6 +347,7 @@ func (*scenarioC5OrderStable) Run() (Observed, error) {
 	sameDecision := true
 	sameFinalMode := true
 	sameRecoverySig := true
+	var divergentPath []string
 	sameCloseCount := true
 	dataOK := true
 
@@ -381,6 +384,9 @@ func (*scenarioC5OrderStable) Run() (Observed, error) {
 			}
 			if sig != firstSig {
 				sameRecoverySig = false
+				if divergentPath == nil {
+					divergentPath = append([]string{fmt.Sprintf("perturbation=%d baseline=%v", p, first.CommandPath)}, obs.CommandPath...)
+				}
 			}
 			if obs.CloseEventCount != first.CloseEventCount {
 				sameCloseCount = false
@@ -401,10 +407,9 @@ func (*scenarioC5OrderStable) Run() (Observed, error) {
 	}
 	if !sameRecoverySig {
 		// Pollute the command path marker so the reader cannot miss
-		// that the recovery signature drifted. The baseline first-run
-		// path is preserved alongside the marker so divergence-log
-		// authors can still see what the first run looked like.
-		out.CommandPath = append([]string{"DIVERGED_ACROSS_RUNS_RECOVERY_SIG"}, first.CommandPath...)
+		// that the recovery signature drifted. Preserve the actual divergent
+		// perturbation and path alongside the baseline.
+		out.CommandPath = append([]string{"DIVERGED_ACROSS_RUNS_RECOVERY_SIG"}, divergentPath...)
 	}
 	if !sameCloseCount {
 		// Set CloseEventCount to a negative sentinel so the JSON
@@ -446,13 +451,8 @@ func extractRecoverySignature(path []string) recoverySignature {
 // R/S/H); only the delivery shape — timing, ordering, concurrency,
 // assignment idempotence — varies.
 //
-// All post-assignment probe variations are deliberately omitted: a
-// probe fired with pre-captured facts after the engine has converged
-// would deliver STALE R to the engine and legitimately trigger
-// re-recovery. Treating that as a C5 failure would conflate engine
-// correctness with A1/A4. Treating it as a C5 success would require
-// gating the engine's fact-processing, which is a route change that
-// belongs outside Phase 06.
+// Delayed same-identity probes cannot lower completed durable R; the
+// concurrent variants exercise both pending and post-completion delivery.
 func applyPerturbation(h *harness, p perturbation) {
 	_, _, pH := h.primaryStore.Boundaries()
 	rR, rS, _ := h.replicaStore.Boundaries()

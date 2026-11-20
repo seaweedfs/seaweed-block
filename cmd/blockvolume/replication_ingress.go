@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/seaweedfs/seaweed-block/core/recovery"
+	"github.com/seaweedfs/seaweed-block/core/replication"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"github.com/seaweedfs/seaweed-block/core/transport"
 )
@@ -18,6 +19,7 @@ type replicationIngress struct {
 	mu                        sync.Mutex
 	addr, volumeID, floorPath string
 	store                     storage.LogicalStorage
+	applyGate                 *replication.ReplicaApplyGate
 	dualLane                  bool
 	// rf1Only, when set, refuses every role with replica slots with this reason
 	// (walstore-chunk). The host latches the error: no role is adopted, not Healthy.
@@ -86,8 +88,12 @@ func (r *replicationIngress) roleLocked(epoch uint64, primary bool) error {
 	listener := r.listener
 	fresh := listener == nil
 	if fresh {
+		// One version map per replica store, surviving listener role transitions.
+		if r.applyGate == nil {
+			r.applyGate = replication.NewReplicaApplyGate(r.store)
+		}
 		var err error
-		listener, err = transport.NewReplicaListenerWithFloor(r.addr, r.store, r.volumeID, r.floorPath)
+		listener, err = transport.NewReplicaListenerWithFloorAndApplyHook(r.addr, r.store, r.volumeID, r.floorPath, r.applyGate)
 		if err != nil {
 			return err
 		}

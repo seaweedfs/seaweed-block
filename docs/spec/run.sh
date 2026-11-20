@@ -25,6 +25,9 @@ case $cfg in
   S4_*)                             spec=CutCapture ;;
   S5_*)                             spec=ControlPlane ;;
   S6_*)                             spec=ReplicationFailover ;;
+  R293_review_*)                    spec=ReplicaReviewGuards ;;
+  R293_prefix_*)                    spec=ReplicaPrefixFloor ;;
+  R292_*)                           spec=ReplicaApplyOrder ;;
   S9b_*)                            spec=RetentionGCMulti ;;
   S9_*)                             spec=RetentionGCTiming ;;
   *) echo "run.sh: no spec for config '$cfg'" >&2; exit 2 ;;

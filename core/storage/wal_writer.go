@@ -479,7 +479,13 @@ func (w *walWriter) logicalTailValue() uint64 {
 }
 
 // fsync forces buffered data to durable storage.
-func (w *walWriter) fsync() error { return w.fd.Sync() }
+func (w *walWriter) fsync() error {
+	sync, err := newDataFileSync(w.fd)
+	if err != nil {
+		return err
+	}
+	return sync()
+}
 
 // usedFraction returns the fraction of the WAL region currently in
 // use, in the range [0, 1]. Used by the admission controller to

@@ -163,3 +163,9 @@ type DurableAckResult struct {
 type DurableAckCallbackSetter interface {
 	SetOnDurableAck(fn OnDurableAck)
 }
+
+// RecoveryPrefixPublisher forwards the engine's explicit completed-prefix
+// certificate. Plain healthy/probe or storage Sync facts carry no certificate.
+type RecoveryPrefixPublisher interface {
+	PublishRecoveryPrefix(replicaID string, sessionID, epoch, endpointVersion, prefix uint64)
+}

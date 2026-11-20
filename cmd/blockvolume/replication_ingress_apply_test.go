@@ -1,0 +1,52 @@
+package main
+
+import (
+	"bytes"
+	"net"
+	"testing"
+	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/storage"
+	"github.com/seaweedfs/seaweed-block/core/transport"
+)
+
+func TestReplicationIngressSharesApplyVersionsAcrossSessions(t *testing.T) {
+	store := storage.NewBlockStore(64, 4096)
+	r := newReplicationIngress(flags{dataAddr: "127.0.0.1:0", volumeID: "vol1"}, store)
+	if err := r.AdmitAsReplica(1); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(r.Stop)
+	want := bytes.Repeat([]byte{0xBB}, 4096)
+	ship := func(session, lsn uint64, data []byte, recovery bool) {
+		c, err := net.DialTimeout("tcp", r.listener.Addr(), 2*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		if err := c.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		lineage := transport.RecoveryLineage{SessionID: session, Epoch: 1, EndpointVersion: 1, TargetLSN: 120}
+		send := func(kind byte, data []byte) {
+			if err := transport.WriteMsg(c, kind, data); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if recovery {
+			send(transport.MsgRecoveryLaneStart, transport.EncodeLineage(lineage))
+		}
+		send(transport.MsgShipEntry, transport.EncodeShipEntry(transport.ShipEntry{Lineage: lineage, LBA: 5, Data: data, LSN: lsn}))
+		send(transport.MsgBarrierReq, transport.EncodeLineage(lineage))
+		kind, _, err := transport.ReadMsg(c)
+		if err != nil || kind != transport.MsgBarrierResp {
+			t.Fatalf("barrier: kind=%d err=%v", kind, err)
+		}
+	}
+	ship(1, 120, want, false)
+	ship(2, 95, bytes.Repeat([]byte{0xAA}, 4096), true)
+	got, err := store.Read(5)
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("production ingress allowed cross-session byte regression: err=%v", err)
+	}
+}

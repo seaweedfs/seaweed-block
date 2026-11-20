@@ -295,7 +295,10 @@ func applyRecoveryFacts(st *ReplicaState, e RecoveryFactsObserved, r *ApplyResul
 		trace("stale_recovery_facts", reason)
 		return
 	}
-	st.Recovery.R = e.R
+	// Within one identity, delayed probes cannot undo completed durable work.
+	// An identity-changing assignment resets the recovery facts.
+	st.Recovery.R = max(st.Recovery.R, e.R)
+	st.Recovery.FactsMissing = !e.ProgressFact().PrimaryBoundsKnown
 	st.Recovery.S = e.S
 	st.Recovery.H = e.H
 
@@ -309,6 +312,11 @@ func applyDurableAck(st *ReplicaState, e DurableAckObserved, r *ApplyResult, tra
 		return
 	}
 	fact := e.ProgressFact()
+	if st.Recovery.FactsMissing {
+		st.Recovery.R = max(st.Recovery.R, fact.ReplicaR)
+		st.Recovery.S, st.Recovery.H = fact.PrimaryS, fact.PrimaryH
+		st.Recovery.FactsMissing = false
+	}
 	updateDurableAckLagState(st, fact)
 	if fact.ReplicaR > st.Recovery.DurableAckR || !st.Recovery.DurableAckKnown {
 		st.Recovery.DurableAckR = fact.ReplicaR
@@ -347,6 +355,7 @@ func applyDurableAck(st *ReplicaState, e DurableAckObserved, r *ApplyResult, tra
 			TargetLSN:       fact.PrimaryH,
 		})
 		trace("command", "StartCatchUp (durable ack stalled)")
+		return // this observation already selected and emitted its recovery
 	}
 	if lag == LagDecisionStartRebuild && canEmitRecoveryFromDurableAck(st) {
 		st.Recovery.R = st.Recovery.DurableAckR
@@ -362,6 +371,7 @@ func applyDurableAck(st *ReplicaState, e DurableAckObserved, r *ApplyResult, tra
 			TargetLSN:       fact.PrimaryH,
 		})
 		trace("command", "StartRebuild (durable ack below retention)")
+		return // do not emit a second recovery through post-close decide
 	}
 	if st.Recovery.PostCloseDurableAckKnown {
 		decide(st, r, trace)
@@ -441,6 +451,12 @@ func decide(st *ReplicaState, r *ApplyResult, trace func(string, string)) {
 		trace("decision", "unknown (not reachable)")
 		return
 	}
+	if st.Recovery.FactsMissing {
+		st.Recovery.Decision = DecisionUnknown
+		st.Recovery.DecisionReason = "no_boundaries"
+		trace("decision", "unknown (missing probe facts)")
+		return
+	}
 
 	fact := RecoveryFactsObserved{
 		ReplicaID:       st.Identity.ReplicaID,
@@ -509,7 +525,19 @@ func decide(st *ReplicaState, r *ApplyResult, trace func(string, string)) {
 			} else if recoveredReplicaWaitingForPostCloseAck(st) {
 				trace("publish_healthy_held", "waiting for post-close durable ack")
 			} else {
-				r.Commands = append(r.Commands, PublishHealthy{ReplicaID: st.Identity.ReplicaID})
+				healthy := PublishHealthy{ReplicaID: st.Identity.ReplicaID}
+				target := st.Session.FrontierHint
+				if target == 0 {
+					target = st.Session.TargetLSN
+				}
+				if st.Recovery.RecoveryWindowClosed && st.Recovery.PostCloseDurableAckKnown &&
+					st.Session.Phase == PhaseCompleted && target > 0 && st.Session.AchievedLSN >= target {
+					healthy.RecoverySessionID = st.Session.SessionID
+					healthy.Epoch = st.Identity.Epoch
+					healthy.EndpointVersion = st.Identity.EndpointVersion
+					healthy.CertifiedPrefix = target
+				}
+				r.Commands = append(r.Commands, healthy)
 			}
 		}
 

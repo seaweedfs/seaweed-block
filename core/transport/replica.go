@@ -38,6 +38,17 @@ const (
 // Returning a non-nil error → caller (handler) logs + closes conn.
 // Per INV-REPL-LIVE-LANE-STALE-FAILS-LOUD: live-lane stale entries
 // surface here as errors.
+// RecoveryPrefixHook accepts explicit completed-prefix certificates. It does
+// not derive source coverage from Sync. Admission is checked at the effect.
+type SessionRetirer interface{ CloseSession(sessionID uint64) }
+
+// RecoveryPrefixHook accepts explicit completed-prefix certificates. It does
+// not derive source coverage from Sync. Admission is checked at the effect.
+type RecoveryPrefixHook interface {
+	CertifyRecoveryPrefix(lineage RecoveryLineage) error
+	CertifiedPrefix() uint64
+}
+
 type ApplyHook interface {
 	// ApplyRecovery routes the entry through the recovery-lane apply
 	// path. Stale entries (LSN <= per-LBA applied) skip data + advance
@@ -58,8 +69,11 @@ type ReplicaListener struct {
 	wg        sync.WaitGroup
 	applyHook ApplyHook // optional gate plug-in; nil = direct apply
 
-	mu            sync.Mutex
-	activeLineage RecoveryLineage
+	mu               sync.Mutex
+	activeLineage    RecoveryLineage
+	prefixEligible   RecoveryLineage // one active source-covered recovery certificate
+	sessionFrames    map[uint64]int
+	retiringSessions map[uint64]bool
 	// epochFloor is the highest epoch this host has taken a role at
 	// (G2): mutating traffic below it is refused. primary is set while
 	// this host is the primary: then every inbound replication mutation
@@ -104,6 +118,12 @@ func NewReplicaListener(addr string, store storage.LogicalStorage) (*ReplicaList
 // it takes effect; a missing or invalid record refuses construction. An
 // empty floorPath (non-durable memback) keeps the floor in memory.
 func NewReplicaListenerWithFloor(addr string, store storage.LogicalStorage, volumeID, floorPath string) (*ReplicaListener, error) {
+	return NewReplicaListenerWithFloorAndApplyHook(addr, store, volumeID, floorPath, nil)
+}
+
+// NewReplicaListenerWithFloorAndApplyHook preserves role and durable-floor
+// admission while using the volume's shared apply ordering gate.
+func NewReplicaListenerWithFloorAndApplyHook(addr string, store storage.LogicalStorage, volumeID, floorPath string, hook ApplyHook) (*ReplicaListener, error) {
 	var floor uint64
 	if floorPath != "" {
 		var err error
@@ -111,7 +131,7 @@ func NewReplicaListenerWithFloor(addr string, store storage.LogicalStorage, volu
 			return nil, err
 		}
 	}
-	r, err := NewReplicaListenerWithApplyHook(addr, store, nil)
+	r, err := NewReplicaListenerWithApplyHook(addr, store, hook)
 	if err != nil {
 		return nil, err
 	}
@@ -149,21 +169,31 @@ func (r *ReplicaListener) raiseFloor(epoch uint64) error {
 func (r *ReplicaListener) admitMutation(l RecoveryLineage) bool {
 	r.mu.Lock()
 	prev := r.activeLineage
-	r.mu.Unlock()
-	if !r.acceptMutationLineage(l) {
+	if !r.acceptMutationLineageLocked(l) {
+		r.mu.Unlock()
 		return false
 	}
+	if r.sessionFrames == nil {
+		r.sessionFrames = make(map[uint64]int)
+	}
+	r.sessionFrames[l.SessionID]++ // register before another lineage can retire it
+	r.mu.Unlock()
 	if err := r.raiseFloor(l.Epoch); err != nil {
-		// Nothing changes on a refused frame: undo the lineage advance,
-		// unless another frame has moved it on since.
 		r.mu.Lock()
 		if r.activeLineage == l {
 			r.activeLineage = prev
 		}
+		r.markSessionRetiringLocked(l.SessionID)
 		r.mu.Unlock()
+		r.endSessionFrame(l.SessionID)
 		log.Printf("replica: refuse mutation at epoch %d: %v", l.Epoch, err)
 		return false
 	}
+	r.mu.Lock()
+	if prev.SessionID != l.SessionID {
+		r.markSessionRetiringLocked(prev.SessionID)
+	}
+	r.mu.Unlock()
 	return true
 }
 
@@ -231,6 +261,7 @@ func (r *ReplicaListener) Stop() {
 	close(r.stopCh)
 	r.listener.Close()
 	r.wg.Wait()
+	r.closeSettledSessions()
 }
 
 // StopHard is like Stop but also forcibly closes all active handler
@@ -266,6 +297,7 @@ func (r *ReplicaListener) StopHard() {
 		_ = c.Close()
 	}
 	r.wg.Wait()
+	r.closeSettledSessions()
 }
 
 func (r *ReplicaListener) acceptLoop() {
@@ -356,6 +388,14 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 		// the fence waits for storage effects only, never for the network.
 		var replyType byte
 		var reply []byte
+		var admittedSession uint64
+		admit := func(l RecoveryLineage) bool {
+			if !r.admitMutation(l) {
+				return false
+			}
+			admittedSession = l.SessionID
+			return true
+		}
 		stop := func() bool {
 			switch msgType {
 			case MsgRecoveryLaneStart:
@@ -364,12 +404,13 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 					log.Printf("replica: decode recovery lane start: %v", err)
 					return true
 				}
-				if !r.admitMutation(lineage) {
+				if !admit(lineage) {
 					log.Printf("replica: reject stale recovery lane start session=%d epoch=%d endpointVersion=%d",
 						lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
 					return true
 				}
 				lane = mutationLaneRecovery
+				r.markPrefixEligibility(lineage, false)
 
 			case MsgShipEntry:
 				entry, err := DecodeShipEntry(payload)
@@ -377,7 +418,7 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 					log.Printf("replica: decode ship entry: %v", err)
 					return true
 				}
-				if !r.admitMutation(entry.Lineage) {
+				if !admit(entry.Lineage) {
 					log.Printf("replica: reject stale ship session=%d epoch=%d endpointVersion=%d",
 						entry.Lineage.SessionID, entry.Lineage.Epoch, entry.Lineage.EndpointVersion)
 					return true
@@ -451,7 +492,7 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 					log.Printf("replica: decode rebuild block: %v", err)
 					return true
 				}
-				if !r.admitMutation(lineage) {
+				if !admit(lineage) {
 					log.Printf("replica: reject stale rebuild block session=%d epoch=%d endpointVersion=%d",
 						lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
 					return true
@@ -474,7 +515,7 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 					log.Printf("replica: decode rebuild done: %v", err)
 					return true
 				}
-				if !r.admitMutation(lineage) {
+				if !admit(lineage) {
 					log.Printf("replica: reject stale rebuild done session=%d epoch=%d endpointVersion=%d",
 						lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
 					return true
@@ -497,6 +538,8 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 					log.Printf("replica: sync after rebuild done: %v", err)
 					return true
 				}
+				// A completed full BASE supplies the covered starting image.
+				r.markPrefixEligibility(lineage, true)
 				// Echo the request's full lineage in the rebuild-done ack
 				// so primary-side validators can consume it.
 				resp := EncodeBarrierResp(BarrierResponse{
@@ -506,13 +549,19 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 				replyType, reply = MsgBarrierResp, resp
 				return true
 
+			case MsgCertifiedPrefix:
+				lineage, err := DecodeLineage(payload)
+				if err != nil || r.certifyRecoveryPrefix(lineage) != nil {
+					return true
+				}
+
 			case MsgBarrierReq:
 				lineage, err := DecodeLineage(payload)
 				if err != nil {
 					log.Printf("replica: decode barrier req: %v", err)
 					return true
 				}
-				if !r.admitMutation(lineage) {
+				if !admit(lineage) {
 					log.Printf("replica: reject stale barrier session=%d epoch=%d endpointVersion=%d",
 						lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
 					return true
@@ -534,6 +583,9 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 			}
 			return false
 		}()
+		if admittedSession != 0 {
+			r.endSessionFrame(admittedSession)
+		}
 		if mutating {
 			r.endMutationFrame()
 		}
@@ -654,7 +706,7 @@ const defaultFenceDrainTimeout = 10 * time.Second
 // isMutationMsg names the frames that pass acceptMutationLineage.
 func isMutationMsg(msgType byte) bool {
 	switch msgType {
-	case MsgRecoveryLaneStart, MsgShipEntry, MsgRebuildBlock, MsgRebuildDone, MsgBarrierReq:
+	case MsgRecoveryLaneStart, MsgShipEntry, MsgRebuildBlock, MsgRebuildDone, MsgBarrierReq, MsgCertifiedPrefix:
 		return true
 	}
 	return false
@@ -726,6 +778,10 @@ func (r *ReplicaListener) AdmitAsReplica(epoch uint64) error {
 func (r *ReplicaListener) acceptMutationLineage(incoming RecoveryLineage) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.acceptMutationLineageLocked(incoming)
+}
+
+func (r *ReplicaListener) acceptMutationLineageLocked(incoming RecoveryLineage) bool {
 
 	if incoming.SessionID == 0 || incoming.Epoch == 0 || incoming.EndpointVersion == 0 {
 		return false
@@ -775,4 +831,85 @@ func compareLineage(a, b RecoveryLineage) int {
 	default:
 		return 0
 	}
+}
+
+// A certificate cannot introduce an unseen session or survive a later one.
+// Lock order: listener.mu -> gate.mu -> store boundary read. There is no wire
+// or physical I/O here; fencing/session admission cannot cross the effect.
+func (r *ReplicaListener) certifyRecoveryPrefix(lineage RecoveryLineage) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.primary || (r.requireRole && !r.assigned) || lineage.Epoch < r.epochFloor ||
+		lineage.SessionID == 0 || lineage.EffectiveFrontierHint() == 0 || !r.activeLineage.Equivalent(lineage) || !r.prefixEligible.Equivalent(lineage) {
+		return fmt.Errorf("replica: uncertified/stale recovery lineage")
+	}
+	hook, ok := r.applyHook.(RecoveryPrefixHook)
+	if !ok {
+		return fmt.Errorf("replica: no recovery prefix hook")
+	}
+	return hook.CertifyRecoveryPrefix(lineage)
+}
+
+// A successful scan can extend only an already-covered starting prefix. The
+// engine starts catch-up at probed R+1; R is monotone, so observing local R<=P
+// at the lane marker is a conservative bound on that starting R. A completed
+// full BASE instead supplies its own prefix. A refusal only retains history.
+func (r *ReplicaListener) markPrefixEligibility(lineage RecoveryLineage, fullBase bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.activeLineage.Equivalent(lineage) || r.primary || (r.requireRole && !r.assigned) {
+		return
+	}
+	r.prefixEligible = RecoveryLineage{}
+	hook, ok := r.applyHook.(RecoveryPrefixHook)
+	if !ok {
+		return
+	}
+	synced, _, _ := r.store.Boundaries()
+	if fullBase || synced <= hook.CertifiedPrefix() {
+		r.prefixEligible = lineage
+	}
+}
+
+// Retirement tracks logical-session frames, not socket lifetimes. A newer
+// session may run while an admitted older frame is parked before the hook.
+// Lock order remains listener.mu -> gate.mu; versions and P are not released.
+func (r *ReplicaListener) markSessionRetiringLocked(id uint64) {
+	if id == 0 {
+		return
+	}
+	if r.retiringSessions == nil {
+		r.retiringSessions = make(map[uint64]bool)
+	}
+	r.retiringSessions[id] = true
+	r.retireSessionIfSettledLocked(id)
+}
+func (r *ReplicaListener) retireSessionIfSettledLocked(id uint64) {
+	if !r.retiringSessions[id] || id == r.activeLineage.SessionID || r.sessionFrames[id] != 0 {
+		return
+	}
+	if hook, ok := r.applyHook.(SessionRetirer); ok {
+		hook.CloseSession(id)
+	}
+	delete(r.retiringSessions, id)
+}
+func (r *ReplicaListener) endSessionFrame(id uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sessionFrames[id]--
+	if r.sessionFrames[id] == 0 {
+		delete(r.sessionFrames, id)
+	}
+	r.retireSessionIfSettledLocked(id)
+}
+func (r *ReplicaListener) closeSettledSessions() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if hook, ok := r.applyHook.(SessionRetirer); ok {
+		hook.CloseSession(r.activeLineage.SessionID)
+		for id := range r.retiringSessions {
+			hook.CloseSession(id)
+		}
+	}
+	r.retiringSessions = nil
 }
