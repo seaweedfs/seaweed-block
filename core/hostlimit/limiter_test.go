@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -329,4 +330,39 @@ func TestFallbackLogDoesNotHoldCOWAccountingLock(t *testing.T) {
 		t.Fatal("blocked log holds guest COW accounting lock")
 	}
 	l.mu.Unlock()
+}
+
+func TestHealthyAdmissionDoesNotHideOlderFallbackLease(t *testing.T) {
+	c := testConfig(t)
+	c.Directory = filepath.Join(c.Directory, "late-pool")
+	l := newTest(t, c)
+	x, e := l.Admit(context.Background(), 1, nil)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = os.Mkdir(c.Directory, 0700); e != nil {
+		t.Fatal(e)
+	}
+	y, e := l.Acquire(context.Background(), BackgroundFill, nil)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer l.Release(y)
+	if !l.Snapshot().(Stats).FallbackActive {
+		t.Fatal("healthy admission hid an active uncoordinated lease")
+	}
+	l.Release(x)
+	deadline := time.After(3 * time.Second)
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	for l.Snapshot().(Stats).Active != 1 {
+		select {
+		case <-deadline:
+			t.Fatal("fallback lease not released")
+		case <-tick.C:
+		}
+	}
+	if l.Snapshot().(Stats).FallbackActive {
+		t.Fatal("settled fallback lease still degrades healthy owner")
+	}
 }

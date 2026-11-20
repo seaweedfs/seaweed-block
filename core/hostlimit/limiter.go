@@ -67,6 +67,7 @@ type lease struct {
 	file         *os.File
 	started      time.Time
 	class        Class
+	fallback     bool
 	payload, cow int64
 	abort        func(error)
 	timer        *time.Timer
@@ -232,13 +233,16 @@ func (l *Limiter) Admit(ctx context.Context, payload int64, abort func(error)) (
 	}
 	l.next++
 	id := l.next
-	x := &lease{file: f, started: time.Now(), class: c, payload: payload, abort: abort}
+	x := &lease{file: f, started: time.Now(), class: c, fallback: fallback, payload: payload, abort: abort}
 	l.live[id] = x
 	l.stats.Admitted++
 	l.stats.PayloadReserved += payload
 	l.stats.Active++
 	l.fallback = fallback
-	l.stats.FallbackActive = fallback
+	for _, held := range l.live {
+		l.fallback = l.fallback || held.fallback
+	}
+	l.stats.FallbackActive = l.fallback
 	warnFallback := fallback && l.stats.Fallback == 0
 	if fallback {
 		l.stats.LastPoolError = err.Error()
@@ -332,6 +336,13 @@ func (l *Limiter) releaseLoop() {
 			}
 			l.mu.Lock()
 			delete(l.live, id)
+			if len(l.live) > 0 {
+				l.fallback = false
+				for _, held := range l.live {
+					l.fallback = l.fallback || held.fallback
+				}
+				l.stats.FallbackActive = l.fallback
+			}
 			l.stats.Active--
 			l.stats.PayloadReserved -= x.payload
 			l.stats.COWReserved -= x.cow
