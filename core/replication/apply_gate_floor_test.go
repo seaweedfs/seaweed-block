@@ -32,11 +32,13 @@ func TestApplyGate_DurableFloorBoundsVersionHistory(t *testing.T) {
 	const batch = 32
 	store := storage.NewBlockStore(1025, 1)
 	gate := NewReplicaApplyGate(store)
+	var lsn uint64
 	for round := uint64(0); round < 32; round++ {
 		session := round + 1
 		for j := uint64(0); j < batch; j++ {
 			lba := uint32(round*batch + j)
-			if err := gate.ApplyLive(liveLineage(session), lba, []byte{0xBB}, uint64(lba)+1); err != nil {
+			lsn++
+			if err := gate.ApplyLive(liveLineage(session), lba, []byte{0xBB}, lsn); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -44,7 +46,8 @@ func TestApplyGate_DurableFloorBoundsVersionHistory(t *testing.T) {
 			t.Fatal(err)
 		}
 		// A subsequent apply provides a lazy-pruning opportunity.
-		if err := gate.ApplyLive(liveLineage(session), 1024, []byte{0xCC}, 2048+round); err != nil {
+		lsn++
+		if err := gate.ApplyLive(liveLineage(session), 1024, []byte{0xCC}, lsn); err != nil {
 			t.Fatal(err)
 		}
 		tracked, _, _, _ := gate.SessionState(session)
