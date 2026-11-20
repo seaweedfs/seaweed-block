@@ -93,7 +93,8 @@ func TestCutCOWV3_MutationCompletesWhileEarlierChunkCopyIsHeld(t *testing.T) {
 			if _, err = layer.Cut(context.Background()); err != nil {
 				t.Fatal(err)
 			}
-			for lba, value := range map[uint32]byte{1: 0x21, 5: 0x65} {
+			for _, lba := range []uint32{5, 1} {
+				value := map[uint32]byte{1: 0x21, 5: 0x65}[lba]
 				if _, err = s.Write(lba, makeBlock(ctBlockSize, value)); err != nil {
 					t.Fatal(err)
 				}

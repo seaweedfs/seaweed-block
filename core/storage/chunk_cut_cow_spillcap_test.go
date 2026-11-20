@@ -13,8 +13,10 @@ import (
 
 func TestCutCOWV3_SaverCapacityAbortsWithoutParkingGuest(t *testing.T) {
 	s, l, f, gate := cowFixture(t)
-	if _, err := s.Write(9, makeBlock(ctBlockSize, 0x39)); err != nil {
-		t.Fatal(err)
+	for _, lba := range []uint32{9, 1} {
+		if _, err := s.Write(lba, makeBlock(ctBlockSize, byte(lba))); err != nil {
+			t.Fatal(err)
+		}
 	}
 	entered, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once

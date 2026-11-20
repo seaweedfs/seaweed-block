@@ -499,6 +499,9 @@ func (l *chunkLayerImpl) copyCOWEntry(w *cutCOWWindow, idx uint64) (capturedChun
 // Once copied, its entry is done: guest writes need not wait for remote I/O.
 // The window remains installed for candidates not yet read by a worker.
 func (l *chunkLayerImpl) copyCOWWindow(ctx context.Context, w *cutCOWWindow, recent map[uint64]uint64) ([]capturedChunk, string, error) {
+	parent := ctx
+	abortStop := context.AfterFunc(parent, func() { w.abort(parent.Err()) })
+	defer abortStop()
 	ctx, cancel := context.WithCancel(ctx)
 	stop := context.AfterFunc(w.ctx, cancel)
 	defer stop()

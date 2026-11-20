@@ -111,10 +111,10 @@ func TestCutCOWV3_LazySaverSpillImageIsExact(t *testing.T) {
 	cfg.BarrierBound = 0
 	cfg.UploadConcurrency = 1
 	l := mustAttach(t, s, f, cfg).(*chunkLayerImpl)
-	if _, err := s.Write(1, makeBlock(ctBlockSize, 0x51)); err != nil {
+	if _, err := s.WriteBatch(4, [][]byte{makeBlock(ctBlockSize, 0x54), makeBlock(ctBlockSize, 0x55)}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.WriteBatch(4, [][]byte{makeBlock(ctBlockSize, 0x54), makeBlock(ctBlockSize, 0x55)}); err != nil {
+	if _, err := s.Write(1, makeBlock(ctBlockSize, 0x51)); err != nil {
 		t.Fatal(err)
 	}
 	live, releaseLive := make(chan struct{}), make(chan struct{})
