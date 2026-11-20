@@ -30,6 +30,7 @@ const (
 )
 
 var errCutCOWAborted = errors.New("storage: cut copy window aborted; retry cut")
+var errCutLocalFlushBusy = errors.New("storage: local chunk flush in progress")
 
 type cutCOWEntry struct {
 	mu           sync.Mutex
@@ -213,7 +214,7 @@ func (w *cutCOWWindow) claim(idx uint64, saving bool) (*cutCOWEntry, uint8, <-ch
 		gate := w.layer.s.chunkFlushGate(idx)
 		if !gate.TryRLock() {
 			w.terminal = true
-			w.err = fmt.Errorf("%w: local chunk flush in progress", errCutCOWAborted)
+			w.err = fmt.Errorf("%w: %w", errCutCOWAborted, errCutLocalFlushBusy)
 			close(w.ended)
 			w.cancel()
 			return nil, cowDone, nil, nil

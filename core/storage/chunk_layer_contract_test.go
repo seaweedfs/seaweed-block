@@ -176,7 +176,7 @@ func TestChunkLayer_C2_StalledUploadDoesNotGateLocal(t *testing.T) {
 func TestChunkLayer_C3_EveryHeadIsExactUnderConcurrentWrites(t *testing.T) {
 	s, _ := newChunkTestStore(t)
 	f := newFakeChunkRemote()
-	layer := mustAttach(t, s, f, ctConfig(1))
+	layer := rollingCaptureForTest{mustAttach(t, s, f, ctConfig(1))}
 	w := newWriteLog()
 	for lba := uint32(0); lba < ctChunkBlocks; lba++ {
 		w.write(t, s, lba, byte(0x40+lba))
@@ -1198,4 +1198,42 @@ func TestChunkLayer_C10_LocalRecoveryWinsOverOlderHead(t *testing.T) {
 	if got := blockOf(f.imageOf(t, f.stats().head), 9); !bytes.Equal(got, makeBlock(ctBlockSize, 0x92)) {
 		t.Fatal("first capture after restart did not publish the recovered local data")
 	}
+}
+
+// Rolling callers retry a point refused because the local flusher already
+// owns its chunk. No deadline extension and no retry of a joined physical,
+// integrity, cancellation or authority error is allowed here.
+type rollingCaptureForTest struct{ chunkLayer }
+
+func (l rollingCaptureForTest) Capture(ctx context.Context) (uint64, error) {
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		h, err := l.chunkLayer.Capture(ctx)
+		if !errors.Is(err, errCutLocalFlushBusy) || !onlyLocalFlushAbortForTest(err) {
+			return h, err
+		}
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+func onlyLocalFlushAbortForTest(err error) bool {
+	if err == nil || err == errCutLocalFlushBusy || err == errCutCOWAborted {
+		return true
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, cause := range joined.Unwrap() {
+			if !onlyLocalFlushAbortForTest(cause) {
+				return false
+			}
+		}
+		return true
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return onlyLocalFlushAbortForTest(wrapped.Unwrap())
+	}
+	return false
 }
