@@ -350,7 +350,19 @@ func TestPrecopyDetachExcludesServingPreparationFromFreezeCost(t *testing.T) {
 }
 
 func TestPrecopyDetachRetryResolvesPreviouslyAppliedDetachedCut(t *testing.T) {
+	precopyAppliedDetachRetryControl(t, false)
+}
+
+func TestPrecopyDetachAppliedRetryRetainsSlowFixedCost(t *testing.T) {
+	precopyAppliedDetachRetryControl(t, true)
+}
+
+func precopyAppliedDetachRetryControl(t *testing.T, slow bool) {
+	t.Helper()
 	_, f, l, _ := precopyLayer(t, 1024, 1)
+	if slow {
+		f.beforeCAS = func(*fakeChunkRemote) { time.Sleep(1300 * time.Millisecond) }
+	}
 	if _, err := l.Cut(ctTimeout(t)); err != nil {
 		t.Fatal(err)
 	}
@@ -456,7 +468,23 @@ func TestPrecopyDrainLetsAnAdmittedWriterReachTheBarrier(t *testing.T) {
 }
 
 func TestPrecopyAttemptDiagnosticsSeparateTimeoutFromFit(t *testing.T) {
-	_, _, l, _ := precopyLayer(t, 1024, 0)
+	precopyAttemptDiagnosticsControl(t, false)
+}
+
+func TestPrecopyAttemptDiagnosticsRetainSlowFixedCost(t *testing.T) {
+	precopyAttemptDiagnosticsControl(t, true)
+}
+
+func precopyAttemptDiagnosticsControl(t *testing.T, slow bool) {
+	t.Helper()
+	s, f, l, w := precopyLayer(t, 1024, 0)
+	if slow {
+		w.write(t, s, 1, 0x10)
+		f.beforeCAS = func(*fakeChunkRemote) { time.Sleep(1300 * time.Millisecond) }
+		if _, err := l.Cut(ctTimeout(t)); err != nil {
+			t.Fatal(err)
+		}
+	}
 	calls := 0
 	r, err := l.PrecopyDetachWithAdmission(ctTimeout(t), func(ctx context.Context) (func(), error) {
 		calls++
