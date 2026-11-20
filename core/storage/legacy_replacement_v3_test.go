@@ -833,6 +833,15 @@ func TestNativeReplacementRetainedBatchAcrossWrap(t *testing.T) {
 			t.Fatalf("suffix %d: %+v", i, e)
 		}
 	}
+	// The retained batch plus wrap padding occupies the hard watermark.
+	// This fixture disables automatic flushing, so settle its remainder
+	// explicitly before admitting the next guest write.
+	if err := r.flusher.flushOnce(); err != nil {
+		t.Fatal(err)
+	}
+	if r.CheckpointLSN() != 17 {
+		t.Fatalf("settled batch checkpoint=%d", r.CheckpointLSN())
+	}
 	if n, err := r.Write(20, blk(0xF1)); err != nil || n != 18 {
 		t.Fatalf("post-recovery append=%d %v", n, err)
 	}
