@@ -387,9 +387,17 @@ func TestCutCOWV3_SaverBurstWaitsAndPublishes(t *testing.T) {
 	t.Cleanup(func() {
 		free()
 		gate.unblock()
-		cowWaitSignal(t, firstDone, "first burst writer cleanup")
+		// A timeout reports failure without skipping the other owner's join.
+		wait := func(done <-chan struct{}, name string) {
+			select {
+			case <-done:
+			case <-time.After(ctLocalBound):
+				t.Errorf("%s did not settle within %s", name, ctLocalBound)
+			}
+		}
+		wait(firstDone, "first burst writer cleanup")
 		if secondStarted {
-			cowWaitSignal(t, secondDone, "second burst writer cleanup")
+			wait(secondDone, "second burst writer cleanup")
 		}
 	})
 	go func() { defer close(firstDone); _, e := s.Write(5, makeBlock(ctBlockSize, 0xa5)); writers <- e }()
