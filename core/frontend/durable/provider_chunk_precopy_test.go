@@ -188,7 +188,9 @@ func precopyBusyOwnerKeepsServing(t *testing.T, delay time.Duration) {
 		t.Fatal("write not admitted")
 	}
 	remote.nextDelay.Store(int64(delay))
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Rolling cuts run while serving and have a 60s operation budget.
+	// The drain and frozen admission bounds are checked independently.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	logs := &lockedLog{}
 	captureWriteLogs(t, logs)
