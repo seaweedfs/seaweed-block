@@ -23,15 +23,22 @@ import (
 // concurrent writer on another.
 var ErrNotSingleFiler = errors.New("chunkstore: block metadata needs exactly one filer")
 
-// singleFilerWait bounds the whole check (a var for tests).
-var singleFilerWait = 15 * time.Second
+// singleFilerWait bounds the whole check; singleFilerRetry spaces the
+// rounds (vars for tests). A filer registers with the master only some
+// seconds after it serves (14 s measured with a fresh filer), so "no filer
+// listed yet" is retried until the bound.
+var (
+	singleFilerWait  = 60 * time.Second
+	singleFilerRetry = time.Second
+)
 
 // CheckSingleFiler asks the filer for its masters and filer group
 // (filer_pb.SeaweedFiler/GetFilerConfiguration), then asks the masters for
 // the filers registered in that group (master_pb.Seaweed/ListClusterNodes,
 // client_type "filer"). It passes only when a master answers with exactly
-// one filer. More than one filer is refused; so is an answer it cannot get
-// or confirm (fail closed).
+// one filer. More than one filer is refused at once. No filer listed yet, or
+// no master answering, is retried until the bound and then refused (fail
+// closed).
 func (c *SWFS) CheckSingleFiler(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, singleFilerWait)
 	defer cancel()
@@ -44,27 +51,45 @@ func (c *SWFS) CheckSingleFiler(ctx context.Context) error {
 		return fmt.Errorf("%w: filer %s reports no master, cannot list its group", ErrNotSingleFiler, c.cfg.FilerGRPC)
 	}
 	var tried []string
+	for {
+		ok, err := c.singleFilerRound(ctx, cfg, &tried)
+		if ok || err != nil {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%w: could not confirm a single filer within %s: %s", ErrNotSingleFiler, singleFilerWait, strings.Join(tried, "; "))
+		case <-time.After(singleFilerRetry):
+		}
+	}
+}
+
+// singleFilerRound asks each master once: ok when one lists exactly one
+// filer, an error when one lists several, else (false, nil) to retry; tried
+// keeps the last answer of each master.
+func (c *SWFS) singleFilerRound(ctx context.Context, cfg *filerpb.GetFilerConfigurationResponse, tried *[]string) (bool, error) {
+	*tried = (*tried)[:0]
 	for _, m := range cfg.GetMasters() {
 		addr, err := masterGRPCAddress(m)
 		if err != nil {
-			tried = append(tried, fmt.Sprintf("%s: %v", m, err))
+			*tried = append(*tried, fmt.Sprintf("%s: %v", m, err))
 			continue
 		}
 		nodes, err := listFilers(ctx, addr, cfg.GetFilerGroup())
 		if err != nil {
-			tried = append(tried, fmt.Sprintf("%s: %v", addr, err))
+			*tried = append(*tried, fmt.Sprintf("%s: %v", addr, err))
 			continue
 		}
 		switch len(nodes) {
 		case 1:
-			return nil
+			return true, nil
 		case 0:
-			tried = append(tried, addr+": lists no filer in group "+strconv.Quote(cfg.GetFilerGroup()))
+			*tried = append(*tried, addr+": lists no filer in group "+strconv.Quote(cfg.GetFilerGroup())+" yet")
 		default:
-			return fmt.Errorf("%w: filer group %q has %d filers %v (master %s)", ErrNotSingleFiler, cfg.GetFilerGroup(), len(nodes), nodes, addr)
+			return false, fmt.Errorf("%w: filer group %q has %d filers %v (master %s)", ErrNotSingleFiler, cfg.GetFilerGroup(), len(nodes), nodes, addr)
 		}
 	}
-	return fmt.Errorf("%w: could not confirm a single filer: %s", ErrNotSingleFiler, strings.Join(tried, "; "))
+	return false, nil
 }
 
 func listFilers(ctx context.Context, addr, group string) ([]string, error) {

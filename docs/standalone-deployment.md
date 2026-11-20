@@ -134,8 +134,10 @@ The `--chunk-*` and `--workspace-lease` flags are refused unless
 
 `--chunk-filer` must name the only filer of its filer group. At startup
 blockvolume asks that filer for its masters, then the masters for the filers
-in the group, and refuses to start unless exactly one is listed. It also
-refuses when it cannot get that answer within 15 s.
+in the group, and refuses to start unless exactly one is listed: several
+filers are refused at once; a filer not listed yet (a fresh filer registers
+with its master some seconds after it serves) is asked again until 60 s, then
+refused.
 
 ## Notes
 
