@@ -215,8 +215,8 @@ func precopyBusyOwnerKeepsServing(t *testing.T, delay time.Duration) {
 			t.Fatalf("incomplete pre-copy attempt diagnostic: %s", line)
 		}
 	}
-	if lines != r.Precopy.Attempts {
-		t.Fatalf("pre-copy attempt diagnostics missing: got %d, want %d", lines, r.Precopy.Attempts)
+	if lines != len(r.Precopy.Rounds) || lines != r.Precopy.Attempts+r.Precopy.MeasurementRounds {
+		t.Fatalf("pre-copy round diagnostics missing: got %d, report=%+v", lines, r.Precopy)
 	}
 	if started, resumed := k.calls(); len(started) != 1 || len(resumed) != 1 {
 		t.Fatalf("nonconverged hooks: started=%v resumed=%v", started, resumed)

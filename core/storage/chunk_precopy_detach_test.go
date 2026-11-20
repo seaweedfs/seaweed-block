@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -76,7 +77,7 @@ func TestPrecopyDetachBusyOwnerExhaustsWithoutStopping(t *testing.T) {
 	s, f, l, _ := precopyLayer(t, 1024, 1)
 	calls := 0
 	r, err := l.PrecopyDetach(ctTimeout(t), func() bool { calls++; return false })
-	if !errors.Is(err, ErrPrecopyNotConverged) || r.Precopy.Attempts != 5 || r.Precopy.Frozen || calls == 0 {
+	if !errors.Is(err, ErrPrecopyNotConverged) || len(r.Precopy.Rounds) != 5 || r.Precopy.Frozen || calls == 0 {
 		t.Fatalf("report=%+v calls=%d err=%v", r.Precopy, calls, err)
 	}
 	if f.stats().head.State == ChunkHeadDetached {
@@ -414,5 +415,37 @@ func TestPrecopyAttemptDiagnosticsSeparateTimeoutFromFit(t *testing.T) {
 		if a.Drain <= 0 || a.Pause < a.Drain || a.Barrier != a.Pause-a.Drain {
 			t.Fatalf("pause accounting: %+v", a)
 		}
+	}
+}
+
+func TestPrecopyCountsWarmAttemptsSeparatelyFromMeasurementRounds(t *testing.T) {
+	for _, warm := range []bool{false, true} {
+		t.Run(map[bool]string{false: "cold", true: "warm"}[warm], func(t *testing.T) {
+			_, _, l, _ := precopyLayer(t, 1024, 0)
+			l.precopySamples = nil
+			if warm {
+				for i := 0; i < 3; i++ {
+					l.precopySamples = append(l.precopySamples, precopySample{at: time.Now(), fixed: time.Millisecond, rate: 1 << 30})
+				}
+			}
+			r, _ := l.PrecopyDetachWithAdmission(ctTimeout(t), func(context.Context) (func(), error) {
+				return nil, errors.New("controlled admission refusal")
+			}, func() bool { t.Fatal("refused admission froze"); return false })
+			data, err := json.Marshal(r.Precopy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]any
+			if err := json.Unmarshal(data, &fields); err != nil {
+				t.Fatal(err)
+			}
+			wantSamples, wantAttempts, wantMeasurement := float64(0), float64(0), float64(5)
+			if warm {
+				wantSamples, wantAttempts, wantMeasurement = 3, 5, 0
+			}
+			if fields["samplesAtStart"] != wantSamples || fields["attempts"] != wantAttempts || fields["measurementRounds"] != wantMeasurement || len(r.Precopy.Rounds) != 5 {
+				t.Fatalf("warm=%t report=%s", warm, data)
+			}
+		})
 	}
 }

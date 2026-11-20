@@ -962,7 +962,7 @@ func (p *DurableProvider) DetachVolume(ctx context.Context, volumeID string) (st
 		if !stopIOReturned.IsZero() {
 			stopAt = stopIOReturned.UTC().Format(time.RFC3339Nano)
 		}
-		log.Printf("durable: pre-copy volume=%s attempts=%d tail=%d rate=%.0f sample_age=%s fixed=%s estimate=%s frozen=%t reason=%s stop_io_returned_at=%s err=%v", volumeID, r.Precopy.Attempts, r.Precopy.TailBytes, r.Precopy.BytesPerSecond, r.Precopy.SampleAge, r.Precopy.Fixed, r.Precopy.Estimate, r.Precopy.Frozen, r.Precopy.Reason, stopAt, err)
+		log.Printf("durable: pre-copy volume=%s attempts=%d measurement_rounds=%d samples_at_start=%d tail=%d rate=%.0f sample_age=%s fixed=%s estimate=%s frozen=%t reason=%s stop_io_returned_at=%s err=%v", volumeID, r.Precopy.Attempts, r.Precopy.MeasurementRounds, r.Precopy.SamplesAtStart, r.Precopy.TailBytes, r.Precopy.BytesPerSecond, r.Precopy.SampleAge, r.Precopy.Fixed, r.Precopy.Estimate, r.Precopy.Frozen, r.Precopy.Reason, stopAt, err)
 		if err == nil {
 			if !start.IsZero() {
 				r.Precopy.Finish(time.Since(start)+r.Precopy.BarrierBeforeFreeze, 0, false)
