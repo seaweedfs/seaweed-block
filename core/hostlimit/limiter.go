@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -75,17 +76,18 @@ type lease struct {
 	revoked      bool
 }
 type Limiter struct {
-	cfg        Config
-	mu         sync.Mutex
-	admitWG    sync.WaitGroup
-	next       uint64
-	live       map[uint64]*lease
-	stats      Stats
-	closed     bool
-	wake       chan struct{}
-	done       chan struct{}
-	nextUpload time.Time
-	fallback   bool
+	testBeforeConfigWrite func() // test-only crash boundary; immutable before first admission
+	cfg                   Config
+	mu                    sync.Mutex
+	admitWG               sync.WaitGroup
+	next                  uint64
+	live                  map[uint64]*lease
+	stats                 Stats
+	closed                bool
+	wake                  chan struct{}
+	done                  chan struct{}
+	nextUpload            time.Time
+	fallback              bool
 }
 
 func New(c Config) (*Limiter, error) {
@@ -136,7 +138,7 @@ func (l *Limiter) pool(c Class) (*os.File, error) {
 	path := filepath.Join(l.cfg.Directory, "configuration.json")
 	existing, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		err = os.WriteFile(path, expected, 0600)
+		err = l.publishConfig(path, expected)
 		existing = expected
 	}
 	if err != nil {
@@ -178,6 +180,34 @@ func (l *Limiter) pool(c Class) (*os.File, error) {
 		}
 	}
 	return nil, ErrBusy
+}
+
+// publishConfig runs under the configuration OS lock. A killed initializer
+// leaves an ignored temporary file, never a partially visible configuration.
+func (l *Limiter) publishConfig(path string, data []byte) error {
+	f, err := os.CreateTemp(l.cfg.Directory, ".configuration-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	defer f.Close()
+	if l.testBeforeConfigWrite != nil {
+		l.testBeforeConfigWrite()
+	}
+	n, err := f.Write(data)
+	if err != nil {
+		return err
+	}
+	if n != len(data) {
+		return io.ErrShortWrite
+	}
+	if err = f.Sync(); err != nil {
+		return err
+	}
+	if err = f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
 }
 
 // Acquire exposes background fill/idle permits to future background callers.

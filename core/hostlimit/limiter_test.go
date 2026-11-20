@@ -216,6 +216,9 @@ func TestProcessSlotHelper(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
+	if os.Getenv("SWBLOCK_TEST_LIMITER_INIT_GATE") == "1" {
+		l.testBeforeConfigWrite = func() { fmt.Println("CONFIG-WRITE"); _, _ = bufio.NewReader(os.Stdin).ReadByte() }
+	}
 	_, e = l.Admit(context.Background(), 1, nil)
 	if e != nil {
 		t.Fatal(e)
@@ -367,5 +370,59 @@ func TestHealthyAdmissionDoesNotHideOlderFallbackLease(t *testing.T) {
 	}
 	if l.Snapshot().(Stats).FallbackActive {
 		t.Fatal("settled fallback lease still degrades healthy owner")
+	}
+}
+
+func TestKilledInitializerDoesNotPublishPartialConfiguration(t *testing.T) {
+	c := testConfig(t)
+	cmd := exec.Command(os.Args[0], "-test.run=^TestProcessSlotHelper$")
+	cmd.Env = append(os.Environ(), "SWBLOCK_TEST_LIMITER_DIR="+c.Directory, "SWBLOCK_TEST_LIMITER_INIT_GATE=1")
+	out, e := cmd.StdoutPipe()
+	if e != nil {
+		t.Fatal(e)
+	}
+	in, e := cmd.StdinPipe()
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer in.Close()
+	if e = cmd.Start(); e != nil {
+		t.Fatal(e)
+	}
+	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+	ready := make(chan bool, 1)
+	go func() {
+		s := bufio.NewScanner(out)
+		for s.Scan() {
+			if s.Text() == "CONFIG-WRITE" {
+				ready <- true
+				return
+			}
+		}
+		ready <- false
+	}()
+	select {
+	case ok := <-ready:
+		if !ok {
+			t.Fatal("initializer did not reach write boundary")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("initializer boundary not reached")
+	}
+	if _, e = os.Stat(filepath.Join(c.Directory, "configuration.json")); !errors.Is(e, os.ErrNotExist) {
+		t.Fatal("unpublished configuration became visible", e)
+	}
+	if e = cmd.Process.Kill(); e != nil {
+		t.Fatal(e)
+	}
+	_ = cmd.Wait()
+	l := newTest(t, c)
+	x, e := l.Admit(context.Background(), 1, nil)
+	if e != nil {
+		t.Fatal("successor did not recover interrupted initialization", e)
+	}
+	defer l.Release(x)
+	if l.Snapshot().(Stats).FallbackActive {
+		t.Fatal("successor silently bypassed shared cap")
 	}
 }
