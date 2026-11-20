@@ -357,6 +357,15 @@ func TestWALStoreV3FlusherWritesTheExtentButHoldsTheCheckpointUntilTheMap(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The simulated crash below cannot leave the automatic flusher using the
+	// descriptor (its reopen raced that close: "volume locked", #227); this
+	// test drives the flush by hand. Stop it before writes, as walstore_test.
+	s.DisableAutoFlushForRecoveryTest()
+	select {
+	case <-s.flusher.doneCh:
+	default:
+		t.Fatal("automatic flusher still running")
+	}
 	writeSynced(t, s, 1, 3)
 	before := s.v3.pub.current()
 	if err := s.flusher.flushOnceInternal(false); err != nil {

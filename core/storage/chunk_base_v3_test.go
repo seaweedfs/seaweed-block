@@ -52,7 +52,7 @@ func TestChunkLayerV3_BASEBeginDrainsWholeCut(t *testing.T) {
 	}
 	entered, release := holdPuts(t, f)
 	cutDone := startCapture(t, l)
-	waitKey(t, entered, "held cut upload after barrier")
+	<-entered // progress, no timer (#227): the cut's upload is held after its barrier
 	attempted := make(chan struct{})
 	l.testBaseTransitionBeforeLock = func() { close(attempted) }
 	type result struct {
@@ -70,26 +70,17 @@ func TestChunkLayerV3_BASEBeginDrainsWholeCut(t *testing.T) {
 		}
 	})
 	go func() { defer close(joined); h, e := s.BeginBaseInstall(7, idA); finished <- result{h, e} }()
-	select {
-	case <-attempted:
-	case <-time.After(ctLocalBound):
-		t.Fatal("BASE did not reach outer drain")
-	}
+	<-attempted // BASE reached the outer drain
 	select {
 	case r := <-finished:
 		t.Fatalf("BASE begin completed before the captured upload/CAS drained: %v", r.err)
 	case <-time.After(200 * time.Millisecond):
 	}
 	release()
-	if e := waitErr(t, cutDone, "old cut settlement"); e != nil {
+	if e := <-cutDone; e != nil { // the old cut settles once released
 		t.Fatal(e)
 	}
-	var r result
-	select {
-	case r = <-finished:
-	case <-time.After(ctLocalBound):
-		t.Fatal("BASE begin failed to resume after cut settled")
-	}
+	r := <-finished // BASE begin resumes after the cut settled
 	if r.err != nil {
 		t.Fatal(r.err)
 	}

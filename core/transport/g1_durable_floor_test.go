@@ -54,32 +54,27 @@ func g1Lineage(sess, epoch uint64) RecoveryLineage {
 }
 
 // g1Ship sends one ship on a fresh connection and reports whether it was
-// applied (bytes visible within d) or refused (connection closed).
+// applied or refused (g2Refused's probe handshake: an accepted ship is applied
+// before the probe is answered), and checks the effect agrees.
 func g1Ship(t *testing.T, ln *ReplicaListener, store storage.LogicalStorage, l RecoveryLineage, lsn uint64, fill byte) bool {
 	t.Helper()
 	want := bytes.Repeat([]byte{fill}, 4096)
-	if g2Refused(t, ln.Addr(), MsgShipEntry, EncodeShipEntry(ShipEntry{Lineage: l, LBA: 0, LSN: lsn, Data: want})) {
-		if bytes.Equal(g1Block(t, store), want) {
-			t.Fatalf("epoch-%d ship refused yet its bytes were applied", l.Epoch)
-		}
-		return false
+	refused := g2Refused(t, ln.Addr(), MsgShipEntry, EncodeShipEntry(ShipEntry{Lineage: l, LBA: 0, LSN: lsn, Data: want}))
+	applied := bytes.Equal(g1Block(t, store), want)
+	if refused && applied {
+		t.Fatalf("epoch-%d ship refused yet its bytes were applied", l.Epoch)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for !bytes.Equal(g1Block(t, store), want) {
-		if time.Now().After(deadline) {
-			t.Fatalf("epoch-%d ship neither refused nor applied", l.Epoch)
-		}
-		time.Sleep(5 * time.Millisecond)
+	if !refused && !applied {
+		t.Fatalf("epoch-%d ship accepted but its bytes are not visible after the probe answer", l.Epoch)
 	}
-	return true
+	return !refused
 }
 
 // g1Barrier sends a barrier and reports whether it was ACKed (a barrier
 // response echoing the lineage) or refused (connection closed, no ACK).
 func g1Barrier(t *testing.T, ln *ReplicaListener, l RecoveryLineage) bool {
 	t.Helper()
-	conn := g2Dial(t, ln.Addr())
-	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	conn := g2Dial(t, ln.Addr()) // no deadline: the listener answers or closes
 	if err := WriteMsg(conn, MsgBarrierReq, EncodeLineage(l)); err != nil {
 		t.Fatal(err)
 	}
@@ -328,6 +323,49 @@ func TestG1_PersistFailureRefusesTheRaisingMutation(t *testing.T) {
 				t.Fatal("a ship at the current floor was refused")
 			}
 		})
+	}
+}
+
+// A refusal that is slow (a loaded machine; here a persist failure delayed
+// past the old 500 ms read window) is still classified as a refusal: the
+// probe handshake waits for the listener's answer or close, not a timer.
+func TestG1_SlowPersistFailureIsStillARefusal(t *testing.T) {
+	store := storage.NewBlockStore(16, 4096)
+	floor := g1Fresh(t)
+	ln := g1Listener(t, store, floor)
+	if err := ln.AdmitAsReplica(1); err != nil {
+		t.Fatal(err)
+	}
+	ops := osFloorOps
+	ops.rename = func(string, string) error {
+		time.Sleep(700 * time.Millisecond) // injected slowness, not a bound
+		return errors.New("injected slow rename failure")
+	}
+	floorFS = ops
+	t.Cleanup(func() { floorFS = osFloorOps })
+	if g1Ship(t, ln, store, g1Lineage(1, 2), 1, 's') {
+		t.Fatal("a slow refused ship was classified as applied")
+	}
+}
+
+// The probe handshake classifies by effect: an accepted ship's bytes are
+// visible after the probe answer, a refused ship's never are, including a
+// refused ship below an accepted higher epoch (the probe stays admissible).
+func TestG1_ProbeHandshakeClassifiesByEffect(t *testing.T) {
+	store := storage.NewBlockStore(16, 4096)
+	floor := g1Fresh(t)
+	ln := g1Listener(t, store, floor)
+	if err := ln.AdmitAsReplica(3); err != nil {
+		t.Fatal(err)
+	}
+	if !g1Ship(t, ln, store, g1Lineage(1, 3), 1, 'a') {
+		t.Fatal("an epoch-3 ship at the admitted epoch was classified refused")
+	}
+	if g1Ship(t, ln, store, g1Lineage(2, 2), 2, 'b') {
+		t.Fatal("an epoch-2 ship below the admitted epoch was classified accepted")
+	}
+	if !bytes.Equal(g1Block(t, store), bytes.Repeat([]byte{'a'}, 4096)) {
+		t.Fatal("the refused ship changed the block")
 	}
 }
 

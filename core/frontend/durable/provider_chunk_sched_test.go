@@ -96,14 +96,10 @@ func TestWALStoreChunk_ExplicitCutRestartsTheTimer(t *testing.T) {
 	if h := headGen(t, remote); h.Gen != 1 {
 		t.Fatalf("automatic cut %s after the explicit one (HEAD gen %d): the timer did not restart", time.Since(explicit), h.Gen)
 	}
-	deadline := explicit.Add(interval + 5*time.Second)
-	for {
-		if h := headGen(t, remote); h.Gen >= 2 {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("no automatic cut one interval after the explicit cut")
-		}
+	// Progress, no timer (#227): the automatic cut follows; a loaded host only
+	// delays it (the early-cut check above is the timing assertion, and it
+	// skips when the host cannot separate the two deadlines).
+	for headGen(t, remote).Gen < 2 {
 		time.Sleep(50 * time.Millisecond)
 	}
 }

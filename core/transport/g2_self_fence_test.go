@@ -1,9 +1,7 @@
 package transport
 
 import (
-	"errors"
 	"net"
-	"os"
 	"testing"
 	"time"
 
@@ -24,17 +22,35 @@ func g2Dial(t *testing.T, addr string) net.Conn {
 	return conn
 }
 
+// g2ProbeLineage is always admissible for a probe: probes are refused only
+// below the active (epoch, endpointVersion), and no test reaches this epoch.
+// Probes never change listener state.
+var g2ProbeLineage = RecoveryLineage{SessionID: 1, Epoch: 1 << 62, EndpointVersion: 1, TargetLSN: 1}
+
 // g2Refused sends one mutating frame and reports whether the listener closed
-// the connection (refusal) rather than leaving it open (accepted).
+// the connection (refusal) rather than accepting it. Handshake, no timer: an
+// always-admissible probe follows on the same connection; the listener
+// handles frames in order, so it either closes the connection (refused) or
+// answers the probe after the frame's effect (accepted). A write or read error
+// on the probe counts as refused: the listener is the only side that closes
+// this connection, and it closes it only on a refusal.
 func g2Refused(t *testing.T, addr string, msgType byte, payload []byte) bool {
 	t.Helper()
 	conn := g2Dial(t, addr)
 	if err := WriteMsg(conn, msgType, payload); err != nil {
 		t.Fatal(err)
 	}
-	_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
-	_, err := conn.Read(make([]byte, 1))
-	return err != nil && !errors.Is(err, os.ErrDeadlineExceeded)
+	if err := WriteMsg(conn, MsgProbeReq, EncodeProbeReq(ProbeRequest{Lineage: g2ProbeLineage})); err != nil {
+		return true // the listener already closed the connection
+	}
+	replyType, _, err := ReadMsg(conn)
+	if err != nil {
+		return true
+	}
+	if replyType != MsgProbeResp {
+		t.Fatalf("frame 0x%02x followed by a probe answered 0x%02x", msgType, replyType)
+	}
+	return false
 }
 
 func g2ShipPayload(l RecoveryLineage, lsn uint64) []byte {
