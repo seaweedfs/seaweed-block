@@ -29,9 +29,48 @@ func TestWALStoreV3NoClientSyncSixRings(t *testing.T) {
 			if s.admissionTimeout >= 5*time.Second {
 				t.Fatalf("budget=%v", s.admissionTimeout)
 			}
+			start := time.Now()
+			busyCount := 0
+			var maxAttempt time.Duration
 			for i := uint32(0); i < count; i++ {
-				if _, err := s.Write(i, blk(byte(i+1))); err != nil {
-					t.Fatalf("no-client-Sync write %d/%d: %v", i, count, err)
+				retryDeadline := time.Now().Add(30 * time.Second)
+				cpBefore, wackBefore := s.CheckpointLSN(), s.v3.wack.Load()
+				retried := false
+				for {
+					attemptStart := time.Now()
+					_, err := s.Write(i, blk(byte(i+1)))
+					elapsed := time.Since(attemptStart)
+					maxAttempt = max(maxAttempt, elapsed)
+					if elapsed >= 5*time.Second || time.Since(start) >= 2*time.Minute || time.Now().After(retryDeadline) {
+						t.Fatalf("no-client-Sync exceeded wait bound write=%d/%d attempt=%v total=%v busy=%d err=%v", i, count, elapsed, time.Since(start), busyCount, err)
+					}
+					if err == nil {
+						if retried {
+							t.Logf("no-client-Sync resumed write=%d cp=%d->%d wack=%d->%d busy=%d", i, cpBefore, s.CheckpointLSN(), wackBefore, s.v3.wack.Load(), busyCount)
+						}
+						break
+					}
+					if !errors.Is(err, ErrWALPressureTimeout) || s.stickyIOFault() != nil {
+						t.Fatalf("no-client-Sync non-retryable write %d/%d: %v", i, count, err)
+					}
+					busyCount++
+					retried = true
+					t.Logf("no-client-Sync busy write=%d cp=%d wack=%d busy=%d attempt=%v", i, s.CheckpointLSN(), s.v3.wack.Load(), busyCount, elapsed)
+					if busyCount == 1 {
+						passiveStart := time.Now()
+						cpAtBusy, wackAtBusy := s.CheckpointLSN(), s.v3.wack.Load()
+						target := s.v3.appended.Load()
+						cpObserved, wackObserved := cpAtBusy, wackAtBusy
+						for cpAtBusy < target && cpObserved <= cpAtBusy && time.Since(passiveStart) < 10*time.Second {
+							time.Sleep(25 * time.Millisecond)
+							cpObserved, wackObserved = s.CheckpointLSN(), s.v3.wack.Load()
+						}
+						t.Logf("no-client-Sync passive write=%d wait=%v cpBefore=%d cpAtBusy=%d cpObserved=%d target=%d wack=%d->%d", i, time.Since(passiveStart), cpBefore, cpAtBusy, cpObserved, target, wackAtBusy, wackObserved)
+						if time.Since(passiveStart) >= 10*time.Second || (cpAtBusy < target && cpObserved <= cpAtBusy) || wackObserved < cpObserved {
+							t.Fatalf("no-client-Sync passive checkpoint did not advance without another write: cp=%d wack=%d busy=%d", cpObserved, wackObserved, busyCount)
+						}
+					}
+					time.Sleep(25 * time.Millisecond)
 				}
 			}
 			for i := uint32(0); i < count; i++ {
@@ -40,6 +79,7 @@ func TestWALStoreV3NoClientSyncSixRings(t *testing.T) {
 					t.Fatalf("readback %d: %v", i, err)
 				}
 			}
+			t.Logf("no-client-Sync mode=%d writes=%d busy=%d elapsed=%v maxAttempt=%v", mode, count, busyCount, time.Since(start), maxAttempt)
 		})
 	}
 }

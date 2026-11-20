@@ -81,7 +81,10 @@ type walStoreV3State struct {
 	testRecoverHold          func()
 	testBatchBeforeAck       func()
 	testSyncBeforeCompletion func()
-	testMapPrepared          func() // outside all publication locks, after owned-map persistence
+	// testAfterRollover runs in a v3 write after the checkpoint rollover and
+	// before the payload append (write-command budget, #252).
+	testAfterRollover func()
+	testMapPrepared   func() // outside all publication locks, after owned-map persistence
 	// testReadResolved runs in a v3 read after the dirty map resolved the
 	// LBA's WAL position and before the record is read.
 	testReadResolved func()
@@ -165,14 +168,19 @@ func ProbeWALStoreV3(path string) error {
 		return err
 	}
 	defer f.Close()
+	return probeWALStoreV3At(f)
+}
+
+// probeWALStoreV3At is ProbeWALStoreV3 on an already open file.
+func probeWALStoreV3At(r io.ReaderAt) error {
 	a, b := make([]byte, slotSizeV3), make([]byte, slotSizeV3)
-	if _, err := f.ReadAt(a, 0); err != nil {
+	if _, err := r.ReadAt(a, 0); err != nil {
 		return err
 	}
-	if _, err := f.ReadAt(b, slotBOffsetV3); err != nil {
+	if _, err := r.ReadAt(b, slotBOffsetV3); err != nil {
 		return err
 	}
-	_, _, err = selectSlotV3(a, b, nil)
+	_, _, err := selectSlotV3(a, b, nil)
 	return err
 }
 
@@ -649,22 +657,27 @@ func (s *WALStore) fenceV3(E, floor, walSize uint64, sameNonce bool, walOffset u
 
 // appendWriteV3 is the v3 body of Write's append, under s.mu. DurableLSN is
 // the acknowledged W at append time; a pwrite failure latches the store.
-func (s *WALStore) appendWriteV3(lba uint32, data []byte, lsn uint64) (uint64, error) {
+// budget (nil = none) is the guest command's budget: checked after a
+// checkpoint rollover (whose metadata I/O completes) and before any new
+// payload WAL I/O, so an expired command never starts one.
+func (s *WALStore) appendWriteV3(lba uint32, data []byte, lsn uint64, budget func() error) (uint64, error) {
 	e := walEntryV3{LSN: lsn, Type: walEntryWrite, LBA: uint64(lba), Length: uint32(len(data)), Data: data}
 	if s.v3.w == nil {
 		return 0, errWALBindingV3 // a half-published reset before its Recover
 	}
-	// Reserve proof invalidation before the WAL can change. This is under
-	// the existing store lock; a refused append only causes conservative retry.
-	if s.v3.mapProof != nil {
-		if err := s.v3.mapProof.mutatedV3(); err != nil {
-			return 0, err
-		}
+	// A strictly newer append stays in the retained WAL suffix. It cannot
+	// invalidate coverage of an older checkpoint prefix. BASE writes, capture
+	// UNKNOWN clearing and lifecycle mutations still invalidate at their seams.
+	if p := s.v3.mapProof; p != nil && p.mutation.Load() >= counterMaxV3 {
+		return 0, ErrCounterExhausted
 	}
 	if err := s.rolloverCheckpointV3Locked(); err != nil {
 		return 0, err
 	}
-	phys, err := s.v3.w.append(e, s.v3.wack.Load())
+	if err := s.v3BudgetAfterRollover(budget); err != nil {
+		return 0, err
+	}
+	phys, err := s.v3.w.append(e, s.v3.wack.Load(), budget)
 	if err != nil {
 		if errors.Is(err, errWALPwrite) {
 			s.latchV3(err)
@@ -682,10 +695,10 @@ func (s *WALStore) appendWriteV3(lba uint32, data []byte, lsn uint64) (uint64, e
 // it (one CRC32C); the writer consumes the whole LSN range (DESIGN 6.7,
 // r16). A single block is an ordinary write record. Each block's dirty
 // entry names its data offset inside the record.
-func (s *WALStore) writeBatchV3Locked(startLBA uint32, blocks [][]byte, firstLSN uint64) ([]uint64, error) {
+func (s *WALStore) writeBatchV3Locked(startLBA uint32, blocks [][]byte, firstLSN uint64, budget func() error) ([]uint64, error) {
 	start := time.Now()
 	if len(blocks) == 1 {
-		phys, err := s.appendWriteV3(startLBA, blocks[0], firstLSN)
+		phys, err := s.appendWriteV3(startLBA, blocks[0], firstLSN, budget)
 		s.instr.appendLatency.Observe(time.Since(start))
 		s.walMutation.Add(1)
 		if err != nil {
@@ -710,16 +723,17 @@ func (s *WALStore) writeBatchV3Locked(startLBA uint32, blocks [][]byte, firstLSN
 	s.instr.recordWALCopy(len(payload), time.Since(copyStart))
 	n := uint64(len(blocks))
 	lastLSN := firstLSN + n - 1
-	if s.v3.mapProof != nil {
-		if err := s.v3.mapProof.mutatedV3(); err != nil {
-			return nil, err
-		}
+	if p := s.v3.mapProof; p != nil && p.mutation.Load() >= counterMaxV3 {
+		return nil, ErrCounterExhausted
 	}
 	e := walEntryV3{LSN: firstLSN, BatchCount: n, Type: walEntryWriteBatch, LBA: uint64(startLBA), Length: uint32(len(payload)), Data: payload}
 	if err := s.rolloverCheckpointV3Locked(); err != nil {
 		return nil, err
 	}
-	phys, err := s.v3.w.append(e, s.v3.wack.Load())
+	if err := s.v3BudgetAfterRollover(budget); err != nil {
+		return nil, err
+	}
+	phys, err := s.v3.w.append(e, s.v3.wack.Load(), budget)
 	s.instr.appendLatency.Observe(time.Since(start))
 	s.walMutation.Add(1)
 	if err != nil {
@@ -1094,7 +1108,7 @@ func (f *flusher) readDirtyRecordV3Cached(e snapshotEntry, cache *flushRecordCac
 	store := f.store
 	d := store.v3.pub.current()
 	if cache != nil && !store.v3.flushLifetimeValidV3(cache.recoveryGen) {
-		return nil, 0, ErrMapCoverageStale
+		return nil, 0, mapCoverageRefusal("recovery_lifetime_changed")
 	}
 	var entry walEntryV3
 	var size uint64
@@ -1163,7 +1177,7 @@ func (s *WALStore) persistCheckpointV3(highestLSN, recoveryGen uint64) error {
 	v.syncMu.Lock()
 	defer v.syncMu.Unlock()
 	if !v.flushLifetimeValidV3(recoveryGen) {
-		return ErrMapCoverageStale
+		return mapCoverageRefusal("recovery_lifetime_changed")
 	}
 	wack := v.wack.Load()
 	if wack < checkpoint {
@@ -1181,4 +1195,16 @@ func (s *WALStore) persistCheckpointV3(highestLSN, recoveryGen uint64) error {
 	s.checkpointLSN = d.CheckpointLSN
 	s.mu.Unlock()
 	return nil
+}
+
+// v3BudgetAfterRollover is the last budget check of a v3 write: after the
+// rollover's metadata I/O (completed, owned) and before the payload append.
+func (s *WALStore) v3BudgetAfterRollover(budget func() error) error {
+	if h := s.v3.testAfterRollover; h != nil {
+		h()
+	}
+	if budget == nil {
+		return nil
+	}
+	return budget()
 }

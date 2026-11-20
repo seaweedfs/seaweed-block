@@ -24,3 +24,8 @@ func SetTestDetachTrace(p *DurableProvider, f func(stage string, deadline time.T
 // SetTestBeforeIOLock runs f in the backend's admission, right before the I/O
 // lock (test-only).
 func SetTestBeforeIOLock(b frontend.Backend, f func()) { b.(*StorageBackend).testBeforeIOLock = f }
+
+// SetTestBeforeAttachWait observes the first registered readiness wait.
+func SetTestBeforeAttachWait(b frontend.Backend, f func()) {
+	b.(*StorageBackend).testBeforeReadReadyWait = f
+}

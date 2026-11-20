@@ -110,7 +110,10 @@ func (e *BlockExecutor) doRebuild(replicaID string, session *activeSession, fron
 	}()
 	e.signalSessionStart(replicaID, session.lineage.SessionID)
 
-	blocks := e.primaryStore.AllBlocks()
+	blocks, err := e.primaryStore.AllBlocks()
+	if err != nil {
+		return 0, fmt.Errorf("rebuild snapshot: %w", err)
+	}
 	lbas := make([]int, 0, len(blocks))
 	for lba := range blocks {
 		lbas = append(lbas, int(lba))

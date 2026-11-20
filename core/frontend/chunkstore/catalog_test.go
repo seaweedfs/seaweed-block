@@ -41,11 +41,20 @@ func publishSource(t *testing.T, f *fakeFiler, b *fakeBlobs, vol string, chunks 
 	if err != nil {
 		t.Fatal(err)
 	}
+	h, intents, err := r.PrepareManifest(ctx, cur, h, uint64(catGeo.BlockSize)*uint64(catGeo.ChunkBlocks))
+	if err != nil {
+		t.Fatal(err)
+	}
 	gen, err := r.CASHead(ctx, storage.ChunkHeadVersion{Gen: cur.Gen, Epoch: cur.Epoch}, h)
 	if err != nil {
 		t.Fatal(err)
 	}
 	h.Gen = gen
+	for _, id := range intents {
+		if err := r.DeleteIntent(ctx, id); err != nil {
+			t.Fatal(err)
+		}
+	}
 	return h
 }
 
@@ -80,7 +89,10 @@ func chunkBytes(fill byte) []byte {
 func catalogFixture(t *testing.T) (*fakeFiler, *fakeBlobs, *Catalog, storage.ChunkHead) {
 	t.Helper()
 	f, b := newFakeFiler(), newFakeBlobs()
-	c := newCat(t, f)
+	c, err := NewCatalog(manifestFilerBlobs{f, gcBlobs{b}}, catBase)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := c.EnsureVolume(context.Background(), "v1", catGeo); err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +245,7 @@ func TestCatalog_DeleteMarksThenIdempotent(t *testing.T) {
 }
 
 func TestFork_HeadIsEpochZeroWithQualifiedKeys(t *testing.T) {
-	f, _, c, h := catalogFixture(t)
+	f, b, c, h := catalogFixture(t)
 	ctx := context.Background()
 	if _, err := c.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: "s1", RequestID: "r"}, h); err != nil {
 		t.Fatal(err)
@@ -259,7 +271,7 @@ func TestFork_HeadIsEpochZeroWithQualifiedKeys(t *testing.T) {
 	if got, _ := f.ListEntries(ctx, catBase+"/v2/intents", "", "", 0); len(got) != 0 {
 		t.Fatalf("fork left %d intents", len(got))
 	}
-	r2, _ := NewChunkRemote(f, newFakeBlobs(), catBase+"/v2")
+	r2, _ := NewChunkRemote(f, b, catBase+"/v2")
 	head, err := r2.GetHead(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -269,11 +281,11 @@ func TestFork_HeadIsEpochZeroWithQualifiedKeys(t *testing.T) {
 	}
 	for idx, ref := range head.Chunks {
 		src := h.Chunks[idx]
-		if ref.Key != "@v1/"+src.Key || ref.SHA256 != src.SHA256 {
+		if ref.Key != qualifyManifestKey("v1", src.Key) || ref.SHA256 != src.SHA256 {
 			t.Fatalf("chunk %d ref %+v, want @v1/%s with the same hash", idx, ref, src.Key)
 		}
 	}
-	if res.HeadGen != 1 || res.HeadEpoch != 0 || res.QualifiedRefs != 2 || res.SourceGen != h.Gen || res.RemoteLSN != 42 || res.Replayed {
+	if res.HeadGen != 1 || res.HeadEpoch != 0 || res.QualifiedRefs != 1 || res.ChunkCount != 2 || res.SourceGen != h.Gen || res.RemoteLSN != 42 || res.Replayed {
 		t.Fatalf("result %+v", res)
 	}
 	v, ok, err := c.ReadVolume(ctx, "v2")
@@ -310,7 +322,7 @@ func TestFork_ForkOfForkKeepsOriginalOwner(t *testing.T) {
 	r3, _ := NewChunkRemote(f, b, catBase+"/v3")
 	h3, _ := r3.GetHead(ctx)
 	for idx, ref := range h3.Chunks {
-		if ref.Key != "@v1/"+h.Chunks[idx].Key {
+		if ref.Key != qualifyManifestKey("v1", h.Chunks[idx].Key) {
 			t.Fatalf("second-level fork chunk %d names %q, want the original owner @v1/%s", idx, ref.Key, h.Chunks[idx].Key)
 		}
 		if got, err := r3.Get(ctx, ref.Key); err != nil || sha256.Sum256(got) != ref.SHA256 {
@@ -648,7 +660,7 @@ func TestCatalog_EnsureVolumeCreatesTheInitialHead(t *testing.T) {
 	if _, err := c.EnsureVolume(ctx, "v2", catGeo); err != nil {
 		t.Fatal(err)
 	}
-	if kept, _, _ := c.ReadHead(ctx, "v2"); kept.Gen != pub.Gen || len(kept.Chunks) != 1 {
+	if kept, _, _ := c.ReadHead(ctx, "v2"); kept.Gen != pub.Gen || manifestCount(kept) != 1 || kept.Segments[0] != pub.Segments[0] {
 		t.Fatalf("an existing HEAD was replaced by the initial one: %+v, published %+v", kept, pub)
 	}
 

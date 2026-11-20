@@ -369,3 +369,8 @@ func (f *failingStore) Close() error { return nil }
 // Silence unused import warning if adapter is not referenced
 // directly in this file's test bodies.
 var _ = adapter.AssignmentInfo{}
+
+func (f *failingStore) PutWorkspaceLostRanges(string, []WorkspaceLostRange) error { return nil }
+func (f *failingStore) LoadWorkspaceLostRanges() (map[string][]WorkspaceLostRange, []error, error) {
+	return nil, nil, nil
+}

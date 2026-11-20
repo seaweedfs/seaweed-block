@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -105,22 +106,32 @@ type unjoinedUploadRemote struct {
 	second  chan struct{}
 	failed  chan struct{}
 	release chan struct{}
+	settled chan struct{}
 }
 
 func (r *unjoinedUploadRemote) Put(ctx context.Context, key string, data []byte) error {
-	if r.calls.Add(1) == 1 {
-		<-r.second
+	switch r.calls.Add(1) {
+	case 1:
+		select {
+		case <-r.second:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 		close(r.failed)
 		return errFakeRemoteDown
+	case 2:
+		close(r.second)
+		defer close(r.settled)
+	default:
+		return errFakeRemoteDown
 	}
-	close(r.second)
 	<-r.release
 	return r.fakeChunkRemote.Put(context.Background(), key, data)
 }
 func TestChunkUploads_FailureJoinsBeforeIntentCleanup(t *testing.T) {
 	s, _ := newChunkTestStore(t)
 	f := newFakeChunkRemote()
-	r := &unjoinedUploadRemote{fakeChunkRemote: f, second: make(chan struct{}), failed: make(chan struct{}), release: make(chan struct{})}
+	r := &unjoinedUploadRemote{fakeChunkRemote: f, second: make(chan struct{}), failed: make(chan struct{}), release: make(chan struct{}), settled: make(chan struct{})}
 	cfg := ctConfig(1)
 	cfg.FreshFromHead = true
 	cfg.UploadConcurrency = 2
@@ -128,29 +139,52 @@ func TestChunkUploads_FailureJoinsBeforeIntentCleanup(t *testing.T) {
 	w := newWriteLog()
 	w.write(t, s, 0, 0x21)
 	w.write(t, s, ctChunkBlocks, 0x22)
+	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { _, err := l.Cut(context.Background()); done <- err }()
+	joined := make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(r.release) }) }
+	t.Cleanup(func() {
+		cancel()
+		release()
+		select {
+		case <-joined:
+		case <-time.After(5 * time.Second):
+			t.Error("cut worker not joined")
+		}
+		select {
+		case <-r.second:
+			select {
+			case <-r.settled:
+			case <-time.After(5 * time.Second):
+				t.Error("owned upload not joined")
+			}
+		default:
+		}
+	})
+	go func() { defer close(joined); _, err := l.Cut(ctx); done <- err }()
 	select {
 	case <-r.failed:
+		cancel() // retries are now allowed; terminate this cut explicitly
 	case <-time.After(time.Second):
-		close(r.release)
-		<-done
 		t.Fatal("uploads did not overlap")
 	}
 	select {
 	case err := <-done:
-		close(r.release)
 		t.Fatalf("returned with owned upload still active: %v", err)
 	case <-time.After(20 * time.Millisecond):
 	}
 	if len(liveIntents(t, f)) == 0 {
-		close(r.release)
-		<-done
 		t.Fatal("intent removed before join")
 	}
-	close(r.release)
-	if err := <-done; !errors.Is(err, errFakeRemoteDown) {
-		t.Fatalf("lost upload failure: %v", err)
+	release()
+	select {
+	case err := <-done:
+		if !errors.Is(err, errFakeRemoteDown) {
+			t.Fatalf("lost upload failure: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cut completion not joined")
 	}
 	if f.stats().cas != 0 {
 		t.Fatal("failed batch published")

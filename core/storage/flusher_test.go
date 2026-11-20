@@ -533,7 +533,10 @@ func TestAllBlocks_ReturnsBlocksAfterFlush(t *testing.T) {
 
 	// AllBlocks must still return both written LBAs even though
 	// they're no longer in the dirty map.
-	all := s.AllBlocks()
+	all, snapshotErr := s.AllBlocks()
+	if snapshotErr != nil {
+		t.Fatal(snapshotErr)
+	}
 	if len(all) != 2 {
 		t.Fatalf("AllBlocks after flush returned %d entries, want 2", len(all))
 	}

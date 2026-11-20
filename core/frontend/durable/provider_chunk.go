@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -84,6 +85,25 @@ func chunkAuthority(proj frontend.Projection, volumeID string) bool {
 	return proj.VolumeID == volumeID && proj.Healthy && proj.Epoch > 0 && proj.ReplicaID != ""
 }
 
+// chunkAuthorityGap names the projection fields that fail chunkAuthority,
+// for the logs ("" when none fails).
+func chunkAuthorityGap(proj frontend.Projection, volumeID string) string {
+	var gap []string
+	if proj.VolumeID != volumeID {
+		gap = append(gap, fmt.Sprintf("volume=%q", proj.VolumeID))
+	}
+	if !proj.Healthy {
+		gap = append(gap, "healthy=false")
+	}
+	if proj.Epoch == 0 {
+		gap = append(gap, "epoch=0")
+	}
+	if proj.ReplicaID == "" {
+		gap = append(gap, `replica=""`)
+	}
+	return strings.Join(gap, " ")
+}
+
 // recoverChunk runs after a successful local Recover, generation gen. It
 // attaches the layer when the projection already carries master authority
 // and reports true. Otherwise it starts an authority wait bound to gen
@@ -126,6 +146,13 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 	if limit <= 0 {
 		limit = 30 * time.Second
 	}
+	start := time.Now()
+	log.Printf("durable: chunk layer for volume=%s waits for master authority (up to %s): projection lacks %s",
+		volumeID, limit, chunkAuthorityGap(p.view.Projection(), volumeID))
+	ended := "superseded by a later recovery"
+	defer func() {
+		log.Printf("durable: chunk authority wait for volume=%s ended after %s: %s", volumeID, time.Since(start), ended)
+	}()
 	waitCtx, endWait := context.WithTimeout(p.closeCtx, limit)
 	defer endWait()
 	defer func() {
@@ -136,6 +163,7 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 		h.attachMu.Lock()
 		defer h.attachMu.Unlock()
 		if p.current(h, gen) && h.chunk == nil {
+			ended = fmt.Sprintf("assignment unavailable, not serving (projection lacks %s)", chunkAuthorityGap(p.view.Projection(), volumeID))
 			h.backend.SetOperational(false, "chunk assignment unavailable: "+waitCtx.Err().Error())
 		}
 	}()
@@ -148,17 +176,27 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 	}()
 	t := time.NewTicker(chunkAuthorityPoll)
 	defer t.Stop()
+	attempts := 0
 	for {
 		select {
 		case <-waitCtx.Done():
+			ended = "provider closed"
+			if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
+				ended = "deadline"
+			}
 			return
 		case <-t.C:
 		}
 		if !p.current(h, gen) {
 			return // a later recovery (successful or failed) owns the volume
 		}
-		if !chunkAuthority(p.view.Projection(), volumeID) {
+		proj := p.view.Projection()
+		if !chunkAuthority(proj, volumeID) {
 			continue
+		}
+		if attempts++; attempts == 1 {
+			log.Printf("durable: chunk layer for volume=%s: master authority after %s (replica=%q epoch=%d endpoint=%d); first attach attempt",
+				volumeID, time.Since(start), proj.ReplicaID, proj.Epoch, proj.EndpointVersion)
 		}
 		h.attachMu.Lock()
 		if !p.current(h, gen) { // re-checked under the per-volume serialization
@@ -176,9 +214,14 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 		}
 		h.attachMu.Unlock()
 		switch {
-		case err == nil, errors.Is(err, errProviderClosed):
+		case err == nil:
+			ended = fmt.Sprintf("attached after %d attempt(s)", attempts)
+			return
+		case errors.Is(err, errProviderClosed):
+			ended = "provider closed"
 			return
 		case errors.Is(err, storage.ErrChunkLayerFenced):
+			ended = "fenced, not serving"
 			log.Printf("durable: chunk layer for volume=%s: %v (not serving)", volumeID, err)
 			if errors.Is(err, ErrChunkStaleLocalRoot) {
 				h.attachMu.Lock()
@@ -189,11 +232,17 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 			}
 			return
 		case errors.Is(err, errChunkNoAuthority):
+			log.Printf("durable: chunk layer attach for volume=%s: authority lost before attempt %d (projection lacks %s); waiting",
+				volumeID, attempts, chunkAuthorityGap(p.view.Projection(), volumeID))
 			continue
 		}
 		log.Printf("durable: chunk layer attach for volume=%s: %v (retrying)", volumeID, err)
 		select {
 		case <-waitCtx.Done():
+			ended = "provider closed during the retry backoff"
+			if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
+				ended = "deadline during the retry backoff"
+			}
 			return
 		case <-time.After(chunkAttachRetry):
 		}
@@ -315,13 +364,16 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 		remote = &manifestBoundRemote{closeBoundRemote: bound, builder: builder}
 	}
 	cfg := storage.ChunkLayerConfig{
-		ChunkBlocks:       p.cfg.ChunkBlocks,
-		Epoch:             lin.epoch,
-		Holder:            holder,
-		FreshFromHead:     h.fresh,
-		ReadMissTimeout:   p.cfg.ChunkReadMissTimeout,
-		BarrierBound:      p.cfg.ChunkDirtyThreshold,
-		UploadConcurrency: p.cfg.ChunkUploadConcurrency,
+		ChunkBlocks:         p.cfg.ChunkBlocks,
+		RestoreChunkBytes:   uint64(ws.BlockSize()) * uint64(p.cfg.ChunkBlocks),
+		Epoch:               lin.epoch,
+		Holder:              holder,
+		FreshFromHead:       h.fresh,
+		ReadMissTimeout:     p.cfg.ChunkReadMissTimeout,
+		HydrationWorkers:    p.cfg.ChunkHydrationWorkers,
+		HydrationQueueDepth: p.cfg.ChunkHydrationQueueDepth,
+		BarrierBound:        p.cfg.ChunkDirtyThreshold,
+		UploadConcurrency:   p.cfg.ChunkUploadConcurrency,
 		CaptureAllowed: func() error {
 			cur := p.view.Projection()
 			if !cur.Healthy || cur.VolumeID != volumeID || lin.volumeID != volumeID {
@@ -355,6 +407,8 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 		// Attach preparation is gated. Seed the exact observed HEAD before
 		// its takeover CAS; only then finalize lazy attachment and expose I/O.
 		cfg.PrepareRestore = func(head storage.ChunkHead) error {
+			log.Printf("durable: HEAD claim for volume=%s observed HEAD gen=%d epoch=%d holder=%q state=%v remote_lsn=%d; preparing",
+				volumeID, head.Gen, head.Epoch, head.Holder, head.State, head.RemoteLSN)
 			if baseLSN, complete := ws.InstalledBaseLSN(); complete {
 				// The fresh marker can outlive a full local BASE. It is not
 				// permission to seed backwards or to fill from an older HEAD.
@@ -383,10 +437,18 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 			// restore here, so HEAD is never claimed for a mis-ordered ship.
 			return h.backend.seedAndRebase(func() error { return ws.SeedChunkFrontier(head.RemoteLSN) })
 		}
+		claimStart := time.Now()
+		log.Printf("durable: HEAD claim for volume=%s starting: target epoch=%d holder=%q", volumeID, cfg.Epoch, cfg.Holder)
 		head, err := storage.ClaimChunkHead(ctx, remote, cfg)
 		if err != nil {
+			log.Printf("durable: HEAD claim for volume=%s failed after %s: %v", volumeID, time.Since(claimStart), err)
 			return nil, fmt.Errorf("durable: restore HEAD claim: %w", err)
 		}
+		claimed := "claimed"
+		if head.Gen == 0 {
+			claimed = "no HEAD to claim (new lineage)"
+		}
+		log.Printf("durable: HEAD claim for volume=%s done in %s: gen=%d epoch=%d holder=%q, %s", volumeID, time.Since(claimStart), head.Gen, head.Epoch, head.Holder, claimed)
 		cfg.RestoreGuard = &storage.ChunkHeadVersion{Gen: head.Gen, Epoch: head.Epoch}
 	}
 

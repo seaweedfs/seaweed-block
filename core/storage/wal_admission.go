@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync/atomic"
@@ -96,27 +97,57 @@ func (a *walAdmission) HardMark() float64         { return a.hardMark }
 // expires. Returns errWALFull on timeout, errVolumeClosed if the
 // store closes during the wait.
 func (a *walAdmission) Acquire(timeout time.Duration) error {
+	return a.acquireContext(context.Background(), timeout, nil)
+}
+
+func (a *walAdmission) acquireContext(ctx context.Context, timeout time.Duration, sample func() (float64, error)) error {
+	contextual := sample != nil
+	if sample == nil {
+		sample = func() (float64, error) { return a.walUsed(), nil }
+	}
+	if err := ctx.Err(); err != nil {
+		if fault := a.terminalFault(); fault != nil {
+			return fault
+		}
+		return admissionContextError(err)
+	}
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 
-	pressure := a.walUsed()
+	pressure, err := sample()
+	if err != nil {
+		return err
+	}
 
 	// Hard watermark: wait for flusher to drain before competing
 	// for the semaphore.
 	if pressure >= a.hardMark {
 		a.notifyFn()
 		hardStart := time.Now()
-		for a.walUsed() >= a.hardMark {
+		for {
+			pressure, err = sample()
+			if err != nil {
+				return err
+			}
+			if pressure < a.hardMark {
+				break
+			}
 			if err := a.terminalFault(); err != nil {
 				a.hardPressureWaitNs.Add(time.Since(hardStart).Nanoseconds())
 				return err
 			}
-			if a.closedFn() {
+			if !contextual && a.closedFn() {
 				a.hardPressureWaitNs.Add(time.Since(hardStart).Nanoseconds())
 				return errVolumeClosed
 			}
 			a.notifyFn()
 			select {
+			case <-ctx.Done():
+				a.hardPressureWaitNs.Add(time.Since(hardStart).Nanoseconds())
+				if err := a.terminalFault(); err != nil {
+					return err
+				}
+				return admissionContextError(ctx.Err())
 			case <-deadline.C:
 				a.hardPressureWaitNs.Add(time.Since(hardStart).Nanoseconds())
 				if err := a.terminalFault(); err != nil {
@@ -157,16 +188,26 @@ func (a *walAdmission) Acquire(timeout time.Duration) error {
 		select {
 		case a.sem <- struct{}{}:
 			return nil
+		case <-ctx.Done():
+			if err := a.terminalFault(); err != nil {
+				return err
+			}
+			return admissionContextError(ctx.Err())
 		case <-deadline.C:
 			if err := a.terminalFault(); err != nil {
 				return err
 			}
 			return ErrWALPressureTimeout
 		case <-closeTick.C:
+			if contextual {
+				if _, err := sample(); err != nil {
+					return err
+				}
+			}
 			if err := a.terminalFault(); err != nil {
 				return err
 			}
-			if a.closedFn() {
+			if !contextual && a.closedFn() {
 				return errVolumeClosed
 			}
 		}
@@ -183,4 +224,11 @@ func (a *walAdmission) terminalFault() error {
 		return a.faultFn()
 	}
 	return nil
+}
+
+func admissionContextError(err error) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return ErrWALPressureTimeout
+	}
+	return err
 }
