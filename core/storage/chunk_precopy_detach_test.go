@@ -77,7 +77,7 @@ func TestPrecopyDetachBusyOwnerExhaustsWithoutStopping(t *testing.T) {
 	s, f, l, _ := precopyLayer(t, 1024, 1)
 	calls := 0
 	r, err := l.PrecopyDetach(ctTimeout(t), func() bool { calls++; return false })
-	if !errors.Is(err, ErrPrecopyNotConverged) || r.Precopy.Attempts != 5 || r.Precopy.Frozen || calls == 0 {
+	if !errors.Is(err, ErrPrecopyNotConverged) || len(r.Precopy.Rounds) != 5 || r.Precopy.Frozen || calls == 0 {
 		t.Fatalf("report=%+v calls=%d err=%v", r.Precopy, calls, err)
 	}
 	if f.stats().head.State == ChunkHeadDetached {

@@ -27,6 +27,7 @@ type precopySample struct {
 }
 
 type PrecopyAttempt struct {
+	// Attempt is the physical round ordinal, including measurement rounds.
 	Attempt     int           `json:"attempt"`
 	Drain       time.Duration `json:"drainNs"`
 	Barrier     time.Duration `json:"barrierNs"`
@@ -45,6 +46,8 @@ type PrecopyReport struct {
 	Drain                 time.Duration    `json:"drainNs"`
 	DrainTimedOut         bool             `json:"drainTimedOut"`
 	Attempts              int              `json:"attempts"`
+	MeasurementRounds     int              `json:"measurementRounds"`
+	SamplesAtStart        int              `json:"samplesAtStart"`
 	TailBytes             uint64           `json:"tailBytes"`
 	Fixed                 time.Duration    `json:"fixedNs"`
 	Estimate              time.Duration    `json:"estimateNs"`
@@ -114,6 +117,8 @@ func (l *chunkLayerImpl) precopyDetach(ctx context.Context, prepare func(context
 	var drain time.Duration
 	var drainErr error
 	var rounds []PrecopyAttempt
+	samplesAtStart := l.precopyEstimate(0, 0).RateSamples
+	warmAttempts, measurementRounds := 0, 0
 	if prepare != nil {
 		l.precopyPrepare = func(ctx context.Context) (func(), error) {
 			dc, cancel := context.WithTimeout(ctx, precopyDrainBound)
@@ -164,13 +169,21 @@ func (l *chunkLayerImpl) precopyDetach(ctx context.Context, prepare func(context
 	}
 	defer func() { l.precopyFreeze = nil; l.precopyPause = nil; l.precopyPrepare = nil }()
 	for attempt := 1; attempt <= precopyAttempts; attempt++ {
-		report = PrecopyReport{Attempts: attempt, Rounds: rounds}
+		// Measurement rounds still consume the same five-round/60s budget.
+		// Count an admission attempt only with a warm rate window at entry.
+		if l.precopyEstimate(0, 0).RateSamples >= 3 {
+			warmAttempts++
+		} else {
+			measurementRounds++
+		}
+		report = PrecopyReport{Attempts: warmAttempts, Rounds: rounds, SamplesAtStart: samplesAtStart, MeasurementRounds: measurementRounds}
 		drain, drainErr = 0, nil
 		if err := ctx.Err(); err != nil {
 			return ChunkCutResult{Precopy: report}, err
 		}
 		pauseBefore := pauseTotal
 		r, err := l.captureLocked(ctx, false)
+		report.SamplesAtStart, report.MeasurementRounds = samplesAtStart, measurementRounds
 		a := PrecopyAttempt{
 			Attempt: attempt, Drain: drain, Pause: pauseTotal - pauseBefore,
 			TailBytes: report.TailBytes, RateSamples: report.RateSamples,

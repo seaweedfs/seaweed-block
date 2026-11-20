@@ -130,13 +130,13 @@ func precopyFiftyIOPS(t *testing.T, samples byte, wantUnknown bool) {
 	}()
 	result, _, err := p.DetachVolume(ctx, "v1")
 	stopped.Store(true)
-	t.Logf("attempts=%d drain=%s estimate=%s frozen=%t guest_errors=%d", result.Precopy.Attempts, result.Precopy.Drain, result.Precopy.Estimate, result.Precopy.Frozen, guestErrors.Load())
+	t.Logf("attempts=%d measurement_rounds=%d samples_at_start=%d drain=%s estimate=%s frozen=%t guest_errors=%d", result.Precopy.Attempts, result.Precopy.MeasurementRounds, result.Precopy.SamplesAtStart, result.Precopy.Drain, result.Precopy.Estimate, result.Precopy.Frozen, guestErrors.Load())
 	if wantUnknown {
 		if result.Precopy.Frozen {
 			// Staging or later rounds may leave an empty tail, which needs
 			// only measured fixed cost. A nonempty first tail still needs
 			// three upload samples; the one-sample fixture cannot supply them.
-			if err != nil || (result.Precopy.Attempts == 1 && result.Precopy.TailBytes != 0) || guestErrors.Load() != 0 || !bytes.Equal(headBlock(t, remote, 1), block(0x5b)) {
+			if err != nil || (len(result.Precopy.Rounds) == 1 && result.Precopy.TailBytes != 0) || guestErrors.Load() != 0 || !bytes.Equal(headBlock(t, remote, 1), block(0x5b)) {
 				t.Fatalf("cold samples claimed premature fit: report=%+v guest_errors=%d err=%v", result.Precopy, guestErrors.Load(), err)
 			}
 			return
