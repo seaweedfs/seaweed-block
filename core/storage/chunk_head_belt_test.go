@@ -114,3 +114,36 @@ func TestHeadBeltTakeoverWaitsBeforeConfirmation(t *testing.T) {
 		t.Fatal("confirmed the wrong owner", head)
 	}
 }
+
+type rootOnlyBeltRemote struct {
+	*fakeChunkRemote
+	rootReads int
+}
+
+func (r *rootOnlyBeltRemote) GetHeadRoot(ctx context.Context) (ChunkHead, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.rootReads++
+	return ChunkHead{Gen: r.head.Gen, Epoch: r.head.Epoch, Holder: r.head.Holder}, nil
+}
+
+func TestHeadBeltConfirmationUsesOnlyRoot(t *testing.T) {
+	s, _ := newChunkTestStore(t)
+	f := newFakeChunkRemote()
+	r := &rootOnlyBeltRemote{fakeChunkRemote: f}
+	layer := mustAttach(t, s, r, ctConfig(1))
+	if _, err := s.Write(0, makeBlock(4096, 0x42)); err != nil {
+		t.Fatal(err)
+	}
+	f.afterCAS = func(f *fakeChunkRemote) { f.failGet = errors.New("full manifest read unavailable") }
+	result, err := layer.Cut(ctTimeout(t))
+	if err != nil {
+		t.Fatalf("root confirmation depended on full manifest read: %v", err)
+	}
+	if r.rootReads != 1 || result.H != 1 || layer.RemoteLSN() != 1 {
+		t.Fatalf("root confirmation reads=%d result=%d remote=%d", r.rootReads, result.H, layer.RemoteLSN())
+	}
+	if got := f.imageOf(t, f.stats().head); !bytes.Equal(got[:4096], makeBlock(4096, 0x42)) {
+		t.Fatal("confirmed wrong image")
+	}
+}
