@@ -188,6 +188,8 @@ func (s *services) MoveWorkspace(ctx context.Context, q *control.WorkspaceMove) 
 		refusal = fmt.Sprintf("move target node %q is not registered", q.GetTargetServerId())
 	case target.ServerID == oldHost:
 		refusal = fmt.Sprintf("move target %q is the current source host", target.ServerID)
+	case s.host.colocatedTargetRefused(target.ServerID):
+		refusal = fmt.Sprintf("move target node %q shares the authority store's file system (strict journal isolation)", target.ServerID)
 	case !matched:
 		refusal = fmt.Sprintf("move target endpoints %s/%s on %q are not registered (%s)", q.GetTargetDataAddr(), q.GetTargetCtrlAddr(), target.ServerID, registeredTargetEndpoints(target, bindings, explicit))
 	}

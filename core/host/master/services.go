@@ -12,6 +12,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 	"github.com/seaweedfs/seaweed-block/core/ops"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"github.com/seaweedfs/seaweed-block/core/storeident"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -284,6 +285,12 @@ func (s *services) ExecuteFailback(ctx context.Context, req *control.FailbackReq
 func (s *services) ReportHeartbeat(ctx context.Context, r *control.HeartbeatReport) (*control.HeartbeatAck, error) {
 	if err := validateHeartbeat(r); err != nil {
 		return nil, err
+	}
+	// Journal isolation: alarm on a durable root sharing the authority
+	// store's file system; under strict isolation refuse it unless the node
+	// already serves volumes (refusing a serving node stops its renewals).
+	if err := s.host.refuseColocatedHeartbeat(r.ServerId, storeident.Identity{MachineID: r.GetMachineId(), Dev: r.GetDurableRootDev()}); err != nil {
+		return nil, status.Error(codes.FailedPrecondition, err.Error())
 	}
 	msg := heartbeatFromWire(r)
 	if err := s.host.ingestHeartbeatRecordingHealth(msg); err != nil {

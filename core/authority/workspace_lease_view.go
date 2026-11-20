@@ -33,6 +33,7 @@ type leaseView struct {
 	deadline  time.Time
 	extending bool
 	clamped   bool // a renewal was clamped below now+TTL; logged once per streak
+	alarmed   bool // a headroom alarm streak is open (headroomAlarmLocked)
 }
 
 // deriveLeaseLocked computes the derived lease view from published state.
@@ -161,6 +162,10 @@ func (p *Publisher) RenewWorkspaceLease(ctx context.Context, volume, holder stri
 		p.leaseMu.Unlock()
 		return WorkspaceLease{}, fmt.Errorf("workspace durable store unavailable or uncertain")
 	}
+	// The headroom alarm is evaluated before the clamp: it fires while an
+	// extension is pending and headroom is still above one TTL.
+	headroom := lv.d.horizon - now.UnixNano()
+	alarm := p.headroomAlarmLocked(volume, lv, headroom)
 	grant := now.Add(p.workspaceTTL).UnixNano()
 	clamped := grant > lv.d.horizon
 	if clamped {
@@ -172,10 +177,15 @@ func (p *Publisher) RenewWorkspaceLease(ctx context.Context, volume, holder stri
 	if grant-lv.d.maxSkewNS/2 <= now.UnixNano() {
 		horizon := lv.d.horizon // the view is leaseMu's: read it before the unlock (#242)
 		p.leaseMu.Unlock()
+		p.logLease(alarm)
 		return WorkspaceLease{}, fmt.Errorf("workspace lease: durable horizon %s leaves no host validity", time.Unix(0, horizon).UTC().Format(time.RFC3339Nano))
 	}
 	if g := time.Unix(0, grant); g.After(lv.deadline) {
 		lv.deadline = g
+	}
+	summary := p.leaseStats.observeGrant(now, headroom)
+	if clamped {
+		p.leaseStats.recordClamp(now)
 	}
 	var note string
 	switch {
@@ -194,9 +204,9 @@ func (p *Publisher) RenewWorkspaceLease(ctx context.Context, volume, holder stri
 	}
 	l := WorkspaceLease{ReplicaID: holder, Epoch: epoch, ExpiresAtNS: grant, MaxClockSkewNS: lv.d.maxSkewNS}
 	p.leaseMu.Unlock()
-	if note != "" {
-		log.Print(note)
-	}
+	p.logLease(alarm)
+	p.logLease(note)
+	p.logLease(summary)
 	return l, nil
 }
 

@@ -170,6 +170,8 @@ type Publisher struct {
 	leaseMu        sync.Mutex
 	leaseViews     map[string]*leaseView
 	leaseClosing   bool
+	leaseStats     leaseCounters // guarded by leaseMu
+	leaseLog       func(string)  // renewal-path notes; nil = log.Print (test seam)
 	extWG          sync.WaitGroup
 	extendFailures map[string]int // guarded by mu
 }
