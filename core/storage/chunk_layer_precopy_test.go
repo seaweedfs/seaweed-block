@@ -54,8 +54,8 @@ func TestChunkPrecopy_RedirtiedStagedChunkIsRecopied(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			s, f, l, w := precopyLayer(t, 2, 3) // 3 candidates, bound 2
 			l.testAfterStageHook = func(round int) {
-				if round == 0 { // chunks 0 and 1 are staged now
-					w.write(t, s, 1, 0x99) // chunk 0 again
+				if round == 0 { // recent chunks 2 and 1 are staged now
+					w.write(t, s, 9, 0x99) // chunk 2 again
 					if flushed {
 						mustSyncFlush(t, s)
 					}
@@ -69,7 +69,7 @@ func TestChunkPrecopy_RedirtiedStagedChunkIsRecopied(t *testing.T) {
 				t.Fatalf("staging: %d rounds, %d chunks; want 1 round of 2", r.Stats.StageRounds, r.Stats.StagedChunks)
 			}
 			if r.Stats.StagedChunksUsed != 1 || r.Stats.BarrierCopyChunks != 0 || r.Stats.CandidateChunks != 3 || r.Stats.BarrierOverBound {
-				t.Fatalf("barrier: %d staged used, %d copied, over bound %v; want chunk 1 from staging, chunks 0 and 2 copied outside the barrier",
+				t.Fatalf("barrier: %d staged used, %d copied, over bound %v; want chunk 1 from staging, chunks 0 and 2 read by COW workers",
 					r.Stats.StagedChunksUsed, r.Stats.BarrierCopyChunks, r.Stats.BarrierOverBound)
 			}
 			assertEveryHeadIsPrefixImage(t, f, w)

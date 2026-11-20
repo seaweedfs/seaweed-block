@@ -32,48 +32,82 @@ func hotChunkKeys(indices map[uint64]bool, recent map[uint64]uint64) []uint64 {
 	return keys
 }
 
-func (l *chunkLayerImpl) stagePayloadRound(ctx context.Context, batch []uint64, versions map[uint64]uint64, head chunkHead, st *chunkCutStats) (map[uint64]stagedChunk, string, error) {
-	keys := make([]string, len(batch))
-	for i, idx := range batch {
-		keys[i] = l.newKey(idx)
+// Each wave owns at most one image per uploader. Classify that bounded set,
+// durably name only its changed keys, then upload and discard its buffers.
+// Later waves remain protected by COW; no whole-round payload is retained.
+func (l *chunkLayerImpl) streamCutPayloads(ctx context.Context, batch []uint64, head chunkHead, read func(context.Context, uint64) (capturedChunk, error)) ([]capturedChunk, []string, error) {
+	workers, _, _ := l.cutPayloadWorkers()
+	out := make([]capturedChunk, 0, len(batch))
+	var intents []string
+	for start := 0; start < len(batch); start += workers {
+		order := batch[start:min(len(batch), start+workers)]
+		wave := make([]capturedChunk, len(order))
+		err := l.uploadBatch(ctx, len(order), func(ctx context.Context, i int) error {
+			c, err := read(ctx, order[i])
+			if err != nil {
+				return err
+			}
+			ref, had := head.Chunks[c.idx]
+			if !c.zero && !(had && ref.SHA256 == c.sum) {
+				c.key = l.newKey(c.idx)
+				c.size = len(c.data)
+			}
+			wave[i] = c
+			return nil
+		})
+		if err != nil {
+			return nil, intents, err
+		}
+		var keys []string
+		var changed []int
+		for i, c := range wave {
+			if c.key != "" {
+				keys = append(keys, c.key)
+				changed = append(changed, i)
+			}
+		}
+		if len(keys) > 0 {
+			id, err := l.remote.PutIntent(ctx, chunkIntent{Gen: head.Gen, Epoch: l.cfg.Epoch, Holder: l.cfg.Holder, Keys: keys})
+			if err != nil {
+				return nil, intents, fmt.Errorf("storage: capture intent: %w: %w", errChunkRemoteUnavailable, err)
+			}
+			intents = append(intents, id)
+			if err = l.uploadBatch(ctx, len(changed), func(ctx context.Context, i int) error {
+				c := wave[changed[i]]
+				return l.putCaptured(ctx, c.key, c.data)
+			}); err != nil {
+				return nil, intents, fmt.Errorf("storage: capture upload: %w: %w", errChunkRemoteUnavailable, err)
+			}
+		}
+		for i := range wave {
+			wave[i].data = nil
+			out = append(out, wave[i])
+		}
 	}
-	// Reserve every possible binding before the first worker uploads. Unused
-	// keys are harmless intent roots and disappear when this cut settles.
-	intent, err := l.remote.PutIntent(ctx, chunkIntent{Gen: head.Gen, Epoch: l.cfg.Epoch, Holder: l.cfg.Holder, Keys: keys})
-	if err != nil {
-		return nil, "", fmt.Errorf("storage: capture stage intent: %w: %w", errChunkRemoteUnavailable, err)
-	}
-	out := make([]stagedChunk, len(batch))
-	err = l.uploadBatch(ctx, len(batch), func(ctx context.Context, i int) error {
-		idx := batch[i]
+	return out, intents, nil
+}
+
+func (l *chunkLayerImpl) stagePayloadRound(ctx context.Context, batch []uint64, versions map[uint64]uint64, head chunkHead, st *chunkCutStats) (map[uint64]stagedChunk, []string, error) {
+	out, intents, err := l.streamCutPayloads(ctx, batch, head, func(ctx context.Context, idx uint64) (capturedChunk, error) {
 		data, err := l.readChunk(idx)
 		if err != nil {
-			return err
+			return capturedChunk{}, err
 		}
 		if hook := l.testAfterStageReadHook; hook != nil {
 			hook(idx)
 		}
-		c := capturedChunk{idx: idx, sum: sha256.Sum256(data), zero: isAllZero(data)}
-		ref, had := head.Chunks[idx]
-		if !c.zero && !(had && ref.SHA256 == c.sum) {
-			if err := l.putCaptured(ctx, keys[i], data); err != nil {
-				return err
-			}
-			c.key, c.size = keys[i], len(data)
-		}
-		out[i] = stagedChunk{capturedChunk: c, ver: versions[idx], headGen: head.Gen}
-		return nil
+		return capturedChunk{idx: idx, data: data, sum: sha256.Sum256(data), zero: isAllZero(data)}, nil
 	})
 	if err != nil {
-		return nil, intent, fmt.Errorf("storage: capture stage upload: %w: %w", errChunkRemoteUnavailable, err)
+		return nil, intents, err
 	}
-	chunks := make(map[uint64]stagedChunk, len(batch))
+	chunks := make(map[uint64]stagedChunk, len(out))
 	for _, c := range out {
-		chunks[c.idx] = c
+		chunks[c.idx] = stagedChunk{capturedChunk: c, ver: versions[c.idx], headGen: head.Gen}
 		if c.key != "" {
 			st.UploadedChunks++
 			st.UploadedBytes += int64(c.size)
 		}
 	}
-	return chunks, intent, nil
+	return chunks, intents, nil
 }

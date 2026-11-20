@@ -911,11 +911,9 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		copyStart = time.Now()
 		if copyErr == nil {
 			var copied []capturedChunk
-			var intent string
-			copied, intent, copyErr = l.copyCOWWindow(ctx, w, births)
-			if intent != "" {
-				intents = append(intents, intent)
-			}
+			var ids []string
+			copied, ids, copyErr = l.copyCOWWindow(ctx, w, births, baseHead)
+			intents = append(intents, ids...)
 			for _, c := range copied {
 				if c.key != "" {
 					st.UploadedChunks++
@@ -1719,10 +1717,8 @@ func (l *chunkLayerImpl) stage(ctx context.Context, st *chunkCutStats) (map[uint
 		head := copyHead(l.head)
 		l.stMu.Unlock()
 		st.StageRounds++
-		roundChunks, id, err := l.stagePayloadRound(ctx, batch, vers, head, st)
-		if id != "" {
-			intents = append(intents, id)
-		}
+		roundChunks, ids, err := l.stagePayloadRound(ctx, batch, vers, head, st)
+		intents = append(intents, ids...)
 		if err != nil {
 			return nil, intents, err
 		}

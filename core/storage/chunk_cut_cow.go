@@ -498,7 +498,7 @@ func (l *chunkLayerImpl) copyCOWEntry(w *cutCOWWindow, idx uint64) (capturedChun
 // Each worker owns one immutable image from local read through remote Put.
 // Once copied, its entry is done: guest writes need not wait for remote I/O.
 // The window remains installed for candidates not yet read by a worker.
-func (l *chunkLayerImpl) copyCOWWindow(ctx context.Context, w *cutCOWWindow, recent map[uint64]uint64) ([]capturedChunk, string, error) {
+func (l *chunkLayerImpl) copyCOWWindow(ctx context.Context, w *cutCOWWindow, recent map[uint64]uint64, head chunkHead) ([]capturedChunk, []string, error) {
 	parent := ctx
 	abortStop := context.AfterFunc(parent, func() { w.abort(parent.Err()) })
 	defer abortStop()
@@ -526,47 +526,22 @@ func (l *chunkLayerImpl) copyCOWWindow(ctx context.Context, w *cutCOWWindow, rec
 		}
 	}
 	order := hotChunkKeys(indices, recent)
-	keys := make([]string, len(order))
-	for i, idx := range order {
-		keys[i] = l.newKey(idx)
-	}
-	intent := ""
-	if len(keys) > 0 {
-		var err error
-		l.stMu.Lock()
-		gen := l.head.Gen
-		l.stMu.Unlock()
-		intent, err = l.remote.PutIntent(ctx, chunkIntent{Gen: gen, Epoch: l.cfg.Epoch, Holder: l.cfg.Holder, Keys: keys})
+	out, intents, err := l.streamCutPayloads(ctx, order, head, func(ctx context.Context, idx uint64) (capturedChunk, error) {
+		c, ok, err := l.copyCOWEntry(w, idx)
 		if err != nil {
-			return nil, "", fmt.Errorf("storage: capture intent: %w: %w", errChunkRemoteUnavailable, err)
-		}
-	}
-	out := make([]capturedChunk, len(order))
-	err := l.uploadBatch(ctx, len(order), func(ctx context.Context, i int) error {
-		c, ok, err := l.copyCOWEntry(w, order[i])
-		if err != nil {
-			return err
+			return capturedChunk{}, err
 		}
 		if !ok {
-			return errCutCOWAborted
+			return capturedChunk{}, errCutCOWAborted
 		}
 		if len(c.missing) > 0 {
 			c.data, err = l.fillMissing(ctx, w.head, c.idx, c.data, c.missing)
 			if err != nil {
-				return errors.Join(errCutCOWAborted, err)
+				return capturedChunk{}, errors.Join(errCutCOWAborted, err)
 			}
 			c.sum, c.zero, c.missing = sha256.Sum256(c.data), isAllZero(c.data), nil
 		}
-		ref, had := w.head[c.idx]
-		if !c.zero && !(had && ref.SHA256 == c.sum) {
-			if err = l.putCaptured(ctx, keys[i], c.data); err != nil {
-				return fmt.Errorf("%w: %w", errChunkRemoteUnavailable, err)
-			}
-			c.key, c.size = keys[i], len(c.data)
-		}
-		c.data = nil
-		out[i] = c
-		return nil
+		return c, nil
 	})
 	w.mu.Lock()
 	if !w.terminal {
@@ -578,9 +553,9 @@ func (l *chunkLayerImpl) copyCOWWindow(ctx context.Context, w *cutCOWWindow, rec
 	w.mu.Unlock()
 	err = errors.Join(err, w.join())
 	if err != nil {
-		return nil, intent, err
+		return nil, intents, err
 	}
-	return out, intent, nil
+	return out, intents, nil
 }
 
 // Creation is single-owner, but no allocation/lifetime lock spans filesystem I/O.
