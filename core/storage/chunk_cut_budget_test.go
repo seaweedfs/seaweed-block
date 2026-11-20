@@ -121,6 +121,9 @@ func TestCutBudgetRevocationJoinsBeforeRelease(t *testing.T) {
 	if err := <-errs; !errors.Is(err, errTestCutBudget) {
 		t.Fatalf("revoked capture: %v", err)
 	}
+	if l.Stats().CutsAborted["budget_revoked"] != 1 {
+		t.Fatal("missing budget revoke status")
+	}
 	if f.stats().head.Gen != before {
 		t.Fatal("revoked point published")
 	}

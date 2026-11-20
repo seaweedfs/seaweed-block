@@ -176,6 +176,9 @@ func TestChunkCutUploadDeadlineBoundRetainsDirt(t *testing.T) {
 	if _, err := layer.Cut(ctx); err == nil {
 		t.Fatal("persistent upload outage published")
 	}
+	if layer.Stats().CutsAborted["upload"] != 1 {
+		t.Fatal("missing upload abort status")
+	}
 	r.mu.Lock()
 	if len(r.calls) != 1 {
 		t.Fatalf("retry changed object keys: %v", r.calls)

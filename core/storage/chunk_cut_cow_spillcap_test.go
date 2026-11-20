@@ -66,6 +66,9 @@ func TestCutCOWV3_SaverCapacityAbortsWithoutParkingGuest(t *testing.T) {
 	if err := <-errs; !errors.Is(err, errCutCOWAborted) {
 		t.Fatalf("cut: %v", err)
 	}
+	if l.Stats().CutsAborted["saver_capacity"] != 1 {
+		t.Fatal("missing saver abort status")
+	}
 	if f.stats().head.Gen != before {
 		t.Fatal("capacity-refused cut published")
 	}
@@ -148,6 +151,9 @@ func TestCutCOWV3_SpillCapAbortsTheCut(t *testing.T) {
 	cowWaitSignal(t, cutDone, "capped cut")
 	if err := <-cutErr; !errors.Is(err, errCutCOWAborted) || !strings.Contains(err.Error(), "spill would exceed its cap") {
 		t.Fatalf("cut past the spill cap: %v, want the cap abort", err)
+	}
+	if l.Stats().CutsAborted["cow_capacity"] != 1 {
+		t.Fatal("missing COW cap status")
 	}
 	if _, err := l.Cut(context.Background()); err != nil {
 		t.Fatal("retried cut:", err)

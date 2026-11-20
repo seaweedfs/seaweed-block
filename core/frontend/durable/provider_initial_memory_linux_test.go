@@ -411,9 +411,12 @@ func TestWALStoreChunk_InitialWriteAnonymousMemory(t *testing.T) {
 	anon, _ = memoryAnonBytes()
 	t.Logf("after QD32 anon=%d MiB", anon>>20)
 	if os.Getenv("SWBLOCK_MEMORY_CUT") != "0" {
-		if _, err = p.CaptureVolume(ctx, "v1"); err != nil {
-			t.Fatal(err)
+		cutStart := time.Now()
+		cut, cutErr := p.CutVolume(ctx, "v1", 0)
+		if cutErr != nil {
+			t.Fatal(cutErr)
 		}
+		t.Logf("first_cut_bytes=%d wall=%s stageRounds=%d candidates=%d", cfg.NumBlocks*4096, time.Since(cutStart), cut.Stats.StageRounds, cut.Stats.CandidateChunks)
 		if os.Getenv("SWBLOCK_MEMORY_FULL") != "" {
 			head, e := r.GetHead(ctx)
 			if e != nil {

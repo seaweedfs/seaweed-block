@@ -351,7 +351,7 @@ func (w *cutCOWWindow) save(e *cutCOWEntry, data []byte, missing []uint64) error
 		// The side file is sparse but its saved chunks are real bytes on the
 		// volume's filesystem: abort the cut (retried) instead of filling it.
 		w.mu.Unlock()
-		return fmt.Errorf("%w: %w: limit %d bytes", errCutCOWAborted, errCutCOWCapacity, w.spillLimit)
+		return fmt.Errorf("%w: %w: COW spill would exceed its cap of %d bytes", errCutCOWAborted, errCutCOWCapacity, w.spillLimit)
 	} else {
 		w.spillBytes += w.chunkBytes
 	}

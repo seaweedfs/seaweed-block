@@ -12,7 +12,7 @@ import (
 )
 
 func TestCutPayloadIntentCountIndependentOfCandidates(t *testing.T) {
-	for _, n := range []int{4, 12} {
+	for _, n := range []int{4, 8} {
 		_, f, l, _ := precopyLayer(t, 0, n)
 		l.cfg.UploadConcurrency = 1
 		before := len(f.putIntents)
@@ -125,7 +125,7 @@ func TestV3ReadLargeBatchScratchIsBlockBounded(t *testing.T) {
 	}
 	// Corruption outside the requested block must still fail the whole-record CRC.
 	at := int64(s.sb.WALOffset + off + walEntryPrefixSizeV3 + 255*4096)
-	if _, err = s.fd.WriteAt([]byte{0xff}, at); err != nil {
+	if _, err = s.fd.WriteAt([]byte{0x17}, at); err != nil {
 		t.Fatal(err)
 	}
 	_, ioErr, verr = s.readRecordV3(3, off, dataOff, lsn)
