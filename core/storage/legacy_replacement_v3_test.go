@@ -190,6 +190,100 @@ func TestNativeReplacementAllBlocksAfterCheckpoint(t *testing.T) {
 	}
 }
 
+func TestNativeReplacementFlusherCannotOverwriteBASE(t *testing.T) {
+	for _, phase := range []string{"snapshot", "extent_sync"} {
+		t.Run(phase, func(t *testing.T) {
+			s, path := newMappedCheckpointStoreV3(t)
+			if _, err := s.Write(5, blk(0x55)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.Sync(); err != nil {
+				t.Fatal(err)
+			}
+			replaced := false
+			replace := func() {
+				h, err := s.beginBaseInstallV3(7, idA)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := h.WriteBase(5, blk(0xB5)); err != nil {
+					t.Fatal(err)
+				}
+				if err := h.MarkBaseComplete(); err != nil {
+					t.Fatal(err)
+				}
+				replaced = true
+			}
+			if phase == "snapshot" {
+				s.flusher.afterSnapshotForTest = replace
+			} else {
+				s.flusher.afterExtentSyncForTest = replace
+			}
+			if err := s.flusher.flushOnce(); err != nil && !errors.Is(err, ErrMapCoverageStale) {
+				t.Fatal(err)
+			}
+			if !replaced {
+				t.Fatal("BASE replacement schedule not reached")
+			}
+			s.flusher.afterSnapshotForTest = nil
+			s.flusher.afterExtentSyncForTest = nil
+			if got, err := s.Read(5); err != nil || !bytes.Equal(got, blk(0xB5)) {
+				t.Fatalf("old flush overwrote BASE: %v", err)
+			}
+			crashReadOnlyStoreV3(t, s)
+			r, err := OpenWALStore(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.DisableAutoFlushForRecoveryTest()
+			t.Cleanup(func() { _ = r.Close() })
+			if _, err := r.Recover(); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := r.Read(5); err != nil || !bytes.Equal(got, blk(0xB5)) {
+				t.Fatalf("old WAL resurfaced over BASE: %v", err)
+			}
+		})
+	}
+}
+
+func TestNativeReplacementDirectExtentRefusedPreservesWAL(t *testing.T) {
+	s, path := newMappedCheckpointStoreV3(t)
+	if _, err := s.Write(5, blk(0x55)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.WriteExtentDirect(5, blk(0xB5)); !errors.Is(err, errV3NotYet) {
+		t.Fatalf("unguarded direct BASE write: %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, after) || s.dm.len() != 1 {
+		t.Fatalf("refused direct write changed bytes/dirty WAL: %v", err)
+	}
+	if got, err := s.Read(5); err != nil || !bytes.Equal(got, blk(0x55)) {
+		t.Fatalf("refusal lost ACK bytes: %v", err)
+	}
+	crashReadOnlyStoreV3(t, s)
+	r, err := OpenWALStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.DisableAutoFlushForRecoveryTest()
+	t.Cleanup(func() { _ = r.Close() })
+	if _, err := r.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := r.Read(5); err != nil || !bytes.Equal(got, blk(0x55)) {
+		t.Fatalf("refused direct write lost bytes at reopen: %v", err)
+	}
+}
+
 func TestNativeReplacementQueuedWritersAfterFailedAppend(t *testing.T) {
 	for _, batch := range []bool{false, true} {
 		t.Run(map[bool]string{false: "write", true: "batch"}[batch], func(t *testing.T) {
