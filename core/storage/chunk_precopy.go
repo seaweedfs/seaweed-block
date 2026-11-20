@@ -27,12 +27,28 @@ type precopySample struct {
 
 // PrecopyReport records admission estimates, not a worst-case latency proof.
 type PrecopyReport struct {
-	Attempts                   int
-	TailBytes                  uint64
-	Fixed, Estimate, SampleAge time.Duration
-	BytesPerSecond             float64
-	Reason                     string
-	Frozen                     bool
+	Attempts          int           `json:"attempts"`
+	TailBytes         uint64        `json:"tailBytes"`
+	Fixed             time.Duration `json:"fixedNs"`
+	Estimate          time.Duration `json:"estimateNs"`
+	SampleAge         time.Duration `json:"sampleAgeNs"`
+	BytesPerSecond    float64       `json:"bytesPerSecond"`
+	Reason            string        `json:"reason"`
+	Frozen            bool          `json:"frozen"`
+	FreezeElapsed     time.Duration `json:"freezeElapsedNs"`
+	ExtraCASAttempts  uint64        `json:"extraCASAttempts"`
+	CASFailureTimeout time.Duration `json:"casFailureTimeoutNs"`
+	DeclaredWorst     time.Duration `json:"declaredWorstNs"`
+	LatencyGateFailed bool          `json:"latencyGateFailed"`
+}
+
+// Finish records the whole freeze, including any owner-driven settlement.
+// D_cas is failure allowance only; it never enters successful admission.
+func (r *PrecopyReport) Finish(elapsed time.Duration, extraCAS uint64, failed bool) {
+	r.FreezeElapsed, r.ExtraCASAttempts = elapsed, extraCAS
+	r.CASFailureTimeout = chunkHeadOperationTimeout
+	r.DeclaredWorst = r.Estimate + time.Duration(extraCAS)*chunkHeadOperationTimeout
+	r.LatencyGateFailed = failed || elapsed > precopyAllowance
 }
 
 // PrecopyDetach runs rolling cuts before the final detached cut. stopIO is
@@ -52,9 +68,12 @@ func (l *chunkLayerImpl) PrecopyDetach(ctx context.Context, stopIO func() bool) 
 		r.Precopy.Frozen = true
 		return r, nil
 	}
+	ctx, countCAS := WithChunkCASAccounting(ctx)
 	ctx, cancel := context.WithTimeout(ctx, precopyDuration)
 	defer cancel()
 	var report PrecopyReport
+	var frozenAt time.Time
+	var casAtFreeze uint64
 	l.precopyFreeze = func(tail uint64) bool {
 		report = l.precopyEstimate(tail, report.Attempts)
 		if report.Reason != "fit" {
@@ -65,6 +84,7 @@ func (l *chunkLayerImpl) PrecopyDetach(ctx context.Context, stopIO func() bool) 
 			return false
 		}
 		report.Frozen = true
+		frozenAt, casAtFreeze = time.Now(), countCAS()
 		return true
 	}
 	defer func() { l.precopyFreeze = nil }()
@@ -76,6 +96,12 @@ func (l *chunkLayerImpl) PrecopyDetach(ctx context.Context, stopIO func() bool) 
 		r, err := l.captureLocked(ctx, false)
 		r.Precopy = report
 		if report.Frozen {
+			attempts := countCAS() - casAtFreeze
+			extra := uint64(0)
+			if attempts > 0 {
+				extra = attempts - 1
+			}
+			r.Precopy.Finish(time.Since(frozenAt), extra, err != nil)
 			return r, err
 		}
 		if err != nil {
