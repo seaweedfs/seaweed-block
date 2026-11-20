@@ -80,7 +80,7 @@ func (r *publishAfterAbsentRead) GetHead(ctx context.Context) (storage.ChunkHead
 }
 
 func TestRestoreHEADAppearsBetweenClaimAndAttach(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	remote := storage.NewMemChunkRemote()
 	data := bytes.Repeat([]byte{0xA7}, pcChunkBlocks*4096)

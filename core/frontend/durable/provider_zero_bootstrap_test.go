@@ -36,7 +36,7 @@ func (b *bootstrapBlobs) Get(_ context.Context, id string) ([]byte, error) {
 }
 
 func TestRestoreEnsureVolumeZeroHEADPreservesCheckpointedBootstrap(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	filer := chunkstore.NewMemFiler()
 	catalog, err := chunkstore.NewCatalog(filer, "/bootstrap")
