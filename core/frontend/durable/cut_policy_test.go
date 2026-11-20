@@ -160,19 +160,18 @@ func TestCutPolicy_NothingDueWhileReconciling(t *testing.T) {
 func TestCutPolicy_StaggerPreservesExplicitTimerReset(t *testing.T) {
 	pol := testPolicy()
 	s := initialCutSchedule("v1", pol.interval, t0, true)
-	if !s.lastSuccess.Equal(t0) || s.initialDelay <= 0 {
-		t.Fatal("phase fabricated a successful cut", s)
+	if !s.lastSuccess.Equal(t0) || !s.firstDue.After(t0) || s.firstDue.After(t0.Add(pol.interval)) {
+		t.Fatal("phase fabricated success or exceeded first period", s)
 	}
-	phase := s.initialDelay
-	if _, ok := pol.dueNR(s, t0.Add(pol.interval)); ok {
+	if _, ok := pol.dueNR(s, s.firstDue.Add(-time.Nanosecond)); ok {
 		t.Fatal("initial phase ignored")
 	}
-	if _, ok := pol.dueNR(s, t0.Add(pol.interval+phase)); !ok {
+	if _, ok := pol.dueNR(s, s.firstDue); !ok {
 		t.Fatal("first phased cut not due")
 	}
-	explicit := t0.Add(phase / 2)
+	explicit := t0.Add(s.firstDue.Sub(t0) / 2)
 	s = s.observe(explicit.UnixNano())
-	if !s.lastSuccess.Equal(explicit) || s.initialDelay != 0 {
+	if !s.lastSuccess.Equal(explicit) || !s.firstDue.IsZero() {
 		t.Fatal("stagger hid explicit success", s)
 	}
 	if _, ok := pol.dueNR(s, explicit.Add(pol.interval-time.Nanosecond)); ok {

@@ -637,12 +637,12 @@ type cutPolicy struct {
 }
 
 type cutSchedule struct {
-	lastSuccess  time.Time // last successful cut of any kind
-	lastAuto     time.Time // start of the last automatic cut
-	failedAt     time.Time // end of the last failed automatic cut
-	retryAt      time.Time // a failed automatic cut's backoff ends here
-	backoff      time.Duration
-	initialDelay time.Duration // first automatic cut only; never a fabricated success
+	lastSuccess time.Time // last successful cut of any kind
+	lastAuto    time.Time // start of the last automatic cut
+	failedAt    time.Time // end of the last failed automatic cut
+	retryAt     time.Time // a failed automatic cut's backoff ends here
+	backoff     time.Duration
+	firstDue    time.Time // startup phase only; never a fabricated success
 }
 
 // observe takes in a successful cut the layer reports (any trigger). A
@@ -653,7 +653,7 @@ func (s cutSchedule) observe(lastCutNs int64) cutSchedule {
 		c := time.Unix(0, lastCutNs)
 		if c.After(s.lastSuccess) {
 			s.lastSuccess = c
-			s.initialDelay = 0
+			s.firstDue = time.Time{}
 		}
 		if !s.failedAt.IsZero() && c.After(s.failedAt) {
 			s.backoff, s.retryAt, s.failedAt = 0, time.Time{}, time.Time{}
@@ -672,7 +672,11 @@ func (pol cutPolicy) due(s cutSchedule, now time.Time, reconciling bool) (string
 	if !s.lastAuto.IsZero() && now.Sub(s.lastAuto) < pol.minSpacing {
 		return "", false
 	}
-	if pol.interval > 0 && !now.Before(s.lastSuccess.Add(pol.interval).Add(s.initialDelay)) {
+	deadline := s.lastSuccess.Add(pol.interval)
+	if !s.firstDue.IsZero() {
+		deadline = s.firstDue
+	}
+	if pol.interval > 0 && !now.Before(deadline) {
 		return "periodic", true
 	}
 	return "", false
@@ -682,7 +686,7 @@ func (pol cutPolicy) due(s cutSchedule, now time.Time, reconciling bool) (string
 func (pol cutPolicy) after(s cutSchedule, start, end time.Time, err error) cutSchedule {
 	s.lastAuto = start
 	if err == nil {
-		s.initialDelay = 0
+		s.firstDue = time.Time{}
 		s.backoff, s.retryAt, s.failedAt = 0, time.Time{}, time.Time{}
 		if end.After(s.lastSuccess) {
 			s.lastSuccess = end
@@ -703,8 +707,10 @@ func (pol cutPolicy) after(s cutSchedule, start, end time.Time, err error) cutSc
 
 func initialCutSchedule(volumeID string, interval time.Duration, now time.Time, stagger bool) cutSchedule {
 	s := cutSchedule{lastSuccess: now}
-	if stagger {
-		s.initialDelay = hostlimit.Phase(volumeID, interval)
+	if stagger && interval > 0 {
+		phase := hostlimit.Phase(volumeID, interval)
+		startup := hostlimit.Phase(volumeID+":startup", min(interval, 10*time.Second))
+		s.firstDue = now.Add(max(phase, startup))
 	}
 	return s
 }
