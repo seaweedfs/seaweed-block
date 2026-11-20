@@ -53,8 +53,9 @@ const defaultReadMissTimeout = 30 * time.Second
 
 type chunkLayerImpl struct {
 	// capMu serializes pre-copy admission and its recent measurements.
-	precopyFreeze  func(uint64) bool
+	precopyFreeze  func(uint64, time.Time) bool
 	precopySamples []precopySample
+	precopyPause   func(time.Duration)
 
 	s      *WALStore
 	remote chunkRemote
@@ -824,6 +825,9 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 			l.stMu.Unlock()
 			l.dropIntents(ctx, ids)
 		}
+		if observe := l.precopyPause; observe != nil {
+			observe(time.Duration(st.BarrierPauseNs))
+		}
 		l.recordCut(res, st, err)
 	}()
 	if err := l.admit(); err != nil {
@@ -878,7 +882,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	stageStart := time.Now()
 	staged, intents, err := l.stage(ctx, &st)
 	if st.UploadedBytes > 0 {
-		st.precopyPayloadNs += time.Since(stageStart).Nanoseconds()
+		st.PayloadNs += time.Since(stageStart).Nanoseconds()
 	}
 	if err != nil {
 		l.dropIntents(ctx, intents)
@@ -961,9 +965,9 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	// The authoritative candidate set is fixed with mutation admission closed.
 	// The owner callback is nonblocking and may stop only an already drained
 	// frontend; rejected attempts remain ordinary COW cuts.
-	if freeze := l.precopyFreeze; freeze != nil {
+	if freeze := l.precopyFreeze; freeze != nil && context.Cause(ctx) == nil {
 		tail := uint64(len(candidates)) * uint64(l.blockSize) * l.chunkBlocks
-		detach = freeze(tail)
+		detach = freeze(tail, pauseStart)
 	}
 
 	if h < baseHead.RemoteLSN && !l.supersededBy(baseHead) {
@@ -1024,7 +1028,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	}
 	st.CopyNs = time.Since(copyStart).Nanoseconds()
 	if st.UploadedBytes > bytesBeforeCopy {
-		st.precopyPayloadNs += st.CopyNs
+		st.PayloadNs += st.CopyNs
 	}
 	if l.usesOwnedMapV3() {
 		st.UploadNs = st.CopyNs
@@ -1103,7 +1107,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		return chunkCutResult{}, fmt.Errorf("storage: capture upload: %w", errors.Join(errChunkRemoteUnavailable, errCutUpload, err))
 	}
 	if len(uploads) > 0 {
-		st.precopyPayloadNs += time.Since(payloadStart).Nanoseconds()
+		st.PayloadNs += time.Since(payloadStart).Nanoseconds()
 	}
 	for _, u := range uploads {
 		next.Chunks[u.c.idx] = chunkRef{Key: u.key, SHA256: u.c.sum, Encoding: "full", BirthLSN: u.c.birth}

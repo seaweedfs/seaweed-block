@@ -27,19 +27,22 @@ type precopySample struct {
 
 // PrecopyReport records admission estimates, not a worst-case latency proof.
 type PrecopyReport struct {
-	Attempts          int           `json:"attempts"`
-	TailBytes         uint64        `json:"tailBytes"`
-	Fixed             time.Duration `json:"fixedNs"`
-	Estimate          time.Duration `json:"estimateNs"`
-	SampleAge         time.Duration `json:"sampleAgeNs"`
-	BytesPerSecond    float64       `json:"bytesPerSecond"`
-	Reason            string        `json:"reason"`
-	Frozen            bool          `json:"frozen"`
-	FreezeElapsed     time.Duration `json:"freezeElapsedNs"`
-	ExtraCASAttempts  uint64        `json:"extraCASAttempts"`
-	CASFailureTimeout time.Duration `json:"casFailureTimeoutNs"`
-	DeclaredWorst     time.Duration `json:"declaredWorstNs"`
-	LatencyGateFailed bool          `json:"latencyGateFailed"`
+	Attempts              int           `json:"attempts"`
+	TailBytes             uint64        `json:"tailBytes"`
+	Fixed                 time.Duration `json:"fixedNs"`
+	Estimate              time.Duration `json:"estimateNs"`
+	SampleAge             time.Duration `json:"sampleAgeNs"`
+	BytesPerSecond        float64       `json:"bytesPerSecond"`
+	Reason                string        `json:"reason"`
+	Frozen                bool          `json:"frozen"`
+	FreezeElapsed         time.Duration `json:"freezeElapsedNs"`
+	ExtraCASAttempts      uint64        `json:"extraCASAttempts"`
+	CASFailureTimeout     time.Duration `json:"casFailureTimeoutNs"`
+	DeclaredWorst         time.Duration `json:"declaredWorstNs"`
+	LatencyGateFailed     bool          `json:"latencyGateFailed"`
+	BarrierBeforeFreeze   time.Duration `json:"barrierBeforeFreezeNs"`
+	TentativePauseTotal   time.Duration `json:"tentativePauseTotalNs"`
+	LongestTentativePause time.Duration `json:"longestTentativePauseNs"`
 }
 
 // Finish records the whole freeze, including any owner-driven settlement.
@@ -74,8 +77,22 @@ func (l *chunkLayerImpl) PrecopyDetach(ctx context.Context, stopIO func() bool) 
 	var report PrecopyReport
 	var frozenAt time.Time
 	var casAtFreeze uint64
-	l.precopyFreeze = func(tail uint64) bool {
+	var pauseTotal, longestPause time.Duration
+	l.precopyPause = func(pause time.Duration) {
+		pauseTotal += pause
+		if pause > longestPause {
+			longestPause = pause
+		}
+	}
+	l.precopyFreeze = func(tail uint64, barrierStart time.Time) bool {
 		report = l.precopyEstimate(tail, report.Attempts)
+		spent := time.Since(barrierStart)
+		if spent > report.Fixed {
+			report.Estimate += spent - report.Fixed
+		}
+		if report.Reason == "fit" && report.Estimate > precopyAllowance {
+			report.Reason = "barrier_over_budget"
+		}
 		if report.Reason != "fit" {
 			return false
 		}
@@ -84,16 +101,18 @@ func (l *chunkLayerImpl) PrecopyDetach(ctx context.Context, stopIO func() bool) 
 			return false
 		}
 		report.Frozen = true
-		frozenAt, casAtFreeze = time.Now(), countCAS()
+		report.BarrierBeforeFreeze = time.Since(barrierStart)
+		frozenAt, casAtFreeze = barrierStart, countCAS()
 		return true
 	}
-	defer func() { l.precopyFreeze = nil }()
+	defer func() { l.precopyFreeze = nil; l.precopyPause = nil }()
 	for attempt := 1; attempt <= precopyAttempts; attempt++ {
 		report.Attempts = attempt
 		if err := ctx.Err(); err != nil {
 			return ChunkCutResult{Precopy: report}, err
 		}
 		r, err := l.captureLocked(ctx, false)
+		report.TentativePauseTotal, report.LongestTentativePause = pauseTotal, longestPause
 		r.Precopy = report
 		if report.Frozen {
 			attempts := countCAS() - casAtFreeze
@@ -171,9 +190,9 @@ func (l *chunkLayerImpl) precopyEstimate(tail uint64, attempts int) PrecopyRepor
 }
 
 func (l *chunkLayerImpl) samplePrecopy(st chunkCutStats) {
-	s := precopySample{at: time.Now(), fixed: time.Duration(max(int64(1), st.TotalNs-st.precopyPayloadNs))}
-	if st.UploadedBytes > 0 && st.precopyPayloadNs > 0 {
-		s.rate = float64(st.UploadedBytes) / time.Duration(st.precopyPayloadNs).Seconds()
+	s := precopySample{at: time.Now(), fixed: time.Duration(max(int64(1), st.TotalNs-st.PayloadNs))}
+	if st.UploadedBytes > 0 && st.PayloadNs > 0 {
+		s.rate = float64(st.UploadedBytes) / time.Duration(st.PayloadNs).Seconds()
 	}
 	l.precopySamples = append(l.precopySamples, s)
 	if len(l.precopySamples) > 32 {

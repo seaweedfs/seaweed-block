@@ -911,7 +911,7 @@ func (p *DurableProvider) DetachVolume(ctx context.Context, volumeID string) (st
 		log.Printf("durable: pre-copy volume=%s attempts=%d tail=%d rate=%.0f sample_age=%s fixed=%s estimate=%s frozen=%t reason=%s err=%v", volumeID, r.Precopy.Attempts, r.Precopy.TailBytes, r.Precopy.BytesPerSecond, r.Precopy.SampleAge, r.Precopy.Fixed, r.Precopy.Estimate, r.Precopy.Frozen, r.Precopy.Reason, err)
 		if err == nil {
 			if !start.IsZero() {
-				r.Precopy.Finish(time.Since(start), 0, false)
+				r.Precopy.Finish(time.Since(start)+r.Precopy.BarrierBeforeFreeze, 0, false)
 			}
 			return r, h.storage.NextLSN() - 1, nil
 		}
@@ -959,7 +959,7 @@ func (p *DurableProvider) DetachVolume(ctx context.Context, volumeID string) (st
 		if attempts > 0 {
 			extra = attempts - 1
 		}
-		r.Precopy.Finish(time.Since(start), extra, true)
+		r.Precopy.Finish(time.Since(start)+r.Precopy.BarrierBeforeFreeze, extra, true)
 		log.Printf("durable: pre-copy settlement volume=%s elapsed=%s extra_cas=%d declared_worst=%s latency_gate_failed=%t outcome=%v err=%v", volumeID, r.Precopy.FreezeElapsed, extra, r.Precopy.DeclaredWorst, r.Precopy.LatencyGateFailed, how, serr)
 		dr.Precopy = r.Precopy
 	}
