@@ -464,26 +464,38 @@ func (b *StorageBackend) SetOperational(ok bool, evidence string) {
 		}
 	}
 	b.mu.Lock()
+	b.setOperationalLocked(ok, evidence)
+	b.mu.Unlock()
+}
+
+// The caller owns mu; publication never calls the store or waits for I/O.
+func (b *StorageBackend) setOperationalLocked(ok bool, evidence string) {
 	b.opEvidence.Store(evidence)
 	b.operational.Store(ok)
 	b.waitAttachReady = false
 	b.notifyReadReadyLocked()
-	b.mu.Unlock()
 }
 
 // TryStopIO closes admission only if every admitted I/O has drained already.
 // Used under the capture barrier: never wait for ioMu there, since an I/O
 // holding its read side may itself be queued on that barrier. Failed attempts
-// leave the frontend unchanged. Lock order: try ioMu -> mu; no store calls.
+// leave the frontend unchanged. Lock order: try ioMu -> try mu; neither lock waits, and no store calls.
 func (b *StorageBackend) TryStopIO(evidence string) bool {
 	if !b.ioMu.TryLock() {
 		return false
 	}
 	defer b.ioMu.Unlock()
-	if !b.operational.Load() {
+	if !b.mu.TryLock() {
 		return false
 	}
-	b.SetOperational(false, evidence)
+	defer b.mu.Unlock()
+	if b.closed || !b.operational.Load() {
+		return false
+	}
+	if evidence == "" {
+		evidence = "not operational"
+	}
+	b.setOperationalLocked(false, evidence)
 	return true
 }
 
