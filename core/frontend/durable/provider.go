@@ -294,6 +294,7 @@ type VolumeStatus struct {
 	Evidence              string
 	Closed                bool
 	WriteProfile          WriteProfileStatus
+	DataSync              *storage.DataSyncStatus              `json:",omitempty"`
 	CheckpointPersistence *storage.CheckpointPersistenceStatus `json:",omitempty"`
 	// Chunk is the chunk layer's state and cut counters; walstore-chunk
 	// volumes only.

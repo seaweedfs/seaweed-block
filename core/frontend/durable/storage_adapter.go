@@ -299,6 +299,11 @@ func (b *StorageBackend) durableStatus(volumeID, path, impl string) VolumeStatus
 	if c, ok := b.storage.(interface{ HolesSuspected() uint64 }); ok {
 		holes = c.HolesSuspected()
 	}
+	var dataSync *storage.DataSyncStatus
+	if reporter, ok := b.storage.(interface{ DataSyncPolicy() storage.DataSyncStatus }); ok {
+		snapshot := reporter.DataSyncPolicy()
+		dataSync = &snapshot
+	}
 	var checkpoint *storage.CheckpointPersistenceStatus
 	if reporter, ok := b.storage.(interface {
 		CheckpointPersistence() storage.CheckpointPersistenceStatus
@@ -352,6 +357,7 @@ func (b *StorageBackend) durableStatus(volumeID, path, impl string) VolumeStatus
 		Closed:                closed,
 		WriteProfile:          writeProfile,
 		CheckpointPersistence: checkpoint,
+		DataSync:              dataSync,
 	}
 }
 
