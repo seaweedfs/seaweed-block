@@ -78,7 +78,8 @@ func (p *Publisher) leaseDeadlineLocked(volume string) time.Time {
 	return time.Time{}
 }
 
-// setLeaseDeadlineLocked replaces the deadline (restart rule, move issue) or,
+// setLeaseDeadlineLocked replaces the deadline (restart rule, move issue: the
+// new holder's lease starts with the grant issue+TTL) or,
 // with raise, raises it to at least t (a grant). Caller holds p.mu.
 func (p *Publisher) setLeaseDeadlineLocked(volume string, t time.Time, raise bool) {
 	d := p.deriveLeaseLocked(volume)
@@ -201,7 +202,8 @@ func (p *Publisher) RenewWorkspaceLease(ctx context.Context, volume, holder stri
 }
 
 // firstWorkspaceGrant creates a lease synchronously under p.mu (one write per
-// assignment epoch). A host whose first renewal fails does not fence: it has
+// assignment epoch) for an epoch that has none: a move issue already started
+// its holder's lease. A host whose first renewal fails does not fence: it has
 // no deadline yet and retries. The durable horizon starts at now+1.5*TTL.
 func (p *Publisher) firstWorkspaceGrant(ctx context.Context, volume, holder string, epoch uint64) (WorkspaceLease, error) {
 	p.mu.Lock()
@@ -226,17 +228,22 @@ func (p *Publisher) firstWorkspaceGrant(ctx context.Context, volume, holder stri
 		p.mu.Unlock()
 		return WorkspaceLease{}, fmt.Errorf("workspace lease: created concurrently; retry")
 	}
-	now := p.workspaceNow()
-	skew := int64(p.workspaceSkew(nil))
-	grant := now.Add(p.workspaceTTL)
-	s.Lease = &WorkspaceLease{ReplicaID: holder, Epoch: epoch, ExpiresAtNS: now.Add(p.workspaceTTL + p.workspaceTTL/2).UnixNano(), MaxClockSkewNS: skew}
+	lease, grant := p.newWorkspaceLease(holder, epoch, p.workspaceNow())
+	s.Lease = lease
 	if err := p.persistWorkspaceLocked(volume, s); err != nil {
 		p.mu.Unlock()
 		return WorkspaceLease{}, err
 	}
 	p.setLeaseDeadlineLocked(volume, grant, true)
 	p.mu.Unlock()
-	return WorkspaceLease{ReplicaID: holder, Epoch: epoch, ExpiresAtNS: grant.UnixNano(), MaxClockSkewNS: skew}, nil
+	return WorkspaceLease{ReplicaID: holder, Epoch: epoch, ExpiresAtNS: grant.UnixNano(), MaxClockSkewNS: lease.MaxClockSkewNS}, nil
+}
+
+// newWorkspaceLease starts a lease at now: the durable horizon is
+// now+1.5*TTL and the grant (the deadline) now+TTL. Both a first grant and a
+// move issue start a lease this way.
+func (p *Publisher) newWorkspaceLease(holder string, epoch uint64, now time.Time) (*WorkspaceLease, time.Time) {
+	return &WorkspaceLease{ReplicaID: holder, Epoch: epoch, ExpiresAtNS: now.Add(p.workspaceTTL + p.workspaceTTL/2).UnixNano(), MaxClockSkewNS: int64(p.workspaceSkew(nil))}, now.Add(p.workspaceTTL)
 }
 
 // extendWorkspaceLease is an ordinary writer: under p.mu it rechecks the
