@@ -54,6 +54,7 @@ const defaultReadMissTimeout = 30 * time.Second
 type chunkLayerImpl struct {
 	// capMu serializes pre-copy admission and its recent measurements.
 	precopyFreeze  func(uint64, time.Time) bool
+	precopyPrepare func(context.Context) (func(), error)
 	precopySamples []precopySample
 	precopyPause   func(time.Duration)
 
@@ -905,6 +906,31 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	// paused too. LockWaitNs reports that wait on its own.
 	payloadBeforeBarrier = st.PayloadNs
 	pauseStart = time.Now()
+	var releasePrecopy func()
+	if prepare := l.precopyPrepare; prepare != nil {
+		releasePrecopy, _ = prepare(ctx)
+	}
+	defer func() {
+		if releasePrecopy != nil && !detach {
+			releasePrecopy()
+		}
+	}()
+	if cause := context.Cause(ctx); cause != nil {
+		if releasePrecopy != nil {
+			releasePrecopy()
+			releasePrecopy = nil
+		}
+		l.dropIntents(ctx, intents)
+		return chunkCutResult{}, cause
+	}
+	// Resume rejected tentative admission before any ordinary COW upload.
+	unlockCapture := func() {
+		l.s.captureMu.Unlock()
+		if !detach && releasePrecopy != nil {
+			releasePrecopy()
+			releasePrecopy = nil
+		}
+	}
 	if hook := l.testBeforeBarrierLockHook; hook != nil {
 		hook()
 	}
@@ -917,7 +943,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		hook(h)
 	}
 	if err != nil {
-		l.s.captureMu.Unlock()
+		unlockCapture()
 		st.BarrierPauseNs = time.Since(pauseStart).Nanoseconds()
 		l.dropIntents(ctx, intents) // a clean abort: staged keys are released
 		return chunkCutResult{}, fmt.Errorf("storage: capture sync: %w", err)
@@ -977,7 +1003,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	}
 
 	if h < baseHead.RemoteLSN && !l.supersededBy(baseHead) {
-		l.s.captureMu.Unlock()
+		unlockCapture()
 		st.BarrierPauseNs = time.Since(pauseStart).Nanoseconds()
 		// HEAD holds the image of a later LSN than this host's log has
 		// reached: publishing would move remote_lsn backwards. Refused
@@ -997,7 +1023,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		if copyErr == nil {
 			w.budget = budget
 		}
-		l.s.captureMu.Unlock()
+		unlockCapture()
 		st.BarrierPauseNs = time.Since(pauseStart).Nanoseconds()
 		copyStart = time.Now()
 		if copyErr == nil {
@@ -1029,7 +1055,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 			}
 			captured = append(captured, capturedChunk{idx: idx, data: buf, sum: sha256.Sum256(buf), zero: isAllZero(buf)})
 		}
-		l.s.captureMu.Unlock()
+		unlockCapture()
 		st.BarrierPauseNs = time.Since(pauseStart).Nanoseconds()
 	}
 	st.CopyNs = time.Since(copyStart).Nanoseconds()

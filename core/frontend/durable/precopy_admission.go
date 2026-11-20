@@ -2,6 +2,7 @@ package durable
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -132,6 +133,15 @@ func (b *StorageBackend) admitPrecopy(ctx context.Context, admit func() (func(),
 			}
 			return release, err
 		}
+		b.mu.Unlock()
+		if err := b.readyCheck(); err != nil && !errors.Is(err, frontend.ErrBackendBusy) {
+			return nil, err
+		}
+		b.mu.Lock()
+		if b.precopy != p {
+			b.mu.Unlock()
+			continue
+		}
 		w := &precopyWaiter{ready: make(chan struct{})}
 		p.waiters = append(p.waiters, w)
 		if !p.active && len(p.waiters) == 1 {
@@ -139,6 +149,9 @@ func (b *StorageBackend) admitPrecopy(ctx context.Context, admit func() (func(),
 		}
 		deadline := p.started.Add(precopyQueueBudget)
 		b.mu.Unlock()
+		if hook := b.testPrecopyQueued; hook != nil {
+			hook()
+		}
 		waitCtx, cancel := context.WithDeadline(ctx, deadline)
 		select {
 		case <-w.ready:

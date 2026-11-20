@@ -148,7 +148,8 @@ const maxFullBlockBatchBlocks = 64
 type StorageBackend struct {
 	// testBeforeIOLock, test-only, runs in admit after the readiness check,
 	// right before the I/O lock (an arrival handshake for queued I/O).
-	testBeforeIOLock func()
+	testBeforeIOLock  func()
+	testPrecopyQueued func() // after FIFO registration, outside mu
 	// Runs outside locks after a read registers its readiness notification.
 	testBeforeReadReadyWait func()
 	testAfterAttachRefusal  func()
@@ -488,8 +489,11 @@ func (b *StorageBackend) TryStopIO(evidence string) bool {
 	// A drained admission pause excludes late gate callers even if they still
 	// hold ioMu's read side. Their final registration check cannot reach storage.
 	if b.mu.TryLock() {
-		if b.precopy != nil && b.precopy.active {
+		if b.precopy != nil {
 			defer b.mu.Unlock()
+			if !b.precopy.active {
+				return false
+			}
 			if b.admittedIO != 0 || b.closed || !b.operational.Load() {
 				return false
 			}

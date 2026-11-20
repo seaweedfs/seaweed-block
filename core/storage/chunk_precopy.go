@@ -13,10 +13,11 @@ var (
 )
 
 const (
-	precopyAttempts  = 5
-	precopyDuration  = 60 * time.Second
-	precopyAllowance = 1200 * time.Millisecond
-	precopyMargin    = 100 * time.Millisecond
+	precopyAttempts   = 5
+	precopyDuration   = 60 * time.Second
+	precopyAllowance  = 1200 * time.Millisecond
+	precopyMargin     = 100 * time.Millisecond
+	precopyDrainBound = 100 * time.Millisecond
 )
 
 type precopySample struct {
@@ -27,6 +28,8 @@ type precopySample struct {
 
 // PrecopyReport records admission estimates, not a worst-case latency proof.
 type PrecopyReport struct {
+	Drain                 time.Duration `json:"drainNs"`
+	DrainTimedOut         bool          `json:"drainTimedOut"`
 	Attempts              int           `json:"attempts"`
 	TailBytes             uint64        `json:"tailBytes"`
 	Fixed                 time.Duration `json:"fixedNs"`
@@ -62,6 +65,16 @@ func (r *PrecopyReport) Finish(elapsed time.Duration, extraCAS uint64, failed bo
 // capMu owns the callback and samples; no owner lock is taken while waiting
 // for capMu. The callback must never wait for an I/O holding a backend read lock.
 func (l *chunkLayerImpl) PrecopyDetach(ctx context.Context, stopIO func() bool) (ChunkCutResult, error) {
+	return l.precopyDetach(ctx, nil, stopIO)
+}
+
+// prepare closes frontend admission and drains before the store barrier. Its
+// release reopens only that tentative admission; it must not undo a host fence.
+func (l *chunkLayerImpl) PrecopyDetachWithAdmission(ctx context.Context, prepare func(context.Context) (func(), error), stopIO func() bool) (ChunkCutResult, error) {
+	return l.precopyDetach(ctx, prepare, stopIO)
+}
+
+func (l *chunkLayerImpl) precopyDetach(ctx context.Context, prepare func(context.Context) (func(), error), stopIO func() bool) (ChunkCutResult, error) {
 	if stopIO == nil {
 		return ChunkCutResult{}, fmt.Errorf("%w: missing I/O stop", ErrPrecopyUnknown)
 	}
@@ -83,6 +96,20 @@ func (l *chunkLayerImpl) PrecopyDetach(ctx context.Context, stopIO func() bool) 
 	var frozenAt time.Time
 	var casAtFreeze uint64
 	var pauseTotal, longestPause time.Duration
+	var drain time.Duration
+	var drainErr error
+	if prepare != nil {
+		l.precopyPrepare = func(ctx context.Context) (func(), error) {
+			dc, cancel := context.WithTimeout(ctx, precopyDrainBound)
+			defer cancel()
+			start := time.Now()
+			release, err := prepare(dc)
+			drain = time.Since(start)
+			drainErr = err
+			return release, err
+		}
+	}
+
 	l.precopyPause = func(pause time.Duration) {
 		pauseTotal += pause
 		if pause > longestPause {
@@ -91,6 +118,15 @@ func (l *chunkLayerImpl) PrecopyDetach(ctx context.Context, stopIO func() bool) 
 	}
 	l.precopyFreeze = func(tail uint64, barrierStart time.Time) bool {
 		report = l.precopyEstimate(tail, report.Attempts)
+		report.Drain = drain
+		report.DrainTimedOut = errors.Is(drainErr, context.DeadlineExceeded)
+		if drainErr != nil {
+			report.Reason = "drain_refused"
+			if report.DrainTimedOut {
+				report.Reason = "drain_timeout"
+			}
+			return false
+		}
 		spent := time.Since(barrierStart)
 		if spent > report.Fixed {
 			report.Estimate += spent - report.Fixed
@@ -110,7 +146,7 @@ func (l *chunkLayerImpl) PrecopyDetach(ctx context.Context, stopIO func() bool) 
 		frozenAt, casAtFreeze = barrierStart, countCAS()
 		return true
 	}
-	defer func() { l.precopyFreeze = nil; l.precopyPause = nil }()
+	defer func() { l.precopyFreeze = nil; l.precopyPause = nil; l.precopyPrepare = nil }()
 	for attempt := 1; attempt <= precopyAttempts; attempt++ {
 		report.Attempts = attempt
 		if err := ctx.Err(); err != nil {
