@@ -191,6 +191,19 @@ func TestNativeReplacementAllBlocksAfterCheckpoint(t *testing.T) {
 	}
 }
 
+func TestNativeReplacementChunkAttachmentBypassesSyncDedup(t *testing.T) {
+	s, _, _, _ := precopyLayer(t, 1, 0)
+	before := s.WALSyncCount()
+	for i := 0; i < 2; i++ {
+		if _, err := s.Sync(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := s.WALSyncCount() - before; n != 2 {
+		t.Fatalf("chunk-attached physical syncs=%d", n)
+	}
+}
+
 func TestNativeReplacementRecoverPersistsBoundsBeforeReuse(t *testing.T) {
 	s, path := newMappedCheckpointStoreV3(t)
 	if _, err := s.Write(0, blk(0x30)); err != nil {
@@ -890,6 +903,11 @@ func TestNativeReplacementDirectExtentRefusedPreservesWAL(t *testing.T) {
 	}
 	if _, err := s.Sync(); err != nil {
 		t.Fatal(err)
+	}
+	d := s.v3.pub.current()
+	s.AdvanceFrontier(100) // retired direct-frontier API cannot bypass BASE
+	if n, err := s.Sync(); err != nil || n != 1 || s.v3.pub.current() != d {
+		t.Fatalf("legacy frontier changed native durability: %d %v", n, err)
 	}
 	before, err := os.ReadFile(path)
 	if err != nil {
