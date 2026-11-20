@@ -68,13 +68,18 @@ func TestNativeReplacementSyncCallerReturnOrdering(t *testing.T) {
 				return err
 			}
 			type result struct {
-				frontier uint64
-				err      error
+				frontier  uint64
+				completed int32
+				err       error
 			}
 			leader, followers := make(chan result, 1), make(chan result, 1)
 			start := func(out chan<- result) {
 				workers.Add(1)
-				go func() { defer workers.Done(); n, err := s.Sync(); out <- result{n, err} }()
+				go func() {
+					defer workers.Done()
+					n, err := s.Sync()
+					out <- result{frontier: n, completed: completed.Load(), err: err}
+				}()
 			}
 			await := func(ch <-chan struct{}, label string) {
 				t.Helper()
@@ -133,26 +138,17 @@ func TestNativeReplacementSyncCallerReturnOrdering(t *testing.T) {
 			} else {
 				closeOnce(publishFirst)
 			}
-			first := receive(leader)
-			// Sync returns the current global stable frontier, not its own cut.
-			// A later return may include a newer independently completed fsync.
-			wantFirst := uint64(1)
-			if laterPublishesFirst {
-				wantFirst = 2
-			}
-			if first.frontier != wantFirst {
-				t.Fatalf("first batch frontier=%d want %d (completed physical syncs=%d laterPublishesFirst=%v)", first.frontier, wantFirst, completed.Load(), laterPublishesFirst)
-			}
+			// Strict v3 may wait for the shared-file sync before publishing
+			// its descriptor. It need not return before the second caller.
 			if !laterPublishesFirst {
-				if completed.Load() != 1 {
-					t.Fatal("held second fsync unexpectedly completed")
-				}
 				closeOnce(releaseSecond)
-				for i := 0; i < 1; i++ {
-					if r := receive(followers); r.frontier != 2 {
-						t.Fatal("follower frontier", r)
-					}
+				if r := receive(followers); r.frontier != 2 || r.completed < 2 {
+					t.Fatal("follower frontier without completed physical sync", r)
 				}
+			}
+			first := receive(leader)
+			if first.frontier < 1 || first.frontier > uint64(first.completed) {
+				t.Fatalf("first frontier exceeds completed physical syncs: %+v", first)
 			}
 			if completed.Load() != 2 || s.WALSyncCount() != 2 {
 				t.Fatalf("physical counts completed=%d attempts=%d", completed.Load(), s.WALSyncCount())
