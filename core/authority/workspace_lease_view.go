@@ -335,8 +335,8 @@ func (p *Publisher) extendWorkspaceLease(volume, holder string, epoch uint64, tr
 	s.Lease.ExpiresAtNS = h
 	write, wrote, err := p.persistWorkspaceTimedLocked(volume, s)
 	if wrote {
-		// The store write alone, failed or not: the earliest sign of a
-		// lagging authority journal, before any headroom is lost.
+		// The store write alone, failed or not, recorded when it returns
+		// (completed-write telemetry; a blocked write is not seen until then).
 		p.leaseMu.Lock()
 		p.leaseStats.recordExtensionWrite(p.workspaceNow(), write)
 		p.leaseMu.Unlock()

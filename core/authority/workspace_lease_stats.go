@@ -12,8 +12,10 @@ import (
 // 1 TTL, so a lagging authority store shows first as an extension in flight
 // with headroom under 1.125 TTL, and only later as clamps.
 //
-// The earliest signal is the extension store write latency
-// (LeaseStats.ExtensionWrite*), measured at every extension write. The alarm
+// The extension store write latency (LeaseStats.ExtensionWrite*) is
+// completed-write telemetry: a write is sampled when its Put returns, so a
+// write that is still blocked shows up only after it returns, possibly after
+// headroom is already lost; it is not an early warning by itself. The alarm
 // is sampled at renewals, never by a timer: it fires at the latest
 // together with the first clamped grant of a streak (logged before the clamp
 // line), and earlier only if a renewal lands in the 1-1.125 TTL band while an
@@ -36,8 +38,8 @@ type LeaseStats struct {
 	MinHeadroomObserved bool
 	// ExtensionWriteLast is the duration of the latest lease extension's
 	// durable store write (the write alone, failed or not); valid only when
-	// ExtensionWriteObserved. Write latency is the early signal: it rises
-	// before any headroom is lost, while the alarm and clamps come later.
+	// ExtensionWriteObserved. Completed-write telemetry: recorded when the
+	// Put returns, so a write still blocked is not visible here yet.
 	ExtensionWriteLast     time.Duration
 	ExtensionWriteObserved bool
 	// ExtensionWriteMaxLastMinute is the slowest extension write in the last
