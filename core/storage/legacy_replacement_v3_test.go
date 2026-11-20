@@ -277,3 +277,75 @@ func TestNativeReplacementCallerPublicationFaults(t *testing.T) {
 		}
 	}
 }
+
+func TestNativeReplacementRefusedBatchPreservesWrapBytes(t *testing.T) {
+	f, p, w := newWALIOTestV3(t, 0, 0)
+	d := p.current()
+	for i := uint64(1); i <= 3; i++ {
+		if _, err := w.append(walEntryV3{LSN: i, Type: walEntryWrite, LBA: i, Length: d.BlockSize, Data: blk(byte(i))}, i-1, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	head := w.logicalHeadV3()
+	payload := append(blk(0x41), blk(0x42)...)
+	if d.WALSize-head%d.WALSize >= uint64(walEntryHeaderSizeV3+len(payload)) {
+		t.Fatal("setup does not force wrap padding")
+	}
+	before, err := os.ReadFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	real := w.writeAt
+	w.writeAt = func(b []byte, off int64) (int, error) { calls++; return real(b, off) }
+	_, err = w.append(walEntryV3{LSN: 4, Type: walEntryWriteBatch, LBA: 10, BatchCount: 2, Length: uint32(len(payload)), Data: payload}, 3, nil)
+	if !errors.Is(err, errWALFull) {
+		t.Fatalf("pinned batch append: %v", err)
+	}
+	after, e := os.ReadFile(f.Name())
+	if e != nil {
+		t.Fatal(e)
+	}
+	if calls != 0 || w.logicalHeadV3() != head || w.highestLSN != 3 || !bytes.Equal(before, after) {
+		t.Fatalf("refusal altered physical head/LSN/wrap bytes: calls=%d head=%d", calls, w.logicalHeadV3())
+	}
+}
+
+func TestNativeReplacementRecoveredBatchFrontier(t *testing.T) {
+	s, path := newMappedCheckpointStoreV3(t)
+	if _, err := s.WriteBatch(10, batchBlocks(0x40, 4)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	crashReadOnlyStoreV3(t, s)
+	restored, err := openWALStoreV3ForTest(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored.DisableAutoFlushForRecoveryTest()
+	t.Cleanup(func() { _ = restored.Close() })
+	if _, err = restored.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	if restored.NextLSN() != 5 {
+		t.Fatalf("recovered next LSN=%d", restored.NextLSN())
+	}
+	if lsn, e := restored.Write(20, blk(0x65)); e != nil || lsn != 5 {
+		t.Fatalf("append after recovered batch: %d %v", lsn, e)
+	}
+	if _, err = restored.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	for i := uint32(0); i < 4; i++ {
+		got, e := restored.Read(10 + i)
+		if e != nil || !bytes.Equal(got, blk(0x40+byte(i))) {
+			t.Fatalf("batch block%d changed: %v", i, e)
+		}
+	}
+	got, err := restored.Read(20)
+	if err != nil || !bytes.Equal(got, blk(0x65)) {
+		t.Fatalf("post-recovery append bytes: %v", err)
+	}
+}
