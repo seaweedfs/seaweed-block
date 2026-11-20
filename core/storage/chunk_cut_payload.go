@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync"
 )
 
 // DefaultCutPayloadMemoryBudget bounds engine-owned payload buffers, including
@@ -36,79 +37,49 @@ func hotChunkKeys(indices map[uint64]bool, recent map[uint64]uint64) []uint64 {
 	return keys
 }
 
-// Preallocate immutable keys and durably root the candidate set once per round.
-// Each wave owns at most one image per uploader; unused intent keys are harmless.
-// Classify that bounded set, then upload and discard its buffers.
-// Later waves remain protected by COW; no whole-round payload is retained.
+// Preallocate metadata keys once per round. Each worker owns one immutable
+// image through PUT/retry, then reads its next candidate independently of slow
+// workers. One durable intent covers all candidate keys before the first PUT;
+// unused keys are harmless and retain no payload memory.
 func (l *chunkLayerImpl) streamCutPayloads(ctx context.Context, batch []uint64, head chunkHead, read func(context.Context, uint64) (capturedChunk, error)) ([]capturedChunk, []string, error) {
-	workers, _, _ := l.cutPayloadWorkers()
-	out := make([]capturedChunk, 0, len(batch))
-	var intents []string
+	out := make([]capturedChunk, len(batch))
 	keys := make([]string, len(batch))
 	for i, idx := range batch {
 		keys[i] = l.newKey(idx)
 	}
-	intent := ""
-	ensureIntent := func() error {
-		if intent != "" {
-			return nil
-		}
-		id, err := l.remote.PutIntent(ctx, chunkIntent{Gen: head.Gen, Epoch: l.cfg.Epoch, Holder: l.cfg.Holder, Keys: keys})
+	var intents []string
+	var once sync.Once
+	var intent string
+	var intentErr error
+	err := l.uploadBatch(ctx, len(batch), func(ctx context.Context, i int) error {
+		c, err := read(ctx, batch[i])
 		if err != nil {
-			return fmt.Errorf("storage: capture intent: %w: %w", errChunkRemoteUnavailable, err)
+			return err
 		}
-		intent = id
-		intents = append(intents, id)
-		return nil
-	}
-	for start := 0; start < len(batch); start += workers {
-		order := batch[start:min(len(batch), start+workers)]
-		wave := make([]capturedChunk, len(order))
-		err := l.uploadBatch(ctx, len(order), func(ctx context.Context, i int) error {
-			c, err := read(ctx, order[i])
-			if err != nil {
-				return err
-			}
-			ref, had := head.Chunks[c.idx]
-			if !c.zero && !(had && ref.SHA256 == c.sum) {
-				c.key = keys[start+i]
-				c.size = len(c.data)
-			}
-			wave[i] = c
-			return nil
-		})
-		if err != nil {
-			return nil, intents, err
-		}
-		var changed []int
-		for i, c := range wave {
-			if c.key != "" {
-				changed = append(changed, i)
-			}
-		}
-		if len(changed) > 0 {
-			if err := ensureIntent(); err != nil {
-				return nil, intents, err
-			}
-			for _, i := range changed {
-				wave[i].intent = intent
-			}
-			if err = l.uploadBatch(ctx, len(changed), func(ctx context.Context, i int) error {
-				c := wave[changed[i]]
-				if err := l.putCaptured(ctx, c.key, c.data); err != nil {
-					return err
+		ref, had := head.Chunks[c.idx]
+		if !c.zero && !(had && ref.SHA256 == c.sum) {
+			c.key, c.size = keys[i], len(c.data)
+			once.Do(func() {
+				intent, intentErr = l.remote.PutIntent(ctx, chunkIntent{Gen: head.Gen, Epoch: l.cfg.Epoch, Holder: l.cfg.Holder, Keys: keys})
+				if intentErr == nil {
+					intents = append(intents, intent)
 				}
-				l.rememberPayload(c, head.Gen)
-				return nil
-			}); err != nil {
-				return nil, intents, fmt.Errorf("storage: capture upload: %w", errors.Join(errChunkRemoteUnavailable, errCutUpload, err))
+			})
+			if intentErr != nil {
+				return fmt.Errorf("storage: capture intent: %w: %w", errChunkRemoteUnavailable, intentErr)
+			}
+			c.intent = intent
+			if err := l.putCaptured(ctx, c.key, c.data); err != nil {
+				return fmt.Errorf("storage: capture upload: %w", errors.Join(errChunkRemoteUnavailable, errCutUpload, err))
 			}
 		}
-		for i := range wave {
-			l.rememberPayload(wave[i], head.Gen)
-			wave[i].data = nil
-			out = append(out, wave[i])
-		}
+		l.rememberPayload(c, head.Gen)
+		c.data = nil
+		out[i] = c
+		return nil
+	})
+	if err != nil {
+		return nil, intents, err
 	}
 	return out, intents, nil
 }
