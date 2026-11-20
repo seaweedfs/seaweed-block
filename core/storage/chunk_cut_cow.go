@@ -417,12 +417,7 @@ func (l *chunkLayerImpl) readCOWChunk(w *cutCOWWindow, idx uint64) ([]byte, []ui
 // write of the block waits for the caller's COW entry.
 func (l *chunkLayerImpl) readLocalBlock(lba uint64, w *cutCOWWindow, dst []byte) ([]byte, bool, error) {
 	s := l.s
-	if s.v3 != nil {
-		if data, handled, err := s.readDirtyV3Into(uint32(lba), dst, func() { w.walReads.Add(1) }); handled {
-			return data, err == nil, err
-		}
-	} else if walRelOff, dataOffset, _, _, ok := s.dm.get(lba); ok {
-		data, err := s.readFromWAL(walRelOff, dataOffset)
+	if data, handled, err := s.readDirtyV3Into(uint32(lba), dst, func() { w.walReads.Add(1) }); handled {
 		return data, err == nil, err
 	}
 	idx := l.chunkOf(lba)

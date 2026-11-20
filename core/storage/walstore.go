@@ -203,10 +203,10 @@ func OpenWALStoreWithOptions(path string, opts WALStoreOptions) (*WALStore, erro
 	return openWALStoreV3WithOptions(path, true, opts)
 }
 
-// openInitializedInternal is openInitializedWithMetadata with an optional
+// openInitializedV3 is openInitializedWithMetadata with an optional
 // init hook that runs before the committer and flusher goroutines start
 // (the v3 store attaches its state there).
-func openInitializedInternal(path string, f *os.File, sb *superblock, metadata BlockMetadata, init func(*WALStore) error) (*WALStore, error) {
+func openInitializedV3(path string, f *os.File, sb *superblock, metadata BlockMetadata, init func(*WALStore) error) (*WALStore, error) {
 	dm := newDirtyMap(64) // 64 shards is plenty for Phase 07 demo workloads
 
 	s := &WALStore{
@@ -233,10 +233,8 @@ func openInitializedInternal(path string, f *os.File, sb *superblock, metadata B
 		return f.Sync()
 	}
 	s.syncExtentFile = f.Sync
-	if init != nil {
-		if err := init(s); err != nil {
-			return nil, err
-		}
+	if err := init(s); err != nil {
+		return nil, err
 	}
 	committer := NewGroupCommitter(GroupCommitterConfig{
 		SyncFunc: s.syncWALBatch,
@@ -262,7 +260,6 @@ func openInitializedInternal(path string, f *os.File, sb *superblock, metadata B
 	// (WALSoftWatermark, WALHardWatermark). Admission wakes the
 	// flusher via NotifyUrgent — same seam V2 wires for pressure-
 	// driven flushes.
-	s.admissionTimeout = 30 * time.Second
 
 	// WAL pressure gets a budget below the host's I/O timeout. This bounds
 	// cooperative admission waits, not a blocking callback or physical I/O.
@@ -289,8 +286,7 @@ func openInitializedInternal(path string, f *os.File, sb *superblock, metadata B
 	return s, nil
 }
 
-// walUsedFraction samples the active format's writer. The legacy writer is
-// still present on a v3 store but receives no appends, so its occupancy is zero.
+// walUsedFraction samples the native writer and both-slot reuse floor.
 // Store admission is held only for this snapshot, never across a pressure wait.
 func (s *WALStore) walUsedFraction() float64 {
 	s.mu.RLock()
@@ -668,7 +664,9 @@ func (s *WALStore) ReadContext(ctx context.Context, lba uint32) (data []byte, er
 }
 
 // SetMultiBlockRecords is retained for callers; native batching is always enabled.
-func (s *WALStore) SetMultiBlockRecords(enabled bool) {}
+func (s *WALStore) SetMultiBlockRecords(enabled bool) {
+
+}
 
 func (s *WALStore) enableMultiBlockRecordsForTest(enabled bool) {
 	s.SetMultiBlockRecords(enabled)
@@ -771,7 +769,7 @@ func (s *WALStore) Sync() (uint64, error) {
 		s.mu.RUnlock()
 		return 0, ErrBaseInstalling
 	}
-	targetGen = s.v3.recoverGen.Load()
+	targetGen = s.v3.recoverGen.Load() // captured with targetHead (Recover holds s.mu)
 
 	s.mu.RUnlock()
 
@@ -883,7 +881,11 @@ func (s *WALStore) RecoveryRetentionLSNs() uint64 {
 }
 
 // AdvanceFrontier is a compatibility no-op; BASE uses its install handle.
-func (s *WALStore) AdvanceFrontier(lsn uint64) {}
+func (s *WALStore) AdvanceFrontier(lsn uint64) {
+
+	return // v3 frontier jumps happen only inside MarkBaseComplete (rows 9 to 11)
+
+}
 
 // AdvanceWALTail moves the retained-window tail forward. After this,
 // recovery cases where the requested LSN is below newTail must
@@ -903,7 +905,9 @@ func (s *WALStore) AdvanceWALTail(newTail uint64) {
 
 // WriteExtentDirect refuses unguarded BASE writes; use an install handle.
 func (s *WALStore) WriteExtentDirect(lba uint32, data []byte) error {
-	return errV3NotYet
+
+	return errV3NotYet // v3 BASE writes go through an install handle (rows 9 to 11)
+
 }
 
 // ApplyEntry writes a replicated block with the source's LSN rather

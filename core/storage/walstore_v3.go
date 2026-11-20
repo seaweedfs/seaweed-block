@@ -401,7 +401,7 @@ func openWALStoreV3File(path string, f *os.File, requireMap bool, opts WALStoreO
 			return nil, err
 		}
 	}
-	s, err := openInitializedInternal(path, f, &sb, metadata, func(s *WALStore) error {
+	s, err := openInitializedV3(path, f, &sb, metadata, func(s *WALStore) error {
 		v := &walStoreV3State{}
 		v.pub = newDescriptorPublisherV3(d, id, other, descriptorIOV3{
 			writeSlot: func(off int64, buf []byte) error {

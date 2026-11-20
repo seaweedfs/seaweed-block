@@ -39,13 +39,6 @@ func (l *chunkLayerImpl) holdBaseTransitionV3() (func(), error) {
 		d := l.s.v3.pub.current()
 		l.noteAllMutated()
 		l.stMu.Lock()
-		l.reconcileGen++
-		if l.reconciled != nil {
-			close(l.reconciled)
-			l.reconciled = nil
-		}
-		l.reconcile = map[uint64]bool{}
-		l.hashMode = false
 		l.allDirty = true
 		l.dirtyVer++
 		switch d.BaseState {

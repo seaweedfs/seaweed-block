@@ -95,6 +95,5 @@ func (s *WALStore) seedChunkFrontierV3Locked(lsn uint64, t *seedTimes) (err erro
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.checkpointLSN, s.syncedLSN, s.walHead, s.nextLSN = lsn, lsn, lsn, lsn+1
-	s.pendingDirectFrontierLSN = 0
 	return nil
 }

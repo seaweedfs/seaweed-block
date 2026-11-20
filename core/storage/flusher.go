@@ -186,7 +186,7 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 	store.mu.RUnlock()
 	if len(entries) == 0 {
 
-		return store.refreshW()
+		return store.refreshW() // the mode-C idle refresh (DESIGN 6.2)
 
 	}
 	if f.afterSnapshotForTest != nil {
@@ -308,7 +308,7 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 
 	f.flushes.Add(1)
 
-	return store.refreshW()
+	return store.refreshW() // the mode-C idle refresh (DESIGN 6.2)
 
 }
 

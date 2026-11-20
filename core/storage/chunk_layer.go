@@ -71,7 +71,8 @@ type chunkLayerImpl struct {
 	cowTransitions int
 	cowClosed      bool
 
-	capMu  sync.Mutex // serializes Capture, Evict, Begin/EndBaseInstall
+	capMu sync.Mutex // serializes Capture, Evict, Begin/EndBaseInstall
+
 	presMu sync.Mutex // serializes a whole presence save: snapshot, fsync, replace, version
 
 	hydration        map[uint64]*chunkHydrationFlight // under stMu
@@ -109,7 +110,8 @@ type chunkLayerImpl struct {
 	dirty     map[uint64]bool   // chunks dirtied since the cut in progress or the last HEAD
 	inflight  map[uint64]bool   // chunks captured by a cut whose HEAD is not yet installed
 	allDirty  bool              // a BASE block landed: every chunk is dirty
-	cutLSN    uint64            // H of the latest cut taken (in flight or installed)
+
+	cutLSN uint64 // H of the latest cut taken (in flight or installed)
 	// chunkMut counts the mutations of each chunk: every dirty-map insert
 	// (any LSN, a replica apply's lower LSN included) and every BASE
 	// block. Flushing moves bytes without changing them and never counts.
@@ -147,7 +149,7 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 		return nil, fmt.Errorf("%w: chunk layer requires the native owned map", ErrMapInvalid)
 	}
 	if remote == nil || cfg.ChunkBlocks == 0 {
-		return nil, errors.New("storage: chunk layer needs a remote and ChunkBlocks > 0")
+		return nil, errors.New("storage: chunk layer needs a remote, ChunkBlocks > 0 and a legacy bitmap unless the store owns an impl3 map")
 	}
 	var localBase bool
 	s.captureMu.Lock()
@@ -261,7 +263,6 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 		// preserve ALL chunks as candidates for the first hash-comparing cut.
 		// Persist that obligation before publishing hooks/readiness.
 		l.hdr = chunkBitmapHeader{BaseLSN: head.RemoteLSN, HeadGen: head.Gen, Epoch: cfg.Epoch}
-		var initialDirty []uint64
 		l.dirty = map[uint64]bool{}
 
 		for idx := range head.Chunks {
@@ -524,7 +525,6 @@ func (l *chunkLayerImpl) BeginBaseInstall() error {
 	defer l.capMu.Unlock()
 	return fmt.Errorf("%w: BASE state must be published by the descriptor install protocol", errV3NotYet)
 }
-
 func (l *chunkLayerImpl) EndBaseInstall(frontier uint64) error {
 	l.capMu.Lock()
 	defer l.capMu.Unlock()
@@ -938,7 +938,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		}
 	}
 	st.UploadNs += time.Since(uploadStart).Nanoseconds()
-	if !detach && len(changed) == 0 && h == baseHead.RemoteLSN && baseHead.Gen != 0 && !chunkHeadIsDetached(baseHead) {
+	if !upgrade && !detach && len(changed) == 0 && h == baseHead.RemoteLSN && baseHead.Gen != 0 && !chunkHeadIsDetached(baseHead) {
 		// A no-op cut still observes authority: a fresh host may have
 		// claimed HEAD without uploading a single chunk since our last cut.
 		cur, err := l.remote.GetHead(ctx)
@@ -1404,7 +1404,6 @@ func (l *chunkLayerImpl) dropIntents(ctx context.Context, ids []string) {
 // Legacy fixtures retain their bounded-count rounds.
 func (l *chunkLayerImpl) stage(ctx context.Context, st *chunkCutStats) (map[uint64]stagedChunk, []string, error) {
 	bound := l.cfg.BarrierBound
-	native := true
 
 	// Leave at most half the side budget exposed at the barrier. Streaming
 	// staging uses no local payload file, even for a much larger image.
@@ -1522,6 +1521,7 @@ func (l *chunkLayerImpl) finishCut(head chunkHead, h uint64, changed []uint64, n
 	l.hdr = chunkBitmapHeader{BaseLSN: h, HeadGen: head.Gen, Epoch: head.Epoch, Base: chunkBaseNone}
 	l.dirtyVer++
 }
+
 func (l *chunkLayerImpl) newKey(idx uint64) string {
 	l.stMu.Lock()
 	l.keySeq++
