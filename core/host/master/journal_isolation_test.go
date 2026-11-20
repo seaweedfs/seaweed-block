@@ -235,7 +235,7 @@ func TestStrictProductLoopSkipsColocatedNodeForNewPlacement(t *testing.T) {
 		t.Run(map[bool]string{true: "strict", false: "default"}[strict], func(t *testing.T) {
 			r := newIsolationRig(t, strict, t.TempDir(), t.TempDir())
 			if _, err := r.m.Lifecycle().Nodes.RegisterNode(lifecycle.NodeRegistration{ServerID: "node-c", DataAddr: "127.0.0.1:19501", CtrlAddr: "127.0.0.1:19502",
-				Pools: []lifecycle.StoragePool{{PoolID: "p1", TotalBytes: 1 << 30, FreeBytes: 1 << 30}}}); err != nil {
+				Pools: []lifecycle.StoragePool{{PoolID: "p1", TotalBytes: 1 << 30, FreeBytes: 1 << 30, BlockSize: 4096}}}); err != nil {
 				t.Fatal(err)
 			}
 			_ = r.heartbeat("node-c", masterStore)
