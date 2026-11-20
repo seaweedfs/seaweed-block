@@ -293,3 +293,20 @@ func TestChunkStageV3_ChangedImageExceedsSpillCap(t *testing.T) {
 		t.Fatalf("unexpected staging files: %v %v", files, err)
 	}
 }
+
+func TestCutCOWV3_RecentChunkUploadsFirst(t *testing.T) {
+	s, l, _, gate := cowFixture(t)
+	gate.unblock()
+	if _, err := s.Write(9, makeBlock(ctBlockSize, 9)); err != nil {
+		t.Fatal(err)
+	}
+	first := make(chan uint64, 1)
+	var once sync.Once
+	l.testCOWRead = func(idx uint64, _ bool) { once.Do(func() { first <- idx }) }
+	if _, err := l.Cut(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if idx := <-first; idx != 2 {
+		t.Fatalf("first chunk=%d, want recently written chunk 2", idx)
+	}
+}
