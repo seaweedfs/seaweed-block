@@ -116,10 +116,10 @@ stateDiagram-v2
 
 The apply gate retains versions only above its certified contiguous prefix P.
 Completed recovery plus post-close healthy publication sends an explicit full-lineage
-certificate; current listener admission and the durable boundary guard it. Sync R,
+certificate; current listener admission and the durable boundary guard it. A catch-up certificate also requires a covered starting image (local R at its lane marker no greater than P); a completed full BASE supplies its own image. A missing certificate retains history. Sync R,
 ordinary live traffic and session changes do not advance P. This implementation
 prunes at successful recovery certification only; healthy-run growth remains an
-RF2 qualification limitation until ordered-live certification is wired.
+RF2 qualification limitation until ordered-live certification is wired (#297). Session coverage teardown is separate.
 
 **Host role and listener admission.**
 
