@@ -575,6 +575,11 @@ func (a *VolumeReplicaAdapter) executeCommand(q queuedCommand) {
 		a.executor.InvalidateSession(c.ReplicaID, c.SessionID, c.Reason)
 
 	case engine.PublishHealthy:
+		if c.CertifiedPrefix != 0 {
+			if publisher, ok := a.executor.(RecoveryPrefixPublisher); ok {
+				publisher.PublishRecoveryPrefix(c.ReplicaID, c.RecoverySessionID, c.Epoch, c.EndpointVersion, c.CertifiedPrefix)
+			}
+		}
 		a.executor.PublishHealthy(c.ReplicaID)
 
 	case engine.PublishDegraded:

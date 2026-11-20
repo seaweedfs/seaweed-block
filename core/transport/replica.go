@@ -38,6 +38,12 @@ const (
 // Returning a non-nil error → caller (handler) logs + closes conn.
 // Per INV-REPL-LIVE-LANE-STALE-FAILS-LOUD: live-lane stale entries
 // surface here as errors.
+// RecoveryPrefixHook accepts explicit completed-prefix certificates. It does
+// not derive source coverage from Sync. Admission is checked at the effect.
+type RecoveryPrefixHook interface {
+	CertifyRecoveryPrefix(lineage RecoveryLineage) error
+}
+
 type ApplyHook interface {
 	// ApplyRecovery routes the entry through the recovery-lane apply
 	// path. Stale entries (LSN <= per-LBA applied) skip data + advance
@@ -512,6 +518,12 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 				replyType, reply = MsgBarrierResp, resp
 				return true
 
+			case MsgCertifiedPrefix:
+				lineage, err := DecodeLineage(payload)
+				if err != nil || r.certifyRecoveryPrefix(lineage) != nil {
+					return true
+				}
+
 			case MsgBarrierReq:
 				lineage, err := DecodeLineage(payload)
 				if err != nil {
@@ -660,7 +672,7 @@ const defaultFenceDrainTimeout = 10 * time.Second
 // isMutationMsg names the frames that pass acceptMutationLineage.
 func isMutationMsg(msgType byte) bool {
 	switch msgType {
-	case MsgRecoveryLaneStart, MsgShipEntry, MsgRebuildBlock, MsgRebuildDone, MsgBarrierReq:
+	case MsgRecoveryLaneStart, MsgShipEntry, MsgRebuildBlock, MsgRebuildDone, MsgBarrierReq, MsgCertifiedPrefix:
 		return true
 	}
 	return false
@@ -781,4 +793,21 @@ func compareLineage(a, b RecoveryLineage) int {
 	default:
 		return 0
 	}
+}
+
+// A certificate cannot introduce an unseen session or survive a later one.
+// Lock order: listener.mu -> gate.mu -> store boundary read. There is no wire
+// or physical I/O here; fencing/session admission cannot cross the effect.
+func (r *ReplicaListener) certifyRecoveryPrefix(lineage RecoveryLineage) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.primary || (r.requireRole && !r.assigned) || lineage.Epoch < r.epochFloor ||
+		lineage.SessionID == 0 || lineage.EffectiveFrontierHint() == 0 || !r.activeLineage.Equivalent(lineage) {
+		return fmt.Errorf("replica: uncertified/stale recovery lineage")
+	}
+	hook, ok := r.applyHook.(RecoveryPrefixHook)
+	if !ok {
+		return fmt.Errorf("replica: no recovery prefix hook")
+	}
+	return hook.CertifyRecoveryPrefix(lineage)
 }

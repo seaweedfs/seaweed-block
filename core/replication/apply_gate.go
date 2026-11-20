@@ -68,6 +68,7 @@ type ReplicaApplyGate struct {
 	mu         sync.Mutex
 	sessions   map[uint64]*applyGateSession // keyed by lineage.SessionID
 	appliedLSN map[uint32]uint64            // replica-wide, shared by every lane and session
+	floorLSN   uint64                       // certified contiguous prefix; never inferred from synced maximum R
 }
 
 // applyGateSession is the per-recovery-session state. Per round-44
@@ -165,7 +166,7 @@ func (g *ReplicaApplyGate) applyRecovery(sess *applyGateSession, lba uint32, dat
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	if existing, ok := g.appliedLSN[lba]; ok && lsn <= existing {
+	if existing := max(g.appliedLSN[lba], g.floorLSN); lsn <= existing {
 		// Stale: skip data write but ADVANCE recoveryCovered.
 		sess.recoveryCovered[lba] = true
 		return nil
@@ -190,7 +191,7 @@ func (g *ReplicaApplyGate) applyLive(sess *applyGateSession, lba uint32, data []
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	if existing, ok := g.appliedLSN[lba]; ok && lsn <= existing {
+	if existing := max(g.appliedLSN[lba], g.floorLSN); lsn <= existing {
 		// Stale: fail-loud. Caller logs + drops conn.
 		return fmt.Errorf("apply gate: live-lane stale entry lba=%d lsn=%d <= applied=%d (INV-REPL-LIVE-LANE-STALE-FAILS-LOUD)",
 			lba, lsn, existing)
@@ -224,7 +225,9 @@ func (g *ReplicaApplyGate) initSessionLocked(sessionID uint64) *applyGateSession
 		return sess
 	}
 	for lba, lsn := range seed {
-		g.appliedLSN[lba] = max(g.appliedLSN[lba], lsn)
+		if lsn > g.floorLSN {
+			g.appliedLSN[lba] = max(g.appliedLSN[lba], lsn)
+		}
 	}
 	return sess
 }
@@ -287,4 +290,39 @@ func (g *ReplicaApplyGate) SessionAppliedLSN(sessionID uint64, lba uint32) (uint
 	}
 	lsn, present := g.appliedLSN[lba]
 	return lsn, present
+}
+
+// CertifyRecoveryPrefix accepts an explicit source-coverage certificate emitted
+// only after a successful recovery close is published healthy. Sync/Boundaries
+// alone cannot certify coverage: a high live LSN can be durable across a hole.
+// The transport owns lineage admission. A missing/refused certificate retains
+// history conservatively; ordinary live traffic does not advance this floor.
+func (g *ReplicaApplyGate) CertifyRecoveryPrefix(lineage transport.RecoveryLineage) error {
+	prefix := lineage.EffectiveFrontierHint()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	r, _, _ := g.store.Boundaries()
+	if prefix == 0 || prefix > r {
+		return fmt.Errorf("apply gate: certified prefix %d exceeds durable boundary %d or is zero", prefix, r)
+	}
+	if prefix <= g.floorLSN {
+		return nil
+	}
+	// Rebuild rather than only deleting: release the old map's bucket capacity.
+	retained := make(map[uint32]uint64)
+	for lba, lsn := range g.appliedLSN {
+		if lsn > prefix {
+			retained[lba] = lsn
+		}
+	}
+	g.appliedLSN = retained
+	g.floorLSN = prefix
+	return nil
+}
+
+// CertifiedPrefix reports the source-certified coverage frontier, not R.
+func (g *ReplicaApplyGate) CertifiedPrefix() uint64 {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.floorLSN
 }

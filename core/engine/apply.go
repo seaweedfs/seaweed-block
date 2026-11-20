@@ -524,7 +524,19 @@ func decide(st *ReplicaState, r *ApplyResult, trace func(string, string)) {
 			} else if recoveredReplicaWaitingForPostCloseAck(st) {
 				trace("publish_healthy_held", "waiting for post-close durable ack")
 			} else {
-				r.Commands = append(r.Commands, PublishHealthy{ReplicaID: st.Identity.ReplicaID})
+				healthy := PublishHealthy{ReplicaID: st.Identity.ReplicaID}
+				target := st.Session.FrontierHint
+				if target == 0 {
+					target = st.Session.TargetLSN
+				}
+				if st.Recovery.RecoveryWindowClosed && st.Recovery.PostCloseDurableAckKnown &&
+					st.Session.Phase == PhaseCompleted && target > 0 && st.Session.AchievedLSN >= target {
+					healthy.RecoverySessionID = st.Session.SessionID
+					healthy.Epoch = st.Identity.Epoch
+					healthy.EndpointVersion = st.Identity.EndpointVersion
+					healthy.CertifiedPrefix = target
+				}
+				r.Commands = append(r.Commands, healthy)
 			}
 		}
 

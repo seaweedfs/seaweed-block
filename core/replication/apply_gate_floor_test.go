@@ -26,9 +26,9 @@ func TestApplyGate_SyncedLiveMaximumDoesNotCoverRecoveryHole(t *testing.T) {
 	}
 }
 
-// Each batch completes durability and closes coverage; retained version history
-// should scale with the outstanding suffix, rather than all LBAs ever written.
-func TestApplyGate_DurableFloorBoundsVersionHistory(t *testing.T) {
+// Each batch has a successful recovery close and an explicit prefix certificate.
+// Durability alone is insufficient; ordinary healthy traffic remains unbounded.
+func TestApplyGate_CertifiedRecoveryClosesBoundVersionHistory(t *testing.T) {
 	const batch = 32
 	store := storage.NewBlockStore(1025, 1)
 	gate := NewReplicaApplyGate(store)
@@ -43,6 +43,9 @@ func TestApplyGate_DurableFloorBoundsVersionHistory(t *testing.T) {
 			}
 		}
 		if _, err := store.Sync(); err != nil {
+			t.Fatal(err)
+		}
+		if err := gate.CertifyRecoveryPrefix(recoveryLineage(session, lsn)); err != nil {
 			t.Fatal(err)
 		}
 		// A subsequent apply provides a lazy-pruning opportunity.
@@ -69,6 +72,9 @@ func TestApplyGate_PrunedDurableVersionsRemainStale(t *testing.T) {
 	if _, err := store.Sync(); err != nil {
 		t.Fatal(err)
 	}
+	if err := gate.CertifyRecoveryPrefix(recoveryLineage(1, 32)); err != nil {
+		t.Fatal(err)
+	}
 	gate.CloseSession(1)
 	if err := gate.ApplyRecovery(recoveryLineage(2, 32), 5, makeData(0xAA), 1); err != nil {
 		t.Fatal(err)
@@ -91,5 +97,45 @@ func TestApplyGate_PrunedDurableVersionsRemainStale(t *testing.T) {
 	tracked, _, _, _ := gate.SessionState(2)
 	if tracked != 0 {
 		t.Fatalf("durable versions were not pruned: tracked=%d want=0", tracked)
+	}
+}
+
+func TestApplyGate_CertifiedPrefixFreezesAcrossSessions(t *testing.T) {
+	gate, store := newGate(t)
+	if err := gate.ApplyRecovery(recoveryLineage(1, 1), 0, makeData(1), 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gate.CertifyRecoveryPrefix(recoveryLineage(1, 1)); err != nil {
+		t.Fatal(err)
+	}
+	gate.CloseSession(1)
+	if err := gate.ApplyLive(liveLineage(2), 5, makeData(0xBB), 120); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if got := gate.CertifiedPrefix(); got != 1 {
+		t.Fatalf("new session or Sync extended certified floor: P=%d", got)
+	}
+	want := makeData(0xAA)
+	if err := gate.ApplyRecovery(recoveryLineage(3, 100), 6, want, 95); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Read(6)
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("frozen prefix swallowed missing recovery: err=%v", err)
+	}
+	if err := gate.CertifyRecoveryPrefix(recoveryLineage(3, 121)); err == nil {
+		t.Fatal("certificate above durable boundary accepted")
+	}
+	if err := gate.CertifyRecoveryPrefix(recoveryLineage(3, 1)); err != nil {
+		t.Fatal(err)
+	}
+	if gate.CertifiedPrefix() != 1 {
+		t.Fatal("failed/repeated certificate changed prefix")
 	}
 }
