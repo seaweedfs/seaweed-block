@@ -205,3 +205,24 @@ func TestCutCOWV3_SharedPayloadCapRefusesBeforePublication(t *testing.T) {
 		t.Fatalf("scratch files after refused cut: %v %v", files, err)
 	}
 }
+
+func TestCutCOWV3_ChangedImageExceedsSpillCap(t *testing.T) {
+	_, l, f, gate := cowFixture(t)
+	before := f.stats().head.Gen
+	done, errs := cowStartCut(t, l, gate)
+	w := l.cowActive.Load()
+	w.mu.Lock()
+	w.spillLimit = w.chunkBytes / 2 // two changed chunks are four times the cap
+	w.mu.Unlock()
+	gate.unblock()
+	cowWaitSignal(t, done, "streamed image")
+	if err := <-errs; err != nil {
+		t.Fatal(err)
+	}
+	if f.stats().head.Gen != before+1 {
+		t.Fatal("image did not publish")
+	}
+	if w.spillBytes != 0 {
+		t.Fatalf("unchanged local extents consumed %d scratch bytes", w.spillBytes)
+	}
+}
