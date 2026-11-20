@@ -795,6 +795,18 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		if err == nil {
 			res.Stats = st
 		}
+		if errors.Is(err, errChunkLayerFenced) {
+			l.stMu.Lock()
+			var ids []string
+			for _, sc := range l.reusable {
+				if sc.intent != "" {
+					ids = append(ids, sc.intent)
+				}
+			}
+			l.reusable = nil
+			l.stMu.Unlock()
+			l.dropIntents(ctx, ids)
+		}
 		l.recordCut(res, st, err)
 	}()
 	if err := l.admit(); err != nil {
@@ -1630,7 +1642,7 @@ func (l *chunkLayerImpl) dropIntent(ctx context.Context, id string) {
 	l.stMu.Lock()
 	keep := false
 	for idx, sc := range l.reusable {
-		if sc.ver != l.chunkVersion(idx) || sc.headGen != l.head.Gen {
+		if l.closed || l.fenced || sc.ver != l.chunkVersion(idx) || sc.headGen != l.head.Gen {
 			delete(l.reusable, idx)
 			continue
 		}

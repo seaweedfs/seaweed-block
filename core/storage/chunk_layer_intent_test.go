@@ -282,7 +282,7 @@ func TestChunkIntent_OtherIntentsUntouched(t *testing.T) {
 
 // Admission is refused at the final check right before the CAS: a clean
 // abort, so the intent goes.
-func TestChunkIntent_AdmissionRefusedBeforeCASDeletesIntent(t *testing.T) {
+func TestChunkIntent_AdmissionRefusedBeforeCASKeepsReusableIntent(t *testing.T) {
 	s, _ := newChunkTestStore(t)
 	f := newFakeChunkRemote()
 	cfg := ctConfig(1)
@@ -306,7 +306,17 @@ func TestChunkIntent_AdmissionRefusedBeforeCASDeletesIntent(t *testing.T) {
 	if n := f.stats().cas; n != 0 {
 		t.Fatalf("refused cut issued %d CAS", n)
 	}
-	if live := liveIntents(t, f); len(live) != 0 {
-		t.Fatalf("intent left after admission was refused: %+v", live)
+	if live := liveIntents(t, f); len(live) == 0 {
+		t.Fatal("completed upload lost its retry root after admission refusal")
 	}
+	// Restored admission reuses the exact payload and settles its root.
+	layer.(*chunkLayerImpl).cfg.CaptureAllowed = nil
+	before := f.stats().puts
+	if _, err := layer.Cut(ctTimeout(t)); err != nil {
+		t.Fatal(err)
+	}
+	if f.stats().puts != before {
+		t.Fatal("unchanged refused point uploaded again")
+	}
+	assertNoIntentsLeft(t, f)
 }
