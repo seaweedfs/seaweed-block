@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -117,8 +118,35 @@ func TestPrecopyProviderPublishesExactDetachedImage(t *testing.T) {
 	}
 }
 
+type precopyFixedSampleRemote struct {
+	*storage.MemChunkRemote
+	nextDelay atomic.Int64
+}
+
+func (r *precopyFixedSampleRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVersion, next storage.ChunkHead) (uint64, error) {
+	if delay := time.Duration(r.nextDelay.Swap(0)); delay > 0 {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
+	}
+	return r.MemChunkRemote.CASHead(ctx, expected, next)
+}
+
 func TestPrecopyProviderBusyOwnerKeepsServing(t *testing.T) {
-	remote := storage.NewMemChunkRemote()
+	precopyBusyOwnerKeepsServing(t, 0)
+}
+
+func TestPrecopyProviderBusyOwnerRetryRetainsSlowFixedSample(t *testing.T) {
+	precopyBusyOwnerKeepsServing(t, 1300*time.Millisecond)
+}
+
+func precopyBusyOwnerKeepsServing(t *testing.T, delay time.Duration) {
+	t.Helper()
+	remote := &precopyFixedSampleRemote{MemChunkRemote: storage.NewMemChunkRemote()}
 	view := &parkView{stubView: v1View()}
 	k := &detachHooks{}
 	p := precopyProvider(t, remote, view, k)
@@ -159,6 +187,7 @@ func TestPrecopyProviderBusyOwnerKeepsServing(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("write not admitted")
 	}
+	remote.nextDelay.Store(int64(delay))
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	logs := &lockedLog{}
@@ -215,7 +244,7 @@ func TestPrecopyProviderBusyOwnerKeepsServing(t *testing.T) {
 	if started, resumed := k.calls(); len(started) != 2 || len(resumed) != 1 {
 		t.Fatalf("successful retry hooks: started=%v resumed=%v", started, resumed)
 	}
-	if !bytes.Equal(headBlock(t, remote, 1), block(0x8a)) || !bytes.Equal(headBlock(t, remote, 2), block(0x9b)) {
+	if !bytes.Equal(headBlock(t, remote.MemChunkRemote, 1), block(0x8a)) || !bytes.Equal(headBlock(t, remote.MemChunkRemote, 2), block(0x9b)) {
 		t.Fatal("retry lost admitted bytes")
 	}
 }
