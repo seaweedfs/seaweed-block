@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // Exercise the owner-facing optional seam without changing ChunkLayer's
@@ -211,5 +212,17 @@ func TestPrecopyDetachCanceledBarrierNeverStopsFrontend(t *testing.T) {
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled attempt: %v", err)
+	}
+}
+
+func TestPrecopyDetachFreezeIncludesBarrierPause(t *testing.T) {
+	_, _, l, _ := precopyLayer(t, 1024, 0)
+	l.testBeforeBarrierLockHook = func() { time.Sleep(120 * time.Millisecond) }
+	r, err := l.PrecopyDetach(ctTimeout(t), func() bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Precopy.FreezeElapsed < 120*time.Millisecond {
+		t.Fatalf("freeze %s omitted tentative barrier pause", r.Precopy.FreezeElapsed)
 	}
 }
