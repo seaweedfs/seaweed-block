@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"github.com/seaweedfs/seaweed-block/core/hostlimit"
@@ -44,7 +45,7 @@ func TestHostCOWCapAbortsCutAndRetainsPermitUntilJoin(t *testing.T) {
 		t.Fatal("host-cap aborted cut published")
 	}
 	b, err := s.Read(5)
-	if err != nil || b[0] != 0xeb {
+	if err != nil || !bytes.Equal(b, makeBlock(ctBlockSize, 0xeb)) {
 		t.Fatal("guest bytes lost after cut abort", err)
 	}
 	if l.Stats().CutsAborted["budget_revoked"] != 1 {
