@@ -167,3 +167,54 @@ func TestCutCOWV3_PutRetryUsesFrozenSlot(t *testing.T) {
 		t.Fatal("PUT retry included the post-H overwrite")
 	}
 }
+
+// Supported zero-data writes use the ordinary before-append COW hook. They
+// do not take the lifecycle abort/drain path used by Recover/reset/install.
+func TestCutCOWV3_ZeroWritesDoNotAbortUpdates(t *testing.T) {
+	s, l, f, gate := cowFixture(t)
+	gate.unblock()
+	for round := 0; round < 3; round++ {
+		old := byte(0x50 + round)
+		for _, lba := range []uint32{5, 1} {
+			if _, err := s.Write(lba, makeBlock(ctBlockSize, old)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		entered, release := holdPuts(t, f)
+		results := make(chan chunkCutResult, 1)
+		errs := make(chan error, 1)
+		done := make(chan struct{})
+		t.Cleanup(func() { release(); cowWaitSignal(t, done, "zero-write cut cleanup") })
+		go func() { defer close(done); r, e := l.Cut(ctTimeout(t)); results <- r; errs <- e }()
+		waitKey(t, entered, "copied hot chunk PUT")
+		start := time.Now()
+		var err error
+		if round%2 == 0 {
+			_, err = s.Write(5, makeBlock(ctBlockSize, 0))
+		} else {
+			zeroes := make([][]byte, ctChunkBlocks)
+			for i := range zeroes {
+				zeroes[i] = makeBlock(ctBlockSize, 0)
+			}
+			_, err = s.WriteBatch(ctChunkBlocks, zeroes)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if time.Since(start) >= ctLocalBound {
+			t.Fatal("zero write waited for remote I/O")
+		}
+		release()
+		cowWaitSignal(t, done, "zero-write point publication")
+		if err = <-errs; err != nil {
+			t.Fatal(err)
+		}
+		r := <-results
+		if r.Stats.COWSavedChunks != 1 || !bytes.Equal(blockOf(f.imageOf(t, r.Head), 5), makeBlock(ctBlockSize, old)) {
+			t.Fatal("zero write aborted the point or changed its pre-zero image")
+		}
+	}
+	if l.Stats().CutsFailed != 0 {
+		t.Fatal("regular zero writes aborted updates")
+	}
+}
