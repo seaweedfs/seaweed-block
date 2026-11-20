@@ -334,3 +334,9 @@ one missing-probe/newer-ACK schedule. `R293_review_safe` checks four invariants;
 four negative controls separately remove retirement, the frame join, the
 readiness guard or ACK progress restoration. This abstracts successful admitted
 frames and does not prove physical-I/O, authority rollback or timing behavior.
+
+`PrecopyFixedAdmission.tla` checks bounded pre-copy cost admission: ordinary
+allowance, small non-improving tail, declared freeze and the five-second ceiling.
+`PrecopyFixedAdmission.cfg` is the positive configuration; `_no_tail`, `_no_stall`
+and `_no_cap` must violate `SafeCommit`. It does not model publication/data safety
+or physical latency; those remain separate checks.
