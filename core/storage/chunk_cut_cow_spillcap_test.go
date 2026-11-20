@@ -81,9 +81,27 @@ func TestCutCOWV3_RemoteUploadDoesNotParkCopiedChunk(t *testing.T) {
 	if l.cowActive.Load() == nil {
 		t.Fatal("window closed with unsent candidates")
 	}
+	w := l.cowActive.Load()
+	w.mu.Lock()
+	w.memory = w.memoryLimit
+	w.spillLimit = w.chunkBytes
+	w.mu.Unlock()
 	var err error
 	if _, err = s.Write(1, makeBlock(ctBlockSize, 0xe5)); err != nil {
 		t.Fatal(err)
+	}
+	start := time.Now()
+	if _, err = s.Write(5, makeBlock(ctBlockSize, 0xe5)); err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(start) >= ctLocalBound {
+		t.Fatal("unsent chunk waited for remote upload")
+	}
+	w.mu.Lock()
+	saved := w.spillBytes
+	w.mu.Unlock()
+	if saved != w.chunkBytes {
+		t.Fatalf("unsent chunk saved %d bytes", saved)
 	}
 	if _, err = s.Sync(); err != nil {
 		t.Fatal(err)
@@ -194,6 +212,12 @@ func TestCutCOWV3_ChangedImageExceedsSpillCap(t *testing.T) {
 	}
 	if f.stats().head.Gen != before+1 {
 		t.Fatal("image did not publish")
+	}
+	img := f.imageOf(t, f.stats().head)
+	for _, lba := range []uint32{1, 5} {
+		if !bytes.Equal(blockOf(img, lba), makeBlock(ctBlockSize, byte(lba))) {
+			t.Fatal("published bytes mismatch", lba)
+		}
 	}
 	if w.spillBytes != 0 {
 		t.Fatalf("unchanged local extents consumed %d scratch bytes", w.spillBytes)

@@ -932,6 +932,9 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		st.BarrierPauseNs = time.Since(pauseStart).Nanoseconds()
 	}
 	st.CopyNs = time.Since(copyStart).Nanoseconds()
+	if l.usesOwnedMapV3() {
+		st.UploadNs = st.CopyNs
+	}
 	if copyErr != nil {
 		l.abortCut(all)
 		l.dropIntents(ctx, intents)
@@ -1032,7 +1035,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 			return chunkCutResult{}, err
 		}
 	}
-	st.UploadNs = time.Since(uploadStart).Nanoseconds()
+	st.UploadNs += time.Since(uploadStart).Nanoseconds()
 	if !upgrade && !detach && len(changed) == 0 && h == baseHead.RemoteLSN && baseHead.Gen != 0 && !chunkHeadIsDetached(baseHead) {
 		// A no-op cut still observes authority: a fresh host may have
 		// claimed HEAD without uploading a single chunk since our last cut.
