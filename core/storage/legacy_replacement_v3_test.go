@@ -191,6 +191,106 @@ func TestNativeReplacementAllBlocksAfterCheckpoint(t *testing.T) {
 	}
 }
 
+func TestNativeReplacementLowerApplyAfterPrecopy(t *testing.T) {
+	s, f, l, _ := precopyLayer(t, 1, 3)
+	if err := s.ApplyEntry(0, blk(0xA0), 4); err != nil {
+		t.Fatal(err)
+	}
+	image := make([]byte, ctNumBlocks*ctBlockSize)
+	for lba := uint32(0); lba < ctNumBlocks; lba++ {
+		b, err := s.Read(lba)
+		if err != nil {
+			t.Fatal(err)
+		}
+		copy(image[int(lba)*ctBlockSize:], b)
+	}
+	refused := false
+	l.testAfterStageHook = func(round int) {
+		if round != 0 {
+			return
+		}
+		if err := s.ApplyEntry(1, blk(0xB1), 3); !errors.Is(err, ErrWALLSNOrder) {
+			t.Errorf("native lower-LSN apply after staging: %v", err)
+			return
+		}
+		refused = true
+	}
+	r, err := l.Cut(ctTimeout(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !refused || r.Stats.StagedChunks == 0 {
+		t.Fatal("precopy/lower-apply schedule did not run")
+	}
+	if !bytes.Equal(f.imageOf(t, r.Head), image) {
+		t.Fatal("refused lower apply changed the cut image")
+	}
+}
+
+func TestNativeReplacementPublicDefaultBatch(t *testing.T) {
+	s, err := CreateWALStore(filepath.Join(t.TempDir(), "volume"), 32, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	s.DisableAutoFlushForRecoveryTest()
+	if !s.FormatV3() {
+		t.Fatal("public default selected an old engine")
+	}
+	if ns, err := s.WriteBatch(4, batchBlocks(0x41, 3)); err != nil || len(ns) != 3 || ns[0] != 1 || ns[2] != 3 {
+		t.Fatalf("default batch=%v %v", ns, err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if i := s.WriteInstrumentation(); i.WALAppendOps != 1 || i.WALEncodeOps != 1 {
+		t.Fatalf("native batch was not one record: %+v", i)
+	}
+	readBatchV3(t, s, 4, 0x41, 3, "public default batch")
+}
+
+func TestNativeReplacementHeldFailureCleanup(t *testing.T) {
+	var s *WALStore
+	var done chan struct{}
+	var workerErr error
+	boom := errors.New("held WAL failure on cleanup path")
+	t.Run("stop_with_worker_held", func(t *testing.T) {
+		s, _ = newMappedCheckpointStoreV3(t)
+		if _, err := s.Write(1, blk(1)); err != nil {
+			t.Fatal(err)
+		}
+		entered, resume := make(chan struct{}), make(chan struct{})
+		done = make(chan struct{})
+		release := sync.OnceFunc(func() { close(resume) })
+		t.Cleanup(func() {
+			release()
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				t.Error("held failing worker did not join")
+			}
+		})
+		s.syncWALFile = func() error { close(entered); <-resume; return boom }
+		go func() { _, workerErr = s.Sync(); close(done) }()
+		waitV3(t, entered, "worker held on deliberate test exit")
+		t.SkipNow()
+	})
+	select {
+	case <-done:
+	default:
+		t.Fatal("cleanup returned before worker settled")
+	}
+	if !errors.Is(workerErr, boom) {
+		t.Fatalf("held failure lost its cause: %v", workerErr)
+	}
+	s.mu.RLock()
+	closed := s.closed
+	s.mu.RUnlock()
+	if !closed || s.fd != nil {
+		t.Fatal("cleanup did not close the native store after joining")
+	}
+}
+
 func TestNativeReplacementTornWrapKeepsAcknowledgedSuffix(t *testing.T) {
 	for _, duringFlush := range []bool{false, true} {
 		t.Run(map[bool]string{false: "full_checkpoint", true: "append_during_checkpoint"}[duringFlush], func(t *testing.T) {
