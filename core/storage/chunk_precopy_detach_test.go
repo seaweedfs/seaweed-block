@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 )
 
@@ -126,4 +127,74 @@ func TestPrecopyDetachRefusedFinalCutKeepsChangedBytes(t *testing.T) {
 		t.Fatal("refused final cut marked changed bytes clean")
 	}
 	assertEveryHeadIsPrefixImage(t, f, w)
+}
+
+func TestPrecopyDetachSustainedWrapFlushAndFreshRestore(t *testing.T) {
+	makeStore := func(name string) *WALStore {
+		s, err := createMappedWALStoreV3ForTest(filepath.Join(t.TempDir(), name), ctNumBlocks, ctBlockSize, v3TestWAL, WModeStrict, ctChunkBlocks)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.DisableAutoFlushForRecoveryTest()
+		s.SetRecoveryRetentionLSNs(0)
+		t.Cleanup(func() { closeBounded(t, s) })
+		return s
+	}
+	s := makeStore("old")
+	f := newFakeChunkRemote()
+	cfg := ctConfig(1)
+	cfg.FreshFromHead = true
+	l := mustAttach(t, s, f, cfg).(*chunkLayerImpl)
+	if _, err := l.Cut(ctTimeout(t)); err != nil {
+		t.Fatal(err)
+	}
+	want := make([]byte, ctNumBlocks*ctBlockSize)
+	written := 0
+	for i := 0; written <= 2*int(s.sb.WALSize); i++ {
+		lba := uint32(i % ctNumBlocks)
+		data := makeBlock(ctBlockSize, byte(i%250+1))
+		if _, err := s.Write(lba, data); err != nil {
+			t.Fatal(err)
+		}
+		copy(want[int(lba)*ctBlockSize:], data)
+		written += len(data)
+		if i%4 == 3 {
+			mustSyncFlush(t, s)
+		}
+		if i%16 == 15 {
+			if _, err := l.Cut(ctTimeout(t)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	mustSyncFlush(t, s)
+	r, err := l.PrecopyDetach(ctTimeout(t), func() bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(f.imageOf(t, r.Head), want) {
+		t.Fatal("sustained writes/Flush detached the wrong image")
+	}
+	fresh := makeStore("new")
+	next := ctConfig(2)
+	next.Holder = "host-b"
+	next.FreshFromHead = true
+	next.RestoreChunkBytes = ctChunkBytes
+	next.PrepareRestore = func(h ChunkHead) error { return fresh.SeedChunkFrontier(h.RemoteLSN) }
+	h, err := ClaimChunkHead(ctTimeout(t), f, next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next.RestoreGuard = &ChunkHeadVersion{Gen: h.Gen, Epoch: h.Epoch}
+	mustAttach(t, fresh, f, next)
+	for lba := uint32(0); lba < ctNumBlocks; lba++ {
+		got, err := fresh.Read(lba)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, want[int(lba)*ctBlockSize:int(lba+1)*ctBlockSize]) {
+			t.Fatalf("fresh restore LBA %d differs", lba)
+		}
+	}
+	t.Logf("wrote %d bytes > WAL %d with periodic Flush; fresh host exact readback", written, s.sb.WALSize)
 }

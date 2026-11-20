@@ -121,11 +121,12 @@ type ChunkSnapshotRequest struct {
 
 // ChunkDetachResponse is the body of a successful POST /chunk/detach (§3.6).
 type ChunkDetachResponse struct {
-	VolumeID       string `json:"volumeID"`
-	CutLSN         uint64 `json:"cutLSN"`
-	HeadGen        uint64 `json:"headGen"`
-	HeadEpoch      uint64 `json:"headEpoch"`
-	LastWrittenLSN uint64 `json:"lastWrittenLSN"`
+	Precopy        *storage.PrecopyReport `json:"precopy,omitempty"`
+	VolumeID       string                 `json:"volumeID"`
+	CutLSN         uint64                 `json:"cutLSN"`
+	HeadGen        uint64                 `json:"headGen"`
+	HeadEpoch      uint64                 `json:"headEpoch"`
+	LastWrittenLSN uint64                 `json:"lastWrittenLSN"`
 }
 
 // snapshotBody is POST /chunk/snapshot's success body, exactly §3.2's fields.
@@ -597,5 +598,9 @@ func (c *chunkControl) Detach(ctx context.Context, volumeID string) (ChunkDetach
 	if err != nil {
 		return ChunkDetachResponse{}, err
 	}
-	return ChunkDetachResponse{VolumeID: volumeID, CutLSN: r.H, HeadGen: r.Head.Gen, HeadEpoch: r.Head.Epoch, LastWrittenLSN: last}, nil
+	response := ChunkDetachResponse{VolumeID: volumeID, CutLSN: r.H, HeadGen: r.Head.Gen, HeadEpoch: r.Head.Epoch, LastWrittenLSN: last}
+	if r.Precopy.Frozen {
+		response.Precopy = &r.Precopy
+	}
+	return response, nil
 }
