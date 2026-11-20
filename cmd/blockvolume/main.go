@@ -40,6 +40,7 @@ import (
 )
 
 type flags struct {
+	cpuProfileDir  string
 	memoryLimitMiB int64
 	masterAddr     string
 	serverID       string
@@ -170,6 +171,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.printReadyLine, "t0-print-ready", false, "internal test-only: emit one structured JSON line on stdout on first assignment")
 	fs.BoolVar(&f.enableT1Readiness, "t1-readiness", false, "enable readiness bridge (HealthyPathExecutor) so adapter projection reaches Healthy")
 	fs.StringVar(&f.statusAddr, "status-addr", "", "address for the status HTTP endpoint (e.g. 127.0.0.1:0); empty disables")
+	fs.StringVar(&f.cpuProfileDir, "cpu-profile-dir", os.Getenv(cpuProfileEnv), "diagnostics: an existing directory; SIGUSR1 then toggles a CPU profile written there (default $"+cpuProfileEnv+"; empty disables)")
 	fs.BoolVar(&f.statusRecovery, "status-recovery", false, "expose /status/recovery?volume=<id> with engine.ReplicaProjection (Mode/R/S/H/RecoveryDecision); off by default; loopback-only; intended for hardware test orchestration")
 	fs.BoolVar(&f.allowExternalStatusBind, "allow-external-status-bind", false, "allow the unauthenticated status endpoint to bind and serve non-loopback addresses; intended only for explicit Kubernetes node-loss gates")
 	fs.BoolVar(&f.runtimeRebuildEndpoint, "runtime-rebuild-endpoint", false, "expose POST /runtime/rebuild on the status HTTP listener; off by default; starts primary-side rebuild/catch-up traffic only after request lineage validation")
@@ -252,6 +254,14 @@ func parseFlags(args []string) (flags, error) {
 	}
 	if f.memoryLimitMiB < 0 || f.memoryLimitMiB > math.MaxInt64>>20 {
 		return flags{}, fmt.Errorf("--memory-limit-mib out of range")
+	}
+	if f.cpuProfileDir != "" { // before anything starts: run() has no side effect yet
+		if !cpuProfileSupported {
+			return flags{}, fmt.Errorf("--cpu-profile-dir needs SIGUSR1 (unix only)")
+		}
+		if err := checkCPUProfileDir(f.cpuProfileDir); err != nil {
+			return flags{}, err
+		}
 	}
 	if f.version {
 		return f, nil
@@ -567,6 +577,14 @@ func durableCreateGeometry(f flags) (uint32, int, error) {
 }
 
 func run(f flags) int {
+	// Diagnostics first: parseFlags validated the directory, and nothing
+	// has been activated yet, so a failure here leaves nothing to clean up.
+	stopProfile, err := startCPUProfileSignal(f.cpuProfileDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "blockvolume:", err)
+		return 1
+	}
+	defer stopProfile()
 	readyCh := make(chan adapter.AssignmentInfo, 16)
 
 	h, err := volume.New(hostConfig(f, readyCh))
