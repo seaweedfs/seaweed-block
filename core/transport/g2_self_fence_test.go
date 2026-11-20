@@ -31,7 +31,9 @@ var g2ProbeLineage = RecoveryLineage{SessionID: 1, Epoch: 1 << 62, EndpointVersi
 // the connection (refusal) rather than accepting it. Handshake, no timer: an
 // always-admissible probe follows on the same connection; the listener
 // handles frames in order, so it either closes the connection (refused) or
-// answers the probe after the frame's effect (accepted).
+// answers the probe after the frame's effect (accepted). A write or read error
+// on the probe counts as refused: the listener is the only side that closes
+// this connection, and it closes it only on a refusal.
 func g2Refused(t *testing.T, addr string, msgType byte, payload []byte) bool {
 	t.Helper()
 	conn := g2Dial(t, addr)
