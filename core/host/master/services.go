@@ -289,7 +289,7 @@ func (s *services) ReportHeartbeat(ctx context.Context, r *control.HeartbeatRepo
 	// Journal isolation: alarm on a durable root sharing the authority
 	// store's file system; under strict isolation refuse it unless the node
 	// already serves volumes (refusing a serving node stops its renewals).
-	if err := s.host.refuseColocatedHeartbeat(r.ServerId, storeident.Identity{MachineID: r.GetMachineId(), Dev: r.GetDurableRootDev()}); err != nil {
+	if err := s.host.refuseColocatedHeartbeat(r.ServerId, storeident.Identity{MachineID: r.GetMachineId(), Dev: r.GetDurableRootDev(), FSID: r.GetDurableRootFsid()}); err != nil {
 		return nil, status.Error(codes.FailedPrecondition, err.Error())
 	}
 	msg := heartbeatFromWire(r)

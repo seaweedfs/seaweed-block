@@ -74,7 +74,7 @@ type Config struct {
 	RF1Only string
 
 	// StorageIdentity identifies the file system of the durable root
-	// (machine id + st_dev), reported in every heartbeat so the master can
+	// (machine id + st_dev + statfs f_fsid), reported in every heartbeat so the master can
 	// detect a durable root that shares the authority store's journal. Zero
 	// means unknown (memback, non-unix, or the root could not be read).
 	StorageIdentity storeident.Identity
@@ -642,8 +642,9 @@ func (h *Host) buildReport() *control.HeartbeatReport {
 		Reachable: true,
 		Eligible:  true,
 		// Raw identity facts; the master compares them with its own store.
-		MachineId:      h.cfg.StorageIdentity.MachineID,
-		DurableRootDev: h.cfg.StorageIdentity.Dev,
+		MachineId:       h.cfg.StorageIdentity.MachineID,
+		DurableRootDev:  h.cfg.StorageIdentity.Dev,
+		DurableRootFsid: h.cfg.StorageIdentity.FSID,
 		Slots: []*control.HeartbeatSlot{
 			{
 				VolumeId:        h.cfg.VolumeID,

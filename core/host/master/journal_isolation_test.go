@@ -97,7 +97,7 @@ var hbPorts = map[string][2]string{
 
 func (r *isolationRig) heartbeat(server string, id storeident.Identity) error {
 	_, err := r.obs.ReportHeartbeat(r.ctx, &control.HeartbeatReport{ServerId: server, SentAt: timestamppb.Now(), Reachable: true, Eligible: true,
-		MachineId: id.MachineID, DurableRootDev: id.Dev,
+		MachineId: id.MachineID, DurableRootDev: id.Dev, DurableRootFsid: id.FSID,
 		Slots: []*control.HeartbeatSlot{{VolumeId: "hb-" + server, ReplicaId: "r-" + server, DataAddr: hbPorts[server][0], CtrlAddr: hbPorts[server][1]}}})
 	return err
 }
@@ -316,12 +316,14 @@ func TestStatusEndpointLoopbackOnlyAndServesJSON(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"colocated_nodes", "headroom_alarms", "clamps_total", "clamps_last_minute", "min_headroom_ms", "strict_journal_isolation"} {
+	for _, k := range []string{"colocated_nodes", "headroom_alarms", "clamps_total", "clamps_last_minute", "min_headroom_ms", "strict_journal_isolation",
+		"extension_write_last_ms", "extension_write_max_last_minute_ms"} {
 		if _, ok := body[k]; !ok {
 			t.Fatalf("status JSON lacks %q: %v", k, body)
 		}
 	}
-	if body["strict_journal_isolation"] != true || body["colocated_nodes"] != float64(0) || body["min_headroom_ms"] != float64(-1) {
+	if body["strict_journal_isolation"] != true || body["colocated_nodes"] != float64(0) || body["min_headroom_ms"] != float64(-1) ||
+		body["extension_write_last_ms"] != float64(-1) || body["extension_write_max_last_minute_ms"] != float64(-1) {
 		t.Fatalf("status JSON values: %v", body)
 	}
 	if post, err := http.Post("http://"+m.StatusAddr()+"/status/workspace-lease", "application/json", nil); err != nil || post.StatusCode != http.StatusMethodNotAllowed {

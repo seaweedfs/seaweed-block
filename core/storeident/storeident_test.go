@@ -75,3 +75,36 @@ func TestOfSameFileSystemOnLinux(t *testing.T) {
 		t.Fatalf("temp dir and /proc reported as one file system: %+v", a)
 	}
 }
+
+// The file system id refines machine id + device: when both sides know it,
+// all three must be equal; when either side does not (a peer that predates
+// it), the comparison falls back to machine id + device.
+func TestSameFileSystemComparesFSIDWhenBothKnowIt(t *testing.T) {
+	a := Identity{MachineID: "m1", Dev: 7, FSID: 0xabc}
+	for _, c := range []struct {
+		name string
+		b    Identity
+		want bool
+	}{
+		{"same machine, dev and fsid", Identity{MachineID: "m1", Dev: 7, FSID: 0xabc}, true},
+		{"same machine and dev, other fsid", Identity{MachineID: "m1", Dev: 7, FSID: 0xabd}, false},
+		{"fsid unknown on the peer", Identity{MachineID: "m1", Dev: 7}, true},
+		{"fsid unknown on the peer, other dev", Identity{MachineID: "m1", Dev: 8}, false},
+		{"same fsid, other dev", Identity{MachineID: "m1", Dev: 8, FSID: 0xabc}, false},
+		{"same fsid and dev, other machine", Identity{MachineID: "m2", Dev: 7, FSID: 0xabc}, false},
+		{"fsid alone known", Identity{FSID: 0xabc}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := a.SameFileSystem(c.b); got != c.want {
+				t.Fatalf("%+v.SameFileSystem(%+v) = %v, want %v", a, c.b, got, c.want)
+			}
+			if got := c.b.SameFileSystem(a); got != c.want {
+				t.Fatalf("not symmetric: %+v.SameFileSystem(%+v) = %v, want %v", c.b, a, got, c.want)
+			}
+		})
+	}
+	both := Identity{MachineID: "m1", Dev: 7}
+	if !both.SameFileSystem(Identity{MachineID: "m1", Dev: 7}) {
+		t.Fatal("both fsids unknown: machine id + device must still match")
+	}
+}

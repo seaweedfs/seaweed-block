@@ -177,17 +177,27 @@ type WorkspaceLeaseStatus struct {
 	ClampsLastMinute       uint64 `json:"clamps_last_minute"`
 	MinHeadroomMS          int64  `json:"min_headroom_ms"` // -1: no grant observed yet
 	StrictJournalIsolation bool   `json:"strict_journal_isolation"`
+	// Lease extension store write latency, the earliest lag signal.
+	ExtensionWriteLastMS          int64 `json:"extension_write_last_ms"`            // -1: no extension write yet
+	ExtensionWriteMaxLastMinuteMS int64 `json:"extension_write_max_last_minute_ms"` // -1: none in the last minute
 }
 
 // WorkspaceLeaseStatus returns the journal-isolation and lease headroom
 // counters served by the status endpoint.
 func (h *Host) WorkspaceLeaseStatus() WorkspaceLeaseStatus {
-	st := WorkspaceLeaseStatus{ColocatedNodes: h.journal.count(), MinHeadroomMS: -1, StrictJournalIsolation: h.cfg.StrictJournalIsolation}
+	st := WorkspaceLeaseStatus{ColocatedNodes: h.journal.count(), MinHeadroomMS: -1, StrictJournalIsolation: h.cfg.StrictJournalIsolation,
+		ExtensionWriteLastMS: -1, ExtensionWriteMaxLastMinuteMS: -1}
 	if p := h.Publisher(); p != nil {
 		s := p.WorkspaceLeaseStats()
 		st.HeadroomAlarms, st.ClampsTotal, st.ClampsLastMinute = s.HeadroomAlarms, s.ClampsTotal, s.ClampsLastMinute
 		if s.MinHeadroomObserved {
 			st.MinHeadroomMS = s.MinHeadroom.Milliseconds()
+		}
+		if s.ExtensionWriteObserved {
+			st.ExtensionWriteLastMS = s.ExtensionWriteLast.Milliseconds()
+		}
+		if s.ExtensionWriteInLastMinute {
+			st.ExtensionWriteMaxLastMinuteMS = s.ExtensionWriteMaxLastMinute.Milliseconds()
 		}
 	}
 	return st

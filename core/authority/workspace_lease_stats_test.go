@@ -321,3 +321,73 @@ func TestWorkspaceLeaseSummaryWithoutALaterGrant(t *testing.T) {
 		t.Fatalf("want the summary %q once from refused renewals, got %d summaries:\n%s", want, n, strings.Join(lines, "\n"))
 	}
 }
+
+// delayedLeaseStore makes every lease write take delay (when set): a slow
+// authority journal that still completes.
+type delayedLeaseStore struct {
+	AuthorityStore
+	delay atomic.Int64
+}
+
+func (s *delayedLeaseStore) Put(r DurableRecord) error {
+	if d := time.Duration(s.delay.Load()); d > 0 && r.Workspace != nil && r.Workspace.Lease != nil {
+		time.Sleep(d)
+	}
+	return s.AuthorityStore.Put(r)
+}
+
+// The extension's store write latency is recorded at every extension write:
+// the latest one, and the slowest of the last minute (rolling per second),
+// which ages out a minute after the write. The first grant's write is not an
+// extension and records nothing.
+func TestWorkspaceLeaseExtensionWriteLatency(t *testing.T) {
+	disk, _ := newTempStore(t)
+	store := &delayedLeaseStore{AuthorityStore: disk}
+	var nowNS atomic.Int64
+	t0 := time.Unix(1000, 0)
+	nowNS.Store(t0.UnixNano())
+	p := NewPublisher(nil, WithStore(store), WithWorkspaceLeaseConfig(30*time.Second, func() time.Time { return time.Unix(0, nowNS.Load()) }))
+	p.leaseLog = func(string) {}
+	t.Cleanup(p.CloseWorkspaceExtenders)
+	if err := p.apply(AssignmentAsk{VolumeID: "v", ReplicaID: "r", DataAddr: "d", CtrlAddr: "c", Intent: IntentBind}); err != nil {
+		t.Fatal(err)
+	}
+	renew := func(d time.Duration) LeaseStats {
+		t.Helper()
+		nowNS.Store(t0.Add(d).UnixNano())
+		if _, err := p.RenewWorkspaceLease(context.Background(), "v", "r", 1); err != nil {
+			t.Fatalf("renewal at +%s: %v", d, err)
+		}
+		waitExtenders(t, p)
+		return p.WorkspaceLeaseStats()
+	}
+	if s := renew(0); s.ExtensionWriteObserved || s.ExtensionWriteInLastMinute { // first grant
+		t.Fatalf("the first grant recorded an extension write: %+v", s)
+	}
+	const slow = 300 * time.Millisecond
+	store.delay.Store(int64(slow))
+	// +10s: headroom 35s < 1.25 TTL starts an extension; its write takes 300 ms.
+	s := renew(10 * time.Second)
+	if !s.ExtensionWriteObserved || s.ExtensionWriteLast < slow || s.ExtensionWriteLast > slow+time.Second {
+		t.Fatalf("+10s: want the last extension write ~%s, got %+v", slow, s)
+	}
+	if !s.ExtensionWriteInLastMinute || s.ExtensionWriteMaxLastMinute < slow {
+		t.Fatalf("+10s: want max >= %s in the last minute, got %+v", slow, s)
+	}
+	store.delay.Store(0)
+	// +20s: horizon +55s, headroom 35s: a fast extension write.
+	s = renew(20 * time.Second)
+	if s.ExtensionWriteLast >= slow || s.ExtensionWriteMaxLastMinute < slow {
+		t.Fatalf("+20s: want a fast last write and the 300 ms max kept, got %+v", s)
+	}
+	// +71s: the +10s write is older than a minute; the +20s one is not.
+	nowNS.Store(t0.Add(71 * time.Second).UnixNano())
+	if s = p.WorkspaceLeaseStats(); !s.ExtensionWriteInLastMinute || s.ExtensionWriteMaxLastMinute >= slow || s.ExtensionWriteLast >= slow {
+		t.Fatalf("+71s: the 300 ms max must age out, got %+v", s)
+	}
+	// +81s: no write in the last minute; the last write stays reported.
+	nowNS.Store(t0.Add(81 * time.Second).UnixNano())
+	if s = p.WorkspaceLeaseStats(); s.ExtensionWriteInLastMinute || !s.ExtensionWriteObserved {
+		t.Fatalf("+81s: want no write in the last minute, last still observed; got %+v", s)
+	}
+}

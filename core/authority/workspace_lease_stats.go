@@ -12,7 +12,9 @@ import (
 // 1 TTL, so a lagging authority store shows first as an extension in flight
 // with headroom under 1.125 TTL, and only later as clamps.
 //
-// The alarm is sampled at renewals, never by a timer: it fires at the latest
+// The earliest signal is the extension store write latency
+// (LeaseStats.ExtensionWrite*), measured at every extension write. The alarm
+// is sampled at renewals, never by a timer: it fires at the latest
 // together with the first clamped grant of a streak (logged before the clamp
 // line), and earlier only if a renewal lands in the 1-1.125 TTL band while an
 // extension is pending. A renewer slower than that band may see both on one
@@ -32,6 +34,17 @@ type LeaseStats struct {
 	// when MinHeadroomObserved.
 	MinHeadroom         time.Duration
 	MinHeadroomObserved bool
+	// ExtensionWriteLast is the duration of the latest lease extension's
+	// durable store write (the write alone, failed or not); valid only when
+	// ExtensionWriteObserved. Write latency is the early signal: it rises
+	// before any headroom is lost, while the alarm and clamps come later.
+	ExtensionWriteLast     time.Duration
+	ExtensionWriteObserved bool
+	// ExtensionWriteMaxLastMinute is the slowest extension write in the last
+	// minute (rolling, one bucket per second like ClampsLastMinute); valid
+	// only when ExtensionWriteInLastMinute.
+	ExtensionWriteMaxLastMinute time.Duration
+	ExtensionWriteInLastMinute  bool
 }
 
 const clampBuckets = 60 // one per second of the last minute
@@ -43,6 +56,14 @@ type leaseCounters struct {
 	buckets     [clampBuckets]struct{ sec, n int64 } // clamps by unix second
 	minHeadroom int64
 	minObserved bool
+	// Extension store writes: the latest, and the slowest per second of the
+	// last minute.
+	writeLast     int64
+	writeObserved bool
+	writeBuckets  [clampBuckets]struct {
+		sec, max int64
+		set      bool
+	}
 	// Per-minute summary, emitted by the first renewal attempt after the
 	// window, granted or refused: no goroutine or timer of its own. With no
 	// renewal attempts at all nothing is emitted; the counters above (the
@@ -73,6 +94,32 @@ func (c *leaseCounters) recordClamp(now time.Time) {
 		b.sec, b.n = sec, 0
 	}
 	b.n++
+}
+
+// recordExtensionWrite records the duration of one extension store write
+// that returned at now.
+func (c *leaseCounters) recordExtensionWrite(now time.Time, d time.Duration) {
+	c.writeLast, c.writeObserved = int64(d), true
+	sec := now.Unix()
+	b := &c.writeBuckets[uint64(sec)%clampBuckets]
+	if !b.set || b.sec != sec {
+		b.sec, b.max, b.set = sec, int64(d), true
+	} else if int64(d) > b.max {
+		b.max = int64(d)
+	}
+}
+
+// extensionWriteMaxSince returns the slowest extension write of the last
+// minute, and whether there was one.
+func (c *leaseCounters) extensionWriteMaxSince(now time.Time) (int64, bool) {
+	cut := now.Unix() - clampBuckets
+	max, ok := int64(0), false
+	for _, b := range c.writeBuckets {
+		if b.set && b.sec > cut && b.sec <= now.Unix() && (!ok || b.max > max) {
+			max, ok = b.max, true
+		}
+	}
+	return max, ok
 }
 
 // summaryDue closes a window that has lasted a minute and returns its summary
@@ -114,12 +161,18 @@ func (p *Publisher) WorkspaceLeaseStats() LeaseStats {
 	p.leaseMu.Lock()
 	defer p.leaseMu.Unlock()
 	c := &p.leaseStats
+	now := p.workspaceNow()
+	writeMax, writeRecent := c.extensionWriteMaxSince(now)
 	return LeaseStats{
-		HeadroomAlarms:      c.alarms,
-		ClampsTotal:         c.clamps,
-		ClampsLastMinute:    c.clampsSince(p.workspaceNow()),
-		MinHeadroom:         time.Duration(c.minHeadroom),
-		MinHeadroomObserved: c.minObserved,
+		HeadroomAlarms:              c.alarms,
+		ClampsTotal:                 c.clamps,
+		ClampsLastMinute:            c.clampsSince(now),
+		MinHeadroom:                 time.Duration(c.minHeadroom),
+		MinHeadroomObserved:         c.minObserved,
+		ExtensionWriteLast:          time.Duration(c.writeLast),
+		ExtensionWriteObserved:      c.writeObserved,
+		ExtensionWriteMaxLastMinute: time.Duration(writeMax),
+		ExtensionWriteInLastMinute:  writeRecent,
 	}
 }
 

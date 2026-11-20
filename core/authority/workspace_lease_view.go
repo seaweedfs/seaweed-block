@@ -333,9 +333,15 @@ func (p *Publisher) extendWorkspaceLease(volume, holder string, epoch uint64, tr
 		return
 	}
 	s.Lease.ExpiresAtNS = h
-	start := time.Now()
-	err := p.persistWorkspaceLocked(volume, s)
-	took := time.Since(start).Round(time.Millisecond)
+	write, wrote, err := p.persistWorkspaceTimedLocked(volume, s)
+	if wrote {
+		// The store write alone, failed or not: the earliest sign of a
+		// lagging authority journal, before any headroom is lost.
+		p.leaseMu.Lock()
+		p.leaseStats.recordExtensionWrite(p.workspaceNow(), write)
+		p.leaseMu.Unlock()
+	}
+	took := write.Round(time.Millisecond)
 	if err != nil {
 		if p.extendFailures[volume] == 0 {
 			note = fmt.Sprintf("workspace lease: extension of volume=%s failed after %s (horizon %s, %s remaining); the volume is now uncertain and its renewals are refused: %v",

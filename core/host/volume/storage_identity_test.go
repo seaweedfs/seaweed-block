@@ -12,14 +12,14 @@ import (
 func TestBuildReportCarriesStorageIdentity(t *testing.T) {
 	h, err := New(Config{MasterAddr: "127.0.0.1:1", ServerID: "node-a", VolumeID: "v1", ReplicaID: "r1",
 		DataAddr: "127.0.0.1:9201", CtrlAddr: "127.0.0.1:9101",
-		StorageIdentity: storeident.Identity{MachineID: "machine-1", Dev: 2049}})
+		StorageIdentity: storeident.Identity{MachineID: "machine-1", Dev: 2049, FSID: 0xfeed}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = h.Close() }()
 	r := h.buildReport()
-	if r.GetMachineId() != "machine-1" || r.GetDurableRootDev() != 2049 {
-		t.Fatalf("report identity = (%q, %d), want (machine-1, 2049)", r.GetMachineId(), r.GetDurableRootDev())
+	if r.GetMachineId() != "machine-1" || r.GetDurableRootDev() != 2049 || r.GetDurableRootFsid() != 0xfeed {
+		t.Fatalf("report identity = (%q, %d, %#x), want (machine-1, 2049, 0xfeed)", r.GetMachineId(), r.GetDurableRootDev(), r.GetDurableRootFsid())
 	}
 
 	plain := newTestVolumeHost(t)

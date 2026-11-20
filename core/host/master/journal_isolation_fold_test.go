@@ -2,10 +2,13 @@ package master
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -295,5 +298,78 @@ func TestHostCloseForceClosesAStalledStatusConnection(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "status graceful shutdown") {
 		t.Fatalf("expired graceful shutdown not logged:\n%s", logs.String())
+	}
+}
+
+// The status endpoint carries the extension write latency: -1 before any
+// extension, then the measured write once a renewal past 1.25 TTL of
+// headroom (7.5 s after the first grant, TTL 30 s) has started one.
+func TestStatusReportsExtensionWriteLatency(t *testing.T) {
+	h, c, _ := reviewBindingHost(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	reviewLegacyBind(t, h, c, ctx, "vol-b")
+	line := waitAuthorityLine(t, h.Publisher(), "vol-b")
+	svc := &services{host: h}
+	id := &control.WorkspaceIdentity{VolumeId: "vol-b", ReplicaId: line.ReplicaID, Epoch: line.Epoch}
+	if _, err := svc.RenewWorkspaceLease(ctx, id); err != nil {
+		t.Fatal(err) // first grant: not an extension
+	}
+	get := func() map[string]any {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		h.statusHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/status/workspace-lease", nil))
+		var body map[string]any
+		if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+	if b := get(); b["extension_write_last_ms"] != float64(-1) || b["extension_write_max_last_minute_ms"] != float64(-1) {
+		t.Fatalf("before any extension: %v", b)
+	}
+	time.Sleep(8 * time.Second)
+	if _, err := svc.RenewWorkspaceLease(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		b := get()
+		last, _ := b["extension_write_last_ms"].(float64)
+		max, _ := b["extension_write_max_last_minute_ms"].(float64)
+		if last >= 0 && max >= last {
+			t.Logf("extension write: last %v ms, max in the last minute %v ms", last, max)
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no extension write reported: %v", b)
+		}
+	}
+}
+
+// With a known file system id on both sides, machine id + device alone no
+// longer make a node co-located: a different fsid is another file system.
+// The same three facts are co-located; a heartbeat without an fsid (an older
+// volume binary) falls back to machine id + device.
+func TestColocationComparesFSIDWhenBothSidesKnowIt(t *testing.T) {
+	self := storeident.Identity{MachineID: "machine-1", Dev: 2049, FSID: 0x1111}
+	r := startIsolationRig(t, false, t.TempDir(), t.TempDir(), &self)
+	for _, c := range []struct {
+		server string
+		id     storeident.Identity
+		want   bool
+	}{
+		{"node-a", storeident.Identity{MachineID: "machine-1", Dev: 2049, FSID: 0x2222}, false},
+		{"node-b", storeident.Identity{MachineID: "machine-1", Dev: 2049, FSID: 0x1111}, true},
+		{"node-c", storeident.Identity{MachineID: "machine-1", Dev: 2049}, true},
+	} {
+		if err := r.heartbeat(c.server, c.id); err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Contains(r.logs.String(), "node "+c.server+" "+colocatedLine); got != c.want {
+			t.Fatalf("%s reporting %+v: co-located alarm = %v, want %v\n%s", c.server, c.id, got, c.want, r.logs.String())
+		}
+	}
+	if n := r.m.WorkspaceLeaseStatus().ColocatedNodes; n != 2 {
+		t.Fatalf("colocated_nodes = %d, want 2", n)
 	}
 }

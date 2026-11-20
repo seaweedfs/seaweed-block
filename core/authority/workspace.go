@@ -273,25 +273,37 @@ func (p *Publisher) workspaceLineLocked(volume string) (subKey, assignmentState,
 }
 
 func (p *Publisher) persistWorkspaceLocked(volume string, s *WorkspaceState) error {
+	_, _, err := p.persistWorkspaceTimedLocked(volume, s)
+	return err
+}
+
+// persistWorkspaceTimedLocked is persistWorkspaceLocked that also reports how
+// long the durable store write itself took (write) and whether it was
+// attempted (wrote is false when it refused before writing). Caller holds
+// p.mu.
+func (p *Publisher) persistWorkspaceTimedLocked(volume string, s *WorkspaceState) (write time.Duration, wrote bool, err error) {
 	if p.store == nil || p.workspaceUncertain[volume] {
-		return fmt.Errorf("workspace durable store unavailable or uncertain")
+		return 0, false, fmt.Errorf("workspace durable store unavailable or uncertain")
 	}
 	_, line, ok := p.workspaceLineLocked(volume)
 	if !ok {
-		return fmt.Errorf("workspace authority missing")
+		return 0, false, fmt.Errorf("workspace authority missing")
 	}
 	i := line.info
 	record := DurableRecord{VolumeID: volume, ReplicaID: i.ReplicaID, Epoch: i.Epoch, EndpointVersion: i.EndpointVersion, DataAddr: i.DataAddr, CtrlAddr: i.CtrlAddr,
 		WriteSeq: p.writeSeqByVolume[volume] + 1, Workspace: cloneWorkspace(s)}
-	if err := p.store.Put(record); err != nil {
+	start := time.Now()
+	err = p.store.Put(record)
+	write = time.Since(start)
+	if err != nil {
 		p.workspaceUncertain[volume] = true
 		p.refreshLeaseViewLocked(volume)
-		return err
+		return write, true, err
 	}
 	p.writeSeqByVolume[volume] = record.WriteSeq
 	p.workspace[volume] = cloneWorkspace(s)
 	p.refreshLeaseViewLocked(volume)
-	return nil
+	return write, true, nil
 }
 
 type workspaceGrant struct {
