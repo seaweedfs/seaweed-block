@@ -44,6 +44,7 @@ func (h *Host) runWorkspaceLease(ctx context.Context, stop func(context.Context,
 			// The guard is not yet shared: publish it already fenced if a
 			// synchronous shutdown won the race with this installer.
 			guard.fenced = h.workspaceLeaseFenced || ctx.Err() != nil
+			guard.stopPending = h.workspaceStopPending
 			h.view.workspaceGuard.Store(guard)
 			h.workspaceLeaseMu.Unlock()
 			return guard.Run(ctx)
@@ -53,6 +54,22 @@ func (h *Host) runWorkspaceLease(ctx context.Context, stop func(context.Context,
 			return ctx.Err()
 		case <-tick.C:
 		}
+	}
+}
+
+// WorkspaceStopPending is called when a graceful stop of volumeID has begun
+// (its chunk layer is being detached): the lease guard then polls the master
+// at a short cadence so it fences soon after the revocation instead of at its
+// next normal renewal. Other volume ids are ignored. Never blocks.
+func (h *Host) WorkspaceStopPending(volumeID string) {
+	if volumeID != h.cfg.VolumeID {
+		return
+	}
+	h.workspaceLeaseMu.Lock()
+	defer h.workspaceLeaseMu.Unlock()
+	h.workspaceStopPending = true
+	if g := h.view.workspaceGuard.Load(); g != nil {
+		g.StopPending()
 	}
 }
 

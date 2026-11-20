@@ -915,6 +915,9 @@ func (p *DurableProvider) DetachVolume(ctx context.Context, volumeID string) (st
 		trace("cut", dl)
 	}
 	h.chunkDetach = true
+	if hook := p.cfg.OnChunkDetach; hook != nil {
+		hook(volumeID)
+	}
 	if stop := p.testDetachStopIO; stop != nil {
 		err = stop(cutCtx)
 	} else {

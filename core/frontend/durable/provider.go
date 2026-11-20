@@ -179,6 +179,11 @@ type ProviderConfig struct {
 	// host's 30 s I/O timeout; a freeze past the 5 s target is logged as an
 	// alarm. Cooperative: a syscall that never returns is not bounded.
 	DetachFreezeTimeout time.Duration
+	// OnChunkDetach, optional, is called with the volume id when DetachVolume
+	// starts a detach (a graceful stop), before the drain and final cut, so
+	// the host can watch for the coming lease revocation. It runs under the
+	// volume's attach lock: it must not block or call back into the provider.
+	OnChunkDetach func(volumeID string)
 	// ChunkDirtyThreshold is the number of candidate chunks above which
 	// a cut pre-copies (stages) chunks before its barrier, in rounds of
 	// this size; copy-before-write copies the rest outside the barrier.

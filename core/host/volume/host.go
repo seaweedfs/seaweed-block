@@ -171,6 +171,7 @@ type Host struct {
 	// workspaceLeaseMu -> guard.mu; never hold either across RPC or drain.
 	workspaceLeaseMu     sync.Mutex
 	workspaceLeaseFenced bool
+	workspaceStopPending bool
 	readyOnce            atomic.Bool
 	readyMarkerMu        sync.Mutex
 	supportingReadyMarks map[string]struct{}

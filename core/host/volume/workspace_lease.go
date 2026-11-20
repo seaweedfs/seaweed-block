@@ -39,6 +39,29 @@ type WorkspaceLeaseGuard struct {
 	// because the shutdown it triggers is otherwise silent (issue #205).
 	cause  string
 	logged bool
+	// stopPending is set by StopPending and never cleared: a detached host
+	// does not serve again under this guard. kick wakes Run from its sleep.
+	stopPending bool
+	kick        chan struct{}
+}
+
+// stopPendingPoll is the renewal cadence while a stop is pending, so the
+// master's revocation is seen within this bound instead of the normal
+// renewal delay (up to 10 s).
+const stopPendingPoll = 250 * time.Millisecond
+
+// StopPending records that a graceful stop of this workspace has begun (the
+// chunk layer is being detached) and wakes Run to renew at once; from then on
+// Run renews every stopPendingPoll until the guard fences. Idempotent, safe
+// from any goroutine, never blocks and makes no RPC.
+func (g *WorkspaceLeaseGuard) StopPending() {
+	g.mu.Lock()
+	g.stopPending = true
+	g.mu.Unlock()
+	select {
+	case g.kick <- struct{}{}:
+	default:
+	}
 }
 
 // fenceLocked latches the fence and records its first cause. Caller holds mu.
@@ -76,7 +99,7 @@ func NewWorkspaceLeaseGuard(base frontend.ProjectionView, client WorkspaceLeaseC
 	if now == nil {
 		now = time.Now
 	}
-	return &WorkspaceLeaseGuard{base: base, client: client, id: control.WorkspaceIdentity{VolumeId: id.VolumeId, ReplicaId: id.ReplicaId, Epoch: id.Epoch}, stop: stop, now: now}, nil
+	return &WorkspaceLeaseGuard{base: base, client: client, id: control.WorkspaceIdentity{VolumeId: id.VolumeId, ReplicaId: id.ReplicaId, Epoch: id.Epoch}, stop: stop, now: now, kick: make(chan struct{}, 1)}, nil
 }
 
 func (g *WorkspaceLeaseGuard) Projection() frontend.Projection {
@@ -268,12 +291,16 @@ func (g *WorkspaceLeaseGuard) Run(ctx context.Context) error {
 		if g.until.IsZero() {
 			delay = time.Second
 		}
+		pending := g.stopPending
 		g.mu.Unlock()
 		if delay < 50*time.Millisecond {
 			delay = 50 * time.Millisecond
 		}
 		if delay > 10*time.Second {
 			delay = 10 * time.Second
+		}
+		if pending && delay > stopPendingPoll {
+			delay = stopPendingPoll
 		}
 		select {
 		case <-ctx.Done():
@@ -286,6 +313,7 @@ func (g *WorkspaceLeaseGuard) Run(ctx context.Context) error {
 			g.operation.Unlock()
 			return err
 		case <-time.After(delay):
+		case <-g.kick:
 		}
 	}
 }
