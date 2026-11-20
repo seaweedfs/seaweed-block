@@ -349,3 +349,83 @@ func TestNativeReplacementRecoveredBatchFrontier(t *testing.T) {
 		t.Fatalf("post-recovery append bytes: %v", err)
 	}
 }
+
+func TestNativeReplacementApplyDirtSurvivesCheckpoint(t *testing.T) {
+	s, _ := newMappedCheckpointStoreV3(t)
+	if err := s.SeedChunkFrontier(4); err != nil {
+		t.Fatal(err)
+	}
+	f := newFakeChunkRemote()
+	l := mustAttach(t, s, f, ctConfig(1))
+	if err := s.ApplyEntry(16, blk(0x16), 5); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.flusher.flushOnce(); err != nil {
+		t.Fatal(err)
+	}
+	if s.CheckpointLSN() != 5 || s.dm.len() != 0 {
+		t.Fatal("setup did not checkpoint applied WAL")
+	}
+	if err := l.EvictChunk(4); !errors.Is(err, errChunkEvictRefused) {
+		t.Fatalf("eviction ignored applied native map dirt: %v", err)
+	}
+	cut, err := l.Cut(ctTimeout(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := f.imageOf(t, cut.Head)
+	if !bytes.Equal(got[16*ctBlockSize:17*ctBlockSize], blk(0x16)) {
+		t.Fatal("capture omitted checkpointed ApplyEntry bytes")
+	}
+}
+
+func TestNativeReplacementRecoverInvalidatesStagedImage(t *testing.T) {
+	s, f, l, _ := precopyLayer(t, 1, 3)
+	if !s.FormatV3() {
+		t.Fatal("replacement requires native v3")
+	}
+	want := blk(0xA7)
+	recovered := false
+	l.testAfterStageHook = func(round int) {
+		if round != 0 || recovered {
+			return
+		}
+		d := s.v3.pub.current()
+		head := s.v3.w.logicalHeadV3()
+		record, err := encodeWALEntryV3(walEntryV3{LSN: s.NextLSN(), Type: walEntryWrite, LBA: 0, Length: d.BlockSize, Data: want, Nonce: d.Nonce, LogicalStart: head, DurableLSN: d.W}, d.BlockSize, d.VolumeSize/uint64(d.BlockSize))
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		// A complete unacknowledged record can remain beyond the captured writer
+		// head. Its nonce/cursor/CRC are native v3, not a legacy scanner fixture.
+		if _, err = s.fd.WriteAt(record, int64(d.WALOffset+head%d.WALSize)); err != nil {
+			t.Error(err)
+			return
+		}
+		if _, err = s.Recover(); err != nil {
+			t.Error(err)
+			return
+		}
+		got, err := s.Read(0)
+		if err != nil || !bytes.Equal(got, want) {
+			t.Errorf("native prefix not recovered: %v", err)
+			return
+		}
+		recovered = true
+	}
+	cut, err := l.Cut(ctTimeout(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !recovered || cut.Stats.StagedChunks == 0 {
+		t.Fatal("staged/recovery schedule did not run")
+	}
+	if !bytes.Equal(f.imageOf(t, cut.Head)[:ctBlockSize], want) {
+		t.Fatal("cut reused bytes staged before native Recover")
+	}
+	assertNoIntentsLeft(t, f)
+}
