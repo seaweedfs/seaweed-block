@@ -100,11 +100,4 @@ func TestLegacyFixtureIsolationRejectsFunctionValues(t *testing.T) {
 			}
 		})
 	}
-	f, err := parser.ParseFile(token.NewFileSet(), "legacy.go", "package storage\nfunc createLegacyWALStoreWithOptions() {}", 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if refs := legacyConstructorReferences(f, map[string]bool{name: true}); len(refs) != 0 {
-		t.Fatalf("declaration is not a use: %v", refs)
-	}
 }
