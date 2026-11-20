@@ -48,6 +48,21 @@ func TestAdapter_ProbeUsesFreshBoundsBeforePreparingRecovery(t *testing.T) {
 	}
 }
 
+func TestAdapter_OneRecoveryFromPostCloseStalledAck(t *testing.T) {
+	a, exec, _ := dedupAdapter(t)
+	a.OnSessionClose(SessionCloseResult{ReplicaID: "r1", SessionID: exec.latestSessionID("StartCatchUp"), Success: true, AchievedLSN: 100})
+	for i := 0; i < 8; i++ {
+		a.OnDurableAck(DurableAckResult{ReplicaID: "r1", EndpointVersion: 1, TransportEpoch: 1, DurableLSN: 100, PrimaryTailLSN: 10, PrimaryHeadLSN: uint64(200 + i)})
+		if got := countStarts(exec, "StartCatchUp"); got > 1 {
+			if got != 2 {
+				t.Fatalf("one stalled ack emitted duplicate recovery: starts=%d", got)
+			}
+			return
+		}
+	}
+	t.Fatal("stalled ack never requested legitimate new recovery")
+}
+
 func TestAdapter_ConcurrentOldProbesNeverRestartHealthyRecovery(t *testing.T) {
 	for _, n := range []int{8, 5} {
 		t.Run(strconv.Itoa(n), func(t *testing.T) {

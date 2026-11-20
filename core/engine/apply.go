@@ -354,6 +354,7 @@ func applyDurableAck(st *ReplicaState, e DurableAckObserved, r *ApplyResult, tra
 			TargetLSN:       fact.PrimaryH,
 		})
 		trace("command", "StartCatchUp (durable ack stalled)")
+		return // this observation already selected and emitted its recovery
 	}
 	if lag == LagDecisionStartRebuild && canEmitRecoveryFromDurableAck(st) {
 		st.Recovery.R = st.Recovery.DurableAckR
@@ -369,6 +370,7 @@ func applyDurableAck(st *ReplicaState, e DurableAckObserved, r *ApplyResult, tra
 			TargetLSN:       fact.PrimaryH,
 		})
 		trace("command", "StartRebuild (durable ack below retention)")
+		return // do not emit a second recovery through post-close decide
 	}
 	if st.Recovery.PostCloseDurableAckKnown {
 		decide(st, r, trace)
