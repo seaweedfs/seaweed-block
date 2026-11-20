@@ -1224,6 +1224,9 @@ func (l *chunkLayerImpl) SettleDetach(ctx context.Context) (detachSettlement, ch
 		}
 	}
 	// Settled: the detach landed, or it can never land.
+	l.stMu.Lock()
+	l.reusable = nil
+	l.stMu.Unlock()
 	l.dropIntents(ctx, intents)
 	l.stMu.Lock()
 	defer l.stMu.Unlock()
@@ -1341,6 +1344,9 @@ func (l *chunkLayerImpl) resolvePending(ctx context.Context) (err error) {
 		}
 	}
 	// Settled: the proposal landed or can never land.
+	l.stMu.Lock()
+	l.reusable = nil
+	l.stMu.Unlock()
 	l.dropIntents(ctx, intents)
 	l.stMu.Lock()
 	defer l.stMu.Unlock()
@@ -1637,27 +1643,7 @@ func (l *chunkLayerImpl) sleep(d time.Duration) bool {
 // cut is settled. A failed delete is kept and retried by the next cut; it
 // never fails a cut whose outcome is already settled.
 func (l *chunkLayerImpl) dropIntent(ctx context.Context, id string) {
-	if id == "" {
-		return
-	}
-	l.stMu.Lock()
-	keep := false
-	for idx, sc := range l.reusable {
-		if l.closed || l.fenced || sc.ver != l.chunkVersion(idx) || sc.headGen != l.head.Gen {
-			delete(l.reusable, idx)
-			continue
-		}
-		keep = keep || sc.intent == id
-	}
-	l.stMu.Unlock()
-	if keep {
-		return
-	}
-	if err := l.remote.DeleteIntent(ctx, id); err != nil {
-		l.stMu.Lock()
-		l.leftoverIntents = append(l.leftoverIntents, id)
-		l.stMu.Unlock()
-	}
+	l.dropIntents(ctx, []string{id})
 }
 
 // readChunk copies chunk idx from the store (the barrier copy, the
@@ -1681,8 +1667,29 @@ func (l *chunkLayerImpl) readChunk(idx uint64) ([]byte, error) {
 // dropIntents drops every intent of a settled cut (staging rounds and
 // the barrier).
 func (l *chunkLayerImpl) dropIntents(ctx context.Context, ids []string) {
+	// A wave roots several chunks with one intent. Build the live root set
+	// once, rather than rescanning every cached chunk for each delete.
+	l.stMu.Lock()
+	keep := make(map[string]bool)
+	for idx, sc := range l.reusable {
+		if l.closed || l.fenced || sc.ver != l.chunkVersion(idx) || sc.headGen != l.head.Gen {
+			delete(l.reusable, idx)
+			continue
+		}
+		keep[sc.intent] = true
+	}
+	l.stMu.Unlock()
+	seen := make(map[string]bool)
 	for _, id := range ids {
-		l.dropIntent(ctx, id)
+		if id == "" || keep[id] || seen[id] {
+			continue
+		}
+		seen[id] = true
+		if err := l.remote.DeleteIntent(ctx, id); err != nil {
+			l.stMu.Lock()
+			l.leftoverIntents = append(l.leftoverIntents, id)
+			l.stMu.Unlock()
+		}
 	}
 }
 
