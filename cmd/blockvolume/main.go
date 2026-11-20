@@ -674,6 +674,11 @@ func run(f flags) int {
 					cfg.ChunkCOWSpillLimit = f.chunk.hostLimit.COWBytes
 				}
 			}
+			// A detach is a graceful stop: the lease guard renews at a short
+			// cadence for the revocation that follows instead of waiting out
+			// its renewal delay, until the detach provably aborts and resumes.
+			cfg.OnChunkDetach = h.WorkspaceStopPending
+			cfg.OnChunkDetachResumed = h.WorkspaceStopResumed
 			if chunkErr == nil {
 				cfg.ChunkRemoteFor = chunk.remoteFor
 				workspaceRemoteFor = chunk.remoteFor
