@@ -903,6 +903,13 @@ func (p *DurableProvider) DetachVolume(ctx context.Context, volumeID string) (st
 	// the cut gets three quarters, the settlement what is left. The bound is
 	// cooperative (contexts): a syscall that never returns is not bounded here.
 	var start time.Time
+	var stopIOReturned time.Time
+	defer func() {
+		if !stopIOReturned.IsZero() {
+			// Emit after the cut releases its barrier, using the actual return time.
+			log.Printf("durable: volume=%s StopIO returned at %s", volumeID, stopIOReturned.UTC().Format(time.RFC3339Nano))
+		}
+	}()
 	accountCtx, countCAS := storage.WithChunkCASAccounting(ctx)
 	var casAtFreeze uint64
 	cutCtx, cancel := context.WithCancelCause(accountCtx)
@@ -948,6 +955,7 @@ func (p *DurableProvider) DetachVolume(ctx context.Context, volumeID string) (st
 			if !h.backend.TryStopIO("chunk pre-copy: final detached cut") {
 				return false
 			}
+			stopIOReturned = time.Now()
 			h.chunkDetach = true
 			beginFreeze()
 			return true
@@ -988,6 +996,9 @@ func (p *DurableProvider) DetachVolume(ctx context.Context, volumeID string) (st
 			err = stop(cutCtx)
 		} else {
 			err = h.backend.StopIO(cutCtx, "chunk detach: I/O stopped until a new attach")
+		}
+		if err == nil {
+			stopIOReturned = time.Now()
 		}
 		if err == nil {
 			p.stopChunkLoop(h)
