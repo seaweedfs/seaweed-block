@@ -173,8 +173,11 @@ func TestChunkCutUploadDeadlineBoundRetainsDirt(t *testing.T) {
 	w.write(t, s, 0, 0x51)
 	ctx, cancel := context.WithTimeout(context.Background(), 1700*time.Millisecond)
 	defer cancel()
-	if _, err := layer.Cut(ctx); err == nil {
-		t.Fatal("persistent upload outage published")
+	if _, err := layer.Cut(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("persistent upload outage ended before caller deadline: %v", err)
+	}
+	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		t.Fatalf("upload retry returned before caller context expired: %v", ctx.Err())
 	}
 	if layer.Stats().CutsAborted["upload"] != 1 {
 		t.Fatal("missing upload abort status")
