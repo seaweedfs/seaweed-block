@@ -23,3 +23,20 @@ func TestHealthyPrefixRequiresCompletedRecoveryAndPostCloseAck(t *testing.T) {
 	}
 	t.Fatal("post-close ack did not publish certified recovery prefix")
 }
+
+func TestHealthyProbeDoesNotCertifyRecoveryPrefix(t *testing.T) {
+	st := helperPrime(t, 100, 1, 100)
+	result := Apply(st, FenceCompleted{ReplicaID: "r1", Epoch: 1, EndpointVersion: 1})
+	found := false
+	for _, command := range result.Commands {
+		if healthy, ok := command.(PublishHealthy); ok {
+			found = true
+			if healthy.CertifiedPrefix != 0 || healthy.RecoverySessionID != 0 {
+				t.Fatalf("plain healthy probe invented a prefix certificate: %+v", healthy)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("control did not reach healthy publication")
+	}
+}
