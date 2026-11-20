@@ -2,6 +2,7 @@ package durable_test
 
 import (
 	"context"
+	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"sync"
 	"testing"
@@ -24,7 +25,8 @@ func (r *beltClaimNotice) CASHead(ctx context.Context, v storage.ChunkHeadVersio
 
 func TestHeadBeltProviderCloseCancelsCooling(t *testing.T) {
 	r := &beltClaimNotice{ChunkRemote: seededRemote(t), claimed: make(chan struct{})}
-	p := chunkProvider(t, t.TempDir(), r, v1View(), 0)
+	view := newStubView(healthyProj(frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 4, EndpointVersion: 2}))
+	p := chunkProvider(t, t.TempDir(), r, view, 0)
 	if _, err := p.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}
