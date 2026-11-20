@@ -65,15 +65,20 @@ func (l *chunkLayerImpl) PrecopyDetach(ctx context.Context, stopIO func() bool) 
 	if stopIO == nil {
 		return ChunkCutResult{}, fmt.Errorf("%w: missing I/O stop", ErrPrecopyUnknown)
 	}
-	l.capMu.Lock()
+	ctx, cancel := context.WithTimeout(ctx, precopyDuration)
+	defer cancel()
+	if err := l.lockPrecopy(ctx); err != nil {
+		return ChunkCutResult{}, err
+	}
 	defer l.capMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return ChunkCutResult{}, err
+	}
 	if r, ok := l.storedDetach(); ok {
 		r.Precopy.Frozen = true
 		return r, nil
 	}
 	ctx, countCAS := WithChunkCASAccounting(ctx)
-	ctx, cancel := context.WithTimeout(ctx, precopyDuration)
-	defer cancel()
 	var report PrecopyReport
 	var frozenAt time.Time
 	var casAtFreeze uint64
@@ -197,5 +202,28 @@ func (l *chunkLayerImpl) samplePrecopy(st chunkCutStats) {
 	l.precopySamples = append(l.precopySamples, s)
 	if len(l.precopySamples) > 32 {
 		l.precopySamples = l.precopySamples[len(l.precopySamples)-32:]
+	}
+}
+
+// A queued caller's cooperative budget starts before pipeline ownership.
+// No background lock waiter can outlive cancellation or capture a later cut.
+func (l *chunkLayerImpl) lockPrecopy(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if l.capMu.TryLock() {
+		return nil
+	}
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-tick.C:
+			if l.capMu.TryLock() {
+				return nil
+			}
+		}
 	}
 }

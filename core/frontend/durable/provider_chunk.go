@@ -892,14 +892,14 @@ func (p *DurableProvider) DetachVolume(ctx context.Context, volumeID string) (st
 	}()
 	var r storage.ChunkCutResult
 	if p.cfg.ChunkDetachPrecopy {
-		// Cancel/join the periodic owner before any final freeze, while serving.
-		p.stopChunkLoop(h)
 		owner, ok := layer.(interface {
 			PrecopyDetach(context.Context, func() bool) (storage.ChunkCutResult, error)
 		})
 		if !ok {
 			return r, 0, fmt.Errorf("%w: layer lacks pre-copy", storage.ErrPrecopyUnknown)
 		}
+		// Cancel/join the periodic owner before any final freeze, while serving.
+		p.stopChunkLoop(h)
 		r, err = owner.PrecopyDetach(cutCtx, func() bool {
 			if !h.backend.TryStopIO("chunk pre-copy: final detached cut") {
 				return false
