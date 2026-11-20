@@ -138,18 +138,20 @@ func TestPrecopyFreezeTerminalStopWakesQueuedIO(t *testing.T) {
 				t.Fatalf("command escaped freeze: %v", result)
 			case <-time.After(30 * time.Millisecond):
 			}
-			want := frontend.ErrNotReady
-			if terminal == "close" {
-				want = frontend.ErrBackendClosed
-				if err := b.Close(); err != nil {
-					t.Fatal(err)
-				}
-			} else {
+			if terminal == "stop" {
 				gate.SetOperational(false, "workspace lease self-fence")
+				select {
+				case <-done:
+					t.Fatalf("host fence completed a held command: %v", result)
+				case <-time.After(30 * time.Millisecond):
+				}
+			}
+			if err := b.Close(); err != nil {
+				t.Fatal(err)
 			}
 			select {
 			case <-done:
-				if !errors.Is(result, want) || errors.Is(result, frontend.ErrBackendBusy) {
+				if !errors.Is(result, frontend.ErrBackendClosed) || errors.Is(result, frontend.ErrBackendBusy) {
 					t.Fatalf("terminal gate masked: %v", result)
 				}
 			case <-time.After(time.Second):

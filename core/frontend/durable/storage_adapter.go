@@ -477,7 +477,12 @@ func (b *StorageBackend) setOperationalLocked(ok bool, evidence string) {
 	b.opEvidence.Store(evidence)
 	b.operational.Store(ok)
 	b.waitAttachReady = false
-	b.finishPrecopyLocked(ok)
+	// A host drain closes storage admission, but is not the old path's
+	// teardown. Keep a final pre-copy queue parked until Close or its budget;
+	// publishing readiness loss must not complete commands on that path.
+	if ok || b.precopy == nil || !b.precopy.active {
+		b.finishPrecopyLocked(ok)
+	}
 	b.notifyReadReadyLocked()
 }
 

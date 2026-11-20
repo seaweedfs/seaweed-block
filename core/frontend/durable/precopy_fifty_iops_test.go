@@ -18,14 +18,14 @@ import (
 // peer reply is held until a separate control probe witnesses closed admission,
 // then released after20ms. This is a forced schedule, not physical NVMe proof.
 func TestPrecopyFiftyIOPSSyncConvergesFirstAttempt(t *testing.T) {
-	precopyFiftyIOPS(t, 3)
+	precopyFiftyIOPS(t, 3, false)
 }
 
-func TestPrecopyFiftyIOPSOnePriorSampleConvergesFirstAttempt(t *testing.T) {
-	precopyFiftyIOPS(t, 1)
+func TestPrecopyFiftyIOPSUnknownCostKeepsServing(t *testing.T) {
+	precopyFiftyIOPS(t, 1, true)
 }
 
-func precopyFiftyIOPS(t *testing.T, samples byte) {
+func precopyFiftyIOPS(t *testing.T, samples byte, wantUnknown bool) {
 	t.Helper()
 	remote := storage.NewMemChunkRemote()
 	p := precopyProvider(t, remote, &parkView{stubView: v1View()})
@@ -131,6 +131,15 @@ func precopyFiftyIOPS(t *testing.T, samples byte) {
 	result, _, err := p.DetachVolume(ctx, "v1")
 	stopped.Store(true)
 	t.Logf("attempts=%d drain=%s estimate=%s frozen=%t guest_errors=%d", result.Precopy.Attempts, result.Precopy.Drain, result.Precopy.Estimate, result.Precopy.Frozen, guestErrors.Load())
+	if wantUnknown {
+		if !errors.Is(err, storage.ErrPrecopyUnknown) || result.Precopy.Frozen || guestErrors.Load() != 0 {
+			t.Fatalf("unknown cost did not preserve live service: report=%+v guest_errors=%d err=%v", result.Precopy, guestErrors.Load(), err)
+		}
+		if _, err := backend.Write(ctx, 12288, block(0x7d)); err != nil {
+			t.Fatal("unknown-cost refusal stopped the frontend:", err)
+		}
+		return
+	}
 	if err != nil || !result.Precopy.Frozen || result.Precopy.Attempts != 1 {
 		t.Fatalf("50IOPS cutover: report=%+v err=%v", result.Precopy, err)
 	}
