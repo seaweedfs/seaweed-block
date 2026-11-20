@@ -24,6 +24,18 @@ func newTest(t *testing.T, c Config) *Limiter {
 	if e != nil {
 		t.Fatal(e)
 	}
+	t.Cleanup(func() {
+		l.mu.Lock()
+		ids := make([]uint64, 0, len(l.live))
+		for id := range l.live {
+			ids = append(ids, id)
+		}
+		l.mu.Unlock()
+		for _, id := range ids {
+			l.Release(id)
+		}
+		l.Close()
+	})
 	return l
 }
 func settled(t *testing.T, l *Limiter) {
@@ -45,9 +57,6 @@ func settled(t *testing.T, l *Limiter) {
 func TestSlotsUrgentAndJoinedRelease(t *testing.T) {
 	c := testConfig(t)
 	a, b, d := newTest(t, c), newTest(t, c), newTest(t, c)
-	defer a.Close()
-	defer b.Close()
-	defer d.Close()
 	x, e := a.Admit(context.Background(), c.PayloadBytes, nil)
 	if e != nil {
 		t.Fatal(e)
@@ -77,8 +86,6 @@ func TestSlotsUrgentAndJoinedRelease(t *testing.T) {
 func TestCOWAbortHoldsSlotUntilWorkerSettlement(t *testing.T) {
 	c := testConfig(t)
 	a, b := newTest(t, c), newTest(t, c)
-	defer a.Close()
-	defer b.Close()
 	revoked := make(chan struct{}, 1)
 	x, e := a.Admit(context.Background(), 1, func(error) { revoked <- struct{}{} })
 	if e != nil {
@@ -106,7 +113,6 @@ func TestHoldExpiryAndCloseDoNotSteal(t *testing.T) {
 	c := testConfig(t)
 	c.MaxHold = 30 * time.Millisecond
 	a, b := newTest(t, c), newTest(t, c)
-	defer b.Close()
 	revoked := make(chan struct{}, 4)
 	x, e := a.Admit(context.Background(), 1, func(error) { revoked <- struct{}{} })
 	if e != nil {
@@ -152,13 +158,11 @@ func TestFallbackAndConfigMismatch(t *testing.T) {
 	bad := c
 	bad.NormalSlots++
 	b := newTest(t, bad)
-	defer b.Close()
 	if _, e = b.Admit(context.Background(), 1, nil); !errors.Is(e, ErrConfig) {
 		t.Fatalf("config mismatch bypassed cap: %v", e)
 	}
 	c.Directory += "-missing"
 	f := newTest(t, c)
-	defer f.Close()
 	x, e = f.Admit(context.Background(), 1, nil)
 	if e != nil {
 		t.Fatal(e)
@@ -173,7 +177,6 @@ func TestRateCancellationAndPhase(t *testing.T) {
 	c := testConfig(t)
 	c.BytesPerSecond = 1024
 	l := newTest(t, c)
-	defer l.Close()
 	if e := l.WaitUpload(context.Background(), 2048); e != nil {
 		t.Fatal(e)
 	}
@@ -226,7 +229,6 @@ func TestKilledProcessReleasesButLiveHolderDoesNot(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	defer in.Close()
 	if e = cmd.Start(); e != nil {
 		t.Fatal(e)
 	}
@@ -251,7 +253,6 @@ func TestKilledProcessReleasesButLiveHolderDoesNot(t *testing.T) {
 		t.Fatal("child not ready")
 	}
 	l := newTest(t, c)
-	defer l.Close()
 	if _, e = l.Admit(context.Background(), 1, nil); !errors.Is(e, ErrBusy) {
 		t.Fatalf("live child not counted: %v", e)
 	}
@@ -272,7 +273,6 @@ func TestBackgroundPoolsDoNotBorrowCutReservations(t *testing.T) {
 	c.FillSlots = 1
 	c.IdleSlots = 1
 	l := newTest(t, c)
-	defer l.Close()
 	x, e := l.Admit(context.Background(), 1, nil)
 	if e != nil {
 		t.Fatal(e)
