@@ -10,9 +10,9 @@ func (l *chunkLayerImpl) captureBirths(candidates map[uint64]bool, frontier uint
 	defer l.s.mu.RUnlock()
 	for idx := range candidates {
 		birth := frontier
-		if l.usesOwnedMapV3() {
-			birth = min(l.s.v3.mapEntries[idx].LSN, frontier)
-		}
+
+		birth = min(l.s.v3.mapEntries[idx].LSN, frontier)
+
 		out[idx] = birth
 	}
 	return out

@@ -2,7 +2,6 @@ package storage
 
 import (
 	"bytes"
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -59,26 +58,6 @@ func TestWALStoreV3CloseKeepsTheNewestSlotAAndItsW(t *testing.T) {
 			}
 			readAllV3(t, r, 1, 1)
 		})
-	}
-}
-
-// The other legacy offset-0 writers (the checkpoint/recovery superblock
-// writer and the direct-frontier writer behind SeedChunkFrontier and Sync's
-// direct frontier) refuse on a v3 store and leave slot A untouched.
-func TestWALStoreV3LegacySuperblockWritersRefuse(t *testing.T) {
-	s, path := newStoreV3(t, WModeStrict)
-	t.Cleanup(func() { crashRecoveryHardeningStore(t, s) })
-	writeSynced(t, s, 1, 1)
-	rawA := readSlotRawV3(t, path, slotAOffsetV3)
-	junk := bytes.Repeat([]byte{0xEE}, 4096)
-	if err := s.writeSuperblockMetadata(junk); !errors.Is(err, errV3LegacySuperblockWrite) {
-		t.Fatalf("writeSuperblockMetadata: err = %v, want errV3LegacySuperblockWrite", err)
-	}
-	if err := s.syncDirectFrontierMetadata(junk); !errors.Is(err, errV3LegacySuperblockWrite) {
-		t.Fatalf("syncDirectFrontierMetadata: err = %v, want errV3LegacySuperblockWrite", err)
-	}
-	if got := readSlotRawV3(t, path, slotAOffsetV3); !bytes.Equal(got, rawA) {
-		t.Fatal("a refused legacy writer changed descriptor slot A")
 	}
 }
 

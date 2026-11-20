@@ -77,9 +77,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, buildinfo.Version("sw-block"))
 		return ops.VolumeStatusExitOK
 	}
-	if args[0] == "migrate-v3" {
-		return runMigrateV3(args[1:], stdout, stderr)
-	}
 	if args[0] != "ops" {
 		fmt.Fprintf(stderr, "sw-block: unknown command %q\n", args[0])
 		usage(stderr)

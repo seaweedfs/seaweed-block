@@ -44,25 +44,3 @@ func TestChunkLayer_FreshVolumeStartsWithEmptyBitmap(t *testing.T) {
 		})
 	}
 }
-
-// Control: an existing volume (not fresh) without a bitmap reconciles its
-// local image against HEAD before it publishes, so a chunk that differs
-// from HEAD without a recorded write is still uploaded by its first cut.
-func TestChunkLayer_LostBitmapReconciles(t *testing.T) {
-	src := make([]byte, ctNumBlocks*ctBlockSize)
-	copy(src, makeBlock(ctBlockSize, 0x44)) // HEAD's block 0 differs from the local image
-	f := newFakeChunkRemote()
-	f.seedHead(t, src, 0, 0) // an older epoch: this holder may publish over it
-	s, _ := newLegacyChunkTestStore(t)
-	layer := mustAttach(t, s, f, ctConfig(1)) // waits for reconciliation
-	if st := layer.Stats(); st.Reconciling || st.ReconcileTotal == 0 || st.ReconcileDone != st.ReconcileTotal {
-		t.Fatalf("an existing volume without a bitmap did not reconcile: reconciling=%v done=%d/%d", st.Reconciling, st.ReconcileDone, st.ReconcileTotal)
-	}
-	w := newWriteLog()
-	w.write(t, s, ctNumBlocks-1, 0x33) // the last chunk, never HEAD's block 0 chunk
-	r, err := layer.Cut(ctTimeout(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertImage(t, "first cut after reconciliation vs the local image", f.imageOf(t, r.Head), w.imageAt(r.H))
-}

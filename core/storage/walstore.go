@@ -55,18 +55,16 @@ type WALStore struct {
 	fileSyncLatency iolatency.Histogram
 	metadata        BlockMetadata // immutable before publication
 
-	path                       string
-	fd                         *os.File
-	sb                         *superblock
-	wal                        *walWriter
-	dm                         *dirtyMap
-	committer                  *GroupCommitter
-	syncCache                  func() error
-	syncDirectFrontierMetadata func([]byte) error
-	writeSuperblockMetadata    func([]byte) error
-	syncSuperblockMetadata     func() error
-	flusher                    *flusher      // background WAL→extent applier; nil if disabled
-	admission                  *walAdmission // backpressure on WAL pressure; nil if disabled
+	path string
+	fd   *os.File
+	sb   *superblock
+
+	dm        *dirtyMap
+	committer *GroupCommitter
+	syncCache func() error
+
+	flusher   *flusher      // background WAL→extent applier; nil if disabled
+	admission *walAdmission // backpressure on WAL pressure; nil if disabled
 
 	// admissionTimeout is the per-Write deadline for admission. If
 	// the WAL stays above the hard watermark for longer than this,
@@ -109,12 +107,6 @@ type WALStore struct {
 	// only by the flusher.
 	checkpointLSN uint64
 
-	// pendingDirectFrontierLSN is set by AdvanceFrontier after direct
-	// extent writes (rebuild BASE lane). It is persisted as checkpoint
-	// metadata only after a successful Sync, so an un-synced BASE install
-	// cannot be mistaken for durable recovery progress after a crash.
-	pendingDirectFrontierLSN uint64
-
 	// recoveryRetentionLSNs is the operator-tunable retention window
 	// past checkpointLSN: the recovery scan accepts fromLSN as long
 	// as fromLSN > checkpointLSN - recoveryRetentionLSNs. Zero means
@@ -138,11 +130,6 @@ type WALStore struct {
 
 	syncs atomic.Uint64 // completed logical Sync calls (test/diagnostic)
 	instr writeInstrumentation
-
-	// multiBlockRecords is a disabled-by-default Phase 148 local prototype.
-	// It must not be wired into production paths before version/compatibility
-	// gates and mounted NVMe/TCP profiling pass.
-	multiBlockRecords bool
 
 	// v3 is non-nil for a format-v3 store (walstore_v3.go). Production
 	// selectors use v3; legacy formats require explicit offline migration.
@@ -206,57 +193,6 @@ func CreateWALStoreWithOptions(path string, numBlocks uint32, blockSize int, opt
 	return createWALStoreV3Configured(path, numBlocks, uint32(blockSize), 64*1024*1024, opts.WMode, 0, uint64(cb), opts)
 }
 
-// Frozen constructor for legacy-format regression fixtures; public Create
-// never reaches it after activation. Removed from production in row 14a.
-func createLegacyWALStoreWithOptions(path string, numBlocks uint32, blockSize int, opts WALStoreOptions) (*WALStore, error) {
-	if blockSize == 0 {
-		blockSize = DefaultBlockSize
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, fmt.Errorf("storage: mkdir %s: %w", filepath.Dir(path), err)
-	}
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o644)
-	if err != nil {
-		return nil, fmt.Errorf("storage: create %s: %w", path, err)
-	}
-
-	volumeBytes := uint64(numBlocks) * uint64(blockSize)
-	sb, err := newSuperblock(volumeBytes, createOptions{
-		BlockSize:   uint32(blockSize),
-		ExtentSize:  uint32(blockSize), // one block per extent slot keeps math trivial
-		ImplKind:    ImplKindWALStore,
-		ImplVersion: 1,
-	})
-	if err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	sb.CreatedAt = uint64(time.Now().UnixNano())
-
-	metadata, totalSize, err := bindBlockMetadata(f, &sb, opts, true, false)
-	if err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	if err := f.Truncate(totalSize); err != nil {
-		_ = f.Close()
-		return nil, fmt.Errorf("storage: preallocate %d bytes: %w", totalSize, err)
-	}
-	if _, err := f.Seek(0, 0); err != nil {
-		_ = f.Close()
-		return nil, fmt.Errorf("storage: seek to header: %w", err)
-	}
-	if _, err := sb.writeTo(f); err != nil {
-		_ = f.Close()
-		return nil, fmt.Errorf("storage: write header: %w", err)
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		return nil, fmt.Errorf("storage: fsync after create: %w", err)
-	}
-	return openInitializedWithMetadata(path, f, &sb, metadata)
-}
-
 // OpenWALStore opens an existing store file WITHOUT recovering it.
 // Call Recover() before any Read/Write to replay the WAL.
 func OpenWALStore(path string) (*WALStore, error) {
@@ -265,44 +201,6 @@ func OpenWALStore(path string) (*WALStore, error) {
 
 func OpenWALStoreWithOptions(path string, opts WALStoreOptions) (*WALStore, error) {
 	return openWALStoreV3WithOptions(path, true, opts)
-}
-
-func openLegacyWALStoreWithOptions(path string, opts WALStoreOptions) (*WALStore, error) {
-	f, err := os.OpenFile(path, os.O_RDWR, 0o644)
-	if err != nil {
-		return nil, fmt.Errorf("storage: open %s: %w", path, err)
-	}
-	if _, err := f.Seek(0, 0); err != nil {
-		_ = f.Close()
-		return nil, fmt.Errorf("storage: seek to header: %w", err)
-	}
-	sb, err := readSuperblock(f)
-	if err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	if err := sb.validate(); err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	metadata, _, err := bindBlockMetadata(f, &sb, opts, false, false)
-	if err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	return openInitializedWithMetadata(path, f, &sb, metadata)
-}
-
-// openInitialized is the shared constructor body used by both Create
-// and Open after the superblock is in place. It wires the WAL writer,
-// the dirty map, and the group committer; it does NOT replay the WAL
-// (that is Recover's job).
-func openInitialized(path string, f *os.File, sb *superblock) (*WALStore, error) {
-	return openInitializedWithMetadata(path, f, sb, nil)
-}
-
-func openInitializedWithMetadata(path string, f *os.File, sb *superblock, metadata BlockMetadata) (*WALStore, error) {
-	return openInitializedInternal(path, f, sb, metadata, nil)
 }
 
 // openInitializedInternal is openInitializedWithMetadata with an optional
@@ -324,8 +222,7 @@ func openInitializedInternal(path string, f *os.File, sb *superblock, metadata B
 		walHead:       sb.WALCheckpointLSN,
 		checkpointLSN: sb.WALCheckpointLSN,
 	}
-	wal := newWALWriter(f, sb.WALOffset, sb.WALSize, sb.WALHead, sb.WALTail, &s.instr)
-	s.wal = wal
+
 	if s.nextLSN < 1 {
 		s.nextLSN = 1
 	}
@@ -349,31 +246,6 @@ func openInitializedInternal(path string, f *os.File, sb *superblock, metadata B
 	go committer.Run()
 	s.committer = committer
 	s.syncCache = committer.SyncCache
-	// The two legacy superblock writers pwrite offset 0, which on a v3 file
-	// is descriptor slot A: they refuse on v3 (codex01 row 7 slice 4 P1).
-	// A v3 store publishes metadata only through its descriptor publisher.
-	s.syncDirectFrontierMetadata = func(data []byte) error {
-		if s.v3 != nil {
-			return errV3LegacySuperblockWrite
-		}
-		if _, err := f.WriteAt(data, 0); err != nil {
-			return fmt.Errorf("storage: pwrite direct frontier superblock: %w", err)
-		}
-		if err := f.Sync(); err != nil {
-			return fmt.Errorf("storage: fsync direct frontier superblock: %w", err)
-		}
-		return nil
-	}
-	s.writeSuperblockMetadata = func(data []byte) error {
-		if s.v3 != nil {
-			return errV3LegacySuperblockWrite
-		}
-		if _, err := f.WriteAt(data, 0); err != nil {
-			return err
-		}
-		return nil
-	}
-	s.syncSuperblockMetadata = f.Sync
 
 	// Background flusher: drains dirty map → extent, advances
 	// checkpoint, allows WAL recycling. Defaults are conservative
@@ -391,11 +263,11 @@ func openInitializedInternal(path string, f *os.File, sb *superblock, metadata B
 	// flusher via NotifyUrgent — same seam V2 wires for pressure-
 	// driven flushes.
 	s.admissionTimeout = 30 * time.Second
-	if s.v3 != nil {
-		// WAL pressure gets a budget below the host's I/O timeout. This bounds
-		// cooperative admission waits, not a blocking callback or physical I/O.
-		s.admissionTimeout = 4 * time.Second
-	}
+
+	// WAL pressure gets a budget below the host's I/O timeout. This bounds
+	// cooperative admission waits, not a blocking callback or physical I/O.
+	s.admissionTimeout = 4 * time.Second
+
 	s.admission = newWALAdmission(walAdmissionConfig{
 		MaxConcurrent: 64,
 		SoftWatermark: 0.70,
@@ -423,9 +295,7 @@ func openInitializedInternal(path string, f *os.File, sb *superblock, metadata B
 func (s *WALStore) walUsedFraction() float64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if s.v3 == nil {
-		return s.wal.usedFraction()
-	}
+
 	w := s.v3.w
 	if w == nil {
 		// Not a capacity decision: append must retain its typed binding refusal
@@ -473,114 +343,6 @@ func (s *WALStore) writeExtentUnlocked(lba uint32, data []byte) error {
 	if s.metadata != nil {
 		return s.metadata.OnExtentWrite(lba, data)
 	}
-	return nil
-}
-
-// persistCheckpoint advances the on-disk checkpoint LSN to highestLSN
-// (after the flusher has confirmed the extent writes are fsync'd).
-// Updates both the in-memory checkpointLSN and the on-disk
-// superblock.WALCheckpointLSN. The metadata write is fsynced before
-// the in-memory checkpoint advances, because the caller may recycle
-// the corresponding WAL bytes immediately after this method returns.
-func (s *WALStore) persistCheckpoint(highestLSN uint64) error {
-	return s.persistCheckpointReleasing(highestLSN, 0, 0, false)
-}
-
-// persistCheckpointAndRelease is persistCheckpoint that also releases the
-// WAL bytes through the entry at entryPhys (entryLen bytes long) when the
-// checkpoint reaches highestLSN. The released tail is persisted in the
-// same superblock before the writer may reuse those bytes.
-func (s *WALStore) persistCheckpointAndRelease(highestLSN, entryPhys, entryLen uint64) error {
-	return s.persistCheckpointReleasing(highestLSN, entryPhys, entryLen, true)
-}
-
-func (s *WALStore) persistCheckpointReleasing(highestLSN, entryPhys, entryLen uint64, release bool) error {
-	if s.v3 != nil {
-		return s.persistCheckpointV3(highestLSN, s.v3.recoverGen.Load())
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.stickyIOFault(); err != nil {
-		return err // no checkpoint advance after a fault, whenever it latched
-	}
-	requested := highestLSN
-	// Clamp the proposed checkpoint to the recycle floor reported
-	// by an external coordinator (e.g., the recovery package's
-	// PeerShipCoordinator). When a replica is in an active rebuild
-	// session and pin_floor < highestLSN, we hold the checkpoint at
-	// pin_floor so WAL entries the replica still depends on are
-	// retained. INV-RECYCLE-GATED-BY-MIN-ACTIVE-PIN.
-	if s.recycleFloorSrc != nil {
-		if floor, anyActive := s.recycleFloorSrc.MinPinAcrossActiveSessions(); anyActive {
-			if highestLSN > floor {
-				highestLSN = floor
-			}
-		}
-	}
-	advance := highestLSN > s.checkpointLSN
-	checkpoint := s.checkpointLSN
-	if advance {
-		checkpoint = highestLSN
-	}
-	// One snapshot of head and tail; the tail this flush releases is
-	// persisted here, before the writer may reuse its bytes.
-	head, tail := s.wal.bounds()
-	if release && checkpoint >= requested {
-		tail = s.wal.tailPastEntry(entryPhys, entryLen)
-	}
-	if !advance && tail == s.sb.WALTail {
-		return nil
-	}
-	if advance {
-		if s.metadata != nil {
-			if err := s.metadata.BeforeCheckpointAdvance(highestLSN); err != nil {
-				return fmt.Errorf("storage: block metadata before checkpoint %d: %w", highestLSN, err)
-			}
-		}
-		// The chunk layer's dirty bitmap must be durable before the checkpoint
-		// (and so the WAL tail) can pass the entries it covers.
-		if h := s.chunk.Load(); h != nil {
-			if err := h.sink.BeforeCheckpointAdvance(highestLSN); err != nil {
-				return fmt.Errorf("storage: chunk bitmap before checkpoint %d: %w", highestLSN, err)
-			}
-		}
-	}
-
-	sbCopy := *s.sb
-	sbCopy.WALCheckpointLSN = checkpoint
-	sbCopy.WALHead = head
-	sbCopy.WALTail = tail
-	buf := newSimpleByteBuf()
-	if _, err := sbCopy.writeTo(buf); err != nil {
-		return fmt.Errorf("storage: encode superblock: %w", err)
-	}
-	var writeErr error
-	err := s.syncFile(func() error {
-		checkpointWriteStart := time.Now()
-		writeErr = s.writeSuperblockMetadata(buf.bytes())
-		if s.flusher != nil {
-			s.flusher.instr.recordCheckpointWrite(len(buf.bytes()), time.Since(checkpointWriteStart), writeErr)
-		}
-		return writeErr
-	}, func() error {
-		checkpointSyncStart := time.Now()
-		err := s.syncSuperblockMetadata()
-		if s.flusher != nil {
-			s.flusher.instr.recordCheckpointSync(time.Since(checkpointSyncStart), err)
-		}
-		return err
-	})
-	if writeErr != nil {
-		return fmt.Errorf("storage: pwrite superblock: %w", writeErr)
-	}
-	if err != nil {
-		return fmt.Errorf("storage: fsync checkpoint superblock: %w", err)
-	}
-	s.checkpointLSN = checkpoint
-	s.sb.WALCheckpointLSN = checkpoint
-	s.sb.WALHead = sbCopy.WALHead
-	s.sb.WALTail = sbCopy.WALTail
-	s.wal.tailPersisted(sbCopy.WALTail)
 	return nil
 }
 
@@ -651,28 +413,28 @@ func (s *WALStore) Recover() (frontier uint64, err error) {
 	defer release() // also releases captureMu, after all lower locks
 	s.lifecycleMu.RLock()
 	defer s.lifecycleMu.RUnlock()
-	if s.v3 != nil {
-		// A v3 recovery holds the leader role for its whole run, so no W
-		// publication or acknowledgement straddles it (walstore_v3.go
-		// recoverGen). Order: lifecycleMu -> syncMu -> s.mu.
-		s.v3.syncMu.Lock()
-		defer s.v3.syncMu.Unlock()
-	}
+
+	// A v3 recovery holds the leader role for its whole run, so no W
+	// publication or acknowledgement straddles it (walstore_v3.go
+	// recoverGen). Order: lifecycleMu -> syncMu -> s.mu.
+	s.v3.syncMu.Lock()
+	defer s.v3.syncMu.Unlock()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.v3 != nil {
-		// The store lock orders both epoch boundaries with real map publishers.
-		// START invalidates old candidates; END also invalidates candidates
-		// prepared while this Recover was in flight, including on failure.
-		defer func() {
-			if endErr := s.v3.pub.invalidateMapProofV3(); endErr != nil {
-				frontier, err = 0, errors.Join(err, endErr)
-			}
-		}()
-		if err := s.v3.pub.invalidateMapProofV3(); err != nil {
-			return 0, err
+
+	// The store lock orders both epoch boundaries with real map publishers.
+	// START invalidates old candidates; END also invalidates candidates
+	// prepared while this Recover was in flight, including on failure.
+	defer func() {
+		if endErr := s.v3.pub.invalidateMapProofV3(); endErr != nil {
+			frontier, err = 0, errors.Join(err, endErr)
 		}
+	}()
+	if err := s.v3.pub.invalidateMapProofV3(); err != nil {
+		return 0, err
 	}
+
 	if s.closed {
 		return 0, errors.New("storage: Recover after Close")
 	}
@@ -689,67 +451,9 @@ func (s *WALStore) Recover() (frontier uint64, err error) {
 	// are never reused across it), also on a failed or partial scan. Runs
 	// before s.mu is released, so no read sees recovered bytes first.
 	defer s.noteChunkRecovery()
-	if s.v3 != nil {
-		return s.recoverV3()
-	}
-	s.dm.clear()
-	res, err := recoverWAL(s.fd, s.sb, s.dm)
-	if err != nil {
-		s.dm.clear()
-		return 0, err
-	}
-	if err := s.wal.restoreRecoveredBounds(res.WALHead, res.WALTail); err != nil {
-		s.dm.clear()
-		return 0, NewWALIntegrityFailure(err, "restore walstore recovery bounds")
-	}
-	if res.WALHead != s.sb.WALHead || res.WALTail != s.sb.WALTail {
-		// Persist the rebuilt bounds before any append: the writer never
-		// reuses bytes the on-disk superblock still declares retained.
-		sbCopy := *s.sb
-		sbCopy.WALHead, sbCopy.WALTail = res.WALHead, res.WALTail
-		buf := newSimpleByteBuf()
-		if _, err := sbCopy.writeTo(buf); err != nil {
-			s.dm.clear()
-			return 0, fmt.Errorf("storage: encode recovered superblock: %w", err)
-		}
-		var writeErr error
-		err := s.syncFile(func() error {
-			writeErr = s.writeSuperblockMetadata(buf.bytes())
-			return writeErr
-		}, func() error { return s.syncSuperblockMetadata() })
-		if writeErr != nil {
-			s.dm.clear()
-			return 0, fmt.Errorf("storage: pwrite recovered superblock: %w", writeErr)
-		}
-		if err != nil {
-			s.dm.clear()
-			return 0, fmt.Errorf("storage: fsync recovered superblock: %w", err)
-		}
-	}
-	s.wal.tailPersisted(res.WALTail)
-	s.sb.WALHead = res.WALHead
-	s.sb.WALTail = res.WALTail
-	s.recoveryWarnings = nil
-	if res.HoleSuspected {
-		s.holesSuspected++
-		s.recoveryWarnings = []string{WarningWALHoleSuspected + ": " + res.HoleDetail}
-	}
-	recoveredHead := s.checkpointLSN
-	if res.HighestLSN > recoveredHead {
-		recoveredHead = res.HighestLSN
-	}
-	if recoveredHead >= s.nextLSN {
-		s.nextLSN = recoveredHead + 1
-	}
-	if recoveredHead > s.syncedLSN {
-		s.syncedLSN = recoveredHead
-	}
-	s.walHead = recoveredHead
-	if s.walTail == 0 && s.syncedLSN > 0 {
-		// First write LSN observed becomes S baseline.
-		s.walTail = 1
-	}
-	return s.syncedLSN, nil
+
+	return s.recoverV3()
+
 }
 
 // Write appends one block to the WAL with a fresh LSN, updates the
@@ -823,28 +527,17 @@ func (s *WALStore) WriteContext(ctx context.Context, lba uint32, data []byte) (u
 	}
 	lsn := s.nextLSN
 
-	entry := &walEntry{
-		LSN:    lsn,
-		Type:   walEntryWrite,
-		LBA:    uint64(lba),
-		Length: uint32(len(data)),
-		Data:   data,
-	}
 	appendStart := time.Now()
 	var walRelOff uint64
 	var err error
-	if s.v3 != nil {
-		walRelOff, err = s.appendWriteV3(lba, data, lsn, func() error { return s.writeBudgetError(ctx, deadline) })
-	} else {
-		walRelOff, err = s.wal.append(entry)
-	}
+
+	walRelOff, err = s.appendWriteV3(lba, data, lsn, func() error { return s.writeBudgetError(ctx, deadline) })
+
 	s.instr.appendLatency.Observe(time.Since(appendStart))
 	// A failed pwrite may still leave complete records or padding in the file.
 	s.walMutation.Add(1)
 	if err != nil {
-		if s.v3 == nil {
-			s.noteAppendFailure(err)
-		}
+
 		s.mu.Unlock()
 		return 0, fmt.Errorf("storage: WAL append: %w", err)
 	}
@@ -929,115 +622,13 @@ func (s *WALStore) WriteBatchContext(ctx context.Context, startLBA uint32, block
 		return nil, err
 	}
 	firstLSN := s.nextLSN
-	if s.v3 != nil {
+	{
+
 		lsns, err := s.writeBatchV3Locked(startLBA, blocks, firstLSN, func() error { return s.writeBudgetError(ctx, deadline) })
 		s.mu.Unlock()
 		return lsns, err
 	}
-	useMultiBlock := s.multiBlockRecords && len(blocks) > 1
 
-	if useMultiBlock {
-		lsns, err := s.writeBatchMultiBlockLocked(startLBA, blocks, firstLSN)
-		s.mu.Unlock()
-		return lsns, err
-	}
-
-	entries := make([]walEntry, len(blocks))
-	lsns := make([]uint64, len(blocks))
-	for i, data := range blocks {
-		lsn := firstLSN + uint64(i)
-		lsns[i] = lsn
-		entries[i] = walEntry{
-			LSN:    lsn,
-			Type:   walEntryWrite,
-			LBA:    uint64(startLBA + uint32(i)),
-			Length: uint32(len(data)),
-			Data:   data,
-		}
-	}
-	appendStart := time.Now()
-	offsets, err := s.wal.appendBatch(entries)
-	s.instr.appendLatency.Observe(time.Since(appendStart))
-	// A failed pwrite may still leave complete records or padding in the file.
-	s.walMutation.Add(1)
-	if err != nil {
-		s.noteAppendFailure(err)
-		s.mu.Unlock()
-		return nil, fmt.Errorf("storage: WAL batch append: %w", err)
-	}
-	dirtyStart := time.Now()
-	for i, walRelOff := range offsets {
-		s.dm.put(uint64(startLBA+uint32(i)), walRelOff, lsns[i], uint32(len(blocks[i])))
-		s.noteChunkMutation(uint64(startLBA + uint32(i)))
-	}
-	s.instr.recordDirtyMapUpdate(len(offsets), time.Since(dirtyStart))
-
-	lastLSN := lsns[len(lsns)-1]
-	s.nextLSN += uint64(len(lsns))
-	if lastLSN > s.walHead {
-		s.walHead = lastLSN
-	}
-	if s.walTail == 0 {
-		s.walTail = firstLSN
-	}
-	s.mu.Unlock()
-	return lsns, nil
-}
-
-// writeBatchMultiBlockLocked appends one multi-block record while the caller
-// holds s.mu, so a failed append cannot consume an LSN range.
-func (s *WALStore) writeBatchMultiBlockLocked(startLBA uint32, blocks [][]byte, firstLSN uint64) ([]uint64, error) {
-	totalLen := 0
-	for _, data := range blocks {
-		totalLen += len(data)
-	}
-	payload := make([]byte, 0, totalLen)
-	for _, data := range blocks {
-		payload = append(payload, data...)
-	}
-	entry := &walEntry{
-		LSN:      firstLSN,
-		Reserved: uint64(len(blocks)),
-		Type:     walEntryWriteBatch,
-		LBA:      uint64(startLBA),
-		Length:   uint32(len(payload)),
-		Data:     payload,
-	}
-	appendStart := time.Now()
-	walRelOff, err := s.wal.append(entry)
-	s.instr.appendLatency.Observe(time.Since(appendStart))
-	// A failed pwrite may still leave complete records or padding in the file.
-	s.walMutation.Add(1)
-	if err != nil {
-		s.noteAppendFailure(err)
-		return nil, fmt.Errorf("storage: WAL multiblock append: %w", err)
-	}
-
-	lsns := make([]uint64, len(blocks))
-	dirtyStart := time.Now()
-	for i, data := range blocks {
-		lsn := firstLSN + uint64(i)
-		lsns[i] = lsn
-		s.dm.putAt(
-			uint64(startLBA+uint32(i)),
-			walRelOff,
-			uint32(i*int(s.sb.BlockSize)),
-			lsn,
-			uint32(len(data)),
-		)
-		s.noteChunkMutation(uint64(startLBA + uint32(i)))
-	}
-	s.instr.recordDirtyMapUpdate(len(blocks), time.Since(dirtyStart))
-
-	lastLSN := lsns[len(lsns)-1]
-	s.nextLSN += uint64(len(lsns))
-	if lastLSN > s.walHead {
-		s.walHead = lastLSN
-	}
-	if s.walTail == 0 {
-		s.walTail = firstLSN
-	}
-	return lsns, nil
 }
 
 func (s *WALStore) WriteInstrumentation() WriteInstrumentationStatus {
@@ -1069,57 +660,15 @@ func (s *WALStore) ReadContext(ctx context.Context, lba uint32) (data []byte, er
 	}
 	s.mu.RUnlock()
 
-	if s.v3 != nil {
-		if data, handled, err := s.readDirtyV3(lba); handled {
-			return data, err
-		}
-		return s.readFromExtentContext(ctx, lba)
-	}
-	if walRelOff, dataOffset, _, _, ok := s.dm.get(uint64(lba)); ok {
-		return s.readFromWAL(walRelOff, dataOffset)
+	if data, handled, err := s.readDirtyV3(lba); handled {
+		return data, err
 	}
 	return s.readFromExtentContext(ctx, lba)
+
 }
 
-// readFromWAL pulls a single block out of a WAL Write/Trim entry
-// previously deposited by Append. The walRelOff points at the start
-// of the entry; data starts at walEntryHeaderSize bytes into it.
-func (s *WALStore) readFromWAL(walRelOff uint64, dataOffset uint32) ([]byte, error) {
-	headerBuf := make([]byte, walEntryHeaderSize)
-	absOff := int64(s.sb.WALOffset + walRelOff)
-	if _, err := s.fd.ReadAt(headerBuf, absOff); err != nil {
-		return nil, fmt.Errorf("storage: WAL read header: %w", err)
-	}
-	if headerBuf[16] == walEntryTrim {
-		return make([]byte, s.sb.BlockSize), nil
-	}
-	length := parseLengthFromHeader(headerBuf)
-	if dataOffset >= length {
-		return nil, fmt.Errorf("storage: WAL read data offset %d >= length %d", dataOffset, length)
-	}
-	readLen := s.sb.BlockSize
-	if remaining := length - dataOffset; remaining < readLen {
-		readLen = remaining
-	}
-	data := make([]byte, readLen)
-	if _, err := s.fd.ReadAt(data, absOff+int64(walEntryPrefixSize)+int64(dataOffset)); err != nil {
-		return nil, fmt.Errorf("storage: WAL read data: %w", err)
-	}
-	// In the simple "one block per WAL write" case, length == blockSize.
-	if uint32(len(data)) > s.sb.BlockSize {
-		data = data[:s.sb.BlockSize]
-	}
-	return data, nil
-}
-
-// SetMultiBlockRecords toggles the Phase 150 disabled-by-default multi-block
-// WAL record prototype. Callers must keep this behind an explicit operator/test
-// opt-in until mounted NVMe/TCP profiling and format-compatibility gates pass.
-func (s *WALStore) SetMultiBlockRecords(enabled bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.multiBlockRecords = enabled
-}
+// SetMultiBlockRecords is retained for callers; native batching is always enabled.
+func (s *WALStore) SetMultiBlockRecords(enabled bool) {}
 
 func (s *WALStore) enableMultiBlockRecordsForTest(enabled bool) {
 	s.SetMultiBlockRecords(enabled)
@@ -1162,16 +711,11 @@ func (s *WALStore) readFromExtentContext(ctx context.Context, lba uint32) ([]byt
 		if data != nil {
 			return data, nil
 		}
-		// The miss may have waited on a remote fetch while this block was
-		// written: re-resolve through the normal path (dirty map/WAL first)
-		// before the extent. No lock is held here.
-		if s.v3 != nil {
-			if data, handled, err := s.readDirtyV3(lba); handled {
-				return data, err
-			}
-		} else if walRelOff, dataOffset, _, _, ok := s.dm.get(uint64(lba)); ok {
-			return s.readFromWAL(walRelOff, dataOffset)
+
+		if data, handled, err := s.readDirtyV3(lba); handled {
+			return data, err
 		}
+
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, hydrationPending(err)
@@ -1218,17 +762,17 @@ func (s *WALStore) Sync() (uint64, error) {
 		return 0, err
 	}
 	targetHead := s.walHead
-	targetDirectFrontier := s.pendingDirectFrontierLSN
+
 	var targetGen uint64
-	if s.v3 != nil {
-		// The logical Sync is gated while installing (DESIGN 7): exactly
-		// (0, ErrBaseInstalling), no batch, no new W.
-		if s.v3.pub.current().BaseState == BaseInstalling {
-			s.mu.RUnlock()
-			return 0, ErrBaseInstalling
-		}
-		targetGen = s.v3.recoverGen.Load() // captured with targetHead (Recover holds s.mu)
+
+	// The logical Sync is gated while installing (DESIGN 7): exactly
+	// (0, ErrBaseInstalling), no batch, no new W.
+	if s.v3.pub.current().BaseState == BaseInstalling {
+		s.mu.RUnlock()
+		return 0, ErrBaseInstalling
 	}
+	targetGen = s.v3.recoverGen.Load()
+
 	s.mu.RUnlock()
 
 	if s.walSyncCovered() {
@@ -1242,8 +786,9 @@ func (s *WALStore) Sync() (uint64, error) {
 		return 0, fmt.Errorf("storage: group commit fsync: %w", err)
 	}
 	s.syncs.Add(1)
+	{
 
-	if v := s.v3; v != nil {
+		v := s.v3
 		if h := v.testSyncBeforeCompletion; h != nil {
 			h()
 		}
@@ -1258,6 +803,7 @@ func (s *WALStore) Sync() (uint64, error) {
 			return 0, ErrBaseInstalling // an install began meanwhile
 		}
 	}
+
 	s.mu.Lock()
 	// A fault latched while this Sync waited (another caller's fsync or
 	// append, or a flusher fsync) refuses it: nothing is acknowledged.
@@ -1265,40 +811,7 @@ func (s *WALStore) Sync() (uint64, error) {
 		s.mu.Unlock()
 		return 0, err
 	}
-	if targetDirectFrontier > s.checkpointLSN && targetDirectFrontier <= targetHead {
-		if s.metadata != nil {
-			if err := s.metadata.BeforeCheckpointAdvance(targetDirectFrontier); err != nil {
-				s.mu.Unlock()
-				return 0, fmt.Errorf("storage: block metadata before direct frontier %d: %w", targetDirectFrontier, err)
-			}
-		}
-		if h := s.chunk.Load(); h != nil {
-			if err := h.sink.BeforeCheckpointAdvance(targetDirectFrontier); err != nil {
-				s.mu.Unlock()
-				return 0, fmt.Errorf("storage: chunk bitmap before direct frontier %d: %w", targetDirectFrontier, err)
-			}
-		}
-		sbCopy := *s.sb
-		sbCopy.WALCheckpointLSN = targetDirectFrontier
-		// WALHead is a logical byte cursor, not an LSN. Holding s.mu
-		// excludes appends while the second fsync makes this cursor durable.
-		sbCopy.WALHead = s.wal.logicalHeadValue()
-		buf := newSimpleByteBuf()
-		if _, err := sbCopy.writeTo(buf); err != nil {
-			s.mu.Unlock()
-			return 0, fmt.Errorf("storage: encode superblock: %w", err)
-		}
-		if err := s.syncFile(nil, func() error { return s.syncDirectFrontierMetadata(buf.bytes()) }); err != nil {
-			s.mu.Unlock()
-			return 0, err
-		}
-		s.checkpointLSN = targetDirectFrontier
-		s.sb.WALCheckpointLSN = targetDirectFrontier
-		s.sb.WALHead = sbCopy.WALHead
-		if s.pendingDirectFrontierLSN <= targetDirectFrontier {
-			s.pendingDirectFrontierLSN = 0
-		}
-	}
+
 	if targetHead > s.syncedLSN {
 		s.syncedLSN = targetHead
 	}
@@ -1369,31 +882,8 @@ func (s *WALStore) RecoveryRetentionLSNs() uint64 {
 	return s.recoveryRetentionLSNs
 }
 
-// AdvanceFrontier bumps the recorded frontier without writing data.
-// Used by the rebuild server to declare the replica's frontier
-// matches the primary's head once base blocks are installed.
-func (s *WALStore) AdvanceFrontier(lsn uint64) {
-	if s.v3 != nil {
-		return // v3 frontier jumps happen only inside MarkBaseComplete (rows 9 to 11)
-	}
-	s.bypassSyncDedup.Store(true)
-	s.lifecycleMu.RLock()
-	defer s.lifecycleMu.RUnlock()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return
-	}
-	if lsn >= s.nextLSN {
-		s.nextLSN = lsn + 1
-	}
-	if lsn > s.walHead {
-		s.walHead = lsn
-	}
-	if lsn > s.pendingDirectFrontierLSN {
-		s.pendingDirectFrontierLSN = lsn
-	}
-}
+// AdvanceFrontier is a compatibility no-op; BASE uses its install handle.
+func (s *WALStore) AdvanceFrontier(lsn uint64) {}
 
 // AdvanceWALTail moves the retained-window tail forward. After this,
 // recovery cases where the requested LSN is below newTail must
@@ -1411,57 +901,9 @@ func (s *WALStore) AdvanceWALTail(newTail uint64) {
 	}
 }
 
-// WriteExtentDirect installs a base block directly into the extent
-// without going through the WAL append path — INV-RECV-BITMAP-CORE
-// (§6.10). The receiver's per-session bitmap is the sole arbiter of
-// BASE-vs-WAL conflict at this LBA; substrate-level WAL replay /
-// stale-skip is intentionally bypassed.
-//
-// No LSN is recorded. nextLSN / walHead / dirtyMap are NOT advanced.
-// The recovery layer pairs this with AdvanceFrontier(targetLSN) at
-// MarkBaseComplete to keep post-rebuild frontier reporting honest.
-//
-// Durability follows the same rule as Write: bytes become durable
-// only on the next successful Sync (the extent fsync covers them).
+// WriteExtentDirect refuses unguarded BASE writes; use an install handle.
 func (s *WALStore) WriteExtentDirect(lba uint32, data []byte) error {
-	if s.v3 != nil {
-		return errV3NotYet // v3 BASE writes go through an install handle (rows 9 to 11)
-	}
-	s.bypassSyncDedup.Store(true)
-	s.captureMu.RLock()
-	defer s.captureMu.RUnlock()
-	s.lifecycleMu.RLock()
-	defer s.lifecycleMu.RUnlock()
-	if err := s.stickyIOFault(); err != nil {
-		return err
-	}
-	maxLBA := uint32(s.sb.VolumeSize / uint64(s.sb.BlockSize))
-	if lba >= maxLBA {
-		return fmt.Errorf("storage: WriteExtentDirect LBA %d out of range", lba)
-	}
-	if len(data) != int(s.sb.BlockSize) {
-		return fmt.Errorf("storage: WriteExtentDirect data size %d != block size %d", len(data), s.sb.BlockSize)
-	}
-	s.mu.RLock()
-	closed := s.closed
-	s.mu.RUnlock()
-	if closed {
-		return errors.New("storage: WriteExtentDirect after Close")
-	}
-	lock := &s.extentMu[uint64(lba)%uint64(len(s.extentMu))]
-	lock.Lock()
-	defer lock.Unlock()
-	_, _, previousLSN, _, hadDirty := s.dm.get(uint64(lba))
-	if err := s.writeExtentUnlocked(lba, data); err != nil {
-		return err
-	}
-	if h := s.chunk.Load(); h != nil {
-		h.sink.OnExtentWrite(uint64(lba), 0)
-	}
-	if hadDirty {
-		s.dm.compareAndDelete(uint64(lba), previousLSN)
-	}
-	return nil
+	return errV3NotYet
 }
 
 // ApplyEntry writes a replicated block with the source's LSN rather
@@ -1484,65 +926,9 @@ func (s *WALStore) noteChunkMutation(lba uint64) {
 }
 
 func (s *WALStore) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
-	if s.v3 != nil {
-		return s.applyEntryV3(lba, data, lsn, false)
-	}
-	s.bypassSyncDedup.Store(true)
-	s.captureMu.RLock()
-	defer s.captureMu.RUnlock()
-	s.lifecycleMu.RLock()
-	defer s.lifecycleMu.RUnlock()
-	if err := s.stickyIOFault(); err != nil {
-		return err
-	}
-	maxLBA := uint32(s.sb.VolumeSize / uint64(s.sb.BlockSize))
-	if lba >= maxLBA {
-		return fmt.Errorf("storage: apply LBA %d out of range", lba)
-	}
-	if len(data) != int(s.sb.BlockSize) {
-		return fmt.Errorf("storage: apply data size %d != block size %d", len(data), s.sb.BlockSize)
-	}
-	if h := s.testAfterAdmit; h != nil {
-		h()
-	}
-	// Publish under the same lock as Write/WriteBatch and the flusher's
-	// cross-shard snapshot, including supplied LSNs below nextLSN.
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return errors.New("storage: ApplyEntry after Close")
-	}
-	if err := s.stickyIOFault(); err != nil { // recheck under the append lock
-		return err
-	}
-	dataCopy := make([]byte, len(data))
-	copy(dataCopy, data)
-	entry := &walEntry{
-		LSN:    lsn,
-		Type:   walEntryWrite,
-		LBA:    uint64(lba),
-		Length: uint32(len(dataCopy)),
-		Data:   dataCopy,
-	}
-	appendStart := time.Now()
-	walRelOff, err := s.wal.append(entry)
-	s.instr.appendLatency.Observe(time.Since(appendStart))
-	// A failed pwrite may still leave complete records or padding in the file.
-	s.walMutation.Add(1)
-	if err != nil {
-		s.noteAppendFailure(err)
-		return fmt.Errorf("storage: WAL append (apply): %w", err)
-	}
-	s.dm.put(uint64(lba), walRelOff, lsn, uint32(len(dataCopy)))
-	s.noteChunkMutation(uint64(lba))
 
-	if lsn >= s.nextLSN {
-		s.nextLSN = lsn + 1
-	}
-	if lsn > s.walHead {
-		s.walHead = lsn
-	}
-	return nil
+	return s.applyEntryV3(lba, data, lsn, false)
+
 }
 
 // RecoveryMode reports walstore's recovery sub-mode. walstore's
@@ -1683,27 +1069,8 @@ func (s *WALStore) Close() (err error) {
 	if fault := s.stickyIOFault(); fault != nil {
 		closeErrors = append(closeErrors, fault)
 	}
-	if s.fd != nil && s.v3 == nil && s.stickyIOFault() == nil {
-		// v2 only: a v3 Close writes nothing; its acknowledged state is
-		// already durable in the descriptor slots and the WAL, and a
-		// lagged mode-C W is recovered from the WAL scan on reopen.
-		// Persist current head/tail back into the superblock so a
-		// subsequent OpenWALStore can find the WAL bounds without
-		// relying solely on the defensive scan.
-		s.sb.WALHead, s.sb.WALTail = s.wal.bounds()
-		buf := newSimpleByteBuf()
-		if _, err := s.sb.writeTo(buf); err != nil {
-			closeErrors = append(closeErrors, fmt.Errorf("storage: encode final superblock: %w", err))
-		} else {
-			if err := s.writeSuperblockMetadata(buf.bytes()); err != nil {
-				closeErrors = append(closeErrors, fmt.Errorf("storage: write final superblock: %w", err))
-			}
-			if err := s.syncSuperblockMetadata(); err != nil {
-				closeErrors = append(closeErrors, fmt.Errorf("storage: fsync final superblock: %w", err))
-			}
-		}
-	}
-	if s.v3 != nil && s.v3.ownedMap != nil {
+
+	if s.v3.ownedMap != nil {
 		if err := s.v3.ownedMap.Close(); err != nil {
 			closeErrors = append(closeErrors, err)
 		}
@@ -1738,25 +1105,9 @@ func (s *WALStore) walSyncCovered() bool {
 // Requests queued during a sync can reuse it only if their mutations predate its
 // captured cut. Failure leaves the previous durable generation unchanged.
 func (s *WALStore) syncWALBatch() error {
-	if s.v3 != nil {
-		return s.syncWALBatchV3()
-	}
-	// A batch queued behind a failed fsync must not fsync again (or report
-	// a covered cut as durable): the failed fsync may have dropped pages.
-	if err := s.stickyIOFault(); err != nil {
-		return err
-	}
-	cut := s.walMutation.Load()
-	if !s.bypassSyncDedup.Load() && s.chunk.Load() == nil && cut <= s.durableMutation.Load() {
-		return nil
-	}
-	start := time.Now()
-	defer func() { s.fileSyncLatency.Observe(time.Since(start)) }()
-	if err := s.syncFile(nil, func() error { return s.syncWALFile() }); err != nil {
-		return err
-	}
-	s.durableMutation.Store(cut)
-	return nil
+
+	return s.syncWALBatchV3()
+
 }
 
 // noteFsyncFailure latches the first fsync failure of the store's file as
@@ -1768,22 +1119,6 @@ func (s *WALStore) noteFsyncFailure(err error) error {
 	s.ioFault.CompareAndSwap(nil, NewSubstrateIOFailure(
 		fmt.Errorf("%w: %w", ErrFsyncFailed, err),
 		"fsync failed; the open store refuses further Syncs, writes and checkpoints",
-	))
-	return err
-}
-
-// noteAppendFailure latches a WAL append whose write failed as the sticky
-// ErrAppendFailed fault and returns err unchanged. The failed records may be
-// on disk without nextLSN or the head having moved; any further append on
-// this open store would reuse their LSNs and offsets. Space and encoding
-// refusals (no bytes written) do not latch.
-func (s *WALStore) noteAppendFailure(err error) error {
-	if err == nil || !errors.Is(err, errWALPwrite) {
-		return err
-	}
-	s.ioFault.CompareAndSwap(nil, NewSubstrateIOFailure(
-		fmt.Errorf("%w: %w", ErrAppendFailed, err),
-		"WAL append failed; the open store refuses further appends and Syncs",
 	))
 	return err
 }

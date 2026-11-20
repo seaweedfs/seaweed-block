@@ -5,21 +5,6 @@ import (
 	"testing"
 )
 
-// The causes a control plane reports as typed codes (B9 W2 §2.2) stay
-// reachable with errors.Is through the layer's errors.
-
-func TestChunkCut_BaseInstallRefusalIsTyped(t *testing.T) {
-	s, _ := newLegacyChunkTestStore(t)
-	layer := mustAttach(t, s, newFakeChunkRemote(), ctConfig(1))
-	newWriteLog().write(t, s, 2, 0x22)
-	if err := layer.BeginBaseInstall(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := layer.Cut(ctTimeout(t)); !errors.Is(err, errChunkCaptureRefused) || !errors.Is(err, errChunkBaseInstalling) {
-		t.Fatalf("cut during a BASE install: %v; want refused with errChunkBaseInstalling", err)
-	}
-}
-
 func TestChunkCut_UploadFailureIsRemoteUnavailable(t *testing.T) {
 	s, _ := newMappedCheckpointStoreV3(t)
 	f := newFakeChunkRemote()
