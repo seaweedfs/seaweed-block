@@ -313,6 +313,7 @@ func applyDurableAck(st *ReplicaState, e DurableAckObserved, r *ApplyResult, tra
 	}
 	fact := e.ProgressFact()
 	if st.Recovery.FactsMissing {
+		st.Recovery.R = max(st.Recovery.R, fact.ReplicaR)
 		st.Recovery.S, st.Recovery.H = fact.PrimaryS, fact.PrimaryH
 		st.Recovery.FactsMissing = false
 	}

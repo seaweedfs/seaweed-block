@@ -15,6 +15,14 @@ type heldAdmittedRecovery struct {
 	*ReplicaApplyGate
 	entered, release chan struct{}
 	done             chan error
+	closed           chan uint64
+}
+
+func (h *heldAdmittedRecovery) CloseSession(id uint64) {
+	h.ReplicaApplyGate.CloseSession(id)
+	if h.closed != nil {
+		h.closed <- id
+	}
 }
 
 func (h *heldAdmittedRecovery) ApplyRecovery(l transport.RecoveryLineage, lba uint32, data []byte, lsn uint64) error {
@@ -32,7 +40,7 @@ func (h *heldAdmittedRecovery) ApplyRecovery(l transport.RecoveryLineage, lba ui
 // advances that check, then reach the apply gate after the newer write.
 func TestApplyGate_AlreadyAdmittedWireSessionNeverRegressesBytes(t *testing.T) {
 	store := storage.NewBlockStore(64, blockSize)
-	h := &heldAdmittedRecovery{ReplicaApplyGate: NewReplicaApplyGate(store), entered: make(chan struct{}), release: make(chan struct{}), done: make(chan error, 1)}
+	h := &heldAdmittedRecovery{ReplicaApplyGate: NewReplicaApplyGate(store), entered: make(chan struct{}), release: make(chan struct{}), done: make(chan error, 1), closed: make(chan uint64, 8)}
 	listener, err := transport.NewReplicaListenerWithApplyHook("127.0.0.1:0", store, h)
 	if err != nil {
 		t.Fatal(err)
@@ -79,6 +87,9 @@ func TestApplyGate_AlreadyAdmittedWireSessionNeverRegressesBytes(t *testing.T) {
 	want := bytes.Repeat([]byte{0xBB}, blockSize)
 	send(c2, transport.MsgShipEntry, transport.EncodeShipEntry(transport.ShipEntry{Lineage: newer, LBA: 5, Data: want, LSN: 120}))
 	barrier(c2, newer)
+	if _, _, _, found := h.SessionState(old.SessionID); !found {
+		t.Fatal("admitted old frame lost coverage before settlement")
+	}
 	release()
 	select {
 	case err := <-h.done:
@@ -87,6 +98,17 @@ func TestApplyGate_AlreadyAdmittedWireSessionNeverRegressesBytes(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("admitted old frame did not settle")
+	}
+	select {
+	case id := <-h.closed:
+		if id != old.SessionID {
+			t.Fatalf("retired session=%d want old%d", id, old.SessionID)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("settled admitted old session was not retired")
+	}
+	if _, _, _, found := h.SessionState(old.SessionID); found {
+		t.Fatal("settled old coverage survived retirement")
 	}
 	got, err := store.Read(5)
 	if err != nil || !bytes.Equal(got, want) {

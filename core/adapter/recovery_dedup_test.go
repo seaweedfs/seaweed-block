@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/engine"
 )
@@ -94,8 +95,24 @@ func TestAdapter_ConcurrentOldProbesNeverRestartHealthyRecovery(t *testing.T) {
 				wg.Add(1)
 				go func() { defer wg.Done(); <-start; a.OnProbeResult(probe) }()
 			}
-			close(start)
-			wg.Wait()
+			done := make(chan struct{})
+			go func() { wg.Wait(); close(done) }()
+			var releaseOnce sync.Once
+			release := func() { releaseOnce.Do(func() { close(start) }) }
+			t.Cleanup(func() {
+				release()
+				select {
+				case <-done:
+				case <-time.After(3 * time.Second):
+					t.Error("concurrent probe workers did not settle during cleanup")
+				}
+			})
+			release()
+			select {
+			case <-done:
+			case <-time.After(3 * time.Second):
+				t.Fatal("concurrent probe workers did not settle")
+			}
 			if got := countStarts(exec, "StartCatchUp"); got != 1 {
 				t.Fatalf("identical delayed probes restarted healthy recovery: starts=%d path=%v", got, a.CommandLog())
 			}

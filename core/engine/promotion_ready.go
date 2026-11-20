@@ -2,6 +2,7 @@ package engine
 
 const (
 	PromotionReadyReasonReady              = "promotion_ready"
+	PromotionReadyReasonRecoveryActive     = "recovery_active"
 	PromotionReadyReasonNotMember          = "not_member"
 	PromotionReadyReasonNotReachable       = "not_reachable"
 	PromotionReadyReasonNotCaughtUp        = "not_caught_up"
@@ -35,6 +36,8 @@ func BuildPromotionReadyFact(st *ReplicaState) PromotionReadyFact {
 		fact.Reason = PromotionReadyReasonNotMember
 	case st.Reachability.Status != ProbeReachable:
 		fact.Reason = PromotionReadyReasonNotReachable
+	case hasActiveSession(st):
+		fact.Reason = PromotionReadyReasonRecoveryActive
 	case st.Recovery.Decision != DecisionNone:
 		fact.Reason = PromotionReadyReasonNotCaughtUp
 	case st.Identity.Epoch > st.Reachability.FencedEpoch:
