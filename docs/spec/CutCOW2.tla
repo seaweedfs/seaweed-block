@@ -77,10 +77,7 @@ SaveFinish(c) == /\ pend[c] # NONE
 Sync == /\ synced < Len(hist) /\ synced' = Len(hist)
         /\ UNCHANGED <<hist, vis, ext, side, pend, head, cut, dirty, cuts, crashes, aborts>>
 
-\* Local capture/save excludes materialization of this chunk only. Other
-\* chunks remain flushable while the point is open or its owners drain.
-Flush(c) == /\ c \notin (cut.copying \cup cut.saving)
-            /\ ext[c] # vis[c] /\ ext' = [ext EXCEPT ![c] = vis[c]]
+Flush(c) == /\ ext[c] # vis[c] /\ ext' = [ext EXCEPT ![c] = vis[c]]
             /\ UNCHANGED <<hist, synced, vis, side, pend, head, cut, dirty, cuts, crashes, aborts>>
 
 CutBegin == /\ cut.pc = "idle" /\ cuts < MaxCuts /\ Len(hist) > head.lsn

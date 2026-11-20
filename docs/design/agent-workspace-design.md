@@ -387,4 +387,5 @@ These are tracked for fixes. Gaps that apply to the whole codebase (authenticati
 
 Native pre-copy streams logical reads directly to remote while remaining candidate bytes exceed half the COW spill cap and staging shrinks that remainder. Completed uploads retain their intents across refused points; reuse requires unchanged chunk mutation version and HEAD generation. Recovery invalidates the chunk versions. No changed-set payload file is created.
 
-A native local capture/save borrows its store-owned chunk gate until its local bytes settle. Flusher borrows only available chunks, fsyncs their extents before retirement, and clamps checkpoint below the earliest deferred entry. A capture finding an already-flushing chunk aborts its point immediately; the guest mutation continues. Neither borrow spans remote calls, and no global flusher pause is used.
+
+A cut does not pin WAL space or defer flushing. Local reads validate and re-resolve across dirty-map retirement and slot reuse. CopyFinish releases local chunk ownership; every PUT retry sends the same immutable slot, while lazy fills use the cut's fixed base HEAD.

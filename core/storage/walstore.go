@@ -47,7 +47,6 @@ import (
 //   - Online resize
 //   - Compaction (the WAL is bounded but periodic checkpoints free space)
 type WALStore struct {
-	chunkFlushGates sync.Map // chunk index -> *sync.RWMutex; local capture/flush only
 	// recoveryWarnings and holesSuspected: the last Recover's typed
 	// warnings, and how many recoveries found a WAL hole (issue #51).
 	recoveryWarnings []string

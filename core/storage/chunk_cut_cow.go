@@ -30,7 +30,6 @@ const (
 )
 
 var errCutCOWAborted = errors.New("storage: cut copy window aborted; retry cut")
-var errCutLocalFlushBusy = errors.New("storage: local chunk flush in progress")
 
 type cutCOWEntry struct {
 	mu           sync.Mutex
@@ -196,54 +195,46 @@ func (w *cutCOWWindow) status() error { w.mu.Lock(); defer w.mu.Unlock(); return
 
 // A nil result without a notification means done/terminal. Waiters own a
 // lifetime reference through wakeup/accounting, never an entry or I/O lock.
-func (w *cutCOWWindow) claim(idx uint64, saving bool) (*cutCOWEntry, uint8, <-chan struct{}, func()) {
+func (w *cutCOWWindow) claim(idx uint64, saving bool) (*cutCOWEntry, uint8, <-chan struct{}) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.terminal {
-		return nil, cowDone, nil, nil
+		return nil, cowDone, nil
 	}
 	e := w.entries[idx]
 	if e == nil {
-		return nil, cowDone, nil, nil
+		return nil, cowDone, nil
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	state := e.state
 	switch state {
 	case cowPending:
-		gate := w.layer.s.chunkFlushGate(idx)
-		if !gate.TryRLock() {
-			w.terminal = true
-			w.err = fmt.Errorf("%w: %w", errCutCOWAborted, errCutLocalFlushBusy)
-			close(w.ended)
-			w.cancel()
-			return nil, cowDone, nil, nil
-		}
 		if saving {
 			e.state = cowSaving
 		} else {
 			e.state = cowCopying
 		}
 		w.refs.Add(1)
-		return e, state, nil, gate.RUnlock
+		return e, state, nil
 	case cowSaved:
 		if saving {
-			return nil, cowDone, nil, nil
+			return nil, cowDone, nil
 		} // live bytes are already saved
 		if e.readingSaved {
 			w.refs.Add(1)
-			return nil, state, e.ready, nil
+			return nil, state, e.ready
 		}
 		e.readingSaved = true
 		w.refs.Add(1)
-		return e, state, nil, nil
+		return e, state, nil
 	case cowSaving, cowCopying:
 		// Waiters acquire while OPEN too: drain includes their accounting
 		// before the coordinator snapshots aggregate wait time.
 		w.refs.Add(1)
-		return nil, state, e.ready, nil
+		return nil, state, e.ready
 	default:
-		return nil, cowDone, nil, nil
+		return nil, cowDone, nil
 	}
 }
 func (w *cutCOWWindow) finish(e *cutCOWEntry, state uint8) bool {
@@ -281,7 +272,7 @@ func (l *chunkLayerImpl) beforeCOWMutation(first, count uint64) {
 	last := (first + count - 1) / l.chunkBlocks
 	for idx := first / l.chunkBlocks; idx <= last; idx++ {
 		for {
-			e, _, wait, releaseFlush := w.claim(idx, true)
+			e, _, wait := w.claim(idx, true)
 			if wait != nil {
 				w.wait(wait)
 				continue
@@ -298,9 +289,6 @@ func (l *chunkLayerImpl) beforeCOWMutation(first, count uint64) {
 				acquired = true
 			default:
 				w.abort(fmt.Errorf("%w: saver memory capacity", errCutCOWAborted))
-				if releaseFlush != nil {
-					releaseFlush()
-				}
 				w.refs.Done()
 			}
 			if !acquired {
@@ -308,9 +296,6 @@ func (l *chunkLayerImpl) beforeCOWMutation(first, count uint64) {
 			}
 			if w.status() != nil {
 				<-w.saverSlots
-				if releaseFlush != nil {
-					releaseFlush()
-				}
 				w.refs.Done()
 				break
 			}
@@ -327,9 +312,6 @@ func (l *chunkLayerImpl) beforeCOWMutation(first, count uint64) {
 			}
 			w.saveNs.Add(time.Since(start).Nanoseconds())
 			// In particular an aborting saver releases itself BEFORE anyone joins.
-			if releaseFlush != nil {
-				releaseFlush()
-			}
 			w.refs.Done()
 			<-w.saverSlots
 			break
@@ -474,7 +456,7 @@ func (l *chunkLayerImpl) copyCOWEntry(w *cutCOWWindow, idx uint64) (capturedChun
 			w.abort(err)
 			return capturedChunk{}, false, err
 		}
-		e, state, wait, releaseFlush := w.claim(idx, false)
+		e, state, wait := w.claim(idx, false)
 		if wait != nil {
 			w.wait(wait)
 			continue
@@ -508,9 +490,6 @@ func (l *chunkLayerImpl) copyCOWEntry(w *cutCOWWindow, idx uint64) (capturedChun
 		kept := false
 		if err == nil {
 			kept = w.finish(e, cowDone)
-		}
-		if releaseFlush != nil {
-			releaseFlush()
 		}
 		w.refs.Done()
 		if !kept {

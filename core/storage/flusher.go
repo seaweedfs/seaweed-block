@@ -182,12 +182,8 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 	// Bind materialization to the same Recover lifetime as this snapshot.
 	// Recover holds store.mu at both generation boundaries.
 	var recoveryGen uint64
-	var captureChunkBlocks uint64
 	if store.v3 != nil {
 		recoveryGen = store.v3.recoverGen.Load()
-		if store.v3.ownedMap != nil {
-			captureChunkBlocks = store.v3.ownedMap.chunkBlocks
-		}
 	}
 	entries := store.dm.snapshot()
 	store.mu.RUnlock()
@@ -197,8 +193,6 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 		}
 		return nil
 	}
-	entries, checkpointLimit, releaseChunks := store.borrowFlushChunks(entries, captureChunkBlocks)
-	defer releaseChunks()
 	if f.afterSnapshotForTest != nil {
 		f.afterSnapshotForTest()
 	}
@@ -280,7 +274,6 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 	// processed the entire consistent snapshot, every entry
 	// with LSN <= maxLSN is in extent or superseded by a retained newer
 	// WAL record. Concurrent writes remain dirty for the next cycle.
-	maxLSN = min(maxLSN, checkpointLimit)
 	if maxLSN > 0 {
 		// The released tail is persisted with the checkpoint, before the
 		// writer may reuse those bytes.
