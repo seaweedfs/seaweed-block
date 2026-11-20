@@ -52,3 +52,6 @@ func verifyInitializedFile(f *os.File) error {
 	}
 	return nil
 }
+
+func dataSyncSupported() error       { return nil }
+func fdatasyncFile(f *os.File) error { return unix.Fdatasync(int(f.Fd())) }

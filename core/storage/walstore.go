@@ -309,6 +309,10 @@ func openInitializedWithMetadata(path string, f *os.File, sb *superblock, metada
 // init hook that runs before the committer and flusher goroutines start
 // (the v3 store attaches its state there).
 func openInitializedInternal(path string, f *os.File, sb *superblock, metadata BlockMetadata, init func(*WALStore) error) (*WALStore, error) {
+	dataSync, err := newDataFileSync(f)
+	if err != nil {
+		return nil, err
+	}
 	dm := newDirtyMap(64) // 64 shards is plenty for Phase 07 demo workloads
 
 	s := &WALStore{
@@ -333,9 +337,9 @@ func openInitializedInternal(path string, f *os.File, sb *superblock, metadata B
 	s.walMutation.Store(1)
 	s.syncWALFile = func() error {
 		s.walSyncCalls.Add(1)
-		return f.Sync()
+		return dataSync()
 	}
-	s.syncExtentFile = f.Sync
+	s.syncExtentFile = dataSync
 	if init != nil {
 		if err := init(s); err != nil {
 			return nil, err

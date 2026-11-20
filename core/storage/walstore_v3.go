@@ -269,6 +269,9 @@ func createWALStoreV3Configured(path string, numBlocks, blockSize uint32, walSiz
 		return nil, err
 	}
 	err = fd.Truncate(totalSize)
+	if err == nil {
+		err = prezeroNewStore(fd, totalSize)
+	}
 	if err == nil && chunkBlocks != 0 {
 		var m *chunkLSNMapV3
 		m, err = createChunkLSNMapV3(path+".chunkmap", d, chunkBlocks)
