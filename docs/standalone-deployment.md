@@ -133,11 +133,13 @@ The `--chunk-*` and `--workspace-lease` flags are refused unless
 `--durable-impl=walstore-chunk`; leave them at their defaults otherwise.
 
 `--chunk-filer` must name the only filer of its filer group. At startup
-blockvolume asks that filer for its masters, then the masters for the filers
-in the group, and refuses to start unless exactly one is listed: several
-filers are refused at once; a filer not listed yet (a fresh filer registers
-with its master some seconds after it serves) is asked again until 60 s, then
-refused.
+blockvolume asks that filer for its masters, then every master for the
+filers in the group. It starts only when a master lists exactly that filer.
+Any master listing another filer, or several, refuses at once. If no master
+lists it yet (a fresh filer registers with its master some seconds after it
+serves), or none answers, blockvolume asks again every second until 60 s,
+then refuses. This is checked at startup only; do not add filers to the
+group while volumes run.
 
 ## Notes
 

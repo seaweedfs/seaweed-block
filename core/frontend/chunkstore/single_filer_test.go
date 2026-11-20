@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,12 +19,15 @@ import (
 
 type configFiler struct {
 	filerpb.UnimplementedSeaweedFilerServer
+	mu      sync.Mutex
 	masters []string
 	group   string
 	err     error
 }
 
 func (f *configFiler) GetFilerConfiguration(context.Context, *filerpb.GetFilerConfigurationRequest) (*filerpb.GetFilerConfigurationResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -32,23 +36,39 @@ func (f *configFiler) GetFilerConfiguration(context.Context, *filerpb.GetFilerCo
 
 type nodesMaster struct {
 	masterpb.UnimplementedSeaweedServer
+	mu     sync.Mutex
 	filers []string
-	emptyN int // the first emptyN calls list no filer (not registered yet)
+	emptyN int  // the first emptyN calls list no filer (not registered yet)
+	stall  bool // never answers (until the caller's deadline)
 	calls  int
 	got    *masterpb.ListClusterNodesRequest
 }
 
-func (m *nodesMaster) ListClusterNodes(_ context.Context, r *masterpb.ListClusterNodesRequest) (*masterpb.ListClusterNodesResponse, error) {
+func (m *nodesMaster) ListClusterNodes(ctx context.Context, r *masterpb.ListClusterNodesRequest) (*masterpb.ListClusterNodesResponse, error) {
+	m.mu.Lock()
 	m.got = r
 	m.calls++
+	calls, stall := m.calls, m.stall
+	filers := append([]string(nil), m.filers...)
+	m.mu.Unlock()
+	if stall {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	resp := &masterpb.ListClusterNodesResponse{}
-	if m.calls <= m.emptyN {
+	if calls <= m.emptyN {
 		return resp, nil
 	}
-	for _, a := range m.filers {
+	for _, a := range filers {
 		resp.ClusterNodes = append(resp.ClusterNodes, &masterpb.ListClusterNodesResponse_ClusterNode{Address: a})
 	}
 	return resp, nil
+}
+
+func (m *nodesMaster) callCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.calls
 }
 
 // startMaster serves a fake master and returns its address in SeaweedFS's
@@ -79,7 +99,9 @@ func deadAddress(t *testing.T) string {
 	return "127.0.0.1:9333." + port
 }
 
-func startConfigFiler(t *testing.T, f *configFiler) *SWFS {
+// startConfigFiler serves a fake filer and dials it. It returns the client
+// and the filer's address as a master lists it ("host:httpPort.grpcPort").
+func startConfigFiler(t *testing.T, f *configFiler) (*SWFS, string) {
 	t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -94,74 +116,144 @@ func startConfigFiler(t *testing.T, f *configFiler) *SWFS {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = c.Close() })
-	return c
+	_, port, _ := net.SplitHostPort(lis.Addr().String())
+	return c, "127.0.0.1:8888." + port
 }
 
-// Block metadata needs exactly one filer: a group with one filer passes, also
-// when the filer registers with the master only after a few rounds; two
-// filers are refused at once; no filer, an unreachable master or a filer that
-// cannot report its configuration are refused at the bound (fail closed).
-func TestCheckSingleFiler(t *testing.T) {
-	oldW, oldR := singleFilerWait, singleFilerRetry
-	singleFilerWait, singleFilerRetry = 1500*time.Millisecond, 100*time.Millisecond
-	t.Cleanup(func() { singleFilerWait, singleFilerRetry = oldW, oldR })
-	ctx := context.Background()
-
-	one := &nodesMaster{filers: []string{"10.0.0.1:8888"}}
-	c := startConfigFiler(t, &configFiler{masters: []string{startMaster(t, one)}, group: "g1"})
-	if err := c.CheckSingleFiler(ctx); err != nil {
-		t.Fatalf("one filer refused: %v", err)
+// cluster starts a fake filer and one fake master per entry of masters; each
+// master's listing is built from the filer's own listed address (self).
+func cluster(t *testing.T, group string, masters ...func(self string) *nodesMaster) (*SWFS, []*nodesMaster) {
+	t.Helper()
+	f := &configFiler{group: group}
+	c, self := startConfigFiler(t, f)
+	var ms []*nodesMaster
+	var addrs []string
+	for _, mk := range masters {
+		m := mk(self)
+		ms = append(ms, m)
+		addrs = append(addrs, startMaster(t, m))
 	}
-	if one.got.GetClientType() != "filer" || one.got.GetFilerGroup() != "g1" {
-		t.Fatalf("master asked for %q in group %q; want filer in g1", one.got.GetClientType(), one.got.GetFilerGroup())
-	}
+	f.mu.Lock()
+	f.masters = addrs
+	f.mu.Unlock()
+	return c, ms
+}
 
-	// A fresh filer registers with the master only after it serves.
-	late := &nodesMaster{filers: []string{"10.0.0.1:8888"}, emptyN: 3}
-	c = startConfigFiler(t, &configFiler{masters: []string{startMaster(t, late)}})
-	if err := c.CheckSingleFiler(ctx); err != nil || late.calls != 4 {
-		t.Fatalf("filer listed on the 4th round: %v after %d calls; want a pass", err, late.calls)
+func lists(filers ...string) func(string) *nodesMaster {
+	return func(self string) *nodesMaster {
+		var out []string
+		for _, a := range filers {
+			if a == "self" {
+				a = self
+			}
+			out = append(out, a)
+		}
+		return &nodesMaster{filers: out}
 	}
+}
 
-	two := &nodesMaster{filers: []string{"10.0.0.1:8888", "10.0.0.2:8888"}}
-	c = startConfigFiler(t, &configFiler{masters: []string{startMaster(t, two)}})
+func shortBounds(t *testing.T) {
+	t.Helper()
+	w, r, a := singleFilerWait, singleFilerRetry, singleFilerAttempt
+	singleFilerWait, singleFilerRetry, singleFilerAttempt = 1500*time.Millisecond, 100*time.Millisecond, 300*time.Millisecond
+	t.Cleanup(func() { singleFilerWait, singleFilerRetry, singleFilerAttempt = w, r, a })
+}
+
+func refusedAtOnce(t *testing.T, what string, c *SWFS, want string) {
+	t.Helper()
 	start := time.Now()
-	err := c.CheckSingleFiler(ctx)
-	if !errors.Is(err, ErrNotSingleFiler) || !strings.Contains(err.Error(), "10.0.0.2:8888") || time.Since(start) > 500*time.Millisecond {
-		t.Fatalf("two filers: %v after %s; want ErrNotSingleFiler naming both, at once", err, time.Since(start))
+	err := c.CheckSingleFiler(context.Background())
+	if !errors.Is(err, ErrNotSingleFiler) || !strings.Contains(err.Error(), want) || time.Since(start) > 700*time.Millisecond {
+		t.Fatalf("%s: %v after %s; want ErrNotSingleFiler naming %q, at once", what, err, time.Since(start), want)
 	}
+}
 
-	none := &nodesMaster{}
-	c = startConfigFiler(t, &configFiler{masters: []string{startMaster(t, none)}})
-	start = time.Now()
-	if err := c.CheckSingleFiler(ctx); !errors.Is(err, ErrNotSingleFiler) || time.Since(start) < singleFilerWait || none.calls < 3 {
-		t.Fatalf("no filer listed: %v after %s and %d calls; want retries, then a refusal at the bound", err, time.Since(start), none.calls)
+func refusedAtBound(t *testing.T, what string, c *SWFS) {
+	t.Helper()
+	start := time.Now()
+	err := c.CheckSingleFiler(context.Background())
+	if !errors.Is(err, ErrNotSingleFiler) || time.Since(start) < singleFilerWait {
+		t.Fatalf("%s: %v after %s; want a refusal only at the %s bound", what, err, time.Since(start), singleFilerWait)
 	}
+}
 
-	start = time.Now()
-	c = startConfigFiler(t, &configFiler{masters: []string{deadAddress(t)}})
-	if err := c.CheckSingleFiler(ctx); !errors.Is(err, ErrNotSingleFiler) || time.Since(start) > 5*time.Second {
-		t.Fatalf("unreachable master: %v after %s; want a bounded refusal", err, time.Since(start))
+// The configured filer passes only as the one filer of its group, listed by
+// a master; also when it registers only after a few rounds.
+func TestCheckSingleFilerPasses(t *testing.T) {
+	shortBounds(t)
+	c, ms := cluster(t, "g1", lists("self"))
+	if err := c.CheckSingleFiler(context.Background()); err != nil {
+		t.Fatalf("the target as the one filer: %v", err)
 	}
+	if ms[0].got.GetClientType() != "filer" || ms[0].got.GetFilerGroup() != "g1" {
+		t.Fatalf("master asked for %q in group %q; want filer in g1", ms[0].got.GetClientType(), ms[0].got.GetFilerGroup())
+	}
+	c, ms = cluster(t, "", func(self string) *nodesMaster { return &nodesMaster{filers: []string{self}, emptyN: 3} })
+	if err := c.CheckSingleFiler(context.Background()); err != nil || ms[0].callCount() != 4 {
+		t.Fatalf("target registered on the 4th round: %v after %d calls; want a pass", err, ms[0].callCount())
+	}
+	// A dead or stalled first master does not hide a healthy second one, and
+	// a stalled call costs one attempt, not the whole bound.
+	c, _ = cluster(t, "", func(string) *nodesMaster { return &nodesMaster{stall: true} }, lists("self"))
+	start := time.Now()
+	if err := c.CheckSingleFiler(context.Background()); err != nil || time.Since(start) > 2*singleFilerAttempt {
+		t.Fatalf("stalled first master: %v after %s; want a pass within one attempt", err, time.Since(start))
+	}
+	f := &configFiler{}
+	c, self := startConfigFiler(t, f)
+	f.mu.Lock()
+	f.masters = []string{deadAddress(t), startMaster(t, &nodesMaster{filers: []string{self}})}
+	f.mu.Unlock()
+	if err := c.CheckSingleFiler(context.Background()); err != nil {
+		t.Fatalf("dead first master: %v", err)
+	}
+}
 
-	c = startConfigFiler(t, &configFiler{err: status.Error(codes.Unimplemented, "no")})
-	if err := c.CheckSingleFiler(ctx); !errors.Is(err, ErrNotSingleFiler) {
+// Refusals, in both master orders: several filers, or another filer listed
+// as the sole filer while the target is not registered, refuse at once,
+// whichever master answers first.
+func TestCheckSingleFilerRefusesAnotherOrSeveralFilers(t *testing.T) {
+	shortBounds(t)
+	c, _ := cluster(t, "", lists("self", "10.0.0.2:8888"))
+	refusedAtOnce(t, "two filers", c, "10.0.0.2:8888")
+	c, _ = cluster(t, "", lists("10.9.9.9:8888"))
+	refusedAtOnce(t, "another sole filer, target not registered", c, "10.9.9.9:8888")
+	c, _ = cluster(t, "", lists("self"), lists("self", "10.0.0.2:8888"))
+	refusedAtOnce(t, "first master favourable, second lists two", c, "10.0.0.2:8888")
+	c, _ = cluster(t, "", lists("self", "10.0.0.2:8888"), lists("self"))
+	refusedAtOnce(t, "first master lists two, second favourable", c, "10.0.0.2:8888")
+	c, _ = cluster(t, "", lists("self"), lists("10.9.9.9:8888"))
+	refusedAtOnce(t, "masters disagree on the sole filer", c, "10.9.9.9:8888")
+	c, _ = cluster(t, "", lists("10.9.9.9:8888"), lists("self"))
+	refusedAtOnce(t, "masters disagree on the sole filer, reversed", c, "10.9.9.9:8888")
+}
+
+// Fail closed at the bound, after retrying: no filer listed, an unreachable
+// master; and at once: a filer without configuration or without a master.
+func TestCheckSingleFilerFailsClosed(t *testing.T) {
+	shortBounds(t)
+	c, ms := cluster(t, "", lists())
+	refusedAtBound(t, "no filer listed", c)
+	if n := ms[0].callCount(); n < 3 {
+		t.Fatalf("no filer listed: %d rounds; want retries until the bound", n)
+	}
+	f := &configFiler{}
+	c, _ = startConfigFiler(t, f)
+	f.mu.Lock()
+	f.masters = []string{deadAddress(t)}
+	f.mu.Unlock()
+	refusedAtBound(t, "unreachable master", c)
+	c, _ = startConfigFiler(t, &configFiler{err: status.Error(codes.Unimplemented, "no")})
+	if err := c.CheckSingleFiler(context.Background()); !errors.Is(err, ErrNotSingleFiler) {
 		t.Fatalf("filer without configuration: %v; want a refusal", err)
 	}
-
-	c = startConfigFiler(t, &configFiler{})
-	if err := c.CheckSingleFiler(ctx); !errors.Is(err, ErrNotSingleFiler) {
+	c, _ = startConfigFiler(t, &configFiler{})
+	if err := c.CheckSingleFiler(context.Background()); !errors.Is(err, ErrNotSingleFiler) {
 		t.Fatalf("filer with no master: %v; want a refusal", err)
-	}
-
-	// An unreachable first master does not hide the answer of the next one.
-	c = startConfigFiler(t, &configFiler{masters: []string{deadAddress(t), startMaster(t, &nodesMaster{filers: []string{"10.0.0.1:8888"}})}})
-	if err := c.CheckSingleFiler(ctx); err != nil {
-		t.Fatalf("second master answers one filer: %v", err)
 	}
 }
 
-func TestMasterGRPCAddress(t *testing.T) {
+func TestGRPCAddress(t *testing.T) {
 	for in, want := range map[string]string{
 		"m1:9333":          "m1:19333",
 		"m1:9333.19555":    "m1:19555",
@@ -171,7 +263,7 @@ func TestMasterGRPCAddress(t *testing.T) {
 		"m1":               "",
 		"m1:60000":         "",
 	} {
-		got, err := masterGRPCAddress(in)
+		got, err := grpcAddress(in)
 		if want == "" {
 			if err == nil {
 				t.Errorf("%q: got %q, want an error", in, got)

@@ -48,23 +48,34 @@ func serve(t *testing.T, register func(*grpc.Server)) string {
 	return lis.Addr().String()
 }
 
-// blockvolume's chunk wiring runs the single-filer check at startup: a filer
-// group with two filers is refused, one filer passes.
+// blockvolume's chunk wiring runs the single-filer check at startup: the
+// configured filer listed as the one filer passes; a group with a second
+// filer is refused.
 func TestChunkWiringRefusesAMultiFilerGroup(t *testing.T) {
 	for _, c := range []struct {
-		name   string
-		filers []string
-		ok     bool
+		name  string
+		other []string
+		ok    bool
 	}{
-		{"one filer", []string{"10.0.0.1:8888"}, true},
-		{"two filers", []string{"10.0.0.1:8888", "10.0.0.2:8888"}, false},
+		{"one filer", nil, true},
+		{"two filers", []string{"10.0.0.2:8888"}, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			m := serve(t, func(s *grpc.Server) { masterpb.RegisterSeaweedServer(s, &groupMaster{filers: c.filers}) })
-			_, mport, _ := net.SplitHostPort(m)
-			filer := serve(t, func(s *grpc.Server) {
-				filerpb.RegisterSeaweedFilerServer(s, &groupFiler{master: "127.0.0.1:9333." + mport})
+			lis, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			filer := lis.Addr().String()
+			_, fport, _ := net.SplitHostPort(filer)
+			self := "127.0.0.1:8888." + fport // the filer as a master lists it
+			m := serve(t, func(s *grpc.Server) {
+				masterpb.RegisterSeaweedServer(s, &groupMaster{filers: append([]string{self}, c.other...)})
 			})
+			_, mport, _ := net.SplitHostPort(m)
+			srv := grpc.NewServer()
+			filerpb.RegisterSeaweedFilerServer(srv, &groupFiler{master: "127.0.0.1:9333." + mport})
+			go func() { _ = srv.Serve(lis) }()
+			t.Cleanup(srv.Stop)
 			w, err := newChunkWiring(chunkFlags{filer: filer, path: defaultChunkPath})
 			if c.ok {
 				if err != nil {
