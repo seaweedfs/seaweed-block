@@ -312,18 +312,47 @@ func TestChunkStageV3_ChangedImageExceedsSpillCap(t *testing.T) {
 }
 
 func TestCutCOWV3_RecentChunkUploadsFirst(t *testing.T) {
-	s, l, _, gate := cowFixture(t)
+	s, l, f, gate := cowFixture(t)
 	gate.unblock()
-	if _, err := s.Write(9, makeBlock(ctBlockSize, 9)); err != nil {
+	// Make index order differ from heat order: chunk 1, then 2, then 0.
+	for _, lba := range []uint32{1, 9, 5} {
+		if _, err := s.Write(lba, makeBlock(ctBlockSize, byte(lba))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.mu.Lock()
+	start := len(f.ops)
+	f.mu.Unlock()
+	var copied []uint64
+	l.testCOWRead = func(idx uint64, _ bool) { copied = append(copied, idx) }
+	result, err := l.Cut(context.Background())
+	if err != nil {
 		t.Fatal(err)
 	}
-	first := make(chan uint64, 1)
-	var once sync.Once
-	l.testCOWRead = func(idx uint64, _ bool) { once.Do(func() { first <- idx }) }
-	if _, err := l.Cut(context.Background()); err != nil {
-		t.Fatal(err)
+	want := []uint64{1, 2, 0}
+	if len(copied) != len(want) {
+		t.Fatalf("copied %v, want %v", copied, want)
 	}
-	if idx := <-first; idx != 2 {
-		t.Fatalf("first chunk=%d, want recently written chunk 2", idx)
+	for i, idx := range want {
+		if copied[i] != idx {
+			t.Fatalf("local copy order=%v, want %v", copied, want)
+		}
+	}
+	f.mu.Lock()
+	ops := append([]string(nil), f.ops[start:]...)
+	f.mu.Unlock()
+	var puts []string
+	for _, op := range ops {
+		if strings.HasPrefix(op, "put:") {
+			puts = append(puts, strings.TrimPrefix(op, "put:"))
+		}
+	}
+	if len(puts) != len(want) {
+		t.Fatalf("PUTs=%v, want three uploads", puts)
+	}
+	for i, idx := range want {
+		if puts[i] != result.Head.Chunks[idx].Key {
+			t.Fatalf("PUT %d=%q, want hot chunk %d key %q", i, puts[i], idx, result.Head.Chunks[idx].Key)
+		}
 	}
 }
