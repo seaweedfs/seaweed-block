@@ -205,7 +205,7 @@ func TestDefaultCreatedVolumeStaysSparse(t *testing.T) {
 	t.Setenv("SWBLOCK_PREZERO", "")
 	t.Setenv("SWBLOCK_ALLOCATION", "")
 	path := filepath.Join(t.TempDir(), "volume")
-	s, err := CreateWALStore(path, 8192, 4096)
+	s, err := CreateWALStore(path, 262144, 4096)
 	if err != nil {
 		t.Fatal(err)
 	}
