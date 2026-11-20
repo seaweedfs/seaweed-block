@@ -266,3 +266,32 @@ func TestKilledProcessReleasesButLiveHolderDoesNot(t *testing.T) {
 	l.Release(x)
 	settled(t, l)
 }
+
+func TestBackgroundPoolsDoNotBorrowCutReservations(t *testing.T) {
+	c := testConfig(t)
+	c.FillSlots = 1
+	c.IdleSlots = 1
+	l := newTest(t, c)
+	defer l.Close()
+	x, e := l.Admit(context.Background(), 1, nil)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer l.Release(x)
+	y, e := l.Acquire(context.Background(), BackgroundFill, nil)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer l.Release(y)
+	if _, e = l.Acquire(context.Background(), BackgroundFill, nil); !errors.Is(e, ErrBusy) {
+		t.Fatal("fill exceeded independent pool", e)
+	}
+	z, e := l.Acquire(context.Background(), Idle, nil)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer l.Release(z)
+	if e = l.ReserveCOW(y, 1); !errors.Is(e, ErrRevoked) {
+		t.Fatal("fill consumed cut spill", e)
+	}
+}

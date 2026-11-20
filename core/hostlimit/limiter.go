@@ -24,6 +24,8 @@ type Class uint8
 const (
 	Normal Class = iota
 	Urgent
+	BackgroundFill
+	Idle
 )
 
 type classKey struct{}
@@ -35,6 +37,7 @@ func WithClass(ctx context.Context, c Class) context.Context {
 type Config struct {
 	Directory                string
 	NormalSlots, UrgentSlots int
+	FillSlots, IdleSlots     int
 	PayloadBytes, COWBytes   int64
 	BytesPerSecond           int64
 	FallbackVolumes          int
@@ -42,10 +45,10 @@ type Config struct {
 }
 
 func DefaultConfig(dir string) Config {
-	return Config{dir, 3, 1, 64 << 20, 1 << 30, 64 << 20, 200, 5 * time.Minute}
+	return Config{Directory: dir, NormalSlots: 3, UrgentSlots: 1, FillSlots: 2, IdleSlots: 1, PayloadBytes: 64 << 20, COWBytes: 1 << 30, BytesPerSecond: 64 << 20, FallbackVolumes: 200, MaxHold: 5 * time.Minute}
 }
 func (c Config) validate() error {
-	if !filepath.IsAbs(c.Directory) || c.NormalSlots < 1 || c.UrgentSlots < 1 || c.NormalSlots+c.UrgentSlots > 256 || c.PayloadBytes <= 0 || c.COWBytes <= 0 || c.BytesPerSecond <= 0 || c.FallbackVolumes < 1 || c.FallbackVolumes > 65536 || c.MaxHold <= 0 {
+	if !filepath.IsAbs(c.Directory) || c.NormalSlots < 1 || c.UrgentSlots < 1 || c.FillSlots < 0 || c.IdleSlots < 0 || c.NormalSlots+c.UrgentSlots+c.FillSlots+c.IdleSlots > 256 || c.PayloadBytes <= 0 || c.COWBytes <= 0 || c.BytesPerSecond <= 0 || c.FallbackVolumes < 1 || c.FallbackVolumes > 65536 || c.MaxHold <= 0 {
 		return errors.New("hostlimit: invalid configuration")
 	}
 	return nil
@@ -59,6 +62,7 @@ type Stats struct {
 }
 type lease struct {
 	file         *os.File
+	class        Class
 	payload, cow int64
 	abort        func(error)
 	timer        *time.Timer
@@ -137,13 +141,23 @@ func (l *Limiter) pool(c Class) (*os.File, error) {
 		return nil, ErrConfig
 	}
 	names := []string{}
-	if c == Urgent {
-		for i := 0; i < l.cfg.UrgentSlots; i++ {
-			names = append(names, fmt.Sprintf("urgent-%d", i))
+	if c == BackgroundFill || c == Idle {
+		n, prefix := l.cfg.FillSlots, "fill"
+		if c == Idle {
+			n, prefix = l.cfg.IdleSlots, "idle"
 		}
-	}
-	for i := 0; i < l.cfg.NormalSlots; i++ {
-		names = append(names, fmt.Sprintf("normal-%d", i))
+		for i := 0; i < n; i++ {
+			names = append(names, fmt.Sprintf("%s-%d", prefix, i))
+		}
+	} else {
+		if c == Urgent {
+			for i := 0; i < l.cfg.UrgentSlots; i++ {
+				names = append(names, fmt.Sprintf("urgent-%d", i))
+			}
+		}
+		for i := 0; i < l.cfg.NormalSlots; i++ {
+			names = append(names, fmt.Sprintf("normal-%d", i))
+		}
 	}
 	for _, name := range names {
 		f, e := open(name)
@@ -160,6 +174,13 @@ func (l *Limiter) pool(c Class) (*os.File, error) {
 	}
 	return nil, ErrBusy
 }
+
+// Acquire exposes background fill/idle permits to future background callers.
+// Demand hydration must bypass this API; these permits carry no cut payload.
+func (l *Limiter) Acquire(ctx context.Context, c Class, abort func(error)) (uint64, error) {
+	return l.Admit(WithClass(ctx, c), 0, abort)
+}
+
 func (l *Limiter) Admit(ctx context.Context, payload int64, abort func(error)) (uint64, error) {
 	l.mu.Lock()
 	if l.closed {
@@ -176,6 +197,9 @@ func (l *Limiter) Admit(ctx context.Context, payload int64, abort func(error)) (
 		return 0, ErrBusy
 	}
 	c, _ := ctx.Value(classKey{}).(Class)
+	if c > Idle || (c >= BackgroundFill && payload != 0) {
+		return 0, ErrBusy
+	}
 	f, err := l.pool(c)
 	if errors.Is(err, ErrBusy) {
 		l.mu.Lock()
@@ -188,7 +212,7 @@ func (l *Limiter) Admit(ctx context.Context, payload int64, abort func(error)) (
 	}
 	fallback := err != nil // A is deliberately degraded: no shared memory/spill cap.
 	l.mu.Lock()
-	if l.closed || ctx.Err() != nil || len(l.live) >= l.cfg.NormalSlots+l.cfg.UrgentSlots {
+	if l.closed || ctx.Err() != nil || len(l.live) >= l.cfg.NormalSlots+l.cfg.UrgentSlots+l.cfg.FillSlots+l.cfg.IdleSlots {
 		l.stats.Skipped++
 		l.mu.Unlock()
 		if f != nil {
@@ -201,7 +225,7 @@ func (l *Limiter) Admit(ctx context.Context, payload int64, abort func(error)) (
 	}
 	l.next++
 	id := l.next
-	x := &lease{file: f, payload: payload, abort: abort}
+	x := &lease{file: f, class: c, payload: payload, abort: abort}
 	l.live[id] = x
 	l.stats.Admitted++
 	l.stats.PayloadReserved += payload
@@ -238,7 +262,7 @@ func (l *Limiter) revoke(id uint64) {
 func (l *Limiter) ReserveCOW(id uint64, n int64) error {
 	l.mu.Lock()
 	x := l.live[id]
-	if x == nil || x.releasing || x.revoked || n < 0 {
+	if x == nil || x.releasing || x.revoked || n < 0 || (x.class >= BackgroundFill && n != 0) {
 		l.mu.Unlock()
 		return ErrRevoked
 	}

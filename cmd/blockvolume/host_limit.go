@@ -10,6 +10,8 @@ func registerHostLimitFlags(fs *flag.FlagSet, c *hostlimit.Config) {
 	fs.StringVar(&c.Directory, "host-limit-dir", "", "shared local directory for background-cut slots; empty disables shared slots")
 	fs.IntVar(&c.NormalSlots, "host-limit-normal-slots", c.NormalSlots, "host normal-cut slots; identical across processes")
 	fs.IntVar(&c.UrgentSlots, "host-limit-urgent-slots", c.UrgentSlots, "host reserved urgent-cut slots")
+	fs.IntVar(&c.FillSlots, "host-limit-fill-slots", c.FillSlots, "host background-fill slots; demand hydration bypasses them")
+	fs.IntVar(&c.IdleSlots, "host-limit-idle-slots", c.IdleSlots, "host idle-work slots")
 	fs.Int64Var(&c.PayloadBytes, "host-limit-payload-bytes", c.PayloadBytes, "maximum cut payload per slot")
 	fs.Int64Var(&c.COWBytes, "host-limit-cow-bytes", c.COWBytes, "maximum saved COW bytes per slot")
 	fs.Int64Var(&c.BytesPerSecond, "host-limit-upload-bytes-sec", c.BytesPerSecond, "aggregate background upload rate across cut slots")
