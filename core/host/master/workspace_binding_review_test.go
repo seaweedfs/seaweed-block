@@ -2,6 +2,8 @@ package master
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -234,6 +236,10 @@ func TestWorkspaceBindingChosenObservationMustMatchServerAndPair(t *testing.T) {
 }
 
 // The ACK must complete while the unrelated remote reader/prober remains held.
+// errHeldNotJoined: the held remote operation's worker did not return within
+// its own bound after being released.
+var errHeldNotJoined = errors.New("held remote operation not joined")
+
 func TestWorkspaceBindingRemoteReadDoesNotBlockAck(t *testing.T) {
 	for _, mode := range []string{"head", "promotion"} {
 		t.Run(mode, func(t *testing.T) {
@@ -257,6 +263,29 @@ func TestWorkspaceBindingRemoteReadDoesNotBlockAck(t *testing.T) {
 				t.Fatal(e)
 			}
 			done := make(chan error, 1)
+			var releaseOnce sync.Once
+			releaseHeld := func() { releaseOnce.Do(func() { close(release) }) }
+			// Registered before either worker launches: every exit releases the
+			// held call and joins its worker under its own bound, not under the
+			// fixture context a blocked ACK has already used up.
+			var joinOnce sync.Once
+			var joined error
+			join := func() error {
+				joinOnce.Do(func() {
+					select {
+					case joined = <-done:
+					case <-time.After(10 * time.Second):
+						joined = errHeldNotJoined
+					}
+				})
+				return joined
+			}
+			t.Cleanup(func() {
+				releaseHeld()
+				if err := join(); errors.Is(err, errHeldNotJoined) {
+					t.Error(err)
+				}
+			})
 			if mode == "head" {
 				reviewLegacyBind(t, h, c, ctx, "probe")
 				go func() {
@@ -287,11 +316,9 @@ func TestWorkspaceBindingRemoteReadDoesNotBlockAck(t *testing.T) {
 			// separate 1 s bound: the ACK includes a durable persist, which a
 			// loaded host can slow past that without anything being blocked.
 			_, e := client.AckWorkspaceRevoked(ctx, &control.WorkspaceRevocationAck{Identity: id, HeadGen: 9})
-			close(release)
-			select {
-			case <-done:
-			case <-ctx.Done():
-				t.Fatal("remote operation did not finish", ctx.Err())
+			releaseHeld()
+			if err := join(); errors.Is(err, errHeldNotJoined) {
+				t.Fatal(err)
 			}
 			if e != nil {
 				t.Fatal("held remote operation blocked ACK", e)
