@@ -1,0 +1,57 @@
+name: Known bugs
+
+# Nightly: every open-issue reproduction that is skipped by default (t.Skip unless
+# SEAWEED_KNOWN_BUGS=1) runs and is EXPECTED TO FAIL. If one passes, its bug is
+# fixed but its skip is still in place: this job fails and names it, so the skip
+# is removed in the fix PR (or right after). A fix PR removes the test's line here
+# together with its skip.
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  known-bugs:
+    name: known-bug reproductions still fail
+    runs-on: tp04-seaweed-block
+    timeout-minutes: 15
+    env:
+      CGO_ENABLED: "0"
+      SEAWEED_KNOWN_BUGS: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Each reproduction still fails
+        run: |
+          set -u
+          ok=1
+          while read -r issue pkg test; do
+            [ -n "$issue" ] || continue
+            if go test -count=1 -run "^${test}\$" "$pkg" > "out-${test}.txt" 2>&1; then
+              echo "::error::${test} (${pkg}) now PASSES: ${issue} looks fixed, remove its skip"
+              ok=0
+            elif grep -q "^--- FAIL: ${test} " "out-${test}.txt"; then
+              echo "${test} (${issue}) still fails, as expected"
+            else
+              echo "::error::${test} (${pkg}) did not run or failed to build:"; tail -20 "out-${test}.txt"
+              ok=0
+            fi
+          done <<'LIST'
+          #186 ./cmd/blockmaster/ TestChartOptInLoopbackFlagIsAcceptedByBlockmaster
+          #187 ./cmd/blockmaster/ TestChartDefaultAuthorityStateSurvivesPodReplacement
+          #188 ./core/ops/ TestDeleteSafety_UntimedCleanupCannotProveFreshness
+          #189 ./core/storage/ TestMultiBlockRecordsRequireDistinctOnDiskImplVersion
+          LIST
+          [ "$ok" = 1 ]
