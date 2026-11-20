@@ -44,6 +44,7 @@ func (h *Host) runWorkspaceLease(ctx context.Context, stop func(context.Context,
 			// The guard is not yet shared: publish it already fenced if a
 			// synchronous shutdown won the race with this installer.
 			guard.fenced = h.workspaceLeaseFenced || ctx.Err() != nil
+			guard.stopPending = h.workspaceStopPending
 			h.view.workspaceGuard.Store(guard)
 			h.workspaceLeaseMu.Unlock()
 			return guard.Run(ctx)
@@ -53,6 +54,47 @@ func (h *Host) runWorkspaceLease(ctx context.Context, stop func(context.Context,
 			return ctx.Err()
 		case <-tick.C:
 		}
+	}
+}
+
+// WorkspaceStopPending is called when a graceful stop of volumeID has begun
+// (its chunk layer is being detached): the lease guard renews at once and
+// then sleeps at most stopPendingPoll between renewals, instead of its normal
+// renewal delay, so it sees the revocation that follows sooner. Scheduling
+// only: what the guard admits or ACKs is unchanged. It returns this detach
+// attempt's token for WorkspaceStopResumed; other volume ids are ignored
+// (token 0). Never blocks.
+func (h *Host) WorkspaceStopPending(volumeID string) uint64 {
+	if volumeID != h.cfg.VolumeID {
+		return 0
+	}
+	h.workspaceLeaseMu.Lock()
+	defer h.workspaceLeaseMu.Unlock()
+	h.workspaceStopAttempt++
+	h.workspaceStopPending = true
+	if g := h.view.workspaceGuard.Load(); g != nil {
+		g.StopPending()
+	}
+	return h.workspaceStopAttempt
+}
+
+// WorkspaceStopResumed is called when the detach attempt that returned
+// attempt provably did not happen and the volume serves again: stop-pending
+// ends and the guard returns to its normal renewal delay. A token other than
+// the latest attempt's (an older attempt, 0, another volume) changes nothing,
+// so an old attempt's resume never clears a newer pending detach. Never blocks.
+func (h *Host) WorkspaceStopResumed(volumeID string, attempt uint64) {
+	if volumeID != h.cfg.VolumeID || attempt == 0 {
+		return
+	}
+	h.workspaceLeaseMu.Lock()
+	defer h.workspaceLeaseMu.Unlock()
+	if !h.workspaceStopPending || attempt != h.workspaceStopAttempt {
+		return
+	}
+	h.workspaceStopPending = false
+	if g := h.view.workspaceGuard.Load(); g != nil {
+		g.ClearStopPending()
 	}
 }
 

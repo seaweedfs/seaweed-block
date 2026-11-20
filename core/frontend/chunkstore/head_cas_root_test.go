@@ -48,6 +48,10 @@ func TestManifest_CASReadsOnlyRoot(t *testing.T) {
 	if gen != h.Gen+1 || tracked.roots != 1 || tracked.children != 0 {
 		t.Fatalf("CAS gen=%d root reads=%d child reads=%d", gen, tracked.roots, tracked.children)
 	}
+	root, err := r.GetHeadRoot(context.Background())
+	if err != nil || root.Gen != gen || root.Epoch != h.Epoch || root.Holder != h.Holder || tracked.children != 0 {
+		t.Fatalf("confirmation resolved segments: root=%+v children=%d err=%v", root, tracked.children, err)
+	}
 	if _, err := r.GetHead(context.Background()); err == nil {
 		t.Fatal("GetHead skipped segment resolution")
 	}

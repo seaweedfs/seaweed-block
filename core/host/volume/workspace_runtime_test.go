@@ -78,6 +78,7 @@ type runtimeLeaseServer struct {
 	ttl                         time.Duration
 	disabled, blocked, revoking bool
 	blockedCalls                int // renewals that arrived while blocked
+	renewals                    int // every renewal that arrived
 	acks                        int
 	ackGen                      uint64
 	first                       chan struct{}
@@ -88,6 +89,7 @@ type runtimeLeaseServer struct {
 func (s *runtimeLeaseServer) RenewWorkspaceLease(ctx context.Context, id *control.WorkspaceIdentity) (*control.WorkspaceLeaseFact, error) {
 	s.once.Do(func() { close(s.first) })
 	s.mu.Lock()
+	s.renewals++
 	ttl, disabled, blocked, revoking := s.ttl, s.disabled, s.blocked, s.revoking
 	s.mu.Unlock()
 	if disabled {

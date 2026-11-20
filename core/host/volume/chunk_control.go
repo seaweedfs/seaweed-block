@@ -19,6 +19,7 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/hostlimit"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -546,7 +547,8 @@ func (c *chunkControl) Snapshot(ctx context.Context, volumeID string, req ChunkS
 	if info, replayed, err := c.cat.SnapshotReplay(ctx, volumeID, sreq); err != nil || replayed {
 		return info, err
 	}
-	r, err := c.p.CutVolume(ctx, volumeID, 0)
+	// A named seal is urgent even without a minimum LSN.
+	r, err := c.p.CutVolume(hostlimit.WithClass(ctx, hostlimit.Urgent), volumeID, 0)
 	if err != nil {
 		return chunkstore.SnapshotInfo{}, err
 	}
