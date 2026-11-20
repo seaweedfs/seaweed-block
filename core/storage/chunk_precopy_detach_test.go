@@ -99,3 +99,31 @@ func TestPrecopyDetachCountsBurstAtNextBarrier(t *testing.T) {
 		t.Fatalf("writes=%d report=%+v err=%v", writes, r.Precopy, err)
 	}
 }
+
+func TestPrecopyDetachRefusedFinalCutKeepsChangedBytes(t *testing.T) {
+	s, f, l, w := precopyLayer(t, 1024, 0)
+	for i := 0; i < 3; i++ {
+		w.write(t, s, 1, byte(0x40+i))
+		if _, err := l.Cut(ctTimeout(t)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w.write(t, s, 1, 0xbb)
+	f.beforeCAS = func(f *fakeChunkRemote) { f.installLocked(copyHead(f.head)) }
+	r, err := l.PrecopyDetach(ctTimeout(t), func() bool { return true })
+	if !r.Precopy.Frozen || !errors.Is(err, ErrChunkHeadPrecondition) {
+		t.Fatalf("report=%+v err=%v", r.Precopy, err)
+	}
+	how, _, err := l.SettleDetach(ctTimeout(t))
+	if err != nil || how != DetachNotPublished {
+		t.Fatalf("settlement=%v err=%v", how, err)
+	}
+	r, err = l.Cut(ctTimeout(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(f.imageOf(t, r.Head)[ctBlockSize:2*ctBlockSize], makeBlock(ctBlockSize, 0xbb)) {
+		t.Fatal("refused final cut marked changed bytes clean")
+	}
+	assertEveryHeadIsPrefixImage(t, f, w)
+}

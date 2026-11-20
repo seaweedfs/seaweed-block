@@ -1,7 +1,10 @@
 package durable_test
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"testing"
 	"time"
 
@@ -63,5 +66,101 @@ func TestPrecopyFreezeDoesNotWaitForAdmittedIO(t *testing.T) {
 	}
 	if _, err := b.Write(context.Background(), 8192, block(9)); err == nil {
 		t.Fatal("write served after successful freeze")
+	}
+}
+
+func precopyProvider(t *testing.T, remote storage.ChunkRemote, view *parkView) *durable.DurableProvider {
+	t.Helper()
+	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
+		ChunkDetachPrecopy: true, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
+	}, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	return p
+}
+
+func TestPrecopyProviderPublishesExactDetachedImage(t *testing.T) {
+	remote := storage.NewMemChunkRemote()
+	p := precopyProvider(t, remote, &parkView{stubView: v1View()})
+	openRecovered(t, p)
+	b, err := p.Open(context.Background(), "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = b.Write(context.Background(), 4096, block(0x8a)); err != nil {
+		t.Fatal(err)
+	}
+	r, last, err := p.DetachVolume(context.Background(), "v1")
+	if err != nil || !r.Precopy.Frozen || r.Head.State != storage.ChunkHeadDetached || r.H != last {
+		t.Fatalf("detach=%+v last=%d err=%v", r, last, err)
+	}
+	if !bytes.Equal(headBlock(t, remote, 1), block(0x8a)) {
+		t.Fatal("detached image lost write")
+	}
+	if _, err = b.Write(context.Background(), 4096, block(0x9a)); err == nil {
+		t.Fatal("old owner serves after final detach")
+	}
+	again, _, err := p.DetachVolume(context.Background(), "v1")
+	if err != nil || again.Head.Gen != r.Head.Gen {
+		t.Fatalf("repeated detach: %+v %v", again, err)
+	}
+}
+
+func TestPrecopyProviderBusyOwnerKeepsServing(t *testing.T) {
+	remote := storage.NewMemChunkRemote()
+	view := &parkView{stubView: v1View()}
+	p := precopyProvider(t, remote, view)
+	openRecovered(t, p)
+	b, err := p.Open(context.Background(), "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	view.arm()
+	done := make(chan error, 1)
+	t.Cleanup(func() {
+		view.unpark()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("writer did not join")
+		}
+	})
+	go func() { _, err := b.Write(context.Background(), 4096, block(0x8a)); done <- err }()
+	select {
+	case <-view.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("write not admitted")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	r, _, err := p.DetachVolume(ctx, "v1")
+	if !errors.Is(err, storage.ErrPrecopyNotConverged) || r.Precopy.Frozen {
+		t.Fatalf("report=%+v err=%v", r.Precopy, err)
+	}
+	if h, _ := remote.GetHead(ctx); h.State == storage.ChunkHeadDetached {
+		t.Fatal("busy owner detached")
+	}
+	if _, err = b.Write(ctx, 8192, block(0x9b)); err != nil {
+		t.Fatal("nonconverged owner stopped:", err)
+	}
+	view.unpark()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+		done <- nil
+	case <-ctx.Done():
+		t.Fatal("held write did not finish")
+	}
+	r, _, err = p.DetachVolume(ctx, "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(headBlock(t, remote, 1), block(0x8a)) || !bytes.Equal(headBlock(t, remote, 2), block(0x9b)) {
+		t.Fatal("retry lost admitted bytes")
 	}
 }
