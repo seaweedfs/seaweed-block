@@ -36,6 +36,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/replication"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"github.com/seaweedfs/seaweed-block/core/storage"
+	"github.com/seaweedfs/seaweed-block/core/storeident"
 	"github.com/seaweedfs/seaweed-block/core/transport"
 	"github.com/seaweedfs/seaweed-block/internal/buildinfo"
 )
@@ -1511,6 +1512,10 @@ func deriveDualLaneAddr(addr string) (string, error) {
 // beside the volume's durable files, or "" for non-durable memback runs.
 // hostConfig is the volume host's configuration from the flags.
 func hostConfig(f flags, readyCh chan<- adapter.AssignmentInfo) volume.Config {
+	var ident storeident.Identity
+	if f.durableRoot != "" {
+		ident = storeident.Of(f.durableRoot)
+	}
 	return volume.Config{
 		MasterAddr:        f.masterAddr,
 		ServerID:          f.serverID,
@@ -1524,6 +1529,7 @@ func hostConfig(f flags, readyCh chan<- adapter.AssignmentInfo) volume.Config {
 		EnableT1Readiness: f.enableT1Readiness,
 		WorkspaceLease:    f.workspaceLease,
 		RF1Only:           rf1Only(f),
+		StorageIdentity:   ident,
 	}
 }
 

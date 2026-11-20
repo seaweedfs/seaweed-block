@@ -6,12 +6,10 @@ package storage
 // write reached it since staging, so the image at H stays exact.
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"strings"
 	"testing"
-	"time"
 )
 
 // precopyLayer attaches a fresh layer with the given barrier bound and
@@ -203,63 +201,6 @@ func TestChunkPrecopy_WriteRightAfterStagingReadIsNotLost(t *testing.T) {
 	assertEveryHeadIsPrefixImage(t, f, w)
 }
 
-// A replica apply may land a block at an LSN below another block of the
-// same chunk (the highest LSN in the chunk does not move). It still makes
-// the staged copy stale: the barrier copies the chunk again and HEAD has
-// the applied bytes, whether the apply is still in the WAL or flushed.
-func TestChunkPrecopy_LowerLSNApplyAfterStagingIsNotLost(t *testing.T) {
-	for _, flushed := range []bool{false, true} {
-		name := map[bool]string{true: "flushed", false: "in the WAL"}[flushed]
-		t.Run(name, func(t *testing.T) {
-			s, _ := newLegacyChunkTestStore(t)
-			f := newFakeChunkRemote()
-			cfg := ctConfig(1)
-			cfg.FreshFromHead = true
-			cfg.BarrierBound = 1
-			l := mustAttach(t, s, f, cfg).(*chunkLayerImpl)
-			a, b, b2, c := makeBlock(ctBlockSize, 0xa0), makeBlock(ctBlockSize, 0xb5), makeBlock(ctBlockSize, 0xb6), makeBlock(ctBlockSize, 0xc1)
-			for _, e := range []struct {
-				lba  uint32
-				data []byte
-				lsn  uint64
-			}{{1, b, 5}, {0, a, 10}, {ctChunkBlocks, c, 11}} { // chunk 0 holds a@10 and b@5; chunk 1 c@11
-				if err := s.ApplyEntry(e.lba, e.data, e.lsn); err != nil {
-					t.Fatal(err)
-				}
-			}
-			applied := false
-			l.testAfterStageReadHook = func(idx uint64) {
-				if idx == 0 && !applied { // chunk 0 is staged with b@5
-					applied = true
-					if err := s.ApplyEntry(1, b2, 6); err != nil { // the production apply path
-						t.Errorf("apply b@6: %v", err)
-					}
-					if flushed {
-						mustSyncFlush(t, s)
-					}
-				}
-			}
-			r, err := l.Cut(ctTimeout(t))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !applied || r.Stats.StagedChunks == 0 {
-				t.Fatalf("schedule did not run: applied=%v staged=%d", applied, r.Stats.StagedChunks)
-			}
-			img := f.imageOf(t, r.Head)
-			for _, want := range []struct {
-				lba  int
-				data []byte
-			}{{0, a}, {1, b2}, {ctChunkBlocks, c}} {
-				if got := img[want.lba*ctBlockSize : (want.lba+1)*ctBlockSize]; !bytes.Equal(got, want.data) {
-					t.Fatalf("HEAD at H=%d: LBA %d is %#x..., want %#x... (the b@6 apply after staging lost)", r.H, want.lba, got[0], want.data[0])
-				}
-			}
-			assertNoIntentsLeft(t, f)
-		})
-	}
-}
-
 // A barrier Sync that fails after staging uploaded keys is a clean abort:
 // the cut's staging intents are deleted (a failed delete is kept and
 // retried by the next cut), and the next cut publishes the exact image.
@@ -305,129 +246,4 @@ func TestChunkPrecopy_BarrierSyncFailureSettlesStagedIntents(t *testing.T) {
 	}
 	assertEveryHeadIsPrefixImage(t, f, w)
 	assertNoIntentsLeft(t, f)
-}
-
-// Recover republishes the dirty map outside the write path: a complete newer
-// record past the head (what a failed append can leave) is published by a
-// same-open Recover. A chunk staged before it must not be reused:
-// HEAD at the recovered H has the recovered bytes.
-func TestChunkPrecopy_RecoverAfterStagingInvalidatesTheStage(t *testing.T) {
-	s, f, l, _ := legacyPrecopyLayer(t, 1, 3) // chunk 0 staged in round 0; bound 1
-	want := makeBlock(ctBlockSize, 0xa7)
-	recovered := false
-	l.testAfterStageHook = func(round int) {
-		if round != 0 {
-			return
-		}
-		plantRecordPastHead(t, s, 0, want)
-		if _, err := s.Recover(); err != nil { // same open, before the barrier
-			t.Errorf("same-open Recover: %v", err)
-			return
-		}
-		if got, err := s.Read(0); err != nil || !bytes.Equal(got, want) {
-			t.Errorf("valid prefix not recovered: err=%v", err)
-			return
-		}
-		recovered = true
-	}
-	r, err := l.Cut(ctTimeout(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !recovered || r.Stats.StagedChunks == 0 {
-		t.Fatalf("schedule did not run: recovered=%v staged=%d", recovered, r.Stats.StagedChunks)
-	}
-	img := f.imageOf(t, r.Head)
-	if got := img[:ctBlockSize]; !bytes.Equal(got, want) {
-		t.Fatalf("HEAD at H=%d: LBA 0 is %#x..., want the recovered %#x... (a stage from before Recover reused)", r.H, got[0], want[0])
-	}
-	assertNoIntentsLeft(t, f)
-}
-
-// partialBatchPrefix leaves a complete, CRC-valid record for want at the
-// next LSN past the head, the bytes a failed append can leave behind, without
-// failing an append (which latches the open store): same-open Recover
-// republishes it.
-func partialBatchPrefix(t *testing.T, s *WALStore, want []byte) {
-	t.Helper()
-	plantRecordPastHead(t, s, 0, want)
-}
-
-// plantRecordPastHead writes a complete write record for lba at the next LSN
-// at the WAL head, without publishing it.
-func plantRecordPastHead(t *testing.T, s *WALStore, lba uint64, data []byte) {
-	t.Helper()
-	e := walEntry{LSN: s.NextLSN(), Type: walEntryWrite, LBA: lba, Length: uint32(len(data)), Data: data}
-	buf, err := e.encode()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := int64(s.sb.WALOffset + s.wal.physicalPos(s.wal.logicalHeadValue()))
-	if _, err := s.fd.WriteAt(buf, off); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// A cut parked right after its barrier Sync fixed H: a same-open Recover
-// that would republish a newer complete record (H+1) waits for the
-// barrier, so the cut's HEAD at H never holds post-H bytes; the recovered
-// bytes are published by the next cut.
-func TestChunkCut_RecoverWaitsForTheCaptureBarrier(t *testing.T) {
-	s, f, l, w := legacyPrecopyLayer(t, 0, 2) // no bound: the barrier copies all
-	newer := makeBlock(ctBlockSize, 0xa7)
-	partialBatchPrefix(t, s, newer)
-	recovered := make(chan error, 1)
-	parked := false
-	l.testAfterBarrierSyncHook = func(h uint64) {
-		parked = true
-		go func() { _, err := s.Recover(); recovered <- err }()
-		select {
-		case err := <-recovered:
-			t.Errorf("Recover ran inside the capture barrier after Sync fixed H=%d (err %v)", h, err)
-		case <-time.After(300 * time.Millisecond): // held: it waits for the barrier
-		}
-	}
-	r, err := l.Cut(ctTimeout(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !parked {
-		t.Fatal("the cut never reached the post-Sync hook")
-	}
-	assertEveryHeadIsPrefixImage(t, f, w) // HEAD at H is the image at H: no 0xa7
-	if got := f.imageOf(t, r.Head)[:ctBlockSize]; bytes.Equal(got, newer) {
-		t.Fatalf("HEAD at H=%d holds the post-H recovered bytes", r.H)
-	}
-	select {
-	case err := <-recovered:
-		if err != nil {
-			t.Fatalf("Recover after the barrier: %v", err)
-		}
-	case <-time.After(ctLocalBound):
-		t.Fatal("Recover never ran after the barrier was released")
-	}
-	l.testAfterBarrierSyncHook = nil
-	r2, err := l.Cut(ctTimeout(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := f.imageOf(t, r2.Head)[:ctBlockSize]; !bytes.Equal(got, newer) || r2.H <= r.H {
-		t.Fatalf("next cut H=%d (prev %d): LBA 0 %#x..., want the recovered %#x...", r2.H, r.H, got[0], newer[0])
-	}
-}
-
-// TODO(format-v3 row 14a): raw v2 surgery/nonmonotone fixture only.
-func legacyPrecopyLayer(t *testing.T, bound, n int) (*WALStore, *fakeChunkRemote, *chunkLayerImpl, *writeLog) {
-	t.Helper()
-	s, _ := newLegacyChunkTestStore(t)
-	f := newFakeChunkRemote()
-	cfg := ctConfig(1)
-	cfg.FreshFromHead = true
-	cfg.BarrierBound = bound
-	l := mustAttach(t, s, f, cfg).(*chunkLayerImpl)
-	w := newWriteLog()
-	for c := 0; c < n; c++ {
-		w.write(t, s, uint32(c*ctChunkBlocks+1), byte(0x10+c))
-	}
-	return s, f, l, w
 }

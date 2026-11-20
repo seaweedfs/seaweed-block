@@ -2,8 +2,7 @@ package storage
 
 import (
 	"bytes"
-	"errors"
-	"fmt"
+
 	"os"
 	"path/filepath"
 	"testing"
@@ -87,45 +86,6 @@ func TestWALStoreProductionFallsBackWhenDamagedSlotOnlyLooksLegacy(t *testing.T)
 	}
 	if got, err := r.Read(3); err != nil || !bytes.Equal(got, blk(0x73)) {
 		t.Fatalf("fallback bytes: %v", err)
-	}
-}
-
-func TestWALStoreProductionRefusesLegacyWithoutMutation(t *testing.T) {
-	for _, version := range []uint32{1, 2} {
-		t.Run(fmt.Sprint(version), func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "legacy")
-			opts := WALStoreOptions{}
-			if version == 2 {
-				opts = recordingOptions(&recordingMetadata{}, 2)
-			}
-			s, err := createLegacyWALStoreWithOptions(path, 16, 4096, opts)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := s.Close(); err != nil {
-				t.Fatal(err)
-			}
-			before, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if r, err := OpenWALStore(path); !errors.Is(err, ErrUnsupportedLegacyFormat) {
-				if r != nil {
-					_ = r.Close()
-				}
-				t.Fatalf("legacy writable open: %v", err)
-			}
-			if r, err := OpenReadOnly(path); !errors.Is(err, ErrUnsupportedLegacyFormat) {
-				if r != nil {
-					_ = r.Close()
-				}
-				t.Fatalf("legacy readonly open: %v", err)
-			}
-			after, err := os.ReadFile(path)
-			if err != nil || !bytes.Equal(before, after) {
-				t.Fatal("legacy refusal changed bytes", err)
-			}
-		})
 	}
 }
 

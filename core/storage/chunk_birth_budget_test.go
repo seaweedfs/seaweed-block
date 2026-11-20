@@ -28,7 +28,7 @@ func BenchmarkCaptureBirthsMaxVolumeDefaultChunk(b *testing.B) {
 	}
 }
 func TestCaptureBirthsIncludesStoreLockWait(t *testing.T) {
-	s := &WALStore{}
+	s := &WALStore{v3: &walStoreV3State{mapEntries: []chunkLSNEntryV3{{LSN: 7}}, mapProof: newMapProofEpochV3()}}
 	l := &chunkLayerImpl{s: s}
 	candidates := map[uint64]bool{0: true}
 	s.mu.Lock()
@@ -57,7 +57,7 @@ func TestCaptureBirthsIncludesStoreLockWait(t *testing.T) {
 	case out := <-done:
 		done <- out
 		if out[0] != 7 {
-			t.Fatal("legacy frontier changed")
+			t.Fatal("native image frontier changed")
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("sampler did not finish after lock release")

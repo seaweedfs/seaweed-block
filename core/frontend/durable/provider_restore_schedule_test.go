@@ -25,8 +25,7 @@ func awaitRestoreCondition(t *testing.T, ctx context.Context, what string, ready
 }
 
 func TestRestoreCheckpointBeforeAssignmentPreservesRemoteBytes(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	ctx := hangGuard(t)
 	remote := storage.NewMemChunkRemote()
 	view := newStubView(frontend.Projection{VolumeID: "v1", ReplicaID: "r1"})
 	p := chunkProvider(t, t.TempDir(), remote, view, 0)
@@ -80,8 +79,7 @@ func (r *publishAfterAbsentRead) GetHead(ctx context.Context) (storage.ChunkHead
 }
 
 func TestRestoreHEADAppearsBetweenClaimAndAttach(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	ctx := hangGuard(t)
 	remote := storage.NewMemChunkRemote()
 	data := bytes.Repeat([]byte{0xA7}, pcChunkBlocks*4096)
 	wrapped := &publishAfterAbsentRead{ChunkRemote: remote, beforeReturn: func() {

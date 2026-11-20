@@ -141,36 +141,70 @@ func (p *Publisher) RecordWorkspaceDeletion(ctx context.Context, volume string, 
 	return persist()
 }
 
-func (p *Publisher) MoveWorkspace(ctx context.Context, req WorkspaceMoveRequest, head WorkspaceHead) (WorkspaceMoveRecord, error) {
-	if err := ctx.Err(); err != nil {
-		return WorkspaceMoveRecord{}, err
-	}
+func validateWorkspaceMoveRequest(req WorkspaceMoveRequest) error {
 	// v1 moves a replica between hosts without changing its logical slot.
 	// Refuse before locking or persisting a reservation/authority epoch.
 	if req.ExpectedReplicaID != req.TargetReplicaID {
-		return WorkspaceMoveRecord{}, fmt.Errorf("workspace move: v1 requires the same logical replica id")
+		return fmt.Errorf("workspace move: v1 requires the same logical replica id")
 	}
 	if req.RequestID == "" || req.VolumeID == "" || req.ExpectedHost == "" || req.TargetHost == "" || req.ExpectedHost == req.TargetHost || req.ExpectedReplicaID == "" || req.ExpectedEpoch == 0 || req.TargetReplicaID == "" ||
 		req.TargetDataAddr == "" || req.TargetCtrlAddr == "" || (req.Kind != "clean" && req.Kind != "forced") || req.Force != (req.Kind == "forced") {
-		return WorkspaceMoveRecord{}, fmt.Errorf("workspace move: invalid request")
+		return fmt.Errorf("workspace move: invalid request")
 	}
-	p.mu.Lock()
+	return nil
+}
+
+// issuedWorkspaceReplayLocked finds req's journal record: replay is true when
+// req repeats an issued move (same request id, same validated body); an id
+// reused with a different body is an error. Caller holds p.mu.
+func (p *Publisher) issuedWorkspaceReplayLocked(req WorkspaceMoveRequest) (WorkspaceMoveRecord, bool, error) {
 	if s := p.workspace[req.VolumeID]; s != nil {
 		for _, r := range s.Moves {
 			if r.RequestID == req.RequestID {
 				if !sameWorkspaceRequest(r, req) {
-					p.mu.Unlock()
-					return WorkspaceMoveRecord{}, fmt.Errorf("workspace move request id reused")
+					return WorkspaceMoveRecord{}, false, fmt.Errorf("workspace move request id reused")
 				}
 				if r.Issued {
-					p.mu.Unlock()
-					return r, nil
+					return r, true, nil
 				}
 			}
 		}
 	}
+	return WorkspaceMoveRecord{}, false, nil
+}
+
+// IssuedWorkspaceMove reports whether req is an exact replay of an issued
+// move, with the same validation MoveWorkspace applies before its replay. It
+// only reads: MoveWorkspace of the same request returns that record and
+// mints nothing. Admission rules for new work (strict journal isolation) let
+// such a replay through: they refuse new decisions, never an issued one.
+func (p *Publisher) IssuedWorkspaceMove(req WorkspaceMoveRequest) bool {
+	if validateWorkspaceMoveRequest(req) != nil {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	_, replay, err := p.issuedWorkspaceReplayLocked(req)
+	return replay && err == nil
+}
+
+func (p *Publisher) MoveWorkspace(ctx context.Context, req WorkspaceMoveRequest, head WorkspaceHead) (WorkspaceMoveRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return WorkspaceMoveRecord{}, err
+	}
+	if err := validateWorkspaceMoveRequest(req); err != nil {
+		return WorkspaceMoveRecord{}, err
+	}
+	p.mu.Lock()
+	r, replay, err := p.issuedWorkspaceReplayLocked(req)
 	p.mu.Unlock()
-	err := p.applyWithWorkspaceMove(AssignmentAsk{VolumeID: req.VolumeID, ReplicaID: req.TargetReplicaID, DataAddr: req.TargetDataAddr, CtrlAddr: req.TargetCtrlAddr, Intent: IntentReassign}, &workspaceGrant{req, head})
+	if err != nil {
+		return WorkspaceMoveRecord{}, err
+	}
+	if replay {
+		return r, nil
+	}
+	err = p.applyWithWorkspaceMove(AssignmentAsk{VolumeID: req.VolumeID, ReplicaID: req.TargetReplicaID, DataAddr: req.TargetDataAddr, CtrlAddr: req.TargetCtrlAddr, Intent: IntentReassign}, &workspaceGrant{req, head})
 	if err != nil {
 		return WorkspaceMoveRecord{}, err
 	}
@@ -239,25 +273,37 @@ func (p *Publisher) workspaceLineLocked(volume string) (subKey, assignmentState,
 }
 
 func (p *Publisher) persistWorkspaceLocked(volume string, s *WorkspaceState) error {
+	_, _, err := p.persistWorkspaceTimedLocked(volume, s)
+	return err
+}
+
+// persistWorkspaceTimedLocked is persistWorkspaceLocked that also reports how
+// long the durable store write itself took (write) and whether it was
+// attempted (wrote is false when it refused before writing). Caller holds
+// p.mu.
+func (p *Publisher) persistWorkspaceTimedLocked(volume string, s *WorkspaceState) (write time.Duration, wrote bool, err error) {
 	if p.store == nil || p.workspaceUncertain[volume] {
-		return fmt.Errorf("workspace durable store unavailable or uncertain")
+		return 0, false, fmt.Errorf("workspace durable store unavailable or uncertain")
 	}
 	_, line, ok := p.workspaceLineLocked(volume)
 	if !ok {
-		return fmt.Errorf("workspace authority missing")
+		return 0, false, fmt.Errorf("workspace authority missing")
 	}
 	i := line.info
 	record := DurableRecord{VolumeID: volume, ReplicaID: i.ReplicaID, Epoch: i.Epoch, EndpointVersion: i.EndpointVersion, DataAddr: i.DataAddr, CtrlAddr: i.CtrlAddr,
 		WriteSeq: p.writeSeqByVolume[volume] + 1, Workspace: cloneWorkspace(s)}
-	if err := p.store.Put(record); err != nil {
+	start := time.Now()
+	err = p.store.Put(record)
+	write = time.Since(start)
+	if err != nil {
 		p.workspaceUncertain[volume] = true
 		p.refreshLeaseViewLocked(volume)
-		return err
+		return write, true, err
 	}
 	p.writeSeqByVolume[volume] = record.WriteSeq
 	p.workspace[volume] = cloneWorkspace(s)
 	p.refreshLeaseViewLocked(volume)
-	return nil
+	return write, true, nil
 }
 
 type workspaceGrant struct {

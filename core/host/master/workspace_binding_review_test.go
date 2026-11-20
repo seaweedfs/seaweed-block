@@ -2,6 +2,8 @@ package master
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -234,6 +236,10 @@ func TestWorkspaceBindingChosenObservationMustMatchServerAndPair(t *testing.T) {
 }
 
 // The ACK must complete while the unrelated remote reader/prober remains held.
+// errHeldNotJoined: the held remote operation's worker did not return within
+// its own bound after being released.
+var errHeldNotJoined = errors.New("held remote operation not joined")
+
 func TestWorkspaceBindingRemoteReadDoesNotBlockAck(t *testing.T) {
 	for _, mode := range []string{"head", "promotion"} {
 		t.Run(mode, func(t *testing.T) {
@@ -257,12 +263,44 @@ func TestWorkspaceBindingRemoteReadDoesNotBlockAck(t *testing.T) {
 				t.Fatal(e)
 			}
 			done := make(chan error, 1)
+			var releaseOnce sync.Once
+			releaseHeld := func() { releaseOnce.Do(func() { close(release) }) }
+			// Registered before either worker launches: every exit releases the
+			// held call, and a worker that was launched is joined under its own
+			// bound, not under the fixture context a blocked ACK has already
+			// used up. A setup failure before the launch joins nothing.
+			launched := false
+			launch := func(worker func() error) {
+				launched = true
+				go func() { done <- worker() }()
+			}
+			var joinOnce sync.Once
+			var joined error
+			join := func() error {
+				if !launched {
+					return nil
+				}
+				joinOnce.Do(func() {
+					select {
+					case joined = <-done:
+					case <-time.After(10 * time.Second):
+						joined = errHeldNotJoined
+					}
+				})
+				return joined
+			}
+			t.Cleanup(func() {
+				releaseHeld()
+				if err := join(); errors.Is(err, errHeldNotJoined) {
+					t.Error(err)
+				}
+			})
 			if mode == "head" {
 				reviewLegacyBind(t, h, c, ctx, "probe")
-				go func() {
+				launch(func() error {
 					_, e := client.MoveWorkspace(ctx, &control.WorkspaceMove{RequestId: "held", VolumeId: "probe", ExpectedReplicaId: "r1", ExpectedEpoch: 1, TargetReplicaId: "r1", TargetServerId: "node-b", TargetDataAddr: "127.0.0.1:9200", TargetCtrlAddr: "127.0.0.1:9100", Kind: "clean"})
-					done <- e
-				}()
+					return e
+				})
 			} else {
 				if _, e := h.Lifecycle().Volumes.CreateVolume(lifecycle.VolumeSpec{VolumeID: "vol-rf3", SizeBytes: 1 << 20, ReplicationFactor: 3}); e != nil {
 					t.Fatal(e)
@@ -275,21 +313,21 @@ func TestWorkspaceBindingRemoteReadDoesNotBlockAck(t *testing.T) {
 				waitAuthorityLine(t, h.Publisher(), "vol-rf3")
 				ingestRF3Observation(t, h, false, true, true)
 				h.SetPromotionEvidenceProvider(reviewHeldPromotion{arrived, release})
-				go func() { _, e := h.RunLifecycleProductTick(); done <- e }()
+				launch(func() error { _, e := h.RunLifecycleProductTick(); return e })
 			}
 			select {
 			case <-arrived:
 			case <-ctx.Done():
 				t.Fatal("remote call not reached", ctx.Err())
 			}
-			ackCtx, cancel := context.WithTimeout(ctx, time.Second)
-			_, e := client.AckWorkspaceRevoked(ackCtx, &control.WorkspaceRevocationAck{Identity: id, HeadGen: 9})
-			cancel()
-			close(release)
-			select {
-			case <-done:
-			case <-ctx.Done():
-				t.Fatal("remote operation did not finish", ctx.Err())
+			// The held remote call is released only after the ACK returns, so an
+			// ACK that waited for it would run into the test's own deadline. No
+			// separate 1 s bound: the ACK includes a durable persist, which a
+			// loaded host can slow past that without anything being blocked.
+			_, e := client.AckWorkspaceRevoked(ctx, &control.WorkspaceRevocationAck{Identity: id, HeadGen: 9})
+			releaseHeld()
+			if err := join(); errors.Is(err, errHeldNotJoined) {
+				t.Fatal(err)
 			}
 			if e != nil {
 				t.Fatal("held remote operation blocked ACK", e)

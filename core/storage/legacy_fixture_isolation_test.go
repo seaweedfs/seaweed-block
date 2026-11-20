@@ -14,15 +14,13 @@ import (
 	"time"
 )
 
-// The old engine remains only for explicit fixtures until row 14a. The
-// production import closure must not bring in its frozen tool/test package,
-// and no production source may call the legacy constructor chain.
+// The retired engine must not return through constructors or import aliases.
 func TestLegacyFixtureIsolation(t *testing.T) {
 	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatal(err)
 	}
-	forbidden := map[string]bool{"createLegacyWALStoreWithOptions": true, "openLegacyWALStoreWithOptions": true, "openLegacyReadOnlyWithOptions": true}
+	forbidden := map[string]bool{"createLegacyWALStoreWithOptions": true, "openLegacyWALStoreWithOptions": true, "openLegacyReadOnlyWithOptions": true, "newWALWriter": true, "decodeWALEntry": true, "encodeWALPadding": true, "recoverWAL": true, "walEntry": true}
 	for _, e := range entries {
 		n := e.Name()
 		if e.IsDir() || !strings.HasSuffix(n, ".go") || strings.HasSuffix(n, "_test.go") || n == "format_v3_test_support.go" {
@@ -74,16 +72,8 @@ func TestLegacyFixtureIsolation(t *testing.T) {
 
 func legacyConstructorReferences(f *ast.File, forbidden map[string]bool) []string {
 	var refs []string
-	// A constructor declaration is retained for test linking, but every use
-	// (including function values, aliases and arguments) is forbidden.
-	declarations := map[*ast.Ident]bool{}
-	for _, decl := range f.Decls {
-		if fn, ok := decl.(*ast.FuncDecl); ok {
-			declarations[fn.Name] = true
-		}
-	}
 	ast.Inspect(f, func(n ast.Node) bool {
-		if id, ok := n.(*ast.Ident); ok && forbidden[id.Name] && !declarations[id] {
+		if id, ok := n.(*ast.Ident); ok && forbidden[id.Name] {
 			refs = append(refs, id.Name)
 		}
 		return true
@@ -95,6 +85,7 @@ func TestLegacyFixtureIsolationRejectsFunctionValues(t *testing.T) {
 	const name = "createLegacyWALStoreWithOptions"
 	for _, body := range []string{
 		"func use() { createLegacyWALStoreWithOptions() }",
+		"func createLegacyWALStoreWithOptions() {}",
 		"var constructor = createLegacyWALStoreWithOptions",
 		"func use() { constructor := createLegacyWALStoreWithOptions; constructor() }",
 		"func use() { accept(createLegacyWALStoreWithOptions) }",
@@ -108,12 +99,5 @@ func TestLegacyFixtureIsolationRejectsFunctionValues(t *testing.T) {
 				t.Fatalf("legacy constructor reference escaped guard: %v", refs)
 			}
 		})
-	}
-	f, err := parser.ParseFile(token.NewFileSet(), "legacy.go", "package storage\nfunc createLegacyWALStoreWithOptions() {}", 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if refs := legacyConstructorReferences(f, map[string]bool{name: true}); len(refs) != 0 {
-		t.Fatalf("declaration is not a use: %v", refs)
 	}
 }

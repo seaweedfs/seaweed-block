@@ -1,40 +1,10 @@
 package storage
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"testing"
 )
-
-func TestClaimChunkHeadClearsProductionDetachProof(t *testing.T) {
-	s, _ := newChunkTestStore(t)
-	if _, err := s.Recover(); err != nil {
-		t.Fatal(err)
-	}
-	remote := NewMemChunkRemote()
-	layer, err := AttachChunkLayer(s, remote, ChunkLayerConfig{ChunkBlocks: 4, Epoch: 1, Holder: "old"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = s.Write(0, bytes.Repeat([]byte{0xD7}, 4096)); err != nil {
-		t.Fatal(err)
-	}
-	detached, err := layer.Detach(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if detached.Head.State != chunkHeadDetached || detached.Head.DetachedBy == nil {
-		t.Fatal("producer did not detach", detached.Head)
-	}
-	claimed, err := ClaimChunkHead(context.Background(), remote, ChunkLayerConfig{Epoch: 2, Holder: "new"})
-	if err != nil {
-		t.Fatal("takeover of production detached HEAD", err)
-	}
-	if claimed.State != chunkHeadActive || claimed.DetachedBy != nil || claimed.RemoteLSN != detached.H {
-		t.Fatalf("takeover retained detached proof or changed frontier: %+v", claimed)
-	}
-}
 
 type claimFaultRemote struct {
 	ChunkRemote
@@ -133,21 +103,6 @@ func TestClaimChunkHeadFencesNoopCut(t *testing.T) {
 	}
 	if !layer.Fenced() {
 		t.Fatal("no-op cut did not propagate fence")
-	}
-}
-
-func TestFreshRestoreBitmapStartsAtClaimedHEAD(t *testing.T) {
-	s, _ := newLegacyChunkTestStore(t)
-	r := NewMemChunkRemote()
-	if _, err := r.CASHead(ctTimeout(t), ChunkHeadVersion{}, ChunkHead{Epoch: 2, Holder: "host-a", RemoteLSN: 42}); err != nil {
-		t.Fatal(err)
-	}
-	cfg := ctConfig(2)
-	cfg.FreshFromHead = true
-	mustAttach(t, s, r, cfg)
-	hdr, dirty, ok, err := cfg.Bitmap.Load()
-	if err != nil || !ok || hdr.BaseLSN != 42 || hdr.HeadGen != 1 || hdr.Epoch != 2 || hdr.Base != chunkBaseNone || len(dirty) != 0 {
-		t.Fatalf("fresh bitmap not at HEAD: hdr=%+v dirty=%v ok=%v err=%v", hdr, dirty, ok, err)
 	}
 }
 

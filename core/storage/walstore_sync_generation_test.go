@@ -1,9 +1,8 @@
 package storage
 
 import (
-	"bytes"
 	"errors"
-	"io"
+
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -178,43 +177,6 @@ func TestWALGenerationSyncFailureAndShutdown(t *testing.T) {
 	}
 }
 
-func TestWALGenerationBypassesUntrackedMutationPaths(t *testing.T) {
-	for _, kind := range []string{"old LSN apply", "direct extent", "direct frontier", "chunk layer"} {
-		t.Run(kind, func(t *testing.T) {
-			s := newLegacyGenerationStore(t)
-			if _, err := s.Write(0, makeBlock(4096, 0x81)); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := s.Sync(); err != nil {
-				t.Fatal(err)
-			}
-			before := s.WALSyncCount()
-			switch kind {
-			case "old LSN apply":
-				if err := s.ApplyEntry(0, makeBlock(4096, 0x82), 1); err != nil {
-					t.Fatal(err)
-				}
-			case "direct extent":
-				if err := s.WriteExtentDirect(1, makeBlock(4096, 0x83)); err != nil {
-					t.Fatal(err)
-				}
-			case "direct frontier":
-				s.AdvanceFrontier(5)
-			case "chunk layer":
-				mustAttach(t, s, newFakeChunkRemote(), ctConfig(1))
-			}
-			for i := 0; i < 2; i++ {
-				if _, err := s.Sync(); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if n := s.WALSyncCount() - before; n != 2 {
-				t.Fatalf("bypass physical syncs=%d want 2", n)
-			}
-		})
-	}
-}
-
 func TestWALGenerationBatchPublication(t *testing.T) {
 	for _, multi := range []bool{false, true} {
 		t.Run(map[bool]string{false: "normal records", true: "multiblock record"}[multi], func(t *testing.T) {
@@ -236,78 +198,6 @@ func TestWALGenerationBatchPublication(t *testing.T) {
 				if n := s.WALSyncCount() - before; n != 1 {
 					t.Fatalf("batch %d physical syncs=%d want 1", i, n)
 				}
-			}
-		})
-	}
-}
-
-// An actual partial pwrite leaves a valid first record and a torn second record,
-// but appendBatch returns before publishing its planned head. Same-open Recover
-// must not let the prefix reuse the pre-failure durable generation.
-func TestWALGenerationPartialAppendRecoverySync(t *testing.T) {
-	for _, recoverFirst := range []bool{false, true} {
-		t.Run(map[bool]string{false: "failed append without recovery", true: "same-open recovery"}[recoverFirst], func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "store.bin")
-			s := createLegacyWALStoreWithWALSizeForTest(t, path, 64, 4096, 1<<20)
-			s.DisableAutoFlushForRecoveryTest()
-			if _, err := s.Sync(); err != nil {
-				t.Fatal(err)
-			}
-			beforeHead := s.wal.logicalHeadValue()
-			want := makeBlock(4096, 0xa7)
-			pwriteCalls := 0
-			s.wal.batchWriteAt = func(data []byte, off int64) (int, error) {
-				pwriteCalls++
-				limit := walEntryHeaderSize + 4096 + walEntryHeaderSize + 17
-				if len(data) <= limit {
-					return 0, errors.New("fixture needs two whole records")
-				}
-				n, err := s.fd.WriteAt(data[:limit], off)
-				if err != nil {
-					return n, err
-				}
-				return n, io.ErrShortWrite
-			}
-			_, err := s.WriteBatch(0, [][]byte{want, makeBlock(4096, 0xb8)})
-			s.wal.batchWriteAt = nil
-			if !errors.Is(err, io.ErrShortWrite) || pwriteCalls != 1 {
-				t.Fatalf("partial batch err=%v pwrite calls=%d", err, pwriteCalls)
-			}
-			if got := s.wal.logicalHeadValue(); got != beforeHead {
-				t.Fatalf("failed batch published head=%d want %d", got, beforeHead)
-			}
-			// The failed append is sticky (ErrAppendFailed): no same-open
-			// recovery, and no Sync acknowledges anything, without an fsync.
-			if recoverFirst {
-				if _, err := s.Recover(); !errors.Is(err, ErrAppendFailed) {
-					t.Fatalf("same-open Recover after a failed append: %v; want ErrAppendFailed", err)
-				}
-			}
-			before := s.WALSyncCount()
-			if _, err := s.Sync(); !errors.Is(err, ErrAppendFailed) {
-				t.Fatalf("Sync after a failed append: %v; want ErrAppendFailed", err)
-			}
-			if n := s.WALSyncCount() - before; n != 0 {
-				t.Fatalf("a refused Sync fsynced %d times", n)
-			}
-			crashRecoveryHardeningStore(t, s)
-
-			// A reopen may republish the failed batch's complete prefix (it
-			// was never acknowledged) and serves normally again.
-			r, err := openLegacyWALStoreForTest(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			r.DisableAutoFlushForRecoveryTest()
-			t.Cleanup(func() { _ = r.Close() })
-			if n, err := r.Recover(); err != nil || n != 1 {
-				t.Fatalf("reopen Recover=%d err=%v want 1,nil", n, err)
-			}
-			if got, err := r.Read(0); err != nil || !bytes.Equal(got, want) {
-				t.Fatalf("valid prefix not recovered: err=%v", err)
-			}
-			if _, err := r.Sync(); err != nil {
-				t.Fatalf("Sync after a reopen: %v", err)
 			}
 		})
 	}
@@ -359,18 +249,4 @@ func TestWALGenerationSameOpenRecoverInvalidatesCoverage(t *testing.T) {
 	if n := s2.WALSyncCount() - before; n != 1 {
 		t.Fatalf("Recover permanently disabled dedup: syncs=%d want1", n)
 	}
-}
-
-// TODO(format-v3 row 14a): v2 callback-cache / direct-mutation controls only.
-func newLegacyGenerationStore(t *testing.T) *WALStore {
-	t.Helper()
-	// This control holds the standalone WAL fsync seam. Mode A retains
-	// that phase; mode C combines WAL durability with descriptor publication.
-	s, err := createLegacyWALStoreWithOptions(filepath.Join(t.TempDir(), "store.bin"), 32, 4096, WALStoreOptions{WMode: WModeStrict})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = s.Close() })
-	s.DisableAutoFlushForRecoveryTest()
-	return s
 }

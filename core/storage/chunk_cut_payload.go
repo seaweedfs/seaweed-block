@@ -114,9 +114,7 @@ func (l *chunkLayerImpl) stagePayloadRound(ctx context.Context, batch []uint64, 
 // This cache belongs to one layer/owner lifetime. Generation equality is not
 // a reuse proof across reopen or takeover; those require content-hash matching.
 func (l *chunkLayerImpl) rememberPayload(c capturedChunk, gen uint64) {
-	if !l.usesOwnedMapV3() {
-		return
-	}
+
 	c.data = nil
 	l.stMu.Lock()
 	defer l.stMu.Unlock()

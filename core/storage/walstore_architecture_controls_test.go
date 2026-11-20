@@ -484,14 +484,16 @@ func preparePhase173FileLayoutScratch(t *testing.T, dir string) *phase173FileLay
 	}
 
 	for index := 0; index < phase173ScratchBlocks; index++ {
-		entry := walEntry{
-			LSN:    uint64(index + 1),
-			Type:   walEntryWrite,
-			LBA:    uint64(index),
-			Length: phase173FixedWorkBlockSize,
-			Data:   scratch.logicalData,
+		entry := walEntryV3{
+			LSN:          uint64(index + 1),
+			Type:         walEntryWrite,
+			LBA:          uint64(index),
+			Length:       phase173FixedWorkBlockSize,
+			Data:         scratch.logicalData,
+			Nonce:        [16]byte{1},
+			LogicalStart: uint64(index * (walEntryHeaderSizeV3 + phase173FixedWorkBlockSize)),
 		}
-		encoded, err := entry.encodeWithInstrumentation(nil)
+		encoded, err := encodeWALEntryV3(entry, phase173FixedWorkBlockSize, phase173ScratchBlocks)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -537,7 +539,7 @@ func (s *phase173FileLayoutScratch) run(t *testing.T, split bool, run int) phase
 	for pass := 0; pass < phase173ScratchPasses; pass++ {
 		for index := 0; index < phase173ScratchBlocks; index++ {
 			offset := s.walBase + int64(index*s.recordSize)
-			header := make([]byte, walEntryHeaderSize)
+			header := make([]byte, walEntryHeaderSizeV3)
 			if _, err := walFile.ReadAt(header, offset); err != nil {
 				t.Fatal(err)
 			}
@@ -545,7 +547,7 @@ func (s *phase173FileLayoutScratch) run(t *testing.T, split bool, run int) phase
 			if _, err := walFile.ReadAt(full, offset); err != nil {
 				t.Fatal(err)
 			}
-			entry, err := decodeWALEntry(full)
+			entry, err := decodeWALEntryV3(full, phase173FixedWorkBlockSize, phase173ScratchBlocks)
 			if err != nil {
 				t.Fatal(err)
 			}
