@@ -21,7 +21,15 @@ func dedupAdapter(t *testing.T) (*VolumeReplicaAdapter, *mockExecutor, ProbeResu
 		ReplicaFlushedLSN: 50, PrimaryTailLSN: 10, PrimaryHeadLSN: 100}
 	a.OnProbeResult(probe)
 	t.Cleanup(func() {
-		a.OnSessionClose(SessionCloseResult{ReplicaID: "r1", SessionID: max(exec.latestSessionID("StartCatchUp"), exec.latestSessionID("StartRebuild")), Success: true, AchievedLSN: 100})
+		exec.mu.Lock()
+		var sid, target uint64
+		for _, start := range exec.starts {
+			if start.sessionID > sid {
+				sid, target = start.sessionID, start.targetLSN
+			}
+		}
+		exec.mu.Unlock()
+		a.OnSessionClose(SessionCloseResult{ReplicaID: "r1", SessionID: sid, Success: true, AchievedLSN: target})
 	})
 	return a, exec, probe
 }
@@ -49,18 +57,26 @@ func TestAdapter_ProbeUsesFreshBoundsBeforePreparingRecovery(t *testing.T) {
 }
 
 func TestAdapter_OneRecoveryFromPostCloseStalledAck(t *testing.T) {
-	a, exec, _ := dedupAdapter(t)
-	a.OnSessionClose(SessionCloseResult{ReplicaID: "r1", SessionID: exec.latestSessionID("StartCatchUp"), Success: true, AchievedLSN: 100})
-	for i := 0; i < 8; i++ {
-		a.OnDurableAck(DurableAckResult{ReplicaID: "r1", EndpointVersion: 1, TransportEpoch: 1, DurableLSN: 100, PrimaryTailLSN: 10, PrimaryHeadLSN: uint64(200 + i)})
-		if got := countStarts(exec, "StartCatchUp"); got > 1 {
-			if got != 2 {
-				t.Fatalf("one stalled ack emitted duplicate recovery: starts=%d", got)
+	for _, kind := range []string{"StartCatchUp", "StartRebuild"} {
+		t.Run(kind, func(t *testing.T) {
+			a, exec, _ := dedupAdapter(t)
+			a.OnSessionClose(SessionCloseResult{ReplicaID: "r1", SessionID: exec.latestSessionID("StartCatchUp"), Success: true, AchievedLSN: 100})
+			initial, tail := 1, uint64(10)
+			if kind == "StartRebuild" {
+				initial, tail = 0, 110
 			}
-			return
-		}
+			for i := 0; i < 8; i++ {
+				a.OnDurableAck(DurableAckResult{ReplicaID: "r1", EndpointVersion: 1, TransportEpoch: 1, DurableLSN: 100, PrimaryTailLSN: tail, PrimaryHeadLSN: uint64(200 + i)})
+				if got := countStarts(exec, kind); got > initial {
+					if got != initial+1 {
+						t.Fatalf("one stalled ack emitted duplicate recovery: kind=%s starts=%d want=%d", kind, got, initial+1)
+					}
+					return
+				}
+			}
+			t.Fatal("stalled ack never requested legitimate new recovery")
+		})
 	}
-	t.Fatal("stalled ack never requested legitimate new recovery")
 }
 
 func TestAdapter_ConcurrentOldProbesNeverRestartHealthyRecovery(t *testing.T) {
