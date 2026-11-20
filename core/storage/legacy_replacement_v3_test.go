@@ -344,8 +344,15 @@ func TestNativeReplacementHeldFailureCleanup(t *testing.T) {
 }
 
 func TestNativeReplacementTornWrapKeepsAcknowledgedSuffix(t *testing.T) {
-	for _, duringFlush := range []bool{false, true} {
-		t.Run(map[bool]string{false: "full_checkpoint", true: "append_during_checkpoint"}[duringFlush], func(t *testing.T) {
+	for _, scenario := range []struct {
+		name              string
+		duringFlush, hole bool
+	}{
+		{"full_checkpoint", false, false}, {"append_during_checkpoint", true, false},
+		{"committed_hole", false, true}, {"append_during_checkpoint_hole", true, true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			duringFlush := scenario.duringFlush
 			s, path := newMappedCheckpointStoreV3(t)
 			s.admission = nil // isolate physical reuse, not the pressure timer
 			write := func(lba uint32) {
@@ -392,6 +399,15 @@ func TestNativeReplacementTornWrapKeepsAcknowledgedSuffix(t *testing.T) {
 			if _, err := s.fd.WriteAt(make([]byte, 2048), int64(s.sb.WALOffset+walEntryPrefixSizeV3)); err != nil {
 				t.Fatal(err)
 			}
+			if scenario.hole {
+				off, _, _, _, ok := s.dm.get(7)
+				if !ok {
+					t.Fatal("missing committed-hole target")
+				}
+				if _, err := s.fd.WriteAt([]byte{0xFF}, int64(s.sb.WALOffset+off+walEntryPrefixSizeV3)); err != nil {
+					t.Fatal(err)
+				}
+			}
 			crashReadOnlyStoreV3(t, s)
 			r, err := OpenWALStore(path)
 			if err != nil {
@@ -399,6 +415,15 @@ func TestNativeReplacementTornWrapKeepsAcknowledgedSuffix(t *testing.T) {
 			}
 			r.DisableAutoFlushForRecoveryTest()
 			t.Cleanup(func() { _ = r.Close() })
+			if scenario.hole {
+				if _, err := r.Recover(); !isWALCorrupt(err) {
+					t.Fatalf("committed wrapped hole was served: %v", err)
+				}
+				if r.dm.len() != 0 {
+					t.Fatal("failed recovery published a partial image")
+				}
+				return
+			}
 			if n, err := r.Recover(); err != nil || n != 15 {
 				t.Fatalf("torn-wrap recovery=%d %v", n, err)
 			}
