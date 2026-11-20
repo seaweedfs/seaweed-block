@@ -159,7 +159,7 @@ func TestFdatasyncAcknowledgedWritesSurviveSIGKILL(t *testing.T) {
 	}
 }
 
-// Run under strace with the experiment environment unset/set to verify the
+// Run under strace with the sync environment unset/set to verify the
 // syscall boundary independently of the selected function's Go identity.
 func TestDataSyncSyscallProbe(t *testing.T) {
 	opts := WALStoreOptions{}
