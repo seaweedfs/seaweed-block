@@ -47,6 +47,8 @@ import (
 //   - Online resize
 //   - Compaction (the WAL is bounded but periodic checkpoints free space)
 type WALStore struct {
+	dataSyncStatus DataSyncStatus // selected before publication; never changes in this open
+
 	// recoveryWarnings and holesSuspected: the last Recover's typed
 	// warnings, and how many recoveries found a WAL hole (issue #51).
 	recoveryWarnings []string
@@ -205,24 +207,25 @@ func OpenWALStoreWithOptions(path string, opts WALStoreOptions) (*WALStore, erro
 
 // openInitializedV3 binds native state before starting background workers.
 func openInitializedV3(path string, f *os.File, sb *superblock, metadata BlockMetadata, init func(*WALStore) error) (*WALStore, error) {
-	dataSync, err := newDataFileSync(f)
+	dataSync, syncStatus, err := bindDataFileSync(f)
 	if err != nil {
 		return nil, err
 	}
 	dm := newDirtyMap(64) // 64 shards is plenty for Phase 07 demo workloads
 
 	s := &WALStore{
-		metadata:      metadata,
-		path:          path,
-		fd:            f,
-		sb:            sb,
-		dm:            dm,
-		extentBase:    sb.WALOffset + sb.WALSize,
-		nextLSN:       sb.WALCheckpointLSN + 1,
-		syncedLSN:     sb.WALCheckpointLSN,
-		walTail:       retainedLSNFromCheckpoint(sb.WALCheckpointLSN),
-		walHead:       sb.WALCheckpointLSN,
-		checkpointLSN: sb.WALCheckpointLSN,
+		metadata:       metadata,
+		dataSyncStatus: syncStatus,
+		path:           path,
+		fd:             f,
+		sb:             sb,
+		dm:             dm,
+		extentBase:     sb.WALOffset + sb.WALSize,
+		nextLSN:        sb.WALCheckpointLSN + 1,
+		syncedLSN:      sb.WALCheckpointLSN,
+		walTail:        retainedLSNFromCheckpoint(sb.WALCheckpointLSN),
+		walHead:        sb.WALCheckpointLSN,
+		checkpointLSN:  sb.WALCheckpointLSN,
 	}
 
 	if s.nextLSN < 1 {

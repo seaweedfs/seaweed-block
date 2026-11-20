@@ -7,7 +7,9 @@ import (
 	"os"
 )
 
-const defaultDataFileSyncMode = "fsync"
+func defaultDataSyncMode(*os.File) (string, string) {
+	return "fsync", "device cache detection requires Linux"
+}
 
 func dataSyncSupported() error {
 	return errors.New("storage: fdatasync/prezero experiment requires Linux")

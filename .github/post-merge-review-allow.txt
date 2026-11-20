@@ -1,0 +1,94 @@
+# What a PR labelled "post-merge-review" may touch.
+#
+# A labelled PR passes the "post-merge-review paths" check only if EVERY
+# changed file (both names of a rename) matches an allow line and no "!"
+# line. Anything not allowed is denied: new files start denied. A PR that
+# fails keeps the full review before merge. Without the label the check
+# passes and nothing changes.
+#
+# One bash glob per line, matched against the repo-relative path; "*" also
+# matches "/". A line starting with "!" denies, and wins over any allow line.
+# Blank lines and text after "#" are ignored. The check reads this file from
+# the base branch, so a PR cannot loosen its own check; a missing or empty
+# file fails the check.
+
+# ---- Allowed ----
+
+# Docs.
+docs/*
+*.md
+
+# Tests: added or modified, never deleted or moved (the check enforces
+# that); a test file in a denied directory stays denied.
+*_test.go
+
+# Status, metrics and observation files, by name.
+core/host/master/observation_service.go
+core/host/master/observation_snapshot.go
+core/host/volume/memory_status.go
+core/ops/observation.go
+core/ops/observation_bundle.go
+core/ops/observation_dashboard.go
+core/ops/observation_report.go
+core/ops/volume_status_artifacts.go
+core/ops/volume_status_report.go
+core/ops/volume_status_report_collector.go
+core/ops/volume_status_summary.go
+
+# ---- Denied even if allowed above ----
+
+# The check itself and CI.
+!.github/*
+
+# The test gates: the testops engine, its CLI and the gate definitions
+# (their docs stay allowed).
+!internal/testops/*.go
+!internal/testops/*.json
+!cmd/sw-testops/*
+
+# Data path and replication.
+!core/storage/*
+!core/frontend/*
+!core/transport/*
+!core/replication/*
+!core/recovery/*
+!core/engine/*
+!core/adapter/*
+
+# Authority: lease, epoch, fencing, move.
+!core/authority/*
+!core/host/master/workspace_*
+!core/host/volume/workspace_*
+!cmd/blockvolume/workspace_lease*
+
+# Wire and persisted formats.
+!*.proto
+!*.pb.go
+!core/host/master/journal_isolation*
+!core/lifecycle/store*
+!cmd/sparrow/persist*
+
+# GC and delete paths.
+!cmd/sw-block/chunk_gc*
+!cmd/sw-block/chunk_volume_delete*
+!core/lifecycle/deletion_reservations*
+!core/ops/delete_safety_contract*
+!*/gc[_.]*
+!*_gc[_.]*
+
+# Lease, epoch, claim, admission, GC, delete or format code (tests included)
+# wherever it lives, by file name.
+!*/lease*.go
+!*_lease*.go
+!*epoch*.go
+!*fenc*.go
+!*claim*.go
+!*admission*.go
+!*/gc_*.go
+!*_gc.go
+!*_gc_*.go
+!*delet*.go
+!*purge*.go
+!*persist*.go
+!*journal*.go
+!*format*.go
