@@ -10,14 +10,19 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/transport"
 )
 
+type prefixResult struct {
+	lineage transport.RecoveryLineage
+	err     error
+}
+
 type observedPrefixGate struct {
 	*ReplicaApplyGate
-	certified chan error
+	certified chan prefixResult
 }
 
 func (g *observedPrefixGate) CertifyRecoveryPrefix(l transport.RecoveryLineage) error {
 	err := g.ReplicaApplyGate.CertifyRecoveryPrefix(l)
-	g.certified <- err
+	g.certified <- prefixResult{l, err}
 	return err
 }
 
@@ -33,7 +38,7 @@ func TestApplyGate_HealthyRecoveryPublishesWirePrefix(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := storage.NewBlockStore(64, blockSize)
-	gate := &observedPrefixGate{ReplicaApplyGate: NewReplicaApplyGate(store), certified: make(chan error, 8)}
+	gate := &observedPrefixGate{ReplicaApplyGate: NewReplicaApplyGate(store), certified: make(chan prefixResult, 8)}
 	if err := gate.ApplyLive(liveLineage(1), 0, makeData(1), 1); err != nil {
 		t.Fatal(err)
 	}
@@ -53,18 +58,20 @@ func TestApplyGate_HealthyRecoveryPublishesWirePrefix(t *testing.T) {
 	t.Cleanup(func() { executor.Stop(); listener.StopHard() })
 	a := adapter.NewVolumeReplicaAdapter(executor)
 	a.OnAssignment(adapter.AssignmentInfo{VolumeID: "v1", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1, DataAddr: listener.Addr()})
+	var certified transport.RecoveryLineage
 	select {
-	case err := <-gate.certified:
-		if err != nil {
-			t.Fatal(err)
+	case result := <-gate.certified:
+		if result.err != nil {
+			t.Fatal(result.err)
 		}
+		certified = result.lineage
 	case <-time.After(5 * time.Second):
 		t.Fatal("healthy recovery did not publish wire prefix certificate")
 	}
 	if got := gate.CertifiedPrefix(); got != 32 {
 		t.Fatalf("wire certified prefix=%d want32", got)
 	}
-	tracked, _, _, found := gate.SessionState(2)
+	tracked, _, _, found := gate.SessionState(certified.SessionID)
 	if !found || tracked != 0 {
 		t.Fatalf("wire recovery did not prune: found=%v tracked=%d", found, tracked)
 	}
