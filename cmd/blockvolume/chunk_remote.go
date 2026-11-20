@@ -30,6 +30,7 @@ const (
 )
 
 type chunkFlags struct {
+	detachPrecopy       bool
 	hostLimit           hostlimit.Config
 	filer               string
 	path                string
@@ -56,7 +57,7 @@ func validateChunkFlags(f flags) error {
 	if f.durableImpl != "walstore-chunk" {
 		if c.filer != "" || c.collection != "" || c.replication != "" || c.path != defaultChunkPath ||
 			c.captureInterval != defaultChunkCaptureInterval || c.dirtyThreshold != defaultChunkDirtyThreshold ||
-			c.uploadConcurrency != 8 || c.hydrationWorkers != 2 || c.hydrationQueueDepth != 64 || c.controlEndpoint || c.hostLimit.Directory != "" {
+			c.uploadConcurrency != 8 || c.hydrationWorkers != 2 || c.hydrationQueueDepth != 64 || c.controlEndpoint || c.detachPrecopy || c.hostLimit.Directory != "" {
 			return errors.New("--chunk-* flags require --durable-impl=walstore-chunk")
 		}
 		return nil
