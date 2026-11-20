@@ -191,6 +191,77 @@ func TestNativeReplacementAllBlocksAfterCheckpoint(t *testing.T) {
 	}
 }
 
+func TestNativeReplacementRecoverPersistsBoundsBeforeReuse(t *testing.T) {
+	s, path := newMappedCheckpointStoreV3(t)
+	if _, err := s.Write(0, blk(0x30)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.flusher.flushOnce(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Write(1, blk(0x31)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	wantHead := s.v3.w.logicalHeadV3()
+	before := s.v3.pub.current()
+	if before.RetainedHead >= wantHead {
+		t.Fatal("fixture has no newer physical suffix to reconstruct")
+	}
+	crashReadOnlyStoreV3(t, s)
+	r, err := OpenWALStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.DisableAutoFlushForRecoveryTest()
+	t.Cleanup(func() { _ = r.Close() })
+	if _, err := r.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	a, b := slotsV3(t, path)
+	disk := a
+	if r.v3.pub.curSlot == slotB {
+		disk = b
+	}
+	if disk.RetainedHead != wantHead || disk.RetainedHead != r.v3.w.logicalHeadV3() || disk.RetainedTail != r.v3.pub.current().RetainedTail {
+		t.Fatal("recovered bounds not durable before writer reuse")
+	}
+	for i := byte(1); i <= 20; i++ {
+		if _, err := r.Write(5, blk(i)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.Sync(); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.flusher.flushOnce(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if r.v3.w.logicalHeadV3() <= r.sb.WALSize {
+		t.Fatal("test never reused a ring lap")
+	}
+	crashReadOnlyStoreV3(t, r)
+	q, err := OpenWALStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q.DisableAutoFlushForRecoveryTest()
+	t.Cleanup(func() { _ = q.Close() })
+	if _, err := q.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	for lba, want := range map[uint32]byte{0: 0x30, 1: 0x31, 5: 20} {
+		if got, err := q.Read(lba); err != nil || !bytes.Equal(got, blk(want)) {
+			t.Fatalf("ACK after recovered-bound reuse LBA %d: %v", lba, err)
+		}
+	}
+}
+
 func TestNativeReplacementRangeZeroBatch(t *testing.T) {
 	s, path := newMappedCheckpointStoreV3(t)
 	if _, err := s.WriteBatch(0, batchBlocks(0x40, 8)); err != nil {
