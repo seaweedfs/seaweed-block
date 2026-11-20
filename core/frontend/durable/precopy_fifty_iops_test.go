@@ -21,7 +21,7 @@ func TestPrecopyFiftyIOPSSyncConvergesFirstAttempt(t *testing.T) {
 	precopyFiftyIOPS(t, 3, false)
 }
 
-func TestPrecopyFiftyIOPSColdCostsDoNotClaimFirstAttempt(t *testing.T) {
+func TestPrecopyFiftyIOPSColdCostsKeepAdmissionHonest(t *testing.T) {
 	precopyFiftyIOPS(t, 1, true)
 }
 
@@ -133,9 +133,10 @@ func precopyFiftyIOPS(t *testing.T, samples byte, wantUnknown bool) {
 	t.Logf("attempts=%d drain=%s estimate=%s frozen=%t guest_errors=%d", result.Precopy.Attempts, result.Precopy.Drain, result.Precopy.Estimate, result.Precopy.Frozen, guestErrors.Load())
 	if wantUnknown {
 		if result.Precopy.Frozen {
-			// Later rolling cuts may leave an empty tail, which needs only a
-			// measured fixed cost. They must not masquerade as first-round fit.
-			if err != nil || result.Precopy.Attempts <= 1 || guestErrors.Load() != 0 || !bytes.Equal(headBlock(t, remote, 1), block(0x5b)) {
+			// Staging or later rounds may leave an empty tail, which needs
+			// only measured fixed cost. A nonempty first tail still needs
+			// three upload samples; the one-sample fixture cannot supply them.
+			if err != nil || (result.Precopy.Attempts == 1 && result.Precopy.TailBytes != 0) || guestErrors.Load() != 0 || !bytes.Equal(headBlock(t, remote, 1), block(0x5b)) {
 				t.Fatalf("cold samples claimed premature fit: report=%+v guest_errors=%d err=%v", result.Precopy, guestErrors.Load(), err)
 			}
 			return
