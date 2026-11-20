@@ -238,11 +238,29 @@ func precopyBusyOwnerKeepsServing(t *testing.T, delay time.Duration) {
 		t.Fatal("held write did not finish")
 	}
 	r, _, err = p.DetachVolume(ctx, "v1")
+	resumedCount := 1
 	if err != nil {
-		t.Fatal(err)
+		// Releasing the owner does not erase a slow sample. Admission must
+		// still refuse a measured final cut above its unchanged 1.2s allowance.
+		if !errors.Is(err, storage.ErrPrecopyNotConverged) || r.Precopy.Frozen || r.Precopy.Estimate <= 1200*time.Millisecond || (r.Precopy.Reason != "tail_too_large" && r.Precopy.Reason != "barrier_over_budget") {
+			t.Fatalf("post-release retry violated measured admission: report=%+v err=%v", r.Precopy, err)
+		}
+		if delay > 0 && r.Precopy.Fixed < delay {
+			t.Fatal("retry forgot the controlled slow fixed sample")
+		}
+		resumedCount = 2
+		if h, e := remote.GetHead(ctx); e != nil || h.State == storage.ChunkHeadDetached {
+			t.Fatalf("over-budget retry detached: head=%+v err=%v", h, e)
+		}
+		buf := make([]byte, 4096)
+		if n, e := b.Read(ctx, 8192, buf); e != nil || n != len(buf) || !bytes.Equal(buf, block(0x9b)) {
+			t.Fatalf("over-budget retry failed to resume service: n=%d err=%v", n, e)
+		}
+	} else if delay > 0 {
+		t.Fatal("retry froze despite a retained fixed sample above the allowance")
 	}
-	if started, resumed := k.calls(); len(started) != 2 || len(resumed) != 1 {
-		t.Fatalf("successful retry hooks: started=%v resumed=%v", started, resumed)
+	if started, resumed := k.calls(); len(started) != 2 || len(resumed) != resumedCount {
+		t.Fatalf("retry hooks: started=%v resumed=%v", started, resumed)
 	}
 	if !bytes.Equal(headBlock(t, remote.MemChunkRemote, 1), block(0x8a)) || !bytes.Equal(headBlock(t, remote.MemChunkRemote, 2), block(0x9b)) {
 		t.Fatal("retry lost admitted bytes")
