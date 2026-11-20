@@ -366,9 +366,10 @@ type chunkLayerConfig struct {
 
 	// PayloadMemoryBudget bounds this layer's uploader, saver and cached payload
 	// bytes (0 uses 64 MiB, or six chunks for larger geometry). Host-wide
-	// admission belongs behind a single Budget interface in the host limiter;
-	// this per-process budget does not coordinate other blockvolume processes.
+	// admission is provided separately through Budget; this per-process
+	// budget does not coordinate other blockvolume processes.
 	PayloadMemoryBudget int64
+	Budget              Budget
 
 	// COWSpillLimit caps saved-before-write
 	// side bytes. Native pre-copy is triggered when remaining candidate
