@@ -185,6 +185,8 @@ type ProviderConfig struct {
 	ChunkDirtyThreshold int
 	// ChunkUploadConcurrency bounds remote uploads; zero defaults to 8.
 	ChunkUploadConcurrency int
+	// ChunkPayloadMemoryBudget bounds one volume's cut payloads; zero uses the storage default.
+	ChunkPayloadMemoryBudget int64
 }
 
 // DurableProvider is the production frontend.Provider implementation.

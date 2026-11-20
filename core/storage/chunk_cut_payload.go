@@ -15,12 +15,15 @@ const DefaultCutPayloadMemoryBudget int64 = 64 << 20
 // completed image, or a binding verification read. Reserve four chunk buffers
 // per uploader before admitting savers. No payload queue or whole-round copy.
 // (4*uploadWorkers + 2*savers)*chunkBytes + cachedSaves <= memoryLimit.
-// Oversized chunks scale this bound, never candidate count or volume size.
+// The configured bound is independent of candidate count and volume size.
 func (l *chunkLayerImpl) cutPayloadWorkers() (uploadWorkers int, reserved, limit int64) {
 	size := int64(l.blockSize) * int64(l.chunkBlocks)
-	uploadWorkers = min(l.cfg.UploadConcurrency, max(1, int(DefaultCutPayloadMemoryBudget/(8*size))))
+	limit = l.cfg.PayloadMemoryBudget
+	if limit == 0 {
+		limit = max(DefaultCutPayloadMemoryBudget, 6*size)
+	}
+	uploadWorkers = min(l.cfg.UploadConcurrency, max(1, int(limit/(8*size))))
 	reserved = int64(4*uploadWorkers) * size
-	limit = max(DefaultCutPayloadMemoryBudget, reserved)
 	return
 }
 

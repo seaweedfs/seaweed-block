@@ -374,6 +374,7 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 		HydrationQueueDepth: p.cfg.ChunkHydrationQueueDepth,
 		BarrierBound:        p.cfg.ChunkDirtyThreshold,
 		UploadConcurrency:   p.cfg.ChunkUploadConcurrency,
+		PayloadMemoryBudget: p.cfg.ChunkPayloadMemoryBudget,
 		CaptureAllowed: func() error {
 			cur := p.view.Projection()
 			if !cur.Healthy || cur.VolumeID != volumeID || lin.volumeID != volumeID {

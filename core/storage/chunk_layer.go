@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -196,6 +197,16 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 	}
 	if cfg.ReadMissTimeout <= 0 {
 		cfg.ReadMissTimeout = defaultReadMissTimeout
+	}
+	chunkBytes := uint64(s.BlockSize()) * uint64(cfg.ChunkBlocks)
+	if chunkBytes > math.MaxInt64/6 || cfg.PayloadMemoryBudget < 0 {
+		return nil, errors.New("storage: invalid payload memory budget or chunk geometry")
+	}
+	minimumPayload := 6 * int64(chunkBytes) // one uploader and one saver
+	if cfg.PayloadMemoryBudget == 0 {
+		cfg.PayloadMemoryBudget = max(DefaultCutPayloadMemoryBudget, minimumPayload)
+	} else if cfg.PayloadMemoryBudget < minimumPayload {
+		return nil, fmt.Errorf("storage: payload memory budget must hold at least six chunks (%d bytes)", minimumPayload)
 	}
 	if cfg.COWSpillLimit < 0 {
 		return nil, errors.New("storage: COW spill limit must not be negative (0 defaults to 1 GiB)")
