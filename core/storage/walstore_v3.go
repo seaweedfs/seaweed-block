@@ -953,6 +953,10 @@ func (s *WALStore) readDirtyV3(lba uint32) (data []byte, handled bool, err error
 // Optional per-operation accounting; the validation/re-resolution contract is
 // identical for guest readers and local COW owners.
 func (s *WALStore) readDirtyV3Observed(lba uint32, recordAttempt func()) (data []byte, handled bool, err error) {
+	return s.readDirtyV3Into(lba, nil, recordAttempt)
+}
+
+func (s *WALStore) readDirtyV3Into(lba uint32, dst []byte, recordAttempt func()) (data []byte, handled bool, err error) {
 	const attempts = 8
 	for i := 0; i < attempts; i++ {
 		if h := s.v3.testReadAdmitted; h != nil {
@@ -969,7 +973,7 @@ func (s *WALStore) readDirtyV3Observed(lba uint32, recordAttempt func()) (data [
 		if recordAttempt != nil {
 			recordAttempt()
 		}
-		data, ioErr, verr := s.readRecordV3(lba, off, dataOff, lsn)
+		data, ioErr, verr := s.readRecordIntoV3(lba, off, dataOff, lsn, dst)
 		if ioErr != nil {
 			return nil, true, NewSubstrateIOFailure(ioErr, "v3 WAL read")
 		}
@@ -992,6 +996,10 @@ func (s *WALStore) readDirtyV3Observed(lba uint32, recordAttempt func()) (data [
 // io.EOF (a file shorter than its geometry) is substrate I/O too. verr is a
 // record that was read but does not validate as the resolved write.
 func (s *WALStore) readRecordV3(lba uint32, walRelOff uint64, dataOff uint32, lsn uint64) (data []byte, ioErr, verr error) {
+	return s.readRecordIntoV3(lba, walRelOff, dataOff, lsn, nil)
+}
+
+func (s *WALStore) readRecordIntoV3(lba uint32, walRelOff uint64, dataOff uint32, lsn uint64, dst []byte) (data []byte, ioErr, verr error) {
 	// Validate the entire record while retaining only one block of scratch.
 	// A legal batch can be much larger than the capturing chunk and its budget.
 	if walRelOff+walEntryHeaderSizeV3 > s.sb.WALSize {
@@ -1021,7 +1029,13 @@ func (s *WALStore) readRecordV3(lba uint32, walRelOff uint64, dataOff uint32, ls
 		return nil, nil, fmt.Errorf("%w: v3 dirty record identity", errInvalidEntry)
 	}
 	scratch := make([]byte, s.sb.BlockSize)
-	data = make([]byte, s.sb.BlockSize)
+	data = dst
+	if data == nil {
+		data = make([]byte, s.sb.BlockSize)
+	}
+	if len(data) != int(s.sb.BlockSize) {
+		return nil, nil, errInvalidEntry
+	}
 	crc := crc32.Update(0, walEntryCRC32CV3, prefix[:])
 	for off := uint64(0); off < n; off += uint64(len(scratch)) {
 		part := scratch[:min(uint64(len(scratch)), n-off)]

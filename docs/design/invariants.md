@@ -222,7 +222,7 @@ stateDiagram-v2
 | No-op cut | when nothing changed since HEAD, no CAS is sent, but HEAD is re-read; a HEAD that moved fences the holder | `core/storage/chunk_layer.go` `captureLocked` | `INV-WS-HEAD-CAS-001` |
 | Readmit | admission is checked again right before the CAS; a superseding HEAD fences | `core/storage/chunk_layer.go` `admit`, `supersededBy` | `INV-WS-HEAD-CAS-001` |
 | CAS | conditional update on `{gen, epoch}`, with `RemoteLSN = H`; refused for a lower epoch, a lower `RemoteLSN`, or a HEAD in a delete state | `core/frontend/chunkstore/chunk_remote.go` `CASHead` | `INV-WS-HEAD-CAS-001`, `INV-WS-HEAD-MONOTONE-001`, `INV-HEAD-DELETE-FROZEN-001` |
-| Settled | drop the intents; reset the bitmap to the cut, keeping chunks dirtied after it; a refused current-lineage point retains intent-rooted completed uploads until reuse or supersession | `core/storage/chunk_layer.go` `finishCut` | `INV-CUT-BITMAP-001` |
+| Settled | drop the intents; reset the bitmap to the cut, keeping chunks dirtied after it; a refused current-lineage point retains intent-rooted completed uploads until reuse, supersession or clean Close (unresolved CAS roots excluded) | `core/storage/chunk_layer.go` `finishCut` | `INV-CUT-BITMAP-001` |
 | Pending | the outcome is unknown and HEAD still shows the CAS base: keep the proposal and its intents | `core/storage/chunk_layer.go` `captureLocked` | `INV-WS-CAS-UNKNOWN-001` |
 
 ### M6 Chunk lifecycle

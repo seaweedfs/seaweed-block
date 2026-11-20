@@ -331,7 +331,7 @@ func (w *cutCOWWindow) save(e *cutCOWEntry, data []byte, missing []uint64) error
 	// No window lock spans the host callback: it may revoke this or another cut.
 	if w.budget != nil {
 		if err := w.budget.reserve(w.chunkBytes); err != nil {
-			return fmt.Errorf("%w: COW budget reservation: %w", errCutCOWAborted, err)
+			return fmt.Errorf("%w: COW budget reservation: %w", errors.Join(errCutCOWAborted, errCutBudgetRevoked), err)
 		}
 	}
 	if hook := w.layer.testCOWSave; hook != nil {
@@ -396,7 +396,7 @@ func (l *chunkLayerImpl) readCOWChunk(w *cutCOWWindow, idx uint64) ([]byte, []ui
 		if lba >= uint64(l.s.NumBlocks()) {
 			break
 		}
-		b, local, err := l.readLocalBlock(lba, w)
+		b, local, err := l.readLocalBlock(lba, w, buf[int(i)*l.blockSize:int(i+1)*l.blockSize])
 		if err != nil {
 			return nil, nil, err
 		}
@@ -415,10 +415,10 @@ func (l *chunkLayerImpl) readCOWChunk(w *cutCOWWindow, idx uint64) ([]byte, []ui
 // ZERO. It never calls the miss hook. The order is safe against a concurrent
 // flush (dirty map before presence) and fill (HEAD's bytes either way); a new
 // write of the block waits for the caller's COW entry.
-func (l *chunkLayerImpl) readLocalBlock(lba uint64, w *cutCOWWindow) ([]byte, bool, error) {
+func (l *chunkLayerImpl) readLocalBlock(lba uint64, w *cutCOWWindow, dst []byte) ([]byte, bool, error) {
 	s := l.s
 	if s.v3 != nil {
-		if data, handled, err := s.readDirtyV3Observed(uint32(lba), func() { w.walReads.Add(1) }); handled {
+		if data, handled, err := s.readDirtyV3Into(uint32(lba), dst, func() { w.walReads.Add(1) }); handled {
 			return data, err == nil, err
 		}
 	} else if walRelOff, dataOffset, _, _, ok := s.dm.get(lba); ok {
