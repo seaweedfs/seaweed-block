@@ -384,8 +384,9 @@ func (a *VolumeReplicaAdapter) applyBatchAndExecute(events []engine.Event, event
 		log.EventKind = eventKind
 	}
 
-	var cmds []engine.Command
+	var queued []queuedCommand
 	for _, ev := range events {
+		var cmds []engine.Command
 		result := engine.Apply(&a.state, ev)
 		a.trace = append(a.trace, result.Trace...)
 		log.Projection = result.Projection
@@ -407,21 +408,22 @@ func (a *VolumeReplicaAdapter) applyBatchAndExecute(events []engine.Event, event
 			log.Commands = append(log.Commands, kind)
 			cmds = append(cmds, cmd)
 		}
-	}
 
-	// Feed session lifecycle events back into engine while still under lock
-	// (these are synchronous, no external calls).
-	sessionEvents, queued := a.prepareQueuedCommands(cmds)
-	for _, sev := range sessionEvents {
-		sr := engine.Apply(&a.state, sev)
-		a.trace = append(a.trace, sr.Trace...)
-		log.Projection = sr.Projection
-		log.Trace = append(log.Trace, sr.Trace...)
-		for _, cmd := range sr.Commands {
-			kind := engine.CommandKind(cmd)
-			a.cmdLog = append(a.cmdLog, kind)
-			log.Commands = append(log.Commands, kind)
-			queued = append(queued, queuedCommand{cmd: cmd})
+		// Reserve recovery before applying the next event in this observation.
+		// Otherwise both reachability and facts can emit a Start for an idle slot.
+		sessionEvents, prepared := a.prepareQueuedCommands(cmds)
+		queued = append(queued, prepared...)
+		for _, sev := range sessionEvents {
+			sr := engine.Apply(&a.state, sev)
+			a.trace = append(a.trace, sr.Trace...)
+			log.Projection = sr.Projection
+			log.Trace = append(log.Trace, sr.Trace...)
+			for _, cmd := range sr.Commands {
+				kind := engine.CommandKind(cmd)
+				a.cmdLog = append(a.cmdLog, kind)
+				log.Commands = append(log.Commands, kind)
+				queued = append(queued, queuedCommand{cmd: cmd})
+			}
 		}
 	}
 	a.mu.Unlock()

@@ -295,7 +295,9 @@ func applyRecoveryFacts(st *ReplicaState, e RecoveryFactsObserved, r *ApplyResul
 		trace("stale_recovery_facts", reason)
 		return
 	}
-	st.Recovery.R = e.R
+	// Within one identity, delayed probes cannot undo completed durable work.
+	// An identity-changing assignment resets the recovery facts.
+	st.Recovery.R = max(st.Recovery.R, e.R)
 	st.Recovery.S = e.S
 	st.Recovery.H = e.H
 

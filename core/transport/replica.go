@@ -104,6 +104,12 @@ func NewReplicaListener(addr string, store storage.LogicalStorage) (*ReplicaList
 // it takes effect; a missing or invalid record refuses construction. An
 // empty floorPath (non-durable memback) keeps the floor in memory.
 func NewReplicaListenerWithFloor(addr string, store storage.LogicalStorage, volumeID, floorPath string) (*ReplicaListener, error) {
+	return NewReplicaListenerWithFloorAndApplyHook(addr, store, volumeID, floorPath, nil)
+}
+
+// NewReplicaListenerWithFloorAndApplyHook preserves role and durable-floor
+// admission while using the volume's shared apply ordering gate.
+func NewReplicaListenerWithFloorAndApplyHook(addr string, store storage.LogicalStorage, volumeID, floorPath string, hook ApplyHook) (*ReplicaListener, error) {
 	var floor uint64
 	if floorPath != "" {
 		var err error
@@ -111,7 +117,7 @@ func NewReplicaListenerWithFloor(addr string, store storage.LogicalStorage, volu
 			return nil, err
 		}
 	}
-	r, err := NewReplicaListenerWithApplyHook(addr, store, nil)
+	r, err := NewReplicaListenerWithApplyHook(addr, store, hook)
 	if err != nil {
 		return nil, err
 	}

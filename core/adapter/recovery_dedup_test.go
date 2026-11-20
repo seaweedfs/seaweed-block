@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"strconv"
 	"sync"
 	"testing"
 
@@ -20,7 +21,7 @@ func dedupAdapter(t *testing.T) (*VolumeReplicaAdapter, *mockExecutor, ProbeResu
 		ReplicaFlushedLSN: 50, PrimaryTailLSN: 10, PrimaryHeadLSN: 100}
 	a.OnProbeResult(probe)
 	t.Cleanup(func() {
-		a.OnSessionClose(SessionCloseResult{ReplicaID: "r1", SessionID: exec.latestSessionID("StartCatchUp"), Success: true, AchievedLSN: 100})
+		a.OnSessionClose(SessionCloseResult{ReplicaID: "r1", SessionID: max(exec.latestSessionID("StartCatchUp"), exec.latestSessionID("StartRebuild")), Success: true, AchievedLSN: 100})
 	})
 	return a, exec, probe
 }
@@ -37,9 +38,19 @@ func TestAdapter_OneRecoveryPreparedWithinProbeBatch(t *testing.T) {
 	}
 }
 
+func TestAdapter_ProbeUsesFreshBoundsBeforePreparingRecovery(t *testing.T) {
+	a, exec, probe := dedupAdapter(t)
+	a.OnSessionClose(SessionCloseResult{ReplicaID: "r1", SessionID: exec.latestSessionID("StartCatchUp"), FailureKind: engine.RecoveryFailureStartTimeout})
+	probe.PrimaryTailLSN = 60 // the former catch-up prefix is now recycled
+	a.OnProbeResult(probe)
+	if catchup, rebuild := countStarts(exec, "StartCatchUp"), countStarts(exec, "StartRebuild"); catchup != 1 || rebuild != 1 {
+		t.Fatalf("probe reserved recovery from stale bounds: catchup=%d rebuild=%d", catchup, rebuild)
+	}
+}
+
 func TestAdapter_ConcurrentOldProbesNeverRestartHealthyRecovery(t *testing.T) {
 	for _, n := range []int{8, 5} {
-		t.Run(string(rune('0'+n)), func(t *testing.T) {
+		t.Run(strconv.Itoa(n), func(t *testing.T) {
 			a, exec, probe := dedupAdapter(t)
 			a.OnSessionClose(SessionCloseResult{ReplicaID: "r1", SessionID: exec.latestSessionID("StartCatchUp"), Success: true, AchievedLSN: 100})
 			a.OnDurableAck(DurableAckResult{ReplicaID: "r1", EndpointVersion: 1, TransportEpoch: 1, DurableLSN: 100, PrimaryTailLSN: 10, PrimaryHeadLSN: 100})

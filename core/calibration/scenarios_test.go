@@ -124,7 +124,7 @@ func TestC5_OrderStableAcrossRuns(t *testing.T) {
 	// Recovery-signature divergence is signaled by a sentinel element
 	// prepended to CommandPath. The scenario run must not hit this.
 	if len(obs.CommandPath) > 0 && obs.CommandPath[0] == "DIVERGED_ACROSS_RUNS_RECOVERY_SIG" {
-		t.Fatalf("C5: recovery signature drifted across runs; first-run path=%v", obs.CommandPath[1:])
+		t.Fatalf("C5: recovery signature drifted across runs; divergent perturbation/path=%v", obs.CommandPath[1:])
 	}
 	// CloseEventCount sentinel: negative is used to flag cross-run
 	// drift in the number of SessionClosedCompleted events. A legit

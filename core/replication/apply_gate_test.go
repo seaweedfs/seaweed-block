@@ -230,18 +230,21 @@ func TestApplyGate_LiveLane_StaleEntry_DoesNotAdvanceRecoveryCovered(t *testing.
 
 // --- Lane independence: two sessions, different lanes ---
 
-func TestApplyGate_LiveAndRecovery_DistinctSessions_Independent(t *testing.T) {
+func TestApplyGate_LiveAndRecovery_DistinctCoverageSharedVersion(t *testing.T) {
 	gate, _ := newGate(t)
 	live := liveLineage(50)
 	recov := recoveryLineage(7, 100)
 
 	gate.ApplyLive(live, 5, makeData(0xBB), 100)
-	gate.ApplyRecovery(recov, 5, makeData(0xAA), 30) // recovery sees its own session
+	gate.ApplyRecovery(recov, 5, makeData(0xAA), 30) // stale across sessions
 
-	// Recovery session sees its own appliedLSN (just set: 30).
+	// Both sessions see the replica-wide version, with separate coverage.
 	lsn, ok := gate.SessionAppliedLSN(7, 5)
-	if !ok || lsn != 30 {
-		t.Errorf("recovery session appliedLSN[5] = (%d, %v), want (30, true)", lsn, ok)
+	if !ok || lsn != 100 {
+		t.Errorf("recovery appliedLSN[5] = (%d, %v), want (100, true)", lsn, ok)
+	}
+	if !gate.SessionRecoveryCoverage(7, 5) || gate.SessionRecoveryCoverage(50, 5) {
+		t.Fatal("cross-session version sharing mixed recovery coverage")
 	}
 
 	// Live session sees its own appliedLSN (set: 100).
