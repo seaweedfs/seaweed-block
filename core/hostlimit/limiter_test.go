@@ -162,10 +162,12 @@ func TestFallbackAndConfigMismatch(t *testing.T) {
 	bad := c
 	bad.NormalSlots++
 	b := newTest(t, bad)
-	if _, e = b.Admit(context.Background(), 1, nil); !errors.Is(e, ErrConfig) {
-		t.Fatalf("config mismatch bypassed cap: %v", e)
+	for _, class := range []Class{Normal, Urgent} {
+		if _, e = b.Admit(WithClass(context.Background(), class), 1, nil); !errors.Is(e, ErrConfig) {
+			t.Fatalf("config mismatch bypassed cap: class=%d err=%v", class, e)
+		}
 	}
-	if st := b.Snapshot().(Stats); st.LastPoolError == "" || st.Skipped != 1 {
+	if st := b.Snapshot().(Stats); st.LastPoolError == "" || st.Skipped != 2 || st.Fallback != 0 {
 		t.Fatal("configuration refusal was silent", st)
 	}
 	c.Directory += "-missing"
@@ -174,10 +176,13 @@ func TestFallbackAndConfigMismatch(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	f.Release(x)
-	settled(t, f)
 	if !f.Snapshot().(Stats).FallbackActive {
 		t.Fatal("degraded cap hidden")
+	}
+	f.Release(x)
+	settled(t, f)
+	if st := f.Snapshot().(Stats); st.FallbackActive || st.Fallback != 1 {
+		t.Fatalf("settled fallback status: %+v", st)
 	}
 }
 func TestRateCancellationAndPhase(t *testing.T) {

@@ -137,7 +137,7 @@ func (l *Limiter) pool(c Class) (*os.File, error) {
 		l.testBeforeConfigLock(guard)
 	}
 	if err = tryLock(guard); err != nil {
-		return nil, ErrBusy
+		return nil, err
 	}
 	expected, _ := json.Marshal(l.cfg)
 	path := filepath.Join(l.cfg.Directory, "configuration.json")
@@ -392,13 +392,11 @@ func (l *Limiter) releaseLoop() {
 			}
 			l.mu.Lock()
 			delete(l.live, id)
-			if len(l.live) > 0 {
-				l.fallback = false
-				for _, held := range l.live {
-					l.fallback = l.fallback || held.fallback
-				}
-				l.stats.FallbackActive = l.fallback
+			l.fallback = false
+			for _, held := range l.live {
+				l.fallback = l.fallback || held.fallback
 			}
+			l.stats.FallbackActive = l.fallback
 			l.stats.Active--
 			l.stats.PayloadReserved -= x.payload
 			l.stats.COWReserved -= x.cow
