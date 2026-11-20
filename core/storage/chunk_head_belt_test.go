@@ -172,21 +172,34 @@ func TestHeadBeltOperationsHaveOwnDeadline(t *testing.T) {
 func TestHeadBeltTakeoverWaitsBeforeConfirmation(t *testing.T) {
 	f := newFakeChunkRemote()
 	f.head = chunkHead{Gen: 1, Epoch: 1, Holder: "old", Chunks: map[uint64]chunkRef{}}
-	var committedAt time.Time
-	f.afterCAS = func(f *fakeChunkRemote) {
-		committedAt = time.Now()
+	var committedAt, confirmedAt time.Time
+	f.afterCAS = func(f *fakeChunkRemote) { committedAt = time.Now() }
+	f.onGetHead = func(f *fakeChunkRemote) {
+		if !committedAt.IsZero() {
+			confirmedAt = time.Now()
+		}
 	}
+	window := chunkHeadOperationTimeout + chunkHeadSettleTime
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	head, err := ClaimChunkHead(ctx, f, ChunkLayerConfig{Epoch: 2, Holder: "new"})
+	head, err := ClaimChunkHead(ctx, f, ChunkLayerConfig{Epoch: 2, Holder: "new", HeadCoolingWindow: window})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if committedAt.IsZero() || time.Since(committedAt) < 5*time.Second || f.stats().getHeads != 2 {
-		t.Fatal("takeover served before cooling and its confirmation read")
+	if committedAt.IsZero() || confirmedAt.IsZero() || confirmedAt.Sub(committedAt) < window || f.stats().getHeads != 2 {
+		t.Fatal("confirmation read preceded cooling", confirmedAt.Sub(committedAt))
 	}
 	if head.Gen != 2 || head.Epoch != 2 || head.Holder != "new" {
 		t.Fatal("confirmed the wrong owner", head)
+	}
+}
+
+func TestHeadBeltCoolingWindowCoversCASAndSettle(t *testing.T) {
+	for _, window := range []time.Duration{-1, time.Millisecond, chunkHeadOperationTimeout, chunkHeadOperationTimeout + chunkHeadSettleTime - 1} {
+		f := newFakeChunkRemote()
+		if _, err := ClaimChunkHead(context.Background(), f, ChunkLayerConfig{Epoch: 2, Holder: "new", HeadCoolingWindow: window}); err == nil || f.stats().getHeads != 0 {
+			t.Fatalf("unsafe cooling window %s admitted or touched remote: %v", window, err)
+		}
 	}
 }
 
@@ -228,16 +241,16 @@ func TestHeadBeltRetryOfUnconfirmedClaimStillCools(t *testing.T) {
 	f.head = chunkHead{Gen: 1, Epoch: 1, Holder: "old", Chunks: map[uint64]chunkRef{}}
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	if _, err := ClaimChunkHead(ctx, f, ChunkLayerConfig{Epoch: 2, Holder: "new"}); !errors.Is(err, context.DeadlineExceeded) || f.stats().cas != 1 {
+	if _, err := ClaimChunkHead(ctx, f, ChunkLayerConfig{Epoch: 2, Holder: "new", HeadCoolingWindow: chunkHeadOperationTimeout + chunkHeadSettleTime}); !errors.Is(err, context.DeadlineExceeded) || f.stats().cas != 1 {
 		t.Fatalf("claim did not stop inside cooling after CAS: %v, calls=%d", err, f.stats().cas)
 	}
 	retryCtx, retryCancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer retryCancel()
 	start := time.Now()
-	if _, err := ClaimChunkHead(retryCtx, f, ChunkLayerConfig{Epoch: 2, Holder: "new"}); err != nil {
+	if _, err := ClaimChunkHead(retryCtx, f, ChunkLayerConfig{Epoch: 2, Holder: "new", HeadCoolingWindow: chunkHeadOperationTimeout + chunkHeadSettleTime}); err != nil {
 		t.Fatal(err)
 	}
-	if time.Since(start) < 5*time.Second || f.stats().cas != 1 {
+	if time.Since(start) < chunkHeadOperationTimeout+chunkHeadSettleTime || f.stats().cas != 1 {
 		t.Fatal("retry bypassed cooling or replayed a settled claim")
 	}
 }

@@ -87,7 +87,7 @@ func failSeedFD(t *testing.T, root string) func() {
 }
 
 func TestRestoreFailedSeedSyncRetryCaptureAndReopen(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	root := filepath.Join(t.TempDir(), "provider")
 	remote := storage.NewMemChunkRemote()
@@ -191,7 +191,7 @@ func TestRestoreFailedSeedSyncRetryCaptureAndReopen(t *testing.T) {
 }
 
 func TestRestoreFailedSeedNeverTakesOwnership(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	root := filepath.Join(t.TempDir(), "provider")
 	remote := storage.NewMemChunkRemote()

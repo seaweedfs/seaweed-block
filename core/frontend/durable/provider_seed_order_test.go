@@ -24,7 +24,7 @@ func (r *takeoverOrderRemote) CASHead(ctx context.Context, v storage.ChunkHeadVe
 }
 
 func TestRestoreSeedPrecedesTakeoverCAS(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	remote := storage.NewMemChunkRemote()
 	if _, err := remote.CASHead(ctx, storage.ChunkHeadVersion{}, storage.ChunkHead{Epoch: 1, Holder: "old", RemoteLSN: 7}); err != nil {
@@ -81,7 +81,7 @@ func TestRestoreSeedPrecedesTakeoverCAS(t *testing.T) {
 // A restored restart under the same assignment must reactivate a detached
 // image before exposing I/O, not treat it as an already-settled active claim.
 func TestRestoreEqualOwnerDetachedHEADIsReactivated(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	remote := storage.NewMemChunkRemote()
 	makeProvider := func() *durable.DurableProvider {

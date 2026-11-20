@@ -91,18 +91,17 @@ func pendingTakeoverRead(t *testing.T, hold time.Duration) (*durable.DurableProv
 // Model Linux max_retries=5 and CRD=0: at most six attempts, no sleeps.
 // A status-only fix exhausts them during attachment and becomes guest EIO.
 func TestWALStoreChunk_TakeoverReadBeforeAttachIsRetryable(t *testing.T) {
-	_, _, handler := pendingTakeoverRead(t, 2500*time.Millisecond)
+	_, _, handler := pendingTakeoverRead(t, 1500*time.Millisecond)
 	command := nvme.IOCommand{Opcode: 0x02, NSID: 1, SLBA: 33, NLB: 1}
 	start := time.Now()
 	for attempt := 0; attempt <= 5; attempt++ {
-		commandStart := time.Now()
 		result := handler.Handle(context.Background(), command)
-		if elapsed := time.Since(commandStart); elapsed >= 5*time.Second {
-			t.Fatalf("guest command took %s", elapsed)
-		}
 		if result.AsError() == nil {
 			if !bytes.Equal(result.Data, block(0x33)) {
 				t.Fatal("guest read returned incorrect HEAD bytes")
+			}
+			if elapsed := time.Since(start); elapsed >= 5*time.Second {
+				t.Fatalf("guest read took %s", elapsed)
 			}
 			t.Logf("guest read succeeded on attempt%d after%s (max5 immediate retries)", attempt+1, time.Since(start))
 			return
@@ -142,24 +141,14 @@ func TestWALStoreChunk_PendingReadHonoursEarlierDeadline(t *testing.T) {
 }
 
 func TestWALStoreChunk_TakeoverWriteWaitsForAttach(t *testing.T) {
-	_, backend, _ := pendingTakeoverRead(t, 2500*time.Millisecond)
-	var n int
-	var err error
-	for attempt := 0; attempt <= 5; attempt++ {
-		start := time.Now()
-		n, err = backend.Write(context.Background(), 33*4096, block(0x74))
-		if elapsed := time.Since(start); elapsed >= 5*time.Second {
-			t.Fatalf("write command waited %s", elapsed)
-		}
-		if err == nil {
-			break
-		}
-		if n != 0 || !errors.Is(err, frontend.ErrBackendBusy) {
-			t.Fatalf("pending write lost retryability: n=%d err=%v", n, err)
-		}
-	}
+	_, backend, _ := pendingTakeoverRead(t, 1500*time.Millisecond)
+	start := time.Now()
+	n, err := backend.Write(context.Background(), 33*4096, block(0x74))
 	if err != nil || n != 4096 {
 		t.Fatalf("pending write: n=%d err=%v", n, err)
+	}
+	if elapsed := time.Since(start); elapsed >= 5*time.Second {
+		t.Fatalf("write waited %s", elapsed)
 	}
 	got := make([]byte, 4096)
 	if n, err := backend.Read(context.Background(), 33*4096, got); err != nil || n != 4096 || !bytes.Equal(got, block(0x74)) {

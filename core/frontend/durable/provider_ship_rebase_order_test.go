@@ -49,7 +49,7 @@ func (o *countingRebaser) seen() []uint64 {
 // before the takeover CAS. Returns the recovery error.
 func restoreWithObserver(t *testing.T, obs *countingRebaser, atCAS func(p *durable.DurableProvider)) (storage.ChunkRemote, *durable.DurableProvider, *atomic.Int32, error) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	t.Cleanup(cancel)
 	remote := storage.NewMemChunkRemote()
 	if _, err := remote.CASHead(ctx, storage.ChunkHeadVersion{}, storage.ChunkHead{Epoch: 1, Holder: "old", RemoteLSN: 7}); err != nil {
@@ -104,7 +104,7 @@ func TestRestoreRefusedShipRebaseKeepsHeadAndIOClosed(t *testing.T) {
 	if err == nil {
 		t.Fatal("restore succeeded although the observer refused the post-seed ship-LSN rebase")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	h, herr := remote.GetHead(ctx)
 	if herr != nil || calls.Load() != 0 || h.Epoch != 1 || h.Holder != "old" {

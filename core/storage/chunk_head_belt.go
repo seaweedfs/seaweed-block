@@ -7,9 +7,29 @@ import (
 	"time"
 )
 
-// Matches the filer lock ring's prior-owner cooling window. This is a
-// detection belt, not a substitute for a single HEAD serialization point.
-const chunkHeadCoolingWindow = 5 * time.Second
+const (
+	chunkHeadOperationTimeout = 2 * time.Second
+	chunkHeadSettleTime       = 100 * time.Millisecond
+)
+
+func validateHeadCoolingWindow(window time.Duration) error {
+	if window != 0 && window < chunkHeadOperationTimeout+chunkHeadSettleTime {
+		return fmt.Errorf("storage: HEAD cooling window must be zero (single serialization point) or at least %s", chunkHeadOperationTimeout+chunkHeadSettleTime)
+	}
+	return nil
+}
+
+func casChunkHead(ctx context.Context, remote chunkRemote, expected chunkHeadVersion, next chunkHead) (uint64, error) {
+	ctx, cancel := context.WithTimeout(ctx, chunkHeadOperationTimeout)
+	defer cancel()
+	return remote.CASHead(ctx, expected, next)
+}
+
+func readChunkHead(ctx context.Context, remote chunkRemote) (chunkHead, error) {
+	ctx, cancel := context.WithTimeout(ctx, chunkHeadOperationTimeout)
+	defer cancel()
+	return remote.GetHead(ctx)
+}
 
 // ChunkHeadRootReader confirms publication identity without resolving every
 // immutable manifest. The returned Chunks need not be populated.
@@ -18,6 +38,8 @@ type ChunkHeadRootReader interface {
 }
 
 func confirmChunkHead(ctx context.Context, remote chunkRemote, want chunkHead) error {
+	ctx, cancel := context.WithTimeout(ctx, chunkHeadOperationTimeout)
+	defer cancel()
 	var got chunkHead
 	var err error
 	if reader, ok := remote.(ChunkHeadRootReader); ok {
@@ -38,7 +60,7 @@ func confirmChunkHead(ctx context.Context, remote chunkRemote, want chunkHead) e
 // Every successful CAS is confirmed, including calls near or beyond a lease
 // horizon. No lease renewal or guard lock is needed across these remote calls.
 func casAndConfirmChunkHead(ctx context.Context, remote chunkRemote, expected chunkHeadVersion, next chunkHead) (uint64, error) {
-	gen, err := remote.CASHead(ctx, expected, next)
+	gen, err := casChunkHead(ctx, remote, expected, next)
 	if err != nil {
 		return gen, err
 	}
@@ -46,8 +68,11 @@ func casAndConfirmChunkHead(ctx context.Context, remote chunkRemote, expected ch
 	return gen, confirmChunkHead(ctx, remote, next)
 }
 
-func confirmChunkTakeover(ctx context.Context, remote chunkRemote, head chunkHead) error {
-	timer := time.NewTimer(chunkHeadCoolingWindow)
+func confirmChunkTakeover(ctx context.Context, remote chunkRemote, head chunkHead, window time.Duration) error {
+	if window == 0 {
+		return confirmChunkHead(ctx, remote, head)
+	}
+	timer := time.NewTimer(window)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
@@ -62,8 +87,11 @@ func confirmChunkTakeover(ctx context.Context, remote chunkRemote, head chunkHea
 func (l *chunkLayerImpl) publicationOwnerChanged(cur chunkHead) bool {
 	l.stMu.Lock()
 	last := l.head
+	if last.Gen == 0 {
+		last.Epoch, last.Holder = l.cfg.Epoch, l.cfg.Holder
+	}
 	l.stMu.Unlock()
-	return l.supersededBy(cur) || (last.Gen != 0 && cur.Gen != 0 && (last.Epoch != cur.Epoch || last.Holder != cur.Holder))
+	return l.supersededBy(cur) || (cur.Gen != 0 && (last.Epoch != cur.Epoch || last.Holder != cur.Holder))
 }
 
 func (l *chunkLayerImpl) fencePublication(cur chunkHead) {

@@ -1104,7 +1104,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	if !upgrade && !detach && len(changed) == 0 && h == baseHead.RemoteLSN && baseHead.Gen != 0 && !chunkHeadIsDetached(baseHead) {
 		// A no-op cut still observes authority: a fresh host may have
 		// claimed HEAD without uploading a single chunk since our last cut.
-		cur, err := l.remote.GetHead(ctx)
+		cur, err := readChunkHead(ctx, l.remote)
 		if err != nil {
 			l.abortCut(all)
 			l.dropIntents(ctx, intents)
@@ -1170,7 +1170,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		l.fencePublication(chunkHead{}) // confirmChunkHead already logged the observed root.
 		return chunkCutResult{}, casErr
 	}
-	cur, gerr := l.remote.GetHead(ctx)
+	cur, gerr := readChunkHead(ctx, l.remote)
 	if gerr != nil {
 		keepPending()
 		return chunkCutResult{}, fmt.Errorf("storage: capture CAS outcome unresolved (%v): %w: %w", casErr, errChunkCASOutcomeUnknown, gerr)
@@ -1257,7 +1257,7 @@ func (l *chunkLayerImpl) SettleDetach(ctx context.Context) (detachSettlement, ch
 		// definitely refused (an unresolved ordinary cut settles as usual).
 		return detachNotPublished, chunkCutResult{}, nil
 	}
-	cur, err := l.remote.GetHead(ctx)
+	cur, err := readChunkHead(ctx, l.remote)
 	if err != nil {
 		return 0, chunkCutResult{}, fmt.Errorf("storage: detach outcome unresolved: %w: %w", errChunkCASOutcomeUnknown, err)
 	}
@@ -1275,7 +1275,7 @@ func (l *chunkLayerImpl) SettleDetach(ctx context.Context) (detachSettlement, ch
 		} else if errors.Is(casErr, errChunkLayerFenced) {
 			l.fencePublication(chunkHead{})
 			return detachFenced, chunkCutResult{}, nil
-		} else if cur, err = l.remote.GetHead(ctx); err != nil {
+		} else if cur, err = readChunkHead(ctx, l.remote); err != nil {
 			return 0, chunkCutResult{}, fmt.Errorf("storage: detach outcome unresolved (cancel: %v): %w: %w", casErr, errChunkCASOutcomeUnknown, err)
 		} else if !sameProposal(cur, *pending) && !l.publicationOwnerChanged(cur) && cur.Gen == base.Gen && cur.Epoch == base.Epoch {
 			return 0, chunkCutResult{}, fmt.Errorf("storage: detach outcome unresolved (cancel: %v): HEAD unchanged: %w", casErr, errChunkCASOutcomeUnknown)
@@ -1381,7 +1381,7 @@ func (l *chunkLayerImpl) resolvePending(ctx context.Context) (err error) {
 	if pending == nil {
 		return nil
 	}
-	cur, err := l.remote.GetHead(ctx)
+	cur, err := readChunkHead(ctx, l.remote)
 	if err != nil {
 		return fmt.Errorf("storage: capture: earlier CAS outcome still unresolved: %w: %w", errChunkCASOutcomeUnknown, err)
 	}
@@ -1403,7 +1403,7 @@ func (l *chunkLayerImpl) resolvePending(ctx context.Context) (err error) {
 		} else if errors.Is(casErr, errChunkLayerFenced) {
 			l.fencePublication(chunkHead{})
 			return errChunkLayerFenced
-		} else if cur, err = l.remote.GetHead(ctx); err != nil {
+		} else if cur, err = readChunkHead(ctx, l.remote); err != nil {
 			return fmt.Errorf("storage: capture: earlier CAS outcome still unresolved (%v): %w: %w", casErr, errChunkCASOutcomeUnknown, err)
 		} else if !sameProposal(cur, *pending) && !l.publicationOwnerChanged(cur) && cur.Gen == base.Gen && cur.Epoch == base.Epoch {
 			return fmt.Errorf("storage: capture: earlier CAS outcome still unresolved (%v): HEAD unchanged: %w", casErr, errChunkCASOutcomeUnknown)

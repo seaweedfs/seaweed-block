@@ -319,6 +319,10 @@ type chunkLayerConfig struct {
 	// projection on every I/O.
 	Epoch  uint64
 	Holder string
+	// HeadCoolingWindow is zero for the supported single serialization point.
+	// Nonzero is reserved for explicit multi-filer experiments, must cover
+	// the HEAD operation deadline plus settling, and does not imply atomicity.
+	HeadCoolingWindow time.Duration
 	// FreshFromHead says the local volume is new and empty and starts from
 	// HEAD (every block absent, read lazily). False means an existing local
 	// volume. Never inferred from the local contents.
