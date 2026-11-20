@@ -122,6 +122,8 @@ func (l *chunkLayerImpl) stagePayloadRound(ctx context.Context, batch []uint64, 
 
 // Only immutable metadata survives an attempt. The intent remains a GC root
 // until this version is superseded or a confirmed HEAD makes it reachable.
+// This cache belongs to one layer/owner lifetime. Generation equality is not
+// a reuse proof across reopen or takeover; those require content-hash matching.
 func (l *chunkLayerImpl) rememberPayload(c capturedChunk, gen uint64) {
 	if !l.usesOwnedMapV3() {
 		return

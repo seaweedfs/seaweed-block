@@ -225,46 +225,63 @@ func TestCutCOWV3_ChangedImageExceedsSpillCap(t *testing.T) {
 }
 
 func TestCutCOWV3_OverwriteStormAbortsAndRetries(t *testing.T) {
-	s, l, f, gate := cowFixture(t)
-	// Keep chunk 0 hottest, with two other candidates still waiting behind it.
-	for _, lba := range []uint32{9, 1} {
-		if _, err := s.Write(lba, makeBlock(ctBlockSize, byte(lba))); err != nil {
-			t.Fatal(err)
-		}
-	}
-	before := f.stats().head.Gen
-	done, errs := cowStartCut(t, l, gate)
-	w := l.cowActive.Load()
-	w.mu.Lock()
-	w.memory = w.memoryLimit
-	w.spillLimit = w.chunkBytes
-	w.mu.Unlock()
-	for _, lba := range []uint32{5, 9} {
-		start := time.Now()
-		if _, err := s.Write(lba, makeBlock(ctBlockSize, 0xd0+byte(lba))); err != nil {
-			t.Fatal(err)
-		}
-		if time.Since(start) >= ctLocalBound {
-			t.Fatal("overwrite exceeded guest budget")
-		}
-	}
-	gate.unblock()
-	cowWaitSignal(t, done, "spill-refused update")
-	if err := <-errs; !errors.Is(err, errCutCOWAborted) || !strings.Contains(err.Error(), "spill would exceed its cap") {
-		t.Fatalf("cut: %v", err)
-	}
-	if f.stats().head.Gen != before {
-		t.Fatal("refused cut published")
-	}
-	result, err := l.Cut(context.Background())
-	if err != nil {
-		t.Fatal("retry:", err)
-	}
-	img := f.imageOf(t, result.Head)
-	for _, lba := range []uint32{5, 9} {
-		if !bytes.Equal(blockOf(img, lba), makeBlock(ctBlockSize, 0xd0+byte(lba))) {
-			t.Fatal("retry lost overwrite", lba)
-		}
+	// Every invocation reports its own failure. Rolling and periodic callers
+	// may issue a new invocation; a named caller must retain the failure.
+	for _, request := range []string{"rolling", "periodic", "named"} {
+		t.Run(request, func(t *testing.T) {
+			s, l, f, gate := cowFixture(t)
+			// Keep chunk 0 hottest, with two other candidates still waiting behind it.
+			for _, lba := range []uint32{9, 1} {
+				if _, err := s.Write(lba, makeBlock(ctBlockSize, byte(lba))); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := f.stats().head.Gen
+			var fixed uint64
+			l.testAfterBarrierSyncHook = func(h uint64) { fixed = h }
+			done, errs := cowStartCut(t, l, gate)
+			w := l.cowActive.Load()
+			w.mu.Lock()
+			w.memory = w.memoryLimit
+			w.spillLimit = w.chunkBytes
+			w.mu.Unlock()
+			for _, lba := range []uint32{5, 9} {
+				start := time.Now()
+				if _, err := s.Write(lba, makeBlock(ctBlockSize, 0xd0+byte(lba))); err != nil {
+					t.Fatal(err)
+				}
+				if time.Since(start) >= ctLocalBound {
+					t.Fatal("overwrite exceeded guest budget")
+				}
+			}
+			gate.unblock()
+			cowWaitSignal(t, done, "spill-refused update")
+			if err := <-errs; !errors.Is(err, errCutCOWAborted) || !strings.Contains(err.Error(), "spill would exceed its cap") {
+				t.Fatalf("cut: %v", err)
+			}
+			if f.stats().head.Gen != before {
+				t.Fatal("refused cut published")
+			}
+			if request == "named" {
+				// The failed named invocation ends here: only a new request may
+				// select another point, never an implicit replacement success.
+				return
+			}
+			oldPoint := fixed
+			result, err := l.Cut(context.Background())
+			if err != nil {
+				t.Fatal("retry:", err)
+			}
+			if result.H <= oldPoint || result.Head.RemoteLSN != result.H {
+				t.Fatalf("new invocation reused aborted point: old=%d new=%d remote=%d", oldPoint, result.H, result.Head.RemoteLSN)
+			}
+			img := f.imageOf(t, result.Head)
+			for _, lba := range []uint32{5, 9} {
+				if !bytes.Equal(blockOf(img, lba), makeBlock(ctBlockSize, 0xd0+byte(lba))) {
+					t.Fatal("retry lost overwrite", lba)
+				}
+			}
+		})
 	}
 }
 

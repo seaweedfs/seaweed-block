@@ -127,6 +127,8 @@ func TestCutCOWV3_PutRetryUsesFrozenSlot(t *testing.T) {
 	gate.unblock()
 	r := &retrySlotRemote{fakeChunkRemote: f, first: make(chan struct{}), release: make(chan struct{})}
 	l.remote = r
+	var fixed uint64
+	l.testAfterBarrierSyncHook = func(h uint64) { fixed = h }
 	var reads atomic.Int32
 	l.testCOWRead = func(idx uint64, _ bool) {
 		if idx == 0 {
@@ -154,6 +156,9 @@ func TestCutCOWV3_PutRetryUsesFrozenSlot(t *testing.T) {
 		t.Fatal(err)
 	}
 	result := <-results
+	if result.H != fixed || result.Head.RemoteLSN != fixed {
+		t.Fatalf("PUT retry replaced the point: fixed=%d result=%d remote=%d", fixed, result.H, result.Head.RemoteLSN)
+	}
 	r.mu.Lock()
 	attempts := r.attempts
 	r.mu.Unlock()
