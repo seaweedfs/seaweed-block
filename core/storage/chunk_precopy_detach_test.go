@@ -22,8 +22,8 @@ func TestPrecopyDetachConvergesBeforeStoppingIO(t *testing.T) {
  got := f.imageOf(t, r.Head)
  want := make([]byte, len(got))
  for i := uint32(0); i < ctNumBlocks; i++ {
-  b := make([]byte, ctBlockSize)
-  if _, err := s.Read(i, b); err != nil { t.Fatal(err) }
+  b, err := s.Read(i)
+  if err != nil { t.Fatal(err) }
   copy(want[int(i)*ctBlockSize:], b)
  }
  if !bytes.Equal(got, want) { t.Fatal("detached HEAD differs from local image") }
