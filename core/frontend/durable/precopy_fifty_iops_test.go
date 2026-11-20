@@ -121,6 +121,7 @@ func TestPrecopyFiftyIOPSSyncConvergesFirstAttempt(t *testing.T) {
 	}()
 	result, _, err := p.DetachVolume(ctx, "v1")
 	stopped.Store(true)
+	t.Logf("attempts=%d drain=%s estimate=%s frozen=%t guest_errors=%d", result.Precopy.Attempts, result.Precopy.Drain, result.Precopy.Estimate, result.Precopy.Frozen, guestErrors.Load())
 	if err != nil || !result.Precopy.Frozen || result.Precopy.Attempts != 1 {
 		t.Fatalf("50IOPS cutover: report=%+v err=%v", result.Precopy, err)
 	}
