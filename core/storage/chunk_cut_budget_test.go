@@ -94,3 +94,45 @@ func TestCutBudgetCOWRefusalAbortsOnlyCut(t *testing.T) {
 		t.Fatalf("budget lifecycle: %+v", b)
 	}
 }
+
+func TestCutBudgetRevocationJoinsBeforeRelease(t *testing.T) {
+	_, l, f, gate := cowFixture(t)
+	b := &testCutBudget{}
+	l.cfg.Budget = b
+	before := f.stats().head.Gen
+	done, errs := cowStartCut(t, l, gate)
+	w := l.cowActive.Load()
+	b.mu.Lock()
+	abort := b.abort
+	b.mu.Unlock()
+	if abort == nil {
+		t.Fatal("no revocation callback registered")
+	}
+	abort(errTestCutBudget)
+	cowWaitSignal(t, w.ended, "budget revocation")
+	b.mu.Lock()
+	released := b.released
+	b.mu.Unlock()
+	if released != 0 {
+		t.Fatal("released host ticket before held local read joined")
+	}
+	gate.unblock()
+	cowWaitSignal(t, done, "revoked capture settlement")
+	if err := <-errs; !errors.Is(err, errTestCutBudget) {
+		t.Fatalf("revoked capture: %v", err)
+	}
+	if f.stats().head.Gen != before {
+		t.Fatal("revoked point published")
+	}
+	b.mu.Lock()
+	released = b.released
+	b.mu.Unlock()
+	if released != 1 {
+		t.Fatalf("ticket releases=%d", released)
+	}
+	// A late revocation for a finished ticket cannot poison a later point.
+	abort(errTestCutBudget)
+	if _, err := l.Cut(ctTimeout(t)); err != nil {
+		t.Fatal("new point after revoked ticket:", err)
+	}
+}
