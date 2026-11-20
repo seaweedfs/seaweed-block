@@ -21,7 +21,7 @@ func TestPrecopyFiftyIOPSSyncConvergesFirstAttempt(t *testing.T) {
 	precopyFiftyIOPS(t, 3, false)
 }
 
-func TestPrecopyFiftyIOPSUnknownCostKeepsServing(t *testing.T) {
+func TestPrecopyFiftyIOPSColdCostsDoNotClaimFirstAttempt(t *testing.T) {
 	precopyFiftyIOPS(t, 1, true)
 }
 
@@ -132,7 +132,15 @@ func precopyFiftyIOPS(t *testing.T, samples byte, wantUnknown bool) {
 	stopped.Store(true)
 	t.Logf("attempts=%d drain=%s estimate=%s frozen=%t guest_errors=%d", result.Precopy.Attempts, result.Precopy.Drain, result.Precopy.Estimate, result.Precopy.Frozen, guestErrors.Load())
 	if wantUnknown {
-		if !errors.Is(err, storage.ErrPrecopyUnknown) || result.Precopy.Frozen || guestErrors.Load() != 0 {
+		if result.Precopy.Frozen {
+			// Later rolling cuts may leave an empty tail, which needs only a
+			// measured fixed cost. They must not masquerade as first-round fit.
+			if err != nil || result.Precopy.Attempts <= 1 || guestErrors.Load() != 0 || !bytes.Equal(headBlock(t, remote, 1), block(0x5b)) {
+				t.Fatalf("cold samples claimed premature fit: report=%+v guest_errors=%d err=%v", result.Precopy, guestErrors.Load(), err)
+			}
+			return
+		}
+		if !errors.Is(err, storage.ErrPrecopyUnknown) || guestErrors.Load() != 0 {
 			t.Fatalf("unknown cost did not preserve live service: report=%+v guest_errors=%d err=%v", result.Precopy, guestErrors.Load(), err)
 		}
 		if _, err := backend.Write(ctx, 12288, block(0x7d)); err != nil {

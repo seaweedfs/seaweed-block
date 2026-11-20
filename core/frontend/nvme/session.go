@@ -153,6 +153,8 @@ func newSession(conn net.Conn, h *IOHandler, target *Target, expectedSubNQN stri
 
 func (s *Session) serve(ctx context.Context) error {
 	defer s.close()
+	ctx, cancelCommands := context.WithCancel(ctx)
+	defer cancelCommands()
 
 	if err := s.handleICReq(); err != nil {
 		return fmt.Errorf("ICReq: %w", err)
@@ -168,6 +170,9 @@ func (s *Session) serve(ctx context.Context) error {
 
 	rxErr := s.rxLoop(ctx)
 
+	// The old transport is gone. Unacknowledged commands held by pre-copy
+	// must stop waiting before we join them; they cannot complete this path.
+	cancelCommands()
 	s.cmdWg.Wait()
 	close(s.done)
 	txErr := <-txErrCh
