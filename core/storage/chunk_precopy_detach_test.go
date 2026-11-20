@@ -83,21 +83,35 @@ func TestPrecopyDetachBusyOwnerRetainsSlowFixedCost(t *testing.T) {
 
 func precopyBusyOwnerControl(t *testing.T, slow bool) {
 	t.Helper()
-	s, f, l, _ := precopyLayer(t, 1024, 1)
+	s, f, l, w := precopyLayer(t, 1024, 1)
 	if slow {
 		f.beforeCAS = func(*fakeChunkRemote) { time.Sleep(1300 * time.Millisecond) }
 	}
 	calls := 0
 	r, err := l.PrecopyDetach(ctTimeout(t), func() bool { calls++; return false })
-	if !errors.Is(err, ErrPrecopyNotConverged) || len(r.Precopy.Rounds) != 5 || r.Precopy.Frozen || calls == 0 {
+	if !errors.Is(err, ErrPrecopyNotConverged) || len(r.Precopy.Rounds) != 5 || r.Precopy.Frozen {
 		t.Fatalf("report=%+v calls=%d err=%v", r.Precopy, calls, err)
 	}
-	if f.stats().head.State == ChunkHeadDetached {
-		t.Fatal("busy frontend detached")
+	if calls == 0 {
+		assertPrecopyMeasuredRefusal(t, r.Precopy, err)
 	}
-	if _, err := s.Write(2, makeBlock(ctBlockSize, 0x99)); err != nil {
+	if slow && (calls != 0 || r.Precopy.Fixed < 1300*time.Millisecond) {
+		t.Fatalf("slow fixed cost did not refuse before stop: calls=%d report=%+v", calls, r.Precopy)
+	}
+	if f.stats().head.State != ChunkHeadActive {
+		t.Fatal("busy frontend lost its active HEAD")
+	}
+	w.write(t, s, 2, 0x99) // The old owner must still serve after either refusal.
+	r, err = l.Cut(ctTimeout(t))
+	if err != nil {
 		t.Fatal(err)
 	}
+	image := f.imageOf(t, r.Head)
+	if !bytes.Equal(image[ctBlockSize:2*ctBlockSize], makeBlock(ctBlockSize, 0x10)) ||
+		!bytes.Equal(image[2*ctBlockSize:3*ctBlockSize], makeBlock(ctBlockSize, 0x99)) {
+		t.Fatal("busy-owner refusal lost existing or resumed-write bytes")
+	}
+	assertEveryHeadIsPrefixImage(t, f, w)
 }
 
 func TestPrecopyDetachCountsBurstAtNextBarrier(t *testing.T) {
@@ -138,21 +152,45 @@ func precopyRefusedFinalCutControl(t *testing.T, slow bool) {
 	w.write(t, s, 1, 0xbb)
 	f.beforeCAS = func(f *fakeChunkRemote) { f.installLocked(copyHead(f.head)) }
 	r, err := l.PrecopyDetach(ctTimeout(t), func() bool { return true })
-	if !r.Precopy.Frozen || !errors.Is(err, ErrChunkHeadPrecondition) {
-		t.Fatalf("report=%+v err=%v", r.Precopy, err)
+	if r.Precopy.Frozen {
+		if !errors.Is(err, ErrChunkHeadPrecondition) {
+			t.Fatalf("report=%+v err=%v", r.Precopy, err)
+		}
+	} else {
+		assertPrecopyMeasuredRefusal(t, r.Precopy, err)
+	}
+	if slow && (r.Precopy.Frozen || r.Precopy.Fixed < 1300*time.Millisecond) {
+		t.Fatalf("slow fixed cost incorrectly admitted a final cut: report=%+v", r.Precopy)
+	}
+	if f.stats().head.State != ChunkHeadActive {
+		t.Fatal("refused final cut lost its active HEAD")
 	}
 	how, _, err := l.SettleDetach(ctTimeout(t))
 	if err != nil || how != DetachNotPublished {
 		t.Fatalf("settlement=%v err=%v", how, err)
 	}
+	w.write(t, s, 2, 0x99) // A safe refusal leaves the old owner serving.
 	r, err = l.Cut(ctTimeout(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(f.imageOf(t, r.Head)[ctBlockSize:2*ctBlockSize], makeBlock(ctBlockSize, 0xbb)) {
-		t.Fatal("refused final cut marked changed bytes clean")
+	image := f.imageOf(t, r.Head)
+	if !bytes.Equal(image[ctBlockSize:2*ctBlockSize], makeBlock(ctBlockSize, 0xbb)) ||
+		!bytes.Equal(image[2*ctBlockSize:3*ctBlockSize], makeBlock(ctBlockSize, 0x99)) {
+		t.Fatal("refused final cut lost changed or resumed-write bytes")
 	}
 	assertEveryHeadIsPrefixImage(t, f, w)
+}
+
+// A retained slow observation can refuse admission under load. This is a
+// valid outcome only with the exact refusal class, budget and active owner.
+func assertPrecopyMeasuredRefusal(t *testing.T, report PrecopyReport, err error) {
+	t.Helper()
+	if !errors.Is(err, ErrPrecopyNotConverged) || report.Frozen ||
+		report.Estimate <= 1200*time.Millisecond ||
+		(report.Reason != "tail_too_large" && report.Reason != "barrier_over_budget") {
+		t.Fatalf("not a valid measured over-budget refusal: report=%+v err=%v", report, err)
+	}
 }
 
 func TestPrecopyDetachSustainedWrapFlushAndFreshRestore(t *testing.T) {
