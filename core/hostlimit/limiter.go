@@ -239,16 +239,17 @@ func (l *Limiter) Admit(ctx context.Context, payload int64, abort func(error)) (
 	l.stats.Active++
 	l.fallback = fallback
 	l.stats.FallbackActive = fallback
+	warnFallback := fallback && l.stats.Fallback == 0
 	if fallback {
 		l.stats.LastPoolError = err.Error()
-		if l.stats.Fallback == 0 {
-			log.Printf("hostlimit: shared cut pool unavailable (%v); using static fallback, shared memory/spill cap NOT enforced", err)
-		}
 		l.stats.Fallback++
 		l.stats.FallbackActive = true
 	}
 	x.timer = time.AfterFunc(l.cfg.MaxHold, func() { l.revoke(id) })
 	l.mu.Unlock()
+	if warnFallback {
+		log.Printf("hostlimit: shared cut pool unavailable (%v); using static fallback, shared memory/spill cap NOT enforced", err)
+	}
 	return id, nil
 }
 func (l *Limiter) revoke(id uint64) {
