@@ -19,6 +19,7 @@ func FuzzDecodeWALEntryV3(f *testing.F) {
 			f.Fatal(err)
 		}
 		f.Add(b)
+		f.Add(append(append([]byte(nil), b...), 0xA5))
 	}
 	f.Add([]byte{})
 	f.Fuzz(func(t *testing.T, b []byte) {

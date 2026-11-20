@@ -16,6 +16,7 @@ import (
 
 func TestNativeReplacementCheckpointSIGKILL(t *testing.T) {
 	const phaseEnv, pathEnv = "SW_BLOCK_NATIVE_CHECKPOINT_KILL", "SW_BLOCK_NATIVE_CHECKPOINT_PATH"
+	const skipHookEnv = "SW_BLOCK_NATIVE_CHECKPOINT_SKIP_HOOK"
 	if phase := os.Getenv(phaseEnv); phase != "" {
 		s, err := createMappedWALStoreV3ForTest(os.Getenv(pathEnv), 16, 4096, 64*1024, WModeStrict, 4)
 		if err != nil {
@@ -33,14 +34,18 @@ func TestNativeReplacementCheckpointSIGKILL(t *testing.T) {
 		case "extent_sync":
 			s.flusher.afterExtentSyncForTest = func() { _ = kill() }
 		case "slot_pwrite":
-			s.v3.pub.io.fsync = kill
+			if os.Getenv(skipHookEnv) != phase {
+				s.v3.pub.io.fsync = kill
+			}
 		case "slot_sync":
 			real := s.v3.pub.io.fsync
-			s.v3.pub.io.fsync = func() error {
-				if err := real(); err != nil {
-					return err
+			if os.Getenv(skipHookEnv) != phase {
+				s.v3.pub.io.fsync = func() error {
+					if err := real(); err != nil {
+						return err
+					}
+					return kill()
 				}
-				return kill()
 			}
 		case "tail_publication":
 		default:
@@ -82,6 +87,20 @@ func TestNativeReplacementCheckpointSIGKILL(t *testing.T) {
 			}
 			if r.NextLSN() != 2 {
 				t.Fatalf("recovered allocator=%d", r.NextLSN())
+			}
+		})
+	}
+	for _, phase := range []string{"slot_pwrite", "slot_sync"} {
+		t.Run("missing_hook_"+phase, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "volume")
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestNativeReplacementCheckpointSIGKILL$")
+			cmd.Env = append(os.Environ(), phaseEnv+"="+phase, pathEnv+"="+path, skipHookEnv+"="+phase)
+			out, err := cmd.CombinedOutput()
+			var exited *exec.ExitError
+			if ctx.Err() != nil || !errors.As(err, &exited) || exited.ProcessState.Sys().(syscall.WaitStatus).Signaled() || !bytes.Contains(out, []byte("flush returned without reaching crash hook")) {
+				t.Fatalf("missing %s hook was not detected: %v ctx=%v output=%s", phase, err, ctx.Err(), out)
 			}
 		})
 	}
