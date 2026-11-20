@@ -48,7 +48,7 @@ func DefaultConfig(dir string) Config {
 	return Config{Directory: dir, NormalSlots: 3, UrgentSlots: 1, FillSlots: 2, IdleSlots: 1, PayloadBytes: 64 << 20, COWBytes: 1 << 30, BytesPerSecond: 64 << 20, FallbackVolumes: 200, MaxHold: 5 * time.Minute}
 }
 func (c Config) Validate() error {
-	if !filepath.IsAbs(c.Directory) || c.NormalSlots < 1 || c.UrgentSlots < 1 || c.FillSlots < 0 || c.IdleSlots < 0 || c.NormalSlots+c.UrgentSlots+c.FillSlots+c.IdleSlots > 256 || c.PayloadBytes <= 0 || c.COWBytes <= 0 || c.BytesPerSecond <= 0 || c.FallbackVolumes < 1 || c.FallbackVolumes > 65536 || c.MaxHold <= 0 {
+	if !filepath.IsAbs(c.Directory) || c.NormalSlots < 1 || c.NormalSlots > 256 || c.UrgentSlots < 1 || c.UrgentSlots > 256 || c.FillSlots < 0 || c.FillSlots > 256 || c.IdleSlots < 0 || c.IdleSlots > 256 || c.NormalSlots+c.UrgentSlots+c.FillSlots+c.IdleSlots > 256 || c.PayloadBytes <= 0 || c.COWBytes <= 0 || c.BytesPerSecond <= 0 || c.FallbackVolumes < 1 || c.FallbackVolumes > 65536 || c.MaxHold <= 0 {
 		return errors.New("hostlimit: invalid configuration")
 	}
 	return nil
