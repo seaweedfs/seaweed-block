@@ -339,6 +339,78 @@ func TestFallbackLogDoesNotHoldCOWAccountingLock(t *testing.T) {
 	l.mu.Unlock()
 }
 
+func TestLastFallbackReleaseClearsActiveStatus(t *testing.T) {
+	c := testConfig(t)
+	c.Directory += "-missing"
+	l := newTest(t, c)
+	id, err := l.Acquire(context.Background(), Urgent, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !l.Snapshot().(Stats).FallbackActive {
+		t.Fatal("fallback not reported while held")
+	}
+	l.Release(id)
+	settled(t, l)
+	st := l.Snapshot().(Stats)
+	if st.FallbackActive || st.PayloadReserved != 0 || st.COWReserved != 0 || st.Released != 1 {
+		t.Fatalf("last fallback release left stale status: %+v", st)
+	}
+}
+
+func TestConfigurationLockFailurePreservesPoolPolicy(t *testing.T) {
+	for _, class := range []Class{Normal, Urgent} {
+		t.Run(fmt.Sprint(class), func(t *testing.T) {
+			l := newTest(t, testConfig(t))
+			var lockErr error
+			l.testBeforeConfigLock = func(f *os.File) {
+				if err := f.Close(); err != nil {
+					t.Fatal(err)
+				}
+				lockErr = tryLock(f)
+			}
+			id, err := l.Acquire(context.Background(), class, nil)
+			if lockErr == nil || errors.Is(lockErr, ErrBusy) {
+				t.Fatalf("fault did not cause non-contention lock error: %v", lockErr)
+			}
+			st := l.Snapshot().(Stats)
+			if class == Normal {
+				if id != 0 || !errors.Is(err, ErrBusy) || !errors.Is(err, lockErr) || st.SkippedByClass[Normal] != 1 || st.Fallback != 0 {
+					t.Fatalf("configuration lock fault lost cause: id=%d err=%v stats=%+v", id, err, st)
+				}
+			} else {
+				if err != nil || id == 0 || st.Fallback != 1 || !st.FallbackActive {
+					t.Fatalf("configuration lock fault refused urgent fallback: id=%d err=%v stats=%+v", id, err, st)
+				}
+				l.Release(id)
+			}
+			if st.LastPoolError != lockErr.Error() {
+				t.Fatalf("configuration lock alarm lost cause: got %q want %q", st.LastPoolError, lockErr)
+			}
+		})
+	}
+}
+
+func TestConfigurationLockContentionRefusesAllClasses(t *testing.T) {
+	c := testConfig(t)
+	f, err := os.OpenFile(filepath.Join(c.Directory, "configuration.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err = tryLock(f); err != nil {
+		t.Fatal(err)
+	}
+	for _, class := range []Class{Normal, Urgent} {
+		l := newTest(t, c)
+		id, err := l.Acquire(context.Background(), class, nil)
+		st := l.Snapshot().(Stats)
+		if id != 0 || !errors.Is(err, ErrBusy) || st.Fallback != 0 || st.FallbackActive || st.LastPoolError != "" || st.SkippedByClass[class] != 1 {
+			t.Fatalf("configuration contention bypassed cap: class=%d id=%d err=%v stats=%+v", class, id, err, st)
+		}
+	}
+}
+
 func TestHealthyAdmissionDoesNotHideOlderFallbackLease(t *testing.T) {
 	c := testConfig(t)
 	c.Directory = filepath.Join(c.Directory, "late-pool")

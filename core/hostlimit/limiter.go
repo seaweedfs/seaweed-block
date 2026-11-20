@@ -77,7 +77,8 @@ type lease struct {
 	revoked      bool
 }
 type Limiter struct {
-	testBeforeConfigWrite func() // test-only crash boundary; immutable before first admission
+	testBeforeConfigWrite func()         // test-only crash boundary; immutable before first admission
+	testBeforeConfigLock  func(*os.File) // test-only fault boundary; immutable before first admission
 	cfg                   Config
 	mu                    sync.Mutex
 	admitWG               sync.WaitGroup
@@ -132,6 +133,9 @@ func (l *Limiter) pool(c Class) (*os.File, error) {
 		return nil, err
 	}
 	defer guard.Close()
+	if l.testBeforeConfigLock != nil {
+		l.testBeforeConfigLock(guard)
+	}
 	if err = tryLock(guard); err != nil {
 		return nil, ErrBusy
 	}
