@@ -46,6 +46,43 @@ func precopyMemoryBackend(t *testing.T) *StorageBackend {
 	return b
 }
 
+func TestPrecopyHostDrainDoesNotCompleteHeldGuestIO(t *testing.T) {
+	b := precopyMemoryBackend(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	queued, done := make(chan struct{}), make(chan struct{})
+	b.testPrecopyQueued = func() { close(queued) }
+	var result error
+	t.Cleanup(func() {
+		cancel()
+		_ = b.Close()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Error("held command did not join")
+		}
+	})
+	if !b.TryStopIO("final detached cut") {
+		t.Fatal("freeze failed")
+	}
+	go func() {
+		defer close(done)
+		_, result = b.Write(ctx, 0, make([]byte, 4096))
+	}()
+	select {
+	case <-queued:
+	case <-ctx.Done():
+		t.Fatal("command did not enter the freeze queue")
+	}
+	if err := b.StopIO(ctx, "workspace lease fenced"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+		t.Fatalf("host drain completed held guest I/O before old path teardown: %v", result)
+	case <-time.After(80 * time.Millisecond):
+	}
+}
+
 func TestPrecopyQueueResumesInFIFOOrder(t *testing.T) {
 	b := precopyMemoryBackend(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)

@@ -18,6 +18,15 @@ import (
 // peer reply is held until a separate control probe witnesses closed admission,
 // then released after20ms. This is a forced schedule, not physical NVMe proof.
 func TestPrecopyFiftyIOPSSyncConvergesFirstAttempt(t *testing.T) {
+	precopyFiftyIOPS(t, 3)
+}
+
+func TestPrecopyFiftyIOPSOnePriorSampleConvergesFirstAttempt(t *testing.T) {
+	precopyFiftyIOPS(t, 1)
+}
+
+func precopyFiftyIOPS(t *testing.T, samples byte) {
+	t.Helper()
 	remote := storage.NewMemChunkRemote()
 	p := precopyProvider(t, remote, &parkView{stubView: v1View()})
 	openRecovered(t, p)
@@ -25,7 +34,7 @@ func TestPrecopyFiftyIOPSSyncConvergesFirstAttempt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := byte(1); i <= 3; i++ {
+	for i := byte(1); i <= samples; i++ {
 		if _, err := backend.Write(context.Background(), 4096, block(i)); err != nil {
 			t.Fatal(err)
 		}
