@@ -264,3 +264,40 @@ func TestPrecopyDetachQueuedCancellationReturnsWhileOtherCutOwnsPipeline(t *test
 		t.Fatal("queued pre-copy ignored its caller deadline")
 	}
 }
+
+func TestPrecopyDetachExcludesServingPreparationFromFreezeCost(t *testing.T) {
+	_, _, l, _ := precopyLayer(t, 1024, 0)
+	l.testAfterAdmitHook = func() { l.testAfterAdmitHook = nil; time.Sleep(1300 * time.Millisecond) }
+	if _, err := l.Cut(ctTimeout(t)); err != nil {
+		t.Fatal(err)
+	}
+	r, err := l.PrecopyDetach(ctTimeout(t), func() bool { return true })
+	if err != nil {
+		t.Fatalf("preparation while serving was charged as frozen time: %v", err)
+	}
+	if !r.Precopy.Frozen {
+		t.Fatal("empty final tail never froze")
+	}
+}
+
+func TestPrecopyDetachRetryResolvesPreviouslyAppliedDetachedCut(t *testing.T) {
+	_, f, l, _ := precopyLayer(t, 1024, 1)
+	if _, err := l.Cut(ctTimeout(t)); err != nil {
+		t.Fatal(err)
+	}
+	f.casModes = []fakeCASMode{casAppliedLost}
+	f.afterCAS = func(f *fakeChunkRemote) { f.failGet = errFakeRemoteDown }
+	r, err := l.PrecopyDetach(ctTimeout(t), func() bool { return true })
+	if !r.Precopy.Frozen || !errors.Is(err, ErrChunkCASOutcomeUnknown) {
+		t.Fatalf("first report=%+v err=%v", r.Precopy, err)
+	}
+	f.failGet = nil
+	before := f.stats()
+	r, err = l.PrecopyDetach(ctTimeout(t), func() bool { t.Fatal("retry stopped I/O again instead of resolving the applied detach"); return false })
+	if err != nil || r.Head.State != ChunkHeadDetached || r.Head.Gen != before.head.Gen {
+		t.Fatalf("resolved result=%+v err=%v", r, err)
+	}
+	if !bytes.Equal(f.imageOf(t, r.Head)[ctBlockSize:2*ctBlockSize], makeBlock(ctBlockSize, 0x10)) {
+		t.Fatal("resolved detach lost bytes")
+	}
+}
