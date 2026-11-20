@@ -342,7 +342,7 @@ func TestNativeReplacementDirectExtentRefusedPreservesWAL(t *testing.T) {
 func TestNativeReplacementQueuedWritersAfterFailedAppend(t *testing.T) {
 	for _, batch := range []bool{false, true} {
 		t.Run(map[bool]string{false: "write", true: "batch"}[batch], func(t *testing.T) {
-			s, _ := newMappedCheckpointStoreV3(t)
+			s, path := newMappedCheckpointStoreV3(t)
 			s.admission = nil
 			entered, release, admitted := make(chan struct{}), make(chan struct{}), make(chan struct{})
 			open := sync.OnceFunc(func() { close(release) })
@@ -389,6 +389,35 @@ func TestNativeReplacementQueuedWritersAfterFailedAppend(t *testing.T) {
 			}
 			if calls.Load() != 1 || s.NextLSN() != next || s.v3.w.logicalHeadV3() != head || s.dm.len() != 0 {
 				t.Fatal("queued writer appended, consumed an LSN or published dirty state after failure")
+			}
+			crashReadOnlyStoreV3(t, s)
+			r, err := OpenWALStore(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.DisableAutoFlushForRecoveryTest()
+			t.Cleanup(func() { _ = r.Close() })
+			if _, err := r.Recover(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := r.Write(11, blk(0xAC)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := r.Sync(); err != nil {
+				t.Fatal(err)
+			}
+			crashReadOnlyStoreV3(t, r)
+			q, err := OpenWALStore(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			q.DisableAutoFlushForRecoveryTest()
+			t.Cleanup(func() { _ = q.Close() })
+			if _, err := q.Recover(); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := q.Read(11); err != nil || !bytes.Equal(got, blk(0xAC)) {
+				t.Fatalf("failed batch resurfaced over later ACK: %v", err)
 			}
 		})
 	}
