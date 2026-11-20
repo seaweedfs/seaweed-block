@@ -102,3 +102,59 @@ func TestPrecopyFreezeCallerDeadlineIsRetryable(t *testing.T) {
 		t.Fatalf("deadline lost retryable admission status: %v", err)
 	}
 }
+
+func TestPrecopyFreezeTerminalStopWakesQueuedIO(t *testing.T) {
+	for _, terminal := range []string{"close", "stop"} {
+		t.Run(terminal, func(t *testing.T) {
+			p := precopyProvider(t, storage.NewMemChunkRemote(), &parkView{stubView: v1View()})
+			openRecovered(t, p)
+			b, err := p.Open(context.Background(), "v1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			gate := b.(interface {
+				TryStopIO(string) bool
+				SetOperational(bool, string)
+			})
+			if !gate.TryStopIO("pre-copy final cut") {
+				t.Fatal("freeze failed")
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			started, done := make(chan struct{}), make(chan struct{})
+			var result error
+			t.Cleanup(func() {
+				cancel()
+				gate.SetOperational(false, "cleanup")
+				select {
+				case <-done:
+				case <-time.After(3 * time.Second):
+					t.Error("queued command did not join")
+				}
+			})
+			go func() { defer close(done); close(started); _, result = b.Write(ctx, 4096, block(9)) }()
+			<-started
+			select {
+			case <-done:
+				t.Fatalf("command escaped freeze: %v", result)
+			case <-time.After(30 * time.Millisecond):
+			}
+			want := frontend.ErrNotReady
+			if terminal == "close" {
+				want = frontend.ErrBackendClosed
+				if err := b.Close(); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				gate.SetOperational(false, "workspace lease self-fence")
+			}
+			select {
+			case <-done:
+				if !errors.Is(result, want) || errors.Is(result, frontend.ErrBackendBusy) {
+					t.Fatalf("terminal gate masked: %v", result)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("terminal stop did not wake command")
+			}
+		})
+	}
+}

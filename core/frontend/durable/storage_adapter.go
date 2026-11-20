@@ -162,8 +162,8 @@ type StorageBackend struct {
 	// false; provider flips true after Recover() succeeds (T3b).
 	// opEvidence is the reason reported when operational=false
 	// (e.g., "awaiting recovery", "local epoch ahead of assignment").
-	// Only a successfully recovered chunk volume awaiting attachment may wait.
-	// waitAttachReady and readyChanged are protected by mu.
+	// Readiness waits cover pending chunk attachment and temporary pre-copy freezes.
+	// Readiness flags and readyChanged are protected by mu.
 	waitAttachReady  bool
 	waitPrecopyReady bool // temporary pre-copy freeze; queued I/O has not reached storage
 	readyChanged     chan struct{}
