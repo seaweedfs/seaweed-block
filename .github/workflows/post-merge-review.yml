@@ -1,0 +1,51 @@
+name: post-merge-review paths
+
+# A PR labelled "post-merge-review" may merge before its full review only if
+# it touches no path in .github/post-merge-review-deny.txt. This check fails
+# such a PR if any changed file matches; without the label it passes.
+#
+# pull_request_target: the workflow, the deny list and the script all come
+# from the base branch, so a PR cannot change its own check. The PR's code is
+# never checked out or run: only its commit is fetched, for the file list.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: post-merge-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  paths:
+    name: post-merge-review paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Not labelled
+        if: ${{ !contains(github.event.pull_request.labels.*.name, 'post-merge-review') }}
+        run: echo "no post-merge-review label; nothing to check"
+
+      - name: Checkout base
+        if: ${{ contains(github.event.pull_request.labels.*.name, 'post-merge-review') }}
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check changed paths
+        if: ${{ contains(github.event.pull_request.labels.*.name, 'post-merge-review') }}
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          bash .github/scripts/post-merge-review-check-test.sh
+          git fetch --no-tags origin "+refs/pull/${PR}/head:refs/remotes/pr/head"
+          # --no-renames lists both names of a moved file.
+          git diff --name-only --no-renames "$BASE...$HEAD" >changed.txt
+          bash .github/scripts/post-merge-review-check.sh .github/post-merge-review-deny.txt <changed.txt
