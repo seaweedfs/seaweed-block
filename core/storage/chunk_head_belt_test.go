@@ -147,3 +147,22 @@ func TestHeadBeltConfirmationUsesOnlyRoot(t *testing.T) {
 		t.Fatal("confirmed wrong image")
 	}
 }
+
+func TestHeadBeltRetryOfUnconfirmedClaimStillCools(t *testing.T) {
+	f := newFakeChunkRemote()
+	f.head = chunkHead{Gen: 1, Epoch: 1, Holder: "old", Chunks: map[uint64]chunkRef{}}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if _, err := ClaimChunkHead(ctx, f, ChunkLayerConfig{Epoch: 2, Holder: "new"}); !errors.Is(err, context.DeadlineExceeded) || f.stats().cas != 1 {
+		t.Fatalf("claim did not stop inside cooling after CAS: %v, calls=%d", err, f.stats().cas)
+	}
+	retryCtx, retryCancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer retryCancel()
+	start := time.Now()
+	if _, err := ClaimChunkHead(retryCtx, f, ChunkLayerConfig{Epoch: 2, Holder: "new"}); err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(start) < 5*time.Second || f.stats().cas != 1 {
+		t.Fatal("retry bypassed cooling or replayed a settled claim")
+	}
+}
