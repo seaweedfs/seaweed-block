@@ -168,6 +168,8 @@ func TestChunkCutStatsBody_MirrorsTheLayerStats(t *testing.T) {
 		switch f := v.Field(i); f.Kind() {
 		case reflect.Int, reflect.Int64:
 			f.SetInt(int64(i + 1))
+		case reflect.Uint64:
+			f.SetUint(uint64(i + 1))
 		case reflect.String:
 			f.SetString("s")
 		case reflect.Bool:

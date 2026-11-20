@@ -184,6 +184,7 @@ const (
 // replica readiness from authority movement.
 type StatusProjection struct {
 	frontend.Projection
+	Memory               ProcessMemoryStatus
 	FrontendPrimaryReady bool
 	AuthorityRole        string
 	ReplicationRole      string
@@ -516,6 +517,7 @@ func (s *StatusServer) authorityProjection() StatusProjection {
 		replicationRole = ReplicationRoleNotReady
 	}
 	out := StatusProjection{
+		Memory:               processMemoryStatus(),
 		Projection:           p,
 		FrontendPrimaryReady: p.Healthy && !superseded && !supportingReady,
 		AuthorityRole:        authorityRole,

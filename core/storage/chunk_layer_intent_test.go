@@ -1,7 +1,7 @@
 package storage
 
 // The capture path's intents (W5): a cut that uploads chunks durably writes
-// an intent naming exactly those keys before the first upload, and deletes
+// an intent naming at least those keys before the first upload, and deletes
 // only its own intent once the outcome is settled: after a confirmed HEAD
 // CAS, or a clean abort. An uncertain CAS keeps the intent until a later
 // HEAD read settles it.
@@ -84,8 +84,11 @@ func TestChunkIntent_WrittenBeforeFirstUploadAndDeletedAfterCAS(t *testing.T) {
 	}
 	keys := append([]string(nil), in.Keys...)
 	sort.Strings(keys)
-	if got := uploadedKeys(ops); strings.Join(keys, ",") != strings.Join(got, ",") {
-		t.Fatalf("intent keys %q, uploaded keys %q", keys, got)
+	for _, key := range uploadedKeys(ops) {
+		i := sort.SearchStrings(keys, key)
+		if i == len(keys) || keys[i] != key {
+			t.Fatalf("uploaded key %q absent from intent %q", key, keys)
+		}
 	}
 	if in.Gen != 0 || in.Epoch != 1 || in.Holder != "host-a" {
 		t.Fatalf("intent gen %d epoch %d holder %q, want the cut's base gen 0, epoch 1, host-a", in.Gen, in.Epoch, in.Holder)
@@ -282,7 +285,7 @@ func TestChunkIntent_OtherIntentsUntouched(t *testing.T) {
 
 // Admission is refused at the final check right before the CAS: a clean
 // abort, so the intent goes.
-func TestChunkIntent_AdmissionRefusedBeforeCASDeletesIntent(t *testing.T) {
+func TestChunkIntent_AdmissionRefusedBeforeCASKeepsReusableIntent(t *testing.T) {
 	s, _ := newChunkTestStore(t)
 	f := newFakeChunkRemote()
 	cfg := ctConfig(1)
@@ -306,7 +309,17 @@ func TestChunkIntent_AdmissionRefusedBeforeCASDeletesIntent(t *testing.T) {
 	if n := f.stats().cas; n != 0 {
 		t.Fatalf("refused cut issued %d CAS", n)
 	}
-	if live := liveIntents(t, f); len(live) != 0 {
-		t.Fatalf("intent left after admission was refused: %+v", live)
+	if live := liveIntents(t, f); len(live) == 0 {
+		t.Fatal("completed upload lost its retry root after admission refusal")
 	}
+	// Restored admission reuses the exact payload and settles its root.
+	layer.(*chunkLayerImpl).cfg.CaptureAllowed = nil
+	before := f.stats().puts
+	if _, err := layer.Cut(ctTimeout(t)); err != nil {
+		t.Fatal(err)
+	}
+	if f.stats().puts != before {
+		t.Fatal("unchanged refused point uploaded again")
+	}
+	assertNoIntentsLeft(t, f)
 }

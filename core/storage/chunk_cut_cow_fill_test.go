@@ -47,6 +47,17 @@ func TestCutCOWV3_HeldFillIsCancelledByAbortAndDrained(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { _, err := l.Cut(ctx); done <- err }()
 	waitKey(t, gEntered, "the copier's HEAD fill of chunk 2")
+	w := l.cowActive.Load()
+	if w == nil {
+		t.Fatal("missing active window")
+	}
+	e := w.entries[2]
+	e.mu.Lock()
+	state := e.state
+	e.mu.Unlock()
+	if state != cowDone {
+		t.Fatal("remote fill held the local entry")
+	}
 	cancel()
 	err := waitErr(t, done, "aborted cut with a held fill")
 	if err == nil || !(errors.Is(err, context.Canceled) || errors.Is(err, errCutCOWAborted)) {
@@ -100,10 +111,10 @@ func TestCutCOWV3_LazySaverSpillImageIsExact(t *testing.T) {
 	cfg.BarrierBound = 0
 	cfg.UploadConcurrency = 1
 	l := mustAttach(t, s, f, cfg).(*chunkLayerImpl)
-	if _, err := s.Write(1, makeBlock(ctBlockSize, 0x51)); err != nil {
+	if _, err := s.WriteBatch(4, [][]byte{makeBlock(ctBlockSize, 0x54), makeBlock(ctBlockSize, 0x55)}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.WriteBatch(4, [][]byte{makeBlock(ctBlockSize, 0x54), makeBlock(ctBlockSize, 0x55)}); err != nil {
+	if _, err := s.Write(1, makeBlock(ctBlockSize, 0x51)); err != nil {
 		t.Fatal(err)
 	}
 	live, releaseLive := make(chan struct{}), make(chan struct{})

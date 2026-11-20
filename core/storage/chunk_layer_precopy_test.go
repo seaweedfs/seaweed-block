@@ -23,6 +23,9 @@ func precopyLayer(t *testing.T, bound, n int) (*WALStore, *fakeChunkRemote, *chu
 	cfg := ctConfig(1)
 	cfg.FreshFromHead = true
 	cfg.BarrierBound = bound
+	if bound > 0 {
+		cfg.COWSpillLimit = 2 * int64(bound) * ctChunkBytes
+	}
 	l := mustAttach(t, s, f, cfg).(*chunkLayerImpl)
 	// A new v3 map is conservatively UNKNOWN. Publish the zero baseline
 	// first so this control isolates subsequent pre-copy redirty behavior.
@@ -54,8 +57,8 @@ func TestChunkPrecopy_RedirtiedStagedChunkIsRecopied(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			s, f, l, w := precopyLayer(t, 2, 3) // 3 candidates, bound 2
 			l.testAfterStageHook = func(round int) {
-				if round == 0 { // chunks 0 and 1 are staged now
-					w.write(t, s, 1, 0x99) // chunk 0 again
+				if round == 0 { // recent chunks 2 and 1 are staged now
+					w.write(t, s, 9, 0x99) // chunk 2 again
 					if flushed {
 						mustSyncFlush(t, s)
 					}
@@ -65,11 +68,11 @@ func TestChunkPrecopy_RedirtiedStagedChunkIsRecopied(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if r.Stats.StageRounds != 1 || r.Stats.StagedChunks != 2 {
-				t.Fatalf("staging: %d rounds, %d chunks; want 1 round of 2", r.Stats.StageRounds, r.Stats.StagedChunks)
+			if r.Stats.StageRounds != 1 || r.Stats.StagedChunks != 3 {
+				t.Fatalf("staging: %d rounds, %d chunks; want 1 round of 3", r.Stats.StageRounds, r.Stats.StagedChunks)
 			}
-			if r.Stats.StagedChunksUsed != 1 || r.Stats.BarrierCopyChunks != 0 || r.Stats.CandidateChunks != 3 || r.Stats.BarrierOverBound {
-				t.Fatalf("barrier: %d staged used, %d copied, over bound %v; want chunk 1 from staging, chunks 0 and 2 copied outside the barrier",
+			if r.Stats.StagedChunksUsed != 2 || r.Stats.BarrierCopyChunks != 0 || r.Stats.CandidateChunks != 3 || r.Stats.BarrierOverBound {
+				t.Fatalf("barrier: %d staged used, %d copied, over bound %v; want chunks 0 and 1 from staging, redirtied chunk 2 read by COW",
 					r.Stats.StagedChunksUsed, r.Stats.BarrierCopyChunks, r.Stats.BarrierOverBound)
 			}
 			assertEveryHeadIsPrefixImage(t, f, w)
@@ -91,8 +94,8 @@ func TestChunkPrecopy_WritesOutpacingStagingGoOverBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Stats.StageRounds != 3 { // the ruling: at most three rounds
-		t.Fatalf("%d staging rounds, want 3", r.Stats.StageRounds)
+	if r.Stats.StageRounds != 1 { // no shrink: fix the frontier instead of repeating the same round
+		t.Fatalf("%d staging rounds, want 1", r.Stats.StageRounds)
 	}
 	if r.Stats.BarrierOverBound || r.Stats.BarrierCopyChunks != 0 || r.Stats.CandidateChunks != 4 {
 		t.Fatalf("barrier copied %d chunks, over bound %v; want all 4 candidates copied outside the barrier", r.Stats.BarrierCopyChunks, r.Stats.BarrierOverBound)
@@ -275,7 +278,9 @@ func TestChunkPrecopy_BarrierSyncFailureSettlesStagedIntents(t *testing.T) {
 	if st := f.stats(); st.puts == before.puts {
 		t.Fatal("schedule did not stage any upload before the barrier")
 	}
-	assertNoIntentsLeft(t, f)
+	if len(liveIntents(t, f)) == 0 {
+		t.Fatal("completed uploads lost their retry roots")
+	}
 
 	// The same abort with the intent delete failing: kept, retried next cut.
 	w.write(t, s, 2, 0x22)

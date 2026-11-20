@@ -374,6 +374,8 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 		HydrationQueueDepth: p.cfg.ChunkHydrationQueueDepth,
 		BarrierBound:        p.cfg.ChunkDirtyThreshold,
 		UploadConcurrency:   p.cfg.ChunkUploadConcurrency,
+		PayloadMemoryBudget: p.cfg.ChunkPayloadMemoryBudget,
+		Budget:              p.cfg.ChunkBudget,
 		CaptureAllowed: func() error {
 			cur := p.view.Projection()
 			if !cur.Healthy || cur.VolumeID != volumeID || lin.volumeID != volumeID {
@@ -534,6 +536,14 @@ func (r *closeBoundRemote) DeleteIntent(ctx context.Context, id string) error {
 	c, end := r.bind(ctx)
 	defer end()
 	return r.ChunkRemote.DeleteIntent(c, id)
+}
+
+// DeleteSettledIntent is reserved for joined layer shutdown. Provider Close
+// has already cancelled ordinary operations; a settled root can still be
+// removed using the cleanup caller's bounded context. Unknown CAS roots never
+// reach this method: the layer retains them until publication is settled.
+func (r *closeBoundRemote) DeleteSettledIntent(ctx context.Context, id string) error {
+	return r.ChunkRemote.DeleteIntent(ctx, id)
 }
 
 func (r *closeBoundRemote) ListIntents(ctx context.Context) ([]storage.ChunkIntent, error) {

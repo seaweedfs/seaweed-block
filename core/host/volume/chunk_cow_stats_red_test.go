@@ -19,12 +19,18 @@ func TestChunkCutStatsBody_ExposesCOWCounters(t *testing.T) {
 		{"COWSavedChunks", "cowSavedChunks", 31},
 		{"COWSaveNs", "cowSaveNs", 47},
 		{"COWWaitNs", "cowWaitNs", 59},
+		{"COWWALReadAttempts", "cowWALReadAttempts", 61},
+		{"COWLocalReadNs", "cowLocalReadNs", 67},
 	}
 	value := reflect.ValueOf(&stats).Elem()
 	for _, field := range fields {
 		target := value.FieldByName(field.goName)
 		if !target.IsValid() {
 			t.Errorf("RED: storage cut stats lack %s", field.goName)
+			continue
+		}
+		if target.Kind() == reflect.Uint64 {
+			target.SetUint(uint64(field.value))
 			continue
 		}
 		if target.Kind() != reflect.Int && target.Kind() != reflect.Int64 {

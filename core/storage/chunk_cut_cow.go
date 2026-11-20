@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-const cutCOWMemoryLimit = 64 << 20
+const cutCOWMemoryLimit = DefaultCutPayloadMemoryBudget
 
 // defaultCOWSpillLimit caps a copy window's side-file bytes by default.
 const defaultCOWSpillLimit = 1 << 30
@@ -30,6 +30,13 @@ const (
 )
 
 var errCutCOWAborted = errors.New("storage: cut copy window aborted; retry cut")
+
+var (
+	errCutSaverCapacity = errors.New("storage: saver capacity")
+	errCutCOWCapacity   = errors.New("storage: COW capacity")
+	errCutBudgetRevoked = errors.New("storage: cut budget revoked")
+	errCutUpload        = errors.New("storage: cut upload failed")
+)
 
 type cutCOWEntry struct {
 	mu           sync.Mutex
@@ -45,26 +52,33 @@ type cutCOWEntry struct {
 	missing []uint64
 }
 type cutCOWWindow struct {
-	layer      *chunkLayerImpl
-	mu         sync.Mutex
-	terminal   bool
-	err        error
-	ended      chan struct{}
-	refs       sync.WaitGroup // Add under mu, only while OPEN; Wait only after terminal
-	sideReady  chan struct{}
-	cleanupErr error
-	entries    map[uint64]*cutCOWEntry
-	head       map[uint64]chunkRef // the cut's base HEAD: the source of missing blocks
-	memory     int64
-	spillBytes int64 // bytes written to the side file; at most spillLimit
-	spillLimit int64
-	chunkBytes int64
-	side       *os.File
-	sideErr    error
-	cleanup    sync.Once
-	saved      atomic.Int64
-	saveNs     atomic.Int64
-	waitNs     atomic.Int64
+	layer       *chunkLayerImpl
+	budget      *cutBudgetReservation // immutable before captureMu releases writers
+	mu          sync.Mutex
+	terminal    bool
+	err         error
+	ended       chan struct{}
+	ctx         context.Context
+	cancel      context.CancelFunc
+	refs        sync.WaitGroup // Add under mu, only while OPEN; Wait only after terminal
+	sideReady   chan struct{}
+	cleanupErr  error
+	entries     map[uint64]*cutCOWEntry
+	head        map[uint64]chunkRef // the cut's base HEAD: the source of missing blocks
+	memory      int64
+	spillBytes  int64 // bytes written to the side file; at most spillLimit
+	spillLimit  int64
+	chunkBytes  int64
+	memoryLimit int64
+	saverSlots  chan struct{}
+	side        *os.File
+	sideErr     error
+	cleanup     sync.Once
+	walReads    atomic.Uint64
+	localReadNs atomic.Int64
+	saved       atomic.Int64
+	saveNs      atomic.Int64
+	waitNs      atomic.Int64
 	// Scheduling/fault controls are nil in production and set before installation.
 }
 
@@ -135,6 +149,14 @@ func (l *chunkLayerImpl) installCOWWindow(candidates, staged map[uint64]bool, he
 		return nil, fmt.Errorf("%w: side-store geometry", errCutCOWAborted)
 	}
 	w := &cutCOWWindow{layer: l, ended: make(chan struct{}), entries: make(map[uint64]*cutCOWEntry), head: head, spillLimit: l.cfg.COWSpillLimit, chunkBytes: int64(size)}
+	w.ctx, w.cancel = context.WithCancel(context.Background())
+	_, reserved, limit := l.cutPayloadWorkers()
+	savers := min(max(1, int((16<<20)/int64(size))), int((limit-reserved)/(2*int64(size))))
+	// Active saver buffers are reserved independently of upload concurrency.
+	// (4*U + 2*S)*chunkBytes + cached saves <= memoryLimit.
+	reserved += int64(2*savers) * int64(size)
+	w.memory, w.memoryLimit = reserved, limit
+	w.saverSlots = make(chan struct{}, savers)
 	var slot int64
 	for _, idx := range sortedKeys(candidates) {
 		state := cowPending
@@ -159,6 +181,7 @@ func (w *cutCOWWindow) abort(err error) {
 	if !w.terminal {
 		w.terminal, w.err = true, fmt.Errorf("%w: %w", errCutCOWAborted, err)
 		close(w.ended)
+		w.cancel()
 	}
 	w.mu.Unlock()
 }
@@ -265,6 +288,25 @@ func (l *chunkLayerImpl) beforeCOWMutation(first, count uint64) {
 			if e == nil {
 				break
 			}
+			// Never queue an unbounded number of full-chunk saver buffers behind
+			// local I/O. Refuse this cut, not the guest mutation, when its fixed
+			// saver slots are exhausted; no physical I/O has started for this owner.
+			acquired := false
+			select {
+			case w.saverSlots <- struct{}{}:
+				acquired = true
+			default:
+				w.abort(errors.Join(errCutCOWAborted, errCutSaverCapacity))
+				w.refs.Done()
+			}
+			if !acquired {
+				break
+			}
+			if w.status() != nil {
+				<-w.saverSlots
+				w.refs.Done()
+				break
+			}
 			start := time.Now()
 			// Local blocks only: a guest write never waits on SeaweedFS.
 			data, missing, err := l.readCOWChunk(w, idx)
@@ -279,12 +321,19 @@ func (l *chunkLayerImpl) beforeCOWMutation(first, count uint64) {
 			w.saveNs.Add(time.Since(start).Nanoseconds())
 			// In particular an aborting saver releases itself BEFORE anyone joins.
 			w.refs.Done()
+			<-w.saverSlots
 			break
 		}
 	}
 }
 
 func (w *cutCOWWindow) save(e *cutCOWEntry, data []byte, missing []uint64) error {
+	// No window lock spans the host callback: it may revoke this or another cut.
+	if w.budget != nil {
+		if err := w.budget.reserve(w.chunkBytes); err != nil {
+			return fmt.Errorf("%w: COW budget reservation: %w", errors.Join(errCutCOWAborted, errCutBudgetRevoked), err)
+		}
+	}
 	if hook := w.layer.testCOWSave; hook != nil {
 		if err := hook(); err != nil {
 			return err
@@ -295,14 +344,14 @@ func (w *cutCOWWindow) save(e *cutCOWEntry, data []byte, missing []uint64) error
 		w.mu.Unlock()
 		return errCutCOWAborted
 	}
-	inMemory := w.memory+w.chunkBytes <= cutCOWMemoryLimit
+	inMemory := w.memory+w.chunkBytes <= w.memoryLimit
 	if inMemory {
 		w.memory += w.chunkBytes
 	} else if w.spillBytes+w.chunkBytes > w.spillLimit {
 		// The side file is sparse but its saved chunks are real bytes on the
 		// volume's filesystem: abort the cut (retried) instead of filling it.
 		w.mu.Unlock()
-		return fmt.Errorf("%w: COW spill would exceed its cap of %d bytes", errCutCOWAborted, w.spillLimit)
+		return fmt.Errorf("%w: %w: COW spill would exceed its cap of %d bytes", errCutCOWAborted, errCutCOWCapacity, w.spillLimit)
 	} else {
 		w.spillBytes += w.chunkBytes
 	}
@@ -333,6 +382,8 @@ func (w *cutCOWWindow) save(e *cutCOWEntry, data []byte, missing []uint64) error
 // is lazily absent (no local version, HEAD names the chunk) is left zero and
 // listed in missing; its image at H is HEAD's by definition.
 func (l *chunkLayerImpl) readCOWChunk(w *cutCOWWindow, idx uint64) ([]byte, []uint64, error) {
+	start := time.Now()
+	defer func() { w.localReadNs.Add(time.Since(start).Nanoseconds()) }()
 	buf := make([]byte, int(w.chunkBytes))
 	var missing []uint64
 	for i := uint64(0); i < l.chunkBlocks; i++ {
@@ -345,7 +396,7 @@ func (l *chunkLayerImpl) readCOWChunk(w *cutCOWWindow, idx uint64) ([]byte, []ui
 		if lba >= uint64(l.s.NumBlocks()) {
 			break
 		}
-		b, local, err := l.readLocalBlock(lba)
+		b, local, err := l.readLocalBlock(lba, w, buf[int(i)*l.blockSize:int(i+1)*l.blockSize])
 		if err != nil {
 			return nil, nil, err
 		}
@@ -364,10 +415,10 @@ func (l *chunkLayerImpl) readCOWChunk(w *cutCOWWindow, idx uint64) ([]byte, []ui
 // ZERO. It never calls the miss hook. The order is safe against a concurrent
 // flush (dirty map before presence) and fill (HEAD's bytes either way); a new
 // write of the block waits for the caller's COW entry.
-func (l *chunkLayerImpl) readLocalBlock(lba uint64) ([]byte, bool, error) {
+func (l *chunkLayerImpl) readLocalBlock(lba uint64, w *cutCOWWindow, dst []byte) ([]byte, bool, error) {
 	s := l.s
 	if s.v3 != nil {
-		if data, handled, err := s.readDirtyV3(uint32(lba)); handled {
+		if data, handled, err := s.readDirtyV3Into(uint32(lba), dst, func() { w.walReads.Add(1) }); handled {
 			return data, err == nil, err
 		}
 	} else if walRelOff, dataOffset, _, _, ok := s.dm.get(lba); ok {
@@ -390,22 +441,15 @@ func (l *chunkLayerImpl) readLocalBlock(lba uint64) ([]byte, bool, error) {
 }
 
 // fillMissing completes a COW capture: the blocks listed missing get the cut's
-// base HEAD bytes. It runs with no entry held (no guest waits on it), bounded
-// by ReadMissTimeout and the window's end.
-func (l *chunkLayerImpl) fillMissing(w *cutCOWWindow, idx uint64, data []byte, missing []uint64) ([]byte, error) {
-	ref, ok := w.head[idx]
+// base HEAD bytes. It runs after the local entry is released, bounded by
+// ReadMissTimeout and the owning cut's cancellation.
+func (l *chunkLayerImpl) fillMissing(ctx context.Context, base map[uint64]chunkRef, idx uint64, data []byte, missing []uint64) ([]byte, error) {
+	ref, ok := base[idx]
 	if !ok {
-		return nil, fmt.Errorf("storage: cut chunk %d: %d lazily absent block(s) but HEAD has no chunk", idx, len(missing))
+		return nil, fmt.Errorf("storage: cut chunk %d: lazily absent blocks but HEAD has no chunk", idx)
 	}
-	ctx, cancel := context.WithTimeout(l.ctx, l.cfg.ReadMissTimeout)
+	ctx, cancel := context.WithTimeout(ctx, l.cfg.ReadMissTimeout)
 	defer cancel()
-	go func() {
-		select {
-		case <-w.ended:
-			cancel()
-		case <-ctx.Done():
-		}
-	}()
 	head, err := l.remote.Get(ctx, ref.Key)
 	if err != nil {
 		return nil, fmt.Errorf("storage: cut chunk %d HEAD fetch: %w", idx, err)
@@ -461,24 +505,25 @@ func (l *chunkLayerImpl) copyCOWEntry(w *cutCOWWindow, idx uint64) (capturedChun
 		if err == nil {
 			kept = w.finish(e, cowDone)
 		}
-		if kept && len(missing) > 0 {
-			// The entry is released: guests no longer wait on this chunk.
-			if data, err = l.fillMissing(w, idx, data, missing); err != nil {
-				w.abort(err)
-				kept = false
-			}
-		}
 		w.refs.Done()
 		if !kept {
 			return capturedChunk{}, false, w.status()
 		}
-		return capturedChunk{idx: idx, data: data, sum: sha256.Sum256(data), zero: isAllZero(data)}, true, nil
+		return capturedChunk{idx: idx, data: data, sum: sha256.Sum256(data), zero: isAllZero(data), missing: missing}, true, nil
 	}
 }
 
-func (l *chunkLayerImpl) copyCOWWindow(ctx context.Context, w *cutCOWWindow) ([]capturedChunk, error) {
-	stop := context.AfterFunc(ctx, func() { w.abort(ctx.Err()) })
+// Each worker owns one immutable image from local read through remote Put.
+// Once copied, its entry is done: guest writes need not wait for remote I/O.
+// The window remains installed for candidates not yet read by a worker.
+func (l *chunkLayerImpl) copyCOWWindow(ctx context.Context, w *cutCOWWindow, recent, versions map[uint64]uint64, head chunkHead) ([]capturedChunk, []string, error) {
+	parent := ctx
+	abortStop := context.AfterFunc(parent, func() { w.abort(parent.Err()) })
+	defer abortStop()
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(w.ctx, cancel)
 	defer stop()
+	defer cancel()
 	defer func() {
 		w.abort(errCutCOWAborted)
 		w.join()
@@ -490,53 +535,46 @@ func (l *chunkLayerImpl) copyCOWWindow(ctx context.Context, w *cutCOWWindow) ([]
 		l.cowMu.Unlock()
 	}()
 	indices := make(map[uint64]bool, len(w.entries))
-	for idx := range w.entries {
-		indices[idx] = true
+	for idx, e := range w.entries {
+		e.mu.Lock()
+		done := e.state == cowDone
+		e.mu.Unlock()
+		if !done {
+			indices[idx] = true
+		}
 	}
-	keys := sortedKeys(indices)
-	out := make([]capturedChunk, len(keys))
-	kept := make([]bool, len(keys))
-	var next atomic.Int64
-	var workers sync.WaitGroup
-	for n := 0; n < min(l.cfg.UploadConcurrency, len(keys)); n++ {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			for {
-				i := int(next.Add(1) - 1)
-				if i >= len(keys) {
-					return
-				}
-				c, ok, err := l.copyCOWEntry(w, keys[i])
-				if err != nil {
-					return
-				}
-				out[i], kept[i] = c, ok
+	order := hotChunkKeys(indices, recent)
+	out, intents, err := l.streamCutPayloads(ctx, order, head, func(ctx context.Context, idx uint64) (capturedChunk, error) {
+		c, ok, err := l.copyCOWEntry(w, idx)
+		if err != nil {
+			return capturedChunk{}, err
+		}
+		if !ok {
+			return capturedChunk{}, errCutCOWAborted
+		}
+		if len(c.missing) > 0 {
+			c.data, err = l.fillMissing(ctx, w.head, c.idx, c.data, c.missing)
+			if err != nil {
+				return capturedChunk{}, errors.Join(errCutCOWAborted, err)
 			}
-		}()
-	}
-	workers.Wait()
+			c.sum, c.zero, c.missing = sha256.Sum256(c.data), isAllZero(c.data), nil
+		}
+		c.version = versions[idx]
+		return c, nil
+	})
 	w.mu.Lock()
 	if !w.terminal {
 		w.terminal = true
 		close(w.ended)
+		w.cancel()
 	}
-	err := w.err
+	err = errors.Join(err, w.err)
 	w.mu.Unlock()
-	cleanupErr := w.join()
-	if cleanupErr != nil {
-		err = errors.Join(err, errCutCOWAborted, cleanupErr)
-	}
+	err = errors.Join(err, w.join())
 	if err != nil {
-		return nil, err
+		return nil, intents, err
 	}
-	var result []capturedChunk
-	for i, c := range out {
-		if kept[i] {
-			result = append(result, c)
-		}
-	}
-	return result, nil
+	return out, intents, nil
 }
 
 // Creation is single-owner, but no allocation/lifetime lock spans filesystem I/O.

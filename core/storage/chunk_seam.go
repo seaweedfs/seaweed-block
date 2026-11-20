@@ -364,9 +364,18 @@ type chunkLayerConfig struct {
 	// UploadConcurrency bounds capture/pre-copy Put calls (0 defaults to 8).
 	UploadConcurrency int
 
-	// COWSpillLimit caps the bytes a cut's copy window may spill to its side
-	// file once the in-memory budget is used: a save beyond it aborts the cut
-	// (the caller retries) instead of growing the file under the WAL/extent.
+	// PayloadMemoryBudget bounds this layer's uploader, saver and cached payload
+	// bytes (0 uses 64 MiB, or six chunks for larger geometry). Host-wide
+	// admission is provided separately through Budget; this per-process
+	// budget does not coordinate other blockvolume processes.
+	PayloadMemoryBudget int64
+	Budget              Budget
+
+	// COWSpillLimit caps saved-before-write
+	// side bytes. Native pre-copy is triggered when remaining candidate
+	// bytes exceed half this cap; it streams directly to remote, without a
+	// local payload file. Exceeding it aborts the cut (the caller
+	// retries), never publishes a partial image or refuses the guest mutation.
 	// 0 defaults to defaultCOWSpillLimit; negative is refused.
 	COWSpillLimit int64
 
@@ -384,9 +393,12 @@ type chunkLayerConfig struct {
 // chunkCutStats describes one cut. The periodic-cut work fills it; a zero
 // value means "not measured".
 type chunkCutStats struct {
-	COWSavedChunks int
-	COWSaveNs      int64
-	COWWaitNs      int64
+	// Local validated WAL attempts and local copy duration, including savers.
+	COWWALReadAttempts uint64
+	COWLocalReadNs     int64
+	COWSavedChunks     int
+	COWSaveNs          int64
+	COWWaitNs          int64
 	// BarrierPauseNs is the guest pause: from the capture barrier's Lock
 	// request until it is released. LockWaitNs is its first part, the wait for
 	// writers already holding the capture barrier shared.
@@ -440,6 +452,7 @@ type chunkLayerStats struct {
 	CutsNoop          uint64
 	CutsFailed        uint64
 	CutsRefused       map[string]uint64
+	CutsAborted       map[string]uint64 // saver_capacity, cow_capacity, budget_revoked, upload
 	CASConflicts      uint64
 	CASUnknown        uint64
 	PendingUnresolved bool

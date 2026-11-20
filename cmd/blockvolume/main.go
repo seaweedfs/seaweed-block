@@ -9,11 +9,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
@@ -38,6 +40,7 @@ import (
 )
 
 type flags struct {
+	memoryLimitMiB int64
 	masterAddr     string
 	serverID       string
 	volumeID       string
@@ -154,6 +157,7 @@ type flags struct {
 func parseFlags(args []string) (flags, error) {
 	var f flags
 	fs := flag.NewFlagSet("blockvolume", flag.ContinueOnError)
+	fs.Int64Var(&f.memoryLimitMiB, "memory-limit-mib", 4*storage.DefaultCutPayloadMemoryBudget/(1<<20), "process Go soft memory limit in MiB (0 preserves GOMEMLIMIT); explicit GOMEMLIMIT is preserved unless this flag is set")
 	fs.StringVar(&f.masterAddr, "master", "", "master gRPC address (required)")
 	fs.StringVar(&f.serverID, "server-id", "", "this server identity (required)")
 	fs.StringVar(&f.volumeID, "volume-id", "", "served volume (required)")
@@ -236,6 +240,18 @@ func parseFlags(args []string) (flags, error) {
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
+	}
+	memoryFlagSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "memory-limit-mib" {
+			memoryFlagSet = true
+		}
+	})
+	if !memoryFlagSet && os.Getenv("GOMEMLIMIT") != "" {
+		f.memoryLimitMiB = 0
+	}
+	if f.memoryLimitMiB < 0 || f.memoryLimitMiB > math.MaxInt64>>20 {
+		return flags{}, fmt.Errorf("--memory-limit-mib out of range")
 	}
 	if f.version {
 		return f, nil
@@ -491,6 +507,9 @@ func main() {
 	if f.version {
 		fmt.Println(buildinfo.Version("blockvolume"))
 		return
+	}
+	if f.memoryLimitMiB > 0 {
+		debug.SetMemoryLimit(f.memoryLimitMiB << 20)
 	}
 	os.Exit(run(f))
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"os"
 	"sync"
@@ -946,6 +947,16 @@ func (s *WALStore) SetWMode(m WMode) error {
 // validation within one stable lifetime is damage. No lock is taken: the
 // lock graph is unchanged.
 func (s *WALStore) readDirtyV3(lba uint32) (data []byte, handled bool, err error) {
+	return s.readDirtyV3Observed(lba, nil)
+}
+
+// Optional per-operation accounting; the validation/re-resolution contract is
+// identical for guest readers and local COW owners.
+func (s *WALStore) readDirtyV3Observed(lba uint32, recordAttempt func()) (data []byte, handled bool, err error) {
+	return s.readDirtyV3Into(lba, nil, recordAttempt)
+}
+
+func (s *WALStore) readDirtyV3Into(lba uint32, dst []byte, recordAttempt func()) (data []byte, handled bool, err error) {
 	const attempts = 8
 	for i := 0; i < attempts; i++ {
 		if h := s.v3.testReadAdmitted; h != nil {
@@ -959,7 +970,10 @@ func (s *WALStore) readDirtyV3(lba uint32) (data []byte, handled bool, err error
 		if h := s.v3.testReadResolved; h != nil {
 			h()
 		}
-		data, ioErr, verr := s.readRecordV3(lba, off, dataOff, lsn)
+		if recordAttempt != nil {
+			recordAttempt()
+		}
+		data, ioErr, verr := s.readRecordIntoV3(lba, off, dataOff, lsn, dst)
 		if ioErr != nil {
 			return nil, true, NewSubstrateIOFailure(ioErr, "v3 WAL read")
 		}
@@ -982,13 +996,66 @@ func (s *WALStore) readDirtyV3(lba uint32) (data []byte, handled bool, err error
 // io.EOF (a file shorter than its geometry) is substrate I/O too. verr is a
 // record that was read but does not validate as the resolved write.
 func (s *WALStore) readRecordV3(lba uint32, walRelOff uint64, dataOff uint32, lsn uint64) (data []byte, ioErr, verr error) {
-	e, _, ioErr, verr := readWholeRecordV3(s.fd, recordGeometryV3{s.sb.WALOffset, s.sb.WALSize, s.sb.BlockSize, s.sb.VolumeSize}, walRelOff)
-	if ioErr != nil || verr != nil {
-		return nil, ioErr, verr
+	return s.readRecordIntoV3(lba, walRelOff, dataOff, lsn, nil)
+}
+
+func (s *WALStore) readRecordIntoV3(lba uint32, walRelOff uint64, dataOff uint32, lsn uint64, dst []byte) (data []byte, ioErr, verr error) {
+	// Validate the entire record while retaining only one block of scratch.
+	// A legal batch can be much larger than the capturing chunk and its budget.
+	if walRelOff+walEntryHeaderSizeV3 > s.sb.WALSize {
+		return nil, nil, errEntryTruncated
 	}
-	data, err := blockOfRecordV3(e, uint64(lba), dataOff, lsn, s.sb.BlockSize)
+	var prefix [walEntryPrefixSizeV3]byte
+	base := int64(s.sb.WALOffset + walRelOff)
+	if _, err := s.fd.ReadAt(prefix[:], base); err != nil {
+		return nil, err, nil
+	}
+	e := entryPrefixV3(prefix[:])
+	n, err := e.payloadSizeV3(s.sb.BlockSize, s.sb.VolumeSize/uint64(s.sb.BlockSize))
 	if err != nil {
-		return nil, nil, fmt.Errorf("storage: v3 WAL read at %d: %w", walRelOff, err)
+		return nil, nil, err
+	}
+	if walRelOff+walEntryHeaderSizeV3+n > s.sb.WALSize {
+		return nil, nil, errEntryTruncated
+	}
+	count := uint64(1)
+	if e.Type == walEntryWriteBatch {
+		count = e.BatchCount
+	} else if e.Type != walEntryWrite {
+		return nil, nil, errInvalidEntry
+	}
+	idx := uint64(dataOff) / uint64(s.sb.BlockSize)
+	if dataOff%s.sb.BlockSize != 0 || idx >= count || e.LBA+idx != uint64(lba) || e.LSN+idx != lsn {
+		return nil, nil, fmt.Errorf("%w: v3 dirty record identity", errInvalidEntry)
+	}
+	scratch := make([]byte, s.sb.BlockSize)
+	data = dst
+	if data == nil {
+		data = make([]byte, s.sb.BlockSize)
+	}
+	if len(data) != int(s.sb.BlockSize) {
+		return nil, nil, errInvalidEntry
+	}
+	crc := crc32.Update(0, walEntryCRC32CV3, prefix[:])
+	for off := uint64(0); off < n; off += uint64(len(scratch)) {
+		part := scratch[:min(uint64(len(scratch)), n-off)]
+		if _, err := s.fd.ReadAt(part, base+walEntryPrefixSizeV3+int64(off)); err != nil {
+			return nil, err, nil
+		}
+		crc = crc32.Update(crc, walEntryCRC32CV3, part)
+		if off == uint64(dataOff) {
+			copy(data, part)
+		}
+	}
+	var footer [8]byte
+	if _, err := s.fd.ReadAt(footer[:], base+walEntryPrefixSizeV3+int64(n)); err != nil {
+		return nil, err, nil
+	}
+	if binary.LittleEndian.Uint32(footer[4:]) != uint32(walEntryHeaderSizeV3+n) {
+		return nil, nil, fmt.Errorf("%w: v3 EntrySize", errInvalidEntry)
+	}
+	if binary.LittleEndian.Uint32(footer[:4]) != crc {
+		return nil, nil, errCRCMismatch
 	}
 	return data, nil, nil
 }

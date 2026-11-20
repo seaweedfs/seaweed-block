@@ -11,12 +11,16 @@ import (
 // putCaptured retries one immutable object, never a whole batch or HEAD CAS.
 // A lost binding reply can turn the next attempt into KeyExists: only exact
 // bytes read from that binding prove completion; a collision is terminal.
-// Bound attempts per object, without imposing a deadline on legitimate work
-// across the whole cut. All attempts still obey the caller's context.
+// Keep the point and frozen buffer through transient failures until the cut
+// context ends (deadline, Close or window abort), never a fresh point.
 func (l *chunkLayerImpl) putCaptured(ctx context.Context, key string, data []byte) error {
+	// The per-object retry deadline also bounds a contextless cut. It retains
+	// the same point and buffer through a remote outage, never re-reads live data.
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	backoff := 100 * time.Millisecond
 	var lastErr error
-	for attempt := 1; ; attempt++ {
+	for {
 		if err := ctx.Err(); err != nil {
 			return errors.Join(lastErr, err)
 		}
@@ -32,9 +36,6 @@ func (l *chunkLayerImpl) putCaptured(ctx context.Context, key string, data []byt
 				return nil
 			}
 			return errChunkKeyExists
-		}
-		if attempt == 3 {
-			return lastErr
 		}
 		timer := time.NewTimer(backoff)
 		select {
@@ -57,7 +58,8 @@ func (l *chunkLayerImpl) uploadBatch(ctx context.Context, n int, put func(contex
 	next := 0
 	var first error
 	var wg sync.WaitGroup
-	workers := min(l.cfg.UploadConcurrency, n)
+	uploadWorkers, _, _ := l.cutPayloadWorkers()
+	workers := min(uploadWorkers, n)
 	for j := 0; j < workers; j++ {
 		wg.Add(1)
 		go func() {

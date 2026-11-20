@@ -55,52 +55,56 @@ type ChunkCutResponse struct {
 // mirrors storage.ChunkCutStats field for field (a test keeps the two in
 // step); every duration is in nanoseconds.
 type ChunkCutStatsBody struct {
-	COWSavedChunks    int    `json:"cowSavedChunks"`
-	COWSaveNs         int64  `json:"cowSaveNs"`
-	COWWaitNs         int64  `json:"cowWaitNs"`
-	BarrierPauseNs    int64  `json:"barrierPauseNs"`
-	LockWaitNs        int64  `json:"lockWaitNs"`
-	SyncNs            int64  `json:"syncNs"`
-	CopyNs            int64  `json:"copyNs"`
-	CandidateChunks   int    `json:"candidateChunks"`
-	UploadedChunks    int    `json:"uploadedChunks"`
-	UploadedBytes     int64  `json:"uploadedBytes"`
-	ZeroedChunks      int    `json:"zeroedChunks"`
-	UnchangedChunks   int    `json:"unchangedChunks"`
-	UploadNs          int64  `json:"uploadNs"`
-	CASNs             int64  `json:"casNs"`
-	CASResult         string `json:"casResult"`
-	TotalNs           int64  `json:"totalNs"`
-	StageRounds       int    `json:"stageRounds"`
-	StagedChunks      int    `json:"stagedChunks"`
-	StagedChunksUsed  int    `json:"stagedChunksUsed"`
-	BarrierCopyChunks int    `json:"barrierCopyChunks"`
-	BarrierOverBound  bool   `json:"barrierOverBound"`
+	COWWALReadAttempts uint64 `json:"cowWALReadAttempts"`
+	COWLocalReadNs     int64  `json:"cowLocalReadNs"`
+	COWSavedChunks     int    `json:"cowSavedChunks"`
+	COWSaveNs          int64  `json:"cowSaveNs"`
+	COWWaitNs          int64  `json:"cowWaitNs"`
+	BarrierPauseNs     int64  `json:"barrierPauseNs"`
+	LockWaitNs         int64  `json:"lockWaitNs"`
+	SyncNs             int64  `json:"syncNs"`
+	CopyNs             int64  `json:"copyNs"`
+	CandidateChunks    int    `json:"candidateChunks"`
+	UploadedChunks     int    `json:"uploadedChunks"`
+	UploadedBytes      int64  `json:"uploadedBytes"`
+	ZeroedChunks       int    `json:"zeroedChunks"`
+	UnchangedChunks    int    `json:"unchangedChunks"`
+	UploadNs           int64  `json:"uploadNs"`
+	CASNs              int64  `json:"casNs"`
+	CASResult          string `json:"casResult"`
+	TotalNs            int64  `json:"totalNs"`
+	StageRounds        int    `json:"stageRounds"`
+	StagedChunks       int    `json:"stagedChunks"`
+	StagedChunksUsed   int    `json:"stagedChunksUsed"`
+	BarrierCopyChunks  int    `json:"barrierCopyChunks"`
+	BarrierOverBound   bool   `json:"barrierOverBound"`
 }
 
 func cutStatsBody(s storage.ChunkCutStats) ChunkCutStatsBody {
 	return ChunkCutStatsBody{
-		BarrierPauseNs:    s.BarrierPauseNs,
-		LockWaitNs:        s.LockWaitNs,
-		SyncNs:            s.SyncNs,
-		CopyNs:            s.CopyNs,
-		COWSavedChunks:    s.COWSavedChunks,
-		COWSaveNs:         s.COWSaveNs,
-		COWWaitNs:         s.COWWaitNs,
-		CandidateChunks:   s.CandidateChunks,
-		UploadedChunks:    s.UploadedChunks,
-		UploadedBytes:     s.UploadedBytes,
-		ZeroedChunks:      s.ZeroedChunks,
-		UnchangedChunks:   s.UnchangedChunks,
-		UploadNs:          s.UploadNs,
-		CASNs:             s.CASNs,
-		CASResult:         s.CASResult,
-		TotalNs:           s.TotalNs,
-		StageRounds:       s.StageRounds,
-		StagedChunks:      s.StagedChunks,
-		StagedChunksUsed:  s.StagedChunksUsed,
-		BarrierCopyChunks: s.BarrierCopyChunks,
-		BarrierOverBound:  s.BarrierOverBound,
+		COWWALReadAttempts: s.COWWALReadAttempts,
+		COWLocalReadNs:     s.COWLocalReadNs,
+		BarrierPauseNs:     s.BarrierPauseNs,
+		LockWaitNs:         s.LockWaitNs,
+		SyncNs:             s.SyncNs,
+		CopyNs:             s.CopyNs,
+		COWSavedChunks:     s.COWSavedChunks,
+		COWSaveNs:          s.COWSaveNs,
+		COWWaitNs:          s.COWWaitNs,
+		CandidateChunks:    s.CandidateChunks,
+		UploadedChunks:     s.UploadedChunks,
+		UploadedBytes:      s.UploadedBytes,
+		ZeroedChunks:       s.ZeroedChunks,
+		UnchangedChunks:    s.UnchangedChunks,
+		UploadNs:           s.UploadNs,
+		CASNs:              s.CASNs,
+		CASResult:          s.CASResult,
+		TotalNs:            s.TotalNs,
+		StageRounds:        s.StageRounds,
+		StagedChunks:       s.StagedChunks,
+		StagedChunksUsed:   s.StagedChunksUsed,
+		BarrierCopyChunks:  s.BarrierCopyChunks,
+		BarrierOverBound:   s.BarrierOverBound,
 	}
 }
 
@@ -270,6 +274,8 @@ func chunkErrorCode(err error) (int, string, bool) {
 		return http.StatusConflict, chunkstore.CodeNotChunkVolume, false
 	case errors.Is(err, context.DeadlineExceeded):
 		return http.StatusServiceUnavailable, chunkstore.CodeDeadlineExceeded, true
+	case errors.Is(err, storage.ErrChunkCaptureRefused):
+		return http.StatusServiceUnavailable, "capture_refused", true
 	case errors.Is(err, storage.ErrCutCOWAborted):
 		return http.StatusServiceUnavailable, "cut_aborted", true
 	default:

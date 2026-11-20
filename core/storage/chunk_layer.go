@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -101,12 +102,15 @@ type chunkLayerImpl struct {
 	// leftoverIntents are this layer's own intents whose delete failed
 	// after their cut was settled; every cut retries them.
 	leftoverIntents []string
-	remoteLSN       uint64
-	hdr             chunkBitmapHeader // last header written or loaded
-	dirty           map[uint64]bool   // chunks dirtied since the cut in progress or the last HEAD
-	inflight        map[uint64]bool   // chunks captured by a cut whose HEAD is not yet installed
-	allDirty        bool              // a BASE block landed: every chunk is dirty
-	hashMode        bool              // the dirty set is unknown: reconcile every chunk against HEAD before any cut
+	// Immutable completed uploads survive a refused point. Guarded by stMu;
+	// versions and HEAD generation prevent reuse across mutations/recovery.
+	reusable  map[uint64]stagedChunk
+	remoteLSN uint64
+	hdr       chunkBitmapHeader // last header written or loaded
+	dirty     map[uint64]bool   // chunks dirtied since the cut in progress or the last HEAD
+	inflight  map[uint64]bool   // chunks captured by a cut whose HEAD is not yet installed
+	allDirty  bool              // a BASE block landed: every chunk is dirty
+	hashMode  bool              // the dirty set is unknown: reconcile every chunk against HEAD before any cut
 	// reconcile holds the chunks the reconciler has not compared yet;
 	// reconcileTotal is the size of the current reconciliation, and
 	// reconciled is closed when it is done or replaced (under stMu).
@@ -193,6 +197,16 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 	}
 	if cfg.ReadMissTimeout <= 0 {
 		cfg.ReadMissTimeout = defaultReadMissTimeout
+	}
+	chunkBytes := uint64(s.BlockSize()) * uint64(cfg.ChunkBlocks)
+	if chunkBytes > math.MaxInt64/6 || cfg.PayloadMemoryBudget < 0 {
+		return nil, errors.New("storage: invalid payload memory budget or chunk geometry")
+	}
+	minimumPayload := 6 * int64(chunkBytes) // one uploader and one saver
+	if cfg.PayloadMemoryBudget == 0 {
+		cfg.PayloadMemoryBudget = max(DefaultCutPayloadMemoryBudget, minimumPayload)
+	} else if cfg.PayloadMemoryBudget < minimumPayload {
+		return nil, fmt.Errorf("storage: payload memory budget must hold at least six chunks (%d bytes)", minimumPayload)
 	}
 	if cfg.COWSpillLimit < 0 {
 		return nil, errors.New("storage: COW spill limit must not be negative (0 defaults to 1 GiB)")
@@ -478,7 +492,7 @@ func (l *chunkLayerImpl) BeforeCheckpointAdvance(lsn uint64) error {
 	return l.persistPresence()
 }
 
-// saveDirty persists dirty Ã¢Ë†Âª inflight Ã¢Ë†Âª the chunks of WAL entries still in
+// saveDirty persists dirty ÃÆ’Ã†â€™Ãâ€šÂ¢ÃÆ’Ã¢â‚¬Â¹Ã¢Ã¢â€šÂ¬ÂÂ ÃÆ’Ã¢â‚¬Å¡Ãâ€šÂª inflight ÃÆ’Ã†â€™Ãâ€šÂ¢ÃÆ’Ã¢â‚¬Â¹Ã¢Ã¢â€šÂ¬ÂÂ ÃÆ’Ã¢â‚¬Å¡Ãâ€šÂª the chunks of WAL entries still in
 // the dirty map (all chunks when a BASE block landed or the set is unknown).
 func (l *chunkLayerImpl) saveDirty() error {
 	// Impl3's actual checkpoint caller persists its owned map after this
@@ -755,12 +769,16 @@ func (l *chunkLayerImpl) MakeRemoteDurable(ctx context.Context, t uint64) error 
 }
 
 type capturedChunk struct {
-	idx   uint64
-	data  []byte
-	sum   [32]byte
-	zero  bool
-	key   string // staged: already uploaded under this key (data is nil)
-	birth uint64
+	version uint64
+	intent  string
+	idx     uint64
+	data    []byte
+	sum     [32]byte
+	zero    bool
+	key     string // staged: already uploaded under this key (data is nil)
+	birth   uint64
+	size    int
+	missing []uint64 // local copy awaits the pinned HEAD, after the local entry is released
 }
 
 // stagedChunk is a chunk pre-copied outside the barrier at chunk version
@@ -788,6 +806,18 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		if err == nil {
 			res.Stats = st
 		}
+		if errors.Is(err, errChunkLayerFenced) {
+			l.stMu.Lock()
+			var ids []string
+			for _, sc := range l.reusable {
+				if sc.intent != "" {
+					ids = append(ids, sc.intent)
+				}
+			}
+			l.reusable = nil
+			l.stMu.Unlock()
+			l.dropIntents(ctx, ids)
+		}
 		l.recordCut(res, st, err)
 	}()
 	if err := l.admit(); err != nil {
@@ -804,18 +834,50 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	}
 	ctx, cancel := l.opCtx(ctx)
 	defer cancel()
+	var budget *cutBudgetReservation
+	if host := l.cfg.Budget; host != nil {
+		budgetCtx, abort := context.WithCancelCause(ctx)
+		ctx = budgetCtx
+		_, _, payload := l.cutPayloadWorkers()
+		ticket, admitErr := host.Admit(ctx, payload, func(cause error) {
+			if cause == nil {
+				cause = errChunkCaptureRefused
+			}
+			abort(errors.Join(errCutCOWAborted, errCutBudgetRevoked, cause))
+		})
+		if admitErr != nil {
+			abort(nil)
+			return chunkCutResult{}, fmt.Errorf("%w: budget admission: %w", errChunkCaptureRefused, admitErr)
+		}
+		budget = &cutBudgetReservation{budget: host, ticket: ticket, ctx: ctx}
+		defer func() {
+			if err != nil {
+				err = errors.Join(err, context.Cause(budgetCtx))
+			}
+			abort(nil)
+			host.Release(ticket)
+		}()
+		if cause := context.Cause(ctx); cause != nil {
+			return chunkCutResult{}, cause
+		}
+	}
 
 	if err := l.resolvePending(ctx); err != nil {
 		return chunkCutResult{}, err
 	}
 	l.retryLeftoverIntents(ctx)
 
-	// Pre-copy: while more chunks than the bound would be copied under the
-	// barrier, stage up to the bound per round outside it.
+	// Pre-copy large native dirty sets outside the barrier, bounded by the
+	// remaining COW exposure rather than a fixed candidate count.
 	staged, intents, err := l.stage(ctx, &st)
 	if err != nil {
 		l.dropIntents(ctx, intents)
 		return chunkCutResult{}, err
+	}
+
+	if cause := context.Cause(ctx); cause != nil {
+		l.dropIntents(ctx, intents)
+		return chunkCutResult{}, cause
 	}
 
 	// Quiesced cut. The guest pause starts at the Lock REQUEST: a pending
@@ -887,19 +949,42 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	// Do not sample the owned map after COW writers are admitted again.
 	births := l.captureBirths(candidates, h)
 
+	if h < baseHead.RemoteLSN && !l.supersededBy(baseHead) {
+		l.s.captureMu.Unlock()
+		st.BarrierPauseNs = time.Since(pauseStart).Nanoseconds()
+		// HEAD holds the image of a later LSN than this host's log has
+		// reached: publishing would move remote_lsn backwards. Refused
+		// before any upload. (A HEAD of a newer holder fences below.)
+		l.abortCut(all)
+		l.dropIntents(ctx, intents)
+		return chunkCutResult{}, fmt.Errorf("%w: %w: cut LSN %d, HEAD remote_lsn %d", errChunkCaptureRefused, errChunkLSNBehind, h, baseHead.RemoteLSN)
+	}
+
 	st.CandidateChunks = len(candidates)
 	var copyErr error
 	copyStart := time.Now()
 	if l.usesOwnedMapV3() {
 		var w *cutCOWWindow
 		w, copyErr = l.installCOWWindow(candidates, useStaged, baseHead.Chunks)
+		if copyErr == nil {
+			w.budget = budget
+		}
 		l.s.captureMu.Unlock()
 		st.BarrierPauseNs = time.Since(pauseStart).Nanoseconds()
 		copyStart = time.Now()
 		if copyErr == nil {
 			var copied []capturedChunk
-			copied, copyErr = l.copyCOWWindow(ctx, w)
+			var ids []string
+			copied, ids, copyErr = l.copyCOWWindow(ctx, w, births, capturedVersions, baseHead)
+			intents = append(intents, ids...)
+			for _, c := range copied {
+				if c.key != "" {
+					st.UploadedChunks++
+					st.UploadedBytes += int64(c.size)
+				}
+			}
 			captured = append(captured, copied...)
+			st.COWWALReadAttempts, st.COWLocalReadNs = w.walReads.Load(), w.localReadNs.Load()
 			st.COWSavedChunks = int(w.saved.Load())
 			st.COWSaveNs, st.COWWaitNs = w.saveNs.Load(), w.waitNs.Load()
 		}
@@ -920,6 +1005,9 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		st.BarrierPauseNs = time.Since(pauseStart).Nanoseconds()
 	}
 	st.CopyNs = time.Since(copyStart).Nanoseconds()
+	if l.usesOwnedMapV3() {
+		st.UploadNs = st.CopyNs
+	}
 	if copyErr != nil {
 		l.abortCut(all)
 		l.dropIntents(ctx, intents)
@@ -927,14 +1015,6 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	}
 	if b := l.cfg.BarrierBound; b > 0 && st.BarrierCopyChunks > b {
 		st.BarrierOverBound = true
-	}
-	if h < baseHead.RemoteLSN && !l.supersededBy(baseHead) {
-		// HEAD holds the image of a later LSN than this host's log has
-		// reached: publishing would move remote_lsn backwards. Refused
-		// before any upload. (A HEAD of a newer holder fences below.)
-		l.abortCut(all)
-		l.dropIntents(ctx, intents)
-		return chunkCutResult{}, fmt.Errorf("%w: %w: cut LSN %d, HEAD remote_lsn %d", errChunkCaptureRefused, errChunkLSNBehind, h, baseHead.RemoteLSN)
 	}
 
 	// Upload only what changed against HEAD.
@@ -969,7 +1049,9 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 			next.Chunks[c.idx] = chunkRef{Key: c.key, SHA256: c.sum, Encoding: "full", BirthLSN: c.birth}
 			newKeys[c.idx] = c.key
 			changed = append(changed, c.idx)
-			st.StagedChunksUsed++
+			if useStaged[c.idx] {
+				st.StagedChunksUsed++
+			}
 			continue
 		}
 		uploads = append(uploads, upload{c: c, key: l.newKey(c.idx)})
@@ -996,14 +1078,14 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	}); err != nil {
 		l.abortCut(all)
 		l.dropIntents(ctx, intents)
-		return chunkCutResult{}, fmt.Errorf("storage: capture upload: %w: %w", errChunkRemoteUnavailable, err)
+		return chunkCutResult{}, fmt.Errorf("storage: capture upload: %w", errors.Join(errChunkRemoteUnavailable, errCutUpload, err))
 	}
 	for _, u := range uploads {
 		next.Chunks[u.c.idx] = chunkRef{Key: u.key, SHA256: u.c.sum, Encoding: "full", BirthLSN: u.c.birth}
 		newKeys[u.c.idx] = u.key
 		changed = append(changed, u.c.idx)
 		st.UploadedChunks++
-		st.UploadedBytes += int64(len(u.c.data))
+		st.UploadedBytes += int64(max(len(u.c.data), u.c.size))
 	}
 	upgrade := false
 	if builder, ok := l.remote.(ChunkManifestBuilder); ok {
@@ -1018,7 +1100,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 			return chunkCutResult{}, err
 		}
 	}
-	st.UploadNs = time.Since(uploadStart).Nanoseconds()
+	st.UploadNs += time.Since(uploadStart).Nanoseconds()
 	if !upgrade && !detach && len(changed) == 0 && h == baseHead.RemoteLSN && baseHead.Gen != 0 && !chunkHeadIsDetached(baseHead) {
 		// A no-op cut still observes authority: a fresh host may have
 		// claimed HEAD without uploading a single chunk since our last cut.
@@ -1188,6 +1270,9 @@ func (l *chunkLayerImpl) SettleDetach(ctx context.Context) (detachSettlement, ch
 		}
 	}
 	// Settled: the detach landed, or it can never land.
+	l.stMu.Lock()
+	l.reusable = nil
+	l.stMu.Unlock()
 	l.dropIntents(ctx, intents)
 	l.stMu.Lock()
 	defer l.stMu.Unlock()
@@ -1305,6 +1390,9 @@ func (l *chunkLayerImpl) resolvePending(ctx context.Context) (err error) {
 		}
 	}
 	// Settled: the proposal landed or can never land.
+	l.stMu.Lock()
+	l.reusable = nil
+	l.stMu.Unlock()
 	l.dropIntents(ctx, intents)
 	l.stMu.Lock()
 	defer l.stMu.Unlock()
@@ -1342,6 +1430,23 @@ func (l *chunkLayerImpl) recordCut(r chunkCutResult, st chunkCutStats, err error
 		if l.pending != nil { // the HEAD re-read did not settle it
 			l.stats.CASUnknown++
 		}
+	}
+	abortReason := ""
+	switch {
+	case errors.Is(err, errCutSaverCapacity):
+		abortReason = "saver_capacity"
+	case errors.Is(err, errCutCOWCapacity):
+		abortReason = "cow_capacity"
+	case errors.Is(err, errCutBudgetRevoked):
+		abortReason = "budget_revoked"
+	case errors.Is(err, errCutUpload):
+		abortReason = "upload"
+	}
+	if abortReason != "" {
+		if l.stats.CutsAborted == nil {
+			l.stats.CutsAborted = map[string]uint64{}
+		}
+		l.stats.CutsAborted[abortReason]++
 	}
 	reason := ""
 	switch {
@@ -1387,6 +1492,10 @@ func (l *chunkLayerImpl) Stats() chunkLayerStats {
 	out.CutsRefused = make(map[string]uint64, len(l.stats.CutsRefused))
 	for k, v := range l.stats.CutsRefused {
 		out.CutsRefused[k] = v
+	}
+	out.CutsAborted = make(map[string]uint64, len(l.stats.CutsAborted))
+	for k, v := range l.stats.CutsAborted {
+		out.CutsAborted[k] = v
 	}
 	out.PendingUnresolved = l.pending != nil
 	out.DirtyChunks = len(l.dirty)
@@ -1601,14 +1710,7 @@ func (l *chunkLayerImpl) sleep(d time.Duration) bool {
 // cut is settled. A failed delete is kept and retried by the next cut; it
 // never fails a cut whose outcome is already settled.
 func (l *chunkLayerImpl) dropIntent(ctx context.Context, id string) {
-	if id == "" {
-		return
-	}
-	if err := l.remote.DeleteIntent(ctx, id); err != nil {
-		l.stMu.Lock()
-		l.leftoverIntents = append(l.leftoverIntents, id)
-		l.stMu.Unlock()
-	}
+	l.dropIntents(ctx, []string{id})
 }
 
 // readChunk copies chunk idx from the store (the barrier copy, the
@@ -1632,27 +1734,58 @@ func (l *chunkLayerImpl) readChunk(idx uint64) ([]byte, error) {
 // dropIntents drops every intent of a settled cut (staging rounds and
 // the barrier).
 func (l *chunkLayerImpl) dropIntents(ctx context.Context, ids []string) {
+	// A wave roots several chunks with one intent. Build the live root set
+	// once, rather than rescanning every cached chunk for each delete.
+	l.stMu.Lock()
+	keep := make(map[string]bool)
+	for idx, sc := range l.reusable {
+		if l.closed || l.fenced || sc.ver != l.chunkVersion(idx) || sc.headGen != l.head.Gen {
+			delete(l.reusable, idx)
+			continue
+		}
+		keep[sc.intent] = true
+	}
+	l.stMu.Unlock()
+	seen := make(map[string]bool)
 	for _, id := range ids {
-		l.dropIntent(ctx, id)
+		if id == "" || keep[id] || seen[id] {
+			continue
+		}
+		seen[id] = true
+		if err := l.remote.DeleteIntent(ctx, id); err != nil {
+			l.stMu.Lock()
+			l.leftoverIntents = append(l.leftoverIntents, id)
+			l.stMu.Unlock()
+		}
 	}
 }
 
-// stage pre-copies chunks outside the barrier (B9 W3 bound ruling): while
-// more than BarrierBound chunks would be copied under the barrier, it
-// stages up to BarrierBound per round, at most chunkStageRounds rounds.
-// Each staged chunk records its chunk version; a staged chunk whose bytes
-// differ from HEAD is uploaded under a fresh content key named by an
-// intent written before the round's first upload. It returns the staged
-// chunks and the intents to settle with the cut; it changes no dirty
-// state, so a failed cut simply leaves its staged keys to the intents.
+// stage uploads large native dirty sets through logical reads, before fixing H.
+// It stops when the spill-budget remainder is reached or a round makes no
+// progress. Versions/HEAD generation bind every reusable immutable result.
+// Legacy fixtures retain their bounded-count rounds.
 func (l *chunkLayerImpl) stage(ctx context.Context, st *chunkCutStats) (map[uint64]stagedChunk, []string, error) {
 	bound := l.cfg.BarrierBound
-	if bound <= 0 {
+	native := l.usesOwnedMapV3()
+	if native {
+		// Leave at most half the side budget exposed at the barrier. Streaming
+		// staging uses no local payload file, even for a much larger image.
+		bound = int(l.cfg.COWSpillLimit / (2 * int64(l.blockSize) * int64(l.chunkBlocks)))
+	} else if bound <= 0 {
 		return nil, nil, nil
 	}
 	staged := map[uint64]stagedChunk{}
 	var intents []string
-	for round := 0; round < chunkStageRounds; round++ {
+	l.stMu.Lock()
+	for idx, sc := range l.reusable {
+		staged[idx] = sc
+		if sc.intent != "" {
+			intents = append(intents, sc.intent)
+		}
+	}
+	l.stMu.Unlock()
+	previous := int(^uint(0) >> 1)
+	for round := 0; ; round++ {
 		wal := l.captureCandidates()
 		l.stMu.Lock()
 		need := map[uint64]bool{}
@@ -1676,11 +1809,26 @@ func (l *chunkLayerImpl) stage(ctx context.Context, st *chunkCutStats) (map[uint
 				consider(i)
 			}
 		}
-		if len(need) <= bound {
+		if len(need) <= bound || (native && len(need) >= previous) || (!native && round >= chunkStageRounds) {
 			l.stMu.Unlock()
 			break
 		}
-		batch := sortedKeys(need)[:bound]
+		previous = len(need)
+		recent := make(map[uint64]uint64, len(need))
+		// Release layer state before sampling the store; never invert store -> stMu.
+		l.stMu.Unlock()
+		l.s.mu.RLock()
+		if l.usesOwnedMapV3() {
+			for idx := range need {
+				recent[idx] = l.s.v3.mapEntries[idx].LSN
+			}
+		}
+		l.s.mu.RUnlock()
+		l.stMu.Lock()
+		batch := hotChunkKeys(need, recent)
+		if !native {
+			batch = batch[:bound]
+		}
 		vers := make(map[uint64]uint64, len(batch))
 		for _, idx := range batch {
 			vers[idx] = l.chunkVersion(idx) // before the read: a later mutation raises it
@@ -1688,46 +1836,13 @@ func (l *chunkLayerImpl) stage(ctx context.Context, st *chunkCutStats) (map[uint
 		head := copyHead(l.head)
 		l.stMu.Unlock()
 		st.StageRounds++
-		var uploads []stagedChunk
-		for _, idx := range batch {
-			data, err := l.readChunk(idx)
-			if err != nil {
-				return nil, intents, fmt.Errorf("storage: capture stage chunk %d: %w", idx, err)
-			}
-			if hook := l.testAfterStageReadHook; hook != nil {
-				hook(idx)
-			}
-			sc := stagedChunk{capturedChunk: capturedChunk{idx: idx, sum: sha256.Sum256(data), zero: isAllZero(data)}, ver: vers[idx], headGen: head.Gen}
-			ref, had := head.Chunks[idx]
-			if !sc.zero && !(had && ref.SHA256 == sc.sum) {
-				sc.key, sc.data = l.newKey(idx), data
-				uploads = append(uploads, sc)
-				continue
-			}
-			staged[idx] = sc
+		roundChunks, ids, err := l.stagePayloadRound(ctx, batch, vers, head, st)
+		intents = append(intents, ids...)
+		if err != nil {
+			return nil, intents, err
 		}
-		if len(uploads) > 0 {
-			keys := make([]string, len(uploads))
-			for i, u := range uploads {
-				keys[i] = u.key
-			}
-			id, err := l.remote.PutIntent(ctx, chunkIntent{Gen: head.Gen, Epoch: l.cfg.Epoch, Holder: l.cfg.Holder, Keys: keys})
-			if err != nil {
-				return nil, intents, fmt.Errorf("storage: capture stage intent: %w: %w", errChunkRemoteUnavailable, err)
-			}
-			intents = append(intents, id)
-			if err := l.uploadBatch(ctx, len(uploads), func(ctx context.Context, i int) error {
-				u := uploads[i]
-				return l.putCaptured(ctx, u.key, u.data)
-			}); err != nil {
-				return nil, intents, fmt.Errorf("storage: capture stage upload: %w: %w", errChunkRemoteUnavailable, err)
-			}
-			for _, u := range uploads {
-				st.UploadedChunks++
-				st.UploadedBytes += int64(len(u.data))
-				u.data = nil
-				staged[u.idx] = u
-			}
+		for idx, sc := range roundChunks {
+			staged[idx] = sc
 		}
 		st.StagedChunks += len(batch)
 		if hook := l.testAfterStageHook; hook != nil {
@@ -1784,6 +1899,7 @@ func (l *chunkLayerImpl) finishCut(head chunkHead, h uint64, changed []uint64, n
 	}
 	prevBase := l.hdr.BaseLSN
 	l.head, l.remoteLSN, l.pending = copyHead(head), h, nil
+	l.reusable = nil
 	l.inflight = map[uint64]bool{}
 	l.hashMode = false
 	hdr := chunkBitmapHeader{BaseLSN: h, HeadGen: head.Gen, Epoch: head.Epoch, Base: chunkBaseNone}
@@ -2007,6 +2123,45 @@ func (l *chunkLayerImpl) Close() error {
 		w.join()
 	}
 	l.wg.Wait()
+	l.stMu.Lock()
+	protected := make(map[string]bool, len(l.pendingIntents))
+	if l.pending != nil {
+		for _, id := range l.pendingIntents {
+			protected[id] = true
+		}
+	}
+	var settled []string
+	for _, sc := range l.reusable {
+		if !protected[sc.intent] {
+			settled = append(settled, sc.intent)
+		}
+	}
+	for _, id := range l.leftoverIntents {
+		if !protected[id] {
+			settled = append(settled, id)
+		}
+	}
+	l.reusable = nil
+	l.leftoverIntents = nil
+	l.stMu.Unlock()
+	// Layer cancellation has joined all owners. Cleanup has a separate bounded
+	// context; an unknown CAS retains its roots for later epoch fencing.
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	if cleaner, ok := l.remote.(interface {
+		DeleteSettledIntent(context.Context, string) error
+	}); ok {
+		seen := map[string]bool{}
+		for _, id := range settled {
+			if id == "" || seen[id] {
+				continue
+			}
+			seen[id] = true
+			_ = cleaner.DeleteSettledIntent(cleanupCtx, id)
+		}
+	} else {
+		l.dropIntents(cleanupCtx, settled)
+	}
+	cleanupCancel()
 	close(l.closeDone)
 	return nil
 }
