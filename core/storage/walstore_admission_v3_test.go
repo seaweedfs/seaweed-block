@@ -31,7 +31,7 @@ func TestWALStoreV3AdmissionUsesNativeOccupancy(t *testing.T) {
 	}
 	want := float64(32*4096+70) / float64(64*1024*1024)
 	if got := s.admission.walUsed(); got != want {
-		t.Fatalf("native occupancy=%g want%g; legacy=%g", got, want, s.wal.usedFraction())
+		t.Fatalf("native occupancy=%g want%g", got, want)
 	}
 	if _, err := s.Sync(); err != nil {
 		t.Fatal(err)
