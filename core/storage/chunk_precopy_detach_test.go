@@ -335,3 +335,19 @@ func TestPrecopyDetachColdNoopRequiresMeasuredCASCost(t *testing.T) {
 		t.Fatalf("measured CAS did not enable empty-tail freeze: report=%+v stopped=%d err=%v", r.Precopy, stopped, err)
 	}
 }
+
+func TestPrecopyDrainReceives100MillisecondBound(t *testing.T) {
+	_, _, l, _ := precopyLayer(t, 1024, 1)
+	calls := 0
+	_, err := l.PrecopyDetachWithAdmission(context.Background(), func(ctx context.Context) (func(), error) {
+		calls++
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) > 100*time.Millisecond {
+			t.Fatalf("unbounded pre-copy drain: deadline=%v present=%t", deadline, ok)
+		}
+		return nil, errors.New("controlled drain refusal")
+	}, func() bool { t.Error("refused drain committed freeze"); return true })
+	if calls == 0 || !errors.Is(err, ErrPrecopyNotConverged) {
+		t.Fatalf("calls=%d err=%v", calls, err)
+	}
+}
