@@ -870,12 +870,12 @@ func (p *DurableProvider) DetachVolume(ctx context.Context, volumeID string) (st
 	// the cut gets three quarters, the settlement what is left. The bound is
 	// cooperative (contexts): a syscall that never returns is not bounded here.
 	var start time.Time
-	cutCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	cutCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(context.Canceled)
 	var timer *time.Timer
 	beginFreeze := func() {
 		start = time.Now()
-		timer = time.AfterFunc(freeze*3/4, cancel)
+		timer = time.AfterFunc(freeze*3/4, func() { cancel(context.DeadlineExceeded) })
 	}
 	defer func() {
 		if timer != nil {
@@ -935,6 +935,7 @@ func (p *DurableProvider) DetachVolume(ctx context.Context, volumeID string) (st
 			}
 		}
 	}
+	err = errors.Join(err, context.Cause(cutCtx))
 	// Every failure, a failed drain included, is settled before anything
 	// resumes: an earlier detach that applied, an unresolved detach CAS or a
 	// fenced layer must never resume serving. The settlement keeps the rest
