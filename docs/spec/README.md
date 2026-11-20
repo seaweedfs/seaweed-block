@@ -315,3 +315,5 @@ end-to-end wall-clock latency guarantee. Keep long model runs off tp04.
 ## HostBudget
 
 `HostBudget.tla` abstracts cooperating process slots, COW reservation and joined release. Config `HostBudget.cfg` checks three owners/two slots; `HostBudget_early_release.cfg` must violate HeldUntilJoined. It excludes degraded static fallback and does not prove filesystem locks, rates or physical-I/O deadlines. Native subprocess tests cover lock lifetime.
+
+HostBudget also models guarded configuration initialization: staged bytes are invisible until atomic publication; an initializer crash permits a successor. `HostBudget_partial_config.cfg` must violate NoPartialConfig. The syscall-level crash boundary is covered by TestKilledInitializerDoesNotPublishPartialConfiguration.
