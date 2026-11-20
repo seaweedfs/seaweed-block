@@ -382,10 +382,20 @@ func TestCutCOWV3_SaverBurstWaitsAndPublishes(t *testing.T) {
 	done, errs := cowStartCut(t, l, gate)
 	l.cowActive.Load().saverSlots = make(chan struct{}, 1)
 	writers := make(chan error, 2)
-	t.Cleanup(func() { free(); gate.unblock() })
-	go func() { _, e := s.Write(5, makeBlock(ctBlockSize, 0xa5)); writers <- e }()
+	firstDone, secondDone := make(chan struct{}), make(chan struct{})
+	secondStarted := false
+	t.Cleanup(func() {
+		free()
+		gate.unblock()
+		cowWaitSignal(t, firstDone, "first burst writer cleanup")
+		if secondStarted {
+			cowWaitSignal(t, secondDone, "second burst writer cleanup")
+		}
+	})
+	go func() { defer close(firstDone); _, e := s.Write(5, makeBlock(ctBlockSize, 0xa5)); writers <- e }()
 	cowWaitSignal(t, entered, "first saver held")
-	go func() { _, e := s.Write(9, makeBlock(ctBlockSize, 0xa9)); writers <- e }()
+	secondStarted = true
+	go func() { defer close(secondDone); _, e := s.Write(9, makeBlock(ctBlockSize, 0xa9)); writers <- e }()
 	cowWaitSignal(t, waiting, "second saver queued")
 	free()
 	for i := 0; i < 2; i++ {

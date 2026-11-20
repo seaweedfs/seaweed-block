@@ -225,6 +225,8 @@ func TestStatusServer_ChunkErrorBodyIsTyped(t *testing.T) {
 		{errors.Join(storage.ErrCutCOWAborted, storage.ErrChunkLayerFenced, storage.ErrChunkRemoteUnavailable), "fenced", 409, false},
 		{fmt.Errorf("x: %w", storage.ErrChunkRemoteUnavailable), "remote_unavailable", 503, true},
 		{fmt.Errorf("x: %w", storage.ErrChunkLayerClosed), "closing", 503, false},
+		{errors.Join(storage.ErrCutCOWAborted, storage.ErrChunkLayerClosed, storage.ErrChunkRemoteUnavailable, context.Canceled), "closing", 503, false},
+		{errors.Join(storage.ErrCutCOWAborted, storage.ErrChunkLayerDetached, storage.ErrChunkRemoteUnavailable, context.Canceled), "closing", 409, false},
 		{fmt.Errorf("x: %w", storage.ErrChunkLayerDetached), "closing", 409, false},
 		{fmt.Errorf("%w: %w", durable.ErrDetachAborted, storage.ErrChunkRemoteUnavailable), "detach_aborted", 409, true},
 		// The detach sentinels decide even over a catalog-error cause (which
