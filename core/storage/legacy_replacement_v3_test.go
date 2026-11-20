@@ -191,6 +191,61 @@ func TestNativeReplacementAllBlocksAfterCheckpoint(t *testing.T) {
 	}
 }
 
+func TestNativeReplacementDataFaultDuringCheckpoint(t *testing.T) {
+	for _, caller := range []string{"wal", "extent"} {
+		t.Run(caller, func(t *testing.T) {
+			s, _ := newMappedCheckpointStoreV3(t)
+			if _, err := s.Write(1, blk(1)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.Sync(); err != nil {
+				t.Fatal(err)
+			}
+			before := s.v3.pub.current()
+			entered, resume, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			release := sync.OnceFunc(func() { close(resume) })
+			var flushErr error
+			t.Cleanup(func() {
+				release()
+				select {
+				case <-done:
+				case <-time.After(10 * time.Second):
+					t.Error("checkpoint worker did not join")
+				}
+			})
+			s.v3.testMapPrepared = func() { close(entered); <-resume }
+			var writes atomic.Int32
+			real := s.v3.pub.io.writeSlot
+			s.v3.pub.io.writeSlot = func(off int64, b []byte) error { writes.Add(1); return real(off, b) }
+			go func() { flushErr = s.flusher.flushOnce(); close(done) }()
+			waitV3(t, entered, "checkpoint map prepared before publication")
+			boom := errors.New("data fsync fault while checkpoint publication waits")
+			var err error
+			if caller == "wal" {
+				if _, err = s.Write(2, blk(2)); err != nil {
+					t.Fatal(err)
+				}
+				s.syncWALFile = func() error { return boom }
+				_, err = s.Sync()
+			} else {
+				s.syncExtentFile = func() error { return boom }
+				err = s.flusher.flushOnce()
+			}
+			if !errors.Is(err, boom) {
+				t.Fatalf("actual %s fsync: %v", caller, err)
+			}
+			release()
+			waitV3(t, done, "checkpoint refused after data fault")
+			if !errors.Is(flushErr, boom) || writes.Load() != 0 || s.v3.pub.current() != before || s.CheckpointLSN() != 0 {
+				t.Fatalf("checkpoint passed concurrent data fault: err=%v writes=%d", flushErr, writes.Load())
+			}
+			if _, _, lsn, _, ok := s.dm.get(1); !ok || lsn != 1 {
+				t.Fatal("refused checkpoint retired acknowledged WAL")
+			}
+		})
+	}
+}
+
 func TestNativeReplacementRecoverRejectsOverflowBatch(t *testing.T) {
 	for name, mutate := range map[string]func([]byte){
 		"count_overflow":        func(b []byte) { binary.LittleEndian.PutUint64(b[8:16], (uint64(1)<<52)+3) },
