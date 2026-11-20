@@ -151,3 +151,30 @@ func TestFdatasyncAcknowledgedWritesSurviveSIGKILL(t *testing.T) {
 		}
 	}
 }
+
+// Run under strace with the experiment environment unset/set to verify the
+// syscall boundary independently of the selected function's Go identity.
+func TestDataSyncSyscallProbe(t *testing.T) {
+	s, e := CreateWALStore(filepath.Join(t.TempDir(), "volume"), 32, 4096)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer s.Close()
+	s.DisableAutoFlushForRecoveryTest()
+	if _, e = s.Recover(); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = s.Write(7, bytes.Repeat([]byte{0x6d}, 4096)); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = s.Sync(); e != nil {
+		t.Fatal(e)
+	}
+	if e = s.flusher.flushOnce(); e != nil {
+		t.Fatal(e)
+	}
+	b, e := s.Read(7)
+	if e != nil || !bytes.Equal(b, bytes.Repeat([]byte{0x6d}, 4096)) {
+		t.Fatalf("readback: %v", e)
+	}
+}
