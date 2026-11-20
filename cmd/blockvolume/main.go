@@ -40,6 +40,7 @@ import (
 )
 
 type flags struct {
+	cpuProfileDir  string
 	memoryLimitMiB int64
 	masterAddr     string
 	serverID       string
@@ -170,6 +171,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.printReadyLine, "t0-print-ready", false, "internal test-only: emit one structured JSON line on stdout on first assignment")
 	fs.BoolVar(&f.enableT1Readiness, "t1-readiness", false, "enable readiness bridge (HealthyPathExecutor) so adapter projection reaches Healthy")
 	fs.StringVar(&f.statusAddr, "status-addr", "", "address for the status HTTP endpoint (e.g. 127.0.0.1:0); empty disables")
+	fs.StringVar(&f.cpuProfileDir, "cpu-profile-dir", os.Getenv(cpuProfileEnv), "diagnostics: an existing directory; SIGUSR1 then toggles a CPU profile written there (default $"+cpuProfileEnv+"; empty disables)")
 	fs.BoolVar(&f.statusRecovery, "status-recovery", false, "expose /status/recovery?volume=<id> with engine.ReplicaProjection (Mode/R/S/H/RecoveryDecision); off by default; loopback-only; intended for hardware test orchestration")
 	fs.BoolVar(&f.allowExternalStatusBind, "allow-external-status-bind", false, "allow the unauthenticated status endpoint to bind and serve non-loopback addresses; intended only for explicit Kubernetes node-loss gates")
 	fs.BoolVar(&f.runtimeRebuildEndpoint, "runtime-rebuild-endpoint", false, "expose POST /runtime/rebuild on the status HTTP listener; off by default; starts primary-side rebuild/catch-up traffic only after request lineage validation")
@@ -1196,6 +1198,12 @@ func run(f flags) int {
 
 	shutdownCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
+	stopProfile, err := startCPUProfileSignal(shutdownCtx, f.cpuProfileDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "blockvolume: %v\n", err)
+		return 1
+	}
+	defer stopProfile()
 	var leaseRequests <-chan workspaceStopRequest
 	var leaseDone <-chan error
 	if f.workspaceLease {
