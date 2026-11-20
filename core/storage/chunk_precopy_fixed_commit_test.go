@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -142,6 +143,7 @@ func TestPrecopyFixedExceptionFinishUsesDeclaredFreeze(t *testing.T) {
 type precopyTimedHeadRemote struct {
 	*fakeChunkRemote
 	casDelay, readDelay time.Duration
+	beforeRead          func()
 }
 
 func (r *precopyTimedHeadRemote) CASHead(ctx context.Context, v chunkHeadVersion, h chunkHead) (uint64, error) {
@@ -155,6 +157,9 @@ func (r *precopyTimedHeadRemote) CASHead(ctx context.Context, v chunkHeadVersion
 	return r.fakeChunkRemote.CASHead(ctx, v, h)
 }
 func (r *precopyTimedHeadRemote) GetHead(ctx context.Context) (chunkHead, error) {
+	if r.beforeRead != nil {
+		r.beforeRead()
+	}
 	timer := time.NewTimer(r.readDelay)
 	defer timer.Stop()
 	select {
@@ -165,15 +170,26 @@ func (r *precopyTimedHeadRemote) GetHead(ctx context.Context) (chunkHead, error)
 	return r.fakeChunkRemote.GetHead(ctx)
 }
 func TestPrecopyFixedPartsMeasureCASAndReadbackSeparately(t *testing.T) {
-	r := &precopyTimedHeadRemote{fakeChunkRemote: newFakeChunkRemote(), casDelay: 15 * time.Millisecond, readDelay: 25 * time.Millisecond}
-	var st chunkCutStats
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_, err := casAndConfirmChunkHeadMeasured(ctx, r, chunkHeadVersion{}, chunkHead{Epoch: 1, Holder: "owner", Chunks: map[uint64]chunkRef{}}, &st)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if time.Duration(st.CASWriteNs) < r.casDelay || time.Duration(st.HeadReadbackNs) < r.readDelay {
-		t.Fatalf("missing or overlapping operation timing: %+v", st)
-	}
+	// The bubble's virtual clock advances only during the two blocked phases.
+	// Exact phase attribution is independent of host scheduling or elapsed limits.
+	synctest.Test(t, func(t *testing.T) {
+		r := &precopyTimedHeadRemote{fakeChunkRemote: newFakeChunkRemote(), casDelay: 15 * time.Millisecond, readDelay: 25 * time.Millisecond}
+		var st chunkCutStats
+		readEntered := false
+		r.beforeRead = func() {
+			readEntered = true
+			if time.Duration(st.CASWriteNs) != r.casDelay || st.HeadReadbackNs != 0 {
+				t.Fatalf("CAS must be settled before readback starts: %+v", st)
+			}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_, err := casAndConfirmChunkHeadMeasured(ctx, r, chunkHeadVersion{}, chunkHead{Epoch: 1, Holder: "owner", Chunks: map[uint64]chunkRef{}}, &st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !readEntered || time.Duration(st.CASWriteNs) != r.casDelay || time.Duration(st.HeadReadbackNs) != r.readDelay {
+			t.Fatalf("overlapping or missing phase attribution: %+v readEntered=%t", st, readEntered)
+		}
+	})
 }
