@@ -328,6 +328,10 @@ func (p *DurableProvider) startChunkLoop(volumeID string, h *volHandle, layer st
 }
 
 func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h *volHandle) (storage.ChunkLayer, error) {
+	// Close cancels local takeover cooling as well as each bound remote RPC.
+	ctx, cancelAttach := context.WithCancel(ctx)
+	stopClose := context.AfterFunc(p.closeCtx, cancelAttach)
+	defer func() { stopClose(); cancelAttach() }()
 	ws, ok := h.storage.(*storage.WALStore)
 	if !ok {
 		return nil, fmt.Errorf("durable: %s storage is %T, not a walstore", ImplWALStoreChunk, h.storage)
