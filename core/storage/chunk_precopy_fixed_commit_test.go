@@ -101,12 +101,12 @@ func TestPrecopyFixedCommitRuleKeepsProgressAndFreezeBounds(t *testing.T) {
 func TestPrecopyFixedPartsStayWithLargestObservation(t *testing.T) {
 	_, _, l, _ := precopyLayer(t, 1024, 0)
 	l.precopySamples = nil
-	st := chunkCutStats{CASNs: 1, DrainNs: int64(10 * time.Millisecond), LockWaitNs: int64(30 * time.Millisecond), SyncNs: int64(40 * time.Millisecond), CASWriteNs: int64(50 * time.Millisecond), HeadReadbackNs: int64(60 * time.Millisecond)}
+	st := chunkCutStats{CASNs: 1, DrainNs: int64(10 * time.Millisecond), LockWaitNs: int64(30 * time.Millisecond), SyncNs: int64(40 * time.Millisecond), CASWriteNs: int64(50 * time.Millisecond), HeadReadbackNs: int64(60 * time.Millisecond), MapPersistNs: int64(10 * time.Millisecond)}
 	l.samplePrecopy(st, int64(200*time.Millisecond))
 	l.samplePrecopy(chunkCutStats{CASNs: 1, SyncNs: int64(100 * time.Millisecond)}, int64(150*time.Millisecond))
 	r := l.precopyEstimate(0, 0)
 	p := r.FixedParts
-	if r.Fixed != 200*time.Millisecond || p.Drain != 10*time.Millisecond || p.StoreLock != 20*time.Millisecond || p.DataSync != 40*time.Millisecond || p.HeadCAS != 50*time.Millisecond || p.HeadReadback != 60*time.Millisecond || p.Other != 20*time.Millisecond {
+	if r.Fixed != 200*time.Millisecond || p.Drain != 10*time.Millisecond || p.StoreLock != 20*time.Millisecond || p.DataSync != 40*time.Millisecond || p.HeadCAS != 50*time.Millisecond || p.HeadReadback != 60*time.Millisecond || p.MapPersist != 10*time.Millisecond || p.Other != 10*time.Millisecond {
 		t.Fatalf("mixed cost samples or overlapping terms: %+v", r)
 	}
 }

@@ -658,6 +658,11 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	defer done()
 	start := time.Now()
 	var st chunkCutStats
+	persistCapturedMap := func(versions map[uint64]uint64) {
+		start := time.Now()
+		l.persistCapturedMapV3(versions)
+		st.MapPersistNs += time.Since(start).Nanoseconds()
+	}
 	var pauseStart time.Time
 	var payloadBeforeBarrier int64
 	defer func() {
@@ -1010,7 +1015,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 			return chunkCutResult{}, errChunkLayerFenced
 		}
 		l.finishCut(baseHead, h, nil, nil) // nothing new: no CAS
-		l.persistCapturedMapV3(capturedVersions)
+		persistCapturedMap(capturedVersions)
 		l.dropIntents(ctx, intents) // superseded staged uploads only
 		return chunkCutResult{H: h, Head: copyHead(baseHead), Noop: true, FullHash: all}, nil
 	}
@@ -1041,7 +1046,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	if casErr == nil {
 		next.Gen = gen
 		l.finishCut(next, h, changed, newKeys)
-		l.persistCapturedMapV3(capturedVersions)
+		persistCapturedMap(capturedVersions)
 		l.dropIntents(ctx, intents)
 		return l.cutDone(chunkCutResult{H: h, Head: copyHead(next), FullHash: all}, detach), nil
 	}
@@ -1081,7 +1086,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	if sameProposal(cur, next) {
 		st.CASResult = "resolved-by-reread"
 		l.finishCut(cur, h, changed, newKeys)
-		l.persistCapturedMapV3(capturedVersions)
+		persistCapturedMap(capturedVersions)
 		l.dropIntents(ctx, intents)
 		return l.cutDone(chunkCutResult{H: h, Head: copyHead(cur), FullHash: all}, detach), nil
 	}

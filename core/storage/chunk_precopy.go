@@ -28,12 +28,13 @@ type PrecopyFixedParts struct {
 	DataSync     time.Duration `json:"dataSyncNs"`
 	HeadCAS      time.Duration `json:"headCASNs"`
 	HeadReadback time.Duration `json:"headReadbackNs"`
+	MapPersist   time.Duration `json:"mapPersistNs"`
 	Other        time.Duration `json:"otherNs"`
 }
 
 func precopyFixedParts(st chunkCutStats, fixed time.Duration) PrecopyFixedParts {
-	p := PrecopyFixedParts{Drain: time.Duration(st.DrainNs), StoreLock: time.Duration(max(int64(0), st.LockWaitNs-st.DrainNs)), DataSync: time.Duration(st.SyncNs), HeadCAS: time.Duration(st.CASWriteNs), HeadReadback: time.Duration(st.HeadReadbackNs)}
-	p.Other = max(time.Duration(0), fixed-p.Drain-p.StoreLock-p.DataSync-p.HeadCAS-p.HeadReadback)
+	p := PrecopyFixedParts{Drain: time.Duration(st.DrainNs), StoreLock: time.Duration(max(int64(0), st.LockWaitNs-st.DrainNs)), DataSync: time.Duration(st.SyncNs), HeadCAS: time.Duration(st.CASWriteNs), HeadReadback: time.Duration(st.HeadReadbackNs), MapPersist: time.Duration(st.MapPersistNs)}
+	p.Other = max(time.Duration(0), fixed-p.Drain-p.StoreLock-p.DataSync-p.HeadCAS-p.HeadReadback-p.MapPersist)
 	return p
 }
 
@@ -290,7 +291,7 @@ func (l *chunkLayerImpl) precopyEstimate(tail uint64, attempts int) PrecopyRepor
 		if s.fixed > r.Fixed {
 			r.Fixed = s.fixed
 			r.FixedParts = s.parts
-			known := s.parts.Drain + s.parts.StoreLock + s.parts.DataSync + s.parts.HeadCAS + s.parts.HeadReadback
+			known := s.parts.Drain + s.parts.StoreLock + s.parts.DataSync + s.parts.HeadCAS + s.parts.HeadReadback + s.parts.MapPersist
 			r.FixedParts.Other = max(time.Duration(0), s.fixed-known)
 		}
 		if s.rate > 0 {

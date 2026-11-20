@@ -16,24 +16,32 @@ import (
 
 // Backend Write+Sync models the guest's 4KiB synchronous command stream. The
 // peer reply is held until a separate control probe witnesses closed admission,
-// then released after20ms. This is a forced schedule, not physical NVMe proof.
+// then released after20ms. The first attempt must fit only when its measured
+// estimate fits the allowance or the declared small-tail plateau exception;
+// host I/O costs are not fixture constants.
+// This is a forced schedule, not physical NVMe proof.
 func TestPrecopyFiftyIOPSSyncConvergesFirstAttempt(t *testing.T) {
-	precopyFiftyIOPS(t, 3, false)
+	precopyFiftyIOPS(t, 3, false, 0)
 }
 
 func TestPrecopyFiftyIOPSColdCostsKeepAdmissionHonest(t *testing.T) {
-	precopyFiftyIOPS(t, 1, true)
+	precopyFiftyIOPS(t, 1, true, 0)
 }
 
-func precopyFiftyIOPS(t *testing.T, samples byte, wantUnknown bool) {
+func TestPrecopyFiftyIOPSSlowMeasuredCostsKeepServing(t *testing.T) {
+	precopyFiftyIOPS(t, 3, false, 1300*time.Millisecond)
+}
+
+func precopyFiftyIOPS(t *testing.T, samples byte, wantUnknown bool, fixedDelay time.Duration) {
 	t.Helper()
-	remote := storage.NewMemChunkRemote()
+	remote := &precopyFixedSampleRemote{MemChunkRemote: storage.NewMemChunkRemote()}
 	p := precopyProvider(t, remote, &parkView{stubView: v1View()})
 	openRecovered(t, p)
 	backend, err := p.Open(context.Background(), "v1")
 	if err != nil {
 		t.Fatal(err)
 	}
+	remote.nextDelay.Store(int64(fixedDelay))
 	for i := byte(1); i <= samples; i++ {
 		if _, err := backend.Write(context.Background(), 4096, block(i)); err != nil {
 			t.Fatal(err)
@@ -44,6 +52,10 @@ func precopyFiftyIOPS(t *testing.T, samples byte, wantUnknown bool) {
 		if _, err := p.CaptureVolume(context.Background(), "v1"); err != nil {
 			t.Fatal(err)
 		}
+	}
+	before, err := remote.GetHead(context.Background())
+	if err != nil {
+		t.Fatal(err)
 	}
 	entered, release := make(chan struct{}), make(chan struct{})
 	var enteredOnce, releaseOnce sync.Once
@@ -136,7 +148,7 @@ func precopyFiftyIOPS(t *testing.T, samples byte, wantUnknown bool) {
 			// Staging or later rounds may leave an empty tail, which needs
 			// only measured fixed cost. A nonempty first tail still needs
 			// three upload samples; the one-sample fixture cannot supply them.
-			if err != nil || (len(result.Precopy.Rounds) == 1 && result.Precopy.TailBytes != 0) || guestErrors.Load() != 0 || !bytes.Equal(headBlock(t, remote, 1), block(0x5b)) {
+			if err != nil || (len(result.Precopy.Rounds) == 1 && result.Precopy.TailBytes != 0) || guestErrors.Load() != 0 || !bytes.Equal(headBlock(t, remote.MemChunkRemote, 1), block(0x5b)) {
 				t.Fatalf("cold samples claimed premature fit: report=%+v guest_errors=%d err=%v", result.Precopy, guestErrors.Load(), err)
 			}
 			return
@@ -149,13 +161,76 @@ func precopyFiftyIOPS(t *testing.T, samples byte, wantUnknown bool) {
 		}
 		return
 	}
-	if err != nil || !result.Precopy.Frozen || result.Precopy.Attempts != 1 {
+	// A loaded host may correctly refuse an expensive tail. Preserve the
+	// first-attempt oracle whenever it fits: EVERY earlier attempt must have
+	// been refused by both the ordinary allowance and the small-tail plateau rule.
+	if fixedDelay > 0 && result.Precopy.Fixed < fixedDelay {
+		t.Fatalf("lost slow fixed sample: %+v", result.Precopy)
+	}
+	const allowance = 1200 * time.Millisecond
+	if len(result.Precopy.Rounds) == 0 {
+		t.Fatal("no admission attempts")
+	}
+	if result.Precopy.Rounds[len(result.Precopy.Rounds)-1].Frozen != result.Precopy.Frozen {
+		t.Fatal("final freeze disagrees with attempt report")
+	}
+	for i, round := range result.Precopy.Rounds {
+		eligible := round.Estimate <= allowance
+		reason := "fit"
+		if !eligible && i > 0 && round.TailEstimate <= allowance/4 && round.Estimate >= result.Precopy.Rounds[i-1].Estimate && round.Estimate <= 5*time.Second {
+			eligible = true
+			reason = "fixed_cost_over_allowance"
+		}
+		if round.Frozen {
+			if !eligible || i != len(result.Precopy.Rounds)-1 || round.Reason != reason || round.DeclaredFreeze != round.Estimate || round.Error != "" {
+				t.Fatalf("invalid fitting attempt: %+v", round)
+			}
+		} else if eligible || (round.Reason != "tail_too_large" && round.Reason != "barrier_over_budget" && round.Reason != "fixed_cost_exceeds_freeze_budget") || round.Error != "" {
+			t.Fatalf("refused an eligible attempt or hid a failure: %+v", round)
+		}
+	}
+	if !result.Precopy.Frozen {
+		if !errors.Is(err, storage.ErrPrecopyNotConverged) || len(result.Precopy.Rounds) != 5 || result.Precopy.Attempts != 5 || guestErrors.Load() != 0 {
+			t.Fatalf("wrong over-budget outcome: report=%+v err=%v", result.Precopy, err)
+		}
+		// Settle both guest workers before proving the refused owner is still live.
+		releasePeer()
+		cancel()
+		for _, done := range []chan struct{}{writerDone, probeDone} {
+			select {
+			case <-done:
+			case <-time.After(3 * time.Second):
+				t.Fatal("guest worker did not settle")
+			}
+		}
+		liveCtx, stop := context.WithTimeout(context.Background(), time.Second)
+		defer stop()
+		head, headErr := remote.GetHead(liveCtx)
+		if headErr != nil || head.Gen < before.Gen || head.RemoteLSN < before.RemoteLSN || head.Epoch != before.Epoch || head.Holder != before.Holder || head.State != storage.ChunkHeadActive || head.DetachedBy != nil {
+			t.Fatalf("refusal lost the active owner or regressed HEAD: %+v %v", head, headErr)
+		}
+		if _, writeErr := backend.Write(liveCtx, 12288, block(0x7d)); writeErr != nil {
+			t.Fatal("refusal stopped service:", writeErr)
+		}
+		for _, read := range []struct {
+			offset int64
+			value  byte
+		}{{4096, 0x5b}, {12288, 0x7d}} {
+			got := make([]byte, 4096)
+			n, readErr := backend.Read(liveCtx, read.offset, got)
+			if readErr != nil || n != len(got) || !bytes.Equal(got, block(read.value)) {
+				t.Fatalf("refused-owner bytes at %d: n=%d err=%v", read.offset, n, readErr)
+			}
+		}
+		return
+	}
+	if err != nil {
 		t.Fatalf("50IOPS cutover: report=%+v err=%v", result.Precopy, err)
 	}
 	if guestErrors.Load() != 0 {
 		t.Fatalf("guest errors before cutover: %d", guestErrors.Load())
 	}
-	if !bytes.Equal(headBlock(t, remote, 1), block(0x5b)) {
+	if !bytes.Equal(headBlock(t, remote.MemChunkRemote, 1), block(0x5b)) {
 		t.Fatal("final cut lost synchronous writer bytes")
 	}
 }

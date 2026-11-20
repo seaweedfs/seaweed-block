@@ -150,8 +150,11 @@ func precopyRefusedFinalCutControl(t *testing.T, slow bool) {
 		}
 	}
 	w.write(t, s, 1, 0xbb)
-	f.beforeCAS = func(f *fakeChunkRemote) { f.installLocked(copyHead(f.head)) }
-	r, err := l.PrecopyDetach(ctTimeout(t), func() bool { return true })
+	r, err := l.PrecopyDetach(ctTimeout(t), func() bool {
+		// Target the final publication, not an earlier refused rolling attempt.
+		f.beforeCAS = func(f *fakeChunkRemote) { f.installLocked(copyHead(f.head)) }
+		return true
+	})
 	if r.Precopy.Frozen {
 		if !errors.Is(err, ErrChunkHeadPrecondition) {
 			t.Fatalf("report=%+v err=%v", r.Precopy, err)

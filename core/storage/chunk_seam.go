@@ -422,6 +422,7 @@ type chunkCutStats struct {
 	UnchangedChunks int
 	UploadNs        int64
 	CASNs           int64
+	MapPersistNs    int64
 	CASResult       string
 	TotalNs         int64
 	// Pre-copy (BarrierBound > 0): StageRounds staging rounds staged
