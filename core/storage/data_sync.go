@@ -7,12 +7,12 @@ import (
 	"os"
 )
 
-// Data-only sync applies to WAL/extent data on Linux by default. Descriptor slots,
-// chunk maps, creation and directory operations retain full fsync.
+// Data-only sync applies to WAL/extent data. Descriptor slots, chunk maps,
+// creation and directory operations retain full fsync.
 func configuredDataSyncMode() (string, error) {
 	mode := os.Getenv("SWBLOCK_SYNC")
 	if mode == "" {
-		mode = defaultDataFileSyncMode
+		return "", nil
 	}
 	switch mode {
 	case "fsync":
@@ -24,15 +24,27 @@ func configuredDataSyncMode() (string, error) {
 	}
 }
 
-func newDataFileSync(f *os.File) (func() error, error) {
+func selectedDataSyncMode(f *os.File) (string, string, error) {
 	mode, err := configuredDataSyncMode()
+	if err != nil {
+		return "", "", err
+	}
+	reason := "explicit SWBLOCK_SYNC override"
+	if mode == "" {
+		mode, reason = defaultDataSyncMode(f)
+	}
+	return mode, reason, nil
+}
+
+func newDataFileSync(f *os.File) (func() error, error) {
+	mode, reason, err := selectedDataSyncMode(f)
 	if err != nil {
 		return nil, err
 	}
+	log.Printf("storage: WAL/extent sync=%s file=%s reason=%s", mode, f.Name(), reason)
 	if mode == "fsync" {
 		return f.Sync, nil
 	}
-	log.Printf("storage: WAL/extent sync=fdatasync file=%s", f.Name())
 	return func() error { return fdatasyncFile(f) }, nil
 }
 
