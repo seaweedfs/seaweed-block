@@ -46,6 +46,10 @@ const (
 	// recovery-lane before any MsgShipEntry frames arrive. It replaces
 	// payload-derived lane guessing from RecoveryLineage.TargetLSN.
 	MsgRecoveryLaneStart byte = 0x08
+	// MsgCertifiedPrefix carries a full lineage whose frontier is an explicit
+	// completed-recovery coverage certificate, never a scalar Sync maximum.
+	// No acknowledgement/old-peer fallback is needed: refusal retains history.
+	MsgCertifiedPrefix byte = 0x09
 )
 
 // RecoveryLineage binds a mutating recovery stream to one accepted recovery

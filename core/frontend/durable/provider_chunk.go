@@ -915,6 +915,13 @@ func (p *DurableProvider) DetachVolume(ctx context.Context, volumeID string) (st
 		trace("cut", dl)
 	}
 	h.chunkDetach = true
+	var resumed func() // tells the host this attempt aborted and serving resumed
+	if hook := p.cfg.OnChunkDetach; hook != nil {
+		attempt := hook(volumeID)
+		if done := p.cfg.OnChunkDetachResumed; done != nil {
+			resumed = func() { done(volumeID, attempt) }
+		}
+	}
 	if stop := p.testDetachStopIO; stop != nil {
 		err = stop(cutCtx)
 	} else {
@@ -946,7 +953,7 @@ func (p *DurableProvider) DetachVolume(ctx context.Context, volumeID string) (st
 	case how == storage.DetachFenced:
 		return storage.ChunkCutResult{}, 0, fmt.Errorf("durable: detach of %s: HEAD belongs to a newer epoch or another holder; I/O stays stopped: %w: %w", volumeID, storage.ErrChunkLayerFenced, err)
 	default:
-		return storage.ChunkCutResult{}, 0, p.resumeAfterDetach(volumeID, h, layer, err)
+		return storage.ChunkCutResult{}, 0, p.resumeAfterDetach(volumeID, h, layer, err, resumed)
 	}
 }
 
@@ -957,8 +964,8 @@ const (
 
 // resumeAfterDetach undoes a detach that provably did not happen: the
 // periodic cuts restart, the stop is lifted, and the volume serves again.
-// The caller holds h.attachMu.
-func (p *DurableProvider) resumeAfterDetach(volumeID string, h *volHandle, layer storage.ChunkLayer, cause error) error {
+// Only then is resumed (if set) called. The caller holds h.attachMu.
+func (p *DurableProvider) resumeAfterDetach(volumeID string, h *volHandle, layer storage.ChunkLayer, cause error, resumed func()) error {
 	p.mu.Lock()
 	closed := p.closed || h.chunk != layer
 	if !closed {
@@ -970,6 +977,9 @@ func (p *DurableProvider) resumeAfterDetach(volumeID string, h *volHandle, layer
 	}
 	h.chunkDetach = false
 	h.backend.SetOperational(true, "chunk detach aborted: serving resumed")
+	if resumed != nil {
+		resumed()
+	}
 	log.Printf("durable: detach of volume=%s aborted, nothing published; serving resumed: %v", volumeID, cause)
 	return fmt.Errorf("%w: %w", ErrDetachAborted, cause)
 }

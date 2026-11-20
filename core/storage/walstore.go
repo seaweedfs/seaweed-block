@@ -205,6 +205,10 @@ func OpenWALStoreWithOptions(path string, opts WALStoreOptions) (*WALStore, erro
 
 // openInitializedV3 binds native state before starting background workers.
 func openInitializedV3(path string, f *os.File, sb *superblock, metadata BlockMetadata, init func(*WALStore) error) (*WALStore, error) {
+	dataSync, err := newDataFileSync(f)
+	if err != nil {
+		return nil, err
+	}
 	dm := newDirtyMap(64) // 64 shards is plenty for Phase 07 demo workloads
 
 	s := &WALStore{
@@ -228,9 +232,9 @@ func openInitializedV3(path string, f *os.File, sb *superblock, metadata BlockMe
 	s.walMutation.Store(1)
 	s.syncWALFile = func() error {
 		s.walSyncCalls.Add(1)
-		return f.Sync()
+		return dataSync()
 	}
-	s.syncExtentFile = f.Sync
+	s.syncExtentFile = dataSync
 	if err := init(s); err != nil {
 		return nil, err
 	}

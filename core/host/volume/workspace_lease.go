@@ -39,6 +39,72 @@ type WorkspaceLeaseGuard struct {
 	// because the shutdown it triggers is otherwise silent (issue #205).
 	cause  string
 	logged bool
+	// stopPending is a scheduling-only mode, it changes no admission or ACK
+	// rule: set by StopPending when a detach starts, cleared by
+	// ClearStopPending only when that detach provably did not happen and
+	// serving resumed; otherwise it lasts until the guard fences. kick wakes
+	// Run from its sleep.
+	stopPending bool
+	kick        chan struct{}
+	// after schedules Run's sleep between renewals (time.After; tests
+	// replace it before Run starts to observe the delays chosen).
+	after func(time.Duration) <-chan time.Time
+}
+
+// stopPendingPoll caps Run's sleep after a completed renewal while a stop is
+// pending (the normal sleep is up to 10 s). It bounds scheduling only: a kick
+// does not interrupt a renewal already in flight, and the time from a
+// revocation to its ACK also includes that renewal, the drain and the ACK.
+const stopPendingPoll = 250 * time.Millisecond
+
+// StopPending records that a graceful stop of this workspace has begun (the
+// chunk layer is being detached) and wakes Run to renew at once; while it
+// stays pending Run sleeps at most stopPendingPoll between renewals.
+// Idempotent, safe from any goroutine, never blocks and makes no RPC.
+func (g *WorkspaceLeaseGuard) StopPending() {
+	g.mu.Lock()
+	g.stopPending = true
+	g.mu.Unlock()
+	select {
+	case g.kick <- struct{}{}:
+	default:
+	}
+}
+
+// ClearStopPending leaves stop-pending after a detach that provably did not
+// happen (serving resumed): Run's next sleep is the normal renewal delay
+// again, and a kick not yet consumed is dropped. Never blocks, makes no RPC.
+func (g *WorkspaceLeaseGuard) ClearStopPending() {
+	g.mu.Lock()
+	g.stopPending = false
+	g.mu.Unlock()
+	select {
+	case <-g.kick:
+	default:
+	}
+}
+
+// renewDelay is Run's sleep after a renewal: a third of the remaining lease
+// (1 s before any grant) within [50 ms, 10 s], and at most stopPendingPoll
+// while a stop is pending.
+func (g *WorkspaceLeaseGuard) renewDelay() time.Duration {
+	g.mu.Lock()
+	delay := g.until.Sub(g.now()) / 3
+	if g.until.IsZero() {
+		delay = time.Second
+	}
+	pending := g.stopPending
+	g.mu.Unlock()
+	if delay < 50*time.Millisecond {
+		delay = 50 * time.Millisecond
+	}
+	if delay > 10*time.Second {
+		delay = 10 * time.Second
+	}
+	if pending && delay > stopPendingPoll {
+		delay = stopPendingPoll
+	}
+	return delay
 }
 
 // fenceLocked latches the fence and records its first cause. Caller holds mu.
@@ -76,7 +142,7 @@ func NewWorkspaceLeaseGuard(base frontend.ProjectionView, client WorkspaceLeaseC
 	if now == nil {
 		now = time.Now
 	}
-	return &WorkspaceLeaseGuard{base: base, client: client, id: control.WorkspaceIdentity{VolumeId: id.VolumeId, ReplicaId: id.ReplicaId, Epoch: id.Epoch}, stop: stop, now: now}, nil
+	return &WorkspaceLeaseGuard{base: base, client: client, id: control.WorkspaceIdentity{VolumeId: id.VolumeId, ReplicaId: id.ReplicaId, Epoch: id.Epoch}, stop: stop, now: now, kick: make(chan struct{}, 1), after: time.After}, nil
 }
 
 func (g *WorkspaceLeaseGuard) Projection() frontend.Projection {
@@ -263,18 +329,7 @@ func (g *WorkspaceLeaseGuard) Run(ctx context.Context) error {
 		if closed {
 			return err
 		}
-		g.mu.Lock()
-		delay := g.until.Sub(g.now()) / 3
-		if g.until.IsZero() {
-			delay = time.Second
-		}
-		g.mu.Unlock()
-		if delay < 50*time.Millisecond {
-			delay = 50 * time.Millisecond
-		}
-		if delay > 10*time.Second {
-			delay = 10 * time.Second
-		}
+		wake := g.after(g.renewDelay())
 		select {
 		case <-ctx.Done():
 			g.operation.Lock()
@@ -285,7 +340,8 @@ func (g *WorkspaceLeaseGuard) Run(ctx context.Context) error {
 			err := g.drain(ctx, false)
 			g.operation.Unlock()
 			return err
-		case <-time.After(delay):
+		case <-wake:
+		case <-g.kick:
 		}
 	}
 }

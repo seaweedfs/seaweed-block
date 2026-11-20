@@ -226,6 +226,9 @@ func createWALStoreV3MapAtCursorForTest(path string, numBlocks, blockSize uint32
 }
 
 func createWALStoreV3Configured(path string, numBlocks, blockSize uint32, walSize uint64, mode WMode, cursor, chunkBlocks uint64, opts WALStoreOptions) (*WALStore, error) {
+	if err := validateNewStorePolicy(); err != nil {
+		return nil, err
+	}
 	d := descriptorV3{
 		ImplKind: ImplKindWALStore, ImplVersion: walStoreImplVersion3,
 		VolumeSize: uint64(numBlocks) * uint64(blockSize), ExtentSize: 64 * 1024, BlockSize: blockSize,
@@ -264,6 +267,9 @@ func createWALStoreV3Configured(path string, numBlocks, blockSize uint32, walSiz
 		return nil, err
 	}
 	err = fd.Truncate(totalSize)
+	if err == nil {
+		err = prezeroNewStore(fd, totalSize)
+	}
 	if err == nil && chunkBlocks != 0 {
 		var m *chunkLSNMapV3
 		m, err = createChunkLSNMapV3(path+".chunkmap", d, chunkBlocks)

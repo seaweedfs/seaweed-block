@@ -186,8 +186,10 @@ func TestWorkspaceLeaseViewMatchesDeriveAfterEveryWriter(t *testing.T) {
 		t.Fatal(err)
 	}
 	check("clean move issued")
-	if p.leaseDeadlineLockedForTest("v") != (time.Time{}) {
-		t.Fatal("move issue kept the old deadline")
+	// The issue replaces the old holder's deadline with the new holder's
+	// first grant: issue time (10 s) + TTL.
+	if got := p.leaseDeadlineLockedForTest("v"); !got.Equal(c.sec(40)) {
+		t.Fatalf("move issue deadline %s; want the new holder's issue+TTL %s", got, c.sec(40))
 	}
 	// w: forced move whose issue write fails after the reservation persisted.
 	c.at(30 + 15 + 20 + 1) // past w's horizon (45) + skew (20)
@@ -940,10 +942,13 @@ func TestWorkspaceLeaseConcurrentRenewalsWritersExtendersClose(t *testing.T) {
 	if extensions.Load() == 0 {
 		t.Fatal("no horizon-extension write was observed")
 	}
-	if st := p.WorkspaceState(vol(forcedVol)); st == nil || st.Lease != nil || len(st.Moves) != 1 || !st.Moves[0].Issued || st.Moves[0].Kind != "forced" {
+	// An issued move starts the new holder's lease at the new epoch.
+	if st := p.WorkspaceState(vol(forcedVol)); st == nil || len(st.Moves) != 1 || !st.Moves[0].Issued || st.Moves[0].Kind != "forced" ||
+		st.Lease == nil || st.Lease.Epoch != st.Moves[0].NewEpoch || st.Lease.Revoking {
 		t.Fatalf("forced move not issued: %+v", st)
 	}
-	if st := p.WorkspaceState(vol(cleanVol)); st == nil || st.Lease != nil || len(st.Moves) != 1 || st.Moves[0].Kind != "clean" {
+	if st := p.WorkspaceState(vol(cleanVol)); st == nil || len(st.Moves) != 1 || st.Moves[0].Kind != "clean" ||
+		st.Lease == nil || st.Lease.Epoch != st.Moves[0].NewEpoch || st.Lease.Revoking {
 		t.Fatalf("clean move not issued: %+v", st)
 	}
 	assertLeaseViewMatches(t, p, "after concurrency")
@@ -959,8 +964,8 @@ func TestWorkspaceLeaseConcurrentRenewalsWritersExtendersClose(t *testing.T) {
 	}
 	for i := 0; i < n; i++ {
 		st := p.WorkspaceState(vol(i))
-		if st == nil || st.Lease == nil {
-			continue // a completed move cleared the lease (out of S1's scope)
+		if st == nil || st.Lease == nil || st.Lease.Epoch != 1 {
+			continue // a completed move started the next epoch's lease (out of S1's scope)
 		}
 		if onDisk[vol(i)] < st.Lease.ExpiresAtNS || st.Lease.ExpiresAtNS < maxGrant[i].Load() {
 			t.Fatalf("%s: S1 broken: disk %d, published horizon %d, max grant %d", vol(i), onDisk[vol(i)], st.Lease.ExpiresAtNS, maxGrant[i].Load())
