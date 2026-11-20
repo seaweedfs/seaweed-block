@@ -131,3 +131,42 @@ func TestPrecopyFixedExceptionFinishUsesDeclaredFreeze(t *testing.T) {
 		t.Fatal("relaxed ordinary fit bound")
 	}
 }
+
+type precopyTimedHeadRemote struct {
+	*fakeChunkRemote
+	casDelay, readDelay time.Duration
+}
+
+func (r *precopyTimedHeadRemote) CASHead(ctx context.Context, v chunkHeadVersion, h chunkHead) (uint64, error) {
+	timer := time.NewTimer(r.casDelay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	case <-timer.C:
+	}
+	return r.fakeChunkRemote.CASHead(ctx, v, h)
+}
+func (r *precopyTimedHeadRemote) GetHead(ctx context.Context) (chunkHead, error) {
+	timer := time.NewTimer(r.readDelay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return chunkHead{}, ctx.Err()
+	case <-timer.C:
+	}
+	return r.fakeChunkRemote.GetHead(ctx)
+}
+func TestPrecopyFixedPartsMeasureCASAndReadbackSeparately(t *testing.T) {
+	r := &precopyTimedHeadRemote{fakeChunkRemote: newFakeChunkRemote(), casDelay: 15 * time.Millisecond, readDelay: 25 * time.Millisecond}
+	var st chunkCutStats
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, err := casAndConfirmChunkHeadMeasured(ctx, r, chunkHeadVersion{}, chunkHead{Epoch: 1, Holder: "owner", Chunks: map[uint64]chunkRef{}}, &st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if time.Duration(st.CASWriteNs) < r.casDelay || time.Duration(st.HeadReadbackNs) < r.readDelay {
+		t.Fatalf("missing or overlapping operation timing: %+v", st)
+	}
+}
