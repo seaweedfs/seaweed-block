@@ -1165,6 +1165,11 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		l.stMu.Unlock()
 		l.abortCut(all)
 	}
+	if errors.Is(casErr, errChunkLayerFenced) {
+		keepPending()
+		l.fencePublication(chunkHead{}) // confirmChunkHead already logged the observed root.
+		return chunkCutResult{}, casErr
+	}
 	cur, gerr := l.remote.GetHead(ctx)
 	if gerr != nil {
 		keepPending()
@@ -1267,6 +1272,9 @@ func (l *chunkLayerImpl) SettleDetach(ctx context.Context) (detachSettlement, ch
 		if casErr == nil {
 			cancel.Gen = gen
 			cur = cancel
+		} else if errors.Is(casErr, errChunkLayerFenced) {
+			l.fencePublication(chunkHead{})
+			return detachFenced, chunkCutResult{}, nil
 		} else if cur, err = l.remote.GetHead(ctx); err != nil {
 			return 0, chunkCutResult{}, fmt.Errorf("storage: detach outcome unresolved (cancel: %v): %w: %w", casErr, errChunkCASOutcomeUnknown, err)
 		} else if !sameProposal(cur, *pending) && !l.publicationOwnerChanged(cur) && cur.Gen == base.Gen && cur.Epoch == base.Epoch {
@@ -1280,6 +1288,7 @@ func (l *chunkLayerImpl) SettleDetach(ctx context.Context) (detachSettlement, ch
 	// Settled: the detach landed, or it can never land.
 	l.stMu.Lock()
 	l.reusable = nil
+	l.pendingIntents = nil // settled here; allow deletion of these roots below.
 	l.stMu.Unlock()
 	l.dropIntents(ctx, intents)
 	l.stMu.Lock()
@@ -1391,6 +1400,9 @@ func (l *chunkLayerImpl) resolvePending(ctx context.Context) (err error) {
 		if casErr == nil {
 			cur = copyHead(*pending)
 			cur.Gen = gen
+		} else if errors.Is(casErr, errChunkLayerFenced) {
+			l.fencePublication(chunkHead{})
+			return errChunkLayerFenced
 		} else if cur, err = l.remote.GetHead(ctx); err != nil {
 			return fmt.Errorf("storage: capture: earlier CAS outcome still unresolved (%v): %w: %w", casErr, errChunkCASOutcomeUnknown, err)
 		} else if !sameProposal(cur, *pending) && !l.publicationOwnerChanged(cur) && cur.Gen == base.Gen && cur.Epoch == base.Epoch {
@@ -1404,6 +1416,7 @@ func (l *chunkLayerImpl) resolvePending(ctx context.Context) (err error) {
 	// Settled: the proposal landed or can never land.
 	l.stMu.Lock()
 	l.reusable = nil
+	l.pendingIntents = nil // settled here; allow deletion of these roots below.
 	l.stMu.Unlock()
 	l.dropIntents(ctx, intents)
 	l.stMu.Lock()
