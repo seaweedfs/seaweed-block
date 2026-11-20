@@ -1,0 +1,353 @@
+// Package hostlimit coordinates background cuts across cooperating host processes.
+// Guest I/O never acquires a slot. A missing pool degrades to static rate sharing.
+package hostlimit
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"hash/fnv"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+)
+
+var ErrBusy = errors.New("hostlimit: no background slot")
+var ErrConfig = errors.New("hostlimit: incompatible host configuration")
+var ErrRevoked = errors.New("hostlimit: cut budget revoked")
+
+type Class uint8
+
+const (
+	Normal Class = iota
+	Urgent
+)
+
+type classKey struct{}
+
+func WithClass(ctx context.Context, c Class) context.Context {
+	return context.WithValue(ctx, classKey{}, c)
+}
+
+type Config struct {
+	Directory                string
+	NormalSlots, UrgentSlots int
+	PayloadBytes, COWBytes   int64
+	BytesPerSecond           int64
+	FallbackVolumes          int
+	MaxHold                  time.Duration
+}
+
+func DefaultConfig(dir string) Config {
+	return Config{dir, 3, 1, 64 << 20, 1 << 30, 64 << 20, 200, 5 * time.Minute}
+}
+func (c Config) validate() error {
+	if !filepath.IsAbs(c.Directory) || c.NormalSlots < 1 || c.UrgentSlots < 1 || c.NormalSlots+c.UrgentSlots > 256 || c.PayloadBytes <= 0 || c.COWBytes <= 0 || c.BytesPerSecond <= 0 || c.FallbackVolumes < 1 || c.FallbackVolumes > 65536 || c.MaxHold <= 0 {
+		return errors.New("hostlimit: invalid configuration")
+	}
+	return nil
+}
+
+type Stats struct {
+	Active                                         int
+	PayloadReserved, COWReserved                   int64
+	Admitted, Skipped, Fallback, Revoked, Released uint64
+	FallbackActive                                 bool
+}
+type lease struct {
+	file         *os.File
+	payload, cow int64
+	abort        func(error)
+	timer        *time.Timer
+	releasing    bool
+}
+type Limiter struct {
+	cfg        Config
+	mu         sync.Mutex
+	cond       *sync.Cond
+	next       uint64
+	live       map[uint64]*lease
+	stats      Stats
+	closed     bool
+	wake       chan struct{}
+	done       chan struct{}
+	nextUpload time.Time
+	fallback   bool
+}
+
+func New(c Config) (*Limiter, error) {
+	if err := c.validate(); err != nil {
+		return nil, err
+	}
+	l := &Limiter{cfg: c, live: map[uint64]*lease{}, wake: make(chan struct{}, 1), done: make(chan struct{})}
+	l.cond = sync.NewCond(&l.mu)
+	go l.releaseLoop()
+	return l, nil
+}
+
+// Phase is stable across process restarts; it never delays guest readiness.
+func Phase(volume string, period time.Duration) time.Duration {
+	if period <= 0 {
+		return 0
+	}
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(volume))
+	return time.Duration(h.Sum64() % uint64(period))
+}
+
+// pool checks the immutable configuration under a separate OS lock. Slot files
+// are never unlinked: replacing them could create a second set of live permits.
+func (l *Limiter) pool(c Class) (*os.File, error) {
+	info, err := os.Lstat(l.cfg.Directory)
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("hostlimit: pool must be a local directory")
+	}
+	open := func(name string) (*os.File, error) {
+		path := filepath.Join(l.cfg.Directory, name)
+		if i, e := os.Lstat(path); e == nil && !i.Mode().IsRegular() {
+			return nil, errors.New("hostlimit: nonregular pool file")
+		}
+		return os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	}
+	guard, err := open("configuration.lock")
+	if err != nil {
+		return nil, err
+	}
+	defer guard.Close()
+	if err = tryLock(guard); err != nil {
+		return nil, ErrBusy
+	}
+	expected, _ := json.Marshal(l.cfg)
+	path := filepath.Join(l.cfg.Directory, "configuration.json")
+	existing, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		err = os.WriteFile(path, expected, 0600)
+		existing = expected
+	}
+	if err != nil {
+		return nil, err
+	}
+	if string(existing) != string(expected) {
+		return nil, ErrConfig
+	}
+	names := []string{}
+	if c == Urgent {
+		for i := 0; i < l.cfg.UrgentSlots; i++ {
+			names = append(names, fmt.Sprintf("urgent-%d", i))
+		}
+	}
+	for i := 0; i < l.cfg.NormalSlots; i++ {
+		names = append(names, fmt.Sprintf("normal-%d", i))
+	}
+	for _, name := range names {
+		f, e := open(name)
+		if e != nil {
+			return nil, e
+		}
+		if e = tryLock(f); e == nil {
+			return f, nil
+		}
+		_ = f.Close()
+		if !errors.Is(e, ErrBusy) {
+			return nil, e
+		}
+	}
+	return nil, ErrBusy
+}
+func (l *Limiter) Admit(ctx context.Context, payload int64, abort func(error)) (uint64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if payload < 0 || payload > l.cfg.PayloadBytes {
+		return 0, ErrBusy
+	}
+	c, _ := ctx.Value(classKey{}).(Class)
+	f, err := l.pool(c)
+	if errors.Is(err, ErrBusy) {
+		l.mu.Lock()
+		l.stats.Skipped++
+		l.mu.Unlock()
+		return 0, err
+	}
+	if errors.Is(err, ErrConfig) {
+		return 0, err
+	}
+	fallback := err != nil // A is deliberately degraded: no shared memory/spill cap.
+	l.mu.Lock()
+	if l.closed || ctx.Err() != nil || len(l.live) >= l.cfg.NormalSlots+l.cfg.UrgentSlots {
+		l.stats.Skipped++
+		l.mu.Unlock()
+		if f != nil {
+			_ = f.Close()
+		}
+		if ctx.Err() != nil {
+			return 0, ctx.Err()
+		}
+		return 0, ErrBusy
+	}
+	l.next++
+	id := l.next
+	x := &lease{file: f, payload: payload, abort: abort}
+	l.live[id] = x
+	l.stats.Admitted++
+	l.stats.PayloadReserved += payload
+	l.stats.Active++
+	l.fallback = fallback
+	l.stats.FallbackActive = fallback
+	if fallback {
+		l.stats.Fallback++
+		l.stats.FallbackActive = true
+	}
+	x.timer = time.AfterFunc(l.cfg.MaxHold, func() { l.revoke(id) })
+	l.mu.Unlock()
+	return id, nil
+}
+func (l *Limiter) revoke(id uint64) {
+	l.mu.Lock()
+	x := l.live[id]
+	var abort func(error)
+	if x != nil && !x.releasing {
+		abort = x.abort
+		l.stats.Revoked++
+	}
+	l.mu.Unlock()
+	if abort != nil {
+		abort(ErrRevoked)
+	}
+}
+
+// ReserveCOW is guest-path accounting only: no OS calls, RPC or waiting for a slot.
+func (l *Limiter) ReserveCOW(id uint64, n int64) error {
+	l.mu.Lock()
+	x := l.live[id]
+	if x == nil || x.releasing || n < 0 {
+		l.mu.Unlock()
+		return ErrRevoked
+	}
+	if n > l.cfg.COWBytes-x.cow {
+		abort := x.abort
+		l.stats.Revoked++
+		l.mu.Unlock()
+		if abort != nil {
+			abort(ErrRevoked)
+		}
+		return ErrRevoked
+	}
+	x.cow += n
+	l.stats.COWReserved += n
+	l.mu.Unlock()
+	return nil
+}
+
+// Release only marks settled work; one owned worker closes descriptors. Until
+// then the kernel slot remains unavailable, conservatively retaining capacity.
+func (l *Limiter) Release(id uint64) {
+	l.mu.Lock()
+	if x := l.live[id]; x != nil && !x.releasing {
+		x.releasing = true
+		x.timer.Stop()
+	}
+	l.mu.Unlock()
+	select {
+	case l.wake <- struct{}{}:
+	default:
+	}
+}
+func (l *Limiter) releaseLoop() {
+	defer close(l.done)
+	for range l.wake {
+		for {
+			l.mu.Lock()
+			var id uint64
+			var x *lease
+			for k, v := range l.live {
+				if v.releasing {
+					id, x = k, v
+					break
+				}
+			}
+			if x == nil {
+				stop := l.closed && len(l.live) == 0
+				l.mu.Unlock()
+				if stop {
+					return
+				}
+				break
+			}
+			l.mu.Unlock()
+			if x.file != nil {
+				_ = x.file.Close()
+			}
+			l.mu.Lock()
+			delete(l.live, id)
+			l.stats.Active--
+			l.stats.PayloadReserved -= x.payload
+			l.stats.COWReserved -= x.cow
+			l.stats.Released++
+			l.cond.Broadcast()
+			l.mu.Unlock()
+		}
+	}
+}
+func (l *Limiter) Snapshot() any { l.mu.Lock(); defer l.mu.Unlock(); return l.stats }
+
+// WaitUpload paces background payload PUTs, including parallel uploader workers.
+// Static shares trade utilization for a conservative aggregate rate. It never
+// paces local WAL flushing, COW reads, or demand hydration.
+func (l *Limiter) WaitUpload(ctx context.Context, n int) error {
+	if n < 0 {
+		return ErrBusy
+	}
+	l.mu.Lock()
+	div := l.cfg.NormalSlots + l.cfg.UrgentSlots
+	if l.fallback {
+		div = l.cfg.FallbackVolumes
+	}
+	rate := l.cfg.BytesPerSecond / int64(div)
+	if rate < 1 {
+		rate = 1
+	}
+	now := time.Now()
+	start := l.nextUpload
+	if start.Before(now) {
+		start = now
+	}
+	duration := time.Duration(float64(n) / float64(rate) * float64(time.Second))
+	l.nextUpload = start.Add(duration)
+	l.mu.Unlock()
+	timer := time.NewTimer(time.Until(start))
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// Close cancels cuts but cannot release their physical-I/O ownership. Callers
+// must still settle their cuts and call Release; Close joins that settlement.
+func (l *Limiter) Close() {
+	l.mu.Lock()
+	l.closed = true
+	callbacks := []func(error){}
+	for _, x := range l.live {
+		if !x.releasing && x.abort != nil {
+			callbacks = append(callbacks, x.abort)
+		}
+	}
+	l.mu.Unlock()
+	for _, a := range callbacks {
+		a(ErrRevoked)
+	}
+	select {
+	case l.wake <- struct{}{}:
+	default:
+	}
+	<-l.done
+}

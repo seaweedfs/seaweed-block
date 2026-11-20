@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/hostlimit"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -357,6 +358,11 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 		holder = proj.ReplicaID
 	}
 	bound := &closeBoundRemote{ChunkRemote: inner, done: p.closeCtx}
+	if pace, ok := p.cfg.ChunkBudget.(interface {
+		WaitUpload(context.Context, int) error
+	}); ok {
+		bound.waitUpload = pace.WaitUpload
+	}
 	bound.setAttach(ctx) // the attach's calls also end with the caller's ctx
 	defer bound.setAttach(nil)
 	var remote storage.ChunkRemote = bound
@@ -376,6 +382,7 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 		UploadConcurrency:   p.cfg.ChunkUploadConcurrency,
 		PayloadMemoryBudget: p.cfg.ChunkPayloadMemoryBudget,
 		Budget:              p.cfg.ChunkBudget,
+		COWSpillLimit:       p.cfg.ChunkCOWSpillLimit,
 		CaptureAllowed: func() error {
 			cur := p.view.Projection()
 			if !cur.Healthy || cur.VolumeID != volumeID || lin.volumeID != volumeID {
@@ -462,7 +469,8 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 // attach runs, its calls also end with the attach caller's context.
 type closeBoundRemote struct {
 	storage.ChunkRemote
-	done context.Context
+	done       context.Context
+	waitUpload func(context.Context, int) error
 
 	mu     sync.Mutex
 	attach context.Context
@@ -499,6 +507,11 @@ func (r *closeBoundRemote) bind(ctx context.Context) (context.Context, func()) {
 func (r *closeBoundRemote) Put(ctx context.Context, key string, data []byte) error {
 	c, end := r.bind(ctx)
 	defer end()
+	if r.waitUpload != nil {
+		if err := r.waitUpload(c, len(data)); err != nil {
+			return err
+		}
+	}
 	return r.ChunkRemote.Put(c, key, data)
 }
 
@@ -698,6 +711,9 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 		backoffMax: chunkCutBackoffMax,
 	}
 	s := cutSchedule{lastSuccess: time.Now()}
+	if p.cfg.ChunkStagger {
+		s.lastSuccess = s.lastSuccess.Add(hostlimit.Phase(volumeID, pol.interval))
+	}
 	t := time.NewTicker(chunkSchedulePoll)
 	defer t.Stop()
 	for {
@@ -811,6 +827,9 @@ func (p *DurableProvider) CutVolume(ctx context.Context, volumeID string, minLSN
 			return storage.ChunkCutResult{}, fmt.Errorf("durable: cut of %s to LSN %d: that LSN was never written (last %d)", volumeID, minLSN, last)
 		}
 	}
+	if minLSN > 0 {
+		ctx = hostlimit.WithClass(ctx, hostlimit.Urgent)
+	}
 	r, err := layer.Cut(ctx)
 	if err != nil {
 		return storage.ChunkCutResult{}, err
@@ -876,7 +895,7 @@ func (p *DurableProvider) DetachVolume(ctx context.Context, volumeID string) (st
 	if err == nil {
 		p.stopChunkLoop(h)
 		var r storage.ChunkCutResult
-		if r, err = layer.Detach(cutCtx); err == nil {
+		if r, err = layer.Detach(hostlimit.WithClass(cutCtx, hostlimit.Urgent)); err == nil {
 			return r, h.storage.NextLSN() - 1, nil
 		}
 	}
