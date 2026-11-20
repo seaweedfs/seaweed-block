@@ -1695,7 +1695,7 @@ func (l *chunkLayerImpl) stage(ctx context.Context, st *chunkCutStats) (map[uint
 	if native {
 		// Leave at most half the side budget exposed at the barrier. Streaming
 		// staging uses no local payload file, even for a much larger image.
-		bound = max(1, int(l.cfg.COWSpillLimit/(2*int64(l.blockSize)*int64(l.chunkBlocks))))
+		bound = int(l.cfg.COWSpillLimit / (2 * int64(l.blockSize) * int64(l.chunkBlocks)))
 	} else if bound <= 0 {
 		return nil, nil, nil
 	}

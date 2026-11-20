@@ -386,3 +386,5 @@ These are tracked for fixes. Gaps that apply to the whole codebase (authenticati
 - **No multi-replica workspaces with chunk snapshots**, and no crash-restart recovery of a ublk server (a crashed server fails closed).
 
 Native pre-copy streams logical reads directly to remote while remaining candidate bytes exceed half the COW spill cap and staging shrinks that remainder. Completed uploads retain their intents across refused points; reuse requires unchanged chunk mutation version and HEAD generation. Recovery invalidates the chunk versions. No changed-set payload file is created.
+
+A native local capture/save borrows its store-owned chunk gate until its local bytes settle. Flusher borrows only available chunks, fsyncs their extents before retirement, and clamps checkpoint below the earliest deferred entry. A capture finding an already-flushing chunk aborts its point immediately; the guest mutation continues. Neither borrow spans remote calls, and no global flusher pause is used.

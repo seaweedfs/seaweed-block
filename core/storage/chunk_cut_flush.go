@@ -7,6 +7,9 @@ import "sync"
 // the point instead of parking a guest write. Neither borrow spans remote I/O.
 // Gates belong to the store so a concurrent first attach cannot bypass them.
 func (s *WALStore) chunkFlushGate(idx uint64) *sync.RWMutex {
+	if value, ok := s.chunkFlushGates.Load(idx); ok {
+		return value.(*sync.RWMutex)
+	}
 	value, _ := s.chunkFlushGates.LoadOrStore(idx, new(sync.RWMutex))
 	return value.(*sync.RWMutex)
 }
