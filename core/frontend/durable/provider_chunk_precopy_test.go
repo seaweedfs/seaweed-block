@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -159,9 +161,33 @@ func TestPrecopyProviderBusyOwnerKeepsServing(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	logs := &lockedLog{}
+	captureWriteLogs(t, logs)
 	r, _, err := p.DetachVolume(ctx, "v1")
 	if !errors.Is(err, storage.ErrPrecopyNotConverged) || r.Precopy.Frozen {
 		t.Fatalf("report=%+v err=%v", r.Precopy, err)
+	}
+	lines := 0
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if !strings.Contains(line, "durable: pre-copy attempt ") {
+			continue
+		}
+		lines++
+		fields := map[string]string{}
+		for _, token := range strings.Fields(line) {
+			if key, value, ok := strings.Cut(token, "="); ok {
+				fields[key] = value
+			}
+		}
+		drain, de := strconv.ParseFloat(fields["drain_ms"], 64)
+		barrier, be := strconv.ParseFloat(fields["barrier_ms"], 64)
+		pause, pe := strconv.ParseFloat(fields["pause_ms"], 64)
+		if fields["attempt"] != strconv.Itoa(lines) || fields["reason"] != "drain_timeout" || fields["volume"] != "v1" || de != nil || be != nil || pe != nil || drain <= 0 || barrier < 0 || pause < drain {
+			t.Fatalf("incomplete pre-copy attempt diagnostic: %s", line)
+		}
+	}
+	if lines != r.Precopy.Attempts {
+		t.Fatalf("pre-copy attempt diagnostics missing: got %d, want %d", lines, r.Precopy.Attempts)
 	}
 	if started, resumed := k.calls(); len(started) != 1 || len(resumed) != 1 {
 		t.Fatalf("nonconverged hooks: started=%v resumed=%v", started, resumed)
