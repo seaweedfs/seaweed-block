@@ -1,36 +1,59 @@
 #!/usr/bin/env bash
-# Usage: post-merge-review-check.sh DENY_FILE < changed-paths
+# Usage: post-merge-review-check.sh ALLOW_FILE < changed-paths
 #
-# Prints every changed path that matches a deny pattern and exits 1 if there
-# is one; exits 0 if none match, 2 on a usage error or an empty deny list.
+# changed-paths are NUL-separated (post-merge-review-changed.sh). A path
+# passes only if it matches an allow pattern and no "!" pattern.
+# Prints every path that does not pass and exits 1 if there is one; exits 0
+# if all pass, 2 on a usage error or a missing or empty allow list.
 set -euo pipefail
 
-deny_file=${1:?usage: post-merge-review-check.sh DENY_FILE < changed-paths}
-patterns=()
+allow_file=${1:?usage: post-merge-review-check.sh ALLOW_FILE < changed-paths}
+if [[ ! -f $allow_file ]]; then
+	echo "post-merge-review: allow list $allow_file missing" >&2
+	exit 2
+fi
+allow=()
+deny=()
 while IFS= read -r line; do
 	line=${line%%#*}
 	line=${line%"${line##*[![:space:]]}"}
 	line=${line#"${line%%[![:space:]]*}"}
-	[[ -n $line ]] && patterns+=("$line")
-done <"$deny_file"
-if ((${#patterns[@]} == 0)); then
-	echo "post-merge-review: empty deny list $deny_file" >&2
+	[[ -n $line ]] || continue
+	if [[ $line == '!'* ]]; then
+		deny+=("${line#!}")
+	else
+		allow+=("$line")
+	fi
+done <"$allow_file"
+if ((${#allow[@]} == 0)); then
+	echo "post-merge-review: empty allow list $allow_file" >&2
 	exit 2
 fi
 
 denied=0
 checked=0
-while IFS= read -r path; do
+while IFS= read -r -d '' path; do
 	[[ -n $path ]] || continue
 	checked=$((checked + 1))
-	for p in "${patterns[@]}"; do
+	why="not on the allow list"
+	for p in "${allow[@]}"; do
 		# Unquoted on the right: a glob, where * also matches /.
 		if [[ $path == $p ]]; then
-			echo "DENY $path (matches $p)"
-			denied=1
+			why=""
 			break
 		fi
 	done
+	for p in ${deny[@]+"${deny[@]}"}; do
+		if [[ $path == $p ]]; then
+			why="matches !$p"
+			break
+		fi
+	done
+	if [[ -n $why ]]; then
+		printf 'DENY %q (%s)
+' "$path" "$why"
+		denied=1
+	fi
 done
-echo "post-merge-review: $checked changed path(s) checked against ${#patterns[@]} pattern(s)"
+echo "post-merge-review: $checked changed path(s) checked against ${#allow[@]} allow and ${#deny[@]} deny pattern(s)"
 exit "$denied"

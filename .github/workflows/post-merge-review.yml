@@ -1,15 +1,16 @@
 name: post-merge-review paths
 
 # A PR labelled "post-merge-review" may merge before its full review only if
-# it touches no path in .github/post-merge-review-deny.txt. This check fails
-# such a PR if any changed file matches; without the label it passes.
+# every changed file is allowed by .github/post-merge-review-allow.txt.
+# This check fails such a PR otherwise; without the label it passes.
 #
-# pull_request_target: the workflow, the deny list and the script all come
+# pull_request_target: the workflow, the allow list and the script all come
 # from the base branch, so a PR cannot change its own check. The PR's code is
 # never checked out or run: only its commit is fetched, for the file list.
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    # edited: a retarget changes the base, and with it the diff.
+    types: [opened, synchronize, reopened, labeled, unlabeled, edited]
 
 permissions:
   contents: read
@@ -46,6 +47,5 @@ jobs:
           set -euo pipefail
           bash .github/scripts/post-merge-review-check-test.sh
           git fetch --no-tags origin "+refs/pull/${PR}/head:refs/remotes/pr/head"
-          # --no-renames lists both names of a moved file.
-          git diff --name-only --no-renames "$BASE...$HEAD" >changed.txt
-          bash .github/scripts/post-merge-review-check.sh .github/post-merge-review-deny.txt <changed.txt
+          bash .github/scripts/post-merge-review-changed.sh "$BASE" "$HEAD" >changed.bin
+          bash .github/scripts/post-merge-review-check.sh .github/post-merge-review-allow.txt <changed.bin
