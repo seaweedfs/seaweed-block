@@ -191,6 +191,58 @@ func TestNativeReplacementAllBlocksAfterCheckpoint(t *testing.T) {
 	}
 }
 
+func TestNativeReplacementQueuedApplyAfterFailedAppend(t *testing.T) {
+	s, _ := newChunkTestStore(t)
+	_ = mustAttach(t, s, newFakeChunkRemote(), ctConfig(1))
+	s.admission = nil
+	entered, resume, admitted := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	release := sync.OnceFunc(func() { close(resume) })
+	a, b := make(chan struct{}), make(chan struct{})
+	var errA, errB error
+	t.Cleanup(func() {
+		release()
+		for _, done := range []chan struct{}{a, b} {
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				t.Error("queued native apply did not join")
+			}
+		}
+	})
+	h := s.chunk.Load()
+	realBefore := h.beforeMutation
+	h.beforeMutation = func(first, count uint64) {
+		realBefore(first, count)
+		if first == 21 {
+			close(admitted)
+		}
+	}
+	boom := errors.New("held append before replicated apply")
+	var calls atomic.Int32
+	s.v3.w.writeAt = func(data []byte, off int64) (int, error) {
+		if calls.Add(1) == 1 {
+			close(entered)
+			<-resume
+		}
+		n, _ := s.fd.WriteAt(data, off)
+		return n, boom
+	}
+	next, head := s.NextLSN(), s.v3.w.logicalHeadV3()
+	go func() { _, errA = s.WriteBatch(10, batchBlocks(0x51, 2)); close(a) }()
+	waitV3(t, entered, "native failing batch")
+	go func() { errB = s.ApplyEntry(21, blk(0xAE), 1); close(b) }()
+	waitV3(t, admitted, "replicated apply passed entry checks")
+	release()
+	waitV3(t, a, "failed batch return")
+	waitV3(t, b, "queued apply return")
+	if !errors.Is(errA, boom) || !errors.Is(errB, boom) {
+		t.Fatalf("batch=%v apply=%v", errA, errB)
+	}
+	if calls.Load() != 1 || s.NextLSN() != next || s.v3.w.logicalHeadV3() != head || s.dm.len() != 0 {
+		t.Fatal("queued apply published after failed append")
+	}
+}
+
 func TestNativeReplacementLowerApplyAfterPrecopy(t *testing.T) {
 	s, f, l, _ := precopyLayer(t, 1, 3)
 	if err := s.ApplyEntry(0, blk(0xA0), 4); err != nil {
