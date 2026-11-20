@@ -15,6 +15,9 @@ func ClaimChunkHead(ctx context.Context, remote ChunkRemote, cfg ChunkLayerConfi
 	if remote == nil || cfg.Epoch == 0 || cfg.Holder == "" {
 		return ChunkHead{}, errors.New("storage: HEAD claim needs master epoch and holder")
 	}
+	if err := validateHeadCoolingWindow(cfg.HeadCoolingWindow); err != nil {
+		return ChunkHead{}, err
+	}
 	allowed := func() error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -50,6 +53,11 @@ func ClaimChunkHead(ctx context.Context, remote ChunkRemote, cfg ChunkLayerConfi
 		return head, nil
 	}
 	if head.Gen != 0 && head.Epoch == cfg.Epoch && head.Holder == cfg.Holder && !chunkHeadIsDetached(head) && head.DetachedBy == nil {
+		// A previous claim may have committed but timed out during cooling.
+		// An identical root alone does not prove that wait completed.
+		if err := confirmChunkTakeover(ctx, remote, head, cfg.HeadCoolingWindow); err != nil {
+			return ChunkHead{}, err
+		}
 		return head, allowed() // idempotent restart or settled prior claim
 	}
 	next := copyHead(head)
@@ -79,21 +87,38 @@ func ClaimChunkHead(ctx context.Context, remote ChunkRemote, cfg ChunkLayerConfi
 		return ChunkHead{}, err
 	}
 	settled = false // an ambiguous CAS keeps its segment intents
-	gen, casErr := remote.CASHead(ctx, ChunkHeadVersion{Gen: head.Gen, Epoch: head.Epoch}, next)
+	gen, casErr := casChunkHead(ctx, remote, ChunkHeadVersion{Gen: head.Gen, Epoch: head.Epoch}, next)
 	if casErr == nil {
-		settled = true
 		next.Gen = gen
-		return next, allowed()
+		if err := confirmChunkTakeover(ctx, remote, next, cfg.HeadCoolingWindow); err != nil {
+			return ChunkHead{}, err
+		}
+		if err := allowed(); err != nil {
+			return ChunkHead{}, err
+		}
+		settled = true
+		return next, nil
 	}
 	// Never blindly replay a possibly committed takeover. A re-read must
 	// prove the exact proposal; otherwise the volume remains nonoperational.
-	current, readErr := remote.GetHead(ctx)
+	current, readErr := readChunkHead(ctx, remote)
 	if readErr != nil {
 		return ChunkHead{}, fmt.Errorf("storage: HEAD claim unresolved: %w", errors.Join(casErr, readErr))
 	}
-	settled = errors.Is(casErr, ErrChunkHeadPrecondition) || current.Gen > head.Gen
 	if current.Gen > head.Gen && sameProposal(current, next) {
-		return current, allowed()
+		if err := confirmChunkTakeover(ctx, remote, current, cfg.HeadCoolingWindow); err != nil {
+			return ChunkHead{}, err
+		}
+		if err := allowed(); err != nil {
+			return ChunkHead{}, err
+		}
+		settled = true
+		return current, nil
 	}
+	// A foreign publication is a fence, not permission to clean our roots.
+	if current.Gen != 0 && (current.Epoch != head.Epoch || current.Holder != head.Holder) {
+		return ChunkHead{}, fmt.Errorf("storage: HEAD claim displaced: %w", ErrChunkLayerFenced)
+	}
+	settled = errors.Is(casErr, ErrChunkHeadPrecondition) || current.Gen > head.Gen
 	return ChunkHead{}, fmt.Errorf("storage: HEAD claim not installed: %w", casErr)
 }

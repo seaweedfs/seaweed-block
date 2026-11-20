@@ -19,6 +19,7 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/hostlimit"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -264,20 +265,22 @@ func chunkErrorCode(err error) (int, string, bool) {
 		return http.StatusConflict, codeReconciling, true
 	case errors.Is(err, storage.ErrChunkHeadPrecondition):
 		return http.StatusConflict, codeHeadConflict, true
-	case errors.Is(err, storage.ErrChunkRemoteUnavailable):
-		return http.StatusServiceUnavailable, chunkstore.CodeRemoteUnavailable, true
 	case errors.Is(err, storage.ErrChunkLayerDetached):
 		return http.StatusConflict, codeClosing, false // stays closed until a new attach
 	case errors.Is(err, storage.ErrChunkLayerClosed):
 		return http.StatusServiceUnavailable, codeClosing, false // the process is shutting down
+	// A local window abort cancels its uploads; that cancellation is not
+	// a remote outage. Keep authority and uncertain-publication precedence.
+	case errors.Is(err, storage.ErrCutCOWAborted):
+		return http.StatusServiceUnavailable, "cut_aborted", true
+	case errors.Is(err, storage.ErrChunkRemoteUnavailable):
+		return http.StatusServiceUnavailable, chunkstore.CodeRemoteUnavailable, true
 	case errors.Is(err, durable.ErrNotChunkVolume), errors.Is(err, durable.ErrVolumeNotOpen):
 		return http.StatusConflict, chunkstore.CodeNotChunkVolume, false
 	case errors.Is(err, context.DeadlineExceeded):
 		return http.StatusServiceUnavailable, chunkstore.CodeDeadlineExceeded, true
 	case errors.Is(err, storage.ErrChunkCaptureRefused):
 		return http.StatusServiceUnavailable, "capture_refused", true
-	case errors.Is(err, storage.ErrCutCOWAborted):
-		return http.StatusServiceUnavailable, "cut_aborted", true
 	default:
 		return http.StatusInternalServerError, codeInternal, false
 	}
@@ -544,7 +547,8 @@ func (c *chunkControl) Snapshot(ctx context.Context, volumeID string, req ChunkS
 	if info, replayed, err := c.cat.SnapshotReplay(ctx, volumeID, sreq); err != nil || replayed {
 		return info, err
 	}
-	r, err := c.p.CutVolume(ctx, volumeID, 0)
+	// A named seal is urgent even without a minimum LSN.
+	r, err := c.p.CutVolume(hostlimit.WithClass(ctx, hostlimit.Urgent), volumeID, 0)
 	if err != nil {
 		return chunkstore.SnapshotInfo{}, err
 	}

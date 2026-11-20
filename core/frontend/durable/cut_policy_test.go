@@ -156,3 +156,28 @@ func TestCutPolicy_NothingDueWhileReconciling(t *testing.T) {
 		t.Fatalf("after reconciliation: %q %v; want an immediate periodic cut", r, ok)
 	}
 }
+
+func TestCutPolicy_StaggerPreservesExplicitTimerReset(t *testing.T) {
+	pol := testPolicy()
+	s := initialCutSchedule("v1", pol.interval, t0, true)
+	if !s.lastSuccess.Equal(t0) || !s.firstDue.After(t0) || s.firstDue.After(t0.Add(pol.interval)) {
+		t.Fatal("phase fabricated success or exceeded first period", s)
+	}
+	if _, ok := pol.dueNR(s, s.firstDue.Add(-time.Nanosecond)); ok {
+		t.Fatal("initial phase ignored")
+	}
+	if _, ok := pol.dueNR(s, s.firstDue); !ok {
+		t.Fatal("first phased cut not due")
+	}
+	explicit := t0.Add(s.firstDue.Sub(t0) / 2)
+	s = s.observe(explicit.UnixNano())
+	if !s.lastSuccess.Equal(explicit) || !s.firstDue.IsZero() {
+		t.Fatal("stagger hid explicit success", s)
+	}
+	if _, ok := pol.dueNR(s, explicit.Add(pol.interval-time.Nanosecond)); ok {
+		t.Fatal("timer advanced before explicit success interval")
+	}
+	if _, ok := pol.dueNR(s, explicit.Add(pol.interval)); !ok {
+		t.Fatal("explicit success did not restart timer")
+	}
+}

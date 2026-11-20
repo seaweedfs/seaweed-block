@@ -272,6 +272,36 @@ func (w *cutCOWWindow) wait(ch <-chan struct{}) {
 	w.waitNs.Add(time.Since(start).Nanoseconds())
 }
 
+// Saver admission is bounded independently of local physical I/O. Expiry
+// drops only this cut; it never fails the guest mutation.
+const cutSaverWaitLimit = 250 * time.Millisecond
+
+func (w *cutCOWWindow) acquireSaver() bool {
+	select {
+	case w.saverSlots <- struct{}{}:
+		return true
+	default:
+	}
+	start := time.Now()
+	timer := time.NewTimer(cutSaverWaitLimit)
+	defer timer.Stop()
+	defer func() { w.waitNs.Add(time.Since(start).Nanoseconds()) }()
+	if hook := w.layer.testCOWSaverWait; hook != nil {
+		hook()
+	}
+	select {
+	case w.saverSlots <- struct{}{}:
+		return true
+	case <-w.ended:
+		return false
+	case <-w.ctx.Done():
+		return false
+	case <-timer.C:
+		w.abort(errors.Join(errCutCOWAborted, errCutSaverCapacity))
+		return false
+	}
+}
+
 func (l *chunkLayerImpl) beforeCOWMutation(first, count uint64) {
 	w := l.cowActive.Load()
 	if w == nil || count == 0 {
@@ -288,18 +318,10 @@ func (l *chunkLayerImpl) beforeCOWMutation(first, count uint64) {
 			if e == nil {
 				break
 			}
-			// Never queue an unbounded number of full-chunk saver buffers behind
-			// local I/O. Refuse this cut, not the guest mutation, when its fixed
-			// saver slots are exhausted; no physical I/O has started for this owner.
-			acquired := false
-			select {
-			case w.saverSlots <- struct{}{}:
-				acquired = true
-			default:
-				w.abort(errors.Join(errCutCOWAborted, errCutSaverCapacity))
+			// Wait briefly for an existing local saver, never for remote I/O.
+			// The claimed entry owns no payload until a slot becomes available.
+			if !w.acquireSaver() {
 				w.refs.Done()
-			}
-			if !acquired {
 				break
 			}
 			if w.status() != nil {
