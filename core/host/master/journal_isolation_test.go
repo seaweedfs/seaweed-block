@@ -142,6 +142,25 @@ func TestColocatedNodeIsAlarmedButAcceptedByDefault(t *testing.T) {
 	}
 }
 
+// A node that moves its durable root off the authority store's file system
+// leaves the co-located set on its next heartbeat: strict isolation accepts
+// it again and no longer refuses new work on it.
+func TestColocatedNodeLeavesTheSetWhenItMovesOff(t *testing.T) {
+	r := newIsolationRig(t, true, t.TempDir(), t.TempDir())
+	if err := r.heartbeat("node-a", masterStore); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("strict heartbeat of a co-located new node: %v, want FailedPrecondition", err)
+	}
+	if !r.m.colocatedTargetRefused("node-a") || r.m.WorkspaceLeaseStatus().ColocatedNodes != 1 {
+		t.Fatal("co-located node not recorded")
+	}
+	if err := r.heartbeat("node-a", storeident.Identity{MachineID: "machine-1", Dev: 2050}); err != nil {
+		t.Fatalf("strict refused the node after it moved off the store's file system: %v", err)
+	}
+	if r.m.colocatedTargetRefused("node-a") || r.m.WorkspaceLeaseStatus().ColocatedNodes != 0 {
+		t.Fatal("node still counted as co-located after it moved off")
+	}
+}
+
 // Strict: a co-located node that serves no volume is refused
 // (FailedPrecondition) and still alarmed; a node elsewhere is accepted.
 func TestStrictRefusesColocatedNodeWithoutVolumes(t *testing.T) {

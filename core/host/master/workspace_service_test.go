@@ -162,4 +162,17 @@ func TestWorkspaceRPCCleanMovePreservesReplicaIdentity(t *testing.T) {
 	if state := restarted.Publisher().WorkspaceState("vol-a"); state == nil || len(state.Moves) != 1 || !state.Moves[0].Issued {
 		t.Fatal(state)
 	}
+	// Journal isolation reads "serves" from durable state: the issued move's
+	// target serves vol-a through its authority line alone (the placement
+	// still names the old node), also on a restarted master.
+	if p, ok := restarted.Lifecycle().Placements.GetPlacement("vol-a"); ok {
+		for _, slot := range p.Slots {
+			if slot.ServerID == "node-b" {
+				t.Fatalf("placement already names the move target: %+v", p)
+			}
+		}
+	}
+	if !restarted.nodeServesVolumes("node-b") {
+		t.Fatal("the issued move's target does not count as serving vol-a")
+	}
 }
