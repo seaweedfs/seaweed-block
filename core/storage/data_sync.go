@@ -7,17 +7,21 @@ import (
 	"os"
 )
 
-// Experimental data-only sync applies to WAL/extent data. Descriptor slots,
+// Data-only sync applies to WAL/extent data on Linux by default. Descriptor slots,
 // chunk maps, creation and directory operations retain full fsync.
 func newDataFileSync(f *os.File) (func() error, error) {
-	switch mode := os.Getenv("SWBLOCK_SYNC"); mode {
-	case "", "fsync":
+	mode := os.Getenv("SWBLOCK_SYNC")
+	if mode == "" {
+		mode = defaultDataFileSyncMode
+	}
+	switch mode {
+	case "fsync":
 		return f.Sync, nil
 	case "fdatasync":
 		if err := dataSyncSupported(); err != nil {
 			return nil, err
 		}
-		log.Printf("storage: experimental WAL/extent sync=fdatasync file=%s", f.Name())
+		log.Printf("storage: WAL/extent sync=fdatasync file=%s", f.Name())
 		return func() error { return fdatasyncFile(f) }, nil
 	default:
 		return nil, fmt.Errorf("storage: invalid SWBLOCK_SYNC %q", mode)
@@ -42,17 +46,7 @@ func prezeroNewStore(f *os.File, size int64) error {
 	case "", "sparse":
 		return nil
 	case "fallocate":
-		if err := fallocateFile(f, size); err != nil {
-			return err
-		}
-		if err := f.Sync(); err != nil {
-			return err
-		}
-		if err := verifyAllocatedFile(f, false); err != nil {
-			return err
-		}
-		log.Printf("storage: FIEMAP verified allocated file=%s bytes=%d (unwritten extents allowed)", f.Name(), size)
-		return nil
+		return fmt.Errorf("storage: fallocate allocation is disabled; use sparse or explicit prezero")
 	case "prezero":
 		if err := dataSyncSupported(); err != nil {
 			return err

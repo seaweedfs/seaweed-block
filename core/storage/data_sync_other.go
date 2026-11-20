@@ -7,6 +7,8 @@ import (
 	"os"
 )
 
+const defaultDataFileSyncMode = "fsync"
+
 func dataSyncSupported() error {
 	return errors.New("storage: fdatasync/prezero experiment requires Linux")
 }
