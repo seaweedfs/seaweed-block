@@ -57,3 +57,39 @@ func TestApplyGate_DurableFloorBoundsVersionHistory(t *testing.T) {
 		gate.CloseSession(session)
 	}
 }
+
+func TestApplyGate_PrunedDurableVersionsRemainStale(t *testing.T) {
+	gate, store := newGate(t)
+	want := makeData(0xBB)
+	for lba := uint32(0); lba < 32; lba++ {
+		if err := gate.ApplyLive(liveLineage(1), lba, want, uint64(lba)+1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	gate.CloseSession(1)
+	if err := gate.ApplyRecovery(recoveryLineage(2, 32), 5, makeData(0xAA), 1); err != nil {
+		t.Fatal(err)
+	}
+	if !gate.SessionRecoveryCoverage(2, 5) {
+		t.Fatal("pruned stale recovery did not cover its own session")
+	}
+	if err := gate.ApplyLive(liveLineage(3), 6, makeData(0xCC), 2); err == nil {
+		t.Fatal("pruned stale live write was accepted")
+	}
+	if gate.SessionRecoveryCoverage(3, 6) {
+		t.Fatal("stale live write advanced recovery coverage")
+	}
+	for _, lba := range []uint32{5, 6} {
+		got, err := store.Read(lba)
+		if err != nil || !bytes.Equal(got, want) {
+			t.Fatalf("pruned stale record changed LBA %d: err=%v", lba, err)
+		}
+	}
+	tracked, _, _, _ := gate.SessionState(2)
+	if tracked != 0 {
+		t.Fatalf("durable versions were not pruned: tracked=%d want=0", tracked)
+	}
+}
