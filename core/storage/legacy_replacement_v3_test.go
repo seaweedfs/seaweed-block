@@ -2,8 +2,11 @@ package storage
 
 import (
 	"bytes"
+	"errors"
 	"os"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestNativeReplacementAllBlocksAfterCheckpoint(t *testing.T) {
@@ -73,5 +76,124 @@ func TestNativeReplacementMutationsAfterClose(t *testing.T) {
 		if !bytes.Equal(got, want) {
 			t.Fatalf("closed mutation changed %s", p)
 		}
+	}
+}
+
+func TestNativeReplacementCloseJoinsSync(t *testing.T) {
+	s, _ := newMappedCheckpointStoreV3(t)
+	if _, err := s.Write(1, blk(0x61)); err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	closeEntered := make(chan struct{})
+	releaseOnce := sync.OnceFunc(func() { close(release) })
+	syncDone, closeDone := make(chan struct{}), make(chan struct{})
+	var syncErr, closeErr error
+	t.Cleanup(func() {
+		releaseOnce()
+		for name, done := range map[string]<-chan struct{}{"Sync": syncDone, "Close": closeDone} {
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				t.Errorf("%s worker did not join", name)
+			}
+		}
+	})
+	real := s.syncCache
+	s.syncCache = func() error { close(entered); <-release; return real() }
+	s.testCloseSnapshot = func() { close(closeEntered) }
+	go func() { _, syncErr = s.Sync(); close(syncDone) }()
+	waitV3(t, entered, "held native Sync")
+	go func() { closeErr = s.Close(); close(closeDone) }()
+	waitV3(t, closeEntered, "Close admitted while Sync held")
+	select {
+	case <-closeDone:
+		t.Fatal("Close returned while Sync still owns I/O")
+	case <-time.After(25 * time.Millisecond):
+	}
+	releaseOnce()
+	waitV3(t, syncDone, "native Sync completion")
+	waitV3(t, closeDone, "native Close completion")
+	if syncErr != nil || closeErr != nil {
+		t.Fatalf("Sync=%v Close=%v", syncErr, closeErr)
+	}
+}
+
+func TestNativeReplacementRecycledRangeIsTyped(t *testing.T) {
+	s, _ := newMappedCheckpointStoreV3(t)
+	for i := uint32(1); i <= 5; i++ {
+		if _, err := s.Write(i, blk(byte(i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.flusher.flushOnce(); err != nil {
+		t.Fatal(err)
+	}
+	emitted := 0
+	err := s.ScanLBAs(1, func(RecoveryEntry) error { emitted++; return nil })
+	var failure *RecoveryFailure
+	if !errors.As(err, &failure) || failure.Kind != StorageRecoveryFailureWALRecycled || !errors.Is(err, ErrWALRecycled) {
+		t.Fatalf("recycled range: %T %v", err, err)
+	}
+	if emitted != 0 {
+		t.Fatal("recycled range emitted partial entries")
+	}
+}
+
+func TestNativeReplacementCutBehindHEADRefuses(t *testing.T) {
+	f := newFakeChunkRemote()
+	image := make([]byte, ctNumBlocks*ctBlockSize)
+	copy(image, blk(0x44))
+	f.seedHead(t, image, 10, 1)
+	cfg := ctConfig(2)
+	cfg.FreshFromHead = true
+	newStore := func() *WALStore {
+		s, err := createMappedWALStoreV3ForTest(t.TempDir()+"/native", ctNumBlocks, ctBlockSize, v3TestWAL, WModeStrict, ctChunkBlocks)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.DisableAutoFlushForRecoveryTest()
+		t.Cleanup(func() { _ = s.Close() })
+		return s
+	}
+	s := newStore()
+	layer := mustAttach(t, s, f, cfg)
+	if _, err := s.Write(3, blk(0x33)); err != nil {
+		t.Fatal(err)
+	}
+	before := f.stats()
+	if _, err := layer.Cut(ctTimeout(t)); !errors.Is(err, errChunkLSNBehind) {
+		t.Fatalf("behind cut: %v", err)
+	}
+	if _, err := layer.Detach(ctTimeout(t)); !errors.Is(err, errChunkLSNBehind) {
+		t.Fatalf("behind detach: %v", err)
+	}
+	after := f.stats()
+	if before.puts != after.puts || before.cas != after.cas || before.head.Gen != after.head.Gen {
+		t.Fatal("behind native store published")
+	}
+	// The production restore path seeds before attach. A separate valid new
+	// owner continues from the exact inherited frontier instead of resetting it.
+	seeded := newStore()
+	if err := seeded.SeedChunkFrontier(10); err != nil {
+		t.Fatal(err)
+	}
+	next := mustAttach(t, seeded, f, cfg)
+	if lsn, err := seeded.Write(4, blk(0x34)); err != nil || lsn != 11 {
+		t.Fatalf("seeded append: %d %v", lsn, err)
+	}
+	cut, err := next.Cut(ctTimeout(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cut.Head.RemoteLSN != 11 {
+		t.Fatalf("HEAD LSN=%d", cut.Head.RemoteLSN)
+	}
+	copy(image[4*ctBlockSize:], blk(0x34))
+	if !bytes.Equal(f.imageOf(t, cut.Head), image) {
+		t.Fatal("seeded native owner changed inherited bytes")
 	}
 }
