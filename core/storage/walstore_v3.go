@@ -136,15 +136,10 @@ type walStoreV3State struct {
 // of its target and its completion; nothing is acknowledged.
 var errV3RecoveredMeanwhile = errors.New("storage: v3 recovery ran meanwhile; the Sync is not acknowledged")
 
-// errV3LegacySuperblockWrite: a legacy superblock write (offset 0, which is
-// descriptor slot A on a v3 file) was attempted on a v3 store.
-var errV3LegacySuperblockWrite = errors.New("storage: legacy superblock write refused on a v3 store (offset 0 is descriptor slot A)")
-
 var errV3NotYet = errors.New("storage: operation not yet supported on a v3 store (later plan row)")
 
-// ErrUnsupportedLegacyFormat requires offline migration or workspace restore;
-// a production open never interprets a v2 volume as v3.
-var ErrUnsupportedLegacyFormat = errors.New("storage: unsupported legacy walstore format; migrate offline or restore into a new volume")
+// ErrUnsupportedLegacyFormat refuses v2 files without an in-place upgrade.
+var ErrUnsupportedLegacyFormat = errors.New("storage: unsupported legacy walstore format; restore into a new volume")
 
 func refuseLegacyWALStore(f *os.File) error {
 	if sb, err := readSuperblock(io.NewSectionReader(f, 0, superblockSize)); err == nil && sb.Version == 2 && sb.validate() == nil {
@@ -412,7 +407,7 @@ func openWALStoreV3File(path string, f *os.File, requireMap bool, opts WALStoreO
 			return nil, err
 		}
 	}
-	s, err := openInitializedInternal(path, f, &sb, metadata, func(s *WALStore) error {
+	s, err := openInitializedV3(path, f, &sb, metadata, func(s *WALStore) error {
 		v := &walStoreV3State{}
 		v.pub = newDescriptorPublisherV3(d, id, other, descriptorIOV3{
 			writeSlot: func(off int64, buf []byte) error {

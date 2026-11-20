@@ -60,7 +60,7 @@ func TestBlockMetadata_DurableBeforeTail(t *testing.T) {
 	}
 	cp, tail := s.CheckpointLSN(), walLogicalTail(s)
 	h.before = func(uint64) {
-		if s.checkpointLSN != cp || s.wal.logicalTail != tail {
+		if s.checkpointLSN != cp || s.v3.pub.current().RetainedTail != tail {
 			t.Error("tail/checkpoint advanced before hook durability")
 		}
 	}

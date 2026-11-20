@@ -67,39 +67,6 @@ func OpenReadOnlyWithOptions(path string, opts WALStoreOptions) (*WALStoreReader
 	return openReadOnlyV3(path, opts)
 }
 
-func openLegacyReadOnlyWithOptions(path string, opts WALStoreOptions) (*WALStoreReader, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY, 0)
-	if err != nil {
-		return nil, fmt.Errorf("storage: OpenReadOnly %s: %w", path, err)
-	}
-	if _, err := f.Seek(0, 0); err != nil {
-		_ = f.Close()
-		return nil, fmt.Errorf("storage: seek superblock: %w", err)
-	}
-	sb, err := readSuperblock(f)
-	if err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	if err := sb.validate(); err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	metadata, _, err := bindBlockMetadata(f, &sb, opts, false, true)
-	if err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	dm := newDirtyMap(64)
-	// Replay WAL into the dirty map. recoverWAL is a pure read pass
-	// over the WAL frames — no writes back to the fd.
-	if _, err := recoverWAL(f, &sb, dm); err != nil {
-		_ = f.Close()
-		return nil, fmt.Errorf("storage: OpenReadOnly recover: %w", err)
-	}
-	return &WALStoreReader{metadata: metadata, fd: f, sb: &sb, dm: dm}, nil
-}
-
 // Read returns the current bytes at lba — same merge logic the
 // daemon uses (WAL-recent over extent). No mutation; safe to call
 // concurrently from multiple goroutines.
@@ -109,46 +76,10 @@ func (r *WALStoreReader) Read(lba uint32) ([]byte, error) {
 		r.mu.Unlock()
 		return nil, errors.New("storage: WALStoreReader.Read after Close")
 	}
-	if r.v3 != nil {
-		defer r.mu.Unlock()
-		return r.readV3(lba)
-	}
-	r.mu.Unlock()
 
-	maxLBA := uint32(r.sb.VolumeSize / uint64(r.sb.BlockSize))
-	if lba >= maxLBA {
-		return nil, fmt.Errorf("storage: LBA %d out of range", lba)
-	}
-	// WAL-recent first. Inline the same logic as WALStore.readFromWAL
-	// + readFromExtent, but operating against the read-only fd.
-	if walRelOff, dataOffset, _, _, ok := r.dm.get(uint64(lba)); ok {
-		return r.readFromWAL(walRelOff, dataOffset)
-	}
-	return r.readFromExtent(lba)
-}
+	defer r.mu.Unlock()
+	return r.readV3(lba)
 
-func (r *WALStoreReader) readFromWAL(walRelOff uint64, dataOffset uint32) ([]byte, error) {
-	headerBuf := make([]byte, walEntryHeaderSize)
-	absOff := int64(r.sb.WALOffset + walRelOff)
-	if _, err := r.fd.ReadAt(headerBuf, absOff); err != nil {
-		return nil, fmt.Errorf("storage: OpenReadOnly WAL header: %w", err)
-	}
-	if headerBuf[16] == walEntryTrim {
-		return make([]byte, r.sb.BlockSize), nil
-	}
-	length := parseLengthFromHeader(headerBuf)
-	if dataOffset >= length {
-		return nil, fmt.Errorf("storage: OpenReadOnly WAL data offset %d >= length %d", dataOffset, length)
-	}
-	readLen := r.sb.BlockSize
-	if remaining := length - dataOffset; remaining < readLen {
-		readLen = remaining
-	}
-	data := make([]byte, readLen)
-	if _, err := r.fd.ReadAt(data, absOff+int64(walEntryPrefixSize)+int64(dataOffset)); err != nil {
-		return nil, fmt.Errorf("storage: OpenReadOnly WAL data: %w", err)
-	}
-	return data, nil
 }
 
 func (r *WALStoreReader) readFromExtent(lba uint32) ([]byte, error) {

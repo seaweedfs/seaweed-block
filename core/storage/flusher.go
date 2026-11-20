@@ -1,7 +1,6 @@
 package storage
 
 import (
-	"encoding/binary"
 	"fmt"
 	"sort"
 	"sync"
@@ -163,13 +162,11 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 	if err := store.stickyIOFault(); err != nil {
 		return err // no checkpoint advance after a failed fsync
 	}
-	// Do not acquire lifecycleMu here: Close holds it while joining Stop.
-	// The pressure leader is released before snapshot/materialization/checkpoint.
-	if store.v3 != nil {
-		if err := store.syncWALPressureV3(); err != nil {
-			return fmt.Errorf("flusher: pressure WAL sync: %w", err)
-		}
+
+	if err := store.syncWALPressureV3(); err != nil {
+		return fmt.Errorf("flusher: pressure WAL sync: %w", err)
 	}
+
 	store.mu.RLock()
 	if store.closed && !allowClosed {
 		store.mu.RUnlock()
@@ -182,16 +179,15 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 	// Bind materialization to the same Recover lifetime as this snapshot.
 	// Recover holds store.mu at both generation boundaries.
 	var recoveryGen uint64
-	if store.v3 != nil {
-		recoveryGen = store.v3.recoverGen.Load()
-	}
+
+	recoveryGen = store.v3.recoverGen.Load()
+
 	entries := store.dm.snapshot()
 	store.mu.RUnlock()
 	if len(entries) == 0 {
-		if store.v3 != nil {
-			return store.refreshW() // the mode-C idle refresh (DESIGN 6.2)
-		}
-		return nil
+
+		return store.refreshW() // the mode-C idle refresh (DESIGN 6.2)
+
 	}
 	if f.afterSnapshotForTest != nil {
 		f.afterSnapshotForTest()
@@ -205,8 +201,6 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 	// checkpoint progress. Partial extent writes are safe because checkpoint
 	// publication happens only after the whole snapshot and fsync succeed.
 	var maxLSN uint64
-	var maxLSNPhys uint64
-	var maxLSNEntrySize uint64
 	writtenEntries := make([]snapshotEntry, 0, len(entries))
 	defer func() {
 		f.instr.recordWrittenOpportunity(writtenEntries, store.sb.BlockSize)
@@ -214,25 +208,17 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 
 	// Adjacent blocks of a native batch share one immutable, validated record.
 	// Keep only one record (at most WALSize bytes), scoped to this Recover lifetime.
-	var recordCache *flushRecordCacheV3
-	if store.v3 != nil {
-		sort.Slice(entries, func(i, j int) bool {
-			if entries[i].WALOffset == entries[j].WALOffset {
-				return entries[i].DataOffset < entries[j].DataOffset
-			}
-			return entries[i].WALOffset < entries[j].WALOffset
-		})
-		recordCache = &flushRecordCacheV3{recoveryGen: recoveryGen}
-	}
-	for _, e := range entries {
-		var data []byte
-		var entrySize uint64
-		var err error
-		if recordCache != nil {
-			data, entrySize, err = f.readDirtyRecordV3Cached(e, recordCache)
-		} else {
-			data, entrySize, err = f.readDirtyRecord(e)
+
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].WALOffset == entries[j].WALOffset {
+			return entries[i].DataOffset < entries[j].DataOffset
 		}
+		return entries[i].WALOffset < entries[j].WALOffset
+	})
+	recordCache := &flushRecordCacheV3{recoveryGen: recoveryGen}
+
+	for _, e := range entries {
+		data, _, err := f.readDirtyRecordV3Cached(e, recordCache)
 		if err != nil {
 			return err
 		}
@@ -252,8 +238,6 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 		}
 		if e.LSN > maxLSN {
 			maxLSN = e.LSN
-			maxLSNPhys = e.WALOffset
-			maxLSNEntrySize = entrySize
 		}
 	}
 	// Step 2: one fsync covers all extent writes in this batch
@@ -279,22 +263,14 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 		// writer may reuse those bytes.
 		var publishErr error
 		cpBefore := store.CheckpointLSN()
-		if store.v3 != nil {
-			publishErr = store.persistCheckpointV3(maxLSN, recoveryGen)
-		} else {
-			publishErr = store.persistCheckpointAndRelease(maxLSN, maxLSNPhys, maxLSNEntrySize)
-		}
+
+		publishErr = store.persistCheckpointV3(maxLSN, recoveryGen)
+
 		f.instr.recordCheckpoint(publishErr, cpBefore, store.CheckpointLSN(), time.Now())
 		if err := publishErr; err != nil {
 			return fmt.Errorf("flusher: persist checkpoint %d: %w", maxLSN, err)
 		}
-		if store.v3 == nil && store.CheckpointLSN() >= maxLSN {
-			store.mu.Lock()
-			if maxLSN+1 > store.walTail {
-				store.walTail = maxLSN + 1
-			}
-			store.mu.Unlock()
-		}
+
 	}
 
 	if f.afterCheckpointForTest != nil {
@@ -308,210 +284,36 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 	// Keep the uncovered entries as retry work even though their extent
 	// bytes were fsynced: a later Sync plus cycle must advance checkpoint
 	// AND coverage, rather than merely refreshing W on an empty dirty map.
-	checkpoint := maxLSN // legacy behavior: remove the whole flushed snapshot
-	if store.v3 != nil {
-		// Serialize validation and LSN-only retirement with Recover. A new
-		// lifetime can reuse the same LBA, physical offset and LSN.
-		store.mu.Lock()
-		if !store.v3.flushLifetimeValidV3(recoveryGen) {
-			store.mu.Unlock()
-			return mapCoverageRefusal("recovery_lifetime_changed")
-		}
-		checkpoint = store.checkpointLSN
-		if checkpoint >= maxLSN && maxLSN+1 > store.walTail {
-			store.walTail = maxLSN + 1
-		}
+
+	// Serialize validation and LSN-only retirement with Recover. A new
+	// lifetime can reuse the same LBA, physical offset and LSN.
+	store.mu.Lock()
+	if !store.v3.flushLifetimeValidV3(recoveryGen) {
+		store.mu.Unlock()
+		return mapCoverageRefusal("recovery_lifetime_changed")
 	}
+	checkpoint := store.checkpointLSN
+	if checkpoint >= maxLSN && maxLSN+1 > store.walTail {
+		store.walTail = maxLSN + 1
+	}
+
 	for _, e := range entries {
 		if e.LSN > checkpoint {
 			continue
 		}
 		store.dm.compareAndDelete(e.LBA, e.LSN)
 	}
-	if store.v3 != nil {
-		store.mu.Unlock()
-	}
+
+	store.mu.Unlock()
+
 	f.flushes.Add(1)
-	if store.v3 != nil {
-		return store.refreshW() // the mode-C idle refresh (DESIGN 6.2)
-	}
-	return nil
+
+	return store.refreshW() // the mode-C idle refresh (DESIGN 6.2)
+
 }
 
 func (f *flusher) readDirtyRecord(e snapshotEntry) (data []byte, entrySize uint64, err error) {
-	if f.store.v3 != nil {
-		return f.readDirtyRecordV3(e)
-	}
-	store := f.store
-	readFailed := false
-	defer func() {
-		switch {
-		case err == nil:
-			f.instr.recordValidatedRecord()
-		case !readFailed:
-			f.instr.recordValidationFailure()
-		}
-	}()
 
-	absOff := int64(store.sb.WALOffset + e.WALOffset)
-	header := make([]byte, walEntryHeaderSize)
-	headerStart := time.Now()
-	n, readErr := store.fd.ReadAt(header, absOff)
-	f.instr.recordWALHeaderRead(n, time.Since(headerStart), readErr)
-	if readErr != nil {
-		readFailed = true
-		return nil, 0, fmt.Errorf("flusher: read WAL header at %d: %w", e.WALOffset, readErr)
-	}
+	return f.readDirtyRecordV3(e)
 
-	entryLSN := binary.LittleEndian.Uint64(header[0:8])
-	entryType := header[16]
-	if entryType != walEntryWriteBatch && entryLSN != e.LSN {
-		return nil, 0, fmt.Errorf(
-			"flusher: WAL slot mismatch LBA %d offset %d dirty LSN %d record LSN %d",
-			e.LBA, e.WALOffset, e.LSN, entryLSN)
-	}
-	if entryType != walEntryWrite && entryType != walEntryWriteBatch && entryType != walEntryTrim {
-		return nil, 0, fmt.Errorf(
-			"flusher: invalid dirty WAL record LBA %d offset %d type %d",
-			e.LBA, e.WALOffset, entryType)
-	}
-
-	payloadLen := uint64(0)
-	if entryType == walEntryWrite || entryType == walEntryWriteBatch {
-		payloadLen = uint64(parseLengthFromHeader(header))
-		if payloadLen == 0 {
-			return nil, 0, fmt.Errorf(
-				"flusher: invalid dirty WAL record LBA %d offset %d with zero payload",
-				e.LBA, e.WALOffset)
-		}
-	}
-	entrySize = uint64(walEntryHeaderSize) + payloadLen
-	if entrySize > store.sb.WALSize || e.WALOffset+entrySize > store.sb.WALSize {
-		return nil, 0, fmt.Errorf(
-			"flusher: invalid dirty WAL record LBA %d offset %d size %d WAL size %d",
-			e.LBA, e.WALOffset, entrySize, store.sb.WALSize)
-	}
-
-	full := make([]byte, entrySize)
-	recordStart := time.Now()
-	n, readErr = store.fd.ReadAt(full, absOff)
-	f.instr.recordWALRecordRead(n, time.Since(recordStart), readErr)
-	if readErr != nil {
-		readFailed = true
-		return nil, 0, fmt.Errorf("flusher: read WAL record at %d: %w", e.WALOffset, readErr)
-	}
-
-	entryLSN = binary.LittleEndian.Uint64(full[0:8])
-	entryType = full[16]
-	if entryType != walEntryWriteBatch && entryLSN != e.LSN {
-		return nil, 0, fmt.Errorf(
-			"flusher: WAL slot mismatch LBA %d offset %d dirty LSN %d record LSN %d",
-			e.LBA, e.WALOffset, e.LSN, entryLSN)
-	}
-	if entryType != walEntryWrite && entryType != walEntryWriteBatch && entryType != walEntryTrim {
-		return nil, 0, fmt.Errorf(
-			"flusher: invalid dirty WAL record LBA %d offset %d type %d",
-			e.LBA, e.WALOffset, entryType)
-	}
-	expectedRecordSize := uint64(walEntryHeaderSize)
-	if entryType == walEntryWrite || entryType == walEntryWriteBatch {
-		payloadLen := uint64(parseLengthFromHeader(full))
-		if payloadLen == 0 {
-			return nil, 0, fmt.Errorf(
-				"flusher: invalid dirty WAL record LBA %d offset %d with zero payload",
-				e.LBA, e.WALOffset)
-		}
-		expectedRecordSize += payloadLen
-	}
-	if expectedRecordSize != entrySize || uint64(len(full)) != entrySize {
-		return nil, 0, fmt.Errorf(
-			"flusher: invalid dirty WAL record LBA %d offset %d record size %d expected %d",
-			e.LBA, e.WALOffset, entrySize, expectedRecordSize)
-	}
-	decodeStart := time.Now()
-	entry, err := decodeWALEntry(full)
-	f.instr.recordWALRecordDecode(len(full), time.Since(decodeStart), err)
-	if err != nil {
-		return nil, 0, fmt.Errorf(
-			"flusher: invalid dirty WAL record LBA %d offset %d: %w",
-			e.LBA, e.WALOffset, err)
-	}
-	if entry.Flags != 0 {
-		return nil, 0, fmt.Errorf(
-			"flusher: invalid dirty WAL record LBA %d offset %d flags %d",
-			e.LBA, e.WALOffset, entry.Flags)
-	}
-	data, err = f.validateMaterializedDirtyEntry(e, &entry)
-	if err != nil {
-		return nil, 0, err
-	}
-	return data, entrySize, nil
-}
-
-func (f *flusher) validateMaterializedDirtyEntry(e snapshotEntry, entry *walEntry) ([]byte, error) {
-	blockSize := f.store.sb.BlockSize
-	switch entry.Type {
-	case walEntryWrite:
-		if entry.LSN != e.LSN || entry.LBA != e.LBA || e.DataOffset != 0 ||
-			entry.Length != blockSize || e.Length != blockSize {
-			return nil, fmt.Errorf(
-				"flusher: WAL slot mismatch LBA %d offset %d dirty LSN %d record LSN %d",
-				e.LBA, e.WALOffset, e.LSN, entry.LSN)
-		}
-		return entry.Data, nil
-	case walEntryWriteBatch:
-		maxBlocks := uint64(^uint32(0)) / uint64(blockSize)
-		if entry.Reserved == 0 || entry.Reserved > maxBlocks {
-			return nil, fmt.Errorf(
-				"flusher: invalid dirty WAL batch LBA %d offset %d",
-				e.LBA, e.WALOffset)
-		}
-		expectedLength := entry.Reserved * uint64(blockSize)
-		if uint64(entry.Length) != expectedLength ||
-			e.DataOffset%blockSize != 0 || e.Length != blockSize {
-			return nil, fmt.Errorf(
-				"flusher: invalid dirty WAL batch LBA %d offset %d",
-				e.LBA, e.WALOffset)
-		}
-		blockIndex := uint64(e.DataOffset / blockSize)
-		if blockIndex >= entry.Reserved || entry.LSN+blockIndex != e.LSN ||
-			entry.LBA+blockIndex != e.LBA {
-			return nil, fmt.Errorf(
-				"flusher: WAL slot mismatch LBA %d offset %d dirty LSN %d batch base %d block %d count %d",
-				e.LBA, e.WALOffset, e.LSN, entry.LSN, blockIndex, entry.Reserved)
-		}
-		start := uint64(e.DataOffset)
-		end := start + uint64(blockSize)
-		if end > uint64(len(entry.Data)) {
-			return nil, fmt.Errorf(
-				"flusher: invalid dirty WAL batch LBA %d offset %d data range [%d,%d)",
-				e.LBA, e.WALOffset, start, end)
-		}
-		return entry.Data[start:end], nil
-	case walEntryTrim:
-		trimBlocks := uint64(1)
-		if entry.Length > 0 {
-			if entry.Length%blockSize != 0 {
-				return nil, fmt.Errorf(
-					"flusher: invalid dirty WAL trim LBA %d offset %d length %d",
-					e.LBA, e.WALOffset, entry.Length)
-			}
-			trimBlocks = uint64(entry.Length / blockSize)
-		}
-		if e.DataOffset%blockSize != 0 || e.Length != blockSize {
-			return nil, fmt.Errorf(
-				"flusher: invalid dirty WAL trim LBA %d offset %d",
-				e.LBA, e.WALOffset)
-		}
-		blockIndex := uint64(e.DataOffset / blockSize)
-		if entry.LSN != e.LSN || blockIndex >= trimBlocks ||
-			entry.LBA+blockIndex != e.LBA {
-			return nil, fmt.Errorf(
-				"flusher: WAL slot mismatch trim LBA %d offset %d dirty LSN %d record LSN %d",
-				e.LBA, e.WALOffset, e.LSN, entry.LSN)
-		}
-		return make([]byte, blockSize), nil
-	default:
-		panic("validated dirty WAL type became unsupported")
-	}
 }
