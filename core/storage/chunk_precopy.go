@@ -337,16 +337,19 @@ func (r *PrecopyReport) admitPrecopy(previous *PrecopyAttempt) bool {
 	if r.Reason == "fit" && r.Estimate <= precopyAllowance {
 		return true
 	}
-	if previous == nil || previous.Estimate <= 0 || r.Reason == "samples_unknown" {
+	if r.Reason == "samples_unknown" {
+		return false
+	}
+	// Preserve and name the existing frontend ceiling even on the first round.
+	if r.TailEstimate <= precopyAllowance/4 && r.Estimate > precopyFreezeLimit {
+		r.Reason = "fixed_cost_exceeds_freeze_budget"
+		return false
+	}
+	if previous == nil || previous.Estimate <= 0 {
 		return false
 	}
 	r.PreviousEstimate = previous.Estimate
 	if r.TailEstimate > precopyAllowance/4 || r.Estimate < previous.Estimate {
-		return false
-	}
-	// Preserve the frontend's existing five-second held-command ceiling.
-	if r.Estimate > precopyFreezeLimit {
-		r.Reason = "fixed_cost_exceeds_freeze_budget"
 		return false
 	}
 	r.Reason = "fixed_cost_over_allowance"

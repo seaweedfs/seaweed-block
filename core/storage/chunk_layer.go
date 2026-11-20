@@ -663,6 +663,12 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		l.persistCapturedMapV3(versions)
 		st.MapPersistNs += time.Since(start).Nanoseconds()
 	}
+	readCapturedHead := func() (chunkHead, error) {
+		start := time.Now()
+		head, err := readChunkHead(ctx, l.remote)
+		st.HeadReadbackNs += time.Since(start).Nanoseconds()
+		return head, err
+	}
 	var pauseStart time.Time
 	var payloadBeforeBarrier int64
 	defer func() {
@@ -1000,7 +1006,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	if !upgrade && !detach && len(changed) == 0 && h == baseHead.RemoteLSN && baseHead.Gen != 0 && !chunkHeadIsDetached(baseHead) {
 		// A no-op cut still observes authority: a fresh host may have
 		// claimed HEAD without uploading a single chunk since our last cut.
-		cur, err := readChunkHead(ctx, l.remote)
+		cur, err := readCapturedHead()
 		if err != nil {
 			l.abortCut(all)
 			l.dropIntents(ctx, intents)
@@ -1066,7 +1072,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		l.fencePublication(chunkHead{}) // confirmChunkHead already logged the observed root.
 		return chunkCutResult{}, casErr
 	}
-	cur, gerr := readChunkHead(ctx, l.remote)
+	cur, gerr := readCapturedHead()
 	if gerr != nil {
 		keepPending()
 		return chunkCutResult{}, fmt.Errorf("storage: capture CAS outcome unresolved (%v): %w: %w", casErr, errChunkCASOutcomeUnknown, gerr)

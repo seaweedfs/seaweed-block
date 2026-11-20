@@ -11,15 +11,15 @@ import (
 func TestPrecopyFixedCostSmallTailCommitsBySecondAttempt(t *testing.T) {
 	s, f, l, w := precopyLayer(t, 1024, 0)
 	fixed := 1300 * time.Millisecond
-	f.beforeCAS = func(*fakeChunkRemote) { time.Sleep(fixed) }
 	rounds := 0
 	l.testBeforeBarrierLockHook = func() {
 		rounds++
 		w.write(t, s, 1, byte(rounds))
+		f.beforeCAS = func(*fakeChunkRemote) { time.Sleep(fixed) }
 		// Keep the same known small tail and fixed envelope in each attempt.
 		l.precopySamples = nil
 		for i := 0; i < 3; i++ {
-			l.precopySamples = append(l.precopySamples, precopySample{at: time.Now(), fixed: fixed, rate: 20 * float64(ctChunkBytes)})
+			l.precopySamples = append(l.precopySamples, precopySample{at: time.Now(), fixed: fixed, parts: PrecopyFixedParts{HeadCAS: fixed}, rate: 20 * float64(ctChunkBytes)})
 		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -27,6 +27,9 @@ func TestPrecopyFixedCostSmallTailCommitsBySecondAttempt(t *testing.T) {
 	r, err := l.PrecopyDetach(ctx, func() bool { return true })
 	if err != nil || !r.Precopy.Frozen || len(r.Precopy.Rounds) > 2 || r.Precopy.Reason != "fixed_cost_over_allowance" || r.Precopy.Fixed < fixed || r.Precopy.DeclaredWorst < fixed {
 		t.Fatalf("fixed cost cannot converge by recopying the same small tail: report=%+v err=%v", r.Precopy, err)
+	}
+	if r.Precopy.FreezeElapsed < fixed || r.Precopy.LatencyGateFailed || time.Duration(r.Stats.CASWriteNs) < fixed {
+		t.Fatalf("final fixed-cost operation was not witnessed within its declaration: %+v", r)
 	}
 	if r.Head.State != ChunkHeadDetached || !bytes.Equal(f.imageOf(t, r.Head)[ctBlockSize:2*ctBlockSize], makeBlock(ctBlockSize, byte(rounds))) {
 		t.Fatal("amended commit lost the exact point")
@@ -77,6 +80,7 @@ func TestPrecopyFixedCommitRuleKeepsProgressAndFreezeBounds(t *testing.T) {
 		{"large-tail", 300*time.Millisecond + 1, 1500 * time.Millisecond, 1500 * time.Millisecond, true, false},
 		{"unknown", 0, 1500 * time.Millisecond, 1500 * time.Millisecond, false, false},
 		{"freeze-ceiling", 0, 5*time.Second + 1, 5*time.Second + 1, true, false},
+		{"first-freeze-ceiling", 0, 5*time.Second + 1, 0, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			reason := "tail_too_large"
@@ -90,6 +94,9 @@ func TestPrecopyFixedCommitRuleKeepsProgressAndFreezeBounds(t *testing.T) {
 			}
 			if got := r.admitPrecopy(previous); got != tc.want {
 				t.Fatalf("admit=%t report=%+v", got, r)
+			}
+			if tc.known && tc.estimate > 5*time.Second && r.Reason != "fixed_cost_exceeds_freeze_budget" {
+				t.Fatalf("mislabelled fixed ceiling: %+v", r)
 			}
 			if tc.want && r.Reason != "fixed_cost_over_allowance" {
 				t.Fatalf("missing exception reason: %+v", r)
