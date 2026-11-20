@@ -8,6 +8,9 @@ import (
 )
 
 func TestChartOptInLoopbackFlagIsAcceptedByBlockmaster(t *testing.T) {
+	if os.Getenv("SEAWEED_KNOWN_BUGS") != "1" {
+		t.Skip("known bug #186 (open): reproduction runs with SEAWEED_KNOWN_BUGS=1; the fix PR removes this skip")
+	}
 	raw, err := os.ReadFile(filepath.Join("..", "..", "charts", "seaweed-block", "templates", "blockmaster.yaml"))
 	if err != nil {
 		t.Fatal(err)

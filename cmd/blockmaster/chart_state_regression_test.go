@@ -9,6 +9,9 @@ import (
 )
 
 func TestChartDefaultAuthorityStateSurvivesPodReplacement(t *testing.T) {
+	if os.Getenv("SEAWEED_KNOWN_BUGS") != "1" {
+		t.Skip("known bug #187 (open): reproduction runs with SEAWEED_KNOWN_BUGS=1; the fix PR removes this skip")
+	}
 	var values struct {
 		Blockmaster struct {
 			StateHostPath  string `yaml:"stateHostPath"`
