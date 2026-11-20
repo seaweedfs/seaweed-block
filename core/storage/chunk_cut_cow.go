@@ -50,6 +50,8 @@ type cutCOWWindow struct {
 	terminal    bool
 	err         error
 	ended       chan struct{}
+	ctx         context.Context
+	cancel      context.CancelFunc
 	refs        sync.WaitGroup // Add under mu, only while OPEN; Wait only after terminal
 	sideReady   chan struct{}
 	cleanupErr  error
@@ -60,7 +62,6 @@ type cutCOWWindow struct {
 	spillLimit  int64
 	chunkBytes  int64
 	memoryLimit int64
-	copyWorkers int
 	saverSlots  chan struct{}
 	side        *os.File
 	sideErr     error
@@ -138,12 +139,13 @@ func (l *chunkLayerImpl) installCOWWindow(candidates, staged map[uint64]bool, he
 		return nil, fmt.Errorf("%w: side-store geometry", errCutCOWAborted)
 	}
 	w := &cutCOWWindow{layer: l, ended: make(chan struct{}), entries: make(map[uint64]*cutCOWEntry), head: head, spillLimit: l.cfg.COWSpillLimit, chunkBytes: int64(size)}
-	c, _, reserved, limit := l.cutPayloadWorkers()
+	w.ctx, w.cancel = context.WithCancel(context.Background())
+	_, reserved, limit := l.cutPayloadWorkers()
 	savers := max(1, int((16<<20)/int64(size)))
 	// Active saver buffers are reserved independently of upload concurrency.
-	// (4*C + 2*U + 2*S)*chunkBytes + cached saves <= memoryLimit.
+	// (4*U + 2*S)*chunkBytes + cached saves <= memoryLimit.
 	reserved += int64(2*savers) * int64(size)
-	w.copyWorkers, w.memory, w.memoryLimit = c, reserved, max(limit, reserved)
+	w.memory, w.memoryLimit = reserved, max(limit, reserved)
 	w.saverSlots = make(chan struct{}, savers)
 	var slot int64
 	for _, idx := range sortedKeys(candidates) {
@@ -169,6 +171,7 @@ func (w *cutCOWWindow) abort(err error) {
 	if !w.terminal {
 		w.terminal, w.err = true, fmt.Errorf("%w: %w", errCutCOWAborted, err)
 		close(w.ended)
+		w.cancel()
 	}
 	w.mu.Unlock()
 }
@@ -420,7 +423,7 @@ func (l *chunkLayerImpl) readLocalBlock(lba uint64) ([]byte, bool, error) {
 }
 
 // fillMissing completes a COW capture: the blocks listed missing get the cut's
-// base HEAD bytes. It runs after the local window has drained, bounded by
+// base HEAD bytes. It runs after the local entry is released, bounded by
 // ReadMissTimeout and the owning cut's cancellation.
 func (l *chunkLayerImpl) fillMissing(ctx context.Context, base map[uint64]chunkRef, idx uint64, data []byte, missing []uint64) ([]byte, error) {
 	ref, ok := base[idx]
@@ -492,21 +495,14 @@ func (l *chunkLayerImpl) copyCOWEntry(w *cutCOWWindow, idx uint64) (capturedChun
 	}
 }
 
-func (l *chunkLayerImpl) copyCOWWindow(ctx context.Context, w *cutCOWWindow, payloads *cutPayloadStore) ([]capturedChunk, error) {
-	payloads.reserve = func(size int64) error {
-		w.mu.Lock()
-		defer w.mu.Unlock()
-		if w.terminal {
-			return w.err
-		}
-		if size > w.spillLimit-w.spillBytes {
-			return fmt.Errorf("%w: local cut payload cap %d bytes", errCutCOWAborted, w.spillLimit)
-		}
-		w.spillBytes += size
-		return nil
-	}
-	stop := context.AfterFunc(ctx, func() { w.abort(ctx.Err()) })
+// Each worker owns one immutable image from local read through remote Put.
+// Once copied, its entry is done: guest writes need not wait for remote I/O.
+// The window remains installed for candidates not yet read by a worker.
+func (l *chunkLayerImpl) copyCOWWindow(ctx context.Context, w *cutCOWWindow, recent map[uint64]uint64) ([]capturedChunk, string, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(w.ctx, cancel)
 	defer stop()
+	defer cancel()
 	defer func() {
 		w.abort(errCutCOWAborted)
 		w.join()
@@ -518,60 +514,70 @@ func (l *chunkLayerImpl) copyCOWWindow(ctx context.Context, w *cutCOWWindow, pay
 		l.cowMu.Unlock()
 	}()
 	indices := make(map[uint64]bool, len(w.entries))
-	for idx := range w.entries {
-		indices[idx] = true
+	for idx, e := range w.entries {
+		e.mu.Lock()
+		done := e.state == cowDone
+		e.mu.Unlock()
+		if !done {
+			indices[idx] = true
+		}
 	}
-	keys := sortedKeys(indices)
-	out := make([]capturedChunk, len(keys))
-	kept := make([]bool, len(keys))
-	var next atomic.Int64
-	var workers sync.WaitGroup
-	for n := 0; n < min(w.copyWorkers, len(keys)); n++ {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			for {
-				i := int(next.Add(1) - 1)
-				if i >= len(keys) {
-					return
-				}
-				c, ok, err := l.copyCOWEntry(w, keys[i])
-				if err != nil {
-					return
-				}
-				if ok {
-					c, err = payloads.keep(c, w.head)
-					if err != nil {
-						w.abort(err)
-						return
-					}
-				}
-				out[i], kept[i] = c, ok
+	order := hotChunkKeys(indices, recent)
+	keys := make([]string, len(order))
+	for i, idx := range order {
+		keys[i] = l.newKey(idx)
+	}
+	intent := ""
+	if len(keys) > 0 {
+		var err error
+		l.stMu.Lock()
+		gen := l.head.Gen
+		l.stMu.Unlock()
+		intent, err = l.remote.PutIntent(ctx, chunkIntent{Gen: gen, Epoch: l.cfg.Epoch, Holder: l.cfg.Holder, Keys: keys})
+		if err != nil {
+			return nil, "", fmt.Errorf("storage: capture intent: %w: %w", errChunkRemoteUnavailable, err)
+		}
+	}
+	out := make([]capturedChunk, len(order))
+	err := l.uploadBatch(ctx, len(order), func(ctx context.Context, i int) error {
+		c, ok, err := l.copyCOWEntry(w, order[i])
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errCutCOWAborted
+		}
+		if len(c.missing) > 0 {
+			c.data, err = l.fillMissing(ctx, w.head, c.idx, c.data, c.missing)
+			if err != nil {
+				return errors.Join(errCutCOWAborted, err)
 			}
-		}()
-	}
-	workers.Wait()
+			c.sum, c.zero, c.missing = sha256.Sum256(c.data), isAllZero(c.data), nil
+		}
+		ref, had := w.head[c.idx]
+		if !c.zero && !(had && ref.SHA256 == c.sum) {
+			if err = l.putCaptured(ctx, keys[i], c.data); err != nil {
+				return fmt.Errorf("%w: %w", errChunkRemoteUnavailable, err)
+			}
+			c.key, c.size = keys[i], len(c.data)
+		}
+		c.data = nil
+		out[i] = c
+		return nil
+	})
 	w.mu.Lock()
 	if !w.terminal {
 		w.terminal = true
 		close(w.ended)
+		w.cancel()
 	}
-	err := w.err
+	err = errors.Join(err, w.err)
 	w.mu.Unlock()
-	cleanupErr := w.join()
-	if cleanupErr != nil {
-		err = errors.Join(err, errCutCOWAborted, cleanupErr)
-	}
+	err = errors.Join(err, w.join())
 	if err != nil {
-		return nil, err
+		return nil, intent, err
 	}
-	var result []capturedChunk
-	for i, c := range out {
-		if kept[i] {
-			result = append(result, c)
-		}
-	}
-	return result, nil
+	return out, intent, nil
 }
 
 // Creation is single-owner, but no allocation/lifetime lock spans filesystem I/O.

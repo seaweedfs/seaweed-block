@@ -47,8 +47,16 @@ func TestCutCOWV3_HeldFillIsCancelledByAbortAndDrained(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { _, err := l.Cut(ctx); done <- err }()
 	waitKey(t, gEntered, "the copier's HEAD fill of chunk 2")
-	if l.cowActive.Load() != nil {
-		t.Fatal("pinned HEAD fetch retained a local COW window")
+	w := l.cowActive.Load()
+	if w == nil {
+		t.Fatal("missing active window")
+	}
+	e := w.entries[2]
+	e.mu.Lock()
+	state := e.state
+	e.mu.Unlock()
+	if state != cowDone {
+		t.Fatal("remote fill held the local entry")
 	}
 	cancel()
 	err := waitErr(t, done, "aborted cut with a held fill")

@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"path/filepath"
@@ -68,21 +69,18 @@ func TestCutCOWV3_SaverCapacityAbortsWithoutParkingGuest(t *testing.T) {
 	}
 }
 
-func TestCutCOWV3_RemoteUploadStartsAfterWindowCloses(t *testing.T) {
+func TestCutCOWV3_RemoteUploadDoesNotParkCopiedChunk(t *testing.T) {
 	s, l, f, gate := cowFixture(t)
 	entered, release := holdPuts(t, f)
 	done, errs := cowStartCut(t, l, gate)
 	t.Cleanup(release) // unblock remote I/O before cowStartCut's failure join
 	gate.unblock()
 	waitKey(t, entered, "upload after local copy")
-	if l.cowActive.Load() != nil {
-		t.Fatal("remote wait retained the COW window")
+	if l.cowActive.Load() == nil {
+		t.Fatal("window closed with unsent candidates")
 	}
-	files, err := filepath.Glob(s.path + ".cut-cow-payload-*")
-	if err != nil || len(files) != 1 {
-		t.Fatalf("owned payload file during upload: %v %v", files, err)
-	}
-	if _, err = s.Write(5, makeBlock(ctBlockSize, 0xe5)); err != nil {
+	var err error
+	if _, err = s.Write(1, makeBlock(ctBlockSize, 0xe5)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = s.Sync(); err != nil {
@@ -93,7 +91,7 @@ func TestCutCOWV3_RemoteUploadStartsAfterWindowCloses(t *testing.T) {
 	if err = <-errs; err != nil {
 		t.Fatal(err)
 	}
-	files, err = filepath.Glob(s.path + ".cut-cow-*")
+	files, err := filepath.Glob(s.path + ".cut-cow-*")
 	if err != nil || len(files) != 0 {
 		t.Fatalf("settled payload files: %v %v", files, err)
 	}
@@ -151,15 +149,14 @@ func TestChunkLayer_COWSpillLimitDefaultAndRefusal(t *testing.T) {
 	}
 }
 
-// The shared cap covers one saver plus the two copied payloads. The saver is
-// counted before the held copier runs; the exact three-chunk cap then succeeds.
+// Only a guest overwrite consumes the side-file budget; uploads do not.
 func TestCutCOWV3_SpillWithinCapIsAccounted(t *testing.T) {
 	s, l, _, gate := cowFixture(t)
 	cutDone, cutErr := cowStartCut(t, l, gate)
 	w := l.cowActive.Load()
 	w.mu.Lock()
 	w.memory = cutCOWMemoryLimit
-	w.spillLimit = 3 * w.chunkBytes
+	w.spillLimit = w.chunkBytes
 	w.mu.Unlock()
 	if _, err := s.Write(5, makeBlock(ctBlockSize, 0xd5)); err != nil {
 		t.Fatal(err)
@@ -175,34 +172,8 @@ func TestCutCOWV3_SpillWithinCapIsAccounted(t *testing.T) {
 	if err := <-cutErr; err != nil {
 		t.Fatal(err)
 	}
-	if w.spillBytes != 3*w.chunkBytes {
-		t.Fatalf("shared saver/payload bytes=%d, want %d", w.spillBytes, 3*w.chunkBytes)
-	}
-}
-
-func TestCutCOWV3_SharedPayloadCapRefusesBeforePublication(t *testing.T) {
-	s, l, f, gate := cowFixture(t)
-	before := f.stats().head.Gen
-	done, errs := cowStartCut(t, l, gate)
-	w := l.cowActive.Load()
-	w.mu.Lock()
-	w.memory = cutCOWMemoryLimit
-	w.spillLimit = 2 * w.chunkBytes
-	w.mu.Unlock()
-	if _, err := s.Write(5, makeBlock(ctBlockSize, 0xd6)); err != nil {
-		t.Fatal(err)
-	}
-	gate.unblock()
-	cowWaitSignal(t, done, "shared payload cap")
-	if err := <-errs; !errors.Is(err, errCutCOWAborted) {
-		t.Fatalf("over-cap cut: %v", err)
-	}
-	if f.stats().head.Gen != before {
-		t.Fatal("over-cap image published")
-	}
-	files, err := filepath.Glob(s.path + ".cut-cow-*")
-	if err != nil || len(files) != 0 {
-		t.Fatalf("scratch files after refused cut: %v %v", files, err)
+	if w.spillBytes != w.chunkBytes {
+		t.Fatalf("saved bytes=%d, want %d", w.spillBytes, w.chunkBytes)
 	}
 }
 
@@ -224,5 +195,75 @@ func TestCutCOWV3_ChangedImageExceedsSpillCap(t *testing.T) {
 	}
 	if w.spillBytes != 0 {
 		t.Fatalf("unchanged local extents consumed %d scratch bytes", w.spillBytes)
+	}
+}
+
+func TestCutCOWV3_OverwriteStormAbortsAndRetries(t *testing.T) {
+	s, l, f, gate := cowFixture(t)
+	// Keep chunk 0 hottest, with two other candidates still waiting behind it.
+	for _, lba := range []uint32{9, 1} {
+		if _, err := s.Write(lba, makeBlock(ctBlockSize, byte(lba))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := f.stats().head.Gen
+	done, errs := cowStartCut(t, l, gate)
+	w := l.cowActive.Load()
+	w.mu.Lock()
+	w.memory = w.memoryLimit
+	w.spillLimit = w.chunkBytes
+	w.mu.Unlock()
+	for _, lba := range []uint32{5, 9} {
+		start := time.Now()
+		if _, err := s.Write(lba, makeBlock(ctBlockSize, 0xd0+byte(lba))); err != nil {
+			t.Fatal(err)
+		}
+		if time.Since(start) >= ctLocalBound {
+			t.Fatal("overwrite exceeded guest budget")
+		}
+	}
+	gate.unblock()
+	cowWaitSignal(t, done, "spill-refused update")
+	if err := <-errs; !errors.Is(err, errCutCOWAborted) || !strings.Contains(err.Error(), "spill would exceed its cap") {
+		t.Fatalf("cut: %v", err)
+	}
+	if f.stats().head.Gen != before {
+		t.Fatal("refused cut published")
+	}
+	result, err := l.Cut(context.Background())
+	if err != nil {
+		t.Fatal("retry:", err)
+	}
+	img := f.imageOf(t, result.Head)
+	for _, lba := range []uint32{5, 9} {
+		if !bytes.Equal(blockOf(img, lba), makeBlock(ctBlockSize, 0xd0+byte(lba))) {
+			t.Fatal("retry lost overwrite", lba)
+		}
+	}
+}
+
+func TestChunkStageV3_ChangedImageExceedsSpillCap(t *testing.T) {
+	s, l, f, gate := cowFixture(t)
+	gate.unblock()
+	l.cfg.BarrierBound = 1
+	l.cfg.COWSpillLimit = int64(ctBlockSize) * int64(ctChunkBlocks) / 2
+	for _, lba := range []uint32{1, 5, 9, 13} {
+		if _, err := s.Write(lba, makeBlock(ctBlockSize, byte(lba))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := l.Cut(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	img := f.imageOf(t, result.Head)
+	for _, lba := range []uint32{1, 5, 9, 13} {
+		if !bytes.Equal(blockOf(img, lba), makeBlock(ctBlockSize, byte(lba))) {
+			t.Fatal("stage image mismatch", lba)
+		}
+	}
+	files, err := filepath.Glob(s.path + ".cut-cow-*")
+	if err != nil || len(files) != 0 {
+		t.Fatalf("unexpected staging files: %v %v", files, err)
 	}
 }

@@ -130,7 +130,6 @@ type chunkLayerImpl struct {
 	testCOWWait                  func()
 	testCOWRead                  func(idx uint64, saved bool)
 	testCOWSave                  func() error
-	testPayloadWrite             func()                 // before an admitted local payload WriteAt
 	testPresenceSnapshotHook     func()                 // after a presence snapshot, before it is written
 	testBaseTransitionBeforeLock func()                 // test handshake before capMu drain
 	testAfterAdmitHook           func()                 // right after a capture is admitted
@@ -762,9 +761,8 @@ type capturedChunk struct {
 	zero    bool
 	key     string // staged: already uploaded under this key (data is nil)
 	birth   uint64
-	offset  int64 // private local payload file, never a durable reference
 	size    int
-	missing []uint64 // local copy awaits the pinned HEAD, after the window closes
+	missing []uint64 // local copy awaits the pinned HEAD, after the local entry is released
 }
 
 // stagedChunk is a chunk pre-copied outside the barrier at chunk version
@@ -892,8 +890,6 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	births := l.captureBirths(candidates, h)
 
 	st.CandidateChunks = len(candidates)
-	payloads := l.newCutPayloadStore()
-	defer func() { err = errors.Join(err, payloads.Close()) }()
 	var copyErr error
 	copyStart := time.Now()
 	if l.usesOwnedMapV3() {
@@ -904,7 +900,17 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		copyStart = time.Now()
 		if copyErr == nil {
 			var copied []capturedChunk
-			copied, copyErr = l.copyCOWWindow(ctx, w, payloads)
+			var intent string
+			copied, intent, copyErr = l.copyCOWWindow(ctx, w, births)
+			if intent != "" {
+				intents = append(intents, intent)
+			}
+			for _, c := range copied {
+				if c.key != "" {
+					st.UploadedChunks++
+					st.UploadedBytes += int64(c.size)
+				}
+			}
 			captured = append(captured, copied...)
 			st.COWSavedChunks = int(w.saved.Load())
 			st.COWSaveNs, st.COWWaitNs = w.saveNs.Load(), w.waitNs.Load()
@@ -924,17 +930,6 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		}
 		l.s.captureMu.Unlock()
 		st.BarrierPauseNs = time.Since(pauseStart).Nanoseconds()
-	}
-	if copyErr == nil {
-		for i, c := range captured {
-			if len(c.missing) == 0 {
-				continue
-			}
-			captured[i], copyErr = payloads.complete(ctx, l, baseHead.Chunks, c)
-			if copyErr != nil {
-				break
-			}
-		}
 	}
 	st.CopyNs = time.Since(copyStart).Nanoseconds()
 	if copyErr != nil {
@@ -986,7 +981,9 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 			next.Chunks[c.idx] = chunkRef{Key: c.key, SHA256: c.sum, Encoding: "full", BirthLSN: c.birth}
 			newKeys[c.idx] = c.key
 			changed = append(changed, c.idx)
-			st.StagedChunksUsed++
+			if useStaged[c.idx] {
+				st.StagedChunksUsed++
+			}
 			continue
 		}
 		uploads = append(uploads, upload{c: c, key: l.newKey(c.idx)})
@@ -1009,11 +1006,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	}
 	if err := l.uploadBatch(ctx, len(uploads), func(ctx context.Context, i int) error {
 		u := uploads[i]
-		data, err := payloads.read(u.c)
-		if err != nil {
-			return err
-		}
-		return l.putCaptured(ctx, u.key, data)
+		return l.putCaptured(ctx, u.key, u.c.data)
 	}); err != nil {
 		l.abortCut(all)
 		l.dropIntents(ctx, intents)
@@ -1701,7 +1694,18 @@ func (l *chunkLayerImpl) stage(ctx context.Context, st *chunkCutStats) (map[uint
 			l.stMu.Unlock()
 			break
 		}
-		batch := sortedKeys(need)[:bound]
+		recent := make(map[uint64]uint64, len(need))
+		// Release layer state before sampling the store; never invert store -> stMu.
+		l.stMu.Unlock()
+		l.s.mu.RLock()
+		if l.usesOwnedMapV3() {
+			for idx := range need {
+				recent[idx] = l.s.v3.mapEntries[idx].LSN
+			}
+		}
+		l.s.mu.RUnlock()
+		l.stMu.Lock()
+		batch := hotChunkKeys(need, recent)[:bound]
 		vers := make(map[uint64]uint64, len(batch))
 		for _, idx := range batch {
 			vers[idx] = l.chunkVersion(idx) // before the read: a later mutation raises it

@@ -39,7 +39,7 @@ func cowFixture(t *testing.T) (*WALStore, *chunkLayerImpl, *fakeChunkRemote, *co
 	if _, err = l.Cut(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	for _, lba := range []uint32{1, 5} {
+	for _, lba := range []uint32{5, 1} {
 		if _, err = s.Write(lba, makeBlock(ctBlockSize, byte(lba))); err != nil {
 			t.Fatal(err)
 		}
@@ -661,7 +661,7 @@ func TestCutCOWV3_ProcessCrashDropsSideAndRestoresSyncedImage(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, lba := range []uint32{1, 5} {
+		for _, lba := range []uint32{5, 1} {
 			if _, err = s.Write(lba, makeBlock(ctBlockSize, byte(lba))); err != nil {
 				t.Fatal(err)
 			}

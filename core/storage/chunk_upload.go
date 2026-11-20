@@ -57,7 +57,7 @@ func (l *chunkLayerImpl) uploadBatch(ctx context.Context, n int, put func(contex
 	next := 0
 	var first error
 	var wg sync.WaitGroup
-	_, uploadWorkers, _, _ := l.cutPayloadWorkers()
+	uploadWorkers, _, _ := l.cutPayloadWorkers()
 	workers := min(uploadWorkers, n)
 	for j := 0; j < workers; j++ {
 		wg.Add(1)

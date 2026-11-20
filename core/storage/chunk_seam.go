@@ -364,7 +364,7 @@ type chunkLayerConfig struct {
 	// UploadConcurrency bounds capture/pre-copy Put calls (0 defaults to 8).
 	UploadConcurrency int
 
-	// COWSpillLimit caps private local cut payloads plus saved-before-write
+	// COWSpillLimit caps saved-before-write
 	// side bytes. Pre-copy rounds use the same cap and release their local
 	// files after uploads settle. Exceeding it aborts the cut (the caller
 	// retries), never publishes a partial image or refuses the guest mutation.
