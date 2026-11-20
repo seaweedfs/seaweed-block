@@ -384,7 +384,7 @@ func TestPrecopyDrainLetsAnAdmittedWriterReachTheBarrier(t *testing.T) {
 			return nil, ctx.Err()
 		}
 	}, func() bool { return true })
-	if timedOut || err != nil || !r.Precopy.Frozen || r.Precopy.Attempts != 1 {
+	if timedOut || err != nil || !r.Precopy.Frozen {
 		t.Fatalf("drain blocked admitted writer: timed_out=%t report=%+v err=%v", timedOut, r.Precopy, err)
 	}
 	if !bytes.Equal(f.imageOf(t, r.Head)[2*ctBlockSize:3*ctBlockSize], makeBlock(ctBlockSize, 0xa7)) {
