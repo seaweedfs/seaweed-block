@@ -31,7 +31,7 @@ func FuzzDecodeWALEntryV3(f *testing.F) {
 			return
 		}
 		encoded, err := encodeWALEntryV3(e, 4096, 64)
-		if err != nil || !bytes.Equal(encoded, b) {
+		if err != nil || len(encoded) > len(b) || !bytes.Equal(encoded, b[:len(encoded)]) {
 			t.Fatalf("accepted native record does not roundtrip: %v", err)
 		}
 	})

@@ -54,8 +54,11 @@ func TestNativeReplacementCheckpointSIGKILL(t *testing.T) {
 		if err := s.flusher.flushOnce(); err != nil {
 			t.Fatal(err)
 		}
-		_ = kill()
-		t.Fatal("SIGKILL returned")
+		if phase == "tail_publication" {
+			_ = kill()
+			t.Fatal("SIGKILL returned")
+		}
+		t.Fatal("flush returned without reaching crash hook", phase)
 	}
 	for _, phase := range []string{"extent_sync", "slot_pwrite", "slot_sync", "tail_publication"} {
 		t.Run(phase, func(t *testing.T) {
