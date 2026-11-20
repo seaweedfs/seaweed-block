@@ -316,10 +316,14 @@ func TestAllBlocks_LastWriterWins_FiltersZeros(t *testing.T) {
 	s := NewStore(numBlocks, blockSize)
 	_, _ = s.Write(0, mkBlock(0xAA))
 	_, _ = s.Write(1, mkBlock(0xBB))
-	_, _ = s.Write(0, mkBlock(0xCC)) // overwrites lba 0
+	_, _ = s.Write(0, mkBlock(0xCC))           // overwrites lba 0
 	_, _ = s.Write(2, make([]byte, blockSize)) // zero block — should be filtered
 
-	all := s.AllBlocks()
+	all, snapshotErr := s.AllBlocks()
+
+	if snapshotErr != nil {
+		t.Fatal(snapshotErr)
+	}
 	if len(all) != 2 {
 		t.Fatalf("AllBlocks: got %d want 2 (lba 2 should be filtered as zero)", len(all))
 	}

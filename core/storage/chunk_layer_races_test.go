@@ -129,6 +129,12 @@ func TestChunkLayer_StaleFillCannotInstallAfterReEviction(t *testing.T) {
 	}
 
 	held, releaseA := holdNextGet(t, f)
+	// Schedule an old-generation physical fill directly. Guest readers now
+	// share one flight, so two guest reads cannot create this overlap.
+	impl := layer.(*chunkLayerImpl)
+	impl.stMu.Lock()
+	oldGen, oldRef := impl.absentGen[2], impl.head.Chunks[2]
+	impl.stMu.Unlock()
 	readA := make(chan error, 1)
 	joinedA := make(chan struct{})
 	t.Cleanup(func() {
@@ -141,7 +147,7 @@ func TestChunkLayer_StaleFillCannotInstallAfterReEviction(t *testing.T) {
 	})
 	go func() {
 		defer close(joinedA)
-		_, err := s.Read(8)
+		_, err := impl.fillOnce(ctTimeout(t), 2, oldGen, oldRef)
 		readA <- err
 	}()
 	waitKey(t, held, "fetch A")

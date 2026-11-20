@@ -1046,7 +1046,18 @@ func (s *WALStore) WriteInstrumentation() WriteInstrumentationStatus {
 
 // Read returns the current bytes at lba. Dirty entries are served
 // from the WAL; clean LBAs are served from the extent.
-func (s *WALStore) Read(lba uint32) ([]byte, error) {
+func (s *WALStore) Read(lba uint32) ([]byte, error) { return s.ReadContext(context.Background(), lba) }
+
+func (s *WALStore) ReadContext(ctx context.Context, lba uint32) (data []byte, err error) {
+	defer func() {
+		if err == nil && ctx.Err() != nil {
+			data = nil
+			err = hydrationPending(ctx.Err())
+		}
+	}()
+	if err := ctx.Err(); err != nil {
+		return nil, hydrationPending(err)
+	}
 	maxLBA := uint32(s.sb.VolumeSize / uint64(s.sb.BlockSize))
 	if lba >= maxLBA {
 		return nil, fmt.Errorf("storage: LBA %d out of range", lba)
@@ -1062,12 +1073,12 @@ func (s *WALStore) Read(lba uint32) ([]byte, error) {
 		if data, handled, err := s.readDirtyV3(lba); handled {
 			return data, err
 		}
-		return s.readFromExtent(lba)
+		return s.readFromExtentContext(ctx, lba)
 	}
 	if walRelOff, dataOffset, _, _, ok := s.dm.get(uint64(lba)); ok {
 		return s.readFromWAL(walRelOff, dataOffset)
 	}
-	return s.readFromExtent(lba)
+	return s.readFromExtentContext(ctx, lba)
 }
 
 // readFromWAL pulls a single block out of a WAL Write/Trim entry
@@ -1129,10 +1140,22 @@ func (s *WALStore) DisableAutoFlushForRecoveryTest() {
 }
 
 func (s *WALStore) readFromExtent(lba uint32) ([]byte, error) {
+	return s.readFromExtentContext(context.Background(), lba)
+}
+
+func (s *WALStore) readFromExtentContext(ctx context.Context, lba uint32) ([]byte, error) {
 	// An attached chunk layer resolves blocks that are absent locally
 	// before the extent lock is taken; nil data means read the extent.
 	if h := s.chunk.Load(); h != nil {
-		data, err := h.sink.OnReadMiss(uint64(lba))
+		var data []byte
+		var err error
+		if r, ok := h.sink.(interface {
+			OnReadMissContext(context.Context, uint64) ([]byte, error)
+		}); ok {
+			data, err = r.OnReadMissContext(ctx, uint64(lba))
+		} else {
+			data, err = h.sink.OnReadMiss(uint64(lba))
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -1149,6 +1172,9 @@ func (s *WALStore) readFromExtent(lba uint32) ([]byte, error) {
 		} else if walRelOff, dataOffset, _, _, ok := s.dm.get(uint64(lba)); ok {
 			return s.readFromWAL(walRelOff, dataOffset)
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, hydrationPending(err)
 	}
 	return s.readExtentBlock(lba)
 }
@@ -1571,14 +1597,14 @@ func (s *WALStore) AppliedLSNs() (map[uint32]uint64, error) {
 // Linear scan over numBlocks. Acceptable for the rebuild path
 // (one-shot, off the hot read/write loop). Not appropriate for
 // a hot-path scan.
-func (s *WALStore) AllBlocks() map[uint32][]byte {
+func (s *WALStore) AllBlocks() (map[uint32][]byte, error) {
 	n := s.NumBlocks()
 	out := make(map[uint32][]byte)
 	zero := make([]byte, s.sb.BlockSize)
 	for lba := uint32(0); lba < n; lba++ {
 		data, err := s.Read(lba)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("snapshot LBA %d: %w", lba, err)
 		}
 		// Skip never-written / trimmed LBAs.
 		if bytesAllZero(data, zero) {
@@ -1586,7 +1612,7 @@ func (s *WALStore) AllBlocks() map[uint32][]byte {
 		}
 		out[lba] = data
 	}
-	return out
+	return out, nil
 }
 
 // bytesAllZero is a fast tight-loop equality against a zero slice.

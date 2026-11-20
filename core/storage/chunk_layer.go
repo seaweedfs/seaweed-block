@@ -74,7 +74,10 @@ type chunkLayerImpl struct {
 	bmMu   sync.Mutex // serializes bitmap store calls
 	presMu sync.Mutex // serializes a whole presence save: snapshot, fsync, replace, version
 
-	closeDone chan struct{} // closed when Close has finished
+	hydration        map[uint64]*chunkHydrationFlight // under stMu
+	hydrationWake    chan struct{}
+	hydrationStarted bool
+	closeDone        chan struct{} // closed when Close has finished
 
 	stMu     sync.Mutex
 	closed   bool
@@ -123,6 +126,7 @@ type chunkLayerImpl struct {
 	keySeq   uint64
 
 	// Test-only scheduling hooks; nil in production.
+	testHydrationWait            func(uint64) // after promise registration, outside locks
 	testCOWWait                  func()
 	testCOWRead                  func(idx uint64, saved bool)
 	testCOWSave                  func() error
@@ -177,6 +181,15 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 	}
 	if cfg.UploadConcurrency == 0 {
 		cfg.UploadConcurrency = 8
+	}
+	if cfg.HydrationWorkers < 0 || cfg.HydrationWorkers > 64 || cfg.HydrationQueueDepth < 0 || cfg.HydrationQueueDepth > 65536 {
+		return nil, errors.New("storage: hydration workers must be 1..64 and queue depth 1..65536 (0 uses defaults)")
+	}
+	if cfg.HydrationWorkers == 0 {
+		cfg.HydrationWorkers = defaultHydrationWorkers
+	}
+	if cfg.HydrationQueueDepth == 0 {
+		cfg.HydrationQueueDepth = defaultHydrationQueueDepth
 	}
 	if cfg.ReadMissTimeout <= 0 {
 		cfg.ReadMissTimeout = defaultReadMissTimeout
@@ -534,45 +547,7 @@ func sortedKeys(m map[uint64]bool) []uint64 {
 // block that has no newer local version, then lets the store read its
 // extent. It runs with no walstore lock held.
 func (l *chunkLayerImpl) OnReadMiss(lba uint64) ([]byte, error) {
-	idx := l.chunkOf(lba)
-	l.stMu.Lock()
-	if l.closed || !l.absent[idx] || l.localBlocks[lba] {
-		l.stMu.Unlock()
-		return nil, nil
-	}
-	l.wg.Add(1)
-	l.stMu.Unlock()
-	defer l.wg.Done()
-	// One deadline covers every attempt. Each attempt fetches the chunk as
-	// the current HEAD names it; a fill that went stale (eviction generation
-	// or HEAD ref changed meanwhile) installs nothing and the read retries,
-	// so the extent is read only once the block is resolved: the chunk is no
-	// longer absent, or the block has a local version.
-	ctx, cancel := context.WithTimeout(l.ctx, l.cfg.ReadMissTimeout)
-	defer cancel()
-	for {
-		l.stMu.Lock()
-		if !l.absent[idx] || l.localBlocks[lba] {
-			l.stMu.Unlock()
-			return nil, nil
-		}
-		ref, ok := l.head.Chunks[idx]
-		gen := l.absentGen[idx]
-		l.stMu.Unlock()
-		if !ok { // ZERO in the current HEAD
-			return make([]byte, l.blockSize), nil
-		}
-		resolved, err := l.fillOnce(ctx, idx, gen, ref)
-		if err != nil {
-			return nil, err
-		}
-		if resolved {
-			return nil, nil
-		}
-		if err := ctx.Err(); err != nil {
-			return nil, fmt.Errorf("storage: chunk %d fetch: fill kept going stale: %w", idx, err)
-		}
-	}
+	return l.OnReadMissContext(context.Background(), lba)
 }
 
 // fillOnce fetches one chunk version and installs every block that has no
@@ -1402,6 +1377,13 @@ func (l *chunkLayerImpl) recordCut(r chunkCutResult, st chunkCutStats, err error
 func (l *chunkLayerImpl) Stats() chunkLayerStats {
 	l.stMu.Lock()
 	out := l.stats
+	out.Hydration.WorkerLimit = l.cfg.HydrationWorkers
+	out.Hydration.QueueDepth = l.cfg.HydrationQueueDepth
+	for _, f := range l.hydration {
+		if !f.running {
+			out.Hydration.Queued++
+		}
+	}
 	out.CutsRefused = make(map[string]uint64, len(l.stats.CutsRefused))
 	for k, v := range l.stats.CutsRefused {
 		out.CutsRefused[k] = v
@@ -2011,6 +1993,7 @@ func (l *chunkLayerImpl) Close() error {
 		return nil
 	}
 	l.closed = true
+	l.closeHydrationLocked()
 	l.stMu.Unlock()
 	l.cowMu.Lock()
 	l.cowClosed = true

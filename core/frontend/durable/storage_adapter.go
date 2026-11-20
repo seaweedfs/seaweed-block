@@ -554,6 +554,8 @@ func (b *StorageBackend) Sync(ctx context.Context) error {
 // Read copies up to len(p) bytes starting at offset. Reads past
 // end-of-volume return zero bytes (no error). Every read is gated.
 func (b *StorageBackend) Read(ctx context.Context, offset int64, p []byte) (int, error) {
+	ctx, cancel := frontend.WithReadBudget(ctx, time.Time{})
+	defer cancel()
 	release, err := b.admitAfterAttach(ctx)
 	if err != nil {
 		return 0, err
@@ -565,7 +567,14 @@ func (b *StorageBackend) Read(ctx context.Context, offset int64, p []byte) (int,
 	if ctx.Err() != nil {
 		return 0, b.attachReadyTimeout(ctx.Err())
 	}
-	return b.readBytes(offset, p)
+	n, err := b.readBytes(ctx, offset, p)
+	if hydrationPendingOnly(err) {
+		if gateErr := b.gate(); gateErr != nil {
+			return 0, gateErr
+		}
+		return n, fmt.Errorf("%w: %w", frontend.ErrBackendBusy, err)
+	}
+	return n, err
 }
 
 // setChunkAttachPending is used only after successful local recovery.
@@ -679,7 +688,12 @@ func (b *StorageBackend) Write(ctx context.Context, offset int64, p []byte) (int
 	b.profile.recordBackendWriteRequest(len(p))
 	start := time.Now()
 	n, err := b.writeBytes(ctx, offset, p)
-	if errors.Is(err, storage.ErrWALPressureTimeout) {
+	if hydrationPendingOnly(err) {
+		if gateErr := b.gate(); gateErr != nil {
+			err = gateErr
+		}
+	}
+	if errors.Is(err, storage.ErrWALPressureTimeout) || hydrationPendingOnly(err) {
 		err = fmt.Errorf("%w: %w", frontend.ErrBackendBusy, err)
 	}
 	if n > 0 {
@@ -772,6 +786,54 @@ func (b *StorageBackend) lineageCheck() error {
 	return nil
 }
 
+// readStorageBlock shares the request deadline across blocks and partial-write
+// RMW. Legacy engines may still perform contextless local I/O (#221).
+func (b *StorageBackend) readStorageBlock(ctx context.Context, lba uint32) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("%w: %w", storage.ErrChunkHydrationPending, err)
+	}
+	var data []byte
+	var err error
+	if r, ok := b.storage.(storage.ContextReader); ok {
+		data, err = r.ReadContext(ctx, lba)
+	} else {
+		data, err = b.storage.Read(lba)
+	}
+	if err != nil {
+		return nil, err
+	} // a known substrate failure wins expiry
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("%w: %w", storage.ErrChunkHydrationPending, err)
+	}
+	return data, nil
+}
+
+func hydrationPendingOnly(err error) bool {
+	return errors.Is(err, storage.ErrChunkHydrationPending) && hydrationPendingCauseOnly(err)
+}
+
+func hydrationPendingCauseOnly(err error) bool {
+	if err == storage.ErrChunkHydrationPending || err == context.DeadlineExceeded || err == context.Canceled {
+		return true
+	}
+	if err == nil {
+		return false
+	}
+	if j, ok := err.(interface{ Unwrap() []error }); ok {
+		causes := j.Unwrap()
+		if len(causes) == 0 {
+			return false
+		}
+		for _, cause := range causes {
+			if !hydrationPendingCauseOnly(cause) {
+				return false
+			}
+		}
+		return true
+	}
+	return hydrationPendingCauseOnly(errors.Unwrap(err))
+}
+
 // readBytes performs the byte-range → LBA-range fanout for Read.
 // Reads block-at-a-time, copying the sub-slice covered by the
 // current byte range. Handles three cases:
@@ -779,7 +841,7 @@ func (b *StorageBackend) lineageCheck() error {
 //   - offset aligned, len >= block: copy full block, advance.
 //   - offset misaligned: copy tail of first block only.
 //   - final block, len < available: copy prefix only.
-func (b *StorageBackend) readBytes(offset int64, p []byte) (int, error) {
+func (b *StorageBackend) readBytes(ctx context.Context, offset int64, p []byte) (int, error) {
 	if offset < 0 {
 		return 0, errInvalidOffset
 	}
@@ -789,7 +851,7 @@ func (b *StorageBackend) readBytes(offset int64, p []byte) (int, error) {
 	pos := offset
 	for len(buf) > 0 {
 		lba := uint32(pos / bs)
-		block, err := b.storage.Read(lba)
+		block, err := b.readStorageBlock(ctx, lba)
 		if err != nil {
 			return total, fmt.Errorf("durable: read lba=%d: %w", lba, err)
 		}
@@ -866,7 +928,7 @@ func (b *StorageBackend) writeBytes(ctx context.Context, offset int64, p []byte)
 			block = buf[:chunkLen]
 		} else {
 			// Partial-block: RMW.
-			existing, err := b.storage.Read(lba)
+			existing, err := b.readStorageBlock(ctx, lba)
 			if err != nil {
 				writeLock.Unlock()
 				return total, fmt.Errorf("durable: RMW read lba=%d: %w", lba, err)

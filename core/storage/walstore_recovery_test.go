@@ -245,7 +245,11 @@ func TestWalstoreRecovery_AllBlocks_DeterministicOrdering(t *testing.T) {
 		t.Fatalf("Sync: %v", err)
 	}
 
-	got := s.AllBlocks()
+	got, snapshotErr := s.AllBlocks()
+
+	if snapshotErr != nil {
+		t.Fatal(snapshotErr)
+	}
 	if len(got) != len(expected) {
 		t.Fatalf("AllBlocks size: got %d want %d", len(got), len(expected))
 	}
@@ -418,7 +422,10 @@ func TestWalstoreRecovery_Sanity_ExistingAPIsUnchanged(t *testing.T) {
 	if got[0] != 0x42 {
 		t.Fatalf("Read[0]=%02x want 42", got[0])
 	}
-	all := s.AllBlocks()
+	all, snapshotErr := s.AllBlocks()
+	if snapshotErr != nil {
+		t.Fatal(snapshotErr)
+	}
 	if len(all) != 1 {
 		t.Fatalf("AllBlocks: got %d want 1", len(all))
 	}

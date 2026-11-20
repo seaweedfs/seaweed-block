@@ -793,7 +793,10 @@ func (c *Cluster) allConverged() bool {
 }
 
 func (c *Cluster) replicaConverged(r *ReplicaNode) bool {
-	pBlocks := c.primary.Store.AllBlocks()
+	pBlocks, err := c.primary.Store.AllBlocks()
+	if err != nil {
+		return false
+	}
 	for lba, pData := range pBlocks {
 		rData, _ := r.Store.Read(lba)
 		if !bytes.Equal(pData, rData) {
@@ -816,7 +819,10 @@ func (c *Cluster) divergenceReport() string {
 
 func (c *Cluster) divergenceReportFor(r *ReplicaNode) string {
 	var diffs []string
-	pBlocks := c.primary.Store.AllBlocks()
+	pBlocks, err := c.primary.Store.AllBlocks()
+	if err != nil {
+		return fmt.Sprintf("primary snapshot failed: %v", err)
+	}
 	for lba, pData := range pBlocks {
 		rData, _ := r.Store.Read(lba)
 		if !bytes.Equal(pData, rData) {

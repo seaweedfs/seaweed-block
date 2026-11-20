@@ -364,14 +364,16 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 		remote = &manifestBoundRemote{closeBoundRemote: bound, builder: builder}
 	}
 	cfg := storage.ChunkLayerConfig{
-		ChunkBlocks:       p.cfg.ChunkBlocks,
-		RestoreChunkBytes: uint64(ws.BlockSize()) * uint64(p.cfg.ChunkBlocks),
-		Epoch:             lin.epoch,
-		Holder:            holder,
-		FreshFromHead:     h.fresh,
-		ReadMissTimeout:   p.cfg.ChunkReadMissTimeout,
-		BarrierBound:      p.cfg.ChunkDirtyThreshold,
-		UploadConcurrency: p.cfg.ChunkUploadConcurrency,
+		ChunkBlocks:         p.cfg.ChunkBlocks,
+		RestoreChunkBytes:   uint64(ws.BlockSize()) * uint64(p.cfg.ChunkBlocks),
+		Epoch:               lin.epoch,
+		Holder:              holder,
+		FreshFromHead:       h.fresh,
+		ReadMissTimeout:     p.cfg.ChunkReadMissTimeout,
+		HydrationWorkers:    p.cfg.ChunkHydrationWorkers,
+		HydrationQueueDepth: p.cfg.ChunkHydrationQueueDepth,
+		BarrierBound:        p.cfg.ChunkDirtyThreshold,
+		UploadConcurrency:   p.cfg.ChunkUploadConcurrency,
 		CaptureAllowed: func() error {
 			cur := p.view.Projection()
 			if !cur.Healthy || cur.VolumeID != volumeID || lin.volumeID != volumeID {
