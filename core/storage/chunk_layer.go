@@ -2147,7 +2147,20 @@ func (l *chunkLayerImpl) Close() error {
 	// Layer cancellation has joined all owners. Cleanup has a separate bounded
 	// context; an unknown CAS retains its roots for later epoch fencing.
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 3*time.Second)
-	l.dropIntents(cleanupCtx, settled)
+	if cleaner, ok := l.remote.(interface {
+		DeleteSettledIntent(context.Context, string) error
+	}); ok {
+		seen := map[string]bool{}
+		for _, id := range settled {
+			if id == "" || seen[id] {
+				continue
+			}
+			seen[id] = true
+			_ = cleaner.DeleteSettledIntent(cleanupCtx, id)
+		}
+	} else {
+		l.dropIntents(cleanupCtx, settled)
+	}
 	cleanupCancel()
 	close(l.closeDone)
 	return nil
