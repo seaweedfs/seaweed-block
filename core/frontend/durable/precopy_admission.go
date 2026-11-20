@@ -55,6 +55,13 @@ func (b *StorageBackend) BeginPrecopyPause(ctx context.Context) (func(), error) 
 	}
 	select {
 	case <-p.drained:
+		b.mu.Lock()
+		valid := b.precopy == p && p.active && b.operational.Load() && !b.closed
+		b.mu.Unlock()
+		if !valid {
+			resume()
+			return nil, frontend.ErrNotReady
+		}
 		if err := ctx.Err(); err != nil {
 			resume()
 			return nil, err
