@@ -359,7 +359,7 @@ func TestPrecopyDetachAppliedRetryRetainsSlowFixedCost(t *testing.T) {
 
 func precopyAppliedDetachRetryControl(t *testing.T, slow bool) {
 	t.Helper()
-	_, f, l, _ := precopyLayer(t, 1024, 1)
+	s, f, l, w := precopyLayer(t, 1024, 1)
 	if slow {
 		f.beforeCAS = func(*fakeChunkRemote) { time.Sleep(1300 * time.Millisecond) }
 	}
@@ -369,6 +369,30 @@ func precopyAppliedDetachRetryControl(t *testing.T, slow bool) {
 	f.casModes = []fakeCASMode{casAppliedLost}
 	f.afterCAS = func(f *fakeChunkRemote) { f.failGet = errFakeRemoteDown }
 	r, err := l.PrecopyDetach(ctTimeout(t), func() bool { return true })
+	if slow && (r.Precopy.Frozen || r.Precopy.Fixed < 1300*time.Millisecond) {
+		t.Fatalf("slow retry control bypassed measured admission: report=%+v", r.Precopy)
+	}
+	if !r.Precopy.Frozen {
+		assertPrecopyMeasuredRefusal(t, r.Precopy, err)
+		if f.stats().head.State != ChunkHeadActive || len(f.casModes) != 1 || f.failGet != nil {
+			t.Fatal("over-budget refusal issued the final CAS or lost the active owner")
+		}
+		// No detach CAS was attempted. Remove its pending fault before checking
+		// that the old owner can publish an ordinary serving cut.
+		f.casModes, f.afterCAS = nil, nil
+		w.write(t, s, 2, 0x99)
+		r, err = l.Cut(ctTimeout(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		image := f.imageOf(t, r.Head)
+		if !bytes.Equal(image[ctBlockSize:2*ctBlockSize], makeBlock(ctBlockSize, 0x10)) ||
+			!bytes.Equal(image[2*ctBlockSize:3*ctBlockSize], makeBlock(ctBlockSize, 0x99)) {
+			t.Fatal("refused applied-retry control lost original or resumed-write bytes")
+		}
+		assertEveryHeadIsPrefixImage(t, f, w)
+		return
+	}
 	if !r.Precopy.Frozen || !errors.Is(err, ErrChunkCASOutcomeUnknown) {
 		t.Fatalf("first report=%+v err=%v", r.Precopy, err)
 	}
@@ -494,12 +518,45 @@ func precopyAttemptDiagnosticsControl(t *testing.T, slow bool) {
 		}
 		return func() {}, nil
 	}, func() bool { return true })
-	if err != nil || len(r.Precopy.Rounds) != 2 {
+	if len(r.Precopy.Rounds) < 2 {
 		t.Fatalf("rounds=%+v err=%v", r.Precopy.Rounds, err)
 	}
 	first, second := r.Precopy.Rounds[0], r.Precopy.Rounds[1]
-	if first.Attempt != 1 || first.Reason != "drain_timeout" || first.Frozen || second.Attempt != 2 || second.Reason != "fit" || !second.Frozen {
+	if first.Attempt != 1 || first.Reason != "drain_timeout" || first.Frozen || second.Attempt != 2 {
 		t.Fatalf("attempt outcomes mixed: first=%+v second=%+v", first, second)
+	}
+	if slow && (r.Precopy.Frozen || r.Precopy.Fixed < 1300*time.Millisecond) {
+		t.Fatalf("slow diagnostics control bypassed measured admission: report=%+v", r.Precopy)
+	}
+	if r.Precopy.Frozen {
+		if err != nil || len(r.Precopy.Rounds) != 2 || second.Reason != "fit" || !second.Frozen {
+			t.Fatalf("invalid fit after drain timeout: report=%+v err=%v", r.Precopy, err)
+		}
+	} else {
+		assertPrecopyMeasuredRefusal(t, r.Precopy, err)
+		if len(r.Precopy.Rounds) != 5 || f.stats().head.State != ChunkHeadActive {
+			t.Fatalf("budget refusal did not keep the owner active: report=%+v", r.Precopy)
+		}
+		for _, a := range r.Precopy.Rounds[1:] {
+			if a.Frozen || a.Estimate <= 1200*time.Millisecond ||
+				(a.Reason != "tail_too_large" && a.Reason != "barrier_over_budget") {
+				t.Fatalf("budget refusal mixed with the initial drain timeout: %+v", a)
+			}
+		}
+		w.write(t, s, 2, 0x99)
+		cut, err := l.Cut(ctTimeout(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := make([]byte, ctNumBlocks*ctBlockSize)
+		if slow {
+			copy(want[ctBlockSize:2*ctBlockSize], makeBlock(ctBlockSize, 0x10))
+		}
+		copy(want[2*ctBlockSize:3*ctBlockSize], makeBlock(ctBlockSize, 0x99))
+		if !bytes.Equal(f.imageOf(t, cut.Head), want) {
+			t.Fatal("diagnostic refusal lost original or resumed-write bytes")
+		}
+		assertEveryHeadIsPrefixImage(t, f, w)
 	}
 	for _, a := range r.Precopy.Rounds {
 		if a.Drain <= 0 || a.Pause < a.Drain || a.Barrier != a.Pause-a.Drain {
