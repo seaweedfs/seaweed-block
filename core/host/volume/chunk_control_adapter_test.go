@@ -8,17 +8,20 @@ import (
 	"sync"
 	"testing"
 
+	"errors"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/hostlimit"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 type fakeChunkProvider struct {
-	cut     storage.ChunkCutResult
-	cutErr  error
-	detach  storage.ChunkCutResult
-	last    uint64
-	cuts    int
-	lastMin uint64
+	cut      storage.ChunkCutResult
+	cutErr   error
+	cutCheck func(context.Context) error
+	detach   storage.ChunkCutResult
+	last     uint64
+	cuts     int
+	lastMin  uint64
 }
 
 type adapterManifestFiler struct {
@@ -45,9 +48,14 @@ func (f *adapterManifestFiler) Get(_ context.Context, id string) ([]byte, error)
 	return append([]byte(nil), b...), nil
 }
 
-func (f *fakeChunkProvider) CutVolume(_ context.Context, _ string, minLSN uint64) (storage.ChunkCutResult, error) {
+func (f *fakeChunkProvider) CutVolume(ctx context.Context, _ string, minLSN uint64) (storage.ChunkCutResult, error) {
 	f.cuts++
 	f.lastMin = minLSN
+	if f.cutCheck != nil {
+		if err := f.cutCheck(ctx); err != nil {
+			return storage.ChunkCutResult{}, err
+		}
+	}
 	if f.cutErr != nil {
 		return storage.ChunkCutResult{}, f.cutErr
 	}
@@ -199,5 +207,32 @@ func TestChunkControl_CutMinLSNAndDetach(t *testing.T) {
 	d, err := ctl.Detach(ctx, "v1")
 	if err != nil || d != (ChunkDetachResponse{VolumeID: "v1", CutLSN: 12, HeadGen: 4, HeadEpoch: 2, LastWrittenLSN: 12}) {
 		t.Fatalf("detach: %+v %v", d, err)
+	}
+}
+
+func TestChunkControl_NamedSnapshotUsesUrgentFallback(t *testing.T) {
+	fp, ctl := adapterFixture(t)
+	c := hostlimit.DefaultConfig(t.TempDir() + "/missing")
+	l, err := hostlimit.New(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	fp.cutCheck = func(ctx context.Context) error {
+		id, err := l.Admit(ctx, 1, nil)
+		if err == nil {
+			l.Release(id)
+		}
+		return err
+	}
+	if _, err = ctl.Cut(context.Background(), "v1", 0); !errors.Is(err, hostlimit.ErrBusy) {
+		t.Fatalf("ordinary cut bypassed missing pool: %v", err)
+	}
+	info, err := ctl.Snapshot(context.Background(), "v1", ChunkSnapshotRequest{Name: "named", RequestID: "named-r1"})
+	if err != nil || info.Name != "named" {
+		t.Fatalf("named seal did not use urgent fallback: %+v %v", info, err)
+	}
+	if st := l.Snapshot().(hostlimit.Stats); st.Fallback != 1 || st.SkippedByClass[hostlimit.Normal] != 1 {
+		t.Fatalf("wrong named/normal policy: %+v", st)
 	}
 }

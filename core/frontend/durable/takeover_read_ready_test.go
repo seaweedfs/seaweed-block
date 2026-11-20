@@ -23,9 +23,29 @@ type heldTakeoverClaim struct {
 	once, releaseOnce sync.Once
 	holdFor           time.Duration
 	readRegistered    chan struct{}
+	resolutionBlocked chan struct{}
+	resolutionOnce    sync.Once
 }
 
 func (r *heldTakeoverClaim) unblock() { r.releaseOnce.Do(func() { close(r.release) }) }
+func (r *heldTakeoverClaim) GetHead(ctx context.Context) (storage.ChunkHead, error) {
+	// The permanent-outage case must hold outcome resolution as well as the
+	// CAS reply: a committed CAS with readable HEAD can now settle after the
+	// per-operation deadline. Unbounded diagnostic reads still see the root.
+	if _, bounded := ctx.Deadline(); bounded && r.holdFor == 0 {
+		select {
+		case <-r.claimed:
+			r.resolutionOnce.Do(func() { close(r.resolutionBlocked) })
+			select {
+			case <-r.release:
+			case <-ctx.Done():
+				return storage.ChunkHead{}, ctx.Err()
+			}
+		default:
+		}
+	}
+	return r.ChunkRemote.GetHead(ctx)
+}
 func (r *heldTakeoverClaim) CASHead(ctx context.Context, expected storage.ChunkHeadVersion, next storage.ChunkHead) (uint64, error) {
 	gen, err := r.ChunkRemote.CASHead(ctx, expected, next)
 	if err != nil || next.Epoch != 4 {
@@ -57,7 +77,7 @@ func (r *heldTakeoverClaim) CASHead(ctx context.Context, expected storage.ChunkH
 
 func pendingTakeoverRead(t *testing.T, hold time.Duration) (*durable.DurableProvider, frontend.Backend, *nvme.IOHandler) {
 	t.Helper()
-	remote := &heldTakeoverClaim{ChunkRemote: seededRemote(t), claimed: make(chan struct{}), release: make(chan struct{}), holdFor: hold, readRegistered: make(chan struct{})}
+	remote := &heldTakeoverClaim{ChunkRemote: seededRemote(t), claimed: make(chan struct{}), release: make(chan struct{}), holdFor: hold, readRegistered: make(chan struct{}), resolutionBlocked: make(chan struct{})}
 	view := newStubView(frontend.Projection{VolumeID: "v1", ReplicaID: "r1"})
 	p := chunkProvider(t, t.TempDir(), remote, view, 0)
 	// Registered after provider cleanup, so release precedes its worker join.
@@ -73,6 +93,13 @@ func pendingTakeoverRead(t *testing.T, hold time.Duration) (*durable.DurableProv
 	case <-remote.claimed:
 	case <-time.After(10 * time.Second):
 		t.Fatal("takeover CAS never became visible")
+	}
+	if hold == 0 {
+		select {
+		case <-remote.resolutionBlocked:
+		case <-time.After(30 * time.Second):
+			t.Fatal("permanent attach did not reach held outcome resolution")
+		}
 	}
 	head, err := remote.GetHead(context.Background())
 	if err != nil || head.Epoch != 4 || head.Holder != "r1" {
@@ -91,7 +118,7 @@ func pendingTakeoverRead(t *testing.T, hold time.Duration) (*durable.DurableProv
 // Model Linux max_retries=5 and CRD=0: at most six attempts, no sleeps.
 // A status-only fix exhausts them during attachment and becomes guest EIO.
 func TestWALStoreChunk_TakeoverReadBeforeAttachIsRetryable(t *testing.T) {
-	_, _, handler := pendingTakeoverRead(t, 2500*time.Millisecond)
+	_, _, handler := pendingTakeoverRead(t, 1500*time.Millisecond)
 	command := nvme.IOCommand{Opcode: 0x02, NSID: 1, SLBA: 33, NLB: 1}
 	start := time.Now()
 	for attempt := 0; attempt <= 5; attempt++ {
@@ -141,7 +168,7 @@ func TestWALStoreChunk_PendingReadHonoursEarlierDeadline(t *testing.T) {
 }
 
 func TestWALStoreChunk_TakeoverWriteWaitsForAttach(t *testing.T) {
-	_, backend, _ := pendingTakeoverRead(t, 2500*time.Millisecond)
+	_, backend, _ := pendingTakeoverRead(t, 1500*time.Millisecond)
 	start := time.Now()
 	n, err := backend.Write(context.Background(), 33*4096, block(0x74))
 	if err != nil || n != 4096 {

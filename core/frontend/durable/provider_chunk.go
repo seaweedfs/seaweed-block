@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/hostlimit"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -328,6 +329,10 @@ func (p *DurableProvider) startChunkLoop(volumeID string, h *volHandle, layer st
 }
 
 func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h *volHandle) (storage.ChunkLayer, error) {
+	// Close cancels local takeover cooling as well as each bound remote RPC.
+	ctx, cancelAttach := context.WithCancel(ctx)
+	stopClose := context.AfterFunc(p.closeCtx, cancelAttach)
+	defer func() { stopClose(); cancelAttach() }()
 	ws, ok := h.storage.(*storage.WALStore)
 	if !ok {
 		return nil, fmt.Errorf("durable: %s storage is %T, not a walstore", ImplWALStoreChunk, h.storage)
@@ -357,6 +362,11 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 		holder = proj.ReplicaID
 	}
 	bound := &closeBoundRemote{ChunkRemote: inner, done: p.closeCtx}
+	if pace, ok := p.cfg.ChunkBudget.(interface {
+		WaitUpload(context.Context, int) error
+	}); ok {
+		bound.waitUpload = pace.WaitUpload
+	}
 	bound.setAttach(ctx) // the attach's calls also end with the caller's ctx
 	defer bound.setAttach(nil)
 	var remote storage.ChunkRemote = bound
@@ -366,6 +376,7 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 	cfg := storage.ChunkLayerConfig{
 		ChunkBlocks:         p.cfg.ChunkBlocks,
 		RestoreChunkBytes:   uint64(ws.BlockSize()) * uint64(p.cfg.ChunkBlocks),
+		HeadCoolingWindow:   p.cfg.ChunkHeadCoolingWindow,
 		Epoch:               lin.epoch,
 		Holder:              holder,
 		FreshFromHead:       h.fresh,
@@ -376,6 +387,7 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 		UploadConcurrency:   p.cfg.ChunkUploadConcurrency,
 		PayloadMemoryBudget: p.cfg.ChunkPayloadMemoryBudget,
 		Budget:              p.cfg.ChunkBudget,
+		COWSpillLimit:       p.cfg.ChunkCOWSpillLimit,
 		CaptureAllowed: func() error {
 			cur := p.view.Projection()
 			if !cur.Healthy || cur.VolumeID != volumeID || lin.volumeID != volumeID {
@@ -462,7 +474,8 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 // attach runs, its calls also end with the attach caller's context.
 type closeBoundRemote struct {
 	storage.ChunkRemote
-	done context.Context
+	done       context.Context
+	waitUpload func(context.Context, int) error
 
 	mu     sync.Mutex
 	attach context.Context
@@ -499,6 +512,11 @@ func (r *closeBoundRemote) bind(ctx context.Context) (context.Context, func()) {
 func (r *closeBoundRemote) Put(ctx context.Context, key string, data []byte) error {
 	c, end := r.bind(ctx)
 	defer end()
+	if r.waitUpload != nil {
+		if err := r.waitUpload(c, len(data)); err != nil {
+			return err
+		}
+	}
 	return r.ChunkRemote.Put(c, key, data)
 }
 
@@ -511,6 +529,15 @@ func (r *closeBoundRemote) Get(ctx context.Context, key string) ([]byte, error) 
 func (r *closeBoundRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
 	c, end := r.bind(ctx)
 	defer end()
+	return r.ChunkRemote.GetHead(c)
+}
+
+func (r *closeBoundRemote) GetHeadRoot(ctx context.Context) (storage.ChunkHead, error) {
+	c, end := r.bind(ctx)
+	defer end()
+	if reader, ok := r.ChunkRemote.(storage.ChunkHeadRootReader); ok {
+		return reader.GetHeadRoot(c)
+	}
 	return r.ChunkRemote.GetHead(c)
 }
 
@@ -629,6 +656,7 @@ type cutSchedule struct {
 	failedAt    time.Time // end of the last failed automatic cut
 	retryAt     time.Time // a failed automatic cut's backoff ends here
 	backoff     time.Duration
+	firstDue    time.Time // startup phase only; never a fabricated success
 }
 
 // observe takes in a successful cut the layer reports (any trigger). A
@@ -639,6 +667,7 @@ func (s cutSchedule) observe(lastCutNs int64) cutSchedule {
 		c := time.Unix(0, lastCutNs)
 		if c.After(s.lastSuccess) {
 			s.lastSuccess = c
+			s.firstDue = time.Time{}
 		}
 		if !s.failedAt.IsZero() && c.After(s.failedAt) {
 			s.backoff, s.retryAt, s.failedAt = 0, time.Time{}, time.Time{}
@@ -657,7 +686,11 @@ func (pol cutPolicy) due(s cutSchedule, now time.Time, reconciling bool) (string
 	if !s.lastAuto.IsZero() && now.Sub(s.lastAuto) < pol.minSpacing {
 		return "", false
 	}
-	if pol.interval > 0 && now.Sub(s.lastSuccess) >= pol.interval {
+	deadline := s.lastSuccess.Add(pol.interval)
+	if !s.firstDue.IsZero() {
+		deadline = s.firstDue
+	}
+	if pol.interval > 0 && !now.Before(deadline) {
 		return "periodic", true
 	}
 	return "", false
@@ -667,6 +700,7 @@ func (pol cutPolicy) due(s cutSchedule, now time.Time, reconciling bool) (string
 func (pol cutPolicy) after(s cutSchedule, start, end time.Time, err error) cutSchedule {
 	s.lastAuto = start
 	if err == nil {
+		s.firstDue = time.Time{}
 		s.backoff, s.retryAt, s.failedAt = 0, time.Time{}, time.Time{}
 		if end.After(s.lastSuccess) {
 			s.lastSuccess = end
@@ -685,6 +719,16 @@ func (pol cutPolicy) after(s cutSchedule, start, end time.Time, err error) cutSc
 	return s
 }
 
+func initialCutSchedule(volumeID string, interval time.Duration, now time.Time, stagger bool) cutSchedule {
+	s := cutSchedule{lastSuccess: now}
+	if stagger && interval > 0 {
+		phase := hostlimit.Phase(volumeID, interval)
+		startup := hostlimit.Phase(volumeID+":startup", min(interval, 10*time.Second))
+		s.firstDue = now.Add(max(phase, startup))
+	}
+	return s
+}
+
 // chunkLoop runs the volume's automatic cuts under cutPolicy. A refused
 // cut (not a healthy primary of this lineage, BASE install) is expected
 // and logged only when it is something else. A fenced layer can never
@@ -697,7 +741,7 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 		backoffMin: chunkCutBackoffMin,
 		backoffMax: chunkCutBackoffMax,
 	}
-	s := cutSchedule{lastSuccess: time.Now()}
+	s := initialCutSchedule(volumeID, pol.interval, time.Now(), p.cfg.ChunkStagger)
 	t := time.NewTicker(chunkSchedulePoll)
 	defer t.Stop()
 	for {
@@ -780,7 +824,7 @@ func (p *DurableProvider) MakeVolumeRemoteDurable(ctx context.Context, volumeID 
 	if err != nil {
 		return err
 	}
-	return layer.MakeRemoteDurable(ctx, lsn)
+	return layer.MakeRemoteDurable(hostlimit.WithClass(ctx, hostlimit.Urgent), lsn)
 }
 
 // chunkFenced refuses a volume whose layer attached fenced: HEAD belongs to
@@ -810,6 +854,9 @@ func (p *DurableProvider) CutVolume(ctx context.Context, volumeID string, minLSN
 		if last := h.storage.NextLSN() - 1; minLSN > last {
 			return storage.ChunkCutResult{}, fmt.Errorf("durable: cut of %s to LSN %d: that LSN was never written (last %d)", volumeID, minLSN, last)
 		}
+	}
+	if minLSN > 0 {
+		ctx = hostlimit.WithClass(ctx, hostlimit.Urgent)
 	}
 	r, err := layer.Cut(ctx)
 	if err != nil {
@@ -868,6 +915,13 @@ func (p *DurableProvider) DetachVolume(ctx context.Context, volumeID string) (st
 		trace("cut", dl)
 	}
 	h.chunkDetach = true
+	var resumed func() // tells the host this attempt aborted and serving resumed
+	if hook := p.cfg.OnChunkDetach; hook != nil {
+		attempt := hook(volumeID)
+		if done := p.cfg.OnChunkDetachResumed; done != nil {
+			resumed = func() { done(volumeID, attempt) }
+		}
+	}
 	if stop := p.testDetachStopIO; stop != nil {
 		err = stop(cutCtx)
 	} else {
@@ -876,7 +930,7 @@ func (p *DurableProvider) DetachVolume(ctx context.Context, volumeID string) (st
 	if err == nil {
 		p.stopChunkLoop(h)
 		var r storage.ChunkCutResult
-		if r, err = layer.Detach(cutCtx); err == nil {
+		if r, err = layer.Detach(hostlimit.WithClass(cutCtx, hostlimit.Urgent)); err == nil {
 			return r, h.storage.NextLSN() - 1, nil
 		}
 	}
@@ -899,7 +953,7 @@ func (p *DurableProvider) DetachVolume(ctx context.Context, volumeID string) (st
 	case how == storage.DetachFenced:
 		return storage.ChunkCutResult{}, 0, fmt.Errorf("durable: detach of %s: HEAD belongs to a newer epoch or another holder; I/O stays stopped: %w: %w", volumeID, storage.ErrChunkLayerFenced, err)
 	default:
-		return storage.ChunkCutResult{}, 0, p.resumeAfterDetach(volumeID, h, layer, err)
+		return storage.ChunkCutResult{}, 0, p.resumeAfterDetach(volumeID, h, layer, err, resumed)
 	}
 }
 
@@ -910,8 +964,8 @@ const (
 
 // resumeAfterDetach undoes a detach that provably did not happen: the
 // periodic cuts restart, the stop is lifted, and the volume serves again.
-// The caller holds h.attachMu.
-func (p *DurableProvider) resumeAfterDetach(volumeID string, h *volHandle, layer storage.ChunkLayer, cause error) error {
+// Only then is resumed (if set) called. The caller holds h.attachMu.
+func (p *DurableProvider) resumeAfterDetach(volumeID string, h *volHandle, layer storage.ChunkLayer, cause error, resumed func()) error {
 	p.mu.Lock()
 	closed := p.closed || h.chunk != layer
 	if !closed {
@@ -923,6 +977,9 @@ func (p *DurableProvider) resumeAfterDetach(volumeID string, h *volHandle, layer
 	}
 	h.chunkDetach = false
 	h.backend.SetOperational(true, "chunk detach aborted: serving resumed")
+	if resumed != nil {
+		resumed()
+	}
 	log.Printf("durable: detach of volume=%s aborted, nothing published; serving resumed: %v", volumeID, cause)
 	return fmt.Errorf("%w: %w", ErrDetachAborted, cause)
 }

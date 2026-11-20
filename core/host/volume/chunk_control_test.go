@@ -219,8 +219,14 @@ func TestStatusServer_ChunkErrorBodyIsTyped(t *testing.T) {
 		{fmt.Errorf("x: %w", storage.ErrChunkCASOutcomeUnknown), "outcome_unknown", 503, true},
 		{fmt.Errorf("x: %w", storage.ErrChunkHeadPrecondition), "head_conflict", 409, true},
 		{fmt.Errorf("save: %w", storage.ErrCutCOWAborted), "cut_aborted", 503, true},
+		// Local capacity abort cancels the in-flight remote PUT.
+		{errors.Join(storage.ErrCutCOWAborted, storage.ErrChunkRemoteUnavailable, context.Canceled, errors.New("storage: saver capacity")), "cut_aborted", 503, true},
+		{errors.Join(storage.ErrCutCOWAborted, storage.ErrChunkCASOutcomeUnknown, storage.ErrChunkRemoteUnavailable), "outcome_unknown", 503, true},
+		{errors.Join(storage.ErrCutCOWAborted, storage.ErrChunkLayerFenced, storage.ErrChunkRemoteUnavailable), "fenced", 409, false},
 		{fmt.Errorf("x: %w", storage.ErrChunkRemoteUnavailable), "remote_unavailable", 503, true},
 		{fmt.Errorf("x: %w", storage.ErrChunkLayerClosed), "closing", 503, false},
+		{errors.Join(storage.ErrCutCOWAborted, storage.ErrChunkLayerClosed, storage.ErrChunkRemoteUnavailable, context.Canceled), "closing", 503, false},
+		{errors.Join(storage.ErrCutCOWAborted, storage.ErrChunkLayerDetached, storage.ErrChunkRemoteUnavailable, context.Canceled), "closing", 409, false},
 		{fmt.Errorf("x: %w", storage.ErrChunkLayerDetached), "closing", 409, false},
 		{fmt.Errorf("%w: %w", durable.ErrDetachAborted, storage.ErrChunkRemoteUnavailable), "detach_aborted", 409, true},
 		// The detach sentinels decide even over a catalog-error cause (which
