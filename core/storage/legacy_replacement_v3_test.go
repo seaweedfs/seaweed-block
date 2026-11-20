@@ -2,12 +2,167 @@ package storage
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 )
+
+func TestNativeReplacementLegacyBytesRefusedWithoutMutation(t *testing.T) {
+	for _, impl := range []uint32{1, 2} {
+		// Frozen v2 header bytes, independent of its retired writer/codec.
+		raw := make([]byte, 4096+65536+16*4096)
+		copy(raw, "SWBK")
+		binary.LittleEndian.PutUint16(raw[4:], 2)
+		binary.LittleEndian.PutUint64(raw[24:], 16*4096)
+		binary.LittleEndian.PutUint32(raw[32:], 4096)
+		binary.LittleEndian.PutUint32(raw[36:], 4096)
+		binary.LittleEndian.PutUint64(raw[40:], 4096)
+		binary.LittleEndian.PutUint64(raw[48:], 65536)
+		raw[88] = 1 // walstore
+		binary.LittleEndian.PutUint32(raw[92:], impl)
+		path := filepath.Join(t.TempDir(), "legacy")
+		if err := os.WriteFile(path, raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if s, err := OpenWALStore(path); !errors.Is(err, ErrUnsupportedLegacyFormat) {
+			if s != nil {
+				_ = s.Close()
+			}
+			t.Fatalf("v2 impl %d writable open: %v", impl, err)
+		}
+		if s, err := OpenReadOnly(path); !errors.Is(err, ErrUnsupportedLegacyFormat) {
+			if s != nil {
+				_ = s.Close()
+			}
+			t.Fatalf("v2 impl %d readonly open: %v", impl, err)
+		}
+		got, err := os.ReadFile(path)
+		if err != nil || !bytes.Equal(got, raw) {
+			t.Fatalf("refusal mutated v2 bytes: %v", err)
+		}
+		entries, err := os.ReadDir(filepath.Dir(path))
+		if err != nil || len(entries) != 1 {
+			t.Fatalf("refusal created sidecars: %v %v", entries, err)
+		}
+	}
+}
+
+func TestNativeReplacementFlusherConcurrentOverwriteAndReopen(t *testing.T) {
+	s, path := newMappedCheckpointStoreV3(t)
+	for lba := uint32(0); lba < 12; lba++ {
+		if _, err := s.Write(lba, blk(byte(lba+1))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	// A later same-LBA write is excluded from the captured snapshot.
+	s.flusher.afterSnapshotForTest = func() {
+		s.flusher.afterSnapshotForTest = nil
+		if _, err := s.Write(3, blk(0xE3)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Sync(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.flusher.flushOnce(); err != nil {
+		t.Fatal(err)
+	}
+	if s.CheckpointLSN() != 12 || s.dm.len() != 1 {
+		t.Fatalf("first checkpoint=%d dirty=%d", s.CheckpointLSN(), s.dm.len())
+	}
+	if got, err := s.Read(3); err != nil || !bytes.Equal(got, blk(0xE3)) {
+		t.Fatalf("new dirty bytes lost: %v", err)
+	}
+	if err := s.flusher.flushOnce(); err != nil {
+		t.Fatal(err)
+	}
+	if s.CheckpointLSN() != 13 || s.dm.len() != 0 {
+		t.Fatalf("final checkpoint=%d dirty=%d", s.CheckpointLSN(), s.dm.len())
+	}
+	crashReadOnlyStoreV3(t, s)
+	for round := 0; round < 3; round++ {
+		r, err := OpenWALStore(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.DisableAutoFlushForRecoveryTest()
+		t.Cleanup(func() { _ = r.Close() })
+		if _, err := r.Recover(); err != nil {
+			t.Fatal(err)
+		}
+		if r.CheckpointLSN() != 13 || r.NextLSN() != 14 {
+			t.Fatalf("round %d: checkpoint=%d next=%d", round, r.CheckpointLSN(), r.NextLSN())
+		}
+		for lba := uint32(0); lba < 12; lba++ {
+			want := byte(lba + 1)
+			if lba == 3 {
+				want = 0xE3
+			}
+			if got, err := r.Read(lba); err != nil || !bytes.Equal(got, blk(want)) {
+				t.Fatalf("round %d LBA %d: %v", round, lba, err)
+			}
+		}
+		crashReadOnlyStoreV3(t, r)
+	}
+}
+
+func TestNativeReplacementDataFsyncFailureIsSticky(t *testing.T) {
+	for _, caller := range []string{"wal", "extent"} {
+		t.Run(caller, func(t *testing.T) {
+			s, path := newMappedCheckpointStoreV3(t)
+			if _, err := s.Write(1, blk(0x61)); err != nil {
+				t.Fatal(err)
+			}
+			boom := errors.New("native data fsync failure")
+			calls := 0
+			var err error
+			if caller == "wal" {
+				real := s.syncWALFile
+				s.syncWALFile = func() error { calls++; return boom }
+				_, err = s.Sync()
+				s.syncWALFile = real
+			} else {
+				if _, err := s.Sync(); err != nil {
+					t.Fatal(err)
+				}
+				real := s.syncExtentFile
+				s.syncExtentFile = func() error { calls++; return boom }
+				err = s.flusher.flushOnce()
+				s.syncExtentFile = real
+			}
+			if calls != 1 || !errors.Is(err, boom) {
+				t.Fatalf("fault did not reach data fsync: calls=%d err=%v", calls, err)
+			}
+			if s.CheckpointLSN() != 0 || s.dm.len() != 1 {
+				t.Fatal("failed data sync retired dirty WAL")
+			}
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.Write(2, blk(0x62)); !errors.Is(err, ErrFsyncFailed) {
+				t.Fatalf("write after fault: %v", err)
+			}
+			if _, err := s.Sync(); !errors.Is(err, ErrFsyncFailed) {
+				t.Fatalf("Sync after fault: %v", err)
+			}
+			if err := s.flusher.flushOnce(); !errors.Is(err, ErrFsyncFailed) {
+				t.Fatalf("flush after fault: %v", err)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatalf("latched operations changed bytes: %v", err)
+			}
+		})
+	}
+}
 
 func TestNativeReplacementAllBlocksAfterCheckpoint(t *testing.T) {
 	s, _ := newMappedCheckpointStoreV3(t)
