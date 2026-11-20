@@ -191,6 +191,119 @@ func TestNativeReplacementAllBlocksAfterCheckpoint(t *testing.T) {
 	}
 }
 
+func TestNativeReplacementTornWrapKeepsAcknowledgedSuffix(t *testing.T) {
+	for _, duringFlush := range []bool{false, true} {
+		t.Run(map[bool]string{false: "full_checkpoint", true: "append_during_checkpoint"}[duringFlush], func(t *testing.T) {
+			s, path := newMappedCheckpointStoreV3(t)
+			s.admission = nil // isolate physical reuse, not the pressure timer
+			write := func(lba uint32) {
+				t.Helper()
+				if _, err := s.Write(lba, blk(byte(0x10+lba))); err != nil {
+					t.Fatal(err)
+				}
+			}
+			syncStore := func() {
+				t.Helper()
+				if _, err := s.Sync(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write(0)
+			syncStore()
+			if duringFlush {
+				s.flusher.afterSnapshotForTest = func() { s.flusher.afterSnapshotForTest = nil; write(1); syncStore() }
+			}
+			if err := s.flusher.flushOnce(); err != nil {
+				t.Fatal(err)
+			}
+			if s.CheckpointLSN() != 1 {
+				t.Fatalf("checkpoint=%d", s.CheckpointLSN())
+			}
+			start := uint32(1)
+			if duringFlush {
+				start = 2
+			}
+			for lba := start; lba <= 14; lba++ {
+				write(lba)
+			}
+			syncStore()
+			write(15) // unsynced wrap over only checkpoint-released bytes
+			off, _, _, _, ok := s.dm.get(15)
+			if !ok || off != 0 {
+				t.Fatalf("latest append did not wrap: %d", off)
+			}
+			rec := uint64(walEntryHeaderSizeV3 + 4096)
+			end := 15 * rec
+			if _, err := s.fd.WriteAt(make([]byte, s.sb.WALSize-end), int64(s.sb.WALOffset+end)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.fd.WriteAt(make([]byte, 2048), int64(s.sb.WALOffset+walEntryPrefixSizeV3)); err != nil {
+				t.Fatal(err)
+			}
+			crashReadOnlyStoreV3(t, s)
+			r, err := OpenWALStore(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.DisableAutoFlushForRecoveryTest()
+			t.Cleanup(func() { _ = r.Close() })
+			if n, err := r.Recover(); err != nil || n != 15 {
+				t.Fatalf("torn-wrap recovery=%d %v", n, err)
+			}
+			for lba := uint32(0); lba <= 14; lba++ {
+				if got, err := r.Read(lba); err != nil || !bytes.Equal(got, blk(byte(0x10+lba))) {
+					t.Fatalf("ACK LBA %d after torn wrap: %v", lba, err)
+				}
+			}
+		})
+	}
+}
+
+func TestNativeReplacementAbruptCrashWindows(t *testing.T) {
+	for _, phase := range []string{"before_sync", "after_sync", "after_checkpoint"} {
+		t.Run(phase, func(t *testing.T) {
+			s, path := newMappedCheckpointStoreV3(t)
+			if _, err := s.Write(1, blk(0x11)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.Sync(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.Write(2, blk(0x22)); err != nil {
+				t.Fatal(err)
+			}
+			if phase != "before_sync" {
+				if _, err := s.Sync(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if phase == "after_checkpoint" {
+				if err := s.flusher.flushOnce(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			crashReadOnlyStoreV3(t, s)
+			r, err := OpenWALStore(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.DisableAutoFlushForRecoveryTest()
+			t.Cleanup(func() { _ = r.Close() })
+			if _, err := r.Recover(); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := r.Read(1); err != nil || !bytes.Equal(got, blk(0x11)) {
+				t.Fatalf("ACK lost at %s: %v", phase, err)
+			}
+			if phase != "before_sync" {
+				if got, err := r.Read(2); err != nil || !bytes.Equal(got, blk(0x22)) {
+					t.Fatalf("second ACK lost at %s: %v", phase, err)
+				}
+			}
+		})
+	}
+}
+
 func TestNativeReplacementDataFaultDuringCheckpoint(t *testing.T) {
 	for _, caller := range []string{"wal", "extent"} {
 		t.Run(caller, func(t *testing.T) {
