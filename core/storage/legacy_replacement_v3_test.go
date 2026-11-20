@@ -191,6 +191,83 @@ func TestNativeReplacementAllBlocksAfterCheckpoint(t *testing.T) {
 	}
 }
 
+func TestNativeReplacementRangeZeroBatch(t *testing.T) {
+	s, path := newMappedCheckpointStoreV3(t)
+	if _, err := s.WriteBatch(0, batchBlocks(0x40, 8)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.WriteBatch(3, [][]byte{blk(0), blk(0), blk(0)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.flusher.flushOnce(); err != nil {
+		t.Fatal(err)
+	}
+	crashReadOnlyStoreV3(t, s)
+	r, err := OpenWALStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.DisableAutoFlushForRecoveryTest()
+	t.Cleanup(func() { _ = r.Close() })
+	if _, err := r.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	for lba := uint32(0); lba < 8; lba++ {
+		want := byte(0x40 + lba)
+		if lba >= 3 && lba <= 5 {
+			want = 0
+		}
+		if got, err := r.Read(lba); err != nil || !bytes.Equal(got, blk(want)) {
+			t.Fatalf("zero range affected LBA %d: %v", lba, err)
+		}
+	}
+}
+
+func TestNativeReplacementUnsupportedCommittedRecordsRefuse(t *testing.T) {
+	for _, typ := range []uint8{walEntryTrim, walEntryBarrier} {
+		t.Run(map[uint8]string{walEntryTrim: "range_trim", walEntryBarrier: "barrier"}[typ], func(t *testing.T) {
+			s, path := newMappedCheckpointStoreV3(t)
+			s.mu.Lock()
+			e := walEntryV3{LSN: 1, Type: typ}
+			if typ == walEntryTrim {
+				e.LBA, e.Length = 3, 3*4096
+			}
+			_, err := s.v3.w.append(e, 0, nil)
+			if err == nil {
+				s.walHead, s.nextLSN = 1, 2
+				s.v3.appended.Store(1)
+				s.walMutation.Add(1)
+			}
+			s.mu.Unlock()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.Sync(); err != nil {
+				t.Fatal(err)
+			}
+			crashReadOnlyStoreV3(t, s)
+			r, err := OpenWALStore(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.DisableAutoFlushForRecoveryTest()
+			t.Cleanup(func() { _ = r.Close() })
+			if _, err := r.Recover(); !errors.Is(err, errV3NotYet) {
+				t.Fatalf("unsupported committed record was served: %v", err)
+			}
+			if r.dm.len() != 0 {
+				t.Fatal("unsupported committed record published dirty entries")
+			}
+		})
+	}
+}
+
 func TestNativeReplacementQueuedApplyAfterFailedAppend(t *testing.T) {
 	s, _ := newChunkTestStore(t)
 	_ = mustAttach(t, s, newFakeChunkRemote(), ctConfig(1))
