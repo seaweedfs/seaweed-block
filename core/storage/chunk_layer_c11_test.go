@@ -9,7 +9,6 @@ package storage
 // It may over-report, never under-report. RED until the layer exists.
 
 import (
-
 	"testing"
 )
 
@@ -33,4 +32,3 @@ func flushWithin(t *testing.T, s *WALStore, what string) error {
 	within(t, what, func() error { ferr = s.flusher.flushOnce(); return nil })
 	return ferr
 }
-

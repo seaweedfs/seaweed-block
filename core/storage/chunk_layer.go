@@ -149,7 +149,7 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 		return nil, fmt.Errorf("%w: chunk layer requires the native owned map", ErrMapInvalid)
 	}
 	if remote == nil || cfg.ChunkBlocks == 0 {
-		return nil, errors.New("storage: chunk layer needs a remote, ChunkBlocks > 0 and a legacy bitmap unless the store owns an impl3 map")
+		return nil, errors.New("storage: chunk layer needs a remote and ChunkBlocks > 0")
 	}
 	var localBase bool
 	s.captureMu.Lock()
@@ -1401,7 +1401,6 @@ func (l *chunkLayerImpl) dropIntents(ctx context.Context, ids []string) {
 // stage uploads large native dirty sets through logical reads, before fixing H.
 // It stops when the spill-budget remainder is reached or a round makes no
 // progress. Versions/HEAD generation bind every reusable immutable result.
-// Legacy fixtures retain their bounded-count rounds.
 func (l *chunkLayerImpl) stage(ctx context.Context, st *chunkCutStats) (map[uint64]stagedChunk, []string, error) {
 	bound := l.cfg.BarrierBound
 

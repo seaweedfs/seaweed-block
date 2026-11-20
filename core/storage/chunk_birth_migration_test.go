@@ -1,7 +1,6 @@
 package storage
 
 import (
-	
 	"testing"
 )
 
@@ -29,4 +28,3 @@ func TestChunkBirthSeededFrontierPreservesInheritedImage(t *testing.T) {
 		t.Fatalf("seeded image birth lost: %+v", cut.Head)
 	}
 }
-

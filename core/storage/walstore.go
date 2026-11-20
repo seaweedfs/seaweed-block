@@ -132,7 +132,7 @@ type WALStore struct {
 	instr writeInstrumentation
 
 	// v3 is non-nil for a format-v3 store (walstore_v3.go). Production
-	// selectors use v3; legacy formats require explicit offline migration.
+	// selectors use v3; legacy files are refused without mutation.
 	v3 *walStoreV3State
 
 	// Physical WAL sync attempts exclude the separate metadata/checkpoint syncs.
@@ -203,9 +203,7 @@ func OpenWALStoreWithOptions(path string, opts WALStoreOptions) (*WALStore, erro
 	return openWALStoreV3WithOptions(path, true, opts)
 }
 
-// openInitializedV3 is openInitializedWithMetadata with an optional
-// init hook that runs before the committer and flusher goroutines start
-// (the v3 store attaches its state there).
+// openInitializedV3 binds native state before starting background workers.
 func openInitializedV3(path string, f *os.File, sb *superblock, metadata BlockMetadata, init func(*WALStore) error) (*WALStore, error) {
 	dm := newDirtyMap(64) // 64 shards is plenty for Phase 07 demo workloads
 
