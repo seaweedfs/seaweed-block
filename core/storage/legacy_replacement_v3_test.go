@@ -197,3 +197,83 @@ func TestNativeReplacementCutBehindHEADRefuses(t *testing.T) {
 		t.Fatal("seeded native owner changed inherited bytes")
 	}
 }
+
+func TestNativeReplacementCallerPublicationFaults(t *testing.T) {
+	for _, caller := range []string{"seed", "checkpoint", "recover"} {
+		for _, fault := range []string{"write", "fsync"} {
+			t.Run(caller+"/"+fault, func(t *testing.T) {
+				s, path := newMappedCheckpointStoreV3(t)
+				if caller != "seed" {
+					writeSynced(t, s, 1, 1)
+				}
+				before := s.v3.pub.current()
+				next := s.NextLSN()
+				boom := errors.New("injected native caller publication " + fault)
+				calls := 0
+				if fault == "write" {
+					s.v3.pub.io.writeSlot = func(int64, []byte) error { calls++; return boom }
+				} else {
+					s.v3.pub.io.fsync = func() error { calls++; return boom }
+				}
+				var err error
+				switch caller {
+				case "seed":
+					err = s.SeedChunkFrontier(7)
+				case "checkpoint":
+					err = s.flusher.flushOnce()
+				case "recover":
+					_, err = s.Recover()
+				}
+				if calls == 0 || !errors.Is(err, boom) {
+					t.Fatalf("%s did not hit %s publication: calls=%d err=%v", caller, fault, calls, err)
+				}
+				if s.v3.pub.current() != before || s.NextLSN() != next {
+					t.Fatal("failed publication advanced the descriptor or allocator")
+				}
+				rawBefore, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err = s.Write(2, blk(0x52)); err == nil {
+					t.Fatal("append accepted after uncertain publication")
+				}
+				rawAfter, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(rawBefore, rawAfter) {
+					t.Fatal("refused append changed physical bytes")
+				}
+				crashReadOnlyStoreV3(t, s)
+				restored, err := openWALStoreV3ForTest(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				restored.DisableAutoFlushForRecoveryTest()
+				t.Cleanup(func() { _ = restored.Close() })
+				if _, err = restored.Recover(); err != nil {
+					t.Fatal(err)
+				}
+				if caller == "seed" {
+					if err = restored.SeedChunkFrontier(7); err != nil {
+						t.Fatal(err)
+					}
+					if restored.NextLSN() != 8 || restored.CheckpointLSN() != 7 {
+						t.Fatal("reopened seed failed to persist/retry inherited frontier")
+					}
+				} else {
+					got, err := restored.Read(1)
+					if err != nil || !bytes.Equal(got, blk(1)) {
+						t.Fatalf("acknowledged image after failed %s: %v", caller, err)
+					}
+					if _, err = restored.Write(2, blk(0x52)); err != nil {
+						t.Fatal(err)
+					}
+					if _, err = restored.Sync(); err != nil {
+						t.Fatal(err)
+					}
+				}
+			})
+		}
+	}
+}
