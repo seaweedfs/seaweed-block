@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"hash/crc32"
 	"os"
 	"path/filepath"
 	"sync"
@@ -187,6 +188,93 @@ func TestNativeReplacementAllBlocksAfterCheckpoint(t *testing.T) {
 	}
 	if len(all) != 2 || !bytes.Equal(all[1], blk(0x11)) || !bytes.Equal(all[7], blk(0x77)) {
 		t.Fatal("checkpointed LBAs missing from AllBlocks or bytes changed")
+	}
+}
+
+func TestNativeReplacementRecoverRejectsOverflowBatch(t *testing.T) {
+	for name, mutate := range map[string]func([]byte){
+		"count_overflow":        func(b []byte) { binary.LittleEndian.PutUint64(b[8:16], (uint64(1)<<52)+3) },
+		"lsn_overflow":          func(b []byte) { binary.LittleEndian.PutUint64(b[:8], ^uint64(0)-1) },
+		"count_length_mismatch": func(b []byte) { binary.LittleEndian.PutUint64(b[8:16], 2) },
+		"length_overflow":       func(b []byte) { binary.LittleEndian.PutUint32(b[26:30], ^uint32(0)) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, path := newMappedCheckpointStoreV3(t)
+			if _, err := s.WriteBatch(4, batchBlocks(0xA1, 3)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.Sync(); err != nil {
+				t.Fatal(err)
+			}
+			off, _, _, _, ok := s.dm.get(4)
+			if !ok {
+				t.Fatal("missing batch")
+			}
+			b := make([]byte, walEntryHeaderSizeV3+3*4096)
+			if _, err := s.fd.ReadAt(b, int64(s.sb.WALOffset+off)); err != nil {
+				t.Fatal(err)
+			}
+			mutate(b)
+			end := len(b) - 8
+			binary.LittleEndian.PutUint32(b[end:], crc32.Checksum(b[:end], walEntryCRC32CV3))
+			if _, err := s.fd.WriteAt(b, int64(s.sb.WALOffset+off)); err != nil {
+				t.Fatal(err)
+			}
+			crashReadOnlyStoreV3(t, s)
+			r, err := OpenWALStore(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.DisableAutoFlushForRecoveryTest()
+			t.Cleanup(func() { _ = r.Close() })
+			if _, err := r.Recover(); !isWALCorrupt(err) {
+				t.Fatalf("malformed committed native batch: %v", err)
+			}
+			if r.dm.len() != 0 {
+				t.Fatal("malformed batch published dirty entries")
+			}
+		})
+	}
+}
+
+func TestNativeReplacementExtentCallbackIsInMemory(t *testing.T) {
+	s, path := newChunkTestStore(t)
+	f := newFakeChunkRemote()
+	l := mustAttach(t, s, f, ctConfig(1))
+	mapPath := s.v3.ownedMap.fd.Name()
+	before := map[string][]byte{}
+	for _, p := range []string{path, mapPath} {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before[p] = b
+	}
+	stats := f.stats()
+	s.mu.Lock()
+	f.mu.Lock()
+	unlock := sync.OnceFunc(func() { f.mu.Unlock(); s.mu.Unlock() })
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		unlock()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Error("callback did not settle")
+		}
+	})
+	go func() { l.OnExtentWrite(12, 7); l.OnExtentWrite(13, 0); close(done) }()
+	waitV3(t, done, "native callback with store and remote locked")
+	unlock()
+	after := f.stats()
+	if after.puts != stats.puts || after.gets != stats.gets || after.getHeads != stats.getHeads || after.cas != stats.cas {
+		t.Fatal("callback called remote")
+	}
+	for p, want := range before {
+		got, err := os.ReadFile(p)
+		if err != nil || !bytes.Equal(got, want) {
+			t.Fatalf("callback persisted %s: %v", p, err)
+		}
 	}
 }
 
