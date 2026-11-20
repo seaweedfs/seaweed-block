@@ -132,6 +132,7 @@ type chunkLayerImpl struct {
 	// Test-only scheduling hooks; nil in production.
 	testHydrationWait            func(uint64) // after promise registration, outside locks
 	testCOWWait                  func()
+	testCOWSaverWait             func()
 	testCOWRead                  func(idx uint64, saved bool)
 	testCOWSave                  func() error
 	testPresenceSnapshotHook     func()                 // after a presence snapshot, before it is written

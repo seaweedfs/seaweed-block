@@ -1,0 +1,33 @@
+// Minimal subset of SeaweedFS master.proto (seaweed-mono, weed/pb/master.proto)
+// used by the single-filer startup check.
+//
+// Package, service, message names and field numbers are copied verbatim so
+// the wire format and the gRPC method path (/master_pb.Seaweed/ListClusterNodes)
+// match a real master. Fields the check never reads are omitted; protobuf
+// keeps them as unknown fields on decode.
+//
+// Regenerate (from this directory):
+//   protoc --go_out=. --go_opt=paths=source_relative \
+//          --go-grpc_out=. --go-grpc_opt=paths=source_relative master_subset.proto
+syntax = "proto3";
+
+package master_pb;
+
+option go_package = "github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/masterpb";
+
+service Seaweed {
+  rpc ListClusterNodes (ListClusterNodesRequest) returns (ListClusterNodesResponse) {}
+}
+
+message ListClusterNodesRequest {
+  string client_type = 1;
+  string filer_group = 2;
+  int32 limit = 4;
+}
+
+message ListClusterNodesResponse {
+  message ClusterNode {
+    string address = 1;
+  }
+  repeated ClusterNode cluster_nodes = 1;
+}

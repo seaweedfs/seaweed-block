@@ -23,6 +23,7 @@ service SeaweedFiler {
     rpc DeleteEntry (DeleteEntryRequest) returns (DeleteEntryResponse) {}
     rpc AssignVolume (AssignVolumeRequest) returns (AssignVolumeResponse) {}
     rpc LookupVolume (LookupVolumeRequest) returns (LookupVolumeResponse) {}
+    rpc GetFilerConfiguration (GetFilerConfigurationRequest) returns (GetFilerConfigurationResponse) {}
 }
 
 message LookupDirectoryEntryRequest {
@@ -166,4 +167,13 @@ message Location {
 
 message LookupVolumeResponse {
     map<string, Locations> locations_map = 1;
+}
+
+message GetFilerConfigurationRequest {
+}
+
+// Only the fields the single-filer startup check reads.
+message GetFilerConfigurationResponse {
+    repeated string masters = 1;
+    string filer_group = 13;
 }

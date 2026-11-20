@@ -362,3 +362,72 @@ func TestCutCOWV3_RecentChunkUploadsFirst(t *testing.T) {
 		}
 	}
 }
+
+// Two guest saves exceed one slot; the second waits for local capacity and
+// preserves the same cut point rather than aborting a transient burst.
+func TestCutCOWV3_SaverBurstWaitsAndPublishes(t *testing.T) {
+	s, l, f, gate := cowFixture(t)
+	if _, err := s.Write(9, makeBlock(ctBlockSize, 9)); err != nil {
+		t.Fatal(err)
+	}
+	// Keep chunk 0 hottest, so the held copier precedes both unread saves.
+	if _, err := s.Write(1, makeBlock(ctBlockSize, 1)); err != nil {
+		t.Fatal(err)
+	}
+	entered, release, waiting := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once, unblock sync.Once
+	free := func() { unblock.Do(func() { close(release) }) }
+	l.testCOWSave = func() error { once.Do(func() { close(entered); <-release }); return nil }
+	l.testCOWSaverWait = func() { close(waiting) }
+	done, errs := cowStartCut(t, l, gate)
+	l.cowActive.Load().saverSlots = make(chan struct{}, 1)
+	writers := make(chan error, 2)
+	firstDone, secondDone := make(chan struct{}), make(chan struct{})
+	secondStarted := false
+	t.Cleanup(func() {
+		free()
+		gate.unblock()
+		// A timeout reports failure without skipping the other owner's join.
+		wait := func(done <-chan struct{}, name string) {
+			select {
+			case <-done:
+			case <-time.After(ctLocalBound):
+				t.Errorf("%s did not settle within %s", name, ctLocalBound)
+			}
+		}
+		wait(firstDone, "first burst writer cleanup")
+		if secondStarted {
+			wait(secondDone, "second burst writer cleanup")
+		}
+	})
+	go func() { defer close(firstDone); _, e := s.Write(5, makeBlock(ctBlockSize, 0xa5)); writers <- e }()
+	cowWaitSignal(t, entered, "first saver held")
+	secondStarted = true
+	go func() { defer close(secondDone); _, e := s.Write(9, makeBlock(ctBlockSize, 0xa9)); writers <- e }()
+	cowWaitSignal(t, waiting, "second saver queued")
+	free()
+	for i := 0; i < 2; i++ {
+		select {
+		case e := <-writers:
+			if e != nil {
+				t.Fatal(e)
+			}
+		case <-time.After(ctLocalBound):
+			t.Fatal("writer did not settle")
+		}
+	}
+	gate.unblock()
+	cowWaitSignal(t, done, "burst cut")
+	if e := <-errs; e != nil {
+		t.Fatal(e)
+	}
+	image := f.imageOf(t, f.stats().head)
+	for _, lba := range []int{5, 9} {
+		if !bytes.Equal(image[lba*ctBlockSize:(lba+1)*ctBlockSize], makeBlock(ctBlockSize, byte(lba))) {
+			t.Fatalf("cut changed at block %d", lba)
+		}
+	}
+	if l.Stats().CutsAborted["saver_capacity"] != 0 {
+		t.Fatal("transient burst aborted cut")
+	}
+}
