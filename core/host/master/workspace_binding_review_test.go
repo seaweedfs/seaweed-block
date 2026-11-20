@@ -282,9 +282,11 @@ func TestWorkspaceBindingRemoteReadDoesNotBlockAck(t *testing.T) {
 			case <-ctx.Done():
 				t.Fatal("remote call not reached", ctx.Err())
 			}
-			ackCtx, cancel := context.WithTimeout(ctx, time.Second)
-			_, e := client.AckWorkspaceRevoked(ackCtx, &control.WorkspaceRevocationAck{Identity: id, HeadGen: 9})
-			cancel()
+			// The held remote call is released only after the ACK returns, so an
+			// ACK that waited for it would run into the test's own deadline. No
+			// separate 1 s bound: the ACK includes a durable persist, which a
+			// loaded host can slow past that without anything being blocked.
+			_, e := client.AckWorkspaceRevoked(ctx, &control.WorkspaceRevocationAck{Identity: id, HeadGen: 9})
 			close(release)
 			select {
 			case <-done:
