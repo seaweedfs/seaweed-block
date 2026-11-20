@@ -148,7 +148,9 @@ const maxFullBlockBatchBlocks = 64
 type StorageBackend struct {
 	// testBeforeIOLock, test-only, runs in admit after the readiness check,
 	// right before the I/O lock (an arrival handshake for queued I/O).
-	testBeforeIOLock func()
+	testBeforeIOLock        func()
+	testPrecopyQueued       func() // after FIFO registration, outside mu
+	testPrecopyStopFallback func() // before fallback lock attempts, outside mu
 	// Runs outside locks after a read registers its readiness notification.
 	testBeforeReadReadyWait func()
 	testAfterAttachRefusal  func()
@@ -162,9 +164,11 @@ type StorageBackend struct {
 	// false; provider flips true after Recover() succeeds (T3b).
 	// opEvidence is the reason reported when operational=false
 	// (e.g., "awaiting recovery", "local epoch ahead of assignment").
-	// Only a successfully recovered chunk volume awaiting attachment may wait.
-	// waitAttachReady and readyChanged are protected by mu.
+	// Readiness waits cover pending chunk attachment and temporary pre-copy freezes.
+	// Readiness flags and readyChanged are protected by mu.
 	waitAttachReady bool
+	precopy         *precopyAdmission // under mu; owns transient admission and FIFO waiters
+	admittedIO      int               // under mu; operations past the complete gate
 	readyChanged    chan struct{}
 	operational     atomic.Bool
 	opEvidence      atomic.Value // string
@@ -364,6 +368,7 @@ func (b *StorageBackend) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.closed = true
+	b.finishPrecopyLocked(false)
 	b.notifyReadReadyLocked()
 	return nil
 }
@@ -470,11 +475,72 @@ func (b *StorageBackend) SetOperational(ok bool, evidence string) {
 		}
 	}
 	b.mu.Lock()
+	b.setOperationalLocked(ok, evidence)
+	b.mu.Unlock()
+}
+
+// The caller owns mu; publication never calls the store or waits for I/O.
+func (b *StorageBackend) setOperationalLocked(ok bool, evidence string) {
 	b.opEvidence.Store(evidence)
 	b.operational.Store(ok)
 	b.waitAttachReady = false
+	// A host drain closes storage admission, but is not the old path's
+	// teardown. Keep a final pre-copy queue parked until Close or its budget;
+	// publishing readiness loss must not complete commands on that path.
+	if ok || b.precopy == nil || !b.precopy.active {
+		b.finishPrecopyLocked(ok)
+	}
 	b.notifyReadReadyLocked()
-	b.mu.Unlock()
+}
+
+// TryStopIO closes admission only if every admitted I/O has drained already.
+// Used under the capture barrier: never wait for ioMu there, since an I/O
+// holding its read side may itself be queued on that barrier. Failed attempts
+// leave the frontend unchanged. Lock order: try ioMu -> try mu; neither lock waits, and no store calls.
+func (b *StorageBackend) TryStopIO(evidence string) bool {
+	// A drained admission pause excludes late gate callers even if they still
+	// hold ioMu's read side. Their final registration check cannot reach storage.
+	if b.mu.TryLock() {
+		if b.precopy != nil {
+			defer b.mu.Unlock()
+			if !b.precopy.active {
+				return false
+			}
+			if b.admittedIO != 0 || b.closed || !b.operational.Load() {
+				return false
+			}
+			b.opEvidence.Store(evidence)
+			b.operational.Store(false)
+			b.waitAttachReady = false
+			b.notifyReadReadyLocked()
+			return true
+		}
+		b.mu.Unlock()
+	}
+	if hook := b.testPrecopyStopFallback; hook != nil {
+		hook()
+	}
+	if !b.ioMu.TryLock() {
+		return false
+	}
+	defer b.ioMu.Unlock()
+	if !b.mu.TryLock() {
+		return false
+	}
+	defer b.mu.Unlock()
+	// State may have changed after the initial mu attempt. An existing pause
+	// owns its waiters and shared clock; refuse rather than replace it.
+	if b.precopy != nil || b.closed || !b.operational.Load() {
+		return false
+	}
+	p := &precopyAdmission{active: true, started: time.Now(), drained: make(chan struct{}), drainDone: true}
+	close(p.drained)
+	b.precopy = p
+	b.opEvidence.Store(evidence)
+	b.operational.Store(false)
+	b.waitAttachReady = false
+	b.notifyReadReadyLocked()
+	return true
 }
 
 // StopIO makes the backend refuse every new Read, Write and Sync with
@@ -518,7 +584,7 @@ func (b *StorageBackend) Sync(ctx context.Context) error {
 	defer iolatency.BackendExit(ctx)
 	latencyStart := time.Now()
 	defer func() { b.profile.syncLatency.Observe(time.Since(latencyStart)) }()
-	release, err := b.admit()
+	release, err := b.admitPrecopy(ctx, b.admit)
 	if err != nil {
 		return err
 	}
@@ -594,6 +660,10 @@ func (b *StorageBackend) setChunkAttachPending(evidence string) {
 }
 
 func (b *StorageBackend) admitAfterAttach(ctx context.Context) (func(), error) {
+	return b.admitPrecopy(ctx, func() (func(), error) { return b.admitAfterAttachUnqueued(ctx) })
+}
+
+func (b *StorageBackend) admitAfterAttachUnqueued(ctx context.Context) (func(), error) {
 	release, err := b.admit()
 	if !errors.Is(err, frontend.ErrNotReady) {
 		return release, err
@@ -735,7 +805,24 @@ func (b *StorageBackend) admit() (func(), error) {
 		b.ioMu.RUnlock()
 		return nil, err
 	}
-	return b.ioMu.RUnlock, nil
+	b.mu.Lock()
+	if b.precopy != nil && b.precopy.active {
+		b.mu.Unlock()
+		b.ioMu.RUnlock()
+		return nil, fmt.Errorf("%w: %w: pre-copy admission paused", frontend.ErrNotReady, frontend.ErrBackendBusy)
+	}
+	b.admittedIO++
+	b.mu.Unlock()
+	return func() {
+		b.mu.Lock()
+		b.admittedIO--
+		if p := b.precopy; p != nil && p.active && b.admittedIO == 0 && !p.drainDone {
+			close(p.drained)
+			p.drainDone = true
+		}
+		b.mu.Unlock()
+		b.ioMu.RUnlock()
+	}, nil
 }
 
 // gate is the per-I/O precondition stack. Order matters:
@@ -760,6 +847,7 @@ func (b *StorageBackend) readyCheck() error {
 	closed := b.closed
 	chunkFenced := b.chunkFenced
 	observerErr := b.observerErr
+	precopyPending := b.precopy != nil && b.precopy.active
 	b.mu.Unlock()
 	if closed {
 		return frontend.ErrBackendClosed
@@ -769,6 +857,9 @@ func (b *StorageBackend) readyCheck() error {
 	}
 	if chunkFenced != nil && chunkFenced() {
 		return frontend.ErrStalePrimary
+	}
+	if precopyPending {
+		return fmt.Errorf("%w: %w: pre-copy admission paused", frontend.ErrNotReady, frontend.ErrBackendBusy)
 	}
 	if !b.operational.Load() {
 		ev, _ := b.opEvidence.Load().(string)

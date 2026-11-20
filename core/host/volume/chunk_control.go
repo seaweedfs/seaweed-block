@@ -56,6 +56,7 @@ type ChunkCutResponse struct {
 // mirrors storage.ChunkCutStats field for field (a test keeps the two in
 // step); every duration is in nanoseconds.
 type ChunkCutStatsBody struct {
+	PayloadNs          int64  `json:"payloadNs"`
 	COWWALReadAttempts uint64 `json:"cowWALReadAttempts"`
 	COWLocalReadNs     int64  `json:"cowLocalReadNs"`
 	COWSavedChunks     int    `json:"cowSavedChunks"`
@@ -83,6 +84,7 @@ type ChunkCutStatsBody struct {
 
 func cutStatsBody(s storage.ChunkCutStats) ChunkCutStatsBody {
 	return ChunkCutStatsBody{
+		PayloadNs:          s.PayloadNs,
 		COWWALReadAttempts: s.COWWALReadAttempts,
 		COWLocalReadNs:     s.COWLocalReadNs,
 		BarrierPauseNs:     s.BarrierPauseNs,
@@ -122,11 +124,12 @@ type ChunkSnapshotRequest struct {
 
 // ChunkDetachResponse is the body of a successful POST /chunk/detach (§3.6).
 type ChunkDetachResponse struct {
-	VolumeID       string `json:"volumeID"`
-	CutLSN         uint64 `json:"cutLSN"`
-	HeadGen        uint64 `json:"headGen"`
-	HeadEpoch      uint64 `json:"headEpoch"`
-	LastWrittenLSN uint64 `json:"lastWrittenLSN"`
+	Precopy        *storage.PrecopyReport `json:"precopy,omitempty"`
+	VolumeID       string                 `json:"volumeID"`
+	CutLSN         uint64                 `json:"cutLSN"`
+	HeadGen        uint64                 `json:"headGen"`
+	HeadEpoch      uint64                 `json:"headEpoch"`
+	LastWrittenLSN uint64                 `json:"lastWrittenLSN"`
 }
 
 // snapshotBody is POST /chunk/snapshot's success body, exactly §3.2's fields.
@@ -235,6 +238,10 @@ func writeChunkFailure(w http.ResponseWriter, err error) {
 func chunkErrorCode(err error) (int, string, bool) {
 	var ce *chunkstore.CatalogError
 	switch {
+	case errors.Is(err, storage.ErrPrecopyUnknown):
+		return http.StatusConflict, "precopy_unknown", true
+	case errors.Is(err, storage.ErrPrecopyNotConverged):
+		return http.StatusConflict, "precopy_not_converged", true
 	case errors.Is(err, durable.ErrDetachAborted):
 		// Before any cause (a catalog error included): nothing was
 		// published and serving resumed here.
@@ -595,5 +602,9 @@ func (c *chunkControl) Detach(ctx context.Context, volumeID string) (ChunkDetach
 	if err != nil {
 		return ChunkDetachResponse{}, err
 	}
-	return ChunkDetachResponse{VolumeID: volumeID, CutLSN: r.H, HeadGen: r.Head.Gen, HeadEpoch: r.Head.Epoch, LastWrittenLSN: last}, nil
+	response := ChunkDetachResponse{VolumeID: volumeID, CutLSN: r.H, HeadGen: r.Head.Gen, HeadEpoch: r.Head.Epoch, LastWrittenLSN: last}
+	if r.Precopy.Frozen {
+		response.Precopy = &r.Precopy
+	}
+	return response, nil
 }

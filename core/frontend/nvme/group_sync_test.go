@@ -48,6 +48,11 @@ func (o *syncPairObserver) Sync(_ context.Context, target uint64) error {
 }
 
 func newSyncPairFixture(t *testing.T, path string) (*storage.WALStore, *durable.StorageBackend, *nvmeClient) {
+	s, b, c, _ := newSyncPairTargetFixture(t, path)
+	return s, b, c
+}
+
+func newSyncPairTargetFixture(t *testing.T, path string) (*storage.WALStore, *durable.StorageBackend, *nvmeClient, *nvme.Target) {
 	t.Helper()
 	id := frontend.Identity{VolumeID: strings.TrimSuffix(filepath.Base(path), ".bin"), ReplicaID: "r1", Epoch: 1, EndpointVersion: 1}
 	provider, err := durable.NewDurableProvider(durable.ProviderConfig{
@@ -78,7 +83,7 @@ func newSyncPairFixture(t *testing.T, path string) (*storage.WALStore, *durable.
 	if err := c.io.SetDeadline(time.Now().Add(15 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	return s, backend, c
+	return s, backend, c, tg
 }
 func syncPairFlush(t *testing.T, c *nvmeClient, cid uint16) uint16 {
 	t.Helper()

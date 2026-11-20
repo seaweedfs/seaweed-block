@@ -179,6 +179,9 @@ type ProviderConfig struct {
 	// host's 30 s I/O timeout; a freeze past the 5 s target is logged as an
 	// alarm. Cooperative: a syscall that never returns is not bounded.
 	DetachFreezeTimeout time.Duration
+	// ChunkDetachPrecopy attempts bounded rolling cuts before stopping I/O.
+	// Nonconvergence leaves service live; no fallback to an unbounded tail.
+	ChunkDetachPrecopy bool
 	// OnChunkDetach, optional, is called with the volume id when DetachVolume
 	// starts a detach (a graceful stop), before the drain and final cut, so
 	// the host can watch for the coming lease revocation; it returns a token

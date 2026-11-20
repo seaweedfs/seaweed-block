@@ -52,6 +52,12 @@ type chunkHooks struct {
 const defaultReadMissTimeout = 30 * time.Second
 
 type chunkLayerImpl struct {
+	// capMu serializes pre-copy admission and its recent measurements.
+	precopyFreeze  func(uint64, time.Time) bool
+	precopyPrepare func(context.Context) (func(), error)
+	precopySamples []precopySample
+	precopyPause   func(time.Duration)
+
 	s      *WALStore
 	remote chunkRemote
 	cfg    chunkLayerConfig
@@ -652,10 +658,16 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	defer done()
 	start := time.Now()
 	var st chunkCutStats
+	var pauseStart time.Time
+	var payloadBeforeBarrier int64
 	defer func() {
 		st.TotalNs = time.Since(start).Nanoseconds()
 		if err == nil {
 			res.Stats = st
+			if !pauseStart.IsZero() {
+				fixed := time.Since(pauseStart).Nanoseconds() - st.PayloadNs + payloadBeforeBarrier
+				l.samplePrecopy(st, fixed)
+			}
 		}
 		if errors.Is(err, errChunkLayerFenced) {
 			l.stMu.Lock()
@@ -668,6 +680,9 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 			l.reusable = nil
 			l.stMu.Unlock()
 			l.dropIntents(ctx, ids)
+		}
+		if observe := l.precopyPause; observe != nil {
+			observe(time.Duration(st.BarrierPauseNs))
 		}
 		l.recordCut(res, st, err)
 	}()
@@ -715,7 +730,11 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 
 	// Pre-copy large native dirty sets outside the barrier, bounded by the
 	// remaining COW exposure rather than a fixed candidate count.
+	stageStart := time.Now()
 	staged, intents, err := l.stage(ctx, &st)
+	if st.UploadedBytes > 0 {
+		st.PayloadNs += time.Since(stageStart).Nanoseconds()
+	}
 	if err != nil {
 		l.dropIntents(ctx, intents)
 		return chunkCutResult{}, err
@@ -730,7 +749,33 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	// writer blocks new readers of captureMu, so a write arriving while the cut
 	// waits for writers already holding it (e.g. parked in WAL admission) is
 	// paused too. LockWaitNs reports that wait on its own.
-	pauseStart := time.Now()
+	payloadBeforeBarrier = st.PayloadNs
+	pauseStart = time.Now()
+	var releasePrecopy func()
+	if prepare := l.precopyPrepare; prepare != nil {
+		releasePrecopy, _ = prepare(ctx)
+	}
+	defer func() {
+		if releasePrecopy != nil && !detach {
+			releasePrecopy()
+		}
+	}()
+	if cause := context.Cause(ctx); cause != nil {
+		if releasePrecopy != nil {
+			releasePrecopy()
+			releasePrecopy = nil
+		}
+		l.dropIntents(ctx, intents)
+		return chunkCutResult{}, cause
+	}
+	// Resume rejected tentative admission before any ordinary COW upload.
+	unlockCapture := func() {
+		l.s.captureMu.Unlock()
+		if !detach && releasePrecopy != nil {
+			releasePrecopy()
+			releasePrecopy = nil
+		}
+	}
 	if hook := l.testBeforeBarrierLockHook; hook != nil {
 		hook()
 	}
@@ -743,7 +788,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		hook(h)
 	}
 	if err != nil {
-		l.s.captureMu.Unlock()
+		unlockCapture()
 		st.BarrierPauseNs = time.Since(pauseStart).Nanoseconds()
 		l.dropIntents(ctx, intents) // a clean abort: staged keys are released
 		return chunkCutResult{}, fmt.Errorf("storage: capture sync: %w", err)
@@ -794,9 +839,16 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	// Candidates, mutation versions and births belong to the same barrier.
 	// Do not sample the owned map after COW writers are admitted again.
 	births := l.captureBirths(candidates, h)
+	// The authoritative candidate set is fixed with mutation admission closed.
+	// The owner callback is nonblocking and may stop only an already drained
+	// frontend; rejected attempts remain ordinary COW cuts.
+	if freeze := l.precopyFreeze; freeze != nil && context.Cause(ctx) == nil {
+		tail := uint64(len(candidates)) * uint64(l.blockSize) * l.chunkBlocks
+		detach = freeze(tail, pauseStart)
+	}
 
 	if h < baseHead.RemoteLSN && !l.supersededBy(baseHead) {
-		l.s.captureMu.Unlock()
+		unlockCapture()
 		st.BarrierPauseNs = time.Since(pauseStart).Nanoseconds()
 		// HEAD holds the image of a later LSN than this host's log has
 		// reached: publishing would move remote_lsn backwards. Refused
@@ -809,14 +861,14 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	st.CandidateChunks = len(candidates)
 	var copyErr error
 	copyStart := time.Now()
+	bytesBeforeCopy := st.UploadedBytes
 	{
-
 		var w *cutCOWWindow
 		w, copyErr = l.installCOWWindow(candidates, useStaged, baseHead.Chunks)
 		if copyErr == nil {
 			w.budget = budget
 		}
-		l.s.captureMu.Unlock()
+		unlockCapture()
 		st.BarrierPauseNs = time.Since(pauseStart).Nanoseconds()
 		copyStart = time.Now()
 		if copyErr == nil {
@@ -838,9 +890,10 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	}
 
 	st.CopyNs = time.Since(copyStart).Nanoseconds()
-
+	if st.UploadedBytes > bytesBeforeCopy {
+		st.PayloadNs += st.CopyNs
+	}
 	st.UploadNs = st.CopyNs
-
 	if copyErr != nil {
 		l.abortCut(all)
 		l.dropIntents(ctx, intents)
@@ -905,6 +958,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		}
 		intents = append(intents, id)
 	}
+	payloadStart := time.Now()
 	if err := l.uploadBatch(ctx, len(uploads), func(ctx context.Context, i int) error {
 		u := uploads[i]
 		return l.putCaptured(ctx, u.key, u.c.data)
@@ -912,6 +966,9 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		l.abortCut(all)
 		l.dropIntents(ctx, intents)
 		return chunkCutResult{}, fmt.Errorf("storage: capture upload: %w", errors.Join(errChunkRemoteUnavailable, errCutUpload, err))
+	}
+	if len(uploads) > 0 {
+		st.PayloadNs += time.Since(payloadStart).Nanoseconds()
 	}
 	for _, u := range uploads {
 		next.Chunks[u.c.idx] = chunkRef{Key: u.key, SHA256: u.c.sum, Encoding: "full", BirthLSN: u.c.birth}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync/atomic"
 	"time"
 )
 
@@ -19,9 +20,25 @@ func validateHeadCoolingWindow(window time.Duration) error {
 	return nil
 }
 
+type chunkCASCountKey struct{}
+
+// WithChunkCASAccounting counts actual CAS attempts through final publication
+// and its settlement. Reusing its context preserves the same operation scope.
+func WithChunkCASAccounting(ctx context.Context) (context.Context, func() uint64) {
+	counter, _ := ctx.Value(chunkCASCountKey{}).(*atomic.Uint64)
+	if counter == nil {
+		counter = &atomic.Uint64{}
+		ctx = context.WithValue(ctx, chunkCASCountKey{}, counter)
+	}
+	return ctx, counter.Load
+}
+
 func casChunkHead(ctx context.Context, remote chunkRemote, expected chunkHeadVersion, next chunkHead) (uint64, error) {
 	ctx, cancel := context.WithTimeout(ctx, chunkHeadOperationTimeout)
 	defer cancel()
+	if counter, _ := ctx.Value(chunkCASCountKey{}).(*atomic.Uint64); counter != nil {
+		counter.Add(1)
+	}
 	return remote.CASHead(ctx, expected, next)
 }
 
