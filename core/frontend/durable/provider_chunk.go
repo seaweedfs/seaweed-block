@@ -448,6 +448,11 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 		log.Printf("durable: HEAD claim for volume=%s starting: target epoch=%d holder=%q", volumeID, cfg.Epoch, cfg.Holder)
 		head, err := storage.ClaimChunkHead(ctx, remote, cfg)
 		if err != nil {
+			// The close-bound RPC can observe its explicit cancellation
+			// before parent deadline propagation. Preserve the caller's cause.
+			if ctx.Err() != nil {
+				err = errors.Join(err, ctx.Err())
+			}
 			log.Printf("durable: HEAD claim for volume=%s failed after %s: %v", volumeID, time.Since(claimStart), err)
 			return nil, fmt.Errorf("durable: restore HEAD claim: %w", err)
 		}
