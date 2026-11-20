@@ -1258,7 +1258,6 @@ func run(f flags) int {
 	var drainErr error
 	if leaseStop != nil && durableProv != nil {
 		drainErr = durableProv.Backend(f.volumeID).StopIO(leaseStop.ctx, "workspace lease fenced")
-		fmt.Fprintf(os.Stderr, "blockvolume: stop volume=%s stop_io_returned_at=%s\n", f.volumeID, time.Now().UTC().Format(time.RFC3339Nano))
 	}
 	h.SetFrontendTargets(nil)
 	// The ublk device drains with the other frontends: its Close (STOP_DEV,
