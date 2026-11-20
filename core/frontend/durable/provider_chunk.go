@@ -637,11 +637,12 @@ type cutPolicy struct {
 }
 
 type cutSchedule struct {
-	lastSuccess time.Time // last successful cut of any kind
-	lastAuto    time.Time // start of the last automatic cut
-	failedAt    time.Time // end of the last failed automatic cut
-	retryAt     time.Time // a failed automatic cut's backoff ends here
-	backoff     time.Duration
+	lastSuccess  time.Time // last successful cut of any kind
+	lastAuto     time.Time // start of the last automatic cut
+	failedAt     time.Time // end of the last failed automatic cut
+	retryAt      time.Time // a failed automatic cut's backoff ends here
+	backoff      time.Duration
+	initialDelay time.Duration // first automatic cut only; never a fabricated success
 }
 
 // observe takes in a successful cut the layer reports (any trigger). A
@@ -652,6 +653,7 @@ func (s cutSchedule) observe(lastCutNs int64) cutSchedule {
 		c := time.Unix(0, lastCutNs)
 		if c.After(s.lastSuccess) {
 			s.lastSuccess = c
+			s.initialDelay = 0
 		}
 		if !s.failedAt.IsZero() && c.After(s.failedAt) {
 			s.backoff, s.retryAt, s.failedAt = 0, time.Time{}, time.Time{}
@@ -670,7 +672,7 @@ func (pol cutPolicy) due(s cutSchedule, now time.Time, reconciling bool) (string
 	if !s.lastAuto.IsZero() && now.Sub(s.lastAuto) < pol.minSpacing {
 		return "", false
 	}
-	if pol.interval > 0 && now.Sub(s.lastSuccess) >= pol.interval {
+	if pol.interval > 0 && !now.Before(s.lastSuccess.Add(pol.interval).Add(s.initialDelay)) {
 		return "periodic", true
 	}
 	return "", false
@@ -680,6 +682,7 @@ func (pol cutPolicy) due(s cutSchedule, now time.Time, reconciling bool) (string
 func (pol cutPolicy) after(s cutSchedule, start, end time.Time, err error) cutSchedule {
 	s.lastAuto = start
 	if err == nil {
+		s.initialDelay = 0
 		s.backoff, s.retryAt, s.failedAt = 0, time.Time{}, time.Time{}
 		if end.After(s.lastSuccess) {
 			s.lastSuccess = end
@@ -698,6 +701,14 @@ func (pol cutPolicy) after(s cutSchedule, start, end time.Time, err error) cutSc
 	return s
 }
 
+func initialCutSchedule(volumeID string, interval time.Duration, now time.Time, stagger bool) cutSchedule {
+	s := cutSchedule{lastSuccess: now}
+	if stagger {
+		s.initialDelay = hostlimit.Phase(volumeID, interval)
+	}
+	return s
+}
+
 // chunkLoop runs the volume's automatic cuts under cutPolicy. A refused
 // cut (not a healthy primary of this lineage, BASE install) is expected
 // and logged only when it is something else. A fenced layer can never
@@ -710,10 +721,7 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 		backoffMin: chunkCutBackoffMin,
 		backoffMax: chunkCutBackoffMax,
 	}
-	s := cutSchedule{lastSuccess: time.Now()}
-	if p.cfg.ChunkStagger {
-		s.lastSuccess = s.lastSuccess.Add(hostlimit.Phase(volumeID, pol.interval))
-	}
+	s := initialCutSchedule(volumeID, pol.interval, time.Now(), p.cfg.ChunkStagger)
 	t := time.NewTicker(chunkSchedulePoll)
 	defer t.Stop()
 	for {
