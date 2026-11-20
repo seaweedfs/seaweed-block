@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"sync"
 	"testing"
 	"time"
 
@@ -124,19 +125,35 @@ func TestPrecopyProviderBusyOwnerKeepsServing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	view.arm()
+	if _, err := b.Write(context.Background(), 4096, block(0x8a)); err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	unpark := func() { releaseOnce.Do(func() { close(release) }) }
+	if err := b.(*durable.StorageBackend).SetWriteObserver(writeObserverFunc{sync: func(ctx context.Context, _ uint64) error {
+		close(entered)
+		select {
+		case <-release:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}}); err != nil {
+		t.Fatal(err)
+	}
 	done := make(chan error, 1)
 	t.Cleanup(func() {
-		view.unpark()
+		unpark()
 		select {
 		case <-done:
 		case <-time.After(5 * time.Second):
 			t.Error("writer did not join")
 		}
 	})
-	go func() { _, err := b.Write(context.Background(), 4096, block(0x8a)); done <- err }()
+	go func() { done <- b.Sync(context.Background()) }()
 	select {
-	case <-view.entered:
+	case <-entered:
 	case <-time.After(5 * time.Second):
 		t.Fatal("write not admitted")
 	}
@@ -155,7 +172,7 @@ func TestPrecopyProviderBusyOwnerKeepsServing(t *testing.T) {
 	if _, err = b.Write(ctx, 8192, block(0x9b)); err != nil {
 		t.Fatal("nonconverged owner stopped:", err)
 	}
-	view.unpark()
+	unpark()
 	select {
 	case err := <-done:
 		if err != nil {
