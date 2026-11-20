@@ -370,6 +370,10 @@ func TestCutCOWV3_SaverBurstWaitsAndPublishes(t *testing.T) {
 	if _, err := s.Write(9, makeBlock(ctBlockSize, 9)); err != nil {
 		t.Fatal(err)
 	}
+	// Keep chunk 0 hottest, so the held copier precedes both unread saves.
+	if _, err := s.Write(1, makeBlock(ctBlockSize, 1)); err != nil {
+		t.Fatal(err)
+	}
 	entered, release, waiting := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	var once, unblock sync.Once
 	free := func() { unblock.Do(func() { close(release) }) }
