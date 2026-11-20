@@ -326,7 +326,10 @@ func TestPrecopyStopFallbackPreservesQueuedPause(t *testing.T) {
 			locked = false
 			release()
 			select {
-			case <-stopDone:
+			case stopped := <-stopDone:
+				if stopped || !b.operational.Load() {
+					t.Fatal("fallback did not refuse without changing admission")
+				}
 			case <-ctx.Done():
 				t.Fatal("fallback did not settle")
 			}

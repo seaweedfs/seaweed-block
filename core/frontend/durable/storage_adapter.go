@@ -522,7 +522,9 @@ func (b *StorageBackend) TryStopIO(evidence string) bool {
 		return false
 	}
 	defer b.mu.Unlock()
-	if b.closed || !b.operational.Load() {
+	// State may have changed after the initial mu attempt. An existing pause
+	// owns its waiters and shared clock; refuse rather than replace it.
+	if b.precopy != nil || b.closed || !b.operational.Load() {
 		return false
 	}
 	p := &precopyAdmission{active: true, started: time.Now(), drained: make(chan struct{}), drainDone: true}
