@@ -11,6 +11,7 @@ package durable_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -34,7 +35,7 @@ type faultRemote struct {
 	release    chan struct{}
 	delayedErr chan error
 	// held records the CAS held by "hold-detach": when and why its context
-	// ended, and whether it had ended by the witness time (see witnessCut).
+	// ended, and what the cut witness saw (see witnessCut).
 	held heldCAS
 }
 
@@ -43,31 +44,67 @@ type heldCAS struct {
 	ctx     context.Context
 	ended   time.Time
 	cause   error // context.Cause once the context ended
-
-	witnessed    bool  // the witness time has passed
-	witnessCause error // context.Cause at the witness time (nil: still live)
+	witness cutObservation
 }
 
-// witnessCut arms the check that the held detach CAS was really cancelled at
-// the cut deadline the detach traced, not later: a timer at the deadline plus
-// half of a 100 ms shift records the CAS context's cause at that moment. A
-// CAS entered after that moment must find its context already cancelled.
-// done is closed once the witness has run.
+// cutObservation is one sample of the held detach CAS's context, taken
+// between from and at.
+type cutObservation struct {
+	ran      bool
+	from, at time.Time
+	entered  bool  // the CAS was already held when sampled
+	cause    error // its context.Cause then (nil: still live)
+}
+
+const (
+	// The witness samples cutWitnessDelay after the traced cut deadline, so
+	// a cancel shifted cutWitnessShift past it is still live at the sample.
+	cutWitnessDelay    = 50 * time.Millisecond
+	cutWitnessShift    = 100 * time.Millisecond
+	cutWitnessAttempts = 3
+)
+
+var errCutWitnessUnexercised = errors.New("cut witness not exercised")
+
+// cutWitnessVerdict judges one sample. Only a sample of an already held CAS,
+// taken after the cut deadline and before the shift, discriminates: then the
+// context must already be cancelled for the cut's expiry. Any other sample
+// (late timer, CAS not yet held) proves nothing either way and is reported
+// as unexercised; it is never filled in from a later observation.
+func cutWitnessVerdict(cut time.Time, o cutObservation) error {
+	switch {
+	case !o.ran:
+		return fmt.Errorf("%w: the witness never ran", errCutWitnessUnexercised)
+	case o.from.Before(cut):
+		return fmt.Errorf("%w: sampled %v before the cut deadline", errCutWitnessUnexercised, cut.Sub(o.from))
+	case !o.at.Before(cut.Add(cutWitnessShift)):
+		return fmt.Errorf("%w: sampled up to %v after the cut deadline, not within %v", errCutWitnessUnexercised, o.at.Sub(cut), cutWitnessShift)
+	case !o.entered:
+		return fmt.Errorf("%w: the detach CAS was not held yet when sampled", errCutWitnessUnexercised)
+	case !errors.Is(o.cause, context.DeadlineExceeded):
+		return fmt.Errorf("held detach CAS live or cancelled otherwise (cause %v) %v after the traced cut deadline", o.cause, o.from.Sub(cut))
+	}
+	return nil
+}
+
+// witnessCut samples the held detach CAS's context once, cutWitnessDelay
+// after the traced cut deadline, recording when the sample was taken. done
+// is closed once the sample is recorded.
 func (r *faultRemote) witnessCut(cut time.Time) (done <-chan struct{}, stop func() bool) {
 	ch := make(chan struct{})
-	tm := time.AfterFunc(time.Until(cut.Add(cutWitnessSlack)), func() {
+	tm := time.AfterFunc(time.Until(cut.Add(cutWitnessDelay)), func() {
 		r.set(func(r *faultRemote) {
-			r.held.witnessed = true
+			o := cutObservation{ran: true, from: time.Now()}
 			if r.held.ctx != nil {
-				r.held.witnessCause = context.Cause(r.held.ctx)
+				o.entered, o.cause = true, context.Cause(r.held.ctx)
 			}
+			o.at = time.Now()
+			r.held.witness = o
 		})
 		close(ch)
 	})
 	return ch, tm.Stop
 }
-
-const cutWitnessSlack = 50 * time.Millisecond
 
 var errInjected = errors.New("injected remote fault")
 
@@ -123,9 +160,6 @@ func (r *faultRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVer
 	case "hold-detach": // the detach CAS, held until its caller gives up; witnessed
 		r.set(func(r *faultRemote) {
 			r.held.entered, r.held.ctx = true, ctx
-			if r.held.witnessed { // entered after the witness time
-				r.held.witnessCause = context.Cause(ctx)
-			}
 		})
 		<-ctx.Done()
 		ended := time.Now()
@@ -280,7 +314,30 @@ func TestWALStoreChunk_UndecidableDetachStaysStopped(t *testing.T) {
 // test asserts against the deadlines the detach itself traced, so a loaded
 // host cannot turn the order into a timing failure; the settlement keeps a
 // quarter of a 2 s bound for its HEAD read and cancel.
+//
+// The CAS must also be cancelled at the traced cut deadline, not later. That
+// takes a sample between the deadline and a 100 ms shift; an attempt whose
+// sample missed that window (a loaded host) proves nothing and is retried,
+// up to cutWitnessAttempts.
 func TestWALStoreChunk_DetachFreezeIsBoundedThenResumes(t *testing.T) {
+	for attempt := 1; ; attempt++ {
+		var verdict error
+		if !t.Run(fmt.Sprintf("attempt%d", attempt), func(t *testing.T) { verdict = detachFreezeAttempt(t) }) {
+			return
+		}
+		if verdict == nil {
+			return
+		}
+		if attempt == cutWitnessAttempts {
+			t.Fatalf("no attempt in %d exercised the cut witness; last: %v", attempt, verdict)
+		}
+		t.Logf("attempt %d: %v; retrying", attempt, verdict)
+	}
+}
+
+// detachFreezeAttempt runs one bounded detach; it fails t on any defect and
+// returns the cut witness's verdict when that sample proved nothing.
+func detachFreezeAttempt(t *testing.T) error {
 	const freeze = 2 * time.Second
 	remote := &faultRemote{MemChunkRemote: storage.NewMemChunkRemote()}
 	p, err := durable.NewDurableProvider(durable.ProviderConfig{
@@ -352,8 +409,9 @@ func TestWALStoreChunk_DetachFreezeIsBoundedThenResumes(t *testing.T) {
 	if !errors.Is(held.cause, context.DeadlineExceeded) {
 		t.Fatalf("held detach CAS cancelled with cause %v; want the cut's deadline expiry", held.cause)
 	}
-	if !errors.Is(held.witnessCause, context.DeadlineExceeded) {
-		t.Fatalf("held detach CAS still live (cause %v) %v after the traced cut deadline", held.witnessCause, cutWitnessSlack)
+	verdict := cutWitnessVerdict(cut, held.witness)
+	if verdict != nil && !errors.Is(verdict, errCutWitnessUnexercised) {
+		t.Fatal(verdict)
 	}
 	if end.Before(held.ended) {
 		t.Fatal("detach returned before its held CAS ended")
@@ -362,6 +420,42 @@ func TestWALStoreChunk_DetachFreezeIsBoundedThenResumes(t *testing.T) {
 		t.Fatalf("detach returned %v after the freeze bound", late)
 	}
 	assertServing(t, p, b, remote)
+	return verdict
+}
+
+// The verdict counts only a sample of an already held CAS, taken inside the
+// window, as evidence; a late sample of a context that a shifted cut has
+// cancelled by then, or a CAS that entered after the sample, prove nothing.
+func TestCutWitnessVerdict(t *testing.T) {
+	cut := time.Unix(1700000000, 0)
+	at := func(d time.Duration) time.Time { return cut.Add(d) }
+	ms := time.Millisecond
+	for _, c := range []struct {
+		name string
+		o    cutObservation
+		want string // "pass", "unexercised" or "fail"
+	}{
+		{"cancelled at the cut", cutObservation{true, at(50 * ms), at(51 * ms), true, context.DeadlineExceeded}, "pass"},
+		{"still live: shifted cut", cutObservation{true, at(50 * ms), at(51 * ms), true, nil}, "fail"},
+		{"cancelled otherwise", cutObservation{true, at(50 * ms), at(51 * ms), true, context.Canceled}, "fail"},
+		{"never sampled", cutObservation{}, "unexercised"},
+		{"CAS entered after the sample", cutObservation{true, at(50 * ms), at(51 * ms), false, nil}, "unexercised"},
+		{"delayed sample of a shifted cut", cutObservation{true, at(120 * ms), at(121 * ms), true, context.DeadlineExceeded}, "unexercised"},
+		{"sample straddles the shift", cutObservation{true, at(90 * ms), at(100 * ms), true, context.DeadlineExceeded}, "unexercised"},
+		{"sampled before the cut", cutObservation{true, at(-ms), at(0), true, nil}, "unexercised"},
+	} {
+		err := cutWitnessVerdict(cut, c.o)
+		got := "fail"
+		switch {
+		case err == nil:
+			got = "pass"
+		case errors.Is(err, errCutWitnessUnexercised):
+			got = "unexercised"
+		}
+		if got != c.want {
+			t.Errorf("%s: %s (%v), want %s", c.name, got, err, c.want)
+		}
+	}
 }
 
 // HEAD belongs to a newer epoch: the detach's CAS is refused and the volume
