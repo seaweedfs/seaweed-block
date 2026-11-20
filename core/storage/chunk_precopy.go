@@ -49,6 +49,7 @@ func (l *chunkLayerImpl) PrecopyDetach(ctx context.Context, stopIO func() bool) 
 	l.capMu.Lock()
 	defer l.capMu.Unlock()
 	if r, ok := l.storedDetach(); ok {
+		r.Precopy.Frozen = true
 		return r, nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, precopyDuration)
@@ -79,7 +80,7 @@ func (l *chunkLayerImpl) PrecopyDetach(ctx context.Context, stopIO func() bool) 
 		}
 		if err != nil {
 			// An unresolved publication or lost authority is never another rolling point.
-			if errors.Is(err, errChunkCASOutcomeUnknown) || errors.Is(err, errChunkLayerFenced) || errors.Is(err, errChunkLayerClosed) || ctx.Err() != nil {
+			if errors.Is(err, errChunkCASOutcomeUnknown) || errors.Is(err, errChunkLayerFenced) || errors.Is(err, errChunkLayerClosed) || ctx.Err() != nil || !(errors.Is(err, errCutCOWAborted) || errors.Is(err, errChunkRemoteUnavailable) || errors.Is(err, errChunkHeadPrecondition)) {
 				return r, err
 			}
 		}
@@ -104,8 +105,8 @@ func (l *chunkLayerImpl) precopyEstimate(tail uint64, attempts int) PrecopyRepor
 			r.SampleAge = age
 		}
 		// With at most 32 observations the maximum is a conservative empirical
-		// p99 envelope. Whole-cut time includes transfer too, so it overcharges,
-		// rather than omitting, manifest/read-back/local work. The stop is drained.
+		// p99 envelope of the measured non-payload path (including final
+		// metadata, CAS/read-back and settlement). The stop is already drained.
 		if s.fixed > r.Fixed {
 			r.Fixed = s.fixed
 		}
@@ -144,9 +145,9 @@ func (l *chunkLayerImpl) precopyEstimate(tail uint64, attempts int) PrecopyRepor
 }
 
 func (l *chunkLayerImpl) samplePrecopy(st chunkCutStats) {
-	s := precopySample{at: time.Now(), fixed: time.Duration(st.TotalNs)}
-	if st.UploadedBytes > 0 && st.UploadNs > 0 {
-		s.rate = float64(st.UploadedBytes) / time.Duration(st.UploadNs).Seconds()
+	s := precopySample{at: time.Now(), fixed: time.Duration(max(int64(1), st.TotalNs-st.precopyPayloadNs))}
+	if st.UploadedBytes > 0 && st.precopyPayloadNs > 0 {
+		s.rate = float64(st.UploadedBytes) / time.Duration(st.precopyPayloadNs).Seconds()
 	}
 	l.precopySamples = append(l.precopySamples, s)
 	if len(l.precopySamples) > 32 {

@@ -875,7 +875,11 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 
 	// Pre-copy large native dirty sets outside the barrier, bounded by the
 	// remaining COW exposure rather than a fixed candidate count.
+	stageStart := time.Now()
 	staged, intents, err := l.stage(ctx, &st)
+	if st.UploadedBytes > 0 {
+		st.precopyPayloadNs += time.Since(stageStart).Nanoseconds()
+	}
 	if err != nil {
 		l.dropIntents(ctx, intents)
 		return chunkCutResult{}, err
@@ -976,6 +980,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	st.CandidateChunks = len(candidates)
 	var copyErr error
 	copyStart := time.Now()
+	bytesBeforeCopy := st.UploadedBytes
 	if l.usesOwnedMapV3() {
 		var w *cutCOWWindow
 		w, copyErr = l.installCOWWindow(candidates, useStaged, baseHead.Chunks)
@@ -1018,6 +1023,9 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		st.BarrierPauseNs = time.Since(pauseStart).Nanoseconds()
 	}
 	st.CopyNs = time.Since(copyStart).Nanoseconds()
+	if st.UploadedBytes > bytesBeforeCopy {
+		st.precopyPayloadNs += st.CopyNs
+	}
 	if l.usesOwnedMapV3() {
 		st.UploadNs = st.CopyNs
 	}
@@ -1085,6 +1093,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		}
 		intents = append(intents, id)
 	}
+	payloadStart := time.Now()
 	if err := l.uploadBatch(ctx, len(uploads), func(ctx context.Context, i int) error {
 		u := uploads[i]
 		return l.putCaptured(ctx, u.key, u.c.data)
@@ -1092,6 +1101,9 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		l.abortCut(all)
 		l.dropIntents(ctx, intents)
 		return chunkCutResult{}, fmt.Errorf("storage: capture upload: %w", errors.Join(errChunkRemoteUnavailable, errCutUpload, err))
+	}
+	if len(uploads) > 0 {
+		st.precopyPayloadNs += time.Since(payloadStart).Nanoseconds()
 	}
 	for _, u := range uploads {
 		next.Chunks[u.c.idx] = chunkRef{Key: u.key, SHA256: u.c.sum, Encoding: "full", BirthLSN: u.c.birth}
