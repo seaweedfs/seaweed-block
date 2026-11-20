@@ -38,7 +38,7 @@ func TestHostCutLimitDoesNotGateGuestIO(t *testing.T) {
 	if _, e = s.Write(0, block(0x72)); e != nil {
 		t.Fatal(e)
 	}
-	if e = s.Sync(); e != nil {
+	if _, e = s.Sync(); e != nil {
 		t.Fatal(e)
 	}
 	if _, e = p.CaptureVolume(context.Background(), "v1"); !errors.Is(e, storage.ErrChunkCaptureRefused) {
@@ -47,7 +47,7 @@ func TestHostCutLimitDoesNotGateGuestIO(t *testing.T) {
 	if _, e = s.Write(1, block(0x73)); e != nil {
 		t.Fatal("limiter blocked write", e)
 	}
-	if e = s.Sync(); e != nil {
+	if _, e = s.Sync(); e != nil {
 		t.Fatal("limiter blocked Flush", e)
 	}
 	if b, e := s.Read(0); e != nil || b[0] != 0x72 {

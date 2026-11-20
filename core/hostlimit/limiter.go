@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -62,11 +63,12 @@ type lease struct {
 	abort        func(error)
 	timer        *time.Timer
 	releasing    bool
+	revoked      bool
 }
 type Limiter struct {
 	cfg        Config
 	mu         sync.Mutex
-	cond       *sync.Cond
+	admitWG    sync.WaitGroup
 	next       uint64
 	live       map[uint64]*lease
 	stats      Stats
@@ -82,7 +84,6 @@ func New(c Config) (*Limiter, error) {
 		return nil, err
 	}
 	l := &Limiter{cfg: c, live: map[uint64]*lease{}, wake: make(chan struct{}, 1), done: make(chan struct{})}
-	l.cond = sync.NewCond(&l.mu)
 	go l.releaseLoop()
 	return l, nil
 }
@@ -160,6 +161,14 @@ func (l *Limiter) pool(c Class) (*os.File, error) {
 	return nil, ErrBusy
 }
 func (l *Limiter) Admit(ctx context.Context, payload int64, abort func(error)) (uint64, error) {
+	l.mu.Lock()
+	if l.closed {
+		l.mu.Unlock()
+		return 0, ErrRevoked
+	}
+	l.admitWG.Add(1)
+	l.mu.Unlock()
+	defer l.admitWG.Done()
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -200,6 +209,9 @@ func (l *Limiter) Admit(ctx context.Context, payload int64, abort func(error)) (
 	l.fallback = fallback
 	l.stats.FallbackActive = fallback
 	if fallback {
+		if l.stats.Fallback == 0 {
+			log.Printf("hostlimit: shared cut pool unavailable (%v); using static fallback, shared memory/spill cap NOT enforced", err)
+		}
 		l.stats.Fallback++
 		l.stats.FallbackActive = true
 	}
@@ -211,7 +223,8 @@ func (l *Limiter) revoke(id uint64) {
 	l.mu.Lock()
 	x := l.live[id]
 	var abort func(error)
-	if x != nil && !x.releasing {
+	if x != nil && !x.releasing && !x.revoked {
+		x.revoked = true
 		abort = x.abort
 		l.stats.Revoked++
 	}
@@ -225,11 +238,12 @@ func (l *Limiter) revoke(id uint64) {
 func (l *Limiter) ReserveCOW(id uint64, n int64) error {
 	l.mu.Lock()
 	x := l.live[id]
-	if x == nil || x.releasing || n < 0 {
+	if x == nil || x.releasing || x.revoked || n < 0 {
 		l.mu.Unlock()
 		return ErrRevoked
 	}
 	if n > l.cfg.COWBytes-x.cow {
+		x.revoked = true
 		abort := x.abort
 		l.stats.Revoked++
 		l.mu.Unlock()
@@ -289,7 +303,6 @@ func (l *Limiter) releaseLoop() {
 			l.stats.PayloadReserved -= x.payload
 			l.stats.COWReserved -= x.cow
 			l.stats.Released++
-			l.cond.Broadcast()
 			l.mu.Unlock()
 		}
 	}
@@ -303,30 +316,38 @@ func (l *Limiter) WaitUpload(ctx context.Context, n int) error {
 	if n < 0 {
 		return ErrBusy
 	}
-	l.mu.Lock()
-	div := l.cfg.NormalSlots + l.cfg.UrgentSlots
-	if l.fallback {
-		div = l.cfg.FallbackVolumes
-	}
-	rate := l.cfg.BytesPerSecond / int64(div)
-	if rate < 1 {
-		rate = 1
-	}
-	now := time.Now()
-	start := l.nextUpload
-	if start.Before(now) {
-		start = now
-	}
-	duration := time.Duration(float64(n) / float64(rate) * float64(time.Second))
-	l.nextUpload = start.Add(duration)
-	l.mu.Unlock()
-	timer := time.NewTimer(time.Until(start))
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		l.mu.Lock()
+		if l.closed {
+			l.mu.Unlock()
+			return ErrRevoked
+		}
+		div := l.cfg.NormalSlots + l.cfg.UrgentSlots
+		if l.fallback {
+			div = l.cfg.FallbackVolumes
+		}
+		rate := l.cfg.BytesPerSecond / int64(div)
+		if rate < 1 {
+			rate = 1
+		}
+		now := time.Now()
+		wait := time.Until(l.nextUpload)
+		if wait <= 0 {
+			l.nextUpload = now.Add(time.Duration(float64(n) / float64(rate) * float64(time.Second)))
+			l.mu.Unlock()
+			return ctx.Err()
+		}
+		l.mu.Unlock()
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
 	}
 }
 
@@ -342,6 +363,7 @@ func (l *Limiter) Close() {
 		}
 	}
 	l.mu.Unlock()
+	l.admitWG.Wait()
 	for _, a := range callbacks {
 		a(ErrRevoked)
 	}
