@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"testing"
 )
 
@@ -26,5 +27,10 @@ func TestChunkBirthSeededFrontierPreservesInheritedImage(t *testing.T) {
 	}
 	if cut.Head.Chunks[1].BirthLSN != 7 || cut.Head.Chunks[0].BirthLSN != newest {
 		t.Fatalf("seeded image birth lost: %+v", cut.Head)
+	}
+	want := bytes.Clone(image)
+	copy(want, makeBlock(ctBlockSize, 0x41))
+	if !bytes.Equal(f.imageOf(t, cut.Head), want) {
+		t.Fatal("seeded cut changed inherited or appended bytes")
 	}
 }
