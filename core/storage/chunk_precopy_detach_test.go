@@ -351,3 +351,43 @@ func TestPrecopyDrainReceives100MillisecondBound(t *testing.T) {
 		t.Fatalf("calls=%d err=%v", calls, err)
 	}
 }
+
+func TestPrecopyDrainLetsAnAdmittedWriterReachTheBarrier(t *testing.T) {
+	s, f, l, _ := precopyLayer(t, 1024, 3)
+	written := make(chan error, 1)
+	started, timedOut := false, false
+	t.Cleanup(func() {
+		if !started {
+			return
+		}
+		select {
+		case <-written:
+		case <-time.After(3 * time.Second):
+			t.Error("admitted writer did not join")
+		}
+	})
+	r, err := l.PrecopyDetachWithAdmission(ctTimeout(t), func(ctx context.Context) (func(), error) {
+		if started {
+			return func() {}, nil
+		}
+		started = true
+		go func() {
+			_, err := s.Write(2, makeBlock(ctBlockSize, 0xa7))
+			written <- err
+		}()
+		select {
+		case err := <-written:
+			written <- err // retain the completion for the cleanup join
+			return func() {}, err
+		case <-ctx.Done():
+			timedOut = true
+			return nil, ctx.Err()
+		}
+	}, func() bool { return true })
+	if timedOut || err != nil || !r.Precopy.Frozen || r.Precopy.Attempts != 1 {
+		t.Fatalf("drain blocked admitted writer: timed_out=%t report=%+v err=%v", timedOut, r.Precopy, err)
+	}
+	if !bytes.Equal(f.imageOf(t, r.Head)[2*ctBlockSize:3*ctBlockSize], makeBlock(ctBlockSize, 0xa7)) {
+		t.Fatal("authoritative barrier omitted the drained writer")
+	}
+}
