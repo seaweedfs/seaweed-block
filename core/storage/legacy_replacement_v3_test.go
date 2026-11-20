@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -186,6 +187,61 @@ func TestNativeReplacementAllBlocksAfterCheckpoint(t *testing.T) {
 	}
 	if len(all) != 2 || !bytes.Equal(all[1], blk(0x11)) || !bytes.Equal(all[7], blk(0x77)) {
 		t.Fatal("checkpointed LBAs missing from AllBlocks or bytes changed")
+	}
+}
+
+func TestNativeReplacementQueuedWritersAfterFailedAppend(t *testing.T) {
+	for _, batch := range []bool{false, true} {
+		t.Run(map[bool]string{false: "write", true: "batch"}[batch], func(t *testing.T) {
+			s, _ := newMappedCheckpointStoreV3(t)
+			s.admission = nil
+			entered, release, admitted := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			open := sync.OnceFunc(func() { close(release) })
+			a, b := make(chan struct{}), make(chan struct{})
+			var errA, errB error
+			t.Cleanup(func() {
+				open()
+				for _, done := range []chan struct{}{a, b} {
+					select {
+					case <-done:
+					case <-time.After(10 * time.Second):
+						t.Error("append worker did not settle")
+					}
+				}
+			})
+			boom := errors.New("held native batch pwrite failure")
+			var calls atomic.Int32
+			s.v3.w.writeAt = func(data []byte, off int64) (int, error) {
+				if calls.Add(1) == 1 {
+					close(entered)
+					<-release
+				}
+				n, _ := s.fd.WriteAt(data, off)
+				return n, boom
+			}
+			next, head := s.NextLSN(), s.v3.w.logicalHeadV3()
+			go func() { _, errA = s.WriteBatch(10, [][]byte{blk(0x31), blk(0x32)}); close(a) }()
+			waitV3(t, entered, "failing native append")
+			s.testAfterAdmit = sync.OnceFunc(func() { close(admitted) })
+			go func() {
+				if batch {
+					_, errB = s.WriteBatch(20, [][]byte{blk(0x41), blk(0x42)})
+				} else {
+					_, errB = s.Write(20, blk(0x41))
+				}
+				close(b)
+			}()
+			waitV3(t, admitted, "queued writer admission")
+			open()
+			waitV3(t, a, "failed append return")
+			waitV3(t, b, "queued writer return")
+			if !errors.Is(errA, boom) || !errors.Is(errB, boom) {
+				t.Fatalf("append=%v queued=%v", errA, errB)
+			}
+			if calls.Load() != 1 || s.NextLSN() != next || s.v3.w.logicalHeadV3() != head || s.dm.len() != 0 {
+				t.Fatal("queued writer appended, consumed an LSN or published dirty state after failure")
+			}
+		})
 	}
 }
 
@@ -501,6 +557,12 @@ func TestNativeReplacementCallerPublicationFaults(t *testing.T) {
 				}
 				if s.v3.pub.current() != before || s.NextLSN() != next {
 					t.Fatal("failed publication advanced the descriptor or allocator")
+				}
+				if caller == "checkpoint" {
+					i := s.FlusherInstrumentation()
+					if s.dm.len() != 1 || i.CheckpointFailures != 1 || i.CyclesFailed != 1 || i.CyclesSucceeded != 0 {
+						t.Fatalf("failed checkpoint lost retry state or counters: dirty=%d %+v", s.dm.len(), i)
+					}
 				}
 				rawBefore, err := os.ReadFile(path)
 				if err != nil {
