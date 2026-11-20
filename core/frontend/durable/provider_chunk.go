@@ -952,6 +952,10 @@ func (p *DurableProvider) DetachVolume(ctx context.Context, volumeID string) (st
 			beginFreeze()
 			return true
 		})
+		// Log only after capture releases its barrier; at most five records.
+		for _, a := range r.Precopy.Rounds {
+			log.Printf("durable: pre-copy attempt volume=%s attempt=%d drain_ms=%.3f barrier_ms=%.3f pause_ms=%.3f reason=%s tail=%d rate_samples=%d estimate_ms=%.3f frozen=%t err=%s", volumeID, a.Attempt, float64(a.Drain)/float64(time.Millisecond), float64(a.Barrier)/float64(time.Millisecond), float64(a.Pause)/float64(time.Millisecond), a.Reason, a.TailBytes, a.RateSamples, float64(a.Estimate)/float64(time.Millisecond), a.Frozen, a.Error)
+		}
 		log.Printf("durable: pre-copy volume=%s attempts=%d tail=%d rate=%.0f sample_age=%s fixed=%s estimate=%s frozen=%t reason=%s err=%v", volumeID, r.Precopy.Attempts, r.Precopy.TailBytes, r.Precopy.BytesPerSecond, r.Precopy.SampleAge, r.Precopy.Fixed, r.Precopy.Estimate, r.Precopy.Frozen, r.Precopy.Reason, err)
 		if err == nil {
 			if !start.IsZero() {

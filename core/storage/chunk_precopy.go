@@ -26,26 +26,41 @@ type precopySample struct {
 	rate  float64
 }
 
+type PrecopyAttempt struct {
+	Attempt     int           `json:"attempt"`
+	Drain       time.Duration `json:"drainNs"`
+	Barrier     time.Duration `json:"barrierNs"`
+	Pause       time.Duration `json:"pauseNs"`
+	TailBytes   uint64        `json:"tailBytes"`
+	RateSamples int           `json:"rateSamples"`
+	Estimate    time.Duration `json:"estimateNs"`
+	Reason      string        `json:"reason"`
+	Frozen      bool          `json:"frozen"`
+	Error       string        `json:"error,omitempty"`
+}
+
 // PrecopyReport records admission estimates, not a worst-case latency proof.
 type PrecopyReport struct {
-	Drain                 time.Duration `json:"drainNs"`
-	DrainTimedOut         bool          `json:"drainTimedOut"`
-	Attempts              int           `json:"attempts"`
-	TailBytes             uint64        `json:"tailBytes"`
-	Fixed                 time.Duration `json:"fixedNs"`
-	Estimate              time.Duration `json:"estimateNs"`
-	SampleAge             time.Duration `json:"sampleAgeNs"`
-	BytesPerSecond        float64       `json:"bytesPerSecond"`
-	Reason                string        `json:"reason"`
-	Frozen                bool          `json:"frozen"`
-	FreezeElapsed         time.Duration `json:"freezeElapsedNs"`
-	ExtraCASAttempts      uint64        `json:"extraCASAttempts"`
-	CASFailureTimeout     time.Duration `json:"casFailureTimeoutNs"`
-	DeclaredWorst         time.Duration `json:"declaredWorstNs"`
-	LatencyGateFailed     bool          `json:"latencyGateFailed"`
-	BarrierBeforeFreeze   time.Duration `json:"barrierBeforeFreezeNs"`
-	TentativePauseTotal   time.Duration `json:"tentativePauseTotalNs"`
-	LongestTentativePause time.Duration `json:"longestTentativePauseNs"`
+	Rounds                []PrecopyAttempt `json:"rounds,omitempty"`
+	Drain                 time.Duration    `json:"drainNs"`
+	DrainTimedOut         bool             `json:"drainTimedOut"`
+	Attempts              int              `json:"attempts"`
+	TailBytes             uint64           `json:"tailBytes"`
+	Fixed                 time.Duration    `json:"fixedNs"`
+	Estimate              time.Duration    `json:"estimateNs"`
+	SampleAge             time.Duration    `json:"sampleAgeNs"`
+	BytesPerSecond        float64          `json:"bytesPerSecond"`
+	RateSamples           int              `json:"rateSamples"`
+	Reason                string           `json:"reason"`
+	Frozen                bool             `json:"frozen"`
+	FreezeElapsed         time.Duration    `json:"freezeElapsedNs"`
+	ExtraCASAttempts      uint64           `json:"extraCASAttempts"`
+	CASFailureTimeout     time.Duration    `json:"casFailureTimeoutNs"`
+	DeclaredWorst         time.Duration    `json:"declaredWorstNs"`
+	LatencyGateFailed     bool             `json:"latencyGateFailed"`
+	BarrierBeforeFreeze   time.Duration    `json:"barrierBeforeFreezeNs"`
+	TentativePauseTotal   time.Duration    `json:"tentativePauseTotalNs"`
+	LongestTentativePause time.Duration    `json:"longestTentativePauseNs"`
 }
 
 // Finish records the whole freeze, including any owner-driven settlement.
@@ -98,6 +113,7 @@ func (l *chunkLayerImpl) precopyDetach(ctx context.Context, prepare func(context
 	var pauseTotal, longestPause time.Duration
 	var drain time.Duration
 	var drainErr error
+	var rounds []PrecopyAttempt
 	if prepare != nil {
 		l.precopyPrepare = func(ctx context.Context) (func(), error) {
 			dc, cancel := context.WithTimeout(ctx, precopyDrainBound)
@@ -148,11 +164,27 @@ func (l *chunkLayerImpl) precopyDetach(ctx context.Context, prepare func(context
 	}
 	defer func() { l.precopyFreeze = nil; l.precopyPause = nil; l.precopyPrepare = nil }()
 	for attempt := 1; attempt <= precopyAttempts; attempt++ {
-		report.Attempts = attempt
+		report = PrecopyReport{Attempts: attempt, Rounds: rounds}
+		drain, drainErr = 0, nil
 		if err := ctx.Err(); err != nil {
 			return ChunkCutResult{Precopy: report}, err
 		}
+		pauseBefore := pauseTotal
 		r, err := l.captureLocked(ctx, false)
+		a := PrecopyAttempt{
+			Attempt: attempt, Drain: drain, Pause: pauseTotal - pauseBefore,
+			TailBytes: report.TailBytes, RateSamples: report.RateSamples,
+			Estimate: report.Estimate, Reason: report.Reason, Frozen: report.Frozen,
+		}
+		a.Barrier = max(time.Duration(0), a.Pause-a.Drain)
+		if a.Reason == "" {
+			a.Reason = "before_barrier"
+		}
+		if err != nil {
+			a.Error = err.Error()
+		}
+		rounds = append(rounds, a)
+		report.Rounds = rounds
 		report.TentativePauseTotal, report.LongestTentativePause = pauseTotal, longestPause
 		r.Precopy = report
 		if errors.Is(err, errChunkLayerDetached) {
@@ -209,6 +241,7 @@ func (l *chunkLayerImpl) precopyEstimate(tail uint64, attempts int) PrecopyRepor
 			rates = append(rates, s.rate)
 		}
 	}
+	r.RateSamples = len(rates)
 	if r.Fixed <= 0 {
 		return r
 	}

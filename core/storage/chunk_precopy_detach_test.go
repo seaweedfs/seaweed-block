@@ -391,3 +391,28 @@ func TestPrecopyDrainLetsAnAdmittedWriterReachTheBarrier(t *testing.T) {
 		t.Fatal("authoritative barrier omitted the drained writer")
 	}
 }
+
+func TestPrecopyAttemptDiagnosticsSeparateTimeoutFromFit(t *testing.T) {
+	_, _, l, _ := precopyLayer(t, 1024, 0)
+	calls := 0
+	r, err := l.PrecopyDetachWithAdmission(ctTimeout(t), func(ctx context.Context) (func(), error) {
+		calls++
+		if calls == 1 {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		return func() {}, nil
+	}, func() bool { return true })
+	if err != nil || len(r.Precopy.Rounds) != 2 {
+		t.Fatalf("rounds=%+v err=%v", r.Precopy.Rounds, err)
+	}
+	first, second := r.Precopy.Rounds[0], r.Precopy.Rounds[1]
+	if first.Attempt != 1 || first.Reason != "drain_timeout" || first.Frozen || second.Attempt != 2 || second.Reason != "fit" || !second.Frozen {
+		t.Fatalf("attempt outcomes mixed: first=%+v second=%+v", first, second)
+	}
+	for _, a := range r.Precopy.Rounds {
+		if a.Drain <= 0 || a.Pause < a.Drain || a.Barrier != a.Pause-a.Drain {
+			t.Fatalf("pause accounting: %+v", a)
+		}
+	}
+}
