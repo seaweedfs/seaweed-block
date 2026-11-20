@@ -119,6 +119,14 @@ func (l *chunkLayerImpl) PrecopyDetach(ctx context.Context, stopIO func() bool) 
 		r, err := l.captureLocked(ctx, false)
 		report.TentativePauseTotal, report.LongestTentativePause = pauseTotal, longestPause
 		r.Precopy = report
+		if errors.Is(err, errChunkLayerDetached) {
+			if previous, ok := l.storedDetach(); ok {
+				previous.Precopy = report
+				previous.Precopy.Frozen = true
+				previous.Precopy.Reason = "previous_detach_applied"
+				return previous, nil
+			}
+		}
 		if report.Frozen {
 			attempts := countCAS() - casAtFreeze
 			extra := uint64(0)
@@ -155,8 +163,9 @@ func (l *chunkLayerImpl) precopyEstimate(tail uint64, attempts int) PrecopyRepor
 			r.SampleAge = age
 		}
 		// With at most 32 observations the maximum is a conservative empirical
-		// p99 envelope of the measured non-payload path (including final
-		// metadata, CAS/read-back and settlement). The stop is already drained.
+		// p99 envelope of barrier-to-settlement non-payload work. Serving
+		// preparation and host-budget waits are outside the freeze. The stop
+		// is already drained; metadata and CAS/read-back remain included.
 		if s.fixed > r.Fixed {
 			r.Fixed = s.fixed
 		}
@@ -194,8 +203,8 @@ func (l *chunkLayerImpl) precopyEstimate(tail uint64, attempts int) PrecopyRepor
 	return r
 }
 
-func (l *chunkLayerImpl) samplePrecopy(st chunkCutStats) {
-	s := precopySample{at: time.Now(), fixed: time.Duration(max(int64(1), st.TotalNs-st.PayloadNs))}
+func (l *chunkLayerImpl) samplePrecopy(st chunkCutStats, fixedNs int64) {
+	s := precopySample{at: time.Now(), fixed: time.Duration(max(int64(1), fixedNs))}
 	if st.UploadedBytes > 0 && st.PayloadNs > 0 {
 		s.rate = float64(st.UploadedBytes) / time.Duration(st.PayloadNs).Seconds()
 	}

@@ -807,11 +807,16 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	defer done()
 	start := time.Now()
 	var st chunkCutStats
+	var pauseStart time.Time
+	var payloadBeforeBarrier int64
 	defer func() {
 		st.TotalNs = time.Since(start).Nanoseconds()
 		if err == nil {
 			res.Stats = st
-			l.samplePrecopy(st)
+			if !pauseStart.IsZero() {
+				fixed := time.Since(pauseStart).Nanoseconds() - st.PayloadNs + payloadBeforeBarrier
+				l.samplePrecopy(st, fixed)
+			}
 		}
 		if errors.Is(err, errChunkLayerFenced) {
 			l.stMu.Lock()
@@ -898,7 +903,8 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	// writer blocks new readers of captureMu, so a write arriving while the cut
 	// waits for writers already holding it (e.g. parked in WAL admission) is
 	// paused too. LockWaitNs reports that wait on its own.
-	pauseStart := time.Now()
+	payloadBeforeBarrier = st.PayloadNs
+	pauseStart = time.Now()
 	if hook := l.testBeforeBarrierLockHook; hook != nil {
 		hook()
 	}
