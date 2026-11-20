@@ -43,7 +43,12 @@ func captureSeedLog(t *testing.T) *seedLog {
 	return l
 }
 
-var seedTimesLine = regexp.MustCompile(`storage: seed frontier 7: capture\+lifecycle lock wait [0-9.]+[a-zµ]+s, store mutex\+validation [0-9.]+[a-zµ]+s, data sync \(incl\. sync serialization\) [0-9.]+[a-zµ]+s, checkpoint publish [0-9.]+[a-zµ]+s, err=`)
+// durationRE matches a time.Duration's String form at any scale: "92ns",
+// "1.0197ms", "1.4535s", "2m3.5s".
+const durationRE = `(?:[0-9.]+(?:ns|us|µs|ms|s|m|h))+`
+
+var seedTimesLine = regexp.MustCompile(`storage: seed frontier 7: capture\+lifecycle lock wait ` + durationRE + `, store mutex\+validation ` + durationRE +
+	`, data sync \(incl\. sync serialization\) ` + durationRE + `, checkpoint publish ` + durationRE + `, err=`)
 
 // A v3 seed logs its lock wait, data fsync and checkpoint publication
 // times once per seed that did I/O, with its outcome; a no-op repeat and a
@@ -156,5 +161,20 @@ func TestWALStoreV3SeedLogsOutsideTheStoreLocks(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the seed did not finish after the log output was released")
+	}
+}
+
+// The stage-time pattern accepts durations of a second and more (a slow
+// fsync under load printed "1.453517616s" and failed the old pattern).
+func TestSeedTimesLineMatchesEveryDurationScale(t *testing.T) {
+	for _, d := range []string{"92ns", "498ns", "1.019665ms", "1.453517616s", "2m3.5s", "1h0m0s"} {
+		line := "storage: seed frontier 7: capture+lifecycle lock wait " + d + ", store mutex+validation " + d +
+			", data sync (incl. sync serialization) " + d + ", checkpoint publish " + d + ", err=<nil>"
+		if !seedTimesLine.MatchString(line) {
+			t.Errorf("pattern rejects %q", d)
+		}
+	}
+	if seedTimesLine.MatchString("storage: seed frontier 7: capture+lifecycle lock wait , store mutex+validation 1s, data sync (incl. sync serialization) 1s, checkpoint publish 1s, err=<nil>") {
+		t.Error("pattern accepts a missing duration")
 	}
 }
