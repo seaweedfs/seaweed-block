@@ -11,12 +11,24 @@ import (
 // detection belt, not a substitute for a single HEAD serialization point.
 const chunkHeadCoolingWindow = 5 * time.Second
 
+// ChunkHeadRootReader confirms publication identity without resolving every
+// immutable manifest. The returned Chunks need not be populated.
+type ChunkHeadRootReader interface {
+	GetHeadRoot(context.Context) (ChunkHead, error)
+}
+
 func confirmChunkHead(ctx context.Context, remote chunkRemote, want chunkHead) error {
-	got, err := remote.GetHead(ctx)
+	var got chunkHead
+	var err error
+	if reader, ok := remote.(ChunkHeadRootReader); ok {
+		got, err = reader.GetHeadRoot(ctx)
+	} else {
+		got, err = remote.GetHead(ctx)
+	}
 	if err != nil {
 		return fmt.Errorf("storage: HEAD publication confirmation: %w: %w", errChunkCASOutcomeUnknown, err)
 	}
-	if got.Gen != want.Gen || !sameProposal(got, want) {
+	if got.Gen != want.Gen || got.Epoch != want.Epoch || got.Holder != want.Holder {
 		log.Printf("ALARM: HEAD publication displaced: wanted gen=%d epoch=%d holder=%q, read gen=%d epoch=%d holder=%q", want.Gen, want.Epoch, want.Holder, got.Gen, got.Epoch, got.Holder)
 		return fmt.Errorf("%w: HEAD publication displaced", errChunkLayerFenced)
 	}

@@ -514,6 +514,15 @@ func (r *closeBoundRemote) GetHead(ctx context.Context) (storage.ChunkHead, erro
 	return r.ChunkRemote.GetHead(c)
 }
 
+func (r *closeBoundRemote) GetHeadRoot(ctx context.Context) (storage.ChunkHead, error) {
+	c, end := r.bind(ctx)
+	defer end()
+	if reader, ok := r.ChunkRemote.(storage.ChunkHeadRootReader); ok {
+		return reader.GetHeadRoot(c)
+	}
+	return r.ChunkRemote.GetHead(c)
+}
+
 func (r *closeBoundRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVersion, next storage.ChunkHead) (uint64, error) {
 	c, end := r.bind(ctx)
 	defer end()
