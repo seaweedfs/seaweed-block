@@ -46,6 +46,13 @@ type chunkFlags struct {
 
 func validateChunkFlags(f flags) error {
 	c := f.chunk
+	if c.hostLimit.Directory != "" {
+		if err := c.hostLimit.Validate(); err != nil {
+			return err
+		}
+	} else if c.hostLimit != (hostlimit.Config{}) && c.hostLimit != hostlimit.DefaultConfig("") {
+		return errors.New("--host-limit-* settings require --host-limit-dir")
+	}
 	if f.durableImpl != "walstore-chunk" {
 		if c.filer != "" || c.collection != "" || c.replication != "" || c.path != defaultChunkPath ||
 			c.captureInterval != defaultChunkCaptureInterval || c.dirtyThreshold != defaultChunkDirtyThreshold ||

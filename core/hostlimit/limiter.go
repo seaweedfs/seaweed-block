@@ -47,7 +47,7 @@ type Config struct {
 func DefaultConfig(dir string) Config {
 	return Config{Directory: dir, NormalSlots: 3, UrgentSlots: 1, FillSlots: 2, IdleSlots: 1, PayloadBytes: 64 << 20, COWBytes: 1 << 30, BytesPerSecond: 64 << 20, FallbackVolumes: 200, MaxHold: 5 * time.Minute}
 }
-func (c Config) validate() error {
+func (c Config) Validate() error {
 	if !filepath.IsAbs(c.Directory) || c.NormalSlots < 1 || c.UrgentSlots < 1 || c.FillSlots < 0 || c.IdleSlots < 0 || c.NormalSlots+c.UrgentSlots+c.FillSlots+c.IdleSlots > 256 || c.PayloadBytes <= 0 || c.COWBytes <= 0 || c.BytesPerSecond <= 0 || c.FallbackVolumes < 1 || c.FallbackVolumes > 65536 || c.MaxHold <= 0 {
 		return errors.New("hostlimit: invalid configuration")
 	}
@@ -84,7 +84,7 @@ type Limiter struct {
 }
 
 func New(c Config) (*Limiter, error) {
-	if err := c.validate(); err != nil {
+	if err := c.Validate(); err != nil {
 		return nil, err
 	}
 	l := &Limiter{cfg: c, live: map[uint64]*lease{}, wake: make(chan struct{}, 1), done: make(chan struct{})}
