@@ -64,7 +64,11 @@ func TestInitializedFileRejectsSparseAndUnwritten(t *testing.T) {
 
 func TestFdatasyncAcknowledgedWritesSurviveSIGKILL(t *testing.T) {
 	if path := os.Getenv("SWBLOCK_TEST_SYNC_CRASH"); path != "" {
-		s, e := CreateWALStore(path, 32, 4096)
+		opts := WALStoreOptions{}
+		if os.Getenv("SWBLOCK_TEST_STRICT") == "1" {
+			opts.WMode = WModeStrict
+		}
+		s, e := CreateWALStoreWithOptions(path, 32, 4096, opts)
 		if e != nil {
 			panic(e)
 		}
@@ -90,72 +94,79 @@ func TestFdatasyncAcknowledgedWritesSurviveSIGKILL(t *testing.T) {
 			time.Sleep(time.Hour)
 		}
 	}
-	for _, prezero := range []string{"0", "1"} {
-		for _, extent := range []string{"0", "1"} {
-			t.Run("prezero"+prezero+"/extent"+extent, func(t *testing.T) {
-				path := filepath.Join(t.TempDir(), "volume")
-				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-				defer cancel()
-				cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestFdatasyncAcknowledgedWritesSurviveSIGKILL$")
-				cmd.Env = append(os.Environ(), "SWBLOCK_SYNC=fdatasync", "SWBLOCK_PREZERO="+prezero, "SWBLOCK_TEST_SYNC_CRASH="+path, "SWBLOCK_TEST_EXTENT="+extent)
-				out, e := cmd.StdoutPipe()
-				if e != nil {
-					t.Fatal(e)
-				}
-				var stderr bytes.Buffer
-				cmd.Stderr = &stderr
-				if e = cmd.Start(); e != nil {
-					t.Fatal(e)
-				}
-				defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
-				scan := bufio.NewScanner(out)
-				ready := false
-				for scan.Scan() {
-					if scan.Text() == "SYNC_ACKNOWLEDGED" {
-						ready = true
-						break
+	for _, strict := range []string{"0", "1"} {
+		for _, prezero := range []string{"0", "1"} {
+			for _, extent := range []string{"0", "1"} {
+				t.Run("strict"+strict+"/prezero"+prezero+"/extent"+extent, func(t *testing.T) {
+					path := filepath.Join(t.TempDir(), "volume")
+					ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+					defer cancel()
+					cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestFdatasyncAcknowledgedWritesSurviveSIGKILL$")
+					cmd.Env = append(os.Environ(), "SWBLOCK_SYNC=fdatasync", "SWBLOCK_PREZERO="+prezero, "SWBLOCK_TEST_SYNC_CRASH="+path, "SWBLOCK_TEST_EXTENT="+extent, "SWBLOCK_TEST_STRICT="+strict)
+					out, e := cmd.StdoutPipe()
+					if e != nil {
+						t.Fatal(e)
 					}
-				}
-				if !ready {
-					t.Fatalf("no sync ACK: %v %s", scan.Err(), stderr.String())
-				}
-				if e = cmd.Process.Kill(); e != nil {
-					t.Fatal(e)
-				}
-				e = cmd.Wait()
-				exit, ok := e.(*exec.ExitError)
-				if !ok {
-					t.Fatalf("not killed: %v", e)
-				}
-				status, ok := exit.Sys().(syscall.WaitStatus)
-				if !ok || status.Signal() != syscall.SIGKILL {
-					t.Fatalf("wrong exit: %v", e)
-				}
-				t.Setenv("SWBLOCK_SYNC", "fdatasync")
-				t.Setenv("SWBLOCK_PREZERO", prezero)
-				s, e := OpenWALStore(path)
-				if e != nil {
-					t.Fatal(e)
-				}
-				defer s.Close()
-				if _, e = s.Recover(); e != nil {
-					t.Fatal(e)
-				}
-				for _, lba := range []uint32{0, 13, 31} {
-					b, e := s.Read(lba)
-					if e != nil || !bytes.Equal(b, bytes.Repeat([]byte{byte(lba + 17)}, 4096)) {
-						t.Fatalf("acknowledged block%d differs: %v", lba, e)
+					var stderr bytes.Buffer
+					cmd.Stderr = &stderr
+					if e = cmd.Start(); e != nil {
+						t.Fatal(e)
 					}
-				}
-			})
+					defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+					scan := bufio.NewScanner(out)
+					ready := false
+					for scan.Scan() {
+						if scan.Text() == "SYNC_ACKNOWLEDGED" {
+							ready = true
+							break
+						}
+					}
+					if !ready {
+						t.Fatalf("no sync ACK: %v %s", scan.Err(), stderr.String())
+					}
+					if e = cmd.Process.Kill(); e != nil {
+						t.Fatal(e)
+					}
+					e = cmd.Wait()
+					exit, ok := e.(*exec.ExitError)
+					if !ok {
+						t.Fatalf("not killed: %v", e)
+					}
+					status, ok := exit.Sys().(syscall.WaitStatus)
+					if !ok || status.Signal() != syscall.SIGKILL {
+						t.Fatalf("wrong exit: %v", e)
+					}
+					t.Setenv("SWBLOCK_SYNC", "fdatasync")
+					t.Setenv("SWBLOCK_PREZERO", prezero)
+					s, e := OpenWALStore(path)
+					if e != nil {
+						t.Fatal(e)
+					}
+					defer s.Close()
+					if _, e = s.Recover(); e != nil {
+						t.Fatal(e)
+					}
+					for _, lba := range []uint32{0, 13, 31} {
+						b, e := s.Read(lba)
+						if e != nil || !bytes.Equal(b, bytes.Repeat([]byte{byte(lba + 17)}, 4096)) {
+							t.Fatalf("acknowledged block%d differs: %v", lba, e)
+						}
+					}
+				})
+			}
 		}
+
 	}
 }
 
 // Run under strace with the experiment environment unset/set to verify the
 // syscall boundary independently of the selected function's Go identity.
 func TestDataSyncSyscallProbe(t *testing.T) {
-	s, e := CreateWALStore(filepath.Join(t.TempDir(), "volume"), 32, 4096)
+	opts := WALStoreOptions{}
+	if os.Getenv("SWBLOCK_TEST_STRICT") == "1" {
+		opts.WMode = WModeStrict
+	}
+	s, e := CreateWALStoreWithOptions(filepath.Join(t.TempDir(), "volume"), 32, 4096, opts)
 	if e != nil {
 		t.Fatal(e)
 	}
