@@ -164,7 +164,7 @@ func TestGC_PublishedUnnamedAttemptRootsUntilDeletingGrace(t *testing.T) {
 		t.Fatalf("first unrooted mark: %+v %v", result, e)
 	}
 	*now = now.Add(time.Hour)
-	if result, e := g.Run(ctx); e != nil || result.Reclaimed != 2 {
+	if result, e := g.Run(ctx); e != nil || result.Reclaimed != 1 {
 		t.Fatalf("deleted attempt retained chunks forever: %+v %v", result, e)
 	}
 	if _, e := f.LookupEntry(ctx, path.Dir(oldPath), path.Base(oldPath)); e != nil {

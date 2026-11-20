@@ -338,20 +338,11 @@ func publishTagged(t *testing.T, f *fakeFiler, b *fakeBlobs, vol, tag string, ch
 	if err != nil {
 		t.Fatal(err)
 	}
-	h, ids, err := r.PrepareManifest(ctx, cur, h, uint64(catGeo.BlockSize)*uint64(catGeo.ChunkBlocks))
-	if err != nil {
-		t.Fatal(err)
-	}
 	gen, err := r.CASHead(ctx, storage.ChunkHeadVersion{Gen: cur.Gen, Epoch: cur.Epoch}, h)
 	if err != nil {
 		t.Fatal(err)
 	}
 	h.Gen = gen
-	for _, id := range ids {
-		if err := r.DeleteIntent(ctx, id); err != nil {
-			t.Fatal(err)
-		}
-	}
 	return h
 }
 
@@ -362,19 +353,6 @@ func TestCatalog_UsageFromManifests(t *testing.T) {
 	f, b, c, h := catalogFixture(t) // HEAD: chunks 0 and 3
 	ctx := context.Background()
 	full := uint64(catGeo.ChunkBlocks) * uint64(catGeo.BlockSize)
-	r, _ := NewChunkRemote(f, b, path.Join(catBase, "v1"))
-	manifestBytes := func(head storage.ChunkHead) uint64 {
-		var total uint64
-		for _, ref := range head.Segments {
-			body, err := r.Get(ctx, ref.Key)
-			if err != nil {
-				t.Fatal(err)
-			}
-			total += uint64(len(body))
-		}
-		return total
-	}
-	expectedManifestBytes := manifestBytes(h)
 	if _, err := c.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: "s1", RequestID: "r1"}, h); err != nil {
 		t.Fatal(err)
 	}
@@ -385,13 +363,12 @@ func TestCatalog_UsageFromManifests(t *testing.T) {
 	if u.LiveChunks != 2 || u.LiveBytes != 2*full || len(u.Snapshots) != 1 || u.Snapshots[0].ExclusiveBytes != 0 {
 		t.Fatalf("shared chunks: %+v", u)
 	}
-	if u.StoredBindings != 3 || u.ManifestBindings != 1 || expectedManifestBytes == 0 || u.ManifestBytes != expectedManifestBytes || u.StoredBytes != 2*full+expectedManifestBytes || u.StoredUpperBound {
+	if u.StoredBindings != 2 || u.StoredBytes != 2*full || u.StoredUpperBound {
 		t.Fatalf("stored: %+v; want 2 bindings, exact", u)
 	}
 
 	// HEAD moves on: chunk 0 is rewritten, so s1 alone holds the old one.
-	newHead := publishTagged(t, f, b, "v1", "e2", map[uint64][]byte{0: chunkBytes(0x20), 3: chunkBytes(0x13)})
-	expectedManifestBytes += manifestBytes(newHead)
+	publishTagged(t, f, b, "v1", "e2", map[uint64][]byte{0: chunkBytes(0x20), 3: chunkBytes(0x13)})
 	u, err = c.Usage(ctx, "v1")
 	if err != nil {
 		t.Fatal(err)
@@ -400,7 +377,7 @@ func TestCatalog_UsageFromManifests(t *testing.T) {
 		// both of s1's chunks are now exclusive: the new HEAD uses e2 keys
 		t.Fatalf("after HEAD moved: s1 exclusive %d, want %d", u.Snapshots[0].ExclusiveBytes, 2*full)
 	}
-	if u.StoredBindings != 6 || u.ManifestBindings != 2 || u.ManifestBytes != expectedManifestBytes || u.StoredBytes != 4*full+expectedManifestBytes || u.StoredUpperBound {
+	if u.StoredBindings != 4 || u.StoredBytes != 4*full || u.StoredUpperBound {
 		t.Fatalf("stored after HEAD moved: %+v; want 4 bindings, exact", u)
 	}
 
@@ -413,7 +390,7 @@ func TestCatalog_UsageFromManifests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(u.Snapshots) != 0 || u.StoredBindings != 6 || !u.StoredUpperBound {
+	if len(u.Snapshots) != 0 || u.StoredBindings != 4 || !u.StoredUpperBound {
 		t.Fatalf("after delete: %+v; want no snapshots, 4 bindings, upper bound", u)
 	}
 }

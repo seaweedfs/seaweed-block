@@ -151,12 +151,10 @@ type chunkBitmapStore interface {
 }
 
 // chunkRef names one published chunk: its immutable key and the SHA-256 of
-// its stored object bytes, verified before any encoding is decoded.
+// its ChunkBlocks*BlockSize bytes.
 type chunkRef struct {
-	Key      string
-	SHA256   [32]byte
-	Encoding string
-	BirthLSN uint64
+	Key    string
+	SHA256 [32]byte
 }
 
 // chunkHeadVersion is the CAS guard of HEAD.
@@ -333,9 +331,6 @@ type chunkLayerConfig struct {
 	// while its frontend is gated. An error leaves remote ownership unchanged.
 	// No store/layer/remote lock is held across the callback.
 	PrepareRestore func(head chunkHead) error
-	// RestoreChunkBytes is the local, validated geometry for upgrading a flat
-	// legacy image during an ownership claim; it is never inferred from data.
-	RestoreChunkBytes uint64
 	// CaptureAllowed is supplied by the store owner. It is an admission
 	// check, made when a capture starts and again right before its HEAD CAS:
 	// it refuses a cut during a BASE install or rebuild, or when this node is

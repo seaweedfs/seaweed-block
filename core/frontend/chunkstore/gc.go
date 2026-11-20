@@ -230,15 +230,6 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 				}
 				if in.Segments != nil {
 					h := storage.ChunkHead{Segments: in.Segments, ChunkBytes: in.ChunkBytes}
-					// Intents protect keys without carrying a published frontier.
-					// Validate segment maxima against the reference maxima here.
-					for group, ref := range h.Segments {
-						if ref.SegFormat == 0 {
-							ref.SegFormat = 1
-							h.Segments[group] = ref
-						}
-						h.RemoteLSN = max(h.RemoteLSN, ref.MaxBirthLSN)
-					}
 					for _, ref := range in.Segments {
 						h.ManifestChunkCount += ref.Count
 					}

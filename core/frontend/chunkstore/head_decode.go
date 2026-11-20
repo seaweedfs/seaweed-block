@@ -26,30 +26,9 @@ type flatHeadDoc struct {
 }
 type segmentedHeadDoc struct {
 	headIdentityDoc
-	Segments   map[uint64]legacySegmentRefDoc `json:"segments"`
-	ChunkBytes uint64                         `json:"chunk_bytes"`
-	ChunkCount int                            `json:"chunk_count"`
-}
-
-type legacySegmentRefDoc struct {
-	Key    string   `json:"key"`
-	SHA256 [32]byte `json:"sha256"`
-	Owner  string   `json:"owner"`
-	Count  int      `json:"count"`
-}
-
-type segmentRefV3Doc struct {
-	legacySegmentRefDoc
-	MaxBirthLSN *uint64 `json:"max_birth_lsn"`
-	SegFormat   int     `json:"seg_format"`
-}
-
-type levelHeadDoc struct {
-	headIdentityDoc
-	Levels     int                        `json:"levels"`
-	Segments   map[uint64]segmentRefV3Doc `json:"segments"`
-	ChunkBytes uint64                     `json:"chunk_bytes"`
-	ChunkCount int                        `json:"chunk_count"`
+	Segments   map[uint64]storage.ChunkSegment `json:"segments"`
+	ChunkBytes uint64                          `json:"chunk_bytes"`
+	ChunkCount int                             `json:"chunk_count"`
 }
 
 func (d headIdentityDoc) document() headDoc {
@@ -82,29 +61,7 @@ func decodeFormatHead(content []byte) (headDoc, error) {
 			return headDoc{}, err
 		}
 		doc := segmented.headIdentityDoc.document()
-		doc.Segments = make(map[uint64]storage.ChunkSegment, len(segmented.Segments))
-		for group, ref := range segmented.Segments {
-			doc.Segments[group] = storage.ChunkSegment{Key: ref.Key, SHA256: ref.SHA256, Owner: ref.Owner, Count: ref.Count, SegFormat: 1, MaxBirthLSN: doc.RemoteLSN}
-		}
-		doc.ChunkBytes, doc.ChunkCount = segmented.ChunkBytes, segmented.ChunkCount
-		return doc, nil
-	case 3:
-		var root levelHeadDoc
-		if err := decoder.Decode(&root); err != nil {
-			return headDoc{}, err
-		}
-		if root.Levels != 1 {
-			return headDoc{}, fmt.Errorf("chunkstore: unsupported levels %d", root.Levels)
-		}
-		doc := root.headIdentityDoc.document()
-		doc.Levels, doc.ChunkBytes, doc.ChunkCount = root.Levels, root.ChunkBytes, root.ChunkCount
-		doc.Segments = make(map[uint64]storage.ChunkSegment, len(root.Segments))
-		for group, ref := range root.Segments {
-			if ref.MaxBirthLSN == nil || (ref.SegFormat != 1 && ref.SegFormat != 2) || *ref.MaxBirthLSN > root.RemoteLSN {
-				return headDoc{}, fmt.Errorf("chunkstore: invalid segment version/birth maximum")
-			}
-			doc.Segments[group] = storage.ChunkSegment{Key: ref.Key, SHA256: ref.SHA256, Owner: ref.Owner, Count: ref.Count, SegFormat: ref.SegFormat, MaxBirthLSN: *ref.MaxBirthLSN}
-		}
+		doc.Segments, doc.ChunkBytes, doc.ChunkCount = segmented.Segments, segmented.ChunkBytes, segmented.ChunkCount
 		return doc, nil
 	default:
 		return headDoc{}, fmt.Errorf("chunkstore: unsupported HEAD format %d", discriminator.Format)

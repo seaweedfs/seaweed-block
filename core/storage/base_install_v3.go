@@ -634,15 +634,7 @@ func (s *WALStore) markMapUnknownV3(lba uint64) {
 	if v.ownedMap == nil {
 		return
 	}
-	e := &v.mapEntries[lba/v.ownedMap.chunkBlocks]
-	e.Unknown = true
-	// A BASE byte has no WAL record: inherit its image frontier, not an
-	// unrelated later write. Keep UNKNOWN conservative as before.
-	birth := s.nextLSN - 1
-	if d := v.pub.current(); d.BaseState == BaseInstalling {
-		birth = d.BaseLSN
-	}
-	e.LSN = max(e.LSN, birth)
+	v.mapEntries[lba/v.ownedMap.chunkBlocks].Unknown = true
 }
 
 // InstalledBaseLSN reports a completed local BASE obligation, not a normal

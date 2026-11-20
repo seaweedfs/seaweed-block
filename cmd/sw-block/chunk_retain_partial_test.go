@@ -41,11 +41,10 @@ func (f *failingFiler) UpdateEntry(ctx context.Context, dir string, e *filerpb.E
 func TestOpsChunk_RetainReportsPartialProgress(t *testing.T) {
 	ctx := context.Background()
 	ff := &failingFiler{MemFiler: chunkstore.NewMemFiler()}
-	fm := newManifestFixtureFiler(ff)
 	prev := dialChunkFiler
-	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return fm, func() error { return nil }, nil }
+	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return ff, func() error { return nil }, nil }
 	t.Cleanup(func() { dialChunkFiler = prev })
-	cat, err := chunkstore.NewCatalog(fm, defaultChunkPathCLI)
+	cat, err := chunkstore.NewCatalog(ff, defaultChunkPathCLI)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +54,6 @@ func TestOpsChunk_RetainReportsPartialProgress(t *testing.T) {
 	base := time.Now().Add(-48 * time.Hour)
 	head := storage.ChunkHead{Gen: 2, Epoch: 1, Holder: "s1/r1", RemoteLSN: 42, State: storage.ChunkHeadActive,
 		Chunks: map[uint64]storage.ChunkRef{0: {Key: "chunks/e1/c0/k"}}}
-	head = prepareFixtureHead(t, fm, head)
 	for i := 0; i < 4; i++ {
 		at := base.Add(time.Duration(i) * time.Minute)
 		cat.SetClock(func() time.Time { return at })

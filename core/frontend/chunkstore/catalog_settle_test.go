@@ -28,7 +28,8 @@ func intentsOf(t *testing.T, f *fakeFiler, vol string) []storage.ChunkIntent {
 
 func sortedKeysOf(h storage.ChunkHead, qualify string) []string {
 	var out []string
-	for _, k := range headKeys(h) {
+	for _, ref := range h.Chunks {
+		k := ref.Key
 		if qualify != "" && !strings.HasPrefix(k, "@") {
 			k = "@" + qualify + "/" + k
 		}
@@ -195,20 +196,11 @@ func TestFork_IncompleteRetryBoundToOriginalImage(t *testing.T) {
 		next.Chunks[k] = v
 	}
 	next.Chunks[5] = storage.ChunkRef{Key: "chunks/e1/c5/new", SHA256: sha256Of(chunkBytes(0x55))}
-	next, ids, err := r1.PrepareManifest(ctx, h, next, h.ChunkBytes)
-	if err != nil {
-		t.Fatal(err)
-	}
 	gen, err := r1.CASHead(ctx, storage.ChunkHeadVersion{Gen: h.Gen, Epoch: 1}, next)
 	if err != nil {
 		t.Fatal(err)
 	}
 	next.Gen = gen
-	for _, id := range ids {
-		if err := r1.DeleteIntent(ctx, id); err != nil {
-			t.Fatal(err)
-		}
-	}
 	if _, err := c.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: "s1", RequestID: "r-new"}, next); err != nil {
 		t.Fatal(err)
 	}

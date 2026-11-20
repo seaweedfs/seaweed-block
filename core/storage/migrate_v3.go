@@ -107,8 +107,7 @@ func ValidateMigrationV3(src MigrationSourceV3) error {
 
 // PrepareMigrationV3 runs DESIGN 10.1 step 3 and builds the slot images of
 // steps 4 to 6. It (re)creates the initial map sidecar at mapPath durably:
-// generation 1, every chunk UNKNOWN with its inherited checkpoint frontier,
-// coveredCheckpoint =
+// generation 1, every chunk UNKNOWN with maxWriteLSN 0, coveredCheckpoint =
 // the v2 checkpoint (a fully flushed WAL is not remote-clean). The slots
 // carry a fresh random nonce and the map fields of that root. It writes
 // nothing to the store file.
@@ -142,7 +141,6 @@ func PrepareMigrationV3(mapPath string, src MigrationSourceV3) (MigrationPlanV3,
 	entries := make([]chunkLSNEntryV3, int(shape.chunks))
 	for i := range entries {
 		entries[i].Unknown = true
-		entries[i].LSN = src.CheckpointLSN
 	}
 	c, err := m.Prepare(1, src.CheckpointLSN, entries, nil)
 	if err = errors.Join(err, m.Close()); err != nil {

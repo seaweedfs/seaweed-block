@@ -44,7 +44,7 @@ func TestOpsChunk_SnapshotPinAndExpires(t *testing.T) {
 // dry-run, apply, and see the accounting follow.
 func TestOpsChunk_UsageAndRetain(t *testing.T) {
 	ctx := context.Background()
-	mem := newManifestFixtureFiler(chunkstore.NewMemFiler())
+	mem := chunkstore.NewMemFiler()
 	prev := dialChunkFiler
 	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return mem, func() error { return nil }, nil }
 	t.Cleanup(func() { dialChunkFiler = prev })
@@ -59,7 +59,6 @@ func TestOpsChunk_UsageAndRetain(t *testing.T) {
 	cat.SetClock(func() time.Time { return old })
 	head := storage.ChunkHead{Gen: 2, Epoch: 1, Holder: "s1/r1", RemoteLSN: 42, State: storage.ChunkHeadActive,
 		Chunks: map[uint64]storage.ChunkRef{0: {Key: "chunks/e1/c0/k"}}}
-	head = prepareFixtureHead(t, mem, head)
 	for i := 0; i < 5; i++ {
 		if _, err := cat.CreateSnapshot(ctx, "v1", chunkstore.SnapshotRequest{Name: fmt.Sprintf("s%d", i), RequestID: fmt.Sprintf("r%d", i), Class: chunkstore.SnapshotClassSemantic}, head); err != nil {
 			t.Fatal(err)

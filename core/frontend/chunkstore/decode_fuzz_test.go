@@ -21,14 +21,10 @@ func fuzzHeadSeeds(tb testing.TB) [][]byte {
 		{Gen: 3, Epoch: 4, Holder: "r2", RemoteLSN: 9, State: storage.ChunkHeadDetached,
 			DetachedBy: &storage.ChunkDetachedBy{Holder: "r2", Epoch: 4, Gen: 3}, Chunks: map[uint64]storage.ChunkRef{}},
 		{Gen: 2, Epoch: 1, Holder: "r1", RemoteLSN: 3, ChunkBytes: 4 << 20, ManifestChunkCount: 2,
-			Segments: map[uint64]storage.ChunkSegment{0: {Key: "@v1/seg/00", SHA256: sum, Owner: "v1", Count: 2, SegFormat: 2, MaxBirthLSN: 3}}},
+			Segments: map[uint64]storage.ChunkSegment{0: {Key: "@v1/seg/00", SHA256: sum, Owner: "v1", Count: 2}}},
 	}
 	var out [][]byte
 	for _, h := range heads {
-		if h.Segments == nil && len(h.Chunks) > 0 {
-			out = append(out, legacyHeadFixture(tb, h).Content)
-			continue
-		}
 		e, err := headEntry(h)
 		if err != nil {
 			tb.Fatalf("seed %+v: %v", h, err)
@@ -94,12 +90,6 @@ func FuzzDecodeHeadDocument(f *testing.F) {
 			return
 		}
 		e, err := headEntry(h)
-		if h.Segments == nil && len(h.Chunks) > 0 {
-			if err == nil {
-				t.Fatal("read-only legacy data was writable as flat HEAD")
-			}
-			return
-		}
 		if err != nil {
 			if gap := knownHeadEncodeGap(h); gap != "" {
 				return

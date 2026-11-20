@@ -3,9 +3,7 @@ package volume
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"reflect"
-	"sync"
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
@@ -19,30 +17,6 @@ type fakeChunkProvider struct {
 	last    uint64
 	cuts    int
 	lastMin uint64
-}
-
-type adapterManifestFiler struct {
-	chunkstore.Filer
-	mu    sync.Mutex
-	blobs map[string][]byte
-}
-
-func (f *adapterManifestFiler) Put(_ context.Context, b []byte) (string, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	id := fmt.Sprintf("fixture-%d", len(f.blobs))
-	f.blobs[id] = append([]byte(nil), b...)
-	return id, nil
-}
-
-func (f *adapterManifestFiler) Get(_ context.Context, id string) ([]byte, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	b, ok := f.blobs[id]
-	if !ok {
-		return nil, chunkstore.ErrNotFound
-	}
-	return append([]byte(nil), b...), nil
 }
 
 func (f *fakeChunkProvider) CutVolume(_ context.Context, _ string, minLSN uint64) (storage.ChunkCutResult, error) {
@@ -62,17 +36,8 @@ func adapterFixture(t *testing.T) (*fakeChunkProvider, ChunkControl) {
 	t.Helper()
 	head := storage.ChunkHead{Gen: 3, Epoch: 2, Holder: "r1", RemoteLSN: 9, State: storage.ChunkHeadActive,
 		Chunks: map[uint64]storage.ChunkRef{0: {Key: "chunks/e2/c0/k1"}, 5: {Key: "chunks/e2/c5/k2"}}}
-	f := &adapterManifestFiler{Filer: chunkstore.NewMemFiler(), blobs: map[string][]byte{}}
-	r, err := chunkstore.NewChunkRemote(f, f, "/swblock/chunks/v1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	head, _, err = r.PrepareManifest(context.Background(), storage.ChunkHead{}, head, 8*4096)
-	if err != nil {
-		t.Fatal(err)
-	}
 	fp := &fakeChunkProvider{cut: storage.ChunkCutResult{H: 9, Head: head}}
-	cat, err := chunkstore.NewCatalog(f, "/swblock/chunks")
+	cat, err := chunkstore.NewCatalog(chunkstore.NewMemFiler(), "/swblock/chunks")
 	if err != nil {
 		t.Fatal(err)
 	}

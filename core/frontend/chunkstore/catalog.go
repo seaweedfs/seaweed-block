@@ -228,9 +228,8 @@ type SnapshotInfo struct {
 
 	attempt string // the attempt the name resolved to, when read by name
 
-	head   storage.ChunkHead
-	geo    Geometry
-	digest string // identity uses the embedded writer version, not today's serializer
+	head storage.ChunkHead
+	geo  Geometry
 }
 
 // Head returns the HEAD the snapshot copied.
@@ -674,10 +673,6 @@ func decodeSnap(p string, e *filerpb.Entry) (SnapshotInfo, string, error) {
 	if err != nil {
 		return fail("%v", err)
 	}
-	digest, err := snapshotHeadDigest(head, doc.Head)
-	if err != nil {
-		return fail("HEAD identity: %v", err)
-	}
 	state := string(e.Extended[extSnapState])
 	if state != SnapActive && state != SnapDeleting {
 		return fail("state %q", state)
@@ -689,7 +684,7 @@ func decodeSnap(p string, e *filerpb.Entry) (SnapshotInfo, string, error) {
 		VolumeID: doc.VolumeID, Name: doc.Name, HeadGen: head.Gen, HeadEpoch: head.Epoch, CutLSN: head.RemoteLSN,
 		CreatedNs: doc.CreatedNs, State: state, ChunkCount: manifestCount(head), ManifestBytes: len(e.GetContent()),
 		Consistency: doc.Consistency, Labels: doc.Labels, Parent: doc.Parent, ExpiresAtNs: doc.ExpiresAtNs,
-		Class: doc.Class, head: head, geo: doc.Geometry, digest: digest,
+		Class: doc.Class, head: head, geo: doc.Geometry,
 	}, doc.RequestID, nil
 }
 
@@ -875,11 +870,6 @@ func (c *Catalog) CreateSnapshot(ctx context.Context, vol string, req SnapshotRe
 		return SnapshotInfo{}, refuseDeleted(vol, "it cannot be snapshotted")
 	}
 
-	head, upgradeIDs, err := c.prepareLegacyHead(ctx, root, head, head, v.Geometry)
-	defer c.dropManifestIntents(ctx, root, upgradeIDs)
-	if err != nil {
-		return SnapshotInfo{}, err
-	}
 	headEnt, err := headEntry(head)
 	if err != nil {
 		return SnapshotInfo{}, err
@@ -1241,7 +1231,10 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 		return ForkResult{}, fmt.Errorf("chunkstore: snapshot %s/%s has no geometry", req.Source, req.Snapshot)
 	}
 	src := snap.Head()
-	digest := snap.digest
+	digest, err := headDigest(src)
+	if err != nil {
+		return ForkResult{}, err
+	}
 	head := storage.ChunkHead{Gen: 1, Epoch: 0, Holder: "", RemoteLSN: src.RemoteLSN, Chunks: make(map[uint64]storage.ChunkRef, len(src.Chunks)), State: storage.ChunkHeadActive}
 	qualified := 0
 	if src.Segments != nil {
@@ -1292,11 +1285,6 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 		existing = vol
 	}
 
-	head, upgradeIDs, err := c.prepareLegacyHead(ctx, dstRoot, storage.ChunkHead{}, head, snap.geo)
-	defer c.dropManifestIntents(ctx, dstRoot, upgradeIDs)
-	if err != nil {
-		return ForkResult{}, err
-	}
 	he, err := headEntry(head)
 	if err != nil {
 		return ForkResult{}, err
