@@ -126,6 +126,20 @@ func TestV3ReadLargeBatchScratchIsBlockBounded(t *testing.T) {
 	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 96<<10 {
 		t.Fatalf("16KiB chunk /96KiB budget: single batch read allocated %d", allocated)
 	}
+	// Exercise the same scratch accounting through the attached COW reader.
+	cfg := ctConfig(1)
+	cfg.Bitmap, cfg.FreshFromHead, cfg.PayloadMemoryBudget = nil, true, 96<<10
+	l := mustAttach(t, s, newFakeChunkRemote(), cfg).(*chunkLayerImpl)
+	w := &cutCOWWindow{chunkBytes: 16 << 10, ended: make(chan struct{})}
+	runtime.ReadMemStats(&before)
+	image, missing, readErr := l.readCOWChunk(w, 0)
+	runtime.ReadMemStats(&after)
+	if readErr != nil || len(missing) != 0 || !bytes.Equal(image, bytes.Join(blocks[:4], nil)) {
+		t.Fatalf("COW batch image: %v missing=%v", readErr, missing)
+	}
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 96<<10 {
+		t.Fatalf("COW batch read allocated %d above configured budget", allocated)
+	}
 	// Corruption outside the requested block must still fail the whole-record CRC.
 	at := int64(s.sb.WALOffset + off + walEntryPrefixSizeV3 + 255*4096)
 	if _, err = s.fd.WriteAt([]byte{0x17}, at); err != nil {
@@ -207,5 +221,24 @@ func TestCutPayloadReadsOverlapEarlierUploadsWithinBudget(t *testing.T) {
 	cowWaitSignal(t, done, "overlapping upload join")
 	if err := <-errs; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCutPayloadIntentCountLargeCandidateSets(t *testing.T) {
+	for _, n := range []int{256, 4096} {
+		_, _, l, _ := precopyLayer(t, 0, 1)
+		f := newFakeChunkRemote()
+		l.remote = f
+		batch := make([]uint64, n)
+		for i := range batch {
+			batch[i] = uint64(i)
+		}
+		_, ids, err := l.streamCutPayloads(ctTimeout(t), batch, chunkHead{}, func(_ context.Context, idx uint64) (capturedChunk, error) {
+			data := makeBlock(ctBlockSize, byte(idx%255+1))
+			return capturedChunk{idx: idx, data: data, sum: sha256.Sum256(data)}, nil
+		})
+		if err != nil || len(ids) != 1 || len(f.putIntents) != 1 || len(f.putIntents[0].Keys) != n {
+			t.Fatalf("D=%d intents=%d ids=%d err=%v", n, len(f.putIntents), len(ids), err)
+		}
 	}
 }
