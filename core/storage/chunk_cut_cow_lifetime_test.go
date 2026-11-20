@@ -795,6 +795,10 @@ func TestCutCOWV3_SaverUsesValidatedWALBatchAndLazyHEAD(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			// Keep chunk 0 hotter than chunk 1 so the uploader holds chunk 0.
+			if _, err := s.Write(1, makeBlock(ctBlockSize, 0x51)); err != nil {
+				t.Fatal(err)
+			}
 			live, releaseLive := make(chan struct{}), make(chan struct{})
 			var once sync.Once
 			unblockLive := func() { once.Do(func() { close(releaseLive) }) }
@@ -826,6 +830,9 @@ func TestCutCOWV3_SaverUsesValidatedWALBatchAndLazyHEAD(t *testing.T) {
 			writeStarted = true
 			go func() { defer close(writeDone); _, writeErr = s.Write(6, makeBlock(ctBlockSize, 0x96)) }()
 			cowWaitSignal(t, writeDone, "lazy saving write without a remote fetch")
+			if w := l.cowActive.Load(); w == nil || w.saved.Load() != 1 {
+				t.Fatal("target write skipped the saver path")
+			}
 			select {
 			case k := <-gets:
 				t.Fatalf("a guest write fetched %s from the remote inside the cut window", k)
