@@ -129,9 +129,11 @@ func TestWorkspaceUnclaimedGrantForcedReassignAfterExpiry(t *testing.T) {
 	}
 }
 
-// The HEAD rule: a forced move from a grantee that never claimed HEAD accepts
-// the predecessor's HEAD only when it is unchanged since the issue (same Gen
-// and RemoteLSN, an older epoch). Clean moves never accept it.
+// The HEAD rule: after admission, a forced move from a grantee that never
+// claimed HEAD accepts any HEAD at an older epoch (its Gen and RemoteLSN may
+// have moved, e.g. by an earlier holder's late claim); the lost range starts
+// at that HEAD's RemoteLSN. A HEAD at the expected or a higher epoch that is
+// not the grantee's, or no HEAD, is refused. Clean moves never accept it.
 func TestWorkspaceUnclaimedGrantHEADRule(t *testing.T) {
 	ctx := context.Background()
 	disk, _ := newTempStore(t)
@@ -153,20 +155,16 @@ func TestWorkspaceUnclaimedGrantHEADRule(t *testing.T) {
 	}
 
 	now = issued.Add(10 * grantTTL)
-	changed := map[string]WorkspaceHead{}
+	refused := map[string]WorkspaceHead{}
 	h := predecessorHead
-	h.Gen++
-	changed["gen advanced"] = h
-	h = predecessorHead
-	h.RemoteLSN++
-	changed["remote LSN differs"] = h
-	h = predecessorHead
 	h.Epoch = 2
-	changed["epoch not older"] = h
+	refused["expected epoch, another holder"] = h
+	h = WorkspaceHead{Gen: 9, Epoch: 3, Holder: "third-node/r", RemoteLSN: 50}
+	refused["epoch above expected"] = h
 	h = predecessorHead
 	h.Gen = 0
-	changed["no HEAD"] = h
-	for what, h := range changed {
+	refused["no HEAD"] = h
+	for what, h := range refused {
 		if _, err := p.MoveWorkspace(ctx, forcedFromGrantee("forced-"+what), h); err == nil || !strings.Contains(err.Error(), "HEAD not owned by expected holder") {
 			t.Fatalf("%s: forced move accepted %+v: %v", what, h, err)
 		}
@@ -174,16 +172,21 @@ func TestWorkspaceUnclaimedGrantHEADRule(t *testing.T) {
 	if line, _ := p.VolumeAuthorityLine("v"); line.Epoch != 2 || len(p.WorkspaceState("v").Moves) != 1 {
 		t.Fatal("a refused HEAD changed authority or journal", line)
 	}
-	r, err := p.MoveWorkspace(ctx, forcedFromGrantee("forced"), predecessorHead)
-	if err != nil || r.NewEpoch != 3 {
-		t.Fatal("forced move with the unchanged predecessor HEAD:", r, err)
+	// An older-epoch HEAD whose Gen and RemoteLSN moved since the issue.
+	moved := predecessorHead
+	moved.Gen, moved.RemoteLSN = predecessorHead.Gen+1, predecessorHead.RemoteLSN+8
+	r, err := p.MoveWorkspace(ctx, forcedFromGrantee("forced"), moved)
+	if err != nil || r.NewEpoch != 3 || r.HeadGen != moved.Gen || r.RemoteLSN != moved.RemoteLSN {
+		t.Fatal("forced move with an older-epoch HEAD:", r, err)
 	}
-	// A chain: the epoch-3 grantee dies unclaimed too; HEAD is still the
-	// same predecessor HEAD, recorded by both moves.
+	if lost := p.WorkspaceLostRanges("v"); len(lost) != 1 || lost[0].LostAfterLSN != moved.RemoteLSN {
+		t.Fatalf("lost range must start at the fresh HEAD's RemoteLSN: %+v", lost)
+	}
+	// A chain: the epoch-3 grantee dies unclaimed too.
 	now = now.Add(10 * grantTTL)
 	next := forcedFromGrantee("forced-again")
 	next.ExpectedHost, next.TargetHost, next.ExpectedEpoch = "third-node", "fourth-node", 3
-	if r, err := p.MoveWorkspace(ctx, next, predecessorHead); err != nil || r.NewEpoch != 4 {
+	if r, err := p.MoveWorkspace(ctx, next, moved); err != nil || r.NewEpoch != 4 {
 		t.Fatal("second unclaimed grant:", r, err)
 	}
 }
@@ -267,5 +270,44 @@ func TestWorkspaceReplayedIssueStartsGranteeLease(t *testing.T) {
 	next := WorkspaceMoveRequest{RequestID: "m2", VolumeID: "v", ExpectedReplicaID: "r", TargetReplicaID: "r", ExpectedHost: "new-node", TargetHost: "third-node", ExpectedEpoch: 2, TargetDataAddr: "td", TargetCtrlAddr: "tc", Kind: "forced", Force: true}
 	if r, err := loaded.MoveWorkspace(ctx, next, head); err != nil || r.NewEpoch != 3 {
 		t.Fatal("forced move after the replayed grant expired:", r, err)
+	}
+}
+
+// The double fault: grantee 1 renews and sends its HEAD claim, then stalls;
+// its lease expires and a forced move grants grantee 2 against the
+// predecessor's HEAD; grantee 1's in-flight claim lands afterwards (HEAD
+// moves to its epoch and the next generation); grantee 2 dies unclaimed.
+// The next forced move must still be admitted on that older-epoch HEAD, with
+// the lost range from its RemoteLSN; never refused for good.
+func TestWorkspaceLateClaimThenUnclaimedGrantForcedReassign(t *testing.T) {
+	ctx := context.Background()
+	disk, _ := newTempStore(t)
+	now := time.Unix(1000, 0)
+	p, issued := cleanMoveToGrantee(t, disk, &now)
+	now = issued.Add(100 * time.Millisecond)
+	if _, err := p.RenewWorkspaceLease(ctx, "v", "r", 2); err != nil {
+		t.Fatal("grantee 1 renewal:", err)
+	}
+	// Grantee 1's claim is in flight; it renews no more.
+	now = now.Add(10 * grantTTL)
+	r, err := p.MoveWorkspace(ctx, forcedFromGrantee("forced-1"), predecessorHead)
+	if err != nil || r.NewEpoch != 3 {
+		t.Fatal("forced move to grantee 2:", r, err)
+	}
+	late := WorkspaceHead{Gen: predecessorHead.Gen + 1, Epoch: 2, Holder: "new-node/r", RemoteLSN: predecessorHead.RemoteLSN}
+	// Grantee 2 dies unclaimed.
+	now = now.Add(10 * grantTTL)
+	next := forcedFromGrantee("forced-2")
+	next.ExpectedHost, next.TargetHost, next.ExpectedEpoch = "third-node", "fourth-node", 3
+	r, err = p.MoveWorkspace(ctx, next, late)
+	if err != nil || r.NewEpoch != 4 || r.HeadGen != late.Gen || r.RemoteLSN != late.RemoteLSN {
+		t.Fatal("forced move after grantee 1's late claim and grantee 2's death:", r, err)
+	}
+	lost := p.WorkspaceLostRanges("v")
+	if len(lost) != 2 || lost[1].NewEpoch != 4 || lost[1].LostAfterLSN != late.RemoteLSN {
+		t.Fatalf("lost ranges %+v", lost)
+	}
+	if line, _ := p.VolumeAuthorityLine("v"); line.Epoch != 4 {
+		t.Fatal("authority line", line)
 	}
 }

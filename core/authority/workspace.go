@@ -273,9 +273,11 @@ func sameWorkspaceRequest(r WorkspaceMoveRecord, q WorkspaceMoveRequest) bool {
 // WorkspaceForcedMoveAdmitted reports whether a forced move of volume away
 // from holder at epoch is admitted now: the lease expiry and the granted or
 // restart deadline, each plus the clock-skew margin, have passed. A caller
-// reads HEAD only after this returns nil, so the HEAD a forced move checks
-// can no longer be changed by a holder of that epoch's grants. The move
-// itself checks admission again. A request id the journal already holds is
+// reads HEAD only after this returns nil: by then the holder's own lease has
+// expired, so it starts no new claim or cut. HEAD is not frozen: a claim the
+// holder or an earlier one sent may still land (ownership only, RemoteLSN
+// unchanged), and the next holder's higher-epoch claim supersedes it. The
+// move itself checks admission again. A request id the journal already holds is
 // left to MoveWorkspace: its replay never uses a new HEAD.
 func (p *Publisher) WorkspaceForcedMoveAdmitted(ctx context.Context, volume, requestID, holder string, epoch uint64) error {
 	if err := ctx.Err(); err != nil {
@@ -315,22 +317,6 @@ func (p *Publisher) forcedMoveAdmissionLocked(volume string, lease *WorkspaceLea
 		lostUntil = d
 	}
 	return lostUntil, nil
-}
-
-// headUnclaimedSinceIssue reports whether h is still the HEAD the move to the
-// expected holder was issued against, so that holder never claimed it (every
-// HEAD write advances Gen). Only a forced move may use it: the expected
-// holder's grant has expired, so it can no longer claim.
-func headUnclaimedSinceIssue(s *WorkspaceState, q WorkspaceMoveRequest, h WorkspaceHead) bool {
-	for i := len(s.Moves) - 1; i >= 0; i-- {
-		r := s.Moves[i]
-		if !r.Issued {
-			continue
-		}
-		return r.NewEpoch == q.ExpectedEpoch && r.NewHost == q.ExpectedHost && r.NewReplicaID == q.ExpectedReplicaID &&
-			h.Gen != 0 && h.Gen == r.HeadGen && h.RemoteLSN == r.RemoteLSN && h.Epoch < q.ExpectedEpoch
-	}
-	return false
 }
 
 // issueWorkspaceMove marks the move issued and starts the new holder's lease
@@ -384,9 +370,12 @@ func (p *Publisher) prepareWorkspaceMoveLocked(ask AssignmentAsk, g workspaceGra
 	}
 	owned := h.Gen != 0 && h.Epoch == q.ExpectedEpoch && h.Holder == q.ExpectedHost+"/"+q.ExpectedReplicaID
 	if !owned && q.Kind == "forced" {
-		// A holder that died between its grant and its claim left HEAD
-		// naming its predecessor.
-		owned = headUnclaimedSinceIssue(s, q, h)
+		// Admitted (the expected holder's lease has expired) and HEAD read
+		// after that: a HEAD at an older epoch means the expected holder
+		// never claimed it, or an earlier holder's late claim landed. The
+		// lost range starts at this HEAD's RemoteLSN. A HEAD at the expected
+		// or a higher epoch that is not the expected holder's stays refused.
+		owned = h.Gen != 0 && h.Epoch < q.ExpectedEpoch
 	}
 	if !owned {
 		return nil, 0, time.Time{}, fmt.Errorf("workspace move: HEAD not owned by expected holder")

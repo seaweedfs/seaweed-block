@@ -3,6 +3,7 @@ package master
 import (
 	"bytes"
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,6 +14,47 @@ import (
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
+
+// attachWitness records each projection read: the first refused read (not
+// healthy) with the HEAD current at that instant, and whether any read was
+// healthy.
+type attachWitness struct {
+	base frontend.ProjectionView
+	head func() authority.WorkspaceHead
+
+	mu       sync.Mutex
+	refusals int
+	firstAt  authority.WorkspaceHead
+	healthy  bool
+}
+
+func (w *attachWitness) Projection() frontend.Projection {
+	p := w.base.Projection()
+	var h authority.WorkspaceHead
+	if !p.Healthy {
+		h = w.head()
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if p.Healthy {
+		w.healthy = true
+	} else if w.refusals++; w.refusals == 1 {
+		w.firstAt = h
+	}
+	return p
+}
+
+func (w *attachWitness) first() (authority.WorkspaceHead, int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.firstAt, w.refusals
+}
+
+func (w *attachWitness) admitted() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.healthy
+}
 
 // A grantee renews its issued lease, then pauses before claiming HEAD. The
 // forced move away from it is admitted only after the GRANT's lease expiry
@@ -155,25 +197,33 @@ func TestWorkspacePausedGranteeRefusedAtAttach(t *testing.T) {
 	if guard.Projection().Healthy {
 		t.Fatal("the paused grantee still serves after the forced move")
 	}
-	granteeProv := open("new-node/r", guard)
-	deadline := time.Now().Add(300 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		if h := readHead(); h != predecessor {
-			t.Fatalf("the paused grantee claimed HEAD after the forced move: %+v, was %+v", h, predecessor)
+	// The attach decision is witnessed, not waited for: recovery runs the
+	// first attach attempt synchronously, and every admission read of the
+	// projection records the HEAD current at that instant. Close then
+	// settles the deferred attempts, so none can land afterwards.
+	witness := &attachWitness{base: guard, head: func() authority.WorkspaceHead {
+		h, err := remote.GetHead(context.Background()) // also read off the test goroutine: no t.Fatal
+		if err != nil {
+			return authority.WorkspaceHead{}
 		}
-		time.Sleep(20 * time.Millisecond)
+		return authority.WorkspaceHead{Gen: h.Gen, Epoch: h.Epoch, Holder: h.Holder, RemoteLSN: h.RemoteLSN, Detached: h.State == storage.ChunkHeadDetached}
+	}}
+	granteeProv := open("new-node/r", witness)
+	refusedAt, refusals := witness.first()
+	if refusals == 0 || refusedAt != predecessor {
+		t.Fatalf("no witnessed refused attach decision while the predecessor HEAD was current (refusals %d, HEAD %+v)", refusals, refusedAt)
 	}
-	if bk, err := granteeProv.Open(ctx, "v"); err == nil {
-		if n, err := bk.Write(ctx, 0, make([]byte, 4096)); err == nil && n == 4096 {
-			if err := bk.Sync(ctx); err == nil {
-				if _, err := granteeProv.CaptureVolume(ctx, "v"); err == nil {
-					t.Fatal("the paused grantee published a cut after the forced move")
-				}
-			}
-		}
+	if witness.admitted() {
+		t.Fatal("the paused grantee's attach read a healthy projection after the forced move")
 	}
 	if h := readHead(); h != predecessor {
-		t.Fatalf("HEAD changed by the paused grantee: %+v", h)
+		t.Fatalf("the paused grantee claimed HEAD after the forced move: %+v, was %+v", h, predecessor)
+	}
+	if err := granteeProv.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if h := readHead(); h != predecessor || witness.admitted() {
+		t.Fatalf("HEAD changed by the paused grantee before its provider settled: %+v", h)
 	}
 
 	// The new owner claims at the higher epoch.

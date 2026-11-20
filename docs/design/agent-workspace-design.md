@@ -245,6 +245,8 @@ The attempt path is never removed, so a late create can never land after a delet
 
 **FORCED move:** blockmaster waits until both the persisted lease horizon (at least every grant, so at most TTL/2 later than the last grant) and the granted or conservative restart deadline, plus the full skew bound, have passed (`core/authority/workspace.go` `prepareWorkspaceMoveLocked`). The old host's late CAS fails on the epoch; its uploads become orphans for GC. Writes since the old host's last cut are lost.
 
+**Move issue starts the new holder's lease.** The write that issues epoch e+1 also writes the new holder's lease (horizon issue + 1.5·TTL, granted deadline issue + TTL), published with the epoch in one lease-view update; the holder's first renewal is an ordinary renewal of it (`core/authority/workspace.go` `issueWorkspaceMove`; `core/authority/workspace_lease_view.go` `publishIssuedLeaseLocked`). A new holder that dies before it renews or claims HEAD therefore expires like any holder, and a forced move away from it waits for that lease's expiry and deadline plus the skew bound, never a predecessor's. Blockmaster reads HEAD for a forced move only after that admission holds (`core/host/master/workspace_service.go` `MoveWorkspace`): the holder then starts no new claim or cut, but a claim it already sent may still land, so HEAD is not frozen. A forced move accepts a HEAD that names the expected holder at the expected epoch, or any HEAD at an older epoch (the expected holder never claimed it, or an earlier holder's late claim landed); its lost range starts at that HEAD's `RemoteLSN`. A HEAD at the expected or a higher epoch that is not the expected holder's is refused. A returning holder is stopped by two fences: its lease-gated attach refuses to claim (its lease has expired), and a HEAD that already carries a higher epoch fences its claim.
+
 **Takeover** (`core/storage/chunk_restore.go` `ClaimChunkHead`, called before the chunk layer attaches in `core/frontend/durable/provider_chunk.go`): read HEAD; fence if HEAD has a higher epoch or another holder at the same epoch; seed the local LSN frontier from HEAD (`PrepareRestore`); CAS HEAD to the new epoch and holder with `State = active`; on an unknown outcome, succeed only if a re-read shows the exact proposal. I/O opens afterwards; blocks load lazily on first read.
 
 ```mermaid
@@ -266,7 +268,14 @@ sequenceDiagram
     A->>A: self-fence when ValidForNs runs out
     M->>M: wait for expiry, restart deadline and skew bound, then mint epoch e+1
   end
+  M->>M: the issue write also starts B's lease (horizon issue+1.5·TTL, deadline issue+TTL)
   M->>B: assignment at epoch e+1 and a lease
+  opt B dies before renewing or claiming (HEAD still at epoch e)
+    M->>M: wait for B's lease expiry, deadline and skew bound
+    M->>F: GetHead (only after that admission)
+    M->>M: HEAD epoch is older than e+1, so mint epoch e+2 for host C, lost range from that HEAD's RemoteLSN
+    Note over B,F: a claim B already sent may still land at e+1, C's claim at e+2 supersedes it, and a returning B is refused at attach (expired lease) and by the higher HEAD epoch
+  end
   B->>F: GetHead
   B->>B: refuse if HEAD epoch is higher, else seed the local frontier from HEAD
   B->>F: CASHead expected {current gen, e}, next {epoch e+1, holder B, active}
@@ -284,13 +293,14 @@ Lease states:
 ```mermaid
 stateDiagram-v2
   state "Lease (blockmaster)" as L {
-    [*] --> Granted: Renew
+    [*] --> Granted: first Renew after bind
+    [*] --> Granted: move issue starts the new holder's lease
     Granted --> Granted: Renew before horizon and deadline (from memory)
     Granted --> Revoking: BeginWorkspaceRevocation
     Revoking --> Acked: host acks detached HEAD gen while the lease is valid
     Acked --> Moved: CLEAN move
     Granted --> Expired: horizon or deadline passes
-    Expired --> Moved: FORCED move after expiry + skew bound
+    Expired --> Moved: FORCED move after expiry + skew bound, then HEAD read (an older-epoch HEAD is accepted)
   }
 ```
 

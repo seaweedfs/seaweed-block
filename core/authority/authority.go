@@ -172,6 +172,10 @@ type Publisher struct {
 	leaseClosing   bool
 	extWG          sync.WaitGroup
 	extendFailures map[string]int // guarded by mu
+
+	// testAfterIssuePublish, when set by a test, runs under mu right after
+	// an issued move's lease view is published.
+	testAfterIssuePublish func(volume string)
 }
 
 // PublicationAdmission surrounds an ordinary mint with local ownership/lifetime
@@ -610,10 +614,14 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 	}
 
 	p.state[k] = assignmentState{info: next, present: true}
-	p.refreshLeaseViewLocked(ask.VolumeID)
 	if issuedWorkspace != nil {
 		// The issued move starts the new holder's lease (issuedAt+TTL grant).
-		p.setLeaseDeadlineLocked(ask.VolumeID, issuedAt.Add(p.workspaceTTL), false)
+		p.publishIssuedLeaseLocked(ask.VolumeID, issuedAt.Add(p.workspaceTTL))
+		if hook := p.testAfterIssuePublish; hook != nil {
+			hook(ask.VolumeID)
+		}
+	} else {
+		p.refreshLeaseViewLocked(ask.VolumeID)
 	}
 
 	// Snapshot subscribers under lock, release the lock BEFORE

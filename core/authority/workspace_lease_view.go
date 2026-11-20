@@ -68,6 +68,25 @@ func (p *Publisher) refreshLeaseViewLocked(volume string) {
 	lv.d = d
 }
 
+// publishIssuedLeaseLocked publishes an issued move's derived view (the new
+// epoch and the new holder's lease) and that lease's initial deadline in one
+// leaseMu section: a renewal of the new epoch sees both or neither, so the
+// issue never lowers a deadline a renewal has raised. Caller holds p.mu.
+func (p *Publisher) publishIssuedLeaseLocked(volume string, deadline time.Time) {
+	d := p.deriveLeaseLocked(volume)
+	p.leaseMu.Lock()
+	defer p.leaseMu.Unlock()
+	lv := p.leaseViews[volume]
+	if lv == nil {
+		lv = &leaseView{}
+		p.leaseViews[volume] = lv
+	}
+	lv.d = d
+	if deadline.After(lv.deadline) {
+		lv.deadline = deadline
+	}
+}
+
 // leaseDeadlineLocked reads the granted deadline. Caller holds p.mu.
 func (p *Publisher) leaseDeadlineLocked(volume string) time.Time {
 	p.leaseMu.Lock()
@@ -78,8 +97,7 @@ func (p *Publisher) leaseDeadlineLocked(volume string) time.Time {
 	return time.Time{}
 }
 
-// setLeaseDeadlineLocked replaces the deadline (restart rule, move issue: the
-// new holder's lease starts with the grant issue+TTL) or,
+// setLeaseDeadlineLocked replaces the deadline (restart rule) or,
 // with raise, raises it to at least t (a grant). Caller holds p.mu.
 func (p *Publisher) setLeaseDeadlineLocked(volume string, t time.Time, raise bool) {
 	d := p.deriveLeaseLocked(volume)
