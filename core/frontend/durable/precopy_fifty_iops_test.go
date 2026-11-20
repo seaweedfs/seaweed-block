@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -142,6 +143,9 @@ func precopyFiftyIOPS(t *testing.T, samples byte, wantUnknown bool, fixedDelay t
 	result, _, err := p.DetachVolume(ctx, "v1")
 	stopped.Store(true)
 	t.Logf("attempts=%d measurement_rounds=%d samples_at_start=%d drain=%s estimate=%s frozen=%t guest_errors=%d", result.Precopy.Attempts, result.Precopy.MeasurementRounds, result.Precopy.SamplesAtStart, result.Precopy.Drain, result.Precopy.Estimate, result.Precopy.Frozen, guestErrors.Load())
+	if accountingErr := precopyFiftyRoundAccounting(result.Precopy); accountingErr != nil {
+		t.Fatal(accountingErr)
+	}
 	if wantUnknown {
 		if result.Precopy.Frozen {
 			// Staging or later rounds may leave an empty tail, which needs
@@ -226,4 +230,67 @@ func precopyFiftyIOPS(t *testing.T, samples byte, wantUnknown bool, fixedDelay t
 	if !bytes.Equal(headBlock(t, remote.MemChunkRemote, 1), block(0x5b)) {
 		t.Fatal("final cut lost synchronous writer bytes")
 	}
+}
+
+// Both outcomes consume the same physical-round budget; admission and
+// measurement counters must account for every recorded round, including success.
+func precopyFiftyRoundAccounting(report storage.PrecopyReport) error {
+	if len(report.Rounds) == 0 || len(report.Rounds) > 5 {
+		return fmt.Errorf("physical-round budget: rounds=%d limit=5", len(report.Rounds))
+	}
+	if report.Attempts+report.MeasurementRounds != len(report.Rounds) {
+		return fmt.Errorf("attempt accounting: admission=%d measurement=%d rounds=%d", report.Attempts, report.MeasurementRounds, len(report.Rounds))
+	}
+	for i, round := range report.Rounds {
+		if round.Attempt != i+1 {
+			return fmt.Errorf("physical ordinal: round=%d attempt=%d", i+1, round.Attempt)
+		}
+	}
+	return nil
+}
+
+func TestPrecopyFiftyIOPSRoundAccounting(t *testing.T) {
+	makeReport := func(n int, frozen bool) storage.PrecopyReport {
+		report := storage.PrecopyReport{Attempts: n, Frozen: frozen}
+		for i := 1; i <= n; i++ {
+			report.Rounds = append(report.Rounds, storage.PrecopyAttempt{Attempt: i, Estimate: 1300 * time.Millisecond, Reason: "tail_too_large"})
+		}
+		if frozen {
+			last := &report.Rounds[n-1]
+			last.Frozen, last.Estimate, last.Reason = true, 500*time.Millisecond, "fit"
+		}
+		return report
+	}
+	for _, frozen := range []bool{false, true} {
+		t.Run(fmt.Sprintf("five_rounds_frozen_%t", frozen), func(t *testing.T) {
+			if err := precopyFiftyRoundAccounting(makeReport(5, frozen)); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	t.Run("five_refusals_then_sixth_fit", func(t *testing.T) {
+		report := makeReport(6, true)
+		if err := precopyFiftyRoundAccounting(report); err == nil {
+			t.Fatal("five expensive refusals followed by a sixth fit escaped the physical-round cap")
+		}
+	})
+	t.Run("six_refusals", func(t *testing.T) {
+		if err := precopyFiftyRoundAccounting(makeReport(6, false)); err == nil {
+			t.Fatal("six refusals escaped the physical-round cap")
+		}
+	})
+	t.Run("measurement_rounds_count_toward_cap", func(t *testing.T) {
+		report := makeReport(5, true)
+		report.Attempts, report.MeasurementRounds = 3, 2
+		if err := precopyFiftyRoundAccounting(report); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("successful_attempt_not_counted", func(t *testing.T) {
+		report := makeReport(5, true)
+		report.Attempts--
+		if err := precopyFiftyRoundAccounting(report); err == nil {
+			t.Fatal("successful round absent from accounting")
+		}
+	})
 }
