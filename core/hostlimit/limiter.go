@@ -59,9 +59,13 @@ type Stats struct {
 	PayloadReserved, COWReserved                   int64
 	Admitted, Skipped, Fallback, Revoked, Released uint64
 	FallbackActive                                 bool
+	AdmissionNs, MaxHoldNs                         uint64
+	SkippedByClass                                 [4]uint64
+	LastPoolError                                  string
 }
 type lease struct {
 	file         *os.File
+	started      time.Time
 	class        Class
 	payload, cow int64
 	abort        func(error)
@@ -182,6 +186,8 @@ func (l *Limiter) Acquire(ctx context.Context, c Class, abort func(error)) (uint
 }
 
 func (l *Limiter) Admit(ctx context.Context, payload int64, abort func(error)) (uint64, error) {
+	start := time.Now()
+	defer func() { l.mu.Lock(); l.stats.AdmissionNs += uint64(time.Since(start)); l.mu.Unlock() }()
 	l.mu.Lock()
 	if l.closed {
 		l.mu.Unlock()
@@ -204,6 +210,7 @@ func (l *Limiter) Admit(ctx context.Context, payload int64, abort func(error)) (
 	if errors.Is(err, ErrBusy) {
 		l.mu.Lock()
 		l.stats.Skipped++
+		l.stats.SkippedByClass[c]++
 		l.mu.Unlock()
 		return 0, err
 	}
@@ -225,7 +232,7 @@ func (l *Limiter) Admit(ctx context.Context, payload int64, abort func(error)) (
 	}
 	l.next++
 	id := l.next
-	x := &lease{file: f, class: c, payload: payload, abort: abort}
+	x := &lease{file: f, started: time.Now(), class: c, payload: payload, abort: abort}
 	l.live[id] = x
 	l.stats.Admitted++
 	l.stats.PayloadReserved += payload
@@ -233,6 +240,7 @@ func (l *Limiter) Admit(ctx context.Context, payload int64, abort func(error)) (
 	l.fallback = fallback
 	l.stats.FallbackActive = fallback
 	if fallback {
+		l.stats.LastPoolError = err.Error()
 		if l.stats.Fallback == 0 {
 			log.Printf("hostlimit: shared cut pool unavailable (%v); using static fallback, shared memory/spill cap NOT enforced", err)
 		}
@@ -327,6 +335,7 @@ func (l *Limiter) releaseLoop() {
 			l.stats.PayloadReserved -= x.payload
 			l.stats.COWReserved -= x.cow
 			l.stats.Released++
+			l.stats.MaxHoldNs = max(l.stats.MaxHoldNs, uint64(time.Since(x.started)))
 			l.mu.Unlock()
 		}
 	}
