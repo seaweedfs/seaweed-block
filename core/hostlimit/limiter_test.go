@@ -5,8 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
+	"sync"
 	"testing"
 	"time"
 )
@@ -295,4 +297,36 @@ func TestBackgroundPoolsDoNotBorrowCutReservations(t *testing.T) {
 	if e = l.ReserveCOW(y, 1); !errors.Is(e, ErrRevoked) {
 		t.Fatal("fill consumed cut spill", e)
 	}
+}
+
+type heldLog struct {
+	entered, release chan struct{}
+	once             sync.Once
+}
+
+func (w *heldLog) Write(p []byte) (int, error) {
+	w.once.Do(func() { close(w.entered) })
+	<-w.release
+	return len(p), nil
+}
+func TestFallbackLogDoesNotHoldCOWAccountingLock(t *testing.T) {
+	c := testConfig(t)
+	c.Directory += "-missing"
+	l := newTest(t, c)
+	gate := &heldLog{entered: make(chan struct{}), release: make(chan struct{})}
+	before := log.Writer()
+	log.SetOutput(gate)
+	defer log.SetOutput(before)
+	defer close(gate.release)
+	done := make(chan struct{})
+	go func() { _, _ = l.Admit(context.Background(), 1, nil); close(done) }()
+	select {
+	case <-gate.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("fallback log not reached")
+	}
+	if !l.mu.TryLock() {
+		t.Fatal("blocked log holds guest COW accounting lock")
+	}
+	l.mu.Unlock()
 }
