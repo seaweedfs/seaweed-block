@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# Usage: post-merge-review-check.sh ALLOW_FILE < changed-paths
+# Usage: post-merge-review-check.sh ALLOW_FILE < changes
 #
-# changed-paths are NUL-separated (post-merge-review-changed.sh). A path
-# passes only if it matches an allow pattern and no "!" pattern.
-# Prints every path that does not pass and exits 1 if there is one; exits 0
-# if all pass, 2 on a usage error or a missing or empty allow list.
+# changes are NUL-separated STATUS, PATH pairs (post-merge-review-changed.sh).
+# A path passes only if it matches an allow pattern and no "!" pattern, and
+# a test file may be added or modified but not deleted (a move deletes its
+# old name). Prints every change that does not pass and exits 1 if there is
+# one; exits 0 if all pass, 2 on a usage error, a malformed change or a
+# missing or empty allow list.
 set -euo pipefail
 
-allow_file=${1:?usage: post-merge-review-check.sh ALLOW_FILE < changed-paths}
+allow_file=${1:?usage: post-merge-review-check.sh ALLOW_FILE < changes}
 if [[ ! -f $allow_file ]]; then
 	echo "post-merge-review: allow list $allow_file missing" >&2
 	exit 2
@@ -32,8 +34,11 @@ fi
 
 denied=0
 checked=0
-while IFS= read -r -d '' path; do
-	[[ -n $path ]] || continue
+while IFS= read -r -d '' status; do
+	if ! IFS= read -r -d '' path || [[ -z $status || -z $path ]]; then
+		echo "post-merge-review: malformed change list (status ${status@Q})" >&2
+		exit 2
+	fi
 	checked=$((checked + 1))
 	why="not on the allow list"
 	for p in "${allow[@]}"; do
@@ -49,9 +54,12 @@ while IFS= read -r -d '' path; do
 			break
 		fi
 	done
+	# A labelled PR may not delete a test (or turn it into something else).
+	if [[ -z $why && $path == *_test.go && $status != [AM] ]]; then
+		why="test file status $status: only adding or modifying a test is allowed"
+	fi
 	if [[ -n $why ]]; then
-		printf 'DENY %q (%s)
-' "$path" "$why"
+		printf 'DENY %s %q (%s)\n' "$status" "$path" "$why"
 		denied=1
 	fi
 done

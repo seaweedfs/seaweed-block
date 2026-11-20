@@ -18,16 +18,14 @@
 docs/*
 *.md
 
-# Test harness and tests (a test file in a denied directory stays denied).
-internal/testops/*
-cmd/sw-testops/*
+# Tests: added or modified, never deleted or moved (the check enforces
+# that); a test file in a denied directory stays denied.
 *_test.go
 
 # Status, metrics and observation files, by name.
 core/host/master/observation_service.go
 core/host/master/observation_snapshot.go
 core/host/volume/memory_status.go
-core/host/volume/status_server.go
 core/ops/observation.go
 core/ops/observation_bundle.go
 core/ops/observation_dashboard.go
@@ -41,6 +39,12 @@ core/ops/volume_status_summary.go
 
 # The check itself and CI.
 !.github/*
+
+# The test gates: the testops engine, its CLI and the gate definitions
+# (their docs stay allowed).
+!internal/testops/*.go
+!internal/testops/*.json
+!cmd/sw-testops/*
 
 # Data path and replication.
 !core/storage/*
@@ -60,6 +64,17 @@ core/ops/volume_status_summary.go
 # Wire and persisted formats.
 !*.proto
 !*.pb.go
+!core/host/master/journal_isolation*
+!core/lifecycle/store*
+!cmd/sparrow/persist*
+
+# GC and delete paths.
+!cmd/sw-block/chunk_gc*
+!cmd/sw-block/chunk_volume_delete*
+!core/lifecycle/deletion_reservations*
+!core/ops/delete_safety_contract*
+!*/gc[_.]*
+!*_gc[_.]*
 
 # Lease, epoch, claim, admission, GC, delete or format code (tests included)
 # wherever it lives, by file name.
