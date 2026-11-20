@@ -49,6 +49,12 @@ func TestHeadBeltOldCASUnconfirmedKeepsIntentsAndFrontier(t *testing.T) {
 	if got, err := s.Read(0); err != nil || !bytes.Equal(got, want) {
 		t.Fatalf("local acknowledged bytes changed: %v", err)
 	}
+	if err := layer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(liveIntents(t, f)) == 0 {
+		t.Fatal("Close removed unconfirmed publication roots")
+	}
 }
 
 func TestHeadBeltLowerEpochConflictFencesWithoutCleanup(t *testing.T) {
@@ -79,5 +85,32 @@ func TestHeadBeltLowerEpochConflictFencesWithoutCleanup(t *testing.T) {
 	calls := f.stats().cas
 	if _, err := layer.Cut(ctTimeout(t)); !errors.Is(err, ErrChunkLayerFenced) || f.stats().cas != calls {
 		t.Fatalf("fenced owner retried publication: %v", err)
+	}
+	if err := layer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(liveIntents(t, f)) == 0 {
+		t.Fatal("Close removed fenced publication roots")
+	}
+}
+
+func TestHeadBeltTakeoverWaitsBeforeConfirmation(t *testing.T) {
+	f := newFakeChunkRemote()
+	f.head = chunkHead{Gen: 1, Epoch: 1, Holder: "old", Chunks: map[uint64]chunkRef{}}
+	var committedAt time.Time
+	f.afterCAS = func(f *fakeChunkRemote) {
+		committedAt = time.Now()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	head, err := ClaimChunkHead(ctx, f, ChunkLayerConfig{Epoch: 2, Holder: "new"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if committedAt.IsZero() || time.Since(committedAt) < 5*time.Second || f.stats().getHeads != 2 {
+		t.Fatal("takeover served before cooling and its confirmation read")
+	}
+	if head.Gen != 2 || head.Epoch != 2 || head.Holder != "new" {
+		t.Fatal("confirmed the wrong owner", head)
 	}
 }

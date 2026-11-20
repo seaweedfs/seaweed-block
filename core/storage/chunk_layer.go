@@ -1750,6 +1750,9 @@ func (l *chunkLayerImpl) dropIntents(ctx context.Context, ids []string) {
 	// once, rather than rescanning every cached chunk for each delete.
 	l.stMu.Lock()
 	keep := make(map[string]bool)
+	for _, id := range l.pendingIntents {
+		keep[id] = true
+	}
 	for idx, sc := range l.reusable {
 		if l.closed || l.fenced || sc.ver != l.chunkVersion(idx) || sc.headGen != l.head.Gen {
 			delete(l.reusable, idx)
