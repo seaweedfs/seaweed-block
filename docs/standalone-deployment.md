@@ -132,6 +132,11 @@ the example units, which turn them into flags. blockvolume itself reads only
 The `--chunk-*` and `--workspace-lease` flags are refused unless
 `--durable-impl=walstore-chunk`; leave them at their defaults otherwise.
 
+`--chunk-filer` must name the only filer of its filer group. At startup
+blockvolume asks that filer for its masters, then the masters for the filers
+in the group, and refuses to start unless exactly one is listed. It also
+refuses when it cannot get that answer within 15 s.
+
 ## Notes
 
 - The control plane, the status endpoint and the NVMe/TCP target have no
