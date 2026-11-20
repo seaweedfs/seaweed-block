@@ -216,6 +216,15 @@ func (l *Limiter) Admit(ctx context.Context, payload int64, abort func(error)) (
 		return 0, err
 	}
 	if errors.Is(err, ErrConfig) {
+		l.mu.Lock()
+		warn := l.stats.LastPoolError != err.Error()
+		l.stats.LastPoolError = err.Error()
+		l.stats.Skipped++
+		l.stats.SkippedByClass[c]++
+		l.mu.Unlock()
+		if warn {
+			log.Printf("hostlimit: shared pool configuration refused; background protection may lag: %v", err)
+		}
 		return 0, err
 	}
 	fallback := err != nil // A is deliberately degraded: no shared memory/spill cap.

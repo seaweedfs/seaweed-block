@@ -164,6 +164,9 @@ func TestFallbackAndConfigMismatch(t *testing.T) {
 	if _, e = b.Admit(context.Background(), 1, nil); !errors.Is(e, ErrConfig) {
 		t.Fatalf("config mismatch bypassed cap: %v", e)
 	}
+	if st := b.Snapshot().(Stats); st.LastPoolError == "" || st.Skipped != 1 {
+		t.Fatal("configuration refusal was silent", st)
+	}
 	c.Directory += "-missing"
 	f := newTest(t, c)
 	x, e = f.Admit(context.Background(), 1, nil)
