@@ -34,76 +34,104 @@ type faultRemote struct {
 	// remote only when release closes; its own result goes to delayedErr.
 	release    chan struct{}
 	delayedErr chan error
-	// held records the CAS held by "hold-detach": when and why its context
-	// ended, and what the cut witness saw (see witnessCut).
-	held heldCAS
+	// held records the CAS held by "hold-detach", heldRead the first HEAD read
+	// held once readArmed is set: when and why each context ended, and what
+	// its witness saw (see witnessHeld).
+	held      heldOp
+	heldRead  heldOp
+	readArmed bool
 }
 
-type heldCAS struct {
+type heldOp struct {
 	entered bool
 	ctx     context.Context
 	ended   time.Time
 	cause   error // context.Cause once the context ended
-	witness cutObservation
+	witness heldObservation
 }
 
-// cutObservation is one sample of the held detach CAS's context, taken
+// heldObservation is one sample of a held operation's context, taken
 // between from and at.
-type cutObservation struct {
+type heldObservation struct {
 	ran      bool
 	from, at time.Time
-	entered  bool  // the CAS was already held when sampled
+	entered  bool  // the operation was already held when sampled
 	cause    error // its context.Cause then (nil: still live)
 }
 
 const (
-	// The witness samples cutWitnessDelay after the traced cut deadline, so
-	// a cancel shifted cutWitnessShift past it is still live at the sample.
-	cutWitnessDelay    = 50 * time.Millisecond
-	cutWitnessShift    = 100 * time.Millisecond
-	cutWitnessAttempts = 3
+	// The witness samples witnessDelay after a traced deadline, so a cancel
+	// shifted witnessShift past it is still live at the sample.
+	witnessDelay    = 50 * time.Millisecond
+	witnessShift    = 100 * time.Millisecond
+	witnessAttempts = 3
 )
 
-var errCutWitnessUnexercised = errors.New("cut witness not exercised")
+var errWitnessUnexercised = errors.New("witness not exercised")
 
-// cutWitnessVerdict judges one sample. Only a sample of an already held CAS,
-// taken after the cut deadline and before the shift, discriminates: then the
-// context must already be cancelled for the cut's expiry. Any other sample
-// (late timer, CAS not yet held) proves nothing either way and is reported
-// as unexercised; it is never filled in from a later observation.
-func cutWitnessVerdict(cut time.Time, o cutObservation) error {
+// witnessVerdict judges one sample of the operation held under deadline.
+// Only a sample of an already held operation, taken after the deadline and
+// before the shift, discriminates: then its context must already be
+// cancelled for that deadline's expiry. Any other sample (late timer,
+// operation not yet held) proves nothing either way and is reported as
+// unexercised; it is never filled in from a later observation.
+func witnessVerdict(deadline time.Time, o heldObservation) error {
 	switch {
 	case !o.ran:
-		return fmt.Errorf("%w: the witness never ran", errCutWitnessUnexercised)
-	case o.from.Before(cut):
-		return fmt.Errorf("%w: sampled %v before the cut deadline", errCutWitnessUnexercised, cut.Sub(o.from))
-	case !o.at.Before(cut.Add(cutWitnessShift)):
-		return fmt.Errorf("%w: sampled up to %v after the cut deadline, not within %v", errCutWitnessUnexercised, o.at.Sub(cut), cutWitnessShift)
+		return fmt.Errorf("%w: the witness never ran", errWitnessUnexercised)
+	case o.from.Before(deadline):
+		return fmt.Errorf("%w: sampled %v before the deadline", errWitnessUnexercised, deadline.Sub(o.from))
+	case !o.at.Before(deadline.Add(witnessShift)):
+		return fmt.Errorf("%w: sampled up to %v after the deadline, not within %v", errWitnessUnexercised, o.at.Sub(deadline), witnessShift)
 	case !o.entered:
-		return fmt.Errorf("%w: the detach CAS was not held yet when sampled", errCutWitnessUnexercised)
+		return fmt.Errorf("%w: the operation was not held yet when sampled", errWitnessUnexercised)
 	case !errors.Is(o.cause, context.DeadlineExceeded):
-		return fmt.Errorf("held detach CAS live or cancelled otherwise (cause %v) %v after the traced cut deadline", o.cause, o.from.Sub(cut))
+		return fmt.Errorf("held operation live or cancelled otherwise (cause %v) %v after its traced deadline", o.cause, o.from.Sub(deadline))
 	}
 	return nil
 }
 
-// witnessCut samples the held detach CAS's context once, cutWitnessDelay
-// after the traced cut deadline, recording when the sample was taken. done
-// is closed once the sample is recorded.
-func (r *faultRemote) witnessCut(cut time.Time) (done <-chan struct{}, stop func() bool) {
+func heldDetachCAS(r *faultRemote) *heldOp  { return &r.held }
+func heldSettleRead(r *faultRemote) *heldOp { return &r.heldRead }
+
+// witnessHeld samples the context of the operation op selects once,
+// witnessDelay after the traced deadline, recording when the sample was
+// taken. done is closed once the sample is recorded.
+func (r *faultRemote) witnessHeld(deadline time.Time, op func(*faultRemote) *heldOp) (done <-chan struct{}, stop func() bool) {
 	ch := make(chan struct{})
-	tm := time.AfterFunc(time.Until(cut.Add(cutWitnessDelay)), func() {
+	tm := time.AfterFunc(time.Until(deadline.Add(witnessDelay)), func() {
 		r.set(func(r *faultRemote) {
-			o := cutObservation{ran: true, from: time.Now()}
-			if r.held.ctx != nil {
-				o.entered, o.cause = true, context.Cause(r.held.ctx)
+			h := op(r)
+			o := heldObservation{ran: true, from: time.Now()}
+			if h.ctx != nil {
+				o.entered, o.cause = true, context.Cause(h.ctx)
 			}
 			o.at = time.Now()
-			r.held.witness = o
+			h.witness = o
 		})
 		close(ch)
 	})
 	return ch, tm.Stop
+}
+
+// retryUnexercised runs attempt until its witness is exercised: an attempt
+// whose sample proved nothing (a loaded host) is retried, up to
+// witnessAttempts; attempt fails t itself on any defect.
+func retryUnexercised(t *testing.T, attempt func(t *testing.T) error) {
+	t.Helper()
+	for n := 1; ; n++ {
+		var verdict error
+		if !t.Run(fmt.Sprintf("attempt%d", n), func(t *testing.T) { verdict = attempt(t) }) {
+			return
+		}
+		if verdict == nil {
+			return
+		}
+		if n == witnessAttempts {
+			t.Fatalf("no attempt in %d exercised the witness; last: %v", n, verdict)
+		}
+		t.Logf("attempt %d: %v; retrying", n, verdict)
+	}
 }
 
 var errInjected = errors.New("injected remote fault")
@@ -130,7 +158,17 @@ func (r *faultRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
 	}
 	r.mu.Unlock()
 	if hold {
+		var mine bool
+		r.set(func(r *faultRemote) {
+			if mine = r.readArmed && !r.heldRead.entered; mine {
+				r.heldRead.entered, r.heldRead.ctx = true, ctx
+			}
+		})
 		<-ctx.Done()
+		if mine {
+			ended := time.Now()
+			r.set(func(r *faultRemote) { r.heldRead.ended, r.heldRead.cause = ended, context.Cause(ctx) })
+		}
 		return storage.ChunkHead{}, ctx.Err()
 	}
 	if err != nil {
@@ -318,21 +356,9 @@ func TestWALStoreChunk_UndecidableDetachStaysStopped(t *testing.T) {
 // The CAS must also be cancelled at the traced cut deadline, not later. That
 // takes a sample between the deadline and a 100 ms shift; an attempt whose
 // sample missed that window (a loaded host) proves nothing and is retried,
-// up to cutWitnessAttempts.
+// up to witnessAttempts.
 func TestWALStoreChunk_DetachFreezeIsBoundedThenResumes(t *testing.T) {
-	for attempt := 1; ; attempt++ {
-		var verdict error
-		if !t.Run(fmt.Sprintf("attempt%d", attempt), func(t *testing.T) { verdict = detachFreezeAttempt(t) }) {
-			return
-		}
-		if verdict == nil {
-			return
-		}
-		if attempt == cutWitnessAttempts {
-			t.Fatalf("no attempt in %d exercised the cut witness; last: %v", attempt, verdict)
-		}
-		t.Logf("attempt %d: %v; retrying", attempt, verdict)
-	}
+	retryUnexercised(t, detachFreezeAttempt)
 }
 
 // detachFreezeAttempt runs one bounded detach; it fails t on any defect and
@@ -374,7 +400,7 @@ func detachFreezeAttempt(t *testing.T) error {
 		deadlines[stage] = d
 		if stage == "cut" {
 			var stop func() bool
-			witnessed, stop = remote.witnessCut(d)
+			witnessed, stop = remote.witnessHeld(d, heldDetachCAS)
 			t.Cleanup(func() { stop() })
 		}
 	})
@@ -396,7 +422,7 @@ func detachFreezeAttempt(t *testing.T) error {
 	// The held operation is the detach CAS itself, released by the cut's
 	// expiry. Its context's own deadline proves nothing: a CAS carries its
 	// own operation timeout, and the cut may be a timer, not a deadline.
-	var held heldCAS
+	var held heldOp
 	remote.set(func(r *faultRemote) { held = r.held })
 	if !held.entered {
 		t.Fatal("the detach CAS was never held")
@@ -409,8 +435,8 @@ func detachFreezeAttempt(t *testing.T) error {
 	if !errors.Is(held.cause, context.DeadlineExceeded) {
 		t.Fatalf("held detach CAS cancelled with cause %v; want the cut's deadline expiry", held.cause)
 	}
-	verdict := cutWitnessVerdict(cut, held.witness)
-	if verdict != nil && !errors.Is(verdict, errCutWitnessUnexercised) {
+	verdict := witnessVerdict(cut, held.witness)
+	if verdict != nil && !errors.Is(verdict, errWitnessUnexercised) {
 		t.Fatal(verdict)
 	}
 	if end.Before(held.ended) {
@@ -426,30 +452,30 @@ func detachFreezeAttempt(t *testing.T) error {
 // The verdict counts only a sample of an already held CAS, taken inside the
 // window, as evidence; a late sample of a context that a shifted cut has
 // cancelled by then, or a CAS that entered after the sample, prove nothing.
-func TestCutWitnessVerdict(t *testing.T) {
+func TestHeldWitnessVerdict(t *testing.T) {
 	cut := time.Unix(1700000000, 0)
 	at := func(d time.Duration) time.Time { return cut.Add(d) }
 	ms := time.Millisecond
 	for _, c := range []struct {
 		name string
-		o    cutObservation
+		o    heldObservation
 		want string // "pass", "unexercised" or "fail"
 	}{
-		{"cancelled at the cut", cutObservation{true, at(50 * ms), at(51 * ms), true, context.DeadlineExceeded}, "pass"},
-		{"still live: shifted cut", cutObservation{true, at(50 * ms), at(51 * ms), true, nil}, "fail"},
-		{"cancelled otherwise", cutObservation{true, at(50 * ms), at(51 * ms), true, context.Canceled}, "fail"},
-		{"never sampled", cutObservation{}, "unexercised"},
-		{"CAS entered after the sample", cutObservation{true, at(50 * ms), at(51 * ms), false, nil}, "unexercised"},
-		{"delayed sample of a shifted cut", cutObservation{true, at(120 * ms), at(121 * ms), true, context.DeadlineExceeded}, "unexercised"},
-		{"sample straddles the shift", cutObservation{true, at(90 * ms), at(100 * ms), true, context.DeadlineExceeded}, "unexercised"},
-		{"sampled before the cut", cutObservation{true, at(-ms), at(0), true, nil}, "unexercised"},
+		{"cancelled at the cut", heldObservation{true, at(50 * ms), at(51 * ms), true, context.DeadlineExceeded}, "pass"},
+		{"still live: shifted cut", heldObservation{true, at(50 * ms), at(51 * ms), true, nil}, "fail"},
+		{"cancelled otherwise", heldObservation{true, at(50 * ms), at(51 * ms), true, context.Canceled}, "fail"},
+		{"never sampled", heldObservation{}, "unexercised"},
+		{"entered after the sample", heldObservation{true, at(50 * ms), at(51 * ms), false, nil}, "unexercised"},
+		{"delayed sample of a shifted cut", heldObservation{true, at(120 * ms), at(121 * ms), true, context.DeadlineExceeded}, "unexercised"},
+		{"sample straddles the shift", heldObservation{true, at(90 * ms), at(100 * ms), true, context.DeadlineExceeded}, "unexercised"},
+		{"sampled before the cut", heldObservation{true, at(-ms), at(0), true, nil}, "unexercised"},
 	} {
-		err := cutWitnessVerdict(cut, c.o)
+		err := witnessVerdict(cut, c.o)
 		got := "fail"
 		switch {
 		case err == nil:
 			got = "pass"
-		case errors.Is(err, errCutWitnessUnexercised):
+		case errors.Is(err, errWitnessUnexercised):
 			got = "unexercised"
 		}
 		if got != c.want {
@@ -526,11 +552,18 @@ func TestWALStoreChunk_RetryAfterUndecidableDetachNeverResumes(t *testing.T) {
 	}
 }
 
-// P1 (review): one freeze budget covers the cut AND the settlement: with the
-// CAS and every HEAD read hung, DetachVolume returns within the bound (here
-// undecided, so the volume stays stopped).
+// The freeze bound covers the settlement too: with the detach CAS and the
+// settlement's HEAD read both hung, the cut ends at its deadline, the read
+// at the bound, the outcome stays unknown and the volume stays stopped. The
+// bounds are the deadlines the detach traced, and each held operation is
+// witnessed: the read must be cancelled at the traced settlement deadline,
+// not later (retried, like the cut witness, when a sample proves nothing).
 func TestWALStoreChunk_DetachFreezeBoundCoversTheSettle(t *testing.T) {
-	const freeze = 400 * time.Millisecond
+	retryUnexercised(t, settleBoundAttempt)
+}
+
+func settleBoundAttempt(t *testing.T) error {
+	const freeze = 2 * time.Second
 	remote := &faultRemote{MemChunkRemote: storage.NewMemChunkRemote()}
 	p, err := durable.NewDurableProvider(durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
@@ -549,25 +582,66 @@ func TestWALStoreChunk_DetachFreezeBoundCoversTheSettle(t *testing.T) {
 	if _, err := b.Write(context.Background(), 4096, block(1)); err != nil {
 		t.Fatal(err)
 	}
-	remote.set(func(r *faultRemote) { r.casMode = "hold"; r.getHeadHold = true })
+	remote.set(func(r *faultRemote) { r.casMode = "hold-detach"; r.getHeadHold = true })
 	deadlines := map[string]time.Time{}
-	durable.SetTestDetachTrace(p, func(stage string, d time.Time) { deadlines[stage] = d })
-	start := time.Now()
+	var witnessed <-chan struct{}
+	durable.SetTestDetachTrace(p, func(stage string, d time.Time) {
+		deadlines[stage] = d
+		if stage == "settle" {
+			// Only reads from here on are the settlement's.
+			remote.set(func(r *faultRemote) { r.readArmed = true })
+			var stop func() bool
+			witnessed, stop = remote.witnessHeld(d, heldSettleRead)
+			t.Cleanup(func() { stop() })
+		}
+	})
 	_, _, err = p.DetachVolume(context.Background(), "v1")
-	took := time.Since(start)
-	cutAt, settleAt := deadlines["cut"].Sub(start), deadlines["settle"].Sub(start)
-	if cutAt < freeze*3/4-50*time.Millisecond || cutAt > freeze*3/4+50*time.Millisecond || settleAt < freeze-50*time.Millisecond || settleAt > freeze+50*time.Millisecond {
-		t.Fatalf("deadlines: cut %v, settle %v after the start; want three quarters of the %v freeze, then the bound", cutAt, settleAt, freeze)
+	end := time.Now()
+	if witnessed == nil {
+		t.Fatal("the detach traced no settlement deadline")
 	}
+	<-witnessed
 	if !errors.Is(err, durable.ErrDetachOutcomeUnknown) {
 		t.Fatalf("detach with a hung CAS and hung HEAD reads: %v; want the outcome unknown", err)
 	}
-	if took > freeze+200*time.Millisecond {
-		t.Fatalf("detach took %v; the %v freeze bound must cover the settlement too", took, freeze)
+	cut, settle := deadlines["cut"], deadlines["settle"]
+	if gap := settle.Sub(cut); gap != freeze/4 {
+		t.Fatalf("settlement deadline %v after the cut deadline; want a quarter of the %v bound", gap, freeze)
+	}
+	var cas, read heldOp
+	remote.set(func(r *faultRemote) { cas, read = r.held, r.heldRead })
+	// The cut ended on the hung detach CAS, not earlier in the capture.
+	if !cas.entered {
+		t.Fatal("the detach CAS was never held")
+	}
+	if cas.ended.Before(cut) {
+		t.Fatalf("held detach CAS ended %v before the cut deadline", cut.Sub(cas.ended))
+	}
+	// The settlement's HEAD read was held until the bound, and the detach
+	// returned right after it (scheduling slack only).
+	if !read.entered {
+		t.Fatal("the settlement's HEAD read was never held")
+	}
+	if read.ended.Before(settle) {
+		t.Fatalf("held settlement read ended %v before the settlement deadline", settle.Sub(read.ended))
+	}
+	if !errors.Is(read.cause, context.DeadlineExceeded) {
+		t.Fatalf("held settlement read cancelled with cause %v; want the bound's expiry", read.cause)
+	}
+	verdict := witnessVerdict(settle, read.witness)
+	if verdict != nil && !errors.Is(verdict, errWitnessUnexercised) {
+		t.Fatal(verdict)
+	}
+	if end.Before(read.ended) {
+		t.Fatal("detach returned before its held settlement read ended")
+	}
+	if late := end.Sub(settle); late > 500*time.Millisecond {
+		t.Fatalf("detach returned %v after the freeze bound; the bound must cover the settlement too", late)
 	}
 	if _, err := b.Write(context.Background(), 8192, block(2)); !errors.Is(err, frontend.ErrNotReady) {
 		t.Fatalf("write after an undecided detach: %v; want ErrNotReady", err)
 	}
+	return verdict
 }
 
 // P2 (review): the lost detach CAS really is in flight. It reaches the remote
