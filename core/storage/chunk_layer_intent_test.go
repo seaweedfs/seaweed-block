@@ -167,8 +167,9 @@ func TestChunkIntent_FailedUploadDeletesIntent(t *testing.T) {
 }
 
 // HEAD is taken over before the CAS: the CAS is refused for good and the
-// layer fences. Its uploads are orphans; its intent goes.
-func TestChunkIntent_RefusedCASDeletesIntent(t *testing.T) {
+// layer fences. Keep its roots for epoch-aware GC rather than cleaning over
+// an independently serialized owner's publication.
+func TestChunkIntent_ForeignOwnerRefusalKeepsIntent(t *testing.T) {
 	s, _ := newChunkTestStore(t)
 	f := newFakeChunkRemote()
 	layer := mustAttach(t, s, f, ctConfig(1))
@@ -180,8 +181,8 @@ func TestChunkIntent_RefusedCASDeletesIntent(t *testing.T) {
 	if _, err := layer.Cut(ctTimeout(t)); !errors.Is(err, errChunkLayerFenced) {
 		t.Fatalf("cut against a taken-over HEAD: %v; want fenced", err)
 	}
-	if live := liveIntents(t, f); len(live) != 0 {
-		t.Fatalf("intent left after a refused CAS: %+v", live)
+	if live := liveIntents(t, f); len(live) == 0 {
+		t.Fatal("foreign-owner refusal removed the cut's intent")
 	}
 }
 

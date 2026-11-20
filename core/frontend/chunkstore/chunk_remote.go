@@ -378,6 +378,11 @@ func (r *ChunkRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
 	return r.resolveManifest(ctx, h)
 }
 
+// GetHeadRoot validates publication identity without reading segment bodies.
+func (r *ChunkRemote) GetHeadRoot(ctx context.Context) (storage.ChunkHead, error) {
+	return r.getHeadRoot(ctx)
+}
+
 // getHeadRoot validates the root and its CAS attributes without reading any
 // immutable segment. CASHead only needs authority and lineage from this root.
 func (r *ChunkRemote) getHeadRoot(ctx context.Context) (storage.ChunkHead, error) {

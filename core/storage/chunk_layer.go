@@ -1105,7 +1105,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	if !upgrade && !detach && len(changed) == 0 && h == baseHead.RemoteLSN && baseHead.Gen != 0 && !chunkHeadIsDetached(baseHead) {
 		// A no-op cut still observes authority: a fresh host may have
 		// claimed HEAD without uploading a single chunk since our last cut.
-		cur, err := l.remote.GetHead(ctx)
+		cur, err := readChunkHead(ctx, l.remote)
 		if err != nil {
 			l.abortCut(all)
 			l.dropIntents(ctx, intents)
@@ -1113,11 +1113,10 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		}
 		if cur.Gen != baseHead.Gen || !sameProposal(cur, baseHead) {
 			l.abortCut(all)
-			l.dropIntents(ctx, intents)
 			l.stMu.Lock()
-			l.fenced, l.head = true, copyHead(cur)
+			l.pendingIntents = append(l.pendingIntents, intents...)
 			l.stMu.Unlock()
-			l.abortCOW(errChunkLayerFenced)
+			l.fencePublication(cur)
 			return chunkCutResult{}, errChunkLayerFenced
 		}
 		l.finishCut(baseHead, h, nil, nil) // nothing new: no CAS
@@ -1141,7 +1140,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	}
 	expected := chunkHeadVersion{Gen: baseHead.Gen, Epoch: baseHead.Epoch}
 	casStart := time.Now()
-	gen, casErr := l.remote.CASHead(ctx, expected, next)
+	gen, casErr := casAndConfirmChunkHead(ctx, l.remote, expected, next)
 	st.CASNs = time.Since(casStart).Nanoseconds()
 	st.CASResult = "ok"
 	if errors.Is(casErr, errChunkHeadPrecondition) {
@@ -1167,10 +1166,20 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		l.stMu.Unlock()
 		l.abortCut(all)
 	}
-	cur, gerr := l.remote.GetHead(ctx)
+	if errors.Is(casErr, errChunkLayerFenced) {
+		keepPending()
+		l.fencePublication(chunkHead{}) // confirmChunkHead already logged the observed root.
+		return chunkCutResult{}, casErr
+	}
+	cur, gerr := readChunkHead(ctx, l.remote)
 	if gerr != nil {
 		keepPending()
 		return chunkCutResult{}, fmt.Errorf("storage: capture CAS outcome unresolved (%v): %w: %w", casErr, errChunkCASOutcomeUnknown, gerr)
+	}
+	if !sameProposal(cur, next) && l.publicationOwnerChanged(cur) {
+		keepPending() // Close must keep these roots as well.
+		l.fencePublication(cur)
+		return chunkCutResult{}, errors.Join(errChunkLayerFenced, casErr)
 	}
 	if !errors.Is(casErr, errChunkHeadPrecondition) && !sameProposal(cur, next) && cur.Gen == expected.Gen && cur.Epoch == expected.Epoch {
 		// HEAD is still the CAS's base and the server gave no definite
@@ -1249,30 +1258,38 @@ func (l *chunkLayerImpl) SettleDetach(ctx context.Context) (detachSettlement, ch
 		// definitely refused (an unresolved ordinary cut settles as usual).
 		return detachNotPublished, chunkCutResult{}, nil
 	}
-	cur, err := l.remote.GetHead(ctx)
+	cur, err := readChunkHead(ctx, l.remote)
 	if err != nil {
 		return 0, chunkCutResult{}, fmt.Errorf("storage: detach outcome unresolved: %w: %w", errChunkCASOutcomeUnknown, err)
 	}
-	if !sameProposal(cur, *pending) && !l.supersededBy(cur) && cur.Gen == base.Gen && cur.Epoch == base.Epoch {
+	if !sameProposal(cur, *pending) && !l.publicationOwnerChanged(cur) && cur.Gen == base.Gen && cur.Epoch == base.Epoch {
 		if err := l.admit(); err != nil {
 			return 0, chunkCutResult{}, fmt.Errorf("storage: detach outcome unresolved (%w); cancel refused: %w", errChunkCASOutcomeUnknown, err)
 		}
 		cancel := copyHead(baseHead)
 		cancel.Epoch, cancel.Holder = l.cfg.Epoch, l.cfg.Holder
 		cancel.State, cancel.DetachedBy = chunkHeadActive, nil
-		gen, casErr := l.remote.CASHead(ctx, base, cancel)
+		gen, casErr := casAndConfirmChunkHead(ctx, l.remote, base, cancel)
 		if casErr == nil {
 			cancel.Gen = gen
 			cur = cancel
-		} else if cur, err = l.remote.GetHead(ctx); err != nil {
+		} else if errors.Is(casErr, errChunkLayerFenced) {
+			l.fencePublication(chunkHead{})
+			return detachFenced, chunkCutResult{}, nil
+		} else if cur, err = readChunkHead(ctx, l.remote); err != nil {
 			return 0, chunkCutResult{}, fmt.Errorf("storage: detach outcome unresolved (cancel: %v): %w: %w", casErr, errChunkCASOutcomeUnknown, err)
-		} else if !sameProposal(cur, *pending) && !l.supersededBy(cur) && cur.Gen == base.Gen && cur.Epoch == base.Epoch {
+		} else if !sameProposal(cur, *pending) && !l.publicationOwnerChanged(cur) && cur.Gen == base.Gen && cur.Epoch == base.Epoch {
 			return 0, chunkCutResult{}, fmt.Errorf("storage: detach outcome unresolved (cancel: %v): HEAD unchanged: %w", casErr, errChunkCASOutcomeUnknown)
 		}
+	}
+	if !sameProposal(cur, *pending) && l.publicationOwnerChanged(cur) {
+		l.fencePublication(cur)
+		return detachFenced, chunkCutResult{}, nil
 	}
 	// Settled: the detach landed, or it can never land.
 	l.stMu.Lock()
 	l.reusable = nil
+	l.pendingIntents = nil // settled here; allow deletion of these roots below.
 	l.stMu.Unlock()
 	l.dropIntents(ctx, intents)
 	l.stMu.Lock()
@@ -1365,11 +1382,11 @@ func (l *chunkLayerImpl) resolvePending(ctx context.Context) (err error) {
 	if pending == nil {
 		return nil
 	}
-	cur, err := l.remote.GetHead(ctx)
+	cur, err := readChunkHead(ctx, l.remote)
 	if err != nil {
 		return fmt.Errorf("storage: capture: earlier CAS outcome still unresolved: %w: %w", errChunkCASOutcomeUnknown, err)
 	}
-	if !sameProposal(cur, *pending) && !l.supersededBy(cur) && cur.Gen == base.Gen && cur.Epoch == base.Epoch {
+	if !sameProposal(cur, *pending) && !l.publicationOwnerChanged(cur) && cur.Gen == base.Gen && cur.Epoch == base.Epoch {
 		// HEAD is still the unresolved CAS's base, so that CAS may still
 		// land. Settle it by issuing the same proposal at the same base:
 		// whichever lands first, HEAD ends at this proposal and the other
@@ -1380,19 +1397,27 @@ func (l *chunkLayerImpl) resolvePending(ctx context.Context) (err error) {
 		if err := l.admit(); err != nil {
 			return fmt.Errorf("storage: capture: earlier CAS outcome still unresolved (%w); re-proposal refused: %w", errChunkCASOutcomeUnknown, err)
 		}
-		gen, casErr := l.remote.CASHead(ctx, base, copyHead(*pending))
+		gen, casErr := casAndConfirmChunkHead(ctx, l.remote, base, copyHead(*pending))
 		if casErr == nil {
 			cur = copyHead(*pending)
 			cur.Gen = gen
-		} else if cur, err = l.remote.GetHead(ctx); err != nil {
+		} else if errors.Is(casErr, errChunkLayerFenced) {
+			l.fencePublication(chunkHead{})
+			return errChunkLayerFenced
+		} else if cur, err = readChunkHead(ctx, l.remote); err != nil {
 			return fmt.Errorf("storage: capture: earlier CAS outcome still unresolved (%v): %w: %w", casErr, errChunkCASOutcomeUnknown, err)
-		} else if !sameProposal(cur, *pending) && !l.supersededBy(cur) && cur.Gen == base.Gen && cur.Epoch == base.Epoch {
+		} else if !sameProposal(cur, *pending) && !l.publicationOwnerChanged(cur) && cur.Gen == base.Gen && cur.Epoch == base.Epoch {
 			return fmt.Errorf("storage: capture: earlier CAS outcome still unresolved (%v): HEAD unchanged: %w", casErr, errChunkCASOutcomeUnknown)
 		}
+	}
+	if !sameProposal(cur, *pending) && l.publicationOwnerChanged(cur) {
+		l.fencePublication(cur)
+		return errChunkLayerFenced
 	}
 	// Settled: the proposal landed or can never land.
 	l.stMu.Lock()
 	l.reusable = nil
+	l.pendingIntents = nil // settled here; allow deletion of these roots below.
 	l.stMu.Unlock()
 	l.dropIntents(ctx, intents)
 	l.stMu.Lock()
@@ -1739,6 +1764,9 @@ func (l *chunkLayerImpl) dropIntents(ctx context.Context, ids []string) {
 	// once, rather than rescanning every cached chunk for each delete.
 	l.stMu.Lock()
 	keep := make(map[string]bool)
+	for _, id := range l.pendingIntents {
+		keep[id] = true
+	}
 	for idx, sc := range l.reusable {
 		if l.closed || l.fenced || sc.ver != l.chunkVersion(idx) || sc.headGen != l.head.Gen {
 			delete(l.reusable, idx)
@@ -2126,10 +2154,8 @@ func (l *chunkLayerImpl) Close() error {
 	l.wg.Wait()
 	l.stMu.Lock()
 	protected := make(map[string]bool, len(l.pendingIntents))
-	if l.pending != nil {
-		for _, id := range l.pendingIntents {
-			protected[id] = true
-		}
+	for _, id := range l.pendingIntents {
+		protected[id] = true
 	}
 	var settled []string
 	for _, sc := range l.reusable {

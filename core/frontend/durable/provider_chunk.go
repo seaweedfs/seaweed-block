@@ -328,6 +328,10 @@ func (p *DurableProvider) startChunkLoop(volumeID string, h *volHandle, layer st
 }
 
 func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h *volHandle) (storage.ChunkLayer, error) {
+	// Close cancels local takeover cooling as well as each bound remote RPC.
+	ctx, cancelAttach := context.WithCancel(ctx)
+	stopClose := context.AfterFunc(p.closeCtx, cancelAttach)
+	defer func() { stopClose(); cancelAttach() }()
 	ws, ok := h.storage.(*storage.WALStore)
 	if !ok {
 		return nil, fmt.Errorf("durable: %s storage is %T, not a walstore", ImplWALStoreChunk, h.storage)
@@ -366,6 +370,7 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 	cfg := storage.ChunkLayerConfig{
 		ChunkBlocks:         p.cfg.ChunkBlocks,
 		RestoreChunkBytes:   uint64(ws.BlockSize()) * uint64(p.cfg.ChunkBlocks),
+		HeadCoolingWindow:   p.cfg.ChunkHeadCoolingWindow,
 		Epoch:               lin.epoch,
 		Holder:              holder,
 		FreshFromHead:       h.fresh,
@@ -511,6 +516,15 @@ func (r *closeBoundRemote) Get(ctx context.Context, key string) ([]byte, error) 
 func (r *closeBoundRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
 	c, end := r.bind(ctx)
 	defer end()
+	return r.ChunkRemote.GetHead(c)
+}
+
+func (r *closeBoundRemote) GetHeadRoot(ctx context.Context) (storage.ChunkHead, error) {
+	c, end := r.bind(ctx)
+	defer end()
+	if reader, ok := r.ChunkRemote.(storage.ChunkHeadRootReader); ok {
+		return reader.GetHeadRoot(c)
+	}
 	return r.ChunkRemote.GetHead(c)
 }
 

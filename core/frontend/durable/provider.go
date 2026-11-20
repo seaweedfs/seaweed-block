@@ -159,6 +159,9 @@ type ProviderConfig struct {
 	// ChunkHolder names this node in HEAD; blockvolume sets
 	// <server-id>/<replica-id>. Zero: the replica ID (tests).
 	ChunkHolder string
+	// Zero uses immediate HEAD confirmation for the supported single-filer
+	// topology. Nonzero cooling is reserved for explicit topology experiments.
+	ChunkHeadCoolingWindow time.Duration
 	// ChunkReadMissTimeout bounds one remote fetch of an absent block.
 	// Zero: the storage default.
 	ChunkReadMissTimeout time.Duration
