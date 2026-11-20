@@ -190,6 +190,61 @@ func TestNativeReplacementAllBlocksAfterCheckpoint(t *testing.T) {
 	}
 }
 
+func TestNativeReplacementFsyncSerialization(t *testing.T) {
+	s, _ := newMappedCheckpointStoreV3(t)
+	if _, err := s.Write(0, blk(1)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Write(1, blk(2)); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, resumeSnapshot := make(chan struct{}), make(chan struct{})
+	walEntered, resumeWAL := make(chan struct{}), make(chan struct{})
+	boundary, extentEntered := make(chan struct{}), make(chan struct{})
+	flushDone, syncDone := make(chan struct{}), make(chan struct{})
+	releaseSnapshot := sync.OnceFunc(func() { close(resumeSnapshot) })
+	releaseWAL := sync.OnceFunc(func() { close(resumeWAL) })
+	var flushErr, syncErr error
+	t.Cleanup(func() {
+		releaseSnapshot()
+		releaseWAL()
+		for _, done := range []chan struct{}{flushDone, syncDone} {
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				t.Error("fsync caller did not join")
+			}
+		}
+	})
+	s.flusher.afterSnapshotForTest = func() { close(snapshot); <-resumeSnapshot }
+	go func() { flushErr = s.flusher.flushOnce(); close(flushDone) }()
+	waitV3(t, snapshot, "native flusher snapshot")
+	realWAL := s.syncWALFile
+	s.syncWALFile = func() error { close(walEntered); <-resumeWAL; return realWAL() }
+	go func() { _, syncErr = s.Sync(); close(syncDone) }()
+	waitV3(t, walEntered, "held WAL fsync")
+	s.testBeforeFileSync = sync.OnceFunc(func() { close(boundary) })
+	realExtent := s.syncExtentFile
+	s.syncExtentFile = func() error { close(extentEntered); return realExtent() }
+	releaseSnapshot()
+	waitV3(t, boundary, "flusher reached shared-file sync boundary")
+	select {
+	case <-extentEntered:
+		t.Fatal("extent fsync overlapped held WAL fsync")
+	case <-time.After(50 * time.Millisecond):
+	}
+	releaseWAL()
+	waitV3(t, syncDone, "WAL sync completion")
+	waitV3(t, flushDone, "flusher completion")
+	if syncErr != nil || flushErr != nil {
+		t.Fatalf("Sync=%v flush=%v", syncErr, flushErr)
+	}
+	waitV3(t, extentEntered, "extent fsync after WAL release")
+}
+
 func TestNativeReplacementFlusherCannotOverwriteBASE(t *testing.T) {
 	for _, phase := range []string{"snapshot", "extent_sync"} {
 		t.Run(phase, func(t *testing.T) {
