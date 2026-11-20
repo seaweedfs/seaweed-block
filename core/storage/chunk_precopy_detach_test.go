@@ -253,6 +253,7 @@ func TestPrecopyDetachQueuedCancellationReturnsWhileOtherCutOwnsPipeline(t *test
 		t.Fatal("other cut did not reach held upload")
 	}
 	ctx, cancel = context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
 	go func() {
 		defer close(preDone)
 		_, precopyErr = l.PrecopyDetach(ctx, func() bool { t.Error("queued canceled caller stopped I/O"); return false })
