@@ -63,7 +63,9 @@ func (h *Host) RunLifecycleProductTick() (LifecycleProductTickResult, error) {
 		return LifecycleProductTickResult{}, nil
 	}
 	nodes := stores.Nodes.ListNodes()
-	reconciled := lifecycle.ReconcilePlacement(stores.liveVolumes(), nodes, stores.Placements)
+	// New placements never choose a co-located node under strict journal
+	// isolation; existing placements still verify against every node.
+	reconciled := h.reconcilePlacements(stores, nodes)
 	placements := stores.Placements.ListPlacements()
 	verified := h.verifyPlacements(placements, nodes)
 	result := LifecycleProductTickResult{

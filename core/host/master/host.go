@@ -17,6 +17,7 @@ package master
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -30,6 +31,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/host/bootstrap"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"github.com/seaweedfs/seaweed-block/core/storeident"
 	"google.golang.org/grpc"
 )
 
@@ -78,6 +80,18 @@ type Config struct {
 	FrontendPublicationRuntimeHTTP   bool
 	FrontendPublicationRuntimeListen string
 
+	// StrictJournalIsolation refuses nodes whose durable root shares the
+	// authority store's file system (one journal): a co-located node that
+	// serves no volume yet gets its heartbeats refused, and no new placement
+	// or move targets a co-located node. A co-located node that already
+	// serves volumes is only alarmed (refusing it would stop its lease
+	// renewals). Off: alarm only.
+	StrictJournalIsolation bool
+
+	// StatusListen, when non-empty, serves the read-only status endpoint
+	// GET /status/workspace-lease on this loopback address.
+	StatusListen string
+
 	// Logger is used for structured startup and error logging. If
 	// nil, the default log package logger is used.
 	Logger *log.Logger
@@ -107,6 +121,9 @@ type Host struct {
 	ln                  net.Listener
 	frontendRuntimeLn   net.Listener
 	frontendRuntimeHTTP *http.Server
+	statusLn            net.Listener
+	statusHTTP          *http.Server
+	journal             *journalIsolation
 	grpc                *grpc.Server
 	topo                authority.AcceptedTopology
 	lifecycle           *LifecycleStores
@@ -184,6 +201,9 @@ func New(cfg Config) (*Host, error) {
 	if cfg.Listen == "" {
 		return nil, fmt.Errorf("master.New: Listen is required")
 	}
+	if err := ValidateStatusListen(cfg.StatusListen); err != nil {
+		return nil, fmt.Errorf("master.New: %w", err)
+	}
 	lg := cfg.Logger
 	if lg == nil {
 		lg = log.Default()
@@ -205,11 +225,12 @@ func New(cfg Config) (*Host, error) {
 	ctrl := authority.NewTopologyController(ctrlCfg, holder)
 
 	h := &Host{
-		cfg:    cfg,
-		log:    lg,
-		ctrl:   ctrl,
-		topo:   cfg.Topology,
-		events: newEventRing(1024),
+		cfg:     cfg,
+		log:     lg,
+		ctrl:    ctrl,
+		topo:    cfg.Topology,
+		events:  newEventRing(1024),
+		journal: newJournalIsolation(storeident.Identity{}), // sampled once the store exists
 	}
 
 	boot, err := bootstrap.BootstrapWithOptions(cfg.AuthorityStoreDir, ctrl, bootstrap.Options{
@@ -221,6 +242,10 @@ func New(cfg Config) (*Host, error) {
 		return nil, fmt.Errorf("master.New: Bootstrap: %w", err)
 	}
 	holder.set(boot.Publisher)
+	// Bootstrap creates a fresh store directory: sample its file system only
+	// now, or a first start would compare against an unknown device forever.
+	// An unknown identity (stat error, unsupported platform) never matches.
+	h.journal.setSelf(storeident.Of(cfg.AuthorityStoreDir))
 
 	var sink authority.ControllerSink = ctrl
 	if len(cfg.Topology.Volumes) == 0 {
@@ -277,6 +302,23 @@ func New(cfg Config) (*Host, error) {
 		h.frontendRuntimeHTTP = &http.Server{Handler: h.frontendPublicationRuntimeHandler()}
 	}
 
+	if cfg.StatusListen != "" {
+		statusLn, err := net.Listen("tcp", cfg.StatusListen)
+		if err != nil {
+			if h.frontendRuntimeLn != nil {
+				_ = h.frontendRuntimeLn.Close()
+			}
+			_ = ln.Close()
+			_ = boot.Close()
+			return nil, fmt.Errorf("master.New: status listen %q: %w", cfg.StatusListen, err)
+		}
+		h.statusLn = statusLn
+		// Every connection phase is bounded: a client that withholds a
+		// declared body or never reads the reply is cut off.
+		h.statusHTTP = &http.Server{Handler: h.statusHandler(), ReadHeaderTimeout: statusReadTimeout, ReadTimeout: statusReadTimeout,
+			WriteTimeout: statusWriteTimeout, IdleTimeout: statusIdleTimeout}
+	}
+
 	grpcSrv := grpc.NewServer()
 	svc := newServices(h)
 	control.RegisterObservationServiceServer(grpcSrv, svc)
@@ -292,6 +334,12 @@ func New(cfg Config) (*Host, error) {
 		boot.ReloadedRecords, ln.Addr().String())
 	if h.frontendRuntimeLn != nil {
 		lg.Printf("blockmaster: frontend publication runtime listen=%s", h.frontendRuntimeLn.Addr().String())
+	}
+	if h.statusLn != nil {
+		lg.Printf("blockmaster: status listen=%s", h.statusLn.Addr().String())
+	}
+	if cfg.StrictJournalIsolation {
+		lg.Printf("blockmaster: strict journal isolation: nodes sharing the authority store's file system are refused new work")
 	}
 	for _, e := range boot.ReloadSkips {
 		lg.Printf("blockmaster: reload skip: %v", e)
@@ -342,6 +390,15 @@ func (h *Host) FrontendPublicationRuntimeAddr() string {
 		return ""
 	}
 	return h.frontendRuntimeLn.Addr().String()
+}
+
+// StatusAddr returns the bound status HTTP address, or empty when the status
+// endpoint is disabled.
+func (h *Host) StatusAddr() string {
+	if h.statusLn == nil {
+		return ""
+	}
+	return h.statusLn.Addr().String()
 }
 
 // Publisher exposes the reloaded publisher for tests and for the
@@ -454,6 +511,16 @@ func (h *Host) Start() context.Context {
 		}()
 	}
 
+	if h.statusHTTP != nil && h.statusLn != nil {
+		h.wg.Add(1)
+		go func() {
+			defer h.wg.Done()
+			if err := h.statusHTTP.Serve(h.statusLn); err != nil && err != http.ErrServerClosed {
+				h.log.Printf("blockmaster: status Serve: %v", err)
+			}
+		}()
+	}
+
 	return ctx
 }
 
@@ -465,6 +532,10 @@ func (h *Host) Close(ctx context.Context) error {
 	}
 	if h.frontendRuntimeHTTP != nil {
 		_ = h.frontendRuntimeHTTP.Shutdown(ctx)
+	}
+	var statusErr error
+	if h.statusHTTP != nil {
+		statusErr = h.closeStatusHTTP(ctx)
 	}
 	h.obs.Stop()
 
@@ -484,5 +555,29 @@ func (h *Host) Close(ctx context.Context) error {
 	if h.boot != nil && h.boot.Publisher != nil {
 		h.boot.Publisher.CloseWorkspaceExtenders()
 	}
-	return h.boot.Close()
+	return errors.Join(statusErr, h.boot.Close())
+}
+
+// Status endpoint connection bounds.
+const (
+	statusReadTimeout  = 5 * time.Second
+	statusWriteTimeout = 5 * time.Second
+	statusIdleTimeout  = 30 * time.Second
+)
+
+// closeStatusHTTP shuts the status endpoint down gracefully until ctx ends,
+// then force-closes the connections still open (Shutdown leaves them). It
+// returns the force close's error, if any; an expired graceful shutdown that
+// the force close completed is only logged.
+func (h *Host) closeStatusHTTP(ctx context.Context) error {
+	defer h.statusLn.Close() // a listener Start never served is not Shutdown's
+	err := h.statusHTTP.Shutdown(ctx)
+	if err == nil {
+		return nil
+	}
+	h.log.Printf("blockmaster: status graceful shutdown: %v; closing its open connections", err)
+	if cerr := h.statusHTTP.Close(); cerr != nil && !errors.Is(cerr, net.ErrClosed) {
+		return fmt.Errorf("status endpoint close: %w", cerr)
+	}
+	return nil
 }

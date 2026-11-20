@@ -116,6 +116,17 @@ message HeartbeatReport {
     bool reachable = 3;
     bool eligible = 4;
     repeated HeartbeatSlot slots = 5;
+    // machine_id and durable_root_dev identify the file system of the
+    // reporting process's durable root (the machine's /etc/machine-id and
+    // the root's st_dev). Raw observation facts: the master compares them
+    // with its own authority store to detect a shared file system (one
+    // journal). Empty / 0 means unknown and is never compared.
+    string machine_id = 6;
+    uint64 durable_root_dev = 7;
+    // durable_root_fsid is the durable root's statfs f_fsid (high word
+    // first). 0 means unknown (older reporters, platforms without statfs):
+    // the master then compares machine_id and durable_root_dev only.
+    uint64 durable_root_fsid = 8;
 }
 
 // HeartbeatSlot — per-replica slot fact. local_role_claim is the

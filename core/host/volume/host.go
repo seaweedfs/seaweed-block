@@ -15,6 +15,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/engine"
 	"github.com/seaweedfs/seaweed-block/core/replication"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"github.com/seaweedfs/seaweed-block/core/storeident"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/proto"
@@ -71,6 +72,12 @@ type Config struct {
 	// peers or supporting replica, is refused before any peer set, role or
 	// readiness is installed, and latched like a failed role admission.
 	RF1Only string
+
+	// StorageIdentity identifies the file system of the durable root
+	// (machine id + st_dev + statfs f_fsid), reported in every heartbeat so the master can
+	// detect a durable root that shares the authority store's journal. Zero
+	// means unknown (memback, non-unix, or the root could not be read).
+	StorageIdentity storeident.Identity
 
 	// ReplicationVolume, when non-nil, receives peer-set updates on
 	// every self-replica AssignmentFact. The Host calls
@@ -639,6 +646,10 @@ func (h *Host) buildReport() *control.HeartbeatReport {
 		SentAt:    timestamppb.Now(),
 		Reachable: true,
 		Eligible:  true,
+		// Raw identity facts; the master compares them with its own store.
+		MachineId:       h.cfg.StorageIdentity.MachineID,
+		DurableRootDev:  h.cfg.StorageIdentity.Dev,
+		DurableRootFsid: h.cfg.StorageIdentity.FSID,
 		Slots: []*control.HeartbeatSlot{
 			{
 				VolumeId:        h.cfg.VolumeID,

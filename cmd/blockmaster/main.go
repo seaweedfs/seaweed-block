@@ -60,6 +60,8 @@ type flags struct {
 	workspaceHEADBase                     string
 	frontendPublicationRuntimeHTTP        bool
 	frontendPublicationRuntimeListen      string
+	strictJournalIsolation                bool
+	statusListen                          string
 	version                               bool
 	// printReadyLine: test-only flag that emits a single
 	// structured JSON line to stdout after the gRPC listener is
@@ -110,6 +112,8 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.workspaceHEADBase, "workspace-head-base-url", "", "filer HTTP directory containing per-volume HEAD files; required with --workspace-rpc")
 	fs.BoolVar(&f.frontendPublicationRuntimeHTTP, "frontend-publication-runtime-http", false, "enable disabled-by-default frontend publication HTTP runtime; confirms post-failback authority publication only")
 	fs.StringVar(&f.frontendPublicationRuntimeListen, "frontend-publication-runtime-listen", "127.0.0.1:9334", "HTTP listen address for --frontend-publication-runtime-http")
+	fs.BoolVar(&f.strictJournalIsolation, "strict-journal-isolation", false, "refuse new work on nodes whose durable root shares the authority store's file system (one journal): their heartbeats are refused until they serve a volume, and no placement or move targets them; off = alarm only")
+	fs.StringVar(&f.statusListen, "status-listen", "", "loopback HTTP address for the read-only GET /status/workspace-lease endpoint; empty = off")
 	fs.BoolVar(&f.version, "version", false, "print build provenance and exit")
 	fs.BoolVar(&f.printReadyLine, "t0-print-ready", false, "internal test-only: emit one structured JSON line on stdout after listener bound")
 	fs.SetOutput(os.Stderr)
@@ -130,6 +134,9 @@ func parseFlags(args []string) (flags, error) {
 	}
 	if f.authorityStore == "" {
 		return flags{}, fmt.Errorf("--authority-store is required")
+	}
+	if err := master.ValidateStatusListen(f.statusListen); err != nil {
+		return flags{}, err
 	}
 	if f.launcherExternalISCSI && f.launcherCHAPSecretName == "" {
 		return flags{}, fmt.Errorf("cannot enable --launcher-external-iscsi without --launcher-iscsi-chap-secret-name")
@@ -182,6 +189,8 @@ func run(f flags) int {
 		FailbackRuntimeRPC:               f.failbackRuntimeRPC,
 		FrontendPublicationRuntimeHTTP:   f.frontendPublicationRuntimeHTTP,
 		FrontendPublicationRuntimeListen: f.frontendPublicationRuntimeListen,
+		StrictJournalIsolation:           f.strictJournalIsolation,
+		StatusListen:                     f.statusListen,
 	}
 	if f.workspaceRPC {
 		reader, err := master.NewWorkspaceHEADReader(f.workspaceHEADBase)
