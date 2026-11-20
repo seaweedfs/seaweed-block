@@ -170,7 +170,7 @@ func TestFallbackAndConfigMismatch(t *testing.T) {
 	}
 	c.Directory += "-missing"
 	f := newTest(t, c)
-	x, e = f.Admit(context.Background(), 1, nil)
+	x, e = f.Admit(WithClass(context.Background(), Urgent), 1, nil)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -327,7 +327,7 @@ func TestFallbackLogDoesNotHoldCOWAccountingLock(t *testing.T) {
 	defer log.SetOutput(before)
 	defer close(gate.release)
 	done := make(chan struct{})
-	go func() { _, _ = l.Admit(context.Background(), 1, nil); close(done) }()
+	go func() { _, _ = l.Admit(WithClass(context.Background(), Urgent), 1, nil); close(done) }()
 	select {
 	case <-gate.entered:
 	case <-time.After(5 * time.Second):
@@ -343,7 +343,7 @@ func TestHealthyAdmissionDoesNotHideOlderFallbackLease(t *testing.T) {
 	c := testConfig(t)
 	c.Directory = filepath.Join(c.Directory, "late-pool")
 	l := newTest(t, c)
-	x, e := l.Admit(context.Background(), 1, nil)
+	x, e := l.Admit(WithClass(context.Background(), Urgent), 1, nil)
 	if e != nil {
 		t.Fatal(e)
 	}

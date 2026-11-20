@@ -1,5 +1,6 @@
 // Package hostlimit coordinates background cuts across cooperating host processes.
-// Guest I/O never acquires a slot. A missing pool degrades to static rate sharing.
+// Guest I/O never acquires a slot. An unavailable pool skips background work;
+// urgent seals may use explicitly uncoordinated per-process limits.
 package hostlimit
 
 import (
@@ -257,7 +258,19 @@ func (l *Limiter) Admit(ctx context.Context, payload int64, abort func(error)) (
 		}
 		return 0, err
 	}
-	fallback := err != nil // A is deliberately degraded: no shared memory/spill cap.
+	if err != nil && c != Urgent {
+		l.mu.Lock()
+		warn := l.stats.LastPoolError != err.Error()
+		l.stats.LastPoolError = err.Error()
+		l.stats.Skipped++
+		l.stats.SkippedByClass[c]++
+		l.mu.Unlock()
+		if warn {
+			log.Printf("hostlimit: shared pool unavailable; background work skipped: %v", err)
+		}
+		return 0, errors.Join(ErrBusy, err)
+	}
+	fallback := err != nil // Urgent fallback has no coordinated host resource/rate bound.
 	l.mu.Lock()
 	if l.closed || ctx.Err() != nil || len(l.live) >= l.cfg.NormalSlots+l.cfg.UrgentSlots+l.cfg.FillSlots+l.cfg.IdleSlots {
 		l.stats.Skipped++
@@ -394,8 +407,12 @@ func (l *Limiter) releaseLoop() {
 func (l *Limiter) Snapshot() any { l.mu.Lock(); defer l.mu.Unlock(); return l.stats }
 
 // WaitUpload paces background payload PUTs, including parallel uploader workers.
-// Static shares trade utilization for a conservative aggregate rate. It never
-// paces local WAL flushing, COW reads, or demand hydration.
+// One process spaces reservations by the previous payload/rate. Its first
+// payload is immediate; debt survives its leases but resets on a new process.
+// For a constant share r and maximum payload B, one process reserves at most
+// r*T+B bytes over T. Fresh processes each add a new B; neither process/slot
+// churn nor uncoordinated fallback has a fixed host-rate bound. Wire overhead
+// is excluded. Local WAL flushing, COW reads and demand hydration bypass it.
 func (l *Limiter) WaitUpload(ctx context.Context, n int) error {
 	if n < 0 {
 		return ErrBusy

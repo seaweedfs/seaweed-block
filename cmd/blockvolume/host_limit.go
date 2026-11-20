@@ -14,7 +14,7 @@ func registerHostLimitFlags(fs *flag.FlagSet, c *hostlimit.Config) {
 	fs.IntVar(&c.IdleSlots, "host-limit-idle-slots", c.IdleSlots, "host idle-work slots")
 	fs.Int64Var(&c.PayloadBytes, "host-limit-payload-bytes", c.PayloadBytes, "maximum cut payload per slot")
 	fs.Int64Var(&c.COWBytes, "host-limit-cow-bytes", c.COWBytes, "maximum saved COW bytes per slot")
-	fs.Int64Var(&c.BytesPerSecond, "host-limit-upload-bytes-sec", c.BytesPerSecond, "aggregate background upload rate across cut slots")
-	fs.IntVar(&c.FallbackVolumes, "host-limit-fallback-volumes", c.FallbackVolumes, "static-share divisor when the pool is unavailable; shared cap is not enforced")
+	fs.Int64Var(&c.BytesPerSecond, "host-limit-upload-bytes-sec", c.BytesPerSecond, "pacing parameter divided per process by cut-slot count; not a host rate cap")
+	fs.IntVar(&c.FallbackVolumes, "host-limit-fallback-volumes", c.FallbackVolumes, "urgent-fallback per-process divisor; coordinated host cap is not enforced")
 	fs.DurationVar(&c.MaxHold, "host-limit-max-hold", c.MaxHold, "cut lease timeout; expiration aborts but waits for admitted I/O before release")
 }

@@ -810,7 +810,7 @@ func (p *DurableProvider) MakeVolumeRemoteDurable(ctx context.Context, volumeID 
 	if err != nil {
 		return err
 	}
-	return layer.MakeRemoteDurable(ctx, lsn)
+	return layer.MakeRemoteDurable(hostlimit.WithClass(ctx, hostlimit.Urgent), lsn)
 }
 
 // chunkFenced refuses a volume whose layer attached fenced: HEAD belongs to

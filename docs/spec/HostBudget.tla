@@ -1,4 +1,6 @@
 ----------------------------- MODULE HostBudget -----------------------------
+\* Active coordinated reservations only: fallback, pacing, RSS and retained
+\* crash scratch bytes are outside this abstraction. Crash frees active slots.
 EXTENDS Integers, FiniteSets, TLC
 CONSTANTS N, SlotCount, Payload, Spill, EarlyRelease, AtomicConfig
 Owners == 1..N

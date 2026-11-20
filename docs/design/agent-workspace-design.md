@@ -402,4 +402,4 @@ stateDiagram-v2
     Joined --> Free: descriptor closed
 ```
 
-Guest I/O never acquires a slot. Static fallback reports that the shared cap is not enforced.
+Guest I/O never acquires a slot. An unavailable pool skips background cuts; urgent and named seals may use per-process fallback with an alarm. Active coordinated reservations exclude orphaned crash spill. Upload pacing debt survives leases in one process, but a new process starts fresh, so arbitrary process turnover has no fixed host-rate bound.
