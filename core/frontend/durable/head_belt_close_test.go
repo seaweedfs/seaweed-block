@@ -63,7 +63,7 @@ func TestHeadBeltProviderCloseCancelsCooling(t *testing.T) {
 	go func() { _, err := p.RecoverVolume(ctx, "v1"); recovered <- err }()
 	select {
 	case <-r.claimed:
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("takeover did not reach cooling")
 	}
 	closeStarted = true

@@ -26,6 +26,23 @@ type heldTakeoverClaim struct {
 }
 
 func (r *heldTakeoverClaim) unblock() { r.releaseOnce.Do(func() { close(r.release) }) }
+func (r *heldTakeoverClaim) GetHead(ctx context.Context) (storage.ChunkHead, error) {
+	// The permanent-outage case must hold outcome resolution as well as the
+	// CAS reply: a committed CAS with readable HEAD can now settle after the
+	// per-operation deadline. Unbounded diagnostic reads still see the root.
+	if _, bounded := ctx.Deadline(); bounded && r.holdFor == 0 {
+		select {
+		case <-r.claimed:
+			select {
+			case <-r.release:
+			case <-ctx.Done():
+				return storage.ChunkHead{}, ctx.Err()
+			}
+		default:
+		}
+	}
+	return r.ChunkRemote.GetHead(ctx)
+}
 func (r *heldTakeoverClaim) CASHead(ctx context.Context, expected storage.ChunkHeadVersion, next storage.ChunkHead) (uint64, error) {
 	gen, err := r.ChunkRemote.CASHead(ctx, expected, next)
 	if err != nil || next.Epoch != 4 {
