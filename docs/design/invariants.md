@@ -191,12 +191,14 @@ stateDiagram-v2
   Stage --> Quiesce: at most 3 pre-copy rounds
   Quiesce --> OpenWindow: Sync H and D fixed under barrier
   OpenWindow --> Copy: release barrier
-  Copy --> Closed: all candidates done
+  Copy --> Upload: local entry released, intent durable first
+  Upload --> Copy: next unsent candidate
+  Upload --> Closed: all workers settled
   Copy --> Aborted: error, cancellation, observed fence, recovery or close
+  Upload --> Aborted: error, cancellation, observed fence, recovery or close
   Aborted --> Refused: drain owners, cleanup, merge candidates
   Copy --> Refused: H below HEAD RemoteLSN
-  Closed --> Upload: drain and cleanup; intent durable first
-  Upload --> Manifest
+  Closed --> Manifest: drain owners and cleanup
   Manifest --> Readmit
   Readmit --> Fenced: superseding HEAD
   Readmit --> CAS

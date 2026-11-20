@@ -889,6 +889,17 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	// Do not sample the owned map after COW writers are admitted again.
 	births := l.captureBirths(candidates, h)
 
+	if h < baseHead.RemoteLSN && !l.supersededBy(baseHead) {
+		l.s.captureMu.Unlock()
+		st.BarrierPauseNs = time.Since(pauseStart).Nanoseconds()
+		// HEAD holds the image of a later LSN than this host's log has
+		// reached: publishing would move remote_lsn backwards. Refused
+		// before any upload. (A HEAD of a newer holder fences below.)
+		l.abortCut(all)
+		l.dropIntents(ctx, intents)
+		return chunkCutResult{}, fmt.Errorf("%w: %w: cut LSN %d, HEAD remote_lsn %d", errChunkCaptureRefused, errChunkLSNBehind, h, baseHead.RemoteLSN)
+	}
+
 	st.CandidateChunks = len(candidates)
 	var copyErr error
 	copyStart := time.Now()
@@ -942,14 +953,6 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	}
 	if b := l.cfg.BarrierBound; b > 0 && st.BarrierCopyChunks > b {
 		st.BarrierOverBound = true
-	}
-	if h < baseHead.RemoteLSN && !l.supersededBy(baseHead) {
-		// HEAD holds the image of a later LSN than this host's log has
-		// reached: publishing would move remote_lsn backwards. Refused
-		// before any upload. (A HEAD of a newer holder fences below.)
-		l.abortCut(all)
-		l.dropIntents(ctx, intents)
-		return chunkCutResult{}, fmt.Errorf("%w: %w: cut LSN %d, HEAD remote_lsn %d", errChunkCaptureRefused, errChunkLSNBehind, h, baseHead.RemoteLSN)
 	}
 
 	// Upload only what changed against HEAD.
