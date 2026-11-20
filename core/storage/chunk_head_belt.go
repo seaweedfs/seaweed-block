@@ -69,6 +69,11 @@ func (l *chunkLayerImpl) publicationOwnerChanged(cur chunkHead) bool {
 func (l *chunkLayerImpl) fencePublication(cur chunkHead) {
 	l.stMu.Lock()
 	l.fenced = true
+	if cur.Gen != 0 {
+		// Preserve the existing hydration identity invalidation. This is not
+		// settlement of our cut: remoteLSN and captured-map dirt stay unchanged.
+		l.head = copyHead(cur)
+	}
 	l.stMu.Unlock()
 	log.Printf("ALARM: chunk publisher fenced: local epoch=%d holder=%q, observed gen=%d epoch=%d holder=%q; keeping local data and intents", l.cfg.Epoch, l.cfg.Holder, cur.Gen, cur.Epoch, cur.Holder)
 	l.abortCOW(errChunkLayerFenced)

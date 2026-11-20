@@ -1175,7 +1175,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		keepPending()
 		return chunkCutResult{}, fmt.Errorf("storage: capture CAS outcome unresolved (%v): %w: %w", casErr, errChunkCASOutcomeUnknown, gerr)
 	}
-	if errors.Is(casErr, errChunkLayerFenced) || (!sameProposal(cur, next) && l.publicationOwnerChanged(cur)) {
+	if !sameProposal(cur, next) && l.publicationOwnerChanged(cur) {
 		keepPending() // Close must keep these roots as well.
 		l.fencePublication(cur)
 		return chunkCutResult{}, errors.Join(errChunkLayerFenced, casErr)

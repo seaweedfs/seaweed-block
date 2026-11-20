@@ -50,6 +50,11 @@ func ClaimChunkHead(ctx context.Context, remote ChunkRemote, cfg ChunkLayerConfi
 		return head, nil
 	}
 	if head.Gen != 0 && head.Epoch == cfg.Epoch && head.Holder == cfg.Holder && !chunkHeadIsDetached(head) && head.DetachedBy == nil {
+		// A previous claim may have committed but timed out during cooling.
+		// An identical root alone does not prove that wait completed.
+		if err := confirmChunkTakeover(ctx, remote, head); err != nil {
+			return ChunkHead{}, err
+		}
 		return head, allowed() // idempotent restart or settled prior claim
 	}
 	next := copyHead(head)
