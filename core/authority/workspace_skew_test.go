@@ -23,7 +23,10 @@ func TestWorkspaceClockSkewPersistsAndProtectsRestart(t *testing.T) {
 			if lease.MaxClockSkewNS != int64(4*time.Second) {
 				t.Fatal("configured margin not in durable grant", lease)
 			}
-			boundary := start.Add(10 * time.Second)
+			// The first grant persists the durable horizon start+1.5*TTL (9 s),
+			// the upper bound of every later grant; the forced barrier is
+			// horizon + skew, TTL/2 later than the grant itself (#205).
+			boundary := start.Add(9*time.Second + 4*time.Second)
 			if restart {
 				now = start.Add(7 * time.Second)
 				p = NewPublisher(nil, WithStore(disk), WithWorkspaceLeaseConfig(6*time.Second, func() time.Time { return now }), WithWorkspaceMaxClockSkew(time.Second))

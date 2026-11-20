@@ -23,7 +23,7 @@ func TestManifest_CapturePublishesSegmentRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := filepath.Join(t.TempDir(), "volume")
-	s, err := storage.CreateWALStore(p, 64, 4096)
+	s, err := storage.CreateWALStoreWithOptions(p, 64, 4096, storage.WALStoreOptions{ChunkBlocks: 8})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,7 +31,7 @@ func TestManifest_CapturePublishesSegmentRoot(t *testing.T) {
 	if _, err = s.Recover(); err != nil {
 		t.Fatal(err)
 	}
-	l, err := storage.AttachChunkLayer(s, r, storage.ChunkLayerConfig{ChunkBlocks: 8, Epoch: 1, Holder: "h1", FreshFromHead: true, Bitmap: storage.NewFileChunkBitmapStore(p + ".bitmap")})
+	l, err := storage.AttachChunkLayer(s, r, storage.ChunkLayerConfig{ChunkBlocks: 8, Epoch: 1, Holder: "h1", FreshFromHead: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestManifest_CapturePublishesSegmentRoot(t *testing.T) {
 	if err = json.Unmarshal(e.Content, &doc); err != nil {
 		t.Fatal(err)
 	}
-	if doc.Format != 2 || len(doc.Chunks) != 0 || len(doc.Segments) != 1 {
+	if doc.Format != 3 || len(doc.Chunks) != 0 || len(doc.Segments) != 1 {
 		t.Fatalf("cut did not publish a small segmented root: %s", e.Content)
 	}
 	h, err := r.GetHead(ctx)
@@ -281,7 +281,7 @@ func TestManifest_NoopFlatUpgradeUsesOneNormalGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := filepath.Join(t.TempDir(), "store")
-	s, err := storage.CreateWALStore(p, 64, 4096)
+	s, err := storage.CreateWALStoreWithOptions(p, 64, 4096, storage.WALStoreOptions{ChunkBlocks: 8})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +289,7 @@ func TestManifest_NoopFlatUpgradeUsesOneNormalGeneration(t *testing.T) {
 	if _, err = s.Recover(); err != nil {
 		t.Fatal(err)
 	}
-	l, err := storage.AttachChunkLayer(s, r, storage.ChunkLayerConfig{ChunkBlocks: 8, Epoch: 1, Holder: "h1", FreshFromHead: true, Bitmap: storage.NewFileChunkBitmapStore(p + ".bitmap")})
+	l, err := storage.AttachChunkLayer(s, r, storage.ChunkLayerConfig{ChunkBlocks: 8, Epoch: 1, Holder: "h1", FreshFromHead: true})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -48,6 +48,9 @@ func validateRoot(h storage.ChunkHead) error {
 	}
 	count := 0
 	for group, ref := range h.Segments {
+		if (ref.SegFormat != 1 && ref.SegFormat != 2) || ref.MaxBirthLSN > h.RemoteLSN {
+			return errors.New("chunkstore: invalid segment version/birth maximum")
+		}
 		if CheckVolumeID(ref.Owner) != nil || storage.ValidChunkKey(ref.Key) != nil || ref.Count <= 0 || uint64(ref.Count) > manifestSegmentBytes/h.ChunkBytes || group > ^uint64(0)/(manifestSegmentBytes/h.ChunkBytes) {
 			return errors.New("chunkstore: invalid segment reference")
 		}
@@ -76,6 +79,12 @@ func (r *ChunkRemote) PrepareManifest(ctx context.Context, base, next storage.Ch
 	groups := map[uint64]map[uint64]storage.ChunkRef{}
 	canonical := make(map[uint64]storage.ChunkRef, len(next.Chunks))
 	for idx, ref := range next.Chunks {
+		if ref.Encoding == "" {
+			ref.Encoding, ref.BirthLSN = "full", next.RemoteLSN
+		}
+		if ref.Encoding != "full" || ref.BirthLSN > next.RemoteLSN {
+			return next, nil, errors.New("chunkstore: invalid chunk encoding/birth")
+		}
 		ref.Key = qualifyManifestKey(owner, ref.Key)
 		canonical[idx] = ref
 		group := idx / per
@@ -90,19 +99,31 @@ func (r *ChunkRemote) PrepareManifest(ctx context.Context, base, next storage.Ch
 		data []byte
 	}
 	var uploads []upload
-	for group, chunks := range groups {
-		old := map[uint64]storage.ChunkRef{}
-		for idx, ref := range base.Chunks {
-			if idx/per == group {
-				ref.Key = qualifyManifestKey(owner, ref.Key)
-				old[idx] = ref
-			}
+	// Partition the base once, rather than scanning every base chunk for each
+	// segment group. Keep the same qualified-key comparison for segment reuse.
+	baseGroups := map[uint64]map[uint64]storage.ChunkRef{}
+	for idx, ref := range base.Chunks {
+		if ref.Encoding == "" {
+			ref.Encoding, ref.BirthLSN = "full", base.RemoteLSN
 		}
+		group := idx / per
+		if baseGroups[group] == nil {
+			baseGroups[group] = map[uint64]storage.ChunkRef{}
+		}
+		ref.Key = qualifyManifestKey(owner, ref.Key)
+		baseGroups[group][idx] = ref
+	}
+	for group, chunks := range groups {
+		old := baseGroups[group]
 		if previous, ok := base.Segments[group]; ok && base.ChunkBytes == chunkBytes && reflect.DeepEqual(chunks, old) {
+			// Legacy groups keep a conservative upper bound until rewritten.
+			if previous.SegFormat == 0 {
+				previous.SegFormat, previous.MaxBirthLSN = 1, base.RemoteLSN
+			}
 			next.Segments[group] = previous
 			continue
 		}
-		body, err := json.Marshal(segmentDoc{1, group, chunkBytes, owner, chunks})
+		body, maxBirth, err := encodeSegmentV2(group, chunkBytes, owner, chunks)
 		if err != nil {
 			return next, nil, err
 		}
@@ -114,7 +135,7 @@ func (r *ChunkRemote) PrepareManifest(ctx context.Context, base, next storage.Ch
 			return next, nil, err
 		}
 		key := fmt.Sprintf("seg/%x", nonce)
-		next.Segments[group] = storage.ChunkSegment{Key: qualifyManifestKey(owner, key), SHA256: sha256.Sum256(body), Owner: owner, Count: len(chunks)}
+		next.Segments[group] = storage.ChunkSegment{Key: qualifyManifestKey(owner, key), SHA256: sha256.Sum256(body), Owner: owner, Count: len(chunks), SegFormat: 2, MaxBirthLSN: maxBirth}
 		uploads = append(uploads, upload{key, body})
 	}
 	if err := validateRoot(next); err != nil {
@@ -156,11 +177,11 @@ func (r *ChunkRemote) resolveManifest(ctx context.Context, h storage.ChunkHead) 
 		if len(body) > maxManifestBytes || sha256.Sum256(body) != ref.SHA256 {
 			return h, errors.New("chunkstore: segment hash/size mismatch")
 		}
-		var doc segmentDoc
-		if err := decodeManifestJSON(body, &doc); err != nil {
+		doc, err := decodeSegment(body, ref, h.RemoteLSN)
+		if err != nil {
 			return h, err
 		}
-		if doc.Format != 1 || doc.Range != group || doc.ChunkBytes != h.ChunkBytes || doc.Owner != ref.Owner || len(doc.Chunks) != ref.Count {
+		if doc.Range != group || doc.ChunkBytes != h.ChunkBytes || doc.Owner != ref.Owner || len(doc.Chunks) != ref.Count {
 			return h, errors.New("chunkstore: invalid segment contents")
 		}
 		for idx, cr := range doc.Chunks {

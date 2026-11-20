@@ -39,7 +39,7 @@ func newReconcileFixtureWith(t *testing.T, hold bool, mutate func(bm *fakeBitmap
 // newReconcileFixtureOpts also lets mutateCfg adjust the reattach config.
 func newReconcileFixtureOpts(t *testing.T, hold bool, mutate func(bm *fakeBitmapStore), mutateCfg func(cfg *chunkLayerConfig)) *reconcileFixture {
 	t.Helper()
-	s, path, crash := crashableStore(t)
+	s, path, crash := legacyCrashableStore(t)
 	f := newFakeChunkRemote()
 	cfg := ctConfig(1)
 	bm := cfg.Bitmap.(*fakeBitmapStore)
@@ -57,7 +57,7 @@ func newReconcileFixtureOpts(t *testing.T, hold bool, mutate func(bm *fakeBitmap
 		t.Fatal(err)
 	}
 	crash()
-	s2, _ := reopen(t, path)
+	s2, _ := legacyReopen(t, path)
 	bm.mu.Lock()
 	mutate(bm)
 	bm.mu.Unlock()
@@ -220,7 +220,7 @@ func TestChunkReconcile_ResultPersisted(t *testing.T) {
 	if err := fx.s.Close(); err != nil { // closes the layer too
 		t.Fatal(err)
 	}
-	s3, _ := reopen(t, fx.path)
+	s3, _ := legacyReopen(t, fx.path)
 	l2, err := attachChunkLayer(s3, fx.f, fx.cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -290,7 +290,7 @@ func TestChunkReconcile_BaseInstallSupersedesRunningReconciliation(t *testing.T)
 	if err := fx.s.Close(); err != nil { // closes the layer too
 		t.Fatal(err)
 	}
-	s3, _ := reopen(t, fx.path)
+	s3, _ := legacyReopen(t, fx.path)
 	defer s3.Close()
 	cfg := fx.cfg
 	cfg.testReconcileHold = nil

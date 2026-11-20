@@ -26,8 +26,10 @@ type AskIntent int
 
 const (
 	// IntentBind: first-time binding for (VolumeID, ReplicaID).
-	// Publisher mints Epoch=1, EndpointVersion=1. Rejected if a
-	// prior publish already exists for the key.
+	// Publisher mints Epoch=1, EndpointVersion=1. Rejected
+	// (ErrBindAlreadyBound) if a prior publish already exists for the
+	// key or for any other slot of the same volume: Bind is genesis
+	// for the volume; another slot is reached by IntentReassign.
 	IntentBind AskIntent = iota + 1
 
 	// IntentRefreshEndpoint: same volume/replica, new transport

@@ -316,7 +316,7 @@ func (s *BlockStore) WriteExtentDirect(lba uint32, data []byte) error {
 }
 
 // AllBlocks returns all written LBAs and their data (for rebuild serving).
-func (s *BlockStore) AllBlocks() map[uint32][]byte {
+func (s *BlockStore) AllBlocks() (map[uint32][]byte, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	result := make(map[uint32][]byte, len(s.blocks))
@@ -325,5 +325,5 @@ func (s *BlockStore) AllBlocks() map[uint32][]byte {
 		copy(cp, data)
 		result[lba] = cp
 	}
-	return result
+	return result, nil
 }

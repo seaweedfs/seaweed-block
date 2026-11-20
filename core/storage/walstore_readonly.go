@@ -37,6 +37,7 @@ import (
 // need them must use OpenWALStore + Recover.
 type WALStoreReader struct {
 	metadata BlockMetadata
+	v3       *walStoreReaderV3
 
 	mu     sync.Mutex
 	fd     *os.File
@@ -63,6 +64,10 @@ func OpenReadOnly(path string) (*WALStoreReader, error) {
 }
 
 func OpenReadOnlyWithOptions(path string, opts WALStoreOptions) (*WALStoreReader, error) {
+	return openReadOnlyV3(path, opts)
+}
+
+func openLegacyReadOnlyWithOptions(path string, opts WALStoreOptions) (*WALStoreReader, error) {
 	f, err := os.OpenFile(path, os.O_RDONLY, 0)
 	if err != nil {
 		return nil, fmt.Errorf("storage: OpenReadOnly %s: %w", path, err)
@@ -103,6 +108,10 @@ func (r *WALStoreReader) Read(lba uint32) ([]byte, error) {
 	if r.closed {
 		r.mu.Unlock()
 		return nil, errors.New("storage: WALStoreReader.Read after Close")
+	}
+	if r.v3 != nil {
+		defer r.mu.Unlock()
+		return r.readV3(lba)
 	}
 	r.mu.Unlock()
 

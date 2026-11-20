@@ -27,7 +27,11 @@ import (
 // This type knows nothing about pin_floor, primary recycle, wire
 // protocol, or barrier ack. Those live in layer 2.
 type RebuildSession struct {
-	store            storage.LogicalStorage
+	store storage.LogicalStorage
+	// install is the BASE install handle (DESIGN r17.3.1 section 8.7): every
+	// BASE write, install-lane apply and the completion go through it. The
+	// receiver begins the install and sets it; otherwise the legacy handle.
+	install          storage.InstallHandle
 	baseFrontierHint uint64 // snapshot pin/frontier hint for BASE lane; not a completion predicate
 
 	mu         sync.Mutex
@@ -75,6 +79,7 @@ type RebuildSession struct {
 func NewRebuildSession(store storage.LogicalStorage, baseFrontierHint uint64) *RebuildSession {
 	return &RebuildSession{
 		store:            store,
+		install:          storage.NewLegacyInstallHandle(store, baseFrontierHint),
 		baseFrontierHint: baseFrontierHint,
 		bitmap:           NewRebuildBitmap(store.NumBlocks()),
 	}
@@ -107,7 +112,7 @@ func (s *RebuildSession) ApplyBaseBlock(lba uint32, data []byte) (skipped bool, 
 	if s.bitmap.IsApplied(lba) {
 		return true, nil
 	}
-	if err := s.store.WriteExtentDirect(lba, data); err != nil {
+	if err := s.install.WriteBase(lba, data); err != nil {
 		return false, fmt.Errorf("recovery: base extent-direct lba=%d: %w", lba, err)
 	}
 	return false, nil
@@ -136,7 +141,7 @@ func (s *RebuildSession) ApplyWALEntry(kind WALEntryKind, lba uint32, data []byt
 	if s.completed {
 		return errors.New("recovery: ApplyWALEntry after session completed")
 	}
-	if err := s.store.ApplyEntry(lba, data, lsn); err != nil {
+	if err := s.install.ApplyInstallEntry(lba, data, lsn); err != nil {
 		return fmt.Errorf("recovery: wal apply lba=%d lsn=%d: %w", lba, lsn, err)
 	}
 	s.bitmap.MarkApplied(lba)
@@ -178,15 +183,32 @@ func (s *RebuildSession) BaseBatchAcked(lbaUpper uint32) {
 // is installed" without needing a competing WAL apply at
 // that hint. Subsequent WAL frames above that hint advance
 // further via `ApplyEntry`'s normal side effects.
-func (s *RebuildSession) MarkBaseComplete() {
+//
+// Since the v3 seam the completion goes through the install handle and
+// returns its error (DESIGN 8.2 step 4): on an error the install stays
+// incomplete and baseDone stays false.
+func (s *RebuildSession) MarkBaseComplete() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.baseDone = true
 	// §6.10 frontier reconciliation: BASE bytes are now installed
 	// to extent; declare frontier at baseFrontierHint so post-rebuild
 	// Sync()/Boundaries() report a non-degenerate value even on
-	// BASE-only sessions (no WAL frames in this session).
-	s.store.AdvanceFrontier(s.baseFrontierHint)
+	// BASE-only sessions (no WAL frames in this session). The legacy
+	// handle does exactly that (AdvanceFrontier); a v3 handle publishes
+	// installed and moves the frontier itself.
+	if err := s.install.MarkBaseComplete(); err != nil {
+		return fmt.Errorf("recovery: mark BASE complete: %w", err)
+	}
+	s.baseDone = true
+	return nil
+}
+
+// SetInstallHandle binds the session to the install the receiver began.
+// It is called before any BASE block or WAL entry.
+func (s *RebuildSession) SetInstallHandle(h storage.InstallHandle) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.install = h
 }
 
 // SeedWalApplied seeds walApplied at session start with the receiver's
@@ -274,7 +296,7 @@ type Status struct {
 	WALApplied         uint64
 	BaseDone           bool
 	Completed          bool
-	BarrierWitnessed   bool   // §IV.2.1 A-class: latched on frameBarrierReq arrival
+	BarrierWitnessed   bool // §IV.2.1 A-class: latched on frameBarrierReq arrival
 	BaseAckedPrefix    uint32
 	BitmapApplied      int    // count of LBAs the WAL lane has marked
 	BacklogApplied     uint64 // count of WALKindBacklog entries applied

@@ -13,7 +13,7 @@ import (
 func TestWALGenerationFirstCallerReturnOrdering(t *testing.T) {
 	for _, laterPublishesFirst := range []bool{false, true} {
 		t.Run(fmt.Sprintf("later_publishes_first=%v", laterPublishesFirst), func(t *testing.T) {
-			s := newGenerationStore(t)
+			s := newLegacyGenerationStore(t)
 			firstEntered, secondEntered, firstCacheReturned := make(chan struct{}), make(chan struct{}), make(chan struct{})
 			releaseFirst, releaseSecond, publishFirst := make(chan struct{}), make(chan struct{}), make(chan struct{})
 			var workers sync.WaitGroup

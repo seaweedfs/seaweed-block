@@ -1,13 +1,19 @@
 package storage
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"time"
 )
 
 // errVolumeClosed is returned by walAdmission.Acquire if the store
 // closes while the caller is waiting.
+// ErrWALPressureTimeout is retryable local admission pressure, not a substrate
+// fault. Unwrap preserves existing WAL-full classification for callers.
+var ErrWALPressureTimeout = fmt.Errorf("storage: admission wait timed out: %w", errWALFull)
+
 var errVolumeClosed = errors.New("storage: volume closed during admission wait")
 
 // walAdmission controls write admission based on WAL pressure
@@ -34,6 +40,7 @@ type walAdmission struct {
 	softMark float64
 	hardMark float64
 	closedFn func() bool
+	faultFn  func() error // lock-free terminal fault lookup; nil for controllers without a store
 
 	sleepFn func(time.Duration) // replaceable for tests
 
@@ -48,10 +55,11 @@ type walAdmissionConfig struct {
 	WALUsedFn     func() float64
 	NotifyFn      func()
 	ClosedFn      func() bool
+	FaultFn       func() error
 }
 
 // newWALAdmission constructs an admission controller. Caller must
-// set every field of cfg — there are no defaults. Behavior mirrors
+// set every capacity/lifetime field of cfg; FaultFn is optional. Behavior mirrors
 // V2's weed/storage/blockvol/wal_admission.go NewWALAdmission:
 // passing a zero watermark or nil NotifyFn/ClosedFn is a bug, not
 // a shortcut.
@@ -63,6 +71,7 @@ func newWALAdmission(cfg walAdmissionConfig) *walAdmission {
 		softMark: cfg.SoftWatermark,
 		hardMark: cfg.HardWatermark,
 		closedFn: cfg.ClosedFn,
+		faultFn:  cfg.FaultFn,
 		sleepFn:  time.Sleep,
 	}
 }
@@ -88,26 +97,63 @@ func (a *walAdmission) HardMark() float64         { return a.hardMark }
 // expires. Returns errWALFull on timeout, errVolumeClosed if the
 // store closes during the wait.
 func (a *walAdmission) Acquire(timeout time.Duration) error {
+	return a.acquireContext(context.Background(), timeout, nil)
+}
+
+func (a *walAdmission) acquireContext(ctx context.Context, timeout time.Duration, sample func() (float64, error)) error {
+	contextual := sample != nil
+	if sample == nil {
+		sample = func() (float64, error) { return a.walUsed(), nil }
+	}
+	if err := ctx.Err(); err != nil {
+		if fault := a.terminalFault(); fault != nil {
+			return fault
+		}
+		return admissionContextError(err)
+	}
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 
-	pressure := a.walUsed()
+	pressure, err := sample()
+	if err != nil {
+		return err
+	}
 
 	// Hard watermark: wait for flusher to drain before competing
 	// for the semaphore.
 	if pressure >= a.hardMark {
 		a.notifyFn()
 		hardStart := time.Now()
-		for a.walUsed() >= a.hardMark {
-			if a.closedFn() {
+		for {
+			pressure, err = sample()
+			if err != nil {
+				return err
+			}
+			if pressure < a.hardMark {
+				break
+			}
+			if err := a.terminalFault(); err != nil {
+				a.hardPressureWaitNs.Add(time.Since(hardStart).Nanoseconds())
+				return err
+			}
+			if !contextual && a.closedFn() {
 				a.hardPressureWaitNs.Add(time.Since(hardStart).Nanoseconds())
 				return errVolumeClosed
 			}
 			a.notifyFn()
 			select {
+			case <-ctx.Done():
+				a.hardPressureWaitNs.Add(time.Since(hardStart).Nanoseconds())
+				if err := a.terminalFault(); err != nil {
+					return err
+				}
+				return admissionContextError(ctx.Err())
 			case <-deadline.C:
 				a.hardPressureWaitNs.Add(time.Since(hardStart).Nanoseconds())
-				return errWALFull
+				if err := a.terminalFault(); err != nil {
+					return err
+				}
+				return ErrWALPressureTimeout
 			default:
 			}
 			a.sleepFn(2 * time.Millisecond)
@@ -142,10 +188,26 @@ func (a *walAdmission) Acquire(timeout time.Duration) error {
 		select {
 		case a.sem <- struct{}{}:
 			return nil
+		case <-ctx.Done():
+			if err := a.terminalFault(); err != nil {
+				return err
+			}
+			return admissionContextError(ctx.Err())
 		case <-deadline.C:
-			return errWALFull
+			if err := a.terminalFault(); err != nil {
+				return err
+			}
+			return ErrWALPressureTimeout
 		case <-closeTick.C:
-			if a.closedFn() {
+			if contextual {
+				if _, err := sample(); err != nil {
+					return err
+				}
+			}
+			if err := a.terminalFault(); err != nil {
+				return err
+			}
+			if !contextual && a.closedFn() {
 				return errVolumeClosed
 			}
 		}
@@ -154,3 +216,19 @@ func (a *walAdmission) Acquire(timeout time.Duration) error {
 
 // Release returns a write slot to the semaphore.
 func (a *walAdmission) Release() { <-a.sem }
+
+// terminalFault is sampled only on waiting paths. The store supplies its atomic
+// latch lookup; this does not acquire a store lock or perform persistence I/O.
+func (a *walAdmission) terminalFault() error {
+	if a.faultFn != nil {
+		return a.faultFn()
+	}
+	return nil
+}
+
+func admissionContextError(err error) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return ErrWALPressureTimeout
+	}
+	return err
+}

@@ -8,12 +8,12 @@ import (
 )
 
 func TestClaimChunkHeadClearsProductionDetachProof(t *testing.T) {
-	s, path := newChunkTestStore(t)
+	s, _ := newChunkTestStore(t)
 	if _, err := s.Recover(); err != nil {
 		t.Fatal(err)
 	}
 	remote := NewMemChunkRemote()
-	layer, err := AttachChunkLayer(s, remote, ChunkLayerConfig{ChunkBlocks: 4, Epoch: 1, Holder: "old", Bitmap: NewFileChunkBitmapStore(path + ".bitmap")})
+	layer, err := AttachChunkLayer(s, remote, ChunkLayerConfig{ChunkBlocks: 4, Epoch: 1, Holder: "old"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +137,7 @@ func TestClaimChunkHeadFencesNoopCut(t *testing.T) {
 }
 
 func TestFreshRestoreBitmapStartsAtClaimedHEAD(t *testing.T) {
-	s, _ := newChunkTestStore(t)
+	s, _ := newLegacyChunkTestStore(t)
 	r := NewMemChunkRemote()
 	if _, err := r.CASHead(ctTimeout(t), ChunkHeadVersion{}, ChunkHead{Epoch: 2, Holder: "host-a", RemoteLSN: 42}); err != nil {
 		t.Fatal(err)

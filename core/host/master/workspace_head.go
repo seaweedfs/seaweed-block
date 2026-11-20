@@ -48,7 +48,6 @@ func NewWorkspaceHEADReader(base string) (func(context.Context, string) (authori
 			return authority.WorkspaceHead{}, fmt.Errorf("HEAD too large")
 		}
 		var doc struct {
-			Format     int    `json:"format"`
 			Gen        uint64 `json:"gen"`
 			Epoch      uint64 `json:"epoch"`
 			Holder     string `json:"holder"`
@@ -67,7 +66,8 @@ func NewWorkspaceHEADReader(base string) (func(context.Context, string) (authori
 		if _, err := chunkstore.DecodeHeadDocument("workspace/"+volume, raw); err != nil {
 			return authority.WorkspaceHead{}, err
 		}
-		if (doc.Format != 1 && doc.Format != 2) || doc.Gen == 0 || doc.Epoch == 0 || doc.Holder == "" || doc.LegacyDetached != nil || (doc.State != "" && doc.State != "active" && doc.State != "detached") {
+		// DecodeHeadDocument above owns the supported-format checks.
+		if doc.Gen == 0 || doc.Epoch == 0 || doc.Holder == "" || doc.LegacyDetached != nil || (doc.State != "" && doc.State != "active" && doc.State != "detached") {
 			return authority.WorkspaceHead{}, fmt.Errorf("invalid HEAD identity/state")
 		}
 		// Missing state is the legacy active representation. Only a final-cut

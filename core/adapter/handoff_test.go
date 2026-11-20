@@ -263,7 +263,10 @@ func TestHandoff_RejoinAfterNewPrimary_DataConsistent(t *testing.T) {
 	waitRecoveredHealthy(t, adapterB, "r1", 3*time.Second)
 
 	// Every LBA that B wrote must match on the replica.
-	allB := primaryB.AllBlocks()
+	allB, snapshotErr := primaryB.AllBlocks()
+	if snapshotErr != nil {
+		t.Fatal(snapshotErr)
+	}
 	for lba, expected := range allB {
 		got, err := replica.Read(lba)
 		if err != nil {

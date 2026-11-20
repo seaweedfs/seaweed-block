@@ -219,7 +219,7 @@ func TestIntegration_ChunkLayerCaptureThenFreshHost(t *testing.T) {
 	dir := t.TempDir()
 	attach := func(name string, fresh bool) (*storage.WALStore, storage.ChunkLayer) {
 		p := filepath.Join(dir, name)
-		s, err := storage.CreateWALStore(p, blocks, 4096)
+		s, err := storage.CreateWALStoreWithOptions(p, blocks, 4096, storage.WALStoreOptions{ChunkBlocks: chunkBlocks})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -228,7 +228,6 @@ func TestIntegration_ChunkLayerCaptureThenFreshHost(t *testing.T) {
 		}
 		l, err := storage.AttachChunkLayer(s, c.remote(t, root), storage.ChunkLayerConfig{
 			ChunkBlocks: chunkBlocks, Epoch: 1, Holder: name, FreshFromHead: fresh,
-			Bitmap: storage.NewFileChunkBitmapStore(p + ".chunkbitmap"),
 		})
 		if err != nil {
 			t.Fatal(err)

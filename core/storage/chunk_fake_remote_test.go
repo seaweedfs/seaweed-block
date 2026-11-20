@@ -386,7 +386,7 @@ func (f *fakeChunkRemote) seedHead(t *testing.T, image []byte, remoteLSN, epoch 
 		key := fmt.Sprintf("seed/%d", idx)
 		f.objs[key] = append([]byte(nil), c...)
 		f.everStored[key] = true
-		head.Chunks[uint64(idx)] = chunkRef{Key: key, SHA256: sha256.Sum256(c)}
+		head.Chunks[uint64(idx)] = chunkRef{Key: key, SHA256: sha256.Sum256(c), Encoding: "full", BirthLSN: remoteLSN}
 	}
 	f.installLocked(head)
 }
@@ -696,7 +696,7 @@ func closeBounded(t *testing.T, s *WALStore) {
 func newChunkTestStore(t *testing.T) (*WALStore, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "vol.bin")
-	s, err := CreateWALStore(path, ctNumBlocks, ctBlockSize)
+	s, err := CreateWALStoreWithOptions(path, ctNumBlocks, ctBlockSize, WALStoreOptions{ChunkBlocks: ctChunkBlocks})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -710,7 +710,7 @@ func newChunkTestStore(t *testing.T) (*WALStore, string) {
 func crashableStore(t *testing.T) (*WALStore, string, func()) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "vol.bin")
-	s, err := CreateWALStore(path, ctNumBlocks, ctBlockSize)
+	s, err := CreateWALStoreWithOptions(path, ctNumBlocks, ctBlockSize, WALStoreOptions{ChunkBlocks: ctChunkBlocks})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1131,5 +1131,69 @@ func waitReconciledForTest(t *testing.T, layer chunkLayer) {
 			t.Fatalf("chunk layer still reconciling after %v", ctLocalBound)
 		}
 		time.Sleep(time.Millisecond)
+	}
+}
+
+// TODO(format-v3 row 14a): explicit C11 bitmap-engine fixtures only.
+func newLegacyChunkTestStore(t *testing.T) (*WALStore, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "vol.bin")
+	s, err := createLegacyWALStoreWithOptions(path, ctNumBlocks, ctBlockSize, WALStoreOptions{ChunkBlocks: ctChunkBlocks})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.DisableAutoFlushForRecoveryTest()
+	t.Cleanup(func() { closeBounded(t, s) })
+	return s, path
+}
+
+// crashableStore is a store a test may crash; it is closed at cleanup only
+// if it was not crashed.
+func legacyCrashableStore(t *testing.T) (*WALStore, string, func()) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "vol.bin")
+	s, err := createLegacyWALStoreWithOptions(path, ctNumBlocks, ctBlockSize, WALStoreOptions{ChunkBlocks: ctChunkBlocks})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.DisableAutoFlushForRecoveryTest()
+	crashed := false
+	t.Cleanup(func() {
+		if !crashed {
+			closeBounded(t, s)
+		}
+	})
+	return s, path, func() {
+		crashed = true
+		s.committer.Stop()
+		if err := s.fd.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// reopen opens and recovers a crashed store; it may be crashed again.
+func legacyReopen(t *testing.T, path string) (*WALStore, func()) {
+	t.Helper()
+	s, err := openLegacyWALStoreForTest(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	crashed := false
+	t.Cleanup(func() {
+		if !crashed {
+			closeBounded(t, s)
+		}
+	})
+	s.DisableAutoFlushForRecoveryTest()
+	if _, err := s.Recover(); err != nil {
+		t.Fatalf("local recovery: %v", err)
+	}
+	return s, func() {
+		crashed = true
+		s.committer.Stop()
+		if err := s.fd.Close(); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

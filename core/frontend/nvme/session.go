@@ -63,6 +63,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"io"
 	"net"
 	"sync"
@@ -80,7 +81,8 @@ type Request struct {
 	capsule         CapsuleCommand
 	payload         []byte // inline/R2T-collected data for Write
 	resp            CapsuleResponse
-	c2hData         []byte // non-nil for Read/Identify responses
+	c2hData         []byte    // non-nil for Read/Identify responses
+	receivedAt      time.Time // capsule arrival, including queued/R2T time
 	dispatchReadyAt time.Time
 }
 
@@ -266,7 +268,7 @@ func (s *Session) parseCapsule() (*Request, error) {
 			return nil, err
 		}
 	}
-	req := &Request{capsule: capsule, payload: payload}
+	req := &Request{capsule: capsule, payload: payload, receivedAt: start}
 	req.resp.CID = capsule.CID
 	if s.qid > 0 && capsule.OpCode == ioWrite {
 		s.recordWriteCapsuleReceiveParse(time.Since(start))
@@ -402,11 +404,12 @@ func (s *Session) recvH2CData(totalBytes uint32) ([]byte, error) {
 		if dataLen == 0 {
 			return nil, fmt.Errorf("recvH2CData: H2CData PDU has no payload")
 		}
-		if h2c.DATAO+dataLen > totalBytes {
+		end := uint64(h2c.DATAO) + uint64(dataLen)
+		if end > uint64(totalBytes) {
 			return nil, fmt.Errorf("recvH2CData: data exceeds expected size (%d+%d > %d)",
 				h2c.DATAO, dataLen, totalBytes)
 		}
-		if err := s.wire.ReceiveData(buf[h2c.DATAO : h2c.DATAO+dataLen]); err != nil {
+		if err := s.wire.ReceiveData(buf[uint64(h2c.DATAO):end]); err != nil {
 			return nil, fmt.Errorf("recvH2CData: receive data: %w", err)
 		}
 		s.recordH2CData(dataLen)
@@ -469,7 +472,12 @@ func (s *Session) dispatchIO(ctx context.Context, req *Request) {
 			NSID:   req.capsule.NSID,
 		})
 		if res.AsError() != nil {
-			req.resp.Status = MakeStatusField(res.SCT, res.SC, true)
+			// CQEs carry status, not the backend's diagnostic. Keep the reason
+			// at the real session boundary so host fsync EIO can be attributed.
+			if s.logger != nil {
+				s.logger.Printf("nvme: Flush failed qid=%d nsid=%d sct=%#x sc=%#x reason=%s", s.qid, req.capsule.NSID, res.SCT, res.SC, res.Reason)
+			}
+			req.resp.Status = res.completionStatus()
 		}
 		s.enqueueResponse(&response{resp: req.resp})
 	default:
@@ -566,6 +574,12 @@ func (s *Session) enqueueResponse(resp *response) {
 // ---------- IO handlers (run in goroutines) ----------
 
 func (s *Session) handleRead(ctx context.Context, req *Request) {
+	arrival := req.receivedAt
+	if arrival.IsZero() {
+		arrival = req.dispatchReadyAt
+	}
+	ctx, cancel := frontend.WithReadBudget(ctx, arrival)
+	defer cancel()
 	s.recordReadCommand()
 	res := s.handler.Handle(ctx, IOCommand{
 		Opcode: req.capsule.OpCode,
@@ -574,7 +588,7 @@ func (s *Session) handleRead(ctx context.Context, req *Request) {
 		NLB:    req.capsule.LbaLength(),
 	})
 	if res.AsError() != nil {
-		req.resp.Status = MakeStatusField(res.SCT, res.SC, true)
+		req.resp.Status = res.completionStatus()
 		s.enqueueResponse(&response{resp: req.resp})
 		return
 	}
@@ -582,6 +596,12 @@ func (s *Session) handleRead(ctx context.Context, req *Request) {
 }
 
 func (s *Session) handleWrite(ctx context.Context, req *Request) {
+	arrival := req.receivedAt
+	if arrival.IsZero() {
+		arrival = req.dispatchReadyAt
+	}
+	ctx, cancel := frontend.WithWriteBudget(ctx, arrival)
+	defer cancel()
 	s.recordWriteCommand()
 	s.recordWriteDispatchWait(time.Since(req.dispatchReadyAt))
 	handlerStart := time.Now()
@@ -595,7 +615,7 @@ func (s *Session) handleWrite(ctx context.Context, req *Request) {
 	})
 	s.recordWriteHandler(time.Since(handlerStart))
 	if res.AsError() != nil {
-		req.resp.Status = MakeStatusField(res.SCT, res.SC, true)
+		req.resp.Status = res.completionStatus()
 	}
 	s.enqueueResponse(&response{resp: req.resp, writeCompletion: true, queuedAt: time.Now()})
 }

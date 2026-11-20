@@ -157,12 +157,21 @@ type Publisher struct {
 
 	// Workspace state is serialized with assignment minting under mu. Remote
 	// HEAD reads and subscriber delivery never run under this lock.
-	workspace              map[string]*WorkspaceState
-	workspaceUncertain     map[string]bool
-	workspaceNow           func() time.Time
-	workspaceTTL           time.Duration
-	workspaceMaxClockSkew  time.Duration
-	workspaceLeaseDeadline map[string]time.Time
+	workspace             map[string]*WorkspaceState
+	lostRanges            map[string][]WorkspaceLostRange // forced moves' abandoned ranges (side files)
+	workspaceUncertain    map[string]bool
+	workspaceNow          func() time.Time
+	workspaceTTL          time.Duration
+	workspaceMaxClockSkew time.Duration
+
+	// Lease renewal state (workspace_lease_view.go). leaseMu is a memory-only
+	// leaf: lock order p.mu -> leaseMu, never the reverse, and nothing is
+	// acquired, waited on or written while it is held.
+	leaseMu        sync.Mutex
+	leaseViews     map[string]*leaseView
+	leaseClosing   bool
+	extWG          sync.WaitGroup
+	extendFailures map[string]int // guarded by mu
 }
 
 // PublicationAdmission surrounds an ordinary mint with local ownership/lifetime
@@ -221,15 +230,17 @@ func WithPublishObserver(observer PublishObserver) PublisherOption {
 // the pieces.
 func NewPublisher(dir Directive, opts ...PublisherOption) *Publisher {
 	p := &Publisher{
-		dir:                    dir,
-		state:                  make(map[subKey]assignmentState),
-		subs:                   make(map[subKey][]*subscription),
-		writeSeqByVolume:       map[string]uint64{},
-		workspace:              map[string]*WorkspaceState{},
-		workspaceUncertain:     map[string]bool{},
-		workspaceNow:           time.Now,
-		workspaceTTL:           30 * time.Second,
-		workspaceLeaseDeadline: map[string]time.Time{},
+		dir:                dir,
+		state:              make(map[subKey]assignmentState),
+		subs:               make(map[subKey][]*subscription),
+		writeSeqByVolume:   map[string]uint64{},
+		workspace:          map[string]*WorkspaceState{},
+		lostRanges:         map[string][]WorkspaceLostRange{},
+		workspaceUncertain: map[string]bool{},
+		workspaceNow:       time.Now,
+		workspaceTTL:       30 * time.Second,
+		leaseViews:         map[string]*leaseView{},
+		extendFailures:     map[string]int{},
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -256,9 +267,6 @@ func (p *Publisher) reloadFromStore() {
 	for _, rec := range records {
 		if rec.Workspace != nil {
 			p.workspace[rec.VolumeID] = cloneWorkspace(rec.Workspace)
-			// Conservatively cover every previously granted TTL after restart.
-			// Persisted wall time alone must never shorten a live host's lease.
-			p.workspaceLeaseDeadline[rec.VolumeID] = p.workspaceNow().Add(p.workspaceTTL)
 		}
 		key := subKey{volumeID: rec.VolumeID, replicaID: rec.ReplicaID}
 		p.state[key] = assignmentState{
@@ -277,6 +285,20 @@ func (p *Publisher) reloadFromStore() {
 		}
 	}
 	p.loadErrs = append(p.loadErrs, skips...)
+	ranges, lskips, lerr := p.store.LoadWorkspaceLostRanges()
+	if lerr != nil {
+		panic(fmt.Sprintf("authority: lost range load failure: %v", lerr))
+	}
+	p.lostRanges = ranges
+	p.loadErrs = append(p.loadErrs, lskips...)
+	for _, rec := range records {
+		p.refreshLeaseViewLocked(rec.VolumeID)
+		if rec.Workspace != nil {
+			// Conservatively cover every previously granted TTL after restart.
+			// Persisted wall time alone must never shorten a live host's lease.
+			p.setLeaseDeadlineLocked(rec.VolumeID, p.workspaceNow().Add(p.workspaceTTL), false)
+		}
+	}
 }
 
 // LoadErrors returns the per-record skip errors observed during
@@ -474,6 +496,15 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 			p.mu.Unlock()
 			return ErrBindAlreadyBound
 		}
+		// Bind is genesis for the VOLUME, not only for this slot: once
+		// any slot of the volume holds an authority line, a Bind for
+		// another slot would mint a second epoch-1 line beside it.
+		// Moving authority to another slot is IntentReassign.
+		if bound, ok := boundReplicaForVolume(p.state, ask.VolumeID); ok {
+			p.mu.Unlock()
+			return fmt.Errorf("%w: volume %s is already bound to replica %s; use Reassign",
+				ErrBindAlreadyBound, ask.VolumeID, bound)
+		}
 		next = adapter.AssignmentInfo{
 			VolumeID:        ask.VolumeID,
 			ReplicaID:       ask.ReplicaID,
@@ -566,6 +597,7 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 			// unwind. Just report the failure.
 			if record.Workspace != nil {
 				p.workspaceUncertain[ask.VolumeID] = true
+				p.refreshLeaseViewLocked(ask.VolumeID)
 			}
 			p.mu.Unlock()
 			return fmt.Errorf("authority: durable Put failed, rolling back mint: %w", err)
@@ -574,10 +606,13 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 	}
 	if issuedWorkspace != nil {
 		p.workspace[ask.VolumeID] = issuedWorkspace
-		delete(p.workspaceLeaseDeadline, ask.VolumeID)
 	}
 
 	p.state[k] = assignmentState{info: next, present: true}
+	p.refreshLeaseViewLocked(ask.VolumeID)
+	if issuedWorkspace != nil {
+		p.setLeaseDeadlineLocked(ask.VolumeID, time.Time{}, false) // the issued move clears the lease
+	}
 
 	// Snapshot subscribers under lock, release the lock BEFORE
 	// delivering. This prevents a slow consumer goroutine from
@@ -610,6 +645,22 @@ func safeInvokePublishObserver(observer func(PublishEvent), event PublishEvent) 
 // treat that as "no per-volume authority line to advance".
 //
 // Must be called with p.mu held; reads p.state.
+// boundReplicaForVolume reports whether any slot of volumeID holds a
+// published authority line, and names one (the lowest replica id, so the
+// error text is deterministic). Presence, not the epoch value, decides.
+func boundReplicaForVolume(state map[subKey]assignmentState, volumeID string) (string, bool) {
+	bound, found := "", false
+	for k, st := range state {
+		if !st.present || k.volumeID != volumeID {
+			continue
+		}
+		if !found || k.replicaID < bound {
+			bound, found = k.replicaID, true
+		}
+	}
+	return bound, found
+}
+
 func maxPublishedEpochForVolume(state map[subKey]assignmentState, volumeID string) uint64 {
 	var max uint64
 	for k, st := range state {

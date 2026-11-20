@@ -24,7 +24,7 @@ func TestFlusherSnapshotCutPreservesSyncedWrites(t *testing.T) {
 				}
 				t.Run(name, func(t *testing.T) {
 					path := filepath.Join(t.TempDir(), "store.bin")
-					s, err := CreateWALStore(path, 128, 4096)
+					s, err := createLegacyWALStoreForTest(path, 128, 4096)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -127,7 +127,7 @@ func TestFlusherSnapshotCutPreservesSyncedWrites(t *testing.T) {
 						t.Fatal(err)
 					}
 					crashed = true
-					reopened, err := OpenWALStore(path)
+					reopened, err := openLegacyWALStoreForTest(path)
 					if err != nil {
 						t.Fatal(err)
 					}

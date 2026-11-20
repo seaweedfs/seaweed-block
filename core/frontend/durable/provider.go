@@ -38,6 +38,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/geometry"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"github.com/seaweedfs/seaweed-block/core/storage/parallelwal"
 	"github.com/seaweedfs/seaweed-block/core/storage/smartwal"
@@ -80,6 +81,14 @@ var ErrImplKindMismatch = errors.New("durable: impl kind mismatch between select
 // ErrVolumeNotOpen is returned by RecoverVolume / Close when the
 // volumeID has not been Open'd.
 var ErrVolumeNotOpen = errors.New("durable: volume not opened")
+
+// ErrDetachAborted: the detach did not happen (its final cut provably did not
+// publish), so the volume resumed serving on this host (MIGRATION E4).
+var ErrDetachAborted = errors.New("durable: detach aborted; the volume keeps serving on this host")
+
+// ErrDetachOutcomeUnknown: whether the detach landed cannot be decided yet;
+// I/O stays stopped (never resumed on a possibly detached HEAD).
+var ErrDetachOutcomeUnknown = errors.New("durable: detach outcome unknown; I/O stays stopped")
 
 // ProviderConfig configures a DurableProvider.
 type ProviderConfig struct {
@@ -153,14 +162,26 @@ type ProviderConfig struct {
 	// ChunkReadMissTimeout bounds one remote fetch of an absent block.
 	// Zero: the storage default.
 	ChunkReadMissTimeout time.Duration
+	// Per-volume hydration bounds; zero selects 2 workers and 64 distinct chunks.
+	ChunkHydrationWorkers    int
+	ChunkHydrationQueueDepth int
 	// ChunkCaptureInterval: an automatic cut is due once this long has
 	// passed since the volume's last successful cut (of any kind). Zero
 	// disables the timer.
 	ChunkCaptureInterval time.Duration
-	// ChunkDirtyThreshold is the bound on one cut's barrier copy, in
-	// chunks. It never triggers a cut: the remote holds snapshots, and
-	// cuts are published only by CaptureVolume, MakeVolumeRemoteDurable
-	// (snapshot, detach) and the timer. Zero: unbounded.
+	// DetachFreezeTimeout bounds how long a failing DetachVolume keeps guest
+	// I/O stopped before it resumes or settles: the drain and final cut get
+	// three quarters of it, the settlement of a failed cut the rest (the
+	// caller's context can only shorten the cut part). Zero: 20 s, below the
+	// host's 30 s I/O timeout; a freeze past the 5 s target is logged as an
+	// alarm. Cooperative: a syscall that never returns is not bounded.
+	DetachFreezeTimeout time.Duration
+	// ChunkDirtyThreshold is the number of candidate chunks above which
+	// a cut pre-copies (stages) chunks before its barrier, in rounds of
+	// this size; copy-before-write copies the rest outside the barrier.
+	// It never triggers a cut: the remote holds snapshots, and cuts are
+	// published only by CaptureVolume, MakeVolumeRemoteDurable
+	// (snapshot, detach) and the timer. Zero: no pre-copy.
 	ChunkDirtyThreshold int
 	// ChunkUploadConcurrency bounds remote uploads; zero defaults to 8.
 	ChunkUploadConcurrency int
@@ -179,6 +200,18 @@ type DurableProvider struct {
 	// testAfterChunkResolve, test-only, runs in CutVolume right after the
 	// volume's handle and layer are resolved.
 	testAfterChunkResolve func()
+	// testDetachStopIO, test-only, replaces DetachVolume's StopIO call (so a
+	// test can force the failed-drain branch); testDetachTrace, test-only,
+	// observes the detach's stages and their deadlines ("cut", "settle").
+	testDetachStopIO func(ctx context.Context) error
+	testDetachTrace  func(stage string, deadline time.Time)
+
+	// testBeforeChunkFreshRetire holds the real post-presence/pre-marker boundary.
+	testBeforeChunkFreshRetire func() error
+
+	// testWALStoreFactory selects a dark store only in provider caller controls.
+	// No production option, flag or environment variable installs it.
+	testWALStoreFactory func(path string, create bool) (*storage.WALStore, error)
 
 	// walstore-chunk: closeCtx ends with Close and cancels in-flight
 	// remote attachment; inflight counts RecoverVolume calls admitted
@@ -209,6 +242,8 @@ type volHandle struct {
 	recoverGen uint64
 	waitGen    uint64
 	chunk      storage.ChunkLayer // after RecoverVolume
+	// Private until the owner commit succeeds; retained for attach retry.
+	chunkPending storage.ChunkLayer
 	// chunkDetach is set (under attachMu) when DetachVolume starts and
 	// never cleared in this process: frontend I/O stays stopped, through
 	// any later RecoverVolume, until a new lifetime attaches the volume.
@@ -221,21 +256,22 @@ type volHandle struct {
 // handle. It intentionally exposes lineage and readiness facts without giving
 // callers a control surface.
 type VolumeStatus struct {
-	VolumeID        string
-	Path            string
-	Impl            string
-	ReplicaID       string
-	Epoch           uint64
-	EndpointVersion uint64
-	Latched         bool
-	Operational     bool
-	FrontierKnown   bool
-	DurableLSN      uint64
-	RetainedLSN     uint64
-	HeadLSN         uint64
-	Evidence        string
-	Closed          bool
-	WriteProfile    WriteProfileStatus
+	VolumeID              string
+	Path                  string
+	Impl                  string
+	ReplicaID             string
+	Epoch                 uint64
+	EndpointVersion       uint64
+	Latched               bool
+	Operational           bool
+	FrontierKnown         bool
+	DurableLSN            uint64
+	RetainedLSN           uint64
+	HeadLSN               uint64
+	Evidence              string
+	Closed                bool
+	WriteProfile          WriteProfileStatus
+	CheckpointPersistence *storage.CheckpointPersistenceStatus `json:",omitempty"`
 	// Chunk is the chunk layer's state and cut counters; walstore-chunk
 	// volumes only.
 	Chunk *ChunkStatus
@@ -587,6 +623,13 @@ func (p *DurableProvider) openOrCreate(volumeID string) (*volHandle, error) {
 		}
 		return h, nil
 	}
+	// Existing storage ignores create geometry; admission precedes all fresh sidecars.
+	if p.cfg.NumBlocks == 0 {
+		return nil, fmt.Errorf("durable: NumBlocks=0; cannot create storage for %s (use open-existing mode)", volumeID)
+	}
+	if err := geometry.ValidateBlockGeometry(uint64(p.cfg.NumBlocks), uint64(p.cfg.BlockSize)); err != nil {
+		return nil, err
+	}
 	if p.cfg.Impl == ImplWALStoreChunk {
 		// Durable before the volume file exists: a crash anywhere between
 		// here and the first successful attach leaves a fresh volume.
@@ -627,6 +670,8 @@ func (p *DurableProvider) verifyImplOnDisk(path string) (ImplName, error) {
 		// the format's real header selector instead of rejecting on byte 0.
 		if err := parallelwal.ProbeStore(path); err == nil {
 			diskImpl, ok = ImplParallelWALStore, true
+		} else if err := storage.ProbeWALStoreV3(path); err == nil {
+			diskImpl, ok = ImplWALStore, true
 		}
 	}
 	if !ok {
@@ -668,13 +713,23 @@ func (p *DurableProvider) openExisting(volumeID, path string, impl ImplName) (*v
 	var s storage.LogicalStorage
 	switch impl {
 	case ImplWALStore, ImplWALStoreChunk:
-		ws, err := storage.OpenWALStore(path)
+		var ws *storage.WALStore
+		var err error
+		if p.testWALStoreFactory != nil {
+			ws, err = p.testWALStoreFactory(path, false)
+		} else {
+			ws, err = storage.OpenWALStore(path)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("durable: OpenWALStore %s: %w", path, err)
 		}
 		// G6 §1.A α: plumb operator-tunable retention into walstore.
 		// Zero (pre-G6 default) preserves strict checkpoint-driven
 		// recycle.
+		// Defer before Recover can publish a completed BASE away.
+		if impl == ImplWALStoreChunk && p.cfg.ChunkRemoteFor != nil {
+			ws.DeferBaseRetirementV3()
+		}
 		if p.cfg.WALRetentionLSNs > 0 {
 			ws.SetRecoveryRetentionLSNs(p.cfg.WALRetentionLSNs)
 		}
@@ -714,11 +769,21 @@ func (p *DurableProvider) createFresh(volumeID, path string, impl ImplName) (*vo
 	var s storage.LogicalStorage
 	switch impl {
 	case ImplWALStore, ImplWALStoreChunk:
-		ws, err := storage.CreateWALStore(path, p.cfg.NumBlocks, p.cfg.BlockSize)
+		var ws *storage.WALStore
+		var err error
+		if p.testWALStoreFactory != nil {
+			ws, err = p.testWALStoreFactory(path, true)
+		} else {
+			ws, err = storage.CreateWALStoreWithOptions(path, p.cfg.NumBlocks, p.cfg.BlockSize, storage.WALStoreOptions{ChunkBlocks: p.cfg.ChunkBlocks})
+		}
 		if err != nil {
 			return nil, fmt.Errorf("durable: CreateWALStore %s: %w", path, err)
 		}
 		// G6 §1.A α (see openExisting comment for semantics).
+		// Defer before Recover can publish a completed BASE away.
+		if impl == ImplWALStoreChunk && p.cfg.ChunkRemoteFor != nil {
+			ws.DeferBaseRetirementV3()
+		}
 		if p.cfg.WALRetentionLSNs > 0 {
 			ws.SetRecoveryRetentionLSNs(p.cfg.WALRetentionLSNs)
 		}
@@ -816,7 +881,7 @@ func (p *DurableProvider) RecoverVolume(ctx context.Context, volumeID string) (R
 			// Recovered; I/O stays refused until the layer attaches under
 			// the master's assignment (the authority wait flips it).
 			report.Evidence += "; chunk layer awaiting master authority"
-			h.backend.SetOperational(false, report.Evidence)
+			h.backend.setChunkAttachPending(report.Evidence)
 			return report, nil
 		}
 		if err := chunkFenced(volumeID, h); err != nil {
@@ -889,6 +954,11 @@ func chunkSidecars(path string) ([]string, error) {
 	}
 	var out []string
 	for _, e := range entries {
+		// The owned v3 LSN map belongs to plain walstore as well. Remote
+		// chunk identity still has its own presence/fresh/HEAD sidecars.
+		if e.Name() == base+".chunkmap" {
+			continue
+		}
 		if !e.IsDir() && strings.HasPrefix(e.Name(), base+".chunk") {
 			out = append(out, e.Name())
 		}

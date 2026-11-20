@@ -94,7 +94,7 @@ func NewVolumeShowBody(vol string, v *VolumeInfo, h *storage.ChunkHead) VolumeSh
 		if state == "" {
 			state = storage.ChunkHeadActive
 		}
-		body.Head = &HeadShow{Gen: h.Gen, Epoch: h.Epoch, Holder: h.Holder, RemoteLSN: h.RemoteLSN, State: state, ChunkCount: len(h.Chunks)}
+		body.Head = &HeadShow{Gen: h.Gen, Epoch: h.Epoch, Holder: h.Holder, RemoteLSN: h.RemoteLSN, State: state, ChunkCount: manifestCount(*h)}
 		if d := h.DetachedBy; d != nil {
 			body.Head.DetachedBy = &DetachedByShow{Holder: d.Holder, Epoch: d.Epoch, Gen: d.Gen}
 		}

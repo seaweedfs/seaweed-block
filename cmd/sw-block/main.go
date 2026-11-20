@@ -77,13 +77,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, buildinfo.Version("sw-block"))
 		return ops.VolumeStatusExitOK
 	}
+	if args[0] == "migrate-v3" {
+		return runMigrateV3(args[1:], stdout, stderr)
+	}
 	if args[0] != "ops" {
 		fmt.Fprintf(stderr, "sw-block: unknown command %q\n", args[0])
 		usage(stderr)
 		return ops.VolumeStatusExitInvalid
 	}
 	if len(args) < 2 {
-		fmt.Fprintln(stderr, "sw-block: expected subcommand ops status|inventory|list|cluster|volumes|describe|timeline|explain|report|dashboard|generate-helm-values|operator-status|lifecycle-owner|authority-executor|rebuild-target-owner|failback-target-owner|failback-executor|frontend-publication-target-owner|frontend-publication-executor|chunk")
+		fmt.Fprintln(stderr, "sw-block: expected subcommand ops status|inventory|list|cluster|volumes|describe|timeline|explain|report|dashboard|generate-helm-values|operator-status|lifecycle-owner|authority-executor|rebuild-target-owner|failback-target-owner|failback-executor|frontend-publication-target-owner|frontend-publication-executor|chunk|volume-unheld")
 		usage(stderr)
 		return ops.VolumeStatusExitInvalid
 	}
@@ -126,6 +129,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runOpsFrontendPublicationExecutor(args[2:], stdout, stderr)
 	case "chunk":
 		return runOpsChunk(args[2:], stdout, stderr)
+	case "volume-unheld":
+		return runOpsVolumeUnheld(args[2:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "sw-block: unknown ops subcommand %q\n", args[1])
 		usage(stderr)
@@ -2293,6 +2298,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  sw-block ops chunk fork --chunk-filer <host:port> [--chunk-path /swblock/chunks] --source <id> --snapshot <name> --target <id> [--request-id <id>] [--label k=v]...")
 	fmt.Fprintln(w, "  sw-block ops chunk show --volume <id> --chunk-filer <host:port> [--chunk-path /swblock/chunks]")
 	fmt.Fprintln(w, "  sw-block ops chunk gc --chunk-filer <host:port> --master <blockmaster-grpc> [--chunk-path /swblock/chunks] [--apply] [--grace 1h] [--intent-ttl 1h] [--timeout 1m]")
+	fmt.Fprintln(w, "  sw-block ops volume-unheld --path <volume-file>   (exit 0: no process on this host holds it; local filesystems only)")
 }
 
 func emptyCLI(value string) string {

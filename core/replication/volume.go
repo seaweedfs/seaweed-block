@@ -798,9 +798,8 @@ func (v *ReplicationVolume) dispatchLocalWrite(w LocalWrite) writeAckSet {
 	}
 	v.mu.Unlock()
 
-	log.Printf("replication: OnLocalWrite volume=%s lba=%d lsn=%d peers=%d",
-		v.volumeID, w.LBA, w.LSN, peerCount)
-
+	// No per-write log line here (#204): at RF=1 it filled the volume log under
+	// sustained writes. Per-write evidence is in the counters (Stats).
 	v.writeFanout.Add(replicationDurationNanos(time.Since(start)))
 	return writeAckSet{
 		mode:      mode,

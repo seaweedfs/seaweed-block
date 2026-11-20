@@ -67,7 +67,7 @@ func TestManifestPerf_64DirtyChunks(t *testing.T) {
 			if _, err = s.Recover(); err != nil {
 				t.Fatal(err)
 			}
-			l, err := storage.AttachChunkLayer(s, r, storage.ChunkLayerConfig{ChunkBlocks: 1024, Epoch: 1, Holder: "h1", FreshFromHead: true, UploadConcurrency: parallel, Bitmap: storage.NewFileChunkBitmapStore(filepath.Join(dir, "bitmap"))})
+			l, err := storage.AttachChunkLayer(s, r, storage.ChunkLayerConfig{ChunkBlocks: 1024, Epoch: 1, Holder: "h1", FreshFromHead: true, UploadConcurrency: parallel})
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -362,6 +362,12 @@ func TestDurableAuthority_StoreWriteCallerAllowlist_BoundaryGuard(t *testing.T) 
 		if !strings.HasSuffix(path, ".go") {
 			return nil
 		}
+		// Test doubles outside the package (for example a slow-store wrapper
+		// that delays and then delegates Put) are not production write
+		// callers; the guard is about the production tree.
+		if strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
 		// The authority package itself is the only legitimate
 		// write caller.
 		if strings.Contains(path, string(filepath.Separator)+"core"+string(filepath.Separator)+"authority"+string(filepath.Separator)) {

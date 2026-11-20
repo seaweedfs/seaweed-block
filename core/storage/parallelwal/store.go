@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/geometry"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -134,6 +135,9 @@ func CreateStore(path string, numBlocks uint32, blockSize int) (*Store, error) {
 
 func CreateStoreWithConfig(path string, cfg Config) (*Store, error) {
 	cfg = normalizeConfig(cfg)
+	if err := geometry.ValidateBlockGeometry(uint64(cfg.NumBlocks), uint64(cfg.BlockSize)); err != nil {
+		return nil, err
+	}
 	h, err := headerForConfig(cfg)
 	if err != nil {
 		return nil, err
@@ -1205,10 +1209,10 @@ func (s *Store) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
 	return err
 }
 
-// BeginBaseInstall resets the inactive extent used for the next rebuild.
+// BeginBaseStage resets the inactive extent used for the next rebuild.
 // The active extent remains authoritative until Sync publishes a header that
 // atomically switches ActiveExtent.
-func (s *Store) BeginBaseInstall() error {
+func (s *Store) BeginBaseStage() error {
 	s.syncMu.Lock()
 	defer s.syncMu.Unlock()
 	return s.resetBaseStageUnderSync()
@@ -1326,16 +1330,19 @@ func (s *Store) resetBaseStageUnderSync() error {
 	return nil
 }
 
-func (s *Store) AllBlocks() map[uint32][]byte {
+func (s *Store) AllBlocks() (map[uint32][]byte, error) {
 	out := make(map[uint32][]byte)
 	zero := make([]byte, s.blockSize)
 	for lba := uint32(0); lba < s.numBlocks; lba++ {
 		data, err := s.Read(lba)
-		if err == nil && !bytes.Equal(data, zero) {
+		if err != nil {
+			return nil, fmt.Errorf("snapshot LBA %d: %w", lba, err)
+		}
+		if !bytes.Equal(data, zero) {
 			out[lba] = data
 		}
 	}
-	return out
+	return out, nil
 }
 
 func (s *Store) ScanLBAs(fromLSN uint64, fn func(storage.RecoveryEntry) error) error {
@@ -1418,6 +1425,6 @@ func (s *Store) extentOffsetFor(extent int, lba uint32) int64 {
 }
 
 var (
-	_ storage.LogicalStorage      = (*Store)(nil)
-	_ storage.BaseInstallPreparer = (*Store)(nil)
+	_ storage.LogicalStorage = (*Store)(nil)
+	_ storage.BaseStager     = (*Store)(nil)
 )

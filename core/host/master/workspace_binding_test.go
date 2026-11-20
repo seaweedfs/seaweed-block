@@ -126,8 +126,14 @@ func workspaceBindingsMove(t *testing.T, forced bool) {
 			t.Fatal(e)
 		}
 		if forced {
+			// The forced barrier is the durable horizon (>= every grant) plus
+			// skew, not the reply's grant (#205).
+			horizon := lease.ExpiresAtNs
+			if st := h.Publisher().WorkspaceState(vol); st != nil && st.Lease != nil && st.Lease.ExpiresAtNS > horizon {
+				horizon = st.Lease.ExpiresAtNS
+			}
 			select {
-			case <-time.After(time.Until(time.Unix(0, lease.ExpiresAtNs)) + 100*time.Millisecond + 20*time.Millisecond):
+			case <-time.After(time.Until(time.Unix(0, horizon)) + 100*time.Millisecond + 20*time.Millisecond):
 			case <-ctx.Done():
 				t.Fatal(ctx.Err())
 			}

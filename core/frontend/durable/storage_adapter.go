@@ -146,6 +146,13 @@ const maxFullBlockBatchBlocks = 64
 
 // StorageBackend adapts a LogicalStorage into frontend.Backend.
 type StorageBackend struct {
+	// testBeforeIOLock, test-only, runs in admit after the readiness check,
+	// right before the I/O lock (an arrival handshake for queued I/O).
+	testBeforeIOLock func()
+	// Runs outside locks after a read registers its readiness notification.
+	testBeforeReadReadyWait func()
+	testAfterAttachRefusal  func()
+
 	storage   storage.LogicalStorage
 	view      frontend.ProjectionView
 	id        frontend.Identity
@@ -155,8 +162,12 @@ type StorageBackend struct {
 	// false; provider flips true after Recover() succeeds (T3b).
 	// opEvidence is the reason reported when operational=false
 	// (e.g., "awaiting recovery", "local epoch ahead of assignment").
-	operational atomic.Bool
-	opEvidence  atomic.Value // string
+	// Only a successfully recovered chunk volume awaiting attachment may wait.
+	// waitAttachReady and readyChanged are protected by mu.
+	waitAttachReady bool
+	readyChanged    chan struct{}
+	operational     atomic.Bool
+	opEvidence      atomic.Value // string
 
 	// ioMu is the I/O admission boundary: every Read, Write and Sync holds
 	// its read side for the whole operation, gate included, so StopIO can
@@ -284,6 +295,13 @@ func (b *StorageBackend) durableStatus(volumeID, path, impl string) VolumeStatus
 	if c, ok := b.storage.(interface{ HolesSuspected() uint64 }); ok {
 		holes = c.HolesSuspected()
 	}
+	var checkpoint *storage.CheckpointPersistenceStatus
+	if reporter, ok := b.storage.(interface {
+		CheckpointPersistence() storage.CheckpointPersistenceStatus
+	}); ok {
+		snapshot := reporter.CheckpointPersistence()
+		checkpoint = &snapshot
+	}
 	writeProfile := b.WriteProfile()
 	if instrumented, ok := b.storage.(storage.WriteInstrumented); ok {
 		storageProfile := instrumented.WriteInstrumentation()
@@ -312,23 +330,24 @@ func (b *StorageBackend) durableStatus(volumeID, path, impl string) VolumeStatus
 		writeProfile.DirtyMapUpdateDurationNanos = storageProfile.DirtyMapUpdateDurationNanos
 	}
 	return VolumeStatus{
-		Warnings:        warnings,
-		HolesSuspected:  holes,
-		VolumeID:        volumeID,
-		Path:            path,
-		Impl:            impl,
-		ReplicaID:       id.ReplicaID,
-		Epoch:           id.Epoch,
-		EndpointVersion: id.EndpointVersion,
-		Latched:         id.Epoch > 0 && id.EndpointVersion > 0,
-		Operational:     b.operational.Load(),
-		FrontierKnown:   true,
-		DurableLSN:      durableLSN,
-		RetainedLSN:     retainedLSN,
-		HeadLSN:         headLSN,
-		Evidence:        evidence,
-		Closed:          closed,
-		WriteProfile:    writeProfile,
+		Warnings:              warnings,
+		HolesSuspected:        holes,
+		VolumeID:              volumeID,
+		Path:                  path,
+		Impl:                  impl,
+		ReplicaID:             id.ReplicaID,
+		Epoch:                 id.Epoch,
+		EndpointVersion:       id.EndpointVersion,
+		Latched:               id.Epoch > 0 && id.EndpointVersion > 0,
+		Operational:           b.operational.Load(),
+		FrontierKnown:         true,
+		DurableLSN:            durableLSN,
+		RetainedLSN:           retainedLSN,
+		HeadLSN:               headLSN,
+		Evidence:              evidence,
+		Closed:                closed,
+		WriteProfile:          writeProfile,
+		CheckpointPersistence: checkpoint,
 	}
 }
 
@@ -339,6 +358,7 @@ func (b *StorageBackend) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.closed = true
+	b.notifyReadReadyLocked()
 	return nil
 }
 
@@ -367,12 +387,14 @@ func (b *StorageBackend) SetWriteObserver(obs WriteObserver) error {
 			err = fmt.Errorf("durable: write observer not installed: ship LSN: %w", err)
 			b.mu.Lock()
 			b.observerErr = err
+			b.notifyReadReadyLocked()
 			b.mu.Unlock()
 			return err
 		}
 	}
 	b.mu.Lock()
 	b.observer, b.observerErr = obs, nil
+	b.notifyReadReadyLocked()
 	b.mu.Unlock()
 	return nil
 }
@@ -397,6 +419,7 @@ func (b *StorageBackend) seedAndRebase(seed func() error) error {
 		err = fmt.Errorf("durable: write observer ship LSN after the frontier seed: %w", err)
 		b.mu.Lock()
 		b.observerErr = err
+		b.notifyReadReadyLocked()
 		b.mu.Unlock()
 		return err
 	}
@@ -440,8 +463,12 @@ func (b *StorageBackend) SetOperational(ok bool, evidence string) {
 			evidence = "not operational"
 		}
 	}
+	b.mu.Lock()
 	b.opEvidence.Store(evidence)
 	b.operational.Store(ok)
+	b.waitAttachReady = false
+	b.notifyReadReadyLocked()
+	b.mu.Unlock()
 }
 
 // StopIO makes the backend refuse every new Read, Write and Sync with
@@ -527,7 +554,9 @@ func (b *StorageBackend) Sync(ctx context.Context) error {
 // Read copies up to len(p) bytes starting at offset. Reads past
 // end-of-volume return zero bytes (no error). Every read is gated.
 func (b *StorageBackend) Read(ctx context.Context, offset int64, p []byte) (int, error) {
-	release, err := b.admit()
+	ctx, cancel := frontend.WithReadBudget(ctx, time.Time{})
+	defer cancel()
+	release, err := b.admitAfterAttach(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -535,7 +564,104 @@ func (b *StorageBackend) Read(ctx context.Context, offset int64, p []byte) (int,
 	if len(p) == 0 {
 		return 0, nil
 	}
-	return b.readBytes(offset, p)
+	if ctx.Err() != nil {
+		return 0, b.attachReadyTimeout(ctx.Err())
+	}
+	n, err := b.readBytes(ctx, offset, p)
+	if hydrationPendingOnly(err) {
+		if gateErr := b.gate(); gateErr != nil {
+			return 0, gateErr
+		}
+		return n, fmt.Errorf("%w: %w", frontend.ErrBackendBusy, err)
+	}
+	return n, err
+}
+
+// setChunkAttachPending is used only after successful local recovery.
+func (b *StorageBackend) setChunkAttachPending(evidence string) {
+	b.mu.Lock()
+	b.opEvidence.Store(evidence)
+	b.operational.Store(false)
+	b.waitAttachReady = true
+	b.notifyReadReadyLocked()
+	b.mu.Unlock()
+}
+
+func (b *StorageBackend) admitAfterAttach(ctx context.Context) (func(), error) {
+	release, err := b.admit()
+	if !errors.Is(err, frontend.ErrNotReady) {
+		return release, err
+	}
+	if hook := b.testAfterAttachRefusal; hook != nil {
+		hook()
+	}
+	b.mu.Lock()
+	pending := b.waitAttachReady
+	b.mu.Unlock()
+	if !pending {
+		// Readiness may have published after the initial refusal.
+		return b.admit()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	return b.awaitAttachAdmission(ctx)
+}
+
+// notifyReadReadyLocked wakes waiting I/O without making them hold ioMu while
+// the provider is attaching or draining the backend. Caller holds mu.
+func (b *StorageBackend) notifyReadReadyLocked() {
+	if b.readyChanged != nil {
+		close(b.readyChanged)
+		b.readyChanged = nil
+	}
+}
+
+// awaitAttachAdmission waits only after a gate refusal, before any storage I/O.
+// The three-second readiness allowance is capped by an earlier caller deadline.
+func (b *StorageBackend) awaitAttachAdmission(ctx context.Context) (func(), error) {
+	for {
+		b.mu.Lock()
+		if b.readyChanged == nil {
+			b.readyChanged = make(chan struct{})
+		}
+		changed := b.readyChanged
+		terminal := b.closed || b.observerErr != nil || !b.waitAttachReady
+		b.mu.Unlock()
+		if err := ctx.Err(); err != nil {
+			return nil, b.attachReadyTimeout(err)
+		}
+		release, err := b.admit()
+		if err == nil {
+			if cause := ctx.Err(); cause != nil {
+				release()
+				return nil, b.attachReadyTimeout(cause)
+			}
+			return release, nil
+		}
+		if !errors.Is(err, frontend.ErrNotReady) || terminal || b.operational.Load() {
+			return release, err
+		}
+		if hook := b.testBeforeReadReadyWait; hook != nil {
+			hook()
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return nil, b.attachReadyTimeout(ctx.Err())
+		}
+	}
+}
+
+func (b *StorageBackend) attachReadyTimeout(cause error) error {
+	// A concurrent Close, fence or observer failure must retain its gate error.
+	err := b.gate()
+	b.mu.Lock()
+	observerFailed := b.observerErr != nil
+	b.mu.Unlock()
+	if err != nil && (!errors.Is(err, frontend.ErrNotReady) || observerFailed) {
+		return err
+	}
+	return fmt.Errorf("%w: %w: chunk attachment readiness: %w", frontend.ErrNotReady, frontend.ErrBackendBusy, cause)
 }
 
 // Write persists up to len(p) bytes at offset. Partial-block
@@ -543,9 +669,11 @@ func (b *StorageBackend) Read(ctx context.Context, offset int64, p []byte) (int,
 // overlay the partial range, write the full block back.
 // Every write is gated.
 func (b *StorageBackend) Write(ctx context.Context, offset int64, p []byte) (int, error) {
+	ctx, cancel := frontend.WithWriteBudget(ctx, time.Time{})
+	defer cancel()
 	iolatency.BackendEnter(ctx)
 	defer iolatency.BackendExit(ctx)
-	release, err := b.admit()
+	release, err := b.admitAfterAttach(ctx)
 	if err != nil {
 		log.Printf("durable: StorageBackend.Write gate-rejected offset=%d: %v", offset, err)
 		return 0, err
@@ -554,9 +682,20 @@ func (b *StorageBackend) Write(ctx context.Context, offset int64, p []byte) (int
 	if len(p) == 0 {
 		return 0, nil
 	}
+	if ctx.Err() != nil {
+		return 0, b.attachReadyTimeout(ctx.Err())
+	}
 	b.profile.recordBackendWriteRequest(len(p))
 	start := time.Now()
 	n, err := b.writeBytes(ctx, offset, p)
+	if hydrationPendingOnly(err) {
+		if gateErr := b.gate(); gateErr != nil {
+			err = gateErr
+		}
+	}
+	if errors.Is(err, storage.ErrWALPressureTimeout) || hydrationPendingOnly(err) {
+		err = fmt.Errorf("%w: %w", frontend.ErrBackendBusy, err)
+	}
 	if n > 0 {
 		b.profile.recordBackendWrite(n, time.Since(start))
 	}
@@ -581,6 +720,9 @@ func (b *StorageBackend) RecordTargetWrite(bytes int, d time.Duration) {
 func (b *StorageBackend) admit() (func(), error) {
 	if err := b.readyCheck(); err != nil {
 		return nil, err
+	}
+	if hook := b.testBeforeIOLock; hook != nil {
+		hook()
 	}
 	b.ioMu.RLock()
 	if err := b.gate(); err != nil {
@@ -644,6 +786,54 @@ func (b *StorageBackend) lineageCheck() error {
 	return nil
 }
 
+// readStorageBlock shares the request deadline across blocks and partial-write
+// RMW. Legacy engines may still perform contextless local I/O (#221).
+func (b *StorageBackend) readStorageBlock(ctx context.Context, lba uint32) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("%w: %w", storage.ErrChunkHydrationPending, err)
+	}
+	var data []byte
+	var err error
+	if r, ok := b.storage.(storage.ContextReader); ok {
+		data, err = r.ReadContext(ctx, lba)
+	} else {
+		data, err = b.storage.Read(lba)
+	}
+	if err != nil {
+		return nil, err
+	} // a known substrate failure wins expiry
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("%w: %w", storage.ErrChunkHydrationPending, err)
+	}
+	return data, nil
+}
+
+func hydrationPendingOnly(err error) bool {
+	return errors.Is(err, storage.ErrChunkHydrationPending) && hydrationPendingCauseOnly(err)
+}
+
+func hydrationPendingCauseOnly(err error) bool {
+	if err == storage.ErrChunkHydrationPending || err == context.DeadlineExceeded || err == context.Canceled {
+		return true
+	}
+	if err == nil {
+		return false
+	}
+	if j, ok := err.(interface{ Unwrap() []error }); ok {
+		causes := j.Unwrap()
+		if len(causes) == 0 {
+			return false
+		}
+		for _, cause := range causes {
+			if !hydrationPendingCauseOnly(cause) {
+				return false
+			}
+		}
+		return true
+	}
+	return hydrationPendingCauseOnly(errors.Unwrap(err))
+}
+
 // readBytes performs the byte-range → LBA-range fanout for Read.
 // Reads block-at-a-time, copying the sub-slice covered by the
 // current byte range. Handles three cases:
@@ -651,7 +841,7 @@ func (b *StorageBackend) lineageCheck() error {
 //   - offset aligned, len >= block: copy full block, advance.
 //   - offset misaligned: copy tail of first block only.
 //   - final block, len < available: copy prefix only.
-func (b *StorageBackend) readBytes(offset int64, p []byte) (int, error) {
+func (b *StorageBackend) readBytes(ctx context.Context, offset int64, p []byte) (int, error) {
 	if offset < 0 {
 		return 0, errInvalidOffset
 	}
@@ -661,7 +851,7 @@ func (b *StorageBackend) readBytes(offset int64, p []byte) (int, error) {
 	pos := offset
 	for len(buf) > 0 {
 		lba := uint32(pos / bs)
-		block, err := b.storage.Read(lba)
+		block, err := b.readStorageBlock(ctx, lba)
 		if err != nil {
 			return total, fmt.Errorf("durable: read lba=%d: %w", lba, err)
 		}
@@ -738,7 +928,7 @@ func (b *StorageBackend) writeBytes(ctx context.Context, offset int64, p []byte)
 			block = buf[:chunkLen]
 		} else {
 			// Partial-block: RMW.
-			existing, err := b.storage.Read(lba)
+			existing, err := b.readStorageBlock(ctx, lba)
 			if err != nil {
 				writeLock.Unlock()
 				return total, fmt.Errorf("durable: RMW read lba=%d: %w", lba, err)
@@ -752,7 +942,13 @@ func (b *StorageBackend) writeBytes(ctx context.Context, offset int64, p []byte)
 			return total, fmt.Errorf("%w: no write observer installed", ErrReplicationAckUnavailable)
 		}
 
-		lsn, err := b.storage.Write(lba, block)
+		var lsn uint64
+		var err error
+		if writer, ok := b.storage.(storage.ContextWriter); ok {
+			lsn, err = writer.WriteContext(ctx, lba, block)
+		} else if err = expiredCommand(ctx); err == nil {
+			lsn, err = b.storage.Write(lba, block)
+		}
 		writeLock.Unlock()
 		if err != nil {
 			return total, fmt.Errorf("durable: write lba=%d: %w", lba, err)
@@ -788,7 +984,13 @@ func (b *StorageBackend) writeFullBlockBatch(ctx context.Context, startLBA uint3
 		blocks[i] = p[i*bs : (i+1)*bs]
 	}
 	unlock := b.lockLBARange(startLBA, blockCount)
-	lsns, err := batcher.WriteBatch(startLBA, blocks)
+	var lsns []uint64
+	var err error
+	if writer, ok := batcher.(storage.ContextWriteBatcher); ok {
+		lsns, err = writer.WriteBatchContext(ctx, startLBA, blocks)
+	} else if err = expiredCommand(ctx); err == nil {
+		lsns, err = batcher.WriteBatch(startLBA, blocks)
+	}
 	unlock()
 	if len(lsns) > 0 {
 		b.profile.recordBackendStorageWrite(len(lsns), true)
@@ -799,14 +1001,14 @@ func (b *StorageBackend) writeFullBlockBatch(ctx context.Context, startLBA uint3
 			log.Printf("durable: replication batch fan-out failed lba=%d blocks=%d: %v",
 				startLBA, len(lsns), obsErr)
 			if policy == WriteAckRequireObserverAck {
-				return len(lsns) * bs, fmt.Errorf("%w: %w", ErrReplicationAckUnavailable, obsErr)
+				return len(lsns) * bs, replicationWriteError(ctx, withStorageCause(startLBA, blockCount, err, obsErr))
 			}
 		}
 	} else {
 		for i, lsn := range lsns {
 			block := blocks[i]
 			lba := startLBA + uint32(i)
-			if obsErr := b.observeWrite(ctx, lba, lsn, block, obs, policy); obsErr != nil {
+			if obsErr := b.observeWriteCause(ctx, lba, lsn, block, obs, policy, withStorageCause(startLBA, blockCount, err, nil)); obsErr != nil {
 				return (i + 1) * bs, obsErr
 			}
 		}
@@ -842,6 +1044,13 @@ func (b *StorageBackend) lockLBARange(startLBA uint32, blockCount int) func() {
 }
 
 func (b *StorageBackend) observeWrite(ctx context.Context, lba uint32, lsn uint64, block []byte, obs WriteObserver, policy WriteAckPolicy) error {
+	return b.observeWriteCause(ctx, lba, lsn, block, obs, policy, nil)
+}
+
+// observeWriteCause is observeWrite with the storage failure of the same
+// command (nil if none): a required observer's error is classified together
+// with it, so a physical storage fault is never reclassified as retryable.
+func (b *StorageBackend) observeWriteCause(ctx context.Context, lba uint32, lsn uint64, block []byte, obs WriteObserver, policy WriteAckPolicy, storageErr error) error {
 	// Replication fan-out (T4a-6 hook). Error is logged best-effort
 	// unless the ack policy requires observer acknowledgement.
 	if obs == nil {
@@ -851,12 +1060,53 @@ func (b *StorageBackend) observeWrite(ctx context.Context, lba uint32, lsn uint6
 		log.Printf("durable: replication fan-out failed lba=%d lsn=%d: %v",
 			lba, lsn, werr)
 		if policy == WriteAckRequireObserverAck {
-			return fmt.Errorf("%w: %w", ErrReplicationAckUnavailable, werr)
+			if storageErr != nil {
+				werr = errors.Join(storageErr, werr)
+			}
+			return replicationWriteError(ctx, werr)
 		}
 	}
 	return nil
 }
 
+// withStorageCause joins a batch's storage error (nil if none) with an
+// observer error, so the classifier sees the complete error set (#252):
+// a committed prefix may come back together with a physical failure.
+func withStorageCause(startLBA uint32, blockCount int, storageErr, obsErr error) error {
+	if storageErr == nil {
+		return obsErr
+	}
+	se := fmt.Errorf("durable: write batch lba=%d blocks=%d: %w", startLBA, blockCount, storageErr)
+	if obsErr == nil {
+		return se
+	}
+	return errors.Join(se, obsErr)
+}
+
+// Classify the observer cause before adding the acknowledgement sentinel;
+// otherwise that sentinel would obscure a pure caller deadline at the target.
+func replicationWriteError(ctx context.Context, err error) error {
+	wrapped := fmt.Errorf("%w: %w", ErrReplicationAckUnavailable, err)
+	if frontend.IsWriteDeadline(ctx, err) {
+		return fmt.Errorf("%w: %w", frontend.ErrBackendBusy, wrapped)
+	}
+	return wrapped
+}
+
 // Compile-time check that StorageBackend satisfies frontend.Backend.
 // Catches interface drift at build time rather than runtime.
 var _ frontend.Backend = (*StorageBackend)(nil)
+
+// expiredCommand refuses a fresh mutation through a contextless storage
+// fallback once the command is already expired or cancelled (#252); a pure
+// deadline is retryable busy, as on the context-aware path.
+func expiredCommand(ctx context.Context) error {
+	err := ctx.Err()
+	if err == nil {
+		return nil
+	}
+	if frontend.IsWriteDeadline(ctx, err) {
+		return fmt.Errorf("%w: %w", frontend.ErrBackendBusy, err)
+	}
+	return err
+}

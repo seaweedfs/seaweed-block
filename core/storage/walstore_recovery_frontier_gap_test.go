@@ -17,7 +17,7 @@ import (
 func TestWALStoreRecoverKeepsSyncedEntriesAboveAnUnpersistedFrontierJump(t *testing.T) {
 	const blockSize = 4096
 	path := filepath.Join(t.TempDir(), "store.bin")
-	s := createWALStoreWithWALSizeForTest(t, path, 64, blockSize, 24*1024)
+	s := createLegacyWALStoreWithWALSizeForTest(t, path, 64, blockSize, 24*1024)
 	s.DisableAutoFlushForRecoveryTest()
 	crashed := false
 	t.Cleanup(func() {
@@ -47,7 +47,7 @@ func TestWALStoreRecoverKeepsSyncedEntriesAboveAnUnpersistedFrontierJump(t *test
 	if sb := diskSuperblockForGapTest(t, path); sb.WALCheckpointLSN != 0 {
 		t.Fatalf("persisted checkpoint %d; want 0 (the frontier jump is not persisted)", sb.WALCheckpointLSN)
 	}
-	r, err := OpenWALStore(path)
+	r, err := openLegacyWALStoreForTest(path)
 	if err != nil {
 		t.Fatal(err)
 	}

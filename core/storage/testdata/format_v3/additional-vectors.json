@@ -1,0 +1,26 @@
+[
+  {
+    "file": "batch.bin",
+    "lsn": 7,
+    "count": 2,
+    "lba": 3,
+    "length": 8192,
+    "durable_lsn": 6,
+    "logical_start": 128,
+    "payload_byte": "72",
+    "crc32c_hex": "53d5bcbc",
+    "sha256": "337cc3a7f13c336deb5682c8dfa0c9ab168be56d340b91679ef5eb66304648e0"
+  },
+  {
+    "file": "trim.bin",
+    "lsn": 7,
+    "count": 0,
+    "lba": 5,
+    "length": 65536,
+    "durable_lsn": 6,
+    "logical_start": 128,
+    "payload_byte": null,
+    "crc32c_hex": "870783db",
+    "sha256": "05cff7670d346efb2b9e693fa9a8b9e4d9c6035d3df933f3dce4b68d301bb589"
+  }
+]

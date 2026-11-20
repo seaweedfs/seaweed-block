@@ -9,9 +9,14 @@ import "errors"
 var ErrStalePrimary = errors.New("frontend: stale primary lineage")
 
 // ErrNotReady is returned by Provider.Open when the projection
-// never reports healthy before the context deadline.
+// never reports healthy before the context deadline, and by a Backend
+// while local recovery or chunk attachment is not yet operational.
 var ErrNotReady = errors.New("frontend: volume not ready")
 
 // ErrBackendClosed is returned by Backend.Read / Backend.Write
 // after Backend.Close has been invoked.
 var ErrBackendClosed = errors.New("frontend: backend closed")
+
+// ErrBackendBusy is a transient local admission timeout. Retry may succeed;
+// it must not be used for a sticky persistence or integrity fault.
+var ErrBackendBusy = errors.New("frontend: backend temporarily busy")

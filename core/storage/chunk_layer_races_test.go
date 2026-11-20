@@ -129,6 +129,12 @@ func TestChunkLayer_StaleFillCannotInstallAfterReEviction(t *testing.T) {
 	}
 
 	held, releaseA := holdNextGet(t, f)
+	// Schedule an old-generation physical fill directly. Guest readers now
+	// share one flight, so two guest reads cannot create this overlap.
+	impl := layer.(*chunkLayerImpl)
+	impl.stMu.Lock()
+	oldGen, oldRef := impl.absentGen[2], impl.head.Chunks[2]
+	impl.stMu.Unlock()
 	readA := make(chan error, 1)
 	joinedA := make(chan struct{})
 	t.Cleanup(func() {
@@ -141,7 +147,7 @@ func TestChunkLayer_StaleFillCannotInstallAfterReEviction(t *testing.T) {
 	})
 	go func() {
 		defer close(joinedA)
-		_, err := s.Read(8)
+		_, err := impl.fillOnce(ctTimeout(t), 2, oldGen, oldRef)
 		readA <- err
 	}()
 	waitKey(t, held, "fetch A")
@@ -193,7 +199,11 @@ func TestChunkLayer_StaleAttachDoesNotPublishOverNewerHolder(t *testing.T) {
 			f.heads[len(f.heads)-1].Holder = tc.headHolder
 			f.mu.Unlock()
 			s, _ := newChunkTestStore(t)
-			s.AdvanceFrontier(5)                                                // the log continues from HEAD's remote_lsn (W4b's job in production)
+			func() {
+				if err := s.SeedChunkFrontier(5); err != nil {
+					t.Fatal(err)
+				}
+			}() // the log continues from HEAD's remote_lsn (W4b's job in production)
 			if _, err := s.Write(3, makeBlock(ctBlockSize, 0x33)); err != nil { // stale local change
 				t.Fatal(err)
 			}
@@ -328,7 +338,11 @@ func TestChunkLayer_StaleFillNeverAuthorizesUnresolvedExtentRead(t *testing.T) {
 	f := newFakeChunkRemote()
 	f.seedHead(t, src, 5, 1)
 	s, _ := newChunkTestStore(t)
-	s.AdvanceFrontier(5) // the log continues from HEAD's remote_lsn (W4b's job in production)
+	func() {
+		if err := s.SeedChunkFrontier(5); err != nil {
+			t.Fatal(err)
+		}
+	}() // the log continues from HEAD's remote_lsn (W4b's job in production)
 	cfg := ctConfig(2)
 	cfg.FreshFromHead = true
 	layer := mustAttach(t, s, f, cfg)
@@ -409,7 +423,11 @@ func TestChunkLayer_FreshHostHashCutFetchesNoUntouchedChunk(t *testing.T) {
 	f := newFakeChunkRemote()
 	f.seedHead(t, src, 5, 1)
 	s, _ := newChunkTestStore(t)
-	s.AdvanceFrontier(5) // the log continues from HEAD's remote_lsn (W4b's job in production)
+	func() {
+		if err := s.SeedChunkFrontier(5); err != nil {
+			t.Fatal(err)
+		}
+	}() // the log continues from HEAD's remote_lsn (W4b's job in production)
 	cfg := ctConfig(2)
 	cfg.FreshFromHead = true
 	layer := mustAttach(t, s, f, cfg)

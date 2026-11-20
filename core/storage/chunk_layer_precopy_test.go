@@ -24,6 +24,11 @@ func precopyLayer(t *testing.T, bound, n int) (*WALStore, *fakeChunkRemote, *chu
 	cfg.FreshFromHead = true
 	cfg.BarrierBound = bound
 	l := mustAttach(t, s, f, cfg).(*chunkLayerImpl)
+	// A new v3 map is conservatively UNKNOWN. Publish the zero baseline
+	// first so this control isolates subsequent pre-copy redirty behavior.
+	if _, err := l.Cut(ctTimeout(t)); err != nil {
+		t.Fatal(err)
+	}
 	w := newWriteLog()
 	for c := 0; c < n; c++ {
 		w.write(t, s, uint32(c*ctChunkBlocks+1), byte(0x10+c))
@@ -39,8 +44,8 @@ func assertNoIntentsLeft(t *testing.T, f *fakeChunkRemote) {
 	}
 }
 
-// A chunk re-dirtied between staging and the barrier is copied again under
-// the barrier: HEAD has the newer bytes, never the stale stage. Both ways a
+// A chunk re-dirtied between staging and the barrier is copied again in
+// the COW window: HEAD has the newer bytes, never the stale stage. Both ways a
 // write can reach a staged chunk are covered: flushed to the extent (its
 // chunk version moves) and still in the WAL.
 func TestChunkPrecopy_RedirtiedStagedChunkIsRecopied(t *testing.T) {
@@ -63,8 +68,8 @@ func TestChunkPrecopy_RedirtiedStagedChunkIsRecopied(t *testing.T) {
 			if r.Stats.StageRounds != 1 || r.Stats.StagedChunks != 2 {
 				t.Fatalf("staging: %d rounds, %d chunks; want 1 round of 2", r.Stats.StageRounds, r.Stats.StagedChunks)
 			}
-			if r.Stats.StagedChunksUsed != 1 || r.Stats.BarrierCopyChunks != 2 || r.Stats.BarrierOverBound {
-				t.Fatalf("barrier: %d staged used, %d copied, over bound %v; want chunk 1 from staging, chunks 0 and 2 copied, within the bound",
+			if r.Stats.StagedChunksUsed != 1 || r.Stats.BarrierCopyChunks != 0 || r.Stats.CandidateChunks != 3 || r.Stats.BarrierOverBound {
+				t.Fatalf("barrier: %d staged used, %d copied, over bound %v; want chunk 1 from staging, chunks 0 and 2 copied outside the barrier",
 					r.Stats.StagedChunksUsed, r.Stats.BarrierCopyChunks, r.Stats.BarrierOverBound)
 			}
 			assertEveryHeadIsPrefixImage(t, f, w)
@@ -73,8 +78,8 @@ func TestChunkPrecopy_RedirtiedStagedChunkIsRecopied(t *testing.T) {
 	}
 }
 
-// Writes that outpace the staging: after three rounds the barrier copies
-// the rest even above the bound, counts it, and the image is still exact.
+// Writes that outpace staging: after three rounds the COW window copies
+// all remaining chunks outside the barrier, keeping the image exact.
 func TestChunkPrecopy_WritesOutpacingStagingGoOverBound(t *testing.T) {
 	s, f, l, w := precopyLayer(t, 2, 4)
 	l.testAfterStageHook = func(round int) {
@@ -89,11 +94,11 @@ func TestChunkPrecopy_WritesOutpacingStagingGoOverBound(t *testing.T) {
 	if r.Stats.StageRounds != 3 { // the ruling: at most three rounds
 		t.Fatalf("%d staging rounds, want 3", r.Stats.StageRounds)
 	}
-	if !r.Stats.BarrierOverBound || r.Stats.BarrierCopyChunks != 4 {
-		t.Fatalf("barrier copied %d chunks, over bound %v; want all 4, over the bound of 2", r.Stats.BarrierCopyChunks, r.Stats.BarrierOverBound)
+	if r.Stats.BarrierOverBound || r.Stats.BarrierCopyChunks != 0 || r.Stats.CandidateChunks != 4 {
+		t.Fatalf("barrier copied %d chunks, over bound %v; want all 4 candidates copied outside the barrier", r.Stats.BarrierCopyChunks, r.Stats.BarrierOverBound)
 	}
-	if got := l.Stats().BarrierOverBound; got != 1 {
-		t.Fatalf("BarrierOverBound counter %d, want 1", got)
+	if got := l.Stats().BarrierOverBound; got != 0 {
+		t.Fatalf("BarrierOverBound counter %d, want 0 for COW", got)
 	}
 	assertEveryHeadIsPrefixImage(t, f, w)
 	assertNoIntentsLeft(t, f)
@@ -107,8 +112,8 @@ func TestChunkPrecopy_NoStagingWithoutNeed(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if r.Stats.StageRounds != 0 || r.Stats.BarrierCopyChunks != tc.n || r.Stats.BarrierOverBound {
-			t.Fatalf("bound %d, %d dirty: %d rounds, %d copied, over %v; want no staging, all copied under the barrier",
+		if r.Stats.StageRounds != 0 || r.Stats.BarrierCopyChunks != 0 || r.Stats.CandidateChunks != tc.n || r.Stats.BarrierOverBound {
+			t.Fatalf("bound %d, %d dirty: %d rounds, %d copied, over %v; want no staging, all copied outside the barrier",
 				tc.bound, tc.n, r.Stats.StageRounds, r.Stats.BarrierCopyChunks, r.Stats.BarrierOverBound)
 		}
 		assertEveryHeadIsPrefixImage(t, f, w)
@@ -203,7 +208,7 @@ func TestChunkPrecopy_LowerLSNApplyAfterStagingIsNotLost(t *testing.T) {
 	for _, flushed := range []bool{false, true} {
 		name := map[bool]string{true: "flushed", false: "in the WAL"}[flushed]
 		t.Run(name, func(t *testing.T) {
-			s, _ := newChunkTestStore(t)
+			s, _ := newLegacyChunkTestStore(t)
 			f := newFakeChunkRemote()
 			cfg := ctConfig(1)
 			cfg.FreshFromHead = true
@@ -302,7 +307,7 @@ func TestChunkPrecopy_BarrierSyncFailureSettlesStagedIntents(t *testing.T) {
 // same-open Recover. A chunk staged before it must not be reused:
 // HEAD at the recovered H has the recovered bytes.
 func TestChunkPrecopy_RecoverAfterStagingInvalidatesTheStage(t *testing.T) {
-	s, f, l, _ := precopyLayer(t, 1, 3) // chunk 0 staged in round 0; bound 1
+	s, f, l, _ := legacyPrecopyLayer(t, 1, 3) // chunk 0 staged in round 0; bound 1
 	want := makeBlock(ctBlockSize, 0xa7)
 	recovered := false
 	l.testAfterStageHook = func(round int) {
@@ -363,7 +368,7 @@ func plantRecordPastHead(t *testing.T, s *WALStore, lba uint64, data []byte) {
 // barrier, so the cut's HEAD at H never holds post-H bytes; the recovered
 // bytes are published by the next cut.
 func TestChunkCut_RecoverWaitsForTheCaptureBarrier(t *testing.T) {
-	s, f, l, w := precopyLayer(t, 0, 2) // no bound: the barrier copies all
+	s, f, l, w := legacyPrecopyLayer(t, 0, 2) // no bound: the barrier copies all
 	newer := makeBlock(ctBlockSize, 0xa7)
 	partialBatchPrefix(t, s, newer)
 	recovered := make(chan error, 1)
@@ -404,4 +409,20 @@ func TestChunkCut_RecoverWaitsForTheCaptureBarrier(t *testing.T) {
 	if got := f.imageOf(t, r2.Head)[:ctBlockSize]; !bytes.Equal(got, newer) || r2.H <= r.H {
 		t.Fatalf("next cut H=%d (prev %d): LBA 0 %#x..., want the recovered %#x...", r2.H, r.H, got[0], newer[0])
 	}
+}
+
+// TODO(format-v3 row 14a): raw v2 surgery/nonmonotone fixture only.
+func legacyPrecopyLayer(t *testing.T, bound, n int) (*WALStore, *fakeChunkRemote, *chunkLayerImpl, *writeLog) {
+	t.Helper()
+	s, _ := newLegacyChunkTestStore(t)
+	f := newFakeChunkRemote()
+	cfg := ctConfig(1)
+	cfg.FreshFromHead = true
+	cfg.BarrierBound = bound
+	l := mustAttach(t, s, f, cfg).(*chunkLayerImpl)
+	w := newWriteLog()
+	for c := 0; c < n; c++ {
+		w.write(t, s, uint32(c*ctChunkBlocks+1), byte(0x10+c))
+	}
+	return s, f, l, w
 }

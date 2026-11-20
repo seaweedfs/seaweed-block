@@ -15,12 +15,12 @@ package storage
 //  1. blocks new writes at the store and waits for in-flight ones;
 //  2. Syncs; H is then the synced LSN (nextLSN-1) and no data newer than H
 //     exists in the WAL or the extent. The flusher is not drained;
-//  3. under that barrier reads every chunk dirtied since the last HEAD
-//     through the store's normal read path (dirty map/WAL entry if present,
-//     else extent) into immutable buffers; that is exactly the image at H.
-//     A chunk counts as dirty since HEAD whether its newer blocks are still
-//     in the WAL or already in the extent;
-//  4. releases the barrier (pause = Sync + copy of the dirty chunks);
+//  3. fixes the candidate set and installs an owned-map v3 COW window under
+//     that barrier, then releases it (pause = Sync + window installation);
+//  4. copies outside the barrier. Before publication, the first writer to a
+//     pending candidate saves its at-H chunk; writers wait for a copying or
+//     saving owner. Both paths use the validated store reader. Legacy test
+//     fixtures retain the full-copy barrier;
 //  5. uploads the buffers, outside every walstore lock;
 //  6. CASes HEAD {gen, epoch} with RemoteLSN = H.
 //
@@ -151,10 +151,12 @@ type chunkBitmapStore interface {
 }
 
 // chunkRef names one published chunk: its immutable key and the SHA-256 of
-// its ChunkBlocks*BlockSize bytes.
+// its stored object bytes, verified before any encoding is decoded.
 type chunkRef struct {
-	Key    string
-	SHA256 [32]byte
+	Key      string
+	SHA256   [32]byte
+	Encoding string
+	BirthLSN uint64
 }
 
 // chunkHeadVersion is the CAS guard of HEAD.
@@ -331,6 +333,9 @@ type chunkLayerConfig struct {
 	// while its frontend is gated. An error leaves remote ownership unchanged.
 	// No store/layer/remote lock is held across the callback.
 	PrepareRestore func(head chunkHead) error
+	// RestoreChunkBytes is the local, validated geometry for upgrading a flat
+	// legacy image during an ownership claim; it is never inferred from data.
+	RestoreChunkBytes uint64
 	// CaptureAllowed is supplied by the store owner. It is an admission
 	// check, made when a capture starts and again right before its HEAD CAS:
 	// it refuses a cut during a BASE install or rebuild, or when this node is
@@ -338,10 +343,16 @@ type chunkLayerConfig struct {
 	// that last check and the CAS. Publication safety across a demotion
 	// rests on the epoch: a new primary's takeover raises the HEAD epoch, so
 	// the old primary's CAS fails and it fences (C6). Nil allows capture.
+	// COW workers may call this concurrently, between chunk claims.
 	CaptureAllowed func() error
 	// ReadMissTimeout bounds one OnReadMiss remote fetch.
 	ReadMissTimeout time.Duration
-	// Bitmap persists the dirty-since-HEAD bitmap. Required.
+	// HydrationWorkers bounds layer-owned fetches (0 defaults to 2).
+	HydrationWorkers int
+	// HydrationQueueDepth bounds distinct queued/in-flight chunks (0 defaults to 64).
+	HydrationQueueDepth int
+	// Bitmap persists the legacy dirty-since-HEAD bitmap. Required for v2;
+	// impl3 uses its owned LSN map and never calls this optional legacy object.
 	Bitmap chunkBitmapStore
 
 	// BarrierBound bounds how many chunks a cut copies under its barrier:
@@ -352,6 +363,12 @@ type chunkLayerConfig struct {
 
 	// UploadConcurrency bounds capture/pre-copy Put calls (0 defaults to 8).
 	UploadConcurrency int
+
+	// COWSpillLimit caps the bytes a cut's copy window may spill to its side
+	// file once the in-memory budget is used: a save beyond it aborts the cut
+	// (the caller retries) instead of growing the file under the WAL/extent.
+	// 0 defaults to defaultCOWSpillLimit; negative is refused.
+	COWSpillLimit int64
 
 	// testReconcileHold, set only by this package's tests, holds the
 	// reconciler before each slice until a token is received or the
@@ -367,7 +384,14 @@ type chunkLayerConfig struct {
 // chunkCutStats describes one cut. The periodic-cut work fills it; a zero
 // value means "not measured".
 type chunkCutStats struct {
+	COWSavedChunks int
+	COWSaveNs      int64
+	COWWaitNs      int64
+	// BarrierPauseNs is the guest pause: from the capture barrier's Lock
+	// request until it is released. LockWaitNs is its first part, the wait for
+	// writers already holding the capture barrier shared.
 	BarrierPauseNs  int64
+	LockWaitNs      int64
 	SyncNs          int64
 	CopyNs          int64
 	CandidateChunks int
@@ -411,6 +435,7 @@ type chunkCutStats struct {
 //   - LastCut, LastCutH and LastCutNs (wall clock, Unix ns) describe the
 //     last successful cut, whatever triggered it.
 type chunkLayerStats struct {
+	Hydration         ChunkHydrationStats
 	CutsOK            uint64
 	CutsNoop          uint64
 	CutsFailed        uint64
@@ -448,6 +473,15 @@ type chunkCutResult struct {
 }
 
 // chunkLayer is what the store owner drives.
+// detachSettlement is how a failed Detach ended (SettleDetach).
+type detachSettlement int
+
+const (
+	detachNotPublished detachSettlement = iota
+	detachApplied
+	detachFenced
+)
+
 type chunkLayer interface {
 	chunkSink
 	// Cut takes a quiesced cut at H (the last written LSN), uploads the
@@ -466,6 +500,14 @@ type chunkLayer interface {
 	// Detach returns the first result. An unresolved detach CAS is settled
 	// like any other unresolved CAS, before the next capture or Detach.
 	Detach(ctx context.Context) (chunkCutResult, error)
+	// SettleDetach decides how a failed Detach ended, with the caller's I/O
+	// still stopped: detachNotPublished (HEAD does not and can never carry
+	// this layer's detach: serving may resume; the dirty set stays dirty),
+	// detachApplied (HEAD carries it: the detached result is returned) or
+	// detachFenced (HEAD belongs to a newer epoch or another holder). An
+	// error wrapping errChunkCASOutcomeUnknown leaves it undecided: stay
+	// stopped. It never resumes on top of a possibly detached HEAD.
+	SettleDetach(ctx context.Context) (detachSettlement, chunkCutResult, error)
 	// MakeRemoteDurable is the durability point for snapshot, detach and
 	// migrate: a Capture whose H >= t. Only a nil return makes t remote
 	// durable; it requires the local Sync to cover t first, and fails

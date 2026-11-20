@@ -286,10 +286,10 @@ func TestChunkIntent_AdmissionRefusedBeforeCASDeletesIntent(t *testing.T) {
 	s, _ := newChunkTestStore(t)
 	f := newFakeChunkRemote()
 	cfg := ctConfig(1)
-	calls := 0
 	cfg.CaptureAllowed = func() error {
-		calls++
-		if calls >= 2 { // the cut's start passes; the check before the CAS refuses
+		// The gate is checked concurrently between COW claims as well. Bind
+		// demotion to the real upload event, not a call count/schedule.
+		if f.stats().puts > 0 { // uploaded under an intent, before the CAS
 			return errors.New("demoted")
 		}
 		return nil
@@ -299,6 +299,9 @@ func TestChunkIntent_AdmissionRefusedBeforeCASDeletesIntent(t *testing.T) {
 	w.write(t, s, 2, 0x22)
 	if _, err := layer.Cut(ctTimeout(t)); !errors.Is(err, errChunkCaptureRefused) {
 		t.Fatalf("cut refused before its CAS: %v", err)
+	}
+	if f.stats().puts == 0 {
+		t.Fatal("control did not reach the intent-protected upload")
 	}
 	if n := f.stats().cas; n != 0 {
 		t.Fatalf("refused cut issued %d CAS", n)

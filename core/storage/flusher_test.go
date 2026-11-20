@@ -16,7 +16,7 @@ func TestFlusher_AdvancesCheckpointBeforeReadFromExtent(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "store.bin")
 
-	s, err := CreateWALStore(path, 16, 4096)
+	s, err := createLegacyWALStoreForTest(path, 16, 4096)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestFlusher_ReleasesWALPressureAfterCheckpoint(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "store.bin")
 
-	s := createWALStoreWithWALSizeForTest(t, path, 128, 4096, 256*1024)
+	s := createLegacyWALStoreWithWALSizeForTest(t, path, 128, 4096, 256*1024)
 	defer s.Close()
 
 	for i := uint32(0); i < 32; i++ {
@@ -130,7 +130,7 @@ func TestWALWriter_AdvanceTailPastWrappedEntry(t *testing.T) {
 	}
 }
 
-func createWALStoreWithWALSizeForTest(t *testing.T, path string, numBlocks uint32, blockSize int, walSize uint64) *WALStore {
+func createLegacyWALStoreWithWALSizeForTest(t *testing.T, path string, numBlocks uint32, blockSize int, walSize uint64) *WALStore {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -144,7 +144,7 @@ func createWALStoreWithWALSizeForTest(t *testing.T, path string, numBlocks uint3
 		ExtentSize:  uint32(blockSize),
 		WALSize:     walSize,
 		ImplKind:    ImplKindWALStore,
-		ImplVersion: WALStoreImplVersion,
+		ImplVersion: 1, // frozen v2 engine fixture, not the production selector
 	})
 	if err != nil {
 		_ = f.Close()
@@ -180,7 +180,7 @@ func TestFlusher_RecoveryHonorsCheckpoint(t *testing.T) {
 	path := filepath.Join(dir, "store.bin")
 
 	{
-		s, err := CreateWALStore(path, 16, 4096)
+		s, err := createLegacyWALStoreForTest(path, 16, 4096)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -204,7 +204,7 @@ func TestFlusher_RecoveryHonorsCheckpoint(t *testing.T) {
 
 	// Reopen + Recover. The checkpointed records should be skipped;
 	// extent should serve all reads.
-	s, err := OpenWALStore(path)
+	s, err := openLegacyWALStoreForTest(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,7 +273,7 @@ func TestCrashFamily_AbruptKillAtMultipleWindows(t *testing.T) {
 			path := filepath.Join(dir, "store.bin")
 
 			func() {
-				s, err := CreateWALStore(path, 16, 4096)
+				s, err := createLegacyWALStoreForTest(path, 16, 4096)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -313,7 +313,7 @@ func TestCrashFamily_AbruptKillAtMultipleWindows(t *testing.T) {
 
 			// Reopen + Recover. Verify acked survives, unacked
 			// is either present-as-written or absent, never corrupt.
-			s, err := OpenWALStore(path)
+			s, err := openLegacyWALStoreForTest(path)
 			if err != nil {
 				t.Fatalf("reopen after %s: %v", c.name, err)
 			}
@@ -373,7 +373,7 @@ func TestFlusher_ManyDirtyEntriesCheckpointStaysCorrect(t *testing.T) {
 	const n = 300 // > any plausible old maxBatch (which was 256)
 
 	{
-		s, err := CreateWALStore(path, n+10, 4096)
+		s, err := createLegacyWALStoreForTest(path, n+10, 4096)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -409,7 +409,7 @@ func TestFlusher_ManyDirtyEntriesCheckpointStaysCorrect(t *testing.T) {
 	// Reopen + Recover. Every LBA must be readable with the bytes
 	// we wrote — the checkpoint advance must have only covered
 	// LBAs whose data is actually in the extent.
-	s, err := OpenWALStore(path)
+	s, err := openLegacyWALStoreForTest(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -448,7 +448,7 @@ func TestFlusher_ConcurrentWriteRaceLBAStaysFresh(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "store.bin")
 
-	s, err := CreateWALStore(path, 16, 4096)
+	s, err := createLegacyWALStoreForTest(path, 16, 4096)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -502,7 +502,7 @@ func TestAllBlocks_ReturnsBlocksAfterFlush(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "store.bin")
 
-	s, err := CreateWALStore(path, 16, 4096)
+	s, err := createLegacyWALStoreForTest(path, 16, 4096)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -533,7 +533,10 @@ func TestAllBlocks_ReturnsBlocksAfterFlush(t *testing.T) {
 
 	// AllBlocks must still return both written LBAs even though
 	// they're no longer in the dirty map.
-	all := s.AllBlocks()
+	all, snapshotErr := s.AllBlocks()
+	if snapshotErr != nil {
+		t.Fatal(snapshotErr)
+	}
 	if len(all) != 2 {
 		t.Fatalf("AllBlocks after flush returned %d entries, want 2", len(all))
 	}
@@ -553,7 +556,7 @@ func TestRecovery_DeterministicAcrossMultipleOpens(t *testing.T) {
 	path := filepath.Join(dir, "store.bin")
 
 	{
-		s, _ := CreateWALStore(path, 16, 4096)
+		s, _ := createLegacyWALStoreForTest(path, 16, 4096)
 		for i := uint32(0); i < 5; i++ {
 			_, _ = s.Write(i, makeBlock(4096, byte(0x10+i)))
 		}
@@ -565,7 +568,7 @@ func TestRecovery_DeterministicAcrossMultipleOpens(t *testing.T) {
 	}
 
 	// First reopen + Recover.
-	s1, _ := OpenWALStore(path)
+	s1, _ := openLegacyWALStoreForTest(path)
 	r1, err := s1.Recover()
 	if err != nil {
 		t.Fatal(err)
@@ -577,7 +580,7 @@ func TestRecovery_DeterministicAcrossMultipleOpens(t *testing.T) {
 	_ = s1.Close()
 
 	// Second reopen + Recover on the same file.
-	s2, _ := OpenWALStore(path)
+	s2, _ := openLegacyWALStoreForTest(path)
 	r2, err := s2.Recover()
 	if err != nil {
 		t.Fatal(err)

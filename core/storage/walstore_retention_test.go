@@ -28,7 +28,7 @@ func freshWALStore(t *testing.T) *WALStore {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "v.bin")
-	ws, err := CreateWALStore(path, 64, 4096)
+	ws, err := createLegacyWALStoreForTest(path, 64, 4096)
 	if err != nil {
 		t.Fatalf("CreateWALStore: %v", err)
 	}

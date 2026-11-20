@@ -67,7 +67,10 @@ func (h *harness) writeBlocks(n uint32) {
 // and marks the replica's synced frontier at the primary's head. Used
 // by C1 setup where the replica is already caught up.
 func (h *harness) mirrorToReplica() {
-	blocks := h.primaryStore.AllBlocks()
+	blocks, err := h.primaryStore.AllBlocks()
+	if err != nil {
+		panic(fmt.Errorf("calibration snapshot: %w", err))
+	}
 	_, _, pH := h.primaryStore.Boundaries()
 	for lba, data := range blocks {
 		_ = h.replicaStore.ApplyEntry(lba, data, pH)
@@ -120,7 +123,10 @@ func (h *harness) commandLog() []string {
 // dataMatches returns true iff every LBA that exists on the primary is
 // byte-identical on the replica. Used for C2/C3 data-integrity evidence.
 func (h *harness) dataMatches() bool {
-	primary := h.primaryStore.AllBlocks()
+	primary, err := h.primaryStore.AllBlocks()
+	if err != nil {
+		return false
+	}
 	for lba, want := range primary {
 		got, err := h.replicaStore.Read(lba)
 		if err != nil {

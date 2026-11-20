@@ -69,7 +69,7 @@ func TestGC_StalledCutRemainsReadableAfterTwoMarks(t *testing.T) {
 	}
 	held := &heldGCRemote{remote, make(chan struct{}), make(chan struct{})}
 	p := filepath.Join(t.TempDir(), "volume")
-	s, e := storage.CreateWALStore(p, 64, 4096)
+	s, e := storage.CreateWALStoreWithOptions(p, 64, 4096, storage.WALStoreOptions{ChunkBlocks: 8})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -77,8 +77,7 @@ func TestGC_StalledCutRemainsReadableAfterTwoMarks(t *testing.T) {
 	if _, e = s.Recover(); e != nil {
 		t.Fatal(e)
 	}
-	layer, e := storage.AttachChunkLayer(s, held, storage.ChunkLayerConfig{ChunkBlocks: 8, Epoch: 1, Holder: "h1", Bitmap: storage.NewFileChunkBitmapStore(p + ".bitmap"),
-		FreshFromHead: true}) // a new, empty store: its dirty set is known (empty)
+	layer, e := storage.AttachChunkLayer(s, held, storage.ChunkLayerConfig{ChunkBlocks: 8, Epoch: 1, Holder: "h1", FreshFromHead: true}) // a new, empty store: its dirty set is known (empty)
 	if e != nil {
 		t.Fatal(e)
 	}

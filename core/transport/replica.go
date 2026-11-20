@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"crypto/rand"
 	"fmt"
 	"log"
 	"net"
@@ -308,17 +309,33 @@ func (r *ReplicaListener) acceptLoop() {
 func (r *ReplicaListener) handleConn(conn net.Conn) {
 	defer conn.Close()
 	lane := mutationLaneLive
-	basePrepared := false
-	prepareBaseInstall := func() error {
-		if basePrepared {
+	// The legacy single-lane rebuild is the second BASE-install caller
+	// (DESIGN r17.4 section 8.7): the first admitted rebuild message of a
+	// connection begins one install at its frontier hint under a fresh
+	// random ID; a reconnect is a new connection and so a superseding
+	// install. Stores without the seam keep their pre-seam behaviour behind
+	// the legacy handle (lazy BaseStager staging, WriteExtentDirect,
+	// AdvanceFrontier at completion).
+	var install storage.InstallHandle
+	var installBase uint64
+	beginInstall := func(hint uint64) error {
+		if install != nil {
+			if hint != installBase {
+				return fmt.Errorf("rebuild frontier hint %d differs from the install's BaseLSN %d", hint, installBase)
+			}
 			return nil
 		}
-		if preparer, ok := r.store.(storage.BaseInstallPreparer); ok {
-			if err := preparer.BeginBaseInstall(); err != nil {
+		var id [16]byte
+		for id == ([16]byte{}) {
+			if _, err := rand.Read(id[:]); err != nil {
 				return err
 			}
 		}
-		basePrepared = true
+		h, err := storage.BeginInstall(r.store, hint, id)
+		if err != nil {
+			return err
+		}
+		install, installBase = h, hint
 		return nil
 	}
 
@@ -442,11 +459,11 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 				// Rebuild blocks are BASE-lane bytes. They must not enter the
 				// WAL apply path and must not advance R/S/H per block; the
 				// frontier is reconciled once, at MsgRebuildDone.
-				if err := prepareBaseInstall(); err != nil {
-					log.Printf("replica: prepare rebuild base: %v", err)
+				if err := beginInstall(lineage.EffectiveFrontierHint()); err != nil {
+					log.Printf("replica: begin rebuild base: %v", err)
 					return true
 				}
-				if err := r.store.WriteExtentDirect(lba, data); err != nil {
+				if err := install.WriteBase(lba, data); err != nil {
 					log.Printf("replica: apply rebuild base block: %v", err)
 					return true
 				}
@@ -462,15 +479,24 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 						lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
 					return true
 				}
-				if err := prepareBaseInstall(); err != nil {
-					log.Printf("replica: prepare empty rebuild base: %v", err)
+				// Done (DESIGN 8.7): an empty rebuild begins here; the hint must
+				// equal the install's BaseLSN; then complete, then the logical
+				// Sync, which is ordinary once installed. A failed completion or
+				// Sync closes the connection with no MsgBarrierResp, so the
+				// primary never sees an AchievedLSN from a failed call.
+				if err := beginInstall(lineage.EffectiveFrontierHint()); err != nil {
+					log.Printf("replica: begin rebuild base at done: %v", err)
 					return true
 				}
-				// The done message carries the engine's frozen base frontier hint.
-				// Advance the replica's frontier metadata without touching
-				// any block data — AdvanceFrontier only updates nextLSN/walHead.
-				r.store.AdvanceFrontier(lineage.EffectiveFrontierHint())
-				frontier, _ := r.store.Sync()
+				if err := install.MarkBaseComplete(); err != nil {
+					log.Printf("replica: complete rebuild base: %v", err)
+					return true
+				}
+				frontier, err := r.store.Sync()
+				if err != nil {
+					log.Printf("replica: sync after rebuild done: %v", err)
+					return true
+				}
 				// Echo the request's full lineage in the rebuild-done ack
 				// so primary-side validators can consume it.
 				resp := EncodeBarrierResp(BarrierResponse{

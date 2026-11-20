@@ -90,7 +90,7 @@ type basePreparingStore struct {
 	prepareCalls int
 }
 
-func (s *basePreparingStore) BeginBaseInstall() error {
+func (s *basePreparingStore) BeginBaseStage() error {
 	s.prepareCalls++
 	return nil
 }
@@ -196,7 +196,7 @@ func (s *receiverAckStore) ApplyEntry(lba uint32, data []byte, lsn uint64) error
 
 func (s *receiverAckStore) WriteExtentDirect(lba uint32, data []byte) error { return nil }
 
-func (s *receiverAckStore) AllBlocks() map[uint32][]byte { return nil }
+func (s *receiverAckStore) AllBlocks() (map[uint32][]byte, error) { return nil, nil }
 
 func (s *receiverAckStore) ScanLBAs(fromLSN uint64, fn func(storage.RecoveryEntry) error) error {
 	return nil

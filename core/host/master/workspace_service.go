@@ -2,6 +2,8 @@ package master
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/authority"
@@ -23,6 +25,29 @@ func (s *services) workspaceVolume(volume string) error {
 		return status.Error(codes.FailedPrecondition, "workspace move requires an existing RF1 volume")
 	}
 	if s.host.lifecycle.Deletions.Reserved(volume) {
+		return status.Error(codes.FailedPrecondition, "workspace: volume is being deleted")
+	}
+	return nil
+}
+
+// workspaceVolumeForRenewal is workspaceVolume for lease renewal: it reads
+// the published snapshots of the lifecycle stores instead of taking their
+// mutexes, which writers hold across file I/O. A renewal during an in-flight
+// lifecycle write sees the last published state; deletion admission itself
+// stays in the publisher (RecordWorkspaceDeletion needs a clean revocation
+// ACK for a live authority line).
+func (s *services) workspaceVolumeForRenewal(volume string) error {
+	if !s.host.cfg.WorkspaceRPC {
+		return status.Error(codes.FailedPrecondition, "workspace RPC disabled")
+	}
+	if s.host.lifecycle == nil {
+		return status.Error(codes.FailedPrecondition, "lifecycle store unavailable")
+	}
+	r, ok := s.host.lifecycle.Volumes.GetVolumeSnapshot(volume)
+	if !ok || r.Spec.ReplicationFactor != 1 {
+		return status.Error(codes.FailedPrecondition, "workspace move requires an existing RF1 volume")
+	}
+	if s.host.lifecycle.Deletions.ReservedSnapshot(volume) {
 		return status.Error(codes.FailedPrecondition, "workspace: volume is being deleted")
 	}
 	return nil
@@ -61,7 +86,7 @@ func leaseFact(volume string, l authority.WorkspaceLease) *control.WorkspaceLeas
 }
 
 func (s *services) RenewWorkspaceLease(ctx context.Context, q *control.WorkspaceIdentity) (*control.WorkspaceLeaseFact, error) {
-	if err := s.workspaceVolume(q.GetVolumeId()); err != nil {
+	if err := s.workspaceVolumeForRenewal(q.GetVolumeId()); err != nil {
 		return nil, err
 	}
 	l, err := s.host.Publisher().RenewWorkspaceLease(ctx, q.GetVolumeId(), q.GetReplicaId(), q.GetEpoch())
@@ -78,11 +103,12 @@ func (s *services) RevokeWorkspace(ctx context.Context, q *control.WorkspaceIden
 	if err := s.host.Publisher().BeginWorkspaceRevocation(ctx, q.GetVolumeId(), q.GetReplicaId(), q.GetEpoch()); err != nil {
 		return nil, workspaceError(err)
 	}
-	state := s.host.Publisher().WorkspaceState(q.GetVolumeId())
-	if state == nil || state.Lease == nil {
+	// Report what was granted, never the durable horizon.
+	lease, ok := s.host.Publisher().WorkspaceLeaseReply(q.GetVolumeId())
+	if !ok {
 		return nil, status.Error(codes.FailedPrecondition, "workspace moved during revocation")
 	}
-	return leaseFact(q.GetVolumeId(), *state.Lease), nil
+	return leaseFact(q.GetVolumeId(), lease), nil
 }
 
 func (s *services) AckWorkspaceRevoked(ctx context.Context, q *control.WorkspaceRevocationAck) (*control.WorkspaceEmpty, error) {
@@ -119,6 +145,14 @@ func (s *services) MoveWorkspace(ctx context.Context, q *control.WorkspaceMove) 
 	}
 	// Remote reads never hold the workspace mutation lock. Re-read every
 	// local precondition below; Publisher checks the expected epoch atomically.
+	// A refusal is logged after the lock is released (deferred first, so it
+	// runs last): a slow log writer never holds workspaceMu.
+	var refusal string
+	defer func() {
+		if refusal != "" {
+			s.host.log.Printf("blockmaster: MoveWorkspace refused volume=%q request=%q: %s", q.GetVolumeId(), q.GetRequestId(), refusal)
+		}
+	}()
 	s.host.workspaceMu.Lock()
 	defer s.host.workspaceMu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -133,14 +167,32 @@ func (s *services) MoveWorkspace(ctx context.Context, q *control.WorkspaceMove) 
 	if err != nil {
 		return nil, workspaceError(err)
 	}
-	matched := !explicit && target.DataAddr == q.GetTargetDataAddr() && target.CtrlAddr == q.GetTargetCtrlAddr()
+	// A volume without per-volume bindings may move to any port on the
+	// target node's registered hosts (a host runs several slots): the host
+	// match ties the endpoints to that node's registration (it trusts the
+	// registration; it is not an identity proof). The collision check below
+	// still refuses endpoints another assignment or binding owns.
+	matched := !explicit && sameHost(q.GetTargetDataAddr(), target.DataAddr) && sameHost(q.GetTargetCtrlAddr(), target.CtrlAddr)
+	endpointErr := lifecycle.ValidateWorkspaceEndpoints(lifecycle.WorkspaceBinding{VolumeID: q.GetVolumeId(), ServerID: q.GetTargetServerId(), DataAddr: q.GetTargetDataAddr(), CtrlAddr: q.GetTargetCtrlAddr()})
 	for _, b := range bindings {
 		if !b.Retired && b.ServerID == q.GetTargetServerId() && b.DataAddr == q.GetTargetDataAddr() && b.CtrlAddr == q.GetTargetCtrlAddr() {
 			matched = true
 		}
 	}
-	if oldHost == "" || !ok || target.ServerID == oldHost || !matched {
-		return nil, status.Error(codes.FailedPrecondition, "move needs known source slot and registered target endpoints")
+	switch {
+	case endpointErr != nil:
+		refusal = fmt.Sprintf("move target endpoints invalid: %v", endpointErr)
+	case oldHost == "":
+		refusal = fmt.Sprintf("move source unknown: no issued move or placement names replica %q at epoch %d", q.GetExpectedReplicaId(), q.GetExpectedEpoch())
+	case !ok:
+		refusal = fmt.Sprintf("move target node %q is not registered", q.GetTargetServerId())
+	case target.ServerID == oldHost:
+		refusal = fmt.Sprintf("move target %q is the current source host", target.ServerID)
+	case !matched:
+		refusal = fmt.Sprintf("move target endpoints %s/%s on %q are not registered (%s)", q.GetTargetDataAddr(), q.GetTargetCtrlAddr(), target.ServerID, registeredTargetEndpoints(target, bindings, explicit))
+	}
+	if refusal != "" {
+		return nil, status.Error(codes.FailedPrecondition, refusal)
 	}
 	if err = s.host.workspaceEndpointsAvailable(lifecycle.WorkspaceBinding{VolumeID: q.GetVolumeId(), ServerID: target.ServerID, DataAddr: q.GetTargetDataAddr(), CtrlAddr: q.GetTargetCtrlAddr()}); err != nil {
 		return nil, workspaceError(err)
@@ -154,6 +206,32 @@ func (s *services) MoveWorkspace(ctx context.Context, q *control.WorkspaceMove) 
 		return nil, workspaceError(err)
 	}
 	return grantFact(r), nil
+}
+
+// sameHost reports whether two host:port addresses name the same host:
+// canonical host parts (equivalent IP spellings equal), no name resolution.
+func sameHost(a, b string) bool {
+	ha := lifecycle.WorkspaceEndpointHost(a)
+	return ha != "" && ha == lifecycle.WorkspaceEndpointHost(b)
+}
+
+// registeredTargetEndpoints describes what a move to target may name: the
+// node's own pair for a volume without explicit bindings, else its live
+// bindings on that node.
+func registeredTargetEndpoints(target lifecycle.NodeRegistration, bindings []lifecycle.WorkspaceBinding, explicit bool) string {
+	if !explicit {
+		return fmt.Sprintf("not on the node's hosts: it registers %s/%s; no per-volume binding is prepared", target.DataAddr, target.CtrlAddr)
+	}
+	var live []string
+	for _, b := range bindings {
+		if !b.Retired && b.ServerID == target.ServerID {
+			live = append(live, b.DataAddr+"/"+b.CtrlAddr)
+		}
+	}
+	if len(live) == 0 {
+		return "the volume has explicit bindings but none live on that node"
+	}
+	return "live bindings on that node: " + strings.Join(live, ", ")
 }
 
 func (s *services) QueryWorkspace(ctx context.Context, q *control.WorkspaceVolume) (*control.WorkspaceStatus, error) {
@@ -174,8 +252,8 @@ func (s *services) QueryWorkspace(ctx context.Context, q *control.WorkspaceVolum
 	if state == nil {
 		return out, nil
 	}
-	if state.Lease != nil {
-		out.Lease = leaseFact(q.GetVolumeId(), *state.Lease)
+	if lease, ok := s.host.Publisher().WorkspaceLeaseReply(q.GetVolumeId()); ok {
+		out.Lease = leaseFact(q.GetVolumeId(), lease) // granted expiry, not the durable horizon
 	}
 	if state.Ack != nil {
 		out.RevocationAck = &control.WorkspaceRevocationAck{Identity: &control.WorkspaceIdentity{VolumeId: q.GetVolumeId(), ReplicaId: state.Ack.ReplicaID, Epoch: state.Ack.Epoch}, HeadGen: state.Ack.HeadGen}

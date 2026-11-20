@@ -62,21 +62,26 @@ read-only status (stale evidence is `Ready=Unknown`, never a false ready).
 
 Lab runs, median of 3; not SLOs. Workloads: Firecracker microVMs (4 vCPU,
 4 GiB) on one bare-metal host over NVMe/TCP loopback, against a local
-file-backed disk. Snapshot and fork: a host-side proxy without network
-latency, guest `fsync` or the block frontend.
+file-backed disk. The two `fsync` rows marked "ublk" come from a later run on
+the same host with the ublk frontend, after the group-commit fix
+([#173](https://github.com/seaweedfs/seaweed-block/pull/173)). Snapshot and
+fork: a host-side proxy without network latency, guest `fsync` or the block
+frontend.
 
 | Measurement | Seaweed Block | Local disk |
 |---|---|---|
 | `npm ci` (617 packages, offline) / `git clone` (Go 1.23, local) | 2.14 s / 7.10 s | 2.14 s / 6.99 s |
 | Untar 100,000 files / cold `find` + `stat` over them | 1.10 s / 0.32 s | 1.06 s / 0.33 s |
-| 2,000 × create + write + `fsync` | 14.33 s | 6.09 s |
+| 2,000 × create + write + `fsync` (ublk) | 8.48 s | 6.11 s |
+| Guest `fsync` median, fio 4 KiB random write, one at a time (ublk) | 3.23 ms | 2.74 ms |
 | Snapshot / fork of a 10 GiB volume (2,560 chunks) | 0.18 ms / 0.29 ms | |
 | Two-host lifecycle: create, snapshot, fork, move, stale holder, delete, GC | 35 of 35 checks | |
 
-Metadata-heavy workloads run at local-disk speed. The cost in these runs is
-`fsync` latency, about 7 ms against 3 ms local, measured with the NVMe/TCP
-loopback frontend. The ublk frontend and per-stage `fsync` histograms are on
-`main` now; latency improvement is in progress.
+Metadata-heavy workloads run at local-disk speed. The remaining cost is
+`fsync`: a median of 3.23 ms against 2.74 ms local with the ublk frontend
+(3.59 ms over NVMe/TCP loopback), down from about 7 ms before the group-commit
+fix. Every guest `fsync` still reaches the backend sync; no write cache is
+turned off to get there.
 [Workspace measurements](docs/workspace-measurements.md) has every number and
 how each was measured.
 
@@ -180,7 +185,8 @@ run evidence: [release notes](docs/releases/README.md).
 ### Not claimed yet
 
 - Production readiness, SLOs, or a published performance, RTO or RPO claim.
-- `fsync` parity with local disk (in progress, see Measured results).
+- `fsync` parity with local disk. Today it is about 1.2× local (see Measured
+  results).
 - ublk at high density. Unprivileged per-volume servers need a privileged
   control broker, which is not done.
 - Crash-restart recovery of a ublk server. A crashed server fails closed.
@@ -209,7 +215,8 @@ run evidence: [release notes](docs/releases/README.md).
 ## Documentation
 
 - Design: [core](docs/design/block-design.md), [agent workspace](docs/design/agent-workspace-design.md),
-  [Kubernetes block](docs/design/kubernetes-block-design.md), [TLA+ specifications](docs/spec/README.md),
+  [Kubernetes block](docs/design/kubernetes-block-design.md), [invariants and state machines](docs/design/invariants.md),
+  [TLA+ specifications](docs/spec/README.md),
   [workspace measurements](docs/workspace-measurements.md)
 - Operations: [standalone deployment](docs/standalone-deployment.md),
   [Kubernetes quickstart](docs/quickstart-kubernetes.md), [user capabilities](docs/user-capabilities.md)

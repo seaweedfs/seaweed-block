@@ -339,6 +339,7 @@ func decodeIntent(p string, e *filerpb.Entry) (storage.ChunkIntent, error) {
 }
 
 type headDoc struct {
+	Levels     int                             `json:"levels,omitempty"`
 	Segments   map[uint64]storage.ChunkSegment `json:"segments,omitempty"`
 	ChunkBytes uint64                          `json:"chunk_bytes,omitempty"`
 	ChunkCount int                             `json:"chunk_count,omitempty"`
@@ -370,6 +371,16 @@ type refDoc struct {
 // was ever published. An entry that exists but does not decode is an
 // error, never the zero HEAD.
 func (r *ChunkRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
+	h, err := r.getHeadRoot(ctx)
+	if err != nil {
+		return h, err
+	}
+	return r.resolveManifest(ctx, h)
+}
+
+// getHeadRoot validates the root and its CAS attributes without reading any
+// immutable segment. CASHead only needs authority and lineage from this root.
+func (r *ChunkRemote) getHeadRoot(ctx context.Context) (storage.ChunkHead, error) {
 	e, err := r.f.LookupEntry(ctx, r.root, headName)
 	if errors.Is(err, ErrNotFound) {
 		return storage.ChunkHead{}, nil
@@ -377,11 +388,7 @@ func (r *ChunkRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
 	if err != nil {
 		return storage.ChunkHead{}, err
 	}
-	h, err := decodeHead(path.Join(r.root, headName), e)
-	if err != nil {
-		return h, err
-	}
-	return r.resolveManifest(ctx, h)
+	return decodeHead(path.Join(r.root, headName), e)
 }
 
 // CASHead installs next, at generation expected.Gen+1, only if the stored
@@ -397,7 +404,7 @@ func (r *ChunkRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVer
 	// Read the LSN under the same generation/epoch guard used by UpdateEntry.
 	// A competing write after this read makes the conditional update fail;
 	// no successful CAS can lower the committed lineage frontier.
-	current, err := r.GetHead(ctx)
+	current, err := r.getHeadRoot(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -439,19 +446,17 @@ func headEntry(h storage.ChunkHead) (*filerpb.Entry, error) {
 		doc.DetachedBy = &detachedByDoc{Holder: h.DetachedBy.Holder, Epoch: h.DetachedBy.Epoch, Gen: h.DetachedBy.Gen}
 	}
 	if h.Segments == nil {
-		doc.Chunks = make(map[uint64]refDoc, len(h.Chunks))
-		for idx, ref := range h.Chunks {
-			if ref.Key == "" {
-				return nil, fmt.Errorf("chunkstore: HEAD chunk %d has no key", idx)
-			}
-			doc.Chunks[idx] = refDoc{Key: ref.Key, SHA256: hex.EncodeToString(ref.SHA256[:])}
+		if len(h.Chunks) != 0 {
+			return nil, errors.New("chunkstore: data HEAD requires a segmented manifest and geometry")
 		}
+		doc.Chunks = map[uint64]refDoc{}
 	}
 	if h.Segments != nil {
 		if err := validateRoot(h); err != nil {
 			return nil, err
 		}
-		doc.Format = 2
+		doc.Format = 3
+		doc.Levels = 1
 		doc.Chunks = nil
 		doc.Segments = h.Segments
 		doc.ChunkBytes = h.ChunkBytes
@@ -555,11 +560,11 @@ func decodeHeadDoc(p string, content []byte) (storage.ChunkHead, error) {
 		if err != nil || len(sum) != 32 || ref.Key == "" {
 			return fail("chunk %d ref invalid", idx)
 		}
-		cr := storage.ChunkRef{Key: ref.Key}
+		cr := storage.ChunkRef{Key: ref.Key, Encoding: "full", BirthLSN: doc.RemoteLSN}
 		copy(cr.SHA256[:], sum)
 		h.Chunks[idx] = cr
 	}
-	if doc.Format == 2 {
+	if doc.Format == 2 || doc.Format == 3 {
 		if len(doc.Chunks) != 0 {
 			return fail("segmented root contains flat chunks")
 		}

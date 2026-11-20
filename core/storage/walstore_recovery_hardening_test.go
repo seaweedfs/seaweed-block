@@ -12,7 +12,7 @@ import (
 func TestWALStoreRecoverRetainsMultiBlockSuffixAcrossRestart(t *testing.T) {
 	const blockSize = 4096
 	path := filepath.Join(t.TempDir(), "store.bin")
-	s, err := CreateWALStore(path, 32, blockSize)
+	s, err := createLegacyWALStoreForTest(path, 32, blockSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +55,7 @@ func TestWALStoreRecoverRetainsMultiBlockSuffixAcrossRestart(t *testing.T) {
 	}
 	crashRecoveryHardeningStore(t, s)
 
-	reopened, err := OpenWALStore(path)
+	reopened, err := openLegacyWALStoreForTest(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestWALStoreRecoverRejectsOverflowingBatchGeometry(t *testing.T) {
 				blocks    = 3
 			)
 			path := filepath.Join(t.TempDir(), "store.bin")
-			s, err := CreateWALStore(path, 16, blockSize)
+			s, err := createLegacyWALStoreForTest(path, 16, blockSize)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -149,7 +149,7 @@ func TestWALStoreRecoverRejectsOverflowingBatchGeometry(t *testing.T) {
 			)
 			crashRecoveryHardeningStore(t, s)
 
-			reopened, err := OpenWALStore(path)
+			reopened, err := openLegacyWALStoreForTest(path)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -176,7 +176,7 @@ func TestWALStoreRecoverReconstructsLegacyWrappedRetainedWindow(t *testing.T) {
 		lowRecordSize = uint64(walEntryHeaderSize + 2*blockSize)
 	)
 	path := filepath.Join(t.TempDir(), "store.bin")
-	s := createWALStoreWithWALSizeForTest(t, path, 64, blockSize, walSize)
+	s := createLegacyWALStoreWithWALSizeForTest(t, path, 64, blockSize, walSize)
 	s.DisableAutoFlushForRecoveryTest()
 	for lba := uint32(0); lba < 3; lba++ {
 		if _, err := s.Write(lba, makeBlock(blockSize, byte(0x10+lba))); err != nil {
@@ -228,7 +228,7 @@ func TestWALStoreRecoverReconstructsLegacyWrappedRetainedWindow(t *testing.T) {
 	}
 	crashRecoveryHardeningStore(t, s)
 
-	reopened, err := OpenWALStore(path)
+	reopened, err := openLegacyWALStoreForTest(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,6 +283,12 @@ func TestWALStoreRecoverReconstructsLegacyWrappedRetainedWindow(t *testing.T) {
 func crashRecoveryHardeningStore(t *testing.T, s *WALStore) {
 	t.Helper()
 	s.committer.Stop()
+	if s.v3 != nil && s.v3.ownedMap != nil {
+		if err := s.v3.ownedMap.Close(); err != nil {
+			t.Fatal(err)
+		}
+		s.v3.ownedMap = nil
+	}
 	if err := s.fd.Close(); err != nil {
 		t.Fatal(err)
 	}

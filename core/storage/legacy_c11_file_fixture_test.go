@@ -1,6 +1,7 @@
 package storage
 
-// FileChunkBitmapStore is the production chunkBitmapStore: one state file
+// legacyC11FileStore preserves the retired C11 file codec for historical tests.
+// It is compiled only into this package's tests: one state file
 // (header + dirty-since-HEAD chunks, with a SHA-256 over its body) replaced
 // atomically on every change, plus an append-only delta log with one JSON
 // record per closed HEAD period. Every method is durable on return.
@@ -17,7 +18,7 @@ import (
 	"sync"
 )
 
-type FileChunkBitmapStore struct {
+type legacyC11FileStore struct {
 	path string
 
 	mu     sync.Mutex
@@ -27,10 +28,10 @@ type FileChunkBitmapStore struct {
 	dirty  []uint64
 }
 
-// NewFileChunkBitmapStore returns a store at path (the delta log is
+// newLegacyC11FileStore returns a store at path (the delta log is
 // path + ".deltas").
-func NewFileChunkBitmapStore(path string) *FileChunkBitmapStore {
-	return &FileChunkBitmapStore{path: path}
+func newLegacyC11FileStore(path string) *legacyC11FileStore {
+	return &legacyC11FileStore{path: path}
 }
 
 type chunkBitmapFile struct {
@@ -44,7 +45,7 @@ type chunkBitmapEnvelope struct {
 	SHA256 string          `json:"sha256"`
 }
 
-func (b *FileChunkBitmapStore) loadLocked() error {
+func (b *legacyC11FileStore) loadLocked() error {
 	if b.loaded {
 		return nil
 	}
@@ -72,7 +73,7 @@ func (b *FileChunkBitmapStore) loadLocked() error {
 	return nil
 }
 
-func (b *FileChunkBitmapStore) writeLocked(hdr chunkBitmapHeader, dirty []uint64) error {
+func (b *legacyC11FileStore) writeLocked(hdr chunkBitmapHeader, dirty []uint64) error {
 	body, err := json.Marshal(chunkBitmapFile{Version: 1, Header: hdr, Dirty: dirty})
 	if err != nil {
 		return err
@@ -93,7 +94,7 @@ func (b *FileChunkBitmapStore) writeLocked(hdr chunkBitmapHeader, dirty []uint64
 	return nil
 }
 
-func (b *FileChunkBitmapStore) Load() (chunkBitmapHeader, []uint64, bool, error) {
+func (b *legacyC11FileStore) Load() (chunkBitmapHeader, []uint64, bool, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if err := b.loadLocked(); err != nil {
@@ -105,7 +106,7 @@ func (b *FileChunkBitmapStore) Load() (chunkBitmapHeader, []uint64, bool, error)
 	return b.hdr, append([]uint64(nil), b.dirty...), true, nil
 }
 
-func (b *FileChunkBitmapStore) Save(dirty []uint64) error {
+func (b *legacyC11FileStore) Save(dirty []uint64) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if err := b.loadLocked(); err != nil {
@@ -114,7 +115,7 @@ func (b *FileChunkBitmapStore) Save(dirty []uint64) error {
 	return b.writeLocked(b.hdr, dirty)
 }
 
-func (b *FileChunkBitmapStore) WriteHeader(hdr chunkBitmapHeader) error {
+func (b *legacyC11FileStore) WriteHeader(hdr chunkBitmapHeader) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if err := b.loadLocked(); err != nil {
@@ -123,7 +124,7 @@ func (b *FileChunkBitmapStore) WriteHeader(hdr chunkBitmapHeader) error {
 	return b.writeLocked(hdr, b.dirty)
 }
 
-func (b *FileChunkBitmapStore) Reset(hdr chunkBitmapHeader, stillDirty []uint64, delta chunkDelta) error {
+func (b *legacyC11FileStore) Reset(hdr chunkBitmapHeader, stillDirty []uint64, delta chunkDelta) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if err := b.loadLocked(); err != nil {
@@ -152,7 +153,7 @@ func (b *FileChunkBitmapStore) Reset(hdr chunkBitmapHeader, stillDirty []uint64,
 }
 
 // Deltas returns the archived delta records, oldest first.
-func (b *FileChunkBitmapStore) Deltas() ([]chunkDelta, error) {
+func (b *legacyC11FileStore) Deltas() ([]chunkDelta, error) {
 	raw, err := os.ReadFile(b.path + ".deltas")
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -174,4 +175,4 @@ func (b *FileChunkBitmapStore) Deltas() ([]chunkDelta, error) {
 	return out, nil
 }
 
-var _ chunkBitmapStore = (*FileChunkBitmapStore)(nil)
+var _ chunkBitmapStore = (*legacyC11FileStore)(nil)

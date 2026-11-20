@@ -401,9 +401,52 @@ func TestWALStoreChunk_ConcurrentRecoverAttachesOnce(t *testing.T) {
 	}
 }
 
-// The caller's recovery deadline governs the attach's first remote call,
-// with no Close and no hold release.
+// A caller deadline can expire during local recovery, before the first
+// remote call, or while that call is held. Both must return the deadline
+// error without Close or releasing the remote hold.
 func TestWALStoreChunk_RecoverHonoursCallerDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		timeout time.Duration
+	}{
+		{"during_recovery_or_attach", 300 * time.Millisecond},
+		{"before_recovery", -time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newGated(storage.NewMemChunkRemote())
+			g.holdGetHead = make(chan struct{})
+			g.honourCtx = true
+			t.Cleanup(g.release)
+			p := chunkProvider(t, t.TempDir(), g, v1View(), 0)
+			if _, err := p.EnsureStorage("v1"); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), tc.timeout)
+			defer cancel()
+			recErr := make(chan error, 1)
+			go func() { _, err := p.RecoverVolume(ctx, "v1"); recErr <- err }()
+			var err error
+			select {
+			case what := <-g.entered:
+				if what != "gethead" {
+					t.Fatalf("held call %q, want gethead", what)
+				}
+				err = recvErr(t, recErr, "RecoverVolume past its caller deadline")
+			case err = <-recErr:
+				// Local recovery may consume the deadline before attach starts.
+			case <-time.After(10 * time.Second):
+				t.Fatal("RecoverVolume neither returned nor reached the held remote")
+			}
+			if !errors.Is(err, context.DeadlineExceeded) || ctx.Err() != context.DeadlineExceeded {
+				t.Fatalf("RecoverVolume=%v caller=%v, want deadline exceeded", err, ctx.Err())
+			}
+		})
+	}
+}
+
+// This handshake separately guarantees that the caller's cancellation is
+// tested with a remote call already in flight, independent of local I/O speed.
+func TestWALStoreChunk_RecoverHonoursCallerCancellationAfterRemoteEntry(t *testing.T) {
 	g := newGated(storage.NewMemChunkRemote())
 	g.holdGetHead = make(chan struct{})
 	g.honourCtx = true
@@ -412,13 +455,14 @@ func TestWALStoreChunk_RecoverHonoursCallerDeadline(t *testing.T) {
 	if _, err := p.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	recErr := make(chan error, 1)
 	go func() { _, err := p.RecoverVolume(ctx, "v1"); recErr <- err }()
 	waitEntered(t, g, "gethead")
-	if err := recvErr(t, recErr, "RecoverVolume past its caller deadline"); err == nil {
-		t.Fatal("RecoverVolume succeeded although its deadline expired during attach")
+	cancel()
+	if err := recvErr(t, recErr, "RecoverVolume after caller cancellation"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("RecoverVolume=%v, want caller cancellation", err)
 	}
 }
 
@@ -542,24 +586,65 @@ func TestWALStoreChunk_CloseSettlesDeferredAttach(t *testing.T) {
 // recovery refuses as a WAL integrity fault. It returns a restore func.
 func corruptWALWrite(t *testing.T, path string, fill byte) func() {
 	t.Helper()
-	raw, err := os.ReadFile(path)
+	// Read the known fixture geometry without touching the owner's locked
+	// byte zero, and search only the WAL (the extent may contain a copy).
+	source, err := os.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload := bytes.Repeat([]byte{fill}, 4096)
-	at := bytes.Index(raw, payload)
-	if at < 30 || bytes.Index(raw[at+1:], payload) >= 0 {
-		t.Fatalf("WAL record for fill %#x not found exactly once", fill)
+	defer source.Close()
+	var geometry [16]byte
+	if _, err := source.ReadAt(geometry[:], 48); err != nil {
+		t.Fatal(err)
 	}
-	const hdr = 30 // LSN 8, Reserved 8, Type 1, Flags 1, LBA 8, Length 4
-	start := at - hdr
-	rec := append([]byte(nil), raw[start:at+4096+8]...)
+	walStart := binary.LittleEndian.Uint64(geometry[:8])
+	walSize := binary.LittleEndian.Uint64(geometry[8:])
+	if walStart != 8192 || walSize > 64*1024*1024 || walSize < 4096+70 {
+		t.Fatalf("unexpected v3 fixture geometry %d/%d", walStart, walSize)
+	}
+	wal := make([]byte, int(walSize))
+	if _, err := source.ReadAt(wal, int64(walStart)); err != nil {
+		t.Fatal(err)
+	}
+	payload := bytes.Repeat([]byte{fill}, 4096)
+	// Search every overlapping payload occurrence, accepting only a complete,
+	// CRC-valid single-write record. A nonce/trailer byte may equal fill, so
+	// the first bytes.Index match is not necessarily the payload boundary.
+	const hdr, recordSize = 62, 62 + 4096 + 8
+	table := crc32.MakeTable(crc32.Castagnoli)
+	at, matches := -1, 0
+	for search := 0; search <= len(wal)-len(payload); {
+		relative := bytes.Index(wal[search:], payload)
+		if relative < 0 {
+			break
+		}
+		candidate := search + relative
+		search = candidate + 1
+		if candidate < hdr || candidate+4096+8 > len(wal) {
+			continue
+		}
+		record := wal[candidate-hdr : candidate+4096+8]
+		if record[16] != 0x01 || record[17] != 0 ||
+			binary.LittleEndian.Uint64(record[8:16]) != 0 ||
+			binary.LittleEndian.Uint32(record[26:30]) != 4096 ||
+			binary.LittleEndian.Uint64(record[38:46])%walSize != uint64(candidate-hdr) ||
+			binary.LittleEndian.Uint32(record[hdr+4096:]) != crc32.Checksum(record[:hdr+4096], table) ||
+			binary.LittleEndian.Uint32(record[hdr+4096+4:]) != recordSize {
+			continue
+		}
+		at, matches = candidate, matches+1
+	}
+	if matches != 1 {
+		t.Fatalf("CRC-valid WAL write payload %#x matched %d records; want exactly one", fill, matches)
+	}
+	start := int64(walStart) + int64(at-hdr)
+	rec := append([]byte(nil), wal[at-hdr:at+4096+8]...)
 	orig := append([]byte(nil), rec...)
 	if rec[16] != 0x01 || binary.LittleEndian.Uint64(rec[8:]) != 0 {
 		t.Fatalf("unexpected WAL record header % x", rec[:hdr])
 	}
-	rec[16] = 0x04 // write batch, Reserved stays 0: invalid
-	binary.LittleEndian.PutUint32(rec[hdr+4096:], crc32.ChecksumIEEE(rec[:hdr+4096]))
+	rec[16] = 0x04 // invalid native batch: BatchCount remains zero
+	binary.LittleEndian.PutUint32(rec[hdr+4096:], crc32.Checksum(rec[:hdr+4096], crc32.MakeTable(crc32.Castagnoli)))
 	f, err := os.OpenFile(path, os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -577,6 +662,47 @@ func corruptWALWrite(t *testing.T, path string, fill byte) func() {
 		if _, err := f.WriteAt(orig, int64(start)); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// The nonce ends immediately before the payload. A matching last nonce byte
+// must not shift the corruption target one byte into the header.
+func TestCorruptWALWrite_NoncePayloadOverlap(t *testing.T) {
+	const prefix, payloadSize, walStart, walSize = 62, 4096, 8192, 16384
+	path := filepath.Join(t.TempDir(), "overlap.bin")
+	image := make([]byte, walStart+walSize)
+	binary.LittleEndian.PutUint64(image[48:56], walStart)
+	binary.LittleEndian.PutUint64(image[56:64], walSize)
+	rec := image[walStart : walStart+prefix+payloadSize+8]
+	binary.LittleEndian.PutUint64(rec[:8], 1)
+	rec[16] = 0x01
+	binary.LittleEndian.PutUint64(rec[18:26], 5)
+	binary.LittleEndian.PutUint32(rec[26:30], payloadSize)
+	rec[61] = 0xa7 // legal nonce: old bytes.Index reports 61, not payload offset 62
+	copy(rec[prefix:], bytes.Repeat([]byte{0xa7}, payloadSize))
+	binary.LittleEndian.PutUint32(rec[prefix+payloadSize:], crc32.Checksum(rec[:prefix+payloadSize], crc32.MakeTable(crc32.Castagnoli)))
+	binary.LittleEndian.PutUint32(rec[prefix+payloadSize+4:], uint32(len(rec)))
+	if err := os.WriteFile(path, image, 0600); err != nil {
+		t.Fatal(err)
+	}
+	restore := corruptWALWrite(t, path, 0xa7)
+	changed, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := append([]byte(nil), image...)
+	want[walStart+16] = 0x04
+	binary.LittleEndian.PutUint32(want[walStart+prefix+payloadSize:], crc32.Checksum(want[walStart:walStart+prefix+payloadSize], crc32.MakeTable(crc32.Castagnoli)))
+	if !bytes.Equal(changed, want) {
+		t.Fatal("corruption changed bytes outside the intended type/CRC")
+	}
+	restore()
+	repaired, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(repaired, image) {
+		t.Fatal("restore did not recover the exact original image")
 	}
 }
 
@@ -607,6 +733,15 @@ func TestWALStoreChunk_StaleWaiterCannotOverrideFailedRecovery(t *testing.T) {
 		t.Fatalf("recovery A: %v", err)
 	}
 	if _, err := s.Write(5, block(0xA7)); err != nil {
+		t.Fatal(err)
+	}
+	// This oracle requires corruption below a persisted W. Default mode C
+	// intentionally permits losing its newest uncheckpointed batch instead.
+	ws, ok := s.(*storage.WALStore)
+	if !ok {
+		t.Fatalf("unexpected native store %T", s)
+	}
+	if err := ws.SetWMode(storage.WModeStrict); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Sync(); err != nil {
@@ -681,6 +816,15 @@ func TestWALStoreChunk_FailedRecoveryRetiresAuthorityWait(t *testing.T) {
 		t.Fatalf("after recovery without authority: %v; want the volume awaiting authority", err)
 	}
 	if _, err := s.Write(5, block(0xA7)); err != nil {
+		t.Fatal(err)
+	}
+	// This oracle requires corruption below a persisted W. Default mode C
+	// intentionally permits losing its newest uncheckpointed batch instead.
+	ws, ok := s.(*storage.WALStore)
+	if !ok {
+		t.Fatalf("unexpected native store %T", s)
+	}
+	if err := ws.SetWMode(storage.WModeStrict); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Sync(); err != nil {
@@ -774,6 +918,15 @@ func TestWALStoreChunk_StaleWaiterPastTickCheckCannotAttach(t *testing.T) {
 	if _, err := s.Write(5, block(0xA7)); err != nil {
 		t.Fatal(err)
 	}
+	// This oracle requires corruption below a persisted W. Default mode C
+	// intentionally permits losing its newest uncheckpointed batch instead.
+	ws, ok := s.(*storage.WALStore)
+	if !ok {
+		t.Fatalf("unexpected native store %T", s)
+	}
+	if err := ws.SetWMode(storage.WModeStrict); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.Sync(); err != nil {
 		t.Fatal(err)
 	}
@@ -781,6 +934,7 @@ func TestWALStoreChunk_StaleWaiterPastTickCheckCannotAttach(t *testing.T) {
 
 	// Park A's wait inside its projection read, after its tick check.
 	view.arm()
+	t.Cleanup(func() { close(view.release) })
 	select {
 	case <-view.parked:
 	case <-time.After(10 * time.Second):

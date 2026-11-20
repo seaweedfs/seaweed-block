@@ -12,6 +12,8 @@ The design is split into three documents: this shared core and one document per 
 
 Code references name a file and a function, not a line number, so they stay valid as the code changes. Test references name the test function and its file. "Model-checked" means the protocol was specified in TLA+ and checked exhaustively with TLC at small scale. The specifications are in [`docs/spec/`](../spec/README.md); Go regression tests are the in-repo evidence for every counterexample found that way.
 
+The state machines and the invariant ledger of all three documents, with the rules for changing them, are collected in [Invariants and state machines](invariants.md).
+
 ## Contents
 
 - [Part 1. Core block service](#part-1-core-block-service)
@@ -92,6 +94,22 @@ stateDiagram-v2
 **Lessons.** #86: NVMe/TCP advertised a volatile cache but ignored the FUA bit, so FUA writes were acknowledged before `Sync`; fixed in #90, guarded by `TestNVMeWriteFUACompletion`.
 
 ## 1.2 walstore: WAL plus extent
+
+**Production format v3.** Create writes impl3; v2/impl1 and v2/impl2 require explicit offline migration or recreation/HEAD restore. Chunk geometry is fixed at create from the provider configuration. Mode C is the default; mode A is an explicit create option. Both descriptor slots and their owned immutable map dependencies are validated at open, under exclusive file ownership. The creator holds that same fd from O_EXCL through slot publication and store construction.
+
+```mermaid
+flowchart LR
+  A["slot A: 0..4095"] --- B["slot B: 4096..8191"] --- W["WAL: starts 8192"] --- E["block extent"]
+  A -. "root hash / lineage" .-> M["owned COW chunk LSN map sidecar"]
+  B -. "both valid slots pin dependencies" .-> M
+  F["extent fsync + metadata barrier"] --> C["COW map durable"] --> P["single descriptor publisher"] --> R["reuse only above both-slot floor"]
+```
+
+The native record is a 62-byte prefix (LSN, batch count, type/flags, LBA/length, DurableLSN, absolute logical start and 128-bit WAL nonce) plus payload and an 8-byte CRC32C/size trailer: 70 bytes overhead. Appends are physically LSN-strict within an incarnation. Reads validate the entire containing record before returning a block. Recovery uses the physical trusted prefix and the mode/BASE watermark rules, then fences dropped byte ranges before reuse. Same-open Recover invalidates map proofs at both entry and exit. All runtime descriptor mutations converge through `descriptorPublisherV3.publishLockedCoreV3`; initial creation and the explicitly offline migration tool are the pre-serving exceptions.
+
+The flusher prepares map coverage within its original recovery lifetime, syncs extent and metadata, and publishes checkpoint/map/W/tail together; fallback rollover releases no bytes until both slots permit it. Installed/installing BASE uses install handles; logical Sync while installing is refused, while receiver-only SyncInstallLog follows strict durability. Mode C physically syncs each covering batch but can persist the previous acknowledged W; A persists the current covering W before acknowledgment. The final mode-C window and corruption oracles are specified by the canonical format contract; this summary does not weaken its gates.
+
+The [exact temporary legacy test inventory](format-v3-legacy-test-inventory.md) pairs old-format controls with native replacements. The following original diagrams and scan explanation describe the **legacy v2 fixture/offline-input format**, retained until row 14a; they are not the active production byte layout or recovery algorithm.
 
 **Layout.** One preallocated file with a 4 KB superblock, a circular WAL, and a block-indexed extent (`core/storage/walstore.go`, type comment of `WALStore`).
 - The superblock holds geometry, `WALHead` and `WALTail` (monotonic logical byte cursors), `WALCheckpointLSN` (the highest LSN durably in the extent) and the engine kind; opening a file of the wrong kind is refused (`core/storage/superblock.go`).
@@ -377,9 +395,7 @@ These are tracked for fixes. Most were raised by an independent review of this r
 
 - **NVMe/TCP H2CData offset overflow.** The `DATAO + length` bound check is done in 32-bit arithmetic and can wrap, so one malformed PDU can panic the process (`core/frontend/nvme/session.go` `recvH2CData`). Reachable from loopback by default. **Planned fix:** 64-bit arithmetic, offset and R2T consistency checks, and bounds on wire-supplied allocations.
 - **Process notes in source comments.** #162 removed reviewer names and decision timestamps from code comments. A few comments still cite internal review labels (for example "ruling F1") where a neutral design rationale would be clearer.
-- **fsync latency (about 7 ms against 3 ms local).** Leads to measure with the `/status/durable` histograms:
-  - the group committer waits a full 1 ms unless 64 waiters are queued, so at queue depth 1 every `fsync` pays at least 1 ms;
-  - the checkpoint superblock `fsync` runs under the exclusive store lock, stalling reads and writes each flush cycle.
+- **fsync latency.** #173 removed the idle group-commit wait: a lone `Sync` no longer waits out the collection delay, and guest `fsync` fell from about 5.5 ms to a median of 3.23 ms against 2.74 ms local (ublk; see [workspace measurements](../workspace-measurements.md)). Remaining lead: the checkpoint superblock `fsync` runs under the exclusive store lock, stalling reads and writes each flush cycle.
 - **smartwal crash window.** A crash between the in-place write and the ring append can leave the volume unopenable (§1.3). smartwal is experimental and not a default: standalone `blockvolume` creates new volumes as walstore (auto), and Kubernetes and workspaces use walstore. **Planned:** fix the ordering.
 - **Forged records in user data.** WAL records are not bound to a store incarnation or lap, so bytes inside user data that happen to decode as a valid record could be replayed by the defensive scan. **Planned:** an incarnation nonce and lap in the next format, plus a clean-shutdown marker in the meantime.
 - **Mid-history WAL corruption only warns** (§1.2 step 2). Fixing it needs the synced watermark in the next format.

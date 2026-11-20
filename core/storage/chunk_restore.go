@@ -57,11 +57,31 @@ func ClaimChunkHead(ctx context.Context, remote ChunkRemote, cfg ChunkLayerConfi
 	// A new holder's takeover starts serving the same image as active. The
 	// previous holder's final-cut proof belongs only to its detached HEAD.
 	next.State, next.DetachedBy = chunkHeadActive, nil
+	var intents []string
+	settled := true // no root RPC sent yet
+	defer func() {
+		if settled {
+			for _, id := range intents {
+				_ = remote.DeleteIntent(ctx, id)
+			}
+		}
+	}()
+	if builder, ok := remote.(ChunkManifestBuilder); ok && next.Segments == nil && len(next.Chunks) != 0 {
+		if cfg.RestoreChunkBytes == 0 {
+			return ChunkHead{}, errors.New("storage: legacy HEAD claim needs validated chunk geometry")
+		}
+		next, intents, err = builder.PrepareManifest(ctx, head, next, cfg.RestoreChunkBytes)
+		if err != nil {
+			return ChunkHead{}, err
+		}
+	}
 	if err := allowed(); err != nil {
 		return ChunkHead{}, err
 	}
+	settled = false // an ambiguous CAS keeps its segment intents
 	gen, casErr := remote.CASHead(ctx, ChunkHeadVersion{Gen: head.Gen, Epoch: head.Epoch}, next)
 	if casErr == nil {
+		settled = true
 		next.Gen = gen
 		return next, allowed()
 	}
@@ -71,6 +91,7 @@ func ClaimChunkHead(ctx context.Context, remote ChunkRemote, cfg ChunkLayerConfi
 	if readErr != nil {
 		return ChunkHead{}, fmt.Errorf("storage: HEAD claim unresolved: %w", errors.Join(casErr, readErr))
 	}
+	settled = errors.Is(casErr, ErrChunkHeadPrecondition) || current.Gen > head.Gen
 	if current.Gen > head.Gen && sameProposal(current, next) {
 		return current, allowed()
 	}

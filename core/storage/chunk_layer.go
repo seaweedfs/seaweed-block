@@ -4,7 +4,7 @@ package storage
 //
 // Lock order (never reversed):
 //
-//	capMu -> WALStore.captureMu -> WALStore.lifecycleMu -> WALStore.mu
+//	installMu (BASE transitions only) -> capMu -> WALStore.captureMu -> WALStore.lifecycleMu -> WALStore.mu
 //	extentMu[i] -> stMu
 //	WALStore.mu -> bmMu -> stMu (BeforeCheckpointAdvance runs under mu)
 //
@@ -33,6 +33,9 @@ import (
 
 // chunkHooks is what the WALStore holds for an attached layer.
 type chunkHooks struct {
+	beforeMutation    func(first, count uint64)
+	beforeDestructive func() func()
+
 	sink   chunkSink
 	closer func() error
 	// mutated runs after every dirty-map insert (a write, a batch write,
@@ -41,6 +44,8 @@ type chunkHooks struct {
 	// recovered runs when Recover republished the dirty map (any chunk
 	// may have changed), before reads resume.
 	recovered func()
+	// Acquired only under installMu exclusive, before every lower store lock.
+	baseTransitionV3 func() (release func(), err error)
 }
 
 const defaultReadMissTimeout = 30 * time.Second
@@ -59,11 +64,20 @@ type chunkLayerImpl struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup // captures and fills in flight
 
+	cowMu          sync.Mutex // window admission only; never held during reads or joins
+	cow            *cutCOWWindow
+	cowActive      atomic.Pointer[cutCOWWindow]
+	cowTransitions int
+	cowClosed      bool
+
 	capMu  sync.Mutex // serializes Capture, Evict, Begin/EndBaseInstall
 	bmMu   sync.Mutex // serializes bitmap store calls
 	presMu sync.Mutex // serializes a whole presence save: snapshot, fsync, replace, version
 
-	closeDone chan struct{} // closed when Close has finished
+	hydration        map[uint64]*chunkHydrationFlight // under stMu
+	hydrationWake    chan struct{}
+	hydrationStarted bool
+	closeDone        chan struct{} // closed when Close has finished
 
 	stMu     sync.Mutex
 	closed   bool
@@ -112,12 +126,18 @@ type chunkLayerImpl struct {
 	keySeq   uint64
 
 	// Test-only scheduling hooks; nil in production.
-	testPresenceSnapshotHook func()                 // after a presence snapshot, before it is written
-	testAfterAdmitHook       func()                 // right after a capture is admitted
-	testAfterStageHook       func(round int)        // after each pre-copy staging round
-	testAfterStageReadHook   func(idx uint64)       // after a staging read, before its result is kept
-	testAfterBarrierSyncHook func(h uint64)         // under the capture barrier, right after Sync fixed H
-	syncDirFn                func(dir string) error // directory fsync after a rename; syncDir in production
+	testHydrationWait            func(uint64) // after promise registration, outside locks
+	testCOWWait                  func()
+	testCOWRead                  func(idx uint64, saved bool)
+	testCOWSave                  func() error
+	testPresenceSnapshotHook     func()                 // after a presence snapshot, before it is written
+	testBaseTransitionBeforeLock func()                 // test handshake before capMu drain
+	testAfterAdmitHook           func()                 // right after a capture is admitted
+	testAfterStageHook           func(round int)        // after each pre-copy staging round
+	testAfterStageReadHook       func(idx uint64)       // after a staging read, before its result is kept
+	testAfterBarrierSyncHook     func(h uint64)         // under the capture barrier, right after Sync fixed H
+	testBeforeBarrierLockHook    func()                 // right before the capture barrier's Lock request
+	syncDirFn                    func(dir string) error // directory fsync after a rename; syncDir in production
 
 	// Absence: chunks whose local bytes are not authoritative (fresh host,
 	// evicted), and blocks written locally inside such chunks since.
@@ -131,8 +151,30 @@ type chunkLayerImpl struct {
 }
 
 func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig) (chunkLayer, error) {
-	if remote == nil || cfg.Bitmap == nil || cfg.ChunkBlocks == 0 {
-		return nil, errors.New("storage: chunk layer needs a remote, a bitmap store and ChunkBlocks > 0")
+	mapped := s.v3 != nil && s.v3.mapProof != nil
+	if remote == nil || cfg.ChunkBlocks == 0 || (!mapped && cfg.Bitmap == nil) {
+		return nil, errors.New("storage: chunk layer needs a remote, ChunkBlocks > 0 and a legacy bitmap unless the store owns an impl3 map")
+	}
+	var localBase bool
+	s.captureMu.Lock()
+	defer s.captureMu.Unlock()
+	if s.attachClosed {
+		return nil, errChunkLayerClosed
+	}
+	if mapped {
+		// Serialize hook publication with begin/complete. Their outer hook
+		// snapshot is rechecked after taking this same barrier.
+		d := s.v3.pub.current()
+		if d.BaseState == BaseInstalling {
+			return nil, ErrBaseIncomplete
+		}
+		localBase = d.BaseState == BaseInstalled
+		if localBase {
+			cfg.FreshFromHead = false
+		}
+	}
+	if s.v3 != nil && s.v3.ownedMap != nil && uint64(cfg.ChunkBlocks) != s.v3.ownedMap.chunkBlocks {
+		return nil, fmt.Errorf("%w: chunk layer geometry differs from owned map", ErrMapInvalid)
 	}
 	if cfg.UploadConcurrency < 0 || cfg.UploadConcurrency > 64 {
 		return nil, errors.New("storage: upload concurrency must be between 1 and 64 (0 defaults to 8)")
@@ -140,8 +182,23 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 	if cfg.UploadConcurrency == 0 {
 		cfg.UploadConcurrency = 8
 	}
+	if cfg.HydrationWorkers < 0 || cfg.HydrationWorkers > 64 || cfg.HydrationQueueDepth < 0 || cfg.HydrationQueueDepth > 65536 {
+		return nil, errors.New("storage: hydration workers must be 1..64 and queue depth 1..65536 (0 uses defaults)")
+	}
+	if cfg.HydrationWorkers == 0 {
+		cfg.HydrationWorkers = defaultHydrationWorkers
+	}
+	if cfg.HydrationQueueDepth == 0 {
+		cfg.HydrationQueueDepth = defaultHydrationQueueDepth
+	}
 	if cfg.ReadMissTimeout <= 0 {
 		cfg.ReadMissTimeout = defaultReadMissTimeout
+	}
+	if cfg.COWSpillLimit < 0 {
+		return nil, errors.New("storage: COW spill limit must not be negative (0 defaults to 1 GiB)")
+	}
+	if cfg.COWSpillLimit == 0 {
+		cfg.COWSpillLimit = defaultCOWSpillLimit
 	}
 	nb := uint64(s.NumBlocks())
 	l := &chunkLayerImpl{
@@ -183,40 +240,53 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 	// never used as this holder's publication guard.
 	l.fenced = l.supersededBy(head)
 
-	hdr, saved, ok, err := cfg.Bitmap.Load()
-	if err != nil {
-		l.cancel()
-		return nil, fmt.Errorf("storage: chunk layer attach: load bitmap: %w", err)
-	}
-	switch {
-	case ok && hdr.Base == chunkBaseInstalling:
-		l.hdr = hdr // an interrupted BASE install: cuts stay refused
-	case ok && hdr.Base == chunkBaseInstalledAwaitingCut:
-		l.hdr, l.hashMode = hdr, true
-	case ok && hdr.BaseLSN == head.RemoteLSN && hdr.HeadGen == head.Gen && hdr.Epoch == head.Epoch:
-		l.hdr = hdr
-		for _, idx := range saved {
-			l.dirty[idx] = true
+	if mapped {
+		// Dirt is derived from the owned LSN map against the actual remote HEAD;
+		// no local HEAD-period bitmap header is loaded or created for impl3.
+		l.hdr = chunkBitmapHeader{BaseLSN: head.RemoteLSN, HeadGen: head.Gen, Epoch: head.Epoch}
+	} else {
+		hdr, saved, ok, err := cfg.Bitmap.Load()
+		if err != nil {
+			l.cancel()
+			return nil, fmt.Errorf("storage: chunk layer attach: load bitmap: %w", err)
 		}
-	case !ok && cfg.FreshFromHead:
-		// A fresh local volume has taken no write yet (I/O waits for its
-		// first attach): its image is HEAD's, so nothing is dirty. Start with
-		// an empty bitmap bound to HEAD instead of hash mode, which stays for
-		// an existing volume whose bitmap is lost (integration ruling F1).
-		fresh := chunkBitmapHeader{BaseLSN: head.RemoteLSN, HeadGen: head.Gen, Epoch: head.Epoch, Base: chunkBaseNone}
-		if err := cfg.Bitmap.WriteHeader(fresh); err != nil {
-			l.hashMode = true // safe: compare every chunk on the first cut
-		} else {
-			l.hdr = fresh
-		}
-	default:
-		if ok {
+		switch {
+		case ok && hdr.Base == chunkBaseInstalling:
+			l.hdr = hdr // an interrupted BASE install: cuts stay refused
+		case ok && hdr.Base == chunkBaseInstalledAwaitingCut:
+			l.hdr, l.hashMode = hdr, true
+		case ok && hdr.BaseLSN == head.RemoteLSN && hdr.HeadGen == head.Gen && hdr.Epoch == head.Epoch:
 			l.hdr = hdr
+			for _, idx := range saved {
+				l.dirty[idx] = true
+			}
+		case !ok && cfg.FreshFromHead:
+			// A fresh local volume has taken no write yet (I/O waits for its
+			// first attach): its image is HEAD's, so nothing is dirty. Start with
+			// an empty bitmap bound to HEAD instead of hash mode, which stays for
+			// an existing volume whose bitmap is lost (integration ruling F1).
+			fresh := chunkBitmapHeader{BaseLSN: head.RemoteLSN, HeadGen: head.Gen, Epoch: head.Epoch, Base: chunkBaseNone}
+			if err := cfg.Bitmap.WriteHeader(fresh); err != nil {
+				l.hashMode = true // safe: compare every chunk on the first cut
+			} else {
+				l.hdr = fresh
+			}
+		default:
+			if ok {
+				l.hdr = hdr
+			}
+			l.hashMode = true
 		}
-		l.hashMode = true
+
 	}
 
-	if cfg.FreshFromHead {
+	if localBase {
+		// The completed BASE image is local authority, including ZERO blocks.
+		// Never revive old HEAD absence after a crash before its first cut.
+		l.hdr.Base = chunkBaseInstalledAwaitingCut
+		l.allDirty = true
+		l.presenceVer++
+	} else if cfg.FreshFromHead {
 		// An existing HEAD defines the fresh host's lazy image. With no HEAD,
 		// local writes may already have checkpointed out of the WAL dirty map:
 		// preserve ALL chunks as candidates for the first hash-comparing cut.
@@ -224,16 +294,18 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 		l.hdr = chunkBitmapHeader{BaseLSN: head.RemoteLSN, HeadGen: head.Gen, Epoch: cfg.Epoch}
 		var initialDirty []uint64
 		l.dirty = map[uint64]bool{}
-		l.hashMode = head.Gen == 0 && s.NextLSN() > 1
+		l.hashMode = !mapped && head.Gen == 0 && s.NextLSN() > 1
 		if l.hashMode {
 			for idx := uint64(0); idx < l.numChunks; idx++ {
 				l.dirty[idx] = true
 				initialDirty = append(initialDirty, idx)
 			}
 		}
-		if err := cfg.Bitmap.Reset(l.hdr, initialDirty, chunkDelta{}); err != nil {
-			l.cancel()
-			return nil, fmt.Errorf("storage: fresh bitmap reset: %w", err)
+		if !mapped {
+			if err := cfg.Bitmap.Reset(l.hdr, initialDirty, chunkDelta{}); err != nil {
+				l.cancel()
+				return nil, fmt.Errorf("storage: fresh bitmap reset: %w", err)
+			}
 		}
 		for idx := range head.Chunks {
 			l.absent[idx] = true
@@ -245,6 +317,11 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 		return nil, err
 	}
 	hooks := &chunkHooks{sink: l, closer: l.Close, mutated: l.noteMutation, recovered: l.noteAllMutated}
+	if mapped {
+		hooks.baseTransitionV3 = l.holdBaseTransitionV3
+		hooks.beforeMutation = l.beforeCOWMutation
+		hooks.beforeDestructive = l.holdCOWDestructive
+	}
 	if !s.chunk.CompareAndSwap(nil, hooks) {
 		l.cancel()
 		return nil, errors.New("storage: a chunk layer is already attached")
@@ -336,11 +413,42 @@ func (l *chunkLayerImpl) noteAllMutated() {
 	}
 }
 
-// walChunks returns the chunks with entries in the WAL dirty map.
-func (l *chunkLayerImpl) walChunks() map[uint64]bool {
+// captureCandidates includes current WAL entries and impl3 owned-map dirt.
+// UNKNOWN never certifies clean; a max LSN beyond HEAD must be captured even
+// after the WAL entry has checkpointed and the legacy bitmap says clean.
+func (l *chunkLayerImpl) captureCandidates() map[uint64]bool {
 	out := map[uint64]bool{}
+	mapped := l.usesOwnedMapV3()
+	var base uint64
+	if mapped {
+		l.stMu.Lock()
+		base = l.remoteLSN
+		l.stMu.Unlock()
+	}
 	for _, e := range l.s.dm.snapshot() {
-		out[l.chunkOf(e.LBA)] = true
+		// Retention in the local WAL is not dirt since HEAD. Lower-LSN
+		// BASE/direct changes remain conservative through UNKNOWN below.
+		if !mapped || e.LSN > base {
+			out[l.chunkOf(e.LBA)] = true
+		}
+	}
+	if mapped {
+		l.stMu.Lock()
+		absent := map[uint64]bool{}
+		for idx := range l.absent {
+			if !l.chunkHasLocalLocked(idx) {
+				absent[idx] = true
+			}
+		}
+		l.stMu.Unlock()
+		l.s.mu.RLock()
+		for idx, e := range l.s.v3.mapEntries {
+			i := uint64(idx)
+			if !absent[i] && (e.Unknown || e.LSN > base) {
+				out[i] = true
+			}
+		}
+		l.s.mu.RUnlock()
 	}
 	return out
 }
@@ -354,6 +462,16 @@ func (l *chunkLayerImpl) chunkVersion(idx uint64) uint64 {
 // frontier path, under WALStore.mu: it makes the dirty set (and any changed
 // absence state) durable before the checkpoint can pass the entries.
 func (l *chunkLayerImpl) BeforeCheckpointAdvance(lsn uint64) error {
+	if l.usesOwnedMapV3() && l.s.v3.pub.current().BaseState == BaseInstalling {
+		// Serving/capture remain blocked by the installing descriptor. Settle
+		// local BASE authority before the installed descriptor can publish;
+		// a failure leaves the volume installing, never serving a partial image.
+		l.stMu.Lock()
+		l.absent = map[uint64]bool{}
+		l.localBlocks = map[uint64]bool{}
+		l.presenceVer++
+		l.stMu.Unlock()
+	}
 	if err := l.saveDirty(); err != nil {
 		return err
 	}
@@ -363,6 +481,12 @@ func (l *chunkLayerImpl) BeforeCheckpointAdvance(lsn uint64) error {
 // saveDirty persists dirty Ã¢Ë†Âª inflight Ã¢Ë†Âª the chunks of WAL entries still in
 // the dirty map (all chunks when a BASE block landed or the set is unknown).
 func (l *chunkLayerImpl) saveDirty() error {
+	// Impl3's actual checkpoint caller persists its owned map after this
+	// callback. It already tracks WAL mutations independently of this layer;
+	// making a second persistent C11 bitmap would add no coverage authority.
+	if l.usesOwnedMapV3() {
+		return nil
+	}
 	l.bmMu.Lock()
 	defer l.bmMu.Unlock()
 	set := l.dirtySetLocked(nil)
@@ -423,45 +547,7 @@ func sortedKeys(m map[uint64]bool) []uint64 {
 // block that has no newer local version, then lets the store read its
 // extent. It runs with no walstore lock held.
 func (l *chunkLayerImpl) OnReadMiss(lba uint64) ([]byte, error) {
-	idx := l.chunkOf(lba)
-	l.stMu.Lock()
-	if l.closed || !l.absent[idx] || l.localBlocks[lba] {
-		l.stMu.Unlock()
-		return nil, nil
-	}
-	l.wg.Add(1)
-	l.stMu.Unlock()
-	defer l.wg.Done()
-	// One deadline covers every attempt. Each attempt fetches the chunk as
-	// the current HEAD names it; a fill that went stale (eviction generation
-	// or HEAD ref changed meanwhile) installs nothing and the read retries,
-	// so the extent is read only once the block is resolved: the chunk is no
-	// longer absent, or the block has a local version.
-	ctx, cancel := context.WithTimeout(l.ctx, l.cfg.ReadMissTimeout)
-	defer cancel()
-	for {
-		l.stMu.Lock()
-		if !l.absent[idx] || l.localBlocks[lba] {
-			l.stMu.Unlock()
-			return nil, nil
-		}
-		ref, ok := l.head.Chunks[idx]
-		gen := l.absentGen[idx]
-		l.stMu.Unlock()
-		if !ok { // ZERO in the current HEAD
-			return make([]byte, l.blockSize), nil
-		}
-		resolved, err := l.fillOnce(ctx, idx, gen, ref)
-		if err != nil {
-			return nil, err
-		}
-		if resolved {
-			return nil, nil
-		}
-		if err := ctx.Err(); err != nil {
-			return nil, fmt.Errorf("storage: chunk %d fetch: fill kept going stale: %w", idx, err)
-		}
-	}
+	return l.OnReadMissContext(context.Background(), lba)
 }
 
 // fillOnce fetches one chunk version and installs every block that has no
@@ -559,6 +645,9 @@ func (l *chunkLayerImpl) EndBaseInstall(frontier uint64) error {
 }
 
 func (l *chunkLayerImpl) writeBaseState(state chunkBaseState, apply func()) error {
+	if l.usesOwnedMapV3() {
+		return fmt.Errorf("%w: BASE state must be published by the descriptor install protocol", errV3NotYet)
+	}
 	l.bmMu.Lock()
 	defer l.bmMu.Unlock()
 	l.stMu.Lock()
@@ -596,7 +685,15 @@ func (l *chunkLayerImpl) register() (done func(), err error) {
 	return l.wg.Done, nil
 }
 
-func (l *chunkLayerImpl) admit() error {
+func (l *chunkLayerImpl) admit() (err error) {
+	defer func() {
+		if err != nil {
+			l.abortCOW(err)
+		}
+	}()
+	if l.usesOwnedMapV3() && l.s.v3.pub.current().BaseState == BaseInstalling {
+		return fmt.Errorf("%w: %w", errChunkCaptureRefused, errChunkBaseInstalling)
+	}
 	l.stMu.Lock()
 	closed, fenced, base, detached := l.closed, l.fenced, l.hdr.Base, l.detached != nil
 	l.stMu.Unlock()
@@ -607,7 +704,7 @@ func (l *chunkLayerImpl) admit() error {
 		return errChunkLayerFenced
 	case detached:
 		return errChunkLayerDetached
-	case base == chunkBaseInstalling:
+	case base == chunkBaseInstalling && !l.usesOwnedMapV3():
 		return fmt.Errorf("%w: %w", errChunkCaptureRefused, errChunkBaseInstalling)
 	}
 	if gate := l.cfg.CaptureAllowed; gate != nil {
@@ -658,11 +755,12 @@ func (l *chunkLayerImpl) MakeRemoteDurable(ctx context.Context, t uint64) error 
 }
 
 type capturedChunk struct {
-	idx  uint64
-	data []byte
-	sum  [32]byte
-	zero bool
-	key  string // staged: already uploaded under this key (data is nil)
+	idx   uint64
+	data  []byte
+	sum   [32]byte
+	zero  bool
+	key   string // staged: already uploaded under this key (data is nil)
+	birth uint64
 }
 
 // stagedChunk is a chunk pre-copied outside the barrier at chunk version
@@ -720,9 +818,17 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		return chunkCutResult{}, err
 	}
 
-	// Quiesced cut.
+	// Quiesced cut. The guest pause starts at the Lock REQUEST: a pending
+	// writer blocks new readers of captureMu, so a write arriving while the cut
+	// waits for writers already holding it (e.g. parked in WAL admission) is
+	// paused too. LockWaitNs reports that wait on its own.
+	pauseStart := time.Now()
+	if hook := l.testBeforeBarrierLockHook; hook != nil {
+		hook()
+	}
 	l.s.captureMu.Lock()
 	barrier := time.Now()
+	st.LockWaitNs = barrier.Sub(pauseStart).Nanoseconds()
 	h, err := l.s.Sync()
 	st.SyncNs = time.Since(barrier).Nanoseconds()
 	if hook := l.testAfterBarrierSyncHook; hook != nil && err == nil {
@@ -730,12 +836,12 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	}
 	if err != nil {
 		l.s.captureMu.Unlock()
-		st.BarrierPauseNs = time.Since(barrier).Nanoseconds()
+		st.BarrierPauseNs = time.Since(pauseStart).Nanoseconds()
 		l.dropIntents(ctx, intents) // a clean abort: staged keys are released
 		return chunkCutResult{}, fmt.Errorf("storage: capture sync: %w", err)
 	}
 	candidates := map[uint64]bool{}
-	for idx := range l.walChunks() {
+	for idx := range l.captureCandidates() {
 		candidates[idx] = true
 	}
 	l.stMu.Lock()
@@ -757,8 +863,15 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	// it since staging (its version is unchanged) and HEAD is the one it
 	// was compared against.
 	var captured []capturedChunk
+	var capturedVersions map[uint64]uint64
+	if l.usesOwnedMapV3() {
+		capturedVersions = make(map[uint64]uint64, len(candidates))
+	}
 	useStaged := map[uint64]bool{}
 	for idx := range candidates {
+		if capturedVersions != nil {
+			capturedVersions[idx] = l.chunkVersion(idx)
+		}
 		if sc, ok := staged[idx]; ok && sc.ver == l.chunkVersion(idx) && sc.headGen == l.head.Gen {
 			useStaged[idx] = true
 			captured = append(captured, sc.capturedChunk)
@@ -770,25 +883,43 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	l.cutLSN = h
 	baseHead := copyHead(l.head)
 	l.stMu.Unlock()
+	// Candidates, mutation versions and births belong to the same barrier.
+	// Do not sample the owned map after COW writers are admitted again.
+	births := l.captureBirths(candidates, h)
 
 	st.CandidateChunks = len(candidates)
-	st.BarrierCopyChunks = len(candidates) - len(useStaged)
 	var copyErr error
 	copyStart := time.Now()
-	for _, idx := range sortedKeys(candidates) {
-		if useStaged[idx] {
-			continue
+	if l.usesOwnedMapV3() {
+		var w *cutCOWWindow
+		w, copyErr = l.installCOWWindow(candidates, useStaged, baseHead.Chunks)
+		l.s.captureMu.Unlock()
+		st.BarrierPauseNs = time.Since(pauseStart).Nanoseconds()
+		copyStart = time.Now()
+		if copyErr == nil {
+			var copied []capturedChunk
+			copied, copyErr = l.copyCOWWindow(ctx, w)
+			captured = append(captured, copied...)
+			st.COWSavedChunks = int(w.saved.Load())
+			st.COWSaveNs, st.COWWaitNs = w.saveNs.Load(), w.waitNs.Load()
 		}
-		buf, err := l.readChunk(idx)
-		if err != nil {
-			copyErr = err
-			break
+	} else {
+		st.BarrierCopyChunks = len(candidates) - len(useStaged)
+		for _, idx := range sortedKeys(candidates) {
+			if useStaged[idx] {
+				continue
+			}
+			buf, err := l.readChunk(idx)
+			if err != nil {
+				copyErr = err
+				break
+			}
+			captured = append(captured, capturedChunk{idx: idx, data: buf, sum: sha256.Sum256(buf), zero: isAllZero(buf)})
 		}
-		captured = append(captured, capturedChunk{idx: idx, data: buf, sum: sha256.Sum256(buf), zero: isAllZero(buf)})
+		l.s.captureMu.Unlock()
+		st.BarrierPauseNs = time.Since(pauseStart).Nanoseconds()
 	}
 	st.CopyNs = time.Since(copyStart).Nanoseconds()
-	l.s.captureMu.Unlock()
-	st.BarrierPauseNs = time.Since(barrier).Nanoseconds()
 	if copyErr != nil {
 		l.abortCut(all)
 		l.dropIntents(ctx, intents)
@@ -822,6 +953,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	}
 	var uploads []upload
 	for _, c := range captured {
+		c.birth = births[c.idx]
 		ref, had := baseHead.Chunks[c.idx]
 		switch {
 		case c.zero && !had, had && !c.zero && ref.SHA256 == c.sum:
@@ -834,7 +966,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 			continue
 		}
 		if c.key != "" { // staged: uploaded before the barrier
-			next.Chunks[c.idx] = chunkRef{Key: c.key, SHA256: c.sum}
+			next.Chunks[c.idx] = chunkRef{Key: c.key, SHA256: c.sum, Encoding: "full", BirthLSN: c.birth}
 			newKeys[c.idx] = c.key
 			changed = append(changed, c.idx)
 			st.StagedChunksUsed++
@@ -860,14 +992,14 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	}
 	if err := l.uploadBatch(ctx, len(uploads), func(ctx context.Context, i int) error {
 		u := uploads[i]
-		return l.remote.Put(ctx, u.key, u.c.data)
+		return l.putCaptured(ctx, u.key, u.c.data)
 	}); err != nil {
 		l.abortCut(all)
 		l.dropIntents(ctx, intents)
 		return chunkCutResult{}, fmt.Errorf("storage: capture upload: %w: %w", errChunkRemoteUnavailable, err)
 	}
 	for _, u := range uploads {
-		next.Chunks[u.c.idx] = chunkRef{Key: u.key, SHA256: u.c.sum}
+		next.Chunks[u.c.idx] = chunkRef{Key: u.key, SHA256: u.c.sum, Encoding: "full", BirthLSN: u.c.birth}
 		newKeys[u.c.idx] = u.key
 		changed = append(changed, u.c.idx)
 		st.UploadedChunks++
@@ -902,10 +1034,12 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 			l.stMu.Lock()
 			l.fenced, l.head = true, copyHead(cur)
 			l.stMu.Unlock()
+			l.abortCOW(errChunkLayerFenced)
 			return chunkCutResult{}, errChunkLayerFenced
 		}
 		l.finishCut(baseHead, h, nil, nil) // nothing new: no CAS
-		l.dropIntents(ctx, intents)        // superseded staged uploads only
+		l.persistCapturedMapV3(capturedVersions)
+		l.dropIntents(ctx, intents) // superseded staged uploads only
 		return chunkCutResult{H: h, Head: copyHead(baseHead), Noop: true, FullHash: all}, nil
 	}
 	if err := l.admit(); err != nil { // admission re-checked right before the CAS
@@ -919,6 +1053,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		l.stMu.Lock()
 		l.fenced = true
 		l.stMu.Unlock()
+		l.abortCOW(errChunkLayerFenced)
 		return chunkCutResult{}, errChunkLayerFenced
 	}
 	expected := chunkHeadVersion{Gen: baseHead.Gen, Epoch: baseHead.Epoch}
@@ -934,6 +1069,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	if casErr == nil {
 		next.Gen = gen
 		l.finishCut(next, h, changed, newKeys)
+		l.persistCapturedMapV3(capturedVersions)
 		l.dropIntents(ctx, intents)
 		return l.cutDone(chunkCutResult{H: h, Head: copyHead(next), FullHash: all}, detach), nil
 	}
@@ -963,6 +1099,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	if sameProposal(cur, next) {
 		st.CASResult = "resolved-by-reread"
 		l.finishCut(cur, h, changed, newKeys)
+		l.persistCapturedMapV3(capturedVersions)
 		l.dropIntents(ctx, intents)
 		return l.cutDone(chunkCutResult{H: h, Head: copyHead(cur), FullHash: all}, detach), nil
 	}
@@ -974,6 +1111,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		l.fenced = true
 		l.head = copyHead(cur)
 		l.stMu.Unlock()
+		l.abortCOW(errChunkLayerFenced)
 		return chunkCutResult{}, errors.Join(errChunkLayerFenced, casErr)
 	}
 	l.stMu.Lock()
@@ -1003,6 +1141,75 @@ func (l *chunkLayerImpl) Detach(ctx context.Context) (chunkCutResult, error) {
 		}
 	}
 	return r, err
+}
+
+// SettleDetach: see chunkLayer. Only an unresolved DETACH proposal needs a
+// remote decision: if HEAD is still that CAS's base, it is cancelled by a CAS
+// at the same base to the non-detached base image (this holder, this epoch),
+// so whichever lands first decides and the detach can never land after a
+// successful cancel. resolvePending would re-propose the detach instead.
+func (l *chunkLayerImpl) SettleDetach(ctx context.Context) (detachSettlement, chunkCutResult, error) {
+	l.capMu.Lock()
+	defer l.capMu.Unlock()
+	if r, ok := l.storedDetach(); ok {
+		return detachApplied, r, nil
+	}
+	l.stMu.Lock()
+	fenced, pending, isDetach, base, intents := l.fenced, l.pending, l.pendingDetach, l.pendingBase, l.pendingIntents
+	baseHead := copyHead(l.head)
+	l.stMu.Unlock()
+	if fenced {
+		return detachFenced, chunkCutResult{}, nil
+	}
+	if pending == nil || !isDetach {
+		// Nothing of this detach can land: it failed before its CAS or was
+		// definitely refused (an unresolved ordinary cut settles as usual).
+		return detachNotPublished, chunkCutResult{}, nil
+	}
+	cur, err := l.remote.GetHead(ctx)
+	if err != nil {
+		return 0, chunkCutResult{}, fmt.Errorf("storage: detach outcome unresolved: %w: %w", errChunkCASOutcomeUnknown, err)
+	}
+	if !sameProposal(cur, *pending) && !l.supersededBy(cur) && cur.Gen == base.Gen && cur.Epoch == base.Epoch {
+		if err := l.admit(); err != nil {
+			return 0, chunkCutResult{}, fmt.Errorf("storage: detach outcome unresolved (%w); cancel refused: %w", errChunkCASOutcomeUnknown, err)
+		}
+		cancel := copyHead(baseHead)
+		cancel.Epoch, cancel.Holder = l.cfg.Epoch, l.cfg.Holder
+		cancel.State, cancel.DetachedBy = chunkHeadActive, nil
+		gen, casErr := l.remote.CASHead(ctx, base, cancel)
+		if casErr == nil {
+			cancel.Gen = gen
+			cur = cancel
+		} else if cur, err = l.remote.GetHead(ctx); err != nil {
+			return 0, chunkCutResult{}, fmt.Errorf("storage: detach outcome unresolved (cancel: %v): %w: %w", casErr, errChunkCASOutcomeUnknown, err)
+		} else if !sameProposal(cur, *pending) && !l.supersededBy(cur) && cur.Gen == base.Gen && cur.Epoch == base.Epoch {
+			return 0, chunkCutResult{}, fmt.Errorf("storage: detach outcome unresolved (cancel: %v): HEAD unchanged: %w", casErr, errChunkCASOutcomeUnknown)
+		}
+	}
+	// Settled: the detach landed, or it can never land.
+	l.dropIntents(ctx, intents)
+	l.stMu.Lock()
+	defer l.stMu.Unlock()
+	cut := l.pendingCut
+	l.pending, l.pendingIntents = nil, nil
+	l.pendingDetach, l.pendingCut, l.pendingBase = false, chunkCutResult{}, chunkHeadVersion{}
+	switch {
+	case sameProposal(cur, *pending):
+		l.head, l.remoteLSN = copyHead(cur), cur.RemoteLSN
+		cut.Head = copyHead(cur)
+		l.detached = &cut
+		r := cut
+		r.Head = copyHead(cur)
+		return detachApplied, r, nil
+	case l.supersededBy(cur):
+		l.fenced = true
+		l.head = copyHead(cur)
+		return detachFenced, chunkCutResult{}, nil
+	default:
+		l.head = copyHead(cur)
+		return detachNotPublished, chunkCutResult{}, nil
+	}
 }
 
 func (l *chunkLayerImpl) storedDetach() (chunkCutResult, bool) {
@@ -1059,7 +1266,13 @@ func sameProposal(cur, next chunkHead) bool {
 }
 
 // resolvePending re-reads HEAD when an earlier CAS outcome is unresolved.
-func (l *chunkLayerImpl) resolvePending(ctx context.Context) error {
+func (l *chunkLayerImpl) resolvePending(ctx context.Context) (err error) {
+	// Registered before the state unlock, so invalidation runs without stMu.
+	defer func() {
+		if errors.Is(err, errChunkLayerFenced) {
+			l.abortCOW(err)
+		}
+	}()
 	l.stMu.Lock()
 	pending, base, intents := l.pending, l.pendingBase, l.pendingIntents
 	l.stMu.Unlock()
@@ -1163,8 +1376,14 @@ func (l *chunkLayerImpl) recordCut(r chunkCutResult, st chunkCutStats, err error
 
 func (l *chunkLayerImpl) Stats() chunkLayerStats {
 	l.stMu.Lock()
-	defer l.stMu.Unlock()
 	out := l.stats
+	out.Hydration.WorkerLimit = l.cfg.HydrationWorkers
+	out.Hydration.QueueDepth = l.cfg.HydrationQueueDepth
+	for _, f := range l.hydration {
+		if !f.running {
+			out.Hydration.Queued++
+		}
+	}
 	out.CutsRefused = make(map[string]uint64, len(l.stats.CutsRefused))
 	for k, v := range l.stats.CutsRefused {
 		out.CutsRefused[k] = v
@@ -1174,6 +1393,10 @@ func (l *chunkLayerImpl) Stats() chunkLayerStats {
 	out.Reconciling = l.hashMode
 	out.ReconcileTotal = l.reconcileTotal
 	out.ReconcileDone = l.reconcileTotal - len(l.reconcile)
+	l.stMu.Unlock()
+	if l.usesOwnedMapV3() {
+		out.DirtyChunks = len(l.captureCandidates())
+	}
 	return out
 }
 
@@ -1317,11 +1540,13 @@ func (l *chunkLayerImpl) finishReconcile(gen uint64) bool {
 	// The dirty set first, then the header naming HEAD: a crash between
 	// the two leaves the old header, which mismatches HEAD, so the next
 	// attach reconciles again instead of trusting an incomplete bitmap.
-	if err := l.cfg.Bitmap.Save(sortedKeys(still)); err != nil {
-		return false
-	}
-	if err := l.cfg.Bitmap.WriteHeader(hdr); err != nil {
-		return false
+	if !l.usesOwnedMapV3() {
+		if err := l.cfg.Bitmap.Save(sortedKeys(still)); err != nil {
+			return false
+		}
+		if err := l.cfg.Bitmap.WriteHeader(hdr); err != nil {
+			return false
+		}
 	}
 	l.stMu.Lock()
 	defer l.stMu.Unlock()
@@ -1428,7 +1653,7 @@ func (l *chunkLayerImpl) stage(ctx context.Context, st *chunkCutStats) (map[uint
 	staged := map[uint64]stagedChunk{}
 	var intents []string
 	for round := 0; round < chunkStageRounds; round++ {
-		wal := l.walChunks()
+		wal := l.captureCandidates()
 		l.stMu.Lock()
 		need := map[uint64]bool{}
 		consider := func(idx uint64) {
@@ -1493,7 +1718,7 @@ func (l *chunkLayerImpl) stage(ctx context.Context, st *chunkCutStats) (map[uint
 			intents = append(intents, id)
 			if err := l.uploadBatch(ctx, len(uploads), func(ctx context.Context, i int) error {
 				u := uploads[i]
-				return l.remote.Put(ctx, u.key, u.data)
+				return l.putCaptured(ctx, u.key, u.data)
 			}); err != nil {
 				return nil, intents, fmt.Errorf("storage: capture stage upload: %w: %w", errChunkRemoteUnavailable, err)
 			}
@@ -1570,12 +1795,14 @@ func (l *chunkLayerImpl) finishCut(head chunkHead, h uint64, changed []uint64, n
 	delta := chunkDelta{FromLSN: prevBase, ToLSN: h, Gen: head.Gen, Dirty: changed, NewKeys: newKeys}
 	// HEAD is published; a failed Reset only leaves a stale header, which a
 	// restart treats as a mismatch (hash compare): safe.
-	if err := l.cfg.Bitmap.Reset(hdr, sortedKeys(still), delta); err == nil {
-		l.stMu.Lock()
-		if ver > l.savedDirtyVer {
-			l.savedDirtyVer = ver
+	if !l.usesOwnedMapV3() {
+		if err := l.cfg.Bitmap.Reset(hdr, sortedKeys(still), delta); err == nil {
+			l.stMu.Lock()
+			if ver > l.savedDirtyVer {
+				l.savedDirtyVer = ver
+			}
+			l.stMu.Unlock()
 		}
-		l.stMu.Unlock()
 	}
 }
 
@@ -1604,16 +1831,12 @@ func (l *chunkLayerImpl) EvictChunk(idx uint64) error {
 	if idx >= l.numChunks {
 		return fmt.Errorf("%w: chunk %d out of range", errChunkEvictRefused, idx)
 	}
-	walDirty := false
-	for _, e := range l.s.dm.snapshot() {
-		if l.chunkOf(e.LBA) == idx {
-			walDirty = true
-			break
-		}
-	}
+	// The same owned-map/WAL dirt that capture must publish also forbids
+	// eviction: a later fill from the older HEAD must not overwrite it.
+	dirtyCandidate := l.captureCandidates()[idx]
 	l.stMu.Lock()
 	switch {
-	case l.head.Gen == 0, l.hashMode, l.allDirty, l.hdr.Base != chunkBaseNone, l.dirty[idx], l.inflight[idx], walDirty:
+	case l.head.Gen == 0, l.hashMode, l.allDirty, l.hdr.Base != chunkBaseNone, l.dirty[idx], l.inflight[idx], dirtyCandidate:
 		l.stMu.Unlock()
 		return fmt.Errorf("%w: chunk %d is dirty since HEAD or HEAD is unknown", errChunkEvictRefused, idx)
 	}
@@ -1770,8 +1993,19 @@ func (l *chunkLayerImpl) Close() error {
 		return nil
 	}
 	l.closed = true
+	l.closeHydrationLocked()
 	l.stMu.Unlock()
+	l.cowMu.Lock()
+	l.cowClosed = true
+	w := l.cow
+	if w != nil {
+		w.abort(errChunkLayerClosed)
+	}
+	l.cowMu.Unlock()
 	l.cancel()
+	if w != nil {
+		w.join()
+	}
 	l.wg.Wait()
 	close(l.closeDone)
 	return nil

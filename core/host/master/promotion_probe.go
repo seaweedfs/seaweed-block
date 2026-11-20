@@ -69,10 +69,14 @@ type workloadPlanPromotionEvidenceProvider struct {
 }
 
 func (p *workloadPlanPromotionEvidenceProvider) ProbePromotionCandidates(volumeID string, current authority.AuthorityBasis, candidates []authority.ReplicaCandidate) (PromotionProbeResult, error) {
+	// A volume absent from RequiredLSNByVolume has an unknown required
+	// frontier, not a zero one.
+	required, requiredKnown := p.required[volumeID]
 	result := PromotionProbeResult{
-		AckProfile: p.ackProfile,
-		SyncAckLSN: p.required[volumeID],
-		Candidates: make([]PromotionCandidateEvidence, 0, len(candidates)),
+		AckProfile:   p.ackProfile,
+		SyncAckLSN:   required,
+		SyncAckKnown: requiredKnown,
+		Candidates:   make([]PromotionCandidateEvidence, 0, len(candidates)),
 	}
 	if current.ReplicaID != "" {
 		statusAddr := p.status[volumeID][current.ReplicaID]

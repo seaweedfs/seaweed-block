@@ -20,6 +20,14 @@ type (
 	ChunkLayerStats   = chunkLayerStats
 	ChunkIntent       = chunkIntent
 	ChunkDetachedBy   = chunkDetachedBy
+	DetachSettlement  = detachSettlement
+)
+
+// How a failed Detach ended (ChunkLayer.SettleDetach).
+const (
+	DetachNotPublished = detachNotPublished
+	DetachApplied      = detachApplied
+	DetachFenced       = detachFenced
 )
 
 // HEAD states.
@@ -45,6 +53,7 @@ const (
 )
 
 var (
+	ErrCutCOWAborted          = errCutCOWAborted
 	ErrChunkKeyExists         = errChunkKeyExists
 	ErrChunkHeadPrecondition  = errChunkHeadPrecondition
 	ErrChunkHeadDeleted       = errChunkHeadDeleted

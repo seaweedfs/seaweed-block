@@ -12,7 +12,7 @@ The three design documents:
 | Agent workspace design (this document) | Agent workspace disks: one local replica per workspace, cuts to SeaweedFS, snapshots, forks, GC, host moves |
 | [Kubernetes block design](kubernetes-block-design.md) | Kubernetes block volumes (alpha): CSI, Helm, RF=2/3 replication and failover, multipath, readiness |
 
-Conventions are those of the core document: code references name a file and a function, not a line number; test references name the test function and its file; "Model-checked" means the protocol was specified in TLA+ and checked exhaustively with TLC at small scale (the specifications are in [`docs/spec/`](../spec/README.md)).
+Conventions are those of the core document: code references name a file and a function, not a line number; test references name the test function and its file; "Model-checked" means the protocol was specified in TLA+ and checked exhaustively with TLC at small scale (the specifications are in [`docs/spec/`](../spec/README.md)). The state machines and invariants of this document are also in the shared ledger, [Invariants and state machines](invariants.md).
 
 ## Contents
 
@@ -45,12 +45,14 @@ An agent workspace disk is a composition of core parts plus a SeaweedFS chunk ba
 flowchart LR
   G["guest microVM"] -->|"virtio-blk"| F["frontend: ublk or NVMe/TCP loopback"]
   F -->|"Read / Write / Sync"| W["local engine: walstore"]
-  W -->|"dirty chunk bitmap"| C["chunk layer: quiesced cut"]
+  W -->|"owned chunk LSN map + WAL dirt"| C["chunk layer: short barrier + COW cut"]
   C -->|"upload changed 4 MiB chunks, intents first"| S[("SeaweedFS: immutable chunks + segment manifests")]
   C -->|"CAS HEAD on {gen, epoch}"| H["HEAD root (about 2 KB)"]
   H -->|"snapshot / fork = copy the root"| H2["snapshot or forked volume"]
   M["blockmaster: epoch + lease"] -->|"higher epoch"| T["another host: claim HEAD, lazy-load chunks"]
   T --> H
+  F -->|"one arrival deadline"| Q["bounded per-chunk shared hydration"]
+  Q -->|"owned fetch, caller may detach"| S
 ```
 
 - **Frontend:** the same ublk and NVMe/TCP code as the Kubernetes line ([core Â§1.1](block-design.md#11-frontends-and-the-backend-contract)). NVMe/TCP binds to loopback (`cmd/blockvolume/main.go` `enforceFrontendLoopbackBind`); ublk serves `/dev/ublkbN` on the same host (`--ublk-device`). The guest sees a plain virtio block device that the hypervisor attaches.
@@ -70,7 +72,7 @@ A workspace runs one replica (RF=1). It does not use the replication engine of t
 | Permanent host loss | the image at the last successful cut (HEAD `RemoteLSN`); writes after it are lost |
 | Clean move (Detach) | everything written before Detach: guest I/O is stopped, then Detach publishes a final cut before the host releases the volume |
 
-- **When cuts happen.** At semantic points chosen by the integrator (after an agent step, before a risky command, on detach) and on explicit request (`sw-block ops chunk cut`). The periodic timer is off by default (`cmd/blockvolume/chunk_remote.go` `defaultChunkCaptureInterval = 0`); an operator may set one as a host-loss safety net. `--chunk-dirty-threshold` (default 512 chunks, 2 GiB) only bounds how much one cut copies under its barrier; it never triggers a cut.
+- **When cuts happen.** At semantic points chosen by the integrator (after an agent step, before a risky command, on detach) and on explicit request (`sw-block ops chunk cut`). The periodic timer is off by default (`cmd/blockvolume/chunk_remote.go` `defaultChunkCaptureInterval = 0`); an operator may set one as a host-loss safety net. `--chunk-dirty-threshold` (default 512 chunks, 2 GiB) bounds pre-copy staging work; native COW copies the remainder outside its barrier. It never triggers a cut.
 - **So the default RPO is unbounded** until the integrator cuts. This is a design choice for workspaces, where a cut at a semantic point is more useful than a timer.
 - Multi-replica workspaces combined with chunk snapshots are not supported.
 
@@ -101,13 +103,19 @@ Per volume, under the chunk base directory in the filer (`core/frontend/chunksto
 - Each HEAD is logically full: restore never chains deltas.
 - A flat (format 1) HEAD is upgraded at its next cut ([chunk manifests](../chunk-manifests.md)). In a host-side proxy, the root of a 10 GiB volume shrank from 261,531 bytes (flat) to 2,172 bytes (two-level) (Â§13).
 
+**How versions share data.** A HEAD, a snapshot and a fork root are each a complete map from chunk index to chunk key. There is no backing chain and no per-layer bitmap that falls through to a parent, as qcow2 backing files or overlay layers have.
+- A cut uploads a new key only for a chunk whose content changed (Â§5, step 6) and rewrites only the segments that list such chunks. Every other index keeps its key, and every other segment its object, from the previous HEAD. A snapshot copies the root; a fork writes a new root with the same references (Â§6). Neither copies a chunk or a segment.
+- So a chunk that was not rewritten after a snapshot is the same object in that snapshot, in every later snapshot and in HEAD. A chunk rewritten after the snapshot has an old key that only the snapshot (and any earlier version that shares it) still references.
+- A read looks up one map: the root, one segment, one chunk. It never walks a chain, and deleting a version never requires merging another one.
+- The dirty bitmap (Â§4) is local state on the holder's host. It records which chunks changed since the last HEAD, so that the next cut knows what to compare and upload. It is not stored with a snapshot, and reads do not use it.
+- Example: a volume holds 100 non-zero chunks when snapshot `init` is taken; then 20 of them are rewritten and snapshot `snap1` is taken. `snap1` and HEAD each list 100 keys, 80 of them the same as in `init`. The store holds 120 chunk objects, not 200. Deleting `init` frees exactly its 20 old keys, and only once GC finds them unreferenced (Â§6); the 80 shared objects are neither moved nor copied.
+- The cost of complete maps falls on the cut: a scattered write pattern dirties many 4 MiB chunks and many segments (Â§14, cut cost).
+
 ## 4. Dirty tracking
 
-- **In memory:** every extent write marks its chunk dirty, in O(1), with no I/O and no remote call (`chunk_layer.go` `OnExtentWrite`; the set is `chunkLayerImpl.dirty`). A rebuild BASE write sets a constant-time all-dirty flag instead.
-- **Off the write path:** WAL entries carry their LBA, so the dirty set is the persisted bitmap plus the chunks of WAL entries above the checkpoint (`walChunks`). The bitmap is made durable before the checkpoint advances past those entries (`BeforeCheckpointAdvance`, called from walstore `persistCheckpointReleasing`); an error refuses the advance and the WAL keeps the entries.
-- **On disk:** `FileChunkBitmapStore` (`core/storage/chunk_bitmap_file.go`) is one state file (a header `{BaseLSN, HeadGen, Epoch, Base}` and the dirty chunk indices, with a SHA-256 over the body) replaced atomically on every change, plus an append-only delta log with one record per closed HEAD period.
-- **Reset:** only after a successful HEAD CAS at cut H. The new header is `{BaseLSN: H, HeadGen, Epoch}`; chunks dirtied after the cut stay set (`chunkBitmapStore.Reset`, stillDirty).
-- **Over-report, never under-report.** A lost bitmap, or a header that does not match HEAD `{RemoteLSN, Gen, Epoch}`, falls back to a background per-chunk SHA-256 comparison against HEAD; cuts are refused until it finishes (`startReconcile`, `errChunkReconciling`).
+- **Native v3:** the owned per-chunk LSN map and retained WAL/in-memory mutations determine dirt relative to HEAD (`captureCandidates`). UNKNOWN is conservative. Map coverage is durable with the checkpoint before reuse, and a cut certifies only unchanged captured versions after successful publication.
+- **Post-H writes:** per-chunk mutation versions prevent a cut from certifying newer local bytes as remotely clean. Abort merges every in-flight candidate back into dirt.
+- **Legacy evidence:** temporary v2 test constructors retain fake bitmap branches and old-format codec controls. There is no production FileChunkBitmapStore or C11 file; the owned map is authoritative for v3.
 
 ## 5. The cut
 
@@ -116,18 +124,64 @@ Per volume, under the chunk base directory in the filer (`core/frontend/chunksto
 1. **Admit:** refuse when closed, fenced, detached, during a base install, or when `CaptureAllowed` fails (healthy primary, unchanged lineage, valid lease).
 2. **Pre-copy:** while more than `BarrierBound` chunks would be copied under the barrier (`--chunk-dirty-threshold`, default 512), stage up to that many per round outside the barrier, for at most `chunkStageRounds` (3) rounds (`stage`). A staged chunk with new bytes is uploaded under a fresh key named by an intent written first.
 3. **Quiesce:** take the capture barrier (walstore `captureMu`) exclusively, then `Sync`. H is the synced LSN; no data newer than H exists in the WAL or the extent.
-4. **Copy:** read every candidate chunk through the normal read path into immutable buffers and hash them; release the barrier. The pause is `Sync` plus this copy. A staged copy is reused only if its chunk was not written since and HEAD is unchanged.
+4. **Open and copy:** install the fixed candidate window under the barrier, then release it. Bounded workers copy through the validated reader outside the barrier. A first writer saves a pending candidate before mutation; a writer waits only for its own copying/saving chunk. A staged copy is reused only if its version and HEAD still match. Pause is Sync plus candidate/window installation, independent of copy bytes.
 5. **LSN guard:** if H is below HEAD's `RemoteLSN`, refuse (`lsn_behind`).
 6. **Diff:** upload only chunks whose SHA-256 differs from HEAD; drop all-zero chunks from the map.
 7. **Intent first:** write an intent naming every key, then upload in parallel (`UploadConcurrency`, `--chunk-upload-concurrency`, default 8, 1 to 64).
 8. **Manifest:** build segments; new segments are also covered by an intent before upload (`PrepareManifest`).
 9. **Re-admit** right before the CAS; fence if a superseding holder owns HEAD (`supersededBy`).
-10. **CAS** HEAD on `{gen, epoch}` with `RemoteLSN = H`. On success, drop the intents and reset the bitmap, keeping post-cut dirt.
+10. **CAS** HEAD on `{gen, epoch}` with `RemoteLSN = H`. On success, drop the intents and settle unchanged owned-map versions, keeping post-cut dirt.
 11. **Unknown outcome:** re-read HEAD; never retry blindly. If unresolved, keep the proposal pending and keep the intents.
 
 `ChunkRemote.CASHead` (`core/frontend/chunkstore/chunk_remote.go`) refuses a lower epoch, any move of a `deleting`, `purging` or `deleted` HEAD, a `{gen, epoch}` mismatch and a lower `RemoteLSN`, then issues the filer's conditional `UpdateEntry` with `expected_extended = {swb.gen, swb.epoch}`. Only a definite refusal is a precondition failure; any other error is an unknown outcome.
 
-**Reads after a move.** A block absent locally is fetched from the chunk named in HEAD, bounded by `ReadMissTimeout` (default 30 s), and installed only if no newer local version exists; the dirty map is consulted again after the fetch, so a newer local write always wins (`OnReadMiss`; walstore `readFromExtent`).
+**Reads after a move.** A block absent locally is fetched from the chunk named in HEAD, by a bounded per-chunk shared worker. Frontend callers share their arrival deadline across attach and all missing chunks; contextless internal readers retain `ReadMissTimeout` (default 30 s). Fetched bytes are installed only if they do not overwrite a newer local extent version; the dirty map is consulted again after the fetch, so a newer WAL-only write still wins on reads, and HEAD's value may sit beneath it as the backing value, which is correct if a crash loses that unsynced write (`OnReadMiss`; walstore `readFromExtent`).
+
+
+### Copy-before-write in the cut window (native v3 implementation)
+
+**Problem.** Steps 3â€“4 hold `captureMu` exclusively while every non-staged candidate chunk is copied; `Write`, `WriteBatch`, `ApplyEntry` and `WriteExtentDirect` take `captureMu` shared, so every write waited for the whole copy. A cut-stall measurement on two lab hosts gave a maximum stall of 1.50 s with 3 GiB dirty and 0.67 s with 512 MiB (p99 15â€“20 ms). Pre-copy staging shortens it only when the staging rounds converge.
+
+**Design.**
+1. **Short barrier; `capMu` held for the whole cut.** The chunk layer's `capMu` stays held from admission to the end of the cut, as today; it already serializes Capture with Evict and Begin/EndBaseInstall, so no BASE install can start inside a window. Under `captureMu` exclusive the cut's `Sync` fixes H and the candidate set D is fixed as today (the owned chunk LSN map relative to HEAD plus retained WAL and in-memory mutations). A COW window `{H, D, state per chunk, refcount}` is installed in the chunk layer, then only `captureMu` is released. The stall becomes `Sync` plus fixing D, independent of the bytes to copy.
+2. **Per-chunk state and one owner.** Each chunk of D is `pending`, then exactly one owner moves it on, under a small per-chunk mutex that is never held across I/O:
+   - the copier: `pending â†' copying â†' done`;
+   - a writer: `pending â†' saving â†' saved` (the copier later reads the saved bytes: `saved â†' done`).
+   Everyone else who finds `copying` or `saving` waits on that chunk's condition until it reaches `done` or `saved`, or until the window is aborted (step 5).
+3. **The save happens before publication, outside `store.mu`.** Every mutation that can change what a read returns (`Write`, `WriteBatch`, `ApplyEntry`) runs the COW step right after it takes `captureMu` shared and **before** it takes `lifecycleMu` / `mu`, appends to the WAL or inserts into the dirty map. The save reads the chunk through the ordinary read path, which needs `store.mu`, so it cannot run inside the mutation's critical section; a hook after publication (on the WAL append, the dirty-map insert or the flusher's extent write) would see the new bytes and cannot implement this. Lock order: `captureMu` (shared) â†' per-chunk COW mutex (leaf, released before any read) â†' the read path's own locks.
+   - chunk not in D, `done` or `saved`: proceed;
+   - `pending`: become the owner (`saving`), read the chunk (still its content at H), put it in the side store, mark `saved`, wake waiters, proceed;
+   - `copying` or `saving`: wait (step 2), then re-check.
+   - **Batches across chunks** (`WriteBatch`; public `ApplyEntry` accepts one block): visit the batch's chunks in ascending chunk index and finish each chunk's step (wait, or save) before the next; no chunk is held while waiting on another, so batches cannot deadlock with each other or with the copier, which owns one chunk at a time. The batch publishes only after all its chunks are `saved`, `done` or outside D.
+4. **Copier**, outside the barrier and parallel: for each chunk of D, become the owner (`copying`) or find `saved`; read the live chunk (or the saved bytes) into the cut's immutable buffer, hash it, mark `done`, wake waiters. When every chunk of D is `done`, the window closes: no mutation runs the COW step any more. Upload, manifest and CAS are unchanged (steps 5â€“11) and work from the buffers, so an unknown CAS outcome keeps today's semantics (proposal pending, intents kept); it does not need the side store.
+5. **Terminal states: closed, or aborted.** The window ends exactly once, either closed (step 4) or aborted. Abort is taken on a save error (side store full or an I/O error), cut cancellation, fencing, and before `Recover`, a reset or `Close` in the same open. Abort happens **before** the mutation that hit the error proceeds: the cut is marked failed (retryable, `finishCut` does not run, so the dirty set keeps every candidate and the next cut takes them again), all waiters are woken and proceed without saving, and the copier stops. A guest write is never refused because of a cut problem. `Recover`, a reset and `Close` wait for the abort to finish and join every outstanding owner and reader (step 6) before they take their own locks.
+6. **Side store and drain.** Local and per cut: memory up to a bound, then a file in the volume's local root; at most |D| Ã— 4 MiB, in practice the chunks written during the window. Every saving or copying owner holds a window reference from its state claim until all of its live-chunk reads and side-store I/O finish; every additional saved-buffer or side-store reader holds a reference too. Abort atomically invalidates the cut and wakes waiters without waiting for its caller's own reference. Owners release their references on every success and error path; an owner that initiates an abort releases its own reference before any join. `Recover`, a reset and `Close` join all outstanding owners and readers before their destructive transition. The side store is deleted exactly once, after the window is closed or aborted **and** no reference is outstanding; no later state claim or I/O may acquire a reference to that terminal window. Recovery never reads it: after a crash the cut is gone, HEAD is unchanged, and the dirty set is rebuilt from the owned map and the WAL. A locked RW open discards only regular files with this volume's reserved `.cut-cow-` prefix; it never reads their contents.
+7. **Reads go through the store's read path as the format-v3 work defines it** (the stable, validated reader), both for the save and for the copier; COW adds no flusher hook and no raw extent read. The flusher moves WAL content to the extent without changing what a read returns, so saving at the flusher would miss writes still in the WAL.
+8. **After the CAS** the dirty set keeps every chunk written after H, as `finishCut` does today, so the next cut uploads them.
+
+**What it does not change.** The bytes a cut uploads (whole 4 MiB chunks whose content changed), the manifest work and the load on SeaweedFS stay the same; COW moves the copy out of the write stall, it does not reduce upload volume. Per-cut statistics (`barrierPauseNs`, `uploadedChunks`, `uploadedBytes` in the `/chunk/cut` body) measure both.
+
+**Alternatives.** Holding the flusher for candidate chunks (reading the at-H content back from the extent and WAL entries up to H) needs no side store, but the WAL cannot be released for those chunks during the window, and a long upload fills it. Raising `BarrierBound` staging does not bound the stall when writes keep re-dirtying staged chunks. Redirect-on-write at the extent changes the on-disk layout and is out of scope for the current format work.
+
+**Implementation and lifetime.** `chunk_cut_cow.go` owns the window, single-owner chunk claims and reference drain; the write hook runs before lifecycle/admission/store locks. Copier workers use the configured upload concurrency (default 8). Side payload retains at most 64 MiB in RAM, then spills to an ephemeral file beside the volume, in checked compact candidate slots. This is not an RSS cap: immutable upload buffers and transient owner reads remain additional memory. Side I/O failures abort the cut, not the guest write. Cleanup failures fail the cut diagnostically; side files are never durable evidence.
+
+Store Close permanently closes attachment admission and captures hooks under captureMu, releases it, then aborts/joins the layer before closing storage. Every Close caller shares completion/result. Recover/reset acquire a window-admission lease and join owners before lower store locks; hook snapshot recheck includes racing first attachment. BASE begin/complete drain the whole cut through capMu. Resume is excluded by BaseInstalling state, not by capMu. A completed install handle's ApplyInstallEntry uses the same pre-publication hook as ordinary ApplyEntry.
+
+```mermaid
+stateDiagram-v2
+  [*] --> OPEN: Sync H and fix D under barrier
+  OPEN --> CLOSED: every candidate staged or copied
+  OPEN --> ABORTED: save/read failure, cancel, observed fence, destructive transition
+  CLOSED --> Drain: no new claims
+  ABORTED --> Drain: wake waiters, discard late results
+  Drain --> Cleanup: all real owner/reader references returned
+  Cleanup --> Upload: CLOSED only, immutable output owns bytes
+  Cleanup --> Retry: ABORTED, merge all candidates back
+```
+
+**Statistics.** `barrierPauseNs` runs from the capture barrier's Lock request to its release: `lockWaitNs` (the wait for writers already holding it shared), Sync and window installation; native `barrierCopyChunks` is zero. `copyNs` covers outside-barrier materialization/drain. `cowSavedChunks` counts successful saves; `cowSaveNs` and `cowWaitNs` sum per-owner/per-wait elapsed time and are not wall-clock pause. These fields mirror into the actual cut response. Upload sizes and remote GC roots are unchanged.
+
+**Model and tests.** The existing S4c r2 `CutCOW2` verdict and limits are bound in the [spec correspondence](../spec/README.md#cut-window-implementation-correspondence). One-copier whole-chunk modelling does not certify actual writer ownership, batches or Close/attach. `TestCutCOWV3_*` exercises real native mutation, abort, spill, recovery and close callers; earlier ACTIVE staging/image/intent/CAS controls remain. See [the implementation lock graph and mount rehearsal](cut-cow-validation.md).
 
 ## 6. Snapshots, forks, retention, GC, volume delete
 
@@ -135,12 +189,17 @@ Per volume, under the chunk base directory in the filer (`core/frontend/chunksto
 - **Fork** (`Catalog.Fork`): claim the parent snapshot, check the source is not being deleted, write the target `VOLUME` (origin fork), then a HEAD at gen 1, epoch 0, no holder, with the parent's `RemoteLSN` and references. No segment or chunk is copied: the fork's references are owner-qualified, so it reads the parent's objects, and its root alone keeps them live after the parent snapshot is deleted.
 - **Retention** (`retention.go`): classes `semantic` and `pinned`; newest N, recent window and log-spaced keeps; a snapshot with a live fork claim is always kept; deletion uses the same conditional mark as `DeleteSnapshot`.
 - **GC** (`gc.go` `Collector.run`, operator-driven through `sw-block ops chunk gc`, preview by default; see also `core/frontend/chunkstore/GC.md`):
-  - roots: every HEAD, every snapshot (including deleting ones), snapshot attempts, live intents, and segment objects; an unreadable segment aborts the mark;
+  - roots: every HEAD, every named snapshot (including one whose delete is still in progress), every snapshot attempt that is not aborted, live intents, and segment objects; an unreadable segment aborts the mark. A deleted snapshot's attempt stays a root for one grace period after its delete time, then stops counting (`Collector.snapshotAttemptHeads` in `gc_copy.go`);
   - a capture intent expires only if it is older than the TTL, blockmaster has issued a higher epoch, and the remote HEAD has moved to a higher epoch; copy intents are settled only by a permanent tombstone at their publication target;
   - the whole mark must finish within the grace period minus the operation deadline, and the collector requires grace greater than the deadline;
   - a binding is deleted only if it is older than the grace period and was unrooted in two marks at least one grace period apart with unchanged binding bytes;
   - deletion tombstones the binding (`swb.gc.deleted=1`), deletes the needle, then marks it `done`; bindings are never removed, so a key is never rebound.
-- **Volume delete** (`volume_delete.go` `DeleteVolume`): (a) a blockmaster deletion reservation; (b) one HEAD write to `deleting` (refused while HEAD is held); (c) refuse and revert if any snapshot name record exists; (c') commit `deleting â†’ purging` bound to the same incarnation; (e) HEAD becomes `deleted` with no chunks and `VOLUME` is marked deleted. A deleted id is never attached or created again.
+- **Freeing an old snapshot's data** takes three separate steps:
+  1. **Delete the snapshot** (`sw-block ops chunk snapshot-delete`, `POST /chunk/snapshot/delete`, `Catalog.DeleteSnapshot`), or let retention delete it. This marks the attempt `deleting` with its delete time and removes the name record; no chunk or segment is touched, and a retry is safe (`deleting` and `absent` are both success).
+  2. **Run GC with `--apply`.** The deleted attempt stops being a root one grace period after its delete time. A chunk referenced by nothing else then becomes a candidate (if it is itself older than the grace period), and it is deleted only after a second mark at least one grace period later still finds it unreferenced. With the default grace of one hour, a chunk is reclaimed two hours or more after the snapshot delete, and only by GC passes that run after those points. Chunks still referenced by HEAD, another snapshot or a fork are never candidates.
+  3. **Volume vacuum in SeaweedFS.** GC deletes the needle; SeaweedFS returns the disk space when it vacuums that volume. Until then the bytes stay on the volume servers.
+- **Why a reachability mark and not reference counts.** Chunks and segments are shared by snapshots and forks of any number of volumes. A reference count kept in filer entries and changed by several hosts can be lost or applied twice by a crash or an unknown outcome; a lost increment would delete live data. The mark recomputes reachability from the roots on every pass, and the two-mark grace covers writers that are about to publish keys they already uploaded. The cost is delay: space comes back hours after a delete, not at once.
+- **Volume delete** (`volume_delete.go` `DeleteVolume`): (a) a blockmaster deletion reservation; (b) one HEAD write to `deleting` (refused while HEAD is held); (c) refuse and revert if any snapshot name record exists; (c') commit `deleting â†' purging` bound to the same incarnation; (e) HEAD becomes `deleted` with no chunks and `VOLUME` is marked deleted. A deleted id is never attached or created again.
 
 HEAD states:
 
@@ -180,9 +239,11 @@ The attempt path is never removed, so a late create can never land after a delet
 
 **Host guard** (`core/host/volume/workspace_lease.go` `WorkspaceLeaseGuard`, enabled with `blockvolume --workspace-lease`; see [workspace lease](../workspace-lease.md)): frontend I/O and cuts are admitted only with a granted, unexpired lease for the exact `{volume, replica, epoch}`. Validity is anchored to the renewal request's start time, and blockmaster's `ValidForNs` already subtracts half the clock-skew bound (`core/host/master/workspace_service.go` `leaseFact`). A late reply cannot extend admission. A fenced guard never reopens. The lease is 30 s (`core/authority/authority.go`, `workspaceTTL`); the skew bound defaults to 20 s (`blockmaster --workspace-max-clock-skew`).
 
-**CLEAN move:** Detach publishes the final cut with `State = detached` in one CAS â†’ revoke â†’ the host drains frontend, replication and provider and acknowledges the stored detached HEAD generation â†’ blockmaster checks the detached HEAD and the matching acknowledgement â†’ new epoch â†’ the new host claims HEAD.
+**Master side of a renewal** (`core/authority/workspace_lease_view.go`): blockmaster answers a renewal of an established lease from memory, under a small leaf lock, with no disk write and without waiting for other authority writes. The grant is min(now + TTL, durable horizon), where the horizon is the lease expiry stored on disk; a background extension, an ordinary authority write, keeps the horizon about 1.5Â·TTL ahead of the last renewal that triggered it. Only the first grant of a lease is written synchronously. If extensions fall behind, grants shrink and the host fences by the horizon minus half the skew bound; a failed extension write makes the volume uncertain and refuses renewals that would issue a new or extended grant (a Revoking lease still gets its bounded drain reply).
 
-**FORCED move:** blockmaster waits until both the stored expiry and its conservative restart deadline plus the full skew bound have passed (`core/authority/workspace.go` `prepareWorkspaceMoveLocked`). The old host's late CAS fails on the epoch; its uploads become orphans for GC. Writes since the old host's last cut are lost.
+**CLEAN move:** Detach publishes the final cut with `State = detached` in one CAS â†' revoke â†' the host drains frontend, replication and provider and acknowledges the stored detached HEAD generation â†' blockmaster checks the detached HEAD and the matching acknowledgement â†' new epoch â†' the new host claims HEAD.
+
+**FORCED move:** blockmaster waits until both the persisted lease horizon (at least every grant, so at most TTL/2 later than the last grant) and the granted or conservative restart deadline, plus the full skew bound, have passed (`core/authority/workspace.go` `prepareWorkspaceMoveLocked`). The old host's late CAS fails on the epoch; its uploads become orphans for GC. Writes since the old host's last cut are lost.
 
 **Takeover** (`core/storage/chunk_restore.go` `ClaimChunkHead`, called before the chunk layer attaches in `core/frontend/durable/provider_chunk.go`): read HEAD; fence if HEAD has a higher epoch or another holder at the same epoch; seed the local LSN frontier from HEAD (`PrepareRestore`); CAS HEAD to the new epoch and holder with `State = active`; on an unknown outcome, succeed only if a re-read shows the exact proposal. I/O opens afterwards; blocks load lazily on first read.
 
@@ -224,11 +285,11 @@ Lease states:
 stateDiagram-v2
   state "Lease (blockmaster)" as L {
     [*] --> Granted: Renew
-    Granted --> Granted: Renew before expiry
+    Granted --> Granted: Renew before horizon and deadline (from memory)
     Granted --> Revoking: BeginWorkspaceRevocation
     Revoking --> Acked: host acks detached HEAD gen while the lease is valid
     Acked --> Moved: CLEAN move
-    Granted --> Expired: expiry
+    Granted --> Expired: horizon or deadline passes
     Expired --> Moved: FORCED move after expiry + skew bound
   }
 ```
@@ -307,7 +368,7 @@ Not done yet:
 
 Measurements, not SLOs; each is the median of 3 runs. [Workspace measurements](../workspace-measurements.md) has every number and how it was measured.
 
-- **Workloads** (Firecracker microVMs, 4 vCPU, 4 GiB, one bare-metal host, NVMe/TCP loopback): metadata-heavy agent workloads (`npm ci`, `git clone`, untar, `find` + `stat`) ran at local-disk speed. The cost is `fsync` latency: 2,000 Ã— create + write + `fsync` took 14.33 s against 6.09 s on a local disk, about 7 ms against 3 ms per `fsync`. Reducing it is in progress; the per-stage histograms are described in [fsync latency](../fsync-latency.md).
+- **Workloads** (Firecracker microVMs, 4 vCPU, 4 GiB, one bare-metal host, NVMe/TCP loopback): metadata-heavy agent workloads (`npm ci`, `git clone`, untar, `find` + `stat`) ran at local-disk speed. The cost was `fsync` latency: 2,000 Ã— create + write + `fsync` took 14.33 s against 6.09 s on a local disk, about 7 ms against 3 ms per `fsync`. After the group-commit fix (#173), guest `fsync` is a median of 3.23 ms against 2.74 ms local with the ublk frontend (3.59 ms over NVMe/TCP loopback); [workspace measurements](../workspace-measurements.md) has both rounds. The per-stage histograms are described in [fsync latency](../fsync-latency.md).
 - **Snapshot and fork** (host-side proxy, a 10 GiB volume of 2,560 chunks, no network latency, guest `fsync` or block frontend): HEAD root 2,172 bytes; snapshot 0.18 ms; fork 0.29 ms (flat manifest: 261,531 bytes, 5.79 ms, 10.67 ms).
 - **Cut upload** (same proxy): 64 dirty chunks (256 MiB) in 624 ms with one upload at a time, 434 ms with 8 in parallel.
 - **Two-host lifecycle** (Firecracker VMs, SeaweedFS chunk backend): create, write, two snapshots, fork, clean move, stale-holder replay refused, delete, GC; 35 of 35 checks passed, GC reclaimed 38 of 38 candidates and every reclaimed chunk returned 404.
@@ -319,7 +380,7 @@ These are tracked for fixes. Gaps that apply to the whole codebase (authenticati
 - **Moving back to a host with a surviving local file** fails closed with `ErrChunkStaleLocalRoot` (Â§7). **Follow-up:** recreate the local root from HEAD automatically instead of refusing.
 - **Default RPO is unbounded.** No automatic cut is enabled by default (Â§2).
 - **The master is a single point of failure.** A master outage longer than the lease stops I/O on every workspace, and recovery is a forced move.
-- **Cut cost.** The barrier pause includes copying every non-staged candidate chunk (up to the dirty threshold, 512 chunks by default), held in RAM until upload. A 4 KiB write re-uploads its 4 MiB chunk, and a read miss after a move fetches the whole chunk with no request coalescing.
+- **Cut cost.** The barrier pause includes copying every non-staged candidate chunk (up to the dirty threshold, 512 chunks by default), held in RAM until upload. A 4 KiB write re-uploads its 4 MiB chunk, and a read miss after a move fetches the whole chunk with no request coalescing. **Proposed:** copy-before-write takes the copy out of the barrier (Â§5); it does not change the upload volume.
 - **GC is manual.** Needles uploaded without a persisted key binding are never reclaimed. An intent stamped by a host clock running ahead of the GC runner fails the whole pass (liveness, not safety).
 - **Filer conditional update: multi-filer and old-filer cases.** Reading the open-source SeaweedFS filer: `UpdateEntry` takes an exclusive lock on the path before it validates `expected_extended`. The concurrent case against one pinned filer is tested (#163). Not tested: several filers sharing a store, and a filer that predates the field (there is no capability probe). **Planned:** a multi-filer test and a probe.
 - **No multi-replica workspaces with chunk snapshots**, and no crash-restart recovery of a ublk server (a crashed server fails closed).

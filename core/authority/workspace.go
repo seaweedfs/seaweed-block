@@ -92,41 +92,6 @@ func (p *Publisher) workspaceSkew(lease *WorkspaceLease) time.Duration {
 	return skew
 }
 
-func (p *Publisher) RenewWorkspaceLease(ctx context.Context, volume, holder string, epoch uint64) (WorkspaceLease, error) {
-	if err := ctx.Err(); err != nil {
-		return WorkspaceLease{}, err
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	_, line, ok := p.workspaceLineLocked(volume)
-	if !ok || line.info.ReplicaID != holder || line.info.Epoch != epoch {
-		return WorkspaceLease{}, fmt.Errorf("workspace lease: stale authority")
-	}
-	s := cloneWorkspace(p.workspace[volume])
-	if s == nil {
-		s = &WorkspaceState{}
-	}
-	if len(s.Moves) > 0 && !s.Moves[len(s.Moves)-1].Issued {
-		return WorkspaceLease{}, fmt.Errorf("workspace lease: move pending")
-	}
-	now := p.workspaceNow()
-	if s.Lease != nil {
-		if s.Lease.Revoking {
-			return *s.Lease, nil
-		} // tell the host to drain; never extend
-		if now.UnixNano() >= s.Lease.ExpiresAtNS || !now.Before(p.workspaceLeaseDeadline[volume]) {
-			return WorkspaceLease{}, fmt.Errorf("workspace lease expired or revoking")
-		}
-	}
-	lease := WorkspaceLease{ReplicaID: holder, Epoch: epoch, ExpiresAtNS: now.Add(p.workspaceTTL).UnixNano(), MaxClockSkewNS: int64(p.workspaceSkew(s.Lease))}
-	s.Lease = &lease
-	if err := p.persistWorkspaceLocked(volume, s); err != nil {
-		return WorkspaceLease{}, err
-	}
-	p.workspaceLeaseDeadline[volume] = now.Add(p.workspaceTTL)
-	return lease, nil
-}
-
 // Replica IDs are logical assignment identities; HEAD.Holder is qualified
 // as <server-id>/<replica-id> and is checked separately against ExpectedHost.
 type WorkspaceMoveRequest struct {
@@ -246,7 +211,7 @@ func (p *Publisher) AckWorkspaceRevocation(ctx context.Context, volume string, a
 		return fmt.Errorf("workspace revoke ACK: stale or unsolicited")
 	}
 	now := p.workspaceNow()
-	if now.UnixNano() >= s.Lease.ExpiresAtNS || !now.Before(p.workspaceLeaseDeadline[volume]) {
+	if now.UnixNano() >= s.Lease.ExpiresAtNS || !now.Before(p.leaseDeadlineLocked(volume)) {
 		return fmt.Errorf("workspace revoke ACK: lease expired; forced move required")
 	}
 	if s.Ack != nil && *s.Ack != ack {
@@ -286,10 +251,12 @@ func (p *Publisher) persistWorkspaceLocked(volume string, s *WorkspaceState) err
 		WriteSeq: p.writeSeqByVolume[volume] + 1, Workspace: cloneWorkspace(s)}
 	if err := p.store.Put(record); err != nil {
 		p.workspaceUncertain[volume] = true
+		p.refreshLeaseViewLocked(volume)
 		return err
 	}
 	p.writeSeqByVolume[volume] = record.WriteSeq
 	p.workspace[volume] = cloneWorkspace(s)
+	p.refreshLeaseViewLocked(volume)
 	return nil
 }
 
@@ -313,11 +280,19 @@ func (p *Publisher) prepareWorkspaceMoveLocked(ask AssignmentAsk, g workspaceGra
 	if !ok || line.info.Epoch != q.ExpectedEpoch || line.info.ReplicaID != q.ExpectedReplicaID || s == nil || s.Lease == nil {
 		return nil, 0, fmt.Errorf("workspace move: missing or changed authority/lease")
 	}
+	var lostUntil int64
 	if q.Kind == "forced" {
 		now := p.workspaceNow()
 		skew := p.workspaceSkew(s.Lease)
-		if now.Before(time.Unix(0, s.Lease.ExpiresAtNS).Add(skew)) || now.Before(p.workspaceLeaseDeadline[q.VolumeID].Add(skew)) {
+		deadline := p.leaseDeadlineLocked(q.VolumeID)
+		if now.Before(time.Unix(0, s.Lease.ExpiresAtNS).Add(skew)) || now.Before(deadline.Add(skew)) {
 			return nil, 0, fmt.Errorf("workspace forced move lease expiry plus clock-skew margin has not elapsed")
+		}
+		// The audit bound only, in wall time: the admission above keeps both
+		// predicates (the deadline's monotonic reading included).
+		lostUntil = time.Unix(0, s.Lease.ExpiresAtNS).Add(skew).UnixNano()
+		if d := deadline.Add(skew).UnixNano(); d > lostUntil {
+			lostUntil = d
 		}
 	}
 	// A restart may resume the identical durable reservation; it never grants
@@ -326,6 +301,15 @@ func (p *Publisher) prepareWorkspaceMoveLocked(ask AssignmentAsk, g workspaceGra
 		if r.RequestID == q.RequestID {
 			if r.Issued || !sameWorkspaceRequest(r, q) {
 				return nil, 0, fmt.Errorf("workspace move reservation differs")
+			}
+			// A forced reservation issues only with the exact range recorded
+			// before it; a missing one (a reservation older than lost ranges,
+			// or a skipped side file) is refused, never recomputed: a new
+			// request records a fresh range.
+			if r.Kind == "forced" {
+				if _, ok := p.lostRangeLocked(q.VolumeID, r.RequestID, r.NewEpoch); !ok {
+					return nil, 0, fmt.Errorf("workspace forced move reservation %s has no recorded lost range; retry with a new request id", r.RequestID)
+				}
 			}
 			s.Moves[idx].Issued = true
 			s.Lease = nil
@@ -352,6 +336,12 @@ func (p *Publisher) prepareWorkspaceMoveLocked(ask AssignmentAsk, g workspaceGra
 	}
 	r := WorkspaceMoveRecord{RequestID: q.RequestID, VolumeID: q.VolumeID, OldHost: q.ExpectedHost, NewHost: q.TargetHost, OldReplicaID: q.ExpectedReplicaID, NewReplicaID: q.TargetReplicaID, Kind: q.Kind,
 		OldEpoch: q.ExpectedEpoch, NewEpoch: max + 1, HeadGen: h.Gen, RemoteLSN: h.RemoteLSN, TargetDataAddr: q.TargetDataAddr, TargetCtrlAddr: q.TargetCtrlAddr}
+	if q.Kind == "forced" {
+		lost := WorkspaceLostRange{RequestID: r.RequestID, NewEpoch: r.NewEpoch, OldReplicaID: r.OldReplicaID, OldEpoch: r.OldEpoch, LostAfterLSN: r.RemoteLSN, LostUntilNS: lostUntil}
+		if err := p.recordLostRangeLocked(q.VolumeID, lost); err != nil {
+			return nil, 0, err
+		}
+	}
 	s.Moves = append(s.Moves, r)
 	if err := p.persistWorkspaceLocked(q.VolumeID, s); err != nil {
 		return nil, 0, err

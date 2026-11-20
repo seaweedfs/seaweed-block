@@ -35,6 +35,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/geometry"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/filerpb"
@@ -227,8 +228,9 @@ type SnapshotInfo struct {
 
 	attempt string // the attempt the name resolved to, when read by name
 
-	head storage.ChunkHead
-	geo  Geometry
+	head   storage.ChunkHead
+	geo    Geometry
+	digest string // identity uses the embedded writer version, not today's serializer
 }
 
 // Head returns the HEAD the snapshot copied.
@@ -487,6 +489,9 @@ func (c *Catalog) EnsureVolume(ctx context.Context, vol string, g Geometry) (Vol
 		return VolumeInfo{}, err
 	}
 	if !ok {
+		if g.BlockSize != 0 && g.NumBlocks > geometry.MaxVolumeBytes/uint64(g.BlockSize) {
+			return VolumeInfo{}, catErr(CodeGeometryMismatch, false, nil, "volume size exceeds maximum %d bytes (16 TiB - 4 KiB; uint32 LBA)", geometry.MaxVolumeBytes)
+		}
 		v = VolumeInfo{Format: volumeFormat, VolumeID: vol, Geometry: g, Origin: OriginCreate, CreatedNs: c.now().UnixNano()}
 		e, err := volumeEntry(v, "")
 		if err != nil {
@@ -669,6 +674,10 @@ func decodeSnap(p string, e *filerpb.Entry) (SnapshotInfo, string, error) {
 	if err != nil {
 		return fail("%v", err)
 	}
+	digest, err := snapshotHeadDigest(head, doc.Head)
+	if err != nil {
+		return fail("HEAD identity: %v", err)
+	}
 	state := string(e.Extended[extSnapState])
 	if state != SnapActive && state != SnapDeleting {
 		return fail("state %q", state)
@@ -680,7 +689,7 @@ func decodeSnap(p string, e *filerpb.Entry) (SnapshotInfo, string, error) {
 		VolumeID: doc.VolumeID, Name: doc.Name, HeadGen: head.Gen, HeadEpoch: head.Epoch, CutLSN: head.RemoteLSN,
 		CreatedNs: doc.CreatedNs, State: state, ChunkCount: manifestCount(head), ManifestBytes: len(e.GetContent()),
 		Consistency: doc.Consistency, Labels: doc.Labels, Parent: doc.Parent, ExpiresAtNs: doc.ExpiresAtNs,
-		Class: doc.Class, head: head, geo: doc.Geometry,
+		Class: doc.Class, head: head, geo: doc.Geometry, digest: digest,
 	}, doc.RequestID, nil
 }
 
@@ -866,6 +875,11 @@ func (c *Catalog) CreateSnapshot(ctx context.Context, vol string, req SnapshotRe
 		return SnapshotInfo{}, refuseDeleted(vol, "it cannot be snapshotted")
 	}
 
+	head, upgradeIDs, err := c.prepareLegacyHead(ctx, root, head, head, v.Geometry)
+	defer c.dropManifestIntents(ctx, root, upgradeIDs)
+	if err != nil {
+		return SnapshotInfo{}, err
+	}
 	headEnt, err := headEntry(head)
 	if err != nil {
 		return SnapshotInfo{}, err
@@ -1227,10 +1241,7 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 		return ForkResult{}, fmt.Errorf("chunkstore: snapshot %s/%s has no geometry", req.Source, req.Snapshot)
 	}
 	src := snap.Head()
-	digest, err := headDigest(src)
-	if err != nil {
-		return ForkResult{}, err
-	}
+	digest := snap.digest
 	head := storage.ChunkHead{Gen: 1, Epoch: 0, Holder: "", RemoteLSN: src.RemoteLSN, Chunks: make(map[uint64]storage.ChunkRef, len(src.Chunks)), State: storage.ChunkHeadActive}
 	qualified := 0
 	if src.Segments != nil {
@@ -1281,6 +1292,11 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 		existing = vol
 	}
 
+	head, upgradeIDs, err := c.prepareLegacyHead(ctx, dstRoot, storage.ChunkHead{}, head, snap.geo)
+	defer c.dropManifestIntents(ctx, dstRoot, upgradeIDs)
+	if err != nil {
+		return ForkResult{}, err
+	}
 	he, err := headEntry(head)
 	if err != nil {
 		return ForkResult{}, err
@@ -1351,6 +1367,9 @@ func (c *Catalog) claimForkParent(ctx context.Context, req ForkRequest) (Snapsho
 		}
 		if ref.info.State == SnapDeleting {
 			return SnapshotInfo{}, catErr(CodeSnapshotDeleting, false, nil, "snapshot %s/%s is being deleted", req.Source, req.Snapshot)
+		}
+		if ref.info.geo.BlockSize != 0 && ref.info.geo.NumBlocks > geometry.MaxVolumeBytes/uint64(ref.info.geo.BlockSize) {
+			return SnapshotInfo{}, catErr(CodeGeometryMismatch, false, nil, "fork size exceeds maximum %d bytes (16 TiB - 4 KiB; uint32 LBA)", geometry.MaxVolumeBytes)
 		}
 		claims := decodeClaims(ref.entry)
 		for _, cl := range claims {

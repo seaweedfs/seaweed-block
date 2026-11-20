@@ -159,8 +159,8 @@ func TestStatusServer_ChunkSuccessBodiesUseSpecFields(t *testing.T) {
 		ctl.deadline < chunkstore.DefaultOpDeadline-time.Minute || ctl.deadline > chunkstore.DefaultOpDeadline {
 		t.Fatalf("cut with a huge timeoutMs: %d (deadline %v), want OpDeadline", w.Code, ctl.deadline)
 	}
-	// The cut statistics are omitted until W3 fills them (B9 W2 appendix).
-	wantKeys(t, "cut", jsonKeys(t, w.Body.Bytes()), "volumeID", "cutLSN", "headGen", "headEpoch", "holder", "noop", "fullHash")
+	// The chunk layer fills the cut statistics (§3.1), so the body carries them.
+	wantKeys(t, "cut", jsonKeys(t, w.Body.Bytes()), "volumeID", "cutLSN", "headGen", "headEpoch", "holder", "noop", "fullHash", "stats")
 
 	w = serve(t, s, http.MethodPost, "/chunk/snapshot", `{"volumeID":"v1","name":"s1","requestID":"r","labels":{"agent.step":"x"},"consistency":"app","expiresAtNs":9}`, "")
 	if w.Code != 200 || ctl.lastSnap.Name != "s1" || ctl.lastSnap.RequestID != "r" || ctl.lastSnap.Consistency != "app" || ctl.lastSnap.Labels["agent.step"] != "x" || ctl.lastSnap.ExpiresAtNs != 9 {
@@ -218,9 +218,15 @@ func TestStatusServer_ChunkErrorBodyIsTyped(t *testing.T) {
 		{fmt.Errorf("%w: %w", storage.ErrChunkReconciling, context.DeadlineExceeded), "reconciling", 409, true},
 		{fmt.Errorf("x: %w", storage.ErrChunkCASOutcomeUnknown), "outcome_unknown", 503, true},
 		{fmt.Errorf("x: %w", storage.ErrChunkHeadPrecondition), "head_conflict", 409, true},
+		{fmt.Errorf("save: %w", storage.ErrCutCOWAborted), "cut_aborted", 503, true},
 		{fmt.Errorf("x: %w", storage.ErrChunkRemoteUnavailable), "remote_unavailable", 503, true},
 		{fmt.Errorf("x: %w", storage.ErrChunkLayerClosed), "closing", 503, false},
 		{fmt.Errorf("x: %w", storage.ErrChunkLayerDetached), "closing", 409, false},
+		{fmt.Errorf("%w: %w", durable.ErrDetachAborted, storage.ErrChunkRemoteUnavailable), "detach_aborted", 409, true},
+		// The detach sentinels decide even over a catalog-error cause (which
+		// alone maps to its own code), and without the storage CAS sentinel.
+		{fmt.Errorf("%w: %w", durable.ErrDetachAborted, &chunkstore.CatalogError{Code: chunkstore.CodeSnapshotExists, Message: "m"}), "detach_aborted", 409, true},
+		{fmt.Errorf("%w: %w", durable.ErrDetachOutcomeUnknown, &chunkstore.CatalogError{Code: chunkstore.CodeSnapshotExists, Message: "m"}), "outcome_unknown", 503, true},
 		{fmt.Errorf("%w: %w: cut LSN 1, HEAD remote_lsn 10", storage.ErrChunkCaptureRefused, storage.ErrChunkLSNBehind), "lsn_behind", 409, false},
 		{&chunkstore.CatalogError{Code: chunkstore.CodeInvalidLabel, Message: "m"}, "invalid_label", 400, false},
 		{fmt.Errorf("x: %w", durable.ErrNotChunkVolume), "not_chunk_volume", 409, false},

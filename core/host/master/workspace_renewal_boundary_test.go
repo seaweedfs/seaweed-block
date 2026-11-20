@@ -69,7 +69,9 @@ func TestWorkspaceHeldRenewalBoundary(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			// No wall-clock bound on the test context (#227): the held client
+			// is released by the test; only the guard's own RPC timeout remains.
+			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			if err := g.Refresh(ctx); err != nil {
 				t.Fatal(err)
@@ -99,10 +101,13 @@ func TestWorkspaceHeldRenewalBoundary(t *testing.T) {
 			case <-ctx.Done():
 				t.Fatal("renewal did not enter", ctx.Err())
 			}
+			// A renewal is answered from memory: the grant is in the reply, and
+			// the durable lease holds the horizon (>= every grant), so the
+			// persisted expiry is not the grant any more (#205).
 			renewed := *p.WorkspaceState("v").Lease
 			freshEarly := requestStart.Add(time.Duration(reply.ValidForNs))
-			if freshEarly.Sub(oldEarly) < time.Second || renewed.ExpiresAtNS <= oldLease.ExpiresAtNS || renewed.MaxClockSkewNS != int64(4*time.Second) {
-				t.Fatal("fixture did not extend the real persisted grant", oldLease, renewed)
+			if freshEarly.Sub(oldEarly) < time.Second || reply.ExpiresAtNs <= client.initial.ExpiresAtNs || renewed.ExpiresAtNS < reply.ExpiresAtNs || renewed.MaxClockSkewNS != int64(4*time.Second) {
+				t.Fatal("fixture did not extend the grant under the durable horizon", client.initial, reply, oldLease, renewed)
 			}
 			arrival := oldEarly.Add(-time.Second)
 			if late {
@@ -135,8 +140,14 @@ func TestWorkspaceHeldRenewalBoundary(t *testing.T) {
 			}
 			q := authority.WorkspaceMoveRequest{RequestID: "renewed-forced", VolumeID: "v", ExpectedReplicaID: "r", TargetReplicaID: "r", ExpectedHost: "old", TargetHost: "new", ExpectedEpoch: 1, TargetDataAddr: "nd", TargetCtrlAddr: "nc", Kind: "forced", Force: true}
 			head := authority.WorkspaceHead{Gen: 7, Epoch: 1, Holder: "old/r", RemoteLSN: 42}
-			boundary := time.Unix(0, renewed.ExpiresAtNS).Add(time.Duration(renewed.MaxClockSkewNS))
-			for _, when := range []time.Time{time.Unix(0, oldLease.ExpiresAtNS).Add(4 * time.Second), boundary.Add(-time.Nanosecond)} {
+			// The barrier is max(durable horizon, renewed grant) + skew; the old
+			// grant's expiry plus skew is still too early.
+			barrierBase := renewed.ExpiresAtNS
+			if reply.ExpiresAtNs > barrierBase {
+				barrierBase = reply.ExpiresAtNs
+			}
+			boundary := time.Unix(0, barrierBase).Add(time.Duration(renewed.MaxClockSkewNS))
+			for _, when := range []time.Time{time.Unix(0, client.initial.ExpiresAtNs).Add(4 * time.Second), time.Unix(0, reply.ExpiresAtNs).Add(4 * time.Second), boundary.Add(-time.Nanosecond)} {
 				masterNS.Store(when.UnixNano())
 				if _, err := p.MoveWorkspace(ctx, q, head); err == nil {
 					t.Fatal("forced move ignored renewed expiry plus persisted margin")

@@ -69,6 +69,7 @@ func TestComponent_Adversarial_StaleEntryDoesNotRegress(t *testing.T) {
 		// Stage 2: replica is primed with the LATEST state (LSN=2,
 		// value B). Simulates "replica caught up via prior live
 		// ship before our catch-up session."
+		primeReplicaZeroBase(t, c, 1)
 		c.ReplicaApply(0, 7, dataB, 2)
 		c.Replica(0).Store.Sync()
 

@@ -214,6 +214,11 @@ func TestChunkLayer_C3_EveryHeadIsExactUnderConcurrentWrites(t *testing.T) {
 			}
 			if err == nil {
 				err = s.flusher.flushOnce()
+				// A concurrent cut can invalidate a prepared checkpoint map;
+				// the production worker retries this explicit stale-proof outcome.
+				if errors.Is(err, ErrMapCoverageStale) {
+					err = nil
+				}
 			}
 			if err != nil {
 				werr <- err
@@ -268,6 +273,10 @@ func TestChunkLayer_C3_EveryHeadIsExactUnderConcurrentWrites(t *testing.T) {
 
 // C3 barrier: a write issued while a cut is still copying its chunks does
 // not land until the copy is done, so it can never tear the captured image.
+// It waits for the LOCAL copy only, never for SeaweedFS (design rules 1/2):
+// the copy reads chunk 2's local blocks and releases the chunk; it fetches the
+// absent blocks from HEAD afterwards, so the write completes with every remote
+// fetch held.
 // The copy is held deterministically: on a fresh host the cut's copy of a
 // dirty chunk must fetch that chunk's absent blocks, and the fetch is held.
 func TestChunkLayer_C3_WriteDuringCopyWaitsForTheCut(t *testing.T) {
@@ -278,7 +287,11 @@ func TestChunkLayer_C3_WriteDuringCopyWaitsForTheCut(t *testing.T) {
 	f := newFakeChunkRemote()
 	f.seedHead(t, src, 10, 1)
 	s, _ := newChunkTestStore(t)
-	s.AdvanceFrontier(10) // the log continues from HEAD's remote_lsn (W4b's job in production)
+	func() {
+		if err := s.SeedChunkFrontier(10); err != nil {
+			t.Fatal(err)
+		}
+	}() // the log continues from HEAD's remote_lsn (W4b's job in production)
 	cfg := ctConfig(2)
 	cfg.FreshFromHead = true
 	layer := mustAttach(t, s, f, cfg)
@@ -287,12 +300,28 @@ func TestChunkLayer_C3_WriteDuringCopyWaitsForTheCut(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	gEntered, gRelease := holdGets(t, f)
+	l := layer.(*chunkLayerImpl)
+	writerParked := make(chan struct{})
+	var parkOnce sync.Once
+	l.testCOWWait = func() { parkOnce.Do(func() { close(writerParked) }) } // a writer is waiting on a COW entry
+	inCopy, releaseCopy := make(chan struct{}), make(chan struct{})
+	var copyOnce, releaseOnce sync.Once
+	unblockCopy := func() { releaseOnce.Do(func() { close(releaseCopy) }) }
+	l.testCOWRead = func(idx uint64, _ bool) {
+		if idx == 2 {
+			copyOnce.Do(func() { close(inCopy) })
+			<-releaseCopy
+		}
+	}
 	late := makeBlock(ctBlockSize, 0xDA)
 	wrote := make(chan error, 1)
 	joined := make(chan struct{})
+	var gRelease func()
 	t.Cleanup(func() {
-		gRelease()
+		unblockCopy()
+		if gRelease != nil {
+			gRelease()
+		}
 		select {
 		case <-joined:
 		case <-time.After(ctLocalBound):
@@ -300,23 +329,30 @@ func TestChunkLayer_C3_WriteDuringCopyWaitsForTheCut(t *testing.T) {
 		}
 	})
 	done := startCapture(t, layer)
-	waitKey(t, gEntered, "the cut's fetch of an absent block in chunk 2")
+	cowWaitSignal(t, inCopy, "the cut copying chunk 2 inside its window")
+	var gEntered chan string
+	gEntered, gRelease = holdGets(t, f) // from here any remote fetch blocks
 	go func() {
 		defer close(joined)
 		_, err := s.Write(10, late)
 		wrote <- err
 	}()
+	cowWaitSignal(t, writerParked, "the write parked on chunk 2's copy entry")
 	select {
 	case err := <-wrote:
 		t.Fatalf("a write landed while the cut was still copying (err %v); the barrier was released before the copy", err)
-	case <-time.After(200 * time.Millisecond): // the copy is held indefinitely; the write must wait
+	default: // parked on the held copy's entry, as it must be
 	}
+	unblockCopy() // the remote stays held: the write may wait only for the local copy
+	if err := waitErr(t, wrote, "write after the local copy, with the remote held"); err != nil {
+		t.Fatal(err)
+	}
+	// The copier fetches chunk 2's absent blocks from HEAD only now, after it
+	// released the entry: the write above completed with that fetch held.
+	waitKey(t, gEntered, "the copier's HEAD fetch of chunk 2's absent blocks, off the write path")
 	gRelease()
 	if err := waitErr(t, done, "held cut"); err != nil {
 		t.Fatalf("held cut: %v", err)
-	}
-	if err := waitErr(t, wrote, "write after the cut"); err != nil {
-		t.Fatal(err)
 	}
 	img := f.imageOf(t, f.stats().head)
 	if !bytes.Equal(blockOf(img, 8), local) {
@@ -382,29 +418,38 @@ func TestChunkLayer_C4_WritesDuringUploadAndBaseAreCapturedNext(t *testing.T) {
 		t.Fatalf("second HEAD remote_lsn %d still misses the mid-upload write %d", h.RemoteLSN, during)
 	}
 
-	// Rebuild BASE, bracketed: no cut runs between Begin and End.
-	if err := layer.BeginBaseInstall(); err != nil {
-		t.Fatalf("BeginBaseInstall: %v", err)
-	}
+	// Rebuild through the v3 store handle. The admitted BASE is the full
+	// image at the last cut, plus the replacement block, at a new floor.
+	image := f.imageOf(t, f.stats().head)
 	base := makeBlock(ctBlockSize, 0xBA)
-	if err := s.WriteExtentDirect(20, base); err != nil {
+	copy(image[20*ctBlockSize:21*ctBlockSize], base)
+	frontier := during + 10
+	handle, err := s.BeginBaseInstall(frontier, [16]byte{0x44})
+	if err != nil {
 		t.Fatal(err)
 	}
-	frontier := during + 10
-	s.AdvanceFrontier(frontier)
+	for lba := uint32(0); lba < ctNumBlocks; lba++ {
+		data := image[int(lba)*ctBlockSize : int(lba+1)*ctBlockSize]
+		if err := handle.WriteBase(lba, data); err != nil {
+			t.Fatal(err)
+		}
+	}
 	w.record(frontier, 20, base)
-	if _, err := s.Sync(); err != nil {
-		t.Fatal(err)
+	if _, err := s.Sync(); !errors.Is(err, ErrBaseInstalling) {
+		t.Fatalf("logical Sync during install: %v", err)
 	}
 	before := f.stats()
 	if _, err := layer.Capture(ctTimeout(t)); !errors.Is(err, errChunkCaptureRefused) {
-		t.Fatalf("Capture during a BASE install: got %v, want errChunkCaptureRefused", err)
+		t.Fatalf("capture while installing: %v", err)
 	}
 	if after := f.stats(); after.puts != before.puts || after.cas != before.cas {
-		t.Fatalf("capture during a BASE install made %d puts and %d CAS calls", after.puts-before.puts, after.cas-before.cas)
+		t.Fatal("capture during install made remote effects")
 	}
-	if err := layer.EndBaseInstall(frontier); err != nil {
-		t.Fatalf("EndBaseInstall after the durable frontier: %v", err)
+	if err := handle.MarkBaseComplete(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
 	}
 	waitReconciledForTest(t, layer) // the BASE is reconciled against HEAD first
 	if _, err := layer.Capture(ctTimeout(t)); err != nil {
