@@ -190,32 +190,32 @@ func TestDataSyncSyscallProbe(t *testing.T) {
 	}
 }
 
-func TestFallocateCreatesAllocatedUnwrittenVolume(t *testing.T) {
-	t.Setenv("SWBLOCK_SYNC", "fdatasync")
+func TestFallocateAllocationIsRefused(t *testing.T) {
 	t.Setenv("SWBLOCK_PREZERO", "0")
 	t.Setenv("SWBLOCK_ALLOCATION", "fallocate")
+	s, err := CreateWALStore(filepath.Join(t.TempDir(), "volume"), 32, 4096)
+	if err == nil {
+		s.Close()
+		t.Fatal("fallocate allocation must be refused")
+	}
+}
+
+func TestDefaultCreatedVolumeStaysSparse(t *testing.T) {
+	t.Setenv("SWBLOCK_SYNC", "")
+	t.Setenv("SWBLOCK_PREZERO", "")
+	t.Setenv("SWBLOCK_ALLOCATION", "")
 	path := filepath.Join(t.TempDir(), "volume")
-	s, e := CreateWALStore(path, 32, 4096)
-	if e != nil {
-		t.Fatal(e)
+	s, err := CreateWALStore(path, 8192, 4096)
+	if err != nil {
+		t.Fatal(err)
 	}
 	defer s.Close()
-	f, e := os.Open(path)
-	if e != nil {
-		t.Fatal(e)
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
 	}
-	defer f.Close()
-	if e = verifyAllocatedFile(f, false); e != nil {
-		t.Fatalf("fallocate left holes: %v", e)
-	}
-	if e = verifyInitializedFile(f); e == nil {
-		t.Fatal("fallocate unexpectedly reports every extent written")
-	}
-	if _, e = s.Recover(); e != nil {
-		t.Fatal(e)
-	}
-	b, e := s.Read(31)
-	if e != nil || !bytes.Equal(b, make([]byte, 4096)) {
-		t.Fatalf("unwritten extent bytes: %v", e)
+	stat := info.Sys().(*syscall.Stat_t)
+	if allocated := stat.Blocks * 512; allocated >= info.Size()/4 {
+		t.Fatalf("default volume lost sparse allocation: allocated=%d size=%d", allocated, info.Size())
 	}
 }
