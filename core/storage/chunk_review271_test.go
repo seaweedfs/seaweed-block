@@ -21,6 +21,17 @@ func TestCutPayloadIntentCountIndependentOfCandidates(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		rooted := map[string]bool{}
+		for _, in := range f.putIntents[before:] {
+			for _, key := range in.Keys {
+				rooted[key] = true
+			}
+		}
+		for _, key := range uploadedKeys(opsSince(f, mark)) {
+			if !rooted[key] {
+				t.Fatalf("unrooted upload %s", key)
+			}
+		}
 		calls := len(f.putIntents) - before
 		if calls > 1+r.Stats.StageRounds {
 			t.Fatalf("candidates=%d intent writes=%d rounds=%d", n, calls, r.Stats.StageRounds)

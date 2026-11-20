@@ -492,7 +492,7 @@ func (l *chunkLayerImpl) BeforeCheckpointAdvance(lsn uint64) error {
 	return l.persistPresence()
 }
 
-// saveDirty persists dirty ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Â¹ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Âª inflight ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Â¹ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Âª the chunks of WAL entries still in
+// saveDirty persists dirty ÃÆ’Ã†â€™Ãâ€šÂ¢ÃÆ’Ã¢â‚¬Â¹Ã¢Ã¢â€šÂ¬ÂÂ ÃÆ’Ã¢â‚¬Å¡Ãâ€šÂª inflight ÃÆ’Ã†â€™Ãâ€šÂ¢ÃÆ’Ã¢â‚¬Â¹Ã¢Ã¢â€šÂ¬ÂÂ ÃÆ’Ã¢â‚¬Å¡Ãâ€šÂª the chunks of WAL entries still in
 // the dirty map (all chunks when a BASE block landed or the set is unknown).
 func (l *chunkLayerImpl) saveDirty() error {
 	// Impl3's actual checkpoint caller persists its owned map after this

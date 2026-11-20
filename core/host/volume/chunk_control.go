@@ -1,7 +1,7 @@
 package volume
 
 // /chunk/*: the walstore-chunk control routes on the status listener
-// (B9 W2 spec Â§2.1-Â§2.2, Â§3.1-Â§3.4, Â§3.6). They are off by default
+// (B9 W2 spec §2.1-§2.2, §3.1-§3.4, §3.6). They are off by default
 // (EnableChunkControlEndpoint, flag --chunk-control-endpoint), share the
 // listener's loopback rule, take JSON request bodies (POST) or a
 // ?volume= query (GET), and answer failures with a typed JSON body
@@ -36,7 +36,7 @@ type ChunkControl interface {
 	Usage(ctx context.Context, volumeID string) (chunkstore.VolumeUsage, error)
 }
 
-// ChunkCutResponse is the body of a successful POST /chunk/cut (Â§3.1).
+// ChunkCutResponse is the body of a successful POST /chunk/cut (§3.1).
 type ChunkCutResponse struct {
 	VolumeID  string `json:"volumeID"`
 	CutLSN    uint64 `json:"cutLSN"`
@@ -46,7 +46,7 @@ type ChunkCutResponse struct {
 	Noop      bool   `json:"noop"`
 	FullHash  bool   `json:"fullHash"`
 	// Stats are the statistics the chunk layer measured for this cut
-	// (Â§3.1). A zero field is "not measured" or "none" (a Noop cut
+	// (§3.1). A zero field is "not measured" or "none" (a Noop cut
 	// uploads nothing).
 	Stats ChunkCutStatsBody `json:"stats"`
 }
@@ -108,7 +108,7 @@ func cutStatsBody(s storage.ChunkCutStats) ChunkCutStatsBody {
 	}
 }
 
-// ChunkSnapshotRequest is POST /chunk/snapshot's request (Â§3.2), without
+// ChunkSnapshotRequest is POST /chunk/snapshot's request (§3.2), without
 // the volume and the timeout.
 type ChunkSnapshotRequest struct {
 	Name        string
@@ -119,7 +119,7 @@ type ChunkSnapshotRequest struct {
 	Class       string // retention class: "semantic" or "pinned"
 }
 
-// ChunkDetachResponse is the body of a successful POST /chunk/detach (Â§3.6).
+// ChunkDetachResponse is the body of a successful POST /chunk/detach (§3.6).
 type ChunkDetachResponse struct {
 	VolumeID       string `json:"volumeID"`
 	CutLSN         uint64 `json:"cutLSN"`
@@ -128,7 +128,7 @@ type ChunkDetachResponse struct {
 	LastWrittenLSN uint64 `json:"lastWrittenLSN"`
 }
 
-// snapshotBody is POST /chunk/snapshot's success body, exactly Â§3.2's fields.
+// snapshotBody is POST /chunk/snapshot's success body, exactly §3.2's fields.
 type snapshotBody struct {
 	VolumeID      string            `json:"volumeID"`
 	Name          string            `json:"name"`
@@ -149,7 +149,7 @@ type chunkErrorBody struct {
 	Retryable bool   `json:"retryable"`
 }
 
-// The codes the routes add to the catalog's (B9 Â§2.2 plus the 2026-11-15
+// The codes the routes add to the catalog's (B9 §2.2 plus the 2026-11-15
 // rulings: awaiting_assignment, reconciling, internal, lsn_behind, and the
 // transport errors bad_request, method_not_allowed, forbidden; not_found
 // for an unknown /chunk path).
@@ -529,7 +529,7 @@ func (c *chunkControl) Cut(ctx context.Context, volumeID string, minLSN uint64) 
 		Noop: r.Noop, FullHash: r.FullHash, Stats: cutStatsBody(r.Stats)}, nil
 }
 
-// Snapshot resolves the request against the catalog first (Â§3.2 step 1):
+// Snapshot resolves the request against the catalog first (§3.2 step 1):
 // a retry of a recorded request returns that snapshot and another request
 // for the name gets snapshot_exists, both without cutting. Only a free name
 // is cut, and the HEAD that cut installed is stored.
