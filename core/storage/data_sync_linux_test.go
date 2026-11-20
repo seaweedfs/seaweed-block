@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -64,6 +65,12 @@ func TestInitializedFileRejectsSparseAndUnwritten(t *testing.T) {
 
 func TestFdatasyncAcknowledgedWritesSurviveSIGKILL(t *testing.T) {
 	if path := os.Getenv("SWBLOCK_TEST_SYNC_CRASH"); path != "" {
+		if os.Getenv("SWBLOCK_TEST_SYNC_CHILD_FAILURE") == "1" {
+			_ = os.Stdout.Close()
+			time.Sleep(30 * time.Millisecond)
+			fmt.Fprintln(os.Stderr, "SYNC_CHILD_FAILURE_SETTLED")
+			os.Exit(7)
+		}
 		opts := WALStoreOptions{}
 		if os.Getenv("SWBLOCK_TEST_STRICT") == "1" {
 			opts.WMode = WModeStrict
@@ -71,6 +78,9 @@ func TestFdatasyncAcknowledgedWritesSurviveSIGKILL(t *testing.T) {
 		s, e := CreateWALStoreWithOptions(path, 32, 4096, opts)
 		if e != nil {
 			panic(e)
+		}
+		if os.Getenv("SWBLOCK_PREZERO") == "0" && verifyInitializedFile(s.fd) == nil {
+			panic("sparse crash arm was silently prezeroed")
 		}
 		s.DisableAutoFlushForRecoveryTest()
 		if _, e = s.Recover(); e != nil {
@@ -217,5 +227,70 @@ func TestDefaultCreatedVolumeStaysSparse(t *testing.T) {
 	stat := info.Sys().(*syscall.Stat_t)
 	if allocated := stat.Blocks * 512; allocated >= info.Size()/4 {
 		t.Fatalf("default volume lost sparse allocation: allocated=%d size=%d", allocated, info.Size())
+	}
+}
+
+func TestInvalidCreatePolicyLeavesNoFileAndAllowsRetry(t *testing.T) {
+	for _, tc := range []struct{ name, sync, allocation, prezero string }{
+		{"sync-before-prezero", "bad", "prezero", "1"},
+		{"allocation", "fdatasync", "bad", "0"},
+		{"fallocate", "fdatasync", "fallocate", "0"},
+		{"prezero", "fdatasync", "", "bad"},
+		{"conflict", "fdatasync", "sparse", "1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SWBLOCK_SYNC", tc.sync)
+			t.Setenv("SWBLOCK_ALLOCATION", tc.allocation)
+			t.Setenv("SWBLOCK_PREZERO", tc.prezero)
+			path := filepath.Join(t.TempDir(), "volume")
+			s, err := CreateWALStore(path, 32, 4096)
+			if err == nil {
+				s.Close()
+				t.Fatal("invalid policy accepted")
+			}
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("invalid policy touched volume before refusal: %v", err)
+			}
+			t.Setenv("SWBLOCK_SYNC", "fdatasync")
+			t.Setenv("SWBLOCK_ALLOCATION", "sparse")
+			t.Setenv("SWBLOCK_PREZERO", "0")
+			s, err = CreateWALStore(path, 32, 4096)
+			if err != nil {
+				t.Fatalf("corrected retry failed: %v", err)
+			}
+			s.Close()
+		})
+	}
+}
+
+func TestSyncCrashFailureDiagnosticsWaitForStderr(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestFdatasyncAcknowledgedWritesSurviveSIGKILL$")
+	cmd.Env = append(os.Environ(), "SWBLOCK_TEST_SYNC_CRASH=", "SWBLOCK_TEST_SYNC_CHILD_FAILURE=1", "SWBLOCK_ALLOCATION=", "SWBLOCK_PREZERO=0")
+	out, err := cmd.CombinedOutput()
+	if err == nil || ctx.Err() != nil {
+		t.Fatalf("wrong failed-child outcome: %v %v", err, ctx.Err())
+	}
+	if !strings.Contains(string(out), "SYNC_CHILD_FAILURE_SETTLED") || strings.Contains(string(out), "WARNING: DATA RACE") {
+		t.Fatalf("failure diagnostics read before child settlement: %s", out)
+	}
+}
+
+func TestSyncControlsIgnoreAmbientAllocation(t *testing.T) {
+	for _, tc := range []struct{ name, test, allocation string }{
+		{"prezero", "TestPrezeroCreatesInitializedVolume", "sparse"},
+		{"crash-matrix", "TestFdatasyncAcknowledgedWritesSurviveSIGKILL", "prezero"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^"+tc.test+"$")
+			cmd.Env = append(os.Environ(), "SWBLOCK_TEST_SYNC_CRASH=", "SWBLOCK_TEST_SYNC_CHILD_FAILURE=", "SWBLOCK_ALLOCATION="+tc.allocation, "SWBLOCK_PREZERO=0")
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("ambient allocation contaminated control: %v: %s", err, out)
+			}
+		})
 	}
 }
