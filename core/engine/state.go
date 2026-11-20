@@ -82,6 +82,9 @@ const (
 
 // RecoveryTruth: what recovery is needed. Authority: primary.
 type RecoveryTruth struct {
+	// FactsMissing preserves an all-zero probe's unknown confidence even
+	// while R retains already-confirmed durable progress.
+	FactsMissing   bool
 	R              uint64 // replica durable/achieved boundary
 	S              uint64 // primary recoverable start boundary (WAL tail)
 	H              uint64 // primary target boundary (head)

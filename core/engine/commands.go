@@ -106,6 +106,8 @@ func (FenceAtEpoch) commandKind() string { return "FenceAtEpoch" }
 // PublishHealthy: declare this replica healthy for external consumption.
 type PublishHealthy struct {
 	ReplicaID string
+	// Zero unless this publication follows a successful recovery close at T.
+	RecoverySessionID, Epoch, EndpointVersion, CertifiedPrefix uint64
 }
 
 func (PublishHealthy) commandKind() string { return "PublishHealthy" }

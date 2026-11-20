@@ -1315,3 +1315,32 @@ func (e *BlockExecutor) recordSessionRunning(replicaID string, sessionID uint64)
 		SessionID: sessionID,
 	}
 }
+
+// PublishRecoveryPrefix forwards a completed-recovery certificate supplied by
+// the engine's healthy publication. Failure conservatively retains the map.
+// It does not certify subsequent live traffic or infer coverage from R.
+func (e *BlockExecutor) PublishRecoveryPrefix(replicaID string, sessionID, epoch, endpointVersion, prefix uint64) {
+	if err := e.beginAsyncOperation(); err != nil {
+		return
+	}
+	go func() {
+		defer e.asyncWG.Done()
+		lineage := RecoveryLineage{SessionID: sessionID, Epoch: epoch, EndpointVersion: endpointVersion, FrontierHint: prefix}
+		conn, err := net.DialTimeout("tcp", e.replicaAddr, 2*time.Second)
+		if err != nil {
+			log.Printf("executor: prefix certificate %s: %v", replicaID, err)
+			return
+		}
+		defer conn.Close()
+		if err := e.trackTransientConn(conn); err != nil {
+			return
+		}
+		defer e.untrackTransientConn(conn)
+		if err := conn.SetDeadline(time.Now().Add(recoveryConnTimeout)); err != nil {
+			return
+		}
+		if err := WriteMsg(conn, MsgCertifiedPrefix, EncodeLineage(lineage)); err != nil {
+			log.Printf("executor: prefix certificate %s: %v", replicaID, err)
+		}
+	}()
+}
