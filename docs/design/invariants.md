@@ -114,6 +114,13 @@ stateDiagram-v2
   Excluded --> Supporting: later fact lists self as a peer
 ```
 
+The apply gate retains versions only above its certified contiguous prefix P.
+Completed recovery plus post-close healthy publication sends an explicit full-lineage
+certificate; current listener admission and the durable boundary guard it. Sync R,
+ordinary live traffic and session changes do not advance P. This implementation
+prunes at successful recovery certification only; healthy-run growth remains an
+RF2 qualification limitation until ordered-live certification is wired.
+
 **Host role and listener admission.**
 
 | From | To | Event and guard | Enforced in | Protects |
@@ -135,7 +142,7 @@ stateDiagram-v2
 |---|---|---|---|---|
 | `Healthy`, `Unknown` | `Degraded` or `CatchingUp` | ship, barrier or fence failure; or a probe that needs catch-up | `core/replication/peer.go` `ReplicaPeer.SetState`, `replicaStateTransitionAllowed` | `INV-REPL-PEER-TRANSITIONS-001` |
 | `Degraded` | `CatchingUp` or `NeedsRebuild` | the engine decides catch-up when the gap is in the primary's WAL, rebuild when it is not | `core/engine/apply.go` `decide` | `INV-REPL-RECOVERY-SESSION-UNIQUE-001` | Each runtime observation selects at most one recovery session; delayed same-identity facts cannot restart a completed prefix, while a higher primary head or replacement identity still permits new work. | M3 recovery observation / preparation | `core/adapter/adapter.go`, `normalize.go`; `core/engine/apply.go` | `TestAdapter_OneRecoveryFromPostCloseStalledAck`, `TestAdapter_OneRecoveryPreparedWithinProbeBatch`, `TestAdapter_ConcurrentOldProbesNeverRestartHealthyRecovery`, `TestAdapter_ProbeUsesFreshBoundsBeforePreparingRecovery`, `TestRecoveryProbeKeepsCompletedRButAllowsNewWorkAndIdentity`, `TestC5_OrderStableAcrossRuns` | `ReplicaApplyOrder` NoDuplicateRecovery | ACTIVE |
-| `INV-REPL-NO-PER-LBA-DATA-REGRESSION` | Successful applies share a replica-wide per-LBA version across all sessions and lanes. Stale recovery advances only its own coverage; stale live entries fail. Closing a session or merging a lower seed cannot erase the applied version; failed physical writes do not publish it. Restart safety still requires substrate seeds. | M3 replica apply / session release | `core/replication/apply_gate.go`; blockvolume `replicationIngress` | `TestReplicationIngressSharesApplyVersionsAcrossSessions`, `TestApplyGate_OverlappingSessionsNeverRegressBytes`, `TestApplyGate_AlreadyAdmittedWireSessionNeverRegressesBytes`, `TestApplyGate_CloseAndLowerSeedNeverEraseReplicaVersion`, `TestApplyGate_FailedWriteDoesNotPublishReplicaVersion` | `ReplicaApplyOrder` NoRegression | ACTIVE |
+| `INV-REPL-NO-PER-LBA-DATA-REGRESSION` | Successful applies share a replica-wide per-LBA version across all sessions and lanes. Stale recovery advances only its own coverage; stale live entries fail. Closing a session or merging a lower seed cannot erase the applied version; failed physical writes do not publish it. Only an explicit completed-recovery prefix certificate advances P and prunes entries at/below P; the floor still rejects/skips old records. Synced R is not a certificate. Restart safety still requires substrate seeds. | M3 replica apply / session release | `core/replication/apply_gate.go`; blockvolume `replicationIngress` | `TestReplicationIngressSharesApplyVersionsAcrossSessions`, `TestApplyGate_OverlappingSessionsNeverRegressBytes`, `TestApplyGate_AlreadyAdmittedWireSessionNeverRegressesBytes`, `TestApplyGate_CloseAndLowerSeedNeverEraseReplicaVersion`, `TestApplyGate_FailedWriteDoesNotPublishReplicaVersion`, `TestApplyGate_CertifiedRecoveryClosesBoundVersionHistory`, `TestApplyGate_PrunedDurableVersionsRemainStale`, `TestApplyGate_CertifiedPrefixFreezesAcrossSessions`, `TestApplyGate_SyncedLiveMaximumDoesNotCoverRecoveryHole`, `TestApplyGate_HealthyRecoveryPublishesWirePrefix`, `TestApplyGate_WirePrefixCannotIntroduceOrReviveSession` | `ReplicaApplyOrder` NoRegression; `ReplicaPrefixFloor` NoRegression/CertifiedCoverage/OnlySuffix | ACTIVE |
 | `INV-REPL-CATCHUP-REBUILD-001` |
 | `CatchingUp` | `Healthy`, `Degraded` or `NeedsRebuild` | done-acknowledgement; failure; WAL recycled or retries exhausted | `core/replication/peer.go` `ReplicaPeer.SetState` | `INV-REPL-PEER-TRANSITIONS-001` |
 | any but `NeedsRebuild` | `Healthy` | recovered | `core/replication/peer.go` `replicaStateTransitionAllowed` | `INV-REPL-PEER-TRANSITIONS-001` |

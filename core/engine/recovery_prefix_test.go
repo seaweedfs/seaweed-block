@@ -12,7 +12,7 @@ func TestHealthyPrefixRequiresCompletedRecoveryAndPostCloseAck(t *testing.T) {
 			t.Fatal("recovery close certified before post-close ack")
 		}
 	}
-	result = Apply(st, DurableAckObserved{ReplicaID: "r1", SessionID: 8, EndpointVersion: 1, TransportEpoch: 1, DurableLSN: 120, PrimaryTailLSN: 1, PrimaryHeadLSN: 120})
+	result = Apply(st, DurableAckObserved{ReplicaID: "r1", EndpointVersion: 1, TransportEpoch: 1, DurableLSN: 120, PrimaryTailLSN: 1, PrimaryHeadLSN: 120})
 	for _, command := range result.Commands {
 		if healthy, ok := command.(PublishHealthy); ok {
 			if healthy.CertifiedPrefix != 100 || healthy.RecoverySessionID != 8 || healthy.Epoch != 1 || healthy.EndpointVersion != 1 {

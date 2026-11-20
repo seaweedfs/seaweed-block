@@ -320,3 +320,10 @@ HostBudget also models guarded configuration initialization: staged bytes are in
 ## Replica apply ordering
 
 `ReplicaApplyOrder.tla` models two admitted sessions on one LBA with three versions, plus the two events of one probe and a delayed post-completion probe. `R292_safe` checks `NoRegression`, `NoDuplicateRecovery` and `NoFalseKnown`; the four `R292_red_*` configurations remove one guard each. It abstracts successful physical applies only: it does not establish restart persistence, authority, byte-level framing, or I/O deadlines.
+
+`ReplicaPrefixFloor.tla` checks two LBAs/three source versions with explicit
+covered-prefix certification, suffix pruning and stale checks against the floor.
+`R293_prefix_safe` checks `NoRegression`, `CertifiedCoverage`, and `OnlySuffix`;
+its two negative controls infer a prefix from the synced maximum or omit the
+floor after pruning. It does not establish the wire certificate's provenance,
+restart persistence, live-prefix extension, or a fixed memory cap without closes.

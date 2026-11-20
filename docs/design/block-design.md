@@ -299,6 +299,7 @@ stateDiagram-v2
   Degraded --> CatchingUp: gap within the primary's WAL
   CatchingUp --> CatchingUp: identical recovery facts retain the prepared session
   Healthy --> Healthy: delayed probe retains completed durable R
+  Healthy --> Healthy: completed recovery certifies P, prune version suffix
   CatchingUp --> Healthy: caught up to the target
   CatchingUp --> Degraded: catch-up fails
   Degraded --> Healthy: recovers
