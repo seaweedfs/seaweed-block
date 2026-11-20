@@ -94,6 +94,81 @@ func TestHeadBeltLowerEpochConflictFencesWithoutCleanup(t *testing.T) {
 	}
 }
 
+func TestHeadBeltEmptyBaseForeignPublicationFences(t *testing.T) {
+	s, _ := newChunkTestStore(t)
+	f := newFakeChunkRemote()
+	layer := mustAttach(t, s, f, ctConfig(2))
+	if _, err := s.Write(0, makeBlock(4096, 0x51)); err != nil {
+		t.Fatal(err)
+	}
+	f.beforeCAS = func(f *fakeChunkRemote) {
+		f.head = chunkHead{Gen: 1, Epoch: 1, Holder: "old", Chunks: map[uint64]chunkRef{}}
+	}
+	if _, err := layer.Cut(ctTimeout(t)); !errors.Is(err, ErrChunkLayerFenced) || !layer.Fenced() {
+		t.Fatalf("empty-base foreign publication not fenced: %v", err)
+	}
+	if layer.RemoteLSN() != 0 || len(liveIntents(t, f)) == 0 {
+		t.Fatal("fenced first cut settled or deleted intents")
+	}
+	calls := f.stats().cas
+	if _, err := layer.Cut(ctTimeout(t)); !errors.Is(err, ErrChunkLayerFenced) || f.stats().cas != calls {
+		t.Fatal("fenced first cut published again", err)
+	}
+	if err := layer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(liveIntents(t, f)) == 0 {
+		t.Fatal("Close removed first-cut intents")
+	}
+}
+
+func TestHeadBeltSinglePointHasNoCoolingDelay(t *testing.T) {
+	f := newFakeChunkRemote()
+	f.head = chunkHead{Gen: 1, Epoch: 1, Holder: "old", Chunks: map[uint64]chunkRef{}}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := ClaimChunkHead(ctx, f, ChunkLayerConfig{Epoch: 2, Holder: "new"}); err != nil {
+		t.Fatal("single-point takeover delayed", err)
+	}
+	if f.stats().getHeads != 2 {
+		t.Fatal("single-point claim skipped readback")
+	}
+}
+
+type deadlineBeltRemote struct {
+	*fakeChunkRemote
+	casDeadline, readDeadline bool
+}
+
+func (r *deadlineBeltRemote) CASHead(ctx context.Context, v ChunkHeadVersion, h ChunkHead) (uint64, error) {
+	d, ok := ctx.Deadline()
+	r.casDeadline = ok && time.Until(d) <= 2*time.Second
+	return r.fakeChunkRemote.CASHead(ctx, v, h)
+}
+func (r *deadlineBeltRemote) GetHeadRoot(ctx context.Context) (ChunkHead, error) {
+	d, ok := ctx.Deadline()
+	r.readDeadline = ok && time.Until(d) <= 2*time.Second
+	return r.fakeChunkRemote.GetHead(ctx)
+}
+func TestHeadBeltOperationsHaveOwnDeadline(t *testing.T) {
+	r := &deadlineBeltRemote{fakeChunkRemote: newFakeChunkRemote()}
+	r.head = chunkHead{Gen: 1, Epoch: 1, Holder: "old", Chunks: map[uint64]chunkRef{}}
+	if _, err := ClaimChunkHead(context.Background(), r, ChunkLayerConfig{Epoch: 2, Holder: "new"}); err != nil {
+		t.Fatal(err)
+	}
+	if !r.casDeadline || !r.readDeadline {
+		t.Fatalf("claim deadlines: CAS=%t read=%t", r.casDeadline, r.readDeadline)
+	}
+	r.casDeadline, r.readDeadline = false, false
+	head := r.stats().head
+	if _, err := casAndConfirmChunkHead(context.Background(), r, ChunkHeadVersion{Gen: head.Gen, Epoch: head.Epoch}, head); err != nil {
+		t.Fatal(err)
+	}
+	if !r.casDeadline || !r.readDeadline {
+		t.Fatalf("cut deadlines: CAS=%t read=%t", r.casDeadline, r.readDeadline)
+	}
+}
+
 func TestHeadBeltTakeoverWaitsBeforeConfirmation(t *testing.T) {
 	f := newFakeChunkRemote()
 	f.head = chunkHead{Gen: 1, Epoch: 1, Holder: "old", Chunks: map[uint64]chunkRef{}}
