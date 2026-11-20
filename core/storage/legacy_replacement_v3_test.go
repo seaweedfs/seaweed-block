@@ -684,6 +684,76 @@ func TestNativeReplacementRecoveredBatchFrontier(t *testing.T) {
 	}
 }
 
+func TestNativeReplacementRetainedBatchAcrossWrap(t *testing.T) {
+	s, path := newMappedCheckpointStoreV3(t)
+	for i := byte(1); i <= 9; i++ {
+		if _, err := s.Write(0, blk(i)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Sync(); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.flusher.flushOnce(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := s.v3.w.logicalHeadV3()
+	if _, err := s.WriteBatch(8, batchBlocks(0x80, 8)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if s.v3.w.logicalHeadV3() <= s.sb.WALSize || before >= s.sb.WALSize {
+		t.Fatal("batch did not physically wrap")
+	}
+	s.SetRecycleFloorSource(&fakeRecycleFloorSource{floor: 13, anyActive: true})
+	if err := s.flusher.flushOnce(); err != nil {
+		t.Fatal(err)
+	}
+	if s.CheckpointLSN() != 13 {
+		t.Fatalf("partial checkpoint=%d", s.CheckpointLSN())
+	}
+	crashReadOnlyStoreV3(t, s)
+	r, err := OpenWALStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.DisableAutoFlushForRecoveryTest()
+	t.Cleanup(func() { _ = r.Close() })
+	if _, err := r.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	if r.NextLSN() != 18 || r.CheckpointLSN() != 13 {
+		t.Fatalf("recovered next=%d cp=%d", r.NextLSN(), r.CheckpointLSN())
+	}
+	var suffix []RecoveryEntry
+	if err := r.ScanLBAs(14, func(e RecoveryEntry) error { suffix = append(suffix, e); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if len(suffix) != 4 {
+		t.Fatalf("retained suffix entries=%d", len(suffix))
+	}
+	for i, e := range suffix {
+		if e.LSN != uint64(14+i) || e.LBA != uint32(12+i) || !bytes.Equal(e.Data, blk(byte(0x84+i))) {
+			t.Fatalf("suffix %d: %+v", i, e)
+		}
+	}
+	if n, err := r.Write(20, blk(0xF1)); err != nil || n != 18 {
+		t.Fatalf("post-recovery append=%d %v", n, err)
+	}
+	if _, err := r.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.flusher.flushOnce(); err != nil {
+		t.Fatal(err)
+	}
+	readBatchV3(t, r, 8, 0x80, 8, "wrapped retained batch")
+	if got, err := r.Read(20); err != nil || !bytes.Equal(got, blk(0xF1)) {
+		t.Fatalf("later append: %v", err)
+	}
+}
+
 func TestNativeReplacementApplyDirtSurvivesCheckpoint(t *testing.T) {
 	s, _ := newMappedCheckpointStoreV3(t)
 	if err := s.SeedChunkFrontier(4); err != nil {
