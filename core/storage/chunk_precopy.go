@@ -204,6 +204,10 @@ func (l *chunkLayerImpl) precopyEstimate(tail uint64, attempts int) PrecopyRepor
 }
 
 func (l *chunkLayerImpl) samplePrecopy(st chunkCutStats, fixedNs int64) {
+	// A no-op root read is not a measurement of final CAS + confirmation.
+	if st.CASNs <= 0 {
+		return
+	}
 	s := precopySample{at: time.Now(), fixed: time.Duration(max(int64(1), fixedNs))}
 	if st.UploadedBytes > 0 && st.PayloadNs > 0 {
 		s.rate = float64(st.UploadedBytes) / time.Duration(st.PayloadNs).Seconds()

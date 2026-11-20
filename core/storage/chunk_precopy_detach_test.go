@@ -231,7 +231,8 @@ func TestPrecopyDetachQueuedCancellationReturnsWhileOtherCutOwnsPipeline(t *test
 	_, f, l, _ := precopyLayer(t, 1024, 1)
 	entered, release := holdPuts(t, f)
 	cutDone, preDone := make(chan struct{}), make(chan struct{})
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	var ctx context.Context
+	cancel := func() {}
 	var precopyErr error
 	t.Cleanup(func() {
 		release()
@@ -251,6 +252,7 @@ func TestPrecopyDetachQueuedCancellationReturnsWhileOtherCutOwnsPipeline(t *test
 		close(preDone)
 		t.Fatal("other cut did not reach held upload")
 	}
+	ctx, cancel = context.WithTimeout(context.Background(), 100*time.Millisecond)
 	go func() {
 		defer close(preDone)
 		_, precopyErr = l.PrecopyDetach(ctx, func() bool { t.Error("queued canceled caller stopped I/O"); return false })
