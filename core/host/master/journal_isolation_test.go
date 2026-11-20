@@ -38,6 +38,13 @@ type isolationRig struct {
 
 func newIsolationRig(t *testing.T, strict bool, authorityDir, lifecycleDir string) *isolationRig {
 	t.Helper()
+	return startIsolationRig(t, strict, authorityDir, lifecycleDir, &masterStore)
+}
+
+// startIsolationRig starts the rig's master; self, when not nil, replaces the
+// identity the master sampled from its authority store.
+func startIsolationRig(t *testing.T, strict bool, authorityDir, lifecycleDir string, self *storeident.Identity) *isolationRig {
+	t.Helper()
 	logs := &syncBuffer{}
 	m, err := New(Config{Listen: "127.0.0.1:0", AuthorityStoreDir: authorityDir, LifecycleStoreDir: lifecycleDir, WorkspaceRPC: true,
 		StrictJournalIsolation: strict, Logger: log.New(logs, "", 0),
@@ -47,7 +54,9 @@ func newIsolationRig(t *testing.T, strict bool, authorityDir, lifecycleDir strin
 	if err != nil {
 		t.Fatal(err)
 	}
-	m.journal.setSelf(masterStore) // before Start: no RPC has run yet
+	if self != nil {
+		m.journal.setSelf(*self) // before Start: no RPC has run yet
+	}
 	m.Start()
 	r := &isolationRig{m: m, logs: logs}
 	t.Cleanup(func() {

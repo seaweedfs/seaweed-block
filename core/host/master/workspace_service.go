@@ -179,6 +179,12 @@ func (s *services) MoveWorkspace(ctx context.Context, q *control.WorkspaceMove) 
 			matched = true
 		}
 	}
+	req := authority.WorkspaceMoveRequest{RequestID: q.GetRequestId(), VolumeID: q.GetVolumeId(), ExpectedReplicaID: q.GetExpectedReplicaId(), ExpectedHost: oldHost, TargetHost: target.ServerID,
+		ExpectedEpoch: q.GetExpectedEpoch(), TargetReplicaID: q.GetTargetReplicaId(), TargetDataAddr: q.GetTargetDataAddr(), TargetCtrlAddr: q.GetTargetCtrlAddr(), Kind: q.GetKind(), Force: q.GetForce()}
+	// Strict journal isolation refuses new work only: an exact replay of an
+	// issued move (its reply lost, the target found co-located since) gets
+	// its durable grant back from MoveWorkspace, never a definite refusal.
+	replay := ok && s.host.Publisher().IssuedWorkspaceMove(req)
 	switch {
 	case endpointErr != nil:
 		refusal = fmt.Sprintf("move target endpoints invalid: %v", endpointErr)
@@ -188,7 +194,7 @@ func (s *services) MoveWorkspace(ctx context.Context, q *control.WorkspaceMove) 
 		refusal = fmt.Sprintf("move target node %q is not registered", q.GetTargetServerId())
 	case target.ServerID == oldHost:
 		refusal = fmt.Sprintf("move target %q is the current source host", target.ServerID)
-	case s.host.colocatedTargetRefused(target.ServerID):
+	case !replay && s.host.colocatedTargetRefused(target.ServerID):
 		refusal = fmt.Sprintf("move target node %q shares the authority store's file system (strict journal isolation)", target.ServerID)
 	case !matched:
 		refusal = fmt.Sprintf("move target endpoints %s/%s on %q are not registered (%s)", q.GetTargetDataAddr(), q.GetTargetCtrlAddr(), target.ServerID, registeredTargetEndpoints(target, bindings, explicit))
@@ -199,8 +205,7 @@ func (s *services) MoveWorkspace(ctx context.Context, q *control.WorkspaceMove) 
 	if err = s.host.workspaceEndpointsAvailable(lifecycle.WorkspaceBinding{VolumeID: q.GetVolumeId(), ServerID: target.ServerID, DataAddr: q.GetTargetDataAddr(), CtrlAddr: q.GetTargetCtrlAddr()}); err != nil {
 		return nil, workspaceError(err)
 	}
-	r, err := s.host.Publisher().MoveWorkspace(ctx, authority.WorkspaceMoveRequest{RequestID: q.GetRequestId(), VolumeID: q.GetVolumeId(), ExpectedReplicaID: q.GetExpectedReplicaId(), ExpectedHost: oldHost, TargetHost: target.ServerID,
-		ExpectedEpoch: q.GetExpectedEpoch(), TargetReplicaID: q.GetTargetReplicaId(), TargetDataAddr: q.GetTargetDataAddr(), TargetCtrlAddr: q.GetTargetCtrlAddr(), Kind: q.GetKind(), Force: q.GetForce()}, head)
+	r, err := s.host.Publisher().MoveWorkspace(ctx, req, head)
 	if err != nil {
 		return nil, workspaceError(err)
 	}

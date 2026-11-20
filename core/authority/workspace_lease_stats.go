@@ -10,12 +10,19 @@ import (
 // how long the published lease still covers a holder if no extension lands.
 // Extensions start below 1.25 TTL of headroom and grants are clamped below
 // 1 TTL, so a lagging authority store shows first as an extension in flight
-// with headroom under 1.125 TTL (the alarm), and only later as clamps.
+// with headroom under 1.125 TTL, and only later as clamps.
+//
+// The alarm is sampled at renewals, never by a timer: it fires at the latest
+// together with the first clamped grant of a streak (logged before the clamp
+// line), and earlier only if a renewal lands in the 1-1.125 TTL band while an
+// extension is pending. A renewer slower than that band may see both on one
+// renewal.
 
 // LeaseStats is a snapshot of the workspace lease renewal counters.
 type LeaseStats struct {
-	// HeadroomAlarms counts alarm streaks: renewals that found an extension
-	// in flight with headroom below 1.125 TTL, once per volume per streak.
+	// HeadroomAlarms counts alarm streaks, once per volume per streak: a
+	// renewal that found headroom below 1.125 TTL with an extension in
+	// flight, or the first clamped grant (headroom below 1 TTL) of a streak.
 	HeadroomAlarms uint64
 	// ClampsTotal counts grants clamped to the durable horizon.
 	ClampsTotal uint64
@@ -36,8 +43,10 @@ type leaseCounters struct {
 	buckets     [clampBuckets]struct{ sec, n int64 } // clamps by unix second
 	minHeadroom int64
 	minObserved bool
-	// Per-minute summary, emitted lazily by the first renewal after the
-	// window: no goroutine of its own.
+	// Per-minute summary, emitted by the first renewal attempt after the
+	// window, granted or refused: no goroutine or timer of its own. With no
+	// renewal attempts at all nothing is emitted; the counters above (the
+	// status endpoint) still show the clamps.
 	windowStart  time.Time
 	windowClamps uint64
 	windowMin    int64
@@ -66,20 +75,31 @@ func (c *leaseCounters) recordClamp(now time.Time) {
 	b.n++
 }
 
+// summaryDue closes a window that has lasted a minute and returns its summary
+// note when it had clamps. Every renewal attempt calls it, granted or refused,
+// so a stall through expiry (only refusals after the clamps) is still
+// summarized. It opens no window: the first grant does.
+func (c *leaseCounters) summaryDue(now time.Time) string {
+	if c.windowStart.IsZero() || now.Sub(c.windowStart) < time.Minute {
+		return ""
+	}
+	var note string
+	if c.windowClamps > 0 {
+		note = fmt.Sprintf("workspace lease: %d clamped grants in the last %s (total %d, min headroom %s); the authority store is lagging",
+			c.windowClamps, now.Sub(c.windowStart).Round(time.Second), c.clamps, time.Duration(c.windowMin).Round(time.Millisecond))
+	}
+	c.windowStart, c.windowClamps, c.windowMinSet = now, 0, false
+	return note
+}
+
 // observeGrant records the headroom of a grant and returns a per-minute
 // summary note when a window with clamps has just ended. Call it before
 // recordClamp of the same grant (it may open a new window).
 func (c *leaseCounters) observeGrant(now time.Time, headroom int64) string {
-	var note string
 	if c.windowStart.IsZero() {
 		c.windowStart = now
-	} else if now.Sub(c.windowStart) >= time.Minute {
-		if c.windowClamps > 0 {
-			note = fmt.Sprintf("workspace lease: %d clamped grants in the last %s (total %d, min headroom %s); the authority store is lagging",
-				c.windowClamps, now.Sub(c.windowStart).Round(time.Second), c.clamps, time.Duration(c.windowMin).Round(time.Millisecond))
-		}
-		c.windowStart, c.windowClamps, c.windowMinSet = now, 0, false
 	}
+	note := c.summaryDue(now)
 	if !c.windowMinSet || headroom < c.windowMin {
 		c.windowMin, c.windowMinSet = headroom, true
 	}
@@ -103,16 +123,21 @@ func (p *Publisher) WorkspaceLeaseStats() LeaseStats {
 	}
 }
 
-// headroomAlarmLocked runs the alarm state machine of one renewal. Caller
-// holds leaseMu. It returns a note to log after the unlock.
+// headroomAlarmLocked runs the alarm state machine of one renewal, before the
+// renewal clamps (a grant clamps exactly when headroom < 1 TTL). Caller holds
+// leaseMu. It returns a note to log after the unlock, before the clamp note.
 //
 //	state      | condition at a renewal                        | next       | effect
 //	-----------+-----------------------------------------------+------------+------------------
 //	quiet      | extending && headroom < 1.125 TTL             | alarmed    | count + log once
+//	quiet      | headroom < 1 TTL (this grant clamps)          | alarmed    | count + log once
 //	quiet      | otherwise                                     | quiet      | -
 //	alarmed    | headroom >= 1.25 TTL                          | quiet      | streak ends
 //	alarmed    | !extending && headroom >= 1.125 TTL           | quiet      | streak ends
 //	alarmed    | otherwise                                     | alarmed    | -
+//
+// A clamp streak (headroom < 1 TTL) therefore never starts without an alarm
+// on the same or an earlier renewal, and never re-alarms while it lasts.
 func (p *Publisher) headroomAlarmLocked(volume string, lv *leaseView, headroom int64) string {
 	ttl := int64(p.workspaceTTL)
 	low, high := ttl+ttl/8, ttl+ttl/4
@@ -122,13 +147,19 @@ func (p *Publisher) headroomAlarmLocked(volume string, lv *leaseView, headroom i
 		}
 		return ""
 	}
-	if !lv.extending || headroom >= low {
+	var why string
+	switch {
+	case lv.extending && headroom < low:
+		why = "below 1.125 TTL while the extension write is pending"
+	case headroom < ttl:
+		why = "below 1 TTL: this grant is the first clamped to the durable horizon"
+	default:
 		return ""
 	}
 	lv.alarmed = true
 	p.leaseStats.alarms++
-	return fmt.Sprintf("workspace lease: volume=%s headroom %s below 1.125 TTL while the extension write is pending; the authority store is lagging",
-		volume, time.Duration(headroom).Round(time.Millisecond))
+	return fmt.Sprintf("workspace lease: volume=%s headroom %s %s; the authority store is lagging",
+		volume, time.Duration(headroom).Round(time.Millisecond), why)
 }
 
 func (p *Publisher) logLease(note string) {

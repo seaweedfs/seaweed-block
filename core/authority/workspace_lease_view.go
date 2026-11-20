@@ -15,6 +15,7 @@ type leaseDerived struct {
 	bound        bool // an authority line exists for the volume
 	replica      string
 	epoch        uint64
+	issuedHost   string // NewHost of the issued move that minted the line; "" if none
 	leasePresent bool
 	revoking     bool
 	movePending  bool // the last workspace move is reserved, not issued
@@ -45,6 +46,11 @@ func (p *Publisher) deriveLeaseLocked(volume string) leaseDerived {
 	}
 	if s := p.workspace[volume]; s != nil {
 		d.movePending = len(s.Moves) > 0 && !s.Moves[len(s.Moves)-1].Issued
+		for _, r := range s.Moves {
+			if d.bound && r.Issued && r.NewReplicaID == d.replica && r.NewEpoch == d.epoch {
+				d.issuedHost = r.NewHost
+			}
+		}
 		if s.Lease != nil {
 			d.leasePresent, d.revoking, d.horizon, d.lease = true, s.Lease.Revoking, s.Lease.ExpiresAtNS, *s.Lease
 			d.maxSkewNS = int64(p.workspaceSkew(s.Lease))
@@ -122,6 +128,33 @@ func (p *Publisher) WorkspaceLeaseReply(volume string) (WorkspaceLease, bool) {
 	return l, true
 }
 
+// PublishedLine is a volume's committed authority line as the lease view
+// publishes it.
+type PublishedLine struct {
+	ReplicaID string
+	Epoch     uint64
+	// IssuedHost is the target host of the issued move that minted this line;
+	// "" when no issued move did (a placement or static topology line).
+	IssuedHost string
+}
+
+// PublishedAuthorityLines returns the committed authority line of every
+// volume that has one. It reads the lease views under the leaf leaseMu only:
+// it never waits on p.mu, which writers hold across store writes, and it
+// sees only state those writers already published (a reserved, unissued
+// move never shows here).
+func (p *Publisher) PublishedAuthorityLines() map[string]PublishedLine {
+	p.leaseMu.Lock()
+	defer p.leaseMu.Unlock()
+	out := make(map[string]PublishedLine, len(p.leaseViews))
+	for volume, lv := range p.leaseViews {
+		if lv.d.bound {
+			out[volume] = PublishedLine{ReplicaID: lv.d.replica, Epoch: lv.d.epoch, IssuedHost: lv.d.issuedHost}
+		}
+	}
+	return out
+}
+
 // RenewWorkspaceLease answers a live holder from memory: it takes only the
 // leaf leaseMu, does no I/O and never waits on p.mu or the store. The grant
 // is min(now+TTL, durable horizon); a background extender (an ordinary p.mu
@@ -133,37 +166,45 @@ func (p *Publisher) RenewWorkspaceLease(ctx context.Context, volume, holder stri
 	}
 	p.leaseMu.Lock()
 	now := p.workspaceNow() // read under leaseMu: the forced-barrier argument needs it
+	// unlock releases leaseMu on a path that grants nothing and logs a due
+	// per-minute summary after the unlock: every renewal attempt, granted or
+	// refused, may close the window (a stall through expiry refuses only).
+	unlock := func() {
+		summary := p.leaseStats.summaryDue(now)
+		p.leaseMu.Unlock()
+		p.logLease(summary)
+	}
 	lv := p.leaseViews[volume]
 	if lv == nil || !lv.d.bound || lv.d.replica != holder || lv.d.epoch != epoch {
-		p.leaseMu.Unlock()
+		unlock()
 		return WorkspaceLease{}, fmt.Errorf("workspace lease: stale authority")
 	}
 	if lv.d.movePending {
-		p.leaseMu.Unlock()
+		unlock()
 		return WorkspaceLease{}, fmt.Errorf("workspace lease: move pending")
 	}
 	if !lv.d.leasePresent {
-		p.leaseMu.Unlock() // never re-enter p.mu while holding the leaf
+		unlock() // never re-enter p.mu while holding the leaf
 		return p.firstWorkspaceGrant(ctx, volume, holder, epoch)
 	}
 	if lv.d.revoking { // tell the host to drain; never extend
 		l := lv.d.lease
 		l.ExpiresAtNS = lv.replyExpiryNS()
-		p.leaseMu.Unlock()
+		unlock()
 		return l, nil
 	}
 	if now.UnixNano() >= lv.d.horizon || !now.Before(lv.deadline) {
-		p.leaseMu.Unlock()
+		unlock()
 		return WorkspaceLease{}, fmt.Errorf("workspace lease expired or revoking")
 	}
 	// Where the synchronous write used to refuse (persistWorkspaceLocked):
 	// a renewal never bypasses uncertainty (INV-AUTH-UNCERTAIN-001).
 	if lv.d.storeless || lv.d.uncertain {
-		p.leaseMu.Unlock()
+		unlock()
 		return WorkspaceLease{}, fmt.Errorf("workspace durable store unavailable or uncertain")
 	}
-	// The headroom alarm is evaluated before the clamp: it fires while an
-	// extension is pending and headroom is still above one TTL.
+	// The headroom alarm is sampled here, before the clamp: at the latest it
+	// fires on the first clamped grant of a streak (headroomAlarmLocked).
 	headroom := lv.d.horizon - now.UnixNano()
 	alarm := p.headroomAlarmLocked(volume, lv, headroom)
 	grant := now.Add(p.workspaceTTL).UnixNano()
@@ -176,8 +217,10 @@ func (p *Publisher) RenewWorkspaceLease(ctx context.Context, volume, holder stri
 	// its remaining validity; refuse with an error instead.
 	if grant-lv.d.maxSkewNS/2 <= now.UnixNano() {
 		horizon := lv.d.horizon // the view is leaseMu's: read it before the unlock (#242)
+		summary := p.leaseStats.summaryDue(now)
 		p.leaseMu.Unlock()
 		p.logLease(alarm)
+		p.logLease(summary)
 		return WorkspaceLease{}, fmt.Errorf("workspace lease: durable horizon %s leaves no host validity", time.Unix(0, horizon).UTC().Format(time.RFC3339Nano))
 	}
 	if g := time.Unix(0, grant); g.After(lv.deadline) {

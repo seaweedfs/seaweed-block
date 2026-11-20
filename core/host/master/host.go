@@ -17,6 +17,7 @@ package master
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -229,7 +230,7 @@ func New(cfg Config) (*Host, error) {
 		ctrl:    ctrl,
 		topo:    cfg.Topology,
 		events:  newEventRing(1024),
-		journal: newJournalIsolation(storeident.Of(cfg.AuthorityStoreDir)),
+		journal: newJournalIsolation(storeident.Identity{}), // sampled once the store exists
 	}
 
 	boot, err := bootstrap.BootstrapWithOptions(cfg.AuthorityStoreDir, ctrl, bootstrap.Options{
@@ -241,6 +242,10 @@ func New(cfg Config) (*Host, error) {
 		return nil, fmt.Errorf("master.New: Bootstrap: %w", err)
 	}
 	holder.set(boot.Publisher)
+	// Bootstrap creates a fresh store directory: sample its file system only
+	// now, or a first start would compare against an unknown device forever.
+	// An unknown identity (stat error, unsupported platform) never matches.
+	h.journal.setSelf(storeident.Of(cfg.AuthorityStoreDir))
 
 	var sink authority.ControllerSink = ctrl
 	if len(cfg.Topology.Volumes) == 0 {
@@ -308,7 +313,10 @@ func New(cfg Config) (*Host, error) {
 			return nil, fmt.Errorf("master.New: status listen %q: %w", cfg.StatusListen, err)
 		}
 		h.statusLn = statusLn
-		h.statusHTTP = &http.Server{Handler: h.statusHandler(), ReadHeaderTimeout: 5 * time.Second}
+		// Every connection phase is bounded: a client that withholds a
+		// declared body or never reads the reply is cut off.
+		h.statusHTTP = &http.Server{Handler: h.statusHandler(), ReadHeaderTimeout: statusReadTimeout, ReadTimeout: statusReadTimeout,
+			WriteTimeout: statusWriteTimeout, IdleTimeout: statusIdleTimeout}
 	}
 
 	grpcSrv := grpc.NewServer()
@@ -525,9 +533,9 @@ func (h *Host) Close(ctx context.Context) error {
 	if h.frontendRuntimeHTTP != nil {
 		_ = h.frontendRuntimeHTTP.Shutdown(ctx)
 	}
+	var statusErr error
 	if h.statusHTTP != nil {
-		_ = h.statusHTTP.Shutdown(ctx)
-		_ = h.statusLn.Close() // a listener Start never served is not Shutdown's
+		statusErr = h.closeStatusHTTP(ctx)
 	}
 	h.obs.Stop()
 
@@ -547,5 +555,29 @@ func (h *Host) Close(ctx context.Context) error {
 	if h.boot != nil && h.boot.Publisher != nil {
 		h.boot.Publisher.CloseWorkspaceExtenders()
 	}
-	return h.boot.Close()
+	return errors.Join(statusErr, h.boot.Close())
+}
+
+// Status endpoint connection bounds.
+const (
+	statusReadTimeout  = 5 * time.Second
+	statusWriteTimeout = 5 * time.Second
+	statusIdleTimeout  = 30 * time.Second
+)
+
+// closeStatusHTTP shuts the status endpoint down gracefully until ctx ends,
+// then force-closes the connections still open (Shutdown leaves them). It
+// returns the force close's error, if any; an expired graceful shutdown that
+// the force close completed is only logged.
+func (h *Host) closeStatusHTTP(ctx context.Context) error {
+	defer h.statusLn.Close() // a listener Start never served is not Shutdown's
+	err := h.statusHTTP.Shutdown(ctx)
+	if err == nil {
+		return nil
+	}
+	h.log.Printf("blockmaster: status graceful shutdown: %v; closing its open connections", err)
+	if cerr := h.statusHTTP.Close(); cerr != nil && !errors.Is(cerr, net.ErrClosed) {
+		return fmt.Errorf("status endpoint close: %w", cerr)
+	}
+	return nil
 }

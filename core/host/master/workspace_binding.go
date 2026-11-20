@@ -136,12 +136,17 @@ func (s *services) PlaceWorkspace(ctx context.Context, q *control.WorkspacePlace
 	if _, ok := s.host.lifecycle.Nodes.GetNode(q.GetServerId()); !ok {
 		return nil, workspaceError(fmt.Errorf("workspace placement: unknown server"))
 	}
-	if s.host.colocatedTargetRefused(binding.ServerID) {
+	identical := func(p lifecycle.PlacementIntent) bool {
+		return len(p.Slots) == 1 && p.Slots[0].ServerID == binding.ServerID && p.Slots[0].ReplicaID == q.GetReplicaId() && p.Slots[0].DataAddr == binding.DataAddr && p.Slots[0].CtrlAddr == binding.CtrlAddr
+	}
+	// Strict journal isolation refuses new work only: repeating the
+	// recorded placement keeps its idempotent result.
+	if p, ok := s.host.lifecycle.Placements.GetPlacement(q.GetVolumeId()); !(ok && identical(p)) && s.host.colocatedTargetRefused(binding.ServerID) {
 		return nil, workspaceError(fmt.Errorf("workspace placement: node %q shares the authority store's file system (strict journal isolation)", binding.ServerID))
 	}
 	err = s.host.Publisher().RecordWorkspacePlacement(ctx, q.GetVolumeId(), func() error {
 		if p, ok := s.host.lifecycle.Placements.GetPlacement(q.GetVolumeId()); ok {
-			if len(p.Slots) == 1 && p.Slots[0].ServerID == binding.ServerID && p.Slots[0].ReplicaID == q.GetReplicaId() && p.Slots[0].DataAddr == binding.DataAddr && p.Slots[0].CtrlAddr == binding.CtrlAddr {
+			if identical(p) {
 				return nil
 			}
 			return fmt.Errorf("workspace placement: existing intent differs")

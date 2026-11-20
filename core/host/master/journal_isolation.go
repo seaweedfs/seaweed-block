@@ -69,25 +69,28 @@ func (j *journalIsolation) setSelf(id storeident.Identity) {
 // a lifecycle placement slot on it, or a current authority line whose source
 // host (an issued move's target, the placement, or a static topology slot) is
 // it. Both survive a master restart, so a restart never turns a serving node
-// into a new one. It takes no workspaceMu: a heartbeat must not wait behind a
-// slow authority write.
+// into a new one. A heartbeat must not wait behind a slow authority write: it
+// takes neither workspaceMu nor the publisher lock (held across authority
+// store writes), only the published authority lines and the lifecycle
+// stores, whose locks cover only their own file I/O.
 func (h *Host) nodeServesVolumes(server string) bool {
+	lines := h.Publisher().PublishedAuthorityLines()
 	if h.lifecycle != nil {
 		for _, p := range h.lifecycle.Placements.ListPlacements() {
 			for _, slot := range p.Slots {
 				if slot.ServerID == server {
-					return true
+					return true // also every line a placement slot sources
 				}
 			}
 		}
-		for _, v := range h.lifecycle.Volumes.ListVolumes() {
-			if line, ok := h.Publisher().VolumeAuthorityLine(v.Spec.VolumeID); ok && h.workspaceSourceHost(v.Spec.VolumeID, line.ReplicaID, line.Epoch) == server {
+		for volume, line := range lines {
+			if _, live := h.lifecycle.Volumes.GetVolumeSnapshot(volume); live && line.IssuedHost == server {
 				return true
 			}
 		}
 	}
 	for _, v := range h.topo.Volumes {
-		line, ok := h.Publisher().VolumeAuthorityLine(v.VolumeID)
+		line, ok := lines[v.VolumeID]
 		if !ok {
 			continue
 		}
