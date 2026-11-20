@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -425,4 +426,93 @@ func TestKilledInitializerDoesNotPublishPartialConfiguration(t *testing.T) {
 	if l.Snapshot().(Stats).FallbackActive {
 		t.Fatal("successor silently bypassed shared cap")
 	}
+}
+
+func TestUnusablePoolClassPolicy(t *testing.T) {
+	for _, class := range []Class{Normal, Urgent, BackgroundFill, Idle} {
+		t.Run(fmt.Sprint(class), func(t *testing.T) {
+			c := testConfig(t)
+			c.Directory += "-missing"
+			l := newTest(t, c)
+			id, err := l.Acquire(context.Background(), class, nil)
+			st := l.Snapshot().(Stats)
+			if class == Urgent {
+				if err != nil || st.Fallback != 1 || !st.FallbackActive || st.LastPoolError == "" {
+					t.Fatalf("urgent fallback: id=%d err=%v stats=%+v", id, err, st)
+				}
+				l.Release(id)
+			} else if !errors.Is(err, ErrBusy) || id != 0 || st.Admitted != 0 || st.SkippedByClass[class] != 1 || st.Fallback != 0 || st.LastPoolError == "" {
+				t.Fatalf("background bypassed unavailable pool: class=%d id=%d err=%v stats=%+v", class, id, err, st)
+			}
+		})
+	}
+}
+
+func TestPacingDebtSurvivesOwnLeaseTurnover(t *testing.T) {
+	c := testConfig(t)
+	c.BytesPerSecond = 2 // one byte/second per coordinated cut slot
+	l := newTest(t, c)
+	first, err := l.Admit(context.Background(), 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = l.WaitUpload(context.Background(), 4<<20); err != nil {
+		t.Fatal(err)
+	}
+	l.Release(first)
+	settled(t, l)
+	next, err := l.Admit(context.Background(), 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Release(next)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err = l.WaitUpload(ctx, 1); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("same-process debt reset at lease turnover: %v", err)
+	}
+}
+
+func TestPacingProcessHelper(t *testing.T) {
+	dir := os.Getenv("SWBLOCK_TEST_PACING_DIR")
+	if dir == "" {
+		return
+	}
+	c := DefaultConfig(dir)
+	c.NormalSlots, c.UrgentSlots, c.BytesPerSecond = 1, 1, 2
+	l, err := New(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := l.Admit(context.Background(), 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { l.Release(id); l.Close() }()
+	// Start the pacing budget after process startup and slot admission.
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	if err = l.WaitUpload(ctx, 4<<20); err != nil {
+		t.Fatalf("fresh process inherited another process's pacing debt: %v", err)
+	}
+	fmt.Println("FRESH-PACING 4194304")
+}
+
+func TestPacingFreshProcessesDoNotShareDebt(t *testing.T) {
+	dir := t.TempDir()
+	const starts = 6
+	start := time.Now()
+	for i := 0; i < starts; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestPacingProcessHelper$")
+		cmd.Env = append(os.Environ(), "SWBLOCK_TEST_PACING_DIR="+dir)
+		out, err := cmd.CombinedOutput()
+		cancel()
+		if err != nil || !strings.Contains(string(out), "FRESH-PACING 4194304") {
+			t.Fatalf("fresh holder %d: %v\n%s", i, err, out)
+		}
+	}
+	// Each new process gets an immediate first reservation. Slot reuse does
+	// not preserve pacing debt, so these bytes cannot certify a host-rate cap.
+	t.Logf("fresh_processes=%d attempted_payload_bytes=%d elapsed=%s", starts, starts*(4<<20), time.Since(start))
 }
