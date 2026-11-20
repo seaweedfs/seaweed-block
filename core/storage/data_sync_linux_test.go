@@ -189,3 +189,33 @@ func TestDataSyncSyscallProbe(t *testing.T) {
 		t.Fatalf("readback: %v", e)
 	}
 }
+
+func TestFallocateCreatesAllocatedUnwrittenVolume(t *testing.T) {
+	t.Setenv("SWBLOCK_SYNC", "fdatasync")
+	t.Setenv("SWBLOCK_PREZERO", "0")
+	t.Setenv("SWBLOCK_ALLOCATION", "fallocate")
+	path := filepath.Join(t.TempDir(), "volume")
+	s, e := CreateWALStore(path, 32, 4096)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer s.Close()
+	f, e := os.Open(path)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer f.Close()
+	if e = verifyAllocatedFile(f, false); e != nil {
+		t.Fatalf("fallocate left holes: %v", e)
+	}
+	if e = verifyInitializedFile(f); e == nil {
+		t.Fatal("fallocate unexpectedly reports every extent written")
+	}
+	if _, e = s.Recover(); e != nil {
+		t.Fatal(e)
+	}
+	b, e := s.Read(31)
+	if e != nil || !bytes.Equal(b, make([]byte, 4096)) {
+		t.Fatalf("unwritten extent bytes: %v", e)
+	}
+}

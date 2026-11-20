@@ -12,7 +12,9 @@ import (
 // FIEMAP with SYNC resolves delayed allocation before inspecting the mapping.
 // Reject holes, unknown/delayed mappings and unwritten extents; fallocate alone
 // does not satisfy the initialized-file experiment's precondition.
-func verifyInitializedFile(f *os.File) error {
+func verifyInitializedFile(f *os.File) error { return verifyAllocatedFile(f, true) }
+
+func verifyAllocatedFile(f *os.File, written bool) error {
 	info, err := f.Stat()
 	if err != nil {
 		return err
@@ -40,7 +42,7 @@ func verifyInitializedFile(f *os.File) error {
 			return fmt.Errorf("storage: uninitialized file at %d", covered)
 		}
 		for _, e := range m.Extents[:m.Mapped] {
-			if e.Logical > covered || e.Length == 0 || e.Logical+e.Length < e.Logical || e.Flags&(2|4|0x800) != 0 {
+			if e.Logical > covered || e.Length == 0 || e.Logical+e.Length < e.Logical || e.Flags&(2|4) != 0 || (written && e.Flags&0x800 != 0) {
 				return fmt.Errorf("storage: hole or unwritten extent at %d (logical=%d flags=%#x)", covered, e.Logical, e.Flags)
 			}
 			next := e.Logical + e.Length
@@ -55,3 +57,5 @@ func verifyInitializedFile(f *os.File) error {
 
 func dataSyncSupported() error       { return nil }
 func fdatasyncFile(f *os.File) error { return unix.Fdatasync(int(f.Fd())) }
+
+func fallocateFile(f *os.File, size int64) error { return unix.Fallocate(int(f.Fd()), 0, 0, size) }
