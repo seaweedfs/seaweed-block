@@ -938,6 +938,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 				}
 			}
 			captured = append(captured, copied...)
+			st.COWWALReadAttempts, st.COWLocalReadNs = w.walReads.Load(), w.localReadNs.Load()
 			st.COWSavedChunks = int(w.saved.Load())
 			st.COWSaveNs, st.COWWaitNs = w.saveNs.Load(), w.waitNs.Load()
 		}

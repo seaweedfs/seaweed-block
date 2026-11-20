@@ -66,6 +66,8 @@ type cutCOWWindow struct {
 	side        *os.File
 	sideErr     error
 	cleanup     sync.Once
+	walReads    atomic.Uint64
+	localReadNs atomic.Int64
 	saved       atomic.Int64
 	saveNs      atomic.Int64
 	waitNs      atomic.Int64
@@ -383,6 +385,8 @@ func (w *cutCOWWindow) save(e *cutCOWEntry, data []byte, missing []uint64) error
 // is lazily absent (no local version, HEAD names the chunk) is left zero and
 // listed in missing; its image at H is HEAD's by definition.
 func (l *chunkLayerImpl) readCOWChunk(w *cutCOWWindow, idx uint64) ([]byte, []uint64, error) {
+	start := time.Now()
+	defer func() { w.localReadNs.Add(time.Since(start).Nanoseconds()) }()
 	buf := make([]byte, int(w.chunkBytes))
 	var missing []uint64
 	for i := uint64(0); i < l.chunkBlocks; i++ {
@@ -395,7 +399,7 @@ func (l *chunkLayerImpl) readCOWChunk(w *cutCOWWindow, idx uint64) ([]byte, []ui
 		if lba >= uint64(l.s.NumBlocks()) {
 			break
 		}
-		b, local, err := l.readLocalBlock(lba)
+		b, local, err := l.readLocalBlock(lba, w)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -414,10 +418,10 @@ func (l *chunkLayerImpl) readCOWChunk(w *cutCOWWindow, idx uint64) ([]byte, []ui
 // ZERO. It never calls the miss hook. The order is safe against a concurrent
 // flush (dirty map before presence) and fill (HEAD's bytes either way); a new
 // write of the block waits for the caller's COW entry.
-func (l *chunkLayerImpl) readLocalBlock(lba uint64) ([]byte, bool, error) {
+func (l *chunkLayerImpl) readLocalBlock(lba uint64, w *cutCOWWindow) ([]byte, bool, error) {
 	s := l.s
 	if s.v3 != nil {
-		if data, handled, err := s.readDirtyV3(uint32(lba)); handled {
+		if data, handled, err := s.readDirtyV3Observed(uint32(lba), func() { w.walReads.Add(1) }); handled {
 			return data, err == nil, err
 		}
 	} else if walRelOff, dataOffset, _, _, ok := s.dm.get(lba); ok {

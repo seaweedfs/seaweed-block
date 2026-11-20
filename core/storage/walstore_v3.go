@@ -946,6 +946,12 @@ func (s *WALStore) SetWMode(m WMode) error {
 // validation within one stable lifetime is damage. No lock is taken: the
 // lock graph is unchanged.
 func (s *WALStore) readDirtyV3(lba uint32) (data []byte, handled bool, err error) {
+	return s.readDirtyV3Observed(lba, nil)
+}
+
+// Optional per-operation accounting; the validation/re-resolution contract is
+// identical for guest readers and local COW owners.
+func (s *WALStore) readDirtyV3Observed(lba uint32, recordAttempt func()) (data []byte, handled bool, err error) {
 	const attempts = 8
 	for i := 0; i < attempts; i++ {
 		if h := s.v3.testReadAdmitted; h != nil {
@@ -958,6 +964,9 @@ func (s *WALStore) readDirtyV3(lba uint32) (data []byte, handled bool, err error
 		}
 		if h := s.v3.testReadResolved; h != nil {
 			h()
+		}
+		if recordAttempt != nil {
+			recordAttempt()
 		}
 		data, ioErr, verr := s.readRecordV3(lba, off, dataOff, lsn)
 		if ioErr != nil {
