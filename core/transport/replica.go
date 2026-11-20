@@ -42,6 +42,7 @@ const (
 // not derive source coverage from Sync. Admission is checked at the effect.
 type RecoveryPrefixHook interface {
 	CertifyRecoveryPrefix(lineage RecoveryLineage) error
+	CertifiedPrefix() uint64
 }
 
 type ApplyHook interface {
@@ -64,8 +65,9 @@ type ReplicaListener struct {
 	wg        sync.WaitGroup
 	applyHook ApplyHook // optional gate plug-in; nil = direct apply
 
-	mu            sync.Mutex
-	activeLineage RecoveryLineage
+	mu             sync.Mutex
+	activeLineage  RecoveryLineage
+	prefixEligible RecoveryLineage // one active source-covered recovery certificate
 	// epochFloor is the highest epoch this host has taken a role at
 	// (G2): mutating traffic below it is refused. primary is set while
 	// this host is the primary: then every inbound replication mutation
@@ -382,6 +384,7 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 					return true
 				}
 				lane = mutationLaneRecovery
+				r.markPrefixEligibility(lineage, false)
 
 			case MsgShipEntry:
 				entry, err := DecodeShipEntry(payload)
@@ -509,6 +512,8 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 					log.Printf("replica: sync after rebuild done: %v", err)
 					return true
 				}
+				// A completed full BASE supplies the covered starting image.
+				r.markPrefixEligibility(lineage, true)
 				// Echo the request's full lineage in the rebuild-done ack
 				// so primary-side validators can consume it.
 				resp := EncodeBarrierResp(BarrierResponse{
@@ -802,7 +807,7 @@ func (r *ReplicaListener) certifyRecoveryPrefix(lineage RecoveryLineage) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.primary || (r.requireRole && !r.assigned) || lineage.Epoch < r.epochFloor ||
-		lineage.SessionID == 0 || lineage.EffectiveFrontierHint() == 0 || !r.activeLineage.Equivalent(lineage) {
+		lineage.SessionID == 0 || lineage.EffectiveFrontierHint() == 0 || !r.activeLineage.Equivalent(lineage) || !r.prefixEligible.Equivalent(lineage) {
 		return fmt.Errorf("replica: uncertified/stale recovery lineage")
 	}
 	hook, ok := r.applyHook.(RecoveryPrefixHook)
@@ -810,4 +815,25 @@ func (r *ReplicaListener) certifyRecoveryPrefix(lineage RecoveryLineage) error {
 		return fmt.Errorf("replica: no recovery prefix hook")
 	}
 	return hook.CertifyRecoveryPrefix(lineage)
+}
+
+// A successful scan can extend only an already-covered starting prefix. The
+// engine starts catch-up at probed R+1; R is monotone, so observing local R<=P
+// at the lane marker is a conservative bound on that starting R. A completed
+// full BASE instead supplies its own prefix. A refusal only retains history.
+func (r *ReplicaListener) markPrefixEligibility(lineage RecoveryLineage, fullBase bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.activeLineage.Equivalent(lineage) || r.primary || (r.requireRole && !r.assigned) {
+		return
+	}
+	r.prefixEligible = RecoveryLineage{}
+	hook, ok := r.applyHook.(RecoveryPrefixHook)
+	if !ok {
+		return
+	}
+	synced, _, _ := r.store.Boundaries()
+	if fullBase || synced <= hook.CertifiedPrefix() {
+		r.prefixEligible = lineage
+	}
 }
