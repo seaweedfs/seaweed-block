@@ -2,7 +2,6 @@ package durable_test
 
 import (
 	"context"
-	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"sync"
 	"testing"
@@ -29,6 +28,7 @@ func TestHeadBeltProviderCloseCancelsCooling(t *testing.T) {
 	if _, err := p.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}
+	backend := p.Backend("v1")
 	ctx, cancel := context.WithCancel(context.Background())
 	recovered := make(chan error, 1)
 	closed := make(chan error, 1)
@@ -66,8 +66,7 @@ func TestHeadBeltProviderCloseCancelsCooling(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("provider Close waited for takeover cooling instead of canceling it")
 	}
-	if _, err := p.Backend("v1").Read(context.Background(), 0, make([]byte, 4096)); err == nil {
+	if _, err := backend.Read(context.Background(), 0, make([]byte, 4096)); err == nil {
 		t.Fatal("closed provider served I/O")
 	}
-	_ = durable.ErrChunkStaleLocalRoot // Keep this external seam's dependency explicit.
 }
