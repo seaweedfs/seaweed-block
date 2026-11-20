@@ -226,3 +226,41 @@ func TestPrecopyDetachFreezeIncludesBarrierPause(t *testing.T) {
 		t.Fatalf("freeze %s omitted tentative barrier pause", r.Precopy.FreezeElapsed)
 	}
 }
+
+func TestPrecopyDetachQueuedCancellationReturnsWhileOtherCutOwnsPipeline(t *testing.T) {
+	_, f, l, _ := precopyLayer(t, 1024, 1)
+	entered, release := holdPuts(t, f)
+	cutDone, preDone := make(chan struct{}), make(chan struct{})
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	var precopyErr error
+	t.Cleanup(func() {
+		release()
+		cancel()
+		for _, done := range []chan struct{}{cutDone, preDone} {
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Error("cut owner did not join")
+			}
+		}
+	})
+	go func() { defer close(cutDone); _, _ = l.Cut(context.Background()) }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		close(preDone)
+		t.Fatal("other cut did not reach held upload")
+	}
+	go func() {
+		defer close(preDone)
+		_, precopyErr = l.PrecopyDetach(ctx, func() bool { t.Error("queued canceled caller stopped I/O"); return false })
+	}()
+	select {
+	case <-preDone:
+		if !errors.Is(precopyErr, context.DeadlineExceeded) {
+			t.Fatalf("queued error: %v", precopyErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("queued pre-copy ignored its caller deadline")
+	}
+}
