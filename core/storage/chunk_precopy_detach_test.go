@@ -74,7 +74,19 @@ func TestPrecopyDetachUnsettledRoundsKeepDirtyBytes(t *testing.T) {
 }
 
 func TestPrecopyDetachBusyOwnerExhaustsWithoutStopping(t *testing.T) {
+	precopyBusyOwnerControl(t, false)
+}
+
+func TestPrecopyDetachBusyOwnerRetainsSlowFixedCost(t *testing.T) {
+	precopyBusyOwnerControl(t, true)
+}
+
+func precopyBusyOwnerControl(t *testing.T, slow bool) {
+	t.Helper()
 	s, f, l, _ := precopyLayer(t, 1024, 1)
+	if slow {
+		f.beforeCAS = func(*fakeChunkRemote) { time.Sleep(1300 * time.Millisecond) }
+	}
 	calls := 0
 	r, err := l.PrecopyDetach(ctTimeout(t), func() bool { calls++; return false })
 	if !errors.Is(err, ErrPrecopyNotConverged) || len(r.Precopy.Rounds) != 5 || r.Precopy.Frozen || calls == 0 {
@@ -104,7 +116,19 @@ func TestPrecopyDetachCountsBurstAtNextBarrier(t *testing.T) {
 }
 
 func TestPrecopyDetachRefusedFinalCutKeepsChangedBytes(t *testing.T) {
+	precopyRefusedFinalCutControl(t, false)
+}
+
+func TestPrecopyDetachRefusedFinalCutRetainsSlowFixedCost(t *testing.T) {
+	precopyRefusedFinalCutControl(t, true)
+}
+
+func precopyRefusedFinalCutControl(t *testing.T, slow bool) {
+	t.Helper()
 	s, f, l, w := precopyLayer(t, 1024, 0)
+	if slow {
+		f.beforeCAS = func(*fakeChunkRemote) { time.Sleep(1300 * time.Millisecond) }
+	}
 	for i := 0; i < 3; i++ {
 		w.write(t, s, 1, byte(0x40+i))
 		if _, err := l.Cut(ctTimeout(t)); err != nil {
