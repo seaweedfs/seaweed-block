@@ -135,6 +135,10 @@ sw-block ops chunk verify    --volume v1 --chunk-filer <filer>   # read-only che
 ```
 
 `volume-delete` is refused while the volume is attached or has snapshots.
+Frozen detach and the pre-copy detach are not supported in this release: a
+detach with `--frozen` (`frozen:true` on `POST /chunk/detach`) is refused with
+409 `frozen_detach_unsupported`, and `blockvolume` refuses to start with
+`--chunk-detach-precopy`.
 The chunk path (`walstore-chunk`) is a proof of concept. It is not yet a
 default, a release claim or a production path.
 

@@ -561,14 +561,11 @@ func (s *StatusServer) handleChunkDetach(w http.ResponseWriter, r *http.Request)
 	var res ChunkDetachResponse
 	var err error
 	if req.Frozen {
-		frozen, ok := ctl.(interface {
-			DetachFrozen(context.Context, string, storage.FrozenDetachOptions) (ChunkDetachResponse, error)
-		})
-		if !ok {
-			writeChunkErr(w, http.StatusConflict, "frozen_detach_unsupported", false, "frozen detach unsupported")
-			return
-		}
-		res, err = frozen.DetachFrozen(ctx, req.VolumeID, storage.FrozenDetachOptions{StartedAt: time.Unix(0, req.FreezeStartedAtNs), AllowOverBudget: req.AllowOverBudget})
+		// Frozen detach is not supported in this release: refuse before any
+		// provider call. The request fields stay so the strict decoder keeps
+		// answering this typed refusal rather than an unknown-field 400.
+		writeChunkErr(w, http.StatusConflict, "frozen_detach_unsupported", false, "frozen detach is not supported in this release; stop the guest and send a plain detach")
+		return
 	} else if req.Plain {
 		plain, ok := ctl.(interface {
 			DetachPlain(context.Context, string) (ChunkDetachResponse, error)
