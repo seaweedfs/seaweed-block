@@ -186,9 +186,10 @@ stateDiagram-v2
 ## 6. Snapshots, forks, retention, GC, volume delete
 
 - **Snapshot** (`Catalog.CreateSnapshot`): claim the name with an exclusive name record `{request, attempt}` (a retry gets its own attempt back); check the volume is not being deleted; write an intent with a deadline; re-check the deadline; exclusively create `snaps/<name>/<attempt>` holding a copy of the HEAD root. An unknown outcome keeps the intent; the caller retries with the same request id.
-- **Fork** (`Catalog.Fork`): claim the parent snapshot, check the source is not being deleted, write the target `VOLUME` (origin fork), then a HEAD at gen 1, epoch 0, no holder, with the parent's `RemoteLSN` and references. No segment or chunk is copied: the fork's references are owner-qualified, so it reads the parent's objects, and its root alone keeps them live after the parent snapshot is deleted.
-- **Restore** (`Catalog.Restore`, independent restore): the fork steps with `VOLUME` origin `restore`; the claim is the fork's (live until the target has a HEAD), and from then on the target's owner-qualified refs keep the source's chunks live, so deleting the source snapshot or volume mid-restore is normal. The background walker (`HydrateAll`) makes every chunk local through the shared fill flights, under one host fill permit per flight. Bounded batch cuts then upload the chunks under the target's own keys; when the resolved HEAD holds no ref to another volume, the write-once `RESTORE-INDEPENDENT` entry is created (`MarkIndependent`). Snapshots of the target are refused until then, and a snapshot image that still names another volume's chunks is refused even after it. An aborted first HEAD keeps the parent snapshot as `fork_parent` until the target is deleted. Model: `docs/spec/RestoreIndependence.tla`.
-- **Retention** (`retention.go`): classes `semantic` and `pinned`; newest N, recent window and log-spaced keeps; a snapshot with a live fork claim is always kept; deletion uses the same conditional mark as `DeleteSnapshot`.
+- **Fork** (`Catalog.Fork`): take the deadline start and read the parent snapshot (every attempt reads it again; a parent deleting or gone refuses; the parent is not claimed), check the source is not being deleted, write the target `VOLUME` (origin fork), then a HEAD at gen 1, epoch 0, no holder, with the parent's `RemoteLSN` and references. No segment or chunk is copied: the fork's references are owner-qualified, so it reads the parent's objects, and its root alone keeps them live after the parent snapshot is deleted.
+- **Restore** (`Catalog.Restore`, independent restore): the fork steps with `VOLUME` origin `restore`; until its first HEAD the parent stays rooted by GC's grace after any delete, and from then on the target's owner-qualified refs keep the source's chunks live, so deleting the source snapshot or volume mid-restore is normal. The background walker (`HydrateAll`) makes every chunk local through the shared fill flights, under one host fill permit per flight. Bounded batch cuts then upload the chunks under the target's own keys; when the resolved HEAD holds no ref to another volume, the write-once `RESTORE-INDEPENDENT` entry is created (`MarkIndependent`). Snapshots of the target are refused until then, and a snapshot image that still names another volume's chunks is refused even after it. Model: `docs/spec/RestoreIndependence.tla`.
+- **Retention** (`retention.go`): classes `semantic` and `pinned`; newest N, recent window and log-spaced keeps; no snapshot is kept because of a fork or restore; deletion uses the same conditional mark as `DeleteSnapshot`.
+- **Snapshot delete in any order with forks** (no claims): a fork publishes only before its read time + operation deadline, and GC keeps a deleted attempt rooted for a grace of at least deadline + clock skew + CAS apply bound (`NewCollector` refuses otherwise); an unknown publish keeps the fork intent, which roots the keys until the target is resolved. Model: `ForkDelete` (`G >= D + E + P`).
 - **GC** (`gc.go` `Collector.run`, operator-driven through `sw-block ops chunk gc`, preview by default; see also `core/frontend/chunkstore/GC.md`):
   - roots: every HEAD, every named snapshot (including one whose delete is still in progress), every snapshot attempt that is not aborted, live intents, and segment objects; an unreadable segment aborts the mark. A deleted snapshot's attempt stays a root for one grace period after its delete time, then stops counting (`Collector.snapshotAttemptHeads` in `gc_copy.go`);
   - a capture intent expires only if it is older than the TTL, blockmaster has issued a higher epoch, and the remote HEAD has moved to a higher epoch; copy intents are settled only by a permanent tombstone at their publication target;
@@ -228,7 +229,7 @@ stateDiagram-v2
   [*] --> NameHeld: exclusive name record {request, attempt}
   NameHeld --> Published: exclusive create snaps/name/attempt
   NameHeld --> Aborted: DeleteSnapshot or GC tombstones the attempt path
-  Published --> Deleting: DeleteSnapshot or retention (no live fork claim)
+  Published --> Deleting: DeleteSnapshot or retention (forks do not hold it)
   Deleting --> NameFreed: name record removed
   Aborted --> NameFreed: name record removed
   NameFreed --> [*]
@@ -240,16 +241,16 @@ Restore (target volume):
 
 ```mermaid
 stateDiagram-v2
-  [*] --> Claimed: claim parent snapshot, write VOLUME (origin restore)
-  Claimed --> Restoring: first HEAD (parent's refs, owner-qualified); claim dropped
-  Claimed --> Aborted: GC tombstones the HEAD (parent kept as fork_parent)
+  [*] --> Forking: read the parent snapshot, write VOLUME (origin restore)
+  Forking --> Restoring: first HEAD (parent's refs, owner-qualified) before read time + deadline
+  Forking --> Aborted: GC tombstones the HEAD
   Restoring --> Restoring: walker fills; batch cut replaces foreign refs with own keys
   Restoring --> Independent: no foreign ref in the resolved HEAD; RESTORE-INDEPENDENT created
   Independent --> [*]
   Aborted --> [*]: target deleted
 ```
 
-Snapshots of the target are refused in `Claimed` and `Restoring`.
+Snapshots of the target are refused in `Forking` and `Restoring`.
 
 ### Attached-volume scheduling
 
@@ -376,7 +377,7 @@ Not done yet:
 | Chunks and segments are write-once; keys are never rebound | `chunk_remote.go` `putObject`; `gc.go` tombstones | `TestChunkRemote_KeysAreWriteOnce` (`core/frontend/chunkstore/chunk_remote_test.go`); `TestChunkLayer_C5_ChunksAreImmutable` (`core/storage/chunk_layer_contract_test.go`) | yes |
 | Intents are durable before the first upload and removed only after the CAS outcome is known | `captureLocked` | `TestChunkIntent_WrittenBeforeFirstUploadAndDeletedAfterCAS`, `TestChunkIntent_UncertainCASKeepsIntentUntilSettled` (`core/storage/chunk_layer_intent_test.go`) | yes |
 | GC never deletes a chunk reachable from a HEAD, snapshot, attempt or intent, and deletes only after two graced marks | `gc.go` `Collector.run` | `TestGC_UnreachableRequiresTwoMarksAndUploadAge`, `TestGC_StalledCutRemainsReadableAfterTwoMarks`, `TestGC_IntentExpiryNeedsTTLAuthorityAndRemoteFence` (`core/frontend/chunkstore/gc_test.go`) | yes |
-| A published snapshot is removed only by `DeleteSnapshot` or retention for the planned attempt, never while a fork claim is live | `catalog.go` `DeleteSnapshot`; `retention.go` `markDeleting` | `TestCatalog_DeleteMarksThenIdempotent` (`core/frontend/chunkstore/catalog_test.go`); `TestCatalog_ClaimBetweenCheckAndMarkWins` (`core/frontend/chunkstore/retention_review_test.go`) | yes |
+| A published snapshot is removed only by `DeleteSnapshot` or retention for the planned attempt, in any order with forks (no claims) | `catalog.go` `DeleteSnapshot`; `retention.go` `markDeleting` | `TestCatalog_DeleteMarksThenIdempotent` (`core/frontend/chunkstore/catalog_test.go`); `TestSnapshotDelete_DeleteDuringAForkInFlight` (`core/frontend/chunkstore/snapshot_delete_test.go`) | yes |
 | Volume delete commits only with no snapshot name records; past the commit point it is irreversible | `volume_delete.go` | `TestCatalog_DeleteVolumeRefusesWhileSnapshotsExist`, `TestCatalog_ConcurrentDeleteCannotRollBackACommittedOne`, `TestCatalog_DeletedHeadCannotBeRevivedByAClaim` (`core/frontend/chunkstore/volume_delete_test.go`) | yes |
 | Volume ids are never reused | `core/host/master/services.go`; `catalog.go` `EnsureVolume` | `TestCatalog_DeleteVolumeTombstonesAndRefusesReuse` (`core/frontend/chunkstore/volume_delete_test.go`) | yes |
 | A host serves and cuts only under a valid lease; a fenced guard never reopens | `workspace_lease.go` | `TestWorkspaceLeaseExpiryFencesWithoutTimerAndCannotReopen`, `TestWorkspaceDelayedRenewalCannotUndoExpiry` (`core/host/volume/workspace_lease_test.go`); `TestWorkspaceHostRequiresLeaseBeforeFrontendAndCut` (`core/host/volume/workspace_runtime_test.go`) | yes |

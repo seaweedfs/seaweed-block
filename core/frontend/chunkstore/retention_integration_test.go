@@ -143,7 +143,7 @@ func TestIntegration_RetainAndUsage(t *testing.T) {
 // deadline exceeded) keeps its parent, and completes on retry; (3) a fork
 // that claims between retention's claim check and its mark makes the
 // filer refuse the mark (conditioned on no claims), so the parent is kept.
-func TestIntegration_RetainHeldSchedules(t *testing.T) {
+func TestIntegration_RetainIgnoresIncompleteForks(t *testing.T) {
 	c := startWeed(t)
 	ctx := context.Background()
 	const base = "/swblock/chunks"
@@ -222,27 +222,18 @@ func TestIntegration_RetainHeldSchedules(t *testing.T) {
 		t.Fatal(err)
 	}
 	cat.retainHook = nil
-	if len(res.Deleted) != 0 || fmt.Sprint(res.Replaced) != "[s00]" || fmt.Sprint(res.ForkHeld) != "[s02 s01]" {
-		t.Fatalf("retain: deleted=%v replaced=%v forkHeld=%v; want none / s00 / s02 s01", res.Deleted, res.Replaced, res.ForkHeld)
+	if fmt.Sprint(res.Deleted) != "[s02 s01]" || fmt.Sprint(res.Replaced) != "[s00]" {
+		t.Fatalf("retain: deleted=%v replaced=%v; want s02 s01 / s00 (forks do not hold their parent)", res.Deleted, res.Replaced)
 	}
 	b, err := cat.readSnap(ctx, "v1", "s00")
 	if err != nil || b.attempt != pinnedAttempt || b.State != SnapActive || b.Class != SnapshotClassPinned {
 		t.Fatalf("pinned replacement: %+v %v (attempt %s, want %s)", b, err, b.attempt, pinnedAttempt)
 	}
-	// An explicit delete of a claimed parent is refused.
-	if _, err := cat.DeleteSnapshot(ctx, "v1", "s01"); CodeOf(err) != CodeSnapshotClaimed {
-		t.Fatalf("delete of the claimed s01: %v; want snapshot_claimed", err)
-	}
+	// A retry of either stopped fork reads its parent again and is refused.
 	for _, fk := range []struct{ snap, target string }{{"s01", "v2"}, {"s02", "v3"}} {
-		if s, err := cat.readSnap(ctx, "v1", fk.snap); err != nil || s.State != SnapActive {
-			t.Fatalf("fork parent %s: %+v %v; want active", fk.snap, s, err)
+		_, err := cat.Fork(ctx, ForkRequest{Source: "v1", Snapshot: fk.snap, Target: fk.target, RequestID: "f"})
+		if code := CodeOf(err); code != CodeSnapshotNotFound && code != CodeSnapshotDeleting {
+			t.Fatalf("fork %s retry after its parent was deleted: %v; want snapshot_not_found or snapshot_deleting", fk.target, err)
 		}
-		if _, err := cat.Fork(ctx, ForkRequest{Source: "v1", Snapshot: fk.snap, Target: fk.target, RequestID: "f"}); err != nil {
-			t.Fatalf("fork %s retry: %v", fk.target, err)
-		}
-	}
-	res, err = cat.Retain(ctx, "v1", false)
-	if err != nil || fmt.Sprint(res.Deleted) != "[s02 s01]" {
-		t.Fatalf("after the forks completed: deleted=%v %v; want s02 s01 (s00 is pinned)", res.Deleted, err)
 	}
 }
