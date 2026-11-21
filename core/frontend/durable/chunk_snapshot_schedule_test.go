@@ -106,3 +106,35 @@ func TestSnapshotSchedule_OverdueAfterPeriodPlusRetryCap(t *testing.T) {
 		t.Fatalf("status %+v; want overdue with the failure visible", st)
 	}
 }
+
+// Slots come from the wall clock, so the schedule must survive clock steps:
+// after a step backwards or forwards, the next attempt is always the first
+// slot strictly after the step's now (never in the past, so no burst of
+// catch-up attempts, and never more than one period ahead), a step forwards
+// past a period plus the retry cap shows as overdue, and a success after
+// either step resumes the per-volume slots.
+func TestSnapshotSchedule_ClockStepsNeitherRepeatNorStall(t *testing.T) {
+	day := 24 * time.Hour
+	s := newSnapshotSchedule("v1", day, schedT0)
+	ok := s.due()
+	s.record(ok, nil)
+	for _, step := range []time.Duration{-3 * time.Hour, -2 * day, 5 * time.Minute, 3 * day} {
+		now := ok.Add(step)
+		s.record(now, &SnapshotFailure{Code: "remote_unavailable"}) // an attempt at the stepped clock
+		if !s.due().After(now) || s.due().Sub(now) > time.Hour {
+			t.Fatalf("step %v: retry due %v for now %v; want within the backoff after now", step, s.due(), now)
+		}
+		s.record(now, nil)
+		due := s.due()
+		if !due.After(now) || due.Sub(now) > day || time.Duration(due.UnixNano()%int64(day)) != s.offset {
+			t.Fatalf("step %v: next slot %v for now %v; want the first per-volume slot after now", step, due, now)
+		}
+		if st := s.status(now); st.Overdue || st.LastOkNs != now.UnixNano() {
+			t.Fatalf("step %v: status %+v right after a success", step, st)
+		}
+	}
+	far := s.due().Add(3 * day)
+	if !s.status(far).Overdue {
+		t.Fatal("a clock step forwards past a period plus the retry cap with no success is not overdue")
+	}
+}
