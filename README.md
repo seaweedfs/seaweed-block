@@ -128,6 +128,8 @@ sw-block ops chunk cut       --volume v1 --status-addr <status>  # publish chang
 sw-block ops chunk snapshot  --volume v1 --status-addr <status> --name s1   # name a snapshot
 sw-block ops chunk snapshots --volume v1 --chunk-filer <filer>   # list snapshots
 sw-block ops chunk fork      --chunk-filer <filer> --source v1 --snapshot s1 --target v2  # root copy only
+sw-block ops chunk restore   --chunk-filer <filer> --source v1 --snapshot s1 --target v3 --status-addr <v3's status>  # independent copy
+sw-block ops chunk restore   --volume v3 --status-addr <status> --status  # restore progress
 sw-block ops chunk detach    --volume v1 --status-addr <status>  # final cut and release; resume elsewhere
 sw-block ops chunk volume-delete --volume v2 --chunk-filer <filer> --master <blockmaster> --request-id del-v2
 sw-block ops chunk gc        --chunk-filer <filer> --master <blockmaster>  # preview; --apply to reclaim
@@ -135,6 +137,12 @@ sw-block ops chunk verify    --volume v1 --chunk-filer <filer>   # read-only che
 ```
 
 `volume-delete` is refused while the volume is attached or has snapshots.
+`restore` creates the target from the snapshot and, with `--status-addr` naming
+the blockvolume that serves the target, starts the background restore there:
+the target serves at once, copies every chunk under its own keys and becomes
+independent of the source (snapshots of it are refused until then). Without
+`--status-addr` it only creates the target and prints the command that starts
+the restore once the target is attached.
 The chunk path (`walstore-chunk`) is a proof of concept. It is not yet a
 default, a release claim or a production path.
 
