@@ -331,23 +331,7 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 		if err = ctx.Err(); err != nil {
 			return result, err
 		}
-		// Preserve the immutable binding forever: removing it would allow Put
-		// to rebind a key that once existed. The tombstone also permits retry
-		// after a failed physical delete without losing the fid.
-		if string(b.entry.Extended[extGCDeleted]) != "1" {
-			e := proto.Clone(b.entry).(*filerpb.Entry)
-			e.Extended[extGCDeleted] = []byte("1")
-			expected := map[string][]byte{extKind: []byte(kindChunkKey), extFid: b.entry.Extended[extFid], extGCDeleted: nil}
-			if err = g.cat.f.UpdateEntry(ctx, path.Dir(p), e, expected); err != nil {
-				return result, err
-			}
-		}
-		if err = g.blobs.DeleteBlob(ctx, string(b.entry.Extended[extFid])); err != nil {
-			return result, err
-		}
-		e := proto.Clone(b.entry).(*filerpb.Entry)
-		e.Extended[extGCDeleted] = []byte("done")
-		if err = g.cat.f.UpdateEntry(ctx, path.Dir(p), e, map[string][]byte{extFid: b.entry.Extended[extFid], extGCDeleted: []byte("1")}); err != nil {
+		if err = reclaimBinding(ctx, g.cat.f, g.blobs, path.Dir(p), b.entry); err != nil {
 			return result, err
 		}
 		result.Reclaimed++
@@ -387,4 +371,32 @@ func (b gcBlobReader) Get(ctx context.Context, fid string) ([]byte, error) {
 		return nil, errors.New("chunkstore: GC segment reader unavailable")
 	}
 	return reader.Get(ctx, fid)
+}
+
+// reclaimBinding deletes the needle a key binding names, keeping the binding
+// for ever: removing it would allow Put to rebind a key that once existed.
+// The binding first gets a conditional swb.gc.deleted=1 tombstone (which
+// also lets a failed physical delete be retried without losing the fid),
+// then the exact fid is deleted, then the tombstone becomes done. A binding
+// already done is left as it is. The caller decides that nothing references
+// the key.
+func reclaimBinding(ctx context.Context, f Filer, blobs BlobDeleter, dir string, entry *filerpb.Entry) error {
+	switch string(entry.Extended[extGCDeleted]) {
+	case "done":
+		return nil
+	case "1":
+	default:
+		e := proto.Clone(entry).(*filerpb.Entry)
+		e.Extended[extGCDeleted] = []byte("1")
+		expected := map[string][]byte{extKind: []byte(kindChunkKey), extFid: entry.Extended[extFid], extGCDeleted: nil}
+		if err := f.UpdateEntry(ctx, dir, e, expected); err != nil {
+			return err
+		}
+	}
+	if err := blobs.DeleteBlob(ctx, string(entry.Extended[extFid])); err != nil {
+		return err
+	}
+	e := proto.Clone(entry).(*filerpb.Entry)
+	e.Extended[extGCDeleted] = []byte("done")
+	return f.UpdateEntry(ctx, dir, e, map[string][]byte{extFid: entry.Extended[extFid], extGCDeleted: []byte("1")})
 }
