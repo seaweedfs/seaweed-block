@@ -43,6 +43,7 @@ spec:
             - "--cluster-spec=/config/cluster-spec.yaml"
             - "--lifecycle-product-loop-interval=100ms"
             - "--listen=0.0.0.0:9333"
+            - "--insecure-external-bind"
             - "--expected-slots-per-volume=2"
           ports:
             - name: grpc

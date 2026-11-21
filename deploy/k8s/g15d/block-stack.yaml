@@ -48,6 +48,7 @@ spec:
             - "--launcher-durable-root=/var/lib/sw-block"
             - "--launcher-iscsi-port-base=3260"
             - "--listen=0.0.0.0:9333"
+            - "--insecure-external-bind"
             - "--expected-slots-per-volume=1"
           ports:
             - name: grpc
