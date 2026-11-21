@@ -1,6 +1,7 @@
 // Package invcheck checks docs/design/invariants.md against the code: the
 // row count it states is the count its tables hold, every Go test a row
-// names exists, and an ACTIVE row names at least one test.
+// names exists, an ACTIVE row names at least one test, and a statement is
+// short (one property per row).
 package invcheck
 
 import (
@@ -11,14 +12,19 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 type invRow struct {
-	id     string
-	tests  []string
-	status string
-	line   int
+	id        string
+	statement string
+	tests     []string
+	status    string
+	line      int
 }
+
+// maxStatement is the longest Statement cell, in characters, a row may have.
+const maxStatement = 300
 
 var (
 	rowID     = regexp.MustCompile("^\\| `(INV-[A-Z0-9-]+)` \\|")
@@ -70,7 +76,7 @@ func partB(t *testing.T, root string) ([]invRow, string) {
 			t.Errorf("invariants.md:%d: row %s has %d cells, want 7", firstLine+i, m[1], len(cells))
 			continue
 		}
-		r := invRow{id: m[1], status: strings.TrimSpace(cells[6]), line: firstLine + i}
+		r := invRow{id: m[1], statement: strings.TrimSpace(cells[1]), status: strings.TrimSpace(cells[6]), line: firstLine + i}
 		for _, tm := range testName.FindAllStringSubmatch(cells[4], -1) {
 			r.tests = append(r.tests, tm[1])
 		}
@@ -181,5 +187,53 @@ func TestInvariantRowCountMatchesTables(t *testing.T) {
 	}
 	if m != want {
 		t.Fatalf("invariants.md says %q; its tables hold %q", m, want)
+	}
+}
+
+// TestInvariantStatementsAreShort checks that the Statement of every row that
+// is not ARCHIVED is at most maxStatement characters, except the rows named in
+// testdata/long-statements.txt. That list only shrinks: it must be sorted,
+// name each row once, and name only rows that exist and are still too long.
+func TestInvariantStatementsAreShort(t *testing.T) {
+	root := repoRoot(t)
+	rows, _ := partB(t, root)
+	const list = "internal/invcheck/testdata/long-statements.txt"
+	raw, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(list)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := map[string]int{}
+	prev := ""
+	for i, line := range strings.Split(strings.ReplaceAll(string(raw), "\r\n", "\n"), "\n") {
+		id := strings.TrimSpace(line)
+		if id == "" || strings.HasPrefix(id, "#") {
+			continue
+		}
+		if at, dup := listed[id]; dup {
+			t.Errorf("%s:%d: %s is also at line %d", list, i+1, id, at)
+			continue
+		}
+		if id < prev {
+			t.Errorf("%s:%d: %s is not in sorted order (after %s)", list, i+1, id, prev)
+		}
+		listed[id], prev = i+1, id
+	}
+	exists := map[string]bool{}
+	for _, r := range rows {
+		exists[r.id] = true
+		n := utf8.RuneCountInString(r.statement)
+		long := r.status != "ARCHIVED" && n > maxStatement
+		at, ok := listed[r.id]
+		switch {
+		case long && !ok:
+			t.Errorf("invariants.md:%d: %s has a %d-character statement, over %d: split it into rows of one property each", r.line, r.id, n, maxStatement)
+		case !long && ok:
+			t.Errorf("%s:%d: %s is no longer over %d characters (%d, %s): delete its line", list, at, r.id, maxStatement, n, r.status)
+		}
+	}
+	for id, at := range listed {
+		if !exists[id] {
+			t.Errorf("%s:%d: %s is not a row of invariants.md: delete its line", list, at, id)
+		}
 	}
 }
