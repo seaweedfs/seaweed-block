@@ -92,7 +92,7 @@ func (b *StorageBackend) finishPrecopyLocked() {
 		}
 		w.signaled = true
 		close(w.ready)
-		if hook := b.testPrecopyGranted; hook != nil {
+		if hook := b.testPrecopyGranted; hook != nil && w.err == nil {
 			hook(w)
 		}
 	}
@@ -142,6 +142,9 @@ func (b *StorageBackend) admitPrecopy(ctx context.Context, admit func() (func(),
 			continue
 		}
 		deadline := arrival.Add(precopyQueueBudget)
+		if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+			deadline = d
+		}
 		w := &precopyWaiter{ready: make(chan struct{}), deadline: deadline}
 		p.waiters = append(p.waiters, w)
 		b.mu.Unlock()
@@ -168,11 +171,6 @@ func (b *StorageBackend) admitPrecopy(ctx context.Context, admit func() (func(),
 			b.removePrecopyWaiter(p, w)
 			return nil, b.attachReadyTimeout(cause)
 		}
-		release, err := admit()
-		if err != nil {
-			b.removePrecopyWaiter(p, w)
-			return nil, err
-		}
-		return release, nil
+		return admit()
 	}
 }
