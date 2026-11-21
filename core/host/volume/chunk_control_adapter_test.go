@@ -182,6 +182,13 @@ func TestChunkCutStatsBody_MirrorsTheLayerStats(t *testing.T) {
 			f.SetString("s")
 		case reflect.Bool:
 			f.SetBool(true)
+		case reflect.Struct:
+			for j := 0; j < f.NumField(); j++ {
+				if f.Field(j).Kind() != reflect.Int64 {
+					t.Fatalf("nested field %s.%s is not a duration counter", v.Type().Field(i).Name, f.Type().Field(j).Name)
+				}
+				f.Field(j).SetInt(int64(100*(i+1) + j + 1))
+			}
 		default:
 			t.Fatalf("field %s: unhandled kind %s", v.Type().Field(i).Name, f.Kind())
 		}

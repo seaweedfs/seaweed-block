@@ -39,13 +39,14 @@ type ChunkControl interface {
 
 // ChunkCutResponse is the body of a successful POST /chunk/cut (§3.1).
 type ChunkCutResponse struct {
-	VolumeID  string `json:"volumeID"`
-	CutLSN    uint64 `json:"cutLSN"`
-	HeadGen   uint64 `json:"headGen"`
-	HeadEpoch uint64 `json:"headEpoch"`
-	Holder    string `json:"holder"`
-	Noop      bool   `json:"noop"`
-	FullHash  bool   `json:"fullHash"`
+	CandidateTail *storage.ChunkCandidateTail `json:"candidateTail,omitempty"`
+	VolumeID      string                      `json:"volumeID"`
+	CutLSN        uint64                      `json:"cutLSN"`
+	HeadGen       uint64                      `json:"headGen"`
+	HeadEpoch     uint64                      `json:"headEpoch"`
+	Holder        string                      `json:"holder"`
+	Noop          bool                        `json:"noop"`
+	FullHash      bool                        `json:"fullHash"`
 	// Stats are the statistics the chunk layer measured for this cut
 	// (§3.1). A zero field is "not measured" or "none" (a Noop cut
 	// uploads nothing).
@@ -56,6 +57,15 @@ type ChunkCutResponse struct {
 // mirrors storage.ChunkCutStats field for field (a test keeps the two in
 // step); every duration is in nanoseconds.
 type ChunkCutStatsBody struct {
+	SyncPhases       storage.SyncPhaseStats `json:"syncPhases"`
+	CandidateNs      int64                  `json:"candidateNs"`
+	WindowSetupNs    int64                  `json:"windowSetupNs"`
+	PublishPrepareNs int64                  `json:"publishPrepareNs"`
+	ManifestNs       int64                  `json:"manifestNs"`
+	CommitStateNs    int64                  `json:"commitStateNs"`
+	IntentCleanupNs  int64                  `json:"intentCleanupNs"`
+	NonPayloadCopyNs int64                  `json:"nonPayloadCopyNs"`
+
 	PayloadNs          int64  `json:"payloadNs"`
 	COWWALReadAttempts uint64 `json:"cowWALReadAttempts"`
 	COWLocalReadNs     int64  `json:"cowLocalReadNs"`
@@ -88,6 +98,15 @@ type ChunkCutStatsBody struct {
 
 func cutStatsBody(s storage.ChunkCutStats) ChunkCutStatsBody {
 	return ChunkCutStatsBody{
+		SyncPhases:       s.SyncPhases,
+		CandidateNs:      s.CandidateNs,
+		WindowSetupNs:    s.WindowSetupNs,
+		PublishPrepareNs: s.PublishPrepareNs,
+		ManifestNs:       s.ManifestNs,
+		CommitStateNs:    s.CommitStateNs,
+		IntentCleanupNs:  s.IntentCleanupNs,
+		NonPayloadCopyNs: s.NonPayloadCopyNs,
+
 		PayloadNs:          s.PayloadNs,
 		COWWALReadAttempts: s.COWWALReadAttempts,
 		COWLocalReadNs:     s.COWLocalReadNs,
@@ -286,6 +305,12 @@ func chunkErrorCode(err error) (int, string, bool) {
 		return http.StatusConflict, codeClosing, false // stays closed until a new attach
 	case errors.Is(err, storage.ErrChunkLayerClosed):
 		return http.StatusServiceUnavailable, codeClosing, false // the process is shutting down
+	case errors.Is(err, errFrozenDetachUnsupported):
+		return http.StatusConflict, "frozen_detach_unsupported", false
+	case errors.Is(err, storage.ErrInvalidFreezeBudget):
+		return http.StatusBadRequest, "bad_request", false
+	case errors.Is(err, storage.ErrFrozenTailTooLarge):
+		return http.StatusConflict, "frozen_tail_too_large", true
 	// A local window abort cancels its uploads; that cancellation is not
 	// a remote outage. Keep authority and uncertain-publication precedence.
 	case errors.Is(err, storage.ErrCutCOWAborted):
@@ -496,11 +521,18 @@ func (s *StatusServer) handleChunkDetach(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var req struct {
-		VolumeID  string `json:"volumeID"`
-		TimeoutMs int64  `json:"timeoutMs"`
-		Plain     bool   `json:"plain,omitempty"`
+		VolumeID          string `json:"volumeID"`
+		TimeoutMs         int64  `json:"timeoutMs"`
+		Plain             bool   `json:"plain,omitempty"`
+		Frozen            bool   `json:"frozen,omitempty"`
+		FreezeStartedAtNs int64  `json:"freezeStartedAtNs,omitempty"`
+		AllowOverBudget   bool   `json:"allowOverBudget,omitempty"`
 	}
 	if !decodeChunkBody(w, r, &req) {
+		return
+	}
+	if (req.Frozen && (req.Plain || req.FreezeStartedAtNs <= 0 || time.Unix(0, req.FreezeStartedAtNs).After(time.Now()))) || (!req.Frozen && (req.FreezeStartedAtNs != 0 || req.AllowOverBudget)) {
+		writeChunkErr(w, http.StatusBadRequest, "bad_request", false, "frozen requires a non-future freezeStartedAtNs and cannot combine with plain; allowOverBudget requires frozen")
 		return
 	}
 	ctl := s.chunkTarget(w, req.VolumeID)
@@ -511,7 +543,16 @@ func (s *StatusServer) handleChunkDetach(w http.ResponseWriter, r *http.Request)
 	defer cancel()
 	var res ChunkDetachResponse
 	var err error
-	if req.Plain {
+	if req.Frozen {
+		frozen, ok := ctl.(interface {
+			DetachFrozen(context.Context, string, storage.FrozenDetachOptions) (ChunkDetachResponse, error)
+		})
+		if !ok {
+			writeChunkErr(w, http.StatusConflict, "frozen_detach_unsupported", false, "frozen detach unsupported")
+			return
+		}
+		res, err = frozen.DetachFrozen(ctx, req.VolumeID, storage.FrozenDetachOptions{StartedAt: time.Unix(0, req.FreezeStartedAtNs), AllowOverBudget: req.AllowOverBudget})
+	} else if req.Plain {
 		plain, ok := ctl.(interface {
 			DetachPlain(context.Context, string) (ChunkDetachResponse, error)
 		})
@@ -543,6 +584,8 @@ type ChunkProvider interface {
 	DetachVolume(ctx context.Context, volumeID string) (storage.ChunkCutResult, uint64, error)
 }
 
+var errFrozenDetachUnsupported = errors.New("frozen detach unsupported by provider")
+
 type chunkControl struct {
 	p   ChunkProvider
 	cat *chunkstore.Catalog
@@ -560,7 +603,7 @@ func (c *chunkControl) Cut(ctx context.Context, volumeID string, minLSN uint64) 
 		return ChunkCutResponse{}, err
 	}
 	return ChunkCutResponse{VolumeID: volumeID, CutLSN: r.H, HeadGen: r.Head.Gen, HeadEpoch: r.Head.Epoch, Holder: r.Head.Holder,
-		Noop: r.Noop, FullHash: r.FullHash, Stats: cutStatsBody(r.Stats)}, nil
+		Noop: r.Noop, FullHash: r.FullHash, CandidateTail: r.CandidateTail, Stats: cutStatsBody(r.Stats)}, nil
 }
 
 // Snapshot resolves the request against the catalog first (§3.2 step 1):
@@ -623,6 +666,17 @@ func (s *StatusServer) handleStatusChunk(w http.ResponseWriter, r *http.Request)
 
 func (c *chunkControl) Detach(ctx context.Context, volumeID string) (ChunkDetachResponse, error) {
 	r, last, err := c.p.DetachVolume(ctx, volumeID)
+	return chunkDetachResponse(volumeID, r, last, err)
+}
+
+func (c *chunkControl) DetachFrozen(ctx context.Context, volumeID string, opts storage.FrozenDetachOptions) (ChunkDetachResponse, error) {
+	p, ok := c.p.(interface {
+		DetachVolumeFrozen(context.Context, string, storage.FrozenDetachOptions) (storage.ChunkCutResult, uint64, error)
+	})
+	if !ok {
+		return ChunkDetachResponse{}, errFrozenDetachUnsupported
+	}
+	r, last, err := p.DetachVolumeFrozen(ctx, volumeID, opts)
 	return chunkDetachResponse(volumeID, r, last, err)
 }
 
