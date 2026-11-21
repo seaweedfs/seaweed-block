@@ -3,11 +3,13 @@ package chunkstore
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"path"
 	"testing"
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/filerpb"
+	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 // INV-SNAP-DELETE-ANY-ORDER-001: forks and restores do not hold their parent.
@@ -91,11 +93,7 @@ func TestSnapshotDelete_DeleteDuringAForkInFlight(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for idx, ref := range h2.Chunks {
-		if got, err := r2.Get(ctx, ref.Key); err != nil || !bytes.Equal(got, want[idx]) {
-			t.Fatalf("fork chunk %d lost: %v", idx, err)
-		}
-	}
+	requireChunks(t, ctx, r2, h2, want, "fork")
 }
 
 // An unknown publish outcome keeps the fork's intent, and that intent roots
@@ -150,9 +148,57 @@ func TestSnapshotDelete_UnknownPublishKeepsTheKeysWhileItsIntentExists(t *testin
 		t.Fatal("GC settled the fork intent without the target being resolved")
 	}
 	r1, _ := NewChunkRemote(f, b, path.Join(catBase, "v1"))
-	for idx, ref := range h.Chunks {
-		if got, err := r1.Get(ctx, ref.Key); err != nil || !bytes.Equal(got, want[idx]) {
-			t.Fatalf("parent chunk %d reclaimed while the fork intent exists: %v", idx, err)
+	requireChunks(t, ctx, r1, h, want, "parent (fork intent still present)")
+}
+
+// requireChunks fails unless h names exactly the indexes of want and each one
+// reads back want's bytes (a missing index cannot pass by iterating h alone).
+func requireChunks(t *testing.T, ctx context.Context, r *ChunkRemote, h storage.ChunkHead, want map[uint64][]byte, what string) {
+	t.Helper()
+	if err := chunksMismatch(ctx, r, h, want); err != nil {
+		t.Fatalf("%s: %v", what, err)
+	}
+}
+
+func chunksMismatch(ctx context.Context, r *ChunkRemote, h storage.ChunkHead, want map[uint64][]byte) error {
+	if len(h.Chunks) != len(want) {
+		return fmt.Errorf("HEAD names %d chunks, want %d", len(h.Chunks), len(want))
+	}
+	for idx, data := range want {
+		ref, ok := h.Chunks[idx]
+		if !ok {
+			return fmt.Errorf("HEAD lost chunk %d", idx)
 		}
+		if got, err := r.Get(ctx, ref.Key); err != nil || !bytes.Equal(got, data) {
+			return fmt.Errorf("chunk %d unreadable or changed: %v", idx, err)
+		}
+	}
+	return nil
+}
+
+// The check refuses a HEAD that lost an index, even when every chunk it
+// still names reads back correctly.
+func TestSnapshotDelete_ChunkCheckCatchesAMissingIndex(t *testing.T) {
+	f, b, _, h := catalogFixture(t)
+	ctx := context.Background()
+	r, _ := NewChunkRemote(f, b, path.Join(catBase, "v1"))
+	want := map[uint64][]byte{}
+	missing := uint64(0)
+	for idx, ref := range h.Chunks {
+		data, err := r.Get(ctx, ref.Key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want[idx] = data
+		if idx >= missing {
+			missing = idx + 1
+		}
+	}
+	if err := chunksMismatch(ctx, r, h, want); err != nil {
+		t.Fatalf("the matching HEAD failed the check: %v", err)
+	}
+	want[missing] = chunkBytes(0x62) // an index the HEAD does not name
+	if err := chunksMismatch(ctx, r, h, want); err == nil {
+		t.Fatal("a HEAD missing an expected chunk passed the check")
 	}
 }

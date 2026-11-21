@@ -241,16 +241,16 @@ Restore (target volume):
 
 ```mermaid
 stateDiagram-v2
-  [*] --> Claimed: claim parent snapshot, write VOLUME (origin restore)
-  Claimed --> Restoring: first HEAD (parent's refs, owner-qualified); claim dropped
-  Claimed --> Aborted: GC tombstones the HEAD
+  [*] --> Forking: read the parent snapshot, write VOLUME (origin restore)
+  Forking --> Restoring: first HEAD (parent's refs, owner-qualified) before read time + deadline
+  Forking --> Aborted: GC tombstones the HEAD
   Restoring --> Restoring: walker fills; batch cut replaces foreign refs with own keys
   Restoring --> Independent: no foreign ref in the resolved HEAD; RESTORE-INDEPENDENT created
   Independent --> [*]
   Aborted --> [*]: target deleted
 ```
 
-Snapshots of the target are refused in `Claimed` and `Restoring`.
+Snapshots of the target are refused in `Forking` and `Restoring`.
 
 ### Attached-volume scheduling
 
