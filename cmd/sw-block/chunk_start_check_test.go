@@ -10,7 +10,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
 )
 
-// O-ENG-4: every ops chunk command that writes chunk metadata runs the
+// Every ops chunk command that writes chunk metadata runs the
 // single-filer start check before it reads or writes anything, and refuses
 // when the filer is not the only one of its group; read-only commands (and
 // read-only modes) do not run it.

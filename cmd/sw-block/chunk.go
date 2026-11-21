@@ -43,7 +43,7 @@ var dialChunkFiler = func(addr string) (chunkstore.Filer, func() error, error) {
 }
 
 // checkSingleFiler is the start check of a command that writes chunk
-// metadata (O-ENG-4): block metadata goes through exactly one filer, the
+// metadata: block metadata goes through exactly one filer, the
 // same rule blockvolume enforces at start. Tests replace it.
 var checkSingleFiler = func(ctx context.Context, f chunkstore.Filer) error {
 	if s, ok := f.(*chunkstore.SWFS); ok {
