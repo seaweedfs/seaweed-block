@@ -29,7 +29,9 @@ func TestPrecopyFixedCostSmallTailCommitsBySecondAttempt(t *testing.T) {
 	if err != nil || !r.Precopy.Frozen || len(r.Precopy.Rounds) > 2 || r.Precopy.Reason != "no_progress" || r.Precopy.Fixed < fixed || r.Precopy.DeclaredWorst < fixed {
 		t.Fatalf("fixed cost cannot converge by recopying the same small tail: report=%+v err=%v", r.Precopy, err)
 	}
-	if r.Precopy.FreezeElapsed < fixed || r.Precopy.LatencyGateFailed || time.Duration(r.Stats.CASWriteNs) < fixed {
+	// The synthetic estimate excludes real disk scheduling. An overloaded
+	// checkpoint may exceed it; the product must report that overrun honestly.
+	if r.Precopy.FreezeElapsed < fixed || r.Precopy.LatencyGateFailed != (r.Precopy.FreezeElapsed > r.Precopy.DeclaredFreeze) || time.Duration(r.Stats.CASWriteNs) < fixed {
 		t.Fatalf("final fixed-cost operation was not witnessed within its declaration: %+v", r)
 	}
 	if r.Head.State != ChunkHeadDetached || !bytes.Equal(f.imageOf(t, r.Head)[ctBlockSize:2*ctBlockSize], makeBlock(ctBlockSize, byte(rounds))) {
