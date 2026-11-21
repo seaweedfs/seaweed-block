@@ -1,0 +1,203 @@
+package durable_test
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/storage"
+)
+
+func TestMaintenanceCloseCancelsAndJoinsWithoutGuestLock(t *testing.T) {
+	entered, cancelled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	finish := func() { once.Do(func() { close(release) }) }
+	remote := storage.NewMemChunkRemote()
+	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
+		ChunkRemoteFor:           func(string) (storage.ChunkRemote, error) { return remote, nil },
+		ChunkMaintenanceInterval: time.Millisecond,
+		ChunkMaintenance: func(ctx context.Context, vol string) error {
+			close(entered)
+			<-ctx.Done()
+			close(cancelled)
+			<-release
+			return ctx.Err()
+		},
+	}, v1View())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { finish(); _ = p.Close() })
+	s := openRecovered(t, p)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("maintenance did not start with cut timer off")
+	}
+	writeDone := make(chan error, 1)
+	go func() { _, err := s.Write(1, block(0x51)); writeDone <- err }()
+	select {
+	case err := <-writeDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("maintenance held a guest lock")
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- p.Close() }()
+	select {
+	case <-cancelled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not cancel maintenance")
+	}
+	select {
+	case err := <-closed:
+		t.Fatalf("Close released resources before worker join: %v", err)
+	default:
+	}
+	finish()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not join")
+	}
+}
+
+func TestMaintenanceAuthorityLossCancelsHeldPass(t *testing.T) {
+	view := v1View()
+	entered, cancelled := make(chan struct{}), make(chan struct{})
+	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
+		ChunkRemoteFor:           func(string) (storage.ChunkRemote, error) { return storage.NewMemChunkRemote(), nil },
+		ChunkMaintenanceInterval: time.Millisecond,
+		ChunkMaintenance: func(ctx context.Context, _ string) error {
+			close(entered)
+			<-ctx.Done()
+			close(cancelled)
+			return ctx.Err()
+		},
+	}, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	openRecovered(t, p)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no pass")
+	}
+	view.set(frontend.Projection{VolumeID: "v1", ReplicaID: "r1"})
+	select {
+	case <-cancelled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("lost authority did not cancel held pass")
+	}
+}
+
+func TestMaintenancePassHasOneDeadline(t *testing.T) {
+	entered := make(chan error, 1)
+	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
+		ChunkRemoteFor:           func(string) (storage.ChunkRemote, error) { return storage.NewMemChunkRemote(), nil },
+		ChunkMaintenanceInterval: time.Millisecond, ChunkMaintenanceTimeout: 10 * time.Millisecond,
+		ChunkMaintenance: func(ctx context.Context, _ string) error { <-ctx.Done(); entered <- ctx.Err(); return ctx.Err() },
+	}, v1View())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	openRecovered(t, p)
+	select {
+	case err := <-entered:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("maintenance had no deadline")
+	}
+}
+
+type pendingMaintenancePut struct{ *storage.MemChunkRemote }
+
+func (r pendingMaintenancePut) Put(ctx context.Context, _ string, _ []byte) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+func TestCutDeadlineIncludesUploadWithBackgroundCaller(t *testing.T) {
+	remote := pendingMaintenancePut{storage.NewMemChunkRemote()}
+	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
+		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil }, ChunkCutTimeout: 10 * time.Millisecond,
+	}, v1View())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	s := openRecovered(t, p)
+	if _, err = s.Write(1, block(0x48)); err != nil {
+		t.Fatal(err)
+	}
+	_, err = p.CaptureVolume(context.Background(), "v1")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("whole cut did not expire: %v", err)
+	}
+	h, err := remote.GetHead(context.Background())
+	if err != nil || h.Gen != 0 {
+		t.Fatalf("expired upload published: %+v %v", h, err)
+	}
+}
+
+func TestMaintenanceCoalescesWhileOnePassIsHeld(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	finish := func() { once.Do(func() { close(release) }) }
+	var calls atomic.Int32
+	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
+		ChunkRemoteFor:           func(string) (storage.ChunkRemote, error) { return storage.NewMemChunkRemote(), nil },
+		ChunkMaintenanceInterval: time.Millisecond,
+		ChunkMaintenance: func(ctx context.Context, _ string) error {
+			if calls.Add(1) == 1 {
+				close(entered)
+			}
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return ctx.Err()
+		},
+	}, v1View())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { finish(); _ = p.Close() })
+	openRecovered(t, p)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no pass")
+	}
+	time.Sleep(30 * time.Millisecond)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("held pass started %d workers", got)
+	}
+	// Close cancels the held pass before release; there is no queued retry to drain.
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("Close dispatched %d elapsed ticks", got)
+	}
+	finish()
+}

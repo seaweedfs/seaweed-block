@@ -121,3 +121,62 @@ func TestChunkStageV3_FourTimesCapConvergesUnderSteadyWrites(t *testing.T) {
 	assertEveryHeadIsPrefixImage(t, f, w)
 	assertNoIntentsLeft(t, f)
 }
+
+// Each of two deadlines interrupts the third upload, after two immutable chunks
+// completed. The next pass must reuse those chunks rather than restart the set.
+type deadlineProgressRemote struct {
+	*fakeChunkRemote
+	completed int
+	calls     int
+}
+
+func (r *deadlineProgressRemote) Put(ctx context.Context, key string, b []byte) error {
+	r.calls++
+	if r.completed == 2 {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	err := r.fakeChunkRemote.Put(ctx, key, b)
+	if err == nil {
+		r.completed++
+	}
+	return err
+}
+func TestChunkStageV3_MultipleDeadlinesKeepProgress(t *testing.T) {
+	_, f, l, _ := precopyLayer(t, 1, 5)
+	l.cfg.COWSpillLimit = ctChunkBytes
+	l.cfg.UploadConcurrency = 1
+	r := &deadlineProgressRemote{fakeChunkRemote: f}
+	l.remote = r
+	base := f.stats().head.Gen
+	previous := 0
+	for pass := 0; pass < 3; pass++ {
+		r.completed = 0
+		r.calls = 0
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		result, err := l.Cut(ctx)
+		cancel()
+		if pass < 2 {
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("pass %d did not reach injected deadline: %v", pass, err)
+			}
+			if f.stats().head.Gen != base {
+				t.Fatal("deadline moved HEAD")
+			}
+			l.stMu.Lock()
+			cached := len(l.reusable)
+			l.stMu.Unlock()
+			if cached <= previous {
+				t.Fatalf("pass %d restarted dirty set: cached=%d previous=%d", pass, cached, previous)
+			}
+			previous = cached
+		} else if err != nil || result.Head.Gen != base+1 {
+			t.Fatalf("third pass failed to publish: %+v %v", result, err)
+		}
+	}
+	// Five changed chunks, five successful puts, no retransmission after expiry.
+	if previous != 4 {
+		t.Fatalf("reusable chunks=%d", previous)
+	}
+	assertNoIntentsLeft(t, f)
+}

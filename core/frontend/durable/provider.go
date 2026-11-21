@@ -172,6 +172,13 @@ type ProviderConfig struct {
 	// passed since the volume's last successful cut (of any kind). Zero
 	// disables the timer.
 	ChunkCaptureInterval time.Duration
+	// ChunkCutTimeout bounds a cut as a whole; zero uses five minutes.
+	ChunkCutTimeout time.Duration
+	// Maintenance runs serially for an attached healthy volume. Zero interval disables
+	// it. Callback ownership ends only after cancellation and worker settlement.
+	ChunkMaintenanceInterval time.Duration
+	ChunkMaintenanceTimeout  time.Duration
+	ChunkMaintenance         func(context.Context, string) error
 	// DetachFreezeTimeout bounds how long a failing DetachVolume keeps guest
 	// I/O stopped before it resumes or settles: the drain and final cut get
 	// three quarters of it, the settlement of a failed cut the rest (the
@@ -331,6 +338,12 @@ func NewDurableProvider(cfg ProviderConfig, view frontend.ProjectionView) (*Dura
 	}
 	if cfg.Impl == ImplWALStoreChunk && cfg.ChunkRemoteFor == nil {
 		return nil, fmt.Errorf("durable: impl %q requires ProviderConfig.ChunkRemoteFor", ImplWALStoreChunk)
+	}
+	if cfg.ChunkCaptureInterval < 0 || cfg.ChunkCutTimeout < 0 || cfg.ChunkMaintenanceInterval < 0 || cfg.ChunkMaintenanceTimeout < 0 {
+		return nil, fmt.Errorf("durable: chunk schedule durations must not be negative")
+	}
+	if cfg.ChunkMaintenanceInterval > 0 && cfg.ChunkMaintenance == nil {
+		return nil, fmt.Errorf("durable: chunk maintenance interval requires its callback")
 	}
 	if cfg.ChunkBlocks == 0 {
 		cfg.ChunkBlocks = defaultChunkBlocks

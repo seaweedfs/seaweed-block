@@ -235,6 +235,33 @@ stateDiagram-v2
 
 The attempt path is never removed, so a late create can never land after a delete.
 
+### Attached-volume scheduling
+
+Blockvolume defaults to periodic HEAD capture every 15 minutes (minimum 5
+minutes, 0 disables) and retention every hour. Named snapshots remain explicit.
+A five-minute context covers the whole cut; completed immutable uploads survive
+an expired attempt only under matching version/HEAD generation. Automatic GC is
+opt-in until the 50/200-volume metadata/RSS qualification accepts its full-catalog
+scan cost. Scoped GC changes candidates, not the catalog root domain; each volume
+has independent persisted mark coverage. CLI catalog mutations also check the
+single-filer deployment constraint before mutation.
+
+```mermaid
+stateDiagram-v2
+  [*] --> PendingAttach
+  PendingAttach --> Armed: attached and healthy
+  Armed --> Running: staggered due event
+  Running --> Armed: retention and optional scoped GC settle
+  Running --> Draining: detach, fence, close
+  Armed --> Draining: detach, fence, close
+  Draining --> Closed: cancel and join every worker
+  Draining --> Armed: safe detach abort, same current handle
+```
+
+No catch-up queue is accumulated. Retention failure skips GC; incomplete marks
+and configuration changes do not authorize reclamation. Unknown same-epoch CAS
+intents remain rooted after restart; elapsed TTL is not a settlement proof.
+
 ## 7. Lease, takeover and host moves
 
 **Host guard** (`core/host/volume/workspace_lease.go` `WorkspaceLeaseGuard`, enabled with `blockvolume --workspace-lease`; see [workspace lease](../workspace-lease.md)): frontend I/O and cuts are admitted only with a granted, unexpired lease for the exact `{volume, replica, epoch}`. Validity is anchored to the renewal request's start time, and blockmaster's `ValidForNs` already subtracts half the clock-skew bound (`core/host/master/workspace_service.go` `leaseFact`). A late reply cannot extend admission. A fenced guard never reopens. The lease is 30 s (`core/authority/authority.go`, `workspaceTTL`); the skew bound defaults to 20 s (`blockmaster --workspace-max-clock-skew`).

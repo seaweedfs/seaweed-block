@@ -334,3 +334,24 @@ one missing-probe/newer-ACK schedule. `R293_review_safe` checks four invariants;
 four negative controls separately remove retirement, the frame join, the
 readiness guard or ACK progress restoration. This abstracts successful admitted
 frames and does not prove physical-I/O, authority rollback or timing behavior.
+
+## Attached-volume maintenance
+
+`MaintenanceOwner.tla` models a single attached maintenance owner, coalesced due
+work and joined release. `MaintenanceOwner_safe.cfg` completed with TLC 2.19
+(tla2tools v1.7.4, SHA256
+`936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`),
+15 generated / 8 distinct states, depth 5. The overlap and early-release configs
+both failed their intended invariant (`OneOwner` / `JoinedBeforeRelease`).
+This does not establish physical-I/O cancellation or a fleet scheduling bound.
+
+`ScopedMaintenanceGC.tla` extends S9's scope correspondence: three keys across
+two volumes, one foreign-only root, independent local coverage and crash/config
+invalidation. `ScopedMaintenanceGC_safe.cfg` checks foreign-root preservation,
+local candidate scope and coverage ownership: 20 generated / 10 distinct states,
+depth 9, with the same TLC/jar. Its three negative configs narrow
+the root domain, widen reclamation or import namespace coverage. Native tests
+exercise the persisted mark records and real catalog root traversal; the finite
+model abstracts the complete mark and grace, whose timing remains in S9.
+No 50/200-volume density or metadata-RPC qualification is claimed; automatic GC
+remains opt-in, while periodic HEAD capture and retention are enabled by the CLI.

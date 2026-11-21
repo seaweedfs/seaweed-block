@@ -249,6 +249,11 @@ stateDiagram-v2
 | Settled | drop the intents; settle native map capture tokens, keeping chunks dirtied after the cut; a refused current-lineage point retains intent-rooted completed uploads until reuse, supersession or clean Close (unresolved CAS roots excluded) | `core/storage/chunk_layer.go` `finishCut` | `INV-CUT-BITMAP-001` |
 | Pending | the outcome is unknown and HEAD still shows the CAS base: keep the proposal and its intents | `core/storage/chunk_layer.go` `captureLocked` | `INV-WS-CAS-UNKNOWN-001` |
 
+Periodic HEAD cuts default to 15 minutes in blockvolume (OSS minimum 5 minutes;
+0 explicitly disables); they do not create named snapshots. One five-minute
+context covers a cut, including uploads. Deadline-aborted uploads remain rooted
+and reusable only while their chunk version and HEAD generation match.
+
 ### M6 Chunk lifecycle
 
 HEAD states, snapshots, forks, intents, key bindings, GC and volume delete in the SeaweedFS catalog. The HEAD-state and snapshot-name diagrams are in [agent workspace §6](agent-workspace-design.md#6-snapshots-forks-retention-gc-volume-delete).
@@ -336,9 +341,19 @@ snapshot lifetime; local persistence does not bypass it.
 
 `free -> admitted -> draining -> joined -> released`; process death releases its OS slot. Configuration is published by temporary-file sync and rename under its OS lock; a killed initializer leaves no partially visible configuration. Admission precedes staging/barrier; expiry cancels the cut but keeps its slot until workers join. Urgent can borrow normal slots; normal cannot borrow urgent. Unavailable pools skip background work with an alarm; urgent move-final and named seals may use per-process fallback with no coordinated host-cap claim. Guest COW only accounts locally; guest I/O and WAL reclamation never acquire slots.
 
+### M8. Attached-volume maintenance
+
+`PendingAttach -> Armed -> Due -> Running -> Armed`; elapsed ticks coalesce.
+A stable volume phase staggers the one-hour retention schedule. GC is opt-in
+pending density qualification. Detach/fence/Close cancels and joins before
+catalog/storage release; only a still-current handle may re-arm after safe abort.
+A pass has one minute for retention and optional GC; retention failure skips GC.
+A scoped GC pass traces the whole catalog but mutates only its target volume,
+with a separate scope/config-bound mark. Incomplete marks carry no coverage.
+
 ## Part B. Invariant ledger
 
-117 rows: 98 ACTIVE, 19 STUB; 15 kept from the internal ledger, 102 new.
+120 rows: 103 ACTIVE, 17 STUB; 15 kept from the internal ledger, 105 new.
 
 The "Machine / transition" column refers to Part A. Notes under a table record what a row does not cover and, for kept rows, what was narrowed from the internal ledger.
 
@@ -508,10 +523,13 @@ Notes:
 | ID | Statement | Machine / transition | Enforced in | Test | TLA+ property | Status |
 |---|---|---|---|---|---|---|
 | `INV-CHUNK-WRITE-ONCE-001` | Chunk and segment keys are write-once: a key that exists or once existed is refused, and a volume writes only its own keys. | M6 key: Bound | `core/frontend/chunkstore/chunk_remote.go` `putObject` | `TestChunkRemote_KeysAreWriteOnce` (`core/frontend/chunkstore/chunk_remote_test.go`); `TestChunkLayer_C5_ChunksAreImmutable` (`core/storage/chunk_layer_contract_test.go`) | — | ACTIVE |
+| `INV-MAINT-ONE-OWNER` | One attached volume admits at most one maintenance pass; elapsed ticks coalesce and never enqueue catch-up work. | M8 Armed → Running | `provider_chunk.go` `chunkMaintenanceLoop` | `TestMaintenanceCloseCancelsAndJoinsWithoutGuestLock`, `TestMaintenancePassHasOneDeadline` | `MaintenanceOwner` `OneOwner` | ACTIVE |
+| `INV-MAINT-SCOPE` | Per-volume GC traces foreign roots while restricting candidate reclamation, intent expiry and copy settlement to its volume; namespace coverage is not imported. | M8 scoped GC | `gc.go` `Collector.run`; `gc_copy.go` `SweepCopies`; `gc_execution.go` `ExecuteVolumeGC` | `TestVolumeGC_ForeignIntentRootsAndLocalCandidates`, `TestVolumeGC_DoesNotImportGlobalMark` | `ScopedMaintenanceGC` `ForeignRootSurvives`, `ForeignCandidatesUntouched`, `OwnCoverageOnly` | ACTIVE |
+| `INV-MAINT-JOIN` | Detach/fence/Close cancels maintenance and joins admitted workers before releasing its catalog/storage lifetime. | M8 Running → Draining → Closed | `provider_chunk.go` `chunkBackground`, `stopChunkLoop` | `TestMaintenanceCloseCancelsAndJoinsWithoutGuestLock`, `TestMaintenanceAuthorityLossCancelsHeldPass` | `MaintenanceOwner` `JoinedBeforeRelease` | ACTIVE |
 | `INV-GC-REACHABLE-001` | GC never deletes a chunk reachable from a HEAD, a snapshot, an attempt or a live intent, and deletes a binding only after two marks at least one grace period apart. | M6 key: Bound → Tombstoned | `core/frontend/chunkstore/gc.go` `Collector.run` | `TestGC_UnreachableRequiresTwoMarksAndUploadAge`, `TestGC_StalledCutRemainsReadableAfterTwoMarks`, `TestGC_SnapshotAndQualifiedForkAreRoots` (`core/frontend/chunkstore/gc_test.go`) | `ChunkLifecycleFixed` `GCSafe`; `RetentionGCTiming` `NoLiveDelete` | ACTIVE |
 | `INV-GC-INTENT-EXPIRY-001` | A capture intent expires only when it is older than the TTL, blockmaster has issued a higher epoch, and remote HEAD has moved to a higher epoch. | M6 intent: Live → Expired | `core/frontend/chunkstore/gc.go` `Collector.run` | `TestGC_IntentExpiryNeedsTTLAuthorityAndRemoteFence` (`core/frontend/chunkstore/gc_test.go`) | `WorkspaceTakeover` `NoLiveIntentExpired`, `GCSafe` | ACTIVE |
 | `INV-GC-UNREADABLE-SEGMENT-001` | An unreadable published segment aborts the whole GC pass before any deletion. | M6 GC mark | `core/frontend/chunkstore/gc.go` `Collector.run` | `TestManifest_UnreadablePublishedSegmentRefusesWholeGC` (`core/frontend/chunkstore/manifest_test.go`) | — | ACTIVE |
-| `INV-GC-GRACE-DEADLINE-001` | A GC collector cannot be built unless its grace period exceeds the catalog operation deadline. | M6 GC configuration | `core/frontend/chunkstore/gc.go` `NewCollector` | — | `RetentionGCTiming` `NoLiveDelete` | STUB |
+| `INV-GC-GRACE-DEADLINE-001` | A GC collector cannot be built unless its grace period exceeds the catalog operation deadline. | M6 GC configuration | `core/frontend/chunkstore/gc.go` `NewCollector` | `TestGC_GraceConstructorRejectsCopyDeadline` | `RetentionGCTiming` `NoLiveDelete` | ACTIVE |
 | `INV-SNAP-EXPLICIT-DELETE-001` | A published snapshot is removed only by `DeleteSnapshot` or retention for its own attempt, and never while a fork claim on it is live. | M6 snapshot: Published → Deleting | `core/frontend/chunkstore/catalog.go` `DeleteSnapshot`; `core/frontend/chunkstore/retention.go` `markDeleting` | `TestCatalog_DeleteMarksThenIdempotent` (`core/frontend/chunkstore/catalog_test.go`); `TestCatalog_ClaimBetweenCheckAndMarkWins` (`core/frontend/chunkstore/retention_review_test.go`) | `ChunkLifecycleFixed` `SnapOnlyExplicitDelete` | ACTIVE |
 | `INV-VOLDEL-COMMIT-001` | A volume delete commits only when no snapshot name record exists, and after its commit point no concurrent delete can roll it back. | M6 HEAD: deleting → purging | `core/frontend/chunkstore/volume_delete.go` `DeleteVolume`, `snapshotsBlock`, `commitHeadPurging` | `TestCatalog_DeleteVolumeRefusesWhileSnapshotsExist`, `TestCatalog_ConcurrentDeleteCannotRollBackACommittedOne` (`core/frontend/chunkstore/volume_delete_test.go`) | `ChunkLifecycleFixed` `CommitClean` | ACTIVE |
 | `INV-VOLDEL-HELD-HEAD-001` | A delete marks HEAD `deleting` only while no holder holds it; an attach that reaches HEAD first wins. | M6 HEAD: detached → deleting | `core/frontend/chunkstore/volume_delete.go` `markHeadDeleting`, `headHeld` | `TestCatalog_DeleteVolumeLosesToAnAttachAtTheMark` (`core/frontend/chunkstore/volume_delete_test.go`) | — | ACTIVE |
@@ -519,7 +537,6 @@ Notes:
 
 Notes:
 
-- `INV-GC-GRACE-DEADLINE-001`: The check is in `NewCollector`; no Go test constructs a collector with a too-short grace.
 
 ### B.7 Rows kept from the internal ledger: Kubernetes line and replica fencing
 
