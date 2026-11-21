@@ -132,6 +132,7 @@ type chunkLayerImpl struct {
 
 	// Test-only scheduling hooks; nil in production.
 	testHydrationWait            func(uint64) // after promise registration, outside locks
+	testHydrateAllPause          func()       // HydrateAll yielded to a guest waiter, outside locks
 	testCOWWait                  func()
 	testCOWSaverWait             func()
 	testCOWRead                  func(idx uint64, saved bool)
@@ -1481,6 +1482,7 @@ func (l *chunkLayerImpl) Stats() chunkLayerStats {
 	l.stMu.Unlock()
 
 	out.DirtyChunks = len(l.captureCandidates())
+	out.AbsentChunks = l.absentHydratable()
 
 	return out
 }

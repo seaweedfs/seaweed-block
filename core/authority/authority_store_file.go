@@ -6,7 +6,25 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
+
+// putAfterRenameFault, when set, runs in every FileAuthorityStore.Put after
+// the record's rename (its bytes are in the final file) and before the
+// directory sync; an error fails that Put as a failed sync would.
+var putAfterRenameFault atomic.Pointer[func(DurableRecord) error]
+
+// SetPutAfterRenameFaultForTest installs (nil clears) that hook for every
+// FileAuthorityStore in the process. Tests only: it models a durable write
+// whose caller sees an error (directory sync or close failing after the
+// rename).
+func SetPutAfterRenameFaultForTest(hook func(DurableRecord) error) {
+	if hook == nil {
+		putAfterRenameFault.Store(nil)
+		return
+	}
+	putAfterRenameFault.Store(&hook)
+}
 
 // ============================================================
 // P14 S5 — File-Per-Volume Authority Store
@@ -187,6 +205,11 @@ func (s *FileAuthorityStore) Put(record DurableRecord) error {
 	if err := renameWithRetry(tempPath, finalPath); err != nil {
 		_ = os.Remove(tempPath)
 		return fmt.Errorf("authority_store: rename temp->final: %w", err)
+	}
+	if h := putAfterRenameFault.Load(); h != nil {
+		if err := (*h)(record); err != nil {
+			return fmt.Errorf("authority_store: after rename: %w", err)
+		}
 	}
 
 	// Best-effort fsync the directory so the rename is durable.

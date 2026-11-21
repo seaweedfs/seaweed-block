@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// Plan row 11a controls (DESIGN r17.4 sections 6.6 and 8.3; owner claude03):
+// Install-reopen controls:
 // a covering superseding begin after an installing reopen.
 
 // installThenCrashV3 begins install A at BaseLSN 10 over two acknowledged

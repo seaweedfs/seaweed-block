@@ -26,6 +26,8 @@ const (
 	WorkspaceService_AckWorkspaceRevoked_FullMethodName      = "/seaweedfs.block.control.WorkspaceService/AckWorkspaceRevoked"
 	WorkspaceService_MoveWorkspace_FullMethodName            = "/seaweedfs.block.control.WorkspaceService/MoveWorkspace"
 	WorkspaceService_QueryWorkspace_FullMethodName           = "/seaweedfs.block.control.WorkspaceService/QueryWorkspace"
+	WorkspaceService_QueryWorkspaceLostRange_FullMethodName  = "/seaweedfs.block.control.WorkspaceService/QueryWorkspaceLostRange"
+	WorkspaceService_PreviewWorkspaceMove_FullMethodName     = "/seaweedfs.block.control.WorkspaceService/PreviewWorkspaceMove"
 )
 
 // WorkspaceServiceClient is the client API for WorkspaceService service.
@@ -43,6 +45,13 @@ type WorkspaceServiceClient interface {
 	AckWorkspaceRevoked(ctx context.Context, in *WorkspaceRevocationAck, opts ...grpc.CallOption) (*WorkspaceEmpty, error)
 	MoveWorkspace(ctx context.Context, in *WorkspaceMove, opts ...grpc.CallOption) (*WorkspaceGrant, error)
 	QueryWorkspace(ctx context.Context, in *WorkspaceVolume, opts ...grpc.CallOption) (*WorkspaceStatus, error)
+	// The stored lost ranges of the volume's issued forced moves, in issue
+	// order (or the one of request_id); never recomputed. A forced move whose
+	// range is missing or unreadable fails with DATA_LOSS, never "no loss".
+	QueryWorkspaceLostRange(ctx context.Context, in *WorkspaceLostRangeQuery, opts ...grpc.CallOption) (*WorkspaceLostRanges, error)
+	// Read-only forced-move admission check (no reservation, no journal
+	// write): advisory, re-checked by MoveWorkspace.
+	PreviewWorkspaceMove(ctx context.Context, in *WorkspaceMove, opts ...grpc.CallOption) (*WorkspaceMovePreview, error)
 }
 
 type workspaceServiceClient struct {
@@ -123,6 +132,26 @@ func (c *workspaceServiceClient) QueryWorkspace(ctx context.Context, in *Workspa
 	return out, nil
 }
 
+func (c *workspaceServiceClient) QueryWorkspaceLostRange(ctx context.Context, in *WorkspaceLostRangeQuery, opts ...grpc.CallOption) (*WorkspaceLostRanges, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WorkspaceLostRanges)
+	err := c.cc.Invoke(ctx, WorkspaceService_QueryWorkspaceLostRange_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *workspaceServiceClient) PreviewWorkspaceMove(ctx context.Context, in *WorkspaceMove, opts ...grpc.CallOption) (*WorkspaceMovePreview, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WorkspaceMovePreview)
+	err := c.cc.Invoke(ctx, WorkspaceService_PreviewWorkspaceMove_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // WorkspaceServiceServer is the server API for WorkspaceService service.
 // All implementations must embed UnimplementedWorkspaceServiceServer
 // for forward compatibility.
@@ -138,6 +167,13 @@ type WorkspaceServiceServer interface {
 	AckWorkspaceRevoked(context.Context, *WorkspaceRevocationAck) (*WorkspaceEmpty, error)
 	MoveWorkspace(context.Context, *WorkspaceMove) (*WorkspaceGrant, error)
 	QueryWorkspace(context.Context, *WorkspaceVolume) (*WorkspaceStatus, error)
+	// The stored lost ranges of the volume's issued forced moves, in issue
+	// order (or the one of request_id); never recomputed. A forced move whose
+	// range is missing or unreadable fails with DATA_LOSS, never "no loss".
+	QueryWorkspaceLostRange(context.Context, *WorkspaceLostRangeQuery) (*WorkspaceLostRanges, error)
+	// Read-only forced-move admission check (no reservation, no journal
+	// write): advisory, re-checked by MoveWorkspace.
+	PreviewWorkspaceMove(context.Context, *WorkspaceMove) (*WorkspaceMovePreview, error)
 	mustEmbedUnimplementedWorkspaceServiceServer()
 }
 
@@ -168,6 +204,12 @@ func (UnimplementedWorkspaceServiceServer) MoveWorkspace(context.Context, *Works
 }
 func (UnimplementedWorkspaceServiceServer) QueryWorkspace(context.Context, *WorkspaceVolume) (*WorkspaceStatus, error) {
 	return nil, status.Error(codes.Unimplemented, "method QueryWorkspace not implemented")
+}
+func (UnimplementedWorkspaceServiceServer) QueryWorkspaceLostRange(context.Context, *WorkspaceLostRangeQuery) (*WorkspaceLostRanges, error) {
+	return nil, status.Error(codes.Unimplemented, "method QueryWorkspaceLostRange not implemented")
+}
+func (UnimplementedWorkspaceServiceServer) PreviewWorkspaceMove(context.Context, *WorkspaceMove) (*WorkspaceMovePreview, error) {
+	return nil, status.Error(codes.Unimplemented, "method PreviewWorkspaceMove not implemented")
 }
 func (UnimplementedWorkspaceServiceServer) mustEmbedUnimplementedWorkspaceServiceServer() {}
 func (UnimplementedWorkspaceServiceServer) testEmbeddedByValue()                          {}
@@ -316,6 +358,42 @@ func _WorkspaceService_QueryWorkspace_Handler(srv interface{}, ctx context.Conte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _WorkspaceService_QueryWorkspaceLostRange_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(WorkspaceLostRangeQuery)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkspaceServiceServer).QueryWorkspaceLostRange(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkspaceService_QueryWorkspaceLostRange_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkspaceServiceServer).QueryWorkspaceLostRange(ctx, req.(*WorkspaceLostRangeQuery))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _WorkspaceService_PreviewWorkspaceMove_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(WorkspaceMove)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkspaceServiceServer).PreviewWorkspaceMove(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkspaceService_PreviewWorkspaceMove_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkspaceServiceServer).PreviewWorkspaceMove(ctx, req.(*WorkspaceMove))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // WorkspaceService_ServiceDesc is the grpc.ServiceDesc for WorkspaceService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -350,6 +428,14 @@ var WorkspaceService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "QueryWorkspace",
 			Handler:    _WorkspaceService_QueryWorkspace_Handler,
+		},
+		{
+			MethodName: "QueryWorkspaceLostRange",
+			Handler:    _WorkspaceService_QueryWorkspaceLostRange_Handler,
+		},
+		{
+			MethodName: "PreviewWorkspaceMove",
+			Handler:    _WorkspaceService_PreviewWorkspaceMove_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

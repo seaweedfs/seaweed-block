@@ -38,15 +38,15 @@ type walStoreV3State struct {
 	// leader role) for its whole run, between lifecycleMu and s.mu, and bumps
 	// recoverGen first, under syncMu and s.mu. Every W publisher (the Sync
 	// batch, refreshW, SetWMode) holds syncMu across capture -> publish ->
-	// acknowledgement, so no publication straddles a recovery (codex01 row
-	// 5d; Claude01's structural seam). The one boundary that cannot hold
-	// syncMu across its wait, the outer Sync() completion, captures
-	// recoverGen with its target and rechecks it under syncMu -> s.mu.
+	// acknowledgement, so no publication straddles a recovery. The one
+	// boundary that cannot hold syncMu across its wait, the outer Sync()
+	// completion, captures recoverGen with its target and rechecks it under
+	// syncMu -> s.mu.
 	//
 	// recoverGen is bumped at the start AND at the end of every recovery
 	// and reset, the start+end pattern of the map proof epoch: a lock-free
 	// reader whose attempt saw the same value before and after was not cut
-	// by a recovery's end (codex01 2fa56078 P2: a read admitted between the
+	// by a recovery's end (the case this closes: a read admitted between the
 	// start bump and the dirty-map clear captured the new value with an old
 	// entry, then a same-tuple rewrite after the recovery).
 	//
@@ -478,7 +478,7 @@ func (s *WALStore) recoverV3() (uint64, error) {
 	if err != nil {
 		if d.BaseState == BaseInstalling {
 			// Installing keeps its typed not-ready outcome; the cause is a
-			// substrate error, not proven install-log damage (codex01 5b P2).
+			// substrate error, not proven install-log damage.
 			return 0, fmt.Errorf("%w: scan: %w", ErrBaseIncomplete, err)
 		}
 		return 0, err
@@ -503,11 +503,11 @@ func (s *WALStore) recoverV3() (uint64, error) {
 		// never reuses an LSN the WAL still holds.
 		//
 		// Only a physical reopen records them: when this open began the
-		// installing ID, its handle stays valid (DESIGN r17.4: until the next
-		// begin) and may append and acknowledge past this cut, so a cached E
-		// would be stale and fencing from it could erase acknowledged
-		// records (codex01 row 11b P1). A resume or a fenced supersession
-		// then refuses before any I/O; the live install continues.
+		// installing ID, its handle stays valid (until the next begin) and
+		// may append and acknowledge past this cut, so a cached E would be
+		// stale and fencing from it could erase acknowledged records. A
+		// resume or a fenced supersession then refuses before any I/O; the
+		// live install continues.
 		if d.BaseInstallID != v.liveInstallID {
 			ro := &installReopenV3{id: d.BaseInstallID, E: o.E, R: o.R, damaged: o.Damaged, walSize: d.WALSize}
 			for _, r := range scan.Records {
@@ -533,11 +533,11 @@ func (s *WALStore) recoverV3() (uint64, error) {
 			// closed; a physical reopen then decides intact or damaged.
 			s.latchV3(fmt.Errorf("storage: v3 same-open installing recovery: recovered cut E %d is not the live writer head", o.E))
 		} else {
-			// The live install continues (r17.4). Its trusted install-lane
+			// The live install continues. Its trusted install-lane
 			// records are republished in the dirty map, which this Recover
 			// cleared, so the completed image serves them and not older BASE
 			// bytes; the volatile map coverage (the BASE writes' UNKNOWN) is
-			// kept as it is (codex01 04180c33 P1).
+			// kept as it is.
 			for _, r := range scan.Records {
 				if r.Entry.LSN > o.R {
 					break
@@ -623,7 +623,7 @@ func (s *WALStore) recoverV3() (uint64, error) {
 	// The volatile acknowledged frontier is the recovered prefix, never an
 	// older in-memory maximum: a same-open recovery that dropped mode C's
 	// newest batch must not let a later refresh publish a W the WAL no
-	// longer holds (codex01 5b P1).
+	// longer holds.
 	v.appended.Store(o.R)
 	v.wack.Store(o.R)
 	return s.syncedLSN, nil
@@ -864,7 +864,7 @@ func (s *WALStore) syncWALBatchV3Internal(pressureOnly bool) error {
 	if h := v.testBatchBeforeAck; h != nil {
 		h()
 	}
-	// The acknowledgement boundary (codex01 row 5 P1): a queued append may
+	// The acknowledgement boundary: a queued append may
 	// have failed and latched the store fault while this batch's slot I/O
 	// was in flight. Recheck under the store lock, which that append holds
 	// until it has latched, before acknowledging anything.
@@ -931,7 +931,7 @@ func (s *WALStore) SetWMode(m WMode) error {
 // readDirtyV3 serves a v3 read from the dirty map, if the LBA has an entry
 // (handled false: read the extent). A reader holds no lock across its WAL
 // read, so the position it resolved may be reused before the pread: after a
-// reset (cursor 0 again, codex01 row 8 P1) or a same-open recovery that
+// reset (cursor 0 again) or a same-open recovery that
 // fenced and reused it. The read therefore validates the WHOLE record it
 // read, payload included (CRC, footer, write type, LBA and LSN against the
 // resolving entry), and re-resolves on a mismatch. LSN allocation runs on
@@ -940,7 +940,7 @@ func (s *WALStore) SetWMode(m WMode) error {
 // to the same LBA at the same position, so the "entry unchanged" damage
 // verdict also requires the same recovery generation before and after the
 // whole attempt. A recovery bumps it at its start and its end, so any
-// overlap changes it (codex01 e72acd40 and 2fa56078 P2s; see recoverGen).
+// overlap changes it (see recoverGen).
 // A generation captured while a recovery runs can match only if the
 // verdict also falls inside that recovery, which holds s.mu: no write can
 // re-allocate the tuple, and the replay installs only validated records. A pread error is a

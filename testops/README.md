@@ -154,7 +154,7 @@ controller, pointing it at the remote product checkout on m02:
 
 ```powershell
 swblock suite `
-  --results-dir V:/share/g15d-k8s/testops-runs/protocol-release-gate-native `
+  --results-dir <evidence-store>/g15d-k8s/testops-runs/protocol-release-gate-native `
   --env product_root=/tmp/seaweed-block-nvme-p4l `
   --env ssh_key=C:/work/dev_server/testdev_key `
   C:/work/seaweed_block/testops/suites/protocol-release-gate.yaml
@@ -164,7 +164,7 @@ Validate the bundle before manual artifact review:
 
 ```powershell
 swblock validate-bundle --profile protocol-release-gate `
-  V:/share/g15d-k8s/testops-runs/protocol-release-gate-native/<run-id>
+  <evidence-store>/g15d-k8s/testops-runs/protocol-release-gate-native/<run-id>
 ```
 
 QA close evidence:
@@ -264,7 +264,7 @@ Run shape:
 
 ```powershell
 swblock suite `
-  --results-dir V:/share/g15d-k8s/testops-runs/beta-hardening-gate `
+  --results-dir <evidence-store>/g15d-k8s/testops-runs/beta-hardening-gate `
   --env product_root=/tmp/seaweed-block-plan-roadmap-refresh-devrun `
   --env ssh_key=C:/work/dev_server/testdev_key `
   C:/work/seaweed_block/testops/suites/beta-hardening-gate.yaml

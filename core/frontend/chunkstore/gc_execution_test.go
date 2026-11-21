@@ -31,7 +31,7 @@ func TestGCExecution_PreviewAndIndependentApplyMarks(t *testing.T) {
 	if e != nil || len(early.WouldDelete) != 0 {
 		t.Fatalf("early independent preview: %+v %v", early, e)
 	}
-	*now = now.Add(2 * time.Second)
+	*now = now.Add(2*time.Second + g.cfg.ClockSkew)
 	before, _ := f.LookupEntry(ctx, catBase, gcMarkName)
 	mature, e := c.ExecuteGC(ctx, b, g.cfg, false)
 	if e != nil || len(mature.WouldDelete) != 1 || mature.Reclaimed != 0 {

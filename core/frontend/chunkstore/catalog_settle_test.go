@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
-	"path"
 	"sort"
 	"strings"
 	"testing"
@@ -166,22 +165,8 @@ func TestFork_IncompleteRetryBoundToOriginalImage(t *testing.T) {
 		t.Fatalf("request id reused for another snapshot: %v, want target_exists", err)
 	}
 
-	// The fork claims s1, so an explicit delete is refused. The image
-	// binding below still guards a
-	// fork made before claims existed: drop the claim as such a fork would
-	// never have written one.
-	if _, err := c.DeleteSnapshot(ctx, "v1", "s1"); CodeOf(err) != CodeSnapshotClaimed {
-		t.Fatalf("delete of a claimed parent: %v, want snapshot_claimed", err)
-	}
-	ref, _, err := c.resolveSnap(ctx, "v1", "s1")
-	if err != nil || ref.entry == nil {
-		t.Fatalf("read s1: %v", err)
-	}
-	delete(ref.entry.Extended, extSnapClaims)
-	if err := f.UpdateEntry(ctx, path.Join(catBase, "v1", snapsDir, "s1"), ref.entry, nil); err != nil {
-		t.Fatal(err)
-	}
-
+	// Forks do not hold their parent: the delete goes through while the
+	// fork is incomplete, and the image binding below guards the retry.
 	// s1 is deleted and recreated over a newer source image.
 	if _, err := c.DeleteSnapshot(ctx, "v1", "s1"); err != nil { // frees the name
 		t.Fatal(err)

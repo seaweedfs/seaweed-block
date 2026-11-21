@@ -19,6 +19,15 @@ import (
 
 const extGCDeleted = "swb.gc.deleted"
 
+// ErrBlobDeleteRejected identifies a definite per-object refusal (HTTP400).
+// It never proves the needle absent; GC retains its tombstone and reports it.
+var ErrBlobDeleteRejected = errors.New("chunkstore: blob DELETE rejected")
+
+// DefaultGCClockSkew is the allowed pairwise difference between timestamp
+// writers and collectors. Deployments with a larger bound must raise ClockSkew;
+// no finite time-based grace can be safe with unbounded clock differences.
+const DefaultGCClockSkew = time.Minute
+
 // BlobDeleter deletes one immutable needle. Missing needles are success.
 // Implementations must not reuse a deleted fid.
 type BlobDeleter interface {
@@ -30,8 +39,22 @@ type BlobDeleter interface {
 // lease expiry or a cached guess. Unknown authority retains the intent.
 type GCConfig struct {
 	Grace, IntentTTL time.Duration
-	IssuedEpoch      func(context.Context, string) (uint64, error)
-	Now              func() time.Time
+	// ClockSkew bounds pairwise wall-clock differences. Zero uses the default.
+	// Binding creation timestamps additionally lose up to one second of precision.
+	ClockSkew time.Duration
+	// CASApplyBound is the margin for a publish applied after its fork's
+	// deadline check. Zero uses the catalog operation deadline. A publish
+	// known to have succeeded was applied before its context ended, and that
+	// context ends at readAt + deadline, so it is inside the deadline; an
+	// unknown outcome keeps the fork intent, which roots the keys until the
+	// target is resolved, with no time bound. This bound covers apply delay
+	// and clock-rate drift beyond those two. NewCollector requires
+	// Grace >= operation deadline + ClockSkew + CASApplyBound, so a snapshot
+	// deleted while a fork of it is in flight stays rooted until the fork can
+	// no longer publish (INV-SNAP-DELETE-ANY-ORDER-001).
+	CASApplyBound time.Duration
+	IssuedEpoch   func(context.Context, string) (uint64, error)
+	Now           func() time.Time
 }
 
 type GCRoot struct {
@@ -47,10 +70,16 @@ type GCObject struct {
 	Key    string `json:"key"`
 	FID    string `json:"fid"`
 }
+type GCDeleteFailure struct {
+	GCObject
+	Error string `json:"error"`
+}
+
 type GCResult struct {
-	Roots                                                   []GCRoot   `json:"roots"`
-	WouldDelete                                             []GCObject `json:"would_delete"`
-	WouldExpireIntents                                      []string   `json:"would_expire_intents"`
+	FailedDeletes                                           []GCDeleteFailure `json:"failed_deletes"`
+	Roots                                                   []GCRoot          `json:"roots"`
+	WouldDelete                                             []GCObject        `json:"would_delete"`
+	WouldExpireIntents                                      []string          `json:"would_expire_intents"`
 	Volumes, Intents, ExpiredIntents, Candidates, Reclaimed int
 	// Pre-binding needles cannot be enumerated by this API. They are retained;
 	// UnknownUnbound is true rather than inventing a report-only count.
@@ -77,6 +106,7 @@ type gcIntent struct {
 // Different collectors may duplicate idempotent blob deletes but cannot
 // shorten either collector's independent two-mark grace requirement.
 type Collector struct {
+	scope      string // empty traces and reclaims the entire namespace
 	cat        *Catalog
 	blobs      BlobDeleter
 	cfg        GCConfig
@@ -86,8 +116,25 @@ type Collector struct {
 }
 
 func NewCollector(cat *Catalog, blobs BlobDeleter, cfg GCConfig) (*Collector, error) {
-	if cat == nil || blobs == nil || cfg.Grace <= cat.deadline() || cfg.IntentTTL <= 0 || cfg.IssuedEpoch == nil {
-		return nil, errors.New("chunkstore: GC requires catalog, blob deletion, grace > operation deadline, positive intent TTL and epoch authority")
+	if cat == nil || blobs == nil || cfg.IntentTTL <= 0 || cfg.IssuedEpoch == nil {
+		return nil, errors.New("chunkstore: GC requires catalog, blob deletion, positive intent TTL and epoch authority")
+	}
+	if cfg.ClockSkew == 0 {
+		cfg.ClockSkew = DefaultGCClockSkew
+	}
+	if cfg.ClockSkew < 0 || cfg.ClockSkew > time.Duration(1<<63-1)-time.Second {
+		return nil, errors.New("chunkstore: invalid GC clock skew bound")
+	}
+	if cfg.CASApplyBound == 0 {
+		cfg.CASApplyBound = cat.deadline()
+	}
+	const maxDur = time.Duration(1<<63 - 1)
+	d := cat.deadline()
+	if cfg.CASApplyBound < 0 || cfg.CASApplyBound > maxDur-d-cfg.ClockSkew {
+		return nil, errors.New("chunkstore: invalid GC CAS apply bound")
+	}
+	if need := d + cfg.ClockSkew + cfg.CASApplyBound; cfg.Grace < need {
+		return nil, fmt.Errorf("chunkstore: GC grace %v is below operation deadline %v + clock skew %v + CAS apply bound %v = %v", cfg.Grace, d, cfg.ClockSkew, cfg.CASApplyBound, need)
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
@@ -112,6 +159,7 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 	result.Roots = []GCRoot{}
 	result.WouldDelete = []GCObject{}
 	result.WouldExpireIntents = []string{}
+	result.FailedDeletes = []GCDeleteFailure{}
 	defer func() {
 		if err != nil && apply {
 			g.candidates = map[string]gcCandidate{}
@@ -119,7 +167,13 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 	}()
 	start := g.cfg.Now()
 	if !g.last.IsZero() && start.Before(g.last) {
-		return result, errors.New("chunkstore: GC clock moved backwards")
+		// Discard coverage across a backward clock step; a fresh complete mark
+		// can still make progress without borrowing time from the future.
+		if apply {
+			g.candidates = map[string]gcCandidate{}
+		}
+		// Preview must also ignore the old coverage without mutating it.
+		// Candidate lookup below is guarded by this same condition.
 	}
 	roots := map[string]bool{}
 	var bindings []gcBinding
@@ -207,18 +261,18 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 		}
 		for _, in := range intents {
 			result.Intents++
-			if in.CreatedNs <= 0 || in.CreatedNs > start.UnixNano() {
+			if in.CreatedNs <= 0 {
 				return result, errors.New("chunkstore: invalid intent creation time")
 			}
 			expire := false
-			if !strings.HasPrefix(in.Holder, "snapshot:") && !strings.HasPrefix(in.Holder, "fork:") && start.Sub(time.Unix(0, in.CreatedNs)) > g.cfg.IntentTTL {
+			if !strings.HasPrefix(in.Holder, "snapshot:") && !strings.HasPrefix(in.Holder, "fork:") && g.oldEnough(start, time.Unix(0, in.CreatedNs), g.cfg.IntentTTL, 0) {
 				issued, authorityErr := g.cfg.IssuedEpoch(ctx, vol)
 				// Catalog copy intents are retained: their exclusive creates
 				// are not epoch-fenced. For a capture, both the authority
 				// and the actual CAS domain must have
 				// advanced. Mere lease loss, or issuance without takeover,
 				// cannot authorize expiry of a paused publisher's intent.
-				expire = authorityErr == nil && issued > in.Epoch && h.Epoch > in.Epoch && h.Epoch <= issued
+				expire = (g.scope == "" || g.scope == vol) && authorityErr == nil && issued > in.Epoch && h.Epoch > in.Epoch && h.Epoch <= issued
 			}
 			if expire {
 				expired = append(expired, gcIntent{r, in})
@@ -255,6 +309,10 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 					roots[path.Join(dir, name)] = true
 				}
 			}
+		}
+		// INV-MAINT-SCOPE: roots above remain catalog-wide; candidates are local.
+		if g.scope != "" && g.scope != vol {
+			continue
 		}
 		pageAfter := ""
 		for {
@@ -312,15 +370,18 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 			continue
 		}
 		created := time.Unix(b.entry.Attributes.Crtime, 0)
-		if !start.After(created.Add(g.cfg.Grace)) {
+		if !g.oldEnough(start, created, g.cfg.Grace, time.Second) {
 			continue
 		}
 		candidate, seen := g.candidates[p]
+		if !g.last.IsZero() && start.Before(g.last) {
+			seen = false
+		}
 		if !seen || candidate.digest != b.digest {
 			candidate = gcCandidate{start, b.digest}
 		}
 		result.Candidates++
-		if start.Sub(candidate.since) < g.cfg.Grace {
+		if !g.oldEnough(start, candidate.since, g.cfg.Grace, 0) {
 			nextCandidates[p] = candidate
 			continue
 		}
@@ -331,7 +392,21 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 		if err = ctx.Err(); err != nil {
 			return result, err
 		}
-		if err = reclaimBinding(ctx, g.cat.f, g.blobs, path.Dir(p), b.entry); err != nil {
+		err = reclaimBinding(ctx, g.cat.f, g.blobs, path.Dir(p), b.entry)
+		if err != nil && ctx.Err() != nil {
+			err = ctx.Err()
+		}
+		if errors.Is(err, ErrBlobDeleteRejected) {
+			// INV-GC-DELETE-PROGRESS-001: a confirmed object rejection
+			// must not starve later candidates or invalidate a complete mark.
+			// Keep the fid/tombstone and retry; never record this object done.
+			result.FailedDeletes = append(result.FailedDeletes, GCDeleteFailure{
+				GCObject: GCObject{Volume: b.volume, Key: mustUnescapeGCKey(b.entry.Name), FID: string(b.entry.Extended[extFid])}, Error: err.Error(),
+			})
+			nextCandidates[p] = candidate
+			continue
+		}
+		if err != nil {
 			return result, err
 		}
 		result.Reclaimed++
@@ -399,4 +474,12 @@ func reclaimBinding(ctx context.Context, f Filer, blobs BlobDeleter, dir string,
 	e := proto.Clone(entry).(*filerpb.Entry)
 	e.Extended[extGCDeleted] = []byte("done")
 	return f.UpdateEntry(ctx, dir, e, map[string][]byte{extFid: entry.Extended[extFid], extGCDeleted: []byte("1")})
+}
+
+// INV-GC-CLOCK-SKEW-001: expiry uses a lower bound on elapsed time,
+// never the raw difference of timestamps from different hosts. Subtracting
+// separately avoids overflowing grace + skew for large configured durations.
+func (g *Collector) oldEnough(now, stamp time.Time, grace, resolution time.Duration) bool {
+	age := now.Sub(stamp)
+	return age > grace && age-grace > g.cfg.ClockSkew+resolution
 }

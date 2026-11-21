@@ -21,12 +21,14 @@ import (
 
 const (
 	defaultChunkPath = "/swblock/chunks"
-	// The remote holds snapshots, not live data: cuts are published at
-	// snapshots, at detach/stop and on explicit request. The timer is off
-	// by default (an operator may set one, e.g. 15m, as a host-loss safety
-	// net); the dirty threshold only bounds how large one cut can grow.
-	defaultChunkCaptureInterval = 0
-	defaultChunkDirtyThreshold  = 512 // chunks, 2 GiB at 4 MiB chunks
+	// Periodic HEAD publication bounds the host-loss recovery point. Automatic
+	// named snapshots remain explicit catalog operations.
+	defaultChunkCaptureInterval     = 0
+	defaultChunkMaintenanceInterval = time.Hour
+	defaultChunkCutTimeout          = 5 * time.Minute
+	defaultChunkMaintenanceTimeout  = time.Minute
+	defaultChunkGCGrace             = time.Hour
+	defaultChunkIntentTTL           = time.Hour
 )
 
 type chunkFlags struct {
@@ -37,7 +39,8 @@ type chunkFlags struct {
 	collection          string
 	replication         string
 	captureInterval     time.Duration
-	dirtyThreshold      int
+	maintenanceInterval time.Duration
+	automaticGC         bool
 	uploadConcurrency   int
 	hydrationWorkers    int
 	hydrationQueueDepth int
@@ -56,7 +59,7 @@ func validateChunkFlags(f flags) error {
 	}
 	if f.durableImpl != "walstore-chunk" {
 		if c.filer != "" || c.collection != "" || c.replication != "" || c.path != defaultChunkPath ||
-			c.captureInterval != defaultChunkCaptureInterval || c.dirtyThreshold != defaultChunkDirtyThreshold ||
+			c.captureInterval != defaultChunkCaptureInterval || c.maintenanceInterval != defaultChunkMaintenanceInterval || c.automaticGC ||
 			c.uploadConcurrency != 8 || c.hydrationWorkers != 2 || c.hydrationQueueDepth != 64 || c.controlEndpoint || c.detachPrecopy || c.hostLimit.Directory != "" {
 			return errors.New("--chunk-* flags require --durable-impl=walstore-chunk")
 		}
@@ -77,6 +80,12 @@ func validateChunkFlags(f flags) error {
 	if !path.IsAbs(c.path) || path.Clean(c.path) != c.path || c.path == "/" {
 		return fmt.Errorf("--chunk-path=%q must be a clean absolute filer directory other than /", c.path)
 	}
+	if c.maintenanceInterval < 0 {
+		return errors.New("--chunk-maintenance-interval must not be negative")
+	}
+	if c.captureInterval > 0 && c.captureInterval < 5*time.Minute {
+		return errors.New("--chunk-capture-interval must be 0 or at least 5m")
+	}
 	if c.captureInterval < 0 {
 		return fmt.Errorf("--chunk-capture-interval=%s must not be negative", c.captureInterval)
 	}
@@ -88,9 +97,6 @@ func validateChunkFlags(f flags) error {
 	}
 	if c.hydrationQueueDepth < 1 || c.hydrationQueueDepth > 65536 {
 		return errors.New("--chunk-hydration-queue-depth must be between 1 and 65536")
-	}
-	if c.dirtyThreshold < 0 {
-		return fmt.Errorf("--chunk-dirty-threshold=%d must not be negative", c.dirtyThreshold)
 	}
 	return nil
 }
@@ -106,14 +112,15 @@ const chunkRF1Reason = "chunk snapshots take the cut LSN from the local WAL, whi
 // provider's per-volume remotes, the catalog under the same base (VOLUME
 // entries, snapshots) and the client's closer.
 type chunkWiring struct {
-	remoteFor func(volumeID string) (storage.ChunkRemote, error)
-	catalog   *chunkstore.Catalog
-	close     func() error
+	remoteFor   func(volumeID string) (storage.ChunkRemote, error)
+	catalog     *chunkstore.Catalog
+	maintenance func(context.Context, string) error
+	close       func() error
 }
 
 // newChunkWiring dials the filer and refuses unless it is the only filer of
 // its group (chunkstore.CheckSingleFiler).
-func newChunkWiring(c chunkFlags) (chunkWiring, error) {
+func newChunkWiring(c chunkFlags, master ...string) (chunkWiring, error) {
 	client, err := chunkstore.DialSWFS(chunkstore.SWFSConfig{
 		FilerGRPC:   c.filer,
 		Collection:  c.collection,
@@ -133,7 +140,17 @@ func newChunkWiring(c chunkFlags) (chunkWiring, error) {
 		_ = client.Close()
 		return chunkWiring{}, err
 	}
+	var masterAddr string
+	if len(master) > 0 {
+		masterAddr = master[0]
+	}
+	maintenance, closeMaintenance, err := newChunkMaintenance(cat, client, c.automaticGC, masterAddr)
+	if err != nil {
+		_ = client.Close()
+		return chunkWiring{}, err
+	}
 	return chunkWiring{
+		maintenance: maintenance,
 		remoteFor: func(volumeID string) (storage.ChunkRemote, error) {
 			root, err := chunkVolumeRoot(c.path, volumeID)
 			if err != nil {
@@ -142,7 +159,7 @@ func newChunkWiring(c chunkFlags) (chunkWiring, error) {
 			return chunkstore.NewSWFSChunkRemote(client, root)
 		},
 		catalog: cat,
-		close:   client.Close,
+		close:   func() error { return errors.Join(closeMaintenance(), client.Close()) },
 	}, nil
 }
 
