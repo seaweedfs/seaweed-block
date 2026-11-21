@@ -410,6 +410,9 @@ type chunkCutStats struct {
 	// writers already holding the capture barrier shared.
 	BarrierPauseNs  int64
 	LockWaitNs      int64
+	DrainNs         int64
+	CASWriteNs      int64
+	HeadReadbackNs  int64
 	SyncNs          int64
 	CopyNs          int64
 	CandidateChunks int
@@ -419,6 +422,7 @@ type chunkCutStats struct {
 	UnchangedChunks int
 	UploadNs        int64
 	CASNs           int64
+	MapPersistNs    int64
 	CASResult       string
 	TotalNs         int64
 	// Pre-copy (BarrierBound > 0): StageRounds staging rounds staged

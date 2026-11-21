@@ -77,12 +77,25 @@ func confirmChunkHead(ctx context.Context, remote chunkRemote, want chunkHead) e
 // Every successful CAS is confirmed, including calls near or beyond a lease
 // horizon. No lease renewal or guard lock is needed across these remote calls.
 func casAndConfirmChunkHead(ctx context.Context, remote chunkRemote, expected chunkHeadVersion, next chunkHead) (uint64, error) {
+	return casAndConfirmChunkHeadMeasured(ctx, remote, expected, next, nil)
+}
+
+func casAndConfirmChunkHeadMeasured(ctx context.Context, remote chunkRemote, expected chunkHeadVersion, next chunkHead, st *chunkCutStats) (uint64, error) {
+	start := time.Now()
 	gen, err := casChunkHead(ctx, remote, expected, next)
+	if st != nil {
+		st.CASWriteNs += time.Since(start).Nanoseconds()
+	}
 	if err != nil {
 		return gen, err
 	}
 	next.Gen = gen
-	return gen, confirmChunkHead(ctx, remote, next)
+	start = time.Now()
+	err = confirmChunkHead(ctx, remote, next)
+	if st != nil {
+		st.HeadReadbackNs += time.Since(start).Nanoseconds()
+	}
+	return gen, err
 }
 
 func confirmChunkTakeover(ctx context.Context, remote chunkRemote, head chunkHead, window time.Duration) error {

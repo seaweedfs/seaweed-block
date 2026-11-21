@@ -107,6 +107,17 @@ for bad in "$empty" "/nonexistent/post-merge-review-allow.txt"; do
 done
 rm -f "$empty"
 
+# A list whose last line has no newline keeps that line (here a denial).
+unterminated=$(mktemp)
+printf '*_test.go\n!core/workspace/*' >"$unterminated"
+got=0
+printf 'M\0core/workspace/orch_test.go\0' | bash "$check" "$unterminated" >/dev/null 2>&1 || got=$?
+[[ $got == 1 ]] || { echo "FAIL allow list with an unterminated last line: exit $got, want 1"; fail=1; }
+got=0
+printf 'M\0cmd/foo/a_test.go\0' | bash "$check" "$unterminated" >/dev/null 2>&1 || got=$?
+[[ $got == 0 ]] || { echo "FAIL allow list with an unterminated last line, allowed path: exit $got, want 0"; fail=1; }
+rm -f "$unterminated"
+
 # Real Git: names that git quotes in its default output, a rename out of a
 # denied directory, a retarget onto a base that differs, and test deletes.
 repo=$(mktemp -d)
