@@ -28,23 +28,44 @@ import (
 )
 
 const (
-	chunkExitFailed     = 1
+	chunkExitFailed = 1
+	// chunkExitFindings: the command completed and found problems (verify).
+	chunkExitFindings   = 3
 	defaultChunkPathCLI = "/swblock/chunks"
 	chunkResponseLimit  = 64 << 20
 )
 
-// dialChunkFiler opens the filer for the direct commands; tests replace it.
+// dialChunkFiler opens the filer for the direct commands and refuses unless
+// it is the only filer of its group, the same start check blockvolume makes
+// (chunkstore.CheckSingleFiler): a compare-and-swap on one of several
+// filers does not exclude a writer on another. Tests replace it.
 var dialChunkFiler = func(addr string) (chunkstore.Filer, func() error, error) {
 	c, err := chunkstore.DialSWFS(chunkstore.SWFSConfig{FilerGRPC: addr})
 	if err != nil {
 		return nil, nil, err
 	}
+	if err := c.CheckSingleFiler(context.Background()); err != nil {
+		_ = c.Close()
+		return nil, nil, err
+	}
 	return c, c.Close, nil
+}
+
+// codeNotSingleFilerCLI: the filer is not the only filer of its group.
+const codeNotSingleFilerCLI = "not_single_filer"
+
+// chunkDialFail reports a failed dialChunkFiler: a multi-filer refusal is a
+// failure (exit 1), anything else a bad --chunk-filer (exit 2).
+func chunkDialFail(name string, err error, stdout, stderr io.Writer) int {
+	if errors.Is(err, chunkstore.ErrNotSingleFiler) {
+		return chunkFail(name, stdout, stderr, chunkExitFailed, codeNotSingleFilerCLI, err.Error(), false)
+	}
+	return chunkFail(name, stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, err.Error(), false)
 }
 
 func runOpsChunk(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		return chunkFail("", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "expected cut|snapshot|snapshots|snapshot-delete|fork|detach|show|gc|usage|retain|volume-delete", false)
+		return chunkFail("", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "expected cut|snapshot|snapshots|snapshot-delete|fork|detach|show|gc|usage|retain|verify|volume-delete", false)
 	}
 	switch args[0] {
 	case "gc":
@@ -67,6 +88,8 @@ func runOpsChunk(args []string, stdout, stderr io.Writer) int {
 		return chunkUsage(args[1:], stdout, stderr)
 	case "retain":
 		return chunkRetain(args[1:], stdout, stderr)
+	case "verify":
+		return chunkVerify(args[1:], stdout, stderr)
 	case "volume-delete":
 		return chunkVolumeDelete(args[1:], stdout, stderr)
 	default:
@@ -249,7 +272,7 @@ func chunkCatalog(name, filer, base string, stdout, stderr io.Writer) (*chunksto
 	}
 	f, closeFn, err := dialChunkFiler(filer)
 	if err != nil {
-		return nil, nil, chunkFail(name, stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, err.Error(), false)
+		return nil, nil, chunkDialFail(name, err, stdout, stderr)
 	}
 	cat, err := chunkstore.NewCatalog(f, base)
 	if err != nil {

@@ -261,18 +261,42 @@ func (c *SWFS) Get(ctx context.Context, fid string) ([]byte, error) {
 		return nil, err
 	}
 	var lastErr error
+	allNotFound := true
 	for _, host := range urls {
 		b, err := c.getFrom(ctx, host, fid)
 		if err == nil {
 			return b, nil
 		}
 		lastErr = err
+		var se *blobStatusError
+		if !errors.As(err, &se) || se.code != http.StatusNotFound {
+			allNotFound = false
+		}
 	}
 	c.mu.Lock()
 	delete(c.vidCache, vid)
 	c.mu.Unlock()
+	if allNotFound && lastErr != nil {
+		lastErr = &blobNotFoundError{lastErr}
+	}
 	return nil, fmt.Errorf("chunkstore: read %s: %w", fid, lastErr)
 }
+
+// blobStatusError is a volume server's non-200 answer to a needle GET.
+type blobStatusError struct {
+	code int
+	host string
+}
+
+func (e *blobStatusError) Error() string { return fmt.Sprintf("http %d from %s", e.code, e.host) }
+
+// blobNotFoundError marks a read every location answered 404: it reads as
+// the last location's error and matches ErrBlobNotFound.
+type blobNotFoundError struct{ err error }
+
+func (e *blobNotFoundError) Error() string        { return e.err.Error() }
+func (e *blobNotFoundError) Unwrap() error        { return e.err }
+func (e *blobNotFoundError) Is(target error) bool { return target == ErrBlobNotFound }
 
 func (c *SWFS) getFrom(ctx context.Context, host, fid string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+host+"/"+fid, nil)
@@ -285,7 +309,7 @@ func (c *SWFS) getFrom(ctx context.Context, host, fid string) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("http %d from %s", resp.StatusCode, host)
+		return nil, &blobStatusError{code: resp.StatusCode, host: host}
 	}
 	return io.ReadAll(resp.Body)
 }

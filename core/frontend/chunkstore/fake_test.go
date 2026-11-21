@@ -256,7 +256,7 @@ func (b *fakeBlobs) Get(_ context.Context, fid string) ([]byte, error) {
 	b.gets++
 	d, ok := b.data[fid]
 	if !ok {
-		return nil, errors.New("fake: no such fid " + fid)
+		return nil, fmt.Errorf("fake: no such fid %s: %w", fid, ErrBlobNotFound)
 	}
 	return append([]byte(nil), d...), nil
 }
