@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// Plan row 9c controls (owner claude03): SeedChunkFrontier on a dark v3
+// Chunk-frontier controls: SeedChunkFrontier on a dark v3
 // store uses the checkpoint's map/metadata barrier and the sole descriptor
 // publication (publishCheckpointV3), never the legacy superblock writer.
 

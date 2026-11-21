@@ -366,7 +366,7 @@ by the SRA/RDMA project, not as a Kubernetes node for seaweed_block.
 |---|---|
 | M02 (k3s alpha lab) | `192.168.1.184`, user `testdev` |
 | SSH key (controller-side) | `C:/work/dev_server/testdev_key` |
-| Shared SMB share | `V:/share` on Windows = `/mnt/smb/work/share` on Linux |
+| Shared SMB share (`<evidence-store>`) | the internal evidence store; `/mnt/smb/work/share` on Linux |
 | TestOps artifact root on M02 | `/mnt/smb/work/share/g15d-k8s/<run_id>-<scenario>/` |
 | Default `KUBECONFIG` on M02 | `/etc/rancher/k3s/k3s.yaml` |
 | TestOps control directory (when used) | `--control-dir` flag to `sw-testops` |
@@ -416,7 +416,7 @@ The `swblock` runner can drive scenarios on M02 over SSH:
 
 ```powershell
 swblock run `
-  --results-dir V:/share/g15d-k8s/testops-runs/<scenario-name> `
+  --results-dir <evidence-store>/g15d-k8s/testops-runs/<scenario-name> `
   --env product_root=/tmp/seaweed_block `
   --env ssh_key=C:/work/dev_server/testdev_key `
   C:/work/seaweed_block/testops/scenarios/<scenario>.yaml
@@ -424,7 +424,7 @@ swblock run `
 
 Scenario artifacts land under both:
 
-- The Windows result bundle at `V:/share/g15d-k8s/testops-runs/...`,
+- The Windows result bundle at `<evidence-store>/g15d-k8s/testops-runs/...`,
 - The M02-side artifact dir at `/mnt/smb/work/share/g15d-k8s/<run_id>-*/`.
 
 ### 9.5 Lab Hygiene After A Run

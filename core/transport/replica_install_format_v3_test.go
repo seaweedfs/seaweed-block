@@ -15,8 +15,8 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
-// Plan row 10b controls (DESIGN r17.4 section 8.7, caller 2; owner
-// claude03): the legacy single-lane rebuild on a dark v3 replica. The
+// Replica install controls:
+// the legacy single-lane rebuild on a dark v3 replica. The
 // first admitted rebuild message begins one install at its frontier hint;
 // blocks go through the handle; done completes, then Syncs, and a failure
 // closes the connection with no MsgBarrierResp.

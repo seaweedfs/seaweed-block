@@ -15,13 +15,12 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
-// Plan row 9b controls (DESIGN r17.3.1 section 8.7): the dual-lane Receiver
-// on a dark v3 store. Every BASE block and WAL entry goes through the
-// session's install handle; both admission schedules run through the real
-// receiver (WriteBase through frameBaseBlock, ApplyInstallEntry through
-// RebuildSession.ApplyWALEntry from frameWALEntry). Owner: claude03.
-// Mutants are the row 9a store mutants (shared-begin, no-id-check,
-// premature-check) plus the row 9b caller mutants named per control.
+// Controls for the dual-lane Receiver on a dark v3 store. Every BASE block
+// and WAL entry goes through the session's install handle; both admission
+// schedules run through the real receiver (WriteBase through frameBaseBlock,
+// ApplyInstallEntry through RebuildSession.ApplyWALEntry from frameWALEntry).
+// Mutants are the store mutants (shared-begin, no-id-check, premature-check)
+// plus the caller mutants named per control.
 
 const v3RecvBlock = 4096
 
@@ -182,7 +181,7 @@ func TestReceiverV3InstallThroughTheHandle(t *testing.T) {
 	}
 }
 
-// Drain setup through the receiver (codex01 r12 P2): A's admitted BASE
+// Drain setup through the receiver: A's admitted BASE
 // write is held; B's SessionStart begin waits for it; B writes the target
 // block and stays installing; a further A frame fails A's session with
 // ErrInstallSuperseded and B's block is byte-identical.
@@ -248,7 +247,7 @@ func TestReceiverV3HeldOldBaseWriteDrainsBeforeANewSession(t *testing.T) {
 	}
 }
 
-// Premature-check setup through the receiver (codex03 r11): A's frame parks
+// Premature-check setup through the receiver: A's frame parks
 // before acquiring installMu; B supersedes, writes the target block and
 // stays installing; A resumes and its session fails with
 // ErrInstallSuperseded, B's block byte-identical. WriteBase runs through
@@ -311,7 +310,7 @@ func TestReceiverV3SupersededBaseDoneFailsWithoutAnAck(t *testing.T) {
 	}
 }
 
-// codex01 row 9b P1: the real Sender sends BaseDone from its base lane while
+// The real Sender sends BaseDone from its base lane while
 // its WAL lane is still sending (sender.go base goroutine). A WAL entry of
 // the same session after BaseDone must still apply, and the barrier then
 // completes with both lanes' bytes. Mutant: admitting install-lane WAL
