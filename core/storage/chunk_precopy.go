@@ -19,6 +19,8 @@ const (
 	precopyMargin      = 100 * time.Millisecond
 	precopyDrainBound  = 100 * time.Millisecond
 	precopyFreezeLimit = 5 * time.Second
+	precopyFixedWindow = 5
+	precopyFixedMaxAge = 15 * time.Minute
 )
 
 // PrecopyFixedParts are disjoint terms of the same retained fixed-cost sample.
@@ -101,7 +103,7 @@ func (r *PrecopyReport) Finish(elapsed time.Duration, extraCAS uint64, failed bo
 	r.CASFailureTimeout = chunkHeadOperationTimeout
 	r.DeclaredWorst = r.Estimate + time.Duration(extraCAS)*chunkHeadOperationTimeout
 	limit := precopyAllowance
-	if r.Reason == "fixed_cost_over_allowance" {
+	if r.Reason == "no_progress" || r.Reason == "final_attempt" {
 		limit = min(r.DeclaredFreeze, precopyFreezeLimit)
 	}
 	r.LatencyGateFailed = failed || elapsed > limit
@@ -194,7 +196,7 @@ func (l *chunkLayerImpl) precopyDetach(ctx context.Context, prepare func(context
 		if len(rounds) > 0 {
 			previous = &rounds[len(rounds)-1]
 		}
-		if !report.admitPrecopy(previous) {
+		if !report.admitPrecopy(previous, len(rounds)+1 == precopyAttempts) {
 			return false
 		}
 		report.DeclaredFreeze = report.Estimate
@@ -276,30 +278,34 @@ func (l *chunkLayerImpl) precopyEstimate(tail uint64, attempts int) PrecopyRepor
 	r := PrecopyReport{Attempts: attempts, TailBytes: tail, Reason: "samples_unknown"}
 	now := time.Now()
 	var rates []float64
-	for _, s := range l.precopySamples {
-		age := now.Sub(s.at)
-		if age > precopyDuration {
+	// Fixed work uses up to the last five fresh observations, independent of the
+	// latest-three-rate window. Parts always belong to the selected observation.
+	fixedCount := 0
+	for i := len(l.precopySamples) - 1; i >= 0; i-- {
+		sample := l.precopySamples[i]
+		age := now.Sub(sample.at)
+		if age < 0 {
 			continue
 		}
-		if age > r.SampleAge {
-			r.SampleAge = age
+		if age <= precopyDuration && sample.rate > 0 {
+			rates = append(rates, sample.rate)
 		}
-		// With at most 32 observations the maximum is a conservative empirical
-		// p99 envelope of barrier-to-settlement non-payload work. Serving
-		// preparation and host-budget waits are outside the freeze. The stop
-		// is already drained; metadata and CAS/read-back remain included.
-		if s.fixed > r.Fixed {
-			r.Fixed = s.fixed
-			r.FixedParts = s.parts
-			known := s.parts.Drain + s.parts.StoreLock + s.parts.DataSync + s.parts.HeadCAS + s.parts.HeadReadback + s.parts.MapPersist
-			r.FixedParts.Other = max(time.Duration(0), s.fixed-known)
+		if age >= precopyFixedMaxAge || fixedCount >= precopyFixedWindow {
+			continue
 		}
-		if s.rate > 0 {
-			rates = append(rates, s.rate)
+		fixedCount++
+		r.SampleAge = max(r.SampleAge, age)
+		if sample.fixed > r.Fixed {
+			r.Fixed = sample.fixed
+			r.FixedParts = precopyFixedPartsFromSample(sample)
 		}
 	}
+	// Rates were visited newest first; only the latest three are used below.
 	r.RateSamples = len(rates)
-	if r.Fixed <= 0 {
+	if len(rates) > 3 {
+		rates = rates[:3]
+	}
+	if fixedCount == 0 || r.Fixed <= 0 {
 		return r
 	}
 	r.Estimate = r.Fixed + precopyMargin
@@ -331,29 +337,41 @@ func (l *chunkLayerImpl) precopyEstimate(tail uint64, attempts int) PrecopyRepor
 	return r
 }
 
-// More copying cannot reduce a fixed-bound plateau. Only the measured tail
-// may use at most a quarter of the normal allowance on this exception path.
-func (r *PrecopyReport) admitPrecopy(previous *PrecopyAttempt) bool {
-	if r.Reason == "fit" && r.Estimate <= precopyAllowance {
+// Rounds shrink the tail; a plateau or the final round may use the full
+// declared freeze budget. The final flag is the physical round, not the number
+// of warm admission attempts (measurement rounds consume the same limit).
+func (r *PrecopyReport) admitPrecopy(previous *PrecopyAttempt, final bool) bool {
+	if r.Reason == "samples_unknown" || r.Estimate <= 0 {
+		return false
+	}
+	if r.Estimate <= precopyAllowance {
+		r.Reason = "fit"
 		return true
 	}
-	if r.Reason == "samples_unknown" {
+	if r.Estimate > precopyFreezeLimit {
+		r.Reason = "freeze_budget_exceeded"
 		return false
 	}
-	// Preserve and name the existing frontend ceiling even on the first round.
-	if r.TailEstimate <= precopyAllowance/4 && r.Estimate > precopyFreezeLimit {
-		r.Reason = "fixed_cost_exceeds_freeze_budget"
-		return false
+	if comparablePrecopyAttempt(previous) {
+		r.PreviousEstimate = previous.Estimate
+		// Division first avoids overflow while retaining nanosecond precision.
+		threshold := previous.Estimate - previous.Estimate/10
+		if r.Estimate >= threshold {
+			r.Reason = "no_progress"
+			return true
+		}
 	}
-	if previous == nil || previous.Estimate <= 0 {
-		return false
+	if final {
+		r.Reason = "final_attempt"
+		return true
 	}
-	r.PreviousEstimate = previous.Estimate
-	if r.TailEstimate > precopyAllowance/4 || r.Estimate < previous.Estimate {
-		return false
-	}
-	r.Reason = "fixed_cost_over_allowance"
-	return true
+	return false
+}
+
+func precopyFixedPartsFromSample(s precopySample) PrecopyFixedParts {
+	p := s.parts
+	p.Other = max(time.Duration(0), s.fixed-p.Drain-p.StoreLock-p.DataSync-p.HeadCAS-p.HeadReadback-p.MapPersist)
+	return p
 }
 
 func (l *chunkLayerImpl) samplePrecopy(st chunkCutStats, fixedNs int64) {
@@ -392,5 +410,19 @@ func (l *chunkLayerImpl) lockPrecopy(ctx context.Context) error {
 				return nil
 			}
 		}
+	}
+}
+
+// Only a completed cost estimate is comparable. A drain/before-barrier refusal
+// can carry Fixed+margin without a known tail, just like samples_unknown.
+func comparablePrecopyAttempt(a *PrecopyAttempt) bool {
+	if a == nil || a.Estimate <= 0 || a.Error != "" {
+		return false
+	}
+	switch a.Reason {
+	case "fit", "tail_too_large", "barrier_over_budget", "freeze_budget_exceeded", "no_progress", "final_attempt", "admitted_io":
+		return true
+	default:
+		return false
 	}
 }
