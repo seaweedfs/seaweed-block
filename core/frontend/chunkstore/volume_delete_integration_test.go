@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"path"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -140,7 +141,7 @@ func TestIntegration_DeleteVolumeThenGC(t *testing.T) {
 	want := []string{"w1:chunks/e1/c0/a", "w2:chunks/e1/c2/d"}
 	for _, h := range []storage.ChunkHead{h1, h3} {
 		for _, segment := range h.Segments {
-			want = append(want, segment.Owner+":"+segment.Key)
+			want = append(want, segment.Owner+":"+strings.TrimPrefix(segment.Key, "@"+segment.Owner+"/"))
 		}
 	}
 	sort.Strings(want)
