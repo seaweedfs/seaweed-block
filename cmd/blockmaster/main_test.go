@@ -87,6 +87,7 @@ func TestParseFlags_FrontendPublicationRuntimeHTTPDisabledByDefault(t *testing.T
 		"--authority-store", "authority-dir",
 		"--frontend-publication-runtime-http",
 		"--frontend-publication-runtime-listen", "0.0.0.0:9334",
+		"--insecure-external-bind", // a non-loopback control listener is an explicit choice
 	})
 	if err != nil {
 		t.Fatalf("parseFlags with frontend publication runtime HTTP: %v", err)
