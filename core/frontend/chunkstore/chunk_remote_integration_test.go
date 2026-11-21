@@ -69,6 +69,13 @@ func waitTCP(t *testing.T, addr string, d time.Duration) {
 
 func startWeed(t *testing.T) *weedCluster {
 	t.Helper()
+	return startWeedWith(t, "")
+}
+
+// startWeedWith starts the cluster with security (the contents of a
+// security.toml in its working directory; "" for none).
+func startWeedWith(t *testing.T, security string) *weedCluster {
+	t.Helper()
 	weed := os.Getenv("CHUNKSTORE_WEED")
 	if weed == "" {
 		t.Skip("CHUNKSTORE_WEED not set")
@@ -109,6 +116,11 @@ func startWeed(t *testing.T) *weedCluster {
 	}
 	for _, d := range []string{"m", "v", "f"} {
 		if err := os.MkdirAll(filepath.Join(dir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if security != "" {
+		if err := os.WriteFile(filepath.Join(dir, "security.toml"), []byte(security), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
