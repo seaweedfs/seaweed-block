@@ -1,11 +1,14 @@
 package durable
 
+// The scheduled-snapshot loop on virtual time (testing/synctest): the
+// bubble's clock is the monotonic clock the schedule runs on.
+
 import (
 	"context"
 	"errors"
-	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
@@ -18,167 +21,187 @@ type snapStubLayer struct{ storage.ChunkLayer }
 func (snapStubLayer) Fenced() bool                   { return false }
 func (snapStubLayer) Stats() storage.ChunkLayerStats { return storage.ChunkLayerStats{} }
 
-// stepClock is a wall clock a test can step.
-type stepClock struct {
-	mu  sync.Mutex
-	now time.Time
-}
-
-func (c *stepClock) get() time.Time  { c.mu.Lock(); defer c.mu.Unlock(); return c.now }
-func (c *stepClock) set(t time.Time) { c.mu.Lock(); c.now = t; c.mu.Unlock() }
-
-// snapLoopFixture is a provider running the scheduled-snapshot loop of one
-// volume on a stepped clock, with a 10 ms wake bound. take is called for
-// every attempt; the loop is stopped and joined at cleanup.
-func snapLoopFixture(t *testing.T, take func(context.Context) error) (*DurableProvider, *volHandle, *stepClock) {
-	t.Helper()
-	wake := snapshotWake
-	snapshotWake = 10 * time.Millisecond
-	t.Cleanup(func() { snapshotWake = wake })
-	clock := &stepClock{now: time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)}
+// snapLoop sets up volume v1's scheduled-snapshot loop (period one day) in
+// the current bubble; take runs each attempt. start arms the loop; stop
+// stops it and reports whether it was joined within an hour of virtual
+// time.
+func snapLoop(take func(context.Context) error) (h *volHandle, start func(), stop func() bool) {
 	id := frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 3, EndpointVersion: 1}
 	layer := &snapStubLayer{}
-	h := &volHandle{chunk: layer, chunkLineage: chunkLineage{"v1", "r1", 3, 1}}
-	p := &DurableProvider{volumes: map[string]*volHandle{"v1": h}, view: precopyQueueView{id}, testSnapshotClock: clock.get,
+	h = &volHandle{chunk: layer, chunkLineage: chunkLineage{"v1", "r1", 3, 1}}
+	p := &DurableProvider{volumes: map[string]*volHandle{"v1": h}, view: precopyQueueView{id},
 		cfg: ProviderConfig{ChunkSnapshotPeriod: 24 * time.Hour,
 			ChunkScheduledSnapshot: func(ctx context.Context, _ string, _ time.Time, _ func(context.Context) (storage.ChunkHead, error)) error {
 				return take(ctx)
 			}}}
-	p.mu.Lock()
-	p.startChunkLoop("v1", h, layer)
-	p.mu.Unlock()
-	t.Cleanup(func() {
+	start = func() {
+		p.mu.Lock()
+		p.startChunkLoop("v1", h, layer)
+		p.mu.Unlock()
+	}
+	stop = func() bool {
 		done := make(chan struct{})
 		go func() { p.stopChunkLoop(h); close(done) }()
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Error("the snapshot loop was not joined")
+			return true
+		case <-time.After(time.Hour):
+			return false
+		}
+	}
+	return h, start, stop
+}
+
+// The first attempt is at the start plus the volume's offset and the next
+// one a period later, both on the monotonic clock.
+func TestScheduledSnapshotLoop_TakesEachSlotOnMonotonicTime(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var calls atomic.Int64
+		h, start, stop := snapLoop(func(context.Context) error { calls.Add(1); return nil })
+		begin := time.Now()
+		start()
+		defer func() {
+			if !stop() {
+				t.Error("the loop was not joined")
+			}
+		}()
+		first := h.snapshots.due()
+		if off := first.Sub(begin); off < 0 || off >= 24*time.Hour {
+			t.Fatalf("first slot %v after the start; want within one period", off)
+		}
+		time.Sleep(time.Until(first) - time.Second)
+		synctest.Wait()
+		if calls.Load() != 0 {
+			t.Fatal("an attempt ran before its slot")
+		}
+		time.Sleep(2 * time.Second)
+		synctest.Wait()
+		if calls.Load() != 1 {
+			t.Fatalf("%d attempts at the first slot; want 1", calls.Load())
+		}
+		if next := h.snapshots.due(); next.Sub(first) != 24*time.Hour {
+			t.Fatalf("next slot %v after the first; want one period", next.Sub(first))
+		}
+		time.Sleep(24 * time.Hour)
+		synctest.Wait()
+		if calls.Load() != 2 {
+			t.Fatalf("%d attempts after one period; want 2", calls.Load())
 		}
 	})
-	return p, h, clock
 }
 
-func waitUntil(t *testing.T, what string, ok func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for !ok() {
-		if time.Now().After(deadline) {
-			t.Fatalf("%s not reached", what)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-}
-
-// A wall-clock step forwards past the due time is observed within the wake
-// bound: the attempt runs without waiting out the elapsed-time timer, and
-// its success is recorded at the stepped wall time.
-func TestScheduledSnapshotLoop_ForwardWallStepIsObserved(t *testing.T) {
-	var calls atomic.Int64
-	p, h, clock := snapLoopFixture(t, func(context.Context) error { calls.Add(1); return nil })
-	due := h.snapshots.status(clock.get()).NextDueNs
-	time.Sleep(50 * time.Millisecond)
-	if calls.Load() != 0 {
-		t.Fatal("an attempt ran before its slot")
-	}
-	stepped := time.Unix(0, due).Add(time.Second)
-	clock.set(stepped)
-	waitUntil(t, "the attempt after a forward step", func() bool { return calls.Load() == 1 })
-	waitUntil(t, "the recorded success", func() bool { return h.snapshots.status(p.snapshotNow()).LastOkNs == stepped.UnixNano() })
-}
-
-// A wall-clock step backwards realigns the next attempt to the first slot
-// after the stepped now (it does not wait the step out), and that slot is
-// then taken.
-func TestScheduledSnapshotLoop_BackwardWallStepRealigns(t *testing.T) {
-	var calls atomic.Int64
-	_, h, clock := snapLoopFixture(t, func(context.Context) error { calls.Add(1); return nil })
-	back := clock.get().Add(-3 * 24 * time.Hour)
-	clock.set(back)
-	waitUntil(t, "the realigned slot", func() bool {
-		next := time.Unix(0, h.snapshots.status(clock.get()).NextDueNs)
-		return next.After(back) && next.Sub(back) <= 24*time.Hour
-	})
-	if calls.Load() != 0 {
-		t.Fatal("a backward step triggered an attempt")
-	}
-	clock.set(time.Unix(0, h.snapshots.status(clock.get()).NextDueNs).Add(time.Second))
-	waitUntil(t, "the attempt at the realigned slot", func() bool { return calls.Load() == 1 })
-}
-
-// Overdue follows the wall clock: a success recorded by the loop, then a
-// wall step forwards past one period plus the retry cap, reads as overdue.
-func TestScheduledSnapshotLoop_OverdueFollowsTheWallClock(t *testing.T) {
-	var calls atomic.Int64
-	p, h, clock := snapLoopFixture(t, func(context.Context) error { calls.Add(1); return nil })
-	clock.set(time.Unix(0, h.snapshots.status(clock.get()).NextDueNs))
-	waitUntil(t, "the first success", func() bool { return h.snapshots.status(p.snapshotNow()).LastOkNs != 0 })
-	clock.set(clock.get().Add(2 * 24 * time.Hour))
-	if !h.snapshots.status(p.snapshotNow()).Overdue {
-		t.Fatal("two days after the last success on the wall clock, not overdue")
-	}
-}
-
-// A re-armed loop (stopped and started again on the same handle, as after a
-// refused detach) keeps the schedule: the failed attempt, its count and
-// backoff survive.
+// A re-armed loop (stopped and started again on the same handle, as after
+// a refused detach) keeps the volume's schedule: the failure, its count and
+// its retry time survive, and the retry runs at that time.
 func TestScheduledSnapshotLoop_RearmKeepsTheSchedule(t *testing.T) {
-	p, h, clock := snapLoopFixture(t, func(context.Context) error { return &SnapshotFailure{Code: "remote_unavailable"} })
-	clock.set(time.Unix(0, h.snapshots.status(clock.get()).NextDueNs))
-	waitUntil(t, "the failure", func() bool { return h.snapshots.status(clock.get()).Attempts == 1 })
-	slot := h.snapshots
-	p.stopChunkLoop(h)
-	p.mu.Lock()
-	p.startChunkLoop("v1", h, h.chunk)
-	p.mu.Unlock()
-	if st := h.snapshots.status(clock.get()); h.snapshots != slot || st.Attempts != 1 || st.LastFailure == nil {
-		t.Fatalf("after re-arm: %+v (same schedule %v); want the failure kept", st, h.snapshots == slot)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		var calls atomic.Int64
+		h, start, stop := snapLoop(func(context.Context) error {
+			calls.Add(1)
+			return &SnapshotFailure{Code: "remote_unavailable"}
+		})
+		start()
+		time.Sleep(time.Until(h.snapshots.due()) + time.Second)
+		synctest.Wait()
+		slot, retry := h.snapshots, h.snapshots.due()
+		if st := slot.status(time.Now()); st.Attempts != 1 || st.LastFailure == nil {
+			t.Fatalf("after the first attempt: %+v; want one failure", st)
+		}
+		if !stop() {
+			t.Fatal("the loop was not joined")
+		}
+		start()
+		defer func() {
+			if !stop() {
+				t.Error("the re-armed loop was not joined")
+			}
+		}()
+		if h.snapshots != slot || h.snapshots.due() != retry || slot.status(time.Now()).Attempts != 1 {
+			t.Fatalf("after re-arm: same schedule %v, due %v (want %v), %+v", h.snapshots == slot, h.snapshots.due(), retry, slot.status(time.Now()))
+		}
+		time.Sleep(time.Until(retry) + time.Second)
+		synctest.Wait()
+		if calls.Load() != 2 || slot.status(time.Now()).Attempts != 2 {
+			t.Fatalf("%d attempts after the retry time; want the re-armed loop to retry once", calls.Load())
+		}
+	})
 }
 
 // INV-MAINT-JOIN for the scheduled-snapshot worker: stopping the loop
-// cancels an attempt in flight and returns only after the attempt has
-// returned.
+// cancels an attempt in flight (the attempt observes the cancellation) and
+// returns only after the attempt has returned. The attempt is released
+// before the loop is joined, whatever the outcome.
 func TestScheduledSnapshotLoop_StopJoinsTheAttempt(t *testing.T) {
-	entered, release := make(chan struct{}), make(chan struct{})
-	var once sync.Once
-	finish := func() { once.Do(func() { close(release) }) }
-	t.Cleanup(finish)
-	p, h, clock := snapLoopFixture(t, func(ctx context.Context) error {
-		close(entered)
-		<-ctx.Done()
-		<-release // returns only when the test allows it
-		return errors.New("stopped")
+	synctest.Test(t, func(t *testing.T) {
+		entered, cancelled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+		h, start, stop := snapLoop(func(ctx context.Context) error {
+			close(entered)
+			<-ctx.Done()
+			close(cancelled)
+			<-release // returns only when the test allows it
+			return errors.New("stopped")
+		})
+		start()
+		joined := make(chan bool, 1)
+		stopping := false
+		defer func() { // runs after the release below: join the stop, bounded
+			if !stopping {
+				joined <- stop()
+			}
+			select {
+			case ok := <-joined:
+				if !ok {
+					t.Error("stop was not joined after the attempt returned")
+				}
+			case <-time.After(2 * time.Hour):
+				t.Error("stop did not return")
+			}
+		}()
+		var released atomic.Bool
+		defer func() {
+			if released.CompareAndSwap(false, true) {
+				close(release)
+			}
+		}()
+		time.Sleep(time.Until(h.snapshots.due()) + time.Second)
+		<-entered
+		stopping = true
+		go func() { joined <- stop() }()
+		<-cancelled // the attempt saw the cancellation
+		synctest.Wait()
+		select {
+		case <-joined:
+			t.Fatal("stop returned while the attempt was still running")
+		default:
+		}
+		if released.CompareAndSwap(false, true) {
+			close(release)
+		}
 	})
-	clock.set(time.Unix(0, h.snapshots.status(clock.get()).NextDueNs))
-	select {
-	case <-entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("no attempt started")
-	}
-	stopped := make(chan struct{})
-	go func() { p.stopChunkLoop(h); close(stopped) }()
-	select {
-	case <-stopped:
-		t.Fatal("stop returned while the attempt was still running")
-	case <-time.After(100 * time.Millisecond):
-	}
-	finish()
-	select {
-	case <-stopped:
-	case <-time.After(5 * time.Second):
-		t.Fatal("stop did not return after the attempt")
-	}
 }
 
-// The production clock carries no monotonic reading, so durations and
-// overdue between its readings follow wall-clock steps.
-func TestScheduledSnapshotWallClockHasNoMonotonicReading(t *testing.T) {
-	now := snapshotWallNow()
-	if now != now.Round(0) {
-		t.Fatalf("snapshotWallNow %v carries a monotonic reading", now)
-	}
-	if p := (&DurableProvider{}); p.snapshotNow() != p.snapshotNow().Round(0) {
-		t.Fatal("the provider's snapshot clock carries a monotonic reading")
-	}
+// With every attempt failing, the schedule is overdue once no success
+// came within one period plus the retry cap from the start; never before.
+func TestScheduledSnapshotLoop_OverdueWithNoSuccess(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h, start, stop := snapLoop(func(context.Context) error { return &SnapshotFailure{Code: "remote_unavailable"} })
+		begin := time.Now()
+		start()
+		defer func() {
+			if !stop() {
+				t.Error("the loop was not joined")
+			}
+		}()
+		limit := 24*time.Hour + snapshotRetryMax
+		time.Sleep(time.Until(begin.Add(limit)))
+		synctest.Wait()
+		if st := h.snapshots.status(time.Now()); st.Overdue || st.LastOkNs != 0 {
+			t.Fatalf("at one period plus the retry cap: %+v; want not yet overdue", st)
+		}
+		time.Sleep(time.Minute)
+		synctest.Wait()
+		if st := h.snapshots.status(time.Now()); !st.Overdue || st.LastFailure == nil {
+			t.Fatalf("past one period plus the retry cap with only failures: %+v; want overdue with the failure", st)
+		}
+	})
 }

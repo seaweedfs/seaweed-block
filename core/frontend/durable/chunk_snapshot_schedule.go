@@ -18,23 +18,6 @@ const (
 	snapshotRetryMax = time.Hour
 )
 
-// snapshotWake bounds how long the loop sleeps before it reads the wall
-// clock again, so a wall-clock step is observed within it.
-var snapshotWake = time.Minute
-
-// snapshotWallNow is the wall clock the schedule runs on, without the
-// monotonic reading: slots, durations and overdue all follow wall-clock
-// steps.
-func snapshotWallNow() time.Time { return time.Now().Round(0) }
-
-// snapshotNow is the provider's scheduled-snapshot clock.
-func (p *DurableProvider) snapshotNow() time.Time {
-	if p.testSnapshotClock != nil {
-		return p.testSnapshotClock()
-	}
-	return snapshotWallNow()
-}
-
 // SnapshotSkipRestoring is the skip reason of a volume still fetching the
 // chunks its HEAD names (a restore's hydration).
 const SnapshotSkipRestoring = "restoring"
@@ -91,61 +74,41 @@ type ScheduledSnapshotStatus struct {
 }
 
 // snapshotSchedule decides when one volume's scheduled snapshot is due and
-// records the outcome of each attempt. Each slot starts at a multiple of
-// the period (from the Unix epoch) plus the volume's offset, spread over
-// the whole period and stable across restarts: "daily" is once per 24 h
-// at a per-volume offset, not at a wall-clock hour. It is not safe for
-// concurrent use.
+// records the outcome of each attempt, on this process's monotonic time
+// (every time in it is a time.Now() reading or derived from one), so
+// wall-clock steps move nothing. Slots are the start plus the volume's
+// offset (spread over the whole period) plus whole periods: "daily" is
+// once per 24 h at a per-volume offset, not at a wall-clock hour. A
+// restart starts a fresh schedule. It is not safe for concurrent use.
 type snapshotSchedule struct {
-	period  time.Duration
-	offset  time.Duration
-	started time.Time
-	lastOK  time.Time
-	next    time.Time
-	// setAt is when next was last set; retry says next is a retry
-	// (setAt plus a delay) rather than a slot.
-	setAt    time.Time
-	retry    bool
+	period   time.Duration
+	origin   time.Time // the first slot: the start plus the volume's offset
+	started  time.Time
+	lastOK   time.Time
+	next     time.Time
 	failure  *ScheduledSnapshotFailure
 	attempts int
 	skipped  map[string]int64
 }
 
-// newSnapshotSchedule starts vol's schedule at now.
+// newSnapshotSchedule starts vol's schedule at now, a time.Now() reading.
 func newSnapshotSchedule(vol string, period time.Duration, now time.Time) *snapshotSchedule {
-	s := &snapshotSchedule{period: period, offset: hostlimit.Phase(vol+":snapshot", period), started: now, skipped: map[string]int64{}}
-	s.next, s.setAt = s.slotAfter(now), now
+	s := &snapshotSchedule{period: period, origin: now.Add(hostlimit.Phase(vol+":snapshot", period)), started: now, skipped: map[string]int64{}}
+	s.next = s.origin
 	return s
 }
 
-// slotAfter returns the first slot start strictly after t.
+// slotAfter returns the first slot strictly after t: the origin plus a
+// whole number of periods.
 func (s *snapshotSchedule) slotAfter(t time.Time) time.Time {
-	p := int64(s.period)
-	base := t.UnixNano() / p * p
-	slot := time.Unix(0, base).Add(s.offset)
-	if !slot.After(t) {
-		slot = slot.Add(s.period)
+	if t.Before(s.origin) {
+		return s.origin
 	}
-	return slot
+	return s.origin.Add((t.Sub(s.origin)/s.period + 1) * s.period)
 }
 
 // due returns when the next attempt is due.
 func (s *snapshotSchedule) due() time.Time { return s.next }
-
-// align handles a wall-clock step backwards (now earlier than when the
-// next attempt was set): a retry keeps its delay, counted from now; a slot
-// becomes the first slot after now.
-func (s *snapshotSchedule) align(now time.Time) {
-	if !now.Before(s.setAt) {
-		return
-	}
-	if s.retry {
-		s.next = now.Add(s.next.Sub(s.setAt))
-	} else {
-		s.next = s.slotAfter(now)
-	}
-	s.setAt = now
-}
 
 // record records the outcome of an attempt made at now: nil is a
 // success (the next attempt is the next slot); a *SnapshotSkip is counted
@@ -153,7 +116,6 @@ func (s *snapshotSchedule) align(now time.Time) {
 // failure, recorded with its code, and retried with a doubling backoff.
 func (s *snapshotSchedule) record(now time.Time, err error) {
 	var skip *SnapshotSkip
-	s.setAt, s.retry = now, err != nil
 	switch {
 	case err == nil:
 		s.lastOK, s.failure, s.attempts = now, nil, 0
@@ -226,11 +188,9 @@ func (sl *snapshotSlot) status(now time.Time) ScheduledSnapshotStatus {
 	return sl.s.status(now)
 }
 
-// alignedDue aligns the schedule to now and returns its due time.
-func (sl *snapshotSlot) alignedDue(now time.Time) time.Time {
+func (sl *snapshotSlot) due() time.Time {
 	sl.mu.Lock()
 	defer sl.mu.Unlock()
-	sl.s.align(now)
 	return sl.s.due()
 }
 
@@ -241,18 +201,13 @@ func (sl *snapshotSlot) record(now time.Time, err error) {
 }
 
 // chunkSnapshotLoop takes volumeID's scheduled snapshots while the
-// attachment is current. It sleeps at most snapshotWake at a time and
-// compares the wall clock with the due time on each wake, so wall-clock
-// steps are observed. A restoring volume is skipped. Each attempt is one
-// bounded pass: one urgent cut and the snapshot record. An attempt cut
-// short by the loop's own end is not recorded. chunkBackground joins it
-// with its other workers (INV-MAINT-JOIN).
+// attachment is current, on this process's monotonic time. A restoring
+// volume is skipped. Each attempt is one bounded pass: one urgent cut and
+// the snapshot record. An attempt cut short by the loop's own end is not
+// recorded. chunkBackground joins it with its other workers
+// (INV-MAINT-JOIN).
 func (p *DurableProvider) chunkSnapshotLoop(ctx context.Context, volumeID string, layer storage.ChunkLayer, current func() bool, slot *snapshotSlot) {
-	sleep := func() time.Duration {
-		now := p.snapshotNow()
-		return min(max(slot.alignedDue(now).Sub(now), 0), snapshotWake)
-	}
-	timer := time.NewTimer(sleep())
+	timer := time.NewTimer(time.Until(slot.due()))
 	defer timer.Stop()
 	timeout := 2 * p.cfg.ChunkCutTimeout
 	if timeout <= 0 {
@@ -271,11 +226,7 @@ func (p *DurableProvider) chunkSnapshotLoop(ctx context.Context, volumeID string
 		if ctx.Err() != nil || layer.Fenced() || !current() {
 			return
 		}
-		at := p.snapshotNow()
-		if at.Before(slot.alignedDue(at)) {
-			timer.Reset(sleep())
-			continue
-		}
+		at := time.Now()
 		var err error
 		if layer.Stats().AbsentChunks > 0 {
 			// Restoring: HEAD names chunks this volume has not fetched yet.
@@ -288,11 +239,10 @@ func (p *DurableProvider) chunkSnapshotLoop(ctx context.Context, volumeID string
 		if ctx.Err() != nil {
 			return
 		}
-		now := p.snapshotNow()
-		slot.record(now, err)
+		slot.record(time.Now(), err)
 		if err != nil {
-			log.Printf("durable: scheduled snapshot volume=%s: %v (next attempt %s)", volumeID, err, slot.alignedDue(now).UTC().Format(time.RFC3339))
+			log.Printf("durable: scheduled snapshot volume=%s: %v (next attempt in %s)", volumeID, err, time.Until(slot.due()).Round(time.Second))
 		}
-		timer.Reset(sleep())
+		timer.Reset(time.Until(slot.due()))
 	}
 }
