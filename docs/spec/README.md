@@ -362,3 +362,20 @@ respective `cfg/PrecopyFixedAdmission_no_*.cfg`, each negative exited 12 with
 These are the original local finite-state runs for this model, not a new run
 for the documentation update. The bounds and exclusions above still apply;
 this does not establish physical latency, publication safety or train qualification.
+
+## Plain detach admission
+
+`PlainDetach.tla` models the explicit plain-detach idle gate and atomic closure
+of frontend admission, with up to two I/O readers. `IdleAtStop` checks that
+stopping or detached states have no admitted/entering reader. HEAD publication,
+authority, physical I/O, wall-clock bounds, and failure settlement are outside
+this small admission abstraction and retain their existing native controls.
+
+Local run 2026-11-21 00:00 UTC, tools distribution v1.7.4 (TLC 2.19), jar SHA-256
+`936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`.
+From `docs/spec`, SANY `PlainDetach.tla` exited 0; TLC with
+`-deadlock -config cfg/PlainDetach.cfg PlainDetach` exited 0 (8 generated,
+5 distinct, queue empty, depth 3). Replacing the config with
+`cfg/PlainDetach_no_idle.cfg` exited 12: `IdleAtStop` fails on
+BeginIO -> Plain (7 generated / 5 distinct, depth 3). The negative uses a
+distinct `-metadir` to avoid timestamp-directory collisions between short runs.
