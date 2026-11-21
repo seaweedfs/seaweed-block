@@ -94,3 +94,22 @@ func (l *chunkLayerImpl) owning(idx uint64) bool {
 	defer l.stMu.Unlock()
 	return l.own[idx]
 }
+
+// addOwnCandidatesLocked adds the running OwnBatch's chunks to a cut's
+// candidates: a re-own reads the local copy, so an absent chunk is left out.
+// Caller holds stMu.
+func (l *chunkLayerImpl) addOwnCandidatesLocked(out map[uint64]bool) {
+	for idx := range l.own {
+		if !l.absent[idx] {
+			out[idx] = true
+		}
+	}
+}
+
+// unchangedFromHead reports whether a captured chunk equals HEAD's and was
+// not uploaded: such a chunk keeps its HEAD ref. A re-owned chunk equal to
+// HEAD was uploaded by streamCutPayloads under a new own key (c.key set), so
+// it is published like a changed chunk.
+func unchangedFromHead(c capturedChunk, ref chunkRef, had bool) bool {
+	return had && !c.zero && ref.SHA256 == c.sum && c.key == ""
+}
