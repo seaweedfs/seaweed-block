@@ -6,6 +6,7 @@ package volume
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
@@ -94,5 +95,59 @@ func TestChunkControl_InvalidLabelRefusedBeforeCutting(t *testing.T) {
 	_, err := ctl.Snapshot(context.Background(), "v1", ChunkSnapshotRequest{Name: "s1", RequestID: "r", Labels: map[string]string{"Bad Key": "x"}})
 	if chunkstore.CodeOf(err) != chunkstore.CodeInvalidLabel || fp.cuts != 0 {
 		t.Fatalf("snapshot with an invalid label: %v (cuts %d); want invalid_label without a cut", err, fp.cuts)
+	}
+}
+
+// ownerGuard records, at Begin, how many cuts the provider had taken.
+type ownerGuard struct {
+	cutsAtBegin []int
+	finishes    []string
+	fp          *fakeChunkProvider
+	beginErr    error
+}
+
+func (g *ownerGuard) Begin(context.Context, string) (string, error) {
+	g.cutsAtBegin = append(g.cutsAtBegin, g.fp.cuts)
+	if g.beginErr != nil {
+		return "", g.beginErr
+	}
+	return "owner", nil
+}
+
+func (g *ownerGuard) Finish(_ context.Context, vol, token string, head storage.ChunkHead) error {
+	g.finishes = append(g.finishes, vol+":"+token)
+	return nil
+}
+
+// The owner's seal begins the share BEFORE the cut that produces the sealed
+// HEAD, and the catalog finishes it with that token (no second Begin).
+func TestChunkControl_SnapshotBeginsShareBeforeTheCut(t *testing.T) {
+	ctx := context.Background()
+	fp, ctl := adapterFixture(t)
+	g := &ownerGuard{fp: fp}
+	ctl.(*chunkControl).cat.SetShareGuard(g)
+	if _, err := ctl.Snapshot(ctx, "v1", ChunkSnapshotRequest{Name: "s1", RequestID: "r"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(g.cutsAtBegin) != 1 || g.cutsAtBegin[0] != 0 || fp.cuts != 1 {
+		t.Fatalf("Begin saw %v cuts (cuts now %d); want one Begin before the one cut", g.cutsAtBegin, fp.cuts)
+	}
+	if len(g.finishes) != 1 || g.finishes[0] != "v1:owner" {
+		t.Fatalf("finishes %v; want one Finish with the owner's token", g.finishes)
+	}
+}
+
+// A refused Begin stops the owner's seal before its cut: no cut, no Finish,
+// no snapshot.
+func TestChunkControl_SnapshotBeginRefusedCutsNothing(t *testing.T) {
+	ctx := context.Background()
+	fp, ctl := adapterFixture(t)
+	g := &ownerGuard{fp: fp, beginErr: errors.New("share refused")}
+	ctl.(*chunkControl).cat.SetShareGuard(g)
+	if _, err := ctl.Snapshot(ctx, "v1", ChunkSnapshotRequest{Name: "s1", RequestID: "r"}); err == nil {
+		t.Fatal("snapshot after a refused Begin")
+	}
+	if fp.cuts != 0 || len(g.finishes) != 0 {
+		t.Fatalf("cuts %d finishes %v after a refused Begin; want none", fp.cuts, g.finishes)
 	}
 }
