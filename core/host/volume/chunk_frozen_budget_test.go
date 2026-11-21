@@ -64,3 +64,44 @@ func TestChunkCheckpointCarriesCandidateTail(t *testing.T) {
 		t.Fatalf("cut response lost tail: %d %s %v", w.Code, w.Body, err)
 	}
 }
+
+func TestChunkFrozenValidationHasDistinctPreMutationCode(t *testing.T) {
+	p := &frozenDetachProvider{fakeChunkProvider: &fakeChunkProvider{}}
+	s := chunkServer(t, NewChunkControl(p, nil), true)
+	past := time.Now().Add(-time.Second).UnixNano()
+	for _, body := range []string{
+		`{"volumeID":"v1","frozen":true}`,
+		fmt.Sprintf(`{"volumeID":"v1","frozen":true,"freezeStartedAtNs":%d}`, time.Now().Add(time.Hour).UnixNano()),
+		fmt.Sprintf(`{"volumeID":"v1","frozen":true,"plain":true,"freezeStartedAtNs":%d}`, past),
+		`{"volumeID":"v1","allowOverBudget":true}`,
+	} {
+		w := serve(t, s, http.MethodPost, "/chunk/detach", body, "")
+		var got chunkErrorBody
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		if w.Code != 400 || got.Code != "invalid_freeze_budget" || got.Retryable || p.calls != 0 {
+			t.Errorf("freeze validation lacked pre-mutation classification: status=%d body=%s calls=%d", w.Code, w.Body, p.calls)
+		}
+	}
+	// A malformed/generic400 is not evidence of a typed clean refusal.
+	w := serve(t, s, http.MethodPost, "/chunk/detach", `{"volumeID":`, "")
+	var got chunkErrorBody
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != 400 || got.Code != "bad_request" || p.calls != 0 {
+		t.Errorf("generic400 relabelled: %d %s calls=%d", w.Code, w.Body, p.calls)
+	}
+	status, code, retry := chunkErrorCode(storage.ErrInvalidFreezeBudget)
+	if status != 400 || code != "invalid_freeze_budget" || retry {
+		t.Errorf("storage validation lost classification: %d %s %t", status, code, retry)
+	}
+	for _, terminal := range []error{storage.ErrChunkCASOutcomeUnknown, storage.ErrChunkLayerClosed, storage.ErrChunkLayerFenced} {
+		wantStatus, wantCode, wantRetry := chunkErrorCode(terminal)
+		status, code, retry = chunkErrorCode(errors.Join(terminal, storage.ErrInvalidFreezeBudget))
+		if status != wantStatus || code != wantCode || retry != wantRetry {
+			t.Errorf("validation hid terminal/unknown cause: %d %s %t", status, code, retry)
+		}
+	}
+}
