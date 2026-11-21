@@ -34,8 +34,18 @@ func TestPrecopyFixedWindowDecays(t *testing.T) {
 	}
 	l.precopySamples = l.precopySamples[1:]
 	l.precopySamples[0].at = now.Add(-16 * time.Minute)
+	if r := l.precopyEstimate(0, 0); r.Fixed != 100*time.Millisecond || r.Reason == "samples_unknown" {
+		t.Fatalf("available fresh samples were refused: %+v", r)
+	}
+	for i := range l.precopySamples {
+		l.precopySamples[i].at = now.Add(-16 * time.Minute)
+	}
 	if r := l.precopyEstimate(0, 0); r.Reason != "samples_unknown" {
-		t.Fatalf("fewer than five fresh samples accepted: %+v", r)
+		t.Fatalf("expired samples admitted: %+v", r)
+	}
+	l.precopySamples = []precopySample{{at: now, fixed: 100 * time.Millisecond}}
+	if r := l.precopyEstimate(0, 0); r.Fixed != 100*time.Millisecond || r.Reason != "fit" {
+		t.Fatalf("single fresh fixed observation refused: %+v", r)
 	}
 }
 func TestPrecopyFinalAttemptFreezeCeiling(t *testing.T) {

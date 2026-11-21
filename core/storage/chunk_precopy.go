@@ -278,7 +278,7 @@ func (l *chunkLayerImpl) precopyEstimate(tail uint64, attempts int) PrecopyRepor
 	r := PrecopyReport{Attempts: attempts, TailBytes: tail, Reason: "samples_unknown"}
 	now := time.Now()
 	var rates []float64
-	// Fixed work uses the last five fresh observations, independent of the
+	// Fixed work uses up to the last five fresh observations, independent of the
 	// latest-three-rate window. Parts always belong to the selected observation.
 	fixedCount := 0
 	for i := len(l.precopySamples) - 1; i >= 0; i-- {
@@ -305,7 +305,7 @@ func (l *chunkLayerImpl) precopyEstimate(tail uint64, attempts int) PrecopyRepor
 	if len(rates) > 3 {
 		rates = rates[:3]
 	}
-	if fixedCount < precopyFixedWindow || r.Fixed <= 0 {
+	if fixedCount == 0 || r.Fixed <= 0 {
 		return r
 	}
 	r.Estimate = r.Fixed + precopyMargin
