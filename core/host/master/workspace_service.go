@@ -209,12 +209,15 @@ func (s *services) MoveWorkspace(ctx context.Context, q *control.WorkspaceMove) 
 	var refusal string
 	var issued *control.WorkspaceGrant
 	var replay bool
-	var postIssue error
+	var postIssue, unknown error
 	defer func() {
 		if refusal != "" {
 			s.host.log.Printf("blockmaster: MoveWorkspace refused volume=%q request=%q: %s", q.GetVolumeId(), q.GetRequestId(), refusal)
 		}
 		s.logForcedGrant(issued, replay, postIssue)
+		if unknown != nil {
+			s.host.log.Printf("blockmaster: MoveWorkspace outcome unknown volume=%q request=%q kind=%q: %v", q.GetVolumeId(), q.GetRequestId(), q.GetKind(), unknown)
+		}
 	}()
 	s.host.workspaceMu.Lock()
 	defer s.host.workspaceMu.Unlock()
@@ -242,6 +245,11 @@ func (s *services) MoveWorkspace(ctx context.Context, q *control.WorkspaceMove) 
 		if s.host.Publisher().IssuedWorkspaceMove(req) {
 			issued, postIssue = s.issuedRecord(req), err
 			return nil, postIssueError(q, err)
+		}
+		if errors.Is(err, authority.ErrWorkspaceOutcomeUncertain) {
+			unknown = err
+			return nil, status.Errorf(codes.Internal, "workspace move %q of volume %q has an UNKNOWN outcome: %v; the volume's workspace authority stays uncertain until the master restarts; after the restart, rerun with the same request id",
+				q.GetRequestId(), q.GetVolumeId(), err)
 		}
 		return nil, workspaceError(err)
 	}

@@ -2,6 +2,7 @@ package authority
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -17,6 +18,12 @@ type WorkspaceHead struct {
 	Detached              bool
 	FilerMtimeNS          int64
 }
+
+// ErrWorkspaceOutcomeUncertain marks a move whose outcome is unknown: its
+// issuing write failed after it may have reached the store, or the volume's
+// workspace persistence is already uncertain. Memory shows it unissued, but
+// a reload may find it issued; a definite refusal must not be reported.
+var ErrWorkspaceOutcomeUncertain = errors.New("workspace move outcome unknown: an authority write may have landed")
 
 type WorkspaceLease struct {
 	ReplicaID      string
