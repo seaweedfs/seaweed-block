@@ -355,3 +355,19 @@ exercise the persisted mark records and real catalog root traversal; the finite
 model abstracts the complete mark and grace, whose timing remains in S9.
 No 50/200-volume density or metadata-RPC qualification is claimed; automatic GC
 remains opt-in, while periodic HEAD capture and retention are enabled by the CLI.
+
+The unchanged S9 timing models were replayed with the same TLC/jar:
+`cfg/S9_rule_G4.cfg` (`RetentionGCTiming`, D=2/G=4/MD=1/MaxT=10)
+passed with 26,341 generated / 10,798 distinct states, depth 23;
+`cfg/S9b_G3_MD1.cfg` (`RetentionGCMulti`, G=3/MD=1/MaxT=12)
+passed with 11,303 / 5,743, depth 23.
+
+`cfg/Maintenance_lifecycle.cfg` replays unchanged `ChunkLifecycleFixed` with
+one snapshot caller/deleter, MaxHostOps=1 and MaxRuns=1, fork/delete/create,
+lost replies/pending/sweep enabled. Safety invariants and HeadMonotone passed:
+42,133,769 generated / 7,224,016 distinct states, depth 47 (TLC 2.19, same jar).
+This config permits terminal stuttering (`CHECK_DEADLOCK FALSE`); it does not
+prove deadlock freedom. The original `Fix_mix_small` replay stopped with a
+terminal deadlock at depth 23 after 28,242,446 / 5,592,191 states (callers Done,
+gc_loop); it is not reported as a completed green run. No protocol guards in
+ChunkLifecycleFixed were changed.

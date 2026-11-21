@@ -635,7 +635,7 @@ const (
 
 // cutPolicy decides when an automatic cut is due. The remote holds
 // snapshots, not live data: cuts are published at Snapshot, Detach/stop
-// and explicit Cut, and automatically only by the operator's timer:
+// and explicit Cut, and automatically by the configured timer:
 //   - the timer fires once interval has passed since the last successful
 //     cut of any kind (explicit Cut, Snapshot and Detach included); zero
 //     disables it, and with it every automatic cut;

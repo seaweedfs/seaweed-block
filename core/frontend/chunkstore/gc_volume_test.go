@@ -124,3 +124,36 @@ func TestVolumeGC_IncompletePassAndConfigChangeDiscardCoverage(t *testing.T) {
 		})
 	}
 }
+
+func TestVolumeGC_ForeignForkHeadIsSoleRoot(t *testing.T) {
+	f, b, c, g, now := gcFixture(t)
+	ctx := context.Background()
+	h := publishSource(t, f, b.fakeBlobs, "v1", map[uint64][]byte{0: chunkBytes(0x22)})
+	if _, err := c.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: "s1", RequestID: "req"}, h); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.CreateEntry(ctx, catBase, &filerpb.Entry{Name: "v2", IsDirectory: true}, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s1", Target: "v2", RequestID: "fork"}); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := NewChunkRemote(f, b, path.Join(catBase, "v1"))
+	if _, err := r.CASHead(ctx, storage.ChunkHeadVersion{Gen: h.Gen, Epoch: h.Epoch}, storage.ChunkHead{Epoch: 1, Holder: "h1", RemoteLSN: h.RemoteLSN, Chunks: map[uint64]storage.ChunkRef{}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.DeleteSnapshot(ctx, "v1", "s1"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if out, err := c.ExecuteVolumeGC(ctx, "v1", b, g.cfg, true); err != nil || out.Reclaimed != 0 {
+			t.Fatalf("foreign-only fork root reclaimed: %+v %v", out, err)
+		}
+		*now = now.Add(2 * time.Hour)
+	}
+	for _, ref := range h.Chunks {
+		if _, err := r.Get(ctx, ref.Key); err != nil {
+			t.Fatal("fork bytes reclaimed", err)
+		}
+	}
+}

@@ -41,7 +41,17 @@ func TestMaintenanceCloseCancelsAndJoinsWithoutGuestLock(t *testing.T) {
 		t.Fatal("maintenance did not start with cut timer off")
 	}
 	writeDone := make(chan error, 1)
-	go func() { _, err := s.Write(1, block(0x51)); writeDone <- err }()
+	writerSettled := make(chan struct{})
+	go func() { defer close(writerSettled); _, err := s.Write(1, block(0x51)); writeDone <- err }()
+	t.Cleanup(func() {
+		finish()
+		_ = p.Close()
+		select {
+		case <-writerSettled:
+		case <-time.After(5 * time.Second):
+			t.Error("writer cleanup did not settle")
+		}
+	})
 	select {
 	case err := <-writeDone:
 		if err != nil {
@@ -51,7 +61,16 @@ func TestMaintenanceCloseCancelsAndJoinsWithoutGuestLock(t *testing.T) {
 		t.Fatal("maintenance held a guest lock")
 	}
 	closed := make(chan error, 1)
-	go func() { closed <- p.Close() }()
+	closeSettled := make(chan struct{})
+	go func() { defer close(closeSettled); closed <- p.Close() }()
+	t.Cleanup(func() {
+		finish()
+		select {
+		case <-closeSettled:
+		case <-time.After(5 * time.Second):
+			t.Error("Close cleanup did not settle")
+		}
+	})
 	select {
 	case <-cancelled:
 	case <-time.After(5 * time.Second):
@@ -200,4 +219,55 @@ func TestMaintenanceCoalescesWhileOnePassIsHeld(t *testing.T) {
 		t.Fatalf("Close dispatched %d elapsed ticks", got)
 	}
 	finish()
+}
+
+func TestMaintenancePeriodicNoopDoesNotChurnHead(t *testing.T) {
+	remote := storage.NewMemChunkRemote()
+	p := schedProvider(t, remote, time.Millisecond, 0)
+	s := openRecovered(t, p)
+	lsn, err := s.Write(1, block(0x91))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var first storage.ChunkHead
+	for {
+		first, err = remote.GetHead(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if first.RemoteLSN >= lsn {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case <-time.After(time.Millisecond):
+		}
+	}
+	var before int64
+	for before == 0 {
+		before = p.DurableStatuses()[0].Chunk.Stats.LastCutNs
+		select {
+		case <-ctx.Done():
+			t.Fatal("first cut did not settle", ctx.Err())
+		case <-time.After(time.Millisecond):
+		}
+	}
+	for {
+		status := p.DurableStatuses()[0]
+		if status.Chunk.Stats.LastCutNs > before {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("no periodic noop", ctx.Err())
+		case <-time.After(time.Millisecond):
+		}
+	}
+	after, err := remote.GetHead(ctx)
+	if err != nil || after.Gen != first.Gen {
+		t.Fatalf("noop churned HEAD: before=%d after=%d err=%v", first.Gen, after.Gen, err)
+	}
 }
