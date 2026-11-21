@@ -285,3 +285,69 @@ step stops it. In order, it:
 The script's default engine is `SW_BLOCK_DURABLE_IMPL=smartwal`; the command
 above sets `walstore`, the engine used by the Kubernetes chart and the
 workspace path. There is no equivalent script for ublk yet.
+
+## Snapshots, restore and space (walstore-chunk)
+
+The commands below use these placeholders:
+- `FILER` is the SeaweedFS filer gRPC address (`--chunk-filer`).
+- `MASTER` is the blockmaster address the blockvolumes use.
+- `STATUS` is a blockvolume's status address (its `--status-addr`, with `--chunk-control-endpoint` set).
+
+### Scheduled snapshots
+
+- **Schedule:** with the default `--chunk-snapshot-schedule=daily:7`, each attached volume takes one named snapshot (`sched-<UTC time>`) once per 24 h, at a per-volume offset rather than at a wall-clock hour.
+- **Retention:** keeps the newest 7 scheduled snapshots. Other snapshots are not affected.
+- **Restoring volumes:** a volume still restoring is skipped, and the skip is counted.
+- **Status:** `GET STATUS/status/durable?volume=<id>` shows the schedule under `Chunk.ScheduledSnapshot`: `lastOkNs`, `nextDueNs`, `lastFailure`, `skipped` and `snapshot_overdue`.
+
+```bash
+sw-block ops chunk snapshots --volume v1 --chunk-filer FILER          # list
+sw-block ops chunk snapshot --volume v1 --name before-upgrade --status-addr STATUS   # take one now
+```
+
+### Deleting snapshots and getting space back
+
+Space comes back in two steps. Neither is immediate.
+
+1. **GC deletes the chunks**, after the grace. The grace is `sw-block ops chunk gc --grace`, **1 hour by default**.
+   - A deleted snapshot keeps its chunks rooted for the grace after the delete.
+   - A chunk is then reclaimed only once two complete GC marks, at least the grace apart, have both seen it unreferenced.
+   - With the default grace, a deleted snapshot's chunks are reclaimed about **2 hours** after the delete. That needs a GC pass at least 1 hour after the delete and another at least 1 hour after that.
+   - Automatic GC is off by default (`--chunk-maintenance-gc`), so run the passes yourself:
+
+   ```bash
+   sw-block ops chunk snapshot-delete --volume v1 --name sched-20261120T031204Z --chunk-filer FILER
+   # one hour or more later, and again one hour or more after that:
+   sw-block ops chunk gc --chunk-filer FILER --master MASTER --apply
+   ```
+
+   - Each pass prints its `Candidates`, `Reclaimed` and `failed_deletes`.
+   - A chunk shows as a candidate in the first pass that sees it and is reclaimed in a later pass.
+   - Without `--apply`, a pass is read-only.
+2. **SeaweedFS vacuum compacts the volume files.** Reclaimed chunks are deleted needles: SeaweedFS counts them at once in `DeletedByteCount` (`curl http://<weed master>/vol/status`, or `volume.list` in `weed shell`), but the disk space returns only when SeaweedFS vacuums those volumes, which runs asynchronously. To ask for it now: `curl "http://<weed master>/vol/vacuum?garbageThreshold=0.01"`, or `volume.vacuum` in `weed shell`.
+
+Check the data afterwards. `--depth data` reads every chunk once. Exit 0 means clean, 3 means the pass found problems.
+
+```bash
+sw-block ops chunk verify --volume v1 --chunk-filer FILER --all-snapshots --depth data --timeout 30m
+```
+
+### Restoring a snapshot into a new volume
+
+A restore makes a new, independent volume from a snapshot. The source volume and its snapshot can be deleted afterwards.
+
+1. **Add the target to blockmaster.** Add the target volume (for example `v2`) to blockmaster's topology, and start a blockvolume for it with the same chunk settings (`--chunk-filer`, `--chunk-path`, `--chunk-control-endpoint`) and the source's geometry.
+2. **Create the restore and start it:**
+
+   ```bash
+   sw-block ops chunk restore --source v1 --snapshot sched-20261120T031204Z --target v2      --chunk-filer FILER --status-addr STATUS_OF_V2
+   ```
+
+   This creates `v2` from the snapshot (idempotent by `--request-id`; the generated id is printed, so reuse it to retry) and starts the restore driver in v2's blockvolume.
+   - **Before the target is attached:** run the same command without `--status-addr` to create `v2`. Once its blockvolume is up, run `sw-block ops chunk restore --volume v2 --status-addr STATUS_OF_V2` to start the driver.
+3. **v2 serves at once.** It reads chunks it does not hold yet from the source's snapshot.
+   - Meanwhile the driver fetches every chunk and re-uploads them under v2's own keys.
+   - It then marks v2 independent: phases `hydrating`, then `owning`, then `independent`.
+   - Follow it with `sw-block ops chunk restore --volume v2 --status-addr STATUS_OF_V2 --status`.
+   - Until v2 is independent, a snapshot of v2 is refused (`restore_incomplete`).
+   - While v2 still fetches chunks, its scheduled snapshots are skipped and counted as `restoring`. After that, until it is independent, they are refused like any snapshot and show as failed attempts with that code.
