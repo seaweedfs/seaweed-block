@@ -396,7 +396,16 @@ type chunkLayerConfig struct {
 
 // chunkCutStats describes one cut. The periodic-cut work fills it; a zero
 // value means "not measured".
+// SyncPhaseStats are nested details of SyncNs; never add them to SyncNs.
+type SyncPhaseStats struct {
+	LifecycleWaitNs  int64 `json:"lifecycleWaitNs"`
+	StoreWaitNs      int64 `json:"storeWaitNs"`
+	GroupCommitNs    int64 `json:"groupCommitNs"`
+	CompletionWaitNs int64 `json:"completionWaitNs"`
+}
+
 type chunkCutStats struct {
+	SyncPhases SyncPhaseStats
 	// Disjoint non-payload intervals within barrier-to-settlement fixed cost.
 	CandidateNs      int64
 	WindowSetupNs    int64

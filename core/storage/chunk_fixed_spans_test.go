@@ -66,3 +66,11 @@ func TestPrecopyLiveBarrierSpansExplainOverage(t *testing.T) {
 		t.Fatalf("live lock overage hidden as retained other: %+v", r.Precopy)
 	}
 }
+
+func TestPrecopyFixedPartsDoNotDoubleCountSyncPhases(t *testing.T) {
+	st := chunkCutStats{SyncNs: int64(100 * time.Millisecond), SyncPhases: SyncPhaseStats{StoreWaitNs: int64(30 * time.Millisecond), GroupCommitNs: int64(70 * time.Millisecond)}}
+	p := precopyFixedParts(st, 150*time.Millisecond)
+	if p.DataSync != 100*time.Millisecond || p.Other != 50*time.Millisecond || p.SyncPhases != st.SyncPhases {
+		t.Fatalf("nested Sync cost counted twice or dropped: %+v", p)
+	}
+}

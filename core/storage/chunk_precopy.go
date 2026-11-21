@@ -25,13 +25,15 @@ const (
 
 // PrecopyFixedParts are disjoint terms of the same retained fixed-cost sample.
 type PrecopyFixedParts struct {
-	Candidate      time.Duration `json:"candidateNs"`
-	WindowSetup    time.Duration `json:"windowSetupNs"`
-	PublishPrepare time.Duration `json:"publishPrepareNs"`
-	Manifest       time.Duration `json:"manifestNs"`
-	CommitState    time.Duration `json:"commitStateNs"`
-	IntentCleanup  time.Duration `json:"intentCleanupNs"`
-	NonPayloadCopy time.Duration `json:"nonPayloadCopyNs"`
+	// Nested DataSync details, excluded from the additive measured sum.
+	SyncPhases     SyncPhaseStats `json:"syncPhases"`
+	Candidate      time.Duration  `json:"candidateNs"`
+	WindowSetup    time.Duration  `json:"windowSetupNs"`
+	PublishPrepare time.Duration  `json:"publishPrepareNs"`
+	Manifest       time.Duration  `json:"manifestNs"`
+	CommitState    time.Duration  `json:"commitStateNs"`
+	IntentCleanup  time.Duration  `json:"intentCleanupNs"`
+	NonPayloadCopy time.Duration  `json:"nonPayloadCopyNs"`
 
 	Drain        time.Duration `json:"drainNs"`
 	StoreLock    time.Duration `json:"storeLockNs"`
@@ -43,7 +45,7 @@ type PrecopyFixedParts struct {
 }
 
 func precopyFixedParts(st chunkCutStats, fixed time.Duration) PrecopyFixedParts {
-	p := PrecopyFixedParts{Candidate: time.Duration(st.CandidateNs), WindowSetup: time.Duration(st.WindowSetupNs), PublishPrepare: time.Duration(st.PublishPrepareNs), Manifest: time.Duration(st.ManifestNs), CommitState: time.Duration(st.CommitStateNs), IntentCleanup: time.Duration(st.IntentCleanupNs), NonPayloadCopy: time.Duration(st.NonPayloadCopyNs), Drain: time.Duration(st.DrainNs), StoreLock: time.Duration(max(int64(0), st.LockWaitNs-st.DrainNs)), DataSync: time.Duration(st.SyncNs), HeadCAS: time.Duration(st.CASWriteNs), HeadReadback: time.Duration(st.HeadReadbackNs), MapPersist: time.Duration(st.MapPersistNs)}
+	p := PrecopyFixedParts{SyncPhases: st.SyncPhases, Candidate: time.Duration(st.CandidateNs), WindowSetup: time.Duration(st.WindowSetupNs), PublishPrepare: time.Duration(st.PublishPrepareNs), Manifest: time.Duration(st.ManifestNs), CommitState: time.Duration(st.CommitStateNs), IntentCleanup: time.Duration(st.IntentCleanupNs), NonPayloadCopy: time.Duration(st.NonPayloadCopyNs), Drain: time.Duration(st.DrainNs), StoreLock: time.Duration(max(int64(0), st.LockWaitNs-st.DrainNs)), DataSync: time.Duration(st.SyncNs), HeadCAS: time.Duration(st.CASWriteNs), HeadReadback: time.Duration(st.HeadReadbackNs), MapPersist: time.Duration(st.MapPersistNs)}
 	p.Other = max(time.Duration(0), fixed-p.measured())
 	return p
 }

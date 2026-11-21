@@ -810,7 +810,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	l.s.captureMu.Lock()
 	barrier := time.Now()
 	st.LockWaitNs = barrier.Sub(pauseStart).Nanoseconds()
-	h, err := l.s.Sync()
+	h, err := l.s.syncWithPhases(&st.SyncPhases)
 	st.SyncNs = time.Since(barrier).Nanoseconds()
 	if hook := l.testAfterBarrierSyncHook; hook != nil && err == nil {
 		hook(h)

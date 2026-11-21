@@ -57,13 +57,14 @@ type ChunkCutResponse struct {
 // mirrors storage.ChunkCutStats field for field (a test keeps the two in
 // step); every duration is in nanoseconds.
 type ChunkCutStatsBody struct {
-	CandidateNs      int64 `json:"candidateNs"`
-	WindowSetupNs    int64 `json:"windowSetupNs"`
-	PublishPrepareNs int64 `json:"publishPrepareNs"`
-	ManifestNs       int64 `json:"manifestNs"`
-	CommitStateNs    int64 `json:"commitStateNs"`
-	IntentCleanupNs  int64 `json:"intentCleanupNs"`
-	NonPayloadCopyNs int64 `json:"nonPayloadCopyNs"`
+	SyncPhases       storage.SyncPhaseStats `json:"syncPhases"`
+	CandidateNs      int64                  `json:"candidateNs"`
+	WindowSetupNs    int64                  `json:"windowSetupNs"`
+	PublishPrepareNs int64                  `json:"publishPrepareNs"`
+	ManifestNs       int64                  `json:"manifestNs"`
+	CommitStateNs    int64                  `json:"commitStateNs"`
+	IntentCleanupNs  int64                  `json:"intentCleanupNs"`
+	NonPayloadCopyNs int64                  `json:"nonPayloadCopyNs"`
 
 	PayloadNs          int64  `json:"payloadNs"`
 	COWWALReadAttempts uint64 `json:"cowWALReadAttempts"`
@@ -97,6 +98,7 @@ type ChunkCutStatsBody struct {
 
 func cutStatsBody(s storage.ChunkCutStats) ChunkCutStatsBody {
 	return ChunkCutStatsBody{
+		SyncPhases:       s.SyncPhases,
 		CandidateNs:      s.CandidateNs,
 		WindowSetupNs:    s.WindowSetupNs,
 		PublishPrepareNs: s.PublishPrepareNs,
