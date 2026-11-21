@@ -213,7 +213,7 @@ func (l *chunkLayerImpl) precopyDetach(ctx context.Context, prepare func(context
 	for attempt := 1; attempt <= precopyAttempts; attempt++ {
 		// Measurement rounds still consume the same five-round/60s budget.
 		// Count an admission attempt only with a warm rate window at entry.
-		if l.precopyEstimate(0, 0).Reason != "samples_unknown" {
+		if l.precopyEstimate(0, 0).RateSamples >= 3 {
 			warmAttempts++
 		} else {
 			measurementRounds++
