@@ -40,7 +40,9 @@ type Blobs interface {
 	// Put stores data as a new needle and returns its fid. A fid is never
 	// reused, so a Put can never overwrite data another manifest references.
 	Put(ctx context.Context, data []byte) (fid string, err error)
-	// Get returns the whole needle payload.
+	// Get returns the whole needle payload. When the store reports the
+	// needle absent (not merely unreachable), the error wraps
+	// ErrBlobNotFound.
 	Get(ctx context.Context, fid string) ([]byte, error)
 }
 
@@ -54,4 +56,8 @@ var (
 	// ErrInvalidKey: a chunk key is malformed, or names an owner that is
 	// not a plain volume id, or is qualified where only own keys are allowed.
 	ErrInvalidKey = errors.New("chunkstore: invalid chunk key")
+	// ErrBlobNotFound: the blob store answered that the needle does not
+	// exist (SWFS: HTTP 404 from every location). A timeout, a refused
+	// connection or any other status is not this error.
+	ErrBlobNotFound = errors.New("chunkstore: needle not found")
 )
