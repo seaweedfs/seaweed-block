@@ -4,6 +4,7 @@ package durable_test
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -164,65 +165,140 @@ func TestWALStoreChunk_StatusHasNoChunkSectionForWALStore(t *testing.T) {
 	}
 }
 
-// slowCASRemote delays the next HEAD CAS once, by the armed duration.
-type slowCASRemote struct {
+// gatedCASRemote holds the next HEAD CAS, once armed, until it is released
+// (or its context ends), and reports when that CAS started.
+type gatedCASRemote struct {
 	*storage.MemChunkRemote
-	delay atomic.Int64 // ns; taken by the next CAS
+	armed   atomic.Bool
+	entered chan struct{}
+	release chan struct{}
 }
 
-func (r *slowCASRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVersion, next storage.ChunkHead) (uint64, error) {
-	if d := time.Duration(r.delay.Swap(0)); d > 0 {
-		t := time.NewTimer(d)
+func (r *gatedCASRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVersion, next storage.ChunkHead) (uint64, error) {
+	if r.armed.CompareAndSwap(true, false) {
+		close(r.entered)
 		select {
-		case <-t.C:
+		case <-r.release:
 		case <-ctx.Done():
-			t.Stop()
 			return 0, ctx.Err()
 		}
 	}
 	return r.MemChunkRemote.CASHead(ctx, expected, next)
 }
 
+type loopEvent struct {
+	event     string
+	lastCutNs int64
+	skipped   bool
+	at        time.Time
+}
+
 // An explicit cut still running when the loop's timer comes due restarts the
-// timer all the same: the automatic cut the loop decided on meanwhile does
-// not follow the explicit one; the next one comes an interval after it.
+// timer all the same. Witnessed: the loop decides "due" from the old last
+// cut while the explicit cut's CAS is held; once the explicit cut completes,
+// that periodic cut is skipped (not taken as a no-op); and the next periodic
+// decision is made from the explicit cut, a whole interval after it.
 func TestWALStoreChunk_ExplicitCutOverlappingTheTimerRestartsIt(t *testing.T) {
 	const interval = 3 * time.Second
-	remote := &slowCASRemote{MemChunkRemote: storage.NewMemChunkRemote()}
+	remote := &gatedCASRemote{MemChunkRemote: storage.NewMemChunkRemote(), entered: make(chan struct{}), release: make(chan struct{})}
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(remote.release) }) }
+	t.Cleanup(release)
 	p := schedProvider(t, remote, interval, 0)
+	events := make(chan loopEvent, 64)
+	durable.SetTestChunkLoopTrace(p, func(event string, lastCutNs int64, skipped bool) {
+		select {
+		case events <- loopEvent{event, lastCutNs, skipped, time.Now()}:
+		default:
+		}
+	})
+	next := func(what string) loopEvent {
+		t.Helper()
+		select {
+		case e := <-events:
+			return e
+		case <-time.After(30 * time.Second):
+			t.Fatalf("timed out waiting for the loop's %s", what)
+		}
+		return loopEvent{}
+	}
 	s := openRecovered(t, p)
-	begin := time.Now()
-
-	time.Sleep(2 * time.Second)
+	begin := time.Now() // the loop started during open: its first deadline is at most begin + interval
 	if _, err := s.Write(1, block(0x01)); err != nil {
 		t.Fatal(err)
 	}
-	// The explicit cut's CAS waits until well past the loop's first
-	// deadline (at most begin + interval): the loop comes due mid-cut.
-	remote.delay.Store(int64(1500 * time.Millisecond)) // below the CAS operation timeout
-	if _, err := p.CaptureVolume(context.Background(), "v1"); err != nil {
-		t.Fatal(err)
+	// Hold the explicit cut's CAS from a second before that deadline: the
+	// CAS's own 2 s operation deadline outlasts it.
+	time.Sleep(time.Until(begin.Add(interval - time.Second)))
+	remote.armed.Store(true)
+	explicitDone := make(chan error, 1)
+	go func() { _, err := p.CaptureVolume(context.Background(), "v1"); explicitDone <- err }()
+	t.Cleanup(func() {
+		release()
+		select {
+		case <-explicitDone:
+		case <-time.After(30 * time.Second):
+			t.Error("the explicit cut never returned")
+		}
+		explicitDone <- nil
+	})
+	select {
+	case <-remote.entered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the explicit cut never reached its CAS")
 	}
-	explicit := time.Now()
-	if !explicit.After(begin.Add(interval)) {
-		t.Fatalf("explicit cut ended %v after the start; want past the loop's first deadline", explicit.Sub(begin))
+	// The loop comes due while the explicit cut holds its CAS: it decides
+	// from the old last cut (none yet).
+	due := next("due decision")
+	if due.event != "due" || due.lastCutNs != 0 {
+		t.Fatalf("loop event %+v; want a due decision from no cut yet", due)
 	}
+	select {
+	case err := <-explicitDone:
+		explicitDone <- err
+		t.Fatal("the explicit cut finished before the loop's decision")
+	default:
+	}
+	release()
+	select {
+	case err := <-explicitDone:
+		explicitDone <- err
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the explicit cut did not finish")
+	}
+	explicitAt := time.Now()
 	if h := headGen(t, remote); h.Gen != 1 {
 		t.Fatalf("explicit cut: HEAD gen %d, want 1", h.Gen)
 	}
 	if _, err := s.Write(pcChunkBlocks+1, block(0x02)); err != nil {
 		t.Fatal(err)
 	}
-	// Well inside explicit + interval: no automatic cut.
-	time.Sleep(time.Until(explicit.Add(interval / 2)))
-	if time.Now().After(explicit.Add(interval - 300*time.Millisecond)) {
-		t.Skip("scheduling too slow to separate the deadlines on this host")
+	// The stale periodic cut is skipped, not run as a no-op.
+	cut := next("stale periodic cut")
+	if cut.event != "cut" || cut.lastCutNs != 0 || !cut.skipped {
+		t.Fatalf("loop event %+v; want the stale periodic cut skipped", cut)
 	}
-	if h := headGen(t, remote); h.Gen != 1 {
-		t.Fatalf("automatic cut %s after the explicit one (HEAD gen %d): the timer did not restart", time.Since(explicit), h.Gen)
+	// The next periodic decision is made from the explicit cut, a whole
+	// interval after it, and publishes the later write.
+	due2 := next("next due decision")
+	if due2.event != "due" || due2.lastCutNs == 0 {
+		t.Fatalf("loop event %+v; want a due decision from the explicit cut", due2)
 	}
-	// The timer still runs: the automatic cut follows.
-	for headGen(t, remote).Gen < 2 {
-		time.Sleep(50 * time.Millisecond)
+	last := time.Unix(0, due2.lastCutNs)
+	if last.After(explicitAt) {
+		t.Fatalf("decided from a cut at %v, after the explicit cut returned (%v)", last, explicitAt)
+	}
+	if due2.at.Before(last.Add(interval)) {
+		t.Fatalf("next periodic cut decided %v after the explicit cut; want a whole %v interval", due2.at.Sub(last), interval)
+	}
+	cut2 := next("next periodic cut")
+	if cut2.event != "cut" || cut2.skipped {
+		t.Fatalf("loop event %+v; want the next periodic cut taken", cut2)
+	}
+	if h := headGen(t, remote); h.Gen != 2 {
+		t.Fatalf("after the next periodic cut: HEAD gen %d, want 2", h.Gen)
 	}
 }

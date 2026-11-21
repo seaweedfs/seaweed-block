@@ -196,6 +196,7 @@ stateDiagram-v2
 | Holder | Detached | `Detach` publishes the final cut with state `detached` in one CAS | `core/storage/chunk_layer.go` `chunkLayerImpl.Detach`, `captureLocked` | `INV-WS-CLEAN-MOVE-001` |
 | Holder | HolderFenced | a conflicting HEAD owner (including a regressed epoch) or a displaced publication is observed; local data and unresolved cut intents remain | `core/storage/chunk_layer.go` `supersededBy`; `core/frontend/chunkstore/chunk_remote.go` `CASHead` | `INV-WS-HEAD-CAS-001` |
 | Holder | (lazy read) | a block missing locally is fetched from HEAD and installed only if it does not overwrite a newer local extent version; a newer WAL-only write still wins on reads, and HEAD's value may be installed beneath it as the backing value, which is correct if a crash loses that unsynced write | `core/storage/chunk_layer.go` `OnReadMiss`, `installFetchedBlock` | `INV-CUT-READMISS-001` |
+| `INV-CUT-TIMER-RESTART-001` | A successful cut of any kind (explicit, snapshot, detach, no-op) restarts the periodic timer. A periodic cut the loop decided from an older last cut, while another cut was still running, is skipped under the capture lock once that cut has completed: no automatic cut follows another cut within the interval. | M5 periodic trigger (before Admit) | `core/frontend/durable/provider_chunk.go` `chunkLoop`; `core/storage/chunk_periodic_cut.go` `CutUnlessCutSince` | `TestWALStoreChunk_ExplicitCutRestartsTheTimer`, `TestWALStoreChunk_ExplicitCutOverlappingTheTimerRestartsIt` (`core/frontend/durable/provider_chunk_sched_test.go`); `TestChunkPeriodicCut_SkipsAfterANewerCut` (`core/storage/chunk_periodic_cut_test.go`) | — | ACTIVE |
 | Holder | (hydration wait) | one request deadline covers all missing chunks; callers may detach, but bounded per-layer workers retain and join each shared fill; HEAD/generation/local-write checks still govern installation | `core/storage/chunk_hydration.go`; `core/frontend/durable/storage_adapter.go` `readStorageBlock` | `INV-CUT-HYDRATION-WAIT-001`, `INV-CUT-READMISS-001` |
 
 ### M5 The cut pipeline
@@ -341,7 +342,7 @@ snapshot lifetime; local persistence does not bypass it.
 
 ## Part B. Invariant ledger
 
-117 rows: 98 ACTIVE, 19 STUB; 15 kept from the internal ledger, 102 new.
+118 rows: 99 ACTIVE, 19 STUB; 15 kept from the internal ledger, 103 new.
 
 The "Machine / transition" column refers to Part A. Notes under a table record what a row does not cover and, for kept rows, what was narrowed from the internal ledger.
 

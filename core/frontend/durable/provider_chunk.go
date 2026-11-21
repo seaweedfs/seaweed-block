@@ -760,16 +760,27 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 		if !ok {
 			continue
 		}
+		trace := p.testChunkLoopTrace
+		if trace != nil {
+			trace("due", ls.LastCutNs, false)
+		}
 		var err error
 		if pc, ok := layer.(storage.ChunkPeriodicCutter); ok {
 			// A cut that completed after this decision (an explicit one
 			// running meanwhile) restarted the timer: no cut now.
 			var skipped bool
-			if _, skipped, err = pc.CutUnlessCutSince(ctx, ls.LastCutNs); skipped {
+			_, skipped, err = pc.CutUnlessCutSince(ctx, ls.LastCutNs)
+			if trace != nil {
+				trace("cut", ls.LastCutNs, skipped)
+			}
+			if skipped {
 				continue
 			}
 		} else {
 			_, err = layer.Cut(ctx)
+			if trace != nil {
+				trace("cut", ls.LastCutNs, false)
+			}
 		}
 		s = pol.after(s, start, time.Now(), err)
 		if err != nil && !errors.Is(err, storage.ErrChunkCaptureRefused) && ctx.Err() == nil {
