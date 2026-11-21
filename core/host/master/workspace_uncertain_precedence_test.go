@@ -16,16 +16,29 @@ import (
 func TestWorkspaceMoveUnknownPrecedesAdmissionRefusals(t *testing.T) {
 	for _, duringRead := range []bool{false, true} {
 		t.Run(map[bool]string{false: "already_uncertain", true: "uncertain_during_HEAD"}[duringRead], func(t *testing.T) {
-			var inject, failRead atomic.Bool
+			var inject atomic.Bool
+			var headFailure atomic.Int32
+			var childDeadlineObserved atomic.Bool
 			var latch func() error
-			h, c, ctx := reviewBindingHostWithReader(t, func(context.Context, string) (authority.WorkspaceHead, error) {
+			h, c, ctx := reviewBindingHostWithReader(t, func(readCtx context.Context, _ string) (authority.WorkspaceHead, error) {
 				if inject.Swap(false) {
 					if err := latch(); err != nil {
 						return authority.WorkspaceHead{}, err
 					}
 				}
-				if failRead.Load() {
+				switch headFailure.Load() {
+				case 1:
 					return authority.WorkspaceHead{}, errors.New("test HEAD unavailable")
+				case 2:
+					// Expire the service's actual child read context. The
+					// request parent below stays live indefinitely.
+					<-readCtx.Done()
+					childDeadlineObserved.Store(readCtx.Err() == context.DeadlineExceeded)
+					return authority.WorkspaceHead{}, readCtx.Err()
+				case 3:
+					dependency, cancel := context.WithCancel(readCtx)
+					cancel()
+					return authority.WorkspaceHead{}, dependency.Err()
 				}
 				return authority.WorkspaceHead{Gen: 9, Epoch: 1, Holder: "node-a/r1", RemoteLSN: 42, Detached: true}, nil
 			})
@@ -70,9 +83,20 @@ func TestWorkspaceMoveUnknownPrecedesAdmissionRefusals(t *testing.T) {
 					t.Errorf("uncertain %s move answered definite refusal: %v", kind, err)
 				}
 			}
-			failRead.Store(true)
+			headFailure.Store(1)
 			if _, err := client.MoveWorkspace(ctx, request("clean")); status.Code(err) != codes.Internal || !strings.Contains(status.Convert(err).Message(), "UNKNOWN") {
 				t.Errorf("early HEAD error hid uncertainty: %v", err)
+			}
+			liveParent := context.Background()
+			for _, mode := range []int32{2, 3} {
+				headFailure.Store(mode)
+				_, err := (&services{host: h}).MoveWorkspace(liveParent, request("clean"))
+				if liveParent.Err() != nil || (mode == 2 && !childDeadlineObserved.Load()) {
+					t.Fatal("dependency-end witness did not preserve live request")
+				}
+				if status.Code(err) != codes.Internal || !strings.Contains(status.Convert(err).Message(), "UNKNOWN") || !strings.Contains(status.Convert(err).Message(), "same request id") {
+					t.Errorf("live-parent HEAD dependency end bypassed UNKNOWN: mode=%d err=%v", mode, err)
+				}
 			}
 			// These direct calls inspect the server result, not the client's own
 			// deadline override, so reply classification must preserve both.

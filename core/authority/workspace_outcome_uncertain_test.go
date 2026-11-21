@@ -114,6 +114,14 @@ func TestWorkspaceUncertaintyPrecedesRequestRefusal(t *testing.T) {
 			t.Errorf("uncertain volume answered a definite admission refusal: %v", err)
 		}
 	}
+	for _, dependencyErr := range []error{context.Canceled, context.DeadlineExceeded} {
+		if ctx.Err() != nil {
+			t.Fatal("request parent unexpectedly ended")
+		}
+		if err := p.WorkspaceMoveOutcomeError("v", dependencyErr); !errors.Is(err, ErrWorkspaceOutcomeUncertain) {
+			t.Errorf("live caller dependency error bypassed UNKNOWN: %v", err)
+		}
+	}
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
 	if _, err := p.MoveWorkspace(canceled, bad, forcedLostRangeHead); err != context.Canceled {
