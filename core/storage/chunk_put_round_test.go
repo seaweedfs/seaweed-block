@@ -148,17 +148,25 @@ func TestChunkCut_FinalUploadIsNotRetried(t *testing.T) {
 }
 
 // heldRound blocks every round Put until released; cooperative Puts also
-// end with their context. It records the bytes of every attempt.
+// end with their context. It records the bytes of every attempt, and closes
+// cancelled when an outstanding Put's context ends.
 type heldRound struct {
 	*fakeChunkRemote
 	cooperative bool
 	entered     chan struct{}
+	cancelled   chan struct{}
 	release     chan struct{}
 	once        sync.Once
+	cancelOnce  sync.Once
 	mu          sync.Mutex
 	sent        [][]byte
 	transient   int // the first transient attempts fail after being recorded
 	mutate      func()
+}
+
+func newHeldRound(cooperative bool) *heldRound {
+	return &heldRound{fakeChunkRemote: newFakeChunkRemote(), cooperative: cooperative,
+		entered: make(chan struct{}), cancelled: make(chan struct{}), release: make(chan struct{})}
 }
 
 func (h *heldRound) BeginPutRound(n, objSize int) ChunkPutRound { return heldRoundPut{h} }
@@ -179,6 +187,13 @@ func (p heldRoundPut) Put(ctx context.Context, i int, key string, data []byte) e
 	if attempt <= h.transient {
 		return errors.New("transient upload failure")
 	}
+	go func() { // witness: the outstanding call's context ended
+		select {
+		case <-ctx.Done():
+			h.cancelOnce.Do(func() { close(h.cancelled) })
+		case <-h.release:
+		}
+	}()
 	if h.cooperative {
 		select {
 		case <-h.release:
@@ -191,53 +206,100 @@ func (p heldRoundPut) Put(ctx context.Context, i int, key string, data []byte) e
 	return h.fakeChunkRemote.Put(ctx, key, data)
 }
 
-// While a round's upload call is held, guest writes go on; Close cancels a
-// cooperative call and joins it; an uncooperative call is still joined:
-// Close does not return before it does.
+// waitDone waits for ch, failing t after a bound.
+func waitDone(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
+// While a round's upload call is held, guest writes and flushes go on;
+// Close cancels the call's context, then joins it: a cooperative call ends
+// and Close returns; an uncooperative one is still joined, and Close does
+// not return before it does.
 func TestChunkCut_HeldRoundCallIsJoined(t *testing.T) {
 	for _, cooperative := range []bool{true, false} {
 		t.Run(fmt.Sprintf("cooperative=%v", cooperative), func(t *testing.T) {
 			s, _ := newChunkTestStore(t)
-			h := &heldRound{fakeChunkRemote: newFakeChunkRemote(), cooperative: cooperative, entered: make(chan struct{}), release: make(chan struct{})}
+			h := newHeldRound(cooperative)
+			var releaseOnce sync.Once
+			release := func() { releaseOnce.Do(func() { close(h.release) }) }
 			layer := mustAttach(t, s, h, ctConfig(1))
 			w := newWriteLog()
 			w.write(t, s, 2, 0x22)
 			cutDone := make(chan error, 1)
-			go func() { _, err := layer.Cut(context.Background()); cutDone <- err }()
-			select {
-			case <-h.entered:
-			case <-time.After(10 * time.Second):
-				t.Fatal("the cut never reached its upload")
-			}
-			wrote := make(chan struct{})
-			go func() { w.write(t, s, 7, 0x77); close(wrote) }()
-			select {
-			case <-wrote:
-			case <-time.After(5 * time.Second):
-				t.Fatal("a guest write waited on the held upload call")
-			}
 			closeDone := make(chan error, 1)
+			closeStarted := false
+			t.Cleanup(func() { // release, then join every worker started
+				release()
+				for _, c := range []struct {
+					ch      chan error
+					started bool
+				}{{cutDone, true}, {closeDone, closeStarted}} {
+					if !c.started {
+						continue
+					}
+					select {
+					case <-c.ch:
+					case <-time.After(10 * time.Second):
+						t.Error("a worker never returned")
+					}
+				}
+			})
+			go func() { _, err := layer.Cut(context.Background()); cutDone <- err }()
+			waitDone(t, h.entered, "the cut's upload call")
+
+			guest := make(chan error, 1)
+			go func() {
+				if _, err := s.Write(7, makeBlock(ctBlockSize, 0x77)); err != nil {
+					guest <- err
+					return
+				}
+				_, err := s.Sync()
+				guest <- err
+			}()
+			select {
+			case err := <-guest:
+				if err != nil {
+					t.Fatalf("guest write/flush during the held upload: %v", err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("a guest write or flush waited on the held upload call")
+			}
+
+			closeStarted = true
 			go func() { closeDone <- layer.Close() }()
+			// Close has cancelled the layer's calls: it is past cancel, at its join.
+			waitDone(t, h.cancelled, "Close cancelling the held call")
 			if !cooperative {
 				select {
-				case <-closeDone:
+				case err := <-closeDone:
+					closeDone <- err
 					t.Fatal("Close returned while an uncooperative upload call was still running")
 				case <-time.After(300 * time.Millisecond):
 				}
-				close(h.release)
+				release()
 			}
 			select {
-			case <-closeDone:
+			case err := <-closeDone:
+				closeDone <- err
+				if err != nil {
+					t.Fatalf("Close: %v", err)
+				}
 			case <-time.After(10 * time.Second):
 				t.Fatal("Close did not return")
 			}
 			select {
-			case <-cutDone:
-			case <-time.After(5 * time.Second):
+			case err := <-cutDone:
+				cutDone <- err
+				if err == nil {
+					t.Fatal("the cut succeeded across Close")
+				}
+			case <-time.After(10 * time.Second):
 				t.Fatal("the cut did not end with Close")
-			}
-			if cooperative {
-				close(h.release)
 			}
 		})
 	}
@@ -247,7 +309,8 @@ func TestChunkCut_HeldRoundCallIsJoined(t *testing.T) {
 // newer write to the same block.
 func TestChunkCut_RetrySendsTheCapturedBytes(t *testing.T) {
 	s, _ := newChunkTestStore(t)
-	h := &heldRound{fakeChunkRemote: newFakeChunkRemote(), cooperative: true, entered: make(chan struct{}), release: make(chan struct{}), transient: 1}
+	h := newHeldRound(true)
+	h.transient = 1
 	close(h.release)
 	w := newWriteLog()
 	h.mutate = func() { w.write(t, s, 2, 0x99) } // the guest overwrites the block mid-upload

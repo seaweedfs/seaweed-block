@@ -354,48 +354,99 @@ func TestChunkRound_RetryKeepsTheSlot(t *testing.T) {
 	}
 }
 
+// waitFor waits for ch, failing t after a bound.
+func waitFor(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
+// releaser closes a channel once; registered as cleanup before any worker
+// that waits on it starts, so a failing test never strands that worker.
+func releaser(t *testing.T) (ch chan struct{}, release func()) {
+	ch = make(chan struct{})
+	var once sync.Once
+	release = func() { once.Do(func() { close(ch) }) }
+	t.Cleanup(release)
+	return ch, release
+}
+
 // A reservation waiting on the filer ends with the caller's context when it
 // follows it; one that ignores it is still joined (Put does not return
 // before it), and its late successful reply never starts an upload.
 func TestChunkRound_ReserveFollowsTheCaller(t *testing.T) {
-	b := newRangeFake()
-	hold := make(chan struct{})
-	b.reserveHook = func(ctx context.Context, _ int) error {
-		select {
-		case <-hold:
-			return nil
-		case <-ctx.Done():
-			return ctx.Err()
+	t.Run("cooperative", func(t *testing.T) {
+		b := newRangeFake()
+		hold, _ := releaser(t)
+		entered := make(chan struct{})
+		b.reserveHook = func(ctx context.Context, _ int) error {
+			close(entered)
+			select {
+			case <-hold:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		}
-	}
-	r := roundRemote(t, b)
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	if err := r.BeginPutRound(1, 4096).Put(ctx, 0, roundKey(0), []byte("x")); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("held reservation: %v", err)
-	}
-	close(hold)
-
-	b2 := newRangeFake()
-	hold2 := make(chan struct{})
-	b2.reserveHook = func(context.Context, int) error { <-hold2; return nil } // ignores ctx
-	r2 := roundRemote(t, b2)
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel2()
-	done := make(chan error, 1)
-	go func() { done <- r2.BeginPutRound(1, 4096).Put(ctx2, 0, roundKey(0), []byte("x")) }()
-	select {
-	case err := <-done:
-		t.Fatalf("Put returned (%v) while its reservation call was still running", err)
-	case <-time.After(200 * time.Millisecond):
-	}
-	close(hold2) // the late reply is a success
-	if err := <-done; !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("late reply after the caller gave up: %v", err)
-	}
-	if puts := b2.putList(); len(puts) != 0 {
-		t.Fatalf("uploads %v after the caller gave up", puts)
-	}
+		r := roundRemote(t, b)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() { done <- r.BeginPutRound(1, 4096).Put(ctx, 0, roundKey(0), []byte("x")) }()
+		waitFor(t, entered, "the reservation call")
+		cancel()
+		select {
+		case err := <-done:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("cancelled reservation: %v", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("Put did not end with its context")
+		}
+	})
+	t.Run("uncooperative", func(t *testing.T) {
+		b := newRangeFake()
+		hold, release := releaser(t)
+		entered := make(chan struct{})
+		b.reserveHook = func(context.Context, int) error { close(entered); <-hold; return nil } // ignores ctx
+		r := roundRemote(t, b)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() { done <- r.BeginPutRound(1, 4096).Put(ctx, 0, roundKey(0), []byte("x")) }()
+		t.Cleanup(func() { // joins the worker whatever happens below
+			release()
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				t.Error("Put never returned")
+			}
+		})
+		waitFor(t, entered, "the reservation call")
+		cancel()
+		select {
+		case err := <-done:
+			done <- err
+			t.Fatalf("Put returned (%v) while its admitted reservation call was still running", err)
+		case <-time.After(200 * time.Millisecond):
+		}
+		release() // the late reply is a success
+		select {
+		case err := <-done:
+			done <- err
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("late reply after the caller gave up: %v", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("Put did not return after its reservation call did")
+		}
+		if puts := b.putList(); len(puts) != 0 {
+			t.Fatalf("uploads %v after the caller gave up", puts)
+		}
+	})
 }
 
 // A replacement reply that arrives after a lower slot retired the group's
@@ -407,33 +458,58 @@ func TestChunkRound_StaleReplacementIsDiscarded(t *testing.T) {
 	rd := r.BeginPutRound(4, 4096).(*putRound)
 	g := rd.groups[0]
 	second := make(chan struct{})
-	release := make(chan struct{})
-	b.reserveHook = func(_ context.Context, call int) error {
+	var secondOnce sync.Once
+	release, releaseAll := releaser(t)
+	b.reserveHook = func(ctx context.Context, call int) error {
 		if call == 2 {
-			close(second)
-			<-release
+			secondOnce.Do(func() { close(second) })
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		}
 		return nil
 	}
 	slot0Sent := make(chan struct{})
-	b.putHook = func(_ context.Context, fid string) (bool, error) {
+	b.putHook = func(ctx context.Context, fid string) (bool, error) {
 		switch fid {
 		case "1,0a0b0c0d0e_1": // slot 1: refused at once
 			return false, errRangeRefused
 		case "1,0a0b0c0d0e": // slot 0: sent, refused once the replacement is in flight
 			close(slot0Sent)
-			<-second
+			select {
+			case <-second:
+			case <-ctx.Done():
+				return false, ctx.Err()
+			}
 			return false, errRangeRefused
 		}
 		return true, nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	errs := make(chan error, 2)
+	started := 0
+	t.Cleanup(func() { // release and join every worker started
+		releaseAll()
+		cancel()
+		for k := 0; k < started; k++ {
+			select {
+			case <-errs:
+			case <-time.After(10 * time.Second):
+				t.Error("a round worker never returned")
+				return
+			}
+		}
+	})
+	started++
 	go func() { errs <- rd.Put(ctx, 0, roundKey(0), []byte(roundKey(0))) }()
-	<-slot0Sent
+	waitFor(t, slot0Sent, "slot 0's upload")
+	started++
 	go func() { errs <- rd.Put(ctx, 1, roundKey(1), []byte(roundKey(1))) }()
-	<-second
+	waitFor(t, second, "the replacement reservation")
+	deadline := time.Now().Add(10 * time.Second)
 	for { // slot 0's refusal retires the rest of the group meanwhile
 		g.mu.Lock()
 		v := g.ver
@@ -441,12 +517,20 @@ func TestChunkRound_StaleReplacementIsDiscarded(t *testing.T) {
 		if v == 2 {
 			break
 		}
+		if time.Now().After(deadline) {
+			t.Fatalf("group version %d; slot 0's refusal never retired the range", v)
+		}
 		time.Sleep(time.Millisecond)
 	}
-	close(release)
-	for k := 0; k < 2; k++ {
-		if err := <-errs; err != nil {
-			t.Fatal(err)
+	releaseAll()
+	for ; started > 0; started-- {
+		select {
+		case err := <-errs:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("a round worker did not finish")
 		}
 	}
 	got := b.reserveCounts()

@@ -18,6 +18,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -127,17 +128,27 @@ func validBaseFid(fid string, count int) error {
 	return nil
 }
 
-// validHostPort checks a volume server location: host:port, no scheme or path.
+// validHostPort checks a volume server location: a plain host:port HTTP
+// authority ([v6]:port included), with no scheme, path, user, escape,
+// space or control byte, so the range's uploads can be addressed at all.
 func validHostPort(loc string) error {
+	for _, c := range loc {
+		if c <= ' ' || c == 0x7f || strings.ContainsRune("/?#@\\", c) {
+			return fmt.Errorf("chunkstore: assign location %q: not a plain host:port", loc)
+		}
+	}
 	host, port, err := net.SplitHostPort(loc)
 	if err != nil {
 		return fmt.Errorf("chunkstore: assign location %q: %v", loc, err)
 	}
-	if host == "" || strings.ContainsAny(host, "/ ?#@") {
-		return fmt.Errorf("chunkstore: assign location %q: bad host", loc)
+	if host == "" {
+		return fmt.Errorf("chunkstore: assign location %q: no host", loc)
 	}
 	if p, err := strconv.ParseUint(port, 10, 16); err != nil || p == 0 {
 		return fmt.Errorf("chunkstore: assign location %q: bad port", loc)
+	}
+	if u, err := url.Parse("http://" + loc + "/"); err != nil || u.Host != loc {
+		return fmt.Errorf("chunkstore: assign location %q: not an HTTP authority", loc)
 	}
 	return nil
 }

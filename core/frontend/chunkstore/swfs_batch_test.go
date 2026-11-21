@@ -154,6 +154,13 @@ func TestSWFSRange_ReserveValidates(t *testing.T) {
 		{"location with a bad port", 4, &filerpb.AssignVolumeResponse{FileId: "3,0a0b0c0d0e", Count: 4, Location: &filerpb.Location{Url: "127.0.0.1:x"}}, false, 0},
 		{"location with port 0", 4, &filerpb.AssignVolumeResponse{FileId: "3,0a0b0c0d0e", Count: 4, Location: &filerpb.Location{Url: "127.0.0.1:0"}}, false, 0},
 		{"location with a path", 4, &filerpb.AssignVolumeResponse{FileId: "3,0a0b0c0d0e", Count: 4, Location: &filerpb.Location{Url: "a/b:1"}}, false, 0},
+		{"location with a tab", 4, &filerpb.AssignVolumeResponse{FileId: "3,0a0b0c0d0e", Count: 4, Location: &filerpb.Location{Url: "127.0.0.1\t:1"}}, false, 0},
+		{"location with a newline", 4, &filerpb.AssignVolumeResponse{FileId: "3,0a0b0c0d0e", Count: 4, Location: &filerpb.Location{Url: "a\nb:1"}}, false, 0},
+		{"location with a bad escape", 4, &filerpb.AssignVolumeResponse{FileId: "3,0a0b0c0d0e", Count: 4, Location: &filerpb.Location{Url: "a%zz:1"}}, false, 0},
+		{"location with an escape", 4, &filerpb.AssignVolumeResponse{FileId: "3,0a0b0c0d0e", Count: 4, Location: &filerpb.Location{Url: "a%41:1"}}, false, 0},
+		{"location with a space", 4, &filerpb.AssignVolumeResponse{FileId: "3,0a0b0c0d0e", Count: 4, Location: &filerpb.Location{Url: "a b:1"}}, false, 0},
+		{"location with a user", 4, &filerpb.AssignVolumeResponse{FileId: "3,0a0b0c0d0e", Count: 4, Location: &filerpb.Location{Url: "u@a:1"}}, false, 0},
+		{"bracketed IPv6 location", 4, &filerpb.AssignVolumeResponse{FileId: "3,0a0b0c0d0e", Count: 4, Location: &filerpb.Location{Url: "[::1]:8080"}}, true, 4},
 		{"widest key", 4, &filerpb.AssignVolumeResponse{FileId: "3,0123456789abcdef0a0b0c0d", Count: 4, Location: loc}, true, 4},
 		{"key of 17 digits (leading zero)", 4, &filerpb.AssignVolumeResponse{FileId: "3,00123456789abcdef0a0b0c0d", Count: 4, Location: loc}, false, 0},
 		{"key wider than 64 bits", 4, &filerpb.AssignVolumeResponse{FileId: "3,10123456789abcdef0a0b0c0d", Count: 4, Location: loc}, false, 0},
@@ -184,6 +191,20 @@ func TestSWFSRange_ReserveValidates(t *testing.T) {
 		if fid, err := r.fid(n); err == nil {
 			t.Fatalf("reserve %d: offset %d gave %q", n, n, fid)
 		}
+	}
+	// A rejected location leaves nothing to upload to: a round over it makes
+	// no upload at all.
+	vol := newBatchVolume(t)
+	bad := startFakeFiler(t, &fakeFilerGRPC{assignResp: &filerpb.AssignVolumeResponse{FileId: "3,0a0b0c0d0e", Count: 2, Location: &filerpb.Location{Url: vol.host() + "\t"}}})
+	rr, err := NewChunkRemote(newFakeFiler(), bad, "/swblock/vols/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rr.BeginPutRound(2, 4096).Put(context.Background(), 0, "k00000", []byte("x")); err == nil {
+		t.Fatal("round over a malformed location stored an object")
+	}
+	if uploads, _, _ := vol.snapshot(); len(uploads) != 0 {
+		t.Fatalf("uploads %v after a malformed location", uploads)
 	}
 	s := startFakeFiler(t, &fakeFilerGRPC{assignResp: &filerpb.AssignVolumeResponse{FileId: "3,0a0b0c0d0e", Count: 1, Location: loc}})
 	for _, n := range []int{0, -1, maxRangeCount + 1} {
