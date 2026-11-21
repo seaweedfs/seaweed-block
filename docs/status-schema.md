@@ -334,32 +334,32 @@ NVMe/TCP frontend counters. Go type `volume.NVMeStatus`.
 |---|---|---|
 | `volumeID` | string | the served volume |
 | `stats` | object | the NVMe/TCP target's counters since start |
-| `stats.sessions_accepted` | uint64 | — |
-| `stats.admin_connects` | uint64 | — |
-| `stats.io_connects` | uint64 | — |
-| `stats.read_commands` | uint64 | — |
-| `stats.write_commands` | uint64 | — |
-| `stats.flush_commands` | uint64 | — |
-| `stats.inline_write_commands` | uint64 | — |
-| `stats.inline_write_bytes` | uint64 | — |
-| `stats.r2t_write_commands` | uint64 | — |
-| `stats.r2t_write_bytes` | uint64 | — |
-| `stats.h2c_data_pdus` | uint64 | — |
-| `stats.h2c_data_bytes` | uint64 | — |
-| `stats.c2h_data_pdus` | uint64 | — |
-| `stats.c2h_data_bytes` | uint64 | — |
-| `stats.write_capsule_receive_parse_ops` | uint64 | — |
-| `stats.write_capsule_receive_parse_ns` | uint64 | — |
-| `stats.r2t_data_collection_ops` | uint64 | — |
-| `stats.r2t_data_collection_ns` | uint64 | — |
-| `stats.write_dispatch_wait_ops` | uint64 | — |
-| `stats.write_dispatch_wait_ns` | uint64 | — |
-| `stats.write_handler_ops` | uint64 | — |
-| `stats.write_handler_ns` | uint64 | — |
-| `stats.write_completion_queue_wait_ops` | uint64 | — |
-| `stats.write_completion_queue_wait_ns` | uint64 | — |
-| `stats.write_completion_send_ops` | uint64 | — |
-| `stats.write_completion_send_ns` | uint64 | — |
+| `stats.sessions_accepted` | uint64 | TCP sessions accepted |
+| `stats.admin_connects` | uint64 | admin-queue Connect commands |
+| `stats.io_connects` | uint64 | I/O-queue Connect commands |
+| `stats.read_commands` | uint64 | Read commands received |
+| `stats.write_commands` | uint64 | Write commands received |
+| `stats.flush_commands` | uint64 | Flush commands received |
+| `stats.inline_write_commands` | uint64 | writes whose data came inline in the command capsule |
+| `stats.inline_write_bytes` | uint64 | their data bytes |
+| `stats.r2t_write_commands` | uint64 | writes whose data the target requested with R2T |
+| `stats.r2t_write_bytes` | uint64 | their data bytes |
+| `stats.h2c_data_pdus` | uint64 | host-to-controller data PDUs received |
+| `stats.h2c_data_bytes` | uint64 | their bytes |
+| `stats.c2h_data_pdus` | uint64 | controller-to-host data PDUs sent (read data) |
+| `stats.c2h_data_bytes` | uint64 | their bytes |
+| `stats.write_capsule_receive_parse_ops` | uint64 | Write phase attribution: for each phase, the operations timed and their total nanoseconds (overlapping phases can overlap in time). |
+| `stats.write_capsule_receive_parse_ns` | uint64 | total nanoseconds of those operations |
+| `stats.r2t_data_collection_ops` | uint64 | R2T data collections (R2T send to the last H2CData) |
+| `stats.r2t_data_collection_ns` | uint64 | total nanoseconds of those operations |
+| `stats.write_dispatch_wait_ops` | uint64 | waits for a write handler to take the command |
+| `stats.write_dispatch_wait_ns` | uint64 | total nanoseconds of those operations |
+| `stats.write_handler_ops` | uint64 | write handler runs (the backend write) |
+| `stats.write_handler_ns` | uint64 | total nanoseconds of those operations |
+| `stats.write_completion_queue_wait_ops` | uint64 | waits of a completion for the send queue |
+| `stats.write_completion_queue_wait_ns` | uint64 | total nanoseconds of those operations |
+| `stats.write_completion_send_ops` | uint64 | completion sends to the host |
+| `stats.write_completion_send_ns` | uint64 | total nanoseconds of those operations |
 
 ### `GET /status/ublk`
 
@@ -369,12 +369,12 @@ Ublk frontend counters. Go type `volume.UblkStatus`.
 |---|---|---|
 | `volumeID` | string | the served volume |
 | `stats` | object | the ublk device's request counters since start |
-| `stats.read_requests` | uint64 | — |
-| `stats.write_requests` | uint64 | — |
-| `stats.flush_requests` | uint64 | — |
-| `stats.fua_writes` | uint64 | — |
-| `stats.other_requests` | uint64 | — |
-| `stats.errors` | uint64 | — |
+| `stats.read_requests` | uint64 | read requests received |
+| `stats.write_requests` | uint64 | write requests received |
+| `stats.flush_requests` | uint64 | flush requests received |
+| `stats.fua_writes` | uint64 | writes with forced unit access |
+| `stats.other_requests` | uint64 | requests of any other operation |
+| `stats.errors` | uint64 | requests completed with a negative result |
 
 ### `GET /status/frontend-capabilities`
 
