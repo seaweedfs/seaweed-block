@@ -462,20 +462,18 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 			// restore here, so HEAD is never claimed for a mis-ordered ship.
 			return h.backend.seedAndRebase(func() error { return ws.SeedChunkFrontier(head.RemoteLSN) })
 		}
-		claimStart := time.Now()
-		log.Printf("durable: HEAD claim for volume=%s starting: target epoch=%d holder=%q", volumeID, cfg.Epoch, cfg.Holder)
-		head, err := storage.ClaimChunkHead(ctx, remote, cfg)
-		if err != nil {
-			log.Printf("durable: HEAD claim for volume=%s failed after %s: %v", volumeID, time.Since(claimStart), err)
-			return nil, fmt.Errorf("durable: restore HEAD claim: %w", err)
-		}
-		claimed := "claimed"
-		if head.Gen == 0 {
-			claimed = "no HEAD to claim (new lineage)"
-		}
-		log.Printf("durable: HEAD claim for volume=%s done in %s: gen=%d epoch=%d holder=%q, %s", volumeID, time.Since(claimStart), head.Gen, head.Epoch, head.Holder, claimed)
-		cfg.RestoreGuard = &storage.ChunkHeadVersion{Gen: head.Gen, Epoch: head.Epoch}
 	}
+	// INV-WS-REOPEN-FENCE-001: local-root reopens claim too, without
+	// reseeding their acknowledged WAL or replacing it with remote absence.
+	claimStart := time.Now()
+	log.Printf("durable: HEAD claim for volume=%s starting: target epoch=%d holder=%q", volumeID, cfg.Epoch, cfg.Holder)
+	head, err := storage.ClaimChunkHead(ctx, remote, cfg)
+	if err != nil {
+		log.Printf("durable: HEAD claim for volume=%s failed after %s: %v", volumeID, time.Since(claimStart), err)
+		return nil, fmt.Errorf("durable: restore HEAD claim: %w", err)
+	}
+	log.Printf("durable: HEAD claim for volume=%s done in %s: gen=%d epoch=%d holder=%q", volumeID, time.Since(claimStart), head.Gen, head.Epoch, head.Holder)
+	cfg.RestoreGuard = &storage.ChunkHeadVersion{Gen: head.Gen, Epoch: head.Epoch}
 
 	layer, attachErr := storage.AttachChunkLayer(ws, remote, cfg)
 	if attachErr == nil {

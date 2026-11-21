@@ -172,10 +172,9 @@ stateDiagram-v2
   }
   state "HEAD holder" as H {
     [*] --> Attaching
-    Attaching --> Claiming: fresh local root
-    Attaching --> Holder: existing root, HEAD is this holder's
+    Attaching --> Claiming: fresh or same-holder local root
     Attaching --> Refused: existing root, HEAD published by another holder
-    Claiming --> Cooling: CAS to this epoch and holder, state active
+    Claiming --> Cooling: replace generation (or exclusive create), same image
     Cooling --> Holder: configured window elapsed (zero for single filer), exact HEAD reread
     Cooling --> HolderFenced: publication displaced
     Claiming --> HolderFenced: HEAD epoch higher, or another holder at this epoch
@@ -194,8 +193,9 @@ stateDiagram-v2
 | Fenced | Drained, Acked | the stop callback succeeded; only then, and only when revoked, the acknowledgement is sent | `core/host/volume/workspace_lease.go` `drain` | `INV-WS-REVOKE-ACK-001` |
 | Attaching | Refused | an existing local root whose HEAD another holder has published (`ErrChunkStaleLocalRoot`) | `core/frontend/durable/provider_chunk.go` `newChunkLayer` | `INV-WS-STALE-LOCAL-ROOT-001` |
 | (startup) | Refused | `--chunk-filer` is not the only filer of its group: a master lists another filer or several, or no master lists it within 60 s (`ErrNotSingleFiler`) | `core/frontend/chunkstore/single_filer.go` `CheckSingleFiler`; `cmd/blockvolume/chunk_remote.go` `newChunkWiring` | `INV-WS-SINGLE-FILER-001` |
-| Claiming | Holder | HEAD epoch not above the master-issued epoch, no other holder at the same epoch; the local frontier is seeded from HEAD before the CAS; I/O opens only after the configured cooling window (zero at one serialization point) and an exact generation/epoch/holder readback | `core/storage/chunk_restore.go` `ClaimChunkHead`; `core/frontend/durable/provider_chunk.go` `newChunkLayer` | `INV-WS-CLAIM-BEFORE-SERVE-001`, `INV-WS-HEAD-CAS-001` |
-| Claiming | Holder, or not installed | unknown CAS outcome: success only if a re-read shows the exact proposal; never a blind replay | `core/storage/chunk_restore.go` `ClaimChunkHead` | `INV-WS-CAS-UNKNOWN-001` |
+| Claiming | Holder | HEAD epoch not above the master-issued epoch, no other holder at the same epoch; fresh roots seed from HEAD before the CAS; existing roots retain local WAL; every incarnation replaces the generation (or exclusive-creates HEAD); I/O opens only after the configured cooling window (zero at one serialization point) and an exact generation/epoch/holder readback | `core/storage/chunk_restore.go` `ClaimChunkHead`; `core/frontend/durable/provider_chunk.go` `newChunkLayer` | `INV-WS-CLAIM-BEFORE-SERVE-001`, `INV-WS-HEAD-CAS-001`, `INV-WS-REOPEN-FENCE-001` |
+| Claiming | Holder, or not installed | unknown CAS outcome: success only if a re-read shows the exact proposal; never a blind replay | `core/storage/chunk_restore.go` `ClaimChunkHead` | `INV-WS-REOPEN-FENCE-001` | Before I/O, every reopened holder replaces the observed HEAD generation, including the same epoch/holder and an empty HEAD. A previous incarnation's delayed CAS cannot publish afterward. Local acknowledged WAL is retained. | M4 Claiming -> Holder | `core/storage/chunk_restore.go` `ClaimChunkHead`; `core/frontend/durable/provider_chunk.go` `newChunkLayer` | `TestClaimChunkHeadSameOwnerReopenRejectsKilledProcessCAS`, `TestHeadBeltSameOwnerReopenPreservesAcknowledgedWrites` (`core/storage/chunk_reopen_belt_test.go`); `TestLocalReopenClaimsBeforeServing` (`core/frontend/durable/provider_reopen_belt_test.go`) | `HeadReopenBelt` `OldCASCannotLandAfterReopen` | ACTIVE |
+| `INV-WS-CAS-UNKNOWN-001` |
 | Holder | Holder | every publish is a cut (M5) | `core/storage/chunk_layer.go` `captureLocked` | `INV-WS-HEAD-CAS-001`, `INV-WS-HEAD-MONOTONE-001` |
 | Holder | Detached | `Detach` publishes the final cut with state `detached` in one CAS | `core/storage/chunk_layer.go` `chunkLayerImpl.Detach`, `captureLocked` | `INV-WS-CLEAN-MOVE-001` |
 | Holder | HolderFenced | a conflicting HEAD owner (including a regressed epoch) or a displaced publication is observed; local data and unresolved cut intents remain | `core/storage/chunk_layer.go` `supersededBy`; `core/frontend/chunkstore/chunk_remote.go` `CASHead` | `INV-WS-HEAD-CAS-001` |

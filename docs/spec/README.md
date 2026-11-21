@@ -572,3 +572,24 @@ HEAD-read deadline/cancellation controls in
 controls in `TestWorkspaceUncertaintyPrecedesRequestRefusal`. Actual request
 cancellation retains its own controls, including a conflicting dependency status.
 These are reply-classification claims, not authority-durability or delivery proof.
+
+### Same-owner process reopen belt
+
+`HeadReopenBelt.tla` checks M4 Claiming -> Holder and
+`INV-WS-REOPEN-FENCE-001` at one HEAD serialization point. One old server-held
+CAS, one reopen and one new acknowledged image are interleaved. Claim replaces
+the generation while preserving the observed image; the old CAS evaluates its
+original generation when applied. This abstracts storage I/O and durability;
+native tests cover WAL recovery and acknowledged bytes.
+
+TLC 2.19, tool SHA256
+`936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`,
+2026-11-21: `cfg/HeadReopenBelt.cfg` exhausted 14 generated / 12 distinct states,
+depth 6, queue empty. `OldCASCannotLandAfterReopen` and
+`PublishedAcknowledgedImage` hold. `cfg/HeadReopenBelt_no_claim.cfg` violates
+`OldCASCannotLandAfterReopen` at depth 4 (5 distinct states). That negative maps
+to `TestClaimChunkHeadSameOwnerReopenRejectsKilledProcessCAS` and the real
+cut/recovered-WAL control `TestHeadBeltSameOwnerReopenPreservesAcknowledgedWrites`;
+`TestLocalReopenClaimsBeforeServing` covers the provider existing-root path.
+The finite model checks one nonempty base; the native/public claim test also
+covers an empty root with a delayed first-cut exclusive create.

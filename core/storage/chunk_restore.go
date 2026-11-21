@@ -47,19 +47,10 @@ func ClaimChunkHead(ctx context.Context, remote ChunkRemote, cfg ChunkLayerConfi
 	if err := allowed(); err != nil {
 		return ChunkHead{}, err
 	}
-	// No HEAD is a new volume, not a restore: there is no old holder to
-	// fence. The first content cut keeps exclusive-create semantics.
-	if head.Gen == 0 {
-		return head, nil
-	}
-	if head.Gen != 0 && head.Epoch == cfg.Epoch && head.Holder == cfg.Holder && !chunkHeadIsDetached(head) && head.DetachedBy == nil {
-		// A previous claim may have committed but timed out during cooling.
-		// An identical root alone does not prove that wait completed.
-		if err := confirmChunkTakeover(ctx, remote, head, cfg.HeadCoolingWindow); err != nil {
-			return ChunkHead{}, err
-		}
-		return head, allowed() // idempotent restart or settled prior claim
-	}
+	// INV-WS-HEAD-BELT-001: even the same owner must replace the generation
+	// before serving. A killed incarnation may have left a CAS in flight;
+	// readback alone cannot invalidate that request's original precondition.
+	// An empty HEAD also needs an exclusive create before an old first cut.
 	next := copyHead(head)
 	next.Epoch, next.Holder = cfg.Epoch, cfg.Holder
 	// A new holder's takeover starts serving the same image as active. The
