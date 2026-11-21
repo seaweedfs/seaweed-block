@@ -237,6 +237,7 @@ func TestWALStoreChunk_LineageDriftRefusesCapture(t *testing.T) {
 			view := v1View()
 			p := chunkProvider(t, t.TempDir(), remote, view, 0)
 			s := openRecovered(t, p)
+			claimed := headHolder(t, remote)
 			if _, err := s.Write(1, block(1)); err != nil {
 				t.Fatal(err)
 			}
@@ -248,7 +249,7 @@ func TestWALStoreChunk_LineageDriftRefusesCapture(t *testing.T) {
 			_, err := p.CaptureVolume(context.Background(), "v1")
 			head, _ := remote.GetHead(context.Background())
 			if drift == nil {
-				if err != nil || head.Gen != 1 {
+				if err != nil || head.Gen != claimed.Gen+1 {
 					t.Fatalf("capture under the attach lineage: %v (HEAD gen %d)", err, head.Gen)
 				}
 				return
@@ -256,7 +257,7 @@ func TestWALStoreChunk_LineageDriftRefusesCapture(t *testing.T) {
 			if !errors.Is(err, storage.ErrChunkCaptureRefused) {
 				t.Fatalf("capture after %s drift: %v; want refused", name, err)
 			}
-			if head.Gen != 0 || remote.Puts() != 0 {
+			if head.Gen != claimed.Gen || remote.Puts() != 0 {
 				t.Fatalf("capture after %s drift published: HEAD gen %d, %d chunks stored", name, head.Gen, remote.Puts())
 			}
 		})
@@ -273,6 +274,7 @@ func TestWALStoreChunk_LineageDriftDuringHeldUploadRefusesPublication(t *testing
 	view := v1View()
 	p := chunkProvider(t, t.TempDir(), g, view, 0)
 	s := openRecovered(t, p)
+	claimed := headHolder(t, remote)
 	if _, err := s.Write(1, block(1)); err != nil {
 		t.Fatal(err)
 	}
@@ -286,7 +288,7 @@ func TestWALStoreChunk_LineageDriftDuringHeldUploadRefusesPublication(t *testing
 	if err := recvErr(t, errc, "CaptureVolume"); !errors.Is(err, storage.ErrChunkCaptureRefused) {
 		t.Fatalf("capture whose lineage moved during upload: %v; want refused", err)
 	}
-	if head, _ := remote.GetHead(context.Background()); head.Gen != 0 {
+	if head, _ := remote.GetHead(context.Background()); head.Gen != claimed.Gen {
 		t.Fatalf("stale lineage published HEAD gen %d", head.Gen)
 	}
 }

@@ -241,6 +241,7 @@ func TestWALStoreChunk_CutVolumeRefusesUnwrittenMinLSNBeforePublishing(t *testin
 	remote := storage.NewMemChunkRemote()
 	p := chunkProvider(t, t.TempDir(), remote, v1View(), 0)
 	s := openRecovered(t, p)
+	claimed := headHolder(t, remote)
 	if _, err := s.Write(1, block(1)); err != nil {
 		t.Fatal(err)
 	}
@@ -248,11 +249,11 @@ func TestWALStoreChunk_CutVolumeRefusesUnwrittenMinLSNBeforePublishing(t *testin
 	if _, err := p.CutVolume(ctx, "v1", last+1); err == nil {
 		t.Fatal("a cut to an LSN never written succeeded")
 	}
-	if head, _ := remote.GetHead(ctx); head.Gen != 0 || remote.Puts() != 0 {
+	if head, _ := remote.GetHead(ctx); head.Gen != claimed.Gen || remote.Puts() != 0 {
 		t.Fatalf("a refused minLSN published: HEAD gen %d, %d chunks stored", head.Gen, remote.Puts())
 	}
 	r, err := p.CutVolume(ctx, "v1", last)
-	if err != nil || r.H != last || r.Head.Gen != 1 {
+	if err != nil || r.H != last || r.Head.Gen != claimed.Gen+1 {
 		t.Fatalf("cut to the last written LSN: %+v %v", r, err)
 	}
 }

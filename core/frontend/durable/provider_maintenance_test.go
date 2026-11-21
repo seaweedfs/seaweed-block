@@ -197,6 +197,7 @@ func TestCutDeadlineIncludesUploadWithBackgroundCaller(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = p.Close() })
 	s := openRecovered(t, p)
+	claimed := headHolder(t, remote.MemChunkRemote)
 	if _, err = s.Write(1, block(0x48)); err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +206,7 @@ func TestCutDeadlineIncludesUploadWithBackgroundCaller(t *testing.T) {
 		t.Fatalf("whole cut did not expire: %v", err)
 	}
 	h, err := remote.GetHead(context.Background())
-	if err != nil || h.Gen != 0 {
+	if err != nil || h.Gen != claimed.Gen {
 		t.Fatalf("expired upload published: %+v %v", h, err)
 	}
 }

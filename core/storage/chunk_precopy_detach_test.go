@@ -191,7 +191,8 @@ func assertPrecopyMeasuredRefusal(t *testing.T, report PrecopyReport, err error)
 	t.Helper()
 	if !errors.Is(err, ErrPrecopyNotConverged) || report.Frozen ||
 		report.Estimate <= 1200*time.Millisecond ||
-		(report.Reason != "tail_too_large" && report.Reason != "barrier_over_budget") {
+		(report.Reason != "tail_too_large" && report.Reason != "barrier_over_budget" &&
+			!(report.Reason == "freeze_budget_exceeded" && report.Estimate > precopyFreezeLimit)) {
 		t.Fatalf("not a valid measured over-budget refusal: report=%+v err=%v", report, err)
 	}
 }
