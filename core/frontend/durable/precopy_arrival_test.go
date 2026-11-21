@@ -46,7 +46,14 @@ func TestPrecopyQueueBoundStartsAtCommandArrival(t *testing.T) {
 					}
 				})
 				go func() { done <- b.Sync(ctx) }()
-				<-queued
+				select {
+				case <-queued:
+				case err := <-done:
+					joined = true
+					t.Fatalf("command ended before queue registration: %v", err)
+				case <-time.After(time.Second):
+					t.Fatal("initial queue registration timed out")
+				}
 				synctest.Wait()
 				bound := 5 * time.Second
 				if caller < bound {
@@ -120,7 +127,14 @@ func TestPrecopyResumeGrantVersusExpiry(t *testing.T) {
 					}
 				})
 				go func() { done <- b.Sync(ctx) }()
-				<-queued
+				select {
+				case <-queued:
+				case err := <-done:
+					joined = true
+					t.Fatalf("command ended before queue registration: %v", err)
+				case <-time.After(time.Second):
+					t.Fatal("initial queue registration timed out")
+				}
 				synctest.Wait()
 				if outcome == "expiry-before-grant" {
 					time.Sleep(6 * time.Second)
@@ -212,8 +226,16 @@ func TestPrecopyGrantedWaiterFollowsReplacementPause(t *testing.T) {
 					}
 				})
 				go func() { done <- b.Sync(ctx) }()
-				if n := <-queued; n != 1 {
-					t.Fatal("first pause registration missing")
+				select {
+				case n := <-queued:
+					if n != 1 {
+						t.Fatal("first pause registration missing")
+					}
+				case err := <-done:
+					joined = true
+					t.Fatalf("command ended before first pause registration: %v", err)
+				case <-time.After(time.Second):
+					t.Fatal("initial queue registration timed out")
 				}
 				synctest.Wait()
 				time.Sleep(2 * time.Second)

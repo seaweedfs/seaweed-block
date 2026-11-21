@@ -21,11 +21,13 @@ func TestPrecopyNewPauseCannotEraseObservedStalePrimary(t *testing.T) {
 	resumeB := func() {}
 	defer func() { resumeB() }()
 	calls := 0
+	var startErr error
 	b.view = precopyProjectionFunc(func() frontend.Projection {
 		calls++
 		resume, err := b.BeginPrecopyPause(ctx)
 		if err != nil {
-			t.Fatalf("start B from projection: %v", err)
+			startErr = err
+			return frontend.Projection{}
 		}
 		resumeB = resume
 		return frontend.Projection{VolumeID: b.id.VolumeID, ReplicaID: b.id.ReplicaID, Epoch: b.id.Epoch + 1, EndpointVersion: b.id.EndpointVersion, Healthy: true}
@@ -35,6 +37,9 @@ func TestPrecopyNewPauseCannotEraseObservedStalePrimary(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := b.Sync(ctx)
+	if startErr != nil {
+		t.Fatal("start B from projection:", startErr)
+	}
 	if !errors.Is(err, frontend.ErrStalePrimary) || errors.Is(err, frontend.ErrBackendBusy) {
 		t.Fatalf("observed stale ownership replaced by pause retry: %v", err)
 	}

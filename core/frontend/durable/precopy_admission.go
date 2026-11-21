@@ -12,6 +12,8 @@ import (
 
 const precopyQueueBudget = 5 * time.Second
 
+var errPrecopyPaused = fmt.Errorf("%w: %w: pre-copy admission paused", frontend.ErrNotReady, frontend.ErrBackendBusy)
+
 type precopyWaiter struct {
 	ready    chan struct{}
 	deadline time.Time
@@ -162,7 +164,8 @@ func (b *StorageBackend) admitPrecopy(ctx context.Context, admit func() (func(),
 			}
 		}
 		release, err := admit()
-		if err != nil {
+		// INV-CUT-PRECOPY-001 / INV-FE-LINEAGE-GATE-001: retry only the pause.
+		if errors.Is(err, errPrecopyPaused) {
 			b.mu.Lock()
 			pending := b.precopy != nil
 			b.mu.Unlock()

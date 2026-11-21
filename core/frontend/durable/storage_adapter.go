@@ -830,7 +830,7 @@ func (b *StorageBackend) admit() (func(), error) {
 	if b.precopy != nil && b.precopy.active {
 		b.mu.Unlock()
 		b.ioMu.RUnlock()
-		return nil, fmt.Errorf("%w: %w: pre-copy admission paused", frontend.ErrNotReady, frontend.ErrBackendBusy)
+		return nil, errPrecopyPaused
 	}
 	b.admittedIO++
 	b.mu.Unlock()
@@ -880,7 +880,7 @@ func (b *StorageBackend) readyCheck() error {
 		return frontend.ErrStalePrimary
 	}
 	if precopyPending {
-		return fmt.Errorf("%w: %w: pre-copy admission paused", frontend.ErrNotReady, frontend.ErrBackendBusy)
+		return errPrecopyPaused
 	}
 	if !b.operational.Load() {
 		ev, _ := b.opEvidence.Load().(string)
