@@ -93,7 +93,7 @@ func TestPrecopyFixedCommitRuleKeepsProgressAndFreezeBounds(t *testing.T) {
 			r := PrecopyReport{Fixed: 1300 * time.Millisecond, TailEstimate: tc.tail, Estimate: tc.estimate, Reason: reason}
 			var previous *PrecopyAttempt
 			if tc.previous > 0 {
-				previous = &PrecopyAttempt{Estimate: tc.previous}
+				previous = &PrecopyAttempt{Reason: "tail_too_large", Estimate: tc.previous}
 			}
 			if got := r.admitPrecopy(previous, false); got != tc.want {
 				t.Fatalf("admit=%t report=%+v", got, r)

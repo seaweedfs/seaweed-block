@@ -352,7 +352,7 @@ func (r *PrecopyReport) admitPrecopy(previous *PrecopyAttempt, final bool) bool 
 		r.Reason = "freeze_budget_exceeded"
 		return false
 	}
-	if previous != nil && previous.Estimate > 0 {
+	if comparablePrecopyAttempt(previous) {
 		r.PreviousEstimate = previous.Estimate
 		// Division first avoids overflow while retaining nanosecond precision.
 		threshold := previous.Estimate - previous.Estimate/10
@@ -410,5 +410,19 @@ func (l *chunkLayerImpl) lockPrecopy(ctx context.Context) error {
 				return nil
 			}
 		}
+	}
+}
+
+// Only a completed cost estimate is comparable. A drain/before-barrier refusal
+// can carry Fixed+margin without a known tail, just like samples_unknown.
+func comparablePrecopyAttempt(a *PrecopyAttempt) bool {
+	if a == nil || a.Estimate <= 0 || a.Error != "" {
+		return false
+	}
+	switch a.Reason {
+	case "fit", "tail_too_large", "barrier_over_budget", "freeze_budget_exceeded", "no_progress", "final_attempt", "admitted_io":
+		return true
+	default:
+		return false
 	}
 }

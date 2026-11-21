@@ -337,15 +337,15 @@ frames and does not prove physical-I/O, authority rollback or timing behavior.
 
 `PrecopyFixedAdmission.tla` checks cost admission over five physical rounds.
 A known estimate fits the 1.2-second allowance, or uses the five-second declared
-freeze limit when it is at least 90% of the previous estimate or on the final
+freeze limit when it is at least 90% of the previous comparable known estimate or on the final
 round. `SafeCommit` checks the declaration and ceiling; `FinalWithinBudget`
 checks that an eligible final round cannot refuse. This model does not model
-sample freshness, measurement availability, publication/data safety or physical
+sample freshness, current-measurement availability, publication/data safety or physical
 latency; those remain separate checks.
 
 ### PrecopyFixedAdmission checked configurations
 
-Local amendment-4 run, 2026-11-21 01:46 UTC, TLC 2.19 (tools jar SHA-256
+Local amendment-4 review-fold run, 2026-11-21 02:07 UTC, TLC 2.19 (tools jar SHA-256
 `936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`),
 from `docs/spec`:
 
@@ -353,11 +353,15 @@ from `docs/spec`:
 java -Xmx512m -cp /path/to/tla2tools.jar tlc2.TLC -deadlock -config cfg/PrecopyFixedAdmission.cfg PrecopyFixedAdmission
 ```
 
-The positive configuration exited 0: 6,467 generated / 1,893 distinct states,
+The positive configuration exited 0: 37,399 generated / 5,851 distinct states,
 queue empty, depth 6. The same invocation with each negative configuration
 exited 12: `no_stall` violates `SafeCommit` (24 / 20, depth 2), `no_cap`
-violates `SafeCommit` (417 / 390, depth 3), and `no_final` violates
-`FinalWithinBudget` (5,759 / 1,605, depth 6). The older quarter-tail model
+violates `SafeCommit` (1,634 / 1,024, depth 3), and `no_final` violates
+`FinalWithinBudget` (34,330 / 4,620, depth 6). The additional
+`unknown_previous` negative violates `SafeCommit` (640 / 426, depth 3),
+witnessing that a partial prior estimate cannot establish a plateau. The model
+tracks previous-known status nondeterministically across rounds; only the
+current estimate is assumed known. The older quarter-tail model
 results are superseded by this rule. These finite-state checks do not establish
 physical latency or train qualification.
 

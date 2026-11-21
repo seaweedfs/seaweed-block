@@ -532,8 +532,19 @@ func precopyAttemptDiagnosticsControl(t *testing.T, slow bool) {
 		t.Fatalf("slow diagnostics control lost its measured fixed cost: report=%+v", r.Precopy)
 	}
 	if r.Precopy.Frozen {
-		if err != nil || len(r.Precopy.Rounds) != 2 || (second.Reason != "fit" && second.Reason != "no_progress") || !second.Frozen {
-			t.Fatalf("invalid fit after drain timeout: report=%+v err=%v", r.Precopy, err)
+		// A drain refusal is not a comparable estimate. A cheap second
+		// round fits directly; a slow second round establishes the first known
+		// estimate, so only the third may establish no progress.
+		last := r.Precopy.Rounds[len(r.Precopy.Rounds)-1]
+		if err != nil || !last.Frozen {
+			t.Fatalf("invalid admission after drain timeout: report=%+v err=%v", r.Precopy, err)
+		}
+		if second.Reason == "fit" {
+			if len(r.Precopy.Rounds) != 2 || !second.Frozen {
+				t.Fatalf("first fitting round skipped: %+v", r.Precopy)
+			}
+		} else if len(r.Precopy.Rounds) != 3 || second.Frozen || second.Reason != "tail_too_large" || last.Reason != "no_progress" || last.PreviousEstimate != second.Estimate {
+			t.Fatalf("drain refusal treated as a comparable estimate: %+v", r.Precopy)
 		}
 	} else {
 		assertPrecopyMeasuredRefusal(t, r.Precopy, err)

@@ -315,7 +315,7 @@ func precopyFiftyAttemptError(round storage.PrecopyAttempt, previous *storage.Pr
 	eligible := round.Estimate > 0 && round.Estimate <= allowance
 	reason := "fit"
 	if !eligible && round.Estimate > 0 && round.Estimate <= 5*time.Second {
-		if previous != nil && previous.Estimate > 0 && round.Estimate >= previous.Estimate-previous.Estimate/10 {
+		if precopyFiftyPreviousKnown(previous) && round.Estimate >= previous.Estimate-previous.Estimate/10 {
 			eligible, reason = true, "no_progress"
 		} else if round.Attempt == 5 {
 			eligible, reason = true, "final_attempt"
@@ -357,4 +357,15 @@ func TestPrecopyFiftyIOPSDrainRefusalDoesNotClaimAdmission(t *testing.T) {
 			})
 		}
 	}
+}
+
+func precopyFiftyPreviousKnown(a *storage.PrecopyAttempt) bool {
+	if a == nil || a.Estimate <= 0 || a.Error != "" {
+		return false
+	}
+	switch a.Reason {
+	case "fit", "tail_too_large", "barrier_over_budget", "freeze_budget_exceeded", "no_progress", "final_attempt", "admitted_io":
+		return true
+	}
+	return false
 }

@@ -17,7 +17,7 @@ func TestPrecopySmokeTraceAmendment4(t *testing.T) {
 			}
 			return
 		}
-		previous = &PrecopyAttempt{Estimate: r.Estimate}
+		previous = &PrecopyAttempt{Reason: "tail_too_large", Estimate: r.Estimate}
 	}
 	t.Fatal("smoke trace refused despite no meaningful progress within freeze bound")
 }
@@ -54,7 +54,7 @@ func TestPrecopyFinalAttemptFreezeCeiling(t *testing.T) {
 		want     bool
 	}{{4500 * time.Millisecond, true}, {5500 * time.Millisecond, false}} {
 		r := PrecopyReport{Estimate: tc.estimate, TailEstimate: 3 * time.Second, Reason: "tail_too_large"}
-		previous := &PrecopyAttempt{Estimate: 6 * time.Second}
+		previous := &PrecopyAttempt{Reason: "tail_too_large", Estimate: 6 * time.Second}
 		if got := r.admitPrecopy(previous, true); got != tc.want {
 			t.Fatalf("final admission=%t want=%t: %+v", got, tc.want, r)
 		}
@@ -82,7 +82,7 @@ func TestPrecopyAmendment4AdmissionBoundaries(t *testing.T) {
 			r := PrecopyReport{Estimate: tc.estimate, Reason: "tail_too_large"}
 			var prev *PrecopyAttempt
 			if tc.previous > 0 {
-				prev = &PrecopyAttempt{Estimate: tc.previous}
+				prev = &PrecopyAttempt{Reason: "tail_too_large", Estimate: tc.previous}
 			}
 			got := r.admitPrecopy(prev, tc.final)
 			want := tc.reason == "fit" || tc.reason == "no_progress" || tc.reason == "final_attempt"
@@ -92,7 +92,7 @@ func TestPrecopyAmendment4AdmissionBoundaries(t *testing.T) {
 		})
 	}
 	r := PrecopyReport{Reason: "samples_unknown", Estimate: time.Second}
-	if r.admitPrecopy(&PrecopyAttempt{Estimate: time.Second}, true) {
+	if r.admitPrecopy(&PrecopyAttempt{Reason: "tail_too_large", Estimate: time.Second}, true) {
 		t.Fatal("unknown samples admitted")
 	}
 }
@@ -114,6 +114,21 @@ func TestPrecopyFixedWindowUsesAvailableFreshSamples(t *testing.T) {
 			}
 			if r.Reason != "fit" || r.Fixed != time.Duration(n)*100*time.Millisecond {
 				t.Fatalf("%d fresh refused or wrong maximum: %+v", n, r)
+			}
+		})
+	}
+}
+
+func TestPrecopyUnknownPreviousCannotClaimProgress(t *testing.T) {
+	for _, reason := range []string{"samples_unknown", "drain_refused", "before_barrier"} {
+		t.Run(reason, func(t *testing.T) {
+			r := PrecopyReport{Estimate: 2 * time.Second, Reason: "tail_too_large"}
+			previous := &PrecopyAttempt{Estimate: 200 * time.Millisecond, Reason: reason}
+			if r.admitPrecopy(previous, false) || r.PreviousEstimate != 0 {
+				t.Fatalf("partial previous admitted no_progress: %+v", r)
+			}
+			if !r.admitPrecopy(previous, true) || r.Reason != "final_attempt" {
+				t.Fatalf("unknown previous blocked independent final admission: %+v", r)
 			}
 		})
 	}
