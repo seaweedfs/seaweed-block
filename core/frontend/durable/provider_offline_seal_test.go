@@ -42,6 +42,11 @@ func TestOfflineSealUsesCallerDeadline(t *testing.T) {
 			}
 			deadline, _ := ctx.Deadline()
 			observed := false
+			durable.SetTestDetachTrace(p, func(stage string, got time.Time) {
+				if stage == "cut" && !got.Equal(deadline) {
+					t.Errorf("offline seal inherited live cut deadline: got %v want caller %v", got, deadline)
+				}
+			})
 			durable.SetTestDetachStopIO(p, func(c context.Context) error {
 				observed = true
 				got, ok := c.Deadline()
