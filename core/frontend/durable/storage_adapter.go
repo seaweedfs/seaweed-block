@@ -149,8 +149,9 @@ type StorageBackend struct {
 	// testBeforeIOLock, test-only, runs in admit after the readiness check,
 	// right before the I/O lock (an arrival handshake for queued I/O).
 	testBeforeIOLock        func()
-	testPrecopyQueued       func() // after FIFO registration, outside mu
-	testPrecopyStopFallback func() // before fallback lock attempts, outside mu
+	testPrecopyQueued       func()               // after FIFO registration, outside mu
+	testPrecopyGranted      func(*precopyWaiter) // FIFO grant under mu; nonblocking test hook
+	testPrecopyStopFallback func()               // before fallback lock attempts, outside mu
 	// Runs outside locks after a read registers its readiness notification.
 	testBeforeReadReadyWait func()
 	testAfterAttachRefusal  func()
@@ -368,7 +369,7 @@ func (b *StorageBackend) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.closed = true
-	b.finishPrecopyLocked(false)
+	b.finishPrecopyLocked()
 	b.notifyReadReadyLocked()
 	return nil
 }
@@ -488,7 +489,7 @@ func (b *StorageBackend) setOperationalLocked(ok bool, evidence string) {
 	// teardown. Keep a final pre-copy queue parked until Close or its budget;
 	// publishing readiness loss must not complete commands on that path.
 	if ok || b.precopy == nil || !b.precopy.active {
-		b.finishPrecopyLocked(ok)
+		b.finishPrecopyLocked()
 	}
 	b.notifyReadReadyLocked()
 }
@@ -829,7 +830,7 @@ func (b *StorageBackend) admit() (func(), error) {
 	if b.precopy != nil && b.precopy.active {
 		b.mu.Unlock()
 		b.ioMu.RUnlock()
-		return nil, fmt.Errorf("%w: %w: pre-copy admission paused", frontend.ErrNotReady, frontend.ErrBackendBusy)
+		return nil, errPrecopyPaused
 	}
 	b.admittedIO++
 	b.mu.Unlock()
@@ -879,7 +880,7 @@ func (b *StorageBackend) readyCheck() error {
 		return frontend.ErrStalePrimary
 	}
 	if precopyPending {
-		return fmt.Errorf("%w: %w: pre-copy admission paused", frontend.ErrNotReady, frontend.ErrBackendBusy)
+		return errPrecopyPaused
 	}
 	if !b.operational.Load() {
 		ev, _ := b.opEvidence.Load().(string)
