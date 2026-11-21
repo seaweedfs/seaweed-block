@@ -129,13 +129,36 @@ func TestOpsChunk_RestoreCreatesAndStartsTheDriver(t *testing.T) {
 	}))
 	defer srv.Close()
 	code, out, errs := runChunk("restore", "--source", "src", "--snapshot", "s1", "--target", "dst", "--request-id", "rq", "--chunk-filer", "x", "--chunk-path", "/rs2", "--status-addr", srv.URL)
-	if code != 0 || !strings.Contains(out, `"phase":"hydrating"`) {
+	if code != 0 || !strings.Contains(out, `"phase":"hydrating"`) || !strings.Contains(errs, "created ") {
 		t.Fatalf("create and start: exit %d out %s err %s", code, out, errs)
+	}
+	var one map[string]any
+	if err := json.Unmarshal([]byte(out), &one); err != nil {
+		t.Fatalf("stdout is not one JSON document: %v (%s)", err, out)
 	}
 	if got["volumeID"] != "dst" || got["statusOnly"] != nil {
 		t.Fatalf("driver request %v, want a start for dst", got)
 	}
 	if _, ok, _ := cat.ReadVolume(context.Background(), "dst"); !ok {
 		t.Fatal("the target was not created before the driver start")
+	}
+}
+
+// A start that fails after the create (the target not attached there yet)
+// says the target exists and how to start the restore later.
+func TestOpsChunk_RestoreCreateThenStartRefusedSaysHowToResume(t *testing.T) {
+	_, cat := restoreSource(t, "/rs3")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"code":"not_chunk_volume","message":"volume dst not open","retryable":false}`))
+	}))
+	defer srv.Close()
+	code, _, errs := runChunk("restore", "--source", "src", "--snapshot", "s1", "--target", "dst", "--request-id", "rq", "--chunk-filer", "x", "--chunk-path", "/rs3", "--status-addr", srv.URL)
+	if code == 0 || !strings.Contains(errs, "dst was created") || !strings.Contains(errs, "--volume dst") {
+		t.Fatalf("refused start: exit %d err %s", code, errs)
+	}
+	if _, ok, _ := cat.ReadVolume(context.Background(), "dst"); !ok {
+		t.Fatal("the target must exist after the create")
 	}
 }

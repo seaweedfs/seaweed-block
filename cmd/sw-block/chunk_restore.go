@@ -17,7 +17,7 @@ import (
 // With --source, --snapshot and --target it creates the target volume from
 // the snapshot (Catalog.Restore, idempotent by --request-id) and, when
 // --status-addr names the blockvolume serving the target, starts the restore
-// driver there and prints both results. With --volume and --status-addr it
+// driver there and prints its status (the create result goes to stderr). With --volume and --status-addr it
 // starts (or joins) the driver of an existing restore and prints its status;
 // --status only prints the status. The driver runs in blockvolume and
 // outlives this call.
@@ -80,7 +80,13 @@ func chunkRestore(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return chunkFail("restore", stdout, stderr, chunkExitFailed, codeInternalCLI, err.Error(), false)
 	}
-	fmt.Fprintf(stdout, "%s\n", created)
+	// stdout stays one JSON document (the driver status); the create result
+	// goes to stderr.
+	fmt.Fprintf(stderr, "sw-block ops chunk restore: created %s\n", created)
 	body := map[string]any{"volumeID": target}
-	return chunkPost("restore", statusAddr, "/chunk/restore", 30*time.Second, body, stdout, stderr)
+	code := chunkPost("restore", statusAddr, "/chunk/restore", 30*time.Second, body, stdout, stderr)
+	if code != ops.VolumeStatusExitOK {
+		fmt.Fprintf(stderr, "sw-block ops chunk restore: %s was created, but the restore did not start at %s (is the target attached there?); once it is, run: sw-block ops chunk restore --volume %s --status-addr <its blockvolume>\n", target, statusAddr, target)
+	}
+	return code
 }
