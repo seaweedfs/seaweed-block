@@ -86,3 +86,10 @@ func TestFrozenBudgetInputValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestFrozenFinalOverrideIsVisibleEvenWhenEstimateFits(t *testing.T) {
+	r := PrecopyReport{Estimate: time.Second, Reason: "fit"}
+	if !r.admitFrozen(FrozenDetachOptions{StartedAt: time.Now(), AllowOverBudget: true}) || !r.OverBudget || r.Reason != "over_budget" {
+		t.Fatalf("explicit override hidden: %+v", r)
+	}
+}

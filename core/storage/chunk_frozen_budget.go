@@ -37,13 +37,12 @@ func (r *PrecopyReport) admitFrozen(opts FrozenDetachOptions) bool {
 	r.GuestFreezeElapsed = time.Since(opts.StartedAt)
 	r.RemainingFreeze = max(time.Duration(0), precopyFreezeLimit-r.GuestFreezeElapsed)
 	known := r.Reason != "samples_unknown" && r.Estimate > 0
-	if !known || r.Estimate > r.RemainingFreeze {
-		r.Reason = "frozen_tail_too_large"
-		if !opts.AllowOverBudget {
-			return false
-		}
+	if opts.AllowOverBudget {
 		r.Reason = "over_budget"
 		r.OverBudget = true
+	} else if !known || r.Estimate > r.RemainingFreeze {
+		r.Reason = "frozen_tail_too_large"
+		return false
 	} else {
 		r.Reason = "fit"
 	}
