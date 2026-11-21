@@ -557,6 +557,8 @@ Notes:
 
 - `INV-CUT-STAGED-REUSE-001`: `captureLocked` also requires HEAD's generation to be the one the stage was compared against (code reading; not asserted by these tests).
 
+- `INV-CUT-PAYLOAD-BOUNDED-001`: failed COW windows log their first abort reason, saver capacity/occupancy, candidate count and payload/spill quantities before joined operations release resources. The bare cleanup sentinel emits no failure event. Logging runs outside window/entry/store locks; it does not add retries or alter capacity.
+
 ### B.6 Workspace: chunk lifecycle, GC and delete
 
 | ID | Statement | Machine / transition | Enforced in | Test | TLA+ property | Status |

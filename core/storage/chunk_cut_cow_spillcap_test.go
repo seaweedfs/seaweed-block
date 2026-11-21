@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -12,6 +13,10 @@ import (
 )
 
 func TestCutCOWV3_SaverCapacityAbortsWithoutParkingGuest(t *testing.T) {
+	out := &seedLog{}
+	old := log.Writer()
+	log.SetOutput(out)
+	t.Cleanup(func() { log.SetOutput(old) })
 	s, l, f, gate := cowFixture(t)
 	for _, lba := range []uint32{9, 1} {
 		if _, err := s.Write(lba, makeBlock(ctBlockSize, byte(lba))); err != nil {
@@ -71,6 +76,16 @@ func TestCutCOWV3_SaverCapacityAbortsWithoutParkingGuest(t *testing.T) {
 	}
 	if f.stats().head.Gen != before {
 		t.Fatal("capacity-refused cut published")
+	}
+	w.abort(errCutSaverCapacity) // terminal cleanup must not emit a second event.
+	out.mu.Lock()
+	logged := out.buf.String()
+	out.mu.Unlock()
+	if strings.Count(logged, "storage: cut_aborted ") != 1 ||
+		!strings.Contains(logged, "saver_capacity=1 saver_used=1 window_chunks=3") ||
+		!strings.Contains(logged, "storage: saver capacity") ||
+		!strings.Contains(logged, "spill_bytes=0 spill_limit=1073741824") {
+		t.Fatalf("missing abort-time capacity snapshot: %s", logged)
 	}
 }
 
