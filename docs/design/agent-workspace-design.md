@@ -72,8 +72,8 @@ A workspace runs one replica (RF=1). It does not use the replication engine of t
 | Permanent host loss | the image at the last successful cut (HEAD `RemoteLSN`); writes after it are lost |
 | Clean move (Detach) | everything written before Detach: guest I/O is stopped, then Detach publishes a final cut before the host releases the volume |
 
-- **When cuts happen.** At semantic points chosen by the integrator (after an agent step, before a risky command, on detach) and on explicit request (`sw-block ops chunk cut`). The periodic timer is off by default (`cmd/blockvolume/chunk_remote.go` `defaultChunkCaptureInterval = 0`); an operator may set one as a host-loss safety net. `--chunk-dirty-threshold` (default 512 chunks, 2 GiB) bounds pre-copy staging work; native COW copies the remainder outside its barrier. It never triggers a cut.
-- **So the default RPO is unbounded** until the integrator cuts. This is a design choice for workspaces, where a cut at a semantic point is more useful than a timer.
+- **When cuts happen.** At semantic points chosen by the integrator, on explicit request, and by the periodic timer (default 15m, minimum 5m in the OSS CLI; 0 disables). Periodic cuts update HEAD without creating named snapshots. `--chunk-dirty-threshold` bounds staging work and never triggers a cut.
+- **Recoverable frontier.** The confirmed remote HEAD is the recovery point after host loss. The default capture interval is 15m; failed or expired attempts retry with bounded backoff and reusable uploads, and do not claim a newly durable recovery point.
 - Multi-replica workspaces combined with chunk snapshots are not supported.
 
 ## 3. Remote layout
@@ -187,6 +187,7 @@ stateDiagram-v2
 
 - **Snapshot** (`Catalog.CreateSnapshot`): claim the name with an exclusive name record `{request, attempt}` (a retry gets its own attempt back); check the volume is not being deleted; write an intent with a deadline; re-check the deadline; exclusively create `snaps/<name>/<attempt>` holding a copy of the HEAD root. An unknown outcome keeps the intent; the caller retries with the same request id.
 - **Fork** (`Catalog.Fork`): claim the parent snapshot, check the source is not being deleted, write the target `VOLUME` (origin fork), then a HEAD at gen 1, epoch 0, no holder, with the parent's `RemoteLSN` and references. No segment or chunk is copied: the fork's references are owner-qualified, so it reads the parent's objects, and its root alone keeps them live after the parent snapshot is deleted.
+- **Restore** (`Catalog.Restore`, independent restore): the fork steps with `VOLUME` origin `restore`; the claim is the fork's (live until the target has a HEAD), and from then on the target's owner-qualified refs keep the source's chunks live, so deleting the source snapshot or volume mid-restore is normal. The background walker (`HydrateAll`) makes every chunk local through the shared fill flights, under one host fill permit per flight. Bounded batch cuts then upload the chunks under the target's own keys; when the resolved HEAD holds no ref to another volume, the write-once `RESTORE-INDEPENDENT` entry is created (`MarkIndependent`). Snapshots of the target are refused until then, and a snapshot image that still names another volume's chunks is refused even after it. An aborted first HEAD keeps the parent snapshot as `fork_parent` until the target is deleted. Model: `docs/spec/RestoreIndependence.tla`.
 - **Retention** (`retention.go`): classes `semantic` and `pinned`; newest N, recent window and log-spaced keeps; a snapshot with a live fork claim is always kept; deletion uses the same conditional mark as `DeleteSnapshot`.
 - **GC** (`gc.go` `Collector.run`, operator-driven through `sw-block ops chunk gc`, preview by default; see also `core/frontend/chunkstore/GC.md`):
   - roots: every HEAD, every named snapshot (including one whose delete is still in progress), every snapshot attempt that is not aborted, live intents, and segment objects; an unreadable segment aborts the mark. A deleted snapshot's attempt stays a root for one grace period after its delete time, then stops counting (`Collector.snapshotAttemptHeads` in `gc_copy.go`);
@@ -205,7 +206,7 @@ HEAD states:
 
 ```mermaid
 stateDiagram-v2
-  [*] --> active: initial HEAD (gen 1, epoch 0) or fork HEAD
+  [*] --> active: initial HEAD (gen 1, epoch 0), fork or restore HEAD
   active --> active: holder's cut CAS (gen+1)
   active --> detached: Detach final cut
   detached --> active: takeover CAS (higher epoch, new holder)
@@ -234,6 +235,48 @@ stateDiagram-v2
 ```
 
 The attempt path is never removed, so a late create can never land after a delete.
+
+Restore (target volume):
+
+```mermaid
+stateDiagram-v2
+  [*] --> Claimed: claim parent snapshot, write VOLUME (origin restore)
+  Claimed --> Restoring: first HEAD (parent's refs, owner-qualified); claim dropped
+  Claimed --> Aborted: GC tombstones the HEAD (parent kept as fork_parent)
+  Restoring --> Restoring: walker fills; batch cut replaces foreign refs with own keys
+  Restoring --> Independent: no foreign ref in the resolved HEAD; RESTORE-INDEPENDENT created
+  Independent --> [*]
+  Aborted --> [*]: target deleted
+```
+
+Snapshots of the target are refused in `Claimed` and `Restoring`.
+
+### Attached-volume scheduling
+
+Blockvolume defaults to periodic HEAD capture every 15 minutes (minimum 5
+minutes, 0 disables) and retention every hour. Named snapshots remain explicit.
+A five-minute context covers the whole cut; completed immutable uploads survive
+an expired attempt only under matching version/HEAD generation. Automatic GC is
+opt-in until the 50/200-volume metadata/RSS qualification accepts its full-catalog
+scan cost. Scoped GC changes candidates, not the catalog root domain; each volume
+has independent persisted mark coverage. CLI catalog mutations also check the
+single-filer deployment constraint before mutation.
+
+```mermaid
+stateDiagram-v2
+  [*] --> PendingAttach
+  PendingAttach --> Armed: attached and healthy
+  Armed --> Running: staggered due event
+  Running --> Armed: retention and optional scoped GC settle
+  Running --> Draining: detach, fence, close
+  Armed --> Draining: detach, fence, close
+  Draining --> Closed: cancel and join every worker
+  Draining --> Armed: safe detach abort, same current handle
+```
+
+No catch-up queue is accumulated. Retention failure skips GC; incomplete marks
+and configuration changes do not authorize reclamation. Unknown same-epoch CAS
+intents remain rooted after restart; elapsed TTL is not a settlement proof.
 
 ## 7. Lease, takeover and host moves
 

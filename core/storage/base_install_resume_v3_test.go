@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// Plan row 11b controls (DESIGN r17.4 sections 6.6 and 8.3; owner claude03):
+// Install-resume controls:
 // the same-ID resume after an installing reopen.
 
 // An intact reopen (W 2 <= R 11; record 12 damaged, 13 beyond the gap)
@@ -65,7 +65,7 @@ func TestBaseInstallV3ResumeRefusesADamagedSuffix(t *testing.T) {
 	}
 }
 
-// E below the persisted retainedHead (codex03 r17 check): the head was
+// E below the persisted retainedHead: the head was
 // published past LSN 13 (white-box, as an earlier same-open recovery
 // would), then 13 is damaged, so the reopen's E ends after 12, below the
 // head. The resume is refused (E >= head is part of trusted-through-W). A
@@ -121,9 +121,9 @@ func TestBaseInstallV3EBelowThePersistedHead(t *testing.T) {
 	}
 }
 
-// codex01 row 11b P1: a same-open Recover while this open's install is live
+// A same-open Recover while this open's install is live
 // must not leave a resumable cut behind. The old handle stays valid
-// (r17.4) and applies and acknowledges LSN 12 after the Recover; a resume
+// and applies and acknowledges LSN 12 after the Recover; a resume
 // then refuses before any I/O, so the acknowledged record's bytes are
 // unchanged, and a crash and a physical reopen still resume the same ID and
 // serve LSN 12. Mutant: recording the recovered bounds on a same-open
@@ -191,7 +191,7 @@ func readRawV3(t *testing.T, path string, off int64, n int) []byte {
 	return b
 }
 
-// codex01 04180c33 P1 (live continuation): BASE writes LBA 1 = B0, then the
+// Live continuation: BASE writes LBA 1 = B0, then the
 // install lane applies and acknowledges LSN 11 at LBA 1; a same-open
 // Recover clears the dirty map; the ORIGINAL handle then applies and
 // acknowledges LSN 12 at LBA 2 and completes; reads in the same open must

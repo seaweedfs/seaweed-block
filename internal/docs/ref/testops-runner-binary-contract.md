@@ -103,7 +103,7 @@ Run the full protocol release gate:
 
 ```bash
 swblock suite \
-  --results-dir V:/share/g15d-k8s/testops-runs/protocol-release-gate-native \
+  --results-dir <evidence-store>/g15d-k8s/testops-runs/protocol-release-gate-native \
   --env product_root=/tmp/seaweed-block-nvme-p4l \
   --env ssh_key=C:/work/dev_server/testdev_key \
   C:/work/seaweed_block/testops/suites/protocol-release-gate.yaml
@@ -113,7 +113,7 @@ Validate a finished protocol release gate bundle:
 
 ```bash
 swblock validate-bundle --profile protocol-release-gate \
-  V:/share/g15d-k8s/testops-runs/protocol-release-gate-native/<run-id>
+  <evidence-store>/g15d-k8s/testops-runs/protocol-release-gate-native/<run-id>
 ```
 
 ## Responsibility Boundary

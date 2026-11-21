@@ -93,7 +93,7 @@ func TestSlotV3ReferenceFields(t *testing.T) {
 		d.BaseState != BaseNone || d.WMode != WModeLagged || d.MigrationPhase != MigrationNormal {
 		t.Fatalf("reference fields differ: %+v", d)
 	}
-	// The slot names codex03's map fixture root (DESIGN 9.5).
+	// The slot names the map fixture root (DESIGN 9.5).
 	if got := d.MapRootHash; got[0] != 0xb4 || got[1] != 0x7d || got[31] != 0x1b {
 		t.Fatalf("map root hash %x is not the 9.5 rootBodyDigest", got)
 	}

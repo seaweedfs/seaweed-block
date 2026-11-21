@@ -29,7 +29,7 @@ From the Windows controller:
 
 ```powershell
 swblock run `
-  --results-dir V:/share/g15d-k8s/testops-runs/cluster-ops-inventory `
+  --results-dir <evidence-store>/g15d-k8s/testops-runs/cluster-ops-inventory `
   --env product_root=/tmp/seaweed_block `
   --env ssh_key=C:/work/dev_server/testdev_key `
   C:/work/seaweed_block/testops/scenarios/cluster-ops-inventory-chain.yaml

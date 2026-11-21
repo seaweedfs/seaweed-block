@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -262,5 +263,22 @@ func TestOpsChunkGC_FailedMarkLookupPreservesUnknownUnbound(t *testing.T) {
 				t.Fatalf("failed lookup misreported/mutated: rc=%d out=%s stderr=%s lookups=%d writes=%d deletes=%d", rc, out, stderr, store.lookups, store.writes, store.deletes)
 			}
 		})
+	}
+}
+
+func TestOpsChunkGC_PermanentDeleteReportsFailureWithSavedCoverage(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	out := chunkstore.GCExecution{MarkOutcome: "complete", MarkSaved: true, GCResult: chunkstore.GCResult{
+		Reclaimed: 1, FailedDeletes: []chunkstore.GCDeleteFailure{{GCObject: chunkstore.GCObject{Volume: "v1", Key: "bad", FID: "3,bad"}, Error: "http 400"}},
+	}}
+	rc := chunkGCResult(out, chunkstore.ErrBlobDeleteRejected, &stdout, &stderr)
+	var body struct {
+		GC chunkstore.GCExecution `json:"gc"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if rc != 1 || !body.GC.MarkSaved || body.GC.MarkOutcome != "complete" || body.GC.Reclaimed != 1 || len(body.GC.FailedDeletes) != 1 || body.GC.FailedDeletes[0].FID != "3,bad" {
+		t.Fatalf("partial failure lost saved coverage or object identity: rc=%d body=%s", rc, stdout.String())
 	}
 }

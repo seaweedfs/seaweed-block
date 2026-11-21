@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-// v3 WriteBatch controls (DESIGN r17.4 sections 3.1 and 6.7; owner
-// claude03): one multi-block record per batch, its replay and reads.
+// v3 WriteBatch controls:
+// one multi-block record per batch, its replay and reads.
 
 func batchBlocks(first byte, n int) [][]byte {
 	out := make([][]byte, n)
@@ -201,7 +201,7 @@ func TestWALStoreV3BatchFlushesEveryBlock(t *testing.T) {
 	readBatchV3(t, r, 10, 0x40, 4, "after reopen")
 }
 
-// The dark offline reader (codex03's walstore_readonly_v3.go) indexes and
+// The dark offline reader (walstore_readonly_v3.go) indexes and
 // reads every block of a batch record. Mutant: indexing only a batch's
 // first block fails here.
 func TestWALStoreV3ReadOnlyReaderServesBatchBlocks(t *testing.T) {
@@ -242,8 +242,8 @@ func TestWALStoreV3BatchRecordsMapCoverage(t *testing.T) {
 	}
 }
 
-// Ordinary replicated ApplyEntry on v3 (DESIGN 8.1, 6.7, r16.1; codex03
-// 12a inventory): applies append in LSN order and survive a crash; an LSN
+// Ordinary replicated ApplyEntry on v3 (DESIGN 8.1, 6.7):
+// applies append in LSN order and survive a crash; an LSN
 // at or below the highest is a superseded no-op when the LBA holds a higher
 // LSN and ErrWALLSNOrder otherwise; an unanchored gap is refused; an
 // ordinary apply while installing is refused (the install lane is the
@@ -329,7 +329,7 @@ func TestWALStoreV3ScanLBAs(t *testing.T) {
 	}
 }
 
-// codex01 4caac700 P1s: v3 ScanLBAs is all or nothing. A corrupt middle
+// v3 ScanLBAs is all or nothing. A corrupt middle
 // record makes the chain stop short of the head: a typed WAL integrity
 // failure carrying the scanner's stop cause, with nothing emitted (never
 // a short success, never WALRecycled). An installing
