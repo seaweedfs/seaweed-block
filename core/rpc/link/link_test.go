@@ -109,10 +109,11 @@ func TestLink_ServerRunsInterceptorsInOrder(t *testing.T) {
 	}
 }
 
-// rawLinkCalls lists the gRPC link constructions in one Go source that
-// bypass this package: a client (grpc.NewClient, grpc.Dial, grpc.DialContext),
-// a server (grpc.NewServer) or plaintext credentials (insecure.NewCredentials),
-// whatever local name the import has (aliases and dot imports included).
+// rawLinkCalls lists the uses in one Go source of a gRPC link constructor
+// that bypass this package: a client (grpc.NewClient, grpc.Dial,
+// grpc.DialContext), a server (grpc.NewServer) or plaintext credentials
+// (insecure.NewCredentials), called or taken as a function value, whatever
+// local name the import has (aliases and dot imports included).
 func rawLinkCalls(name string, src []byte) ([]string, error) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, name, src, parser.SkipObjectResolution)
@@ -145,20 +146,26 @@ func rawLinkCalls(name string, src []byte) ([]string, error) {
 			local[name] = fns
 		}
 	}
+	// Any use counts, not only a call: a function value (f := grpc.NewClient)
+	// builds a raw link just the same. A selector's own name is not an
+	// unqualified use.
+	sels := map[*ast.Ident]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		if sel, ok := n.(*ast.SelectorExpr); ok {
+			sels[sel.Sel] = true
+		}
+		return true
+	})
 	var found []string
 	ast.Inspect(f, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		switch fun := call.Fun.(type) {
+		switch e := n.(type) {
 		case *ast.SelectorExpr:
-			if x, ok := fun.X.(*ast.Ident); ok && local[x.Name][fun.Sel.Name] {
-				found = append(found, fmt.Sprintf("%s: %s.%s", fset.Position(call.Pos()), x.Name, fun.Sel.Name))
+			if x, ok := e.X.(*ast.Ident); ok && local[x.Name][e.Sel.Name] {
+				found = append(found, fmt.Sprintf("%s: %s.%s", fset.Position(e.Pos()), x.Name, e.Sel.Name))
 			}
 		case *ast.Ident:
-			if dot[fun.Name] {
-				found = append(found, fmt.Sprintf("%s: %s", fset.Position(call.Pos()), fun.Name))
+			if dot[e.Name] && !sels[e] {
+				found = append(found, fmt.Sprintf("%s: %s", fset.Position(e.Pos()), e.Name))
 			}
 		}
 		return true
@@ -197,6 +204,18 @@ func f() { ins.NewCredentials() }
 		"dotImport": `package p
 import . "google.golang.org/grpc"
 func f() { NewServer() }
+`,
+		"funcValue": `package p
+import "google.golang.org/grpc"
+var dial = grpc.NewClient
+`,
+		"aliasValue": `package p
+import g "google.golang.org/grpc"
+func f() { mk := g.NewServer; _ = mk }
+`,
+		"dotValue": `package p
+import . "google.golang.org/grpc"
+var dial = NewClient
 `,
 		"plainCredsFn": `package p
 import "google.golang.org/grpc/credentials/insecure"
