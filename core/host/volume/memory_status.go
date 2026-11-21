@@ -11,13 +11,13 @@ import (
 // ProcessMemoryStatus separates live heap from resident pages awaiting return
 // to the OS. RSS fields are zero on systems without /proc/self/status.
 type ProcessMemoryStatus struct {
-	HeapAllocBytes    uint64
-	HeapInuseBytes    uint64
-	HeapSysBytes      uint64
-	HeapReleasedBytes uint64
-	SoftLimitBytes    int64
-	RSSBytes          uint64
-	AnonymousRSSBytes uint64
+	HeapAllocBytes    uint64 // Go heap bytes in live objects (runtime.MemStats.HeapAlloc)
+	HeapInuseBytes    uint64 // Go heap bytes in in-use spans (HeapInuse)
+	HeapSysBytes      uint64 // Go heap bytes obtained from the OS (HeapSys)
+	HeapReleasedBytes uint64 // Go heap bytes returned to the OS (HeapReleased)
+	SoftLimitBytes    int64  // the Go soft memory limit in force (--memory-limit-mib or GOMEMLIMIT)
+	RSSBytes          uint64 // resident set size from /proc/self/status (VmRSS); 0 off Linux
+	AnonymousRSSBytes uint64 // anonymous resident memory (RssAnon); 0 off Linux
 }
 
 func processMemoryStatus() ProcessMemoryStatus {

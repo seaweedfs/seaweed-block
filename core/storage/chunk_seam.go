@@ -398,14 +398,14 @@ type chunkLayerConfig struct {
 // value means "not measured".
 // SyncPhaseStats are nested details of SyncNs; never add them to SyncNs.
 type SyncPhaseStats struct {
-	LifecycleWaitNs  int64 `json:"lifecycleWaitNs"`
-	StoreWaitNs      int64 `json:"storeWaitNs"`
-	GroupCommitNs    int64 `json:"groupCommitNs"`
-	CompletionWaitNs int64 `json:"completionWaitNs"`
+	LifecycleWaitNs  int64 `json:"lifecycleWaitNs"`  // waiting for the store's lifecycle lock
+	StoreWaitNs      int64 `json:"storeWaitNs"`      // waiting for the store lock
+	GroupCommitNs    int64 `json:"groupCommitNs"`    // in the group commit that made the data durable
+	CompletionWaitNs int64 `json:"completionWaitNs"` // waiting for the sync leader role to validate the completion
 }
 
 type chunkCutStats struct {
-	SyncPhases SyncPhaseStats
+	SyncPhases SyncPhaseStats // the parts of SyncNs (never added to it)
 	// Disjoint non-payload intervals within barrier-to-settlement fixed cost.
 	CandidateNs      int64
 	WindowSetupNs    int64
@@ -476,22 +476,22 @@ type chunkCutStats struct {
 //   - LastCut, LastCutH and LastCutNs (wall clock, Unix ns) describe the
 //     last successful cut, whatever triggered it.
 type chunkLayerStats struct {
-	Hydration         ChunkHydrationStats
-	CutsOK            uint64
-	CutsNoop          uint64
-	CutsFailed        uint64
-	CutsRefused       map[string]uint64
-	CutsAborted       map[string]uint64 // saver_capacity, cow_capacity, budget_revoked, upload
-	CASConflicts      uint64
-	CASUnknown        uint64
-	PendingUnresolved bool
-	DirtyChunks       int
-	Reconciling       bool
-	ReconcileDone     int
-	ReconcileTotal    int
-	LastCut           chunkCutStats
-	LastCutH          uint64
-	LastCutNs         int64
+	Hydration         ChunkHydrationStats // lazy fetches of absent chunks from the remote
+	CutsOK            uint64              // cuts that installed a HEAD
+	CutsNoop          uint64              // cuts with nothing new (no CAS)
+	CutsFailed        uint64              // every other cut failure
+	CutsRefused       map[string]uint64   // refusals by reason: admission, fenced, detached
+	CutsAborted       map[string]uint64   // saver_capacity, cow_capacity, budget_revoked, upload
+	CASConflicts      uint64              // HEAD CAS precondition failures
+	CASUnknown        uint64              // HEAD CAS results still unresolved after the re-read
+	PendingUnresolved bool                // an unresolved HEAD proposal is held now
+	DirtyChunks       int                 // chunks dirty since the last HEAD (not counting those awaiting reconciliation)
+	Reconciling       bool                // the dirty set is being reconciled against HEAD; no cut publishes meanwhile
+	ReconcileDone     int                 // chunks compared so far
+	ReconcileTotal    int                 // chunks to compare
+	LastCut           chunkCutStats       // the last successful cut's measurements
+	LastCutH          uint64              // the LSN the last successful cut published
+	LastCutNs         int64               // when it completed (wall clock, Unix ns)
 	// BarrierOverBound counts cuts whose barrier copied more than the
 	// bound after the staging rounds.
 	BarrierOverBound uint64

@@ -116,11 +116,11 @@ func (s SnapshotInfo) Pinned() bool {
 
 // RetentionPolicy is a volume's snapshot retention policy.
 type RetentionPolicy struct {
-	KeepNewest    int   `json:"keepNewest"`
-	KeepYoungerNs int64 `json:"keepYoungerNs"`
-	KeepHourly    int   `json:"keepHourly"`
-	KeepDaily     int   `json:"keepDaily"`
-	KeepWeekly    int   `json:"keepWeekly"`
+	KeepNewest    int   `json:"keepNewest"`    // keep the newest N unpinned snapshots
+	KeepYoungerNs int64 `json:"keepYoungerNs"` // keep every snapshot younger than this (ns)
+	KeepHourly    int   `json:"keepHourly"`    // keep the newest snapshot of each of the last N hours
+	KeepDaily     int   `json:"keepDaily"`     // keep the newest snapshot of each of the last N days
+	KeepWeekly    int   `json:"keepWeekly"`    // keep the newest snapshot of each of the last N weeks
 }
 
 // DefaultRetentionPolicy is the policy of a volume that never set one.

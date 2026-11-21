@@ -38,28 +38,28 @@ import (
 
 // SnapshotUsage is one snapshot's share of a volume's space.
 type SnapshotUsage struct {
-	Name           string `json:"name"`
-	CreatedNs      int64  `json:"createdNs"`
-	Class          string `json:"class"`
-	Pinned         bool   `json:"pinned"`
-	Chunks         int    `json:"chunks"`
-	ExclusiveBytes uint64 `json:"exclusiveBytes"`
+	Name           string `json:"name"`           // the snapshot name
+	CreatedNs      int64  `json:"createdNs"`      // when it was created (Unix ns)
+	Class          string `json:"class"`          // its retention class
+	Pinned         bool   `json:"pinned"`         // retention never deletes it
+	Chunks         int    `json:"chunks"`         // chunks its manifest references
+	ExclusiveBytes uint64 `json:"exclusiveBytes"` // bytes no other holder references: what deleting it makes eligible for GC
 }
 
 // VolumeUsage is a volume's space accounting.
 type VolumeUsage struct {
-	VolumeID         string          `json:"volumeID"`
-	ChunkBytes       uint64          `json:"chunkBytes"` // one full chunk
-	LiveChunks       int             `json:"liveChunks"`
-	LiveBytes        uint64          `json:"liveBytes"`
-	Snapshots        []SnapshotUsage `json:"snapshots"`
-	ManifestBindings int             `json:"manifestBindings"`
-	ManifestBytes    uint64          `json:"manifestBytes"`
-	StoredBindings   int             `json:"storedBindings"`
-	StoredBytes      uint64          `json:"storedBytes"`
-	StoredUpperBound bool            `json:"storedUpperBound"`
-	Policy           RetentionPolicy `json:"policy"`
-	PolicySet        bool            `json:"policySet"`
+	VolumeID         string          `json:"volumeID"`         // the volume
+	ChunkBytes       uint64          `json:"chunkBytes"`       // one full chunk
+	LiveChunks       int             `json:"liveChunks"`       // chunks HEAD references
+	LiveBytes        uint64          `json:"liveBytes"`        // their bytes (the last chunk clipped)
+	Snapshots        []SnapshotUsage `json:"snapshots"`        // one entry per live snapshot
+	ManifestBindings int             `json:"manifestBindings"` // stored chunk-key bindings some manifest references
+	ManifestBytes    uint64          `json:"manifestBytes"`    // their exact bytes
+	StoredBindings   int             `json:"storedBindings"`   // all chunk-key bindings in the filer, referenced or not
+	StoredBytes      uint64          `json:"storedBytes"`      // their bytes; unreferenced ones counted at full chunk size
+	StoredUpperBound bool            `json:"storedUpperBound"` // StoredBytes is an upper bound (some bindings are unreferenced)
+	Policy           RetentionPolicy `json:"policy"`           // the snapshot retention policy in force
+	PolicySet        bool            `json:"policySet"`        // the volume set its own policy (else the default applies)
 }
 
 // chunkSize is the byte size of chunk index idx under g.
