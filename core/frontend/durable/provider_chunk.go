@@ -666,32 +666,32 @@ type cutPolicy struct {
 // cutSchedule runs on in-process monotonic time: every time in it is a
 // time.Now() reading of this process (or derived from one), never the
 // layer's persisted LastCutNs, so wall-clock steps move nothing and a
-// restart starts a fresh schedule. LastCutNs is used only as the identity
-// of the latest cut: a value not seen before is a new successful cut.
+// restart starts a fresh schedule. The layer's CutSeq identifies the
+// latest cut: a value not seen before is a new successful cut.
 type cutSchedule struct {
-	lastSuccess  time.Time // last successful cut of any kind, as observed here
-	lastAuto     time.Time // start of the last automatic cut
-	failedAt     time.Time // end of the last failed automatic cut
-	retryAt      time.Time // a failed automatic cut's backoff ends here
-	backoff      time.Duration
-	firstDue     time.Time // startup phase only; never a fabricated success
-	seenNs       int64     // the layer's LastCutNs last taken in
-	failedSeenNs int64     // the layer's LastCutNs when the last automatic cut failed
+	lastSuccess   time.Time // last successful cut of any kind, as observed here
+	lastAuto      time.Time // start of the last automatic cut
+	failedAt      time.Time // end of the last failed automatic cut
+	retryAt       time.Time // a failed automatic cut's backoff ends here
+	backoff       time.Duration
+	firstDue      time.Time // startup phase only; never a fabricated success
+	seenSeq       uint64    // the layer's CutSeq last taken in
+	failedSeenSeq uint64    // the layer's CutSeq when the last automatic cut failed
 }
 
 // observe takes in, at now, the latest cut the layer reports (any
-// trigger): a LastCutNs not seen before is a success at now. A cut other
+// trigger): a CutSeq not seen before is a success at now. A cut other
 // than the one the last failure saw makes that failure's backoff obsolete.
-func (s cutSchedule) observe(lastCutNs int64, now time.Time) cutSchedule {
-	if lastCutNs == 0 || lastCutNs == s.seenNs {
+func (s cutSchedule) observe(seq uint64, now time.Time) cutSchedule {
+	if seq == 0 || seq == s.seenSeq {
 		return s
 	}
-	s.seenNs = lastCutNs
+	s.seenSeq = seq
 	if now.After(s.lastSuccess) {
 		s.lastSuccess = now
 	}
 	s.firstDue = time.Time{}
-	if !s.failedAt.IsZero() && lastCutNs != s.failedSeenNs {
+	if !s.failedAt.IsZero() && seq != s.failedSeenSeq {
 		s.backoff, s.retryAt, s.failedAt = 0, time.Time{}, time.Time{}
 	}
 	return s
@@ -718,11 +718,11 @@ func (pol cutPolicy) due(s cutSchedule, now time.Time, reconciling bool) (string
 }
 
 // after records the outcome of an automatic cut started at start, with
-// the layer's LastCutNs read after it.
-func (pol cutPolicy) after(s cutSchedule, start, end time.Time, err error, lastCutNs int64) cutSchedule {
+// the layer's CutSeq read after it.
+func (pol cutPolicy) after(s cutSchedule, start, end time.Time, err error, seq uint64) cutSchedule {
 	s.lastAuto = start
 	if err == nil {
-		s.seenNs = lastCutNs
+		s.seenSeq = seq
 		s.firstDue = time.Time{}
 		s.backoff, s.retryAt, s.failedAt = 0, time.Time{}, time.Time{}
 		if end.After(s.lastSuccess) {
@@ -738,15 +738,14 @@ func (pol cutPolicy) after(s cutSchedule, start, end time.Time, err error, lastC
 	default:
 		s.backoff *= 2
 	}
-	s.failedAt, s.retryAt, s.failedSeenNs = end, end.Add(s.backoff), lastCutNs
+	s.failedAt, s.retryAt, s.failedSeenSeq = end, end.Add(s.backoff), seq
 	return s
 }
 
-// initialCutSchedule starts a fresh schedule at now; lastCutNs is the
-// layer's latest cut at start, so a cut from before (another process
-// lifetime) is not taken in as new.
-func initialCutSchedule(volumeID string, interval time.Duration, now time.Time, stagger bool, lastCutNs int64) cutSchedule {
-	s := cutSchedule{lastSuccess: now, seenNs: lastCutNs}
+// initialCutSchedule starts a fresh schedule at now; seq is the layer's
+// CutSeq at start, so a cut already made is not taken in as new.
+func initialCutSchedule(volumeID string, interval time.Duration, now time.Time, stagger bool, seq uint64) cutSchedule {
+	s := cutSchedule{lastSuccess: now, seenSeq: seq}
 	if stagger && interval > 0 {
 		phase := hostlimit.Phase(volumeID, interval)
 		startup := hostlimit.Phase(volumeID+":startup", min(interval, 10*time.Second))
@@ -767,7 +766,7 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 		backoffMin: chunkCutBackoffMin,
 		backoffMax: chunkCutBackoffMax,
 	}
-	s := initialCutSchedule(volumeID, pol.interval, time.Now(), p.cfg.ChunkStagger, layer.Stats().LastCutNs)
+	s := initialCutSchedule(volumeID, pol.interval, time.Now(), p.cfg.ChunkStagger, layer.Stats().CutSeq)
 	t := time.NewTicker(chunkSchedulePoll)
 	defer t.Stop()
 	for {
@@ -781,7 +780,7 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 		}
 		ls := layer.Stats()
 		start := time.Now()
-		s = s.observe(ls.LastCutNs, start)
+		s = s.observe(ls.CutSeq, start)
 		reason, ok := pol.due(s, start, ls.Reconciling)
 		if !ok {
 			continue
@@ -796,7 +795,7 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 			// A cut that completed after this decision (an explicit one
 			// running meanwhile) restarted the timer: no cut now.
 			var skipped bool
-			_, skipped, err = pc.CutUnlessCutSince(cutCtx, ls.LastCutNs)
+			_, skipped, err = pc.CutUnlessCutSince(cutCtx, ls.CutSeq)
 			if trace != nil {
 				trace("cut", ls.LastCutNs, skipped)
 			}
@@ -811,7 +810,7 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 			}
 		}
 		cancel()
-		s = pol.after(s, start, time.Now(), err, layer.Stats().LastCutNs)
+		s = pol.after(s, start, time.Now(), err, layer.Stats().CutSeq)
 		if err != nil && !errors.Is(err, storage.ErrChunkCaptureRefused) && ctx.Err() == nil {
 			log.Printf("durable: %s chunk cut for volume=%s: %v (retry in %s)", reason, volumeID, err, s.backoff)
 		}

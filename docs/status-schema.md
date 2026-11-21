@@ -273,6 +273,7 @@ Durable store state of the served volume. Go type `volume.durableStatusBody`.
 | `Volumes[].Chunk.Stats.LastCut.BarrierOverBound` | bool | (group of `StageRounds`) Pre-copy (staging by the copy-on-write side budget, M5 Stage): StageRounds staging rounds staged StagedChunks chunks outside the barrier; StagedChunksUsed of the uploads in HEAD came from staging. BarrierCopyChunks were copied under the barrier. BarrierOverBound: more than the legacy fixture BarrierBound; always false in production, where that bound is zero. |
 | `Volumes[].Chunk.Stats.LastCutH` | uint64 | the LSN the last successful cut published |
 | `Volumes[].Chunk.Stats.LastCutNs` | int64 | when it completed (wall clock, Unix ns) |
+| `Volumes[].Chunk.Stats.CutSeq` | uint64 | successful cuts of this layer so far (in-process); the latest cut's identity |
 | `Volumes[].Chunk.Stats.BarrierOverBound` | uint64 | BarrierOverBound counts cuts whose barrier copied more than the bound after the staging rounds. |
 | `Volumes[].Chunk.Stats.AbsentChunks` | int | AbsentChunks is the number of HEAD-named chunks still absent with a block not local (what HydrateAll would still fetch); 0 = fully local. |
 | `Volumes[].Chunk.HostBudget` | interface | the host background-cut budget state, with --host-limit-dir (omitted when empty) |

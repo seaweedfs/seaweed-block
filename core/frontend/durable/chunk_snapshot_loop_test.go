@@ -52,6 +52,16 @@ func snapLoop(take func(context.Context) error) (h *volHandle, start func(), sto
 	return h, start, stop
 }
 
+// recv waits for ch for at most an hour of virtual time.
+func recv(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(time.Hour):
+		t.Fatalf("%s did not happen", what)
+	}
+}
+
 // The first attempt is at the start plus the volume's offset and the next
 // one a period later, both on the monotonic clock.
 func TestScheduledSnapshotLoop_TakesEachSlotOnMonotonicTime(t *testing.T) {
@@ -101,21 +111,24 @@ func TestScheduledSnapshotLoop_RearmKeepsTheSchedule(t *testing.T) {
 			return &SnapshotFailure{Code: "remote_unavailable"}
 		})
 		start()
+		running := true
+		defer func() { // registered before any check: whichever loop runs is joined
+			if running && !stop() {
+				t.Error("the loop was not joined")
+			}
+		}()
 		time.Sleep(time.Until(h.snapshots.due()) + time.Second)
 		synctest.Wait()
 		slot, retry := h.snapshots, h.snapshots.due()
 		if st := slot.status(time.Now()); st.Attempts != 1 || st.LastFailure == nil {
 			t.Fatalf("after the first attempt: %+v; want one failure", st)
 		}
+		running = false
 		if !stop() {
 			t.Fatal("the loop was not joined")
 		}
 		start()
-		defer func() {
-			if !stop() {
-				t.Error("the re-armed loop was not joined")
-			}
-		}()
+		running = true
 		if h.snapshots != slot || h.snapshots.due() != retry || slot.status(time.Now()).Attempts != 1 {
 			t.Fatalf("after re-arm: same schedule %v, due %v (want %v), %+v", h.snapshots == slot, h.snapshots.due(), retry, slot.status(time.Now()))
 		}
@@ -143,9 +156,18 @@ func TestScheduledSnapshotLoop_StopJoinsTheAttempt(t *testing.T) {
 		})
 		start()
 		joined := make(chan bool, 1)
-		stopping := false
-		defer func() { // runs after the release below: join the stop, bounded
-			if !stopping {
+		stopStarted := false
+		var released atomic.Bool
+		free := func() {
+			if released.CompareAndSwap(false, true) {
+				close(release)
+			}
+		}
+		// Registered before any check, run last: release the attempt, then
+		// join the stop (bounded), starting it if the test never did.
+		defer func() {
+			free()
+			if !stopStarted {
 				joined <- stop()
 			}
 			select {
@@ -157,26 +179,19 @@ func TestScheduledSnapshotLoop_StopJoinsTheAttempt(t *testing.T) {
 				t.Error("stop did not return")
 			}
 		}()
-		var released atomic.Bool
-		defer func() {
-			if released.CompareAndSwap(false, true) {
-				close(release)
-			}
-		}()
 		time.Sleep(time.Until(h.snapshots.due()) + time.Second)
-		<-entered
-		stopping = true
+		recv(t, entered, "the attempt")
+		stopStarted = true
 		go func() { joined <- stop() }()
-		<-cancelled // the attempt saw the cancellation
+		recv(t, cancelled, "the attempt seeing the cancellation")
 		synctest.Wait()
 		select {
-		case <-joined:
+		case ok := <-joined:
+			joined <- ok // leave it for the deferred join
 			t.Fatal("stop returned while the attempt was still running")
 		default:
 		}
-		if released.CompareAndSwap(false, true) {
-			close(release)
-		}
+		free()
 	})
 }
 

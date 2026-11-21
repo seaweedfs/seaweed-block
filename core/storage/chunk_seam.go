@@ -474,7 +474,9 @@ type chunkCutStats struct {
 //     publishes until it is done. ReconcileDone of ReconcileTotal chunks
 //     are compared.
 //   - LastCut, LastCutH and LastCutNs (wall clock, Unix ns) describe the
-//     last successful cut, whatever triggered it.
+//     last successful cut, whatever triggered it. CutSeq counts the
+//     successful cuts of this layer (in-process): it identifies the latest
+//     cut and orders cuts without any clock.
 type chunkLayerStats struct {
 	Hydration         ChunkHydrationStats // lazy fetches of absent chunks from the remote
 	CutsOK            uint64              // cuts that installed a HEAD
@@ -492,6 +494,7 @@ type chunkLayerStats struct {
 	LastCut           chunkCutStats       // the last successful cut's measurements
 	LastCutH          uint64              // the LSN the last successful cut published
 	LastCutNs         int64               // when it completed (wall clock, Unix ns)
+	CutSeq            uint64              // successful cuts of this layer so far (in-process); the latest cut's identity
 	// BarrierOverBound counts cuts whose barrier copied more than the
 	// bound after the staging rounds.
 	BarrierOverBound uint64

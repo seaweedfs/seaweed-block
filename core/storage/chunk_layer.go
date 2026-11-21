@@ -1443,6 +1443,7 @@ func (l *chunkLayerImpl) recordCut(r chunkCutResult, st chunkCutStats, err error
 	}
 	if err == nil {
 		l.stats.LastCut, l.stats.LastCutH, l.stats.LastCutNs = st, r.H, time.Now().UnixNano()
+		l.stats.CutSeq++
 	}
 	if st.BarrierOverBound {
 		l.stats.BarrierOverBound++

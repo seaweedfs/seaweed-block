@@ -130,7 +130,7 @@ func TestCutPolicy_ExplicitSuccessClearsFailedAutoBackoff(t *testing.T) {
 	}
 	// The cut the failure already saw (it completed before the failure)
 	// leaves the backoff in force.
-	s2 := cutSchedule{lastSuccess: t0, seenNs: 90}
+	s2 := cutSchedule{lastSuccess: t0, seenSeq: 90}
 	s2 = pol.after(s2, at(10*time.Second), at(10*time.Second), fail, 100)
 	s2 = s2.observe(100, at(11*time.Second))
 	if s2.retryAt.IsZero() {
@@ -183,30 +183,26 @@ func TestCutPolicy_StaggerPreservesExplicitTimerReset(t *testing.T) {
 	}
 }
 
-// The timer runs on this process's monotonic time: the layer's LastCutNs
-// is only the identity of the latest cut. A stamp from a wall clock that
-// lags or leaps (a step, another host) is taken in at the moment it is
-// observed, so the next timer cut is one interval after the observation;
-// and at start the layer's existing cut (from before a restart) is not
-// new, so the startup phase stands.
-func TestCutPolicy_TimerIgnoresTheWallClockOfLastCutNs(t *testing.T) {
+// The timer runs on this process's monotonic time and keys on the layer's
+// CutSeq, never on a cut's wall stamp: a cut seen for the first time is a
+// success at the moment it is observed, so the next timer cut is one
+// interval after the observation; at start the layer's existing CutSeq is
+// not new, so the startup phase stands.
+func TestCutPolicy_TimerRunsOnObservationTime(t *testing.T) {
 	pol := testPolicy()
-	s := cutSchedule{lastSuccess: t0}
-	for _, stamp := range []time.Time{t0.Add(-3 * time.Hour), t0.Add(48 * time.Hour)} {
-		seen := at(20 * time.Second)
-		s = cutSchedule{lastSuccess: t0}.observe(stamp.UnixNano(), seen)
-		if !s.lastSuccess.Equal(seen) {
-			t.Fatalf("stamp %v: last success %v; want the observation time %v", stamp, s.lastSuccess, seen)
-		}
-		if _, ok := pol.dueNR(s, seen.Add(pol.interval-time.Nanosecond)); ok {
-			t.Fatalf("stamp %v: due before one interval after the observation", stamp)
-		}
-		if _, ok := pol.dueNR(s, seen.Add(pol.interval)); !ok {
-			t.Fatalf("stamp %v: not due one interval after the observation", stamp)
-		}
+	seen := at(20 * time.Second)
+	s := cutSchedule{lastSuccess: t0}.observe(1, seen)
+	if !s.lastSuccess.Equal(seen) {
+		t.Fatalf("last success %v; want the observation time %v", s.lastSuccess, seen)
 	}
-	restart := initialCutSchedule("v1", pol.interval, t0, true, 777)
-	if got := restart.observe(777, at(time.Second)); got.firstDue.IsZero() || !got.lastSuccess.Equal(t0) {
-		t.Fatalf("after a restart the existing cut was taken in as new: %+v", got)
+	if _, ok := pol.dueNR(s, seen.Add(pol.interval-time.Nanosecond)); ok {
+		t.Fatal("due before one interval after the observation")
+	}
+	if _, ok := pol.dueNR(s, seen.Add(pol.interval)); !ok {
+		t.Fatal("not due one interval after the observation")
+	}
+	restart := initialCutSchedule("v1", pol.interval, t0, true, 7)
+	if got := restart.observe(7, at(time.Second)); got.firstDue.IsZero() || !got.lastSuccess.Equal(t0) {
+		t.Fatalf("the cut existing at start was taken in as new: %+v", got)
 	}
 }
