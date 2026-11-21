@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 
@@ -76,63 +77,68 @@ func TestRestoreSeedPrecedesTakeoverCAS(t *testing.T) {
 	t.Logf("VOLUME check -> seed nextLSN=%d/durable=%d -> takeover -> serve", nextAtCAS, durableAtCAS)
 }
 
-// A restored restart under the same assignment must reactivate a detached
-// image before exposing I/O, not treat it as an already-settled active claim.
-func TestRestoreEqualOwnerDetachedHEADIsReactivated(t *testing.T) {
-	ctx := hangGuard(t)
-	remote := storage.NewMemChunkRemote()
-	makeProvider := func() *durable.DurableProvider {
-		p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, ChunkHolder: "node-a/r1",
-			ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil }}, v1View())
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = p.Close() })
-		return p
-	}
-	source := makeProvider()
-	openRecovered(t, source)
-	be, err := source.Open(ctx, "v1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := block(0xA7)
-	if _, err = be.Write(ctx, 4096, want); err != nil {
-		t.Fatal(err)
-	}
-	if err = be.Sync(ctx); err != nil {
-		t.Fatal(err)
-	}
-	cut, _, err := source.DetachVolume(ctx, "v1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = source.Close(); err != nil {
-		t.Fatal(err)
-	}
-	restarted := makeProvider()
-	if _, err = restarted.EnsureStorage("v1"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = restarted.RecoverVolume(ctx, "v1"); err != nil {
-		t.Fatal(err)
-	}
-	h, err := remote.GetHead(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if h.Gen <= cut.Head.Gen || h.Epoch != cut.Head.Epoch || h.Holder != cut.Head.Holder || h.State != storage.ChunkHeadActive || h.DetachedBy != nil || h.RemoteLSN != cut.H {
-		t.Errorf("ready with stale detached proof: HEAD=%+v detached=%+v", h, cut.Head)
-	}
-	frontend, err := restarted.Open(ctx, "v1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := make([]byte, 4096)
-	if _, err = frontend.Read(ctx, 4096, got); err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got, want) {
-		t.Fatal("restart changed exact data")
+// A storage restart between the successful plain seal and teardown must not
+// erase the proof the planned new host needs. Neither local-root nor fresh
+// same-assignment reopen may reactivate it or expose I/O.
+func TestRestoreEqualOwnerDetachedHEADStaysSealed(t *testing.T) {
+	for _, local := range []bool{false, true} {
+		t.Run(fmt.Sprint(local), func(t *testing.T) {
+			ctx := hangGuard(t)
+			remote := storage.NewMemChunkRemote()
+			root := t.TempDir()
+			makeProvider := func(root string, view *stubView, holder string) *durable.DurableProvider {
+				p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: root, NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, ChunkHolder: holder,
+					ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil }}, view)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = p.Close() })
+				return p
+			}
+			source := makeProvider(root, v1View(), "node-a/r1")
+			s := openRecovered(t, source)
+			want := block(0xA7)
+			writeSync(t, s, 1, 0xA7)
+			cut, _, err := source.DetachVolumePlain(ctx, "v1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := source.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if !local {
+				root = t.TempDir()
+			}
+			restarted := makeProvider(root, v1View(), "node-a/r1")
+			if _, err := restarted.EnsureStorage("v1"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := restarted.RecoverVolume(ctx, "v1"); !errors.Is(err, storage.ErrChunkLayerDetached) {
+				t.Errorf("sealed incarnation reopened for serving: %v", err)
+			}
+			h := headHolder(t, remote)
+			if h.Gen != cut.Head.Gen || h.Epoch != cut.Head.Epoch || h.Holder != cut.Head.Holder || h.State != storage.ChunkHeadDetached || h.DetachedBy == nil || *h.DetachedBy != *cut.Head.DetachedBy || h.RemoteLSN != cut.H {
+				t.Errorf("restart changed sealed proof: HEAD=%+v seal=%+v", h, cut.Head)
+			}
+			be, err := restarted.Open(ctx, "v1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := be.Read(ctx, 4096, make([]byte, 4096)); !errors.Is(err, frontend.ErrNotReady) {
+				t.Errorf("sealed restart exposed I/O: %v", err)
+			}
+			if !bytes.Equal(headBlock(t, remote, 1), want) {
+				t.Fatal("restart changed sealed bytes")
+			}
+			planned := makeProvider(t.TempDir(), viewAs("r2", 4), "node-b/r2")
+			loaded := openRecovered(t, planned)
+			if got, err := loaded.Read(1); err != nil || !bytes.Equal(got, want) {
+				t.Fatal("planned new holder could not load sealed image", err)
+			}
+			taken := headHolder(t, remote)
+			if taken.State != storage.ChunkHeadActive || taken.Epoch != 4 || taken.Holder != "node-b/r2" || taken.Gen <= cut.Head.Gen || taken.RemoteLSN != cut.H {
+				t.Fatalf("planned takeover did not consume preserved seal: %+v", taken)
+			}
+		})
 	}
 }
