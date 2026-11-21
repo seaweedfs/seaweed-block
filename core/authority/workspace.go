@@ -2,17 +2,28 @@ package authority
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
 
 // WorkspaceHead is read from the configured HEAD source, never supplied as
 // operator evidence. Detached means the old holder's final cut is committed.
+// FilerMtimeNS is the HEAD entry's modification time as the filer reports it
+// with that same read (1 s resolution; the entry's mtime is set by the cut
+// that wrote it); 0 means the source gave none (unknown, never invented).
 type WorkspaceHead struct {
 	Gen, Epoch, RemoteLSN uint64
 	Holder                string
 	Detached              bool
+	FilerMtimeNS          int64
 }
+
+// ErrWorkspaceOutcomeUncertain marks a move whose outcome is unknown: its
+// issuing write failed after it may have reached the store, or the volume's
+// workspace persistence is already uncertain. Memory shows it unissued, but
+// a reload may find it issued; a definite refusal must not be reported.
+var ErrWorkspaceOutcomeUncertain = errors.New("workspace move outcome unknown: an authority write may have landed")
 
 type WorkspaceLease struct {
 	ReplicaID      string
@@ -350,19 +361,32 @@ func (p *Publisher) WorkspaceForcedMoveAdmitted(ctx context.Context, volume, req
 // forcedMoveAdmissionLocked returns the audit bound of the lost range when a
 // forced move is admitted. Caller holds p.mu.
 func (p *Publisher) forcedMoveAdmissionLocked(volume string, lease *WorkspaceLease) (int64, error) {
-	now := p.workspaceNow()
+	lostUntil, _, err := p.forcedMoveBarrierLocked(volume, lease)
+	if err != nil {
+		return 0, err
+	}
+	return lostUntil, nil
+}
+
+// forcedMoveBarrierLocked evaluates forced admission at master time now. It
+// returns the barrier (the audit bound of the lost range, wall time: the
+// later of lease expiry and the granted or restart deadline, each plus
+// skew) whether or not it has passed, and an error while it has not.
+// Caller holds p.mu.
+func (p *Publisher) forcedMoveBarrierLocked(volume string, lease *WorkspaceLease) (lostUntil int64, now time.Time, err error) {
+	now = p.workspaceNow()
 	skew := p.workspaceSkew(lease)
 	deadline := p.leaseDeadlineLocked(volume)
-	if now.Before(time.Unix(0, lease.ExpiresAtNS).Add(skew)) || now.Before(deadline.Add(skew)) {
-		return 0, fmt.Errorf("workspace forced move lease expiry plus clock-skew margin has not elapsed")
-	}
-	// The audit bound only, in wall time: the admission above keeps both
+	// The audit bound only, in wall time: the admission below keeps both
 	// predicates (the deadline's monotonic reading included).
-	lostUntil := time.Unix(0, lease.ExpiresAtNS).Add(skew).UnixNano()
+	lostUntil = time.Unix(0, lease.ExpiresAtNS).Add(skew).UnixNano()
 	if d := deadline.Add(skew).UnixNano(); d > lostUntil {
 		lostUntil = d
 	}
-	return lostUntil, nil
+	if now.Before(time.Unix(0, lease.ExpiresAtNS).Add(skew)) || now.Before(deadline.Add(skew)) {
+		return lostUntil, now, fmt.Errorf("workspace forced move lease expiry plus clock-skew margin has not elapsed")
+	}
+	return lostUntil, now, nil
 }
 
 // issueWorkspaceMove marks the move issued and starts the new holder's lease
@@ -414,16 +438,7 @@ func (p *Publisher) prepareWorkspaceMoveLocked(ask AssignmentAsk, g workspaceGra
 			return s, r.NewEpoch, now, nil
 		}
 	}
-	owned := h.Gen != 0 && h.Epoch == q.ExpectedEpoch && h.Holder == q.ExpectedHost+"/"+q.ExpectedReplicaID
-	if !owned && q.Kind == "forced" {
-		// Admitted (the expected holder's lease has expired) and HEAD read
-		// after that: a HEAD at an older epoch means the expected holder
-		// never claimed it, or an earlier holder's late claim landed. The
-		// lost range starts at this HEAD's RemoteLSN. A HEAD at the expected
-		// or a higher epoch that is not the expected holder's stays refused.
-		owned = h.Gen != 0 && h.Epoch < q.ExpectedEpoch
-	}
-	if !owned {
+	if !workspaceHeadAdmits(q, h) {
 		return nil, 0, time.Time{}, fmt.Errorf("workspace move: HEAD not owned by expected holder")
 	}
 	if q.Kind == "clean" {
@@ -443,7 +458,7 @@ func (p *Publisher) prepareWorkspaceMoveLocked(ask AssignmentAsk, g workspaceGra
 	r := WorkspaceMoveRecord{RequestID: q.RequestID, VolumeID: q.VolumeID, OldHost: q.ExpectedHost, NewHost: q.TargetHost, OldReplicaID: q.ExpectedReplicaID, NewReplicaID: q.TargetReplicaID, Kind: q.Kind,
 		OldEpoch: q.ExpectedEpoch, NewEpoch: max + 1, HeadGen: h.Gen, RemoteLSN: h.RemoteLSN, TargetDataAddr: q.TargetDataAddr, TargetCtrlAddr: q.TargetCtrlAddr}
 	if q.Kind == "forced" {
-		lost := WorkspaceLostRange{RequestID: r.RequestID, NewEpoch: r.NewEpoch, OldReplicaID: r.OldReplicaID, OldEpoch: r.OldEpoch, LostAfterLSN: r.RemoteLSN, LostUntilNS: lostUntil}
+		lost := WorkspaceLostRange{RequestID: r.RequestID, NewEpoch: r.NewEpoch, OldReplicaID: r.OldReplicaID, OldEpoch: r.OldEpoch, LostAfterLSN: r.RemoteLSN, LostUntilNS: lostUntil, HeadTimeNS: h.FilerMtimeNS}
 		if err := p.recordLostRangeLocked(q.VolumeID, lost); err != nil {
 			return nil, 0, time.Time{}, err
 		}
@@ -455,4 +470,82 @@ func (p *Publisher) prepareWorkspaceMoveLocked(ask AssignmentAsk, g workspaceGra
 	now := p.workspaceNow()
 	p.issueWorkspaceMove(s, len(s.Moves)-1, now)
 	return s, r.NewEpoch, now, nil
+}
+
+// workspaceHeadAdmits is the HEAD rule of a move: HEAD is the expected
+// holder's at the expected epoch, or, for a forced move only, any published
+// HEAD at an older epoch. Admitted (the expected holder's lease has expired)
+// and HEAD read after that: a HEAD at an older epoch means the expected
+// holder never claimed it, or an earlier holder's late claim landed. The
+// lost range starts at this HEAD's RemoteLSN. A HEAD at the expected or a
+// higher epoch that is not the expected holder's stays refused.
+func workspaceHeadAdmits(q WorkspaceMoveRequest, h WorkspaceHead) bool {
+	owned := h.Gen != 0 && h.Epoch == q.ExpectedEpoch && h.Holder == q.ExpectedHost+"/"+q.ExpectedReplicaID
+	if !owned && q.Kind == "forced" {
+		owned = h.Gen != 0 && h.Epoch < q.ExpectedEpoch
+	}
+	return owned
+}
+
+// WorkspaceForcedMovePreview is a forced move's admission as the publisher
+// would judge it now. It is advisory: MoveWorkspace checks again.
+type WorkspaceForcedMovePreview struct {
+	Admitted bool
+	Reason   string // why not admitted, or a note on an admitted replay
+	// LostUntilNS is the forced barrier (master wall time): the move is
+	// admissible from then on, and it bounds the lost range. 0 when there
+	// is no lease of the expected holder to judge.
+	LostUntilNS int64
+	NowNS       int64 // the master time of this judgement
+	Replay      bool  // the request id is an issued move: a move replays it
+}
+
+// PreviewWorkspaceForcedMove runs the forced admission of req (request
+// validation, journal replay, the expected line and lease, the barrier)
+// without reserving, writing or minting anything. The HEAD rule is
+// WorkspaceMoveHeadAdmits, applied by the caller to a HEAD read after an
+// admitted preview, as for the move itself.
+func (p *Publisher) PreviewWorkspaceForcedMove(req WorkspaceMoveRequest) WorkspaceForcedMovePreview {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := WorkspaceForcedMovePreview{NowNS: p.workspaceNow().UnixNano()}
+	if req.Kind != "forced" {
+		out.Reason = "workspace move preview: forced moves only"
+		return out
+	}
+	if err := validateWorkspaceMoveRequest(req); err != nil {
+		out.Reason = err.Error()
+		return out
+	}
+	if _, replay, err := p.issuedWorkspaceReplayLocked(req); err != nil {
+		out.Reason = err.Error()
+		return out
+	} else if replay {
+		out.Admitted, out.Replay = true, true
+		out.Reason = "request id already issued: a move with it returns the stored grant"
+		if lr, ok := p.lostRangeForRequestLocked(req.VolumeID, req.RequestID); ok {
+			out.LostUntilNS = lr.LostUntilNS
+		}
+		return out
+	}
+	_, line, ok := p.workspaceLineLocked(req.VolumeID)
+	s := p.workspace[req.VolumeID]
+	if !ok || line.info.Epoch != req.ExpectedEpoch || line.info.ReplicaID != req.ExpectedReplicaID || s == nil || s.Lease == nil {
+		out.Reason = "workspace move: missing or changed authority/lease"
+		return out
+	}
+	lostUntil, now, err := p.forcedMoveBarrierLocked(req.VolumeID, s.Lease)
+	out.LostUntilNS, out.NowNS = lostUntil, now.UnixNano()
+	if err != nil {
+		out.Reason = err.Error()
+		return out
+	}
+	out.Admitted = true
+	return out
+}
+
+// WorkspaceMoveHeadAdmits reports whether head passes the HEAD rule of req
+// (the same predicate a move applies).
+func WorkspaceMoveHeadAdmits(req WorkspaceMoveRequest, head WorkspaceHead) bool {
+	return workspaceHeadAdmits(req, head)
 }

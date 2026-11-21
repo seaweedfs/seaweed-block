@@ -83,7 +83,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return ops.VolumeStatusExitInvalid
 	}
 	if len(args) < 2 {
-		fmt.Fprintln(stderr, "sw-block: expected subcommand ops status|inventory|list|cluster|volumes|describe|timeline|explain|report|dashboard|generate-helm-values|operator-status|lifecycle-owner|authority-executor|rebuild-target-owner|failback-target-owner|failback-executor|frontend-publication-target-owner|frontend-publication-executor|chunk|volume-unheld")
+		fmt.Fprintln(stderr, "sw-block: expected subcommand ops status|inventory|list|cluster|volumes|describe|timeline|explain|report|dashboard|generate-helm-values|operator-status|lifecycle-owner|authority-executor|rebuild-target-owner|failback-target-owner|failback-executor|frontend-publication-target-owner|frontend-publication-executor|chunk|volume-unheld|workspace")
 		usage(stderr)
 		return ops.VolumeStatusExitInvalid
 	}
@@ -128,6 +128,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runOpsChunk(args[2:], stdout, stderr)
 	case "volume-unheld":
 		return runOpsVolumeUnheld(args[2:], stdout, stderr)
+	case "workspace":
+		return runOpsWorkspace(args[2:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "sw-block: unknown ops subcommand %q\n", args[1])
 		usage(stderr)
@@ -2296,6 +2298,8 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  sw-block ops chunk show --volume <id> --chunk-filer <host:port> [--chunk-path /swblock/chunks]")
 	fmt.Fprintln(w, "  sw-block ops chunk gc --chunk-filer <host:port> --master <blockmaster-grpc> [--chunk-path /swblock/chunks] [--apply] [--grace 1h] [--intent-ttl 1h] [--timeout 1m]")
 	fmt.Fprintln(w, "  sw-block ops volume-unheld --path <volume-file>   (exit 0: no process on this host holds it; local filesystems only)")
+	fmt.Fprintln(w, "  sw-block ops workspace force-move --master <addr> --volume <id> --target-host <server-id> --target-data <addr> --target-ctrl <addr> --request-id <id> --confirm-forced <volume>@<epoch> [--dry-run]")
+	fmt.Fprintln(w, "  sw-block ops workspace lost-range --master <addr> --volume <id> [--request-id <id>]   (authority only; no bypass: see `sw-block ops workspace help`)")
 }
 
 func emptyCLI(value string) string {
