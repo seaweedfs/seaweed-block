@@ -12,8 +12,9 @@
 #   no behaviour may use, each checked against what it changes:
 #   DOCS (docs outside docs/spec/, tests, and non-test Go whose tokens are
 #   unchanged: BLOBS holds old/<path> and new/<path> for each changed non-test
-#   Go file, compared by sametokens.go, run as $SAMETOKENS if set), TEST (only
-#   tests, testdata and test helpers), CI (only .github/). NONE is not a kind.
+#   Go file, compared by sametokens.go), TEST (only tests, testdata and test
+#   helpers), CI (only .github/). NONE is not a kind. Known limit: a docs file
+#   that is go:embed-ed into a binary changes behaviour under DOCS (none today).
 # - Simplest: (20+ characters) is present when the PR adds, modifies or
 #   deletes non-test Go under core/ or cmd/.
 #
@@ -125,14 +126,29 @@ DOCS)
 		if [[ -z $blobs || ! -d $blobs ]]; then
 			problem "kind DOCS: non-test Go changed but no old/new blobs were given to compare"
 		else
-			st=(go run "$here/sametokens.go")
-			[[ -z ${SAMETOKENS-} ]] || st=("$SAMETOKENS")
+			# Built here, not run with "go run": that would take the .go
+			# arguments as more source files of the program.
+			bin=$(mktemp -d)
+			trap 'rm -rf "$bin"' EXIT
+			if ! go build -o "$bin/sametokens" "$here/sametokens.go"; then
+				echo "spec-trace: could not build sametokens.go; the DOCS check did not run" >&2
+				exit 2
+			fi
 			for p in "${gofiles[@]}"; do
 				if [[ ! -e $blobs/old/$p && ! -e $blobs/new/$p ]]; then
 					problem "kind DOCS: $p has no old or new blob, so it was not compared"
-				elif ! "${st[@]}" "$blobs/old/$p" "$blobs/new/$p" >/dev/null; then
-					problem "kind DOCS: $p changes more than comments (its Go tokens differ)"
+					continue
 				fi
+				rc=0
+				"$bin/sametokens" "$blobs/old/$p" "$blobs/new/$p" >/dev/null || rc=$?
+				case $rc in
+				0) ;;
+				1) problem "kind DOCS: $p changes more than comments (its Go tokens differ)" ;;
+				*)
+					echo "spec-trace: sametokens failed on $p (exit $rc); the DOCS check did not run" >&2
+					exit 2
+					;;
+				esac
 			done
 		fi
 	fi

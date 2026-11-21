@@ -4,8 +4,9 @@
 // Usage: go run sametokens.go OLD NEW
 //
 // A missing file counts as empty. Directive comments are compared as tokens:
-// //go:..., // +build, //line, /*line, //export, and any comment directly
-// above import "C" (the cgo preamble). Exit 0: same tokens; 1: different
+// //go:..., // +build, //line, /*line, //export; in a file that uses cgo
+// (any "C" string literal, as in import "C"), every comment counts, since the
+// preamble is code. Exit 0: same tokens; 1: different
 // (the first difference is printed); 2: usage error or a file that does not scan.
 package main
 
@@ -84,9 +85,15 @@ func tokens(path string) ([]tok, error) {
 	if scanErr != nil {
 		return nil, scanErr
 	}
+	cgo := false
+	for _, x := range all {
+		if x.t == token.STRING && x.lit == "\"C\"" {
+			cgo = true
+		}
+	}
 	var out []tok
-	for i, x := range all {
-		if x.t == token.COMMENT && !directive(x.lit) && !abovePreamble(all, i) {
+	for _, x := range all {
+		if x.t == token.COMMENT && !cgo && !directive(x.lit) {
 			continue
 		}
 		out = append(out, x)
@@ -98,22 +105,6 @@ func directive(c string) bool {
 	for _, p := range []string{"//go:", "// +build", "//+build", "//line ", "/*line ", "//export "} {
 		if strings.HasPrefix(c, p) {
 			return true
-		}
-	}
-	return false
-}
-
-// abovePreamble reports whether the comment at i is followed, past other
-// comments and automatic semicolons, by import "C".
-func abovePreamble(all []tok, i int) bool {
-	for j := i + 1; j < len(all); j++ {
-		switch all[j].t {
-		case token.COMMENT, token.SEMICOLON:
-			continue
-		case token.IMPORT:
-			return j+1 < len(all) && all[j+1].t == token.STRING && all[j+1].lit == `"C"`
-		default:
-			return false
 		}
 	}
 	return false

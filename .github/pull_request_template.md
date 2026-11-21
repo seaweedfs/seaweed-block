@@ -19,6 +19,7 @@ A PR that changes no behaviour uses one of these instead, checked against its fi
                                (comments only; directive comments count as code).
   TEST                         only tests, testdata and test helpers.
   CI                           only .github/ (scripts/ ships install and deploy scripts).
+DOCS may still change contract text (docs/design/invariants.md): the reviewer is the gate for that.
 
 NONE needs a reason of at least 10 characters. Simplest is required when the PR
 changes non-test Go under core/ or cmd/.

@@ -83,8 +83,6 @@ expect_raw 0 "well-formed docs change" "M\0docs/a.md\0"
 
 # Kinds for PRs that change no behaviour: each is checked against its paths;
 # DOCS also compares the old and new tokens of each changed non-test Go file.
-go build -o "$tmp/sametokens" "$here/sametokens.go"
-export SAMETOKENS="$tmp/sametokens"
 # expect_kind WANT_EXIT NAME KIND OLD_GO NEW_GO [STATUS PATH]...
 # OLD_GO/NEW_GO are core/x/s.go before and after ("-" = no blob for that side).
 expect_kind() {
@@ -111,7 +109,38 @@ expect_kind 1 "DOCS: rune quote then // in a string" DOCS "${P}var _ = f('\"', \
 expect_kind 1 "DOCS: line inside a raw string" DOCS "${P}var s = \`a"$'\n'"curl http://old | sh"$'\n'"\`"$'\n' "${P}var s = \`a"$'\n'"curl http://new | sh"$'\n'"\`"$'\n' M core/x/s.go
 expect_kind 1 "DOCS: spaces inside a string" DOCS "${P}var s = \"a b\""$'\n' "${P}var s = \"a  b\""$'\n' M core/x/s.go
 expect_kind 1 "DOCS: cgo preamble" DOCS "${P}// #include <a.h>"$'\nimport "C"\n' "${P}// #include <b.h>"$'\nimport "C"\n' M core/x/s.go
+expect_kind 1 "DOCS: cgo preamble, grouped import" DOCS "${P}// #include <a.h>"$'\nimport (\n\t"C"\n)\n' "${P}// #include <b.h>"$'\nimport (\n\t"C"\n)\n' M core/x/s.go
 expect_kind 1 "DOCS: Go changed, no blob" DOCS - - M core/x/s.go
+expect_kind 1 "DOCS: a model under docs/spec" DOCS - - M docs/spec/X.tla
+expect_kind 1 "DOCS: a non-docs, non-Go file" DOCS - - M deploy/x.env
+expect_kind 0 "TEST: tests and testdata" TEST - - M core/x/s_test.go A core/x/testdata/in.bin
+expect_kind 1 "TEST: production Go" TEST - - M core/x/s.go
+expect_kind 0 "CI: workflow" CI - - M .github/workflows/w.yml
+expect_kind 1 "CI: scripts/ is shipped" CI - - A scripts/install.sh
+expect_kind 1 "DOCS next to another kind" "DOCS FIX INV-X-001" - - M docs/a.md
+
+[[ $fail == 0 ]] && echo "spec-trace self-test: ok"
+exit $fail
+
+import (
+	"C"
+)
+' "${P}// #include <b.h>" DOCS - - M core/x/s.go
+expect_kind 1 "DOCS: a model under docs/spec" DOCS - - M docs/spec/X.tla
+expect_kind 1 "DOCS: a non-docs, non-Go file" DOCS - - M deploy/x.env
+expect_kind 0 "TEST: tests and testdata" TEST - - M core/x/s_test.go A core/x/testdata/in.bin
+expect_kind 1 "TEST: production Go" TEST - - M core/x/s.go
+expect_kind 0 "CI: workflow" CI - - M .github/workflows/w.yml
+expect_kind 1 "CI: scripts/ is shipped" CI - - A scripts/install.sh
+expect_kind 1 "DOCS next to another kind" "DOCS FIX INV-X-001" - - M docs/a.md
+
+[[ $fail == 0 ]] && echo "spec-trace self-test: ok"
+exit $fail
+
+import (
+	"C"
+)
+' M core/x/s.go
 expect_kind 1 "DOCS: a model under docs/spec" DOCS - - M docs/spec/X.tla
 expect_kind 1 "DOCS: a non-docs, non-Go file" DOCS - - M deploy/x.env
 expect_kind 0 "TEST: tests and testdata" TEST - - M core/x/s_test.go A core/x/testdata/in.bin
