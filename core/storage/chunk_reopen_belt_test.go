@@ -31,7 +31,7 @@ func TestClaimChunkHeadSameOwnerReopenRejectsKilledProcessCAS(t *testing.T) {
 }
 
 func TestHeadBeltSameOwnerReopenPreservesAcknowledgedWrites(t *testing.T) {
-	s, _ := newChunkTestStore(t)
+	s, path, crash := crashableStore(t)
 	r := newFakeChunkRemote()
 	cfg := ctConfig(2)
 	old := mustAttach(t, s, r, cfg)
@@ -59,6 +59,8 @@ func TestHeadBeltSameOwnerReopenPreservesAcknowledgedWrites(t *testing.T) {
 	if err := old.Close(); err != nil {
 		t.Fatal(err)
 	}
+	crash()
+	s, _ = reopen(t, path)
 	claimed, err := ClaimChunkHead(ctTimeout(t), r, cfg)
 	if err != nil {
 		t.Fatal(err)
