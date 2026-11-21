@@ -195,15 +195,25 @@ those outcomes and the roots at its final read:
   no read follows it. Only a HEAD that decodes can be part of it: if that read
   finds no HEAD, or one that does not decode, the final view has no HEAD root and
   the pass is incomplete.
-- A segment is read once per key, whatever reference names it: a root whose
-  reference matches its content uses it; a root whose reference does not has a
-  `CONTENT_MISMATCH` for that segment.
-- A bad chunk (or segment) is one finding per class, under the first root that
-  names it at the final read (HEAD, then the snapshots still active, in order), at
-  that root's first index for it. A bad one no root names then is not reported: it is counted in
-  `rootDeletedDuringVerify` when a checked snapshot that was deleted during the
-  pass names it, otherwise in `supersededDuringVerify`. Deleted snapshots are
-  listed in `snapshotsDeletedDuringVerify` as not fully covered.
+- Chunks and segments alike are read once per key, whatever reference names them,
+  and keep that one outcome: the content (a segment keeps its bytes), or binding
+  missing or tombstoned, needle missing, or a read error.
+- At the end, each reference is judged against that one outcome, the same way
+  whatever the order the pass met them in: a bad outcome stays that outcome; a
+  reference with another hash is a `CONTENT_MISMATCH`; a chunk that matches its
+  reference but is not a chunk long is a `SIZE_MISMATCH`; a segment that does not
+  decode under that reference's own fields is `SEGMENT_UNREADABLE`; else it is
+  sound (and a sound segment reference gives that root its chunks).
+- For each object and class a reference of the final read has, there is one
+  finding, under the first root having such a reference (HEAD, then the snapshots
+  still active, in order), at its first such index.
+- A chunk or segment that had a problem under any reference the pass saw (or a bad
+  outcome) but has no finding, because no reference of the final read has one, is
+  counted once: in `rootDeletedDuringVerify` when a checked snapshot that was
+  deleted during the pass carried a problem reference, otherwise in
+  `supersededDuringVerify`. This includes an object still named, but only by sound
+  references. Deleted snapshots are listed in `snapshotsDeletedDuringVerify` as not
+  fully covered. The counters do not make a pass unclean.
 - A key that an earlier HEAD read named, a later one did not, and the final HEAD
   names again is a `ROOT_INVALID` finding ("HEAD names a key it had dropped"),
   whatever its chunk's state: a key that left every root may have been collected,

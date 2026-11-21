@@ -313,11 +313,18 @@ func TestVerify_FlippedByteDataOnly(t *testing.T) {
 	}
 }
 
+// A reference is judged by its hash first: a needle truncated in the store
+// no longer matches its reference (CONTENT_MISMATCH); a needle that matches
+// its reference but is not a chunk long is SIZE_MISMATCH.
 func TestVerify_TruncatedNeedleSizeMismatch(t *testing.T) {
 	fx := newVerifyFixture(t, "v1")
 	h := fx.publish("v1", map[uint64][]byte{0: verifyData(1), 1: verifyData(2)}, false)
 	fx.needle(fx.fid(h.Chunks[1].Key), truncate)
-	wantClasses(t, "data", fx.verify("v1", VerifyOptions{Depth: VerifyData}), "SIZE_MISMATCH@1")
+	wantClasses(t, "truncated in the store", fx.verify("v1", VerifyOptions{Depth: VerifyData}), "CONTENT_MISMATCH@1")
+
+	fx = newVerifyFixture(t, "v1")
+	fx.publish("v1", map[uint64][]byte{0: verifyData(1), 1: verifyData(2)[:verifyChunkBytes-4096]}, false)
+	wantClasses(t, "short but as referenced", fx.verify("v1", VerifyOptions{Depth: VerifyData}), "SIZE_MISMATCH@1")
 }
 
 func TestVerify_MissingNeedle(t *testing.T) {
@@ -576,7 +583,7 @@ func TestVerify_UnreadableSegmentContinues(t *testing.T) {
 	fx.deleteBinding(h.Segments[1].Key)
 	fx.deleteBinding(h.Chunks[2*verifyPer].Key)
 	res := fx.verify("v1", VerifyOptions{})
-	wantClasses(t, "bindings", res, "CONTENT_MISMATCH@seg0", "SEGMENT_UNREADABLE@seg1", fmt.Sprintf("BINDING_MISSING@%d", 2*verifyPer))
+	wantClasses(t, "bindings", res, "CONTENT_MISMATCH@seg0", "BINDING_MISSING@seg1", fmt.Sprintf("BINDING_MISSING@%d", 2*verifyPer))
 	if res.SegmentsChecked != 3 || res.ChunksChecked != 1 {
 		t.Fatalf("summary %+v", res)
 	}
@@ -643,12 +650,12 @@ func TestVerify_SupersededDuringPass(t *testing.T) {
 					}
 				}
 				superseded := 0
-				if !withSnap && tc.class != FindingContentMismatch {
-					superseded = 1
+				if !withSnap {
+					superseded = 1 // a problem under a reference seen, and no finding
 				}
 				// The closing read sees the owner's new HEAD: it is the final view.
 				if hooked != 1 || res.SupersededDuringVerify != superseded || len(res.HeadGens) != 2 || res.HeadGens[0] != h.Gen {
-					t.Fatalf("hooked %d, superseded %d, gens %v; want 1, %d, [%d next]", hooked, res.SupersededDuringVerify, superseded, res.HeadGens, h.Gen)
+					t.Fatalf("hooked %d, superseded %d, gens %v; want 1, %d, [%d next]", hooked, res.SupersededDuringVerify, res.HeadGens, superseded, h.Gen)
 				}
 			})
 		}
@@ -672,7 +679,7 @@ func TestVerify_SnapshotDeletedDuringPass(t *testing.T) {
 			fx.needle(fid, dropNeedle)
 		}, FindingBindingMissing},
 		{"needle overwritten", VerifyData, func(fx *verifyFixture, k string) { fx.needle(fx.fid(k), flipByte) }, FindingContentMismatch},
-		{"needle truncated", VerifyData, func(fx *verifyFixture, k string) { fx.needle(fx.fid(k), truncate) }, FindingSizeMismatch},
+		{"needle truncated", VerifyData, func(fx *verifyFixture, k string) { fx.needle(fx.fid(k), truncate) }, FindingContentMismatch},
 		{"needle unreadable", VerifyData, func(fx *verifyFixture, k string) { fx.cb.failReads(fx.fid(k), -1) }, FindingReadError},
 	}
 	for _, tc := range cases {
@@ -712,11 +719,8 @@ func TestVerify_SnapshotDeletedDuringPass(t *testing.T) {
 					return
 				}
 				wantClasses(t, "deleted snapshot", res)
-				rootDeleted := 1 // a bad outcome; read content has no reference left to compare with
-				if tc.class == FindingContentMismatch {
-					rootDeleted = 0
-				}
-				if res.RootDeletedDuringVerify != rootDeleted || res.SupersededDuringVerify != 0 ||
+				// The gone snapshot carried the only problem reference.
+				if res.RootDeletedDuringVerify != 1 || res.SupersededDuringVerify != 0 ||
 					len(res.SnapshotsDeletedDuringVerify) != 1 || res.SnapshotsDeletedDuringVerify[0] != res.Snapshots[0] {
 					t.Fatalf("deleted snapshot: root deleted %d, superseded %d, deleted list %v (checked %v, created %+v)",
 						res.RootDeletedDuringVerify, res.SupersededDuringVerify, res.SnapshotsDeletedDuringVerify, res.Snapshots, s.Name)
@@ -1780,7 +1784,8 @@ func TestVerify_ClosingReadWithoutUsableHeadIsIncomplete(t *testing.T) {
 }
 
 // casHead installs a HEAD whose segment references edit changes, without
-// writing segments (the chunk references stay those of the current HEAD).
+// writing segments (the current HEAD is read without resolving them, so it
+// may already carry a wrong reference).
 func (fx *verifyFixture) casHead(vol string, edit func(segs map[uint64]storage.ChunkSegment)) storage.ChunkHead {
 	fx.t.Helper()
 	ctx := context.Background()
@@ -1788,9 +1793,9 @@ func (fx *verifyFixture) casHead(vol string, edit func(segs map[uint64]storage.C
 	if err != nil {
 		fx.t.Fatal(err)
 	}
-	cur, err := r.GetHead(ctx)
-	if err != nil {
-		fx.t.Fatal(err)
+	cur, ok, err := fx.c.ReadHead(ctx, vol)
+	if err != nil || !ok {
+		fx.t.Fatalf("HEAD of %s: %v %v", vol, ok, err)
 	}
 	next := cur
 	next.Chunks = nil
@@ -1800,6 +1805,10 @@ func (fx *verifyFixture) casHead(vol string, edit func(segs map[uint64]storage.C
 		next.Segments[g] = s
 	}
 	edit(next.Segments)
+	next.ManifestChunkCount = 0
+	for _, s := range next.Segments {
+		next.ManifestChunkCount += s.Count
+	}
 	if next.Gen, err = r.CASHead(ctx, storage.ChunkHeadVersion{Gen: cur.Gen, Epoch: cur.Epoch}, next); err != nil {
 		fx.t.Fatal(err)
 	}
@@ -1888,11 +1897,16 @@ func TestVerify_QuietClosingReadIsTheFinalView(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	atClose := -1
+	beforeRound, atClose := -1, -1
 	var h2 storage.ChunkHead
 	opts := VerifyOptions{Depth: VerifyData, BytesPerSecond: -1}
 	opts.hook = func(stage string) {
-		if stage == verifyHookClosed {
+		switch stage {
+		case verifyHookClosingRead:
+			if beforeRound < 0 {
+				beforeRound = filer.count() // before the closing round reads anything
+			}
+		case verifyHookClosed:
 			atClose = filer.count()
 			h2 = fx.publish("v1", map[uint64][]byte{2: verifyData(3)}, true)
 			fx.needle(fx.fid(h2.Chunks[2].Key), dropNeedle)
@@ -1904,14 +1918,119 @@ func TestVerify_QuietClosingReadIsTheFinalView(t *testing.T) {
 	if err != nil || !res.Complete {
 		t.Fatalf("verify: %v, %+v", err, res)
 	}
-	if atClose < 0 {
+	if beforeRound < 0 || atClose < 0 {
 		t.Fatal("the quiet closing read was never reached")
 	}
-	if n := filer.count(); n != atClose {
-		t.Fatalf("%d HEAD reads after the quiet closing read, want none", n-atClose)
+	// The closing round reads HEAD exactly once, and nothing reads it after.
+	if n := filer.count(); n-beforeRound != 1 {
+		t.Fatalf("%d HEAD reads from the start of the closing round to the end of the pass, want 1", n-beforeRound)
 	}
 	wantClasses(t, "publication after the quiet read", res)
 	if res.HeadGens[len(res.HeadGens)-1] != h.Gen || h2.Gen <= h.Gen {
 		t.Fatalf("covered gens %v (published %d after the close); want the quiet read's %d last", res.HeadGens, h2.Gen, h.Gen)
+	}
+}
+
+// HEAD and an active snapshot name one segment key; the snapshot's reference
+// is valid, HEAD's is changed by edit. Whichever reference the pass meets
+// first, the findings are the same: each reference is judged against the
+// segment's one outcome at the end, nothing about a reference is kept.
+func TestVerify_SegmentFindingsDoNotDependOnOrder(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit func(s *storage.ChunkSegment)
+		want string
+	}{
+		{"HEAD's reference has the right hash and wrong fields", func(s *storage.ChunkSegment) { s.Count++ }, "SEGMENT_UNREADABLE@seg0"},
+		{"HEAD's reference has a wrong hash", func(s *storage.ChunkSegment) { s.SHA256[0] ^= 0xff }, "CONTENT_MISMATCH@seg0"},
+	} {
+		for _, headFirst := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/HEAD's reference first=%v", tc.name, headFirst), func(t *testing.T) {
+				fx := newVerifyFixture(t, "v1")
+				ctx := context.Background()
+				h := fx.publish("v1", map[uint64][]byte{0: verifyData(1), 1: verifyData(2)}, false)
+				if _, err := fx.c.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: "s1", RequestID: "r1"}, h); err != nil {
+					t.Fatal(err)
+				}
+				var bad storage.ChunkHead
+				breakHead := func() {
+					bad = fx.casHead("v1", func(segs map[uint64]storage.ChunkSegment) {
+						s := segs[0]
+						tc.edit(&s)
+						segs[0] = s
+					})
+				}
+				opts := VerifyOptions{Depth: VerifyData, AllSnapshots: true, BytesPerSecond: -1}
+				if headFirst {
+					breakHead() // the pass starts on HEAD's changed reference
+				} else {
+					// The pass first meets the valid reference (HEAD and the
+					// snapshot share it); the changed one comes at the closing read.
+					opts.hook = func(stage string) {
+						if stage == verifyHookRootsWalked {
+							breakHead()
+						}
+					}
+				}
+				res := fx.verify("v1", opts)
+				wantClasses(t, tc.name, res, tc.want)
+				if f := res.Findings[0]; f.Root != headLabel(bad.Gen) || f.Key != h.Segments[0].Key {
+					t.Fatalf("finding %+v; want under %q", f, headLabel(bad.Gen))
+				}
+				// The snapshot's valid reference is used: its chunks are checked.
+				if res.ChunksChecked != 2 || res.DistinctChunks != 2 || res.DistinctChunksRead != 2 {
+					t.Fatalf("chunks checked %d, distinct %d, read %d; want the snapshot's 2", res.ChunksChecked, res.DistinctChunks, res.DistinctChunksRead)
+				}
+				if n := fx.cb.reads(fx.fid(h.Segments[0].Key)); n != 1 {
+					t.Fatalf("segment read %d times, want once", n)
+				}
+			})
+		}
+	}
+}
+
+// A problem under a reference that the final view no longer carries is not
+// a finding, but it is counted once (superseded): the segment HEAD named
+// with a wrong hash and then dropped; the segment HEAD named with a wrong
+// hash and then named again soundly; a chunk read whose content a dropped
+// reference did not match.
+func TestVerify_DroppedReferenceProblemIsCounted(t *testing.T) {
+	wrongSegHash := func(segs map[uint64]storage.ChunkSegment) { s := segs[0]; s.SHA256[0] ^= 0xff; segs[0] = s }
+	for _, tc := range []struct {
+		name  string
+		setup func(fx *verifyFixture) (before, during func())
+	}{
+		{"segment with a wrong hash, then dropped", func(fx *verifyFixture) (func(), func()) {
+			fx.publish("v1", map[uint64][]byte{0: verifyData(1), verifyPer: verifyData(2)}, false)
+			return func() { fx.casHead("v1", wrongSegHash) },
+				func() { fx.casHead("v1", func(segs map[uint64]storage.ChunkSegment) { delete(segs, 0) }) }
+		}},
+		{"segment with a wrong hash, then named soundly", func(fx *verifyFixture) (func(), func()) {
+			h := fx.publish("v1", map[uint64][]byte{0: verifyData(1), 1: verifyData(2)}, false)
+			return func() { fx.casHead("v1", wrongSegHash) },
+				func() { fx.casHead("v1", func(segs map[uint64]storage.ChunkSegment) { segs[0] = h.Segments[0] }) }
+		}},
+		{"chunk read, a dropped reference did not match it", func(fx *verifyFixture) (func(), func()) {
+			h := fx.publish("v1", map[uint64][]byte{0: verifyData(1), 1: verifyData(2)}, false)
+			return func() { fx.republish("v1", wrongHash(0)) },
+				func() { fx.republish("v1", func(c map[uint64]storage.ChunkRef) { c[0] = h.Chunks[0] }) }
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newVerifyFixture(t, "v1")
+			before, during := tc.setup(fx)
+			before()
+			opts := VerifyOptions{Depth: VerifyData, BytesPerSecond: -1}
+			opts.hook = func(stage string) {
+				if stage == verifyHookHeadWalked {
+					during()
+				}
+			}
+			res := fx.verify("v1", opts)
+			wantClasses(t, tc.name, res)
+			if res.SupersededDuringVerify != 1 || res.RootDeletedDuringVerify != 0 {
+				t.Fatalf("superseded %d, root deleted %d; want 1, 0", res.SupersededDuringVerify, res.RootDeletedDuringVerify)
+			}
+		})
 	}
 }

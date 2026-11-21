@@ -22,10 +22,12 @@ package chunkstore
 // The pass runs beside a live owner and beside GC, so what it reports about
 // chunks comes from a small automaton (the V.* names on the functions):
 //
-//   - V.Discover: a chunk (owner, key) a root view names that the pass has
-//     not seen is queued for one check.
-//   - V.Settle: the check records the chunk's outcome and reports nothing;
-//     a settled chunk is never checked again.
+//   - V.Discover: an object (a chunk or a segment, by owner and key) a root
+//     view names that the pass has not seen is queued for one check; every
+//     reference met is recorded as seen, with nothing judged about it.
+//   - V.Settle: the check records the object's one outcome (its content, or
+//     binding missing or tombstoned, needle missing, read error) and reports
+//     nothing; a settled object is never checked again.
 //   - V.Refresh: HEAD is read again at least every RefreshInterval; a newer
 //     generation replaces the HEAD view (an older one is ignored), the keys
 //     the old view named and the new one does not are marked dropped, and
@@ -38,22 +40,23 @@ package chunkstore
 //     Only a decodable HEAD, not older than the view, can close a pass as
 //     complete: a closing read that finds no HEAD, or one that does not
 //     decode (ROOT_INVALID), leaves no HEAD root and the pass incomplete.
-//   - V.Reconcile: the findings about chunks and segments are computed from
-//     the outcomes and the final view alone, nowhere else: a bad chunk is
-//     one finding under the first final root naming its key (HEAD, then the
-//     snapshots not gone, in order) at that root's first index; a key HEAD
+//   - V.Reconcile: the findings and counters are computed from the outcomes,
+//     the references seen and the final view alone, nowhere else. Judge, a
+//     pure function of an object's outcome and one reference, gives the
+//     outcome when it is bad, else CONTENT_MISMATCH (another hash),
+//     SIZE_MISMATCH (a chunk not a chunk long) or SEGMENT_UNREADABLE (a
+//     segment that does not decode under that reference's fields), else
+//     sound. Per object and class Judge gives a final reference: one finding,
+//     under the first final root having one (HEAD, then the snapshots not
+//     gone, in order) at its first such index. An object with a problem
+//     under any reference seen, and no finding, is counted once. A key HEAD
 //     dropped and names again is ROOT_INVALID, whatever its outcome.
-//
-// A segment is an object of the same automaton, keyed by (owner, key): read
-// once, its outcome kept; a root whose reference matches its content gets its
-// chunk references, a root whose reference does not has a mismatch; its
-// problems are reported by the chunk rule.
 //
 // The pass therefore reports the state of each named chunk at its check,
 // for the roots at the final read; a chunk damaged after its check is the
 // next pass's finding. A chunk that left HEAD can be collected after GC's
-// grace, and a deleted snapshot's chunks are kept only for the grace, so a
-// bad chunk that no root names at the final read is not a finding.
+// grace, and a deleted snapshot's chunks are kept only for the grace, so an
+// object that no root names at the final read is not a finding.
 //
 // A needle is NEEDLE_MISSING only when the store reports it absent
 // (ErrBlobNotFound). Any other read failure is retried; if it persists it is
@@ -220,9 +223,11 @@ type VerifyResult struct {
 	// DistinctChunksRead and BytesRead count the chunk data read.
 	DistinctChunksRead int   `json:"distinctChunksRead"`
 	BytesRead          int64 `json:"bytesRead"`
-	// SupersededDuringVerify counts bad chunks and segments no root names
-	// at the final read (not findings); RootDeletedDuringVerify those of
-	// them that a selected snapshot deleted during the pass names.
+	// SupersededDuringVerify counts the chunks and segments that had a bad
+	// outcome or a problem under a reference seen during the pass, yet yield
+	// no finding (no final reference has a problem), once each;
+	// RootDeletedDuringVerify counts instead those whose problem reference
+	// was carried by a selected snapshot deleted during the pass.
 	SupersededDuringVerify  int `json:"supersededDuringVerify"`
 	RootDeletedDuringVerify int `json:"rootDeletedDuringVerify"`
 	// SnapshotsDeletedDuringVerify lists, as name/attempt, the checked
@@ -285,6 +290,7 @@ func (c *Catalog) Verify(ctx context.Context, vol string, opts VerifyOptions) (V
 	}
 	v := &verifier{c: c, vol: vol, root: root, opts: opts, res: &res, blobs: c.blobs,
 		segs: map[string]*verifySegment{}, chunks: map[string]*verifyChunk{}, dropped: map[string]bool{},
+		seenChunks: map[string]map[seenChunk]bool{}, seenSegs: map[string]map[seenSeg]bool{},
 		pacer: &verifyPacer{rate: opts.BytesPerSecond}}
 	err = v.run(ctx)
 	v.reconcile()
@@ -321,41 +327,51 @@ var (
 )
 
 // verifySegment is one segment object (owner, key): read once, like a chunk
-// (keys are never rebound), its outcome kept, and per root reference the
-// result of using it. Its chunk references are decoded under the first
-// reference that matches its content; the body is kept until then.
+// (keys are never rebound). Its one outcome is a bad one (class and detail:
+// binding missing, needle missing, read error) or its content (sum, body:
+// a segment keeps its bytes). A reference to it is judged at need
+// (judgeSegment); nothing about a reference is kept but the decode memo.
 type verifySegment struct {
-	owner, key string
-	fid        string
-	tombstoned bool
-	issue      *segIssue // the object could not be read: its outcome
-	sum        [32]byte  // the content's SHA-256, once read
-	body       []byte
-	decoded    *segUse // the use that decoded it (with decodedBy)
-	decodedBy  segRef
-	uses       map[segRef]segUse
+	owner, key    string
+	fid           string
+	tombstoned    bool
+	class, detail string
+	sum           [32]byte
+	body          []byte
+	memo          map[segRef]segJudged // decodes by the full reference (every input of the decode)
 }
 
-// segRef is one root's reference to a segment, with what decoding it depends on.
+// segRef is one root's reference to a segment, with every root field its
+// decode depends on.
 type segRef struct {
 	group, chunkBytes, remoteLSN uint64
 	ref                          storage.ChunkSegment
 }
 
-// segUse is the result of using a segment under one reference: its chunk
-// references, or the problem for that root (issue).
-type segUse struct {
-	chunks map[uint64]storage.ChunkRef
-	issue  *segIssue
-}
-
-// segIssue is why a segment could not be used.
-type segIssue struct {
-	class, fid, detail string
+// segJudged is Judge's answer for a segment reference: a class (and detail)
+// when it is not sound, else this root's chunk references.
+type segJudged struct {
+	class, detail string
+	chunks        map[uint64]storage.ChunkRef
 }
 
 // segID is a segment's identity: its owner and key.
 func segID(vol string, ref storage.ChunkSegment) string { return chunkIdentity(vol, ref.Key) }
+
+// Seen references, per object: the root (HEAD, or a snapshot's label), the
+// index (a chunk's) or the reference with its root fields (a segment's).
+type seenChunk struct {
+	root string
+	idx  uint64
+	sha  [32]byte
+}
+
+type seenSeg struct {
+	root string
+	ref  segRef
+}
+
+const headRoot = "HEAD" // the root of every HEAD generation's references
 
 // verifyChunk is one distinct chunk (owner volume + the owner's own key):
 // unseen while absent from the verifier's map, then queued, then settled.
@@ -367,12 +383,13 @@ type verifyChunk struct {
 
 	// The outcome, under the verifier's lock until the checks are joined:
 	// class and detail of a bad outcome (binding missing or tombstoned,
-	// needle missing, read error, size mismatch), or the SHA-256 of the
-	// content read (read).
+	// needle missing, read error), or the content read (read: its SHA-256
+	// and length).
 	settled       bool
 	class, detail string
 	read          bool
 	digest        [32]byte
+	length        int
 }
 
 // verifyView is one root as last read: its references by index, and its
@@ -410,6 +427,9 @@ type verifier struct {
 	dropped     map[string]bool // keys a HEAD view named and a later one did not
 	snaps       []*verifyView   // the selected snapshots, in order
 	lastRefresh time.Time
+
+	seenChunks map[string]map[seenChunk]bool // the references seen, per chunk
+	seenSegs   map[string]map[seenSeg]bool   // the references seen, per segment
 }
 
 func (v *verifier) hook(stage string) {
@@ -633,15 +653,15 @@ func (v *verifier) readSegment(ctx context.Context, ref storage.ChunkSegment) (*
 	if err != nil {
 		return nil, err
 	}
-	s := &verifySegment{owner: ref.Owner, key: ref.Key, uses: map[segRef]segUse{}}
+	s := &verifySegment{owner: ref.Owner, key: ref.Key, memo: map[segRef]segJudged{}}
 	dir, name, err := r.keyLocation(ref.Key)
 	if err != nil {
-		s.issue = &segIssue{FindingSegmentUnreadable, "", err.Error()}
+		s.class, s.detail = FindingBindingMissing, "segment binding: "+err.Error()
 		return s, nil
 	}
 	e, err := v.c.f.LookupEntry(ctx, dir, name)
 	if errors.Is(err, ErrNotFound) {
-		s.issue = &segIssue{FindingSegmentUnreadable, "", "segment binding not found"}
+		s.class, s.detail = FindingBindingMissing, "segment binding not found"
 		return s, nil
 	}
 	if err != nil {
@@ -649,7 +669,7 @@ func (v *verifier) readSegment(ctx context.Context, ref storage.ChunkSegment) (*
 	}
 	s.fid = string(e.Extended[extFid])
 	if bad := bindingProblem(e); bad != "" {
-		s.issue = &segIssue{FindingSegmentUnreadable, s.fid, "segment binding: " + bad}
+		s.class, s.detail = FindingBindingMissing, "invalid segment binding: "+bad
 		return s, nil
 	}
 	s.tombstoned = len(e.Extended[extGCDeleted]) != 0
@@ -662,64 +682,48 @@ func (v *verifier) readSegment(ctx context.Context, ref storage.ChunkSegment) (*
 	case isContextErr(ctx, err):
 		return nil, abortErr(ctx, err, "read segment %s", ref.Key)
 	case errors.Is(err, ErrBlobNotFound):
-		s.issue = &segIssue{FindingSegmentUnreadable, s.fid, "segment needle not found: " + err.Error()}
+		s.class, s.detail = FindingNeedleMissing, "segment needle not found: "+err.Error()
 		return s, nil
 	default:
-		s.issue = &segIssue{FindingReadError, s.fid, readErrorDetail(err)}
-		return s, nil
-	}
-	if len(body) > maxManifestBytes {
-		s.issue = &segIssue{FindingSegmentUnreadable, s.fid, fmt.Sprintf("segment holds %d bytes, above the %d byte bound", len(body), maxManifestBytes)}
+		s.class, s.detail = FindingReadError, readErrorDetail(err)
 		return s, nil
 	}
 	s.sum, s.body = sha256.Sum256(body), body
 	return s, nil
 }
 
-// use returns what root h gets from segment s at group: its chunk references
-// when h's reference matches the content (decoded through the decoder GC
-// and the chunk layer use), else the problem for h: a reference whose hash,
-// or whose other fields, differ from the content's is a CONTENT_MISMATCH;
-// content that does not decode under a matching reference is unreadable.
-// Nothing is read: the body is kept until a reference decodes it.
-func (v *verifier) use(ctx context.Context, s *verifySegment, h storage.ChunkHead, group uint64) segUse {
-	if s.issue != nil {
-		return segUse{issue: s.issue}
-	}
-	k := segRef{group: group, chunkBytes: h.ChunkBytes, remoteLSN: h.RemoteLSN, ref: h.Segments[group]}
-	if u, ok := s.uses[k]; ok {
-		return u
-	}
-	u := segUse{}
-	d := s.decodedBy
+// V.Reconcile's Judge for a segment reference (also used to walk a root): the segment's bad outcome; a hash mismatch; bytes that do not decode under this reference's own fields (SEGMENT_UNREADABLE); else this root's chunk references.
+func (v *verifier) judgeSegment(ctx context.Context, s *verifySegment, k segRef) segJudged {
 	switch {
+	case s.class != "":
+		return segJudged{class: s.class, detail: s.detail}
 	case k.ref.SHA256 != s.sum:
-		u.issue = &segIssue{FindingContentMismatch, s.fid, fmt.Sprintf("segment SHA-256 %s, reference %s", hex.EncodeToString(s.sum[:]), hex.EncodeToString(k.ref.SHA256[:]))}
-	case s.decoded != nil && d.ref == k.ref && d.group == k.group && d.chunkBytes == k.chunkBytes && (k.ref.SegFormat == 1 || k.ref.MaxBirthLSN <= k.remoteLSN):
-		u.chunks = s.decoded.chunks
-	case s.body == nil:
-		u.issue = &segIssue{FindingContentMismatch, s.fid, "the reference has the segment's SHA-256 but not the rest of the reference it was decoded under"}
-	default:
-		r, err := NewChunkRemote(v.c.f, verifyPrefetched{s.fid, s.body}, v.root)
-		if err != nil {
-			u.issue = &segIssue{FindingSegmentUnreadable, s.fid, err.Error()}
-			break
-		}
+		return segJudged{class: FindingContentMismatch, detail: fmt.Sprintf("segment SHA-256 %s, reference %s", hex.EncodeToString(s.sum[:]), hex.EncodeToString(k.ref.SHA256[:]))}
+	}
+	// A memo of the decode, keyed by the full reference: the decode is a
+	// function of the bytes and of k alone, so the memo cannot change an
+	// answer; it only saves decoding a segment again at each walk.
+	if j, ok := s.memo[k]; ok {
+		return j
+	}
+	j := segJudged{}
+	r, err := NewChunkRemote(v.c.f, verifyPrefetched{s.fid, s.body}, v.root)
+	if err == nil {
 		r.mu.Lock()
 		r.fids[k.ref.Key] = s.fid
 		r.mu.Unlock()
-		one := storage.ChunkHead{Segments: map[uint64]storage.ChunkSegment{group: k.ref}, ChunkBytes: h.ChunkBytes,
-			ManifestChunkCount: k.ref.Count, RemoteLSN: h.RemoteLSN, State: storage.ChunkHeadActive}
-		resolved, err := r.resolveManifest(ctx, one)
-		if err != nil {
-			u.issue = &segIssue{FindingSegmentUnreadable, s.fid, err.Error()}
-			break
+		one := storage.ChunkHead{Segments: map[uint64]storage.ChunkSegment{k.group: k.ref}, ChunkBytes: k.chunkBytes,
+			ManifestChunkCount: k.ref.Count, RemoteLSN: k.remoteLSN, State: storage.ChunkHeadActive}
+		var resolved storage.ChunkHead
+		if resolved, err = r.resolveManifest(ctx, one); err == nil {
+			j.chunks = resolved.Chunks
 		}
-		u.chunks = resolved.Chunks
-		s.decoded, s.decodedBy, s.body = &u, k, nil
 	}
-	s.uses[k] = u
-	return u
+	if err != nil {
+		j = segJudged{class: FindingSegmentUnreadable, detail: err.Error()}
+	}
+	s.memo[k] = j
+	return j
 }
 
 // bindingProblem is what makes e unusable as a chunk key binding, or "".
@@ -737,16 +741,17 @@ func bindingProblem(e *filerpb.Entry) string {
 	return ""
 }
 
-// walk reads the segments root h names and returns its chunk references by
-// index, and the segment groups it could not use (their chunks are unknown).
-func (v *verifier) walk(ctx context.Context, h storage.ChunkHead) (map[uint64]storage.ChunkRef, map[uint64]bool, error) {
+// walk reads the segments root h (of root, HEAD or a snapshot's label) names
+// and returns its chunk references by index, and the segment groups whose
+// reference Judge does not find sound (their chunks are unknown). Every
+// reference met is recorded as seen.
+func (v *verifier) walk(ctx context.Context, root string, h storage.ChunkHead) (map[uint64]storage.ChunkRef, map[uint64]bool, error) {
 	out := map[uint64]storage.ChunkRef{}
 	unusable := map[uint64]bool{}
 	if h.Segments == nil {
 		for idx, ref := range h.Chunks {
 			out[idx] = ref
 		}
-		return out, unusable, nil
 	}
 	for _, g := range sortedGroups(h.Segments) {
 		v.mu.Lock()
@@ -756,16 +761,29 @@ func (v *verifier) walk(ctx context.Context, h storage.ChunkHead) (map[uint64]st
 		if err != nil {
 			return out, unusable, err
 		}
-		u := v.use(ctx, s, h, g)
-		if u.issue != nil {
+		k := segRef{group: g, chunkBytes: h.ChunkBytes, remoteLSN: h.RemoteLSN, ref: h.Segments[g]}
+		see(v.seenSegs, segID(v.vol, k.ref), seenSeg{root, k})
+		j := v.judgeSegment(ctx, s, k)
+		if j.class != "" {
 			unusable[g] = true
 			continue
 		}
-		for idx, cr := range u.chunks {
+		for idx, cr := range j.chunks {
 			out[idx] = cr
 		}
 	}
+	for idx, ref := range out {
+		see(v.seenChunks, chunkIdentity(v.vol, ref.Key), seenChunk{root, idx, ref.SHA256})
+	}
 	return out, unusable, nil
+}
+
+// see records a reference to object id as seen.
+func see[R comparable](seen map[string]map[R]bool, id string, r R) {
+	if seen[id] == nil {
+		seen[id] = map[R]bool{}
+	}
+	seen[id][r] = true
 }
 
 // geometry reports a root's chunk size and chunk indices against VOLUME.
@@ -924,7 +942,7 @@ func (v *verifier) snapshot(ctx context.Context, name string, ref snapRef) error
 	if ref.info.geo != (Geometry{}) && ref.info.geo != v.geo {
 		v.finding(VerifyFinding{Root: s.label, Class: FindingGeometry, Detail: fmt.Sprintf("snapshot geometry %+v, VOLUME %+v", ref.info.geo, v.geo)})
 	}
-	chunks, _, err := v.walk(ctx, s.h)
+	chunks, _, err := v.walk(ctx, s.label, s.h)
 	if err != nil {
 		return err
 	}
@@ -1104,7 +1122,7 @@ func (v *verifier) refresh(ctx context.Context, h storage.ChunkHead) (bool, erro
 	if v.head != nil && (h.Gen < v.head.h.Gen || h.Gen == v.head.h.Gen && h.Epoch == v.head.h.Epoch) {
 		return false, nil
 	}
-	chunks, unusable, err := v.walk(ctx, h)
+	chunks, unusable, err := v.walk(ctx, headRoot, h)
 	if err != nil {
 		return false, err
 	}
@@ -1335,107 +1353,102 @@ func (v *verifier) readChunk(ctx context.Context, w *verifyChunk) error {
 	defer v.mu.Unlock()
 	v.res.DistinctChunksRead++
 	v.res.BytesRead += int64(len(data))
-	w.settled, w.read, w.digest = true, true, sum
-	if uint64(len(data)) != v.chunkBytes {
-		w.class, w.detail = FindingSizeMismatch, fmt.Sprintf("needle holds %d bytes, chunk size %d", len(data), v.chunkBytes)
-	}
+	w.settled, w.read, w.digest, w.length = true, true, sum, len(data)
 	return nil
 }
 
 // ---- reconcile ----
 
-// verifyRef is a final-view reference: the root (its position among the
-// final roots), the index and the SHA-256.
-type verifyRef struct {
-	root int
-	idx  uint64
-	sha  [32]byte
+// V.Reconcile's Judge for a chunk reference: the chunk's bad outcome; a hash mismatch; a wrong length; else sound ("").
+func (v *verifier) judgeChunk(w *verifyChunk, sha [32]byte) (string, string) {
+	switch {
+	case w.class != "":
+		return w.class, w.detail
+	case !w.read: // checked to its binding (depth bindings), or not checked (depth meta)
+		return "", ""
+	case sha != w.digest:
+		return FindingContentMismatch, fmt.Sprintf("needle SHA-256 %s, reference %s", hex.EncodeToString(w.digest[:]), hex.EncodeToString(sha[:]))
+	case uint64(w.length) != v.chunkBytes:
+		return FindingSizeMismatch, fmt.Sprintf("needle holds %d bytes, chunk size %d", w.length, v.chunkBytes)
+	}
+	return "", ""
 }
 
-// V.Reconcile: compute every chunk and segment finding from the outcomes and the final view alone; an unnamed bad chunk counts as root deleted if a gone selected snapshot names it, else as superseded.
+// judged is Judge's answer for one final reference: its root (position
+// among the final roots), its index (a chunk's) or group (a segment's), the
+// SHA-256 it expects, and its class ("" when sound) and detail.
+type judged struct {
+	root          int
+	at            uint64
+	sha           [32]byte
+	class, detail string
+}
+
+// V.Reconcile: every finding and counter, from the settled outcomes, the references seen and the final view alone (an incomplete pass: its last view); root deleted takes precedence over superseded.
 func (v *verifier) reconcile() {
-	// The final roots are the HEAD view, then each selected snapshot not
-	// gone, in order. A chunk with a bad outcome: one finding under the
-	// first final root that names its key, at that root's first index; if
-	// none does, no finding, counted once (root deleted takes precedence
-	// over superseded). A chunk read and verified: one CONTENT_MISMATCH,
-	// under the first final reference that differs from the content, its
-	// detail counting the others (and naming the next root carrying one).
-	// At most one finding per key and class. Below depth data, final
-	// references to one chunk with different SHA-256s are one
-	// CONTENT_MISMATCH. A key HEAD
-	// dropped earlier in the pass and names again is one ROOT_INVALID. A
-	// segment problem follows the bad-chunk rule over the final roots that
-	// name that segment. Chunks never settled (an incomplete pass) are not
-	// judged.
+	// The final roots: the HEAD view, then each selected snapshot not gone,
+	// in order. Per object and class Judge gives a final reference: one
+	// finding (byClass). An object with a bad outcome or a problem under any
+	// reference seen, and no finding, is counted once (count). Objects never
+	// settled (an incomplete pass) are not judged.
 	var roots []*verifyView
+	gone := map[string]bool{}
 	if v.head != nil {
 		roots = append(roots, v.head)
 		v.geometry(v.head.label, v.head.h, v.head.chunks)
 	}
 	for _, s := range v.snaps {
 		if s.gone {
+			gone[s.label] = true
 			v.res.SnapshotsDeletedDuringVerify = append(v.res.SnapshotsDeletedDuringVerify, s.name+"/"+s.attempt)
 		} else {
 			roots = append(roots, s)
 		}
 	}
-	named := map[string][]verifyRef{}
+	finalChunks := map[string][]judged{}
 	for ri, r := range roots {
 		for _, idx := range sortedIndexes(r.chunks) {
 			ref := r.chunks[idx]
 			id := chunkIdentity(v.vol, ref.Key)
-			named[id] = append(named[id], verifyRef{root: ri, idx: idx, sha: ref.SHA256})
+			finalChunks[id] = append(finalChunks[id], judged{root: ri, at: idx, sha: ref.SHA256})
 			v.res.ChunksChecked++
 		}
 	}
-	ids := make([]string, 0, len(v.chunks))
-	for id := range v.chunks {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	for _, id := range ids {
-		w, refs := v.chunks[id], named[id]
-		report := func(at verifyRef, class, detail string) {
-			idx := at.idx
-			v.finding(VerifyFinding{Root: roots[at.root].label, Index: &idx, Owner: w.owner, Key: w.key, FID: w.fid, Class: class, Detail: detail})
+	for _, id := range sortedKeys(v.chunks) {
+		w := v.chunks[id]
+		if !w.settled {
+			continue
 		}
-		switch {
-		case !w.settled:
-		case w.class != "" && len(refs) == 0:
-			v.unnamed(func(s *verifyView) bool { return s.namesChunk(v.vol, id) })
-		case w.class != "":
-			report(refs[0], w.class, w.detail)
-		case w.read:
-			var differ []verifyRef
-			for _, r := range refs {
-				if r.sha != w.digest {
-					differ = append(differ, r)
-				}
-			}
-			if len(differ) == 0 {
-				break
-			}
-			detail := fmt.Sprintf("needle SHA-256 %s, reference %s", hex.EncodeToString(w.digest[:]), hex.EncodeToString(differ[0].sha[:]))
-			if more := differ[1:]; len(more) > 0 {
-				detail += fmt.Sprintf("; %d more final reference(s) differ", len(more))
-				for _, r := range more {
-					if r.root != differ[0].root {
-						detail += ", next under " + roots[r.root].label
-						break
-					}
-				}
-			}
-			report(differ[0], FindingContentMismatch, detail)
+		refs := finalChunks[id]
+		for i := range refs {
+			refs[i].class, refs[i].detail = v.judgeChunk(w, refs[i].sha)
 		}
+		mk := func(j judged) VerifyFinding {
+			idx := j.at
+			return VerifyFinding{Root: roots[j.root].label, Index: &idx, Owner: w.owner, Key: w.key, FID: w.fid, Class: j.class, Detail: j.detail}
+		}
+		reported := v.byClass(roots, refs, mk)
 		if v.opts.Depth != VerifyData {
+			// Below depth data no content was read: final references to one
+			// chunk with different SHA-256s disagree with each other.
 			for _, r := range refs[min(1, len(refs)):] {
 				if r.sha != refs[0].sha {
-					report(r, FindingContentMismatch, fmt.Sprintf("references to this chunk disagree: SHA-256 %s here, %s under %s at index %d (depth data reads the chunk)",
-						hex.EncodeToString(r.sha[:]), hex.EncodeToString(refs[0].sha[:]), roots[refs[0].root].label, refs[0].idx))
+					v.finding(mk(judged{root: r.root, at: r.at, class: FindingContentMismatch, detail: fmt.Sprintf(
+						"references to this chunk disagree: SHA-256 %s here, %s under %s at index %d (depth data reads the chunk)",
+						hex.EncodeToString(r.sha[:]), hex.EncodeToString(refs[0].sha[:]), roots[refs[0].root].label, refs[0].at)}))
+					reported = true
 					break
 				}
 			}
+		}
+		if !reported {
+			var problem []string
+			for r := range v.seenChunks[id] {
+				if c, _ := v.judgeChunk(w, r.sha); c != "" {
+					problem = append(problem, r.root)
+				}
+			}
+			v.count(problem, w.class != "", gone)
 		}
 	}
 	if v.head != nil {
@@ -1455,90 +1468,100 @@ func (v *verifier) reconcile() {
 			}
 		}
 	}
-	segIDs := make([]string, 0, len(v.segs))
-	for id := range v.segs {
-		segIDs = append(segIDs, id)
-	}
-	sort.Strings(segIDs)
-	for _, id := range segIDs {
-		v.reconcileSegment(roots, id, v.segs[id])
+	for _, id := range sortedKeys(v.segs) {
+		s := v.segs[id]
+		var refs []judged
+		for ri, r := range roots {
+			for _, g := range sortedGroups(r.h.Segments) {
+				if ref := r.h.Segments[g]; segID(v.vol, ref) == id {
+					j := v.judgeSegment(context.Background(), s, segRef{group: g, chunkBytes: r.h.ChunkBytes, remoteLSN: r.h.RemoteLSN, ref: ref})
+					refs = append(refs, judged{root: ri, at: g, class: j.class, detail: j.detail})
+				}
+			}
+		}
+		mk := func(j judged) VerifyFinding {
+			g := j.at
+			return VerifyFinding{Root: roots[j.root].label, Segment: &g, Owner: s.owner, Key: s.key, FID: s.fid, Class: j.class, Detail: j.detail}
+		}
+		reported := v.byClass(roots, refs, mk)
+		// A tombstoned segment binding is reported beside the segment's
+		// outcome, at depths that check bindings.
+		tomb := s.tombstoned && v.opts.Depth != VerifyMeta
+		if tomb && len(refs) > 0 {
+			v.finding(mk(judged{root: refs[0].root, at: refs[0].at, class: FindingBindingTombstoned, detail: "segment binding tombstoned by GC"}))
+			reported = true
+		}
+		if !reported {
+			var problem []string
+			for r := range v.seenSegs[id] {
+				if tomb || v.judgeSegment(context.Background(), s, r.ref).class != "" {
+					problem = append(problem, r.root)
+				}
+			}
+			v.count(problem, s.class != "" || tomb, gone)
+		}
 	}
 }
 
-// reconcileSegment reports segment id by the chunk rule: its own problems
-// (unreadable, read error, tombstoned binding) and each final reference's
-// (mismatch, undecodable) at most once per class, under the first final root
-// naming it at that root's first group; a problem no final root names is
-// counted once.
-func (v *verifier) reconcileSegment(roots []*verifyView, id string, s *verifySegment) {
-	type at struct {
-		root  int
-		group uint64
-	}
-	var naming []at
-	for ri, r := range roots {
-		for _, g := range sortedGroups(r.h.Segments) {
-			if segID(v.vol, r.h.Segments[g]) == id {
-				naming = append(naming, at{ri, g})
-			}
-		}
-	}
-	var own []segIssue
-	if s.tombstoned && v.opts.Depth != VerifyMeta {
-		own = append(own, segIssue{FindingBindingTombstoned, s.fid, "segment binding tombstoned by GC"})
-	}
-	if s.issue != nil {
-		own = append(own, *s.issue)
-	}
-	if len(naming) == 0 {
-		if len(own) != 0 {
-			v.unnamed(func(r *verifyView) bool { return r.namesSegment(v.vol, id) })
-		}
-		return
-	}
-	report := func(a at, is segIssue) {
-		g := a.group
-		v.finding(VerifyFinding{Root: roots[a.root].label, Segment: &g, Owner: s.owner, Key: s.key, FID: is.fid, Class: is.class, Detail: is.detail})
-	}
-	for _, is := range own {
-		report(naming[0], is)
-	}
-	if s.issue != nil {
-		return
-	}
-	type problem struct {
-		at    at
-		issue segIssue
-		more  int
-		next  string
-	}
-	var problems []*problem
-	byClass := map[string]*problem{}
-	for _, a := range naming {
-		u := v.use(context.Background(), s, roots[a.root].h, a.group)
-		if u.issue == nil {
+// byClass reports one finding per class among refs (in final-root order):
+// under the first reference of that class, its detail counting the others
+// of that class and naming the next root carrying one. It reports whether it
+// made one.
+func (v *verifier) byClass(roots []*verifyView, refs []judged, mk func(judged) VerifyFinding) bool {
+	var order []string
+	first, more, next := map[string]int{}, map[string]int{}, map[string]string{}
+	for i, j := range refs {
+		if j.class == "" {
 			continue
 		}
-		if p := byClass[u.issue.class]; p != nil {
-			p.more++
-			if p.next == "" && a.root != p.at.root {
-				p.next = roots[a.root].label
-			}
+		f, ok := first[j.class]
+		if !ok {
+			first[j.class] = i
+			order = append(order, j.class)
 			continue
 		}
-		p := &problem{at: a, issue: *u.issue}
-		byClass[u.issue.class] = p
-		problems = append(problems, p)
+		more[j.class]++
+		if next[j.class] == "" && j.root != refs[f].root {
+			next[j.class] = roots[j.root].label
+		}
 	}
-	for _, p := range problems {
-		if p.more > 0 {
-			p.issue.detail += fmt.Sprintf("; %d more final reference(s) with this problem", p.more)
-			if p.next != "" {
-				p.issue.detail += ", next under " + p.next
+	for _, c := range order {
+		j := refs[first[c]]
+		if n := more[c]; n > 0 {
+			j.detail += fmt.Sprintf("; %d more final reference(s) of this class", n)
+			if next[c] != "" {
+				j.detail += ", next under " + next[c]
 			}
 		}
-		report(p.at, p.issue)
+		v.finding(mk(j))
 	}
+	return len(order) > 0
+}
+
+// count counts an object that yields no finding but had a bad outcome (bad)
+// or a problem under a reference seen (problem: those references' roots),
+// once: root deleted when a snapshot that is gone carried such a reference,
+// otherwise superseded.
+func (v *verifier) count(problem []string, bad bool, gone map[string]bool) {
+	if len(problem) == 0 && !bad {
+		return
+	}
+	for _, r := range problem {
+		if gone[r] {
+			v.res.RootDeletedDuringVerify++
+			return
+		}
+	}
+	v.res.SupersededDuringVerify++
+}
+
+func sortedKeys[T any](m map[string]T) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func sortedGroups(m map[uint64]storage.ChunkSegment) []uint64 {
@@ -1548,36 +1571,6 @@ func sortedGroups(m map[uint64]storage.ChunkSegment) []uint64 {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out
-}
-
-// unnamed counts a bad chunk or segment no final root names: root deleted
-// when a selected snapshot that is gone names it, otherwise superseded.
-func (v *verifier) unnamed(namedBy func(*verifyView) bool) {
-	for _, s := range v.snaps {
-		if s.gone && namedBy(s) {
-			v.res.RootDeletedDuringVerify++
-			return
-		}
-	}
-	v.res.SupersededDuringVerify++
-}
-
-func (r *verifyView) namesChunk(vol, id string) bool {
-	for _, ref := range r.chunks {
-		if chunkIdentity(vol, ref.Key) == id {
-			return true
-		}
-	}
-	return false
-}
-
-func (r *verifyView) namesSegment(vol, id string) bool {
-	for _, ref := range r.h.Segments {
-		if segID(vol, ref) == id {
-			return true
-		}
-	}
-	return false
 }
 
 // verifyPacer spaces reads so they average at most rate bytes per second.
