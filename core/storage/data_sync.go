@@ -38,8 +38,8 @@ func selectedDataSyncMode(f *os.File) (string, string, error) {
 
 // DataSyncStatus is immutable for the lifetime of an open volume.
 type DataSyncStatus struct {
-	Mode   string
-	Reason string
+	Mode   string // the data-file sync call in use (fsync or fdatasync)
+	Reason string // why it was chosen (an explicit SWBLOCK_SYNC, or the automatic choice)
 }
 
 func (s *WALStore) DataSyncPolicy() DataSyncStatus { return s.dataSyncStatus }

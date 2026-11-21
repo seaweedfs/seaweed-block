@@ -41,9 +41,20 @@ type GCConfig struct {
 	Grace, IntentTTL time.Duration
 	// ClockSkew bounds pairwise wall-clock differences. Zero uses the default.
 	// Binding creation timestamps additionally lose up to one second of precision.
-	ClockSkew   time.Duration
-	IssuedEpoch func(context.Context, string) (uint64, error)
-	Now         func() time.Time
+	ClockSkew time.Duration
+	// CASApplyBound is the margin for a publish applied after its fork's
+	// deadline check. Zero uses the catalog operation deadline. A publish
+	// known to have succeeded was applied before its context ended, and that
+	// context ends at readAt + deadline, so it is inside the deadline; an
+	// unknown outcome keeps the fork intent, which roots the keys until the
+	// target is resolved, with no time bound. This bound covers apply delay
+	// and clock-rate drift beyond those two. NewCollector requires
+	// Grace >= operation deadline + ClockSkew + CASApplyBound, so a snapshot
+	// deleted while a fork of it is in flight stays rooted until the fork can
+	// no longer publish (INV-SNAP-DELETE-ANY-ORDER-001).
+	CASApplyBound time.Duration
+	IssuedEpoch   func(context.Context, string) (uint64, error)
+	Now           func() time.Time
 }
 
 type GCRoot struct {
@@ -105,14 +116,25 @@ type Collector struct {
 }
 
 func NewCollector(cat *Catalog, blobs BlobDeleter, cfg GCConfig) (*Collector, error) {
-	if cat == nil || blobs == nil || cfg.Grace <= cat.deadline() || cfg.IntentTTL <= 0 || cfg.IssuedEpoch == nil {
-		return nil, errors.New("chunkstore: GC requires catalog, blob deletion, grace > operation deadline, positive intent TTL and epoch authority")
+	if cat == nil || blobs == nil || cfg.IntentTTL <= 0 || cfg.IssuedEpoch == nil {
+		return nil, errors.New("chunkstore: GC requires catalog, blob deletion, positive intent TTL and epoch authority")
 	}
 	if cfg.ClockSkew == 0 {
 		cfg.ClockSkew = DefaultGCClockSkew
 	}
 	if cfg.ClockSkew < 0 || cfg.ClockSkew > time.Duration(1<<63-1)-time.Second {
 		return nil, errors.New("chunkstore: invalid GC clock skew bound")
+	}
+	if cfg.CASApplyBound == 0 {
+		cfg.CASApplyBound = cat.deadline()
+	}
+	const maxDur = time.Duration(1<<63 - 1)
+	d := cat.deadline()
+	if cfg.CASApplyBound < 0 || cfg.CASApplyBound > maxDur-d-cfg.ClockSkew {
+		return nil, errors.New("chunkstore: invalid GC CAS apply bound")
+	}
+	if need := d + cfg.ClockSkew + cfg.CASApplyBound; cfg.Grace < need {
+		return nil, fmt.Errorf("chunkstore: GC grace %v is below operation deadline %v + clock skew %v + CAS apply bound %v = %v", cfg.Grace, d, cfg.ClockSkew, cfg.CASApplyBound, need)
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now

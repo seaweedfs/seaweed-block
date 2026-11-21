@@ -16,11 +16,11 @@ type Histogram struct {
 	sum     atomic.Uint64
 }
 type Distribution struct {
-	Count         uint64
-	SumNanos      uint64
-	P50UpperNanos uint64
-	P99UpperNanos uint64
-	Buckets       [64]uint64
+	Count         uint64     // samples observed
+	SumNanos      uint64     // their total nanoseconds
+	P50UpperNanos uint64     // upper bound of the bucket holding the median
+	P99UpperNanos uint64     // upper bound of the bucket holding the 99th percentile
+	Buckets       [64]uint64 // bucket i counts samples of i significant bits in ns, i.e. [2^(i-1), 2^i) ns
 }
 
 func (h *Histogram) Observe(d time.Duration) {
@@ -69,16 +69,16 @@ type Requests struct {
 	writes, flushes, fua, failed     atomic.Uint64
 }
 type RequestStatus struct {
-	WriteTotal       Distribution
-	FlushTotal       Distribution
-	FUATotal         Distribution
-	ReceiveToBackend Distribution
-	AckDispatch      Distribution
-	RequestTotal     Distribution
-	Writes           uint64
-	Flushes          uint64
-	FUAWrites        uint64
-	Failed           uint64
+	WriteTotal       Distribution // end-to-end latency of writes
+	FlushTotal       Distribution // end-to-end latency of flushes
+	FUATotal         Distribution // end-to-end latency of forced-unit-access writes
+	ReceiveToBackend Distribution // from request receipt to the backend call
+	AckDispatch      Distribution // from backend completion to the acknowledgement sent
+	RequestTotal     Distribution // end-to-end latency of every request
+	Writes           uint64       // writes observed
+	Flushes          uint64       // flushes observed
+	FUAWrites        uint64       // forced-unit-access writes observed
+	Failed           uint64       // requests that completed with an error
 }
 
 func (c *Requests) Snapshot() RequestStatus {

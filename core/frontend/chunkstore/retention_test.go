@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/filerpb"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -45,7 +44,7 @@ func TestPlanRetention_NewestNWithNameTieBreak(t *testing.T) {
 	for i := 0; i < 15; i++ {
 		snaps = append(snaps, snapAt(fmt.Sprintf("s%02d", i), retBase.Add(time.Duration(i)*time.Minute), SnapshotClassSemantic, time.Time{}, nil))
 	}
-	k := kept(planRetention(noYoung(), snaps, nil, now))
+	k := kept(planRetention(noYoung(), snaps, now))
 	if len(k) != 10 {
 		t.Fatalf("kept %d, want 10: %v", len(k), k)
 	}
@@ -55,7 +54,7 @@ func TestPlanRetention_NewestNWithNameTieBreak(t *testing.T) {
 		}
 	}
 	tie := []SnapshotInfo{snapAt("b", retBase, "", time.Time{}, nil), snapAt("a", retBase, "", time.Time{}, nil)}
-	if k := kept(planRetention(RetentionPolicy{KeepNewest: 1}, tie, nil, now)); len(k) != 1 || k["a"] == nil {
+	if k := kept(planRetention(RetentionPolicy{KeepNewest: 1}, tie, now)); len(k) != 1 || k["a"] == nil {
 		t.Fatalf("tie: kept %v, want only a (name order)", k)
 	}
 }
@@ -71,7 +70,7 @@ func TestPlanRetention_PinnedSemanticAndLabels(t *testing.T) {
 		snapAt("semantic-old", retBase, SnapshotClassSemantic, time.Time{}, nil),
 		snapAt("labeled-old", retBase, "", time.Time{}, map[string]string{"agent.step": "npm-ci"}),
 	}
-	k := kept(planRetention(RetentionPolicy{}, snaps, nil, now))
+	k := kept(planRetention(RetentionPolicy{}, snaps, now))
 	if len(k) != 2 || k["pinned-old"] == nil || k["pinned-by-expiry"] == nil {
 		t.Fatalf("kept %v; want exactly pinned-old and pinned-by-expiry", k)
 	}
@@ -87,7 +86,7 @@ func TestPlanRetention_YoungAndClockSkew(t *testing.T) {
 		snapAt("future", now.Add(10*time.Minute), SnapshotClassSemantic, time.Time{}, nil),
 		snapAt("old", now.Add(-2*time.Hour), SnapshotClassSemantic, time.Time{}, nil),
 	}
-	k := kept(planRetention(p, snaps, nil, now))
+	k := kept(planRetention(p, snaps, now))
 	if len(k) != 2 || k["young"] == nil || k["future"] == nil {
 		t.Fatalf("kept %v; want young and future", k)
 	}
@@ -100,7 +99,7 @@ func TestPlanRetention_HourlyBuckets(t *testing.T) {
 	for i := 0; i < 12; i++ { // every 30 min over the last 6 hours
 		snaps = append(snaps, snapAt(fmt.Sprintf("s%02d", i), now.Add(-time.Duration(i)*30*time.Minute), SnapshotClassSemantic, time.Time{}, nil))
 	}
-	k := kept(planRetention(RetentionPolicy{KeepHourly: 3}, snaps, nil, now))
+	k := kept(planRetention(RetentionPolicy{KeepHourly: 3}, snaps, now))
 	if len(k) != 3 {
 		t.Fatalf("kept %d, want 3 (one per hour for the last 3 hours): %v", len(k), k)
 	}
@@ -108,16 +107,6 @@ func TestPlanRetention_HourlyBuckets(t *testing.T) {
 		if len(reasons) != 1 || reasons[0] != keepHourly {
 			t.Fatalf("reasons %v; want hourly", reasons)
 		}
-	}
-}
-
-// A snapshot a fork still needs is kept whatever the policy says.
-func TestPlanRetention_ForkParentKept(t *testing.T) {
-	now := retBase.Add(48 * time.Hour)
-	snaps := []SnapshotInfo{snapAt("parent", retBase, SnapshotClassSemantic, time.Time{}, nil)}
-	k := kept(planRetention(RetentionPolicy{}, snaps, map[string]bool{"parent": true}, now))
-	if len(k) != 1 || k["parent"][0] != keepForkParent {
-		t.Fatalf("kept %v; want parent (fork_parent)", k)
 	}
 }
 
@@ -132,14 +121,14 @@ func TestPlanRetention_AgentCheckpointingEveryStepStaysBounded(t *testing.T) {
 	}
 	now := start.Add(24 * time.Hour)
 	bound := p.KeepNewest + int(DefaultKeepYounger/time.Minute) + p.KeepHourly
-	if k := kept(planRetention(p, snaps, nil, now)); len(k) > bound {
+	if k := kept(planRetention(p, snaps, now)); len(k) > bound {
 		t.Fatalf("kept %d of %d step checkpoints; want at most %d", len(k), len(snaps), bound)
 	}
 	// The bound holds however long the agent runs.
 	for i := 24 * 60; i < 7*24*60; i++ {
 		snaps = append(snaps, snapAt(fmt.Sprintf("step-%05d", i), start.Add(time.Duration(i)*time.Minute), SnapshotClassSemantic, time.Time{}, nil))
 	}
-	if k := kept(planRetention(p, snaps, nil, start.Add(7*24*time.Hour))); len(k) > bound {
+	if k := kept(planRetention(p, snaps, start.Add(7*24*time.Hour))); len(k) > bound {
 		t.Fatalf("after a week: kept %d; want at most %d", len(k), bound)
 	}
 }
@@ -280,41 +269,6 @@ func TestCatalog_SnapshotClass(t *testing.T) {
 	snaps, err := c.allSnapshots(ctx, "v1")
 	if err != nil || len(snaps) != 1 || snaps[0].Class != SnapshotClassPinned {
 		t.Fatalf("listed class: %+v %v", snaps, err)
-	}
-}
-
-// A fork whose HEAD is not yet written still needs its parent snapshot:
-// retain keeps it; once the fork's HEAD is published it no longer does.
-func TestCatalog_RetainKeepsParentOfAnIncompleteFork(t *testing.T) {
-	f, c, _, clock := retentionFixture(t, 3)
-	ctx := context.Background()
-	if err := c.SetRetentionPolicy(ctx, "v1", RetentionPolicy{}); err != nil { // keep nothing by policy
-		t.Fatal(err)
-	}
-	// The fake filer lists only directory entries it holds; a real filer
-	// has them for every volume directory.
-	for _, vol := range []string{"v1", "v2"} {
-		if err := f.CreateEntry(ctx, catBase, &filerpb.Entry{Name: vol, IsDirectory: true}, true); err != nil {
-			t.Fatal(err)
-		}
-	}
-	holdFirst(f, catBase+"/v2/HEAD")
-	if _, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s01", Target: "v2", RequestID: "f"}); CodeOf(err) != CodeOutcomeUnknown {
-		t.Fatalf("fork with a held HEAD create: %v", err)
-	}
-	res, err := c.Retain(ctx, "v1", true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if k := kept(res.Decisions); len(k) != 1 || k["s01"] == nil || k["s01"][0] != keepForkParent {
-		t.Fatalf("incomplete fork: kept %v; want only s01 (fork_parent)", k)
-	}
-	if _, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s01", Target: "v2", RequestID: "f"}); err != nil {
-		t.Fatalf("fork retry: %v", err)
-	}
-	_ = clock
-	if res, err := c.Retain(ctx, "v1", true); err != nil || res.Kept != 0 {
-		t.Fatalf("published fork: kept %d (%v); want 0", res.Kept, err)
 	}
 }
 

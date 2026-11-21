@@ -11,13 +11,15 @@ VARIABLES phase, elapsed, estimate, known, force, authority, admitted,
 vars == <<phase,elapsed,estimate,known,force,authority,admitted,
           uploaded,published,overBudget,atElapsed,atEstimate,atKnown>>
 Init == /\ phase = "forecast" /\ elapsed \in {0,30,60}
-        /\ estimate \in {5,30,60} /\ known \in BOOLEAN
+        /\ estimate \in {0,5,30,60} /\ known \in BOOLEAN
         /\ force \in BOOLEAN /\ authority \in BOOLEAN
         /\ admitted = FALSE /\ uploaded = FALSE /\ published = FALSE
         /\ overBudget = FALSE /\ atElapsed = 0 /\ atEstimate = 0
         /\ atKnown = FALSE
 AuthorityOK == authority \/ OmitAuthority
-Fits == known /\ estimate > 0 /\ estimate + (IF OmitElapsed THEN 0 ELSE elapsed) <= Limit
+FrozenEstimateKnown == known /\ estimate > 0
+MaxRefreezeQuiesce == IF FrozenEstimateKnown /\ estimate < Limit THEN Limit-estimate ELSE 0
+Fits == FrozenEstimateKnown /\ estimate + (IF OmitElapsed THEN 0 ELSE elapsed) <= Limit
 Eligible == AuthorityOK /\ (force \/ Fits)
 Forecast == /\ phase = "forecast" /\ Eligible /\ phase' = "stage"
             /\ UNCHANGED <<elapsed,estimate,known,force,authority,admitted,
@@ -53,4 +55,7 @@ NoUploadBeforeAdmission == uploaded => admitted
 BudgetAtAdmission == admitted /\ ~force => atKnown /\ atEstimate > 0 /\ atElapsed + atEstimate <= Limit
 OverrideVisible == admitted /\ force => overBudget
 AuthorityAtPublication == published => authority
+ReportSlackSound == MaxRefreezeQuiesce >= 0 /\
+    (MaxRefreezeQuiesce > 0 => known /\ estimate > 0 /\ MaxRefreezeQuiesce + estimate = Limit) /\
+    (~FrozenEstimateKnown => MaxRefreezeQuiesce = 0)
 =============================================================================
