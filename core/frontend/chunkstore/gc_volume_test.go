@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path"
+	"reflect"
 	"testing"
 	"time"
 
@@ -155,5 +156,84 @@ func TestVolumeGC_ForeignForkHeadIsSoleRoot(t *testing.T) {
 		if _, err := r.Get(ctx, ref.Key); err != nil {
 			t.Fatal("fork bytes reclaimed", err)
 		}
+	}
+}
+
+func TestVolumeGC_ForeignEligibleCaptureIntentStaysProtected(t *testing.T) {
+	f, b, c, g, now := gcFixture(t)
+	ctx := context.Background()
+	if err := f.CreateEntry(ctx, catBase, &filerpb.Entry{Name: "v2", IsDirectory: true}, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.EnsureVolume(ctx, "v2", catGeo); err != nil {
+		t.Fatal(err)
+	}
+	remotes := map[string]*ChunkRemote{}
+	for _, vol := range []string{"v1", "v2"} {
+		remote, _ := NewChunkRemote(f, b, path.Join(catBase, vol))
+		remotes[vol] = remote
+		if err := remote.Put(ctx, "capture", []byte("protected")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := remote.PutIntent(ctx, storage.ChunkIntent{Epoch: 1, Holder: "old", Keys: []string{"capture"}}); err != nil {
+			t.Fatal(err)
+		}
+		cur, err := remote.GetHead(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := remote.CASHead(ctx, storage.ChunkHeadVersion{Gen: cur.Gen, Epoch: cur.Epoch}, storage.ChunkHead{Epoch: 2, Holder: "new", Chunks: map[uint64]storage.ChunkRef{}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	g.cfg.IssuedEpoch = func(context.Context, string) (uint64, error) { return 2, nil }
+	*now = time.Now().Add(3 * time.Hour)
+	foreign, _ := remotes["v2"].ListIntents(ctx)
+	result, err := c.ExecuteVolumeGC(ctx, "v1", b, g.cfg, true)
+	local, _ := remotes["v1"].ListIntents(ctx)
+	after, _ := remotes["v2"].ListIntents(ctx)
+	if err != nil || result.ExpiredIntents != 1 || len(local) != 0 || !reflect.DeepEqual(foreign, after) {
+		t.Fatalf("capture scope mutated foreign intent: %+v %v before=%+v after=%+v", result, err, foreign, after)
+	}
+	if _, err := remotes["v2"].Get(ctx, "capture"); err != nil {
+		t.Fatal("foreign protection lost", err)
+	}
+	result, err = c.ExecuteVolumeGC(ctx, "v2", b, g.cfg, true)
+	if err != nil || result.ExpiredIntents != 1 {
+		t.Fatalf("foreign positive eligibility not witnessed: %+v %v", result, err)
+	}
+}
+func TestVolumeGC_ForeignEligibleCopyIsNotSettled(t *testing.T) {
+	f, b, c, g, now := gcFixture(t)
+	ctx := context.Background()
+	c.SetClock(func() time.Time { return *now })
+	if err := f.CreateEntry(ctx, catBase, &filerpb.Entry{Name: "v2", IsDirectory: true}, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.EnsureVolume(ctx, "v2", catGeo); err != nil {
+		t.Fatal(err)
+	}
+	for _, vol := range []string{"v1", "v2"} {
+		h := publishSource(t, f, b.fakeBlobs, vol, map[uint64][]byte{0: chunkBytes(0x55)})
+		snapshotDir(t, f, vol, "held")
+		holdFirst(f, path.Join(catBase, vol, snapsDir, "held")+"/")
+		if _, err := c.CreateSnapshot(ctx, vol, SnapshotRequest{Name: "held", RequestID: "dead"}, h); CodeOf(err) != CodeOutcomeUnknown {
+			t.Fatalf("copy not held: %v", err)
+		}
+	}
+	before := intentsOf(t, f, "v2")
+	foreignPath := snapPath(t, f, "v2", "held")
+	*now = now.Add(DefaultOpDeadline + time.Second)
+	result, err := c.ExecuteVolumeGC(ctx, "v1", b, g.cfg, true)
+	after := intentsOf(t, f, "v2")
+	if err != nil || result.SettledCopies != 1 || len(intentsOf(t, f, "v1")) != 0 || !reflect.DeepEqual(before, after) {
+		t.Fatalf("copy scope changed foreign attempt: %+v %v", result, err)
+	}
+	if _, err := f.LookupEntry(ctx, path.Dir(foreignPath), path.Base(foreignPath)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("foreign pending copy claimed: %v", err)
+	}
+	result, err = c.ExecuteVolumeGC(ctx, "v2", b, g.cfg, true)
+	if err != nil || result.SettledCopies != 1 || len(intentsOf(t, f, "v2")) != 0 {
+		t.Fatalf("foreign positive settlement not witnessed: %+v %v", result, err)
 	}
 }

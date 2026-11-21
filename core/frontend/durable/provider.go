@@ -269,9 +269,10 @@ type volHandle struct {
 	// wait, 0 if none: a recovered volume whose layer waits for master
 	// authority. A wait only acts while its generation is still the
 	// latest recovery's.
-	recoverGen uint64
-	waitGen    uint64
-	chunk      storage.ChunkLayer // after RecoverVolume
+	recoverGen   uint64
+	waitGen      uint64
+	chunk        storage.ChunkLayer // after RecoverVolume
+	chunkLineage chunkLineage       // immutable authority captured by this attachment
 	// Private until the owner commit succeeds; retained for attach retry.
 	chunkPending storage.ChunkLayer
 	// chunkDetach is set (under attachMu) when DetachVolume starts and

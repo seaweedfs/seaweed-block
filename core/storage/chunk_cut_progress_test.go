@@ -125,6 +125,7 @@ func TestChunkStageV3_FourTimesCapConvergesUnderSteadyWrites(t *testing.T) {
 // Each of two deadlines interrupts the third upload, after two immutable chunks
 // completed. The next pass must reuse those chunks rather than restart the set.
 type deadlineProgressRemote struct {
+	successful map[string][]byte
 	*fakeChunkRemote
 	completed int
 	calls     int
@@ -139,11 +140,18 @@ func (r *deadlineProgressRemote) Put(ctx context.Context, key string, b []byte) 
 	err := r.fakeChunkRemote.Put(ctx, key, b)
 	if err == nil {
 		r.completed++
+		if _, exists := r.successful[key]; exists {
+			return errors.New("test: retransmitted unchanged successful key")
+		}
+		if r.successful == nil {
+			r.successful = map[string][]byte{}
+		}
+		r.successful[key] = append([]byte(nil), b...)
 	}
 	return err
 }
 func TestChunkStageV3_MultipleDeadlinesKeepProgress(t *testing.T) {
-	_, f, l, _ := precopyLayer(t, 1, 5)
+	_, f, l, w := precopyLayer(t, 1, 5)
 	l.cfg.COWSpillLimit = ctChunkBytes
 	l.cfg.UploadConcurrency = 1
 	r := &deadlineProgressRemote{fakeChunkRemote: f}
@@ -175,6 +183,17 @@ func TestChunkStageV3_MultipleDeadlinesKeepProgress(t *testing.T) {
 		}
 	}
 	// Five changed chunks, five successful puts, no retransmission after expiry.
+	if len(r.successful) != 5 {
+		t.Fatalf("successful upload keys=%d want5", len(r.successful))
+	}
+	totalBytes := 0
+	for _, payload := range r.successful {
+		totalBytes += len(payload)
+	}
+	if totalBytes != 5*ctChunkBytes {
+		t.Fatalf("uploaded bytes=%d want%d", totalBytes, 5*ctChunkBytes)
+	}
+	assertEveryHeadIsPrefixImage(t, f, w)
 	if previous != 4 {
 		t.Fatalf("reusable chunks=%d", previous)
 	}

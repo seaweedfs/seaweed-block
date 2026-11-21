@@ -325,7 +325,9 @@ func (p *DurableProvider) startChunkLoop(volumeID string, h *volHandle, layer st
 	}
 	loopCtx, cancel := context.WithCancel(context.Background())
 	h.chunkStop, h.chunkDone = cancel, make(chan struct{})
-	go p.chunkBackground(loopCtx, cancel, volumeID, layer, h.chunkDone)
+	lin := h.chunkLineage
+	current := func() bool { return p.maintenanceCurrent(volumeID, h, layer, lin) }
+	go p.chunkBackground(loopCtx, cancel, volumeID, layer, h.chunkDone, current)
 }
 
 func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h *volHandle) (storage.ChunkLayer, error) {
@@ -466,7 +468,11 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 		cfg.RestoreGuard = &storage.ChunkHeadVersion{Gen: head.Gen, Epoch: head.Epoch}
 	}
 
-	return storage.AttachChunkLayer(ws, remote, cfg)
+	layer, attachErr := storage.AttachChunkLayer(ws, remote, cfg)
+	if attachErr == nil {
+		h.chunkLineage = lin
+	}
+	return layer, attachErr
 }
 
 // closeBoundRemote ends every remote call when the provider closes, so a
@@ -773,7 +779,7 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 // chunkBackground owns both workers and their cancellation. A fence is observed
 // even while either worker is waiting on a cooperative remote call. INV-MAINT-JOIN:
 // done closes only after every admitted worker has returned.
-func (p *DurableProvider) chunkBackground(ctx context.Context, cancel context.CancelFunc, volumeID string, layer storage.ChunkLayer, done chan struct{}) {
+func (p *DurableProvider) chunkBackground(ctx context.Context, cancel context.CancelFunc, volumeID string, layer storage.ChunkLayer, done chan struct{}, current func() bool) {
 	defer close(done)
 	defer cancel()
 	var workers sync.WaitGroup
@@ -787,7 +793,7 @@ func (p *DurableProvider) chunkBackground(ctx context.Context, cancel context.Ca
 	}
 	if p.cfg.ChunkMaintenanceInterval > 0 && p.cfg.ChunkMaintenance != nil {
 		workers.Add(1)
-		go func() { defer workers.Done(); p.chunkMaintenanceLoop(ctx, volumeID, layer) }()
+		go func() { defer workers.Done(); p.chunkMaintenanceLoop(ctx, volumeID, layer, current) }()
 	}
 	timer := time.NewTicker(chunkSchedulePoll)
 	defer timer.Stop()
@@ -803,7 +809,17 @@ func (p *DurableProvider) chunkBackground(ctx context.Context, cancel context.Ca
 	workers.Wait()
 }
 
-func (p *DurableProvider) chunkMaintenanceLoop(ctx context.Context, volumeID string, layer storage.ChunkLayer) {
+// maintenanceCurrent binds the pass to the attached handle AND its lineage.
+// The projection can remain healthy while a different owner replaces it.
+func (p *DurableProvider) maintenanceCurrent(volumeID string, h *volHandle, layer storage.ChunkLayer, lin chunkLineage) bool {
+	p.mu.Lock()
+	active := !p.closed && p.volumes[volumeID] == h && h.chunk == layer
+	p.mu.Unlock()
+	cur := p.view.Projection()
+	return active && chunkAuthority(cur, volumeID) && cur.VolumeID == lin.volumeID && cur.ReplicaID == lin.replicaID && cur.Epoch == lin.epoch && cur.EndpointVersion == lin.endpoint
+}
+
+func (p *DurableProvider) chunkMaintenanceLoop(ctx context.Context, volumeID string, layer storage.ChunkLayer, current func() bool) {
 	interval := p.cfg.ChunkMaintenanceInterval
 	due := time.Now().Add(interval)
 	if p.cfg.ChunkStagger {
@@ -820,9 +836,8 @@ func (p *DurableProvider) chunkMaintenanceLoop(ctx context.Context, volumeID str
 		if ctx.Err() != nil || layer.Fenced() {
 			return
 		}
-		if !chunkAuthority(p.view.Projection(), volumeID) {
-			timer.Reset(interval)
-			continue
+		if !current() {
+			return
 		}
 		timeout := p.cfg.ChunkMaintenanceTimeout
 		if timeout <= 0 {
@@ -841,7 +856,7 @@ func (p *DurableProvider) chunkMaintenanceLoop(ctx context.Context, volumeID str
 				case <-passCtx.Done():
 					return
 				case <-tick.C:
-					if layer.Fenced() || !chunkAuthority(p.view.Projection(), volumeID) {
+					if layer.Fenced() || !current() {
 						cancel()
 						return
 					}

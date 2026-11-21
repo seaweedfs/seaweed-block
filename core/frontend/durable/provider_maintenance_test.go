@@ -126,24 +126,57 @@ func TestMaintenanceAuthorityLossCancelsHeldPass(t *testing.T) {
 
 func TestMaintenancePassHasOneDeadline(t *testing.T) {
 	entered := make(chan error, 1)
+	three := make(chan struct{})
+	var completed atomic.Int32
 	p, err := durable.NewDurableProvider(durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
 		ChunkRemoteFor:           func(string) (storage.ChunkRemote, error) { return storage.NewMemChunkRemote(), nil },
 		ChunkMaintenanceInterval: time.Millisecond, ChunkMaintenanceTimeout: 10 * time.Millisecond,
-		ChunkMaintenance: func(ctx context.Context, _ string) error { <-ctx.Done(); entered <- ctx.Err(); return ctx.Err() },
+		ChunkMaintenance: func(ctx context.Context, _ string) error {
+			<-ctx.Done()
+			select {
+			case entered <- ctx.Err():
+			default:
+			}
+			if completed.Add(1) == 3 {
+				close(three)
+			}
+			return ctx.Err()
+		},
 	}, v1View())
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = p.Close() })
+	t.Cleanup(func() {
+		done := make(chan struct{})
+		go func() { _ = p.Close(); close(done) }()
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-entered:
+			case <-timer.C:
+				t.Error("deadline callback cleanup failed to join")
+				return
+			}
+		}
+	})
 	openRecovered(t, p)
+	// Deliberately leave the one-slot observation full across recurring passes.
+	select {
+	case <-three:
+	case <-time.After(5 * time.Second):
+		t.Fatal("recurring callback blocked with delayed receiver")
+	}
 	select {
 	case err := <-entered:
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatal(err)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("maintenance had no deadline")
+	default:
+		t.Fatal("no deadline observation")
 	}
 }
 
@@ -269,5 +302,59 @@ func TestMaintenancePeriodicNoopDoesNotChurnHead(t *testing.T) {
 	after, err := remote.GetHead(ctx)
 	if err != nil || after.Gen != first.Gen {
 		t.Fatalf("noop churned HEAD: before=%d after=%d err=%v", first.Gen, after.Gen, err)
+	}
+}
+
+func TestMaintenanceHealthyLineageChangeCancelsHeldPass(t *testing.T) {
+	for _, field := range []string{"epoch", "replica", "endpoint"} {
+		t.Run(field, func(t *testing.T) {
+			view := v1View()
+			entered, cancelled := make(chan struct{}), make(chan struct{})
+			var enterOnce, cancelOnce sync.Once
+			p, err := durable.NewDurableProvider(durable.ProviderConfig{
+				Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
+				ChunkRemoteFor:           func(string) (storage.ChunkRemote, error) { return storage.NewMemChunkRemote(), nil },
+				ChunkMaintenanceInterval: time.Millisecond,
+				ChunkMaintenance: func(ctx context.Context, _ string) error {
+					enterOnce.Do(func() { close(entered) })
+					<-ctx.Done()
+					cancelOnce.Do(func() { close(cancelled) })
+					return ctx.Err()
+				},
+			}, view)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				done := make(chan struct{})
+				go func() { _ = p.Close(); close(done) }()
+				select {
+				case <-done:
+				case <-time.After(5 * time.Second):
+					t.Error("lineage cleanup did not join")
+				}
+			})
+			openRecovered(t, p)
+			select {
+			case <-entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("no held pass")
+			}
+			cur := view.Projection()
+			switch field {
+			case "epoch":
+				cur.Epoch++
+			case "replica":
+				cur.ReplicaID = "r2"
+			case "endpoint":
+				cur.EndpointVersion++
+			}
+			view.set(cur)
+			select {
+			case <-cancelled:
+			case <-time.After(5 * time.Second):
+				t.Fatal("healthy foreign lineage did not cancel pass")
+			}
+		})
 	}
 }

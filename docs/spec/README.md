@@ -337,13 +337,23 @@ frames and does not prove physical-I/O, authority rollback or timing behavior.
 
 ## Attached-volume maintenance
 
-`MaintenanceOwner.tla` models a single attached maintenance owner, coalesced due
-work and joined release. `MaintenanceOwner_safe.cfg` completed with TLC 2.19
-(tla2tools v1.7.4, SHA256
-`936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`),
-15 generated / 8 distinct states, depth 5. The overlap and early-release configs
-both failed their intended invariant (`OneOwner` / `JoinedBeforeRelease`).
-This does not establish physical-I/O cancellation or a fleet scheduling bound.
+`MaintenanceOwner.tla` now includes joined-stop re-arm on the same current
+handle, and replacement followed by a new attachment. At most three arms and
+two handles make the graph finite. Local review-fold run 2026-11-21 03:47 UTC,
+TLC2.19 / Java21 /512MiB, jar SHA256
+`936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`:
+
+```sh
+java -Xmx512m -cp /path/to/tla2tools.jar tlc2.TLC -deadlock -config MaintenanceOwner_safe.cfg MaintenanceOwner
+```
+
+Positive exited0,105generated/54distinct, queue empty, depth12. Negative configs
+`overlap` exited12 at OneOwner (20/14 depth6), `early_release` at
+JoinedBeforeRelease (25/14 depth6), and `stale_rearm` at
+CurrentHandleAtAdmission (50/33 depth8). Unique `-metadir` paths were used.
+Native tests separately bind replica/epoch/endpoint and current handle/layer,
+witness cancellation while held, and same-handle stop/join/re-arm. This finite
+model does not establish physical-I/O cancellation or a fleet scheduling bound.
 
 `ScopedMaintenanceGC.tla` extends S9's scope correspondence: three keys across
 two volumes, one foreign-only root, independent local coverage and crash/config
