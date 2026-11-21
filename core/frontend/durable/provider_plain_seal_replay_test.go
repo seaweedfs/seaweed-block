@@ -167,3 +167,63 @@ func TestPlainSealReplayNeverUsesProcessMemory(t *testing.T) {
 		t.Fatal("re-sent plain seal answered from process memory despite unreadable filer")
 	}
 }
+
+// INV-WS-SEAL-REPLAY-001: deferred healthy startup must not hide a filer seal.
+func TestPlainSealReplayDuringDeferredAuthorityStartup(t *testing.T) {
+	ctx := hangGuard(t)
+	r := &plainSealReplayRemote{MemChunkRemote: storage.NewMemChunkRemote()}
+	root := t.TempDir()
+	first := chunkProvider(t, root, r, v1View(), 0)
+	s := openRecovered(t, first)
+	writeSync(t, s, 1, 0x64)
+	r.mu.Lock()
+	r.loseSeal = true
+	r.mu.Unlock()
+	if _, _, err := first.DetachVolumePlain(ctx, "v1"); !errors.Is(err, durable.ErrDetachOutcomeUnknown) {
+		t.Fatal("seal did not lose its committed answer", err)
+	}
+	sealed := headHolder(t, r.MemChunkRemote)
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	r.mu.Lock()
+	r.loseSeal, r.unreadable = false, false
+	r.mu.Unlock()
+	view := v1View()
+	assigned := view.Projection()
+	assigned.Healthy = false
+	view.set(assigned)
+	second := chunkProvider(t, root, r, view, 0)
+	if _, err := second.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.RecoverVolume(ctx, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	// This is the actual awaiting/no-layer schedule, before any healthy attach.
+	if _, err := second.CaptureVolume(ctx, "v1"); !errors.Is(err, durable.ErrChunkAwaitingAuthority) {
+		t.Fatal("recovery did not enter deferred authority startup", err)
+	}
+	r.mu.Lock()
+	reads, cas := r.reads, r.cas
+	r.mu.Unlock()
+	result, last, err := second.DetachVolumePlain(ctx, "v1")
+	if err != nil || !reflect.DeepEqual(result.Head, sealed) || result.H != sealed.RemoteLSN || last != sealed.RemoteLSN {
+		t.Fatalf("awaiting restart did not replay exact filer proof: result=%+v last=%d err=%v", result, last, err)
+	}
+	r.mu.Lock()
+	gotReads, gotCAS := r.reads, r.cas
+	r.mu.Unlock()
+	if gotReads <= reads || gotCAS != cas || !reflect.DeepEqual(headHolder(t, r.MemChunkRemote), sealed) {
+		t.Fatal("replay skipped filer proof or changed sealed HEAD")
+	}
+	if view.Projection().Healthy {
+		t.Fatal("replay made the projection healthy")
+	}
+	if _, err := second.CaptureVolume(ctx, "v1"); !errors.Is(err, durable.ErrChunkAwaitingAuthority) {
+		t.Fatal("replay enabled unhealthy cuts", err)
+	}
+	if err := second.Close(); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -1096,11 +1096,12 @@ var ErrPlainDetachBusy = errors.New("durable: plain detach requires idle fronten
 // only the caller context, not the live-serving freeze timer.
 func (p *DurableProvider) DetachVolumePlain(ctx context.Context, volumeID string) (storage.ChunkCutResult, uint64, error) {
 	result, last, err := p.detachVolume(ctx, volumeID, true)
-	if err != nil && !errors.Is(err, ErrNotChunkVolume) {
+	if err != nil && !errors.Is(err, ErrNotChunkVolume) && !errors.Is(err, ErrChunkAwaitingAuthority) {
 		return result, last, err
 	}
 	// INV-WS-SEAL-REPLAY-001: success is always a fresh remote proof, also
-	// after restart when no layer exists. A cached result is not sufficient.
+	// after restart when no layer exists, including deferred authority startup.
+	// A cached result is not sufficient.
 	return p.replayPlainSeal(ctx, volumeID, result)
 }
 

@@ -636,3 +636,8 @@ that test's lost committed answer -> storage restart -> successful re-send.
 Native controls additionally require the original full HEAD and no CAS/new
 generation. CAS atomicity, local WAL recovery and remote-call cancellation
 remain native/existing-spec obligations rather than claims of this small model.
+
+The provider dispatch control `TestPlainSealReplayDuringDeferredAuthorityStartup`
+sets Healthy=false before RecoverVolume, witnesses the no-layer authority wait,
+and checks fresh proof replay without CAS or enabling cuts. This is native
+integration coverage of the existing RemoteProof transition; the model is unchanged.
