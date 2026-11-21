@@ -187,7 +187,7 @@ stateDiagram-v2
 
 - **Snapshot** (`Catalog.CreateSnapshot`): claim the name with an exclusive name record `{request, attempt}` (a retry gets its own attempt back); check the volume is not being deleted; write an intent with a deadline; re-check the deadline; exclusively create `snaps/<name>/<attempt>` holding a copy of the HEAD root. An unknown outcome keeps the intent; the caller retries with the same request id.
 - **Fork** (`Catalog.Fork`): claim the parent snapshot, check the source is not being deleted, write the target `VOLUME` (origin fork), then a HEAD at gen 1, epoch 0, no holder, with the parent's `RemoteLSN` and references. No segment or chunk is copied: the fork's references are owner-qualified, so it reads the parent's objects, and its root alone keeps them live after the parent snapshot is deleted.
-- **Restore** (`Catalog.Restore`, independent restore): the fork steps with `VOLUME` origin `restore`; the claim is the fork's (live until the target has a HEAD), and from then on the target's owner-qualified refs keep the source's chunks live, so deleting the source snapshot or volume mid-restore is normal. The background walker (`HydrateAll`) makes every chunk local through the shared fill flights, under one host fill permit per flight. Bounded batch cuts then upload the chunks under the target's own keys; when the resolved HEAD holds no ref to another volume, the write-once `RESTORE-INDEPENDENT` entry is created (`MarkIndependent`). Snapshots of the target are refused until then, and a snapshot image that still names another volume's chunks is refused even after it. An aborted first HEAD keeps the parent snapshot as `fork_parent` until the target is deleted. Model: `docs/spec/RestoreIndependence.tla`.
+- **Restore** (`Catalog.Restore`, independent restore): the fork steps with `VOLUME` origin `restore`; until its first HEAD the parent stays rooted by GC's grace after any delete, and from then on the target's owner-qualified refs keep the source's chunks live, so deleting the source snapshot or volume mid-restore is normal. The background walker (`HydrateAll`) makes every chunk local through the shared fill flights, under one host fill permit per flight. Bounded batch cuts then upload the chunks under the target's own keys; when the resolved HEAD holds no ref to another volume, the write-once `RESTORE-INDEPENDENT` entry is created (`MarkIndependent`). Snapshots of the target are refused until then, and a snapshot image that still names another volume's chunks is refused even after it. Model: `docs/spec/RestoreIndependence.tla`.
 - **Retention** (`retention.go`): classes `semantic` and `pinned`; newest N, recent window and log-spaced keeps; a snapshot with a live fork claim is always kept; deletion uses the same conditional mark as `DeleteSnapshot`.
 - **GC** (`gc.go` `Collector.run`, operator-driven through `sw-block ops chunk gc`, preview by default; see also `core/frontend/chunkstore/GC.md`):
   - roots: every HEAD, every named snapshot (including one whose delete is still in progress), every snapshot attempt that is not aborted, live intents, and segment objects; an unreadable segment aborts the mark. A deleted snapshot's attempt stays a root for one grace period after its delete time, then stops counting (`Collector.snapshotAttemptHeads` in `gc_copy.go`);
@@ -240,9 +240,9 @@ Restore (target volume):
 
 ```mermaid
 stateDiagram-v2
-  [*] --> Claimed: claim parent snapshot, write VOLUME (origin restore)
-  Claimed --> Restoring: first HEAD (parent's refs, owner-qualified); claim dropped
-  Claimed --> Aborted: GC tombstones the HEAD (parent kept as fork_parent)
+  [*] --> Forking: read the parent snapshot, write VOLUME (origin restore)
+  Forking --> Restoring: first HEAD (parent's refs, owner-qualified) before read time + deadline
+  Forking --> Aborted: GC tombstones the HEAD
   Restoring --> Hydrating: driver starts the paced walker
   Hydrating --> Owning: batch cuts start (the walker may still run)
   Owning --> Owning: one bounded batch cut replaces up to N foreign refs with own keys

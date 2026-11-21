@@ -17,7 +17,8 @@ type OwnProgress struct {
 
 // OwnBatch runs one bounded cut (M6.Restore.Owning>Owning): it picks up to n
 // chunks, lowest index first, whose HEAD key is foreign (foreign reports
-// whether a key names another volume's object) and that are local, and cuts
+// whether a key names another volume's object) and that are local (present,
+// or every block written locally), and cuts
 // with them as candidates: each is uploaded under a new own key under the
 // cut's intent and published by the cut's one HEAD CAS, even when its bytes
 // equal HEAD's. Absent chunks are skipped (never fetched by the cut). The cut
@@ -30,7 +31,7 @@ func (l *chunkLayerImpl) OwnBatch(ctx context.Context, n int, foreign func(key s
 	l.stMu.Lock()
 	var picked []uint64
 	for _, idx := range sortedForeign(l.head.Chunks, foreign) {
-		if len(picked) < n && !l.absent[idx] {
+		if len(picked) < n && l.chunkLocalLocked(idx) {
 			picked = append(picked, idx)
 		}
 	}
@@ -42,6 +43,12 @@ func (l *chunkLayerImpl) OwnBatch(ctx context.Context, n int, foreign func(key s
 	l.own = make(map[uint64]bool, len(picked))
 	for _, idx := range picked {
 		l.own[idx] = true
+		// A payload remembered from an earlier failed cut that matched HEAD
+		// was never uploaded (no key, data discarded): reusing it would skip
+		// the re-own upload. Drop it, so this cut reads and uploads the chunk.
+		if sc, ok := l.reusable[idx]; ok && sc.key == "" {
+			delete(l.reusable, idx)
+		}
 	}
 	l.stMu.Unlock()
 	_, err := l.captureLocked(ctx, false)
@@ -69,7 +76,7 @@ func (l *chunkLayerImpl) ownProgressLocked(foreign func(string) bool) ownCount {
 	c := ownCount{head: l.head.Chunks}
 	for _, idx := range sortedForeign(l.head.Chunks, foreign) {
 		c.Remaining++
-		if l.absent[idx] {
+		if !l.chunkLocalLocked(idx) {
 			c.NotLocal++
 		}
 	}
@@ -100,10 +107,30 @@ func (l *chunkLayerImpl) owning(idx uint64) bool {
 // Caller holds stMu.
 func (l *chunkLayerImpl) addOwnCandidatesLocked(out map[uint64]bool) {
 	for idx := range l.own {
-		if !l.absent[idx] {
+		if l.chunkLocalLocked(idx) {
 			out[idx] = true
 		}
 	}
+}
+
+// chunkLocalLocked reports whether a re-own can read chunk idx without a
+// fetch: it is present, or absent with every block written locally (a guest
+// overwrite flushed before the walker reached it). Caller holds stMu.
+func (l *chunkLayerImpl) chunkLocalLocked(idx uint64) bool {
+	if !l.absent[idx] {
+		return true
+	}
+	first := idx * l.chunkBlocks
+	for i := uint64(0); i < l.chunkBlocks; i++ {
+		b := first + i
+		if b >= uint64(l.s.NumBlocks()) {
+			break
+		}
+		if !l.localBlocks[b] {
+			return false
+		}
+	}
+	return true
 }
 
 // unchangedFromHead reports whether a captured chunk equals HEAD's and was

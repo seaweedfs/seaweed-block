@@ -2,6 +2,7 @@ package durable
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/seaweedfs/seaweed-block/core/hostlimit"
@@ -48,4 +49,26 @@ func (p *DurableProvider) OwnVolumeBatch(ctx context.Context, volumeID string, n
 	ctx, cancel := p.chunkCutContext(ctx)
 	defer cancel()
 	return r.OwnBatch(ctx, n, foreign)
+}
+
+// ErrProviderClosed refuses work admitted after Close.
+var ErrProviderClosed = errors.New("durable: provider closed")
+
+// GoOwned runs fn on its own goroutine inside the provider's lifetime: its
+// ctx ends when Close starts, and Close waits for fn to return before it
+// closes any store. A restore driver runs this way, so it never outlives the
+// volume it drives.
+func (p *DurableProvider) GoOwned(fn func(ctx context.Context)) error {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return ErrProviderClosed
+	}
+	p.inflight.Add(1)
+	p.mu.Unlock()
+	go func() {
+		defer p.inflight.Done()
+		fn(p.closeCtx)
+	}()
+	return nil
 }

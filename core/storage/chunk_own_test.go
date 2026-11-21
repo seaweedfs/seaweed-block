@@ -3,8 +3,10 @@ package storage
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func seedForeign(key string) bool { return strings.HasPrefix(key, "seed/") }
@@ -92,5 +94,99 @@ func TestOwnBatch_CarriesGuestWrites(t *testing.T) {
 	off := (ctChunkBlocks*6 + 1) * ctBlockSize
 	if !bytes.Equal(img[off:off+ctBlockSize], makeBlock(ctBlockSize, 0xAB)) {
 		t.Fatal("the guest write did not reach HEAD with the batch")
+	}
+}
+
+// A chunk whose every block the guest overwrote and flushed before the walker
+// reached it stays absent but is fully local: a batch owns it with no fetch
+// (codex01 #340 S1: otherwise nothing ever cuts it and the driver stalls).
+func TestOwnBatch_OwnsAFullyOverwrittenAbsentChunkWithoutAFetch(t *testing.T) {
+	fastWalker(t)
+	s, layer, remote, _ := hydrationFixture(t, 2, 64)
+	const idx = 3
+	for i := uint32(0); i < ctChunkBlocks; i++ {
+		if _, err := s.Write(idx*ctChunkBlocks+i, makeBlock(ctBlockSize, 0xC0+byte(i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.flusher.flushOnce(); err != nil {
+		t.Fatal(err)
+	}
+	layer.stMu.Lock()
+	absent := layer.absent[idx]
+	layer.stMu.Unlock()
+	if !absent {
+		t.Fatal("fixture: the overwritten chunk must still be absent")
+	}
+	if _, err := layer.HydrateAll(ownCtx(t)); err != nil {
+		t.Fatal(err)
+	}
+	seedKey := remote.stats().head.Chunks[idx].Key
+	// The stall needs this chunk to be the only foreign one left: then no
+	// other pick triggers the cut that would carry its guest write.
+	onlyThis := func(key string) bool { return key == seedKey }
+	p, err := layer.OwnBatch(ownCtx(t), 3, onlyThis)
+	if err != nil || p.Owned != 1 || p.Remaining != 0 {
+		t.Fatalf("batch with only the fully overwritten chunk foreign: %+v %v, want it owned", p, err)
+	}
+	if n := countGets(remote)[seedKey]; n != 0 {
+		t.Fatalf("the fully overwritten chunk was fetched %d times", n)
+	}
+	img := remote.imageOf(t, remote.stats().head)
+	for i := 0; i < ctChunkBlocks; i++ {
+		off := (idx*ctChunkBlocks + i) * ctBlockSize
+		if !bytes.Equal(img[off:off+ctBlockSize], makeBlock(ctBlockSize, 0xC0+byte(i))) {
+			t.Fatalf("block %d of the overwritten chunk is not the guest's in HEAD", i)
+		}
+	}
+}
+
+// A failed ordinary cut remembers an equal-to-HEAD chunk without a key; the
+// next batch must still upload it under an own key (codex01 #340 S2).
+func TestOwnBatch_UploadsAChunkRememberedEqualByAFailedCut(t *testing.T) {
+	fastWalker(t)
+	s, layer, remote, _ := hydrationFixture(t, 2, 64)
+	if _, err := layer.HydrateAll(ownCtx(t)); err != nil {
+		t.Fatal(err)
+	}
+	same := makeBlock(ctBlockSize, 0x40) // block 0 rewritten with HEAD's own bytes
+	if _, err := s.Write(0, same); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Write(ctChunkBlocks, makeBlock(ctBlockSize, 0xEE)); err != nil { // chunk 1 changed
+		t.Fatal(err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	remote.mu.Lock()
+	remote.failPut = errors.New("test: put refused")
+	remote.mu.Unlock()
+	failCtx, cancelFail := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancelFail()
+	if _, err := layer.Cut(failCtx); err == nil {
+		t.Fatal("fixture: the ordinary cut must fail")
+	}
+	remote.mu.Lock()
+	remote.failPut = nil
+	remote.mu.Unlock()
+	layer.stMu.Lock()
+	sc, kept := layer.reusable[0]
+	layer.stMu.Unlock()
+	if !kept || sc.key != "" {
+		t.Fatalf("fixture: the failed cut must remember chunk 0 equal and keyless: kept=%v key=%q", kept, sc.key)
+	}
+	p, err := layer.OwnBatch(ownCtx(t), 1, seedForeign)
+	if err != nil || p.Owned != 1 {
+		t.Fatalf("batch after the failed cut: %+v %v, want chunk 0 owned", p, err)
+	}
+	if k := remote.stats().head.Chunks[0].Key; seedForeign(k) {
+		t.Fatalf("chunk 0 still names the foreign key %s", k)
+	}
+	if !bytes.Equal(remote.imageOf(t, remote.stats().head)[:ctBlockSize], same) {
+		t.Fatal("chunk 0's bytes changed")
 	}
 }

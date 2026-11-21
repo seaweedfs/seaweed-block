@@ -8,6 +8,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -59,10 +60,24 @@ type fakeRestoreProvider struct {
 	hydrations  int
 	batches     int
 	failAtBatch int // a batch with this 1-based number fails (0: never)
+	mu          sync.Mutex
+	entered     chan struct{} // if set, HydrateVolume signals entry and
+	gate        chan struct{} // then waits for gate or its ctx
 }
 
 func (p *fakeRestoreProvider) HydrateVolume(ctx context.Context, vol string, bps int64) (storage.HydrateProgress, error) {
+	p.mu.Lock()
 	p.hydrations++
+	entered, gate := p.entered, p.gate
+	p.mu.Unlock()
+	if entered != nil {
+		entered <- struct{}{}
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return storage.HydrateProgress{}, ctx.Err()
+		}
+	}
 	if bps != DefaultRestoreBytesPerSecond {
 		return storage.HydrateProgress{}, fmt.Errorf("walker pace %d, want the default %d", bps, DefaultRestoreBytesPerSecond)
 	}
@@ -244,28 +259,62 @@ func TestRestoreDriver_RefusesAVolumeNotMadeByRestore(t *testing.T) {
 	}
 }
 
-// POST /chunk/restore starts one background run; GET reports it.
-func TestRestoreDriver_ChunkControlStartsOneRunAndReportsIt(t *testing.T) {
-	_, cat, p := restoreFixtureHost(t, 3)
-	ctl := &chunkControl{p: restoreOnlyProvider{p}, cat: cat}
-	ctx := context.Background()
-	if st, err := ctl.Restore(ctx, "v2", false); err != nil || st.Phase != "" {
-		t.Fatalf("status before any run: %+v %v", st, err)
+// testOwner runs owned goroutines until close, which cancels and joins them
+// (bounded), like DurableProvider.Close.
+type testOwner struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+}
+
+func newTestOwner(t *testing.T) *testOwner {
+	o := &testOwner{}
+	o.ctx, o.cancel = context.WithCancel(context.Background())
+	t.Cleanup(func() { o.close(t) })
+	return o
+}
+
+func (o *testOwner) GoOwned(fn func(context.Context)) error {
+	o.wg.Add(1)
+	go func() { defer o.wg.Done(); fn(o.ctx) }()
+	return nil
+}
+
+func (o *testOwner) close(t *testing.T) {
+	o.cancel()
+	done := make(chan struct{})
+	go func() { o.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Error("owned restore run did not return after close")
 	}
-	if _, err := ctl.Restore(ctx, "v2", true); err != nil {
-		t.Fatal(err)
-	}
+}
+
+// restoreOnlyProvider is a ChunkProvider (cut and detach unused) with the
+// restore surface and an owner.
+type restoreOnlyProvider struct {
+	*fakeRestoreProvider
+	*testOwner
+}
+
+func (restoreOnlyProvider) CutVolume(context.Context, string, uint64) (storage.ChunkCutResult, error) {
+	return storage.ChunkCutResult{}, errors.New("unused")
+}
+func (restoreOnlyProvider) DetachVolume(context.Context, string) (storage.ChunkCutResult, uint64, error) {
+	return storage.ChunkCutResult{}, 0, errors.New("unused")
+}
+
+func waitRestore(t *testing.T, ctl *chunkControl, vol string) RestoreStatus {
+	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		st, err := ctl.Restore(ctx, "v2", false)
+		st, err := ctl.Restore(context.Background(), vol, false)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if !st.Running {
-			if st.Phase != RestoreIndependent || st.Owned != 3 {
-				t.Fatalf("final status %+v", st)
-			}
-			break
+			return st
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("restore still running: %+v", st)
@@ -274,14 +323,69 @@ func TestRestoreDriver_ChunkControlStartsOneRunAndReportsIt(t *testing.T) {
 	}
 }
 
-// restoreOnlyProvider is a ChunkProvider whose cut and detach are unused.
-type restoreOnlyProvider struct{ *fakeRestoreProvider }
-
-func (restoreOnlyProvider) CutVolume(context.Context, string, uint64) (storage.ChunkCutResult, error) {
-	return storage.ChunkCutResult{}, errors.New("unused")
+// POST /chunk/restore starts one background run: a second start while the
+// first is held joins it (one walk), and the run is reported to the end.
+func TestRestoreDriver_ChunkControlStartsOneRunAndReportsIt(t *testing.T) {
+	_, cat, p := restoreFixtureHost(t, 3)
+	owner := newTestOwner(t)
+	p.entered, p.gate = make(chan struct{}, 2), make(chan struct{})
+	release := func() {
+		select {
+		case <-p.gate:
+		default:
+			close(p.gate)
+		}
+	}
+	t.Cleanup(release) // registered before launch; the owner joins after it
+	ctl := &chunkControl{p: restoreOnlyProvider{p, owner}, cat: cat}
+	ctx := context.Background()
+	if st, err := ctl.Restore(ctx, "v2", false); err != nil || st.Phase != "" {
+		t.Fatalf("status before any run: %+v %v", st, err)
+	}
+	if _, err := ctl.Restore(ctx, "v2", true); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-p.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the run never reached the walker")
+	}
+	if st, err := ctl.Restore(ctx, "v2", true); err != nil || !st.Running {
+		t.Fatalf("second start while the first runs: %+v %v, want it joined", st, err)
+	}
+	release()
+	st := waitRestore(t, ctl, "v2")
+	p.mu.Lock()
+	walks := p.hydrations
+	p.mu.Unlock()
+	if walks != 1 || st.Phase != RestoreIndependent || st.Owned != 3 {
+		t.Fatalf("walks=%d status %+v, want one run to independence", walks, st)
+	}
 }
-func (restoreOnlyProvider) DetachVolume(context.Context, string) (storage.ChunkCutResult, uint64, error) {
-	return storage.ChunkCutResult{}, 0, errors.New("unused")
+
+// Closing the serving owner cancels a run held in a provider call and joins
+// it: the run ends failed and publishes no marker after the close.
+func TestRestoreDriver_OwnerCloseCancelsAndJoinsTheRun(t *testing.T) {
+	_, cat, p := restoreFixtureHost(t, 3)
+	owner := newTestOwner(t)
+	p.entered, p.gate = make(chan struct{}, 1), make(chan struct{}) // gate never opens
+	ctl := &chunkControl{p: restoreOnlyProvider{p, owner}, cat: cat}
+	if _, err := ctl.Restore(context.Background(), "v2", true); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-p.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the run never reached the walker")
+	}
+	owner.close(t) // cancel and bounded join, like DurableProvider.Close
+	st, err := ctl.Restore(context.Background(), "v2", false)
+	if err != nil || st.Running || st.Phase != RestoreFailed {
+		t.Fatalf("status after the owner closed: %+v %v, want a finished failed run", st, err)
+	}
+	if _, ok, _ := cat.ReadIndependence(context.Background(), "v2"); ok {
+		t.Fatal("a marker was published after the owner closed")
+	}
 }
 
 var _ RestoreProvider = (*durable.DurableProvider)(nil)

@@ -411,15 +411,47 @@ func TestHydrateAll_StatsReportAbsentChunks(t *testing.T) {
 // at least (8-1)/4 s.
 func TestHydrateAll_PacedByByteRate(t *testing.T) {
 	fastWalker(t)
-	_, layer, _, _ := hydrationFixture(t, 2, 64)
+	_, layer, remote, _ := hydrationFixture(t, 2, 64)
+	budget := &timedBudget{}
+	layer.cfg.Budget = budget // admission times witness the pace
 	rate := int64(4 * ctChunkBytes)
-	start := time.Now()
 	p, err := layer.HydrateAllAt(boundedCtx(t, context.Background()), rate)
-	took := time.Since(start)
-	if err != nil || p.Remaining != 0 {
-		t.Fatalf("paced walk: %+v %v", p, err)
+	want := ctNumBlocks / ctChunkBlocks
+	if err != nil || p.Remaining != 0 || p.Filled != want {
+		t.Fatalf("paced walk: %+v %v, want all %d chunks filled", p, err, want)
 	}
-	if min := time.Duration(p.Filled-1) * time.Second / 4; took < min {
-		t.Fatalf("%d fills at %d B/s took %v, want at least %v", p.Filled, rate, took, min)
+	gets := 0
+	for _, n := range countGets(remote) {
+		gets += n
+	}
+	if gets != want {
+		t.Fatalf("%d remote Gets, want %d", gets, want)
+	}
+	budget.mu.Lock()
+	defer budget.mu.Unlock()
+	if len(budget.at) != want {
+		t.Fatalf("%d admissions, want %d", len(budget.at), want)
+	}
+	for i := 1; i < len(budget.at); i++ {
+		// fill i is admitted no earlier than i chunks at the rate from the start
+		due := budget.at[0].Add(time.Duration(i) * time.Second / 4)
+		if budget.at[i].Before(due.Add(-10 * time.Millisecond)) {
+			t.Fatalf("fill %d admitted %v after the first, before its pace time %v", i, budget.at[i].Sub(budget.at[0]), due.Sub(budget.at[0]))
+		}
 	}
 }
+
+// timedBudget admits every fill and records when.
+type timedBudget struct {
+	mu sync.Mutex
+	at []time.Time
+}
+
+func (b *timedBudget) Admit(context.Context, int64, func(error)) (uint64, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.at = append(b.at, time.Now())
+	return uint64(len(b.at)), nil
+}
+func (b *timedBudget) ReserveCOW(uint64, int64) error { return nil }
+func (b *timedBudget) Release(uint64)                 {}

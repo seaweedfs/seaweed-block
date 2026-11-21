@@ -149,12 +149,13 @@ type restoreRuns struct {
 }
 
 // Restore reports vol's restore status and, with start, starts a run unless
-// one is running (POST /chunk/restore). A run outlives the request; it ends
-// independent, or failed with the error (a later start resumes from the
-// target's remote facts).
+// one is running (POST /chunk/restore). A run outlives the request but not
+// the serving provider (RestoreOwner); it ends independent, or failed with
+// the error (a later start resumes from the target's remote facts).
 func (c *chunkControl) Restore(ctx context.Context, vol string, start bool) (RestoreStatus, error) {
 	p, ok := c.p.(RestoreProvider)
-	if !ok {
+	owner, owned := c.p.(RestoreOwner)
+	if !ok || !owned {
 		return RestoreStatus{}, fmt.Errorf("restore: provider has no restore surface: %w", errNotRestore)
 	}
 	c.restores.mu.Lock()
@@ -176,16 +177,27 @@ func (c *chunkControl) Restore(ctx context.Context, vol string, start bool) (Res
 		*st = s
 		c.restores.mu.Unlock()
 	}
-	go func() {
-		final, err := runRestore(context.Background(), c.cat, p, vol, RestoreConfig{}, report)
+	run := func(ctx context.Context) {
+		final, err := runRestore(ctx, c.cat, p, vol, RestoreConfig{}, report)
 		final.Running = false
 		if err != nil {
 			_, code, _ := chunkErrorCode(err)
 			final.Phase, final.ErrorCode, final.ErrorText = RestoreFailed, code, err.Error()
 		}
 		report(final)
-	}()
+	}
+	if err := owner.GoOwned(run); err != nil {
+		delete(c.restores.runs, vol)
+		return RestoreStatus{}, err
+	}
 	return *st, nil
+}
+
+// RestoreOwner runs the driver inside the serving volume's lifetime: the
+// driver's ctx ends when the owner closes, and the owner waits for it
+// (DurableProvider.GoOwned).
+type RestoreOwner interface {
+	GoOwned(fn func(ctx context.Context)) error
 }
 
 // handleChunkRestore serves GET /chunk/restore?volume=V (status) and
