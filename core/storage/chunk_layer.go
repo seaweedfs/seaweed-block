@@ -53,7 +53,7 @@ const defaultReadMissTimeout = 30 * time.Second
 
 type chunkLayerImpl struct {
 	// capMu serializes pre-copy admission and its recent measurements.
-	precopyFreeze  func(uint64, time.Time) bool
+	precopyFreeze  func(uint64, time.Time, chunkCutStats) bool
 	precopyPrepare func(context.Context) (func(), error)
 	precopySamples []precopySample
 	precopyPause   func(time.Duration)
@@ -133,6 +133,8 @@ type chunkLayerImpl struct {
 	testCOWSave                  func() error
 	testPresenceSnapshotHook     func()                 // after a presence snapshot, before it is written
 	testBaseTransitionBeforeLock func()                 // test handshake before capMu drain
+	testBeforeTailScanHook       func()                 // diagnostic tail scan cost witness
+	testFrozenNow                func() time.Time       // controlled guest elapsed at admission
 	testAfterAdmitHook           func()                 // right after a capture is admitted
 	testAfterStageHook           func(round int)        // after each pre-copy staging round
 	testAfterStageReadHook       func(idx uint64)       // after a staging read, before its result is kept
@@ -669,9 +671,25 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		st.HeadReadbackNs += time.Since(start).Nanoseconds()
 		return head, err
 	}
+	dropCapturedIntents := func(ctx context.Context, ids []string) {
+		start := time.Now()
+		l.dropIntents(ctx, ids)
+		st.IntentCleanupNs += time.Since(start).Nanoseconds()
+	}
+	finishCapturedCut := func(head chunkHead, h uint64, changed []uint64, keys map[uint64]string) {
+		start := time.Now()
+		l.finishCut(head, h, changed, keys)
+		st.CommitStateNs += time.Since(start).Nanoseconds()
+	}
 	var pauseStart time.Time
 	var payloadBeforeBarrier int64
 	defer func() {
+		var tailBytes uint64
+		if err == nil {
+			scanStart := time.Now()
+			tailBytes = l.candidateTailBytes()
+			st.CandidateNs += time.Since(scanStart).Nanoseconds()
+		}
 		st.TotalNs = time.Since(start).Nanoseconds()
 		if err == nil {
 			res.Stats = st
@@ -679,6 +697,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 				fixed := time.Since(pauseStart).Nanoseconds() - st.PayloadNs + payloadBeforeBarrier
 				l.samplePrecopy(st, fixed)
 			}
+			res.CandidateTail = l.estimateCandidateTail(tailBytes)
 		}
 		if errors.Is(err, errChunkLayerFenced) {
 			l.stMu.Lock()
@@ -690,7 +709,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 			}
 			l.reusable = nil
 			l.stMu.Unlock()
-			l.dropIntents(ctx, ids)
+			dropCapturedIntents(ctx, ids)
 		}
 		if observe := l.precopyPause; observe != nil {
 			observe(time.Duration(st.BarrierPauseNs))
@@ -742,17 +761,22 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	// Pre-copy large native dirty sets outside the barrier, bounded by the
 	// remaining COW exposure rather than a fixed candidate count.
 	stageStart := time.Now()
-	staged, intents, err := l.stage(ctx, &st)
+	var staged map[uint64]stagedChunk
+	var intents []string
+	_, guestFrozen := FrozenDetachFromContext(ctx)
+	if !guestFrozen {
+		staged, intents, err = l.stage(ctx, &st)
+	}
 	if st.UploadedBytes > 0 {
 		st.PayloadNs += time.Since(stageStart).Nanoseconds()
 	}
 	if err != nil {
-		l.dropIntents(ctx, intents)
+		dropCapturedIntents(ctx, intents)
 		return chunkCutResult{}, err
 	}
 
 	if cause := context.Cause(ctx); cause != nil {
-		l.dropIntents(ctx, intents)
+		dropCapturedIntents(ctx, intents)
 		return chunkCutResult{}, cause
 	}
 
@@ -777,7 +801,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 			releasePrecopy()
 			releasePrecopy = nil
 		}
-		l.dropIntents(ctx, intents)
+		dropCapturedIntents(ctx, intents)
 		return chunkCutResult{}, cause
 	}
 	// Resume rejected tentative admission before any ordinary COW upload.
@@ -794,7 +818,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	l.s.captureMu.Lock()
 	barrier := time.Now()
 	st.LockWaitNs = barrier.Sub(pauseStart).Nanoseconds()
-	h, err := l.s.Sync()
+	h, err := l.s.syncWithPhases(&st.SyncPhases)
 	st.SyncNs = time.Since(barrier).Nanoseconds()
 	if hook := l.testAfterBarrierSyncHook; hook != nil && err == nil {
 		hook(h)
@@ -802,9 +826,10 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	if err != nil {
 		unlockCapture()
 		st.BarrierPauseNs = time.Since(pauseStart).Nanoseconds()
-		l.dropIntents(ctx, intents) // a clean abort: staged keys are released
+		dropCapturedIntents(ctx, intents) // a clean abort: staged keys are released
 		return chunkCutResult{}, fmt.Errorf("storage: capture sync: %w", err)
 	}
+	candidateStart := time.Now()
 	candidates := map[uint64]bool{}
 	for idx := range l.captureCandidates() {
 		candidates[idx] = true
@@ -851,12 +876,20 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	// Candidates, mutation versions and births belong to the same barrier.
 	// Do not sample the owned map after COW writers are admitted again.
 	births := l.captureBirths(candidates, h)
+	st.CandidateNs += time.Since(candidateStart).Nanoseconds()
 	// The authoritative candidate set is fixed with mutation admission closed.
 	// The owner callback is nonblocking and may stop only an already drained
 	// frontend; rejected attempts remain ordinary COW cuts.
 	if freeze := l.precopyFreeze; freeze != nil && context.Cause(ctx) == nil {
 		tail := uint64(len(candidates)) * uint64(l.blockSize) * l.chunkBlocks
-		detach = freeze(tail, pauseStart)
+		detach = freeze(tail, pauseStart, st)
+	}
+	if guestFrozen && !detach {
+		unlockCapture()
+		st.BarrierPauseNs = time.Since(pauseStart).Nanoseconds()
+		l.abortCut(all)
+		dropCapturedIntents(ctx, intents)
+		return chunkCutResult{}, errors.Join(ErrFrozenTailTooLarge, context.Cause(ctx), l.admit())
 	}
 
 	if h < baseHead.RemoteLSN && !l.supersededBy(baseHead) {
@@ -866,7 +899,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		// reached: publishing would move remote_lsn backwards. Refused
 		// before any upload. (A HEAD of a newer holder fences below.)
 		l.abortCut(all)
-		l.dropIntents(ctx, intents)
+		dropCapturedIntents(ctx, intents)
 		return chunkCutResult{}, fmt.Errorf("%w: %w: cut LSN %d, HEAD remote_lsn %d", errChunkCaptureRefused, errChunkLSNBehind, h, baseHead.RemoteLSN)
 	}
 
@@ -876,11 +909,13 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	bytesBeforeCopy := st.UploadedBytes
 	{
 		var w *cutCOWWindow
+		windowStart := time.Now()
 		w, copyErr = l.installCOWWindow(candidates, useStaged, baseHead.Chunks)
 		if copyErr == nil {
 			w.budget = budget
 		}
 		unlockCapture()
+		st.WindowSetupNs += time.Since(windowStart).Nanoseconds()
 		st.BarrierPauseNs = time.Since(pauseStart).Nanoseconds()
 		copyStart = time.Now()
 		if copyErr == nil {
@@ -904,11 +939,13 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	st.CopyNs = time.Since(copyStart).Nanoseconds()
 	if st.UploadedBytes > bytesBeforeCopy {
 		st.PayloadNs += st.CopyNs
+	} else {
+		st.NonPayloadCopyNs += st.CopyNs
 	}
 	st.UploadNs = st.CopyNs
 	if copyErr != nil {
 		l.abortCut(all)
-		l.dropIntents(ctx, intents)
+		dropCapturedIntents(ctx, intents)
 		return chunkCutResult{}, fmt.Errorf("storage: capture copy: %w", copyErr)
 	}
 	if b := l.cfg.BarrierBound; b > 0 && st.BarrierCopyChunks > b {
@@ -916,6 +953,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	}
 
 	// Upload only what changed against HEAD.
+	prepareStart := time.Now()
 	next := copyHead(baseHead)
 	next.Epoch, next.Holder, next.RemoteLSN = l.cfg.Epoch, l.cfg.Holder, h
 	next.State, next.DetachedBy = chunkHeadActive, nil
@@ -965,23 +1003,25 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		id, err := l.remote.PutIntent(ctx, chunkIntent{Gen: baseHead.Gen, Epoch: l.cfg.Epoch, Holder: l.cfg.Holder, Keys: keys})
 		if err != nil {
 			l.abortCut(all)
-			l.dropIntents(ctx, intents)
+			dropCapturedIntents(ctx, intents)
 			return chunkCutResult{}, fmt.Errorf("storage: capture intent: %w: %w", errChunkRemoteUnavailable, err)
 		}
 		intents = append(intents, id)
 	}
+	st.PublishPrepareNs += time.Since(prepareStart).Nanoseconds()
 	payloadStart := time.Now()
 	if err := l.uploadBatch(ctx, len(uploads), func(ctx context.Context, i int) error {
 		u := uploads[i]
 		return l.putCaptured(ctx, u.key, u.c.data)
 	}); err != nil {
 		l.abortCut(all)
-		l.dropIntents(ctx, intents)
+		dropCapturedIntents(ctx, intents)
 		return chunkCutResult{}, fmt.Errorf("storage: capture upload: %w", errors.Join(errChunkRemoteUnavailable, errCutUpload, err))
 	}
 	if len(uploads) > 0 {
 		st.PayloadNs += time.Since(payloadStart).Nanoseconds()
 	}
+	prepareStart = time.Now()
 	for _, u := range uploads {
 		next.Chunks[u.c.idx] = chunkRef{Key: u.key, SHA256: u.c.sum, Encoding: "full", BirthLSN: u.c.birth}
 		newKeys[u.c.idx] = u.key
@@ -989,16 +1029,19 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		st.UploadedChunks++
 		st.UploadedBytes += int64(max(len(u.c.data), u.c.size))
 	}
+	st.PublishPrepareNs += time.Since(prepareStart).Nanoseconds()
 	upgrade := false
 	if builder, ok := l.remote.(ChunkManifestBuilder); ok {
 		upgrade = baseHead.Segments == nil
 		var ids []string
 		var err error
+		manifestStart := time.Now()
 		next, ids, err = builder.PrepareManifest(ctx, baseHead, next, uint64(l.blockSize)*l.chunkBlocks)
+		st.ManifestNs += time.Since(manifestStart).Nanoseconds()
 		intents = append(intents, ids...)
 		if err != nil {
 			l.abortCut(all)
-			l.dropIntents(ctx, intents)
+			dropCapturedIntents(ctx, intents)
 			return chunkCutResult{}, err
 		}
 	}
@@ -1009,7 +1052,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		cur, err := readCapturedHead()
 		if err != nil {
 			l.abortCut(all)
-			l.dropIntents(ctx, intents)
+			dropCapturedIntents(ctx, intents)
 			return chunkCutResult{}, fmt.Errorf("storage: no-op cut authority read: %w: %w", errChunkRemoteUnavailable, err)
 		}
 		if cur.Gen != baseHead.Gen || !sameProposal(cur, baseHead) {
@@ -1020,19 +1063,19 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 			l.fencePublication(cur)
 			return chunkCutResult{}, errChunkLayerFenced
 		}
-		l.finishCut(baseHead, h, nil, nil) // nothing new: no CAS
+		finishCapturedCut(baseHead, h, nil, nil) // nothing new: no CAS
 		persistCapturedMap(capturedVersions)
-		l.dropIntents(ctx, intents) // superseded staged uploads only
+		dropCapturedIntents(ctx, intents) // superseded staged uploads only
 		return chunkCutResult{H: h, Head: copyHead(baseHead), Noop: true, FullHash: all}, nil
 	}
 	if err := l.admit(); err != nil { // admission re-checked right before the CAS
 		l.abortCut(all)
-		l.dropIntents(ctx, intents)
+		dropCapturedIntents(ctx, intents)
 		return chunkCutResult{}, err
 	}
 	if l.supersededBy(baseHead) {
 		l.abortCut(all)
-		l.dropIntents(ctx, intents)
+		dropCapturedIntents(ctx, intents)
 		l.stMu.Lock()
 		l.fenced = true
 		l.stMu.Unlock()
@@ -1051,9 +1094,9 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	}
 	if casErr == nil {
 		next.Gen = gen
-		l.finishCut(next, h, changed, newKeys)
+		finishCapturedCut(next, h, changed, newKeys)
 		persistCapturedMap(capturedVersions)
-		l.dropIntents(ctx, intents)
+		dropCapturedIntents(ctx, intents)
 		return l.cutDone(chunkCutResult{H: h, Head: copyHead(next), FullHash: all}, detach), nil
 	}
 	// Precondition or unknown outcome: resolve by re-reading HEAD, never by
@@ -1091,14 +1134,14 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	}
 	if sameProposal(cur, next) {
 		st.CASResult = "resolved-by-reread"
-		l.finishCut(cur, h, changed, newKeys)
+		finishCapturedCut(cur, h, changed, newKeys)
 		persistCapturedMap(capturedVersions)
-		l.dropIntents(ctx, intents)
+		dropCapturedIntents(ctx, intents)
 		return l.cutDone(chunkCutResult{H: h, Head: copyHead(cur), FullHash: all}, detach), nil
 	}
 	// HEAD moved past the CAS's base without it: it can never land.
 	l.abortCut(all)
-	l.dropIntents(ctx, intents)
+	dropCapturedIntents(ctx, intents)
 	if l.supersededBy(cur) {
 		l.stMu.Lock()
 		l.fenced = true
