@@ -173,6 +173,13 @@ func TestChunkLayer_C2_StalledUploadDoesNotGateLocal(t *testing.T) {
 // HEAD ever installed equals the image at its RemoteLSN while the same chunk
 // is overwritten and flushed. Each upload-entry event precedes three complete
 // writer rounds, and the upload is released only after those rounds finish.
+// Complementary capture/barrier witnesses:
+// TestChunkLayer_C3_WriteDuringCopyWaitsForTheCut parks a writer on a held
+// local copy and checks its exclusion from the at-H image;
+// TestChunkPrecopy_RedirtiedStagedChunkIsRecopied checks an overwrite between
+// staging and the barrier (both WAL-resident and flushed);
+// TestPrecopyDrainLetsAnAdmittedWriterReachTheBarrier checks that the barrier
+// includes the admitted writer completed by its pre-barrier drain.
 func TestChunkLayer_C3_EveryHeadIsExactUnderConcurrentWrites(t *testing.T) {
 	s, _ := newChunkTestStore(t)
 	f := newFakeChunkRemote()
