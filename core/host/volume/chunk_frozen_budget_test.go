@@ -80,7 +80,7 @@ func TestChunkFrozenValidationHasDistinctPreMutationCode(t *testing.T) {
 		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 			t.Fatal(err)
 		}
-		if w.Code != 400 || got.Code != "invalid_freeze_budget" || got.Retryable || p.calls != 0 {
+		if w.Code != 400 || got.Code != "invalid_freeze_request" || got.Retryable || p.calls != 0 {
 			t.Errorf("freeze validation lacked pre-mutation classification: status=%d body=%s calls=%d", w.Code, w.Body, p.calls)
 		}
 	}
@@ -94,7 +94,7 @@ func TestChunkFrozenValidationHasDistinctPreMutationCode(t *testing.T) {
 		t.Errorf("generic400 relabelled: %d %s calls=%d", w.Code, w.Body, p.calls)
 	}
 	status, code, retry := chunkErrorCode(storage.ErrInvalidFreezeBudget)
-	if status != 400 || code != "invalid_freeze_budget" || retry {
+	if status != 400 || code != "invalid_freeze_request" || retry {
 		t.Errorf("storage validation lost classification: %d %s %t", status, code, retry)
 	}
 	for _, terminal := range []error{storage.ErrChunkCASOutcomeUnknown, storage.ErrChunkLayerClosed, storage.ErrChunkLayerFenced} {
