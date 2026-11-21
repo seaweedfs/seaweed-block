@@ -30,10 +30,14 @@ type slowGuardStore struct {
 	stop     chan struct{} // closed by release(): frees any held Put
 	stopOnce sync.Once
 	held     atomic.Int64 // lease writes that were held and then completed
+	// Diagnostics only, printed when the test fails: when renewals succeeded.
+	t0     time.Time
+	lastOK atomic.Int64 // time since t0 of the latest successful renewal
+	maxGap atomic.Int64 // longest time between two successful renewals
 }
 
 func newSlowGuardStore(s authority.AuthorityStore) *slowGuardStore {
-	return &slowGuardStore{AuthorityStore: s, kick: make(chan struct{}, 1), stop: make(chan struct{})}
+	return &slowGuardStore{AuthorityStore: s, kick: make(chan struct{}, 1), stop: make(chan struct{}), t0: time.Now()}
 }
 
 // release disarms and frees every held Put; idempotent.
@@ -45,6 +49,15 @@ func (s *slowGuardStore) release() {
 // renewed credits a successful renewal that started under generation g.
 func (s *slowGuardStore) renewed(g int64) {
 	s.renewals.Add(1)
+	now := int64(time.Since(s.t0))
+	if prev := s.lastOK.Swap(now); prev != 0 {
+		for gap := now - prev; ; {
+			m := s.maxGap.Load()
+			if gap <= m || s.maxGap.CompareAndSwap(m, gap) {
+				break
+			}
+		}
+	}
 	for {
 		c := s.credited.Load()
 		if g <= c || s.credited.CompareAndSwap(c, g) {
@@ -162,13 +175,16 @@ func TestWorkspaceLeaseGuardSurvivesSlowAuthorityStore(t *testing.T) {
 	// so a renewal that waited for the store would deadlock this test. The
 	// sampler records any fence while armed; three held writes must complete.
 	var fenced atomic.Bool
+	var sinceOKAtFence atomic.Int64 // time since the latest successful renewal when the fence was first seen
 	sampled := make(chan struct{})
 	slow.armed.Store(true)
 	go func() {
 		defer close(sampled)
 		for slow.armed.Load() {
 			if !g.Projection().Healthy || stops.Load() != 0 {
-				fenced.Store(true)
+				if fenced.CompareAndSwap(false, true) {
+					sinceOKAtFence.Store(int64(time.Since(slow.t0)) - slow.lastOK.Load())
+				}
 			}
 			time.Sleep(20 * time.Millisecond)
 		}
@@ -182,7 +198,10 @@ func TestWorkspaceLeaseGuardSurvivesSlowAuthorityStore(t *testing.T) {
 	slow.armed.Store(false)
 	<-sampled
 	if fenced.Load() || !g.Projection().Healthy || stops.Load() != 0 {
-		t.Fatalf("guard fenced while lease writes were held behind renewals (held=%d renewals=%d stops=%d)", slow.held.Load(), slow.renewals.Load(), stops.Load())
+		// The gaps tell a starved runner (a gap near the 4 s validity) from a
+		// guard that fenced although renewals kept succeeding in time.
+		t.Fatalf("guard fenced while lease writes were held behind renewals (held=%d renewals=%d stops=%d); longest gap between successful renewals %s, time since the latest one when the fence was seen %s, validity 4s; the guard gives as cause: %q",
+			slow.held.Load(), slow.renewals.Load(), stops.Load(), time.Duration(slow.maxGap.Load()), time.Duration(sinceOKAtFence.Load()), g.FenceCause())
 	}
 	t.Logf("guard stayed healthy through %d held lease writes (%d renewals)", slow.held.Load(), slow.renewals.Load())
 }
