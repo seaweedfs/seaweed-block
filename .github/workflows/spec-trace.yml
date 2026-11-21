@@ -31,7 +31,9 @@ jobs:
       - name: Checkout base
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          # github.sha is the tip of the base branch when the event fires; the
+          # PR's base.sha can predate this workflow's own scripts.
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -47,4 +49,14 @@ jobs:
           git fetch --no-tags origin "+refs/pull/${PR}/head:refs/remotes/pr/head"
           printf '%s' "$BODY" >body.txt
           bash .github/scripts/post-merge-review-changed.sh "$BASE" "$HEAD" >changed.bin
-          bash .github/scripts/spec-trace-check.sh body.txt <changed.bin
+          # Old and new blobs of each changed non-test Go file, for kind DOCS
+          # (objects only; nothing from the PR is built or run).
+          mb=$(git merge-base "$BASE" "$HEAD")
+          git diff --name-only --no-renames -z "$mb" "$HEAD" -- "*.go" ":(exclude)*_test.go" |
+            while IFS= read -r -d "" p; do
+              mkdir -p "blobs/old/$(dirname "$p")" "blobs/new/$(dirname "$p")"
+              git show "$mb:$p" >"blobs/old/$p" 2>/dev/null || rm -f "blobs/old/$p"
+              git show "$HEAD:$p" >"blobs/new/$p" 2>/dev/null || rm -f "blobs/new/$p"
+            done
+          mkdir -p blobs
+          bash .github/scripts/spec-trace-check.sh body.txt blobs <changed.bin
