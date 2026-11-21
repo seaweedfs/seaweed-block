@@ -67,23 +67,23 @@ Durable store state of the served volume. Go type `volume.durableStatusBody`.
 | `ReplicaID` | string | this host's replica |
 | `VolumeCount` | int | number of entries in Volumes |
 | `Volumes[]` | object | the durable store state of the served volume |
-| `Volumes[].VolumeID` | string | — |
-| `Volumes[].Path` | string | — |
-| `Volumes[].Impl` | string | — |
-| `Volumes[].ReplicaID` | string | — |
-| `Volumes[].Epoch` | uint64 | — |
-| `Volumes[].EndpointVersion` | uint64 | — |
-| `Volumes[].Latched` | bool | — |
-| `Volumes[].Operational` | bool | — |
-| `Volumes[].FrontierKnown` | bool | — |
-| `Volumes[].DurableLSN` | uint64 | — |
-| `Volumes[].RetainedLSN` | uint64 | — |
-| `Volumes[].HeadLSN` | uint64 | — |
-| `Volumes[].Evidence` | string | — |
-| `Volumes[].Closed` | bool | — |
-| `Volumes[].WriteProfile` | object | — |
-| `Volumes[].WriteProfile.DurabilityLatency` | object | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend` | object | — |
+| `Volumes[].VolumeID` | string | the volume |
+| `Volumes[].Path` | string | its store path under --durable-root |
+| `Volumes[].Impl` | string | the durable implementation (walstore, smartwal, walstore-chunk, ...) |
+| `Volumes[].ReplicaID` | string | the replica this store holds |
+| `Volumes[].Epoch` | uint64 | the epoch the store is latched to; 0 before an assignment |
+| `Volumes[].EndpointVersion` | uint64 | the endpoint version it is latched to |
+| `Volumes[].Latched` | bool | an assignment latched the store (epoch and endpoint version set) |
+| `Volumes[].Operational` | bool | the backend admits I/O now |
+| `Volumes[].FrontierKnown` | bool | DurableLSN, RetainedLSN and HeadLSN are the store's current boundaries |
+| `Volumes[].DurableLSN` | uint64 | R: the newest LSN made durable |
+| `Volumes[].RetainedLSN` | uint64 | S: the oldest LSN the WAL still retains |
+| `Volumes[].HeadLSN` | uint64 | H: the newest LSN written |
+| `Volumes[].Evidence` | string | why the backend is or is not operational |
+| `Volumes[].Closed` | bool | the backend was closed |
+| `Volumes[].WriteProfile` | object | write-path counters since start |
+| `Volumes[].WriteProfile.DurabilityLatency` | object | latency distributions of writes, flushes and syncs |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend` | object | per-request latency at the frontend, by stage |
 | `Volumes[].WriteProfile.DurabilityLatency.Frontend.WriteTotal` | object | — |
 | `Volumes[].WriteProfile.DurabilityLatency.Frontend.WriteTotal.Count` | uint64 | — |
 | `Volumes[].WriteProfile.DurabilityLatency.Frontend.WriteTotal.SumNanos` | uint64 | — |
@@ -124,13 +124,13 @@ Durable store state of the served volume. Go type `volume.durableStatusBody`.
 | `Volumes[].WriteProfile.DurabilityLatency.Frontend.Flushes` | uint64 | — |
 | `Volumes[].WriteProfile.DurabilityLatency.Frontend.FUAWrites` | uint64 | — |
 | `Volumes[].WriteProfile.DurabilityLatency.Frontend.Failed` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.BackendSync` | object | — |
+| `Volumes[].WriteProfile.DurabilityLatency.BackendSync` | object | latency of backend syncs |
 | `Volumes[].WriteProfile.DurabilityLatency.BackendSync.Count` | uint64 | — |
 | `Volumes[].WriteProfile.DurabilityLatency.BackendSync.SumNanos` | uint64 | — |
 | `Volumes[].WriteProfile.DurabilityLatency.BackendSync.P50UpperNanos` | uint64 | — |
 | `Volumes[].WriteProfile.DurabilityLatency.BackendSync.P99UpperNanos` | uint64 | — |
 | `Volumes[].WriteProfile.DurabilityLatency.BackendSync.Buckets[]` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.WAL` | object | — (omitted when empty) |
+| `Volumes[].WriteProfile.DurabilityLatency.WAL` | object | the WAL's own sync latency, where the store reports it (omitted when empty) |
 | `Volumes[].WriteProfile.DurabilityLatency.WAL.WALAppend` | object | — |
 | `Volumes[].WriteProfile.DurabilityLatency.WAL.WALAppend.Count` | uint64 | — |
 | `Volumes[].WriteProfile.DurabilityLatency.WAL.WALAppend.SumNanos` | uint64 | — |
@@ -149,52 +149,52 @@ Durable store state of the served volume. Go type `volume.durableStatusBody`.
 | `Volumes[].WriteProfile.DurabilityLatency.WAL.FileSync.P50UpperNanos` | uint64 | — |
 | `Volumes[].WriteProfile.DurabilityLatency.WAL.FileSync.P99UpperNanos` | uint64 | — |
 | `Volumes[].WriteProfile.DurabilityLatency.WAL.FileSync.Buckets[]` | uint64 | — |
-| `Volumes[].WriteProfile.TargetWriteOps` | uint64 | — |
-| `Volumes[].WriteProfile.TargetWriteBytes` | uint64 | — |
-| `Volumes[].WriteProfile.TargetWriteRequestMaxBytes` | uint64 | — |
-| `Volumes[].WriteProfile.TargetWriteDurationNanos` | uint64 | — |
-| `Volumes[].WriteProfile.BackendWriteRequestOps` | uint64 | — |
-| `Volumes[].WriteProfile.BackendWriteRequestBytes` | uint64 | — |
-| `Volumes[].WriteProfile.BackendWriteRequestMaxBytes` | uint64 | — |
-| `Volumes[].WriteProfile.BackendWriteOps` | uint64 | — |
-| `Volumes[].WriteProfile.BackendWriteBytes` | uint64 | — |
-| `Volumes[].WriteProfile.BackendWriteDurationNanos` | uint64 | — |
-| `Volumes[].WriteProfile.BackendStorageWriteCalls` | uint64 | — |
-| `Volumes[].WriteProfile.BackendStorageWriteBlocks` | uint64 | — |
-| `Volumes[].WriteProfile.BackendStorageBatchCalls` | uint64 | — |
-| `Volumes[].WriteProfile.BackendStorageBatchBlocks` | uint64 | — |
-| `Volumes[].WriteProfile.BackendFullBlockBatchCalls` | uint64 | — |
-| `Volumes[].WriteProfile.BackendFullBlockBatchBlocks` | uint64 | — |
-| `Volumes[].WriteProfile.BackendFullBlockBatchMax` | uint64 | — |
-| `Volumes[].WriteProfile.WALCopyOps` | uint64 | — |
-| `Volumes[].WriteProfile.WALCopyBytes` | uint64 | — |
-| `Volumes[].WriteProfile.WALCopyDurationNanos` | uint64 | — |
-| `Volumes[].WriteProfile.WALEncodeOps` | uint64 | — |
-| `Volumes[].WriteProfile.WALEncodeBytes` | uint64 | — |
-| `Volumes[].WriteProfile.WALEncodeDurationNanos` | uint64 | — |
-| `Volumes[].WriteProfile.WALChecksumOps` | uint64 | — |
-| `Volumes[].WriteProfile.WALChecksumBytes` | uint64 | — |
-| `Volumes[].WriteProfile.WALChecksumDurationNanos` | uint64 | — |
-| `Volumes[].WriteProfile.WALAppendOps` | uint64 | — |
-| `Volumes[].WriteProfile.WALAppendBytes` | uint64 | — |
-| `Volumes[].WriteProfile.WALAppendDurationNanos` | uint64 | — |
-| `Volumes[].WriteProfile.WALAppendLockWaitOps` | uint64 | — |
-| `Volumes[].WriteProfile.WALAppendLockWaitNanos` | uint64 | — |
-| `Volumes[].WriteProfile.WriteCommitLockWaitOps` | uint64 | — |
-| `Volumes[].WriteProfile.WriteCommitLockWaitNanos` | uint64 | — |
-| `Volumes[].WriteProfile.WALAppendWriteAtCalls` | uint64 | — |
-| `Volumes[].WriteProfile.WALAppendWriteAtBytes` | uint64 | — |
-| `Volumes[].WriteProfile.WALAppendWriteAtMaxBytes` | uint64 | — |
-| `Volumes[].WriteProfile.WALAppendWrapCount` | uint64 | — |
-| `Volumes[].WriteProfile.WALAppendPaddingBytes` | uint64 | — |
-| `Volumes[].WriteProfile.DirtyMapUpdateOps` | uint64 | — |
-| `Volumes[].WriteProfile.DirtyMapUpdateDurationNanos` | uint64 | — |
-| `Volumes[].WriteProfile.BackendSyncOps` | uint64 | — |
-| `Volumes[].WriteProfile.BackendSyncDurationNanos` | uint64 | — |
-| `Volumes[].DataSync` | object | — (omitted when empty) |
+| `Volumes[].WriteProfile.TargetWriteOps` | uint64 | writes the protocol target handed to the volume |
+| `Volumes[].WriteProfile.TargetWriteBytes` | uint64 | their bytes |
+| `Volumes[].WriteProfile.TargetWriteRequestMaxBytes` | uint64 | the largest of them |
+| `Volumes[].WriteProfile.TargetWriteDurationNanos` | uint64 | their total time at the target |
+| `Volumes[].WriteProfile.BackendWriteRequestOps` | uint64 | write requests that entered the durable backend |
+| `Volumes[].WriteProfile.BackendWriteRequestBytes` | uint64 | their bytes |
+| `Volumes[].WriteProfile.BackendWriteRequestMaxBytes` | uint64 | the largest of them |
+| `Volumes[].WriteProfile.BackendWriteOps` | uint64 | backend writes completed |
+| `Volumes[].WriteProfile.BackendWriteBytes` | uint64 | their bytes |
+| `Volumes[].WriteProfile.BackendWriteDurationNanos` | uint64 | their total time |
+| `Volumes[].WriteProfile.BackendStorageWriteCalls` | uint64 | single-write calls into the store |
+| `Volumes[].WriteProfile.BackendStorageWriteBlocks` | uint64 | blocks they wrote |
+| `Volumes[].WriteProfile.BackendStorageBatchCalls` | uint64 | batch-write calls into the store |
+| `Volumes[].WriteProfile.BackendStorageBatchBlocks` | uint64 | blocks they wrote |
+| `Volumes[].WriteProfile.BackendFullBlockBatchCalls` | uint64 | batch calls made only of whole blocks |
+| `Volumes[].WriteProfile.BackendFullBlockBatchBlocks` | uint64 | blocks they wrote |
+| `Volumes[].WriteProfile.BackendFullBlockBatchMax` | uint64 | the largest such batch, in blocks |
+| `Volumes[].WriteProfile.WALCopyOps` | uint64 | WAL record payload copies |
+| `Volumes[].WriteProfile.WALCopyBytes` | uint64 | their bytes |
+| `Volumes[].WriteProfile.WALCopyDurationNanos` | uint64 | their total time |
+| `Volumes[].WriteProfile.WALEncodeOps` | uint64 | WAL record encodes |
+| `Volumes[].WriteProfile.WALEncodeBytes` | uint64 | their bytes |
+| `Volumes[].WriteProfile.WALEncodeDurationNanos` | uint64 | their total time |
+| `Volumes[].WriteProfile.WALChecksumOps` | uint64 | WAL record checksums |
+| `Volumes[].WriteProfile.WALChecksumBytes` | uint64 | their bytes |
+| `Volumes[].WriteProfile.WALChecksumDurationNanos` | uint64 | their total time |
+| `Volumes[].WriteProfile.WALAppendOps` | uint64 | WAL appends |
+| `Volumes[].WriteProfile.WALAppendBytes` | uint64 | their bytes |
+| `Volumes[].WriteProfile.WALAppendDurationNanos` | uint64 | their total time |
+| `Volumes[].WriteProfile.WALAppendLockWaitOps` | uint64 | appends that waited for the WAL append lock |
+| `Volumes[].WriteProfile.WALAppendLockWaitNanos` | uint64 | their total wait |
+| `Volumes[].WriteProfile.WriteCommitLockWaitOps` | uint64 | writes that waited for the commit lock |
+| `Volumes[].WriteProfile.WriteCommitLockWaitNanos` | uint64 | their total wait |
+| `Volumes[].WriteProfile.WALAppendWriteAtCalls` | uint64 | file WriteAt calls made by WAL appends |
+| `Volumes[].WriteProfile.WALAppendWriteAtBytes` | uint64 | their bytes |
+| `Volumes[].WriteProfile.WALAppendWriteAtMaxBytes` | uint64 | the largest of them |
+| `Volumes[].WriteProfile.WALAppendWrapCount` | uint64 | times the WAL append wrapped to the start of the log |
+| `Volumes[].WriteProfile.WALAppendPaddingBytes` | uint64 | padding bytes written at those wraps |
+| `Volumes[].WriteProfile.DirtyMapUpdateOps` | uint64 | dirty-map updates after writes |
+| `Volumes[].WriteProfile.DirtyMapUpdateDurationNanos` | uint64 | their total time |
+| `Volumes[].WriteProfile.BackendSyncOps` | uint64 | backend syncs (flush, FUA, explicit sync) |
+| `Volumes[].WriteProfile.BackendSyncDurationNanos` | uint64 | their total time |
+| `Volumes[].DataSync` | object | data-file sync state, where the store has one (omitted when empty) |
 | `Volumes[].DataSync.Mode` | string | — |
 | `Volumes[].DataSync.Reason` | string | — |
-| `Volumes[].CheckpointPersistence` | object | — (omitted when empty) |
+| `Volumes[].CheckpointPersistence` | object | checkpoint persistence state, where the store has one (omitted when empty) |
 | `Volumes[].CheckpointPersistence.Successes` | uint64 | — |
 | `Volumes[].CheckpointPersistence.Refusals` | uint64 | — |
 | `Volumes[].CheckpointPersistence.Failures` | uint64 | — |
@@ -202,11 +202,11 @@ Durable store state of the served volume. Go type `volume.durableStatusBody`.
 | `Volumes[].CheckpointPersistence.Advances` | uint64 | — |
 | `Volumes[].CheckpointPersistence.LastAdvance` | time (RFC 3339) | — |
 | `Volumes[].Chunk` | object | Chunk is the chunk layer's state and cut counters; walstore-chunk volumes only. |
-| `Volumes[].Chunk.Attached` | bool | — |
-| `Volumes[].Chunk.AwaitingAuthority` | bool | — |
-| `Volumes[].Chunk.Fenced` | bool | — |
-| `Volumes[].Chunk.RemoteLSN` | uint64 | — |
-| `Volumes[].Chunk.Stats` | object | — |
+| `Volumes[].Chunk.Attached` | bool | the chunk layer is attached to the remote |
+| `Volumes[].Chunk.AwaitingAuthority` | bool | recovered; the layer waits for master authority to attach |
+| `Volumes[].Chunk.Fenced` | bool | a newer holder fenced this layer: it publishes nothing |
+| `Volumes[].Chunk.RemoteLSN` | uint64 | the LSN of the remote HEAD (what the remote holds durably) |
+| `Volumes[].Chunk.Stats` | object | the layer's cut counters; zero until attached |
 | `Volumes[].Chunk.Stats.Hydration` | object | — |
 | `Volumes[].Chunk.Stats.Hydration.WorkerLimit` | int | — |
 | `Volumes[].Chunk.Stats.Hydration.QueueDepth` | int | — |
@@ -275,7 +275,7 @@ Durable store state of the served volume. Go type `volume.durableStatusBody`.
 | `Volumes[].Chunk.Stats.LastCutNs` | int64 | — |
 | `Volumes[].Chunk.Stats.BarrierOverBound` | uint64 | BarrierOverBound counts cuts whose barrier copied more than the bound after the staging rounds. |
 | `Volumes[].Chunk.Stats.AbsentChunks` | int | AbsentChunks is the number of HEAD-named chunks still absent with a block not local (what HydrateAll would still fetch); 0 = fully local. |
-| `Volumes[].Chunk.HostBudget` | interface | — (omitted when empty) |
+| `Volumes[].Chunk.HostBudget` | interface | the host background-cut budget state, with --host-limit-dir (omitted when empty) |
 | `Volumes[].Warnings[]` | string | Warnings are the store's typed recovery warnings (e.g. wal_hole_suspected, issue #51); they do not change readiness. HolesSuspected counts the recoveries that found a WAL hole. (omitted when empty) |
 | `Volumes[].HolesSuspected` | uint64 | (group of `Warnings`) Warnings are the store's typed recovery warnings (e.g. wal_hole_suspected, issue #51); they do not change readiness. HolesSuspected counts the recoveries that found a WAL hole. (omitted when empty) |
 
