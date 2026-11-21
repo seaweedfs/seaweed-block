@@ -294,18 +294,26 @@ func TestRestore_SnapshotsRefusedUntilIndependent(t *testing.T) {
 }
 
 // hangingDeleteFiler blocks DeleteEntry until its ctx ends (or the test
-// releases it) and records whether that ctx carried a deadline.
+// releases it). It reports whether that ctx carried a deadline and was live on
+// entry, then how it ended.
 type hangingDeleteFiler struct {
 	Filer
-	hadDeadline chan bool
-	release     chan struct{}
+	entered chan deleteEntry
+	ended   chan error
+	release chan struct{}
+}
+
+type deleteEntry struct {
+	hadDeadline bool
+	errAtEntry  error
 }
 
 func (h hangingDeleteFiler) DeleteEntry(ctx context.Context, dir, name string, expected map[string][]byte) error {
 	_, ok := ctx.Deadline()
-	h.hadDeadline <- ok
+	h.entered <- deleteEntry{hadDeadline: ok, errAtEntry: ctx.Err()}
 	select {
 	case <-ctx.Done():
+		h.ended <- ctx.Err()
 		return ctx.Err()
 	case <-h.release:
 		return errors.New("released by the test")
@@ -317,7 +325,7 @@ func TestCatalog_DropIntentIsBoundedAfterTheCallerIsCancelled(t *testing.T) {
 	old := dropIntentTimeout
 	dropIntentTimeout = 50 * time.Millisecond
 	t.Cleanup(func() { dropIntentTimeout = old })
-	h := hangingDeleteFiler{Filer: newFakeFiler(), hadDeadline: make(chan bool, 1), release: make(chan struct{})}
+	h := hangingDeleteFiler{Filer: newFakeFiler(), entered: make(chan deleteEntry, 1), ended: make(chan error, 1), release: make(chan struct{})}
 	c := &Catalog{f: h}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -332,12 +340,23 @@ func TestCatalog_DropIntentIsBoundedAfterTheCallerIsCancelled(t *testing.T) {
 	})
 	go func() { c.dropIntent(ctx, "/vols/v1", "op-1"); close(done) }()
 	select {
-	case ok := <-h.hadDeadline:
-		if !ok {
+	case e := <-h.entered:
+		if e.errAtEntry != nil {
+			t.Fatalf("the intent delete inherited the caller's cancellation: %v", e.errAtEntry)
+		}
+		if !e.hadDeadline {
 			t.Fatal("the intent delete ran without any deadline")
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("dropIntent never reached the filer")
+	}
+	select {
+	case err := <-h.ended:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("the intent delete ended with %v, want its own deadline (context.DeadlineExceeded)", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the intent delete never ended: it is unbounded")
 	}
 	select {
 	case <-done:
