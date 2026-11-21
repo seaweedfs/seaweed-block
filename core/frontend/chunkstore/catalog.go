@@ -864,6 +864,16 @@ func (c *Catalog) CreateSnapshot(ctx context.Context, vol string, req SnapshotRe
 	if !ok {
 		return SnapshotInfo{}, catErr(CodeNotChunkVolume, false, nil, "volume %s has no VOLUME entry", vol)
 	}
+	if v.Origin == OriginRestore {
+		// A restore is independent only once its marker exists: a snapshot
+		// taken before would keep naming the source's chunks for its whole
+		// retention, so it is refused until then (DESIGN-r2 open question a).
+		if _, independent, err := c.ReadIndependence(ctx, vol); err != nil {
+			return SnapshotInfo{}, err
+		} else if !independent {
+			return SnapshotInfo{}, catErr(CodeRestoreIncomplete, false, nil, "volume %s is still being restored: snapshots are refused until it is independent", vol)
+		}
+	}
 
 	// Take the name: this request's record, or an earlier attempt's of it.
 	attempt, err := c.claimName(ctx, vol, root, req, head.Gen)

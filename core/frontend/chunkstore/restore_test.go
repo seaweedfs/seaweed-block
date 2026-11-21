@@ -263,3 +263,31 @@ func TestRestore_WithoutLiveHeadNeverAttaches(t *testing.T) {
 		t.Fatalf("marker on an aborted restore: %v, want %s", err, CodeRestoreIncomplete)
 	}
 }
+
+// DESIGN-r2 open question (a), ruled: snapshots of a restore are refused until it is independent.
+func TestRestore_SnapshotsRefusedUntilIndependent(t *testing.T) {
+	f, b, c, _ := restoreFixture(t)
+	ctx := context.Background()
+	r2, _ := NewChunkRemote(f, b, catBase+"/v2")
+	h2, _ := r2.GetHead(ctx)
+	if _, err := c.CreateSnapshot(ctx, "v2", SnapshotRequest{Name: "early", RequestID: "e"}, h2); CodeOf(err) != CodeRestoreIncomplete {
+		t.Fatalf("snapshot of a restore in progress: %v, want %s", err, CodeRestoreIncomplete)
+	}
+	if _, ok, err := c.SnapshotReplay(ctx, "v2", SnapshotRequest{Name: "early", RequestID: "e"}); err != nil || ok {
+		t.Fatalf("a refused snapshot must leave nothing: ok=%v err=%v", ok, err)
+	}
+	h := ownAll(t, f, b, "v2")
+	if _, err := c.CreateSnapshot(ctx, "v2", SnapshotRequest{Name: "late", RequestID: "l"}, h); CodeOf(err) != CodeRestoreIncomplete {
+		t.Fatalf("own chunks but no marker yet: %v, want %s", err, CodeRestoreIncomplete)
+	}
+	if _, err := c.MarkIndependent(ctx, "v2"); err != nil {
+		t.Fatal(err)
+	}
+	s, err := c.CreateSnapshot(ctx, "v2", SnapshotRequest{Name: "late", RequestID: "l"}, h)
+	if err != nil {
+		t.Fatalf("snapshot after the marker: %v", err)
+	}
+	if ForeignRefs(s.Head(), "v2") != 0 {
+		t.Fatalf("a snapshot of an independent restore names %d foreign refs", ForeignRefs(s.Head(), "v2"))
+	}
+}
