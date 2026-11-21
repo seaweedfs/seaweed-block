@@ -42,7 +42,7 @@ func chunkGC(args []string, stdout, stderr io.Writer) int {
 	}
 	defer closeFn()
 	if apply {
-		if exit := refuseUnlessSingleFiler("gc", f, stdout, stderr); exit >= 0 {
+		if exit := refuseUnlessSingleFiler("gc", f, timeout, stdout, stderr); exit >= 0 {
 			return exit
 		}
 	}
