@@ -278,7 +278,7 @@ func TestG1_InvalidOrMissingRecordRefusesTheListener(t *testing.T) {
 }
 
 // failAt makes one persistence step fail (the rest behave as on disk).
-func failAt(t *testing.T, step string) {
+func failAt(t *testing.T, ln *ReplicaListener, step string) {
 	t.Helper()
 	ops := osFloorOps
 	boom := errors.New("injected " + step + " failure")
@@ -294,6 +294,8 @@ func failAt(t *testing.T, step string) {
 	}
 	floorFS = ops
 	t.Cleanup(func() { floorFS = osFloorOps })
+	// A refusal/probe reply is not a join of the connection handler.
+	t.Cleanup(ln.StopHard)
 }
 
 // A mutation that would raise the floor is refused, with nothing applied and
@@ -308,7 +310,7 @@ func TestG1_PersistFailureRefusesTheRaisingMutation(t *testing.T) {
 			if err := ln.AdmitAsReplica(1); err != nil {
 				t.Fatal(err)
 			}
-			failAt(t, step)
+			failAt(t, ln, step)
 			if g1Ship(t, ln, store, g1Lineage(1, 2), 1, 's') {
 				t.Fatal("a ship raising the floor was applied though the floor write failed")
 			}
@@ -318,7 +320,7 @@ func TestG1_PersistFailureRefusesTheRaisingMutation(t *testing.T) {
 			if g1Rebuild(t, ln, store, g1Lineage(3, 2), 'r') {
 				t.Fatal("a rebuild raising the floor was written though the floor write failed")
 			}
-			floorFS = osFloorOps
+			// A current-floor ship does not persist: keep the fault armed until handlers join.
 			if !g1Ship(t, ln, store, g1Lineage(4, 1), 2, 'o') {
 				t.Fatal("a ship at the current floor was refused")
 			}
@@ -343,6 +345,8 @@ func TestG1_SlowPersistFailureIsStillARefusal(t *testing.T) {
 	}
 	floorFS = ops
 	t.Cleanup(func() { floorFS = osFloorOps })
+	// A refusal/probe reply is not a join of the connection handler.
+	t.Cleanup(ln.StopHard)
 	if g1Ship(t, ln, store, g1Lineage(1, 2), 1, 's') {
 		t.Fatal("a slow refused ship was classified as applied")
 	}
@@ -376,7 +380,7 @@ func TestG1_RoleCallsPersistBeforeReturning(t *testing.T) {
 	floor := g1Fresh(t)
 	ln := g1Listener(t, store, floor)
 
-	failAt(t, "rename")
+	failAt(t, ln, "rename")
 	if err := ln.AdmitAsReplica(3); err == nil {
 		t.Fatal("AdmitAsReplica returned nil though its floor write failed")
 	}
@@ -426,6 +430,8 @@ func TestG1_ConcurrentRaisesNeverLowerTheRecord(t *testing.T) {
 	}
 	floorFS = ops
 	t.Cleanup(func() { floorFS = osFloorOps })
+	// A refusal/probe reply is not a join of the connection handler.
+	t.Cleanup(ln.StopHard)
 
 	var wg sync.WaitGroup
 	wg.Add(2)
