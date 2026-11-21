@@ -16,7 +16,8 @@ if [[ ! -f $allow_file ]]; then
 fi
 allow=()
 deny=()
-while IFS= read -r line; do
+# A last line without a newline is read too: dropping it could drop a "!".
+while IFS= read -r line || [[ -n $line ]]; do
 	line=${line%%#*}
 	line=${line%"${line##*[![:space:]]}"}
 	line=${line#"${line%%[![:space:]]*}"}
