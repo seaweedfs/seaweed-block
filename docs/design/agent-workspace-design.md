@@ -72,7 +72,7 @@ A workspace runs one replica (RF=1). It does not use the replication engine of t
 | Permanent host loss | the image at the last successful cut (HEAD `RemoteLSN`); writes after it are lost |
 | Clean move (Detach) | everything written before Detach: guest I/O is stopped, then Detach publishes a final cut before the host releases the volume |
 
-- **When cuts happen.** At semantic points chosen by the integrator, on explicit request, and by the periodic timer (default 15m, minimum 5m in the OSS CLI; 0 disables). Periodic cuts update HEAD without creating named snapshots. `--chunk-dirty-threshold` bounds staging work and never triggers a cut.
+- **When cuts happen.** At semantic points chosen by the integrator, on explicit request, and by the periodic timer (default 15m, minimum 5m in the OSS CLI; 0 disables). Periodic cuts update HEAD without creating named snapshots. Dirty chunks never trigger a cut.
 - **Recoverable frontier.** The confirmed remote HEAD is the recovery point after host loss. The default capture interval is 15m; failed or expired attempts retry with bounded backoff and reusable uploads, and do not claim a newly durable recovery point.
 - Multi-replica workspaces combined with chunk snapshots are not supported.
 
@@ -122,7 +122,7 @@ Per volume, under the chunk base directory in the filer (`core/frontend/chunksto
 `chunkLayerImpl.captureLocked` (`core/storage/chunk_layer.go`; contract in the `chunk_seam.go` header). A checkpoint is not a prefix image (the extent can already hold blocks newer than the checkpoint), so a cut is a quiesced point, not a checkpoint boundary.
 
 1. **Admit:** refuse when closed, fenced, detached, during a base install, or when `CaptureAllowed` fails (healthy primary, unchanged lineage, valid lease).
-2. **Pre-copy:** while more than `BarrierBound` chunks would be copied under the barrier (`--chunk-dirty-threshold`, default 512), stage up to that many per round outside the barrier, for at most `chunkStageRounds` (3) rounds (`stage`). A staged chunk with new bytes is uploaded under a fresh key named by an intent written first.
+2. **Pre-copy:** while the chunks that would be copied under the barrier exceed half the copy-on-write side budget, stage the hottest of them per round outside the barrier, repeating only while the remainder shrinks (`stage`). A staged chunk with new bytes is uploaded under a fresh key named by an intent written first.
 3. **Quiesce:** take the capture barrier (walstore `captureMu`) exclusively, then `Sync`. H is the synced LSN; no data newer than H exists in the WAL or the extent.
 4. **Open and copy:** install the fixed candidate window under the barrier, then release it. Bounded workers copy through the validated reader outside the barrier. A first writer saves a pending candidate before mutation; a writer waits only for its own copying/saving chunk. A staged copy is reused only if its version and HEAD still match. Pause is Sync plus candidate/window installation, independent of copy bytes.
 5. **LSN guard:** if H is below HEAD's `RemoteLSN`, refuse (`lsn_behind`).

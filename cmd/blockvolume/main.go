@@ -209,7 +209,6 @@ func parseFlags(args []string) (flags, error) {
 	fs.IntVar(&f.chunk.uploadConcurrency, "chunk-upload-concurrency", 8, "walstore-chunk: maximum concurrent dirty-chunk uploads (1..64)")
 	fs.IntVar(&f.chunk.hydrationWorkers, "chunk-hydration-workers", 2, "walstore-chunk: concurrent lazy chunk fetches per volume (1..64)")
 	fs.IntVar(&f.chunk.hydrationQueueDepth, "chunk-hydration-queue-depth", 64, "walstore-chunk: distinct queued/in-flight hydration chunks per volume (1..65536)")
-	fs.IntVar(&f.chunk.dirtyThreshold, "chunk-dirty-threshold", defaultChunkDirtyThreshold, "walstore-chunk: number of candidate chunks above which a cut pre-copies (stages) chunks before its barrier, in rounds of this size; copy-before-write copies the rest outside the barrier; never triggers a cut; 0 = no pre-copy")
 	fs.BoolVar(&f.chunk.controlEndpoint, "chunk-control-endpoint", false, "walstore-chunk: expose the /chunk/* control routes (cut, snapshot, snapshots, snapshot/delete, detach) on the status HTTP listener; off by default; loopback-only like the listener")
 	fs.UintVar(&f.durableBlocks, "durable-blocks", 2048, "number of blocks per volume on first create (ignored when opening existing)")
 	fs.UintVar(&f.durableBlockSize, "durable-blocksize", 4096, "block size in bytes on first create")
@@ -251,8 +250,8 @@ func parseFlags(args []string) (flags, error) {
 		return flags{}, err
 	}
 	memoryFlagSet := false
-	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "memory-limit-mib" {
+	fs.Visit(func(fl *flag.Flag) {
+		if fl.Name == "memory-limit-mib" {
 			memoryFlagSet = true
 		}
 	})
@@ -667,7 +666,6 @@ func run(f flags) int {
 			cfg.ChunkMaintenanceTimeout = defaultChunkMaintenanceTimeout
 			cfg.ChunkMaintenance = chunk.maintenance
 			cfg.ChunkDetachPrecopy = f.chunk.detachPrecopy
-			cfg.ChunkDirtyThreshold = f.chunk.dirtyThreshold
 			cfg.ChunkUploadConcurrency = f.chunk.uploadConcurrency
 			cfg.ChunkHydrationWorkers = f.chunk.hydrationWorkers
 			cfg.ChunkHydrationQueueDepth = f.chunk.hydrationQueueDepth
