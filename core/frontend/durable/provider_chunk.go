@@ -376,6 +376,7 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 		remote = &manifestBoundRemote{closeBoundRemote: bound, builder: builder}
 	}
 	cfg := storage.ChunkLayerConfig{
+		OnPublishSettled:    p.publishSettledHook(volumeID),
 		ChunkBlocks:         p.cfg.ChunkBlocks,
 		RestoreChunkBytes:   uint64(ws.BlockSize()) * uint64(p.cfg.ChunkBlocks),
 		HeadCoolingWindow:   p.cfg.ChunkHeadCoolingWindow,
@@ -1303,4 +1304,13 @@ func (r *manifestBoundRemote) PrepareManifest(ctx context.Context, base, next st
 	c, end := r.bind(ctx)
 	defer end()
 	return r.builder.PrepareManifest(c, base, next, chunkBytes)
+}
+
+// publishSettledHook adapts ChunkOnPublishSettled to one volume's layer.
+func (p *DurableProvider) publishSettledHook(volumeID string) func(context.Context, storage.ChunkHead, storage.ChunkHead) {
+	hook := p.cfg.ChunkOnPublishSettled
+	if hook == nil {
+		return nil
+	}
+	return func(ctx context.Context, prev, next storage.ChunkHead) { hook(ctx, volumeID, prev, next) }
 }

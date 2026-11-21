@@ -29,7 +29,7 @@ func (l *chunkLayerImpl) holdBaseTransitionV3() (func(), error) {
 	}
 	l.stMu.Unlock()
 	if refusal != nil {
-		l.capMu.Unlock()
+		l.unlockCap()
 		done()
 		return nil, fmt.Errorf("storage: BASE transition refused: %w", refusal)
 	}
@@ -56,7 +56,7 @@ func (l *chunkLayerImpl) holdBaseTransitionV3() (func(), error) {
 		if d.BaseState == BaseInstalled && presenceDurable && l.s.OwnerChunkAttachDurableV3() {
 			l.s.AllowBaseRetirementV3()
 		}
-		l.capMu.Unlock()
+		l.unlockCap()
 		done()
 	}, nil
 }

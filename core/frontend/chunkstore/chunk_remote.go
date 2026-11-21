@@ -236,6 +236,32 @@ func (r *ChunkRemote) Get(ctx context.Context, key string) ([]byte, error) {
 	return r.b.Get(ctx, fid)
 }
 
+// ReclaimKey deletes the needle bound to one of this volume's own keys
+// with GC's step (reclaimBinding): the binding is tombstoned, the exact fid
+// deleted, the binding kept for ever and marked done. It decides nothing:
+// the caller must know that no HEAD, snapshot, fork or intent references
+// key. An owner-qualified key is refused.
+func (r *ChunkRemote) ReclaimKey(ctx context.Context, key string, blobs BlobDeleter) error {
+	if err := storage.ValidChunkKey(key); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidKey, err)
+	}
+	if strings.HasPrefix(key, "@") {
+		return fmt.Errorf("%w: %q is owner-qualified; a volume reclaims only its own keys", ErrInvalidKey, key)
+	}
+	name, err := keyName(key)
+	if err != nil {
+		return err
+	}
+	e, err := r.f.LookupEntry(ctx, r.keyDir(), name)
+	if err != nil {
+		return fmt.Errorf("chunkstore: chunk key %q: %w", key, err)
+	}
+	if len(e.GetChunks()) != 0 || string(e.Extended[extKind]) != kindChunkKey || len(e.Extended[extFid]) == 0 {
+		return fmt.Errorf("chunkstore: chunk key %q: entry is not a chunk key binding", key)
+	}
+	return reclaimBinding(ctx, r.f, blobs, r.keyDir(), e)
+}
+
 // Delete is not supported; see ErrDeleteUnsupported.
 func (r *ChunkRemote) Delete(context.Context, string) error { return ErrDeleteUnsupported }
 

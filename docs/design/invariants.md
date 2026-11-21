@@ -387,7 +387,7 @@ with a separate scope/config-bound mark. Incomplete marks carry no coverage.
 
 ## Part B. Invariant ledger
 
-149 rows: 128 ACTIVE, 18 STUB, 3 ARCHIVED; 15 kept from the internal ledger, 134 new.
+151 rows: 130 ACTIVE, 18 STUB, 3 ARCHIVED; 15 kept from the internal ledger, 136 new.
 
 The "Machine / transition" column refers to Part A. Notes under a table record what a row does not cover and, for kept rows, what was narrowed from the internal ledger.
 
@@ -603,11 +603,16 @@ Notes:
 | `INV-RESTORE-OWN-BATCH-001` | A batch cut re-uploads at most N local chunks whose HEAD keys name another volume under new own keys, even when their bytes equal HEAD's, in one ordinary cut (one intent, one HEAD CAS); it never fetches an absent chunk. | M6.Restore.Owning>Owning | `core/storage/chunk_own.go` `OwnBatch`; `core/storage/chunk_cut_payload.go` `streamCutPayloads` | `TestOwnBatch_BoundedBatchesReplaceEveryForeignKey`, `TestOwnBatch_SkipsChunksNotLocal`, `TestOwnBatch_CarriesGuestWrites` (`core/storage/chunk_own_test.go`) | `RestoreIndependence` `NoGap` | ACTIVE |
 | `INV-RESTORE-DRIVER-001` | The restore driver decides only from the target's VOLUME, HEAD and marker (never the source), writes the marker only after a batch leaves no foreign ref, and a rerun resumes from the target's remote state. | M6.Restore (all transitions) | `core/host/volume/chunk_restore.go` `runRestore`, `chunkControl.Restore` | `TestRestoreDriver_RunsToIndependenceFromTheTargetsFactsOnly`, `TestRestoreDriver_ResumesAfterAFailedBatch`, `TestRestoreDriver_RefusesAVolumeNotMadeByRestore` (`core/host/volume/chunk_restore_test.go`) | `RestoreIndependence` `Independent`, `StateRemote` | ACTIVE |
 | `INV-CAT-INTENT-DROP-BOUNDED-001` | Dropping an operation's intent outlives the caller's cancellation (cleanup after a refused or cancelled request) but is bounded by `dropIntentTimeout`; a failed or timed-out delete leaves the intent, which only over-protects. | M6 intent: Live → Removed | `core/frontend/chunkstore/catalog.go` `dropIntent` | `TestCatalog_DropIntentIsBoundedAfterTheCallerIsCancelled` (`core/frontend/chunkstore/restore_test.go`) | — | ACTIVE |
+| `INV-SHARE-ACTIVATION-001` | With a `ShareGuard` installed, a snapshot or fork activates (snapshot entry, child HEAD) only after `Finish` accepts the share; a refused `Begin` or `Finish` aborts before activation and drops the new intent. With no guard, nothing is called or checked. | M6 snapshot: Pending → Published; fork: child HEAD create | `core/frontend/chunkstore/share_guard.go` `beginShare`, `finishShare`; `core/frontend/chunkstore/catalog.go` `CreateSnapshot`, `Fork`; `core/host/volume/chunk_control.go` `chunkControl.Snapshot` | `TestShareGuard_SnapshotFinishesBeforeActivation`, `TestShareGuard_RefusedFinishAbortsTheSnapshot`, `TestShareGuard_StaleHeadIsRefused`, `TestShareGuard_CallerToken`, `TestShareGuard_Fork`, `TestShareGuard_BeginRefused` (`core/frontend/chunkstore/share_guard_test.go`); `TestChunkControl_SnapshotBeginsShareBeforeTheCut`, `TestChunkControl_SnapshotBeginRefusedCutsNothing` (`core/host/volume/chunk_control_order_test.go`) | — | ACTIVE |
+| `INV-PUBLISH-SETTLED-001` | With `OnPublishSettled` set, each confirmed publication (a new HEAD generation) is delivered once, in publication order, one at a time, outside the capture and state locks. After Close begins, no report is dequeued. | M5 CAS → Settled; M6 HEAD: published | `core/storage/chunk_publish_settled.go` `noteSettled`, `unlockCap`, `runPublishSettled`; `core/storage/chunk_periodic_cut.go` `CutUnlessCutSince` | `TestChunkPublishSettled_ReportsEachPublication`, `TestChunkPublishSettled_ReportsALatePublication`, `TestChunkPublishSettled_ClosedAndUnset`, `TestChunkPublishSettled_OverlappingPublishersStayOrdered`, `TestChunkPublishSettled_CloseDropsUnstartedReports`, `TestChunkPublishSettled_HookThatPublishes`, `TestChunkPublishSettled_PeriodicCutReports` (`core/storage/chunk_publish_settled_test.go`); `TestWALStoreChunk_PublishSettledHook` (`core/frontend/durable/provider_chunk_sched_test.go`) | — | ACTIVE |
 
 Notes:
 
 - `INV-SNAP-DELETE-ANY-ORDER-001`: a fork takes its deadline start before it reads the parent, and every attempt (a retry included) reads it again, so a parent deleted before the read refuses. GC keeps a deleted attempt rooted for a grace of at least deadline + clock skew + CAS apply bound (`NewCollector`). An unknown publish keeps the fork intent, which roots the keys until the target is resolved.
 - Restore quantities: batch size N = `DefaultRestoreBatchChunks` (64 chunks per batch cut) and the walker pace = `DefaultRestoreBytesPerSecond` (64 MiB/s, plus the host limiter's BackgroundFill class), both in `core/host/volume/chunk_restore.go`. They move to the quantity table when it exists.
+- `INV-SHARE-ACTIVATION-001`: the owner's seal calls `Begin` before the cut that produces the sealed HEAD, so a refused `Begin` cuts nothing.
+- `INV-PUBLISH-SETTLED-001`: a publication is a cut, a detach, or an earlier unresolved CAS found applied; a no-op cut reports nothing, and with no hook nothing is queued. One registered drainer delivers; a report already dequeued when Close begins may still reach the hook, and Close waits for it.
+- `ChunkRemote.ReclaimKey` is the Collector's per-key step (`reclaimBinding`) exported, not a new admission: `INV-GC-REACHABLE-001` (reachability and the two-mark grace) stays the Collector's, and a `ReclaimKey` caller must itself know nothing references the key. The step keeps `INV-CHUNK-WRITE-ONCE-001`: the binding is tombstoned, its exact fid deleted, and the binding kept for ever, never rebound; owner-qualified keys are refused.
 
 ### B.7 Rows kept from the internal ledger: Kubernetes line and replica fencing
 
@@ -669,6 +674,14 @@ How a fix or a feature is calibrated against this model:
 4. **Every bug becomes a test and a row.** A bug found by a unit test, a review, a soak or chaos run, or a TLA+ counterexample becomes a regression test that fails before the fix and passes after it, and a new or updated Part B row naming that test.
 5. **Rows are stable.** IDs are never reused or renumbered. A retired row stays with status `ARCHIVED` and a reason. A narrowed statement says what was dropped in a note.
 6. **STUB rows block claims.** A release note or a design document must not claim a property backed only by a `STUB` row. Turning a `STUB` into `ACTIVE` is the test plus the status change.
+
+### C.W Wait sites (SYSTEM-MATH Part C)
+
+One row per wait in the data and control paths. Guest-visible rows on one path must sum to at most 5 s.
+
+| Site | Waits for | Bound | Owner that ends it | On expiry | Lock held while waiting | Guest-visible |
+|---|---|---|---|---|---|---|
+| `core/storage/chunk_publish_settled.go` `runPublishSettled` (from `unlockCap`, on the cut or detach caller's goroutine) | the `OnPublishSettled` hook to return | the hook's duration: the hook must return without blocking and without remote calls, enqueueing its work to its own worker | the hook implementer | none: a stalled hook stalls its caller, and later reports queue without a bound (a nil hook queues nothing) | none (`capMu` and `stMu` released) | yes on detach (the detach caller delivers before returning) |
 
 Format v3 row 4 remains dark. Its typed scan result preserves trusted records, absolute end, highest LSN, contiguous frontier, trusted DurableLSN and stop cause separately. The later W/BASE/fence owner must check R < W*, fence and publish bounds before readiness or append admission; neither codec nor scan success is readiness. The installed scan begins at max(BaseCursor, retainedTail). No ACTIVE v2 machine/guard is replaced by this step.
 

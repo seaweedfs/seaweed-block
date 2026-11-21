@@ -639,6 +639,14 @@ func (c *chunkControl) Snapshot(ctx context.Context, volumeID string, req ChunkS
 	if info, replayed, err := c.cat.SnapshotReplay(ctx, volumeID, sreq); err != nil || replayed {
 		return info, err
 	}
+	// The share begins before the cut that produces the sealed HEAD.
+	if g := c.cat.ShareGuard(); g != nil {
+		token, err := g.Begin(ctx, volumeID)
+		if err != nil {
+			return chunkstore.SnapshotInfo{}, err
+		}
+		sreq.ShareToken = token
+	}
 	// A named seal is urgent even without a minimum LSN.
 	r, err := c.p.CutVolume(hostlimit.WithClass(ctx, hostlimit.Urgent), volumeID, 0)
 	if err != nil {
