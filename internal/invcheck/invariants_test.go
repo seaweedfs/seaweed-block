@@ -1,0 +1,185 @@
+// Package invcheck checks docs/design/invariants.md against the code: the
+// row count it states is the count its tables hold, every Go test a row
+// names exists, and an ACTIVE row names at least one test.
+package invcheck
+
+import (
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"testing"
+)
+
+type invRow struct {
+	id     string
+	tests  []string
+	status string
+	line   int
+}
+
+var (
+	rowID     = regexp.MustCompile("^\\| `(INV-[A-Z0-9-]+)` \\|")
+	testName  = regexp.MustCompile("`(Test[A-Za-z0-9_]+)`")
+	testFunc  = regexp.MustCompile(`(?m)^func (Test[A-Za-z0-9_]+)\(`)
+	countLine = regexp.MustCompile("(\\d+) (?:`INV-` )?rows: (\\d+) ACTIVE, (\\d+) STUB, (\\d+) ARCHIVED")
+)
+
+func repoRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("go.mod not found above the test directory")
+		}
+		dir = parent
+	}
+}
+
+// partB returns the Part B rows of the invariant document and its text.
+func partB(t *testing.T, root string) ([]invRow, string) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(root, "docs", "design", "invariants.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	start := strings.Index(doc, "\n## Part B")
+	end := strings.Index(doc, "\n## Part C")
+	if start < 0 || end < start {
+		t.Fatal("invariants.md: Part B or Part C heading not found")
+	}
+	firstLine := strings.Count(doc[:start], "\n") + 1
+	var rows []invRow
+	for i, line := range strings.Split(doc[start:end], "\n") {
+		m := rowID.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		cells := splitRow(line)
+		if len(cells) != 7 {
+			t.Errorf("invariants.md:%d: row %s has %d cells, want 7", firstLine+i, m[1], len(cells))
+			continue
+		}
+		r := invRow{id: m[1], status: strings.TrimSpace(cells[6]), line: firstLine + i}
+		for _, tm := range testName.FindAllStringSubmatch(cells[4], -1) {
+			r.tests = append(r.tests, tm[1])
+		}
+		rows = append(rows, r)
+	}
+	return rows, doc
+}
+
+// splitRow splits a table row on unescaped pipes outside code spans.
+func splitRow(line string) []string {
+	line = strings.TrimSpace(line)
+	line = strings.TrimPrefix(line, "|")
+	line = strings.TrimSuffix(line, "|")
+	var cells []string
+	var cur strings.Builder
+	inCode := false
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		switch {
+		case c == '\\' && i+1 < len(line) && line[i+1] == '|':
+			cur.WriteString(`\|`)
+			i++
+		case c == '`':
+			inCode = !inCode
+			cur.WriteByte(c)
+		case c == '|' && !inCode:
+			cells = append(cells, cur.String())
+			cur.Reset()
+		default:
+			cur.WriteByte(c)
+		}
+	}
+	return append(cells, cur.String())
+}
+
+// goTests returns every top-level Test function name in the repository.
+func goTests(t *testing.T, root string) map[string]bool {
+	t.Helper()
+	found := map[string]bool{}
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if name := d.Name(); name == ".git" || name == "node_modules" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		src, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for _, m := range testFunc.FindAllSubmatch(src, -1) {
+			found[string(m[1])] = true
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return found
+}
+
+func TestInvariantRowsNameExistingTests(t *testing.T) {
+	root := repoRoot(t)
+	rows, _ := partB(t, root)
+	if len(rows) == 0 {
+		t.Fatal("no INV rows found in Part B")
+	}
+	tests := goTests(t, root)
+	seen := map[string]int{}
+	for _, r := range rows {
+		if prev, dup := seen[r.id]; dup {
+			t.Errorf("invariants.md:%d: %s is also at line %d", r.line, r.id, prev)
+		}
+		seen[r.id] = r.line
+		switch r.status {
+		case "ACTIVE":
+			if len(r.tests) == 0 {
+				t.Errorf("invariants.md:%d: %s is ACTIVE and names no test", r.line, r.id)
+			}
+		case "STUB", "ARCHIVED":
+		default:
+			t.Errorf("invariants.md:%d: %s has status %q", r.line, r.id, r.status)
+		}
+		for _, name := range r.tests {
+			if !tests[name] {
+				t.Errorf("invariants.md:%d: %s names %s, which is not a test in this repository", r.line, r.id, name)
+			}
+		}
+	}
+}
+
+func TestInvariantRowCountMatchesTables(t *testing.T) {
+	rows, doc := partB(t, repoRoot(t))
+	by := map[string]int{}
+	for _, r := range rows {
+		by[r.status]++
+	}
+	want := fmt.Sprintf("%d rows: %d ACTIVE, %d STUB, %d ARCHIVED", len(rows), by["ACTIVE"], by["STUB"], by["ARCHIVED"])
+	m := strings.Replace(countLine.FindString(doc), "`INV-` ", "", 1)
+	if m == "" {
+		t.Fatalf("invariants.md states no row count; the tables hold: %s", want)
+	}
+	if m != want {
+		t.Fatalf("invariants.md says %q; its tables hold %q", m, want)
+	}
+}

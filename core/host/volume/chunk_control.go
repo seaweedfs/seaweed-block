@@ -552,11 +552,21 @@ func (s *StatusServer) handleChunkDetach(w http.ResponseWriter, r *http.Request)
 		writeChunkErr(w, http.StatusBadRequest, codeInvalidFreezeBudget, false, "frozen requires a non-future freezeStartedAtNs and cannot combine with plain; allowOverBudget requires frozen")
 		return
 	}
+	// M5 PlainStop -> Quiesce: the offline caller owns a finite wait.
+	if req.Plain && req.TimeoutMs <= 0 {
+		writeChunkErr(w, http.StatusBadRequest, codeBadRequest, false, "plain detach requires positive timeoutMs")
+		return
+	}
 	ctl := s.chunkTarget(w, req.VolumeID)
 	if ctl == nil {
 		return
 	}
 	ctx, cancel := chunkContext(r, req.TimeoutMs)
+	if req.Plain { // M5 PlainStop -> Quiesce: offline work is bounded by its caller.
+		cancel()
+		const maxTimeoutMs = int64((1<<63 - 1) / time.Millisecond)
+		ctx, cancel = context.WithTimeout(r.Context(), time.Duration(min(req.TimeoutMs, maxTimeoutMs))*time.Millisecond)
+	}
 	defer cancel()
 	var res ChunkDetachResponse
 	var err error
@@ -636,24 +646,35 @@ func (c *chunkControl) Snapshot(ctx context.Context, volumeID string, req ChunkS
 	}
 	sreq := chunkstore.SnapshotRequest{Name: req.Name, RequestID: req.RequestID, Labels: req.Labels,
 		Consistency: req.Consistency, ExpiresAtNs: req.ExpiresAtNs, CreatedBy: "blockvolume", Class: req.Class}
-	if info, replayed, err := c.cat.SnapshotReplay(ctx, volumeID, sreq); err != nil || replayed {
+	return sealSnapshot(ctx, c.cat, volumeID, sreq, func(ctx context.Context) (storage.ChunkHead, error) {
+		// A named seal is urgent even without a minimum LSN.
+		r, err := c.p.CutVolume(hostlimit.WithClass(ctx, hostlimit.Urgent), volumeID, 0)
+		return r.Head, err
+	})
+}
+
+// sealSnapshot resolves sreq against the catalog first: a retry of a
+// recorded request returns that snapshot and another request for the name
+// fails, both without cutting. Only a free name is cut, and the HEAD that
+// cut installed is stored.
+func sealSnapshot(ctx context.Context, cat *chunkstore.Catalog, volumeID string, sreq chunkstore.SnapshotRequest, cut func(context.Context) (storage.ChunkHead, error)) (chunkstore.SnapshotInfo, error) {
+	if info, replayed, err := cat.SnapshotReplay(ctx, volumeID, sreq); err != nil || replayed {
 		return info, err
 	}
 	// The share begins before the cut that produces the sealed HEAD.
-	if g := c.cat.ShareGuard(); g != nil {
+	if g := cat.ShareGuard(); g != nil {
 		token, err := g.Begin(ctx, volumeID)
 		if err != nil {
 			return chunkstore.SnapshotInfo{}, err
 		}
 		sreq.ShareToken = token
 	}
-	// A named seal is urgent even without a minimum LSN.
-	r, err := c.p.CutVolume(hostlimit.WithClass(ctx, hostlimit.Urgent), volumeID, 0)
+	head, err := cut(ctx)
 	if err != nil {
 		return chunkstore.SnapshotInfo{}, err
 	}
 	sreq.SourceReadAt = time.Now()
-	return c.cat.CreateSnapshot(ctx, volumeID, sreq, r.Head)
+	return cat.CreateSnapshot(ctx, volumeID, sreq, head)
 }
 
 func (c *chunkControl) ListSnapshots(ctx context.Context, volumeID string, opts chunkstore.ListOptions) ([]chunkstore.SnapshotInfo, string, error) {

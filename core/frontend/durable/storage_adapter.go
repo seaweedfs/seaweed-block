@@ -554,9 +554,6 @@ func (b *StorageBackend) stopPlainDetachIfIdle() error {
 	defer b.ioMu.Unlock()
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.closed {
-		return frontend.ErrBackendClosed
-	}
 	if b.admittedIO != 0 {
 		return ErrPlainDetachBusy
 	}

@@ -68,6 +68,14 @@ func (f *fakeChunkProvider) DetachVolume(context.Context, string) (storage.Chunk
 
 func adapterFixture(t *testing.T) (*fakeChunkProvider, ChunkControl) {
 	t.Helper()
+	fp, cat := adapterCatalog(t)
+	return fp, NewChunkControl(fp, cat)
+}
+
+// adapterCatalog is a catalog holding volume v1 and a provider whose cut
+// installs a published HEAD of v1.
+func adapterCatalog(t *testing.T) (*fakeChunkProvider, *chunkstore.Catalog) {
+	t.Helper()
 	head := storage.ChunkHead{Gen: 3, Epoch: 2, Holder: "r1", RemoteLSN: 9, State: storage.ChunkHeadActive,
 		Chunks: map[uint64]storage.ChunkRef{0: {Key: "chunks/e2/c0/k1"}, 5: {Key: "chunks/e2/c5/k2"}}}
 	f := &adapterManifestFiler{Filer: chunkstore.NewMemFiler(), blobs: map[string][]byte{}}
@@ -87,7 +95,7 @@ func adapterFixture(t *testing.T) (*fakeChunkProvider, ChunkControl) {
 	if _, err := cat.EnsureVolume(context.Background(), "v1", chunkstore.Geometry{NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 8}); err != nil {
 		t.Fatal(err)
 	}
-	return fp, NewChunkControl(fp, cat)
+	return fp, cat
 }
 
 // Snapshot validates before it cuts, then stores the HEAD its cut
