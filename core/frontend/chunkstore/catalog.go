@@ -70,9 +70,12 @@ const (
 	// SnapAbsent is DeleteSnapshot's answer for a snapshot that is not there.
 	SnapAbsent = "absent"
 
-	// OriginCreate and OriginFork are a volume's origins.
-	OriginCreate = "create"
-	OriginFork   = "fork"
+	// OriginCreate, OriginFork and OriginRestore are a volume's origins. A
+	// restore is a fork whose volume later becomes independent of its source
+	// (own chunks, restoreIndependentName written); until then it is a fork.
+	OriginCreate  = "create"
+	OriginFork    = "fork"
+	OriginRestore = "restore"
 
 	// DefaultOpDeadline bounds a snapshot or fork from reading its source to
 	// its final write (spec §2.3).
@@ -395,10 +398,10 @@ func decodeVolume(p string, e *filerpb.Entry) (VolumeInfo, error) {
 	if v.Format != volumeFormat {
 		return VolumeInfo{}, fmt.Errorf("chunkstore: VOLUME %s: format %d not supported", p, v.Format)
 	}
-	if v.Origin != OriginCreate && v.Origin != OriginFork {
+	if v.Origin != OriginCreate && v.Origin != OriginFork && v.Origin != OriginRestore {
 		return VolumeInfo{}, fmt.Errorf("chunkstore: VOLUME %s: origin %q", p, v.Origin)
 	}
-	if v.Origin == OriginFork && (v.Fork == nil || v.Fork.RequestID == "") {
+	if isForked(v.Origin) && (v.Fork == nil || v.Fork.RequestID == "") {
 		return VolumeInfo{}, fmt.Errorf("chunkstore: VOLUME %s: a fork without its fork record", p)
 	}
 	v.State = string(e.Extended[extVolState])
@@ -527,8 +530,10 @@ func (c *Catalog) EnsureVolume(ctx context.Context, vol string, g Geometry) (Vol
 			return VolumeInfo{}, err
 		}
 	}
-	if v.Origin == OriginFork {
+	if isForked(v.Origin) {
 		// One read of HEAD decides both: absent and aborted never attach.
+		// A restore reads only its own HEAD here, never its source: a source
+		// deleted meanwhile is a normal state, not a mismatch.
 		h, has, err := c.ReadHead(ctx, vol)
 		switch {
 		case err != nil:
@@ -1169,6 +1174,24 @@ func (c *Catalog) ListVolumes(ctx context.Context) ([]string, error) {
 // unsettled keeps its own intent (that create may still land); no attempt
 // or replay deletes another attempt's intent.
 func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error) {
+	return c.fork(ctx, req, OriginFork)
+}
+
+// Restore starts an independent restore of req.Source's snapshot into
+// req.Target: the same steps as Fork (claim, qualified refs, HEAD), recorded
+// with Origin restore. The target serves at once (lazy fill); the restore
+// driver then hydrates every chunk, re-uploads the qualified ones under the
+// target's own keys in bounded batch cuts, and MarkIndependent records the
+// end of the lineage once HEAD holds no qualified ref (DESIGN-r2, O-REC-2).
+func (c *Catalog) Restore(ctx context.Context, req ForkRequest) (ForkResult, error) {
+	return c.fork(ctx, req, OriginRestore)
+}
+
+// isForked reports whether origin made the volume from another volume's
+// snapshot (a fork record exists and HEAD may hold qualified refs).
+func isForked(origin string) bool { return origin == OriginFork || origin == OriginRestore }
+
+func (c *Catalog) fork(ctx context.Context, req ForkRequest, origin string) (ForkResult, error) {
 	if _, err := c.volRoot(req.Source); err != nil {
 		return ForkResult{}, err
 	}
@@ -1199,7 +1222,7 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 		return ForkResult{}, refuseDeleted(req.Target, "fork to a new volume id")
 	}
 	if ok {
-		if err := c.checkForkRecord(existing, req); err != nil {
+		if err := c.checkForkRecord(existing, req, origin); err != nil {
 			return ForkResult{}, err
 		}
 		h, has, err := c.ReadHead(ctx, req.Target)
@@ -1271,7 +1294,7 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 				req.Target, req.Source, req.Snapshot, existing.Fork.SourceGen, snap.HeadGen)
 		}
 	} else {
-		vol := VolumeInfo{Format: volumeFormat, VolumeID: req.Target, Geometry: snap.geo, Origin: OriginFork, CreatedNs: c.now().UnixNano(),
+		vol := VolumeInfo{Format: volumeFormat, VolumeID: req.Target, Geometry: snap.geo, Origin: origin, CreatedNs: c.now().UnixNano(),
 			Parent: &Parent{VolumeID: req.Source, Snapshot: req.Snapshot, Gen: snap.HeadGen}, Fork: record}
 		ve, err := volumeEntry(vol, req.RequestID)
 		if err != nil {
@@ -1285,7 +1308,7 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 				return ForkResult{}, catErr(CodeOutcomeUnknown, true, cerr, "fork %s: VOLUME create outcome unknown; retry with the same request id", req.Target)
 			}
 			v, err := decodeVolume(path.Join(dstRoot, volumeName), got)
-			if err != nil || c.checkForkRecord(v, req) != nil || v.Fork.HeadSHA256 != digest {
+			if err != nil || c.checkForkRecord(v, req, origin) != nil || v.Fork.HeadSHA256 != digest {
 				return ForkResult{}, catErr(CodeTargetExists, false, nil, "volume %s exists (another request, or another image)", req.Target)
 			}
 		}
@@ -1477,7 +1500,10 @@ func (c *Catalog) AbortFork(ctx context.Context, target string) (claimed bool, e
 }
 
 // checkForkRecord refuses a target VOLUME that is not this fork request's.
-func (c *Catalog) checkForkRecord(v VolumeInfo, req ForkRequest) error {
+func (c *Catalog) checkForkRecord(v VolumeInfo, req ForkRequest, origin string) error {
+	if v.Origin != origin {
+		return catErr(CodeTargetExists, false, nil, "volume %s exists (origin %s, not %s)", req.Target, v.Origin, origin)
+	}
 	if v.Fork == nil || v.Fork.RequestID != req.RequestID {
 		return catErr(CodeTargetExists, false, nil, "volume %s exists (another request)", req.Target)
 	}
