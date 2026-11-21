@@ -285,6 +285,17 @@ intents remain rooted after restart; elapsed TTL is not a settlement proof.
 
 **Master side of a renewal** (`core/authority/workspace_lease_view.go`): blockmaster answers a renewal of an established lease from memory, under a small leaf lock, with no disk write and without waiting for other authority writes. The grant is min(now + TTL, durable horizon), where the horizon is the lease expiry stored on disk; a background extension, an ordinary authority write, keeps the horizon about 1.5·TTL ahead of the last renewal that triggered it. Only the first grant of a lease is written synchronously. If extensions fall behind, grants shrink and the host fences by the horizon minus half the skew bound; a failed extension write makes the volume uncertain and refuses renewals that would issue a new or extended grant (a Revoking lease still gets its bounded drain reply).
 
+**Uncertain move outcomes** (`INV-AUTH-UNCERTAIN-001`): at a failed move's reply boundary, the publisher's per-volume persistence latch takes precedence over request, forced-admission, HEAD-read and target refusals. Such a reply is UNKNOWN with same-request recovery after reload, without another authority write. Caller cancellation/deadline stays typed; a known successful issued replay remains valid.
+
+```mermaid
+flowchart LR
+  E[Move error] --> C{Caller canceled or deadline?}
+  C -->|yes| T[Typed caller error]
+  C -->|no| U{Persistence uncertain at reply?}
+  U -->|yes| X[UNKNOWN, never definite admission refusal]
+  U -->|no| R[Ordinary error classification]
+```
+
 **CLEAN move:** Detach publishes the final cut with `State = detached` in one CAS �' revoke �' the host drains frontend, replication and provider and acknowledges the stored detached HEAD generation �' blockmaster checks the detached HEAD and the matching acknowledgement �' new epoch �' the new host claims HEAD.
 
 **FORCED move:** blockmaster waits until both the persisted lease horizon (at least every grant, so at most TTL/2 later than the last grant) and the granted or conservative restart deadline, plus the full skew bound, have passed (`core/authority/workspace.go` `prepareWorkspaceMoveLocked`). The old host's late CAS fails on the epoch; its uploads become orphans for GC. Writes since the old host's last cut are lost.
