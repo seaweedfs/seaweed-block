@@ -1,0 +1,23 @@
+# Specs in docs/spec with no row yet in the "Exhausted bounds" table of docs/spec/README.md.
+# This list only shrinks: add the row, then remove the line and lower specsWithoutBoundsLeft.
+ChunkLifecycle.tla
+ChunkLifecycleFixed.tla
+ControlPlane.tla
+CutCOW.tla
+CutCOW2.tla
+CutCapture.tla
+CutPipeline.tla
+HostBudget.tla
+MaintenanceOwner.tla
+PrecopyFixedAdmission.tla
+ReplicaApplyOrder.tla
+ReplicaPrefixFloor.tla
+ReplicaReviewGuards.tla
+ReplicationFailover.tla
+RetentionGCMulti.tla
+RetentionGCTiming.tla
+SmartWALRecovery.tla
+WALReclaim.tla
+WALRecovery.tla
+WALReplica.tla
+WorkspaceTakeover.tla

@@ -103,6 +103,29 @@ Two kinds of config are **expected to violate**:
 
 Each `.cfg` names its spec on its first line.
 
+## Exhausted bounds
+
+One row per spec: a configuration that TLC explored completely (breadth-first,
+no error, queue empty), the bounds of that configuration, its distinct state
+count, and what the model leaves out. A pass means "no violation exists within
+these bounds", nothing more. A spec is added to this directory together with
+its row; `internal/invcheck` checks that each row names an existing spec and
+configuration and fills every cell. Specs that predate this table are listed
+in `internal/invcheck/testdata/specs-without-bounds.txt`; the list only
+shrinks. The sections below hold the full results, the negative
+configurations and the counterexamples.
+
+| Spec | Configuration | Bounds | Distinct states | Not modelled |
+|---|---|---|---|---|
+| `ForkDelete.tla` | `cfg/ForkDelete_safe_na_P2_D1E2G5.cfg` | deadline D=1, skew E=2, apply bound P=2, grace G=5 (the boundary G = D + E + P), check-then-publish fork, three clocks | 15,730,209 | guest I/O; GC as more than one atomic step; more than one fork per parent read |
+| `FrozenDetachBudget.tla` | `cfg/FrozenDetachBudget.cfg` | one externally frozen attempt; time in tenths of a second | 439 | physical latency; the external controller's re-freeze limit; fencing and CAS races during the cut |
+| `GCClockSkew.tla` | `GCClockSkew_safe.cfg` | G=3, S=1, Q=1, Born=10, MaxT=17 | 96 | the root scan, copy settlement and higher-epoch guards; clocks outside the configured skew |
+| `GCDeleteProgress.tla` | `GCDeleteProgress_safe.cfg` | three ordered candidates, the first DELETE rejected | 4 | root and epoch admission; elapsed coverage; persistence |
+| `PlainDetach.tla` | `cfg/PlainDetach.cfg` | up to two I/O readers, frontend close | 10 | HEAD publication; authority; physical I/O; wall-clock bounds; failure settlement |
+| `RestoreIndependence.tla` | `cfg/RestoreIndependence_nc_safe_n4.cfg` | no-claim design, the largest of the safe configurations (`n4`) | 2,752,518 | guest writes to the target while it takes ownership; GC that takes time; more than one restore per snapshot |
+| `ScopedMaintenanceGC.tla` | `ScopedMaintenanceGC_safe.cfg` | three keys across two volumes, one foreign-only root | 10 | the complete mark and the grace timing (in `RetentionGCTiming`); density and metadata-RPC cost |
+| `WorkspaceMoveOutcome.tla` | `cfg/WorkspaceMoveOutcome.cfg` | one volume, seven error causes, one failed write, one reply | 135 | authority changes; journal durability; lease safety; RPC delivery; reload |
+
 ## Specs at a glance
 
 State counts are distinct states for exhaustive passes. "N-step trace" is the
