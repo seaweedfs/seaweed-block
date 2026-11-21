@@ -85,8 +85,11 @@ func TestCutCOWV3_SpillCapIsReadOncePerCutAndShown(t *testing.T) {
 			t.Fatal(err)
 		}
 		before := reads.Load()
-		if _, err := l.Cut(context.Background()); err != nil && c.reason == "" {
-			t.Fatal(err)
+		if _, err := l.Cut(context.Background()); err != nil {
+			t.Fatalf("cut %d (free %d, read error %v): %v; want it to complete by staging, not refuse", i, c.free, c.fail, err)
+		}
+		if st := l.Stats(); len(st.CutsAborted) != 0 {
+			t.Fatalf("cut %d: aborts %v; want none", i, st.CutsAborted)
 		}
 		if n := reads.Load() - before; n != 1 {
 			t.Fatalf("cut %d read the free space %d times; want once", i, n)
@@ -94,6 +97,57 @@ func TestCutCOWV3_SpillCapIsReadOncePerCutAndShown(t *testing.T) {
 		if st := l.Stats(); st.COWSpillCap != c.cap || st.COWSpillCapReason != c.reason {
 			t.Fatalf("cut %d: stats cap %d reason %q; want %d %q", i, st.COWSpillCap, st.COWSpillCapReason, c.cap, c.reason)
 		}
+	}
+}
+
+// The cap the window holds is the one this cut read: with the free space
+// within the reserve (or unreadable) the copy window opens with a cap of 0
+// and that cause, straight from the reader. The window is caught open by
+// holding its copy of chunk 0: staging runs with the read gate disarmed,
+// and the stage hook re-dirties chunk 0 each round and arms the gate after
+// the second, so the barrier leaves chunk 0 to the window.
+func TestCutCOWV3_WindowGetsTheCutsReadCap(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		read  func() (int64, error)
+		cause error
+	}{
+		{"no room", func() (int64, error) { return 1 << 30, nil }, errCutNoRoom},
+		{"unreadable", func() (int64, error) { return 0, errors.New("statfs failed") }, errCutFreeUnreadable},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s, l, _, gate := cowFixture(t)
+			gate.mu.Lock()
+			gate.armed = false
+			gate.mu.Unlock()
+			l.cfg.COWSpillFree = c.read
+			l.testAfterStageHook = func(round int) {
+				if _, err := s.Write(1, makeBlock(ctBlockSize, byte(0x70+round))); err != nil {
+					t.Error(err)
+				}
+				if round == 1 {
+					gate.mu.Lock()
+					gate.armed = true
+					gate.mu.Unlock()
+				}
+			}
+			cutDone, cutErr := cowStartCut(t, l, gate)
+			w := l.cowActive.Load()
+			if w == nil {
+				t.Fatal("no copy window open while its copy is held")
+			}
+			w.mu.Lock()
+			limit, cause := w.spillLimit, w.spillCause
+			w.mu.Unlock()
+			if limit != 0 || !errors.Is(cause, c.cause) {
+				t.Fatalf("window cap %d cause %v; want 0 and %v from the cut's read", limit, cause, c.cause)
+			}
+			gate.unblock()
+			cowWaitSignal(t, cutDone, "cut with the window held")
+			if err := <-cutErr; err != nil {
+				t.Fatalf("cut: %v; want it to complete (the held copy needs no spill)", err)
+			}
+		})
 	}
 }
 
