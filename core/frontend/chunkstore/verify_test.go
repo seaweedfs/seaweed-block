@@ -1078,7 +1078,7 @@ func TestVerify_ContextEndedIsIncomplete(t *testing.T) {
 }
 
 // heldReads holds the read of one needle open until the reader's context
-// ends, and counts the reads in progress.
+// ends (or the test releases it), and counts the reads in progress.
 type heldReads struct {
 	Blobs
 	fid     string
@@ -1086,13 +1086,56 @@ type heldReads struct {
 	entered chan struct{} // closed when the held read has started
 	once    sync.Once
 
+	released    chan struct{} // closed by release: the escape when cancellation fails
+	releaseOnce sync.Once
+
 	mu     sync.Mutex
 	active int
-	ended  error // the held read's context error, once it ended
+	ended  error // the held read's context error, once its context ended
 }
 
 func newHeldReads(b Blobs, fid string) *heldReads {
-	return &heldReads{Blobs: b, fid: fid, entered: make(chan struct{})}
+	return &heldReads{Blobs: b, fid: fid, entered: make(chan struct{}), released: make(chan struct{})}
+}
+
+func (h *heldReads) release() { h.releaseOnce.Do(func() { close(h.released) }) }
+
+// verifyEscape bounds a test's wait for a Verify that should return at
+// once; it only turns a hang into a failure, it is not a success criterion.
+const verifyEscape = 30 * time.Second
+
+type verifyOutcome struct {
+	res VerifyResult
+	err error
+}
+
+// verifyBounded runs cat.Verify in a goroutine and returns its result, or
+// fails the test when it has not returned within verifyEscape. The cleanup,
+// registered before the launch, releases the held read and joins the call.
+func verifyBounded(t *testing.T, cat *Catalog, ctx context.Context, opts VerifyOptions, held *heldReads) (VerifyResult, error) {
+	t.Helper()
+	done := make(chan verifyOutcome, 1)
+	t.Cleanup(func() {
+		held.release()
+		select {
+		case out := <-done:
+			done <- out
+		case <-time.After(verifyEscape):
+			t.Error("Verify did not return even after its held read was released")
+		}
+	})
+	go func() {
+		res, err := cat.Verify(ctx, "v1", opts)
+		done <- verifyOutcome{res, err}
+	}()
+	select {
+	case out := <-done:
+		done <- out // for the cleanup's join
+		return out.res, out.err
+	case <-time.After(verifyEscape):
+		t.Fatalf("Verify did not return within %s: the read in progress was not cancelled and joined", verifyEscape)
+		return VerifyResult{}, nil
+	}
 }
 
 func (h *heldReads) Get(ctx context.Context, fid string) ([]byte, error) {
@@ -1113,7 +1156,11 @@ func (h *heldReads) Get(ctx context.Context, fid string) ([]byte, error) {
 			h.onEnter()
 		}
 	})
-	<-ctx.Done()
+	select {
+	case <-ctx.Done():
+	case <-h.released:
+		return nil, fmt.Errorf("chunkstore: read %s: released by the test", fid)
+	}
 	h.mu.Lock()
 	h.ended = ctx.Err()
 	h.mu.Unlock()
@@ -1149,6 +1196,7 @@ type headFailsDuringRead struct {
 	Filer
 	root, keys string
 	entered    <-chan struct{}
+	released   <-chan struct{} // the test's escape
 
 	mu     sync.Mutex
 	listed bool
@@ -1179,6 +1227,8 @@ func (f *headFailsDuringRead) LookupEntry(ctx context.Context, dir, name string)
 				return nil, errFilerDown
 			case <-ctx.Done():
 				return nil, ctx.Err()
+			case <-f.released:
+				return nil, errors.New("released by the test")
 			}
 		}
 	}
@@ -1193,16 +1243,18 @@ func TestVerify_FailedRefreshCancelsReadInProgress(t *testing.T) {
 	fx := newVerifyFixture(t, "v1")
 	h := fx.publish("v1", map[uint64][]byte{0: verifyData(1), 1: verifyData(2)}, false)
 	held := newHeldReads(fx.cb, fx.fid(h.Chunks[0].Key))
-	filer := &headFailsDuringRead{Filer: fx.f, root: path.Join(catBase, "v1"), keys: path.Join(catBase, "v1", keysDir), entered: held.entered}
+	filer := &headFailsDuringRead{Filer: fx.f, root: path.Join(catBase, "v1"), keys: path.Join(catBase, "v1", keysDir),
+		entered: held.entered, released: held.released}
 	cat, err := NewCatalog(manifestFilerBlobs{filer, held}, catBase)
 	if err != nil {
 		t.Fatal(err)
 	}
 	cat.SetClock(tickingClock(time.Minute))
-	// The caller's deadline only guards the test: Verify must end well before it.
+	// The caller's deadline tells a read cancelled by the failed refresh
+	// from one that ran into it: Verify must end well before it.
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	res, err := cat.Verify(ctx, "v1", VerifyOptions{Depth: VerifyData, RefreshInterval: time.Minute, BytesPerSecond: -1})
+	res, err := verifyBounded(t, cat, ctx, VerifyOptions{Depth: VerifyData, RefreshInterval: time.Minute, BytesPerSecond: -1}, held)
 	active, ended := held.state()
 	if !errors.Is(err, errFilerDown) || !strings.Contains(err.Error(), "refresh HEAD") {
 		t.Fatalf("verify: %v; want the HEAD refresh error", err)
@@ -1229,7 +1281,7 @@ func TestVerify_CancelDuringReadJoinsReaders(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	held.onEnter = cancel
-	res, err := cat.Verify(ctx, "v1", VerifyOptions{Depth: VerifyData, BytesPerSecond: -1})
+	res, err := verifyBounded(t, cat, ctx, VerifyOptions{Depth: VerifyData, BytesPerSecond: -1}, held)
 	active, ended := held.state()
 	select {
 	case <-held.entered:
@@ -1372,6 +1424,106 @@ func TestVerify_SameKeyWithAnotherHashIsAFinding(t *testing.T) {
 			}
 			if tc.depth == VerifyData && (res.DistinctChunksRead != 2 || fx.cb.reads(fid0) != 1) {
 				t.Fatalf("read %d chunks, chunk 0 %d times; want 2, chunk 0 once", res.DistinctChunksRead, fx.cb.reads(fid0))
+			}
+		})
+	}
+}
+
+// manualClock stands still until advanced.
+type manualClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *manualClock) read() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *manualClock) advance(d time.Duration) {
+	c.mu.Lock()
+	c.now = c.now.Add(d)
+	c.mu.Unlock()
+}
+
+// A chunk's outcome (needle missing, read error, binding missing) applies
+// to every reference to it, also to those a refreshed HEAD added before or
+// after that outcome: a reference whose root still names the chunk there is
+// a finding, under that root. The chunk is not read again.
+func TestVerify_OutcomeAppliesToRefreshedReferences(t *testing.T) {
+	dropK := func(fx *verifyFixture, k string) { fx.needle(fx.fid(k), dropNeedle) }
+	failK := func(fx *verifyFixture, k string) { fx.cb.failReads(fx.fid(k), -1) }
+	unbindK := func(fx *verifyFixture, k string) { fx.deleteBinding(k) }
+	for _, tc := range []struct {
+		name   string
+		depth  VerifyDepth
+		after  bool // the refresh comes after the outcome, not before
+		damage func(fx *verifyFixture, qkey string)
+		want   string
+		reads  int // reads of the damaged chunk
+	}{
+		{"refresh before, needle missing", VerifyData, false, dropK, "NEEDLE_MISSING@1", 1},
+		{"refresh before, read error", VerifyData, false, failK, "READ_ERROR@1", verifyReadAttempts},
+		{"refresh before, binding missing", VerifyBindings, false, unbindK, "BINDING_MISSING@1", 0},
+		{"refresh after, needle missing", VerifyData, true, dropK, "NEEDLE_MISSING@1", 1},
+		{"refresh after, read error", VerifyData, true, failK, "READ_ERROR@1", verifyReadAttempts},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newVerifyFixture(t, "v1")
+			h1 := fx.publish("v1", map[uint64][]byte{0: verifyData(1), 1: verifyData(2)}, false)
+			k := h1.Chunks[0].Key
+			fidK := fx.fid(k)
+			var h2 storage.ChunkHead
+			// The owner moves chunk K from index 0 to index 1 (index 0 and
+			// the old chunk 1 leave HEAD), and K is damaged.
+			move := func() {
+				h2 = fx.republish("v1", func(c map[uint64]storage.ChunkRef) {
+					c[1] = c[0]
+					delete(c, 0)
+				})
+				tc.damage(fx, k)
+			}
+			opts := VerifyOptions{Depth: tc.depth, BytesPerSecond: -1, RefreshInterval: time.Minute, Concurrency: 1}
+			cat := fx.c
+			if !tc.after {
+				// Refreshed at every opportunity: the bindings phase sees
+				// the move before K is checked.
+				cat.SetClock(tickingClock(time.Minute))
+				opts.hook = func(stage string) {
+					if stage == verifyHookHeadWalked {
+						move()
+					}
+				}
+			} else {
+				// No refresh until K's read has failed (one reader: K, at
+				// index 0, is read completely before the old chunk 1), then
+				// time passes and the pass refreshes after that batch.
+				clock := &manualClock{now: time.Now()}
+				moveFirst := &beforeRead{Blobs: fx.cb, fid: fidK, fn: move}
+				thenAdvance := &beforeRead{Blobs: moveFirst, fid: fx.fid(h1.Chunks[1].Key), fn: func() { clock.advance(time.Hour) }}
+				var err error
+				if cat, err = NewCatalog(manifestFilerBlobs{fx.f, thenAdvance}, catBase); err != nil {
+					t.Fatal(err)
+				}
+				cat.SetClock(clock.read)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			res, err := cat.Verify(ctx, "v1", opts)
+			if err != nil || !res.Complete {
+				t.Fatalf("verify: %v, %+v", err, res)
+			}
+			wantClasses(t, tc.name, res, tc.want)
+			if res.Findings[0].Root != headLabel(h2.Gen) || res.SupersededDuringVerify != 1 {
+				t.Fatalf("finding under %q, superseded %d; want under %q (the index 0 reference superseded)",
+					res.Findings[0].Root, res.SupersededDuringVerify, headLabel(h2.Gen))
+			}
+			if len(res.HeadGens) != 2 || res.HeadGens[0] != h1.Gen || res.HeadGens[1] != h2.Gen {
+				t.Fatalf("covered gens %v, want [%d %d]", res.HeadGens, h1.Gen, h2.Gen)
+			}
+			if n := fx.cb.reads(fidK); n != tc.reads {
+				t.Fatalf("chunk K read %d times, want %d", n, tc.reads)
 			}
 		})
 	}

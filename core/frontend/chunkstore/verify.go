@@ -18,8 +18,9 @@ package chunkstore
 //   - data: every distinct chunk (owner + key, across all selected roots)
 //     is fetched once; its SHA-256 must equal each reference and its length
 //     the chunk size (the rule the chunk layer applies on a read miss). A
-//     reference added later (a refreshed HEAD) is compared with the content
-//     already read; the chunk is not read again.
+//     chunk's outcome (the content read, or its miss) applies to every
+//     reference to it, also one a refreshed HEAD adds later; the chunk is
+//     not read again.
 //
 // Running beside a live owner and beside GC: segments and chunks are
 // immutable and written before the root that names them, so a root read
@@ -285,15 +286,18 @@ type verifyChunk struct {
 	fid        string
 	bound      bool // a sound, untombstoned binding was found
 
-	// Under the verifier's lock. read is set once the needle was read
-	// (depth data), with its length and SHA-256: a later reference is
-	// compared with them, the chunk is not read again. late are the
-	// references refreshed HEADs added; the reader compares those added
-	// before it read the chunk, addUses the ones added after.
-	read   bool
-	length int
-	digest [32]byte
-	late   []verifyUse
+	// Under the verifier's lock: the chunk's outcome, which applies to every
+	// reference to it. read is set once the needle was read (depth data),
+	// with its length and SHA-256; missClass and missDetail once a miss
+	// settled it (binding missing or tombstoned, needle missing, read
+	// error). The chunk is not read again. late are the references
+	// refreshed HEADs added: the outcome applies to those present when it
+	// is settled, and addUses applies it to the ones added after.
+	read                  bool
+	length                int
+	digest                [32]byte
+	missClass, missDetail string
+	late                  []verifyUse
 }
 
 // repeats reports whether u repeats a reference already recorded for w
@@ -844,11 +848,11 @@ func (v *verifier) names(ctx context.Context, h storage.ChunkHead, idx uint64, i
 // not seen, and returns the references to compare once the lock is
 // released. A chunk is immutable, but a new reference to it can be wrong,
 // so a reference to a chunk already seen is compared, never by reading the
-// chunk again: with its content once it was read, and below depth data
-// with the chunk's first reference. A refreshed HEAD's references (refreshed
-// set) to chunks already seen are not counted as checked again; one that
-// repeats a recorded reference adds nothing, and one the reader has yet to
-// read is left for it to compare.
+// chunk again: with its outcome once settled (its content, or its miss),
+// and below depth data with the chunk's first reference. A refreshed HEAD's
+// references (refreshed set) to chunks already seen are not counted as
+// checked again; one that repeats a recorded reference adds nothing, and
+// one to a chunk not yet settled is left for its outcome.
 func (v *verifier) addUses(r verifyRoot, chunks map[uint64]storage.ChunkRef, refreshed bool) []verifyRef {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -870,7 +874,7 @@ func (v *verifier) addUses(r verifyRoot, chunks map[uint64]storage.ChunkRef, ref
 				}
 				w.late = append(w.late, u)
 			}
-			if w.read || (v.opts.Depth != VerifyData && u.sha != w.uses[0].sha) {
+			if w.read || w.missClass != "" || (v.opts.Depth != VerifyData && u.sha != w.uses[0].sha) {
 				check = append(check, verifyRef{w, u})
 			}
 			if refreshed {
@@ -888,11 +892,15 @@ func (v *verifier) compareRefs(ctx context.Context, refs []verifyRef) error {
 	for _, c := range refs {
 		v.mu.Lock()
 		read, n, sum, first := c.w.read, c.w.length, c.w.digest, c.w.uses[0]
+		missClass, missDetail := c.w.missClass, c.w.missDetail
 		v.mu.Unlock()
 		var err error
-		if read {
+		switch {
+		case read:
 			err = v.compareContent(ctx, c.w, n, sum, []verifyUse{c.u})
-		} else {
+		case missClass != "":
+			err = v.missUses(ctx, c.w, []verifyUse{c.u}, missClass, func(verifyUse) string { return missDetail })
+		default:
 			err = v.missUses(ctx, c.w, []verifyUse{c.u}, FindingContentMismatch, func(u verifyUse) string {
 				return fmt.Sprintf("references to this chunk disagree: SHA-256 %s here, %s under %s at index %d (depth data reads the chunk)",
 					hex.EncodeToString(u.sha[:]), hex.EncodeToString(first.sha[:]), first.root.label, first.idx)
@@ -1259,9 +1267,14 @@ func (v *verifier) evaluateBinding(ctx context.Context, w *verifyChunk, e *filer
 	return nil
 }
 
-// miss reports a miss of w under all of its roots.
+// miss settles w with a miss and reports it under all of its references,
+// those refreshed HEADs added included; addUses applies it to later ones.
 func (v *verifier) miss(ctx context.Context, w *verifyChunk, class, detail string) error {
-	return v.missUses(ctx, w, w.uses, class, func(verifyUse) string { return detail })
+	v.mu.Lock()
+	w.missClass, w.missDetail = class, detail
+	uses := append(append([]verifyUse(nil), w.uses...), w.late...)
+	v.mu.Unlock()
+	return v.missUses(ctx, w, uses, class, func(verifyUse) string { return detail })
 }
 
 // missUses reports a miss of w as at most one finding: under the first of

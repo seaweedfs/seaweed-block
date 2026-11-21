@@ -205,8 +205,10 @@ A chunk that several checked roots name is reported once, under the first root
 that still names it (HEAD first). The HEAD view is also refreshed at least every
 2 minutes during a long pass; only segments whose key changed are read again,
 and chunks the pass has not seen are added. A changed reference to a chunk
-already seen is compared with that chunk's content (at depth `data`; the chunk
-is not read again) or with its other references. The result therefore states "every
+already seen gets that chunk's outcome: it is compared with the chunk's content
+(at depth `data`; the chunk is not read again) or its other references, and a
+miss already found for the chunk is reported under it if its root still names
+the chunk there. The result therefore states "every
 chunk named by the listed HEAD generations at the time it was checked", not "the
 image at one instant".
 

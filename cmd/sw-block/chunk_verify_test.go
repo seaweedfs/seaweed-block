@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -250,20 +251,47 @@ func TestOpsChunk_RefusesMultiFiler(t *testing.T) {
 }
 
 // stalledConfigFiler never answers GetFilerConfiguration: the call returns
-// only when its context ends. It reports the deadline the call carried and
-// the context error it ended with.
+// only when its context ends (or the test releases it). It reports the
+// deadline the call carried and the context error it ended with.
 type stalledConfigFiler struct {
 	filerpb.UnimplementedSeaweedFilerServer
 	deadline chan time.Time // zero: the call had no deadline
 	ended    chan error
+	release  chan struct{} // the test's escape, closed in its cleanup
 }
 
 func (f *stalledConfigFiler) GetFilerConfiguration(ctx context.Context, _ *filerpb.GetFilerConfigurationRequest) (*filerpb.GetFilerConfigurationResponse, error) {
 	dl, _ := ctx.Deadline()
 	f.deadline <- dl
-	<-ctx.Done()
-	f.ended <- ctx.Err()
-	return nil, ctx.Err()
+	select {
+	case <-ctx.Done():
+		f.ended <- ctx.Err()
+		return nil, ctx.Err()
+	case <-f.release:
+		return nil, errors.New("released by the test")
+	}
+}
+
+// chunkTestEscape bounds a wait for something that should happen promptly;
+// it only turns a hang into a failure, it is not a success criterion.
+const chunkTestEscape = 30 * time.Second
+
+// within receives from ch, or fails the test naming what was not exercised.
+func within[T any](t *testing.T, ch <-chan T, what string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(chunkTestEscape):
+		t.Fatalf("not exercised within %s: %s", chunkTestEscape, what)
+		var zero T
+		return zero
+	}
+}
+
+type chunkRun struct {
+	code      int
+	out, errs string
 }
 
 // The single-filer check runs within the command's --timeout: a filer that
@@ -278,22 +306,39 @@ func TestOpsChunk_SingleFilerCheckWithinTimeout(t *testing.T) {
 		{"snapshots", "--volume", "v1"},
 	} {
 		t.Run(args[0], func(t *testing.T) {
-			f := &stalledConfigFiler{deadline: make(chan time.Time, 1), ended: make(chan error, 1)}
+			f := &stalledConfigFiler{deadline: make(chan time.Time, 1), ended: make(chan error, 1), release: make(chan struct{})}
 			addr := serveGRPC(t, func(s *grpc.Server) { filerpb.RegisterSeaweedFilerServer(s, f) })
+			done := make(chan chunkRun, 1)
+			// Registered before the launch (and run before the server stops):
+			// release a call still held, then join the command.
+			t.Cleanup(func() {
+				close(f.release)
+				select {
+				case r := <-done:
+					done <- r
+				case <-time.After(chunkTestEscape):
+					t.Errorf("%s did not return even after the held call was released", args[0])
+				}
+			})
 			start := time.Now()
-			code, out, errs := runChunk(append(args, "--chunk-filer", addr, "--timeout", timeout.String())...)
-			dl := <-f.deadline
-			ended := <-f.ended
-			if e := chunkErrorOut(t, out); code != chunkExitFailed || e.Code != codeNotSingleFilerCLI || !strings.Contains(e.Message, "deadline") {
-				t.Fatalf("%s with a stalled filer: exit %d %q %q; want 1, not_single_filer, the deadline", args[0], code, out, errs)
-			}
+			go func() {
+				code, out, errs := runChunk(append(args, "--chunk-filer", addr, "--timeout", timeout.String())...)
+				done <- chunkRun{code, out, errs}
+			}()
+			dl := within(t, f.deadline, args[0]+": the start check never called GetFilerConfiguration")
 			// The call's deadline is the command's: start + timeout, plus
 			// the time to start the command; far below the check's own 60 s.
 			if dl.IsZero() || dl.After(start.Add(timeout+20*time.Second)) {
 				t.Fatalf("%s: the check's call carried deadline %v (start %v); want the command's %s", args[0], dl, start, timeout)
 			}
+			ended := within(t, f.ended, args[0]+": the start check's call never observed the end of its context")
+			r := within(t, done, args[0]+": the command did not return after the check's call ended")
+			done <- r // for the cleanup's join
 			if ended == nil {
 				t.Fatalf("%s: the check's call did not observe the cancellation", args[0])
+			}
+			if e := chunkErrorOut(t, r.out); r.code != chunkExitFailed || e.Code != codeNotSingleFilerCLI || !strings.Contains(e.Message, "deadline") {
+				t.Fatalf("%s with a stalled filer: exit %d %q %q; want 1, not_single_filer, the deadline", args[0], r.code, r.out, r.errs)
 			}
 		})
 	}
