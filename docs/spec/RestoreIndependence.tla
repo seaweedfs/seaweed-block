@@ -1,7 +1,7 @@
 ------------------------------ MODULE RestoreIndependence ------------------------------
 (***************************************************************************)
-(* Independent restore (O-REC-2): restore a snapshot into a volume that   *)
-(* ends up owning all its chunks, with no lineage to the source.          *)
+(* Independent restore: restore a snapshot into a volume that ends up      *)
+(* owning all its chunks, with no lineage to the source.                   *)
 (* Source volume V with HEAD and one sealed snapshot S; target T restored  *)
 (* from S. T's HEAD maps indexes to fids; a fid is owned by V (a "@V/"     *)
 (* ref) or by T. Steps: 0 claim S; 1 fork (T HEAD = S's fids, all V-owned) *)

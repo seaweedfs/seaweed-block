@@ -28,7 +28,7 @@ var (
 )
 
 // HydrateAll makes every chunk local that HEAD names and the volume does not
-// hold yet (an independent restore's background hydrate, O-REC-2). It walks
+// hold yet (an independent restore's background hydrate). It walks
 // the absent chunks lowest index first through the same shared fill flights
 // as guest read misses (one fetch per chunk, the hydration queue bound and
 // the read-miss timeout apply), so it never fetches a chunk twice or races a

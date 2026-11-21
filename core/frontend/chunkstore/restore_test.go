@@ -154,7 +154,7 @@ func TestRestore_MarkIndependentOnlyWithoutQualifiedRefs(t *testing.T) {
 	}
 }
 
-// claude06 (verify side): deleting the source mid-restore is a normal state for every reader of T's fork record.
+// Deleting the source mid-restore is a normal state for every reader of T's fork record.
 func TestRestore_SourceGoneIsNormal(t *testing.T) {
 	f, b, c, _ := restoreFixture(t)
 	ctx := context.Background()
@@ -194,7 +194,7 @@ func TestRestore_SourceGoneIsNormal(t *testing.T) {
 	}
 }
 
-// claude05/claude06 load-bearing invariant for O-REC-2 option 1: after the restore's HEAD exists, the
+// Load-bearing (the claim ends at the first HEAD): after the restore's HEAD exists, the
 // source snapshot and the source volume may both go; GC must keep every chunk T's HEAD names (qualified
 // refs resolve to the owner's bindings) until T's own batch cuts replace them.
 func TestRestore_GCRootsQualifiedRefsWithSnapshotAndSourceGone(t *testing.T) {
@@ -237,7 +237,7 @@ func TestRestore_GCRootsQualifiedRefsWithSnapshotAndSourceGone(t *testing.T) {
 	}
 }
 
-// claude06 condition (3): a restore whose HEAD is absent or an aborted tombstone never attaches, like a fork.
+// A restore whose HEAD is absent or an aborted tombstone never attaches, like a fork.
 func TestRestore_WithoutLiveHeadNeverAttaches(t *testing.T) {
 	f, _, c, _ := catalogFixture(t)
 	ctx := context.Background()
@@ -264,7 +264,7 @@ func TestRestore_WithoutLiveHeadNeverAttaches(t *testing.T) {
 	}
 }
 
-// DESIGN-r2 open question (a), ruled: snapshots of a restore are refused until it is independent.
+// Snapshots of a restore are refused until it is independent.
 func TestRestore_SnapshotsRefusedUntilIndependent(t *testing.T) {
 	f, b, c, _ := restoreFixture(t)
 	ctx := context.Background()

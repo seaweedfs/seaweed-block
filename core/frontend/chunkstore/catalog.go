@@ -874,7 +874,7 @@ func (c *Catalog) CreateSnapshot(ctx context.Context, vol string, req SnapshotRe
 	if v.Origin == OriginRestore {
 		// A restore is independent only once its marker exists: a snapshot
 		// taken before would keep naming the source's chunks for its whole
-		// retention, so it is refused until then (DESIGN-r2 open question a).
+		// retention, so it is refused until then.
 		if _, independent, err := c.ReadIndependence(ctx, vol); err != nil {
 			return SnapshotInfo{}, err
 		} else if !independent {
@@ -1206,7 +1206,7 @@ func (c *Catalog) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 // with Origin restore. The target serves at once (lazy fill); the restore
 // driver then hydrates every chunk, re-uploads the qualified ones under the
 // target's own keys in bounded batch cuts, and MarkIndependent records the
-// end of the lineage once HEAD holds no qualified ref (DESIGN-r2, O-REC-2).
+// end of the lineage once HEAD holds no ref to another volume.
 func (c *Catalog) Restore(ctx context.Context, req ForkRequest) (ForkResult, error) {
 	return c.fork(ctx, req, OriginRestore)
 }
