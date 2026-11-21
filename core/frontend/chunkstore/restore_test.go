@@ -291,3 +291,114 @@ func TestRestore_SnapshotsRefusedUntilIndependent(t *testing.T) {
 		t.Fatalf("a snapshot of an independent restore names %d foreign refs", ForeignRefs(s.Head(), "v2"))
 	}
 }
+
+// hangingDeleteFiler blocks DeleteEntry until its ctx ends and records whether
+// that ctx carried a deadline.
+type hangingDeleteFiler struct {
+	Filer
+	hadDeadline chan bool
+}
+
+func (h hangingDeleteFiler) DeleteEntry(ctx context.Context, dir, name string, expected map[string][]byte) error {
+	_, ok := ctx.Deadline()
+	h.hadDeadline <- ok
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// dropIntent outlives a cancelled caller, but one unresponsive delete must still be bounded.
+func TestCatalog_DropIntentIsBoundedAfterTheCallerIsCancelled(t *testing.T) {
+	old := dropIntentTimeout
+	dropIntentTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { dropIntentTimeout = old })
+	h := hangingDeleteFiler{Filer: newFakeFiler(), hadDeadline: make(chan bool, 1)}
+	c := &Catalog{f: h}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan struct{})
+	go func() { c.dropIntent(ctx, "/vols/v1", "op-1"); close(done) }()
+	select {
+	case ok := <-h.hadDeadline:
+		if !ok {
+			t.Fatal("the intent delete ran without any deadline")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("dropIntent never reached the filer")
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("dropIntent did not return: the delete is unbounded")
+	}
+}
+
+// A cut image saved before the marker still names the source's chunks: the
+// marker must not let it become a snapshot.
+func TestRestore_SnapshotOfAStalePreIndependenceImageRefused(t *testing.T) {
+	f, b, c, _ := restoreFixture(t)
+	ctx := context.Background()
+	r2, _ := NewChunkRemote(f, b, catBase+"/v2")
+	stale, _ := r2.GetHead(ctx)
+	h := ownAll(t, f, b, "v2")
+	if _, err := c.MarkIndependent(ctx, "v2"); err != nil {
+		t.Fatal(err)
+	}
+	req := SnapshotRequest{Name: "stale", RequestID: "s"}
+	if _, err := c.CreateSnapshot(ctx, "v2", req, stale); CodeOf(err) != CodeRestoreIncomplete {
+		t.Fatalf("stale foreign image after the marker: %v, want %s", err, CodeRestoreIncomplete)
+	}
+	if _, ok, err := c.SnapshotReplay(ctx, "v2", req); err != nil || ok {
+		t.Fatalf("a refused snapshot must leave nothing: ok=%v err=%v", ok, err)
+	}
+	if list, _, err := c.ListSnapshots(ctx, "v2", ListOptions{}); err != nil || len(list) != 0 {
+		t.Fatalf("snapshots after the refusal: %v %v", list, err)
+	}
+	if _, err := c.CreateSnapshot(ctx, "v2", SnapshotRequest{Name: "own", RequestID: "o"}, h); err != nil {
+		t.Fatalf("the own image must still be accepted: %v", err)
+	}
+}
+
+// Retention disposition with an aborted first HEAD on a restore target: the
+// fork claim alone no longer holds the parent (liveClaims counts any HEAD,
+// aborted included), but the fork-record scan does (forkParentsNeeded treats
+// an aborted HEAD as no HEAD), so the parent snapshot is kept as fork_parent
+// until the aborted target is deleted. That conservative hold is the rule.
+func TestRestore_AbortedFirstHeadKeepsTheParentUntilTheTargetIsDeleted(t *testing.T) {
+	f, c, _, _ := retentionFixture(t, 1)
+	ctx := context.Background()
+	if err := c.SetRetentionPolicy(ctx, "v1", RetentionPolicy{}); err != nil { // keep nothing by policy
+		t.Fatal(err)
+	}
+	for _, vol := range []string{"v1", "v2"} {
+		if err := f.CreateEntry(ctx, catBase, &filerpb.Entry{Name: vol, IsDirectory: true}, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	holdFirst(f, catBase+"/v2/HEAD")
+	if _, err := c.Restore(ctx, ForkRequest{Source: "v1", Snapshot: "s00", Target: "v2", RequestID: "rs"}); CodeOf(err) != CodeOutcomeUnknown {
+		t.Fatalf("restore with a held HEAD create: %v", err)
+	}
+	if claimed, err := c.AbortFork(ctx, "v2"); err != nil || !claimed {
+		t.Fatalf("abort the unpublished restore: claimed=%v %v", claimed, err)
+	}
+	if live, err := c.liveClaims(ctx, "v1", "s00", []string{forkClaim("v2", "rs")}); err != nil || len(live) != 0 {
+		t.Fatalf("claim on an aborted target: live=%v %v, want not live (any HEAD ends the claim)", live, err)
+	}
+	res, err := c.Retain(ctx, "v1", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if k := kept(res.Decisions); len(k) != 1 || k["s00"] == nil || k["s00"][0] != keepForkParent || len(res.Deleted) != 0 {
+		t.Fatalf("aborted restore: kept %v deleted %v; want s00 kept as fork_parent", k, res.Deleted)
+	}
+	if s, err := c.allSnapshots(ctx, "v1"); err != nil || len(s) != 1 {
+		t.Fatalf("parent after retention: %v %v", s, err)
+	}
+	if _, err := c.DeleteVolume(ctx, "v2", nil); err != nil {
+		t.Fatalf("delete the aborted restore: %v", err)
+	}
+	res, err = c.Retain(ctx, "v1", false)
+	if err != nil || len(res.Deleted) != 1 || res.Deleted[0] != "s00" {
+		t.Fatalf("after the target is gone: deleted %v (%v), want s00", res.Deleted, err)
+	}
+}

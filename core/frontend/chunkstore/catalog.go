@@ -753,10 +753,17 @@ func (c *Catalog) AbortSnapshot(ctx context.Context, vol, name, attempt string) 
 // is confirmed or can never apply. It never touches another attempt's
 // intent, even under the same operation: an earlier attempt's create may
 // still be held by the server and land later (W5 rule). A failed delete
-// leaves the intent, which only over-protects.
+// leaves the intent, which only over-protects. The delete outlives the
+// caller's cancellation (cleanup after a refused or cancelled request) but is
+// bounded by dropIntentTimeout, so it can never hang on an unresponsive filer.
 func (c *Catalog) dropIntent(ctx context.Context, root, id string) {
-	_ = c.f.DeleteEntry(context.WithoutCancel(ctx), path.Join(root, intentsDir), id, nil)
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dropIntentTimeout)
+	defer cancel()
+	_ = c.f.DeleteEntry(dctx, path.Join(root, intentsDir), id, nil)
 }
+
+// dropIntentTimeout bounds one intent delete (a var so tests can shorten it).
+var dropIntentTimeout = 30 * time.Second
 
 type createOutcome int
 
@@ -872,6 +879,13 @@ func (c *Catalog) CreateSnapshot(ctx context.Context, vol string, req SnapshotRe
 			return SnapshotInfo{}, err
 		} else if !independent {
 			return SnapshotInfo{}, catErr(CodeRestoreIncomplete, false, nil, "volume %s is still being restored: snapshots are refused until it is independent", vol)
+		}
+		// The supplied image need not be the current HEAD: a cut taken before
+		// the marker may still name the source's chunks. Check the image itself.
+		if q, err := c.foreignRefsOf(ctx, vol, head); err != nil {
+			return SnapshotInfo{}, err
+		} else if q > 0 {
+			return SnapshotInfo{}, catErr(CodeRestoreIncomplete, false, nil, "volume %s: snapshot image gen %d holds %d refs to another volume", vol, head.Gen, q)
 		}
 	}
 

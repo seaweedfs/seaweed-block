@@ -88,20 +88,11 @@ func (c *Catalog) MarkIndependent(ctx context.Context, vol string) (RestoreIndep
 	if !has || h.State == storage.ChunkHeadAborted || headDeletingOrDeleted(h) {
 		return RestoreIndependence{}, catErr(CodeRestoreIncomplete, false, nil, "volume %s has no live HEAD", vol)
 	}
-	// The manifest segments name chunk refs too: check the resolved HEAD (every
-	// segment key and every chunk ref inside), as GC and usage resolve it.
-	if c.blobs == nil {
-		return RestoreIndependence{}, errors.New("chunkstore: restore marker needs the segment reader")
-	}
-	r, err := NewChunkRemote(c.f, c.blobs, path.Join(c.base, vol))
+	q, err := c.foreignRefsOf(ctx, vol, h)
 	if err != nil {
 		return RestoreIndependence{}, err
 	}
-	resolved, err := r.resolveManifest(ctx, h)
-	if err != nil {
-		return RestoreIndependence{}, remoteErr(err, "resolve HEAD of %s", vol)
-	}
-	if q := ForeignRefs(resolved, vol); q > 0 {
+	if q > 0 {
 		return RestoreIndependence{}, catErr(CodeRestoreIncomplete, false, nil, "volume %s: HEAD gen %d still holds %d refs to another volume", vol, h.Gen, q)
 	}
 	m := RestoreIndependence{Format: volumeFormat, VolumeID: vol, HeadGen: h.Gen, MarkedNs: c.now().UnixNano()}
@@ -151,4 +142,22 @@ func (c *Catalog) ReadIndependence(ctx context.Context, vol string) (RestoreInde
 		return RestoreIndependence{}, false, remoteErr(err, "decode %s of %s", restoreIndependentName, vol)
 	}
 	return m, true, nil
+}
+
+// foreignRefsOf counts the refs to other volumes in image h of vol, resolved:
+// the manifest segments name chunk refs too, so every segment key and every
+// chunk ref inside is checked, as GC and usage resolve it.
+func (c *Catalog) foreignRefsOf(ctx context.Context, vol string, h storage.ChunkHead) (int, error) {
+	if c.blobs == nil {
+		return 0, errors.New("chunkstore: restore independence needs the segment reader")
+	}
+	r, err := NewChunkRemote(c.f, c.blobs, path.Join(c.base, vol))
+	if err != nil {
+		return 0, err
+	}
+	resolved, err := r.resolveManifest(ctx, h)
+	if err != nil {
+		return 0, remoteErr(err, "resolve gen %d of %s", h.Gen, vol)
+	}
+	return ForeignRefs(resolved, vol), nil
 }
