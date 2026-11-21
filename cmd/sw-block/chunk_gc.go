@@ -27,7 +27,7 @@ func chunkGC(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&base, "chunk-path", defaultChunkPathCLI, "chunk catalog namespace")
 	fs.StringVar(&master, "master", "", "authoritative blockmaster gRPC address")
 	fs.BoolVar(&apply, "apply", false, "settle intents, save completed marks and reclaim eligible chunks; default is read-only")
-	fs.DurationVar(&grace, "grace", time.Hour, "two-mark interval and minimum upload age (must exceed the operation deadline plus mark time)")
+	fs.DurationVar(&grace, "grace", time.Hour, "two-mark interval and minimum upload age (at least the operation deadline + clock skew + CAS apply bound, and more than the operation deadline plus mark time)")
 	fs.DurationVar(&ttl, "intent-ttl", time.Hour, "minimum capture-intent age before authoritative epoch expiry")
 	fs.DurationVar(&timeout, "timeout", time.Minute, "bound for this pass, including master/filer/blob calls")
 	if e := fs.Parse(args); e != nil {

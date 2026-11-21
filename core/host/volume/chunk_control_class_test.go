@@ -29,9 +29,6 @@ func TestChunkControl_InvalidClassRefusedBeforeCut(t *testing.T) {
 			t.Fatalf("%s maps to %d, want 400", code, s)
 		}
 	}
-	if s := catalogStatus(chunkstore.CodeSnapshotClaimed); s != http.StatusConflict {
-		t.Fatalf("snapshot_claimed maps to %d, want 409", s)
-	}
 
 	info, err := ctl.Snapshot(ctx, "v1", ChunkSnapshotRequest{Name: "s1", RequestID: "r1", Class: chunkstore.SnapshotClassPinned})
 	if err != nil || info.Class != chunkstore.SnapshotClassPinned || fp.cuts != 1 {

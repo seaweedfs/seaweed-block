@@ -120,7 +120,7 @@ func TestIntegration_DeleteVolumeThenGC(t *testing.T) {
 
 	// GC: two marks past grace reclaim exactly A (only S1 and w2 reached
 	// it) and D (only w2); B and C (w1's HEAD and S2) stay.
-	grace := 2 * DefaultOpDeadline
+	grace := 3 * DefaultOpDeadline // >= deadline + skew + CAS apply bound
 	at := time.Now().Add(3 * grace)
 	g, err := NewCollector(cat, cl, GCConfig{Grace: grace, IntentTTL: time.Hour, Now: func() time.Time { return at },
 		IssuedEpoch: func(context.Context, string) (uint64, error) { return 1, nil }})
