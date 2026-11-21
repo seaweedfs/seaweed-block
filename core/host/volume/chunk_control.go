@@ -552,11 +552,21 @@ func (s *StatusServer) handleChunkDetach(w http.ResponseWriter, r *http.Request)
 		writeChunkErr(w, http.StatusBadRequest, codeInvalidFreezeBudget, false, "frozen requires a non-future freezeStartedAtNs and cannot combine with plain; allowOverBudget requires frozen")
 		return
 	}
+	// M5 PlainStop -> Quiesce: the offline caller owns a finite wait.
+	if req.Plain && req.TimeoutMs <= 0 {
+		writeChunkErr(w, http.StatusBadRequest, codeBadRequest, false, "plain detach requires positive timeoutMs")
+		return
+	}
 	ctl := s.chunkTarget(w, req.VolumeID)
 	if ctl == nil {
 		return
 	}
 	ctx, cancel := chunkContext(r, req.TimeoutMs)
+	if req.Plain { // M5 PlainStop -> Quiesce: offline work is bounded by its caller.
+		cancel()
+		const maxTimeoutMs = int64((1<<63 - 1) / time.Millisecond)
+		ctx, cancel = context.WithTimeout(r.Context(), time.Duration(min(req.TimeoutMs, maxTimeoutMs))*time.Millisecond)
+	}
 	defer cancel()
 	var res ChunkDetachResponse
 	var err error

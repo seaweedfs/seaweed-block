@@ -1084,7 +1084,8 @@ func (p *DurableProvider) DetachVolumeFrozen(ctx context.Context, volumeID strin
 var ErrPlainDetachBusy = errors.New("durable: plain detach requires idle frontend I/O")
 
 // DetachVolumePlain bypasses pre-copy cost admission only after atomically
-// closing an idle frontend. Publication and failure settlement are unchanged.
+// closing an idle frontend (including a closed handle). M5 PlainStop -> Quiesce uses
+// only the caller context, not the live-serving freeze timer.
 func (p *DurableProvider) DetachVolumePlain(ctx context.Context, volumeID string) (storage.ChunkCutResult, uint64, error) {
 	return p.detachVolume(ctx, volumeID, true)
 }
@@ -1142,6 +1143,10 @@ func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, pla
 			start = guestFreeze.StartedAt
 		}
 		casAtFreeze = countCAS()
+		if plain { // M5 PlainStop -> Quiesce: no live frontend, caller owns the bound.
+			settleDeadline, _ = ctx.Deadline()
+			return
+		}
 		operationStart := start
 		if guestFrozen && guestFreeze.AllowOverBudget {
 			operationStart = time.Now()
@@ -1158,7 +1163,7 @@ func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, pla
 		if timer != nil {
 			timer.Stop()
 		}
-		if !start.IsZero() {
+		if !plain && !start.IsZero() {
 			if d := time.Since(start); d > detachFreezeTarget {
 				log.Printf("durable: ALARM detach of volume=%s held guest I/O for %s (target %s, bound %s)", volumeID, d.Round(time.Millisecond), detachFreezeTarget, freeze)
 			}
@@ -1239,7 +1244,11 @@ func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, pla
 			}
 		}
 		if trace := p.testDetachTrace; trace != nil {
-			trace("cut", start.Add(freeze*3/4))
+			deadline := start.Add(freeze * 3 / 4)
+			if plain {
+				deadline, _ = cutCtx.Deadline()
+			}
+			trace("cut", deadline)
 		}
 		h.chunkDetach = true
 		notifyDetach()
@@ -1263,7 +1272,11 @@ func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, pla
 	// resumes: an earlier detach that applied, an unresolved detach CAS or a
 	// fenced layer must never resume serving. The settlement keeps the rest
 	// of the freeze budget even when the caller's context is gone.
-	sctx, scancel := context.WithDeadline(context.WithoutCancel(cutCtx), settleDeadline)
+	sctx, scancel := context.WithCancel(cutCtx)
+	if !plain { // Live detach retains its reserved settlement budget.
+		scancel()
+		sctx, scancel = context.WithDeadline(context.WithoutCancel(cutCtx), settleDeadline)
+	}
 	defer scancel()
 	if trace := p.testDetachTrace; trace != nil {
 		dl, _ := sctx.Deadline()
