@@ -10,9 +10,9 @@ import (
 	"time"
 )
 
-// Plan row 9a controls (DESIGN r17.3.1 sections 8.1, 8.2, 8.4, 8.5, 8.7):
+// BASE install controls:
 // the v3 BASE begin, the install handle, complete, no abort and retirement.
-// Owner: claude03. Each control names the mutant it qualifies.
+// Each control names the mutant it qualifies.
 
 var (
 	idA = [16]byte{0xA}
@@ -244,8 +244,7 @@ func TestBaseInstallV3ApplyInstallEntryOrderAndGap(t *testing.T) {
 
 // holdOnce returns a hook that parks the first call until release runs,
 // and reports through parked when it has parked. The test's cleanup always
-// releases, so a failing test never leaves a parked goroutine behind
-// (codex01 row 9a P2).
+// releases, so a failing test never leaves a parked goroutine behind.
 func holdOnce(t *testing.T) (hook func(), parked chan struct{}, release func()) {
 	parked = make(chan struct{})
 	gate := make(chan struct{})
@@ -262,7 +261,7 @@ func holdOnce(t *testing.T) (hook func(), parked chan struct{}, release func()) 
 	}, parked, release
 }
 
-// Drain setup, held inside the mutation (plan row 9, codex01 r12 P2):
+// Drain setup, held inside the mutation:
 // A's admitted write is held; B's begin waits for it; B then writes the
 // target block and stays installing; a further A attempt is refused with
 // B's block byte-identical. Mutants: begin taking installMu shared (A's
@@ -316,8 +315,8 @@ func TestBaseInstallV3HeldOldWriteDrainsBeforeANewBegin(t *testing.T) {
 	}
 }
 
-// Premature-check setup, parked before admission (codex03 r11, plan row
-// 9): A parks before acquiring installMu; B supersedes, writes the target
+// Premature-check setup, parked before admission:
+// A parks before acquiring installMu; B supersedes, writes the target
 // block and stays installing; A resumes and is refused under the lock.
 // Mutants: checking the ID before acquiring installMu, and no ID check.
 func TestBaseInstallV3ParkedOldFrameIsRefusedAfterASupersession(t *testing.T) {
@@ -355,7 +354,7 @@ func TestBaseInstallV3ParkedOldFrameIsRefusedAfterASupersession(t *testing.T) {
 	}
 }
 
-// codex01 row 9a P1-1: W 1 with unacknowledged LSNs 2 and 3 appended. A
+// W 1 with unacknowledged LSNs 2 and 3 appended. A
 // begin at BaseLSN 1 would put 2 and 3 behind BaseCursor while the
 // allocator continues at 4: after complete, an acknowledged write 4 and a
 // reopen from F = 1 meet the hole (strict: R 1 < W 4; lagged: 4 dropped).
@@ -407,7 +406,7 @@ func TestBaseInstallV3BeginRefusesBelowTheHighestAppendedLSN(t *testing.T) {
 	}
 }
 
-// codex01 row 9a P1-2: a BASE write makes its chunk's coverage UNKNOWN only
+// A BASE write makes its chunk's coverage UNKNOWN only
 // in memory. Complete settles the map like a checkpoint: the installed
 // publication carries a fresh root with that UNKNOWN, so a crash and a
 // mapped reopen keep it. Setup: chunk 2 is clean in the durable root (as a
@@ -473,7 +472,7 @@ func TestBaseInstallV3BeginRefusesWithAnUnsupportedAttachedChunkLayer(t *testing
 	}
 }
 
-// codex01 row 9b P1, store part: a completed handle keeps admitting
+// Store side: a completed handle keeps admitting
 // install-lane applies (the session's WAL lane outlives its BaseDone) while
 // installed and after its retirement, until the next begin; a BASE write
 // after complete is refused; once a later begin has run (here after the

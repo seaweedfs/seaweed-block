@@ -29,7 +29,7 @@ Happy path:
 
 ```powershell
 swblock run `
-  --results-dir V:/share/g15d-k8s/testops-runs/same-node-alpha-attach `
+  --results-dir <evidence-store>/g15d-k8s/testops-runs/same-node-alpha-attach `
   --env product_root=/tmp/seaweed_block `
   --env ssh_key=C:/work/dev_server/testdev_key `
   C:/work/seaweed_block/testops/scenarios/same-node-alpha-attach-chain.yaml
@@ -39,7 +39,7 @@ Negative fixture:
 
 ```powershell
 swblock run `
-  --results-dir V:/share/g15d-k8s/testops-runs/same-node-alpha-attach-negative `
+  --results-dir <evidence-store>/g15d-k8s/testops-runs/same-node-alpha-attach-negative `
   --env product_root=/tmp/seaweed_block `
   --env ssh_key=C:/work/dev_server/testdev_key `
   C:/work/seaweed_block/testops/scenarios/same-node-alpha-attach-negative-chain.yaml

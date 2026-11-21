@@ -30,7 +30,7 @@ component first -> product-backed gate only when the component boundary is green
 Milestone bundle:
 
 ```text
-V:/share/g15d-k8s/testops-runs/iscsi-pressure-close/20260511-091432-d7f6
+<evidence-store>/g15d-k8s/testops-runs/iscsi-pressure-close/20260511-091432-d7f6
 ```
 
 Remote product checkout used for the milestone gate:
@@ -130,7 +130,7 @@ addressed them:
 Runner-native gate:
 
 ```text
-swblock run --results-dir V:/share/g15d-k8s/testops-runs/iscsi-pressure-close \
+swblock run --results-dir <evidence-store>/g15d-k8s/testops-runs/iscsi-pressure-close \
   --env product_root=/tmp/seaweed-block-plan-roadmap-refresh-devrun \
   --env ssh_key=C:/work/dev_server/testdev_key \
   testops/scenarios/iscsi-os-initiator-compat-chain.yaml
@@ -141,7 +141,7 @@ Result:
 ```text
 === iscsi-os-initiator-compat-chain === PASS (1m13.531s)
 22 actions: 22 passed, 0 failed
-run bundle: V:\share\g15d-k8s\testops-runs\iscsi-pressure-close\20260511-091432-d7f6
+run bundle: <evidence-store>\g15d-k8s\testops-runs\iscsi-pressure-close\20260511-091432-d7f6
 ```
 
 The milestone gate re-proves the real Linux kernel initiator path after the

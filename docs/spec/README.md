@@ -305,7 +305,7 @@ java -cp /path/to/tla2tools.jar tlc2.TLC -deadlock -config cfg/REC_red_noInterna
 
 The authored LIGHT receipts report exhaustive safe searches at 2,700 and 25,550
 states, plus the expected mutant/witness failures. Source and configs are copied
-from the sealed `claude05-walreclaim-tla-r0-20261119` artifact with line-ending
+from the sealed authoring artifact with line-ending
 normalization only. Those are prior author runs, not a claim that this PR reran
 TLC. This is an abstraction: physical fsync success, byte layout, crash recovery,
 both-slot retirement, timing and multiple writers remain covered by their other
