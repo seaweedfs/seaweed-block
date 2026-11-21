@@ -14,6 +14,12 @@ import (
 // Keep the point and frozen buffer through transient failures until the cut
 // context ends (deadline, Close or window abort), never a fresh point.
 func (l *chunkLayerImpl) putCaptured(ctx context.Context, key string, data []byte) error {
+	return l.putCapturedWith(ctx, key, data, func(ctx context.Context) error { return l.remote.Put(ctx, key, data) })
+}
+
+// putCapturedWith is putCaptured over put, one object's slot in an upload
+// round: every retry sends through the same put.
+func (l *chunkLayerImpl) putCapturedWith(ctx context.Context, key string, data []byte, put func(context.Context) error) error {
 	// The per-object retry deadline also bounds a contextless cut. It retains
 	// the same point and buffer through a remote outage, never re-reads live data.
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -24,7 +30,7 @@ func (l *chunkLayerImpl) putCaptured(ctx context.Context, key string, data []byt
 		if err := ctx.Err(); err != nil {
 			return errors.Join(lastErr, err)
 		}
-		err := l.remote.Put(ctx, key, data)
+		err := put(ctx)
 		if err == nil {
 			return nil
 		}

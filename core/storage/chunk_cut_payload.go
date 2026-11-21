@@ -51,6 +51,7 @@ func (l *chunkLayerImpl) streamCutPayloads(ctx context.Context, batch []uint64, 
 	var once sync.Once
 	var intent string
 	var intentErr error
+	put := l.beginPutRound(len(batch))
 	err := l.uploadBatch(ctx, len(batch), func(ctx context.Context, i int) error {
 		c, err := read(ctx, batch[i])
 		if err != nil {
@@ -69,7 +70,7 @@ func (l *chunkLayerImpl) streamCutPayloads(ctx context.Context, batch []uint64, 
 				return fmt.Errorf("storage: capture intent: %w: %w", errChunkRemoteUnavailable, intentErr)
 			}
 			c.intent = intent
-			if err := l.putCaptured(ctx, c.key, c.data); err != nil {
+			if err := l.putCapturedWith(ctx, c.key, c.data, func(ctx context.Context) error { return put(ctx, i, c.key, c.data) }); err != nil {
 				return fmt.Errorf("storage: capture upload: %w", errors.Join(errChunkRemoteUnavailable, errCutUpload, err))
 			}
 		}

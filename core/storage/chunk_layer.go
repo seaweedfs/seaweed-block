@@ -959,9 +959,10 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		intents = append(intents, id)
 	}
 	payloadStart := time.Now()
+	put := l.beginPutRound(len(uploads))
 	if err := l.uploadBatch(ctx, len(uploads), func(ctx context.Context, i int) error {
 		u := uploads[i]
-		return l.putCaptured(ctx, u.key, u.c.data)
+		return l.putCapturedWith(ctx, u.key, u.c.data, func(ctx context.Context) error { return put(ctx, i, u.key, u.c.data) })
 	}); err != nil {
 		l.abortCut(all)
 		l.dropIntents(ctx, intents)
