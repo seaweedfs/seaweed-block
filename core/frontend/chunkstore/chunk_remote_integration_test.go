@@ -167,6 +167,29 @@ func (c *weedCluster) remote(t *testing.T, root string) *ChunkRemote {
 	return r
 }
 
+// publishIntegrationHead uses the real format-3 manifest path before publishing data.
+func publishIntegrationHead(t *testing.T, r *ChunkRemote, base, next storage.ChunkHead, chunkBytes uint64) storage.ChunkHead {
+	t.Helper()
+	ctx := context.Background()
+	next, intents, err := r.PrepareManifest(ctx, base, next, chunkBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next.Gen, err = r.CASHead(ctx, storage.ChunkHeadVersion{Gen: base.Gen, Epoch: base.Epoch}, next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.Gen != base.Gen+1 {
+		t.Fatalf("published generation %d, want %d", next.Gen, base.Gen+1)
+	}
+	for _, id := range intents {
+		if err := r.DeleteIntent(ctx, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return next
+}
+
 func TestIntegration_ChunkRemoteContract(t *testing.T) {
 	c := startWeed(t)
 	ctx := context.Background()
@@ -191,10 +214,7 @@ func TestIntegration_ChunkRemoteContract(t *testing.T) {
 		t.Fatalf("Get from another client: %d bytes, %v", len(got), err)
 	}
 
-	h1 := storage.ChunkHead{Epoch: 1, Holder: "a", RemoteLSN: 7, Chunks: map[uint64]storage.ChunkRef{4: ref(key, d)}}
-	if gen, err := a.CASHead(ctx, storage.ChunkHeadVersion{}, h1); err != nil || gen != 1 {
-		t.Fatalf("first CAS = %d, %v", gen, err)
-	}
+	h1 := publishIntegrationHead(t, a, storage.ChunkHead{}, storage.ChunkHead{Epoch: 1, Holder: "a", RemoteLSN: 7, Chunks: map[uint64]storage.ChunkRef{4: ref(key, d)}}, 16384)
 	if _, err := b.CASHead(ctx, storage.ChunkHeadVersion{}, h1); !isPrecondition(err) {
 		t.Fatalf("racing first CAS: %v; want precondition (real o_excl)", err)
 	}
@@ -203,7 +223,9 @@ func TestIntegration_ChunkRemoteContract(t *testing.T) {
 		t.Fatalf("HEAD from another client = %+v, %v", got, err)
 	}
 	// Takeover at epoch 2, then the old holder's CAS at the version it read.
-	if gen, err := b.CASHead(ctx, storage.ChunkHeadVersion{Gen: 1, Epoch: 1}, storage.ChunkHead{Epoch: 2, Holder: "b", RemoteLSN: 7, Chunks: h1.Chunks}); err != nil || gen != 2 {
+	takeover := h1
+	takeover.Epoch, takeover.Holder = 2, "b"
+	if gen, err := b.CASHead(ctx, storage.ChunkHeadVersion{Gen: 1, Epoch: 1}, takeover); err != nil || gen != 2 {
 		t.Fatalf("takeover CAS = %d, %v", gen, err)
 	}
 	_, err = a.CASHead(ctx, storage.ChunkHeadVersion{Gen: 1, Epoch: 1}, storage.ChunkHead{Epoch: 1, Holder: "a", RemoteLSN: 9})
