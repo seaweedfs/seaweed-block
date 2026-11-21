@@ -89,7 +89,7 @@ func (g *Collector) SweepCopies(ctx context.Context) (settled int, err error) {
 			if readErr != nil {
 				return settled, readErr
 			}
-			if !ok || v.Origin != OriginFork || v.Fork == nil || v.Fork.RequestID != parts[1] {
+			if !ok || !isForked(v.Origin) || v.Fork == nil || v.Fork.RequestID != parts[1] {
 				return settled, errors.New("chunkstore: fork intent has no matching target VOLUME")
 			}
 			if _, err = g.cat.AbortFork(ctx, a.vol); err != nil {
