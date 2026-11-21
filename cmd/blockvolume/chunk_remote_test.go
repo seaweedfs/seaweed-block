@@ -122,7 +122,7 @@ func TestChunkHolderIsServerAndReplica(t *testing.T) {
 	}
 }
 
-// --chunk-dirty-threshold is gone (O-OPS-1): a cut stages by the
+// --chunk-dirty-threshold is gone: a cut stages by the
 // copy-on-write budget (M5 Stage), so the flag never had an effect. A unit
 // that still passes it fails at start.
 func TestChunkDirtyThresholdFlagIsGone(t *testing.T) {
