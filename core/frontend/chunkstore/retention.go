@@ -235,9 +235,14 @@ func planRetention(p RetentionPolicy, snaps []SnapshotInfo, now time.Time) []Ret
 	for i, s := range ordered {
 		pinned := s.Pinned() && (s.ExpiresAtNs == 0 || nowNs < s.ExpiresAtNs)
 		d := RetentionDecision{Name: s.Name, Attempt: s.attempt, CreatedNs: s.CreatedNs, Class: s.Class, Pinned: pinned}
-		if !pinned && s.Class == SnapshotClassScheduled {
+		if s.Class == SnapshotClassScheduled {
+			// Every scheduled snapshot, pinned or not, is planned here and
+			// ranked among its class; a pinned one is also kept by its pin.
 			if scheduleKeep < 0 {
 				scheduleKeep = scheduleKeepOf(s)
+			}
+			if pinned {
+				d.Reasons = append(d.Reasons, keepPinned)
 			}
 			if scheduled < scheduleKeep {
 				d.Reasons = append(d.Reasons, keepScheduled)

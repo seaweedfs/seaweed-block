@@ -18,6 +18,23 @@ const (
 	snapshotRetryMax = time.Hour
 )
 
+// snapshotWake bounds how long the loop sleeps before it reads the wall
+// clock again, so a wall-clock step is observed within it.
+var snapshotWake = time.Minute
+
+// snapshotWallNow is the wall clock the schedule runs on, without the
+// monotonic reading: slots, durations and overdue all follow wall-clock
+// steps.
+func snapshotWallNow() time.Time { return time.Now().Round(0) }
+
+// snapshotNow is the provider's scheduled-snapshot clock.
+func (p *DurableProvider) snapshotNow() time.Time {
+	if p.testSnapshotClock != nil {
+		return p.testSnapshotClock()
+	}
+	return snapshotWallNow()
+}
+
 // SnapshotSkipRestoring is the skip reason of a volume still fetching the
 // chunks its HEAD names (a restore's hydration).
 const SnapshotSkipRestoring = "restoring"
@@ -111,6 +128,14 @@ func (s *snapshotSchedule) slotAfter(t time.Time) time.Time {
 // due returns when the next attempt is due.
 func (s *snapshotSchedule) due() time.Time { return s.next }
 
+// align moves the next attempt to the first slot after now when a wall
+// clock step backwards left it further away than any slot or retry.
+func (s *snapshotSchedule) align(now time.Time) {
+	if s.next.Sub(now) > s.period+snapshotRetryMax {
+		s.next = s.slotAfter(now)
+	}
+}
+
 // record records the outcome of an attempt made at now: nil is a
 // success (the next attempt is the next slot); a *SnapshotSkip is counted
 // by reason and retried after the backoff cap; any other error is a
@@ -189,9 +214,11 @@ func (sl *snapshotSlot) status(now time.Time) ScheduledSnapshotStatus {
 	return sl.s.status(now)
 }
 
-func (sl *snapshotSlot) due() time.Time {
+// alignedDue aligns the schedule to now and returns its due time.
+func (sl *snapshotSlot) alignedDue(now time.Time) time.Time {
 	sl.mu.Lock()
 	defer sl.mu.Unlock()
+	sl.s.align(now)
 	return sl.s.due()
 }
 
@@ -202,11 +229,18 @@ func (sl *snapshotSlot) record(now time.Time, err error) {
 }
 
 // chunkSnapshotLoop takes volumeID's scheduled snapshots while the
-// attachment is current. Each attempt is one bounded pass: one urgent cut
-// and the snapshot record. An attempt cut short by the loop's own end is
-// not recorded.
+// attachment is current. It sleeps at most snapshotWake at a time and
+// compares the wall clock with the due time on each wake, so wall-clock
+// steps are observed. A restoring volume is skipped. Each attempt is one
+// bounded pass: one urgent cut and the snapshot record. An attempt cut
+// short by the loop's own end is not recorded. chunkBackground joins it
+// with its other workers (INV-MAINT-JOIN).
 func (p *DurableProvider) chunkSnapshotLoop(ctx context.Context, volumeID string, layer storage.ChunkLayer, current func() bool, slot *snapshotSlot) {
-	timer := time.NewTimer(time.Until(slot.due()))
+	sleep := func() time.Duration {
+		now := p.snapshotNow()
+		return min(max(slot.alignedDue(now).Sub(now), 0), snapshotWake)
+	}
+	timer := time.NewTimer(sleep())
 	defer timer.Stop()
 	timeout := 2 * p.cfg.ChunkCutTimeout
 	if timeout <= 0 {
@@ -225,7 +259,11 @@ func (p *DurableProvider) chunkSnapshotLoop(ctx context.Context, volumeID string
 		if ctx.Err() != nil || layer.Fenced() || !current() {
 			return
 		}
-		at := time.Now()
+		at := p.snapshotNow()
+		if at.Before(slot.alignedDue(at)) {
+			timer.Reset(sleep())
+			continue
+		}
 		var err error
 		if layer.Stats().AbsentChunks > 0 {
 			// Restoring: HEAD names chunks this volume has not fetched yet.
@@ -238,10 +276,11 @@ func (p *DurableProvider) chunkSnapshotLoop(ctx context.Context, volumeID string
 		if ctx.Err() != nil {
 			return
 		}
-		slot.record(time.Now(), err)
+		now := p.snapshotNow()
+		slot.record(now, err)
 		if err != nil {
-			log.Printf("durable: scheduled snapshot volume=%s: %v (next attempt %s)", volumeID, err, slot.due().UTC().Format(time.RFC3339))
+			log.Printf("durable: scheduled snapshot volume=%s: %v (next attempt %s)", volumeID, err, slot.alignedDue(now).UTC().Format(time.RFC3339))
 		}
-		timer.Reset(time.Until(slot.due()))
+		timer.Reset(sleep())
 	}
 }

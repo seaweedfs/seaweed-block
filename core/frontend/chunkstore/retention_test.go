@@ -411,3 +411,21 @@ func TestPlanRetention_ScheduledClassKeepsItsOwnNewest(t *testing.T) {
 		t.Fatalf("kept %v with no label on the newest; want min(6, DefaultScheduleKeep)", k)
 	}
 }
+
+// A pinned scheduled snapshot stays in its class: it is kept by its pin,
+// ranks among the scheduled ones (its label sets K when it is the newest),
+// and takes no log-spaced window from a manual snapshot.
+func TestPlanRetention_PinnedScheduledStaysInItsClass(t *testing.T) {
+	now := retBase.Add(30 * 24 * time.Hour)
+	newest := snapAt("sched-pinned", now.Add(-10*time.Minute), SnapshotClassScheduled, now.Add(24*time.Hour), map[string]string{LabelScheduleKeep: "2"})
+	snaps := []SnapshotInfo{
+		newest,
+		snapAt("sched-1", now.Add(-24*time.Hour), SnapshotClassScheduled, time.Time{}, map[string]string{LabelScheduleKeep: "9"}),
+		snapAt("sched-2", now.Add(-48*time.Hour), SnapshotClassScheduled, time.Time{}, map[string]string{LabelScheduleKeep: "9"}),
+		snapAt("manual", now.Add(-20*time.Minute), "", time.Time{}, nil), // same hourly window as the pinned scheduled one
+	}
+	k := kept(planRetention(RetentionPolicy{KeepHourly: 1}, snaps, now))
+	if len(k) != 3 || k["sched-pinned"] == nil || k["sched-1"] == nil || k["manual"] == nil {
+		t.Fatalf("kept %v; want sched-pinned (pin, K=2 from its label), sched-1 (second newest scheduled) and manual (its hourly window)", k)
+	}
+}

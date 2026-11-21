@@ -231,6 +231,9 @@ type DurableProvider struct {
 	// testAfterChunkResolve, test-only, runs in CutVolume right after the
 	// volume's handle and layer are resolved.
 	testAfterChunkResolve func()
+	// testSnapshotClock, test-only, replaces the scheduled-snapshot wall
+	// clock (snapshotWallNow).
+	testSnapshotClock func() time.Time
 	// testDetachStopIO, test-only, replaces DetachVolume's StopIO call (so a
 	// test can force the failed-drain branch); testDetachTrace, test-only,
 	// observes the detach's stages and their deadlines ("cut", "settle").
@@ -613,7 +616,7 @@ func (p *DurableProvider) DurableStatuses() []VolumeStatus {
 				cs.HostBudget = budget.Snapshot()
 			}
 			if cv.snapshots != nil {
-				ss := cv.snapshots.status(time.Now())
+				ss := cv.snapshots.status(p.snapshotNow())
 				cs.ScheduledSnapshot = &ss
 			}
 			st.Chunk = cs

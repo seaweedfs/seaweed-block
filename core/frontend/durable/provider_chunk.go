@@ -326,9 +326,12 @@ func (p *DurableProvider) startChunkLoop(volumeID string, h *volHandle, layer st
 	}
 	loopCtx, cancel := context.WithCancel(context.Background())
 	h.chunkStop, h.chunkDone = cancel, make(chan struct{})
-	h.snapshots = nil
-	if snapshotsOn {
-		h.snapshots = &snapshotSlot{s: newSnapshotSchedule(volumeID, p.cfg.ChunkSnapshotPeriod, time.Now())}
+	// A re-armed loop (for example after a refused detach) keeps the
+	// volume's schedule: its slots, retries and history.
+	if !snapshotsOn {
+		h.snapshots = nil
+	} else if h.snapshots == nil {
+		h.snapshots = &snapshotSlot{s: newSnapshotSchedule(volumeID, p.cfg.ChunkSnapshotPeriod, p.snapshotNow())}
 	}
 	lin := h.chunkLineage
 	current := func() bool { return p.maintenanceCurrent(volumeID, h, layer, lin) }
