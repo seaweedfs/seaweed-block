@@ -203,7 +203,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.chunk.replication, "chunk-replication", "", "walstore-chunk: replication for chunk needles (empty = filer default / storage rule)")
 	fs.Bool("chunk-detach-plain-supported", false, "capability: supports idle plain=true on /chunk/detach (no-op flag)")
 	fs.BoolVar(&f.chunk.detachPrecopy, "chunk-detach-precopy", false, "walstore-chunk: converge rolling cuts before final detach; refuse cutover if measured tail does not fit")
-	fs.DurationVar(&f.chunk.captureInterval, "chunk-capture-interval", defaultChunkCaptureInterval, "walstore-chunk: periodic HEAD capture interval (default 15m, minimum 5m); 0 disables")
+	fs.DurationVar(&f.chunk.captureInterval, "chunk-capture-interval", defaultChunkCaptureInterval, "walstore-chunk: periodic HEAD capture interval (default 0: off; when set, at least 5m)")
 	fs.DurationVar(&f.chunk.maintenanceInterval, "chunk-maintenance-interval", defaultChunkMaintenanceInterval, "walstore-chunk: retention and optional GC pass interval; 0 disables")
 	fs.BoolVar(&f.chunk.automaticGC, "chunk-maintenance-gc", false, "walstore-chunk: enable scoped automatic GC; off pending restart-safe unknown-CAS settlement and density qualification")
 	fs.IntVar(&f.chunk.uploadConcurrency, "chunk-upload-concurrency", 8, "walstore-chunk: maximum concurrent dirty-chunk uploads (1..64)")
