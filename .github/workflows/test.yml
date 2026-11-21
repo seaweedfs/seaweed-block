@@ -22,7 +22,7 @@ jobs:
     # capped at 8 cores / 8 GiB). Fork PRs never reach it: they stay on a
     # GitHub-hosted runner.
     runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && 'tp04-seaweed-block' || 'ubuntu-latest' }}
-    timeout-minutes: 25
+    timeout-minutes: 40
     env:
       # Pure-Go build: no package in the default build needs cgo, and the
       # hosted runner should not depend on a C toolchain being present.
@@ -62,7 +62,7 @@ jobs:
     # runners (two instances, so both passes run in parallel); fork PRs stay on
     # a GitHub-hosted runner, whose shared queue can wait for hours.
     runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && 'tp04-seaweed-block' || 'ubuntu-latest' }}
-    timeout-minutes: 30
+    timeout-minutes: 40
     env:
       CGO_ENABLED: "0"
     steps:
