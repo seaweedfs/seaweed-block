@@ -334,3 +334,31 @@ one missing-probe/newer-ACK schedule. `R293_review_safe` checks four invariants;
 four negative controls separately remove retirement, the frame join, the
 readiness guard or ACK progress restoration. This abstracts successful admitted
 frames and does not prove physical-I/O, authority rollback or timing behavior.
+
+`PrecopyFixedAdmission.tla` checks bounded pre-copy cost admission: ordinary
+allowance, small non-improving tail, declared freeze and the five-second ceiling.
+`PrecopyFixedAdmission.cfg` is the positive configuration; `_no_tail`, `_no_stall`
+and `_no_cap` must violate `SafeCommit`. It does not model publication/data safety
+or physical latency; those remain separate checks.
+
+
+### PrecopyFixedAdmission checked configurations
+
+Recorded local run, 2026-11-20 22:30 UTC, using the v1.7.4 tools distribution (TLC 2.19)
+(`tla2tools.jar` SHA-256
+`936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`),
+from `docs/spec`:
+
+```sh
+java -cp /path/to/tla2tools.jar tla2sany.SANY PrecopyFixedAdmission.tla
+java -cp /path/to/tla2tools.jar tlc2.TLC -deadlock -config cfg/PrecopyFixedAdmission.cfg PrecopyFixedAdmission
+```
+
+SANY exited 0. The positive configuration exited 0: 11,240 generated states,
+2,856 distinct, queue empty, complete depth 6. With the same command and the
+respective `cfg/PrecopyFixedAdmission_no_*.cfg`, each negative exited 12 with
+`SafeCommit` violated: `no_tail` (266 generated / 262 distinct, depth 3),
+`no_stall` (44 / 41, depth 2), `no_cap` (546 / 517, depth 3).
+These are the original local finite-state runs for this model, not a new run
+for the documentation update. The bounds and exclusions above still apply;
+this does not establish physical latency, publication safety or train qualification.
