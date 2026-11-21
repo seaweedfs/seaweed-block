@@ -165,7 +165,7 @@ func TestOwnBatch_UploadsAChunkRememberedEqualByAFailedCut(t *testing.T) {
 	remote.mu.Lock()
 	remote.failPut = errors.New("test: put refused")
 	remote.mu.Unlock()
-	failCtx, cancelFail := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	failCtx, cancelFail := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancelFail()
 	if _, err := layer.Cut(failCtx); err == nil {
 		t.Fatal("fixture: the ordinary cut must fail")
