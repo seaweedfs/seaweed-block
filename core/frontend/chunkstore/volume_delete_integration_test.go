@@ -51,10 +51,7 @@ func TestIntegration_DeleteVolumeThenGC(t *testing.T) {
 			t.Fatal(err)
 		}
 		next := storage.ChunkHead{Epoch: epoch, Holder: holder, RemoteLSN: cur.RemoteLSN + 1, Chunks: chunks, State: storage.ChunkHeadActive}
-		if next.Gen, err = r.CASHead(ctx, storage.ChunkHeadVersion{Gen: cur.Gen, Epoch: cur.Epoch}, next); err != nil {
-			t.Fatal(err)
-		}
-		return next
+		return publishIntegrationHead(t, r, cur, next, uint64(full))
 	}
 	detach := func(r *ChunkRemote) {
 		t.Helper()
@@ -95,7 +92,7 @@ func TestIntegration_DeleteVolumeThenGC(t *testing.T) {
 	for k, v := range fh.Chunks {
 		chunks[k] = v
 	}
-	publish(w2, "h2", 1, chunks)
+	h3 := publish(w2, "h2", 1, chunks)
 
 	// An attached volume is refused (w1 is held by h1; w2 by h2).
 	for _, vol := range []string{"w1", "w2"} {
@@ -139,9 +136,16 @@ func TestIntegration_DeleteVolumeThenGC(t *testing.T) {
 	for _, o := range gr.WouldDelete {
 		got = append(got, o.Volume+":"+o.Key)
 	}
+	want := []string{"w1:chunks/e1/c0/a", "w2:chunks/e1/c2/d"}
+	for _, h := range []storage.ChunkHead{h1, h3} {
+		for _, segment := range h.Segments {
+			want = append(want, segment.Owner+":"+segment.Key)
+		}
+	}
+	sort.Strings(want)
 	sort.Strings(got)
-	if fmt.Sprint(got) != "[w1:chunks/e1/c0/a w2:chunks/e1/c2/d]" || gr.Reclaimed != 2 {
-		t.Fatalf("GC reclaimed %v (%d); want exactly w1's A and w2's D", got, gr.Reclaimed)
+	if fmt.Sprint(got) != fmt.Sprint(want) || gr.Reclaimed != len(want) {
+		t.Fatalf("GC reclaimed %v (%d); want exactly w1's A, w2's D and their unreachable manifests", got, gr.Reclaimed)
 	}
 	for _, kept := range []string{bb.Key, cc.Key} {
 		if _, err := w1.Get(ctx, kept); err != nil {
