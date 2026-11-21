@@ -59,7 +59,19 @@ jobs:
         run: go vet ./...
 
       - name: Test default configuration
-        run: go test -p=1 -short -count=1 -timeout 10m ./...
+        # A PR runs the light set: every package except the long, disk-heavy and
+        # timing-sensitive ones, which run in full on main and on train PRs.
+        env:
+          EVENT: ${{ github.event_name }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = push ] || [[ "$HEAD_REF" == train/* ]]; then
+            pkgs=$(go list ./...)
+          else
+            pkgs=$(go list ./... | grep -vE '/core/(storage|frontend/durable|host/master|authority)$')
+          fi
+          go test -p=1 -short -count=1 -timeout 10m $pkgs
 
   test-legacy:
     name: go test legacy-fixture
