@@ -70,9 +70,11 @@ type chunkLayerImpl struct {
 	ctx    context.Context // cancelled by Close
 	cancel context.CancelFunc
 	// settled: confirmed publications not yet reported to
-	// cfg.OnPublishSettled (stMu).
-	settled []headTransition
-	wg      sync.WaitGroup // captures and fills in flight
+	// cfg.OnPublishSettled, in publication order; settledDraining: a caller
+	// is delivering them (both stMu).
+	settled         []headTransition
+	settledDraining bool
+	wg              sync.WaitGroup // captures and fills in flight
 
 	cowMu          sync.Mutex // window admission only; never held during reads or joins
 	cow            *cutCOWWindow
