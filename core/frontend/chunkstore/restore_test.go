@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"path"
 	"strings"
@@ -292,18 +293,23 @@ func TestRestore_SnapshotsRefusedUntilIndependent(t *testing.T) {
 	}
 }
 
-// hangingDeleteFiler blocks DeleteEntry until its ctx ends and records whether
-// that ctx carried a deadline.
+// hangingDeleteFiler blocks DeleteEntry until its ctx ends (or the test
+// releases it) and records whether that ctx carried a deadline.
 type hangingDeleteFiler struct {
 	Filer
 	hadDeadline chan bool
+	release     chan struct{}
 }
 
 func (h hangingDeleteFiler) DeleteEntry(ctx context.Context, dir, name string, expected map[string][]byte) error {
 	_, ok := ctx.Deadline()
 	h.hadDeadline <- ok
-	<-ctx.Done()
-	return ctx.Err()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-h.release:
+		return errors.New("released by the test")
+	}
 }
 
 // dropIntent outlives a cancelled caller, but one unresponsive delete must still be bounded.
@@ -311,11 +317,19 @@ func TestCatalog_DropIntentIsBoundedAfterTheCallerIsCancelled(t *testing.T) {
 	old := dropIntentTimeout
 	dropIntentTimeout = 50 * time.Millisecond
 	t.Cleanup(func() { dropIntentTimeout = old })
-	h := hangingDeleteFiler{Filer: newFakeFiler(), hadDeadline: make(chan bool, 1)}
+	h := hangingDeleteFiler{Filer: newFakeFiler(), hadDeadline: make(chan bool, 1), release: make(chan struct{})}
 	c := &Catalog{f: h}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	done := make(chan struct{})
+	t.Cleanup(func() { // an unbounded delete (the failing case) is released and joined
+		close(h.release)
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("cleanup: dropIntent did not return")
+		}
+	})
 	go func() { c.dropIntent(ctx, "/vols/v1", "op-1"); close(done) }()
 	select {
 	case ok := <-h.hadDeadline:

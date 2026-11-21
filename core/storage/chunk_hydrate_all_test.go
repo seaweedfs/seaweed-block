@@ -117,6 +117,15 @@ func (r *payloadRecorder) Admit(ctx context.Context, payload int64, abort func(e
 	return r.Budget.Admit(ctx, payload, abort)
 }
 
+// boundedCtx bounds a synchronous walk so that a walker that never finishes
+// fails the test instead of hanging it.
+func boundedCtx(t *testing.T, parent context.Context) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(parent, ctLocalBound)
+	t.Cleanup(cancel)
+	return ctx
+}
+
 func bgFill() context.Context {
 	return hostlimit.WithClass(context.Background(), hostlimit.BackgroundFill)
 }
@@ -124,7 +133,7 @@ func bgFill() context.Context {
 func TestHydrateAll_FillsEveryChunkOnceAndReadsTheHeadImage(t *testing.T) {
 	fastWalker(t)
 	s, layer, remote, _ := hydrationFixture(t, 2, 64)
-	ctx := context.Background()
+	ctx := boundedCtx(t, context.Background())
 	p, err := layer.HydrateAll(ctx)
 	if err != nil || p.Remaining != 0 || p.Filled != ctNumBlocks/ctChunkBlocks {
 		t.Fatalf("hydrate all: %+v %v, want %d filled, 0 remaining", p, err, ctNumBlocks/ctChunkBlocks)
@@ -161,7 +170,7 @@ func TestHydrateAll_NeverOverwritesALocalWrite(t *testing.T) {
 	if _, err := s.Write(ctChunkBlocks+1, makeBlock(ctBlockSize, 0xEF)); err != nil { // one block of chunk 1
 		t.Fatal(err)
 	}
-	p, err := layer.HydrateAll(context.Background())
+	p, err := layer.HydrateAll(boundedCtx(t, context.Background()))
 	if err != nil || p.Remaining != 0 {
 		t.Fatalf("hydrate all: %+v %v", p, err)
 	}
@@ -255,7 +264,7 @@ func TestHydrateAll_AdmitsEachFillThroughTheLimiterWithTheCallersClass(t *testin
 	_, layer, _, _ := hydrationFixture(t, 2, 64)
 	budget := &walkerBudget{refuse: 2}
 	layer.cfg.Budget = budget
-	ctx := context.WithValue(context.Background(), walkerClassKey{}, "fill")
+	ctx := boundedCtx(t, context.WithValue(context.Background(), walkerClassKey{}, "fill"))
 	p, err := layer.HydrateAll(ctx)
 	if err != nil || p.Remaining != 0 || p.Deferred != 2 {
 		t.Fatalf("hydrate all: %+v %v, want 2 deferred then everything filled", p, err)
@@ -390,7 +399,7 @@ func TestHydrateAll_StatsReportAbsentChunks(t *testing.T) {
 	if n := layer.Stats().AbsentChunks; n != ctNumBlocks/ctChunkBlocks {
 		t.Fatalf("absent before the walk: %d, want %d", n, ctNumBlocks/ctChunkBlocks)
 	}
-	if _, err := layer.HydrateAll(context.Background()); err != nil {
+	if _, err := layer.HydrateAll(boundedCtx(t, context.Background())); err != nil {
 		t.Fatal(err)
 	}
 	if n := layer.Stats().AbsentChunks; n != 0 {
