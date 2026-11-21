@@ -15,9 +15,10 @@ Machine/INV starts with exactly one kind:
 A fix without an invariant, or a guard term without a transition, is a CHANGE.
 
 A PR that changes no behaviour uses one of these instead, checked against its files:
-  DOCS                         docs, tests, and Go whose hunks change only comments.
+  DOCS                         docs (not docs/spec), tests, and Go whose tokens are unchanged
+                               (comments only; directive comments count as code).
   TEST                         only tests, testdata and test helpers.
-  CI                           only .github/ and scripts/.
+  CI                           only .github/ (scripts/ ships install and deploy scripts).
 
 NONE needs a reason of at least 10 characters. Simplest is required when the PR
 changes non-test Go under core/ or cmd/.

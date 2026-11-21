@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: spec-trace-check.sh BODY_FILE [GO_DIFF] < changes
+# Usage: spec-trace-check.sh BODY_FILE [BLOBS] < changes
 #
 # Checks the spec trace in a PR description. changes are NUL-separated
 # STATUS, PATH pairs (post-merge-review-changed.sh).
@@ -10,9 +10,10 @@
 # - Machine/INV: starts with exactly one PR kind: "IMPL <machine>.<transition>",
 #   "FIX <INV-ID>", "CHANGE <machine>", or one of the kinds a PR that changes
 #   no behaviour may use, each checked against what it changes:
-#   DOCS (docs, tests, and non-test Go whose hunks change only comments; GO_DIFF
-#   is the git diff of the non-test Go files), TEST (only tests, testdata and
-#   test helpers), CI (only .github/ and scripts/). NONE is not a kind.
+#   DOCS (docs outside docs/spec/, tests, and non-test Go whose tokens are
+#   unchanged: BLOBS holds old/<path> and new/<path> for each changed non-test
+#   Go file, compared by sametokens.go, run as $SAMETOKENS if set), TEST (only
+#   tests, testdata and test helpers), CI (only .github/). NONE is not a kind.
 # - Simplest: (20+ characters) is present when the PR adds, modifies or
 #   deletes non-test Go under core/ or cmd/.
 #
@@ -20,8 +21,9 @@
 # usage error or a malformed change list.
 set -euo pipefail
 
-body_file=${1:?usage: spec-trace-check.sh BODY_FILE [GO_DIFF] < changes}
-go_diff=${2-}
+body_file=${1:?usage: spec-trace-check.sh BODY_FILE [BLOBS] < changes}
+blobs=${2-}
+here=$(cd "$(dirname "$0")" && pwd)
 [[ -f $body_file ]] || { echo "spec-trace: body file $body_file missing" >&2; exit 2; }
 body=$(tr -d '\r' <"$body_file")
 
@@ -79,7 +81,8 @@ if [[ -n $mi && $mi != '<'* ]]; then
 fi
 
 is_test() { [[ $1 == *_test.go || $1 == testdata/* || $1 == */testdata/* || $1 == */testutil/* ]]; }
-is_doc() { [[ $1 == *.md || $1 == docs/* ]]; }
+# docs/spec holds the models: changing one is not a docs change.
+is_doc() { [[ $1 != docs/spec/* ]] && [[ $1 == *.md || $1 == docs/* ]]; }
 core=0
 paths=()
 while IFS= read -r -d '' status; do
@@ -100,39 +103,10 @@ if ((core)); then
 	fi
 fi
 
-# comment_only: print each non-test Go file in GO_DIFF whose removed and added
-# lines differ once line comments (outside strings) and spacing are dropped.
-comment_only() {
-	awk '
-	function norm(s,   o, i, c, q, b) {
-		o = ""; q = 0; b = 0
-		for (i = 1; i <= length(s); i++) {
-			c = substr(s, i, 1)
-			if (!q && !b && c == "/" && substr(s, i + 1, 1) == "/") break
-			if (q && c == "\\") { o = o c substr(s, i + 1, 1); i++; continue }
-			if (c == "\"" && !b) q = !q
-			if (c == "`" && !q) b = !b
-			o = o c
-		}
-		gsub(/[ 	]+/, " ", o); sub(/^ /, "", o); sub(/ $/, "", o)
-		return o
-	}
-	/^\+\+\+ / { f = substr($0, 7); next }
-	/^--- / { next }
-	/^[-+]/ {
-		if (f !~ /\.go$/ || f ~ /_test\.go$/) next
-		n = norm(substr($0, 2)); if (n == "") next
-		k = f SUBSEP n
-		if (substr($0, 1, 1) == "+") d[k]++; else d[k]--
-	}
-	END { for (k in d) if (d[k] != 0) { split(k, p, SUBSEP); bad[p[1]] = 1 } for (x in bad) print x }
-	' "$1"
-}
-
 case $kind in
 CI)
 	for p in ${paths[@]+"${paths[@]}"}; do
-		[[ $p == .github/* || $p == scripts/* ]] || problem "kind CI: $p is outside .github/ and scripts/"
+		[[ $p == .github/* ]] || problem "kind CI: $p is outside .github/ (scripts/ holds shipped install and deploy scripts)"
 	done
 	;;
 TEST)
@@ -148,16 +122,18 @@ DOCS)
 		problem "kind DOCS: $p is neither docs, a test, nor Go"
 	done
 	if ((${#gofiles[@]})); then
-		if [[ -z $go_diff || ! -f $go_diff ]]; then
-			problem "kind DOCS: non-test Go changed but no Go diff was given to check it is comment-only"
+		if [[ -z $blobs || ! -d $blobs ]]; then
+			problem "kind DOCS: non-test Go changed but no old/new blobs were given to compare"
 		else
-			# Every changed Go file must be in the diff, or its hunks went unchecked.
+			st=(go run "$here/sametokens.go")
+			[[ -z ${SAMETOKENS-} ]] || st=("$SAMETOKENS")
 			for p in "${gofiles[@]}"; do
-				grep -qxF -e "+++ b/$p" -e "--- a/$p" "$go_diff" || problem "kind DOCS: $p is not in the Go diff, so its hunks were not checked"
+				if [[ ! -e $blobs/old/$p && ! -e $blobs/new/$p ]]; then
+					problem "kind DOCS: $p has no old or new blob, so it was not compared"
+				elif ! "${st[@]}" "$blobs/old/$p" "$blobs/new/$p" >/dev/null; then
+					problem "kind DOCS: $p changes more than comments (its Go tokens differ)"
+				fi
 			done
-			while IFS= read -r f; do
-				[[ -n $f ]] && problem "kind DOCS: $f changes more than comments"
-			done < <(comment_only "$go_diff")
 		fi
 	fi
 	;;

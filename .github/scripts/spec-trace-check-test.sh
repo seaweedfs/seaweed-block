@@ -80,48 +80,45 @@ expect_raw 2 "status cut off before its NUL" "M\0docs/a.md\0M"
 expect_raw 2 "unknown status" "R100\0core/a.go\0"
 expect_raw 0 "well-formed docs change" "M\0docs/a.md\0"
 
-# Kinds for PRs that change no behaviour: each is checked against its paths,
-# and DOCS also against the Go diff (only comments may change in non-test Go).
-# expect_kind WANT_EXIT NAME KIND GO_DIFF_TEXT [STATUS PATH]...
+
+# Kinds for PRs that change no behaviour: each is checked against its paths;
+# DOCS also compares the old and new tokens of each changed non-test Go file.
+go build -o "$tmp/sametokens" "$here/sametokens.go"
+export SAMETOKENS="$tmp/sametokens"
+# expect_kind WANT_EXIT NAME KIND OLD_GO NEW_GO [STATUS PATH]...
+# OLD_GO/NEW_GO are core/x/s.go before and after ("-" = no blob for that side).
 expect_kind() {
-	local want=$1 name=$2 k=$3 d=$4 got=0
-	shift 4
+	local want=$1 name=$2 k=$3 old=$4 new=$5 got=0
+	shift 5
 	printf '%s' "${ok/IMPL M5.Quiesce>Copy/$k}
 $simplest" >"$tmp/body"
-	printf '%s' "$d" >"$tmp/go.diff"
-	if (($#)); then printf '%s\0' "$@"; fi | bash "$check" "$tmp/body" "$tmp/go.diff" >/dev/null || got=$?
+	rm -rf "$tmp/blobs"; mkdir -p "$tmp/blobs/old/core/x" "$tmp/blobs/new/core/x"
+	[[ $old == - ]] || printf '%s' "$old" >"$tmp/blobs/old/core/x/s.go"
+	[[ $new == - ]] || printf '%s' "$new" >"$tmp/blobs/new/core/x/s.go"
+	if (($#)); then printf '%s\0' "$@"; fi | bash "$check" "$tmp/body" "$tmp/blobs" >/dev/null || got=$?
 	if [[ $got != "$want" ]]; then
 		echo "FAIL $name: exit $got, want $want"
 		fail=1
 	fi
 }
-comment_diff='--- a/core/x/s.go
-+++ b/core/x/s.go
-@@ -1,3 +1,4 @@
--	Name string `json:"name"`
-+	Name string `json:"name"` // the volume name
-+	// Count is how many.
- 	Count int'
-code_diff='--- a/core/x/s.go
-+++ b/core/x/s.go
-@@ -1,2 +1,2 @@
--	limit := 512 // chunks
-+	limit := 256 // chunks'
-url_diff='--- a/core/x/s.go
-+++ b/core/x/s.go
-@@ -1,1 +1,1 @@
--	u := "http://a"
-+	u := "http://b"'
-expect_kind 0 "DOCS: docs and comment-only Go" DOCS "$comment_diff" M docs/a.md M core/x/s.go A core/x/s_test.go
-expect_kind 1 "DOCS: a code change in Go" DOCS "$code_diff" M core/x/s.go
-expect_kind 1 "DOCS: a change inside a string that holds //" DOCS "$url_diff" M core/x/s.go
-expect_kind 1 "DOCS: Go changed but no diff given" DOCS "" M core/x/s.go
-expect_kind 1 "DOCS: a non-docs, non-Go file" DOCS "" M deploy/x.env
-expect_kind 0 "TEST: tests and testdata" TEST "" M core/x/s_test.go A core/x/testdata/in.bin
-expect_kind 1 "TEST: production Go" TEST "$comment_diff" M core/x/s.go
-expect_kind 0 "CI: workflow and scripts" CI "" M .github/workflows/w.yml A scripts/x.sh
-expect_kind 1 "CI: anything else" CI "" M docs/a.md
-expect_kind 1 "DOCS next to another kind" "DOCS FIX INV-X-001" "" M docs/a.md
+P=$'package x\n'
+expect_kind 0 "DOCS: comment-only Go" DOCS "${P}var A = 1"$'\n' "${P}"$'// A is one.\nvar A = 1 // one\n' M docs/a.md M core/x/s.go A core/x/s_test.go
+expect_kind 0 "DOCS: gofmt realignment" DOCS "${P}var  A  =  1"$'\n' "${P}var A = 1"$'\n' M core/x/s.go
+expect_kind 0 "DOCS: block comment" DOCS "${P}var A = 1"$'\n' "${P}"$'/* doc */\nvar A = 1\n' M core/x/s.go
+expect_kind 1 "DOCS: reorder" DOCS "${P}func f() { u(); p() }"$'\n' "${P}func f() { p(); u() }"$'\n' M core/x/s.go
+expect_kind 1 "DOCS: build constraint comment" DOCS "$P" $'//go:build never\n\npackage x\n' M core/x/s.go
+expect_kind 1 "DOCS: rune quote then // in a string" DOCS "${P}var _ = f('\"', \"http://a\")"$'\n' "${P}var _ = f('\"', \"http://b\")"$'\n' M core/x/s.go
+expect_kind 1 "DOCS: line inside a raw string" DOCS "${P}var s = \`a"$'\n'"curl http://old | sh"$'\n'"\`"$'\n' "${P}var s = \`a"$'\n'"curl http://new | sh"$'\n'"\`"$'\n' M core/x/s.go
+expect_kind 1 "DOCS: spaces inside a string" DOCS "${P}var s = \"a b\""$'\n' "${P}var s = \"a  b\""$'\n' M core/x/s.go
+expect_kind 1 "DOCS: cgo preamble" DOCS "${P}// #include <a.h>"$'\nimport "C"\n' "${P}// #include <b.h>"$'\nimport "C"\n' M core/x/s.go
+expect_kind 1 "DOCS: Go changed, no blob" DOCS - - M core/x/s.go
+expect_kind 1 "DOCS: a model under docs/spec" DOCS - - M docs/spec/X.tla
+expect_kind 1 "DOCS: a non-docs, non-Go file" DOCS - - M deploy/x.env
+expect_kind 0 "TEST: tests and testdata" TEST - - M core/x/s_test.go A core/x/testdata/in.bin
+expect_kind 1 "TEST: production Go" TEST - - M core/x/s.go
+expect_kind 0 "CI: workflow" CI - - M .github/workflows/w.yml
+expect_kind 1 "CI: scripts/ is shipped" CI - - A scripts/install.sh
+expect_kind 1 "DOCS next to another kind" "DOCS FIX INV-X-001" - - M docs/a.md
 
 [[ $fail == 0 ]] && echo "spec-trace self-test: ok"
 exit $fail
