@@ -368,7 +368,10 @@ func TestRestoreDriver_ChunkControlStartsOneRunAndReportsIt(t *testing.T) {
 func TestRestoreDriver_OwnerCloseCancelsAndJoinsTheRun(t *testing.T) {
 	_, cat, p := restoreFixtureHost(t, 3)
 	owner := newTestOwner(t)
-	p.entered, p.gate = make(chan struct{}, 1), make(chan struct{}) // gate never opens
+	p.entered, p.gate = make(chan struct{}, 1), make(chan struct{}) // opened only at teardown
+	// Registered after the owner: it runs first, so a run that ignored the
+	// owner's cancel (the red case) is released before the owner's join.
+	t.Cleanup(func() { close(p.gate) })
 	ctl := &chunkControl{p: restoreOnlyProvider{p, owner}, cat: cat}
 	if _, err := ctl.Restore(context.Background(), "v2", true); err != nil {
 		t.Fatal(err)

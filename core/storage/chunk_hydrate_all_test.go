@@ -415,6 +415,7 @@ func TestHydrateAll_PacedByByteRate(t *testing.T) {
 	budget := &timedBudget{}
 	layer.cfg.Budget = budget // admission times witness the pace
 	rate := int64(4 * ctChunkBytes)
+	origin := time.Now() // a lower bound of the walker's own pace start
 	p, err := layer.HydrateAllAt(boundedCtx(t, context.Background()), rate)
 	want := ctNumBlocks / ctChunkBlocks
 	if err != nil || p.Remaining != 0 || p.Filled != want {
@@ -433,10 +434,11 @@ func TestHydrateAll_PacedByByteRate(t *testing.T) {
 		t.Fatalf("%d admissions, want %d", len(budget.at), want)
 	}
 	for i := 1; i < len(budget.at); i++ {
-		// fill i is admitted no earlier than i chunks at the rate from the start
-		due := budget.at[0].Add(time.Duration(i) * time.Second / 4)
-		if budget.at[i].Before(due.Add(-10 * time.Millisecond)) {
-			t.Fatalf("fill %d admitted %v after the first, before its pace time %v", i, budget.at[i].Sub(budget.at[0]), due.Sub(budget.at[0]))
+		// fill i is admitted no earlier than i chunks at the rate after the
+		// walker started, and the walker started after origin
+		due := origin.Add(time.Duration(i) * time.Second / 4)
+		if budget.at[i].Before(due) {
+			t.Fatalf("fill %d admitted %v after the call, before its pace time %v", i, budget.at[i].Sub(origin), due.Sub(origin))
 		}
 	}
 }
