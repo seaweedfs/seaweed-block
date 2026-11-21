@@ -14,22 +14,22 @@ The volume's authority and health projection. Go type `volume.StatusProjection`.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `VolumeID` | string | — |
-| `ReplicaID` | string | — |
-| `Epoch` | uint64 | — |
-| `EndpointVersion` | uint64 | — |
-| `Healthy` | bool | — |
-| `Memory` | object | — |
-| `Memory.HeapAllocBytes` | uint64 | — |
-| `Memory.HeapInuseBytes` | uint64 | — |
-| `Memory.HeapSysBytes` | uint64 | — |
-| `Memory.HeapReleasedBytes` | uint64 | — |
-| `Memory.SoftLimitBytes` | int64 | — |
-| `Memory.RSSBytes` | uint64 | — |
-| `Memory.AnonymousRSSBytes` | uint64 | — |
-| `FrontendPrimaryReady` | bool | — |
-| `AuthorityRole` | string | — |
-| `ReplicationRole` | string | — |
+| `VolumeID` | string | the volume this host serves |
+| `ReplicaID` | string | this host's replica of it |
+| `Epoch` | uint64 | the authority epoch of the current assignment |
+| `EndpointVersion` | uint64 | the assignment's endpoint version within the epoch |
+| `Healthy` | bool | the replica may serve I/O at this epoch |
+| `Memory` | object | Memory is the process's memory use at the time of the request. |
+| `Memory.HeapAllocBytes` | uint64 | Go heap bytes in live objects (runtime.MemStats.HeapAlloc) |
+| `Memory.HeapInuseBytes` | uint64 | Go heap bytes in in-use spans (HeapInuse) |
+| `Memory.HeapSysBytes` | uint64 | Go heap bytes obtained from the OS (HeapSys) |
+| `Memory.HeapReleasedBytes` | uint64 | Go heap bytes returned to the OS (HeapReleased) |
+| `Memory.SoftLimitBytes` | int64 | the Go soft memory limit in force (--memory-limit-mib or GOMEMLIMIT) |
+| `Memory.RSSBytes` | uint64 | resident set size from /proc/self/status (VmRSS); 0 off Linux |
+| `Memory.AnonymousRSSBytes` | uint64 | anonymous resident memory (RssAnon); 0 off Linux |
+| `FrontendPrimaryReady` | bool | FrontendPrimaryReady: this replica is the healthy, non-superseded primary and may serve guest I/O. |
+| `AuthorityRole` | string | AuthorityRole is primary, superseded or unknown. |
+| `ReplicationRole` | string | ReplicationRole is none (a primary), recovering, not_ready, replica_ready or unknown. |
 | `RoleAdmissionFailure` | string | RoleAdmissionFailure (G1) explains a not-Healthy projection caused by a failed role call on the replica listener; empty otherwise. (omitted when empty) |
 | `UnhealthyReason` | string | UnhealthyReason is the slot's explicit unhealthy report (#128 rule 6), the value its heartbeat carries; empty when healthy. (omitted when empty) |
 | `CatchUp` | object | CatchUp shows a supporting replica's catch-up progress while it is not yet replica_ready; it is visible without being an alert. (omitted when empty) |
@@ -43,10 +43,10 @@ Replication peers of the served volume. Go type `volume.peersStatusBody`.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `VolumeID` | string | — |
-| `ReplicaID` | string | — |
-| `PeerCount` | int | — |
-| `Peers[]` | object | — |
+| `VolumeID` | string | the served volume |
+| `ReplicaID` | string | this host's replica |
+| `PeerCount` | int | number of entries in Peers |
+| `Peers[]` | object | this primary's replication peers |
 | `Peers[].ReplicaID` | string | — |
 | `Peers[].State` | string | — |
 | `Peers[].Epoch` | uint64 | — |
@@ -63,10 +63,10 @@ Durable store state of the served volume. Go type `volume.durableStatusBody`.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `VolumeID` | string | — |
-| `ReplicaID` | string | — |
-| `VolumeCount` | int | — |
-| `Volumes[]` | object | — |
+| `VolumeID` | string | the served volume |
+| `ReplicaID` | string | this host's replica |
+| `VolumeCount` | int | number of entries in Volumes |
+| `Volumes[]` | object | the durable store state of the served volume |
 | `Volumes[].VolumeID` | string | — |
 | `Volumes[].Path` | string | — |
 | `Volumes[].Impl` | string | — |
@@ -237,47 +237,47 @@ Durable store state of the served volume. Go type `volume.durableStatusBody`.
 | `Volumes[].Chunk.Stats.LastCut.SyncPhases.groupCommitNs` | int64 | — |
 | `Volumes[].Chunk.Stats.LastCut.SyncPhases.completionWaitNs` | int64 | — |
 | `Volumes[].Chunk.Stats.LastCut.CandidateNs` | int64 | Disjoint non-payload intervals within barrier-to-settlement fixed cost. |
-| `Volumes[].Chunk.Stats.LastCut.WindowSetupNs` | int64 | — |
-| `Volumes[].Chunk.Stats.LastCut.PublishPrepareNs` | int64 | — |
-| `Volumes[].Chunk.Stats.LastCut.ManifestNs` | int64 | — |
-| `Volumes[].Chunk.Stats.LastCut.CommitStateNs` | int64 | — |
-| `Volumes[].Chunk.Stats.LastCut.IntentCleanupNs` | int64 | — |
-| `Volumes[].Chunk.Stats.LastCut.NonPayloadCopyNs` | int64 | — |
+| `Volumes[].Chunk.Stats.LastCut.WindowSetupNs` | int64 | (group of `CandidateNs`) Disjoint non-payload intervals within barrier-to-settlement fixed cost. |
+| `Volumes[].Chunk.Stats.LastCut.PublishPrepareNs` | int64 | (group of `CandidateNs`) Disjoint non-payload intervals within barrier-to-settlement fixed cost. |
+| `Volumes[].Chunk.Stats.LastCut.ManifestNs` | int64 | (group of `CandidateNs`) Disjoint non-payload intervals within barrier-to-settlement fixed cost. |
+| `Volumes[].Chunk.Stats.LastCut.CommitStateNs` | int64 | (group of `CandidateNs`) Disjoint non-payload intervals within barrier-to-settlement fixed cost. |
+| `Volumes[].Chunk.Stats.LastCut.IntentCleanupNs` | int64 | (group of `CandidateNs`) Disjoint non-payload intervals within barrier-to-settlement fixed cost. |
+| `Volumes[].Chunk.Stats.LastCut.NonPayloadCopyNs` | int64 | (group of `CandidateNs`) Disjoint non-payload intervals within barrier-to-settlement fixed cost. |
 | `Volumes[].Chunk.Stats.LastCut.PayloadNs` | int64 | disjoint streaming/copy/upload wall intervals |
 | `Volumes[].Chunk.Stats.LastCut.COWWALReadAttempts` | uint64 | Local validated WAL attempts and local copy duration, including savers. |
-| `Volumes[].Chunk.Stats.LastCut.COWLocalReadNs` | int64 | — |
-| `Volumes[].Chunk.Stats.LastCut.COWSavedChunks` | int | — |
-| `Volumes[].Chunk.Stats.LastCut.COWSaveNs` | int64 | — |
-| `Volumes[].Chunk.Stats.LastCut.COWWaitNs` | int64 | — |
+| `Volumes[].Chunk.Stats.LastCut.COWLocalReadNs` | int64 | (group of `COWWALReadAttempts`) Local validated WAL attempts and local copy duration, including savers. |
+| `Volumes[].Chunk.Stats.LastCut.COWSavedChunks` | int | (group of `COWWALReadAttempts`) Local validated WAL attempts and local copy duration, including savers. |
+| `Volumes[].Chunk.Stats.LastCut.COWSaveNs` | int64 | (group of `COWWALReadAttempts`) Local validated WAL attempts and local copy duration, including savers. |
+| `Volumes[].Chunk.Stats.LastCut.COWWaitNs` | int64 | (group of `COWWALReadAttempts`) Local validated WAL attempts and local copy duration, including savers. |
 | `Volumes[].Chunk.Stats.LastCut.BarrierPauseNs` | int64 | BarrierPauseNs is the guest pause: from the capture barrier's Lock request until it is released. LockWaitNs is its first part, the wait for writers already holding the capture barrier shared. |
-| `Volumes[].Chunk.Stats.LastCut.LockWaitNs` | int64 | — |
-| `Volumes[].Chunk.Stats.LastCut.DrainNs` | int64 | — |
-| `Volumes[].Chunk.Stats.LastCut.CASWriteNs` | int64 | — |
-| `Volumes[].Chunk.Stats.LastCut.HeadReadbackNs` | int64 | — |
-| `Volumes[].Chunk.Stats.LastCut.SyncNs` | int64 | — |
-| `Volumes[].Chunk.Stats.LastCut.CopyNs` | int64 | — |
-| `Volumes[].Chunk.Stats.LastCut.CandidateChunks` | int | — |
-| `Volumes[].Chunk.Stats.LastCut.UploadedChunks` | int | — |
-| `Volumes[].Chunk.Stats.LastCut.UploadedBytes` | int64 | — |
-| `Volumes[].Chunk.Stats.LastCut.ZeroedChunks` | int | — |
-| `Volumes[].Chunk.Stats.LastCut.UnchangedChunks` | int | — |
-| `Volumes[].Chunk.Stats.LastCut.UploadNs` | int64 | — |
-| `Volumes[].Chunk.Stats.LastCut.CASNs` | int64 | — |
-| `Volumes[].Chunk.Stats.LastCut.MapPersistNs` | int64 | — |
-| `Volumes[].Chunk.Stats.LastCut.CASResult` | string | — |
-| `Volumes[].Chunk.Stats.LastCut.TotalNs` | int64 | — |
+| `Volumes[].Chunk.Stats.LastCut.LockWaitNs` | int64 | (group of `BarrierPauseNs`) BarrierPauseNs is the guest pause: from the capture barrier's Lock request until it is released. LockWaitNs is its first part, the wait for writers already holding the capture barrier shared. |
+| `Volumes[].Chunk.Stats.LastCut.DrainNs` | int64 | (group of `BarrierPauseNs`) BarrierPauseNs is the guest pause: from the capture barrier's Lock request until it is released. LockWaitNs is its first part, the wait for writers already holding the capture barrier shared. |
+| `Volumes[].Chunk.Stats.LastCut.CASWriteNs` | int64 | (group of `BarrierPauseNs`) BarrierPauseNs is the guest pause: from the capture barrier's Lock request until it is released. LockWaitNs is its first part, the wait for writers already holding the capture barrier shared. |
+| `Volumes[].Chunk.Stats.LastCut.HeadReadbackNs` | int64 | (group of `BarrierPauseNs`) BarrierPauseNs is the guest pause: from the capture barrier's Lock request until it is released. LockWaitNs is its first part, the wait for writers already holding the capture barrier shared. |
+| `Volumes[].Chunk.Stats.LastCut.SyncNs` | int64 | (group of `BarrierPauseNs`) BarrierPauseNs is the guest pause: from the capture barrier's Lock request until it is released. LockWaitNs is its first part, the wait for writers already holding the capture barrier shared. |
+| `Volumes[].Chunk.Stats.LastCut.CopyNs` | int64 | (group of `BarrierPauseNs`) BarrierPauseNs is the guest pause: from the capture barrier's Lock request until it is released. LockWaitNs is its first part, the wait for writers already holding the capture barrier shared. |
+| `Volumes[].Chunk.Stats.LastCut.CandidateChunks` | int | (group of `BarrierPauseNs`) BarrierPauseNs is the guest pause: from the capture barrier's Lock request until it is released. LockWaitNs is its first part, the wait for writers already holding the capture barrier shared. |
+| `Volumes[].Chunk.Stats.LastCut.UploadedChunks` | int | (group of `BarrierPauseNs`) BarrierPauseNs is the guest pause: from the capture barrier's Lock request until it is released. LockWaitNs is its first part, the wait for writers already holding the capture barrier shared. |
+| `Volumes[].Chunk.Stats.LastCut.UploadedBytes` | int64 | (group of `BarrierPauseNs`) BarrierPauseNs is the guest pause: from the capture barrier's Lock request until it is released. LockWaitNs is its first part, the wait for writers already holding the capture barrier shared. |
+| `Volumes[].Chunk.Stats.LastCut.ZeroedChunks` | int | (group of `BarrierPauseNs`) BarrierPauseNs is the guest pause: from the capture barrier's Lock request until it is released. LockWaitNs is its first part, the wait for writers already holding the capture barrier shared. |
+| `Volumes[].Chunk.Stats.LastCut.UnchangedChunks` | int | (group of `BarrierPauseNs`) BarrierPauseNs is the guest pause: from the capture barrier's Lock request until it is released. LockWaitNs is its first part, the wait for writers already holding the capture barrier shared. |
+| `Volumes[].Chunk.Stats.LastCut.UploadNs` | int64 | (group of `BarrierPauseNs`) BarrierPauseNs is the guest pause: from the capture barrier's Lock request until it is released. LockWaitNs is its first part, the wait for writers already holding the capture barrier shared. |
+| `Volumes[].Chunk.Stats.LastCut.CASNs` | int64 | (group of `BarrierPauseNs`) BarrierPauseNs is the guest pause: from the capture barrier's Lock request until it is released. LockWaitNs is its first part, the wait for writers already holding the capture barrier shared. |
+| `Volumes[].Chunk.Stats.LastCut.MapPersistNs` | int64 | (group of `BarrierPauseNs`) BarrierPauseNs is the guest pause: from the capture barrier's Lock request until it is released. LockWaitNs is its first part, the wait for writers already holding the capture barrier shared. |
+| `Volumes[].Chunk.Stats.LastCut.CASResult` | string | (group of `BarrierPauseNs`) BarrierPauseNs is the guest pause: from the capture barrier's Lock request until it is released. LockWaitNs is its first part, the wait for writers already holding the capture barrier shared. |
+| `Volumes[].Chunk.Stats.LastCut.TotalNs` | int64 | (group of `BarrierPauseNs`) BarrierPauseNs is the guest pause: from the capture barrier's Lock request until it is released. LockWaitNs is its first part, the wait for writers already holding the capture barrier shared. |
 | `Volumes[].Chunk.Stats.LastCut.StageRounds` | int | Pre-copy (BarrierBound > 0): StageRounds staging rounds staged StagedChunks chunks outside the barrier; StagedChunksUsed of the uploads in HEAD came from staging. BarrierCopyChunks were copied under the barrier; BarrierOverBound: more than the bound (the staging rounds did not converge). |
-| `Volumes[].Chunk.Stats.LastCut.StagedChunks` | int | — |
-| `Volumes[].Chunk.Stats.LastCut.StagedChunksUsed` | int | — |
-| `Volumes[].Chunk.Stats.LastCut.BarrierCopyChunks` | int | — |
-| `Volumes[].Chunk.Stats.LastCut.BarrierOverBound` | bool | — |
+| `Volumes[].Chunk.Stats.LastCut.StagedChunks` | int | (group of `StageRounds`) Pre-copy (BarrierBound > 0): StageRounds staging rounds staged StagedChunks chunks outside the barrier; StagedChunksUsed of the uploads in HEAD came from staging. BarrierCopyChunks were copied under the barrier; BarrierOverBound: more than the bound (the staging rounds did not converge). |
+| `Volumes[].Chunk.Stats.LastCut.StagedChunksUsed` | int | (group of `StageRounds`) Pre-copy (BarrierBound > 0): StageRounds staging rounds staged StagedChunks chunks outside the barrier; StagedChunksUsed of the uploads in HEAD came from staging. BarrierCopyChunks were copied under the barrier; BarrierOverBound: more than the bound (the staging rounds did not converge). |
+| `Volumes[].Chunk.Stats.LastCut.BarrierCopyChunks` | int | (group of `StageRounds`) Pre-copy (BarrierBound > 0): StageRounds staging rounds staged StagedChunks chunks outside the barrier; StagedChunksUsed of the uploads in HEAD came from staging. BarrierCopyChunks were copied under the barrier; BarrierOverBound: more than the bound (the staging rounds did not converge). |
+| `Volumes[].Chunk.Stats.LastCut.BarrierOverBound` | bool | (group of `StageRounds`) Pre-copy (BarrierBound > 0): StageRounds staging rounds staged StagedChunks chunks outside the barrier; StagedChunksUsed of the uploads in HEAD came from staging. BarrierCopyChunks were copied under the barrier; BarrierOverBound: more than the bound (the staging rounds did not converge). |
 | `Volumes[].Chunk.Stats.LastCutH` | uint64 | — |
 | `Volumes[].Chunk.Stats.LastCutNs` | int64 | — |
 | `Volumes[].Chunk.Stats.BarrierOverBound` | uint64 | BarrierOverBound counts cuts whose barrier copied more than the bound after the staging rounds. |
 | `Volumes[].Chunk.Stats.AbsentChunks` | int | AbsentChunks is the number of HEAD-named chunks still absent with a block not local (what HydrateAll would still fetch); 0 = fully local. |
 | `Volumes[].Chunk.HostBudget` | interface | — (omitted when empty) |
 | `Volumes[].Warnings[]` | string | Warnings are the store's typed recovery warnings (e.g. wal_hole_suspected, issue #51); they do not change readiness. HolesSuspected counts the recoveries that found a WAL hole. (omitted when empty) |
-| `Volumes[].HolesSuspected` | uint64 | — (omitted when empty) |
+| `Volumes[].HolesSuspected` | uint64 | (group of `Warnings`) Warnings are the store's typed recovery warnings (e.g. wal_hole_suspected, issue #51); they do not change readiness. HolesSuspected counts the recoveries that found a WAL hole. (omitted when empty) |
 
 ### `GET /status/recovery`
 
@@ -332,8 +332,8 @@ NVMe/TCP frontend counters. Go type `volume.NVMeStatus`.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `volumeID` | string | — |
-| `stats` | object | — |
+| `volumeID` | string | the served volume |
+| `stats` | object | the NVMe/TCP target's counters since start |
 | `stats.sessions_accepted` | uint64 | — |
 | `stats.admin_connects` | uint64 | — |
 | `stats.io_connects` | uint64 | — |
@@ -367,8 +367,8 @@ Ublk frontend counters. Go type `volume.UblkStatus`.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `volumeID` | string | — |
-| `stats` | object | — |
+| `volumeID` | string | the served volume |
+| `stats` | object | the ublk device's request counters since start |
 | `stats.read_requests` | uint64 | — |
 | `stats.write_requests` | uint64 | — |
 | `stats.flush_requests` | uint64 | — |
@@ -382,21 +382,21 @@ The frontends this host can serve. Go type `volume.FrontendCapabilitiesStatus`.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `volumeID` | string | — |
-| `hostCapabilityIsProductClaim` | bool | — |
-| `frontendTransports[]` | object | — |
-| `frontendTransports[].protocol` | string | — |
-| `frontendTransports[].transport` | string | — |
-| `frontendTransports[].supported` | bool | — |
-| `frontendTransports[].listenerImplemented` | bool | — |
-| `frontendTransports[].listenerStarted` | bool | — |
-| `frontendTransports[].startAllowed` | bool | — |
-| `frontendTransports[].startReason` | string | — (omitted when empty) |
-| `frontendTransports[].reason` | string | — |
-| `frontendTransports[].preflight[]` | object | — (omitted when empty) |
-| `frontendTransports[].preflight[].name` | string | — |
-| `frontendTransports[].preflight[].available` | bool | — |
-| `frontendTransports[].preflight[].reason` | string | — |
-| `frontendTransports[].preflight[].detail` | string | — (omitted when empty) |
+| `volumeID` | string | the served volume |
+| `hostCapabilityIsProductClaim` | bool | always false: host facts, not a supported-product claim |
+| `frontendTransports[]` | object | one entry per protocol and transport |
+| `frontendTransports[].protocol` | string | the block protocol (iscsi, nvme, ublk) |
+| `frontendTransports[].transport` | string | its transport (tcp, rdma, local) |
+| `frontendTransports[].supported` | bool | this build and host can serve it |
+| `frontendTransports[].listenerImplemented` | bool | a listener exists for it in this binary |
+| `frontendTransports[].listenerStarted` | bool | the listener is running now |
+| `frontendTransports[].startAllowed` | bool | the preflight checks allow starting it |
+| `frontendTransports[].startReason` | string | why it may or may not start (omitted when empty) |
+| `frontendTransports[].reason` | string | why it is or is not supported |
+| `frontendTransports[].preflight[]` | object | the host facts checked for it (omitted when empty) |
+| `frontendTransports[].preflight[].name` | string | the host fact checked (a module, device or privilege) |
+| `frontendTransports[].preflight[].available` | bool | the fact holds on this host |
+| `frontendTransports[].preflight[].reason` | string | why it holds or not |
+| `frontendTransports[].preflight[].detail` | string | extra detail, such as the path probed (omitted when empty) |
 
 <!-- END GENERATED -->

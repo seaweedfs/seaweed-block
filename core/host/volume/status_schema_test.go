@@ -36,17 +36,17 @@ var statusRoutes = []struct {
 }
 
 type peersStatusBody struct {
-	VolumeID  string
-	ReplicaID string
-	PeerCount int
-	Peers     []replication.ReplicaPeerStatus
+	VolumeID  string                          // the served volume
+	ReplicaID string                          // this host's replica
+	PeerCount int                             // number of entries in Peers
+	Peers     []replication.ReplicaPeerStatus // this primary's replication peers
 }
 
 type durableStatusBody struct {
-	VolumeID    string
-	ReplicaID   string
-	VolumeCount int
-	Volumes     []durable.VolumeStatus
+	VolumeID    string                 // the served volume
+	ReplicaID   string                 // this host's replica
+	VolumeCount int                    // number of entries in Volumes
+	Volumes     []durable.VolumeStatus // the durable store state of the served volume
 }
 
 const (
@@ -70,7 +70,9 @@ func (d fieldDocs) load(t *testing.T, pkgPath string) {
 	d["pkg:"+pkgPath] = ""
 	dir := filepath.Join("..", "..", "..", strings.TrimPrefix(pkgPath, modulePath))
 	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, dir, func(fi os.FileInfo) bool { return !strings.HasSuffix(fi.Name(), "_test.go") }, parser.ParseComments)
+	pkgs, err := parser.ParseDir(fset, dir, func(fi os.FileInfo) bool {
+		return !strings.HasSuffix(fi.Name(), "_test.go") || fi.Name() == "status_schema_test.go" // the restated bodies
+	}, parser.ParseComments)
 	if err != nil {
 		t.Fatalf("parse %s: %v", dir, err)
 	}
@@ -85,13 +87,27 @@ func (d fieldDocs) load(t *testing.T, pkgPath string) {
 				if !ok {
 					return true
 				}
+				// A doc comment above a run of fields with no blank line
+				// between them describes the whole run (a group comment).
+				group, groupFirst, prevEnd := "", "", -1
 				for _, fl := range st.Fields.List {
 					text := ""
-					if fl.Doc != nil {
+					line := fset.Position(fl.Pos()).Line
+					switch {
+					case fl.Doc != nil:
 						text = fl.Doc.Text()
-					} else if fl.Comment != nil {
+						group, groupFirst = strings.Join(strings.Fields(text), " "), ""
+						if len(fl.Names) > 0 {
+							groupFirst = fl.Names[0].Name
+						}
+					case fl.Comment != nil:
 						text = fl.Comment.Text()
+					case group != "" && line == prevEnd+1:
+						text = "(group of `" + groupFirst + "`) " + group
+					default:
+						group = ""
 					}
+					prevEnd = fset.Position(fl.End()).Line
 					text = strings.Join(strings.Fields(text), " ")
 					for _, name := range fl.Names {
 						d[pkgPath+"."+ts.Name.Name+"."+name.Name] = text
