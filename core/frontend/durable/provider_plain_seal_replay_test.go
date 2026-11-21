@@ -80,6 +80,11 @@ func TestPlainSealLostAnswerRestartReplaysFilerProof(t *testing.T) {
 	if _, err := second.RecoverVolume(ctx, "v1"); !errors.Is(err, storage.ErrChunkLayerDetached) {
 		t.Fatal("restart must keep the sealed incarnation non-serving", err)
 	}
+	// Startup reports the sealed recovery failure and remains non-serving;
+	// the assigned identity must still be able to answer this read-only retry.
+	notServing := view.Projection()
+	notServing.Healthy = false
+	view.set(notServing)
 	r.mu.Lock()
 	reads, cas := r.reads, r.cas
 	r.mu.Unlock()

@@ -83,7 +83,13 @@ type chunkLineage struct {
 // host blocks it until local recovery is done) the projection has epoch 0
 // and is not healthy; a layer is never attached under that.
 func chunkAuthority(proj frontend.Projection, volumeID string) bool {
-	return proj.VolumeID == volumeID && proj.Healthy && proj.Epoch > 0 && proj.ReplicaID != ""
+	return chunkAssignment(proj, volumeID) && proj.Healthy
+}
+
+// A sealed recovery is non-serving but its assigned identity can still answer
+// the read-only plain-seal replay (INV-WS-SEAL-REPLAY-001).
+func chunkAssignment(proj frontend.Projection, volumeID string) bool {
+	return proj.VolumeID == volumeID && proj.Epoch > 0 && proj.ReplicaID != ""
 }
 
 // chunkAuthorityGap names the projection fields that fail chunkAuthority,

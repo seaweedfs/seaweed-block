@@ -37,7 +37,7 @@ func (p *DurableProvider) replayPlainSeal(ctx context.Context, volumeID string, 
 		return storage.ChunkCutResult{}, 0, err
 	}
 	proj := p.view.Projection()
-	if !chunkAuthority(proj, volumeID) {
+	if !chunkAssignment(proj, volumeID) {
 		return storage.ChunkCutResult{}, 0, ErrChunkNotPrimary
 	}
 	lin := chunkLineage{volumeID: proj.VolumeID, replicaID: proj.ReplicaID, epoch: proj.Epoch, endpoint: proj.EndpointVersion}
@@ -45,7 +45,9 @@ func (p *DurableProvider) replayPlainSeal(ctx context.Context, volumeID string, 
 		return storage.ChunkCutResult{}, 0, ErrChunkEpochStale
 	}
 	if err := h.backend.stopPlainDetachIfIdle(); err != nil {
-		return storage.ChunkCutResult{}, 0, err
+		// A seal may already have committed before this read-back. Do not
+		// expose the before-mutation plain_detach_busy promise here.
+		return storage.ChunkCutResult{}, 0, fmt.Errorf("%w: replay admission: %v", ErrDetachOutcomeUnknown, err)
 	}
 	h.chunkDetach = true
 	p.stopChunkLoop(h)
@@ -58,7 +60,8 @@ func (p *DurableProvider) replayPlainSeal(ctx context.Context, volumeID string, 
 	if err != nil {
 		return storage.ChunkCutResult{}, 0, fmt.Errorf("%w: %w", ErrDetachOutcomeUnknown, err)
 	}
-	if current := p.view.Projection(); current != proj {
+	current := p.view.Projection()
+	if current.VolumeID != lin.volumeID || current.ReplicaID != lin.replicaID || current.Epoch != lin.epoch || current.EndpointVersion != lin.endpoint {
 		return storage.ChunkCutResult{}, 0, ErrChunkEpochStale
 	}
 	if err := ctx.Err(); err != nil {

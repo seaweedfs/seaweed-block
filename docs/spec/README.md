@@ -612,3 +612,27 @@ loads that exact sealed image on the planned new holder at a higher epoch.
 The earlier test expecting same-owner reactivation is replaced by this ruled
 terminal behavior. The active-root generation belt model and its bounds remain
 unchanged; its serving precondition excludes a sealed same-owner incarnation.
+
+### Plain seal replay from the filer
+
+`PlainSealReplay.tla` checks M5 PlainStop -> RemoteProof -> SealedReply and
+`INV-WS-SEAL-REPLAY-001`. One operation may keep process memory or restart;
+seven read observations represent valid proof, active HEAD, wrong holder,
+wrong epoch, malformed proof, unreadable filer or moved authority. The caller
+must obtain a new exact proof for success, and a valid proof needs no process
+memory. This is an idempotent storage request, not a controller HEAD-only
+pending-record/boot proof; no such controller behavior is added here.
+
+TLC 2.19 (same tool SHA256 above), 2026-11-21: `cfg/PlainSealReplay.cfg`
+exhausted 42 generated / 42 distinct states, depth 4, queue empty. Both
+`SuccessNeedsFreshExactProof` and `ValidProofDoesNotNeedProcessMemory` hold.
+Negatives: `_memory` violates the first property at depth 2 (10 distinct
+states); `_no_exact` violates it at depth 3 (25 distinct); `_layer` violates
+the second at depth 4 (36 distinct). The memory negative maps to
+`TestPlainSealReplayNeverUsesProcessMemory`; the exact-proof negative maps to
+the corrupt proof/authority subcontrols in
+`TestPlainSealLostAnswerRestartReplaysFilerProof`; the layer negative maps to
+that test's lost committed answer -> storage restart -> successful re-send.
+Native controls additionally require the original full HEAD and no CAS/new
+generation. CAS atomicity, local WAL recovery and remote-call cancellation
+remain native/existing-spec obligations rather than claims of this small model.
