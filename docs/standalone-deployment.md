@@ -128,8 +128,6 @@ the example units, which turn them into flags. blockvolume itself reads only
 | `SWB_WORKSPACE_LEASE` | `--workspace-lease` | `false` | Require a master lease; fail closed without one |
 | `SWB_VOLUME_EXTRA_ARGS` | any | empty | Other flags (Kubernetes gate and source-gated flags) |
 
-`--chunk-dirty-threshold` (and `SWB_CHUNK_DIRTY_THRESHOLD`) is deprecated and ignored: a cut stages by its copy-on-write budget, not a chunk count. It is still accepted with a startup warning, and it is removed after 2027-01-31. With it, the `barrierOverBound` field of a cut's result is always `false` in production; it goes with the flag.
-
 The `--chunk-*` and `--workspace-lease` flags are refused unless
 `--durable-impl=walstore-chunk`; leave them at their defaults otherwise.
 

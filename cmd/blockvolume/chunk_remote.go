@@ -31,10 +31,6 @@ const (
 	defaultChunkIntentTTL           = time.Hour
 )
 
-// chunkDirtyThresholdRemoval is when --chunk-dirty-threshold, accepted and
-// ignored since cuts stage by the COW budget (M5 Stage), is removed.
-const chunkDirtyThresholdRemoval = "2027-01-31"
-
 type chunkFlags struct {
 	detachPrecopy       bool
 	hostLimit           hostlimit.Config
@@ -45,7 +41,6 @@ type chunkFlags struct {
 	captureInterval     time.Duration
 	maintenanceInterval time.Duration
 	automaticGC         bool
-	dirtyThreshold      int // deprecated, ignored (chunkDirtyThresholdRemoval)
 	uploadConcurrency   int
 	hydrationWorkers    int
 	hydrationQueueDepth int

@@ -31,8 +31,8 @@ func TestWALStoreChunkFlags(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d.chunk.captureInterval != 15*time.Minute || d.chunk.maintenanceInterval != time.Hour || d.chunk.automaticGC || len(d.warnings) != 0 {
-		t.Fatalf("scheduler defaults interval %s warnings %v, want capture 15m, maintenance 1h, GC off and no warning", d.chunk.captureInterval, d.warnings)
+	if d.chunk.captureInterval != 15*time.Minute || d.chunk.maintenanceInterval != time.Hour || d.chunk.automaticGC {
+		t.Fatalf("scheduler defaults interval %s, want capture 15m, maintenance 1h and GC off", d.chunk.captureInterval)
 	}
 	off, err := parseFlags(base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1",
 		"--chunk-capture-interval=0"))
@@ -122,25 +122,12 @@ func TestChunkHolderIsServerAndReplica(t *testing.T) {
 	}
 }
 
-// --chunk-dirty-threshold is deprecated (O-OPS-1): a cut stages by the
-// copy-on-write budget (M5 Stage), so the flag never had an effect. It is
-// still accepted, with any value and any durable implementation, and warns
-// with its removal date; nothing reads its value.
-func TestChunkDirtyThresholdIsDeprecatedAndIgnored(t *testing.T) {
-	base := func(extra ...string) []string {
-		return append(phase150RequiredBlockvolumeArgs(), extra...)
-	}
-	for _, args := range [][]string{
-		base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-dirty-threshold=512"),
-		base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-dirty-threshold=-1"),
-		base("--durable-root=/tmp/sw-block", "--durable-impl=walstore", "--chunk-dirty-threshold=8"),
-	} {
-		f, err := parseFlags(args)
-		if err != nil {
-			t.Fatalf("%v: refused: %v", args, err)
-		}
-		if len(f.warnings) != 1 || !strings.Contains(f.warnings[0], "deprecated") || !strings.Contains(f.warnings[0], chunkDirtyThresholdRemoval) {
-			t.Fatalf("%v: warnings %v; want one deprecation warning naming %s", args, f.warnings, chunkDirtyThresholdRemoval)
-		}
+// --chunk-dirty-threshold is gone (O-OPS-1): a cut stages by the
+// copy-on-write budget (M5 Stage), so the flag never had an effect. A unit
+// that still passes it fails at start.
+func TestChunkDirtyThresholdFlagIsGone(t *testing.T) {
+	args := append(phase150RequiredBlockvolumeArgs(), "--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-dirty-threshold=512")
+	if _, err := parseFlags(args); err == nil || !strings.Contains(err.Error(), "flag provided but not defined") {
+		t.Fatalf("--chunk-dirty-threshold: %v; want flag provided but not defined", err)
 	}
 }
