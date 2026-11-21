@@ -127,7 +127,8 @@ func TestIntegration_DeleteVolumeThenGC(t *testing.T) {
 	if _, err := g.Run(ctx); err != nil {
 		t.Fatalf("GC mark 1: %v", err)
 	}
-	at = at.Add(grace + time.Minute)
+	// Reclamation requires strictly more than grace plus the skew bound.
+	at = at.Add(grace + DefaultGCClockSkew + time.Second)
 	gr, err := g.Run(ctx)
 	if err != nil {
 		t.Fatalf("GC mark 2: %v", err)
