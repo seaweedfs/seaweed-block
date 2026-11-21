@@ -1,7 +1,6 @@
 package durable
 
 import (
-	"context"
 	"errors"
 	"testing"
 
@@ -18,7 +17,7 @@ func TestPlainDetachStopAcceptsClosedIdleBackend(t *testing.T) {
 	if err := b.stopPlainDetachIfIdle(); err != nil {
 		t.Fatalf("closed idle backend cannot seal: %v", err)
 	}
-	if err := b.readyCheck(context.Background()); !errors.Is(err, frontend.ErrBackendClosed) {
+	if err := b.readyCheck(); !errors.Is(err, frontend.ErrBackendClosed) {
 		t.Fatalf("offline admission reopened frontend: %v", err)
 	}
 }
