@@ -46,6 +46,7 @@ spec:
             - "--launcher-iscsi-port-base=3260"
             - "--launcher-kubernetes-apply"
             - "--listen=0.0.0.0:9333"
+            - "--insecure-external-bind"
             - "--expected-slots-per-volume=__EXPECTED_SLOTS_PER_VOLUME__"
           ports:
             - name: grpc

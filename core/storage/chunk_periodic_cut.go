@@ -8,20 +8,22 @@ import "context"
 // complete before this one gets the capture lock. That cut restarted the
 // timer, so the due cut is not taken.
 type ChunkPeriodicCutter interface {
-	// CutUnlessCutSince cuts unless a cut succeeded after lastCutNs (the
-	// LastCutNs the timer decided on); skipped reports that it did not cut.
-	CutUnlessCutSince(ctx context.Context, lastCutNs int64) (r ChunkCutResult, skipped bool, err error)
+	// CutUnlessCutSince cuts unless a cut succeeded since the timer decided
+	// (CutSeq is no longer seq, the CutSeq it decided on); skipped reports
+	// that it did not cut. Cuts are ordered by CutSeq, never by their wall
+	// stamps.
+	CutUnlessCutSince(ctx context.Context, seq uint64) (r ChunkCutResult, skipped bool, err error)
 }
 
 var _ ChunkPeriodicCutter = (*chunkLayerImpl)(nil)
 
-func (l *chunkLayerImpl) CutUnlessCutSince(ctx context.Context, lastCutNs int64) (chunkCutResult, bool, error) {
+func (l *chunkLayerImpl) CutUnlessCutSince(ctx context.Context, seq uint64) (chunkCutResult, bool, error) {
 	l.capMu.Lock()
 	defer l.unlockCap() // delivers the cut's OnPublishSettled report after the lock
 	l.stMu.Lock()
-	last := l.stats.LastCutNs
+	cur := l.stats.CutSeq
 	l.stMu.Unlock()
-	if last > lastCutNs {
+	if cur != seq {
 		return chunkCutResult{}, true, nil
 	}
 	r, err := l.captureLocked(ctx, false)

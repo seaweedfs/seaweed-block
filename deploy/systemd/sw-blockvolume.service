@@ -58,6 +58,7 @@ ExecStart=/usr/local/bin/blockvolume \
   --chunk-collection=${SWB_CHUNK_COLLECTION} \
   --chunk-replication=${SWB_CHUNK_REPLICATION} \
   --chunk-capture-interval=${SWB_CHUNK_CAPTURE_INTERVAL} \
+  --chunk-snapshot-schedule=${SWB_CHUNK_SNAPSHOT_SCHEDULE} \
   --chunk-upload-concurrency=${SWB_CHUNK_UPLOAD_CONCURRENCY} \
   --chunk-control-endpoint=${SWB_CHUNK_CONTROL_ENDPOINT} \
   --workspace-lease=${SWB_WORKSPACE_LEASE} \

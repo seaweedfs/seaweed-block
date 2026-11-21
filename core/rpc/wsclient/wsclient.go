@@ -17,9 +17,9 @@ import (
 	"time"
 
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"github.com/seaweedfs/seaweed-block/core/rpc/link"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 )
 
@@ -124,7 +124,7 @@ func New(rpc control.WorkspaceServiceClient) *Client { return &Client{rpc: rpc} 
 // Dial connects to the blockmaster gRPC address (plaintext, as the other
 // operator commands).
 func Dial(addr string) (*Client, error) {
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := link.Dial(addr)
 	if err != nil {
 		return nil, err
 	}

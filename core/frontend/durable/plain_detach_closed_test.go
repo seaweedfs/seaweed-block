@@ -7,14 +7,17 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 )
 
-// TestPlainDetachStopRefusesClosedBackend pins that the plain-detach stop of a
-// closed backend returns ErrBackendClosed instead of reporting a clean stop.
-func TestPlainDetachStopRefusesClosedBackend(t *testing.T) {
+// M5 PlainStop -> Quiesce permits a closed idle handle to seal, while the
+// frontend remains closed to guest I/O even if the offline attempt aborts.
+func TestPlainDetachStopAcceptsClosedIdleBackend(t *testing.T) {
 	b := precopyTestBackend(newHeldReadStore())
 	if err := b.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.stopPlainDetachIfIdle(); !errors.Is(err, frontend.ErrBackendClosed) {
-		t.Fatalf("plain-detach stop of a closed backend: %v", err)
+	if err := b.stopPlainDetachIfIdle(); err != nil {
+		t.Fatalf("closed idle backend cannot seal: %v", err)
+	}
+	if err := b.readyCheck(); !errors.Is(err, frontend.ErrBackendClosed) {
+		t.Fatalf("offline admission reopened frontend: %v", err)
 	}
 }
