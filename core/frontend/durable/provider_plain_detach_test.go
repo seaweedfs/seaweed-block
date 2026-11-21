@@ -111,3 +111,22 @@ func TestPlainDetachAfterPrecopyRefusalRequiresIdleFrontend(t *testing.T) {
 		t.Fatalf("plain retry changed result: %+v last=%d err=%v", again, last2, err)
 	}
 }
+
+func TestPlainDetachSkipsPrecopyCostAdmission(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	remote := storage.NewMemChunkRemote()
+	p := precopyProvider(t, remote, &parkView{stubView: v1View()})
+	openRecovered(t, p)
+	b, err := p.Open(ctx, "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = b.Write(ctx, 4096, block(0x7c)); err != nil {
+		t.Fatal(err)
+	}
+	r, _, err := p.DetachVolumePlain(ctx, "v1")
+	if err != nil || r.Head.State != storage.ChunkHeadDetached || len(r.Precopy.Rounds) != 0 || !bytes.Equal(headBlock(t, remote, 1), block(0x7c)) {
+		t.Fatalf("plain request used pre-copy admission or lost its point: %+v %v", r, err)
+	}
+}
