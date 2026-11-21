@@ -178,15 +178,15 @@ type ReplicaPeer struct {
 // append-only: status endpoints and TestOps gates use it to assert
 // peer recovery state without scraping logs.
 type ReplicaPeerStatus struct {
-	ReplicaID       string
-	State           string
-	Epoch           uint64
-	EndpointVersion uint64
-	DataAddr        string
-	CtrlAddr        string
-	SessionID       uint64
-	ProbeInFlight   bool
-	Closed          bool
+	ReplicaID       string // the peer replica
+	State           string // the peer state (the replica peer table, M3)
+	Epoch           uint64 // the epoch the peer was assigned at
+	EndpointVersion uint64 // the peer's endpoint version within the epoch
+	DataAddr        string // the peer's data-path address
+	CtrlAddr        string // the peer's control-path address
+	SessionID       uint64 // the current recovery or shipping session; 0 when none
+	ProbeInFlight   bool   // a reachability probe of the peer is running
+	Closed          bool   // the peer handle was closed (it no longer ships)
 }
 
 // NewReplicaPeer constructs a per-replica runtime handle and registers

@@ -47,15 +47,15 @@ Replication peers of the served volume. Go type `volume.peersStatusBody`.
 | `ReplicaID` | string | this host's replica |
 | `PeerCount` | int | number of entries in Peers |
 | `Peers[]` | object | this primary's replication peers |
-| `Peers[].ReplicaID` | string | — |
-| `Peers[].State` | string | — |
-| `Peers[].Epoch` | uint64 | — |
-| `Peers[].EndpointVersion` | uint64 | — |
-| `Peers[].DataAddr` | string | — |
-| `Peers[].CtrlAddr` | string | — |
-| `Peers[].SessionID` | uint64 | — |
-| `Peers[].ProbeInFlight` | bool | — |
-| `Peers[].Closed` | bool | — |
+| `Peers[].ReplicaID` | string | the peer replica |
+| `Peers[].State` | string | the peer state (the replica peer table, M3) |
+| `Peers[].Epoch` | uint64 | the epoch the peer was assigned at |
+| `Peers[].EndpointVersion` | uint64 | the peer's endpoint version within the epoch |
+| `Peers[].DataAddr` | string | the peer's data-path address |
+| `Peers[].CtrlAddr` | string | the peer's control-path address |
+| `Peers[].SessionID` | uint64 | the current recovery or shipping session; 0 when none |
+| `Peers[].ProbeInFlight` | bool | a reachability probe of the peer is running |
+| `Peers[].Closed` | bool | the peer handle was closed (it no longer ships) |
 
 ### `GET /status/durable`
 
@@ -285,16 +285,16 @@ The engine's replica projection (only with recovery enabled). Go type `engine.Re
 
 | Field | Type | Meaning |
 |---|---|---|
-| `Mode` | Mode (string) | — |
-| `RecoveryDecision` | RecoveryDecision (string) | — |
-| `SessionKind` | SessionKind (string) | — |
-| `SessionPhase` | SessionPhase (string) | — |
-| `Epoch` | uint64 | — |
-| `EndpointVersion` | uint64 | — |
-| `R` | uint64 | — |
-| `S` | uint64 | — |
-| `H` | uint64 | — |
-| `Reason` | string | — |
+| `Mode` | Mode (string) | the engine mode (idle, recovering, healthy, degraded) |
+| `RecoveryDecision` | RecoveryDecision (string) | the recovery class the R/S/H boundaries call for |
+| `SessionKind` | SessionKind (string) | the kind of the current recovery session, if any |
+| `SessionPhase` | SessionPhase (string) | its phase |
+| `Epoch` | uint64 | the authority epoch |
+| `EndpointVersion` | uint64 | the endpoint version within the epoch |
+| `R` | uint64 | the replica's durable boundary (LSN) |
+| `S` | uint64 | the primary's recoverable start boundary (WAL tail LSN) |
+| `H` | uint64 | the primary's target boundary (head LSN) |
+| `Reason` | string | why the engine is in this mode or decision |
 
 ### `GET /status/chunk`
 
@@ -302,29 +302,29 @@ Chunk store usage of a walstore-chunk volume (only with --chunk-control-endpoint
 
 | Field | Type | Meaning |
 |---|---|---|
-| `volumeID` | string | — |
+| `volumeID` | string | the volume |
 | `chunkBytes` | uint64 | one full chunk |
-| `liveChunks` | int | — |
-| `liveBytes` | uint64 | — |
-| `snapshots[]` | object | — |
-| `snapshots[].name` | string | — |
-| `snapshots[].createdNs` | int64 | — |
-| `snapshots[].class` | string | — |
-| `snapshots[].pinned` | bool | — |
-| `snapshots[].chunks` | int | — |
-| `snapshots[].exclusiveBytes` | uint64 | — |
-| `manifestBindings` | int | — |
-| `manifestBytes` | uint64 | — |
-| `storedBindings` | int | — |
-| `storedBytes` | uint64 | — |
-| `storedUpperBound` | bool | — |
-| `policy` | object | — |
-| `policy.keepNewest` | int | — |
-| `policy.keepYoungerNs` | int64 | — |
-| `policy.keepHourly` | int | — |
-| `policy.keepDaily` | int | — |
-| `policy.keepWeekly` | int | — |
-| `policySet` | bool | — |
+| `liveChunks` | int | chunks HEAD references |
+| `liveBytes` | uint64 | their bytes (the last chunk clipped) |
+| `snapshots[]` | object | one entry per live snapshot |
+| `snapshots[].name` | string | the snapshot name |
+| `snapshots[].createdNs` | int64 | when it was created (Unix ns) |
+| `snapshots[].class` | string | its retention class |
+| `snapshots[].pinned` | bool | retention never deletes it |
+| `snapshots[].chunks` | int | chunks its manifest references |
+| `snapshots[].exclusiveBytes` | uint64 | bytes no other holder references: what deleting it makes eligible for GC |
+| `manifestBindings` | int | stored chunk-key bindings some manifest references |
+| `manifestBytes` | uint64 | their exact bytes |
+| `storedBindings` | int | all chunk-key bindings in the filer, referenced or not |
+| `storedBytes` | uint64 | their bytes; unreferenced ones counted at full chunk size |
+| `storedUpperBound` | bool | StoredBytes is an upper bound (some bindings are unreferenced) |
+| `policy` | object | the snapshot retention policy in force |
+| `policy.keepNewest` | int | keep the newest N unpinned snapshots |
+| `policy.keepYoungerNs` | int64 | keep every snapshot younger than this (ns) |
+| `policy.keepHourly` | int | keep the newest snapshot of each of the last N hours |
+| `policy.keepDaily` | int | keep the newest snapshot of each of the last N days |
+| `policy.keepWeekly` | int | keep the newest snapshot of each of the last N weeks |
+| `policySet` | bool | the volume set its own policy (else the default applies) |
 
 ### `GET /status/nvme`
 
