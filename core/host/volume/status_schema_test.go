@@ -281,3 +281,28 @@ func TestStatusBodiesMatchTheRoutes(t *testing.T) {
 		}
 	}
 }
+
+// Every /status route the server registers is in the schema.
+func TestStatusSchemaCoversEveryRoute(t *testing.T) {
+	listed := map[string]bool{}
+	for _, r := range statusRoutes {
+		listed[r.route] = true
+	}
+	for _, file := range []string{"status_server.go", "chunk_control.go"} {
+		src, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, line := range strings.Split(string(src), "\n") {
+			i := strings.Index(line, `HandleFunc("/status`)
+			if i < 0 {
+				continue
+			}
+			route := line[i+len(`HandleFunc("`):]
+			route = route[:strings.Index(route, `"`)]
+			if !listed[route] {
+				t.Errorf("%s registers %s, which docs/status-schema.md does not cover", file, route)
+			}
+		}
+	}
+}
