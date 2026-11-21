@@ -469,6 +469,11 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 	p.mu.Lock()
 	if p.workspaceUncertain[ask.VolumeID] {
 		p.mu.Unlock()
+		if grant != nil {
+			// An earlier workspace write may have landed (an issue among
+			// them): a move cannot be answered definitely until a reload.
+			return fmt.Errorf("authority: workspace persistence uncertain; restart required: %w", ErrWorkspaceOutcomeUncertain)
+		}
 		return fmt.Errorf("authority: workspace persistence uncertain; restart required")
 	}
 	if p.workspace[ask.VolumeID] != nil && ask.Intent != IntentRefreshEndpoint && grant == nil {
@@ -607,6 +612,12 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 				p.refreshLeaseViewLocked(ask.VolumeID)
 			}
 			p.mu.Unlock()
+			if issuedWorkspace != nil {
+				// The store may have written the issuing record before
+				// failing (e.g. a directory sync after the rename): the
+				// move's outcome is unknown, not refused.
+				return fmt.Errorf("authority: durable Put of a workspace move issue failed: %w: %w", err, ErrWorkspaceOutcomeUncertain)
+			}
 			return fmt.Errorf("authority: durable Put failed, rolling back mint: %w", err)
 		}
 		p.writeSeqByVolume[ask.VolumeID] = nextSeq

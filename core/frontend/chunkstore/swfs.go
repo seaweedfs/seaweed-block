@@ -317,6 +317,9 @@ func (c *SWFS) DeleteBlob(ctx context.Context, fid string) error {
 			return err
 		}
 		resp.Body.Close()
+		if resp.StatusCode == http.StatusBadRequest {
+			return fmt.Errorf("%w: delete %s: http %d", ErrBlobDeleteRejected, fid, resp.StatusCode)
+		}
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
 			return fmt.Errorf("chunkstore: delete %s: http %d", fid, resp.StatusCode)
 		}

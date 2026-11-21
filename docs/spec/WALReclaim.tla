@@ -1,6 +1,6 @@
 ----------------------------- MODULE WALReclaim -----------------------------
 (***************************************************************************)
-(* Liveness of v3 WAL reclaim under write pressure (claude05, 2026-11-19). *)
+(* Liveness of v3 WAL reclaim under write pressure (2026-11-19).           *)
 (* Abstracts core/storage at seaweed-block main 39f11d6a:                  *)
 (*   head    = WAL head LSN (records appended)                             *)
 (*   wack    = durable WAL frontier; today advanced only by Sync           *)
@@ -14,7 +14,7 @@
 (* (walstore.go:829-832, admission at :850). A cut takes the capture       *)
 (* write lock; Go's RWMutex makes a pending writer block new readers.      *)
 (*                                                                         *)
-(* InternalOn: the fix under review (codex03 design r0) - under pressure   *)
+(* InternalOn: the fix under review - under pressure                       *)
 (* the store makes its own WAL durable (wack := head) with no guest Sync.  *)
 (* Mut:                                                                    *)
 (*   "none"          the design                                            *)

@@ -420,7 +420,7 @@ func TestDescriptorV3BaseTransitionTable(t *testing.T) {
 	}
 }
 
-// codex01 row 3 review P1: a slot write error (full or partial), like an
+// A slot write error (full or partial), like an
 // fsync error, latches the store, keeps the candidate pinned and refuses
 // every further publication, rollover and reuse with no further I/O.
 // Reopen (read back and select) is the positive control.
@@ -492,7 +492,7 @@ func TestDescriptorV3SlotWriteErrorLatchesAndPinsTheCandidate(t *testing.T) {
 	}
 }
 
-// codex01 row 3 review P2: counters beyond 2^64-2 are refused at
+// Counters beyond 2^64-2 are refused at
 // publication with ErrCounterExhausted, before any write.
 func TestDescriptorV3PublicationCounterExhaustion(t *testing.T) {
 	const over = counterMaxV3 + 1
@@ -518,7 +518,7 @@ func TestDescriptorV3PublicationCounterExhaustion(t *testing.T) {
 	}
 }
 
-// codex01 row 3 round 2 P1: the store fault for a slot write error is
+// The store fault for a slot write error is
 // latched inside the leaf, before fileSyncMu is released. An independent
 // store Sync B queued on fileSyncMu behind A's failing slot write must be
 // refused and must not fsync or acknowledge. The harness lets B run right

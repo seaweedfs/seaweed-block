@@ -10,7 +10,7 @@ Runner commit:        sw-test-runner-standalone @ 6ec7abd (swblock 15.9 MB Windo
 Host:                 m02 (192.168.1.184) — Ubuntu 24.04.3 LTS / k3s v1.34.4+k3s1
 Run id:               20260512-203746-8cf2 (QA-owned re-run)
 Dev run id (ref):     20260512-202811-1aa7
-Bundle:               V:/share/g15d-k8s/testops-runs/lifecycle-gate/20260512-203746-8cf2
+Bundle:               <evidence-store>/g15d-k8s/testops-runs/lifecycle-gate/20260512-203746-8cf2
 Scenario:             testops/scenarios/cluster-ops-inventory-chain.yaml
 ```
 
