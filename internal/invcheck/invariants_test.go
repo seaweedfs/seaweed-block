@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -236,4 +237,30 @@ func TestInvariantStatementsAreShort(t *testing.T) {
 			t.Errorf("%s:%d: %s is not a row of invariants.md: delete its line", list, at, id)
 		}
 	}
+	// The list only shrinks. Its size is pinned here, so a new exception needs
+	// an edit of this constant, and where the base commit is at hand every
+	// listed row must already have been listed there.
+	if len(listed) != longStatementsLeft {
+		t.Errorf("%s names %d rows, longStatementsLeft is %d: lower the constant when a line is deleted; it is never raised", list, len(listed), longStatementsLeft)
+	}
+	base, err := exec.Command("git", "-C", root, "show", "HEAD^1:"+list).Output()
+	if err != nil {
+		t.Logf("no base version of %s (%v): the only-shrink comparison is skipped", list, err)
+		return
+	}
+	was := map[string]bool{}
+	for _, line := range strings.Split(strings.ReplaceAll(string(base), "\r\n", "\n"), "\n") {
+		if id := strings.TrimSpace(line); id != "" && !strings.HasPrefix(id, "#") {
+			was[id] = true
+		}
+	}
+	for id, at := range listed {
+		if !was[id] {
+			t.Errorf("%s:%d: %s was not listed in the base commit: the list only shrinks", list, at, id)
+		}
+	}
 }
+
+// longStatementsLeft is the number of rows testdata/long-statements.txt may
+// name. It only goes down.
+const longStatementsLeft = 28
