@@ -1430,6 +1430,7 @@ func (l *chunkLayerImpl) Stats() chunkLayerStats {
 	l.stMu.Unlock()
 
 	out.DirtyChunks = len(l.captureCandidates())
+	out.AbsentChunks = l.absentHydratable()
 
 	return out
 }
