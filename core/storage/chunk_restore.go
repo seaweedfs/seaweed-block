@@ -37,6 +37,11 @@ func ClaimChunkHead(ctx context.Context, remote ChunkRemote, cfg ChunkLayerConfi
 	if head.Epoch > cfg.Epoch || (head.Gen != 0 && head.Epoch == cfg.Epoch && head.Holder != cfg.Holder) {
 		return ChunkHead{}, ErrChunkLayerFenced
 	}
+	// INV-WS-SEALED-REOPEN-001: the sealing incarnation cannot reopen its
+	// committed handoff proof. A higher-epoch takeover remains a separate claim.
+	if chunkHeadIsDetached(head) && head.Epoch == cfg.Epoch && head.Holder == cfg.Holder {
+		return copyHead(head), ErrChunkLayerDetached
+	}
 	// Preparation uses exactly the validated image this CAS will protect.
 	// A failing seed cannot fence the old holder before this host is ready.
 	if cfg.PrepareRestore != nil {

@@ -593,3 +593,22 @@ cut/recovered-WAL control `TestHeadBeltSameOwnerReopenPreservesAcknowledgedWrite
 `TestLocalReopenClaimsBeforeServing` covers the provider existing-root path.
 The finite model checks one nonempty base; the native/public claim test also
 covers an empty root with a delayed first-cut exclusive create.
+
+### Same-incarnation reopen after seal
+
+`SealedReopen.tla` checks the ruled same-epoch/holder M4 Claiming -> Detached
+refusal (`INV-WS-SEALED-REOPEN-001`). It abstracts one detached proof and one
+reopen: no prepare, CAS, generation change or serving is permitted. This is a
+local guard model, not the full handover/liveness or RPC-delivery model.
+TLC 2.19 (same tool SHA256 above), 2026-11-21: `cfg/SealedReopen.cfg` exhausted
+2 generated / 2 distinct states, depth 2, queue empty. Both
+`SealedReopenPreservesProof` and `SealedReopenCannotServe` hold.
+`cfg/SealedReopen_reactivate.cfg` violates `SealedReopenPreservesProof` at depth 2.
+That negative maps to `TestClaimChunkHeadSameOwnerReopenPreservesSeal` and
+`TestRestoreEqualOwnerDetachedHEADStaysSealed`. The latter performs a real plain
+seal, restarts storage on either the retained local root or a fresh root under
+the same assignment, verifies unchanged proof/bytes and no frontend I/O, then
+loads that exact sealed image on the planned new holder at a higher epoch.
+The earlier test expecting same-owner reactivation is replaced by this ruled
+terminal behavior. The active-root generation belt model and its bounds remain
+unchanged; its serving precondition excludes a sealed same-owner incarnation.

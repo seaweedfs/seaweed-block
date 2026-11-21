@@ -38,6 +38,26 @@ func TestClaimChunkHeadSameOwnerReopenRejectsKilledProcessCAS(t *testing.T) {
 	}
 }
 
+func TestClaimChunkHeadSameOwnerReopenPreservesSeal(t *testing.T) {
+	r := newFakeChunkRemote()
+	r.head = ChunkHead{Gen: 7, Epoch: 2, Holder: "host-a", RemoteLSN: 3,
+		State: ChunkHeadDetached, DetachedBy: &ChunkDetachedBy{Gen: 7, Epoch: 2, Holder: "host-a"}}
+	sealed := copyHead(r.head)
+	cfg := ctConfig(2)
+	prepared := false
+	cfg.PrepareRestore = func(ChunkHead) error { prepared = true; return nil }
+	_, err := ClaimChunkHead(context.Background(), r, cfg)
+	if !errors.Is(err, ErrChunkLayerDetached) || prepared || r.stats().cas != 0 || !sameHead(r.stats().head, sealed) {
+		t.Fatalf("reopen undid seal: err=%v prepared=%t CAS=%d HEAD=%+v", err, prepared, r.stats().cas, r.stats().head)
+	}
+	// The planned new holder can consume the sealed image at a higher epoch;
+	// it is a takeover, not a reopen of the sealed incarnation.
+	next, err := ClaimChunkHead(context.Background(), r, ChunkLayerConfig{Epoch: 3, Holder: "host-b"})
+	if err != nil || next.Gen != 8 || next.RemoteLSN != 3 || next.State != ChunkHeadActive || next.DetachedBy != nil {
+		t.Fatalf("planned holder cannot claim preserved seal: HEAD=%+v err=%v", next, err)
+	}
+}
+
 func TestHeadBeltSameOwnerReopenPreservesAcknowledgedWrites(t *testing.T) {
 	s, path, crash := crashableStore(t)
 	r := newFakeChunkRemote()
