@@ -23,7 +23,7 @@ const (
 	defaultChunkPath = "/swblock/chunks"
 	// Periodic HEAD publication bounds the host-loss recovery point. Automatic
 	// named snapshots remain explicit catalog operations.
-	defaultChunkCaptureInterval     = 15 * time.Minute
+	defaultChunkCaptureInterval     = 0
 	defaultChunkMaintenanceInterval = time.Hour
 	defaultChunkCutTimeout          = 5 * time.Minute
 	defaultChunkMaintenanceTimeout  = time.Minute

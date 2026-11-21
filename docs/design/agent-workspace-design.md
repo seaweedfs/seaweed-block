@@ -72,8 +72,8 @@ A workspace runs one replica (RF=1). It does not use the replication engine of t
 | Permanent host loss | the image at the last successful cut (HEAD `RemoteLSN`); writes after it are lost |
 | Clean move (Detach) | everything written before Detach: guest I/O is stopped, then Detach publishes a final cut before the host releases the volume |
 
-- **When cuts happen.** At semantic points chosen by the integrator, on explicit request, and by the periodic timer (default 15m, minimum 5m in the OSS CLI; 0 disables). Periodic cuts update HEAD without creating named snapshots. `--chunk-dirty-threshold` bounds staging work and never triggers a cut.
-- **Recoverable frontier.** The confirmed remote HEAD is the recovery point after host loss. The default capture interval is 15m; failed or expired attempts retry with bounded backoff and reusable uploads, and do not claim a newly durable recovery point.
+- **When cuts happen.** At semantic points chosen by the integrator, on explicit request, and by the periodic timer (off by default; when set, at least 5m in the OSS CLI). Periodic cuts update HEAD without creating named snapshots. `--chunk-dirty-threshold` bounds staging work and never triggers a cut.
+- **Recoverable frontier.** The confirmed remote HEAD is the recovery point after host loss. With the periodic timer off (the default), HEAD advances at explicit cuts, snapshots and detach; failed or expired attempts retry with bounded backoff and reusable uploads, and do not claim a newly durable recovery point.
 - Multi-replica workspaces combined with chunk snapshots are not supported.
 
 ## 3. Remote layout
@@ -253,8 +253,8 @@ Snapshots of the target are refused in `Claimed` and `Restoring`.
 
 ### Attached-volume scheduling
 
-Blockvolume defaults to periodic HEAD capture every 15 minutes (minimum 5
-minutes, 0 disables) and retention every hour. Named snapshots remain explicit.
+Periodic HEAD capture is off by default (opt-in; when set, at least 5
+minutes), and retention runs every hour. Named snapshots remain explicit.
 A five-minute context covers the whole cut; completed immutable uploads survive
 an expired attempt only under matching version/HEAD generation. Automatic GC is
 opt-in until the 50/200-volume metadata/RSS qualification accepts its full-catalog
