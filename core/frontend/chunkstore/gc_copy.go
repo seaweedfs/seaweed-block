@@ -31,6 +31,9 @@ func (g *Collector) SweepCopies(ctx context.Context) (settled int, err error) {
 	}
 	var pending []copyAttempt
 	for _, vol := range vols {
+		if g.scope != "" && g.scope != vol {
+			continue
+		}
 		r, e := NewChunkRemote(g.cat.f, nilBlobs{}, path.Join(g.cat.base, vol))
 		if e != nil {
 			return 0, e

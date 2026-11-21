@@ -335,6 +335,53 @@ four negative controls separately remove retirement, the frame join, the
 readiness guard or ACK progress restoration. This abstracts successful admitted
 frames and does not prove physical-I/O, authority rollback or timing behavior.
 
+## Attached-volume maintenance
+
+`MaintenanceOwner.tla` now includes joined-stop re-arm on the same current
+handle, and replacement followed by a new attachment. At most three arms and
+two handles make the graph finite. Local review-fold run 2026-11-21 03:47 UTC,
+TLC2.19 / Java21 /512MiB, jar SHA256
+`936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`:
+
+```sh
+java -Xmx512m -cp /path/to/tla2tools.jar tlc2.TLC -deadlock -config MaintenanceOwner_safe.cfg MaintenanceOwner
+```
+
+Positive exited0,105generated/54distinct, queue empty, depth12. Negative configs
+`overlap` exited12 at OneOwner (20/14 depth6), `early_release` at
+JoinedBeforeRelease (25/14 depth6), and `stale_rearm` at
+CurrentHandleAtAdmission (50/33 depth8). Unique `-metadir` paths were used.
+Native tests separately bind replica/epoch/endpoint and current handle/layer,
+witness cancellation while held, and same-handle stop/join/re-arm. This finite
+model does not establish physical-I/O cancellation or a fleet scheduling bound.
+
+`ScopedMaintenanceGC.tla` extends S9's scope correspondence: three keys across
+two volumes, one foreign-only root, independent local coverage and crash/config
+invalidation. `ScopedMaintenanceGC_safe.cfg` checks foreign-root preservation,
+local candidate scope and coverage ownership: 20 generated / 10 distinct states,
+depth 9, with the same TLC/jar. Its three negative configs narrow
+the root domain, widen reclamation or import namespace coverage. Native tests
+exercise the persisted mark records and real catalog root traversal; the finite
+model abstracts the complete mark and grace, whose timing remains in S9.
+No 50/200-volume density or metadata-RPC qualification is claimed; automatic GC
+remains opt-in, while periodic HEAD capture and retention are enabled by the CLI.
+
+The unchanged S9 timing models were replayed with the same TLC/jar:
+`cfg/S9_rule_G4.cfg` (`RetentionGCTiming`, D=2/G=4/MD=1/MaxT=10)
+passed with 26,341 generated / 10,798 distinct states, depth 23;
+`cfg/S9b_G3_MD1.cfg` (`RetentionGCMulti`, G=3/MD=1/MaxT=12)
+passed with 11,303 / 5,743, depth 23.
+
+`cfg/Maintenance_lifecycle.cfg` replays unchanged `ChunkLifecycleFixed` with
+one snapshot caller/deleter, MaxHostOps=1 and MaxRuns=1, fork/delete/create,
+lost replies/pending/sweep enabled. Safety invariants and HeadMonotone passed:
+42,133,769 generated / 7,224,016 distinct states, depth 47 (TLC 2.19, same jar).
+This config permits terminal stuttering (`CHECK_DEADLOCK FALSE`); it does not
+prove deadlock freedom. The original `Fix_mix_small` replay stopped with a
+terminal deadlock at depth 23 after 28,242,446 / 5,592,191 states (callers Done,
+gc_loop); it is not reported as a completed green run. No protocol guards in
+ChunkLifecycleFixed were changed.
+
 `PrecopyFixedAdmission.tla` checks cost admission over five physical rounds.
 A known estimate fits the 1.2-second allowance, or uses the five-second declared
 freeze limit when it is at least 90% of the previous comparable known estimate or on the final

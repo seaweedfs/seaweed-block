@@ -121,3 +121,90 @@ func TestChunkStageV3_FourTimesCapConvergesUnderSteadyWrites(t *testing.T) {
 	assertEveryHeadIsPrefixImage(t, f, w)
 	assertNoIntentsLeft(t, f)
 }
+
+// Each of two deadlines interrupts the third upload, after two immutable chunks
+// completed. The next pass must reuse those chunks rather than restart the set.
+type deadlineProgressRemote struct {
+	successful map[string][]byte
+	*fakeChunkRemote
+	completed int
+	calls     int
+}
+
+func (r *deadlineProgressRemote) Put(ctx context.Context, key string, b []byte) error {
+	r.calls++
+	if r.completed == 2 {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	err := r.fakeChunkRemote.Put(ctx, key, b)
+	if err == nil {
+		r.completed++
+		if _, exists := r.successful[key]; exists {
+			return errors.New("test: retransmitted unchanged successful key")
+		}
+		if r.successful == nil {
+			r.successful = map[string][]byte{}
+		}
+		r.successful[key] = append([]byte(nil), b...)
+	}
+	return err
+}
+func TestChunkStageV3_MultipleDeadlinesKeepProgress(t *testing.T) {
+	s, f, l, w := precopyLayer(t, 1, 5)
+	l.cfg.COWSpillLimit = ctChunkBytes
+	l.cfg.UploadConcurrency = 1
+	r := &deadlineProgressRemote{fakeChunkRemote: f}
+	l.remote = r
+	base := f.stats().head.Gen
+	previous := 0
+	lastSubmitted := s.NextLSN() - 1
+	expectedImage := w.imageAt(lastSubmitted)
+	var finalHead chunkHead
+	for pass := 0; pass < 3; pass++ {
+		r.completed = 0
+		r.calls = 0
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		result, err := l.Cut(ctx)
+		cancel()
+		if pass < 2 {
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("pass %d did not reach injected deadline: %v", pass, err)
+			}
+			if f.stats().head.Gen != base {
+				t.Fatal("deadline moved HEAD")
+			}
+			l.stMu.Lock()
+			cached := len(l.reusable)
+			l.stMu.Unlock()
+			if cached <= previous {
+				t.Fatalf("pass %d restarted dirty set: cached=%d previous=%d", pass, cached, previous)
+			}
+			previous = cached
+		} else if err != nil || result.Head.Gen != base+1 {
+			t.Fatalf("third pass failed to publish: %+v %v", result, err)
+		} else {
+			finalHead = result.Head
+		}
+	}
+	// Five changed chunks, five successful puts, no retransmission after expiry.
+	if len(r.successful) != 5 {
+		t.Fatalf("successful upload keys=%d want5", len(r.successful))
+	}
+	totalBytes := 0
+	for _, payload := range r.successful {
+		totalBytes += len(payload)
+	}
+	if totalBytes != 5*ctChunkBytes {
+		t.Fatalf("uploaded bytes=%d want%d", totalBytes, 5*ctChunkBytes)
+	}
+	assertEveryHeadIsPrefixImage(t, f, w)
+	if finalHead.RemoteLSN != lastSubmitted {
+		t.Fatalf("final frontier=%d want last submitted=%d", finalHead.RemoteLSN, lastSubmitted)
+	}
+	assertImage(t, "final complete submitted image", f.imageOf(t, finalHead), expectedImage)
+	if previous != 4 {
+		t.Fatalf("reusable chunks=%d", previous)
+	}
+	assertNoIntentsLeft(t, f)
+}
