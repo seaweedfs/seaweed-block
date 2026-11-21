@@ -4,6 +4,8 @@ package durable_test
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -160,5 +162,43 @@ func TestWALStoreChunk_StatusHasNoChunkSectionForWALStore(t *testing.T) {
 	_ = openRecovered(t, p)
 	if st := p.DurableStatuses(); len(st) != 1 || st[0].Chunk != nil {
 		t.Fatalf("walstore status: %+v", st)
+	}
+}
+
+// ChunkOnPublishSettled sees every confirmed publication of a volume, with
+// its volume id and the HEAD before and after it; a no-op capture is not one.
+func TestWALStoreChunk_PublishSettledHook(t *testing.T) {
+	remote := storage.NewMemChunkRemote()
+	var mu sync.Mutex
+	var got []string
+	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096,
+		NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
+		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
+		ChunkOnPublishSettled: func(_ context.Context, volumeID string, prev, next storage.ChunkHead) {
+			mu.Lock()
+			got = append(got, fmt.Sprintf("%s:%d->%d", volumeID, prev.Gen, next.Gen))
+			mu.Unlock()
+		},
+	}, v1View())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	s := openRecovered(t, p)
+	for i, lba := range []uint32{1, 0, pcChunkBlocks + 1} {
+		if lba != 0 {
+			if _, err := s.Write(lba, block(byte(i+1))); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := p.CaptureVolume(context.Background(), "v1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 2 || got[0] != "v1:0->1" || got[1] != "v1:1->2" {
+		t.Fatalf("reports %v; want [v1:0->1 v1:1->2] (the middle capture changed nothing)", got)
 	}
 }

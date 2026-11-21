@@ -192,6 +192,12 @@ type ProviderConfig struct {
 	// call back into the provider.
 	OnChunkDetach        func(volumeID string) uint64
 	OnChunkDetachResumed func(volumeID string, attempt uint64)
+	// ChunkOnPublishSettled, optional, is called once per confirmed
+	// publication of a chunk volume's HEAD, with the HEAD before and after it
+	// (storage.ChunkLayerConfig.OnPublishSettled). It runs on the publishing
+	// caller after the capture lock is released; ctx ends when the volume's
+	// layer closes.
+	ChunkOnPublishSettled func(ctx context.Context, volumeID string, prev, next storage.ChunkHead)
 	// ChunkDirtyThreshold is the number of candidate chunks above which
 	// a cut pre-copies (stages) chunks before its barrier, in rounds of
 	// this size; copy-before-write copies the rest outside the barrier.

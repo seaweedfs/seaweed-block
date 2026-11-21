@@ -310,6 +310,13 @@ func validChunkIntentID(id string) bool {
 
 // chunkLayerConfig configures one attachment.
 type chunkLayerConfig struct {
+	// OnPublishSettled, when set, is called once per confirmed publication
+	// (a cut, a detach, or an earlier unresolved CAS found applied), with the
+	// HEAD before and after it. It runs on the publishing caller after the
+	// capture lock is released, in publication order, registered with Close;
+	// hooks of different callers may run concurrently. ctx ends with Close.
+	// A closing layer drops pending reports.
+	OnPublishSettled func(ctx context.Context, prev, next ChunkHead)
 	// ChunkBlocks is the number of consecutive blocks per chunk (1024 for
 	// 4 KiB blocks and 4 MiB chunks).
 	ChunkBlocks uint32

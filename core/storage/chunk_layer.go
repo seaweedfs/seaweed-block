@@ -69,7 +69,10 @@ type chunkLayerImpl struct {
 
 	ctx    context.Context // cancelled by Close
 	cancel context.CancelFunc
-	wg     sync.WaitGroup // captures and fills in flight
+	// settled: confirmed publications not yet reported to
+	// cfg.OnPublishSettled (stMu).
+	settled []headTransition
+	wg      sync.WaitGroup // captures and fills in flight
 
 	cowMu          sync.Mutex // window admission only; never held during reads or joins
 	cow            *cutCOWWindow
@@ -528,12 +531,12 @@ func (s *WALStore) installFetchedBlock(lba uint32, data []byte, stillAbsent func
 
 func (l *chunkLayerImpl) BeginBaseInstall() error {
 	l.capMu.Lock()
-	defer l.capMu.Unlock()
+	defer l.unlockCap()
 	return fmt.Errorf("%w: BASE state must be published by the descriptor install protocol", errV3NotYet)
 }
 func (l *chunkLayerImpl) EndBaseInstall(frontier uint64) error {
 	l.capMu.Lock()
-	defer l.capMu.Unlock()
+	defer l.unlockCap()
 	if cp := l.s.CheckpointLSN(); cp < frontier {
 		return fmt.Errorf("storage: EndBaseInstall: frontier %d is not durable (checkpoint %d)", frontier, cp)
 	}
@@ -592,7 +595,7 @@ func (l *chunkLayerImpl) admit() (err error) {
 
 func (l *chunkLayerImpl) Cut(ctx context.Context) (chunkCutResult, error) {
 	l.capMu.Lock()
-	defer l.capMu.Unlock()
+	defer l.unlockCap()
 	return l.captureLocked(ctx, false)
 }
 
@@ -606,7 +609,7 @@ func (l *chunkLayerImpl) Capture(ctx context.Context) (uint64, error) {
 
 func (l *chunkLayerImpl) MakeRemoteDurable(ctx context.Context, t uint64) error {
 	l.capMu.Lock()
-	defer l.capMu.Unlock()
+	defer l.unlockCap()
 	l.stMu.Lock()
 	fenced, detached := l.fenced, l.detached != nil
 	l.stMu.Unlock()
@@ -1120,7 +1123,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 
 func (l *chunkLayerImpl) Detach(ctx context.Context) (chunkCutResult, error) {
 	l.capMu.Lock()
-	defer l.capMu.Unlock()
+	defer l.unlockCap()
 	if r, ok := l.storedDetach(); ok {
 		return r, nil
 	}
@@ -1141,7 +1144,7 @@ func (l *chunkLayerImpl) Detach(ctx context.Context) (chunkCutResult, error) {
 // successful cancel. resolvePending would re-propose the detach instead.
 func (l *chunkLayerImpl) SettleDetach(ctx context.Context) (detachSettlement, chunkCutResult, error) {
 	l.capMu.Lock()
-	defer l.capMu.Unlock()
+	defer l.unlockCap()
 	if r, ok := l.storedDetach(); ok {
 		return detachApplied, r, nil
 	}
@@ -1198,6 +1201,7 @@ func (l *chunkLayerImpl) SettleDetach(ctx context.Context) (detachSettlement, ch
 	l.pendingDetach, l.pendingCut, l.pendingBase = false, chunkCutResult{}, chunkHeadVersion{}
 	switch {
 	case sameProposal(cur, *pending):
+		l.noteSettled(l.head, cur)
 		l.head, l.remoteLSN = copyHead(cur), cur.RemoteLSN
 		cut.Head = copyHead(cur)
 		l.detached = &cut
@@ -1326,6 +1330,7 @@ func (l *chunkLayerImpl) resolvePending(ctx context.Context) (err error) {
 	l.pendingDetach, l.pendingCut, l.pendingBase = false, chunkCutResult{}, chunkHeadVersion{}
 	switch {
 	case sameProposal(cur, *pending):
+		l.noteSettled(l.head, cur)
 		l.head, l.remoteLSN = copyHead(cur), cur.RemoteLSN
 		if wasDetach {
 			cut.Head = copyHead(cur)
@@ -1605,6 +1610,7 @@ func (l *chunkLayerImpl) abortCut(all bool) {
 func (l *chunkLayerImpl) finishCut(head chunkHead, h uint64, changed []uint64, newKeys map[uint64]string) {
 	l.stMu.Lock()
 	defer l.stMu.Unlock()
+	l.noteSettled(l.head, head)
 	l.head, l.remoteLSN, l.pending = copyHead(head), h, nil
 	l.reusable = nil
 	l.inflight = map[uint64]bool{}
@@ -1633,7 +1639,7 @@ func isAllZero(b []byte) bool {
 
 func (l *chunkLayerImpl) EvictChunk(idx uint64) error {
 	l.capMu.Lock()
-	defer l.capMu.Unlock()
+	defer l.unlockCap()
 	if idx >= l.numChunks {
 		return fmt.Errorf("%w: chunk %d out of range", errChunkEvictRefused, idx)
 	}
