@@ -226,19 +226,35 @@ func chunkSnapshot(args []string, stdout, stderr io.Writer) int {
 func chunkDetach(args []string, stdout, stderr io.Writer) int {
 	fs := chunkFlagSet("detach", stderr)
 	var (
-		volumeID, statusAddr string
-		timeout              time.Duration
+		volumeID, statusAddr    string
+		timeout                 time.Duration
+		frozen, allowOverBudget bool
+		freezeStartedAtNs       int64
 	)
 	fs.StringVar(&volumeID, "volume", "", "volume id")
 	fs.StringVar(&statusAddr, "status-addr", "", "blockvolume status address or URL (with --chunk-control-endpoint)")
 	fs.DurationVar(&timeout, "timeout", 120*time.Second, "operation bound (capped at the server's OpDeadline)")
+	fs.BoolVar(&frozen, "frozen", false, "guest is already frozen; use one cut within its remaining five-second budget")
+	fs.Int64Var(&freezeStartedAtNs, "freeze-started-at-ns", 0, "guest freeze start in Unix nanoseconds on the serving host clock")
+	fs.BoolVar(&allowOverBudget, "allow-over-budget", false, "explicit final frozen attempt; record over_budget rather than refuse its estimate")
 	if err := fs.Parse(args); err != nil {
 		return chunkFail(chunkName(fs), stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, err.Error(), false)
 	}
 	if volumeID == "" || statusAddr == "" {
 		return chunkFail("detach", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--volume and --status-addr are required", false)
 	}
-	return chunkPost("detach", statusAddr, "/chunk/detach", timeout, map[string]any{"volumeID": volumeID}, stdout, stderr)
+	if (frozen && freezeStartedAtNs <= 0) || (!frozen && (freezeStartedAtNs != 0 || allowOverBudget)) {
+		return chunkFail("detach", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--frozen requires --freeze-started-at-ns; --allow-over-budget requires --frozen", false)
+	}
+	body := map[string]any{"volumeID": volumeID}
+	if frozen {
+		body["frozen"] = true
+		body["freezeStartedAtNs"] = freezeStartedAtNs
+		if allowOverBudget {
+			body["allowOverBudget"] = true
+		}
+	}
+	return chunkPost("detach", statusAddr, "/chunk/detach", timeout, body, stdout, stderr)
 }
 
 // chunkCatalog opens the catalog under --chunk-path on --chunk-filer.

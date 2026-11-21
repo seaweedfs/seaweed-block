@@ -90,6 +90,8 @@ type ChunkRemote struct {
 
 	mu   sync.Mutex
 	fids map[string]string // key -> fid; key entries are write-once
+
+	assigns assignCounters // reservations made by upload rounds
 }
 
 // NewChunkRemote returns the remote for the volume rooted at root, an
@@ -150,26 +152,42 @@ func (r *ChunkRemote) Put(ctx context.Context, key string, data []byte) error {
 }
 
 func (r *ChunkRemote) putObject(ctx context.Context, key string, data []byte, object string) error {
-	if err := storage.ValidChunkKey(key); err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidKey, err)
-	}
-	if strings.HasPrefix(key, "@") {
-		return fmt.Errorf("%w: %q is owner-qualified; a volume writes only its own keys", ErrInvalidKey, key)
-	}
-	name, err := keyName(key)
+	name, err := r.ownKeyName(key)
 	if err != nil {
 		return err
 	}
-	r.mu.Lock()
-	_, known := r.fids[key]
-	r.mu.Unlock()
-	if known {
+	if r.knownKey(key) {
 		return storage.ErrChunkKeyExists
 	}
 	fid, err := r.b.Put(ctx, data)
 	if err != nil {
 		return err
 	}
+	return r.bindKey(ctx, key, name, fid, data, object)
+}
+
+// ownKeyName checks that key is one of this volume's own keys and returns
+// its binding's entry name.
+func (r *ChunkRemote) ownKeyName(key string) (string, error) {
+	if err := storage.ValidChunkKey(key); err != nil {
+		return "", fmt.Errorf("%w: %v", ErrInvalidKey, err)
+	}
+	if strings.HasPrefix(key, "@") {
+		return "", fmt.Errorf("%w: %q is owner-qualified; a volume writes only its own keys", ErrInvalidKey, key)
+	}
+	return keyName(key)
+}
+
+// knownKey reports whether key is already bound (as far as this remote saw).
+func (r *ChunkRemote) knownKey(key string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, known := r.fids[key]
+	return known
+}
+
+// bindKey binds key to the stored needle fid with an exclusive create.
+func (r *ChunkRemote) bindKey(ctx context.Context, key, name, fid string, data []byte, object string) error {
 	now := time.Now().Unix()
 	e := &filerpb.Entry{
 		Name:       name,

@@ -1,9 +1,7 @@
 package chunkstore
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -219,32 +217,8 @@ func (c *SWFS) Put(ctx context.Context, data []byte) (string, error) {
 	if ar.GetFileId() == "" || ar.GetLocation().GetUrl() == "" {
 		return "", fmt.Errorf("chunkstore: assign returned no fid/location")
 	}
-	u := "http://" + ar.Location.Url + "/" + ar.FileId
-	if ar.GetFsync() {
-		u += "?fsync=true"
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(data))
-	if err != nil {
+	if err := c.upload(ctx, ar.Location.Url, ar.FileId, ar.GetAuth(), ar.GetFsync(), data); err != nil {
 		return "", err
-	}
-	req.Header.Set("Content-Type", "application/octet-stream")
-	if ar.GetAuth() != "" {
-		req.Header.Set("Authorization", "BEARER "+ar.Auth)
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("chunkstore: upload %s: %w", ar.FileId, err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-	if resp.StatusCode/100 != 2 {
-		return "", fmt.Errorf("chunkstore: upload %s: http %d: %s", ar.FileId, resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-	var ur struct {
-		Error string `json:"error"`
-	}
-	if json.Unmarshal(body, &ur) == nil && ur.Error != "" {
-		return "", fmt.Errorf("chunkstore: upload %s: %s", ar.FileId, ur.Error)
 	}
 	return ar.FileId, nil
 }
