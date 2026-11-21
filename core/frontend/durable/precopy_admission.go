@@ -119,58 +119,57 @@ func (b *StorageBackend) admitPrecopy(ctx context.Context, admit func() (func(),
 	for {
 		b.mu.Lock()
 		p := b.precopy
-		if p == nil {
-			b.mu.Unlock()
-			release, err := admit()
-			if err != nil {
-				b.mu.Lock()
-				pending := b.precopy != nil
-				b.mu.Unlock()
-				if pending {
-					continue
-				}
+
+		b.mu.Unlock()
+		if p != nil {
+			if err := b.readyCheck(); err != nil && !errors.Is(err, frontend.ErrBackendBusy) {
+				return nil, err
 			}
-			return release, err
-		}
-		b.mu.Unlock()
-		if err := b.readyCheck(); err != nil && !errors.Is(err, frontend.ErrBackendBusy) {
-			return nil, err
-		}
-		b.mu.Lock()
-		if b.precopy != p {
+			b.mu.Lock()
+			if b.precopy != p {
+				b.mu.Unlock()
+				continue
+			}
+			deadline := arrival.Add(precopyQueueBudget)
+			if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+				deadline = d
+			}
+			w := &precopyWaiter{ready: make(chan struct{}), deadline: deadline}
+			p.waiters = append(p.waiters, w)
 			b.mu.Unlock()
-			continue
+			if hook := b.testPrecopyQueued; hook != nil {
+				hook()
+			}
+			waitCtx, cancel := context.WithDeadline(ctx, deadline)
+			select {
+			case <-w.ready:
+			case <-waitCtx.Done():
+			}
+			b.mu.Lock()
+			cause := waitCtx.Err()
+			if w.signaled {
+				cause = w.err
+			}
+			b.mu.Unlock()
+			// A timely queue grant cannot outlive the command's own deadline.
+			if cause == nil {
+				cause = ctx.Err()
+			}
+			cancel()
+			if cause != nil {
+				b.removePrecopyWaiter(p, w)
+				return nil, b.attachReadyTimeout(cause)
+			}
 		}
-		deadline := arrival.Add(precopyQueueBudget)
-		if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
-			deadline = d
+		release, err := admit()
+		if err != nil {
+			b.mu.Lock()
+			pending := b.precopy != nil
+			b.mu.Unlock()
+			if pending {
+				continue
+			}
 		}
-		w := &precopyWaiter{ready: make(chan struct{}), deadline: deadline}
-		p.waiters = append(p.waiters, w)
-		b.mu.Unlock()
-		if hook := b.testPrecopyQueued; hook != nil {
-			hook()
-		}
-		waitCtx, cancel := context.WithDeadline(ctx, deadline)
-		select {
-		case <-w.ready:
-		case <-waitCtx.Done():
-		}
-		b.mu.Lock()
-		cause := waitCtx.Err()
-		if w.signaled {
-			cause = w.err
-		}
-		b.mu.Unlock()
-		// A timely queue grant cannot outlive the command's own deadline.
-		if cause == nil {
-			cause = ctx.Err()
-		}
-		cancel()
-		if cause != nil {
-			b.removePrecopyWaiter(p, w)
-			return nil, b.attachReadyTimeout(cause)
-		}
-		return admit()
+		return release, err
 	}
 }
