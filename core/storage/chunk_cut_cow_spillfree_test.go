@@ -3,18 +3,19 @@ package storage
 import (
 	"context"
 	"errors"
-	"strings"
+	"fmt"
 	"sync/atomic"
 	"testing"
 )
 
 // The spill cap is min(COWSpillLimit, free/2 - reserve), at least 0, read
-// from COWSpillFree on every call; an error counts as no free space, and
-// without COWSpillFree the configured cap applies.
+// from COWSpillFree on every call. A cap of 0 carries its cause: no room
+// (the free space is within the reserve) or a read error, which is not
+// reported as a full disk. Without COWSpillFree the configured cap applies.
 func TestCOWSpillLimit_FromFreeSpace(t *testing.T) {
 	l := &chunkLayerImpl{cfg: ChunkLayerConfig{COWSpillLimit: 4 << 30}}
-	if got := l.cowSpillLimit(); got != 4<<30 {
-		t.Fatalf("no free-space reader: cap %d, want the configured 4 GiB", got)
+	if got := l.cowSpillLimit(); got.bytes != 4<<30 || got.cause != nil {
+		t.Fatalf("no free-space reader: cap %+v, want the configured 4 GiB", got)
 	}
 	var free atomic.Int64
 	var reads atomic.Int64
@@ -28,74 +29,116 @@ func TestCOWSpillLimit_FromFreeSpace(t *testing.T) {
 	}
 	for _, c := range []struct {
 		free, want int64
+		cause      error
 	}{
-		{100 << 30, 4 << 30},             // plenty: the configured cap
-		{6 << 30, 2 << 30},               // 6 GiB free: half is 3, minus the 1 GiB reserve
-		{2 << 30, 0},                     // half the free space is all reserve
-		{1 << 30, 0},                     // below the reserve: never negative
-		{10<<30 + 2, 4 << 30},            // the configured cap still bounds it
-		{3 << 30, (3<<30)/2 - (1 << 30)}, // 1.5 GiB - 1 GiB
+		{100 << 30, 4 << 30, nil},             // plenty: the configured cap
+		{6 << 30, 2 << 30, nil},               // 6 GiB free: half is 3, minus the 1 GiB reserve
+		{2 << 30, 0, errCutNoRoom},            // half the free space is all reserve
+		{1 << 30, 0, errCutNoRoom},            // below the reserve: never negative
+		{10<<30 + 2, 4 << 30, nil},            // the configured cap still bounds it
+		{3 << 30, (3<<30)/2 - (1 << 30), nil}, // 1.5 GiB - 1 GiB
 	} {
 		free.Store(c.free)
-		if got := l.cowSpillLimit(); got != c.want {
-			t.Fatalf("free %d: cap %d, want %d", c.free, got, c.want)
+		if got := l.cowSpillLimit(); got.bytes != c.want || !errors.Is(got.cause, c.cause) || (c.cause == nil) != (got.cause == nil) {
+			t.Fatalf("free %d: cap %+v, want %d (cause %v)", c.free, got, c.want, c.cause)
 		}
 	}
 	if reads.Load() != 6 {
 		t.Fatalf("free space read %d times for 6 calls; want once per call", reads.Load())
 	}
 	fail.Store(true)
-	if got := l.cowSpillLimit(); got != 0 {
-		t.Fatalf("free-space error: cap %d, want 0 (no free space)", got)
+	if got := l.cowSpillLimit(); got.bytes != 0 || !errors.Is(got.cause, errCutFreeUnreadable) || errors.Is(got.cause, errCutNoRoom) {
+		t.Fatalf("free-space read error: cap %+v, want 0 with cause free_space_unreadable (not no room)", got)
 	}
 }
 
-// The copy window reads the free space when it opens, not only when the
-// cut starts staging: free space that shrinks below the reserve between
-// the two gives the window a cap of 0, so once the in-memory budget is used
-// a save aborts that cut (the guest write completes); after space is freed
-// the cap reads the new value.
-func TestCutCOWV3_SpillCapFollowsFreeSpaceEachCut(t *testing.T) {
+// Each cut reads the free space once, for both the staging bound and the
+// window, and shows the cap in the stats: the configured cap with ample
+// free space; 0 with reason no_room_to_cut when the free space is within
+// the reserve (the cut still completes by staging before the barrier);
+// 0 with reason free_space_unreadable when the read fails.
+func TestCutCOWV3_SpillCapIsReadOncePerCutAndShown(t *testing.T) {
 	s, l, _, gate := cowFixture(t)
+	gate.unblock()
 	var free, reads atomic.Int64
-	free.Store(100 << 30)
+	var fail atomic.Bool
 	l.cfg.COWSpillFree = func() (int64, error) {
-		if reads.Add(1) == 2 { // the window opens: the filesystem has filled up
-			free.Store(1 << 30)
+		reads.Add(1)
+		if fail.Load() {
+			return 0, errors.New("statfs failed")
 		}
 		return free.Load(), nil
 	}
-	cutDone, cutErr := cowStartCut(t, l, gate)
-	w := l.cowActive.Load()
-	w.mu.Lock()
-	w.memory = cutCOWMemoryLimit // the in-memory budget is used
-	limit := w.spillLimit
-	w.mu.Unlock()
-	if limit != 0 {
-		t.Fatalf("window cap %d with 1 GiB free; want 0", limit)
+	for i, c := range []struct {
+		free   int64
+		fail   bool
+		cap    int64
+		reason string
+	}{
+		{100 << 30, false, l.cfg.COWSpillLimit, ""},
+		{1 << 30, false, 0, "no_room_to_cut"},
+		{100 << 30, true, 0, "free_space_unreadable"},
+	} {
+		free.Store(c.free)
+		fail.Store(c.fail)
+		if _, err := s.Write(uint32(i*ctChunkBlocks+1), makeBlock(ctBlockSize, byte(0x60+i))); err != nil {
+			t.Fatal(err)
+		}
+		before := reads.Load()
+		if _, err := l.Cut(context.Background()); err != nil && c.reason == "" {
+			t.Fatal(err)
+		}
+		if n := reads.Load() - before; n != 1 {
+			t.Fatalf("cut %d read the free space %d times; want once", i, n)
+		}
+		if st := l.Stats(); st.COWSpillCap != c.cap || st.COWSpillCapReason != c.reason {
+			t.Fatalf("cut %d: stats cap %d reason %q; want %d %q", i, st.COWSpillCap, st.COWSpillCapReason, c.cap, c.reason)
+		}
 	}
-	writeDone := make(chan struct{})
-	writeErr := make(chan error, 1)
-	// Registered before the writer starts: release the copier and join the
-	// writer (bounded) whatever the test's outcome.
-	t.Cleanup(func() { gate.unblock(); cowWaitSignal(t, writeDone, "free-space-cap writer cleanup") })
-	go func() {
-		defer close(writeDone)
-		_, err := s.Write(5, makeBlock(ctBlockSize, 0xd6))
-		writeErr <- err
-	}()
-	cowWaitSignal(t, writeDone, "guest write at the free-space cap")
-	if err := <-writeErr; err != nil {
-		t.Fatal("guest write refused at the free-space cap:", err)
-	}
-	gate.unblock()
-	cowWaitSignal(t, cutDone, "cut at the free-space cap")
-	if err := <-cutErr; !errors.Is(err, errCutCOWAborted) || !strings.Contains(err.Error(), "cap of 0 bytes") {
-		t.Fatalf("cut at a 0 cap: %v, want the cap abort", err)
-	}
-	free.Store(100 << 30)
-	if got := l.cowSpillLimit(); got != l.cfg.COWSpillLimit {
-		t.Fatalf("after freeing space the cap is %d, want the configured %d", got, l.cfg.COWSpillLimit)
+}
+
+// A save that meets a zero cap aborts the cut under the cap's own cause:
+// no_room_to_cut or free_space_unreadable, not cow_capacity; the guest
+// write completes and the next cut is not blocked.
+func TestCutCOWV3_ZeroCapAbortIsCountedByItsCause(t *testing.T) {
+	for _, c := range []struct {
+		cause  error
+		reason string
+	}{
+		{errCutNoRoom, "no_room_to_cut"},
+		{fmt.Errorf("%w: %w", errCutFreeUnreadable, errors.New("statfs failed")), "free_space_unreadable"},
+	} {
+		t.Run(c.reason, func(t *testing.T) {
+			s, l, _, gate := cowFixture(t)
+			cutDone, cutErr := cowStartCut(t, l, gate)
+			w := l.cowActive.Load()
+			w.mu.Lock()
+			w.memory = cutCOWMemoryLimit // the in-memory budget is used
+			w.spillLimit, w.spillCause = 0, c.cause
+			w.mu.Unlock()
+			writeDone := make(chan struct{})
+			writeErr := make(chan error, 1)
+			// Registered before the writer starts: release the copier and
+			// join the writer (bounded) whatever the test's outcome.
+			t.Cleanup(func() { gate.unblock(); cowWaitSignal(t, writeDone, "zero-cap writer cleanup") })
+			go func() {
+				defer close(writeDone)
+				_, err := s.Write(5, makeBlock(ctBlockSize, 0xd7))
+				writeErr <- err
+			}()
+			cowWaitSignal(t, writeDone, "guest write at a zero cap")
+			if err := <-writeErr; err != nil {
+				t.Fatal("guest write refused at a zero cap:", err)
+			}
+			gate.unblock()
+			cowWaitSignal(t, cutDone, "cut at a zero cap")
+			if err := <-cutErr; !errors.Is(err, errCutCOWAborted) || !errors.Is(err, c.cause) {
+				t.Fatalf("cut at a zero cap: %v, want an abort carrying %v", err, c.cause)
+			}
+			if st := l.Stats(); st.CutsAborted[c.reason] != 1 || st.CutsAborted["cow_capacity"] != 0 {
+				t.Fatalf("aborts %v; want one %s and no cow_capacity", st.CutsAborted, c.reason)
+			}
+		})
 	}
 }
 

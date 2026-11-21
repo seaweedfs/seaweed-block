@@ -486,7 +486,7 @@ type chunkLayerStats struct {
 	CutsNoop          uint64              // cuts with nothing new (no CAS)
 	CutsFailed        uint64              // every other cut failure
 	CutsRefused       map[string]uint64   // refusals by reason: admission, fenced, detached
-	CutsAborted       map[string]uint64   // saver_capacity, cow_capacity, budget_revoked, upload
+	CutsAborted       map[string]uint64   // saver_capacity, cow_capacity, no_room_to_cut, free_space_unreadable, budget_revoked, upload
 	CASConflicts      uint64              // HEAD CAS precondition failures
 	CASUnknown        uint64              // HEAD CAS results still unresolved after the re-read
 	PendingUnresolved bool                // an unresolved HEAD proposal is held now
@@ -503,6 +503,12 @@ type chunkLayerStats struct {
 	// AbsentChunks is the number of HEAD-named chunks still absent with a
 	// block not local (what HydrateAll would still fetch); 0 = fully local.
 	AbsentChunks int
+	// COWSpillCap is the last cut's side-file cap in bytes, read once per
+	// cut; COWSpillCapReason is why it is 0, when the free space made it so:
+	// no_room_to_cut (half the free space is within the 1 GiB reserve) or
+	// free_space_unreadable (the free space could not be read).
+	COWSpillCap       int64
+	COWSpillCapReason string `json:",omitempty"`
 }
 
 // chunkCutResult is the outcome of one successful cut.

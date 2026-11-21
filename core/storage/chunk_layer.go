@@ -765,8 +765,9 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	var staged map[uint64]stagedChunk
 	var intents []string
 	_, guestFrozen := FrozenDetachFromContext(ctx)
+	spill := l.readCutSpill()
 	if !guestFrozen {
-		staged, intents, err = l.stage(ctx, &st)
+		staged, intents, err = l.stage(ctx, &st, spill.bytes)
 	}
 	if st.UploadedBytes > 0 {
 		st.PayloadNs += time.Since(stageStart).Nanoseconds()
@@ -911,7 +912,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	{
 		var w *cutCOWWindow
 		windowStart := time.Now()
-		w, copyErr = l.installCOWWindow(candidates, useStaged, baseHead.Chunks)
+		w, copyErr = l.installCOWWindow(candidates, useStaged, baseHead.Chunks, spill)
 		if copyErr == nil {
 			w.budget = budget
 		}
@@ -1405,6 +1406,10 @@ func (l *chunkLayerImpl) recordCut(r chunkCutResult, st chunkCutStats, err error
 	switch {
 	case errors.Is(err, errCutSaverCapacity):
 		abortReason = "saver_capacity"
+	case errors.Is(err, errCutFreeUnreadable):
+		abortReason = "free_space_unreadable"
+	case errors.Is(err, errCutNoRoom):
+		abortReason = "no_room_to_cut"
 	case errors.Is(err, errCutCOWCapacity):
 		abortReason = "cow_capacity"
 	case errors.Is(err, errCutBudgetRevoked):
@@ -1540,10 +1545,10 @@ func (l *chunkLayerImpl) dropIntents(ctx context.Context, ids []string) {
 // stage uploads large native dirty sets through logical reads, before fixing H.
 // It stops when the spill-budget remainder is reached or a round makes no
 // progress. Versions/HEAD generation bind every reusable immutable result.
-func (l *chunkLayerImpl) stage(ctx context.Context, st *chunkCutStats) (map[uint64]stagedChunk, []string, error) {
+func (l *chunkLayerImpl) stage(ctx context.Context, st *chunkCutStats, spillCap int64) (map[uint64]stagedChunk, []string, error) {
 	// Leave at most half the side budget exposed at the barrier. Streaming
 	// staging uses no local payload file, even for a much larger image.
-	bound := int(l.cowSpillLimit() / (2 * int64(l.blockSize) * int64(l.chunkBlocks)))
+	bound := int(spillCap / (2 * int64(l.blockSize) * int64(l.chunkBlocks)))
 
 	staged := map[uint64]stagedChunk{}
 	var intents []string
