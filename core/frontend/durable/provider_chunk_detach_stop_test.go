@@ -241,7 +241,7 @@ func TestWALStoreChunk_CutVolumeRefusesUnwrittenMinLSNBeforePublishing(t *testin
 	remote := storage.NewMemChunkRemote()
 	p := chunkProvider(t, t.TempDir(), remote, v1View(), 0)
 	s := openRecovered(t, p)
-	claimed := headHolder(t, remote)
+	claimed := freshV1Claim(t, remote)
 	if _, err := s.Write(1, block(1)); err != nil {
 		t.Fatal(err)
 	}

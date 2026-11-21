@@ -73,6 +73,12 @@ func TestChunkControl_CutToUnwrittenMinLSNPublishesNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	assigned := (healthyView{}).Projection()
+	if claimed.Gen != 1 || claimed.Epoch != assigned.Epoch || claimed.Holder != assigned.ReplicaID ||
+		claimed.State != storage.ChunkHeadActive || claimed.RemoteLSN != 0 || claimed.DetachedBy != nil ||
+		len(claimed.Chunks) != 0 || len(claimed.Segments) != 0 || claimed.ManifestChunkCount != 0 || claimed.ChunkBytes != 0 || remote.Puts() != 0 {
+		t.Fatalf("fresh open did not establish exactly one empty assigned active claim: HEAD=%+v PUTs=%d", claimed, remote.Puts())
+	}
 	if _, err := s.Write(1, make([]byte, 4096)); err != nil {
 		t.Fatal(err)
 	}

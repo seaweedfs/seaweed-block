@@ -197,7 +197,7 @@ func TestCutDeadlineIncludesUploadWithBackgroundCaller(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = p.Close() })
 	s := openRecovered(t, p)
-	claimed := headHolder(t, remote.MemChunkRemote)
+	claimed := freshV1Claim(t, remote.MemChunkRemote)
 	if _, err = s.Write(1, block(0x48)); err != nil {
 		t.Fatal(err)
 	}

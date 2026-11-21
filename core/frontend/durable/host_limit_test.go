@@ -35,7 +35,7 @@ func TestHostCutLimitDoesNotGateGuestIO(t *testing.T) {
 	}
 	defer p.Close()
 	s := openRecovered(t, p)
-	claimed := headHolder(t, r)
+	claimed := freshV1Claim(t, r)
 	if _, e = s.Write(0, block(0x72)); e != nil {
 		t.Fatal(e)
 	}

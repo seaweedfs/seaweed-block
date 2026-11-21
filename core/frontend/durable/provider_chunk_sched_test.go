@@ -45,7 +45,7 @@ func TestWALStoreChunk_DirtyChunksNeverTriggerCut(t *testing.T) {
 	remote := storage.NewMemChunkRemote()
 	p := schedProvider(t, remote, 0)
 	s := openRecovered(t, p)
-	claimed := headHolder(t, remote)
+	claimed := freshV1Claim(t, remote)
 	for c := uint32(0); c < 4; c++ { // four dirty chunks
 		if _, err := s.Write(c*pcChunkBlocks+1, block(byte(c+1))); err != nil {
 			t.Fatal(err)
@@ -74,7 +74,7 @@ func TestWALStoreChunk_ExplicitCutRestartsTheTimer(t *testing.T) {
 	remote := storage.NewMemChunkRemote()
 	p := schedProvider(t, remote, interval)
 	s := openRecovered(t, p)
-	claimed := headHolder(t, remote)
+	claimed := freshV1Claim(t, remote)
 	begin := time.Now()
 
 	time.Sleep(2 * time.Second)
@@ -188,7 +188,7 @@ func TestWALStoreChunk_PublishSettledHook(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = p.Close() })
 	s := openRecovered(t, p)
-	claimed := headHolder(t, remote)
+	claimed := freshV1Claim(t, remote)
 	for i, lba := range []uint32{1, 0, pcChunkBlocks + 1} {
 		if lba != 0 {
 			if _, err := s.Write(lba, block(byte(i+1))); err != nil {
@@ -266,7 +266,7 @@ func TestWALStoreChunk_ExplicitCutOverlappingTheTimerRestartsIt(t *testing.T) {
 		return loopEvent{}
 	}
 	s := openRecovered(t, p)
-	claimed := headHolder(t, remote.MemChunkRemote)
+	claimed := freshV1Claim(t, remote.MemChunkRemote)
 	begin := time.Now() // the loop started during open: its first deadline is at most begin + interval
 	if _, err := s.Write(1, block(0x01)); err != nil {
 		t.Fatal(err)

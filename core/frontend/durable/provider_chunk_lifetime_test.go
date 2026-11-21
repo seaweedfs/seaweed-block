@@ -237,7 +237,7 @@ func TestWALStoreChunk_LineageDriftRefusesCapture(t *testing.T) {
 			view := v1View()
 			p := chunkProvider(t, t.TempDir(), remote, view, 0)
 			s := openRecovered(t, p)
-			claimed := headHolder(t, remote)
+			claimed := freshV1Claim(t, remote)
 			if _, err := s.Write(1, block(1)); err != nil {
 				t.Fatal(err)
 			}
@@ -274,7 +274,7 @@ func TestWALStoreChunk_LineageDriftDuringHeldUploadRefusesPublication(t *testing
 	view := v1View()
 	p := chunkProvider(t, t.TempDir(), g, view, 0)
 	s := openRecovered(t, p)
-	claimed := headHolder(t, remote)
+	claimed := freshV1Claim(t, remote)
 	if _, err := s.Write(1, block(1)); err != nil {
 		t.Fatal(err)
 	}
