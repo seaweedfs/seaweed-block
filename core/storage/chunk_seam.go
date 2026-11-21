@@ -396,7 +396,25 @@ type chunkLayerConfig struct {
 
 // chunkCutStats describes one cut. The periodic-cut work fills it; a zero
 // value means "not measured".
+// SyncPhaseStats are nested details of SyncNs; never add them to SyncNs.
+type SyncPhaseStats struct {
+	LifecycleWaitNs  int64 `json:"lifecycleWaitNs"`
+	StoreWaitNs      int64 `json:"storeWaitNs"`
+	GroupCommitNs    int64 `json:"groupCommitNs"`
+	CompletionWaitNs int64 `json:"completionWaitNs"`
+}
+
 type chunkCutStats struct {
+	SyncPhases SyncPhaseStats
+	// Disjoint non-payload intervals within barrier-to-settlement fixed cost.
+	CandidateNs      int64
+	WindowSetupNs    int64
+	PublishPrepareNs int64
+	ManifestNs       int64
+	CommitStateNs    int64
+	IntentCleanupNs  int64
+	NonPayloadCopyNs int64
+
 	PayloadNs int64 // disjoint streaming/copy/upload wall intervals
 
 	// Local validated WAL attempts and local copy duration, including savers.
@@ -487,13 +505,27 @@ type chunkLayerStats struct {
 //     the current HEAD when the cut had nothing new (Noop: no CAS).
 //   - FullHash says the cut compared every chunk by hash (no usable bitmap,
 //     or the first cut after a BASE install).
+//
+// ChunkCandidateTail is advisory pending work sampled after a successful cut.
+// Bytes and rate/estimate belong to one sampler observation; Known=false must
+// never be interpreted as a zero-cost tail. Admission rechecks at its barrier.
+type ChunkCandidateTail struct {
+	Bytes          uint64        `json:"bytes"`
+	Estimate       time.Duration `json:"estimateNs"`
+	BytesPerSecond float64       `json:"bytesPerSecond"`
+	RateSamples    int           `json:"rateSamples"`
+	SampleAge      time.Duration `json:"sampleAgeNs"`
+	Known          bool          `json:"known"`
+}
+
 type chunkCutResult struct {
-	Precopy  PrecopyReport
-	H        uint64
-	Head     chunkHead
-	Noop     bool
-	FullHash bool
-	Stats    chunkCutStats
+	CandidateTail *ChunkCandidateTail
+	Precopy       PrecopyReport
+	H             uint64
+	Head          chunkHead
+	Noop          bool
+	FullHash      bool
+	Stats         chunkCutStats
 }
 
 // chunkLayer is what the store owner drives.

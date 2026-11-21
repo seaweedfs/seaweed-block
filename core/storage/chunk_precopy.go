@@ -19,10 +19,22 @@ const (
 	precopyMargin      = 100 * time.Millisecond
 	precopyDrainBound  = 100 * time.Millisecond
 	precopyFreezeLimit = 5 * time.Second
+	precopyFixedWindow = 5
+	precopyFixedMaxAge = 15 * time.Minute
 )
 
 // PrecopyFixedParts are disjoint terms of the same retained fixed-cost sample.
 type PrecopyFixedParts struct {
+	// Nested DataSync details, excluded from the additive measured sum.
+	SyncPhases     SyncPhaseStats `json:"syncPhases"`
+	Candidate      time.Duration  `json:"candidateNs"`
+	WindowSetup    time.Duration  `json:"windowSetupNs"`
+	PublishPrepare time.Duration  `json:"publishPrepareNs"`
+	Manifest       time.Duration  `json:"manifestNs"`
+	CommitState    time.Duration  `json:"commitStateNs"`
+	IntentCleanup  time.Duration  `json:"intentCleanupNs"`
+	NonPayloadCopy time.Duration  `json:"nonPayloadCopyNs"`
+
 	Drain        time.Duration `json:"drainNs"`
 	StoreLock    time.Duration `json:"storeLockNs"`
 	DataSync     time.Duration `json:"dataSyncNs"`
@@ -33,8 +45,8 @@ type PrecopyFixedParts struct {
 }
 
 func precopyFixedParts(st chunkCutStats, fixed time.Duration) PrecopyFixedParts {
-	p := PrecopyFixedParts{Drain: time.Duration(st.DrainNs), StoreLock: time.Duration(max(int64(0), st.LockWaitNs-st.DrainNs)), DataSync: time.Duration(st.SyncNs), HeadCAS: time.Duration(st.CASWriteNs), HeadReadback: time.Duration(st.HeadReadbackNs), MapPersist: time.Duration(st.MapPersistNs)}
-	p.Other = max(time.Duration(0), fixed-p.Drain-p.StoreLock-p.DataSync-p.HeadCAS-p.HeadReadback-p.MapPersist)
+	p := PrecopyFixedParts{SyncPhases: st.SyncPhases, Candidate: time.Duration(st.CandidateNs), WindowSetup: time.Duration(st.WindowSetupNs), PublishPrepare: time.Duration(st.PublishPrepareNs), Manifest: time.Duration(st.ManifestNs), CommitState: time.Duration(st.CommitStateNs), IntentCleanup: time.Duration(st.IntentCleanupNs), NonPayloadCopy: time.Duration(st.NonPayloadCopyNs), Drain: time.Duration(st.DrainNs), StoreLock: time.Duration(max(int64(0), st.LockWaitNs-st.DrainNs)), DataSync: time.Duration(st.SyncNs), HeadCAS: time.Duration(st.CASWriteNs), HeadReadback: time.Duration(st.HeadReadbackNs), MapPersist: time.Duration(st.MapPersistNs)}
+	p.Other = max(time.Duration(0), fixed-p.measured())
 	return p
 }
 
@@ -46,6 +58,8 @@ type precopySample struct {
 }
 
 type PrecopyAttempt struct {
+	BarrierParts   PrecopyFixedParts `json:"barrierParts"`
+	BarrierOverage time.Duration     `json:"barrierOverageNs"`
 	// Attempt is the physical round ordinal, including measurement rounds.
 	Attempt          int               `json:"attempt"`
 	Drain            time.Duration     `json:"drainNs"`
@@ -66,6 +80,15 @@ type PrecopyAttempt struct {
 
 // PrecopyReport records admission estimates, not a worst-case latency proof.
 type PrecopyReport struct {
+	replayed bool // transport-local marker; never replaces the original freeze telemetry.
+
+	// Live barrier prefix is diagnostic, not additive to the selected forecast.
+	BarrierParts          PrecopyFixedParts `json:"barrierParts"`
+	BarrierOverage        time.Duration     `json:"barrierOverageNs"`
+	GuestFrozen           bool              `json:"guestFrozen,omitempty"`
+	GuestFreezeElapsed    time.Duration     `json:"guestFreezeElapsedNs,omitempty"`
+	RemainingFreeze       time.Duration     `json:"remainingFreezeNs,omitempty"`
+	OverBudget            bool              `json:"overBudget,omitempty"`
 	Rounds                []PrecopyAttempt  `json:"rounds,omitempty"`
 	Drain                 time.Duration     `json:"drainNs"`
 	DrainTimedOut         bool              `json:"drainTimedOut"`
@@ -101,7 +124,10 @@ func (r *PrecopyReport) Finish(elapsed time.Duration, extraCAS uint64, failed bo
 	r.CASFailureTimeout = chunkHeadOperationTimeout
 	r.DeclaredWorst = r.Estimate + time.Duration(extraCAS)*chunkHeadOperationTimeout
 	limit := precopyAllowance
-	if r.Reason == "fixed_cost_over_allowance" {
+	if r.GuestFrozen {
+		r.DeclaredWorst = r.DeclaredFreeze + time.Duration(extraCAS)*chunkHeadOperationTimeout
+		limit = precopyFreezeLimit
+	} else if r.Reason == "no_progress" || r.Reason == "final_attempt" {
 		limit = min(r.DeclaredFreeze, precopyFreezeLimit)
 	}
 	r.LatencyGateFailed = failed || elapsed > limit
@@ -124,7 +150,7 @@ func (l *chunkLayerImpl) PrecopyDetachWithAdmission(ctx context.Context, prepare
 	return l.precopyDetach(ctx, prepare, stopIO)
 }
 
-func (l *chunkLayerImpl) precopyDetach(ctx context.Context, prepare func(context.Context) (func(), error), stopIO func() bool) (ChunkCutResult, error) {
+func (l *chunkLayerImpl) precopyDetach(ctx context.Context, prepare func(context.Context) (func(), error), stopIO func() bool) (result ChunkCutResult, resultErr error) {
 	if stopIO == nil {
 		return ChunkCutResult{}, fmt.Errorf("%w: missing I/O stop", ErrPrecopyUnknown)
 	}
@@ -134,12 +160,33 @@ func (l *chunkLayerImpl) precopyDetach(ctx context.Context, prepare func(context
 		return ChunkCutResult{}, err
 	}
 	defer l.capMu.Unlock()
+	defer func() {
+		if result.Precopy.Frozen && !result.Precopy.IsReplay() {
+			l.RememberDetachReport(result.Precopy)
+		}
+	}()
+	guestFreeze, externallyFrozen := FrozenDetachFromContext(ctx)
+
 	if err := ctx.Err(); err != nil {
 		return ChunkCutResult{}, err
 	}
 	if r, ok := l.storedDetach(); ok {
 		r.Precopy.Frozen = true
+		r.Precopy.replayed = true
 		return r, nil
+	}
+	l.stMu.Lock()
+	pending := l.pending != nil
+	l.stMu.Unlock()
+	if externallyFrozen && !pending {
+		if err := l.admit(); err != nil {
+			return ChunkCutResult{}, err
+		}
+		tail := l.candidateTail()
+		r := l.precopyEstimate(tail.Bytes, 0)
+		if !l.admitFrozen(&r, guestFreeze) {
+			return ChunkCutResult{Precopy: r}, frozenRefusal(r)
+		}
 	}
 	ctx, countCAS := WithChunkCASAccounting(ctx)
 	var report PrecopyReport
@@ -169,7 +216,7 @@ func (l *chunkLayerImpl) precopyDetach(ctx context.Context, prepare func(context
 			longestPause = pause
 		}
 	}
-	l.precopyFreeze = func(tail uint64, barrierStart time.Time) bool {
+	l.precopyFreeze = func(tail uint64, barrierStart time.Time, current chunkCutStats) bool {
 		report = l.precopyEstimate(tail, report.Attempts)
 		report.Drain = drain
 		report.DrainTimedOut = errors.Is(drainErr, context.DeadlineExceeded)
@@ -181,8 +228,10 @@ func (l *chunkLayerImpl) precopyDetach(ctx context.Context, prepare func(context
 			return false
 		}
 		spent := time.Since(barrierStart)
+		report.BarrierParts = precopyFixedParts(current, spent)
 		if spent > report.Fixed {
 			extra := spent - report.Fixed
+			report.BarrierOverage = extra
 			report.Estimate += extra
 			report.FixedParts.Other += extra
 			report.Fixed = spent
@@ -194,10 +243,18 @@ func (l *chunkLayerImpl) precopyDetach(ctx context.Context, prepare func(context
 		if len(rounds) > 0 {
 			previous = &rounds[len(rounds)-1]
 		}
-		if !report.admitPrecopy(previous) {
+		admitted := false
+		if externallyFrozen {
+			admitted = l.admitFrozen(&report, guestFreeze)
+		} else {
+			admitted = report.admitPrecopy(previous, len(rounds)+1 == precopyAttempts)
+		}
+		if !admitted {
 			return false
 		}
-		report.DeclaredFreeze = report.Estimate
+		if !externallyFrozen {
+			report.DeclaredFreeze = report.Estimate
+		}
 		if !stopIO() {
 			report.Reason = "admitted_io"
 			return false
@@ -208,7 +265,11 @@ func (l *chunkLayerImpl) precopyDetach(ctx context.Context, prepare func(context
 		return true
 	}
 	defer func() { l.precopyFreeze = nil; l.precopyPause = nil; l.precopyPrepare = nil }()
-	for attempt := 1; attempt <= precopyAttempts; attempt++ {
+	maxAttempts := precopyAttempts
+	if externallyFrozen {
+		maxAttempts = 1
+	}
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		// Measurement rounds still consume the same five-round/60s budget.
 		// Count an admission attempt only with a warm rate window at entry.
 		if l.precopyEstimate(0, 0).RateSamples >= 3 {
@@ -225,7 +286,7 @@ func (l *chunkLayerImpl) precopyDetach(ctx context.Context, prepare func(context
 		r, err := l.captureLocked(ctx, false)
 		report.SamplesAtStart, report.MeasurementRounds = samplesAtStart, measurementRounds
 		a := PrecopyAttempt{
-			Attempt: attempt, Drain: drain, Pause: pauseTotal - pauseBefore,
+			Attempt: attempt, Drain: drain, Pause: pauseTotal - pauseBefore, BarrierParts: report.BarrierParts, BarrierOverage: report.BarrierOverage,
 			TailBytes: report.TailBytes, RateSamples: report.RateSamples,
 			Estimate: report.Estimate, Reason: report.Reason, Frozen: report.Frozen,
 			Fixed: report.Fixed, FixedParts: report.FixedParts, TailEstimate: report.TailEstimate, DeclaredFreeze: report.DeclaredFreeze, PreviousEstimate: report.PreviousEstimate,
@@ -241,11 +302,13 @@ func (l *chunkLayerImpl) precopyDetach(ctx context.Context, prepare func(context
 		report.Rounds = rounds
 		report.TentativePauseTotal, report.LongestTentativePause = pauseTotal, longestPause
 		r.Precopy = report
+		if errors.Is(err, ErrFrozenTailTooLarge) {
+			return r, errors.Join(err, frozenRefusal(report))
+		}
 		if errors.Is(err, errChunkLayerDetached) {
 			if previous, ok := l.storedDetach(); ok {
-				previous.Precopy = report
 				previous.Precopy.Frozen = true
-				previous.Precopy.Reason = "previous_detach_applied"
+				previous.Precopy.replayed = true
 				return previous, nil
 			}
 		}
@@ -255,7 +318,11 @@ func (l *chunkLayerImpl) precopyDetach(ctx context.Context, prepare func(context
 			if attempts > 0 {
 				extra = attempts - 1
 			}
-			r.Precopy.Finish(time.Since(frozenAt), extra, err != nil)
+			elapsed := time.Since(frozenAt)
+			if externallyFrozen {
+				elapsed = time.Since(guestFreeze.StartedAt)
+			}
+			r.Precopy.Finish(elapsed, extra, err != nil)
 			return r, err
 		}
 		if err != nil {
@@ -276,30 +343,34 @@ func (l *chunkLayerImpl) precopyEstimate(tail uint64, attempts int) PrecopyRepor
 	r := PrecopyReport{Attempts: attempts, TailBytes: tail, Reason: "samples_unknown"}
 	now := time.Now()
 	var rates []float64
-	for _, s := range l.precopySamples {
-		age := now.Sub(s.at)
-		if age > precopyDuration {
+	// Fixed work uses up to the last five fresh observations, independent of the
+	// latest-three-rate window. Parts always belong to the selected observation.
+	fixedCount := 0
+	for i := len(l.precopySamples) - 1; i >= 0; i-- {
+		sample := l.precopySamples[i]
+		age := now.Sub(sample.at)
+		if age < 0 {
 			continue
 		}
-		if age > r.SampleAge {
-			r.SampleAge = age
+		if age <= precopyDuration && sample.rate > 0 {
+			rates = append(rates, sample.rate)
 		}
-		// With at most 32 observations the maximum is a conservative empirical
-		// p99 envelope of barrier-to-settlement non-payload work. Serving
-		// preparation and host-budget waits are outside the freeze. The stop
-		// is already drained; metadata and CAS/read-back remain included.
-		if s.fixed > r.Fixed {
-			r.Fixed = s.fixed
-			r.FixedParts = s.parts
-			known := s.parts.Drain + s.parts.StoreLock + s.parts.DataSync + s.parts.HeadCAS + s.parts.HeadReadback + s.parts.MapPersist
-			r.FixedParts.Other = max(time.Duration(0), s.fixed-known)
+		if age >= precopyFixedMaxAge || fixedCount >= precopyFixedWindow {
+			continue
 		}
-		if s.rate > 0 {
-			rates = append(rates, s.rate)
+		fixedCount++
+		r.SampleAge = max(r.SampleAge, age)
+		if sample.fixed > r.Fixed {
+			r.Fixed = sample.fixed
+			r.FixedParts = precopyFixedPartsFromSample(sample)
 		}
 	}
+	// Rates were visited newest first; only the latest three are used below.
 	r.RateSamples = len(rates)
-	if r.Fixed <= 0 {
+	if len(rates) > 3 {
+		rates = rates[:3]
+	}
+	if fixedCount == 0 || r.Fixed <= 0 {
 		return r
 	}
 	r.Estimate = r.Fixed + precopyMargin
@@ -331,29 +402,41 @@ func (l *chunkLayerImpl) precopyEstimate(tail uint64, attempts int) PrecopyRepor
 	return r
 }
 
-// More copying cannot reduce a fixed-bound plateau. Only the measured tail
-// may use at most a quarter of the normal allowance on this exception path.
-func (r *PrecopyReport) admitPrecopy(previous *PrecopyAttempt) bool {
-	if r.Reason == "fit" && r.Estimate <= precopyAllowance {
+// Rounds shrink the tail; a plateau or the final round may use the full
+// declared freeze budget. The final flag is the physical round, not the number
+// of warm admission attempts (measurement rounds consume the same limit).
+func (r *PrecopyReport) admitPrecopy(previous *PrecopyAttempt, final bool) bool {
+	if r.Reason == "samples_unknown" || r.Estimate <= 0 {
+		return false
+	}
+	if r.Estimate <= precopyAllowance {
+		r.Reason = "fit"
 		return true
 	}
-	if r.Reason == "samples_unknown" {
+	if r.Estimate > precopyFreezeLimit {
+		r.Reason = "freeze_budget_exceeded"
 		return false
 	}
-	// Preserve and name the existing frontend ceiling even on the first round.
-	if r.TailEstimate <= precopyAllowance/4 && r.Estimate > precopyFreezeLimit {
-		r.Reason = "fixed_cost_exceeds_freeze_budget"
-		return false
+	if comparablePrecopyAttempt(previous) {
+		r.PreviousEstimate = previous.Estimate
+		// Division first avoids overflow while retaining nanosecond precision.
+		threshold := previous.Estimate - previous.Estimate/10
+		if r.Estimate >= threshold {
+			r.Reason = "no_progress"
+			return true
+		}
 	}
-	if previous == nil || previous.Estimate <= 0 {
-		return false
+	if final {
+		r.Reason = "final_attempt"
+		return true
 	}
-	r.PreviousEstimate = previous.Estimate
-	if r.TailEstimate > precopyAllowance/4 || r.Estimate < previous.Estimate {
-		return false
-	}
-	r.Reason = "fixed_cost_over_allowance"
-	return true
+	return false
+}
+
+func precopyFixedPartsFromSample(s precopySample) PrecopyFixedParts {
+	p := s.parts
+	p.Other = max(time.Duration(0), s.fixed-p.measured())
+	return p
 }
 
 func (l *chunkLayerImpl) samplePrecopy(st chunkCutStats, fixedNs int64) {
@@ -393,4 +476,53 @@ func (l *chunkLayerImpl) lockPrecopy(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+// Only a completed cost estimate is comparable. A drain/before-barrier refusal
+// can carry Fixed+margin without a known tail, just like samples_unknown.
+func comparablePrecopyAttempt(a *PrecopyAttempt) bool {
+	if a == nil || a.Estimate <= 0 || a.Error != "" {
+		return false
+	}
+	switch a.Reason {
+	case "fit", "tail_too_large", "barrier_over_budget", "freeze_budget_exceeded", "no_progress", "final_attempt", "admitted_io":
+		return true
+	default:
+		return false
+	}
+}
+
+func (p PrecopyFixedParts) measured() time.Duration {
+	return p.Drain + p.StoreLock + p.DataSync + p.HeadCAS + p.HeadReadback + p.MapPersist + p.Candidate + p.WindowSetup + p.PublishPrepare + p.Manifest + p.CommitState + p.IntentCleanup + p.NonPayloadCopy
+}
+
+// Candidate count is conservative and advisory while guest writes continue.
+// The same immutable rate observation supplies both the estimate and its rate.
+func (l *chunkLayerImpl) candidateTail() *ChunkCandidateTail {
+	return l.estimateCandidateTail(l.candidateTailBytes())
+}
+
+func (l *chunkLayerImpl) candidateTailBytes() uint64 {
+	if hook := l.testBeforeTailScanHook; hook != nil {
+		hook()
+	}
+	candidates := l.captureCandidates()
+	l.stMu.Lock()
+	for idx := range l.dirty {
+		candidates[idx] = true
+	}
+	if l.allDirty {
+		for idx := uint64(0); idx < l.numChunks; idx++ {
+			if !l.absent[idx] || l.chunkHasLocalLocked(idx) {
+				candidates[idx] = true
+			}
+		}
+	}
+	l.stMu.Unlock()
+	return uint64(len(candidates)) * uint64(l.blockSize) * l.chunkBlocks
+}
+
+func (l *chunkLayerImpl) estimateCandidateTail(bytes uint64) *ChunkCandidateTail {
+	r := l.precopyEstimate(bytes, 0)
+	return &ChunkCandidateTail{Bytes: bytes, Estimate: r.TailEstimate, BytesPerSecond: r.BytesPerSecond, RateSamples: r.RateSamples, SampleAge: r.SampleAge, Known: bytes == 0 || r.BytesPerSecond > 0}
 }
