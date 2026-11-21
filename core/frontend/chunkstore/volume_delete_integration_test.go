@@ -145,7 +145,7 @@ func TestIntegration_DeleteVolumeThenGC(t *testing.T) {
 	sort.Strings(want)
 	sort.Strings(got)
 	if fmt.Sprint(got) != fmt.Sprint(want) || gr.Reclaimed != len(want) {
-		t.Fatalf("GC reclaimed %v (%d); want exactly w1's A, w2's D and their unreachable manifests", got, gr.Reclaimed)
+		t.Fatalf("GC reclaimed %v (%d); want exactly w1's A, w2's D and their unreachable manifests; roots=%+v candidates=%d", got, gr.Reclaimed, gr.Roots, gr.Candidates)
 	}
 	for _, kept := range []string{bb.Key, cc.Key} {
 		if _, err := w1.Get(ctx, kept); err != nil {
