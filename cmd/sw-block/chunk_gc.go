@@ -41,6 +41,11 @@ func chunkGC(args []string, stdout, stderr io.Writer) int {
 		return chunkResult("gc", nil, e, stdout, stderr)
 	}
 	defer closeFn()
+	if apply {
+		if exit := refuseUnlessSingleFiler("gc", f, timeout, stdout, stderr); exit >= 0 {
+			return exit
+		}
+	}
 	blobs, ok := f.(chunkstore.BlobDeleter)
 	if !ok {
 		return chunkFail("gc", stdout, stderr, chunkExitFailed, codeInternalCLI, "chunk store cannot delete immutable blobs", false)
