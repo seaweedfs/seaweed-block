@@ -395,11 +395,24 @@ func TestChunkRound_ReserveFollowsTheCaller(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		done := make(chan error, 1)
+		joined := false
+		t.Cleanup(func() { // ends and joins the worker whatever happens below
+			cancel()
+			if joined {
+				return
+			}
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				t.Error("Put never returned")
+			}
+		})
 		go func() { done <- r.BeginPutRound(1, 4096).Put(ctx, 0, roundKey(0), []byte("x")) }()
 		waitFor(t, entered, "the reservation call")
 		cancel()
 		select {
 		case err := <-done:
+			joined = true
 			if !errors.Is(err, context.Canceled) {
 				t.Fatalf("cancelled reservation: %v", err)
 			}
@@ -494,7 +507,7 @@ func TestChunkRound_StaleReplacementIsDiscarded(t *testing.T) {
 	t.Cleanup(func() { // release and join every worker started
 		releaseAll()
 		cancel()
-		for k := 0; k < started; k++ {
+		for ; started > 0; started-- {
 			select {
 			case <-errs:
 			case <-time.After(10 * time.Second):
@@ -523,9 +536,10 @@ func TestChunkRound_StaleReplacementIsDiscarded(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	releaseAll()
-	for ; started > 0; started-- {
+	for started > 0 {
 		select {
 		case err := <-errs:
+			started-- // joined, before any Fatal: cleanup must not wait for it again
 			if err != nil {
 				t.Fatal(err)
 			}

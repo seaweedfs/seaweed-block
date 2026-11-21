@@ -232,13 +232,14 @@ func TestChunkCut_HeldRoundCallIsJoined(t *testing.T) {
 			w.write(t, s, 2, 0x22)
 			cutDone := make(chan error, 1)
 			closeDone := make(chan error, 1)
-			closeStarted := false
-			t.Cleanup(func() { // release, then join every worker started
+			guest := make(chan error, 1)
+			closeStarted, guestStarted := false, false
+			t.Cleanup(func() { // release, then join every worker started and not yet joined
 				release()
 				for _, c := range []struct {
 					ch      chan error
 					started bool
-				}{{cutDone, true}, {closeDone, closeStarted}} {
+				}{{cutDone, true}, {closeDone, closeStarted}, {guest, guestStarted}} {
 					if !c.started {
 						continue
 					}
@@ -252,7 +253,7 @@ func TestChunkCut_HeldRoundCallIsJoined(t *testing.T) {
 			go func() { _, err := layer.Cut(context.Background()); cutDone <- err }()
 			waitDone(t, h.entered, "the cut's upload call")
 
-			guest := make(chan error, 1)
+			guestStarted = true
 			go func() {
 				if _, err := s.Write(7, makeBlock(ctBlockSize, 0x77)); err != nil {
 					guest <- err
@@ -263,6 +264,7 @@ func TestChunkCut_HeldRoundCallIsJoined(t *testing.T) {
 			}()
 			select {
 			case err := <-guest:
+				guestStarted = false // joined
 				if err != nil {
 					t.Fatalf("guest write/flush during the held upload: %v", err)
 				}
