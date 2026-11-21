@@ -84,71 +84,71 @@ Durable store state of the served volume. Go type `volume.durableStatusBody`.
 | `Volumes[].WriteProfile` | object | write-path counters since start |
 | `Volumes[].WriteProfile.DurabilityLatency` | object | latency distributions of writes, flushes and syncs |
 | `Volumes[].WriteProfile.DurabilityLatency.Frontend` | object | per-request latency at the frontend, by stage |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.WriteTotal` | object | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.WriteTotal.Count` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.WriteTotal.SumNanos` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.WriteTotal.P50UpperNanos` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.WriteTotal.P99UpperNanos` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.WriteTotal.Buckets[]` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.FlushTotal` | object | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.FlushTotal.Count` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.FlushTotal.SumNanos` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.FlushTotal.P50UpperNanos` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.FlushTotal.P99UpperNanos` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.FlushTotal.Buckets[]` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.FUATotal` | object | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.FUATotal.Count` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.FUATotal.SumNanos` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.FUATotal.P50UpperNanos` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.FUATotal.P99UpperNanos` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.FUATotal.Buckets[]` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.ReceiveToBackend` | object | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.ReceiveToBackend.Count` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.ReceiveToBackend.SumNanos` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.ReceiveToBackend.P50UpperNanos` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.ReceiveToBackend.P99UpperNanos` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.ReceiveToBackend.Buckets[]` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.AckDispatch` | object | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.AckDispatch.Count` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.AckDispatch.SumNanos` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.AckDispatch.P50UpperNanos` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.AckDispatch.P99UpperNanos` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.AckDispatch.Buckets[]` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.RequestTotal` | object | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.RequestTotal.Count` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.RequestTotal.SumNanos` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.RequestTotal.P50UpperNanos` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.RequestTotal.P99UpperNanos` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.RequestTotal.Buckets[]` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.Writes` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.Flushes` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.FUAWrites` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.Frontend.Failed` | uint64 | — |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.WriteTotal` | object | end-to-end latency of writes |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.WriteTotal.Count` | uint64 | samples observed |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.WriteTotal.SumNanos` | uint64 | their total nanoseconds |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.WriteTotal.P50UpperNanos` | uint64 | upper bound of the bucket holding the median |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.WriteTotal.P99UpperNanos` | uint64 | upper bound of the bucket holding the 99th percentile |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.WriteTotal.Buckets[]` | uint64 | bucket i counts samples of i significant bits in ns, i.e. [2^(i-1), 2^i) ns |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.FlushTotal` | object | end-to-end latency of flushes |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.FlushTotal.Count` | uint64 | samples observed |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.FlushTotal.SumNanos` | uint64 | their total nanoseconds |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.FlushTotal.P50UpperNanos` | uint64 | upper bound of the bucket holding the median |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.FlushTotal.P99UpperNanos` | uint64 | upper bound of the bucket holding the 99th percentile |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.FlushTotal.Buckets[]` | uint64 | bucket i counts samples of i significant bits in ns, i.e. [2^(i-1), 2^i) ns |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.FUATotal` | object | end-to-end latency of forced-unit-access writes |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.FUATotal.Count` | uint64 | samples observed |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.FUATotal.SumNanos` | uint64 | their total nanoseconds |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.FUATotal.P50UpperNanos` | uint64 | upper bound of the bucket holding the median |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.FUATotal.P99UpperNanos` | uint64 | upper bound of the bucket holding the 99th percentile |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.FUATotal.Buckets[]` | uint64 | bucket i counts samples of i significant bits in ns, i.e. [2^(i-1), 2^i) ns |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.ReceiveToBackend` | object | from request receipt to the backend call |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.ReceiveToBackend.Count` | uint64 | samples observed |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.ReceiveToBackend.SumNanos` | uint64 | their total nanoseconds |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.ReceiveToBackend.P50UpperNanos` | uint64 | upper bound of the bucket holding the median |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.ReceiveToBackend.P99UpperNanos` | uint64 | upper bound of the bucket holding the 99th percentile |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.ReceiveToBackend.Buckets[]` | uint64 | bucket i counts samples of i significant bits in ns, i.e. [2^(i-1), 2^i) ns |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.AckDispatch` | object | from backend completion to the acknowledgement sent |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.AckDispatch.Count` | uint64 | samples observed |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.AckDispatch.SumNanos` | uint64 | their total nanoseconds |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.AckDispatch.P50UpperNanos` | uint64 | upper bound of the bucket holding the median |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.AckDispatch.P99UpperNanos` | uint64 | upper bound of the bucket holding the 99th percentile |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.AckDispatch.Buckets[]` | uint64 | bucket i counts samples of i significant bits in ns, i.e. [2^(i-1), 2^i) ns |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.RequestTotal` | object | end-to-end latency of every request |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.RequestTotal.Count` | uint64 | samples observed |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.RequestTotal.SumNanos` | uint64 | their total nanoseconds |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.RequestTotal.P50UpperNanos` | uint64 | upper bound of the bucket holding the median |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.RequestTotal.P99UpperNanos` | uint64 | upper bound of the bucket holding the 99th percentile |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.RequestTotal.Buckets[]` | uint64 | bucket i counts samples of i significant bits in ns, i.e. [2^(i-1), 2^i) ns |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.Writes` | uint64 | writes observed |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.Flushes` | uint64 | flushes observed |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.FUAWrites` | uint64 | forced-unit-access writes observed |
+| `Volumes[].WriteProfile.DurabilityLatency.Frontend.Failed` | uint64 | requests that completed with an error |
 | `Volumes[].WriteProfile.DurabilityLatency.BackendSync` | object | latency of backend syncs |
-| `Volumes[].WriteProfile.DurabilityLatency.BackendSync.Count` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.BackendSync.SumNanos` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.BackendSync.P50UpperNanos` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.BackendSync.P99UpperNanos` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.BackendSync.Buckets[]` | uint64 | — |
+| `Volumes[].WriteProfile.DurabilityLatency.BackendSync.Count` | uint64 | samples observed |
+| `Volumes[].WriteProfile.DurabilityLatency.BackendSync.SumNanos` | uint64 | their total nanoseconds |
+| `Volumes[].WriteProfile.DurabilityLatency.BackendSync.P50UpperNanos` | uint64 | upper bound of the bucket holding the median |
+| `Volumes[].WriteProfile.DurabilityLatency.BackendSync.P99UpperNanos` | uint64 | upper bound of the bucket holding the 99th percentile |
+| `Volumes[].WriteProfile.DurabilityLatency.BackendSync.Buckets[]` | uint64 | bucket i counts samples of i significant bits in ns, i.e. [2^(i-1), 2^i) ns |
 | `Volumes[].WriteProfile.DurabilityLatency.WAL` | object | the WAL's own sync latency, where the store reports it (omitted when empty) |
-| `Volumes[].WriteProfile.DurabilityLatency.WAL.WALAppend` | object | — |
-| `Volumes[].WriteProfile.DurabilityLatency.WAL.WALAppend.Count` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.WAL.WALAppend.SumNanos` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.WAL.WALAppend.P50UpperNanos` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.WAL.WALAppend.P99UpperNanos` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.WAL.WALAppend.Buckets[]` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.WAL.GroupCommitWait` | object | — |
-| `Volumes[].WriteProfile.DurabilityLatency.WAL.GroupCommitWait.Count` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.WAL.GroupCommitWait.SumNanos` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.WAL.GroupCommitWait.P50UpperNanos` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.WAL.GroupCommitWait.P99UpperNanos` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.WAL.GroupCommitWait.Buckets[]` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.WAL.FileSync` | object | — |
-| `Volumes[].WriteProfile.DurabilityLatency.WAL.FileSync.Count` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.WAL.FileSync.SumNanos` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.WAL.FileSync.P50UpperNanos` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.WAL.FileSync.P99UpperNanos` | uint64 | — |
-| `Volumes[].WriteProfile.DurabilityLatency.WAL.FileSync.Buckets[]` | uint64 | — |
+| `Volumes[].WriteProfile.DurabilityLatency.WAL.WALAppend` | object | WAL append latency |
+| `Volumes[].WriteProfile.DurabilityLatency.WAL.WALAppend.Count` | uint64 | samples observed |
+| `Volumes[].WriteProfile.DurabilityLatency.WAL.WALAppend.SumNanos` | uint64 | their total nanoseconds |
+| `Volumes[].WriteProfile.DurabilityLatency.WAL.WALAppend.P50UpperNanos` | uint64 | upper bound of the bucket holding the median |
+| `Volumes[].WriteProfile.DurabilityLatency.WAL.WALAppend.P99UpperNanos` | uint64 | upper bound of the bucket holding the 99th percentile |
+| `Volumes[].WriteProfile.DurabilityLatency.WAL.WALAppend.Buckets[]` | uint64 | bucket i counts samples of i significant bits in ns, i.e. [2^(i-1), 2^i) ns |
+| `Volumes[].WriteProfile.DurabilityLatency.WAL.GroupCommitWait` | object | time a sync request waited in the group commit queue |
+| `Volumes[].WriteProfile.DurabilityLatency.WAL.GroupCommitWait.Count` | uint64 | samples observed |
+| `Volumes[].WriteProfile.DurabilityLatency.WAL.GroupCommitWait.SumNanos` | uint64 | their total nanoseconds |
+| `Volumes[].WriteProfile.DurabilityLatency.WAL.GroupCommitWait.P50UpperNanos` | uint64 | upper bound of the bucket holding the median |
+| `Volumes[].WriteProfile.DurabilityLatency.WAL.GroupCommitWait.P99UpperNanos` | uint64 | upper bound of the bucket holding the 99th percentile |
+| `Volumes[].WriteProfile.DurabilityLatency.WAL.GroupCommitWait.Buckets[]` | uint64 | bucket i counts samples of i significant bits in ns, i.e. [2^(i-1), 2^i) ns |
+| `Volumes[].WriteProfile.DurabilityLatency.WAL.FileSync` | object | physical file syncs (one sample per sync, however many waiters) |
+| `Volumes[].WriteProfile.DurabilityLatency.WAL.FileSync.Count` | uint64 | samples observed |
+| `Volumes[].WriteProfile.DurabilityLatency.WAL.FileSync.SumNanos` | uint64 | their total nanoseconds |
+| `Volumes[].WriteProfile.DurabilityLatency.WAL.FileSync.P50UpperNanos` | uint64 | upper bound of the bucket holding the median |
+| `Volumes[].WriteProfile.DurabilityLatency.WAL.FileSync.P99UpperNanos` | uint64 | upper bound of the bucket holding the 99th percentile |
+| `Volumes[].WriteProfile.DurabilityLatency.WAL.FileSync.Buckets[]` | uint64 | bucket i counts samples of i significant bits in ns, i.e. [2^(i-1), 2^i) ns |
 | `Volumes[].WriteProfile.TargetWriteOps` | uint64 | writes the protocol target handed to the volume |
 | `Volumes[].WriteProfile.TargetWriteBytes` | uint64 | their bytes |
 | `Volumes[].WriteProfile.TargetWriteRequestMaxBytes` | uint64 | the largest of them |
@@ -192,50 +192,50 @@ Durable store state of the served volume. Go type `volume.durableStatusBody`.
 | `Volumes[].WriteProfile.BackendSyncOps` | uint64 | backend syncs (flush, FUA, explicit sync) |
 | `Volumes[].WriteProfile.BackendSyncDurationNanos` | uint64 | their total time |
 | `Volumes[].DataSync` | object | data-file sync state, where the store has one (omitted when empty) |
-| `Volumes[].DataSync.Mode` | string | — |
-| `Volumes[].DataSync.Reason` | string | — |
+| `Volumes[].DataSync.Mode` | string | the data-file sync call in use (fsync or fdatasync) |
+| `Volumes[].DataSync.Reason` | string | why it was chosen (an explicit SWBLOCK_SYNC, or the automatic choice) |
 | `Volumes[].CheckpointPersistence` | object | checkpoint persistence state, where the store has one (omitted when empty) |
-| `Volumes[].CheckpointPersistence.Successes` | uint64 | — |
-| `Volumes[].CheckpointPersistence.Refusals` | uint64 | — |
-| `Volumes[].CheckpointPersistence.Failures` | uint64 | — |
-| `Volumes[].CheckpointPersistence.CheckpointLSN` | uint64 | — |
-| `Volumes[].CheckpointPersistence.Advances` | uint64 | — |
-| `Volumes[].CheckpointPersistence.LastAdvance` | time (RFC 3339) | — |
+| `Volumes[].CheckpointPersistence.Successes` | uint64 | checkpoint calls that succeeded (including unchanged ones) |
+| `Volumes[].CheckpointPersistence.Refusals` | uint64 | checkpoint calls refused because the map coverage was stale |
+| `Volumes[].CheckpointPersistence.Failures` | uint64 | checkpoint calls that failed with an error |
+| `Volumes[].CheckpointPersistence.CheckpointLSN` | uint64 | the persisted checkpoint LSN |
+| `Volumes[].CheckpointPersistence.Advances` | uint64 | successes that moved CheckpointLSN forward |
+| `Volumes[].CheckpointPersistence.LastAdvance` | time (RFC 3339) | when the latest advance happened; zero if none in this open |
 | `Volumes[].Chunk` | object | Chunk is the chunk layer's state and cut counters; walstore-chunk volumes only. |
 | `Volumes[].Chunk.Attached` | bool | the chunk layer is attached to the remote |
 | `Volumes[].Chunk.AwaitingAuthority` | bool | recovered; the layer waits for master authority to attach |
 | `Volumes[].Chunk.Fenced` | bool | a newer holder fenced this layer: it publishes nothing |
 | `Volumes[].Chunk.RemoteLSN` | uint64 | the LSN of the remote HEAD (what the remote holds durably) |
 | `Volumes[].Chunk.Stats` | object | the layer's cut counters; zero until attached |
-| `Volumes[].Chunk.Stats.Hydration` | object | — |
-| `Volumes[].Chunk.Stats.Hydration.WorkerLimit` | int | — |
-| `Volumes[].Chunk.Stats.Hydration.QueueDepth` | int | — |
-| `Volumes[].Chunk.Stats.Hydration.Active` | int | — |
-| `Volumes[].Chunk.Stats.Hydration.Queued` | int | — |
-| `Volumes[].Chunk.Stats.Hydration.WaitCalls` | uint64 | — |
-| `Volumes[].Chunk.Stats.Hydration.Joined` | uint64 | — |
-| `Volumes[].Chunk.Stats.Hydration.WaitRefusals` | uint64 | — |
-| `Volumes[].Chunk.Stats.Hydration.Fetches` | uint64 | — |
-| `Volumes[].Chunk.Stats.Hydration.Completed` | uint64 | — |
-| `Volumes[].Chunk.Stats.Hydration.FetchErrors` | uint64 | — |
-| `Volumes[].Chunk.Stats.CutsOK` | uint64 | — |
-| `Volumes[].Chunk.Stats.CutsNoop` | uint64 | — |
-| `Volumes[].Chunk.Stats.CutsFailed` | uint64 | — |
-| `Volumes[].Chunk.Stats.CutsRefused{}` | uint64 | — |
+| `Volumes[].Chunk.Stats.Hydration` | object | lazy fetches of absent chunks from the remote |
+| `Volumes[].Chunk.Stats.Hydration.WorkerLimit` | int | fetch workers allowed (--chunk-hydration-workers) |
+| `Volumes[].Chunk.Stats.Hydration.QueueDepth` | int | fetch queue capacity (--chunk-hydration-queue-depth) |
+| `Volumes[].Chunk.Stats.Hydration.Active` | int | fetches running now |
+| `Volumes[].Chunk.Stats.Hydration.Queued` | int | fetches waiting for a worker now |
+| `Volumes[].Chunk.Stats.Hydration.WaitCalls` | uint64 | reads that waited for a chunk to arrive |
+| `Volumes[].Chunk.Stats.Hydration.Joined` | uint64 | of those, reads that joined a fetch already running |
+| `Volumes[].Chunk.Stats.Hydration.WaitRefusals` | uint64 | waits that ended without the chunk (the caller cancelled, or the fetch was not admitted) |
+| `Volumes[].Chunk.Stats.Hydration.Fetches` | uint64 | fetches started |
+| `Volumes[].Chunk.Stats.Hydration.Completed` | uint64 | fetches that installed the chunk |
+| `Volumes[].Chunk.Stats.Hydration.FetchErrors` | uint64 | fetches that failed |
+| `Volumes[].Chunk.Stats.CutsOK` | uint64 | cuts that installed a HEAD |
+| `Volumes[].Chunk.Stats.CutsNoop` | uint64 | cuts with nothing new (no CAS) |
+| `Volumes[].Chunk.Stats.CutsFailed` | uint64 | every other cut failure |
+| `Volumes[].Chunk.Stats.CutsRefused{}` | uint64 | refusals by reason: admission, fenced, detached |
 | `Volumes[].Chunk.Stats.CutsAborted{}` | uint64 | saver_capacity, cow_capacity, budget_revoked, upload |
-| `Volumes[].Chunk.Stats.CASConflicts` | uint64 | — |
-| `Volumes[].Chunk.Stats.CASUnknown` | uint64 | — |
-| `Volumes[].Chunk.Stats.PendingUnresolved` | bool | — |
-| `Volumes[].Chunk.Stats.DirtyChunks` | int | — |
-| `Volumes[].Chunk.Stats.Reconciling` | bool | — |
-| `Volumes[].Chunk.Stats.ReconcileDone` | int | — |
-| `Volumes[].Chunk.Stats.ReconcileTotal` | int | — |
-| `Volumes[].Chunk.Stats.LastCut` | object | — |
-| `Volumes[].Chunk.Stats.LastCut.SyncPhases` | object | — |
-| `Volumes[].Chunk.Stats.LastCut.SyncPhases.lifecycleWaitNs` | int64 | — |
-| `Volumes[].Chunk.Stats.LastCut.SyncPhases.storeWaitNs` | int64 | — |
-| `Volumes[].Chunk.Stats.LastCut.SyncPhases.groupCommitNs` | int64 | — |
-| `Volumes[].Chunk.Stats.LastCut.SyncPhases.completionWaitNs` | int64 | — |
+| `Volumes[].Chunk.Stats.CASConflicts` | uint64 | HEAD CAS precondition failures |
+| `Volumes[].Chunk.Stats.CASUnknown` | uint64 | HEAD CAS results still unresolved after the re-read |
+| `Volumes[].Chunk.Stats.PendingUnresolved` | bool | an unresolved HEAD proposal is held now |
+| `Volumes[].Chunk.Stats.DirtyChunks` | int | chunks dirty since the last HEAD (not counting those awaiting reconciliation) |
+| `Volumes[].Chunk.Stats.Reconciling` | bool | the dirty set is being reconciled against HEAD; no cut publishes meanwhile |
+| `Volumes[].Chunk.Stats.ReconcileDone` | int | chunks compared so far |
+| `Volumes[].Chunk.Stats.ReconcileTotal` | int | chunks to compare |
+| `Volumes[].Chunk.Stats.LastCut` | object | the last successful cut's measurements |
+| `Volumes[].Chunk.Stats.LastCut.SyncPhases` | object | the parts of SyncNs (never added to it) |
+| `Volumes[].Chunk.Stats.LastCut.SyncPhases.lifecycleWaitNs` | int64 | waiting for the store's lifecycle lock |
+| `Volumes[].Chunk.Stats.LastCut.SyncPhases.storeWaitNs` | int64 | waiting for the store lock |
+| `Volumes[].Chunk.Stats.LastCut.SyncPhases.groupCommitNs` | int64 | in the group commit that made the data durable |
+| `Volumes[].Chunk.Stats.LastCut.SyncPhases.completionWaitNs` | int64 | waiting for the sync leader role to validate the completion |
 | `Volumes[].Chunk.Stats.LastCut.CandidateNs` | int64 | Disjoint non-payload intervals within barrier-to-settlement fixed cost. |
 | `Volumes[].Chunk.Stats.LastCut.WindowSetupNs` | int64 | (group of `CandidateNs`) Disjoint non-payload intervals within barrier-to-settlement fixed cost. |
 | `Volumes[].Chunk.Stats.LastCut.PublishPrepareNs` | int64 | (group of `CandidateNs`) Disjoint non-payload intervals within barrier-to-settlement fixed cost. |
@@ -271,8 +271,8 @@ Durable store state of the served volume. Go type `volume.durableStatusBody`.
 | `Volumes[].Chunk.Stats.LastCut.StagedChunksUsed` | int | (group of `StageRounds`) Pre-copy (BarrierBound > 0): StageRounds staging rounds staged StagedChunks chunks outside the barrier; StagedChunksUsed of the uploads in HEAD came from staging. BarrierCopyChunks were copied under the barrier; BarrierOverBound: more than the bound (the staging rounds did not converge). |
 | `Volumes[].Chunk.Stats.LastCut.BarrierCopyChunks` | int | (group of `StageRounds`) Pre-copy (BarrierBound > 0): StageRounds staging rounds staged StagedChunks chunks outside the barrier; StagedChunksUsed of the uploads in HEAD came from staging. BarrierCopyChunks were copied under the barrier; BarrierOverBound: more than the bound (the staging rounds did not converge). |
 | `Volumes[].Chunk.Stats.LastCut.BarrierOverBound` | bool | (group of `StageRounds`) Pre-copy (BarrierBound > 0): StageRounds staging rounds staged StagedChunks chunks outside the barrier; StagedChunksUsed of the uploads in HEAD came from staging. BarrierCopyChunks were copied under the barrier; BarrierOverBound: more than the bound (the staging rounds did not converge). |
-| `Volumes[].Chunk.Stats.LastCutH` | uint64 | — |
-| `Volumes[].Chunk.Stats.LastCutNs` | int64 | — |
+| `Volumes[].Chunk.Stats.LastCutH` | uint64 | the LSN the last successful cut published |
+| `Volumes[].Chunk.Stats.LastCutNs` | int64 | when it completed (wall clock, Unix ns) |
 | `Volumes[].Chunk.Stats.BarrierOverBound` | uint64 | BarrierOverBound counts cuts whose barrier copied more than the bound after the staging rounds. |
 | `Volumes[].Chunk.Stats.AbsentChunks` | int | AbsentChunks is the number of HEAD-named chunks still absent with a block not local (what HydrateAll would still fetch); 0 = fully local. |
 | `Volumes[].Chunk.HostBudget` | interface | the host background-cut budget state, with --host-limit-dir (omitted when empty) |
