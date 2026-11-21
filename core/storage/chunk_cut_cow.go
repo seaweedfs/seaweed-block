@@ -21,6 +21,24 @@ const cutCOWMemoryLimit = DefaultCutPayloadMemoryBudget
 
 // defaultCOWSpillLimit caps a copy window's side-file bytes by default.
 const defaultCOWSpillLimit = 1 << 30
+
+// cowSpillFreeReserve is the free space a cut's side file never takes,
+// on top of leaving half of the rest.
+const cowSpillFreeReserve = 1 << 30
+
+// cowSpillLimit is this cut's side-file cap: COWSpillLimit, lowered to
+// half the free space minus cowSpillFreeReserve when COWSpillFree is set.
+func (l *chunkLayerImpl) cowSpillLimit() int64 {
+	limit := l.cfg.COWSpillLimit
+	if l.cfg.COWSpillFree == nil {
+		return limit
+	}
+	free, err := l.cfg.COWSpillFree()
+	if err != nil {
+		free = 0
+	}
+	return max(0, min(limit, free/2-cowSpillFreeReserve))
+}
 const (
 	cowPending uint8 = iota
 	cowCopying
@@ -148,7 +166,7 @@ func (l *chunkLayerImpl) installCOWWindow(candidates, staged map[uint64]bool, he
 	if size == 0 || size > math.MaxInt64 || uint64(len(candidates)) > math.MaxInt64/size {
 		return nil, fmt.Errorf("%w: side-store geometry", errCutCOWAborted)
 	}
-	w := &cutCOWWindow{layer: l, ended: make(chan struct{}), entries: make(map[uint64]*cutCOWEntry), head: head, spillLimit: l.cfg.COWSpillLimit, chunkBytes: int64(size)}
+	w := &cutCOWWindow{layer: l, ended: make(chan struct{}), entries: make(map[uint64]*cutCOWEntry), head: head, spillLimit: l.cowSpillLimit(), chunkBytes: int64(size)}
 	w.ctx, w.cancel = context.WithCancel(context.Background())
 	_, reserved, limit := l.cutPayloadWorkers()
 	savers := min(max(1, int((16<<20)/int64(size))), int((limit-reserved)/(2*int64(size))))

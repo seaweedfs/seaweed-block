@@ -1543,7 +1543,7 @@ func (l *chunkLayerImpl) dropIntents(ctx context.Context, ids []string) {
 func (l *chunkLayerImpl) stage(ctx context.Context, st *chunkCutStats) (map[uint64]stagedChunk, []string, error) {
 	// Leave at most half the side budget exposed at the barrier. Streaming
 	// staging uses no local payload file, even for a much larger image.
-	bound := int(l.cfg.COWSpillLimit / (2 * int64(l.blockSize) * int64(l.chunkBlocks)))
+	bound := int(l.cowSpillLimit() / (2 * int64(l.blockSize) * int64(l.chunkBlocks)))
 
 	staged := map[uint64]stagedChunk{}
 	var intents []string

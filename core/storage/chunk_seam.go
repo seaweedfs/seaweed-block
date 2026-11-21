@@ -382,6 +382,11 @@ type chunkLayerConfig struct {
 	// retries), never publishes a partial image or refuses the guest mutation.
 	// 0 defaults to defaultCOWSpillLimit; negative is refused.
 	COWSpillLimit int64
+	// COWSpillFree, optional, returns the free bytes of the filesystem that
+	// holds the side file. When set, it is read at each cut and that cut's
+	// spill cap is min(COWSpillLimit, free/2 - 1 GiB), at least 0; an error
+	// counts as no free space.
+	COWSpillFree func() (int64, error)
 
 	// testReconcileHold, set only by this package's tests, holds the
 	// reconciler before each slice until a token is received or the
