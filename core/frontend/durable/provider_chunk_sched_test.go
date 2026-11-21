@@ -4,6 +4,7 @@ package durable_test
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -160,5 +161,68 @@ func TestWALStoreChunk_StatusHasNoChunkSectionForWALStore(t *testing.T) {
 	_ = openRecovered(t, p)
 	if st := p.DurableStatuses(); len(st) != 1 || st[0].Chunk != nil {
 		t.Fatalf("walstore status: %+v", st)
+	}
+}
+
+// slowCASRemote delays the next HEAD CAS once, by the armed duration.
+type slowCASRemote struct {
+	*storage.MemChunkRemote
+	delay atomic.Int64 // ns; taken by the next CAS
+}
+
+func (r *slowCASRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVersion, next storage.ChunkHead) (uint64, error) {
+	if d := time.Duration(r.delay.Swap(0)); d > 0 {
+		t := time.NewTimer(d)
+		select {
+		case <-t.C:
+		case <-ctx.Done():
+			t.Stop()
+			return 0, ctx.Err()
+		}
+	}
+	return r.MemChunkRemote.CASHead(ctx, expected, next)
+}
+
+// An explicit cut still running when the loop's timer comes due restarts the
+// timer all the same: the automatic cut the loop decided on meanwhile does
+// not follow the explicit one; the next one comes an interval after it.
+func TestWALStoreChunk_ExplicitCutOverlappingTheTimerRestartsIt(t *testing.T) {
+	const interval = 3 * time.Second
+	remote := &slowCASRemote{MemChunkRemote: storage.NewMemChunkRemote()}
+	p := schedProvider(t, remote, interval, 0)
+	s := openRecovered(t, p)
+	begin := time.Now()
+
+	time.Sleep(2 * time.Second)
+	if _, err := s.Write(1, block(0x01)); err != nil {
+		t.Fatal(err)
+	}
+	// The explicit cut's CAS waits until well past the loop's first
+	// deadline (at most begin + interval): the loop comes due mid-cut.
+	remote.delay.Store(int64(1500 * time.Millisecond)) // below the CAS operation timeout
+	if _, err := p.CaptureVolume(context.Background(), "v1"); err != nil {
+		t.Fatal(err)
+	}
+	explicit := time.Now()
+	if !explicit.After(begin.Add(interval)) {
+		t.Fatalf("explicit cut ended %v after the start; want past the loop's first deadline", explicit.Sub(begin))
+	}
+	if h := headGen(t, remote); h.Gen != 1 {
+		t.Fatalf("explicit cut: HEAD gen %d, want 1", h.Gen)
+	}
+	if _, err := s.Write(pcChunkBlocks+1, block(0x02)); err != nil {
+		t.Fatal(err)
+	}
+	// Well inside explicit + interval: no automatic cut.
+	time.Sleep(time.Until(explicit.Add(interval / 2)))
+	if time.Now().After(explicit.Add(interval - 300*time.Millisecond)) {
+		t.Skip("scheduling too slow to separate the deadlines on this host")
+	}
+	if h := headGen(t, remote); h.Gen != 1 {
+		t.Fatalf("automatic cut %s after the explicit one (HEAD gen %d): the timer did not restart", time.Since(explicit), h.Gen)
+	}
+	// The timer still runs: the automatic cut follows.
+	for headGen(t, remote).Gen < 2 {
+		time.Sleep(50 * time.Millisecond)
 	}
 }
