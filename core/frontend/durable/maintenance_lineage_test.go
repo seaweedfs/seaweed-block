@@ -53,7 +53,24 @@ func TestMaintenanceSameHandleRearmsAfterJoinedStop(t *testing.T) {
 	h := &volHandle{chunk: layer, chunkLineage: chunkLineage{"v1", "r1", 3, 1}}
 	entered := make(chan struct{}, 2)
 	p := &DurableProvider{volumes: map[string]*volHandle{"v1": h}, view: precopyQueueView{id}, cfg: ProviderConfig{ChunkMaintenanceInterval: time.Nanosecond, ChunkMaintenance: func(ctx context.Context, _ string) error { entered <- struct{}{}; <-ctx.Done(); return ctx.Err() }}}
-	t.Cleanup(func() { p.stopChunkLoop(h) })
+	var stopperDone chan struct{}
+	t.Cleanup(func() {
+		p.mu.Lock()
+		stop, ownerDone := h.chunkStop, h.chunkDone
+		p.mu.Unlock()
+		if stop != nil {
+			stop()
+		}
+		for _, done := range []<-chan struct{}{stopperDone, ownerDone} {
+			if done != nil {
+				select {
+				case <-done:
+				case <-time.After(time.Second):
+					t.Error("cleanup did not join outstanding maintenance stopper/owner")
+				}
+			}
+		}
+	})
 	for i := 0; i < 2; i++ {
 		p.mu.Lock()
 		p.startChunkLoop("v1", h, layer)
@@ -64,6 +81,7 @@ func TestMaintenanceSameHandleRearmsAfterJoinedStop(t *testing.T) {
 			t.Fatal("same handle did not arm")
 		}
 		done := make(chan struct{})
+		stopperDone = done
 		go func() { p.stopChunkLoop(h); close(done) }()
 		select {
 		case <-done:
