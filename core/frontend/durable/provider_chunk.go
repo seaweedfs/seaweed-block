@@ -413,18 +413,25 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 	}
 	if !h.fresh {
 		// An existing local volume is this holder's image only while HEAD is
-		// still this holder's publication. Another holder's HEAD means the
+		// still this holder's publication (INV-WS-STALE-LOCAL-ROOT-001).
+		// Check again on the exact claim image before its CAS. Another holder means the
 		// workspace moved away and back: refuse rather than serve, or cut
 		// over, the newer image with the stale one.
 		head, err := remote.GetHead(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("durable: read HEAD before attaching existing volume %s: %w", volumeID, err)
 		}
-		if head.Gen != 0 && head.Holder != holder {
-			err := fmt.Errorf("%w: %w: volume %s local root %s, HEAD holder %q gen %d epoch %d, local holder %q; remove or quarantine the local root to attach fresh from HEAD",
-				ErrChunkStaleLocalRoot, storage.ErrChunkLayerFenced, volumeID, h.path, head.Holder, head.Gen, head.Epoch, holder)
-			log.Printf("durable: refusing to attach volume=%s root=%s: HEAD holder=%q gen=%d epoch=%d is not this holder %q (remove or quarantine the local root)",
-				volumeID, h.path, head.Holder, head.Gen, head.Epoch, holder)
+		cfg.PrepareRestore = func(head storage.ChunkHead) error {
+			if head.Gen != 0 && head.Holder != holder {
+				err := fmt.Errorf("%w: %w: volume %s local root %s, HEAD holder %q gen %d epoch %d, local holder %q; remove or quarantine the local root to attach fresh from HEAD",
+					ErrChunkStaleLocalRoot, storage.ErrChunkLayerFenced, volumeID, h.path, head.Holder, head.Gen, head.Epoch, holder)
+				log.Printf("durable: refusing to attach volume=%s root=%s: HEAD holder=%q gen=%d epoch=%d is not this holder %q (remove or quarantine the local root)",
+					volumeID, h.path, head.Holder, head.Gen, head.Epoch, holder)
+				return err
+			}
+			return nil
+		}
+		if err := cfg.PrepareRestore(head); err != nil {
 			return nil, err
 		}
 	}
