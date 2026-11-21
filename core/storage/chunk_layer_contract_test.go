@@ -170,9 +170,9 @@ func TestChunkLayer_C2_StalledUploadDoesNotGateLocal(t *testing.T) {
 }
 
 // C3 no torn chunk: chunks are copied under the capture barrier, so every
-// HEAD ever installed equals the image at its RemoteLSN even while a writer
-// keeps overwriting the same chunk and flushing. Overlap is forced: each
-// round holds the upload until the writer has completed rounds after it.
+// HEAD ever installed equals the image at its RemoteLSN while the same chunk
+// is overwritten and flushed. Each upload-entry event precedes three complete
+// writer rounds, and the upload is released only after those rounds finish.
 func TestChunkLayer_C3_EveryHeadIsExactUnderConcurrentWrites(t *testing.T) {
 	s, _ := newChunkTestStore(t)
 	f := newFakeChunkRemote()
@@ -183,88 +183,50 @@ func TestChunkLayer_C3_EveryHeadIsExactUnderConcurrentWrites(t *testing.T) {
 	}
 	mustSyncFlush(t, s)
 
-	stop := make(chan struct{})
-	var stopOnce sync.Once
-	stopWriter := func() { stopOnce.Do(func() { close(stop) }) }
-	progress := make(chan struct{}, 1024)
-	werr := make(chan error, 1)
-	var rounds atomic.Int64
-	t.Cleanup(func() {
-		stopWriter()
-		select {
-		case <-werr:
-		case <-time.After(ctLocalBound):
-			t.Errorf("writer not joined within %v", ctLocalBound)
+	// The test goroutine is the writer: each upload-entry event is followed
+	// by three complete write/sync/flush rounds before that upload is released.
+	// This proves overlap without a throughput deadline or free-running writer.
+	writes := 0
+	writeRound := func() {
+		lba := uint32(writes % ctChunkBlocks)
+		w.write(t, s, lba, byte(writes))
+		if _, err := s.Sync(); err != nil {
+			t.Fatal(err)
 		}
-	})
-	go func() {
-		defer close(werr)
-		for i := 0; ; i++ {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			lba := uint32(i % ctChunkBlocks)
-			data := makeBlock(ctBlockSize, byte(i))
-			lsn, err := s.Write(lba, data)
-			if err == nil {
-				w.record(lsn, lba, data)
-				_, err = s.Sync()
-			}
-			if err == nil {
-				err = s.flusher.flushOnce()
-				// A concurrent cut can invalidate a prepared checkpoint map;
-				// the production worker retries this explicit stale-proof outcome.
-				if errors.Is(err, ErrMapCoverageStale) {
-					err = nil
-				}
-			}
-			if err != nil {
-				werr <- err
-				return
-			}
-			rounds.Add(1)
-			select {
-			case progress <- struct{}{}:
-			default:
-			}
+		if err := s.flusher.flushOnce(); err != nil && !errors.Is(err, ErrMapCoverageStale) {
+			t.Fatal(err)
 		}
-	}()
-
+		writes++
+	}
 	for round := 0; round < 5; round++ {
 		entered, release := holdPuts(t, f)
 		done := startCapture(t, layer)
-		waitKey(t, entered, "held upload")
-		for len(progress) > 0 {
-			<-progress
+		select {
+		case <-entered:
+		case err := <-done:
+			t.Fatalf("round %d Capture ended before upload entry: %v", round, err)
 		}
-		for need := 0; need < 3; need++ { // the writer must advance while the upload is held
-			select {
-			case <-progress:
-			case <-time.After(ctLocalBound):
-				t.Fatalf("round %d: writer made no progress while an upload was held", round)
-			}
+		for need := 0; need < 3; need++ {
+			writeRound()
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("round %d Capture ended before upload release: %v", round, err)
+		default:
 		}
 		release()
-		if err := waitErr(t, done, "held capture"); err != nil {
+		if err := <-done; err != nil {
 			t.Fatalf("round %d Capture: %v", round, err)
 		}
 	}
 	for i := 0; i < 20; i++ {
+		writeRound()
 		if _, err := layer.Capture(ctTimeout(t)); err != nil {
 			t.Fatalf("free-running Capture %d: %v", i, err)
 		}
 	}
-	stopWriter()
-	if err := waitErr(t, werr, "writer"); err != nil {
-		t.Fatalf("writer: %v", err)
-	}
-	if rounds.Load() < 15 {
-		t.Fatalf("writer completed only %d rounds; overlap not established", rounds.Load())
-	}
-	// Each held round installs a HEAD; a free-running capture with no new
-	// LSN since the last cut is idle and may skip its CAS.
+	// Every held and subsequent unheld capture has new writes. Retain the
+	// historical minimum of five held HEADs plus one unheld HEAD.
 	if n := len(f.installedHeads()); n < 6 {
 		t.Fatalf("%d HEADs installed, want the 5 held rounds plus at least one free-running", n)
 	}
