@@ -546,3 +546,18 @@ server caller-end classification), and the retained
 The new tests use a real file-store rename followed by an injected error;
 a readout verifies that the failed write actually landed while memory rolled
 back. They also check no new authority epoch/move and per-volume scope.
+
+
+2026-11-21 caller-provenance fold: `cfg/WorkspaceMoveOutcome.cfg` exhausts
+223 generated / 135 distinct states, depth 5, queue empty (TLC 2.19 above).
+Bounds remain one volume, seven dependency/admission causes, one failed write
+and one reply; the actual request independently remains live or ends canceled /
+deadline. `NoFalseRefusal`, `CallerEndTyped` and `UncertainReplyClass` hold.
+`ConfuseDependencyEnd=TRUE` violates `UncertainReplyClass` (69 distinct states
+before the counterexample); `BypassUncertainty=TRUE` violates `NoFalseRefusal`
+(54 distinct states). The dependency-confusion negative maps to the live-parent
+HEAD-read deadline/cancellation controls in
+`TestWorkspaceMoveUnknownPrecedesAdmissionRefusals` and the live-context helper
+controls in `TestWorkspaceUncertaintyPrecedesRequestRefusal`. Actual request
+cancellation retains its own controls, including a conflicting dependency status.
+These are reply-classification claims, not authority-durability or delivery proof.

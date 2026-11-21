@@ -20,6 +20,7 @@ func TestWorkspaceMoveUnknownPrecedesAdmissionRefusals(t *testing.T) {
 			var headFailure atomic.Int32
 			var childDeadlineObserved atomic.Bool
 			var latch func() error
+			var cancelRequest context.CancelFunc
 			h, c, ctx := reviewBindingHostWithReader(t, func(readCtx context.Context, _ string) (authority.WorkspaceHead, error) {
 				if inject.Swap(false) {
 					if err := latch(); err != nil {
@@ -38,6 +39,11 @@ func TestWorkspaceMoveUnknownPrecedesAdmissionRefusals(t *testing.T) {
 				case 3:
 					dependency, cancel := context.WithCancel(readCtx)
 					cancel()
+					return authority.WorkspaceHead{}, dependency.Err()
+				case 4:
+					dependency, cancel := context.WithDeadline(readCtx, time.Unix(0, 1))
+					defer cancel()
+					cancelRequest()
 					return authority.WorkspaceHead{}, dependency.Err()
 				}
 				return authority.WorkspaceHead{Gen: 9, Epoch: 1, Holder: "node-a/r1", RemoteLSN: 42, Detached: true}, nil
@@ -97,6 +103,14 @@ func TestWorkspaceMoveUnknownPrecedesAdmissionRefusals(t *testing.T) {
 				if status.Code(err) != codes.Internal || !strings.Contains(status.Convert(err).Message(), "UNKNOWN") || !strings.Contains(status.Convert(err).Message(), "same request id") {
 					t.Errorf("live-parent HEAD dependency end bypassed UNKNOWN: mode=%d err=%v", mode, err)
 				}
+			}
+			caller, cancelCaller := context.WithCancel(context.Background())
+			cancelRequest = cancelCaller
+			headFailure.Store(4)
+			_, err := (&services{host: h}).MoveWorkspace(caller, request("clean"))
+			cancelCaller()
+			if caller.Err() != context.Canceled || status.Code(err) != codes.Canceled {
+				t.Errorf("actual caller end lost to dependency status: %v", err)
 			}
 			// These direct calls inspect the server result, not the client's own
 			// deadline override, so reply classification must preserve both.

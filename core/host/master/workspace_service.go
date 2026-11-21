@@ -192,11 +192,10 @@ func (s *services) MoveWorkspace(ctx context.Context, q *control.WorkspaceMove) 
 	var postIssue, unknown error
 	defer func() {
 		// M2 Uncertain reply precedence applies even to preflight/HEAD errors.
-		outcome := resultErr
-		if code := status.Code(resultErr); code != codes.Canceled && code != codes.DeadlineExceeded {
-			outcome = s.host.Publisher().WorkspaceMoveOutcomeError(q.GetVolumeId(), resultErr)
-		}
-		if errors.Is(outcome, authority.ErrWorkspaceOutcomeUncertain) {
+		outcome := s.host.Publisher().WorkspaceMoveOutcomeError(ctx, q.GetVolumeId(), resultErr)
+		if callerErr := ctx.Err(); resultErr != nil && callerErr != nil {
+			resultErr = workspaceError(callerErr)
+		} else if errors.Is(outcome, authority.ErrWorkspaceOutcomeUncertain) {
 			unknown, refusal = outcome, ""
 			resultErr = status.Errorf(codes.Internal, "workspace move %q of volume %q has an UNKNOWN outcome: %v; the volume's workspace authority stays uncertain until the master restarts; after the restart, rerun with the same request id", q.GetRequestId(), q.GetVolumeId(), outcome)
 		}

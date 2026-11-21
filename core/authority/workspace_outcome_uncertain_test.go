@@ -118,7 +118,7 @@ func TestWorkspaceUncertaintyPrecedesRequestRefusal(t *testing.T) {
 		if ctx.Err() != nil {
 			t.Fatal("request parent unexpectedly ended")
 		}
-		if err := p.WorkspaceMoveOutcomeError("v", dependencyErr); !errors.Is(err, ErrWorkspaceOutcomeUncertain) {
+		if err := p.WorkspaceMoveOutcomeError(ctx, "v", dependencyErr); !errors.Is(err, ErrWorkspaceOutcomeUncertain) {
 			t.Errorf("live caller dependency error bypassed UNKNOWN: %v", err)
 		}
 	}
