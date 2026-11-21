@@ -1,6 +1,13 @@
 package storage
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrChunkPutFinal marks a Put failure no retry can change (for example a
+// rejected token): the caller stops retrying the object.
+var ErrChunkPutFinal = errors.New("storage: chunk upload refused for good")
 
 // ChunkPutRounds is an optional ChunkRemote capability: the objects of one
 // upload round share remote reservations (batch assign) instead of taking

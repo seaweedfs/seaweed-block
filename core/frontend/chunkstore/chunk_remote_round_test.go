@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -21,28 +22,31 @@ type rangeFake struct {
 	reserves []int // requested counts, in order
 	grant    func(requested int) int
 	auth     func() string
-	refuse   func(fid string) error // non-nil: the put fails with it
-	puts     []string
-	putAuth  map[string]string
-	inflight int
-	peak     int
-	hold     chan struct{} // non-nil: reserve waits for it (or ctx)
+	refuse   func(fid string) error // non-nil: the put fails with it (nothing stored)
+	// reserveHook, when set, runs before each reserve (call counts from 1);
+	// an error fails the reserve. It decides itself whether to follow ctx.
+	reserveHook func(ctx context.Context, call int) error
+	// putHook, when set, decides each put: store the bytes or not, and the
+	// error to return (a stored put with an error is a lost reply).
+	putHook func(ctx context.Context, fid string) (store bool, err error)
+	puts    []string
+	putAuth map[string]string
+	putDL   map[string]time.Time // deadline of the context each put was sent under
 }
 
 func newRangeFake() *rangeFake {
-	return &rangeFake{fakeBlobs: newFakeBlobs(), nextVid: 1, putAuth: map[string]string{}}
+	return &rangeFake{fakeBlobs: newFakeBlobs(), nextVid: 1, putAuth: map[string]string{}, putDL: map[string]time.Time{}}
 }
 
 func (b *rangeFake) reserve(ctx context.Context, n int, _ uint64) (blobRange, error) {
 	b.mu.Lock()
 	b.reserves = append(b.reserves, n)
-	hold := b.hold
+	call := len(b.reserves)
+	hook := b.reserveHook
 	b.mu.Unlock()
-	if hold != nil {
-		select {
-		case <-hold:
-		case <-ctx.Done():
-			return blobRange{}, ctx.Err()
+	if hook != nil {
+		if err := hook(ctx, call); err != nil {
+			return blobRange{}, err
 		}
 	}
 	b.mu.Lock()
@@ -57,7 +61,7 @@ func (b *rangeFake) reserve(ctx context.Context, n int, _ uint64) (blobRange, er
 	}
 	vid := b.nextVid
 	b.nextVid++
-	return blobRange{base: fmt.Sprintf("%d,0a0b0c0d0e", vid), count: count, url: "fake", auth: auth}, nil
+	return blobRange{base: fmt.Sprintf("%d,0a0b0c0d0e", vid), count: count, url: "fake:1", auth: auth}, nil
 }
 
 func (b *rangeFake) putRange(ctx context.Context, r blobRange, i int, data []byte) error {
@@ -68,17 +72,46 @@ func (b *rangeFake) putRange(ctx context.Context, r blobRange, i int, data []byt
 	b.mu.Lock()
 	b.puts = append(b.puts, fid)
 	b.putAuth[fid] = r.auth
-	refuse := b.refuse
+	if dl, ok := ctx.Deadline(); ok {
+		b.putDL[fid] = dl
+	}
+	refuse, hook := b.refuse, b.putHook
 	b.mu.Unlock()
+	store, perr := true, error(nil)
 	if refuse != nil {
 		if err := refuse(fid); err != nil {
-			return err
+			store, perr = false, err
 		}
 	}
+	if hook != nil {
+		store, perr = hook(ctx, fid)
+	}
+	if store {
+		b.fakeBlobs.mu.Lock()
+		b.fakeBlobs.data[fid] = append([]byte(nil), data...)
+		b.fakeBlobs.mu.Unlock()
+	}
+	return perr
+}
+
+func (b *rangeFake) probe(_ context.Context, r blobRange, i int) ([]byte, error) {
+	fid, err := r.fid(i)
+	if err != nil {
+		return nil, err
+	}
 	b.fakeBlobs.mu.Lock()
-	b.fakeBlobs.data[fid] = append([]byte(nil), data...)
-	b.fakeBlobs.mu.Unlock()
-	return nil
+	defer b.fakeBlobs.mu.Unlock()
+	d, ok := b.fakeBlobs.data[fid]
+	if !ok {
+		return nil, fmt.Errorf("%w %s", errBlobAbsent, fid)
+	}
+	return append([]byte(nil), d...), nil
+}
+
+func (b *rangeFake) putList() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]string(nil), b.puts...)
 }
 
 func (b *rangeFake) reserveCounts() []int {
@@ -321,23 +354,275 @@ func TestChunkRound_RetryKeepsTheSlot(t *testing.T) {
 	}
 }
 
-// A reservation waiting on the filer ends with the caller's context, and a
-// reply that arrives after it never starts an upload.
+// A reservation waiting on the filer ends with the caller's context when it
+// follows it; one that ignores it is still joined (Put does not return
+// before it), and its late successful reply never starts an upload.
 func TestChunkRound_ReserveFollowsTheCaller(t *testing.T) {
 	b := newRangeFake()
-	b.hold = make(chan struct{})
+	hold := make(chan struct{})
+	b.reserveHook = func(ctx context.Context, _ int) error {
+		select {
+		case <-hold:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	r := roundRemote(t, b)
-	rd := r.BeginPutRound(1, 4096)
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	if err := rd.Put(ctx, 0, roundKey(0), []byte("x")); !errors.Is(err, context.DeadlineExceeded) {
+	if err := r.BeginPutRound(1, 4096).Put(ctx, 0, roundKey(0), []byte("x")); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("held reservation: %v", err)
 	}
-	close(b.hold)
+	close(hold)
+
+	b2 := newRangeFake()
+	hold2 := make(chan struct{})
+	b2.reserveHook = func(context.Context, int) error { <-hold2; return nil } // ignores ctx
+	r2 := roundRemote(t, b2)
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel2()
+	done := make(chan error, 1)
+	go func() { done <- r2.BeginPutRound(1, 4096).Put(ctx2, 0, roundKey(0), []byte("x")) }()
+	select {
+	case err := <-done:
+		t.Fatalf("Put returned (%v) while its reservation call was still running", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(hold2) // the late reply is a success
+	if err := <-done; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("late reply after the caller gave up: %v", err)
+	}
+	if puts := b2.putList(); len(puts) != 0 {
+		t.Fatalf("uploads %v after the caller gave up", puts)
+	}
+}
+
+// A replacement reply that arrives after a lower slot retired the group's
+// ranges is discarded: the group is reserved again from its first uncovered
+// slot, so no slot is left uncovered (and no zero-id reservation is asked).
+func TestChunkRound_StaleReplacementIsDiscarded(t *testing.T) {
+	b := newRangeFake()
+	r := roundRemote(t, b)
+	rd := r.BeginPutRound(4, 4096).(*putRound)
+	g := rd.groups[0]
+	second := make(chan struct{})
+	release := make(chan struct{})
+	b.reserveHook = func(_ context.Context, call int) error {
+		if call == 2 {
+			close(second)
+			<-release
+		}
+		return nil
+	}
+	slot0Sent := make(chan struct{})
+	b.putHook = func(_ context.Context, fid string) (bool, error) {
+		switch fid {
+		case "1,0a0b0c0d0e_1": // slot 1: refused at once
+			return false, errRangeRefused
+		case "1,0a0b0c0d0e": // slot 0: sent, refused once the replacement is in flight
+			close(slot0Sent)
+			<-second
+			return false, errRangeRefused
+		}
+		return true, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	errs := make(chan error, 2)
+	go func() { errs <- rd.Put(ctx, 0, roundKey(0), []byte(roundKey(0))) }()
+	<-slot0Sent
+	go func() { errs <- rd.Put(ctx, 1, roundKey(1), []byte(roundKey(1))) }()
+	<-second
+	for { // slot 0's refusal retires the rest of the group meanwhile
+		g.mu.Lock()
+		v := g.ver
+		g.mu.Unlock()
+		if v == 2 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(release)
+	for k := 0; k < 2; k++ {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := b.reserveCounts()
+	for _, n := range got {
+		if n <= 0 {
+			t.Fatalf("reservations %v: asked for %d ids", got, n)
+		}
+	}
+	if len(got) != 3 || got[0] != 4 || got[1] != 3 || got[2] != 4 {
+		t.Fatalf("reservations %v; want [4 3 4] (the stale [1,4) reply discarded)", got)
+	}
+	for i := 0; i < 2; i++ {
+		if fid := r.fids[roundKey(i)]; !strings.HasPrefix(fid, "3,") {
+			t.Fatalf("slot %d bound to %s; want the fresh range", i, fid)
+		}
+	}
+	if a := r.AssignCounts(); a.Initial != 1 || a.Capacity != 1 || a.Retry != 1 || a.Failed != 1 {
+		t.Fatalf("assign counts %+v", a)
+	}
+}
+
+// A lost reservation reply is counted: the retry is an extra attempt.
+func TestChunkRound_LostReservationReplyIsCounted(t *testing.T) {
+	b := newRangeFake()
+	b.reserveHook = func(_ context.Context, call int) error {
+		if call == 1 {
+			return errors.New("lost assign reply")
+		}
+		return nil
+	}
+	r := roundRemote(t, b)
+	rd := r.BeginPutRound(1, 4096)
+	ctx := context.Background()
+	if err := rd.Put(ctx, 0, roundKey(0), []byte("x")); err == nil {
+		t.Fatal("lost reply reported success")
+	}
+	if err := rd.Put(ctx, 0, roundKey(0), []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if a := r.AssignCounts(); a.Initial != 1 || a.Retry != 1 || a.Failed != 1 || a.Extra() != 1 {
+		t.Fatalf("assign counts %+v; want 1 initial + 1 retry, 1 failed", a)
+	}
+}
+
+// An upload whose reply was lost keeps its fid: a retry after the group's
+// lower slot retired the range, or after the token expired, does not move
+// it. Past expiry the fid is read back: the exact bytes are bound there,
+// definitely absent bytes go to a fresh range.
+func TestChunkRound_AmbiguousUploadKeepsItsFid(t *testing.T) {
+	ctx := context.Background()
+	t.Run("lower slot retires the range", func(t *testing.T) {
+		b := newRangeFake()
+		lost := true
+		b.putHook = func(_ context.Context, fid string) (bool, error) {
+			switch {
+			case fid == "1,0a0b0c0d0e_1" && lost:
+				lost = false
+				return false, errors.New("connection reset") // outcome unknown to the client
+			case fid == "1,0a0b0c0d0e":
+				return false, errRangeRefused
+			}
+			return true, nil
+		}
+		r := roundRemote(t, b)
+		rd := r.BeginPutRound(2, 4096)
+		if err := rd.Put(ctx, 1, roundKey(1), []byte(roundKey(1))); err == nil {
+			t.Fatal("lost reply reported success")
+		}
+		if err := rd.Put(ctx, 0, roundKey(0), []byte(roundKey(0))); err != nil {
+			t.Fatal(err)
+		}
+		if err := rd.Put(ctx, 1, roundKey(1), []byte(roundKey(1))); err != nil {
+			t.Fatal(err)
+		}
+		if fid := r.fids[roundKey(1)]; fid != "1,0a0b0c0d0e_1" {
+			t.Fatalf("retried slot bound to %s; want its first fid", fid)
+		}
+		if fid := r.fids[roundKey(0)]; !strings.HasPrefix(fid, "2,") {
+			t.Fatalf("refused slot bound to %s; want the fresh range", fid)
+		}
+	})
+	for _, stored := range []bool{true, false} {
+		t.Run(fmt.Sprintf("token expires, stored=%v", stored), func(t *testing.T) {
+			b := newRangeFake()
+			calls := 0
+			b.auth = func() string {
+				calls++
+				if calls == 1 { // expires (less skew) about a second from now
+					return jwtWithExp(time.Now().Add(jwtSendSkew + time.Second).Unix())
+				}
+				return jwtWithExp(time.Now().Add(time.Hour).Unix())
+			}
+			lost := true
+			b.putHook = func(context.Context, string) (bool, error) {
+				if lost {
+					lost = false
+					return stored, errors.New("reply lost")
+				}
+				return true, nil
+			}
+			r := roundRemote(t, b)
+			rd := r.BeginPutRound(1, 4096)
+			if err := rd.Put(ctx, 0, roundKey(0), []byte(roundKey(0))); err == nil {
+				t.Fatal("lost reply reported success")
+			}
+			b.mu.Lock()
+			first := b.putAuth["1,0a0b0c0d0e"]
+			b.mu.Unlock()
+			dl, _ := (blobRange{auth: first}).sendDeadline()
+			time.Sleep(time.Until(dl) + 10*time.Millisecond)
+			if err := rd.Put(ctx, 0, roundKey(0), []byte(roundKey(0))); err != nil {
+				t.Fatal(err)
+			}
+			fid, puts := r.fids[roundKey(0)], b.putList()
+			if stored {
+				if fid != "1,0a0b0c0d0e" || len(puts) != 1 {
+					t.Fatalf("stored upload: bound %s after uploads %v; want its first fid, no resend", fid, puts)
+				}
+				return
+			}
+			if !strings.HasPrefix(fid, "2,") || len(puts) != 2 {
+				t.Fatalf("absent upload: bound %s after uploads %v; want a fresh range", fid, puts)
+			}
+			if a := r.AssignCounts(); a.Initial != 1 || a.Expired != 1 {
+				t.Fatalf("assign counts %+v", a)
+			}
+		})
+	}
+}
+
+// An upload is sent under its token's send deadline: a queued upload ends
+// there, not at the caller's later deadline.
+func TestChunkRound_UploadCarriesTheTokenDeadline(t *testing.T) {
+	b := newRangeFake()
+	b.auth = func() string { return jwtWithExp(time.Now().Add(jwtSendSkew + time.Second).Unix()) }
+	b.putHook = func(ctx context.Context, _ string) (bool, error) {
+		<-ctx.Done() // queued until its context ends
+		return false, ctx.Err()
+	}
+	r := roundRemote(t, b)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	start := time.Now()
+	err := r.BeginPutRound(1, 4096).Put(ctx, 0, roundKey(0), []byte("x"))
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > 10*time.Second {
+		t.Fatalf("queued upload: %v after %v; want it ended at the token's deadline", err, time.Since(start))
+	}
 	b.mu.Lock()
-	n := len(b.puts)
-	b.mu.Unlock()
-	if n != 0 {
-		t.Fatalf("%d uploads after the caller gave up", n)
+	defer b.mu.Unlock()
+	for f, a := range b.putAuth {
+		dl, _ := (blobRange{auth: a}).sendDeadline()
+		if !b.putDL[f].Equal(dl) {
+			t.Fatalf("upload to %s sent under deadline %v; want the token's %v", f, b.putDL[f], dl)
+		}
+	}
+}
+
+// A rejected token and used-up replacements are final for the caller; a
+// transient failure is not.
+func TestChunkRound_FinalOutcomes(t *testing.T) {
+	put := func(b *rangeFake) error {
+		return roundRemote(t, b).BeginPutRound(1, 4096).Put(context.Background(), 0, roundKey(0), []byte("x"))
+	}
+	b := newRangeFake()
+	b.refuse = func(string) error { return errRangeAuth }
+	if err := put(b); !errors.Is(err, storage.ErrChunkPutFinal) {
+		t.Fatalf("401: %v; want final", err)
+	}
+	b2 := newRangeFake()
+	b2.refuse = func(string) error { return errRangeRefused }
+	if err := put(b2); !errors.Is(err, storage.ErrChunkPutFinal) {
+		t.Fatalf("replacements used up: %v; want final", err)
+	}
+	b3 := newRangeFake()
+	b3.refuse = func(string) error { return errors.New("connection reset") }
+	if err := put(b3); err == nil || errors.Is(err, storage.ErrChunkPutFinal) {
+		t.Fatalf("transient failure: %v; want retryable", err)
 	}
 }

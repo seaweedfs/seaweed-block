@@ -149,6 +149,17 @@ func TestSWFSRange_ReserveValidates(t *testing.T) {
 		{"non-hex key", 4, &filerpb.AssignVolumeResponse{FileId: "3,0a0b0c0dzz", Count: 4, Location: loc}, false, 0},
 		{"key too short for a cookie", 4, &filerpb.AssignVolumeResponse{FileId: "3,0a0b0c0d", Count: 4, Location: loc}, false, 0},
 		{"assign error", 4, &filerpb.AssignVolumeResponse{Error: "no free volumes"}, false, 0},
+		{"location with a scheme", 4, &filerpb.AssignVolumeResponse{FileId: "3,0a0b0c0d0e", Count: 4, Location: &filerpb.Location{Url: "http://127.0.0.1:1"}}, false, 0},
+		{"location without a port", 4, &filerpb.AssignVolumeResponse{FileId: "3,0a0b0c0d0e", Count: 4, Location: &filerpb.Location{Url: "127.0.0.1"}}, false, 0},
+		{"location with a bad port", 4, &filerpb.AssignVolumeResponse{FileId: "3,0a0b0c0d0e", Count: 4, Location: &filerpb.Location{Url: "127.0.0.1:x"}}, false, 0},
+		{"location with port 0", 4, &filerpb.AssignVolumeResponse{FileId: "3,0a0b0c0d0e", Count: 4, Location: &filerpb.Location{Url: "127.0.0.1:0"}}, false, 0},
+		{"location with a path", 4, &filerpb.AssignVolumeResponse{FileId: "3,0a0b0c0d0e", Count: 4, Location: &filerpb.Location{Url: "a/b:1"}}, false, 0},
+		{"widest key", 4, &filerpb.AssignVolumeResponse{FileId: "3,0123456789abcdef0a0b0c0d", Count: 4, Location: loc}, true, 4},
+		{"key of 17 digits (leading zero)", 4, &filerpb.AssignVolumeResponse{FileId: "3,00123456789abcdef0a0b0c0d", Count: 4, Location: loc}, false, 0},
+		{"key wider than 64 bits", 4, &filerpb.AssignVolumeResponse{FileId: "3,10123456789abcdef0a0b0c0d", Count: 4, Location: loc}, false, 0},
+		{"last offset fits", 2, &filerpb.AssignVolumeResponse{FileId: "3,fffffffffffffffe0a0b0c0d", Count: 2, Location: loc}, true, 2},
+		{"last offset overflows the key", 3, &filerpb.AssignVolumeResponse{FileId: "3,fffffffffffffffe0a0b0c0d", Count: 3, Location: loc}, false, 0},
+		{"volume id wider than 32 bits", 4, &filerpb.AssignVolumeResponse{FileId: "4294967296,0a0b0c0d0e", Count: 4, Location: loc}, false, 0},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s := startFakeFiler(t, &fakeFilerGRPC{assignResp: c.resp})
@@ -160,6 +171,19 @@ func TestSWFSRange_ReserveValidates(t *testing.T) {
 				t.Fatalf("count %d, want %d", r.count, c.want)
 			}
 		})
+	}
+	for _, n := range []int{1, 256, 4096} {
+		s := startFakeFiler(t, &fakeFilerGRPC{assignResp: &filerpb.AssignVolumeResponse{FileId: "3,0a0b0c0d0e", Count: int32(n), Location: loc}})
+		r, err := s.reserve(context.Background(), n, 4096)
+		if err != nil || r.count != n {
+			t.Fatalf("reserve %d: %+v %v", n, r, err)
+		}
+		if _, err := r.fid(n - 1); err != nil {
+			t.Fatalf("reserve %d: last offset: %v", n, err)
+		}
+		if fid, err := r.fid(n); err == nil {
+			t.Fatalf("reserve %d: offset %d gave %q", n, n, fid)
+		}
 	}
 	s := startFakeFiler(t, &fakeFilerGRPC{assignResp: &filerpb.AssignVolumeResponse{FileId: "3,0a0b0c0d0e", Count: 1, Location: loc}})
 	for _, n := range []int{0, -1, maxRangeCount + 1} {

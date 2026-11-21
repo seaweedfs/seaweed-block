@@ -43,6 +43,9 @@ func (l *chunkLayerImpl) putCapturedWith(ctx context.Context, key string, data [
 			}
 			return errChunkKeyExists
 		}
+		if errors.Is(err, ErrChunkPutFinal) {
+			return err
+		}
 		timer := time.NewTimer(backoff)
 		select {
 		case <-ctx.Done():

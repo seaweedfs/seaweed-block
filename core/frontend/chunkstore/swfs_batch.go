@@ -15,6 +15,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -37,6 +39,9 @@ var (
 	errRangeRefused = errors.New("chunkstore: volume refused the write before append")
 	// errRangeAuth: the volume rejected the upload's token. Terminal.
 	errRangeAuth = errors.New("chunkstore: volume rejected the upload token")
+	// errBlobAbsent: the volume server holding a range has no needle at
+	// the probed fid.
+	errBlobAbsent = errors.New("chunkstore: no needle at fid")
 )
 
 // blobRange is one batch reservation: count ids starting at base, on the
@@ -86,13 +91,17 @@ func (r blobRange) sendDeadline() (time.Time, bool) {
 type rangeBlobs interface {
 	reserve(ctx context.Context, n int, objSize uint64) (blobRange, error)
 	putRange(ctx context.Context, r blobRange, i int, data []byte) error
+	// probe reads offset i back from the range's volume server:
+	// errBlobAbsent when that server definitely has no such needle.
+	probe(ctx context.Context, r blobRange, i int) ([]byte, error)
 }
 
 var _ rangeBlobs = (*SWFS)(nil)
 
-// validBaseFid checks "<vid>,<key><cookie>": a decimal volume id, then hex
-// with at least a cookie's 8 digits after a key, and no offset suffix.
-func validBaseFid(fid string) error {
+// validBaseFid checks "<vid>,<key><cookie>" for a range of count ids: a
+// 32-bit decimal volume id, a 64-bit hex needle key (1 to 16 digits) and an
+// 8-digit hex cookie, no offset suffix, and room for key + count - 1.
+func validBaseFid(fid string, count int) error {
 	vid, kc, ok := strings.Cut(fid, ",")
 	if !ok || vid == "" {
 		return fmt.Errorf("chunkstore: assign fid %q has no volume id", fid)
@@ -100,13 +109,35 @@ func validBaseFid(fid string) error {
 	if _, err := strconv.ParseUint(vid, 10, 32); err != nil {
 		return fmt.Errorf("chunkstore: assign fid %q: volume id: %v", fid, err)
 	}
-	if len(kc) <= 8 {
-		return fmt.Errorf("chunkstore: assign fid %q: no key before the cookie", fid)
+	if len(kc) <= 8 || len(kc) > 16+8 {
+		return fmt.Errorf("chunkstore: assign fid %q: want a 1..16 digit key and an 8 digit cookie", fid)
 	}
 	for _, c := range kc {
 		if !strings.ContainsRune("0123456789abcdefABCDEF", c) {
 			return fmt.Errorf("chunkstore: assign fid %q: not a plain hex key and cookie", fid)
 		}
+	}
+	key, err := strconv.ParseUint(kc[:len(kc)-8], 16, 64)
+	if err != nil {
+		return fmt.Errorf("chunkstore: assign fid %q: key: %v", fid, err)
+	}
+	if count > 0 && key > math.MaxUint64-uint64(count-1) {
+		return fmt.Errorf("chunkstore: assign fid %q: key + %d overflows", fid, count-1)
+	}
+	return nil
+}
+
+// validHostPort checks a volume server location: host:port, no scheme or path.
+func validHostPort(loc string) error {
+	host, port, err := net.SplitHostPort(loc)
+	if err != nil {
+		return fmt.Errorf("chunkstore: assign location %q: %v", loc, err)
+	}
+	if host == "" || strings.ContainsAny(host, "/ ?#@") {
+		return fmt.Errorf("chunkstore: assign location %q: bad host", loc)
+	}
+	if p, err := strconv.ParseUint(port, 10, 16); err != nil || p == 0 {
+		return fmt.Errorf("chunkstore: assign location %q: bad port", loc)
 	}
 	return nil
 }
@@ -131,15 +162,15 @@ func (c *SWFS) reserve(ctx context.Context, n int, objSize uint64) (blobRange, e
 	if ar.GetError() != "" {
 		return blobRange{}, fmt.Errorf("chunkstore: assign %d: %s", n, ar.GetError())
 	}
-	if ar.GetLocation().GetUrl() == "" {
-		return blobRange{}, fmt.Errorf("chunkstore: assign %d returned no location", n)
-	}
-	if err := validBaseFid(ar.GetFileId()); err != nil {
+	if err := validHostPort(ar.GetLocation().GetUrl()); err != nil {
 		return blobRange{}, err
 	}
 	count := int(ar.GetCount())
 	if count <= 0 || count > n {
 		return blobRange{}, fmt.Errorf("chunkstore: assign %d returned %d ids", n, count)
+	}
+	if err := validBaseFid(ar.GetFileId(), count); err != nil {
+		return blobRange{}, err
 	}
 	return blobRange{base: ar.FileId, count: count, url: ar.Location.Url, auth: ar.GetAuth(), fsync: ar.GetFsync()}, nil
 }
@@ -153,6 +184,30 @@ func (c *SWFS) putRange(ctx context.Context, r blobRange, i int, data []byte) er
 		return err
 	}
 	return c.upload(ctx, r.url, fid, r.auth, r.fsync, data)
+}
+
+// probe GETs offset i from the range's own volume server.
+func (c *SWFS) probe(ctx context.Context, r blobRange, i int) ([]byte, error) {
+	fid, err := r.fid(i)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+r.url+"/"+fid, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("chunkstore: probe %s: %w", fid, err)
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return io.ReadAll(resp.Body)
+	case http.StatusNotFound:
+		return nil, fmt.Errorf("%w %s", errBlobAbsent, fid)
+	}
+	return nil, fmt.Errorf("chunkstore: probe %s: http %d", fid, resp.StatusCode)
 }
 
 // upload POSTs data raw to fid on the volume server at host.
