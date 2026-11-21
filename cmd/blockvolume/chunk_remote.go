@@ -29,8 +29,11 @@ const (
 	defaultChunkMaintenanceTimeout  = time.Minute
 	defaultChunkGCGrace             = time.Hour
 	defaultChunkIntentTTL           = time.Hour
-	defaultChunkDirtyThreshold      = 512 // chunks, 2 GiB at 4 MiB chunks
 )
+
+// chunkDirtyThresholdRemoval is when --chunk-dirty-threshold, accepted and
+// ignored since cuts stage by the COW budget (M5 Stage), is removed.
+const chunkDirtyThresholdRemoval = "2027-01-31"
 
 type chunkFlags struct {
 	detachPrecopy       bool
@@ -42,7 +45,7 @@ type chunkFlags struct {
 	captureInterval     time.Duration
 	maintenanceInterval time.Duration
 	automaticGC         bool
-	dirtyThreshold      int
+	dirtyThreshold      int // deprecated, ignored (chunkDirtyThresholdRemoval)
 	uploadConcurrency   int
 	hydrationWorkers    int
 	hydrationQueueDepth int
@@ -61,7 +64,7 @@ func validateChunkFlags(f flags) error {
 	}
 	if f.durableImpl != "walstore-chunk" {
 		if c.filer != "" || c.collection != "" || c.replication != "" || c.path != defaultChunkPath ||
-			c.captureInterval != defaultChunkCaptureInterval || c.maintenanceInterval != defaultChunkMaintenanceInterval || c.automaticGC || c.dirtyThreshold != defaultChunkDirtyThreshold ||
+			c.captureInterval != defaultChunkCaptureInterval || c.maintenanceInterval != defaultChunkMaintenanceInterval || c.automaticGC ||
 			c.uploadConcurrency != 8 || c.hydrationWorkers != 2 || c.hydrationQueueDepth != 64 || c.controlEndpoint || c.detachPrecopy || c.hostLimit.Directory != "" {
 			return errors.New("--chunk-* flags require --durable-impl=walstore-chunk")
 		}
@@ -99,9 +102,6 @@ func validateChunkFlags(f flags) error {
 	}
 	if c.hydrationQueueDepth < 1 || c.hydrationQueueDepth > 65536 {
 		return errors.New("--chunk-hydration-queue-depth must be between 1 and 65536")
-	}
-	if c.dirtyThreshold < 0 {
-		return fmt.Errorf("--chunk-dirty-threshold=%d must not be negative", c.dirtyThreshold)
 	}
 	return nil
 }

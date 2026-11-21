@@ -31,13 +31,13 @@ func TestWALStoreChunkFlags(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d.chunk.captureInterval != 15*time.Minute || d.chunk.maintenanceInterval != time.Hour || d.chunk.automaticGC || d.chunk.dirtyThreshold != 512 {
-		t.Fatalf("scheduler defaults interval %s threshold %d, want capture 15m, maintenance 1h, GC off and 512", d.chunk.captureInterval, d.chunk.dirtyThreshold)
+	if d.chunk.captureInterval != 15*time.Minute || d.chunk.maintenanceInterval != time.Hour || d.chunk.automaticGC || len(d.warnings) != 0 {
+		t.Fatalf("scheduler defaults interval %s warnings %v, want capture 15m, maintenance 1h, GC off and no warning", d.chunk.captureInterval, d.warnings)
 	}
 	off, err := parseFlags(base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1",
-		"--chunk-capture-interval=0", "--chunk-dirty-threshold=0"))
-	if err != nil || off.chunk.captureInterval != 0 || off.chunk.dirtyThreshold != 0 {
-		t.Fatalf("disabling both triggers: %+v %v", off.chunk, err)
+		"--chunk-capture-interval=0"))
+	if err != nil || off.chunk.captureInterval != 0 {
+		t.Fatalf("disabling the timer: %+v %v", off.chunk, err)
 	}
 	if _, err := parseFlags(base("--durable-root=/tmp/sw-block", "--durable-impl=walstore")); err != nil {
 		t.Fatalf("walstore with the chunk defaults untouched: %v", err)
@@ -58,8 +58,6 @@ func TestWALStoreChunkFlags(t *testing.T) {
 			"--chunk-filer=x:1", "--chunk-control-endpoint"),
 		"zero upload concurrency": base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-upload-concurrency=0"),
 		"too many uploads":        base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-upload-concurrency=65"),
-		"negative threshold":      base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-dirty-threshold=-1"),
-		"threshold on walstore":   base("--durable-root=/tmp/sw-block", "--durable-impl=walstore", "--chunk-dirty-threshold=8"),
 		"interval on walstore":    base("--durable-root=/tmp/sw-block", "--durable-impl=walstore", "--chunk-capture-interval=5s"),
 	}
 	for name, args := range refused {
@@ -121,5 +119,28 @@ func TestChunkHolderIsServerAndReplica(t *testing.T) {
 	}
 	if got := chunkHolder(f); got != "m02/r1" {
 		t.Fatalf("chunk holder %q, want m02/r1", got)
+	}
+}
+
+// --chunk-dirty-threshold is deprecated (O-OPS-1): a cut stages by the
+// copy-on-write budget (M5 Stage), so the flag never had an effect. It is
+// still accepted, with any value and any durable implementation, and warns
+// with its removal date; nothing reads its value.
+func TestChunkDirtyThresholdIsDeprecatedAndIgnored(t *testing.T) {
+	base := func(extra ...string) []string {
+		return append(phase150RequiredBlockvolumeArgs(), extra...)
+	}
+	for _, args := range [][]string{
+		base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-dirty-threshold=512"),
+		base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-dirty-threshold=-1"),
+		base("--durable-root=/tmp/sw-block", "--durable-impl=walstore", "--chunk-dirty-threshold=8"),
+	} {
+		f, err := parseFlags(args)
+		if err != nil {
+			t.Fatalf("%v: refused: %v", args, err)
+		}
+		if len(f.warnings) != 1 || !strings.Contains(f.warnings[0], "deprecated") || !strings.Contains(f.warnings[0], chunkDirtyThresholdRemoval) {
+			t.Fatalf("%v: warnings %v; want one deprecation warning naming %s", args, f.warnings, chunkDirtyThresholdRemoval)
+		}
 	}
 }

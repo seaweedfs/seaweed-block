@@ -199,13 +199,6 @@ type ProviderConfig struct {
 	// call back into the provider.
 	OnChunkDetach        func(volumeID string) uint64
 	OnChunkDetachResumed func(volumeID string, attempt uint64)
-	// ChunkDirtyThreshold is the number of candidate chunks above which
-	// a cut pre-copies (stages) chunks before its barrier, in rounds of
-	// this size; copy-before-write copies the rest outside the barrier.
-	// It never triggers a cut: the remote holds snapshots, and cuts are
-	// published only by CaptureVolume, MakeVolumeRemoteDurable
-	// (snapshot, detach) and the timer. Zero: no pre-copy.
-	ChunkDirtyThreshold int
 	// ChunkUploadConcurrency bounds remote uploads; zero defaults to 8.
 	ChunkUploadConcurrency int
 	// ChunkPayloadMemoryBudget bounds one volume's cut payloads; zero uses the storage default.
