@@ -3,6 +3,8 @@ package durable_test
 import (
 	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -10,20 +12,26 @@ import (
 )
 
 // A goroutine started with GoOwned sees its ctx end when Close starts, and
-// Close does not return while it is still settling; after Close nothing is
-// admitted.
+// Close returns only after it has returned (ordering witnessed by sequence
+// numbers); after Close nothing is admitted.
 func TestDurableProvider_GoOwnedIsCancelledAndJoinedByClose(t *testing.T) {
 	p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStore, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: 64}, v1View())
 	if err != nil {
 		t.Fatal(err)
 	}
-	started, cancelled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
-	closed := make(chan struct{})
-	released := false
-	t.Cleanup(func() { // registered before launch: release, then a bounded join of Close
-		if !released {
-			close(release)
-		}
+	var seq, settledAt, closedAt atomic.Int64
+	started, cancelled, release, closed := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
+	releaseOnce := sync.OnceFunc(func() { close(release) })
+	startClose := sync.OnceFunc(func() { // one Close, launched by the body or by cleanup
+		go func() {
+			_ = p.Close()
+			closedAt.Store(seq.Add(1))
+			close(closed)
+		}()
+	})
+	t.Cleanup(func() { // registered before launch: always cancels, releases and joins
+		startClose()
+		releaseOnce()
 		select {
 		case <-closed:
 		case <-time.After(5 * time.Second):
@@ -35,28 +43,38 @@ func TestDurableProvider_GoOwnedIsCancelledAndJoinedByClose(t *testing.T) {
 		<-ctx.Done()
 		close(cancelled)
 		<-release // held settlement: Close must wait for this
+		settledAt.Store(seq.Add(1))
 	}); err != nil {
 		t.Fatal(err)
 	}
-	wait := func(ch <-chan struct{}, what string) {
+	wait := func(ch <-chan struct{}, d time.Duration, what string) bool {
 		t.Helper()
 		select {
 		case <-ch:
-		case <-time.After(5 * time.Second):
-			t.Fatalf("timed out waiting for %s", what)
+			return true
+		case <-time.After(d):
+			return false
 		}
 	}
-	wait(started, "the owned goroutine to start")
-	go func() { _ = p.Close(); close(closed) }()
-	wait(cancelled, "Close to cancel the owned goroutine's ctx")
-	select {
-	case <-closed:
-		t.Fatal("Close returned while the owned goroutine was still settling")
-	default:
+	if !wait(started, 5*time.Second, "start") {
+		t.Fatal("the owned goroutine never started")
 	}
-	released = true
-	close(release)
-	wait(closed, "Close to return after the owned goroutine returned")
+	startClose()
+	if !wait(cancelled, 5*time.Second, "cancel") {
+		t.Fatal("Close did not cancel the owned goroutine's ctx")
+	}
+	// Adverse schedule for a Close that does not join: give it time to
+	// return while the goroutine is still held.
+	if wait(closed, 200*time.Millisecond, "early close") {
+		t.Fatal("Close returned while the owned goroutine was still held")
+	}
+	releaseOnce()
+	if !wait(closed, 5*time.Second, "close") {
+		t.Fatal("Close did not return after the owned goroutine returned")
+	}
+	if s, c := settledAt.Load(), closedAt.Load(); s == 0 || c <= s {
+		t.Fatalf("Close returned (seq %d) before the owned goroutine settled (seq %d)", c, s)
+	}
 	if err := p.GoOwned(func(context.Context) {}); !errors.Is(err, durable.ErrProviderClosed) {
 		t.Fatalf("GoOwned after Close: %v, want ErrProviderClosed", err)
 	}
