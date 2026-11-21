@@ -23,13 +23,12 @@ const (
 	defaultChunkPath = "/swblock/chunks"
 	// Periodic HEAD publication bounds the host-loss recovery point. Automatic
 	// named snapshots remain explicit catalog operations.
-	defaultChunkCaptureInterval     = 15 * time.Minute
+	defaultChunkCaptureInterval     = 0
 	defaultChunkMaintenanceInterval = time.Hour
 	defaultChunkCutTimeout          = 5 * time.Minute
 	defaultChunkMaintenanceTimeout  = time.Minute
 	defaultChunkGCGrace             = time.Hour
 	defaultChunkIntentTTL           = time.Hour
-	defaultChunkDirtyThreshold      = 512 // chunks, 2 GiB at 4 MiB chunks
 )
 
 type chunkFlags struct {
@@ -42,7 +41,6 @@ type chunkFlags struct {
 	captureInterval     time.Duration
 	maintenanceInterval time.Duration
 	automaticGC         bool
-	dirtyThreshold      int
 	uploadConcurrency   int
 	hydrationWorkers    int
 	hydrationQueueDepth int
@@ -61,7 +59,7 @@ func validateChunkFlags(f flags) error {
 	}
 	if f.durableImpl != "walstore-chunk" {
 		if c.filer != "" || c.collection != "" || c.replication != "" || c.path != defaultChunkPath ||
-			c.captureInterval != defaultChunkCaptureInterval || c.maintenanceInterval != defaultChunkMaintenanceInterval || c.automaticGC || c.dirtyThreshold != defaultChunkDirtyThreshold ||
+			c.captureInterval != defaultChunkCaptureInterval || c.maintenanceInterval != defaultChunkMaintenanceInterval || c.automaticGC ||
 			c.uploadConcurrency != 8 || c.hydrationWorkers != 2 || c.hydrationQueueDepth != 64 || c.controlEndpoint || c.detachPrecopy || c.hostLimit.Directory != "" {
 			return errors.New("--chunk-* flags require --durable-impl=walstore-chunk")
 		}
@@ -99,9 +97,6 @@ func validateChunkFlags(f flags) error {
 	}
 	if c.hydrationQueueDepth < 1 || c.hydrationQueueDepth > 65536 {
 		return errors.New("--chunk-hydration-queue-depth must be between 1 and 65536")
-	}
-	if c.dirtyThreshold < 0 {
-		return fmt.Errorf("--chunk-dirty-threshold=%d must not be negative", c.dirtyThreshold)
 	}
 	return nil
 }

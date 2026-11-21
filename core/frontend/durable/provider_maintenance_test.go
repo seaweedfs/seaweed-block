@@ -256,7 +256,7 @@ func TestMaintenanceCoalescesWhileOnePassIsHeld(t *testing.T) {
 
 func TestMaintenancePeriodicNoopDoesNotChurnHead(t *testing.T) {
 	remote := storage.NewMemChunkRemote()
-	p := schedProvider(t, remote, time.Millisecond, 0)
+	p := schedProvider(t, remote, time.Millisecond)
 	s := openRecovered(t, p)
 	lsn, err := s.Write(1, block(0x91))
 	if err != nil {

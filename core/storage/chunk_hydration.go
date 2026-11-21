@@ -16,16 +16,16 @@ const defaultHydrationQueueDepth = 64
 // ChunkHydrationStats separates wait refusals from owned fetch outcomes.
 // A wait refusal is not necessarily a wire completion (a caller may cancel).
 type ChunkHydrationStats struct {
-	WorkerLimit  int
-	QueueDepth   int
-	Active       int
-	Queued       int
-	WaitCalls    uint64
-	Joined       uint64
-	WaitRefusals uint64
-	Fetches      uint64
-	Completed    uint64
-	FetchErrors  uint64
+	WorkerLimit  int    // fetch workers allowed (--chunk-hydration-workers)
+	QueueDepth   int    // fetch queue capacity (--chunk-hydration-queue-depth)
+	Active       int    // fetches running now
+	Queued       int    // fetches waiting for a worker now
+	WaitCalls    uint64 // reads that waited for a chunk to arrive
+	Joined       uint64 // of those, reads that joined a fetch already running
+	WaitRefusals uint64 // waits that ended without the chunk (the caller cancelled, or the fetch was not admitted)
+	Fetches      uint64 // fetches started
+	Completed    uint64 // fetches that installed the chunk
+	FetchErrors  uint64 // fetches that failed
 }
 
 type chunkHydrationFlight struct {

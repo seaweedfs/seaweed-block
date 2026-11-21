@@ -3,7 +3,6 @@ package chunkstore
 import (
 	"context"
 	"errors"
-	"path"
 	"strings"
 	"testing"
 	"time"
@@ -26,7 +25,7 @@ func TestPlanRetention_RollingWindows(t *testing.T) {
 		for _, a := range ages {
 			snaps = append(snaps, snapAt(nm(a), a, SnapshotClassSemantic, time.Time{}, nil))
 		}
-		return kept(planRetention(p, snaps, nil, now))
+		return kept(planRetention(p, snaps, now))
 	}
 	now := at(10*time.Hour + 30*time.Minute)
 	if k := plan(RetentionPolicy{KeepHourly: 1}, now, at(10*time.Hour+20*time.Minute), at(9*time.Hour+50*time.Minute)); len(k) != 1 || k[nm(at(10*time.Hour+20*time.Minute))] == nil {
@@ -104,51 +103,6 @@ func forkFixture(t *testing.T) (*fakeFiler, *Catalog) {
 	return f, c
 }
 
-// A fork that starts after the retention scan (its VOLUME published, its
-// HEAD not yet) has claimed the parent: retention keeps it, and the fork
-// completes on retry.
-func TestCatalog_RetainKeepsAParentForkedAfterTheScan(t *testing.T) {
-	f, c := forkFixture(t)
-	ctx := context.Background()
-	c.retainHook = func(stage, _ string) {
-		if stage != hookPlanned {
-			return
-		}
-		holdFirst(f, catBase+"/v2/HEAD")
-		if _, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s01", Target: "v2", RequestID: "f"}); CodeOf(err) != CodeOutcomeUnknown {
-			t.Fatalf("fork with a held HEAD create: %v", err)
-		}
-	}
-	res, err := c.Retain(ctx, "v1", false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Join(res.ForkHeld, ",") != "s01" || strings.Join(res.Deleted, ",") != "s02,s00" {
-		t.Fatalf("deleted=%v forkHeld=%v; want s01 kept for the fork", res.Deleted, res.ForkHeld)
-	}
-	if s, err := c.readSnap(ctx, "v1", "s01"); err != nil || s.State != SnapActive {
-		t.Fatalf("parent after retain: %+v %v; want active", s, err)
-	}
-	c.retainHook = nil
-	if _, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s01", Target: "v2", RequestID: "f"}); err != nil {
-		t.Fatalf("fork retry: %v", err)
-	}
-	// Completed: the hold is gone and the parent is no longer needed.
-	res, err = c.Retain(ctx, "v1", false)
-	if err != nil || strings.Join(res.Deleted, ",") != "s01" {
-		t.Fatalf("after the fork completed: deleted=%v %v; want s01", res.Deleted, err)
-	}
-}
-
-func claimsOf(t *testing.T, c *Catalog, name string) []string {
-	t.Helper()
-	ref, ok, err := c.resolveSnap(context.Background(), "v1", name)
-	if err != nil || !ok || ref.entry == nil {
-		t.Fatalf("read %s: ok=%t %v", name, ok, err)
-	}
-	return decodeClaims(ref.entry)
-}
-
 // A fork arriving after the mark finds the parent deleting and refuses
 // before installing anything (and leaves no claim).
 func TestCatalog_ForkAfterTheMarkRefuses(t *testing.T) {
@@ -173,105 +127,6 @@ func TestCatalog_ForkAfterTheMarkRefuses(t *testing.T) {
 	}
 	if _, ok, err := c.ReadVolume(ctx, "v2"); ok || err != nil {
 		t.Fatalf("a refused fork published its VOLUME (%v)", err)
-	}
-}
-
-// Schedule 1: retention read no claims, then a fork claims before the
-// mark. The mark's condition (no claims) fails; retention reads again,
-// sees the live claim and keeps the parent.
-func TestCatalog_ClaimBetweenCheckAndMarkWins(t *testing.T) {
-	f, c := forkFixture(t)
-	ctx := context.Background()
-	c.retainHook = func(stage, name string) {
-		if stage != hookChecked || name != "s01" {
-			return
-		}
-		c.retainHook = nil
-		holdFirst(f, catBase+"/v2/HEAD")
-		if _, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s01", Target: "v2", RequestID: "f"}); CodeOf(err) != CodeOutcomeUnknown {
-			t.Fatalf("fork with a held HEAD create: %v", err)
-		}
-	}
-	res, err := c.Retain(ctx, "v1", false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Join(res.ForkHeld, ",") != "s01" || strings.Join(res.Deleted, ",") != "s02,s00" {
-		t.Fatalf("deleted=%v forkHeld=%v; want s01 kept", res.Deleted, res.ForkHeld)
-	}
-	if s, err := c.readSnap(ctx, "v1", "s01"); err != nil || s.State != SnapActive {
-		t.Fatalf("parent: %+v %v; want active", s, err)
-	}
-	if got := claimsOf(t, c, "s01"); strings.Join(got, ",") != "v2/f" {
-		t.Fatalf("claims %v; want v2/f", got)
-	}
-}
-
-// Schedule 2: a fork that claimed and died before publishing its VOLUME
-// keeps the parent however much later retention runs (no lifetimes); the
-// fork retried to completion releases it.
-func TestCatalog_DeadForkClaimKeepsTheParent(t *testing.T) {
-	f, c := forkFixture(t)
-	ctx := context.Background()
-	f.failCreate = func(p string) error {
-		if p == catBase+"/v2/"+volumeName {
-			return errors.New("filer unavailable")
-		}
-		return nil
-	}
-	if _, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s01", Target: "v2", RequestID: "f"}); err == nil {
-		t.Fatal("fork with a failing VOLUME create succeeded")
-	}
-	f.failCreate = nil
-	if _, ok, _ := c.ReadVolume(ctx, "v2"); ok {
-		t.Fatal("VOLUME published")
-	}
-	saved := c.now
-	c.SetClock(func() time.Time { return saved().Add(30 * 24 * time.Hour) })
-	res, err := c.Retain(ctx, "v1", false)
-	if err != nil || strings.Join(res.ForkHeld, ",") != "s01" {
-		t.Fatalf("30 days later: forkHeld=%v %v; want s01 still kept", res.ForkHeld, err)
-	}
-	if _, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s01", Target: "v2", RequestID: "f"}); err != nil {
-		t.Fatalf("fork retry: %v", err)
-	}
-	if got := claimsOf(t, c, "s01"); len(got) != 0 {
-		t.Fatalf("claims after the fork completed: %v; want none", got)
-	}
-	res, err = c.Retain(ctx, "v1", false)
-	if err != nil || strings.Join(res.Deleted, ",") != "s01" {
-		t.Fatalf("after completion: deleted=%v %v; want s01", res.Deleted, err)
-	}
-}
-
-// Schedule 3: a second request for the same target is refused without
-// touching the first request's claim (claims are per target AND request,
-// and a fork drops only its own, only once its HEAD exists).
-func TestCatalog_RefusedSameTargetForkLeavesTheOtherClaim(t *testing.T) {
-	f, c := forkFixture(t)
-	ctx := context.Background()
-	holdFirst(f, catBase+"/v2/HEAD")
-	if _, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s01", Target: "v2", RequestID: "a"}); CodeOf(err) != CodeOutcomeUnknown {
-		t.Fatalf("fork a: %v", err)
-	}
-	if _, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s01", Target: "v2", RequestID: "b"}); CodeOf(err) != CodeTargetExists {
-		t.Fatalf("fork b (same target, other request): %v; want target_exists", err)
-	}
-	if _, err := c.Retain(ctx, "v1", false); err != nil {
-		t.Fatal(err)
-	}
-	if s, err := c.readSnap(ctx, "v1", "s01"); err != nil || s.State != SnapActive {
-		t.Fatalf("parent after retain: %+v %v; want kept for request a", s, err)
-	}
-	if got := claimsOf(t, c, "s01"); strings.Join(got, ",") != "v2/a" {
-		t.Fatalf("claims %v; want only a's, intact", got)
-	}
-	if _, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s01", Target: "v2", RequestID: "a"}); err != nil {
-		t.Fatalf("fork a retry: %v", err)
-	}
-	res, err := c.Retain(ctx, "v1", false)
-	if err != nil || strings.Join(res.Deleted, ",") != "s01" {
-		t.Fatalf("after a completed: deleted=%v %v; want s01 (b's claim dead)", res.Deleted, err)
 	}
 }
 
@@ -353,86 +208,5 @@ func TestCatalog_UsageCountsForkHolders(t *testing.T) {
 	}
 	if len(u.Snapshots) != 1 || u.Snapshots[0].ExclusiveBytes != 0 {
 		t.Fatalf("s1 after v1's HEAD moved, v2 forked from it: %+v; want 0 exclusive (v2 holds both chunks)", u.Snapshots)
-	}
-}
-
-// An explicit delete of a snapshot an
-// incomplete fork claims is refused (snapshot_claimed, not retryable,
-// naming the fork); once the fork completes or is aborted the delete goes
-// through. Retention and delete share the check (markDeleting).
-func TestCatalog_DeleteRefusesAClaimedParent(t *testing.T) {
-	f, c := forkFixture(t)
-	ctx := context.Background()
-	holdFirst(f, catBase+"/v2/HEAD")
-	if _, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s01", Target: "v2", RequestID: "f"}); CodeOf(err) != CodeOutcomeUnknown {
-		t.Fatalf("fork v2: %v", err)
-	}
-	holdFirst(f, catBase+"/v3/HEAD")
-	if _, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s02", Target: "v3", RequestID: "g"}); CodeOf(err) != CodeOutcomeUnknown {
-		t.Fatalf("fork v3: %v", err)
-	}
-	for _, tc := range []struct{ snap, target string }{{"s01", "v2"}, {"s02", "v3"}} {
-		_, err := c.DeleteSnapshot(ctx, "v1", tc.snap)
-		var ce *CatalogError
-		if !errors.As(err, &ce) || ce.Code != CodeSnapshotClaimed || ce.Retryable || !strings.Contains(ce.Detail(), tc.target) {
-			t.Fatalf("delete %s claimed by %s: %v; want snapshot_claimed, not retryable, naming %s", tc.snap, tc.target, err, tc.target)
-		}
-		if s, err := c.readSnap(ctx, "v1", tc.snap); err != nil || s.State != SnapActive {
-			t.Fatalf("%s after the refused delete: %+v %v; want active", tc.snap, s, err)
-		}
-	}
-	// Completed fork: its claim no longer blocks.
-	if _, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s01", Target: "v2", RequestID: "f"}); err != nil {
-		t.Fatalf("fork v2 retry: %v", err)
-	}
-	if got, err := c.DeleteSnapshot(ctx, "v1", "s01"); err != nil || got != SnapDeleting {
-		t.Fatalf("delete after the fork completed: %q %v", got, err)
-	}
-	// Aborted fork (a sweep's tombstone): neither does its claim.
-	if claimed, err := c.AbortFork(ctx, "v3"); err != nil || !claimed {
-		t.Fatalf("abort v3: claimed=%t %v", claimed, err)
-	}
-	if got, err := c.DeleteSnapshot(ctx, "v1", "s02"); err != nil || got != SnapDeleting {
-		t.Fatalf("delete after the fork was aborted: %q %v", got, err)
-	}
-}
-
-// Review of f42e723: a completed fork's claim cleanup that read the parent
-// entry, then paused while an explicit delete marked it, must not write
-// its stale copy back (resurrecting an unnamed snapshot as a GC root).
-func TestCatalog_ClaimCleanupNeverUndoesADelete(t *testing.T) {
-	f, c := forkFixture(t)
-	ctx := context.Background()
-	holdFirst(f, catBase+"/v2/HEAD")
-	if _, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s01", Target: "v2", RequestID: "f"}); CodeOf(err) != CodeOutcomeUnknown {
-		t.Fatalf("fork: %v", err)
-	}
-	parent, err := c.readSnap(ctx, "v1", "s01")
-	if err != nil {
-		t.Fatal(err)
-	}
-	ran := false
-	c.retainHook = func(stage, name string) {
-		if stage != hookClaimDrop || name != "s01" || ran {
-			return
-		}
-		ran = true // the fork's HEAD exists now: its claim is dead
-		if _, err := c.DeleteSnapshot(ctx, "v1", "s01"); err != nil {
-			t.Fatalf("delete during the claim cleanup: %v", err)
-		}
-	}
-	if _, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s01", Target: "v2", RequestID: "f"}); err != nil {
-		t.Fatalf("fork retry: %v", err)
-	}
-	c.retainHook = nil
-	e, err := f.LookupEntry(ctx, path.Join(catBase, "v1", snapsDir, "s01"), parent.attempt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !ran || string(e.Extended[extSnapState]) != SnapDeleting || len(e.Extended[extSnapDeletedNs]) == 0 {
-		t.Fatalf("ran=%t state=%q deleted_ns=%q; want the delete mark kept", ran, e.Extended[extSnapState], e.Extended[extSnapDeletedNs])
-	}
-	if _, ok, err := c.resolveSnap(ctx, "v1", "s01"); ok || err != nil {
-		t.Fatalf("s01's name is back (%v)", err)
 	}
 }

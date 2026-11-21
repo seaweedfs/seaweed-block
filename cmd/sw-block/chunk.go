@@ -42,6 +42,33 @@ var dialChunkFiler = func(addr string) (chunkstore.Filer, func() error, error) {
 	return c, c.Close, nil
 }
 
+// checkSingleFiler is the start check of a command that writes chunk
+// metadata: block metadata goes through exactly one filer, the
+// same rule blockvolume enforces at start. Tests replace it.
+var checkSingleFiler = func(ctx context.Context, f chunkstore.Filer) error {
+	if s, ok := f.(*chunkstore.SWFS); ok {
+		return s.CheckSingleFiler(ctx)
+	}
+	return nil
+}
+
+// refuseUnlessSingleFiler runs the start check within the command's own
+// timeout (a stalled filer or master cannot hold the command longer); exit
+// >= 0 means refused.
+func refuseUnlessSingleFiler(name string, f chunkstore.Filer, timeout time.Duration, stdout, stderr io.Writer) int {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	err := checkSingleFiler(ctx, f)
+	switch {
+	case err == nil:
+		return -1
+	case errors.Is(err, chunkstore.ErrNotSingleFiler):
+		return chunkFail(name, stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, err.Error(), false)
+	default:
+		return chunkFail(name, stdout, stderr, chunkExitFailed, codeUnavailableCLI, "single-filer start check: "+err.Error(), true)
+	}
+}
+
 func runOpsChunk(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		return chunkFail("", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "expected cut|snapshot|snapshots|snapshot-delete|fork|detach|show|gc|usage|retain|volume-delete", false)
@@ -259,13 +286,21 @@ func chunkDetach(args []string, stdout, stderr io.Writer) int {
 
 // chunkCatalog opens the catalog under --chunk-path on --chunk-filer.
 // It returns exit -1 on success, else the exit code after reporting.
-func chunkCatalog(name, filer, base string, stdout, stderr io.Writer) (*chunkstore.Catalog, func() error, int) {
+// chunkCatalog dials the filer and opens the catalog; a command that writes
+// (writes) first passes the single-filer start check.
+func chunkCatalog(name, filer, base string, writes bool, timeout time.Duration, stdout, stderr io.Writer) (*chunkstore.Catalog, func() error, int) {
 	if filer == "" {
 		return nil, nil, chunkFail(name, stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--chunk-filer is required", false)
 	}
 	f, closeFn, err := dialChunkFiler(filer)
 	if err != nil {
 		return nil, nil, chunkFail(name, stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, err.Error(), false)
+	}
+	if writes {
+		if exit := refuseUnlessSingleFiler(name, f, timeout, stdout, stderr); exit >= 0 {
+			_ = closeFn()
+			return nil, nil, exit
+		}
 	}
 	cat, err := chunkstore.NewCatalog(f, base)
 	if err != nil {
@@ -364,7 +399,7 @@ func chunkSnapshots(args []string, stdout, stderr io.Writer) int {
 	if volumeID == "" {
 		return chunkFail("snapshots", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--volume is required", false)
 	}
-	cat, closeFn, exit := chunkCatalog("snapshots", filer, base, stdout, stderr)
+	cat, closeFn, exit := chunkCatalog("snapshots", filer, base, false, timeout, stdout, stderr)
 	if exit >= 0 {
 		return exit
 	}
@@ -392,7 +427,7 @@ func chunkSnapshotDelete(args []string, stdout, stderr io.Writer) int {
 	if volumeID == "" || name == "" {
 		return chunkFail("snapshot-delete", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--volume and --name are required", false)
 	}
-	cat, closeFn, exit := chunkCatalog("snapshot-delete", filer, base, stdout, stderr)
+	cat, closeFn, exit := chunkCatalog("snapshot-delete", filer, base, true, timeout, stdout, stderr)
 	if exit >= 0 {
 		return exit
 	}
@@ -428,7 +463,7 @@ func chunkFork(args []string, stdout, stderr io.Writer) int {
 		requestID = newRequestID()
 		fmt.Fprintf(stderr, "sw-block ops chunk fork: request id %s (reuse it to retry)\n", requestID)
 	}
-	cat, closeFn, exit := chunkCatalog("fork", filer, base, stdout, stderr)
+	cat, closeFn, exit := chunkCatalog("fork", filer, base, true, timeout, stdout, stderr)
 	if exit >= 0 {
 		return exit
 	}
@@ -456,7 +491,7 @@ func chunkShow(args []string, stdout, stderr io.Writer) int {
 	if volumeID == "" {
 		return chunkFail("show", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--volume is required", false)
 	}
-	cat, closeFn, exit := chunkCatalog("show", filer, base, stdout, stderr)
+	cat, closeFn, exit := chunkCatalog("show", filer, base, false, timeout, stdout, stderr)
 	if exit >= 0 {
 		return exit
 	}
