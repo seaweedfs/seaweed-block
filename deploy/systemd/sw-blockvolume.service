@@ -59,7 +59,6 @@ ExecStart=/usr/local/bin/blockvolume \
   --chunk-replication=${SWB_CHUNK_REPLICATION} \
   --chunk-capture-interval=${SWB_CHUNK_CAPTURE_INTERVAL} \
   --chunk-upload-concurrency=${SWB_CHUNK_UPLOAD_CONCURRENCY} \
-  --chunk-dirty-threshold=${SWB_CHUNK_DIRTY_THRESHOLD} \
   --chunk-control-endpoint=${SWB_CHUNK_CONTROL_ENDPOINT} \
   --workspace-lease=${SWB_WORKSPACE_LEASE} \
   $SWB_VOLUME_EXTRA_ARGS

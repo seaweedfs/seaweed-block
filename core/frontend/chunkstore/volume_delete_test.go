@@ -331,7 +331,7 @@ func TestCatalog_InFlightSnapshotRefusesTheDelete(t *testing.T) {
 	}
 }
 
-// A fork that claims during the delete mark sees the deleting source and
+// A fork that reads during the delete mark sees the deleting source and
 // refuses before installing anything; the delete refuses too (the forked
 // snapshot exists) and reverts.
 func TestCatalog_ForkDuringTheDeleteMarkRefuses(t *testing.T) {
@@ -354,9 +354,6 @@ func TestCatalog_ForkDuringTheDeleteMarkRefuses(t *testing.T) {
 	}
 	if _, ok, _ := c.ReadVolume(ctx, "w2"); ok {
 		t.Fatal("the refused fork published its VOLUME")
-	}
-	if got := claimsOf(t, c, "s1"); len(got) != 0 {
-		t.Fatalf("the refused fork left claims %v", got)
 	}
 }
 
@@ -504,14 +501,14 @@ func TestCatalog_DeleteVolumeTombstonesAndRefusesReuse(t *testing.T) {
 	if _, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s2", Target: "w3", RequestID: "f3"}); CodeOf(err) != CodeOutcomeUnknown {
 		t.Fatalf("fork w3: %v", err)
 	}
-	if _, err := c.DeleteSnapshot(ctx, "v1", "s2"); CodeOf(err) != CodeSnapshotClaimed {
-		t.Fatalf("delete s2 under the incomplete fork: %v; want snapshot_claimed", err)
+	if got, err := c.DeleteSnapshot(ctx, "v1", "s2"); err != nil || got != SnapDeleting {
+		t.Fatalf("delete s2 under the incomplete fork: %q %v; forks do not hold their parent", got, err)
 	}
 	if res, err := c.DeleteVolume(ctx, "w3", nil); err != nil || !res.Completed {
 		t.Fatalf("delete w3: %+v %v", res, err)
 	}
-	if _, err := c.DeleteSnapshot(ctx, "v1", "s2"); err != nil {
-		t.Fatalf("delete s2 after w3 was deleted (its claim is dead): %v", err)
+	if got, err := c.DeleteSnapshot(ctx, "v1", "s2"); err != nil || got != SnapAbsent {
+		t.Fatalf("delete s2 again: %q %v; want absent", got, err)
 	}
 }
 

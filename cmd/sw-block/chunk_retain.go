@@ -31,7 +31,7 @@ func chunkUsage(args []string, stdout, stderr io.Writer) int {
 	if volumeID == "" {
 		return chunkFail("usage", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--volume is required", false)
 	}
-	cat, closeFn, exit := chunkCatalog("usage", filer, base, stdout, stderr)
+	cat, closeFn, exit := chunkCatalog("usage", filer, base, false, timeout, stdout, stderr)
 	if exit >= 0 {
 		return exit
 	}
@@ -74,7 +74,7 @@ func chunkRetain(args []string, stdout, stderr io.Writer) int {
 	if setPolicy && dryRun {
 		return chunkFail("retain", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--set-policy and --dry-run do not combine", false)
 	}
-	cat, closeFn, exit := chunkCatalog("retain", filer, base, stdout, stderr)
+	cat, closeFn, exit := chunkCatalog("retain", filer, base, !dryRun, timeout, stdout, stderr)
 	if exit >= 0 {
 		return exit
 	}

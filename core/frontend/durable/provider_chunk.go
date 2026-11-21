@@ -385,7 +385,6 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 		ReadMissTimeout:     p.cfg.ChunkReadMissTimeout,
 		HydrationWorkers:    p.cfg.ChunkHydrationWorkers,
 		HydrationQueueDepth: p.cfg.ChunkHydrationQueueDepth,
-		BarrierBound:        p.cfg.ChunkDirtyThreshold,
 		UploadConcurrency:   p.cfg.ChunkUploadConcurrency,
 		PayloadMemoryBudget: p.cfg.ChunkPayloadMemoryBudget,
 		Budget:              p.cfg.ChunkBudget,
