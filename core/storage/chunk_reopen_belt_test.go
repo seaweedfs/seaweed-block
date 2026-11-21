@@ -4,29 +4,37 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 )
 
 // A server-held CAS outlives its caller. No old-process code runs after the
 // reopen: releaseDeferredCAS only evaluates the request's original guard.
 func TestClaimChunkHeadSameOwnerReopenRejectsKilledProcessCAS(t *testing.T) {
-	r := newFakeChunkRemote()
-	r.head = ChunkHead{Gen: 7, Epoch: 2, Holder: "host-a", Chunks: map[uint64]ChunkRef{}}
-	old := copyHead(r.head)
-	old.RemoteLSN = 1
-	r.casModes = []fakeCASMode{casDeferred}
-	if _, err := r.CASHead(context.Background(), ChunkHeadVersion{Gen: 7, Epoch: 2}, old); !errors.Is(err, errFakeCASUnknown) {
-		t.Fatal("old cut was not left in flight", err)
-	}
-	claimed, err := ClaimChunkHead(context.Background(), r, ctConfig(2))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n := r.releaseDeferredCAS(); n != 0 {
-		t.Fatalf("killed process CAS landed after reopen: applied=%d claimedGen=%d", n, claimed.Gen)
-	}
-	if claimed.Gen != 8 || claimed.RemoteLSN != 0 || claimed.Epoch != 2 || claimed.Holder != "host-a" {
-		t.Fatalf("reopen must fence the old generation without changing the image or owner: %+v", claimed)
+	for _, gen := range []uint64{0, 7} {
+		t.Run(fmt.Sprint(gen), func(t *testing.T) {
+			r := newFakeChunkRemote()
+			if gen != 0 {
+				r.head = ChunkHead{Gen: gen, Epoch: 2, Holder: "host-a", Chunks: map[uint64]ChunkRef{}}
+			}
+			old := copyHead(r.head)
+			old.Epoch, old.Holder = 2, "host-a"
+			old.RemoteLSN = 1
+			r.casModes = []fakeCASMode{casDeferred}
+			if _, err := r.CASHead(context.Background(), ChunkHeadVersion{Gen: gen, Epoch: r.head.Epoch}, old); !errors.Is(err, errFakeCASUnknown) {
+				t.Fatal("old cut was not left in flight", err)
+			}
+			claimed, err := ClaimChunkHead(context.Background(), r, ctConfig(2))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n := r.releaseDeferredCAS(); n != 0 {
+				t.Fatalf("killed process CAS landed after reopen: applied=%d claimedGen=%d", n, claimed.Gen)
+			}
+			if claimed.Gen != gen+1 || claimed.RemoteLSN != 0 || claimed.Epoch != 2 || claimed.Holder != "host-a" {
+				t.Fatalf("reopen must fence the old generation without changing the image or owner: %+v", claimed)
+			}
+		})
 	}
 }
 
