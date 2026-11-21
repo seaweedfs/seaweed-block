@@ -367,10 +367,7 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 		return nil, fmt.Errorf("durable: chunk remote for %s: %w", volumeID, err)
 	}
 	lin := chunkLineage{volumeID: proj.VolumeID, replicaID: proj.ReplicaID, epoch: proj.Epoch, endpoint: proj.EndpointVersion}
-	holder := p.cfg.ChunkHolder
-	if holder == "" {
-		holder = proj.ReplicaID
-	}
+	holder := p.chunkHolder(proj)
 	bound := &closeBoundRemote{ChunkRemote: inner, done: p.closeCtx}
 	if pace, ok := p.cfg.ChunkBudget.(interface {
 		WaitUpload(context.Context, int) error
@@ -1092,7 +1089,13 @@ var ErrPlainDetachBusy = errors.New("durable: plain detach requires idle fronten
 // closing an idle frontend (including a closed handle). M5 PlainStop -> Quiesce uses
 // only the caller context, not the live-serving freeze timer.
 func (p *DurableProvider) DetachVolumePlain(ctx context.Context, volumeID string) (storage.ChunkCutResult, uint64, error) {
-	return p.detachVolume(ctx, volumeID, true)
+	result, last, err := p.detachVolume(ctx, volumeID, true)
+	if err != nil && !errors.Is(err, ErrNotChunkVolume) {
+		return result, last, err
+	}
+	// INV-WS-SEAL-REPLAY-001: success is always a fresh remote proof, also
+	// after restart when no layer exists. A cached result is not sufficient.
+	return p.replayPlainSeal(ctx, volumeID, result)
 }
 
 func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, plain bool) (storage.ChunkCutResult, uint64, error) {
