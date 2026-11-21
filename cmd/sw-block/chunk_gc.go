@@ -36,7 +36,10 @@ func chunkGC(args []string, stdout, stderr io.Writer) int {
 	if fs.NArg() != 0 || filer == "" || master == "" || timeout <= 0 || ttl <= 0 || grace <= chunkstore.DefaultOpDeadline {
 		return chunkFail("gc", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--chunk-filer and --master are required; durations must be positive and grace must exceed the operation deadline", false)
 	}
-	f, closeFn, e := dialChunkFiler(filer)
+	// One bound for the pass, the single-filer check included.
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	f, closeFn, e := dialChunkFiler(ctx, filer)
 	if errors.Is(e, chunkstore.ErrNotSingleFiler) {
 		return chunkDialFail("gc", e, stdout, stderr)
 	}
@@ -67,8 +70,6 @@ func chunkGC(args []string, stdout, stderr io.Writer) int {
 		}
 		return reply.Epoch, nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
 	out, e := cat.ExecuteGC(ctx, blobs, chunkstore.GCConfig{Grace: grace, IntentTTL: ttl, Now: chunkGCNow, IssuedEpoch: issuedEpoch}, apply)
 	return chunkGCResult(out, e, stdout, stderr)
 }

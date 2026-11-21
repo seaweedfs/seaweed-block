@@ -132,7 +132,9 @@ func TestOpsChunk_ErrorsAreJSONOnStdout(t *testing.T) {
 
 	mem := chunkstore.NewMemFiler()
 	prev := dialChunkFiler
-	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return mem, func() error { return nil }, nil }
+	dialChunkFiler = func(context.Context, string) (chunkstore.Filer, func() error, error) {
+		return mem, func() error { return nil }, nil
+	}
 	t.Cleanup(func() { dialChunkFiler = prev })
 	if code, out, _ := runChunk("fork", "--chunk-filer", "f:1", "--source", "v1", "--snapshot", "s9", "--target", "v2", "--request-id", "r"); code != chunkExitFailed {
 		t.Fatalf("fork of a missing snapshot: exit %d %q", code, out)
@@ -146,7 +148,9 @@ func TestOpsChunk_FilerCommands(t *testing.T) {
 	ctx := context.Background()
 	mem := chunkstore.NewMemFiler()
 	prev := dialChunkFiler
-	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return mem, func() error { return nil }, nil }
+	dialChunkFiler = func(context.Context, string) (chunkstore.Filer, func() error, error) {
+		return mem, func() error { return nil }, nil
+	}
 	t.Cleanup(func() { dialChunkFiler = prev })
 	cat, err := chunkstore.NewCatalog(mem, defaultChunkPathCLI)
 	if err != nil {
@@ -162,7 +166,7 @@ func TestOpsChunk_FilerCommands(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) {
+	dialChunkFiler = func(context.Context, string) (chunkstore.Filer, func() error, error) {
 		return manifestMem, func() error { return nil }, nil
 	}
 	head = prepareFixtureHead(t, manifestMem, head)

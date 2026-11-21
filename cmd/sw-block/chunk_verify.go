@@ -64,7 +64,10 @@ func chunkVerify(args []string, stdout, stderr io.Writer) int {
 	case timeout <= 0 || concurrency <= 0 || bytesPerSec < 0:
 		return usage("--timeout and --concurrency must be positive and --bytes-per-sec not negative")
 	}
-	cat, closeFn, exit := chunkCatalog("verify", filer, base, stdout, stderr)
+	// One bound for the whole pass, the single-filer check included.
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cat, closeFn, exit := chunkCatalog(ctx, "verify", filer, base, stdout, stderr)
 	if exit >= 0 {
 		return exit
 	}
@@ -72,8 +75,6 @@ func chunkVerify(args []string, stdout, stderr io.Writer) int {
 	if bytesPerSec == 0 {
 		bytesPerSec = -1 // the library's "unpaced"
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
 	res, err := cat.Verify(ctx, volumeID, chunkstore.VerifyOptions{Depth: d, Snapshot: snapshot, AllSnapshots: allSnapshots,
 		Concurrency: concurrency, BytesPerSecond: bytesPerSec})
 	if err != nil {

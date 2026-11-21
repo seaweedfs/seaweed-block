@@ -46,7 +46,9 @@ func chunkVolumeDelete(args []string, stdout, stderr io.Writer) int {
 	if volumeID == "" || master == "" || requestID == "" || timeout <= 0 {
 		return chunkFail("volume-delete", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "a volume, --master and --request-id are required; --timeout must be positive", false)
 	}
-	cat, closeFn, exit := chunkCatalog("volume-delete", filer, base, stdout, stderr)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cat, closeFn, exit := chunkCatalog(ctx, "volume-delete", filer, base, stdout, stderr)
 	if exit >= 0 {
 		return exit
 	}
@@ -57,8 +59,6 @@ func chunkVolumeDelete(args []string, stdout, stderr io.Writer) int {
 	}
 	defer conn.Close()
 	admit := &masterAdmission{lc: control.NewLifecycleServiceClient(conn), token: requestID}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
 	res, err := cat.DeleteVolume(ctx, volumeID, admit)
 	if err != nil {
 		return volumeDeletePartial(res, err, stdout, stderr)

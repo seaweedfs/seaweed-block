@@ -31,13 +31,13 @@ func chunkUsage(args []string, stdout, stderr io.Writer) int {
 	if volumeID == "" {
 		return chunkFail("usage", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--volume is required", false)
 	}
-	cat, closeFn, exit := chunkCatalog("usage", filer, base, stdout, stderr)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cat, closeFn, exit := chunkCatalog(ctx, "usage", filer, base, stdout, stderr)
 	if exit >= 0 {
 		return exit
 	}
 	defer closeFn()
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
 	u, err := cat.Usage(ctx, volumeID)
 	return chunkResult("usage", u, err, stdout, stderr)
 }
@@ -74,13 +74,13 @@ func chunkRetain(args []string, stdout, stderr io.Writer) int {
 	if setPolicy && dryRun {
 		return chunkFail("retain", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--set-policy and --dry-run do not combine", false)
 	}
-	cat, closeFn, exit := chunkCatalog("retain", filer, base, stdout, stderr)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cat, closeFn, exit := chunkCatalog(ctx, "retain", filer, base, stdout, stderr)
 	if exit >= 0 {
 		return exit
 	}
 	defer closeFn()
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
 	if setPolicy {
 		p := chunkstore.RetentionPolicy{KeepNewest: keepNewest, KeepYoungerNs: int64(keepYounger), KeepHourly: keepHourly, KeepDaily: keepDaily, KeepWeekly: keepWeekly}
 		if err := cat.SetRetentionPolicy(ctx, volumeID, p); err != nil {

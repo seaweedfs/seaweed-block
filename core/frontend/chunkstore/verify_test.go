@@ -387,6 +387,18 @@ func TestSWFS_GetNotFoundIsErrBlobNotFound(t *testing.T) {
 		return strings.TrimPrefix(s.URL, "http://")
 	}
 	missing, broken := server(http.StatusNotFound), server(http.StatusInternalServerError)
+	// dropped closes every connection without an answer: a transport error.
+	dropped := func() string {
+		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err == nil {
+				_ = conn.Close()
+			}
+		}))
+		t.Cleanup(s.Close)
+		return strings.TrimPrefix(s.URL, "http://")
+	}()
+	statusOf := map[string]int{missing: http.StatusNotFound, broken: http.StatusInternalServerError}
 	for _, tc := range []struct {
 		name     string
 		hosts    []string
@@ -395,6 +407,9 @@ func TestSWFS_GetNotFoundIsErrBlobNotFound(t *testing.T) {
 		{"every location 404", []string{missing, missing}, true},
 		{"one location 500", []string{missing, broken}, false},
 		{"only 500", []string{broken}, false},
+		// Only the last answer is 404: still not proof of absence.
+		{"500 then 404", []string{broken, missing}, false},
+		{"transport error then 404", []string{dropped, missing}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var locs []*filerpb.Location
@@ -404,14 +419,135 @@ func TestSWFS_GetNotFoundIsErrBlobNotFound(t *testing.T) {
 			c := startFakeFiler(t, &fakeFilerGRPC{lookupVol: &filerpb.LookupVolumeResponse{LocationsMap: map[string]*filerpb.Locations{"7": {Locations: locs}}}})
 			_, err := c.Get(context.Background(), "7,0000dead")
 			last := tc.hosts[len(tc.hosts)-1]
-			status := 404
-			if last == broken {
-				status = 500
-			}
+			status := statusOf[last]
 			if err == nil || errors.Is(err, ErrBlobNotFound) != tc.notFound || err.Error() != fmt.Sprintf("chunkstore: read 7,0000dead: http %d from %s", status, last) {
 				t.Fatalf("Get: %v (not found %v), want not found %v", err, errors.Is(err, ErrBlobNotFound), tc.notFound)
 			}
 		})
+	}
+}
+
+// volumeAt is a LookupVolume answer placing volume vid at hosts.
+func volumeAt(vid string, hosts ...string) *filerpb.LookupVolumeResponse {
+	var locs []*filerpb.Location
+	for _, h := range hosts {
+		locs = append(locs, &filerpb.Location{Url: h})
+	}
+	return &filerpb.LookupVolumeResponse{LocationsMap: map[string]*filerpb.Locations{vid: {Locations: locs}}}
+}
+
+func (f *fakeFilerGRPC) volumeLookups() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.volLookups
+}
+
+// Cached locations can be stale (the volume moved): 404 from every cached
+// location is not proof of absence. Get looks the volume up again and reads
+// from the fresh locations; only 404 from every fresh location is
+// ErrBlobNotFound. A read the cache serves makes no lookup.
+func TestSWFS_GetStaleCachedLocationLooksUpAgain(t *testing.T) {
+	body := []byte("needle bytes")
+	server := func(status int) string {
+		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+			if status == http.StatusOK {
+				_, _ = w.Write(body)
+			}
+		}))
+		t.Cleanup(s.Close)
+		return strings.TrimPrefix(s.URL, "http://")
+	}
+	oldLoc, newLoc, alsoMissing := server(http.StatusNotFound), server(http.StatusOK), server(http.StatusNotFound)
+	const fid = "7,0000dead"
+	for _, tc := range []struct {
+		name        string
+		cached      []string // nil: nothing cached
+		fresh       string
+		wantBody    bool
+		wantLookups int
+	}{
+		{"cached location 404, fresh location has it", []string{oldLoc}, newLoc, true, 1},
+		{"cached and fresh locations 404", []string{oldLoc}, alsoMissing, false, 1},
+		{"warm cache", []string{newLoc}, newLoc, true, 0},
+		{"nothing cached, fresh location 404", nil, alsoMissing, false, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeFilerGRPC{lookupVol: volumeAt("7", tc.fresh)}
+			c := startFakeFiler(t, f)
+			if tc.cached != nil {
+				c.mu.Lock()
+				c.vidCache["7"] = tc.cached
+				c.mu.Unlock()
+			}
+			b, err := c.Get(context.Background(), fid)
+			if n := f.volumeLookups(); n != tc.wantLookups {
+				t.Fatalf("Get made %d volume lookups, want %d (err %v)", n, tc.wantLookups, err)
+			}
+			if tc.wantBody {
+				if err != nil || string(b) != string(body) {
+					t.Fatalf("Get: %q, %v; want the needle from %s", b, err, tc.fresh)
+				}
+				return
+			}
+			if !errors.Is(err, ErrBlobNotFound) || err.Error() != "chunkstore: read "+fid+": http 404 from "+tc.fresh {
+				t.Fatalf("Get: %v (not found %v); want ErrBlobNotFound from the fresh location %s", err, errors.Is(err, ErrBlobNotFound), tc.fresh)
+			}
+		})
+	}
+}
+
+// A volume that moved after its location was cached is not missing: depth
+// data through SWFS reads every needle from the new location, no finding.
+func TestVerify_MovedVolumeIsNotAMissingNeedle(t *testing.T) {
+	fx := newVerifyFixture(t, "v1")
+	h := fx.publish("v1", map[uint64][]byte{0: verifyData(1), 1: verifyData(2)}, false)
+	var mu sync.Mutex
+	moved := false
+	serve := func(old bool) string {
+		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			gone := old && moved
+			mu.Unlock()
+			fx.b.mu.Lock()
+			d, ok := fx.b.data[strings.TrimPrefix(r.URL.Path, "/")]
+			fx.b.mu.Unlock()
+			if gone || !ok {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			_, _ = w.Write(d)
+		}))
+		t.Cleanup(s.Close)
+		return strings.TrimPrefix(s.URL, "http://")
+	}
+	oldLoc, newLoc := serve(true), serve(false)
+	vid, _, _ := strings.Cut(fx.fid(h.Chunks[0].Key), ",")
+	f := &fakeFilerGRPC{lookupVol: volumeAt(vid, oldLoc)}
+	sw := startFakeFiler(t, f)
+	ctx := context.Background()
+	// Warm the location cache at the old location, then move the volume.
+	if _, err := sw.Get(ctx, fx.fid(h.Chunks[0].Key)); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	moved = true
+	mu.Unlock()
+	f.mu.Lock()
+	f.lookupVol = volumeAt(vid, newLoc)
+	f.mu.Unlock()
+
+	cat, err := NewCatalog(manifestFilerBlobs{fx.f, sw}, catBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := cat.Verify(ctx, "v1", VerifyOptions{Depth: VerifyData, BytesPerSecond: -1})
+	if err != nil || !res.Complete {
+		t.Fatalf("verify: %v, %+v", err, res)
+	}
+	wantClasses(t, "moved volume", res)
+	if res.DistinctChunksRead != 2 || res.SegmentReads != 1 {
+		t.Fatalf("read %d chunks, %d segments; want 2, 1", res.DistinctChunksRead, res.SegmentReads)
 	}
 }
 
@@ -938,5 +1074,374 @@ func TestVerify_ContextEndedIsIncomplete(t *testing.T) {
 	}
 	if _, err := fx.c.Verify(context.Background(), "nope", VerifyOptions{}); CodeOf(err) != CodeNotChunkVolume {
 		t.Fatalf("missing volume: %v", err)
+	}
+}
+
+// heldReads holds the read of one needle open until the reader's context
+// ends, and counts the reads in progress.
+type heldReads struct {
+	Blobs
+	fid     string
+	onEnter func()        // runs once, when the held read has started
+	entered chan struct{} // closed when the held read has started
+	once    sync.Once
+
+	mu     sync.Mutex
+	active int
+	ended  error // the held read's context error, once it ended
+}
+
+func newHeldReads(b Blobs, fid string) *heldReads {
+	return &heldReads{Blobs: b, fid: fid, entered: make(chan struct{})}
+}
+
+func (h *heldReads) Get(ctx context.Context, fid string) ([]byte, error) {
+	h.mu.Lock()
+	h.active++
+	h.mu.Unlock()
+	defer func() {
+		h.mu.Lock()
+		h.active--
+		h.mu.Unlock()
+	}()
+	if fid != h.fid {
+		return h.Blobs.Get(ctx, fid)
+	}
+	h.once.Do(func() {
+		close(h.entered)
+		if h.onEnter != nil {
+			h.onEnter()
+		}
+	})
+	<-ctx.Done()
+	h.mu.Lock()
+	h.ended = ctx.Err()
+	h.mu.Unlock()
+	return nil, fmt.Errorf("chunkstore: read %s: %w", fid, ctx.Err())
+}
+
+func (h *heldReads) state() (active int, ended error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.active, h.ended
+}
+
+var errFilerDown = errors.New("filer: connection refused")
+
+// tickingClock advances by step at every reading: with a refresh interval
+// of step, a pass refreshes HEAD at every opportunity, without waiting.
+func tickingClock(step time.Duration) func() time.Time {
+	var mu sync.Mutex
+	now := time.Now()
+	return func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		now = now.Add(step)
+		return now
+	}
+}
+
+// headFailsDuringRead fails HEAD reads made while the held read is in
+// progress. The first HEAD read after the chunk key listing passes (it is
+// the refresh before the first chunk, the held one, is handed to a reader);
+// later ones wait until the held read has started, then fail.
+type headFailsDuringRead struct {
+	Filer
+	root, keys string
+	entered    <-chan struct{}
+
+	mu     sync.Mutex
+	listed bool
+	after  int // HEAD reads since the listing
+}
+
+func (f *headFailsDuringRead) ListEntries(ctx context.Context, dir, prefix, after string, limit uint32) ([]*filerpb.Entry, error) {
+	if dir == f.keys {
+		f.mu.Lock()
+		f.listed = true
+		f.mu.Unlock()
+	}
+	return f.Filer.ListEntries(ctx, dir, prefix, after, limit)
+}
+
+func (f *headFailsDuringRead) LookupEntry(ctx context.Context, dir, name string) (*filerpb.Entry, error) {
+	if dir == f.root && name == headName {
+		f.mu.Lock()
+		n := 0
+		if f.listed {
+			f.after++
+			n = f.after
+		}
+		f.mu.Unlock()
+		if n >= 2 {
+			select {
+			case <-f.entered:
+				return nil, errFilerDown
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+	}
+	return f.Filer.LookupEntry(ctx, dir, name)
+}
+
+// A HEAD refresh that fails while a chunk read is in progress stops that
+// read at once: Verify returns the filer's error (not the cancellation it
+// caused in the reader), incomplete, with no read left running, and long
+// before the caller's own deadline.
+func TestVerify_FailedRefreshCancelsReadInProgress(t *testing.T) {
+	fx := newVerifyFixture(t, "v1")
+	h := fx.publish("v1", map[uint64][]byte{0: verifyData(1), 1: verifyData(2)}, false)
+	held := newHeldReads(fx.cb, fx.fid(h.Chunks[0].Key))
+	filer := &headFailsDuringRead{Filer: fx.f, root: path.Join(catBase, "v1"), keys: path.Join(catBase, "v1", keysDir), entered: held.entered}
+	cat, err := NewCatalog(manifestFilerBlobs{filer, held}, catBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cat.SetClock(tickingClock(time.Minute))
+	// The caller's deadline only guards the test: Verify must end well before it.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	res, err := cat.Verify(ctx, "v1", VerifyOptions{Depth: VerifyData, RefreshInterval: time.Minute, BytesPerSecond: -1})
+	active, ended := held.state()
+	if !errors.Is(err, errFilerDown) || !strings.Contains(err.Error(), "refresh HEAD") {
+		t.Fatalf("verify: %v; want the HEAD refresh error", err)
+	}
+	if ctx.Err() != nil || !errors.Is(ended, context.Canceled) {
+		t.Fatalf("held read ended with %v (caller context %v); want cancelled by the failed refresh", ended, ctx.Err())
+	}
+	if res.Complete || active != 0 {
+		t.Fatalf("complete %v, %d reads still running; want incomplete, none", res.Complete, active)
+	}
+}
+
+// Cancelling the caller's context while a chunk read is in progress ends
+// that read and the pass: incomplete, the cancellation reported, no read
+// left running.
+func TestVerify_CancelDuringReadJoinsReaders(t *testing.T) {
+	fx := newVerifyFixture(t, "v1")
+	h := fx.publish("v1", map[uint64][]byte{0: verifyData(1), 1: verifyData(2)}, false)
+	held := newHeldReads(fx.cb, fx.fid(h.Chunks[0].Key))
+	cat, err := NewCatalog(manifestFilerBlobs{fx.f, held}, catBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	held.onEnter = cancel
+	res, err := cat.Verify(ctx, "v1", VerifyOptions{Depth: VerifyData, BytesPerSecond: -1})
+	active, ended := held.state()
+	select {
+	case <-held.entered:
+	default:
+		t.Fatal("the held read never started")
+	}
+	if !errors.Is(err, context.Canceled) || res.Complete || !errors.Is(ended, context.Canceled) || active != 0 {
+		t.Fatalf("verify: %v, complete %v; held read ended with %v, %d reads still running", err, res.Complete, ended, active)
+	}
+	if len(res.HeadGens) != 1 || res.HeadGens[0] != h.Gen {
+		t.Fatalf("covered gens %v, want [%d]", res.HeadGens, h.Gen)
+	}
+}
+
+// republish installs a new HEAD for vol with the current chunk references
+// as edit leaves them (keys are not uploaded again).
+func (fx *verifyFixture) republish(vol string, edit func(map[uint64]storage.ChunkRef)) storage.ChunkHead {
+	fx.t.Helper()
+	ctx := context.Background()
+	r, err := NewChunkRemote(fx.f, fx.b, path.Join(catBase, vol))
+	if err != nil {
+		fx.t.Fatal(err)
+	}
+	cur, err := r.GetHead(ctx)
+	if err != nil {
+		fx.t.Fatal(err)
+	}
+	next := storage.ChunkHead{Epoch: 1, Holder: "h1", RemoteLSN: cur.RemoteLSN + 1, Chunks: map[uint64]storage.ChunkRef{}}
+	for idx, ref := range cur.Chunks {
+		next.Chunks[idx] = ref
+	}
+	edit(next.Chunks)
+	next, ids, err := r.PrepareManifest(ctx, cur, next, verifyChunkBytes)
+	if err != nil {
+		fx.t.Fatal(err)
+	}
+	gen, err := r.CASHead(ctx, storage.ChunkHeadVersion{Gen: cur.Gen, Epoch: cur.Epoch}, next)
+	if err != nil {
+		fx.t.Fatal(err)
+	}
+	next.Gen = gen
+	for _, id := range ids {
+		if err := r.DeleteIntent(ctx, id); err != nil {
+			fx.t.Fatal(err)
+		}
+	}
+	return next
+}
+
+// wrongHash flips the reference SHA-256 of chunk idx, keeping its key.
+func wrongHash(idx uint64) func(map[uint64]storage.ChunkRef) {
+	return func(c map[uint64]storage.ChunkRef) {
+		ref := c[idx]
+		ref.SHA256[0] ^= 0xff
+		c[idx] = ref
+	}
+}
+
+// beforeRead runs fn once, before the first read of fid.
+type beforeRead struct {
+	Blobs
+	fid  string
+	fn   func()
+	once sync.Once
+}
+
+func (b *beforeRead) Get(ctx context.Context, fid string) ([]byte, error) {
+	if fid == b.fid {
+		b.once.Do(b.fn)
+	}
+	return b.Blobs.Get(ctx, fid)
+}
+
+// A reference to a chunk already checked, under the same key but with
+// another SHA-256, is a finding: at depth data it is compared with the
+// content read once for that chunk (the chunk is not read again), below
+// data with the other reference. This holds for a HEAD refreshed during
+// the pass and for a snapshot.
+func TestVerify_SameKeyWithAnotherHashIsAFinding(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		depth  VerifyDepth
+		when   string // "walked": HEAD changes once the first view is walked; "read": once chunk 0 was read; "snapshot": before the pass
+		detail string
+	}{
+		{"refreshed HEAD, data, before the read", VerifyData, "walked", "needle SHA-256"},
+		{"refreshed HEAD, data, after the read", VerifyData, "read", "needle SHA-256"},
+		{"refreshed HEAD, bindings", VerifyBindings, "walked", "disagree"},
+		{"snapshot, data", VerifyData, "snapshot", "needle SHA-256"},
+		{"snapshot, bindings", VerifyBindings, "snapshot", "disagree"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newVerifyFixture(t, "v1")
+			ctx := context.Background()
+			h1 := fx.publish("v1", map[uint64][]byte{0: verifyData(1), 1: verifyData(2)}, false)
+			fid0 := fx.fid(h1.Chunks[0].Key)
+			var h2 storage.ChunkHead
+			opts := VerifyOptions{Depth: tc.depth, BytesPerSecond: -1, RefreshInterval: time.Minute, Concurrency: 1}
+			cat := fx.c
+			switch tc.when {
+			case "walked":
+				opts.hook = func(stage string) {
+					if stage == verifyHookHeadWalked {
+						h2 = fx.republish("v1", wrongHash(0))
+					}
+				}
+			case "read":
+				// One reader: chunk 0 is read completely before chunk 1 is
+				// handed out, so its content is known when HEAD changes.
+				br := &beforeRead{Blobs: fx.cb, fid: fx.fid(h1.Chunks[1].Key), fn: func() { h2 = fx.republish("v1", wrongHash(0)) }}
+				var err error
+				if cat, err = NewCatalog(manifestFilerBlobs{fx.f, br}, catBase); err != nil {
+					t.Fatal(err)
+				}
+			case "snapshot":
+				if _, err := fx.c.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: "s1", RequestID: "r1"}, h1); err != nil {
+					t.Fatal(err)
+				}
+				h2 = fx.republish("v1", wrongHash(0))
+				opts.AllSnapshots = true
+			}
+			cat.SetClock(tickingClock(time.Minute))
+			res, err := cat.Verify(ctx, "v1", opts)
+			if err != nil || !res.Complete {
+				t.Fatalf("verify: %v, %+v", err, res)
+			}
+			wantClasses(t, tc.name, res, "CONTENT_MISMATCH@0")
+			f := res.Findings[0]
+			wantRoot := headLabel(h2.Gen)
+			if tc.when == "snapshot" && tc.depth != VerifyData {
+				// HEAD is walked first; the snapshot's reference is the one
+				// that disagrees with it.
+				wantRoot = "snapshot s1/"
+			}
+			if !strings.HasPrefix(f.Root, wantRoot) || !strings.Contains(f.Detail, tc.detail) || f.Key == "" {
+				t.Fatalf("finding %+v; want under %q, detail with %q", f, wantRoot, tc.detail)
+			}
+			if tc.when != "snapshot" && (len(res.HeadGens) != 2 || res.HeadGens[0] != h1.Gen || res.HeadGens[1] != h2.Gen) {
+				t.Fatalf("covered gens %v, want [%d %d]", res.HeadGens, h1.Gen, h2.Gen)
+			}
+			if tc.depth == VerifyData && (res.DistinctChunksRead != 2 || fx.cb.reads(fid0) != 1) {
+				t.Fatalf("read %d chunks, chunk 0 %d times; want 2, chunk 0 once", res.DistinctChunksRead, fx.cb.reads(fid0))
+			}
+		})
+	}
+}
+
+// retagSnapshot rewrites one field of the document of the attempt snapshot
+// name resolves to, leaving it otherwise valid.
+func (fx *verifyFixture) retagSnapshot(vol, name, field, value string) string {
+	fx.t.Helper()
+	ctx := context.Background()
+	ref, ok, err := fx.c.resolveSnap(ctx, vol, name)
+	if err != nil || !ok || ref.entry == nil {
+		fx.t.Fatalf("snapshot %s/%s: %v %v", vol, name, ok, err)
+	}
+	dir := path.Join(catBase, vol, snapsDir, name)
+	e, err := fx.f.LookupEntry(ctx, dir, ref.rec.Attempt)
+	if err != nil {
+		fx.t.Fatal(err)
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(e.Content, &doc); err != nil {
+		fx.t.Fatal(err)
+	}
+	if doc[field], err = json.Marshal(value); err != nil {
+		fx.t.Fatal(err)
+	}
+	if e.Content, err = json.Marshal(doc); err != nil {
+		fx.t.Fatal(err)
+	}
+	if err := fx.f.UpdateEntry(ctx, dir, e, nil); err != nil {
+		fx.t.Fatal(err)
+	}
+	return ref.rec.Attempt
+}
+
+// A snapshot is checked under the name and volume it was found at. A
+// document that names another snapshot or volume is ROOT_INVALID, and a
+// miss under that still published attempt is reported under the name it
+// was found at, never excused as a snapshot deleted during the pass.
+func TestVerify_SnapshotDocumentNamingAnotherSnapshot(t *testing.T) {
+	for _, tc := range []struct {
+		name, field, value string
+		opts               VerifyOptions
+	}{
+		{"named, another name", "name", "s2", VerifyOptions{Snapshot: "s1"}},
+		{"all, another name", "name", "s2", VerifyOptions{AllSnapshots: true}},
+		{"named, another volume", "volume_id", "v9", VerifyOptions{Snapshot: "s1"}},
+		{"all, another volume", "volume_id", "v9", VerifyOptions{AllSnapshots: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newVerifyFixture(t, "v1")
+			ctx := context.Background()
+			h := fx.publish("v1", map[uint64][]byte{0: verifyData(1), 1: verifyData(2)}, false)
+			if _, err := fx.c.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: "s1", RequestID: "r1"}, h); err != nil {
+				t.Fatal(err)
+			}
+			// HEAD moves on: only the snapshot names the old chunk 0, whose binding goes.
+			fx.publish("v1", map[uint64][]byte{0: verifyData(9)}, true)
+			attempt := fx.retagSnapshot("v1", "s1", tc.field, tc.value)
+			fx.deleteBinding(h.Chunks[0].Key)
+			res := fx.verify("v1", tc.opts)
+			wantClasses(t, tc.name, res, "ROOT_INVALID", "BINDING_MISSING@0")
+			label := "snapshot s1/" + attempt
+			if res.Findings[0].Root != label || res.Findings[1].Root != label || !strings.Contains(res.Findings[0].Detail, tc.value) {
+				t.Fatalf("findings %+v; want both under %q", res.Findings, label)
+			}
+			if len(res.Snapshots) != 1 || res.Snapshots[0] != "s1/"+attempt || res.RootDeletedDuringVerify != 0 || len(res.SnapshotsDeletedDuringVerify) != 0 {
+				t.Fatalf("snapshots %v, root deleted %d, deleted %v; want [s1/%s], 0, none",
+					res.Snapshots, res.RootDeletedDuringVerify, res.SnapshotsDeletedDuringVerify, attempt)
+			}
+		})
 	}
 }

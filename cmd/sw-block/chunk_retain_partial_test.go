@@ -43,7 +43,9 @@ func TestOpsChunk_RetainReportsPartialProgress(t *testing.T) {
 	ff := &failingFiler{MemFiler: chunkstore.NewMemFiler()}
 	fm := newManifestFixtureFiler(ff)
 	prev := dialChunkFiler
-	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return fm, func() error { return nil }, nil }
+	dialChunkFiler = func(context.Context, string) (chunkstore.Filer, func() error, error) {
+		return fm, func() error { return nil }, nil
+	}
 	t.Cleanup(func() { dialChunkFiler = prev })
 	cat, err := chunkstore.NewCatalog(fm, defaultChunkPathCLI)
 	if err != nil {

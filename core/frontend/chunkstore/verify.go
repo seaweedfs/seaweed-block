@@ -7,15 +7,19 @@ package chunkstore
 // Depths, each including the one before:
 //
 //   - meta: the HEAD root decodes and is self-consistent; its geometry
-//     matches VOLUME; every segment a selected root names is readable and
-//     passes its SHA-256 and strict decode; a fork's record matches the
-//     parent snapshot it was made from.
+//     matches VOLUME; a snapshot's document names the volume and the
+//     snapshot it was found under; every segment a selected root names is
+//     readable and passes its SHA-256 and strict decode; a fork's record
+//     matches the parent snapshot it was made from. References to one
+//     chunk with different SHA-256s disagree (CONTENT_MISMATCH).
 //   - bindings (the default): every chunk key a selected root references
 //     has a sound binding in its owner's keys/ (one listing per owner),
 //     not tombstoned by GC.
 //   - data: every distinct chunk (owner + key, across all selected roots)
-//     is fetched once; its SHA-256 must equal the reference and its length
-//     the chunk size (the rule the chunk layer applies on a read miss).
+//     is fetched once; its SHA-256 must equal each reference and its length
+//     the chunk size (the rule the chunk layer applies on a read miss). A
+//     reference added later (a refreshed HEAD) is compared with the content
+//     already read; the chunk is not read again.
 //
 // Running beside a live owner and beside GC: segments and chunks are
 // immutable and written before the root that names them, so a root read
@@ -280,6 +284,36 @@ type verifyChunk struct {
 	uses       []verifyUse
 	fid        string
 	bound      bool // a sound, untombstoned binding was found
+
+	// Under the verifier's lock. read is set once the needle was read
+	// (depth data), with its length and SHA-256: a later reference is
+	// compared with them, the chunk is not read again. late are the
+	// references refreshed HEADs added; the reader compares those added
+	// before it read the chunk, addUses the ones added after.
+	read   bool
+	length int
+	digest [32]byte
+	late   []verifyUse
+}
+
+// repeats reports whether u repeats a reference already recorded for w
+// (same index and SHA-256): comparing it again finds nothing new.
+func (w *verifyChunk) repeats(u verifyUse) bool {
+	for _, list := range [][]verifyUse{w.uses, w.late} {
+		for _, o := range list {
+			if o.idx == u.idx && o.sha == u.sha {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// verifyRef is a reference to a chunk already seen, to compare without
+// reading the chunk (see addUses).
+type verifyRef struct {
+	w *verifyChunk
+	u verifyUse
 }
 
 type verifier struct {
@@ -435,14 +469,16 @@ func (v *verifier) run(ctx context.Context) error {
 			v.finding(VerifyFinding{Root: "HEAD", Class: FindingRootInvalid, Detail: derr.Error()})
 			break
 		}
-		v.head, v.hasHead, v.lastRefresh = h, true, time.Now()
+		v.head, v.hasHead, v.lastRefresh = h, true, v.c.now()
 		hr := verifyRoot{label: headLabel(h.Gen), head: true}
 		v.res.HeadGens = append(v.res.HeadGens, h.Gen)
 		chunks, err := v.walk(ctx, hr, h)
 		if err != nil {
 			return err
 		}
-		v.addUses(hr, chunks, false)
+		if err := v.compareRefs(ctx, v.addUses(hr, chunks, false)); err != nil {
+			return err
+		}
 		if err := v.intents(ctx, h, chunks); err != nil {
 			return err
 		}
@@ -804,28 +840,69 @@ func (v *verifier) names(ctx context.Context, h storage.ChunkHead, idx uint64, i
 	return has && chunkIdentity(v.vol, ref.Key) == id, nil
 }
 
-// addUses records r's chunk references. onlyNew (a refreshed HEAD)
-// adds only chunks this pass has not seen: an unchanged key was already
-// checked, and its content cannot have changed.
-func (v *verifier) addUses(r verifyRoot, chunks map[uint64]storage.ChunkRef, onlyNew bool) {
+// addUses records r's chunk references, queueing the chunks this pass has
+// not seen, and returns the references to compare once the lock is
+// released. A chunk is immutable, but a new reference to it can be wrong,
+// so a reference to a chunk already seen is compared, never by reading the
+// chunk again: with its content once it was read, and below depth data
+// with the chunk's first reference. A refreshed HEAD's references (refreshed
+// set) to chunks already seen are not counted as checked again; one that
+// repeats a recorded reference adds nothing, and one the reader has yet to
+// read is left for it to compare.
+func (v *verifier) addUses(r verifyRoot, chunks map[uint64]storage.ChunkRef, refreshed bool) []verifyRef {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	var check []verifyRef
 	for _, idx := range sortedIndexes(chunks) {
 		ref := chunks[idx]
 		id := chunkIdentity(v.vol, ref.Key)
+		u := verifyUse{root: r, idx: idx, sha: ref.SHA256}
 		w := v.chunks[id]
-		if w != nil && onlyNew {
-			continue
-		}
 		if w == nil {
 			owner, key := splitIdentity(id)
 			w = &verifyChunk{id: id, owner: owner, key: key}
 			v.chunks[id] = w
 			v.pending = append(v.pending, w)
+		} else {
+			if refreshed {
+				if w.repeats(u) {
+					continue
+				}
+				w.late = append(w.late, u)
+			}
+			if w.read || (v.opts.Depth != VerifyData && u.sha != w.uses[0].sha) {
+				check = append(check, verifyRef{w, u})
+			}
+			if refreshed {
+				continue
+			}
 		}
-		w.uses = append(w.uses, verifyUse{root: r, idx: idx, sha: ref.SHA256})
+		w.uses = append(w.uses, u)
 		v.res.ChunksChecked++
 	}
+	return check
+}
+
+// compareRefs compares references to chunks already seen (see addUses).
+func (v *verifier) compareRefs(ctx context.Context, refs []verifyRef) error {
+	for _, c := range refs {
+		v.mu.Lock()
+		read, n, sum, first := c.w.read, c.w.length, c.w.digest, c.w.uses[0]
+		v.mu.Unlock()
+		var err error
+		if read {
+			err = v.compareContent(ctx, c.w, n, sum, []verifyUse{c.u})
+		} else {
+			err = v.missUses(ctx, c.w, []verifyUse{c.u}, FindingContentMismatch, func(u verifyUse) string {
+				return fmt.Sprintf("references to this chunk disagree: SHA-256 %s here, %s under %s at index %d (depth data reads the chunk)",
+					hex.EncodeToString(u.sha[:]), hex.EncodeToString(first.sha[:]), first.root.label, first.idx)
+			})
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func sortedIndexes(m map[uint64]storage.ChunkRef) []uint64 {
@@ -861,7 +938,7 @@ func (v *verifier) snapshots(ctx context.Context) error {
 		if ref.info.State == SnapDeleting {
 			return catErr(CodeSnapshotDeleting, false, nil, "snapshot %s/%s is being deleted; GC may already reclaim its chunks", v.vol, v.opts.Snapshot)
 		}
-		return v.snapshot(ctx, ref.info)
+		return v.snapshot(ctx, v.opts.Snapshot, ref)
 	}
 	if !v.opts.AllSnapshots {
 		return nil
@@ -889,7 +966,7 @@ func (v *verifier) snapshots(ctx context.Context) error {
 			if !ok || ref.entry == nil || ref.info.State == SnapAborted || ref.info.State == SnapDeleting {
 				continue
 			}
-			if err := v.snapshot(ctx, ref.info); err != nil {
+			if err := v.snapshot(ctx, e.GetName(), ref); err != nil {
 				return err
 			}
 		}
@@ -899,10 +976,19 @@ func (v *verifier) snapshots(ctx context.Context) error {
 	}
 }
 
-func (v *verifier) snapshot(ctx context.Context, s SnapshotInfo) error {
-	r := verifyRoot{label: "snapshot " + s.Name + "/" + s.attempt, name: s.Name, attempt: s.attempt}
-	v.res.Snapshots = append(v.res.Snapshots, s.Name+"/"+s.attempt)
+// snapshot checks the snapshot found under name, at the attempt its name
+// record names. That path is the snapshot's identity, for its label and
+// every recheck; a document naming another volume or snapshot is
+// ROOT_INVALID, and its chunks are still checked under that path.
+func (v *verifier) snapshot(ctx context.Context, name string, ref snapRef) error {
+	s, attempt := ref.info, ref.rec.Attempt
+	r := verifyRoot{label: "snapshot " + name + "/" + attempt, name: name, attempt: attempt}
+	v.res.Snapshots = append(v.res.Snapshots, name+"/"+attempt)
 	v.snapRoots = append(v.snapRoots, r)
+	if s.VolumeID != v.vol || s.Name != name {
+		v.finding(VerifyFinding{Root: r.label, Class: FindingRootInvalid,
+			Detail: fmt.Sprintf("snapshot document names %s/%s, found as %s/%s", s.VolumeID, s.Name, v.vol, name)})
+	}
 	if s.geo != (Geometry{}) && s.geo != v.geo {
 		v.finding(VerifyFinding{Root: r.label, Class: FindingGeometry, Detail: fmt.Sprintf("snapshot geometry %+v, VOLUME %+v", s.geo, v.geo)})
 	}
@@ -910,8 +996,7 @@ func (v *verifier) snapshot(ctx context.Context, s SnapshotInfo) error {
 	if err != nil {
 		return err
 	}
-	v.addUses(r, chunks, false)
-	return nil
+	return v.compareRefs(ctx, v.addUses(r, chunks, false))
 }
 
 // forkRecord checks a fork's record against the parent snapshot it names:
@@ -1036,12 +1121,14 @@ func (v *verifier) intents(ctx context.Context, h storage.ChunkHead, chunks map[
 
 // maybeRefresh reads HEAD again once RefreshInterval has passed since the
 // last view. A new generation is walked (only segments whose reference
-// changed are read) and its chunks this pass has not seen are queued.
+// changed are read); its chunks this pass has not seen are queued, and its
+// changed references to chunks already seen are compared (addUses).
 func (v *verifier) maybeRefresh(ctx context.Context) error {
-	if !v.hasHead || time.Since(v.lastRefresh) < v.opts.RefreshInterval {
+	now := v.c.now()
+	if !v.hasHead || now.Sub(v.lastRefresh) < v.opts.RefreshInterval {
 		return nil
 	}
-	v.lastRefresh = time.Now()
+	v.lastRefresh = now
 	e, err := v.c.f.LookupEntry(ctx, v.root, headName)
 	if errors.Is(err, ErrNotFound) {
 		return nil
@@ -1066,9 +1153,8 @@ func (v *verifier) maybeRefresh(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	v.addUses(hr, chunks, true)
 	v.head = h
-	return nil
+	return v.compareRefs(ctx, v.addUses(hr, chunks, true))
 }
 
 // ---- bindings ----
@@ -1266,13 +1352,17 @@ func (v *verifier) checkData(ctx context.Context, batch []*verifyChunk) error {
 		}
 		return nil
 	}
-	derr := dispatch()
+	if err := dispatch(); err != nil {
+		// Stop the reads in flight before waiting for them, so a known
+		// failure is not held up by a read that would end only with the
+		// caller's deadline. The failure that stopped the pass is the one
+		// returned, not the cancellation it caused in the readers.
+		setErr(err)
+		cancel()
+	}
 	close(jobs)
 	wg.Wait()
-	if err := getErr(); err != nil {
-		return err
-	}
-	return derr
+	return getErr()
 }
 
 func (v *verifier) readChunk(ctx context.Context, w *verifyChunk) error {
@@ -1286,16 +1376,27 @@ func (v *verifier) readChunk(ctx context.Context, w *verifyChunk) error {
 	default:
 		return v.miss(ctx, w, FindingReadError, readErrorDetail(err))
 	}
+	sum := sha256.Sum256(data)
 	v.mu.Lock()
 	v.res.DistinctChunksRead++
 	v.res.BytesRead += int64(len(data))
+	w.read, w.length, w.digest = true, len(data), sum
+	uses := append(append([]verifyUse(nil), w.uses...), w.late...)
 	v.mu.Unlock()
-	if uint64(len(data)) != v.chunkBytes {
-		return v.miss(ctx, w, FindingSizeMismatch, fmt.Sprintf("needle holds %d bytes, chunk size %d", len(data), v.chunkBytes))
+	return v.compareContent(ctx, w, len(data), sum, uses)
+}
+
+// compareContent checks uses against a chunk's content, n bytes with
+// SHA-256 sum: the length must be the chunk size and the hash each
+// reference's.
+func (v *verifier) compareContent(ctx context.Context, w *verifyChunk, n int, sum [32]byte, uses []verifyUse) error {
+	if uint64(n) != v.chunkBytes {
+		return v.missUses(ctx, w, uses, FindingSizeMismatch, func(verifyUse) string {
+			return fmt.Sprintf("needle holds %d bytes, chunk size %d", n, v.chunkBytes)
+		})
 	}
-	sum := sha256.Sum256(data)
 	var mismatched []verifyUse
-	for _, u := range w.uses {
+	for _, u := range uses {
 		if sum != u.sha {
 			mismatched = append(mismatched, u)
 		}

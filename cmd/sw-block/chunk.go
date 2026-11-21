@@ -38,13 +38,14 @@ const (
 // dialChunkFiler opens the filer for the direct commands and refuses unless
 // it is the only filer of its group, the same start check blockvolume makes
 // (chunkstore.CheckSingleFiler): a compare-and-swap on one of several
-// filers does not exclude a writer on another. Tests replace it.
-var dialChunkFiler = func(addr string) (chunkstore.Filer, func() error, error) {
+// filers does not exclude a writer on another. The check runs within ctx,
+// the command's own bound (and within its own). Tests replace it.
+var dialChunkFiler = func(ctx context.Context, addr string) (chunkstore.Filer, func() error, error) {
 	c, err := chunkstore.DialSWFS(chunkstore.SWFSConfig{FilerGRPC: addr})
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := c.CheckSingleFiler(context.Background()); err != nil {
+	if err := c.CheckSingleFiler(ctx); err != nil {
 		_ = c.Close()
 		return nil, nil, err
 	}
@@ -280,13 +281,14 @@ func chunkDetach(args []string, stdout, stderr io.Writer) int {
 	return chunkPost("detach", statusAddr, "/chunk/detach", timeout, body, stdout, stderr)
 }
 
-// chunkCatalog opens the catalog under --chunk-path on --chunk-filer.
-// It returns exit -1 on success, else the exit code after reporting.
-func chunkCatalog(name, filer, base string, stdout, stderr io.Writer) (*chunkstore.Catalog, func() error, int) {
+// chunkCatalog opens the catalog under --chunk-path on --chunk-filer, its
+// single-filer check bounded by ctx (the command's --timeout). It returns
+// exit -1 on success, else the exit code after reporting.
+func chunkCatalog(ctx context.Context, name, filer, base string, stdout, stderr io.Writer) (*chunkstore.Catalog, func() error, int) {
 	if filer == "" {
 		return nil, nil, chunkFail(name, stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--chunk-filer is required", false)
 	}
-	f, closeFn, err := dialChunkFiler(filer)
+	f, closeFn, err := dialChunkFiler(ctx, filer)
 	if err != nil {
 		return nil, nil, chunkDialFail(name, err, stdout, stderr)
 	}
@@ -387,13 +389,13 @@ func chunkSnapshots(args []string, stdout, stderr io.Writer) int {
 	if volumeID == "" {
 		return chunkFail("snapshots", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--volume is required", false)
 	}
-	cat, closeFn, exit := chunkCatalog("snapshots", filer, base, stdout, stderr)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cat, closeFn, exit := chunkCatalog(ctx, "snapshots", filer, base, stdout, stderr)
 	if exit >= 0 {
 		return exit
 	}
 	defer closeFn()
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
 	list, next, err := cat.ListSnapshots(ctx, volumeID, chunkstore.ListOptions{Prefix: prefix, StartAfter: startAfter, Limit: limit, IncludeDeleting: includeDeleting})
 	return chunkResult("snapshots", chunkstore.NewSnapshotListBody(volumeID, list, next), err, stdout, stderr)
 }
@@ -415,13 +417,13 @@ func chunkSnapshotDelete(args []string, stdout, stderr io.Writer) int {
 	if volumeID == "" || name == "" {
 		return chunkFail("snapshot-delete", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--volume and --name are required", false)
 	}
-	cat, closeFn, exit := chunkCatalog("snapshot-delete", filer, base, stdout, stderr)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cat, closeFn, exit := chunkCatalog(ctx, "snapshot-delete", filer, base, stdout, stderr)
 	if exit >= 0 {
 		return exit
 	}
 	defer closeFn()
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
 	state, err := cat.DeleteSnapshot(ctx, volumeID, name)
 	return chunkResult("snapshot-delete", chunkstore.SnapshotDeleteBody{VolumeID: volumeID, Name: name, State: state}, err, stdout, stderr)
 }
@@ -451,13 +453,13 @@ func chunkFork(args []string, stdout, stderr io.Writer) int {
 		requestID = newRequestID()
 		fmt.Fprintf(stderr, "sw-block ops chunk fork: request id %s (reuse it to retry)\n", requestID)
 	}
-	cat, closeFn, exit := chunkCatalog("fork", filer, base, stdout, stderr)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cat, closeFn, exit := chunkCatalog(ctx, "fork", filer, base, stdout, stderr)
 	if exit >= 0 {
 		return exit
 	}
 	defer closeFn()
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
 	res, err := cat.Fork(ctx, chunkstore.ForkRequest{Source: source, Snapshot: snapshot, Target: target, RequestID: requestID, Labels: map[string]string(labels)})
 	return chunkResult("fork", res, err, stdout, stderr)
 }
@@ -479,13 +481,13 @@ func chunkShow(args []string, stdout, stderr io.Writer) int {
 	if volumeID == "" {
 		return chunkFail("show", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--volume is required", false)
 	}
-	cat, closeFn, exit := chunkCatalog("show", filer, base, stdout, stderr)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cat, closeFn, exit := chunkCatalog(ctx, "show", filer, base, stdout, stderr)
 	if exit >= 0 {
 		return exit
 	}
 	defer closeFn()
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
 	v, hasVolume, err := cat.ReadVolume(ctx, volumeID)
 	if err != nil {
 		return chunkResult("show", nil, err, stdout, stderr)

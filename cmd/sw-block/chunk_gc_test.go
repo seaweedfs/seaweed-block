@@ -63,7 +63,9 @@ func TestOpsChunkGC_DefaultIsReadOnly(t *testing.T) {
 	store := &gcCLIStore{MemFiler: chunkstore.NewMemFiler()}
 	old := dialChunkFiler
 	defer func() { dialChunkFiler = old }()
-	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return store, func() error { return nil }, nil }
+	dialChunkFiler = func(context.Context, string) (chunkstore.Filer, func() error, error) {
+		return store, func() error { return nil }, nil
+	}
 	code, out, errs := runChunk("gc", "--master", h.Addr(), "--chunk-filer", "local-test", "--chunk-path", "/gc-test")
 	if code != 0 {
 		t.Fatalf("missing safe GC entrypoint: exit=%d out=%s stderr=%s", code, out, errs)
@@ -105,7 +107,7 @@ func TestOpsChunkGC_InvalidAdmissionHasNoStoreEffects(t *testing.T) {
 	old := dialChunkFiler
 	defer func() { dialChunkFiler = old }()
 	calls := 0
-	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) {
+	dialChunkFiler = func(context.Context, string) (chunkstore.Filer, func() error, error) {
 		calls++
 		t.Fatal("invalid request reached store")
 		return nil, nil, nil
@@ -132,7 +134,9 @@ func gcPartialFixture(t *testing.T) (*gcCLIStore, *time.Time) {
 	store := &gcCLIStore{MemFiler: chunkstore.NewMemFiler()}
 	oldDial, oldClock := dialChunkFiler, chunkGCNow
 	t.Cleanup(func() { dialChunkFiler = oldDial; chunkGCNow = oldClock })
-	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return store, func() error { return nil }, nil }
+	dialChunkFiler = func(context.Context, string) (chunkstore.Filer, func() error, error) {
+		return store, func() error { return nil }, nil
+	}
 	now := time.Now().Add(2 * time.Hour)
 	chunkGCNow = func() time.Time { return now }
 	ctx := context.Background()
@@ -245,7 +249,9 @@ func TestOpsChunkGC_FailedMarkLookupPreservesUnknownUnbound(t *testing.T) {
 			store := &gcFailedMarkLookup{gcCLIStore: &gcCLIStore{MemFiler: chunkstore.NewMemFiler()}}
 			old := dialChunkFiler
 			t.Cleanup(func() { dialChunkFiler = old })
-			dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return store, func() error { return nil }, nil }
+			dialChunkFiler = func(context.Context, string) (chunkstore.Filer, func() error, error) {
+				return store, func() error { return nil }, nil
+			}
 			args := []string{"gc", "--master", "127.0.0.1:1", "--chunk-filer", "local", "--chunk-path", "/gc-lookup"}
 			if apply {
 				args = append(args, "--apply")

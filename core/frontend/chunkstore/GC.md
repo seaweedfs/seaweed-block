@@ -111,7 +111,9 @@ Every catalog command (`verify`, `usage`, `show`, `snapshots`,
 check as blockvolume: it asks the filer for its masters and filer group, and
 refuses unless a master lists exactly one filer in that group and it is the
 `--chunk-filer` given. The refusal exits 1 with code `not_single_filer`. The
-masters the filer reports must be reachable from where the command runs.
+check runs within the command's `--timeout`; a check that cannot finish within
+it refuses. The masters the filer reports must be reachable from where the
+command runs.
 
 ## Verify
 
@@ -133,8 +135,12 @@ one before it:
 - `meta`: the HEAD root decodes and is self-consistent; its chunk size and chunk
   indices fit the VOLUME geometry; every segment a checked root names is
   readable, matches its SHA-256 and decodes strictly; the same for each checked
-  snapshot's embedded HEAD; for a fork, its fork record's digest matches an
-  attempt of the parent snapshot at the recorded generation.
+  snapshot's embedded HEAD; a snapshot's document names the volume and the
+  snapshot it was found under (else `ROOT_INVALID`; the snapshot is still
+  checked, and rechecked, under the name it was found under); references to one
+  chunk with different SHA-256s disagree (`CONTENT_MISMATCH`); for a fork, its
+  fork record's digest matches an attempt of the parent snapshot at the
+  recorded generation.
 - `bindings` (the default): also, every chunk key a checked root references has
   a binding in its owner's `keys/` (a fork's `@owner/key` resolves to the owner
   volume), of the right kind, with a fid, without filer chunks, and not
@@ -160,7 +166,9 @@ class and a detail. Classes: `ROOT_INVALID`, `GEOMETRY`, `SEGMENT_UNREADABLE`,
 `SIZE_MISMATCH`, `FORK_RECORD_MISMATCH`, `INTENT_STALE`, `READ_ERROR`.
 
 `NEEDLE_MISSING` means the blob store answered that the needle does not exist
-(for SeaweedFS: HTTP 404 from every location). Any other read failure, such as a
+(for SeaweedFS: HTTP 404 from every location of a fresh volume lookup; when the
+cached locations all answer 404, the volume is looked up again, since it may
+have moved). Any other read failure, such as a
 timeout, a refused or reset connection, or another HTTP status, is retried twice
 with a short backoff. If it still fails, the chunk or segment is reported as
 `READ_ERROR`, with the error in the detail. `READ_ERROR` is not evidence of
@@ -196,7 +204,9 @@ finding against the current roots.
 A chunk that several checked roots name is reported once, under the first root
 that still names it (HEAD first). The HEAD view is also refreshed at least every
 2 minutes during a long pass; only segments whose key changed are read again,
-and chunks the pass has not seen are added. The result therefore states "every
+and chunks the pass has not seen are added. A changed reference to a chunk
+already seen is compared with that chunk's content (at depth `data`; the chunk
+is not read again) or with its other references. The result therefore states "every
 chunk named by the listed HEAD generations at the time it was checked", not "the
 image at one instant".
 

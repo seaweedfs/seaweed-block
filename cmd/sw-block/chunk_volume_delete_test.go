@@ -56,7 +56,9 @@ func TestOpsChunk_VolumeDelete(t *testing.T) {
 	ctx := context.Background()
 	mem := chunkstore.NewMemFiler()
 	prev := dialChunkFiler
-	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return mem, func() error { return nil }, nil }
+	dialChunkFiler = func(context.Context, string) (chunkstore.Filer, func() error, error) {
+		return mem, func() error { return nil }, nil
+	}
 	t.Cleanup(func() { dialChunkFiler = prev })
 	cat, err := chunkstore.NewCatalog(mem, defaultChunkPathCLI)
 	if err != nil {

@@ -11,6 +11,7 @@ import (
 	"path"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 
@@ -27,7 +28,9 @@ func verifyCLIFixture(t *testing.T) (*manifestFixtureFiler, storage.ChunkHead) {
 	ctx := context.Background()
 	mem := newManifestFixtureFiler(chunkstore.NewMemFiler())
 	prev := dialChunkFiler
-	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return mem, func() error { return nil }, nil }
+	dialChunkFiler = func(context.Context, string) (chunkstore.Filer, func() error, error) {
+		return mem, func() error { return nil }, nil
+	}
 	t.Cleanup(func() { dialChunkFiler = prev })
 	cat, err := chunkstore.NewCatalog(mem, defaultChunkPathCLI)
 	if err != nil {
@@ -161,7 +164,9 @@ func TestOpsChunk_VerifyReadErrorExits3(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := unreadableStore{mem, string(e.Extended["swb.fid"])}
-	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return store, func() error { return nil }, nil }
+	dialChunkFiler = func(context.Context, string) (chunkstore.Filer, func() error, error) {
+		return store, func() error { return nil }, nil
+	}
 	code, out, errs := runChunk("verify", "--volume", "v1", "--chunk-filer", "filer:18888", "--depth", "data", "--timeout", "10s")
 	res := decodeVerify(t, out)
 	if code != chunkExitFindings || !res.Complete || len(res.Findings) != 1 || res.Findings[0].Class != chunkstore.FindingReadError ||
@@ -241,5 +246,55 @@ func TestOpsChunk_RefusesMultiFiler(t *testing.T) {
 	code, out, errs := runChunk("verify", "--volume", "v1", "--chunk-filer", one, "--timeout", "5s")
 	if e := chunkErrorOut(t, out); code != chunkExitFailed || e.Code == codeNotSingleFilerCLI {
 		t.Fatalf("verify against the only filer: exit %d %q %q; want past the check", code, out, errs)
+	}
+}
+
+// stalledConfigFiler never answers GetFilerConfiguration: the call returns
+// only when its context ends. It reports the deadline the call carried and
+// the context error it ended with.
+type stalledConfigFiler struct {
+	filerpb.UnimplementedSeaweedFilerServer
+	deadline chan time.Time // zero: the call had no deadline
+	ended    chan error
+}
+
+func (f *stalledConfigFiler) GetFilerConfiguration(ctx context.Context, _ *filerpb.GetFilerConfigurationRequest) (*filerpb.GetFilerConfigurationResponse, error) {
+	dl, _ := ctx.Deadline()
+	f.deadline <- dl
+	<-ctx.Done()
+	f.ended <- ctx.Err()
+	return nil, ctx.Err()
+}
+
+// The single-filer check runs within the command's --timeout: a filer that
+// never answers holds the check only until that bound, which the call
+// carries as its deadline and then observes as its cancellation. The
+// command fails closed (exit 1).
+func TestOpsChunk_SingleFilerCheckWithinTimeout(t *testing.T) {
+	const timeout = 2 * time.Second
+	for _, args := range [][]string{
+		{"verify", "--volume", "v1"},
+		{"gc", "--master", "127.0.0.1:1"},
+		{"snapshots", "--volume", "v1"},
+	} {
+		t.Run(args[0], func(t *testing.T) {
+			f := &stalledConfigFiler{deadline: make(chan time.Time, 1), ended: make(chan error, 1)}
+			addr := serveGRPC(t, func(s *grpc.Server) { filerpb.RegisterSeaweedFilerServer(s, f) })
+			start := time.Now()
+			code, out, errs := runChunk(append(args, "--chunk-filer", addr, "--timeout", timeout.String())...)
+			dl := <-f.deadline
+			ended := <-f.ended
+			if e := chunkErrorOut(t, out); code != chunkExitFailed || e.Code != codeNotSingleFilerCLI || !strings.Contains(e.Message, "deadline") {
+				t.Fatalf("%s with a stalled filer: exit %d %q %q; want 1, not_single_filer, the deadline", args[0], code, out, errs)
+			}
+			// The call's deadline is the command's: start + timeout, plus
+			// the time to start the command; far below the check's own 60 s.
+			if dl.IsZero() || dl.After(start.Add(timeout+20*time.Second)) {
+				t.Fatalf("%s: the check's call carried deadline %v (start %v); want the command's %s", args[0], dl, start, timeout)
+			}
+			if ended == nil {
+				t.Fatalf("%s: the check's call did not observe the cancellation", args[0])
+			}
+		})
 	}
 }
