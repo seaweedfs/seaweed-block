@@ -14,6 +14,8 @@ const precopyQueueBudget = 5 * time.Second
 
 type precopyWaiter struct {
 	ready    chan struct{}
+	deadline time.Time
+	err      error
 	signaled bool
 }
 type precopyAdmission struct {
@@ -73,13 +75,6 @@ func (b *StorageBackend) BeginPrecopyPause(ctx context.Context) (func(), error) 
 	}
 }
 
-func signalPrecopy(w *precopyWaiter) {
-	if !w.signaled {
-		close(w.ready)
-		w.signaled = true
-	}
-}
-
 // Caller owns mu. INV-CUT-PRECOPY-001: ending the pause releases every
 // waiter in FIFO admission order in this one lock hold, then normal gate checks
 // and completion run independently. New arrivals cannot join the ended pause.
@@ -91,7 +86,12 @@ func (b *StorageBackend) finishPrecopyLocked() {
 	p.active = false
 	b.precopy = nil
 	for _, w := range p.waiters {
-		signalPrecopy(w)
+		// INV-CUT-PRECOPY-001: expiry versus grant is decided under mu.
+		if !time.Now().Before(w.deadline) {
+			w.err = context.DeadlineExceeded
+		}
+		w.signaled = true
+		close(w.ready)
 		if hook := b.testPrecopyGranted; hook != nil {
 			hook(w)
 		}
@@ -141,9 +141,9 @@ func (b *StorageBackend) admitPrecopy(ctx context.Context, admit func() (func(),
 			b.mu.Unlock()
 			continue
 		}
-		w := &precopyWaiter{ready: make(chan struct{})}
-		p.waiters = append(p.waiters, w)
 		deadline := arrival.Add(precopyQueueBudget)
+		w := &precopyWaiter{ready: make(chan struct{}), deadline: deadline}
+		p.waiters = append(p.waiters, w)
 		b.mu.Unlock()
 		if hook := b.testPrecopyQueued; hook != nil {
 			hook()
@@ -153,7 +153,16 @@ func (b *StorageBackend) admitPrecopy(ctx context.Context, admit func() (func(),
 		case <-w.ready:
 		case <-waitCtx.Done():
 		}
+		b.mu.Lock()
 		cause := waitCtx.Err()
+		if w.signaled {
+			cause = w.err
+		}
+		b.mu.Unlock()
+		// A timely queue grant cannot outlive the command's own deadline.
+		if cause == nil {
+			cause = ctx.Err()
+		}
 		cancel()
 		if cause != nil {
 			b.removePrecopyWaiter(p, w)
