@@ -80,5 +80,48 @@ expect_raw 2 "status cut off before its NUL" "M\0docs/a.md\0M"
 expect_raw 2 "unknown status" "R100\0core/a.go\0"
 expect_raw 0 "well-formed docs change" "M\0docs/a.md\0"
 
+# Kinds for PRs that change no behaviour: each is checked against its paths,
+# and DOCS also against the Go diff (only comments may change in non-test Go).
+# expect_kind WANT_EXIT NAME KIND GO_DIFF_TEXT [STATUS PATH]...
+expect_kind() {
+	local want=$1 name=$2 k=$3 d=$4 got=0
+	shift 4
+	printf '%s' "${ok/IMPL M5.Quiesce>Copy/$k}
+$simplest" >"$tmp/body"
+	printf '%s' "$d" >"$tmp/go.diff"
+	if (($#)); then printf '%s\0' "$@"; fi | bash "$check" "$tmp/body" "$tmp/go.diff" >/dev/null || got=$?
+	if [[ $got != "$want" ]]; then
+		echo "FAIL $name: exit $got, want $want"
+		fail=1
+	fi
+}
+comment_diff='--- a/core/x/s.go
++++ b/core/x/s.go
+@@ -1,3 +1,4 @@
+-	Name string `json:"name"`
++	Name string `json:"name"` // the volume name
++	// Count is how many.
+ 	Count int'
+code_diff='--- a/core/x/s.go
++++ b/core/x/s.go
+@@ -1,2 +1,2 @@
+-	limit := 512 // chunks
++	limit := 256 // chunks'
+url_diff='--- a/core/x/s.go
++++ b/core/x/s.go
+@@ -1,1 +1,1 @@
+-	u := "http://a"
++	u := "http://b"'
+expect_kind 0 "DOCS: docs and comment-only Go" DOCS "$comment_diff" M docs/a.md M core/x/s.go A core/x/s_test.go
+expect_kind 1 "DOCS: a code change in Go" DOCS "$code_diff" M core/x/s.go
+expect_kind 1 "DOCS: a change inside a string that holds //" DOCS "$url_diff" M core/x/s.go
+expect_kind 1 "DOCS: Go changed but no diff given" DOCS "" M core/x/s.go
+expect_kind 1 "DOCS: a non-docs, non-Go file" DOCS "" M deploy/x.env
+expect_kind 0 "TEST: tests and testdata" TEST "" M core/x/s_test.go A core/x/testdata/in.bin
+expect_kind 1 "TEST: production Go" TEST "$comment_diff" M core/x/s.go
+expect_kind 0 "CI: workflow and scripts" CI "" M .github/workflows/w.yml A scripts/x.sh
+expect_kind 1 "CI: anything else" CI "" M docs/a.md
+expect_kind 1 "DOCS next to another kind" "DOCS FIX INV-X-001" "" M docs/a.md
+
 [[ $fail == 0 ]] && echo "spec-trace self-test: ok"
 exit $fail

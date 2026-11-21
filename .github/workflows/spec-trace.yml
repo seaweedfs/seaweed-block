@@ -47,4 +47,5 @@ jobs:
           git fetch --no-tags origin "+refs/pull/${PR}/head:refs/remotes/pr/head"
           printf '%s' "$BODY" >body.txt
           bash .github/scripts/post-merge-review-changed.sh "$BASE" "$HEAD" >changed.bin
-          bash .github/scripts/spec-trace-check.sh body.txt <changed.bin
+          git diff --no-renames "$BASE...$HEAD" -- "*.go" ":(exclude)*_test.go" >go.diff
+          bash .github/scripts/spec-trace-check.sh body.txt go.diff <changed.bin
