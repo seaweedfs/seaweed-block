@@ -31,7 +31,9 @@ jobs:
       - name: Checkout base
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          # github.sha is the tip of the base branch when the event fires; the
+          # PR's base.sha can predate this workflow's own scripts.
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
