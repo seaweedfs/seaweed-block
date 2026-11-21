@@ -566,8 +566,9 @@ func TestVerify_TombstonedBinding(t *testing.T) {
 	}
 }
 
-// A corrupt segment and a segment whose binding is gone are each a finding;
-// the pass goes on to the other segments and their chunks.
+// A corrupt segment (its content no longer matches the root's reference: a
+// mismatch for that root) and a segment whose binding is gone are each a
+// finding; the pass goes on to the other segments and their chunks.
 func TestVerify_UnreadableSegmentContinues(t *testing.T) {
 	fx := newVerifyFixture(t, "v1")
 	h := fx.publish("v1", map[uint64][]byte{0: verifyData(1), verifyPer: verifyData(2), 2 * verifyPer: verifyData(3)}, false)
@@ -575,11 +576,11 @@ func TestVerify_UnreadableSegmentContinues(t *testing.T) {
 	fx.deleteBinding(h.Segments[1].Key)
 	fx.deleteBinding(h.Chunks[2*verifyPer].Key)
 	res := fx.verify("v1", VerifyOptions{})
-	wantClasses(t, "bindings", res, "SEGMENT_UNREADABLE@seg0", "SEGMENT_UNREADABLE@seg1", fmt.Sprintf("BINDING_MISSING@%d", 2*verifyPer))
+	wantClasses(t, "bindings", res, "CONTENT_MISMATCH@seg0", "SEGMENT_UNREADABLE@seg1", fmt.Sprintf("BINDING_MISSING@%d", 2*verifyPer))
 	if res.SegmentsChecked != 3 || res.ChunksChecked != 1 {
 		t.Fatalf("summary %+v", res)
 	}
-	if !strings.Contains(res.Findings[0].Detail, "hash") || res.Findings[0].Key != h.Segments[0].Key {
+	if !strings.Contains(res.Findings[0].Detail, "SHA-256") || res.Findings[0].Key != h.Segments[0].Key {
 		t.Fatalf("corrupt segment finding %+v", res.Findings[0])
 	}
 }
@@ -1720,5 +1721,197 @@ func TestVerify_SnapshotDocumentNamingAnotherSnapshot(t *testing.T) {
 					res.Snapshots, res.RootDeletedDuringVerify, res.SnapshotsDeletedDuringVerify, attempt)
 			}
 		})
+	}
+}
+
+// The closing read decides the final view: a HEAD that is gone, or that
+// does not decode, leaves no HEAD root and makes the pass incomplete; it
+// never closes on an earlier view. A bad chunk only that HEAD named is then
+// counted as superseded, not reported.
+func TestVerify_ClosingReadWithoutUsableHeadIsIncomplete(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		bad        bool // chunk 0's needle is missing
+		undecoded  bool // the closing read finds a HEAD that does not decode (else none)
+		want       []string
+		reason     VerifyIncomplete
+		superseded int
+	}{
+		{"HEAD gone, bad chunk", true, false, nil, VerifyIncompleteHeadAbsent, 1},
+		{"HEAD gone, good chunks", false, false, nil, VerifyIncompleteHeadAbsent, 0},
+		{"HEAD does not decode", true, true, []string{"ROOT_INVALID"}, VerifyIncompleteHeadInvalid, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newVerifyFixture(t, "v1")
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			h := fx.publish("v1", map[uint64][]byte{0: verifyData(1), 1: verifyData(2)}, false)
+			if tc.bad {
+				fx.needle(fx.fid(h.Chunks[0].Key), dropNeedle)
+			}
+			done := false
+			opts := VerifyOptions{Depth: VerifyData, BytesPerSecond: -1}
+			opts.hook = func(stage string) {
+				if stage != verifyHookClosingRead || done {
+					return
+				}
+				done = true
+				if tc.undecoded {
+					fx.f.bumpExtended(path.Join(catBase, "v1", headName), extGen, "999")
+				} else if err := fx.f.DeleteEntry(ctx, path.Join(catBase, "v1"), headName, nil); err != nil {
+					t.Error(err)
+				}
+			}
+			res, err := fx.c.Verify(ctx, "v1", opts)
+			if CodeOf(err) != CodeVerifyIncomplete || res.Complete || res.Incomplete != tc.reason {
+				t.Fatalf("verify: %v, complete %v, incomplete %q; want incomplete %q", err, res.Complete, res.Incomplete, tc.reason)
+			}
+			wantClasses(t, tc.name, res, tc.want...)
+			for _, f := range res.Findings {
+				if f.Root == headLabel(h.Gen) {
+					t.Fatalf("finding %+v under the HEAD the closing read no longer returned", f)
+				}
+			}
+			if res.SupersededDuringVerify != tc.superseded {
+				t.Fatalf("superseded %d, want %d", res.SupersededDuringVerify, tc.superseded)
+			}
+		})
+	}
+}
+
+// casHead installs a HEAD whose segment references edit changes, without
+// writing segments (the chunk references stay those of the current HEAD).
+func (fx *verifyFixture) casHead(vol string, edit func(segs map[uint64]storage.ChunkSegment)) storage.ChunkHead {
+	fx.t.Helper()
+	ctx := context.Background()
+	r, err := NewChunkRemote(fx.f, fx.b, path.Join(catBase, vol))
+	if err != nil {
+		fx.t.Fatal(err)
+	}
+	cur, err := r.GetHead(ctx)
+	if err != nil {
+		fx.t.Fatal(err)
+	}
+	next := cur
+	next.Chunks = nil
+	next.RemoteLSN = cur.RemoteLSN + 1
+	next.Segments = map[uint64]storage.ChunkSegment{}
+	for g, s := range cur.Segments {
+		next.Segments[g] = s
+	}
+	edit(next.Segments)
+	if next.Gen, err = r.CASHead(ctx, storage.ChunkHeadVersion{Gen: cur.Gen, Epoch: cur.Epoch}, next); err != nil {
+		fx.t.Fatal(err)
+	}
+	return next
+}
+
+// A segment is one object per (owner, key), read once: HEAD and an active
+// snapshot naming one segment key with different reference hashes share its
+// one outcome. A failed read is one READ_ERROR, under HEAD, counted once; a
+// readable segment is used by the root whose reference matches its content,
+// and the other root gets one mismatch finding.
+func TestVerify_SegmentIsOneObjectPerKey(t *testing.T) {
+	for _, readFails := range []bool{true, false} {
+		t.Run(fmt.Sprintf("read fails=%v", readFails), func(t *testing.T) {
+			fx := newVerifyFixture(t, "v1")
+			ctx := context.Background()
+			h := fx.publish("v1", map[uint64][]byte{0: verifyData(1), 1: verifyData(2)}, false)
+			if _, err := fx.c.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: "s1", RequestID: "r1"}, h); err != nil {
+				t.Fatal(err)
+			}
+			// HEAD names the same segment key with another reference hash.
+			h2 := fx.casHead("v1", func(segs map[uint64]storage.ChunkSegment) {
+				s := segs[0]
+				s.SHA256[0] ^= 0xff
+				segs[0] = s
+			})
+			segFid := fx.fid(h.Segments[0].Key)
+			if readFails {
+				fx.cb.failReads(segFid, -1)
+			}
+			res := fx.verify("v1", VerifyOptions{Depth: VerifyBindings, AllSnapshots: true})
+			wantReads := 1
+			if readFails {
+				wantClasses(t, "segment read fails", res, "READ_ERROR@seg0")
+				wantReads = verifyReadAttempts // one read, with its retries
+				if res.ChunksNotRead != 1 {
+					t.Fatalf("chunksNotRead %d, want 1", res.ChunksNotRead)
+				}
+			} else {
+				wantClasses(t, "segment matches the snapshot only", res, "CONTENT_MISMATCH@seg0")
+				// The snapshot's reference matches: its chunks are walked and checked.
+				if res.ChunksChecked != 2 || res.DistinctChunks != 2 {
+					t.Fatalf("chunks checked %d, distinct %d; want the snapshot's 2", res.ChunksChecked, res.DistinctChunks)
+				}
+			}
+			if f := res.Findings[0]; f.Root != headLabel(h2.Gen) || f.Key != h.Segments[0].Key {
+				t.Fatalf("finding %+v; want under %q for the segment key", f, headLabel(h2.Gen))
+			}
+			if n := fx.cb.reads(segFid); n != wantReads {
+				t.Fatalf("segment read %d times, want %d", n, wantReads)
+			}
+		})
+	}
+}
+
+// headLookups counts the HEAD reads a pass makes.
+type headLookups struct {
+	Filer
+	root string
+	mu   sync.Mutex
+	n    int
+}
+
+func (f *headLookups) LookupEntry(ctx context.Context, dir, name string) (*filerpb.Entry, error) {
+	if dir == f.root && name == headName {
+		f.mu.Lock()
+		f.n++
+		f.mu.Unlock()
+	}
+	return f.Filer.LookupEntry(ctx, dir, name)
+}
+
+func (f *headLookups) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.n
+}
+
+// The quiet closing read is the final view: no HEAD read follows it, and a
+// publication that lands right after it is not part of this pass.
+func TestVerify_QuietClosingReadIsTheFinalView(t *testing.T) {
+	fx := newVerifyFixture(t, "v1")
+	h := fx.publish("v1", map[uint64][]byte{0: verifyData(1), 1: verifyData(2)}, false)
+	filer := &headLookups{Filer: fx.f, root: path.Join(catBase, "v1")}
+	cat, err := NewCatalog(manifestFilerBlobs{filer, fx.cb}, catBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	atClose := -1
+	var h2 storage.ChunkHead
+	opts := VerifyOptions{Depth: VerifyData, BytesPerSecond: -1}
+	opts.hook = func(stage string) {
+		if stage == verifyHookClosed {
+			atClose = filer.count()
+			h2 = fx.publish("v1", map[uint64][]byte{2: verifyData(3)}, true)
+			fx.needle(fx.fid(h2.Chunks[2].Key), dropNeedle)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := cat.Verify(ctx, "v1", opts)
+	if err != nil || !res.Complete {
+		t.Fatalf("verify: %v, %+v", err, res)
+	}
+	if atClose < 0 {
+		t.Fatal("the quiet closing read was never reached")
+	}
+	if n := filer.count(); n != atClose {
+		t.Fatalf("%d HEAD reads after the quiet closing read, want none", n-atClose)
+	}
+	wantClasses(t, "publication after the quiet read", res)
+	if res.HeadGens[len(res.HeadGens)-1] != h.Gen || h2.Gen <= h.Gen {
+		t.Fatalf("covered gens %v (published %d after the close); want the quiet read's %d last", res.HeadGens, h2.Gen, h.Gen)
 	}
 }

@@ -191,10 +191,16 @@ those outcomes and the roots at its final read:
   chunks it names that the pass has not seen are added and checked).
 - When every chunk is checked, verify reads HEAD and each checked snapshot's state
   once more. If that read names a chunk not seen, verify checks it and reads
-  again, at most 3 times; the read that names nothing new is the final read.
-- A bad chunk is one finding, under the first root that names it at the final
-  read (HEAD, then the snapshots still active, in order), at that root's first
-  index for it. A bad chunk no root names then is not reported: it is counted in
+  again, at most 3 times; the read that names nothing new is the final read, and
+  no read follows it. Only a HEAD that decodes can be part of it: if that read
+  finds no HEAD, or one that does not decode, the final view has no HEAD root and
+  the pass is incomplete.
+- A segment is read once per key, whatever reference names it: a root whose
+  reference matches its content uses it; a root whose reference does not has a
+  `CONTENT_MISMATCH` for that segment.
+- A bad chunk (or segment) is one finding per class, under the first root that
+  names it at the final read (HEAD, then the snapshots still active, in order), at
+  that root's first index for it. A bad one no root names then is not reported: it is counted in
   `rootDeletedDuringVerify` when a checked snapshot that was deleted during the
   pass names it, otherwise in `supersededDuringVerify`. Deleted snapshots are
   listed in `snapshotsDeletedDuringVerify` as not fully covered.
@@ -208,9 +214,12 @@ read; a chunk damaged after its check is the next pass's finding.
 
 A pass that cannot finish is **incomplete**, never clean: `complete` is false and
 `incomplete` gives the reason: `deadline`, `cancelled`, `error` (a filer or blob
-store failure, or a refused request) or `closing_rounds_exhausted` (each of the 3
-final reads named new chunks: the volume is too busy; re-run). Its findings are
-those computed from the chunks it did check.
+store failure, a refused request, or a final read that returned an older HEAD),
+`closing_rounds_exhausted` (each of the 3 final reads named new chunks: the volume
+is too busy; re-run), `head_absent` (the final read found no HEAD) or
+`head_invalid` (the final read's HEAD does not decode; also a `ROOT_INVALID`
+finding). Its findings are those computed from the chunks it did check, for the
+roots of its last view (none for HEAD in the last two cases).
 
 ### What verify cannot check
 
@@ -231,7 +240,8 @@ those computed from the chunks it did check.
 - `3`: the pass completed with findings. This includes `READ_ERROR`: the pass
   did not verify everything.
 - `1`: the pass could not complete (the deadline passed, the filer failed, HEAD
-  kept naming new chunks, the volume or snapshot does not exist, or the filer is
+  kept naming new chunks, HEAD was gone or did not decode at the final read, the
+  volume or snapshot does not exist, or the filer is
   not the only one of its group). The error body `{code,message,retryable}` is
   printed with the partial result, and its `incomplete` reason, under `verify`.
 - `2`: usage error.

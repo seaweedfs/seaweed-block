@@ -35,11 +35,19 @@ package chunkstore
 //     the pass checks it and reads again, at most ClosingRounds times
 //     (V.GiveUp: then the pass is incomplete).
 //   - V.Close: a closing read that names no chunk not seen is the final view.
+//     Only a decodable HEAD, not older than the view, can close a pass as
+//     complete: a closing read that finds no HEAD, or one that does not
+//     decode (ROOT_INVALID), leaves no HEAD root and the pass incomplete.
 //   - V.Reconcile: the findings about chunks and segments are computed from
 //     the outcomes and the final view alone, nowhere else: a bad chunk is
 //     one finding under the first final root naming its key (HEAD, then the
 //     snapshots not gone, in order) at that root's first index; a key HEAD
 //     dropped and names again is ROOT_INVALID, whatever its outcome.
+//
+// A segment is an object of the same automaton, keyed by (owner, key): read
+// once, its outcome kept; a root whose reference matches its content gets its
+// chunk references, a root whose reference does not has a mismatch; its
+// problems are reported by the chunk rule.
 //
 // The pass therefore reports the state of each named chunk at its check,
 // for the roots at the final read; a chunk damaged after its check is the
@@ -154,19 +162,23 @@ const (
 	verifyHookRootsWalked  = "roots-walked"  // the selected snapshots have been read and walked too
 	verifyHookBatchChecked = "batch-checked" // a batch of checks has settled
 	verifyHookClosingRead  = "closing-read"  // a closing read is about to be made
+	verifyHookClosed       = "closed"        // the quiet closing read was made: the final view is fixed
 )
 
 // VerifyIncomplete is why a pass did not complete.
 type VerifyIncomplete string
 
 const (
-	VerifyIncompleteDeadline  VerifyIncomplete = "deadline"                 // the caller's deadline passed
-	VerifyIncompleteCancelled VerifyIncomplete = "cancelled"                // the caller cancelled
-	VerifyIncompleteRounds    VerifyIncomplete = "closing_rounds_exhausted" // every closing read named new chunks
-	VerifyIncompleteError     VerifyIncomplete = "error"                    // a filer or blob store failure, or a refused request
+	VerifyIncompleteDeadline    VerifyIncomplete = "deadline"                 // the caller's deadline passed
+	VerifyIncompleteCancelled   VerifyIncomplete = "cancelled"                // the caller cancelled
+	VerifyIncompleteRounds      VerifyIncomplete = "closing_rounds_exhausted" // every closing read named new chunks
+	VerifyIncompleteHeadAbsent  VerifyIncomplete = "head_absent"              // the closing read found no HEAD
+	VerifyIncompleteHeadInvalid VerifyIncomplete = "head_invalid"             // the closing read's HEAD does not decode
+	VerifyIncompleteError       VerifyIncomplete = "error"                    // a filer or blob store failure, or a refused request
 )
 
-// CodeVerifyIncomplete: every closing read named chunks not seen before.
+// CodeVerifyIncomplete: the closing reads could not close the pass (each
+// named chunks not seen before, or the last found no usable HEAD).
 const CodeVerifyIncomplete = "verify_incomplete"
 
 // VerifyFinding is one problem found. Segment is set for a segment's own
@@ -272,7 +284,7 @@ func (c *Catalog) Verify(ctx context.Context, vol string, opts VerifyOptions) (V
 		return refuse(err)
 	}
 	v := &verifier{c: c, vol: vol, root: root, opts: opts, res: &res, blobs: c.blobs,
-		segs: map[verifySegKey]*verifiedSegment{}, chunks: map[string]*verifyChunk{}, dropped: map[string]bool{},
+		segs: map[string]*verifySegment{}, chunks: map[string]*verifyChunk{}, dropped: map[string]bool{},
 		pacer: &verifyPacer{rate: opts.BytesPerSecond}}
 	err = v.run(ctx)
 	v.reconcile()
@@ -283,6 +295,10 @@ func (c *Catalog) Verify(ctx context.Context, vol string, opts VerifyOptions) (V
 	res.DistinctChunks = len(v.chunks)
 	if err != nil {
 		switch {
+		case errors.Is(err, errVerifyHeadAbsent):
+			res.Incomplete = VerifyIncompleteHeadAbsent
+		case errors.Is(err, errVerifyHeadInvalid):
+			res.Incomplete = VerifyIncompleteHeadInvalid
 		case CodeOf(err) == CodeVerifyIncomplete:
 			res.Incomplete = VerifyIncompleteRounds
 		case errors.Is(err, context.DeadlineExceeded):
@@ -298,26 +314,48 @@ func (c *Catalog) Verify(ctx context.Context, vol string, opts VerifyOptions) (V
 	return res, nil
 }
 
-// verifySegKey names a segment reference: a segment object is immutable, so
-// one read under the same reference needs no second read.
-type verifySegKey struct {
-	group, chunkBytes uint64
-	ref               storage.ChunkSegment
-}
+// Why a closing read leaves no HEAD root (wrapped in CodeVerifyIncomplete).
+var (
+	errVerifyHeadAbsent  = errors.New("chunkstore: verify: the closing read found no HEAD")
+	errVerifyHeadInvalid = errors.New("chunkstore: verify: the closing read's HEAD does not decode")
+)
 
-// verifiedSegment is a segment as read once: its chunks, or the problems
-// that make it unusable (issue) or doomed (tombstoned binding).
-type verifiedSegment struct {
-	chunks     map[uint64]storage.ChunkRef
+// verifySegment is one segment object (owner, key): read once, like a chunk
+// (keys are never rebound), its outcome kept, and per root reference the
+// result of using it. Its chunk references are decoded under the first
+// reference that matches its content; the body is kept until then.
+type verifySegment struct {
+	owner, key string
 	fid        string
 	tombstoned bool
-	issue      *segIssue
+	issue      *segIssue // the object could not be read: its outcome
+	sum        [32]byte  // the content's SHA-256, once read
+	body       []byte
+	decoded    *segUse // the use that decoded it (with decodedBy)
+	decodedBy  segRef
+	uses       map[segRef]segUse
+}
+
+// segRef is one root's reference to a segment, with what decoding it depends on.
+type segRef struct {
+	group, chunkBytes, remoteLSN uint64
+	ref                          storage.ChunkSegment
+}
+
+// segUse is the result of using a segment under one reference: its chunk
+// references, or the problem for that root (issue).
+type segUse struct {
+	chunks map[uint64]storage.ChunkRef
+	issue  *segIssue
 }
 
 // segIssue is why a segment could not be used.
 type segIssue struct {
 	class, fid, detail string
 }
+
+// segID is a segment's identity: its owner and key.
+func segID(vol string, ref storage.ChunkSegment) string { return chunkIdentity(vol, ref.Key) }
 
 // verifyChunk is one distinct chunk (owner volume + the owner's own key):
 // unseen while absent from the verifier's map, then queued, then settled.
@@ -363,16 +401,15 @@ type verifier struct {
 
 	mu      sync.Mutex
 	res     *VerifyResult
-	segs    map[verifySegKey]*verifiedSegment // segments read, by reference
-	chunks  map[string]*verifyChunk           // the chunks seen, by identity
-	pending []*verifyChunk                    // queued, not yet checked
-	listed  bool                              // the owners' keys/ were listed once
+	segs    map[string]*verifySegment // the segments read, by identity
+	chunks  map[string]*verifyChunk   // the chunks seen, by identity
+	pending []*verifyChunk            // queued, not yet checked
+	listed  bool                      // the owners' keys/ were listed once
 
-	head        *verifyView     // the HEAD view; nil without a decodable HEAD
+	head        *verifyView     // the HEAD view; nil without a usable HEAD
 	dropped     map[string]bool // keys a HEAD view named and a later one did not
 	snaps       []*verifyView   // the selected snapshots, in order
 	lastRefresh time.Time
-	badRefresh  bool
 }
 
 func (v *verifier) hook(stage string) {
@@ -518,6 +555,7 @@ func (v *verifier) run(ctx context.Context) error {
 			return err
 		}
 		if !named {
+			v.hook(verifyHookClosed)
 			return nil // V.Close: this read is the final view
 		}
 		if rounds++; rounds == v.opts.ClosingRounds {
@@ -557,7 +595,7 @@ func (v *verifier) round(ctx context.Context) (bool, error) {
 	named := false
 	if v.head != nil {
 		var err error
-		if named, err = v.readHead(ctx); err != nil {
+		if named, err = v.readHead(ctx, true); err != nil {
 			return false, err
 		}
 	}
@@ -573,24 +611,21 @@ func (v *verifier) round(ctx context.Context) (bool, error) {
 
 // ---- roots and segments ----
 
-// segment returns h's segment group as read once by this pass (keys
-// owner-qualified, verified through the decoder GC and the chunk layer
-// use), reading it the first time. An error stops the pass.
-func (v *verifier) segment(ctx context.Context, h storage.ChunkHead, group uint64) (*verifiedSegment, error) {
-	ref := h.Segments[group]
-	k := verifySegKey{group: group, chunkBytes: h.ChunkBytes, ref: ref}
-	if s := v.segs[k]; s != nil {
+// V.Discover and V.Settle (segments): the segment ref names, read once per (owner, key) by this pass, its outcome kept. An error stops the pass.
+func (v *verifier) segment(ctx context.Context, ref storage.ChunkSegment) (*verifySegment, error) {
+	id := segID(v.vol, ref)
+	if s := v.segs[id]; s != nil {
 		return s, nil
 	}
-	s, err := v.readSegment(ctx, h, group, ref)
+	s, err := v.readSegment(ctx, ref)
 	if err != nil {
 		return nil, err
 	}
-	v.segs[k] = s
+	v.segs[id] = s
 	return s, nil
 }
 
-func (v *verifier) readSegment(ctx context.Context, h storage.ChunkHead, group uint64, ref storage.ChunkSegment) (*verifiedSegment, error) {
+func (v *verifier) readSegment(ctx context.Context, ref storage.ChunkSegment) (*verifySegment, error) {
 	if v.blobs == nil {
 		return nil, errors.New("chunkstore: verify needs a blob reader for segmented roots")
 	}
@@ -598,21 +633,26 @@ func (v *verifier) readSegment(ctx context.Context, h storage.ChunkHead, group u
 	if err != nil {
 		return nil, err
 	}
+	s := &verifySegment{owner: ref.Owner, key: ref.Key, uses: map[segRef]segUse{}}
 	dir, name, err := r.keyLocation(ref.Key)
 	if err != nil {
-		return &verifiedSegment{issue: &segIssue{FindingSegmentUnreadable, "", err.Error()}}, nil
+		s.issue = &segIssue{FindingSegmentUnreadable, "", err.Error()}
+		return s, nil
 	}
 	e, err := v.c.f.LookupEntry(ctx, dir, name)
 	if errors.Is(err, ErrNotFound) {
-		return &verifiedSegment{issue: &segIssue{FindingSegmentUnreadable, "", "segment binding not found"}}, nil
+		s.issue = &segIssue{FindingSegmentUnreadable, "", "segment binding not found"}
+		return s, nil
 	}
 	if err != nil {
 		return nil, abortErr(ctx, err, "read segment binding %s/%s", dir, name)
 	}
+	s.fid = string(e.Extended[extFid])
 	if bad := bindingProblem(e); bad != "" {
-		return &verifiedSegment{issue: &segIssue{FindingSegmentUnreadable, string(e.Extended[extFid]), "segment binding: " + bad}}, nil
+		s.issue = &segIssue{FindingSegmentUnreadable, s.fid, "segment binding: " + bad}
+		return s, nil
 	}
-	s := &verifiedSegment{fid: string(e.Extended[extFid]), tombstoned: len(e.Extended[extGCDeleted]) != 0}
+	s.tombstoned = len(e.Extended[extGCDeleted]) != 0
 	v.mu.Lock()
 	v.res.SegmentReads++
 	v.mu.Unlock()
@@ -628,22 +668,58 @@ func (v *verifier) readSegment(ctx context.Context, h storage.ChunkHead, group u
 		s.issue = &segIssue{FindingReadError, s.fid, readErrorDetail(err)}
 		return s, nil
 	}
-	r, err = NewChunkRemote(v.c.f, verifyPrefetched{s.fid, body}, v.root)
-	if err != nil {
-		return nil, err
-	}
-	r.mu.Lock()
-	r.fids[ref.Key] = s.fid
-	r.mu.Unlock()
-	one := storage.ChunkHead{Segments: map[uint64]storage.ChunkSegment{group: ref}, ChunkBytes: h.ChunkBytes,
-		ManifestChunkCount: ref.Count, RemoteLSN: h.RemoteLSN, State: storage.ChunkHeadActive}
-	resolved, err := r.resolveManifest(ctx, one)
-	if err != nil {
-		s.issue = &segIssue{FindingSegmentUnreadable, s.fid, err.Error()}
+	if len(body) > maxManifestBytes {
+		s.issue = &segIssue{FindingSegmentUnreadable, s.fid, fmt.Sprintf("segment holds %d bytes, above the %d byte bound", len(body), maxManifestBytes)}
 		return s, nil
 	}
-	s.chunks = resolved.Chunks
+	s.sum, s.body = sha256.Sum256(body), body
 	return s, nil
+}
+
+// use returns what root h gets from segment s at group: its chunk references
+// when h's reference matches the content (decoded through the decoder GC
+// and the chunk layer use), else the problem for h: a reference whose hash,
+// or whose other fields, differ from the content's is a CONTENT_MISMATCH;
+// content that does not decode under a matching reference is unreadable.
+// Nothing is read: the body is kept until a reference decodes it.
+func (v *verifier) use(ctx context.Context, s *verifySegment, h storage.ChunkHead, group uint64) segUse {
+	if s.issue != nil {
+		return segUse{issue: s.issue}
+	}
+	k := segRef{group: group, chunkBytes: h.ChunkBytes, remoteLSN: h.RemoteLSN, ref: h.Segments[group]}
+	if u, ok := s.uses[k]; ok {
+		return u
+	}
+	u := segUse{}
+	d := s.decodedBy
+	switch {
+	case k.ref.SHA256 != s.sum:
+		u.issue = &segIssue{FindingContentMismatch, s.fid, fmt.Sprintf("segment SHA-256 %s, reference %s", hex.EncodeToString(s.sum[:]), hex.EncodeToString(k.ref.SHA256[:]))}
+	case s.decoded != nil && d.ref == k.ref && d.group == k.group && d.chunkBytes == k.chunkBytes && (k.ref.SegFormat == 1 || k.ref.MaxBirthLSN <= k.remoteLSN):
+		u.chunks = s.decoded.chunks
+	case s.body == nil:
+		u.issue = &segIssue{FindingContentMismatch, s.fid, "the reference has the segment's SHA-256 but not the rest of the reference it was decoded under"}
+	default:
+		r, err := NewChunkRemote(v.c.f, verifyPrefetched{s.fid, s.body}, v.root)
+		if err != nil {
+			u.issue = &segIssue{FindingSegmentUnreadable, s.fid, err.Error()}
+			break
+		}
+		r.mu.Lock()
+		r.fids[k.ref.Key] = s.fid
+		r.mu.Unlock()
+		one := storage.ChunkHead{Segments: map[uint64]storage.ChunkSegment{group: k.ref}, ChunkBytes: h.ChunkBytes,
+			ManifestChunkCount: k.ref.Count, RemoteLSN: h.RemoteLSN, State: storage.ChunkHeadActive}
+		resolved, err := r.resolveManifest(ctx, one)
+		if err != nil {
+			u.issue = &segIssue{FindingSegmentUnreadable, s.fid, err.Error()}
+			break
+		}
+		u.chunks = resolved.Chunks
+		s.decoded, s.decodedBy, s.body = &u, k, nil
+	}
+	s.uses[k] = u
+	return u
 }
 
 // bindingProblem is what makes e unusable as a chunk key binding, or "".
@@ -672,24 +748,20 @@ func (v *verifier) walk(ctx context.Context, h storage.ChunkHead) (map[uint64]st
 		}
 		return out, unusable, nil
 	}
-	groups := make([]uint64, 0, len(h.Segments))
-	for g := range h.Segments {
-		groups = append(groups, g)
-	}
-	sort.Slice(groups, func(i, j int) bool { return groups[i] < groups[j] })
-	for _, g := range groups {
+	for _, g := range sortedGroups(h.Segments) {
 		v.mu.Lock()
 		v.res.SegmentsChecked++
 		v.mu.Unlock()
-		s, err := v.segment(ctx, h, g)
+		s, err := v.segment(ctx, h.Segments[g])
 		if err != nil {
 			return out, unusable, err
 		}
-		if s.issue != nil {
+		u := v.use(ctx, s, h, g)
+		if u.issue != nil {
 			unusable[g] = true
 			continue
 		}
-		for idx, cr := range s.chunks {
+		for idx, cr := range u.chunks {
 			out[idx] = cr
 		}
 	}
@@ -987,29 +1059,42 @@ func (v *verifier) maybeRefresh(ctx context.Context) error {
 	if v.head == nil || v.c.now().Sub(v.lastRefresh) < v.opts.RefreshInterval {
 		return nil
 	}
-	_, err := v.readHead(ctx)
+	_, err := v.readHead(ctx, false)
 	return err
 }
 
-// readHead reads HEAD and applies it (V.Refresh); a HEAD that is gone, or does
-// not decode (reported once), changes nothing. It reports whether HEAD named
-// a chunk not seen.
-func (v *verifier) readHead(ctx context.Context) (bool, error) {
+// readHead reads HEAD and applies it (V.Refresh); it reports whether HEAD
+// named a chunk not seen. A periodic read that finds no HEAD, one that does
+// not decode, or an older generation changes nothing: the closing read
+// decides. At the closing read (closing set) every answer decides the final
+// view: no HEAD leaves no HEAD root and the pass incomplete (HEAD absent);
+// an undecodable one is ROOT_INVALID, no HEAD root, incomplete (HEAD
+// invalid); an older generation than the view cannot be the final view and
+// cannot keep the earlier one, so the pass is incomplete (an error).
+func (v *verifier) readHead(ctx context.Context, closing bool) (bool, error) {
 	v.lastRefresh = v.c.now()
 	e, err := v.c.f.LookupEntry(ctx, v.root, headName)
 	if errors.Is(err, ErrNotFound) {
-		return false, nil
+		if !closing {
+			return false, nil
+		}
+		v.head = nil
+		return false, catErr(CodeVerifyIncomplete, true, errVerifyHeadAbsent, "verify of %s: the closing read found no HEAD; the pass has no HEAD to report against", v.vol)
 	}
 	if err != nil {
 		return false, abortErr(ctx, err, "refresh HEAD of %s", v.vol)
 	}
 	h, err := decodeHead(path.Join(v.root, headName), e)
 	if err != nil {
-		if !v.badRefresh {
-			v.badRefresh = true
-			v.finding(VerifyFinding{Root: "HEAD", Class: FindingRootInvalid, Detail: "refreshed HEAD: " + err.Error()})
+		if !closing {
+			return false, nil
 		}
-		return false, nil
+		v.head = nil
+		v.finding(VerifyFinding{Root: "HEAD", Class: FindingRootInvalid, Detail: "HEAD at the closing read: " + err.Error()})
+		return false, catErr(CodeVerifyIncomplete, true, errVerifyHeadInvalid, "verify of %s: the HEAD of the closing read does not decode", v.vol)
+	}
+	if closing && v.head != nil && h.Gen < v.head.h.Gen {
+		return false, remoteErr(nil, "verify of %s: the closing read returned HEAD gen %d, older than gen %d already read", v.vol, h.Gen, v.head.h.Gen)
 	}
 	return v.refresh(ctx, h)
 }
@@ -1370,33 +1455,99 @@ func (v *verifier) reconcile() {
 			}
 		}
 	}
-	for k, s := range v.segs {
-		var issues []segIssue
-		if s.tombstoned && v.opts.Depth != VerifyMeta {
-			issues = append(issues, segIssue{FindingBindingTombstoned, s.fid, "segment binding tombstoned by GC"})
-		}
-		if s.issue != nil {
-			issues = append(issues, *s.issue)
-		}
-		if len(issues) == 0 {
-			continue
-		}
-		var at *verifyView
-		for _, r := range roots {
-			if r.namesSegment(k) {
-				at = r
-				break
+	segIDs := make([]string, 0, len(v.segs))
+	for id := range v.segs {
+		segIDs = append(segIDs, id)
+	}
+	sort.Strings(segIDs)
+	for _, id := range segIDs {
+		v.reconcileSegment(roots, id, v.segs[id])
+	}
+}
+
+// reconcileSegment reports segment id by the chunk rule: its own problems
+// (unreadable, read error, tombstoned binding) and each final reference's
+// (mismatch, undecodable) at most once per class, under the first final root
+// naming it at that root's first group; a problem no final root names is
+// counted once.
+func (v *verifier) reconcileSegment(roots []*verifyView, id string, s *verifySegment) {
+	type at struct {
+		root  int
+		group uint64
+	}
+	var naming []at
+	for ri, r := range roots {
+		for _, g := range sortedGroups(r.h.Segments) {
+			if segID(v.vol, r.h.Segments[g]) == id {
+				naming = append(naming, at{ri, g})
 			}
 		}
-		if at == nil {
-			v.unnamed(func(s *verifyView) bool { return s.namesSegment(k) })
+	}
+	var own []segIssue
+	if s.tombstoned && v.opts.Depth != VerifyMeta {
+		own = append(own, segIssue{FindingBindingTombstoned, s.fid, "segment binding tombstoned by GC"})
+	}
+	if s.issue != nil {
+		own = append(own, *s.issue)
+	}
+	if len(naming) == 0 {
+		if len(own) != 0 {
+			v.unnamed(func(r *verifyView) bool { return r.namesSegment(v.vol, id) })
+		}
+		return
+	}
+	report := func(a at, is segIssue) {
+		g := a.group
+		v.finding(VerifyFinding{Root: roots[a.root].label, Segment: &g, Owner: s.owner, Key: s.key, FID: is.fid, Class: is.class, Detail: is.detail})
+	}
+	for _, is := range own {
+		report(naming[0], is)
+	}
+	if s.issue != nil {
+		return
+	}
+	type problem struct {
+		at    at
+		issue segIssue
+		more  int
+		next  string
+	}
+	var problems []*problem
+	byClass := map[string]*problem{}
+	for _, a := range naming {
+		u := v.use(context.Background(), s, roots[a.root].h, a.group)
+		if u.issue == nil {
 			continue
 		}
-		for _, is := range issues {
-			g := k.group
-			v.finding(VerifyFinding{Root: at.label, Segment: &g, Owner: k.ref.Owner, Key: k.ref.Key, FID: is.fid, Class: is.class, Detail: is.detail})
+		if p := byClass[u.issue.class]; p != nil {
+			p.more++
+			if p.next == "" && a.root != p.at.root {
+				p.next = roots[a.root].label
+			}
+			continue
 		}
+		p := &problem{at: a, issue: *u.issue}
+		byClass[u.issue.class] = p
+		problems = append(problems, p)
 	}
+	for _, p := range problems {
+		if p.more > 0 {
+			p.issue.detail += fmt.Sprintf("; %d more final reference(s) with this problem", p.more)
+			if p.next != "" {
+				p.issue.detail += ", next under " + p.next
+			}
+		}
+		report(p.at, p.issue)
+	}
+}
+
+func sortedGroups(m map[uint64]storage.ChunkSegment) []uint64 {
+	out := make([]uint64, 0, len(m))
+	for g := range m {
+		out = append(out, g)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
 }
 
 // unnamed counts a bad chunk or segment no final root names: root deleted
@@ -1420,9 +1571,13 @@ func (r *verifyView) namesChunk(vol, id string) bool {
 	return false
 }
 
-func (r *verifyView) namesSegment(k verifySegKey) bool {
-	ref, ok := r.h.Segments[k.group]
-	return ok && ref == k.ref && r.h.ChunkBytes == k.chunkBytes
+func (r *verifyView) namesSegment(vol, id string) bool {
+	for _, ref := range r.h.Segments {
+		if segID(vol, ref) == id {
+			return true
+		}
+	}
+	return false
 }
 
 // verifyPacer spaces reads so they average at most rate bytes per second.
