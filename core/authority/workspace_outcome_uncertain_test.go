@@ -3,6 +3,7 @@ package authority
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -65,5 +66,54 @@ func TestWorkspaceUncertainIssueWriteIsTyped(t *testing.T) {
 	}
 	if got, err := reloaded.WorkspaceLostRangeReadouts("v", req.RequestID); err != nil || len(got) != 1 || got[0].LostAfterLSN != 42 {
 		t.Fatalf("readout after reload: %+v %v", got, err)
+	}
+}
+
+func TestWorkspaceUncertaintyPrecedesRequestRefusal(t *testing.T) {
+	ctx := context.Background()
+	disk, _ := newTempStore(t)
+	p, _, _ := forcedLostRangeFixture(t, disk, false)
+	bad := forcedLostRangeReq
+	bad.TargetReplicaID = "other-slot"
+	if _, err := p.MoveWorkspace(ctx, bad, forcedLostRangeHead); err == nil || errors.Is(err, ErrWorkspaceOutcomeUncertain) {
+		t.Fatalf("healthy refusal changed: %v", err)
+	}
+	faults := 0
+	SetPutAfterRenameFaultForTest(func(r DurableRecord) error {
+		if r.Workspace != nil && r.Workspace.Lease != nil && r.Workspace.Lease.Revoking {
+			faults++
+			return errInjected
+		}
+		return nil
+	})
+	t.Cleanup(func() { SetPutAfterRenameFaultForTest(nil) })
+	if err := p.BeginWorkspaceRevocation(ctx, "v", "old", 1); !errors.Is(err, errInjected) {
+		t.Fatalf("failed persistence not witnessed: %v", err)
+	}
+	SetPutAfterRenameFaultForTest(nil)
+	if faults != 1 || p.WorkspaceState("v").Lease.Revoking {
+		t.Fatal("fixture did not retain pre-write memory")
+	}
+	records, err := disk.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	landed := false
+	for _, r := range records {
+		if r.Workspace != nil && r.Workspace.Lease != nil && r.Workspace.Lease.Revoking {
+			landed = true
+		}
+	}
+	if !landed {
+		t.Fatal("faulted write did not land on disk")
+	}
+	before := p.WorkspaceState("v")
+	for _, req := range []WorkspaceMoveRequest{bad, forcedLostRangeReq} {
+		if _, err := p.MoveWorkspace(ctx, req, forcedLostRangeHead); !errors.Is(err, ErrWorkspaceOutcomeUncertain) {
+			t.Errorf("uncertain volume answered a definite admission refusal: %v", err)
+		}
+	}
+	if !reflect.DeepEqual(before, p.WorkspaceState("v")) {
+		t.Fatal("refused requests changed authority memory")
 	}
 }
