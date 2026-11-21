@@ -138,3 +138,25 @@ func TestSnapshotSchedule_ClockStepsNeitherRepeatNorStall(t *testing.T) {
 		t.Fatal("a clock step forwards past a period plus the retry cap with no success is not overdue")
 	}
 }
+
+// A retry keeps its own delay across a wall-clock step backwards: a 1 min
+// retry set before a 3 h step back is due 1 min after the stepped now, not
+// 3 h 1 min later; a slot set before the step becomes the first slot after
+// the stepped now.
+func TestSnapshotSchedule_BackwardStepKeepsTheRetryDelay(t *testing.T) {
+	day := 24 * time.Hour
+	s := newSnapshotSchedule("v1", day, schedT0)
+	at := s.due()
+	s.record(at, &SnapshotFailure{Code: "remote_unavailable"}) // retry in 1 min
+	back := at.Add(-3 * time.Hour)
+	s.align(back)
+	if got := s.due().Sub(back); got != time.Minute {
+		t.Fatalf("retry after a 3 h step back is due %v after the stepped now; want 1m", got)
+	}
+	s.record(s.due(), nil) // success: the next slot
+	back2 := s.due().Add(-2 * day)
+	s.align(back2)
+	if due := s.due(); !due.After(back2) || due.Sub(back2) > day || time.Duration(due.UnixNano()%int64(day)) != s.offset {
+		t.Fatalf("slot after a 2 day step back: %v for now %v; want the first per-volume slot after now", due, back2)
+	}
+}

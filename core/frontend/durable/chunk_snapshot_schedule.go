@@ -97,11 +97,15 @@ type ScheduledSnapshotStatus struct {
 // at a per-volume offset, not at a wall-clock hour. It is not safe for
 // concurrent use.
 type snapshotSchedule struct {
-	period   time.Duration
-	offset   time.Duration
-	started  time.Time
-	lastOK   time.Time
-	next     time.Time
+	period  time.Duration
+	offset  time.Duration
+	started time.Time
+	lastOK  time.Time
+	next    time.Time
+	// setAt is when next was last set; retry says next is a retry
+	// (setAt plus a delay) rather than a slot.
+	setAt    time.Time
+	retry    bool
 	failure  *ScheduledSnapshotFailure
 	attempts int
 	skipped  map[string]int64
@@ -110,7 +114,7 @@ type snapshotSchedule struct {
 // newSnapshotSchedule starts vol's schedule at now.
 func newSnapshotSchedule(vol string, period time.Duration, now time.Time) *snapshotSchedule {
 	s := &snapshotSchedule{period: period, offset: hostlimit.Phase(vol+":snapshot", period), started: now, skipped: map[string]int64{}}
-	s.next = s.slotAfter(now)
+	s.next, s.setAt = s.slotAfter(now), now
 	return s
 }
 
@@ -128,12 +132,19 @@ func (s *snapshotSchedule) slotAfter(t time.Time) time.Time {
 // due returns when the next attempt is due.
 func (s *snapshotSchedule) due() time.Time { return s.next }
 
-// align moves the next attempt to the first slot after now when a wall
-// clock step backwards left it further away than any slot or retry.
+// align handles a wall-clock step backwards (now earlier than when the
+// next attempt was set): a retry keeps its delay, counted from now; a slot
+// becomes the first slot after now.
 func (s *snapshotSchedule) align(now time.Time) {
-	if s.next.Sub(now) > s.period+snapshotRetryMax {
+	if !now.Before(s.setAt) {
+		return
+	}
+	if s.retry {
+		s.next = now.Add(s.next.Sub(s.setAt))
+	} else {
 		s.next = s.slotAfter(now)
 	}
+	s.setAt = now
 }
 
 // record records the outcome of an attempt made at now: nil is a
@@ -142,6 +153,7 @@ func (s *snapshotSchedule) align(now time.Time) {
 // failure, recorded with its code, and retried with a doubling backoff.
 func (s *snapshotSchedule) record(now time.Time, err error) {
 	var skip *SnapshotSkip
+	s.setAt, s.retry = now, err != nil
 	switch {
 	case err == nil:
 		s.lastOK, s.failure, s.attempts = now, nil, 0
