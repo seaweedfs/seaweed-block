@@ -72,8 +72,8 @@ A workspace runs one replica (RF=1). It does not use the replication engine of t
 | Permanent host loss | the image at the last successful cut (HEAD `RemoteLSN`); writes after it are lost |
 | Clean move (Detach) | everything written before Detach: guest I/O is stopped, then Detach publishes a final cut before the host releases the volume |
 
-- **When cuts happen.** At semantic points chosen by the integrator (after an agent step, before a risky command, on detach) and on explicit request (`sw-block ops chunk cut`). The periodic timer is off by default (`cmd/blockvolume/chunk_remote.go` `defaultChunkCaptureInterval = 0`); an operator may set one as a host-loss safety net. `--chunk-dirty-threshold` (default 512 chunks, 2 GiB) bounds pre-copy staging work; native COW copies the remainder outside its barrier. It never triggers a cut.
-- **So the default RPO is unbounded** until the integrator cuts. This is a design choice for workspaces, where a cut at a semantic point is more useful than a timer.
+- **When cuts happen.** At semantic points chosen by the integrator, on explicit request, and by the periodic timer (default 15m, minimum 5m in the OSS CLI; 0 disables). Periodic cuts update HEAD without creating named snapshots. `--chunk-dirty-threshold` bounds staging work and never triggers a cut.
+- **Recoverable frontier.** The confirmed remote HEAD is the recovery point after host loss. The default capture interval is 15m; failed or expired attempts retry with bounded backoff and reusable uploads, and do not claim a newly durable recovery point.
 - Multi-replica workspaces combined with chunk snapshots are not supported.
 
 ## 3. Remote layout
@@ -250,6 +250,33 @@ stateDiagram-v2
 ```
 
 Snapshots of the target are refused in `Claimed` and `Restoring`.
+
+### Attached-volume scheduling
+
+Blockvolume defaults to periodic HEAD capture every 15 minutes (minimum 5
+minutes, 0 disables) and retention every hour. Named snapshots remain explicit.
+A five-minute context covers the whole cut; completed immutable uploads survive
+an expired attempt only under matching version/HEAD generation. Automatic GC is
+opt-in until the 50/200-volume metadata/RSS qualification accepts its full-catalog
+scan cost. Scoped GC changes candidates, not the catalog root domain; each volume
+has independent persisted mark coverage. CLI catalog mutations also check the
+single-filer deployment constraint before mutation.
+
+```mermaid
+stateDiagram-v2
+  [*] --> PendingAttach
+  PendingAttach --> Armed: attached and healthy
+  Armed --> Running: staggered due event
+  Running --> Armed: retention and optional scoped GC settle
+  Running --> Draining: detach, fence, close
+  Armed --> Draining: detach, fence, close
+  Draining --> Closed: cancel and join every worker
+  Draining --> Armed: safe detach abort, same current handle
+```
+
+No catch-up queue is accumulated. Retention failure skips GC; incomplete marks
+and configuration changes do not authorize reclamation. Unknown same-epoch CAS
+intents remain rooted after restart; elapsed TTL is not a settlement proof.
 
 ## 7. Lease, takeover and host moves
 

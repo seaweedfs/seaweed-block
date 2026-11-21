@@ -98,7 +98,7 @@ Two kinds of config are **expected to violate**:
 | `ReplicationFailover.tla` | `cfg/S6_*` | design-level |
 | `RetentionGCTiming.tla` | `cfg/S9_*` | |
 | `RetentionGCMulti.tla` | `cfg/S9b_*` | |
-| `RestoreIndependence.tla` | `cfg/RestoreIndependence_*` | independent restore; simulation only so far |
+| `RestoreIndependence.tla` | `cfg/RestoreIndependence_*` | independent restore |
 
 Each `.cfg` names its spec on its first line.
 
@@ -117,7 +117,7 @@ length of TLC's shortest counterexample.
 | S5 | `ControlPlane` | Blockmaster authority store: one volume record `{epoch, holder, move journal}`, two retried move requests, durable Puts that succeed, fail, or land with the reply lost, and restarts. | `UniqueEpoch` (issued epochs strictly increase), `Idempotent` (one epoch per request id), `JournalComplete` | `S5_code` pass (298). **RED:** `S5_red_noUncertain` UniqueEpoch violated (5-step: a lost-reply Put, then a reservation from stale memory puts the old assignment back). `S5_red_noReserve` passes (the reservation step is not needed for these invariants). | `core/authority/authority.go:436` applyWithWorkspaceMove (uncertain refusal `:442-444`, Put `:564`, mark uncertain `:568`); `core/authority/workspace.go:309` prepareWorkspaceMoveLocked (expected line `:313`, resume a reserved entry `:324-333`, reserve max+1 `:344-355`), journal replay `:192-219`, persist and mark uncertain `:276-288` |
 | S6 | `ReplicationFailover` | RF=2: P ships to R, R acks what is durable, the client is acked when both are durable; promotion of R at a new epoch with an evidence gate; R refuses old-epoch shipping; cuts and snapshots cover only the replicated-durable frontier; an in-flight snapshot create from the old primary may still land after the failover. Design-level. | `AckedSurvive`, `HeadOnLineage`, `SnapOnLineage`, `NoStaleAck` | `S6_design` pass (52,897), `S6_design_big` (598,353). **RED:** `S6_red_localCut` HeadOnLineage; `S6_red_noFence` AckedSurvive. `S6_red_noEvidence` passes: with synchronous RF=2 acks the gate is redundant (it matters for quorum or async shipping, not modelled). | `core/transport/replica.go:362` replica rejects a stale-lineage ship entry; `core/replication/volume.go:680` RebaseShipLSN; takeover CAS as in S2 |
 | S9 | `RetentionGCTiming`, `RetentionGCMulti` | GC timing with an explicit clock: a copy operation with deadline D, marks of duration up to MD, deletion only after two marks at least Grace apart; then marks across two volumes with a fork and a snapshot delete. | `NoLiveDelete` | **Single op:** `S9_rule_G4` (G > D + MD) pass (10,798; `_big` 43,780); G = D passes (`S9_red_G2_noguard`, 11,953). **RED:** `S9_red_G1_noguard`, `S9_red_G1_D3` (G < D) NoLiveDelete violated. **Two volumes:** `S9b_G1_MD2`, `_G2_MD2`, `_G2_MD3`, `_G3_MD1` pass (5,743-9,079). | `core/frontend/chunkstore/gc.go:89` grace > operation deadline, `:280` mark-duration margin, `:306-318` two-mark rule, `:214-221` intent expiry; `catalog.go:896-905` intent deadline re-checked before publish; `gc_copy.go:143`, `:177` a deleting attempt stays a root until grace |
-| S10 | `RestoreIndependence` | Independent restore: claim, two-step fork, hydrate, bounded batch cuts (own keys uploaded under an intent, one HEAD CAS per batch), the independence marker after the last foreign ref, claim drop; GC, source snapshot and volume delete, snapshot retention, and crashes with resume from remote facts at any point. `ClaimUntilHead` selects today's fork claim (dropped at the first HEAD); the strict variant keeps the claim until independent. | `NoGap` (the target's chunks are always rooted), `Independent`, `NoForeignList`, `ClaimUntilHead_Inv`, `LifecycleFree`, `StateRemote` | **Simulation only (proves nothing; not exhausted)**, 3 seeds x 60,000 traces, depth 40: `safe` (NIdx 3, Batch 1) no violation in about 812k states; `safe_b2` about 888k; `safe_n4` about 1.22M; `strict_claim_until_independent` about 421k-844k. **RED** (each violated in simulation): `red_drop_claim_at_fork` ClaimUntilHead_Inv; `red_cas_before_upload`, `red_no_intent` NoGap; `red_marker_early`, `red_marker_before_cas`, `red_snap_during_restore` Independent; `red_list_foreign` NoForeignList; `red_resume_local` StateRemote; `red_retention_ignores_marker` LifecycleFree. **Witnesses reached:** `wit_done`, `wit_crash_resume`. An exhaustive run is pending. | `core/frontend/chunkstore/catalog.go` `Restore`, `CreateSnapshot` (restore refusal); `restore.go` `MarkIndependent`, `foreignRefsOf`; `retention.go` `liveClaims`, `forkParentsNeeded`; `gc.go` `Collector.run` (qualified refs rooted by owner); `core/storage/chunk_hydrate_all.go` `HydrateAll`. Batch cuts and the restore driver are not merged yet. |
+| S10 | `RestoreIndependence` | Independent restore: claim, two-step fork, hydrate, bounded batch cuts (own keys uploaded under an intent, one HEAD CAS per batch), the independence marker after the last foreign ref, claim drop; GC, source snapshot and volume delete, snapshot retention, and crashes with resume from remote facts at any point. `ClaimUntilHead` selects today's fork claim (dropped at the first HEAD); the strict variant keeps the claim until independent. | `NoGap` (the target's chunks are always rooted), `Independent`, `NoForeignList`, `ClaimUntilHead_Inv`, `LifecycleFree`, `StateRemote` | **Exhaustive (TLC breadth-first, complete state graph, no error)** at MaxCrash 2, MaxGc 3 (4 for `n4`): option 1 (claim dropped at the first HEAD, the code): `safe` (NIdx 3, Batch 1) 3,639 distinct states; `safe_b2` 4,492; `safe_n4` (NIdx 4, Batch 2) 25,240. Strict variant `strict_claim_until_independent` 1,599 (and 2,003 / 9,838 at the `b2` / `n4` sizes, not shipped as cfgs here). **RED** (each violated at its invariant): `red_drop_claim_at_fork` ClaimUntilHead_Inv; `red_cas_before_upload`, `red_no_intent` NoGap; `red_marker_early`, `red_marker_before_cas`, `red_snap_during_restore` Independent; `red_list_foreign` NoForeignList; `red_resume_local` StateRemote; `red_retention_ignores_marker` LifecycleFree. **Witnesses reached:** `wit_done`, `wit_crash_resume`. Limits: no guest writes to the target while it takes ownership, GC acts immediately (no grace), one restore per snapshot. | `core/frontend/chunkstore/catalog.go` `Restore`, `CreateSnapshot` (restore refusal); `restore.go` `MarkIndependent`, `foreignRefsOf`; `retention.go` `liveClaims`, `forkParentsNeeded`; `gc.go` `Collector.run` (qualified refs rooted by owner); `core/storage/chunk_hydrate_all.go` `HydrateAll`. Batch cuts and the restore driver are not merged yet. |
 
 ## Limits
 
@@ -336,6 +336,53 @@ one missing-probe/newer-ACK schedule. `R293_review_safe` checks four invariants;
 four negative controls separately remove retirement, the frame join, the
 readiness guard or ACK progress restoration. This abstracts successful admitted
 frames and does not prove physical-I/O, authority rollback or timing behavior.
+
+## Attached-volume maintenance
+
+`MaintenanceOwner.tla` now includes joined-stop re-arm on the same current
+handle, and replacement followed by a new attachment. At most three arms and
+two handles make the graph finite. Local review-fold run 2026-11-21 03:47 UTC,
+TLC2.19 / Java21 /512MiB, jar SHA256
+`936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`:
+
+```sh
+java -Xmx512m -cp /path/to/tla2tools.jar tlc2.TLC -deadlock -config MaintenanceOwner_safe.cfg MaintenanceOwner
+```
+
+Positive exited0,105generated/54distinct, queue empty, depth12. Negative configs
+`overlap` exited12 at OneOwner (20/14 depth6), `early_release` at
+JoinedBeforeRelease (25/14 depth6), and `stale_rearm` at
+CurrentHandleAtAdmission (50/33 depth8). Unique `-metadir` paths were used.
+Native tests separately bind replica/epoch/endpoint and current handle/layer,
+witness cancellation while held, and same-handle stop/join/re-arm. This finite
+model does not establish physical-I/O cancellation or a fleet scheduling bound.
+
+`ScopedMaintenanceGC.tla` extends S9's scope correspondence: three keys across
+two volumes, one foreign-only root, independent local coverage and crash/config
+invalidation. `ScopedMaintenanceGC_safe.cfg` checks foreign-root preservation,
+local candidate scope and coverage ownership: 20 generated / 10 distinct states,
+depth 9, with the same TLC/jar. Its three negative configs narrow
+the root domain, widen reclamation or import namespace coverage. Native tests
+exercise the persisted mark records and real catalog root traversal; the finite
+model abstracts the complete mark and grace, whose timing remains in S9.
+No 50/200-volume density or metadata-RPC qualification is claimed; automatic GC
+remains opt-in, while periodic HEAD capture and retention are enabled by the CLI.
+
+The unchanged S9 timing models were replayed with the same TLC/jar:
+`cfg/S9_rule_G4.cfg` (`RetentionGCTiming`, D=2/G=4/MD=1/MaxT=10)
+passed with 26,341 generated / 10,798 distinct states, depth 23;
+`cfg/S9b_G3_MD1.cfg` (`RetentionGCMulti`, G=3/MD=1/MaxT=12)
+passed with 11,303 / 5,743, depth 23.
+
+`cfg/Maintenance_lifecycle.cfg` replays unchanged `ChunkLifecycleFixed` with
+one snapshot caller/deleter, MaxHostOps=1 and MaxRuns=1, fork/delete/create,
+lost replies/pending/sweep enabled. Safety invariants and HeadMonotone passed:
+42,133,769 generated / 7,224,016 distinct states, depth 47 (TLC 2.19, same jar).
+This config permits terminal stuttering (`CHECK_DEADLOCK FALSE`); it does not
+prove deadlock freedom. The original `Fix_mix_small` replay stopped with a
+terminal deadlock at depth 23 after 28,242,446 / 5,592,191 states (callers Done,
+gc_loop); it is not reported as a completed green run. No protocol guards in
+ChunkLifecycleFixed were changed.
 
 `PrecopyFixedAdmission.tla` checks cost admission over five physical rounds.
 A known estimate fits the 1.2-second allowance, or uses the five-second declared
