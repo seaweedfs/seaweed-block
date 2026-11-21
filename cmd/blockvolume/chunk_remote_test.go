@@ -71,6 +71,34 @@ func TestWALStoreChunkFlags(t *testing.T) {
 	}
 }
 
+// --chunk-detach-precopy stays defined but is refused at flag validation, so
+// a process started with it fails with a clear message instead of running the
+// pre-copy detach; without it the same flags parse as before.
+func TestChunkDetachPrecopyFlagRefused(t *testing.T) {
+	base := func(extra ...string) []string {
+		return append(phase150RequiredBlockvolumeArgs(), extra...)
+	}
+	valid := []string{"--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1",
+		"--status-addr=127.0.0.1:0", "--chunk-control-endpoint"}
+	f, err := parseFlags(base(valid...))
+	if err != nil || f.chunk.detachPrecopy {
+		t.Fatalf("valid chunk flags without --chunk-detach-precopy: %+v %v", f.chunk, err)
+	}
+	const want = "--chunk-detach-precopy is not supported in this release"
+	for name, args := range map[string][]string{
+		"walstore-chunk":  base(append(valid, "--chunk-detach-precopy")...),
+		"explicit true":   base(append(valid, "--chunk-detach-precopy=true")...),
+		"without a chunk": base("--durable-root=/tmp/sw-block", "--durable-impl=walstore", "--chunk-detach-precopy"),
+	} {
+		if _, err := parseFlags(args); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: parseFlags error = %v, want %q", name, err, want)
+		}
+	}
+	if _, err := parseFlags(base(append(valid, "--chunk-detach-precopy=false")...)); err != nil {
+		t.Errorf("explicit false: %v", err)
+	}
+}
+
 func TestChunkVolumeRootStaysInsideBase(t *testing.T) {
 	root, err := chunkVolumeRoot(defaultChunkPath, "v1")
 	if err != nil || root != defaultChunkPath+"/v1" {
