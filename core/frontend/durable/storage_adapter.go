@@ -368,7 +368,7 @@ func (b *StorageBackend) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.closed = true
-	b.finishPrecopyLocked(false)
+	b.finishPrecopyLocked()
 	b.notifyReadReadyLocked()
 	return nil
 }
@@ -488,7 +488,7 @@ func (b *StorageBackend) setOperationalLocked(ok bool, evidence string) {
 	// teardown. Keep a final pre-copy queue parked until Close or its budget;
 	// publishing readiness loss must not complete commands on that path.
 	if ok || b.precopy == nil || !b.precopy.active {
-		b.finishPrecopyLocked(ok)
+		b.finishPrecopyLocked()
 	}
 	b.notifyReadReadyLocked()
 }

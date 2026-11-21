@@ -48,7 +48,7 @@ func (b *StorageBackend) BeginPrecopyPause(ctx context.Context) (func(), error) 
 		once.Do(func() {
 			b.mu.Lock()
 			if b.precopy == p {
-				b.finishPrecopyLocked(b.operational.Load() && !b.closed)
+				b.finishPrecopyLocked()
 			}
 			b.mu.Unlock()
 		})
@@ -80,23 +80,18 @@ func signalPrecopy(w *precopyWaiter) {
 	}
 }
 
-// Caller owns mu. Resume admits the old queue serially; a terminal stop wakes
-// every command to observe the terminal gate, without issuing storage I/O.
-func (b *StorageBackend) finishPrecopyLocked(resume bool) {
+// Caller owns mu. INV-CUT-PRECOPY-001: ending the pause releases every
+// waiter and removes its clock before normal admission. Each woken command
+// rechecks the gate; no storage completion is needed to admit another command.
+func (b *StorageBackend) finishPrecopyLocked() {
 	p := b.precopy
 	if p == nil {
 		return
 	}
 	p.active = false
-	if !resume {
-		for _, w := range p.waiters {
-			signalPrecopy(w)
-		}
-		b.precopy = nil
-	} else if len(p.waiters) == 0 {
-		b.precopy = nil
-	} else {
-		signalPrecopy(p.waiters[0])
+	b.precopy = nil
+	for _, w := range p.waiters {
+		signalPrecopy(w)
 	}
 }
 
@@ -110,13 +105,6 @@ func (b *StorageBackend) removePrecopyWaiter(p *precopyAdmission, w *precopyWait
 		if v == w {
 			p.waiters = append(p.waiters[:i], p.waiters[i+1:]...)
 			break
-		}
-	}
-	if !p.active {
-		if len(p.waiters) == 0 {
-			b.precopy = nil
-		} else {
-			signalPrecopy(p.waiters[0])
 		}
 	}
 }
@@ -151,9 +139,6 @@ func (b *StorageBackend) admitPrecopy(ctx context.Context, admit func() (func(),
 		}
 		w := &precopyWaiter{ready: make(chan struct{})}
 		p.waiters = append(p.waiters, w)
-		if !p.active && len(p.waiters) == 1 {
-			signalPrecopy(w)
-		}
 		deadline := p.started.Add(precopyQueueBudget)
 		b.mu.Unlock()
 		if hook := b.testPrecopyQueued; hook != nil {
@@ -175,6 +160,6 @@ func (b *StorageBackend) admitPrecopy(ctx context.Context, admit func() (func(),
 			b.removePrecopyWaiter(p, w)
 			return nil, err
 		}
-		return func() { release(); b.removePrecopyWaiter(p, w) }, nil
+		return release, nil
 	}
 }

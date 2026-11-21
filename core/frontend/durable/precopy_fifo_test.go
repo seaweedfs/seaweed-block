@@ -83,100 +83,6 @@ func TestPrecopyHostDrainDoesNotCompleteHeldGuestIO(t *testing.T) {
 	}
 }
 
-func TestPrecopyQueueResumesInFIFOOrder(t *testing.T) {
-	b := precopyMemoryBackend(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-	queued := make(chan struct{}, 4)
-	b.testPrecopyQueued = func() { queued <- struct{}{} }
-	first, release := make(chan struct{}), make(chan struct{})
-	var once sync.Once
-	unpark := func() { once.Do(func() { close(release) }) }
-	seen := make(chan byte, 4)
-	if err := b.SetWriteObserver(precopyQueueObserver{observe: func(v byte) {
-		seen <- v
-		if v == 1 {
-			close(first)
-			select {
-			case <-release:
-			case <-ctx.Done():
-			}
-		}
-	}}); err != nil {
-		t.Fatal(err)
-	}
-	resume, err := b.BeginPrecopyPause(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var wg sync.WaitGroup
-	joined := make(chan struct{})
-	errs := make(chan error, 4)
-	t.Cleanup(func() {
-		cancel()
-		unpark()
-		resume()
-		_ = b.Close()
-		go func() { wg.Wait(); close(joined) }()
-		select {
-		case <-joined:
-		case <-time.After(3 * time.Second):
-			t.Error("queue workers did not join")
-		}
-	})
-	start := func(v byte) {
-		wg.Add(1)
-		go func() { defer wg.Done(); _, err := b.Write(ctx, 0, bytes.Repeat([]byte{v}, 4096)); errs <- err }()
-		select {
-		case <-queued:
-		case <-ctx.Done():
-			t.Fatal("command was not queued")
-		}
-	}
-	start(1)
-	start(2)
-	start(3)
-	resume()
-	select {
-	case <-first:
-	case <-ctx.Done():
-		t.Fatal("first queued write did not enter")
-	}
-	start(4) // New arrivals cannot bypass the old queue during an aborted cut.
-	if v := <-seen; v != 1 {
-		t.Fatalf("first write=%d", v)
-	}
-	select {
-	case v := <-seen:
-		t.Fatalf("write %d bypassed held FIFO head", v)
-	case <-time.After(30 * time.Millisecond):
-	}
-	unpark()
-	for _, want := range []byte{2, 3, 4} {
-		select {
-		case got := <-seen:
-			if got != want {
-				t.Fatalf("write=%d want%d", got, want)
-			}
-		case <-ctx.Done():
-			t.Fatal("FIFO queue did not drain")
-		}
-	}
-	for i := 0; i < 4; i++ {
-		select {
-		case err := <-errs:
-			if err != nil {
-				t.Fatal(err)
-			}
-		case <-ctx.Done():
-			t.Fatal("queued write did not finish")
-		}
-	}
-	data := make([]byte, 4096)
-	if _, err := b.Read(ctx, 0, data); err != nil || data[0] != 4 {
-		t.Fatalf("ordered final bytes=%d err=%v", data[0], err)
-	}
-}
-
 func TestPrecopyDrainTimeoutReopensWithoutWaitingUnderCapture(t *testing.T) {
 	b := precopyMemoryBackend(t)
 	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
@@ -258,7 +164,7 @@ func TestPrecopyQueueUsesFiveSecondCutoverBudget(t *testing.T) {
 // Releasing that lock before the fallback must not replace the pause identity.
 func TestPrecopyStopFallbackPreservesQueuedPause(t *testing.T) {
 	for _, terminal := range []bool{false, true} {
-		name := "resume_fifo"
+		name := "resume_all"
 		if terminal {
 			name = "close"
 		}
@@ -365,12 +271,14 @@ func TestPrecopyStopFallbackPreservesQueuedPause(t *testing.T) {
 				default:
 				}
 			} else {
-				for _, want := range []byte{1, 2} {
+				seenWrites := map[byte]bool{}
+				for i := 0; i < 2; i++ {
 					select {
 					case got := <-seen:
-						if got != want {
-							t.Fatalf("FIFO got %d want %d", got, want)
+						if got < 1 || got > 2 || seenWrites[got] {
+							t.Fatalf("unexpected resumed write %d", got)
 						}
+						seenWrites[got] = true
 					case <-ctx.Done():
 						t.Fatal("missing write")
 					}
