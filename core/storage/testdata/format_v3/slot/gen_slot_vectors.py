@@ -29,7 +29,7 @@ assert crc32c(b"123456789") == 0xE3069283, "crc32c self-check failed"
 UUID = bytes(range(0x00, 0x10))
 LINEAGE = bytes(range(0x10, 0x20))
 NONCE = bytes(range(0x20, 0x30))
-# rootBodyDigest of codex03's reference root (DESIGN 9.5): this slot names that map.
+# rootBodyDigest of the reference map root (DESIGN 9.5): this slot names that map.
 ROOT_HASH = bytes.fromhex("b47d24af8db0e0a2cd2494652c981c48f4d2a861c381f4a04cac4b35e2ac321b")
 
 

@@ -273,7 +273,7 @@ func TestWALStoreV3HalfResetRefusesWritesUntilRecover(t *testing.T) {
 	readAllV3(t, r, 1, 3)
 }
 
-// codex01 row 8 P1: a Read that resolved LBA 1's WAL position (cursor 0)
+// A Read that resolved LBA 1's WAL position (cursor 0)
 // parks before its pread; the real flusher checkpoints and releases the
 // entry, the reset starts the new incarnation at cursor 0, and Write(2, B)
 // reuses that position. The resumed Read must not return B for LBA 1: it
@@ -377,7 +377,7 @@ func TestWALStoreV3ReadOfADamagedLiveRecordIsAnIntegrityFault(t *testing.T) {
 	}
 }
 
-// codex01 e72acd40 P2 (1): a same-open Recover can fence a dropped record
+// A same-open Recover can fence a dropped record
 // and re-allocate its LSN to the same LBA at the same position. A read
 // parked across that saw the fenced bytes; on re-resolution the entry looks
 // unchanged (same position and LSN), but it is a new write: the read must
@@ -426,7 +426,7 @@ func TestWALStoreV3ReadAcrossARecoveryThatReusesTheSamePositionAndLSNIsNotDamage
 	}
 }
 
-// codex01 e72acd40 P2 (2): a failed pread is substrate I/O, never WAL
+// A failed pread is substrate I/O, never WAL
 // integrity. EOF policy: the WAL region lies inside the file, so a file
 // shorter than its geometry (io.EOF) is substrate I/O too.
 func TestWALStoreV3ReadIOErrorsAreSubstrateIONotWALIntegrity(t *testing.T) {
@@ -460,7 +460,7 @@ func TestWALStoreV3ReadIOErrorsAreSubstrateIONotWALIntegrity(t *testing.T) {
 	})
 }
 
-// codex01 2fa56078 P2: a read already admitted (past Read's close check)
+// A read already admitted (past Read's close check)
 // captures the recovery generation AFTER a Recover's start bump and the OLD
 // dirty entry BEFORE its clear; the recovery fences the dropped record and
 // a same-LBA write re-allocates the same position and LSN. Tuple and a

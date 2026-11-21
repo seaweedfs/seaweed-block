@@ -134,7 +134,7 @@ type installHandleV3 struct {
 	// completed is set once this handle's own MarkBaseComplete succeeded:
 	// the session's WAL lane may still be sending (the Sender sends BaseDone
 	// from its base lane), so install-lane applies stay admitted until the
-	// next begin (codex01 row 9b P1).
+	// next begin.
 	completed atomic.Bool
 }
 
@@ -203,7 +203,7 @@ func (s *WALStore) beginBaseInstallV3(baseLSN uint64, id [16]byte) (*installHand
 	// BaseLSN must also cover every appended LSN: an unacknowledged record
 	// above BaseLSN would lie behind BaseCursor, so recovery from
 	// max(CheckpointLSN, BaseLSN) would meet a hole where the allocator
-	// continued (codex01 row 9a P1-1). Such a begin is refused, writing
+	// continued. Such a begin is refused, writing
 	// nothing; the records are never rewound or dropped to make room.
 	w := max(d.W, v.wack.Load())
 	appended := v.appended.Load()
@@ -448,7 +448,7 @@ func (s *WALStore) applyEntryV3(lba uint32, data []byte, lsn uint64, installLane
 // a checkpoint does: one fsync for the BASE extent bytes and the
 // install-lane suffix (they share the file), the optional metadata and
 // chunk barriers, and a fresh owned-map candidate that carries the UNKNOWN
-// coverage the BASE writes set (codex01 row 9a P1-2). It then publishes
+// coverage the BASE writes set. It then publishes
 // installed with the same ID and that candidate in one publication
 // (retainedTail = max(retainedTail, P), 8.4), stops serving the superseded
 // pre-BASE records and moves the frontier to BaseLSN. A guest write that

@@ -161,9 +161,8 @@ func fenceRangesV3(E, floor, walSize uint64, sameNonce bool) ([]fenceRangeV3, er
 		return nil, fmt.Errorf("storage: v3 fence: head %d below the reuse floor %d", E, floor)
 	}
 	// Interval-length arithmetic: floor+walSize is never formed, so a
-	// history ending at the last representable cursor still recovers
-	// (codex01 row 5 P2). The logical end may exceed 2^64-2; only the
-	// physical bytes matter.
+	// history ending at the last representable cursor still recovers.
+	// The logical end may exceed 2^64-2; only the physical bytes matter.
 	used := E - floor
 	if used >= walSize {
 		return nil, nil
