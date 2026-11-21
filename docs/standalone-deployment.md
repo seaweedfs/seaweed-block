@@ -288,15 +288,31 @@ workspace path. There is no equivalent script for ublk yet.
 
 ## Snapshots, restore and space (walstore-chunk)
 
+**Recovery point.**
+- **A stopped volume** keeps everything it acknowledged, on its host.
+- **If the host is lost,** the volume is restored from its last cut. With the defaults (periodic capture off, one scheduled snapshot a day), that cut is at most one day old.
+- **For a newer recovery point,** cut more often (`--chunk-capture-interval`, at least 5 minutes), or take a snapshot right before risky work.
+
+**Consistency.** A snapshot is crash-consistent:
+- it holds every write the volume acknowledged up to the cut;
+- a guest file system restored from it replays its journal;
+- data an application had not fsynced may be missing.
+
 The commands below use these placeholders:
 - `FILER` is the SeaweedFS filer gRPC address (`--chunk-filer`).
 - `MASTER` is the blockmaster address the blockvolumes use.
+- `WEED_MASTER` is the SeaweedFS master HTTP address.
 - `STATUS` is a blockvolume's status address (its `--status-addr`, with `--chunk-control-endpoint` set).
+
+**About the control endpoint.** `--chunk-control-endpoint` carries destructive operations (cut, snapshot, snapshot delete, detach, restore) on the status listener.
+- **Binding:** that listener binds loopback addresses only, unless `--allow-external-status-bind` is set.
+- **No authentication:** nothing authenticates it in this release. Keep it on loopback, or behind your own access control.
 
 ### Scheduled snapshots
 
 - **Schedule:** with the default `--chunk-snapshot-schedule=daily:7`, each attached volume takes one named snapshot (`sched-<UTC time>`) once per 24 h, at a per-volume offset rather than at a wall-clock hour.
-- **Retention:** keeps the newest 7 scheduled snapshots. Other snapshots are not affected.
+- **Retention:** keeps the newest 7 scheduled snapshots. It counts only the scheduled class, so other snapshots are not affected.
+- **Deleting by hand:** scheduled snapshots are safe to delete with `snapshot-delete` like any other.
 - **Restoring volumes:** a volume still restoring is skipped, and the skip is counted.
 - **Status:** `GET STATUS/status/durable?volume=<id>` shows the schedule under `Chunk.ScheduledSnapshot`: `lastOkNs`, `nextDueNs`, `lastFailure`, `skipped` and `snapshot_overdue`.
 
@@ -324,9 +340,26 @@ Space comes back in two steps. Neither is immediate.
    - Each pass prints its `Candidates`, `Reclaimed` and `failed_deletes`.
    - A chunk shows as a candidate in the first pass that sees it and is reclaimed in a later pass.
    - Without `--apply`, a pass is read-only.
-2. **SeaweedFS vacuum compacts the volume files.** Reclaimed chunks are deleted needles: SeaweedFS counts them at once in `DeletedByteCount` (`curl http://<weed master>/vol/status`, or `volume.list` in `weed shell`), but the disk space returns only when SeaweedFS vacuums those volumes, which runs asynchronously. To ask for it now: `curl "http://<weed master>/vol/vacuum?garbageThreshold=0.01"`, or `volume.vacuum` in `weed shell`.
+2. **SeaweedFS vacuum compacts the volume files.** Reclaimed chunks are deleted needles.
+   - SeaweedFS counts them at once in `DeletedByteCount`.
+   - The disk space returns only when SeaweedFS vacuums those volumes, which runs asynchronously.
 
-Check the data afterwards. `--depth data` reads every chunk once. Exit 0 means clean, 3 means the pass found problems.
+   To check the count, and to ask for a vacuum now:
+
+   ```bash
+   curl http://WEED_MASTER/vol/status                               # DeletedByteCount per volume
+   curl "http://WEED_MASTER/vol/vacuum?garbageThreshold=0.01"      # compact volumes with more than 1% garbage
+   # or, in weed shell:  volume.list   and   volume.vacuum -garbageThreshold 0.01
+   ```
+
+Check the data afterwards. `--depth data` reads every chunk once.
+
+| Exit | Meaning |
+|---|---|
+| 0 | clean |
+| 3 | the pass found problems |
+| 1 | the pass could not complete, for example a filer or master is unreachable; the partial result is printed |
+| 2 | the command could not run: a usage error, or the filer is not the only filer of its group (it refuses to start) |
 
 ```bash
 sw-block ops chunk verify --volume v1 --chunk-filer FILER --all-snapshots --depth data --timeout 30m
