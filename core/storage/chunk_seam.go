@@ -494,6 +494,9 @@ type chunkLayerStats struct {
 	// BarrierOverBound counts cuts whose barrier copied more than the
 	// bound after the staging rounds.
 	BarrierOverBound uint64
+	// AbsentChunks is the number of HEAD-named chunks still absent with a
+	// block not local (what HydrateAll would still fetch); 0 = fully local.
+	AbsentChunks int
 }
 
 // chunkCutResult is the outcome of one successful cut.

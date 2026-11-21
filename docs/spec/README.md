@@ -98,6 +98,7 @@ Two kinds of config are **expected to violate**:
 | `ReplicationFailover.tla` | `cfg/S6_*` | design-level |
 | `RetentionGCTiming.tla` | `cfg/S9_*` | |
 | `RetentionGCMulti.tla` | `cfg/S9b_*` | |
+| `RestoreIndependence.tla` | `cfg/RestoreIndependence_*` | independent restore |
 
 Each `.cfg` names its spec on its first line.
 
@@ -116,6 +117,7 @@ length of TLC's shortest counterexample.
 | S5 | `ControlPlane` | Blockmaster authority store: one volume record `{epoch, holder, move journal}`, two retried move requests, durable Puts that succeed, fail, or land with the reply lost, and restarts. | `UniqueEpoch` (issued epochs strictly increase), `Idempotent` (one epoch per request id), `JournalComplete` | `S5_code` pass (298). **RED:** `S5_red_noUncertain` UniqueEpoch violated (5-step: a lost-reply Put, then a reservation from stale memory puts the old assignment back). `S5_red_noReserve` passes (the reservation step is not needed for these invariants). | `core/authority/authority.go:436` applyWithWorkspaceMove (uncertain refusal `:442-444`, Put `:564`, mark uncertain `:568`); `core/authority/workspace.go:309` prepareWorkspaceMoveLocked (expected line `:313`, resume a reserved entry `:324-333`, reserve max+1 `:344-355`), journal replay `:192-219`, persist and mark uncertain `:276-288` |
 | S6 | `ReplicationFailover` | RF=2: P ships to R, R acks what is durable, the client is acked when both are durable; promotion of R at a new epoch with an evidence gate; R refuses old-epoch shipping; cuts and snapshots cover only the replicated-durable frontier; an in-flight snapshot create from the old primary may still land after the failover. Design-level. | `AckedSurvive`, `HeadOnLineage`, `SnapOnLineage`, `NoStaleAck` | `S6_design` pass (52,897), `S6_design_big` (598,353). **RED:** `S6_red_localCut` HeadOnLineage; `S6_red_noFence` AckedSurvive. `S6_red_noEvidence` passes: with synchronous RF=2 acks the gate is redundant (it matters for quorum or async shipping, not modelled). | `core/transport/replica.go:362` replica rejects a stale-lineage ship entry; `core/replication/volume.go:680` RebaseShipLSN; takeover CAS as in S2 |
 | S9 | `RetentionGCTiming`, `RetentionGCMulti` | GC timing with an explicit clock: a copy operation with deadline D, marks of duration up to MD, deletion only after two marks at least Grace apart; then marks across two volumes with a fork and a snapshot delete. | `NoLiveDelete` | **Single op:** `S9_rule_G4` (G > D + MD) pass (10,798; `_big` 43,780); G = D passes (`S9_red_G2_noguard`, 11,953). **RED:** `S9_red_G1_noguard`, `S9_red_G1_D3` (G < D) NoLiveDelete violated. **Two volumes:** `S9b_G1_MD2`, `_G2_MD2`, `_G2_MD3`, `_G3_MD1` pass (5,743-9,079). | `core/frontend/chunkstore/gc.go:89` grace > operation deadline, `:280` mark-duration margin, `:306-318` two-mark rule, `:214-221` intent expiry; `catalog.go:896-905` intent deadline re-checked before publish; `gc_copy.go:143`, `:177` a deleting attempt stays a root until grace |
+| S10 | `RestoreIndependence` | Independent restore: claim, two-step fork, hydrate, bounded batch cuts (own keys uploaded under an intent, one HEAD CAS per batch), the independence marker after the last foreign ref, claim drop; GC, source snapshot and volume delete, snapshot retention, and crashes with resume from remote facts at any point. `ClaimUntilHead` selects today's fork claim (dropped at the first HEAD); the strict variant keeps the claim until independent. | `NoGap` (the target's chunks are always rooted), `Independent`, `NoForeignList`, `ClaimUntilHead_Inv`, `LifecycleFree`, `StateRemote` | **Exhaustive (TLC breadth-first, complete state graph, no error)** at MaxCrash 2, MaxGc 3 (4 for `n4`): option 1 (claim dropped at the first HEAD, the code): `safe` (NIdx 3, Batch 1) 3,639 distinct states; `safe_b2` 4,492; `safe_n4` (NIdx 4, Batch 2) 25,240. Strict variant `strict_claim_until_independent` 1,599 (and 2,003 / 9,838 at the `b2` / `n4` sizes, not shipped as cfgs here). **RED** (each violated at its invariant): `red_drop_claim_at_fork` ClaimUntilHead_Inv; `red_cas_before_upload`, `red_no_intent` NoGap; `red_marker_early`, `red_marker_before_cas`, `red_snap_during_restore` Independent; `red_list_foreign` NoForeignList; `red_resume_local` StateRemote; `red_retention_ignores_marker` LifecycleFree. **Witnesses reached:** `wit_done`, `wit_crash_resume`. Limits: no guest writes to the target while it takes ownership, GC acts immediately (no grace), one restore per snapshot. | `core/frontend/chunkstore/catalog.go` `Restore`, `CreateSnapshot` (restore refusal); `restore.go` `MarkIndependent`, `foreignRefsOf`; `retention.go` `liveClaims`, `forkParentsNeeded`; `gc.go` `Collector.run` (qualified refs rooted by owner); `core/storage/chunk_hydrate_all.go` `HydrateAll`. Batch cuts and the restore driver are not merged yet. |
 
 ## Limits
 
@@ -305,7 +307,7 @@ java -cp /path/to/tla2tools.jar tlc2.TLC -deadlock -config cfg/REC_red_noInterna
 
 The authored LIGHT receipts report exhaustive safe searches at 2,700 and 25,550
 states, plus the expected mutant/witness failures. Source and configs are copied
-from the sealed `claude05-walreclaim-tla-r0-20261119` artifact with line-ending
+from the sealed authoring artifact with line-ending
 normalization only. Those are prior author runs, not a claim that this PR reran
 TLC. This is an abstraction: physical fsync success, byte layout, crash recovery,
 both-slot retirement, timing and multiple writers remain covered by their other
@@ -455,3 +457,41 @@ The same command with each negative config exited12 at its intended invariant:
 third `NoUploadBeforeAdmission`, the fourth `OverrideVisible`, and the last
 `AuthorityAtPublication`. Source tests separately check time/metadata handling,
 no-upload refusal, preserved bytes, uncertain outcomes and typed API dispatch.
+
+
+## GC clock allowance
+
+`GCClockSkew.tla` checks the time-admission portion of M6 GC: pairwise clock
+bias -S/0/+S, timestamp truncation 0/Q, and retaining future-dated roots while
+an independently eligible object progresses. It abstracts the existing complete
+root scan, exclusive copy settlement and higher-epoch guards; it does not prove
+those protocols or safety with clocks outside the configured bound.
+
+Local TLC2.19 / Java21 run 2026-11-21, jar SHA256
+`936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`:
+`java -Xmx512m -cp <jar> tlc2.TLC -config GCClockSkew_safe.cfg GCClockSkew`
+from `docs/spec`, each run with its own metadir. Bounds G=3, S=1, Q=1,
+Born=10, MaxT=17. Positive exhausted: exit0, 96 generated / 96 distinct states,
+queue empty, depth16. `GCClockSkew_no_skew.cfg` exited12 at `NoEarlyExpiry`
+(43/43, depth8); `GCClockSkew_no_resolution.cfg` exited12 at `NoEarlyExpiry`
+(44/44, depth8); `GCClockSkew_abort_future.cfg` exited12 at
+`IndependentProgress` (11/11, depth2). Source tests independently cover
+persisted-mark compatibility, future-clock resets and authority-preserving expiry.
+
+
+## Per-object GC DELETE progress
+
+`GCDeleteProgress.tla` models the narrow sweep transition after a complete,
+authorised mark: three ordered candidates, first DELETE definitively rejected,
+later deletes accepted. It checks that the rejected fid is never reported
+successful, the failure is visible, and later candidates progress. Root/epoch
+admission, elapsed coverage and persistence are outside this small abstraction;
+source tests retain those guards and reopen independent collectors between passes.
+
+Local TLC2.19 / Java21, same jar SHA256 as GCClockSkew above, 2026-11-21:
+`java -Xmx512m -cp <jar> tlc2.TLC -config GCDeleteProgress_safe.cfg GCDeleteProgress`
+from `docs/spec`, separate metadirs. Positive exhausted exit0, 4 generated /4
+distinct states, depth4. `GCDeleteProgress_stop.cfg` exits12 at `LaterProgress`
+(2 generated /2 distinct, depth2). The HTTP source red uses an actual400 and
+checks later reclamation, retained failed tombstones, younger-object progress
+across separate collectors and permanent no-rebind behavior.

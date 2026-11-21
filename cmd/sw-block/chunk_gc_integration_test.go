@@ -208,7 +208,7 @@ func TestIntegration_OpsChunkGC_RealMasterAndStore(t *testing.T) {
 	if !first.MarkSaved || first.Reclaimed != 0 {
 		t.Fatalf("first mark: %+v", first)
 	}
-	now = now.Add(time.Hour + time.Second)
+	now = now.Add(time.Hour + chunkstore.DefaultGCClockSkew + time.Second)
 	preview = call(false)
 	if preview.Reclaimed != 0 || len(preview.WouldDelete) != 1 || preview.WouldDelete[0].Key != "orphan" {
 		t.Fatalf("mature preview: %+v", preview)
@@ -278,7 +278,7 @@ func TestIntegration_OpsChunkGC_RealMasterAndStore(t *testing.T) {
 	if expired.ExpiredIntents != 1 || expired.Reclaimed != 0 {
 		t.Fatalf("fenced intent admission: %+v", expired)
 	}
-	now = now.Add(time.Hour + time.Second)
+	now = now.Add(time.Hour + chunkstore.DefaultGCClockSkew + time.Second)
 	reclaimed := call(true)
 	if reclaimed.Reclaimed != 1 || len(reclaimed.WouldDelete) != 1 || reclaimed.WouldDelete[0].Key != "held" {
 		t.Fatalf("expired capture: %+v", reclaimed)

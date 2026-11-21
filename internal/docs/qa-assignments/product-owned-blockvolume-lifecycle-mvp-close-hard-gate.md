@@ -9,7 +9,7 @@ Dev live gate evidence:
 
 - Scenario: `testops/scenarios/cluster-ops-inventory-chain.yaml`
 - Run id: `20260512-202811-1aa7`
-- Bundle: `V:/share/g15d-k8s/testops-runs/lifecycle-gate/20260512-202811-1aa7`
+- Bundle: `<evidence-store>/g15d-k8s/testops-runs/lifecycle-gate/20260512-202811-1aa7`
 - Result: PASS, 9/9 phases, 73/73 actions
 
 ## Product Question
@@ -201,7 +201,7 @@ Runner-native gate:
 
 ```powershell
 swblock run `
-  -results-dir V:/share/g15d-k8s/testops-runs/lifecycle-gate `
+  -results-dir <evidence-store>/g15d-k8s/testops-runs/lifecycle-gate `
   -env product_root=/tmp/seaweed-block-lifecycle-devrun `
   -env ssh_key=C:/work/dev_server/testdev_key `
   testops/scenarios/cluster-ops-inventory-chain.yaml

@@ -46,10 +46,13 @@ func (g *Collector) SweepCopies(ctx context.Context) (settled int, err error) {
 			if !strings.HasPrefix(in.Holder, "snapshot:") && !strings.HasPrefix(in.Holder, "fork:") {
 				continue
 			}
-			if in.CreatedNs <= 0 || in.CreatedNs > now.UnixNano() {
+			if in.CreatedNs <= 0 {
 				return 0, errors.New("chunkstore: invalid copy intent creation time")
 			}
-			if in.DeadlineNs <= 0 || now.UnixNano() <= in.DeadlineNs {
+			// A future creation stamp retains protection, without preventing
+			// unrelated copy attempts from settling. Deadline alone never
+			// releases roots: the permanent target claim below is still required.
+			if in.CreatedNs > now.UnixNano() || in.DeadlineNs <= 0 || now.UnixNano() <= in.DeadlineNs {
 				continue
 			}
 			pending = append(pending, copyAttempt{vol, r, in})
@@ -89,7 +92,7 @@ func (g *Collector) SweepCopies(ctx context.Context) (settled int, err error) {
 			if readErr != nil {
 				return settled, readErr
 			}
-			if !ok || v.Origin != OriginFork || v.Fork == nil || v.Fork.RequestID != parts[1] {
+			if !ok || !isForked(v.Origin) || v.Fork == nil || v.Fork.RequestID != parts[1] {
 				return settled, errors.New("chunkstore: fork intent has no matching target VOLUME")
 			}
 			if _, err = g.cat.AbortFork(ctx, a.vol); err != nil {
@@ -174,10 +177,10 @@ func (g *Collector) snapshotAttemptHeads(ctx context.Context, vol string, now ti
 			}
 			if info.State == SnapDeleting {
 				ns, err := strconv.ParseInt(string(e.Extended[extSnapDeletedNs]), 10, 64)
-				if err != nil || ns <= 0 || ns > now.UnixNano() {
+				if err != nil || ns <= 0 {
 					return nil, errors.New("chunkstore: invalid deleted snapshot timestamp")
 				}
-				if now.Sub(time.Unix(0, ns)) > g.cfg.Grace {
+				if g.oldEnough(now, time.Unix(0, ns), g.cfg.Grace, 0) {
 					continue
 				}
 			}

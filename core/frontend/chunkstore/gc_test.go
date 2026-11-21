@@ -142,7 +142,7 @@ func TestGC_UnreachableRequiresTwoMarksAndUploadAge(t *testing.T) {
 	if _, e := r.Get(ctx, "orphan"); e != nil {
 		t.Fatal("orphan deleted before grace", e)
 	}
-	*now = now.Add(2 * time.Second)
+	*now = now.Add(2*time.Second + g.cfg.ClockSkew)
 	result, e := g.Run(ctx)
 	if e != nil || result.Reclaimed != 1 {
 		t.Fatalf("old unreachable chunk was not reclaimed after grace-separated marks: %+v %v", result, e)
@@ -181,7 +181,7 @@ func TestGC_IntentExpiryNeedsTTLAuthorityAndRemoteFence(t *testing.T) {
 		{"takeover-but-no-authority", 1, 2, 2 * time.Hour, false, false},
 		{"unknown-authority", 2, 2, 2 * time.Hour, true, false},
 		{"TTL-not-exceeded", 2, 2, time.Hour, false, false},
-		{"higher-issued-and-fenced", 2, 2, time.Hour + time.Nanosecond, false, true},
+		{"higher-issued-and-fenced", 2, 2, time.Hour + DefaultGCClockSkew + time.Nanosecond, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f, b, _, g, now := gcFixture(t)
@@ -339,7 +339,7 @@ func TestGC_CopyIntentSurvivesTakeover(t *testing.T) {
 }
 
 func TestSWFS_DeleteBlobStatusesAndExactPath(t *testing.T) {
-	for _, status := range []int{200, 202, 204, 404, 401, 500} {
+	for _, status := range []int{200, 202, 204, 404, 400, 401, 500} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			calls := 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -354,6 +354,9 @@ func TestSWFS_DeleteBlobStatusesAndExactPath(t *testing.T) {
 			e := c.DeleteBlob(context.Background(), "7,01abcdef")
 			if (e == nil) != (status == 200 || status == 202 || status == 204 || status == 404) {
 				t.Fatalf("status %d: %v", status, e)
+			}
+			if errors.Is(e, ErrBlobDeleteRejected) != (status == 400) {
+				t.Fatalf("wrong per-object refusal classification: status=%d err=%v", status, e)
 			}
 			if calls != 1 {
 				t.Fatalf("calls %d", calls)
