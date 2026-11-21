@@ -18,7 +18,8 @@ import (
 // Backend Write+Sync models the guest's 4KiB synchronous command stream. The
 // peer reply is held until a separate control probe witnesses closed admission,
 // then released after20ms. The first attempt must fit only when its measured
-// estimate fits the unchanged allowance; host I/O costs are not fixture constants.
+// estimate fits the allowance or the declared small-tail plateau exception;
+// host I/O costs are not fixture constants.
 // This is a forced schedule, not physical NVMe proof.
 func TestPrecopyFiftyIOPSSyncConvergesFirstAttempt(t *testing.T) {
 	precopyFiftyIOPS(t, 3, false, 0)
@@ -166,11 +167,10 @@ func precopyFiftyIOPS(t *testing.T, samples byte, wantUnknown bool, fixedDelay t
 	}
 	// A loaded host may correctly refuse an expensive tail. Preserve the
 	// first-attempt oracle whenever it fits: EVERY earlier attempt must have
-	// been refused solely because its measured estimate exceeded 1.2 seconds.
+	// been refused by frontend drain admission or both cost-admission rules.
 	if fixedDelay > 0 && result.Precopy.Fixed < fixedDelay {
 		t.Fatalf("lost slow fixed sample: %+v", result.Precopy)
 	}
-	const allowance = 1200 * time.Millisecond
 	if len(result.Precopy.Rounds) == 0 {
 		t.Fatal("no admission attempts")
 	}
@@ -178,14 +178,15 @@ func precopyFiftyIOPS(t *testing.T, samples byte, wantUnknown bool, fixedDelay t
 		t.Fatal("final freeze disagrees with attempt report")
 	}
 	for i, round := range result.Precopy.Rounds {
-		if round.Frozen {
-			if i != len(result.Precopy.Rounds)-1 || round.Reason != "fit" || round.Estimate > allowance || round.Error != "" {
-				t.Fatalf("invalid fitting attempt: %+v", round)
-			}
-		} else if (round.Reason != "tail_too_large" && round.Reason != "barrier_over_budget") || round.Estimate <= allowance || round.Error != "" {
-			t.Fatalf("refused an eligible attempt or hid a failure: %+v", round)
+		var previous *storage.PrecopyAttempt
+		if i > 0 {
+			previous = &result.Precopy.Rounds[i-1]
+		}
+		if admissionErr := precopyFiftyAttemptError(round, previous, i == len(result.Precopy.Rounds)-1); admissionErr != nil {
+			t.Fatal(admissionErr)
 		}
 	}
+
 	if !result.Precopy.Frozen {
 		if !errors.Is(err, storage.ErrPrecopyNotConverged) || len(result.Precopy.Rounds) != 5 || result.Precopy.Attempts != 5 || guestErrors.Load() != 0 {
 			t.Fatalf("wrong over-budget outcome: report=%+v err=%v", result.Precopy, err)
@@ -293,4 +294,78 @@ func TestPrecopyFiftyIOPSRoundAccounting(t *testing.T) {
 			t.Fatal("successful round absent from accounting")
 		}
 	})
+}
+
+func precopyFiftyAttemptError(round storage.PrecopyAttempt, previous *storage.PrecopyAttempt, last bool) error {
+	// Drain admission precedes cost admission. A still-draining FIFO pause
+	// can refuse even a cheap round; it must not freeze or declare admission.
+	if !round.Frozen && (round.Reason == "drain_refused" || round.Reason == "drain_timeout") {
+		if round.Error != "" || round.DeclaredFreeze != 0 {
+			return fmt.Errorf("drain refusal hid a failure or declared admission: %+v", round)
+		}
+		return nil
+	}
+	const allowance = 1200 * time.Millisecond
+	if round.Reason == "samples_unknown" {
+		if round.Frozen || round.DeclaredFreeze != 0 || round.Error != "" {
+			return fmt.Errorf("unknown sample admitted: %+v", round)
+		}
+		return nil
+	}
+	eligible := round.Estimate > 0 && round.Estimate <= allowance
+	reason := "fit"
+	if !eligible && round.Estimate > 0 && round.Estimate <= 5*time.Second {
+		if precopyFiftyPreviousKnown(previous) && round.Estimate >= previous.Estimate-previous.Estimate/10 {
+			eligible, reason = true, "no_progress"
+		} else if round.Attempt == 5 {
+			eligible, reason = true, "final_attempt"
+		}
+	}
+	if round.Frozen {
+		if !eligible || !last || round.Reason != reason || round.DeclaredFreeze != round.Estimate || round.Error != "" {
+			return fmt.Errorf("invalid fitting attempt: %+v", round)
+		}
+	} else if eligible || (round.Reason != "tail_too_large" && round.Reason != "barrier_over_budget" && round.Reason != "freeze_budget_exceeded") || round.Error != "" {
+		return fmt.Errorf("refused an eligible attempt or hid a failure: %+v", round)
+	}
+	return nil
+}
+
+func TestPrecopyFiftyIOPSDrainRefusalDoesNotClaimAdmission(t *testing.T) {
+	previous := storage.PrecopyAttempt{Estimate: 1740 * time.Millisecond}
+	for _, reason := range []string{"drain_refused", "drain_timeout"} {
+		for _, estimate := range []time.Duration{500 * time.Millisecond, 1740 * time.Millisecond} {
+			t.Run(fmt.Sprintf("%s_%d", reason, estimate), func(t *testing.T) {
+				round := storage.PrecopyAttempt{Reason: reason, Estimate: estimate}
+				if err := precopyFiftyAttemptError(round, &previous, false); err != nil {
+					t.Fatal(err)
+				}
+				round.Error = "physical read failure"
+				if err := precopyFiftyAttemptError(round, &previous, false); err == nil {
+					t.Fatal("drain refusal hid a physical failure")
+				}
+				round.Error = ""
+				round.Frozen = true
+				if err := precopyFiftyAttemptError(round, &previous, true); err == nil {
+					t.Fatal("drain refusal claimed a frozen command")
+				}
+				round.Frozen = false
+				round.DeclaredFreeze = round.Estimate
+				if err := precopyFiftyAttemptError(round, &previous, false); err == nil {
+					t.Fatal("drain refusal claimed a freeze declaration")
+				}
+			})
+		}
+	}
+}
+
+func precopyFiftyPreviousKnown(a *storage.PrecopyAttempt) bool {
+	if a == nil || a.Estimate <= 0 || a.Error != "" {
+		return false
+	}
+	switch a.Reason {
+	case "fit", "tail_too_large", "barrier_over_budget", "freeze_budget_exceeded", "no_progress", "final_attempt", "admitted_io":
+		return true
+	}
+	return false
 }

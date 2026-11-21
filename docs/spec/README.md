@@ -334,3 +334,77 @@ one missing-probe/newer-ACK schedule. `R293_review_safe` checks four invariants;
 four negative controls separately remove retirement, the frame join, the
 readiness guard or ACK progress restoration. This abstracts successful admitted
 frames and does not prove physical-I/O, authority rollback or timing behavior.
+
+`PrecopyFixedAdmission.tla` checks cost admission over five physical rounds.
+A known estimate fits the 1.2-second allowance, or uses the five-second declared
+freeze limit when it is at least 90% of the previous comparable known estimate or on the final
+round. `SafeCommit` checks the declaration and ceiling; `FinalWithinBudget`
+checks that an eligible final round cannot refuse. This model does not model
+sample freshness, current-measurement availability, publication/data safety or physical
+latency; those remain separate checks.
+
+### PrecopyFixedAdmission checked configurations
+
+Local amendment-4 review-fold run, 2026-11-21 02:07 UTC, TLC 2.19 (tools jar SHA-256
+`936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`),
+from `docs/spec`:
+
+```sh
+java -Xmx512m -cp /path/to/tla2tools.jar tlc2.TLC -deadlock -config cfg/PrecopyFixedAdmission.cfg PrecopyFixedAdmission
+```
+
+The positive configuration exited 0: 37,399 generated / 5,851 distinct states,
+queue empty, depth 6. The same invocation with each negative configuration
+exited 12: `no_stall` violates `SafeCommit` (24 / 20, depth 2), `no_cap`
+violates `SafeCommit` (1,634 / 1,024, depth 3), and `no_final` violates
+`FinalWithinBudget` (34,330 / 4,620, depth 6). The additional
+`unknown_previous` negative violates `SafeCommit` (640 / 426, depth 3),
+witnessing that a partial prior estimate cannot establish a plateau. The model
+tracks previous-known status nondeterministically across rounds; only the
+current estimate is assumed known. The older quarter-tail model
+results are superseded by this rule. These finite-state checks do not establish
+physical latency or train qualification.
+
+## Plain detach admission
+
+`PlainDetach.tla` models the explicit plain-detach idle gate and atomic closure
+of frontend admission, with up to two I/O readers. `IdleAtStop` checks that
+stopping or detached states have no admitted/entering reader. HEAD publication,
+authority, physical I/O, wall-clock bounds, and failure settlement are outside
+this small admission abstraction and retain their existing native controls.
+
+Local run 2026-11-21 00:00 UTC, tools distribution v1.7.4 (TLC 2.19), jar SHA-256
+`936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`.
+From `docs/spec`, SANY `PlainDetach.tla` exited 0; TLC with
+`-deadlock -config cfg/PlainDetach.cfg PlainDetach` exited 0 (8 generated,
+5 distinct, queue empty, depth 3). Replacing the config with
+`cfg/PlainDetach_no_idle.cfg` exited 12: `IdleAtStop` fails on
+BeginIO -> Plain (7 generated / 5 distinct, depth 3). The negative uses a
+distinct `-metadir` to avoid timestamp-directory collisions between short runs.
+
+
+## Guest-frozen detach admission
+
+`FrozenDetachBudget.tla` models one externally frozen attempt: a forecast,
+skipped staging, changed time/estimate/knowledge at the barrier, explicit
+admission, upload and publication. Time units are tenths of a second. It checks
+`NoUploadBeforeAdmission`, `BudgetAtAdmission`, `OverrideVisible` and
+`AuthorityAtPublication`. Authority is stable within this finite model; mid-cut
+fencing and CAS races remain covered by the publication/COW contracts. It does
+not prove physical latency or the external controller's two-re-freeze limit.
+
+Local run 2026-11-21 02:53 UTC, TLC2.19, tools SHA-256
+`936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`:
+
+```sh
+java -Xmx512m -cp /path/to/tla2tools.jar tlc2.TLC -deadlock -config cfg/FrozenDetachBudget.cfg FrozenDetachBudget
+```
+
+Positive exited0:667 generated/439 distinct states, queue empty, complete depth6.
+The same command with each negative config exited12 at its intended invariant:
+`no_elapsed`410/267 depth4; `no_barrier`386/237 depth4;
+`staging_upload`151/145 depth3; `hidden_override`367/229 depth4;
+`no_authority`951/603 depth6. The first two violate `BudgetAtAdmission`, the
+third `NoUploadBeforeAdmission`, the fourth `OverrideVisible`, and the last
+`AuthorityAtPublication`. Source tests separately check time/metadata handling,
+no-upload refusal, preserved bytes, uncertain outcomes and typed API dispatch.

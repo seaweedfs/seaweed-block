@@ -543,6 +543,26 @@ func (b *StorageBackend) TryStopIO(evidence string) bool {
 	return true
 }
 
+// stopPlainDetachIfIdle closes admission without waiting for a live command.
+// Taking ioMu exclusively also excludes commands between their gate and final
+// registration; a failed try leaves every admission/pause field unchanged.
+func (b *StorageBackend) stopPlainDetachIfIdle() error {
+	if !b.ioMu.TryLock() {
+		return ErrPlainDetachBusy
+	}
+	defer b.ioMu.Unlock()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return frontend.ErrBackendClosed
+	}
+	if b.admittedIO != 0 {
+		return ErrPlainDetachBusy
+	}
+	b.setOperationalLocked(false, "chunk plain detach: idle frontend stopped")
+	return nil
+}
+
 // StopIO makes the backend refuse every new Read, Write and Sync with
 // ErrNotReady (evidence), then waits, bounded by ctx, for the I/O admitted
 // before the stop to finish. After a nil return no I/O admitted before the

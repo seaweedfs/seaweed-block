@@ -1,0 +1,89 @@
+package storage
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+)
+
+var ErrFrozenTailTooLarge = errors.New("storage: frozen tail does not fit remaining freeze budget")
+var ErrInvalidFreezeBudget = errors.New("storage: invalid guest freeze budget")
+
+// FrozenDetachOptions is supplied by the trusted guest orchestrator. It owns
+// the maximum two re-freeze cycles; AllowOverBudget explicitly requests its
+// final attempt. It never bypasses authority, lifecycle or CAS settlement.
+type FrozenDetachOptions struct {
+	StartedAt       time.Time
+	AllowOverBudget bool
+}
+type frozenDetachKey struct{}
+
+func WithFrozenDetach(ctx context.Context, opts FrozenDetachOptions) (context.Context, error) {
+	now := time.Now()
+	if opts.StartedAt.IsZero() || opts.StartedAt.Before(time.Unix(0, 1)) || opts.StartedAt.After(now) {
+		return nil, ErrInvalidFreezeBudget
+	}
+	// Convert remote wall time to a local monotonic origin once at admission.
+	opts.StartedAt = now.Add(-now.Sub(opts.StartedAt))
+	return context.WithValue(ctx, frozenDetachKey{}, opts), nil
+}
+func FrozenDetachFromContext(ctx context.Context) (FrozenDetachOptions, bool) {
+	v, ok := ctx.Value(frozenDetachKey{}).(FrozenDetachOptions)
+	return v, ok
+}
+func (r *PrecopyReport) admitFrozen(opts FrozenDetachOptions) bool {
+	return r.admitFrozenAt(opts, time.Now())
+}
+func (r *PrecopyReport) admitFrozenAt(opts FrozenDetachOptions, now time.Time) bool {
+	r.GuestFrozen = true
+	r.GuestFreezeElapsed = max(time.Duration(0), now.Sub(opts.StartedAt))
+	r.RemainingFreeze = max(time.Duration(0), precopyFreezeLimit-r.GuestFreezeElapsed)
+	known := r.Reason != "samples_unknown" && r.Estimate > 0
+	if opts.AllowOverBudget {
+		r.Reason = "over_budget"
+		r.OverBudget = true
+	} else if !known || r.Estimate > r.RemainingFreeze {
+		r.Reason = "frozen_tail_too_large"
+		return false
+	} else {
+		r.Reason = "fit"
+	}
+	r.DeclaredFreeze = r.GuestFreezeElapsed + r.Estimate
+	if !known {
+		r.DeclaredFreeze = max(r.DeclaredFreeze, precopyFreezeLimit)
+	}
+	return true
+}
+func frozenRefusal(r PrecopyReport) error {
+	return fmt.Errorf("%w: reason=%s estimate=%s remaining=%s elapsed=%s", ErrFrozenTailTooLarge, r.Reason, r.Estimate, r.RemainingFreeze, r.GuestFreezeElapsed)
+}
+
+// IsReplay distinguishes a replayed applied point from a newly completed freeze.
+// The original report remains unchanged on the wire.
+func (r PrecopyReport) IsReplay() bool { return r.replayed }
+
+func (l *chunkLayerImpl) admitFrozen(r *PrecopyReport, opts FrozenDetachOptions) bool {
+	now := time.Now()
+	if hook := l.testFrozenNow; hook != nil {
+		now = hook()
+	}
+	return r.admitFrozenAt(opts, now)
+}
+
+// RememberDetachReport completes the telemetry kept with an applied or still
+// pending point. The durable provider calls it after its final settlement spans.
+// It changes no publication identity or authority state.
+func (l *chunkLayerImpl) RememberDetachReport(report PrecopyReport) {
+	if report.IsReplay() {
+		return
+	}
+	l.stMu.Lock()
+	defer l.stMu.Unlock()
+	if l.detached != nil {
+		l.detached.Precopy = report
+	}
+	if l.pendingDetach {
+		l.pendingCut.Precopy = report
+	}
+}
