@@ -62,9 +62,7 @@ func TestOpsChunk_LostResultFailsTheCommand(t *testing.T) {
 	srv, _ := chunkServer(t, 200, `{"volumeID":"v1","cutLSN":9}`)
 	mem := chunkstore.NewMemFiler()
 	prev := dialChunkFiler
-	dialChunkFiler = func(context.Context, string) (chunkstore.Filer, func() error, error) {
-		return mem, func() error { return nil }, nil
-	}
+	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return mem, func() error { return nil }, nil }
 	t.Cleanup(func() { dialChunkFiler = prev })
 	cat, err := chunkstore.NewCatalog(mem, defaultChunkPathCLI)
 	if err != nil {

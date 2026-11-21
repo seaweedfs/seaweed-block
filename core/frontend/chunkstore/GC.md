@@ -106,13 +106,17 @@ are real. It is not an elapsed-time soak or a lab qualification.
 
 ## Single filer
 
-Every catalog command (`verify`, `usage`, `show`, `snapshots`,
-`snapshot-delete`, `fork`, `retain`, `gc`, `volume-delete`) makes the same start
-check as blockvolume: it asks the filer for its masters and filer group, and
-refuses unless a master lists exactly one filer in that group and it is the
-`--chunk-filer` given. The refusal exits 1 with code `not_single_filer`. The
-check runs within the command's `--timeout`; a check that cannot finish within
-it refuses. The masters the filer reports must be reachable from where the
+Every command that writes chunk metadata (`snapshot-delete`, `fork`, `retain`
+without `--dry-run`, `volume-delete`, `gc --apply`) and `verify` make the same
+start check as blockvolume before they read or write anything: it asks the
+filer for its masters and filer group, and refuses unless a master lists
+exactly one filer in that group and it is the `--chunk-filer` given. `verify`
+writes nothing, but against a split filer view it would report false
+findings. The other read-only commands and modes do not run the check. A
+filer that is not the only one of its group exits 2 with code `bad_request`;
+a check that cannot finish (a filer or master that does not answer) exits 1
+with code `remote_unavailable`, retryable. The check runs within the command's
+`--timeout`. The masters the filer reports must be reachable from where the
 command runs.
 
 ## Verify
@@ -250,8 +254,10 @@ roots of its last view (none for HEAD in the last two cases).
 - `3`: the pass completed with findings. This includes `READ_ERROR`: the pass
   did not verify everything.
 - `1`: the pass could not complete (the deadline passed, the filer failed, HEAD
-  kept naming new chunks, HEAD was gone or did not decode at the final read, the
-  volume or snapshot does not exist, or the filer is
-  not the only one of its group). The error body `{code,message,retryable}` is
-  printed with the partial result, and its `incomplete` reason, under `verify`.
-- `2`: usage error.
+  kept naming new chunks, HEAD was gone or did not decode at the final read, or
+  the volume or snapshot does not exist). The error body
+  `{code,message,retryable}` is printed with the partial result, and its
+  `incomplete` reason, under `verify`. A single-filer start check that cannot
+  finish also exits 1 (`remote_unavailable`), before the pass, with no result.
+- `2`: usage error, or the filer is not the only one of its group (`bad_request`,
+  before the pass, with no result).

@@ -64,10 +64,13 @@ func chunkVerify(args []string, stdout, stderr io.Writer) int {
 	case timeout <= 0 || concurrency <= 0 || bytesPerSec < 0:
 		return usage("--timeout and --concurrency must be positive and --bytes-per-sec not negative")
 	}
-	// One bound for the whole pass, the single-filer check included.
+	// One bound for the whole pass, the single-filer start check included:
+	// the deadline starts before the check. Verify writes nothing, but it
+	// runs the check (writes=true): against a split filer view it would
+	// report false findings.
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cat, closeFn, exit := chunkCatalog(ctx, "verify", filer, base, stdout, stderr)
+	cat, closeFn, exit := chunkCatalog("verify", filer, base, true, timeout, stdout, stderr)
 	if exit >= 0 {
 		return exit
 	}

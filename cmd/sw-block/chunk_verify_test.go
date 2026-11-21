@@ -5,20 +5,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"net"
 	"net/url"
 	"path"
 	"strings"
 	"testing"
 	"time"
 
-	"google.golang.org/grpc"
-
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
-	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/filerpb"
-	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/masterpb"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -29,7 +23,7 @@ func verifyCLIFixture(t *testing.T) (*manifestFixtureFiler, storage.ChunkHead) {
 	ctx := context.Background()
 	mem := newManifestFixtureFiler(chunkstore.NewMemFiler())
 	prev := dialChunkFiler
-	dialChunkFiler = func(context.Context, string) (chunkstore.Filer, func() error, error) {
+	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) {
 		return mem, func() error { return nil }, nil
 	}
 	t.Cleanup(func() { dialChunkFiler = prev })
@@ -166,7 +160,7 @@ func TestOpsChunk_VerifyReadErrorExits3(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := unreadableStore{mem, string(e.Extended["swb.fid"])}
-	dialChunkFiler = func(context.Context, string) (chunkstore.Filer, func() error, error) {
+	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) {
 		return store, func() error { return nil }, nil
 	}
 	code, out, errs := runChunk("verify", "--volume", "v1", "--chunk-filer", "filer:18888", "--depth", "data", "--timeout", "10s")
@@ -177,172 +171,59 @@ func TestOpsChunk_VerifyReadErrorExits3(t *testing.T) {
 	}
 }
 
-type cliConfigFiler struct {
-	filerpb.UnimplementedSeaweedFilerServer
-	masters []string
-}
-
-func (f *cliConfigFiler) GetFilerConfiguration(context.Context, *filerpb.GetFilerConfigurationRequest) (*filerpb.GetFilerConfigurationResponse, error) {
-	return &filerpb.GetFilerConfigurationResponse{Masters: f.masters}, nil
-}
-
-type cliNodesMaster struct {
-	masterpb.UnimplementedSeaweedServer
-	filers []string
-}
-
-func (m *cliNodesMaster) ListClusterNodes(context.Context, *masterpb.ListClusterNodesRequest) (*masterpb.ListClusterNodesResponse, error) {
-	resp := &masterpb.ListClusterNodesResponse{}
-	for _, a := range m.filers {
-		resp.ClusterNodes = append(resp.ClusterNodes, &masterpb.ListClusterNodesResponse_ClusterNode{Address: a})
+// verify writes nothing, yet it is in the set that runs the single-filer
+// start check (a split filer view would give false findings), and it refuses
+// the way the writing commands do (TestOpsChunk_WritingCommandsRunTheSingleFilerCheck).
+func TestOpsChunk_VerifyRunsTheSingleFilerCheck(t *testing.T) {
+	mem := chunkstore.NewMemFiler()
+	prevDial, prevCheck := dialChunkFiler, checkSingleFiler
+	t.Cleanup(func() { dialChunkFiler, checkSingleFiler = prevDial, prevCheck })
+	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return mem, func() error { return nil }, nil }
+	checks := 0
+	checkSingleFiler = func(context.Context, chunkstore.Filer) error {
+		checks++
+		return chunkstore.ErrNotSingleFiler
 	}
-	return resp, nil
-}
-
-func serveGRPC(t *testing.T, register func(*grpc.Server)) string {
-	t.Helper()
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := grpc.NewServer()
-	register(srv)
-	go func() { _ = srv.Serve(lis) }()
-	t.Cleanup(srv.Stop)
-	return lis.Addr().String()
-}
-
-// singleFilerCluster serves a fake filer whose one master lists the filers
-// filersOf(self) for its group; it returns the filer's gRPC address.
-func singleFilerCluster(t *testing.T, filersOf func(self string) []string) string {
-	t.Helper()
-	f := &cliConfigFiler{}
-	filerAddr := serveGRPC(t, func(s *grpc.Server) { filerpb.RegisterSeaweedFilerServer(s, f) })
-	_, filerPort, _ := net.SplitHostPort(filerAddr)
-	m := &cliNodesMaster{filers: filersOf("127.0.0.1:8888." + filerPort)}
-	masterAddr := serveGRPC(t, func(s *grpc.Server) { masterpb.RegisterSeaweedServer(s, m) })
-	_, masterPort, _ := net.SplitHostPort(masterAddr)
-	f.masters = []string{"127.0.0.1:9333." + masterPort}
-	return filerAddr
-}
-
-// The catalog commands make blockvolume's start check through the real
-// dial path: a filer group with another filer is refused before anything is
-// read or written.
-func TestOpsChunk_RefusesMultiFiler(t *testing.T) {
-	two := singleFilerCluster(t, func(self string) []string { return []string{self, "127.0.0.1:8889.18889"} })
-	for _, args := range [][]string{
-		{"verify", "--volume", "v1", "--chunk-filer", two},
-		{"snapshot-delete", "--volume", "v1", "--name", "s1", "--chunk-filer", two},
-		{"usage", "--volume", "v1", "--chunk-filer", two},
-		{"gc", "--chunk-filer", two, "--master", "127.0.0.1:1"},
+	filer := []string{"--chunk-filer", "filer:18888"}
+	for name, args := range map[string][]string{
+		"verify":              append([]string{"ops", "chunk", "verify", "--volume", "v1"}, filer...),
+		"verify --depth data": append([]string{"ops", "chunk", "verify", "--volume", "v1", "--depth", "data", "--timeout", "10s"}, filer...),
 	} {
-		code, out, errs := runChunk(args...)
-		if e := chunkErrorOut(t, out); code != chunkExitFailed || e.Code != codeNotSingleFilerCLI || e.Retryable || !strings.Contains(errs, "exactly one filer") {
-			t.Fatalf("%s against two filers: exit %d %q %q; want 1 and not_single_filer", args[0], code, out, errs)
+		before := checks
+		var out, errb bytes.Buffer
+		code := run(args, &out, &errb)
+		if checks != before+1 {
+			t.Errorf("%s: start check ran %d times; want once", name, checks-before)
+		}
+		if code == 0 || !strings.Contains(out.String()+errb.String(), "exactly one filer") {
+			t.Errorf("%s: exit %d, out %q err %q; want the single-filer refusal", name, code, out.String(), errb.String())
 		}
 	}
-	// The only filer of its group passes the check; the command then goes on
-	// (this fake filer serves nothing else, so it fails later, differently).
-	one := singleFilerCluster(t, func(self string) []string { return []string{self} })
-	code, out, errs := runChunk("verify", "--volume", "v1", "--chunk-filer", one, "--timeout", "5s")
-	if e := chunkErrorOut(t, out); code != chunkExitFailed || e.Code == codeNotSingleFilerCLI {
-		t.Fatalf("verify against the only filer: exit %d %q %q; want past the check", code, out, errs)
+}
+
+// The start check runs within verify's --timeout, as for the writing
+// commands (TestOpsChunk_StartCheckIsBoundedByTheTimeout): a check stalled on
+// its filer or master ends verify at the timeout, as a retryable refusal.
+func TestOpsChunk_VerifyStartCheckIsBoundedByTheTimeout(t *testing.T) {
+	mem := chunkstore.NewMemFiler()
+	prevDial, prevCheck := dialChunkFiler, checkSingleFiler
+	t.Cleanup(func() { dialChunkFiler, checkSingleFiler = prevDial, prevCheck })
+	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return mem, func() error { return nil }, nil }
+	checkSingleFiler = func(ctx context.Context, _ chunkstore.Filer) error {
+		<-ctx.Done()
+		return ctx.Err()
 	}
-}
-
-// stalledConfigFiler never answers GetFilerConfiguration: the call returns
-// only when its context ends (or the test releases it). It reports the
-// deadline the call carried and the context error it ended with.
-type stalledConfigFiler struct {
-	filerpb.UnimplementedSeaweedFilerServer
-	deadline chan time.Time // zero: the call had no deadline
-	ended    chan error
-	release  chan struct{} // the test's escape, closed in its cleanup
-}
-
-func (f *stalledConfigFiler) GetFilerConfiguration(ctx context.Context, _ *filerpb.GetFilerConfigurationRequest) (*filerpb.GetFilerConfigurationResponse, error) {
-	dl, _ := ctx.Deadline()
-	f.deadline <- dl
+	args := []string{"ops", "chunk", "verify", "--volume", "v1", "--chunk-filer", "filer:18888", "--timeout", "200ms"}
+	done := make(chan struct{})
+	var out, errb bytes.Buffer
+	var code int
+	go func() { code = run(args, &out, &errb); close(done) }()
 	select {
-	case <-ctx.Done():
-		f.ended <- ctx.Err()
-		return nil, ctx.Err()
-	case <-f.release:
-		return nil, errors.New("released by the test")
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("a stalled start check held verify past its 200ms --timeout")
 	}
-}
-
-// chunkTestEscape bounds a wait for something that should happen promptly;
-// it only turns a hang into a failure, it is not a success criterion.
-const chunkTestEscape = 30 * time.Second
-
-// within receives from ch, or fails the test naming what was not exercised.
-func within[T any](t *testing.T, ch <-chan T, what string) T {
-	t.Helper()
-	select {
-	case v := <-ch:
-		return v
-	case <-time.After(chunkTestEscape):
-		t.Fatalf("not exercised within %s: %s", chunkTestEscape, what)
-		var zero T
-		return zero
-	}
-}
-
-type chunkRun struct {
-	code      int
-	out, errs string
-}
-
-// The single-filer check runs within the command's --timeout: a filer that
-// never answers holds the check only until that bound, which the call
-// carries as its deadline and then observes as its cancellation. The
-// command fails closed (exit 1).
-func TestOpsChunk_SingleFilerCheckWithinTimeout(t *testing.T) {
-	const timeout = 2 * time.Second
-	for _, args := range [][]string{
-		{"verify", "--volume", "v1"},
-		{"gc", "--master", "127.0.0.1:1"},
-		{"snapshots", "--volume", "v1"},
-	} {
-		t.Run(args[0], func(t *testing.T) {
-			f := &stalledConfigFiler{deadline: make(chan time.Time, 1), ended: make(chan error, 1), release: make(chan struct{})}
-			addr := serveGRPC(t, func(s *grpc.Server) { filerpb.RegisterSeaweedFilerServer(s, f) })
-			done := make(chan chunkRun, 1)
-			// Registered before the launch (and run before the server stops):
-			// release a call still held, then join the command.
-			t.Cleanup(func() {
-				close(f.release)
-				select {
-				case r := <-done:
-					done <- r
-				case <-time.After(chunkTestEscape):
-					t.Errorf("%s did not return even after the held call was released", args[0])
-				}
-			})
-			start := time.Now()
-			go func() {
-				code, out, errs := runChunk(append(args, "--chunk-filer", addr, "--timeout", timeout.String())...)
-				done <- chunkRun{code, out, errs}
-			}()
-			dl := within(t, f.deadline, args[0]+": the start check never called GetFilerConfiguration")
-			// The call's deadline is the command's: start + timeout, plus
-			// the time to start the command; far below the check's own 60 s.
-			if dl.IsZero() || dl.After(start.Add(timeout+20*time.Second)) {
-				t.Fatalf("%s: the check's call carried deadline %v (start %v); want the command's %s", args[0], dl, start, timeout)
-			}
-			ended := within(t, f.ended, args[0]+": the start check's call never observed the end of its context")
-			r := within(t, done, args[0]+": the command did not return after the check's call ended")
-			done <- r // for the cleanup's join
-			if ended == nil {
-				t.Fatalf("%s: the check's call did not observe the cancellation", args[0])
-			}
-			// gRPC words a deadline either way ("context deadline exceeded",
-			// or code DeadlineExceeded with a stream reset).
-			if e := chunkErrorOut(t, r.out); r.code != chunkExitFailed || e.Code != codeNotSingleFilerCLI || !strings.Contains(strings.ToLower(e.Message), "deadline") {
-				t.Fatalf("%s with a stalled filer: exit %d %q %q; want 1, not_single_filer, the deadline", args[0], r.code, r.out, r.errs)
-			}
-		})
+	if code == 0 || !strings.Contains(out.String(), "remote_unavailable") || !strings.Contains(out.String(), `"retryable":true`) {
+		t.Errorf("verify: exit %d, out %q; want a retryable remote_unavailable refusal", code, out.String())
 	}
 }

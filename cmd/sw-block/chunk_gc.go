@@ -27,7 +27,7 @@ func chunkGC(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&base, "chunk-path", defaultChunkPathCLI, "chunk catalog namespace")
 	fs.StringVar(&master, "master", "", "authoritative blockmaster gRPC address")
 	fs.BoolVar(&apply, "apply", false, "settle intents, save completed marks and reclaim eligible chunks; default is read-only")
-	fs.DurationVar(&grace, "grace", time.Hour, "two-mark interval and minimum upload age (must exceed the operation deadline plus mark time)")
+	fs.DurationVar(&grace, "grace", time.Hour, "two-mark interval and minimum upload age (at least the operation deadline + clock skew + CAS apply bound, and more than the operation deadline plus mark time)")
 	fs.DurationVar(&ttl, "intent-ttl", time.Hour, "minimum capture-intent age before authoritative epoch expiry")
 	fs.DurationVar(&timeout, "timeout", time.Minute, "bound for this pass, including master/filer/blob calls")
 	if e := fs.Parse(args); e != nil {
@@ -36,17 +36,16 @@ func chunkGC(args []string, stdout, stderr io.Writer) int {
 	if fs.NArg() != 0 || filer == "" || master == "" || timeout <= 0 || ttl <= 0 || grace <= chunkstore.DefaultOpDeadline {
 		return chunkFail("gc", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--chunk-filer and --master are required; durations must be positive and grace must exceed the operation deadline", false)
 	}
-	// One bound for the pass, the single-filer check included.
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	f, closeFn, e := dialChunkFiler(ctx, filer)
-	if errors.Is(e, chunkstore.ErrNotSingleFiler) {
-		return chunkDialFail("gc", e, stdout, stderr)
-	}
+	f, closeFn, e := dialChunkFiler(filer)
 	if e != nil {
 		return chunkResult("gc", nil, e, stdout, stderr)
 	}
 	defer closeFn()
+	if apply {
+		if exit := refuseUnlessSingleFiler("gc", f, timeout, stdout, stderr); exit >= 0 {
+			return exit
+		}
+	}
 	blobs, ok := f.(chunkstore.BlobDeleter)
 	if !ok {
 		return chunkFail("gc", stdout, stderr, chunkExitFailed, codeInternalCLI, "chunk store cannot delete immutable blobs", false)
@@ -70,6 +69,8 @@ func chunkGC(args []string, stdout, stderr io.Writer) int {
 		}
 		return reply.Epoch, nil
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 	out, e := cat.ExecuteGC(ctx, blobs, chunkstore.GCConfig{Grace: grace, IntentTTL: ttl, Now: chunkGCNow, IssuedEpoch: issuedEpoch}, apply)
 	return chunkGCResult(out, e, stdout, stderr)
 }

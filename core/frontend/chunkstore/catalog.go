@@ -36,7 +36,6 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/geometry"
-	"google.golang.org/protobuf/proto"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/filerpb"
 	"github.com/seaweedfs/seaweed-block/core/storage"
@@ -1126,16 +1125,12 @@ func (c *Catalog) DeleteSnapshot(ctx context.Context, vol, name string) (string,
 			}
 			continue // re-read: the path now holds a tombstone or the late snapshot
 		case ref.info.State == SnapActive:
-			// The one mark path shared with retention: a live fork claim
-			// refuses.
-			m, live, _, err := c.markDeleting(ctx, vol, name, ref.rec.Attempt)
+			// The one mark path shared with retention; forks do not hold it.
+			m, _, err := c.markDeleting(ctx, vol, name, ref.rec.Attempt)
 			if err != nil {
 				return "", err
 			}
-			switch m {
-			case markClaimed:
-				return "", claimedErr(vol, name, live)
-			case markGone:
+			if m == markGone {
 				continue
 			}
 		}
@@ -1266,22 +1261,19 @@ func (c *Catalog) fork(ctx context.Context, req ForkRequest, origin string) (For
 		}
 	}
 
-	// Claim the parent before using it (review of #142): one conditional
-	// write on the parent attempt's entry, which retention's delete mark
-	// is conditioned against (see retention.go).
+	// The deadline starts before the parent is read, and every attempt
+	// (a retry included) reads it again: a snapshot deleted before the read
+	// is refused, and one deleted after it stays rooted by GC's grace past
+	// readAt + deadline, the last moment this fork can publish
+	// (INV-SNAP-DELETE-ANY-ORDER-001). The parent is not claimed.
 	readAt := c.now()
-	snap, err := c.claimForkParent(ctx, req)
+	snap, err := c.readForkParent(ctx, req)
 	if err != nil {
 		return ForkResult{}, err
 	}
-	// Read after the claim: a delete of the source marks its HEAD deleting
-	// before it reads claims, so either it sees this claim (and gives its
-	// mark back) or this read sees the mark and the fork gives the claim
-	// back before installing anything.
 	if gone, err := c.volumeGone(ctx, req.Source); err != nil {
 		return ForkResult{}, err
 	} else if gone {
-		c.dropForkClaim(ctx, req, snap.attempt)
 		return ForkResult{}, refuseDeleted(req.Source, "its snapshots cannot be forked")
 	}
 	if snap.geo == (Geometry{}) {
@@ -1382,115 +1374,33 @@ func (c *Catalog) fork(ctx context.Context, req ForkRequest, origin string) (For
 		return ForkResult{}, err
 	}
 	if h.State == storage.ChunkHeadAborted || headDeletingOrDeleted(h) {
-		c.dropIntent(ctx, dstRoot, id)          // the tombstone is permanent: this create never lands
-		c.dropForkClaim(ctx, req, snap.attempt) // and this fork never needs the parent again
+		c.dropIntent(ctx, dstRoot, id) // the tombstone is permanent: this create never lands
 		return ForkResult{}, catErr(CodeTargetExists, false, nil, "fork %s lost to a sweep: its HEAD is an aborted tombstone; fork to a new volume id", req.Target)
 	}
 	if outcome != createUnsettled {
 		c.dropIntent(ctx, dstRoot, id) // confirmed, or refused for good
 	}
-	c.dropForkClaim(ctx, req, snap.attempt) // the fork has its HEAD: the parent is no longer needed for it
 	return forkResult(existing, outcome != createdNow), nil
 }
 
-// claimForkParent adds fork req's claim to the parent attempt its
-// snapshot name resolves to, conditioned on the entry being active with
-// the claims read, and returns that snapshot. A parent deleting is
-// refused (snapshot_deleting); a claim already there is reused.
-func (c *Catalog) claimForkParent(ctx context.Context, req ForkRequest) (SnapshotInfo, error) {
-	root, err := c.volRoot(req.Source)
+// readForkParent returns the published snapshot fork req names. A parent
+// deleting is refused (snapshot_deleting), an absent or aborted one
+// (snapshot_not_found).
+func (c *Catalog) readForkParent(ctx context.Context, req ForkRequest) (SnapshotInfo, error) {
+	ref, ok, err := c.resolveSnap(ctx, req.Source, req.Snapshot)
 	if err != nil {
 		return SnapshotInfo{}, err
 	}
-	token := forkClaim(req.Target, req.RequestID)
-	dir := path.Join(root, snapsDir, req.Snapshot)
-	for try := 0; try < 5; try++ {
-		ref, ok, err := c.resolveSnap(ctx, req.Source, req.Snapshot)
-		if err != nil {
-			return SnapshotInfo{}, err
-		}
-		if !ok || ref.entry == nil || ref.info.State == SnapAborted {
-			return SnapshotInfo{}, catErr(CodeSnapshotNotFound, false, nil, "snapshot %s/%s", req.Source, req.Snapshot)
-		}
-		if ref.info.State == SnapDeleting {
-			return SnapshotInfo{}, catErr(CodeSnapshotDeleting, false, nil, "snapshot %s/%s is being deleted", req.Source, req.Snapshot)
-		}
-		if ref.info.geo.BlockSize != 0 && ref.info.geo.NumBlocks > geometry.MaxVolumeBytes/uint64(ref.info.geo.BlockSize) {
-			return SnapshotInfo{}, catErr(CodeGeometryMismatch, false, nil, "fork size exceeds maximum %d bytes (16 TiB - 4 KiB; uint32 LBA)", geometry.MaxVolumeBytes)
-		}
-		claims := decodeClaims(ref.entry)
-		for _, cl := range claims {
-			if cl == token {
-				return ref.info, nil
-			}
-		}
-		raw := ref.entry.Extended[extSnapClaims]
-		next := proto.Clone(ref.entry).(*filerpb.Entry)
-		setClaims(next, append(claims, token))
-		err = c.f.UpdateEntry(ctx, dir, next, map[string][]byte{extSnapState: []byte(SnapActive), extSnapClaims: raw})
-		if errors.Is(err, ErrPrecondition) || errors.Is(err, ErrNotFound) {
-			continue // a mark, another claim or a delete landed: read again
-		}
-		if err != nil {
-			// The claim may have landed; a retry finds and reuses it.
-			return SnapshotInfo{}, catErr(CodeOutcomeUnknown, true, err, "fork %s: claim on %s/%s outcome unknown; retry with the same request id", req.Target, req.Source, req.Snapshot)
-		}
-		return ref.info, nil
+	if !ok || ref.entry == nil || ref.info.State == SnapAborted {
+		return SnapshotInfo{}, catErr(CodeSnapshotNotFound, false, nil, "snapshot %s/%s", req.Source, req.Snapshot)
 	}
-	return SnapshotInfo{}, catErr(CodeOutcomeUnknown, true, nil, "fork %s: snapshot %s/%s kept changing; retry", req.Target, req.Source, req.Snapshot)
-}
-
-// dropForkClaim removes fork req's claim from its parent attempt once the
-// fork no longer needs it (best effort: retention treats a claim whose
-// target has a HEAD as dead anyway).
-func (c *Catalog) dropForkClaim(ctx context.Context, req ForkRequest, attempt string) {
-	_, _ = c.removeForkClaim(ctx, req, attempt)
-}
-
-// removeForkClaim removes fork req's claim from its parent attempt and
-// reports whether this call confirmed its removal (false with no error:
-// the claim was not there).
-func (c *Catalog) removeForkClaim(ctx context.Context, req ForkRequest, attempt string) (bool, error) {
-	root, err := c.volRoot(req.Source)
-	if err != nil || attempt == "" {
-		return false, err
+	if ref.info.State == SnapDeleting {
+		return SnapshotInfo{}, catErr(CodeSnapshotDeleting, false, nil, "snapshot %s/%s is being deleted", req.Source, req.Snapshot)
 	}
-	token := forkClaim(req.Target, req.RequestID)
-	dir := path.Join(root, snapsDir, req.Snapshot)
-	for try := 0; try < 3; try++ {
-		e, err := c.f.LookupEntry(ctx, dir, attempt)
-		if errors.Is(err, ErrNotFound) {
-			return false, nil
-		}
-		if err != nil {
-			return false, remoteErr(err, "read %s/%s attempt %s", req.Source, req.Snapshot, attempt)
-		}
-		claims := decodeClaims(e)
-		kept := claims[:0:0]
-		for _, cl := range claims {
-			if cl != token {
-				kept = append(kept, cl)
-			}
-		}
-		if len(kept) == len(claims) {
-			return false, nil
-		}
-		c.hook(hookClaimDrop, req.Snapshot)
-		// Conditioned on the state read too (review of f42e723): a
-		// delete that marked the entry meanwhile must never be undone by
-		// this stale copy. A lost condition re-reads a fresh copy.
-		raw := e.Extended[extSnapClaims]
-		next := proto.Clone(e).(*filerpb.Entry)
-		setClaims(next, kept)
-		err = c.f.UpdateEntry(ctx, dir, next, map[string][]byte{extSnapState: e.Extended[extSnapState], extSnapClaims: raw})
-		if err == nil {
-			return true, nil
-		}
-		if !errors.Is(err, ErrPrecondition) {
-			return false, remoteErr(err, "remove the claim of %s on %s/%s", req.Target, req.Source, req.Snapshot)
-		}
+	if ref.info.geo.BlockSize != 0 && ref.info.geo.NumBlocks > geometry.MaxVolumeBytes/uint64(ref.info.geo.BlockSize) {
+		return SnapshotInfo{}, catErr(CodeGeometryMismatch, false, nil, "fork size exceeds maximum %d bytes (16 TiB - 4 KiB; uint32 LBA)", geometry.MaxVolumeBytes)
 	}
-	return false, remoteErr(nil, "claim of %s on %s/%s kept changing", req.Target, req.Source, req.Snapshot)
+	return ref.info, nil
 }
 
 // AbortFork settles a dead fork for a GC sweep (W5): it claims the

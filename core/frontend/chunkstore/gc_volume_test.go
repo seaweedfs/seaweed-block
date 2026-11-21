@@ -51,19 +51,31 @@ func TestVolumeGC_ForeignIntentRootsAndLocalCandidates(t *testing.T) {
 	}
 }
 
-func TestGC_GraceConstructorRejectsCopyDeadline(t *testing.T) {
+// Grace must cover the operation deadline, the clock skew and the CAS apply
+// bound (default: the deadline), so a snapshot deleted while a fork of it is
+// in flight stays rooted until that fork can no longer publish.
+func TestGC_GraceConstructorRequiresDeadlineSkewAndApplyBound(t *testing.T) {
 	_, b, c, g, _ := gcFixture(t)
-	for _, grace := range []time.Duration{0, c.deadline() - time.Nanosecond, c.deadline()} {
+	need := c.deadline() + DefaultGCClockSkew + c.deadline()
+	for _, grace := range []time.Duration{0, c.deadline(), c.deadline() + DefaultGCClockSkew, need - time.Nanosecond} {
 		cfg := g.cfg
-		cfg.Grace = grace
+		cfg.Grace, cfg.ClockSkew, cfg.CASApplyBound = grace, 0, 0
 		if _, err := NewCollector(c, b, cfg); err == nil {
-			t.Errorf("accepted grace %s <= copy deadline", grace)
+			t.Errorf("accepted grace %s < deadline + skew + apply bound %s", grace, need)
 		}
 	}
 	cfg := g.cfg
-	cfg.Grace = c.deadline() + time.Nanosecond
+	cfg.Grace, cfg.ClockSkew, cfg.CASApplyBound = need, 0, 0
+	if _, err := NewCollector(c, b, cfg); err != nil {
+		t.Fatalf("grace = deadline + skew + apply bound: %v", err)
+	}
+	cfg.Grace, cfg.CASApplyBound = need, time.Second // an explicit, smaller bound
 	if _, err := NewCollector(c, b, cfg); err != nil {
 		t.Fatal(err)
+	}
+	cfg.CASApplyBound = -1
+	if _, err := NewCollector(c, b, cfg); err == nil {
+		t.Fatal("accepted a negative CAS apply bound")
 	}
 }
 

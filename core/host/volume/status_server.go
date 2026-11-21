@@ -131,39 +131,39 @@ type RuntimeRebuildResult struct {
 }
 
 type FrontendTransportCapability struct {
-	Protocol            string                           `json:"protocol"`
-	Transport           string                           `json:"transport"`
-	Supported           bool                             `json:"supported"`
-	ListenerImplemented bool                             `json:"listenerImplemented"`
-	ListenerStarted     bool                             `json:"listenerStarted"`
-	StartAllowed        bool                             `json:"startAllowed"`
-	StartReason         string                           `json:"startReason,omitempty"`
-	Reason              string                           `json:"reason"`
-	Preflight           []FrontendTransportPreflightFact `json:"preflight,omitempty"`
+	Protocol            string                           `json:"protocol"`              // the block protocol (iscsi, nvme, ublk)
+	Transport           string                           `json:"transport"`             // its transport (tcp, rdma, local)
+	Supported           bool                             `json:"supported"`             // this build and host can serve it
+	ListenerImplemented bool                             `json:"listenerImplemented"`   // a listener exists for it in this binary
+	ListenerStarted     bool                             `json:"listenerStarted"`       // the listener is running now
+	StartAllowed        bool                             `json:"startAllowed"`          // the preflight checks allow starting it
+	StartReason         string                           `json:"startReason,omitempty"` // why it may or may not start
+	Reason              string                           `json:"reason"`                // why it is or is not supported
+	Preflight           []FrontendTransportPreflightFact `json:"preflight,omitempty"`   // the host facts checked for it
 }
 
 type FrontendTransportPreflightFact struct {
-	Name      string `json:"name"`
-	Available bool   `json:"available"`
-	Reason    string `json:"reason"`
-	Detail    string `json:"detail,omitempty"`
+	Name      string `json:"name"`             // the host fact checked (a module, device or privilege)
+	Available bool   `json:"available"`        // the fact holds on this host
+	Reason    string `json:"reason"`           // why it holds or not
+	Detail    string `json:"detail,omitempty"` // extra detail, such as the path probed
 }
 
 type FrontendCapabilitiesStatus struct {
-	VolumeID                     string                        `json:"volumeID"`
-	HostCapabilityIsProductClaim bool                          `json:"hostCapabilityIsProductClaim"`
-	FrontendTransports           []FrontendTransportCapability `json:"frontendTransports"`
+	VolumeID                     string                        `json:"volumeID"`                     // the served volume
+	HostCapabilityIsProductClaim bool                          `json:"hostCapabilityIsProductClaim"` // always false: host facts, not a supported-product claim
+	FrontendTransports           []FrontendTransportCapability `json:"frontendTransports"`           // one entry per protocol and transport
 }
 
 type NVMeStatus struct {
-	VolumeID string     `json:"volumeID"`
-	Stats    nvme.Stats `json:"stats"`
+	VolumeID string     `json:"volumeID"` // the served volume
+	Stats    nvme.Stats `json:"stats"`    // the NVMe/TCP target's counters since start
 }
 
 // UblkStatus is the /status/ublk body: the ublk device's request counters.
 type UblkStatus struct {
-	VolumeID string     `json:"volumeID"`
-	Stats    ublk.Stats `json:"stats"`
+	VolumeID string     `json:"volumeID"` // the served volume
+	Stats    ublk.Stats `json:"stats"`    // the ublk device's request counters since start
 }
 
 const (
@@ -184,10 +184,16 @@ const (
 // replica readiness from authority movement.
 type StatusProjection struct {
 	frontend.Projection
-	Memory               ProcessMemoryStatus
+	// Memory is the process's memory use at the time of the request.
+	Memory ProcessMemoryStatus
+	// FrontendPrimaryReady: this replica is the healthy, non-superseded
+	// primary and may serve guest I/O.
 	FrontendPrimaryReady bool
-	AuthorityRole        string
-	ReplicationRole      string
+	// AuthorityRole is primary, superseded or unknown.
+	AuthorityRole string
+	// ReplicationRole is none (a primary), recovering, not_ready,
+	// replica_ready or unknown.
+	ReplicationRole string
 	// RoleAdmissionFailure (G1) explains a not-Healthy projection caused
 	// by a failed role call on the replica listener; empty otherwise.
 	RoleAdmissionFailure string `json:",omitempty"`

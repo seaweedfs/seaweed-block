@@ -15,36 +15,38 @@ import (
 // includes socket wait and decode. R2T collection includes target send,
 // initiator response, and H2CData receive.
 type Stats struct {
-	SessionsAccepted uint64 `json:"sessions_accepted"`
-	AdminConnects    uint64 `json:"admin_connects"`
-	IOConnects       uint64 `json:"io_connects"`
+	SessionsAccepted uint64 `json:"sessions_accepted"` // TCP sessions accepted
+	AdminConnects    uint64 `json:"admin_connects"`    // admin-queue Connect commands
+	IOConnects       uint64 `json:"io_connects"`       // I/O-queue Connect commands
 
-	ReadCommands  uint64 `json:"read_commands"`
-	WriteCommands uint64 `json:"write_commands"`
-	FlushCommands uint64 `json:"flush_commands"`
+	ReadCommands  uint64 `json:"read_commands"`  // Read commands received
+	WriteCommands uint64 `json:"write_commands"` // Write commands received
+	FlushCommands uint64 `json:"flush_commands"` // Flush commands received
 
-	InlineWriteCommands uint64 `json:"inline_write_commands"`
-	InlineWriteBytes    uint64 `json:"inline_write_bytes"`
-	R2TWriteCommands    uint64 `json:"r2t_write_commands"`
-	R2TWriteBytes       uint64 `json:"r2t_write_bytes"`
+	InlineWriteCommands uint64 `json:"inline_write_commands"` // writes whose data came inline in the command capsule
+	InlineWriteBytes    uint64 `json:"inline_write_bytes"`    // their data bytes
+	R2TWriteCommands    uint64 `json:"r2t_write_commands"`    // writes whose data the target requested with R2T
+	R2TWriteBytes       uint64 `json:"r2t_write_bytes"`       // their data bytes
 
-	H2CDataPDUs  uint64 `json:"h2c_data_pdus"`
-	H2CDataBytes uint64 `json:"h2c_data_bytes"`
-	C2HDataPDUs  uint64 `json:"c2h_data_pdus"`
-	C2HDataBytes uint64 `json:"c2h_data_bytes"`
+	H2CDataPDUs  uint64 `json:"h2c_data_pdus"`  // host-to-controller data PDUs received
+	H2CDataBytes uint64 `json:"h2c_data_bytes"` // their bytes
+	C2HDataPDUs  uint64 `json:"c2h_data_pdus"`  // controller-to-host data PDUs sent (read data)
+	C2HDataBytes uint64 `json:"c2h_data_bytes"` // their bytes
 
-	WriteCapsuleReceiveParseOps   uint64 `json:"write_capsule_receive_parse_ops"`
-	WriteCapsuleReceiveParseNanos uint64 `json:"write_capsule_receive_parse_ns"`
-	R2TDataCollectionOps          uint64 `json:"r2t_data_collection_ops"`
-	R2TDataCollectionNanos        uint64 `json:"r2t_data_collection_ns"`
-	WriteDispatchWaitOps          uint64 `json:"write_dispatch_wait_ops"`
-	WriteDispatchWaitNanos        uint64 `json:"write_dispatch_wait_ns"`
-	WriteHandlerOps               uint64 `json:"write_handler_ops"`
-	WriteHandlerNanos             uint64 `json:"write_handler_ns"`
-	WriteCompletionQueueWaitOps   uint64 `json:"write_completion_queue_wait_ops"`
-	WriteCompletionQueueWaitNanos uint64 `json:"write_completion_queue_wait_ns"`
-	WriteCompletionSendOps        uint64 `json:"write_completion_send_ops"`
-	WriteCompletionSendNanos      uint64 `json:"write_completion_send_ns"`
+	// Write phase attribution: for each phase, the operations timed and
+	// their total nanoseconds (overlapping phases can overlap in time).
+	WriteCapsuleReceiveParseOps   uint64 `json:"write_capsule_receive_parse_ops"` // write capsules received and decoded (includes socket wait)
+	WriteCapsuleReceiveParseNanos uint64 `json:"write_capsule_receive_parse_ns"`  // total nanoseconds of those operations
+	R2TDataCollectionOps          uint64 `json:"r2t_data_collection_ops"`         // R2T data collections (R2T send to the last H2CData)
+	R2TDataCollectionNanos        uint64 `json:"r2t_data_collection_ns"`          // total nanoseconds of those operations
+	WriteDispatchWaitOps          uint64 `json:"write_dispatch_wait_ops"`         // waits for a write handler to take the command
+	WriteDispatchWaitNanos        uint64 `json:"write_dispatch_wait_ns"`          // total nanoseconds of those operations
+	WriteHandlerOps               uint64 `json:"write_handler_ops"`               // write handler runs (the backend write)
+	WriteHandlerNanos             uint64 `json:"write_handler_ns"`                // total nanoseconds of those operations
+	WriteCompletionQueueWaitOps   uint64 `json:"write_completion_queue_wait_ops"` // waits of a completion for the send queue
+	WriteCompletionQueueWaitNanos uint64 `json:"write_completion_queue_wait_ns"`  // total nanoseconds of those operations
+	WriteCompletionSendOps        uint64 `json:"write_completion_send_ops"`       // completion sends to the host
+	WriteCompletionSendNanos      uint64 `json:"write_completion_send_ns"`        // total nanoseconds of those operations
 }
 
 type targetStats struct {
