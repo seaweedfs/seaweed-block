@@ -116,6 +116,9 @@ type chunkLayerImpl struct {
 	dirty     map[uint64]bool   // chunks dirtied since the cut in progress or the last HEAD
 	inflight  map[uint64]bool   // chunks captured by a cut whose HEAD is not yet installed
 	allDirty  bool              // a BASE block landed: every chunk is dirty
+	// own names the chunks OwnBatch re-uploads under this layer's own keys in
+	// the cut it runs (set and cleared under capMu, read under stMu).
+	own map[uint64]bool
 
 	cutLSN uint64 // H of the latest cut taken (in flight or installed)
 	// chunkMut counts the mutations of each chunk: every dirty-map insert
@@ -405,6 +408,7 @@ func (l *chunkLayerImpl) captureCandidates() map[uint64]bool {
 				absent[idx] = true
 			}
 		}
+		l.addOwnCandidatesLocked(out)
 		l.stMu.Unlock()
 		l.s.mu.RLock()
 		for idx, e := range l.s.v3.mapEntries {
@@ -973,7 +977,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		c.birth = births[c.idx]
 		ref, had := baseHead.Chunks[c.idx]
 		switch {
-		case c.zero && !had, had && !c.zero && ref.SHA256 == c.sum:
+		case c.zero && !had, unchangedFromHead(c, ref, had):
 			st.UnchangedChunks++
 			continue
 		case c.zero:

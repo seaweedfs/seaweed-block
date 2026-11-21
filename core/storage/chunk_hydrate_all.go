@@ -47,7 +47,16 @@ var (
 // or on a fill error that is not a retryable pending state; the caller may
 // call it again.
 func (l *chunkLayerImpl) HydrateAll(ctx context.Context) (HydrateProgress, error) {
+	return l.HydrateAllAt(ctx, 0)
+}
+
+// HydrateAllAt is HydrateAll paced to at most bytesPerSecond of fill payload
+// (one chunk per fill), counted from its start; 0 means unpaced. The pace
+// applies before admission, so a paced walker holds no permit while it waits.
+func (l *chunkLayerImpl) HydrateAllAt(ctx context.Context, bytesPerSecond int64) (HydrateProgress, error) {
 	var p HydrateProgress
+	start := time.Now()
+	started := int64(0) // fills started, for the pace
 	walk, stop := context.WithCancelCause(ctx)
 	defer stop(nil)
 	backoff := hydrateAllMinBackoff
@@ -89,6 +98,21 @@ func (l *chunkLayerImpl) HydrateAll(ctx context.Context) (HydrateProgress, error
 			}
 			continue
 		}
+		if bytesPerSecond > 0 && started > 0 {
+			due := start.Add(time.Duration(float64(started*int64(l.chunkBlocks)*int64(l.blockSize)) / float64(bytesPerSecond) * float64(time.Second)))
+			if d := time.Until(due); d > 0 {
+				t := time.NewTimer(d)
+				select {
+				case <-t.C:
+				case <-walk.Done():
+					t.Stop()
+					return quit(context.Cause(walk))
+				case <-l.ctx.Done():
+					t.Stop()
+					return quit(errChunkLayerClosed)
+				}
+			}
+		}
 		release, err := l.admitFill(walk, stop)
 		if err != nil {
 			p.Deferred++
@@ -110,6 +134,7 @@ func (l *chunkLayerImpl) HydrateAll(ctx context.Context) (HydrateProgress, error
 		if f == nil {
 			continue // resolved meanwhile
 		}
+		started++
 		select {
 		case <-f.done:
 		case <-walk.Done():
