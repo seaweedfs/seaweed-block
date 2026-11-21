@@ -359,10 +359,10 @@ type chunkLayerConfig struct {
 	// impl3 uses its owned LSN map and never calls this optional legacy object.
 	Bitmap chunkBitmapStore
 
-	// BarrierBound bounds how many chunks a cut copies under its barrier:
-	// beyond it, chunks are pre-copied outside the barrier in staging
-	// rounds (at most chunkStageRounds; then the barrier takes the rest).
-	// Zero: unbounded, no staging.
+	// BarrierBound is for legacy test fixtures only: it sets
+	// BarrierOverBound when a cut copies more chunks than this under its
+	// barrier. Production staging is by the copy-on-write side budget (M5
+	// Stage), and production leaves this zero.
 	BarrierBound int
 
 	// UploadConcurrency bounds capture/pre-copy Put calls (0 defaults to 8).
@@ -443,11 +443,12 @@ type chunkCutStats struct {
 	MapPersistNs    int64
 	CASResult       string
 	TotalNs         int64
-	// Pre-copy (BarrierBound > 0): StageRounds staging rounds staged
-	// StagedChunks chunks outside the barrier; StagedChunksUsed of the
-	// uploads in HEAD came from staging. BarrierCopyChunks were copied
-	// under the barrier; BarrierOverBound: more than the bound (the
-	// staging rounds did not converge).
+	// Pre-copy (staging by the copy-on-write side budget, M5 Stage):
+	// StageRounds staging rounds staged StagedChunks chunks outside the
+	// barrier; StagedChunksUsed of the uploads in HEAD came from staging.
+	// BarrierCopyChunks were copied under the barrier. BarrierOverBound:
+	// more than the legacy fixture BarrierBound; always false in
+	// production, where that bound is zero.
 	StageRounds       int
 	StagedChunks      int
 	StagedChunksUsed  int

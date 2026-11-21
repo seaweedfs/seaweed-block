@@ -93,7 +93,7 @@ type ChunkCutStatsBody struct {
 	StagedChunks       int    `json:"stagedChunks"`
 	StagedChunksUsed   int    `json:"stagedChunksUsed"`
 	BarrierCopyChunks  int    `json:"barrierCopyChunks"`
-	BarrierOverBound   bool   `json:"barrierOverBound"`
+	BarrierOverBound   bool   `json:"barrierOverBound"` // always false in production (legacy fixture bound only); deprecated with --chunk-dirty-threshold
 }
 
 func cutStatsBody(s storage.ChunkCutStats) ChunkCutStatsBody {
