@@ -14,6 +14,15 @@ func TestPrecopyResumeReleasesAllWaiters(t *testing.T) {
 	b := precopyMemoryBackend(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	queued := make(chan struct{}, 3)
+	var want, granted []*precopyWaiter
+	grantUnlocked := false
+	b.testPrecopyGranted = func(w *precopyWaiter) {
+		granted = append(granted, w)
+		if b.mu.TryLock() {
+			b.mu.Unlock()
+			grantUnlocked = true
+		}
+	}
 	b.testPrecopyQueued = func() { queued <- struct{}{} }
 	entered := make(chan byte, 3)
 	release := make(chan struct{})
@@ -55,6 +64,9 @@ func TestPrecopyResumeReleasesAllWaiters(t *testing.T) {
 		}(v)
 		select {
 		case <-queued:
+			b.mu.Lock()
+			want = append(want, b.precopy.waiters[len(b.precopy.waiters)-1])
+			b.mu.Unlock()
 		case <-ctx.Done():
 			t.Fatal("write did not queue")
 		}
@@ -65,6 +77,14 @@ func TestPrecopyResumeReleasesAllWaiters(t *testing.T) {
 	default:
 	}
 	resume()
+	if grantUnlocked || len(granted) != 3 {
+		t.Fatalf("FIFO grants not made together under mu: count=%d unlocked=%v", len(granted), grantUnlocked)
+	}
+	for i, w := range want {
+		if granted[i] != w {
+			t.Fatalf("grant %d bypassed arrival order", i)
+		}
+	}
 	seen := map[byte]bool{}
 	for i := 0; i < 3; i++ {
 		select {

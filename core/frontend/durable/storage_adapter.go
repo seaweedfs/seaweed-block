@@ -149,8 +149,9 @@ type StorageBackend struct {
 	// testBeforeIOLock, test-only, runs in admit after the readiness check,
 	// right before the I/O lock (an arrival handshake for queued I/O).
 	testBeforeIOLock        func()
-	testPrecopyQueued       func() // after FIFO registration, outside mu
-	testPrecopyStopFallback func() // before fallback lock attempts, outside mu
+	testPrecopyQueued       func()               // after FIFO registration, outside mu
+	testPrecopyGranted      func(*precopyWaiter) // FIFO grant under mu; nonblocking test hook
+	testPrecopyStopFallback func()               // before fallback lock attempts, outside mu
 	// Runs outside locks after a read registers its readiness notification.
 	testBeforeReadReadyWait func()
 	testAfterAttachRefusal  func()

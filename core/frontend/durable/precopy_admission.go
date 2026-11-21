@@ -81,8 +81,8 @@ func signalPrecopy(w *precopyWaiter) {
 }
 
 // Caller owns mu. INV-CUT-PRECOPY-001: ending the pause releases every
-// waiter and removes its clock before normal admission. Each woken command
-// rechecks the gate; no storage completion is needed to admit another command.
+// waiter in FIFO admission order in this one lock hold, then normal gate checks
+// and completion run independently. New arrivals cannot join the ended pause.
 func (b *StorageBackend) finishPrecopyLocked() {
 	p := b.precopy
 	if p == nil {
@@ -92,6 +92,9 @@ func (b *StorageBackend) finishPrecopyLocked() {
 	b.precopy = nil
 	for _, w := range p.waiters {
 		signalPrecopy(w)
+		if hook := b.testPrecopyGranted; hook != nil {
+			hook(w)
+		}
 	}
 }
 
@@ -112,6 +115,7 @@ func (b *StorageBackend) removePrecopyWaiter(p *precopyAdmission, w *precopyWait
 // An unqueued caller races the pause only at admit's final registration check.
 // Waiting callers own no I/O lock and execute no storage/observer operation.
 func (b *StorageBackend) admitPrecopy(ctx context.Context, admit func() (func(), error)) (func(), error) {
+	arrival := time.Now() // INV-CUT-PRECOPY-001: one command-owned wait budget.
 	for {
 		b.mu.Lock()
 		p := b.precopy
@@ -139,7 +143,7 @@ func (b *StorageBackend) admitPrecopy(ctx context.Context, admit func() (func(),
 		}
 		w := &precopyWaiter{ready: make(chan struct{})}
 		p.waiters = append(p.waiters, w)
-		deadline := p.started.Add(precopyQueueBudget)
+		deadline := arrival.Add(precopyQueueBudget)
 		b.mu.Unlock()
 		if hook := b.testPrecopyQueued; hook != nil {
 			hook()
