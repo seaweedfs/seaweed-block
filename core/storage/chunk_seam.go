@@ -514,6 +514,7 @@ type chunkLayerStats struct {
 // Bytes and rate/estimate belong to one sampler observation; Known=false must
 // never be interpreted as a zero-cost tail. Admission rechecks at its barrier.
 type ChunkCandidateTail struct {
+	FrozenBudget
 	Bytes          uint64        `json:"bytes"`
 	Estimate       time.Duration `json:"estimateNs"`
 	BytesPerSecond float64       `json:"bytesPerSecond"`

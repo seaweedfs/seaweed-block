@@ -497,3 +497,23 @@ distinct states, depth4. `GCDeleteProgress_stop.cfg` exits12 at `LaterProgress`
 (2 generated /2 distinct, depth2). The HTTP source red uses an actual400 and
 checks later reclamation, retained failed tombstones, younger-object progress
 across separate collectors and permanent no-rebind behavior.
+
+### Frozen budget response quantities (F2)
+
+The additive `candidateTail` and typed refusal quantities share storage's
+complete estimate, including its existing margin. Tail-known alone is not
+complete-estimate-known. `FrozenDetachBudget` now includes estimate zero and
+derives `FrozenEstimateKnown` and `MaxRefreezeQuiesce`; `ReportSlackSound` checks
+positive slack implies a known positive estimate and slack + estimate = limit.
+These durations are same-host advice, not a physical completion bound or a change
+to the existing wall-origin request. Admission still rechecks at its barrier.
+
+TLC 2.19, tools SHA256 `936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`,
+local 2026-11-21 10:43Z: `FrozenDetachBudget.cfg` exhausted 829 generated / 535
+distinct states, depth 6, queue empty, no invariant violation. Bounds: elapsed
+{0,30,60}, estimate {0,5,30,60} (then barrier growth), known/force/authority Boolean;
+limit 50, no physical I/O latency. Raw quantities and JSON preservation are
+checked by native Go tests; this derived arithmetic model does not model the HTTP
+encoder, sampler atomicity, orchestrator timing or an unbounded estimator overrun.
+
+#344 review qualification: `TestChunkFrozenDrainRefusalCarriesObservedBudget` drives a real admitted Sync through frontend drain expiry, durable provider and HTTP, with no report injection; `TestFrozenDrainObservationPreservesKnownBeforeReasonMutation` covers the known observation. `TestFrozenSaturatedTailRemainsKnownButNonActionable` and the literal 60 s/61 s candidate cases preserve the existing saturation sentinel (zero slack, not a complete duration). These native controls add no model claim or admission guard.
