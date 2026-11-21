@@ -204,6 +204,8 @@ func parseFlags(args []string) (flags, error) {
 	fs.Bool("chunk-detach-plain-supported", false, "capability: supports idle plain=true on /chunk/detach (no-op flag)")
 	fs.BoolVar(&f.chunk.detachPrecopy, "chunk-detach-precopy", false, "walstore-chunk: converge rolling cuts before final detach; refuse cutover if measured tail does not fit")
 	fs.DurationVar(&f.chunk.captureInterval, "chunk-capture-interval", defaultChunkCaptureInterval, "walstore-chunk: periodic HEAD capture interval (default 0: off; when set, at least 5m)")
+	f.chunk.snapshotSchedule = defaultSnapshotSchedule
+	fs.Var(&f.chunk.snapshotSchedule, "chunk-snapshot-schedule", "walstore-chunk: scheduled snapshots, daily:N or weekly:N (once per period at a per-volume offset, the newest N kept) or off")
 	fs.DurationVar(&f.chunk.maintenanceInterval, "chunk-maintenance-interval", defaultChunkMaintenanceInterval, "walstore-chunk: retention and optional GC pass interval; 0 disables")
 	fs.BoolVar(&f.chunk.automaticGC, "chunk-maintenance-gc", false, "walstore-chunk: enable scoped automatic GC; off pending restart-safe unknown-CAS settlement and density qualification")
 	fs.IntVar(&f.chunk.uploadConcurrency, "chunk-upload-concurrency", 8, "walstore-chunk: maximum concurrent dirty-chunk uploads (1..64)")
@@ -665,6 +667,10 @@ func run(f flags) int {
 			cfg.ChunkMaintenanceInterval = f.chunk.maintenanceInterval
 			cfg.ChunkMaintenanceTimeout = defaultChunkMaintenanceTimeout
 			cfg.ChunkMaintenance = chunk.maintenance
+			if chunk.catalog != nil && f.chunk.snapshotSchedule.period > 0 {
+				cfg.ChunkSnapshotPeriod = f.chunk.snapshotSchedule.period
+				cfg.ChunkScheduledSnapshot = volume.ScheduledSnapshot(chunk.catalog, f.chunk.snapshotSchedule.keep)
+			}
 			cfg.ChunkDetachPrecopy = f.chunk.detachPrecopy
 			cfg.ChunkUploadConcurrency = f.chunk.uploadConcurrency
 			cfg.ChunkHydrationWorkers = f.chunk.hydrationWorkers

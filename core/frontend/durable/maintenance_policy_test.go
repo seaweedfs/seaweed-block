@@ -13,7 +13,7 @@ func TestMaintenanceVolumePhasesDoNotAlign(t *testing.T) {
 	interval := 15 * time.Minute
 	seen := map[time.Duration]bool{}
 	for i := 0; i < 200; i++ {
-		s := initialCutSchedule(fmt.Sprintf("volume-%d", i), interval, t0, true)
+		s := initialCutSchedule(fmt.Sprintf("volume-%d", i), interval, t0, true, 0)
 		offset := s.firstDue.Sub(t0)
 		if offset <= 0 || offset >= interval {
 			t.Fatalf("phase outside interval: %s", offset)
