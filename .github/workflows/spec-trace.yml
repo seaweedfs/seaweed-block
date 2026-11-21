@@ -1,0 +1,47 @@
+name: spec trace
+
+# Every PR description carries the spec trace (see the PR template); this
+# check fails a PR whose description does not.
+#
+# pull_request_target: the workflow and the script come from the base branch,
+# so a PR cannot change its own check. The PR's code is never checked out or
+# run: only its commit is fetched, for the file list. The description is read
+# from the event through an environment variable, never interpolated.
+on:
+  pull_request_target:
+    # edited: the check reads the description and the base.
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: spec-trace-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  trace:
+    name: spec trace
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout base
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check spec trace
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          PR: ${{ github.event.pull_request.number }}
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          bash .github/scripts/spec-trace-check-test.sh
+          git fetch --no-tags origin "+refs/pull/${PR}/head:refs/remotes/pr/head"
+          printf '%s' "$BODY" >body.txt
+          bash .github/scripts/post-merge-review-changed.sh "$BASE" "$HEAD" >changed.bin
+          bash .github/scripts/spec-trace-check.sh body.txt <changed.bin
