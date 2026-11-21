@@ -348,7 +348,7 @@ snapshot lifetime; local persistence does not bypass it.
 
 ## Part B. Invariant ledger
 
-131 rows: 110 ACTIVE, 19 STUB, 2 ARCHIVED; 15 kept from the internal ledger, 116 new.
+130 `INV-` rows: 109 ACTIVE, 19 STUB, 2 ARCHIVED; 15 kept from the internal ledger, 115 new.
 
 The "Machine / transition" column refers to Part A. Notes under a table record what a row does not cover and, for kept rows, what was narrowed from the internal ledger.
 
