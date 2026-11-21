@@ -169,3 +169,124 @@ func TestPrecopyResumeGrantVersusExpiry(t *testing.T) {
 		})
 	}
 }
+
+func TestPrecopyGrantedWaiterFollowsReplacementPause(t *testing.T) {
+	for _, outcome := range []string{"resume", "caller-cancel", "close", "original-deadline"} {
+		t.Run(outcome, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				b := precopyMemoryBackend(t)
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				resumeA, err := b.BeginPrecopyPause(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				queued, proceedA := make(chan int, 2), make(chan struct{})
+				calls := 0
+				var once sync.Once
+				releaseA := func() { once.Do(func() { close(proceedA) }) }
+				b.testPrecopyQueued = func() {
+					calls++
+					queued <- calls
+					if calls == 1 {
+						<-proceedA
+					}
+				}
+				observed := make(chan struct{}, 1)
+				if err := b.SetWriteObserver(precopyQueueObserver{sync: func(context.Context) error { observed <- struct{}{}; return nil }}); err != nil {
+					t.Fatal(err)
+				}
+				done := make(chan error, 1)
+				joined := false
+				resumeB := func() {}
+				t.Cleanup(func() {
+					releaseA()
+					cancel()
+					resumeA()
+					resumeB()
+					if !joined {
+						select {
+						case <-done:
+						case <-time.After(time.Second):
+							t.Error("replacement-pause waiter did not join")
+						}
+					}
+				})
+				go func() { done <- b.Sync(ctx) }()
+				if n := <-queued; n != 1 {
+					t.Fatal("first pause registration missing")
+				}
+				synctest.Wait()
+				time.Sleep(2 * time.Second)
+				resumeA()
+				resumeB, err = b.BeginPrecopyPause(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				releaseA()
+				synctest.Wait()
+				select {
+				case n := <-queued:
+					if n != 2 {
+						t.Fatalf("requeue=%d", n)
+					}
+				case err := <-done:
+					joined = true
+					t.Fatalf("granted waiter returned replacement pause Busy instead of requeueing: %v", err)
+				default:
+					t.Fatal("waiter did not join replacement pause")
+				}
+				select {
+				case <-observed:
+					t.Fatal("waiter crossed replacement pause")
+				default:
+				}
+				switch outcome {
+				case "resume":
+					resumeB()
+				case "caller-cancel":
+					cancel()
+				case "close":
+					_ = b.Close()
+				case "original-deadline":
+					time.Sleep(3 * time.Second)
+				}
+				synctest.Wait()
+				var result error
+				select {
+				case result = <-done:
+					joined = true
+				case <-time.After(time.Second):
+					t.Fatal("replacement boundary did not settle")
+				}
+				switch outcome {
+				case "resume":
+					if result != nil {
+						t.Fatal(result)
+					}
+				case "close":
+					if !errors.Is(result, frontend.ErrBackendClosed) {
+						t.Fatalf("Close priority: %v", result)
+					}
+				case "caller-cancel":
+					if !errors.Is(result, frontend.ErrBackendBusy) || !errors.Is(result, context.Canceled) {
+						t.Fatalf("caller priority: %v", result)
+					}
+				case "original-deadline":
+					if !errors.Is(result, frontend.ErrBackendBusy) || !errors.Is(result, context.DeadlineExceeded) || ctx.Err() != nil {
+						t.Fatalf("requeue reset command allowance: %v ctx=%v", result, ctx.Err())
+					}
+				}
+				select {
+				case <-observed:
+					if result != nil {
+						t.Fatal("refused replacement waiter performed Sync")
+					}
+				default:
+					if result == nil {
+						t.Fatal("resumed replacement waiter did not Sync")
+					}
+				}
+			})
+		})
+	}
+}
