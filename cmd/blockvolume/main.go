@@ -202,7 +202,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.chunk.collection, "chunk-collection", "", "walstore-chunk: collection for chunk needles (empty = filer default / storage rule)")
 	fs.StringVar(&f.chunk.replication, "chunk-replication", "", "walstore-chunk: replication for chunk needles (empty = filer default / storage rule)")
 	fs.Bool("chunk-detach-plain-supported", false, "capability: supports idle plain=true on /chunk/detach (no-op flag)")
-	fs.BoolVar(&f.chunk.detachPrecopy, "chunk-detach-precopy", false, "walstore-chunk: converge rolling cuts before final detach; refuse cutover if measured tail does not fit")
+	fs.BoolVar(&f.chunk.detachPrecopy, "chunk-detach-precopy", false, "walstore-chunk: not supported in this release; blockvolume refuses to start when it is set")
 	fs.DurationVar(&f.chunk.captureInterval, "chunk-capture-interval", defaultChunkCaptureInterval, "walstore-chunk: periodic HEAD capture interval (default 0: off; when set, at least 5m)")
 	f.chunk.snapshotSchedule = defaultSnapshotSchedule
 	fs.Var(&f.chunk.snapshotSchedule, "chunk-snapshot-schedule", "walstore-chunk: scheduled snapshots, daily:N or weekly:N (once per period at a per-volume offset, the newest N kept) or off")

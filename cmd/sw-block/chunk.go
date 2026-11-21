@@ -267,9 +267,9 @@ func chunkDetach(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&volumeID, "volume", "", "volume id")
 	fs.StringVar(&statusAddr, "status-addr", "", "blockvolume status address or URL (with --chunk-control-endpoint)")
 	fs.DurationVar(&timeout, "timeout", 120*time.Second, "operation bound (capped at the server's OpDeadline)")
-	fs.BoolVar(&frozen, "frozen", false, "guest is already frozen; use one cut within its remaining five-second budget")
-	fs.Int64Var(&freezeStartedAtNs, "freeze-started-at-ns", 0, "guest freeze start in Unix nanoseconds on the serving host clock")
-	fs.BoolVar(&allowOverBudget, "allow-over-budget", false, "explicit final frozen attempt; record over_budget rather than refuse its estimate")
+	fs.BoolVar(&frozen, "frozen", false, "not supported in this release: the server refuses a frozen detach (frozen_detach_unsupported)")
+	fs.Int64Var(&freezeStartedAtNs, "freeze-started-at-ns", 0, "not supported in this release; only valid with --frozen")
+	fs.BoolVar(&allowOverBudget, "allow-over-budget", false, "not supported in this release; only valid with --frozen")
 	if err := fs.Parse(args); err != nil {
 		return chunkFail(chunkName(fs), stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, err.Error(), false)
 	}

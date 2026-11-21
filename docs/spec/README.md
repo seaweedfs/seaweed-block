@@ -516,7 +516,6 @@ limit 50, no physical I/O latency. Raw quantities and JSON preservation are
 checked by native Go tests; this derived arithmetic model does not model the HTTP
 encoder, sampler atomicity, orchestrator timing or an unbounded estimator overrun.
 
-#344 review qualification: `TestChunkFrozenDrainRefusalCarriesObservedBudget` drives a real admitted Sync through frontend drain expiry, durable provider and HTTP, with no report injection; `TestFrozenDrainObservationPreservesKnownBeforeReasonMutation` covers the known observation. `TestFrozenSaturatedTailRemainsKnownButNonActionable` and the literal 60 s/61 s candidate cases preserve the existing saturation sentinel (zero slack, not a complete duration). These native controls add no model claim or admission guard.
 
 
 2026-11-21 offline-seal extension: `PlainDetach` now includes frontend Close,
@@ -572,3 +571,4 @@ HEAD-read deadline/cancellation controls in
 controls in `TestWorkspaceUncertaintyPrecedesRequestRefusal`. Actual request
 cancellation retains its own controls, including a conflicting dependency status.
 These are reply-classification claims, not authority-durability or delivery proof.
+#344 review qualification: `TestFrozenDrainObservationPreservesKnownBeforeReasonMutation` covers the known observation. (The HTTP-level drain refusal test was removed when `/chunk/detach` stopped admitting frozen requests in this release.) `TestFrozenSaturatedTailRemainsKnownButNonActionable` and the literal 60 s/61 s candidate cases preserve the existing saturation sentinel (zero slack, not a complete duration). These native controls add no model claim or admission guard.

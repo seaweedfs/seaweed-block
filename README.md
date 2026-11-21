@@ -137,6 +137,10 @@ sw-block ops chunk verify    --volume v1 --chunk-filer <filer>   # read-only che
 ```
 
 `volume-delete` is refused while the volume is attached or has snapshots.
+Frozen detach and the pre-copy detach are not supported in this release: a
+detach with `--frozen` (`frozen:true` on `POST /chunk/detach`) is refused with
+409 `frozen_detach_unsupported`, and `blockvolume` refuses to start with
+`--chunk-detach-precopy`.
 `restore` creates the target from the snapshot and, with `--status-addr` naming
 the blockvolume that serves the target, starts the background restore there:
 the target serves at once, copies every chunk under its own keys and becomes
