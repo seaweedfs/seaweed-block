@@ -12,8 +12,6 @@ import (
 // FIEMAP with SYNC resolves delayed allocation before inspecting the mapping.
 // Reject holes, unknown/delayed mappings and unwritten extents; fallocate alone
 // does not satisfy the initialized-file experiment's precondition.
-const defaultDataFileSyncMode = "fdatasync"
-
 func verifyInitializedFile(f *os.File) error { return verifyAllocatedFile(f, true) }
 
 func verifyAllocatedFile(f *os.File, written bool) error {

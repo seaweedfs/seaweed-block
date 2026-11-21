@@ -7,12 +7,12 @@ import (
 	"os"
 )
 
-// Data-only sync applies to WAL/extent data on Linux by default. Descriptor slots,
-// chunk maps, creation and directory operations retain full fsync.
+// Data-only sync applies to WAL/extent data. Descriptor slots, chunk maps,
+// creation and directory operations retain full fsync.
 func configuredDataSyncMode() (string, error) {
 	mode := os.Getenv("SWBLOCK_SYNC")
-	if mode == "" {
-		mode = defaultDataFileSyncMode
+	if mode == "" || mode == "auto" {
+		return "auto", nil
 	}
 	switch mode {
 	case "fsync":
@@ -24,16 +24,42 @@ func configuredDataSyncMode() (string, error) {
 	}
 }
 
-func newDataFileSync(f *os.File) (func() error, error) {
+func selectedDataSyncMode(f *os.File) (string, string, error) {
 	mode, err := configuredDataSyncMode()
 	if err != nil {
-		return nil, err
+		return "", "", err
 	}
+	reason := "explicit SWBLOCK_SYNC override"
+	if mode == "auto" {
+		mode, reason = defaultDataSyncMode(f)
+	}
+	return mode, reason, nil
+}
+
+// DataSyncStatus is immutable for the lifetime of an open volume.
+type DataSyncStatus struct {
+	Mode   string
+	Reason string
+}
+
+func (s *WALStore) DataSyncPolicy() DataSyncStatus { return s.dataSyncStatus }
+
+func newDataFileSync(f *os.File) (func() error, error) {
+	sync, _, err := bindDataFileSync(f)
+	return sync, err
+}
+
+func bindDataFileSync(f *os.File) (func() error, DataSyncStatus, error) {
+	mode, reason, err := selectedDataSyncMode(f)
+	if err != nil {
+		return nil, DataSyncStatus{}, err
+	}
+	status := DataSyncStatus{Mode: mode, Reason: reason}
+	log.Printf("storage: WAL/extent sync=%s file=%s reason=%s", mode, f.Name(), reason)
 	if mode == "fsync" {
-		return f.Sync, nil
+		return f.Sync, status, nil
 	}
-	log.Printf("storage: WAL/extent sync=fdatasync file=%s", f.Name())
-	return func() error { return fdatasyncFile(f) }, nil
+	return func() error { return fdatasyncFile(f) }, status, nil
 }
 
 // Configuration errors must not create or initialize a volume file.
