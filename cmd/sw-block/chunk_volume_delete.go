@@ -8,14 +8,13 @@ import (
 	"io"
 	"time"
 
-	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
 	"github.com/seaweedfs/seaweed-block/core/ops"
 	"github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"github.com/seaweedfs/seaweed-block/core/rpc/link"
 )
 
 // chunkVolumeDelete: sw-block ops chunk volume-delete <vol> --chunk-filer
@@ -51,7 +50,7 @@ func chunkVolumeDelete(args []string, stdout, stderr io.Writer) int {
 		return exit
 	}
 	defer closeFn()
-	conn, err := grpc.NewClient(master, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := link.Dial(master)
 	if err != nil {
 		return chunkResult("volume-delete", nil, err, stdout, stderr)
 	}

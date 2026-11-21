@@ -123,6 +123,7 @@ the example units, which turn them into flags. blockvolume itself reads only
 | `SWB_CHUNK_PATH` | `--chunk-path` | `/swblock/chunks` | Filer directory, one directory per volume |
 | `SWB_CHUNK_COLLECTION`, `SWB_CHUNK_REPLICATION` | `--chunk-collection`, `--chunk-replication` | empty (filer default) | Placement of chunk needles |
 | `SWB_CHUNK_CAPTURE_INTERVAL` | `--chunk-capture-interval` | `0` (no timer) | Automatic cut interval, e.g. `15m` |
+| `SWB_CHUNK_SNAPSHOT_SCHEDULE` | `--chunk-snapshot-schedule` | `daily:7` | Scheduled named snapshots: `daily:N` or `weekly:N` (one per period at a per-volume offset, the newest N kept), or `off` |
 | `SWB_CHUNK_UPLOAD_CONCURRENCY` | `--chunk-upload-concurrency` | `8` | Parallel chunk uploads (1..64) |
 | `SWB_CHUNK_CONTROL_ENDPOINT` | `--chunk-control-endpoint` | `false` | `/chunk/*` routes on the status listener |
 | `SWB_WORKSPACE_LEASE` | `--workspace-lease` | `false` | Require a master lease; fail closed without one |
