@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 )
@@ -150,5 +152,87 @@ func TestChunkFrozenRefusalCarriesServerBudget(t *testing.T) {
 	}
 	if _, ok := got["frozenEstimateNs"]; ok {
 		t.Fatalf("terminal response offered retry budget: %s", w.Body)
+	}
+}
+
+// Hold a real admitted Sync through the replication observer, so the actual
+// frontend drain expires before storage frozen admission. No report is injected.
+type frozenDrainObserver struct{ entered, release chan struct{} }
+
+func (*frozenDrainObserver) Observe(context.Context, uint32, uint64, []byte) error { return nil }
+func (o *frozenDrainObserver) Sync(ctx context.Context, _ uint64) error {
+	close(o.entered)
+	select {
+	case <-o.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+func TestChunkFrozenDrainRefusalCarriesObservedBudget(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	remote := storage.NewMemChunkRemote()
+	dp, err := durable.NewDurableProvider(durable.ProviderConfig{
+		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: 256, ChunkBlocks: 16,
+		ChunkDetachPrecopy: true, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
+	}, healthyView{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dp.Close() })
+	if _, err = dp.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = dp.RecoverVolume(ctx, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	backend, err := dp.Open(ctx, "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = backend.Write(ctx, 4096, make([]byte, 4096)); err != nil {
+		t.Fatal(err)
+	}
+	observer := &frozenDrainObserver{make(chan struct{}), make(chan struct{})}
+	if err = backend.(*durable.StorageBackend).SetWriteObserver(observer); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	var once sync.Once
+	t.Cleanup(func() {
+		once.Do(func() { close(observer.release) })
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Error("Sync did not join")
+		}
+	})
+	go func() { done <- backend.Sync(ctx) }()
+	select {
+	case <-observer.entered:
+	case <-ctx.Done():
+		t.Fatal("Sync never admitted")
+	}
+	before, _ := remote.GetHead(ctx)
+	puts := remote.Puts()
+	server := chunkServer(t, NewChunkControl(dp, nil), true)
+	body := fmt.Sprintf(`{"volumeID":"v1","frozen":true,"freezeStartedAtNs":%d,"allowOverBudget":true}`, time.Now().Add(-time.Second).UnixNano())
+	response := serve(t, server, http.MethodPost, "/chunk/detach", body, "")
+	var got struct {
+		Code string `json:"code"`
+		storage.FrozenBudget
+		Remaining time.Duration `json:"remainingFreezeNs"`
+		Elapsed   time.Duration `json:"guestFreezeElapsedNs"`
+	}
+	if err = json.Unmarshal(response.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != 409 || got.Code != "frozen_tail_too_large" || got.FreezeLimit != 5*time.Second || got.Elapsed < time.Second || got.Remaining <= 0 || got.Elapsed+got.Remaining != got.FreezeLimit || got.FrozenEstimateKnown || got.MaxRefreezeQuiesce != 0 {
+		t.Fatalf("real drain refusal lost observation: %d %s", response.Code, response.Body)
+	}
+	after, _ := remote.GetHead(ctx)
+	if after.Gen != before.Gen || remote.Puts() != puts {
+		t.Fatal("failed drain uploaded or published")
 	}
 }

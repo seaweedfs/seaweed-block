@@ -18,7 +18,9 @@ type FrozenDetachOptions struct {
 	AllowOverBudget bool
 }
 
-// FrozenBudget reports the exact storage-owned forecast and its quiesce slack.
+// FrozenBudget reports the storage-owned admission forecast and quiesce slack.
+// A tail above the existing 60s ceiling is a saturated rejection sentinel,
+// not a complete duration: it stays known but offers zero quiesce slack.
 // INV-WS-FREEZE-ACCOUNTING-001: same-host durations; admission still rechecks.
 type FrozenBudget struct {
 	FrozenEstimate      time.Duration `json:"frozenEstimateNs"`
@@ -62,13 +64,17 @@ func FrozenDetachFromContext(ctx context.Context) (FrozenDetachOptions, bool) {
 func (r *PrecopyReport) admitFrozen(opts FrozenDetachOptions) bool {
 	return r.admitFrozenAt(opts, time.Now())
 }
-func (r *PrecopyReport) admitFrozenAt(opts FrozenDetachOptions, now time.Time) bool {
+func (r *PrecopyReport) observeFrozenAt(opts FrozenDetachOptions, now time.Time) {
 	r.FrozenBudget = r.frozenBudgetEstimate()
 	r.GuestFrozen = true
 	r.GuestFreezeElapsed = max(time.Duration(0), now.Sub(opts.StartedAt))
 	budget := r.FrozenBudget
 	r.RemainingFreeze = max(time.Duration(0), budget.FreezeLimit-r.GuestFreezeElapsed)
-	known := budget.FrozenEstimateKnown
+}
+
+func (r *PrecopyReport) admitFrozenAt(opts FrozenDetachOptions, now time.Time) bool {
+	r.observeFrozenAt(opts, now)
+	known := r.FrozenBudget.FrozenEstimateKnown
 	if opts.AllowOverBudget {
 		r.Reason = "over_budget"
 		r.OverBudget = true
@@ -92,12 +98,24 @@ func frozenRefusal(r PrecopyReport) error {
 // The original report remains unchanged on the wire.
 func (r PrecopyReport) IsReplay() bool { return r.replayed }
 
-func (l *chunkLayerImpl) admitFrozen(r *PrecopyReport, opts FrozenDetachOptions) bool {
+func (l *chunkLayerImpl) frozenNow() time.Time {
 	now := time.Now()
 	if hook := l.testFrozenNow; hook != nil {
 		now = hook()
 	}
-	return r.admitFrozenAt(opts, now)
+	return now
+}
+
+// M5 frozen-detach report: observe before drain/reason handling, without
+// deciding admission or overriding an existing refusal.
+func (l *chunkLayerImpl) observeFrozen(r *PrecopyReport, opts FrozenDetachOptions, enabled bool) {
+	if enabled {
+		r.observeFrozenAt(opts, l.frozenNow())
+	}
+}
+
+func (l *chunkLayerImpl) admitFrozen(r *PrecopyReport, opts FrozenDetachOptions) bool {
+	return r.admitFrozenAt(opts, l.frozenNow())
 }
 
 // RememberDetachReport completes the telemetry kept with an applied or still

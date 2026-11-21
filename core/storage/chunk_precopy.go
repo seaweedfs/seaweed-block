@@ -219,6 +219,7 @@ func (l *chunkLayerImpl) precopyDetach(ctx context.Context, prepare func(context
 	}
 	l.precopyFreeze = func(tail uint64, barrierStart time.Time, current chunkCutStats) bool {
 		report = l.precopyEstimate(tail, report.Attempts)
+		l.observeFrozen(&report, guestFreeze, externallyFrozen)
 		report.Drain = drain
 		report.DrainTimedOut = errors.Is(drainErr, context.DeadlineExceeded)
 		if drainErr != nil {
