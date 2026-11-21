@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -911,7 +912,7 @@ func TestWorkspaceLeaseConcurrentRenewalsWritersExtendersClose(t *testing.T) {
 	case werr = <-writersDone:
 		writersDone <- werr // keep it for the cleanup join
 	case <-time.After(20 * time.Second):
-		t.Fatal("deadlock: writers did not finish after the release")
+		t.Fatal("deadlock: writers did not finish after the release", allGoroutineStacks())
 	}
 	if werr != nil {
 		t.Fatal("writer:", werr)
@@ -919,7 +920,7 @@ func TestWorkspaceLeaseConcurrentRenewalsWritersExtendersClose(t *testing.T) {
 	select {
 	case <-closed:
 	case <-time.After(20 * time.Second):
-		t.Fatal("deadlock: Close did not finish after the release")
+		t.Fatal("deadlock: Close did not finish after the release", allGoroutineStacks())
 	}
 	time.Sleep(50 * time.Millisecond) // renewals continue after Close
 	stopRenewers()
@@ -928,7 +929,7 @@ func TestWorkspaceLeaseConcurrentRenewalsWritersExtendersClose(t *testing.T) {
 	select {
 	case <-settled:
 	case <-time.After(20 * time.Second):
-		t.Fatal("deadlock: renewers did not finish")
+		t.Fatal("deadlock: renewers did not finish", allGoroutineStacks())
 	}
 
 	if s := time.Duration(slowest.Load()); s >= 2*time.Second {
@@ -1216,5 +1217,18 @@ func TestLeaseTestClockMonotonicAcrossFreezeResume(t *testing.T) {
 	close(errs)
 	for e := range errs {
 		t.Fatal(e)
+	}
+}
+
+// allGoroutineStacks returns the stack of every goroutine on a new line, so
+// that a stall reported by a test shows where each party is blocked.
+func allGoroutineStacks() string {
+	buf := make([]byte, 1<<20)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			return string('\n') + string(buf[:n])
+		}
+		buf = make([]byte, 2*len(buf))
 	}
 }
