@@ -220,7 +220,11 @@ a launcher of your own that binds blockmaster to a node address must add it.
 ## Correctness and verification
 
 - **CI** runs `go build`, `go vet` and `go test -short` on every pull request
-  and push to `main` ([workflow](.github/workflows/test.yml)). Crash,
+  and push to `main` ([workflow](.github/workflows/test.yml)); that set leaves out the four
+  long, disk-heavy packages (a pull request runs those of them it changes);
+  they run in full, together with the legacy-fixture configuration, on a
+  separate test VM for every merge train (commit status `full-suite (pool VM)`
+  on the train head). Crash,
   mutation, real-SeaweedFS and binary tests are described in the
   [core design, Part 2](docs/design/block-design.md#part-2-verification-lessons-known-issues),
   with the known issues.
