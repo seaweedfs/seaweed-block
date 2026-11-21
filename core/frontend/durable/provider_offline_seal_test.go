@@ -3,6 +3,8 @@ package durable_test
 import (
 	"bytes"
 	"context"
+	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -66,5 +68,50 @@ func TestOfflineSealUsesCallerDeadline(t *testing.T) {
 				t.Fatal("offline seal lost acknowledged bytes")
 			}
 		})
+	}
+}
+
+// Caller cancellation ends an offline upload; the closed backend stays closed,
+// and a new caller can retry the seal without losing acknowledged bytes.
+type cancelSealRemote struct {
+	*storage.MemChunkRemote
+	once   sync.Once
+	cancel context.CancelFunc
+}
+
+func (r *cancelSealRemote) Put(ctx context.Context, key string, b []byte) error {
+	r.once.Do(r.cancel)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return r.MemChunkRemote.Put(ctx, key, b)
+}
+func TestOfflineSealCallerCancelCanRetry(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	remote := &cancelSealRemote{MemChunkRemote: storage.NewMemChunkRemote(), cancel: cancel}
+	p := chunkProvider(t, t.TempDir(), remote, v1View(), 0)
+	openRecovered(t, p)
+	b, err := p.Open(context.Background(), "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = b.Write(context.Background(), 4096, block(0x72)); err != nil {
+		t.Fatal(err)
+	}
+	if err = b.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = p.DetachVolumePlain(ctx, "v1"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("offline caller cancellation lost: %v", err)
+	}
+	if _, err = b.Write(context.Background(), 8192, block(0x73)); err == nil {
+		t.Fatal("failed offline seal reopened closed frontend")
+	}
+	retry, end := context.WithTimeout(context.Background(), time.Minute)
+	defer end()
+	r, _, err := p.DetachVolumePlain(retry, "v1")
+	if err != nil || r.Head.State != storage.ChunkHeadDetached || !bytes.Equal(headBlock(t, remote.MemChunkRemote, 1), block(0x72)) {
+		t.Fatalf("offline retry failed: %+v %v", r, err)
 	}
 }

@@ -517,3 +517,14 @@ checked by native Go tests; this derived arithmetic model does not model the HTT
 encoder, sampler atomicity, orchestrator timing or an unbounded estimator overrun.
 
 #344 review qualification: `TestChunkFrozenDrainRefusalCarriesObservedBudget` drives a real admitted Sync through frontend drain expiry, durable provider and HTTP, with no report injection; `TestFrozenDrainObservationPreservesKnownBeforeReasonMutation` covers the known observation. `TestFrozenSaturatedTailRemainsKnownButNonActionable` and the literal 60 s/61 s candidate cases preserve the existing saturation sentinel (zero slack, not a complete duration). These native controls add no model claim or admission guard.
+
+
+2026-11-21 offline-seal extension: `PlainDetach` now includes frontend Close,
+which disables new readers without discarding readers already admitted. An idle
+closed frontend may enter PlainStop; abort does not clear its closed bit.
+`cfg/PlainDetach.cfg` exhausts 18 generated / 10 distinct states, depth 4, queue
+empty (TLC 2.19 with the tools hash above). `PlainDetach_no_idle.cfg` violates
+`IdleAtStop` in 8 distinct states. This remains an admission model, not a timing
+model. Caller deadline and cancellation are witnessed natively by
+`TestOfflineSealUsesCallerDeadline`, `TestOfflineSealCallerCancelCanRetry` and
+`TestChunkPlainDetachUsesCallerDeadline`; live-detach bounds retain their tests.

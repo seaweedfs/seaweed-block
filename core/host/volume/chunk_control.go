@@ -556,6 +556,15 @@ func (s *StatusServer) handleChunkDetach(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	ctx, cancel := chunkContext(r, req.TimeoutMs)
+	if req.Plain { // G.GONE.SEALED: offline work is bounded by its caller.
+		cancel()
+		ctx, cancel = context.WithCancel(r.Context())
+		if req.TimeoutMs > 0 {
+			const maxTimeoutMs = int64((1<<63 - 1) / time.Millisecond)
+			cancel()
+			ctx, cancel = context.WithTimeout(r.Context(), time.Duration(min(req.TimeoutMs, maxTimeoutMs))*time.Millisecond)
+		}
+	}
 	defer cancel()
 	var res ChunkDetachResponse
 	var err error
