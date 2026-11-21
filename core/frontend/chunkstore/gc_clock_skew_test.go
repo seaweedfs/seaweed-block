@@ -10,8 +10,8 @@ import (
 	"time"
 )
 
-// The default must cover the supported deployment's pairwise clock difference
-// (< one minute), rather than assuming every master uses its default20s.
+// Exercise the default one-minute pairwise budget independently of the
+// implementation constant. Wider clock differences require a larger config.
 const testedGCSkew = time.Minute
 
 func TestGCSkewSnapshotDeleteGraceBothDirections(t *testing.T) {
