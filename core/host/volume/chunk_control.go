@@ -231,6 +231,7 @@ func (s *StatusServer) chunkMux() http.Handler {
 	mux.HandleFunc("/chunk/snapshots", s.handleChunkSnapshots)
 	mux.HandleFunc("/chunk/snapshot/delete", s.handleChunkSnapshotDelete)
 	mux.HandleFunc("/chunk/detach", s.handleChunkDetach)
+	mux.HandleFunc("/chunk/restore", s.handleChunkRestore)
 	// Any other /chunk path: a typed JSON 404, like every other /chunk
 	// error, not net/http's plain-text page.
 	mux.HandleFunc("/chunk/", func(w http.ResponseWriter, r *http.Request) {
@@ -589,8 +590,9 @@ type ChunkProvider interface {
 var errFrozenDetachUnsupported = errors.New("frozen detach unsupported by provider")
 
 type chunkControl struct {
-	p   ChunkProvider
-	cat *chunkstore.Catalog
+	p        ChunkProvider
+	cat      *chunkstore.Catalog
+	restores restoreRuns
 }
 
 // NewChunkControl serves the routes from a durable provider (cut, detach)
