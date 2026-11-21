@@ -25,7 +25,8 @@ func (l *chunkLayerImpl) unlockCap() {
 // caller at a time drains the queue (any other caller only leaves its
 // reports queued for it, so a hook that publishes again cannot deadlock);
 // the drainer is registered with Close. Once Close has begun, no further
-// report is delivered: the rest are dropped.
+// report is dequeued and the rest are dropped; a report already dequeued
+// may still reach the hook, and Close waits for it.
 func (l *chunkLayerImpl) runPublishSettled() {
 	hook := l.cfg.OnPublishSettled
 	if hook == nil {

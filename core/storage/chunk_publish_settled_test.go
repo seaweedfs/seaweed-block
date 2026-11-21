@@ -319,7 +319,10 @@ func TestChunkPublishSettled_HookThatPublishes(t *testing.T) {
 	var mu sync.Mutex
 	var got [][2]uint64
 	nested := false
-	layer.cfg.OnPublishSettled = func(ctx context.Context, prev, next ChunkHead) {
+	// One cancellation covers the outer cut and the cut its hook makes;
+	// cleanup cancels it before the bounded join.
+	cutCtx, cancelCuts := context.WithCancel(context.Background())
+	layer.cfg.OnPublishSettled = func(_ context.Context, prev, next ChunkHead) {
 		mu.Lock()
 		got = append(got, [2]uint64{prev.Gen, next.Gen})
 		again := !nested
@@ -327,13 +330,13 @@ func TestChunkPublishSettled_HookThatPublishes(t *testing.T) {
 		mu.Unlock()
 		if again {
 			w.write(t, s, 9, 0x29)
-			if _, err := layer.Cut(ctx); err != nil {
+			if _, err := layer.Cut(cutCtx); err != nil {
 				t.Errorf("cut from the hook: %v", err)
 			}
 		}
 	}
 	w.write(t, s, 2, 0x22)
-	cut := launch(t, "a cut whose hook publishes", nil, func() error { _, err := layer.Cut(context.Background()); return err })
+	cut := launch(t, "a cut whose hook publishes", cancelCuts, func() error { _, err := layer.Cut(cutCtx); return err })
 	if err, ok := cut.result(10 * time.Second); !ok {
 		t.Fatal("a hook that publishes deadlocked")
 	} else if err != nil {
