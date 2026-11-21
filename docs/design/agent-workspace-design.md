@@ -255,7 +255,11 @@ Snapshots of the target are refused in `Forking` and `Restoring`.
 ### Attached-volume scheduling
 
 Periodic HEAD capture is off by default (opt-in; when set, at least 5
-minutes), and retention runs every hour. Named snapshots remain explicit.
+minutes), and retention runs every hour. Named snapshots are explicit, plus scheduled snapshots
+(`--chunk-snapshot-schedule`, default `daily:7`): one snapshot per period at a
+per-volume offset (not at a wall-clock hour), class `scheduled`, the newest N
+kept by retention; a restoring volume is skipped and counted, and a failed
+attempt is retried with backoff and visible in status (`snapshot_overdue`).
 A five-minute context covers the whole cut; completed immutable uploads survive
 an expired attempt only under matching version/HEAD generation. Automatic GC is
 opt-in until the 50/200-volume metadata/RSS qualification accepts its full-catalog

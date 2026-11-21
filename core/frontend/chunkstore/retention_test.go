@@ -381,3 +381,33 @@ func TestChunkSizeClipsLastChunk(t *testing.T) {
 		}
 	}
 }
+
+// Scheduled snapshots form their own class: retention keeps the newest K
+// of them, K from the newest one's LabelScheduleKeep, and they neither
+// count against KeepNewest nor get the age keeps; other snapshots are
+// planned as before.
+func TestPlanRetention_ScheduledClassKeepsItsOwnNewest(t *testing.T) {
+	now := retBase.Add(30 * 24 * time.Hour)
+	keep3 := map[string]string{LabelScheduleKeep: "3"}
+	var snaps []SnapshotInfo
+	for d := 0; d < 6; d++ { // one scheduled snapshot a day, the newest first at now-1h
+		snaps = append(snaps, snapAt(fmt.Sprintf("sched-%d", d), now.Add(-time.Hour-time.Duration(d)*24*time.Hour), SnapshotClassScheduled, time.Time{}, keep3))
+	}
+	snaps = append(snaps,
+		snapAt("manual-new", now.Add(-2*time.Hour), "", time.Time{}, nil),
+		snapAt("manual-old", now.Add(-20*24*time.Hour), "", time.Time{}, nil))
+	k := kept(planRetention(RetentionPolicy{KeepNewest: 2, KeepYoungerNs: int64(30 * 24 * time.Hour)}, snaps, now))
+	for _, name := range []string{"sched-0", "sched-1", "sched-2", "manual-new", "manual-old"} {
+		if k[name] == nil {
+			t.Fatalf("kept %v; %s missing", k, name)
+		}
+	}
+	if len(k) != 5 {
+		t.Fatalf("kept %v; want the 3 newest scheduled and both manual (KeepNewest 2 is theirs alone)", k)
+	}
+	// Without a valid label the default count applies.
+	snaps[0].Labels = nil
+	if k := kept(planRetention(RetentionPolicy{}, snaps[:6], now)); len(k) != 6 {
+		t.Fatalf("kept %v with no label on the newest; want min(6, DefaultScheduleKeep)", k)
+	}
+}

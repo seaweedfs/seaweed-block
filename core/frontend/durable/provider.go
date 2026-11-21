@@ -179,6 +179,14 @@ type ProviderConfig struct {
 	ChunkMaintenanceInterval time.Duration
 	ChunkMaintenanceTimeout  time.Duration
 	ChunkMaintenance         func(context.Context, string) error
+	// ChunkSnapshotPeriod schedules a named snapshot of each attached
+	// healthy volume once per period, at a per-volume offset (zero
+	// disables it). ChunkScheduledSnapshot takes one: it cuts through cut
+	// (one urgent cut) and records the snapshot of the HEAD cut returns. A
+	// *SnapshotSkip skips the attempt, counted by reason; a
+	// *SnapshotFailure carries the failure's code.
+	ChunkSnapshotPeriod    time.Duration
+	ChunkScheduledSnapshot func(ctx context.Context, volumeID string, at time.Time, cut func(context.Context) (storage.ChunkHead, error)) error
 	// DetachFreezeTimeout bounds how long a failing DetachVolume keeps guest
 	// I/O stopped before it resumes or settles: the drain and final cut get
 	// three quarters of it, the settlement of a failed cut the rest (the
@@ -278,6 +286,9 @@ type volHandle struct {
 	chunkDetach bool
 	chunkStop   context.CancelFunc
 	chunkDone   chan struct{}
+	// snapshots is the scheduled-snapshot state of the running loop, nil
+	// when the schedule is off.
+	snapshots *snapshotSlot
 }
 
 // VolumeStatus is a read-only diagnostic snapshot of one durable volume
@@ -315,12 +326,13 @@ type VolumeStatus struct {
 // AwaitingAuthority: recovered, the layer waits for master authority to
 // attach. Stats is zero until the layer is attached.
 type ChunkStatus struct {
-	Attached          bool                    // the chunk layer is attached to the remote
-	AwaitingAuthority bool                    // recovered; the layer waits for master authority to attach
-	Fenced            bool                    // a newer holder fenced this layer: it publishes nothing
-	RemoteLSN         uint64                  // the LSN of the remote HEAD (what the remote holds durably)
-	Stats             storage.ChunkLayerStats // the layer's cut counters; zero until attached
-	HostBudget        any                     `json:",omitempty"` // the host background-cut budget state, with --host-limit-dir
+	Attached          bool                     // the chunk layer is attached to the remote
+	AwaitingAuthority bool                     // recovered; the layer waits for master authority to attach
+	Fenced            bool                     // a newer holder fenced this layer: it publishes nothing
+	RemoteLSN         uint64                   // the LSN of the remote HEAD (what the remote holds durably)
+	Stats             storage.ChunkLayerStats  // the layer's cut counters; zero until attached
+	HostBudget        any                      `json:",omitempty"` // the host background-cut budget state, with --host-limit-dir
+	ScheduledSnapshot *ScheduledSnapshotStatus `json:",omitempty"` // the scheduled-snapshot state; absent when the schedule is off or its loop has not started
 }
 
 // NewDurableProvider constructs a provider. view is the ONLY
@@ -342,6 +354,9 @@ func NewDurableProvider(cfg ProviderConfig, view frontend.ProjectionView) (*Dura
 	}
 	if cfg.ChunkMaintenanceInterval > 0 && cfg.ChunkMaintenance == nil {
 		return nil, fmt.Errorf("durable: chunk maintenance interval requires its callback")
+	}
+	if cfg.ChunkSnapshotPeriod < 0 || (cfg.ChunkSnapshotPeriod > 0 && cfg.ChunkScheduledSnapshot == nil) {
+		return nil, fmt.Errorf("durable: a chunk snapshot period must not be negative and requires its callback")
 	}
 	if cfg.ChunkBlocks == 0 {
 		cfg.ChunkBlocks = defaultChunkBlocks
@@ -571,8 +586,9 @@ func durableIdentityConflict(got, want frontend.Identity) error {
 // durable lineage latching without scraping logs.
 func (p *DurableProvider) DurableStatuses() []VolumeStatus {
 	type chunkView struct {
-		layer    storage.ChunkLayer
-		awaiting bool
+		layer     storage.ChunkLayer
+		awaiting  bool
+		snapshots *snapshotSlot
 	}
 	p.mu.Lock()
 	handles := make(map[string]*volHandle, len(p.volumes))
@@ -580,7 +596,7 @@ func (p *DurableProvider) DurableStatuses() []VolumeStatus {
 	for volumeID, h := range p.volumes {
 		handles[volumeID] = h
 		if p.cfg.Impl == ImplWALStoreChunk {
-			chunks[volumeID] = chunkView{layer: h.chunk, awaiting: h.waitGen != 0}
+			chunks[volumeID] = chunkView{layer: h.chunk, awaiting: h.waitGen != 0, snapshots: h.snapshots}
 		}
 	}
 	p.mu.Unlock()
@@ -595,6 +611,10 @@ func (p *DurableProvider) DurableStatuses() []VolumeStatus {
 			}
 			if budget, ok := p.cfg.ChunkBudget.(interface{ Snapshot() any }); ok {
 				cs.HostBudget = budget.Snapshot()
+			}
+			if cv.snapshots != nil {
+				ss := cv.snapshots.status(time.Now())
+				cs.ScheduledSnapshot = &ss
 			}
 			st.Chunk = cs
 		}

@@ -276,6 +276,16 @@ Durable store state of the served volume. Go type `volume.durableStatusBody`.
 | `Volumes[].Chunk.Stats.BarrierOverBound` | uint64 | BarrierOverBound counts cuts whose barrier copied more than the bound after the staging rounds. |
 | `Volumes[].Chunk.Stats.AbsentChunks` | int | AbsentChunks is the number of HEAD-named chunks still absent with a block not local (what HydrateAll would still fetch); 0 = fully local. |
 | `Volumes[].Chunk.HostBudget` | interface | the host background-cut budget state, with --host-limit-dir (omitted when empty) |
+| `Volumes[].Chunk.ScheduledSnapshot` | object | the scheduled-snapshot state; absent when the schedule is off or its loop has not started (omitted when empty) |
+| `Volumes[].Chunk.ScheduledSnapshot.periodNs` | int64 | PeriodNs is the schedule period; zero means off. |
+| `Volumes[].Chunk.ScheduledSnapshot.lastOkNs` | int64 | LastOkNs is when the last scheduled snapshot succeeded; zero: none since the schedule started. |
+| `Volumes[].Chunk.ScheduledSnapshot.nextDueNs` | int64 | NextDueNs is when the next attempt is due. |
+| `Volumes[].Chunk.ScheduledSnapshot.lastFailure` | object | LastFailure is the last failed attempt since the last success. (omitted when empty) |
+| `Volumes[].Chunk.ScheduledSnapshot.lastFailure.code` | string | Code is the failure's code, as the control endpoint reports it. |
+| `Volumes[].Chunk.ScheduledSnapshot.lastFailure.atNs` | int64 | AtNs is when the attempt failed. |
+| `Volumes[].Chunk.ScheduledSnapshot.attempts` | int | Attempts counts the failed attempts since the last success. |
+| `Volumes[].Chunk.ScheduledSnapshot.skipped{}` | int64 | Skipped counts attempts not made, by reason. (omitted when empty) |
+| `Volumes[].Chunk.ScheduledSnapshot.snapshot_overdue` | bool | Overdue reports that no scheduled snapshot succeeded within one period plus the retry cap, counted from the last success or, before any, from the start of the schedule. |
 | `Volumes[].Warnings[]` | string | Warnings are the store's typed recovery warnings (e.g. wal_hole_suspected, issue #51); they do not change readiness. HolesSuspected counts the recoveries that found a WAL hole. (omitted when empty) |
 | `Volumes[].HolesSuspected` | uint64 | (group of `Warnings`) Warnings are the store's typed recovery warnings (e.g. wal_hole_suspected, issue #51); they do not change readiness. HolesSuspected counts the recoveries that found a WAL hole. (omitted when empty) |
 

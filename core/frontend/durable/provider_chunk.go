@@ -320,14 +320,19 @@ func (p *DurableProvider) attachChunk(ctx context.Context, volumeID string, h *v
 // startChunkLoop starts the periodic cuts of an attached layer, if configured
 // and not already running. The caller holds h.attachMu and p.mu.
 func (p *DurableProvider) startChunkLoop(volumeID string, h *volHandle, layer storage.ChunkLayer) {
-	if (p.cfg.ChunkCaptureInterval <= 0 && (p.cfg.ChunkMaintenanceInterval <= 0 || p.cfg.ChunkMaintenance == nil)) || h.chunkStop != nil {
+	snapshotsOn := p.cfg.ChunkSnapshotPeriod > 0 && p.cfg.ChunkScheduledSnapshot != nil
+	if (p.cfg.ChunkCaptureInterval <= 0 && (p.cfg.ChunkMaintenanceInterval <= 0 || p.cfg.ChunkMaintenance == nil) && !snapshotsOn) || h.chunkStop != nil {
 		return
 	}
 	loopCtx, cancel := context.WithCancel(context.Background())
 	h.chunkStop, h.chunkDone = cancel, make(chan struct{})
+	h.snapshots = nil
+	if snapshotsOn {
+		h.snapshots = &snapshotSlot{s: newSnapshotSchedule(volumeID, p.cfg.ChunkSnapshotPeriod, time.Now())}
+	}
 	lin := h.chunkLineage
 	current := func() bool { return p.maintenanceCurrent(volumeID, h, layer, lin) }
-	go p.chunkBackground(loopCtx, cancel, volumeID, layer, h.chunkDone, current)
+	go p.chunkBackground(loopCtx, cancel, volumeID, layer, h.chunkDone, current, h.snapshots)
 }
 
 func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h *volHandle) (storage.ChunkLayer, error) {
@@ -800,7 +805,7 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 // chunkBackground owns both workers and their cancellation. A fence is observed
 // even while either worker is waiting on a cooperative remote call. INV-MAINT-JOIN:
 // done closes only after every admitted worker has returned.
-func (p *DurableProvider) chunkBackground(ctx context.Context, cancel context.CancelFunc, volumeID string, layer storage.ChunkLayer, done chan struct{}, current func() bool) {
+func (p *DurableProvider) chunkBackground(ctx context.Context, cancel context.CancelFunc, volumeID string, layer storage.ChunkLayer, done chan struct{}, current func() bool, snapshots *snapshotSlot) {
 	defer close(done)
 	defer cancel()
 	var workers sync.WaitGroup
@@ -815,6 +820,10 @@ func (p *DurableProvider) chunkBackground(ctx context.Context, cancel context.Ca
 	if p.cfg.ChunkMaintenanceInterval > 0 && p.cfg.ChunkMaintenance != nil {
 		workers.Add(1)
 		go func() { defer workers.Done(); p.chunkMaintenanceLoop(ctx, volumeID, layer, current) }()
+	}
+	if snapshots != nil {
+		workers.Add(1)
+		go func() { defer workers.Done(); p.chunkSnapshotLoop(ctx, volumeID, layer, current, snapshots) }()
 	}
 	timer := time.NewTicker(chunkSchedulePoll)
 	defer timer.Stop()
@@ -864,35 +873,44 @@ func (p *DurableProvider) chunkMaintenanceLoop(ctx context.Context, volumeID str
 		if timeout <= 0 {
 			timeout = time.Minute
 		}
-		passCtx, cancel := context.WithTimeout(ctx, timeout)
-		// The projection has no change channel. One bounded watcher belongs to
-		// this pass, never to an individual tick; cancellation is joined below.
-		watchDone := make(chan struct{})
-		go func() {
-			defer close(watchDone)
-			tick := time.NewTicker(chunkSchedulePoll)
-			defer tick.Stop()
-			for {
-				select {
-				case <-passCtx.Done():
-					return
-				case <-tick.C:
-					if layer.Fenced() || !current() {
-						cancel()
-						return
-					}
-				}
-			}
-		}()
-		err := p.cfg.ChunkMaintenance(passCtx, volumeID)
-		cancel()
-		<-watchDone
+		err := boundedPass(ctx, layer, current, timeout, func(passCtx context.Context) error {
+			return p.cfg.ChunkMaintenance(passCtx, volumeID)
+		})
 		if err != nil && ctx.Err() == nil {
 			log.Printf("durable: maintenance volume=%s: %v", volumeID, err)
 		}
 		// Completion-relative reset coalesces all elapsed ticks; no catch-up queue.
 		timer.Reset(interval)
 	}
+}
+
+// boundedPass runs fn with a context that ends after timeout, or as soon
+// as the layer is fenced or the attachment is no longer current. The
+// projection has no change channel: one bounded watcher belongs to the
+// pass, never to an individual tick, and is joined before return.
+func boundedPass(ctx context.Context, layer storage.ChunkLayer, current func() bool, timeout time.Duration, fn func(context.Context) error) error {
+	passCtx, cancel := context.WithTimeout(ctx, timeout)
+	watchDone := make(chan struct{})
+	go func() {
+		defer close(watchDone)
+		tick := time.NewTicker(chunkSchedulePoll)
+		defer tick.Stop()
+		for {
+			select {
+			case <-passCtx.Done():
+				return
+			case <-tick.C:
+				if layer.Fenced() || !current() {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	err := fn(passCtx)
+	cancel()
+	<-watchDone
+	return err
 }
 
 func (p *DurableProvider) stopChunkLoop(h *volHandle) {

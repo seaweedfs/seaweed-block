@@ -23,6 +23,11 @@ import (
 //   - "pinned": an explicit keep. It is never expired by count or age,
 //     only by its own ExpiresAtNs or an explicit delete. A snapshot with
 //     ExpiresAtNs set is pinned whatever its class.
+//   - "scheduled": a scheduled snapshot. Retention keeps the newest K of
+//     this class, where K is the LabelScheduleKeep of the newest one
+//     (DefaultScheduleKeep when absent).
+//     They are not counted against KeepNewest, and the age and log-spaced
+//     keeps do not apply to them, so other snapshots are unaffected.
 //   - "" (snapshots made before classes existed): treated as unpinned.
 //
 // The policy is stored on the VOLUME entry. Retain keeps
@@ -61,8 +66,16 @@ import (
 // it and frees the name.
 
 const (
-	SnapshotClassSemantic = "semantic"
-	SnapshotClassPinned   = "pinned"
+	SnapshotClassSemantic  = "semantic"
+	SnapshotClassPinned    = "pinned"
+	SnapshotClassScheduled = "scheduled"
+
+	// LabelScheduleKeep, on a scheduled snapshot, is how many scheduled
+	// snapshots its schedule keeps (a decimal count).
+	LabelScheduleKeep = "swb.schedule.keep"
+	// DefaultScheduleKeep is the count kept when the newest scheduled
+	// snapshot carries no valid LabelScheduleKeep.
+	DefaultScheduleKeep = 7
 
 	CodeInvalidClass  = "invalid_class"
 	CodeInvalidPolicy = "invalid_policy"
@@ -74,14 +87,14 @@ const (
 	extRetentionRev = "retention_rev"
 )
 
-// ValidateSnapshotClass refuses a class other than "", "semantic" and
-// "pinned" (invalid_class).
+// ValidateSnapshotClass refuses a class other than "", "semantic",
+// "pinned" and "scheduled" (invalid_class).
 func ValidateSnapshotClass(class string) error {
 	switch class {
-	case "", SnapshotClassSemantic, SnapshotClassPinned:
+	case "", SnapshotClassSemantic, SnapshotClassPinned, SnapshotClassScheduled:
 		return nil
 	}
-	return catErr(CodeInvalidClass, false, nil, "snapshot class %q: want %q or %q", class, SnapshotClassSemantic, SnapshotClassPinned)
+	return catErr(CodeInvalidClass, false, nil, "snapshot class %q: want %q, %q or %q", class, SnapshotClassSemantic, SnapshotClassPinned, SnapshotClassScheduled)
 }
 
 // Pinned reports whether the snapshot is an explicit keep.
@@ -198,6 +211,7 @@ const (
 	keepHourly    = "hourly"
 	keepDaily     = "daily"
 	keepWeekly    = "weekly"
+	keepScheduled = "scheduled_newest"
 	reasonExpired = "expired"
 )
 
@@ -215,11 +229,27 @@ func planRetention(p RetentionPolicy, snaps []SnapshotInfo, now time.Time) []Ret
 	})
 	nowNs := now.UnixNano()
 	out := make([]RetentionDecision, len(ordered))
-	unpinned := 0
+	unpinned, scheduled := 0, 0
+	scheduleKeep := -1 // read from the newest scheduled snapshot
 	windows := map[string]bool{}
 	for i, s := range ordered {
 		pinned := s.Pinned() && (s.ExpiresAtNs == 0 || nowNs < s.ExpiresAtNs)
 		d := RetentionDecision{Name: s.Name, Attempt: s.attempt, CreatedNs: s.CreatedNs, Class: s.Class, Pinned: pinned}
+		if !pinned && s.Class == SnapshotClassScheduled {
+			if scheduleKeep < 0 {
+				scheduleKeep = scheduleKeepOf(s)
+			}
+			if scheduled < scheduleKeep {
+				d.Reasons = append(d.Reasons, keepScheduled)
+			}
+			scheduled++
+			d.Keep = len(d.Reasons) > 0
+			if !d.Keep {
+				d.Reasons = []string{reasonExpired}
+			}
+			out[i] = d
+			continue
+		}
 		if pinned {
 			d.Reasons = append(d.Reasons, keepPinned)
 		} else {
@@ -261,6 +291,14 @@ func planRetention(p RetentionPolicy, snaps []SnapshotInfo, now time.Time) []Ret
 		out[i] = d
 	}
 	return out
+}
+
+// scheduleKeepOf is the count a scheduled snapshot's schedule keeps.
+func scheduleKeepOf(s SnapshotInfo) int {
+	if n, err := strconv.Atoi(s.Labels[LabelScheduleKeep]); err == nil && n > 0 {
+		return n
+	}
+	return DefaultScheduleKeep
 }
 
 // RetentionFailure is the deletion that stopped a Retain pass.
