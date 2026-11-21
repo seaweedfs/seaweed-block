@@ -45,6 +45,13 @@ expect 1 "IMPL without transition" "${ok/IMPL M5.Quiesce>Copy/IMPL M5}"
 expect 1 "NONE is not a kind" "${ok/IMPL M5.Quiesce>Copy \/ INV-MAINT-ONE-OWNER/NONE: tooling only, no machine}"
 expect 1 "core file deleted without Simplest" "$ok" D core/storage/old.go
 expect 1 "two kinds" "${ok/IMPL M5.Quiesce>Copy/IMPL M5.Quiesce>Copy FIX INV-MAINT-ONE-OWNER}"
+expect 1 "second Machine/INV line with another kind" "$ok
+Machine/INV: FIX INV-MAINT-ONE-OWNER"
+expect 1 "second Machine/INV line in list and bold form" "$ok
+- **Machine/INV:** CHANGE M5"
+expect 1 "Simplest declared twice" "$ok
+$simplest
+$simplest" M core/storage/gc.go
 expect 1 "kind token with a trailing junk" "${ok/IMPL M5.Quiesce>Copy/FIX INV-GC-SKEW-001x}"
 expect 1 "transition with a stray character" "${ok/IMPL M5.Quiesce>Copy/IMPL M5.Quiesce>Copy;x}"
 expect 1 "key inside another word" "${ok/Feature: O-SNAP-2/Not-Feature: O-SNAP-2}"

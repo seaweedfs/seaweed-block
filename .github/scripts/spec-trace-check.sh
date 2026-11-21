@@ -35,6 +35,13 @@ value() {
 bad=0
 problem() { echo "spec-trace: $1"; bad=1; }
 
+# Each trace line is declared once: a second Machine/INV line could carry a
+# second kind past the check.
+for key in Feature: Machine/INV: Model: Red-first: Simplest:; do
+	n=$(printf '%s\n' "$body" | grep -cE "^[[:space:]]*([-*][[:space:]]+)?(\*\*)?$key" || true)
+	((n <= 1)) || problem "$key is declared $n times; declare it once"
+done
+
 for key in Feature: Machine/INV: Model: Red-first:; do
 	v=$(value "$key")
 	if [[ -z $v ]]; then
