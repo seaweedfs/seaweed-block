@@ -637,7 +637,7 @@ Notes:
 
 | ID | Statement | Machine / transition | Enforced in | Test | TLA+ property | Status |
 |---|---|---|---|---|---|---|
-| `INV-SEC-ONE-SEAM-001` | Every production gRPC client and server is built by core/rpc/link; a non-test file outside it that creates insecure credentials or a raw grpc server fails the guard test. | AUTHORITY: every gRPC link (client dial, server build) | `core/rpc/link` `Dial`, `NewServer` | `TestLink_NoProductionSiteBypassesTheSeam`, `TestLink_DialReachesNewServerUnaryAndStream`, `TestLink_ServerRunsInterceptorsInOrder` (`core/rpc/link/link_test.go`) | — (no state machine; the guard test is the proof form) | ACTIVE |
+| `INV-SEC-ONE-SEAM-001` | Every production gRPC client and server is built by core/rpc/link; a non-test file outside it that constructs a gRPC client or server or insecure credentials, under any import name, fails the guard test. | AUTHORITY: every gRPC link (client dial, server build) | `core/rpc/link` `Dial`, `DialWith`, `NewServer` | `TestLink_NoProductionSiteBypassesTheSeam`, `TestLink_GuardDetectsRawConstructionsAndAliases`, `TestLink_DialReachesNewServerUnaryAndStream`, `TestLink_ServerRunsInterceptorsInOrder` (`core/rpc/link/link_test.go`) | — (no state machine; the guard test is the proof form) | ACTIVE |
 
 ### Experimental data-file synchronization
 

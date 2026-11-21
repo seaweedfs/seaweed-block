@@ -24,13 +24,13 @@ func (r *GRPCFailbackRuntime) ExecuteFailback(ctx context.Context, req FailbackR
 	}
 	// Injected options replace the default link (as before); none means the
 	// standard link.
-	dial := link.Dial
+	var conn *grpc.ClientConn
+	var err error
 	if len(r.Opts) > 0 {
-		dial = func(target string, _ ...grpc.DialOption) (*grpc.ClientConn, error) {
-			return grpc.NewClient(target, r.Opts...)
-		}
+		conn, err = link.DialWith(r.Addr, r.Opts...)
+	} else {
+		conn, err = link.Dial(r.Addr)
 	}
-	conn, err := dial(r.Addr)
 	if err != nil {
 		return FailbackRuntimeResult{}, err
 	}

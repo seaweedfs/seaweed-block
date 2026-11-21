@@ -2,10 +2,15 @@ package link
 
 import (
 	"context"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -104,8 +109,120 @@ func TestLink_ServerRunsInterceptorsInOrder(t *testing.T) {
 	}
 }
 
+// rawLinkCalls lists the gRPC link constructions in one Go source that
+// bypass this package: a client (grpc.NewClient, grpc.Dial, grpc.DialContext),
+// a server (grpc.NewServer) or plaintext credentials (insecure.NewCredentials),
+// whatever local name the import has (aliases and dot imports included).
+func rawLinkCalls(name string, src []byte) ([]string, error) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, name, src, parser.SkipObjectResolution)
+	if err != nil {
+		return nil, err
+	}
+	banned := map[string]map[string]bool{
+		"google.golang.org/grpc":                      {"NewClient": true, "Dial": true, "DialContext": true, "NewServer": true},
+		"google.golang.org/grpc/credentials/insecure": {"NewCredentials": true},
+	}
+	local := map[string]map[string]bool{} // import name -> banned functions
+	dot := map[string]bool{}              // banned functions reachable unqualified
+	for _, im := range f.Imports {
+		path, _ := strconv.Unquote(im.Path.Value)
+		fns, ok := banned[path]
+		if !ok {
+			continue
+		}
+		name := filepath.Base(path)
+		if im.Name != nil {
+			name = im.Name.Name
+		}
+		switch name {
+		case "_":
+		case ".":
+			for fn := range fns {
+				dot[fn] = true
+			}
+		default:
+			local[name] = fns
+		}
+	}
+	var found []string
+	ast.Inspect(f, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		switch fun := call.Fun.(type) {
+		case *ast.SelectorExpr:
+			if x, ok := fun.X.(*ast.Ident); ok && local[x.Name][fun.Sel.Name] {
+				found = append(found, fmt.Sprintf("%s: %s.%s", fset.Position(call.Pos()), x.Name, fun.Sel.Name))
+			}
+		case *ast.Ident:
+			if dot[fun.Name] {
+				found = append(found, fmt.Sprintf("%s: %s", fset.Position(call.Pos()), fun.Name))
+			}
+		}
+		return true
+	})
+	return found, nil
+}
+
+// The detector finds every form of a raw construction, and nothing in a file
+// that only uses this package.
+func TestLink_GuardDetectsRawConstructionsAndAliases(t *testing.T) {
+	cases := map[string]string{
+		"client": `package p
+import "google.golang.org/grpc"
+func f() { grpc.NewClient("x") }
+`,
+		"dial": `package p
+import "google.golang.org/grpc"
+func f() { grpc.Dial("x") }
+`,
+		"dialContext": `package p
+import "google.golang.org/grpc"
+func f() { grpc.DialContext(nil, "x") }
+`,
+		"server": `package p
+import "google.golang.org/grpc"
+func f() { grpc.NewServer() }
+`,
+		"aliasClient": `package p
+import g "google.golang.org/grpc"
+func f() { g.NewClient("x") }
+`,
+		"aliasCreds": `package p
+import ins "google.golang.org/grpc/credentials/insecure"
+func f() { ins.NewCredentials() }
+`,
+		"dotImport": `package p
+import . "google.golang.org/grpc"
+func f() { NewServer() }
+`,
+		"plainCredsFn": `package p
+import "google.golang.org/grpc/credentials/insecure"
+func f() { insecure.NewCredentials() }
+`,
+	}
+	for name, src := range cases {
+		got, err := rawLinkCalls(name+".go", []byte(src))
+		if err != nil || len(got) != 1 {
+			t.Errorf("%s: found %v (%v), want exactly one raw construction", name, got, err)
+		}
+	}
+	clean := `package p
+import (
+	"google.golang.org/grpc"
+	"github.com/seaweedfs/seaweed-block/core/rpc/link"
+)
+func f() { link.Dial("x", grpc.WithBlock()) }
+`
+	if got, err := rawLinkCalls("clean.go", []byte(clean)); err != nil || len(got) != 0 {
+		t.Errorf("clean: found %v (%v), want none", got, err)
+	}
+}
+
 // Every production gRPC link goes through this package: no other non-test Go
-// file builds plaintext credentials or a gRPC server directly.
+// file constructs a gRPC client or server or plaintext credentials directly.
 func TestLink_NoProductionSiteBypassesTheSeam(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", "..", ".."))
 	if err != nil {
@@ -129,14 +246,17 @@ func TestLink_NoProductionSiteBypassesTheSeam(t *testing.T) {
 		if !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
 			return nil
 		}
-		b, err := os.ReadFile(p)
+		src, err := os.ReadFile(p)
 		if err != nil {
 			return err
 		}
-		src := string(b)
-		if strings.Contains(src, "insecure.NewCredentials(") || strings.Contains(src, "grpc.NewServer(") {
+		found, err := rawLinkCalls(p, src)
+		if err != nil {
+			return err
+		}
+		for _, f := range found {
 			rel, _ := filepath.Rel(root, p)
-			bad = append(bad, rel)
+			bad = append(bad, rel+" ("+f[strings.LastIndex(f, ": ")+2:]+")")
 		}
 		return nil
 	})
@@ -144,6 +264,6 @@ func TestLink_NoProductionSiteBypassesTheSeam(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(bad) > 0 {
-		t.Fatalf("gRPC links built outside core/rpc/link (use link.Dial / link.NewServer): %v", bad)
+		t.Fatalf("gRPC links built outside core/rpc/link (use link.Dial, link.DialWith or link.NewServer): %v", bad)
 	}
 }

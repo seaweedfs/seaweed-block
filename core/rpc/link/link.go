@@ -19,6 +19,13 @@ func Dial(target string, opts ...grpc.DialOption) (*grpc.ClientConn, error) {
 	return grpc.NewClient(target, all...)
 }
 
+// DialWith opens a lazy client connection to target with exactly opts: the
+// caller supplies the transport credentials (no default is added). It is the
+// one place a link with caller-chosen options is built.
+func DialWith(target string, opts ...grpc.DialOption) (*grpc.ClientConn, error) {
+	return grpc.NewClient(target, opts...)
+}
+
 // ServerConfig is a server's interceptor chain; the zero value has none.
 type ServerConfig struct {
 	Unary  []grpc.UnaryServerInterceptor
