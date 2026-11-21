@@ -457,3 +457,41 @@ The same command with each negative config exited12 at its intended invariant:
 third `NoUploadBeforeAdmission`, the fourth `OverrideVisible`, and the last
 `AuthorityAtPublication`. Source tests separately check time/metadata handling,
 no-upload refusal, preserved bytes, uncertain outcomes and typed API dispatch.
+
+
+## GC clock allowance
+
+`GCClockSkew.tla` checks the time-admission portion of M6 GC: pairwise clock
+bias -S/0/+S, timestamp truncation 0/Q, and retaining future-dated roots while
+an independently eligible object progresses. It abstracts the existing complete
+root scan, exclusive copy settlement and higher-epoch guards; it does not prove
+those protocols or safety with clocks outside the configured bound.
+
+Local TLC2.19 / Java21 run 2026-11-21, jar SHA256
+`936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`:
+`java -Xmx512m -cp <jar> tlc2.TLC -config GCClockSkew_safe.cfg GCClockSkew`
+from `docs/spec`, each run with its own metadir. Bounds G=3, S=1, Q=1,
+Born=10, MaxT=17. Positive exhausted: exit0, 96 generated / 96 distinct states,
+queue empty, depth16. `GCClockSkew_no_skew.cfg` exited12 at `NoEarlyExpiry`
+(43/43, depth8); `GCClockSkew_no_resolution.cfg` exited12 at `NoEarlyExpiry`
+(44/44, depth8); `GCClockSkew_abort_future.cfg` exited12 at
+`IndependentProgress` (11/11, depth2). Source tests independently cover
+persisted-mark compatibility, future-clock resets and authority-preserving expiry.
+
+
+## Per-object GC DELETE progress
+
+`GCDeleteProgress.tla` models the narrow sweep transition after a complete,
+authorised mark: three ordered candidates, first DELETE definitively rejected,
+later deletes accepted. It checks that the rejected fid is never reported
+successful, the failure is visible, and later candidates progress. Root/epoch
+admission, elapsed coverage and persistence are outside this small abstraction;
+source tests retain those guards and reopen independent collectors between passes.
+
+Local TLC2.19 / Java21, same jar SHA256 as GCClockSkew above, 2026-11-21:
+`java -Xmx512m -cp <jar> tlc2.TLC -config GCDeleteProgress_safe.cfg GCDeleteProgress`
+from `docs/spec`, separate metadirs. Positive exhausted exit0, 4 generated /4
+distinct states, depth4. `GCDeleteProgress_stop.cfg` exits12 at `LaterProgress`
+(2 generated /2 distinct, depth2). The HTTP source red uses an actual400 and
+checks later reclamation, retained failed tombstones, younger-object progress
+across separate collectors and permanent no-rebind behavior.
