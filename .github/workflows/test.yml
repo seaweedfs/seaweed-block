@@ -37,6 +37,9 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
+          # Two commits: the PR merge commit and its base parent, so the test
+          # step can see which packages the PR touches.
+          fetch-depth: 2
 
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
@@ -59,8 +62,9 @@ jobs:
         run: go vet ./...
 
       - name: Test default configuration
-        # A PR runs the light set: every package except the long, disk-heavy and
-        # timing-sensitive ones, which run in full on main and on train PRs.
+        # A PR runs the light set plus every heavy package its own diff touches;
+        # the long, disk-heavy, timing-sensitive packages run in full on main and
+        # on train PRs. A green PR check does not cover an untouched heavy package.
         env:
           EVENT: ${{ github.event_name }}
           HEAD_REF: ${{ github.head_ref }}
@@ -70,6 +74,13 @@ jobs:
             pkgs=$(go list ./...)
           else
             pkgs=$(go list ./... | grep -vE '/core/(storage|frontend/durable|host/master|authority)$')
+            mod=$(go list -m)
+            changed=$(git diff --name-only HEAD^1 HEAD)
+            for p in core/storage core/frontend/durable core/host/master core/authority; do
+              if printf '%s\n' "$changed" | grep -qE "^$p/[^/]+$"; then
+                pkgs="$pkgs $mod/$p"
+              fi
+            done
           fi
           go test -p=1 -short -count=1 -timeout 10m $pkgs
 
