@@ -475,3 +475,21 @@ queue empty, depth16. `GCClockSkew_no_skew.cfg` exited12 at `NoEarlyExpiry`
 (44/44, depth8); `GCClockSkew_abort_future.cfg` exited12 at
 `IndependentProgress` (11/11, depth2). Source tests independently cover
 persisted-mark compatibility, future-clock resets and authority-preserving expiry.
+
+
+## Per-object GC DELETE progress
+
+`GCDeleteProgress.tla` models the narrow sweep transition after a complete,
+authorised mark: three ordered candidates, first DELETE definitively rejected,
+later deletes accepted. It checks that the rejected fid is never reported
+successful, the failure is visible, and later candidates progress. Root/epoch
+admission, elapsed coverage and persistence are outside this small abstraction;
+source tests retain those guards and reopen independent collectors between passes.
+
+Local TLC2.19 / Java21, same jar SHA256 as GCClockSkew above, 2026-11-21:
+`java -Xmx512m -cp <jar> tlc2.TLC -config GCDeleteProgress_safe.cfg GCDeleteProgress`
+from `docs/spec`, separate metadirs. Positive exhausted exit0, 4 generated /4
+distinct states, depth4. `GCDeleteProgress_stop.cfg` exits12 at `LaterProgress`
+(2 generated /2 distinct, depth2). The HTTP source red uses an actual400 and
+checks later reclamation, retained failed tombstones, younger-object progress
+across separate collectors and permanent no-rebind behavior.

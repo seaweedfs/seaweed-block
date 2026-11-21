@@ -2,6 +2,7 @@ package chunkstore
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path"
@@ -56,7 +57,10 @@ func TestGCPermanentDeleteDoesNotStarveLaterBindings(t *testing.T) {
 	if out.Reclaimed != 1 {
 		t.Fatalf("permanent DELETE starved later binding: %+v err=%v", out, err)
 	}
-	if err != nil || !out.MarkSaved {
+	if len(out.FailedDeletes) != 1 || out.FailedDeletes[0].FID != badFID || out.FailedDeletes[0].Key != "a_bad" || out.FailedDeletes[0].Volume != "v1" || !strings.Contains(out.FailedDeletes[0].Error, "http 400") {
+		t.Fatalf("object refusal missing from result: %+v", out)
+	}
+	if !errors.Is(err, ErrBlobDeleteRejected) || !out.MarkSaved {
 		t.Fatalf("partial deletion must retain complete mark coverage: %+v %v", out, err)
 	}
 	badEntry, err := f.LookupEntry(ctx, path.Join(catBase, "v1", keysDir), "a_bad")
@@ -74,7 +78,7 @@ func TestGCPermanentDeleteDoesNotStarveLaterBindings(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		*now = now.Add(2 * time.Hour)
 		out, err = c.ExecuteVolumeGC(ctx, "v1", deleter, g.cfg, true)
-		if err != nil || !out.MarkSaved {
+		if (err != nil && !errors.Is(err, ErrBlobDeleteRejected)) || !out.MarkSaved || ((len(out.FailedDeletes) > 0) != errors.Is(err, ErrBlobDeleteRejected)) {
 			t.Fatalf("repeated rejection stalled coverage: %+v %v", out, err)
 		}
 		if i == 1 && out.Reclaimed != 1 {

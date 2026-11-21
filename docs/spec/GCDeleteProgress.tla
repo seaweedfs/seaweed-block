@@ -16,7 +16,7 @@ Step == /\ next \in Keys
               /\ deleted' = deleted \cup {next}
               /\ rejected' = rejected
               /\ next' = next+1
-              /\ complete' = next = 3
+              /\ complete' = (next = 3)
 Spec == Init /\ [][Step]_vars
 NoFalseSuccess == Bad \notin deleted
 FailureVisible == complete => Bad \in rejected

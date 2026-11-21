@@ -121,6 +121,12 @@ func (c *Catalog) executeGC(ctx context.Context, blobs BlobDeleter, cfg GCConfig
 	}
 	out.MarkOutcome = "complete"
 	out.MarkSaved = true
+	if len(out.FailedDeletes) != 0 {
+		// The mark completed and is reusable even though these tombstoned
+		// objects remain. Report partial failure after persisting coverage,
+		// so CLI/maintenance callers cannot mistake it for full reclamation.
+		return out, fmt.Errorf("%w: %d objects retained; complete GC mark saved", ErrBlobDeleteRejected, len(out.FailedDeletes))
+	}
 	return out, nil
 }
 

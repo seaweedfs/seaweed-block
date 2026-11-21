@@ -19,6 +19,10 @@ import (
 
 const extGCDeleted = "swb.gc.deleted"
 
+// ErrBlobDeleteRejected identifies a definite per-object refusal (HTTP400).
+// It never proves the needle absent; GC retains its tombstone and reports it.
+var ErrBlobDeleteRejected = errors.New("chunkstore: blob DELETE rejected")
+
 // DefaultGCClockSkew is the allowed pairwise difference between timestamp
 // writers and collectors. Deployments with a larger bound must raise ClockSkew;
 // no finite time-based grace can be safe with unbounded clock differences.
@@ -55,10 +59,16 @@ type GCObject struct {
 	Key    string `json:"key"`
 	FID    string `json:"fid"`
 }
+type GCDeleteFailure struct {
+	GCObject
+	Error string `json:"error"`
+}
+
 type GCResult struct {
-	Roots                                                   []GCRoot   `json:"roots"`
-	WouldDelete                                             []GCObject `json:"would_delete"`
-	WouldExpireIntents                                      []string   `json:"would_expire_intents"`
+	FailedDeletes                                           []GCDeleteFailure `json:"failed_deletes"`
+	Roots                                                   []GCRoot          `json:"roots"`
+	WouldDelete                                             []GCObject        `json:"would_delete"`
+	WouldExpireIntents                                      []string          `json:"would_expire_intents"`
 	Volumes, Intents, ExpiredIntents, Candidates, Reclaimed int
 	// Pre-binding needles cannot be enumerated by this API. They are retained;
 	// UnknownUnbound is true rather than inventing a report-only count.
@@ -127,6 +137,7 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 	result.Roots = []GCRoot{}
 	result.WouldDelete = []GCObject{}
 	result.WouldExpireIntents = []string{}
+	result.FailedDeletes = []GCDeleteFailure{}
 	defer func() {
 		if err != nil && apply {
 			g.candidates = map[string]gcCandidate{}
@@ -371,7 +382,20 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 			}
 		}
 		if err = g.blobs.DeleteBlob(ctx, string(b.entry.Extended[extFid])); err != nil {
-			return result, err
+			if ctx.Err() != nil {
+				return result, ctx.Err()
+			}
+			if !errors.Is(err, ErrBlobDeleteRejected) {
+				return result, err
+			}
+			// INV-GC-DELETE-PROGRESS-001: a confirmed object rejection
+			// must not starve later candidates or invalidate a complete mark.
+			// Keep the fid/tombstone and retry; never record this object done.
+			result.FailedDeletes = append(result.FailedDeletes, GCDeleteFailure{
+				GCObject: GCObject{Volume: b.volume, Key: mustUnescapeGCKey(b.entry.Name), FID: string(b.entry.Extended[extFid])}, Error: err.Error(),
+			})
+			nextCandidates[p] = candidate
+			continue
 		}
 		e := proto.Clone(b.entry).(*filerpb.Entry)
 		e.Extended[extGCDeleted] = []byte("done")
