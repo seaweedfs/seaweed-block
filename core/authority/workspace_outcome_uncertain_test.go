@@ -73,6 +73,7 @@ func TestWorkspaceUncertaintyPrecedesRequestRefusal(t *testing.T) {
 	ctx := context.Background()
 	disk, _ := newTempStore(t)
 	p, _, _ := forcedLostRangeFixture(t, disk, false)
+	t.Cleanup(p.CloseWorkspaceExtenders)
 	bad := forcedLostRangeReq
 	bad.TargetReplicaID = "other-slot"
 	if _, err := p.MoveWorkspace(ctx, bad, forcedLostRangeHead); err == nil || errors.Is(err, ErrWorkspaceOutcomeUncertain) {
@@ -112,6 +113,16 @@ func TestWorkspaceUncertaintyPrecedesRequestRefusal(t *testing.T) {
 		if _, err := p.MoveWorkspace(ctx, req, forcedLostRangeHead); !errors.Is(err, ErrWorkspaceOutcomeUncertain) {
 			t.Errorf("uncertain volume answered a definite admission refusal: %v", err)
 		}
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := p.MoveWorkspace(canceled, bad, forcedLostRangeHead); err != context.Canceled {
+		t.Errorf("caller cancellation changed: %v", err)
+	}
+	other := bad
+	other.VolumeID = "other"
+	if _, err := p.MoveWorkspace(ctx, other, forcedLostRangeHead); err == nil || errors.Is(err, ErrWorkspaceOutcomeUncertain) {
+		t.Errorf("uncertainty leaked across volumes: %v", err)
 	}
 	if !reflect.DeepEqual(before, p.WorkspaceState("v")) {
 		t.Fatal("refused requests changed authority memory")

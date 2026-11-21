@@ -199,7 +199,24 @@ func (p *Publisher) IssuedWorkspaceMove(req WorkspaceMoveRequest) bool {
 	return replay && err == nil
 }
 
-func (p *Publisher) MoveWorkspace(ctx context.Context, req WorkspaceMoveRequest, head WorkspaceHead) (WorkspaceMoveRecord, error) {
+// WorkspaceMoveOutcomeError classifies a failed move at the reply boundary.
+// M2 Uncertain / INV-AUTH-UNCERTAIN-001: admission cannot promise no effect
+// while an earlier workspace write may have landed. Cancellation stays typed.
+func (p *Publisher) WorkspaceMoveOutcomeError(volume string, err error) error {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	p.mu.Lock()
+	uncertain := p.workspaceUncertain[volume]
+	p.mu.Unlock()
+	if uncertain {
+		return errors.Join(ErrWorkspaceOutcomeUncertain, err)
+	}
+	return err
+}
+
+func (p *Publisher) MoveWorkspace(ctx context.Context, req WorkspaceMoveRequest, head WorkspaceHead) (_ WorkspaceMoveRecord, resultErr error) {
+	defer func() { resultErr = p.WorkspaceMoveOutcomeError(req.VolumeID, resultErr) }()
 	if err := ctx.Err(); err != nil {
 		return WorkspaceMoveRecord{}, err
 	}

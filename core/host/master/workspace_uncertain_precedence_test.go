@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestWorkspaceMoveUnknownPrecedesAdmissionRefusals(t *testing.T) {
@@ -72,6 +73,25 @@ func TestWorkspaceMoveUnknownPrecedesAdmissionRefusals(t *testing.T) {
 			failRead.Store(true)
 			if _, err := client.MoveWorkspace(ctx, request("clean")); status.Code(err) != codes.Internal || !strings.Contains(status.Convert(err).Message(), "UNKNOWN") {
 				t.Errorf("early HEAD error hid uncertainty: %v", err)
+			}
+			// These direct calls inspect the server result, not the client's own
+			// deadline override, so reply classification must preserve both.
+			for _, deadline := range []bool{false, true} {
+				var ended context.Context
+				var end context.CancelFunc
+				want := codes.Canceled
+				if deadline {
+					ended, end = context.WithDeadline(ctx, time.Unix(0, 1))
+					want = codes.DeadlineExceeded
+				} else {
+					ended, end = context.WithCancel(ctx)
+					end()
+				}
+				_, err := (&services{host: h}).MoveWorkspace(ended, request("forced"))
+				end()
+				if status.Code(err) != want {
+					t.Errorf("server caller-end classification changed: %v want %v", err, want)
+				}
 			}
 			authority.SetPutAfterRenameFaultForTest(nil)
 			state := h.Publisher().WorkspaceState("v")

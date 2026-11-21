@@ -180,7 +180,35 @@ func (s *services) logForcedGrant(g *control.WorkspaceGrant, replay bool, postIs
 		g.GetVolumeId(), g.GetRequestId(), g.GetOldHost(), g.GetOldReplicaId(), g.GetOldEpoch(), g.GetNewHost(), g.GetNewReplicaId(), g.GetNewEpoch(), replay, lost)
 }
 
-func (s *services) MoveWorkspace(ctx context.Context, q *control.WorkspaceMove) (*control.WorkspaceGrant, error) {
+func (s *services) MoveWorkspace(ctx context.Context, q *control.WorkspaceMove) (_ *control.WorkspaceGrant, resultErr error) {
+	// Remote reads never hold the workspace mutation lock. Re-read every
+	// local precondition below; Publisher checks the expected epoch atomically.
+	// A refusal is logged after the lock is released (deferred first, so it
+	// runs last): a slow log writer never holds workspaceMu.
+	// An issued forced grant is logged the same way, also after the unlock.
+	var refusal string
+	var issued *control.WorkspaceGrant
+	var replay bool
+	var postIssue, unknown error
+	defer func() {
+		// M2 Uncertain reply precedence applies even to preflight/HEAD errors.
+		outcome := resultErr
+		if code := status.Code(resultErr); code != codes.Canceled && code != codes.DeadlineExceeded {
+			outcome = s.host.Publisher().WorkspaceMoveOutcomeError(q.GetVolumeId(), resultErr)
+		}
+		if errors.Is(outcome, authority.ErrWorkspaceOutcomeUncertain) {
+			unknown, refusal = outcome, ""
+			resultErr = status.Errorf(codes.Internal, "workspace move %q of volume %q has an UNKNOWN outcome: %v; the volume's workspace authority stays uncertain until the master restarts; after the restart, rerun with the same request id", q.GetRequestId(), q.GetVolumeId(), outcome)
+		}
+		if refusal != "" {
+			s.host.log.Printf("blockmaster: MoveWorkspace refused volume=%q request=%q: %s", q.GetVolumeId(), q.GetRequestId(), refusal)
+		}
+		s.logForcedGrant(issued, replay, postIssue)
+		if unknown != nil {
+			s.host.log.Printf("blockmaster: MoveWorkspace outcome unknown volume=%q request=%q kind=%q: %v", q.GetVolumeId(), q.GetRequestId(), q.GetKind(), unknown)
+		}
+	}()
+
 	if err := s.workspaceVolume(q.GetVolumeId()); err != nil {
 		return nil, err
 	}
@@ -201,24 +229,6 @@ func (s *services) MoveWorkspace(ctx context.Context, q *control.WorkspaceMove) 
 	if err != nil {
 		return nil, workspaceError(err)
 	}
-	// Remote reads never hold the workspace mutation lock. Re-read every
-	// local precondition below; Publisher checks the expected epoch atomically.
-	// A refusal is logged after the lock is released (deferred first, so it
-	// runs last): a slow log writer never holds workspaceMu.
-	// An issued forced grant is logged the same way, also after the unlock.
-	var refusal string
-	var issued *control.WorkspaceGrant
-	var replay bool
-	var postIssue, unknown error
-	defer func() {
-		if refusal != "" {
-			s.host.log.Printf("blockmaster: MoveWorkspace refused volume=%q request=%q: %s", q.GetVolumeId(), q.GetRequestId(), refusal)
-		}
-		s.logForcedGrant(issued, replay, postIssue)
-		if unknown != nil {
-			s.host.log.Printf("blockmaster: MoveWorkspace outcome unknown volume=%q request=%q kind=%q: %v", q.GetVolumeId(), q.GetRequestId(), q.GetKind(), unknown)
-		}
-	}()
 	s.host.workspaceMu.Lock()
 	defer s.host.workspaceMu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -245,11 +255,6 @@ func (s *services) MoveWorkspace(ctx context.Context, q *control.WorkspaceMove) 
 		if s.host.Publisher().IssuedWorkspaceMove(req) {
 			issued, postIssue = s.issuedRecord(req), err
 			return nil, postIssueError(q, err)
-		}
-		if errors.Is(err, authority.ErrWorkspaceOutcomeUncertain) {
-			unknown = err
-			return nil, status.Errorf(codes.Internal, "workspace move %q of volume %q has an UNKNOWN outcome: %v; the volume's workspace authority stays uncertain until the master restarts; after the restart, rerun with the same request id",
-				q.GetRequestId(), q.GetVolumeId(), err)
 		}
 		return nil, workspaceError(err)
 	}

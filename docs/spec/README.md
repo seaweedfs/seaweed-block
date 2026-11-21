@@ -517,3 +517,32 @@ checked by native Go tests; this derived arithmetic model does not model the HTT
 encoder, sampler atomicity, orchestrator timing or an unbounded estimator overrun.
 
 #344 review qualification: `TestChunkFrozenDrainRefusalCarriesObservedBudget` drives a real admitted Sync through frontend drain expiry, durable provider and HTTP, with no report injection; `TestFrozenDrainObservationPreservesKnownBeforeReasonMutation` covers the known observation. `TestFrozenSaturatedTailRemainsKnownButNonActionable` and the literal 60 s/61 s candidate cases preserve the existing saturation sentinel (zero slack, not a complete duration). These native controls add no model claim or admission guard.
+
+
+### Workspace move reply precedence
+
+`WorkspaceMoveOutcome.tla` covers M2's `Uncertain -> Uncertain (move answer)`
+transition and `INV-AUTH-UNCERTAIN-001`. One volume can receive one failed
+workspace write (landed or not), one error from request validation, forced
+preflight, HEAD read, target or endpoint admission, or a caller cancellation /
+deadline. The write may fail before or after the error is selected. Reply-time
+classification must never report a definite refusal while uncertainty is
+observed; caller cancellation/deadline stays typed. No authority changes are
+modeled here: journal durability, lease safety, RPC delivery and reload remain
+with their existing specs and native controls.
+
+TLC 2.19 (tools SHA256
+`936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`),
+2026-11-21: `cfg/WorkspaceMoveOutcome.cfg` exhausted 59 generated / 45 distinct
+states, depth 4, queue empty. Bounds: one volume, seven error causes, one failed
+write with Boolean durable outcome, one reply. `NoFalseRefusal` and
+`CallerEndTyped` hold. The `BypassUncertainty=TRUE` negative must violate
+`NoFalseRefusal`; native controls map to
+`TestWorkspaceUncertaintyPrecedesRequestRefusal` (publisher validation),
+`TestWorkspaceMoveUnknownPrecedesAdmissionRefusals` (real gRPC preflight/HEAD/
+target paths, uncertainty before the call or during HEAD read, plus direct
+server caller-end classification), and the retained
+`TestWorkspaceUncertainIssueWriteIsTyped` (issue failure and replay after reload).
+The new tests use a real file-store rename followed by an injected error;
+a readout verifies that the failed write actually landed while memory rolled
+back. They also check no new authority epoch/move and per-volume scope.
