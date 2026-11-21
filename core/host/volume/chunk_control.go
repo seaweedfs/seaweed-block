@@ -64,6 +64,10 @@ type ChunkCutStatsBody struct {
 	COWWaitNs          int64  `json:"cowWaitNs"`
 	BarrierPauseNs     int64  `json:"barrierPauseNs"`
 	LockWaitNs         int64  `json:"lockWaitNs"`
+	DrainNs            int64  `json:"drainNs"`
+	CASWriteNs         int64  `json:"casWriteNs"`
+	MapPersistNs       int64  `json:"mapPersistNs"`
+	HeadReadbackNs     int64  `json:"headReadbackNs"`
 	SyncNs             int64  `json:"syncNs"`
 	CopyNs             int64  `json:"copyNs"`
 	CandidateChunks    int    `json:"candidateChunks"`
@@ -89,6 +93,10 @@ func cutStatsBody(s storage.ChunkCutStats) ChunkCutStatsBody {
 		COWLocalReadNs:     s.COWLocalReadNs,
 		BarrierPauseNs:     s.BarrierPauseNs,
 		LockWaitNs:         s.LockWaitNs,
+		DrainNs:            s.DrainNs,
+		CASWriteNs:         s.CASWriteNs,
+		MapPersistNs:       s.MapPersistNs,
+		HeadReadbackNs:     s.HeadReadbackNs,
 		SyncNs:             s.SyncNs,
 		CopyNs:             s.CopyNs,
 		COWSavedChunks:     s.COWSavedChunks,
@@ -238,6 +246,8 @@ func writeChunkFailure(w http.ResponseWriter, err error) {
 func chunkErrorCode(err error) (int, string, bool) {
 	var ce *chunkstore.CatalogError
 	switch {
+	case errors.Is(err, durable.ErrPlainDetachBusy):
+		return http.StatusConflict, "plain_detach_busy", true
 	case errors.Is(err, storage.ErrPrecopyUnknown):
 		return http.StatusConflict, "precopy_unknown", true
 	case errors.Is(err, storage.ErrPrecopyNotConverged):
@@ -488,6 +498,7 @@ func (s *StatusServer) handleChunkDetach(w http.ResponseWriter, r *http.Request)
 	var req struct {
 		VolumeID  string `json:"volumeID"`
 		TimeoutMs int64  `json:"timeoutMs"`
+		Plain     bool   `json:"plain,omitempty"`
 	}
 	if !decodeChunkBody(w, r, &req) {
 		return
@@ -498,7 +509,20 @@ func (s *StatusServer) handleChunkDetach(w http.ResponseWriter, r *http.Request)
 	}
 	ctx, cancel := chunkContext(r, req.TimeoutMs)
 	defer cancel()
-	res, err := ctl.Detach(ctx, req.VolumeID)
+	var res ChunkDetachResponse
+	var err error
+	if req.Plain {
+		plain, ok := ctl.(interface {
+			DetachPlain(context.Context, string) (ChunkDetachResponse, error)
+		})
+		if !ok {
+			writeChunkErr(w, http.StatusConflict, "plain_detach_unsupported", false, "plain detach unsupported")
+			return
+		}
+		res, err = plain.DetachPlain(ctx, req.VolumeID)
+	} else {
+		res, err = ctl.Detach(ctx, req.VolumeID)
+	}
 	if err != nil {
 		writeChunkFailure(w, err)
 		return
@@ -599,6 +623,21 @@ func (s *StatusServer) handleStatusChunk(w http.ResponseWriter, r *http.Request)
 
 func (c *chunkControl) Detach(ctx context.Context, volumeID string) (ChunkDetachResponse, error) {
 	r, last, err := c.p.DetachVolume(ctx, volumeID)
+	return chunkDetachResponse(volumeID, r, last, err)
+}
+
+func (c *chunkControl) DetachPlain(ctx context.Context, volumeID string) (ChunkDetachResponse, error) {
+	p, ok := c.p.(interface {
+		DetachVolumePlain(context.Context, string) (storage.ChunkCutResult, uint64, error)
+	})
+	if !ok {
+		return ChunkDetachResponse{}, fmt.Errorf("plain detach unsupported by provider")
+	}
+	r, last, err := p.DetachVolumePlain(ctx, volumeID)
+	return chunkDetachResponse(volumeID, r, last, err)
+}
+
+func chunkDetachResponse(volumeID string, r storage.ChunkCutResult, last uint64, err error) (ChunkDetachResponse, error) {
 	if err != nil {
 		return ChunkDetachResponse{}, err
 	}

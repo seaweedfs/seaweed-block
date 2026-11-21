@@ -13,57 +13,87 @@ var (
 )
 
 const (
-	precopyAttempts   = 5
-	precopyDuration   = 60 * time.Second
-	precopyAllowance  = 1200 * time.Millisecond
-	precopyMargin     = 100 * time.Millisecond
-	precopyDrainBound = 100 * time.Millisecond
+	precopyAttempts    = 5
+	precopyDuration    = 60 * time.Second
+	precopyAllowance   = 1200 * time.Millisecond
+	precopyMargin      = 100 * time.Millisecond
+	precopyDrainBound  = 100 * time.Millisecond
+	precopyFreezeLimit = 5 * time.Second
+	precopyFixedWindow = 5
+	precopyFixedMaxAge = 15 * time.Minute
 )
+
+// PrecopyFixedParts are disjoint terms of the same retained fixed-cost sample.
+type PrecopyFixedParts struct {
+	Drain        time.Duration `json:"drainNs"`
+	StoreLock    time.Duration `json:"storeLockNs"`
+	DataSync     time.Duration `json:"dataSyncNs"`
+	HeadCAS      time.Duration `json:"headCASNs"`
+	HeadReadback time.Duration `json:"headReadbackNs"`
+	MapPersist   time.Duration `json:"mapPersistNs"`
+	Other        time.Duration `json:"otherNs"`
+}
+
+func precopyFixedParts(st chunkCutStats, fixed time.Duration) PrecopyFixedParts {
+	p := PrecopyFixedParts{Drain: time.Duration(st.DrainNs), StoreLock: time.Duration(max(int64(0), st.LockWaitNs-st.DrainNs)), DataSync: time.Duration(st.SyncNs), HeadCAS: time.Duration(st.CASWriteNs), HeadReadback: time.Duration(st.HeadReadbackNs), MapPersist: time.Duration(st.MapPersistNs)}
+	p.Other = max(time.Duration(0), fixed-p.Drain-p.StoreLock-p.DataSync-p.HeadCAS-p.HeadReadback-p.MapPersist)
+	return p
+}
 
 type precopySample struct {
 	at    time.Time
 	fixed time.Duration
+	parts PrecopyFixedParts
 	rate  float64
 }
 
 type PrecopyAttempt struct {
 	// Attempt is the physical round ordinal, including measurement rounds.
-	Attempt     int           `json:"attempt"`
-	Drain       time.Duration `json:"drainNs"`
-	Barrier     time.Duration `json:"barrierNs"`
-	Pause       time.Duration `json:"pauseNs"`
-	TailBytes   uint64        `json:"tailBytes"`
-	RateSamples int           `json:"rateSamples"`
-	Estimate    time.Duration `json:"estimateNs"`
-	Reason      string        `json:"reason"`
-	Frozen      bool          `json:"frozen"`
-	Error       string        `json:"error,omitempty"`
+	Attempt          int               `json:"attempt"`
+	Drain            time.Duration     `json:"drainNs"`
+	Barrier          time.Duration     `json:"barrierNs"`
+	Pause            time.Duration     `json:"pauseNs"`
+	Fixed            time.Duration     `json:"fixedNs"`
+	FixedParts       PrecopyFixedParts `json:"fixedParts"`
+	TailEstimate     time.Duration     `json:"tailEstimateNs"`
+	DeclaredFreeze   time.Duration     `json:"declaredFreezeNs"`
+	PreviousEstimate time.Duration     `json:"previousEstimateNs"`
+	TailBytes        uint64            `json:"tailBytes"`
+	RateSamples      int               `json:"rateSamples"`
+	Estimate         time.Duration     `json:"estimateNs"`
+	Reason           string            `json:"reason"`
+	Frozen           bool              `json:"frozen"`
+	Error            string            `json:"error,omitempty"`
 }
 
 // PrecopyReport records admission estimates, not a worst-case latency proof.
 type PrecopyReport struct {
-	Rounds                []PrecopyAttempt `json:"rounds,omitempty"`
-	Drain                 time.Duration    `json:"drainNs"`
-	DrainTimedOut         bool             `json:"drainTimedOut"`
-	Attempts              int              `json:"attempts"`
-	MeasurementRounds     int              `json:"measurementRounds"`
-	SamplesAtStart        int              `json:"samplesAtStart"`
-	TailBytes             uint64           `json:"tailBytes"`
-	Fixed                 time.Duration    `json:"fixedNs"`
-	Estimate              time.Duration    `json:"estimateNs"`
-	SampleAge             time.Duration    `json:"sampleAgeNs"`
-	BytesPerSecond        float64          `json:"bytesPerSecond"`
-	RateSamples           int              `json:"rateSamples"`
-	Reason                string           `json:"reason"`
-	Frozen                bool             `json:"frozen"`
-	FreezeElapsed         time.Duration    `json:"freezeElapsedNs"`
-	ExtraCASAttempts      uint64           `json:"extraCASAttempts"`
-	CASFailureTimeout     time.Duration    `json:"casFailureTimeoutNs"`
-	DeclaredWorst         time.Duration    `json:"declaredWorstNs"`
-	LatencyGateFailed     bool             `json:"latencyGateFailed"`
-	BarrierBeforeFreeze   time.Duration    `json:"barrierBeforeFreezeNs"`
-	TentativePauseTotal   time.Duration    `json:"tentativePauseTotalNs"`
-	LongestTentativePause time.Duration    `json:"longestTentativePauseNs"`
+	Rounds                []PrecopyAttempt  `json:"rounds,omitempty"`
+	Drain                 time.Duration     `json:"drainNs"`
+	DrainTimedOut         bool              `json:"drainTimedOut"`
+	Attempts              int               `json:"attempts"`
+	MeasurementRounds     int               `json:"measurementRounds"`
+	SamplesAtStart        int               `json:"samplesAtStart"`
+	TailBytes             uint64            `json:"tailBytes"`
+	FixedParts            PrecopyFixedParts `json:"fixedParts"`
+	TailEstimate          time.Duration     `json:"tailEstimateNs"`
+	DeclaredFreeze        time.Duration     `json:"declaredFreezeNs"`
+	PreviousEstimate      time.Duration     `json:"previousEstimateNs"`
+	Fixed                 time.Duration     `json:"fixedNs"`
+	Estimate              time.Duration     `json:"estimateNs"`
+	SampleAge             time.Duration     `json:"sampleAgeNs"`
+	BytesPerSecond        float64           `json:"bytesPerSecond"`
+	RateSamples           int               `json:"rateSamples"`
+	Reason                string            `json:"reason"`
+	Frozen                bool              `json:"frozen"`
+	FreezeElapsed         time.Duration     `json:"freezeElapsedNs"`
+	ExtraCASAttempts      uint64            `json:"extraCASAttempts"`
+	CASFailureTimeout     time.Duration     `json:"casFailureTimeoutNs"`
+	DeclaredWorst         time.Duration     `json:"declaredWorstNs"`
+	LatencyGateFailed     bool              `json:"latencyGateFailed"`
+	BarrierBeforeFreeze   time.Duration     `json:"barrierBeforeFreezeNs"`
+	TentativePauseTotal   time.Duration     `json:"tentativePauseTotalNs"`
+	LongestTentativePause time.Duration     `json:"longestTentativePauseNs"`
 }
 
 // Finish records the whole freeze, including any owner-driven settlement.
@@ -72,7 +102,11 @@ func (r *PrecopyReport) Finish(elapsed time.Duration, extraCAS uint64, failed bo
 	r.FreezeElapsed, r.ExtraCASAttempts = elapsed, extraCAS
 	r.CASFailureTimeout = chunkHeadOperationTimeout
 	r.DeclaredWorst = r.Estimate + time.Duration(extraCAS)*chunkHeadOperationTimeout
-	r.LatencyGateFailed = failed || elapsed > precopyAllowance
+	limit := precopyAllowance
+	if r.Reason == "no_progress" || r.Reason == "final_attempt" {
+		limit = min(r.DeclaredFreeze, precopyFreezeLimit)
+	}
+	r.LatencyGateFailed = failed || elapsed > limit
 }
 
 // PrecopyDetach runs rolling cuts before the final detached cut. stopIO is
@@ -150,14 +184,22 @@ func (l *chunkLayerImpl) precopyDetach(ctx context.Context, prepare func(context
 		}
 		spent := time.Since(barrierStart)
 		if spent > report.Fixed {
-			report.Estimate += spent - report.Fixed
+			extra := spent - report.Fixed
+			report.Estimate += extra
+			report.FixedParts.Other += extra
+			report.Fixed = spent
 		}
 		if report.Reason == "fit" && report.Estimate > precopyAllowance {
 			report.Reason = "barrier_over_budget"
 		}
-		if report.Reason != "fit" {
+		var previous *PrecopyAttempt
+		if len(rounds) > 0 {
+			previous = &rounds[len(rounds)-1]
+		}
+		if !report.admitPrecopy(previous, len(rounds)+1 == precopyAttempts) {
 			return false
 		}
+		report.DeclaredFreeze = report.Estimate
 		if !stopIO() {
 			report.Reason = "admitted_io"
 			return false
@@ -188,6 +230,7 @@ func (l *chunkLayerImpl) precopyDetach(ctx context.Context, prepare func(context
 			Attempt: attempt, Drain: drain, Pause: pauseTotal - pauseBefore,
 			TailBytes: report.TailBytes, RateSamples: report.RateSamples,
 			Estimate: report.Estimate, Reason: report.Reason, Frozen: report.Frozen,
+			Fixed: report.Fixed, FixedParts: report.FixedParts, TailEstimate: report.TailEstimate, DeclaredFreeze: report.DeclaredFreeze, PreviousEstimate: report.PreviousEstimate,
 		}
 		a.Barrier = max(time.Duration(0), a.Pause-a.Drain)
 		if a.Reason == "" {
@@ -235,27 +278,34 @@ func (l *chunkLayerImpl) precopyEstimate(tail uint64, attempts int) PrecopyRepor
 	r := PrecopyReport{Attempts: attempts, TailBytes: tail, Reason: "samples_unknown"}
 	now := time.Now()
 	var rates []float64
-	for _, s := range l.precopySamples {
-		age := now.Sub(s.at)
-		if age > precopyDuration {
+	// Fixed work uses up to the last five fresh observations, independent of the
+	// latest-three-rate window. Parts always belong to the selected observation.
+	fixedCount := 0
+	for i := len(l.precopySamples) - 1; i >= 0; i-- {
+		sample := l.precopySamples[i]
+		age := now.Sub(sample.at)
+		if age < 0 {
 			continue
 		}
-		if age > r.SampleAge {
-			r.SampleAge = age
+		if age <= precopyDuration && sample.rate > 0 {
+			rates = append(rates, sample.rate)
 		}
-		// With at most 32 observations the maximum is a conservative empirical
-		// p99 envelope of barrier-to-settlement non-payload work. Serving
-		// preparation and host-budget waits are outside the freeze. The stop
-		// is already drained; metadata and CAS/read-back remain included.
-		if s.fixed > r.Fixed {
-			r.Fixed = s.fixed
+		if age >= precopyFixedMaxAge || fixedCount >= precopyFixedWindow {
+			continue
 		}
-		if s.rate > 0 {
-			rates = append(rates, s.rate)
+		fixedCount++
+		r.SampleAge = max(r.SampleAge, age)
+		if sample.fixed > r.Fixed {
+			r.Fixed = sample.fixed
+			r.FixedParts = precopyFixedPartsFromSample(sample)
 		}
 	}
+	// Rates were visited newest first; only the latest three are used below.
 	r.RateSamples = len(rates)
-	if r.Fixed <= 0 {
+	if len(rates) > 3 {
+		rates = rates[:3]
+	}
+	if fixedCount == 0 || r.Fixed <= 0 {
 		return r
 	}
 	r.Estimate = r.Fixed + precopyMargin
@@ -274,9 +324,11 @@ func (l *chunkLayerImpl) precopyEstimate(tail uint64, attempts int) PrecopyRepor
 		if seconds > precopyDuration.Seconds() {
 			r.Reason = "tail_too_large"
 			r.Estimate = precopyDuration
+			r.TailEstimate = precopyDuration
 			return r
 		}
-		r.Estimate += time.Duration(seconds * float64(time.Second))
+		r.TailEstimate = time.Duration(seconds * float64(time.Second))
+		r.Estimate += r.TailEstimate
 	}
 	r.Reason = "tail_too_large"
 	if r.Estimate <= precopyAllowance {
@@ -285,12 +337,50 @@ func (l *chunkLayerImpl) precopyEstimate(tail uint64, attempts int) PrecopyRepor
 	return r
 }
 
+// Rounds shrink the tail; a plateau or the final round may use the full
+// declared freeze budget. The final flag is the physical round, not the number
+// of warm admission attempts (measurement rounds consume the same limit).
+func (r *PrecopyReport) admitPrecopy(previous *PrecopyAttempt, final bool) bool {
+	if r.Reason == "samples_unknown" || r.Estimate <= 0 {
+		return false
+	}
+	if r.Estimate <= precopyAllowance {
+		r.Reason = "fit"
+		return true
+	}
+	if r.Estimate > precopyFreezeLimit {
+		r.Reason = "freeze_budget_exceeded"
+		return false
+	}
+	if comparablePrecopyAttempt(previous) {
+		r.PreviousEstimate = previous.Estimate
+		// Division first avoids overflow while retaining nanosecond precision.
+		threshold := previous.Estimate - previous.Estimate/10
+		if r.Estimate >= threshold {
+			r.Reason = "no_progress"
+			return true
+		}
+	}
+	if final {
+		r.Reason = "final_attempt"
+		return true
+	}
+	return false
+}
+
+func precopyFixedPartsFromSample(s precopySample) PrecopyFixedParts {
+	p := s.parts
+	p.Other = max(time.Duration(0), s.fixed-p.Drain-p.StoreLock-p.DataSync-p.HeadCAS-p.HeadReadback-p.MapPersist)
+	return p
+}
+
 func (l *chunkLayerImpl) samplePrecopy(st chunkCutStats, fixedNs int64) {
 	// A no-op root read is not a measurement of final CAS + confirmation.
 	if st.CASNs <= 0 {
 		return
 	}
 	s := precopySample{at: time.Now(), fixed: time.Duration(max(int64(1), fixedNs))}
+	s.parts = precopyFixedParts(st, s.fixed)
 	if st.UploadedBytes > 0 && st.PayloadNs > 0 {
 		s.rate = float64(st.UploadedBytes) / time.Duration(st.PayloadNs).Seconds()
 	}
@@ -320,5 +410,19 @@ func (l *chunkLayerImpl) lockPrecopy(ctx context.Context) error {
 				return nil
 			}
 		}
+	}
+}
+
+// Only a completed cost estimate is comparable. A drain/before-barrier refusal
+// can carry Fixed+margin without a known tail, just like samples_unknown.
+func comparablePrecopyAttempt(a *PrecopyAttempt) bool {
+	if a == nil || a.Estimate <= 0 || a.Error != "" {
+		return false
+	}
+	switch a.Reason {
+	case "fit", "tail_too_large", "barrier_over_budget", "freeze_budget_exceeded", "no_progress", "final_attempt", "admitted_io":
+		return true
+	default:
+		return false
 	}
 }

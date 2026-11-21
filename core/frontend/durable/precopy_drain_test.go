@@ -129,10 +129,13 @@ func TestPrecopyLateGateCallerCannotCrossFreeze(t *testing.T) {
 	}
 	select {
 	case <-done:
-		if !errors.Is(writeErr, frontend.ErrBackendClosed) {
+		// Capture can outlast this caller's budget before Close. The exact
+		// two orderings are witnessed by TestPrecopyCallerExpiryVersusClose.
+		expired := errors.Is(ctx.Err(), context.DeadlineExceeded) && errors.Is(writeErr, frontend.ErrBackendBusy) && errors.Is(writeErr, context.DeadlineExceeded)
+		if !errors.Is(writeErr, frontend.ErrBackendClosed) && !expired {
 			t.Fatal(writeErr)
 		}
-	case <-ctx.Done():
+	case <-time.After(time.Second):
 		t.Fatal("closed path did not settle late command")
 	}
 }

@@ -201,6 +201,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.chunk.path, "chunk-path", defaultChunkPath, "walstore-chunk: filer directory holding one directory per volume (HEAD and chunk key bindings)")
 	fs.StringVar(&f.chunk.collection, "chunk-collection", "", "walstore-chunk: collection for chunk needles (empty = filer default / storage rule)")
 	fs.StringVar(&f.chunk.replication, "chunk-replication", "", "walstore-chunk: replication for chunk needles (empty = filer default / storage rule)")
+	fs.Bool("chunk-detach-plain-supported", false, "capability: supports idle plain=true on /chunk/detach (no-op flag)")
 	fs.BoolVar(&f.chunk.detachPrecopy, "chunk-detach-precopy", false, "walstore-chunk: converge rolling cuts before final detach; refuse cutover if measured tail does not fit")
 	fs.DurationVar(&f.chunk.captureInterval, "chunk-capture-interval", defaultChunkCaptureInterval, "walstore-chunk: periodic HEAD capture interval (default 15m, minimum 5m); 0 disables")
 	fs.DurationVar(&f.chunk.maintenanceInterval, "chunk-maintenance-interval", defaultChunkMaintenanceInterval, "walstore-chunk: retention and optional GC pass interval; 0 disables")
