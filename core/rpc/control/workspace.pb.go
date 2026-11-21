@@ -414,21 +414,26 @@ func (x *WorkspaceMove) GetTargetServerId() string {
 }
 
 type WorkspaceGrant struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	RequestId     string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
-	VolumeId      string                 `protobuf:"bytes,2,opt,name=volume_id,json=volumeId,proto3" json:"volume_id,omitempty"`
-	OldReplicaId  string                 `protobuf:"bytes,3,opt,name=old_replica_id,json=oldReplicaId,proto3" json:"old_replica_id,omitempty"`
-	NewReplicaId  string                 `protobuf:"bytes,4,opt,name=new_replica_id,json=newReplicaId,proto3" json:"new_replica_id,omitempty"`
-	Kind          string                 `protobuf:"bytes,5,opt,name=kind,proto3" json:"kind,omitempty"`
-	OldEpoch      uint64                 `protobuf:"varint,6,opt,name=old_epoch,json=oldEpoch,proto3" json:"old_epoch,omitempty"`
-	NewEpoch      uint64                 `protobuf:"varint,7,opt,name=new_epoch,json=newEpoch,proto3" json:"new_epoch,omitempty"`
-	HeadGen       uint64                 `protobuf:"varint,8,opt,name=head_gen,json=headGen,proto3" json:"head_gen,omitempty"`
-	RemoteLsn     uint64                 `protobuf:"varint,9,opt,name=remote_lsn,json=remoteLsn,proto3" json:"remote_lsn,omitempty"`
-	Issued        bool                   `protobuf:"varint,10,opt,name=issued,proto3" json:"issued,omitempty"`
-	OldHost       string                 `protobuf:"bytes,11,opt,name=old_host,json=oldHost,proto3" json:"old_host,omitempty"`
-	NewHost       string                 `protobuf:"bytes,12,opt,name=new_host,json=newHost,proto3" json:"new_host,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	RequestId    string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	VolumeId     string                 `protobuf:"bytes,2,opt,name=volume_id,json=volumeId,proto3" json:"volume_id,omitempty"`
+	OldReplicaId string                 `protobuf:"bytes,3,opt,name=old_replica_id,json=oldReplicaId,proto3" json:"old_replica_id,omitempty"`
+	NewReplicaId string                 `protobuf:"bytes,4,opt,name=new_replica_id,json=newReplicaId,proto3" json:"new_replica_id,omitempty"`
+	Kind         string                 `protobuf:"bytes,5,opt,name=kind,proto3" json:"kind,omitempty"`
+	OldEpoch     uint64                 `protobuf:"varint,6,opt,name=old_epoch,json=oldEpoch,proto3" json:"old_epoch,omitempty"`
+	NewEpoch     uint64                 `protobuf:"varint,7,opt,name=new_epoch,json=newEpoch,proto3" json:"new_epoch,omitempty"`
+	HeadGen      uint64                 `protobuf:"varint,8,opt,name=head_gen,json=headGen,proto3" json:"head_gen,omitempty"`
+	RemoteLsn    uint64                 `protobuf:"varint,9,opt,name=remote_lsn,json=remoteLsn,proto3" json:"remote_lsn,omitempty"`
+	Issued       bool                   `protobuf:"varint,10,opt,name=issued,proto3" json:"issued,omitempty"`
+	OldHost      string                 `protobuf:"bytes,11,opt,name=old_host,json=oldHost,proto3" json:"old_host,omitempty"`
+	NewHost      string                 `protobuf:"bytes,12,opt,name=new_host,json=newHost,proto3" json:"new_host,omitempty"`
+	// Forced grants only: the lost range stored before the issue (also on a
+	// replay). Absent on a forced grant means the readout is not proven, and
+	// lost_range_error says why; it never means "no loss".
+	LostRange      *WorkspaceLostRange `protobuf:"bytes,13,opt,name=lost_range,json=lostRange,proto3" json:"lost_range,omitempty"`
+	LostRangeError string              `protobuf:"bytes,14,opt,name=lost_range_error,json=lostRangeError,proto3" json:"lost_range_error,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *WorkspaceGrant) Reset() {
@@ -545,6 +550,370 @@ func (x *WorkspaceGrant) GetNewHost() string {
 	return ""
 }
 
+func (x *WorkspaceGrant) GetLostRange() *WorkspaceLostRange {
+	if x != nil {
+		return x.LostRange
+	}
+	return nil
+}
+
+func (x *WorkspaceGrant) GetLostRangeError() string {
+	if x != nil {
+		return x.LostRangeError
+	}
+	return ""
+}
+
+// What a forced move abandoned. head_gen 0: no published HEAD (everything the
+// old holder wrote is lost). head_time_ns is the HEAD entry's filer mtime read
+// with HEAD at the move (1 s resolution), valid only when head_time_known.
+// lost_until_ns is master time; the upper bound is a time, not an LSN.
+type WorkspaceLostRange struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RequestId     string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	VolumeId      string                 `protobuf:"bytes,2,opt,name=volume_id,json=volumeId,proto3" json:"volume_id,omitempty"`
+	NewEpoch      uint64                 `protobuf:"varint,3,opt,name=new_epoch,json=newEpoch,proto3" json:"new_epoch,omitempty"`
+	OldReplicaId  string                 `protobuf:"bytes,4,opt,name=old_replica_id,json=oldReplicaId,proto3" json:"old_replica_id,omitempty"`
+	OldEpoch      uint64                 `protobuf:"varint,5,opt,name=old_epoch,json=oldEpoch,proto3" json:"old_epoch,omitempty"`
+	LostAfterLsn  uint64                 `protobuf:"varint,6,opt,name=lost_after_lsn,json=lostAfterLsn,proto3" json:"lost_after_lsn,omitempty"`
+	LostUntilNs   int64                  `protobuf:"varint,7,opt,name=lost_until_ns,json=lostUntilNs,proto3" json:"lost_until_ns,omitempty"`
+	HeadGen       uint64                 `protobuf:"varint,8,opt,name=head_gen,json=headGen,proto3" json:"head_gen,omitempty"`
+	HeadTimeNs    int64                  `protobuf:"varint,9,opt,name=head_time_ns,json=headTimeNs,proto3" json:"head_time_ns,omitempty"`
+	HeadTimeKnown bool                   `protobuf:"varint,10,opt,name=head_time_known,json=headTimeKnown,proto3" json:"head_time_known,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WorkspaceLostRange) Reset() {
+	*x = WorkspaceLostRange{}
+	mi := &file_workspace_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WorkspaceLostRange) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WorkspaceLostRange) ProtoMessage() {}
+
+func (x *WorkspaceLostRange) ProtoReflect() protoreflect.Message {
+	mi := &file_workspace_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WorkspaceLostRange.ProtoReflect.Descriptor instead.
+func (*WorkspaceLostRange) Descriptor() ([]byte, []int) {
+	return file_workspace_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *WorkspaceLostRange) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *WorkspaceLostRange) GetVolumeId() string {
+	if x != nil {
+		return x.VolumeId
+	}
+	return ""
+}
+
+func (x *WorkspaceLostRange) GetNewEpoch() uint64 {
+	if x != nil {
+		return x.NewEpoch
+	}
+	return 0
+}
+
+func (x *WorkspaceLostRange) GetOldReplicaId() string {
+	if x != nil {
+		return x.OldReplicaId
+	}
+	return ""
+}
+
+func (x *WorkspaceLostRange) GetOldEpoch() uint64 {
+	if x != nil {
+		return x.OldEpoch
+	}
+	return 0
+}
+
+func (x *WorkspaceLostRange) GetLostAfterLsn() uint64 {
+	if x != nil {
+		return x.LostAfterLsn
+	}
+	return 0
+}
+
+func (x *WorkspaceLostRange) GetLostUntilNs() int64 {
+	if x != nil {
+		return x.LostUntilNs
+	}
+	return 0
+}
+
+func (x *WorkspaceLostRange) GetHeadGen() uint64 {
+	if x != nil {
+		return x.HeadGen
+	}
+	return 0
+}
+
+func (x *WorkspaceLostRange) GetHeadTimeNs() int64 {
+	if x != nil {
+		return x.HeadTimeNs
+	}
+	return 0
+}
+
+func (x *WorkspaceLostRange) GetHeadTimeKnown() bool {
+	if x != nil {
+		return x.HeadTimeKnown
+	}
+	return false
+}
+
+type WorkspaceLostRangeQuery struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	VolumeId      string                 `protobuf:"bytes,1,opt,name=volume_id,json=volumeId,proto3" json:"volume_id,omitempty"`
+	RequestId     string                 `protobuf:"bytes,2,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WorkspaceLostRangeQuery) Reset() {
+	*x = WorkspaceLostRangeQuery{}
+	mi := &file_workspace_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WorkspaceLostRangeQuery) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WorkspaceLostRangeQuery) ProtoMessage() {}
+
+func (x *WorkspaceLostRangeQuery) ProtoReflect() protoreflect.Message {
+	mi := &file_workspace_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WorkspaceLostRangeQuery.ProtoReflect.Descriptor instead.
+func (*WorkspaceLostRangeQuery) Descriptor() ([]byte, []int) {
+	return file_workspace_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *WorkspaceLostRangeQuery) GetVolumeId() string {
+	if x != nil {
+		return x.VolumeId
+	}
+	return ""
+}
+
+func (x *WorkspaceLostRangeQuery) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+type WorkspaceLostRanges struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Ranges        []*WorkspaceLostRange  `protobuf:"bytes,1,rep,name=ranges,proto3" json:"ranges,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WorkspaceLostRanges) Reset() {
+	*x = WorkspaceLostRanges{}
+	mi := &file_workspace_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WorkspaceLostRanges) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WorkspaceLostRanges) ProtoMessage() {}
+
+func (x *WorkspaceLostRanges) ProtoReflect() protoreflect.Message {
+	mi := &file_workspace_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WorkspaceLostRanges.ProtoReflect.Descriptor instead.
+func (*WorkspaceLostRanges) Descriptor() ([]byte, []int) {
+	return file_workspace_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *WorkspaceLostRanges) GetRanges() []*WorkspaceLostRange {
+	if x != nil {
+		return x.Ranges
+	}
+	return nil
+}
+
+// lost_until_ns is when a forced move becomes admissible (0 if the master has
+// no lease to judge). HEAD is read only when admitted, as for the move.
+type WorkspaceMovePreview struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Admitted      bool                   `protobuf:"varint,1,opt,name=admitted,proto3" json:"admitted,omitempty"`
+	Reason        string                 `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
+	LostUntilNs   int64                  `protobuf:"varint,3,opt,name=lost_until_ns,json=lostUntilNs,proto3" json:"lost_until_ns,omitempty"`
+	MasterTimeNs  int64                  `protobuf:"varint,4,opt,name=master_time_ns,json=masterTimeNs,proto3" json:"master_time_ns,omitempty"`
+	HeadRead      bool                   `protobuf:"varint,5,opt,name=head_read,json=headRead,proto3" json:"head_read,omitempty"`
+	HeadError     string                 `protobuf:"bytes,6,opt,name=head_error,json=headError,proto3" json:"head_error,omitempty"`
+	HeadGen       uint64                 `protobuf:"varint,7,opt,name=head_gen,json=headGen,proto3" json:"head_gen,omitempty"`
+	HeadEpoch     uint64                 `protobuf:"varint,8,opt,name=head_epoch,json=headEpoch,proto3" json:"head_epoch,omitempty"`
+	HeadHolder    string                 `protobuf:"bytes,9,opt,name=head_holder,json=headHolder,proto3" json:"head_holder,omitempty"`
+	HeadRemoteLsn uint64                 `protobuf:"varint,10,opt,name=head_remote_lsn,json=headRemoteLsn,proto3" json:"head_remote_lsn,omitempty"`
+	HeadTimeNs    int64                  `protobuf:"varint,11,opt,name=head_time_ns,json=headTimeNs,proto3" json:"head_time_ns,omitempty"`
+	HeadTimeKnown bool                   `protobuf:"varint,12,opt,name=head_time_known,json=headTimeKnown,proto3" json:"head_time_known,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WorkspaceMovePreview) Reset() {
+	*x = WorkspaceMovePreview{}
+	mi := &file_workspace_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WorkspaceMovePreview) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WorkspaceMovePreview) ProtoMessage() {}
+
+func (x *WorkspaceMovePreview) ProtoReflect() protoreflect.Message {
+	mi := &file_workspace_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WorkspaceMovePreview.ProtoReflect.Descriptor instead.
+func (*WorkspaceMovePreview) Descriptor() ([]byte, []int) {
+	return file_workspace_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *WorkspaceMovePreview) GetAdmitted() bool {
+	if x != nil {
+		return x.Admitted
+	}
+	return false
+}
+
+func (x *WorkspaceMovePreview) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+func (x *WorkspaceMovePreview) GetLostUntilNs() int64 {
+	if x != nil {
+		return x.LostUntilNs
+	}
+	return 0
+}
+
+func (x *WorkspaceMovePreview) GetMasterTimeNs() int64 {
+	if x != nil {
+		return x.MasterTimeNs
+	}
+	return 0
+}
+
+func (x *WorkspaceMovePreview) GetHeadRead() bool {
+	if x != nil {
+		return x.HeadRead
+	}
+	return false
+}
+
+func (x *WorkspaceMovePreview) GetHeadError() string {
+	if x != nil {
+		return x.HeadError
+	}
+	return ""
+}
+
+func (x *WorkspaceMovePreview) GetHeadGen() uint64 {
+	if x != nil {
+		return x.HeadGen
+	}
+	return 0
+}
+
+func (x *WorkspaceMovePreview) GetHeadEpoch() uint64 {
+	if x != nil {
+		return x.HeadEpoch
+	}
+	return 0
+}
+
+func (x *WorkspaceMovePreview) GetHeadHolder() string {
+	if x != nil {
+		return x.HeadHolder
+	}
+	return ""
+}
+
+func (x *WorkspaceMovePreview) GetHeadRemoteLsn() uint64 {
+	if x != nil {
+		return x.HeadRemoteLsn
+	}
+	return 0
+}
+
+func (x *WorkspaceMovePreview) GetHeadTimeNs() int64 {
+	if x != nil {
+		return x.HeadTimeNs
+	}
+	return 0
+}
+
+func (x *WorkspaceMovePreview) GetHeadTimeKnown() bool {
+	if x != nil {
+		return x.HeadTimeKnown
+	}
+	return false
+}
+
 type WorkspaceStatus struct {
 	state         protoimpl.MessageState  `protogen:"open.v1"`
 	Lease         *WorkspaceLeaseFact     `protobuf:"bytes,1,opt,name=lease,proto3" json:"lease,omitempty"`
@@ -557,7 +926,7 @@ type WorkspaceStatus struct {
 
 func (x *WorkspaceStatus) Reset() {
 	*x = WorkspaceStatus{}
-	mi := &file_workspace_proto_msgTypes[7]
+	mi := &file_workspace_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -569,7 +938,7 @@ func (x *WorkspaceStatus) String() string {
 func (*WorkspaceStatus) ProtoMessage() {}
 
 func (x *WorkspaceStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_workspace_proto_msgTypes[7]
+	mi := &file_workspace_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -582,7 +951,7 @@ func (x *WorkspaceStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkspaceStatus.ProtoReflect.Descriptor instead.
 func (*WorkspaceStatus) Descriptor() ([]byte, []int) {
-	return file_workspace_proto_rawDescGZIP(), []int{7}
+	return file_workspace_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *WorkspaceStatus) GetLease() *WorkspaceLeaseFact {
@@ -626,7 +995,7 @@ type WorkspaceBinding struct {
 
 func (x *WorkspaceBinding) Reset() {
 	*x = WorkspaceBinding{}
-	mi := &file_workspace_proto_msgTypes[8]
+	mi := &file_workspace_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -638,7 +1007,7 @@ func (x *WorkspaceBinding) String() string {
 func (*WorkspaceBinding) ProtoMessage() {}
 
 func (x *WorkspaceBinding) ProtoReflect() protoreflect.Message {
-	mi := &file_workspace_proto_msgTypes[8]
+	mi := &file_workspace_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -651,7 +1020,7 @@ func (x *WorkspaceBinding) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkspaceBinding.ProtoReflect.Descriptor instead.
 func (*WorkspaceBinding) Descriptor() ([]byte, []int) {
-	return file_workspace_proto_rawDescGZIP(), []int{8}
+	return file_workspace_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *WorkspaceBinding) GetVolumeId() string {
@@ -700,7 +1069,7 @@ type WorkspacePlacement struct {
 
 func (x *WorkspacePlacement) Reset() {
 	*x = WorkspacePlacement{}
-	mi := &file_workspace_proto_msgTypes[9]
+	mi := &file_workspace_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -712,7 +1081,7 @@ func (x *WorkspacePlacement) String() string {
 func (*WorkspacePlacement) ProtoMessage() {}
 
 func (x *WorkspacePlacement) ProtoReflect() protoreflect.Message {
-	mi := &file_workspace_proto_msgTypes[9]
+	mi := &file_workspace_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -725,7 +1094,7 @@ func (x *WorkspacePlacement) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkspacePlacement.ProtoReflect.Descriptor instead.
 func (*WorkspacePlacement) Descriptor() ([]byte, []int) {
-	return file_workspace_proto_rawDescGZIP(), []int{9}
+	return file_workspace_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *WorkspacePlacement) GetVolumeId() string {
@@ -786,7 +1155,7 @@ const file_workspace_proto_rawDesc = "" +
 	"\x04kind\x18\b \x01(\tR\x04kind\x12\x14\n" +
 	"\x05force\x18\t \x01(\bR\x05force\x12(\n" +
 	"\x10target_server_id\x18\n" +
-	" \x01(\tR\x0etargetServerId\"\xee\x02\n" +
+	" \x01(\tR\x0etargetServerId\"\xe4\x03\n" +
 	"\x0eWorkspaceGrant\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x1b\n" +
@@ -802,7 +1171,48 @@ const file_workspace_proto_rawDesc = "" +
 	"\x06issued\x18\n" +
 	" \x01(\bR\x06issued\x12\x19\n" +
 	"\bold_host\x18\v \x01(\tR\aoldHost\x12\x19\n" +
-	"\bnew_host\x18\f \x01(\tR\anewHost\"\xb2\x02\n" +
+	"\bnew_host\x18\f \x01(\tR\anewHost\x12J\n" +
+	"\n" +
+	"lost_range\x18\r \x01(\v2+.seaweedfs.block.control.WorkspaceLostRangeR\tlostRange\x12(\n" +
+	"\x10lost_range_error\x18\x0e \x01(\tR\x0elostRangeError\"\xdf\x02\n" +
+	"\x12WorkspaceLostRange\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\tR\trequestId\x12\x1b\n" +
+	"\tvolume_id\x18\x02 \x01(\tR\bvolumeId\x12\x1b\n" +
+	"\tnew_epoch\x18\x03 \x01(\x04R\bnewEpoch\x12$\n" +
+	"\x0eold_replica_id\x18\x04 \x01(\tR\foldReplicaId\x12\x1b\n" +
+	"\told_epoch\x18\x05 \x01(\x04R\boldEpoch\x12$\n" +
+	"\x0elost_after_lsn\x18\x06 \x01(\x04R\flostAfterLsn\x12\"\n" +
+	"\rlost_until_ns\x18\a \x01(\x03R\vlostUntilNs\x12\x19\n" +
+	"\bhead_gen\x18\b \x01(\x04R\aheadGen\x12 \n" +
+	"\fhead_time_ns\x18\t \x01(\x03R\n" +
+	"headTimeNs\x12&\n" +
+	"\x0fhead_time_known\x18\n" +
+	" \x01(\bR\rheadTimeKnown\"U\n" +
+	"\x17WorkspaceLostRangeQuery\x12\x1b\n" +
+	"\tvolume_id\x18\x01 \x01(\tR\bvolumeId\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x02 \x01(\tR\trequestId\"Z\n" +
+	"\x13WorkspaceLostRanges\x12C\n" +
+	"\x06ranges\x18\x01 \x03(\v2+.seaweedfs.block.control.WorkspaceLostRangeR\x06ranges\"\x9d\x03\n" +
+	"\x14WorkspaceMovePreview\x12\x1a\n" +
+	"\badmitted\x18\x01 \x01(\bR\badmitted\x12\x16\n" +
+	"\x06reason\x18\x02 \x01(\tR\x06reason\x12\"\n" +
+	"\rlost_until_ns\x18\x03 \x01(\x03R\vlostUntilNs\x12$\n" +
+	"\x0emaster_time_ns\x18\x04 \x01(\x03R\fmasterTimeNs\x12\x1b\n" +
+	"\thead_read\x18\x05 \x01(\bR\bheadRead\x12\x1d\n" +
+	"\n" +
+	"head_error\x18\x06 \x01(\tR\theadError\x12\x19\n" +
+	"\bhead_gen\x18\a \x01(\x04R\aheadGen\x12\x1d\n" +
+	"\n" +
+	"head_epoch\x18\b \x01(\x04R\theadEpoch\x12\x1f\n" +
+	"\vhead_holder\x18\t \x01(\tR\n" +
+	"headHolder\x12&\n" +
+	"\x0fhead_remote_lsn\x18\n" +
+	" \x01(\x04R\rheadRemoteLsn\x12 \n" +
+	"\fhead_time_ns\x18\v \x01(\x03R\n" +
+	"headTimeNs\x12&\n" +
+	"\x0fhead_time_known\x18\f \x01(\bR\rheadTimeKnown\"\xb2\x02\n" +
 	"\x0fWorkspaceStatus\x12A\n" +
 	"\x05lease\x18\x01 \x01(\v2+.seaweedfs.block.control.WorkspaceLeaseFactR\x05lease\x12V\n" +
 	"\x0erevocation_ack\x18\x02 \x01(\v2/.seaweedfs.block.control.WorkspaceRevocationAckR\rrevocationAck\x12=\n" +
@@ -818,7 +1228,7 @@ const file_workspace_proto_rawDesc = "" +
 	"\tvolume_id\x18\x01 \x01(\tR\bvolumeId\x12\x1b\n" +
 	"\tserver_id\x18\x02 \x01(\tR\bserverId\x12\x1d\n" +
 	"\n" +
-	"replica_id\x18\x03 \x01(\tR\treplicaId2\x81\x06\n" +
+	"replica_id\x18\x03 \x01(\tR\treplicaId2\xeb\a\n" +
 	"\x10WorkspaceService\x12p\n" +
 	"\x18RegisterWorkspaceBinding\x12).seaweedfs.block.control.WorkspaceBinding\x1a).seaweedfs.block.control.WorkspaceBinding\x12f\n" +
 	"\x0ePlaceWorkspace\x12+.seaweedfs.block.control.WorkspacePlacement\x1a'.seaweedfs.block.control.WorkspaceEmpty\x12n\n" +
@@ -826,7 +1236,9 @@ const file_workspace_proto_rawDesc = "" +
 	"\x0fRevokeWorkspace\x12*.seaweedfs.block.control.WorkspaceIdentity\x1a+.seaweedfs.block.control.WorkspaceLeaseFact\x12o\n" +
 	"\x13AckWorkspaceRevoked\x12/.seaweedfs.block.control.WorkspaceRevocationAck\x1a'.seaweedfs.block.control.WorkspaceEmpty\x12`\n" +
 	"\rMoveWorkspace\x12&.seaweedfs.block.control.WorkspaceMove\x1a'.seaweedfs.block.control.WorkspaceGrant\x12d\n" +
-	"\x0eQueryWorkspace\x12(.seaweedfs.block.control.WorkspaceVolume\x1a(.seaweedfs.block.control.WorkspaceStatusB=Z;github.com/seaweedfs/seaweed-block/core/rpc/control;controlb\x06proto3"
+	"\x0eQueryWorkspace\x12(.seaweedfs.block.control.WorkspaceVolume\x1a(.seaweedfs.block.control.WorkspaceStatus\x12y\n" +
+	"\x17QueryWorkspaceLostRange\x120.seaweedfs.block.control.WorkspaceLostRangeQuery\x1a,.seaweedfs.block.control.WorkspaceLostRanges\x12m\n" +
+	"\x14PreviewWorkspaceMove\x12&.seaweedfs.block.control.WorkspaceMove\x1a-.seaweedfs.block.control.WorkspaceMovePreviewB=Z;github.com/seaweedfs/seaweed-block/core/rpc/control;controlb\x06proto3"
 
 var (
 	file_workspace_proto_rawDescOnce sync.Once
@@ -840,44 +1252,54 @@ func file_workspace_proto_rawDescGZIP() []byte {
 	return file_workspace_proto_rawDescData
 }
 
-var file_workspace_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_workspace_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_workspace_proto_goTypes = []any{
-	(*WorkspaceIdentity)(nil),      // 0: seaweedfs.block.control.WorkspaceIdentity
-	(*WorkspaceVolume)(nil),        // 1: seaweedfs.block.control.WorkspaceVolume
-	(*WorkspaceEmpty)(nil),         // 2: seaweedfs.block.control.WorkspaceEmpty
-	(*WorkspaceLeaseFact)(nil),     // 3: seaweedfs.block.control.WorkspaceLeaseFact
-	(*WorkspaceRevocationAck)(nil), // 4: seaweedfs.block.control.WorkspaceRevocationAck
-	(*WorkspaceMove)(nil),          // 5: seaweedfs.block.control.WorkspaceMove
-	(*WorkspaceGrant)(nil),         // 6: seaweedfs.block.control.WorkspaceGrant
-	(*WorkspaceStatus)(nil),        // 7: seaweedfs.block.control.WorkspaceStatus
-	(*WorkspaceBinding)(nil),       // 8: seaweedfs.block.control.WorkspaceBinding
-	(*WorkspacePlacement)(nil),     // 9: seaweedfs.block.control.WorkspacePlacement
+	(*WorkspaceIdentity)(nil),       // 0: seaweedfs.block.control.WorkspaceIdentity
+	(*WorkspaceVolume)(nil),         // 1: seaweedfs.block.control.WorkspaceVolume
+	(*WorkspaceEmpty)(nil),          // 2: seaweedfs.block.control.WorkspaceEmpty
+	(*WorkspaceLeaseFact)(nil),      // 3: seaweedfs.block.control.WorkspaceLeaseFact
+	(*WorkspaceRevocationAck)(nil),  // 4: seaweedfs.block.control.WorkspaceRevocationAck
+	(*WorkspaceMove)(nil),           // 5: seaweedfs.block.control.WorkspaceMove
+	(*WorkspaceGrant)(nil),          // 6: seaweedfs.block.control.WorkspaceGrant
+	(*WorkspaceLostRange)(nil),      // 7: seaweedfs.block.control.WorkspaceLostRange
+	(*WorkspaceLostRangeQuery)(nil), // 8: seaweedfs.block.control.WorkspaceLostRangeQuery
+	(*WorkspaceLostRanges)(nil),     // 9: seaweedfs.block.control.WorkspaceLostRanges
+	(*WorkspaceMovePreview)(nil),    // 10: seaweedfs.block.control.WorkspaceMovePreview
+	(*WorkspaceStatus)(nil),         // 11: seaweedfs.block.control.WorkspaceStatus
+	(*WorkspaceBinding)(nil),        // 12: seaweedfs.block.control.WorkspaceBinding
+	(*WorkspacePlacement)(nil),      // 13: seaweedfs.block.control.WorkspacePlacement
 }
 var file_workspace_proto_depIdxs = []int32{
 	0,  // 0: seaweedfs.block.control.WorkspaceRevocationAck.identity:type_name -> seaweedfs.block.control.WorkspaceIdentity
-	3,  // 1: seaweedfs.block.control.WorkspaceStatus.lease:type_name -> seaweedfs.block.control.WorkspaceLeaseFact
-	4,  // 2: seaweedfs.block.control.WorkspaceStatus.revocation_ack:type_name -> seaweedfs.block.control.WorkspaceRevocationAck
-	6,  // 3: seaweedfs.block.control.WorkspaceStatus.moves:type_name -> seaweedfs.block.control.WorkspaceGrant
-	8,  // 4: seaweedfs.block.control.WorkspaceStatus.bindings:type_name -> seaweedfs.block.control.WorkspaceBinding
-	8,  // 5: seaweedfs.block.control.WorkspaceService.RegisterWorkspaceBinding:input_type -> seaweedfs.block.control.WorkspaceBinding
-	9,  // 6: seaweedfs.block.control.WorkspaceService.PlaceWorkspace:input_type -> seaweedfs.block.control.WorkspacePlacement
-	0,  // 7: seaweedfs.block.control.WorkspaceService.RenewWorkspaceLease:input_type -> seaweedfs.block.control.WorkspaceIdentity
-	0,  // 8: seaweedfs.block.control.WorkspaceService.RevokeWorkspace:input_type -> seaweedfs.block.control.WorkspaceIdentity
-	4,  // 9: seaweedfs.block.control.WorkspaceService.AckWorkspaceRevoked:input_type -> seaweedfs.block.control.WorkspaceRevocationAck
-	5,  // 10: seaweedfs.block.control.WorkspaceService.MoveWorkspace:input_type -> seaweedfs.block.control.WorkspaceMove
-	1,  // 11: seaweedfs.block.control.WorkspaceService.QueryWorkspace:input_type -> seaweedfs.block.control.WorkspaceVolume
-	8,  // 12: seaweedfs.block.control.WorkspaceService.RegisterWorkspaceBinding:output_type -> seaweedfs.block.control.WorkspaceBinding
-	2,  // 13: seaweedfs.block.control.WorkspaceService.PlaceWorkspace:output_type -> seaweedfs.block.control.WorkspaceEmpty
-	3,  // 14: seaweedfs.block.control.WorkspaceService.RenewWorkspaceLease:output_type -> seaweedfs.block.control.WorkspaceLeaseFact
-	3,  // 15: seaweedfs.block.control.WorkspaceService.RevokeWorkspace:output_type -> seaweedfs.block.control.WorkspaceLeaseFact
-	2,  // 16: seaweedfs.block.control.WorkspaceService.AckWorkspaceRevoked:output_type -> seaweedfs.block.control.WorkspaceEmpty
-	6,  // 17: seaweedfs.block.control.WorkspaceService.MoveWorkspace:output_type -> seaweedfs.block.control.WorkspaceGrant
-	7,  // 18: seaweedfs.block.control.WorkspaceService.QueryWorkspace:output_type -> seaweedfs.block.control.WorkspaceStatus
-	12, // [12:19] is the sub-list for method output_type
-	5,  // [5:12] is the sub-list for method input_type
-	5,  // [5:5] is the sub-list for extension type_name
-	5,  // [5:5] is the sub-list for extension extendee
-	0,  // [0:5] is the sub-list for field type_name
+	7,  // 1: seaweedfs.block.control.WorkspaceGrant.lost_range:type_name -> seaweedfs.block.control.WorkspaceLostRange
+	7,  // 2: seaweedfs.block.control.WorkspaceLostRanges.ranges:type_name -> seaweedfs.block.control.WorkspaceLostRange
+	3,  // 3: seaweedfs.block.control.WorkspaceStatus.lease:type_name -> seaweedfs.block.control.WorkspaceLeaseFact
+	4,  // 4: seaweedfs.block.control.WorkspaceStatus.revocation_ack:type_name -> seaweedfs.block.control.WorkspaceRevocationAck
+	6,  // 5: seaweedfs.block.control.WorkspaceStatus.moves:type_name -> seaweedfs.block.control.WorkspaceGrant
+	12, // 6: seaweedfs.block.control.WorkspaceStatus.bindings:type_name -> seaweedfs.block.control.WorkspaceBinding
+	12, // 7: seaweedfs.block.control.WorkspaceService.RegisterWorkspaceBinding:input_type -> seaweedfs.block.control.WorkspaceBinding
+	13, // 8: seaweedfs.block.control.WorkspaceService.PlaceWorkspace:input_type -> seaweedfs.block.control.WorkspacePlacement
+	0,  // 9: seaweedfs.block.control.WorkspaceService.RenewWorkspaceLease:input_type -> seaweedfs.block.control.WorkspaceIdentity
+	0,  // 10: seaweedfs.block.control.WorkspaceService.RevokeWorkspace:input_type -> seaweedfs.block.control.WorkspaceIdentity
+	4,  // 11: seaweedfs.block.control.WorkspaceService.AckWorkspaceRevoked:input_type -> seaweedfs.block.control.WorkspaceRevocationAck
+	5,  // 12: seaweedfs.block.control.WorkspaceService.MoveWorkspace:input_type -> seaweedfs.block.control.WorkspaceMove
+	1,  // 13: seaweedfs.block.control.WorkspaceService.QueryWorkspace:input_type -> seaweedfs.block.control.WorkspaceVolume
+	8,  // 14: seaweedfs.block.control.WorkspaceService.QueryWorkspaceLostRange:input_type -> seaweedfs.block.control.WorkspaceLostRangeQuery
+	5,  // 15: seaweedfs.block.control.WorkspaceService.PreviewWorkspaceMove:input_type -> seaweedfs.block.control.WorkspaceMove
+	12, // 16: seaweedfs.block.control.WorkspaceService.RegisterWorkspaceBinding:output_type -> seaweedfs.block.control.WorkspaceBinding
+	2,  // 17: seaweedfs.block.control.WorkspaceService.PlaceWorkspace:output_type -> seaweedfs.block.control.WorkspaceEmpty
+	3,  // 18: seaweedfs.block.control.WorkspaceService.RenewWorkspaceLease:output_type -> seaweedfs.block.control.WorkspaceLeaseFact
+	3,  // 19: seaweedfs.block.control.WorkspaceService.RevokeWorkspace:output_type -> seaweedfs.block.control.WorkspaceLeaseFact
+	2,  // 20: seaweedfs.block.control.WorkspaceService.AckWorkspaceRevoked:output_type -> seaweedfs.block.control.WorkspaceEmpty
+	6,  // 21: seaweedfs.block.control.WorkspaceService.MoveWorkspace:output_type -> seaweedfs.block.control.WorkspaceGrant
+	11, // 22: seaweedfs.block.control.WorkspaceService.QueryWorkspace:output_type -> seaweedfs.block.control.WorkspaceStatus
+	9,  // 23: seaweedfs.block.control.WorkspaceService.QueryWorkspaceLostRange:output_type -> seaweedfs.block.control.WorkspaceLostRanges
+	10, // 24: seaweedfs.block.control.WorkspaceService.PreviewWorkspaceMove:output_type -> seaweedfs.block.control.WorkspaceMovePreview
+	16, // [16:25] is the sub-list for method output_type
+	7,  // [7:16] is the sub-list for method input_type
+	7,  // [7:7] is the sub-list for extension type_name
+	7,  // [7:7] is the sub-list for extension extendee
+	0,  // [0:7] is the sub-list for field type_name
 }
 
 func init() { file_workspace_proto_init() }
@@ -891,7 +1313,7 @@ func file_workspace_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_workspace_proto_rawDesc), len(file_workspace_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   10,
+			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

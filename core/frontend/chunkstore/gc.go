@@ -77,6 +77,7 @@ type gcIntent struct {
 // Different collectors may duplicate idempotent blob deletes but cannot
 // shorten either collector's independent two-mark grace requirement.
 type Collector struct {
+	scope      string // empty traces and reclaims the entire namespace
 	cat        *Catalog
 	blobs      BlobDeleter
 	cfg        GCConfig
@@ -218,7 +219,7 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 				// and the actual CAS domain must have
 				// advanced. Mere lease loss, or issuance without takeover,
 				// cannot authorize expiry of a paused publisher's intent.
-				expire = authorityErr == nil && issued > in.Epoch && h.Epoch > in.Epoch && h.Epoch <= issued
+				expire = (g.scope == "" || g.scope == vol) && authorityErr == nil && issued > in.Epoch && h.Epoch > in.Epoch && h.Epoch <= issued
 			}
 			if expire {
 				expired = append(expired, gcIntent{r, in})
@@ -255,6 +256,10 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 					roots[path.Join(dir, name)] = true
 				}
 			}
+		}
+		// INV-MAINT-SCOPE: roots above remain catalog-wide; candidates are local.
+		if g.scope != "" && g.scope != vol {
+			continue
 		}
 		pageAfter := ""
 		for {

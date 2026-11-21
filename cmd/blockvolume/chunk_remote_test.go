@@ -15,11 +15,11 @@ func TestWALStoreChunkFlags(t *testing.T) {
 		return append(phase150RequiredBlockvolumeArgs(), extra...)
 	}
 	f, err := parseFlags(base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk",
-		"--chunk-filer=127.0.0.1:18888", "--chunk-capture-interval=30s"))
+		"--chunk-filer=127.0.0.1:18888", "--chunk-capture-interval=5m"))
 	if err != nil {
 		t.Fatalf("walstore-chunk with a filer: %v", err)
 	}
-	if f.chunk.filer != "127.0.0.1:18888" || f.chunk.path != defaultChunkPath || f.chunk.captureInterval != 30*time.Second || f.chunk.controlEndpoint {
+	if f.chunk.filer != "127.0.0.1:18888" || f.chunk.path != defaultChunkPath || f.chunk.captureInterval != 5*time.Minute || f.chunk.controlEndpoint {
 		t.Fatalf("parsed chunk flags = %+v", f.chunk)
 	}
 	f, err = parseFlags(base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1",
@@ -31,8 +31,8 @@ func TestWALStoreChunkFlags(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d.chunk.captureInterval != 0 || d.chunk.dirtyThreshold != 512 {
-		t.Fatalf("scheduler defaults interval %s threshold %d, want timer off and 512", d.chunk.captureInterval, d.chunk.dirtyThreshold)
+	if d.chunk.captureInterval != 15*time.Minute || d.chunk.maintenanceInterval != time.Hour || d.chunk.automaticGC || d.chunk.dirtyThreshold != 512 {
+		t.Fatalf("scheduler defaults interval %s threshold %d, want capture 15m, maintenance 1h, GC off and 512", d.chunk.captureInterval, d.chunk.dirtyThreshold)
 	}
 	off, err := parseFlags(base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1",
 		"--chunk-capture-interval=0", "--chunk-dirty-threshold=0"))
@@ -43,13 +43,15 @@ func TestWALStoreChunkFlags(t *testing.T) {
 		t.Fatalf("walstore with the chunk defaults untouched: %v", err)
 	}
 	refused := map[string][]string{
-		"no filer":               base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk"),
-		"no durable root":        base("--durable-impl=walstore-chunk", "--chunk-filer=127.0.0.1:18888"),
-		"relative path":          base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-path=swblock"),
-		"root path":              base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-path=/"),
-		"negative interval":      base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-capture-interval=-1s"),
-		"chunk flag on walstore": base("--durable-root=/tmp/sw-block", "--durable-impl=walstore", "--chunk-filer=x:1"),
-		"chunk path on walstore": base("--durable-root=/tmp/sw-block", "--durable-impl=walstore", "--chunk-path=/other"),
+		"no filer":                base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk"),
+		"no durable root":         base("--durable-impl=walstore-chunk", "--chunk-filer=127.0.0.1:18888"),
+		"relative path":           base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-path=swblock"),
+		"root path":               base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-path=/"),
+		"below OSS capture floor": base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-capture-interval=4m59s"),
+		"negative maintenance":    base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-maintenance-interval=-1s"),
+		"negative interval":       base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-capture-interval=-1s"),
+		"chunk flag on walstore":  base("--durable-root=/tmp/sw-block", "--durable-impl=walstore", "--chunk-filer=x:1"),
+		"chunk path on walstore":  base("--durable-root=/tmp/sw-block", "--durable-impl=walstore", "--chunk-path=/other"),
 		"control endpoint on walstore": base("--durable-root=/tmp/sw-block", "--durable-impl=walstore", "--status-addr=127.0.0.1:0",
 			"--chunk-control-endpoint"),
 		"control endpoint without a status listener": base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk",
