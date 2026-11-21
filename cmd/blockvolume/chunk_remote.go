@@ -52,6 +52,9 @@ type chunkFlags struct {
 
 func validateChunkFlags(f flags) error {
 	c := f.chunk
+	if c.detachPrecopy {
+		return errors.New("--chunk-detach-precopy is not supported in this release")
+	}
 	if c.hostLimit.Directory != "" {
 		if err := c.hostLimit.Validate(); err != nil {
 			return err
