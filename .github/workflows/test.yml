@@ -2,6 +2,8 @@ name: Test
 
 on:
   pull_request:
+    # ready_for_review: a Draft runs no Go suite (below); marking it ready starts one.
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches:
       - main
@@ -18,6 +20,9 @@ concurrency:
 jobs:
   test:
     name: go test (linux)
+    # The suite writes heavily to the runner disk (real files, fsync), so a
+    # Draft PR skips it; its author tests locally until the PR is ready.
+    if: github.event_name == 'push' || !github.event.pull_request.draft
     # Pushes and same-repo PRs run on the team's tp04 runner (seaweed.slice,
     # capped at 8 cores / 8 GiB). Fork PRs never reach it: they stay on a
     # GitHub-hosted runner.
@@ -32,6 +37,9 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
+          # Two commits: the PR merge commit and its base parent, so the test
+          # step can see which packages the PR touches.
+          fetch-depth: 2
 
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
@@ -54,10 +62,33 @@ jobs:
         run: go vet ./...
 
       - name: Test default configuration
-        run: go test -p=1 -short -count=1 -timeout 10m ./...
+        # A PR runs the light set plus every heavy package its own diff touches;
+        # the long, disk-heavy, timing-sensitive packages run in full on main and
+        # on train PRs. A green PR check does not cover an untouched heavy package.
+        env:
+          EVENT: ${{ github.event_name }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = push ] || [[ "$HEAD_REF" == train/* ]]; then
+            pkgs=$(go list ./...)
+          else
+            pkgs=$(go list ./... | grep -vE '/core/(storage|frontend/durable|host/master|authority)$')
+            mod=$(go list -m)
+            changed=$(git diff --name-only HEAD^1 HEAD)
+            for p in core/storage core/frontend/durable core/host/master core/authority; do
+              if printf '%s\n' "$changed" | grep -qE "^$p/[^/]+$"; then
+                pkgs="$pkgs $mod/$p"
+              fi
+            done
+          fi
+          go test -p=1 -short -count=1 -timeout 10m $pkgs
 
   test-legacy:
     name: go test legacy-fixture
+    # A second full pass (legacy-fixture tag) writes as much again: it runs on
+    # main and on train PRs, which carry every change that merges.
+    if: github.event_name == 'push' || startsWith(github.head_ref, 'train/')
     # Same routing as the default job: same-repo PRs and pushes use the tp04
     # runners (two instances, so both passes run in parallel); fork PRs stay on
     # a GitHub-hosted runner, whose shared queue can wait for hours.

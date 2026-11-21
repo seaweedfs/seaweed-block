@@ -33,7 +33,7 @@ func (f *manifestFixtureFiler) Get(_ context.Context, id string) ([]byte, error)
 	defer f.mu.Unlock()
 	b, ok := f.blobs[id]
 	if !ok {
-		return nil, chunkstore.ErrNotFound
+		return nil, fmt.Errorf("%w: %w", chunkstore.ErrBlobNotFound, chunkstore.ErrNotFound)
 	}
 	return append([]byte(nil), b...), nil
 }

@@ -21,6 +21,62 @@ const cutCOWMemoryLimit = DefaultCutPayloadMemoryBudget
 
 // defaultCOWSpillLimit caps a copy window's side-file bytes by default.
 const defaultCOWSpillLimit = 1 << 30
+
+// cowSpillFreeReserve is the free space a cut's side file never takes,
+// on top of leaving half of the rest.
+const cowSpillFreeReserve = 1 << 30
+
+var (
+	// errCutNoRoom: the free space leaves this cut no side-file room.
+	errCutNoRoom = errors.New("storage: no room to cut")
+	// errCutFreeUnreadable: the free space could not be read, so this cut
+	// has no side-file room.
+	errCutFreeUnreadable = errors.New("storage: free space unreadable")
+)
+
+// cowSpillCap is one cut's side-file cap. cause is set when the free space
+// made it zero: errCutNoRoom or errCutFreeUnreadable.
+type cowSpillCap struct {
+	bytes int64
+	cause error
+}
+
+// cowSpillLimit is this cut's side-file cap: COWSpillLimit, lowered to
+// half the free space minus cowSpillFreeReserve when COWSpillFree is set.
+// A read error gives a cap of 0 with its own cause.
+func (l *chunkLayerImpl) cowSpillLimit() cowSpillCap {
+	limit := l.cfg.COWSpillLimit
+	if l.cfg.COWSpillFree == nil {
+		return cowSpillCap{bytes: limit}
+	}
+	free, err := l.cfg.COWSpillFree()
+	if err != nil {
+		return cowSpillCap{cause: fmt.Errorf("%w: %w", errCutFreeUnreadable, err)}
+	}
+	c := cowSpillCap{bytes: max(0, min(limit, free/2-cowSpillFreeReserve))}
+	if c.bytes == 0 {
+		c.cause = errCutNoRoom
+	}
+	return c
+}
+
+// readCutSpill reads this cut's side-file cap once, for both the staging
+// bound and the copy window, and records it in the stats.
+func (l *chunkLayerImpl) readCutSpill() cowSpillCap {
+	c := l.cowSpillLimit()
+	reason := ""
+	switch {
+	case errors.Is(c.cause, errCutFreeUnreadable):
+		reason = "free_space_unreadable"
+	case errors.Is(c.cause, errCutNoRoom):
+		reason = "no_room_to_cut"
+	}
+	l.stMu.Lock()
+	l.stats.COWSpillCap, l.stats.COWSpillCapReason = c.bytes, reason
+	l.stMu.Unlock()
+	return c
+}
+
 const (
 	cowPending uint8 = iota
 	cowCopying
@@ -68,6 +124,7 @@ type cutCOWWindow struct {
 	memory      int64
 	spillBytes  int64 // bytes written to the side file; at most spillLimit
 	spillLimit  int64
+	spillCause  error // why spillLimit is 0, when the free space made it so
 	chunkBytes  int64
 	memoryLimit int64
 	saverSlots  chan struct{}
@@ -143,12 +200,12 @@ func (l *chunkLayerImpl) holdCOWDestructive() func() {
 }
 
 // The caller owns captureMu exclusive, so no writer can miss this publication.
-func (l *chunkLayerImpl) installCOWWindow(candidates, staged map[uint64]bool, head map[uint64]chunkRef) (*cutCOWWindow, error) {
+func (l *chunkLayerImpl) installCOWWindow(candidates, staged map[uint64]bool, head map[uint64]chunkRef, spill cowSpillCap) (*cutCOWWindow, error) {
 	size := uint64(l.blockSize) * l.chunkBlocks
 	if size == 0 || size > math.MaxInt64 || uint64(len(candidates)) > math.MaxInt64/size {
 		return nil, fmt.Errorf("%w: side-store geometry", errCutCOWAborted)
 	}
-	w := &cutCOWWindow{layer: l, ended: make(chan struct{}), entries: make(map[uint64]*cutCOWEntry), head: head, spillLimit: l.cfg.COWSpillLimit, chunkBytes: int64(size)}
+	w := &cutCOWWindow{layer: l, ended: make(chan struct{}), entries: make(map[uint64]*cutCOWEntry), head: head, spillLimit: spill.bytes, spillCause: spill.cause, chunkBytes: int64(size)}
 	w.ctx, w.cancel = context.WithCancel(context.Background())
 	_, reserved, limit := l.cutPayloadWorkers()
 	savers := min(max(1, int((16<<20)/int64(size))), int((limit-reserved)/(2*int64(size))))
@@ -373,6 +430,9 @@ func (w *cutCOWWindow) save(e *cutCOWEntry, data []byte, missing []uint64) error
 		// The side file is sparse but its saved chunks are real bytes on the
 		// volume's filesystem: abort the cut (retried) instead of filling it.
 		w.mu.Unlock()
+		if w.spillCause != nil {
+			return fmt.Errorf("%w: %w: %w: COW spill cap is 0", errCutCOWAborted, errCutCOWCapacity, w.spillCause)
+		}
 		return fmt.Errorf("%w: %w: COW spill would exceed its cap of %d bytes", errCutCOWAborted, errCutCOWCapacity, w.spillLimit)
 	} else {
 		w.spillBytes += w.chunkBytes

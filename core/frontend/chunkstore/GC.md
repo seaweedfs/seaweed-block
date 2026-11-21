@@ -103,3 +103,161 @@ This test requires the binary and fails rather than skips when it is absent. It 
 It advances only the GC clock to exercise grace admission deterministically;
 network services, conditional metadata writes, authority RPC and blob deletion
 are real. It is not an elapsed-time soak or a lab qualification.
+
+## Single filer
+
+Every command that writes chunk metadata (`snapshot-delete`, `fork`, `retain`
+without `--dry-run`, `volume-delete`, `gc --apply`) and `verify` make the same
+start check as blockvolume before they read or write anything: it asks the
+filer for its masters and filer group, and refuses unless a master lists
+exactly one filer in that group and it is the `--chunk-filer` given. `verify`
+writes nothing, but against a split filer view it would report false
+findings. The other read-only commands and modes do not run the check. A
+filer that is not the only one of its group exits 2 with code `bad_request`;
+a check that cannot finish (a filer or master that does not answer) exits 1
+with code `remote_unavailable`, retryable. The check runs within the command's
+`--timeout`. The masters the filer reports must be reachable from where the
+command runs.
+
+## Verify
+
+`sw-block ops chunk verify` compares one volume's remote image with what its
+HEAD, and optionally its snapshots, say. It is read-only: it writes no intent,
+mark, tombstone or binding, and deletes nothing.
+
+```sh
+sw-block ops chunk verify --volume v1 --chunk-filer 127.0.0.1:18888 \
+  [--chunk-path /swblock/chunks] [--snapshot s1 | --all-snapshots] \
+  [--depth meta|bindings|data] [--concurrency 2] [--bytes-per-sec 33554432] \
+  [--timeout 10m]
+```
+
+HEAD is always checked. `--snapshot` adds one named snapshot; `--all-snapshots`
+adds every published snapshot that is not being deleted. Each depth includes the
+one before it:
+
+- `meta`: the HEAD root decodes and is self-consistent; its chunk size and chunk
+  indices fit the VOLUME geometry; every segment a checked root names is
+  readable, matches its SHA-256 and decodes strictly; the same for each checked
+  snapshot's embedded HEAD; a snapshot's document names the volume and the
+  snapshot it was found under (else `ROOT_INVALID`; the snapshot is still
+  checked under the name it was found under); references to one
+  chunk with different SHA-256s disagree (`CONTENT_MISMATCH`); for a fork, its
+  fork record's digest matches an attempt of the parent snapshot at the
+  recorded generation.
+- `bindings` (the default): also, every chunk key a checked root references has
+  a binding in its owner's `keys/` (a fork's `@owner/key` resolves to the owner
+  volume), of the right kind, with a fid, without filer chunks, and not
+  tombstoned by GC. Each owner's `keys/` is listed once. GC's mark does not make
+  this check: it never looks up the bindings of the keys it roots.
+- `data`: also, every distinct chunk (owner and key, across all checked roots)
+  is read once, and its SHA-256 must equal the reference and its length the
+  chunk size, the rule a guest read applies. `--depth data` requires an explicit
+  `--timeout`. Reads are bounded by `--concurrency` and paced by
+  `--bytes-per-sec` (0 leaves them unpaced).
+
+Old capture intents below HEAD's epoch that name no key HEAD references are
+reported as `INTENT_STALE`. This is a hint only: whether GC may expire an intent
+remains GC's decision, with blockmaster authority.
+
+The output is one JSON object: the HEAD generations and snapshots covered,
+segments and chunks checked, distinct chunks and bytes read, the two counters
+below, findings by class, and the findings, one per line. Each finding
+names the volume, the root (`HEAD gen N`, `snapshot name/attempt`, an intent or
+the VOLUME fork record), the chunk index or segment, the owner, key and fid, a
+class and a detail. Classes: `ROOT_INVALID`, `GEOMETRY`, `SEGMENT_UNREADABLE`,
+`BINDING_MISSING`, `BINDING_TOMBSTONED`, `NEEDLE_MISSING`, `CONTENT_MISMATCH`,
+`SIZE_MISMATCH`, `FORK_RECORD_MISMATCH`, `INTENT_STALE`, `READ_ERROR`.
+
+`NEEDLE_MISSING` means the blob store answered that the needle does not exist
+(for SeaweedFS: HTTP 404 from every location of a fresh volume lookup; when the
+cached locations all answer 404, the volume is looked up again, since it may
+have moved). Any other read failure, such as a
+timeout, a refused or reset connection, or another HTTP status, is retried twice
+with a short backoff. If it still fails, the chunk or segment is reported as
+`READ_ERROR`, with the error in the detail. `READ_ERROR` is not evidence of
+damage: it means that object was **not verified**. Re-run verify, after fixing
+the store's reachability if needed. The summary counts these objects separately
+in `chunksNotRead`, and `readRetries` counts the retried reads. The rule below
+applies to `READ_ERROR` as to any other bad outcome.
+
+### Running beside a live owner and beside GC
+
+Segments and chunks are immutable and written before the root that names them,
+so a root read once and the segments it names are a consistent view. But nothing
+registers a reader with GC: a chunk that leaves a root can be collected once
+GC's grace has passed, and a long pass can outlive that. So verify checks each
+chunk once, records its outcome, and computes the findings only at the end, from
+those outcomes and the roots at its final read:
+
+- HEAD is read again at least every 2 minutes during a long pass (a newer
+  generation replaces the view; only segments whose key changed are read again;
+  chunks it names that the pass has not seen are added and checked).
+- When every chunk is checked, verify reads HEAD and each checked snapshot's state
+  once more. If that read names a chunk not seen, verify checks it and reads
+  again, at most 3 times; the read that names nothing new is the final read, and
+  no read follows it. Only a HEAD that decodes can be part of it: if that read
+  finds no HEAD, or one that does not decode, the final view has no HEAD root and
+  the pass is incomplete.
+- Chunks and segments alike are read once per key, whatever reference names them,
+  and keep that one outcome: the content (a segment keeps its bytes), or binding
+  missing or tombstoned, needle missing, or a read error.
+- At the end, each reference is judged against that one outcome, the same way
+  whatever the order the pass met them in: a bad outcome stays that outcome; a
+  reference with another hash is a `CONTENT_MISMATCH`; a chunk that matches its
+  reference but is not a chunk long is a `SIZE_MISMATCH`; a segment that does not
+  decode under that reference's own fields is `SEGMENT_UNREADABLE`; else it is
+  sound (and a sound segment reference gives that root its chunks).
+- For each object and class a reference of the final read has, there is one
+  finding, under the first root having such a reference (HEAD, then the snapshots
+  still active, in order), at its first such index.
+- A chunk or segment that had a problem under any reference the pass saw (or a bad
+  outcome) but has no finding, because no reference of the final read has one, is
+  counted once: in `rootDeletedDuringVerify` when a checked snapshot that was
+  deleted during the pass carried a problem reference, otherwise in
+  `supersededDuringVerify`. This includes an object still named, but only by sound
+  references. Deleted snapshots are listed in `snapshotsDeletedDuringVerify` as not
+  fully covered. The counters do not make a pass unclean.
+- A key that an earlier HEAD read named, a later one did not, and the final HEAD
+  names again is a `ROOT_INVALID` finding ("HEAD names a key it had dropped"),
+  whatever its chunk's state: a key that left every root may have been collected,
+  and must not come back.
+
+A finding describes each chunk as it was when checked, for the roots at the final
+read; a chunk damaged after its check is the next pass's finding.
+
+A pass that cannot finish is **incomplete**, never clean: `complete` is false and
+`incomplete` gives the reason: `deadline`, `cancelled`, `error` (a filer or blob
+store failure, a refused request, or a final read that returned an older HEAD),
+`closing_rounds_exhausted` (each of the 3 final reads named new chunks: the volume
+is too busy; re-run), `head_absent` (the final read found no HEAD) or
+`head_invalid` (the final read's HEAD does not decode; also a `ROOT_INVALID`
+finding). Its findings are those computed from the chunks it did check, for the
+roots of its last view (none for HEAD in the last two cases).
+
+### What verify cannot check
+
+- Orphan needles: a needle uploaded whose binding was never written cannot be
+  enumerated.
+- Which block inside a chunk is bad: there is one SHA-256 per chunk.
+- A data chunk's size without reading it: bindings and references store no size.
+- The HEAD root against an independent value: no checksum of the root is stored.
+- Whether the image equals the volume's content at its remote LSN: only the
+  holder's local volume could say.
+- Past HEAD generations, forced-move lost ranges (kept outside the filer), and
+  any verification history (nothing records it).
+- Each replica of a needle: a read stops at the first replica that answers.
+
+### Exit codes
+
+- `0`: the pass completed with no finding.
+- `3`: the pass completed with findings. This includes `READ_ERROR`: the pass
+  did not verify everything.
+- `1`: the pass could not complete (the deadline passed, the filer failed, HEAD
+  kept naming new chunks, HEAD was gone or did not decode at the final read, or
+  the volume or snapshot does not exist). The error body
+  `{code,message,retryable}` is printed with the partial result, and its
+  `incomplete` reason, under `verify`. A single-filer start check that cannot
+  finish also exits 1 (`remote_unavailable`), before the pass, with no result.
+- `2`: usage error, or the filer is not the only one of its group (`bad_request`,
+  before the pass, with no result).
