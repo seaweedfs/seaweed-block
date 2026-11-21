@@ -27,6 +27,8 @@ The design is described in three documents, and this one collects their machines
   - [M6 Chunk lifecycle](#m6-chunk-lifecycle)
 - [Part B. Invariant ledger](#part-b-invariant-ledger)
 - [Part C. Change rules](#part-c-change-rules)
+- [Part D. Wait ownership](#part-d-wait-ownership)
+- [Part E. Quantities](#part-e-quantities)
 
 ---
 
@@ -689,3 +691,9 @@ Format v3 row 4 remains dark. Its typed scan result preserves trusted records, a
 | Frontend pre-copy admission | M5 tentative admission -> resume; `INV-CUT-PRECOPY-001` | Earlier of caller deadline and this command arrival + 5 s; one bound across retries, no inherited pause clock | Owner `finishPrecopyLocked`: resume or terminal Close clears the pause and grants all waiters in FIFO arrival order under one `b.mu` hold; each rechecks the ordinary gate. Expiry removes only its waiter and refuses with typed `ErrBackendBusy` + deadline cause (guest-visible: yes). Only a typed pause refusal requeues a granted waiter under the original command deadline; already-observed stale-primary and other gate errors are returned unchanged. Grant versus queue expiry is decided under the same lock; timely grants survive later queue-timer expiry but never caller expiry or a terminal gate. No dependency on another command's completion. | No `ioMu`, store lock, or remote call while queued. Admitted I/O retains normal per-LBA serialization and lifecycle accounting. |
 
 Frozen estimate reporting: a tail above the existing 60 s estimator ceiling reports the same 60 s rejection sentinel used by admission. It is known but saturated, not a complete fixed-plus-tail duration; quiesce slack is zero. Consumers must not use it as a completion forecast. Drain refusals retain the observation before their reason changes; this reporting does not reclassify refusal causes.
+
+## Part E. Quantities
+
+| Quantity | Unit | Cap | Enforced at (producer) | Drained | Outcome at the cap |
+|---|---|---|---|---|---|
+| COW side-file spill per cut | bytes | min(`COWSpillLimit` (default 1 GiB, or the host limit's COW bytes), free space on `--durable-root` / 2 - 1 GiB), at least 0; the free space is read once per cut and that cap bounds both staging and the copy window; off Linux, the configured cap. Shown per cut in the layer stats (`COWSpillCap`, `COWSpillCapReason`: `no_room_to_cut` when the free space is within the reserve, `free_space_unreadable` when the read fails) | the saver: `core/storage/chunk_cut_cow.go` `readCutSpill`, the save's cap check | at the cut's end (the side file is removed on publish, abort or close) | that cut aborts (retryable), counted as `cow_capacity`, or as `no_room_to_cut` / `free_space_unreadable` when the free space made the cap 0; the guest write completes and nothing partial is published |
