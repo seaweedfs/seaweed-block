@@ -1864,7 +1864,13 @@ func (l *chunkLayerImpl) Close() error {
 	if w != nil {
 		w.join()
 	}
+	if h := testCloseJoinHook; h != nil {
+		h() // tests: Close has cancelled the layer and now joins its owners, the drainer among them
+	}
 	l.wg.Wait()
+	if h := testCloseJoinedHook; h != nil {
+		h() // tests: the join returned
+	}
 	l.stMu.Lock()
 	protected := make(map[string]bool, len(l.pendingIntents))
 	for _, id := range l.pendingIntents {

@@ -312,12 +312,19 @@ func validChunkIntentID(id string) bool {
 type chunkLayerConfig struct {
 	// OnPublishSettled, when set, is called once per confirmed publication
 	// (a cut, a detach, or an earlier unresolved CAS found applied), with the
-	// HEAD before and after it. Calls are serialized and in publication
-	// order, outside the capture lock, on whichever publishing caller is
-	// draining the reports (a publisher may return before its own report is
-	// delivered by the drainer). The drainer is registered with Close; ctx
-	// ends with Close, and once Close has begun no further report is
-	// delivered. A hook may publish again (its report is delivered after).
+	// HEAD before and after it (INV-PUBLISH-SETTLED-001). Calls are
+	// serialized and in publication order, outside the capture lock, on
+	// whichever publishing caller is draining the reports (a publisher may
+	// return before its own report is delivered by the drainer). The drainer
+	// is registered with Close; ctx ends with Close. Once Close has begun no
+	// further report is dequeued; a report already dequeued may still reach
+	// the hook after Close began (Close then waits for it).
+	//
+	// The hook MUST return without blocking and without remote calls; enqueue
+	// work to your own worker. It runs on the cut or detach caller's
+	// goroutine, before a detach returns: its duration is a guest-visible wait
+	// (Part C wait sites). While a hook stalls, later reports queue without a
+	// bound. A hook may publish again (its report is delivered after).
 	OnPublishSettled func(ctx context.Context, prev, next ChunkHead)
 	// ChunkBlocks is the number of consecutive blocks per chunk (1024 for
 	// 4 KiB blocks and 4 MiB chunks).

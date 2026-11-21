@@ -6,6 +6,7 @@ package volume
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
@@ -102,10 +103,14 @@ type ownerGuard struct {
 	cutsAtBegin []int
 	finishes    []string
 	fp          *fakeChunkProvider
+	beginErr    error
 }
 
 func (g *ownerGuard) Begin(context.Context, string) (string, error) {
 	g.cutsAtBegin = append(g.cutsAtBegin, g.fp.cuts)
+	if g.beginErr != nil {
+		return "", g.beginErr
+	}
 	return "owner", nil
 }
 
@@ -129,5 +134,20 @@ func TestChunkControl_SnapshotBeginsShareBeforeTheCut(t *testing.T) {
 	}
 	if len(g.finishes) != 1 || g.finishes[0] != "v1:owner" {
 		t.Fatalf("finishes %v; want one Finish with the owner's token", g.finishes)
+	}
+}
+
+// A refused Begin stops the owner's seal before its cut: no cut, no Finish,
+// no snapshot.
+func TestChunkControl_SnapshotBeginRefusedCutsNothing(t *testing.T) {
+	ctx := context.Background()
+	fp, ctl := adapterFixture(t)
+	g := &ownerGuard{fp: fp, beginErr: errors.New("share refused")}
+	ctl.(*chunkControl).cat.SetShareGuard(g)
+	if _, err := ctl.Snapshot(ctx, "v1", ChunkSnapshotRequest{Name: "s1", RequestID: "r"}); err == nil {
+		t.Fatal("snapshot after a refused Begin")
+	}
+	if fp.cuts != 0 || len(g.finishes) != 0 {
+		t.Fatalf("cuts %d finishes %v after a refused Begin; want none", fp.cuts, g.finishes)
 	}
 }

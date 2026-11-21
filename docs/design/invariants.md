@@ -347,7 +347,7 @@ snapshot lifetime; local persistence does not bypass it.
 
 ## Part B. Invariant ledger
 
-118 rows: 99 ACTIVE, 19 STUB; 15 kept from the internal ledger, 103 new.
+120 rows: 101 ACTIVE, 19 STUB; 15 kept from the internal ledger, 105 new.
 
 The "Machine / transition" column refers to Part A. Notes under a table record what a row does not cover and, for kept rows, what was narrowed from the internal ledger.
 
@@ -527,10 +527,13 @@ Notes:
 | `INV-VOLDEL-COMMIT-001` | A volume delete commits only when no snapshot name record exists, and after its commit point no concurrent delete can roll it back. | M6 HEAD: deleting → purging | `core/frontend/chunkstore/volume_delete.go` `DeleteVolume`, `snapshotsBlock`, `commitHeadPurging` | `TestCatalog_DeleteVolumeRefusesWhileSnapshotsExist`, `TestCatalog_ConcurrentDeleteCannotRollBackACommittedOne` (`core/frontend/chunkstore/volume_delete_test.go`) | `ChunkLifecycleFixed` `CommitClean` | ACTIVE |
 | `INV-VOLDEL-HELD-HEAD-001` | A delete marks HEAD `deleting` only while no holder holds it; an attach that reaches HEAD first wins. | M6 HEAD: detached → deleting | `core/frontend/chunkstore/volume_delete.go` `markHeadDeleting`, `headHeld` | `TestCatalog_DeleteVolumeLosesToAnAttachAtTheMark` (`core/frontend/chunkstore/volume_delete_test.go`) | — | ACTIVE |
 | `INV-HEAD-DELETE-FROZEN-001` | Once HEAD is `deleting`, `purging` or `deleted`, `CASHead` refuses every claim or cut; only the delete's own transitions move it. | M6 HEAD: deleting \| purging \| deleted | `core/frontend/chunkstore/chunk_remote.go` `CASHead` | `TestCatalog_DeletedHeadCannotBeRevivedByAClaim` (`core/frontend/chunkstore/volume_delete_test.go`) | `ChunkLifecycleFixed` `NoPublishAfterCommit` | ACTIVE |
+| `INV-SHARE-ACTIVATION-001` | With a `ShareGuard` installed, a snapshot activates (writes its snapshot entry) and a fork activates (writes the child HEAD) only after `Finish` accepted the share for that HEAD; a refused `Begin` or `Finish` aborts before activation and drops the new intent, and the owner's seal calls `Begin` before the cut that produces the sealed HEAD (a refused `Begin` cuts nothing). With no guard, no call and no check is added. | M6 snapshot: Pending → Published; fork: child HEAD create | `core/frontend/chunkstore/share_guard.go` `beginShare`, `finishShare`; `core/frontend/chunkstore/catalog.go` `CreateSnapshot`, `Fork`; `core/host/volume/chunk_control.go` `chunkControl.Snapshot` | `TestShareGuard_SnapshotFinishesBeforeActivation`, `TestShareGuard_RefusedFinishAbortsTheSnapshot`, `TestShareGuard_StaleHeadIsRefused`, `TestShareGuard_CallerToken`, `TestShareGuard_Fork`, `TestShareGuard_BeginRefused` (`core/frontend/chunkstore/share_guard_test.go`); `TestChunkControl_SnapshotBeginsShareBeforeTheCut`, `TestChunkControl_SnapshotBeginRefusedCutsNothing` (`core/host/volume/chunk_control_order_test.go`) | — (the enterprise policy's protocol is modelled in `ShareMarker`) | ACTIVE |
+| `INV-PUBLISH-SETTLED-001` | With `OnPublishSettled` set, each confirmed publication (HEAD prev → next with a new generation: a cut, a detach, or an earlier unresolved CAS found applied) is delivered once, in publication order, one at a time, outside the capture and state locks, by one registered drainer. Once Close has begun no report is dequeued; a report already dequeued may still reach the hook. A no-op cut reports nothing; with no hook nothing is queued. | M5 CAS → Settled; M6 HEAD: published | `core/storage/chunk_publish_settled.go` `noteSettled`, `unlockCap`, `runPublishSettled`; `core/storage/chunk_periodic_cut.go` `CutUnlessCutSince` | `TestChunkPublishSettled_ReportsEachPublication`, `TestChunkPublishSettled_ReportsALatePublication`, `TestChunkPublishSettled_ClosedAndUnset`, `TestChunkPublishSettled_OverlappingPublishersStayOrdered`, `TestChunkPublishSettled_CloseDropsUnstartedReports`, `TestChunkPublishSettled_HookThatPublishes`, `TestChunkPublishSettled_PeriodicCutReports` (`core/storage/chunk_publish_settled_test.go`); `TestWALStoreChunk_PublishSettledHook` (`core/frontend/durable/provider_chunk_sched_test.go`) | — | ACTIVE |
 
 Notes:
 
 - `INV-GC-GRACE-DEADLINE-001`: The check is in `NewCollector`; no Go test constructs a collector with a too-short grace.
+- `ChunkRemote.ReclaimKey` is the Collector's per-key step (`reclaimBinding`) exported, not a new admission: `INV-GC-REACHABLE-001` (reachability and the two-mark grace) stays the Collector's, and a `ReclaimKey` caller must itself know nothing references the key. The step keeps `INV-CHUNK-WRITE-ONCE-001`: the binding is tombstoned, its exact fid deleted, and the binding kept for ever, never rebound; owner-qualified keys are refused.
 
 ### B.7 Rows kept from the internal ledger: Kubernetes line and replica fencing
 
@@ -592,6 +595,14 @@ How a fix or a feature is calibrated against this model:
 4. **Every bug becomes a test and a row.** A bug found by a unit test, a review, a soak or chaos run, or a TLA+ counterexample becomes a regression test that fails before the fix and passes after it, and a new or updated Part B row naming that test.
 5. **Rows are stable.** IDs are never reused or renumbered. A retired row stays with status `ARCHIVED` and a reason. A narrowed statement says what was dropped in a note.
 6. **STUB rows block claims.** A release note or a design document must not claim a property backed only by a `STUB` row. Turning a `STUB` into `ACTIVE` is the test plus the status change.
+
+### C.W Wait sites (SYSTEM-MATH Part C)
+
+One row per wait in the data and control paths. Guest-visible rows on one path must sum to at most 5 s.
+
+| Site | Waits for | Bound | Owner that ends it | On expiry | Lock held while waiting | Guest-visible |
+|---|---|---|---|---|---|---|
+| `core/storage/chunk_publish_settled.go` `runPublishSettled` (from `unlockCap`, on the cut or detach caller's goroutine) | the `OnPublishSettled` hook to return | the hook's duration: the hook must return without blocking and without remote calls, enqueueing its work to its own worker | the hook implementer | none: a stalled hook stalls its caller, and later reports queue without a bound (a nil hook queues nothing) | none (`capMu` and `stMu` released) | yes on detach (the detach caller delivers before returning) |
 
 Format v3 row 4 remains dark. Its typed scan result preserves trusted records, absolute end, highest LSN, contiguous frontier, trusted DurableLSN and stop cause separately. The later W/BASE/fence owner must check R < W*, fence and publish bounds before readiness or append admission; neither codec nor scan success is readiness. The installed scan begins at max(BaseCursor, retainedTail). No ACTIVE v2 machine/guard is replaced by this step.
 

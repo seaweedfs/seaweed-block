@@ -61,3 +61,11 @@ func (l *chunkLayerImpl) runPublishSettled() {
 		hook(l.ctx, t.prev, t.next)
 	}
 }
+
+// testCloseJoinHook, set only by tests, runs in Close after the layer is
+// cancelled and before it joins its owners (the active drainer among them).
+var testCloseJoinHook func()
+
+// testCloseJoinedHook, set only by tests, runs in Close when that join has
+// returned.
+var testCloseJoinedHook func()

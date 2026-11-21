@@ -17,6 +17,7 @@ type recGuard struct {
 	events    []string
 	n         int
 	finishErr error
+	beginErr  error
 	onFinish  func()
 }
 
@@ -25,6 +26,9 @@ func (g *recGuard) Begin(_ context.Context, vol string) (string, error) {
 	defer g.mu.Unlock()
 	g.n++
 	g.events = append(g.events, "begin:"+vol)
+	if g.beginErr != nil {
+		return "", g.beginErr
+	}
 	return fmt.Sprintf("tok-%d", g.n), nil
 }
 
@@ -160,5 +164,41 @@ func TestShareGuard_Fork(t *testing.T) {
 	}
 	if countUnder(f, catBase+"/v3/HEAD") != 0 {
 		t.Fatal("child HEAD written after a refused Finish")
+	}
+	if n := countUnder(f, catBase+"/v3/intents/"); n != 0 {
+		t.Fatalf("%d intents left for the refused fork; want its new intent dropped", n)
+	}
+}
+
+// A refused Begin stops the snapshot and the fork before anything is
+// written: no Finish, no snapshot entry, no child HEAD, no intent left.
+func TestShareGuard_BeginRefused(t *testing.T) {
+	f, _, c, h := catalogFixture(t)
+	ctx := context.Background()
+	if _, err := c.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: "s0", RequestID: "r0"}, h); err != nil {
+		t.Fatal(err)
+	}
+	intents := countUnder(f, catBase+"/v1/intents/")
+	g := &recGuard{beginErr: errors.New("share refused")}
+	c.SetShareGuard(g)
+	if _, err := c.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: "s1", RequestID: "r"}, h); err == nil {
+		t.Fatal("snapshot after a refused Begin")
+	}
+	if n := countUnder(f, catBase+"/v1/snaps/s1/"); n != 0 {
+		t.Fatalf("%d snapshot entries after a refused Begin", n)
+	}
+	if n := countUnder(f, catBase+"/v1/intents/"); n != intents {
+		t.Fatalf("intents %d -> %d after a refused Begin", intents, n)
+	}
+	if _, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s0", Target: "v4", RequestID: "fork-b"}); err == nil {
+		t.Fatal("fork after a refused Begin")
+	}
+	if countUnder(f, catBase+"/v4/HEAD") != 0 || countUnder(f, catBase+"/v4/intents/") != 0 {
+		t.Fatal("a fork refused at Begin wrote a child HEAD or an intent")
+	}
+	for _, e := range g.list() {
+		if strings.HasPrefix(e, "finish:") {
+			t.Fatalf("Finish after a refused Begin: %v", g.list())
+		}
 	}
 }
