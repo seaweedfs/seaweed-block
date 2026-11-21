@@ -199,6 +199,16 @@ type ProviderConfig struct {
 	// call back into the provider.
 	OnChunkDetach        func(volumeID string) uint64
 	OnChunkDetachResumed func(volumeID string, attempt uint64)
+	// ChunkOnPublishSettled, optional, is called once per confirmed
+	// publication of a chunk volume's HEAD, with the HEAD before and after it
+	// (storage.ChunkLayerConfig.OnPublishSettled): serialized, in publication
+	// order, outside the capture lock, by the volume's one registered drainer
+	// (whichever publishing caller is draining; a publisher may return before
+	// its own report is delivered). ctx ends when the volume's layer closes;
+	// after that no report is dequeued, though one already dequeued may still
+	// be delivered. It must return without blocking and without remote calls:
+	// enqueue work to your own worker (it is a guest-visible wait on detach).
+	ChunkOnPublishSettled func(ctx context.Context, volumeID string, prev, next storage.ChunkHead)
 	// ChunkUploadConcurrency bounds remote uploads; zero defaults to 8.
 	ChunkUploadConcurrency int
 	// ChunkPayloadMemoryBudget bounds one volume's cut payloads; zero uses the storage default.

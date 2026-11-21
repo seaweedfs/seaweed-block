@@ -17,7 +17,7 @@ var _ ChunkPeriodicCutter = (*chunkLayerImpl)(nil)
 
 func (l *chunkLayerImpl) CutUnlessCutSince(ctx context.Context, lastCutNs int64) (chunkCutResult, bool, error) {
 	l.capMu.Lock()
-	defer l.capMu.Unlock()
+	defer l.unlockCap() // delivers the cut's OnPublishSettled report after the lock
 	l.stMu.Lock()
 	last := l.stats.LastCutNs
 	l.stMu.Unlock()

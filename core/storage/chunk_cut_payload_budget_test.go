@@ -13,7 +13,7 @@ func TestCutPayloadBudgetBoundsSlots(t *testing.T) {
 		for i := 0; i < candidates; i++ {
 			pending[uint64(i)] = true
 		}
-		w, err := l.installCOWWindow(pending, nil, nil)
+		w, err := l.installCOWWindow(pending, nil, nil, l.cowSpillLimit())
 		if err != nil {
 			t.Fatal(err)
 		}

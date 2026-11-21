@@ -223,29 +223,76 @@ func (c *SWFS) Put(ctx context.Context, data []byte) (string, error) {
 }
 
 // Get implements Blobs: resolve the fid's volume through the filer, then GET
-// the needle from each location until one answers.
+// the needle from each location until one answers. The needle is reported
+// absent (ErrBlobNotFound) only when every location of a fresh lookup
+// answers 404: cached locations can be stale after a volume moves, so their
+// 404s are followed by one fresh lookup.
 func (c *SWFS) Get(ctx context.Context, fid string) ([]byte, error) {
 	vid, _, ok := strings.Cut(fid, ",")
 	if !ok {
 		return nil, fmt.Errorf("chunkstore: bad fid %q", fid)
 	}
-	urls, err := c.lookupVolume(ctx, vid)
+	urls, cached, err := c.lookupVolume(ctx, vid)
 	if err != nil {
 		return nil, err
 	}
-	var lastErr error
-	for _, host := range urls {
-		b, err := c.getFrom(ctx, host, fid)
-		if err == nil {
-			return b, nil
-		}
-		lastErr = err
+	b, allNotFound, lastErr := c.getFromAll(ctx, urls, fid)
+	if lastErr == nil {
+		return b, nil
 	}
 	c.mu.Lock()
 	delete(c.vidCache, vid)
 	c.mu.Unlock()
+	if allNotFound && cached {
+		if urls, _, err = c.lookupVolume(ctx, vid); err != nil {
+			return nil, err
+		}
+		if b, allNotFound, lastErr = c.getFromAll(ctx, urls, fid); lastErr == nil {
+			return b, nil
+		}
+		c.mu.Lock()
+		delete(c.vidCache, vid)
+		c.mu.Unlock()
+	}
+	if allNotFound {
+		lastErr = &blobNotFoundError{lastErr}
+	}
 	return nil, fmt.Errorf("chunkstore: read %s: %w", fid, lastErr)
 }
+
+// getFromAll tries each location in turn. On failure lastErr is the last
+// location's error and allNotFound whether every location answered 404.
+func (c *SWFS) getFromAll(ctx context.Context, urls []string, fid string) (b []byte, allNotFound bool, lastErr error) {
+	allNotFound = true
+	for _, host := range urls {
+		b, err := c.getFrom(ctx, host, fid)
+		if err == nil {
+			return b, false, nil
+		}
+		lastErr = err
+		var se *blobStatusError
+		if !errors.As(err, &se) || se.code != http.StatusNotFound {
+			allNotFound = false
+		}
+	}
+	return nil, allNotFound && lastErr != nil, lastErr
+}
+
+// blobStatusError is a volume server's non-200 answer to a needle GET.
+type blobStatusError struct {
+	code int
+	host string
+}
+
+func (e *blobStatusError) Error() string { return fmt.Sprintf("http %d from %s", e.code, e.host) }
+
+// blobNotFoundError marks a read every location answered 404: it reads as
+// the last location's error and matches ErrBlobNotFound.
+type blobNotFoundError struct{ err error }
+
+func (e *blobNotFoundError) Error() string        { return e.err.Error() }
+func (e *blobNotFoundError) Unwrap() error        { return e.err }
+func (e *blobNotFoundError) Is(target error) bool { return target == ErrBlobNotFound }
 
 func (c *SWFS) getFrom(ctx context.Context, host, fid string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+host+"/"+fid, nil)
@@ -258,21 +305,23 @@ func (c *SWFS) getFrom(ctx context.Context, host, fid string) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("http %d from %s", resp.StatusCode, host)
+		return nil, &blobStatusError{code: resp.StatusCode, host: host}
 	}
 	return io.ReadAll(resp.Body)
 }
 
-func (c *SWFS) lookupVolume(ctx context.Context, vid string) ([]string, error) {
+// lookupVolume returns vid's locations; cached reports that they came from
+// the cache rather than a lookup made now.
+func (c *SWFS) lookupVolume(ctx context.Context, vid string) (urls []string, cached bool, err error) {
 	c.mu.Lock()
 	urls, ok := c.vidCache[vid]
 	c.mu.Unlock()
 	if ok && len(urls) > 0 {
-		return urls, nil
+		return urls, true, nil
 	}
 	resp, err := c.fc.LookupVolume(ctx, &filerpb.LookupVolumeRequest{VolumeIds: []string{vid}})
 	if err != nil {
-		return nil, fmt.Errorf("chunkstore: lookup volume %s: %w", vid, err)
+		return nil, false, fmt.Errorf("chunkstore: lookup volume %s: %w", vid, err)
 	}
 	for _, l := range resp.GetLocationsMap()[vid].GetLocations() {
 		if l.GetUrl() != "" {
@@ -280,12 +329,12 @@ func (c *SWFS) lookupVolume(ctx context.Context, vid string) ([]string, error) {
 		}
 	}
 	if len(urls) == 0 {
-		return nil, fmt.Errorf("chunkstore: volume %s has no locations", vid)
+		return nil, false, fmt.Errorf("chunkstore: volume %s has no locations", vid)
 	}
 	c.mu.Lock()
 	c.vidCache[vid] = urls
 	c.mu.Unlock()
-	return urls, nil
+	return urls, false, nil
 }
 
 var (
@@ -302,7 +351,7 @@ func (c *SWFS) DeleteBlob(ctx context.Context, fid string) error {
 	if !ok || vid == "" || needle == "" || strings.ContainsAny(fid, "/\\?#% \r\n") {
 		return fmt.Errorf("chunkstore: bad deletion fid %q", fid)
 	}
-	urls, err := c.lookupVolume(ctx, vid)
+	urls, _, err := c.lookupVolume(ctx, vid)
 	if err != nil {
 		return err
 	}

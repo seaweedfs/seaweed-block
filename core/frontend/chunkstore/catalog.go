@@ -252,6 +252,11 @@ type SnapshotRequest struct {
 	// SourceReadAt is when the caller obtained the HEAD it snapshots (the
 	// cut's return); OpDeadline counts from it. Zero means now.
 	SourceReadAt time.Time
+	// ShareToken is the ShareGuard token of a caller that began the share
+	// before it obtained the HEAD (the owner's seal: Begin, then the cut).
+	// Empty: CreateSnapshot begins the share itself and refuses a HEAD that
+	// is no longer current. Unused without a guard; never stored.
+	ShareToken string
 }
 
 // ListOptions pages a snapshot listing.
@@ -297,6 +302,8 @@ type Catalog struct {
 	// retainHook, when set, runs at the named stages of a Retain pass (a
 	// test seam for interleavings; see hookPlanned).
 	retainHook func(stage, name string)
+	// guard, when set, is told about every share of a volume's chunks.
+	guard ShareGuard
 }
 
 // NewCatalog returns the catalog for the chunk base directory base (the
@@ -887,6 +894,12 @@ func (c *Catalog) CreateSnapshot(ctx context.Context, vol string, req SnapshotRe
 			return SnapshotInfo{}, catErr(CodeRestoreIncomplete, false, nil, "volume %s: snapshot image gen %d holds %d refs to another volume", vol, head.Gen, q)
 		}
 	}
+	shareToken := req.ShareToken
+	if shareToken == "" {
+		if shareToken, err = c.beginShare(ctx, vol, head); err != nil {
+			return SnapshotInfo{}, err
+		}
+	}
 
 	// Take the name: this request's record, or an earlier attempt's of it.
 	attempt, err := c.claimName(ctx, vol, root, req, head.Gen)
@@ -947,6 +960,11 @@ func (c *Catalog) CreateSnapshot(ctx context.Context, vol string, req SnapshotRe
 		return SnapshotInfo{}, catErr(CodeDeadlineExceeded, true, nil, "snapshot %s/%s: %v since the cut, over the %v deadline; nothing written", vol, req.Name, c.now().Sub(readAt), c.deadline())
 	}
 	dir := path.Join(root, snapsDir, req.Name)
+	if err := c.finishShare(ctx, vol, shareToken, head); err != nil {
+		// Clean abort: the snapshot entry was never sent.
+		c.dropIntent(ctx, root, id)
+		return SnapshotInfo{}, err
+	}
 	pctx, cancel := c.publishCtx(ctx, deadline)
 	outcome, got, cerr := c.createResolved(ctx, pctx, dir, e, attempt)
 	cancel()
@@ -1267,6 +1285,12 @@ func (c *Catalog) fork(ctx context.Context, req ForkRequest, origin string) (For
 	// readAt + deadline, the last moment this fork can publish
 	// (INV-SNAP-DELETE-ANY-ORDER-001). The parent is not claimed.
 	readAt := c.now()
+	var shareToken string
+	if c.guard != nil { // the shared HEAD is the snapshot's, read below
+		if shareToken, err = c.guard.Begin(ctx, req.Source); err != nil {
+			return ForkResult{}, remoteErr(err, "share guard for %s", req.Source)
+		}
+	}
 	snap, err := c.readForkParent(ctx, req)
 	if err != nil {
 		return ForkResult{}, err
@@ -1351,6 +1375,11 @@ func (c *Catalog) fork(ctx context.Context, req ForkRequest, origin string) (For
 		// Clean abort: HEAD was never sent.
 		c.dropIntent(ctx, dstRoot, id)
 		return ForkResult{}, catErr(CodeDeadlineExceeded, true, nil, "fork %s: %v since reading the snapshot, over the %v deadline; HEAD not written", req.Target, c.now().Sub(readAt), c.deadline())
+	}
+	if err := c.finishShare(ctx, req.Source, shareToken, src); err != nil {
+		// Clean abort: HEAD was never sent.
+		c.dropIntent(ctx, dstRoot, id)
+		return ForkResult{}, err
 	}
 	// Under this request's VOLUME only this request's attempts write HEAD
 	// (attach refuses a fork without HEAD), so a HEAD found there completes

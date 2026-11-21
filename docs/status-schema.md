@@ -222,7 +222,7 @@ Durable store state of the served volume. Go type `volume.durableStatusBody`.
 | `Volumes[].Chunk.Stats.CutsNoop` | uint64 | cuts with nothing new (no CAS) |
 | `Volumes[].Chunk.Stats.CutsFailed` | uint64 | every other cut failure |
 | `Volumes[].Chunk.Stats.CutsRefused{}` | uint64 | refusals by reason: admission, fenced, detached |
-| `Volumes[].Chunk.Stats.CutsAborted{}` | uint64 | saver_capacity, cow_capacity, budget_revoked, upload |
+| `Volumes[].Chunk.Stats.CutsAborted{}` | uint64 | saver_capacity, cow_capacity, no_room_to_cut, free_space_unreadable, budget_revoked, upload |
 | `Volumes[].Chunk.Stats.CASConflicts` | uint64 | HEAD CAS precondition failures |
 | `Volumes[].Chunk.Stats.CASUnknown` | uint64 | HEAD CAS results still unresolved after the re-read |
 | `Volumes[].Chunk.Stats.PendingUnresolved` | bool | an unresolved HEAD proposal is held now |
@@ -275,6 +275,8 @@ Durable store state of the served volume. Go type `volume.durableStatusBody`.
 | `Volumes[].Chunk.Stats.LastCutNs` | int64 | when it completed (wall clock, Unix ns) |
 | `Volumes[].Chunk.Stats.BarrierOverBound` | uint64 | BarrierOverBound counts cuts whose barrier copied more than the bound after the staging rounds. |
 | `Volumes[].Chunk.Stats.AbsentChunks` | int | AbsentChunks is the number of HEAD-named chunks still absent with a block not local (what HydrateAll would still fetch); 0 = fully local. |
+| `Volumes[].Chunk.Stats.COWSpillCap` | int64 | COWSpillCap is the last cut's side-file cap in bytes, read once per cut; COWSpillCapReason is why it is 0, when the free space made it so: no_room_to_cut (half the free space is within the 1 GiB reserve) or free_space_unreadable (the free space could not be read). |
+| `Volumes[].Chunk.Stats.COWSpillCapReason` | string | (group of `COWSpillCap`) COWSpillCap is the last cut's side-file cap in bytes, read once per cut; COWSpillCapReason is why it is 0, when the free space made it so: no_room_to_cut (half the free space is within the 1 GiB reserve) or free_space_unreadable (the free space could not be read). (omitted when empty) |
 | `Volumes[].Chunk.HostBudget` | interface | the host background-cut budget state, with --host-limit-dir (omitted when empty) |
 | `Volumes[].Warnings[]` | string | Warnings are the store's typed recovery warnings (e.g. wal_hole_suspected, issue #51); they do not change readiness. HolesSuspected counts the recoveries that found a WAL hole. (omitted when empty) |
 | `Volumes[].HolesSuspected` | uint64 | (group of `Warnings`) Warnings are the store's typed recovery warnings (e.g. wal_hole_suspected, issue #51); they do not change readiness. HolesSuspected counts the recoveries that found a WAL hole. (omitted when empty) |

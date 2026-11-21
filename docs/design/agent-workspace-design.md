@@ -244,13 +244,15 @@ stateDiagram-v2
   [*] --> Forking: read the parent snapshot, write VOLUME (origin restore)
   Forking --> Restoring: first HEAD (parent's refs, owner-qualified) before read time + deadline
   Forking --> Aborted: GC tombstones the HEAD
-  Restoring --> Restoring: walker fills; batch cut replaces foreign refs with own keys
-  Restoring --> Independent: no foreign ref in the resolved HEAD; RESTORE-INDEPENDENT created
+  Restoring --> Hydrating: driver starts the paced walker
+  Hydrating --> Owning: batch cuts start (the walker may still run)
+  Owning --> Owning: one bounded batch cut replaces up to N foreign refs with own keys
+  Owning --> Independent: no foreign ref in the resolved HEAD; RESTORE-INDEPENDENT created
   Independent --> [*]
   Aborted --> [*]: target deleted
 ```
 
-Snapshots of the target are refused in `Forking` and `Restoring`.
+Snapshots of the target are refused until `Independent`. The driver (`core/host/volume/chunk_restore.go`) runs these steps from the target's own facts; `POST /chunk/restore` starts it and `sw-block ops chunk restore` calls it.
 
 ### Attached-volume scheduling
 

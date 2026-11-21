@@ -32,6 +32,7 @@ type fakeFilerGRPC struct {
 	lookupErr  error
 	assignResp *filerpb.AssignVolumeResponse
 	lookupVol  *filerpb.LookupVolumeResponse
+	volLookups int // LookupVolume calls
 
 	lastCreate *filerpb.CreateEntryRequest
 	lastUpdate *filerpb.UpdateEntryRequest
@@ -80,6 +81,7 @@ func (f *fakeFilerGRPC) AssignVolume(_ context.Context, r *filerpb.AssignVolumeR
 func (f *fakeFilerGRPC) LookupVolume(_ context.Context, r *filerpb.LookupVolumeRequest) (*filerpb.LookupVolumeResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.volLookups++
 	return f.lookupVol, nil
 }
 

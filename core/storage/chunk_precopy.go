@@ -160,7 +160,7 @@ func (l *chunkLayerImpl) precopyDetach(ctx context.Context, prepare func(context
 	if err := l.lockPrecopy(ctx); err != nil {
 		return ChunkCutResult{}, err
 	}
-	defer l.capMu.Unlock()
+	defer l.unlockCap()
 	defer func() {
 		if result.Precopy.Frozen && !result.Precopy.IsReplay() {
 			l.RememberDetachReport(result.Precopy)
