@@ -129,13 +129,15 @@ type deadlineProgressRemote struct {
 	*fakeChunkRemote
 	completed int
 	calls     int
+	interrupt context.CancelCauseFunc
 }
 
 func (r *deadlineProgressRemote) Put(ctx context.Context, key string, b []byte) error {
 	r.calls++
-	if r.completed == 2 {
+	if r.completed == 2 && r.interrupt != nil {
+		r.interrupt(context.DeadlineExceeded)
 		<-ctx.Done()
-		return ctx.Err()
+		return context.Cause(ctx)
 	}
 	err := r.fakeChunkRemote.Put(ctx, key, b)
 	if err == nil {
@@ -164,11 +166,17 @@ func TestChunkStageV3_MultipleDeadlinesKeepProgress(t *testing.T) {
 	for pass := 0; pass < 3; pass++ {
 		r.completed = 0
 		r.calls = 0
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		result, err := l.Cut(ctx)
-		cancel()
+		// Expire at the third PUT event, not one second after setup. This
+		// witnesses two completed immutable uploads even on a loaded host.
+		ctx, cancel := context.WithCancelCause(context.Background())
+		r.interrupt = nil
 		if pass < 2 {
-			if !errors.Is(err, context.DeadlineExceeded) {
+			r.interrupt = cancel
+		}
+		result, err := l.Cut(ctx)
+		cancel(nil)
+		if pass < 2 {
+			if !errors.Is(err, context.DeadlineExceeded) || r.calls != 3 || r.completed != 2 {
 				t.Fatalf("pass %d did not reach injected deadline: %v", pass, err)
 			}
 			if f.stats().head.Gen != base {
