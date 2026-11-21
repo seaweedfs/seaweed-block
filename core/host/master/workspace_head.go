@@ -14,9 +14,25 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
 )
 
+// headFilerMtimeNS is the HEAD entry's mtime from the filer's Last-Modified
+// header of the same response as the content (1 s resolution), or 0
+// (unknown) when the header is absent, unparseable or not after the epoch.
+func headFilerMtimeNS(h http.Header) int64 {
+	v := h.Get("Last-Modified")
+	if v == "" {
+		return 0
+	}
+	t, err := http.ParseTime(v)
+	if err != nil || t.UnixNano() <= 0 {
+		return 0
+	}
+	return t.UnixNano()
+}
+
 // NewWorkspaceHEADReader reads inline HEAD content from the configured filer
 // HTTP directory. It never follows redirects or accepts operator-supplied HEAD
-// evidence. W2's detached state is part of the committed HEAD document.
+// evidence. W2's detached state is part of the committed HEAD document. The
+// HEAD's filer mtime comes from the same response (headFilerMtimeNS).
 func NewWorkspaceHEADReader(base string) (func(context.Context, string) (authority.WorkspaceHead, error), error) {
 	u, err := url.Parse(base)
 	if err != nil || u == nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
@@ -79,6 +95,6 @@ func NewWorkspaceHEADReader(base string) (func(context.Context, string) (authori
 		} else if doc.DetachedBy != nil {
 			return authority.WorkspaceHead{}, fmt.Errorf("active HEAD retains detachedBy proof")
 		}
-		return authority.WorkspaceHead{Gen: doc.Gen, Epoch: doc.Epoch, Holder: doc.Holder, RemoteLSN: doc.RemoteLSN, Detached: doc.State == "detached"}, nil
+		return authority.WorkspaceHead{Gen: doc.Gen, Epoch: doc.Epoch, Holder: doc.Holder, RemoteLSN: doc.RemoteLSN, Detached: doc.State == "detached", FilerMtimeNS: headFilerMtimeNS(res.Header)}, nil
 	}, nil
 }
