@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
@@ -144,7 +145,8 @@ func runWorkspaceForceMove(args []string, stdout, stderr io.Writer) int {
 			printForcedGrant(stdout, g)
 		}
 		fmt.Fprintf(stderr, "%s: %v\n", workspaceForceMoveName, err)
-		fmt.Fprintf(stderr, "%s: the move IS issued; do not assume no loss. Check `sw-block ops workspace lost-range --volume %s --request-id %s` and the master's load errors.\n", workspaceForceMoveName, m.VolumeID, m.RequestID)
+		fmt.Fprintf(stderr, "%s: the move IS issued; do not assume no loss. Check the master's load errors, and read the range with:\n", workspaceForceMoveName)
+		fmt.Fprintf(stderr, "%s%s\n", workspaceRecoveryPrefix, shellCommand("sw-block", "ops", "workspace", "lost-range", "--master", master, "--volume", m.VolumeID, "--request-id", m.RequestID))
 		return wsExitReadoutUnproven
 	case wsclient.OutcomeRefused:
 		fmt.Fprintf(stderr, "%s: refused by the master (nothing moved): %v\n", workspaceForceMoveName, err)
@@ -160,6 +162,26 @@ func runWorkspaceForceMove(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "%s: %v\n", workspaceForceMoveName, err)
 		return workspaceExit(o)
 	}
+}
+
+// workspaceRecoveryPrefix starts the line that carries a recovery command.
+const workspaceRecoveryPrefix = "  "
+
+// shellCommand joins args for a POSIX shell, single-quoting any argument
+// that is not plainly safe, so a printed command can be pasted as is.
+func shellCommand(args ...string) string {
+	out := make([]string, len(args))
+	for i, a := range args {
+		out[i] = shellQuote(a)
+	}
+	return strings.Join(out, " ")
+}
+
+func shellQuote(a string) string {
+	if a != "" && strings.Trim(a, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@%+=:,./_-") == "" {
+		return a
+	}
+	return "'" + strings.ReplaceAll(a, "'", `'\''`) + "'"
 }
 
 func printForcedGrant(w io.Writer, g *control.WorkspaceGrant) {
@@ -194,7 +216,7 @@ func workspacePreview(ctx context.Context, c *wsclient.Client, m wsclient.Forced
 	if p.GetHeadRead() {
 		at := "unknown"
 		if p.GetHeadTimeKnown() {
-			at = wsclient.FormatTime(p.GetHeadTimeNs()) + ", filer clock"
+			at = wsclient.FormatTime(p.GetHeadTimeNs()) + " " + wsclient.HeadTimeClock
 		}
 		fmt.Fprintf(stdout, "HEAD now: gen %d, epoch %d, holder %s, remote LSN %d, published at %s\n", p.GetHeadGen(), p.GetHeadEpoch(), p.GetHeadHolder(), p.GetHeadRemoteLsn(), at)
 		if p.GetAdmitted() {

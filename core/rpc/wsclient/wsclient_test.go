@@ -98,21 +98,92 @@ func TestForceMoveResolvesTheHolder(t *testing.T) {
 	}
 }
 
+// goodGrant is the issued forced grant for testMove with its own range.
+func goodGrant() *control.WorkspaceGrant {
+	return &control.WorkspaceGrant{RequestId: "req-1", VolumeId: "vol", Kind: "forced", Issued: true, OldReplicaId: "r1", OldEpoch: 3, NewReplicaId: "r1", NewEpoch: 4,
+		OldHost: "node-a", NewHost: "node-b", HeadGen: 9, RemoteLsn: 42,
+		LostRange: &control.WorkspaceLostRange{RequestId: "req-1", VolumeId: "vol", NewEpoch: 4, OldReplicaId: "r1", OldEpoch: 3, LostAfterLsn: 42, LostUntilNs: 1, HeadGen: 9}}
+}
+
+func holderAt3() *control.WorkspaceStatus {
+	return &control.WorkspaceStatus{Lease: &control.WorkspaceLeaseFact{ReplicaId: "r1", Epoch: 3}}
+}
+
 // A forced grant without its own stored range is issued but unproven.
 func TestForceMoveGrantWithoutRangeIsUnproven(t *testing.T) {
-	g := &control.WorkspaceGrant{RequestId: "req-1", VolumeId: "vol", Kind: "forced", Issued: true, OldReplicaId: "r1", OldEpoch: 3, NewReplicaId: "r1", NewEpoch: 4}
-	f := &fakeRPC{status: &control.WorkspaceStatus{Lease: &control.WorkspaceLeaseFact{ReplicaId: "r1", Epoch: 3}}, grant: g}
-	got, err := New(f).ForceMove(context.Background(), testMove)
+	g := goodGrant()
+	if _, err := New(&fakeRPC{status: holderAt3(), grant: g}).ForceMove(context.Background(), testMove); err != nil {
+		t.Fatalf("own range: %v", err)
+	}
+	g.LostRange = nil
+	got, err := New(&fakeRPC{status: holderAt3(), grant: g}).ForceMove(context.Background(), testMove)
 	if OutcomeOf(err) != OutcomeReadoutUnproven || got != g {
 		t.Fatalf("no range: %v", err)
 	}
-	g.LostRange = &control.WorkspaceLostRange{RequestId: "other", NewEpoch: 4, OldEpoch: 3, OldReplicaId: "r1"}
-	if _, err := New(f).ForceMove(context.Background(), testMove); OutcomeOf(err) != OutcomeReadoutUnproven {
-		t.Fatalf("another move's range: %v", err)
+}
+
+// The answer is bound to the request: each identity field of the grant
+// corrupted on its own leaves the outcome unknown; each identity or
+// frontier field of the range corrupted on its own leaves the readout
+// unproven. Neither ever yields a successful readout.
+func TestForceMoveBindsGrantAndRange(t *testing.T) {
+	grantFaults := map[string]func(*control.WorkspaceGrant){
+		"not issued":   func(g *control.WorkspaceGrant) { g.Issued = false },
+		"kind":         func(g *control.WorkspaceGrant) { g.Kind = "clean" },
+		"request":      func(g *control.WorkspaceGrant) { g.RequestId = "req-2" },
+		"volume":       func(g *control.WorkspaceGrant) { g.VolumeId = "vol2" },
+		"old replica":  func(g *control.WorkspaceGrant) { g.OldReplicaId = "r2" },
+		"old epoch":    func(g *control.WorkspaceGrant) { g.OldEpoch = 2 },
+		"new replica":  func(g *control.WorkspaceGrant) { g.NewReplicaId = "r2" },
+		"target host":  func(g *control.WorkspaceGrant) { g.NewHost = "node-c" },
+		"epoch not up": func(g *control.WorkspaceGrant) { g.NewEpoch = 3 },
 	}
-	g.LostRange.RequestId = "req-1"
-	if _, err := New(f).ForceMove(context.Background(), testMove); err != nil {
-		t.Fatalf("own range: %v", err)
+	for name, fault := range grantFaults {
+		g := goodGrant()
+		fault(g)
+		if _, err := New(&fakeRPC{status: holderAt3(), grant: g}).ForceMove(context.Background(), testMove); OutcomeOf(err) != OutcomeUnknown {
+			t.Errorf("grant %s corrupted: %v; want unknown", name, err)
+		}
+	}
+	rangeFaults := map[string]func(*control.WorkspaceLostRange){
+		"request":     func(r *control.WorkspaceLostRange) { r.RequestId = "req-2" },
+		"volume":      func(r *control.WorkspaceLostRange) { r.VolumeId = "vol2" },
+		"new epoch":   func(r *control.WorkspaceLostRange) { r.NewEpoch = 5 },
+		"old epoch":   func(r *control.WorkspaceLostRange) { r.OldEpoch = 2 },
+		"old replica": func(r *control.WorkspaceLostRange) { r.OldReplicaId = "r2" },
+		"head gen":    func(r *control.WorkspaceLostRange) { r.HeadGen = 8 },
+		"lost after":  func(r *control.WorkspaceLostRange) { r.LostAfterLsn = 41 },
+	}
+	for name, fault := range rangeFaults {
+		g := goodGrant()
+		fault(g.LostRange)
+		if _, err := New(&fakeRPC{status: holderAt3(), grant: g}).ForceMove(context.Background(), testMove); OutcomeOf(err) != OutcomeReadoutUnproven {
+			t.Errorf("range %s corrupted: %v; want unproven", name, err)
+		}
+	}
+}
+
+// lostRangeRPC answers QueryWorkspaceLostRange with fixed ranges.
+type lostRangeRPC struct {
+	control.WorkspaceServiceClient
+	ranges []*control.WorkspaceLostRange
+}
+
+func (f *lostRangeRPC) QueryWorkspaceLostRange(context.Context, *control.WorkspaceLostRangeQuery, ...grpc.CallOption) (*control.WorkspaceLostRanges, error) {
+	return &control.WorkspaceLostRanges{Ranges: f.ranges}, nil
+}
+
+// A lost-range answer that names another volume or request is unproven.
+func TestLostRangesBindsTheAnswer(t *testing.T) {
+	r := goodGrant().LostRange
+	if got, err := New(&lostRangeRPC{ranges: []*control.WorkspaceLostRange{r}}).LostRanges(context.Background(), "vol", "req-1"); err != nil || len(got) != 1 {
+		t.Fatalf("matching answer: %v", err)
+	}
+	if _, err := New(&lostRangeRPC{ranges: []*control.WorkspaceLostRange{r}}).LostRanges(context.Background(), "other", ""); OutcomeOf(err) != OutcomeReadoutUnproven {
+		t.Fatalf("another volume: %v", err)
+	}
+	if _, err := New(&lostRangeRPC{ranges: []*control.WorkspaceLostRange{r}}).LostRanges(context.Background(), "vol", "req-9"); OutcomeOf(err) != OutcomeReadoutUnproven {
+		t.Fatalf("another request: %v", err)
 	}
 }
 
@@ -135,7 +206,7 @@ func TestClassify(t *testing.T) {
 func TestReadoutWording(t *testing.T) {
 	r := &control.WorkspaceLostRange{OldReplicaId: "r1", OldEpoch: 3, LostAfterLsn: 42, LostUntilNs: time.Date(2026, 11, 21, 1, 5, 0, 5, time.UTC).UnixNano(),
 		HeadGen: 9, HeadTimeNs: time.Date(2026, 11, 21, 1, 2, 3, 0, time.UTC).UnixNano(), HeadTimeKnown: true}
-	want := "volume vol restored to the last published image at 2026-11-21T01:02:03Z, filer clock (gen 9, LSN 42): writes with LSN <= 42 are preserved; " +
+	want := "volume vol restored to the last published image at 2026-11-21T01:02:03Z (publishing host clock as recorded in the filer, 1 s resolution) (gen 9, LSN 42): writes with LSN <= 42 are preserved; " +
 		"writes acknowledged by r1@3 after that and before 2026-11-21T01:05:00.000000005Z, master clock, may be lost; the upper bound is a time, not an LSN."
 	if got := Readout("vol", r); got != want {
 		t.Fatalf("readout\n got %s\nwant %s", got, want)

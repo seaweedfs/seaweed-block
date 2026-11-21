@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -39,15 +40,29 @@ func lostRangeFiles(t *testing.T, dir string) []string {
 	return out
 }
 
-// forcedMoveHost starts a master whose volume vol-f is held by r1 on node-a
-// (epoch 1, lease renewed once) with a prepared target binding on node-b.
-func forcedMoveHost(t *testing.T, cfg Config) (*Host, control.WorkspaceServiceClient, *control.WorkspaceMove) {
+// startStoppableMaster starts a master and registers its close as cleanup
+// immediately; the returned stop closes it at most once (an explicit stop
+// before a restart, then the cleanup, never closes twice).
+func startStoppableMaster(t *testing.T, cfg Config) (*Host, func()) {
 	t.Helper()
 	h, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	h.Start()
+	var once sync.Once
+	stop := func() { once.Do(func() { closeTestMaster(t, h) }) }
+	t.Cleanup(stop)
+	return h, stop
+}
+
+// forcedMoveHost starts a master whose volume vol-f is held by r1 on node-a
+// (epoch 1, lease renewed once) with a prepared target binding on node-b.
+// The returned stop closes it once; it is also registered as cleanup as soon
+// as the master starts, so a failing setup step never leaks it.
+func forcedMoveHost(t *testing.T, cfg Config) (*Host, func(), control.WorkspaceServiceClient, *control.WorkspaceMove) {
+	t.Helper()
+	h, stop := startStoppableMaster(t, cfg)
 	conn, err := grpc.NewClient(h.Addr(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatal(err)
@@ -85,7 +100,7 @@ func forcedMoveHost(t *testing.T, cfg Config) (*Host, control.WorkspaceServiceCl
 	if _, err := client.RenewWorkspaceLease(ctx, &control.WorkspaceIdentity{VolumeId: "vol-f", ReplicaId: "r1", Epoch: line.Epoch}); err != nil {
 		t.Fatal(err)
 	}
-	return h, client, &control.WorkspaceMove{RequestId: "force-1", VolumeId: "vol-f", ExpectedReplicaId: "r1", ExpectedEpoch: line.Epoch, TargetReplicaId: "r1",
+	return h, stop, client, &control.WorkspaceMove{RequestId: "force-1", VolumeId: "vol-f", ExpectedReplicaId: "r1", ExpectedEpoch: line.Epoch, TargetReplicaId: "r1",
 		TargetServerId: "node-b", TargetDataAddr: target.DataAddr, TargetCtrlAddr: target.CtrlAddr, Kind: "forced", Force: true}
 }
 
@@ -105,13 +120,7 @@ func TestWorkspaceForcedMoveLostRangeOverRPC(t *testing.T) {
 		WorkspaceHeadReader: func(context.Context, string) (authority.WorkspaceHead, error) {
 			return authority.WorkspaceHead{Gen: 9, Epoch: 1, Holder: "node-a/r1", RemoteLSN: 42, FilerMtimeNS: headTime.UnixNano()}, nil
 		}}
-	h, client, move := forcedMoveHost(t, cfg)
-	closed := false
-	defer func() {
-		if !closed {
-			closeTestMaster(t, h)
-		}
-	}()
+	h, stop, client, move := forcedMoveHost(t, cfg)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
@@ -181,8 +190,7 @@ func TestWorkspaceForcedMoveLostRangeOverRPC(t *testing.T) {
 		t.Fatalf("preview of the issued request: %+v %v", pv3, err)
 	}
 
-	closeTestMaster(t, h)
-	closed = true
+	stop()
 	files := lostRangeFiles(t, authDir)
 	if len(files) != 1 {
 		t.Fatalf("lost range files %v", files)
@@ -194,12 +202,7 @@ func TestWorkspaceForcedMoveLostRangeOverRPC(t *testing.T) {
 	if err := os.WriteFile(files[0], []byte(strings.Replace(string(raw), `"LostAfterLSN":42`, `"LostAfterLSN":41`, 1)), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	h2, err := New(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	h2.Start()
-	defer closeTestMaster(t, h2)
+	h2, _ := startStoppableMaster(t, cfg)
 	conn, err := grpc.NewClient(h2.Addr(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatal(err)

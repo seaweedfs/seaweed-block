@@ -203,8 +203,8 @@ func (c *Client) ForceMove(ctx context.Context, m ForcedMove) (*control.Workspac
 	if err != nil {
 		return nil, classify(op, err)
 	}
-	if !g.GetIssued() || g.GetKind() != "forced" || g.GetRequestId() != m.RequestID || g.GetVolumeId() != m.VolumeID {
-		return g, &Error{Outcome: OutcomeUnknown, Op: op, Err: fmt.Errorf("unexpected grant (issued=%t kind=%q request=%q volume=%q)", g.GetIssued(), g.GetKind(), g.GetRequestId(), g.GetVolumeId())}
+	if err := checkGrant(g, q); err != nil {
+		return g, &Error{Outcome: OutcomeUnknown, Op: op, Err: fmt.Errorf("%v; rerun with the same request id", err)}
 	}
 	if err := checkRange(g.GetLostRange(), g); err != nil {
 		return g, &Error{Outcome: OutcomeReadoutUnproven, Op: op, Err: err}
@@ -212,7 +212,22 @@ func (c *Client) ForceMove(ctx context.Context, m ForcedMove) (*control.Workspac
 	return g, nil
 }
 
-// checkRange: a forced grant must carry its own stored range.
+// checkGrant binds a successful answer to the request that was sent: an
+// issued forced grant for this request id and volume, from the expected
+// holder at the expected epoch to the requested target, at a higher epoch.
+// Anything else leaves the outcome unknown.
+func checkGrant(g *control.WorkspaceGrant, q *control.WorkspaceMove) error {
+	if !g.GetIssued() || g.GetKind() != "forced" || g.GetRequestId() != q.GetRequestId() || g.GetVolumeId() != q.GetVolumeId() ||
+		g.GetOldReplicaId() != q.GetExpectedReplicaId() || g.GetOldEpoch() != q.GetExpectedEpoch() ||
+		g.GetNewReplicaId() != q.GetTargetReplicaId() || g.GetNewHost() != q.GetTargetServerId() || g.GetNewEpoch() <= g.GetOldEpoch() {
+		return fmt.Errorf("the answer does not match the request (issued=%t kind=%q request=%q volume=%q old=%s@%d new=%s@%d on %q)",
+			g.GetIssued(), g.GetKind(), g.GetRequestId(), g.GetVolumeId(), g.GetOldReplicaId(), g.GetOldEpoch(), g.GetNewReplicaId(), g.GetNewEpoch(), g.GetNewHost())
+	}
+	return nil
+}
+
+// checkRange: a forced grant must carry its own stored range, naming the
+// same move and the same kept HEAD (generation and frontier).
 func checkRange(r *control.WorkspaceLostRange, g *control.WorkspaceGrant) error {
 	if r == nil {
 		why := g.GetLostRangeError()
@@ -221,8 +236,11 @@ func checkRange(r *control.WorkspaceLostRange, g *control.WorkspaceGrant) error 
 		}
 		return fmt.Errorf("move issued (volume %s epoch %d -> %d) but the lost range is not proven: %s", g.GetVolumeId(), g.GetOldEpoch(), g.GetNewEpoch(), why)
 	}
-	if r.GetRequestId() != g.GetRequestId() || r.GetNewEpoch() != g.GetNewEpoch() || r.GetOldEpoch() != g.GetOldEpoch() || r.GetOldReplicaId() != g.GetOldReplicaId() {
-		return fmt.Errorf("move issued (volume %s epoch %d -> %d) but its lost range names another move (request %q epoch %d)", g.GetVolumeId(), g.GetOldEpoch(), g.GetNewEpoch(), r.GetRequestId(), r.GetNewEpoch())
+	if r.GetRequestId() != g.GetRequestId() || r.GetVolumeId() != g.GetVolumeId() || r.GetNewEpoch() != g.GetNewEpoch() || r.GetOldEpoch() != g.GetOldEpoch() || r.GetOldReplicaId() != g.GetOldReplicaId() {
+		return fmt.Errorf("move issued (volume %s epoch %d -> %d) but its lost range names another move (volume %q request %q epoch %d)", g.GetVolumeId(), g.GetOldEpoch(), g.GetNewEpoch(), r.GetVolumeId(), r.GetRequestId(), r.GetNewEpoch())
+	}
+	if r.GetHeadGen() != g.GetHeadGen() || r.GetLostAfterLsn() != g.GetRemoteLsn() {
+		return fmt.Errorf("move issued (volume %s epoch %d -> %d) but its lost range disagrees with the kept HEAD (range gen %d LSN %d, grant gen %d LSN %d)", g.GetVolumeId(), g.GetOldEpoch(), g.GetNewEpoch(), r.GetHeadGen(), r.GetLostAfterLsn(), g.GetHeadGen(), g.GetRemoteLsn())
 	}
 	return nil
 }
@@ -269,8 +287,17 @@ func (c *Client) LostRanges(ctx context.Context, volume, requestID string) ([]*c
 	if err != nil {
 		return nil, classify("lost range", err)
 	}
+	for _, x := range r.GetRanges() {
+		if x.GetVolumeId() != volume || (requestID != "" && x.GetRequestId() != requestID) {
+			return nil, &Error{Outcome: OutcomeReadoutUnproven, Op: "lost range", Err: fmt.Errorf("the answer names another range (volume %q request %q)", x.GetVolumeId(), x.GetRequestId())}
+		}
+	}
 	return r.GetRanges(), nil
 }
+
+// HeadTimeClock labels a HEAD time: the filer entry's mtime, which the
+// host that published the HEAD sets from its own clock.
+const HeadTimeClock = "(publishing host clock as recorded in the filer, 1 s resolution)"
 
 // FormatTime prints a master or filer time.
 func FormatTime(ns int64) string { return time.Unix(0, ns).UTC().Format(time.RFC3339Nano) }
@@ -283,7 +310,7 @@ func Readout(volume string, r *control.WorkspaceLostRange) string {
 	}
 	at := "an unknown time (no filer time was recorded)"
 	if r.GetHeadTimeKnown() {
-		at = FormatTime(r.GetHeadTimeNs()) + ", filer clock"
+		at = FormatTime(r.GetHeadTimeNs()) + " " + HeadTimeClock
 	}
 	return fmt.Sprintf("volume %s restored to the last published image at %s (gen %d, LSN %d): writes with LSN <= %d are preserved; "+
 		"writes acknowledged by %s after that and before %s, master clock, may be lost; the upper bound is a time, not an LSN.",

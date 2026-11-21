@@ -122,7 +122,7 @@ func wsGrant(q *control.WorkspaceMove) *control.WorkspaceGrant {
 			LostAfterLsn: 42, LostUntilNs: wsLostUntil.UnixNano(), HeadGen: 9, HeadTimeNs: wsHeadTime.UnixNano(), HeadTimeKnown: true}}
 }
 
-const wsReadout = "volume vol restored to the last published image at 2026-11-21T01:02:03Z, filer clock (gen 9, LSN 42): writes with LSN <= 42 are preserved; " +
+const wsReadout = "volume vol restored to the last published image at 2026-11-21T01:02:03Z (publishing host clock as recorded in the filer, 1 s resolution) (gen 9, LSN 42): writes with LSN <= 42 are preserved; " +
 	"writes acknowledged by r1@3 after that and before 2026-11-21T01:05:00Z, master clock, may be lost; the upper bound is a time, not an LSN."
 
 func forceMoveArgs(addr string, extra ...string) []string {
@@ -179,7 +179,7 @@ func TestWorkspaceForceMove_Row2_DryRunPreview(t *testing.T) {
 		HeadRead: true, HeadGen: 9, HeadEpoch: 3, HeadHolder: "node-a/r1", HeadRemoteLsn: 42, HeadTimeNs: wsHeadTime.UnixNano(), HeadTimeKnown: true}
 	code, out, _ = runCLI(forceMoveArgs(addr, "--confirm-forced", "vol@3", "--dry-run"))
 	if code != wsExitOK || f.n("MoveWorkspace") != 0 || strings.Contains(out, "admissible at") ||
-		!strings.Contains(out, "forced move admitted") || !strings.Contains(out, "HEAD now: gen 9, epoch 3, holder node-a/r1, remote LSN 42, published at 2026-11-21T01:02:03Z, filer clock") {
+		!strings.Contains(out, "forced move admitted") || !strings.Contains(out, "HEAD now: gen 9, epoch 3, holder node-a/r1, remote LSN 42, published at 2026-11-21T01:02:03Z (publishing host clock as recorded in the filer, 1 s resolution)") {
 		t.Fatalf("admitted preview: exit %d\n%s", code, out)
 	}
 }
@@ -272,6 +272,112 @@ func TestWorkspaceForceMove_Row7_ReadoutUnproven(t *testing.T) {
 	code, out, errOut = runCLI([]string{"ops", "workspace", "lost-range", "--master", addr, "--volume", "vol"})
 	if code != wsExitReadoutUnproven || out != "" || !strings.Contains(errOut, "NOT proven") {
 		t.Fatalf("lost-range: exit %d stdout %q stderr %s", code, out, errOut)
+	}
+}
+
+// splitShellWords splits a POSIX shell line of plain words and
+// single-quoted parts and backslash escapes (the forms shellCommand prints).
+func splitShellWords(t *testing.T, line string) []string {
+	t.Helper()
+	var words []string
+	var cur strings.Builder
+	in, quoted, inQuote, escaped := false, false, false, false
+	for _, r := range line {
+		switch {
+		case escaped:
+			cur.WriteRune(r)
+			escaped, in = false, true
+		case inQuote && r == '\'':
+			inQuote = false
+		case inQuote:
+			cur.WriteRune(r)
+		case r == '\'':
+			inQuote, in, quoted = true, true, true
+		case r == '\\':
+			escaped = true
+		case r == ' ':
+			if in {
+				words = append(words, cur.String())
+				cur.Reset()
+				in, quoted = false, false
+			}
+		default:
+			cur.WriteRune(r)
+			in = true
+		}
+	}
+	if inQuote {
+		t.Fatalf("unterminated quote in %q", line)
+	}
+	if in || quoted {
+		words = append(words, cur.String())
+	}
+	return words
+}
+
+// The exit-4 recovery command carries the master address and survives
+// arguments that need quoting: the printed words parse back to the same
+// values and run as a lost-range command against the same master.
+func TestWorkspaceForceMoveRecoveryCommandRuns(t *testing.T) {
+	const reqID = "req 1'$x"
+	f := &fakeWorkspace{status: wsHolder(), move: func(q *control.WorkspaceMove) (*control.WorkspaceGrant, error) {
+		g := wsGrant(q)
+		g.LostRange, g.LostRangeError = nil, "missing"
+		return g, nil
+	}, ranges: nil}
+	addr, _ := startFakeWorkspace(t, f)
+	args := forceMoveArgs(addr, "--confirm-forced", "vol@3")
+	args[len(args)-3] = reqID // --request-id value
+	code, _, errOut := runCLI(args)
+	if code != wsExitReadoutUnproven {
+		t.Fatalf("exit %d %s", code, errOut)
+	}
+	var line string
+	for _, l := range strings.Split(errOut, "\n") {
+		if strings.HasPrefix(l, workspaceRecoveryPrefix+"sw-block ") {
+			line = strings.TrimPrefix(l, workspaceRecoveryPrefix)
+		}
+	}
+	words := splitShellWords(t, line)
+	want := []string{"sw-block", "ops", "workspace", "lost-range", "--master", addr, "--volume", "vol", "--request-id", reqID}
+	if strings.Join(words, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("recovery command %q parses to %q; want %q", line, words, want)
+	}
+	f.ranges = []*control.WorkspaceLostRange{{RequestId: reqID, VolumeId: "vol", NewEpoch: 4, OldReplicaId: "r1", OldEpoch: 3, LostAfterLsn: 42, LostUntilNs: wsLostUntil.UnixNano(), HeadGen: 9}}
+	if code, out, errOut := runCLI(words[1:]); code != wsExitOK || f.lastLR.RequestId != reqID || f.lastLR.VolumeId != "vol" || !strings.Contains(out, "range 1 of 1") {
+		t.Fatalf("recovery command run: exit %d %+v stdout %q stderr %s", code, f.lastLR, out, errOut)
+	}
+}
+
+// A successful answer that does not match the request (here the target)
+// is an unknown outcome, and one whose range disagrees with the kept HEAD
+// is unproven: neither prints the preservation readout.
+func TestWorkspaceForceMoveRejectsAMismatchedAnswer(t *testing.T) {
+	for name, tc := range map[string]struct {
+		fault func(*control.WorkspaceGrant)
+		exit  int
+	}{
+		"grant target":   {func(g *control.WorkspaceGrant) { g.NewHost = "node-c" }, wsExitUnknown},
+		"grant epoch":    {func(g *control.WorkspaceGrant) { g.OldEpoch = 2 }, wsExitUnknown},
+		"range volume":   {func(g *control.WorkspaceGrant) { g.LostRange.VolumeId = "vol2" }, wsExitReadoutUnproven},
+		"range frontier": {func(g *control.WorkspaceGrant) { g.LostRange.LostAfterLsn = 41 }, wsExitReadoutUnproven},
+		"range head gen": {func(g *control.WorkspaceGrant) { g.LostRange.HeadGen = 8 }, wsExitReadoutUnproven},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := &fakeWorkspace{status: wsHolder(), move: func(q *control.WorkspaceMove) (*control.WorkspaceGrant, error) {
+				g := wsGrant(q)
+				tc.fault(g)
+				return g, nil
+			}}
+			addr, _ := startFakeWorkspace(t, f)
+			code, out, errOut := runCLI(forceMoveArgs(addr, "--confirm-forced", "vol@3"))
+			if code != tc.exit || strings.Contains(out, "restored to") || strings.Contains(out, "next: start") {
+				t.Fatalf("exit %d (want %d) stdout %q stderr %s", code, tc.exit, out, errOut)
+			}
+			if tc.exit == wsExitUnknown && !strings.Contains(errOut, "rerun with the SAME --request-id req-1") {
+				t.Fatalf("no same-id recovery: %s", errOut)
+			}
+		})
 	}
 }
 

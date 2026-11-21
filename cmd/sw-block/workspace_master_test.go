@@ -124,7 +124,7 @@ func TestWorkspaceForceMoveAgainstRealMaster(t *testing.T) {
 
 	code, out, errOut = runCLI(args("--confirm-forced", "vol-f@1"))
 	if code != wsExitOK || !strings.HasPrefix(out, "forced move issued: volume vol-f request force-1: r1@1 on node-a -> r1@2 on node-b (kept HEAD gen 9, remote LSN 42)\n") ||
-		!strings.Contains(out, "volume vol-f restored to the last published image at 2026-11-21T01:02:03Z, filer clock (gen 9, LSN 42): writes with LSN <= 42 are preserved; writes acknowledged by r1@1 after that and before ") {
+		!strings.Contains(out, "volume vol-f restored to the last published image at 2026-11-21T01:02:03Z (publishing host clock as recorded in the filer, 1 s resolution) (gen 9, LSN 42): writes with LSN <= 42 are preserved; writes acknowledged by r1@1 after that and before ") {
 		t.Fatalf("forced move: exit %d stderr %s\n%s", code, errOut, out)
 	}
 	code2, out2, _ := runCLI(args("--confirm-forced", "vol-f@1"))
