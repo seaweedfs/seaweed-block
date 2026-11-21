@@ -116,6 +116,9 @@ type chunkLayerImpl struct {
 	dirty     map[uint64]bool   // chunks dirtied since the cut in progress or the last HEAD
 	inflight  map[uint64]bool   // chunks captured by a cut whose HEAD is not yet installed
 	allDirty  bool              // a BASE block landed: every chunk is dirty
+	// own names the chunks OwnBatch re-uploads under this layer's own keys in
+	// the cut it runs (set and cleared under capMu, read under stMu).
+	own map[uint64]bool
 
 	cutLSN uint64 // H of the latest cut taken (in flight or installed)
 	// chunkMut counts the mutations of each chunk: every dirty-map insert
@@ -850,6 +853,11 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 			candidates[i] = true
 		}
 	}
+	for idx := range l.own {
+		if !l.absent[idx] { // a re-own reads the local copy, never fetches
+			candidates[idx] = true
+		}
+	}
 	// A staged chunk stands for the barrier copy while no write reached
 	// it since staging (its version is unchanged) and HEAD is the one it
 	// was compared against.
@@ -973,7 +981,9 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		c.birth = births[c.idx]
 		ref, had := baseHead.Chunks[c.idx]
 		switch {
-		case c.zero && !had, had && !c.zero && ref.SHA256 == c.sum:
+		case c.zero && !had, had && !c.zero && ref.SHA256 == c.sum && c.key == "":
+			// A chunk equal to HEAD is skipped unless streamCutPayloads
+			// uploaded it under a new key: a re-owned chunk (OwnBatch).
 			st.UnchangedChunks++
 			continue
 		case c.zero:

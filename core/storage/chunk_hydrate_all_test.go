@@ -406,3 +406,20 @@ func TestHydrateAll_StatsReportAbsentChunks(t *testing.T) {
 		t.Fatalf("absent after the walk: %d, want 0", n)
 	}
 }
+
+// The walker's byte pace bounds the fill rate: 8 chunks at 4 chunks/s take
+// at least (8-1)/4 s.
+func TestHydrateAll_PacedByByteRate(t *testing.T) {
+	fastWalker(t)
+	_, layer, _, _ := hydrationFixture(t, 2, 64)
+	rate := int64(4 * ctChunkBytes)
+	start := time.Now()
+	p, err := layer.HydrateAllAt(boundedCtx(t, context.Background()), rate)
+	took := time.Since(start)
+	if err != nil || p.Remaining != 0 {
+		t.Fatalf("paced walk: %+v %v", p, err)
+	}
+	if min := time.Duration(p.Filled-1) * time.Second / 4; took < min {
+		t.Fatalf("%d fills at %d B/s took %v, want at least %v", p.Filled, rate, took, min)
+	}
+}
