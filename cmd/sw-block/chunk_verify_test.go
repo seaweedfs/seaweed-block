@@ -116,7 +116,8 @@ func TestOpsChunk_VerifyExitCodes(t *testing.T) {
 
 	// Could not complete: the error body, with what was covered.
 	code, out, _ = runChunk("verify", "--volume", "nope", "--chunk-filer", "filer:18888")
-	if e := chunkErrorOut(t, out); code != chunkExitFailed || e.Code != chunkstore.CodeNotChunkVolume || !strings.Contains(out, `"verify":{`) {
+	if e := chunkErrorOut(t, out); code != chunkExitFailed || e.Code != chunkstore.CodeNotChunkVolume || !strings.Contains(out, `"verify":{`) ||
+		!strings.Contains(out, `"incomplete":"error"`) {
 		t.Fatalf("verify of a missing volume: %d %q", code, out)
 	}
 
@@ -337,7 +338,9 @@ func TestOpsChunk_SingleFilerCheckWithinTimeout(t *testing.T) {
 			if ended == nil {
 				t.Fatalf("%s: the check's call did not observe the cancellation", args[0])
 			}
-			if e := chunkErrorOut(t, r.out); r.code != chunkExitFailed || e.Code != codeNotSingleFilerCLI || !strings.Contains(e.Message, "deadline") {
+			// gRPC words a deadline either way ("context deadline exceeded",
+			// or code DeadlineExceeded with a stream reset).
+			if e := chunkErrorOut(t, r.out); r.code != chunkExitFailed || e.Code != codeNotSingleFilerCLI || !strings.Contains(strings.ToLower(e.Message), "deadline") {
 				t.Fatalf("%s with a stalled filer: exit %d %q %q; want 1, not_single_filer, the deadline", args[0], r.code, r.out, r.errs)
 			}
 		})

@@ -137,7 +137,7 @@ one before it:
   readable, matches its SHA-256 and decodes strictly; the same for each checked
   snapshot's embedded HEAD; a snapshot's document names the volume and the
   snapshot it was found under (else `ROOT_INVALID`; the snapshot is still
-  checked, and rechecked, under the name it was found under); references to one
+  checked under the name it was found under); references to one
   chunk with different SHA-256s disagree (`CONTENT_MISMATCH`); for a fork, its
   fork record's digest matches an attempt of the parent snapshot at the
   recorded generation.
@@ -157,8 +157,8 @@ reported as `INTENT_STALE`. This is a hint only: whether GC may expire an intent
 remains GC's decision, with blockmaster authority.
 
 The output is one JSON object: the HEAD generations and snapshots covered,
-segments and chunks checked, distinct chunks and bytes read, the two recheck
-counters below, findings by class, and the findings, one per line. Each finding
+segments and chunks checked, distinct chunks and bytes read, the two counters
+below, findings by class, and the findings, one per line. Each finding
 names the volume, the root (`HEAD gen N`, `snapshot name/attempt`, an intent or
 the VOLUME fork record), the chunk index or segment, the owner, key and fid, a
 class and a detail. Classes: `ROOT_INVALID`, `GEOMETRY`, `SEGMENT_UNREADABLE`,
@@ -174,43 +174,43 @@ with a short backoff. If it still fails, the chunk or segment is reported as
 `READ_ERROR`, with the error in the detail. `READ_ERROR` is not evidence of
 damage: it means that object was **not verified**. Re-run verify, after fixing
 the store's reachability if needed. The summary counts these objects separately
-in `chunksNotRead`, and `readRetries` counts the retried reads. Both rechecks
-below apply to `READ_ERROR` as they do to a miss.
+in `chunksNotRead`, and `readRetries` counts the retried reads. The rule below
+applies to `READ_ERROR` as to any other bad outcome.
 
 ### Running beside a live owner and beside GC
 
 Segments and chunks are immutable and written before the root that names them,
 so a root read once and the segments it names are a consistent view. But nothing
 registers a reader with GC: a chunk that leaves a root can be collected once
-GC's grace has passed, and a long pass can outlive that. Two rechecks keep such
-a chunk from being reported:
+GC's grace has passed, and a long pass can outlive that. So verify checks each
+chunk once, records its outcome, and computes the findings only at the end, from
+those outcomes and the roots at its final read:
 
-- **Superseded during verify.** A miss under a HEAD root is a finding only if the
-  current HEAD still names that key at that index. On a miss, verify reads HEAD
-  again (the root and the one segment covering the index); if the key is gone,
-  the miss is counted in `supersededDuringVerify`, not reported.
-- **Root deleted during verify.** A miss under a snapshot is a finding only if
-  that exact snapshot attempt still exists and is active. On a miss, verify reads
-  the snapshot's name record and attempt entry again; if the attempt is gone,
-  aborted or marked deleting, the miss is counted in `rootDeletedDuringVerify`,
-  not reported, and the snapshot is listed in `snapshotsDeletedDuringVerify` as
-  not fully covered.
+- HEAD is read again at least every 2 minutes during a long pass (a newer
+  generation replaces the view; only segments whose key changed are read again;
+  chunks it names that the pass has not seen are added and checked).
+- When every chunk is checked, verify reads HEAD and each checked snapshot's state
+  once more. If that read names a chunk not seen, verify checks it and reads
+  again, at most 3 times; the read that names nothing new is the final read.
+- A bad chunk is one finding, under the first root that names it at the final
+  read (HEAD, then the snapshots still active, in order), at that root's first
+  index for it. A bad chunk no root names then is not reported: it is counted in
+  `rootDeletedDuringVerify` when a checked snapshot that was deleted during the
+  pass names it, otherwise in `supersededDuringVerify`. Deleted snapshots are
+  listed in `snapshotsDeletedDuringVerify` as not fully covered.
+- A key that an earlier HEAD read named, a later one did not, and the final HEAD
+  names again is a `ROOT_INVALID` finding ("HEAD names a key it had dropped"),
+  whatever its chunk's state: a key that left every root may have been collected,
+  and must not come back.
 
-A finding describes the image at the time of its recheck: the recheck and the
-report are two steps, so a root that is superseded or deleted right after the
-recheck can still appear in the findings. Run verify again to confirm a
-finding against the current roots.
+A finding describes each chunk as it was when checked, for the roots at the final
+read; a chunk damaged after its check is the next pass's finding.
 
-A chunk that several checked roots name is reported once, under the first root
-that still names it (HEAD first). The HEAD view is also refreshed at least every
-2 minutes during a long pass; only segments whose key changed are read again,
-and chunks the pass has not seen are added. A changed reference to a chunk
-already seen gets that chunk's outcome: it is compared with the chunk's content
-(at depth `data`; the chunk is not read again) or its other references, and a
-miss already found for the chunk is reported under it if its root still names
-the chunk there. The result therefore states "every
-chunk named by the listed HEAD generations at the time it was checked", not "the
-image at one instant".
+A pass that cannot finish is **incomplete**, never clean: `complete` is false and
+`incomplete` gives the reason: `deadline`, `cancelled`, `error` (a filer or blob
+store failure, or a refused request) or `closing_rounds_exhausted` (each of the 3
+final reads named new chunks: the volume is too busy; re-run). Its findings are
+those computed from the chunks it did check.
 
 ### What verify cannot check
 
@@ -230,8 +230,8 @@ image at one instant".
 - `0`: the pass completed with no finding.
 - `3`: the pass completed with findings. This includes `READ_ERROR`: the pass
   did not verify everything.
-- `1`: the pass could not complete (the deadline passed, the filer failed, the
-  volume or snapshot does not exist, or the filer is not the only one of its
-  group). The error body `{code,message,retryable}` is printed with the partial
-  result under `verify`.
+- `1`: the pass could not complete (the deadline passed, the filer failed, HEAD
+  kept naming new chunks, the volume or snapshot does not exist, or the filer is
+  not the only one of its group). The error body `{code,message,retryable}` is
+  printed with the partial result, and its `incomplete` reason, under `verify`.
 - `2`: usage error.

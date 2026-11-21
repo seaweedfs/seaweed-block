@@ -585,8 +585,9 @@ func TestVerify_UnreadableSegmentContinues(t *testing.T) {
 }
 
 // A chunk that leaves HEAD and is collected while the pass runs is not a
-// finding under HEAD (it is counted as superseded during verify); the same
-// miss under a snapshot that still names it is one.
+// finding when no root names it at the final read (a bad outcome is then
+// counted as superseded during verify; read content has no reference left
+// to compare with); under a snapshot that still names it, it is one.
 func TestVerify_SupersededDuringPass(t *testing.T) {
 	type damage struct {
 		name  string
@@ -640,8 +641,13 @@ func TestVerify_SupersededDuringPass(t *testing.T) {
 						t.Fatalf("finding root %q, want the snapshot", res.Findings[0].Root)
 					}
 				}
-				if hooked != 1 || res.SupersededDuringVerify != 1 || len(res.HeadGens) != 1 || res.HeadGens[0] != h.Gen {
-					t.Fatalf("hooked %d, superseded %d, gens %v; want 1, 1, [%d]", hooked, res.SupersededDuringVerify, res.HeadGens, h.Gen)
+				superseded := 0
+				if !withSnap && tc.class != FindingContentMismatch {
+					superseded = 1
+				}
+				// The closing read sees the owner's new HEAD: it is the final view.
+				if hooked != 1 || res.SupersededDuringVerify != superseded || len(res.HeadGens) != 2 || res.HeadGens[0] != h.Gen {
+					t.Fatalf("hooked %d, superseded %d, gens %v; want 1, %d, [%d next]", hooked, res.SupersededDuringVerify, superseded, res.HeadGens, h.Gen)
 				}
 			})
 		}
@@ -649,9 +655,9 @@ func TestVerify_SupersededDuringPass(t *testing.T) {
 }
 
 // A miss under a snapshot is a finding only while that attempt is still
-// active: a snapshot deleted during the pass, whose chunk is then
-// collected, is counted as root deleted during verify and listed as not
-// fully covered, not reported.
+// active at the final read: a snapshot deleted during the pass, whose chunk
+// is then collected, is listed as not fully covered, its bad chunk counted
+// as root deleted during verify, not reported.
 func TestVerify_SnapshotDeletedDuringPass(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -705,7 +711,11 @@ func TestVerify_SnapshotDeletedDuringPass(t *testing.T) {
 					return
 				}
 				wantClasses(t, "deleted snapshot", res)
-				if res.RootDeletedDuringVerify != 1 || res.SupersededDuringVerify != 0 ||
+				rootDeleted := 1 // a bad outcome; read content has no reference left to compare with
+				if tc.class == FindingContentMismatch {
+					rootDeleted = 0
+				}
+				if res.RootDeletedDuringVerify != rootDeleted || res.SupersededDuringVerify != 0 ||
 					len(res.SnapshotsDeletedDuringVerify) != 1 || res.SnapshotsDeletedDuringVerify[0] != res.Snapshots[0] {
 					t.Fatalf("deleted snapshot: root deleted %d, superseded %d, deleted list %v (checked %v, created %+v)",
 						res.RootDeletedDuringVerify, res.SupersededDuringVerify, res.SnapshotsDeletedDuringVerify, res.Snapshots, s.Name)
@@ -716,7 +726,8 @@ func TestVerify_SnapshotDeletedDuringPass(t *testing.T) {
 }
 
 // A chunk named by HEAD (superseded during the pass) and by a snapshot that
-// is still active is one finding, under the snapshot.
+// is still active is one finding, under the snapshot (and not counted as
+// superseded: a root still names it).
 func TestVerify_SharedChunkReportedUnderStillNamingRoot(t *testing.T) {
 	fx := newVerifyFixture(t, "v1")
 	ctx := context.Background()
@@ -733,27 +744,28 @@ func TestVerify_SharedChunkReportedUnderStillNamingRoot(t *testing.T) {
 	}
 	res := fx.verify("v1", opts)
 	wantClasses(t, "shared chunk", res, "NEEDLE_MISSING@0")
-	if !strings.HasPrefix(res.Findings[0].Root, "snapshot s1/") || res.SupersededDuringVerify != 1 || res.RootDeletedDuringVerify != 0 {
-		t.Fatalf("finding under %q, superseded %d, root deleted %d; want the snapshot, 1, 0",
+	if !strings.HasPrefix(res.Findings[0].Root, "snapshot s1/") || res.SupersededDuringVerify != 0 || res.RootDeletedDuringVerify != 0 {
+		t.Fatalf("finding under %q, superseded %d, root deleted %d; want the snapshot, 0, 0",
 			res.Findings[0].Root, res.SupersededDuringVerify, res.RootDeletedDuringVerify)
 	}
 }
 
-// A HEAD that advances mid-pass: the result lists both generations, and
-// only the segment whose key changed is read again.
+// A HEAD that advances mid-pass: the result lists both generations, only
+// the segment whose key changed is read again, and the references checked
+// are the final view's.
 func TestVerify_HeadRefreshRewalksChangedSegments(t *testing.T) {
 	for _, d := range []VerifyDepth{VerifyBindings, VerifyData} {
 		t.Run(string(d), func(t *testing.T) {
 			fx := newVerifyFixture(t, "v1")
 			h1 := fx.publish("v1", map[uint64][]byte{0: verifyData(1), verifyPer: verifyData(2), 2 * verifyPer: verifyData(3)}, false)
 			var h2 storage.ChunkHead
-			opts := VerifyOptions{Depth: d, RefreshInterval: time.Millisecond}
+			opts := VerifyOptions{Depth: d, RefreshInterval: time.Minute}
 			opts.hook = func(stage string) {
 				if stage == verifyHookHeadWalked {
 					h2 = fx.publish("v1", map[uint64][]byte{verifyPer: verifyData(7)}, true)
-					time.Sleep(3 * time.Millisecond) // past the refresh interval
 				}
 			}
+			fx.c.SetClock(tickingClock(time.Minute)) // past the refresh interval at every read
 			res := fx.verify("v1", opts)
 			wantClasses(t, "refresh", res)
 			if len(res.HeadGens) != 2 || res.HeadGens[0] != h1.Gen || res.HeadGens[1] != h2.Gen {
@@ -765,8 +777,8 @@ func TestVerify_HeadRefreshRewalksChangedSegments(t *testing.T) {
 			if res.SegmentReads != 4 || res.SegmentsChecked != 6 {
 				t.Fatalf("segment reads %d (checked %d); want 3 + 1 changed", res.SegmentReads, res.SegmentsChecked)
 			}
-			if res.DistinctChunks != 4 || res.ChunksChecked != 4 {
-				t.Fatalf("chunks %d distinct, %d checked; want the 3 first and the 1 new", res.DistinctChunks, res.ChunksChecked)
+			if res.DistinctChunks != 4 || res.ChunksChecked != 3 {
+				t.Fatalf("chunks %d distinct, %d checked; want the 3 first and the 1 new, 3 final references", res.DistinctChunks, res.ChunksChecked)
 			}
 			if d == VerifyData && (res.DistinctChunksRead != 4 || fx.cb.reads(fx.fid(h2.Chunks[verifyPer].Key)) != 1) {
 				t.Fatalf("read %d chunks; want 4, the new one included", res.DistinctChunksRead)
@@ -1355,11 +1367,11 @@ func (b *beforeRead) Get(ctx context.Context, fid string) ([]byte, error) {
 	return b.Blobs.Get(ctx, fid)
 }
 
-// A reference to a chunk already checked, under the same key but with
-// another SHA-256, is a finding: at depth data it is compared with the
-// content read once for that chunk (the chunk is not read again), below
-// data with the other reference. This holds for a HEAD refreshed during
-// the pass and for a snapshot.
+// A final reference to a chunk under the same key but with another SHA-256
+// is a finding: at depth data it is compared with the content read once for
+// that chunk (the chunk is not read again), below data with the other final
+// references. A reference only an earlier HEAD view carried is not compared
+// (detail "": no finding).
 func TestVerify_SameKeyWithAnotherHashIsAFinding(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -1369,7 +1381,7 @@ func TestVerify_SameKeyWithAnotherHashIsAFinding(t *testing.T) {
 	}{
 		{"refreshed HEAD, data, before the read", VerifyData, "walked", "needle SHA-256"},
 		{"refreshed HEAD, data, after the read", VerifyData, "read", "needle SHA-256"},
-		{"refreshed HEAD, bindings", VerifyBindings, "walked", "disagree"},
+		{"refreshed HEAD, bindings", VerifyBindings, "walked", ""},
 		{"snapshot, data", VerifyData, "snapshot", "needle SHA-256"},
 		{"snapshot, bindings", VerifyBindings, "snapshot", "disagree"},
 	} {
@@ -1408,6 +1420,10 @@ func TestVerify_SameKeyWithAnotherHashIsAFinding(t *testing.T) {
 			if err != nil || !res.Complete {
 				t.Fatalf("verify: %v, %+v", err, res)
 			}
+			if tc.detail == "" {
+				wantClasses(t, tc.name, res)
+				return
+			}
 			wantClasses(t, tc.name, res, "CONTENT_MISMATCH@0")
 			f := res.Findings[0]
 			wantRoot := headLabel(h2.Gen)
@@ -1429,104 +1445,213 @@ func TestVerify_SameKeyWithAnotherHashIsAFinding(t *testing.T) {
 	}
 }
 
-// manualClock stands still until advanced.
-type manualClock struct {
-	mu  sync.Mutex
-	now time.Time
+// A chunk read once whose final references (HEAD and an active snapshot)
+// carry two different wrong SHA-256s is one CONTENT_MISMATCH, under HEAD,
+// whose detail counts the other differing reference and names its root.
+func TestVerify_TwoWrongReferencesAreOneFinding(t *testing.T) {
+	fx := newVerifyFixture(t, "v1")
+	ctx := context.Background()
+	h1 := fx.publish("v1", map[uint64][]byte{0: verifyData(1), 1: verifyData(2)}, false)
+	h2 := fx.republish("v1", wrongHash(0)) // the snapshot keeps this wrong hash
+	if _, err := fx.c.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: "s1", RequestID: "r1"}, h2); err != nil {
+		t.Fatal(err)
+	}
+	h3 := fx.republish("v1", func(c map[uint64]storage.ChunkRef) { // HEAD: another wrong hash, same key
+		ref := c[0]
+		ref.SHA256[1] ^= 0xff
+		c[0] = ref
+	})
+	if h3.Chunks[0].Key != h1.Chunks[0].Key || h3.Chunks[0].SHA256 == h2.Chunks[0].SHA256 || h2.Chunks[0].SHA256 == h1.Chunks[0].SHA256 {
+		t.Fatal("fixture: one key, three different reference hashes")
+	}
+	res := fx.verify("v1", VerifyOptions{Depth: VerifyData, AllSnapshots: true, BytesPerSecond: -1})
+	wantClasses(t, "two wrong references", res, "CONTENT_MISMATCH@0")
+	f := res.Findings[0]
+	if f.Root != headLabel(h3.Gen) || !strings.Contains(f.Detail, "1 more") || !strings.Contains(f.Detail, "snapshot s1/") {
+		t.Fatalf("finding %+v; want under %q, detail counting 1 more differing reference under the snapshot", f, headLabel(h3.Gen))
+	}
+	if n := fx.cb.reads(fx.fid(h1.Chunks[0].Key)); n != 1 {
+		t.Fatalf("chunk read %d times, want once", n)
+	}
 }
 
-func (c *manualClock) read() time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.now
+// A schedule point: where a world event lands relative to the pass.
+type schedPoint string
+
+const (
+	atWalked  schedPoint = "walked"  // after the first HEAD view, before any check
+	atChecked schedPoint = "checked" // after the first batch of checks has settled
+	atClosing schedPoint = "closing" // just before the first closing read
+	atDuring  schedPoint = "during"  // while chunk K's read is in progress
+)
+
+// verifyFixture.schedule runs a data-depth pass over v1 whose owner applies
+// steps[i] at points[i] (several steps at one point run in order). HEAD is
+// re-read at every opportunity; fidK is the chunk whose read is "during".
+func (fx *verifyFixture) schedule(fidK string, steps []func(), points []schedPoint) VerifyResult {
+	fx.t.Helper()
+	var mu sync.Mutex
+	pending := map[schedPoint][]func(){}
+	for i, p := range points {
+		pending[p] = append(pending[p], steps[i])
+	}
+	fire := func(p schedPoint) {
+		mu.Lock()
+		fs := pending[p]
+		delete(pending, p)
+		mu.Unlock()
+		for _, f := range fs {
+			f()
+		}
+	}
+	opts := VerifyOptions{Depth: VerifyData, BytesPerSecond: -1, RefreshInterval: time.Minute, Concurrency: 1}
+	opts.hook = func(stage string) {
+		switch stage {
+		case verifyHookHeadWalked:
+			fire(atWalked)
+		case verifyHookBatchChecked:
+			fire(atChecked)
+		case verifyHookClosingRead:
+			fire(atClosing)
+		}
+	}
+	during := &beforeRead{Blobs: fx.cb, fid: fidK, fn: func() { fire(atDuring) }}
+	cat, err := NewCatalog(manifestFilerBlobs{fx.f, during}, catBase)
+	if err != nil {
+		fx.t.Fatal(err)
+	}
+	cat.SetClock(tickingClock(time.Minute))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := cat.Verify(ctx, "v1", opts)
+	if err != nil || !res.Complete {
+		fx.t.Fatalf("verify: %v, %+v", err, res)
+	}
+	if len(pending) != 0 {
+		fx.t.Fatalf("schedule points never reached: %v", pending)
+	}
+	return res
 }
 
-func (c *manualClock) advance(d time.Duration) {
-	c.mu.Lock()
-	c.now = c.now.Add(d)
-	c.mu.Unlock()
-}
-
-// A chunk's outcome (needle missing, read error, binding missing) applies
-// to every reference to it, also to those a refreshed HEAD added before or
-// after that outcome: a reference whose root still names the chunk there is
-// a finding, under that root. The chunk is not read again.
-func TestVerify_OutcomeAppliesToRefreshedReferences(t *testing.T) {
-	dropK := func(fx *verifyFixture, k string) { fx.needle(fx.fid(k), dropNeedle) }
-	failK := func(fx *verifyFixture, k string) { fx.cb.failReads(fx.fid(k), -1) }
-	unbindK := func(fx *verifyFixture, k string) { fx.deleteBinding(k) }
+// The same owner events in different interleavings with the pass's checks
+// and HEAD reads give the same findings: the findings are computed at the
+// end, from each chunk's one outcome and the roots at the final read. K is
+// chunk 0 (index 0), L chunk 1; "bad" means K's needle is missing.
+func TestVerify_SchedulesGiveTheSameFindings(t *testing.T) {
+	moveK := func(c map[uint64]storage.ChunkRef) { c[1] = c[0]; delete(c, 0) }
+	addK1 := func(c map[uint64]storage.ChunkRef) { c[1] = c[0] }
+	dropK := func(c map[uint64]storage.ChunkRef) { delete(c, 0) }
+	type edit = func(c map[uint64]storage.ChunkRef)
 	for _, tc := range []struct {
-		name   string
-		depth  VerifyDepth
-		after  bool // the refresh comes after the outcome, not before
-		damage func(fx *verifyFixture, qkey string)
-		want   string
-		reads  int // reads of the damaged chunk
+		name         string
+		bad          bool
+		edits        []edit // the owner's publishes, in order (nil: restore K at index 0)
+		interleave   [][]schedPoint
+		want         []string
+		superseded   int
+		finalGenStep int // findings are under the HEAD this many publishes after the first (all of them)
 	}{
-		{"refresh before, needle missing", VerifyData, false, dropK, "NEEDLE_MISSING@1", 1},
-		{"refresh before, read error", VerifyData, false, failK, "READ_ERROR@1", verifyReadAttempts},
-		{"refresh before, binding missing", VerifyBindings, false, unbindK, "BINDING_MISSING@1", 0},
-		{"refresh after, needle missing", VerifyData, true, dropK, "NEEDLE_MISSING@1", 1},
-		{"refresh after, read error", VerifyData, true, failK, "READ_ERROR@1", verifyReadAttempts},
+		{"K moves from index 0 to 1, its check fails", true, []edit{moveK},
+			[][]schedPoint{{atWalked}, {atChecked}, {atClosing}}, []string{"NEEDLE_MISSING@1"}, 0, 1},
+		{"a reference to K arrives after K settled bad", true, []edit{addK1, dropK},
+			[][]schedPoint{{atWalked, atWalked}, {atWalked, atChecked}, {atChecked, atClosing}}, []string{"NEEDLE_MISSING@1"}, 0, 2},
+		{"K is bad, a refresh keeps index 0 and adds index 1", true, []edit{addK1},
+			[][]schedPoint{{atWalked}, {atChecked}, {atClosing}}, []string{"NEEDLE_MISSING@0"}, 0, 1},
+		{"settlement and refresh overlap", true, []edit{moveK},
+			[][]schedPoint{{atDuring}, {atWalked}}, []string{"NEEDLE_MISSING@1"}, 0, 1},
+		{"K is named, not named, named again (bad)", true, []edit{dropK, nil},
+			[][]schedPoint{{atWalked, atChecked}, {atChecked, atClosing}}, []string{"NEEDLE_MISSING@0", "ROOT_INVALID@0"}, 0, 2},
+		{"K is named, not named, named again (good)", false, []edit{dropK, nil},
+			[][]schedPoint{{atWalked, atChecked}, {atChecked, atClosing}}, []string{"ROOT_INVALID@0"}, 0, 2},
+		{"K is bad and the final view does not name it", true, []edit{dropK},
+			[][]schedPoint{{atWalked}, {atChecked}, {atClosing}}, nil, 1, 1},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			fx := newVerifyFixture(t, "v1")
-			h1 := fx.publish("v1", map[uint64][]byte{0: verifyData(1), 1: verifyData(2)}, false)
-			k := h1.Chunks[0].Key
-			fidK := fx.fid(k)
-			var h2 storage.ChunkHead
-			// The owner moves chunk K from index 0 to index 1 (index 0 and
-			// the old chunk 1 leave HEAD), and K is damaged.
-			move := func() {
-				h2 = fx.republish("v1", func(c map[uint64]storage.ChunkRef) {
-					c[1] = c[0]
-					delete(c, 0)
-				})
-				tc.damage(fx, k)
-			}
-			opts := VerifyOptions{Depth: tc.depth, BytesPerSecond: -1, RefreshInterval: time.Minute, Concurrency: 1}
-			cat := fx.c
-			if !tc.after {
-				// Refreshed at every opportunity: the bindings phase sees
-				// the move before K is checked.
-				cat.SetClock(tickingClock(time.Minute))
-				opts.hook = func(stage string) {
-					if stage == verifyHookHeadWalked {
-						move()
+		for _, points := range tc.interleave {
+			t.Run(fmt.Sprintf("%s/%v", tc.name, points), func(t *testing.T) {
+				fx := newVerifyFixture(t, "v1")
+				h1 := fx.publish("v1", map[uint64][]byte{0: verifyData(1), 1: verifyData(2)}, false)
+				k := h1.Chunks[0]
+				fidK := fx.fid(k.Key)
+				if tc.bad {
+					fx.needle(fidK, dropNeedle)
+				}
+				var last storage.ChunkHead
+				steps := make([]func(), len(tc.edits))
+				for i, e := range tc.edits {
+					if e == nil {
+						e = func(c map[uint64]storage.ChunkRef) { c[0] = k }
+					}
+					steps[i] = func() { last = fx.republish("v1", e) }
+				}
+				res := fx.schedule(fidK, steps, points)
+				wantClasses(t, tc.name, res, tc.want...)
+				for _, f := range res.Findings {
+					if f.Root != headLabel(last.Gen) || f.Key == "" {
+						t.Fatalf("finding %+v; want under %q (the final HEAD view)", f, headLabel(last.Gen))
 					}
 				}
-			} else {
-				// No refresh until K's read has failed (one reader: K, at
-				// index 0, is read completely before the old chunk 1), then
-				// time passes and the pass refreshes after that batch.
-				clock := &manualClock{now: time.Now()}
-				moveFirst := &beforeRead{Blobs: fx.cb, fid: fidK, fn: move}
-				thenAdvance := &beforeRead{Blobs: moveFirst, fid: fx.fid(h1.Chunks[1].Key), fn: func() { clock.advance(time.Hour) }}
-				var err error
-				if cat, err = NewCatalog(manifestFilerBlobs{fx.f, thenAdvance}, catBase); err != nil {
-					t.Fatal(err)
+				if res.SupersededDuringVerify != tc.superseded || res.RootDeletedDuringVerify != 0 {
+					t.Fatalf("superseded %d, root deleted %d; want %d, 0", res.SupersededDuringVerify, res.RootDeletedDuringVerify, tc.superseded)
 				}
-				cat.SetClock(clock.read)
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			res, err := cat.Verify(ctx, "v1", opts)
-			if err != nil || !res.Complete {
-				t.Fatalf("verify: %v, %+v", err, res)
-			}
-			wantClasses(t, tc.name, res, tc.want)
-			if res.Findings[0].Root != headLabel(h2.Gen) || res.SupersededDuringVerify != 1 {
-				t.Fatalf("finding under %q, superseded %d; want under %q (the index 0 reference superseded)",
-					res.Findings[0].Root, res.SupersededDuringVerify, headLabel(h2.Gen))
-			}
-			if len(res.HeadGens) != 2 || res.HeadGens[0] != h1.Gen || res.HeadGens[1] != h2.Gen {
-				t.Fatalf("covered gens %v, want [%d %d]", res.HeadGens, h1.Gen, h2.Gen)
-			}
-			if n := fx.cb.reads(fidK); n != tc.reads {
-				t.Fatalf("chunk K read %d times, want %d", n, tc.reads)
-			}
-		})
+				if res.HeadGens[len(res.HeadGens)-1] != last.Gen {
+					t.Fatalf("covered gens %v; want the last one %d", res.HeadGens, last.Gen)
+				}
+				// One check per chunk, however often HEAD names it again.
+				if n := fx.cb.reads(fidK); n != 1 {
+					t.Fatalf("chunk K read %d times, want once", n)
+				}
+			})
+		}
 	}
+}
+
+// A publish that lands while the pass makes its closing read is not missed:
+// the read names a chunk not seen before, so the pass checks it and reads
+// again; a bad new chunk is a finding, not a clean pass.
+func TestVerify_PublishDuringClosingReadIsChecked(t *testing.T) {
+	fx := newVerifyFixture(t, "v1")
+	h1 := fx.publish("v1", map[uint64][]byte{0: verifyData(1), 1: verifyData(2)}, false)
+	var h2 storage.ChunkHead
+	steps := []func(){func() {
+		h2 = fx.publish("v1", map[uint64][]byte{2: verifyData(3)}, true)
+		fx.needle(fx.fid(h2.Chunks[2].Key), dropNeedle)
+	}}
+	res := fx.schedule(fx.fid(h1.Chunks[0].Key), steps, []schedPoint{atClosing})
+	wantClasses(t, "publish during the closing read", res, "NEEDLE_MISSING@2")
+	if res.Findings[0].Root != headLabel(h2.Gen) || fx.cb.reads(fx.fid(h2.Chunks[2].Key)) != 1 {
+		t.Fatalf("finding %+v, new chunk read %d times; want under %q, read once", res.Findings[0], fx.cb.reads(fx.fid(h2.Chunks[2].Key)), headLabel(h2.Gen))
+	}
+	if len(res.HeadGens) != 2 || res.HeadGens[1] != h2.Gen {
+		t.Fatalf("covered gens %v, want [%d %d]", res.HeadGens, h1.Gen, h2.Gen)
+	}
+}
+
+// An owner that publishes a new chunk before every closing read keeps the
+// pass from closing: after ClosingRounds such reads the result is
+// incomplete (never clean), with its reason and the findings computed from
+// what was checked.
+func TestVerify_ClosingRoundsExhaustedIsIncomplete(t *testing.T) {
+	fx := newVerifyFixture(t, "v1")
+	h := fx.publish("v1", map[uint64][]byte{0: verifyData(1), 1: verifyData(2)}, false)
+	fx.needle(fx.fid(h.Chunks[0].Key), dropNeedle)
+	reads := 0
+	opts := VerifyOptions{Depth: VerifyData, BytesPerSecond: -1}
+	opts.hook = func(stage string) {
+		if stage == verifyHookClosingRead {
+			reads++
+			fx.publish("v1", map[uint64][]byte{uint64(2 + reads): verifyData(byte(10 + reads))}, true)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := fx.c.Verify(ctx, "v1", opts)
+	if CodeOf(err) != CodeVerifyIncomplete || res.Complete || res.Incomplete != VerifyIncompleteRounds {
+		t.Fatalf("verify: %v, complete %v, incomplete %q; want %s, incomplete for the closing rounds", err, res.Complete, res.Incomplete, CodeVerifyIncomplete)
+	}
+	if reads != DefaultVerifyClosingRounds {
+		t.Fatalf("%d closing reads, want %d", reads, DefaultVerifyClosingRounds)
+	}
+	wantClasses(t, "partial findings", res, "NEEDLE_MISSING@0")
 }
 
 // retagSnapshot rewrites one field of the document of the attempt snapshot
