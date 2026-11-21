@@ -235,6 +235,10 @@ type DurableProvider struct {
 	// observes the detach's stages and their deadlines ("cut", "settle").
 	testDetachStopIO func(ctx context.Context) error
 	testDetachTrace  func(stage string, deadline time.Time)
+	// testChunkLoopTrace, test-only, observes the cut loop's periodic cuts:
+	// "due" when it decides one from lastCutNs, then "cut" with whether it
+	// was skipped.
+	testChunkLoopTrace func(event string, lastCutNs int64, skipped bool)
 
 	// testBeforeChunkFreshRetire holds the real post-presence/pre-marker boundary.
 	testBeforeChunkFreshRetire func() error

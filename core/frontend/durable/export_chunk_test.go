@@ -21,6 +21,13 @@ func SetTestDetachTrace(p *DurableProvider, f func(stage string, deadline time.T
 	p.testDetachTrace = f
 }
 
+// SetTestChunkLoopTrace observes the cut loop's periodic cuts: "due" with the
+// last cut it decided from, then "cut" with whether it was skipped
+// (test-only; set before the volume opens).
+func SetTestChunkLoopTrace(p *DurableProvider, f func(event string, lastCutNs int64, skipped bool)) {
+	p.testChunkLoopTrace = f
+}
+
 // SetTestBeforeIOLock runs f in the backend's admission, right before the I/O
 // lock (test-only).
 func SetTestBeforeIOLock(b frontend.Backend, f func()) { b.(*StorageBackend).testBeforeIOLock = f }

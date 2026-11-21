@@ -767,7 +767,29 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 			continue
 		}
 		cutCtx, cancel := p.chunkCutContext(ctx)
-		_, err := layer.Cut(cutCtx)
+		trace := p.testChunkLoopTrace
+		if trace != nil {
+			trace("due", ls.LastCutNs, false)
+		}
+		var err error
+		if pc, ok := layer.(storage.ChunkPeriodicCutter); ok {
+			// A cut that completed after this decision (an explicit one
+			// running meanwhile) restarted the timer: no cut now.
+			var skipped bool
+			_, skipped, err = pc.CutUnlessCutSince(cutCtx, ls.LastCutNs)
+			if trace != nil {
+				trace("cut", ls.LastCutNs, skipped)
+			}
+			if skipped {
+				cancel()
+				continue
+			}
+		} else {
+			_, err = layer.Cut(cutCtx)
+			if trace != nil {
+				trace("cut", ls.LastCutNs, false)
+			}
+		}
 		cancel()
 		s = pol.after(s, start, time.Now(), err)
 		if err != nil && !errors.Is(err, storage.ErrChunkCaptureRefused) && ctx.Err() == nil {
@@ -1015,6 +1037,15 @@ func (p *DurableProvider) DetachVolume(ctx context.Context, volumeID string) (st
 	return p.detachVolume(ctx, volumeID, false)
 }
 
+// DetachVolumeFrozen uses one budgeted cut when the guest is already frozen.
+func (p *DurableProvider) DetachVolumeFrozen(ctx context.Context, volumeID string, opts storage.FrozenDetachOptions) (storage.ChunkCutResult, uint64, error) {
+	ctx, err := storage.WithFrozenDetach(ctx, opts)
+	if err != nil {
+		return storage.ChunkCutResult{}, 0, err
+	}
+	return p.detachVolume(ctx, volumeID, false)
+}
+
 // ErrPlainDetachBusy refuses a plain detach without closing frontend admission.
 var ErrPlainDetachBusy = errors.New("durable: plain detach requires idle frontend I/O")
 
@@ -1042,10 +1073,14 @@ func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, pla
 			return storage.ChunkCutResult{}, 0, err
 		}
 	}
-	precopy := p.cfg.ChunkDetachPrecopy && !plain
+	guestFreeze, guestFrozen := storage.FrozenDetachFromContext(ctx)
+	precopy := (p.cfg.ChunkDetachPrecopy || guestFrozen) && !plain
 	freeze := p.cfg.DetachFreezeTimeout
 	if freeze <= 0 {
 		freeze = defaultDetachFreezeTimeout
+	}
+	if guestFrozen && !guestFreeze.AllowOverBudget {
+		freeze = detachFreezeTarget
 	}
 	// One freeze budget covers the drain, the final cut AND the settlement:
 	// the cut gets three quarters, the settlement what is left. The bound is
@@ -1063,10 +1098,27 @@ func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, pla
 	cutCtx, cancel := context.WithCancelCause(accountCtx)
 	defer cancel(context.Canceled)
 	var timer *time.Timer
+	var settleDeadline time.Time
 	beginFreeze := func() {
+		if timer != nil {
+			return
+		}
 		start = time.Now()
+		if guestFrozen {
+			start = guestFreeze.StartedAt
+		}
 		casAtFreeze = countCAS()
-		timer = time.AfterFunc(freeze*3/4, func() { cancel(context.DeadlineExceeded) })
+		operationStart := start
+		if guestFrozen && guestFreeze.AllowOverBudget {
+			operationStart = time.Now()
+		}
+		settleDeadline = operationStart.Add(freeze)
+		remaining := max(time.Duration(0), time.Until(settleDeadline))
+		// An already exhausted normal guest budget must reach the no-I/O
+		// forecast refusal, rather than racing a zero-delay cancellation.
+		if remaining > 0 {
+			timer = time.AfterFunc(remaining*3/4, func() { cancel(context.DeadlineExceeded) })
+		}
 	}
 	defer func() {
 		if timer != nil {
@@ -1088,6 +1140,9 @@ func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, pla
 		}
 	}
 	var r storage.ChunkCutResult
+	if guestFrozen {
+		beginFreeze()
+	}
 	if precopy {
 		owner, ok := layer.(interface {
 			PrecopyDetachWithAdmission(context.Context, func(context.Context) (func(), error), func() bool) (storage.ChunkCutResult, error)
@@ -1110,12 +1165,21 @@ func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, pla
 		})
 		// Log only after capture releases its barrier; at most five records.
 		for _, a := range r.Precopy.Rounds {
+			p := a.FixedParts
+			log.Printf("durable: pre-copy fixed spans volume=%s attempt=%d candidate_ms=%.3f window_setup_ms=%.3f publish_prepare_ms=%.3f manifest_ms=%.3f commit_state_ms=%.3f intent_cleanup_ms=%.3f non_payload_copy_ms=%.3f barrier_overage_ms=%.3f live_drain_ms=%.3f live_capture_lock_ms=%.3f live_sync_ms=%.3f live_candidate_ms=%.3f live_other_ms=%.3f live_sync_lifecycle_wait_ms=%.3f live_sync_store_wait_ms=%.3f live_sync_group_commit_ms=%.3f live_sync_completion_wait_ms=%.3f", volumeID, a.Attempt, float64(p.Candidate)/float64(time.Millisecond), float64(p.WindowSetup)/float64(time.Millisecond), float64(p.PublishPrepare)/float64(time.Millisecond), float64(p.Manifest)/float64(time.Millisecond), float64(p.CommitState)/float64(time.Millisecond), float64(p.IntentCleanup)/float64(time.Millisecond), float64(p.NonPayloadCopy)/float64(time.Millisecond), float64(a.BarrierOverage)/float64(time.Millisecond), float64(a.BarrierParts.Drain)/float64(time.Millisecond), float64(a.BarrierParts.StoreLock)/float64(time.Millisecond), float64(a.BarrierParts.DataSync)/float64(time.Millisecond), float64(a.BarrierParts.Candidate)/float64(time.Millisecond), float64(a.BarrierParts.Other)/float64(time.Millisecond), float64(a.BarrierParts.SyncPhases.LifecycleWaitNs)/float64(time.Millisecond), float64(a.BarrierParts.SyncPhases.StoreWaitNs)/float64(time.Millisecond), float64(a.BarrierParts.SyncPhases.GroupCommitNs)/float64(time.Millisecond), float64(a.BarrierParts.SyncPhases.CompletionWaitNs)/float64(time.Millisecond))
 			log.Printf("durable: pre-copy attempt volume=%s attempt=%d drain_ms=%.3f barrier_ms=%.3f pause_ms=%.3f reason=%s tail=%d rate_samples=%d estimate_ms=%.3f frozen=%t fixed_ms=%.3f drain_cost_ms=%.3f store_lock_ms=%.3f local_sync_ms=%.3f head_cas_ms=%.3f readback_ms=%.3f map_persist_ms=%.3f other_fixed_ms=%.3f tail_ms=%.3f declared_freeze_ms=%.3f err=%s", volumeID, a.Attempt, float64(a.Drain)/float64(time.Millisecond), float64(a.Barrier)/float64(time.Millisecond), float64(a.Pause)/float64(time.Millisecond), a.Reason, a.TailBytes, a.RateSamples, float64(a.Estimate)/float64(time.Millisecond), a.Frozen, float64(a.Fixed)/float64(time.Millisecond), float64(a.FixedParts.Drain)/float64(time.Millisecond), float64(a.FixedParts.StoreLock)/float64(time.Millisecond), float64(a.FixedParts.DataSync)/float64(time.Millisecond), float64(a.FixedParts.HeadCAS)/float64(time.Millisecond), float64(a.FixedParts.HeadReadback)/float64(time.Millisecond), float64(a.FixedParts.MapPersist)/float64(time.Millisecond), float64(a.FixedParts.Other)/float64(time.Millisecond), float64(a.TailEstimate)/float64(time.Millisecond), float64(a.DeclaredFreeze)/float64(time.Millisecond), a.Error)
 		}
 		log.Printf("durable: pre-copy volume=%s attempts=%d measurement_rounds=%d samples_at_start=%d tail=%d rate=%.0f sample_age=%s fixed=%s estimate=%s frozen=%t reason=%s err=%v", volumeID, r.Precopy.Attempts, r.Precopy.MeasurementRounds, r.Precopy.SamplesAtStart, r.Precopy.TailBytes, r.Precopy.BytesPerSecond, r.Precopy.SampleAge, r.Precopy.Fixed, r.Precopy.Estimate, r.Precopy.Frozen, r.Precopy.Reason, err)
 		if err == nil {
-			if !start.IsZero() {
-				r.Precopy.Finish(time.Since(start)+r.Precopy.BarrierBeforeFreeze, 0, false)
+			if !start.IsZero() && !r.Precopy.IsReplay() {
+				elapsed := time.Since(start)
+				if !guestFrozen {
+					elapsed += r.Precopy.BarrierBeforeFreeze
+				}
+				r.Precopy.Finish(elapsed, 0, false)
+				if recorder, ok := layer.(interface{ RememberDetachReport(storage.PrecopyReport) }); ok {
+					recorder.RememberDetachReport(r.Precopy)
+				}
 			}
 			return r, h.storage.NextLSN() - 1, nil
 		}
@@ -1165,7 +1229,7 @@ func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, pla
 	// resumes: an earlier detach that applied, an unresolved detach CAS or a
 	// fenced layer must never resume serving. The settlement keeps the rest
 	// of the freeze budget even when the caller's context is gone.
-	sctx, scancel := context.WithDeadline(context.WithoutCancel(cutCtx), start.Add(freeze))
+	sctx, scancel := context.WithDeadline(context.WithoutCancel(cutCtx), settleDeadline)
 	defer scancel()
 	if trace := p.testDetachTrace; trace != nil {
 		dl, _ := sctx.Deadline()
@@ -1178,9 +1242,16 @@ func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, pla
 		if attempts > 0 {
 			extra = attempts - 1
 		}
-		r.Precopy.Finish(time.Since(start)+r.Precopy.BarrierBeforeFreeze, extra, true)
+		elapsed := time.Since(start)
+		if !guestFrozen {
+			elapsed += r.Precopy.BarrierBeforeFreeze
+		}
+		r.Precopy.Finish(elapsed, extra, true)
 		log.Printf("durable: pre-copy settlement volume=%s elapsed=%s extra_cas=%d declared_worst=%s latency_gate_failed=%t outcome=%v err=%v", volumeID, r.Precopy.FreezeElapsed, extra, r.Precopy.DeclaredWorst, r.Precopy.LatencyGateFailed, how, serr)
 		dr.Precopy = r.Precopy
+		if recorder, ok := layer.(interface{ RememberDetachReport(storage.PrecopyReport) }); ok {
+			recorder.RememberDetachReport(r.Precopy)
+		}
 	}
 	switch {
 	case serr != nil:

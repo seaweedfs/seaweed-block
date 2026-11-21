@@ -428,3 +428,30 @@ From `docs/spec`, SANY `PlainDetach.tla` exited 0; TLC with
 `cfg/PlainDetach_no_idle.cfg` exited 12: `IdleAtStop` fails on
 BeginIO -> Plain (7 generated / 5 distinct, depth 3). The negative uses a
 distinct `-metadir` to avoid timestamp-directory collisions between short runs.
+
+
+## Guest-frozen detach admission
+
+`FrozenDetachBudget.tla` models one externally frozen attempt: a forecast,
+skipped staging, changed time/estimate/knowledge at the barrier, explicit
+admission, upload and publication. Time units are tenths of a second. It checks
+`NoUploadBeforeAdmission`, `BudgetAtAdmission`, `OverrideVisible` and
+`AuthorityAtPublication`. Authority is stable within this finite model; mid-cut
+fencing and CAS races remain covered by the publication/COW contracts. It does
+not prove physical latency or the external controller's two-re-freeze limit.
+
+Local run 2026-11-21 02:53 UTC, TLC2.19, tools SHA-256
+`936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`:
+
+```sh
+java -Xmx512m -cp /path/to/tla2tools.jar tlc2.TLC -deadlock -config cfg/FrozenDetachBudget.cfg FrozenDetachBudget
+```
+
+Positive exited0:667 generated/439 distinct states, queue empty, complete depth6.
+The same command with each negative config exited12 at its intended invariant:
+`no_elapsed`410/267 depth4; `no_barrier`386/237 depth4;
+`staging_upload`151/145 depth3; `hidden_override`367/229 depth4;
+`no_authority`951/603 depth6. The first two violate `BudgetAtAdmission`, the
+third `NoUploadBeforeAdmission`, the fourth `OverrideVisible`, and the last
+`AuthorityAtPublication`. Source tests separately check time/metadata handling,
+no-upload refusal, preserved bytes, uncertain outcomes and typed API dispatch.

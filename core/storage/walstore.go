@@ -752,10 +752,25 @@ func (s *WALStore) readExtentBlock(lba uint32) ([]byte, error) {
 // becomes crash-survivable only when a Sync that covers its LSN
 // returns nil. Group commit batches concurrent Sync callers into one
 // fsync.
-func (s *WALStore) Sync() (uint64, error) {
+func (s *WALStore) Sync() (uint64, error) { return s.syncWithPhases(nil) }
+
+// Optional capture telemetry leaves the ordinary Sync contract and lock order
+// unchanged. Only the requesting goroutine updates these nested phase costs.
+func (s *WALStore) syncWithPhases(phases *SyncPhaseStats) (uint64, error) {
+	var at time.Time
+	if phases != nil {
+		at = time.Now()
+	}
 	s.lifecycleMu.RLock()
+	if phases != nil {
+		phases.LifecycleWaitNs += time.Since(at).Nanoseconds()
+		at = time.Now()
+	}
 	defer s.lifecycleMu.RUnlock()
 	s.mu.RLock()
+	if phases != nil {
+		phases.StoreWaitNs += time.Since(at).Nanoseconds()
+	}
 	if s.closed {
 		s.mu.RUnlock()
 		return 0, errors.New("storage: Sync after Close")
@@ -778,6 +793,9 @@ func (s *WALStore) Sync() (uint64, error) {
 
 	s.mu.RUnlock()
 
+	if phases != nil {
+		at = time.Now()
+	}
 	if s.walSyncCovered() {
 		// Preserve shutdown refusal even when no file I/O is necessary.
 		select {
@@ -788,6 +806,9 @@ func (s *WALStore) Sync() (uint64, error) {
 	} else if err := s.syncCache(); err != nil {
 		return 0, fmt.Errorf("storage: group commit fsync: %w", err)
 	}
+	if phases != nil {
+		phases.GroupCommitNs += time.Since(at).Nanoseconds()
+	}
 	s.syncs.Add(1)
 	{
 
@@ -797,7 +818,13 @@ func (s *WALStore) Sync() (uint64, error) {
 		}
 		// The completion is validated against the recovery generation under
 		// the leader role: a recovery since the capture refuses the ack.
+		if phases != nil {
+			at = time.Now()
+		}
 		v.syncMu.Lock()
+		if phases != nil {
+			phases.CompletionWaitNs += time.Since(at).Nanoseconds()
+		}
 		defer v.syncMu.Unlock()
 		if v.recoverGen.Load() != targetGen {
 			return 0, errV3RecoveredMeanwhile
@@ -807,7 +834,13 @@ func (s *WALStore) Sync() (uint64, error) {
 		}
 	}
 
+	if phases != nil {
+		at = time.Now()
+	}
 	s.mu.Lock()
+	if phases != nil {
+		phases.StoreWaitNs += time.Since(at).Nanoseconds()
+	}
 	// A fault latched while this Sync waited (another caller's fsync or
 	// append, or a flusher fsync) refuses it: nothing is acknowledged.
 	if err := s.stickyIOFault(); err != nil {
