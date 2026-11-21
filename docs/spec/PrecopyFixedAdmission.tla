@@ -1,7 +1,7 @@
 ----------------------- MODULE PrecopyFixedAdmission -----------------------
 \* Admission only: data/authority/publication safety is covered by CutCOW2.
 EXTENDS Integers, TLC
-CONSTANTS OmitTailGuard, OmitStallGuard, OmitFreezeCap
+CONSTANTS OmitFinalGuard, OmitStallGuard, OmitFreezeCap
 Allowance == 12
 FreezeLimit == 50
 Margin == 1
@@ -11,8 +11,8 @@ Init == /\ fixed \in {1,13,60}
         /\ tail \in {0,1,3,4,20}
         /\ previous = 0 /\ estimate = fixed + tail + Margin
         /\ phase = "decide" /\ declared = 0 /\ round = 1
-Exception == /\ (OmitTailGuard \/ tail <= Allowance \div 4)
-             /\ (OmitStallGuard \/ (previous > 0 /\ estimate >= previous))
+Plateau == previous > 0 /\ 10 * estimate >= 9 * previous
+Exception == /\ (OmitStallGuard \/ Plateau \/ (~OmitFinalGuard /\ round = 5))
              /\ (OmitFreezeCap \/ estimate <= FreezeLimit)
 Eligible == estimate <= Allowance \/ Exception
 Commit == /\ phase = "decide" /\ Eligible
@@ -33,6 +33,6 @@ Spec == Init /\ [][Next]_vars
 SafeCommit == phase = "committed" =>
                 /\ declared = estimate /\ estimate <= FreezeLimit
                 /\ (estimate > Allowance =>
-                      /\ tail <= Allowance \div 4
-                      /\ previous > 0 /\ estimate >= previous)
+                      (Plateau \/ round = 5))
+FinalWithinBudget == phase = "refused" => estimate > FreezeLimit
 =============================================================================

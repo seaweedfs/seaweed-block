@@ -306,16 +306,26 @@ func precopyFiftyAttemptError(round storage.PrecopyAttempt, previous *storage.Pr
 		return nil
 	}
 	const allowance = 1200 * time.Millisecond
-	eligible := round.Estimate <= allowance
+	if round.Reason == "samples_unknown" {
+		if round.Frozen || round.DeclaredFreeze != 0 || round.Error != "" {
+			return fmt.Errorf("unknown sample admitted: %+v", round)
+		}
+		return nil
+	}
+	eligible := round.Estimate > 0 && round.Estimate <= allowance
 	reason := "fit"
-	if !eligible && previous != nil && round.TailEstimate <= allowance/4 && round.Estimate >= previous.Estimate && round.Estimate <= 5*time.Second {
-		eligible, reason = true, "fixed_cost_over_allowance"
+	if !eligible && round.Estimate > 0 && round.Estimate <= 5*time.Second {
+		if previous != nil && previous.Estimate > 0 && round.Estimate >= previous.Estimate-previous.Estimate/10 {
+			eligible, reason = true, "no_progress"
+		} else if round.Attempt == 5 {
+			eligible, reason = true, "final_attempt"
+		}
 	}
 	if round.Frozen {
 		if !eligible || !last || round.Reason != reason || round.DeclaredFreeze != round.Estimate || round.Error != "" {
 			return fmt.Errorf("invalid fitting attempt: %+v", round)
 		}
-	} else if eligible || (round.Reason != "tail_too_large" && round.Reason != "barrier_over_budget" && round.Reason != "fixed_cost_exceeds_freeze_budget") || round.Error != "" {
+	} else if eligible || (round.Reason != "tail_too_large" && round.Reason != "barrier_over_budget" && round.Reason != "freeze_budget_exceeded") || round.Error != "" {
 		return fmt.Errorf("refused an eligible attempt or hid a failure: %+v", round)
 	}
 	return nil

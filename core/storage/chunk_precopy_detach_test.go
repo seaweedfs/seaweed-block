@@ -532,7 +532,7 @@ func precopyAttemptDiagnosticsControl(t *testing.T, slow bool) {
 		t.Fatalf("slow diagnostics control lost its measured fixed cost: report=%+v", r.Precopy)
 	}
 	if r.Precopy.Frozen {
-		if err != nil || len(r.Precopy.Rounds) != 2 || (second.Reason != "fit" && second.Reason != "fixed_cost_over_allowance") || !second.Frozen {
+		if err != nil || len(r.Precopy.Rounds) != 2 || (second.Reason != "fit" && second.Reason != "no_progress") || !second.Frozen {
 			t.Fatalf("invalid fit after drain timeout: report=%+v err=%v", r.Precopy, err)
 		}
 	} else {

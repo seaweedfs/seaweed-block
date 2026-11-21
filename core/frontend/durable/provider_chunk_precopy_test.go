@@ -245,7 +245,7 @@ func precopyBusyOwnerKeepsServing(t *testing.T, delay time.Duration) {
 		// Releasing the owner does not erase a slow sample. Admission must
 		// still refuse a tail-bound point; a small stalled tail can now declare
 		// the retained fixed-cost exception instead of recopying indefinitely.
-		if !errors.Is(err, storage.ErrPrecopyNotConverged) || r.Precopy.Frozen || r.Precopy.Estimate <= 1200*time.Millisecond || (r.Precopy.Reason != "tail_too_large" && r.Precopy.Reason != "barrier_over_budget" && r.Precopy.Reason != "fixed_cost_exceeds_freeze_budget") {
+		if !errors.Is(err, storage.ErrPrecopyNotConverged) || r.Precopy.Frozen || r.Precopy.Estimate <= 1200*time.Millisecond || (r.Precopy.Reason != "tail_too_large" && r.Precopy.Reason != "barrier_over_budget" && r.Precopy.Reason != "freeze_budget_exceeded") {
 			t.Fatalf("post-release retry violated measured admission: report=%+v err=%v", r.Precopy, err)
 		}
 		if delay > 0 && r.Precopy.Fixed < delay {
@@ -260,7 +260,7 @@ func precopyBusyOwnerKeepsServing(t *testing.T, delay time.Duration) {
 			t.Fatalf("over-budget retry failed to resume service: n=%d err=%v", n, e)
 		}
 	} else if delay > 0 {
-		if !r.Precopy.Frozen || r.Precopy.Reason != "fixed_cost_over_allowance" || r.Precopy.Fixed < delay || r.Precopy.TailEstimate > 300*time.Millisecond || r.Precopy.PreviousEstimate <= 0 || r.Precopy.Estimate < r.Precopy.PreviousEstimate || r.Precopy.Estimate > 5*time.Second || r.Precopy.DeclaredFreeze != r.Precopy.Estimate {
+		if !r.Precopy.Frozen || r.Precopy.Reason != "no_progress" || r.Precopy.Fixed < delay || r.Precopy.PreviousEstimate <= 0 || r.Precopy.Estimate < r.Precopy.PreviousEstimate-r.Precopy.PreviousEstimate/10 || r.Precopy.Estimate > 5*time.Second || r.Precopy.DeclaredFreeze != r.Precopy.Estimate {
 			t.Fatalf("slow retry bypassed the declared small-tail plateau rule: %+v", r.Precopy)
 		}
 	}
