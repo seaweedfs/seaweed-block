@@ -52,3 +52,16 @@ func TestCandidateTailReportsCompleteFrozenBudget(t *testing.T) {
 		})
 	}
 }
+
+func TestFrozenRefusalRetainsUnknownCompleteEstimate(t *testing.T) {
+	l := &chunkLayerImpl{precopySamples: []precopySample{{at: time.Now(), fixed: 200 * time.Millisecond, rate: 20000}}}
+	r := l.precopyEstimate(1000, 0)
+	now := time.Now()
+	if r.admitFrozenAt(FrozenDetachOptions{StartedAt: now}, now) {
+		t.Fatal("unknown rate admitted")
+	}
+	refusal, ok := frozenRefusal(r).(*FrozenRefusal)
+	if !ok || refusal.Report.FrozenEstimateKnown || refusal.Report.MaxRefreezeQuiesce != 0 || refusal.Report.FrozenEstimate != 300*time.Millisecond {
+		t.Fatalf("partial estimate became known after reason changed: %+v", r)
+	}
+}

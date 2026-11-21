@@ -80,6 +80,7 @@ type PrecopyAttempt struct {
 
 // PrecopyReport records admission estimates, not a worst-case latency proof.
 type PrecopyReport struct {
+	FrozenBudget
 	replayed bool // transport-local marker; never replaces the original freeze telemetry.
 
 	// Live barrier prefix is diagnostic, not additive to the selected forecast.
@@ -524,5 +525,5 @@ func (l *chunkLayerImpl) candidateTailBytes() uint64 {
 
 func (l *chunkLayerImpl) estimateCandidateTail(bytes uint64) *ChunkCandidateTail {
 	r := l.precopyEstimate(bytes, 0)
-	return &ChunkCandidateTail{Bytes: bytes, Estimate: r.TailEstimate, BytesPerSecond: r.BytesPerSecond, RateSamples: r.RateSamples, SampleAge: r.SampleAge, Known: bytes == 0 || r.BytesPerSecond > 0}
+	return &ChunkCandidateTail{FrozenBudget: r.frozenBudgetEstimate(), Bytes: bytes, Estimate: r.TailEstimate, BytesPerSecond: r.BytesPerSecond, RateSamples: r.RateSamples, SampleAge: r.SampleAge, Known: bytes == 0 || r.BytesPerSecond > 0}
 }

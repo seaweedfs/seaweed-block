@@ -174,7 +174,14 @@ type snapshotBody struct {
 	Replayed      bool              `json:"replayed"`
 }
 
+type chunkFrozenRefusalBody struct {
+	storage.FrozenBudget
+	RemainingFreeze    time.Duration `json:"remainingFreezeNs"`
+	GuestFreezeElapsed time.Duration `json:"guestFreezeElapsedNs"`
+}
+
 type chunkErrorBody struct {
+	*chunkFrozenRefusalBody
 	Code      string `json:"code"`
 	Message   string `json:"message"`
 	Retryable bool   `json:"retryable"`
@@ -257,7 +264,14 @@ func writeChunkFailure(w http.ResponseWriter, err error) {
 	if errors.As(err, &ce) {
 		msg = ce.Detail() // the code is in its own field
 	}
-	writeChunkJSON(w, status, chunkErrorBody{Code: code, Message: msg, Retryable: retryable})
+	body := chunkErrorBody{Code: code, Message: msg, Retryable: retryable}
+	var refusal *storage.FrozenRefusal
+	// INV-WS-FREEZE-ACCOUNTING-001: transport observation, never a second forecast.
+	if code == "frozen_tail_too_large" && errors.As(err, &refusal) {
+		r := refusal.Report
+		body.chunkFrozenRefusalBody = &chunkFrozenRefusalBody{FrozenBudget: r.FrozenBudget, RemainingFreeze: r.RemainingFreeze, GuestFreezeElapsed: r.GuestFreezeElapsed}
+	}
+	writeChunkJSON(w, status, body)
 }
 
 // chunkErrorCode maps an operation's error to (HTTP status, code,

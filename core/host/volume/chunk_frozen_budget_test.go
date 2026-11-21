@@ -105,3 +105,50 @@ func TestChunkFrozenValidationHasDistinctPreMutationCode(t *testing.T) {
 		}
 	}
 }
+
+func TestChunkFrozenRefusalCarriesServerBudget(t *testing.T) {
+	report := storage.PrecopyReport{FrozenBudget: storage.FrozenBudget{FrozenEstimate: 5570 * time.Millisecond, FrozenEstimateKnown: true, FreezeLimit: 5 * time.Second}, Estimate: 5570 * time.Millisecond, RemainingFreeze: 4 * time.Second, GuestFreezeElapsed: time.Second, Reason: "frozen_tail_too_large"}
+	refusal := &storage.FrozenRefusal{Report: report}
+	p := &frozenDetachProvider{fakeChunkProvider: &fakeChunkProvider{}, err: refusal}
+	srv := chunkServer(t, NewChunkControl(p, nil), true)
+	body := fmt.Sprintf(`{"volumeID":"v1","frozen":true,"freezeStartedAtNs":%d}`, time.Now().Add(-time.Second).UnixNano())
+	w := serve(t, srv, http.MethodPost, "/chunk/detach", body, "")
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || w.Code != 409 {
+		t.Fatalf("refusal %d %s", w.Code, w.Body)
+	}
+	for key, want := range map[string]int64{"frozenEstimateNs": 5570000000, "freezeLimitNs": 5000000000, "maxRefreezeQuiesceNs": 0, "remainingFreezeNs": 4000000000, "guestFreezeElapsedNs": 1000000000} {
+		var value int64
+		if raw, ok := got[key]; !ok {
+			t.Errorf("missing %s: %s", key, w.Body)
+		} else if err := json.Unmarshal(raw, &value); err != nil || value != want {
+			t.Errorf("%s=%s want%d", key, raw, want)
+		}
+	}
+	var known bool
+	if err := json.Unmarshal(got["frozenEstimateKnown"], &known); err != nil || !known {
+		t.Errorf("known lost: %s", w.Body)
+	}
+	p.err = &storage.FrozenRefusal{Report: storage.PrecopyReport{FrozenBudget: storage.FrozenBudget{FrozenEstimate: 300 * time.Millisecond, FreezeLimit: 5 * time.Second}, Estimate: 300 * time.Millisecond, Reason: "frozen_tail_too_large", RemainingFreeze: 5 * time.Second}}
+	w = serve(t, srv, http.MethodPost, "/chunk/detach", body, "")
+	got = nil
+	_ = json.Unmarshal(w.Body.Bytes(), &got)
+	if string(got["frozenEstimateKnown"]) != "false" || string(got["maxRefreezeQuiesceNs"]) != "0" || string(got["frozenEstimateNs"]) != "300000000" {
+		t.Fatalf("unknown refusal became an actionable estimate: %s", w.Body)
+	}
+	p.err = errors.Join(storage.ErrChunkLayerClosed, refusal)
+	w = serve(t, srv, http.MethodPost, "/chunk/detach", body, "")
+	got = nil
+	if json.Unmarshal(w.Body.Bytes(), &got) != nil {
+		t.Fatal(w.Body)
+	}
+	status, code, _ := chunkErrorCode(storage.ErrChunkLayerClosed)
+	var gotCode string
+	_ = json.Unmarshal(got["code"], &gotCode)
+	if w.Code != status || gotCode != code {
+		t.Fatalf("terminal precedence lost: %d %s", w.Code, w.Body)
+	}
+	if _, ok := got["frozenEstimateNs"]; ok {
+		t.Fatalf("terminal response offered retry budget: %s", w.Body)
+	}
+}
