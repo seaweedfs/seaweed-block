@@ -1,11 +1,11 @@
 package storage
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 )
 
 // The spill cap is min(COWSpillLimit, free/2 - reserve), at least 0, read
@@ -74,15 +74,19 @@ func TestCutCOWV3_SpillCapFollowsFreeSpaceEachCut(t *testing.T) {
 	if limit != 0 {
 		t.Fatalf("window cap %d with 1 GiB free; want 0", limit)
 	}
-	writeDone := make(chan error, 1)
-	go func() { _, err := s.Write(5, makeBlock(ctBlockSize, 0xd6)); writeDone <- err }()
-	select {
-	case err := <-writeDone:
-		if err != nil {
-			t.Fatal("guest write refused at the free-space cap:", err)
-		}
-	case <-time.After(ctLocalBound):
-		t.Fatal("guest write did not complete at the free-space cap")
+	writeDone := make(chan struct{})
+	writeErr := make(chan error, 1)
+	// Registered before the writer starts: release the copier and join the
+	// writer (bounded) whatever the test's outcome.
+	t.Cleanup(func() { gate.unblock(); cowWaitSignal(t, writeDone, "free-space-cap writer cleanup") })
+	go func() {
+		defer close(writeDone)
+		_, err := s.Write(5, makeBlock(ctBlockSize, 0xd6))
+		writeErr <- err
+	}()
+	cowWaitSignal(t, writeDone, "guest write at the free-space cap")
+	if err := <-writeErr; err != nil {
+		t.Fatal("guest write refused at the free-space cap:", err)
 	}
 	gate.unblock()
 	cowWaitSignal(t, cutDone, "cut at the free-space cap")
@@ -92,5 +96,33 @@ func TestCutCOWV3_SpillCapFollowsFreeSpaceEachCut(t *testing.T) {
 	free.Store(100 << 30)
 	if got := l.cowSpillLimit(); got != l.cfg.COWSpillLimit {
 		t.Fatalf("after freeing space the cap is %d, want the configured %d", got, l.cfg.COWSpillLimit)
+	}
+}
+
+// The staging bound follows the free space read at the cut: with ample
+// free space the fixture's two dirty chunks are within the bound and go to
+// the barrier unstaged; with free space below the reserve the cap is 0, so
+// the cut pre-uploads them in a staging round before the barrier.
+func TestCutCOWV3_LowFreeSpaceStagesBeforeTheBarrier(t *testing.T) {
+	for _, c := range []struct {
+		name       string
+		free       int64
+		wantStaged bool
+	}{
+		{"ample free space", 100 << 30, false},
+		{"free space below the reserve", 1 << 30, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, l, _, gate := cowFixture(t)
+			gate.unblock()
+			l.cfg.COWSpillFree = func() (int64, error) { return c.free, nil }
+			r, err := l.Cut(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if staged := r.Stats.StageRounds > 0 && r.Stats.StagedChunks >= 2; staged != c.wantStaged {
+				t.Fatalf("free %d: %d staging rounds, %d staged chunks; want staged=%v", c.free, r.Stats.StageRounds, r.Stats.StagedChunks, c.wantStaged)
+			}
+		})
 	}
 }
