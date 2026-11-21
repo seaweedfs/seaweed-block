@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,8 +22,8 @@ import (
 
 const (
 	defaultChunkPath = "/swblock/chunks"
-	// Periodic HEAD publication bounds the host-loss recovery point. Automatic
-	// named snapshots remain explicit catalog operations.
+	// Periodic HEAD publication bounds the host-loss recovery point. Scheduled
+	// named snapshots are set by --chunk-snapshot-schedule.
 	defaultChunkCaptureInterval     = 0
 	defaultChunkMaintenanceInterval = time.Hour
 	defaultChunkCutTimeout          = 5 * time.Minute
@@ -40,6 +41,7 @@ type chunkFlags struct {
 	replication         string
 	captureInterval     time.Duration
 	maintenanceInterval time.Duration
+	snapshotSchedule    snapshotSchedule
 	automaticGC         bool
 	uploadConcurrency   int
 	hydrationWorkers    int
@@ -62,7 +64,7 @@ func validateChunkFlags(f flags) error {
 	}
 	if f.durableImpl != "walstore-chunk" {
 		if c.filer != "" || c.collection != "" || c.replication != "" || c.path != defaultChunkPath ||
-			c.captureInterval != defaultChunkCaptureInterval || c.maintenanceInterval != defaultChunkMaintenanceInterval || c.automaticGC ||
+			c.captureInterval != defaultChunkCaptureInterval || c.maintenanceInterval != defaultChunkMaintenanceInterval || c.snapshotSchedule != defaultSnapshotSchedule || c.automaticGC ||
 			c.uploadConcurrency != 8 || c.hydrationWorkers != 2 || c.hydrationQueueDepth != 64 || c.controlEndpoint || c.detachPrecopy || c.hostLimit.Directory != "" {
 			return errors.New("--chunk-* flags require --durable-impl=walstore-chunk")
 		}
@@ -114,6 +116,43 @@ const chunkRF1Reason = "chunk snapshots take the cut LSN from the local WAL, whi
 // chunkWiring is what --durable-impl=walstore-chunk dials once: the
 // provider's per-volume remotes, the catalog under the same base (VOLUME
 // entries, snapshots) and the client's closer.
+// snapshotSchedule is --chunk-snapshot-schedule: "daily:N", "weekly:N"
+// (one scheduled snapshot per period at a per-volume offset, the newest N
+// kept) or "off".
+type snapshotSchedule struct {
+	period time.Duration
+	keep   int
+}
+
+var defaultSnapshotSchedule = snapshotSchedule{period: 24 * time.Hour, keep: 7}
+
+func (s *snapshotSchedule) String() string {
+	switch s.period {
+	case 0:
+		return "off"
+	case 24 * time.Hour:
+		return fmt.Sprintf("daily:%d", s.keep)
+	case 7 * 24 * time.Hour:
+		return fmt.Sprintf("weekly:%d", s.keep)
+	}
+	return fmt.Sprintf("%s:%d", s.period, s.keep)
+}
+
+func (s *snapshotSchedule) Set(v string) error {
+	if v == "off" {
+		*s = snapshotSchedule{}
+		return nil
+	}
+	name, count, ok := strings.Cut(v, ":")
+	periods := map[string]time.Duration{"daily": 24 * time.Hour, "weekly": 7 * 24 * time.Hour}
+	keep, err := strconv.Atoi(count)
+	if !ok || periods[name] == 0 || err != nil || keep < 1 || keep > 1000 {
+		return fmt.Errorf("%q: want daily:N, weekly:N (N from 1 to 1000) or off", v)
+	}
+	*s = snapshotSchedule{period: periods[name], keep: keep}
+	return nil
+}
+
 type chunkWiring struct {
 	remoteFor   func(volumeID string) (storage.ChunkRemote, error)
 	catalog     *chunkstore.Catalog

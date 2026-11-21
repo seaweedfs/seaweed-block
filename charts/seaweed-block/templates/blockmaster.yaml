@@ -106,6 +106,7 @@ spec:
             {{- end }}
             - "--launcher-kubernetes-apply"
             - "--listen=0.0.0.0:{{ .Values.blockmaster.listenPort }}"
+            - "--insecure-external-bind"
             {{- if .Values.blockmaster.failbackRuntimeRPC }}
             - "--failback-runtime-rpc"
             {{- end }}

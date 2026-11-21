@@ -15,9 +15,9 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/engine"
 	"github.com/seaweedfs/seaweed-block/core/replication"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"github.com/seaweedfs/seaweed-block/core/rpc/link"
 	"github.com/seaweedfs/seaweed-block/core/storeident"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -259,7 +259,7 @@ func New(cfg Config) (*Host, error) {
 		lg = log.Default()
 	}
 
-	conn, err := grpc.NewClient(cfg.MasterAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := link.Dial(cfg.MasterAddr)
 	if err != nil {
 		return nil, fmt.Errorf("volume.New: dial master %q: %w", cfg.MasterAddr, err)
 	}

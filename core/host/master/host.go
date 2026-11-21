@@ -31,6 +31,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/host/bootstrap"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"github.com/seaweedfs/seaweed-block/core/rpc/link"
 	"github.com/seaweedfs/seaweed-block/core/storeident"
 	"google.golang.org/grpc"
 )
@@ -319,7 +320,7 @@ func New(cfg Config) (*Host, error) {
 			WriteTimeout: statusWriteTimeout, IdleTimeout: statusIdleTimeout}
 	}
 
-	grpcSrv := grpc.NewServer()
+	grpcSrv := link.NewServer(link.ServerConfig{})
 	svc := newServices(h)
 	control.RegisterObservationServiceServer(grpcSrv, svc)
 	control.RegisterAssignmentServiceServer(grpcSrv, svc)

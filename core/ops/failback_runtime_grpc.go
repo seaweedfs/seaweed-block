@@ -5,8 +5,8 @@ import (
 	"fmt"
 
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"github.com/seaweedfs/seaweed-block/core/rpc/link"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 type GRPCFailbackRuntime struct {
@@ -22,11 +22,15 @@ func (r *GRPCFailbackRuntime) ExecuteFailback(ctx context.Context, req FailbackR
 	if r == nil || r.Addr == "" {
 		return FailbackRuntimeResult{}, fmt.Errorf("failback runtime gRPC address is required")
 	}
-	opts := append([]grpc.DialOption(nil), r.Opts...)
-	if len(opts) == 0 {
-		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	// Injected options replace the default link (as before); none means the
+	// standard link.
+	var conn *grpc.ClientConn
+	var err error
+	if len(r.Opts) > 0 {
+		conn, err = link.DialWith(r.Addr, r.Opts...)
+	} else {
+		conn, err = link.Dial(r.Addr)
 	}
-	conn, err := grpc.NewClient(r.Addr, opts...)
 	if err != nil {
 		return FailbackRuntimeResult{}, err
 	}

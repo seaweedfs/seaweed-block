@@ -28,7 +28,7 @@ func TestChunkDetachPlainFieldDispatch(t *testing.T) {
 			t.Fatalf("ordinary request changed: %d %s plain=%d", w.Code, w.Body, c.plainCalls)
 		}
 	}
-	w := serve(t, s, http.MethodPost, "/chunk/detach", `{"volumeID":"v1","plain":true}`, "")
+	w := serve(t, s, http.MethodPost, "/chunk/detach", `{"volumeID":"v1","plain":true,"timeoutMs":60000}`, "")
 	if w.Code != 200 || c.plainCalls != 1 {
 		t.Fatalf("plain request not dispatched: %d %s plain=%d", w.Code, w.Body, c.plainCalls)
 	}
@@ -50,12 +50,12 @@ func (p *plainDetachProvider) DetachVolumePlain(ctx context.Context, id string) 
 func TestChunkDetachPlainAdapterAndBusyResponse(t *testing.T) {
 	p := &plainDetachProvider{fakeChunkProvider: &fakeChunkProvider{detach: storage.ChunkCutResult{H: 9, Head: storage.ChunkHead{Gen: 3, Epoch: 2, State: storage.ChunkHeadDetached}}, last: 9}}
 	s := chunkServer(t, NewChunkControl(p, nil), true)
-	w := serve(t, s, http.MethodPost, "/chunk/detach", `{"volumeID":"v1","plain":true}`, "")
+	w := serve(t, s, http.MethodPost, "/chunk/detach", `{"volumeID":"v1","plain":true,"timeoutMs":60000}`, "")
 	if w.Code != 200 || p.plainCalls != 1 {
 		t.Fatalf("plain adapter: %d %s calls=%d", w.Code, w.Body, p.plainCalls)
 	}
 	p.err = errors.Join(durable.ErrPlainDetachBusy, errors.New("held I/O"))
-	w = serve(t, s, http.MethodPost, "/chunk/detach", `{"volumeID":"v1","plain":true}`, "")
+	w = serve(t, s, http.MethodPost, "/chunk/detach", `{"volumeID":"v1","plain":true,"timeoutMs":60000}`, "")
 	if w.Code != 409 {
 		t.Fatalf("busy status: %d %s", w.Code, w.Body)
 	}

@@ -320,14 +320,22 @@ func (p *DurableProvider) attachChunk(ctx context.Context, volumeID string, h *v
 // startChunkLoop starts the periodic cuts of an attached layer, if configured
 // and not already running. The caller holds h.attachMu and p.mu.
 func (p *DurableProvider) startChunkLoop(volumeID string, h *volHandle, layer storage.ChunkLayer) {
-	if (p.cfg.ChunkCaptureInterval <= 0 && (p.cfg.ChunkMaintenanceInterval <= 0 || p.cfg.ChunkMaintenance == nil)) || h.chunkStop != nil {
+	snapshotsOn := p.cfg.ChunkSnapshotPeriod > 0 && p.cfg.ChunkScheduledSnapshot != nil
+	if (p.cfg.ChunkCaptureInterval <= 0 && (p.cfg.ChunkMaintenanceInterval <= 0 || p.cfg.ChunkMaintenance == nil) && !snapshotsOn) || h.chunkStop != nil {
 		return
 	}
 	loopCtx, cancel := context.WithCancel(context.Background())
 	h.chunkStop, h.chunkDone = cancel, make(chan struct{})
+	// A re-armed loop (for example after a refused detach) keeps the
+	// volume's schedule: its slots, retries and history.
+	if !snapshotsOn {
+		h.snapshots = nil
+	} else if h.snapshots == nil {
+		h.snapshots = &snapshotSlot{s: newSnapshotSchedule(volumeID, p.cfg.ChunkSnapshotPeriod, time.Now())}
+	}
 	lin := h.chunkLineage
 	current := func() bool { return p.maintenanceCurrent(volumeID, h, layer, lin) }
-	go p.chunkBackground(loopCtx, cancel, volumeID, layer, h.chunkDone, current)
+	go p.chunkBackground(loopCtx, cancel, volumeID, layer, h.chunkDone, current, h.snapshots)
 }
 
 func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h *volHandle) (storage.ChunkLayer, error) {
@@ -657,28 +665,36 @@ type cutPolicy struct {
 	interval, minSpacing, backoffMin, backoffMax time.Duration
 }
 
+// cutSchedule runs on in-process monotonic time: every time in it is a
+// time.Now() reading of this process (or derived from one), never the
+// layer's persisted LastCutNs, so wall-clock steps move nothing and a
+// restart starts a fresh schedule. The layer's CutSeq identifies the
+// latest cut: a value not seen before is a new successful cut.
 type cutSchedule struct {
-	lastSuccess time.Time // last successful cut of any kind
-	lastAuto    time.Time // start of the last automatic cut
-	failedAt    time.Time // end of the last failed automatic cut
-	retryAt     time.Time // a failed automatic cut's backoff ends here
-	backoff     time.Duration
-	firstDue    time.Time // startup phase only; never a fabricated success
+	lastSuccess   time.Time // last successful cut of any kind, as observed here
+	lastAuto      time.Time // start of the last automatic cut
+	failedAt      time.Time // end of the last failed automatic cut
+	retryAt       time.Time // a failed automatic cut's backoff ends here
+	backoff       time.Duration
+	firstDue      time.Time // startup phase only; never a fabricated success
+	seenSeq       uint64    // the layer's CutSeq last taken in
+	failedSeenSeq uint64    // the layer's CutSeq when the last automatic cut failed
 }
 
-// observe takes in a successful cut the layer reports (any trigger). A
-// success after the last failed automatic cut makes that failure's
-// backoff obsolete.
-func (s cutSchedule) observe(lastCutNs int64) cutSchedule {
-	if lastCutNs > 0 {
-		c := time.Unix(0, lastCutNs)
-		if c.After(s.lastSuccess) {
-			s.lastSuccess = c
-			s.firstDue = time.Time{}
-		}
-		if !s.failedAt.IsZero() && c.After(s.failedAt) {
-			s.backoff, s.retryAt, s.failedAt = 0, time.Time{}, time.Time{}
-		}
+// observe takes in, at now, the latest cut the layer reports (any
+// trigger): a CutSeq not seen before is a success at now. A cut other
+// than the one the last failure saw makes that failure's backoff obsolete.
+func (s cutSchedule) observe(seq uint64, now time.Time) cutSchedule {
+	if seq == 0 || seq == s.seenSeq {
+		return s
+	}
+	s.seenSeq = seq
+	if now.After(s.lastSuccess) {
+		s.lastSuccess = now
+	}
+	s.firstDue = time.Time{}
+	if !s.failedAt.IsZero() && seq != s.failedSeenSeq {
+		s.backoff, s.retryAt, s.failedAt = 0, time.Time{}, time.Time{}
 	}
 	return s
 }
@@ -703,10 +719,12 @@ func (pol cutPolicy) due(s cutSchedule, now time.Time, reconciling bool) (string
 	return "", false
 }
 
-// after records the outcome of an automatic cut started at start.
-func (pol cutPolicy) after(s cutSchedule, start, end time.Time, err error) cutSchedule {
+// after records the outcome of an automatic cut started at start, with
+// the layer's CutSeq read after it.
+func (pol cutPolicy) after(s cutSchedule, start, end time.Time, err error, seq uint64) cutSchedule {
 	s.lastAuto = start
 	if err == nil {
+		s.seenSeq = seq
 		s.firstDue = time.Time{}
 		s.backoff, s.retryAt, s.failedAt = 0, time.Time{}, time.Time{}
 		if end.After(s.lastSuccess) {
@@ -722,12 +740,14 @@ func (pol cutPolicy) after(s cutSchedule, start, end time.Time, err error) cutSc
 	default:
 		s.backoff *= 2
 	}
-	s.failedAt, s.retryAt = end, end.Add(s.backoff)
+	s.failedAt, s.retryAt, s.failedSeenSeq = end, end.Add(s.backoff), seq
 	return s
 }
 
-func initialCutSchedule(volumeID string, interval time.Duration, now time.Time, stagger bool) cutSchedule {
-	s := cutSchedule{lastSuccess: now}
+// initialCutSchedule starts a fresh schedule at now; seq is the layer's
+// CutSeq at start, so a cut already made is not taken in as new.
+func initialCutSchedule(volumeID string, interval time.Duration, now time.Time, stagger bool, seq uint64) cutSchedule {
+	s := cutSchedule{lastSuccess: now, seenSeq: seq}
 	if stagger && interval > 0 {
 		phase := hostlimit.Phase(volumeID, interval)
 		startup := hostlimit.Phase(volumeID+":startup", min(interval, 10*time.Second))
@@ -748,7 +768,7 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 		backoffMin: chunkCutBackoffMin,
 		backoffMax: chunkCutBackoffMax,
 	}
-	s := initialCutSchedule(volumeID, pol.interval, time.Now(), p.cfg.ChunkStagger)
+	s := initialCutSchedule(volumeID, pol.interval, time.Now(), p.cfg.ChunkStagger, layer.Stats().CutSeq)
 	t := time.NewTicker(chunkSchedulePoll)
 	defer t.Stop()
 	for {
@@ -761,8 +781,8 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 			return
 		}
 		ls := layer.Stats()
-		s = s.observe(ls.LastCutNs)
 		start := time.Now()
+		s = s.observe(ls.CutSeq, start)
 		reason, ok := pol.due(s, start, ls.Reconciling)
 		if !ok {
 			continue
@@ -777,7 +797,7 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 			// A cut that completed after this decision (an explicit one
 			// running meanwhile) restarted the timer: no cut now.
 			var skipped bool
-			_, skipped, err = pc.CutUnlessCutSince(cutCtx, ls.LastCutNs)
+			_, skipped, err = pc.CutUnlessCutSince(cutCtx, ls.CutSeq)
 			if trace != nil {
 				trace("cut", ls.LastCutNs, skipped)
 			}
@@ -792,7 +812,7 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 			}
 		}
 		cancel()
-		s = pol.after(s, start, time.Now(), err)
+		s = pol.after(s, start, time.Now(), err, layer.Stats().CutSeq)
 		if err != nil && !errors.Is(err, storage.ErrChunkCaptureRefused) && ctx.Err() == nil {
 			log.Printf("durable: %s chunk cut for volume=%s: %v (retry in %s)", reason, volumeID, err, s.backoff)
 		}
@@ -802,7 +822,7 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 // chunkBackground owns both workers and their cancellation. A fence is observed
 // even while either worker is waiting on a cooperative remote call. INV-MAINT-JOIN:
 // done closes only after every admitted worker has returned.
-func (p *DurableProvider) chunkBackground(ctx context.Context, cancel context.CancelFunc, volumeID string, layer storage.ChunkLayer, done chan struct{}, current func() bool) {
+func (p *DurableProvider) chunkBackground(ctx context.Context, cancel context.CancelFunc, volumeID string, layer storage.ChunkLayer, done chan struct{}, current func() bool, snapshots *snapshotSlot) {
 	defer close(done)
 	defer cancel()
 	var workers sync.WaitGroup
@@ -817,6 +837,10 @@ func (p *DurableProvider) chunkBackground(ctx context.Context, cancel context.Ca
 	if p.cfg.ChunkMaintenanceInterval > 0 && p.cfg.ChunkMaintenance != nil {
 		workers.Add(1)
 		go func() { defer workers.Done(); p.chunkMaintenanceLoop(ctx, volumeID, layer, current) }()
+	}
+	if snapshots != nil {
+		workers.Add(1)
+		go func() { defer workers.Done(); p.chunkSnapshotLoop(ctx, volumeID, layer, current, snapshots) }()
 	}
 	timer := time.NewTicker(chunkSchedulePoll)
 	defer timer.Stop()
@@ -866,35 +890,44 @@ func (p *DurableProvider) chunkMaintenanceLoop(ctx context.Context, volumeID str
 		if timeout <= 0 {
 			timeout = time.Minute
 		}
-		passCtx, cancel := context.WithTimeout(ctx, timeout)
-		// The projection has no change channel. One bounded watcher belongs to
-		// this pass, never to an individual tick; cancellation is joined below.
-		watchDone := make(chan struct{})
-		go func() {
-			defer close(watchDone)
-			tick := time.NewTicker(chunkSchedulePoll)
-			defer tick.Stop()
-			for {
-				select {
-				case <-passCtx.Done():
-					return
-				case <-tick.C:
-					if layer.Fenced() || !current() {
-						cancel()
-						return
-					}
-				}
-			}
-		}()
-		err := p.cfg.ChunkMaintenance(passCtx, volumeID)
-		cancel()
-		<-watchDone
+		err := boundedPass(ctx, layer, current, timeout, func(passCtx context.Context) error {
+			return p.cfg.ChunkMaintenance(passCtx, volumeID)
+		})
 		if err != nil && ctx.Err() == nil {
 			log.Printf("durable: maintenance volume=%s: %v", volumeID, err)
 		}
 		// Completion-relative reset coalesces all elapsed ticks; no catch-up queue.
 		timer.Reset(interval)
 	}
+}
+
+// boundedPass runs fn with a context that ends after timeout, or as soon
+// as the layer is fenced or the attachment is no longer current. The
+// projection has no change channel: one bounded watcher belongs to the
+// pass, never to an individual tick, and is joined before return.
+func boundedPass(ctx context.Context, layer storage.ChunkLayer, current func() bool, timeout time.Duration, fn func(context.Context) error) error {
+	passCtx, cancel := context.WithTimeout(ctx, timeout)
+	watchDone := make(chan struct{})
+	go func() {
+		defer close(watchDone)
+		tick := time.NewTicker(chunkSchedulePoll)
+		defer tick.Stop()
+		for {
+			select {
+			case <-passCtx.Done():
+				return
+			case <-tick.C:
+				if layer.Fenced() || !current() {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	err := fn(passCtx)
+	cancel()
+	<-watchDone
+	return err
 }
 
 func (p *DurableProvider) stopChunkLoop(h *volHandle) {
@@ -1051,7 +1084,8 @@ func (p *DurableProvider) DetachVolumeFrozen(ctx context.Context, volumeID strin
 var ErrPlainDetachBusy = errors.New("durable: plain detach requires idle frontend I/O")
 
 // DetachVolumePlain bypasses pre-copy cost admission only after atomically
-// closing an idle frontend. Publication and failure settlement are unchanged.
+// closing an idle frontend (including a closed handle). M5 PlainStop -> Quiesce uses
+// only the caller context, not the live-serving freeze timer.
 func (p *DurableProvider) DetachVolumePlain(ctx context.Context, volumeID string) (storage.ChunkCutResult, uint64, error) {
 	return p.detachVolume(ctx, volumeID, true)
 }
@@ -1109,6 +1143,10 @@ func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, pla
 			start = guestFreeze.StartedAt
 		}
 		casAtFreeze = countCAS()
+		if plain { // M5 PlainStop -> Quiesce: no live frontend, caller owns the bound.
+			settleDeadline, _ = ctx.Deadline()
+			return
+		}
 		operationStart := start
 		if guestFrozen && guestFreeze.AllowOverBudget {
 			operationStart = time.Now()
@@ -1125,7 +1163,7 @@ func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, pla
 		if timer != nil {
 			timer.Stop()
 		}
-		if !start.IsZero() {
+		if !plain && !start.IsZero() {
 			if d := time.Since(start); d > detachFreezeTarget {
 				log.Printf("durable: ALARM detach of volume=%s held guest I/O for %s (target %s, bound %s)", volumeID, d.Round(time.Millisecond), detachFreezeTarget, freeze)
 			}
@@ -1206,7 +1244,11 @@ func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, pla
 			}
 		}
 		if trace := p.testDetachTrace; trace != nil {
-			trace("cut", start.Add(freeze*3/4))
+			deadline := start.Add(freeze * 3 / 4)
+			if plain {
+				deadline, _ = cutCtx.Deadline()
+			}
+			trace("cut", deadline)
 		}
 		h.chunkDetach = true
 		notifyDetach()
@@ -1230,7 +1272,11 @@ func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, pla
 	// resumes: an earlier detach that applied, an unresolved detach CAS or a
 	// fenced layer must never resume serving. The settlement keeps the rest
 	// of the freeze budget even when the caller's context is gone.
-	sctx, scancel := context.WithDeadline(context.WithoutCancel(cutCtx), settleDeadline)
+	sctx, scancel := context.WithCancel(cutCtx)
+	if !plain { // Live detach retains its reserved settlement budget.
+		scancel()
+		sctx, scancel = context.WithDeadline(context.WithoutCancel(cutCtx), settleDeadline)
+	}
 	defer scancel()
 	if trace := p.testDetachTrace; trace != nil {
 		dl, _ := sctx.Deadline()

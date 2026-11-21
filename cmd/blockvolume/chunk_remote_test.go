@@ -163,3 +163,40 @@ func TestChunkDirtyThresholdFlagIsGone(t *testing.T) {
 		t.Fatalf("--chunk-dirty-threshold: %v; want flag provided but not defined", err)
 	}
 }
+
+// --chunk-snapshot-schedule: daily:7 by default; daily:N, weekly:N and off
+// are accepted; anything else is refused; setting it without walstore-chunk
+// is refused like the other chunk flags.
+func TestChunkSnapshotScheduleFlag(t *testing.T) {
+	base := func(extra ...string) []string {
+		return append(phase150RequiredBlockvolumeArgs(), extra...)
+	}
+	chunk := func(extra ...string) []string {
+		return base(append([]string{"--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1"}, extra...)...)
+	}
+	d, err := parseFlags(chunk())
+	if err != nil || d.chunk.snapshotSchedule != (snapshotSchedule{period: 24 * time.Hour, keep: 7}) {
+		t.Fatalf("default schedule %+v %v; want daily, keep 7", d.chunk.snapshotSchedule, err)
+	}
+	for v, want := range map[string]snapshotSchedule{
+		"daily:3":  {period: 24 * time.Hour, keep: 3},
+		"weekly:4": {period: 7 * 24 * time.Hour, keep: 4},
+		"off":      {},
+	} {
+		f, err := parseFlags(chunk("--chunk-snapshot-schedule=" + v))
+		if err != nil || f.chunk.snapshotSchedule != want {
+			t.Fatalf("%s: %+v %v; want %+v", v, f.chunk.snapshotSchedule, err, want)
+		}
+		if got := f.chunk.snapshotSchedule.String(); got != v {
+			t.Fatalf("%s prints as %q", v, got)
+		}
+	}
+	for _, v := range []string{"hourly:7", "daily", "daily:0", "daily:x", "weekly:-1", "daily:1001", ""} {
+		if _, err := parseFlags(chunk("--chunk-snapshot-schedule=" + v)); err == nil {
+			t.Fatalf("%q accepted", v)
+		}
+	}
+	if _, err := parseFlags(base("--durable-root=/tmp/sw-block", "--durable-impl=walstore", "--chunk-snapshot-schedule=weekly:4")); err == nil {
+		t.Fatal("--chunk-snapshot-schedule accepted without walstore-chunk")
+	}
+}

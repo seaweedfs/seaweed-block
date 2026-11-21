@@ -21,6 +21,7 @@ import (
 )
 
 type flags struct {
+	insecureExternalBind                  bool
 	authorityStore                        string
 	lifecycleStore                        string
 	lifecyclePlacementSeed                string
@@ -77,7 +78,8 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.lifecycleStore, "lifecycle-store", "", "optional G9D product lifecycle registration store directory (desired volumes, node inventory, placement intents); read-only with respect to assignment publication")
 	fs.StringVar(&f.lifecyclePlacementSeed, "lifecycle-placement-seed", "", "placement-only seed JSON; lifecycle volumes must already be registered (CreateVolume)")
 	fs.StringVar(&f.clusterSpec, "cluster-spec", "", "cluster spec YAML; positive size_bytes imports desired volumes before topology/placement publication")
-	fs.StringVar(&f.listen, "listen", "127.0.0.1:0", "gRPC listen address (e.g. 127.0.0.1:9180)")
+	fs.StringVar(&f.listen, "listen", "127.0.0.1:0", "gRPC listen address (e.g. 127.0.0.1:9180); non-loopback requires --insecure-external-bind")
+	fs.BoolVar(&f.insecureExternalBind, "insecure-external-bind", false, "allow the unauthenticated control listeners (--listen, --frontend-publication-runtime-listen) on non-loopback addresses")
 	fs.StringVar(&f.topology, "topology", "", "path to accepted-topology YAML (required for assignment to mint)")
 	fs.IntVar(&f.expectedSlotsPerVol, "expected-slots-per-volume", 3, "RF/expected slot count per volume; the controller rejects observation snapshots whose slot count differs (default 3, set to 2 for 2-node smoke clusters)")
 	fs.DurationVar(&f.freshnessWindow, "freshness-window", 30*time.Second, "observation freshness window before a server's heartbeat expires")
@@ -137,6 +139,14 @@ func parseFlags(args []string) (flags, error) {
 	}
 	if err := master.ValidateStatusListen(f.statusListen); err != nil {
 		return flags{}, err
+	}
+	if err := master.ValidateControlListen("listen", f.listen, f.insecureExternalBind); err != nil {
+		return flags{}, err
+	}
+	if f.frontendPublicationRuntimeHTTP {
+		if err := master.ValidateControlListen("frontend-publication-runtime-listen", f.frontendPublicationRuntimeListen, f.insecureExternalBind); err != nil {
+			return flags{}, err
+		}
 	}
 	if f.launcherExternalISCSI && f.launcherCHAPSecretName == "" {
 		return flags{}, fmt.Errorf("cannot enable --launcher-external-iscsi without --launcher-iscsi-chap-secret-name")

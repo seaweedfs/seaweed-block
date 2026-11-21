@@ -8,8 +8,7 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
 	"github.com/seaweedfs/seaweed-block/core/rpc/control"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	"github.com/seaweedfs/seaweed-block/core/rpc/link"
 )
 
 // Automatic GC stays default-off until restart-safe unknown-CAS settlement and
@@ -27,7 +26,7 @@ func newChunkMaintenance(cat *chunkstore.Catalog, blobs chunkstore.BlobDeleter, 
 		if defaultChunkGCGrace <= max(defaultChunkCutTimeout, chunkstore.DefaultOpDeadline)+defaultChunkMaintenanceTimeout {
 			return nil, closeFn, errors.New("automatic GC grace does not cover cut/copy and mark bounds")
 		}
-		conn, err := grpc.NewClient(master, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		conn, err := link.Dial(master)
 		if err != nil {
 			return nil, closeFn, err
 		}

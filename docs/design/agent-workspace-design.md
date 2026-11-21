@@ -257,7 +257,11 @@ Snapshots of the target are refused until `Independent`. The driver (`core/host/
 ### Attached-volume scheduling
 
 Periodic HEAD capture is off by default (opt-in; when set, at least 5
-minutes), and retention runs every hour. Named snapshots remain explicit.
+minutes), and retention runs every hour. Named snapshots are explicit, plus scheduled snapshots
+(`--chunk-snapshot-schedule`, default `daily:7`): one snapshot per period at a
+per-volume offset (not at a wall-clock hour), class `scheduled`, the newest N
+kept by retention; a restoring volume is skipped and counted, and a failed
+attempt is retried with backoff and visible in status (`snapshot_overdue`).
 A five-minute context covers the whole cut; completed immutable uploads survive
 an expired attempt only under matching version/HEAD generation. Automatic GC is
 opt-in until the 50/200-volume metadata/RSS qualification accepts its full-catalog
@@ -286,6 +290,17 @@ intents remain rooted after restart; elapsed TTL is not a settlement proof.
 **Host guard** (`core/host/volume/workspace_lease.go` `WorkspaceLeaseGuard`, enabled with `blockvolume --workspace-lease`; see [workspace lease](../workspace-lease.md)): frontend I/O and cuts are admitted only with a granted, unexpired lease for the exact `{volume, replica, epoch}`. Validity is anchored to the renewal request's start time, and blockmaster's `ValidForNs` already subtracts half the clock-skew bound (`core/host/master/workspace_service.go` `leaseFact`). A late reply cannot extend admission. A fenced guard never reopens. The lease is 30 s (`core/authority/authority.go`, `workspaceTTL`); the skew bound defaults to 20 s (`blockmaster --workspace-max-clock-skew`).
 
 **Master side of a renewal** (`core/authority/workspace_lease_view.go`): blockmaster answers a renewal of an established lease from memory, under a small leaf lock, with no disk write and without waiting for other authority writes. The grant is min(now + TTL, durable horizon), where the horizon is the lease expiry stored on disk; a background extension, an ordinary authority write, keeps the horizon about 1.5·TTL ahead of the last renewal that triggered it. Only the first grant of a lease is written synchronously. If extensions fall behind, grants shrink and the host fences by the horizon minus half the skew bound; a failed extension write makes the volume uncertain and refuses renewals that would issue a new or extended grant (a Revoking lease still gets its bounded drain reply).
+
+**Uncertain move outcomes** (`INV-AUTH-UNCERTAIN-001`): at a failed move's reply boundary, the publisher's per-volume persistence latch takes precedence over request, forced-admission, HEAD-read and target refusals. Such a reply is UNKNOWN with same-request recovery after reload, without another authority write. Only an ended request context preserves typed cancellation/deadline; dependency context errors with a live request are UNKNOWN. A known successful issued replay remains valid.
+
+```mermaid
+flowchart LR
+  E[Move error] --> C{Request context ended?}
+  C -->|yes| T[Typed caller error]
+  C -->|no| U{Persistence uncertain at reply?}
+  U -->|yes| X[UNKNOWN, never definite admission refusal]
+  U -->|no| R[Ordinary error classification]
+```
 
 **CLEAN move:** Detach publishes the final cut with `State = detached` in one CAS �' revoke �' the host drains frontend, replication and provider and acknowledges the stored detached HEAD generation �' blockmaster checks the detached HEAD and the matching acknowledgement �' new epoch �' the new host claims HEAD.
 

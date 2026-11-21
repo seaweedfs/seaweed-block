@@ -37,21 +37,21 @@ func TestCutPolicy_OnlyTheTimerTriggers(t *testing.T) {
 func TestCutPolicy_AnySuccessfulCutResetsTheTimer(t *testing.T) {
 	pol := testPolicy()
 	s := cutSchedule{lastSuccess: t0}
-	// An explicit Cut, Snapshot or Detach succeeded at 20 s: the layer
-	// reports it and the timer restarts from there.
-	s = s.observe(at(20 * time.Second).UnixNano())
+	// An explicit Cut, Snapshot or Detach succeeded; the loop sees the
+	// layer's new LastCutNs at 20 s and the timer restarts from there.
+	s = s.observe(101, at(20*time.Second))
 	if r, ok := pol.dueNR(s, at(45*time.Second)); ok {
 		t.Fatalf("due (%s) 25 s after an explicit cut", r)
 	}
 	if _, ok := pol.dueNR(s, at(50*time.Second)); !ok {
 		t.Fatal("not due 30 s after the explicit cut")
 	}
-	// An older report never moves the timer back.
-	if got := s.observe(at(5 * time.Second).UnixNano()); !got.lastSuccess.Equal(at(20 * time.Second)) {
-		t.Fatalf("older report moved the timer to %v", got.lastSuccess)
+	// The same report seen again does not move the timer.
+	if got := s.observe(101, at(40*time.Second)); !got.lastSuccess.Equal(at(20 * time.Second)) {
+		t.Fatalf("a repeated report moved the timer to %v", got.lastSuccess)
 	}
 	// An automatic success restarts it too.
-	s = pol.after(s, at(50*time.Second), at(50*time.Second+200*time.Millisecond), nil)
+	s = pol.after(s, at(50*time.Second), at(50*time.Second+200*time.Millisecond), nil, 102)
 	if _, ok := pol.dueNR(s, at(79*time.Second)); ok {
 		t.Fatal("due less than 30 s after an automatic success")
 	}
@@ -61,7 +61,7 @@ func TestCutPolicy_MinimumSpacingBetweenAutomaticCuts(t *testing.T) {
 	pol := testPolicy()
 	pol.interval = 500 * time.Millisecond
 	s := cutSchedule{lastSuccess: t0}
-	s = pol.after(s, at(10*time.Second), at(10*time.Second+50*time.Millisecond), nil)
+	s = pol.after(s, at(10*time.Second), at(10*time.Second+50*time.Millisecond), nil, 101)
 	if r, ok := pol.dueNR(s, at(10*time.Second+900*time.Millisecond)); ok {
 		t.Fatalf("automatic cut again after 0.9 s (%s)", r)
 	}
@@ -77,7 +77,7 @@ func TestCutPolicy_FailureBacksOffAndResetsNothing(t *testing.T) {
 	now := at(30 * time.Second)
 	var waits []time.Duration
 	for i := 0; i < 7; i++ {
-		s = pol.after(s, now, now, fail)
+		s = pol.after(s, now, now, fail, 0)
 		waits = append(waits, s.backoff)
 		if _, ok := pol.dueNR(s, now.Add(s.backoff-time.Millisecond)); ok {
 			t.Fatalf("retry %d due before its backoff %s", i, s.backoff)
@@ -96,7 +96,7 @@ func TestCutPolicy_FailureBacksOffAndResetsNothing(t *testing.T) {
 	if !s.lastSuccess.Equal(t0) {
 		t.Fatalf("a failure moved the last success to %v", s.lastSuccess)
 	}
-	s = pol.after(s, now, now, nil)
+	s = pol.after(s, now, now, nil, 101)
 	if s.backoff != 0 || !s.retryAt.IsZero() || !s.lastSuccess.Equal(now) {
 		t.Fatalf("success did not clear the backoff: %+v", s)
 	}
@@ -112,12 +112,12 @@ func TestCutPolicy_ExplicitSuccessClearsFailedAutoBackoff(t *testing.T) {
 	fail := errors.New("remote unavailable")
 	now := at(time.Second)
 	for s.backoff < pol.backoffMax {
-		s = pol.after(s, now, now, fail)
+		s = pol.after(s, now, now, fail, 100)
 		now = now.Add(time.Millisecond)
 	}
 	retryAt := s.retryAt
 	explicit := now.Add(2 * time.Second) // well before retryAt (30 s away)
-	s = s.observe(explicit.UnixNano())
+	s = s.observe(200, explicit)
 	next := explicit.Add(pol.interval)
 	if !next.Before(retryAt) {
 		t.Fatalf("test setup: next timer cut %v not before the old retry %v", next, retryAt)
@@ -128,12 +128,13 @@ func TestCutPolicy_ExplicitSuccessClearsFailedAutoBackoff(t *testing.T) {
 	if r, ok := pol.dueNR(s, next); !ok || r != "periodic" {
 		t.Fatalf("one interval after the explicit success: %q %v; want periodic (backoff %s, retry at %v)", r, ok, s.backoff, s.retryAt)
 	}
-	// A success older than the failure leaves the backoff in force.
-	s2 := cutSchedule{lastSuccess: t0}
-	s2 = pol.after(s2, at(10*time.Second), at(10*time.Second), fail)
-	s2 = s2.observe(at(5 * time.Second).UnixNano())
+	// The cut the failure already saw (it completed before the failure)
+	// leaves the backoff in force.
+	s2 := cutSchedule{lastSuccess: t0, seenSeq: 90}
+	s2 = pol.after(s2, at(10*time.Second), at(10*time.Second), fail, 100)
+	s2 = s2.observe(100, at(11*time.Second))
 	if s2.retryAt.IsZero() {
-		t.Fatal("a success older than the failure cleared its backoff")
+		t.Fatal("a success the failure already saw cleared its backoff")
 	}
 }
 
@@ -159,7 +160,7 @@ func TestCutPolicy_NothingDueWhileReconciling(t *testing.T) {
 
 func TestCutPolicy_StaggerPreservesExplicitTimerReset(t *testing.T) {
 	pol := testPolicy()
-	s := initialCutSchedule("v1", pol.interval, t0, true)
+	s := initialCutSchedule("v1", pol.interval, t0, true, 0)
 	if !s.lastSuccess.Equal(t0) || !s.firstDue.After(t0) || s.firstDue.After(t0.Add(pol.interval)) {
 		t.Fatal("phase fabricated success or exceeded first period", s)
 	}
@@ -170,7 +171,7 @@ func TestCutPolicy_StaggerPreservesExplicitTimerReset(t *testing.T) {
 		t.Fatal("first phased cut not due")
 	}
 	explicit := t0.Add(s.firstDue.Sub(t0) / 2)
-	s = s.observe(explicit.UnixNano())
+	s = s.observe(5, explicit)
 	if !s.lastSuccess.Equal(explicit) || !s.firstDue.IsZero() {
 		t.Fatal("stagger hid explicit success", s)
 	}
@@ -179,5 +180,29 @@ func TestCutPolicy_StaggerPreservesExplicitTimerReset(t *testing.T) {
 	}
 	if _, ok := pol.dueNR(s, explicit.Add(pol.interval)); !ok {
 		t.Fatal("explicit success did not restart timer")
+	}
+}
+
+// The timer runs on this process's monotonic time and keys on the layer's
+// CutSeq, never on a cut's wall stamp: a cut seen for the first time is a
+// success at the moment it is observed, so the next timer cut is one
+// interval after the observation; at start the layer's existing CutSeq is
+// not new, so the startup phase stands.
+func TestCutPolicy_TimerRunsOnObservationTime(t *testing.T) {
+	pol := testPolicy()
+	seen := at(20 * time.Second)
+	s := cutSchedule{lastSuccess: t0}.observe(1, seen)
+	if !s.lastSuccess.Equal(seen) {
+		t.Fatalf("last success %v; want the observation time %v", s.lastSuccess, seen)
+	}
+	if _, ok := pol.dueNR(s, seen.Add(pol.interval-time.Nanosecond)); ok {
+		t.Fatal("due before one interval after the observation")
+	}
+	if _, ok := pol.dueNR(s, seen.Add(pol.interval)); !ok {
+		t.Fatal("not due one interval after the observation")
+	}
+	restart := initialCutSchedule("v1", pol.interval, t0, true, 7)
+	if got := restart.observe(7, at(time.Second)); got.firstDue.IsZero() || !got.lastSuccess.Equal(t0) {
+		t.Fatalf("the cut existing at start was taken in as new: %+v", got)
 	}
 }
