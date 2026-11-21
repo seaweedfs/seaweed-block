@@ -12,7 +12,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
-// G.GONE.SEALED: an idle plain detach seals under the caller's deadline,
+// M5 PlainStop -> Quiesce: an idle plain detach seals under the caller's deadline,
 // including after the frontend handle closes; no live-serving timer applies.
 func TestOfflineSealUsesCallerDeadline(t *testing.T) {
 	for _, closed := range []bool{false, true} {

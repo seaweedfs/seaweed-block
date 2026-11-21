@@ -1049,7 +1049,7 @@ func (p *DurableProvider) DetachVolumeFrozen(ctx context.Context, volumeID strin
 var ErrPlainDetachBusy = errors.New("durable: plain detach requires idle frontend I/O")
 
 // DetachVolumePlain bypasses pre-copy cost admission only after atomically
-// closing an idle frontend (including a closed handle). G.GONE.SEALED uses
+// closing an idle frontend (including a closed handle). M5 PlainStop -> Quiesce uses
 // only the caller context, not the live-serving freeze timer.
 func (p *DurableProvider) DetachVolumePlain(ctx context.Context, volumeID string) (storage.ChunkCutResult, uint64, error) {
 	return p.detachVolume(ctx, volumeID, true)
@@ -1108,7 +1108,7 @@ func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, pla
 			start = guestFreeze.StartedAt
 		}
 		casAtFreeze = countCAS()
-		if plain { // G.GONE.SEALED: no live frontend, caller owns the bound.
+		if plain { // M5 PlainStop -> Quiesce: no live frontend, caller owns the bound.
 			settleDeadline, _ = ctx.Deadline()
 			return
 		}

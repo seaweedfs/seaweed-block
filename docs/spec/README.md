@@ -528,3 +528,4 @@ empty (TLC 2.19 with the tools hash above). `PlainDetach_no_idle.cfg` violates
 model. Caller deadline and cancellation are witnessed natively by
 `TestOfflineSealUsesCallerDeadline`, `TestOfflineSealCallerCancelCanRetry` and
 `TestChunkPlainDetachUsesCallerDeadline`; live-detach bounds retain their tests.
+The HTTP plain caller must supply positive timeoutMs; `TestChunkPlainDetachRequiresExplicitBound` witnesses rejection before provider dispatch.
