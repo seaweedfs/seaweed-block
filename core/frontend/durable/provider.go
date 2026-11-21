@@ -172,6 +172,13 @@ type ProviderConfig struct {
 	// passed since the volume's last successful cut (of any kind). Zero
 	// disables the timer.
 	ChunkCaptureInterval time.Duration
+	// ChunkCutTimeout bounds a cut as a whole; zero uses five minutes.
+	ChunkCutTimeout time.Duration
+	// Maintenance runs serially for an attached healthy volume. Zero interval disables
+	// it. Callback ownership ends only after cancellation and worker settlement.
+	ChunkMaintenanceInterval time.Duration
+	ChunkMaintenanceTimeout  time.Duration
+	ChunkMaintenance         func(context.Context, string) error
 	// DetachFreezeTimeout bounds how long a failing DetachVolume keeps guest
 	// I/O stopped before it resumes or settles: the drain and final cut get
 	// three quarters of it, the settlement of a failed cut the rest (the
@@ -192,13 +199,16 @@ type ProviderConfig struct {
 	// call back into the provider.
 	OnChunkDetach        func(volumeID string) uint64
 	OnChunkDetachResumed func(volumeID string, attempt uint64)
-	// ChunkDirtyThreshold is the number of candidate chunks above which
-	// a cut pre-copies (stages) chunks before its barrier, in rounds of
-	// this size; copy-before-write copies the rest outside the barrier.
-	// It never triggers a cut: the remote holds snapshots, and cuts are
-	// published only by CaptureVolume, MakeVolumeRemoteDurable
-	// (snapshot, detach) and the timer. Zero: no pre-copy.
-	ChunkDirtyThreshold int
+	// ChunkOnPublishSettled, optional, is called once per confirmed
+	// publication of a chunk volume's HEAD, with the HEAD before and after it
+	// (storage.ChunkLayerConfig.OnPublishSettled): serialized, in publication
+	// order, outside the capture lock, by the volume's one registered drainer
+	// (whichever publishing caller is draining; a publisher may return before
+	// its own report is delivered). ctx ends when the volume's layer closes;
+	// after that no report is dequeued, though one already dequeued may still
+	// be delivered. It must return without blocking and without remote calls:
+	// enqueue work to your own worker (it is a guest-visible wait on detach).
+	ChunkOnPublishSettled func(ctx context.Context, volumeID string, prev, next storage.ChunkHead)
 	// ChunkUploadConcurrency bounds remote uploads; zero defaults to 8.
 	ChunkUploadConcurrency int
 	// ChunkPayloadMemoryBudget bounds one volume's cut payloads; zero uses the storage default.
@@ -266,9 +276,10 @@ type volHandle struct {
 	// wait, 0 if none: a recovered volume whose layer waits for master
 	// authority. A wait only acts while its generation is still the
 	// latest recovery's.
-	recoverGen uint64
-	waitGen    uint64
-	chunk      storage.ChunkLayer // after RecoverVolume
+	recoverGen   uint64
+	waitGen      uint64
+	chunk        storage.ChunkLayer // after RecoverVolume
+	chunkLineage chunkLineage       // immutable authority captured by this attachment
 	// Private until the owner commit succeeds; retained for attach retry.
 	chunkPending storage.ChunkLayer
 	// chunkDetach is set (under attachMu) when DetachVolume starts and
@@ -283,23 +294,23 @@ type volHandle struct {
 // handle. It intentionally exposes lineage and readiness facts without giving
 // callers a control surface.
 type VolumeStatus struct {
-	VolumeID              string
-	Path                  string
-	Impl                  string
-	ReplicaID             string
-	Epoch                 uint64
-	EndpointVersion       uint64
-	Latched               bool
-	Operational           bool
-	FrontierKnown         bool
-	DurableLSN            uint64
-	RetainedLSN           uint64
-	HeadLSN               uint64
-	Evidence              string
-	Closed                bool
-	WriteProfile          WriteProfileStatus
-	DataSync              *storage.DataSyncStatus              `json:",omitempty"`
-	CheckpointPersistence *storage.CheckpointPersistenceStatus `json:",omitempty"`
+	VolumeID              string                               // the volume
+	Path                  string                               // its store path under --durable-root
+	Impl                  string                               // the durable implementation (walstore, smartwal, walstore-chunk, ...)
+	ReplicaID             string                               // the replica this store holds
+	Epoch                 uint64                               // the epoch the store is latched to; 0 before an assignment
+	EndpointVersion       uint64                               // the endpoint version it is latched to
+	Latched               bool                                 // an assignment latched the store (epoch and endpoint version set)
+	Operational           bool                                 // the backend admits I/O now
+	FrontierKnown         bool                                 // DurableLSN, RetainedLSN and HeadLSN are the store's current boundaries
+	DurableLSN            uint64                               // R: the newest LSN made durable
+	RetainedLSN           uint64                               // S: the oldest LSN the WAL still retains
+	HeadLSN               uint64                               // H: the newest LSN written
+	Evidence              string                               // why the backend is or is not operational
+	Closed                bool                                 // the backend was closed
+	WriteProfile          WriteProfileStatus                   // write-path counters since start
+	DataSync              *storage.DataSyncStatus              `json:",omitempty"` // data-file sync state, where the store has one
+	CheckpointPersistence *storage.CheckpointPersistenceStatus `json:",omitempty"` // checkpoint persistence state, where the store has one
 	// Chunk is the chunk layer's state and cut counters; walstore-chunk
 	// volumes only.
 	Chunk *ChunkStatus
@@ -314,12 +325,12 @@ type VolumeStatus struct {
 // AwaitingAuthority: recovered, the layer waits for master authority to
 // attach. Stats is zero until the layer is attached.
 type ChunkStatus struct {
-	Attached          bool
-	AwaitingAuthority bool
-	Fenced            bool
-	RemoteLSN         uint64
-	Stats             storage.ChunkLayerStats
-	HostBudget        any `json:",omitempty"`
+	Attached          bool                    // the chunk layer is attached to the remote
+	AwaitingAuthority bool                    // recovered; the layer waits for master authority to attach
+	Fenced            bool                    // a newer holder fenced this layer: it publishes nothing
+	RemoteLSN         uint64                  // the LSN of the remote HEAD (what the remote holds durably)
+	Stats             storage.ChunkLayerStats // the layer's cut counters; zero until attached
+	HostBudget        any                     `json:",omitempty"` // the host background-cut budget state, with --host-limit-dir
 }
 
 // NewDurableProvider constructs a provider. view is the ONLY
@@ -335,6 +346,12 @@ func NewDurableProvider(cfg ProviderConfig, view frontend.ProjectionView) (*Dura
 	}
 	if cfg.Impl == ImplWALStoreChunk && cfg.ChunkRemoteFor == nil {
 		return nil, fmt.Errorf("durable: impl %q requires ProviderConfig.ChunkRemoteFor", ImplWALStoreChunk)
+	}
+	if cfg.ChunkCaptureInterval < 0 || cfg.ChunkCutTimeout < 0 || cfg.ChunkMaintenanceInterval < 0 || cfg.ChunkMaintenanceTimeout < 0 {
+		return nil, fmt.Errorf("durable: chunk schedule durations must not be negative")
+	}
+	if cfg.ChunkMaintenanceInterval > 0 && cfg.ChunkMaintenance == nil {
+		return nil, fmt.Errorf("durable: chunk maintenance interval requires its callback")
 	}
 	if cfg.ChunkBlocks == 0 {
 		cfg.ChunkBlocks = defaultChunkBlocks

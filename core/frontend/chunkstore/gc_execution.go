@@ -25,9 +25,11 @@ type savedGCCandidate struct {
 	Digest  string `json:"digest"`
 }
 type savedGCMark struct {
+	Scope        string                      `json:"scope,omitempty"`
 	Format       int                         `json:"format"`
 	Base         string                      `json:"base"`
 	GraceNs      int64                       `json:"grace_ns"`
+	ClockSkewNs  int64                       `json:"clock_skew_ns"`
 	TTLNs        int64                       `json:"ttl_ns"`
 	OpDeadlineNs int64                       `json:"op_deadline_ns"`
 	Ready        bool                        `json:"ready"`
@@ -53,6 +55,19 @@ type GCExecution struct {
 // and identify uncertain stages, rather than asserting remote absence.
 // The catalog namespace is the scope; permanent tombstones are untouched.
 func (c *Catalog) ExecuteGC(ctx context.Context, blobs BlobDeleter, cfg GCConfig, apply bool) (out GCExecution, err error) {
+	return c.executeGC(ctx, blobs, cfg, apply, "")
+}
+
+// ExecuteVolumeGC reclaims only volumeID's objects while tracing every volume's
+// roots. Its persisted two-mark coverage never aliases namespace-wide coverage.
+func (c *Catalog) ExecuteVolumeGC(ctx context.Context, volumeID string, blobs BlobDeleter, cfg GCConfig, apply bool) (GCExecution, error) {
+	if err := CheckVolumeID(volumeID); err != nil {
+		return GCExecution{GCResult: GCResult{UnknownUnbound: true}}, err
+	}
+	return c.executeGC(ctx, blobs, cfg, apply, volumeID)
+}
+
+func (c *Catalog) executeGC(ctx context.Context, blobs BlobDeleter, cfg GCConfig, apply bool, scope string) (out GCExecution, err error) {
 	// Pre-binding needles remain unenumerable even if admission/readback fails.
 	out.UnknownUnbound = true
 	out.DryRun = !apply
@@ -62,11 +77,12 @@ func (c *Catalog) ExecuteGC(ctx context.Context, blobs BlobDeleter, cfg GCConfig
 	if err != nil {
 		return out, err
 	}
+	g.scope = scope
 	mark, previous, err := g.readMark(ctx)
 	if err != nil {
 		return out, err
 	}
-	if mark != nil && mark.Ready && mark.GraceNs == int64(cfg.Grace) && mark.TTLNs == int64(cfg.IntentTTL) && mark.OpDeadlineNs == int64(c.deadline()) {
+	if mark != nil && mark.Ready && mark.GraceNs == int64(cfg.Grace) && mark.TTLNs == int64(g.cfg.IntentTTL) && mark.ClockSkewNs == int64(g.cfg.ClockSkew) && mark.OpDeadlineNs == int64(c.deadline()) {
 		for p, candidate := range mark.Candidates {
 			raw, _ := hex.DecodeString(candidate.Digest)
 			var digest [32]byte
@@ -105,11 +121,17 @@ func (c *Catalog) ExecuteGC(ctx context.Context, blobs BlobDeleter, cfg GCConfig
 	}
 	out.MarkOutcome = "complete"
 	out.MarkSaved = true
+	if len(out.FailedDeletes) != 0 {
+		// The mark completed and is reusable even though these tombstoned
+		// objects remain. Report partial failure after persisting coverage,
+		// so CLI/maintenance callers cannot mistake it for full reclamation.
+		return out, fmt.Errorf("%w: %d objects retained; complete GC mark saved", ErrBlobDeleteRejected, len(out.FailedDeletes))
+	}
 	return out, nil
 }
 
 func (g *Collector) mark(ready bool) savedGCMark {
-	m := savedGCMark{Format: 1, Base: g.cat.base, GraceNs: int64(g.cfg.Grace), TTLNs: int64(g.cfg.IntentTTL), OpDeadlineNs: int64(g.cat.deadline()), Ready: ready, Candidates: map[string]savedGCCandidate{}}
+	m := savedGCMark{Format: 1, Scope: g.scope, Base: g.cat.base, GraceNs: int64(g.cfg.Grace), TTLNs: int64(g.cfg.IntentTTL), ClockSkewNs: int64(g.cfg.ClockSkew), OpDeadlineNs: int64(g.cat.deadline()), Ready: ready, Candidates: map[string]savedGCCandidate{}}
 	if ready {
 		m.LastNs = g.last.UnixNano()
 		for p, c := range g.candidates {
@@ -119,8 +141,15 @@ func (g *Collector) mark(ready bool) savedGCMark {
 	return m
 }
 
+func (g *Collector) markDir() string {
+	if g.scope != "" {
+		return path.Join(g.cat.base, g.scope)
+	}
+	return g.cat.base
+}
+
 func (g *Collector) readMark(ctx context.Context) (*savedGCMark, string, error) {
-	e, err := g.cat.f.LookupEntry(ctx, g.cat.base, gcMarkName)
+	e, err := g.cat.f.LookupEntry(ctx, g.markDir(), gcMarkName)
 	if errors.Is(err, ErrNotFound) {
 		return nil, "", nil
 	}
@@ -141,19 +170,24 @@ func (g *Collector) readMark(ctx context.Context) (*savedGCMark, string, error) 
 	if err = d.Decode(&trailing); err != io.EOF {
 		return nil, "", errors.New("chunkstore: trailing GC mark content")
 	}
-	if m.Format != 1 || m.Base != g.cat.base || m.GraceNs <= 0 || m.TTLNs <= 0 || m.OpDeadlineNs <= 0 {
+	if m.Format != 1 || m.Scope != g.scope || m.Base != g.cat.base || m.GraceNs <= 0 || m.TTLNs <= 0 || m.OpDeadlineNs <= 0 || m.ClockSkewNs < 0 {
 		return nil, "", errors.New("chunkstore: incompatible GC mark")
 	}
 	if m.Ready {
 		now := g.cfg.Now().UnixNano()
-		if m.LastNs <= 0 || m.LastNs > now {
-			return nil, "", errors.New("chunkstore: invalid/future GC mark time")
+		if m.LastNs <= 0 {
+			return nil, "", errors.New("chunkstore: invalid GC mark time")
 		}
 		for p, c := range m.Candidates {
 			digest, err := hex.DecodeString(c.Digest)
-			if err != nil || len(digest) != 32 || c.SinceNs <= 0 || c.SinceNs > m.LastNs || path.Clean(p) != p || !strings.HasPrefix(p, g.cat.base+"/") || !strings.Contains(p, "/"+keysDir+"/") {
+			if err != nil || len(digest) != 32 || c.SinceNs <= 0 || c.SinceNs > m.LastNs || path.Clean(p) != p || !strings.HasPrefix(p, g.markDir()+"/") || !strings.Contains(p, "/"+keysDir+"/") {
 				return nil, "", errors.New("chunkstore: invalid GC candidate state")
 			}
+		}
+		if m.LastNs > now {
+			// A valid mark from a faster clock cannot supply elapsed coverage.
+			// Keep its token for the conditional replacement, but start afresh.
+			m.Ready, m.LastNs, m.Candidates = false, 0, nil
 		}
 	} else if m.LastNs != 0 || len(m.Candidates) != 0 {
 		return nil, "", errors.New("chunkstore: incomplete GC mark carries coverage")
@@ -176,9 +210,9 @@ func (g *Collector) writeMark(ctx context.Context, m savedGCMark, expected strin
 	now := g.cfg.Now().Unix()
 	e := &filerpb.Entry{Name: gcMarkName, Attributes: &filerpb.FuseAttributes{FileSize: uint64(len(body)), Crtime: now, Mtime: now, FileMode: 0600}, Content: body, Extended: map[string][]byte{extKind: []byte(gcMarkKind), gcToken: []byte(token)}}
 	if expected == "" {
-		err = g.cat.f.CreateEntry(ctx, g.cat.base, e, true)
+		err = g.cat.f.CreateEntry(ctx, g.markDir(), e, true)
 	} else {
-		err = g.cat.f.UpdateEntry(ctx, g.cat.base, e, map[string][]byte{extKind: []byte(gcMarkKind), gcToken: []byte(expected)})
+		err = g.cat.f.UpdateEntry(ctx, g.markDir(), e, map[string][]byte{extKind: []byte(gcMarkKind), gcToken: []byte(expected)})
 	}
 	if err != nil {
 		return "", fmt.Errorf("chunkstore: GC watermark changed or unavailable: %w", err)

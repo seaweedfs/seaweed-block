@@ -93,7 +93,7 @@ type ChunkCutStatsBody struct {
 	StagedChunks       int    `json:"stagedChunks"`
 	StagedChunksUsed   int    `json:"stagedChunksUsed"`
 	BarrierCopyChunks  int    `json:"barrierCopyChunks"`
-	BarrierOverBound   bool   `json:"barrierOverBound"`
+	BarrierOverBound   bool   `json:"barrierOverBound"` // always false in production: its bound is set only by legacy test fixtures
 }
 
 func cutStatsBody(s storage.ChunkCutStats) ChunkCutStatsBody {
@@ -174,7 +174,14 @@ type snapshotBody struct {
 	Replayed      bool              `json:"replayed"`
 }
 
+type chunkFrozenRefusalBody struct {
+	storage.FrozenBudget
+	RemainingFreeze    time.Duration `json:"remainingFreezeNs"`
+	GuestFreezeElapsed time.Duration `json:"guestFreezeElapsedNs"`
+}
+
 type chunkErrorBody struct {
+	*chunkFrozenRefusalBody
 	Code      string `json:"code"`
 	Message   string `json:"message"`
 	Retryable bool   `json:"retryable"`
@@ -198,9 +205,11 @@ const (
 	codeLSNBehind          = "lsn_behind"
 	codeInternal           = "internal"
 	codeBadRequest         = "bad_request"
-	codeMethodNotAllowed   = "method_not_allowed"
-	codeForbidden          = "forbidden"
-	codeNotFound           = "not_found"
+	// Only freeze-option validation before provider admission emits this code.
+	codeInvalidFreezeBudget = "invalid_freeze_budget"
+	codeMethodNotAllowed    = "method_not_allowed"
+	codeForbidden           = "forbidden"
+	codeNotFound            = "not_found"
 )
 
 const chunkBodyLimit = 64 << 10
@@ -229,6 +238,7 @@ func (s *StatusServer) chunkMux() http.Handler {
 	mux.HandleFunc("/chunk/snapshots", s.handleChunkSnapshots)
 	mux.HandleFunc("/chunk/snapshot/delete", s.handleChunkSnapshotDelete)
 	mux.HandleFunc("/chunk/detach", s.handleChunkDetach)
+	mux.HandleFunc("/chunk/restore", s.handleChunkRestore)
 	// Any other /chunk path: a typed JSON 404, like every other /chunk
 	// error, not net/http's plain-text page.
 	mux.HandleFunc("/chunk/", func(w http.ResponseWriter, r *http.Request) {
@@ -255,7 +265,14 @@ func writeChunkFailure(w http.ResponseWriter, err error) {
 	if errors.As(err, &ce) {
 		msg = ce.Detail() // the code is in its own field
 	}
-	writeChunkJSON(w, status, chunkErrorBody{Code: code, Message: msg, Retryable: retryable})
+	body := chunkErrorBody{Code: code, Message: msg, Retryable: retryable}
+	var refusal *storage.FrozenRefusal
+	// INV-WS-FREEZE-ACCOUNTING-001: transport observation, never a second forecast.
+	if code == "frozen_tail_too_large" && errors.As(err, &refusal) {
+		r := refusal.Report
+		body.chunkFrozenRefusalBody = &chunkFrozenRefusalBody{FrozenBudget: r.FrozenBudget, RemainingFreeze: r.RemainingFreeze, GuestFreezeElapsed: r.GuestFreezeElapsed}
+	}
+	writeChunkJSON(w, status, body)
 }
 
 // chunkErrorCode maps an operation's error to (HTTP status, code,
@@ -308,7 +325,7 @@ func chunkErrorCode(err error) (int, string, bool) {
 	case errors.Is(err, errFrozenDetachUnsupported):
 		return http.StatusConflict, "frozen_detach_unsupported", false
 	case errors.Is(err, storage.ErrInvalidFreezeBudget):
-		return http.StatusBadRequest, "bad_request", false
+		return http.StatusBadRequest, codeInvalidFreezeBudget, false
 	case errors.Is(err, storage.ErrFrozenTailTooLarge):
 		return http.StatusConflict, "frozen_tail_too_large", true
 	// A local window abort cancels its uploads; that cancellation is not
@@ -532,7 +549,7 @@ func (s *StatusServer) handleChunkDetach(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if (req.Frozen && (req.Plain || req.FreezeStartedAtNs <= 0 || time.Unix(0, req.FreezeStartedAtNs).After(time.Now()))) || (!req.Frozen && (req.FreezeStartedAtNs != 0 || req.AllowOverBudget)) {
-		writeChunkErr(w, http.StatusBadRequest, "bad_request", false, "frozen requires a non-future freezeStartedAtNs and cannot combine with plain; allowOverBudget requires frozen")
+		writeChunkErr(w, http.StatusBadRequest, codeInvalidFreezeBudget, false, "frozen requires a non-future freezeStartedAtNs and cannot combine with plain; allowOverBudget requires frozen")
 		return
 	}
 	ctl := s.chunkTarget(w, req.VolumeID)
@@ -587,8 +604,9 @@ type ChunkProvider interface {
 var errFrozenDetachUnsupported = errors.New("frozen detach unsupported by provider")
 
 type chunkControl struct {
-	p   ChunkProvider
-	cat *chunkstore.Catalog
+	p        ChunkProvider
+	cat      *chunkstore.Catalog
+	restores restoreRuns
 }
 
 // NewChunkControl serves the routes from a durable provider (cut, detach)
@@ -620,6 +638,14 @@ func (c *chunkControl) Snapshot(ctx context.Context, volumeID string, req ChunkS
 		Consistency: req.Consistency, ExpiresAtNs: req.ExpiresAtNs, CreatedBy: "blockvolume", Class: req.Class}
 	if info, replayed, err := c.cat.SnapshotReplay(ctx, volumeID, sreq); err != nil || replayed {
 		return info, err
+	}
+	// The share begins before the cut that produces the sealed HEAD.
+	if g := c.cat.ShareGuard(); g != nil {
+		token, err := g.Begin(ctx, volumeID)
+		if err != nil {
+			return chunkstore.SnapshotInfo{}, err
+		}
+		sreq.ShareToken = token
 	}
 	// A named seal is urgent even without a minimum LSN.
 	r, err := c.p.CutVolume(hostlimit.WithClass(ctx, hostlimit.Urgent), volumeID, 0)

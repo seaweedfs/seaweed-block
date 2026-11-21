@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// Plan row 10a controls (DESIGN r17.4 section 7; owner claude03): the gated
+// Install-log controls: the gated
 // logical Sync and the receiver-only install-log ack.
 
 // While installing, Sync returns exactly (0, ErrBaseInstalling) and writes
@@ -91,7 +91,7 @@ func TestInstallLogV3IsModeAAndSurvivesACrash(t *testing.T) {
 	}
 }
 
-// codex01 row 10a P1 (the #172 ack boundary): an append of the same install
+// The #172 ack boundary: an append of the same install
 // that fails and latches the store after SyncInstallLog's publication and
 // before its ack refuses the ack: no H, no volatile acknowledged frontier.
 // The held hook runs that append with a failing pwrite (the real latch). Mutant: no

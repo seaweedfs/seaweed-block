@@ -409,7 +409,7 @@ func TestWALStoreV3RefusesPathsOfLaterRows(t *testing.T) {
 	}
 }
 
-// codex01 row 5 P1-1: a batch's acknowledgement rechecks the store fault
+// A batch's acknowledgement rechecks the store fault
 // under the store lock. Schedule, in both modes: batch A's slot write is
 // parked (A holds descMu); B's Write, already past capacity admission,
 // takes s.mu exclusively and waits on descMu in the writer's snapshot;
@@ -468,7 +468,7 @@ func TestWALStoreV3SyncRechecksTheFaultAtTheAckBoundary(t *testing.T) {
 	}
 }
 
-// codex01 row 5 P2: a history ending at the last representable cursor
+// A history ending at the last representable cursor
 // recovers; only further appends are refused.
 func TestWALStoreV3RecoversAHistoryEndingAtTheLastRepresentableCursor(t *testing.T) {
 	const recSize = uint64(walEntryHeaderSizeV3 + v3TestBlock)
@@ -496,7 +496,7 @@ func TestWALStoreV3RecoversAHistoryEndingAtTheLastRepresentableCursor(t *testing
 	}
 }
 
-// codex01 row 5 P2 (SetWMode evidence): a held mode-C batch completes and
+// A held mode-C batch completes and
 // acknowledges under C before SetWMode(A) publishes the new mode.
 func TestWALStoreV3SetWModeWaitsForAHeldBatch(t *testing.T) {
 	s, _ := newStoreV3(t, WModeLagged)
@@ -629,7 +629,7 @@ func recvErrV3(t *testing.T, ch <-chan error, what string) error {
 	}
 }
 
-// codex01 5b P1: a SAME-instance recovery that drops mode C's newest batch
+// A SAME-instance recovery that drops mode C's newest batch
 // resets the acknowledged frontier to R, so a later refresh cannot publish
 // a W the WAL no longer holds and the next Recover does not report a false
 // corruption. Fresh-open tests mask this (they start from the slot W).
@@ -674,7 +674,7 @@ func TestWALStoreV3SameOpenRecoverResetsTheAcknowledgedFrontier(t *testing.T) {
 	}
 }
 
-// codex01 5b P2: a scan failure under an installing descriptor keeps the
+// A scan failure under an installing descriptor keeps the
 // typed not-ready outcome and leaves the file unchanged.
 func TestWALStoreV3InstallingScanErrorIsTypedNotReady(t *testing.T) {
 	s, path := newStoreV3(t, WModeLagged)
@@ -707,7 +707,7 @@ func TestWALStoreV3InstallingScanErrorIsTypedNotReady(t *testing.T) {
 	}
 }
 
-// codex01 5b P2: the real flusher cycle performs the mode-C idle refresh,
+// The real flusher cycle performs the mode-C idle refresh,
 // also when no dirty entries remain, so the window closes without a Sync.
 func TestWALStoreV3FlusherCycleRunsTheIdleRefresh(t *testing.T) {
 	s, path := newStoreV3(t, WModeLagged)
@@ -731,7 +731,7 @@ func TestWALStoreV3FlusherCycleRunsTheIdleRefresh(t *testing.T) {
 // heldV3 owns a parked hook and the workers a held control starts. Its
 // cleanup, registered before any worker starts and after the store crash
 // cleanup, first releases the hold, then joins every worker with a bound,
-// so an early Fatal never strands store shutdown (codex01 row 5d P2).
+// so an early Fatal never strands store shutdown.
 type heldV3 struct {
 	t       *testing.T
 	parked  chan struct{}
@@ -792,7 +792,7 @@ func notDoneV3(t *testing.T, c chan error, what string) {
 	}
 }
 
-// codex01 row 5d schedule A: a refresh attempted DURING a same-open
+// Schedule A: a refresh attempted DURING a same-open
 // recovery waits for it (Recover holds the leader role), then sees the
 // recovered frontier and publishes nothing.
 func TestWALStoreV3RefreshDuringRecoverWaitsAndPublishesNothing(t *testing.T) {
@@ -821,7 +821,7 @@ func TestWALStoreV3RefreshDuringRecoverWaitsAndPublishesNothing(t *testing.T) {
 	}
 }
 
-// codex01 row 5d schedule B: a recovery attempted while a C batch is parked
+// Schedule B: a recovery attempted while a C batch is parked
 // after its publication and before its acknowledgement waits for the batch;
 // the recovery then lowers the frontier and nothing revives the dropped cut.
 func TestWALStoreV3RecoverWaitsForABatchAckAndNothingRevivesTheCut(t *testing.T) {
@@ -863,7 +863,7 @@ func TestWALStoreV3RecoverWaitsForABatchAckAndNothingRevivesTheCut(t *testing.T)
 	}
 }
 
-// codex01 row 5d: the outer Sync() completion is validated against the
+// The outer Sync() completion is validated against the
 // recovery generation. A Sync whose batch finished, then waits while a
 // recovery drops its cut, must not acknowledge it; a fresh Sync after the
 // recovery acknowledges normally.
@@ -899,7 +899,7 @@ func TestWALStoreV3OuterSyncCompletionIsRefusedAcrossARecovery(t *testing.T) {
 	}
 }
 
-// codex01 row 5c P2: the empty-dirty-set branch of the flusher cycle runs the
+// The empty-dirty-set branch of the flusher cycle runs the
 // idle refresh on its own (discriminated separately from the flush branch).
 func TestWALStoreV3FlusherEmptyCycleRunsTheIdleRefresh(t *testing.T) {
 	s, _ := newStoreV3(t, WModeLagged)

@@ -50,12 +50,12 @@ type handler struct {
 // counted when it is received, before the backend call; Errors counts the
 // requests that completed with a negative result.
 type Stats struct {
-	ReadRequests  uint64 `json:"read_requests"`
-	WriteRequests uint64 `json:"write_requests"`
-	FlushRequests uint64 `json:"flush_requests"`
-	FUAWrites     uint64 `json:"fua_writes"`
-	OtherRequests uint64 `json:"other_requests"`
-	Errors        uint64 `json:"errors"`
+	ReadRequests  uint64 `json:"read_requests"`  // read requests received
+	WriteRequests uint64 `json:"write_requests"` // write requests received
+	FlushRequests uint64 `json:"flush_requests"` // flush requests received
+	FUAWrites     uint64 `json:"fua_writes"`     // writes with forced unit access
+	OtherRequests uint64 `json:"other_requests"` // requests of any other operation
+	Errors        uint64 `json:"errors"`         // requests completed with a negative result
 }
 
 type counters struct {

@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// codex01 row 7 slice 4 P1: WALStore.Close serialized the legacy superblock
+// Regression: WALStore.Close serialized the legacy superblock
 // and pwrote it at offset 0, which on a v3 file is descriptor slot A. The
 // schedule: strict create (A gen 1), Recover (B gen 2), Write+Sync (A gen 3,
 // W 1), Close (slot A destroyed), reopen (B gen 2, W 0). A v3 Close writes

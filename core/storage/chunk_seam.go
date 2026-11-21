@@ -310,6 +310,22 @@ func validChunkIntentID(id string) bool {
 
 // chunkLayerConfig configures one attachment.
 type chunkLayerConfig struct {
+	// OnPublishSettled, when set, is called once per confirmed publication
+	// (a cut, a detach, or an earlier unresolved CAS found applied), with the
+	// HEAD before and after it (INV-PUBLISH-SETTLED-001). Calls are
+	// serialized and in publication order, outside the capture lock, on
+	// whichever publishing caller is draining the reports (a publisher may
+	// return before its own report is delivered by the drainer). The drainer
+	// is registered with Close; ctx ends with Close. Once Close has begun no
+	// further report is dequeued; a report already dequeued may still reach
+	// the hook after Close began (Close then waits for it).
+	//
+	// The hook MUST return without blocking and without remote calls; enqueue
+	// work to your own worker. It runs on the cut or detach caller's
+	// goroutine, before a detach returns: its duration is a guest-visible wait
+	// (Part C wait sites). While a hook stalls, later reports queue without a
+	// bound. A hook may publish again (its report is delivered after).
+	OnPublishSettled func(ctx context.Context, prev, next ChunkHead)
 	// ChunkBlocks is the number of consecutive blocks per chunk (1024 for
 	// 4 KiB blocks and 4 MiB chunks).
 	ChunkBlocks uint32
@@ -359,10 +375,10 @@ type chunkLayerConfig struct {
 	// impl3 uses its owned LSN map and never calls this optional legacy object.
 	Bitmap chunkBitmapStore
 
-	// BarrierBound bounds how many chunks a cut copies under its barrier:
-	// beyond it, chunks are pre-copied outside the barrier in staging
-	// rounds (at most chunkStageRounds; then the barrier takes the rest).
-	// Zero: unbounded, no staging.
+	// BarrierBound is for legacy test fixtures only: it sets
+	// BarrierOverBound when a cut copies more chunks than this under its
+	// barrier. Production staging is by the copy-on-write side budget (M5
+	// Stage), and production leaves this zero.
 	BarrierBound int
 
 	// UploadConcurrency bounds capture/pre-copy Put calls (0 defaults to 8).
@@ -382,6 +398,11 @@ type chunkLayerConfig struct {
 	// retries), never publishes a partial image or refuses the guest mutation.
 	// 0 defaults to defaultCOWSpillLimit; negative is refused.
 	COWSpillLimit int64
+	// COWSpillFree, optional, returns the free bytes of the filesystem that
+	// holds the side file. When set, it is read at each cut and that cut's
+	// spill cap is min(COWSpillLimit, free/2 - 1 GiB), at least 0; an error
+	// counts as no free space.
+	COWSpillFree func() (int64, error)
 
 	// testReconcileHold, set only by this package's tests, holds the
 	// reconciler before each slice until a token is received or the
@@ -398,14 +419,14 @@ type chunkLayerConfig struct {
 // value means "not measured".
 // SyncPhaseStats are nested details of SyncNs; never add them to SyncNs.
 type SyncPhaseStats struct {
-	LifecycleWaitNs  int64 `json:"lifecycleWaitNs"`
-	StoreWaitNs      int64 `json:"storeWaitNs"`
-	GroupCommitNs    int64 `json:"groupCommitNs"`
-	CompletionWaitNs int64 `json:"completionWaitNs"`
+	LifecycleWaitNs  int64 `json:"lifecycleWaitNs"`  // waiting for the store's lifecycle lock
+	StoreWaitNs      int64 `json:"storeWaitNs"`      // waiting for the store lock
+	GroupCommitNs    int64 `json:"groupCommitNs"`    // in the group commit that made the data durable
+	CompletionWaitNs int64 `json:"completionWaitNs"` // waiting for the sync leader role to validate the completion
 }
 
 type chunkCutStats struct {
-	SyncPhases SyncPhaseStats
+	SyncPhases SyncPhaseStats // the parts of SyncNs (never added to it)
 	// Disjoint non-payload intervals within barrier-to-settlement fixed cost.
 	CandidateNs      int64
 	WindowSetupNs    int64
@@ -443,11 +464,12 @@ type chunkCutStats struct {
 	MapPersistNs    int64
 	CASResult       string
 	TotalNs         int64
-	// Pre-copy (BarrierBound > 0): StageRounds staging rounds staged
-	// StagedChunks chunks outside the barrier; StagedChunksUsed of the
-	// uploads in HEAD came from staging. BarrierCopyChunks were copied
-	// under the barrier; BarrierOverBound: more than the bound (the
-	// staging rounds did not converge).
+	// Pre-copy (staging by the copy-on-write side budget, M5 Stage):
+	// StageRounds staging rounds staged StagedChunks chunks outside the
+	// barrier; StagedChunksUsed of the uploads in HEAD came from staging.
+	// BarrierCopyChunks were copied under the barrier. BarrierOverBound:
+	// more than the legacy fixture BarrierBound; always false in
+	// production, where that bound is zero.
 	StageRounds       int
 	StagedChunks      int
 	StagedChunksUsed  int
@@ -475,25 +497,34 @@ type chunkCutStats struct {
 //   - LastCut, LastCutH and LastCutNs (wall clock, Unix ns) describe the
 //     last successful cut, whatever triggered it.
 type chunkLayerStats struct {
-	Hydration         ChunkHydrationStats
-	CutsOK            uint64
-	CutsNoop          uint64
-	CutsFailed        uint64
-	CutsRefused       map[string]uint64
-	CutsAborted       map[string]uint64 // saver_capacity, cow_capacity, budget_revoked, upload
-	CASConflicts      uint64
-	CASUnknown        uint64
-	PendingUnresolved bool
-	DirtyChunks       int
-	Reconciling       bool
-	ReconcileDone     int
-	ReconcileTotal    int
-	LastCut           chunkCutStats
-	LastCutH          uint64
-	LastCutNs         int64
+	Hydration         ChunkHydrationStats // lazy fetches of absent chunks from the remote
+	CutsOK            uint64              // cuts that installed a HEAD
+	CutsNoop          uint64              // cuts with nothing new (no CAS)
+	CutsFailed        uint64              // every other cut failure
+	CutsRefused       map[string]uint64   // refusals by reason: admission, fenced, detached
+	CutsAborted       map[string]uint64   // saver_capacity, cow_capacity, no_room_to_cut, free_space_unreadable, budget_revoked, upload
+	CASConflicts      uint64              // HEAD CAS precondition failures
+	CASUnknown        uint64              // HEAD CAS results still unresolved after the re-read
+	PendingUnresolved bool                // an unresolved HEAD proposal is held now
+	DirtyChunks       int                 // chunks dirty since the last HEAD (not counting those awaiting reconciliation)
+	Reconciling       bool                // the dirty set is being reconciled against HEAD; no cut publishes meanwhile
+	ReconcileDone     int                 // chunks compared so far
+	ReconcileTotal    int                 // chunks to compare
+	LastCut           chunkCutStats       // the last successful cut's measurements
+	LastCutH          uint64              // the LSN the last successful cut published
+	LastCutNs         int64               // when it completed (wall clock, Unix ns)
 	// BarrierOverBound counts cuts whose barrier copied more than the
 	// bound after the staging rounds.
 	BarrierOverBound uint64
+	// AbsentChunks is the number of HEAD-named chunks still absent with a
+	// block not local (what HydrateAll would still fetch); 0 = fully local.
+	AbsentChunks int
+	// COWSpillCap is the last cut's side-file cap in bytes, read once per
+	// cut; COWSpillCapReason is why it is 0, when the free space made it so:
+	// no_room_to_cut (half the free space is within the 1 GiB reserve) or
+	// free_space_unreadable (the free space could not be read).
+	COWSpillCap       int64
+	COWSpillCapReason string `json:",omitempty"`
 }
 
 // chunkCutResult is the outcome of one successful cut.
@@ -510,6 +541,7 @@ type chunkLayerStats struct {
 // Bytes and rate/estimate belong to one sampler observation; Known=false must
 // never be interpreted as a zero-cost tail. Admission rechecks at its barrier.
 type ChunkCandidateTail struct {
+	FrozenBudget
 	Bytes          uint64        `json:"bytes"`
 	Estimate       time.Duration `json:"estimateNs"`
 	BytesPerSecond float64       `json:"bytesPerSecond"`

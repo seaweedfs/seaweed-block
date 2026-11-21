@@ -2,6 +2,7 @@ package master
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -132,6 +133,53 @@ func grantFact(r authority.WorkspaceMoveRecord) *control.WorkspaceGrant {
 		OldEpoch: r.OldEpoch, NewEpoch: r.NewEpoch, HeadGen: r.HeadGen, RemoteLsn: r.RemoteLSN, Issued: r.Issued, OldHost: r.OldHost, NewHost: r.NewHost}
 }
 
+// lostRangeFact is the wire form of a stored lost range.
+func lostRangeFact(r authority.WorkspaceLostRangeReadout) *control.WorkspaceLostRange {
+	return &control.WorkspaceLostRange{RequestId: r.RequestID, VolumeId: r.VolumeID, NewEpoch: r.NewEpoch, OldReplicaId: r.OldReplicaID, OldEpoch: r.OldEpoch,
+		LostAfterLsn: r.LostAfterLSN, LostUntilNs: r.LostUntilNS, HeadGen: r.HeadGen, HeadTimeNs: r.HeadTimeNS, HeadTimeKnown: r.HeadTimeNS != 0}
+}
+
+// grantWithLostRange is grantFact plus, for an issued forced grant, its
+// stored lost range; a range that cannot be read leaves lost_range unset and
+// says why in lost_range_error (the readout is then unproven, not empty).
+func (s *services) grantWithLostRange(r authority.WorkspaceMoveRecord) *control.WorkspaceGrant {
+	g := grantFact(r)
+	if !r.Issued || r.Kind != "forced" {
+		return g
+	}
+	ranges, err := s.host.Publisher().WorkspaceLostRangeReadouts(r.VolumeID, r.RequestID)
+	switch {
+	case err != nil:
+		g.LostRangeError = err.Error()
+	case len(ranges) != 1:
+		g.LostRangeError = fmt.Sprintf("%v: %d ranges for request %q", authority.ErrWorkspaceLostRangeMissing, len(ranges), r.RequestID)
+	default:
+		g.LostRange = lostRangeFact(ranges[0])
+	}
+	return g
+}
+
+// logForcedGrant records an issued forced move (also a replay of one).
+func (s *services) logForcedGrant(g *control.WorkspaceGrant, replay bool, postIssue error) {
+	if g == nil || !g.GetIssued() || g.GetKind() != "forced" {
+		return
+	}
+	lost := "lost_range=UNPROVEN (" + g.GetLostRangeError() + ")"
+	if l := g.GetLostRange(); l != nil {
+		head := "unknown"
+		if l.GetHeadTimeKnown() {
+			head = time.Unix(0, l.GetHeadTimeNs()).UTC().Format(time.RFC3339Nano)
+		}
+		lost = fmt.Sprintf("lost_after_lsn=%d lost_until_ns=%d lost_until=%s head_gen=%d head_filer_time=%s",
+			l.GetLostAfterLsn(), l.GetLostUntilNs(), time.Unix(0, l.GetLostUntilNs()).UTC().Format(time.RFC3339Nano), l.GetHeadGen(), head)
+	}
+	if postIssue != nil {
+		lost += fmt.Sprintf(" answer_failed_after_issue=%q", postIssue.Error())
+	}
+	s.host.log.Printf("blockmaster: MoveWorkspace forced move issued volume=%q request=%q old=%s/%s@%d new=%s/%s@%d replay=%t %s",
+		g.GetVolumeId(), g.GetRequestId(), g.GetOldHost(), g.GetOldReplicaId(), g.GetOldEpoch(), g.GetNewHost(), g.GetNewReplicaId(), g.GetNewEpoch(), replay, lost)
+}
+
 func (s *services) MoveWorkspace(ctx context.Context, q *control.WorkspaceMove) (*control.WorkspaceGrant, error) {
 	if err := s.workspaceVolume(q.GetVolumeId()); err != nil {
 		return nil, err
@@ -157,10 +205,18 @@ func (s *services) MoveWorkspace(ctx context.Context, q *control.WorkspaceMove) 
 	// local precondition below; Publisher checks the expected epoch atomically.
 	// A refusal is logged after the lock is released (deferred first, so it
 	// runs last): a slow log writer never holds workspaceMu.
+	// An issued forced grant is logged the same way, also after the unlock.
 	var refusal string
+	var issued *control.WorkspaceGrant
+	var replay bool
+	var postIssue, unknown error
 	defer func() {
 		if refusal != "" {
 			s.host.log.Printf("blockmaster: MoveWorkspace refused volume=%q request=%q: %s", q.GetVolumeId(), q.GetRequestId(), refusal)
+		}
+		s.logForcedGrant(issued, replay, postIssue)
+		if unknown != nil {
+			s.host.log.Printf("blockmaster: MoveWorkspace outcome unknown volume=%q request=%q kind=%q: %v", q.GetVolumeId(), q.GetRequestId(), q.GetKind(), unknown)
 		}
 	}()
 	s.host.workspaceMu.Lock()
@@ -171,11 +227,72 @@ func (s *services) MoveWorkspace(ctx context.Context, q *control.WorkspaceMove) 
 	if err := s.workspaceVolume(q.GetVolumeId()); err != nil {
 		return nil, err
 	}
+	req, target, replay, why, err := s.workspaceMoveCheckLocked(q)
+	if err != nil {
+		return nil, workspaceError(err)
+	}
+	if refusal = why; refusal != "" {
+		return nil, status.Error(codes.FailedPrecondition, refusal)
+	}
+	if err = s.host.workspaceEndpointsAvailable(lifecycle.WorkspaceBinding{VolumeID: q.GetVolumeId(), ServerID: target.ServerID, DataAddr: q.GetTargetDataAddr(), CtrlAddr: q.GetTargetCtrlAddr()}); err != nil {
+		return nil, workspaceError(err)
+	}
+	r, err := s.host.Publisher().MoveWorkspace(ctx, req, head)
+	if err != nil {
+		// A move that is issued in spite of the error (it failed after the
+		// issue) is never a refusal: the caller recovers its grant with the
+		// same request id.
+		if s.host.Publisher().IssuedWorkspaceMove(req) {
+			issued, postIssue = s.issuedRecord(req), err
+			return nil, postIssueError(q, err)
+		}
+		if errors.Is(err, authority.ErrWorkspaceOutcomeUncertain) {
+			unknown = err
+			return nil, status.Errorf(codes.Internal, "workspace move %q of volume %q has an UNKNOWN outcome: %v; the volume's workspace authority stays uncertain until the master restarts; after the restart, rerun with the same request id",
+				q.GetRequestId(), q.GetVolumeId(), err)
+		}
+		return nil, workspaceError(err)
+	}
+	// The move is issued from here on: record it for the audit log before
+	// anything else can fail.
+	issued = s.grantWithLostRange(r)
+	if err = s.host.reconcileWorkspaceBindings(); err != nil {
+		postIssue = err
+		return nil, postIssueError(q, err)
+	}
+	return issued, nil
+}
+
+// postIssueError reports a failure after q's move was issued: never
+// FailedPrecondition (a definite refusal); Internal, which clients treat as
+// an unknown outcome, with the same-request-id recovery.
+func postIssueError(q *control.WorkspaceMove, err error) error {
+	return status.Errorf(codes.Internal, "workspace move %q of volume %q is ISSUED, but a step after the issue failed: %v; rerun with the same request id to get its grant",
+		q.GetRequestId(), q.GetVolumeId(), err)
+}
+
+// issuedRecord is the answer for req's issued journal record, if any.
+func (s *services) issuedRecord(req authority.WorkspaceMoveRequest) *control.WorkspaceGrant {
+	if st := s.host.Publisher().WorkspaceState(req.VolumeID); st != nil {
+		for _, m := range st.Moves {
+			if m.RequestID == req.RequestID && m.Issued {
+				return s.grantWithLostRange(m)
+			}
+		}
+	}
+	return nil
+}
+
+// workspaceMoveCheckLocked builds the authority request of q and the
+// blockmaster's own refusal of it ("" when none): endpoints, source host,
+// target node and binding. It reads and writes nothing else; MoveWorkspace
+// and PreviewWorkspaceMove share it. Caller holds workspaceMu.
+func (s *services) workspaceMoveCheckLocked(q *control.WorkspaceMove) (req authority.WorkspaceMoveRequest, target lifecycle.NodeRegistration, replay bool, refusal string, err error) {
 	oldHost := s.host.workspaceSourceHost(q.GetVolumeId(), q.GetExpectedReplicaId(), q.GetExpectedEpoch())
 	target, ok := s.host.lifecycle.Nodes.GetNode(q.GetTargetServerId())
 	bindings, explicit, err := s.host.lifecycle.WorkspaceBindings.Get(q.GetVolumeId())
 	if err != nil {
-		return nil, workspaceError(err)
+		return authority.WorkspaceMoveRequest{}, lifecycle.NodeRegistration{}, false, "", err
 	}
 	// A volume without per-volume bindings may move to any port on the
 	// target node's registered hosts (a host runs several slots): the host
@@ -189,12 +306,12 @@ func (s *services) MoveWorkspace(ctx context.Context, q *control.WorkspaceMove) 
 			matched = true
 		}
 	}
-	req := authority.WorkspaceMoveRequest{RequestID: q.GetRequestId(), VolumeID: q.GetVolumeId(), ExpectedReplicaID: q.GetExpectedReplicaId(), ExpectedHost: oldHost, TargetHost: target.ServerID,
+	req = authority.WorkspaceMoveRequest{RequestID: q.GetRequestId(), VolumeID: q.GetVolumeId(), ExpectedReplicaID: q.GetExpectedReplicaId(), ExpectedHost: oldHost, TargetHost: target.ServerID,
 		ExpectedEpoch: q.GetExpectedEpoch(), TargetReplicaID: q.GetTargetReplicaId(), TargetDataAddr: q.GetTargetDataAddr(), TargetCtrlAddr: q.GetTargetCtrlAddr(), Kind: q.GetKind(), Force: q.GetForce()}
 	// Strict journal isolation refuses new work only: an exact replay of an
 	// issued move (its reply lost, the target found co-located since) gets
 	// its durable grant back from MoveWorkspace, never a definite refusal.
-	replay := ok && s.host.Publisher().IssuedWorkspaceMove(req)
+	replay = ok && s.host.Publisher().IssuedWorkspaceMove(req)
 	switch {
 	case endpointErr != nil:
 		refusal = fmt.Sprintf("move target endpoints invalid: %v", endpointErr)
@@ -209,20 +326,7 @@ func (s *services) MoveWorkspace(ctx context.Context, q *control.WorkspaceMove) 
 	case !matched:
 		refusal = fmt.Sprintf("move target endpoints %s/%s on %q are not registered (%s)", q.GetTargetDataAddr(), q.GetTargetCtrlAddr(), target.ServerID, registeredTargetEndpoints(target, bindings, explicit))
 	}
-	if refusal != "" {
-		return nil, status.Error(codes.FailedPrecondition, refusal)
-	}
-	if err = s.host.workspaceEndpointsAvailable(lifecycle.WorkspaceBinding{VolumeID: q.GetVolumeId(), ServerID: target.ServerID, DataAddr: q.GetTargetDataAddr(), CtrlAddr: q.GetTargetCtrlAddr()}); err != nil {
-		return nil, workspaceError(err)
-	}
-	r, err := s.host.Publisher().MoveWorkspace(ctx, req, head)
-	if err != nil {
-		return nil, workspaceError(err)
-	}
-	if err = s.host.reconcileWorkspaceBindings(); err != nil {
-		return nil, workspaceError(err)
-	}
-	return grantFact(r), nil
+	return req, target, replay, refusal, nil
 }
 
 // sameHost reports whether two host:port addresses name the same host:
@@ -276,7 +380,103 @@ func (s *services) QueryWorkspace(ctx context.Context, q *control.WorkspaceVolum
 		out.RevocationAck = &control.WorkspaceRevocationAck{Identity: &control.WorkspaceIdentity{VolumeId: q.GetVolumeId(), ReplicaId: state.Ack.ReplicaID, Epoch: state.Ack.Epoch}, HeadGen: state.Ack.HeadGen}
 	}
 	for _, r := range state.Moves {
-		out.Moves = append(out.Moves, grantFact(r))
+		out.Moves = append(out.Moves, s.grantWithLostRange(r))
+	}
+	return out, nil
+}
+
+// QueryWorkspaceLostRange returns the stored lost ranges of the volume's
+// issued forced moves in issue order, or the one of request_id. A forced
+// move whose range is missing or failed its checks fails the call with
+// DataLoss: the readout is unproven, never "no loss".
+func (s *services) QueryWorkspaceLostRange(ctx context.Context, q *control.WorkspaceLostRangeQuery) (*control.WorkspaceLostRanges, error) {
+	if err := s.workspaceVolume(q.GetVolumeId()); err != nil {
+		return nil, err
+	}
+	ranges, err := s.host.Publisher().WorkspaceLostRangeReadouts(q.GetVolumeId(), q.GetRequestId())
+	switch {
+	case errors.Is(err, authority.ErrWorkspaceLostRangeMissing):
+		return nil, status.Error(codes.DataLoss, err.Error())
+	case errors.Is(err, authority.ErrWorkspaceNoForcedMove):
+		return nil, status.Error(codes.NotFound, err.Error())
+	case err != nil:
+		return nil, workspaceError(err)
+	}
+	out := &control.WorkspaceLostRanges{}
+	for _, r := range ranges {
+		out.Ranges = append(out.Ranges, lostRangeFact(r))
+	}
+	return out, nil
+}
+
+// PreviewWorkspaceMove answers what MoveWorkspace would do with a forced
+// move now, writing nothing: the blockmaster's own checks, the publisher's
+// forced admission (with the barrier, i.e. when it becomes admissible) and,
+// only once admitted, the HEAD read and HEAD rule, as the move does. A
+// refusal is an answer (admitted false, reason), not an RPC error.
+func (s *services) PreviewWorkspaceMove(ctx context.Context, q *control.WorkspaceMove) (*control.WorkspaceMovePreview, error) {
+	out := &control.WorkspaceMovePreview{}
+	if !s.host.cfg.WorkspaceRPC {
+		return nil, status.Error(codes.FailedPrecondition, "workspace RPC disabled")
+	}
+	if q.GetKind() != "forced" || !q.GetForce() {
+		out.Reason = "workspace move preview: forced moves only (kind forced, force true)"
+		out.MasterTimeNs = time.Now().UnixNano()
+		return out, nil
+	}
+	var req authority.WorkspaceMoveRequest
+	var replay bool
+	if err := func() error {
+		s.host.workspaceMu.Lock()
+		defer s.host.workspaceMu.Unlock()
+		if err := s.workspaceVolume(q.GetVolumeId()); err != nil {
+			out.Reason = status.Convert(err).Message()
+			return nil
+		}
+		r, target, _, why, err := s.workspaceMoveCheckLocked(q)
+		if err != nil {
+			return err
+		}
+		req = r
+		pv := s.host.Publisher().PreviewWorkspaceForcedMove(req)
+		out.Admitted, out.LostUntilNs, out.MasterTimeNs = pv.Admitted, pv.LostUntilNS, pv.NowNS
+		switch {
+		case why != "":
+			out.Admitted, out.Reason = false, why
+		case !pv.Admitted:
+			out.Reason = pv.Reason
+		case pv.Replay:
+			replay, out.Reason = true, pv.Reason
+		default:
+			if err := s.host.workspaceEndpointsAvailable(lifecycle.WorkspaceBinding{VolumeID: q.GetVolumeId(), ServerID: target.ServerID, DataAddr: q.GetTargetDataAddr(), CtrlAddr: q.GetTargetCtrlAddr()}); err != nil {
+				out.Admitted, out.Reason = false, err.Error()
+			}
+		}
+		return nil
+	}(); err != nil {
+		return nil, workspaceError(err)
+	}
+	if out.MasterTimeNs == 0 {
+		out.MasterTimeNs = time.Now().UnixNano()
+	}
+	if !out.Admitted || replay { // a replay never reads a new HEAD
+		return out, nil
+	}
+	// As for the move: HEAD is read only after admission, outside the lock,
+	// bounded even when the caller set no deadline.
+	readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	head, err := s.host.cfg.WorkspaceHeadReader(readCtx, q.GetVolumeId())
+	if err != nil {
+		out.Admitted, out.HeadError = false, err.Error()
+		out.Reason = "workspace move: HEAD read failed: " + err.Error()
+		return out, nil
+	}
+	out.HeadRead = true
+	out.HeadGen, out.HeadEpoch, out.HeadHolder, out.HeadRemoteLsn = head.Gen, head.Epoch, head.Holder, head.RemoteLSN
+	out.HeadTimeNs, out.HeadTimeKnown = head.FilerMtimeNS, head.FilerMtimeNS != 0
+	if !authority.WorkspaceMoveHeadAdmits(req, head) {
+		out.Admitted, out.Reason = false, "workspace move: HEAD not owned by expected holder"
 	}
 	return out, nil
 }

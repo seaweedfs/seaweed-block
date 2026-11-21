@@ -12,55 +12,55 @@ import (
 // It is not a performance API; callers use it to prove which product-owned
 // path observed the write and roughly where time accumulated.
 type WriteProfileStatus struct {
-	DurabilityLatency           DurabilityLatencyStatus
-	TargetWriteOps              uint64
-	TargetWriteBytes            uint64
-	TargetWriteRequestMaxBytes  uint64
-	TargetWriteDurationNanos    uint64
-	BackendWriteRequestOps      uint64
-	BackendWriteRequestBytes    uint64
-	BackendWriteRequestMaxBytes uint64
-	BackendWriteOps             uint64
-	BackendWriteBytes           uint64
-	BackendWriteDurationNanos   uint64
-	BackendStorageWriteCalls    uint64
-	BackendStorageWriteBlocks   uint64
-	BackendStorageBatchCalls    uint64
-	BackendStorageBatchBlocks   uint64
-	BackendFullBlockBatchCalls  uint64
-	BackendFullBlockBatchBlocks uint64
-	BackendFullBlockBatchMax    uint64
-	WALCopyOps                  uint64
-	WALCopyBytes                uint64
-	WALCopyDurationNanos        uint64
-	WALEncodeOps                uint64
-	WALEncodeBytes              uint64
-	WALEncodeDurationNanos      uint64
-	WALChecksumOps              uint64
-	WALChecksumBytes            uint64
-	WALChecksumDurationNanos    uint64
-	WALAppendOps                uint64
-	WALAppendBytes              uint64
-	WALAppendDurationNanos      uint64
-	WALAppendLockWaitOps        uint64
-	WALAppendLockWaitNanos      uint64
-	WriteCommitLockWaitOps      uint64
-	WriteCommitLockWaitNanos    uint64
-	WALAppendWriteAtCalls       uint64
-	WALAppendWriteAtBytes       uint64
-	WALAppendWriteAtMaxBytes    uint64
-	WALAppendWrapCount          uint64
-	WALAppendPaddingBytes       uint64
-	DirtyMapUpdateOps           uint64
-	DirtyMapUpdateDurationNanos uint64
-	BackendSyncOps              uint64
-	BackendSyncDurationNanos    uint64
+	DurabilityLatency           DurabilityLatencyStatus // latency distributions of writes, flushes and syncs
+	TargetWriteOps              uint64                  // writes the protocol target handed to the volume
+	TargetWriteBytes            uint64                  // their bytes
+	TargetWriteRequestMaxBytes  uint64                  // the largest of them
+	TargetWriteDurationNanos    uint64                  // their total time at the target
+	BackendWriteRequestOps      uint64                  // write requests that entered the durable backend
+	BackendWriteRequestBytes    uint64                  // their bytes
+	BackendWriteRequestMaxBytes uint64                  // the largest of them
+	BackendWriteOps             uint64                  // backend writes completed
+	BackendWriteBytes           uint64                  // their bytes
+	BackendWriteDurationNanos   uint64                  // their total time
+	BackendStorageWriteCalls    uint64                  // single-write calls into the store
+	BackendStorageWriteBlocks   uint64                  // blocks they wrote
+	BackendStorageBatchCalls    uint64                  // batch-write calls into the store
+	BackendStorageBatchBlocks   uint64                  // blocks they wrote
+	BackendFullBlockBatchCalls  uint64                  // batch calls made only of whole blocks
+	BackendFullBlockBatchBlocks uint64                  // blocks they wrote
+	BackendFullBlockBatchMax    uint64                  // the largest such batch, in blocks
+	WALCopyOps                  uint64                  // WAL record payload copies
+	WALCopyBytes                uint64                  // their bytes
+	WALCopyDurationNanos        uint64                  // their total time
+	WALEncodeOps                uint64                  // WAL record encodes
+	WALEncodeBytes              uint64                  // their bytes
+	WALEncodeDurationNanos      uint64                  // their total time
+	WALChecksumOps              uint64                  // WAL record checksums
+	WALChecksumBytes            uint64                  // their bytes
+	WALChecksumDurationNanos    uint64                  // their total time
+	WALAppendOps                uint64                  // WAL appends
+	WALAppendBytes              uint64                  // their bytes
+	WALAppendDurationNanos      uint64                  // their total time
+	WALAppendLockWaitOps        uint64                  // appends that waited for the WAL append lock
+	WALAppendLockWaitNanos      uint64                  // their total wait
+	WriteCommitLockWaitOps      uint64                  // writes that waited for the commit lock
+	WriteCommitLockWaitNanos    uint64                  // their total wait
+	WALAppendWriteAtCalls       uint64                  // file WriteAt calls made by WAL appends
+	WALAppendWriteAtBytes       uint64                  // their bytes
+	WALAppendWriteAtMaxBytes    uint64                  // the largest of them
+	WALAppendWrapCount          uint64                  // times the WAL append wrapped to the start of the log
+	WALAppendPaddingBytes       uint64                  // padding bytes written at those wraps
+	DirtyMapUpdateOps           uint64                  // dirty-map updates after writes
+	DirtyMapUpdateDurationNanos uint64                  // their total time
+	BackendSyncOps              uint64                  // backend syncs (flush, FUA, explicit sync)
+	BackendSyncDurationNanos    uint64                  // their total time
 }
 
 type DurabilityLatencyStatus struct {
-	Frontend    iolatency.RequestStatus
-	BackendSync iolatency.Distribution
-	WAL         *storage.DurabilityLatencyStatus `json:",omitempty"`
+	Frontend    iolatency.RequestStatus          // per-request latency at the frontend, by stage
+	BackendSync iolatency.Distribution           // latency of backend syncs
+	WAL         *storage.DurabilityLatencyStatus `json:",omitempty"` // the WAL's own sync latency, where the store reports it
 }
 
 type writeProfile struct {

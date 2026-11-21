@@ -14,12 +14,12 @@ import (
 // LastAdvance stays frozen. Fields are cumulative atomic observations, not a
 // coherent frontier.
 type CheckpointPersistenceStatus struct {
-	Successes     uint64
-	Refusals      uint64
-	Failures      uint64
-	CheckpointLSN uint64
-	Advances      uint64
-	LastAdvance   time.Time
+	Successes     uint64    // checkpoint calls that succeeded (including unchanged ones)
+	Refusals      uint64    // checkpoint calls refused because the map coverage was stale
+	Failures      uint64    // checkpoint calls that failed with an error
+	CheckpointLSN uint64    // the persisted checkpoint LSN
+	Advances      uint64    // successes that moved CheckpointLSN forward
+	LastAdvance   time.Time // when the latest advance happened; zero if none in this open
 }
 
 func (s *WALStore) CheckpointPersistence() CheckpointPersistenceStatus {

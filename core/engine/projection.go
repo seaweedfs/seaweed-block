@@ -13,16 +13,16 @@ const (
 // ReplicaProjection is the operator-facing view derived from state.
 // Intentionally descriptive. Must NEVER be reused as control truth.
 type ReplicaProjection struct {
-	Mode             Mode
-	RecoveryDecision RecoveryDecision
-	SessionKind      SessionKind
-	SessionPhase     SessionPhase
-	Epoch            uint64
-	EndpointVersion  uint64
-	R                uint64
-	S                uint64
-	H                uint64
-	Reason           string
+	Mode             Mode             // the engine mode (idle, recovering, healthy, degraded)
+	RecoveryDecision RecoveryDecision // the recovery class the R/S/H boundaries call for
+	SessionKind      SessionKind      // the kind of the current recovery session, if any
+	SessionPhase     SessionPhase     // its phase
+	Epoch            uint64           // the authority epoch
+	EndpointVersion  uint64           // the endpoint version within the epoch
+	R                uint64           // the replica's durable boundary (LSN)
+	S                uint64           // the primary's recoverable start boundary (WAL tail LSN)
+	H                uint64           // the primary's target boundary (head LSN)
+	Reason           string           // why the engine is in this mode or decision
 }
 
 // DeriveProjection computes the projection from current state.

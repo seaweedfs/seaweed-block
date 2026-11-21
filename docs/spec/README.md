@@ -98,6 +98,8 @@ Two kinds of config are **expected to violate**:
 | `ReplicationFailover.tla` | `cfg/S6_*` | design-level |
 | `RetentionGCTiming.tla` | `cfg/S9_*` | |
 | `RetentionGCMulti.tla` | `cfg/S9b_*` | |
+| `ForkDelete.tla` | `cfg/ForkDelete_*` | snapshot delete in any order with forks |
+| `RestoreIndependence.tla` | `cfg/RestoreIndependence_*` | independent restore |
 
 Each `.cfg` names its spec on its first line.
 
@@ -116,6 +118,8 @@ length of TLC's shortest counterexample.
 | S5 | `ControlPlane` | Blockmaster authority store: one volume record `{epoch, holder, move journal}`, two retried move requests, durable Puts that succeed, fail, or land with the reply lost, and restarts. | `UniqueEpoch` (issued epochs strictly increase), `Idempotent` (one epoch per request id), `JournalComplete` | `S5_code` pass (298). **RED:** `S5_red_noUncertain` UniqueEpoch violated (5-step: a lost-reply Put, then a reservation from stale memory puts the old assignment back). `S5_red_noReserve` passes (the reservation step is not needed for these invariants). | `core/authority/authority.go:436` applyWithWorkspaceMove (uncertain refusal `:442-444`, Put `:564`, mark uncertain `:568`); `core/authority/workspace.go:309` prepareWorkspaceMoveLocked (expected line `:313`, resume a reserved entry `:324-333`, reserve max+1 `:344-355`), journal replay `:192-219`, persist and mark uncertain `:276-288` |
 | S6 | `ReplicationFailover` | RF=2: P ships to R, R acks what is durable, the client is acked when both are durable; promotion of R at a new epoch with an evidence gate; R refuses old-epoch shipping; cuts and snapshots cover only the replicated-durable frontier; an in-flight snapshot create from the old primary may still land after the failover. Design-level. | `AckedSurvive`, `HeadOnLineage`, `SnapOnLineage`, `NoStaleAck` | `S6_design` pass (52,897), `S6_design_big` (598,353). **RED:** `S6_red_localCut` HeadOnLineage; `S6_red_noFence` AckedSurvive. `S6_red_noEvidence` passes: with synchronous RF=2 acks the gate is redundant (it matters for quorum or async shipping, not modelled). | `core/transport/replica.go:362` replica rejects a stale-lineage ship entry; `core/replication/volume.go:680` RebaseShipLSN; takeover CAS as in S2 |
 | S9 | `RetentionGCTiming`, `RetentionGCMulti` | GC timing with an explicit clock: a copy operation with deadline D, marks of duration up to MD, deletion only after two marks at least Grace apart; then marks across two volumes with a fork and a snapshot delete. | `NoLiveDelete` | **Single op:** `S9_rule_G4` (G > D + MD) pass (10,798; `_big` 43,780); G = D passes (`S9_red_G2_noguard`, 11,953). **RED:** `S9_red_G1_noguard`, `S9_red_G1_D3` (G < D) NoLiveDelete violated. **Two volumes:** `S9b_G1_MD2`, `_G2_MD2`, `_G2_MD3`, `_G3_MD1` pass (5,743-9,079). | `core/frontend/chunkstore/gc.go:89` grace > operation deadline, `:280` mark-duration margin, `:306-318` two-mark rule, `:214-221` intent expiry; `catalog.go:896-905` intent deadline re-checked before publish; `gc_copy.go:143`, `:177` a deleting attempt stays a root until grace |
+| S10 | `RestoreIndependence` | Independent restore: fork of a sealed snapshot, hydrate, bounded batch cuts (own fids uploaded under an intent, one HEAD CAS per batch), the independence marker after the last foreign ref; GC, source delete, snapshot retention, and crashes with resume from remote facts at any point. `NoClaim` (the code): no claim; the fork window is safe by two time rules on one clock, ForkEnd only while now < readAt + D and a deleted snapshot rooted while now < delAt + G. The older claim variants stay as regression configurations. | `NoGap`, `Independent`, `NoForeignList`, `LifecycleFree`, `StateRemote` | **Exhaustive (TLC breadth-first, complete state graph, no error)**, no-claim: `nc_safe` 405,198 distinct states; `nc_safe_b2` 504,097; `nc_safe_n4` 2,752,518; `nc_safe_G3D2` 379,500; boundary `nc_bnd_G1D1` 444,564 and `nc_bnd_G3D3` 360,615 safe, `nc_bnd_G0D1` and `nc_bnd_G2D3` violate NoGap: safe iff G >= D on one clock, which is `ForkDelete`'s G >= D + E + P with E = P = 0 (the production inequality is ForkDelete's). **RED** (each violated): `nc_red_CasBeforeUpload`, `nc_red_NoIntent`, `nc_red_GltD`, `nc_red_noDeadline`, `nc_red_notRooted`, `nc_red_resumeNoReread` NoGap; `nc_red_MarkerEarly`, `nc_red_MarkerBeforeCas`, `nc_red_SnapDuringRestore` Independent; `nc_red_ListForeign` NoForeignList; `nc_red_ResumeLocal` StateRemote. **Witnesses reached:** `nc_wit_DelInFork` (the source snapshot deleted inside the fork window and the restore completes), `nc_wit_FailNotFound`. Regression (claim frame): `safe` 1,599, `opt1_safe` 3,639, `oldframe` 1,599 safe; `oldframe_drop`, `red_DropClaimAtFork_gap` violate NoGap. Limits: no guest writes to the target while it takes ownership, GC acts immediately, one restore per snapshot. | `core/frontend/chunkstore/catalog.go` `Restore`, `CreateSnapshot` (restore refusal); `restore.go` `MarkIndependent`, `foreignRefsOf`; `gc.go` `Collector.run` (qualified refs rooted by owner); `core/storage/chunk_hydrate_all.go` `HydrateAllAt`; `core/storage/chunk_own.go` `OwnBatch`; `core/host/volume/chunk_restore.go` `runRestore` |
+| S11 | `ForkDelete` | Fork or restore against snapshot delete with no claim: the fork reads the parent, may crash and retry (a retry re-reads it), and publishes only before its read time + D, as one atomic step or check-then-publish with up to P ticks between; delete stamps its time; GC (one atomic step) keeps a deleted attempt rooted while its clock is below delete time + G. Three clocks with pairwise skew up to E. | `NoGap` (a published fork HEAD names only existing chunks) | **Exhaustive (TLC breadth-first, complete state graph, no error)**: all 11 safe cfgs, from `safe_D2E0G2` (18,672 distinct states) to `safe_na_P2_D1E2G5` (15,730,209), including every boundary G = D + E + P (atomic and two-step, NC = 2). **RED**, each violating NoGap: the boundary minus one (`red_bnd_*`, `red_na_P*`), `red_noDeadlineCheck`, `red_deletedNotRooted`, `red_noRetryReread`. **Witnesses reached:** `wit_benefit`, `wit_benefit_na_P1`, `wit_deadlineLoss`, `wit_gcDeletes`, `wit_retryNotFound`. Safe iff G >= D + E + P. | `core/frontend/chunkstore/catalog.go` `Fork` (deadline start before `readForkParent`, publish before start + deadline); `retention.go` `markDeleting` (no claim); `gc.go` `NewCollector` (grace >= deadline + skew + CAS apply bound); `gc_copy.go` `snapshotAttemptHeads` (deleted attempt rooted for grace) |
 
 ## Limits
 
@@ -305,7 +309,7 @@ java -cp /path/to/tla2tools.jar tlc2.TLC -deadlock -config cfg/REC_red_noInterna
 
 The authored LIGHT receipts report exhaustive safe searches at 2,700 and 25,550
 states, plus the expected mutant/witness failures. Source and configs are copied
-from the sealed `claude05-walreclaim-tla-r0-20261119` artifact with line-ending
+from the sealed authoring artifact with line-ending
 normalization only. Those are prior author runs, not a claim that this PR reran
 TLC. This is an abstraction: physical fsync success, byte layout, crash recovery,
 both-slot retirement, timing and multiple writers remain covered by their other
@@ -334,6 +338,53 @@ one missing-probe/newer-ACK schedule. `R293_review_safe` checks four invariants;
 four negative controls separately remove retirement, the frame join, the
 readiness guard or ACK progress restoration. This abstracts successful admitted
 frames and does not prove physical-I/O, authority rollback or timing behavior.
+
+## Attached-volume maintenance
+
+`MaintenanceOwner.tla` now includes joined-stop re-arm on the same current
+handle, and replacement followed by a new attachment. At most three arms and
+two handles make the graph finite. Local review-fold run 2026-11-21 03:47 UTC,
+TLC2.19 / Java21 /512MiB, jar SHA256
+`936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`:
+
+```sh
+java -Xmx512m -cp /path/to/tla2tools.jar tlc2.TLC -deadlock -config MaintenanceOwner_safe.cfg MaintenanceOwner
+```
+
+Positive exited0,105generated/54distinct, queue empty, depth12. Negative configs
+`overlap` exited12 at OneOwner (20/14 depth6), `early_release` at
+JoinedBeforeRelease (25/14 depth6), and `stale_rearm` at
+CurrentHandleAtAdmission (50/33 depth8). Unique `-metadir` paths were used.
+Native tests separately bind replica/epoch/endpoint and current handle/layer,
+witness cancellation while held, and same-handle stop/join/re-arm. This finite
+model does not establish physical-I/O cancellation or a fleet scheduling bound.
+
+`ScopedMaintenanceGC.tla` extends S9's scope correspondence: three keys across
+two volumes, one foreign-only root, independent local coverage and crash/config
+invalidation. `ScopedMaintenanceGC_safe.cfg` checks foreign-root preservation,
+local candidate scope and coverage ownership: 20 generated / 10 distinct states,
+depth 9, with the same TLC/jar. Its three negative configs narrow
+the root domain, widen reclamation or import namespace coverage. Native tests
+exercise the persisted mark records and real catalog root traversal; the finite
+model abstracts the complete mark and grace, whose timing remains in S9.
+No 50/200-volume density or metadata-RPC qualification is claimed; automatic GC
+remains opt-in, while periodic HEAD capture and retention are enabled by the CLI.
+
+The unchanged S9 timing models were replayed with the same TLC/jar:
+`cfg/S9_rule_G4.cfg` (`RetentionGCTiming`, D=2/G=4/MD=1/MaxT=10)
+passed with 26,341 generated / 10,798 distinct states, depth 23;
+`cfg/S9b_G3_MD1.cfg` (`RetentionGCMulti`, G=3/MD=1/MaxT=12)
+passed with 11,303 / 5,743, depth 23.
+
+`cfg/Maintenance_lifecycle.cfg` replays unchanged `ChunkLifecycleFixed` with
+one snapshot caller/deleter, MaxHostOps=1 and MaxRuns=1, fork/delete/create,
+lost replies/pending/sweep enabled. Safety invariants and HeadMonotone passed:
+42,133,769 generated / 7,224,016 distinct states, depth 47 (TLC 2.19, same jar).
+This config permits terminal stuttering (`CHECK_DEADLOCK FALSE`); it does not
+prove deadlock freedom. The original `Fix_mix_small` replay stopped with a
+terminal deadlock at depth 23 after 28,242,446 / 5,592,191 states (callers Done,
+gc_loop); it is not reported as a completed green run. No protocol guards in
+ChunkLifecycleFixed were changed.
 
 `PrecopyFixedAdmission.tla` checks cost admission over five physical rounds.
 A known estimate fits the 1.2-second allowance, or uses the five-second declared
@@ -408,3 +459,61 @@ The same command with each negative config exited12 at its intended invariant:
 third `NoUploadBeforeAdmission`, the fourth `OverrideVisible`, and the last
 `AuthorityAtPublication`. Source tests separately check time/metadata handling,
 no-upload refusal, preserved bytes, uncertain outcomes and typed API dispatch.
+
+
+## GC clock allowance
+
+`GCClockSkew.tla` checks the time-admission portion of M6 GC: pairwise clock
+bias -S/0/+S, timestamp truncation 0/Q, and retaining future-dated roots while
+an independently eligible object progresses. It abstracts the existing complete
+root scan, exclusive copy settlement and higher-epoch guards; it does not prove
+those protocols or safety with clocks outside the configured bound.
+
+Local TLC2.19 / Java21 run 2026-11-21, jar SHA256
+`936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`:
+`java -Xmx512m -cp <jar> tlc2.TLC -config GCClockSkew_safe.cfg GCClockSkew`
+from `docs/spec`, each run with its own metadir. Bounds G=3, S=1, Q=1,
+Born=10, MaxT=17. Positive exhausted: exit0, 96 generated / 96 distinct states,
+queue empty, depth16. `GCClockSkew_no_skew.cfg` exited12 at `NoEarlyExpiry`
+(43/43, depth8); `GCClockSkew_no_resolution.cfg` exited12 at `NoEarlyExpiry`
+(44/44, depth8); `GCClockSkew_abort_future.cfg` exited12 at
+`IndependentProgress` (11/11, depth2). Source tests independently cover
+persisted-mark compatibility, future-clock resets and authority-preserving expiry.
+
+
+## Per-object GC DELETE progress
+
+`GCDeleteProgress.tla` models the narrow sweep transition after a complete,
+authorised mark: three ordered candidates, first DELETE definitively rejected,
+later deletes accepted. It checks that the rejected fid is never reported
+successful, the failure is visible, and later candidates progress. Root/epoch
+admission, elapsed coverage and persistence are outside this small abstraction;
+source tests retain those guards and reopen independent collectors between passes.
+
+Local TLC2.19 / Java21, same jar SHA256 as GCClockSkew above, 2026-11-21:
+`java -Xmx512m -cp <jar> tlc2.TLC -config GCDeleteProgress_safe.cfg GCDeleteProgress`
+from `docs/spec`, separate metadirs. Positive exhausted exit0, 4 generated /4
+distinct states, depth4. `GCDeleteProgress_stop.cfg` exits12 at `LaterProgress`
+(2 generated /2 distinct, depth2). The HTTP source red uses an actual400 and
+checks later reclamation, retained failed tombstones, younger-object progress
+across separate collectors and permanent no-rebind behavior.
+
+### Frozen budget response quantities (F2)
+
+The additive `candidateTail` and typed refusal quantities share storage's
+complete estimate, including its existing margin. Tail-known alone is not
+complete-estimate-known. `FrozenDetachBudget` now includes estimate zero and
+derives `FrozenEstimateKnown` and `MaxRefreezeQuiesce`; `ReportSlackSound` checks
+positive slack implies a known positive estimate and slack + estimate = limit.
+These durations are same-host advice, not a physical completion bound or a change
+to the existing wall-origin request. Admission still rechecks at its barrier.
+
+TLC 2.19, tools SHA256 `936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`,
+local 2026-11-21 10:43Z: `FrozenDetachBudget.cfg` exhausted 829 generated / 535
+distinct states, depth 6, queue empty, no invariant violation. Bounds: elapsed
+{0,30,60}, estimate {0,5,30,60} (then barrier growth), known/force/authority Boolean;
+limit 50, no physical I/O latency. Raw quantities and JSON preservation are
+checked by native Go tests; this derived arithmetic model does not model the HTTP
+encoder, sampler atomicity, orchestrator timing or an unbounded estimator overrun.
+
+#344 review qualification: `TestChunkFrozenDrainRefusalCarriesObservedBudget` drives a real admitted Sync through frontend drain expiry, durable provider and HTTP, with no report injection; `TestFrozenDrainObservationPreservesKnownBeforeReasonMutation` covers the known observation. `TestFrozenSaturatedTailRemainsKnownButNonActionable` and the literal 60 s/61 s candidate cases preserve the existing saturation sentinel (zero slack, not a complete duration). These native controls add no model claim or admission guard.

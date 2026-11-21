@@ -15,11 +15,11 @@ func TestWALStoreChunkFlags(t *testing.T) {
 		return append(phase150RequiredBlockvolumeArgs(), extra...)
 	}
 	f, err := parseFlags(base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk",
-		"--chunk-filer=127.0.0.1:18888", "--chunk-capture-interval=30s"))
+		"--chunk-filer=127.0.0.1:18888", "--chunk-capture-interval=5m"))
 	if err != nil {
 		t.Fatalf("walstore-chunk with a filer: %v", err)
 	}
-	if f.chunk.filer != "127.0.0.1:18888" || f.chunk.path != defaultChunkPath || f.chunk.captureInterval != 30*time.Second || f.chunk.controlEndpoint {
+	if f.chunk.filer != "127.0.0.1:18888" || f.chunk.path != defaultChunkPath || f.chunk.captureInterval != 5*time.Minute || f.chunk.controlEndpoint {
 		t.Fatalf("parsed chunk flags = %+v", f.chunk)
 	}
 	f, err = parseFlags(base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1",
@@ -31,33 +31,37 @@ func TestWALStoreChunkFlags(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d.chunk.captureInterval != 0 || d.chunk.dirtyThreshold != 512 {
-		t.Fatalf("scheduler defaults interval %s threshold %d, want timer off and 512", d.chunk.captureInterval, d.chunk.dirtyThreshold)
+	if d.chunk.captureInterval != 0 || d.chunk.maintenanceInterval != time.Hour || d.chunk.automaticGC {
+		t.Fatalf("scheduler defaults interval %s, want capture off (0), maintenance 1h and GC off", d.chunk.captureInterval)
+	}
+	on, err := parseFlags(base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-capture-interval=15m"))
+	if err != nil || on.chunk.captureInterval != 15*time.Minute {
+		t.Fatalf("opting in to a 15m periodic cut: %+v %v", on.chunk, err)
 	}
 	off, err := parseFlags(base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1",
-		"--chunk-capture-interval=0", "--chunk-dirty-threshold=0"))
-	if err != nil || off.chunk.captureInterval != 0 || off.chunk.dirtyThreshold != 0 {
-		t.Fatalf("disabling both triggers: %+v %v", off.chunk, err)
+		"--chunk-capture-interval=0"))
+	if err != nil || off.chunk.captureInterval != 0 {
+		t.Fatalf("disabling the timer: %+v %v", off.chunk, err)
 	}
 	if _, err := parseFlags(base("--durable-root=/tmp/sw-block", "--durable-impl=walstore")); err != nil {
 		t.Fatalf("walstore with the chunk defaults untouched: %v", err)
 	}
 	refused := map[string][]string{
-		"no filer":               base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk"),
-		"no durable root":        base("--durable-impl=walstore-chunk", "--chunk-filer=127.0.0.1:18888"),
-		"relative path":          base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-path=swblock"),
-		"root path":              base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-path=/"),
-		"negative interval":      base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-capture-interval=-1s"),
-		"chunk flag on walstore": base("--durable-root=/tmp/sw-block", "--durable-impl=walstore", "--chunk-filer=x:1"),
-		"chunk path on walstore": base("--durable-root=/tmp/sw-block", "--durable-impl=walstore", "--chunk-path=/other"),
+		"no filer":                base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk"),
+		"no durable root":         base("--durable-impl=walstore-chunk", "--chunk-filer=127.0.0.1:18888"),
+		"relative path":           base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-path=swblock"),
+		"root path":               base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-path=/"),
+		"below OSS capture floor": base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-capture-interval=4m59s"),
+		"negative maintenance":    base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-maintenance-interval=-1s"),
+		"negative interval":       base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-capture-interval=-1s"),
+		"chunk flag on walstore":  base("--durable-root=/tmp/sw-block", "--durable-impl=walstore", "--chunk-filer=x:1"),
+		"chunk path on walstore":  base("--durable-root=/tmp/sw-block", "--durable-impl=walstore", "--chunk-path=/other"),
 		"control endpoint on walstore": base("--durable-root=/tmp/sw-block", "--durable-impl=walstore", "--status-addr=127.0.0.1:0",
 			"--chunk-control-endpoint"),
 		"control endpoint without a status listener": base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk",
 			"--chunk-filer=x:1", "--chunk-control-endpoint"),
 		"zero upload concurrency": base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-upload-concurrency=0"),
 		"too many uploads":        base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-upload-concurrency=65"),
-		"negative threshold":      base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-dirty-threshold=-1"),
-		"threshold on walstore":   base("--durable-root=/tmp/sw-block", "--durable-impl=walstore", "--chunk-dirty-threshold=8"),
 		"interval on walstore":    base("--durable-root=/tmp/sw-block", "--durable-impl=walstore", "--chunk-capture-interval=5s"),
 	}
 	for name, args := range refused {
@@ -119,5 +123,15 @@ func TestChunkHolderIsServerAndReplica(t *testing.T) {
 	}
 	if got := chunkHolder(f); got != "m02/r1" {
 		t.Fatalf("chunk holder %q, want m02/r1", got)
+	}
+}
+
+// --chunk-dirty-threshold is gone: a cut stages by the
+// copy-on-write budget (M5 Stage), so the flag never had an effect. A unit
+// that still passes it fails at start.
+func TestChunkDirtyThresholdFlagIsGone(t *testing.T) {
+	args := append(phase150RequiredBlockvolumeArgs(), "--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-dirty-threshold=512")
+	if _, err := parseFlags(args); err == nil || !strings.Contains(err.Error(), "flag provided but not defined") {
+		t.Fatalf("--chunk-dirty-threshold: %v; want flag provided but not defined", err)
 	}
 }

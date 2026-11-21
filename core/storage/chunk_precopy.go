@@ -80,6 +80,7 @@ type PrecopyAttempt struct {
 
 // PrecopyReport records admission estimates, not a worst-case latency proof.
 type PrecopyReport struct {
+	FrozenBudget
 	replayed bool // transport-local marker; never replaces the original freeze telemetry.
 
 	// Live barrier prefix is diagnostic, not additive to the selected forecast.
@@ -159,7 +160,7 @@ func (l *chunkLayerImpl) precopyDetach(ctx context.Context, prepare func(context
 	if err := l.lockPrecopy(ctx); err != nil {
 		return ChunkCutResult{}, err
 	}
-	defer l.capMu.Unlock()
+	defer l.unlockCap()
 	defer func() {
 		if result.Precopy.Frozen && !result.Precopy.IsReplay() {
 			l.RememberDetachReport(result.Precopy)
@@ -218,6 +219,7 @@ func (l *chunkLayerImpl) precopyDetach(ctx context.Context, prepare func(context
 	}
 	l.precopyFreeze = func(tail uint64, barrierStart time.Time, current chunkCutStats) bool {
 		report = l.precopyEstimate(tail, report.Attempts)
+		l.observeFrozen(&report, guestFreeze, externallyFrozen)
 		report.Drain = drain
 		report.DrainTimedOut = errors.Is(drainErr, context.DeadlineExceeded)
 		if drainErr != nil {
@@ -524,5 +526,5 @@ func (l *chunkLayerImpl) candidateTailBytes() uint64 {
 
 func (l *chunkLayerImpl) estimateCandidateTail(bytes uint64) *ChunkCandidateTail {
 	r := l.precopyEstimate(bytes, 0)
-	return &ChunkCandidateTail{Bytes: bytes, Estimate: r.TailEstimate, BytesPerSecond: r.BytesPerSecond, RateSamples: r.RateSamples, SampleAge: r.SampleAge, Known: bytes == 0 || r.BytesPerSecond > 0}
+	return &ChunkCandidateTail{FrozenBudget: r.frozenBudgetEstimate(), Bytes: bytes, Estimate: r.TailEstimate, BytesPerSecond: r.BytesPerSecond, RateSamples: r.RateSamples, SampleAge: r.SampleAge, Known: bytes == 0 || r.BytesPerSecond > 0}
 }

@@ -24,7 +24,7 @@ var (
 	rowID     = regexp.MustCompile("^\\| `(INV-[A-Z0-9-]+)` \\|")
 	testName  = regexp.MustCompile("`(Test[A-Za-z0-9_]+)`")
 	testFunc  = regexp.MustCompile(`(?m)^func (Test[A-Za-z0-9_]+)\(`)
-	countLine = regexp.MustCompile("(\\d+) `INV-` rows: (\\d+) ACTIVE, (\\d+) STUB, (\\d+) ARCHIVED")
+	countLine = regexp.MustCompile("(\\d+) (?:`INV-` )?rows: (\\d+) ACTIVE, (\\d+) STUB, (\\d+) ARCHIVED")
 )
 
 func repoRoot(t *testing.T) string {
@@ -174,8 +174,8 @@ func TestInvariantRowCountMatchesTables(t *testing.T) {
 	for _, r := range rows {
 		by[r.status]++
 	}
-	want := fmt.Sprintf("%d `INV-` rows: %d ACTIVE, %d STUB, %d ARCHIVED", len(rows), by["ACTIVE"], by["STUB"], by["ARCHIVED"])
-	m := countLine.FindString(doc)
+	want := fmt.Sprintf("%d rows: %d ACTIVE, %d STUB, %d ARCHIVED", len(rows), by["ACTIVE"], by["STUB"], by["ARCHIVED"])
+	m := strings.Replace(countLine.FindString(doc), "`INV-` ", "", 1)
 	if m == "" {
 		t.Fatalf("invariants.md states no row count; the tables hold: %s", want)
 	}

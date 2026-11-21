@@ -320,12 +320,14 @@ func (p *DurableProvider) attachChunk(ctx context.Context, volumeID string, h *v
 // startChunkLoop starts the periodic cuts of an attached layer, if configured
 // and not already running. The caller holds h.attachMu and p.mu.
 func (p *DurableProvider) startChunkLoop(volumeID string, h *volHandle, layer storage.ChunkLayer) {
-	if p.cfg.ChunkCaptureInterval <= 0 || h.chunkStop != nil {
+	if (p.cfg.ChunkCaptureInterval <= 0 && (p.cfg.ChunkMaintenanceInterval <= 0 || p.cfg.ChunkMaintenance == nil)) || h.chunkStop != nil {
 		return
 	}
 	loopCtx, cancel := context.WithCancel(context.Background())
 	h.chunkStop, h.chunkDone = cancel, make(chan struct{})
-	go p.chunkLoop(loopCtx, volumeID, layer, h.chunkDone)
+	lin := h.chunkLineage
+	current := func() bool { return p.maintenanceCurrent(volumeID, h, layer, lin) }
+	go p.chunkBackground(loopCtx, cancel, volumeID, layer, h.chunkDone, current)
 }
 
 func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h *volHandle) (storage.ChunkLayer, error) {
@@ -374,6 +376,7 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 		remote = &manifestBoundRemote{closeBoundRemote: bound, builder: builder}
 	}
 	cfg := storage.ChunkLayerConfig{
+		OnPublishSettled:    p.publishSettledHook(volumeID),
 		ChunkBlocks:         p.cfg.ChunkBlocks,
 		RestoreChunkBytes:   uint64(ws.BlockSize()) * uint64(p.cfg.ChunkBlocks),
 		HeadCoolingWindow:   p.cfg.ChunkHeadCoolingWindow,
@@ -383,11 +386,11 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 		ReadMissTimeout:     p.cfg.ChunkReadMissTimeout,
 		HydrationWorkers:    p.cfg.ChunkHydrationWorkers,
 		HydrationQueueDepth: p.cfg.ChunkHydrationQueueDepth,
-		BarrierBound:        p.cfg.ChunkDirtyThreshold,
 		UploadConcurrency:   p.cfg.ChunkUploadConcurrency,
 		PayloadMemoryBudget: p.cfg.ChunkPayloadMemoryBudget,
 		Budget:              p.cfg.ChunkBudget,
 		COWSpillLimit:       p.cfg.ChunkCOWSpillLimit,
+		COWSpillFree:        spillFree(p.cfg.StorageRoot),
 		CaptureAllowed: func() error {
 			cur := p.view.Projection()
 			if !cur.Healthy || cur.VolumeID != volumeID || lin.volumeID != volumeID {
@@ -466,7 +469,11 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 		cfg.RestoreGuard = &storage.ChunkHeadVersion{Gen: head.Gen, Epoch: head.Epoch}
 	}
 
-	return storage.AttachChunkLayer(ws, remote, cfg)
+	layer, attachErr := storage.AttachChunkLayer(ws, remote, cfg)
+	if attachErr == nil {
+		h.chunkLineage = lin
+	}
+	return layer, attachErr
 }
 
 // closeBoundRemote ends every remote call when the provider closes, so a
@@ -635,7 +642,7 @@ const (
 
 // cutPolicy decides when an automatic cut is due. The remote holds
 // snapshots, not live data: cuts are published at Snapshot, Detach/stop
-// and explicit Cut, and automatically only by the operator's timer:
+// and explicit Cut, and automatically by the configured timer:
 //   - the timer fires once interval has passed since the last successful
 //     cut of any kind (explicit Cut, Snapshot and Detach included); zero
 //     disables it, and with it every automatic cut;
@@ -760,6 +767,7 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 		if !ok {
 			continue
 		}
+		cutCtx, cancel := p.chunkCutContext(ctx)
 		trace := p.testChunkLoopTrace
 		if trace != nil {
 			trace("due", ls.LastCutNs, false)
@@ -769,19 +777,21 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 			// A cut that completed after this decision (an explicit one
 			// running meanwhile) restarted the timer: no cut now.
 			var skipped bool
-			_, skipped, err = pc.CutUnlessCutSince(ctx, ls.LastCutNs)
+			_, skipped, err = pc.CutUnlessCutSince(cutCtx, ls.LastCutNs)
 			if trace != nil {
 				trace("cut", ls.LastCutNs, skipped)
 			}
 			if skipped {
+				cancel()
 				continue
 			}
 		} else {
-			_, err = layer.Cut(ctx)
+			_, err = layer.Cut(cutCtx)
 			if trace != nil {
 				trace("cut", ls.LastCutNs, false)
 			}
 		}
+		cancel()
 		s = pol.after(s, start, time.Now(), err)
 		if err != nil && !errors.Is(err, storage.ErrChunkCaptureRefused) && ctx.Err() == nil {
 			log.Printf("durable: %s chunk cut for volume=%s: %v (retry in %s)", reason, volumeID, err, s.backoff)
@@ -789,15 +799,122 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 	}
 }
 
+// chunkBackground owns both workers and their cancellation. A fence is observed
+// even while either worker is waiting on a cooperative remote call. INV-MAINT-JOIN:
+// done closes only after every admitted worker has returned.
+func (p *DurableProvider) chunkBackground(ctx context.Context, cancel context.CancelFunc, volumeID string, layer storage.ChunkLayer, done chan struct{}, current func() bool) {
+	defer close(done)
+	defer cancel()
+	var workers sync.WaitGroup
+	if p.cfg.ChunkCaptureInterval > 0 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			cutDone := make(chan struct{})
+			p.chunkLoop(ctx, volumeID, layer, cutDone)
+		}()
+	}
+	if p.cfg.ChunkMaintenanceInterval > 0 && p.cfg.ChunkMaintenance != nil {
+		workers.Add(1)
+		go func() { defer workers.Done(); p.chunkMaintenanceLoop(ctx, volumeID, layer, current) }()
+	}
+	timer := time.NewTicker(chunkSchedulePoll)
+	defer timer.Stop()
+	for ctx.Err() == nil {
+		select {
+		case <-ctx.Done():
+		case <-timer.C:
+			if layer.Fenced() {
+				cancel()
+			}
+		}
+	}
+	workers.Wait()
+}
+
+// maintenanceCurrent binds the pass to the attached handle AND its lineage.
+// The projection can remain healthy while a different owner replaces it.
+func (p *DurableProvider) maintenanceCurrent(volumeID string, h *volHandle, layer storage.ChunkLayer, lin chunkLineage) bool {
+	p.mu.Lock()
+	active := !p.closed && p.volumes[volumeID] == h && h.chunk == layer
+	p.mu.Unlock()
+	cur := p.view.Projection()
+	return active && chunkAuthority(cur, volumeID) && cur.VolumeID == lin.volumeID && cur.ReplicaID == lin.replicaID && cur.Epoch == lin.epoch && cur.EndpointVersion == lin.endpoint
+}
+
+func (p *DurableProvider) chunkMaintenanceLoop(ctx context.Context, volumeID string, layer storage.ChunkLayer, current func() bool) {
+	interval := p.cfg.ChunkMaintenanceInterval
+	due := time.Now().Add(interval)
+	if p.cfg.ChunkStagger {
+		due = time.Now().Add(hostlimit.Phase(volumeID+":maintenance", interval))
+	}
+	timer := time.NewTimer(time.Until(due))
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		if ctx.Err() != nil || layer.Fenced() {
+			return
+		}
+		if !current() {
+			return
+		}
+		timeout := p.cfg.ChunkMaintenanceTimeout
+		if timeout <= 0 {
+			timeout = time.Minute
+		}
+		passCtx, cancel := context.WithTimeout(ctx, timeout)
+		// The projection has no change channel. One bounded watcher belongs to
+		// this pass, never to an individual tick; cancellation is joined below.
+		watchDone := make(chan struct{})
+		go func() {
+			defer close(watchDone)
+			tick := time.NewTicker(chunkSchedulePoll)
+			defer tick.Stop()
+			for {
+				select {
+				case <-passCtx.Done():
+					return
+				case <-tick.C:
+					if layer.Fenced() || !current() {
+						cancel()
+						return
+					}
+				}
+			}
+		}()
+		err := p.cfg.ChunkMaintenance(passCtx, volumeID)
+		cancel()
+		<-watchDone
+		if err != nil && ctx.Err() == nil {
+			log.Printf("durable: maintenance volume=%s: %v", volumeID, err)
+		}
+		// Completion-relative reset coalesces all elapsed ticks; no catch-up queue.
+		timer.Reset(interval)
+	}
+}
+
 func (p *DurableProvider) stopChunkLoop(h *volHandle) {
 	p.mu.Lock()
 	stop, done := h.chunkStop, h.chunkDone
-	h.chunkStop = nil
 	p.mu.Unlock()
 	if stop != nil {
 		stop()
+	}
+	// Every concurrent stopper joins the same lifetime; none can clear ownership
+	// while an earlier stopper is still waiting for an admitted remote call.
+	if done != nil {
 		<-done
 	}
+	p.mu.Lock()
+	if h.chunkDone == done {
+		h.chunkStop = nil
+		h.chunkDone = nil
+	}
+	p.mu.Unlock()
 }
 
 func (p *DurableProvider) chunkLayer(volumeID string) (storage.ChunkLayer, error) {
@@ -831,6 +948,8 @@ func (p *DurableProvider) chunkHandle(volumeID string) (*volHandle, storage.Chun
 // CaptureVolume takes one quiesced cut of volumeID and publishes it to the
 // remote. It returns the cut's LSN.
 func (p *DurableProvider) CaptureVolume(ctx context.Context, volumeID string) (uint64, error) {
+	ctx, cancel := p.chunkCutContext(ctx)
+	defer cancel()
 	layer, err := p.chunkLayer(volumeID)
 	if err != nil {
 		return 0, err
@@ -841,6 +960,8 @@ func (p *DurableProvider) CaptureVolume(ctx context.Context, volumeID string) (u
 // MakeVolumeRemoteDurable returns nil only once volumeID's writes up to lsn
 // are published in the remote HEAD (snapshot, detach, migrate).
 func (p *DurableProvider) MakeVolumeRemoteDurable(ctx context.Context, volumeID string, lsn uint64) error {
+	ctx, cancel := p.chunkCutContext(ctx)
+	defer cancel()
 	layer, err := p.chunkLayer(volumeID)
 	if err != nil {
 		return err
@@ -863,7 +984,17 @@ func chunkFenced(volumeID string, h *volHandle) error {
 // and the cut's statistics (B9 W2 Â§2.4, Â§3.1). With minLSN > 0 it is
 // MakeRemoteDurable(minLSN) returning the cut: an LSN never written is
 // refused before anything is published, and the cut must reach minLSN.
+func (p *DurableProvider) chunkCutContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	timeout := p.cfg.ChunkCutTimeout
+	if timeout <= 0 {
+		timeout = 5 * time.Minute
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
 func (p *DurableProvider) CutVolume(ctx context.Context, volumeID string, minLSN uint64) (storage.ChunkCutResult, error) {
+	ctx, cancel := p.chunkCutContext(ctx)
+	defer cancel()
 	h, layer, err := p.chunkHandle(volumeID)
 	if err != nil {
 		return storage.ChunkCutResult{}, err
@@ -1173,4 +1304,13 @@ func (r *manifestBoundRemote) PrepareManifest(ctx context.Context, base, next st
 	c, end := r.bind(ctx)
 	defer end()
 	return r.builder.PrepareManifest(c, base, next, chunkBytes)
+}
+
+// publishSettledHook adapts ChunkOnPublishSettled to one volume's layer.
+func (p *DurableProvider) publishSettledHook(volumeID string) func(context.Context, storage.ChunkHead, storage.ChunkHead) {
+	hook := p.cfg.ChunkOnPublishSettled
+	if hook == nil {
+		return nil
+	}
+	return func(ctx context.Context, prev, next storage.ChunkHead) { hook(ctx, volumeID, prev, next) }
 }

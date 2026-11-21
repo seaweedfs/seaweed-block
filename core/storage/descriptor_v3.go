@@ -234,7 +234,7 @@ func (p *descriptorPublisherV3) publishLockedCoreV3(mutate func(next *descriptor
 		if werr != nil && p.io.latch != nil {
 			// Latch inside the leaf, before fileSyncMu is released: a store
 			// Sync queued on fileSyncMu must not fsync and acknowledge
-			// through this uncertain slot (codex01 row 3 round 2).
+			// through this uncertain slot.
 			p.io.latch(fmt.Errorf("%w: %w", ErrDescriptorPublishUncertain, werr))
 		}
 		return werr

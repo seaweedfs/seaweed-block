@@ -16,16 +16,16 @@ const defaultHydrationQueueDepth = 64
 // ChunkHydrationStats separates wait refusals from owned fetch outcomes.
 // A wait refusal is not necessarily a wire completion (a caller may cancel).
 type ChunkHydrationStats struct {
-	WorkerLimit  int
-	QueueDepth   int
-	Active       int
-	Queued       int
-	WaitCalls    uint64
-	Joined       uint64
-	WaitRefusals uint64
-	Fetches      uint64
-	Completed    uint64
-	FetchErrors  uint64
+	WorkerLimit  int    // fetch workers allowed (--chunk-hydration-workers)
+	QueueDepth   int    // fetch queue capacity (--chunk-hydration-queue-depth)
+	Active       int    // fetches running now
+	Queued       int    // fetches waiting for a worker now
+	WaitCalls    uint64 // reads that waited for a chunk to arrive
+	Joined       uint64 // of those, reads that joined a fetch already running
+	WaitRefusals uint64 // waits that ended without the chunk (the caller cancelled, or the fetch was not admitted)
+	Fetches      uint64 // fetches started
+	Completed    uint64 // fetches that installed the chunk
+	FetchErrors  uint64 // fetches that failed
 }
 
 type chunkHydrationFlight struct {
@@ -34,6 +34,7 @@ type chunkHydrationFlight struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	done     chan struct{}
+	settled  chan struct{} // closed once its I/O is over: after fillOnce, or removal unrun
 	running  bool
 	waiters  int
 	err      error
@@ -76,38 +77,14 @@ func (l *chunkLayerImpl) OnReadMissContext(ctx context.Context, lba uint64) ([]b
 			l.stMu.Unlock()
 			return nil, hydrationPending(err)
 		}
-		gen := l.absentGen[idx]
-		f := l.hydration[idx]
-		stale := f != nil && (f.gen != gen || f.ref != ref)
-		if stale {
-			f.cancel()
-			// The old worker remains owned and joined, but cannot delay a
-			// new generation or remove its replacement when it finishes.
-			delete(l.hydration, idx)
-			close(f.done)
-			f = nil
+		f, joined, err := l.hydrationFlightLocked(idx, ref)
+		if err != nil {
+			l.stats.Hydration.WaitRefusals++
+			l.stMu.Unlock()
+			return nil, err
 		}
-		if f != nil && !stale {
+		if joined {
 			l.stats.Hydration.Joined++
-		}
-		if f == nil {
-			if len(l.hydration) >= l.cfg.HydrationQueueDepth {
-				l.stats.Hydration.WaitRefusals++
-				l.stMu.Unlock()
-				return nil, hydrationPending(nil)
-			}
-			if !l.hydrationStarted {
-				l.hydration = make(map[uint64]*chunkHydrationFlight)
-				l.hydrationWake = make(chan struct{}, 1)
-				l.hydrationStarted = true
-				l.wg.Add(l.cfg.HydrationWorkers)
-				for i := 0; i < l.cfg.HydrationWorkers; i++ {
-					go l.hydrationWorker()
-				}
-			}
-			work, cancel := context.WithCancel(l.ctx)
-			f = &chunkHydrationFlight{idx: idx, gen: gen, ref: ref, ctx: work, cancel: cancel, done: make(chan struct{})}
-			l.hydration[idx] = f
 		}
 		f.waiters++
 		l.wakeHydrationLocked()
@@ -138,7 +115,7 @@ func (l *chunkLayerImpl) OnReadMissContext(ctx context.Context, lba uint64) ([]b
 		f.waiters--
 		closed := l.closed
 		changed := l.absentGen[idx] != f.gen || l.head.Chunks[idx] != f.ref
-		err := f.err
+		err = f.err
 		if !closed && !changed && errors.Is(err, ErrChunkHydrationPending) {
 			l.stats.Hydration.WaitRefusals++
 		}
@@ -155,6 +132,46 @@ func (l *chunkLayerImpl) OnReadMissContext(ctx context.Context, lba uint64) ([]b
 		// A local override or an intervening HEAD/absence change is resolved
 		// through the normal path, under the same original caller deadline.
 	}
+}
+
+// hydrationFlightLocked returns the flight for chunk idx's current absence
+// (generation and HEAD ref): an existing one (joined) or a new queued one. A
+// stale flight of an older generation is settled and replaced. It refuses with
+// hydrationPending when the queue is full. The caller holds stMu, counts its
+// own waiter and wakes the workers.
+func (l *chunkLayerImpl) hydrationFlightLocked(idx uint64, ref chunkRef) (*chunkHydrationFlight, bool, error) {
+	gen := l.absentGen[idx]
+	f := l.hydration[idx]
+	if f != nil && (f.gen != gen || f.ref != ref) {
+		f.cancel()
+		// The old worker remains owned and joined, but cannot delay a
+		// new generation or remove its replacement when it finishes.
+		delete(l.hydration, idx)
+		close(f.done)
+		if !f.running {
+			close(f.settled) // never picked up: no I/O will run
+		}
+		f = nil
+	}
+	if f != nil {
+		return f, true, nil
+	}
+	if len(l.hydration) >= l.cfg.HydrationQueueDepth {
+		return nil, false, hydrationPending(nil)
+	}
+	if !l.hydrationStarted {
+		l.hydration = make(map[uint64]*chunkHydrationFlight)
+		l.hydrationWake = make(chan struct{}, 1)
+		l.hydrationStarted = true
+		l.wg.Add(l.cfg.HydrationWorkers)
+		for i := 0; i < l.cfg.HydrationWorkers; i++ {
+			go l.hydrationWorker()
+		}
+	}
+	work, cancel := context.WithCancel(l.ctx)
+	f = &chunkHydrationFlight{idx: idx, gen: gen, ref: ref, ctx: work, cancel: cancel, done: make(chan struct{}), settled: make(chan struct{})}
+	l.hydration[idx] = f
+	return f, false, nil
 }
 
 func (l *chunkLayerImpl) wakeHydrationLocked() {
@@ -196,6 +213,7 @@ func (l *chunkLayerImpl) hydrationWorker() {
 		resolved, err := l.fillOnce(fetch, next.idx, next.gen, next.ref)
 		cancel()
 		next.cancel()
+		close(next.settled)
 		l.stMu.Lock()
 		if hydrationContextCauseOnly(err) {
 			err = hydrationPending(err)
@@ -225,6 +243,7 @@ func (l *chunkLayerImpl) closeHydrationLocked() {
 			f.err = errChunkLayerClosed
 			delete(l.hydration, idx)
 			close(f.done)
+			close(f.settled)
 		}
 	}
 }

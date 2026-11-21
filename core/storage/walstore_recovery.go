@@ -65,7 +65,7 @@ func (s *WALStore) CheckpointLSNForPOC() uint64 {
 }
 
 // scanLBAsV3 is ScanLBAs on a v3 store (the primary's catch-up source).
-// It is all or nothing (codex01 4caac700 P1s): it captures the recovery
+// It is all or nothing: it captures the recovery
 // generation, the descriptor and the head, refuses an installing source
 // (ErrBaseInstalling) before emitting anything, scans the trusted v3 chain
 // into memory, revalidates the capture (a Recover, reset or BASE transition

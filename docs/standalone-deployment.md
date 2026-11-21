@@ -124,7 +124,6 @@ the example units, which turn them into flags. blockvolume itself reads only
 | `SWB_CHUNK_COLLECTION`, `SWB_CHUNK_REPLICATION` | `--chunk-collection`, `--chunk-replication` | empty (filer default) | Placement of chunk needles |
 | `SWB_CHUNK_CAPTURE_INTERVAL` | `--chunk-capture-interval` | `0` (no timer) | Automatic cut interval, e.g. `15m` |
 | `SWB_CHUNK_UPLOAD_CONCURRENCY` | `--chunk-upload-concurrency` | `8` | Parallel chunk uploads (1..64) |
-| `SWB_CHUNK_DIRTY_THRESHOLD` | `--chunk-dirty-threshold` | `512` | Bound on one cut's barrier copy, in chunks |
 | `SWB_CHUNK_CONTROL_ENDPOINT` | `--chunk-control-endpoint` | `false` | `/chunk/*` routes on the status listener |
 | `SWB_WORKSPACE_LEASE` | `--workspace-lease` | `false` | Require a master lease; fail closed without one |
 | `SWB_VOLUME_EXTRA_ARGS` | any | empty | Other flags (Kubernetes gate and source-gated flags) |

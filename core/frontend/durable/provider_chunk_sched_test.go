@@ -4,6 +4,7 @@ package durable_test
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -14,13 +15,12 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
-func schedProvider(t *testing.T, remote storage.ChunkRemote, interval time.Duration, threshold int) *durable.DurableProvider {
+func schedProvider(t *testing.T, remote storage.ChunkRemote, interval time.Duration) *durable.DurableProvider {
 	t.Helper()
 	p, err := durable.NewDurableProvider(durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096,
 		NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
 		ChunkCaptureInterval: interval,
-		ChunkDirtyThreshold:  threshold,
 		ChunkRemoteFor:       func(string) (storage.ChunkRemote, error) { return remote, nil },
 	}, v1View())
 	if err != nil {
@@ -40,12 +40,12 @@ func headGen(t *testing.T, remote storage.ChunkRemote) storage.ChunkHead {
 }
 
 // The remote holds snapshots: with the timer off, no number of dirty
-// chunks publishes a cut on its own (the threshold only bounds a cut).
-func TestWALStoreChunk_DirtyThresholdNeverTriggersCut(t *testing.T) {
+// chunks publishes a cut on its own.
+func TestWALStoreChunk_DirtyChunksNeverTriggerCut(t *testing.T) {
 	remote := storage.NewMemChunkRemote()
-	p := schedProvider(t, remote, 0, 2)
+	p := schedProvider(t, remote, 0)
 	s := openRecovered(t, p)
-	for c := uint32(0); c < 4; c++ { // four dirty chunks, twice the threshold
+	for c := uint32(0); c < 4; c++ { // four dirty chunks
 		if _, err := s.Write(c*pcChunkBlocks+1, block(byte(c+1))); err != nil {
 			t.Fatal(err)
 		}
@@ -71,7 +71,7 @@ func TestWALStoreChunk_DirtyThresholdNeverTriggersCut(t *testing.T) {
 func TestWALStoreChunk_ExplicitCutRestartsTheTimer(t *testing.T) {
 	const interval = 3 * time.Second
 	remote := storage.NewMemChunkRemote()
-	p := schedProvider(t, remote, interval, 0)
+	p := schedProvider(t, remote, interval)
 	s := openRecovered(t, p)
 	begin := time.Now()
 
@@ -165,6 +165,44 @@ func TestWALStoreChunk_StatusHasNoChunkSectionForWALStore(t *testing.T) {
 	}
 }
 
+// ChunkOnPublishSettled sees every confirmed publication of a volume, with
+// its volume id and the HEAD before and after it; a no-op capture is not one.
+func TestWALStoreChunk_PublishSettledHook(t *testing.T) {
+	remote := storage.NewMemChunkRemote()
+	var mu sync.Mutex
+	var got []string
+	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096,
+		NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
+		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
+		ChunkOnPublishSettled: func(_ context.Context, volumeID string, prev, next storage.ChunkHead) {
+			mu.Lock()
+			got = append(got, fmt.Sprintf("%s:%d->%d", volumeID, prev.Gen, next.Gen))
+			mu.Unlock()
+		},
+	}, v1View())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	s := openRecovered(t, p)
+	for i, lba := range []uint32{1, 0, pcChunkBlocks + 1} {
+		if lba != 0 {
+			if _, err := s.Write(lba, block(byte(i+1))); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := p.CaptureVolume(context.Background(), "v1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 2 || got[0] != "v1:0->1" || got[1] != "v1:1->2" {
+		t.Fatalf("reports %v; want [v1:0->1 v1:1->2] (the middle capture changed nothing)", got)
+	}
+}
+
 // gatedCASRemote holds the next HEAD CAS, once armed, until it is released
 // (or its context ends), and reports when that CAS started.
 type gatedCASRemote struct {
@@ -204,7 +242,7 @@ func TestWALStoreChunk_ExplicitCutOverlappingTheTimerRestartsIt(t *testing.T) {
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(remote.release) }) }
 	t.Cleanup(release)
-	p := schedProvider(t, remote, interval, 0)
+	p := schedProvider(t, remote, interval)
 	events := make(chan loopEvent, 64)
 	durable.SetTestChunkLoopTrace(p, func(event string, lastCutNs int64, skipped bool) {
 		select {
