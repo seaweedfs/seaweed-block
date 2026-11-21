@@ -96,3 +96,25 @@ func TestPrecopyAmendment4AdmissionBoundaries(t *testing.T) {
 		t.Fatal("unknown samples admitted")
 	}
 }
+
+func TestPrecopyFixedWindowUsesAvailableFreshSamples(t *testing.T) {
+	_, _, l, _ := precopyLayer(t, 1024, 0)
+	for _, n := range []int{0, 1, 2} {
+		t.Run(string(rune('0'+n)), func(t *testing.T) {
+			l.precopySamples = nil
+			for i := 0; i < n; i++ {
+				l.precopySamples = append(l.precopySamples, precopySample{at: time.Now(), fixed: time.Duration(i+1) * 100 * time.Millisecond})
+			}
+			r := l.precopyEstimate(0, 0)
+			if n == 0 {
+				if r.Reason != "samples_unknown" {
+					t.Fatalf("zero fresh admitted: %+v", r)
+				}
+				return
+			}
+			if r.Reason != "fit" || r.Fixed != time.Duration(n)*100*time.Millisecond {
+				t.Fatalf("%d fresh refused or wrong maximum: %+v", n, r)
+			}
+		})
+	}
+}
