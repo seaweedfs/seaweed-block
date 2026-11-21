@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -75,7 +76,9 @@ func TestFrozenDetachForcedFinalCommitsSamePoint(t *testing.T) {
 	}
 	assertEveryHeadIsPrefixImage(t, f, w)
 	r2, err := l.PrecopyDetach(frozenContext(t, 7*time.Second, false), func() bool { t.Fatal("applied retry stopped again"); return true })
-	if err != nil || r2.Head.Gen != r.Head.Gen {
+	want := r.Precopy
+	want.replayed = true
+	if err != nil || r2.Head.Gen != r.Head.Gen || !reflect.DeepEqual(r2.Precopy, want) {
 		t.Fatalf("applied retry budget-refused: %+v %v", r2, err)
 	}
 }
@@ -136,6 +139,33 @@ func TestFrozenRetryDoesNotHideUnknownPublication(t *testing.T) {
 	r, err = l.PrecopyDetach(frozenContext(t, time.Minute, false), func() bool { t.Fatal("applied retry stopped again"); return true })
 	if err != nil || r.Head.Gen != before.head.Gen || r.Head.State != ChunkHeadDetached {
 		t.Fatalf("applied same-point result budget-refused: %+v %v", r, err)
+	}
+	assertEveryHeadIsPrefixImage(t, f, w)
+}
+
+func TestFrozenBarrierConsumesElapsedWithoutNewAllowance(t *testing.T) {
+	s, f, l, w := precopyLayer(t, 1, 3)
+	w.write(t, s, 1, 0x61)
+	seedFrozenSamples(l, 1300*time.Millisecond)
+	origin := time.Now()
+	now := origin
+	l.testFrozenNow = func() time.Time { return now }
+	reached := false
+	l.testBeforeBarrierLockHook = func() { reached = true; now = origin.Add(4 * time.Second) }
+	before := f.stats()
+	ctx, err := WithFrozenDetach(ctTimeout(t), FrozenDetachOptions{StartedAt: origin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stops := 0
+	result, err := l.PrecopyDetach(ctx, func() bool { stops++; return true })
+	after := f.stats()
+	if !reached || stops != 0 || !errors.Is(err, ErrFrozenTailTooLarge) || result.Precopy.Estimate >= 5*time.Second || result.Precopy.RemainingFreeze > 1100*time.Millisecond || result.Precopy.Estimate <= result.Precopy.RemainingFreeze || after.puts != before.puts || after.cas != before.cas {
+		t.Fatalf("elapsed barrier budget not enforced without upload: %+v %v", result.Precopy, err)
+	}
+	l.testBeforeBarrierLockHook = nil
+	if _, err := l.Cut(ctTimeout(t)); err != nil {
+		t.Fatal(err)
 	}
 	assertEveryHeadIsPrefixImage(t, f, w)
 }

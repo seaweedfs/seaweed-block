@@ -1,7 +1,9 @@
 package durable_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"sync/atomic"
@@ -43,6 +45,14 @@ func TestFrozenProviderFlagOffRefusesWithoutUploadThenFinalCommits(t *testing.T)
 	r, _, err = p.DetachVolumeFrozen(context.Background(), "v1", storage.FrozenDetachOptions{StartedAt: time.Now().Add(-time.Minute), AllowOverBudget: true})
 	if err != nil || !r.Precopy.GuestFrozen || !r.Precopy.OverBudget || !r.Precopy.Frozen || r.Head.State != storage.ChunkHeadDetached || len(r.Precopy.Rounds) != 1 || r.Precopy.FreezeElapsed < time.Minute || r.Precopy.DeclaredWorst < time.Minute || !r.Precopy.LatencyGateFailed {
 		t.Fatalf("explicit final failed/underreported total freeze: %+v %v", r, err)
+	}
+	original, _ := json.Marshal(r.Precopy)
+	originalHead := r.Head.Gen
+	puts = remote.puts.Load()
+	replay, _, replayErr := p.DetachVolumeFrozen(context.Background(), "v1", storage.FrozenDetachOptions{StartedAt: time.Now()})
+	replayJSON, _ := json.Marshal(replay.Precopy)
+	if replayErr != nil || replay.Head.Gen != originalHead || !bytes.Equal(original, replayJSON) || remote.puts.Load() != puts {
+		t.Fatalf("provider replay changed original freeze report or re-uploaded: original=%s replay=%s err=%v", original, replayJSON, replayErr)
 	}
 	if headBlock(t, mem, 1)[0] != 0x77 || headBlock(t, mem, 2)[0] != 0x88 {
 		t.Fatal("final detached point lost writes")

@@ -80,6 +80,8 @@ type PrecopyAttempt struct {
 
 // PrecopyReport records admission estimates, not a worst-case latency proof.
 type PrecopyReport struct {
+	replayed bool // transport-local marker; never replaces the original freeze telemetry.
+
 	// Live barrier prefix is diagnostic, not additive to the selected forecast.
 	BarrierParts          PrecopyFixedParts `json:"barrierParts"`
 	BarrierOverage        time.Duration     `json:"barrierOverageNs"`
@@ -148,7 +150,7 @@ func (l *chunkLayerImpl) PrecopyDetachWithAdmission(ctx context.Context, prepare
 	return l.precopyDetach(ctx, prepare, stopIO)
 }
 
-func (l *chunkLayerImpl) precopyDetach(ctx context.Context, prepare func(context.Context) (func(), error), stopIO func() bool) (ChunkCutResult, error) {
+func (l *chunkLayerImpl) precopyDetach(ctx context.Context, prepare func(context.Context) (func(), error), stopIO func() bool) (result ChunkCutResult, resultErr error) {
 	if stopIO == nil {
 		return ChunkCutResult{}, fmt.Errorf("%w: missing I/O stop", ErrPrecopyUnknown)
 	}
@@ -158,6 +160,11 @@ func (l *chunkLayerImpl) precopyDetach(ctx context.Context, prepare func(context
 		return ChunkCutResult{}, err
 	}
 	defer l.capMu.Unlock()
+	defer func() {
+		if result.Precopy.Frozen && !result.Precopy.IsReplay() {
+			l.RememberDetachReport(result.Precopy)
+		}
+	}()
 	guestFreeze, externallyFrozen := FrozenDetachFromContext(ctx)
 
 	if err := ctx.Err(); err != nil {
@@ -165,6 +172,7 @@ func (l *chunkLayerImpl) precopyDetach(ctx context.Context, prepare func(context
 	}
 	if r, ok := l.storedDetach(); ok {
 		r.Precopy.Frozen = true
+		r.Precopy.replayed = true
 		return r, nil
 	}
 	l.stMu.Lock()
@@ -176,7 +184,7 @@ func (l *chunkLayerImpl) precopyDetach(ctx context.Context, prepare func(context
 		}
 		tail := l.candidateTail()
 		r := l.precopyEstimate(tail.Bytes, 0)
-		if !r.admitFrozen(guestFreeze) {
+		if !l.admitFrozen(&r, guestFreeze) {
 			return ChunkCutResult{Precopy: r}, frozenRefusal(r)
 		}
 	}
@@ -237,7 +245,7 @@ func (l *chunkLayerImpl) precopyDetach(ctx context.Context, prepare func(context
 		}
 		admitted := false
 		if externallyFrozen {
-			admitted = report.admitFrozen(guestFreeze)
+			admitted = l.admitFrozen(&report, guestFreeze)
 		} else {
 			admitted = report.admitPrecopy(previous, len(rounds)+1 == precopyAttempts)
 		}
@@ -299,9 +307,8 @@ func (l *chunkLayerImpl) precopyDetach(ctx context.Context, prepare func(context
 		}
 		if errors.Is(err, errChunkLayerDetached) {
 			if previous, ok := l.storedDetach(); ok {
-				previous.Precopy = report
 				previous.Precopy.Frozen = true
-				previous.Precopy.Reason = "previous_detach_applied"
+				previous.Precopy.replayed = true
 				return previous, nil
 			}
 		}
@@ -492,6 +499,13 @@ func (p PrecopyFixedParts) measured() time.Duration {
 // Candidate count is conservative and advisory while guest writes continue.
 // The same immutable rate observation supplies both the estimate and its rate.
 func (l *chunkLayerImpl) candidateTail() *ChunkCandidateTail {
+	return l.estimateCandidateTail(l.candidateTailBytes())
+}
+
+func (l *chunkLayerImpl) candidateTailBytes() uint64 {
+	if hook := l.testBeforeTailScanHook; hook != nil {
+		hook()
+	}
 	candidates := l.captureCandidates()
 	l.stMu.Lock()
 	for idx := range l.dirty {
@@ -505,7 +519,10 @@ func (l *chunkLayerImpl) candidateTail() *ChunkCandidateTail {
 		}
 	}
 	l.stMu.Unlock()
-	bytes := uint64(len(candidates)) * uint64(l.blockSize) * l.chunkBlocks
+	return uint64(len(candidates)) * uint64(l.blockSize) * l.chunkBlocks
+}
+
+func (l *chunkLayerImpl) estimateCandidateTail(bytes uint64) *ChunkCandidateTail {
 	r := l.precopyEstimate(bytes, 0)
 	return &ChunkCandidateTail{Bytes: bytes, Estimate: r.TailEstimate, BytesPerSecond: r.BytesPerSecond, RateSamples: r.RateSamples, SampleAge: r.SampleAge, Known: bytes == 0 || r.BytesPerSecond > 0}
 }

@@ -45,3 +45,17 @@ func TestCheckpointTailUnknownRateIsNotZeroCost(t *testing.T) {
 		t.Fatalf("partial rate window misreported ready: %+v", tail)
 	}
 }
+
+func TestCheckpointTailUsesLiteralLatestThreeConservativeRate(t *testing.T) {
+	s, _, l, w := precopyLayer(t, 1024, 0)
+	w.write(t, s, 1, 0x51)
+	// Old slow rate must be excluded; latest three min is 2 chunks/s,
+	// conservative divisor is 2 => exactly one chunk/s and one second.
+	for _, multiplier := range []float64{0.25, 2, 6, 4} {
+		l.precopySamples = append(l.precopySamples, precopySample{at: time.Now(), fixed: time.Millisecond, rate: multiplier * float64(ctChunkBytes)})
+	}
+	tail := l.candidateTail()
+	if tail.Bytes != ctChunkBytes || !tail.Known || tail.BytesPerSecond != float64(ctChunkBytes) || tail.Estimate != time.Second || tail.RateSamples != 4 {
+		t.Fatalf("literal latest-three rate/estimate mismatch: %+v", tail)
+	}
+}

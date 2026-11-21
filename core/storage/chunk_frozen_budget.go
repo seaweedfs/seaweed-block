@@ -33,8 +33,11 @@ func FrozenDetachFromContext(ctx context.Context) (FrozenDetachOptions, bool) {
 	return v, ok
 }
 func (r *PrecopyReport) admitFrozen(opts FrozenDetachOptions) bool {
+	return r.admitFrozenAt(opts, time.Now())
+}
+func (r *PrecopyReport) admitFrozenAt(opts FrozenDetachOptions, now time.Time) bool {
 	r.GuestFrozen = true
-	r.GuestFreezeElapsed = time.Since(opts.StartedAt)
+	r.GuestFreezeElapsed = max(time.Duration(0), now.Sub(opts.StartedAt))
 	r.RemainingFreeze = max(time.Duration(0), precopyFreezeLimit-r.GuestFreezeElapsed)
 	known := r.Reason != "samples_unknown" && r.Estimate > 0
 	if opts.AllowOverBudget {
@@ -54,4 +57,33 @@ func (r *PrecopyReport) admitFrozen(opts FrozenDetachOptions) bool {
 }
 func frozenRefusal(r PrecopyReport) error {
 	return fmt.Errorf("%w: reason=%s estimate=%s remaining=%s elapsed=%s", ErrFrozenTailTooLarge, r.Reason, r.Estimate, r.RemainingFreeze, r.GuestFreezeElapsed)
+}
+
+// IsReplay distinguishes a replayed applied point from a newly completed freeze.
+// The original report remains unchanged on the wire.
+func (r PrecopyReport) IsReplay() bool { return r.replayed }
+
+func (l *chunkLayerImpl) admitFrozen(r *PrecopyReport, opts FrozenDetachOptions) bool {
+	now := time.Now()
+	if hook := l.testFrozenNow; hook != nil {
+		now = hook()
+	}
+	return r.admitFrozenAt(opts, now)
+}
+
+// RememberDetachReport completes the telemetry kept with an applied or still
+// pending point. The durable provider calls it after its final settlement spans.
+// It changes no publication identity or authority state.
+func (l *chunkLayerImpl) RememberDetachReport(report PrecopyReport) {
+	if report.IsReplay() {
+		return
+	}
+	l.stMu.Lock()
+	defer l.stMu.Unlock()
+	if l.detached != nil {
+		l.detached.Precopy = report
+	}
+	if l.pendingDetach {
+		l.pendingCut.Precopy = report
+	}
 }

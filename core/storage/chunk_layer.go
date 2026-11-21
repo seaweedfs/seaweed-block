@@ -133,6 +133,8 @@ type chunkLayerImpl struct {
 	testCOWSave                  func() error
 	testPresenceSnapshotHook     func()                 // after a presence snapshot, before it is written
 	testBaseTransitionBeforeLock func()                 // test handshake before capMu drain
+	testBeforeTailScanHook       func()                 // diagnostic tail scan cost witness
+	testFrozenNow                func() time.Time       // controlled guest elapsed at admission
 	testAfterAdmitHook           func()                 // right after a capture is admitted
 	testAfterStageHook           func(round int)        // after each pre-copy staging round
 	testAfterStageReadHook       func(idx uint64)       // after a staging read, before its result is kept
@@ -682,6 +684,12 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	var pauseStart time.Time
 	var payloadBeforeBarrier int64
 	defer func() {
+		var tailBytes uint64
+		if err == nil {
+			scanStart := time.Now()
+			tailBytes = l.candidateTailBytes()
+			st.CandidateNs += time.Since(scanStart).Nanoseconds()
+		}
 		st.TotalNs = time.Since(start).Nanoseconds()
 		if err == nil {
 			res.Stats = st
@@ -689,7 +697,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 				fixed := time.Since(pauseStart).Nanoseconds() - st.PayloadNs + payloadBeforeBarrier
 				l.samplePrecopy(st, fixed)
 			}
-			res.CandidateTail = l.candidateTail()
+			res.CandidateTail = l.estimateCandidateTail(tailBytes)
 		}
 		if errors.Is(err, errChunkLayerFenced) {
 			l.stMu.Lock()

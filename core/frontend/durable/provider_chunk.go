@@ -1020,12 +1020,15 @@ func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, pla
 		}
 		log.Printf("durable: pre-copy volume=%s attempts=%d measurement_rounds=%d samples_at_start=%d tail=%d rate=%.0f sample_age=%s fixed=%s estimate=%s frozen=%t reason=%s err=%v", volumeID, r.Precopy.Attempts, r.Precopy.MeasurementRounds, r.Precopy.SamplesAtStart, r.Precopy.TailBytes, r.Precopy.BytesPerSecond, r.Precopy.SampleAge, r.Precopy.Fixed, r.Precopy.Estimate, r.Precopy.Frozen, r.Precopy.Reason, err)
 		if err == nil {
-			if !start.IsZero() {
+			if !start.IsZero() && !r.Precopy.IsReplay() {
 				elapsed := time.Since(start)
 				if !guestFrozen {
 					elapsed += r.Precopy.BarrierBeforeFreeze
 				}
 				r.Precopy.Finish(elapsed, 0, false)
+				if recorder, ok := layer.(interface{ RememberDetachReport(storage.PrecopyReport) }); ok {
+					recorder.RememberDetachReport(r.Precopy)
+				}
 			}
 			return r, h.storage.NextLSN() - 1, nil
 		}
@@ -1095,6 +1098,9 @@ func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, pla
 		r.Precopy.Finish(elapsed, extra, true)
 		log.Printf("durable: pre-copy settlement volume=%s elapsed=%s extra_cas=%d declared_worst=%s latency_gate_failed=%t outcome=%v err=%v", volumeID, r.Precopy.FreezeElapsed, extra, r.Precopy.DeclaredWorst, r.Precopy.LatencyGateFailed, how, serr)
 		dr.Precopy = r.Precopy
+		if recorder, ok := layer.(interface{ RememberDetachReport(storage.PrecopyReport) }); ok {
+			recorder.RememberDetachReport(r.Precopy)
+		}
 	}
 	switch {
 	case serr != nil:

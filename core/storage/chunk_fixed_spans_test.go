@@ -74,3 +74,23 @@ func TestPrecopyFixedPartsDoNotDoubleCountSyncPhases(t *testing.T) {
 		t.Fatalf("nested Sync cost counted twice or dropped: %+v", p)
 	}
 }
+
+func TestCheckpointTailScanIncludedInTotalAndFixedCosts(t *testing.T) {
+	s, f, l, w := precopyLayer(t, 1024, 0)
+	l.remote = &fixedSpanRemote{fakeChunkRemote: f, delay: time.Millisecond}
+	w.write(t, s, 1, 0x6a)
+	delay := 20 * time.Millisecond
+	scans := 0
+	l.testBeforeTailScanHook = func() { scans++; time.Sleep(delay) }
+	result, err := l.Cut(ctTimeout(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scans != 1 || result.Stats.CandidateNs < int64(delay) || result.Stats.TotalNs < int64(delay) {
+		t.Fatalf("scan missing from returned costs: scans=%d stats=%+v", scans, result.Stats)
+	}
+	sample := l.precopySamples[len(l.precopySamples)-1]
+	if sample.fixed < delay || sample.parts.Candidate < delay {
+		t.Fatalf("scan omitted from fixed observation: %+v", sample)
+	}
+}
