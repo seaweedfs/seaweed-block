@@ -297,10 +297,21 @@ HEAD states, snapshots, forks, intents, key bindings, GC and volume delete in th
 |---|---|---|---|---|
 | — | intent live | written before the first upload of a cut, a segment or a copy | `core/storage/chunk_layer.go` `captureLocked`, `stage`; `core/frontend/chunkstore/manifest.go` `PrepareManifest` | `INV-CUT-INTENT-FIRST-001` |
 | intent live | removed | the CAS outcome is known (success or a definite refusal) | `core/storage/chunk_layer.go` `captureLocked`, `dropIntents` | `INV-CUT-INTENT-FIRST-001`, `INV-WS-CAS-UNKNOWN-001` |
-| intent live | expired | older than the TTL, blockmaster has issued a higher epoch, and remote HEAD has a higher epoch | `core/frontend/chunkstore/gc.go` `Collector.run` | `INV-GC-INTENT-EXPIRY-001` |
+| intent live | expired | conservative elapsed age exceeds the TTL after pairwise clock skew, blockmaster has issued a higher epoch, and remote HEAD has a higher epoch | `core/frontend/chunkstore/gc.go` `Collector.run` | `INV-GC-INTENT-EXPIRY-001` |
 | — | bound | exclusive create of the key; a key that exists or once existed is refused | `core/frontend/chunkstore/chunk_remote.go` `putObject` | `INV-CHUNK-WRITE-ONCE-001` |
-| bound | tombstoned, needle deleted | unrooted in two complete marks at least one grace period apart, older than the grace period, binding unchanged; an unreadable segment aborts the pass; the collector requires grace greater than the operation deadline | `core/frontend/chunkstore/gc.go` `Collector.run`, `NewCollector` | `INV-GC-REACHABLE-001`, `INV-GC-UNREADABLE-SEGMENT-001`, `INV-GC-GRACE-DEADLINE-001` |
+| bound | tombstoned, needle deleted | unrooted in two complete marks separated by more than grace plus clock skew, binding age exceeds grace plus skew plus one-second timestamp precision, binding unchanged; an unreadable segment aborts the pass; the collector requires grace greater than the operation deadline | `core/frontend/chunkstore/gc.go` `Collector.run`, `NewCollector` | `INV-GC-REACHABLE-001`, `INV-GC-UNREADABLE-SEGMENT-001`, `INV-GC-GRACE-DEADLINE-001`, `INV-GC-CLOCK-SKEW-001` |
 | tombstoned | (never rebound) | bindings are never removed | `core/frontend/chunkstore/chunk_remote.go` `putObject` | `INV-CHUNK-WRITE-ONCE-001` |
+
+GC clock admission (`INV-GC-CLOCK-SKEW-001`):
+
+```mermaid
+flowchart LR
+    stamp[Persisted timestamp] --> age[Observed age minus pairwise skew and timestamp precision]
+    age --> young[Not past grace: retain root or candidate]
+    age --> old[Past grace: existing authority and complete-mark guards]
+    future[Future or backward mark clock] --> reset[Discard elapsed coverage and start a fresh mark]
+```
+
 
 ---
 
@@ -362,7 +373,7 @@ with a separate scope/config-bound mark. Incomplete marks carry no coverage.
 
 ## Part B. Invariant ledger
 
-124 rows: 105 ACTIVE, 17 STUB, 2 ARCHIVED; 15 kept from the internal ledger, 109 new.
+125 rows: 106 ACTIVE, 17 STUB, 2 ARCHIVED; 15 kept from the internal ledger, 110 new.
 
 The "Machine / transition" column refers to Part A. Notes under a table record what a row does not cover and, for kept rows, what was narrowed from the internal ledger.
 
@@ -540,6 +551,7 @@ Notes:
 | `INV-GC-REACHABLE-001` | GC never deletes a chunk reachable from a HEAD, a snapshot, an attempt or a live intent, and deletes a binding only after two marks at least one grace period apart. | M6 key: Bound → Tombstoned | `core/frontend/chunkstore/gc.go` `Collector.run` | `TestGC_UnreachableRequiresTwoMarksAndUploadAge`, `TestGC_StalledCutRemainsReadableAfterTwoMarks`, `TestGC_SnapshotAndQualifiedForkAreRoots` (`core/frontend/chunkstore/gc_test.go`) | `ChunkLifecycleFixed` `GCSafe`; `RetentionGCTiming` `NoLiveDelete` | ACTIVE |
 | `INV-GC-INTENT-EXPIRY-001` | A capture intent expires only when it is older than the TTL, blockmaster has issued a higher epoch, and remote HEAD has moved to a higher epoch. | M6 intent: Live → Expired | `core/frontend/chunkstore/gc.go` `Collector.run` | `TestGC_IntentExpiryNeedsTTLAuthorityAndRemoteFence` (`core/frontend/chunkstore/gc_test.go`) | `WorkspaceTakeover` `NoLiveIntentExpired`, `GCSafe` | ACTIVE |
 | `INV-GC-UNREADABLE-SEGMENT-001` | An unreadable published segment aborts the whole GC pass before any deletion. | M6 GC mark | `core/frontend/chunkstore/gc.go` `Collector.run` | `TestManifest_UnreadablePublishedSegmentRefusesWholeGC` (`core/frontend/chunkstore/manifest_test.go`) | — | ACTIVE |
+| `INV-GC-CLOCK-SKEW-001` | Time-based GC eligibility subtracts configured pairwise clock skew (default one minute), plus one second for binding timestamps. Future valid intent/deletion stamps retain roots without blocking unrelated work. Future/backward or differently configured marks supply no elapsed coverage; malformed marks still refuse. This assumes clocks stay within the configured pairwise bound. | M6 intent expiry, deleting snapshot roots, bound → tombstoned | `core/frontend/chunkstore/gc.go` `oldEnough`, `run`; `gc_copy.go` `SweepCopies`, `snapshotAttemptHeads`; `gc_execution.go` `readMark`, `executeGC` | `TestGCSkewSnapshotDeleteGraceBothDirections`, `TestGCSkewIntentExpiryUsesConservativeAge`, `TestGCSkewFutureIntentKeepsRootsWithoutBlockingProgress`, `TestGCSkewPersistedCoverageAcrossHosts`, `TestGCSkewBindingAgeIncludesSecondResolution`, `TestGCSkewConfigAndMarkCoverage`, `TestGCSkewBackwardStepDiscardsCoverageAndPreviewDoesNotMutate`, `TestGCSkewFutureCopyDoesNotBlockOtherSettlement` (`core/frontend/chunkstore/gc_clock_skew_test.go`) | `GCClockSkew` `NoEarlyExpiry`, `FutureProtects`, `IndependentProgress`, `EventuallyEligibleAtBound` | ACTIVE |
 | `INV-GC-GRACE-DEADLINE-001` | A GC collector cannot be built unless its grace period exceeds the catalog operation deadline. | M6 GC configuration | `core/frontend/chunkstore/gc.go` `NewCollector` | `TestGC_GraceConstructorRejectsCopyDeadline` | `RetentionGCTiming` `NoLiveDelete` | ACTIVE |
 | `INV-SNAP-EXPLICIT-DELETE-001` | A published snapshot is removed only by `DeleteSnapshot` or retention for its own attempt, and never while a fork claim on it is live. | M6 snapshot: Published → Deleting | `core/frontend/chunkstore/catalog.go` `DeleteSnapshot`; `core/frontend/chunkstore/retention.go` `markDeleting` | `TestCatalog_DeleteMarksThenIdempotent` (`core/frontend/chunkstore/catalog_test.go`); `TestCatalog_ClaimBetweenCheckAndMarkWins` (`core/frontend/chunkstore/retention_review_test.go`) | `ChunkLifecycleFixed` `SnapOnlyExplicitDelete` | ACTIVE |
 | `INV-VOLDEL-COMMIT-001` | A volume delete commits only when no snapshot name record exists, and after its commit point no concurrent delete can roll it back. | M6 HEAD: deleting → purging | `core/frontend/chunkstore/volume_delete.go` `DeleteVolume`, `snapshotsBlock`, `commitHeadPurging` | `TestCatalog_DeleteVolumeRefusesWhileSnapshotsExist`, `TestCatalog_ConcurrentDeleteCannotRollBackACommittedOne` (`core/frontend/chunkstore/volume_delete_test.go`) | `ChunkLifecycleFixed` `CommitClean` | ACTIVE |

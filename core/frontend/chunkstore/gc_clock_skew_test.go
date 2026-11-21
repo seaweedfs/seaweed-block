@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"path"
+	"strings"
 	"testing"
 	"time"
 )
@@ -169,5 +170,139 @@ func TestGCSkewBindingAgeIncludesSecondResolution(t *testing.T) {
 	out, err := g.Run(ctx)
 	if err != nil || out.Candidates != 0 {
 		t.Fatalf("binding age lost skew/second resolution: %+v %v", out, err)
+	}
+}
+
+func TestGCSkewConfigAndMarkCoverage(t *testing.T) {
+	for _, skew := range []time.Duration{0, 2 * time.Minute} {
+		t.Run(skew.String(), func(t *testing.T) {
+			f, b, c, g, now := gcFixture(t)
+			ctx := context.Background()
+			r, _ := NewChunkRemote(f, b, path.Join(catBase, "v1"))
+			if err := r.Put(ctx, "orphan", []byte("orphan")); err != nil {
+				t.Fatal(err)
+			}
+			cfg := g.cfg
+			cfg.ClockSkew = skew
+			if _, err := c.ExecuteVolumeGC(ctx, "v1", b, cfg, true); err != nil {
+				t.Fatal(err)
+			}
+			entry, err := f.LookupEntry(ctx, path.Join(catBase, "v1"), gcMarkName)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var mark savedGCMark
+			if err = json.Unmarshal(entry.Content, &mark); err != nil {
+				t.Fatal(err)
+			}
+			if mark.ClockSkewNs <= 0 {
+				t.Fatal("normalized clock policy absent from mark")
+			}
+			// A legacy mark, or one from another skew policy, cannot authorize deletion.
+			mark.ClockSkewNs = 0
+			entry.Content, _ = json.Marshal(mark)
+			if err = f.UpdateEntry(ctx, path.Join(catBase, "v1"), entry, nil); err != nil {
+				t.Fatal(err)
+			}
+			*now = now.Add(2 * time.Hour)
+			out, err := c.ExecuteVolumeGC(ctx, "v1", b, cfg, true)
+			if err != nil || out.Reclaimed != 0 {
+				t.Fatalf("legacy coverage borrowed: %+v %v", out, err)
+			}
+			*now = now.Add(2 * time.Hour)
+			out, err = c.ExecuteVolumeGC(ctx, "v1", b, cfg, true)
+			if err != nil || out.Reclaimed != 1 {
+				t.Fatalf("matching normalized policy lost coverage: %+v %v", out, err)
+			}
+		})
+	}
+	_, b, c, g, _ := gcFixture(t)
+	for _, bad := range []time.Duration{-1, time.Duration(1<<63 - 1)} {
+		cfg := g.cfg
+		cfg.ClockSkew = bad
+		if _, err := NewCollector(c, b, cfg); err == nil {
+			t.Fatalf("bad skew %s accepted", bad)
+		}
+	}
+}
+
+func TestGCSkewBackwardStepDiscardsCoverageAndPreviewDoesNotMutate(t *testing.T) {
+	f, b, _, g, now := gcFixture(t)
+	ctx := context.Background()
+	r, _ := NewChunkRemote(f, b, path.Join(catBase, "v1"))
+	if err := r.Put(ctx, "orphan", []byte("orphan")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	first := g.last
+	*now = now.Add(-time.Second)
+	if out, err := g.Preview(ctx); err != nil || out.Reclaimed != 0 {
+		t.Fatalf("backward preview: %+v %v", out, err)
+	}
+	if !g.last.Equal(first) || len(g.candidates) != 1 {
+		t.Fatal("preview changed coverage")
+	}
+	if out, err := g.Run(ctx); err != nil || out.Reclaimed != 0 {
+		t.Fatalf("backward mark: %+v %v", out, err)
+	}
+	*now = now.Add(g.cfg.Grace + g.cfg.ClockSkew + time.Nanosecond)
+	if out, err := g.Run(ctx); err != nil || out.Reclaimed != 1 {
+		t.Fatalf("fresh coverage made no progress: %+v %v", out, err)
+	}
+}
+
+func TestGCSkewFutureCopyDoesNotBlockOtherSettlement(t *testing.T) {
+	f, b, c, g, now := gcFixture(t)
+	ctx := context.Background()
+	c.SetClock(func() time.Time { return *now })
+	h := publishSource(t, f, b.fakeBlobs, "v1", map[uint64][]byte{0: chunkBytes(0x55)})
+	for _, name := range []string{"future", "expired"} {
+		snapshotDir(t, f, "v1", name)
+		holdFirst(f, path.Join(catBase, "v1", snapsDir, name)+"/")
+		if _, err := c.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: name, RequestID: name}, h); CodeOf(err) != CodeOutcomeUnknown {
+			t.Fatalf("held copy: %v", err)
+		}
+	}
+	r, _ := NewChunkRemote(f, b, path.Join(catBase, "v1"))
+	ins, err := r.ListIntents(ctx)
+	if err != nil || len(ins) != 2 {
+		t.Fatalf("intents: %+v %v", ins, err)
+	}
+	*now = now.Add(DefaultOpDeadline + time.Second)
+	futureID := ""
+	for _, in := range ins {
+		if !strings.Contains(in.Holder, "/future/") {
+			continue
+		}
+		futureID = in.ID
+		dir := path.Join(catBase, "v1", intentsDir)
+		e, err := f.LookupEntry(ctx, dir, in.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var d intentDoc
+		if err = json.Unmarshal(e.Content, &d); err != nil {
+			t.Fatal(err)
+		}
+		d.CreatedNs = now.Add(testedGCSkew / 2).UnixNano()
+		e.Content, _ = json.Marshal(d)
+		if err = f.UpdateEntry(ctx, dir, e, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if futureID == "" {
+		t.Fatal("future copy fixture not found")
+	}
+	if count, err := g.SweepCopies(ctx); err != nil || count != 1 {
+		t.Fatalf("unrelated settlement blocked: %d %v", count, err)
+	}
+	left, err := r.ListIntents(ctx)
+	if err != nil || len(left) != 1 || left[0].ID != futureID {
+		t.Fatalf("future protection lost: %+v %v", left, err)
+	}
+	if out, err := g.Run(ctx); err != nil || len(out.Roots) == 0 {
+		t.Fatalf("future copy not rooted: %+v %v", out, err)
 	}
 }

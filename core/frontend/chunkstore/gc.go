@@ -19,6 +19,11 @@ import (
 
 const extGCDeleted = "swb.gc.deleted"
 
+// DefaultGCClockSkew is the allowed pairwise difference between timestamp
+// writers and collectors. Deployments with a larger bound must raise ClockSkew;
+// no finite time-based grace can be safe with unbounded clock differences.
+const DefaultGCClockSkew = time.Minute
+
 // BlobDeleter deletes one immutable needle. Missing needles are success.
 // Implementations must not reuse a deleted fid.
 type BlobDeleter interface {
@@ -30,8 +35,11 @@ type BlobDeleter interface {
 // lease expiry or a cached guess. Unknown authority retains the intent.
 type GCConfig struct {
 	Grace, IntentTTL time.Duration
-	IssuedEpoch      func(context.Context, string) (uint64, error)
-	Now              func() time.Time
+	// ClockSkew bounds pairwise wall-clock differences. Zero uses the default.
+	// Binding creation timestamps additionally lose up to one second of precision.
+	ClockSkew   time.Duration
+	IssuedEpoch func(context.Context, string) (uint64, error)
+	Now         func() time.Time
 }
 
 type GCRoot struct {
@@ -90,6 +98,12 @@ func NewCollector(cat *Catalog, blobs BlobDeleter, cfg GCConfig) (*Collector, er
 	if cat == nil || blobs == nil || cfg.Grace <= cat.deadline() || cfg.IntentTTL <= 0 || cfg.IssuedEpoch == nil {
 		return nil, errors.New("chunkstore: GC requires catalog, blob deletion, grace > operation deadline, positive intent TTL and epoch authority")
 	}
+	if cfg.ClockSkew == 0 {
+		cfg.ClockSkew = DefaultGCClockSkew
+	}
+	if cfg.ClockSkew < 0 || cfg.ClockSkew > time.Duration(1<<63-1)-time.Second {
+		return nil, errors.New("chunkstore: invalid GC clock skew bound")
+	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
@@ -120,7 +134,13 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 	}()
 	start := g.cfg.Now()
 	if !g.last.IsZero() && start.Before(g.last) {
-		return result, errors.New("chunkstore: GC clock moved backwards")
+		// Discard coverage across a backward clock step; a fresh complete mark
+		// can still make progress without borrowing time from the future.
+		if apply {
+			g.candidates = map[string]gcCandidate{}
+		}
+		// Preview must also ignore the old coverage without mutating it.
+		// Candidate lookup below is guarded by this same condition.
 	}
 	roots := map[string]bool{}
 	var bindings []gcBinding
@@ -208,11 +228,11 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 		}
 		for _, in := range intents {
 			result.Intents++
-			if in.CreatedNs <= 0 || in.CreatedNs > start.UnixNano() {
+			if in.CreatedNs <= 0 {
 				return result, errors.New("chunkstore: invalid intent creation time")
 			}
 			expire := false
-			if !strings.HasPrefix(in.Holder, "snapshot:") && !strings.HasPrefix(in.Holder, "fork:") && start.Sub(time.Unix(0, in.CreatedNs)) > g.cfg.IntentTTL {
+			if !strings.HasPrefix(in.Holder, "snapshot:") && !strings.HasPrefix(in.Holder, "fork:") && g.oldEnough(start, time.Unix(0, in.CreatedNs), g.cfg.IntentTTL, 0) {
 				issued, authorityErr := g.cfg.IssuedEpoch(ctx, vol)
 				// Catalog copy intents are retained: their exclusive creates
 				// are not epoch-fenced. For a capture, both the authority
@@ -317,15 +337,18 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 			continue
 		}
 		created := time.Unix(b.entry.Attributes.Crtime, 0)
-		if !start.After(created.Add(g.cfg.Grace)) {
+		if !g.oldEnough(start, created, g.cfg.Grace, time.Second) {
 			continue
 		}
 		candidate, seen := g.candidates[p]
+		if !g.last.IsZero() && start.Before(g.last) {
+			seen = false
+		}
 		if !seen || candidate.digest != b.digest {
 			candidate = gcCandidate{start, b.digest}
 		}
 		result.Candidates++
-		if start.Sub(candidate.since) < g.cfg.Grace {
+		if !g.oldEnough(start, candidate.since, g.cfg.Grace, 0) {
 			nextCandidates[p] = candidate
 			continue
 		}
@@ -392,4 +415,12 @@ func (b gcBlobReader) Get(ctx context.Context, fid string) ([]byte, error) {
 		return nil, errors.New("chunkstore: GC segment reader unavailable")
 	}
 	return reader.Get(ctx, fid)
+}
+
+// INV-GC-CLOCK-SKEW-001: expiry uses a lower bound on elapsed time,
+// never the raw difference of timestamps from different hosts. Subtracting
+// separately avoids overflowing grace + skew for large configured durations.
+func (g *Collector) oldEnough(now, stamp time.Time, grace, resolution time.Duration) bool {
+	age := now.Sub(stamp)
+	return age > grace && age-grace > g.cfg.ClockSkew+resolution
 }

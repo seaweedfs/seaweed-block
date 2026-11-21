@@ -142,7 +142,7 @@ func TestGC_UnreachableRequiresTwoMarksAndUploadAge(t *testing.T) {
 	if _, e := r.Get(ctx, "orphan"); e != nil {
 		t.Fatal("orphan deleted before grace", e)
 	}
-	*now = now.Add(2 * time.Second)
+	*now = now.Add(2*time.Second + g.cfg.ClockSkew)
 	result, e := g.Run(ctx)
 	if e != nil || result.Reclaimed != 1 {
 		t.Fatalf("old unreachable chunk was not reclaimed after grace-separated marks: %+v %v", result, e)
@@ -181,7 +181,7 @@ func TestGC_IntentExpiryNeedsTTLAuthorityAndRemoteFence(t *testing.T) {
 		{"takeover-but-no-authority", 1, 2, 2 * time.Hour, false, false},
 		{"unknown-authority", 2, 2, 2 * time.Hour, true, false},
 		{"TTL-not-exceeded", 2, 2, time.Hour, false, false},
-		{"higher-issued-and-fenced", 2, 2, time.Hour + time.Nanosecond, false, true},
+		{"higher-issued-and-fenced", 2, 2, time.Hour + DefaultGCClockSkew + time.Nanosecond, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f, b, _, g, now := gcFixture(t)
