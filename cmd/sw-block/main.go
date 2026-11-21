@@ -17,9 +17,8 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/ops"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"github.com/seaweedfs/seaweed-block/core/rpc/link"
 	"github.com/seaweedfs/seaweed-block/internal/buildinfo"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 	"gopkg.in/yaml.v3"
 )
 
@@ -1158,7 +1157,7 @@ func liveNodeEvidenceNamespace(namespace string) string {
 }
 
 func readMasterClusterEvidence(ctx context.Context, masterAddr string) (ops.ClusterEvidence, error) {
-	conn, err := grpc.NewClient(masterAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := link.Dial(masterAddr)
 	if err != nil {
 		return ops.ClusterEvidence{}, err
 	}

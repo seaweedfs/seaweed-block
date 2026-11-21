@@ -21,7 +21,7 @@ import (
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"github.com/seaweedfs/seaweed-block/internal/buildinfo"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	"github.com/seaweedfs/seaweed-block/core/rpc/link"
 )
 
 type flags struct {
@@ -127,7 +127,7 @@ func run(f flags) int {
 		registrar   blockcsi.VolumeObjectRegistrar
 	)
 	if f.masterAddr != "" {
-		masterConn, err = grpc.NewClient(f.masterAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		masterConn, err = link.Dial(f.masterAddr)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "blockcsi: master dial:", err)
 			return 1
@@ -167,7 +167,7 @@ func run(f flags) int {
 		nodeSrv.StartMountedNVMeReconnectOwner(reconnectCtx, f.nvmeReconnectInterval)
 	}
 
-	srv := grpc.NewServer()
+	srv := link.NewServer(link.ServerConfig{})
 	csipb.RegisterIdentityServer(srv, blockcsi.NewIdentityServer())
 	csipb.RegisterControllerServer(srv, blockcsi.NewControllerServerWithProvisionerMetadataAndRegistrar(lookup, provisioner, resolver, registrar))
 	csipb.RegisterNodeServer(srv, nodeSrv)

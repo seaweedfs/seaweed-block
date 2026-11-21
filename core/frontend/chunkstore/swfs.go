@@ -12,10 +12,10 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/filerpb"
+	"github.com/seaweedfs/seaweed-block/core/rpc/link"
 )
 
 // SWFSConfig configures the minimal SeaweedFS client.
@@ -56,8 +56,7 @@ func DialSWFS(cfg SWFSConfig) (*SWFS, error) {
 	if cfg.HTTPTimeout == 0 {
 		cfg.HTTPTimeout = 60 * time.Second
 	}
-	conn, err := grpc.NewClient(cfg.FilerGRPC,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	conn, err := link.Dial(cfg.FilerGRPC,
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(64<<20), grpc.MaxCallSendMsgSize(64<<20)))
 	if err != nil {
 		return nil, fmt.Errorf("chunkstore: dial filer %s: %w", cfg.FilerGRPC, err)

@@ -18,8 +18,7 @@ import (
 	hostvolume "github.com/seaweedfs/seaweed-block/core/host/volume"
 	"github.com/seaweedfs/seaweed-block/core/replication"
 	"github.com/seaweedfs/seaweed-block/core/rpc/control"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	"github.com/seaweedfs/seaweed-block/core/rpc/link"
 )
 
 type LiveVolumeStatusConfig struct {
@@ -95,7 +94,7 @@ func NewLiveVolumeStatusReportCollector(cfg LiveVolumeStatusConfig) VolumeStatus
 }
 
 func queryLiveMasterStatus(ctx context.Context, masterAddr, volumeID string) (*control.StatusResponse, error) {
-	conn, err := grpc.NewClient(masterAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := link.Dial(masterAddr)
 	if err != nil {
 		return nil, fmt.Errorf("dial master: %w", err)
 	}
