@@ -26,6 +26,7 @@ func TestWorkspaceUncertainIssueWriteIsTyped(t *testing.T) {
 	}
 	*now = barrier.Add(time.Second)
 	testLostRangeFaultHook = func(string) error { return errInjected }
+	t.Cleanup(func() { testLostRangeFaultHook = nil })
 	if _, err := p.MoveWorkspace(ctx, req, forcedLostRangeHead); !errors.Is(err, errInjected) || errors.Is(err, ErrWorkspaceOutcomeUncertain) {
 		t.Fatalf("lost-range write failure before the issue: %v; want a plain refusal", err)
 	}
