@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/filerpb"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/masterpb"
+	"github.com/seaweedfs/seaweed-block/core/rpc/link"
 )
 
 // ErrNotSingleFiler: block metadata needs exactly one filer behind the
@@ -147,7 +147,7 @@ func (c *SWFS) isTarget(ctx context.Context, listed string) bool {
 }
 
 func listFilers(ctx context.Context, addr, group string) ([]string, error) {
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := link.Dial(addr)
 	if err != nil {
 		return nil, err
 	}

@@ -10,8 +10,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
 	"github.com/seaweedfs/seaweed-block/core/ops"
 	"github.com/seaweedfs/seaweed-block/core/rpc/control"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	"github.com/seaweedfs/seaweed-block/core/rpc/link"
 )
 
 // Same clock seam as GCConfig; production always uses wall time. Tests can
@@ -78,7 +77,7 @@ func chunkGC(args []string, stdout, stderr io.Writer) int {
 // masterEvidence dials the blockmaster's evidence service (gc and
 // volume-delete read volume status from it).
 func masterEvidence(master string) (control.EvidenceServiceClient, func() error, error) {
-	conn, e := grpc.NewClient(master, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, e := link.Dial(master)
 	if e != nil {
 		return nil, nil, e
 	}

@@ -388,7 +388,7 @@ with a separate scope/config-bound mark. Incomplete marks carry no coverage.
 
 ## Part B. Invariant ledger
 
-160 rows: 138 ACTIVE, 19 STUB, 3 ARCHIVED; 15 kept from the internal ledger, 145 new.
+161 rows: 139 ACTIVE, 19 STUB, 3 ARCHIVED; 15 kept from the internal ledger, 146 new.
 
 The "Machine / transition" column refers to Part A. Notes under a table record what a row does not cover and, for kept rows, what was narrowed from the internal ledger.
 
@@ -673,6 +673,12 @@ Notes:
 | ID | Statement | Machine / transition | Enforced in | Test | TLA+ property | Status |
 |---|---|---|---|---|---|---|
 | `INV-NVME-H2C-RANGE-001` | An H2CData range exceeding the expected transfer size is refused before slicing, including a uint32 offset-plus-length overflow; an exact-bound payload is preserved. | Frontend H2C receive validation; no storage state transition | `core/frontend/nvme/session.go` `recvH2CData` | `TestRecvH2CDataRangeBounds` (`core/frontend/nvme/h2c_bounds_test.go`) | — | ACTIVE |
+
+### B.9 Security: gRPC links
+
+| ID | Statement | Machine / transition | Enforced in | Test | TLA+ property | Status |
+|---|---|---|---|---|---|---|
+| `INV-SEC-ONE-SEAM-001` | Every production gRPC client and server is built by core/rpc/link; a non-test file outside it that constructs a gRPC client or server or insecure credentials, under any import name, fails the guard test. | AUTHORITY: every gRPC link (client dial, server build) | `core/rpc/link` `Dial`, `DialWith`, `NewServer` | `TestLink_NoProductionSiteBypassesTheSeam`, `TestLink_GuardDetectsRawConstructionsAndAliases`, `TestLink_DialReachesNewServerUnaryAndStream`, `TestLink_ServerRunsInterceptorsInOrder` (`core/rpc/link/link_test.go`) | — (no state machine; the guard test is the proof form) | ACTIVE |
 
 ### Experimental data-file synchronization
 
