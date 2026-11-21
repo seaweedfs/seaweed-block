@@ -12,6 +12,8 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
+// Automatic GC stays default-off until restart-safe unknown-CAS settlement and
+// the 50/200-volume root-scan measurement both pass. Retention remains enabled.
 // The CLI fixes the maximum cut/copy lifetime at five minutes and the HEAD
 // hydration reader at thirty seconds. A one-minute mark fits strictly inside
 // the one-hour grace. No elapsed TTL alone authorizes capture-intent expiry.

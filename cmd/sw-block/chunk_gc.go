@@ -36,7 +36,7 @@ func chunkGC(args []string, stdout, stderr io.Writer) int {
 	if fs.NArg() != 0 || filer == "" || master == "" || timeout <= 0 || ttl <= 0 || grace <= chunkstore.DefaultOpDeadline {
 		return chunkFail("gc", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--chunk-filer and --master are required; durations must be positive and grace must exceed the operation deadline", false)
 	}
-	f, closeFn, e := checkedChunkFiler(filer)
+	f, closeFn, e := dialChunkFiler(filer)
 	if e != nil {
 		return chunkResult("gc", nil, e, stdout, stderr)
 	}

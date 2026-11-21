@@ -42,25 +42,6 @@ var dialChunkFiler = func(addr string) (chunkstore.Filer, func() error, error) {
 	return c, c.Close, nil
 }
 
-// Direct mutation commands use the same topology admission as blockvolume.
-// Production SWFS implements this probe; metadata-only test filers may omit it.
-func checkedChunkFiler(addr string) (chunkstore.Filer, func() error, error) {
-	f, closeFn, err := dialChunkFiler(addr)
-	if err != nil {
-		return nil, nil, err
-	}
-	if check, ok := f.(interface{ CheckSingleFiler(context.Context) error }); ok {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-		err = check.CheckSingleFiler(ctx)
-		cancel()
-		if err != nil {
-			_ = closeFn()
-			return nil, nil, err
-		}
-	}
-	return f, closeFn, nil
-}
-
 func runOpsChunk(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		return chunkFail("", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "expected cut|snapshot|snapshots|snapshot-delete|fork|detach|show|gc|usage|retain|volume-delete", false)
@@ -266,7 +247,7 @@ func chunkCatalog(name, filer, base string, stdout, stderr io.Writer) (*chunksto
 	if filer == "" {
 		return nil, nil, chunkFail(name, stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--chunk-filer is required", false)
 	}
-	f, closeFn, err := checkedChunkFiler(filer)
+	f, closeFn, err := dialChunkFiler(filer)
 	if err != nil {
 		return nil, nil, chunkFail(name, stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, err.Error(), false)
 	}
