@@ -96,3 +96,38 @@ func TestChunkControl_InvalidLabelRefusedBeforeCutting(t *testing.T) {
 		t.Fatalf("snapshot with an invalid label: %v (cuts %d); want invalid_label without a cut", err, fp.cuts)
 	}
 }
+
+// ownerGuard records, at Begin, how many cuts the provider had taken.
+type ownerGuard struct {
+	cutsAtBegin []int
+	finishes    []string
+	fp          *fakeChunkProvider
+}
+
+func (g *ownerGuard) Begin(context.Context, string) (string, error) {
+	g.cutsAtBegin = append(g.cutsAtBegin, g.fp.cuts)
+	return "owner", nil
+}
+
+func (g *ownerGuard) Finish(_ context.Context, vol, token string, head storage.ChunkHead) error {
+	g.finishes = append(g.finishes, vol+":"+token)
+	return nil
+}
+
+// The owner's seal begins the share BEFORE the cut that produces the sealed
+// HEAD, and the catalog finishes it with that token (no second Begin).
+func TestChunkControl_SnapshotBeginsShareBeforeTheCut(t *testing.T) {
+	ctx := context.Background()
+	fp, ctl := adapterFixture(t)
+	g := &ownerGuard{fp: fp}
+	ctl.(*chunkControl).cat.SetShareGuard(g)
+	if _, err := ctl.Snapshot(ctx, "v1", ChunkSnapshotRequest{Name: "s1", RequestID: "r"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(g.cutsAtBegin) != 1 || g.cutsAtBegin[0] != 0 || fp.cuts != 1 {
+		t.Fatalf("Begin saw %v cuts (cuts now %d); want one Begin before the one cut", g.cutsAtBegin, fp.cuts)
+	}
+	if len(g.finishes) != 1 || g.finishes[0] != "v1:owner" {
+		t.Fatalf("finishes %v; want one Finish with the owner's token", g.finishes)
+	}
+}
