@@ -240,7 +240,6 @@ func TestWALStoreChunk_ExplicitCutOverlappingTheTimerRestartsIt(t *testing.T) {
 		case <-time.After(30 * time.Second):
 			t.Error("the explicit cut never returned")
 		}
-		explicitDone <- nil
 	})
 	select {
 	case <-remote.entered:
