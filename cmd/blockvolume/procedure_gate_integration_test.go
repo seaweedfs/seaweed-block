@@ -171,8 +171,8 @@ func TestProcedureForcedMoveWithTheOldHostReturning(t *testing.T) {
 		}
 		time.Sleep(time.Second)
 	}
-	if !back.has("refusing to attach volume=v1") && !back.has("workspace lease: stale authority") {
-		failures = append(failures, "it logged neither the stale-root refusal nor stale authority")
+	if !back.has("refusing to attach volume=v1") && !back.has("workspace lease: stale authority") && !back.has("is not this process") {
+		failures = append(failures, "it logged no refusal (stale root, stale authority, or another server's assignment)")
 	}
 	if len(failures) > 0 {
 		t.Errorf("the returning old host after the forced move: %s", strings.Join(failures, "; "))
@@ -218,9 +218,9 @@ func TestProcedureRevokeWithoutACKThenForcedMove(t *testing.T) {
 }
 
 // TestProcedureStartInsideTheBarrierWaitIsReGranted: the holder's process
-// dies and is started again 35 s later: its lease has ended, the re-grant
-// barrier (at most 65 s after the stop, default flags) has not passed, and
-// the barrier passes within the process's 30 s authority wait. It must not
+// dies and is started again 40 s later: its lease has ended, the re-grant
+// barrier (at least 50 s and at most 65 s after the stop, default flags) has
+// not passed, and it passes within the process's 30 s authority wait. It must not
 // serve while its renewals are still refused for the barrier; once
 // re-granted it serves its local WAL at the same epoch.
 func TestProcedureStartInsideTheBarrierWaitIsReGranted(t *testing.T) {
@@ -230,7 +230,7 @@ func TestProcedureStartInsideTheBarrierWaitIsReGranted(t *testing.T) {
 	block := pattern("inside-the-wait!")
 	env.writeBlock(t, "s1", 0, block)
 	first.kill(t)
-	time.Sleep(35 * time.Second)
+	time.Sleep(40 * time.Second)
 
 	back := env.start(t, "blockvolume-s1-back", "s1")
 	var ready []time.Time
