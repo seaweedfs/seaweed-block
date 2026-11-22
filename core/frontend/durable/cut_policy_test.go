@@ -302,10 +302,11 @@ func TestNewSlotDelay_ShrinksWithLateness(t *testing.T) {
 }
 
 // V timer loops under the cut policy share one host slot (service T per
-// cut) with every volume due at the same instant, the worst start. With
+// cut) with every volume due at the same instant. In this seeded run, with
 // V x T <= c, no volume waits for the slot longer than (V-1) x (T + gap),
 // gap being one poll plus the largest retry delay, and every volume keeps
-// cutting.
+// cutting. One seeded run is a regression check of the policy, not a
+// proof of the bound for every schedule.
 func TestCutPolicy_OneSlotWaitBound(t *testing.T) {
 	const (
 		V      = 10
