@@ -1019,70 +1019,163 @@ func runVolume(f flags, exits *processExit) int {
 
 	var iscsiTarget *iscsi.Target
 	var frontendTargets []*control.FrontendTarget
-	if f.iscsiListen != "" {
-		prov := provider
-		var probeProvider iscsi.ProbeBackendProvider
-		if durableProv != nil {
-			probeProvider = &durableProbeProvider{provider: durableProv}
-		}
-		negotiation := iscsi.NegotiableConfig{}
-		if f.iscsiCHAPSecret != "" {
-			negotiation = iscsi.DefaultNegotiableConfig()
-			negotiation.CHAP = iscsi.CHAPConfig{
-				Username: f.iscsiCHAPUser,
-				Secret:   f.iscsiCHAPSecret,
-			}
-		}
-		iscsiTarget = iscsi.NewTarget(iscsi.TargetConfig{
-			Listen:         f.iscsiListen,
-			IQN:            f.iscsiIQN,
-			PortalAddr:     f.iscsiPortalAddr,
-			VolumeID:       f.volumeID,
-			Provider:       prov,
-			ProbeProvider:  probeProvider,
-			Negotiation:    negotiation,
-			DataOutTimeout: f.iscsiDataOutTTL,
-			Handler: iscsi.HandlerConfig{
-				BlockSize:  frontendBlockSize,
-				VolumeSize: frontendVolumeSize,
-				ALUA:       newProjectionALUAProvider(h.ProjectionView(), f.volumeID, f.replicaID, f.iscsiIQN),
-			},
-		})
-		iscsiAddr, err := iscsiTarget.Start()
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "blockvolume: iscsi target:", err)
-			if status != nil {
-				shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
-				_ = status.Close(shutCtx)
-				shutCancel()
-			}
-			_ = h.Close()
-			return 1
-		}
-		_ = json.NewEncoder(os.Stdout).Encode(iscsiReadyLine{
-			Component: "blockvolume",
-			Phase:     "iscsi-listening",
-			IscsiAddr: iscsiAddr,
-			IQN:       f.iscsiIQN,
-		})
-		frontendTargets = append(frontendTargets, &control.FrontendTarget{
-			Protocol: "iscsi",
-			Addr:     iscsiAddr,
-			Iqn:      f.iscsiIQN,
-			Lun:      uint32(f.iscsiLUN),
-		})
-		h.SetFrontendTargets(frontendTargets)
-	}
-
 	var nvmeTarget interface {
 		Start() (string, error)
 		Close() error
 	}
-	if f.nvmeListen != "" {
-		if f.nvmeTransport == "rdma" {
-			start := nvmeRDMAListenerStartDecision(true, nvmeRDMAPreflightFacts(f.nvmeListen))
-			if !start.allowed {
-				fmt.Fprintf(os.Stderr, "blockvolume: nvme rdma start refused: reason=%s\n", start.reason)
+	var ublkTarget *ublk.Target
+
+	// One startup order (INV-FE-PRIMARY-READY-OPERATIONAL-001 with
+	// INV-WS-STARTUP-RETRY-001): the workspace lease guard and the process's
+	// one stop waiter (waitWorkspaceStop: signal, lease drain request, lease
+	// end, or the latched startup outcome) run from here, before any frontend;
+	// the frontends start only when the backend first admits I/O, and never
+	// if a stop wins that race.
+	shutdownCtx := exits.parent
+	var leaseRequests <-chan workspaceStopRequest
+	var leaseDone <-chan error
+	if f.workspaceLease {
+		leaseRequests, leaseDone = startWorkspaceLease(shutdownCtx, h)
+	}
+	stopWait := make(chan workspaceStopWait, 1)
+	go func(requests <-chan workspaceStopRequest, done <-chan error) {
+		ls, ld := waitWorkspaceStop(exits, f, h, requests, done)
+		stopWait <- workspaceStopWait{leaseStop: ls, leaseDone: ld}
+	}(leaseRequests, leaseDone)
+	var serving <-chan struct{} // nil: no durable backend, start at once
+	if durableProv != nil {
+		if b := durableProv.Backend(f.volumeID); b != nil {
+			serving = b.FirstServing()
+		}
+	}
+	stopped, startFrontends := awaitFrontendStart(serving, stopWait)
+	if startFrontends {
+		if f.iscsiListen != "" {
+			prov := provider
+			var probeProvider iscsi.ProbeBackendProvider
+			if durableProv != nil {
+				probeProvider = &durableProbeProvider{provider: durableProv}
+			}
+			negotiation := iscsi.NegotiableConfig{}
+			if f.iscsiCHAPSecret != "" {
+				negotiation = iscsi.DefaultNegotiableConfig()
+				negotiation.CHAP = iscsi.CHAPConfig{
+					Username: f.iscsiCHAPUser,
+					Secret:   f.iscsiCHAPSecret,
+				}
+			}
+			iscsiTarget = iscsi.NewTarget(iscsi.TargetConfig{
+				Listen:         f.iscsiListen,
+				IQN:            f.iscsiIQN,
+				PortalAddr:     f.iscsiPortalAddr,
+				VolumeID:       f.volumeID,
+				Provider:       prov,
+				ProbeProvider:  probeProvider,
+				Negotiation:    negotiation,
+				DataOutTimeout: f.iscsiDataOutTTL,
+				Handler: iscsi.HandlerConfig{
+					BlockSize:  frontendBlockSize,
+					VolumeSize: frontendVolumeSize,
+					ALUA:       newProjectionALUAProvider(h.ProjectionView(), f.volumeID, f.replicaID, f.iscsiIQN),
+				},
+			})
+			iscsiAddr, err := iscsiTarget.Start()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "blockvolume: iscsi target:", err)
+				if status != nil {
+					shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
+					_ = status.Close(shutCtx)
+					shutCancel()
+				}
+				_ = h.Close()
+				return 1
+			}
+			_ = json.NewEncoder(os.Stdout).Encode(iscsiReadyLine{
+				Component: "blockvolume",
+				Phase:     "iscsi-listening",
+				IscsiAddr: iscsiAddr,
+				IQN:       f.iscsiIQN,
+			})
+			frontendTargets = append(frontendTargets, &control.FrontendTarget{
+				Protocol: "iscsi",
+				Addr:     iscsiAddr,
+				Iqn:      f.iscsiIQN,
+				Lun:      uint32(f.iscsiLUN),
+			})
+			h.SetFrontendTargets(frontendTargets)
+		}
+
+		if f.nvmeListen != "" {
+			if f.nvmeTransport == "rdma" {
+				start := nvmeRDMAListenerStartDecision(true, nvmeRDMAPreflightFacts(f.nvmeListen))
+				if !start.allowed {
+					fmt.Fprintf(os.Stderr, "blockvolume: nvme rdma start refused: reason=%s\n", start.reason)
+					if iscsiTarget != nil {
+						_ = iscsiTarget.Close()
+					}
+					if replListen != nil {
+						replListen.Stop()
+					}
+					if replVolume != nil {
+						_ = replVolume.Close()
+					}
+					if durableProv != nil {
+						_ = durableProv.Close()
+					}
+					if status != nil {
+						shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
+						_ = status.Close(shutCtx)
+						shutCancel()
+					}
+					_ = h.Close()
+					return 1
+				}
+				blockSize := frontendBlockSize
+				volumeSize := frontendVolumeSize
+				if blockSize == 0 {
+					blockSize = nvme.DefaultBlockSize
+				}
+				if volumeSize == 0 {
+					volumeSize = nvme.DefaultVolumeBlocks * uint64(blockSize)
+				}
+				nvmeTarget = nvmerdma.NewTarget(nvmerdma.TargetConfig{
+					Listen:     f.nvmeListen,
+					SubsysNQN:  f.nvmeSubsysNQN,
+					VolumeID:   f.volumeID,
+					NSID:       uint32(f.nvmeNS),
+					BlockSize:  blockSize,
+					VolumeSize: volumeSize,
+					Provider:   provider,
+				})
+			} else {
+				var probeProvider nvme.ProbeBackendProvider
+				if durableProv != nil {
+					probeProvider = &durableProbeProvider{provider: durableProv}
+				}
+				nvmeTarget = nvme.NewTarget(nvme.TargetConfig{
+					Transport:        nvme.TransportTCP,
+					Listen:           f.nvmeListen,
+					SubsysNQN:        f.nvmeSubsysNQN,
+					VolumeID:         f.volumeID,
+					Provider:         provider,
+					ProbeProvider:    probeProvider,
+					ControllerID:     nvmeControllerIDFromReplicaID(f.replicaID),
+					MaxH2CDataLength: uint32(f.nvmeMaxH2C),
+					Handler: nvme.HandlerConfig{
+						NSID:       uint32(f.nvmeNS),
+						BlockSize:  frontendBlockSize,
+						VolumeSize: frontendVolumeSize,
+						ANA:        newProjectionANAProvider(h.ProjectionView(), f.volumeID, f.replicaID, f.nvmeSubsysNQN),
+					},
+				})
+			}
+			nvmeAddr, err := nvmeTarget.Start()
+			if err != nil {
+				if f.nvmeTransport == "rdma" {
+					fmt.Fprintf(os.Stderr, "blockvolume: nvme rdma start refused: reason=%s error=%v\n", nvmeRDMATargetStartFailureReason(err), err)
+				} else {
+					fmt.Fprintln(os.Stderr, "blockvolume: nvme target:", err)
+				}
 				if iscsiTarget != nil {
 					_ = iscsiTarget.Close()
 				}
@@ -1103,6 +1196,34 @@ func runVolume(f flags, exits *processExit) int {
 				_ = h.Close()
 				return 1
 			}
+			if status != nil {
+				status.SetNVMeListenerReady(true)
+			}
+			_ = json.NewEncoder(os.Stdout).Encode(nvmeReadyLine{
+				Component: "blockvolume",
+				Phase:     "nvme-listening",
+				NvmeAddr:  nvmeAddr,
+				SubsysNQN: f.nvmeSubsysNQN,
+			})
+			if shouldPublishNVMeFrontendTarget(f.nvmeTransport) {
+				frontendTargets = append(frontendTargets, &control.FrontendTarget{
+					Protocol:  "nvme",
+					Transport: f.nvmeTransport,
+					Addr:      nvmeAddr,
+					Nqn:       f.nvmeSubsysNQN,
+					Nsid:      uint32(f.nvmeNS),
+				})
+				h.SetFrontendTargets(frontendTargets)
+			}
+			if status != nil {
+				status.SetFrontendCapabilities(nvmeFrontendCapabilities(f.nvmeListen, f.nvmeTransport, true))
+				if source, ok := nvmeTarget.(interface{ Stats() nvme.Stats }); ok {
+					status.SetNVMeStatusSource(source)
+				}
+			}
+		}
+
+		if f.ublkDevice >= 0 {
 			blockSize := frontendBlockSize
 			volumeSize := frontendVolumeSize
 			if blockSize == 0 {
@@ -1111,153 +1232,58 @@ func runVolume(f flags, exits *processExit) int {
 			if volumeSize == 0 {
 				volumeSize = nvme.DefaultVolumeBlocks * uint64(blockSize)
 			}
-			nvmeTarget = nvmerdma.NewTarget(nvmerdma.TargetConfig{
-				Listen:     f.nvmeListen,
-				SubsysNQN:  f.nvmeSubsysNQN,
+			ublkTarget = ublk.NewTarget(ublk.TargetConfig{
 				VolumeID:   f.volumeID,
-				NSID:       uint32(f.nvmeNS),
+				Provider:   provider,
+				DevID:      f.ublkDevice,
 				BlockSize:  blockSize,
 				VolumeSize: volumeSize,
-				Provider:   provider,
+				Queues:     f.ublkQueues,
+				QueueDepth: f.ublkQueueDepth,
 			})
-		} else {
-			var probeProvider nvme.ProbeBackendProvider
-			if durableProv != nil {
-				probeProvider = &durableProbeProvider{provider: durableProv}
-			}
-			nvmeTarget = nvme.NewTarget(nvme.TargetConfig{
-				Transport:        nvme.TransportTCP,
-				Listen:           f.nvmeListen,
-				SubsysNQN:        f.nvmeSubsysNQN,
-				VolumeID:         f.volumeID,
-				Provider:         provider,
-				ProbeProvider:    probeProvider,
-				ControllerID:     nvmeControllerIDFromReplicaID(f.replicaID),
-				MaxH2CDataLength: uint32(f.nvmeMaxH2C),
-				Handler: nvme.HandlerConfig{
-					NSID:       uint32(f.nvmeNS),
-					BlockSize:  frontendBlockSize,
-					VolumeSize: frontendVolumeSize,
-					ANA:        newProjectionANAProvider(h.ProjectionView(), f.volumeID, f.replicaID, f.nvmeSubsysNQN),
-				},
-			})
-		}
-		nvmeAddr, err := nvmeTarget.Start()
-		if err != nil {
-			if f.nvmeTransport == "rdma" {
-				fmt.Fprintf(os.Stderr, "blockvolume: nvme rdma start refused: reason=%s error=%v\n", nvmeRDMATargetStartFailureReason(err), err)
-			} else {
-				fmt.Fprintln(os.Stderr, "blockvolume: nvme target:", err)
-			}
-			if iscsiTarget != nil {
-				_ = iscsiTarget.Close()
-			}
-			if replListen != nil {
-				replListen.Stop()
-			}
-			if replVolume != nil {
-				_ = replVolume.Close()
-			}
-			if durableProv != nil {
-				_ = durableProv.Close()
+			ublkPath, err := ublkTarget.Start()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "blockvolume: ublk device:", err)
+				if nvmeTarget != nil {
+					_ = nvmeTarget.Close()
+				}
+				if iscsiTarget != nil {
+					_ = iscsiTarget.Close()
+				}
+				if replListen != nil {
+					replListen.Stop()
+				}
+				if replVolume != nil {
+					_ = replVolume.Close()
+				}
+				if durableProv != nil {
+					_ = durableProv.Close()
+				}
+				if status != nil {
+					shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
+					_ = status.Close(shutCtx)
+					shutCancel()
+				}
+				_ = h.Close()
+				return 1
 			}
 			if status != nil {
-				shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
-				_ = status.Close(shutCtx)
-				shutCancel()
+				status.SetUblkStatusSource(ublkTarget)
 			}
-			_ = h.Close()
-			return 1
-		}
-		if status != nil {
-			status.SetNVMeListenerReady(true)
-		}
-		_ = json.NewEncoder(os.Stdout).Encode(nvmeReadyLine{
-			Component: "blockvolume",
-			Phase:     "nvme-listening",
-			NvmeAddr:  nvmeAddr,
-			SubsysNQN: f.nvmeSubsysNQN,
-		})
-		if shouldPublishNVMeFrontendTarget(f.nvmeTransport) {
-			frontendTargets = append(frontendTargets, &control.FrontendTarget{
-				Protocol:  "nvme",
-				Transport: f.nvmeTransport,
-				Addr:      nvmeAddr,
-				Nqn:       f.nvmeSubsysNQN,
-				Nsid:      uint32(f.nvmeNS),
+			_ = json.NewEncoder(os.Stdout).Encode(ublkReadyLine{
+				Component: "blockvolume",
+				Phase:     "ublk-ready",
+				Device:    ublkPath,
 			})
-			h.SetFrontendTargets(frontendTargets)
 		}
-		if status != nil {
-			status.SetFrontendCapabilities(nvmeFrontendCapabilities(f.nvmeListen, f.nvmeTransport, true))
-			if source, ok := nvmeTarget.(interface{ Stats() nvme.Stats }); ok {
-				status.SetNVMeStatusSource(source)
-			}
-		}
-	}
+	} // startFrontends
 
-	var ublkTarget *ublk.Target
-	if f.ublkDevice >= 0 {
-		blockSize := frontendBlockSize
-		volumeSize := frontendVolumeSize
-		if blockSize == 0 {
-			blockSize = nvme.DefaultBlockSize
-		}
-		if volumeSize == 0 {
-			volumeSize = nvme.DefaultVolumeBlocks * uint64(blockSize)
-		}
-		ublkTarget = ublk.NewTarget(ublk.TargetConfig{
-			VolumeID:   f.volumeID,
-			Provider:   provider,
-			DevID:      f.ublkDevice,
-			BlockSize:  blockSize,
-			VolumeSize: volumeSize,
-			Queues:     f.ublkQueues,
-			QueueDepth: f.ublkQueueDepth,
-		})
-		ublkPath, err := ublkTarget.Start()
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "blockvolume: ublk device:", err)
-			if nvmeTarget != nil {
-				_ = nvmeTarget.Close()
-			}
-			if iscsiTarget != nil {
-				_ = iscsiTarget.Close()
-			}
-			if replListen != nil {
-				replListen.Stop()
-			}
-			if replVolume != nil {
-				_ = replVolume.Close()
-			}
-			if durableProv != nil {
-				_ = durableProv.Close()
-			}
-			if status != nil {
-				shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
-				_ = status.Close(shutCtx)
-				shutCancel()
-			}
-			_ = h.Close()
-			return 1
-		}
-		if status != nil {
-			status.SetUblkStatusSource(ublkTarget)
-		}
-		_ = json.NewEncoder(os.Stdout).Encode(ublkReadyLine{
-			Component: "blockvolume",
-			Phase:     "ublk-ready",
-			Device:    ublkPath,
-		})
+	// The one stop waiter has already returned if a stop won the race above.
+	if stopped == nil {
+		w := <-stopWait
+		stopped = &w
 	}
-
-	shutdownCtx := exits.parent
-	var leaseRequests <-chan workspaceStopRequest
-	var leaseDone <-chan error
-	if f.workspaceLease {
-		leaseRequests, leaseDone = startWorkspaceLease(shutdownCtx, h)
-	}
-	leaseStop, leaseDone := waitWorkspaceStop(exits, f, h, leaseRequests, leaseDone)
+	leaseStop, leaseDone := stopped.leaseStop, stopped.leaseDone
 	// The resource owner performs shutdown. The lease callback waits for this
 	// exact drain; it cannot ACK a merely requested or failed close.
 	h.FenceWorkspaceLease()
