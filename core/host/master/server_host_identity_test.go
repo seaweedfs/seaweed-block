@@ -145,6 +145,10 @@ func TestServerIDRefusedFromAHostOtherThanItsRegisteredOne(t *testing.T) {
 	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(status.Convert(err).Message(), "registered on host 127.0.0.1") {
 		t.Fatalf("same --server-id from a second host: %v, want FailedPrecondition naming the registered host", err)
 	}
+	want := "registered on host 127.0.0.1 but connects from 127.0.0.2: register the node by the address it connects from (not loopback) in the cluster spec (volume hb-node-a replica r-node-a)"
+	if !strings.Contains(status.Convert(err).Message(), want) {
+		t.Fatalf("heartbeat refusal lacks the cure or slot detail: %v", err)
+	}
 	if slot, ok := r.m.ObservationHost().Store().SlotFactOnServer("node-a", "hb-node-a", "r-node-a"); !ok || !strings.HasPrefix(slot.DataAddr, "127.0.0.1:") {
 		t.Fatalf("refused heartbeat reached the observations: %+v ok=%v", slot, ok)
 	}
