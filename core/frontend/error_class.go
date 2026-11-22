@@ -5,7 +5,7 @@ import (
 	"errors"
 )
 
-// BackendErrorClass is independent of the transport's status codes.
+// BackendErrorClass is independent of transport status (INV-FE-ERROR-RETRY-CLASS-001).
 type BackendErrorClass uint8
 
 const (
@@ -16,7 +16,7 @@ const (
 	BackendErrorClosed
 )
 
-// ClassifyBackendError implements the approved r2.36 frontend retry-class rule.
+// ClassifyBackendError implements INV-FE-ERROR-RETRY-CLASS-001.
 // Call only for a non-nil backend error. A pure expired command deadline is
 // transient; a joined physical cause keeps its permanent classification.
 func ClassifyBackendError(ctx context.Context, err error) BackendErrorClass {

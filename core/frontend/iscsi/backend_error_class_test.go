@@ -22,7 +22,7 @@ func (b classifiedErrorBackend) Read(context.Context, int64, []byte) (int, error
 func (b classifiedErrorBackend) Write(context.Context, int64, []byte) (int, error) { return 0, b.err }
 func (b classifiedErrorBackend) Sync(context.Context) error                        { return b.err }
 
-// r2.36: transient backend errors must never become a media failure. Both
+// INV-FE-ERROR-RETRY-CLASS-001: transient backend errors must never become a media failure. Both
 // protocol handlers consume the same backend condition; neither returns data.
 func TestBackendErrorClassesAcrossFrontends(t *testing.T) {
 	for _, tc := range []struct {

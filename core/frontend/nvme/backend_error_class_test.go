@@ -17,7 +17,7 @@ func (b retryClassBackend) Read(context.Context, int64, []byte) (int, error)  { 
 func (b retryClassBackend) Write(context.Context, int64, []byte) (int, error) { return 0, b.err }
 func (b retryClassBackend) Sync(context.Context) error                        { return b.err }
 
-// r2.36: validate the completion encoding, not only the handler's status code.
+// INV-FE-ERROR-RETRY-CLASS-001: validate the completion encoding, not only the handler's status code.
 func TestBackendRetryClassClearsWireDNR(t *testing.T) {
 	for _, tc := range []struct {
 		name string
