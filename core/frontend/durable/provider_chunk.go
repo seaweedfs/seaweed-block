@@ -83,7 +83,13 @@ type chunkLineage struct {
 // host blocks it until local recovery is done) the projection has epoch 0
 // and is not healthy; a layer is never attached under that.
 func chunkAuthority(proj frontend.Projection, volumeID string) bool {
-	return proj.VolumeID == volumeID && proj.Healthy && proj.Epoch > 0 && proj.ReplicaID != ""
+	return chunkAssignment(proj, volumeID) && proj.Healthy
+}
+
+// A sealed recovery is non-serving but its assigned identity can still answer
+// the read-only plain-seal replay (INV-WS-SEAL-REPLAY-001).
+func chunkAssignment(proj frontend.Projection, volumeID string) bool {
+	return proj.VolumeID == volumeID && proj.Epoch > 0 && proj.ReplicaID != ""
 }
 
 // chunkAuthorityGap names the projection fields that fail chunkAuthority,
@@ -367,10 +373,7 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 		return nil, fmt.Errorf("durable: chunk remote for %s: %w", volumeID, err)
 	}
 	lin := chunkLineage{volumeID: proj.VolumeID, replicaID: proj.ReplicaID, epoch: proj.Epoch, endpoint: proj.EndpointVersion}
-	holder := p.cfg.ChunkHolder
-	if holder == "" {
-		holder = proj.ReplicaID
-	}
+	holder := p.chunkHolder(proj)
 	bound := &closeBoundRemote{ChunkRemote: inner, done: p.closeCtx}
 	if pace, ok := p.cfg.ChunkBudget.(interface {
 		WaitUpload(context.Context, int) error
@@ -413,18 +416,25 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 	}
 	if !h.fresh {
 		// An existing local volume is this holder's image only while HEAD is
-		// still this holder's publication. Another holder's HEAD means the
+		// still this holder's publication (INV-WS-STALE-LOCAL-ROOT-001).
+		// Check again on the exact claim image before its CAS. Another holder means the
 		// workspace moved away and back: refuse rather than serve, or cut
 		// over, the newer image with the stale one.
 		head, err := remote.GetHead(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("durable: read HEAD before attaching existing volume %s: %w", volumeID, err)
 		}
-		if head.Gen != 0 && head.Holder != holder {
-			err := fmt.Errorf("%w: %w: volume %s local root %s, HEAD holder %q gen %d epoch %d, local holder %q; remove or quarantine the local root to attach fresh from HEAD",
-				ErrChunkStaleLocalRoot, storage.ErrChunkLayerFenced, volumeID, h.path, head.Holder, head.Gen, head.Epoch, holder)
-			log.Printf("durable: refusing to attach volume=%s root=%s: HEAD holder=%q gen=%d epoch=%d is not this holder %q (remove or quarantine the local root)",
-				volumeID, h.path, head.Holder, head.Gen, head.Epoch, holder)
+		cfg.PrepareRestore = func(head storage.ChunkHead) error {
+			if head.Gen != 0 && head.Holder != holder {
+				err := fmt.Errorf("%w: %w: volume %s local root %s, HEAD holder %q gen %d epoch %d, local holder %q; remove or quarantine the local root to attach fresh from HEAD",
+					ErrChunkStaleLocalRoot, storage.ErrChunkLayerFenced, volumeID, h.path, head.Holder, head.Gen, head.Epoch, holder)
+				log.Printf("durable: refusing to attach volume=%s root=%s: HEAD holder=%q gen=%d epoch=%d is not this holder %q (remove or quarantine the local root)",
+					volumeID, h.path, head.Holder, head.Gen, head.Epoch, holder)
+				return err
+			}
+			return nil
+		}
+		if err := cfg.PrepareRestore(head); err != nil {
 			return nil, err
 		}
 	}
@@ -462,20 +472,18 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 			// restore here, so HEAD is never claimed for a mis-ordered ship.
 			return h.backend.seedAndRebase(func() error { return ws.SeedChunkFrontier(head.RemoteLSN) })
 		}
-		claimStart := time.Now()
-		log.Printf("durable: HEAD claim for volume=%s starting: target epoch=%d holder=%q", volumeID, cfg.Epoch, cfg.Holder)
-		head, err := storage.ClaimChunkHead(ctx, remote, cfg)
-		if err != nil {
-			log.Printf("durable: HEAD claim for volume=%s failed after %s: %v", volumeID, time.Since(claimStart), err)
-			return nil, fmt.Errorf("durable: restore HEAD claim: %w", err)
-		}
-		claimed := "claimed"
-		if head.Gen == 0 {
-			claimed = "no HEAD to claim (new lineage)"
-		}
-		log.Printf("durable: HEAD claim for volume=%s done in %s: gen=%d epoch=%d holder=%q, %s", volumeID, time.Since(claimStart), head.Gen, head.Epoch, head.Holder, claimed)
-		cfg.RestoreGuard = &storage.ChunkHeadVersion{Gen: head.Gen, Epoch: head.Epoch}
 	}
+	// INV-WS-REOPEN-FENCE-001: local-root reopens claim too, without
+	// reseeding their acknowledged WAL or replacing it with remote absence.
+	claimStart := time.Now()
+	log.Printf("durable: HEAD claim for volume=%s starting: target epoch=%d holder=%q", volumeID, cfg.Epoch, cfg.Holder)
+	head, err := storage.ClaimChunkHead(ctx, remote, cfg)
+	if err != nil {
+		log.Printf("durable: HEAD claim for volume=%s failed after %s: %v", volumeID, time.Since(claimStart), err)
+		return nil, fmt.Errorf("durable: restore HEAD claim: %w", err)
+	}
+	log.Printf("durable: HEAD claim for volume=%s done in %s: gen=%d epoch=%d holder=%q", volumeID, time.Since(claimStart), head.Gen, head.Epoch, head.Holder)
+	cfg.RestoreGuard = &storage.ChunkHeadVersion{Gen: head.Gen, Epoch: head.Epoch}
 
 	layer, attachErr := storage.AttachChunkLayer(ws, remote, cfg)
 	if attachErr == nil {
@@ -1087,7 +1095,14 @@ var ErrPlainDetachBusy = errors.New("durable: plain detach requires idle fronten
 // closing an idle frontend (including a closed handle). M5 PlainStop -> Quiesce uses
 // only the caller context, not the live-serving freeze timer.
 func (p *DurableProvider) DetachVolumePlain(ctx context.Context, volumeID string) (storage.ChunkCutResult, uint64, error) {
-	return p.detachVolume(ctx, volumeID, true)
+	result, last, err := p.detachVolume(ctx, volumeID, true)
+	if err != nil && !errors.Is(err, ErrNotChunkVolume) && !errors.Is(err, ErrChunkAwaitingAuthority) {
+		return result, last, err
+	}
+	// INV-WS-SEAL-REPLAY-001: success is always a fresh remote proof, also
+	// after restart when no layer exists, including deferred authority startup.
+	// A cached result is not sufficient.
+	return p.replayPlainSeal(ctx, volumeID, result)
 }
 
 func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, plain bool) (storage.ChunkCutResult, uint64, error) {

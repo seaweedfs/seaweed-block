@@ -35,6 +35,7 @@ func TestHostCutLimitDoesNotGateGuestIO(t *testing.T) {
 	}
 	defer p.Close()
 	s := openRecovered(t, p)
+	claimed := freshV1Claim(t, r)
 	if _, e = s.Write(0, block(0x72)); e != nil {
 		t.Fatal(e)
 	}
@@ -54,7 +55,7 @@ func TestHostCutLimitDoesNotGateGuestIO(t *testing.T) {
 		t.Fatal("limiter blocked read", e)
 	}
 	h, _ := r.GetHead(context.Background())
-	if h.Gen != 0 {
+	if h.Gen != claimed.Gen {
 		t.Fatal("refused cut published")
 	}
 }
