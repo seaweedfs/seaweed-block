@@ -509,3 +509,5 @@ stateDiagram-v2
   SealedReplay --> [*]: signal
   Serving --> [*]: revoke ACK or signal
 ```
+
+GAP-1 exit classification compares a newer other-replica fact with the newest own assignment this process observed, including a locally blocked assignment; historical other facts do not suppress restart. The shared `Host.IsSuperseded` predicate is reused without changing frontend admission. An unconfirmed revocation ACK exits75 with `revoke_ack_unconfirmed`. Restart can retry ACK only while the original revoking lease remains valid; after expiry the revoking/recorded-ACK re-grant guards still refuse, so restart alone cannot resolve that case and operator recovery is required.

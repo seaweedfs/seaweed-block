@@ -203,6 +203,9 @@ type Host struct {
 	otherMu   sync.Mutex
 	lastOther *control.AssignmentFact
 
+	selfLineageMu     sync.RWMutex
+	selfEpoch, selfEV uint64
+
 	frontendMu      sync.RWMutex
 	frontendTargets []*control.FrontendTarget
 }
@@ -846,6 +849,8 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 			h.cfg.VolumeID, fact.ReplicaId, fact.Epoch, h.cfg.ReplicaID)
 		return
 	}
+
+	h.recordSelfAssignment(fact)
 
 	// The recovery watchdog runs from the primary assignment, before any
 	// admission step can fail (#128 rule 6).

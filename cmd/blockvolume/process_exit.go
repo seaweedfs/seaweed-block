@@ -11,12 +11,13 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/host/volume"
-	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 )
 
 const (
 	exitWorkspaceRetry      = 75
 	exitWorkspaceSuperseded = 78
+	// Existing post-drain ACK wait; M2 Revoking -> Revoked, Part D.
+	workspaceLeaseCloseoutTimeout = 3 * time.Second
 )
 
 type workspaceExit struct {
@@ -97,11 +98,10 @@ func reportWorkspaceExit(out workspaceExit) int {
 	return out.code
 }
 
-// INV-WS-STARTUP-RETRY-001: only a positive, volume-specific other-replica
-// fact permits no-retry. A
-// higher epoch for the same replica must restart for the new assignment.
-func workspaceRetryOutcome(volumeID, replicaID, reason string, other *control.AssignmentFact) workspaceExit {
-	if other != nil && other.VolumeId == volumeID && other.ReplicaId != "" && other.ReplicaId != replicaID {
+// INV-WS-STARTUP-RETRY-001: only a newer other-replica authority fact
+// permits no-retry. Host owns the lineage observation and shared predicate.
+func workspaceRetryOutcome(reason string, h *volume.Host) workspaceExit {
+	if h.IsCurrentReplicaSuperseded() {
 		return workspaceExit{exitWorkspaceSuperseded, "superseded"}
 	}
 	return workspaceExit{exitWorkspaceRetry, reason}
@@ -138,7 +138,7 @@ func waitWorkspaceStop(e *processExit, f flags, h *volume.Host, requests <-chan 
 	case request := <-requests:
 		out := workspaceExit{reason: "revoked"}
 		if !h.WorkspaceLeaseRevoking() {
-			out = workspaceRetryOutcome(f.volumeID, f.replicaID, "lease_expired", h.LastOtherLine())
+			out = workspaceRetryOutcome("lease_expired", h)
 		}
 		if out.code != 0 {
 			e.choose(out)
@@ -146,7 +146,7 @@ func waitWorkspaceStop(e *processExit, f flags, h *volume.Host, requests <-chan 
 		return &request, done
 	case err := <-done:
 		fmt.Fprintln(os.Stderr, "blockvolume: workspace lease stopped:", err)
-		e.choose(workspaceRetryOutcome(f.volumeID, f.replicaID, "lease_expired", h.LastOtherLine()))
+		e.choose(workspaceRetryOutcome("lease_expired", h))
 		return nil, nil
 	}
 }
@@ -165,10 +165,10 @@ func finishWorkspaceLease(e *processExit, f flags, h *volume.Host, done <-chan e
 			return
 		}
 		fmt.Fprintln(os.Stderr, "blockvolume: workspace lease closeout:", err)
-	case <-time.After(3 * time.Second):
+	case <-time.After(workspaceLeaseCloseoutTimeout):
 		fmt.Fprintln(os.Stderr, "blockvolume: workspace lease closeout deadline")
 	}
-	e.choose(workspaceRetryOutcome(f.volumeID, f.replicaID, "lease_expired", h.LastOtherLine()))
+	e.choose(workspaceExit{exitWorkspaceRetry, "revoke_ack_unconfirmed"})
 }
 
 func chooseChunkStartupExit(e *processExit, f flags, h *volume.Host, p *durable.DurableProvider) bool {
@@ -179,6 +179,6 @@ func chooseChunkStartupExit(e *processExit, f flags, h *volume.Host, p *durable.
 	if !failed {
 		return false
 	}
-	out := workspaceRetryOutcome(f.volumeID, f.replicaID, "assignment_timeout", h.LastOtherLine())
+	out := workspaceRetryOutcome("assignment_timeout", h)
 	return p.ChooseChunkStartupExit(f.volumeID, gen, func() { e.choose(out) })
 }

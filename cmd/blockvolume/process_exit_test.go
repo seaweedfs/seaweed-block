@@ -3,33 +3,11 @@ package main
 import (
 	"context"
 	"errors"
-	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"os"
 	"os/exec"
 	"testing"
 	"time"
 )
-
-func TestWorkspaceRetryNeedsPositiveOtherReplica(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		fact *control.AssignmentFact
-		code int
-	}{
-		{"absent", nil, 75},
-		{"same replica higher epoch", &control.AssignmentFact{VolumeId: "v", ReplicaId: "r", Epoch: 99}, 75},
-		{"another volume", &control.AssignmentFact{VolumeId: "other", ReplicaId: "other"}, 75},
-		{"empty holder", &control.AssignmentFact{VolumeId: "v"}, 75},
-		{"other replica", &control.AssignmentFact{VolumeId: "v", ReplicaId: "other"}, 78},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			out := workspaceRetryOutcome("v", "r", "assignment_timeout", tc.fact)
-			if out.code != tc.code {
-				t.Fatalf("outcome=%+v want %d", out, tc.code)
-			}
-		})
-	}
-}
 
 func TestWorkspaceExitFirstOutcomeIsLatched(t *testing.T) {
 	for _, first := range []workspaceExit{{75, "lease_expired"}, {78, "superseded"}, {0, "revoked"}} {
