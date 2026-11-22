@@ -969,7 +969,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	prepareStart := time.Now()
 	next := copyHead(baseHead)
 	next.Epoch, next.Holder, next.HolderRoot, next.RemoteLSN = l.cfg.Epoch, l.cfg.Holder, l.cfg.HolderRoot, h
-	next.HolderRootGen = baseHead.Gen + 1
+	next.HolderRootGen = rootGenFor(l.cfg.HolderRoot, baseHead.Gen+1)
 	next.State, next.DetachedBy = chunkHeadActive, nil
 	if detach {
 		next.State = chunkHeadDetached
@@ -1225,7 +1225,7 @@ func (l *chunkLayerImpl) SettleDetach(ctx context.Context) (detachSettlement, ch
 		}
 		cancel := copyHead(baseHead)
 		cancel.Epoch, cancel.Holder, cancel.HolderRoot = l.cfg.Epoch, l.cfg.Holder, l.cfg.HolderRoot
-		cancel.HolderRootGen = base.Gen + 1
+		cancel.HolderRootGen = rootGenFor(l.cfg.HolderRoot, base.Gen+1)
 		cancel.State, cancel.DetachedBy = chunkHeadActive, nil
 		gen, casErr := casAndConfirmChunkHead(ctx, l.remote, l.cfg.BeforeHeadCAS, base, cancel)
 		if casErr == nil {

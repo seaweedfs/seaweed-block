@@ -31,8 +31,10 @@ or latest HEAD).
 
 Upgrades: a HEAD written before this release has no `holder_root`; the same
 holder's existing root adopts it once on its first start (its claim then
-writes the root). A binary from before this release cannot read a HEAD that
-carries `holder_root`: upgrade the master and every volume of a volume
-together, with binaries from the same release. walstore-chunk volumes now
+writes the root). A HEAD that names its local root is written as HEAD format 4; a binary
+from before this release refuses it as an unsupported HEAD format. Upgrade
+the master and every volume of a volume together, with binaries from the
+same release. There is no rollback to an earlier pre-release once a volume
+has published format 4. walstore-chunk volumes now
 require their holder (`<server-id>/<replica-id>`); a replica id alone is
 refused.

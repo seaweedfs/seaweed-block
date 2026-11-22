@@ -76,8 +76,12 @@ const (
 	// listPage is the page size of a full directory listing.
 	listPage = 1000
 
-	// headFormat is the only HEAD document format this code reads.
+	// headFormat is the HEAD document format of an unsegmented HEAD without
+	// a local root; segmented ones are format 3.
 	headFormat = 1
+	// headFormatRooted is a HEAD that names its local root (holder_root,
+	// holder_root_gen): pre-root readers refuse it as an unsupported format.
+	headFormatRooted = 4
 )
 
 // ErrDeleteUnsupported: this remote does not reclaim chunks.
@@ -518,6 +522,11 @@ func headEntry(h storage.ChunkHead) (*filerpb.Entry, error) {
 		doc.ChunkBytes = h.ChunkBytes
 		doc.ChunkCount = h.ManifestChunkCount
 	}
+	if h.HolderRoot != "" {
+		doc.Format = headFormatRooted
+	} else if h.HolderRootGen != 0 || (h.DetachedBy != nil && h.DetachedBy.HolderRoot != "") {
+		return nil, errors.New("chunkstore: HEAD root fields without its local root")
+	}
 	body, err := json.Marshal(doc)
 	if err != nil {
 		return nil, err
@@ -620,7 +629,13 @@ func decodeHeadDoc(p string, content []byte) (storage.ChunkHead, error) {
 		copy(cr.SHA256[:], sum)
 		h.Chunks[idx] = cr
 	}
-	if doc.Format == 2 || doc.Format == 3 {
+	if doc.Format != headFormatRooted && doc.DetachedBy != nil && doc.DetachedBy.HolderRoot != "" {
+		return fail("format %d HEAD whose detachedBy names a local root", doc.Format)
+	}
+	if doc.Format == headFormatRooted && doc.Segments == nil && len(doc.Chunks) != 0 {
+		return fail("rooted HEAD with flat chunks")
+	}
+	if doc.Format == 2 || doc.Format == 3 || (doc.Format == headFormatRooted && doc.Segments != nil) {
 		if len(doc.Chunks) != 0 {
 			return fail("segmented root contains flat chunks")
 		}

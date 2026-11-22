@@ -207,10 +207,15 @@ func TestFormatUpgradeLegacyProviderTakeover(t *testing.T) {
 		t.Fatalf("takeover not installed: %+v %v", h, err)
 	}
 	e := f.entries[path.Join(catBase, "v1", headName)]
-	var d struct{ Format int }
+	var d struct {
+		Format   int
+		Segments map[string]any `json:"segments"`
+	}
 	json.Unmarshal(e.Content, &d)
-	if d.Format != 3 {
-		t.Fatal("takeover wrote flat data")
+	// A takeover by a root-identified provider writes the rooted format 4,
+	// with the level manifest (not flat data).
+	if d.Format != headFormatRooted || d.Segments == nil {
+		t.Fatalf("takeover wrote format %d without a level manifest", d.Format)
 	}
 	for i := uint32(0); i < 8; i++ {
 		got, err := s.Read(i)

@@ -42,3 +42,12 @@ func detachedProofOf(head chunkHead, epoch uint64, owner string) bool {
 func anyRootOfHolder(curHolder, _, holderID, _ string) bool {
 	return holder.SameAssignment(curHolder, holderID)
 }
+
+// rootGenFor is the HolderRootGen a publisher stamps: the generation its CAS
+// installs when it has a local root, 0 (no root identity) otherwise.
+func rootGenFor(root string, gen uint64) uint64 {
+	if root == "" {
+		return 0
+	}
+	return gen
+}

@@ -17,14 +17,14 @@ func TestHeadDoc_HolderRootRoundTrip(t *testing.T) {
 	f, b := newFakeFiler(), newFakeBlobs()
 	r, _ := NewChunkRemote(f, b, catBase+"/v1")
 	ctx := context.Background()
-	gen, err := r.CASHead(ctx, storage.ChunkHeadVersion{}, storage.ChunkHead{Epoch: 1, Holder: "s1/r1", HolderRoot: "aaaa", RemoteLSN: 5, Chunks: map[uint64]storage.ChunkRef{}, State: storage.ChunkHeadActive})
+	gen, err := r.CASHead(ctx, storage.ChunkHeadVersion{}, storage.ChunkHead{Epoch: 1, Holder: "s1/r1", HolderRoot: "aaaa", HolderRootGen: 1, RemoteLSN: 5, Chunks: map[uint64]storage.ChunkRef{}, State: storage.ChunkHeadActive})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if h, err := r.GetHead(ctx); err != nil || h.HolderRoot != "aaaa" {
 		t.Fatalf("active HEAD read back as %+v %v, want holder root aaaa", h, err)
 	}
-	det := storage.ChunkHead{Epoch: 1, Holder: "s1/r1", HolderRoot: "aaaa", RemoteLSN: 5, Chunks: map[uint64]storage.ChunkRef{}, State: storage.ChunkHeadDetached,
+	det := storage.ChunkHead{Epoch: 1, Holder: "s1/r1", HolderRoot: "aaaa", HolderRootGen: gen + 1, RemoteLSN: 5, Chunks: map[uint64]storage.ChunkRef{}, State: storage.ChunkHeadDetached,
 		DetachedBy: &storage.ChunkDetachedBy{Holder: "s1/r1", HolderRoot: "aaaa", Epoch: 1, Gen: gen + 1}}
 	if _, err := r.CASHead(ctx, storage.ChunkHeadVersion{Gen: gen, Epoch: 1}, det); err != nil {
 		t.Fatal(err)
@@ -52,8 +52,27 @@ func TestHeadDoc_HolderRootRoundTrip(t *testing.T) {
 	if _, err := r.GetHead(ctx); err == nil {
 		t.Fatal("a detached HEAD whose proof names another local root was accepted")
 	}
-	// A pre-release document (no holder_root anywhere) reads as an empty root.
+	// The format number goes with the root (the leads' ruling on #428): an
+	// old format number carrying root fields is refused, and so is format 4
+	// without its root; a pre-release document (format 1, no root anywhere)
+	// reads as an empty root.
+	if doc["format"] != float64(headFormatRooted) {
+		t.Fatalf("a rooted HEAD was written as format %v, want %d", doc["format"], headFormatRooted)
+	}
+	doc["detachedBy"].(map[string]any)["holder_root"] = "aaaa"
+	doc["format"] = float64(headFormat)
+	set(doc)
+	if _, err := r.GetHead(ctx); err == nil {
+		t.Fatal("a format 1 HEAD carrying root fields was accepted")
+	}
+	doc["format"] = float64(headFormatRooted)
 	delete(doc, "holder_root")
+	set(doc)
+	if _, err := r.GetHead(ctx); err == nil {
+		t.Fatal("a format 4 HEAD without its local root was accepted")
+	}
+	doc["format"] = float64(headFormat)
+	delete(doc, "holder_root_gen")
 	delete(doc["detachedBy"].(map[string]any), "holder_root")
 	set(doc)
 	if h, err := r.GetHead(ctx); err != nil || h.HolderRoot != "" || h.DetachedBy == nil || h.DetachedBy.HolderRoot != "" {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -26,13 +27,18 @@ func TestWorkspaceHEADCanonicalState(t *testing.T) {
 		// INV-WS-LOCAL-ROOT-IDENTITY-001: the root fields are read and the
 		// detached proof must name the same root; the master compares the
 		// holder only (server, replica) for move admission.
-		{"rooted-active", `,"holder_root":"r1","holder_root_gen":9,"state":"active"`, true, false},
-		{"rooted-detached", `,"holder_root":"r1","holder_root_gen":9,"state":"detached","detachedBy":{"holder":"old","holder_root":"r1","epoch":3,"gen":9}`, true, true},
-		{"rooted-proof-other-root", `,"holder_root":"r1","holder_root_gen":9,"state":"detached","detachedBy":{"holder":"old","holder_root":"r2","epoch":3,"gen":9}`, false, false},
+		{"rooted-active", `,"holder_root":"r1","holder_root_gen":9,"chunks":{},"state":"active"`, true, false},
+		{"rooted-detached", `,"holder_root":"r1","holder_root_gen":9,"chunks":{},"state":"detached","detachedBy":{"holder":"old","holder_root":"r1","epoch":3,"gen":9}`, true, true},
+		{"old-format-with-root", `,"holder_root":"r1","holder_root_gen":9,"state":"active"`, false, false},
+		{"rooted-proof-other-root", `,"holder_root":"r1","holder_root_gen":9,"chunks":{},"state":"detached","detachedBy":{"holder":"old","holder_root":"r2","epoch":3,"gen":9}`, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				_, _ = w.Write([]byte(`{"format":1,"gen":9,"epoch":3,"holder":"old","remote_lsn":42` + tc.suffix + `}`))
+				format := "1"
+				if strings.HasPrefix(tc.name, "rooted") {
+					format = "4" // a HEAD that names its local root is format 4
+				}
+				_, _ = w.Write([]byte(`{"format":` + format + `,"gen":9,"epoch":3,"holder":"old","remote_lsn":42` + tc.suffix + `}`))
 			}))
 			defer s.Close()
 			read, err := NewWorkspaceHEADReader(s.URL)
