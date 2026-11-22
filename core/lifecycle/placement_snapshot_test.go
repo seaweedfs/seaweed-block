@@ -1,6 +1,9 @@
 package lifecycle
 
 import (
+	"os"
+	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -58,5 +61,87 @@ func TestPlacementSnapshotDoesNotWaitForWriter(t *testing.T) {
 	}
 	if _, ok := s.GetPlacementSnapshot("v"); ok {
 		t.Fatal("deleted placement remained published")
+	}
+}
+
+// INV-WS-RENEW-NONBLOCKING-001: publication is a committed view, not a
+// speculative plan. Force a real replace/remove failure, without a hook.
+func TestPlacementSnapshotFailedCommitStaysCommitted(t *testing.T) {
+	for _, op := range []string{"create", "replace", "delete"} {
+		t.Run(op, func(t *testing.T) {
+			dir := t.TempDir()
+			s, err := OpenPlacementIntentStore(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan := PlacementPlan{VolumeID: "v", DesiredRF: 1, Candidates: []PlacementCandidate{{VolumeID: "v", ServerID: "node-a", ReplicaID: "r1", Source: PlacementSourceExistingReplica}}}
+			path := filepath.Join(dir, "v.json")
+			var saved []byte
+			if op != "create" {
+				if _, err = s.ApplyPlan(plan); err != nil {
+					t.Fatal(err)
+				}
+				saved, err = os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err = os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, existed := s.GetPlacementSnapshot("v")
+			// A nonempty directory at the record path makes both replace and delete
+			// fail after validation, on Windows and Linux, even when run as root.
+			if err = os.Mkdir(path, 0755); err != nil {
+				t.Fatal(err)
+			}
+			blocker := filepath.Join(path, "blocker")
+			if err = os.WriteFile(blocker, []byte("owned test fixture"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			plan.Candidates[0].ServerID = "node-b"
+			if op == "delete" {
+				err = s.DeletePlacement("v")
+			} else {
+				_, err = s.ApplyPlan(plan)
+			}
+			if err == nil {
+				t.Fatal("fixture did not fail commit")
+			}
+			got, ok := s.GetPlacementSnapshot("v")
+			if ok != existed || !reflect.DeepEqual(got, before) {
+				t.Fatalf("failed %s published %+v/%t instead of %+v/%t", op, got, ok, before, existed)
+			}
+			current, present := s.GetPlacement("v")
+			if present != existed || !reflect.DeepEqual(current, before) {
+				t.Fatal("failed commit changed the store's current placement")
+			}
+			if err = os.Remove(blocker); err != nil {
+				t.Fatal(err)
+			}
+			if err = os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if saved != nil {
+				if err = os.WriteFile(path, saved, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			reopened, err := OpenPlacementIntentStore(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, ok = reopened.GetPlacementSnapshot("v")
+			if ok != existed || !reflect.DeepEqual(got, before) {
+				t.Fatal("reopen did not retain the committed placement")
+			}
+			if _, err = s.ApplyPlan(plan); err != nil {
+				t.Fatal("unblocked commit", err)
+			}
+			got, ok = s.GetPlacementSnapshot("v")
+			if !ok || len(got.Slots) != 1 || got.Slots[0].ServerID != "node-b" {
+				t.Fatal("committed replacement not published", got, ok)
+			}
+		})
 	}
 }
