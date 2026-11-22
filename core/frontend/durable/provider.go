@@ -159,6 +159,17 @@ type ProviderConfig struct {
 	// ChunkHolder names this node in HEAD; blockvolume sets
 	// <server-id>/<replica-id>. Zero: the replica ID (tests).
 	ChunkHolder string
+	// HostVolumeLock makes the provider hold an exclusive, nonblocking lock
+	// on HostVolumeLockDir/<volume id>.lock from before the volume's store
+	// opens until Close: one host runs at most one live process per volume
+	// (V1-SPEC r2.45). The directory must exist (a tmpfiles.d entry ships in
+	// deploy/systemd); NewDurableProvider refuses without it. blockvolume
+	// sets this.
+	HostVolumeLock bool
+	// VolumeLockDirTestOnly replaces HostVolumeLockDir for tests and test
+	// harnesses (blockvolume --volume-lock-dir-test-only); the one-process-
+	// per-host guarantee then holds only among processes sharing it.
+	VolumeLockDirTestOnly string
 	// Zero uses immediate HEAD confirmation for the supported single-filer
 	// topology. Nonzero cooling is reserved for explicit topology experiments.
 	ChunkHeadCoolingWindow time.Duration
@@ -275,6 +286,9 @@ type volHandle struct {
 	path    string
 	impl    ImplName // the resolved implementation, never ImplAuto
 
+	// hostLock is the volume's host lock (HostVolumeLock), held while open.
+	hostLock *os.File
+
 	// ImplWALStoreChunk. fresh: the local volume is new and starts from
 	// the remote HEAD. It mirrors the durable fresh marker beside the
 	// volume file, written before the file is created and removed only
@@ -383,6 +397,17 @@ func NewDurableProvider(cfg ProviderConfig, view frontend.ProjectionView) (*Dura
 	}
 	if cfg.ChunkSnapshotPeriod < 0 || (cfg.ChunkSnapshotPeriod > 0 && cfg.ChunkScheduledSnapshot == nil) {
 		return nil, fmt.Errorf("durable: a chunk snapshot period must not be negative and requires its callback")
+	}
+	if cfg.HostVolumeLock {
+		if cfg.VolumeLockDirTestOnly == "" {
+			cfg.VolumeLockDirTestOnly = HostVolumeLockDir
+		}
+		if fi, err := os.Stat(cfg.VolumeLockDirTestOnly); err != nil || !fi.IsDir() {
+			if err == nil {
+				err = fmt.Errorf("not a directory")
+			}
+			return nil, fmt.Errorf("%w %s: %w; install the tmpfiles.d entry or create the directory", ErrVolumeLockDirMissing, cfg.VolumeLockDirTestOnly, err)
+		}
 	}
 	if cfg.ChunkBlocks == 0 {
 		cfg.ChunkBlocks = defaultChunkBlocks
@@ -497,23 +522,69 @@ func (p *DurableProvider) ensureHandle(volumeID string) (*volHandle, error) {
 	}
 	p.mu.Unlock()
 
-	h, err := p.openOrCreate(volumeID)
+	// V1-SPEC r2.45: the host lock is taken before the store opens.
+	hostLock, err := p.lockVolumeOnHost(volumeID)
 	if err != nil {
 		return nil, err
 	}
+	h, err := p.openOrCreate(volumeID)
+	if err != nil {
+		closeHostLock(hostLock)
+		return nil, err
+	}
+	h.hostLock = hostLock
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closed {
 		_ = h.storage.Close()
+		closeHostLock(h.hostLock)
 		return nil, fmt.Errorf("durable: provider closed")
 	}
 	if existing, ok := p.volumes[volumeID]; ok {
 		_ = h.storage.Close()
+		closeHostLock(h.hostLock)
 		return existing, nil
 	}
 	p.volumes[volumeID] = h
 	return h, nil
+}
+
+// HostVolumeLockDir is the one fixed host-local directory of the volume
+// host locks (HostVolumeLock).
+const HostVolumeLockDir = "/run/sw-block/locks"
+
+// ErrVolumeLockDirMissing refuses a provider with HostVolumeLock whose lock
+// directory does not exist.
+var ErrVolumeLockDirMissing = errors.New("durable: host volume lock directory missing")
+
+// lockVolumeOnHost takes the volume's host lock (nil without
+// HostVolumeLock). A second live process for the volume on this host gets
+// storage.ErrWALStoreLocked.
+func (p *DurableProvider) lockVolumeOnHost(volumeID string) (*os.File, error) {
+	if !p.cfg.HostVolumeLock {
+		return nil, nil
+	}
+	dir := p.cfg.VolumeLockDirTestOnly
+	if volumeID == "" || volumeID == "." || volumeID == ".." || strings.ContainsAny(volumeID, "/\\") {
+		return nil, fmt.Errorf("durable: volume id %q is not a plain path element", volumeID)
+	}
+	path := filepath.Join(dir, volumeID+".lock")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("durable: volume lock %s: %w", path, err)
+	}
+	if err := storage.LockWALStoreFile(f); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("durable: volume %s already has a live process on this host (lock %s held): %w", volumeID, path, err)
+	}
+	return f, nil
+}
+
+func closeHostLock(f *os.File) {
+	if f != nil {
+		_ = f.Close()
+	}
 }
 
 // EnsureStorage opens (or creates) the on-disk LogicalStorage for
@@ -1024,6 +1095,7 @@ func (p *DurableProvider) Close() error {
 		if err := h.storage.Close(); err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("durable: close storage: %w", err)
 		}
+		closeHostLock(h.hostLock) // after the store closes
 	}
 	return firstErr
 }

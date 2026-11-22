@@ -196,7 +196,10 @@ func startG54Volume(t *testing.T, bins l2bins, art string, o volOpts) *proc {
 		t.Fatalf("volume log: %v", err)
 	}
 	_ = os.MkdirAll(o.durableRoot, 0o755)
+	lockDir := o.durableRoot + ".locks" // one simulated host
+	_ = os.MkdirAll(lockDir, 0o700)
 	cmd := exec.Command(bins.volume,
+		"--volume-lock-dir-test-only", lockDir,
 		"--master", o.masterAddr,
 		"--server-id", o.serverID,
 		"--volume-id", "v1",

@@ -244,7 +244,9 @@ func (env *handoffEnv) volArgs(id string) []string { return env.volArgsFor(env.h
 // scheduled snapshot (daily:7, at a per-volume offset) stays on, as the page
 // says; a snapshot inside a test could only make a test fail, never pass.
 func (env *handoffEnv) volArgsFor(b bvHost) []string {
-	return []string{"--master", env.h.masterAddr, "--server-id", b.id, "--volume-id", "v1", "--replica-id", "r1",
+	lockDir := b.root + ".locks" // each simulated host has its own
+	_ = os.MkdirAll(lockDir, 0o700)
+	return []string{"--volume-lock-dir-test-only", lockDir, "--master", env.h.masterAddr, "--server-id", b.id, "--volume-id", "v1", "--replica-id", "r1",
 		"--data-addr", b.data, "--ctrl-addr", b.ctrl, "--status-addr", b.status,
 		"--durable-root", b.root, "--durable-impl", "walstore-chunk",
 		"--durable-blocks", "65536", "--durable-blocksize", "4096",
