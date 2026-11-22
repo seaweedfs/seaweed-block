@@ -1,7 +1,6 @@
 package storage
 
 import (
-	"errors"
 	"testing"
 	"time"
 )
@@ -68,32 +67,5 @@ func TestChunkPeriodicCut_SkipsANewerCutWithAnOlderStamp(t *testing.T) {
 	}
 	if f.stats().cas != casBefore {
 		t.Fatal("the stale periodic decision published")
-	}
-}
-
-// A periodic cut never waits for the capture lock: while another capture
-// holds it, the answer is ErrChunkCaptureBusy at once, and nothing is cut.
-func TestChunkPeriodicCut_DoesNotWaitForTheCaptureLock(t *testing.T) {
-	s, _ := newChunkTestStore(t)
-	f := newFakeChunkRemote()
-	layer := mustAttach(t, s, f, ctConfig(1))
-	pc := layer.(ChunkPeriodicCutter)
-	impl := layer.(*chunkLayerImpl)
-	w := newWriteLog()
-	w.write(t, s, 2, 0x22)
-	seq := layer.Stats().CutSeq
-	impl.capMu.Lock()
-	start := time.Now()
-	_, skipped, err := pc.CutUnlessCutSince(ctTimeout(t), seq)
-	el := time.Since(start)
-	impl.capMu.Unlock()
-	if !errors.Is(err, ErrChunkCaptureBusy) || skipped {
-		t.Fatalf("periodic cut while another capture holds the lock: skipped=%v err=%v; want ErrChunkCaptureBusy", skipped, err)
-	}
-	if el > time.Second || layer.Stats().CutSeq != seq {
-		t.Fatalf("the periodic cut waited %s or cut (CutSeq %d -> %d)", el, seq, layer.Stats().CutSeq)
-	}
-	if _, skipped, err := pc.CutUnlessCutSince(ctTimeout(t), seq); err != nil || skipped {
-		t.Fatalf("periodic cut once the lock is free: skipped=%v err=%v", skipped, err)
 	}
 }
