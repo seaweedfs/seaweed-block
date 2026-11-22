@@ -360,6 +360,9 @@ func (l *Limiter) Admit(ctx context.Context, payload int64, abort func(error)) (
 		l.mu.Lock()
 		l.stats.Skipped++
 		l.stats.SkippedByClass[c]++
+		// A busy answer is the pool answering: a pool error reported
+		// earlier is over.
+		l.stats.LastPoolError = ""
 		l.mu.Unlock()
 		return 0, err
 	}

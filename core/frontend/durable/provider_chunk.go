@@ -888,6 +888,10 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 			}
 			if tk, terr := taker.TakeTicket(hostlimit.HostTime(dueAt)); terr == nil {
 				ticket = tk
+			} else {
+				// The cut still tries, without a place in the queue; status
+				// says why it has none.
+				wait.dropped("no ticket: " + terr.Error())
 			}
 		}
 		if ticket != nil {
@@ -918,6 +922,9 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 			}
 		}
 		cancel()
+		if ticket != nil && ticket.Consumed() {
+			ticket = nil // admitted: the limiter consumed it, whatever the cut did after
+		}
 		switch {
 		case err == nil:
 			dropTicket("") // admitted: the limiter consumed it

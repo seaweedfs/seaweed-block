@@ -564,3 +564,31 @@ func TestSnapshotHeldSinceFollowsTheHolderAcrossAHandOff(t *testing.T) {
 		t.Fatalf("held since %d after the hand-off; want the second holder's take (>= %d), not the first's %d", sinceB, took, sinceA)
 	}
 }
+
+// A busy answer is the pool answering: a pool error reported earlier is
+// cleared by it, not only by the next admission.
+func TestABusyAnswerClearsAnEarlierPoolError(t *testing.T) {
+	c := DefaultConfig(filepath.Join(t.TempDir(), "pool"))
+	c.NormalSlots, c.UrgentSlots = 1, 1
+	l, holder := newTest(t, c), newTest(t, c)
+	if _, err := l.Admit(context.Background(), 1, nil); err == nil {
+		t.Fatal("admitted through a missing pool directory")
+	}
+	if l.Snapshot().(Stats).LastPoolError == "" {
+		t.Fatal("the missing pool directory was not reported")
+	}
+	if err := os.Mkdir(c.Directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	id, err := holder.Admit(context.Background(), 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Release(id)
+	if _, err := l.Admit(context.Background(), 1, nil); !errors.Is(err, ErrSlotsHeld) {
+		t.Fatalf("admission with the slot held: %v; want ErrSlotsHeld", err)
+	}
+	if e := l.Snapshot().(Stats).LastPoolError; e != "" {
+		t.Fatalf("a busy answer left the old pool error %q", e)
+	}
+}

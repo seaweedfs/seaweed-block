@@ -73,6 +73,11 @@ var ticketSeq struct {
 // locked file (a prober may have removed it before the lock); otherwise it
 // is created again.
 func (l *Limiter) TakeTicket(dueHostNs int64) (*Ticket, error) {
+	// A ticket needs the host monotonic clock: without it, due 0 would put
+	// the ticket at the head and the skip rule could never measure.
+	if hostMonoNs() == 0 {
+		return nil, errors.New("hostlimit: the host monotonic clock is unreadable; no ticket")
+	}
 	// The pool directory is never created here: one that was removed while
 	// cuts held its slots must not come back as a second lock domain beside
 	// the old holders. Only its tickets directory is created.
@@ -137,6 +142,17 @@ func (t *Ticket) Due() int64 { return t.due }
 
 // Skipped counts the earlier tickets this ticket passed by the skip rule.
 func (t *Ticket) Skipped() uint64 { t.mu.Lock(); defer t.mu.Unlock(); return t.skipped }
+
+// Consumed reports whether the ticket was given up, by an admission or by
+// Close.
+func (t *Ticket) Consumed() bool {
+	if t == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.done
+}
 
 // Close gives the place up: the file is removed if its path still names
 // it, then unlocked. Close is idempotent.
