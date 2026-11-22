@@ -153,12 +153,13 @@ func (p *Publisher) RecordWorkspaceDeletion(ctx context.Context, volume string, 
 }
 
 func validateWorkspaceMoveRequest(req WorkspaceMoveRequest) error {
-	// v1 moves a replica between hosts without changing its logical slot.
+	// INV-WS-SAME-HOST-CLEAN-MOVE-001: clean moves may reuse the host,
+	// but every move preserves its logical replica slot.
 	// Refuse before locking or persisting a reservation/authority epoch.
 	if req.ExpectedReplicaID != req.TargetReplicaID {
 		return fmt.Errorf("workspace move: v1 requires the same logical replica id")
 	}
-	if req.RequestID == "" || req.VolumeID == "" || req.ExpectedHost == "" || req.TargetHost == "" || req.ExpectedHost == req.TargetHost || req.ExpectedReplicaID == "" || req.ExpectedEpoch == 0 || req.TargetReplicaID == "" ||
+	if req.RequestID == "" || req.VolumeID == "" || req.ExpectedHost == "" || req.TargetHost == "" || (req.ExpectedHost == req.TargetHost && (req.Kind != "clean" || req.Force)) || req.ExpectedReplicaID == "" || req.ExpectedEpoch == 0 || req.TargetReplicaID == "" ||
 		req.TargetDataAddr == "" || req.TargetCtrlAddr == "" || (req.Kind != "clean" && req.Kind != "forced") || req.Force != (req.Kind == "forced") {
 		return fmt.Errorf("workspace move: invalid request")
 	}
