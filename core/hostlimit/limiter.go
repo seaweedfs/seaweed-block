@@ -84,10 +84,14 @@ type Stats struct {
 	// stalled in its probe).
 	UrgentPendingUnheld uint64
 	// SlotsHeldSinceNs maps each slot file seen held at the last snapshot to
-	// the wall time it was first seen held, by any process. A slot held far
-	// longer than MaxHold points to a stopped or hung holder, which only its
-	// supervisor can remove.
+	// the wall time its current holder took it, as that holder recorded in
+	// the file. A slot held far longer than MaxHold points to a stopped or
+	// hung holder, which only its supervisor can remove; SlotHolders names it.
 	SlotsHeldSinceNs map[string]int64 `json:",omitempty"`
+	// SlotHolders maps each slot file seen held to the process id its holder
+	// recorded (0 when the record is missing, for example a holder from an
+	// older build).
+	SlotHolders map[string]int `json:",omitempty"`
 	// UrgentPendingHeldSinceNs is the wall time urgent-pending was first seen
 	// held at consecutive snapshots (0 when free). A stop or other urgent
 	// work that hangs keeps Normal admissions refused for as long as it
@@ -249,6 +253,7 @@ func (l *Limiter) pool(c Class, t *Ticket) (*os.File, error) {
 			return nil, e
 		}
 		if e = tryLock(f); e == nil {
+			writeHolder(f)
 			return f, nil
 		}
 		_ = f.Close()
@@ -547,19 +552,48 @@ func (l *Limiter) Snapshot() any {
 			l.heldSince = map[string]time.Time{}
 		}
 		st.SlotsHeldSinceNs = map[string]int64{}
+		st.SlotHolders = map[string]int{}
 		for name := range l.heldSince {
 			if !held[name] {
 				delete(l.heldSince, name)
 			}
 		}
 		for name := range held {
-			if _, ok := l.heldSince[name]; !ok {
-				l.heldSince[name] = now
+			pid, since, ok := readHolder(filepath.Join(l.cfg.Directory, name))
+			if !ok {
+				// No record: the time this process first saw it held.
+				if _, seen := l.heldSince[name]; !seen {
+					l.heldSince[name] = now
+				}
+				since = l.heldSince[name].UnixNano()
 			}
-			st.SlotsHeldSinceNs[name] = l.heldSince[name].UnixNano()
+			st.SlotsHeldSinceNs[name] = since
+			st.SlotHolders[name] = pid
 		}
 	}
 	return st
+}
+
+// writeHolder records in a slot file just locked who holds it and since
+// when ("pid=<pid> since_ns=<wall ns>"). Slot files carry nothing else and
+// are never unlinked; a failed write leaves only the status less exact.
+func writeHolder(f *os.File) {
+	rec := fmt.Sprintf("pid=%d since_ns=%d\n", os.Getpid(), time.Now().UnixNano())
+	if f.Truncate(0) == nil {
+		_, _ = f.WriteAt([]byte(rec), 0)
+	}
+}
+
+// readHolder reads a slot file's holder record.
+func readHolder(path string) (pid int, sinceNs int64, ok bool) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0, 0, false
+	}
+	if n, _ := fmt.Sscanf(string(b), "pid=%d since_ns=%d", &pid, &sinceNs); n != 2 || sinceNs <= 0 {
+		return 0, 0, false
+	}
+	return pid, sinceNs, true
 }
 
 // slotNames lists the slot files of the given classes.

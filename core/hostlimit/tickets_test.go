@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -528,5 +529,38 @@ func TestTakeTicketDoesNotRecreateARemovedPool(t *testing.T) {
 	}
 	if _, err := os.Stat(c.Directory); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the removed pool directory came back: %v", err)
+	}
+}
+
+// "Held since" is the current holder's own record, not a streak of
+// observations: when the slot is handed from one cut to the next between two
+// snapshots, the time moves to the new holder's take and names its process.
+func TestSnapshotHeldSinceFollowsTheHolderAcrossAHandOff(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows file locks are mandatory: another process cannot read a held slot file")
+	}
+	c := testConfig(t)
+	a, b, observer := newTest(t, c), newTest(t, c), newTest(t, c)
+	first, err := a.Admit(context.Background(), 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := observer.Snapshot().(Stats)
+	sinceA := st.SlotsHeldSinceNs["normal-0"]
+	if sinceA == 0 || st.SlotHolders["normal-0"] != os.Getpid() {
+		t.Fatalf("first holder not recorded: %+v %+v", st.SlotsHeldSinceNs, st.SlotHolders)
+	}
+	time.Sleep(20 * time.Millisecond)
+	a.Release(first)
+	settled(t, a)
+	took := time.Now().UnixNano()
+	second, err := b.Admit(context.Background(), 1, nil) // the next cut, before any snapshot saw the gap
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Release(second)
+	sinceB := observer.Snapshot().(Stats).SlotsHeldSinceNs["normal-0"]
+	if sinceB < took {
+		t.Fatalf("held since %d after the hand-off; want the second holder's take (>= %d), not the first's %d", sinceB, took, sinceA)
 	}
 }
