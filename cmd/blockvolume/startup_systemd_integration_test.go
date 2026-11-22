@@ -75,7 +75,7 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 		t.Fatal(err)
 	}
 	fixture.start(t, stem+"-master", false, filepath.Join(bin, "blockmaster"),
-		"--listen", masterListen, "--authority-store", filepath.Join(root, "auth"), "--lifecycle-store", filepath.Join(root, "life"),
+		"--listen", masterListen, "--insecure-external-bind", "--authority-store", filepath.Join(root, "auth"), "--lifecycle-store", filepath.Join(root, "life"),
 		"--cluster-spec", spec, "--lifecycle-product-loop-interval", "200ms", "--expected-slots-per-volume", "1",
 		"--workspace-rpc", "--workspace-head-base-url", "http://"+cluster.filerHTTP+base)
 	w4WaitTCP(t, masterAddr, 20*time.Second)
@@ -94,6 +94,22 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 	bootstrap := stem + "-bootstrap"
 	fixture.start(t, bootstrap, false, filepath.Join(bin, "blockvolume"), args...)
 	waitGAP1(t, "bootstrap did not attach under a real lease", 60*time.Second, func() bool { return gap1Operational(t, statusAddr, volume) })
+	// Calibrate the readiness parser on the serving source's actual /status
+	// response before using it for the target's negative readiness assertion.
+	waitGAP1(t, "source readiness control never became true", 20*time.Second, func() bool {
+		status, body, err := gap1StatusAt(statusAddr, volume, "/status")
+		if err != nil || status != http.StatusOK {
+			return false
+		}
+		serving, err := gap1Readiness(status, body, volume)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if serving {
+			t.Logf("captured real readiness control: status%d body%s", status, body)
+		}
+		return serving
+	})
 	// Calibrate verdict parsing against actual binary responses BEFORE kill.
 	status, payload, err := gap1Status(statusAddr, volume)
 	t.Logf("captured real status200: status%d body%s", status, payload)
@@ -367,7 +383,10 @@ func gap1ReadUnit(unit string) (map[string]string, error) {
 	return m, nil
 }
 func gap1Status(addr, volume string) (int, []byte, error) {
-	r, e := (&http.Client{Timeout: time.Second}).Get("http://" + addr + "/status/durable?volume=" + volume)
+	return gap1StatusAt(addr, volume, "/status/durable")
+}
+func gap1StatusAt(addr, volume, route string) (int, []byte, error) {
+	r, e := (&http.Client{Timeout: time.Second}).Get("http://" + addr + route + "?volume=" + volume)
 	if e != nil {
 		return 0, nil, e
 	}
@@ -375,6 +394,61 @@ func gap1Status(addr, volume string) (int, []byte, error) {
 	body, e := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	return r.StatusCode, body, e
 }
+
+// /status is a different schema from /status/durable. Presence checks make
+// a wrong route or a missing field a failed oracle, not false readiness.
+func gap1Readiness(status int, payload []byte, volume string) (bool, error) {
+	if status != http.StatusOK {
+		return false, fmt.Errorf("readiness HTTP status%d", status)
+	}
+	var body struct {
+		VolumeID                      string
+		Healthy, FrontendPrimaryReady *bool
+	}
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return false, err
+	}
+	if body.VolumeID != volume || body.Healthy == nil || body.FrontendPrimaryReady == nil {
+		return false, fmt.Errorf("readiness response lacks exact volume and readiness fields: %s", payload)
+	}
+	return *body.Healthy || *body.FrontendPrimaryReady, nil
+}
+
+func TestGAP1ReadinessRejectsWrongSchema(t *testing.T) {
+	projection := hostvolume.StatusProjection{}
+	projection.VolumeID = "v"
+	projectionPayload := func(healthy, ready bool) []byte {
+		t.Helper()
+		projection.Healthy, projection.FrontendPrimaryReady = healthy, ready
+		b, err := json.Marshal(projection)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	for _, tc := range []struct {
+		name             string
+		status           int
+		body             []byte
+		serving, refused bool
+	}{
+		{"not-ready", 200, projectionPayload(false, false), false, false},
+		{"healthy", 200, projectionPayload(true, false), true, false},
+		{"frontend-ready", 200, projectionPayload(false, true), true, false},
+		{"durable-route", 200, []byte(`{"VolumeID":"v","Volumes":[{"VolumeID":"v","Operational":false}]}`), false, true},
+		{"missing-readiness", 200, []byte(`{"VolumeID":"v","Healthy":false}`), false, true},
+		{"wrong-volume", 200, []byte(`{"VolumeID":"other","Healthy":false,"FrontendPrimaryReady":false}`), false, true},
+		{"http-refusal", 404, projectionPayload(false, false), false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := gap1Readiness(tc.status, tc.body, "v")
+			if got != tc.serving || (err != nil) != tc.refused {
+				t.Fatalf("serving=%v err=%v want=%v refused=%v", got, err, tc.serving, tc.refused)
+			}
+		})
+	}
+}
+
 func gap1StatusOperational(status int, payload []byte, volume string) bool {
 	if status != http.StatusOK {
 		return false
@@ -569,15 +643,15 @@ func gap1PrestartedTargetServesAfterMove(t *testing.T, fixture *gap1Fixture, ws 
 	unit := stem + "-prestarted-target"
 	fixture.start(t, unit, true, exe, changed...)
 	waitGAP1(t, "target never observed the source holder before the move", 15*time.Second, func() bool {
-		status, body, err := gap1Status(addr, volume)
+		status, body, err := gap1StatusAt(addr, volume, "/status")
 		if err != nil || status != http.StatusOK {
 			return false
 		}
-		var projection hostvolume.StatusProjection
-		if err := json.Unmarshal(body, &projection); err != nil {
+		serving, err := gap1Readiness(status, body, volume)
+		if err != nil {
 			t.Fatal(err)
 		}
-		if projection.Healthy || projection.FrontendPrimaryReady {
+		if serving {
 			t.Fatalf("future target served before the move: %s", body)
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
