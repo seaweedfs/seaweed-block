@@ -106,7 +106,7 @@ for b in blockmaster blockvolume sw-block; do go build -o $b ./cmd/$b; done
 ```
 
 **Option 3:** Helm, see the [Kubernetes quick start](#quick-start-kubernetes-alpha).
-Services: [standalone deployment](docs/standalone-deployment.md).
+Services: [standalone deployment](docs/standalone-deployment.md). Operator guide (supported setup, sizing, recovery point, host loss, limits): [operator guide](docs/operator-guide.md).
 
 ## Try it
 
