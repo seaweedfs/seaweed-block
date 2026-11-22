@@ -71,6 +71,9 @@ func (h *Host) workspaceSourceHost(volume, replica string, epoch uint64) string 
 			if r.Issued && r.NewReplicaID == replica && r.NewEpoch == epoch {
 				return r.NewHost
 			}
+			if r.Issued && r.OldReplicaID == replica && r.OldEpoch == epoch {
+				return r.OldHost
+			}
 		}
 	}
 	if h.lifecycle != nil {

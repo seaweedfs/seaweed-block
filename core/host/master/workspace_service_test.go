@@ -72,7 +72,7 @@ func TestWorkspaceRPCCleanMovePreservesReplicaIdentity(t *testing.T) {
 	client := control.NewWorkspaceServiceClient(conn)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	id := &control.WorkspaceIdentity{VolumeId: "vol-a", ReplicaId: "r2", Epoch: 1}
+	id := &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "vol-a", ReplicaId: "r2", Epoch: 1}
 	stops := 0
 	g, err := volume.NewWorkspaceLeaseGuard(workspaceRPCView{frontend.Projection{VolumeID: "vol-a", ReplicaID: "r2", Epoch: 1, Healthy: true}}, client, id,
 		func(context.Context) (uint64, error) { stops++; return 9, nil }, nil)
@@ -107,7 +107,7 @@ func TestWorkspaceRPCCleanMovePreservesReplicaIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	initial, err := stream.Recv()
-	if err != nil || initial.ReplicaId != "r2" || initial.Epoch != 1 {
+	if err != nil || initial.ServerId != "node-a" || initial.ReplicaId != "r2" || initial.Epoch != 1 {
 		t.Fatal("initial assignment", initial, err)
 	}
 	beforeLine, _ := h.Publisher().VolumeAuthorityLine("vol-a")
@@ -133,7 +133,7 @@ func TestWorkspaceRPCCleanMovePreservesReplicaIdentity(t *testing.T) {
 		t.Fatal(grant)
 	}
 	delivered, err := stream.Recv()
-	if err != nil || delivered.ReplicaId != "r2" || delivered.Epoch != 2 || delivered.DataAddr != q.TargetDataAddr || delivered.CtrlAddr != q.TargetCtrlAddr || len(delivered.Peers) != 0 {
+	if err != nil || delivered.ServerId != "node-b" || delivered.ReplicaId != "r2" || delivered.Epoch != 2 || delivered.DataAddr != q.TargetDataAddr || delivered.CtrlAddr != q.TargetCtrlAddr || len(delivered.Peers) != 0 {
 		t.Fatal("same-ID move was not delivered on the existing stream with no retired peer", delivered, err)
 	}
 	cancelStream()
@@ -144,7 +144,7 @@ func TestWorkspaceRPCCleanMovePreservesReplicaIdentity(t *testing.T) {
 	if _, err := client.RenewWorkspaceLease(ctx, id); err == nil {
 		t.Fatal("old authority renewed")
 	}
-	if _, err := client.RenewWorkspaceLease(ctx, &control.WorkspaceIdentity{VolumeId: "vol-a", ReplicaId: "r2", Epoch: 2}); err != nil {
+	if _, err := client.RenewWorkspaceLease(ctx, &control.WorkspaceIdentity{ServerId: "node-b", VolumeId: "vol-a", ReplicaId: "r2", Epoch: 2}); err != nil {
 		t.Fatal(err)
 	}
 	if err := h.Close(ctx); err != nil {

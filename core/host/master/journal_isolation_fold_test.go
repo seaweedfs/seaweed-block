@@ -42,7 +42,7 @@ func (r *isolationRig) issueMove(t *testing.T, vol, requestID string) (*control.
 	if line.Epoch != 1 || line.ReplicaID != "r1" {
 		t.Fatalf("fixture authority line: %+v", line)
 	}
-	id := &control.WorkspaceIdentity{VolumeId: vol, ReplicaId: "r1", Epoch: 1}
+	id := &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: vol, ReplicaId: "r1", Epoch: 1}
 	if _, err := r.ws.RenewWorkspaceLease(r.ctx, id); err != nil {
 		t.Fatal(err)
 	}
@@ -311,7 +311,7 @@ func TestStatusReportsExtensionWriteLatency(t *testing.T) {
 	reviewLegacyBind(t, h, c, ctx, "vol-b")
 	line := waitAuthorityLine(t, h.Publisher(), "vol-b")
 	svc := &services{host: h}
-	id := &control.WorkspaceIdentity{VolumeId: "vol-b", ReplicaId: line.ReplicaID, Epoch: line.Epoch}
+	id := &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "vol-b", ReplicaId: line.ReplicaID, Epoch: line.Epoch}
 	if _, err := svc.RenewWorkspaceLease(ctx, id); err != nil {
 		t.Fatal(err) // first grant: not an extension
 	}

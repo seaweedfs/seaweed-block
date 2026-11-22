@@ -55,7 +55,7 @@ func TestWorkspaceLeaseGuardFencesByHorizonUnderStalledStore(t *testing.T) {
 	t.Cleanup(func() { releaseOnce.Do(func() { close(stall.release) }) }) // runs first: unblock the extender
 	var stops atomic.Int32
 	g, err := volume.NewWorkspaceLeaseGuard(workspaceRPCView{frontend.Projection{VolumeID: "v", ReplicaID: "r", Epoch: 1, Healthy: true}},
-		deadlineLeaseClient{p: p, inflight: &inflight}, &control.WorkspaceIdentity{VolumeId: "v", ReplicaId: "r", Epoch: 1},
+		deadlineLeaseClient{p: p, inflight: &inflight}, &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "v", ReplicaId: "r", Epoch: 1},
 		func(context.Context) (uint64, error) { stops.Add(1); return 7, nil }, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -112,7 +112,7 @@ func TestWorkspaceRenewalRPCDuringHeldSameVolumeReservation(t *testing.T) {
 	reviewLegacyBind(t, h, c, ctx, "vol-b")
 	line := waitAuthorityLine(t, h.Publisher(), "vol-b")
 	svc := &services{host: h}
-	id := &control.WorkspaceIdentity{VolumeId: "vol-b", ReplicaId: line.ReplicaID, Epoch: line.Epoch}
+	id := &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "vol-b", ReplicaId: line.ReplicaID, Epoch: line.Epoch}
 	first, err := svc.RenewWorkspaceLease(ctx, id)
 	if err != nil {
 		t.Fatal(err)
