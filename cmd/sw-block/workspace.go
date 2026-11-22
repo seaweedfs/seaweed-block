@@ -65,6 +65,8 @@ func runOpsWorkspace(args []string, stdout, stderr io.Writer) int {
 		return wsExitRefusedLocally
 	}
 	switch args[0] {
+	case "revoke":
+		return runWorkspaceRevoke(args[1:], stdout, stderr)
 	case "force-move":
 		return runWorkspaceForceMove(args[1:], stdout, stderr)
 	case "lost-range":
