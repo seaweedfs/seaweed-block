@@ -25,6 +25,11 @@ const (
 )
 
 const workspaceUsage = `usage:
+  sw-block ops workspace show --master ADDR --volume V [--timeout 30s]
+  sw-block ops workspace revoke --master ADDR --volume V --replica R --epoch E
+      (--sealed-gen G | --without-seal) [--timeout 30s]
+  sw-block ops workspace move --clean --master ADDR --volume V --replica R --epoch E
+      --target-host H --target-data A --target-ctrl A --request-id ID [--timeout 30s]
   sw-block ops workspace force-move --master ADDR --volume V --target-host H --target-data A --target-ctrl A
       --request-id ID --confirm-forced V@EPOCH [--dry-run] [--timeout 30s]
   sw-block ops workspace lost-range --master ADDR --volume V [--request-id ID] [--timeout 30s]
@@ -35,7 +40,18 @@ starting the volume on the target host is the next step, done separately. The
 blockmaster admits it only once the holder's lease horizon and its granted or
 restart deadline, each plus the clock-skew bound, have passed; before that it is
 refused and this command says when it becomes admissible. There is NO bypass
-flag. Clean (detached) moves are not offered here.
+flag.
+
+Planned hand-over order: stop the writer; ops chunk detach --plain; revoke
+--sealed-gen G; show until the recorded ACK names the same replica, epoch and
+HEAD generation G; move --clean; start blockvolume on the target separately.
+Revoke only requests revocation: it does not prove an ACK. --sealed-gen is
+an operator assertion, not checked against storage by this CLI. --without-seal
+deliberately abandons the unpublished tail and may require a forced move.
+The clean target may be the source host once sealed (requires server support).
+On an unknown move outcome, rerun with the SAME --request-id.
+Show is read-only. Lease state uses the master's reported host validity at
+query time, not a comparison with this machine's clock; it is not a grant.
 
 --confirm-forced must be exactly <volume>@<expected epoch>, retyped: the epoch
 is the holder's epoch the move is sent against, and the master refuses it when
