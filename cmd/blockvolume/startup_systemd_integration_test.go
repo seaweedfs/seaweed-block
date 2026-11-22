@@ -167,6 +167,7 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 	if s["Result"] == "start-limit-hit" {
 		t.Fatalf("systemd rate limit hit: %+v", s)
 	}
+	gap1PlannedStopDoesNotRestart(t, ws, unit, statusAddr, volume, after.Epoch, after.Holder, s["NRestarts"])
 }
 
 func startGAP1Unit(t *testing.T, unit string, restart bool, exe string, args ...string) {
@@ -220,7 +221,7 @@ func gap1Unit(t *testing.T, unit string) map[string]string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	b, err := exec.CommandContext(ctx, "systemctl", "show", unit, "--property=MainPID,NRestarts,ExecMainStatus,Result,ExecMainStartTimestampMonotonic,RestartUSec,RestartPreventExitStatus,StartLimitBurst,StartLimitIntervalUSec").CombinedOutput()
+	b, err := exec.CommandContext(ctx, "systemctl", "show", unit, "--property=MainPID,NRestarts,ExecMainStatus,Result,ExecMainStartTimestampMonotonic,RestartUSec,RestartPreventExitStatus,StartLimitBurst,StartLimitIntervalUSec,ActiveState,SubState").CombinedOutput()
 	if err != nil {
 		t.Fatalf("unit show: %v %s", err, b)
 	}
@@ -316,4 +317,54 @@ func gap1ShippedPolicy(t *testing.T) map[string]string {
 		first = fields
 	}
 	return first
+}
+
+// A successful planned revoke is not a retry outcome. The master's ACK and
+// systemd's terminal inactive/dead state prove no automatic restart is queued.
+func gap1PlannedStopDoesNotRestart(t *testing.T, ws control.WorkspaceServiceClient, unit, addr, volume string, epoch uint64, holder, restarts string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, "http://"+addr+"/chunk/detach", bytes.NewBufferString(fmt.Sprintf(`{"volumeID":%q,"plain":true,"timeoutMs":5000}`, volume)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, readErr := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	t.Logf("captured plain seal response: status%d body%s", resp.StatusCode, body)
+	if readErr != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("plain seal: %v status%d", readErr, resp.StatusCode)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	_, err = ws.RevokeWorkspace(ctx, &control.WorkspaceIdentity{VolumeId: volume, ReplicaId: holder, Epoch: epoch})
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitGAP1(t, "planned revoke never recorded ACK and exited normally", 20*time.Second, func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		status, err := ws.QueryWorkspace(ctx, &control.WorkspaceVolume{VolumeId: volume})
+		if err != nil || status.GetRevocationAck() == nil {
+			return false
+		}
+		ack := status.GetRevocationAck()
+		t.Logf("captured planned-stop ACK: %s", ack.String())
+		if ack.GetIdentity().GetVolumeId() != volume || ack.GetIdentity().GetReplicaId() != holder || ack.GetIdentity().GetEpoch() != epoch || ack.GetHeadGen() == 0 {
+			t.Fatalf("wrong planned ACK: %s", ack.String())
+		}
+		state := gap1Unit(t, unit)
+		if state["NRestarts"] != restarts {
+			t.Fatalf("planned stop restarted: %+v", state)
+		}
+		if state["MainPID"] != "0" {
+			return false
+		}
+		if state["ExecMainStatus"] != "0" || state["ActiveState"] != "inactive" || state["SubState"] != "dead" {
+			t.Fatalf("planned stop is not terminal success: %+v", state)
+		}
+		return true
+	})
 }
