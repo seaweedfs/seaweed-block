@@ -124,6 +124,16 @@ func (v *AdapterProjectionView) projectionWithSupersede() (frontend.Projection, 
 	return result, superseded
 }
 
+// workspaceLeaseNotHeld: a workspace primary whose lease guard is not
+// installed yet, or does not hold a granted lease now (the guard decides).
+func (v *AdapterProjectionView) workspaceLeaseNotHeld() bool {
+	if !v.workspaceRequired {
+		return false
+	}
+	g := v.workspaceGuard.Load()
+	return g == nil || !g.Held()
+}
+
 func (v *AdapterProjectionView) supportingReplicaReady(selfEpoch, selfEV uint64) bool {
 	if v == nil || v.probe == nil {
 		return false

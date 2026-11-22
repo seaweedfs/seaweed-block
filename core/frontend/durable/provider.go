@@ -233,10 +233,12 @@ type DurableProvider struct {
 	cfg  ProviderConfig
 	view frontend.ProjectionView
 
-	mu      sync.Mutex
-	volumes map[string]*volHandle  // keyed by volumeID
-	opening map[string]*sync.Mutex // keyed by volumeID; serializes open/create
-	closed  bool
+	mu             sync.Mutex
+	volumes        map[string]*volHandle  // keyed by volumeID
+	opening        map[string]*sync.Mutex // keyed by volumeID; serializes open/create
+	closed         bool
+	startupUpdates chan struct{} // wake only; the generation-bound result stays on the handle
+	fenceUpdates   chan struct{} // wake only; runtimeFenced stays on the handle
 
 	// testAfterChunkResolve, test-only, runs in CutVolume right after the
 	// volume's handle and layer are resolved.
@@ -260,7 +262,8 @@ type DurableProvider struct {
 
 	// walstore-chunk: closeCtx ends with Close and cancels in-flight
 	// remote attachment; inflight counts RecoverVolume calls admitted
-	// before Close, which Close waits for before closing any store.
+	// before Close, and each attached layer's fence watcher, which Close
+	// waits for before closing any store.
 	closeCtx    context.Context
 	closeCancel context.CancelFunc
 	inflight    sync.WaitGroup
@@ -284,10 +287,13 @@ type volHandle struct {
 	// wait, 0 if none: a recovered volume whose layer waits for master
 	// authority. A wait only acts while its generation is still the
 	// latest recovery's.
-	recoverGen   uint64
-	waitGen      uint64
-	chunk        storage.ChunkLayer // after RecoverVolume
-	chunkLineage chunkLineage       // immutable authority captured by this attachment
+	recoverGen        uint64
+	waitGen           uint64
+	startupSuperseded bool               // exact foreign-holder claim proof for startupEnded; guarded by p.mu
+	startupEnded      uint64             // recovery generation with a terminal startup outcome; guarded by p.mu
+	runtimeFenced     bool               // the attached layer fenced after startup (HEAD has another owner); guarded by p.mu
+	chunk             storage.ChunkLayer // after RecoverVolume
+	chunkLineage      chunkLineage       // immutable authority captured by this attachment
 	// Private until the owner commit succeeds; retained for attach retry.
 	chunkPending storage.ChunkLayer
 	// chunkDetach is set (under attachMu) when DetachVolume starts and
@@ -392,12 +398,14 @@ func NewDurableProvider(cfg ProviderConfig, view frontend.ProjectionView) (*Dura
 	}
 	closeCtx, closeCancel := context.WithCancel(context.Background())
 	return &DurableProvider{
-		cfg:         cfg,
-		view:        view,
-		volumes:     map[string]*volHandle{},
-		opening:     map[string]*sync.Mutex{},
-		closeCtx:    closeCtx,
-		closeCancel: closeCancel,
+		cfg:            cfg,
+		view:           view,
+		volumes:        map[string]*volHandle{},
+		opening:        map[string]*sync.Mutex{},
+		closeCtx:       closeCtx,
+		closeCancel:    closeCancel,
+		startupUpdates: make(chan struct{}, 1),
+		fenceUpdates:   make(chan struct{}, 1),
 	}, nil
 }
 
@@ -550,6 +558,16 @@ func (p *DurableProvider) LogicalStorage(volumeID string) storage.LogicalStorage
 // G5-4 binary wiring to install SetWriteObserver eagerly (before
 // any frontend bind) — the same backend instance is returned by
 // the future dp.Open() call when a frontend asks.
+// AdmitsIO is StorageBackend.AdmitsIO for an open volume; ErrVolumeNotOpen
+// for any other (fail closed).
+func (p *DurableProvider) AdmitsIO(volumeID string) error {
+	b := p.Backend(volumeID)
+	if b == nil {
+		return fmt.Errorf("%w: %s", ErrVolumeNotOpen, volumeID)
+	}
+	return b.AdmitsIO()
+}
+
 func (p *DurableProvider) Backend(volumeID string) *StorageBackend {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -947,6 +965,8 @@ func (p *DurableProvider) RecoverVolume(ctx context.Context, volumeID string) (R
 		p.mu.Lock()
 		h.recoverGen++ // any earlier recovery's authority wait is now stale
 		gen = h.recoverGen
+		h.startupEnded = 0
+		h.startupSuperseded = false
 		p.mu.Unlock()
 	}
 	report := Recover(h.storage, volumeID)
