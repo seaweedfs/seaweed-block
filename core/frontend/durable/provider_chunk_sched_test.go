@@ -45,6 +45,7 @@ func TestWALStoreChunk_DirtyChunksNeverTriggerCut(t *testing.T) {
 	remote := storage.NewMemChunkRemote()
 	p := schedProvider(t, remote, 0)
 	s := openRecovered(t, p)
+	claimed := freshV1Claim(t, remote)
 	for c := uint32(0); c < 4; c++ { // four dirty chunks
 		if _, err := s.Write(c*pcChunkBlocks+1, block(byte(c+1))); err != nil {
 			t.Fatal(err)
@@ -52,7 +53,7 @@ func TestWALStoreChunk_DirtyChunksNeverTriggerCut(t *testing.T) {
 	}
 	// A negative invariant: checked repeatedly over several scheduler polls.
 	for i := 0; i < 15; i++ {
-		if h := headGen(t, remote); h.Gen != 0 {
+		if h := headGen(t, remote); h.Gen != claimed.Gen {
 			t.Fatalf("a cut was published with the timer off (HEAD gen %d, %d chunks)", h.Gen, len(h.Chunks))
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -61,7 +62,7 @@ func TestWALStoreChunk_DirtyChunksNeverTriggerCut(t *testing.T) {
 	if _, err := p.CaptureVolume(context.Background(), "v1"); err != nil {
 		t.Fatal(err)
 	}
-	if h := headGen(t, remote); h.Gen == 0 || len(h.Chunks) != 4 {
+	if h := headGen(t, remote); h.Gen != claimed.Gen+1 || len(h.Chunks) != 4 {
 		t.Fatalf("explicit cut HEAD gen %d with %d chunks, want 4", h.Gen, len(h.Chunks))
 	}
 }
@@ -73,6 +74,7 @@ func TestWALStoreChunk_ExplicitCutRestartsTheTimer(t *testing.T) {
 	remote := storage.NewMemChunkRemote()
 	p := schedProvider(t, remote, interval)
 	s := openRecovered(t, p)
+	claimed := freshV1Claim(t, remote)
 	begin := time.Now()
 
 	time.Sleep(2 * time.Second)
@@ -83,8 +85,8 @@ func TestWALStoreChunk_ExplicitCutRestartsTheTimer(t *testing.T) {
 		t.Fatal(err)
 	}
 	explicit := time.Now()
-	if h := headGen(t, remote); h.Gen != 1 {
-		t.Fatalf("explicit cut: HEAD gen %d, want 1", h.Gen)
+	if h := headGen(t, remote); h.Gen != claimed.Gen+1 {
+		t.Fatalf("explicit cut: HEAD gen %d, want open claim + 1", h.Gen)
 	}
 	if _, err := s.Write(pcChunkBlocks+1, block(0x02)); err != nil {
 		t.Fatal(err)
@@ -95,13 +97,13 @@ func TestWALStoreChunk_ExplicitCutRestartsTheTimer(t *testing.T) {
 	if time.Now().After(explicit.Add(interval - 300*time.Millisecond)) {
 		t.Skip("scheduling too slow to separate the two deadlines on this host")
 	}
-	if h := headGen(t, remote); h.Gen != 1 {
+	if h := headGen(t, remote); h.Gen != claimed.Gen+1 {
 		t.Fatalf("automatic cut %s after the explicit one (HEAD gen %d): the timer did not restart", time.Since(explicit), h.Gen)
 	}
 	// Progress, no timer (#227): the automatic cut follows; a loaded host only
 	// delays it (the early-cut check above is the timing assertion, and it
 	// skips when the host cannot separate the two deadlines).
-	for headGen(t, remote).Gen < 2 {
+	for headGen(t, remote).Gen < claimed.Gen+2 {
 		time.Sleep(50 * time.Millisecond)
 	}
 }
@@ -186,6 +188,7 @@ func TestWALStoreChunk_PublishSettledHook(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = p.Close() })
 	s := openRecovered(t, p)
+	claimed := freshV1Claim(t, remote)
 	for i, lba := range []uint32{1, 0, pcChunkBlocks + 1} {
 		if lba != 0 {
 			if _, err := s.Write(lba, block(byte(i+1))); err != nil {
@@ -198,8 +201,10 @@ func TestWALStoreChunk_PublishSettledHook(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(got) != 2 || got[0] != "v1:0->1" || got[1] != "v1:1->2" {
-		t.Fatalf("reports %v; want [v1:0->1 v1:1->2] (the middle capture changed nothing)", got)
+	wantFirst := fmt.Sprintf("v1:%d->%d", claimed.Gen, claimed.Gen+1)
+	wantSecond := fmt.Sprintf("v1:%d->%d", claimed.Gen+1, claimed.Gen+2)
+	if len(got) != 2 || got[0] != wantFirst || got[1] != wantSecond {
+		t.Fatalf("reports %v; want [%s %s] (the middle capture changed nothing)", got, wantFirst, wantSecond)
 	}
 }
 
@@ -261,6 +266,7 @@ func TestWALStoreChunk_ExplicitCutOverlappingTheTimerRestartsIt(t *testing.T) {
 		return loopEvent{}
 	}
 	s := openRecovered(t, p)
+	claimed := freshV1Claim(t, remote.MemChunkRemote)
 	begin := time.Now() // the loop started during open: its first deadline is at most begin + interval
 	if _, err := s.Write(1, block(0x01)); err != nil {
 		t.Fatal(err)
@@ -307,8 +313,8 @@ func TestWALStoreChunk_ExplicitCutOverlappingTheTimerRestartsIt(t *testing.T) {
 		t.Fatal("the explicit cut did not finish")
 	}
 	explicitAt := time.Now()
-	if h := headGen(t, remote); h.Gen != 1 {
-		t.Fatalf("explicit cut: HEAD gen %d, want 1", h.Gen)
+	if h := headGen(t, remote); h.Gen != claimed.Gen+1 {
+		t.Fatalf("explicit cut: HEAD gen %d, want open claim + 1", h.Gen)
 	}
 	if _, err := s.Write(pcChunkBlocks+1, block(0x02)); err != nil {
 		t.Fatal(err)
@@ -335,7 +341,7 @@ func TestWALStoreChunk_ExplicitCutOverlappingTheTimerRestartsIt(t *testing.T) {
 	if cut2.event != "cut" || cut2.skipped {
 		t.Fatalf("loop event %+v; want the next periodic cut taken", cut2)
 	}
-	if h := headGen(t, remote); h.Gen != 2 {
-		t.Fatalf("after the next periodic cut: HEAD gen %d, want 2", h.Gen)
+	if h := headGen(t, remote); h.Gen != claimed.Gen+2 {
+		t.Fatalf("after the next periodic cut: HEAD gen %d, want open claim + 2", h.Gen)
 	}
 }
