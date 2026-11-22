@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -87,9 +88,24 @@ func OpenFileStore(dir string) (*FileStore, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("%w: empty dir", ErrInvalidVolumeSpec)
 	}
+	dir, err := filepath.Abs(filepath.Clean(dir))
+	if err != nil {
+		return nil, fmt.Errorf("lifecycle: resolve store path: %w", err)
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("lifecycle: mkdir %q: %w", dir, err)
 	}
+	// INV-LIFECYCLE-STORE-DURABLE-001: existence does not prove durability.
+	// Every open syncs the full ancestor chain, also after a failed first open.
+	for parent := filepath.Dir(dir); ; parent = filepath.Dir(parent) {
+		if err := syncBindingParent(parent); err != nil {
+			log.Printf("lifecycle: could not sync %s (%v): the store directory entry may not survive a crash right after its creation", parent, err)
+		}
+		if parent == filepath.Dir(parent) {
+			break
+		}
+	}
+
 	s := &FileStore{
 		dir:     dir,
 		records: make(map[string]VolumeRecord),
@@ -291,30 +307,7 @@ func (s *FileStore) putLocked(rec VolumeRecord) error {
 	if err != nil {
 		return fmt.Errorf("lifecycle: marshal %s: %w", rec.Spec.VolumeID, err)
 	}
-	path := s.path(rec.Spec.VolumeID)
-	tmp, err := os.CreateTemp(s.dir, rec.Spec.VolumeID+".*.tmp")
-	if err != nil {
-		return fmt.Errorf("lifecycle: temp %s: %w", rec.Spec.VolumeID, err)
-	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }()
-	if _, err := tmp.Write(raw); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("lifecycle: write temp %s: %w", rec.Spec.VolumeID, err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("lifecycle: close temp %s: %w", rec.Spec.VolumeID, err)
-	}
-	// Windows os.Rename does not replace existing files. Remove first;
-	// lifecycle records are intent metadata, and the in-memory state is
-	// updated only after this write succeeds.
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("lifecycle: replace %s: %w", rec.Spec.VolumeID, err)
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return fmt.Errorf("lifecycle: rename %s: %w", rec.Spec.VolumeID, err)
-	}
-	return nil
+	return writeRecordDurably(s.dir, rec.Spec.VolumeID+".json", raw)
 }
 
 func (s *FileStore) path(volumeID string) string {

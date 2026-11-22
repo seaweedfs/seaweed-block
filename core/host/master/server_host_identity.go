@@ -54,7 +54,7 @@ func (h *Host) refuseServerIDFromOtherHost(r *control.HeartbeatReport) error {
 	for _, s := range r.Slots {
 		for _, a := range []string{s.DataAddr, s.CtrlAddr} {
 			if a != "" && !hosts[addrHost(a)] {
-				return fmt.Errorf("heartbeat: server id %s is registered on host %s; refused from %s (volume %s replica %s): one server id names one host",
+				return fmt.Errorf("heartbeat: server id %s is registered on host %s but advertises %s (volume %s replica %s): advertise the registered address, or register the node by the address it uses, in the cluster spec",
 					r.ServerId, named, addrHost(a), s.VolumeId, s.ReplicaId)
 			}
 		}
@@ -85,7 +85,7 @@ func (h *Host) refuseWorkspaceHolderHost(ctx context.Context, rpc, server string
 		if ph == "" {
 			ph = "an unknown peer"
 		}
-		err = fmt.Errorf("%s: server id %s is registered on host %s; refused from %s: one server id names one host", rpc, server, named, ph)
+		err = fmt.Errorf("%s: server id %s is registered on host %s but connects from %s: register the node by the address it connects from (not loopback) in the cluster spec", rpc, server, named, ph)
 	}
 	if err != nil {
 		h.log.Print(err)

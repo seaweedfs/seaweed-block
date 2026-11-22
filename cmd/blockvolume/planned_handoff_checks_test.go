@@ -229,9 +229,10 @@ func matchUint(re *regexp.Regexp, s string) (uint64, error) {
 
 // TestPlannedHandoffChecksReadCapturedProductOutput runs every check on the
 // output the real binaries printed in one passing hand-over (E=1, G=3, L=1,
-// E2=2) and in the refused clean move without an ACK (move-refused,
-// show-revoked), and each check on an output of another step, which it must
-// refuse.
+// E2=2), in the refused clean move without an ACK (move-refused,
+// show-revoked), and in the procedure gate's move to s2 and forced move
+// (move-clean-s2, head-reopened-s2, force-move*, lost-range), and each check
+// on an output of another step, which it must refuse.
 func TestPlannedHandoffChecksReadCapturedProductOutput(t *testing.T) {
 	read := func(name string) string {
 		b, err := os.ReadFile(filepath.Join("testdata", "planned-handoff", name))
@@ -301,6 +302,34 @@ func TestPlannedHandoffChecksReadCapturedProductOutput(t *testing.T) {
 	refused("clean move refused", checkCleanMoveRefused(read("move-clean.stdout"), "", 0))
 	if r := read("show-revoked.stdout"); showsAck(r, e, g) || !hasLine(r, "recorded ACK: none") {
 		t.Error("the revoked show without an ACK is read as acknowledged")
+	}
+	// The procedure gate's two-host outputs (a planned move to s2, a forced
+	// move s1 -> s2 at E=1 -> E2=2 keeping gen 3, LSN 1).
+	if got, err := movedEpochTo(read("move-clean-s2.stdout"), e, g, l, "s2"); err != nil || got != e2 {
+		t.Errorf("moved epoch to s2 %d, %v; want %d", got, err, e2)
+	}
+	_, err = movedEpochTo(read("move-clean-s2.stdout"), e, g, l, "s1")
+	refused("clean move to s2 read as a move to s1", err)
+	ok("HEAD reopened by s2", checkHeadReopenedBy(read("head-reopened-s2.stdout"), e2, g, l, "s2"))
+	refused("HEAD reopened by s2 read as s1's", checkHeadReopenedBy(read("head-reopened-s2.stdout"), e2, g, l, "s1"))
+	if got, err := forcedEpoch(read("force-move.stdout"), e, "s1", "s2"); err != nil || got != e2 {
+		t.Errorf("forced epoch %d, %v; want %d", got, err, e2)
+	}
+	_, err = forcedEpoch(read("force-move.stdout"), e, "s2", "s1")
+	refused("forced move read the other way round", err)
+	_, err = forcedEpoch(read("move-clean-s2.stdout"), e, "s1", "s2")
+	refused("forced epoch", err)
+	if got, err := forcedKeptLSN(read("force-move.stdout")); err != nil || got != l {
+		t.Errorf("forced kept LSN %d, %v; want %d", got, err, l)
+	}
+	if !previewAdmitted(read("force-move-dry-run-admitted.stdout")) || previewAdmitted(read("force-move-dry-run-refused.stdout")) {
+		t.Error("the dry-run preview is not told admitted from not admitted")
+	}
+	if !strings.Contains(read("force-move-dry-run-refused.stdout"), "admissible at ") {
+		t.Error("the refused preview has no admissible time")
+	}
+	if !strings.Contains(read("lost-range.stdout"), "range 1 of 1: request force-v1-1, r1@") {
+		t.Error("lost-range does not show the forced move")
 	}
 	if !frontendReady([]byte(read("status-primary.json"))) || frontendReady([]byte(`{"FrontendPrimaryReady":false,"Healthy":true}`)) {
 		t.Error("the frontend-ready check does not read FrontendPrimaryReady")

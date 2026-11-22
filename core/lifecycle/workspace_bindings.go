@@ -36,7 +36,9 @@ func OpenWorkspaceBindingStore(dir string) (*WorkspaceBindingStore, error) {
 	return openWorkspaceBindingStore(dir, syncBindingParent)
 }
 
-func syncBindingParent(dir string) error {
+// Isolated subprocess tests may replace this syscall boundary; production
+// always uses the real directory Sync below.
+var syncBindingParent = func(dir string) error {
 	f, err := os.Open(dir)
 	if err != nil {
 		return err

@@ -44,6 +44,11 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 	if out, err := exec.CommandContext(probeCtx, "systemctl", "show", "--property=Version").CombinedOutput(); err != nil {
 		t.Fatalf("real systemd unavailable: %v %s", err, out)
 	}
+	// Under systemd the test lock override is refused: the units use the
+	// real host lock directory, which the shipped tmpfiles.d entry makes.
+	if err := os.MkdirAll(durable.HostVolumeLockDir, 0o700); err != nil {
+		t.Fatalf("host volume lock directory: %v", err)
+	}
 	fixture := newGAP1Fixture(t)
 	root := fixture.root
 	bin := filepath.Join(root, "bin")

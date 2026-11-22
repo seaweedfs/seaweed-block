@@ -10,15 +10,15 @@ import (
 )
 
 func TestWorkspaceExitFirstOutcomeIsLatched(t *testing.T) {
-	for _, first := range []workspaceExit{{75, "lease_expired"}, {78, "superseded"}, {0, "revoked"}} {
+	for _, first := range []workspaceExit{{code: 75, reason: "lease_expired"}, {code: 78, reason: "superseded"}, {code: 0, reason: "revoked"}} {
 		e := newProcessExit(context.Background())
 		e.choose(first)
-		e.choose(workspaceExit{75, "assignment_timeout"})
+		e.choose(workspaceExit{code: 75, reason: "assignment_timeout"})
 		<-e.done
 		if got := <-e.decision; got != first {
 			t.Fatalf("first=%+v changed to %+v", first, got)
 		}
-		e.choose(workspaceExit{78, "superseded"})
+		e.choose(workspaceExit{code: 78, reason: "superseded"})
 		select {
 		case got := <-e.decision:
 			t.Fatalf("later outcome published: %+v", got)
@@ -28,7 +28,7 @@ func TestWorkspaceExitFirstOutcomeIsLatched(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	e := newProcessExit(ctx)
-	e.choose(workspaceExit{78, "superseded"})
+	e.choose(workspaceExit{code: 78, reason: "superseded"})
 	if got := <-e.decision; got.code != 0 || got.reason != "signal" {
 		t.Fatalf("observed signal lost: %+v", got)
 	}
@@ -38,13 +38,13 @@ func TestWorkspaceExitDoesNotWaitForBlockedFrontendClose(t *testing.T) {
 	finished := make(chan int) // a frontend Close that never returns
 	deadline := make(chan time.Time, 1)
 	deadline <- time.Time{}
-	if code := finishWorkspaceExit(workspaceExit{75, "lease_expired"}, finished, deadline); code != 75 {
+	if code := finishWorkspaceExit(workspaceExit{code: 75, reason: "lease_expired"}, finished, deadline); code != 75 {
 		t.Fatalf("code=%d", code)
 	}
 	// Cleanup errors do not overwrite an already selected retry/no-retry status.
 	done := make(chan int, 1)
 	done <- 1
-	if code := finishWorkspaceExit(workspaceExit{78, "superseded"}, done, make(chan time.Time)); code != 78 {
+	if code := finishWorkspaceExit(workspaceExit{code: 78, reason: "superseded"}, done, make(chan time.Time)); code != 78 {
 		t.Fatalf("code=%d", code)
 	}
 }
@@ -64,7 +64,7 @@ func TestWorkspacePlannedStopKeepsSuccess(t *testing.T) {
 func TestWorkspaceRetryProcessExitsWhenCloseBlocks(t *testing.T) {
 	if os.Getenv("GAP1_BLOCKED_CLOSE_CHILD") == "1" {
 		code := superviseProcess(context.Background(), func(e *processExit) int {
-			e.choose(workspaceExit{75, "lease_expired"})
+			e.choose(workspaceExit{code: 75, reason: "lease_expired"})
 			select {} // the frontend/resource owner's Close never returns
 		})
 		os.Exit(code)
@@ -84,7 +84,7 @@ func TestWorkspaceSignalFirstKeepsZeroAfterLaterFailure(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	code := superviseProcess(ctx, func(e *processExit) int {
-		e.choose(workspaceExit{78, "superseded"})
+		e.choose(workspaceExit{code: 78, reason: "superseded"})
 		return 1 // a later cleanup error cannot replace the chosen signal status
 	})
 	if code != 0 {

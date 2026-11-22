@@ -277,8 +277,9 @@ func (p *Publisher) AckWorkspaceRevocation(ctx context.Context, volume string, a
 	if !ok || line.info.ReplicaID != ack.ReplicaID || line.info.Epoch != ack.Epoch || ack.HeadGen == 0 || s == nil || s.Lease == nil || !s.Lease.Revoking {
 		return fmt.Errorf("workspace revoke ACK: stale or unsolicited")
 	}
-	now := p.workspaceNow()
-	if now.UnixNano() >= s.Lease.ExpiresAtNS || !now.Before(p.leaseDeadlineLocked(volume)) {
+	lease := *s.Lease
+	lease.ExpiresAtNS = min(lease.ExpiresAtNS, p.leaseDeadlineLocked(volume).UnixNano())
+	if p.WorkspaceLeaseValidity(lease) == 0 {
 		return fmt.Errorf("workspace revoke ACK: lease expired; forced move required")
 	}
 	if s.Ack != nil && *s.Ack != ack {

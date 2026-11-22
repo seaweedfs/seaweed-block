@@ -1,0 +1,4 @@
+preview (advisory): at master time 2026-11-22T15:36:16.705621624Z, may change; admission is re-checked at the move. Nothing was written; this is not a confirmation.
+forced move admitted
+HEAD now: gen 3, epoch 1, holder s1/r1, remote LSN 1, published at 2026-11-22T15:35:12Z (publishing host clock as recorded in the filer, 1 s resolution)
+if moved now: writes with LSN <= 1 are kept; writes acknowledged after that and before 2026-11-22T15:36:16.617154582Z, master clock, may be lost

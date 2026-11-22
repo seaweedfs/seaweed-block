@@ -23,6 +23,8 @@ const (
 type workspaceExit struct {
 	code   int
 	reason string
+	// detail is the operator's cure, printed on the final exit line.
+	detail string
 }
 
 // INV-WS-STARTUP-RETRY-001: the first outcome is immutable. The channel is a
@@ -113,7 +115,11 @@ func finishWorkspaceExit(out workspaceExit, finished <-chan int, deadline <-chan
 
 func reportWorkspaceExit(out workspaceExit) int {
 	if out.code != 0 {
-		fmt.Fprintf(os.Stderr, "blockvolume: exiting status=%d reason=%s\n", out.code, out.reason)
+		if out.detail != "" {
+			fmt.Fprintf(os.Stderr, "blockvolume: exiting status=%d reason=%s cure=%q\n", out.code, out.reason, out.detail)
+		} else {
+			fmt.Fprintf(os.Stderr, "blockvolume: exiting status=%d reason=%s\n", out.code, out.reason)
+		}
 	}
 	return out.code
 }
@@ -122,9 +128,9 @@ func reportWorkspaceExit(out workspaceExit) int {
 // authority fact and the provider's generation-bound foreign-HEAD proof.
 func workspaceRetryOutcome(reason string, h *volume.Host, claimSuperseded bool) workspaceExit {
 	if claimSuperseded || h.IsCurrentReplicaSuperseded() {
-		return workspaceExit{exitWorkspaceSuperseded, "superseded"}
+		return workspaceExit{code: exitWorkspaceSuperseded, reason: "superseded"}
 	}
-	return workspaceExit{exitWorkspaceRetry, reason}
+	return workspaceExit{code: exitWorkspaceRetry, reason: reason}
 }
 
 // M2 startup outcome; INV-WS-STARTUP-RETRY-001. Workspace chunk primaries only.
@@ -165,7 +171,7 @@ func watchChunkRuntimeFence(ctx context.Context, e *processExit, f flags, p chun
 	}
 	for {
 		if p.ChunkRuntimeFenced(f.volumeID) {
-			e.choose(workspaceExit{exitWorkspaceSuperseded, "head_fenced"})
+			e.choose(workspaceExit{code: exitWorkspaceSuperseded, reason: "head_fenced"})
 			return
 		}
 		select {
@@ -222,7 +228,7 @@ func finishWorkspaceLease(e *processExit, f flags, h *volume.Host, done <-chan e
 	case <-time.After(workspaceLeaseCloseoutTimeout):
 		fmt.Fprintln(os.Stderr, "blockvolume: workspace lease closeout deadline")
 	}
-	e.choose(workspaceExit{exitWorkspaceRetry, "revoke_ack_unconfirmed"})
+	e.choose(workspaceExit{code: exitWorkspaceRetry, reason: "revoke_ack_unconfirmed"})
 }
 
 // The provider publishes only a generation-bound outcome and an atomic choice.
@@ -243,5 +249,8 @@ func chooseChunkStartupExit(e *processExit, f flags, h *volume.Host, p chunkStar
 	// INV-WS-STARTUP-RETRY-001: one exit decision consumes both proof
 	// sources; the provider rechecks the claim generation below.
 	out := workspaceRetryOutcome("assignment_timeout", h, p.ChunkStartupSuperseded(f.volumeID, gen))
+	if c, ok := p.(interface{ ChunkStartupCure(string, uint64) string }); ok {
+		out.detail = c.ChunkStartupCure(f.volumeID, gen)
+	}
 	return p.ChooseChunkStartupExit(f.volumeID, gen, func() { e.chooseChunkStartup(out) })
 }

@@ -144,6 +144,18 @@ func (p *Publisher) WorkspaceLeaseReply(volume string) (WorkspaceLease, bool) {
 	return l, true
 }
 
+// WorkspaceLeaseValidity reports host validity on the publisher clock, with
+// the configured TTL and the larger configured/persisted skew bound.
+// M2 grant/revoke ACK; INV-WS-FORCED-MOVE-HALF-SKEW-001.
+func (p *Publisher) WorkspaceLeaseValidity(l WorkspaceLease) time.Duration {
+	return p.workspaceLeaseValidityAt(l, p.workspaceNow())
+}
+
+func (p *Publisher) workspaceLeaseValidityAt(l WorkspaceLease, now time.Time) time.Duration {
+	remaining := time.Unix(0, l.ExpiresAtNS).Add(-p.workspaceSkew(&l) / 2).Sub(now)
+	return max(0, min(remaining, p.workspaceTTL))
+}
+
 // PublishedLine is a volume's committed authority line as the lease view
 // publishes it.
 type PublishedLine struct {
@@ -261,7 +273,7 @@ func (p *Publisher) RenewWorkspaceLease(ctx context.Context, volume, holder stri
 	// A grant without positive host validity (expiry minus half the skew
 	// bound, leaseFact) would make the host fence on an invalid reply and lose
 	// its remaining validity; refuse with an error instead.
-	if grant-lv.d.maxSkewNS/2 <= now.UnixNano() {
+	if p.workspaceLeaseValidityAt(WorkspaceLease{ExpiresAtNS: grant, MaxClockSkewNS: lv.d.maxSkewNS}, now) == 0 {
 		horizon := lv.d.horizon // the view is leaseMu's: read it before the unlock (#242)
 		summary := p.leaseStats.summaryDue(now)
 		p.leaseMu.Unlock()

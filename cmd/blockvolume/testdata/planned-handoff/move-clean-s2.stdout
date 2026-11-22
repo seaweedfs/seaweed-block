@@ -1,0 +1,2 @@
+clean move issued: volume v1 request move-v1-1: r1@1 -> r1@2 on s2 (sealed HEAD gen 3, remote LSN 1)
+next: start volume v1 on s2 (this command moved authority only)
