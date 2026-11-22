@@ -29,3 +29,12 @@ func TestWorkspaceExitLineageIncludesBlockedOwnAssignment(t *testing.T) {
 		t.Fatal("another volume produced a no-retry outcome")
 	}
 }
+
+func TestWorkspaceEmptyOtherReplicaNeverSelectsNoRetry(t *testing.T) {
+	h, _, _ := newStubbedHost(t, "v", "r", &orderingRecorder{})
+	h.applyFact(&control.AssignmentFact{VolumeId: "v", ReplicaId: "r", Epoch: 5, EndpointVersion: 1})
+	h.applyFact(&control.AssignmentFact{VolumeId: "v", ReplicaId: "", Epoch: 7, EndpointVersion: 1})
+	if h.IsCurrentReplicaSuperseded() {
+		t.Fatal("empty replica id is not another holder; must retry")
+	}
+}

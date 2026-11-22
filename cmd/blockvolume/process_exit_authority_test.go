@@ -127,6 +127,10 @@ func TestWorkspaceRetryUsesNewestOwnAssignment(t *testing.T) {
 			replica string
 			epoch   uint64
 		}{{"other", 6}}, 78},
+		{"empty replica newer epoch", []struct {
+			replica string
+			epoch   uint64
+		}{{"r", 5}, {"", 7}}, 75},
 		{"same replica higher epoch", []struct {
 			replica string
 			epoch   uint64
