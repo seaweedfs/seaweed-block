@@ -336,6 +336,7 @@ func (p *DurableProvider) attachChunk(ctx context.Context, volumeID string, h *v
 		h.backend.chunkFenced = layer.Fenced
 		h.backend.mu.Unlock()
 		p.startChunkLoop(volumeID, h, layer)
+		p.inflight.Add(1) // under p.mu with closed false: Close joins the watcher
 		go p.watchChunkFence(volumeID, h, layer)
 	}
 	return nil
