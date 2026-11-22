@@ -31,10 +31,10 @@ import (
 // The first assertion is RED on GAP-1: the expired startup stays alive.
 func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 	if os.Getenv("GAP1_SYSTEMD_AUTHORIZED") != "1" {
-		t.Fatal("explicit booked WSL systemd qualification required; no skip counts as proof")
+		t.Fatal("explicit real-systemd qualification authorization required; no skip counts as proof")
 	}
 	if os.Geteuid() != 0 {
-		t.Fatal("systemd qualification needs the booked root harness")
+		t.Fatal("systemd qualification needs root")
 	}
 	if os.Getenv("CHUNKSTORE_WEED") == "" {
 		t.Fatal("real CHUNKSTORE_WEED binary required")
@@ -62,7 +62,7 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 	}
 	cluster := startWorkspaceWeedAt(t, filepath.Join(root, "weed"))
 	gap1PreserveFailure(t, root, cluster.dir)
-	stem := fmt.Sprintf("codex03-gap1-%d", time.Now().UnixNano())
+	stem := fmt.Sprintf("gap1-%d", time.Now().UnixNano())
 	gap1ProbeTerminalSuccess(t, fixture, stem+"-policy-probe")
 	volume := stem
 	base := "/" + stem
@@ -205,7 +205,7 @@ type gap1Fixture struct {
 
 func newGAP1Fixture(t *testing.T) *gap1Fixture {
 	t.Helper()
-	root, err := os.MkdirTemp("", "codex03-gap1-runtime-")
+	root, err := os.MkdirTemp("", "gap1-runtime-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -551,7 +551,7 @@ func gap1TargetAddresses(t *testing.T, masterAddr string) (gap1Target, string) {
 }
 
 // Start the future target before a clean move is issued. It has the same
-// logical r1 slot but a different server id, and no own lineage: the source
+// logical r1 identity but a different server id, and no own lineage: the source
 // line cannot mean it lost anything. Prove75 and automatic restart, then issue
 // a real MoveWorkspace and prove lease/HEAD/data admission without touching
 // the target unit again. This is not a positive78/no-restart witness.

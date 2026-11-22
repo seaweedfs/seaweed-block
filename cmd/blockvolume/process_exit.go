@@ -62,7 +62,7 @@ func (e *processExit) choose(out workspaceExit) {
 		if e.parent.Err() != nil {
 			out = workspaceExit{reason: "signal"}
 		}
-		e.decision <- out // exactly one send; the sole slot cannot block under a provider lock
+		e.decision <- out // exactly one send fits the buffer without blocking under a provider lock
 		close(e.done)
 	})
 }
