@@ -1,2 +1,1 @@
 # Part B rows whose Statement is over 300 characters. This list only shrinks: split a row into rows of one property each, then delete its line; never add one.
-INV-WAL-DATA-SYNC-001
