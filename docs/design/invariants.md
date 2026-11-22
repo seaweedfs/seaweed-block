@@ -409,7 +409,7 @@ Tests: `TestSnapshotSchedule_SlotsAreOffsetPerVolume`, `_FailureIsTypedAndBacksO
 
 ## Part B. Invariant ledger
 
-297 rows: 211 ACTIVE, 83 STUB, 3 ARCHIVED; 15 kept from the internal ledger, 282 new.
+298 rows: 212 ACTIVE, 83 STUB, 3 ARCHIVED; 15 kept from the internal ledger, 283 new.
 
 The "Machine / transition" column refers to Part A. Notes under a table record what a row does not cover and, for kept rows, what was narrowed from the internal ledger.
 
