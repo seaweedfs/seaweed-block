@@ -289,6 +289,9 @@ Durable store state of the served volume. Go type `volume.durableStatusBody`.
 | `Volumes[].Chunk.ScheduledSnapshot.attempts` | int | Attempts counts the failed attempts since the last success. |
 | `Volumes[].Chunk.ScheduledSnapshot.skipped{}` | int64 | Skipped counts attempts not made, by reason. (omitted when empty) |
 | `Volumes[].Chunk.ScheduledSnapshot.snapshot_overdue` | bool | Overdue reports that no scheduled snapshot succeeded within one period plus the retry cap, counted from the last success or, before any, from the start of the schedule. |
+| `Volumes[].Chunk.CutSchedule` | object | the automatic-cut timer's state; absent when the timer is off or its loop has not started (omitted when empty) |
+| `Volumes[].Chunk.CutSchedule.HostSlotWaits` | uint64 | automatic cuts refused because every host slot was held |
+| `Volumes[].Chunk.CutSchedule.HostSlotWaitSinceNs` | int64 | wall time of the first such refusal since the last successful cut; 0 when not waiting |
 | `Volumes[].Warnings[]` | string | Warnings are the store's typed recovery warnings (e.g. wal_hole_suspected, issue #51); they do not change readiness. HolesSuspected counts the recoveries that found a WAL hole. (omitted when empty) |
 | `Volumes[].HolesSuspected` | uint64 | (group of `Warnings`) Warnings are the store's typed recovery warnings (e.g. wal_hole_suspected, issue #51); they do not change readiness. HolesSuspected counts the recoveries that found a WAL hole. (omitted when empty) |
 
