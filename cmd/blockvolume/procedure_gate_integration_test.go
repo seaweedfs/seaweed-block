@@ -195,22 +195,22 @@ func TestProcedureForcedMoveWithTheOldHostReturning(t *testing.T) {
 		t.Fatal("the block written after the last cut reads back on s2; the page says it is lost")
 	}
 
-	// The old host returns with its old local root, and a supervisor starts
-	// it again after it exits. Each time it must not take s2's line as its
-	// own (a holder is server and replica), report its frontend ready or
-	// listen for I/O, and it must log a refusal and exit with status 75.
-	back := env.oldHostRefuses(t, "blockvolume-s1-back", env.hosts["s1"], e2)
-	time.Sleep(5 * time.Second) // RestartSec of the example unit
-	restarted := env.oldHostRefuses(t, "blockvolume-s1-restarted", env.hosts["s1"], e2)
-	// Control: on a fresh local root there is no stale root to refuse, and
-	// it must still refuse s2's line.
+	// The old host returns with its old local root. It must not take s2's
+	// line as its own (a holder is server and replica), report its frontend
+	// ready or listen for I/O; it logs a refusal and exits with status 78, the
+	// no-restart class for a local root older than HEAD (the example unit
+	// does not restart on 78). Started again by hand, it does the same.
+	back := env.oldHostRefuses(t, "blockvolume-s1-back", env.hosts["s1"], e2, 78)
+	again := env.oldHostRefuses(t, "blockvolume-s1-started-again", env.hosts["s1"], e2, 78)
+	// Control: on a fresh local root there is no stale root, so its refusal
+	// is the identity check alone; it exits 75, the retry class.
 	fresh := env.hosts["s1"]
 	fresh.root = fresh.root + "-fresh"
-	freshRoot := env.oldHostRefuses(t, "blockvolume-s1-fresh-root", fresh, e2)
+	freshRoot := env.oldHostRefuses(t, "blockvolume-s1-fresh-root", fresh, e2, 75)
 	// A line carries its owner and that owner's endpoints: every line
 	// delivered at the forced epoch, to the new owner and to each returning
 	// old host alike, carries s2's own endpoints, never another host's.
-	if bad := wrongOwnerEndpoints(e2, env.hosts["s2"], nw, back, restarted, freshRoot); len(bad) > 0 {
+	if bad := wrongOwnerEndpoints(e2, env.hosts["s2"], nw, back, again, freshRoot); len(bad) > 0 {
 		t.Errorf("epoch-%d deliveries not proven to carry s2's endpoints (want data=%s ctrl=%s in every recipient's lines):\n%s",
 			e2, env.hosts["s2"].data, env.hosts["s2"].ctrl, strings.Join(bad, "\n"))
 	}
@@ -394,10 +394,10 @@ func exitCode(err error) int {
 }
 
 // oldHostRefuses starts the old holder b after the volume moved to epoch e2
-// on another host, and returns it. While it runs it must not adopt the new line, report its
-// frontend ready or listen; it must log a refusal and exit with status 75
-// (a later change may give a stale local root its own status).
-func (env *handoffEnv) oldHostRefuses(t *testing.T, name string, b bvHost, e2 uint64) *daemon {
+// on another host, and returns it. While it runs it must not adopt the new
+// line, report its frontend ready or listen; it must log a refusal and exit
+// with wantExit.
+func (env *handoffEnv) oldHostRefuses(t *testing.T, name string, b bvHost, e2 uint64, wantExit int) *daemon {
 	t.Helper()
 	d := env.h.start(t, name, env.h.volume, env.volArgsFor(b)...)
 	var failures []string
@@ -418,8 +418,8 @@ func (env *handoffEnv) oldHostRefuses(t *testing.T, name string, b bvHost, e2 ui
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
-	if err := d.wait(5 * time.Second); exitCode(err) != 75 {
-		failures = append(failures, fmt.Sprintf("it did not exit with status 75: %v", err))
+	if err := d.wait(5 * time.Second); exitCode(err) != wantExit {
+		failures = append(failures, fmt.Sprintf("it did not exit with status %d: %v", wantExit, err))
 	}
 	if !d.has("refusing to attach volume=v1") && !d.has("workspace lease: stale authority") && !d.has("foreign assignment") {
 		failures = append(failures, "it logged no refusal (stale root, stale authority, or another server's assignment)")
