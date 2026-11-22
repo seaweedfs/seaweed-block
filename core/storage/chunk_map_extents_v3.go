@@ -36,16 +36,18 @@ type mapRootExtentsV3 struct {
 
 // chunkMapLiveV3 is the live set of one owned map.
 type chunkMapLiveV3 struct {
-	roots       map[mapRootKeyV3]mapRootExtentsV3
-	inflight    map[mapRootKeyV3]bool
-	truncations atomic.Uint64
-	fileBytes   atomic.Uint64 // set at open, after each prepare and truncation
+	roots        map[mapRootKeyV3]mapRootExtentsV3
+	inflight     map[mapRootKeyV3]bool
+	truncations  atomic.Uint64
+	priorRefused atomic.Uint64 // prepares refused because their prior root was released
+	fileBytes    atomic.Uint64 // set at open, after each prepare and truncation
 }
 
 // ChunkMapStats reports the owned map file's size, the bytes its live roots
-// reference, and how many times its free tail was truncated.
+// reference, how many times its free tail was truncated, and how many
+// prepares were refused because their prior root had been released.
 type ChunkMapStats struct {
-	FileBytes, LiveBytes, Truncations uint64
+	FileBytes, LiveBytes, Truncations, PriorReleased uint64
 }
 
 // registerRootV3 records a slot-named root read at open. Caller holds no lock
@@ -112,13 +114,26 @@ func (p *preparedMapPublicationV3) abandonV3() {
 
 // liveSnapshotV3 copies the live roots' extents under liveMu.
 func (m *chunkLSNMapV3) liveSnapshotV3() []mapRootExtentsV3 {
+	out, _ := m.liveSnapshotWithPriorV3(nil)
+	return out
+}
+
+// liveSnapshotWithPriorV3 copies the live roots' extents and reports whether
+// prior's root is still live, in ONE liveMu section
+// (INV-WAL-V3-MAP-PRIOR-LIVE-001): the prior's extents are then in the
+// snapshot exactly when the prepare may reuse its pages. A nil prior is live.
+func (m *chunkLSNMapV3) liveSnapshotWithPriorV3(prior *chunkMapCandidateV3) ([]mapRootExtentsV3, bool) {
 	m.liveMu.Lock()
 	defer m.liveMu.Unlock()
+	priorLive := true
+	if prior != nil {
+		_, priorLive = m.live.roots[mapRootKeyV3{prior.rootOffset, prior.generation}]
+	}
 	out := make([]mapRootExtentsV3, 0, len(m.live.roots))
 	for _, x := range m.live.roots {
 		out = append(out, x)
 	}
-	return out
+	return out, priorLive
 }
 
 // usedPagesV3 returns the sorted, distinct 4 KiB page indexes a live-set
@@ -205,7 +220,7 @@ func (a *extentAllocatorV3) alloc(n uint64) uint64 {
 // bytes are computed on demand from a snapshot.
 func (m *chunkLSNMapV3) Stats() ChunkMapStats {
 	_, live := usedPagesV3(m.liveSnapshotV3())
-	return ChunkMapStats{FileBytes: m.live.fileBytes.Load(), LiveBytes: live, Truncations: m.live.truncations.Load()}
+	return ChunkMapStats{FileBytes: m.live.fileBytes.Load(), LiveBytes: live, Truncations: m.live.truncations.Load(), PriorReleased: m.live.priorRefused.Load()}
 }
 
 // ChunkMapStatsV3 reports the owned map file's bounded-growth counters, or

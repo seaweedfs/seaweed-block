@@ -112,7 +112,7 @@ func (c deadlineLeaseClient) RenewWorkspaceLease(ctx context.Context, id *contro
 			done <- result{err: err}
 			return
 		}
-		done <- result{fact: leaseFact(id.VolumeId, l)}
+		done <- result{fact: leaseFact(c.p, id.VolumeId, l)}
 	}()
 	select {
 	case r := <-done:
@@ -150,11 +150,11 @@ func TestWorkspaceLeaseGuardSurvivesSlowAuthorityStore(t *testing.T) {
 	dir := &skewDirective{asks: make(chan authority.AssignmentAsk, 1)}
 	p := authority.NewPublisher(dir, authority.WithStore(slow), authority.WithWorkspaceLeaseConfig(6*time.Second, nil))
 	t.Cleanup(p.CloseWorkspaceExtenders) // join extenders before the store closes
-	t.Cleanup(slow.release)               // runs before the join above: frees a held Put first
+	t.Cleanup(slow.release)              // runs before the join above: frees a held Put first
 	seedSkewPublisher(t, p, dir)
 	var stops atomic.Int32
 	g, err := volume.NewWorkspaceLeaseGuard(workspaceRPCView{frontend.Projection{VolumeID: "v", ReplicaID: "r", Epoch: 1, Healthy: true}},
-		deadlineLeaseClient{p: p, inflight: &inflight, slow: slow}, &control.WorkspaceIdentity{VolumeId: "v", ReplicaId: "r", Epoch: 1},
+		deadlineLeaseClient{p: p, inflight: &inflight, slow: slow}, &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "v", ReplicaId: "r", Epoch: 1},
 		func(context.Context) (uint64, error) { stops.Add(1); return 7, nil }, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -166,7 +166,7 @@ func TestWorkspaceLeaseGuardSurvivesSlowAuthorityStore(t *testing.T) {
 		cancel()
 		<-runDone // Run returns on cancel; the go test timeout bounds a hang
 	})
-	t.Cleanup(slow.release) // first of all cleanups: a held Put never blocks the joins
+	t.Cleanup(slow.release)       // first of all cleanups: a held Put never blocks the joins
 	for !g.Projection().Healthy { // progress: the first grant
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -215,8 +215,8 @@ func TestWorkspaceRenewalRPCDoesNotWaitForHeldReservationWrite(t *testing.T) {
 	reviewLegacyBind(t, h, c, ctx, "vol-b")
 	line := waitAuthorityLine(t, h.Publisher(), "vol-b")
 	svc := &services{host: h}
-	id := &control.WorkspaceIdentity{VolumeId: "vol-b", ReplicaId: line.ReplicaID, Epoch: line.Epoch}
-	if _, err := svc.RenewWorkspaceLease(ctx, id); err != nil {
+	id := &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "vol-b", ReplicaId: line.ReplicaID, Epoch: line.Epoch}
+	if _, err := svc.RenewWorkspaceLease(loopbackPeer(ctx), id); err != nil {
 		t.Fatal(err) // first grant
 	}
 	deletions := h.Lifecycle().Deletions
@@ -266,7 +266,7 @@ func TestWorkspaceRenewalRPCDoesNotWaitForHeldReservationWrite(t *testing.T) {
 	}
 	start := time.Now()
 	renewStarted = true
-	go func() { _, err := svc.RenewWorkspaceLease(ctx, id); renewed <- err }()
+	go func() { _, err := svc.RenewWorkspaceLease(loopbackPeer(ctx), id); renewed <- err }()
 	select {
 	case err := <-renewed:
 		renewed <- err // keep it for the cleanup join

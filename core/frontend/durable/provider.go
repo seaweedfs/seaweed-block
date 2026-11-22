@@ -159,6 +159,18 @@ type ProviderConfig struct {
 	// ChunkHolder names this node in HEAD; blockvolume sets
 	// <server-id>/<replica-id>. Zero: the replica ID (tests).
 	ChunkHolder string
+	// HostVolumeLock makes the provider hold an exclusive, nonblocking lock
+	// on HostVolumeLockDir/<volume id>.lock from before the volume's store
+	// opens until Close: one host runs at most one live process per volume
+	// (V1-SPEC r2.45). NewDurableProvider creates the directory (0700) when
+	// missing and refuses when it cannot create or use it; the tmpfiles.d
+	// entry in deploy/systemd creates it for the unit's user. blockvolume
+	// sets this.
+	HostVolumeLock bool
+	// VolumeLockDirTestOnly replaces HostVolumeLockDir for tests and test
+	// harnesses (blockvolume --volume-lock-dir-test-only); the one-process-
+	// per-host guarantee then holds only among processes sharing it.
+	VolumeLockDirTestOnly string
 	// Zero uses immediate HEAD confirmation for the supported single-filer
 	// topology. Nonzero cooling is reserved for explicit topology experiments.
 	ChunkHeadCoolingWindow time.Duration
@@ -233,10 +245,12 @@ type DurableProvider struct {
 	cfg  ProviderConfig
 	view frontend.ProjectionView
 
-	mu      sync.Mutex
-	volumes map[string]*volHandle  // keyed by volumeID
-	opening map[string]*sync.Mutex // keyed by volumeID; serializes open/create
-	closed  bool
+	mu             sync.Mutex
+	volumes        map[string]*volHandle  // keyed by volumeID
+	opening        map[string]*sync.Mutex // keyed by volumeID; serializes open/create
+	closed         bool
+	startupUpdates chan struct{} // wake only; the generation-bound result stays on the handle
+	fenceUpdates   chan struct{} // wake only; runtimeFenced stays on the handle
 
 	// testAfterChunkResolve, test-only, runs in CutVolume right after the
 	// volume's handle and layer are resolved.
@@ -260,7 +274,8 @@ type DurableProvider struct {
 
 	// walstore-chunk: closeCtx ends with Close and cancels in-flight
 	// remote attachment; inflight counts RecoverVolume calls admitted
-	// before Close, which Close waits for before closing any store.
+	// before Close, and each attached layer's fence watcher, which Close
+	// waits for before closing any store.
 	closeCtx    context.Context
 	closeCancel context.CancelFunc
 	inflight    sync.WaitGroup
@@ -271,6 +286,11 @@ type volHandle struct {
 	backend *StorageBackend
 	path    string
 	impl    ImplName // the resolved implementation, never ImplAuto
+
+	// hostLock is the volume's host lock (HostVolumeLock), held while open.
+	hostLock *os.File
+	// startupCure is the operator's cure of a stale-root startup end.
+	startupCure string
 
 	// ImplWALStoreChunk. fresh: the local volume is new and starts from
 	// the remote HEAD. It mirrors the durable fresh marker beside the
@@ -284,10 +304,13 @@ type volHandle struct {
 	// wait, 0 if none: a recovered volume whose layer waits for master
 	// authority. A wait only acts while its generation is still the
 	// latest recovery's.
-	recoverGen   uint64
-	waitGen      uint64
-	chunk        storage.ChunkLayer // after RecoverVolume
-	chunkLineage chunkLineage       // immutable authority captured by this attachment
+	recoverGen        uint64
+	waitGen           uint64
+	startupSuperseded bool               // exact foreign-holder claim proof for startupEnded; guarded by p.mu
+	startupEnded      uint64             // recovery generation with a terminal startup outcome; guarded by p.mu
+	runtimeFenced     bool               // the attached layer fenced after startup (HEAD has another owner); guarded by p.mu
+	chunk             storage.ChunkLayer // after RecoverVolume
+	chunkLineage      chunkLineage       // immutable authority captured by this attachment
 	// Private until the owner commit succeeds; retained for attach retry.
 	chunkPending storage.ChunkLayer
 	// chunkDetach is set (under attachMu) when DetachVolume starts and
@@ -378,6 +401,14 @@ func NewDurableProvider(cfg ProviderConfig, view frontend.ProjectionView) (*Dura
 	if cfg.ChunkSnapshotPeriod < 0 || (cfg.ChunkSnapshotPeriod > 0 && cfg.ChunkScheduledSnapshot == nil) {
 		return nil, fmt.Errorf("durable: a chunk snapshot period must not be negative and requires its callback")
 	}
+	if cfg.HostVolumeLock {
+		if cfg.VolumeLockDirTestOnly == "" {
+			cfg.VolumeLockDirTestOnly = HostVolumeLockDir
+		}
+		if err := makeVolumeLockDir(cfg.VolumeLockDirTestOnly); err != nil {
+			return nil, fmt.Errorf("%w %s: %w; %s", ErrVolumeLockDirUnavailable, cfg.VolumeLockDirTestOnly, err, volumeLockCure)
+		}
+	}
 	if cfg.ChunkBlocks == 0 {
 		cfg.ChunkBlocks = defaultChunkBlocks
 	}
@@ -392,12 +423,14 @@ func NewDurableProvider(cfg ProviderConfig, view frontend.ProjectionView) (*Dura
 	}
 	closeCtx, closeCancel := context.WithCancel(context.Background())
 	return &DurableProvider{
-		cfg:         cfg,
-		view:        view,
-		volumes:     map[string]*volHandle{},
-		opening:     map[string]*sync.Mutex{},
-		closeCtx:    closeCtx,
-		closeCancel: closeCancel,
+		cfg:            cfg,
+		view:           view,
+		volumes:        map[string]*volHandle{},
+		opening:        map[string]*sync.Mutex{},
+		closeCtx:       closeCtx,
+		closeCancel:    closeCancel,
+		startupUpdates: make(chan struct{}, 1),
+		fenceUpdates:   make(chan struct{}, 1),
 	}, nil
 }
 
@@ -489,23 +522,111 @@ func (p *DurableProvider) ensureHandle(volumeID string) (*volHandle, error) {
 	}
 	p.mu.Unlock()
 
-	h, err := p.openOrCreate(volumeID)
+	// V1-SPEC r2.45: the host lock is taken before the store opens.
+	hostLock, err := p.lockVolumeOnHost(volumeID)
 	if err != nil {
 		return nil, err
 	}
+	h, err := p.openOrCreate(volumeID)
+	if err != nil {
+		closeHostLock(hostLock)
+		return nil, err
+	}
+	h.hostLock = hostLock
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closed {
 		_ = h.storage.Close()
+		closeHostLock(h.hostLock)
 		return nil, fmt.Errorf("durable: provider closed")
 	}
 	if existing, ok := p.volumes[volumeID]; ok {
 		_ = h.storage.Close()
+		closeHostLock(h.hostLock)
 		return existing, nil
 	}
 	p.volumes[volumeID] = h
 	return h, nil
+}
+
+// HostVolumeLockDir is the one fixed host-local directory of the volume
+// host locks (HostVolumeLock).
+const HostVolumeLockDir = "/run/sw-block/locks"
+
+// ErrVolumeLockDirUnavailable refuses a provider with HostVolumeLock whose
+// lock directory or lock file it cannot create or open.
+var ErrVolumeLockDirUnavailable = errors.New("durable: host volume lock directory unavailable")
+
+// volumeLockCure names the operator's cure. A directory or lock file a root
+// process created is root-owned: an unprivileged unit then cannot use it.
+const volumeLockCure = "install the tmpfiles.d entry (deploy/systemd/sw-block.tmpfiles.conf), or make its parent directory traversable (0755) and chown the directory and its lock files to this process's user"
+
+// makeVolumeLockDir lays out a missing lock directory as the tmpfiles.d
+// entry does: its parent 0755 (traversable by the unit's user even when root
+// created it) and the directory itself 0700. Only a directory this call
+// creates is chmod'ed (the umask cannot narrow it); one that exists, or that
+// another process creates meanwhile, keeps its mode. An existing lock path
+// that is not a directory refuses.
+func makeVolumeLockDir(dir string) error {
+	parent := filepath.Dir(dir)
+	if err := os.MkdirAll(filepath.Dir(parent), 0o755); err != nil {
+		return err
+	}
+	if err := os.Mkdir(parent, 0o755); err == nil {
+		if err := os.Chmod(parent, 0o755); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	if err := os.Mkdir(dir, 0o700); err == nil {
+		return os.Chmod(dir, 0o700)
+	} else if !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("%s exists and is not a directory", dir)
+	}
+	return nil
+}
+
+// lockVolumeOnHost takes the volume's host lock (nil without
+// HostVolumeLock). A second live process for the volume on this host gets
+// storage.ErrWALStoreLocked.
+func (p *DurableProvider) lockVolumeOnHost(volumeID string) (*os.File, error) {
+	if !p.cfg.HostVolumeLock {
+		return nil, nil
+	}
+	dir := p.cfg.VolumeLockDirTestOnly
+	if volumeID == "" || volumeID == "." || volumeID == ".." || strings.ContainsAny(volumeID, "/\\") {
+		return nil, fmt.Errorf("durable: volume id %q is not a plain path element", volumeID)
+	}
+	path := filepath.Join(dir, volumeID+".lock")
+	// Read-only, 0644: a lock file another user created (the root ublk unit)
+	// stays lockable by the plain unit; the 0700 directory keeps others out.
+	f, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		f, err = os.OpenFile(path, os.O_CREATE|os.O_RDONLY, 0o644)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%w: volume lock %s: %w; %s", ErrVolumeLockDirUnavailable, path, err, volumeLockCure)
+	}
+	if err := storage.LockWALStoreFile(f); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("durable: volume %s already has a live process on this host (lock %s held): %w", volumeID, path, err)
+	}
+	return f, nil
+}
+
+func closeHostLock(f *os.File) {
+	if f != nil {
+		_ = f.Close()
+	}
 }
 
 // EnsureStorage opens (or creates) the on-disk LogicalStorage for
@@ -550,6 +671,16 @@ func (p *DurableProvider) LogicalStorage(volumeID string) storage.LogicalStorage
 // G5-4 binary wiring to install SetWriteObserver eagerly (before
 // any frontend bind) — the same backend instance is returned by
 // the future dp.Open() call when a frontend asks.
+// AdmitsIO is StorageBackend.AdmitsIO for an open volume; ErrVolumeNotOpen
+// for any other (fail closed).
+func (p *DurableProvider) AdmitsIO(volumeID string) error {
+	b := p.Backend(volumeID)
+	if b == nil {
+		return fmt.Errorf("%w: %s", ErrVolumeNotOpen, volumeID)
+	}
+	return b.AdmitsIO()
+}
+
 func (p *DurableProvider) Backend(volumeID string) *StorageBackend {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -947,6 +1078,8 @@ func (p *DurableProvider) RecoverVolume(ctx context.Context, volumeID string) (R
 		p.mu.Lock()
 		h.recoverGen++ // any earlier recovery's authority wait is now stale
 		gen = h.recoverGen
+		h.startupEnded = 0
+		h.startupSuperseded = false
 		p.mu.Unlock()
 	}
 	report := Recover(h.storage, volumeID)
@@ -1004,6 +1137,7 @@ func (p *DurableProvider) Close() error {
 		if err := h.storage.Close(); err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("durable: close storage: %w", err)
 		}
+		closeHostLock(h.hostLock) // after the store closes
 	}
 	return firstErr
 }

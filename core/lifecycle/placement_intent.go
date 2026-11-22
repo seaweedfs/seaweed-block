@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -35,9 +36,10 @@ type PlacementIntent struct {
 
 // PlacementIntentStore persists one placement intent per volume.
 type PlacementIntentStore struct {
-	mu      sync.Mutex
-	dir     string
-	records map[string]PlacementIntent
+	mu        sync.Mutex
+	dir       string
+	records   map[string]PlacementIntent
+	published sync.Map // committed immutable PlacementIntent values; renewal never takes mu
 }
 
 // OpenPlacementIntentStore opens or creates a placement intent store.
@@ -45,15 +47,33 @@ func OpenPlacementIntentStore(dir string) (*PlacementIntentStore, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("%w: empty dir", ErrInvalidVolumeSpec)
 	}
+	dir, err := filepath.Abs(filepath.Clean(dir))
+	if err != nil {
+		return nil, fmt.Errorf("lifecycle: resolve store path: %w", err)
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("lifecycle: mkdir placement intent %q: %w", dir, err)
 	}
+	// INV-LIFECYCLE-STORE-DURABLE-001: existence does not prove durability.
+	// Every open syncs the full ancestor chain, also after a failed first open.
+	for parent := filepath.Dir(dir); ; parent = filepath.Dir(parent) {
+		if err := syncBindingParent(parent); err != nil {
+			log.Printf("lifecycle: could not sync %s (%v): the store directory entry may not survive a crash right after its creation", parent, err)
+		}
+		if parent == filepath.Dir(parent) {
+			break
+		}
+	}
+
 	s := &PlacementIntentStore{
 		dir:     dir,
 		records: make(map[string]PlacementIntent),
 	}
 	if err := s.load(); err != nil {
 		return nil, err
+	}
+	for volume, rec := range s.records {
+		s.published.Store(volume, copyPlacementIntent(rec))
 	}
 	return s, nil
 }
@@ -90,6 +110,7 @@ func (s *PlacementIntentStore) ApplyPlan(plan PlacementPlan) (PlacementIntent, e
 		return PlacementIntent{}, err
 	}
 	s.records[intent.VolumeID] = intent
+	s.published.Store(intent.VolumeID, copyPlacementIntent(intent))
 	return copyPlacementIntent(intent), nil
 }
 
@@ -101,10 +122,11 @@ func (s *PlacementIntentStore) DeletePlacement(volumeID string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.records, volumeID)
 	if err := os.Remove(s.path(volumeID)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("lifecycle: remove placement intent %s: %w", volumeID, err)
 	}
+	delete(s.records, volumeID)
+	s.published.Delete(volumeID)
 	return nil
 }
 
@@ -114,6 +136,17 @@ func (s *PlacementIntentStore) GetPlacement(volumeID string) (PlacementIntent, b
 	defer s.mu.Unlock()
 	rec, ok := s.records[volumeID]
 	return copyPlacementIntent(rec), ok
+}
+
+// GetPlacementSnapshot reads only committed placement, without waiting for a
+// writer's filesystem I/O (INV-WS-RENEW-NONBLOCKING-001). The returned slice
+// is a copy: a caller cannot change the published holder membership.
+func (s *PlacementIntentStore) GetPlacementSnapshot(volumeID string) (PlacementIntent, bool) {
+	value, ok := s.published.Load(volumeID)
+	if !ok {
+		return PlacementIntent{}, false
+	}
+	return copyPlacementIntent(value.(PlacementIntent)), true
 }
 
 // ListPlacements returns intents ordered by VolumeID.
@@ -166,27 +199,7 @@ func (s *PlacementIntentStore) putLocked(rec PlacementIntent) error {
 	if err != nil {
 		return fmt.Errorf("lifecycle: marshal placement intent %s: %w", rec.VolumeID, err)
 	}
-	path := s.path(rec.VolumeID)
-	tmp, err := os.CreateTemp(s.dir, rec.VolumeID+".*.tmp")
-	if err != nil {
-		return fmt.Errorf("lifecycle: temp placement intent %s: %w", rec.VolumeID, err)
-	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }()
-	if _, err := tmp.Write(raw); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("lifecycle: write placement intent temp %s: %w", rec.VolumeID, err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("lifecycle: close placement intent temp %s: %w", rec.VolumeID, err)
-	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("lifecycle: replace placement intent %s: %w", rec.VolumeID, err)
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return fmt.Errorf("lifecycle: rename placement intent %s: %w", rec.VolumeID, err)
-	}
-	return nil
+	return writeRecordDurably(s.dir, rec.VolumeID+".json", raw)
 }
 
 func (s *PlacementIntentStore) path(volumeID string) string {

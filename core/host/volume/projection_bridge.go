@@ -124,6 +124,16 @@ func (v *AdapterProjectionView) projectionWithSupersede() (frontend.Projection, 
 	return result, superseded
 }
 
+// workspaceLeaseNotHeld: a workspace primary whose lease guard is not
+// installed yet, or does not hold a granted lease now (the guard decides).
+func (v *AdapterProjectionView) workspaceLeaseNotHeld() bool {
+	if !v.workspaceRequired {
+		return false
+	}
+	g := v.workspaceGuard.Load()
+	return g == nil || !g.Held()
+}
+
 func (v *AdapterProjectionView) supportingReplicaReady(selfEpoch, selfEV uint64) bool {
 	if v == nil || v.probe == nil {
 		return false
@@ -226,4 +236,12 @@ func (v *AdapterProjectionView) PromotionReadyFact() engine.PromotionReadyFact {
 // the frontend gets should also call Projection()).
 func (v *AdapterProjectionView) EngineProjection() engine.ReplicaProjection {
 	return v.projector.Projection()
+}
+
+// assignmentEndpointWarning exposes routing disagreement without gating I/O.
+func (v *AdapterProjectionView) assignmentEndpointWarning() string {
+	if p, ok := v.probe.(interface{ AssignmentEndpointWarning() string }); ok {
+		return p.AssignmentEndpointWarning()
+	}
+	return ""
 }

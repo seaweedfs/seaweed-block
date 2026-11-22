@@ -19,7 +19,7 @@ func (c skewLeaseClient) RenewWorkspaceLease(ctx context.Context, id *control.Wo
 	if err != nil {
 		return nil, err
 	}
-	return leaseFact(id.VolumeId, l), nil
+	return leaseFact(c.p, id.VolumeId, l), nil
 }
 func (skewLeaseClient) AckWorkspaceRevoked(context.Context, *control.WorkspaceRevocationAck, ...grpc.CallOption) (*control.WorkspaceEmpty, error) {
 	panic("expiry must not ACK clean")
@@ -43,7 +43,7 @@ func TestWorkspaceSkewSeparatesOldServingFromForcedGrant(t *testing.T) {
 			dir := &skewDirective{asks: make(chan authority.AssignmentAsk, 1)}
 			p := authority.NewPublisher(dir, authority.WithStore(store), authority.WithWorkspaceLeaseConfig(3*time.Second, func() time.Time { return masterNow }))
 			seedSkewPublisher(t, p, dir)
-			g, err := volume.NewWorkspaceLeaseGuard(workspaceRPCView{frontend.Projection{VolumeID: "v", ReplicaID: "r", Epoch: 1, Healthy: true}}, skewLeaseClient{p}, &control.WorkspaceIdentity{VolumeId: "v", ReplicaId: "r", Epoch: 1}, func(context.Context) (uint64, error) { return 7, nil }, func() time.Time { return hostNow })
+			g, err := volume.NewWorkspaceLeaseGuard(workspaceRPCView{frontend.Projection{VolumeID: "v", ReplicaID: "r", Epoch: 1, Healthy: true}}, skewLeaseClient{p}, &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "v", ReplicaId: "r", Epoch: 1}, func(context.Context) (uint64, error) { return 7, nil }, func() time.Time { return hostNow })
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -130,17 +130,45 @@ func TestWorkspaceClockSkewConfigReachesLeaseReply(t *testing.T) {
 	if _, err := h.Lifecycle().Volumes.CreateVolume(lifecycle.VolumeSpec{VolumeID: "vol-a", SizeBytes: 1 << 20, ReplicationFactor: 1}); err != nil {
 		t.Fatal(err)
 	}
+	registerWorkspaceHolder(t, h, "node-a") // a workspace holder's server id must be registered (INV-AUTH-HOLDER-IDENTITY-001)
 	seedVerifiedExistingReplicaPlacement(t, h)
 	if _, err := h.RunLifecycleProductTick(); err != nil {
 		t.Fatal(err)
 	}
 	line := waitAuthorityLine(t, h.Publisher(), "vol-a")
-	reply, err := (&services{host: h}).RenewWorkspaceLease(context.Background(), &control.WorkspaceIdentity{VolumeId: "vol-a", ReplicaId: line.ReplicaID, Epoch: line.Epoch})
+	reply, err := (&services{host: h}).RenewWorkspaceLease(loopbackPeer(context.Background()), &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "vol-a", ReplicaId: line.ReplicaID, Epoch: line.Epoch})
 	if err != nil {
 		t.Fatal(err)
 	}
 	lease := h.Publisher().WorkspaceState("vol-a").Lease
 	if lease.MaxClockSkewNS != int64(4*time.Second) || reply.ValidForNs <= 0 || reply.ValidForNs > int64(28*time.Second) {
 		t.Fatal("configuration not applied to host validity", lease, reply)
+	}
+}
+
+// The lease reply uses the publisher clock even when it differs from this
+// process's wall clock; configured skew also covers legacy leases with no bound.
+func TestWorkspaceLeaseFactUsesPublisherClockAndSkew(t *testing.T) {
+	now := time.Unix(1000, 0)
+	p := authority.NewPublisher(nil, authority.WithWorkspaceLeaseConfig(12*time.Second, func() time.Time { return now }), authority.WithWorkspaceMaxClockSkew(4*time.Second))
+	for _, tc := range []struct {
+		name   string
+		expiry time.Duration
+		skew   int64
+		want   time.Duration
+	}{
+		{"legacy-configured-bound", 10 * time.Second, 0, 8 * time.Second},
+		{"persisted-smaller-bound", 10 * time.Second, int64(2 * time.Second), 8 * time.Second},
+		{"persisted-larger-bound", 10 * time.Second, int64(6 * time.Second), 7 * time.Second},
+		{"configured-ttl-cap", 40 * time.Second, 0, 12 * time.Second},
+		{"expired", time.Second, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := authority.WorkspaceLease{ReplicaID: "r", Epoch: 1, ExpiresAtNS: now.Add(tc.expiry).UnixNano(), MaxClockSkewNS: tc.skew}
+			fact := leaseFact(p, "v", l)
+			if fact.ValidForNs != int64(tc.want) {
+				t.Fatalf("validity=%s, want %s", time.Duration(fact.ValidForNs), tc.want)
+			}
+		})
 	}
 }

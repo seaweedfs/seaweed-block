@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -64,9 +65,10 @@ type NodeRegistration struct {
 
 // NodeInventoryStore persists one JSON registration record per server.
 type NodeInventoryStore struct {
-	mu      sync.Mutex
-	dir     string
-	records map[string]NodeRegistration
+	mu        sync.Mutex
+	dir       string
+	records   map[string]NodeRegistration
+	published sync.Map // committed NodeRegistration values; holder host checks never take mu (INV-WS-RENEW-NONBLOCKING-001)
 }
 
 // OpenNodeInventoryStore opens or creates a node inventory store.
@@ -74,9 +76,24 @@ func OpenNodeInventoryStore(dir string) (*NodeInventoryStore, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("%w: empty dir", ErrInvalidNodeRegistration)
 	}
+	dir, err := filepath.Abs(filepath.Clean(dir))
+	if err != nil {
+		return nil, fmt.Errorf("lifecycle: resolve store path: %w", err)
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("lifecycle: mkdir node inventory %q: %w", dir, err)
 	}
+	// INV-LIFECYCLE-STORE-DURABLE-001: existence does not prove durability.
+	// Every open syncs the full ancestor chain, also after a failed first open.
+	for parent := filepath.Dir(dir); ; parent = filepath.Dir(parent) {
+		if err := syncBindingParent(parent); err != nil {
+			log.Printf("lifecycle: could not sync %s (%v): the store directory entry may not survive a crash right after its creation", parent, err)
+		}
+		if parent == filepath.Dir(parent) {
+			break
+		}
+	}
+
 	s := &NodeInventoryStore{
 		dir:     dir,
 		records: make(map[string]NodeRegistration),
@@ -84,7 +101,29 @@ func OpenNodeInventoryStore(dir string) (*NodeInventoryStore, error) {
 	if err := s.load(); err != nil {
 		return nil, err
 	}
+	for id, rec := range s.records {
+		s.published.Store(id, copyNodeRegistration(rec))
+	}
 	return s, nil
+}
+
+// GetNodeSnapshot returns the last committed registration of serverID without taking the store mutex, which writers
+// hold across file I/O: a lease renewal's holder host check never waits behind a registration write. The result is a
+// copy (INV-WS-RENEW-NONBLOCKING-001, INV-AUTH-HOLDER-IDENTITY-001).
+func (s *NodeInventoryStore) GetNodeSnapshot(serverID string) (NodeRegistration, bool) {
+	v, ok := s.published.Load(serverID)
+	if !ok {
+		return NodeRegistration{}, false
+	}
+	return copyNodeRegistration(v.(NodeRegistration)), true
+}
+
+// HoldWritesForTest takes the mutex a registration write holds across file I/O and returns its release (idempotent):
+// a held registration write, for controls that a reader (the holder host check) never waits on it. Tests only.
+func (s *NodeInventoryStore) HoldWritesForTest() (release func()) {
+	s.mu.Lock()
+	var once sync.Once
+	return func() { once.Do(s.mu.Unlock) }
 }
 
 // RegisterNode records the latest observed inventory for a server.
@@ -104,6 +143,7 @@ func (s *NodeInventoryStore) RegisterNode(reg NodeRegistration) (NodeRegistratio
 		return NodeRegistration{}, err
 	}
 	s.records[reg.ServerID] = reg
+	s.published.Store(reg.ServerID, copyNodeRegistration(reg)) // committed: the file is in place
 	return reg, nil
 }
 
@@ -119,6 +159,7 @@ func (s *NodeInventoryStore) RemoveNode(serverID string) error {
 	if err := os.Remove(s.path(serverID)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("lifecycle: remove node %s: %w", serverID, err)
 	}
+	s.published.Delete(serverID) // committed: the file is gone
 	return nil
 }
 
@@ -180,27 +221,7 @@ func (s *NodeInventoryStore) putLocked(rec NodeRegistration) error {
 	if err != nil {
 		return fmt.Errorf("lifecycle: marshal node %s: %w", rec.ServerID, err)
 	}
-	path := s.path(rec.ServerID)
-	tmp, err := os.CreateTemp(s.dir, rec.ServerID+".*.tmp")
-	if err != nil {
-		return fmt.Errorf("lifecycle: temp node %s: %w", rec.ServerID, err)
-	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }()
-	if _, err := tmp.Write(raw); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("lifecycle: write node temp %s: %w", rec.ServerID, err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("lifecycle: close node temp %s: %w", rec.ServerID, err)
-	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("lifecycle: replace node %s: %w", rec.ServerID, err)
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return fmt.Errorf("lifecycle: rename node %s: %w", rec.ServerID, err)
-	}
-	return nil
+	return writeRecordDurably(s.dir, rec.ServerID+".json", raw)
 }
 
 func (s *NodeInventoryStore) path(serverID string) string {
