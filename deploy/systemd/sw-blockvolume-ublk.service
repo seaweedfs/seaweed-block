@@ -69,6 +69,7 @@ ExecStart=/usr/local/bin/blockvolume \
 KillSignal=SIGTERM
 TimeoutStopSec=30s
 Restart=on-failure
+RestartPreventExitStatus=78
 RestartSec=5s
 
 NoNewPrivileges=true

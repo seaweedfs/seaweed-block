@@ -48,7 +48,7 @@ func statusWarningsCase(t *testing.T, view *AdapterProjectionView, wantHealthy b
 		t.Fatalf("before the warning: healthy=%t ready=%t; want %t", before.Healthy, before.FrontendPrimaryReady, wantHealthy)
 	}
 	s.SetDurableStatusSource(stubDurableStatusSource{vols: []durable.VolumeStatus{{
-		VolumeID: "v1", Impl: "walstore", Warnings: []string{"wal_hole_suspected: WAL entry at offset=4134 fails its check"}, HolesSuspected: 1,
+		VolumeID: "v1", Impl: "walstore", Operational: true, Warnings: []string{"wal_hole_suspected: WAL entry at offset=4134 fails its check"}, HolesSuspected: 1,
 	}}})
 	after := get()
 	if len(after.Warnings) != 1 || after.Warnings[0][:18] != "wal_hole_suspected" {

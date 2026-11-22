@@ -176,8 +176,7 @@ type Host struct {
 	workspaceLeaseStarted atomic.Bool
 	// Guard installation and terminal host fencing share this lock. Order:
 	// workspaceLeaseMu -> guard.mu; never hold either across RPC or drain.
-	workspaceLeaseMu     sync.Mutex
-	workspaceLeaseFenced bool
+	workspaceLeaseMu sync.Mutex
 	// workspaceStopPending is the guard's stop-pending mode, kept here for a
 	// guard installed later; workspaceStopAttempt numbers detach attempts so
 	// only the latest one's resume clears it.
@@ -203,6 +202,9 @@ type Host struct {
 	// demotion side effects in this slice.
 	otherMu   sync.Mutex
 	lastOther *control.AssignmentFact
+
+	ownAssignmentMu                     sync.RWMutex
+	ownAssignmentEpoch, ownAssignmentEV uint64
 
 	frontendMu      sync.RWMutex
 	frontendTargets []*control.FrontendTarget
@@ -521,29 +523,21 @@ func (h *Host) getReplication() replicaSetUpdater {
 	return h.replication
 }
 
-// IsSuperseded gates a newer foreign replica line, or a same-replica foreign
-// server identity strictly newer than an adopted local lineage. An explicitly
-// matching self identity remains an ordinary adapter update.
+// IsSuperseded is the one foreign-holder comparison. Callers supply the
+// named lineage: adopted engine state for fencing, observed own assignment
+// for exit classification. Zero lineage selects neither fencing nor exit78
+// (INV-AUTH-HOLDER-IDENTITY-001; INV-WS-STARTUP-RETRY-001).
 func (h *Host) IsSuperseded(selfReplicaID string, selfEpoch, selfEV uint64) bool {
 	h.otherMu.Lock()
 	defer h.otherMu.Unlock()
-	if h.lastOther == nil || selfEpoch == 0 {
+	other := h.lastOther
+	if selfEpoch == 0 || other == nil || other.ReplicaId == "" || other.VolumeId != h.cfg.VolumeID {
 		return false
 	}
-	other := h.lastOther
-	if other.ReplicaId == selfReplicaID {
-		if h.assignmentNamesSelf(other) {
-			return false
-		}
-		return other.Epoch > selfEpoch || other.Epoch == selfEpoch && other.EndpointVersion > selfEV
+	if other.ReplicaId == selfReplicaID && h.assignmentNamesSelf(other) {
+		return false
 	}
-	if other.Epoch > selfEpoch {
-		return true
-	}
-	if other.Epoch == selfEpoch && other.EndpointVersion > selfEV {
-		return true
-	}
-	return false
+	return other.Epoch > selfEpoch || other.Epoch == selfEpoch && other.EndpointVersion > selfEV
 }
 
 // ProjectionView returns the AdapterProjectionView that bridges
@@ -861,6 +855,7 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 		return
 	}
 
+	h.recordSelfAssignment(fact)
 	h.reportAssignmentEndpoints(fact)
 
 	// The recovery watchdog runs from the primary assignment, before any

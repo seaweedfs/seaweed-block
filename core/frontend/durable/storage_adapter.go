@@ -181,6 +181,11 @@ type StorageBackend struct {
 	readyChanged    chan struct{}
 	operational     atomic.Bool
 	opEvidence      atomic.Value // string
+	// firstServing is closed the first time the backend admits I/O (under
+	// mu); it never reopens. INV-FE-PRIMARY-READY-OPERATIONAL-001: the
+	// frontends start on it.
+	firstServing chan struct{}
+	served       bool // under mu: firstServing is closed
 
 	// ioMu is the I/O admission boundary: every Read, Write and Sync holds
 	// its read side for the whole operation, gate included, so StopIO can
@@ -221,10 +226,11 @@ type StorageBackend struct {
 // impl changes it mid-session).
 func NewStorageBackend(s storage.LogicalStorage, view frontend.ProjectionView, id frontend.Identity) *StorageBackend {
 	b := &StorageBackend{
-		storage:   s,
-		view:      view,
-		id:        id,
-		blockSize: s.BlockSize(),
+		storage:      s,
+		view:         view,
+		id:           id,
+		blockSize:    s.BlockSize(),
+		firstServing: make(chan struct{}),
 	}
 	b.opEvidence.Store("awaiting first SetOperational")
 	// operational.Store(false) is zero-value default; be explicit.
@@ -488,11 +494,23 @@ func (b *StorageBackend) SetOperational(ok bool, evidence string) {
 	b.mu.Unlock()
 }
 
+// FirstServing is closed the first time the backend admits I/O (for a chunk
+// volume: after its storage claim succeeded) and never reopens. A later loss
+// of readiness does not reopen it: the process exit of
+// INV-WS-STARTUP-RETRY-001 owns that window.
+func (b *StorageBackend) FirstServing() <-chan struct{} { return b.firstServing }
+
 // The caller owns mu; publication never calls the store or waits for I/O.
 func (b *StorageBackend) setOperationalLocked(ok bool, evidence string) {
 	flipped := !ok && b.operational.Load()
 	b.opEvidence.Store(evidence)
 	b.operational.Store(ok)
+	if ok && !b.served {
+		b.served = true
+		if b.firstServing != nil { // nil only for a backend built without NewStorageBackend
+			close(b.firstServing)
+		}
+	}
 	if flipped {
 		b.stopFlipAt = time.Now() // after the store: no gate after this instant admits
 	}
@@ -881,6 +899,13 @@ func (b *StorageBackend) gate() error {
 	}
 	return b.lineageCheck()
 }
+
+// AdmitsIO is the one deciding function for "may serve" (V1-SPEC r2.39):
+// nil exactly when a Read, Write or Sync arriving now passes the I/O gate,
+// i.e. the backend admits I/O (open, operational, not chunk-fenced, no
+// pre-copy pause) AND the guarded projection names this backend's lineage as
+// the healthy primary. /status FrontendPrimaryReady reads it.
+func (b *StorageBackend) AdmitsIO() error { return b.gate() }
 
 // readyCheck is the gate without the lineage check: closed, then
 // operational.
