@@ -217,12 +217,15 @@ func (s *NodeInventoryStore) putLocked(rec NodeRegistration) error {
 		_ = tmp.Close()
 		return fmt.Errorf("lifecycle: write node temp %s: %w", rec.ServerID, err)
 	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("lifecycle: sync node temp %s: %w", rec.ServerID, err)
+	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("lifecycle: close node temp %s: %w", rec.ServerID, err)
 	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("lifecycle: replace node %s: %w", rec.ServerID, err)
-	}
+	// V1-SPEC r2.46: replace without an absent-file window; acknowledge only
+	// after both the complete candidate and its directory entry are synced.
 	if s.persistHookForTest != nil {
 		s.persistHookForTest("before-rename")
 	}
@@ -231,6 +234,9 @@ func (s *NodeInventoryStore) putLocked(rec NodeRegistration) error {
 	}
 	if s.persistHookForTest != nil {
 		s.persistHookForTest("after-rename")
+	}
+	if err := syncBindingParent(s.dir); err != nil {
+		return fmt.Errorf("lifecycle: sync node directory %s: %w", rec.ServerID, err)
 	}
 	return nil
 }
