@@ -46,7 +46,7 @@ func reportSlot(t *testing.T, h *Host) *control.HeartbeatSlot {
 // unhealthy (Eligible=false, recovery_timeout) once the timeout elapses.
 func TestRecoveryWatchdog_PrimaryNotReadyPastTimeoutReportsUnhealthy(t *testing.T) {
 	h, clk := watchdogHost(t, 30*time.Second)
-	h.applyFact(selfPrimaryFact(1))
+	h.applyFixtureFact(selfPrimaryFact(1))
 
 	clk.advance(29 * time.Second)
 	if s := reportSlot(t, h); !s.Eligible || s.UnhealthyReason != "" || s.ReadyForPrimary {
@@ -64,8 +64,8 @@ func TestRecoveryWatchdog_PrimaryNotReadyPastTimeoutReportsUnhealthy(t *testing.
 // A supporting replica in a long catch-up is never flagged.
 func TestRecoveryWatchdog_SupportingReplicaNotFlagged(t *testing.T) {
 	h, clk := watchdogHost(t, 30*time.Second)
-	h.applyFact(selfPrimaryFact(1))
-	h.applyFact(&control.AssignmentFact{ // another replica is now primary
+	h.applyFixtureFact(selfPrimaryFact(1))
+	h.applyFixtureFact(&control.AssignmentFact{ // another replica is now primary
 		VolumeId: "v1", ReplicaId: "r2", Epoch: 2, EndpointVersion: 1,
 		DataAddr: "127.0.0.1:9301", CtrlAddr: "127.0.0.1:9302",
 	})
@@ -127,7 +127,7 @@ func TestRecoveryWatchdog_RoleAdmissionFailure(t *testing.T) {
 // catch-up state.
 func TestRecoveryWatchdog_StatusShowsReasonAndCatchUp(t *testing.T) {
 	h, clk := watchdogHost(t, time.Second)
-	h.applyFact(selfPrimaryFact(1))
+	h.applyFixtureFact(selfPrimaryFact(1))
 	clk.advance(2 * time.Second)
 	s := NewStatusServer(h.view)
 	if got := s.statusProjection().UnhealthyReason; got != UnhealthyRecoveryTimeout {
@@ -148,7 +148,7 @@ func TestRecoveryWatchdog_StatusShowsReasonAndCatchUp(t *testing.T) {
 // no recovery_timeout, however long it lasts.
 func TestRecoveryWatchdog_ReadyThenLaterNotReadyReportsNoTimeout(t *testing.T) {
 	h, clk := watchdogHost(t, 10*time.Second)
-	h.applyFact(selfPrimaryFact(1))
+	h.applyFixtureFact(selfPrimaryFact(1))
 	clk.advance(time.Second)
 	if r := h.unhealthyReason(readyAt(1), true); r != "" {
 		t.Fatalf("ready: %q", r)
@@ -157,7 +157,7 @@ func TestRecoveryWatchdog_ReadyThenLaterNotReadyReportsNoTimeout(t *testing.T) {
 	if r := h.unhealthyReason(readyAt(1), false); r != "" {
 		t.Fatalf("not ready an hour after being ready, same incarnation: %q; want no recovery_timeout", r)
 	}
-	h.applyFact(selfPrimaryFact(1)) // the same assignment replayed: still disarmed
+	h.applyFixtureFact(selfPrimaryFact(1)) // the same assignment replayed: still disarmed
 	clk.advance(time.Hour)
 	if r := h.unhealthyReason(readyAt(1), false); r != "" {
 		t.Fatalf("same assignment replayed: %q; want still disarmed", r)
@@ -169,7 +169,7 @@ func TestRecoveryWatchdog_ReadyThenLaterNotReadyReportsNoTimeout(t *testing.T) {
 // reports recovery_timeout even for the same primary epoch.
 func TestRecoveryWatchdog_NewIncarnationRearms(t *testing.T) {
 	old, clk := watchdogHost(t, 10*time.Second)
-	old.applyFact(selfPrimaryFact(1))
+	old.applyFixtureFact(selfPrimaryFact(1))
 	if r := old.unhealthyReason(readyAt(1), true); r != "" {
 		t.Fatalf("old process ready: %q", r)
 	}
@@ -178,7 +178,7 @@ func TestRecoveryWatchdog_NewIncarnationRearms(t *testing.T) {
 	if restarted.incarnation == old.incarnation {
 		t.Fatalf("restarted process kept incarnation %q", old.incarnation)
 	}
-	restarted.applyFact(selfPrimaryFact(1)) // same primary epoch
+	restarted.applyFixtureFact(selfPrimaryFact(1)) // same primary epoch
 	clk2.advance(11 * time.Second)
 	if s := reportSlot(t, restarted); s.Eligible || s.UnhealthyReason != UnhealthyRecoveryTimeout {
 		t.Fatalf("restarted process past timeout: eligible=%t reason=%q; want ineligible, %s", s.Eligible, s.UnhealthyReason, UnhealthyRecoveryTimeout)
@@ -213,13 +213,13 @@ func TestRecoveryWatchdog_OldEpochReadyDoesNotDisarmNewAssignment(t *testing.T) 
 	ready := &engine.PromotionReadyFact{Ready: true, Epoch: 2, EndpointVersion: 1, ReplicaID: "rB"}
 	readyView(h, "vol1", "rB", ready)
 
-	h.applyFact(selfFact(2))
+	h.applyFixtureFact(selfFact(2))
 	if s := reportSlot(t, h); !s.Eligible || s.UnhealthyReason != "" {
 		t.Fatalf("ready primary at epoch 2: %+v", s)
 	}
 
 	repl.returnErr = errors.New("injected: peer set install failed")
-	h.applyFact(selfFact(3)) // refused: the adapter stays at epoch 2
+	h.applyFixtureFact(selfFact(3)) // refused: the adapter stays at epoch 2
 	if a.callCount.Load() != 1 {
 		t.Fatal("fixture: the epoch-3 assignment was adopted")
 	}
@@ -247,19 +247,19 @@ func TestRecoveryWatchdog_G1LatchWinsOverOldReady(t *testing.T) {
 	if err := h.SetSelfFence(fencer); err != nil {
 		t.Fatal(err)
 	}
-	h.applyFact(selfFact(2))
+	h.applyFixtureFact(selfFact(2))
 	if s := reportSlot(t, h); !s.Eligible || s.UnhealthyReason != "" {
 		t.Fatalf("ready primary at epoch 2: %+v", s)
 	}
 
 	fencer.fail.Store(true)
-	h.applyFact(selfFact(3)) // role call fails: G1 latch
+	h.applyFixtureFact(selfFact(3)) // role call fails: G1 latch
 	if s := reportSlot(t, h); s.Eligible || s.UnhealthyReason != UnhealthyRoleAdmission {
 		t.Fatalf("G1 latch with an old ready fact: eligible=%t reason=%q; want %s", s.Eligible, s.UnhealthyReason, UnhealthyRoleAdmission)
 	}
 
 	fencer.fail.Store(false)
-	h.applyFact(selfFact(3)) // redelivery succeeds
+	h.applyFixtureFact(selfFact(3)) // redelivery succeeds
 	*ready = engine.PromotionReadyFact{Ready: true, Epoch: 3, EndpointVersion: 1, ReplicaID: "rB"}
 	if s := reportSlot(t, h); !s.Eligible || s.UnhealthyReason != "" {
 		t.Fatalf("after successful redelivery and an epoch-3 ready fact: eligible=%t reason=%q; want cleared", s.Eligible, s.UnhealthyReason)

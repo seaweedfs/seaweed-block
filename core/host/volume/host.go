@@ -187,8 +187,9 @@ type Host struct {
 	readyMarkerMu        sync.Mutex
 	supportingReadyMarks map[string]struct{}
 
-	localReadinessBlocked atomic.Bool
-	localReadinessReason  atomic.Value // string
+	assignmentEndpointWarning atomic.Value // diagnostic string; never an admission guard
+	localReadinessBlocked     atomic.Bool
+	localReadinessReason      atomic.Value // string
 	// localRecoveryReason is the typed reason local durable recovery
 	// failed (#133); empty when none or unclassified.
 	localRecoveryReason atomic.Value // string
@@ -235,6 +236,11 @@ func (h *Host) recordOtherLine(f *control.AssignmentFact) {
 	// is the canonical safe deep-copy for proto messages.
 	cp := proto.Clone(f).(*control.AssignmentFact)
 	h.otherMu.Lock()
+	// A stale replay must not erase the newer foreign-holder fence (INV-AUTH-HOLDER-IDENTITY-001).
+	if old := h.lastOther; old != nil && (cp.Epoch < old.Epoch || cp.Epoch == old.Epoch && cp.EndpointVersion < old.EndpointVersion) {
+		h.otherMu.Unlock()
+		return
+	}
 	h.lastOther = cp
 	h.otherMu.Unlock()
 }
@@ -390,7 +396,8 @@ func (h *Host) replayLocalReadinessFactIfReady() {
 	if fact == nil {
 		return
 	}
-	h.log.Printf("blockvolume: volume %s replaying assignment after local readiness cleared", h.cfg.VolumeID)
+	h.log.Printf("blockvolume: volume %s replaying assignment after local readiness cleared server=%q epoch=%d ev=%d data=%q ctrl=%q",
+		h.cfg.VolumeID, fact.ServerId, fact.Epoch, fact.EndpointVersion, fact.DataAddr, fact.CtrlAddr)
 	h.applyFact(fact)
 }
 
@@ -514,21 +521,21 @@ func (h *Host) getReplication() replicaSetUpdater {
 	return h.replication
 }
 
-// IsSuperseded satisfies SupersedeProbe: returns true when this
-// host's lastOther record names a DIFFERENT replica at a strictly
-// newer (Epoch, EndpointVersion) than the caller's self-lineage.
-// Same-replica updates (our own Epoch advance) are NOT supersede
-// events; the bridge handles those naturally through adapter
-// projection.
+// IsSuperseded gates a newer foreign replica line, or a same-replica foreign
+// server identity strictly newer than an adopted local lineage. An explicitly
+// matching self identity remains an ordinary adapter update.
 func (h *Host) IsSuperseded(selfReplicaID string, selfEpoch, selfEV uint64) bool {
 	h.otherMu.Lock()
 	defer h.otherMu.Unlock()
-	if h.lastOther == nil {
+	if h.lastOther == nil || selfEpoch == 0 {
 		return false
 	}
 	other := h.lastOther
 	if other.ReplicaId == selfReplicaID {
-		return false
+		if h.assignmentNamesSelf(other) {
+			return false
+		}
+		return other.Epoch > selfEpoch || other.Epoch == selfEpoch && other.EndpointVersion > selfEV
 	}
 	if other.Epoch > selfEpoch {
 		return true
@@ -761,6 +768,7 @@ func (h *Host) streamOnce(ctx context.Context) error {
 	stream, err := h.asnCli.SubscribeAssignments(ctx, &control.SubscribeRequest{
 		VolumeId:  h.cfg.VolumeID,
 		ReplicaId: h.cfg.ReplicaID,
+		ServerId:  h.cfg.ServerID, // INV-AUTH-HOLDER-IDENTITY-001: the master checks it against the stream's host
 	})
 	if err != nil {
 		return err
@@ -773,6 +781,8 @@ func (h *Host) streamOnce(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		h.log.Printf("blockvolume: assignment stream delivery process=%q server=%q volume=%q replica=%q epoch=%d ev=%d data=%q ctrl=%q",
+			h.cfg.ServerID, fact.ServerId, fact.VolumeId, fact.ReplicaId, fact.Epoch, fact.EndpointVersion, fact.DataAddr, fact.CtrlAddr)
 		h.applyFact(fact)
 	}
 }
@@ -803,6 +813,10 @@ func (h *Host) streamOnce(ctx context.Context) error {
 // OnAssignment could flip the projection Healthy before peers were
 // installed, admitting local-only writes with zero fan-out.
 func (h *Host) applyFact(fact *control.AssignmentFact) {
+	// INV-AUTH-HOLDER-IDENTITY-001: matching r1 and loopback endpoints do not identify a host.
+	if h.refusePrimaryAssignment(fact) {
+		return
+	}
 	if fact.ReplicaId != h.cfg.ReplicaID {
 		h.wd.notPrimary()
 		// Another replica is authoritative for this volume line. Record that
@@ -846,6 +860,8 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 			h.cfg.VolumeID, fact.ReplicaId, fact.Epoch, h.cfg.ReplicaID)
 		return
 	}
+
+	h.reportAssignmentEndpoints(fact)
 
 	// The recovery watchdog runs from the primary assignment, before any
 	// admission step can fail (#128 rule 6).
@@ -918,8 +934,8 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 		return
 	}
 	h.adpt.OnAssignment(info)
-	h.log.Printf("blockvolume: volume %s adopted as PRIMARY at %s@%d (EV=%d)",
-		h.cfg.VolumeID, info.ReplicaID, info.Epoch, info.EndpointVersion)
+	h.log.Printf("blockvolume: volume %s adopted as PRIMARY at %s@%d (EV=%d) process=%q server=%q data=%q ctrl=%q",
+		h.cfg.VolumeID, info.ReplicaID, info.Epoch, info.EndpointVersion, h.cfg.ServerID, fact.ServerId, fact.DataAddr, fact.CtrlAddr)
 	if h.cfg.ReadyMarker != nil && info.Epoch > 0 && h.readyOnce.CompareAndSwap(false, true) {
 		select {
 		case h.cfg.ReadyMarker <- info:

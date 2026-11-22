@@ -26,6 +26,7 @@ type WorkspaceIdentity struct {
 	VolumeId      string                 `protobuf:"bytes,1,opt,name=volume_id,json=volumeId,proto3" json:"volume_id,omitempty"`
 	ReplicaId     string                 `protobuf:"bytes,2,opt,name=replica_id,json=replicaId,proto3" json:"replica_id,omitempty"`
 	Epoch         uint64                 `protobuf:"varint,3,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	ServerId      string                 `protobuf:"bytes,4,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -79,6 +80,13 @@ func (x *WorkspaceIdentity) GetEpoch() uint64 {
 		return x.Epoch
 	}
 	return 0
+}
+
+func (x *WorkspaceIdentity) GetServerId() string {
+	if x != nil {
+		return x.ServerId
+	}
+	return ""
 }
 
 type WorkspaceVolume struct {
@@ -1122,12 +1130,13 @@ var File_workspace_proto protoreflect.FileDescriptor
 
 const file_workspace_proto_rawDesc = "" +
 	"\n" +
-	"\x0fworkspace.proto\x12\x17seaweedfs.block.control\"e\n" +
+	"\x0fworkspace.proto\x12\x17seaweedfs.block.control\"\x82\x01\n" +
 	"\x11WorkspaceIdentity\x12\x1b\n" +
 	"\tvolume_id\x18\x01 \x01(\tR\bvolumeId\x12\x1d\n" +
 	"\n" +
 	"replica_id\x18\x02 \x01(\tR\treplicaId\x12\x14\n" +
-	"\x05epoch\x18\x03 \x01(\x04R\x05epoch\".\n" +
+	"\x05epoch\x18\x03 \x01(\x04R\x05epoch\x12\x1b\n" +
+	"\tserver_id\x18\x04 \x01(\tR\bserverId\".\n" +
 	"\x0fWorkspaceVolume\x12\x1b\n" +
 	"\tvolume_id\x18\x01 \x01(\tR\bvolumeId\"\x10\n" +
 	"\x0eWorkspaceEmpty\"\xc8\x01\n" +

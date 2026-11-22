@@ -292,6 +292,10 @@ func (s *services) ReportHeartbeat(ctx context.Context, r *control.HeartbeatRepo
 	if err := s.host.refuseColocatedHeartbeat(r.ServerId, storeident.Identity{MachineID: r.GetMachineId(), Dev: r.GetDurableRootDev(), FSID: r.GetDurableRootFsid()}); err != nil {
 		return nil, status.Error(codes.FailedPrecondition, err.Error())
 	}
+	// INV-AUTH-HOLDER-IDENTITY-001: one server id names one host.
+	if err := s.host.refuseServerIDFromOtherHost(r); err != nil {
+		return nil, status.Error(codes.FailedPrecondition, err.Error())
+	}
 	msg := heartbeatFromWire(r)
 	if err := s.host.ingestHeartbeatRecordingHealth(msg); err != nil {
 		return nil, fmt.Errorf("ingest: %w", err)
@@ -387,6 +391,13 @@ func (s *services) SubscribeAssignments(req *control.SubscribeRequest, stream co
 	if len(slots) == 0 {
 		return fmt.Errorf("subscribe: volume %q not in accepted topology", req.VolumeId)
 	}
+	// INV-AUTH-HOLDER-IDENTITY-001: a workspace volume's line is delivered only to a registered server id streaming
+	// from its registered host, so a second host with a copied --server-id never receives (never adopts) it.
+	if s.isWorkspaceVolume(req.VolumeId) {
+		if err := s.host.refuseWorkspaceHolderHost(ctx, "assignment stream", req.GetServerId()); err != nil {
+			return status.Error(codes.FailedPrecondition, err.Error())
+		}
+	}
 
 	type recv struct {
 		ch     <-chan adapter.AssignmentInfo
@@ -461,24 +472,7 @@ func (s *services) SubscribeAssignments(req *control.SubscribeRequest, stream co
 			lastEpoch = info.Epoch
 			lastEV = info.EndpointVersion
 			sentAny = true
-			fact := &control.AssignmentFact{
-				VolumeId:        info.VolumeID,
-				ReplicaId:       info.ReplicaID,
-				Epoch:           info.Epoch,
-				EndpointVersion: info.EndpointVersion,
-				DataAddr:        info.DataAddr,
-				CtrlAddr:        info.CtrlAddr,
-			}
-			// Populate the peer set from publisher LastPublished
-			// queries for every non-self replica slot in this volume's
-			// topology. peer_set_generation is derived
-			// from the authoritative line's (Epoch, EndpointVersion)
-			// packed into one uint64 as (epoch<<32 | ev). Assertion
-			// above guarantees each fits in uint32 so no aliasing.
-			// Monotonic across process lifetimes because Epoch/EV are
-			// durable authority facts preserved across master restart.
-			fact.Peers = s.collectPeers(req.VolumeId, info)
-			fact.PeerSetGeneration = (info.Epoch << 32) | info.EndpointVersion
+			fact := s.assignmentFact(info)
 			if err := stream.Send(fact); err != nil {
 				return err
 			}
@@ -508,7 +502,15 @@ func (s *services) QueryVolumeStatus(ctx context.Context, req *control.StatusReq
 			replicaIDs = []string{line.ReplicaID}
 		}
 		replicaIDs = primaryFirstReplicaIDs(replicaIDs, line.ReplicaID)
-		resp.Frontends = statusFrontendsForAssignedVolume(s.host.obs, req.VolumeId, replicaIDs, line.Assigned)
+		// the primary's portal comes from the server on the line, never a fresher same-replica claim elsewhere
+		// (INV-AUTH-HOLDER-IDENTITY-001)
+		resp.Frontends = statusFrontendsFor(s.host.obs, req.VolumeId, replicaIDs, line.Assigned, line.ReplicaID, func(replicaID string) (authority.SlotFact, bool) {
+			if replicaID == line.ReplicaID {
+				_, fact, ok := s.host.holderSlotFact(req.VolumeId, replicaID, line.Epoch)
+				return fact, ok
+			}
+			return s.host.obs.Store().SlotFact(req.VolumeId, replicaID)
+		})
 		resp.UnhealthyReplicas = statusUnhealthyReplicas(s.host.obs, req.VolumeId, replicaIDs)
 	}
 	if ev, ok := ctrl.LastUnsupported(req.VolumeId); ok {
@@ -552,8 +554,24 @@ func primaryFirstReplicaIDs(replicaIDs []string, primaryReplicaID string) []stri
 }
 
 func statusFrontendsForAssignedVolume(obs *authority.ObservationHost, volumeID string, replicaIDs []string, assigned bool) []*control.FrontendTarget {
+	return statusFrontendsFor(obs, volumeID, replicaIDs, assigned, "", nil)
+}
+
+// statusFrontendsFor lists the frontends of replicaIDs in order; slotOf selects each replica's slot fact (nil: the
+// freshest claim for that replica). When primary is set and its slot fact is missing, nothing is listed: a CSI client
+// takes the first frontend as the primary, so a supporting replica's frontend must never stand in for it
+// (INV-AUTH-HOLDER-IDENTITY-001, fail closed).
+func statusFrontendsFor(obs *authority.ObservationHost, volumeID string, replicaIDs []string, assigned bool, primary string, slotOf func(replicaID string) (authority.SlotFact, bool)) []*control.FrontendTarget {
 	if !assigned || obs == nil {
 		return nil
+	}
+	if slotOf == nil {
+		slotOf = func(replicaID string) (authority.SlotFact, bool) { return obs.Store().SlotFact(volumeID, replicaID) }
+	}
+	if primary != "" {
+		if f, ok := slotOf(primary); !ok || len(f.Frontends) == 0 {
+			return nil // no primary evidence, or a primary slot with no frontend: nothing to publish
+		}
 	}
 	out := make([]*control.FrontendTarget, 0, len(replicaIDs))
 	seen := map[string]struct{}{}
@@ -561,11 +579,12 @@ func statusFrontendsForAssignedVolume(obs *authority.ObservationHost, volumeID s
 		if replicaID == "" {
 			continue
 		}
-		slot, ok := obs.Store().SlotFact(volumeID, replicaID)
+		slot, ok := slotOf(replicaID)
 		if !ok {
 			continue
 		}
 		for _, ft := range frontendTargetsToWire(slot.Frontends) {
+			ft.ReplicaId = replicaID // CSI selects only a primary-owned target (INV-AUTH-HOLDER-IDENTITY-001)
 			key := frontendTargetKey(ft)
 			if _, ok := seen[key]; ok {
 				continue
@@ -930,4 +949,28 @@ func (h *Host) ingestHeartbeatRecordingHealth(msg authority.HeartbeatMessage) er
 		})
 	}
 	return nil
+}
+
+// assignmentFact encodes one captured publication at the stream boundary.
+func (s *services) assignmentFact(info adapter.AssignmentInfo) *control.AssignmentFact {
+	fact := &control.AssignmentFact{
+		VolumeId:        info.VolumeID,
+		ReplicaId:       info.ReplicaID,
+		ServerId:        s.host.workspaceLineOwner(authority.PublishedLine{ReplicaID: info.ReplicaID, Epoch: info.Epoch, IssuedHost: info.ServerID, OwnerFromMove: info.OwnerFromMove}, info.VolumeID, info.ReplicaID, info.Epoch),
+		Epoch:           info.Epoch,
+		EndpointVersion: info.EndpointVersion,
+		DataAddr:        info.DataAddr,
+		CtrlAddr:        info.CtrlAddr,
+	}
+	// Populate the peer set from publisher LastPublished
+	// queries for every non-self replica slot in this volume's
+	// topology. peer_set_generation is derived
+	// from the authoritative line's (Epoch, EndpointVersion)
+	// packed into one uint64 as (epoch<<32 | ev). Assertion
+	// above guarantees each fits in uint32 so no aliasing.
+	// Monotonic across process lifetimes because Epoch/EV are
+	// durable authority facts preserved across master restart.
+	fact.Peers = s.collectPeers(info.VolumeID, info)
+	fact.PeerSetGeneration = (info.Epoch << 32) | info.EndpointVersion
+	return fact
 }

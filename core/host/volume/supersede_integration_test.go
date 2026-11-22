@@ -62,10 +62,10 @@ func TestHost_RecordOtherLine_SameReplica_NotSuperseded(t *testing.T) {
 	proj := &mutableProjector{p: engine.ReplicaProjection{
 		Mode: engine.ModeHealthy, Epoch: 2, EndpointVersion: 2,
 	}}
-	h := &Host{cfg: Config{VolumeID: "v1", ReplicaID: "r1"}}
+	h := &Host{cfg: Config{ServerID: "node-a", VolumeID: "v1", ReplicaID: "r1"}}
 	h.view = NewAdapterProjectionView(proj, "v1", "r1", h)
 	h.recordOtherLine(&control.AssignmentFact{
-		VolumeId: "v1", ReplicaId: "r1", Epoch: 2, EndpointVersion: 2,
+		ServerId: "node-a", VolumeId: "v1", ReplicaId: "r1", Epoch: 2, EndpointVersion: 2,
 	})
 	if !h.view.Projection().Healthy {
 		t.Fatal("same-replica lastOther must not trigger supersede")
