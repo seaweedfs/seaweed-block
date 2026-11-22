@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"google.golang.org/protobuf/proto"
 )
 
 // INV-WS-SAME-HOST-CLEAN-MOVE-001: retirement belongs to an epoch, so the
@@ -46,9 +47,9 @@ func TestWorkspaceRPCSameHostCleanMoveKeepsRepreparedBinding(t *testing.T) {
 	if _, err := ws.RegisterWorkspaceBinding(ctx, b); err != nil {
 		t.Fatal("same-host re-prepare refused", err)
 	}
-	forced := *req
+	forced := proto.Clone(req).(*control.WorkspaceMove)
 	forced.Kind, forced.Force = "forced", true
-	if _, err := ws.MoveWorkspace(ctx, &forced); err == nil {
+	if _, err := ws.MoveWorkspace(ctx, forced); err == nil {
 		t.Fatal("same-host forced move accepted over RPC")
 	}
 	if _, err := ws.MoveWorkspace(ctx, req); err != nil {
