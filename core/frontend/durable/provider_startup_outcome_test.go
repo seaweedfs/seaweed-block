@@ -2,6 +2,7 @@ package durable_test
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -54,5 +55,49 @@ func TestChunkAssignmentTimeoutExposesCurrentRecoveryOutcome(t *testing.T) {
 	}
 	if _, ok := outcomes.ChunkStartupOutcome("v1"); ok {
 		t.Fatal("closed provider retained an actionable outcome")
+	}
+}
+
+func TestChunkStartupSealedAssignmentStaysForReplay(t *testing.T) {
+	logs := &lockedLog{}
+	captureWriteLogs(t, logs)
+	ctx := hangGuard(t)
+	remote := storage.NewMemChunkRemote()
+	root := t.TempDir()
+	first := chunkProvider(t, root, remote, v1View(), 0)
+	openRecovered(t, first)
+	sealed, _, err := first.DetachVolumePlain(ctx, "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	view := v1View()
+	assigned := view.Projection()
+	waiting := assigned
+	waiting.Epoch = 0
+	waiting.Healthy = false
+	view.set(waiting)
+	second := chunkProvider(t, root, remote, view, 0)
+	if _, err := second.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.RecoverVolume(ctx, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	view.set(assigned)
+	waitLog(t, logs, "sealed assignment, retained for replay")
+	if _, failed := second.ChunkStartupOutcome("v1"); failed {
+		t.Fatal("sealed assignment became a process retry")
+	}
+	replay, _, err := second.DetachVolumePlain(ctx, "v1")
+	if err != nil || !reflect.DeepEqual(replay.Head, sealed.Head) {
+		t.Fatalf("sealed replay changed: %+v %v", replay, err)
+	}
+	for _, status := range second.DurableStatuses() {
+		if status.Operational {
+			t.Fatal("sealed restart served")
+		}
 	}
 }
