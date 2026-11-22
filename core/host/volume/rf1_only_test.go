@@ -42,7 +42,7 @@ func TestRF1Only_RetainedReplicatedFactReplayedBeforeSelfFence(t *testing.T) {
 	h.replication = nil
 	h.BlockLocalReadiness("awaiting durable recovery")
 
-	h.applyFact(rf2PrimaryFact(3)) // stored for replay
+	h.applyFixtureFact(rf2PrimaryFact(3)) // stored for replay
 	h.ClearLocalReadinessBlock()
 	h.replicationMu.Lock()
 	h.setReplicationLocked(rv) // what SetReplicationVolume does, then it replays
@@ -63,7 +63,7 @@ func TestRF1Only_RetainedReplicatedFactReplayedBeforeSelfFence(t *testing.T) {
 	// A supporting-replica fact (another primary lists this replica) is refused too.
 	sup := rf2PrimaryFact(4)
 	sup.ReplicaId, sup.Peers[0].ReplicaId = "r2", "r1"
-	h.applyFact(sup)
+	h.applyFixtureFact(sup)
 	if r.callCount.Load() != 0 || a.callCount.Load() != 0 || len(ready) != 0 {
 		t.Fatal("supporting replica admitted on an RF1-only volume")
 	}
@@ -74,7 +74,7 @@ func TestRF1Only_RetainedReplicatedFactReplayedBeforeSelfFence(t *testing.T) {
 	// The master moves the volume to RF1: adopted, latch cleared, ready emitted.
 	rf1 := rf2PrimaryFact(5)
 	rf1.Peers = nil
-	h.applyFact(rf1)
+	h.applyFixtureFact(rf1)
 	if a.callCount.Load() != 1 || len(ready) != 1 {
 		t.Fatalf("RF1 primary not adopted: adopt=%d ready=%d", a.callCount.Load(), len(ready))
 	}
@@ -87,7 +87,7 @@ func TestRF1Only_RetainedReplicatedFactReplayedBeforeSelfFence(t *testing.T) {
 // and is adopted (today's behaviour for replicated volumes).
 func TestRF1Only_UnsetKeepsReplicatedAdoption(t *testing.T) {
 	h, a, r := newStubbedHost(t, "vol1", "r1", &orderingRecorder{})
-	h.applyFact(rf2PrimaryFact(3))
+	h.applyFixtureFact(rf2PrimaryFact(3))
 	if r.callCount.Load() != 1 || a.callCount.Load() != 1 {
 		t.Fatalf("replicated fact not applied: peers=%d adopt=%d", r.callCount.Load(), a.callCount.Load())
 	}
@@ -102,25 +102,25 @@ func TestRF1Only_UnsetKeepsReplicatedAdoption(t *testing.T) {
 // epoch or newer, once its role is admitted, clears it.
 func TestRF1Only_StaleRF1FactDoesNotClearANewerRefusal(t *testing.T) {
 	f := newRF1BackendHost(t)
-	f.h.applyFact(rf1Fact(2))
+	f.h.applyFixtureFact(rf1Fact(2))
 	if f.a.callCount.Load() != 1 {
 		t.Fatal("fixture: RF1@2 not adopted")
 	}
 	f.mustWrite(t, 2, 0xD2)
-	f.h.applyFact(rf2PrimaryFact(3))
+	f.h.applyFixtureFact(rf2PrimaryFact(3))
 	f.assertRefusedAt(t, 3)
-	f.h.applyFact(rf1Fact(2)) // stale replay below the refused epoch
+	f.h.applyFixtureFact(rf1Fact(2)) // stale replay below the refused epoch
 	f.assertRefusedAt(t, 3)
 	if f.a.callCount.Load() != 1 || f.r.callCount.Load() != 1 {
 		t.Fatalf("stale RF1@2 adopted or RF2 peers installed: adopt=%d peerSets=%d", f.a.callCount.Load(), f.r.callCount.Load())
 	}
 	f.fencer.fail.Store(true) // RF1@3 whose role fence fails: a failed attempt does not clear the refusal
-	f.h.applyFact(rf1Fact(3))
+	f.h.applyFixtureFact(rf1Fact(3))
 	if _, reason := f.h.RoleAdmissionFailure(); !strings.Contains(reason, "refuses a primary role") || f.a.callCount.Load() != 1 {
 		t.Fatalf("failed RF1@3 attempt cleared the refusal: %q adopt=%d", reason, f.a.callCount.Load())
 	}
 	f.fencer.fail.Store(false)
-	f.h.applyFact(rf1Fact(3))
+	f.h.applyFixtureFact(rf1Fact(3))
 	if failed, reason := f.h.RoleAdmissionFailure(); failed || f.a.callCount.Load() != 2 {
 		t.Fatalf("RF1@3 did not reconcile: %v %q adopt=%d", failed, reason, f.a.callCount.Load())
 	}
@@ -199,22 +199,22 @@ func (f *rf1Fixture) assertRefusedAt(t *testing.T, epoch uint64) {
 // clear that newer refusal nor adopt. RF1@3 then admits and serves at epoch 3.
 func TestRF1Only_HeldRF1ReplayDoesNotClearANewerRefusal(t *testing.T) {
 	f := newRF1BackendHost(t)
-	f.h.applyFact(rf1Fact(2))
+	f.h.applyFixtureFact(rf1Fact(2))
 	f.mustWrite(t, 2, 0xA2)
 	fired := false
 	f.h.rf1BeforeAdmit = func() {
 		if !fired {
 			fired = true
-			f.h.applyFact(rf2PrimaryFact(3))
+			f.h.applyFixtureFact(rf2PrimaryFact(3))
 		}
 	}
-	f.h.applyFact(rf1Fact(2))
+	f.h.applyFixtureFact(rf1Fact(2))
 	f.h.rf1BeforeAdmit = nil
 	if !fired || f.a.callCount.Load() != 1 {
 		t.Fatalf("fixture fired=%v; held RF1@2 adopted=%d", fired, f.a.callCount.Load())
 	}
 	f.assertRefusedAt(t, 3)
-	f.h.applyFact(rf1Fact(3))
+	f.h.applyFixtureFact(rf1Fact(3))
 	if failed, reason := f.h.RoleAdmissionFailure(); failed || f.a.callCount.Load() != 2 || f.a.lastInfo.Epoch != 3 {
 		t.Fatalf("current RF1@3 not admitted: %v %q adopt=%d", failed, reason, f.a.callCount.Load())
 	}
@@ -241,7 +241,7 @@ func (u *holdingUpdater) UpdateReplicaSet(gen uint64, targets []replication.Repl
 // replay then resumes. Bounded by timeouts.
 func TestRF1Only_ParallelHeldReplayAndNewerRefusal(t *testing.T) {
 	f := newRF1BackendHost(t)
-	f.h.applyFact(rf1Fact(2))
+	f.h.applyFixtureFact(rf1Fact(2))
 	f.mustWrite(t, 2, 0xB2)
 	u := &holdingUpdater{inner: f.r, entered: make(chan struct{}), release: make(chan struct{})}
 	u.armed.Store(true)
@@ -273,14 +273,14 @@ func TestRF1Only_ParallelHeldReplayAndNewerRefusal(t *testing.T) {
 		}
 	})
 	replayStarted = true
-	go func() { defer close(replay); f.h.applyFact(rf1Fact(2)) }()
+	go func() { defer close(replay); f.h.applyFixtureFact(rf1Fact(2)) }()
 	select {
 	case <-u.entered:
 	case <-time.After(5 * time.Second):
 		t.Fatal("replay worker did not reach the peer-set update")
 	}
 	streamStarted = true
-	go func() { defer close(stream); f.h.applyFact(rf2PrimaryFact(3)) }()
+	go func() { defer close(stream); f.h.applyFixtureFact(rf2PrimaryFact(3)) }()
 	select {
 	case <-stream:
 	case <-time.After(5 * time.Second):
@@ -296,7 +296,7 @@ func TestRF1Only_ParallelHeldReplayAndNewerRefusal(t *testing.T) {
 		t.Fatalf("parked RF1@2 adopted after the newer refusal: adopt=%d", f.a.callCount.Load())
 	}
 	f.assertRefusedAt(t, 3)
-	f.h.applyFact(rf1Fact(3))
+	f.h.applyFixtureFact(rf1Fact(3))
 	if failed, reason := f.h.RoleAdmissionFailure(); failed || f.a.callCount.Load() != 2 {
 		t.Fatalf("current RF1@3 not admitted: %v %q", failed, reason)
 	}
@@ -306,18 +306,18 @@ func TestRF1Only_ParallelHeldReplayAndNewerRefusal(t *testing.T) {
 // A stale RF2 below an admitted RF1 epoch does not re-latch the refusal.
 func TestRF1Only_StaleRF2AfterNewerRF1DoesNotRelatch(t *testing.T) {
 	f := newRF1BackendHost(t)
-	f.h.applyFact(rf1Fact(2))
-	f.h.applyFact(rf2PrimaryFact(3))
-	f.h.applyFact(rf1Fact(4))
+	f.h.applyFixtureFact(rf1Fact(2))
+	f.h.applyFixtureFact(rf2PrimaryFact(3))
+	f.h.applyFixtureFact(rf1Fact(4))
 	if failed, reason := f.h.RoleAdmissionFailure(); failed || f.a.callCount.Load() != 2 {
 		t.Fatalf("RF1@4 not admitted: %v %q adopt=%d", failed, reason, f.a.callCount.Load())
 	}
-	f.h.applyFact(rf2PrimaryFact(3)) // stale replay
+	f.h.applyFixtureFact(rf2PrimaryFact(3)) // stale replay
 	if failed, reason := f.h.RoleAdmissionFailure(); failed {
 		t.Fatalf("stale RF2@3 re-latched after RF1@4: %q", reason)
 	}
 	f.mustWrite(t, 4, 0xC4)
-	f.h.applyFact(rf2PrimaryFact(4)) // same epoch, peers added: refused
+	f.h.applyFixtureFact(rf2PrimaryFact(4)) // same epoch, peers added: refused
 	if failed, _ := f.h.RoleAdmissionFailure(); !failed {
 		t.Fatal("RF2 at the admitted epoch not refused")
 	}

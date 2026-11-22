@@ -59,7 +59,7 @@ func TestG1_FailedRoleAdmissionStopsAPreviouslyHealthyFrontend(t *testing.T) {
 	if err := h.SetSelfFence(fencer); err != nil {
 		t.Fatal(err)
 	}
-	h.applyFact(selfFact(2))
+	h.applyFixtureFact(selfFact(2))
 	if a.callCount.Load() != 1 {
 		t.Fatal("fixture: primary at epoch 2 not adopted")
 	}
@@ -74,7 +74,7 @@ func TestG1_FailedRoleAdmissionStopsAPreviouslyHealthyFrontend(t *testing.T) {
 	}
 
 	fencer.fail.Store(true)
-	h.applyFact(selfFact(3)) // the epoch advance whose floor persist fails
+	h.applyFixtureFact(selfFact(3)) // the epoch advance whose floor persist fails
 	if a.callCount.Load() != 1 {
 		t.Fatal("the epoch-3 role was adopted though its floor persist failed")
 	}
@@ -92,7 +92,7 @@ func TestG1_FailedRoleAdmissionStopsAPreviouslyHealthyFrontend(t *testing.T) {
 	}
 
 	fencer.fail.Store(false)
-	h.applyFact(selfFact(3)) // master's stream replay redelivers
+	h.applyFixtureFact(selfFact(3)) // master's stream replay redelivers
 	if failed, _ := h.RoleAdmissionFailure(); failed {
 		t.Fatal("latch not cleared by a successful redelivery")
 	}
@@ -115,7 +115,7 @@ func TestG1_SupportingAdmissionFailsClosed(t *testing.T) {
 	if err := h.SetSelfFence(fencer); err != nil {
 		t.Fatal(err)
 	}
-	h.applyFact(&control.AssignmentFact{
+	h.applyFixtureFact(&control.AssignmentFact{
 		VolumeId: "vol1", ReplicaId: "rA", Epoch: 2, EndpointVersion: 1,
 		DataAddr: "127.0.0.1:3", CtrlAddr: "127.0.0.1:4", PeerSetGeneration: 2,
 		Peers: []*control.ReplicaDescriptor{{ReplicaId: "rB", Epoch: 2, EndpointVersion: 1, DataAddr: "127.0.0.1:5", CtrlAddr: "127.0.0.1:6"}},
@@ -132,7 +132,7 @@ func TestG1_SupportingAdmissionFailsClosed(t *testing.T) {
 // failure is returned (the binary then does not serve) and latched.
 func TestG1_SetSelfFenceReturnsTheReplayError(t *testing.T) {
 	h, _, _ := newStubbedHost(t, "vol1", "rB", &orderingRecorder{})
-	h.applyFact(selfFact(2)) // no listener yet: the role is recorded
+	h.applyFixtureFact(selfFact(2)) // no listener yet: the role is recorded
 	fencer := &switchFencer{}
 	fencer.fail.Store(true)
 	if err := h.SetSelfFence(fencer); err == nil {
@@ -175,7 +175,7 @@ func TestG1_StaleReplayDoesNotClearANewerAdmissionFailure(t *testing.T) {
 	if err := h.SetSelfFence(fencer); err != nil {
 		t.Fatal(err)
 	}
-	h.applyFact(selfFact(2))
+	h.applyFixtureFact(selfFact(2))
 	store := memorywal.NewStore(8, 4096)
 	t.Cleanup(func() { _ = store.Close() })
 	backend := durable.NewStorageBackend(store, h.view, frontend.Identity{VolumeID: "vol1", ReplicaID: "rB", Epoch: 2, EndpointVersion: 1})
@@ -184,8 +184,8 @@ func TestG1_StaleReplayDoesNotClearANewerAdmissionFailure(t *testing.T) {
 	if _, err := backend.Write(ctx, 0, []byte("baseline")); err != nil {
 		t.Fatal(err)
 	}
-	h.applyFact(selfFact(3)) // fails: latched
-	h.applyFact(selfFact(2)) // stale replay; its role call would succeed
+	h.applyFixtureFact(selfFact(3)) // fails: latched
+	h.applyFixtureFact(selfFact(2)) // stale replay; its role call would succeed
 	if failed, _ := h.RoleAdmissionFailure(); !failed {
 		t.Fatal("a stale epoch-2 replay cleared the unresolved epoch-3 admission failure")
 	}
@@ -193,7 +193,7 @@ func TestG1_StaleReplayDoesNotClearANewerAdmissionFailure(t *testing.T) {
 		t.Fatalf("stale replay reopened writes: %v", err)
 	}
 	fencer.failAt.Store(0)
-	h.applyFact(selfFact(3)) // the current epoch, now durable
+	h.applyFixtureFact(selfFact(3)) // the current epoch, now durable
 	if failed, _ := h.RoleAdmissionFailure(); failed {
 		t.Fatal("the current epoch's success did not clear the latch")
 	}
@@ -207,10 +207,10 @@ func TestG1_StaleSupportingReplayDoesNotClearTheLatch(t *testing.T) {
 	if err := h.SetSelfFence(fencer); err != nil {
 		t.Fatal(err)
 	}
-	h.applyFact(supportingFact(2))
-	h.applyFact(supportingFact(3)) // fails
+	h.applyFixtureFact(supportingFact(2))
+	h.applyFixtureFact(supportingFact(3)) // fails
 	calls := a.callCount.Load()
-	h.applyFact(supportingFact(2)) // stale
+	h.applyFixtureFact(supportingFact(2)) // stale
 	if failed, _ := h.RoleAdmissionFailure(); !failed {
 		t.Fatal("a stale supporting replay cleared the latch")
 	}
@@ -218,7 +218,7 @@ func TestG1_StaleSupportingReplayDoesNotClearTheLatch(t *testing.T) {
 		t.Fatal("a stale supporting replay was admitted")
 	}
 	fencer.failAt.Store(0)
-	h.applyFact(supportingFact(3))
+	h.applyFixtureFact(supportingFact(3))
 	if failed, _ := h.RoleAdmissionFailure(); failed {
 		t.Fatal("the current supporting admission did not clear the latch")
 	}
@@ -234,8 +234,8 @@ func TestG1_InstallReplayTargetsTheCurrentRole(t *testing.T) {
 	if err := h.SetSelfFence(failing); err != nil {
 		t.Fatal(err)
 	}
-	h.applyFact(selfFact(3)) // fails
-	h.applyFact(selfFact(2)) // stale
+	h.applyFixtureFact(selfFact(3)) // fails
+	h.applyFixtureFact(selfFact(2)) // stale
 	recorder := &recordingFencer{}
 	if err := h.SetSelfFence(recorder); err != nil {
 		t.Fatalf("install replay: %v", err)

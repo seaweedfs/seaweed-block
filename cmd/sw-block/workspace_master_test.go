@@ -64,7 +64,7 @@ func seedForcedVolume(t *testing.T, h *master.Host) {
 			t.Fatal("no authority line for vol-f")
 		}
 	}
-	if _, err := ws.RenewWorkspaceLease(ctx, &control.WorkspaceIdentity{VolumeId: "vol-f", ReplicaId: "r1", Epoch: 1}); err != nil {
+	if _, err := ws.RenewWorkspaceLease(ctx, &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "vol-f", ReplicaId: "r1", Epoch: 1}); err != nil {
 		t.Fatal(err)
 	}
 }

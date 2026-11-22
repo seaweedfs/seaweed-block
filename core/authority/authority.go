@@ -275,7 +275,7 @@ func (p *Publisher) reloadFromStore() {
 			p.workspace[rec.VolumeID] = cloneWorkspace(rec.Workspace)
 		}
 		key := subKey{volumeID: rec.VolumeID, replicaID: rec.ReplicaID}
-		p.state[key] = assignmentState{
+		loaded := assignmentState{
 			info: adapter.AssignmentInfo{
 				VolumeID:        rec.VolumeID,
 				ReplicaID:       rec.ReplicaID,
@@ -286,6 +286,8 @@ func (p *Publisher) reloadFromStore() {
 			},
 			present: true,
 		}
+		p.captureAssignmentOwner(&loaded.info, rec.Workspace)
+		p.state[key] = loaded
 		if rec.WriteSeq > p.writeSeqByVolume[rec.VolumeID] {
 			p.writeSeqByVolume[rec.VolumeID] = rec.WriteSeq
 		}
@@ -586,6 +588,8 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 	// sequenced after Put: on Put failure we simply return without
 	// touching p.state / p.writeSeqByVolume, so no rollback is
 	// needed. Subscribers never see a fact that isn't durable yet.
+	p.captureAssignmentOwner(&next, issuedWorkspace)
+
 	if p.store != nil {
 		// Compute the per-volume WriteSeq for this mint. Starts
 		// at the highest previously-persisted value for the

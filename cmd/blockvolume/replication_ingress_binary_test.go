@@ -166,7 +166,7 @@ func TestBinaryReplicationIngressFollowsAssignedSlots(t *testing.T) {
 			ingressRefused(t, data)
 			ingressRefused(t, dual)
 			fact := func(e uint64, peers []*control.ReplicaDescriptor) *control.AssignmentFact {
-				return &control.AssignmentFact{VolumeId: "v1", ReplicaId: "r1", Epoch: e, EndpointVersion: e, DataAddr: data, CtrlAddr: ctrl, PeerSetGeneration: e, Peers: peers}
+				return &control.AssignmentFact{ServerId: "s1", VolumeId: "v1", ReplicaId: "r1", Epoch: e, EndpointVersion: e, DataAddr: data, CtrlAddr: ctrl, PeerSetGeneration: e, Peers: peers}
 			}
 			m.facts <- fact(1, nil)
 			ingressWait(t, "RF1 assignment not applied", func() bool { return epoch(1) })

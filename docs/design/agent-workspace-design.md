@@ -354,14 +354,14 @@ Lease states:
 ```mermaid
 stateDiagram-v2
   state "Lease (blockmaster)" as L {
-    [*] --> Granted: first Renew after bind
+    [*] --> Granted: first Renew after bind (registered server id, from its registered host)
     [*] --> Granted: move issue starts the new holder's lease
-    Granted --> Granted: Renew before horizon and deadline (from memory)
+    Granted --> Granted: Renew before horizon and deadline (from memory; registered server id, from its registered host)
     Granted --> Revoking: BeginWorkspaceRevocation
-    Revoking --> Acked: host acks detached HEAD gen while the lease is valid
+    Revoking --> Acked: host acks detached HEAD gen while the lease is valid (from its registered host)
     Acked --> Moved: CLEAN move, including same host, new epoch
     Granted --> Expired: horizon or deadline passes
-    Expired --> Granted: unchanged holder, no move/revocation, MAX expiry + skew passed; durable re-grant
+    Expired --> Granted: unchanged holder from its registered host, no move/revocation, MAX expiry + skew passed; durable re-grant
     Expired --> Moved: FORCED move after expiry + skew bound, then HEAD read (an older-epoch HEAD is accepted)
   }
 ```
