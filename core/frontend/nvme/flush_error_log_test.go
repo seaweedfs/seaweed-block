@@ -3,11 +3,12 @@ package nvme
 import (
 	"bytes"
 	"context"
-	"errors"
+	"fmt"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/testback"
 	"log"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -20,7 +21,7 @@ func (b *flushErrorBackend) Sync(context.Context) error { return b.syncErr }
 
 func TestSessionFlushLogsBackendReason(t *testing.T) {
 	var logs bytes.Buffer
-	b := &flushErrorBackend{Backend: testback.NewRecordingBackend(frontend.Identity{VolumeID: "v1"}), syncErr: errors.New("injected Sync failure: extent EIO")}
+	b := &flushErrorBackend{Backend: testback.NewRecordingBackend(frontend.Identity{VolumeID: "v1"}), syncErr: fmt.Errorf("injected Sync failure: extent EIO: %w", syscall.EIO)}
 	s := &Session{handler: NewIOHandler(HandlerConfig{Backend: b}), logger: log.New(&logs, "", 0), qid: 7, respCh: make(chan *response, 1), done: make(chan struct{})}
 	req := &Request{}
 	req.capsule.OpCode = ioFlush

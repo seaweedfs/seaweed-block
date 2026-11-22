@@ -3,6 +3,12 @@ package frontend
 import (
 	"context"
 	"errors"
+	"io"
+	"log"
+	"sync/atomic"
+	"syscall"
+
+	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 // BackendErrorClass is independent of transport status (INV-FE-ERROR-RETRY-CLASS-001).
@@ -16,50 +22,48 @@ const (
 	BackendErrorClosed
 )
 
-// ClassifyBackendError implements INV-FE-ERROR-RETRY-CLASS-001.
-// Call only for a non-nil backend error. A pure expired command deadline is
-// transient; a joined physical cause keeps its permanent classification.
+var unclassifiedBackendErrors atomic.Uint64
+
+// UnclassifiedBackendErrorCount reports completions using the unknown-cause
+// fallback in V1-SPEC r2.42. It is cumulative for this process.
+func UnclassifiedBackendErrorCount() uint64 { return unclassifiedBackendErrors.Load() }
+
+// ClassifyBackendError implements INV-FE-ERROR-RETRY-CLASS-001 and V1-SPEC r2.42.
+// Call only for a non-nil backend error. Known permanent causes win across the
+// entire wrapped/joined tree; unknown causes are counted and retryable.
 func ClassifyBackendError(ctx context.Context, err error) BackendErrorClass {
-	// M1 I/O error completion: every cause must be transient before any
-	// sentinel can select retry status (INV-FE-ERROR-RETRY-CLASS-001).
-	if !backendCausesKnown(ctx, err) {
+	// M1 I/O error completion: inspect permanent causes before any retry marker.
+	if hasPermanentBackendCause(err) {
 		return BackendErrorPermanent
 	}
 	switch {
-	case IsWriteDeadline(ctx, err):
-		return BackendErrorNotReady
-	case errors.Is(err, ErrBackendBusy):
+	case errors.Is(err, ErrBackendBusy), errors.Is(err, storage.ErrWALPressureTimeout),
+		errors.Is(err, storage.ErrChunkHydrationPending),
+		errors.Is(err, ErrReplicationAckUnavailable) && errors.Is(err, context.DeadlineExceeded):
 		return BackendErrorBusy
 	case errors.Is(err, ErrStalePrimary):
 		return BackendErrorStale
 	case errors.Is(err, ErrBackendClosed):
 		return BackendErrorClosed
-	case errors.Is(err, ErrNotReady):
+	case errors.Is(err, ErrNotReady), IsWriteDeadline(ctx, err):
 		return BackendErrorNotReady
 	default:
-		return BackendErrorPermanent
+		// M1 unknown completion: V1-SPEC r2.42 bounds retry at the initiator.
+		count := unclassifiedBackendErrors.Add(1)
+		log.Printf("frontend: unclassified backend error count=%d: %v", count, err)
+		return BackendErrorNotReady
 	}
 }
 
-// Inspect children before matching sentinels: errors.Is on a joined error can
-// match one transient branch while another branch carries a permanent fault.
-func backendCausesKnown(ctx context.Context, err error) bool {
-	if joined, ok := err.(interface{ Unwrap() []error }); ok {
-		causes := joined.Unwrap()
-		if len(causes) == 0 {
-			return false
+func hasPermanentBackendCause(err error) bool {
+	// errors.Is traverses every child of joins, so neither an outer transient
+	// wrapper nor a sibling deadline can hide a typed storage/media failure.
+	for _, cause := range []error{syscall.EIO, syscall.ENOSPC, syscall.EROFS,
+		io.ErrUnexpectedEOF, storage.ErrWALIntegrityFault, storage.ErrFsyncFailed,
+		storage.ErrAppendFailed, storage.ErrMapInvalid} {
+		if errors.Is(err, cause) {
+			return true
 		}
-		for _, cause := range causes {
-			if !backendCausesKnown(ctx, cause) {
-				return false
-			}
-		}
-		return true
 	}
-	if cause := errors.Unwrap(err); cause != nil {
-		return backendCausesKnown(ctx, cause)
-	}
-	return errors.Is(err, ErrBackendBusy) || errors.Is(err, ErrStalePrimary) ||
-		errors.Is(err, ErrBackendClosed) || errors.Is(err, ErrNotReady) ||
-		(ctx.Err() == context.DeadlineExceeded && err == context.DeadlineExceeded)
+	return false
 }

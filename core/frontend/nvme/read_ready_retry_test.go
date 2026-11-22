@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"syscall"
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
@@ -27,7 +28,7 @@ func TestSessionReadNotReadyIsRetryable(t *testing.T) {
 		{"attach-pending", fmt.Errorf("awaiting HEAD attach: %w", frontend.ErrNotReady), SCTGeneric, SCNamespaceNotReady, false},
 		{"not-ready-closed", errors.Join(frontend.ErrNotReady, frontend.ErrBackendClosed), SCTPathRelated, SCPathAsymAccessInaccessible, true},
 		{"not-ready-stale", errors.Join(frontend.ErrNotReady, frontend.ErrStalePrimary), SCTPathRelated, SCPathAsymAccessTransition, true},
-		{"physical-fault", errors.New("physical read failure"), SCTGeneric, SCInternalError, true},
+		{"physical-fault", syscall.EIO, SCTGeneric, SCInternalError, true},
 		{"closed", frontend.ErrBackendClosed, SCTPathRelated, SCPathAsymAccessInaccessible, true},
 		{"stale", frontend.ErrStalePrimary, SCTPathRelated, SCPathAsymAccessTransition, true},
 	} {

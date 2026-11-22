@@ -5,6 +5,7 @@ import (
 	"errors"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/testback"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -26,12 +27,13 @@ func TestBackendRetryClassClearsWireDNR(t *testing.T) {
 		dnr  bool
 	}{
 		{"not-ready", frontend.ErrNotReady, false},
+		{"unknown", errors.New("unrecognized backend cause"), false},
 		{"busy", frontend.ErrBackendBusy, false},
-		{"permanent", errors.New("physical media fault"), true},
+		{"permanent", syscall.EIO, true},
 		{"deadline-busy", errors.Join(context.DeadlineExceeded, frontend.ErrBackendBusy), false},
 		{"deadline-not-ready", errors.Join(context.DeadlineExceeded, frontend.ErrNotReady), false},
-		{"deadline-busy-physical", errors.Join(context.DeadlineExceeded, frontend.ErrBackendBusy, errors.New("physical sync failure")), true},
-		{"deadline-not-ready-physical", errors.Join(context.DeadlineExceeded, frontend.ErrNotReady, errors.New("physical sync failure")), true},
+		{"deadline-busy-physical", errors.Join(context.DeadlineExceeded, frontend.ErrBackendBusy, syscall.EIO), true},
+		{"deadline-not-ready-physical", errors.Join(context.DeadlineExceeded, frontend.ErrNotReady, syscall.EIO), true},
 	} {
 		for _, op := range []uint8{ioRead, ioWrite, ioFlush} {
 			t.Run(tc.name+string(rune('0'+op)), func(t *testing.T) {

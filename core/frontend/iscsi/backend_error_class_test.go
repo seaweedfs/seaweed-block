@@ -1,16 +1,23 @@
 package iscsi_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/frontend/iscsi"
 	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
 	"github.com/seaweedfs/seaweed-block/core/frontend/testback"
+	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 type classifiedErrorBackend struct {
@@ -31,21 +38,37 @@ func TestBackendErrorClassesAcrossFrontends(t *testing.T) {
 		status, key, asc, ascq, sct, sc uint8
 		deadline                        bool
 	}{
+		{name: "wal-pressure", err: fmt.Errorf("%w: %w", frontend.ErrBackendBusy, storage.ErrWALPressureTimeout), status: 0x08, sct: 0, sc: 0x82},
+		{name: "hydration-pending", err: fmt.Errorf("%w: %w", frontend.ErrBackendBusy, storage.ErrChunkHydrationPending), status: 0x08, sct: 0, sc: 0x82},
+		{name: "observer-deadline", err: fmt.Errorf("%w: %w: %w", frontend.ErrBackendBusy, durable.ErrReplicationAckUnavailable, context.DeadlineExceeded), status: 0x08, sct: 0, sc: 0x82, deadline: true},
+		{name: "unknown", err: errors.New("unrecognized backend cause"), status: 0x02, key: 0x02, asc: 0x04, ascq: 0x01, sct: 0, sc: 0x82},
+		{name: "pressure-without-busy-marker", err: storage.ErrWALPressureTimeout, status: 0x08, sct: 0, sc: 0x82},
+		{name: "hydration-without-busy-marker", err: storage.ErrChunkHydrationPending, status: 0x08, sct: 0, sc: 0x82},
+		{name: "observer-deadline-without-busy-marker", err: errors.Join(durable.ErrReplicationAckUnavailable, context.DeadlineExceeded), status: 0x08, sct: 0, sc: 0x82, deadline: true},
+		{name: "unknown-with-busy", err: errors.Join(errors.New("unrecognized backend cause"), frontend.ErrBackendBusy), status: 0x08, sct: 0, sc: 0x82},
+		{name: "unknown-with-physical", err: errors.Join(errors.New("unrecognized backend cause"), syscall.EIO), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6},
+		{name: "fsync-fault", err: errors.Join(frontend.ErrBackendBusy, storage.ErrFsyncFailed), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6},
+		{name: "append-fault", err: errors.Join(frontend.ErrBackendBusy, storage.ErrAppendFailed), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6},
+		{name: "integrity-fault", err: errors.Join(frontend.ErrBackendBusy, storage.ErrWALIntegrityFault), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6},
+		{name: "invalid-map", err: errors.Join(frontend.ErrBackendBusy, storage.ErrMapInvalid), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6},
+		{name: "no-space", err: errors.Join(frontend.ErrBackendBusy, syscall.ENOSPC), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6},
+		{name: "read-only", err: errors.Join(frontend.ErrBackendBusy, syscall.EROFS), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6},
+		{name: "truncated-io", err: errors.Join(frontend.ErrBackendBusy, io.ErrUnexpectedEOF), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6},
 		{name: "not-ready", err: frontend.ErrNotReady, status: 0x02, key: 0x02, asc: 0x04, ascq: 0x01, sct: 0, sc: 0x82},
 		{name: "busy", err: frontend.ErrBackendBusy, status: 0x08, sct: 0, sc: 0x82},
 		{name: "stale", err: frontend.ErrStalePrimary, status: 0x02, key: 0x02, asc: 0x04, ascq: 0x0a, sct: 3, sc: 3},
 		{name: "closed", err: frontend.ErrBackendClosed, status: 0x02, key: 0x02, asc: 0x04, ascq: 0x03, sct: 3, sc: 2},
-		{name: "permanent", err: errors.New("media read failure"), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6},
+		{name: "permanent", err: syscall.EIO, status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6},
 		{name: "deadline", err: context.DeadlineExceeded, status: 0x02, key: 0x02, asc: 0x04, ascq: 0x01, sct: 0, sc: 0x82, deadline: true},
-		{name: "deadline-and-physical", err: errors.Join(context.DeadlineExceeded, errors.New("media sync failure")), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6, deadline: true},
+		{name: "deadline-and-physical", err: errors.Join(context.DeadlineExceeded, syscall.EIO), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6, deadline: true},
 		{name: "deadline-and-busy", err: errors.Join(context.DeadlineExceeded, frontend.ErrBackendBusy), status: 0x08, sct: 0, sc: 0x82, deadline: true},
-		{name: "deadline-busy-physical-last", err: errors.Join(context.DeadlineExceeded, frontend.ErrBackendBusy, errors.New("physical sync failure")), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6, deadline: true},
-		{name: "deadline-busy-physical-first", err: errors.Join(errors.New("physical sync failure"), frontend.ErrBackendBusy, context.DeadlineExceeded), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6, deadline: true},
-		{name: "deadline-busy-nested-physical", err: errors.Join(frontend.ErrBackendBusy, fmt.Errorf("durability: %w", errors.Join(context.DeadlineExceeded, errors.New("physical sync failure")))), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6, deadline: true},
+		{name: "deadline-busy-physical-last", err: errors.Join(context.DeadlineExceeded, frontend.ErrBackendBusy, syscall.EIO), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6, deadline: true},
+		{name: "deadline-busy-physical-first", err: errors.Join(syscall.EIO, frontend.ErrBackendBusy, context.DeadlineExceeded), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6, deadline: true},
+		{name: "deadline-busy-nested-physical", err: errors.Join(frontend.ErrBackendBusy, fmt.Errorf("durability: %w", errors.Join(context.DeadlineExceeded, syscall.EIO))), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6, deadline: true},
 		{name: "deadline-and-not-ready", err: errors.Join(context.DeadlineExceeded, frontend.ErrNotReady), status: 0x02, key: 0x02, asc: 0x04, ascq: 0x01, sct: 0, sc: 0x82, deadline: true},
-		{name: "deadline-not-ready-physical-last", err: errors.Join(context.DeadlineExceeded, frontend.ErrNotReady, errors.New("physical sync failure")), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6, deadline: true},
-		{name: "deadline-not-ready-physical-first", err: errors.Join(errors.New("physical sync failure"), frontend.ErrNotReady, context.DeadlineExceeded), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6, deadline: true},
-		{name: "deadline-not-ready-nested-physical", err: errors.Join(frontend.ErrNotReady, fmt.Errorf("durability: %w", errors.Join(context.DeadlineExceeded, errors.New("physical sync failure")))), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6, deadline: true},
+		{name: "deadline-not-ready-physical-last", err: errors.Join(context.DeadlineExceeded, frontend.ErrNotReady, syscall.EIO), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6, deadline: true},
+		{name: "deadline-not-ready-physical-first", err: errors.Join(syscall.EIO, frontend.ErrNotReady, context.DeadlineExceeded), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6, deadline: true},
+		{name: "deadline-not-ready-nested-physical", err: errors.Join(frontend.ErrNotReady, fmt.Errorf("durability: %w", errors.Join(context.DeadlineExceeded, syscall.EIO))), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6, deadline: true},
 	} {
 		for _, op := range []string{"read", "write", "sync"} {
 			t.Run(tc.name+"/"+op, func(t *testing.T) {
@@ -98,5 +121,27 @@ func TestBackendErrorClassesAcrossFrontends(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// INV-FE-ERROR-RETRY-CLASS-001 / V1-SPEC r2.42: unknown completions are
+// retryable on both protocols, counted once per completion, and diagnosable.
+func TestUnclassifiedBackendErrorIsRetryableAndCounted(t *testing.T) {
+	var logs bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previous) })
+	before := frontend.UnclassifiedBackendErrorCount()
+	b := classifiedErrorBackend{Backend: testback.NewRecordingBackend(frontend.Identity{VolumeID: "v"}), err: errors.New("unknown completion cause")}
+	scsi := iscsi.NewSCSIHandler(iscsi.HandlerConfig{Backend: b}).HandleCommand(context.Background(), [16]byte{iscsi.ScsiSyncCache10}, nil)
+	nv := nvme.NewIOHandler(nvme.HandlerConfig{Backend: b}).Handle(context.Background(), nvme.IOCommand{NSID: 1})
+	if scsi.Status != 0x02 || scsi.SenseKey != 0x02 || scsi.ASC != 0x04 || scsi.ASCQ != 0x01 || nv.SCT != 0 || nv.SC != 0x82 {
+		t.Fatalf("unknown completion not retryable: SCSI=%+v NVMe=%+v", scsi, nv)
+	}
+	if got := frontend.UnclassifiedBackendErrorCount() - before; got != 2 {
+		t.Fatalf("unclassified completions=%d want 2", got)
+	}
+	if strings.Count(logs.String(), "frontend: unclassified backend error count=") != 2 || !strings.Contains(logs.String(), "unknown completion cause") {
+		t.Fatalf("unclassified reason/count missing: %q", logs.String())
 	}
 }
