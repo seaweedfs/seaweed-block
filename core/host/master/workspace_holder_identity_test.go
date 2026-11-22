@@ -49,7 +49,7 @@ func TestWorkspaceLeaseRequiresHolderServerForGrantRenewAndRegrant(t *testing.T)
 				t.Errorf("%s accepted lease for server %q", stage, server)
 			}
 			after := h.Publisher().WorkspaceState("v")
-			if !reflect.DeepEqual(before.Lease, after.Lease) {
+			if !reflect.DeepEqual(before, after) {
 				t.Errorf("%s refused identity changed lease", stage)
 			}
 		}
