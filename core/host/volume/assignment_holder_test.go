@@ -138,7 +138,7 @@ func (f *holderFenceCounter) AdmitAsReplica(uint64) error { f.calls.Add(1); retu
 // INV-AUTH-HOLDER-IDENTITY-001 / M3: a recorded foreign fact supersedes
 // only an adopted own lineage and only when it is strictly newer.
 func TestAssignmentHolderIdentityForeignStreamOrdering(t *testing.T) {
-	for _, mode := range []string{"target-old-first", "served-newer-foreign", "served-old-replay", "never-assigned"} {
+	for _, mode := range []string{"target-old-first", "target-own-endpoint-first", "served-newer-foreign", "served-newer-endpoint-version", "served-old-replay", "never-assigned"} {
 		t.Run(mode, func(t *testing.T) {
 			h, err := New(Config{MasterAddr: "127.0.0.1:1", ServerID: "new-host", VolumeID: "v1", ReplicaID: "r1", DataAddr: "127.0.0.1:19303", CtrlAddr: "127.0.0.1:19304", EnableT1Readiness: true})
 			if err != nil {
@@ -173,6 +173,18 @@ func TestAssignmentHolderIdentityForeignStreamOrdering(t *testing.T) {
 				h.ClearLocalReadinessBlock()
 				h.replayLocalReadinessFactIfReady()
 				waitHealthy()
+			case "target-own-endpoint-first":
+				h.BlockLocalReadiness("awaiting durable recovery")
+				h.applyFact(own)
+				mismatch := holderAssignment(t, "new-host")
+				mismatch.DataAddr = "127.0.0.1:9991"
+				h.applyFact(mismatch)
+				if fencer.calls.Load() != 0 {
+					t.Fatal("early endpoint refusal fenced unassigned target")
+				}
+				h.ClearLocalReadinessBlock()
+				h.replayLocalReadinessFactIfReady()
+				waitHealthy()
 			case "never-assigned":
 				h.applyFact(foreign)
 				foreign.Epoch = 2
@@ -187,8 +199,12 @@ func TestAssignmentHolderIdentityForeignStreamOrdering(t *testing.T) {
 				if mode == "served-newer-foreign" {
 					foreign.Epoch = 3
 				}
+				if mode == "served-newer-endpoint-version" {
+					foreign.Epoch = 2
+					foreign.EndpointVersion = 2
+				}
 				h.applyFact(foreign)
-				if mode == "served-newer-foreign" {
+				if mode == "served-newer-foreign" || mode == "served-newer-endpoint-version" {
 					if fencer.calls.Load() <= before || h.view.Projection().Healthy {
 						t.Fatal("served holder was not fenced by newer foreign line")
 					}
