@@ -38,8 +38,10 @@ type PlacementIntentStore struct {
 	mu                 sync.Mutex
 	dir                string
 	records            map[string]PlacementIntent
-	published          sync.Map     // committed immutable PlacementIntent values; renewal never takes mu
-	persistHookForTest func(string) // nil in production; crash injection at publication boundaries
+	published          sync.Map             // committed immutable PlacementIntent values; renewal never takes mu
+	persistHookForTest func(string)         // nil in production; crash injection at publication boundaries
+	fileSyncForTest    func(*os.File) error // nil uses the real file Sync
+	dirSyncForTest     func(string) error   // nil uses syncBindingParent
 }
 
 // OpenPlacementIntentStore opens or creates a placement intent store.
@@ -50,6 +52,11 @@ func OpenPlacementIntentStore(dir string) (*PlacementIntentStore, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("lifecycle: mkdir placement intent %q: %w", dir, err)
 	}
+	// INV-LIFECYCLE-STORE-DURABLE-001: persist a newly created store entry.
+	if err := syncBindingParent(filepath.Dir(dir)); err != nil {
+		return nil, fmt.Errorf("lifecycle: sync store parent: %w", err)
+	}
+
 	s := &PlacementIntentStore{
 		dir:     dir,
 		records: make(map[string]PlacementIntent),
@@ -195,7 +202,11 @@ func (s *PlacementIntentStore) putLocked(rec PlacementIntent) error {
 		_ = tmp.Close()
 		return fmt.Errorf("lifecycle: write placement intent temp %s: %w", rec.VolumeID, err)
 	}
-	if err := tmp.Sync(); err != nil {
+	fileSync := tmp.Sync
+	if s.fileSyncForTest != nil {
+		fileSync = func() error { return s.fileSyncForTest(tmp) }
+	}
+	if err := fileSync(); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("lifecycle: sync placement intent temp %s: %w", rec.VolumeID, err)
 	}
@@ -203,7 +214,6 @@ func (s *PlacementIntentStore) putLocked(rec PlacementIntent) error {
 		return fmt.Errorf("lifecycle: close placement intent temp %s: %w", rec.VolumeID, err)
 	}
 	// INV-LIFECYCLE-STORE-DURABLE-001: retain the old file until atomic replacement.
-
 	if s.persistHookForTest != nil {
 		s.persistHookForTest("before-rename")
 	}
@@ -213,7 +223,11 @@ func (s *PlacementIntentStore) putLocked(rec PlacementIntent) error {
 	if s.persistHookForTest != nil {
 		s.persistHookForTest("after-rename")
 	}
-	if err := syncBindingParent(s.dir); err != nil {
+	dirSync := syncBindingParent
+	if s.dirSyncForTest != nil {
+		dirSync = s.dirSyncForTest
+	}
+	if err := dirSync(s.dir); err != nil {
 		return fmt.Errorf("lifecycle: sync placement intent directory %s: %w", rec.VolumeID, err)
 	}
 	return nil

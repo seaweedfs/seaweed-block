@@ -67,8 +67,10 @@ type NodeInventoryStore struct {
 	mu                 sync.Mutex
 	dir                string
 	records            map[string]NodeRegistration
-	published          sync.Map     // committed NodeRegistration values; holder host checks never take mu (INV-WS-RENEW-NONBLOCKING-001)
-	persistHookForTest func(string) // nil in production; crash injection at publication boundaries
+	published          sync.Map             // committed NodeRegistration values; holder host checks never take mu (INV-WS-RENEW-NONBLOCKING-001)
+	persistHookForTest func(string)         // nil in production; crash injection at publication boundaries
+	fileSyncForTest    func(*os.File) error // nil uses the real file Sync
+	dirSyncForTest     func(string) error   // nil uses syncBindingParent
 }
 
 // OpenNodeInventoryStore opens or creates a node inventory store.
@@ -79,6 +81,11 @@ func OpenNodeInventoryStore(dir string) (*NodeInventoryStore, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("lifecycle: mkdir node inventory %q: %w", dir, err)
 	}
+	// INV-LIFECYCLE-STORE-DURABLE-001: persist a newly created store entry.
+	if err := syncBindingParent(filepath.Dir(dir)); err != nil {
+		return nil, fmt.Errorf("lifecycle: sync store parent: %w", err)
+	}
+
 	s := &NodeInventoryStore{
 		dir:     dir,
 		records: make(map[string]NodeRegistration),
@@ -217,7 +224,11 @@ func (s *NodeInventoryStore) putLocked(rec NodeRegistration) error {
 		_ = tmp.Close()
 		return fmt.Errorf("lifecycle: write node temp %s: %w", rec.ServerID, err)
 	}
-	if err := tmp.Sync(); err != nil {
+	fileSync := tmp.Sync
+	if s.fileSyncForTest != nil {
+		fileSync = func() error { return s.fileSyncForTest(tmp) }
+	}
+	if err := fileSync(); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("lifecycle: sync node temp %s: %w", rec.ServerID, err)
 	}
@@ -235,7 +246,11 @@ func (s *NodeInventoryStore) putLocked(rec NodeRegistration) error {
 	if s.persistHookForTest != nil {
 		s.persistHookForTest("after-rename")
 	}
-	if err := syncBindingParent(s.dir); err != nil {
+	dirSync := syncBindingParent
+	if s.dirSyncForTest != nil {
+		dirSync = s.dirSyncForTest
+	}
+	if err := dirSync(s.dir); err != nil {
 		return fmt.Errorf("lifecycle: sync node directory %s: %w", rec.ServerID, err)
 	}
 	return nil

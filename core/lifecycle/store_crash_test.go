@@ -24,10 +24,30 @@ type recordCrashFixture struct {
 	old, next any
 	put       func(bool) error
 	get       func() (any, bool)
+	setSync   func(func(*os.File) error, func(string) error)
 }
 
 func openRecordCrashFixture(t *testing.T, kind, dir string, hook func(string)) recordCrashFixture {
 	t.Helper()
+	if kind == "node" {
+		s, err := OpenNodeInventoryStore(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.persistHookForTest = hook
+		return recordCrashFixture{old: crashNodeRegistration(false), next: crashNodeRegistration(true),
+			put: func(updated bool) error { _, err := s.RegisterNode(crashNodeRegistration(updated)); return err },
+			get: func() (any, bool) {
+				r, ok := s.GetNodeSnapshot("node-a")
+				memory, exists := s.GetNode("node-a")
+				if exists != ok || !reflect.DeepEqual(memory, r) {
+					t.Fatal("node records and snapshot diverged")
+				}
+				return r, ok
+			},
+			setSync: func(f func(*os.File) error, d func(string) error) { s.fileSyncForTest, s.dirSyncForTest = f, d },
+		}
+	}
 	if kind == "volume" {
 		s, err := OpenFileStore(dir)
 		if err != nil {
@@ -45,7 +65,15 @@ func openRecordCrashFixture(t *testing.T, kind, dir string, hook func(string)) r
 				}
 				_, err := s.CreateVolume(old.Spec)
 				return err
-			}, get: func() (any, bool) { r, ok := s.GetVolumeSnapshot("vol-a"); return r, ok },
+			}, get: func() (any, bool) {
+				r, ok := s.GetVolumeSnapshot("vol-a")
+				memory, exists := s.GetVolume("vol-a")
+				if exists != ok || !reflect.DeepEqual(memory, r) {
+					t.Fatal("volume records and snapshot diverged")
+				}
+				return r, ok
+			},
+			setSync: func(f func(*os.File) error, d func(string) error) { s.fileSyncForTest, s.dirSyncForTest = f, d },
 		}
 	}
 	if kind != "placement" {
@@ -67,7 +95,15 @@ func openRecordCrashFixture(t *testing.T, kind, dir string, hook func(string)) r
 			}
 			_, err := s.ApplyPlan(PlacementPlan{VolumeID: "vol-a", DesiredRF: 1, Candidates: []PlacementCandidate{{VolumeID: "vol-a", ServerID: "node-a", PoolID: r.Slots[0].PoolID, Source: PlacementSourceBlankPool}}})
 			return err
-		}, get: func() (any, bool) { r, ok := s.GetPlacementSnapshot("vol-a"); return r, ok },
+		}, get: func() (any, bool) {
+			r, ok := s.GetPlacementSnapshot("vol-a")
+			memory, exists := s.GetPlacement("vol-a")
+			if exists != ok || !reflect.DeepEqual(memory, r) {
+				t.Fatal("placement records and snapshot diverged")
+			}
+			return r, ok
+		},
+		setSync: func(f func(*os.File) error, d func(string) error) { s.fileSyncForTest, s.dirSyncForTest = f, d },
 	}
 }
 
@@ -133,4 +169,74 @@ func TestRecordStoreCrashChild(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Fatal("write returned without reaching the crash point")
+}
+
+// The injected operations delegate to real fsync, so omitting either call
+// loses its event or fails to surface the injected error.
+func TestLifecyclePutSyncOrderAndFailure(t *testing.T) {
+	for _, kind := range []string{"node", "volume", "placement"} {
+		for _, failure := range []string{"none", "file", "directory", "nil-hooks"} {
+			t.Run(kind+"/"+failure, func(t *testing.T) {
+				dir := t.TempDir()
+				f := openRecordCrashFixture(t, kind, dir, nil)
+				if err := f.put(false); err != nil {
+					t.Fatal(err)
+				}
+				fault := errors.New("injected sync failure")
+				var events []string
+				if failure != "nil-hooks" {
+					f.setSync(func(file *os.File) error {
+						events = append(events, "file")
+						if filepath.Ext(file.Name()) != ".tmp" {
+							t.Fatal("sync must target the candidate file")
+						}
+						if failure == "file" {
+							return fault
+						}
+						return file.Sync()
+					}, func(path string) error {
+						events = append(events, "directory")
+						if path != dir {
+							t.Fatal("sync must target the record directory")
+						}
+						if failure == "directory" {
+							return fault
+						}
+						return syncBindingParent(path)
+					})
+				}
+				err := f.put(true)
+				want := f.next
+				if failure == "file" || failure == "directory" {
+					if !errors.Is(err, fault) {
+						t.Fatalf("sync failure hidden: %v", err)
+					}
+					want = f.old
+				} else if err != nil {
+					t.Fatal(err)
+				}
+				if got, ok := f.get(); !ok || !reflect.DeepEqual(got, want) {
+					t.Fatal("memory published before successful sync")
+				}
+				wantEvents := []string{"file", "directory"}
+				if failure == "file" {
+					wantEvents = []string{"file"}
+				}
+				if failure == "nil-hooks" {
+					wantEvents = nil
+				}
+				if !reflect.DeepEqual(events, wantEvents) {
+					t.Fatalf("sync events %v want %v", events, wantEvents)
+				}
+				reopened := openRecordCrashFixture(t, kind, dir, nil)
+				diskWant := f.next
+				if failure == "file" {
+					diskWant = f.old
+				}
+				if got, ok := reopened.get(); !ok || !reflect.DeepEqual(got, diskWant) {
+					t.Fatal("wrong durable record after sync outcome")
+				}
+			})
+		}
+	}
 }

@@ -58,7 +58,9 @@ type FileStore struct {
 	// snap mirrors records as an immutable copy, republished at every change
 	// of records, for lock-free renewal-path reads.
 	snap               atomic.Pointer[map[string]VolumeRecord]
-	persistHookForTest func(string) // nil in production; crash injection at publication boundaries
+	persistHookForTest func(string)         // nil in production; crash injection at publication boundaries
+	fileSyncForTest    func(*os.File) error // nil uses the real file Sync
+	dirSyncForTest     func(string) error   // nil uses syncBindingParent
 }
 
 // publishLocked republishes the immutable snapshot of records. Caller holds
@@ -91,6 +93,11 @@ func OpenFileStore(dir string) (*FileStore, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("lifecycle: mkdir %q: %w", dir, err)
 	}
+	// INV-LIFECYCLE-STORE-DURABLE-001: persist a newly created store entry.
+	if err := syncBindingParent(filepath.Dir(dir)); err != nil {
+		return nil, fmt.Errorf("lifecycle: sync store parent: %w", err)
+	}
+
 	s := &FileStore{
 		dir:     dir,
 		records: make(map[string]VolumeRecord),
@@ -303,7 +310,11 @@ func (s *FileStore) putLocked(rec VolumeRecord) error {
 		_ = tmp.Close()
 		return fmt.Errorf("lifecycle: write temp %s: %w", rec.Spec.VolumeID, err)
 	}
-	if err := tmp.Sync(); err != nil {
+	fileSync := tmp.Sync
+	if s.fileSyncForTest != nil {
+		fileSync = func() error { return s.fileSyncForTest(tmp) }
+	}
+	if err := fileSync(); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("lifecycle: sync record temp %s: %w", rec.Spec.VolumeID, err)
 	}
@@ -311,7 +322,6 @@ func (s *FileStore) putLocked(rec VolumeRecord) error {
 		return fmt.Errorf("lifecycle: close temp %s: %w", rec.Spec.VolumeID, err)
 	}
 	// INV-LIFECYCLE-STORE-DURABLE-001: retain the old file until atomic replacement.
-
 	if s.persistHookForTest != nil {
 		s.persistHookForTest("before-rename")
 	}
@@ -321,7 +331,11 @@ func (s *FileStore) putLocked(rec VolumeRecord) error {
 	if s.persistHookForTest != nil {
 		s.persistHookForTest("after-rename")
 	}
-	if err := syncBindingParent(s.dir); err != nil {
+	dirSync := syncBindingParent
+	if s.dirSyncForTest != nil {
+		dirSync = s.dirSyncForTest
+	}
+	if err := dirSync(s.dir); err != nil {
 		return fmt.Errorf("lifecycle: sync record directory %s: %w", rec.Spec.VolumeID, err)
 	}
 	return nil
