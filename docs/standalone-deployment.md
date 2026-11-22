@@ -79,6 +79,16 @@ The binaries take command-line flags. The `SWB_*` variables are read only by
 the example units, which turn them into flags. blockvolume itself reads only
 `SW_BLOCK_ISCSI_CHAP_USERNAME` and `SW_BLOCK_ISCSI_CHAP_SECRET`.
 
+Both blockvolume units restart failed processes after 5 seconds, except exit 78
+(superseded). Exit 75 retries through the ordinary lease and HEAD-claim gates.
+`StartLimitIntervalSec=600` and `StartLimitBurst=10` in `[Unit]` allow at most
+10 starts in a 10-minute window; another start in that window is refused and
+the unit enters `failed` (`start-limit-hit`). This bounds retries on a host
+that no longer holds the volume. After correcting the assignment or disabling
+the obsolete unit, an operator can use `systemctl reset-failed <unit>` and
+`systemctl start <unit>` to resume attempts. An ACKed planned stop exits 0
+and is not automatically restarted.
+
 ## Required setup: make the volume known to blockmaster
 
 blockmaster gives a blockvolume an assignment only for a volume and replica
