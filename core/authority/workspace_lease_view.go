@@ -314,7 +314,11 @@ func (p *Publisher) firstWorkspaceGrant(ctx context.Context, volume, holder stri
 // reusing the forced-move barrier so the old process's validity is past.
 // The live renewal path releases leaseMu before entering this writer.
 func (p *Publisher) regrantWorkspaceLease(ctx context.Context, volume, holder string, epoch uint64) (WorkspaceLease, error) {
-	p.mu.Lock()
+	// INV-WS-RENEW-NONBLOCKING-001: a held writer refuses this attempt;
+	// a returning process can retry after that writer has settled.
+	if !p.mu.TryLock() {
+		return WorkspaceLease{}, fmt.Errorf("workspace lease: authority writer busy; retry")
+	}
 	defer p.mu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return WorkspaceLease{}, err

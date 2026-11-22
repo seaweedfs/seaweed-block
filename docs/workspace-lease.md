@@ -87,6 +87,8 @@ so they do not add durable re-grant writes while that grant is live.
 The authority record must still name this holder and epoch. A pending move,
 revocation/ACK or uncertain store prevents a usable re-grant. Re-grant and
 forced issue serialize; whichever commits first makes the other refuse.
+If an authority writer holds the lock, this renewal attempt refuses
+immediately; a returning process may retry after the writer settles.
 An already fenced guard never reopens: start a new process, which claims a
 new HEAD generation before serving and retains its local WAL. Its first cut
 covers those acknowledged bytes. If the local root is absent, recovery
