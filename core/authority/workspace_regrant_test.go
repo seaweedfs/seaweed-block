@@ -227,3 +227,32 @@ func TestWorkspaceLeaseRegrantWaitsForFullSkew(t *testing.T) {
 		t.Fatalf("safe unchanged owner cannot return: grant=%+v writes=%d err=%v", got, writes, err)
 	}
 }
+
+func TestWorkspaceLeaseRegrantRetainsPersistedSkewAfterRestart(t *testing.T) {
+	disk, _ := newTempStore(t)
+	clock := newTestClock()
+	first := newLeasePublisher(t, disk, time.Second, clock)
+	before := bindAndGrant(t, first, "v", "r")
+	first.CloseWorkspaceExtenders()
+	clock.at(3)
+	returned := NewPublisher(nil, WithStore(disk), WithWorkspaceLeaseConfig(time.Second, clock.now), WithWorkspaceMaxClockSkew(time.Millisecond))
+	t.Cleanup(returned.CloseWorkspaceExtenders)
+	// Restart deadline is 4 s. The newly configured 1 ms bound has passed,
+	// but the original persisted bound still protects the previous process.
+	clock.at(4.5)
+	if got, err := returned.RenewWorkspaceLease(context.Background(), "v", "r", 1); err == nil {
+		t.Fatal("smaller restart setting shortened the old barrier", got)
+	}
+	clock.at(6)
+	got, err := returned.RenewWorkspaceLease(context.Background(), "v", "r", 1)
+	if err != nil || got.MaxClockSkewNS != before.MaxClockSkewNS {
+		t.Fatal("re-grant lowered the persisted skew", got, err)
+	}
+	records, err := disk.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].Workspace.Lease.MaxClockSkewNS != before.MaxClockSkewNS || records[0].Workspace.Lease.ExpiresAtNS < got.ExpiresAtNS {
+		t.Fatal("preserved re-grant bound was not durable", records)
+	}
+}
