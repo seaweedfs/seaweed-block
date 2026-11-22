@@ -12,8 +12,8 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
-// CHANGE M6: PurgeDone report section 9. Production is gated on the
-// exhaustive model verdict and its final invariant row. No purge runs here
+// CHANGE M6 Done -> Absent, INV-GC-DONE-PURGE-001 (PurgeDone section 9).
+// Production is gated on the exhaustive model verdict. No purge runs here
 // against a real filer or volume server.
 const purgeTestDoneStamp = "swb.gc.done_ns"
 
@@ -161,6 +161,89 @@ func TestGCDonePurgeConditionalDeleteProtectsNewIncarnation(t *testing.T) {
 				t.Fatalf("replacement was deleted: %v %v", entry, err)
 			}
 		})
+	}
+}
+
+func TestGCDonePurgeAlreadyAbsentSettlesAsSuccess(t *testing.T) {
+	for _, outcome := range []string{"another-collector", "delete-applied-reply-lost"} {
+		t.Run(outcome, func(t *testing.T) {
+			f, b, c, g, now := purgeTestFixture(t)
+			r, entry := putPurgeTestBinding(t, f, b, "orphan", "done", now.Add(-2*time.Hour))
+			attempted := false
+			c.f = &purgeReplaceFiler{Filer: f, beforeDelete: func(ctx context.Context, dir, name string, expected map[string][]byte) error {
+				if dir != r.keyDir() || name != entry.Name {
+					return nil
+				}
+				attempted = true
+				if outcome == "another-collector" {
+					return f.DeleteEntry(ctx, dir, name, nil)
+				}
+				if err := f.DeleteEntry(ctx, dir, name, expected); err != nil {
+					return err
+				}
+				return errors.New("filer deleted the binding; response lost")
+			}}
+			_, err := g.Run(context.Background())
+			if !attempted {
+				t.Fatal("eligible DONE binding never reached delete")
+			}
+			if err != nil {
+				t.Fatalf("confirmed absence must settle purge successfully: %v", err)
+			}
+			if _, err = f.LookupEntry(context.Background(), r.keyDir(), entry.Name); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("expected settled absence: %v", err)
+			}
+			if _, err = g.Run(context.Background()); err != nil {
+				t.Fatalf("a later collector pass on the same absence failed: %v", err)
+			}
+		})
+	}
+}
+
+func TestGCDonePurgeForkMissingKeyBelongsToOwnerPass(t *testing.T) {
+	f, b, c, g, _ := purgeTestFixture(t)
+	ctx := context.Background()
+	h := publishSource(t, f, b.fakeBlobs, "v1", map[uint64][]byte{0: chunkBytes(0x21)})
+	if _, err := c.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: "s1", RequestID: "parent-snap"}, h); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.CreateEntry(ctx, catBase, &filerpb.Entry{Name: "v2", IsDirectory: true}, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s1", Target: "v2", RequestID: "dependent-fork"}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := NewChunkRemote(f, b, path.Join(catBase, "v1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = r.CASHead(ctx, storage.ChunkHeadVersion{Gen: h.Gen, Epoch: h.Epoch}, storage.ChunkHead{Epoch: 1, Holder: "h1", RemoteLSN: h.RemoteLSN}); err != nil {
+		t.Fatal(err)
+	}
+	// Drop the parent's snapshot record and attempt so ONLY the fork keeps
+	// the old root. Keep its immutable segment bytes available for resolution.
+	nameEntry, err := f.LookupEntry(ctx, path.Join(catBase, "v1", snapNamesDir), "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.DeleteEntry(ctx, path.Join(catBase, "v1", snapsDir, "s1"), string(nameEntry.Extended[extAttempt]), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err = f.DeleteEntry(ctx, path.Join(catBase, "v1", snapNamesDir), "s1", nil); err != nil {
+		t.Fatal(err)
+	}
+	dir, name, err := r.keyLocation(h.Chunks[0].Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.DeleteEntry(ctx, dir, name, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = c.ExecuteVolumeGC(ctx, "v2", b, g.cfg, false); err != nil {
+		t.Fatalf("foreign key does not belong to the fork's own listing: %v", err)
+	}
+	if _, err = c.ExecuteVolumeGC(ctx, "v1", b, g.cfg, false); err == nil {
+		t.Fatal("owner pass accepted missing own binding still rooted by the dependent fork")
 	}
 }
 
