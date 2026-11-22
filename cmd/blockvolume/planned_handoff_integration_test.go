@@ -9,12 +9,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -194,7 +196,7 @@ func startHandoffEnv(t *testing.T, n int, masterArgs ...string) *handoffEnv {
 	env.hosts["s1"] = bvHost{id: "s1", data: h.dataAddr, ctrl: h.ctrlAddr, status: h.statusAddr, nvme: h.nvmeAddr, root: filepath.Join(h.dir, "vol")}
 	for i := 2; i <= n; i++ {
 		id := fmt.Sprintf("s%d", i)
-		env.hosts[id] = bvHost{id: id, data: leaseBinaryAddress(t), ctrl: leaseBinaryAddress(t), status: leaseBinaryAddress(t), nvme: leaseBinaryAddress(t), root: filepath.Join(h.dir, "vol-"+id)}
+		env.hosts[id] = bvHost{id: id, data: handoffAddress(t), ctrl: handoffAddress(t), status: handoffAddress(t), nvme: handoffAddress(t), root: filepath.Join(h.dir, "vol-"+id)}
 	}
 	cluster, chunkPath := env.cluster, env.chunkPath
 
@@ -293,12 +295,44 @@ func newPlannedHandoffHarness(t *testing.T) *plannedHandoffHarness {
 			t.Fatalf("build %s: %v\n%s", b.name, err, out)
 		}
 	}
-	h.masterAddr = leaseBinaryAddress(t)
-	h.dataAddr = leaseBinaryAddress(t)
-	h.ctrlAddr = leaseBinaryAddress(t)
-	h.statusAddr = leaseBinaryAddress(t)
-	h.nvmeAddr = leaseBinaryAddress(t)
+	h.masterAddr = handoffAddress(t)
+	h.dataAddr = handoffAddress(t)
+	h.ctrlAddr = handoffAddress(t)
+	h.statusAddr = handoffAddress(t)
+	h.nvmeAddr = handoffAddress(t)
 	return h
+}
+
+var handoffPorts struct {
+	sync.Mutex
+	used map[int]bool
+}
+
+// handoffAddress returns a free loopback address below the kernel's
+// ephemeral range (32768 and up on Linux). A daemon restarted minutes later
+// binds it again, and an outgoing connection may take any ephemeral port in
+// between; ports below the range are never handed out that way.
+func handoffAddress(t *testing.T) string {
+	t.Helper()
+	handoffPorts.Lock()
+	defer handoffPorts.Unlock()
+	if handoffPorts.used == nil {
+		handoffPorts.used = map[int]bool{}
+	}
+	for i := 0; i < 500; i++ {
+		p := 21000 + rand.Intn(11000)
+		if handoffPorts.used[p] {
+			continue
+		}
+		addr := fmt.Sprintf("127.0.0.1:%d", p)
+		if ln, err := net.Listen("tcp", addr); err == nil {
+			ln.Close()
+			handoffPorts.used[p] = true
+			return addr
+		}
+	}
+	t.Fatal("no free loopback port below the ephemeral range")
+	return ""
 }
 
 // daemon is one started child: its log file and its exit.
