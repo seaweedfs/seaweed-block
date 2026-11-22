@@ -35,7 +35,7 @@ The volume's authority and health projection. Go type `volume.StatusProjection`.
 | `CatchUp` | object | CatchUp shows a supporting replica's catch-up progress while it is not yet replica_ready; it is visible without being an alert. (omitted when empty) |
 | `CatchUp.ElapsedMs` | int64 | ElapsedMs is the time since this replica was admitted as a supporting replica at its current epoch. |
 | `CatchUp.LagLSN` | uint64 | LagLSN is the engine's H-R (primary head minus this replica's durable frontier) as last observed; 0 when unknown or caught up. |
-| `Warnings[]` | string | Warnings are the durable store's typed recovery warnings (e.g. wal_hole_suspected, issue #51). Visible, not an alert: they do not change Healthy or the frontend's readiness. (omitted when empty) |
+| `Warnings[]` | string | Warnings include routing disagreements and typed recovery warnings (e.g. wal_hole_suspected, issue #51). Visible, not an alert: they do not change Healthy or the frontend's readiness. (omitted when empty) |
 
 ### `GET /status/peers`
 
