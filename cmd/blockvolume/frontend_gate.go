@@ -35,7 +35,8 @@ type servingBackend interface {
 // open, as before: it never makes the claim a workspace primary waits for.
 func frontendStartSignal(f flags, b servingBackend, stop <-chan struct{}) <-chan struct{} {
 	if f.workspaceLease && f.durableImpl == "walstore-chunk" {
-		return firstAdmitted(stop, b.FirstServing(), b.AdmitsIO)
+		out, _ := firstAdmitted(stop, b.FirstServing(), b.AdmitsIO)
+		return out
 	}
 	return b.FirstServing()
 }
@@ -45,12 +46,14 @@ func frontendStartSignal(f flags, b servingBackend, stop <-chan struct{}) <-chan
 // backend has no projection-change signal.
 const admitRecheck = 50 * time.Millisecond
 
-// firstAdmitted is closed once first has closed (the backend first admitted
-// I/O) and admits() then passes; it re-checks every admitRecheck until then,
-// and ends without closing when stop closes.
-func firstAdmitted(stop <-chan struct{}, first <-chan struct{}, admits func() error) <-chan struct{} {
-	out := make(chan struct{})
+// firstAdmitted's out is closed once first has closed (the backend first
+// admitted I/O) and admits() then passes; it re-checks every admitRecheck
+// until then, and ends without closing out when stop closes. done is closed
+// when its goroutine has returned, on either path.
+func firstAdmitted(stop <-chan struct{}, first <-chan struct{}, admits func() error) (out, done <-chan struct{}) {
+	o, d := make(chan struct{}), make(chan struct{})
 	go func() {
+		defer close(d)
 		select {
 		case <-first:
 		case <-stop:
@@ -65,9 +68,9 @@ func firstAdmitted(stop <-chan struct{}, first <-chan struct{}, admits func() er
 				return
 			}
 		}
-		close(out)
+		close(o)
 	}()
-	return out
+	return o, d
 }
 
 func awaitFrontendStart(serving <-chan struct{}, stopWait <-chan workspaceStopWait) (stopped *workspaceStopWait, start bool) {
