@@ -90,7 +90,7 @@ func (s *services) RenewWorkspaceLease(ctx context.Context, q *control.Workspace
 	if err := s.workspaceVolumeForRenewal(q.GetVolumeId()); err != nil {
 		return nil, err
 	}
-	// INV-ASSIGNMENT-HOLDER-IDENTITY-001: a replica id can move between servers.
+	// INV-AUTH-HOLDER-IDENTITY-001: a replica id can move between servers.
 	line, ok := s.host.Publisher().PublishedAuthorityLine(q.GetVolumeId())
 	server := line.IssuedHost
 	if server == "" {

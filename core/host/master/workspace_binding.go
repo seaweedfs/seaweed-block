@@ -66,7 +66,7 @@ func (h *Host) workspaceEndpointsAvailable(b lifecycle.WorkspaceBinding) error {
 }
 
 // workspaceSourceHost resolves explicit holder membership for
-// INV-ASSIGNMENT-HOLDER-IDENTITY-001; endpoints never select a server.
+// INV-AUTH-HOLDER-IDENTITY-001; endpoints never select a server.
 func (h *Host) workspaceSourceHost(volume, replica string, epoch uint64) string {
 	if state := h.Publisher().WorkspaceState(volume); state != nil {
 		for _, r := range state.Moves {
@@ -82,7 +82,7 @@ func (h *Host) workspaceSourceHost(volume, replica string, epoch uint64) string 
 }
 
 // placementSourceHost uses committed membership, never endpoint inference
-// (INV-ASSIGNMENT-HOLDER-IDENTITY-001, INV-WS-RENEW-NONBLOCKING-001).
+// (INV-AUTH-HOLDER-IDENTITY-001, INV-WS-RENEW-NONBLOCKING-001).
 func (h *Host) placementSourceHost(volume, replica string) string {
 	if h.lifecycle != nil {
 		if p, ok := h.lifecycle.Placements.GetPlacementSnapshot(volume); ok {
