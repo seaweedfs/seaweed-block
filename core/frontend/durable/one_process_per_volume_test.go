@@ -42,9 +42,13 @@ func TestOneLiveProcessPerVolumePerHost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b := lockedProvider(t, t.TempDir(), lockDir, remote)
+	bRoot := t.TempDir()
+	b := lockedProvider(t, bRoot, lockDir, remote)
 	if _, err := b.EnsureStorage("v1"); !errors.Is(err, storage.ErrWALStoreLocked) {
 		t.Fatalf("a second provider for the same volume on this host opened: %v; want %v", err, storage.ErrWALStoreLocked)
+	}
+	if left, err := os.ReadDir(bRoot); err != nil || len(left) != 0 {
+		t.Fatalf("the refused second provider touched its root: %v %v", left, err)
 	}
 	other := lockedProvider(t, t.TempDir(), lockDir, remote)
 	if _, err := other.EnsureStorage("v2"); err != nil {

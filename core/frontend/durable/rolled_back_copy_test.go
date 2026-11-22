@@ -87,7 +87,8 @@ func TestRolledBackCopyBelowHeadLSNIsRefused(t *testing.T) {
 	copyRootFiles(t, root, exact) // durable LSN at HEAD
 	puts := remote.Puts()
 
-	b := chunkProvider(t, backup, remote, v1View(), 0)
+	observed := &casObservedRemote{ChunkRemote: remote}
+	b := chunkProvider(t, backup, observed, v1View(), 0)
 	bs, err := b.EnsureStorage("v1")
 	if err != nil {
 		t.Fatal(err)
@@ -105,6 +106,9 @@ func TestRolledBackCopyBelowHeadLSNIsRefused(t *testing.T) {
 	}
 	if after, _ := remote.GetHead(ctx); after.Gen != head.Gen || after.Epoch != head.Epoch || after.Holder != head.Holder || remote.Puts() != puts {
 		t.Fatalf("the refused copy claimed or wrote: HEAD gen %d -> %d, PUTs %d -> %d", head.Gen, after.Gen, puts, remote.Puts())
+	}
+	if observed.cass != 0 {
+		t.Fatalf("the refused copy attempted %d HEAD CASes, want none", observed.cass)
 	}
 	if err := b.Backend("v1").AdmitsIO(); err == nil {
 		t.Fatal("the refused copy admits I/O")
@@ -142,5 +146,43 @@ func TestRolledBackCopyBelowHeadLSNIsRefused(t *testing.T) {
 	}
 	if _, err := c.RecoverVolume(ctx, "v1"); err != nil {
 		t.Fatalf("the root's own restart after its last cut was refused: %v", err)
+	}
+
+	// The recheck on the exact claim image: HEAD advances at the same epoch
+	// and holder between the preliminary HEAD read and the claim's read
+	// (the original root cut again). An exact copy that passed the first
+	// read is then below HEAD and refused, with no CAS.
+	race := t.TempDir()
+	copyRootFiles(t, exact, race)
+	raced := &casObservedRemote{ChunkRemote: remote}
+	var advanced storage.ChunkHead
+	raced.onGetHead = func(n int) {
+		if n != 2 {
+			return
+		}
+		cur, err := remote.GetHead(ctx)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		next := cur
+		next.RemoteLSN = cur.RemoteLSN + 1
+		if _, err := remote.CASHead(ctx, storage.ChunkHeadVersion{Gen: cur.Gen, Epoch: cur.Epoch}, next); err != nil {
+			t.Error(err)
+		}
+		advanced, _ = remote.GetHead(ctx)
+	}
+	y := chunkProvider(t, race, raced, v1View(), 0)
+	if _, err := y.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := y.RecoverVolume(ctx, "v1"); !errors.Is(err, durable.ErrChunkStaleLocalRoot) {
+		t.Fatalf("HEAD advanced to remote_lsn %d (epoch %d) after the preliminary read; the claim recheck attached: %v", advanced.RemoteLSN, advanced.Epoch, err)
+	}
+	if advanced.Gen == 0 || advanced.Epoch != head.Epoch || advanced.Holder != head.Holder || raced.cass != 0 {
+		t.Fatalf("race control: advanced HEAD %+v (want same epoch %d, holder %q), CAS attempts %d (want 0)", advanced, head.Epoch, head.Holder, raced.cass)
+	}
+	if err := y.Close(); err != nil {
+		t.Fatal(err)
 	}
 }

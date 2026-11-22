@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // V1-SPEC r2.45: the test lock directory override is refused under systemd
@@ -28,14 +29,20 @@ func TestVolumeLockDirTestOnlyHiddenFromHelp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	read := make(chan []byte)
-	go func() { b, _ := io.ReadAll(r); read <- b }() // usage exceeds a pipe buffer
 	saved := os.Stderr
+	t.Cleanup(func() { os.Stderr = saved; _ = w.Close(); _ = r.Close() })
+	read := make(chan []byte, 1)
+	go func() { b, _ := io.ReadAll(r); read <- b }() // usage exceeds a pipe buffer
 	os.Stderr = w
 	_, parseErr := parseFlags([]string{"-h"})
 	os.Stderr = saved
-	_ = w.Close()
-	out := <-read
+	_ = w.Close() // release the reader before joining it
+	var out []byte
+	select {
+	case out = <-read:
+	case <-time.After(10 * time.Second):
+		t.Fatal("usage reader did not finish")
+	}
 	if parseErr == nil || !strings.Contains(string(out), "-durable-root") {
 		t.Fatalf("no usage printed: %v %q", parseErr, out)
 	}

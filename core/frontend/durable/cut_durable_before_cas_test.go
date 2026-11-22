@@ -9,13 +9,26 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
-// casObservedRemote runs onCAS right after each successful HEAD CAS.
+// casObservedRemote counts HEAD reads and CAS attempts; onGetHead runs
+// before each HEAD read (n counts from 1), onCAS right after each successful
+// HEAD CAS.
 type casObservedRemote struct {
 	storage.ChunkRemote
-	onCAS func(next storage.ChunkHead)
+	onCAS       func(next storage.ChunkHead)
+	onGetHead   func(n int)
+	reads, cass int
+}
+
+func (r *casObservedRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
+	r.reads++
+	if r.onGetHead != nil {
+		r.onGetHead(r.reads)
+	}
+	return r.ChunkRemote.GetHead(ctx)
 }
 
 func (r *casObservedRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVersion, next storage.ChunkHead) (uint64, error) {
+	r.cass++
 	gen, err := r.ChunkRemote.CASHead(ctx, expected, next)
 	if err == nil && r.onCAS != nil {
 		r.onCAS(next)
