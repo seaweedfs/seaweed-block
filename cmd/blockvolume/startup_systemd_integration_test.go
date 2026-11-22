@@ -428,7 +428,21 @@ func gap1SupersededDoesNotRestart(t *testing.T, stem, exe string, args []string,
 		if status.Healthy || status.FrontendPrimaryReady {
 			t.Fatalf("unassigned old identity served: %+v", status)
 		}
-		return status.AuthorityRole == hostvolume.AuthorityRoleSuperseded
+		// A never-assigned replica remains ModeIdle, so /status intentionally
+		// reports unknown even after recording the other-replica fact. Prove
+		// receipt in this process before checking its terminal78 decision.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		journal, err := exec.CommandContext(ctx, "journalctl", "--unit="+unit, "--no-pager", "--output=cat").CombinedOutput()
+		if err != nil {
+			t.Fatalf("supersede journal: %v %s", err, journal)
+		}
+		observed := fmt.Sprintf("volume %s authority is now r1@1 (not this replica r-old); recording supersede", volume)
+		if strings.Contains(string(journal), observed) {
+			t.Logf("captured authoritative other-replica observation: %s", observed)
+			return true
+		}
+		return false
 	})
 	waitGAP1(t, "positive supersede did not exit78 without restart", 45*time.Second, func() bool {
 		s := gap1Unit(t, unit)
