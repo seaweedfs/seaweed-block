@@ -64,9 +64,6 @@ func superviseProcess(ctx context.Context, work func(*processExit) int) int {
 	case code := <-finished:
 		select {
 		case out = <-e.decision:
-			if out.code == 0 {
-				return code
-			}
 			return reportWorkspaceExit(out)
 		default:
 			return code
@@ -77,7 +74,8 @@ func superviseProcess(ctx context.Context, work func(*processExit) int) int {
 	case out = <-e.decision:
 	}
 	if out.code == 0 {
-		return <-finished
+		<-finished
+		return 0
 	}
 	timer := time.NewTimer(volume.WorkspaceDrainTimeout)
 	defer timer.Stop()
@@ -163,6 +161,7 @@ func finishWorkspaceLease(e *processExit, f flags, h *volume.Host, done <-chan e
 	select {
 	case err := <-done:
 		if err == nil {
+			e.choose(workspaceExit{reason: "revoked"})
 			return
 		}
 		fmt.Fprintln(os.Stderr, "blockvolume: workspace lease closeout:", err)

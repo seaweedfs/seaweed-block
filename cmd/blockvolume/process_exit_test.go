@@ -101,3 +101,15 @@ func TestWorkspaceRetryProcessExitsWhenCloseBlocks(t *testing.T) {
 		t.Fatalf("blocked close exit: %v %s", err, out)
 	}
 }
+
+func TestWorkspaceSignalFirstKeepsZeroAfterLaterFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	code := superviseProcess(ctx, func(e *processExit) int {
+		e.choose(workspaceExit{78, "superseded"})
+		return 1 // a later cleanup error cannot replace the chosen signal status
+	})
+	if code != 0 {
+		t.Fatalf("first signal status changed to %d", code)
+	}
+}
