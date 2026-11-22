@@ -724,6 +724,7 @@ func runVolume(f flags, exits *processExit) int {
 		watchCtx, stopWatch := context.WithCancel(exits.parent)
 		defer stopWatch()
 		go watchChunkStartup(watchCtx, exits, f, h, dp)
+		go watchChunkRuntimeFence(watchCtx, exits, f, dp)
 		provider = dp
 		if status != nil {
 			status.SetDurableStatusSource(dp)

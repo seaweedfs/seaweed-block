@@ -149,6 +149,35 @@ func watchChunkStartup(ctx context.Context, e *processExit, f flags, h *volume.H
 	}
 }
 
+// chunkRuntimeFenceProvider reports a runtime HEAD fence of the attached layer.
+type chunkRuntimeFenceProvider interface {
+	ChunkRuntimeFenced(string) bool
+	ChunkRuntimeFenceUpdates() <-chan struct{}
+}
+
+// watchChunkRuntimeFence: a HEAD fence after startup, while the lease may
+// still be valid, ends the process with no restart (78 head_fenced): another
+// holder owns HEAD (INV-FE-PRIMARY-READY-OPERATIONAL-001). Workspace chunk
+// primaries only.
+func watchChunkRuntimeFence(ctx context.Context, e *processExit, f flags, p chunkRuntimeFenceProvider) {
+	if !f.workspaceLease || f.durableImpl != "walstore-chunk" {
+		return
+	}
+	for {
+		if p.ChunkRuntimeFenced(f.volumeID) {
+			e.choose(workspaceExit{exitWorkspaceSuperseded, "head_fenced"})
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-e.done:
+			return
+		case <-p.ChunkRuntimeFenceUpdates():
+		}
+	}
+}
+
 // M2 process exit / Revoking -> Revoked; INV-WS-STARTUP-RETRY-001.
 func waitWorkspaceStop(e *processExit, f flags, h *volume.Host, requests <-chan workspaceStopRequest, done <-chan error) (*workspaceStopRequest, <-chan error) {
 	select {

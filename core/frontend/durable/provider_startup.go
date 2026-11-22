@@ -1,6 +1,11 @@
 package durable
 
-import "errors"
+import (
+	"errors"
+	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/storage"
+)
 
 // ChunkStartupUpdates wakes the process owner when a startup wait ends. It is
 // not an event queue: the owner must read ChunkStartupOutcome for its volume.
@@ -56,4 +61,60 @@ func (p *DurableProvider) ChooseChunkStartupExit(volumeID string, gen uint64, ch
 	}
 	choose()
 	return true
+}
+
+// chunkFenceWatchInterval bounds how long after a runtime fence the backend
+// reports not operational and the process owner is woken. I/O is refused
+// from the fence itself (readyCheck reads the layer's latched flag).
+const chunkFenceWatchInterval = 50 * time.Millisecond
+
+// watchChunkFence waits for the attached layer to fence after startup (its
+// publication found HEAD owned by another holder or epoch: the layer latches
+// fenced only on supersede or owner change, never on a clean detach), then
+// latches the backend not operational with that evidence and marks the
+// volume runtime-fenced (INV-FE-PRIMARY-READY-OPERATIONAL-001). It ends when
+// the provider closes or the layer is no longer this volume's.
+func (p *DurableProvider) watchChunkFence(volumeID string, h *volHandle, layer storage.ChunkLayer) {
+	t := time.NewTicker(chunkFenceWatchInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-p.closeCtx.Done():
+			return
+		case <-t.C:
+		}
+		p.mu.Lock()
+		current := !p.closed && p.volumes[volumeID] == h && h.chunk == layer
+		p.mu.Unlock()
+		if !current {
+			return
+		}
+		if !layer.Fenced() {
+			continue
+		}
+		h.backend.SetOperational(false, "chunk layer fenced after startup: HEAD has another publication owner")
+		p.mu.Lock()
+		if !p.closed && p.volumes[volumeID] == h && h.chunk == layer {
+			h.runtimeFenced = true
+			select {
+			case p.fenceUpdates <- struct{}{}:
+			default:
+			}
+		}
+		p.mu.Unlock()
+		return
+	}
+}
+
+// ChunkRuntimeFenceUpdates wakes the process owner when a volume's attached
+// layer fenced after startup; read ChunkRuntimeFenced for the volume.
+func (p *DurableProvider) ChunkRuntimeFenceUpdates() <-chan struct{} { return p.fenceUpdates }
+
+// ChunkRuntimeFenced reports a latched runtime fence of the volume's
+// attached layer (HEAD has another publication owner).
+func (p *DurableProvider) ChunkRuntimeFenced(volumeID string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	h := p.volumes[volumeID]
+	return !p.closed && h != nil && h.runtimeFenced
 }

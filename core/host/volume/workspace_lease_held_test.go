@@ -59,6 +59,37 @@ func TestWorkspaceLeaseGrantIsLoggedOnceAfterRefusedRenewals(t *testing.T) {
 	}
 }
 
+// A first reply that revokes grants nothing: after refused renewals, a valid
+// first reply with Revoking set fences the guard, is never held and logs no
+// grant line (the line is a readiness timing witness).
+func TestWorkspaceLeaseFirstRevokingReplyIsNotLoggedAsAGrant(t *testing.T) {
+	logs := captureLog(t)
+	now := time.Unix(1000, 0)
+	calls := 0
+	client := workspaceTestClient{
+		renew: func() (*control.WorkspaceLeaseFact, error) {
+			calls++
+			if calls == 1 {
+				return nil, errors.New("workspace forced move lease expiry plus clock-skew margin has not elapsed")
+			}
+			return &control.WorkspaceLeaseFact{VolumeId: "v", ReplicaId: "r", Epoch: 1, ValidForNs: int64(10 * time.Second), Revoking: true}, nil
+		},
+		ack: func() error { return nil },
+	}
+	g, err := NewWorkspaceLeaseGuard(workspaceTestView{}, client, &control.WorkspaceIdentity{VolumeId: "v", ReplicaId: "r", Epoch: 1}, func(context.Context) (uint64, error) { return 7, nil }, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = g.Refresh(context.Background())
+	_ = g.Refresh(context.Background())
+	if g.Held() || g.Projection().Healthy {
+		t.Fatal("a revoking first reply left the lease held")
+	}
+	if out := logs.String(); strings.Contains(out, "granted") || !strings.Contains(out, "revoked by the master") {
+		t.Fatalf("want no grant line and the revocation fence; log=%q", out)
+	}
+}
+
 // V1-SPEC r2.37: a workspace primary reports NotReadyReason=lease_not_held,
 // first, while its guard is missing or holds no granted lease, even with the
 // backend admitting I/O; ready once the lease is held; lease_not_held again

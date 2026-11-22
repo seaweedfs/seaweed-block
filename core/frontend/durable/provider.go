@@ -238,6 +238,7 @@ type DurableProvider struct {
 	opening        map[string]*sync.Mutex // keyed by volumeID; serializes open/create
 	closed         bool
 	startupUpdates chan struct{} // wake only; the generation-bound result stays on the handle
+	fenceUpdates   chan struct{} // wake only; runtimeFenced stays on the handle
 
 	// testAfterChunkResolve, test-only, runs in CutVolume right after the
 	// volume's handle and layer are resolved.
@@ -289,6 +290,7 @@ type volHandle struct {
 	waitGen           uint64
 	startupSuperseded bool               // exact foreign-holder claim proof for startupEnded; guarded by p.mu
 	startupEnded      uint64             // recovery generation with a terminal startup outcome; guarded by p.mu
+	runtimeFenced     bool               // the attached layer fenced after startup (HEAD has another owner); guarded by p.mu
 	chunk             storage.ChunkLayer // after RecoverVolume
 	chunkLineage      chunkLineage       // immutable authority captured by this attachment
 	// Private until the owner commit succeeds; retained for attach retry.
@@ -402,6 +404,7 @@ func NewDurableProvider(cfg ProviderConfig, view frontend.ProjectionView) (*Dura
 		closeCtx:       closeCtx,
 		closeCancel:    closeCancel,
 		startupUpdates: make(chan struct{}, 1),
+		fenceUpdates:   make(chan struct{}, 1),
 	}, nil
 }
 
