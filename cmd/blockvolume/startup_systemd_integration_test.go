@@ -91,6 +91,11 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 	if err != nil || missing != http.StatusNotFound || gap1StatusOperational(missing, body404, volume) {
 		t.Fatalf("real status404 parser control: %v", err)
 	}
+	want := bytes.Repeat([]byte{0x6d}, 4096)
+	client := gap1ConnectNVMe(t, nvmeAddr, "nqn.2026-11.test:"+stem)
+	client.writeFlush(t, 8, want)
+	client.readExact(t, 8, want)
+	client.close()
 	remote := cluster.remote(t, base+"/"+volume)
 	before, err := remote.GetHead(context.Background())
 	if err != nil || before.Gen == 0 {
@@ -150,6 +155,11 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 	if err != nil || after.Gen <= before.Gen || after.Holder != before.Holder || after.Epoch != before.Epoch {
 		t.Fatalf("return did not claim HEAD: before%+v after%+v err%v", before, after, err)
 	}
+	returned := gap1ConnectNVMe(t, nvmeAddr, "nqn.2026-11.test:"+stem)
+	returned.readExact(t, 8, want)
+	returned.writeFlush(t, 9, want)
+	returned.readExact(t, 9, want)
+	returned.close()
 	// A real control cut must pass the lease and layer gates after restart.
 	req, err := http.NewRequest(http.MethodPost, "http://"+statusAddr+"/chunk/cut", bytes.NewBufferString(fmt.Sprintf(`{"volumeID":%q,"timeoutMs":3000}`, volume)))
 	if err != nil {
