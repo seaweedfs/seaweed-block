@@ -247,6 +247,10 @@ func (s *StatusServer) chunkMux() http.Handler {
 	return mux
 }
 
+// codeHostSlotBusy refuses a cut, snapshot or detach because every host
+// cut slot is held (retryable).
+const codeHostSlotBusy = "host_slot_busy"
+
 func writeChunkJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -338,6 +342,11 @@ func chunkErrorCode(err error) (int, string, bool) {
 		return http.StatusConflict, chunkstore.CodeNotChunkVolume, false
 	case errors.Is(err, context.DeadlineExceeded):
 		return http.StatusServiceUnavailable, chunkstore.CodeDeadlineExceeded, true
+	// Every host cut slot held (host admission, --host-limit-dir): a wait
+	// that ends when another cut releases its slot. Its own code, so a
+	// caller can resend on exactly this refusal without reading messages.
+	case errors.Is(err, hostlimit.ErrSlotsHeld):
+		return http.StatusServiceUnavailable, codeHostSlotBusy, true
 	case errors.Is(err, storage.ErrChunkCaptureRefused):
 		return http.StatusServiceUnavailable, "capture_refused", true
 	default:

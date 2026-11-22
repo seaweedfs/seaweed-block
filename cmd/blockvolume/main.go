@@ -678,7 +678,11 @@ func run(f flags) int {
 			cfg.ChunkHolder = chunkHolder(f)
 			cfg.ChunkStagger = true
 			if f.chunk.hostLimit.Directory != "" {
-				limiter, limitErr := hostlimit.New(f.chunk.hostLimit)
+				limitErr := hostlimit.CheckLaunch(f.chunk.hostLimit)
+				var limiter *hostlimit.Limiter
+				if limitErr == nil {
+					limiter, limitErr = hostlimit.New(f.chunk.hostLimit)
+				}
 				if limitErr != nil {
 					chunkErr = errors.Join(chunkErr, limitErr)
 				} else {
