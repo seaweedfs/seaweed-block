@@ -67,6 +67,7 @@ func TestWorkspaceRevokeRejectsInvalidInputsBeforeDial(t *testing.T) {
 		{"--master", ""}, {"--volume", ""}, {"--replica", ""}, {"--epoch", "0"}, {"--epoch", "-1"},
 		{"--timeout", "0s"}, {"--timeout", "-1s"}, {"unexpected"},
 		{"--sealed-gen", "0"}, {"--without-seal"},
+		{"--sealed-gen", "0", "--without-seal"},
 	} {
 		code, _, _ := runCLI(revokeArgs(extra...))
 		if code != wsExitRefusedLocally || *dials != 0 || len(r.requests) != 0 {
