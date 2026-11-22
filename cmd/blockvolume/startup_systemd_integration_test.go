@@ -105,7 +105,7 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 	if err != nil || before.Gen == 0 {
 		t.Fatalf("bootstrap HEAD: %+v %v", before, err)
 	}
-	gap1Systemctl(t, "kill", "--signal=KILL", "--kill-whom=main", bootstrap)
+	gap1Systemctl(t, "kill", "--signal=KILL", "--kill-who=main", bootstrap)
 	waitGAP1(t, "bootstrap still running", 10*time.Second, func() bool { return gap1Unit(t, bootstrap)["MainPID"] == "0" })
 	// QueryWorkspace is read-only. These real binaries and this test share
 	// one WSL kernel wall clock. Use the reported MASTER expiry timestamp,
