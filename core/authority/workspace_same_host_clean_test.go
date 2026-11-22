@@ -14,6 +14,11 @@ func TestWorkspaceSameHostCleanMoveUsesOvernightSeal(t *testing.T) {
 	p := newLeasePublisher(t, disk, time.Second, clock)
 	bindAndGrant(t, p, "v", "r")
 	ctx := context.Background()
+	req := WorkspaceMoveRequest{RequestID: "return", VolumeID: "v", ExpectedReplicaID: "r", TargetReplicaID: "r", ExpectedHost: "host", TargetHost: "host", ExpectedEpoch: 1, TargetDataAddr: "d", TargetCtrlAddr: "c", Kind: "clean"}
+	head := WorkspaceHead{Gen: 7, Epoch: 1, Holder: "host/r", RemoteLSN: 42, Detached: true}
+	if _, err := p.MoveWorkspace(ctx, req, head); err == nil {
+		t.Fatal("same-host move accepted a seal without revocation ACK")
+	}
 	if err := p.BeginWorkspaceRevocation(ctx, "v", "r", 1); err != nil {
 		t.Fatal(err)
 	}
@@ -21,11 +26,11 @@ func TestWorkspaceSameHostCleanMoveUsesOvernightSeal(t *testing.T) {
 		t.Fatal(err)
 	}
 	clock.at(86400)
-	req := WorkspaceMoveRequest{RequestID: "return", VolumeID: "v", ExpectedReplicaID: "r", TargetReplicaID: "r", ExpectedHost: "host", TargetHost: "host", ExpectedEpoch: 1, TargetDataAddr: "d", TargetCtrlAddr: "c", Kind: "clean"}
-	head := WorkspaceHead{Gen: 7, Epoch: 1, Holder: "host/r", RemoteLSN: 42, Detached: true}
 	for _, bad := range []WorkspaceHead{
 		{Gen: 7, Epoch: 1, Holder: "host/r", RemoteLSN: 42},
 		{Gen: 8, Epoch: 1, Holder: "host/r", RemoteLSN: 42, Detached: true},
+		{Gen: 7, Epoch: 1, Holder: "other/r", RemoteLSN: 42, Detached: true},
+		{Gen: 7, Epoch: 2, Holder: "host/r", RemoteLSN: 42, Detached: true},
 	} {
 		if _, err := p.MoveWorkspace(ctx, req, bad); err == nil {
 			t.Fatal("same-host move bypassed sealed-generation proof", bad)

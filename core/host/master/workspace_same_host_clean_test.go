@@ -39,10 +39,18 @@ func TestWorkspaceRPCSameHostCleanMoveKeepsRepreparedBinding(t *testing.T) {
 	if got, ok, err := h.Lifecycle().WorkspaceBindings.Get("v"); err != nil || !ok || len(got) != 1 || !got[0].Retired {
 		t.Fatal("ACK did not retire the old binding", got, err)
 	}
+	req := &control.WorkspaceMove{RequestId: "return", VolumeId: "v", ExpectedReplicaId: "r1", ExpectedEpoch: 1, TargetReplicaId: "r1", TargetServerId: "node-a", TargetDataAddr: b.DataAddr, TargetCtrlAddr: b.CtrlAddr, Kind: "clean"}
+	if _, err := ws.MoveWorkspace(ctx, req); err == nil {
+		t.Fatal("same-host move accepted an unprepared retired binding")
+	}
 	if _, err := ws.RegisterWorkspaceBinding(ctx, b); err != nil {
 		t.Fatal("same-host re-prepare refused", err)
 	}
-	req := &control.WorkspaceMove{RequestId: "return", VolumeId: "v", ExpectedReplicaId: "r1", ExpectedEpoch: 1, TargetReplicaId: "r1", TargetServerId: "node-a", TargetDataAddr: b.DataAddr, TargetCtrlAddr: b.CtrlAddr, Kind: "clean"}
+	forced := *req
+	forced.Kind, forced.Force = "forced", true
+	if _, err := ws.MoveWorkspace(ctx, &forced); err == nil {
+		t.Fatal("same-host forced move accepted over RPC")
+	}
 	if _, err := ws.MoveWorkspace(ctx, req); err != nil {
 		t.Fatal("same-host clean move refused over RPC", err)
 	}
