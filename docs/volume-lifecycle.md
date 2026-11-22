@@ -140,6 +140,10 @@ These are rules for the operator. The product does not detect every breach.
   on a fresh one.
 - **Never revoke before the seal is confirmed** (see the hand-over steps): a revoke
   without an ACK cannot be undone on one node.
+- **Never restore blockmaster's `--authority-store` or `--lifecycle-store` from a copy.**
+  They decide who may write each volume. An older copy hands out epochs the volumes have
+  already passed, and every start is then refused. A lost store needs a recovery
+  procedure, not a restore.
 
 ## Which procedures run end to end
 
