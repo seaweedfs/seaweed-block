@@ -179,8 +179,8 @@ func (r *localRoot) lineageOf(head storage.ChunkHead) string {
 		return fmt.Sprintf("HEAD gen %d was published by local root %s and this root has no identity record (a copy of a root taken before its conversion)", head.Gen, head.HolderRoot)
 	case head.HolderRoot != r.Nonce:
 		return fmt.Sprintf("HEAD gen %d was published by another local root %s of this holder (this root is %s)", head.Gen, head.HolderRoot, r.Nonce)
-	case head.Gen > r.HighWater:
-		return fmt.Sprintf("HEAD gen %d is above this root's published high-water %d (a rolled-back copy of this root)", head.Gen, r.HighWater)
+	case rootGen(head) > r.HighWater:
+		return fmt.Sprintf("HEAD names this root at its generation %d, above this root's published high-water %d (a rolled-back copy of this root)", rootGen(head), r.HighWater)
 	}
 	return ""
 }
@@ -190,7 +190,16 @@ func (r *localRoot) lineageOf(head storage.ChunkHead) string {
 func (r *localRoot) rolledBack(head storage.ChunkHead) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.stored && head.HolderRoot != "" && head.HolderRoot == r.Nonce && head.Gen > r.HighWater
+	return r.stored && head.HolderRoot != "" && head.HolderRoot == r.Nonce && rootGen(head) > r.HighWater
+}
+
+// rootGen is the generation HEAD's holder root last installed itself:
+// HolderRootGen (catalog marks copy it), or Gen on a HEAD written before it.
+func rootGen(head storage.ChunkHead) uint64 {
+	if head.HolderRootGen != 0 {
+		return head.HolderRootGen
+	}
+	return head.Gen
 }
 
 // recordedEpoch is the epoch of the root's last recorded publication.

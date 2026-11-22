@@ -183,7 +183,12 @@ type chunkHead struct {
 	// HolderRoot is the nonce of the local root that published this HEAD
 	// (empty on pre-release HEADs). Compared only through package holder
 	// (INV-WS-LOCAL-ROOT-IDENTITY-001).
-	HolderRoot         string
+	HolderRoot string
+	// HolderRootGen is the generation the HolderRoot's own last CAS
+	// installed: a claim, cut or detach sets it; catalog marks (delete,
+	// revert) copy it unchanged. A local root's high-water is compared with
+	// it, not with Gen.
+	HolderRootGen      uint64
 	RemoteLSN          uint64
 	Chunks             map[uint64]chunkRef
 	Segments           map[uint64]ChunkSegment

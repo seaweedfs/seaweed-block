@@ -420,3 +420,52 @@ func localRootVolume(t *testing.T, root string) string {
 	}
 	return strings.TrimSuffix(ids[0], ".root")
 }
+
+// Catalog marks do not advance the root's own generation (V1-SPEC r2.38):
+// root A seals (plain detach), a catalog delete marks HEAD deleting and is
+// then given back (revert), each a HEAD write with A's root nonce copied; A's
+// next attach at a newer epoch is its own lineage and serves, not a rolled-
+// back copy. HolderRootGen stays the seal's generation across both marks.
+func TestCatalogDeleteMarkAndRevertKeepTheRootsLineage(t *testing.T) {
+	ctx := context.Background()
+	remote := storage.NewMemChunkRemote()
+	root := t.TempDir()
+	a := chunkProvider(t, root, remote, viewAs("rA", 3), 0)
+	s := openRecovered(t, a)
+	writeSync(t, s, 1, 0x11)
+	if _, _, err := a.DetachVolumePlain(ctx, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	sealed, _ := remote.GetHead(ctx)
+	if sealed.State != storage.ChunkHeadDetached || sealed.HolderRootGen != sealed.Gen {
+		t.Fatalf("sealed HEAD %+v: want detached with HolderRootGen = Gen", sealed)
+	}
+	// The catalog's delete mark and its revert, as volume_delete writes them:
+	// the HEAD copied, only State (and the proof's generation) changed.
+	mark := sealed
+	mark.State = storage.ChunkHeadDeleting
+	if _, err := remote.CASHead(ctx, storage.ChunkHeadVersion{Gen: sealed.Gen, Epoch: sealed.Epoch}, mark); err != nil {
+		t.Fatal(err)
+	}
+	marked, _ := remote.GetHead(ctx)
+	revert := marked
+	revert.State = storage.ChunkHeadDetached
+	d := *marked.DetachedBy
+	d.Gen = marked.Gen + 1
+	revert.DetachedBy = &d
+	if _, err := remote.CASHead(ctx, storage.ChunkHeadVersion{Gen: marked.Gen, Epoch: marked.Epoch}, revert); err != nil {
+		t.Fatal(err)
+	}
+	given, _ := remote.GetHead(ctx)
+	if given.Gen != sealed.Gen+2 || given.HolderRootGen != sealed.Gen || given.HolderRoot != sealed.HolderRoot {
+		t.Fatalf("after mark and revert: %+v, want gen %d with the root's generation %d kept", given, sealed.Gen+2, sealed.Gen)
+	}
+	b := chunkProvider(t, root, remote, viewAs("rA", 4), 0)
+	sb := openRecovered(t, b) // refused as rolled back before the fix
+	if got, err := sb.Read(1); err != nil || got[0] != 0x11 {
+		t.Fatalf("the reattached root lost its sealed data: %v", err)
+	}
+}

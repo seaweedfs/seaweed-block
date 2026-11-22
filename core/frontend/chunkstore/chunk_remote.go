@@ -394,9 +394,11 @@ type headDoc struct {
 	Holder     string                          `json:"holder"`
 	// HolderRoot: the publishing local root's nonce (absent on pre-release
 	// HEADs; INV-WS-LOCAL-ROOT-IDENTITY-001).
-	HolderRoot string            `json:"holder_root,omitempty"`
-	RemoteLSN  uint64            `json:"remote_lsn"`
-	Chunks     map[uint64]refDoc `json:"chunks,omitempty"`
+	HolderRoot string `json:"holder_root,omitempty"`
+	// HolderRootGen: the generation the holder root's own last CAS installed.
+	HolderRootGen uint64            `json:"holder_root_gen,omitempty"`
+	RemoteLSN     uint64            `json:"remote_lsn"`
+	Chunks        map[uint64]refDoc `json:"chunks,omitempty"`
 	// State is "active" or "detached"; a document without it is active.
 	// DetachedBy names the holder whose final cut (this generation) a
 	// detached HEAD is; it is absent unless State is detached.
@@ -494,7 +496,7 @@ func (r *ChunkRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVer
 }
 
 func headEntry(h storage.ChunkHead) (*filerpb.Entry, error) {
-	doc := headDoc{Format: headFormat, Gen: h.Gen, Epoch: h.Epoch, Holder: h.Holder, HolderRoot: h.HolderRoot, RemoteLSN: h.RemoteLSN,
+	doc := headDoc{Format: headFormat, Gen: h.Gen, Epoch: h.Epoch, Holder: h.Holder, HolderRoot: h.HolderRoot, HolderRootGen: h.HolderRootGen, RemoteLSN: h.RemoteLSN,
 		State: h.State}
 	if h.DetachedBy != nil {
 		doc.DetachedBy = &detachedByDoc{Holder: h.DetachedBy.Holder, HolderRoot: h.DetachedBy.HolderRoot, Epoch: h.DetachedBy.Epoch, Gen: h.DetachedBy.Gen}
@@ -604,7 +606,7 @@ func decodeHeadDoc(p string, content []byte) (storage.ChunkHead, error) {
 	default:
 		return fail("state %q", doc.State)
 	}
-	h := storage.ChunkHead{Gen: doc.Gen, Epoch: doc.Epoch, Holder: doc.Holder, HolderRoot: doc.HolderRoot, RemoteLSN: doc.RemoteLSN,
+	h := storage.ChunkHead{Gen: doc.Gen, Epoch: doc.Epoch, Holder: doc.Holder, HolderRoot: doc.HolderRoot, HolderRootGen: doc.HolderRootGen, RemoteLSN: doc.RemoteLSN,
 		Chunks: make(map[uint64]storage.ChunkRef, len(doc.Chunks)), State: doc.State}
 	if doc.DetachedBy != nil {
 		h.DetachedBy = &storage.ChunkDetachedBy{Holder: doc.DetachedBy.Holder, HolderRoot: doc.DetachedBy.HolderRoot, Epoch: doc.DetachedBy.Epoch, Gen: doc.DetachedBy.Gen}

@@ -65,6 +65,7 @@ func ClaimChunkHead(ctx context.Context, remote ChunkRemote, cfg ChunkLayerConfi
 	// An empty HEAD also needs an exclusive create before an old first cut.
 	next := copyHead(head)
 	next.Epoch, next.Holder, next.HolderRoot = cfg.Epoch, cfg.Holder, cfg.HolderRoot
+	next.HolderRootGen = head.Gen + 1
 	// A new holder's takeover starts serving the same image as active. The
 	// previous holder's final-cut proof belongs only to its detached HEAD.
 	next.State, next.DetachedBy = chunkHeadActive, nil
