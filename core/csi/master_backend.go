@@ -168,20 +168,23 @@ func publishTargetFromStatus(resp *control.StatusResponse, enableMultipath bool,
 			if ft.GetProtocol() != string(ProtocolISCSI) || ft.GetAddr() == "" || ft.GetIqn() == "" || rejectFrontendAddr(ft.GetAddr(), rejectLoopback) {
 				continue
 			}
-			if _, ok := iscsiByIQN[ft.GetIqn()]; !ok {
-				iscsiOrder = append(iscsiOrder, ft.GetIqn())
+			// one multipath target is one IQN AND LUN: paths to another LUN of the same IQN are another unit
+			// (INV-AUTH-HOLDER-IDENTITY-001)
+			key := ft.GetIqn() + "\x00" + strconv.FormatUint(uint64(ft.GetLun()), 10)
+			if _, ok := iscsiByIQN[key]; !ok {
+				iscsiOrder = append(iscsiOrder, key)
 			}
-			iscsiByIQN[ft.GetIqn()] = append(iscsiByIQN[ft.GetIqn()], ft)
+			iscsiByIQN[key] = append(iscsiByIQN[key], ft)
 		}
-		for _, iqn := range iscsiOrder {
-			frontends := iscsiByIQN[iqn]
+		for _, key := range iscsiOrder {
+			frontends := iscsiByIQN[key]
 			if len(frontends) == 0 {
 				continue
 			}
 			out := base
 			out.Protocol = ProtocolISCSI
 			out.ISCSIAddr = frontends[0].GetAddr()
-			out.IQN = iqn
+			out.IQN = frontends[0].GetIqn()
 			out.LUN = frontends[0].GetLun()
 			if len(frontends) > 1 {
 				out.Multipath = true

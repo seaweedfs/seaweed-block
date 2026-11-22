@@ -110,7 +110,7 @@ The role a blockvolume takes from each assignment, its replica listener's admiss
 ```mermaid
 stateDiagram-v2
   [*] --> Unassigned: listener with a floor record, no role yet
-  Unassigned --> Primary: fact names self (server id + replica, delivered only to its registered host), listener fenced at e
+  Unassigned --> Primary: fact names self, listener fenced at e
   Unassigned --> Supporting: fact names another primary, self in peers
   Supporting --> Primary: promotion, fact names self at a higher epoch
   Primary --> Supporting: fact names another primary, self in peers

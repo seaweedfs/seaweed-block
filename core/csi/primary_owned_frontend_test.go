@@ -45,6 +45,16 @@ func TestPublishTargetIsPrimaryOwned(t *testing.T) {
 	if !ok || got.LUN != 1 || !got.Multipath || len(got.ISCSIAddrs) != 2 || got.ISCSIAddrs[0] != "192.0.2.1:3260" {
 		t.Fatalf("nonzero LUN match: %+v ok=%v, want multipath primary-first at LUN 1", got, ok)
 	}
+	// two PRIMARY-owned units of one IQN (q/LUN1 at A, q/LUN2 at B) are two targets, never one multipath target with
+	// LUN1 for both (codex01: the final grouping binds IQN and LUN too)
+	got, ok = publishTargetFromStatus(status(lun("r1", "192.0.2.1:3260", 1), lun("r1", "192.0.2.2:3260", 2)), true, false)
+	if !ok || got.ISCSIAddr != "192.0.2.1:3260" || got.LUN != 1 || got.Multipath || len(got.ISCSIAddrs) != 0 {
+		t.Fatalf("two primary units: %+v ok=%v, want q/LUN1 at 192.0.2.1 alone (no multipath with LUN2's path)", got, ok)
+	}
+	got, ok = publishTargetFromStatus(status(lun("", "192.0.2.1:3260", 1), lun("", "192.0.2.2:3260", 2)), true, false)
+	if !ok || got.LUN != 1 || got.Multipath {
+		t.Fatalf("untagged two units: %+v ok=%v, want q/LUN1 alone", got, ok)
+	}
 	// no primary frontend at all, supporting present: no target
 	if got, ok := publishTargetFromStatus(status(ft("r2", "192.0.2.2:3260", "iqn.v1")), false, false); ok {
 		t.Fatalf("no primary frontend: published %+v, want no target", got)
