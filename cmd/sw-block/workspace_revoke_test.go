@@ -39,7 +39,7 @@ func installRevokeRecorder(t *testing.T, r *revokeCLIRecorder) *int {
 }
 
 func revokeArgs(extra ...string) []string {
-	return append([]string{"ops", "workspace", "revoke", "--master", "127.0.0.1:19090", "--volume", "vol", "--replica", "r1", "--epoch", "3"}, extra...)
+	return append([]string{"ops", "workspace", "revoke", "--master", "127.0.0.1:19090", "--volume", "vol", "--replica", "r1", "--epoch", "3", "--sealed-gen", "9"}, extra...)
 }
 
 // G1 / existing M2 Granted -> Revoking, INV-WS-CLEAN-MOVE-001.
@@ -55,7 +55,7 @@ func TestWorkspaceRevokeSendsOnlyTheExplicitIdentity(t *testing.T) {
 	if q.GetVolumeId() != "vol" || q.GetReplicaId() != "r1" || q.GetEpoch() != 3 {
 		t.Fatalf("identity=%+v", q)
 	}
-	if !strings.Contains(out, "revocation requested") || !strings.Contains(out, "vol") || !strings.Contains(out, "r1@3") {
+	if !strings.Contains(out, "revocation requested") || !strings.Contains(out, "vol") || !strings.Contains(out, "r1@3") || !strings.Contains(out, "9") {
 		t.Fatalf("request outcome must name its identity and remain distinct from ACK: %q", out)
 	}
 }
@@ -66,11 +66,26 @@ func TestWorkspaceRevokeRejectsInvalidInputsBeforeDial(t *testing.T) {
 	for _, extra := range [][]string{
 		{"--master", ""}, {"--volume", ""}, {"--replica", ""}, {"--epoch", "0"}, {"--epoch", "-1"},
 		{"--timeout", "0s"}, {"--timeout", "-1s"}, {"unexpected"},
+		{"--sealed-gen", "0"}, {"--without-seal"},
 	} {
 		code, _, _ := runCLI(revokeArgs(extra...))
 		if code != wsExitRefusedLocally || *dials != 0 || len(r.requests) != 0 {
 			t.Fatalf("%v: exit=%d dials=%d requests=%d", extra, code, *dials, len(r.requests))
 		}
+	}
+}
+
+func TestWorkspaceRevokeRequiresAnExplicitSealChoice(t *testing.T) {
+	r := &revokeCLIRecorder{reply: &control.WorkspaceLeaseFact{VolumeId: "vol", ReplicaId: "r1", Epoch: 3, Revoking: true}}
+	dials := installRevokeRecorder(t, r)
+	args := revokeArgs()
+	args = args[:len(args)-2] // omit --sealed-gen entirely
+	if code, _, _ := runCLI(args); code != wsExitRefusedLocally || *dials != 0 {
+		t.Fatalf("missing seal choice: exit=%d dials=%d", code, *dials)
+	}
+	code, out, errOut := runCLI(append(args, "--without-seal"))
+	if code != wsExitOK || !strings.Contains(out, "abandoning unpublished tail") || len(r.requests) != 1 {
+		t.Fatalf("explicit lossy choice: exit=%d requests=%d out=%q err=%q", code, len(r.requests), out, errOut)
 	}
 }
 
