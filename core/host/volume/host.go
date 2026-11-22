@@ -519,12 +519,9 @@ func (h *Host) getReplication() replicaSetUpdater {
 	return h.replication
 }
 
-// IsSuperseded satisfies SupersedeProbe: returns true when this
-// host's lastOther record names a DIFFERENT replica at a strictly
-// newer (Epoch, EndpointVersion) than the caller's self-lineage.
-// Same-replica updates (our own Epoch advance) are NOT supersede
-// events; the bridge handles those naturally through adapter
-// projection.
+// IsSuperseded gates a newer foreign replica line, or a same-replica foreign
+// server/endpoint identity at or above the local lineage. An explicitly
+// matching self identity remains an ordinary adapter update.
 func (h *Host) IsSuperseded(selfReplicaID string, selfEpoch, selfEV uint64) bool {
 	h.otherMu.Lock()
 	defer h.otherMu.Unlock()
@@ -818,7 +815,7 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 		if err := h.fenceSelfWithPeers(selfRolePrimary, fact.Epoch, false); err != nil {
 			h.log.Printf("blockvolume: foreign holder ingress fence: %v", err)
 		}
-		h.log.Printf("blockvolume: volume %s assignment server=%q replica=%q is not this process server=%q; fenced, never adopted", h.cfg.VolumeID, fact.ServerId, fact.ReplicaId, h.cfg.ServerID)
+		h.log.Printf("blockvolume: volume %s assignment server=%q replica=%q is not this process server=%q; fenced, not serving; never adopted", h.cfg.VolumeID, fact.ServerId, fact.ReplicaId, h.cfg.ServerID)
 		return
 	}
 	if fact.ReplicaId != h.cfg.ReplicaID {
