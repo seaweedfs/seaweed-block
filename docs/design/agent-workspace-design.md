@@ -479,3 +479,61 @@ stateDiagram-v2
 ```
 
 Guest I/O never acquires a slot. An unavailable pool skips background cuts; urgent and named seals may use per-process fallback with an alarm. Active coordinated reservations exclude orphaned crash spill. Upload pacing debt survives leases in one process, but a new process starts fresh, so arbitrary process turnover has no fixed host-rate bound.
+
+### Workspace primary supervisor retry
+
+A workspace chunk primary that exhausts its existing assignment wait, or whose
+lease fences while serving, exits 75 after fail-closed cleanup bounded by the
+existing five-second lease-drain limit. systemd restarts on failure with
+RestartSec=5s. A newer master fact naming another replica or a refused claim proving another
+HEAD holder permits exit 78;
+RestartPreventExitStatus=78 suppresses automatic restarts until an operator
+explicitly starts the unit. A higher epoch for the same replica retries.
+A HEAD fence after the target listens (the attached chunk layer finds HEAD owned
+by another publisher while the lease may still be valid) is independent of the
+lease and exits 78 `head_fenced` (INV-FE-FENCE-EXIT-001).
+An ACKed planned revocation and a signal stop retain their normal exit status.
+Sealed same-epoch recovery stays non-serving for seal replay after assignment.
+Local-root, WAL-corruption and I/O diagnostics retain their existing wait.
+No restart bypasses the master barrier, durable re-grant, or HEAD claim.
+See M2 and INV-WS-STARTUP-RETRY-001 in the invariant ledger.
+
+```mermaid
+stateDiagram-v2
+  [*] --> AwaitingAssignment
+  AwaitingAssignment --> Serving: grant and HEAD claim
+  AwaitingAssignment --> Exit75: assignment wait exhausted
+  Serving --> Exit75: lease fence
+  AwaitingAssignment --> Exit78: newer other-replica fact or exact foreign-holder HEAD claim proof
+  Serving --> Exit78: lease fence and newer other-replica fact
+  Serving --> Exit78: runtime HEAD fence (another publication owner), head_fenced
+  Exit75 --> AwaitingAssignment: supervisor starts new process
+  Exit78 --> AwaitingAssignment: explicit operator start
+  AwaitingAssignment --> SealedReplay: assigned same-epoch sealed HEAD
+  SealedReplay --> Exit75: lease fence
+  SealedReplay --> [*]: signal
+  AwaitingAssignment --> Draining: planned revoke owns shutdown; retire startup watcher
+  Serving --> Draining: planned revoke owns shutdown
+  SealedReplay --> Draining: planned revoke owns shutdown
+  Draining --> [*]: stored detached proof and revoke ACK
+  Draining --> Exit75: ACK unconfirmed
+  Serving --> [*]: signal
+```
+
+GAP-1 exit classification compares a newer other-replica fact with the newest own assignment this process observed, including a locally blocked assignment; historical other facts do not suppress restart. The shared `Host.IsSuperseded` predicate is reused without changing frontend admission. An unconfirmed revocation ACK exits75 with `revoke_ack_unconfirmed`. Restart can retry ACK only while the original revoking lease remains valid; after expiry the revoking/recorded-ACK re-grant guards still refuse, so restart alone cannot resolve that case and operator recovery is required.
+
+Once the resource owner accepts a stop request, startup-monitor cancellation and startup exit choice serialize on the process owner's startup mutex. A delayed startup deadline cannot replace planned drain ownership; success remains unselected until the real guard confirms the stored detached proof's ACK. A wait that already chose sealed replay or stale-local-root diagnostics keeps that disposition even if its context expires at return.
+
+A refused HEAD claim returns its exact observed image as failure evidence, never
+an installed claim. Only a nonempty foreign holder in that fenced image permits
+no-retry independently of the assignment stream. Higher epochs of the same
+holder and fences without that proof retain retry75. Provider generation checks
+and planned-stop arbitration still apply; no readiness or listen gate changes
+belong to this classification fix.
+
+The existing-local-root precheck uses the same distinction: another holder at
+or above the assigned epoch is positive supersede evidence; an older foreign
+publication remains the existing move-back diagnostic. Neither path serves or
+publishes the local WAL, which remains on disk for diagnosis.
+
+Part T ownership: the lease guard alone holds the terminal fence and its first cause. A host shutdown before runtime installation publishes only a fenced, zero-validity guard; installation carries that cause into the valid-identity guard and never renews it. Startup and runtime exit callers both use workspaceRetryOutcome; only startup can supply a generation-bound refused-claim HEAD proof.
