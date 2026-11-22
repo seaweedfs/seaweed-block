@@ -402,7 +402,7 @@ func (h *plannedHandoffHarness) start(t *testing.T, name, binary string, args ..
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd := stripSystemdForTestLockDir(exec.CommandContext(ctx, binary, args...))
 	cmd.Dir, cmd.Stdout, cmd.Stderr = h.dir, log, log
 	cmd.WaitDelay = 5 * time.Second
 	d := &daemon{name: name, log: log.Name(), done: make(chan struct{}), cancel: cancel}

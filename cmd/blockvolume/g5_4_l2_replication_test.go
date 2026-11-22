@@ -223,6 +223,7 @@ func startG54Volume(t *testing.T, bins l2bins, art string, o volOpts) *proc {
 	if o.replicationAck != "" {
 		cmd.Args = append(cmd.Args, "--replication-ack", o.replicationAck)
 	}
+	stripSystemdForTestLockDir(cmd)
 	cmd.Stdout = lf
 	cmd.Stderr = lf
 	if err := cmd.Start(); err != nil {
