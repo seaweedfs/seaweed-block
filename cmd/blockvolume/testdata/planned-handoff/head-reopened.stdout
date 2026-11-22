@@ -1,0 +1,1 @@
+{"volumeID":"v1","volume":{"origin":"create","numBlocks":65536,"blockSize":4096,"chunkBlocks":1024,"createdNs":1795337541307771858,"parent":null},"head":{"gen":4,"epoch":2,"holder":"s1/r1","remoteLSN":1,"state":"active","detachedBy":null,"chunkCount":1}}

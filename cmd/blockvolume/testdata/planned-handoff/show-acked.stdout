@@ -1,0 +1,8 @@
+volume: v1 (query snapshot, not authority to serve)
+replica: r1
+epoch: 1
+lease state: revoking
+holder: r1@1 (logical replica)
+lease expiry_ns: 1795337571673280526; host validity_ns at query: 19706858270
+recorded ACK: r1@1 HEAD generation 3
+host: unknown (not recorded by the master); issued moves and bindings below are separate facts
