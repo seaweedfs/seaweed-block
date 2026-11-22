@@ -511,3 +511,114 @@ func TestChunkMapExtentsV3DurableButRefusedPublicationStaysPinned(t *testing.T) 
 		t.Fatalf("reopen selected map generation %d, want the durable one %d", g, prepared.candidate.generation)
 	}
 }
+
+// INV-WAL-V3-MAP-PRIOR-LIVE-001. A preparer captures prior (the current root)
+// and releases the descriptor lock before it prepares. If, in that gap,
+// another preparer publishes a new root and a second publication (a W sync or
+// a rollover) writes it into the other slot, prior is released: its extents
+// are free in the live snapshot. A prepare from that prior must not lend its
+// page references: the same prepare may allocate its own page or root into
+// the released extent, and the candidate then names a page whose bytes no
+// longer match its hash (the next open fails). Prepare refuses a released
+// prior without latching; a prepare from the current root then succeeds.
+func TestChunkMapExtentsV3ReleasedPriorIsRefused(t *testing.T) {
+	m, d, path := extentsMapV3(t)
+	same := []chunkLSNEntryV3{{LSN: 500}}
+	c1, err := m.Prepare(1, 7, same, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publishV3(m, d, c1, c1)              // both slots name c1; the flusher captures prior = c1
+	c2 := prepV3(t, m, 2, c1)            // the chunk layer's cut: the page is rewritten
+	publishV3(m, d, c2, c1)              // slot A names c2, slot B still c1
+	publishV3(m, d, c2, c2)              // the next publication: neither slot names c1 (released)
+	c3, err := m.Prepare(3, 7, same, c1) // the flusher's prepare from its captured prior
+	if err == nil {
+		_, _, openErr := openChunkLSNMapV3(path, c3.descriptor(d), m.chunkBlocks)
+		t.Fatalf("prepare from a released prior succeeded: page ref %d reused, root at %d; opening the candidate: %v",
+			c3.refs[0].Offset, c3.rootOffset, openErr)
+	}
+	if !errors.Is(err, ErrMapCoverageStale) {
+		t.Fatalf("prepare from a released prior: %v, want a map coverage refusal", err)
+	}
+	if m.failed != nil {
+		t.Fatalf("the refusal latched the map: %v", m.failed)
+	}
+	if st := m.Stats(); st.PriorReleased != 1 {
+		t.Fatalf("PriorReleased %d, want the refusal counted once", st.PriorReleased)
+	}
+	c4, err := m.Prepare(3, 7, same, c2)
+	if err != nil {
+		t.Fatalf("prepare from the current root after the refusal: %v", err)
+	}
+	m2, _, err := openChunkLSNMapV3(path, c4.descriptor(d), m.chunkBlocks)
+	if err != nil {
+		t.Fatalf("open of the candidate prepared from the current root: %v", err)
+	}
+	m2.Close()
+}
+
+// INV-WAL-V3-MAP-PRIOR-LIVE-001, the release landing INSIDE the prepare, just
+// before its live-set snapshot (the hook): the liveness check must sit in the
+// snapshot's own liveMu section. Mutant: the check in a separate section
+// before the snapshot passes while prior is live, the release lands, and the
+// candidate reuses prior's page while its root takes that extent (the open
+// fails the page hash).
+func TestChunkMapExtentsV3ReleasedPriorIsRefusedInsideThePrepare(t *testing.T) {
+	m, d, path := extentsMapV3(t)
+	same := []chunkLSNEntryV3{{LSN: 500}}
+	c1, err := m.Prepare(1, 7, same, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publishV3(m, d, c1, c1)
+	c2 := prepV3(t, m, 2, c1)
+	m.testBeforeLiveSnapshot = func() {
+		m.testBeforeLiveSnapshot = nil
+		publishV3(m, d, c2, c1) // the other publisher, then the next publication:
+		publishV3(m, d, c2, c2) // c1 is released while this prepare runs
+	}
+	c3, err := m.Prepare(3, 7, same, c1)
+	if err == nil {
+		_, _, openErr := openChunkLSNMapV3(path, c3.descriptor(d), m.chunkBlocks)
+		t.Fatalf("prepare whose prior was released before its snapshot succeeded: page ref %d, root at %d; opening the candidate: %v",
+			c3.refs[0].Offset, c3.rootOffset, openErr)
+	}
+	if !errors.Is(err, ErrMapCoverageStale) || m.failed != nil {
+		t.Fatalf("refusal %v, latched %v: want a non-latching map coverage refusal", err, m.failed)
+	}
+}
+
+// INV-WAL-V3-MAP-PRIOR-LIVE-001, the release landing AFTER the prepare,
+// before the candidate's publication: the candidate is in flight and pins
+// every page it references, the reused ones included, so a later prepare
+// cannot take them and the candidate stays readable. Mutant: registering the
+// candidate with only its newly written extents lets the next prepare
+// overwrite the reused page.
+func TestChunkMapExtentsV3InFlightCandidatePinsItsReusedPages(t *testing.T) {
+	m, d, path := extentsMapV3(t)
+	same := []chunkLSNEntryV3{{LSN: 500}}
+	c1, err := m.Prepare(1, 7, same, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publishV3(m, d, c1, c1)
+	c2 := prepV3(t, m, 2, c1)
+	c3, err := m.Prepare(3, 7, same, c1) // prior live: c3 reuses c1's page
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c3.refs[0] != c1.refs[0] {
+		t.Fatalf("setup: c3 page ref %+v, want c1's reused %+v", c3.refs[0], c1.refs[0])
+	}
+	publishV3(m, d, c2, c1)
+	publishV3(m, d, c2, c2) // c1 released; c3 (gen 3 > current 2) still in flight
+	if _, err := m.Prepare(4, 7, []chunkLSNEntryV3{{LSN: 900}}, c2); err != nil {
+		t.Fatal(err)
+	}
+	m2, _, err := openChunkLSNMapV3(path, c3.descriptor(d), m.chunkBlocks)
+	if err != nil {
+		t.Fatalf("in-flight candidate unreadable after a later prepare: %v", err)
+	}
+	m2.Close()
+}
