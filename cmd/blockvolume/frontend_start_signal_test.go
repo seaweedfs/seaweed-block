@@ -50,13 +50,41 @@ func TestFrontendStartSignal_WorkspacePrimaryWaitsForAdmitsIO(t *testing.T) {
 		t.Fatal("did not start after AdmitsIO passed")
 	}
 
-	stop2 := make(chan struct{})
-	b2 := &servingStub{first: make(chan struct{})}
-	close(b2.first)
-	sig2 := frontendStartSignal(f, b2, stop2)
-	close(stop2)
-	if closedWithin(sig2, 4*admitRecheck) {
-		t.Fatal("a stopped wait started the targets")
+}
+
+// A stop ends firstAdmitted's worker without starting the targets, both
+// while it waits for the first admitted I/O and while it re-checks AdmitsIO:
+// its completion is observed on its own channel, and every join is bounded.
+func TestFirstAdmittedStopEndsTheWorker(t *testing.T) {
+	for _, served := range []bool{false, true} {
+		stop := make(chan struct{})
+		b := &servingStub{first: make(chan struct{})}
+		if served {
+			close(b.first) // re-checking AdmitsIO, which keeps refusing
+		}
+		out, done := firstAdmitted(stop, b.FirstServing(), b.AdmitsIO)
+		stopped := false
+		t.Cleanup(func() {
+			if !stopped {
+				close(stop)
+			}
+			if !closedWithin(done, 5*time.Second) {
+				t.Errorf("served=%v: the worker did not return within 5s of its stop (cleanup)", served)
+			}
+		})
+		if closedWithin(done, 2*admitRecheck) {
+			t.Fatalf("served=%v: the worker returned before any stop", served)
+		}
+		close(stop)
+		stopped = true
+		if !closedWithin(done, 5*time.Second) {
+			t.Fatalf("served=%v: the worker did not return within 5s of its stop", served)
+		}
+		select {
+		case <-out:
+			t.Fatalf("served=%v: a stopped wait started the targets", served)
+		default:
+		}
 	}
 }
 

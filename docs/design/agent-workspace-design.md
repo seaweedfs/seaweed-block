@@ -489,6 +489,9 @@ RestartSec=5s. A newer master fact naming another replica or a refused claim pro
 HEAD holder permits exit 78;
 RestartPreventExitStatus=78 suppresses automatic restarts until an operator
 explicitly starts the unit. A higher epoch for the same replica retries.
+A HEAD fence after the target listens (the attached chunk layer finds HEAD owned
+by another publisher while the lease may still be valid) is independent of the
+lease and exits 78 `head_fenced` (INV-FE-FENCE-EXIT-001).
 An ACKed planned revocation and a signal stop retain their normal exit status.
 Sealed same-epoch recovery stays non-serving for seal replay after assignment.
 Local-root, WAL-corruption and I/O diagnostics retain their existing wait.
@@ -503,6 +506,7 @@ stateDiagram-v2
   Serving --> Exit75: lease fence
   AwaitingAssignment --> Exit78: newer other-replica fact or exact foreign-holder HEAD claim proof
   Serving --> Exit78: lease fence and newer other-replica fact
+  Serving --> Exit78: runtime HEAD fence (another publication owner), head_fenced
   Exit75 --> AwaitingAssignment: supervisor starts new process
   Exit78 --> AwaitingAssignment: explicit operator start
   AwaitingAssignment --> SealedReplay: assigned same-epoch sealed HEAD
