@@ -104,15 +104,26 @@ blockvolume runs with its identity from the spec (`--server-id s1 --volume-id v1
 **Check:** blockvolume logs `blockvolume: volume v1 adopted as PRIMARY at r1@E`,
 and `ops workspace show` prints `lease state: granted` and `holder: r1@E`.
 
-## Rule: one live process per holder
+## Rule: one live process per volume per host
 
-blockmaster cannot tell two processes with the same identity apart. The only
-guard is the exclusive lock on the volume file `<durable-root>/v1.bin`, and it
-works only when both processes use the same file. Moving the local root aside
-while the old process runs bypasses it.
+`blockvolume` takes an exclusive lock on `/run/sw-block/locks/<volume id>.lock`
+before it opens the volume's store and holds it until it exits. A second
+`blockvolume` for the same volume on the same host is refused at start, whatever
+its `--durable-root`. The kernel releases the lock when the process exits, also
+on a crash or a kill; there is nothing to clean up. Setup and limits are in
+[One live process per volume per host](releases/one-process-per-volume.md).
 
-So, before you start a second process for the volume, or move a local root
-aside, make sure the old process is gone:
+The lock covers one host. Two hosts are kept apart by blockmaster's assignment
+and the lease, not by this lock.
+
+An existing local root attaches only if its durable position reaches the
+`remoteLSN` of HEAD. A root that is behind (a copy taken before a later cut)
+is refused, never serves, and its process exits 78 (no automatic restart) with
+`reason=superseded cure="remove or quarantine the local root to attach fresh
+from HEAD"`. A power loss does not cause this: a cut makes its position durable
+locally before it publishes it.
+
+Before you move a local root aside, make sure its process is gone:
 
 ```bash
 systemctl status sw-blockvolume        # inactive (dead)
@@ -122,6 +133,30 @@ sw-block ops volume-unheld --path /var/lib/sw-block-volume/volumes/v1.bin
 `volume-unheld` exits 0 (`unheld: ...`) only when no process on this host holds
 the file; exit 1 is `held: a live process on this host holds ...`. It proves
 nothing about another host.
+
+### Do not
+
+These are rules for the operator. The product does not detect every breach.
+
+- **One local root per volume per host.** A second `blockvolume` for the volume on the
+  same host is refused by the lock; do not work around it (another lock directory, a
+  container that does not share the host's `/run/sw-block/locks`).
+- **Never restore a local root from a copy** (a file copy, a disk snapshot, a backup).
+  A copy older than the last cut is refused. A copy taken after the last cut is NOT
+  detected: it attaches and loses the writes acknowledged after the copy was taken. To go
+  back, start from the remote image with a fresh root.
+- **After a forced move, stop and disable the old host's unit.** Until you do, it
+  restarts about every 35 seconds, logs that it waits for an assignment, and cannot
+  serve.
+- **Before moving a volume back to a host that held it earlier, move that host's old
+  root aside** (after the check above). The old root is stale; the new holder must start
+  on a fresh one.
+- **Never revoke before the seal is confirmed** (see the hand-over steps): a revoke
+  without an ACK cannot be undone on one node.
+- **Never restore blockmaster's `--authority-store` or `--lifecycle-store` from a copy.**
+  They decide who may write each volume. An older copy hands out epochs the volumes have
+  already passed, and every start is then refused. A lost store needs a recovery
+  procedure, not a restore.
 
 ## Which procedures run end to end
 
