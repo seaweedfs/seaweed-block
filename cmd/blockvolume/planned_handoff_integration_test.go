@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -237,8 +238,12 @@ func startHandoffEnv(t *testing.T, n int, masterArgs ...string) *handoffEnv {
 }
 
 // volArgs is the chapter's blockvolume command for one host.
-func (env *handoffEnv) volArgs(id string) []string {
-	b := env.hosts[id]
+func (env *handoffEnv) volArgs(id string) []string { return env.volArgsFor(env.hosts[id]) }
+
+// volArgsFor is the chapter's blockvolume command for b. The default
+// scheduled snapshot (daily:7, at a per-volume offset) stays on, as the page
+// says; a snapshot inside a test could only make a test fail, never pass.
+func (env *handoffEnv) volArgsFor(b bvHost) []string {
 	return []string{"--master", env.h.masterAddr, "--server-id", b.id, "--volume-id", "v1", "--replica-id", "r1",
 		"--data-addr", b.data, "--ctrl-addr", b.ctrl, "--status-addr", b.status,
 		"--durable-root", b.root, "--durable-impl", "walstore-chunk",
@@ -303,15 +308,30 @@ func newPlannedHandoffHarness(t *testing.T) *plannedHandoffHarness {
 	return h
 }
 
+// captureOutput writes each sw-block answer to $HANDOFF_CAPTURE_DIR, when set,
+// as <test>-<n>-<verb>.stdout/.stderr: the source of testdata/planned-handoff.
+func captureOutput(t *testing.T, args []string, stdout, stderr string) {
+	dir := os.Getenv("HANDOFF_CAPTURE_DIR")
+	if dir == "" || len(args) < 3 {
+		return
+	}
+	captureSeq++
+	base := filepath.Join(dir, fmt.Sprintf("%s-%02d-%s-%s", t.Name(), captureSeq, args[1], args[2]))
+	_ = os.WriteFile(base+".stdout", []byte(stdout), 0o644)
+	_ = os.WriteFile(base+".stderr", []byte(stderr), 0o644)
+}
+
+var captureSeq int
+
 var handoffPorts struct {
 	sync.Mutex
 	used map[int]bool
 }
 
-// handoffAddress returns a free loopback address below the kernel's
-// ephemeral range (32768 and up on Linux). A daemon restarted minutes later
-// binds it again, and an outgoing connection may take any ephemeral port in
-// between; ports below the range are never handed out that way.
+// handoffAddress returns a free loopback address in 10000-19999: below the
+// kernel's ephemeral range (32768 and up on Linux), where an outgoing
+// connection can take a port while a restarted daemon waits to bind it
+// again, and below the 20000-49999 range startWorkspaceWeed draws from.
 func handoffAddress(t *testing.T) string {
 	t.Helper()
 	handoffPorts.Lock()
@@ -320,7 +340,7 @@ func handoffAddress(t *testing.T) string {
 		handoffPorts.used = map[int]bool{}
 	}
 	for i := 0; i < 500; i++ {
-		p := 21000 + rand.Intn(11000)
+		p := 10000 + rand.Intn(10000)
 		if handoffPorts.used[p] {
 			continue
 		}
@@ -341,6 +361,21 @@ type daemon struct {
 	done      chan struct{}
 	err       error
 	cancel    context.CancelFunc
+	proc      *os.Process
+}
+
+// term sends SIGTERM, as systemctl stop or restart does, and waits for the
+// child to exit.
+func (d *daemon) term(t *testing.T, timeout time.Duration) {
+	t.Helper()
+	if err := d.proc.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("SIGTERM %s: %v", d.name, err)
+	}
+	select {
+	case <-d.done:
+	case <-time.After(timeout):
+		t.Fatalf("%s did not exit within %s of SIGTERM", d.name, timeout)
+	}
 }
 
 // kill kills the child (no ACK is sent on a signal) and waits for it.
@@ -392,6 +427,7 @@ func (h *plannedHandoffHarness) start(t *testing.T, name, binary string, args ..
 		t.Fatalf("start %s: %v", name, err)
 	}
 	started = true
+	d.proc = cmd.Process
 	go func() { d.err = cmd.Wait(); close(d.done) }()
 	return d
 }
@@ -468,6 +504,7 @@ func (h *plannedHandoffHarness) run(t *testing.T, args ...string) (string, strin
 	var stdout, stderr strings.Builder
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
+	captureOutput(t, args, stdout.String(), stderr.String())
 	var exit *exec.ExitError
 	switch {
 	case err == nil:
