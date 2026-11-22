@@ -768,6 +768,7 @@ func (h *Host) streamOnce(ctx context.Context) error {
 	stream, err := h.asnCli.SubscribeAssignments(ctx, &control.SubscribeRequest{
 		VolumeId:  h.cfg.VolumeID,
 		ReplicaId: h.cfg.ReplicaID,
+		ServerId:  h.cfg.ServerID, // INV-AUTH-HOLDER-IDENTITY-001: the master checks it against the stream's host
 	})
 	if err != nil {
 		return err

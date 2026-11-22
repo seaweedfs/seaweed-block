@@ -186,6 +186,9 @@ message SubscribeRequest {
     string volume_id = 1;
     string replica_id = 2;
     uint64 resume_epoch = 3; // delivery hint only; does NOT influence authority
+    // the subscriber's --server-id: for a workspace volume the master delivers the line only to a registered server
+    // id whose stream comes from its registered host (INV-AUTH-HOLDER-IDENTITY-001)
+    string server_id = 4;
 }
 
 // ReplicaDescriptor — one entry in an AssignmentFact.peers list.

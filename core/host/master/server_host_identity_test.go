@@ -2,6 +2,7 @@ package master
 
 import (
 	"context"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -181,5 +182,85 @@ func TestPortalAndPrimaryComeFromTheLineServerNotTheFreshestHeartbeat(t *testing
 	vol := h.ObservationSnapshot(time.Now().UTC()).Volumes[0]
 	if vol.PrimaryNode != holder || vol.PublishTarget != holderAddr {
 		t.Fatalf("displayed primary node=%q target=%q, want %q %q (line server, not the stale host %s)", vol.PrimaryNode, vol.PublishTarget, holder, holderAddr, stale)
+	}
+}
+
+// dialFrom opens a client connection to the rig's master whose source address is host (a real loopback address).
+func (r *isolationRig) dialFrom(t *testing.T, host string) *grpc.ClientConn {
+	t.Helper()
+	d := net.Dialer{LocalAddr: &net.TCPAddr{IP: net.ParseIP(host)}}
+	conn, err := grpc.NewClient(r.m.Addr(), grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) { return d.DialContext(ctx, "tcp", addr) }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return conn
+}
+
+// INV-AUTH-HOLDER-IDENTITY-001, workspace path: two processes with the same --server-id on two real loopback hosts. The
+// one not on the registered host (127.0.0.2) is refused at lease renew, at the revocation ACK and at the assignment
+// stream (so it never receives the line to adopt), and each refusal is logged; an unregistered server id is refused at
+// its first renew; the registered host is unaffected. The check trusts the network peer address (no NAT or proxy
+// between volume and master in OSS); it is not authentication.
+func TestWorkspaceHolderRefusedFromAnotherHostAtRenewAckAndStream(t *testing.T) {
+	r := newIsolationRig(t, false, t.TempDir(), t.TempDir()) // node-a registered on 127.0.0.1
+	r.createVolume(t, "w1")
+	if _, err := r.m.Lifecycle().Placements.ApplyPlan(lifecycle.PlacementPlan{VolumeID: "w1", DesiredRF: 1,
+		Candidates: []lifecycle.PlacementCandidate{{VolumeID: "w1", ServerID: "node-a", ReplicaID: "r1", Source: lifecycle.PlacementSourceExistingReplica}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.obs.ReportHeartbeat(r.ctx, &control.HeartbeatReport{ServerId: "node-a", SentAt: timestamppb.Now(), Reachable: true, Eligible: true,
+		Slots: []*control.HeartbeatSlot{{VolumeId: "w1", ReplicaId: "r1", DataAddr: "127.0.0.1:19121", CtrlAddr: "127.0.0.1:19122"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.m.RunLifecycleProductTick(); err != nil {
+		t.Fatal(err)
+	}
+	line := waitAuthorityLine(t, r.m.Publisher(), "w1")
+	id := &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "w1", ReplicaId: "r1", Epoch: line.Epoch}
+	other := r.dialFrom(t, "127.0.0.2")
+	wsOther, asnOther := control.NewWorkspaceServiceClient(other), control.NewAssignmentServiceClient(other)
+	refusedFrom2 := func(what string, err error) {
+		t.Helper()
+		if status.Code(err) != codes.FailedPrecondition || !strings.Contains(status.Convert(err).Message(), "registered on host 127.0.0.1; refused from 127.0.0.2") {
+			t.Fatalf("%s from 127.0.0.2 as node-a: %v, want the host refusal", what, err)
+		}
+	}
+	_, err := wsOther.RenewWorkspaceLease(r.ctx, id)
+	refusedFrom2("renew", err)
+	_, err = wsOther.AckWorkspaceRevoked(r.ctx, &control.WorkspaceRevocationAck{Identity: id, HeadGen: 9})
+	refusedFrom2("ACK", err)
+	stream, err := asnOther.SubscribeAssignments(r.ctx, &control.SubscribeRequest{VolumeId: "w1", ReplicaId: "r1", ServerId: "node-a"})
+	if err == nil {
+		_, err = stream.Recv()
+	}
+	refusedFrom2("assignment stream", err)
+	if n := strings.Count(r.logs.String(), "refused from 127.0.0.2"); n < 3 {
+		t.Fatalf("refusals logged %d times, want 3:\n%s", n, r.logs.String())
+	}
+	// the registered host is unaffected: it renews and receives the line
+	if _, err := r.ws.RenewWorkspaceLease(r.ctx, id); err != nil {
+		t.Fatalf("renew from the registered host: %v", err)
+	}
+	own, err := control.NewAssignmentServiceClient(r.dialFrom(t, "127.0.0.1")).SubscribeAssignments(r.ctx, &control.SubscribeRequest{VolumeId: "w1", ReplicaId: "r1", ServerId: "node-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fact, err := own.Recv(); err != nil || fact.GetEpoch() != line.Epoch {
+		t.Fatalf("assignment stream from the registered host: %+v %v", fact, err)
+	}
+	// an unregistered server id is refused at its first renew; a stream naming no server id is refused too
+	_, err = r.ws.RenewWorkspaceLease(r.ctx, &control.WorkspaceIdentity{ServerId: "node-z", VolumeId: "w1", ReplicaId: "r1", Epoch: line.Epoch})
+	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(status.Convert(err).Message(), `server id "node-z" is not registered`) {
+		t.Fatalf("renew by an unregistered server id: %v, want the not-registered refusal", err)
+	}
+	anon := r.dialFrom(t, "127.0.0.1")
+	s2, err := control.NewAssignmentServiceClient(anon).SubscribeAssignments(r.ctx, &control.SubscribeRequest{VolumeId: "w1", ReplicaId: "r1"})
+	if err == nil {
+		_, err = s2.Recv()
+	}
+	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(status.Convert(err).Message(), `server id "" is not registered`) {
+		t.Fatalf("assignment stream with no server id: %v, want the not-registered refusal", err)
 	}
 }

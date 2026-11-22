@@ -391,6 +391,13 @@ func (s *services) SubscribeAssignments(req *control.SubscribeRequest, stream co
 	if len(slots) == 0 {
 		return fmt.Errorf("subscribe: volume %q not in accepted topology", req.VolumeId)
 	}
+	// INV-AUTH-HOLDER-IDENTITY-001: a workspace volume's line is delivered only to a registered server id streaming
+	// from its registered host, so a second host with a copied --server-id never receives (never adopts) it.
+	if s.workspaceVolumeForRenewal(req.VolumeId) == nil {
+		if err := s.host.refuseWorkspaceHolderHost(ctx, "assignment stream", req.GetServerId()); err != nil {
+			return status.Error(codes.FailedPrecondition, err.Error())
+		}
+	}
 
 	type recv struct {
 		ch     <-chan adapter.AssignmentInfo
