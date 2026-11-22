@@ -262,7 +262,8 @@ type DurableProvider struct {
 
 	// walstore-chunk: closeCtx ends with Close and cancels in-flight
 	// remote attachment; inflight counts RecoverVolume calls admitted
-	// before Close, which Close waits for before closing any store.
+	// before Close, and each attached layer's fence watcher, which Close
+	// waits for before closing any store.
 	closeCtx    context.Context
 	closeCancel context.CancelFunc
 	inflight    sync.WaitGroup

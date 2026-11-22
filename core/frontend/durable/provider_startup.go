@@ -73,8 +73,10 @@ const chunkFenceWatchInterval = 50 * time.Millisecond
 // fenced only on supersede or owner change, never on a clean detach), then
 // latches the backend not operational with that evidence and marks the
 // volume runtime-fenced (INV-FE-PRIMARY-READY-OPERATIONAL-001). It ends when
-// the provider closes or the layer is no longer this volume's.
+// the provider closes or the layer is no longer this volume's; Close joins it
+// through p.inflight (counted when it starts) after cancelling closeCtx.
 func (p *DurableProvider) watchChunkFence(volumeID string, h *volHandle, layer storage.ChunkLayer) {
+	defer p.inflight.Done()
 	t := time.NewTicker(chunkFenceWatchInterval)
 	defer t.Stop()
 	for {
