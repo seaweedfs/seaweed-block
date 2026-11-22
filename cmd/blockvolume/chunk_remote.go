@@ -88,8 +88,8 @@ func validateChunkFlags(f flags) error {
 	if c.maintenanceInterval < 0 {
 		return errors.New("--chunk-maintenance-interval must not be negative")
 	}
-	if c.captureInterval > 0 && c.captureInterval < 5*time.Minute {
-		return errors.New("--chunk-capture-interval must be 0 or at least 5m")
+	if c.captureInterval > 0 && c.captureInterval < minChunkCaptureInterval {
+		return fmt.Errorf("--chunk-capture-interval must be 0 or at least %s", minChunkCaptureInterval)
 	}
 	if c.captureInterval < 0 {
 		return fmt.Errorf("--chunk-capture-interval=%s must not be negative", c.captureInterval)
