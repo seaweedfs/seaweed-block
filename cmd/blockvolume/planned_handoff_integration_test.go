@@ -179,6 +179,9 @@ type handoffEnv struct {
 	chunkPath string
 	show      []string
 	hosts     map[string]bvHost
+	// volExtra is appended to every blockvolume command (a test that pins
+	// a default the page leaves alone, for example).
+	volExtra []string
 }
 
 // bvHost is one host's blockvolume: its server id, endpoints, local root
@@ -268,12 +271,12 @@ func (env *handoffEnv) volArgsFor(b bvHost) []string {
 	if vol == "" {
 		vol = "v1"
 	}
-	return []string{"--volume-lock-dir-test-only", lockDir, "--master", env.h.masterAddr, "--server-id", b.id, "--volume-id", vol, "--replica-id", "r1",
+	return append([]string{"--volume-lock-dir-test-only", lockDir, "--master", env.h.masterAddr, "--server-id", b.id, "--volume-id", vol, "--replica-id", "r1",
 		"--data-addr", b.data, "--ctrl-addr", b.ctrl, "--status-addr", b.status,
 		"--durable-root", b.root, "--durable-impl", "walstore-chunk",
 		"--durable-blocks", "65536", "--durable-blocksize", "4096",
 		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath, "--chunk-control-endpoint",
-		"--workspace-lease", "--nvme-listen", b.nvme, "--nvme-subsysnqn", plannedHandoffNQN}
+		"--workspace-lease", "--nvme-listen", b.nvme, "--nvme-subsysnqn", plannedHandoffNQN}, env.volExtra...)
 }
 
 func fatalOn(t *testing.T) (func(error), func(uint64, error) uint64) {
