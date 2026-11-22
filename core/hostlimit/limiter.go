@@ -18,6 +18,11 @@ import (
 )
 
 var ErrBusy = errors.New("hostlimit: no background slot")
+
+// ErrSlotsHeld is the ErrBusy of a host whose slots are all held by other
+// work: retrying once one is released can succeed. Other ErrBusy results
+// (an oversized payload, an unusable pool) do not change by waiting.
+var ErrSlotsHeld = fmt.Errorf("%w: every slot is held", ErrBusy)
 var ErrConfig = errors.New("hostlimit: incompatible host configuration")
 var ErrRevoked = errors.New("hostlimit: cut budget revoked")
 
@@ -184,7 +189,7 @@ func (l *Limiter) pool(c Class) (*os.File, error) {
 			return nil, e
 		}
 	}
-	return nil, ErrBusy
+	return nil, ErrSlotsHeld
 }
 
 // publishConfig runs under the configuration OS lock. A killed initializer
@@ -285,7 +290,7 @@ func (l *Limiter) Admit(ctx context.Context, payload int64, abort func(error)) (
 		if ctx.Err() != nil {
 			return 0, ctx.Err()
 		}
-		return 0, ErrBusy
+		return 0, ErrSlotsHeld
 	}
 	l.next++
 	id := l.next

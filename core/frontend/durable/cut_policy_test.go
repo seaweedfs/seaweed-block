@@ -5,8 +5,12 @@ package durable
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/hostlimit"
+	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 var t0 = time.Unix(1_700_000_000, 0)
@@ -204,5 +208,45 @@ func TestCutPolicy_TimerRunsOnObservationTime(t *testing.T) {
 	restart := initialCutSchedule("v1", pol.interval, t0, true, 7)
 	if got := restart.observe(7, at(time.Second)); got.firstDue.IsZero() || !got.lastSuccess.Equal(t0) {
 		t.Fatalf("the cut existing at start was taken in as new: %+v", got)
+	}
+}
+
+// A cut refused because every host slot is held ran nothing: no backoff,
+// no minimum spacing, the timer is not reset, and the retry comes after
+// the volume's slot jitter. The wait is counted and its start kept until
+// a cut succeeds. Any other error still backs off.
+func TestCutPolicy_HostSlotBusyIsAWaitNotAFailure(t *testing.T) {
+	pol := testPolicy()
+	pol.slotJitter = 150 * time.Millisecond
+	busy := fmt.Errorf("%w: budget admission: %w", storage.ErrChunkCaptureRefused, hostlimit.ErrSlotsHeld)
+	s := cutSchedule{lastSuccess: t0}
+	now := at(30 * time.Second)
+	for i := 0; i < 5; i++ {
+		s = pol.after(s, now, now.Add(time.Millisecond), busy, 0)
+		if s.backoff != 0 || !s.lastAuto.IsZero() || !s.lastSuccess.Equal(t0) {
+			t.Fatalf("busy refusal %d treated as a cut or a failure: %+v", i, s)
+		}
+		if _, ok := pol.dueNR(s, now.Add(100*time.Millisecond)); ok {
+			t.Fatalf("busy retry %d due before its jitter", i)
+		}
+		now = now.Add(time.Millisecond + pol.slotJitter)
+		if _, ok := pol.dueNR(s, now); !ok {
+			t.Fatalf("busy retry %d not due after its jitter", i)
+		}
+	}
+	if s.slotWaits != 5 || !s.slotWaitSince.Equal(at(30*time.Second)) {
+		t.Fatalf("waits %d since %v; want 5 since the first refusal", s.slotWaits, s.slotWaitSince)
+	}
+	s = pol.after(s, now, now, nil, 101)
+	if !s.slotWaitSince.IsZero() || s.slotWaits != 5 {
+		t.Fatalf("success must end the wait and keep the count: %+v", s)
+	}
+	refusedOther := fmt.Errorf("%w: not primary", storage.ErrChunkCaptureRefused)
+	if s = pol.after(s, now, now, refusedOther, 101); s.backoff != time.Second {
+		t.Fatalf("another refusal must back off: %+v", s)
+	}
+	tooLarge := fmt.Errorf("%w: budget admission: %w", storage.ErrChunkCaptureRefused, hostlimit.ErrBusy)
+	if s = pol.after(s, now, now, tooLarge, 101); s.backoff != 2*time.Second {
+		t.Fatalf("a busy result that is not held slots must back off: %+v", s)
 	}
 }

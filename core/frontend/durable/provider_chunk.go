@@ -663,6 +663,7 @@ const (
 //     restarts the timer.
 type cutPolicy struct {
 	interval, minSpacing, backoffMin, backoffMax time.Duration
+	slotJitter                                   time.Duration // this volume's delay before retrying a cut refused for held host slots
 }
 
 // cutSchedule runs on in-process monotonic time: every time in it is a
@@ -679,6 +680,8 @@ type cutSchedule struct {
 	firstDue      time.Time // startup phase only; never a fabricated success
 	seenSeq       uint64    // the layer's CutSeq last taken in
 	failedSeenSeq uint64    // the layer's CutSeq when the last automatic cut failed
+	slotWaitSince time.Time // first refusal for held host slots since the last success; zero when not waiting
+	slotWaits     uint64    // automatic cuts refused for held host slots
 }
 
 // observe takes in, at now, the latest cut the layer reports (any
@@ -760,7 +763,7 @@ func initialCutSchedule(volumeID string, interval time.Duration, now time.Time, 
 // cut (not a healthy primary of this lineage, BASE install) is expected
 // and logged only when it is something else. A fenced layer can never
 // publish again: the loop ends.
-func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer storage.ChunkLayer, done chan struct{}) {
+func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer storage.ChunkLayer, done chan struct{}, wait *cutWaitSlot) {
 	defer close(done)
 	pol := cutPolicy{
 		interval:   p.cfg.ChunkCaptureInterval,
@@ -831,7 +834,7 @@ func (p *DurableProvider) chunkBackground(ctx context.Context, cancel context.Ca
 		go func() {
 			defer workers.Done()
 			cutDone := make(chan struct{})
-			p.chunkLoop(ctx, volumeID, layer, cutDone)
+			p.chunkLoop(ctx, volumeID, layer, cutDone, nil)
 		}()
 	}
 	if p.cfg.ChunkMaintenanceInterval > 0 && p.cfg.ChunkMaintenance != nil {
@@ -1360,3 +1363,7 @@ func (p *DurableProvider) publishSettledHook(volumeID string) func(context.Conte
 	}
 	return func(ctx context.Context, prev, next storage.ChunkHead) { hook(ctx, volumeID, prev, next) }
 }
+
+// cutWaitSlot publishes the automatic-cut timer's host slot waits to
+// status.
+type cutWaitSlot struct{}
