@@ -95,8 +95,6 @@ func TestWorkspaceMoveRefusalNamesTheMissingPrecondition(t *testing.T) {
 		return &control.WorkspaceMove{RequestId: vol + "-" + server + "-" + data, VolumeId: vol, ExpectedReplicaId: "r1", ExpectedEpoch: 1, TargetReplicaId: "r1",
 			TargetServerId: server, TargetDataAddr: data, TargetCtrlAddr: ctrl, Kind: "clean"}
 	}
-	forcedSource := move("placed", "node-a", "127.0.0.1:19101", "127.0.0.1:19102")
-	forcedSource.Kind, forcedSource.Force = "forced", true
 	for _, c := range []struct {
 		name string
 		q    *control.WorkspaceMove
@@ -104,7 +102,7 @@ func TestWorkspaceMoveRefusalNamesTheMissingPrecondition(t *testing.T) {
 	}{
 		{"unknown source", move("unplaced", "node-b", "127.0.0.1:19301", "127.0.0.1:19302"), `move source unknown: no issued move or placement names replica "r1" at epoch 1`},
 		{"unknown target node", move("placed", "node-z", "127.0.0.1:19301", "127.0.0.1:19302"), `move target node "node-z" is not registered`},
-		{"forced target is the source", forcedSource, `move target "node-a" is the current source host`},
+		{"same-host clean still needs authority", move("placed", "node-a", "127.0.0.1:19101", "127.0.0.1:19102"), `workspace move: missing or changed authority/lease`},
 		{"target on another host", move("placed", "node-b", "10.9.9.9:19311", "127.0.0.1:19312"),
 			`move target endpoints 10.9.9.9:19311/127.0.0.1:19312 on "node-b" are not registered (not on the node's hosts: it registers 127.0.0.1:19301/127.0.0.1:19302; no per-volume binding is prepared)`},
 		{"explicit binding elsewhere", move("bound", "node-b", "127.0.0.1:19301", "127.0.0.1:19302"),
