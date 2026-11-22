@@ -145,3 +145,30 @@ func TestWorkspaceClockSkewConfigReachesLeaseReply(t *testing.T) {
 		t.Fatal("configuration not applied to host validity", lease, reply)
 	}
 }
+
+// The lease reply uses the publisher clock even when it differs from this
+// process's wall clock; configured skew also covers legacy leases with no bound.
+func TestWorkspaceLeaseFactUsesPublisherClockAndSkew(t *testing.T) {
+	now := time.Unix(1000, 0)
+	p := authority.NewPublisher(nil, authority.WithWorkspaceLeaseConfig(12*time.Second, func() time.Time { return now }), authority.WithWorkspaceMaxClockSkew(4*time.Second))
+	_ = p
+	for _, tc := range []struct {
+		name   string
+		expiry time.Duration
+		skew   int64
+		want   time.Duration
+	}{
+		{"legacy-configured-bound", 10 * time.Second, 0, 8 * time.Second},
+		{"persisted-larger-bound", 10 * time.Second, int64(6 * time.Second), 7 * time.Second},
+		{"configured-ttl-cap", 40 * time.Second, 0, 12 * time.Second},
+		{"expired", time.Second, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := authority.WorkspaceLease{ReplicaID: "r", Epoch: 1, ExpiresAtNS: now.Add(tc.expiry).UnixNano(), MaxClockSkewNS: tc.skew}
+			fact := leaseFact("v", l)
+			if fact.ValidForNs != int64(tc.want) {
+				t.Fatalf("validity=%s, want %s", time.Duration(fact.ValidForNs), tc.want)
+			}
+		})
+	}
+}
