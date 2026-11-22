@@ -178,7 +178,7 @@ func (p *Publisher) PublishedAuthorityLines() map[string]PublishedLine {
 // leaf leaseMu, does no I/O and never waits on p.mu or the store. The grant
 // is min(now+TTL, durable horizon); a background extender (an ordinary p.mu
 // writer) pushes the horizon ahead. Only the first grant of a lease writes
-// synchronously (firstWorkspaceGrant).
+// synchronously, as does an expired re-grant after the shared move barrier.
 func (p *Publisher) RenewWorkspaceLease(ctx context.Context, volume, holder string, epoch uint64) (WorkspaceLease, error) {
 	if err := ctx.Err(); err != nil {
 		return WorkspaceLease{}, err
@@ -348,7 +348,7 @@ func (p *Publisher) regrantWorkspaceLease(ctx context.Context, volume, holder st
 
 // newWorkspaceLease starts a lease at now: the durable horizon is
 // now+1.5*TTL and the grant (the deadline) now+TTL. Both a first grant and a
-// move issue start a lease this way.
+// expired re-grant and move issue start a lease this way.
 func (p *Publisher) newWorkspaceLease(holder string, epoch uint64, now time.Time) (*WorkspaceLease, time.Time) {
 	return &WorkspaceLease{ReplicaID: holder, Epoch: epoch, ExpiresAtNS: now.Add(p.workspaceTTL + p.workspaceTTL/2).UnixNano(), MaxClockSkewNS: int64(p.workspaceSkew(nil))}, now.Add(p.workspaceTTL)
 }

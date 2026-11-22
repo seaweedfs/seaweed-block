@@ -91,7 +91,11 @@ func TestWorkspaceLeaseRegrantWaitsForDurabilityAndLatchesFailure(t *testing.T) 
 				l, err := p.RenewWorkspaceLease(context.Background(), "v", "r", 1)
 				done <- answer{l, err}
 			}()
-			<-entered
+			select {
+			case <-entered:
+			case got := <-done:
+				t.Fatal("re-grant returned before the durable write witness", got)
+			}
 			if visible, ok := p.WorkspaceLeaseReply("v"); !ok || visible.ExpiresAtNS != before.ExpiresAtNS {
 				t.Error("grant published ahead of durable store", visible)
 			}
