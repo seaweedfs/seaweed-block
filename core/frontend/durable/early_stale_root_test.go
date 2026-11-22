@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -217,4 +218,58 @@ func TestEarlyStaleRootHeadReadEndsWithProviderClose(t *testing.T) {
 	if reason, _ := p.ChunkStartupStop("v1", 1); reason != "" {
 		t.Fatalf("a cancelled early read recorded stop %q", reason)
 	}
+}
+
+// V1-SPEC r2.38: a rolled-back copy of this root is caught before the
+// assignment wait too (HEAD names this very root above its record), with
+// its own reason and the operator's line; an unreadable root record stops
+// with its own no-retry reason instead of looping on 75.
+func TestEarlyStopForRolledBackCopyAndUnreadableRecord(t *testing.T) {
+	t.Run("rolled-back copy", func(t *testing.T) {
+		ctx := context.Background()
+		remote := storage.NewMemChunkRemote()
+		root := t.TempDir()
+		a := chunkProviderAs(t, root, remote, viewAs("rA", 3), 0, "rA")
+		s := openRecovered(t, a)
+		writeSync(t, s, 1, 0x01)
+		if _, err := a.CaptureVolume(ctx, "v1"); err != nil {
+			t.Fatal(err)
+		}
+		if err := a.Close(); err != nil {
+			t.Fatal(err)
+		}
+		backup := t.TempDir()
+		copyRoot(t, root, backup)
+		a = chunkProviderAs(t, root, remote, viewAs("rA", 3), 0, "rA")
+		s = openRecovered(t, a)
+		writeSync(t, s, 2, 0x02)
+		if _, err := a.CaptureVolume(ctx, "v1"); err != nil {
+			t.Fatal(err)
+		}
+		if err := a.Close(); err != nil {
+			t.Fatal(err)
+		}
+		p, err := recoverUnassigned(t, remote, backup)
+		gen, ended := p.ChunkStartupOutcome("v1")
+		reason, detail := p.ChunkStartupStop("v1", gen)
+		if !errors.Is(err, durable.ErrChunkStaleLocalRoot) || !ended || reason != "local_root_rolled_back" || !strings.Contains(detail, "rolled-back copy") || !strings.Contains(detail, "never from a copy of a root") {
+			t.Fatalf("err=%v ended=%t reason=%q detail=%q, want an early local_root_rolled_back stop with the operator line", err, ended, reason, detail)
+		}
+	})
+	t.Run("unreadable record", func(t *testing.T) {
+		remote, root := servedRoot(t)
+		ids, _ := filepath.Glob(filepath.Join(root, "*.root"))
+		if len(ids) != 1 {
+			t.Fatalf("identity files %v", ids)
+		}
+		if err := os.WriteFile(ids[0], []byte("{not json"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		p, err := recoverUnassigned(t, remote, root)
+		gen, ended := p.ChunkStartupOutcome("v1")
+		reason, detail := p.ChunkStartupStop("v1", gen)
+		if err == nil || !ended || reason != "local_root_record_unreadable" || !strings.Contains(detail, "unreadable") {
+			t.Fatalf("err=%v ended=%t reason=%q detail=%q, want local_root_record_unreadable", err, ended, reason, detail)
+		}
+	})
 }

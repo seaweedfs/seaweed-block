@@ -202,6 +202,13 @@ func rootGen(head storage.ChunkHead) uint64 {
 	return head.Gen
 }
 
+// highWater is the root's recorded published-generation high-water.
+func (r *localRoot) highWater() uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.HighWater
+}
+
 // recordedEpoch is the epoch of the root's last recorded publication.
 func (r *localRoot) recordedEpoch() uint64 {
 	r.mu.Lock()

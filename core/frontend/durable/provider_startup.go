@@ -36,7 +36,8 @@ func (p *DurableProvider) ChunkStartupSuperseded(volumeID string, gen uint64) bo
 
 // ChunkStartupStop is this exact recovery's no-retry stop, if its startup
 // ended on a local root that never becomes valid: the reason
-// (stale_local_root, local_root_rolled_back) and its operator line; "" for
+// (stale_local_root, local_root_rolled_back, local_root_record_unreadable)
+// and its operator line; "" for
 // any other outcome (V1-SPEC r2.38).
 func (p *DurableProvider) ChunkStartupStop(volumeID string, gen uint64) (reason, detail string) {
 	p.mu.Lock()
@@ -64,6 +65,8 @@ func startupStopOf(cause error) (reason, detail string) {
 		detail = d.detail
 	}
 	switch {
+	case errors.Is(cause, errChunkRootUnreadable):
+		return "local_root_record_unreadable", detail
 	case errors.Is(cause, errChunkRootRolledBack):
 		return "local_root_rolled_back", detail
 	case errors.Is(cause, errChunkStaleRootNoRetry):

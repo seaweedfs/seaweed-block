@@ -65,6 +65,7 @@ var (
 	// local_root_rolled_back). Neither ever becomes valid.
 	errChunkStaleRootNoRetry = errors.New("durable: stale local root, no retry")
 	errChunkRootRolledBack   = errors.New("durable: rolled-back local root, no retry")
+	errChunkRootUnreadable   = errors.New("durable: unreadable local root record, no retry")
 	errChunkNoAuthority      = errors.New("durable: projection carries no master authority for the chunk layer")
 )
 
@@ -136,7 +137,7 @@ func (p *DurableProvider) recoverChunk(ctx context.Context, volumeID string, h *
 		p.startChunkAuthorityWait(volumeID, h, gen)
 		return false, nil
 	}
-	if errors.Is(err, storage.ErrChunkLayerFenced) && (!errors.Is(err, ErrChunkStaleLocalRoot) || errors.Is(err, errChunkForeignClaim) || errors.Is(err, errChunkStaleRootNoRetry) || errors.Is(err, errChunkRootRolledBack)) {
+	if errors.Is(err, storage.ErrChunkLayerFenced) && (!errors.Is(err, ErrChunkStaleLocalRoot) || errors.Is(err, errChunkForeignClaim) || errors.Is(err, errChunkStaleRootNoRetry) || errors.Is(err, errChunkRootRolledBack) || errors.Is(err, errChunkRootUnreadable)) {
 		p.endChunkStartup(h, gen, err)
 	}
 	return err == nil, err
@@ -152,7 +153,10 @@ func (p *DurableProvider) staleRootBeforeWait(ctx context.Context, volumeID stri
 		return nil
 	}
 	root, err := openLocalRoot(h.path, false)
-	if err != nil || !root.stored {
+	if err != nil {
+		return unreadableRootStop(volumeID, h.path, err)
+	}
+	if !root.stored {
 		return nil
 	}
 	remote, err := p.cfg.ChunkRemoteFor(volumeID)
@@ -170,6 +174,11 @@ func (p *DurableProvider) staleRootBeforeWait(ctx context.Context, volumeID stri
 	}
 	why := root.supersededBefore(head, p.chunkHolder(frontend.Projection{}))
 	if why == "" {
+		if root.rolledBack(head) {
+			why = root.lineageOf(head)
+			log.Printf("durable: volume=%s local root %s is a rolled-back copy before the assignment wait: %s (no retry)", volumeID, h.path, why)
+			return lineageStop(volumeID, h.path, why, errChunkRootRolledBack, head, root)
+		}
 		return nil
 	}
 	log.Printf("durable: volume=%s local root %s is superseded before the assignment wait: %s (no retry)", volumeID, h.path, why)
@@ -178,6 +187,31 @@ func (p *DurableProvider) staleRootBeforeWait(ctx context.Context, volumeID stri
 			ErrChunkStaleLocalRoot, storage.ErrChunkLayerFenced, errChunkStaleRootNoRetry, volumeID, h.path, why),
 		detail: fmt.Sprintf("HEAD is held by %s at epoch %d; this local root last published epoch %d; move this root aside after confirming no blockvolume uses it, and start again",
 			head.Holder, head.Epoch, root.recordedEpoch()),
+	}
+}
+
+// lineageStop is a no-retry stale-root refusal with the operator's line.
+func lineageStop(volumeID, path, why string, class error, head storage.ChunkHead, root *localRoot) error {
+	detail := fmt.Sprintf("HEAD is held by %s at epoch %d; this local root last published epoch %d; move this root aside after confirming no blockvolume uses it, and start again",
+		head.Holder, head.Epoch, root.recordedEpoch())
+	if errors.Is(class, errChunkRootRolledBack) {
+		detail = fmt.Sprintf("this local root is a rolled-back copy (HEAD names it at its generation %d, above its recorded %d); move this root aside after confirming no blockvolume uses it, and start again; restore from the remote image, never from a copy of a root",
+			rootGen(head), root.highWater())
+	}
+	return &stopDetailError{
+		err: fmt.Errorf("%w: %w: %w: volume %s local root %s: %s; remove or quarantine the local root to attach fresh from HEAD",
+			ErrChunkStaleLocalRoot, storage.ErrChunkLayerFenced, class, volumeID, path, why),
+		detail: detail,
+	}
+}
+
+// unreadableRootStop: a local root record that cannot be read never becomes
+// readable by restarting: no retry, with the operator's line.
+func unreadableRootStop(volumeID, path string, cause error) error {
+	return &stopDetailError{
+		err: fmt.Errorf("%w: %w: %w: volume %s local root %s: %w",
+			ErrChunkStaleLocalRoot, storage.ErrChunkLayerFenced, errChunkRootUnreadable, volumeID, path, cause),
+		detail: fmt.Sprintf("the local root record of %s is unreadable; move this root aside after confirming no blockvolume uses it, and start again", path),
 	}
 }
 
@@ -297,7 +331,7 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 		case errors.Is(err, storage.ErrChunkLayerFenced):
 			ended = "fenced, not serving"
 			log.Printf("durable: chunk layer for volume=%s: %v (not serving)", volumeID, err)
-			if errors.Is(err, ErrChunkStaleLocalRoot) && !errors.Is(err, errChunkForeignClaim) && !errors.Is(err, errChunkStaleRootNoRetry) && !errors.Is(err, errChunkRootRolledBack) {
+			if errors.Is(err, ErrChunkStaleLocalRoot) && !errors.Is(err, errChunkForeignClaim) && !errors.Is(err, errChunkStaleRootNoRetry) && !errors.Is(err, errChunkRootRolledBack) && !errors.Is(err, errChunkRootUnreadable) {
 				retained = true
 				h.attachMu.Lock()
 				if p.current(h, gen) && h.chunk == nil {
@@ -455,7 +489,7 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 	// it publishes; its high-water is recorded before each of its CASes.
 	root, err := openLocalRoot(h.path, h.fresh)
 	if err != nil {
-		return nil, err
+		return nil, unreadableRootStop(volumeID, h.path, err)
 	}
 	bound := &closeBoundRemote{ChunkRemote: inner, done: p.closeCtx}
 	if pace, ok := p.cfg.ChunkBudget.(interface {
@@ -531,8 +565,7 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 				if root.rolledBack(head) {
 					class = errChunkRootRolledBack
 				}
-				return fmt.Errorf("%w: %w: %w: volume %s local root %s: %s; remove or quarantine the local root to attach fresh from HEAD",
-					ErrChunkStaleLocalRoot, storage.ErrChunkLayerFenced, class, volumeID, h.path, why)
+				return lineageStop(volumeID, h.path, why, class, head, root)
 			}
 			return nil
 		}
