@@ -105,8 +105,15 @@ func testWorkspaceRegrantStorage(t *testing.T, sealed, fresh bool) {
 	_, err = second.RecoverVolume(ctx, "v")
 	if sealed {
 		after, readErr := remote.GetHead(ctx)
-		if !errors.Is(err, storage.ErrChunkLayerDetached) || readErr != nil || after.Gen != before.Gen || after.Epoch != before.Epoch || after.Holder != before.Holder || after.State != storage.ChunkHeadDetached || after.RemoteLSN != before.RemoteLSN {
+		if !errors.Is(err, storage.ErrChunkLayerDetached) || readErr != nil || !reflect.DeepEqual(after, before) {
 			t.Fatal("same-epoch re-grant reactivated the seal", after, err, readErr)
+		}
+		blocked, openErr := second.Open(ctx, "v")
+		if openErr != nil {
+			t.Fatal(openErr)
+		}
+		if _, readErr := blocked.Read(ctx, 0, make([]byte, 4096)); !errors.Is(readErr, frontend.ErrNotReady) {
+			t.Fatal("sealed re-granted process exposed guest I/O", readErr)
 		}
 		return
 	}
