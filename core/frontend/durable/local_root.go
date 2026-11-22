@@ -27,6 +27,11 @@ type localRoot struct {
 	// Epoch is the epoch of the publication the high-water was recorded for.
 	Epoch  uint64 `json:"epoch"`
 	stored bool   // the file exists: this root has recorded at least once
+	// synced: this process has made the visible record durable (file and
+	// parent directory synced). A record read on open is visible, not proven
+	// durable: an earlier process may have renamed it into place and then
+	// failed its directory sync. Until synced, nothing skips the barrier.
+	synced bool
 }
 
 const localRootSuffix = ".root"
@@ -58,13 +63,30 @@ func openLocalRoot(volPath string, fresh bool) (*localRoot, error) {
 	return r, nil
 }
 
+// localRootSyncDir makes a rename in a record's directory durable; tests
+// replace it to inject a failed barrier.
+var localRootSyncDir = syncParentDir
+
 // record durably raises the high-water to gen, with the epoch of that
 // publication (file and directory synced), before the caller's CAS may
-// install gen. It never lowers either.
+// install gen. It never lowers either. A record that already covers gen and
+// epoch returns at once only once this process has made it durable; a record
+// read on open is first synced again (file, then directory): no CAS passes
+// a barrier that has not succeeded.
 func (r *localRoot) record(gen, epoch uint64) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.stored && gen <= r.HighWater && epoch <= r.Epoch {
+		if r.synced {
+			return nil
+		}
+		if err := syncLocalRootFile(r.path); err != nil {
+			return fmt.Errorf("durable: make local root record %s durable: %w", r.path, err)
+		}
+		if err := localRootSyncDir(r.path); err != nil {
+			return fmt.Errorf("durable: make local root record %s durable: %w", r.path, err)
+		}
+		r.synced = true
 		return nil
 	}
 	hw, ep := r.HighWater, r.Epoch
@@ -101,11 +123,24 @@ func (r *localRoot) record(gen, epoch uint64) error {
 	if err := os.Rename(tmp, r.path); err != nil {
 		return err
 	}
-	if err := syncParentDir(r.path); err != nil {
+	// The rename is visible from here on; durable only once this succeeds.
+	r.synced = false
+	if err := localRootSyncDir(r.path); err != nil {
 		return err
 	}
-	r.HighWater, r.Epoch, r.stored = hw, ep, true
+	r.HighWater, r.Epoch, r.stored, r.synced = hw, ep, true, true
 	return nil
+}
+
+// syncLocalRootFile fsyncs a visible record file.
+func syncLocalRootFile(path string) error {
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	serr := f.Sync()
+	cerr := f.Close()
+	return errors.Join(serr, cerr)
 }
 
 // beforeHeadCAS is the layer's storage.ChunkLayerConfig.BeforeHeadCAS: a CAS

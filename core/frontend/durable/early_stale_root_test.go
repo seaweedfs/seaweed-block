@@ -5,7 +5,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
@@ -149,5 +152,69 @@ func TestRolledBackRootEndsWithItsOwnReason(t *testing.T) {
 	reason, _ := b.ChunkStartupStop("v1", gen)
 	if !errors.Is(err, durable.ErrChunkStaleLocalRoot) || !ended || reason != "local_root_rolled_back" {
 		t.Fatalf("err=%v ended=%t reason=%q, want local_root_rolled_back", err, ended, reason)
+	}
+}
+
+// heldHeadRemote blocks GetHead until its context ends while held.
+type heldHeadRemote struct {
+	storage.ChunkRemote
+	held    atomic.Bool
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (r *heldHeadRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
+	if r.held.Load() {
+		r.once.Do(func() { close(r.entered) })
+		<-ctx.Done()
+		return storage.ChunkHead{}, ctx.Err()
+	}
+	return r.ChunkRemote.GetHead(ctx)
+}
+
+// The early HEAD read (C.W: staleRootBeforeWait) is bounded and owned by
+// the provider: while the read is held, Close cancels it, recovery settles
+// within the bound, Close returns, and no stale-root stop is recorded.
+func TestEarlyStaleRootHeadReadEndsWithProviderClose(t *testing.T) {
+	mem, root := servedRoot(t)
+	remote := &heldHeadRemote{ChunkRemote: mem, entered: make(chan struct{})}
+	remote.held.Store(true)
+	p := chunkProviderAs(t, root, remote, newStubView(frontend.Projection{}), 0, "rA")
+	if _, err := p.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	t.Cleanup(func() {
+		remote.held.Store(false)
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Errorf("the held recovery did not settle within 10s of cleanup")
+		}
+	})
+	go func() {
+		_, err := p.RecoverVolume(context.Background(), "v1")
+		done <- err
+	}()
+	select {
+	case <-remote.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("recovery never reached the early HEAD read")
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- p.Close() }()
+	select {
+	case err := <-done:
+		done <- err // keep it for the cleanup join
+	case <-time.After(3 * time.Second):
+		t.Fatal("recovery did not settle within 3s of Close (the read alone would wait its 5s bound) while its early HEAD read was held")
+	}
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return within 5s of the cancelled early HEAD read")
+	}
+	if reason, _ := p.ChunkStartupStop("v1", 1); reason != "" {
+		t.Fatalf("a cancelled early read recorded stop %q", reason)
 	}
 }

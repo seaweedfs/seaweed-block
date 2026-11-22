@@ -44,3 +44,21 @@ func StopFlipAt(b frontend.Backend) time.Time { return b.(*StorageBackend).StopF
 func StopIOForTest(ctx context.Context, b frontend.Backend, evidence string) error {
 	return b.(*StorageBackend).StopIO(ctx, evidence)
 }
+
+// SetLocalRootSyncDirForTest replaces the local root record's directory
+// barrier; the returned function restores it.
+func SetLocalRootSyncDirForTest(f func(path string) error) func() {
+	prev := localRootSyncDir
+	localRootSyncDir = f
+	return func() { localRootSyncDir = prev }
+}
+
+// LocalRootRecord reads a volume's local root record (nonce, high-water,
+// epoch) as stored, for tests.
+func LocalRootRecord(volPath string) (nonce string, highWater, epoch uint64, ok bool) {
+	r, err := openLocalRoot(volPath, false)
+	if err != nil || !r.stored {
+		return "", 0, 0, false
+	}
+	return r.Nonce, r.HighWater, r.Epoch, true
+}
