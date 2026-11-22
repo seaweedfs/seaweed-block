@@ -63,8 +63,9 @@ Publisher. Lease renewal remains independent of the host workspace mutex.
 
 The RPCs grant/renew a lease, request revocation, record the old holder's ACK,
 request a move, and query persisted state. Leases bind volume, holder and epoch.
-The master owns a 30-second expiry. After expiry, that same assignment cannot
-renew. Reassignment needs a move; ordinary bind/reassign and retired-slot endpoint
+The master owns a 30-second expiry. After expiry, that same assignment renews
+only through a durable re-grant after the forced-move barrier
+(`docs/workspace-lease.md`). Reassignment needs a move; ordinary bind/reassign and retired-slot endpoint
 refresh cannot bypass an enrolled workspace's move path.
 
 ## Move admission and persistence
@@ -118,13 +119,10 @@ reopens a fenced guard. Per-request checks do not depend on timely timer dispatc
 Its Stop callback must close/drain the frontend and stop cuts before returning
 the last committed HEAD generation. A failed Stop never ACKs revocation.
 
-This master-side Draft supplies and tests that component and protocol, not its
-`cmd/blockvolume` chunk-lifecycle wiring. That integration belongs with the host
-restore/provider successor: it must pass the guard to both providers/captures,
-wire actual frontend/cut shutdown into Stop, and return the last committed HEAD.
-Until that is wired, legacy blockvolume processes must not be used as move-capable
-workspace holders. Named Detach production of `state: "detached"` is a separate
-chunk-control dependency. The orchestrator updates desired placement/launches the
+`blockvolume --workspace-lease` wires it (`cmd/blockvolume/workspace_lease.go`):
+the guard gates both frontend I/O and captures, Stop drains the frontends and
+cuts, and the ACK carries the stored detached HEAD generation that Detach
+published. The orchestrator updates desired placement/launches the
 destination; this endpoint does not launch a VM or mutate that desired placement.
 
 Lock order: publisher mutex -> authority store mutex. Remote HEAD reads happen

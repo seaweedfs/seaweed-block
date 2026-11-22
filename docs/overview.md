@@ -25,6 +25,7 @@ belong under `internal/docs/`, not here.
 | `kubernetes-app-demo.md` | Presentation demo: an app pod writes and a replacement pod reads one PVC |
 | `chunk-manifests.md` | Chunk upload settings and the HEAD/segment manifest format |
 | `workspace-lease.md` | Workspace host lease, clean and forced moves, clock skew |
+| `volume-lifecycle.md` | Workspace volume hand-over, same-host return, crash recovery and symptoms (standalone) |
 | `fsync-latency.md` | Reading the per-stage `fsync` histograms under `/status/durable` |
 
 ## Engineering references (Kubernetes line)

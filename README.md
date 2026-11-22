@@ -130,7 +130,7 @@ sw-block ops chunk snapshots --volume v1 --chunk-filer <filer>   # list snapshot
 sw-block ops chunk fork      --chunk-filer <filer> --source v1 --snapshot s1 --target v2  # root copy only
 sw-block ops chunk restore   --chunk-filer <filer> --source v1 --snapshot s1 --target v3 --status-addr <v3's status>  # independent copy
 sw-block ops chunk restore   --volume v3 --status-addr <status> --status  # restore progress
-sw-block ops chunk detach    --volume v1 --status-addr <status>  # final cut and release; resume elsewhere
+sw-block ops chunk detach    --volume v1 --status-addr <status>  # final cut (seal); moving needs revoke + move, see docs/volume-lifecycle.md
 sw-block ops chunk volume-delete --volume v2 --chunk-filer <filer> --master <blockmaster> --request-id del-v2
 sw-block ops chunk gc        --chunk-filer <filer> --master <blockmaster>  # preview; --apply to reclaim
 sw-block ops chunk verify    --volume v1 --chunk-filer <filer>   # read-only check of the remote image
@@ -242,6 +242,7 @@ a launcher of your own that binds blockmaster to a node address must add it.
   [TLA+ specifications](docs/spec/README.md),
   [workspace measurements](docs/workspace-measurements.md)
 - Operations: [standalone deployment](docs/standalone-deployment.md),
+  [volume lifecycle](docs/volume-lifecycle.md),
   [Kubernetes quickstart](docs/quickstart-kubernetes.md), [user capabilities](docs/user-capabilities.md)
 - Claims: [Kubernetes status](docs/kubernetes-status.md), [release notes](docs/releases/README.md),
   [NVMe/TCP supported-lab claim](docs/releases/nvme-tcp-supported-lab.md),
