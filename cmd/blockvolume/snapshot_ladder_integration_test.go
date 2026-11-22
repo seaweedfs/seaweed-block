@@ -181,18 +181,142 @@ func (env *handoffEnv) writeDuringSnapshot(t *testing.T, name string, first uint
 	}
 }
 
-// snapshot takes the named snapshot of vol on its host and checks the answer
-// names it.
-func (env *handoffEnv) snapshot(t *testing.T, hostID, vol, name string) {
+// snapshotInfo is what a snapshot's answer and its list entry say about it.
+type snapshotInfo struct {
+	Name       string `json:"name"`
+	HeadGen    uint64 `json:"headGen"`
+	CutLSN     uint64 `json:"cutLSN"`
+	State      string `json:"state"`
+	ChunkCount int    `json:"chunkCount"`
+}
+
+// snapshot takes the named snapshot of vol on its host, checks the answer
+// names it, and returns the answer.
+func (env *handoffEnv) snapshot(t *testing.T, hostID, vol, name string) snapshotInfo {
 	t.Helper()
 	out, _ := env.h.command(t, "ops", "chunk", "snapshot", "--volume", vol, "--status-addr", env.hosts[hostID].status, "--name", name)
-	var info struct {
-		Name string `json:"name"`
-	}
+	var info snapshotInfo
 	if err := json.Unmarshal([]byte(out), &info); err != nil || info.Name != name {
 		t.Fatalf("snapshot %s of %s: %v\n%s", name, vol, err, out)
 	}
+	return info
 }
+
+// snapshots lists vol's snapshots (with a name prefix when given).
+func (env *handoffEnv) snapshots(t *testing.T, vol, prefix string) []snapshotInfo {
+	t.Helper()
+	args := []string{"ops", "chunk", "snapshots", "--volume", vol, "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath}
+	if prefix != "" {
+		args = append(args, "--prefix", prefix)
+	}
+	out, _ := env.h.command(t, args...)
+	var body struct {
+		Snapshots []snapshotInfo `json:"snapshots"`
+	}
+	if err := json.Unmarshal([]byte(out), &body); err != nil {
+		t.Fatalf("snapshots of %s: %v\n%s", vol, err, out)
+	}
+	return body.Snapshots
+}
+
+// restoreAttached creates target from snapshot snap of src and starts its
+// blockvolume, but not the restore driver: target serves and stays
+// dependent on its source (not independent).
+func (env *handoffEnv) restoreAttached(t *testing.T, src, snap, target string) {
+	t.Helper()
+	b := env.hosts["n-"+target]
+	env.h.command(t, "ops", "chunk", "restore", "--source", src, "--snapshot", snap, "--target", target,
+		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
+	d := env.h.start(t, "blockvolume-"+target, env.h.volume, env.volArgsFor(b)...)
+	d.waitLog(t, 60*time.Second, fmt.Sprintf("blockvolume: volume %s adopted as PRIMARY at r1@", target))
+	poll(t, 60*time.Second, fmt.Sprintf("%s never reported its frontend ready", target), func() bool {
+		return volumeFrontendReady(b.status, target)
+	})
+}
+
+// TestSnapshotLadderB1SnapshotQuery: three snapshots with writes between
+// them. The list is exactly the committed snapshots, in order, each active,
+// with the point (cut LSN), HEAD generation and size (chunk count) its
+// creation answered; a prefix shows one. A snapshot being taken appears in
+// the list only committed, and stays. A snapshot request that is refused
+// (a restore volume not yet independent) leaves no name in the list.
+func TestSnapshotLadderB1SnapshotQuery(t *testing.T) {
+	env := startLadderEnv(t, "v2")
+	var made []snapshotInfo
+	for i, w := range []struct {
+		lba  uint64
+		text string
+	}{{0, "ladder-b1-blk-A!"}, {2 * ladderChunkBlocks, "ladder-b1-blk-B!"}, {1, "ladder-b1-blk-C!"}} {
+		env.writeBlock(t, "s1", w.lba, pattern(w.text))
+		made = append(made, env.snapshot(t, "s1", "v1", fmt.Sprintf("s%d", i+1)))
+	}
+	list := env.snapshots(t, "v1", "")
+	if len(list) != len(made) {
+		t.Fatalf("list has %d snapshots; want exactly the %d committed: %+v", len(list), len(made), list)
+	}
+	wantChunks := []int{1, 2, 2}
+	for i, got := range list {
+		m := made[i]
+		if got.Name != m.Name || got.State != "active" || got.CutLSN != m.CutLSN || got.HeadGen != m.HeadGen || got.ChunkCount != m.ChunkCount {
+			t.Fatalf("list entry %d %+v; want %+v, active", i, got, m)
+		}
+		if got.ChunkCount != wantChunks[i] {
+			t.Fatalf("%s holds %d chunks; want %d", got.Name, got.ChunkCount, wantChunks[i])
+		}
+		if i > 0 && (got.CutLSN <= list[i-1].CutLSN || got.HeadGen <= list[i-1].HeadGen) {
+			t.Fatalf("list not in order of points: %+v after %+v", got, list[i-1])
+		}
+	}
+	if one := env.snapshots(t, "v1", "s2"); len(one) != 1 || one[0].Name != "s2" || one[0].CutLSN != made[1].CutLSN {
+		t.Fatalf("show s2: %+v", one)
+	}
+
+	// A snapshot being taken: listed only committed, and then it stays.
+	done := make(chan int, 1)
+	go func() {
+		_, _, code := env.h.run(t, "ops", "chunk", "snapshot", "--volume", "v1", "--status-addr", env.hosts["s1"].status, "--name", "s4")
+		done <- code
+	}()
+	env.writeBlock(t, "s1", 3, pattern("ladder-b1-blk-D!"))
+	seen := false
+	for running := true; running; {
+		select {
+		case code := <-done:
+			if code != 0 {
+				t.Fatalf("snapshot s4: exit %d", code)
+			}
+			running = false
+		default:
+		}
+		var s4 *snapshotInfo
+		for _, e := range env.snapshots(t, "v1", "s4") {
+			e := e
+			s4 = &e
+		}
+		switch {
+		case s4 == nil && seen:
+			t.Fatal("s4 was listed, then disappeared")
+		case s4 != nil && (s4.State != "active" || s4.CutLSN <= made[2].CutLSN || s4.HeadGen <= made[2].HeadGen):
+			t.Fatalf("s4 listed before it was committed: %+v", *s4)
+		case s4 != nil:
+			seen = true
+		}
+	}
+	if !seen && len(env.snapshots(t, "v1", "s4")) != 1 {
+		t.Fatal("s4 not listed after its snapshot returned")
+	}
+
+	// A refused snapshot is not a snapshot.
+	env.restoreAttached(t, "v1", "s1", "v2")
+	out, errOut, code := env.h.run(t, "ops", "chunk", "snapshot", "--volume", "v2", "--status-addr", env.hosts["n-v2"].status, "--name", "x")
+	if code == 0 || !strings.Contains(out+errOut, "restore_incomplete") {
+		t.Fatalf("snapshot of a restore volume not yet independent: exit %d, want restore_incomplete\n%s\n%s", code, out, errOut)
+	}
+	if l := env.snapshots(t, "v2", ""); len(l) != 0 {
+		t.Fatalf("a refused snapshot left %+v in the list", l)
+	}
+}
+
 
 // lastCutUploads is the number of chunks the last cut of vol uploaded, from
 // its host's durable status.
@@ -293,4 +417,136 @@ func volumeFrontendReady(statusAddr, vol string) bool {
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	return frontendReady(b)
+}
+
+// waitIndependent polls the restore status of target until its phase is
+// independent (it then holds every chunk under its own keys).
+func (env *handoffEnv) waitIndependent(t *testing.T, target string) {
+	t.Helper()
+	poll(t, 120*time.Second, fmt.Sprintf("%s never became independent", target), func() bool {
+		out, _, code := env.h.run(t, "ops", "chunk", "restore", "--volume", target, "--status-addr", env.hosts["n-"+target].status, "--status")
+		var st struct {
+			Phase     string `json:"phase"`
+			ErrorCode string `json:"errorCode"`
+		}
+		if code != 0 || json.Unmarshal([]byte(out), &st) != nil {
+			return false
+		}
+		if st.Phase == "failed" {
+			t.Fatalf("restore of %s failed: %s", target, out)
+		}
+		return st.Phase == "independent"
+	})
+}
+
+// ladderImage is a written picture of a volume: blocks in several chunks.
+func ladderImage(tag string, chunks []uint64, perChunk int) map[uint64][]byte {
+	img := map[uint64][]byte{}
+	for _, c := range chunks {
+		for i := 0; i < perChunk; i++ {
+			lba := c*ladderChunkBlocks + uint64(i)*37
+			img[lba] = pattern(fmt.Sprintf("%-8s%08d", tag, lba)[:16])
+		}
+	}
+	return img
+}
+
+func (env *handoffEnv) writeImage(t *testing.T, hostID string, img map[uint64][]byte) {
+	t.Helper()
+	c := dialNVMe(t, env.hosts[hostID].nvme, plannedHandoffNQN)
+	defer c.close()
+	for lba, b := range img {
+		c.write(t, lba, b)
+	}
+	c.flush(t)
+}
+
+// requireImage reads every block of img on the host and the zeros next to
+// each written run, and the edge blocks.
+func (env *handoffEnv) requireImage(t *testing.T, hostID string, img map[uint64][]byte) {
+	t.Helper()
+	zero := make([]byte, 4096)
+	c := dialNVMe(t, env.hosts[hostID].nvme, plannedHandoffNQN)
+	defer c.close()
+	for lba, want := range img {
+		if got := c.read(t, lba, 4096); !bytes.Equal(got, want) {
+			t.Fatalf("%s: block %d differs from the snapshot", hostID, lba)
+		}
+		if _, written := img[lba+1]; !written && lba+1 <= ladderLastBlock {
+			if got := c.read(t, lba+1, 4096); !bytes.Equal(got, zero) {
+				t.Fatalf("%s: block %d should be zero", hostID, lba+1)
+			}
+		}
+	}
+	c.close()
+	env.requireEdges(t, hostID)
+}
+
+func mergeImages(imgs ...map[uint64][]byte) map[uint64][]byte {
+	out := map[uint64][]byte{}
+	for _, img := range imgs {
+		for k, v := range img {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// TestSnapshotLadderC1FullRestore: blocks in five chunks are written and a
+// snapshot taken; its restore into a new volume runs to independence (every
+// chunk under its own keys) and then equals the snapshot block by block.
+func TestSnapshotLadderC1FullRestore(t *testing.T) {
+	env := startLadderEnv(t, "v2")
+	img := ladderImage("c1", []uint64{0, 1, 7, 20, 63}, 8)
+	env.writeImage(t, "s1", img)
+	env.snapshot(t, "s1", "v1", "full")
+	env.restoreInto(t, "v1", "full", "v2")
+	env.waitIndependent(t, "v2")
+	env.requireImage(t, "n-v2", img)
+}
+
+// TestSnapshotLadderC2IncrementalRestore: three snapshots, each after more
+// writes; the restores of the second and the third, each to independence,
+// equal those snapshots (the earlier writes and theirs, nothing later).
+func TestSnapshotLadderC2IncrementalRestore(t *testing.T) {
+	env := startLadderEnv(t, "v2", "v3")
+	img1 := ladderImage("c2one", []uint64{0, 5}, 4)
+	img2 := ladderImage("c2two", []uint64{5, 9}, 3) // overwrites some of chunk 5
+	img3 := ladderImage("c2three", []uint64{0, 30}, 2)
+	env.writeImage(t, "s1", img1)
+	env.snapshot(t, "s1", "v1", "s1")
+	env.writeImage(t, "s1", img2)
+	env.snapshot(t, "s1", "v1", "s2")
+	env.writeImage(t, "s1", img3)
+	env.snapshot(t, "s1", "v1", "s3")
+
+	env.restoreInto(t, "v1", "s2", "v2")
+	env.waitIndependent(t, "v2")
+	env.requireImage(t, "n-v2", mergeImages(img1, img2))
+	env.restoreInto(t, "v1", "s3", "v3")
+	env.waitIndependent(t, "v3")
+	env.requireImage(t, "n-v3", mergeImages(img1, img2, img3))
+}
+
+// TestSnapshotLadderC3RestoreThenWriteThenSnapshotIt: a restored volume,
+// once independent, is written and snapshotted itself; that snapshot holds
+// its writes, and the source's snapshot still restores unchanged.
+func TestSnapshotLadderC3RestoreThenWriteThenSnapshotIt(t *testing.T) {
+	env := startLadderEnv(t, "v2", "v3", "v4")
+	src := ladderImage("c3src", []uint64{0, 3}, 4)
+	env.writeImage(t, "s1", src)
+	env.snapshot(t, "s1", "v1", "base")
+
+	env.restoreInto(t, "v1", "base", "v2")
+	env.waitIndependent(t, "v2")
+	own := ladderImage("c3own", []uint64{3, 11}, 3)
+	env.writeImage(t, "n-v2", own)
+	env.snapshot(t, "n-v2", "v2", "mine")
+
+	env.restoreInto(t, "v2", "mine", "v3")
+	env.waitIndependent(t, "v3")
+	env.requireImage(t, "n-v3", mergeImages(src, own))
+	env.restoreInto(t, "v1", "base", "v4") // the source's snapshot is unchanged
+	env.waitIndependent(t, "v4")
+	env.requireImage(t, "n-v4", src)
 }
