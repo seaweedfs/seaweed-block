@@ -66,7 +66,12 @@ func (h *Host) refusePrimaryAssignment(f *control.AssignmentFact) bool {
 		h.observeForeignHolder(f)
 		return true
 	}
-	if h.IsSuperseded(h.cfg.ReplicaID, f.Epoch, f.EndpointVersion) {
+	other := h.LastOtherLine()
+	// A candidate's owner cannot change within one epoch, even when its EV
+	// advances. This is an admission refusal, not a supersession fence on
+	// an already-adopted lineage (whose strict-newer rule is unchanged).
+	sameEpochForeign := other != nil && other.Epoch == f.Epoch && other.ReplicaId == f.ReplicaId && other.ServerId != "" && other.ServerId != f.ServerId
+	if sameEpochForeign || h.IsSuperseded(h.cfg.ReplicaID, f.Epoch, f.EndpointVersion) {
 		h.log.Printf("blockvolume: volume %s refuses stale self-labelled assignment server=%q epoch=%d ev=%d behind recorded foreign line",
 			h.cfg.VolumeID, f.ServerId, f.Epoch, f.EndpointVersion)
 		return true
