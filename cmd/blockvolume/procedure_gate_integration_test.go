@@ -171,7 +171,7 @@ func TestProcedureForcedMoveWithTheOldHostReturning(t *testing.T) {
 		}
 		time.Sleep(time.Second)
 	}
-	if !back.has("refusing to attach volume=v1") && !back.has("workspace lease: stale authority") && !back.has("is not this process") {
+	if !back.has("refusing to attach volume=v1") && !back.has("workspace lease: stale authority") && !back.has("is not this process") && !back.has("foreign assignment") {
 		failures = append(failures, "it logged no refusal (stale root, stale authority, or another server's assignment)")
 	}
 	if len(failures) > 0 {
