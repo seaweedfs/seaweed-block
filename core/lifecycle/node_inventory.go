@@ -64,10 +64,11 @@ type NodeRegistration struct {
 
 // NodeInventoryStore persists one JSON registration record per server.
 type NodeInventoryStore struct {
-	mu        sync.Mutex
-	dir       string
-	records   map[string]NodeRegistration
-	published sync.Map // committed NodeRegistration values; holder host checks never take mu (INV-WS-RENEW-NONBLOCKING-001)
+	mu                 sync.Mutex
+	dir                string
+	records            map[string]NodeRegistration
+	published          sync.Map     // committed NodeRegistration values; holder host checks never take mu (INV-WS-RENEW-NONBLOCKING-001)
+	persistHookForTest func(string) // nil in production; crash injection at publication boundaries
 }
 
 // OpenNodeInventoryStore opens or creates a node inventory store.
@@ -222,8 +223,14 @@ func (s *NodeInventoryStore) putLocked(rec NodeRegistration) error {
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("lifecycle: replace node %s: %w", rec.ServerID, err)
 	}
+	if s.persistHookForTest != nil {
+		s.persistHookForTest("before-rename")
+	}
 	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("lifecycle: rename node %s: %w", rec.ServerID, err)
+	}
+	if s.persistHookForTest != nil {
+		s.persistHookForTest("after-rename")
 	}
 	return nil
 }
