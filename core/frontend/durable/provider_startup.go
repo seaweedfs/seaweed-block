@@ -34,6 +34,44 @@ func (p *DurableProvider) ChunkStartupSuperseded(volumeID string, gen uint64) bo
 	return !p.closed && h != nil && gen != 0 && h.recoverGen == gen && h.startupEnded == gen && h.startupSuperseded
 }
 
+// ChunkStartupStop is this exact recovery's no-retry stop, if its startup
+// ended on a local root that never becomes valid: the reason
+// (stale_local_root, local_root_rolled_back) and its operator line; "" for
+// any other outcome (V1-SPEC r2.38).
+func (p *DurableProvider) ChunkStartupStop(volumeID string, gen uint64) (reason, detail string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	h := p.volumes[volumeID]
+	if p.closed || h == nil || gen == 0 || h.recoverGen != gen || h.startupEnded != gen {
+		return "", ""
+	}
+	return h.startupStop, h.startupStopDetail
+}
+
+// stopDetailError carries the operator line of a no-retry stop.
+type stopDetailError struct {
+	err    error
+	detail string
+}
+
+func (e *stopDetailError) Error() string { return e.err.Error() }
+func (e *stopDetailError) Unwrap() error { return e.err }
+
+// startupStopOf classifies a startup's ending cause into its no-retry stop.
+func startupStopOf(cause error) (reason, detail string) {
+	var d *stopDetailError
+	if errors.As(cause, &d) {
+		detail = d.detail
+	}
+	switch {
+	case errors.Is(cause, errChunkRootRolledBack):
+		return "local_root_rolled_back", detail
+	case errors.Is(cause, errChunkStaleRootNoRetry):
+		return "stale_local_root", detail
+	}
+	return "", ""
+}
+
 func (p *DurableProvider) endChunkStartup(h *volHandle, gen uint64, cause error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -42,6 +80,7 @@ func (p *DurableProvider) endChunkStartup(h *volHandle, gen uint64, cause error)
 	}
 	h.startupEnded = gen
 	h.startupSuperseded = errors.Is(cause, errChunkForeignClaim)
+	h.startupStop, h.startupStopDetail = startupStopOf(cause)
 	select {
 	case p.startupUpdates <- struct{}{}:
 	default:

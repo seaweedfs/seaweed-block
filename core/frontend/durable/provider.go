@@ -290,6 +290,8 @@ type volHandle struct {
 	recoverGen        uint64
 	waitGen           uint64
 	startupSuperseded bool               // exact foreign-holder claim proof for startupEnded; guarded by p.mu
+	startupStop       string             // no-retry stop reason of startupEnded (stale_local_root, local_root_rolled_back); guarded by p.mu
+	startupStopDetail string             // its operator line; guarded by p.mu
 	startupEnded      uint64             // recovery generation with a terminal startup outcome; guarded by p.mu
 	runtimeFenced     bool               // the attached layer fenced after startup (HEAD has another owner); guarded by p.mu
 	chunk             storage.ChunkLayer // after RecoverVolume
@@ -972,6 +974,7 @@ func (p *DurableProvider) RecoverVolume(ctx context.Context, volumeID string) (R
 		gen = h.recoverGen
 		h.startupEnded = 0
 		h.startupSuperseded = false
+		h.startupStop, h.startupStopDetail = "", ""
 		p.mu.Unlock()
 	}
 	report := Recover(h.storage, volumeID)

@@ -59,7 +59,13 @@ var ErrChunkStaleLocalRoot = errors.New("durable: local volume predates a HEAD p
 var (
 	errProviderClosed    = errors.New("durable: provider closed")
 	errChunkForeignClaim = errors.New("durable: HEAD claim refused by another holder")
-	errChunkNoAuthority  = errors.New("durable: projection carries no master authority for the chunk layer")
+	// errChunkStaleRootNoRetry marks a stale local root that ends the
+	// startup with no retry (exit 78 stale_local_root; V1-SPEC r2.38);
+	// errChunkRootRolledBack a rolled-back copy of this root (exit 78
+	// local_root_rolled_back). Neither ever becomes valid.
+	errChunkStaleRootNoRetry = errors.New("durable: stale local root, no retry")
+	errChunkRootRolledBack   = errors.New("durable: rolled-back local root, no retry")
+	errChunkNoAuthority      = errors.New("durable: projection carries no master authority for the chunk layer")
 )
 
 const (
@@ -121,16 +127,62 @@ func chunkAuthorityGap(proj frontend.Projection, volumeID string) string {
 // false: the volume is recovered but stays non-operational until then.
 // The caller holds h.attachMu and is registered with Close.
 func (p *DurableProvider) recoverChunk(ctx context.Context, volumeID string, h *volHandle, gen uint64) (bool, error) {
+	if err := p.staleRootBeforeWait(ctx, volumeID, h); err != nil {
+		p.endChunkStartup(h, gen, err)
+		return false, err
+	}
 	err := p.attachChunk(ctx, volumeID, h)
 	if errors.Is(err, errChunkNoAuthority) {
 		p.startChunkAuthorityWait(volumeID, h, gen)
 		return false, nil
 	}
-	if errors.Is(err, storage.ErrChunkLayerFenced) && (!errors.Is(err, ErrChunkStaleLocalRoot) || errors.Is(err, errChunkForeignClaim)) {
+	if errors.Is(err, storage.ErrChunkLayerFenced) && (!errors.Is(err, ErrChunkStaleLocalRoot) || errors.Is(err, errChunkForeignClaim) || errors.Is(err, errChunkStaleRootNoRetry) || errors.Is(err, errChunkRootRolledBack)) {
 		p.endChunkStartup(h, gen, err)
 	}
 	return err == nil, err
 }
+
+// staleRootBeforeWait reads HEAD once, before the assignment wait, for an
+// existing root that has recorded a publication (TERM-STOP-STALE-ROOT-001):
+// superseded over its recorded epoch -> a stale-root error that ends the
+// startup with no retry. Anything else, including a HEAD read error, takes
+// the normal path. No master authority is needed for this read.
+func (p *DurableProvider) staleRootBeforeWait(ctx context.Context, volumeID string, h *volHandle) error {
+	if h.fresh {
+		return nil
+	}
+	root, err := openLocalRoot(h.path, false)
+	if err != nil || !root.stored {
+		return nil
+	}
+	remote, err := p.cfg.ChunkRemoteFor(volumeID)
+	if err != nil {
+		return nil
+	}
+	rctx, cancel := context.WithTimeout(ctx, chunkEarlyHeadReadTimeout)
+	defer cancel()
+	stop := context.AfterFunc(p.closeCtx, cancel)
+	defer stop()
+	head, err := remote.GetHead(rctx)
+	if err != nil {
+		log.Printf("durable: early HEAD read for volume=%s failed (%v); taking the normal startup path", volumeID, err)
+		return nil
+	}
+	why := root.supersededBefore(head, p.chunkHolder(frontend.Projection{}))
+	if why == "" {
+		return nil
+	}
+	log.Printf("durable: volume=%s local root %s is superseded before the assignment wait: %s (no retry)", volumeID, h.path, why)
+	return &stopDetailError{
+		err: fmt.Errorf("%w: %w: %w: volume %s local root %s: %s; remove or quarantine the local root to attach fresh from HEAD",
+			ErrChunkStaleLocalRoot, storage.ErrChunkLayerFenced, errChunkStaleRootNoRetry, volumeID, h.path, why),
+		detail: fmt.Sprintf("HEAD is held by %s at epoch %d; this local root last published epoch %d; move this root aside after confirming no blockvolume uses it, and start again",
+			head.Holder, head.Epoch, root.recordedEpoch()),
+	}
+}
+
+// chunkEarlyHeadReadTimeout bounds the early stale-root HEAD read.
+const chunkEarlyHeadReadTimeout = 5 * time.Second
 
 // startChunkAuthorityWait starts the authority wait of recovery gen,
 // registered with Close like a recovery. A wait of an earlier recovery
@@ -245,7 +297,7 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 		case errors.Is(err, storage.ErrChunkLayerFenced):
 			ended = "fenced, not serving"
 			log.Printf("durable: chunk layer for volume=%s: %v (not serving)", volumeID, err)
-			if errors.Is(err, ErrChunkStaleLocalRoot) && !errors.Is(err, errChunkForeignClaim) {
+			if errors.Is(err, ErrChunkStaleLocalRoot) && !errors.Is(err, errChunkForeignClaim) && !errors.Is(err, errChunkStaleRootNoRetry) && !errors.Is(err, errChunkRootRolledBack) {
 				retained = true
 				h.attachMu.Lock()
 				if p.current(h, gen) && h.chunk == nil {
@@ -474,8 +526,13 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 			// The same holder: HEAD must be this root's lineage (V1-SPEC r2.38).
 			if why := root.lineageOf(head); why != "" {
 				log.Printf("durable: refusing to attach volume=%s root=%s: %s (remove or quarantine the local root)", volumeID, h.path, why)
-				return fmt.Errorf("%w: %w: volume %s local root %s: %s; remove or quarantine the local root to attach fresh from HEAD",
-					ErrChunkStaleLocalRoot, storage.ErrChunkLayerFenced, volumeID, h.path, why)
+				// Not this root's lineage never becomes valid: no retry.
+				class := errChunkStaleRootNoRetry
+				if root.rolledBack(head) {
+					class = errChunkRootRolledBack
+				}
+				return fmt.Errorf("%w: %w: %w: volume %s local root %s: %s; remove or quarantine the local root to attach fresh from HEAD",
+					ErrChunkStaleLocalRoot, storage.ErrChunkLayerFenced, class, volumeID, h.path, why)
 			}
 			return nil
 		}
@@ -1521,5 +1578,5 @@ func (w *cutWaitSlot) status(cutSeq uint64) CutScheduleStatus {
 // INV-WS-STARTUP-RETRY-001: a displaced lower-epoch claim fences this
 // attempt, but cannot prove the assigned holder was superseded.
 func claimHeadSupersedes(head storage.ChunkHead, cfg storage.ChunkLayerConfig) bool {
-	return head.Gen != 0 && head.Holder != "" && head.Holder != cfg.Holder && head.Epoch >= cfg.Epoch
+	return head.Gen != 0 && head.Holder != "" && !holderid.Claimable(head.Holder, head.HolderRoot, cfg.Holder, cfg.HolderRoot) && head.Epoch >= cfg.Epoch
 }

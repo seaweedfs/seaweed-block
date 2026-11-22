@@ -59,7 +59,7 @@ func TestRuntimeHeadFenceChoosesHeadFencedExit(t *testing.T) {
 	stub.updates <- struct{}{}
 	select {
 	case out := <-e.decision:
-		if out != (workspaceExit{exitWorkspaceSuperseded, "head_fenced"}) {
+		if out != (workspaceExit{code: exitWorkspaceSuperseded, reason: "head_fenced"}) {
 			t.Fatalf("exit %+v, want 78 head_fenced", out)
 		}
 	case <-time.After(runtimeFenceWait):

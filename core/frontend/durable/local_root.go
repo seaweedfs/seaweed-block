@@ -24,7 +24,9 @@ type localRoot struct {
 	mu        sync.Mutex
 	Nonce     string `json:"nonce"`
 	HighWater uint64 `json:"high_water"`
-	stored    bool   // the file exists: this root has recorded at least once
+	// Epoch is the epoch of the publication the high-water was recorded for.
+	Epoch  uint64 `json:"epoch"`
+	stored bool   // the file exists: this root has recorded at least once
 }
 
 const localRootSuffix = ".root"
@@ -56,22 +58,27 @@ func openLocalRoot(volPath string, fresh bool) (*localRoot, error) {
 	return r, nil
 }
 
-// record durably raises the high-water to gen (file and directory synced)
-// before the caller's CAS may install gen. It never lowers it.
-func (r *localRoot) record(gen uint64) error {
+// record durably raises the high-water to gen, with the epoch of that
+// publication (file and directory synced), before the caller's CAS may
+// install gen. It never lowers either.
+func (r *localRoot) record(gen, epoch uint64) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.stored && gen <= r.HighWater {
+	if r.stored && gen <= r.HighWater && epoch <= r.Epoch {
 		return nil
 	}
-	hw := r.HighWater
+	hw, ep := r.HighWater, r.Epoch
 	if gen > hw {
 		hw = gen
+	}
+	if epoch > ep {
+		ep = epoch
 	}
 	b, err := json.Marshal(struct {
 		Nonce     string `json:"nonce"`
 		HighWater uint64 `json:"high_water"`
-	}{r.Nonce, hw})
+		Epoch     uint64 `json:"epoch"`
+	}{r.Nonce, hw, ep})
 	if err != nil {
 		return err
 	}
@@ -97,7 +104,7 @@ func (r *localRoot) record(gen uint64) error {
 	if err := syncParentDir(r.path); err != nil {
 		return err
 	}
-	r.HighWater, r.stored = hw, true
+	r.HighWater, r.Epoch, r.stored = hw, ep, true
 	return nil
 }
 
@@ -108,7 +115,7 @@ func (r *localRoot) beforeHeadCAS(holderID string) func(storage.ChunkHead, uint6
 		if !holder.Same(next.Holder, next.HolderRoot, holderID, r.Nonce) {
 			return nil
 		}
-		return r.record(gen)
+		return r.record(gen, next.Epoch)
 	}
 }
 
@@ -141,4 +148,36 @@ func (r *localRoot) lineageOf(head storage.ChunkHead) string {
 		return fmt.Sprintf("HEAD gen %d is above this root's published high-water %d (a rolled-back copy of this root)", head.Gen, r.HighWater)
 	}
 	return ""
+}
+
+// rolledBack: HEAD names this very root above its high-water (a rolled-back
+// copy of this root). Never call with mu held.
+func (r *localRoot) rolledBack(head storage.ChunkHead) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.stored && head.HolderRoot != "" && head.HolderRoot == r.Nonce && head.Gen > r.HighWater
+}
+
+// recordedEpoch is the epoch of the root's last recorded publication.
+func (r *localRoot) recordedEpoch() uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.Epoch
+}
+
+// supersededBefore is the early stale-root check (V1-SPEC r2.38, TERM-STOP-
+// STALE-ROOT-001): an existing root that has recorded a publication is
+// superseded when HEAD names another holder (server, replica, root; a
+// pre-release HEAD without a root is still ours) at an epoch at or above the
+// root's recorded epoch, i.e. someone published over this root's own last
+// line. It returns why, or "" (a lower-epoch foreign HEAD, an empty HEAD or a
+// root without a record takes the normal path).
+func (r *localRoot) supersededBefore(head storage.ChunkHead, holderID string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.stored || head.Gen == 0 || head.Holder == "" || holder.Claimable(head.Holder, head.HolderRoot, holderID, r.Nonce) || head.Epoch < r.Epoch {
+		return ""
+	}
+	return fmt.Sprintf("HEAD gen %d epoch %d was published by holder %q root %q over this root's recorded epoch %d (this holder %q, root %s)",
+		head.Gen, head.Epoch, head.Holder, head.HolderRoot, r.Epoch, holderID, r.Nonce)
 }

@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
@@ -236,25 +235,18 @@ func TestWALStoreChunk_MoveBackRefusedOnDeferredAttach(t *testing.T) {
 	if _, err := pA2.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pA2.RecoverVolume(ctx, "v1"); err != nil {
-		t.Fatalf("recovery before the assignment: %v", err)
+	// V1-SPEC r2.38 (TERM-STOP-STALE-ROOT-001): the old root reads HEAD
+	// before the assignment wait; another holder published over its recorded
+	// epoch, so recovery is refused before any assignment arrives, and the
+	// startup ends with no retry and the operator's cure.
+	_, err := pA2.RecoverVolume(ctx, "v1")
+	if !errors.Is(err, durable.ErrChunkStaleLocalRoot) || !strings.Contains(err.Error(), "remove or quarantine the local root") {
+		t.Fatalf("recovery before the assignment: %v; want the stale-root refusal", err)
 	}
-	view.set(healthyProj(frontend.Identity{VolumeID: "v1", ReplicaID: "rA", Epoch: 5, EndpointVersion: 1}))
-	deadline := time.Now().Add(5 * time.Second)
-	var st durable.VolumeStatus
-	for time.Now().Before(deadline) {
-		for _, s := range pA2.DurableStatuses() {
-			if s.VolumeID == "v1" {
-				st = s
-			}
-		}
-		if strings.Contains(st.Evidence, "remove or quarantine the local root") {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if st.Operational || !strings.Contains(st.Evidence, "remove or quarantine the local root") {
-		t.Fatalf("deferred attach of the old root: operational %t evidence %q", st.Operational, st.Evidence)
+	gen, ended := pA2.ChunkStartupOutcome("v1")
+	reason, detail := pA2.ChunkStartupStop("v1", gen)
+	if !ended || reason != "stale_local_root" || !strings.Contains(detail, "HEAD is held by rB at epoch") || !strings.Contains(detail, "move this root aside") {
+		t.Fatalf("startup stop: ended=%t reason=%q detail=%q", ended, reason, detail)
 	}
 	if after := headHolder(t, remote); after.Gen != before.Gen || after.Holder != before.Holder {
 		t.Fatalf("HEAD changed by a refused deferred attach: %+v -> %+v", before, after)

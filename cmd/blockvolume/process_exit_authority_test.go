@@ -166,8 +166,9 @@ func TestWorkspaceUnconfirmedRevokeHasOwnReason(t *testing.T) {
 // real provider deadline/retained-state boundary is tested in durable.
 type exitStartupOutcome struct{ expired bool }
 
-func (s *exitStartupOutcome) ChunkStartupSuperseded(string, uint64) bool { return false }
-func (s *exitStartupOutcome) ChunkStartupOutcome(string) (uint64, bool)  { return 1, s.expired }
+func (s *exitStartupOutcome) ChunkStartupSuperseded(string, uint64) bool       { return false }
+func (s *exitStartupOutcome) ChunkStartupStop(string, uint64) (string, string) { return "", "" }
+func (s *exitStartupOutcome) ChunkStartupOutcome(string) (uint64, bool)        { return 1, s.expired }
 func (s *exitStartupOutcome) ChooseChunkStartupExit(_ string, gen uint64, choose func()) bool {
 	if gen != 1 || !s.expired {
 		return false
@@ -272,7 +273,7 @@ func TestWorkspaceForeignHeadClaimChoosesNoRetry(t *testing.T) {
 				}
 				view := &claimExitView{}
 				view.assigned.Store(!deferred)
-				p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil }}, view)
+				p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, ChunkHolder: "r", StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil }}, view)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -341,7 +342,7 @@ func TestWorkspaceOldLocalHolderForeignHeadChoosesNoRetry(t *testing.T) {
 			view.assigned.Store(true)
 			open := func() *durable.DurableProvider {
 				t.Helper()
-				p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: root, NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil }}, view)
+				p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, ChunkHolder: "r", StorageRoot: root, NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil }}, view)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -374,26 +375,19 @@ func TestWorkspaceOldLocalHolderForeignHeadChoosesNoRetry(t *testing.T) {
 			}
 			view.assigned.Store(!deferred)
 			second := open()
+			// V1-SPEC r2.38 (TERM-STOP-STALE-ROOT-001): the old root reads HEAD
+			// before the assignment wait; another holder published over its
+			// recorded epoch, so the recovery is refused at once, assigned or not.
 			_, err = second.RecoverVolume(ctx, "v")
-			if deferred {
-				if err != nil {
-					t.Fatal(err)
-				}
-				view.assigned.Store(true)
-				select {
-				case <-second.ChunkStartupUpdates():
-				case <-ctx.Done():
-					t.Fatal(ctx.Err())
-				}
-			} else if !errors.Is(err, storage.ErrChunkLayerFenced) {
+			if !errors.Is(err, storage.ErrChunkLayerFenced) {
 				t.Fatalf("old root refusal=%v", err)
 			}
 			e := newProcessExit(ctx)
 			if !chooseChunkStartupExit(e, flags{workspaceLease: true, durableImpl: "walstore-chunk", volumeID: "v"}, h, second) {
 				t.Fatal("foreign HEAD attach refusal retained the superseded process")
 			}
-			if out := <-e.decision; out.code != 78 {
-				t.Fatalf("old holder exit=%+v", out)
+			if out := <-e.decision; out.code != 78 || out.reason != "stale_local_root" || out.detail == "" {
+				t.Fatalf("old holder exit=%+v, want 78 stale_local_root with the operator line", out)
 			}
 			if got, err := second.LogicalStorage("v").Read(0); err != nil || !bytes.Equal(got, want) {
 				t.Fatalf("refusal lost local acknowledged bytes: %v", err)
@@ -448,7 +442,7 @@ func TestWorkspaceDisplacedClaimUsesAssignedEpoch(t *testing.T) {
 				t.Fatal(err)
 			}
 			remote := &displacedClaimExitRemote{ChunkRemote: base, epoch: tc.epoch}
-			p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil }}, displacedClaimExitView{})
+			p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, ChunkHolder: "B", StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil }}, displacedClaimExitView{})
 			if err != nil {
 				t.Fatal(err)
 			}

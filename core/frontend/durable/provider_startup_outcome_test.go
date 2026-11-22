@@ -19,7 +19,7 @@ func TestChunkAssignmentTimeoutExposesCurrentRecoveryOutcome(t *testing.T) {
 	captureWriteLogs(t, logs)
 	v := &arrivingAssignment{seen: make(chan struct{}), assigned: make(chan struct{})}
 	p, err := durable.NewDurableProvider(durable.ProviderConfig{
-		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64,
+		Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: t.TempDir(), NumBlocks: 64,
 		BlockSize: 4096, ChunkBlocks: 4, ChunkAssignmentTimeout: time.Millisecond,
 		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) {
 			t.Error("remote reached without authority")
@@ -125,7 +125,7 @@ func TestChunkStartupRetainedDispositionWinsExpiredAttachContext(t *testing.T) {
 			view.set(waiting)
 			var entered atomic.Bool
 			p, err := durable.NewDurableProvider(durable.ProviderConfig{
-				Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4,
+				Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4,
 				ChunkAssignmentTimeout: 250 * time.Millisecond,
 				ChunkAttachCheck: func(ctx context.Context, _ string, _ durable.ChunkGeometry) error {
 					entered.Store(true)
