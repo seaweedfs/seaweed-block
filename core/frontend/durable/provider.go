@@ -299,6 +299,9 @@ type volHandle struct {
 	// snapshots is the scheduled-snapshot state of the running loop, nil
 	// when the schedule is off.
 	snapshots *snapshotSlot
+	// cutWait is the automatic-cut timer's host slot waits, nil when the
+	// timer is off.
+	cutWait *cutWaitSlot
 }
 
 // VolumeStatus is a read-only diagnostic snapshot of one durable volume
@@ -343,6 +346,13 @@ type ChunkStatus struct {
 	Stats             storage.ChunkLayerStats  // the layer's cut counters; zero until attached
 	HostBudget        any                      `json:",omitempty"` // the host background-cut budget state, with --host-limit-dir
 	ScheduledSnapshot *ScheduledSnapshotStatus `json:",omitempty"` // the scheduled-snapshot state; absent when the schedule is off or its loop has not started
+	CutSchedule       *CutScheduleStatus       `json:",omitempty"` // the automatic-cut timer's state; absent when the timer is off or its loop has not started
+}
+
+// CutScheduleStatus is the automatic-cut timer's view of host slot waits.
+type CutScheduleStatus struct {
+	HostSlotWaits       uint64 // automatic cuts refused because every host slot was held
+	HostSlotWaitSinceNs int64  // wall time of the first such refusal since the last successful cut; 0 when not waiting
 }
 
 // NewDurableProvider constructs a provider. view is the ONLY
@@ -599,6 +609,7 @@ func (p *DurableProvider) DurableStatuses() []VolumeStatus {
 		layer     storage.ChunkLayer
 		awaiting  bool
 		snapshots *snapshotSlot
+		cutWait   *cutWaitSlot
 	}
 	p.mu.Lock()
 	handles := make(map[string]*volHandle, len(p.volumes))
@@ -606,7 +617,7 @@ func (p *DurableProvider) DurableStatuses() []VolumeStatus {
 	for volumeID, h := range p.volumes {
 		handles[volumeID] = h
 		if p.cfg.Impl == ImplWALStoreChunk {
-			chunks[volumeID] = chunkView{layer: h.chunk, awaiting: h.waitGen != 0, snapshots: h.snapshots}
+			chunks[volumeID] = chunkView{layer: h.chunk, awaiting: h.waitGen != 0, snapshots: h.snapshots, cutWait: h.cutWait}
 		}
 	}
 	p.mu.Unlock()
@@ -625,6 +636,10 @@ func (p *DurableProvider) DurableStatuses() []VolumeStatus {
 			if cv.snapshots != nil {
 				ss := cv.snapshots.status(time.Now())
 				cs.ScheduledSnapshot = &ss
+			}
+			if cv.cutWait != nil {
+				cw := cv.cutWait.status(cs.Stats.CutSeq)
+				cs.CutSchedule = &cw
 			}
 			st.Chunk = cs
 		}
