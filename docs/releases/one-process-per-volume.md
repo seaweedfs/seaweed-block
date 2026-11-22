@@ -7,7 +7,8 @@ the same host is refused before it opens anything, whatever its
 `--durable-root`. The lock is released when the process exits, including on
 a crash or kill.
 
-blockvolume creates the directory (`0700`) when it is missing and it may, and
+blockvolume creates the directory when it is missing and it may, laid out as
+the tmpfiles.d entry does (`/run/sw-block` `0755`, `/run/sw-block/locks` `0700`), and
 refuses to start when it cannot create or open the directory or a volume's
 lock file. The shipped units cannot create it (`ProtectSystem=strict`), so
 install the tmpfiles.d entry shipped in [`deploy/systemd/sw-block.tmpfiles.conf`](../../deploy/systemd/sw-block.tmpfiles.conf):
@@ -22,11 +23,12 @@ boot. Both shipped units allow writes to it
 (`ReadWritePaths=-/run/sw-block/locks`). Without it, or when it is not
 usable, blockvolume exits at start with `host volume lock directory
 unavailable ... install the tmpfiles.d entry (deploy/systemd/sw-block.tmpfiles.conf),
-or chown the directory and its lock files to this process's user`. A
-directory created by a root process (the root ublk unit, or blockvolume run
-by hand as root) is root-owned, and an unprivileged unit on that host then
-cannot use it: install the tmpfiles.d entry, or chown the directory to the
-unit's user. Lock files are opened read-only, so a lock file another user
+or make its parent directory traversable (0755) and chown the directory and
+its lock files to this process's user`. A directory created by a root
+process (the root ublk unit, or blockvolume run by hand as root) is
+root-owned, and an unprivileged unit on that host then cannot use it:
+install the tmpfiles.d entry, or chown the locks directory to the unit's
+user and make sure `/run/sw-block` is `0755`. Lock files are opened read-only, so a lock file another user
 created stays lockable.
 
 ## A rolled-back copy of a root is refused
