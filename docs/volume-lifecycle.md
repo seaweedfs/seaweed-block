@@ -123,16 +123,31 @@ sw-block ops volume-unheld --path /var/lib/sw-block-volume/volumes/v1.bin
 the file; exit 1 is `held: a live process on this host holds ...`. It proves
 nothing about another host.
 
+## Which procedures run end to end
+
+Each procedure below runs as written on this page, with the real binaries, two
+`blockvolume` processes with distinct server ids (`s1`, `s2`) on one host, one
+`blockmaster` and SeaweedFS (tests in `cmd/blockvolume`, build tags
+`subprocess chunkstore_integration`).
+
+| Procedure | Test | Result |
+|---|---|---|
+| Planned hand-over to another host | `TestProcedurePlannedHandoffToAnotherHost` | runs |
+| Planned return to the same host | `TestStandalonePlannedHandoffToTheSameHost` | runs |
+| Clean move refused without the ACK | `TestStandaloneCleanMoveWithoutTheACKIsRefused` | runs |
+| Same host: restart inside the lease | `TestProcedureSameHostRestartInsideTheLease` | runs |
+| After a crash: return after a lapsed lease (started 65 s after the stop) | `TestProcedureReturnAfterALapsedLease` | runs |
+| Revoke without the ACK, then forced move to another node | `TestProcedureRevokeWithoutACKThenForcedMove` | runs |
+| Forced move, then the old host returns | `TestProcedureForcedMoveWithTheOldHostReturning` | **fails in this release**: the returning old host takes the new host's assignment and reports itself ready, although it refuses I/O. Keep the old host down (see "The holder never comes back") |
+| A start inside the window before the re-grant barrier ("started too early") | none | not run |
+| Hand-over between two machines | none | not run (the tests use one machine's loopback) |
+
 ## Planned hand-over
 
 Nothing the volume acknowledged is lost. The target is another registered
 host, or the same host (next section).
 
-Each step below is covered by its own tests. The same-host case of the whole
-sequence runs end to end, with these commands as written, in
-`TestStandalonePlannedHandoffToTheSameHost` (`cmd/blockvolume`), and the refusal of
-a clean move without the ACK in `TestStandaloneCleanMoveWithoutTheACKIsRefused`.
-A move to another host is not yet run end to end.
+Which steps run end to end is listed in [Which procedures run end to end](#which-procedures-run-end-to-end).
 
 **1. Read the holder.**
 
