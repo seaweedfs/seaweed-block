@@ -224,7 +224,7 @@ func (s *NodeInventoryStore) putLocked(rec NodeRegistration) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("lifecycle: close node temp %s: %w", rec.ServerID, err)
 	}
-	// V1-SPEC r2.46: replace without an absent-file window; acknowledge only
+	// INV-LIFECYCLE-STORE-DURABLE-001: replace without an absent-file window; acknowledge only
 	// after both the complete candidate and its directory entry are synced.
 	if s.persistHookForTest != nil {
 		s.persistHookForTest("before-rename")

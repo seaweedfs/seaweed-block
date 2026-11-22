@@ -28,7 +28,7 @@ func crashNodeRegistration(updated bool) NodeRegistration {
 }
 
 // RegisterNode must leave a complete old or new registration across a process
-// crash at either side of the publication rename (V1-SPEC r2.46).
+// crash at either side of the publication rename (INV-LIFECYCLE-STORE-DURABLE-001).
 func TestNodeInventoryCrashKeepsCompleteRegistration(t *testing.T) {
 	for _, phase := range []string{"before-rename", "after-rename"} {
 		t.Run(phase, func(t *testing.T) {
