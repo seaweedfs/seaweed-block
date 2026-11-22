@@ -244,6 +244,9 @@ func TestWorkspaceHolderRefusedFromAnotherHostAtRenewAckAndStream(t *testing.T) 
 		if status.Code(err) != codes.FailedPrecondition || !strings.Contains(status.Convert(err).Message(), "registered on host 127.0.0.1; refused from 127.0.0.2") {
 			t.Fatalf("%s from 127.0.0.2 as node-a: %v, want the host refusal", what, err)
 		}
+		if !strings.Contains(status.Convert(err).Message(), "register the node by the address it connects from (not loopback) in the cluster spec") {
+			t.Fatalf("%s refusal has no registration cure: %v", what, err)
+		}
 	}
 	_, err := wsOther.RenewWorkspaceLease(r.ctx, id)
 	refusedFrom2("renew", err)
