@@ -159,7 +159,7 @@ func TestWorkspacePausedGranteeRefusedAtAttach(t *testing.T) {
 
 	// The grantee renews (its guard is valid), then pauses before its claim.
 	guard, err := volume.NewWorkspaceLeaseGuard(workspaceRPCView{frontend.Projection{VolumeID: "v", ReplicaID: "r", Epoch: 2, EndpointVersion: 1, Healthy: true}}, skewLeaseClient{p},
-		&control.WorkspaceIdentity{VolumeId: "v", ReplicaId: "r", Epoch: 2}, func(context.Context) (uint64, error) { return 0, nil }, func() time.Time { return hostNow })
+		&control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "v", ReplicaId: "r", Epoch: 2}, func(context.Context) (uint64, error) { return 0, nil }, func() time.Time { return hostNow })
 	if err != nil {
 		t.Fatal(err)
 	}

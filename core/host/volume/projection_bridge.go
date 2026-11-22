@@ -227,3 +227,11 @@ func (v *AdapterProjectionView) PromotionReadyFact() engine.PromotionReadyFact {
 func (v *AdapterProjectionView) EngineProjection() engine.ReplicaProjection {
 	return v.projector.Projection()
 }
+
+// assignmentEndpointWarning exposes routing disagreement without gating I/O.
+func (v *AdapterProjectionView) assignmentEndpointWarning() string {
+	if p, ok := v.probe.(interface{ AssignmentEndpointWarning() string }); ok {
+		return p.AssignmentEndpointWarning()
+	}
+	return ""
+}

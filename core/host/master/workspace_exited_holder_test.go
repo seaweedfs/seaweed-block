@@ -78,7 +78,7 @@ func TestWorkspaceExitedHolderForcedMoveThenCleanDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	oldLine := waitAuthorityLine(t, m.Publisher(), "vol-a")
-	oldID := &control.WorkspaceIdentity{VolumeId: "vol-a", ReplicaId: oldLine.ReplicaID, Epoch: oldLine.Epoch}
+	oldID := &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "vol-a", ReplicaId: oldLine.ReplicaID, Epoch: oldLine.Epoch}
 	if _, err = ws.RenewWorkspaceLease(ctx, oldID); err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +188,7 @@ func TestWorkspaceExitedHolderForcedMoveThenCleanDelete(t *testing.T) {
 	}
 
 	// The new holder detaches cleanly and ACKs; the delete is then admitted.
-	newID := &control.WorkspaceIdentity{VolumeId: "vol-a", ReplicaId: newLine.ReplicaID, Epoch: newLine.Epoch}
+	newID := &control.WorkspaceIdentity{ServerId: "node-b", VolumeId: "vol-a", ReplicaId: newLine.ReplicaID, Epoch: newLine.Epoch}
 	if _, err := ws.RenewWorkspaceLease(ctx, newID); err != nil {
 		t.Fatal(err)
 	}

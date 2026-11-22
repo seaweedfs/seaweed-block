@@ -122,7 +122,8 @@ func (h *Host) observationVolume(volumeID string, rec lifecycle.VolumeRecord, pl
 	volume.Replicas = replicas
 	volume.ObservedReplicas = countObservedReplicas(replicas)
 	if volume.PrimaryReplica != "" {
-		volume.PrimaryNode = serverForReplica(placement, volume.PrimaryReplica)
+		// the server on the authority line (issued holder), not placement (INV-AUTH-HOLDER-IDENTITY-001)
+		volume.PrimaryNode = h.workspaceSourceHost(volumeID, line.ReplicaID, line.Epoch)
 		volume.PublishTarget = publishTargetForReplica(replicas, volume.PrimaryReplica)
 	}
 
@@ -230,7 +231,15 @@ func (h *Host) observationReplicas(volumeID string, placement lifecycle.Placemen
 			replica.Role = "primary"
 			replica.ReplicationRole = "primary"
 		}
-		if fact, ok := h.ObservationHost().Store().SlotFact(volumeID, replicaID); ok {
+		fact, ok := h.ObservationHost().Store().SlotFact(volumeID, replicaID)
+		if hasLine && line.Assigned && replicaID == line.ReplicaID {
+			// the whole primary row is the line's server: its identity, evidence and frontend
+			// (INV-AUTH-HOLDER-IDENTITY-001); never placement's server carrying the holder's frontend
+			var holder string
+			holder, fact, ok = h.holderSlotFact(volumeID, replicaID, line.Epoch)
+			replica.ServerID, replica.KubernetesNode = holder, holder
+		}
+		if ok {
 			replica.Observed = true
 			replica.CandidateReady = fact.ReadyForPrimary
 			replica.CandidateReadyReason = candidateReason(fact.ReadyForPrimary)

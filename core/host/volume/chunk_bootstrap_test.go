@@ -34,7 +34,7 @@ func TestWALStoreChunk_ProductionStartupPublishesUnderAssignedEpoch(t *testing.T
 	// main.go: block readiness before Start; the assignment arrives and
 	// is retained, not applied.
 	h.BlockLocalReadiness("awaiting durable recovery")
-	h.applyFact(&control.AssignmentFact{VolumeId: "v1", ReplicaId: "r1", Epoch: 5, EndpointVersion: 2, PeerSetGeneration: 1})
+	h.applyFixtureFact(&control.AssignmentFact{VolumeId: "v1", ReplicaId: "r1", Epoch: 5, EndpointVersion: 2, PeerSetGeneration: 1})
 	if p := h.ProjectionView().Projection(); p.Healthy || p.Epoch != 0 {
 		t.Fatalf("assignment applied while readiness was blocked: %+v", p)
 	}

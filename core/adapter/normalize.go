@@ -23,6 +23,10 @@ import (
 
 // AssignmentInfo is a raw assignment from the master heartbeat.
 type AssignmentInfo struct {
+	// ServerID is immutable for a moved authority line; an unknown moved
+	// owner remains empty instead of falling back to placement.
+	ServerID        string
+	OwnerFromMove   bool
 	VolumeID        string
 	ReplicaID       string
 	Epoch           uint64

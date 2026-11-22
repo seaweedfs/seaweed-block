@@ -92,7 +92,7 @@ func TestWorkspaceUnclaimedGrantForcedReassignOverRPC(t *testing.T) {
 		t.Fatal(err)
 	}
 	oldLine := waitAuthorityLine(t, m.Publisher(), "vol-a")
-	oldID := &control.WorkspaceIdentity{VolumeId: "vol-a", ReplicaId: oldLine.ReplicaID, Epoch: oldLine.Epoch}
+	oldID := &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "vol-a", ReplicaId: oldLine.ReplicaID, Epoch: oldLine.Epoch}
 	if _, err = ws.RenewWorkspaceLease(ctx, oldID); err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestWorkspaceUnclaimedGrantForcedReassignOverRPC(t *testing.T) {
 	if !grant.Issued || grant.NewEpoch != grantee+1 || line.Epoch != grant.NewEpoch || grant.HeadGen != seed.Gen || grant.RemoteLsn != seed.RemoteLSN {
 		t.Fatalf("forced grant %+v line %+v; want epoch %d on HEAD gen %d lsn %d", grant, line, grantee+1, seed.Gen, seed.RemoteLSN)
 	}
-	if _, err := ws.RenewWorkspaceLease(ctx, &control.WorkspaceIdentity{VolumeId: "vol-a", ReplicaId: "r1", Epoch: grantee}); err == nil {
+	if _, err := ws.RenewWorkspaceLease(ctx, &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "vol-a", ReplicaId: "r1", Epoch: grantee}); err == nil {
 		t.Fatal("the dead grantee's epoch renewed after the forced move")
 	}
 

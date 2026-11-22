@@ -88,7 +88,7 @@ func TestWorkspaceBindingLegacyMoveCannotTakePreparedReservation(t *testing.T) {
 	if _, e := client.RegisterWorkspaceBinding(ctx, &control.WorkspaceBinding{VolumeId: "prepared", ServerId: "node-b", DataAddr: "127.0.0.1:9200", CtrlAddr: "127.0.0.1:9100"}); e != nil {
 		t.Fatal(e)
 	}
-	id := &control.WorkspaceIdentity{VolumeId: "legacy", ReplicaId: "r1", Epoch: 1}
+	id := &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "legacy", ReplicaId: "r1", Epoch: 1}
 	if _, e := client.RenewWorkspaceLease(ctx, id); e != nil {
 		t.Fatal(e)
 	}
@@ -114,7 +114,7 @@ func TestWorkspaceBindingDeleteCannotReleaseLiveAuthority(t *testing.T) {
 	if _, e := client.RegisterWorkspaceBinding(ctx, b); e != nil {
 		t.Fatal(e)
 	}
-	if _, e := client.RenewWorkspaceLease(ctx, &control.WorkspaceIdentity{VolumeId: "live", ReplicaId: "r1", Epoch: 1}); e != nil {
+	if _, e := client.RenewWorkspaceLease(ctx, &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "live", ReplicaId: "r1", Epoch: 1}); e != nil {
 		t.Fatal(e)
 	}
 	if _, e := control.NewLifecycleServiceClient(c).DeleteVolume(ctx, &control.DeleteVolumeRequest{VolumeId: "live"}); e == nil {
@@ -126,7 +126,7 @@ func TestWorkspaceBindingDeleteCannotReleaseLiveAuthority(t *testing.T) {
 	if _, bound, e := h.Lifecycle().WorkspaceBindings.Get("live"); e != nil || !bound {
 		t.Fatal("refused deletion removed binding", bound, e)
 	}
-	id := &control.WorkspaceIdentity{VolumeId: "live", ReplicaId: "r1", Epoch: 1}
+	id := &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "live", ReplicaId: "r1", Epoch: 1}
 	if _, e := client.RevokeWorkspace(ctx, id); e != nil {
 		t.Fatal(e)
 	}
@@ -255,7 +255,7 @@ func TestWorkspaceBindingRemoteReadDoesNotBlockAck(t *testing.T) {
 			})
 			reviewLegacyBind(t, h, c, ctx, "ack")
 			client := control.NewWorkspaceServiceClient(c)
-			id := &control.WorkspaceIdentity{VolumeId: "ack", ReplicaId: "r1", Epoch: 1}
+			id := &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "ack", ReplicaId: "r1", Epoch: 1}
 			if _, e := client.RenewWorkspaceLease(ctx, id); e != nil {
 				t.Fatal(e)
 			}
