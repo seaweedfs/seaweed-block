@@ -88,6 +88,11 @@ type Stats struct {
 	// longer than MaxHold points to a stopped or hung holder, which only its
 	// supervisor can remove.
 	SlotsHeldSinceNs map[string]int64 `json:",omitempty"`
+	// UrgentPendingHeldSinceNs is the wall time urgent-pending was first seen
+	// held at consecutive snapshots (0 when free). A stop or other urgent
+	// work that hangs keeps Normal admissions refused for as long as it
+	// lives; this shows since when.
+	UrgentPendingHeldSinceNs int64 `json:",omitempty"`
 }
 type lease struct {
 	file         *os.File
@@ -120,6 +125,7 @@ type Limiter struct {
 	heldSlots             int   // normal and urgent slots held on the host at the last count
 	bytesSinceCount       int64 // payload bytes paced since that count
 	heldSince             map[string]time.Time
+	urgentHeldSince       time.Time
 }
 
 func (l *Limiter) skipAfter() time.Duration {
@@ -488,9 +494,19 @@ func (l *Limiter) releaseLoop() {
 }
 func (l *Limiter) Snapshot() any {
 	held := l.slotFilesHeld()
+	urgentHeld := held != nil && !l.urgentFree()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	st := l.stats
+	switch {
+	case !urgentHeld:
+		l.urgentHeldSince = time.Time{}
+	case l.urgentHeldSince.IsZero():
+		l.urgentHeldSince = time.Now()
+	}
+	if !l.urgentHeldSince.IsZero() {
+		st.UrgentPendingHeldSinceNs = l.urgentHeldSince.UnixNano()
+	}
 	if held != nil {
 		now := time.Now()
 		if l.heldSince == nil {

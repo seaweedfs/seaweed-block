@@ -293,3 +293,30 @@ func TestSnapshotShowsSlotsHeldSince(t *testing.T) {
 		t.Fatalf("released slot still reported: %v", st.SlotsHeldSinceNs)
 	}
 }
+
+// Status shows since when urgent-pending has been held (a hung stop keeps
+// Normal admissions refused while it lives), and clears once it is free.
+func TestSnapshotShowsUrgentPendingHeldSince(t *testing.T) {
+	c := testConfig(t)
+	l := newTest(t, c)
+	if st := l.Snapshot().(Stats); st.UrgentPendingHeldSinceNs != 0 {
+		t.Fatalf("free urgent-pending reported held: %d", st.UrgentPendingHeldSinceNs)
+	}
+	before := time.Now().UnixNano()
+	release, held, err := HoldUrgentPending(c.Directory)
+	if err != nil || !held {
+		t.Fatalf("hold: %v %v", held, err)
+	}
+	since := l.Snapshot().(Stats).UrgentPendingHeldSinceNs
+	if since < before {
+		t.Fatalf("held since %d, want >= %d", since, before)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if again := l.Snapshot().(Stats).UrgentPendingHeldSinceNs; again != since {
+		t.Fatalf("hold start moved from %d to %d", since, again)
+	}
+	release()
+	if st := l.Snapshot().(Stats); st.UrgentPendingHeldSinceNs != 0 {
+		t.Fatalf("released urgent-pending still reported: %d", st.UrgentPendingHeldSinceNs)
+	}
+}
