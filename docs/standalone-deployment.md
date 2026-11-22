@@ -52,6 +52,7 @@ added), do not mix revisions: build the binaries from your checkout instead
 | [`deploy/systemd/sw-blockmaster.service`](../deploy/systemd/sw-blockmaster.service) | `/etc/systemd/system/` | blockmaster, as `sw-block`; state in `/var/lib/sw-block-master` |
 | [`deploy/systemd/sw-blockvolume.service`](../deploy/systemd/sw-blockvolume.service) | `/etc/systemd/system/` | One blockvolume over NVMe/TCP or iSCSI, as `sw-block`; state in `/var/lib/sw-block-volume` |
 | [`deploy/systemd/sw-blockvolume-ublk.service`](../deploy/systemd/sw-blockvolume-ublk.service) | `/etc/systemd/system/` | The same volume over ublk, as root; state in `/var/lib/sw-block-volume-ublk` |
+| [`deploy/systemd/sw-block.tmpfiles.conf`](../deploy/systemd/sw-block.tmpfiles.conf) | `/etc/tmpfiles.d/sw-block.conf` | `/run/sw-block/locks`, the host volume locks; the units cannot create it and blockvolume refuses to start without it ([one process per volume](releases/one-process-per-volume.md)) |
 
 Each unit has its own `StateDirectory=`, so the root ublk unit can never take
 ownership of blockmaster's or the unprivileged volume's files. Run either
@@ -70,6 +71,8 @@ sudo install -m 0755 blockmaster blockvolume sw-block /usr/local/bin/
 sudo install -d -m 0750 -g sw-block /etc/sw-block
 sudo install -m 0640 -g sw-block deploy/config/*.env deploy/config/topology.yaml /etc/sw-block/
 sudo install -m 0644 deploy/systemd/*.service /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/sw-block.tmpfiles.conf /etc/tmpfiles.d/sw-block.conf
+sudo systemd-tmpfiles --create /etc/tmpfiles.d/sw-block.conf
 sudo systemctl daemon-reload
 sudo systemctl enable --now sw-blockmaster sw-blockvolume
 journalctl -u sw-blockvolume -f    # wait for "adopted as PRIMARY" (see the required setup below)

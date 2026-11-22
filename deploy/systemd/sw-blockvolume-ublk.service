@@ -76,6 +76,9 @@ RestartSec=5s
 
 NoNewPrivileges=true
 ProtectSystem=strict
+# The host volume locks (deploy/systemd/sw-block.tmpfiles.conf). Under
+# ProtectSystem=strict blockvolume cannot create the directory itself.
+ReadWritePaths=-/run/sw-block/locks
 ProtectHome=true
 PrivateTmp=true
 # PrivateDevices= is off: the server needs /dev/ublk-control and /dev/ublkcN.

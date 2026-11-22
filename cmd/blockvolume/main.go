@@ -121,6 +121,9 @@ type flags struct {
 	durableBlockSize                     uint
 	durableWALMultiBlockRecords          bool
 	durableWALRecoveryTestDisableFlusher bool
+	// volumeLockDirTestOnly replaces durable.HostVolumeLockDir (hidden,
+	// test-only; refused under systemd).
+	volumeLockDirTestOnly string
 
 	// WAL retention window past checkpoint LSN. Zero = strict
 	// checkpoint-driven recycle. Non-zero = walstore relaxes the
@@ -153,6 +156,22 @@ type flags struct {
 	// gating through the durable WriteObserver seam.
 	replicationAck string
 	version        bool
+}
+
+// volumeLockDirTestOnlyFlag is hidden from --help (printVisibleUsage).
+const volumeLockDirTestOnlyFlag = "volume-lock-dir-test-only"
+
+// printVisibleUsage is the default usage without the hidden test flag.
+func printVisibleUsage(fs *flag.FlagSet) {
+	visible := flag.NewFlagSet(fs.Name(), flag.ContinueOnError)
+	visible.SetOutput(fs.Output())
+	fs.VisitAll(func(fl *flag.Flag) {
+		if fl.Name != volumeLockDirTestOnlyFlag {
+			visible.Var(fl.Value, fl.Name, fl.Usage)
+		}
+	})
+	fmt.Fprintf(fs.Output(), "Usage of %s:\n", fs.Name())
+	visible.PrintDefaults()
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -245,7 +264,9 @@ func parseFlags(args []string) (flags, error) {
 		"replication acknowledgement profile: \"best-effort\" (default), \"sync-quorum\", or \"sync-all\". "+
 			"sync-* modes fail foreground writes when required replica acknowledgement is unavailable.")
 	fs.BoolVar(&f.version, "version", false, "print build provenance and exit")
+	fs.StringVar(&f.volumeLockDirTestOnly, volumeLockDirTestOnlyFlag, "", "")
 	fs.SetOutput(os.Stderr)
+	fs.Usage = func() { printVisibleUsage(fs) }
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
 	}
@@ -271,6 +292,9 @@ func parseFlags(args []string) (flags, error) {
 	}
 	if f.version {
 		return f, nil
+	}
+	if f.volumeLockDirTestOnly != "" && os.Getenv("INVOCATION_ID") != "" {
+		return flags{}, fmt.Errorf("--%s is test-only and refused under systemd (INVOCATION_ID is set): the one-process-per-host guarantee needs %s", volumeLockDirTestOnlyFlag, durable.HostVolumeLockDir)
 	}
 	if f.recoveryMode != "legacy" && f.recoveryMode != "dual-lane" {
 		return flags{}, fmt.Errorf("--recovery-mode=%q invalid; want \"legacy\" or \"dual-lane\"", f.recoveryMode)
@@ -655,6 +679,12 @@ func runVolume(f flags, exits *processExit) int {
 			WALRetentionLSNs:              f.walRetentionLSNs,
 			WALMultiBlockRecords:          f.durableWALMultiBlockRecords,
 			WALRecoveryTestDisableFlusher: f.durableWALRecoveryTestDisableFlusher,
+			// V1-SPEC r2.45: one live process per volume per host.
+			HostVolumeLock:        true,
+			VolumeLockDirTestOnly: f.volumeLockDirTestOnly,
+		}
+		if f.volumeLockDirTestOnly != "" {
+			fmt.Fprintf(os.Stderr, "blockvolume: volume lock directory %s is a test override: the one-process-per-host guarantee does not hold\n", f.volumeLockDirTestOnly)
 		}
 		var chunkErr error
 		var chunk chunkWiring
