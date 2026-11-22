@@ -127,6 +127,11 @@ func TestWorkspaceExitedHolderForcedMoveThenCleanDelete(t *testing.T) {
 	if err != nil || head.RemoteLSN != cut || head.State == storage.ChunkHeadDetached {
 		t.Fatalf("HEAD after the holder exited: %+v %v", head, err)
 	}
+	// INV-WS-LOCAL-ROOT-IDENTITY-001: the HEAD the moves below are admitted
+	// over names its local root; the master admits by server and replica.
+	if head.HolderRoot == "" || head.HolderRootGen != head.Gen {
+		t.Fatalf("the exited holder's HEAD carries no root: %+v", head)
+	}
 
 	// The exited holder's live authority blocks the delete and a clean move.
 	if _, err := lc.MarkVolumeDeleting(ctx, &control.MarkVolumeDeletingRequest{VolumeId: "vol-a", Token: "del-early"}); err == nil || !strings.Contains(err.Error(), "live authority requires clean revocation ACK") {
@@ -198,6 +203,9 @@ func TestWorkspaceExitedHolderForcedMoveThenCleanDelete(t *testing.T) {
 	detached, _, err := newProvider.DetachVolume(ctx, "vol-a")
 	if err != nil || detached.Head.State != storage.ChunkHeadDetached {
 		t.Fatalf("detach: %+v %v", detached.Head, err)
+	}
+	if detached.Head.HolderRoot == "" || detached.Head.DetachedBy == nil || detached.Head.DetachedBy.HolderRoot != detached.Head.HolderRoot {
+		t.Fatalf("the clean ACK below is over a HEAD whose proof does not name its root: %+v", detached.Head)
 	}
 	if _, err := ws.AckWorkspaceRevoked(ctx, &control.WorkspaceRevocationAck{Identity: newID, HeadGen: detached.Head.Gen}); err != nil {
 		t.Fatal(err)

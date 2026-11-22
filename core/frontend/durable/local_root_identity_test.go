@@ -523,7 +523,8 @@ func TestSealedRootWithARecordReopensForReplay(t *testing.T) {
 	a := chunkProvider(t, root, remote, viewAs("rA", 3), 0)
 	s := openRecovered(t, a)
 	writeSync(t, s, 1, 0x21)
-	if _, _, err := a.DetachVolumePlain(ctx, "v1"); err != nil {
+	first, _, err := a.DetachVolumePlain(ctx, "v1")
+	if err != nil {
 		t.Fatal(err)
 	}
 	if err := a.Close(); err != nil {
@@ -532,17 +533,38 @@ func TestSealedRootWithARecordReopensForReplay(t *testing.T) {
 	if _, hw, _, ok := durable.LocalRootRecord(localRootVolume(t, root)); !ok || hw == 0 {
 		t.Fatalf("no root record after the seal (hw=%d ok=%t)", hw, ok)
 	}
+	sealed, _ := remote.GetHead(ctx)
 	b := chunkProvider(t, root, remote, viewAs("rA", 3), 0)
 	if _, err := b.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}
-	_, err := b.RecoverVolume(ctx, "v1")
+	// The sealed outcome (INV-WS-SEALED-REOPEN-001): not a stale root, no
+	// stop, no HEAD change, no serving.
+	_, err = b.RecoverVolume(ctx, "v1")
 	if errors.Is(err, durable.ErrChunkStaleLocalRoot) {
 		t.Fatalf("the sealed root was taken for a stale root: %v", err)
 	}
 	gen, _ := b.ChunkStartupOutcome("v1")
 	if reason, _ := b.ChunkStartupStop("v1", gen); reason != "" {
 		t.Fatalf("the sealed root's reopen stopped with %q", reason)
+	}
+	if after, _ := remote.GetHead(ctx); after.Gen != sealed.Gen || after.State != storage.ChunkHeadDetached || after.DetachedBy == nil || *after.DetachedBy != *sealed.DetachedBy {
+		t.Fatalf("the sealed reopen changed HEAD or its proof: %+v -> %+v", sealed, after)
+	}
+	backend, err := b.Open(ctx, "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, err := backend.Write(ctx, 0, block(0x22)); err == nil || n != 0 {
+		t.Fatalf("the sealed reopen admitted a write: n=%d err=%v", n, err)
+	}
+	// The exact replay of the same seal returns the same proof.
+	again, _, err := b.DetachVolumePlain(ctx, "v1")
+	if err != nil || again.Head.Gen != first.Head.Gen || again.Head.State != storage.ChunkHeadDetached {
+		t.Fatalf("seal replay: %+v %v, want the original seal at gen %d", again.Head, err, first.Head.Gen)
+	}
+	if after, _ := remote.GetHead(ctx); after.Gen != sealed.Gen {
+		t.Fatalf("the seal replay wrote HEAD: gen %d -> %d", sealed.Gen, after.Gen)
 	}
 }
 

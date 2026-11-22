@@ -156,21 +156,33 @@ func TestRolledBackRootEndsWithItsOwnReason(t *testing.T) {
 	}
 }
 
-// heldHeadRemote blocks GetHead until its context ends while held.
+// heldHeadRemote blocks GetHead while held, until its context ends or the
+// test releases it (release is independent of any provider cancellation).
 type heldHeadRemote struct {
 	storage.ChunkRemote
-	held    atomic.Bool
-	entered chan struct{}
-	once    sync.Once
+	held        atomic.Bool
+	entered     chan struct{}
+	release     chan struct{}
+	once        sync.Once
+	releaseOnce sync.Once
 }
 
 func (r *heldHeadRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
 	if r.held.Load() {
 		r.once.Do(func() { close(r.entered) })
-		<-ctx.Done()
-		return storage.ChunkHead{}, ctx.Err()
+		select {
+		case <-ctx.Done():
+			return storage.ChunkHead{}, ctx.Err()
+		case <-r.release:
+			return storage.ChunkHead{}, errors.New("test: held read released")
+		}
 	}
 	return r.ChunkRemote.GetHead(ctx)
+}
+
+func (r *heldHeadRemote) releaseAll() {
+	r.held.Store(false)
+	r.releaseOnce.Do(func() { close(r.release) })
 }
 
 // The early HEAD read (C.W: staleRootBeforeWait) is bounded and owned by
@@ -181,7 +193,7 @@ func (r *heldHeadRemote) GetHead(ctx context.Context) (storage.ChunkHead, error)
 // registered before either starts, independent of Close cancelling.
 func TestEarlyStaleRootHeadReadEndsWithProviderClose(t *testing.T) {
 	mem, root := servedRoot(t)
-	remote := &heldHeadRemote{ChunkRemote: mem, entered: make(chan struct{})}
+	remote := &heldHeadRemote{ChunkRemote: mem, entered: make(chan struct{}), release: make(chan struct{})}
 	remote.held.Store(true)
 	p := chunkProviderAs(t, root, remote, newStubView(frontend.Projection{}), 0, "rA")
 	if _, err := p.EnsureStorage("v1"); err != nil {
@@ -202,7 +214,7 @@ func TestEarlyStaleRootHeadReadEndsWithProviderClose(t *testing.T) {
 		}
 	}
 	t.Cleanup(func() {
-		remote.held.Store(false) // independent release, whatever Close did
+		remote.releaseAll() // settles a still-held read, whatever Close did
 		join("recovery", &recoverStarted, recovered)
 		join("Close", &closeStarted, closed)
 	})

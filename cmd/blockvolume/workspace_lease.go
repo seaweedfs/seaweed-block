@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	holderid "github.com/seaweedfs/seaweed-block/core/holder"
@@ -47,6 +48,21 @@ func startWorkspaceLease(ctx context.Context, h *volume.Host) (<-chan workspaceS
 		})
 	}()
 	return requests, done
+}
+
+// rootProvider is the part of the durable provider the shutdown reads.
+type rootProvider interface {
+	LocalRootNonce(volumeID string) (string, error)
+	Close() error
+}
+
+// closeDurableKeepingRoot reads this incarnation's local root nonce, for the
+// revocation ACK's proof, and then closes the provider: Close forgets the
+// volume, so the order is fixed here (V1-SPEC r2.38). A nonce that cannot be
+// read is returned with the close error.
+func closeDurableKeepingRoot(p rootProvider, volumeID string) (string, error) {
+	root, rootErr := p.LocalRootNonce(volumeID)
+	return root, errors.Join(rootErr, p.Close())
 }
 
 // CLEAN requires a prior Detach while the lease was valid. This is read-only:

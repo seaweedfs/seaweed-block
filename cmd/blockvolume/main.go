@@ -1322,8 +1322,13 @@ func runVolume(f flags, exits *processExit) int {
 	// T3b: close DurableProvider in correct order — Provider.Close
 	// closes backends first (flags them closed) then storage files
 	// (releases fd + final fsync).
+	// The revocation ACK's proof names this incarnation's local root: read
+	// it before Close forgets the volume (closeDurableKeepingRoot).
+	ackRoot := ""
 	if durableProv != nil {
-		drainErr = errors.Join(drainErr, durableProv.Close())
+		var closeErr error
+		ackRoot, closeErr = closeDurableKeepingRoot(durableProv, f.volumeID)
+		drainErr = errors.Join(drainErr, closeErr)
 	}
 	if status != nil {
 		shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -1333,13 +1338,7 @@ func runVolume(f flags, exits *processExit) int {
 	if leaseStop != nil {
 		gen := uint64(0)
 		if drainErr == nil {
-			root := ""
-			if durableProv != nil {
-				root, drainErr = durableProv.LocalRootNonce(f.volumeID)
-			}
-			if drainErr == nil {
-				gen, drainErr = workspaceDetachedGeneration(leaseStop.ctx, workspaceRemoteFor, leaseStop.id, chunkHolder(f), root)
-			}
+			gen, drainErr = workspaceDetachedGeneration(leaseStop.ctx, workspaceRemoteFor, leaseStop.id, chunkHolder(f), ackRoot)
 		}
 		leaseStop.reply <- workspaceStopResult{gen: gen, err: drainErr}
 	}
