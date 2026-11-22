@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -28,69 +29,18 @@ import (
 // by itself, show the ACK, clean move to the same host, start again, and the
 // written block reads back unchanged.
 func TestStandalonePlannedHandoffToTheSameHost(t *testing.T) {
-	h := newPlannedHandoffHarness(t)
-	cluster := startWorkspaceWeed(t)
-	chunkPath := fmt.Sprintf("/handoff-%d", time.Now().UnixNano())
-	const nqn = "nqn.2026-11.io.seaweedfs:handoff"
-	must := func(err error) {
-		t.Helper()
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	mustU := func(v uint64, err error) uint64 {
-		t.Helper()
-		must(err)
-		return v
-	}
-
-	// 1. The cluster spec.
-	spec := filepath.Join(h.dir, "cluster-spec.yaml")
-	must(os.WriteFile(spec, []byte(fmt.Sprintf(`nodes:
-  - server_id: s1
-    data_addr: %s
-    ctrl_addr: %s
-volumes:
-  - id: v1
-    size_bytes: 268435456
-    replication_factor: 1
-    placements:
-      - server_id: s1
-        replica_id: r1
-`, h.dataAddr, h.ctrlAddr)), 0o644))
-
-	// 2. blockmaster with the lifecycle store and the cluster spec.
-	mstate := filepath.Join(h.dir, "master")
-	master := h.start(t, "blockmaster", h.master,
-		"--authority-store", filepath.Join(mstate, "authority"), "--lifecycle-store", filepath.Join(mstate, "lifecycle"),
-		"--cluster-spec", spec, "--expected-slots-per-volume", "1", "--listen", h.masterAddr,
-		"--workspace-rpc", "--workspace-head-base-url", "http://"+cluster.filerHTTP+chunkPath)
-	if l := master.waitLog(t, 30*time.Second, "blockmaster: lock acquired, reloaded="); !strings.Contains(l, "listen="+h.masterAddr) {
-		t.Fatalf("blockmaster start line %q does not name listen=%s", l, h.masterAddr)
-	}
-	if master.has("blockmaster: WARNING: --topology not supplied or empty") {
-		t.Fatal("blockmaster warned about a missing topology although the cluster spec gives it")
-	}
-
-	// 3. The setup answers before any blockvolume runs.
-	show := []string{"ops", "workspace", "show", "--master", h.masterAddr, "--volume", "v1"}
-	out, _ := h.command(t, show...)
-	must(checkShowBeforeStart(out))
+	h, cluster, chunkPath, show, volArgs := startPlannedHandoff(t)
+	must, mustU := fatalOn(t)
+	const nqn = plannedHandoffNQN
 
 	// 4. blockvolume adopts the volume.
-	volArgs := []string{"--master", h.masterAddr, "--server-id", "s1", "--volume-id", "v1", "--replica-id", "r1",
-		"--data-addr", h.dataAddr, "--ctrl-addr", h.ctrlAddr, "--status-addr", h.statusAddr,
-		"--durable-root", filepath.Join(h.dir, "vol"), "--durable-impl", "walstore-chunk",
-		"--durable-blocks", "65536", "--durable-blocksize", "4096",
-		"--chunk-filer", cluster.filerGRPC, "--chunk-path", chunkPath, "--chunk-control-endpoint",
-		"--workspace-lease", "--nvme-listen", h.nvmeAddr, "--nvme-subsysnqn", nqn}
 	vol1 := h.start(t, "blockvolume-1", h.volume, volArgs...)
 	e := mustU(adoptedEpoch(vol1.waitLog(t, 60*time.Second, "blockvolume: volume v1 adopted as PRIMARY at r1@")))
 	vol1.waitLog(t, 60*time.Second, "durable: HEAD claim for volume=v1 done in")
 	h.waitPrimary(t, e)
 
 	// 5. The lease.
-	out, _ = h.command(t, show...)
+	out, _ := h.command(t, show...)
 	must(checkShowGranted(out, e))
 
 	// 6, 7. Write a known block and flush it, then disconnect the writer.
@@ -116,8 +66,8 @@ volumes:
 	must(checkRevoke(out, e, g))
 
 	// 11. The old blockvolume acknowledges and exits by itself (a signal
-	// would suppress the ACK).
-	if err := vol1.wait(45 * time.Second); err != nil {
+	// would suppress the ACK), within the 30 s lease.
+	if err := vol1.wait(30 * time.Second); err != nil {
 		t.Fatalf("blockvolume after the revocation: %v; want a clean exit by itself", err)
 	}
 	if !vol1.has(fmt.Sprintf("workspace lease: fenced volume=v1 replica=r1 epoch=%d: revoked by the master", e)) ||
@@ -172,6 +122,109 @@ volumes:
 	}
 }
 
+// TestStandaloneCleanMoveWithoutTheACKIsRefused is the chapter's negative
+// check N1 made deterministic: the volume is sealed, its blockvolume is
+// killed (a signal sends no ACK), and the lease is revoked with the sealed
+// generation while no blockvolume runs. No ACK can arrive, so the clean move
+// is refused with the documented error, exit 1, and the master keeps no ACK.
+func TestStandaloneCleanMoveWithoutTheACKIsRefused(t *testing.T) {
+	h, cluster, chunkPath, show, volArgs := startPlannedHandoff(t)
+	must, mustU := fatalOn(t)
+
+	vol := h.start(t, "blockvolume", h.volume, volArgs...)
+	e := mustU(adoptedEpoch(vol.waitLog(t, 60*time.Second, "blockvolume: volume v1 adopted as PRIMARY at r1@")))
+	h.waitPrimary(t, e)
+	c := dialNVMe(t, h.nvmeAddr, plannedHandoffNQN)
+	c.write(t, 0, bytes.Repeat([]byte{0xa5}, 4096))
+	c.flush(t)
+	c.close()
+	out, errOut := h.command(t, "ops", "chunk", "detach", "--plain", "--volume", "v1", "--status-addr", h.statusAddr, "--timeout", "120s")
+	g := mustU(sealedGen(out, errOut, e))
+	out, _ = h.command(t, "ops", "chunk", "show", "--volume", "v1", "--chunk-filer", cluster.filerGRPC, "--chunk-path", chunkPath)
+	mustU(sealedHeadLSN(out, e, g)) // HEAD is sealed: only the ACK is missing
+	vol.kill(t)
+
+	out, _ = h.command(t, "ops", "workspace", "revoke", "--master", h.masterAddr, "--volume", "v1", "--replica", "r1",
+		"--epoch", fmt.Sprint(e), "--sealed-gen", fmt.Sprint(g))
+	must(checkRevoke(out, e, g))
+	out, errOut, code := h.run(t, "ops", "workspace", "move", "--clean", "--master", h.masterAddr, "--volume", "v1", "--replica", "r1",
+		"--epoch", fmt.Sprint(e), "--target-host", "s1", "--target-data", h.dataAddr, "--target-ctrl", h.ctrlAddr,
+		"--request-id", "move-v1-1")
+	must(checkCleanMoveRefused(out, errOut, code))
+	out, _ = h.command(t, show...)
+	if showsAck(out, e, g) || !hasLine(out, "recorded ACK: none") {
+		t.Fatalf("workspace show after the refused move:\n%s\nwant recorded ACK: none", out)
+	}
+}
+
+const plannedHandoffNQN = "nqn.2026-11.io.seaweedfs:handoff"
+
+// startPlannedHandoff runs the chapter's steps 1-3: a weed cluster, the
+// cluster spec, blockmaster with the lifecycle store, and the setup check.
+// It returns the blockvolume arguments of step 4 and the show command.
+func startPlannedHandoff(t *testing.T) (h *plannedHandoffHarness, cluster *w4WeedCluster, chunkPath string, show, volArgs []string) {
+	t.Helper()
+	h = newPlannedHandoffHarness(t)
+	cluster = startWorkspaceWeed(t)
+	chunkPath = fmt.Sprintf("/handoff-%d", time.Now().UnixNano())
+	must, _ := fatalOn(t)
+
+	// 1. The cluster spec.
+	spec := filepath.Join(h.dir, "cluster-spec.yaml")
+	must(os.WriteFile(spec, []byte(fmt.Sprintf(`nodes:
+  - server_id: s1
+    data_addr: %s
+    ctrl_addr: %s
+volumes:
+  - id: v1
+    size_bytes: 268435456
+    replication_factor: 1
+    placements:
+      - server_id: s1
+        replica_id: r1
+`, h.dataAddr, h.ctrlAddr)), 0o644))
+
+	// 2. blockmaster with the lifecycle store and the cluster spec.
+	mstate := filepath.Join(h.dir, "master")
+	master := h.start(t, "blockmaster", h.master,
+		"--authority-store", filepath.Join(mstate, "authority"), "--lifecycle-store", filepath.Join(mstate, "lifecycle"),
+		"--cluster-spec", spec, "--expected-slots-per-volume", "1", "--listen", h.masterAddr,
+		"--workspace-rpc", "--workspace-head-base-url", "http://"+cluster.filerHTTP+chunkPath)
+	if l := master.waitLog(t, 30*time.Second, "blockmaster: lock acquired, reloaded="); !strings.Contains(l, "listen="+h.masterAddr) {
+		t.Fatalf("blockmaster start line %q does not name listen=%s", l, h.masterAddr)
+	}
+	if master.has("blockmaster: WARNING: --topology not supplied or empty") {
+		t.Fatal("blockmaster warned about a missing topology although the cluster spec gives it")
+	}
+
+	// 3. The setup answers before any blockvolume runs.
+	show = []string{"ops", "workspace", "show", "--master", h.masterAddr, "--volume", "v1"}
+	out, _ := h.command(t, show...)
+	must(checkShowBeforeStart(out))
+
+	volArgs = []string{"--master", h.masterAddr, "--server-id", "s1", "--volume-id", "v1", "--replica-id", "r1",
+		"--data-addr", h.dataAddr, "--ctrl-addr", h.ctrlAddr, "--status-addr", h.statusAddr,
+		"--durable-root", filepath.Join(h.dir, "vol"), "--durable-impl", "walstore-chunk",
+		"--durable-blocks", "65536", "--durable-blocksize", "4096",
+		"--chunk-filer", cluster.filerGRPC, "--chunk-path", chunkPath, "--chunk-control-endpoint",
+		"--workspace-lease", "--nvme-listen", h.nvmeAddr, "--nvme-subsysnqn", plannedHandoffNQN}
+	return h, cluster, chunkPath, show, volArgs
+}
+
+func fatalOn(t *testing.T) (func(error), func(uint64, error) uint64) {
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return must, func(v uint64, err error) uint64 {
+		t.Helper()
+		must(err)
+		return v
+	}
+}
+
 // plannedHandoffHarness owns real binaries, loopback endpoints and process
 // lifetimes.
 type plannedHandoffHarness struct {
@@ -219,6 +272,18 @@ type daemon struct {
 	name, log string
 	done      chan struct{}
 	err       error
+	cancel    context.CancelFunc
+}
+
+// kill kills the child (no ACK is sent on a signal) and waits for it.
+func (d *daemon) kill(t *testing.T) {
+	t.Helper()
+	d.cancel()
+	select {
+	case <-d.done:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("%s did not exit after kill", d.name)
+	}
 }
 
 // start registers cancellation and a bounded join before starting a daemon.
@@ -235,7 +300,7 @@ func (h *plannedHandoffHarness) start(t *testing.T, name, binary string, args ..
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Dir, cmd.Stdout, cmd.Stderr = h.dir, log, log
 	cmd.WaitDelay = 5 * time.Second
-	d := &daemon{name: name, log: log.Name(), done: make(chan struct{})}
+	d := &daemon{name: name, log: log.Name(), done: make(chan struct{}), cancel: cancel}
 	started := false
 	t.Cleanup(func() {
 		cancel()
@@ -316,6 +381,17 @@ func (d *daemon) waitLog(t *testing.T, timeout time.Duration, s string) string {
 // The bound covers the detach's own --timeout 120s.
 func (h *plannedHandoffHarness) command(t *testing.T, args ...string) (string, string) {
 	t.Helper()
+	stdout, stderr, code := h.run(t, args...)
+	if code != 0 {
+		t.Fatalf("sw-block %q: exit %d\nstdout: %s\nstderr: %s", args, code, stdout, stderr)
+	}
+	return stdout, stderr
+}
+
+// run runs sw-block and returns its output and exit status; only a failure
+// to run it at all (or its timeout) fails the test.
+func (h *plannedHandoffHarness) run(t *testing.T, args ...string) (string, string, int) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, h.cli, args...)
@@ -323,10 +399,16 @@ func (h *plannedHandoffHarness) command(t *testing.T, args ...string) (string, s
 	cmd.WaitDelay = 5 * time.Second
 	var stdout, stderr strings.Builder
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("sw-block %q: %v\nstdout: %s\nstderr: %s", args, err, stdout.String(), stderr.String())
+	err := cmd.Run()
+	var exit *exec.ExitError
+	switch {
+	case err == nil:
+		return stdout.String(), stderr.String(), 0
+	case errors.As(err, &exit) && ctx.Err() == nil:
+		return stdout.String(), stderr.String(), exit.ExitCode()
 	}
-	return stdout.String(), stderr.String()
+	t.Fatalf("sw-block %q: %v\nstdout: %s\nstderr: %s", args, err, stdout.String(), stderr.String())
+	return "", "", -1
 }
 
 // waitPrimary polls the status endpoint until the volume serves as a

@@ -144,6 +144,15 @@ func checkHeadReopened(out string, e2, g, l uint64) error {
 	return nil
 }
 
+// checkCleanMoveRefused checks a clean move refused for a missing ACK: exit
+// 1 (a failed precondition), nothing on stdout, the documented error.
+func checkCleanMoveRefused(stdout, stderr string, code int) error {
+	if code != 1 || stdout != "" || !strings.Contains(stderr, "workspace clean move needs detached HEAD and matching revocation ACK") {
+		return fmt.Errorf("clean move without the ACK: exit %d, stdout %q, stderr %q; want exit 1 and the documented refusal", code, stdout, stderr)
+	}
+	return nil
+}
+
 // statusPrimary reports whether a /status?volume=v1 body shows a healthy
 // primary at epoch.
 func statusPrimary(body []byte, epoch uint64) bool {
@@ -183,7 +192,9 @@ func matchUint(re *regexp.Regexp, s string) (uint64, error) {
 
 // TestPlannedHandoffChecksReadCapturedProductOutput runs every check on the
 // output the real binaries printed in one passing hand-over (E=1, G=3, L=1,
-// E2=2), and each check on an output of another step, which it must refuse.
+// E2=2) and in the refused clean move without an ACK (move-refused,
+// show-revoked), and each check on an output of another step, which it must
+// refuse.
 func TestPlannedHandoffChecksReadCapturedProductOutput(t *testing.T) {
 	read := func(name string) string {
 		b, err := os.ReadFile(filepath.Join("testdata", "planned-handoff", name))
@@ -248,6 +259,12 @@ func TestPlannedHandoffChecksReadCapturedProductOutput(t *testing.T) {
 	refused("show moved", checkShowMoved(read("show-granted.stdout"), e, e2, g, l))
 	ok("HEAD reopened", checkHeadReopened(read("head-reopened.stdout"), e2, g, l))
 	refused("HEAD reopened", checkHeadReopened(read("head-sealed.stdout"), e2, g, l))
+	ok("clean move refused", checkCleanMoveRefused("", read("move-refused.stderr"), 1))
+	refused("clean move refused", checkCleanMoveRefused("", read("move-refused.stderr"), 0))
+	refused("clean move refused", checkCleanMoveRefused(read("move-clean.stdout"), "", 0))
+	if r := read("show-revoked.stdout"); showsAck(r, e, g) || !hasLine(r, "recorded ACK: none") {
+		t.Error("the revoked show without an ACK is read as acknowledged")
+	}
 	if !statusPrimary([]byte(read("status-primary.json")), e2) || statusPrimary([]byte(read("status-primary.json")), e) {
 		t.Error("status check does not read the epoch of a healthy primary")
 	}
