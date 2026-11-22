@@ -523,29 +523,27 @@ func (h *Host) getReplication() replicaSetUpdater {
 	return h.replication
 }
 
-// IsSuperseded gates a newer foreign replica line, or a same-replica foreign
-// server identity strictly newer than an adopted local lineage. An explicitly
-// matching self identity remains an ordinary adapter update.
+// IsSuperseded compares an adopted lineage. Before adoption there is no
+// serving incarnation to fence (INV-AUTH-HOLDER-IDENTITY-001).
 func (h *Host) IsSuperseded(selfReplicaID string, selfEpoch, selfEV uint64) bool {
+	return selfEpoch != 0 && h.isSupersededLineage(selfReplicaID, selfEpoch, selfEV)
+}
+
+// isSupersededLineage is the one foreign-holder comparison. Callers name
+// their evidence: adopted engine lineage for fencing, observed own assignment
+// for process exit (INV-WS-STARTUP-RETRY-001). Zero observed lineage means this
+// process never received its own assignment, not that a foreign line is ours.
+func (h *Host) isSupersededLineage(selfReplicaID string, selfEpoch, selfEV uint64) bool {
 	h.otherMu.Lock()
 	defer h.otherMu.Unlock()
-	if h.lastOther == nil || selfEpoch == 0 {
+	other := h.lastOther
+	if other == nil || other.ReplicaId == "" || other.VolumeId != h.cfg.VolumeID {
 		return false
 	}
-	other := h.lastOther
-	if other.ReplicaId == selfReplicaID {
-		if h.assignmentNamesSelf(other) {
-			return false
-		}
-		return other.Epoch > selfEpoch || other.Epoch == selfEpoch && other.EndpointVersion > selfEV
+	if other.ReplicaId == selfReplicaID && h.assignmentNamesSelf(other) {
+		return false
 	}
-	if other.Epoch > selfEpoch {
-		return true
-	}
-	if other.Epoch == selfEpoch && other.EndpointVersion > selfEV {
-		return true
-	}
-	return false
+	return other.Epoch > selfEpoch || other.Epoch == selfEpoch && other.EndpointVersion > selfEV
 }
 
 // ProjectionView returns the AdapterProjectionView that bridges

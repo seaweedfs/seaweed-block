@@ -79,7 +79,7 @@ func exitAuthorityHost(t *testing.T, configure ...func(*exitAssignmentStream)) (
 	})
 	return h, func(replica string, epoch uint64) {
 		t.Helper()
-		stream.facts <- &control.AssignmentFact{VolumeId: "v", ReplicaId: replica, Epoch: epoch, EndpointVersion: 1}
+		stream.facts <- &control.AssignmentFact{VolumeId: "v", ReplicaId: replica, ServerId: "s", Epoch: epoch, EndpointVersion: 1}
 		deadline := time.NewTimer(3 * time.Second)
 		defer deadline.Stop()
 		tick := time.NewTicker(time.Millisecond)
