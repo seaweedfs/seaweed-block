@@ -60,9 +60,13 @@ func workspaceDetachedGeneration(ctx context.Context, remoteFor func(string) (st
 	if err != nil {
 		return 0, err
 	}
-	head, err := storage.ReadDetachedChunkHead(ctx, remote, id.Epoch, holder)
+	head, err := remote.GetHead(ctx)
 	if err != nil {
 		return 0, err
+	}
+	proof := head.DetachedBy
+	if head.Gen == 0 || head.Epoch != id.Epoch || head.Holder != holder || head.State != storage.ChunkHeadDetached || proof == nil || proof.Gen != head.Gen || proof.Epoch != head.Epoch || proof.Holder != head.Holder {
+		return 0, fmt.Errorf("workspace shutdown has no matching stored detached HEAD")
 	}
 	return head.Gen, nil
 }
