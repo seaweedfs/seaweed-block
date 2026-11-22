@@ -15,6 +15,10 @@ func (h *Host) assignmentNamesSelf(f *control.AssignmentFact) bool {
 // Delivery before a move is not supersession: record every refused fact,
 // and use the one supersession decision against the adopted engine lineage.
 func (h *Host) observeForeignHolder(f *control.AssignmentFact) {
+	h.log.Printf("blockvolume: assignment identity refusal volume=%q replica=%q server=%q epoch=%d ev=%d data=%q ctrl=%q "+
+		"expected_volume=%q expected_replica=%q expected_server=%q expected_data=%q expected_ctrl=%q",
+		f.VolumeId, f.ReplicaId, f.ServerId, f.Epoch, f.EndpointVersion, f.DataAddr, f.CtrlAddr,
+		h.cfg.VolumeID, h.cfg.ReplicaID, h.cfg.ServerID, h.cfg.DataAddr, h.cfg.CtrlAddr)
 	h.recordOtherLine(f)
 	if h.view == nil {
 		return
