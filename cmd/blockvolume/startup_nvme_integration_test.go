@@ -146,7 +146,7 @@ func (c *gap1NVMe) readExact(t *testing.T, lba uint64, want []byte) {
 	if err := c.r.Receive(&header); err != nil {
 		t.Fatal(err)
 	}
-	if header.CCCID != c.cid || header.DATAO != 0 || header.DATAL != uint32(len(want)) || c.r.Length() != len(want) {
+	if header.CCCID != c.cid || header.DATAO != 0 || header.DATAL != uint32(len(want)) || c.r.Length() != uint32(len(want)) {
 		t.Fatalf("wrong read frame %+v length%d", header, c.r.Length())
 	}
 	got := make([]byte, c.r.Length())
