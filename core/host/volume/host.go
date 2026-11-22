@@ -862,6 +862,8 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 		return
 	}
 
+	h.clearOwnEndpointRefusal(fact)
+
 	// The recovery watchdog runs from the primary assignment, before any
 	// admission step can fail (#128 rule 6).
 	h.wd.primaryAssigned(fact.Epoch)

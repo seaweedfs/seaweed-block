@@ -1,6 +1,7 @@
 package volume
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -156,5 +157,34 @@ func TestAssignmentHolderIdentityPlannedHandoffBeforeReadiness(t *testing.T) {
 	}
 	if p := h.view.Projection(); !p.Healthy || p.Epoch != 2 {
 		t.Fatalf("own clean-move assignment stayed fenced after readiness replay: %+v; other=%+v", p, h.LastOtherLine())
+	}
+}
+
+// A same-holder endpoint refusal can be superseded only by a valid current
+// fact; neither a true foreign holder nor a newer refusal is erased.
+func TestAssignmentHolderIdentityReplayCannotClearForeignOrNewerFence(t *testing.T) {
+	for _, foreign := range []bool{false, true} {
+		t.Run(fmt.Sprint("foreign=", foreign), func(t *testing.T) {
+			h, err := New(Config{MasterAddr: "127.0.0.1:1", ServerID: "new-host", VolumeID: "v1", ReplicaID: "r1", DataAddr: "127.0.0.1:19303", CtrlAddr: "127.0.0.1:19304", EnableT1Readiness: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = h.Close() })
+			h.BlockLocalReadiness("awaiting durable recovery")
+			h.applyFact(holderAssignment(t, "new-host"))
+			refused := holderAssignment(t, "new-host")
+			if foreign {
+				refused.ServerId = "another-host"
+			} else {
+				refused.DataAddr = "127.0.0.1:9991"
+				refused.EndpointVersion = 2
+			}
+			h.applyFact(refused)
+			h.ClearLocalReadinessBlock()
+			h.replayLocalReadinessFactIfReady()
+			if h.LastOtherLine() == nil || !h.IsSuperseded("r1", 2, 1) || h.view.Projection().Healthy {
+				t.Fatal("replay erased a foreign or newer fence")
+			}
+		})
 	}
 }
