@@ -10,7 +10,9 @@ import (
 // ReadDetachedChunkHead implements INV-WS-SEAL-REPLAY-001. A re-sent seal
 // succeeds only on this remote observation, never on a remembered result or
 // a generation comparison with a previously observed root. It writes nothing.
-func ReadDetachedChunkHead(ctx context.Context, remote ChunkRemote, epoch uint64, owner string) (ChunkHead, error) {
+// root is the asking local root's nonce: the proof must be that root's (a
+// pre-release HEAD without a root still matches; INV-WS-LOCAL-ROOT-IDENTITY-001).
+func ReadDetachedChunkHead(ctx context.Context, remote ChunkRemote, epoch uint64, owner, root string) (ChunkHead, error) {
 	if remote == nil || epoch == 0 || owner == "" {
 		return ChunkHead{}, fmt.Errorf("%w: seal replay needs remote and assigned owner", ErrChunkCaptureRefused)
 	}
@@ -18,7 +20,7 @@ func ReadDetachedChunkHead(ctx context.Context, remote ChunkRemote, epoch uint64
 	if err != nil {
 		return ChunkHead{}, err
 	}
-	if head.Epoch != epoch || !holder.SameAssignment(head.Holder, owner) {
+	if head.Epoch != epoch || !holder.Claimable(head.Holder, head.HolderRoot, owner, root) {
 		return ChunkHead{}, ErrChunkLayerFenced
 	}
 	if !detachedProofOf(head, epoch, owner) {

@@ -224,7 +224,7 @@ func TestWorkspacePlannedDrainOwnsStartupExpiryUntilAck(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			gen, err := workspaceDetachedGeneration(ctx, func(string) (storage.ChunkRemote, error) { return remote, nil }, request.id, "s/r")
+			gen, err := workspaceDetachedGeneration(ctx, func(string) (storage.ChunkRemote, error) { return remote, nil }, request.id, "s/r", "")
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -51,7 +51,7 @@ func startWorkspaceLease(ctx context.Context, h *volume.Host) (<-chan workspaceS
 
 // CLEAN requires a prior Detach while the lease was valid. This is read-only:
 // revocation, expiry and cancellation never manufacture a final cut/proof.
-func workspaceDetachedGeneration(ctx context.Context, remoteFor func(string) (storage.ChunkRemote, error), id *control.WorkspaceIdentity, holder string) (uint64, error) {
+func workspaceDetachedGeneration(ctx context.Context, remoteFor func(string) (storage.ChunkRemote, error), id *control.WorkspaceIdentity, holder, root string) (uint64, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -67,7 +67,7 @@ func workspaceDetachedGeneration(ctx context.Context, remoteFor func(string) (st
 		return 0, err
 	}
 	proof := head.DetachedBy
-	if head.Gen == 0 || head.Epoch != id.Epoch || !holderid.SameAssignment(head.Holder, holder) || head.State != storage.ChunkHeadDetached || proof == nil || proof.Gen != head.Gen || proof.Epoch != head.Epoch || !holderid.Same(proof.Holder, proof.HolderRoot, head.Holder, head.HolderRoot) {
+	if head.Gen == 0 || head.Epoch != id.Epoch || !holderid.Claimable(head.Holder, head.HolderRoot, holder, root) || head.State != storage.ChunkHeadDetached || proof == nil || proof.Gen != head.Gen || proof.Epoch != head.Epoch || !holderid.Same(proof.Holder, proof.HolderRoot, head.Holder, head.HolderRoot) {
 		return 0, fmt.Errorf("workspace shutdown has no matching stored detached HEAD")
 	}
 	return head.Gen, nil

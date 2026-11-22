@@ -1333,7 +1333,13 @@ func runVolume(f flags, exits *processExit) int {
 	if leaseStop != nil {
 		gen := uint64(0)
 		if drainErr == nil {
-			gen, drainErr = workspaceDetachedGeneration(leaseStop.ctx, workspaceRemoteFor, leaseStop.id, chunkHolder(f))
+			root := ""
+			if durableProv != nil {
+				root, drainErr = durableProv.LocalRootNonce(f.volumeID)
+			}
+			if drainErr == nil {
+				gen, drainErr = workspaceDetachedGeneration(leaseStop.ctx, workspaceRemoteFor, leaseStop.id, chunkHolder(f), root)
+			}
 		}
 		leaseStop.reply <- workspaceStopResult{gen: gen, err: drainErr}
 	}

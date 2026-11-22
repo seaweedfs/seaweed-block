@@ -56,7 +56,11 @@ func (p *DurableProvider) replayPlainSeal(ctx context.Context, volumeID string, 
 		return storage.ChunkCutResult{}, 0, fmt.Errorf("%w: %w", ErrDetachOutcomeUnknown, err)
 	}
 	remote := &closeBoundRemote{ChunkRemote: inner, done: p.closeCtx}
-	head, err := storage.ReadDetachedChunkHead(ctx, remote, proj.Epoch, p.chunkHolder(proj))
+	root, err := p.LocalRootNonce(volumeID)
+	if err != nil {
+		return storage.ChunkCutResult{}, 0, fmt.Errorf("%w: %w", ErrDetachOutcomeUnknown, err)
+	}
+	head, err := storage.ReadDetachedChunkHead(ctx, remote, proj.Epoch, p.chunkHolder(proj), root)
 	if err != nil {
 		return storage.ChunkCutResult{}, 0, fmt.Errorf("%w: %w", ErrDetachOutcomeUnknown, err)
 	}

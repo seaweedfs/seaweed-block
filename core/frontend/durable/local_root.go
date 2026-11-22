@@ -216,3 +216,23 @@ func (r *localRoot) supersededBefore(head storage.ChunkHead, holderID string) st
 	return fmt.Sprintf("HEAD gen %d epoch %d was published by holder %q root %q over this root's recorded epoch %d (this holder %q, root %s)",
 		head.Gen, head.Epoch, head.Holder, head.HolderRoot, r.Epoch, holderID, r.Nonce)
 }
+
+// LocalRootNonce is the open volume's local root nonce as recorded ("" for a
+// root that has not recorded yet: a pre-release root). Sealed-proof checks
+// compare it (V1-SPEC r2.38).
+func (p *DurableProvider) LocalRootNonce(volumeID string) (string, error) {
+	p.mu.Lock()
+	h, ok := p.volumes[volumeID]
+	p.mu.Unlock()
+	if !ok {
+		return "", fmt.Errorf("%w: %s", ErrVolumeNotOpen, volumeID)
+	}
+	r, err := openLocalRoot(h.path, false)
+	if err != nil {
+		return "", err
+	}
+	if !r.stored {
+		return "", nil
+	}
+	return r.Nonce, nil
+}
