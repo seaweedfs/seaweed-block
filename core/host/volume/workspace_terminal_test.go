@@ -76,3 +76,41 @@ func TestWorkspaceCanceledReplyCannotPublishGrant(t *testing.T) {
 		t.Error("canceled reply published a serving grant")
 	}
 }
+
+// A synchronous host fence must use the guard's first-cause latch even
+// before runtime publication; installation must carry that terminal cause.
+func TestWorkspaceHostFencePublishesOneTerminalCause(t *testing.T) {
+	h := workspaceRuntimeHost(t, runtimeWire(t, &runtimeLeaseServer{ttl: time.Second}), true)
+	h.FenceWorkspaceLease()
+	g := h.view.workspaceGuard.Load()
+	if g == nil {
+		t.Fatal("host fence has no guard-owned terminal cause")
+	}
+	first := g.FenceCause()
+	if first == "" {
+		t.Fatal("host fence bypassed the guard first-cause latch")
+	}
+	h.FenceWorkspaceLease()
+	if g.FenceCause() != first || h.ProjectionView().Projection().Healthy {
+		t.Fatal("repeated fence changed cause or reopened admission")
+	}
+}
+func TestWorkspaceInstalledHostFenceRecordsCause(t *testing.T) {
+	wire := &runtimeLeaseServer{ttl: time.Second}
+	h := workspaceRuntimeHost(t, runtimeWire(t, wire), true)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	t.Cleanup(func() { cancel(); _ = runtimeDone(t, done) })
+	go func() {
+		done <- h.RunWorkspaceLease(ctx, func(context.Context, *control.WorkspaceIdentity) (uint64, error) { return 7, nil })
+	}()
+	runtimeAwait(t, "installed serving lease", func() bool { return h.ProjectionView().Projection().Healthy })
+	g := h.view.workspaceGuard.Load()
+	h.FenceWorkspaceLease()
+	if g.FenceCause() == "" {
+		t.Error("installed host fence bypassed fenceLocked")
+	}
+	if h.ProjectionView().Projection().Healthy {
+		t.Error("host fence still admits I/O")
+	}
+}
