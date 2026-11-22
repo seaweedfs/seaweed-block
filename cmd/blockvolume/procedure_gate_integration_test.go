@@ -4,10 +4,13 @@ package main_test
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -212,6 +215,128 @@ func TestProcedureRevokeWithoutACKThenForcedMove(t *testing.T) {
 	if !bytes.Equal(env.readBlock(t, "s2", 0), block) {
 		t.Fatal("the sealed block does not read back on s2")
 	}
+}
+
+// TestProcedureStartInsideTheBarrierWaitIsReGranted: the holder's process
+// dies and is started again 35 s later: its lease has ended, the re-grant
+// barrier (at most 65 s after the stop, default flags) has not passed, and
+// the barrier passes within the process's 30 s authority wait. It must not
+// serve while its renewals are still refused for the barrier; once
+// re-granted it serves its local WAL at the same epoch.
+func TestProcedureStartInsideTheBarrierWaitIsReGranted(t *testing.T) {
+	env := startHandoffEnv(t, 1)
+	first := env.start(t, "blockvolume-s1", "s1")
+	e := env.adopt(t, first, "s1")
+	block := pattern("inside-the-wait!")
+	env.writeBlock(t, "s1", 0, block)
+	first.kill(t)
+	time.Sleep(35 * time.Second)
+
+	back := env.start(t, "blockvolume-s1-back", "s1")
+	var ready []time.Time
+	end := time.Now().Add(90 * time.Second)
+	for time.Now().Before(end) {
+		if env.frontendReadyAt("s1") || listening(env.hosts["s1"].nvme) {
+			ready = append(ready, time.Now())
+			if len(ready) >= 5 {
+				break
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if len(ready) == 0 {
+		t.Fatal("the returning holder never served within 90 s")
+	}
+	if last := lastLogTime(back, "clock-skew margin has not elapsed"); !last.IsZero() && ready[0].Before(last) {
+		t.Errorf("the returning holder served at %s, before its renewal was still refused for the barrier at %s: it served without a lease",
+			ready[0].Format("15:04:05.000"), last.Format("15:04:05"))
+	}
+	if got := env.adopt(t, back, "s1"); got != e {
+		t.Fatalf("the returning holder adopted epoch %d; want the same epoch %d", got, e)
+	}
+	if !bytes.Equal(env.readBlock(t, "s1", 0), block) {
+		t.Fatal("the block written before the stop does not read back")
+	}
+}
+
+// TestProcedureStartTooEarlyExitsAndARestartServes: with
+// --workspace-max-clock-skew 50s the barrier is at most 95 s after the stop.
+// A holder started 31 s after the stop ends its 30 s authority wait before
+// the barrier: it does not serve and exits with status 75, so a supervisor
+// (Restart=on-failure, RestartSec=5s) starts it again; a start that waits
+// past the barrier is re-granted and serves at the same epoch.
+func TestProcedureStartTooEarlyExitsAndARestartServes(t *testing.T) {
+	env := startHandoffEnv(t, 1, "--workspace-max-clock-skew", "50s")
+	first := env.start(t, "blockvolume-s1", "s1")
+	e := env.adopt(t, first, "s1")
+	block := pattern("start-too-early!")
+	env.writeBlock(t, "s1", 0, block)
+	first.kill(t)
+	time.Sleep(31 * time.Second)
+
+	for attempt := 1; ; attempt++ {
+		d := env.start(t, fmt.Sprintf("blockvolume-s1-try%d", attempt), "s1")
+		served := false
+		end := time.Now().Add(45 * time.Second)
+		for time.Now().Before(end) {
+			if env.frontendReadyAt("s1") {
+				served = true
+				break
+			}
+			select {
+			case <-d.done:
+				end = time.Now()
+			default:
+				time.Sleep(200 * time.Millisecond)
+			}
+		}
+		if served {
+			if attempt == 1 {
+				t.Fatal("started before the barrier with its wait ending first, the holder served")
+			}
+			if got := env.adopt(t, d, "s1"); got != e {
+				t.Fatalf("attempt %d adopted epoch %d; want the same epoch %d", attempt, got, e)
+			}
+			break
+		}
+		if err := d.wait(5 * time.Second); exitCode(err) != 75 {
+			t.Fatalf("attempt %d did not serve and did not exit 75: %v", attempt, err)
+		}
+		if attempt == 4 {
+			t.Fatal("four supervised starts never served")
+		}
+		time.Sleep(5 * time.Second)
+	}
+	if !bytes.Equal(env.readBlock(t, "s1", 0), block) {
+		t.Fatal("the block written before the stop does not read back")
+	}
+}
+
+// lastLogTime is the time of the last log line containing s (second
+// resolution, the log's local time), or zero.
+func lastLogTime(d *daemon, s string) time.Time {
+	data, _ := os.ReadFile(d.log)
+	var last time.Time
+	for _, l := range strings.Split(string(data), "\n") {
+		if strings.Contains(l, s) && len(l) >= 19 {
+			if ts, err := time.ParseInLocation("2006/01/02 15:04:05", l[:19], time.Local); err == nil {
+				last = ts
+			}
+		}
+	}
+	return last
+}
+
+// exitCode is a child's exit status (-1 when it did not exit with one).
+func exitCode(err error) int {
+	var exit *exec.ExitError
+	if err == nil {
+		return 0
+	}
+	if errors.As(err, &exit) {
+		return exit.ExitCode()
+	}
+	return -1
 }
 
 func pattern(s string) []byte { return bytes.Repeat([]byte(s), 4096/len(s)) }

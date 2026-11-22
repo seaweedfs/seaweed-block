@@ -184,9 +184,9 @@ type bvHost struct {
 }
 
 // startHandoffEnv runs the chapter's steps 1-3: a weed cluster, the cluster
-// spec with hosts s1..sN, blockmaster with the lifecycle store, and the setup
-// check.
-func startHandoffEnv(t *testing.T, n int) *handoffEnv {
+// spec with hosts s1..sN, blockmaster with the lifecycle store (and
+// masterArgs), and the setup check.
+func startHandoffEnv(t *testing.T, n int, masterArgs ...string) *handoffEnv {
 	t.Helper()
 	h := newPlannedHandoffHarness(t)
 	env := &handoffEnv{h: h, cluster: startWorkspaceWeed(t), chunkPath: fmt.Sprintf("/handoff-%d", time.Now().UnixNano()), hosts: map[string]bvHost{}}
@@ -216,10 +216,10 @@ func startHandoffEnv(t *testing.T, n int) *handoffEnv {
 
 	// 2. blockmaster with the lifecycle store and the cluster spec.
 	mstate := filepath.Join(h.dir, "master")
-	master := h.start(t, "blockmaster", h.master,
+	master := h.start(t, "blockmaster", h.master, append([]string{
 		"--authority-store", filepath.Join(mstate, "authority"), "--lifecycle-store", filepath.Join(mstate, "lifecycle"),
 		"--cluster-spec", spec, "--expected-slots-per-volume", "1", "--listen", h.masterAddr,
-		"--workspace-rpc", "--workspace-head-base-url", "http://"+cluster.filerHTTP+chunkPath)
+		"--workspace-rpc", "--workspace-head-base-url", "http://" + cluster.filerHTTP + chunkPath}, masterArgs...)...)
 	if l := master.waitLog(t, 30*time.Second, "blockmaster: lock acquired, reloaded="); !strings.Contains(l, "listen="+h.masterAddr) {
 		t.Fatalf("blockmaster start line %q does not name listen=%s", l, h.masterAddr)
 	}
