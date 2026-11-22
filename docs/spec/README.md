@@ -121,9 +121,12 @@ configurations and the counterexamples.
 | `FrozenDetachBudget.tla` | `cfg/FrozenDetachBudget.cfg` | one externally frozen attempt; time in tenths of a second | 439 | physical latency; the external controller's re-freeze limit; fencing and CAS races during the cut |
 | `GCClockSkew.tla` | `GCClockSkew_safe.cfg` | G=3, S=1, Q=1, Born=10, MaxT=17 | 96 | the root scan, copy settlement and higher-epoch guards; clocks outside the configured skew |
 | `GCDeleteProgress.tla` | `GCDeleteProgress_safe.cfg` | three ordered candidates, the first DELETE rejected | 4 | root and epoch admission; elapsed coverage; persistence |
+| `HeadReopenBelt.tla` | `cfg/HeadReopenBelt.cfg` | one HEAD, one old server-held CAS, one reopen, one new acknowledged image, one nonempty base | 12 | storage I/O and durability; WAL recovery; an empty root with a delayed first exclusive create |
 | `PlainDetach.tla` | `cfg/PlainDetach.cfg` | up to two I/O readers, frontend close | 10 | HEAD publication; authority; physical I/O; wall-clock bounds; failure settlement |
+| `PlainSealReplay.tla` | `cfg/PlainSealReplay.cfg` | one seal request, process memory kept or lost, seven read observations of HEAD | 42 | the controller's pending record and its boot refusal; the hand-over; RPC delivery |
 | `RestoreIndependence.tla` | `cfg/RestoreIndependence_nc_safe_n4.cfg` | no-claim design, the largest of the safe configurations (`n4`) | 2,752,518 | guest writes to the target while it takes ownership; GC that takes time; more than one restore per snapshot |
 | `ScopedMaintenanceGC.tla` | `ScopedMaintenanceGC_safe.cfg` | three keys across two volumes, one foreign-only root | 10 | the complete mark and the grace timing (in `RetentionGCTiming`); density and metadata-RPC cost |
+| `SealedReopen.tla` | `cfg/SealedReopen.cfg` | one sealed HEAD of the same holder and epoch, one reopen | 2 | the hand-over and its liveness; RPC delivery; any other holder or epoch |
 | `WorkspaceMoveOutcome.tla` | `cfg/WorkspaceMoveOutcome.cfg` | one volume, seven error causes, one failed write, one reply | 135 | authority changes; journal durability; lease safety; RPC delivery; reload |
 
 ## Specs at a glance
