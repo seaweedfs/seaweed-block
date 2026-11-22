@@ -108,3 +108,34 @@ func TestWorkspaceLeaseSealedAckNeverRegrants(t *testing.T) {
 		t.Fatal("sealed proof mutated by re-grant")
 	}
 }
+
+// INV-WS-LEASE-REGRANT-001: expiry alone cannot fence a previous process
+// whose own clock may lag. The full skew bound must pass before re-grant.
+func TestWorkspaceLeaseRegrantWaitsForFullSkew(t *testing.T) {
+	disk, _ := newTempStore(t)
+	clock := newTestClock()
+	store := &hookStore{AuthorityStore: disk}
+	p := NewPublisher(nil, WithStore(store), WithWorkspaceLeaseConfig(10*time.Second, clock.now), WithWorkspaceMaxClockSkew(4*time.Second))
+	t.Cleanup(p.CloseWorkspaceExtenders)
+	grant := bindAndGrant(t, p, "v", "r")
+	if grant.ExpiresAtNS != clock.sec(10).UnixNano() || p.WorkspaceState("v").Lease.ExpiresAtNS != clock.sec(15).UnixNano() {
+		t.Fatal("fixture did not create the declared grant/horizon", grant)
+	}
+	writes := 0
+	store.setBefore(func(DurableRecord) error { writes++; return nil })
+	// Expired by master time, but still inside expiry + the full 4 s bound.
+	clock.at(13)
+	if got, err := p.RenewWorkspaceLease(context.Background(), "v", "r", 1); err == nil {
+		t.Fatal("re-grant raced the old process's lagging clock", got)
+	}
+	if writes != 0 {
+		t.Fatal("unsafe early re-grant attempted persistence", writes)
+	}
+	// Both deadline+skew and horizon+skew have now passed. This positive
+	// endpoint is independent of the pending min/max barrier clarification.
+	clock.at(19)
+	got, err := p.RenewWorkspaceLease(context.Background(), "v", "r", 1)
+	if err != nil || got.ExpiresAtNS <= clock.now().UnixNano() || writes != 1 {
+		t.Fatalf("safe unchanged owner cannot return: grant=%+v writes=%d err=%v", got, writes, err)
+	}
+}
