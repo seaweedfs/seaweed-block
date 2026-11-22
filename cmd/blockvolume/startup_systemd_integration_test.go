@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -79,6 +80,17 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 	bootstrap := stem + "-bootstrap"
 	startGAP1Unit(t, bootstrap, false, filepath.Join(bin, "blockvolume"), args...)
 	waitGAP1(t, "bootstrap did not attach under a real lease", 60*time.Second, func() bool { return gap1Operational(t, statusAddr, volume) })
+	// Calibrate verdict parsing against actual binary responses BEFORE kill.
+	status, payload, err := gap1Status(statusAddr, volume)
+	t.Logf("captured real status200: status%d body%s", status, payload)
+	if err != nil || !gap1StatusOperational(status, payload, volume) {
+		t.Fatalf("real status200 parser control: %v", err)
+	}
+	missing, body404, err := gap1Status(statusAddr, volume+"-not-served")
+	t.Logf("captured real status404: status%d body%s", missing, body404)
+	if err != nil || missing != http.StatusNotFound || gap1StatusOperational(missing, body404, volume) {
+		t.Fatalf("real status404 parser control: %v", err)
+	}
 	remote := cluster.remote(t, base+"/"+volume)
 	before, err := remote.GetHead(context.Background())
 	if err != nil || before.Gen == 0 {
@@ -86,7 +98,10 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 	}
 	gap1Systemctl(t, "kill", "--signal=KILL", "--kill-whom=main", bootstrap)
 	waitGAP1(t, "bootstrap still running", 10*time.Second, func() bool { return gap1Unit(t, bootstrap)["MainPID"] == "0" })
-	// QueryWorkspace is read-only. Do not renew or advance a fake master clock.
+	// QueryWorkspace is read-only. These real binaries and this test share
+	// one WSL kernel wall clock. Use the reported MASTER expiry timestamp,
+	// not ValidForNs (which ends half a skew earlier and could renew live).
+	// No product barrier formula or fake master clock is introduced.
 	waitGAP1(t, "holder's reported validity never lapsed", 60*time.Second, func() bool {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
@@ -95,11 +110,13 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 			return false
 		}
 		t.Logf("captured master lease: %s", s.String())
-		return s.Lease.ValidForNs <= 0
+		return s.Lease.ValidForNs <= 0 && time.Now().UnixNano() >= s.Lease.ExpiresAtNs
 	})
 	unit := stem + "-returning"
 	startGAP1Unit(t, unit, true, filepath.Join(bin, "blockvolume"), args...)
-	firstPID := gap1Unit(t, unit)["MainPID"]
+	first := gap1Unit(t, unit)
+	t.Logf("captured effective restart policy: %+v", first)
+	firstPID := first["MainPID"]
 	if firstPID == "0" {
 		t.Fatal("returning unit did not start a real process")
 	}
@@ -107,6 +124,9 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 	// an injected success delay or a replacement product deadline.
 	waitGAP1(t, "GAP-1: first startup never exited75; stayed alive non-serving", 45*time.Second, func() bool {
 		s := gap1Unit(t, unit)
+		if gap1Operational(t, statusAddr, volume) {
+			t.Fatal("fixture returned before the expired-grant barrier: cannot count this as a startup-timeout red")
+		}
 		if s["ExecMainStatus"] == "75" {
 			return true
 		}
@@ -195,7 +215,7 @@ func gap1Unit(t *testing.T, unit string) map[string]string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	b, err := exec.CommandContext(ctx, "systemctl", "show", unit, "--property=MainPID,NRestarts,ExecMainStatus,Result,ExecMainStartTimestampMonotonic").CombinedOutput()
+	b, err := exec.CommandContext(ctx, "systemctl", "show", unit, "--property=MainPID,NRestarts,ExecMainStatus,Result,ExecMainStartTimestampMonotonic,RestartUSec,RestartPreventExitStatus,StartLimitBurst,StartLimitIntervalUSec").CombinedOutput()
 	if err != nil {
 		t.Fatalf("unit show: %v %s", err, b)
 	}
@@ -214,20 +234,21 @@ func gap1Unit(t *testing.T, unit string) map[string]string {
 	t.Logf("captured unit %s: %s", unit, strings.TrimSpace(string(b)))
 	return m
 }
-func gap1Operational(t *testing.T, addr, volume string) bool {
-	t.Helper()
+func gap1Status(addr, volume string) (int, []byte, error) {
 	r, e := (&http.Client{Timeout: time.Second}).Get("http://" + addr + "/status/durable?volume=" + volume)
 	if e != nil {
-		return false
+		return 0, nil, e
 	}
 	defer r.Body.Close()
-	var body struct {
-		Volumes []durable.VolumeStatus `json:"volumes"`
-	}
-	if r.StatusCode != http.StatusOK {
+	body, e := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	return r.StatusCode, body, e
+}
+func gap1StatusOperational(status int, payload []byte, volume string) bool {
+	if status != http.StatusOK {
 		return false
 	}
-	if e = json.NewDecoder(r.Body).Decode(&body); e != nil {
+	var body struct{ Volumes []durable.VolumeStatus }
+	if json.Unmarshal(payload, &body) != nil {
 		return false
 	}
 	for _, v := range body.Volumes {
@@ -236,6 +257,11 @@ func gap1Operational(t *testing.T, addr, volume string) bool {
 		}
 	}
 	return false
+}
+func gap1Operational(t *testing.T, addr, volume string) bool {
+	t.Helper()
+	status, payload, e := gap1Status(addr, volume)
+	return e == nil && gap1StatusOperational(status, payload, volume)
 }
 func waitGAP1(t *testing.T, what string, bound time.Duration, ready func() bool) {
 	t.Helper()
