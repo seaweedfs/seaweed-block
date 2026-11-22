@@ -180,7 +180,7 @@ func TestProcedureForcedMoveWithTheOldHostReturning(t *testing.T) {
 	// #425 (V1-SPEC r2.40: a line carries its owner and that owner's endpoints): every line delivered at the forced
 	// epoch, to the new owner and to the returning old host alike, carries s2's own endpoints, never another host's.
 	if bad := wrongOwnerEndpoints(e2, env.hosts["s2"], nw, back); len(bad) > 0 {
-		t.Errorf("an epoch-%d line was delivered with another host's endpoints (want s2's data=%s ctrl=%s):\n%s",
+		t.Errorf("epoch-%d deliveries not proven to carry s2's endpoints (want data=%s ctrl=%s in every recipient's lines):\n%s",
 			e2, env.hosts["s2"].data, env.hosts["s2"].ctrl, strings.Join(bad, "\n"))
 	}
 	env.h.waitPrimaryAt(t, env.hosts["s2"].status, e2)
@@ -462,19 +462,29 @@ func (env *handoffEnv) forceMove(t *testing.T, e uint64, target, request string)
 }
 
 // wrongOwnerEndpoints returns every "assignment stream delivery" log line at epoch e (in any of ds) whose data or control
-// endpoint is not owner's (#425).
+// endpoint is not owner's (#425), plus an entry for each recipient whose log cannot be read or shows no epoch-e
+// delivery at all (each recipient must positively have received the owner's line).
 func wrongOwnerEndpoints(e uint64, owner bvHost, ds ...*daemon) []string {
 	var bad []string
 	tag := fmt.Sprintf(" epoch=%d ev=", e)
 	for _, d := range ds {
-		raw, _ := os.ReadFile(d.log)
+		raw, err := os.ReadFile(d.log)
+		if err != nil {
+			bad = append(bad, d.name+": log unreadable: "+err.Error())
+			continue
+		}
+		seen := 0
 		for _, l := range strings.Split(string(raw), "\n") {
 			if !strings.Contains(l, "assignment stream delivery") || !strings.Contains(l, tag) {
 				continue
 			}
+			seen++
 			if !strings.Contains(l, fmt.Sprintf("data=%q", owner.data)) || !strings.Contains(l, fmt.Sprintf("ctrl=%q", owner.ctrl)) {
 				bad = append(bad, d.name+": "+strings.TrimSpace(l))
 			}
+		}
+		if seen == 0 { // positive evidence per recipient: a check that saw no forced-epoch delivery proves nothing
+			bad = append(bad, d.name+": no epoch delivery logged")
 		}
 	}
 	return bad

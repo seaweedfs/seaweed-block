@@ -45,9 +45,12 @@ func TestBuildSnapshotTakesTheMovedLinesReplicaFromItsOwner(t *testing.T) {
 	// a move minted the line but its owner is unknown: NO server supplies the replica's facts, so the returning
 	// placement server's fresh report changes nothing (no endpoint change, hence no refresh)
 	unknown := ownerReader{fakeReaderForHost: reader.fakeReaderForHost, owner: map[string]PublishedLine{"v1": {ReplicaID: "r1", Epoch: 2, OwnerFromMove: true}}}
+	// exact outcome: the volume is not supported, or the replica is the no-observation placeholder (no server, the
+	// line's own endpoints, nothing reachable/ready/eligible): neither s1's nor s2's report may supply it
 	if v, ok := findSupported(BuildSnapshot(store.Snapshot(), topo, unknown), "v1"); ok {
-		if r1, _ := candidateByReplica(v, "r1"); r1.ServerID == "s1" || r1.DataAddr == "old-s1:1" || (r1.DataAddr != "" && r1.DataAddr != "owner-s2:1") {
-			t.Fatalf("unknown owner: candidate %+v takes the placement server's report (want no server's facts)", r1)
+		want := ReplicaCandidate{ReplicaID: "r1", DataAddr: "owner-s2:1", CtrlAddr: "owner-s2:2"}
+		if r1, _ := candidateByReplica(v, "r1"); r1 != want {
+			t.Fatalf("unknown owner: candidate %+v, want exactly the no-observation placeholder %+v (no server's facts)", r1, want)
 		}
 	}
 	// without a move-named owner the accepted topology stands (control)
