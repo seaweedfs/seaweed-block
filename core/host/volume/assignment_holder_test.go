@@ -252,6 +252,8 @@ func TestAssignmentHolderIdentityForcedMoveRefusesEveryDeliveredVersion(t *testi
 	}
 	t.Cleanup(func() { _ = h.Close() })
 	h.BlockLocalReadiness("awaiting durable recovery")
+	staleSelf := holderAssignment(t, "old-host")
+	h.applyFact(staleSelf) // retained before the newer foreign delivery
 	for _, ev := range []uint64{1, 2, 1, 3} {
 		foreign := holderAssignment(t, "new-host")
 		foreign.EndpointVersion = ev
@@ -262,8 +264,6 @@ func TestAssignmentHolderIdentityForcedMoveRefusesEveryDeliveredVersion(t *testi
 	}
 	// Covers the safety boundary even if an older delivery incorrectly
 	// names the source: a known newer foreign line still takes precedence.
-	staleSelf := holderAssignment(t, "old-host")
-	h.applyFact(staleSelf)
 	h.ClearLocalReadinessBlock()
 	h.replayLocalReadinessFactIfReady()
 	if p := h.realAdpt.Projection(); p.Epoch != 0 {
