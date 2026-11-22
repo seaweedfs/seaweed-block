@@ -23,6 +23,16 @@ var ErrBusy = errors.New("hostlimit: no background slot")
 // work: retrying once one is released can succeed. Other ErrBusy results
 // (an oversized payload, an unusable pool) do not change by waiting.
 var ErrSlotsHeld = fmt.Errorf("%w: every slot is held", ErrBusy)
+
+// ErrUrgentPending refuses a Normal admission while an urgent cut runs or
+// a caller holds HoldUrgentPending on the host: new background cuts wait
+// for it. It is an ErrSlotsHeld, so waiting callers treat it alike.
+var ErrUrgentPending = fmt.Errorf("%w: an urgent cut is pending", ErrSlotsHeld)
+
+// urgentPendingFile is the pool file urgent work holds shared; Normal
+// admission probes it exclusively, without waiting. It has no content.
+const urgentPendingFile = "urgent-pending"
+
 var ErrConfig = errors.New("hostlimit: incompatible host configuration")
 var ErrRevoked = errors.New("hostlimit: cut budget revoked")
 
@@ -72,6 +82,7 @@ type Stats struct {
 }
 type lease struct {
 	file         *os.File
+	pending      *os.File // urgent only: the shared hold on urgentPendingFile
 	started      time.Time
 	class        Class
 	fallback     bool
@@ -156,6 +167,20 @@ func (l *Limiter) pool(c Class) (*os.File, error) {
 	}
 	if string(existing) != string(expected) {
 		return nil, ErrConfig
+	}
+	if c == Normal {
+		probe, err := open(urgentPendingFile)
+		if err != nil {
+			return nil, err
+		}
+		err = tryLock(probe)
+		_ = probe.Close()
+		if errors.Is(err, ErrBusy) {
+			return nil, ErrUrgentPending
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
 	names := []string{}
 	if c == BackgroundFill || c == Idle {
@@ -299,6 +324,10 @@ func (l *Limiter) Admit(ctx context.Context, payload int64, abort func(error)) (
 	l.next++
 	id := l.next
 	x := &lease{file: f, started: time.Now(), class: c, fallback: fallback, payload: payload, abort: abort}
+	if c == Urgent && !fallback {
+		// Best effort: an urgent cut that cannot signal still runs.
+		x.pending, _ = holdShared(filepath.Join(l.cfg.Directory, urgentPendingFile))
+	}
 	l.live[id] = x
 	l.stats.Admitted++
 	l.stats.PayloadReserved += payload
@@ -398,6 +427,9 @@ func (l *Limiter) releaseLoop() {
 			l.mu.Unlock()
 			if x.file != nil {
 				_ = x.file.Close()
+			}
+			if x.pending != nil {
+				_ = x.pending.Close()
 			}
 			l.mu.Lock()
 			delete(l.live, id)
