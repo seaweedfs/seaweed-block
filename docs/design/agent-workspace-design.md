@@ -531,3 +531,5 @@ The existing-local-root precheck uses the same distinction: another holder at
 or above the assigned epoch is positive supersede evidence; an older foreign
 publication remains the existing move-back diagnostic. Neither path serves or
 publishes the local WAL, which remains on disk for diagnosis.
+
+Part T ownership: the lease guard alone holds the terminal fence and its first cause. A host shutdown before runtime installation publishes only a fenced, zero-validity guard; installation carries that cause into the valid-identity guard and never renews it. Startup and runtime exit callers both use workspaceRetryOutcome; only startup can supply a generation-bound refused-claim HEAD proof.

@@ -42,6 +42,9 @@ func TestWorkspaceFenceBeforeHeldInstallIsTerminal(t *testing.T) {
 		_ = runtimeDone(t, done)
 		t.Fatal("fenced installer did not settle")
 	}
+	if g := h.view.workspaceGuard.Load(); g == nil || g.FenceCause() != "host shutdown requested" {
+		t.Fatal("installation lost the synchronous fence cause")
+	}
 	if stops.Load() != 1 || h.ProjectionView().Projection().Healthy {
 		t.Fatal("fence failed to stop installed guard", stops.Load())
 	}

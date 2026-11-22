@@ -176,8 +176,7 @@ type Host struct {
 	workspaceLeaseStarted atomic.Bool
 	// Guard installation and terminal host fencing share this lock. Order:
 	// workspaceLeaseMu -> guard.mu; never hold either across RPC or drain.
-	workspaceLeaseMu     sync.Mutex
-	workspaceLeaseFenced bool
+	workspaceLeaseMu sync.Mutex
 	// workspaceStopPending is the guard's stop-pending mode, kept here for a
 	// guard installed later; workspaceStopAttempt numbers detach attempts so
 	// only the latest one's resume clears it.

@@ -118,10 +118,10 @@ func reportWorkspaceExit(out workspaceExit) int {
 	return out.code
 }
 
-// INV-WS-STARTUP-RETRY-001: only a newer other-replica authority fact
-// permits no-retry. Host owns the lineage observation and shared predicate.
-func workspaceRetryOutcome(reason string, h *volume.Host) workspaceExit {
-	if h.IsCurrentReplicaSuperseded() {
+// INV-WS-STARTUP-RETRY-001: one decision combines a newer other-replica
+// authority fact and the provider's generation-bound foreign-HEAD proof.
+func workspaceRetryOutcome(reason string, h *volume.Host, claimSuperseded bool) workspaceExit {
+	if claimSuperseded || h.IsCurrentReplicaSuperseded() {
 		return workspaceExit{exitWorkspaceSuperseded, "superseded"}
 	}
 	return workspaceExit{exitWorkspaceRetry, reason}
@@ -161,7 +161,7 @@ func waitWorkspaceStop(e *processExit, f flags, h *volume.Host, requests <-chan 
 		e.stopChunkStartup()
 		out := workspaceExit{reason: "revoked"}
 		if !h.WorkspaceLeaseRevoking() {
-			out = workspaceRetryOutcome("lease_expired", h)
+			out = workspaceRetryOutcome("lease_expired", h, false)
 		}
 		if out.code != 0 {
 			e.choose(out)
@@ -170,7 +170,7 @@ func waitWorkspaceStop(e *processExit, f flags, h *volume.Host, requests <-chan 
 	case err := <-done:
 		e.stopChunkStartup()
 		fmt.Fprintln(os.Stderr, "blockvolume: workspace lease stopped:", err)
-		e.choose(workspaceRetryOutcome("lease_expired", h))
+		e.choose(workspaceRetryOutcome("lease_expired", h, false))
 		return nil, nil
 	}
 }
@@ -210,11 +210,8 @@ func chooseChunkStartupExit(e *processExit, f flags, h *volume.Host, p chunkStar
 	if !failed {
 		return false
 	}
-	out := workspaceRetryOutcome("assignment_timeout", h)
-	// INV-WS-STARTUP-RETRY-001: a claim's foreign-holder proof is
-	// independent of the master stream; generation is rechecked below.
-	if p.ChunkStartupSuperseded(f.volumeID, gen) {
-		out = workspaceExit{exitWorkspaceSuperseded, "superseded"}
-	}
+	// INV-WS-STARTUP-RETRY-001: one exit decision consumes both proof
+	// sources; the provider rechecks the claim generation below.
+	out := workspaceRetryOutcome("assignment_timeout", h, p.ChunkStartupSuperseded(f.volumeID, gen))
 	return p.ChooseChunkStartupExit(f.volumeID, gen, func() { e.chooseChunkStartup(out) })
 }
