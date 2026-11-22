@@ -32,7 +32,7 @@ func (h *Host) runWorkspaceLease(ctx context.Context, stop func(context.Context,
 		}
 		p := h.view.Projection()
 		if p.Epoch > 0 {
-			id := &control.WorkspaceIdentity{VolumeId: h.cfg.VolumeID, ReplicaId: h.cfg.ReplicaID, Epoch: p.Epoch}
+			id := &control.WorkspaceIdentity{VolumeId: h.cfg.VolumeID, ReplicaId: h.cfg.ReplicaID, ServerId: h.cfg.ServerID, Epoch: p.Epoch}
 			guard, err := NewWorkspaceLeaseGuard(h.view, control.NewWorkspaceServiceClient(h.conn), id, func(c context.Context) (uint64, error) { return stop(c, id) }, nil)
 			if err != nil {
 				return err
@@ -43,7 +43,14 @@ func (h *Host) runWorkspaceLease(ctx context.Context, stop func(context.Context,
 			h.workspaceLeaseMu.Lock()
 			// The guard is not yet shared: publish it already fenced if a
 			// synchronous shutdown won the race with this installer.
-			guard.fenced = h.workspaceLeaseFenced || ctx.Err() != nil
+			if prior := h.view.workspaceGuard.Load(); prior != nil {
+				// Before this one-shot install, only FenceWorkspaceLease can
+				// publish a guard: its terminal cause must survive installation.
+				guard.fenceLocked(prior.FenceCause())
+			}
+			if ctx.Err() != nil {
+				guard.fenceLocked("shutdown requested (context cancelled)")
+			}
 			guard.stopPending = h.workspaceStopPending
 			h.view.workspaceGuard.Store(guard)
 			h.workspaceLeaseMu.Unlock()
@@ -103,10 +110,26 @@ func (h *Host) WorkspaceStopResumed(volumeID string, attempt uint64) {
 func (h *Host) FenceWorkspaceLease() {
 	h.workspaceLeaseMu.Lock()
 	defer h.workspaceLeaseMu.Unlock()
-	h.workspaceLeaseFenced = true
-	if g := h.view.workspaceGuard.Load(); g != nil {
-		g.mu.Lock()
-		g.fenced = true
-		g.mu.Unlock()
+	// INV-WS-STARTUP-RETRY-001: the guard owns the only terminal latch,
+	// including shutdown before its runtime installation.
+	g := h.view.workspaceGuard.Load()
+	if g == nil {
+		g = &WorkspaceLeaseGuard{}
 	}
+	g.mu.Lock()
+	g.fenceLocked("host shutdown requested")
+	g.mu.Unlock()
+	h.view.workspaceGuard.Store(g)
+}
+
+// WorkspaceLeaseRevoking distinguishes the ACK-owning planned drain from a
+// retryable fence without interpreting an error string (M2 Revoking -> Revoked).
+func (h *Host) WorkspaceLeaseRevoking() bool {
+	g := h.view.workspaceGuard.Load()
+	if g == nil {
+		return false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.revoked
 }

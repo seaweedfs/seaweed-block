@@ -56,8 +56,9 @@ var (
 var ErrChunkStaleLocalRoot = errors.New("durable: local volume predates a HEAD published by another holder")
 
 var (
-	errProviderClosed   = errors.New("durable: provider closed")
-	errChunkNoAuthority = errors.New("durable: projection carries no master authority for the chunk layer")
+	errProviderClosed    = errors.New("durable: provider closed")
+	errChunkForeignClaim = errors.New("durable: HEAD claim refused by another holder")
+	errChunkNoAuthority  = errors.New("durable: projection carries no master authority for the chunk layer")
 )
 
 const (
@@ -124,6 +125,9 @@ func (p *DurableProvider) recoverChunk(ctx context.Context, volumeID string, h *
 		p.startChunkAuthorityWait(volumeID, h, gen)
 		return false, nil
 	}
+	if errors.Is(err, storage.ErrChunkLayerFenced) && (!errors.Is(err, ErrChunkStaleLocalRoot) || errors.Is(err, errChunkForeignClaim)) {
+		p.endChunkStartup(h, gen, err)
+	}
 	return err == nil, err
 }
 
@@ -161,10 +165,11 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 	defer func() {
 		log.Printf("durable: chunk authority wait for volume=%s ended after %s: %s", volumeID, time.Since(start), ended)
 	}()
+	retained := false // this generation already chose sealed replay or diagnostics
 	waitCtx, endWait := context.WithTimeout(p.closeCtx, limit)
 	defer endWait()
 	defer func() {
-		if !errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
+		if retained || !errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
 			return
 		}
 		// The old wait must not overwrite a newer recovery's readiness.
@@ -173,6 +178,7 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 		if p.current(h, gen) && h.chunk == nil {
 			ended = fmt.Sprintf("assignment unavailable, not serving (projection lacks %s)", chunkAuthorityGap(p.view.Projection(), volumeID))
 			h.backend.SetOperational(false, "chunk assignment unavailable: "+waitCtx.Err().Error())
+			p.endChunkStartup(h, gen, nil)
 		}
 	}()
 	defer func() {
@@ -228,15 +234,25 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 		case errors.Is(err, errProviderClosed):
 			ended = "provider closed"
 			return
+		case errors.Is(err, storage.ErrChunkLayerDetached):
+			// INV-WS-STARTUP-RETRY-001: an assigned sealed incarnation stays
+			// non-serving for exact seal replay; restarting cannot unseal it.
+			retained = true
+			ended = "sealed assignment, retained for replay"
+			h.backend.SetOperational(false, "sealed assignment; replay only")
+			return
 		case errors.Is(err, storage.ErrChunkLayerFenced):
 			ended = "fenced, not serving"
 			log.Printf("durable: chunk layer for volume=%s: %v (not serving)", volumeID, err)
-			if errors.Is(err, ErrChunkStaleLocalRoot) {
+			if errors.Is(err, ErrChunkStaleLocalRoot) && !errors.Is(err, errChunkForeignClaim) {
+				retained = true
 				h.attachMu.Lock()
 				if p.current(h, gen) && h.chunk == nil {
 					h.backend.SetOperational(false, "chunk layer attach refused: "+err.Error())
 				}
 				h.attachMu.Unlock()
+			} else {
+				p.endChunkStartup(h, gen, err)
 			}
 			return
 		case errors.Is(err, errChunkNoAuthority):
@@ -320,6 +336,8 @@ func (p *DurableProvider) attachChunk(ctx context.Context, volumeID string, h *v
 		h.backend.chunkFenced = layer.Fenced
 		h.backend.mu.Unlock()
 		p.startChunkLoop(volumeID, h, layer)
+		p.inflight.Add(1) // under p.mu with closed false: Close joins the watcher
+		go p.watchChunkFence(volumeID, h, layer)
 	}
 	return nil
 }
@@ -434,6 +452,12 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 			if head.Gen != 0 && head.Holder != holder {
 				err := fmt.Errorf("%w: %w: volume %s local root %s, HEAD holder %q gen %d epoch %d, local holder %q; remove or quarantine the local root to attach fresh from HEAD",
 					ErrChunkStaleLocalRoot, storage.ErrChunkLayerFenced, volumeID, h.path, head.Holder, head.Gen, head.Epoch, holder)
+				// INV-WS-STARTUP-RETRY-001: at or above this assignment,
+				// the foreign holder is a supersede proof. A lower epoch is
+				// the existing move-back/stale-root diagnostic, never 78.
+				if claimHeadSupersedes(head, cfg) {
+					err = fmt.Errorf("%w: %w", err, errChunkForeignClaim)
+				}
 				log.Printf("durable: refusing to attach volume=%s root=%s: HEAD holder=%q gen=%d epoch=%d is not this holder %q (remove or quarantine the local root)",
 					volumeID, h.path, head.Holder, head.Gen, head.Epoch, holder)
 				return err
@@ -485,6 +509,11 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 	log.Printf("durable: HEAD claim for volume=%s starting: target epoch=%d holder=%q", volumeID, cfg.Epoch, cfg.Holder)
 	head, err := storage.ClaimChunkHead(ctx, remote, cfg)
 	if err != nil {
+		// INV-WS-STARTUP-RETRY-001: only the claim's exact foreign-holder
+		// proof permits no-retry; a higher epoch of our own holder retries.
+		if errors.Is(err, storage.ErrChunkLayerFenced) && claimHeadSupersedes(head, cfg) {
+			err = errors.Join(err, errChunkForeignClaim)
+		}
 		log.Printf("durable: HEAD claim for volume=%s failed after %s: %v", volumeID, time.Since(claimStart), err)
 		return nil, fmt.Errorf("durable: restore HEAD claim: %w", err)
 	}
@@ -1472,4 +1501,10 @@ func (w *cutWaitSlot) status(cutSeq uint64) CutScheduleStatus {
 		st.HostSlotWaitSinceNs = 0
 	}
 	return st
+}
+
+// INV-WS-STARTUP-RETRY-001: a displaced lower-epoch claim fences this
+// attempt, but cannot prove the assigned holder was superseded.
+func claimHeadSupersedes(head storage.ChunkHead, cfg storage.ChunkLayerConfig) bool {
+	return head.Gen != 0 && head.Holder != "" && head.Holder != cfg.Holder && head.Epoch >= cfg.Epoch
 }

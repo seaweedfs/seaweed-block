@@ -62,7 +62,7 @@ func restoredHostWrites(t *testing.T, inheritedLSN uint64, observerAfterSeed boo
 
 	// main.go order: readiness blocked, the assignment (epoch 5) retained.
 	h.BlockLocalReadiness("awaiting durable recovery")
-	h.applyFact(&control.AssignmentFact{VolumeId: "v1", ReplicaId: "r1", Epoch: 5, EndpointVersion: 2, PeerSetGeneration: 1})
+	h.applyFixtureFact(&control.AssignmentFact{VolumeId: "v1", ReplicaId: "r1", Epoch: 5, EndpointVersion: 2, PeerSetGeneration: 1})
 
 	dp, err := durable.NewDurableProvider(durable.ProviderConfig{
 		Impl:           durable.ImplWALStoreChunk,

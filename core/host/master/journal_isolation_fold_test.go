@@ -42,7 +42,7 @@ func (r *isolationRig) issueMove(t *testing.T, vol, requestID string) (*control.
 	if line.Epoch != 1 || line.ReplicaID != "r1" {
 		t.Fatalf("fixture authority line: %+v", line)
 	}
-	id := &control.WorkspaceIdentity{VolumeId: vol, ReplicaId: "r1", Epoch: 1}
+	id := &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: vol, ReplicaId: "r1", Epoch: 1}
 	if _, err := r.ws.RenewWorkspaceLease(r.ctx, id); err != nil {
 		t.Fatal(err)
 	}
@@ -311,8 +311,8 @@ func TestStatusReportsExtensionWriteLatency(t *testing.T) {
 	reviewLegacyBind(t, h, c, ctx, "vol-b")
 	line := waitAuthorityLine(t, h.Publisher(), "vol-b")
 	svc := &services{host: h}
-	id := &control.WorkspaceIdentity{VolumeId: "vol-b", ReplicaId: line.ReplicaID, Epoch: line.Epoch}
-	if _, err := svc.RenewWorkspaceLease(ctx, id); err != nil {
+	id := &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "vol-b", ReplicaId: line.ReplicaID, Epoch: line.Epoch}
+	if _, err := svc.RenewWorkspaceLease(loopbackPeer(ctx), id); err != nil {
 		t.Fatal(err) // first grant: not an extension
 	}
 	get := func() map[string]any {
@@ -329,7 +329,7 @@ func TestStatusReportsExtensionWriteLatency(t *testing.T) {
 		t.Fatalf("before any extension: %v", b)
 	}
 	time.Sleep(8 * time.Second)
-	if _, err := svc.RenewWorkspaceLease(ctx, id); err != nil {
+	if _, err := svc.RenewWorkspaceLease(loopbackPeer(ctx), id); err != nil {
 		t.Fatal(err)
 	}
 	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {

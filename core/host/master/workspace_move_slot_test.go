@@ -75,7 +75,7 @@ func TestWorkspaceMoveToAnotherSlotOnTheTargetHost(t *testing.T) {
 		t.Fatalf("fixture lines a1=%+v a2=%+v", a1, a2)
 	}
 	// a2 stops cleanly on node-b: lease, revocation, ACK of its detached HEAD.
-	id := &control.WorkspaceIdentity{VolumeId: "a2", ReplicaId: "r1", Epoch: a2.Epoch}
+	id := &control.WorkspaceIdentity{ServerId: "node-b", VolumeId: "a2", ReplicaId: "r1", Epoch: a2.Epoch}
 	if _, err := ws.RenewWorkspaceLease(ctx, id); err != nil {
 		t.Fatal(err)
 	}

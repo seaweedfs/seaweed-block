@@ -27,7 +27,7 @@ func TestWorkspaceRPCSameHostCleanMoveKeepsRepreparedBinding(t *testing.T) {
 	if line := waitAuthorityLine(t, h.Publisher(), "v"); line.Epoch != 1 {
 		t.Fatal(line)
 	}
-	id := &control.WorkspaceIdentity{VolumeId: "v", ReplicaId: "r1", Epoch: 1}
+	id := &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "v", ReplicaId: "r1", Epoch: 1}
 	if _, err := ws.RenewWorkspaceLease(ctx, id); err != nil {
 		t.Fatal(err)
 	}

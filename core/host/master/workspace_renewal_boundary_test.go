@@ -65,7 +65,7 @@ func TestWorkspaceHeldRenewalBoundary(t *testing.T) {
 			p := authority.NewPublisher(dir, authority.WithStore(store), authority.WithWorkspaceLeaseConfig(30*time.Second, func() time.Time { return time.Unix(0, masterNS.Load()) }), authority.WithWorkspaceMaxClockSkew(4*time.Second))
 			seedSkewPublisher(t, p, dir)
 			client := &heldSkewLeaseClient{skewLeaseClient: skewLeaseClient{p}, entered: make(chan *control.WorkspaceLeaseFact, 1), release: make(chan struct{})}
-			g, err := volume.NewWorkspaceLeaseGuard(workspaceRPCView{frontend.Projection{VolumeID: "v", ReplicaID: "r", Epoch: 1, Healthy: true}}, client, &control.WorkspaceIdentity{VolumeId: "v", ReplicaId: "r", Epoch: 1}, func(context.Context) (uint64, error) { return 7, nil }, func() time.Time { return time.Unix(0, hostNS.Load()) })
+			g, err := volume.NewWorkspaceLeaseGuard(workspaceRPCView{frontend.Projection{VolumeID: "v", ReplicaID: "r", Epoch: 1, Healthy: true}}, client, &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "v", ReplicaId: "r", Epoch: 1}, func(context.Context) (uint64, error) { return 7, nil }, func() time.Time { return time.Unix(0, hostNS.Load()) })
 			if err != nil {
 				t.Fatal(err)
 			}

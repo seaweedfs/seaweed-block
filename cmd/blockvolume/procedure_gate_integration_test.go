@@ -199,14 +199,21 @@ func TestProcedureForcedMoveWithTheOldHostReturning(t *testing.T) {
 	// it again after it exits. Each time it must not take s2's line as its
 	// own (a holder is server and replica), report its frontend ready or
 	// listen for I/O, and it must log a refusal and exit with status 75.
-	env.oldHostRefuses(t, "blockvolume-s1-back", env.hosts["s1"], e2)
+	back := env.oldHostRefuses(t, "blockvolume-s1-back", env.hosts["s1"], e2)
 	time.Sleep(5 * time.Second) // RestartSec of the example unit
-	env.oldHostRefuses(t, "blockvolume-s1-restarted", env.hosts["s1"], e2)
+	restarted := env.oldHostRefuses(t, "blockvolume-s1-restarted", env.hosts["s1"], e2)
 	// Control: on a fresh local root there is no stale root to refuse, and
 	// it must still refuse s2's line.
 	fresh := env.hosts["s1"]
 	fresh.root = fresh.root + "-fresh"
-	env.oldHostRefuses(t, "blockvolume-s1-fresh-root", fresh, e2)
+	freshRoot := env.oldHostRefuses(t, "blockvolume-s1-fresh-root", fresh, e2)
+	// A line carries its owner and that owner's endpoints: every line
+	// delivered at the forced epoch, to the new owner and to each returning
+	// old host alike, carries s2's own endpoints, never another host's.
+	if bad := wrongOwnerEndpoints(e2, env.hosts["s2"], nw, back, restarted, freshRoot); len(bad) > 0 {
+		t.Errorf("epoch-%d deliveries not proven to carry s2's endpoints (want data=%s ctrl=%s in every recipient's lines):\n%s",
+			e2, env.hosts["s2"].data, env.hosts["s2"].ctrl, strings.Join(bad, "\n"))
+	}
 	env.h.waitPrimaryAt(t, env.hosts["s2"].status, e2)
 	if !bytes.Equal(env.readBlock(t, "s2", 0), kept) {
 		t.Fatal("s2 no longer serves the kept block after the old host returned")
@@ -387,10 +394,10 @@ func exitCode(err error) int {
 }
 
 // oldHostRefuses starts the old holder b after the volume moved to epoch e2
-// on another host. While it runs it must not adopt the new line, report its
+// on another host, and returns it. While it runs it must not adopt the new line, report its
 // frontend ready or listen; it must log a refusal and exit with status 75
 // (a later change may give a stale local root its own status).
-func (env *handoffEnv) oldHostRefuses(t *testing.T, name string, b bvHost, e2 uint64) {
+func (env *handoffEnv) oldHostRefuses(t *testing.T, name string, b bvHost, e2 uint64) *daemon {
 	t.Helper()
 	d := env.h.start(t, name, env.h.volume, env.volArgsFor(b)...)
 	var failures []string
@@ -420,6 +427,7 @@ func (env *handoffEnv) oldHostRefuses(t *testing.T, name string, b bvHost, e2 ui
 	if len(failures) > 0 {
 		t.Errorf("%s after the forced move: %s", name, strings.Join(failures, "; "))
 	}
+	return d
 }
 
 // servingNow reports whether the host serves: its frontend is ready or its
@@ -555,4 +563,33 @@ func (env *handoffEnv) forceMove(t *testing.T, e uint64, target, request string)
 	})
 	out, _ := env.h.command(t, args...)
 	return out
+}
+
+// wrongOwnerEndpoints returns every "assignment stream delivery" log line at epoch e (in any of ds) whose data or control
+// endpoint is not owner's, plus an entry for each recipient whose log cannot be read or shows no epoch-e
+// delivery at all (each recipient must positively have received the owner's line).
+func wrongOwnerEndpoints(e uint64, owner bvHost, ds ...*daemon) []string {
+	var bad []string
+	tag := fmt.Sprintf(" epoch=%d ev=", e)
+	for _, d := range ds {
+		raw, err := os.ReadFile(d.log)
+		if err != nil {
+			bad = append(bad, d.name+": log unreadable: "+err.Error())
+			continue
+		}
+		seen := 0
+		for _, l := range strings.Split(string(raw), "\n") {
+			if !strings.Contains(l, "assignment stream delivery") || !strings.Contains(l, tag) {
+				continue
+			}
+			seen++
+			if !strings.Contains(l, fmt.Sprintf("data=%q", owner.data)) || !strings.Contains(l, fmt.Sprintf("ctrl=%q", owner.ctrl)) {
+				bad = append(bad, d.name+": "+strings.TrimSpace(l))
+			}
+		}
+		if seen == 0 { // positive evidence per recipient: a check that saw no forced-epoch delivery proves nothing
+			bad = append(bad, d.name+": no epoch delivery logged")
+		}
+	}
+	return bad
 }

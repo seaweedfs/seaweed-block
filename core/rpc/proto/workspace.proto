@@ -21,7 +21,7 @@ service WorkspaceService {
   // write): advisory, re-checked by MoveWorkspace.
   rpc PreviewWorkspaceMove(WorkspaceMove) returns (WorkspaceMovePreview);
 }
-message WorkspaceIdentity { string volume_id = 1; string replica_id = 2; uint64 epoch = 3; }
+message WorkspaceIdentity { string volume_id = 1; string replica_id = 2; uint64 epoch = 3; string server_id = 4; }
 message WorkspaceVolume { string volume_id = 1; }
 message WorkspaceEmpty {}
 message WorkspaceLeaseFact {

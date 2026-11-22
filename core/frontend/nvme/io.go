@@ -17,7 +17,6 @@ package nvme
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -214,7 +213,7 @@ func (h *IOHandler) Handle(ctx context.Context, cmd IOCommand) (result IOResult)
 		// SC=0x06) — stop rule §3.6 (error-faithful) forbids
 		// swallowing to Success.
 		if err := h.backend.Sync(ctx); err != nil {
-			return mapBackendError(err, "flush")
+			return mapBackendError(ctx, err, "flush")
 		}
 		return IOResult{SCT: SCTGeneric, SC: SCSuccess}
 	default:
@@ -257,7 +256,7 @@ func (h *IOHandler) read(ctx context.Context, cmd IOCommand) IOResult {
 	buf := make([]byte, byteLen)
 	_, err := h.backend.Read(ctx, int64(cmd.SLBA)*int64(h.blockSize), buf)
 	if err != nil {
-		return mapBackendError(err, "read")
+		return mapBackendError(ctx, err, "read")
 	}
 	return IOResult{SCT: SCTGeneric, SC: SCSuccess, Data: buf}
 }
@@ -283,58 +282,29 @@ func (h *IOHandler) write(ctx context.Context, cmd IOCommand) IOResult {
 	start := time.Now()
 	n, err := h.backend.Write(ctx, int64(cmd.SLBA)*int64(h.blockSize), cmd.Data[:expectedBytes])
 	if err != nil {
-		return mapWriteBudgetError(ctx, err, "write")
+		return mapBackendError(ctx, err, "write")
 	}
 	if rec, ok := h.backend.(targetWriteRecorder); ok {
 		rec.RecordTargetWrite(n, time.Since(start))
 	}
 	if cmd.FUA {
 		if err := h.backend.Sync(ctx); err != nil {
-			return mapWriteBudgetError(ctx, err, "FUA sync")
+			return mapBackendError(ctx, err, "FUA sync")
 		}
 	}
 	return IOResult{SCT: SCTGeneric, SC: SCSuccess}
 }
 
-// Only a pure command-deadline cause is transient. A joined physical error
-// must retain its terminal mapping even when the command deadline also passed.
-func mapWriteBudgetError(ctx context.Context, err error, op string) IOResult {
-	if frontend.IsWriteDeadline(ctx, err) {
-		return IOResult{SCT: SCTGeneric, SC: SCNamespaceNotReady, retryable: true, Reason: "command deadline on " + op + ": " + err.Error()}
-	}
-	return mapBackendError(err, op)
-}
-
-// mapBackendError translates frontend errors into NVMe CQE
-// status tuples. ErrStalePrimary → ANA Transition;
-// ErrBackendClosed → ANA Inaccessible; ErrNotReady → retryable Namespace
-// Not Ready; anything else → Internal
-// Error (fail-closed; real-backend-specific mapping lands with
-// T3).
-func mapBackendError(err error, op string) IOResult {
-	if errors.Is(err, frontend.ErrBackendBusy) {
-		return IOResult{SCT: SCTGeneric, SC: SCNamespaceNotReady, Reason: "local admission pressure on " + op + ": " + err.Error(), retryable: true}
-	}
-	if errors.Is(err, frontend.ErrStalePrimary) {
-		return IOResult{
-			SCT:    SCTPathRelated,
-			SC:     SCPathAsymAccessTransition,
-			Reason: "stale primary lineage on " + op,
-		}
-	}
-	if errors.Is(err, frontend.ErrBackendClosed) {
-		return IOResult{
-			SCT:    SCTPathRelated,
-			SC:     SCPathAsymAccessInaccessible,
-			Reason: "backend closed on " + op,
-		}
-	}
-	if errors.Is(err, frontend.ErrNotReady) {
-		return IOResult{SCT: SCTGeneric, SC: SCNamespaceNotReady, Reason: "backend not ready on " + op + ": " + err.Error(), retryable: true}
-	}
-	return IOResult{
-		SCT:    SCTGeneric,
-		SC:     SCInternalError,
-		Reason: "backend error on " + op + ": " + err.Error(),
+// mapBackendError only maps the shared retry class to NVMe protocol status.
+func mapBackendError(ctx context.Context, err error, op string) IOResult {
+	switch frontend.ClassifyBackendError(ctx, err) {
+	case frontend.BackendErrorBusy, frontend.BackendErrorNotReady:
+		return IOResult{SCT: SCTGeneric, SC: SCNamespaceNotReady, retryable: true, Reason: "backend temporarily unavailable on " + op + ": " + err.Error()}
+	case frontend.BackendErrorStale:
+		return IOResult{SCT: SCTPathRelated, SC: SCPathAsymAccessTransition, Reason: "stale primary lineage on " + op}
+	case frontend.BackendErrorClosed:
+		return IOResult{SCT: SCTPathRelated, SC: SCPathAsymAccessInaccessible, Reason: "backend closed on " + op}
+	default:
+		return IOResult{SCT: SCTGeneric, SC: SCInternalError, Reason: "backend error on " + op + ": " + err.Error()}
 	}
 }
