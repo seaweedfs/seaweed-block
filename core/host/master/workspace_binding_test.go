@@ -120,7 +120,7 @@ func workspaceBindingsMove(t *testing.T, forced bool) {
 			t.Fatal(err)
 		}
 		line := waitAuthorityLine(t, h.Publisher(), vol)
-		id := &control.WorkspaceIdentity{VolumeId: vol, ReplicaId: "r1", Epoch: line.Epoch}
+		id := &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: vol, ReplicaId: "r1", Epoch: line.Epoch}
 		lease, e := client.RenewWorkspaceLease(ctx, id)
 		if e != nil {
 			t.Fatal(e)

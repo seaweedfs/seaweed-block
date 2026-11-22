@@ -27,7 +27,8 @@ The volume's authority and health projection. Go type `volume.StatusProjection`.
 | `Memory.SoftLimitBytes` | int64 | the Go soft memory limit in force (--memory-limit-mib or GOMEMLIMIT) |
 | `Memory.RSSBytes` | uint64 | resident set size from /proc/self/status (VmRSS); 0 off Linux |
 | `Memory.AnonymousRSSBytes` | uint64 | anonymous resident memory (RssAnon); 0 off Linux |
-| `FrontendPrimaryReady` | bool | FrontendPrimaryReady: this replica is the healthy, non-superseded primary and may serve guest I/O. |
+| `FrontendPrimaryReady` | bool | FrontendPrimaryReady: this replica is the healthy, non-superseded primary, its local durable backend admits I/O, and it may serve guest I/O (INV-FE-PRIMARY-READY-OPERATIONAL-001). |
+| `NotReadyReason` | string | NotReadyReason says why FrontendPrimaryReady is false, first match: a workspace primary holds no granted lease now (NotReadyLeaseNotHeld); the local durable backend admits no I/O (its evidence: attach pending, fenced, detached) or has no status for the volume; the frontend target is not listening yet; this replica is not the healthy primary. Empty when ready. (omitted when empty) |
 | `AuthorityRole` | string | AuthorityRole is primary, superseded or unknown. |
 | `ReplicationRole` | string | ReplicationRole is none (a primary), recovering, not_ready, replica_ready or unknown. |
 | `RoleAdmissionFailure` | string | RoleAdmissionFailure (G1) explains a not-Healthy projection caused by a failed role call on the replica listener; empty otherwise. (omitted when empty) |
@@ -35,7 +36,7 @@ The volume's authority and health projection. Go type `volume.StatusProjection`.
 | `CatchUp` | object | CatchUp shows a supporting replica's catch-up progress while it is not yet replica_ready; it is visible without being an alert. (omitted when empty) |
 | `CatchUp.ElapsedMs` | int64 | ElapsedMs is the time since this replica was admitted as a supporting replica at its current epoch. |
 | `CatchUp.LagLSN` | uint64 | LagLSN is the engine's H-R (primary head minus this replica's durable frontier) as last observed; 0 when unknown or caught up. |
-| `Warnings[]` | string | Warnings are the durable store's typed recovery warnings (e.g. wal_hole_suspected, issue #51). Visible, not an alert: they do not change Healthy or the frontend's readiness. (omitted when empty) |
+| `Warnings[]` | string | Warnings include routing disagreements and typed recovery warnings (e.g. wal_hole_suspected, issue #51). Visible, not an alert: they do not change Healthy or the frontend's readiness. (omitted when empty) |
 
 ### `GET /status/peers`
 

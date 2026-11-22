@@ -26,7 +26,7 @@ func workspaceRuntimeHost(t *testing.T, addr string, required bool) *Host {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = h.Close() })
-	h.applyFact(&control.AssignmentFact{VolumeId: "v1", ReplicaId: "r1", Epoch: 3, EndpointVersion: 1, DataAddr: "127.0.0.1:9100", CtrlAddr: "127.0.0.1:9101"})
+	h.applyFixtureFact(&control.AssignmentFact{VolumeId: "v1", ReplicaId: "r1", Epoch: 3, EndpointVersion: 1, DataAddr: "127.0.0.1:9100", CtrlAddr: "127.0.0.1:9101"})
 	end := time.Now().Add(time.Second)
 	for h.realAdpt.Projection().Mode != engine.ModeHealthy && time.Now().Before(end) {
 		time.Sleep(time.Millisecond)

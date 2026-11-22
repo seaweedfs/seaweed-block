@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"log"
 
@@ -215,13 +214,7 @@ func (h *SCSIHandler) HandleCommand(ctx context.Context, cdb [16]byte, dataOut [
 		log.Printf("iscsi: SCSI SYNCHRONIZE_CACHE handler entry opcode=0x%02x", cdb[0])
 		if err := h.backend.Sync(ctx); err != nil {
 			log.Printf("iscsi: SCSI SYNCHRONIZE_CACHE backend.Sync FAILED: %v", err)
-			return SCSIResult{
-				Status:   StatusCheckCondition,
-				SenseKey: SenseMediumError,
-				ASC:      ASCWriteError,
-				ASCQ:     0x00,
-				Reason:   fmt.Sprintf("SYNC_CACHE: backend sync: %v", err),
-			}
+			return mapBackendError(ctx, err, "sync")
 		}
 		log.Printf("iscsi: SCSI SYNCHRONIZE_CACHE backend.Sync ok")
 		return SCSIResult{Status: StatusGood}
@@ -278,7 +271,7 @@ func (h *SCSIHandler) doRead(ctx context.Context, lba uint64, transferLen uint32
 	buf := make([]byte, byteLen)
 	_, err := h.backend.Read(ctx, int64(lba)*int64(h.blockSize), buf)
 	if err != nil {
-		return mapBackendError(err, "read")
+		return mapBackendError(ctx, err, "read")
 	}
 	return SCSIResult{Status: StatusGood, Data: buf}
 }
@@ -307,7 +300,7 @@ func (h *SCSIHandler) doWrite(ctx context.Context, lba uint64, transferLen uint3
 	_, err := h.backend.Write(ctx, int64(lba)*int64(h.blockSize), dataOut[:expectedBytes])
 	if err != nil {
 		log.Printf("iscsi: SCSI WRITE backend.Write FAILED lba=%d: %v", lba, err)
-		return mapBackendError(err, "write")
+		return mapBackendError(ctx, err, "write")
 	}
 	log.Printf("iscsi: SCSI WRITE backend.Write ok lba=%d", lba)
 	return SCSIResult{Status: StatusGood}
@@ -688,41 +681,25 @@ func (h *SCSIHandler) reportLuns(cdb [16]byte) SCSIResult {
 
 // --- helpers ---
 
-// mapBackendError translates a frontend.Backend error into the
-// SCSI status/sense tuple. ErrStalePrimary is the load-bearing
-// case (test-spec §4 T2.L0.i2/i3): stale WRITE must not
-// acknowledge success, stale READ must not return stale bytes.
-// Both map to CHECK CONDITION + NOT READY + stale-lineage ASC.
-//
-// Other backend errors surface as CHECK CONDITION / MEDIUM
-// ERROR — conservative fail-closed; real-backend-specific
-// mapping lands with T3.
-func mapBackendError(err error, op string) SCSIResult {
-	if errors.Is(err, frontend.ErrStalePrimary) {
-		return SCSIResult{
-			Status:   StatusCheckCondition,
-			SenseKey: SenseNotReady,
-			ASC:      ASCStaleLineage,
-			ASCQ:     ASCQStaleLineage,
-			Reason:   "stale primary lineage on " + op,
+// mapBackendError only maps the shared retry class to SCSI status/sense.
+func mapBackendError(ctx context.Context, err error, op string) SCSIResult {
+	result := SCSIResult{Status: StatusCheckCondition, SenseKey: SenseNotReady, ASC: ASCNotReady, Reason: "backend error on " + op + ": " + err.Error()}
+	switch frontend.ClassifyBackendError(ctx, err) {
+	case frontend.BackendErrorBusy:
+		return SCSIResult{Status: StatusBusy, Reason: result.Reason}
+	case frontend.BackendErrorNotReady:
+		result.ASCQ = 0x01 // LOGICAL UNIT IS IN PROCESS OF BECOMING READY (T10 ASC list).
+	case frontend.BackendErrorStale:
+		result.ASC, result.ASCQ = ASCStaleLineage, ASCQStaleLineage
+	case frontend.BackendErrorClosed:
+		result.ASCQ = ASCNotReadyManualIntv
+	default:
+		result.SenseKey, result.ASC = SenseMediumError, 0x11
+		if op == "sync" {
+			result.ASC = ASCWriteError
 		}
 	}
-	if errors.Is(err, frontend.ErrBackendClosed) {
-		return SCSIResult{
-			Status:   StatusCheckCondition,
-			SenseKey: SenseNotReady,
-			ASC:      ASCNotReady,
-			ASCQ:     ASCNotReadyManualIntv,
-			Reason:   "backend closed on " + op,
-		}
-	}
-	return SCSIResult{
-		Status:   StatusCheckCondition,
-		SenseKey: SenseMediumError,
-		ASC:      0x11, // Unrecovered read error (or generic medium error)
-		ASCQ:     0x00,
-		Reason:   "backend error on " + op + ": " + err.Error(),
-	}
+	return result
 }
 
 func illegalRequest(asc, ascq uint8, reason string) SCSIResult {

@@ -43,7 +43,7 @@ func TestWorkspaceSkewSeparatesOldServingFromForcedGrant(t *testing.T) {
 			dir := &skewDirective{asks: make(chan authority.AssignmentAsk, 1)}
 			p := authority.NewPublisher(dir, authority.WithStore(store), authority.WithWorkspaceLeaseConfig(3*time.Second, func() time.Time { return masterNow }))
 			seedSkewPublisher(t, p, dir)
-			g, err := volume.NewWorkspaceLeaseGuard(workspaceRPCView{frontend.Projection{VolumeID: "v", ReplicaID: "r", Epoch: 1, Healthy: true}}, skewLeaseClient{p}, &control.WorkspaceIdentity{VolumeId: "v", ReplicaId: "r", Epoch: 1}, func(context.Context) (uint64, error) { return 7, nil }, func() time.Time { return hostNow })
+			g, err := volume.NewWorkspaceLeaseGuard(workspaceRPCView{frontend.Projection{VolumeID: "v", ReplicaID: "r", Epoch: 1, Healthy: true}}, skewLeaseClient{p}, &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "v", ReplicaId: "r", Epoch: 1}, func(context.Context) (uint64, error) { return 7, nil }, func() time.Time { return hostNow })
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -130,12 +130,13 @@ func TestWorkspaceClockSkewConfigReachesLeaseReply(t *testing.T) {
 	if _, err := h.Lifecycle().Volumes.CreateVolume(lifecycle.VolumeSpec{VolumeID: "vol-a", SizeBytes: 1 << 20, ReplicationFactor: 1}); err != nil {
 		t.Fatal(err)
 	}
+	registerWorkspaceHolder(t, h, "node-a") // a workspace holder's server id must be registered (INV-AUTH-HOLDER-IDENTITY-001)
 	seedVerifiedExistingReplicaPlacement(t, h)
 	if _, err := h.RunLifecycleProductTick(); err != nil {
 		t.Fatal(err)
 	}
 	line := waitAuthorityLine(t, h.Publisher(), "vol-a")
-	reply, err := (&services{host: h}).RenewWorkspaceLease(context.Background(), &control.WorkspaceIdentity{VolumeId: "vol-a", ReplicaId: line.ReplicaID, Epoch: line.Epoch})
+	reply, err := (&services{host: h}).RenewWorkspaceLease(loopbackPeer(context.Background()), &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "vol-a", ReplicaId: line.ReplicaID, Epoch: line.Epoch})
 	if err != nil {
 		t.Fatal(err)
 	}

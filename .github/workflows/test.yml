@@ -82,4 +82,33 @@ jobs:
               fi
             done
           fi
-          go test -p=1 -short -count=1 -timeout 10m $pkgs
+          # 20m per package: core/storage alone took 602 s on tp04 on main
+          # (2026-11-22), past the old 10m, so any PR touching it failed.
+          go test -p=1 -short -count=1 -timeout 20m $pkgs
+
+      - name: Test planned hand-over (real binaries)
+        # The documented standalone planned hand-over and its refused clean
+        # move without the ACK (cmd/blockvolume TestStandalone*, build tags
+        # subprocess and chunkstore_integration, so the default pass above is
+        # unchanged) run real blockmaster, blockvolume and sw-block against a
+        # pinned SeaweedFS release. The release archive is checked against its
+        # sha256 before every use, also when taken from the runner's cache; a
+        # mismatch fails the step. Nothing else is fetched.
+        env:
+          WEED_VERSION: "4.53"
+          WEED_SHA256: d1a7dec9f48d8b33895a0ea8951971defc2dc5312906dcc76fa5a5f74a6ee90d
+        run: |
+          set -euo pipefail
+          cache="${RUNNER_TOOL_CACHE:-$RUNNER_TEMP}/seaweedfs-weed/$WEED_VERSION"
+          tgz="$cache/linux_amd64.tar.gz"
+          mkdir -p "$cache"
+          if ! echo "$WEED_SHA256  $tgz" | sha256sum -c --status - 2>/dev/null; then
+            part="$tgz.$$.part"
+            curl -fsSL --retry 3 -o "$part" "https://github.com/seaweedfs/seaweedfs/releases/download/$WEED_VERSION/linux_amd64.tar.gz"
+            echo "$WEED_SHA256  $part" | sha256sum -c - || { rm -f "$part"; exit 1; }
+            mv -f "$part" "$tgz"
+          fi
+          bin="$RUNNER_TEMP/weed-$WEED_VERSION"
+          mkdir -p "$bin"
+          tar -xzf "$tgz" -C "$bin" weed
+          CHUNKSTORE_WEED="$bin/weed" go test -tags 'subprocess chunkstore_integration' -count=1 -timeout 10m -run '^TestStandalone(PlannedHandoffToTheSameHost|CleanMoveWithoutTheACKIsRefused)$' ./cmd/blockvolume/
