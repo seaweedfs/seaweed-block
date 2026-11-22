@@ -30,6 +30,7 @@ case $cfg in
   R292_*)                           spec=ReplicaApplyOrder ;;
   S9b_*)                            spec=RetentionGCMulti ;;
   S9_*)                             spec=RetentionGCTiming ;;
+  HostTickets_*)                    spec=HostTickets ;;
   *) echo "run.sh: no spec for config '$cfg'" >&2; exit 2 ;;
 esac
 

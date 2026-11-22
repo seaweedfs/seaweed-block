@@ -11,9 +11,10 @@ import (
 
 // CheckLaunch refuses a host-limit configuration whose premises do not
 // hold, before the process uses it. The directory must exist as a real
-// directory, outside temporary directories that cleaners empty, on a local
-// file system (kernel file locks are not shared reliably over network
-// file systems), and a configuration already published there by other
+// directory, outside temporary directories that cleaners empty, not on a
+// remote file system (kernel file locks and the host monotonic clock that
+// orders tickets belong to one host), and a configuration already published
+// there by other
 // processes must equal this one. The premise that every process on the
 // host uses the same directory cannot be checked from one process.
 func CheckLaunch(c Config) error {
@@ -39,7 +40,7 @@ func checkLaunch(c Config, tempRoots []string, remote func(string) (string, bool
 		}
 	}
 	if fs, isRemote := remote(dir); isRemote {
-		return fmt.Errorf("hostlimit: --host-limit-dir %s is on %s, a network file system; slot locks need a local one", dir, fs)
+		return fmt.Errorf("hostlimit: --host-limit-dir %s is on %s, a remote file system; slot locks and ticket order need a file system local to this host: use a local directory (for example under /run or /var/lib)", dir, fs)
 	}
 	existing, err := os.ReadFile(filepath.Join(dir, "configuration.json"))
 	if errors.Is(err, os.ErrNotExist) {

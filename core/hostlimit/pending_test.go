@@ -15,9 +15,9 @@ import (
 func TestNormalWaitsWhileUrgentPendingIsHeld(t *testing.T) {
 	c := testConfig(t)
 	l := newTest(t, c)
-	release, err := HoldUrgentPending(c.Directory)
-	if err != nil {
-		t.Fatal(err)
+	release, held, err := HoldUrgentPending(c.Directory)
+	if err != nil || !held {
+		t.Fatalf("hold: held=%t err=%v", held, err)
 	}
 	if id, err := l.Acquire(context.Background(), Normal, nil); id != 0 || !errors.Is(err, ErrUrgentPending) || !errors.Is(err, ErrSlotsHeld) {
 		t.Fatalf("normal admission with an urgent pending: id=%d err=%v", id, err)
@@ -75,7 +75,8 @@ func TestCheckLaunch(t *testing.T) {
 	}{
 		"missing":   {DefaultConfig(filepath.Join(c.Directory, "missing")), nil, local, "missing"},
 		"temp root": {c, []string{filepath.Dir(c.Directory)}, local, "temporary-file cleaners"},
-		"remote":    {c, nil, func(string) (string, bool) { return "NFS", true }, "network file system"},
+		"remote":    {c, nil, func(string) (string, bool) { return "NFS", true }, "on NFS, a remote file system"},
+		"9p":        {c, nil, func(string) (string, bool) { return "9p", true }, "on 9p, a remote file system"},
 	}
 	file := filepath.Join(t.TempDir(), "f")
 	if err := os.WriteFile(file, nil, 0o600); err != nil {
