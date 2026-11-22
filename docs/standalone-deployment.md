@@ -317,7 +317,8 @@ Perform a clean hand-over in this order:
 
    Busy admission refuses the operation. Do not proceed on any failure or
    unknown outcome. JSON remains on stdout; a successful command also prints
-   `sealed HEAD generation: G` on its own stderr line. Copy the positive `G`.
+   `sealed HEAD generation: G` on its own stderr line, taken from the same
+   JSON `headGen` field on stdout. Copy the positive `G`.
 3. Request revocation using that seal and the identity from `show`:
 
    ```bash

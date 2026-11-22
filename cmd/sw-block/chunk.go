@@ -267,7 +267,7 @@ func chunkDetach(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&volumeID, "volume", "", "volume id")
 	fs.StringVar(&statusAddr, "status-addr", "", "blockvolume status address or URL (with --chunk-control-endpoint)")
 	fs.DurationVar(&timeout, "timeout", 120*time.Second, "operation bound (capped at the server's OpDeadline)")
-	fs.BoolVar(&plain, "plain", false, "seal an idle volume without pre-copy; prints sealed HEAD generation on stderr")
+	fs.BoolVar(&plain, "plain", false, "seal an idle volume without pre-copy; prints JSON headGen as sealed HEAD generation on stderr")
 	fs.BoolVar(&frozen, "frozen", false, "not supported in this release: the server refuses a frozen detach (frozen_detach_unsupported)")
 	fs.Int64Var(&freezeStartedAtNs, "freeze-started-at-ns", 0, "not supported in this release; only valid with --frozen")
 	fs.BoolVar(&allowOverBudget, "allow-over-budget", false, "not supported in this release; only valid with --frozen")

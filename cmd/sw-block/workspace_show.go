@@ -49,7 +49,7 @@ func printWorkspaceView(out io.Writer, volume string, view *control.WorkspaceSta
 	fmt.Fprintf(out, "volume: %s (query snapshot, not authority to serve)\n", volume)
 	lease := view.GetLease()
 	if lease == nil {
-		fmt.Fprintln(out, "holder: none\nlease state: none")
+		fmt.Fprintln(out, "replica: none\nepoch: none\nlease state: none\nholder: none")
 	} else {
 		state := "granted"
 		if lease.GetValidForNs() <= 0 {
@@ -57,7 +57,7 @@ func printWorkspaceView(out io.Writer, volume string, view *control.WorkspaceSta
 		} else if lease.GetRevoking() {
 			state = "revoking"
 		}
-		fmt.Fprintf(out, "holder: %s@%d (logical replica; server not provided by lease view)\nlease state: %s\nlease expiry_ns: %d; host validity_ns at query: %d\n", lease.GetReplicaId(), lease.GetEpoch(), state, lease.GetExpiresAtNs(), lease.GetValidForNs())
+		fmt.Fprintf(out, "replica: %s\nepoch: %d\nlease state: %s\nholder: %s@%d (logical replica)\nlease expiry_ns: %d; host validity_ns at query: %d\n", lease.GetReplicaId(), lease.GetEpoch(), state, lease.GetReplicaId(), lease.GetEpoch(), lease.GetExpiresAtNs(), lease.GetValidForNs())
 	}
 	ack := view.GetRevocationAck()
 	if ack == nil {
@@ -66,6 +66,7 @@ func printWorkspaceView(out io.Writer, volume string, view *control.WorkspaceSta
 		id := ack.GetIdentity()
 		fmt.Fprintf(out, "recorded ACK: %s@%d HEAD generation %d\n", id.GetReplicaId(), id.GetEpoch(), ack.GetHeadGen())
 	}
+	fmt.Fprintln(out, "host: unknown (not recorded by the master); issued moves and bindings below are separate facts")
 	for _, g := range view.GetMoves() {
 		fmt.Fprintf(out, "move: request=%s kind=%s issued=%t %s/%s@%d -> %s/%s@%d HEAD generation %d remote LSN %d\n", g.GetRequestId(), g.GetKind(), g.GetIssued(), g.GetOldHost(), g.GetOldReplicaId(), g.GetOldEpoch(), g.GetNewHost(), g.GetNewReplicaId(), g.GetNewEpoch(), g.GetHeadGen(), g.GetRemoteLsn())
 	}
