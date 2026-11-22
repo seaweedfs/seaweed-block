@@ -4,8 +4,9 @@ Assignments and workspace lease requests carry the holder's server id as well
 as its replica id. Replica ids and loopback addresses may be reused on another
 host, so they do not identify the holder by themselves. A volume refuses an
 assignment with a missing or different server id, or different carried data or
-control endpoints. The master refuses a workspace lease request whose server
-id is missing or does not match the assigned holder.
+control endpoints. The master refuses workspace lease requests and revocation ACKs whose server
+id is missing or does not match the assigned primary holder. A refused ACK is
+not recorded and cannot license a clean move.
 
 Upgrade the master first, then the volumes, using binaries from the same
 release. A new volume connected to an older pre-release master stays not

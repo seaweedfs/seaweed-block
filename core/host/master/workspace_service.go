@@ -86,17 +86,25 @@ func leaseFact(volume string, l authority.WorkspaceLease) *control.WorkspaceLeas
 	return &control.WorkspaceLeaseFact{VolumeId: volume, ReplicaId: l.ReplicaID, Epoch: l.Epoch, ExpiresAtNs: l.ExpiresAtNS, ValidForNs: int64(remaining), Revoking: l.Revoking}
 }
 
+// holderMatches implements INV-AUTH-HOLDER-IDENTITY-001 for both holder RPCs.
+// The committed line and placement snapshot avoid store I/O on renewal.
+func (s *services) holderMatches(volume, replica, server string, epoch uint64) bool {
+	line, ok := s.host.Publisher().PublishedAuthorityLine(volume)
+	if !ok || server == "" || line.ReplicaID != replica || line.Epoch != epoch {
+		return false
+	}
+	owner := line.IssuedHost
+	if owner == "" {
+		owner = s.host.placementSourceHost(volume, line.ReplicaID)
+	}
+	return server == owner
+}
+
 func (s *services) RenewWorkspaceLease(ctx context.Context, q *control.WorkspaceIdentity) (*control.WorkspaceLeaseFact, error) {
 	if err := s.workspaceVolumeForRenewal(q.GetVolumeId()); err != nil {
 		return nil, err
 	}
-	// INV-AUTH-HOLDER-IDENTITY-001: a replica id can move between servers.
-	line, ok := s.host.Publisher().PublishedAuthorityLine(q.GetVolumeId())
-	server := line.IssuedHost
-	if server == "" {
-		server = s.host.placementSourceHost(q.GetVolumeId(), line.ReplicaID)
-	}
-	if !ok || line.ReplicaID != q.GetReplicaId() || line.Epoch != q.GetEpoch() || q.GetServerId() == "" || q.GetServerId() != server {
+	if !s.holderMatches(q.GetVolumeId(), q.GetReplicaId(), q.GetServerId(), q.GetEpoch()) {
 		return nil, status.Error(codes.FailedPrecondition, "workspace lease: server identity does not match the current holder")
 	}
 	l, err := s.host.Publisher().RenewWorkspaceLease(ctx, q.GetVolumeId(), q.GetReplicaId(), q.GetEpoch())
@@ -127,6 +135,9 @@ func (s *services) AckWorkspaceRevoked(ctx context.Context, q *control.Workspace
 	id := q.GetIdentity()
 	if err := s.workspaceVolume(id.GetVolumeId()); err != nil {
 		return nil, err
+	}
+	if !s.holderMatches(id.GetVolumeId(), id.GetReplicaId(), id.GetServerId(), id.GetEpoch()) {
+		return nil, status.Error(codes.FailedPrecondition, "workspace ACK: server identity does not match the current holder")
 	}
 	if err := s.host.Publisher().AckWorkspaceRevocation(ctx, id.GetVolumeId(), authority.WorkspaceRevokeAck{ReplicaID: id.GetReplicaId(), Epoch: id.GetEpoch(), HeadGen: q.GetHeadGen()}); err != nil {
 		return nil, workspaceError(err)
