@@ -17,7 +17,9 @@ the assignment. Blockvolume closes frontend admission, drains and closes the
 frontend, replication, and provider, reads the stored detached HEAD, and only
 then ACKs its exact generation. The authority refuses an expired lease's ACK.
 Revocation does not perform a final cut. Lease expiry or cancellation closes
-the host without a CLEAN ACK or cut; recovery uses a FORCED move.
+the host without a CLEAN ACK or cut. A new process of the unchanged holder
+and epoch may return through a durable re-grant as described below; a move
+to a different holder still requires the move protocol.
 
 The shared projection loads the guard atomically. Guard operations serialize
 renewal, drain, and ACK with the operation mutex; the state mutex is held only
@@ -71,6 +73,27 @@ closed. Blockmaster logs one warning per failure streak, with the write's
 latency and the remaining horizon, when an extension fails, and one when
 grants start to be clamped to the horizon, and a line when either recovers.
 
+
+## Returning after an expired lease
+
+Restarting the same holder at the same epoch can retain its acknowledged
+local WAL after a long outage. Re-grant waits for the existing forced-move
+barrier: both the durable horizon and the granted or conservative restart
+deadline, each plus the full configured/persisted skew bound, must have
+passed. The master then persists one new horizon before returning the grant;
+neither horizon nor skew is reduced. Immediate repeated renewals use memory,
+so they do not add durable re-grant writes while that grant is live.
+
+The authority record must still name this holder and epoch. A pending move,
+revocation/ACK or uncertain store prevents a usable re-grant. Re-grant and
+forced issue serialize; whichever commits first makes the other refuse.
+If an authority writer holds the lock, this renewal attempt refuses
+immediately; a returning process may retry after the writer settles.
+An already fenced guard never reopens: start a new process, which claims a
+new HEAD generation before serving and retains its local WAL. Its first cut
+covers those acknowledged bytes. If the local root is absent, recovery
+restores only the sealed/published HEAD image and never claims missing local
+bytes. A same-epoch detached HEAD stays detached even after a lease re-grant.
 
 ## Planned return on the same host
 

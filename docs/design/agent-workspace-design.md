@@ -361,9 +361,12 @@ stateDiagram-v2
     Revoking --> Acked: host acks detached HEAD gen while the lease is valid
     Acked --> Moved: CLEAN move, including same host, new epoch
     Granted --> Expired: horizon or deadline passes
+    Expired --> Granted: unchanged holder, no move/revocation, MAX expiry + skew passed; durable re-grant
     Expired --> Moved: FORCED move after expiry + skew bound, then HEAD read (an older-epoch HEAD is accepted)
   }
 ```
+
+**Return after lease expiry.** A new process of the unchanged holder and epoch may obtain one durable re-grant after the existing forced-move barrier: both the persisted horizon and granted/restart deadline plus full skew have passed. Re-grant and forced issue serialize under the publisher lock; the winner prevents the competing operation. Revocation, a pending move or uncertain persistence refuses a usable grant. Existing fenced guards remain terminal. The returning process claims a new HEAD generation before I/O, keeps its local acknowledged WAL, and publishes it on the first cut. An empty local root restores only HEAD; a same-epoch sealed HEAD remains detached.
 
 **Same-host planned return.** A sealed volume can be moved cleanly back to its source host after the exact detached-generation ACK was recorded. The move issues a higher epoch even when the host and endpoints are unchanged. The returning process claims the sealed HEAD before serving; a same-epoch reopen remains detached. Forced moves to the source host remain refused. Re-preparing the binding preserves the old retired-epoch tag, so replaying that retirement cannot retire the new binding.
 
