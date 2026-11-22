@@ -303,15 +303,15 @@ func (s *FileStore) putLocked(rec VolumeRecord) error {
 		_ = tmp.Close()
 		return fmt.Errorf("lifecycle: write temp %s: %w", rec.Spec.VolumeID, err)
 	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("lifecycle: sync record temp %s: %w", rec.Spec.VolumeID, err)
+	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("lifecycle: close temp %s: %w", rec.Spec.VolumeID, err)
 	}
-	// Windows os.Rename does not replace existing files. Remove first;
-	// lifecycle records are intent metadata, and the in-memory state is
-	// updated only after this write succeeds.
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("lifecycle: replace %s: %w", rec.Spec.VolumeID, err)
-	}
+	// INV-LIFECYCLE-STORE-DURABLE-001: retain the old file until atomic replacement.
+
 	if s.persistHookForTest != nil {
 		s.persistHookForTest("before-rename")
 	}
@@ -320,6 +320,9 @@ func (s *FileStore) putLocked(rec VolumeRecord) error {
 	}
 	if s.persistHookForTest != nil {
 		s.persistHookForTest("after-rename")
+	}
+	if err := syncBindingParent(s.dir); err != nil {
+		return fmt.Errorf("lifecycle: sync record directory %s: %w", rec.Spec.VolumeID, err)
 	}
 	return nil
 }

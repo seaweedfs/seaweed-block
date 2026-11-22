@@ -195,12 +195,15 @@ func (s *PlacementIntentStore) putLocked(rec PlacementIntent) error {
 		_ = tmp.Close()
 		return fmt.Errorf("lifecycle: write placement intent temp %s: %w", rec.VolumeID, err)
 	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("lifecycle: sync placement intent temp %s: %w", rec.VolumeID, err)
+	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("lifecycle: close placement intent temp %s: %w", rec.VolumeID, err)
 	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("lifecycle: replace placement intent %s: %w", rec.VolumeID, err)
-	}
+	// INV-LIFECYCLE-STORE-DURABLE-001: retain the old file until atomic replacement.
+
 	if s.persistHookForTest != nil {
 		s.persistHookForTest("before-rename")
 	}
@@ -209,6 +212,9 @@ func (s *PlacementIntentStore) putLocked(rec PlacementIntent) error {
 	}
 	if s.persistHookForTest != nil {
 		s.persistHookForTest("after-rename")
+	}
+	if err := syncBindingParent(s.dir); err != nil {
+		return fmt.Errorf("lifecycle: sync placement intent directory %s: %w", rec.VolumeID, err)
 	}
 	return nil
 }
