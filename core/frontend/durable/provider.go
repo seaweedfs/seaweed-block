@@ -285,11 +285,12 @@ type volHandle struct {
 	// wait, 0 if none: a recovered volume whose layer waits for master
 	// authority. A wait only acts while its generation is still the
 	// latest recovery's.
-	recoverGen   uint64
-	waitGen      uint64
-	startupEnded uint64             // recovery generation with a terminal startup outcome; guarded by p.mu
-	chunk        storage.ChunkLayer // after RecoverVolume
-	chunkLineage chunkLineage       // immutable authority captured by this attachment
+	recoverGen        uint64
+	waitGen           uint64
+	startupSuperseded bool               // exact foreign-holder claim proof for startupEnded; guarded by p.mu
+	startupEnded      uint64             // recovery generation with a terminal startup outcome; guarded by p.mu
+	chunk             storage.ChunkLayer // after RecoverVolume
+	chunkLineage      chunkLineage       // immutable authority captured by this attachment
 	// Private until the owner commit succeeds; retained for attach retry.
 	chunkPending storage.ChunkLayer
 	// chunkDetach is set (under attachMu) when DetachVolume starts and
@@ -951,6 +952,7 @@ func (p *DurableProvider) RecoverVolume(ctx context.Context, volumeID string) (R
 		h.recoverGen++ // any earlier recovery's authority wait is now stale
 		gen = h.recoverGen
 		h.startupEnded = 0
+		h.startupSuperseded = false
 		p.mu.Unlock()
 	}
 	report := Recover(h.storage, volumeID)

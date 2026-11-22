@@ -11,6 +11,8 @@ import (
 // persist lazy-read absence before exposing the local volume for I/O.
 // No WALStore, layer-state or provider-map lock is held across remote calls;
 // the provider may hold its per-volume attach serialization lock.
+// On a proven owner fence, the returned HEAD is the exact observed proof;
+// it is not an installed claim and must never be used to serve I/O.
 func ClaimChunkHead(ctx context.Context, remote ChunkRemote, cfg ChunkLayerConfig) (ChunkHead, error) {
 	if remote == nil || cfg.Epoch == 0 || cfg.Holder == "" {
 		return ChunkHead{}, errors.New("storage: HEAD claim needs master epoch and holder")
@@ -35,7 +37,7 @@ func ClaimChunkHead(ctx context.Context, remote ChunkRemote, cfg ChunkLayerConfi
 		return ChunkHead{}, err
 	}
 	if head.Epoch > cfg.Epoch || (head.Gen != 0 && head.Epoch == cfg.Epoch && head.Holder != cfg.Holder) {
-		return ChunkHead{}, ErrChunkLayerFenced
+		return copyHead(head), ErrChunkLayerFenced
 	}
 	// INV-WS-SEALED-REOPEN-001: the sealing incarnation cannot reopen its
 	// committed handoff proof. A higher-epoch takeover remains a separate claim.
@@ -113,7 +115,7 @@ func ClaimChunkHead(ctx context.Context, remote ChunkRemote, cfg ChunkLayerConfi
 	}
 	// A foreign publication is a fence, not permission to clean our roots.
 	if current.Gen != 0 && (current.Epoch != head.Epoch || current.Holder != head.Holder) {
-		return ChunkHead{}, fmt.Errorf("storage: HEAD claim displaced: %w", ErrChunkLayerFenced)
+		return copyHead(current), fmt.Errorf("storage: HEAD claim displaced: %w", ErrChunkLayerFenced)
 	}
 	settled = errors.Is(casErr, ErrChunkHeadPrecondition) || current.Gen > head.Gen
 	return ChunkHead{}, fmt.Errorf("storage: HEAD claim not installed: %w", casErr)

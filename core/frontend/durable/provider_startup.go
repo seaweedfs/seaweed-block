@@ -1,5 +1,7 @@
 package durable
 
+import "errors"
+
 // ChunkStartupUpdates wakes the process owner when a startup wait ends. It is
 // not an event queue: the owner must read ChunkStartupOutcome for its volume.
 // INV-WS-STARTUP-RETRY-001 keeps stale recoveries from terminating a newer one.
@@ -18,13 +20,23 @@ func (p *DurableProvider) ChunkStartupOutcome(volumeID string) (uint64, bool) {
 	return h.startupEnded, true
 }
 
-func (p *DurableProvider) endChunkStartup(h *volHandle, gen uint64) {
+// ChunkStartupSuperseded reports only a proven foreign-holder claim refusal
+// for this exact recovery. Selection still rechecks gen under the provider lock.
+func (p *DurableProvider) ChunkStartupSuperseded(volumeID string, gen uint64) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	h := p.volumes[volumeID]
+	return !p.closed && h != nil && gen != 0 && h.recoverGen == gen && h.startupEnded == gen && h.startupSuperseded
+}
+
+func (p *DurableProvider) endChunkStartup(h *volHandle, gen uint64, cause error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closed || gen != h.recoverGen || h.startupEnded != 0 {
 		return
 	}
 	h.startupEnded = gen
+	h.startupSuperseded = errors.Is(cause, errChunkForeignClaim)
 	select {
 	case p.startupUpdates <- struct{}{}:
 	default:

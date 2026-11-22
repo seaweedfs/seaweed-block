@@ -56,8 +56,9 @@ var (
 var ErrChunkStaleLocalRoot = errors.New("durable: local volume predates a HEAD published by another holder")
 
 var (
-	errProviderClosed   = errors.New("durable: provider closed")
-	errChunkNoAuthority = errors.New("durable: projection carries no master authority for the chunk layer")
+	errProviderClosed    = errors.New("durable: provider closed")
+	errChunkForeignClaim = errors.New("durable: HEAD claim refused by another holder")
+	errChunkNoAuthority  = errors.New("durable: projection carries no master authority for the chunk layer")
 )
 
 const (
@@ -125,7 +126,7 @@ func (p *DurableProvider) recoverChunk(ctx context.Context, volumeID string, h *
 		return false, nil
 	}
 	if errors.Is(err, storage.ErrChunkLayerFenced) && !errors.Is(err, ErrChunkStaleLocalRoot) {
-		p.endChunkStartup(h, gen)
+		p.endChunkStartup(h, gen, err)
 	}
 	return err == nil, err
 }
@@ -177,7 +178,7 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 		if p.current(h, gen) && h.chunk == nil {
 			ended = fmt.Sprintf("assignment unavailable, not serving (projection lacks %s)", chunkAuthorityGap(p.view.Projection(), volumeID))
 			h.backend.SetOperational(false, "chunk assignment unavailable: "+waitCtx.Err().Error())
-			p.endChunkStartup(h, gen)
+			p.endChunkStartup(h, gen, nil)
 		}
 	}()
 	defer func() {
@@ -251,7 +252,7 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 				}
 				h.attachMu.Unlock()
 			} else {
-				p.endChunkStartup(h, gen)
+				p.endChunkStartup(h, gen, err)
 			}
 			return
 		case errors.Is(err, errChunkNoAuthority):
@@ -500,6 +501,11 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 	log.Printf("durable: HEAD claim for volume=%s starting: target epoch=%d holder=%q", volumeID, cfg.Epoch, cfg.Holder)
 	head, err := storage.ClaimChunkHead(ctx, remote, cfg)
 	if err != nil {
+		// INV-WS-STARTUP-RETRY-001: only the claim's exact foreign-holder
+		// proof permits no-retry; a higher epoch of our own holder retries.
+		if errors.Is(err, storage.ErrChunkLayerFenced) && head.Gen != 0 && head.Holder != "" && head.Holder != cfg.Holder {
+			err = errors.Join(err, errChunkForeignClaim)
+		}
 		log.Printf("durable: HEAD claim for volume=%s failed after %s: %v", volumeID, time.Since(claimStart), err)
 		return nil, fmt.Errorf("durable: restore HEAD claim: %w", err)
 	}

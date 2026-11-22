@@ -198,6 +198,7 @@ func finishWorkspaceLease(e *processExit, f flags, h *volume.Host, done <-chan e
 // The provider publishes only a generation-bound outcome and an atomic choice.
 type chunkStartupOutcomeProvider interface {
 	ChunkStartupOutcome(string) (uint64, bool)
+	ChunkStartupSuperseded(string, uint64) bool
 	ChooseChunkStartupExit(string, uint64, func()) bool
 }
 
@@ -210,5 +211,10 @@ func chooseChunkStartupExit(e *processExit, f flags, h *volume.Host, p chunkStar
 		return false
 	}
 	out := workspaceRetryOutcome("assignment_timeout", h)
+	// INV-WS-STARTUP-RETRY-001: a claim's foreign-holder proof is
+	// independent of the master stream; generation is rechecked below.
+	if p.ChunkStartupSuperseded(f.volumeID, gen) {
+		out = workspaceExit{exitWorkspaceSuperseded, "superseded"}
+	}
 	return p.ChooseChunkStartupExit(f.volumeID, gen, func() { e.chooseChunkStartup(out) })
 }

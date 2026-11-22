@@ -161,7 +161,8 @@ func TestWorkspaceUnconfirmedRevokeHasOwnReason(t *testing.T) {
 // real provider deadline/retained-state boundary is tested in durable.
 type exitStartupOutcome struct{ expired bool }
 
-func (s *exitStartupOutcome) ChunkStartupOutcome(string) (uint64, bool) { return 1, s.expired }
+func (s *exitStartupOutcome) ChunkStartupSuperseded(string, uint64) bool { return false }
+func (s *exitStartupOutcome) ChunkStartupOutcome(string) (uint64, bool)  { return 1, s.expired }
 func (s *exitStartupOutcome) ChooseChunkStartupExit(_ string, gen uint64, choose func()) bool {
 	if gen != 1 || !s.expired {
 		return false
@@ -240,65 +241,83 @@ func TestWorkspacePlannedDrainOwnsStartupExpiryUntilAck(t *testing.T) {
 
 // The real provider must carry the claim's filer proof to the process owner,
 // even when the master stream has never reported another replica.
-type claimExitView struct{}
+type claimExitView struct{ assigned atomic.Bool }
 
-func (claimExitView) Projection() frontend.Projection {
+func (v *claimExitView) Projection() frontend.Projection {
+	if !v.assigned.Load() {
+		return frontend.Projection{VolumeID: "v"}
+	}
 	return frontend.Projection{VolumeID: "v", ReplicaID: "r", Epoch: 1, Healthy: true}
 }
 func TestWorkspaceForeignHeadClaimChoosesNoRetry(t *testing.T) {
-	for _, tc := range []struct {
-		name, holder string
-		want         int
-	}{
-		{"foreign holder", "other", 78}, {"same holder higher epoch", "r", 75},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			h, _ := exitAuthorityHost(t)
-			remote := storage.NewMemChunkRemote()
-			if _, err := remote.CASHead(ctx, storage.ChunkHeadVersion{}, storage.ChunkHead{Epoch: 2, Holder: tc.holder, State: storage.ChunkHeadActive}); err != nil {
-				t.Fatal(err)
-			}
-			p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil }}, claimExitView{})
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() {
-				if err := p.Close(); err != nil {
-					t.Error(err)
+	for _, deferred := range []bool{false, true} {
+		for _, tc := range []struct {
+			name, holder string
+			want         int
+		}{
+			{"foreign holder", "other", 78}, {"same holder higher epoch", "r", 75},
+		} {
+			t.Run(tc.name+map[bool]string{false: "/immediate", true: "/waiting"}[deferred], func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				h, _ := exitAuthorityHost(t)
+				remote := storage.NewMemChunkRemote()
+				if _, err := remote.CASHead(ctx, storage.ChunkHeadVersion{}, storage.ChunkHead{Epoch: 2, Holder: tc.holder, State: storage.ChunkHeadActive}); err != nil {
+					t.Fatal(err)
+				}
+				view := &claimExitView{}
+				view.assigned.Store(!deferred)
+				p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil }}, view)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					if err := p.Close(); err != nil {
+						t.Error(err)
+					}
+				})
+				if _, err = p.EnsureStorage("v"); err != nil {
+					t.Fatal(err)
+				}
+				_, err = p.RecoverVolume(ctx, "v")
+				if deferred {
+					if err != nil {
+						t.Fatal(err)
+					}
+					view.assigned.Store(true)
+				} else if !errors.Is(err, storage.ErrChunkLayerFenced) {
+					t.Fatalf("claim refusal=%v", err)
+				}
+				select {
+				case <-p.ChunkStartupUpdates():
+				case <-ctx.Done():
+					t.Fatal(ctx.Err())
+				}
+				if h.LastOtherLine() != nil {
+					t.Fatal("fixture unexpectedly supplied master supersede evidence")
+				}
+				e := newProcessExit(ctx)
+				if !chooseChunkStartupExit(e, flags{workspaceLease: true, durableImpl: "walstore-chunk", volumeID: "v"}, h, p) {
+					t.Fatal("claim refusal did not select an exit")
+				}
+				select {
+				case out := <-e.decision:
+					if out.code != tc.want {
+						t.Fatalf("claim exit=%+v want %d", out, tc.want)
+					}
+				case <-ctx.Done():
+					t.Fatal(ctx.Err())
+				}
+				head, err := remote.GetHead(ctx)
+				if err != nil || head.Gen != 1 || head.Holder != tc.holder || remote.Puts() != 0 {
+					t.Fatalf("refused claim mutated remote: %+v puts=%d err=%v", head, remote.Puts(), err)
+				}
+				for _, status := range p.DurableStatuses() {
+					if status.Operational {
+						t.Fatal("refused claim became operational")
+					}
 				}
 			})
-			if _, err = p.EnsureStorage("v"); err != nil {
-				t.Fatal(err)
-			}
-			if _, err = p.RecoverVolume(ctx, "v"); !errors.Is(err, storage.ErrChunkLayerFenced) {
-				t.Fatalf("claim refusal=%v", err)
-			}
-			if h.LastOtherLine() != nil {
-				t.Fatal("fixture unexpectedly supplied master supersede evidence")
-			}
-			e := newProcessExit(ctx)
-			if !chooseChunkStartupExit(e, flags{workspaceLease: true, durableImpl: "walstore-chunk", volumeID: "v"}, h, p) {
-				t.Fatal("claim refusal did not select an exit")
-			}
-			select {
-			case out := <-e.decision:
-				if out.code != tc.want {
-					t.Fatalf("claim exit=%+v want %d", out, tc.want)
-				}
-			case <-ctx.Done():
-				t.Fatal(ctx.Err())
-			}
-			head, err := remote.GetHead(ctx)
-			if err != nil || head.Gen != 1 || head.Holder != tc.holder || remote.Puts() != 0 {
-				t.Fatalf("refused claim mutated remote: %+v puts=%d err=%v", head, remote.Puts(), err)
-			}
-			for _, status := range p.DurableStatuses() {
-				if status.Operational {
-					t.Fatal("refused claim became operational")
-				}
-			}
-		})
+		}
 	}
 }
