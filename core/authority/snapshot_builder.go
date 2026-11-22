@@ -98,6 +98,9 @@ func BuildSnapshot(store storeSnapshot, topology AcceptedTopology, reader Author
 		if reader != nil {
 			basis, hasLine = reader.VolumeAuthorityLine(vid)
 		}
+		if hasLine {
+			expected = expectOwnerForLine(expected, vid, basis, reader)
+		}
 		verdict := evaluateVolume(vid, expected, freshSlotsByVolume[vid], store, basis, hasLine)
 
 		switch verdict.state {
@@ -472,4 +475,38 @@ func assembleVolumeTopology(
 		VolumeID: volumeID,
 		Slots:    slots,
 	}
+}
+
+// lineOwnerReader is the publisher's view of a line's owner (the server a move issued it to).
+type lineOwnerReader interface {
+	PublishedAuthorityLine(volume string) (PublishedLine, bool)
+}
+
+// expectOwnerForLine binds the expected slot of the line's replica to the line's owner (PublishedLine.Owner) when a
+// move minted the line (#425, V1-SPEC r2.40, INV-AUTH-HOLDER-IDENTITY-001): a line carries its owner and that owner's
+// endpoints, so its replica's facts (health, endpoints, and any endpoint refresh) come only from that server, never
+// from the placement or topology server it was moved away from. A move-minted line whose owner is unknown is bound to
+// NO server (no fact from anyone, so no refresh) until the owner is known. Only a line no move minted keeps the
+// accepted topology.
+func expectOwnerForLine(expected VolumeExpected, volumeID string, line AuthorityBasis, reader AuthorityBasisReader) VolumeExpected {
+	r, ok := reader.(lineOwnerReader)
+	if !ok {
+		return expected
+	}
+	pl, ok := r.PublishedAuthorityLine(volumeID)
+	if !ok || pl.ReplicaID != line.ReplicaID || pl.Epoch != line.Epoch {
+		return expected
+	}
+	server, fromMove := pl.Owner()
+	if !fromMove {
+		return expected
+	}
+	out := VolumeExpected{VolumeID: expected.VolumeID, Slots: make([]ExpectedSlot, len(expected.Slots))}
+	copy(out.Slots, expected.Slots)
+	for i := range out.Slots {
+		if out.Slots[i].ReplicaID == line.ReplicaID {
+			out.Slots[i].ServerID = server // "" for an unknown owner: no server supplies this replica's facts
+		}
+	}
+	return out
 }
