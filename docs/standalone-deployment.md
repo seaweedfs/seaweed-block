@@ -293,6 +293,67 @@ The script's default engine is `SW_BLOCK_DURABLE_IMPL=smartwal`; the command
 above sets `walstore`, the engine used by the Kubernetes chart and the
 workspace path. There is no equivalent script for ublk yet.
 
+## Planned workspace hand-over
+
+For an RF1 chunk volume with a workspace lease, inspect the current logical
+holder with `sw-block ops workspace show --master MASTER --volume V`. Copy the
+replica and epoch exactly. The view prints the master's lease state, recorded
+revocation ACK (including its HEAD generation), move records and bindings. It
+does not infer a physical holder from the binding list; a binding is not proof
+of a current assignment. Reported validity is a snapshot, not permission to
+serve I/O.
+`expired` means the master reported no positive **host validity** at query
+time; it is not a claim that the master's forced-move horizon has passed.
+Only the master admits a move.
+
+Perform a clean hand-over in this order:
+
+1. Stop the application/writer and prevent new I/O to the old attachment.
+2. Seal the idle volume while its lease still permits publication:
+
+   ```bash
+   sw-block ops chunk detach --plain --volume V --status-addr OLD_STATUS --timeout 120s >seal.json
+   ```
+
+   Busy admission refuses the operation. Do not proceed on any failure or
+   unknown outcome. JSON remains on stdout; a successful command also prints
+   `sealed HEAD generation: G` on its own stderr line, taken from the same
+   JSON `headGen` field on stdout. Copy the positive `G`.
+3. Request revocation using that seal and the identity from `show`:
+
+   ```bash
+   sw-block ops workspace revoke --master MASTER --volume V --replica R --epoch E --sealed-gen G
+   ```
+
+   Seal **before** revocation: revoking first can prevent the old host from
+   publishing the final image and leave only a lossy forced move. The CLI
+   requires exactly one of `--sealed-gen G` or `--without-seal`. The former is
+   your statement, not a storage check. The latter explicitly abandons the
+   unpublished tail and does not promise that a clean move is possible.
+4. Run `ops workspace show --master MASTER --volume V` until the **recorded
+   ACK** names the same replica `R`, epoch `E` and HEAD generation `G`.
+   A successful `revoke` reply alone is not that ACK.
+5. Ask for the clean authority move:
+
+   ```bash
+   sw-block ops workspace move --clean --master MASTER --volume V --replica R --epoch E \
+     --target-host NEW_HOST --target-data DATA_ADDR --target-ctrl CTRL_ADDR --request-id MOVE_ID
+   ```
+
+   Use registered target endpoints. The master checks the seal and matching
+   ACK. The target may be the source host once sealed, when the server supports
+   same-host clean reload. A command refuses rather than bypassing a missing
+   seal, ACK or current identity. On an **unknown outcome**, rerun with the
+   **SAME `--request-id MOVE_ID`**; never use a new id to guess whether it ran.
+6. Start `blockvolume` on the target separately with the granted replica and
+   new epoch and the normal workspace-lease options. The move command only
+   transfers authority; it does not start the target or reconnect clients.
+
+Workspace commands exit 0 on success, 1 on a definite server refusal, 2 on local
+usage refusal, 3 on an unknown outcome, and 4 on an unproven readout. Plain
+detach keeps the chunk CLI's existing JSON error and exit policy. Neither CLI
+retries or polls automatically.
+
 ## Snapshots, restore and space (walstore-chunk)
 
 **Recovery point.**

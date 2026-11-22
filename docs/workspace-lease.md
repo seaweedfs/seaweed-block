@@ -94,3 +94,15 @@ new HEAD generation before serving and retains its local WAL. Its first cut
 covers those acknowledged bytes. If the local root is absent, recovery
 restores only the sealed/published HEAD image and never claims missing local
 bytes. A same-epoch detached HEAD stays detached even after a lease re-grant.
+
+## Planned return on the same host
+
+After plain detach seals HEAD and revocation records its exact generation,
+a clean move may target the source host itself. Prepare the binding again
+before requesting the move. The move journals a higher epoch even when its
+endpoints are unchanged; start the returning blockvolume at that new epoch.
+It claims the sealed HEAD before serving and preserves the sealed image and
+remote frontier. The matching seal/ACK remains valid overnight while HEAD
+is unchanged. A same-epoch reopen remains detached, and a forced move to the
+same host is refused. Every ordinary binding, endpoint collision, journal
+isolation and uncertain-outcome check still applies.
