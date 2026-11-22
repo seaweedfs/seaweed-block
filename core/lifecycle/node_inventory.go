@@ -64,9 +64,10 @@ type NodeRegistration struct {
 
 // NodeInventoryStore persists one JSON registration record per server.
 type NodeInventoryStore struct {
-	mu      sync.Mutex
-	dir     string
-	records map[string]NodeRegistration
+	mu        sync.Mutex
+	dir       string
+	records   map[string]NodeRegistration
+	published sync.Map // committed NodeRegistration values; holder host checks never take mu (INV-WS-RENEW-NONBLOCKING-001)
 }
 
 // OpenNodeInventoryStore opens or creates a node inventory store.
@@ -84,7 +85,21 @@ func OpenNodeInventoryStore(dir string) (*NodeInventoryStore, error) {
 	if err := s.load(); err != nil {
 		return nil, err
 	}
+	for id, rec := range s.records {
+		s.published.Store(id, copyNodeRegistration(rec))
+	}
 	return s, nil
+}
+
+// GetNodeSnapshot returns the last committed registration of serverID without taking the store mutex, which writers
+// hold across file I/O: a lease renewal's holder host check never waits behind a registration write. The result is a
+// copy (INV-WS-RENEW-NONBLOCKING-001, INV-AUTH-HOLDER-IDENTITY-001).
+func (s *NodeInventoryStore) GetNodeSnapshot(serverID string) (NodeRegistration, bool) {
+	v, ok := s.published.Load(serverID)
+	if !ok {
+		return NodeRegistration{}, false
+	}
+	return copyNodeRegistration(v.(NodeRegistration)), true
 }
 
 // RegisterNode records the latest observed inventory for a server.
@@ -104,6 +119,7 @@ func (s *NodeInventoryStore) RegisterNode(reg NodeRegistration) (NodeRegistratio
 		return NodeRegistration{}, err
 	}
 	s.records[reg.ServerID] = reg
+	s.published.Store(reg.ServerID, copyNodeRegistration(reg)) // committed: the file is in place
 	return reg, nil
 }
 
@@ -119,6 +135,7 @@ func (s *NodeInventoryStore) RemoveNode(serverID string) error {
 	if err := os.Remove(s.path(serverID)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("lifecycle: remove node %s: %w", serverID, err)
 	}
+	s.published.Delete(serverID) // committed: the file is gone
 	return nil
 }
 

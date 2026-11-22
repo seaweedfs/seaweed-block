@@ -393,7 +393,7 @@ func (s *services) SubscribeAssignments(req *control.SubscribeRequest, stream co
 	}
 	// INV-AUTH-HOLDER-IDENTITY-001: a workspace volume's line is delivered only to a registered server id streaming
 	// from its registered host, so a second host with a copied --server-id never receives (never adopts) it.
-	if s.workspaceVolumeForRenewal(req.VolumeId) == nil {
+	if s.isWorkspaceVolume(req.VolumeId) {
 		if err := s.host.refuseWorkspaceHolderHost(ctx, "assignment stream", req.GetServerId()); err != nil {
 			return status.Error(codes.FailedPrecondition, err.Error())
 		}
@@ -587,8 +587,8 @@ func statusFrontendsFor(obs *authority.ObservationHost, volumeID string, replica
 		slotOf = func(replicaID string) (authority.SlotFact, bool) { return obs.Store().SlotFact(volumeID, replicaID) }
 	}
 	if primary != "" {
-		if _, ok := slotOf(primary); !ok {
-			return nil
+		if f, ok := slotOf(primary); !ok || len(f.Frontends) == 0 {
+			return nil // no primary evidence, or a primary slot with no frontend: nothing to publish
 		}
 	}
 	out := make([]*control.FrontendTarget, 0, len(replicaIDs))
@@ -602,6 +602,7 @@ func statusFrontendsFor(obs *authority.ObservationHost, volumeID string, replica
 			continue
 		}
 		for _, ft := range frontendTargetsToWire(slot.Frontends) {
+			ft.ReplicaId = replicaID // CSI selects only a primary-owned target (INV-AUTH-HOLDER-IDENTITY-001)
 			key := frontendTargetKey(ft)
 			if _, ok := seen[key]; ok {
 				continue

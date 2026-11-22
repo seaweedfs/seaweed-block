@@ -25,7 +25,7 @@ func (h *Host) registryHosts(serverID string) (hosts map[string]bool, named stri
 	if h.lifecycle == nil || h.lifecycle.Nodes == nil || serverID == "" {
 		return nil, "", false
 	}
-	reg, ok := h.lifecycle.Nodes.GetNode(serverID)
+	reg, ok := h.lifecycle.Nodes.GetNodeSnapshot(serverID) // committed snapshot: never the store mutex (INV-WS-RENEW-NONBLOCKING-001)
 	if !ok {
 		return nil, "", false
 	}

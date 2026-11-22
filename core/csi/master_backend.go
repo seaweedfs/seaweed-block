@@ -145,6 +145,13 @@ func publishTargetFromStatus(resp *control.StatusResponse, enableMultipath bool,
 	if resp == nil {
 		return PublishTarget{}, false
 	}
+	if fronts, tagged := primaryOwnedFrontends(resp, rejectLoopback); tagged {
+		if len(fronts) == 0 {
+			return PublishTarget{}, false
+		}
+		resp = &control.StatusResponse{VolumeId: resp.GetVolumeId(), ReplicaId: resp.GetReplicaId(), Epoch: resp.GetEpoch(),
+			EndpointVersion: resp.GetEndpointVersion(), Assigned: resp.GetAssigned(), Frontends: fronts}
+	}
 	base := PublishTarget{
 		VolumeID:        resp.GetVolumeId(),
 		ReplicaID:       resp.GetReplicaId(),
@@ -245,6 +252,52 @@ func publishTargetFromStatus(resp *control.StatusResponse, enableMultipath bool,
 		return out, true
 	}
 	return PublishTarget{}, false
+}
+
+// primaryOwnedFrontends applies INV-AUTH-HOLDER-IDENTITY-001 when the master tags each frontend with its replica: the
+// usable frontends of the primary replica come first, and another replica's frontend is kept only as an extra path to a
+// target the primary itself serves (same IQN, or same NQN/NSID/transport). No usable primary frontend: none at all, so
+// a supporting replica is never published under the primary identity. An untagged (older) response is returned as is.
+func primaryOwnedFrontends(resp *control.StatusResponse, rejectLoopback bool) ([]*control.FrontendTarget, bool) {
+	tagged := false
+	for _, ft := range resp.GetFrontends() {
+		if ft != nil && ft.GetReplicaId() != "" {
+			tagged = true
+		}
+	}
+	if !tagged {
+		return nil, false
+	}
+	key := func(ft *control.FrontendTarget) (string, bool) {
+		switch {
+		case ft.GetAddr() == "" || rejectFrontendAddr(ft.GetAddr(), rejectLoopback):
+			return "", false
+		case ft.GetProtocol() == string(ProtocolISCSI) && ft.GetIqn() != "":
+			return "iscsi\x00" + ft.GetIqn(), true
+		case ft.GetProtocol() == string(ProtocolNVMe) && ft.GetNqn() != "":
+			return "nvme\x00" + ft.GetNqn() + "\x00" + strconv.FormatUint(uint64(ft.GetNsid()), 10) + "\x00" +
+				string(normalizeFrontendTransport(ProtocolNVMe, FrontendTransport(ft.GetTransport()))), true
+		}
+		return "", false
+	}
+	var out []*control.FrontendTarget
+	served := map[string]bool{}
+	for _, ft := range resp.GetFrontends() {
+		if ft != nil && ft.GetReplicaId() == resp.GetReplicaId() {
+			if k, ok := key(ft); ok {
+				served[k] = true
+				out = append(out, ft)
+			}
+		}
+	}
+	for _, ft := range resp.GetFrontends() {
+		if ft != nil && ft.GetReplicaId() != resp.GetReplicaId() {
+			if k, ok := key(ft); ok && served[k] {
+				out = append(out, ft)
+			}
+		}
+	}
+	return out, true
 }
 
 func rejectFrontendAddr(addr string, rejectLoopback bool) bool {

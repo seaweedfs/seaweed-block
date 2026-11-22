@@ -54,6 +54,17 @@ func (s *services) workspaceVolumeForRenewal(volume string) error {
 	return nil
 }
 
+// isWorkspaceVolume reports whether volume is a workspace volume (workspace RPC on, an existing RF1 volume), from the
+// lock-free lifecycle snapshot. Unlike workspaceVolumeForRenewal it ignores a deletion reservation: a volume being
+// deleted is still a workspace volume, and its assignment stream keeps the holder host check (codex01 #416 P2).
+func (s *services) isWorkspaceVolume(volume string) bool {
+	if !s.host.cfg.WorkspaceRPC || s.host.lifecycle == nil {
+		return false
+	}
+	r, ok := s.host.lifecycle.Volumes.GetVolumeSnapshot(volume)
+	return ok && r.Spec.ReplicationFactor == 1
+}
+
 func workspaceError(err error) error {
 	if err == nil {
 		return nil

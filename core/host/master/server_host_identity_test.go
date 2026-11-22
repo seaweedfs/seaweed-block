@@ -321,3 +321,79 @@ func TestStatusListsNoFrontendWhenThePrimaryEvidenceIsMissing(t *testing.T) {
 		t.Fatalf("control: without the primary rule the supporting frontends are listed (%v): the hazard this test pins", got)
 	}
 }
+
+// inProcEvidence is the CSI lookup's EvidenceService client wired straight to the master's QueryVolumeStatus.
+type inProcEvidence struct{ s *services }
+
+func (e inProcEvidence) QueryVolumeStatus(ctx context.Context, in *control.StatusRequest, _ ...grpc.CallOption) (*control.StatusResponse, error) {
+	return e.s.QueryVolumeStatus(ctx, in)
+}
+
+// codex01 #416 P1-2: through the real CSI ControlStatusLookup, with supporting replicas reporting usable frontends, no
+// target is published when the primary's slot (on the line's server) exists but carries no frontend, or when its only
+// frontend is one CSI rejects (loopback, with loopback targets rejected). Control: the same lookup without the loopback
+// rejection publishes the primary's own frontend.
+func TestCSIPublishesNoTargetWhenThePrimaryFrontendIsMissingOrRejected(t *testing.T) {
+	h := newTestMasterWithControllerConfig(t, t.TempDir(), authority.TopologyControllerConfig{ExpectedSlotsPerVolume: 3})
+	defer closeTestMaster(t, h)
+	seedObservationSnapshotVolume(t, h)
+	seedRF3PlacementForServers(t, h, "pvc-a", "m01", "m02", "tp01")
+	ingestObservationSnapshotRF3(t, h, true, true, true)
+	if _, err := h.RunLifecycleProductTick(); err != nil {
+		t.Fatalf("product tick: %v", err)
+	}
+	line := waitAuthorityLine(t, h.Publisher(), "pvc-a")
+	holder := h.workspaceSourceHost("pvc-a", line.ReplicaID, line.Epoch)
+	reprimary := func(fronts []authority.FrontendTargetFact, at time.Time) {
+		t.Helper()
+		if err := h.ObservationHost().Ingest(authority.Observation{ServerID: holder, ObservedAt: at, Server: authority.ServerFact{Reachable: true, Eligible: true},
+			Slots: []authority.SlotFact{{VolumeID: "pvc-a", ReplicaID: line.ReplicaID, DataAddr: "192.0.2.1:19101", CtrlAddr: "192.0.2.1:19102",
+				Reachable: true, ReadyForPrimary: true, Eligible: true, EvidenceScore: 30, Frontends: fronts}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	svc := newServices(h)
+	plain := csi.NewControlStatusLookup(inProcEvidence{svc})
+	noLoopback := csi.NewControlStatusLookupWithOptions(inProcEvidence{svc}, csi.WithLoopbackPublishTargetsRejected())
+	ctx := context.Background()
+	// (a) the primary slot exists on the holder but carries no frontend
+	reprimary(nil, time.Now().UTC().Add(time.Second))
+	if resp, err := svc.QueryVolumeStatus(ctx, &control.StatusRequest{VolumeId: "pvc-a"}); err != nil || len(resp.Frontends) != 0 {
+		t.Fatalf("primary slot without a frontend: status frontends %v err %v, want none", resp.GetFrontends(), err)
+	}
+	if target, err := plain.LookupPublishTarget(ctx, "pvc-a", ""); !errors.Is(err, csi.ErrPublishTargetNotFound) {
+		t.Fatalf("primary slot without a frontend: CSI target %+v err %v, want ErrPublishTargetNotFound", target, err)
+	}
+	// (b) the primary's only frontend is loopback, which this CSI lookup rejects; supporting replicas are usable
+	reprimary([]authority.FrontendTargetFact{{Protocol: "iscsi", Addr: "127.0.0.1:3260", IQN: "iqn.2026-05.io.seaweedfs:pvc-a", LUN: 1}}, time.Now().UTC().Add(2*time.Second))
+	if target, err := noLoopback.LookupPublishTarget(ctx, "pvc-a", ""); !errors.Is(err, csi.ErrPublishTargetNotFound) {
+		t.Fatalf("rejected primary frontend: CSI target %+v err %v, want ErrPublishTargetNotFound (no supporting stand-in)", target, err)
+	}
+	if target, err := plain.LookupPublishTarget(ctx, "pvc-a", ""); err != nil || target.ISCSIAddr != "127.0.0.1:3260" || target.ReplicaID != line.ReplicaID {
+		t.Fatalf("control: CSI target %+v err %v, want the primary's own 127.0.0.1:3260", target, err)
+	}
+}
+
+// codex01 #416 P2: a workspace volume being deleted is still a workspace volume: its assignment stream keeps the holder
+// host check (a deletion reservation must not open a bypass).
+func TestDeletionReservedWorkspaceVolumeKeepsTheStreamHostCheck(t *testing.T) {
+	r := newIsolationRig(t, false, t.TempDir(), t.TempDir())
+	r.createVolume(t, "w2")
+	if _, err := r.m.Lifecycle().Placements.ApplyPlan(lifecycle.PlacementPlan{VolumeID: "w2", DesiredRF: 1,
+		Candidates: []lifecycle.PlacementCandidate{{VolumeID: "w2", ServerID: "node-a", ReplicaID: "r1", Source: lifecycle.PlacementSourceExistingReplica}}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.m.replicaSlotsFor("w2")) == 0 {
+		t.Fatal("fixture: w2 has no replica slot, the stream would fail before the host check")
+	}
+	if _, err := r.m.Lifecycle().Deletions.Admit("w2", "del-1"); err != nil {
+		t.Fatal(err)
+	}
+	stream, err := control.NewAssignmentServiceClient(r.dialFrom(t, "127.0.0.2")).SubscribeAssignments(r.ctx, &control.SubscribeRequest{VolumeId: "w2", ReplicaId: "r1", ServerId: "node-a"})
+	if err == nil {
+		_, err = stream.Recv()
+	}
+	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(status.Convert(err).Message(), "refused from 127.0.0.2") {
+		t.Fatalf("deletion-reserved workspace volume, stream from another host: %v, want the host refusal", err)
+	}
+}
