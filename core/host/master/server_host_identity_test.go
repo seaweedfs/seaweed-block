@@ -141,11 +141,14 @@ func TestServerIDRefusedFromAHostOtherThanItsRegisteredOne(t *testing.T) {
 	if err := r.heartbeatFrom("node-a", "127.0.0.1"); err != nil {
 		t.Fatalf("heartbeat from node-a's registered host refused: %v", err)
 	}
-	err := r.heartbeatFrom("node-a", "127.0.0.2")
+	// The peer is the registered host; only the advertised slot address is wrong.
+	obs := control.NewObservationServiceClient(r.dialFrom(t, "127.0.0.1"))
+	_, err := obs.ReportHeartbeat(r.ctx, &control.HeartbeatReport{ServerId: "node-a", SentAt: timestamppb.Now(), Reachable: true, Eligible: true,
+		Slots: []*control.HeartbeatSlot{{VolumeId: "hb-node-a", ReplicaId: "r-node-a", DataAddr: "127.0.0.2:19611", CtrlAddr: "127.0.0.2:19612"}}})
 	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(status.Convert(err).Message(), "registered on host 127.0.0.1") {
 		t.Fatalf("same --server-id from a second host: %v, want FailedPrecondition naming the registered host", err)
 	}
-	want := "registered on host 127.0.0.1 but connects from 127.0.0.2: register the node by the address it connects from (not loopback) in the cluster spec (volume hb-node-a replica r-node-a)"
+	want := "registered on host 127.0.0.1 but advertises 127.0.0.2 (volume hb-node-a replica r-node-a): advertise the registered address, or register the node by the address it uses, in the cluster spec"
 	if !strings.Contains(status.Convert(err).Message(), want) {
 		t.Fatalf("heartbeat refusal lacks the cure or slot detail: %v", err)
 	}
