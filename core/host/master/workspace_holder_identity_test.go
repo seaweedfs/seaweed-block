@@ -95,3 +95,51 @@ func TestWorkspaceLeaseRequiresHolderServerForGrantRenewAndRegrant(t *testing.T)
 		t.Fatal("matching server re-grant", err)
 	}
 }
+
+// INV-AUTH-HOLDER-IDENTITY-001: an ACK licenses a clean move, so only the
+// primary server/replica pair may record it, not another host of the same r1.
+func TestWorkspaceRevocationACKRequiresHolderServer(t *testing.T) {
+	for _, server := range []string{"", "node-b"} {
+		t.Run("server="+server, func(t *testing.T) {
+			h, conn, ctx := reviewBindingHost(t)
+			reviewCreate(t, conn, ctx, "v")
+			ws := control.NewWorkspaceServiceClient(conn)
+			b := &control.WorkspaceBinding{VolumeId: "v", ServerId: "node-a", DataAddr: "127.0.0.1:10000", CtrlAddr: "127.0.0.1:10001"}
+			if _, err := ws.RegisterWorkspaceBinding(ctx, b); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ws.PlaceWorkspace(ctx, &control.WorkspacePlacement{VolumeId: "v", ServerId: "node-a", ReplicaId: "r1"}); err != nil {
+				t.Fatal(err)
+			}
+			reviewHeartbeat(t, conn, ctx, "v", "node-a", b.DataAddr, b.CtrlAddr)
+			if _, err := h.RunLifecycleProductTick(); err != nil {
+				t.Fatal(err)
+			}
+			line := waitAuthorityLine(t, h.Publisher(), "v")
+			own := leaseHolderIdentity(t, line.Epoch, "node-a")
+			if _, err := ws.RenewWorkspaceLease(ctx, own); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ws.RevokeWorkspace(ctx, own); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ws.AckWorkspaceRevoked(ctx, &control.WorkspaceRevocationAck{Identity: leaseHolderIdentity(t, line.Epoch, server), HeadGen: 9}); err == nil {
+				t.Errorf("ACK accepted server %q with the right replica/epoch", server)
+			}
+			recorded, err := ws.QueryWorkspace(ctx, &control.WorkspaceVolume{VolumeId: "v"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if recorded.GetRevocationAck() != nil {
+				t.Errorf("foreign ACK recorded: %v", recorded.GetRevocationAck())
+			}
+			if _, err := ws.AckWorkspaceRevoked(ctx, &control.WorkspaceRevocationAck{Identity: own, HeadGen: 9}); err != nil {
+				t.Fatal("own ACK refused", err)
+			}
+			recorded, err = ws.QueryWorkspace(ctx, &control.WorkspaceVolume{VolumeId: "v"})
+			if err != nil || recorded.GetRevocationAck().GetHeadGen() != 9 {
+				t.Fatal("own ACK not recorded", recorded, err)
+			}
+		})
+	}
+}
