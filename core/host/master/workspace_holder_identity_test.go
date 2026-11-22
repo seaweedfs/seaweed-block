@@ -32,11 +32,13 @@ func leaseHolderIdentity(t *testing.T, epoch uint64, server string) *control.Wor
 func TestWorkspaceLeaseRequiresHolderServerForGrantRenewAndRegrant(t *testing.T) {
 	var nowNS atomic.Int64
 	nowNS.Store(time.Now().UnixNano())
-	h, conn, ctx := reviewBindingHostBeforeStart(t, func(context.Context, string) (authority.WorkspaceHead, error) {
+	h, conn, _ := reviewBindingHostBeforeStart(t, func(context.Context, string) (authority.WorkspaceHead, error) {
 		return authority.WorkspaceHead{Gen: 9, Epoch: 1, Holder: "node-a/r1", RemoteLSN: 42, Detached: true}, nil
 	}, func(h *Host) {
 		authority.WithWorkspaceLeaseConfig(30*time.Second, func() time.Time { return time.Unix(0, nowNS.Load()) })(h.Publisher())
 	})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	t.Cleanup(cancel)
 	reviewCreate(t, conn, ctx, "v")
 	ws := control.NewWorkspaceServiceClient(conn)
 	b := &control.WorkspaceBinding{VolumeId: "v", ServerId: "node-a", DataAddr: "127.0.0.1:10000", CtrlAddr: "127.0.0.1:10001"}
