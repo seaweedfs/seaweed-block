@@ -32,7 +32,7 @@ func (h *Host) runWorkspaceLease(ctx context.Context, stop func(context.Context,
 		}
 		p := h.view.Projection()
 		if p.Epoch > 0 {
-			id := &control.WorkspaceIdentity{VolumeId: h.cfg.VolumeID, ReplicaId: h.cfg.ReplicaID, Epoch: p.Epoch}
+			id := &control.WorkspaceIdentity{VolumeId: h.cfg.VolumeID, ReplicaId: h.cfg.ReplicaID, ServerId: h.cfg.ServerID, Epoch: p.Epoch}
 			guard, err := NewWorkspaceLeaseGuard(h.view, control.NewWorkspaceServiceClient(h.conn), id, func(c context.Context) (uint64, error) { return stop(c, id) }, nil)
 			if err != nil {
 				return err

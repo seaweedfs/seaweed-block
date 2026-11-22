@@ -236,6 +236,9 @@ message AssignmentFact {
     // protection; fake-master / test harnesses MAY use 0 for
     // unversioned apply (does not advance the monotonic guard).
     uint64 peer_set_generation = 8;
+
+    // Required holder identity. Empty (pre-release master) is never adopted.
+    string server_id = 9;
 }
 
 message StatusRequest {

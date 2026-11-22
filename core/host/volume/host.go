@@ -528,7 +528,10 @@ func (h *Host) IsSuperseded(selfReplicaID string, selfEpoch, selfEV uint64) bool
 	}
 	other := h.lastOther
 	if other.ReplicaId == selfReplicaID {
-		return false
+		if h.assignmentNamesSelf(other) {
+			return false
+		}
+		return other.Epoch > selfEpoch || other.Epoch == selfEpoch && other.EndpointVersion >= selfEV
 	}
 	if other.Epoch > selfEpoch {
 		return true
@@ -803,6 +806,16 @@ func (h *Host) streamOnce(ctx context.Context) error {
 // OnAssignment could flip the projection Healthy before peers were
 // installed, admitting local-only writes with zero fan-out.
 func (h *Host) applyFact(fact *control.AssignmentFact) {
+	// r2.34 AUTHORITY: matching r1 and loopback endpoints do not identify a host.
+	if fact.ReplicaId == h.cfg.ReplicaID && !h.assignmentNamesSelf(fact) {
+		h.wd.notPrimary()
+		h.recordOtherLine(fact)
+		if err := h.fenceSelfWithPeers(selfRolePrimary, fact.Epoch, false); err != nil {
+			h.log.Printf("blockvolume: foreign holder ingress fence: %v", err)
+		}
+		h.log.Printf("blockvolume: volume %s assignment server=%q replica=%q is not this process server=%q; fenced, never adopted", h.cfg.VolumeID, fact.ServerId, fact.ReplicaId, h.cfg.ServerID)
+		return
+	}
 	if fact.ReplicaId != h.cfg.ReplicaID {
 		h.wd.notPrimary()
 		// Another replica is authoritative for this volume line. Record that

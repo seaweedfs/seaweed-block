@@ -90,6 +90,11 @@ func (s *services) RenewWorkspaceLease(ctx context.Context, q *control.Workspace
 	if err := s.workspaceVolumeForRenewal(q.GetVolumeId()); err != nil {
 		return nil, err
 	}
+	// r2.34 AUTHORITY: a replica id can move between servers.
+	line, ok := s.host.Publisher().VolumeAuthorityLine(q.GetVolumeId())
+	if !ok || line.ReplicaID != q.GetReplicaId() || line.Epoch != q.GetEpoch() || q.GetServerId() == "" || q.GetServerId() != s.host.workspaceSourceHost(q.GetVolumeId(), line.ReplicaID, line.Epoch) {
+		return nil, status.Error(codes.FailedPrecondition, "workspace lease: server identity does not match the current holder")
+	}
 	l, err := s.host.Publisher().RenewWorkspaceLease(ctx, q.GetVolumeId(), q.GetReplicaId(), q.GetEpoch())
 	if err != nil {
 		return nil, workspaceError(err)

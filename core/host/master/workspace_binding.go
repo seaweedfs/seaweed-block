@@ -73,10 +73,21 @@ func (h *Host) workspaceSourceHost(volume, replica string, epoch uint64) string 
 			}
 		}
 	}
-	if p, ok := h.lifecycle.Placements.GetPlacement(volume); ok {
-		for _, slot := range p.Slots {
-			if slot.ReplicaID == replica {
-				return slot.ServerID
+	if h.lifecycle != nil {
+		if p, ok := h.lifecycle.Placements.GetPlacement(volume); ok {
+			for _, slot := range p.Slots {
+				if slot.ReplicaID == replica {
+					return slot.ServerID
+				}
+			}
+		}
+	}
+	for _, v := range h.topo.Volumes {
+		if v.VolumeID == volume {
+			for _, slot := range v.Slots {
+				if slot.ReplicaID == replica {
+					return slot.ServerID
+				}
 			}
 		}
 	}

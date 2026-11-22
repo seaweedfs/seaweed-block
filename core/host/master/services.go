@@ -464,6 +464,7 @@ func (s *services) SubscribeAssignments(req *control.SubscribeRequest, stream co
 			fact := &control.AssignmentFact{
 				VolumeId:        info.VolumeID,
 				ReplicaId:       info.ReplicaID,
+				ServerId:        s.host.workspaceSourceHost(info.VolumeID, info.ReplicaID, info.Epoch),
 				Epoch:           info.Epoch,
 				EndpointVersion: info.EndpointVersion,
 				DataAddr:        info.DataAddr,
