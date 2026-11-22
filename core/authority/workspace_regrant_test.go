@@ -123,17 +123,25 @@ func TestWorkspaceLeaseRegrantWaitsForFullSkew(t *testing.T) {
 	}
 	writes := 0
 	store.setBefore(func(DurableRecord) error { writes++; return nil })
-	// Expired by master time, but still inside expiry + the full 4 s bound.
-	clock.at(13)
-	if got, err := p.RenewWorkspaceLease(context.Background(), "v", "r", 1); err == nil {
-		t.Fatal("re-grant raced the old process's lagging clock", got)
+	// The deadline+skew boundary is 14 s; horizon+skew is 19 s.
+	// Re-grant uses the same MAX barrier as a forced move, including the
+	// interval after the shorter deadline has passed and its final ns.
+	for _, now := range []time.Time{clock.sec(13), clock.sec(14), clock.sec(19).Add(-time.Nanosecond)} {
+		clock.ns.Store(now.UnixNano())
+		if got, err := p.RenewWorkspaceLease(context.Background(), "v", "r", 1); err == nil {
+			t.Fatal("re-grant crossed the later expiry/skew boundary early", now, got)
+		}
+		if err := p.WorkspaceForcedMoveAdmitted(context.Background(), "v", "force", "r", 1); err == nil {
+			t.Fatal("forced move crossed the shared boundary early", now)
+		}
+		if writes != 0 {
+			t.Fatal("unsafe early re-grant attempted persistence", writes)
+		}
 	}
-	if writes != 0 {
-		t.Fatal("unsafe early re-grant attempted persistence", writes)
-	}
-	// Both deadline+skew and horizon+skew have now passed. This positive
-	// endpoint is independent of the pending min/max barrier clarification.
 	clock.at(19)
+	if err := p.WorkspaceForcedMoveAdmitted(context.Background(), "v", "force", "r", 1); err != nil {
+		t.Fatal("fixture did not reach the shared forced-move barrier", err)
+	}
 	got, err := p.RenewWorkspaceLease(context.Background(), "v", "r", 1)
 	if err != nil || got.ExpiresAtNS <= clock.now().UnixNano() || writes != 1 {
 		t.Fatalf("safe unchanged owner cannot return: grant=%+v writes=%d err=%v", got, writes, err)
