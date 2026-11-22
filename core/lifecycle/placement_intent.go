@@ -35,10 +35,11 @@ type PlacementIntent struct {
 
 // PlacementIntentStore persists one placement intent per volume.
 type PlacementIntentStore struct {
-	mu        sync.Mutex
-	dir       string
-	records   map[string]PlacementIntent
-	published sync.Map // committed immutable PlacementIntent values; renewal never takes mu
+	mu                 sync.Mutex
+	dir                string
+	records            map[string]PlacementIntent
+	published          sync.Map     // committed immutable PlacementIntent values; renewal never takes mu
+	persistHookForTest func(string) // nil in production; crash injection at publication boundaries
 }
 
 // OpenPlacementIntentStore opens or creates a placement intent store.
@@ -200,8 +201,14 @@ func (s *PlacementIntentStore) putLocked(rec PlacementIntent) error {
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("lifecycle: replace placement intent %s: %w", rec.VolumeID, err)
 	}
+	if s.persistHookForTest != nil {
+		s.persistHookForTest("before-rename")
+	}
 	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("lifecycle: rename placement intent %s: %w", rec.VolumeID, err)
+	}
+	if s.persistHookForTest != nil {
+		s.persistHookForTest("after-rename")
 	}
 	return nil
 }

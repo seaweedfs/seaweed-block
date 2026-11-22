@@ -57,7 +57,8 @@ type FileStore struct {
 	records map[string]VolumeRecord
 	// snap mirrors records as an immutable copy, republished at every change
 	// of records, for lock-free renewal-path reads.
-	snap atomic.Pointer[map[string]VolumeRecord]
+	snap               atomic.Pointer[map[string]VolumeRecord]
+	persistHookForTest func(string) // nil in production; crash injection at publication boundaries
 }
 
 // publishLocked republishes the immutable snapshot of records. Caller holds
@@ -311,8 +312,14 @@ func (s *FileStore) putLocked(rec VolumeRecord) error {
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("lifecycle: replace %s: %w", rec.Spec.VolumeID, err)
 	}
+	if s.persistHookForTest != nil {
+		s.persistHookForTest("before-rename")
+	}
 	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("lifecycle: rename %s: %w", rec.Spec.VolumeID, err)
+	}
+	if s.persistHookForTest != nil {
+		s.persistHookForTest("after-rename")
 	}
 	return nil
 }
