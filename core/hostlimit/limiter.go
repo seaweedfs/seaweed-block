@@ -79,6 +79,15 @@ type Stats struct {
 	AdmissionNs, MaxHoldNs                         uint64
 	SkippedByClass                                 [4]uint64
 	LastPoolError                                  string
+	// UrgentPendingUnheld counts urgent admissions that went on without the
+	// urgent-pending hold: it stayed held exclusively for 200 ms (a waiter
+	// stalled in its probe).
+	UrgentPendingUnheld uint64
+	// SlotsHeldSinceNs maps each slot file seen held at the last snapshot to
+	// the wall time it was first seen held, by any process. A slot held far
+	// longer than MaxHold points to a stopped or hung holder, which only its
+	// supervisor can remove.
+	SlotsHeldSinceNs map[string]int64 `json:",omitempty"`
 }
 type lease struct {
 	file         *os.File
@@ -95,6 +104,8 @@ type lease struct {
 type Limiter struct {
 	testBeforeConfigWrite func()         // test-only crash boundary; immutable before first admission
 	testBeforeConfigLock  func(*os.File) // test-only fault boundary; immutable before first admission
+	testAfterTicketCreate func(string)   // test-only: between a ticket's create and its lock
+	testSkipAfter         time.Duration  // test-only TicketSkipAfter override
 	cfg                   Config
 	mu                    sync.Mutex
 	admitWG               sync.WaitGroup
@@ -106,6 +117,16 @@ type Limiter struct {
 	done                  chan struct{}
 	nextUpload            time.Time
 	fallback              bool
+	heldSlots             int   // normal and urgent slots held on the host at the last count
+	bytesSinceCount       int64 // payload bytes paced since that count
+	heldSince             map[string]time.Time
+}
+
+func (l *Limiter) skipAfter() time.Duration {
+	if l.testSkipAfter > 0 {
+		return l.testSkipAfter
+	}
+	return TicketSkipAfter
 }
 
 func New(c Config) (*Limiter, error) {
@@ -129,7 +150,7 @@ func Phase(volume string, period time.Duration) time.Duration {
 
 // pool checks the immutable configuration under a separate OS lock. Slot files
 // are never unlinked: replacing them could create a second set of live permits.
-func (l *Limiter) pool(c Class) (*os.File, error) {
+func (l *Limiter) pool(c Class, t *Ticket) (*os.File, error) {
 	info, err := os.Lstat(l.cfg.Directory)
 	if err != nil {
 		return nil, err
@@ -169,12 +190,19 @@ func (l *Limiter) pool(c Class) (*os.File, error) {
 		return nil, ErrConfig
 	}
 	if c == Normal {
+		if t != nil {
+			if err := t.headCheck(l.normalSlotFree(), l.urgentFree()); err != nil {
+				return nil, err
+			}
+		}
+		// The probe is held until the slot try-lock below has been made, so
+		// no Normal admission completes after urgent work became pending.
 		probe, err := open(urgentPendingFile)
 		if err != nil {
 			return nil, err
 		}
+		defer probe.Close()
 		err = tryLock(probe)
-		_ = probe.Close()
 		if errors.Is(err, ErrBusy) {
 			return nil, ErrUrgentPending
 		}
@@ -272,7 +300,21 @@ func (l *Limiter) Admit(ctx context.Context, payload int64, abort func(error)) (
 	if c > Idle || (c >= BackgroundFill && payload != 0) {
 		return 0, ErrBusy
 	}
-	f, err := l.pool(c)
+	var t *Ticket
+	if c == Normal {
+		t = ticketFrom(ctx)
+	}
+	f, err := l.pool(c, t)
+	var pending *os.File
+	if err == nil && c == Urgent {
+		// Bounded: a waiter stalled in its probe must not block urgent work.
+		var held bool
+		if pending, held, _ = holdSharedBounded(filepath.Join(l.cfg.Directory, urgentPendingFile)); !held {
+			l.mu.Lock()
+			l.stats.UrgentPendingUnheld++
+			l.mu.Unlock()
+		}
+	}
 	if errors.Is(err, ErrBusy) {
 		l.mu.Lock()
 		l.stats.Skipped++
@@ -323,11 +365,8 @@ func (l *Limiter) Admit(ctx context.Context, payload int64, abort func(error)) (
 	}
 	l.next++
 	id := l.next
-	x := &lease{file: f, started: time.Now(), class: c, fallback: fallback, payload: payload, abort: abort}
-	if c == Urgent && !fallback {
-		// Best effort: an urgent cut that cannot signal still runs.
-		x.pending, _ = holdShared(filepath.Join(l.cfg.Directory, urgentPendingFile))
-	}
+	x := &lease{file: f, pending: pending, started: time.Now(), class: c, fallback: fallback, payload: payload, abort: abort}
+	t.Close() // admitted: the ticket's place is used up
 	l.live[id] = x
 	l.stats.Admitted++
 	l.stats.PayloadReserved += payload
@@ -447,18 +486,140 @@ func (l *Limiter) releaseLoop() {
 		}
 	}
 }
-func (l *Limiter) Snapshot() any { l.mu.Lock(); defer l.mu.Unlock(); return l.stats }
+func (l *Limiter) Snapshot() any {
+	held := l.slotFilesHeld()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	st := l.stats
+	if held != nil {
+		now := time.Now()
+		if l.heldSince == nil {
+			l.heldSince = map[string]time.Time{}
+		}
+		st.SlotsHeldSinceNs = map[string]int64{}
+		for name := range l.heldSince {
+			if !held[name] {
+				delete(l.heldSince, name)
+			}
+		}
+		for name := range held {
+			if _, ok := l.heldSince[name]; !ok {
+				l.heldSince[name] = now
+			}
+			st.SlotsHeldSinceNs[name] = l.heldSince[name].UnixNano()
+		}
+	}
+	return st
+}
+
+// slotNames lists the slot files of the given classes.
+func (l *Limiter) slotNames(urgent, normal, others bool) []string {
+	var names []string
+	add := func(prefix string, n int) {
+		for i := 0; i < n; i++ {
+			names = append(names, fmt.Sprintf("%s-%d", prefix, i))
+		}
+	}
+	if urgent {
+		add("urgent", l.cfg.UrgentSlots)
+	}
+	if normal {
+		add("normal", l.cfg.NormalSlots)
+	}
+	if others {
+		add("fill", l.cfg.FillSlots)
+		add("idle", l.cfg.IdleSlots)
+	}
+	return names
+}
+
+// probeHeld reports whether the slot file is held by any process. The probe
+// is a shared non-blocking lock, released at once; it can make another
+// process's exclusive admission attempt fail once (a wait, by rule).
+func (l *Limiter) probeHeld(name string) (held, ok bool) {
+	path := filepath.Join(l.cfg.Directory, name)
+	f, err := os.OpenFile(path, os.O_RDWR, 0o600)
+	if err != nil {
+		return false, errors.Is(err, os.ErrNotExist)
+	}
+	defer f.Close()
+	err = tryLockShared(f)
+	if errors.Is(err, ErrBusy) {
+		return true, true
+	}
+	return false, err == nil
+}
+
+// slotFilesHeld maps every held slot file to true (nil if the pool cannot
+// be read).
+func (l *Limiter) slotFilesHeld() map[string]bool {
+	if _, err := os.Stat(l.cfg.Directory); err != nil {
+		return nil
+	}
+	held := map[string]bool{}
+	for _, name := range l.slotNames(true, true, true) {
+		if h, _ := l.probeHeld(name); h {
+			held[name] = true
+		}
+	}
+	return held
+}
+
+// normalSlotFree reports whether some normal slot file is free now.
+func (l *Limiter) normalSlotFree() bool {
+	for _, name := range l.slotNames(false, true, false) {
+		if h, ok := l.probeHeld(name); ok && !h {
+			return true
+		}
+	}
+	return false
+}
+
+// urgentFree reports whether no urgent work holds urgent-pending now.
+func (l *Limiter) urgentFree() bool {
+	f, err := os.OpenFile(filepath.Join(l.cfg.Directory, urgentPendingFile), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	return tryLock(f) == nil
+}
+
+// heldCodedSlots counts the normal and urgent slots held on the host, the
+// classes that pace on the upload budget.
+func (l *Limiter) heldCodedSlots() int {
+	n := 0
+	for _, name := range l.slotNames(true, true, false) {
+		if h, _ := l.probeHeld(name); h {
+			n++
+		}
+	}
+	return n
+}
 
 // WaitUpload paces background payload PUTs, including parallel uploader workers.
-// One process spaces reservations by the previous payload/rate. Its first
-// payload is immediate; debt survives its leases but resets on a new process.
-// For a constant share r and maximum payload B, one process reserves at most
-// r*T+B bytes over T. Fresh processes each add a new B; neither process/slot
-// churn nor uncoordinated fallback has a fixed host-rate bound. Wire overhead
-// is excluded. Local WAL flushing, COW reads and demand hydration bypass it.
+// The rate is the budget divided by the normal and urgent slots held on the
+// host (counted by probing their files), re-counted once per PayloadBytes of
+// this process's uploads: a lone transfer gets the whole budget. After the
+// held count changes, each process may pace up to one payload at its old
+// rate. One process spaces reservations by the previous payload/rate; its
+// first payload is immediate; debt survives its leases but resets on a new
+// process. Uncoordinated fallback keeps a per-process divisor and has no
+// host-rate bound. Wire overhead is excluded. Local WAL flushing, COW reads
+// and demand hydration bypass it.
 func (l *Limiter) WaitUpload(ctx context.Context, n int) error {
 	if n < 0 {
 		return ErrBusy
+	}
+	l.mu.Lock()
+	recount := l.heldSlots == 0 || l.bytesSinceCount >= l.cfg.PayloadBytes
+	l.bytesSinceCount += int64(n)
+	l.mu.Unlock()
+	if recount {
+		h := l.heldCodedSlots()
+		l.mu.Lock()
+		l.heldSlots, l.bytesSinceCount = h, int64(n)
+		l.mu.Unlock()
 	}
 	for {
 		if err := ctx.Err(); err != nil {
@@ -469,7 +630,7 @@ func (l *Limiter) WaitUpload(ctx context.Context, n int) error {
 			l.mu.Unlock()
 			return ErrRevoked
 		}
-		div := l.cfg.NormalSlots + l.cfg.UrgentSlots
+		div := max(1, l.heldSlots)
 		if l.fallback {
 			div = l.cfg.FallbackVolumes
 		}
