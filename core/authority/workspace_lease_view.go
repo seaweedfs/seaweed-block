@@ -214,7 +214,7 @@ func (p *Publisher) RenewWorkspaceLease(ctx context.Context, volume, holder stri
 	}
 	if now.UnixNano() >= lv.d.horizon || !now.Before(lv.deadline) {
 		unlock()
-		return WorkspaceLease{}, fmt.Errorf("workspace lease expired or revoking")
+		return p.regrantWorkspaceLease(ctx, volume, holder, epoch)
 	}
 	// Where the synchronous write used to refuse (persistWorkspaceLocked):
 	// a renewal never bypasses uncertainty (INV-AUTH-UNCERTAIN-001).
@@ -307,6 +307,42 @@ func (p *Publisher) firstWorkspaceGrant(ctx context.Context, volume, holder stri
 	}
 	p.setLeaseDeadlineLocked(volume, grant, true)
 	p.mu.Unlock()
+	return WorkspaceLease{ReplicaID: holder, Epoch: epoch, ExpiresAtNS: grant.UnixNano(), MaxClockSkewNS: lease.MaxClockSkewNS}, nil
+}
+
+// INV-WS-LEASE-REGRANT-001: serialize an expired re-grant with move issue,
+// reusing the forced-move barrier so the old process's validity is past.
+// The live renewal path releases leaseMu before entering this writer.
+func (p *Publisher) regrantWorkspaceLease(ctx context.Context, volume, holder string, epoch uint64) (WorkspaceLease, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return WorkspaceLease{}, err
+	}
+	_, line, ok := p.workspaceLineLocked(volume)
+	s := cloneWorkspace(p.workspace[volume])
+	if !ok || line.info.ReplicaID != holder || line.info.Epoch != epoch || s == nil || s.Lease == nil ||
+		s.Lease.ReplicaID != holder || s.Lease.Epoch != epoch {
+		return WorkspaceLease{}, fmt.Errorf("workspace lease: stale authority")
+	}
+	if s.Lease.Revoking || s.Ack != nil || (len(s.Moves) > 0 && !s.Moves[len(s.Moves)-1].Issued) {
+		return WorkspaceLease{}, fmt.Errorf("workspace lease: revocation or move pending")
+	}
+	if p.store == nil || p.workspaceUncertain[volume] {
+		return WorkspaceLease{}, fmt.Errorf("workspace durable store unavailable or uncertain")
+	}
+	_, now, err := p.forcedMoveBarrierLocked(volume, s.Lease)
+	if err != nil {
+		return WorkspaceLease{}, err
+	}
+	lease, grant := p.newWorkspaceLease(holder, epoch, now)
+	lease.ExpiresAtNS = max(lease.ExpiresAtNS, s.Lease.ExpiresAtNS)
+	lease.MaxClockSkewNS = int64(p.workspaceSkew(s.Lease))
+	s.Lease = lease
+	if err := p.persistWorkspaceLocked(volume, s); err != nil {
+		return WorkspaceLease{}, err
+	}
+	p.setLeaseDeadlineLocked(volume, grant, true)
 	return WorkspaceLease{ReplicaID: holder, Epoch: epoch, ExpiresAtNS: grant.UnixNano(), MaxClockSkewNS: lease.MaxClockSkewNS}, nil
 }
 
