@@ -80,7 +80,7 @@ func TestIntegrationWorkspaceProductionDetachAndForcedMove(t *testing.T) {
 			}
 			defer conn.Close()
 			client := control.NewWorkspaceServiceClient(conn)
-			id := &control.WorkspaceIdentity{VolumeId: "vol-a", ReplicaId: line.ReplicaID, Epoch: line.Epoch}
+			id := &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "vol-a", ReplicaId: line.ReplicaID, Epoch: line.Epoch}
 			lease, err := client.RenewWorkspaceLease(ctx, id)
 			if err != nil {
 				t.Fatal(err)

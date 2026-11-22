@@ -1,0 +1,1 @@
+{"VolumeID":"v1","ReplicaID":"r1","Epoch":2,"EndpointVersion":1,"Healthy":true,"Memory":{"HeapAllocBytes":1520736,"HeapInuseBytes":3547136,"HeapSysBytes":7503872,"HeapReleasedBytes":3194880,"SoftLimitBytes":268435456,"RSSBytes":21516288,"AnonymousRSSBytes":5230592},"FrontendPrimaryReady":true,"AuthorityRole":"primary","ReplicationRole":"none"}

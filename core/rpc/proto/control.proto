@@ -170,6 +170,10 @@ message FrontendTarget {
     uint32 lun = 5;
     uint32 nsid = 6;
     string transport = 7; // NVMe: "tcp" (default) | "rdma"; empty for iSCSI
+    // the replica this frontend belongs to (StatusResponse): a CSI client publishes a target only when the primary
+    // replica has a usable frontend; another replica's frontend is at most an extra path to the same target
+    // (INV-AUTH-HOLDER-IDENTITY-001)
+    string replica_id = 8;
 }
 
 message HeartbeatAck {
@@ -186,6 +190,9 @@ message SubscribeRequest {
     string volume_id = 1;
     string replica_id = 2;
     uint64 resume_epoch = 3; // delivery hint only; does NOT influence authority
+    // the subscriber's --server-id: for a workspace volume the master delivers the line only to a registered server
+    // id whose stream comes from its registered host (INV-AUTH-HOLDER-IDENTITY-001)
+    string server_id = 4;
 }
 
 // ReplicaDescriptor — one entry in an AssignmentFact.peers list.
@@ -236,6 +243,9 @@ message AssignmentFact {
     // protection; fake-master / test harnesses MAY use 0 for
     // unversioned apply (does not advance the monotonic guard).
     uint64 peer_set_generation = 8;
+
+    // Required holder identity. Empty (pre-release master) is never adopted.
+    string server_id = 9;
 }
 
 message StatusRequest {

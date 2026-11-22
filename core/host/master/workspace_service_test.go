@@ -15,12 +15,26 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
 type workspaceRPCView struct{ p frontend.Projection }
 
 func (v workspaceRPCView) Projection() frontend.Projection { return v.p }
+
+// lostAckReply returns an unknown outcome only after the real master has
+// committed the ACK. The caller must resolve it from a recorded witness.
+type lostAckReply struct{ control.WorkspaceServiceClient }
+
+func (c lostAckReply) AckWorkspaceRevoked(ctx context.Context, q *control.WorkspaceRevocationAck, opts ...grpc.CallOption) (*control.WorkspaceEmpty, error) {
+	reply, err := c.WorkspaceServiceClient.AckWorkspaceRevoked(ctx, q, opts...)
+	if err != nil {
+		return reply, err
+	}
+	return nil, status.Error(codes.DeadlineExceeded, "injected ACK reply loss after commit")
+}
 
 func TestWorkspaceRPCCleanMovePreservesReplicaIdentity(t *testing.T) {
 	var detached atomic.Bool
@@ -56,6 +70,7 @@ func TestWorkspaceRPCCleanMovePreservesReplicaIdentity(t *testing.T) {
 	if _, err := h.Lifecycle().Nodes.RegisterNode(lifecycle.NodeRegistration{ServerID: "node-b", DataAddr: "127.0.0.1:9201", CtrlAddr: "127.0.0.1:9101"}); err != nil {
 		t.Fatal(err)
 	}
+	registerWorkspaceHolder(t, h, "node-a") // a workspace holder's server id must be registered (INV-AUTH-HOLDER-IDENTITY-001)
 	seedVerifiedExistingReplicaPlacement(t, h)
 	if _, err := h.RunLifecycleProductTick(); err != nil {
 		t.Fatal(err)
@@ -70,11 +85,11 @@ func TestWorkspaceRPCCleanMovePreservesReplicaIdentity(t *testing.T) {
 	}
 	defer conn.Close()
 	client := control.NewWorkspaceServiceClient(conn)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	id := &control.WorkspaceIdentity{VolumeId: "vol-a", ReplicaId: "r2", Epoch: 1}
+	id := &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "vol-a", ReplicaId: "r2", Epoch: 1}
 	stops := 0
-	g, err := volume.NewWorkspaceLeaseGuard(workspaceRPCView{frontend.Projection{VolumeID: "vol-a", ReplicaID: "r2", Epoch: 1, Healthy: true}}, client, id,
+	g, err := volume.NewWorkspaceLeaseGuard(workspaceRPCView{frontend.Projection{VolumeID: "vol-a", ReplicaID: "r2", Epoch: 1, Healthy: true}}, lostAckReply{client}, id,
 		func(context.Context) (uint64, error) { stops++; return 9, nil }, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -90,8 +105,18 @@ func TestWorkspaceRPCCleanMovePreservesReplicaIdentity(t *testing.T) {
 	if _, err := client.RevokeWorkspace(ctx, id); err != nil {
 		t.Fatal(err)
 	}
-	if err := g.Refresh(ctx); err != nil {
-		t.Fatal(err)
+	// The stop/ACK path keeps its production timeout. Resolve a lost reply
+	// from the master's exact ACK, never from elapsed time or the stop alone.
+	if err := g.Refresh(ctx); status.Code(err) != codes.DeadlineExceeded {
+		t.Fatalf("expected unknown ACK reply, got %v", err)
+	}
+	recorded, err := client.QueryWorkspace(ctx, &control.WorkspaceVolume{VolumeId: "vol-a"})
+	if err != nil {
+		t.Fatal("ACK witness unreadable", err)
+	}
+	ack := recorded.GetRevocationAck()
+	if ack.GetIdentity().GetVolumeId() != "vol-a" || ack.GetIdentity().GetReplicaId() != "r2" || ack.GetIdentity().GetEpoch() != 1 || ack.GetHeadGen() != 9 {
+		t.Fatalf("unknown ACK has no exact recorded witness: %+v", ack)
 	}
 	if g.Projection().Healthy || stops != 1 {
 		t.Fatal("revoked frontend remained admitted")
@@ -102,12 +127,12 @@ func TestWorkspaceRPCCleanMovePreservesReplicaIdentity(t *testing.T) {
 	detached.Store(true)
 	streamCtx, cancelStream := context.WithCancel(ctx)
 	defer cancelStream()
-	stream, err := control.NewAssignmentServiceClient(conn).SubscribeAssignments(streamCtx, &control.SubscribeRequest{VolumeId: "vol-a", ReplicaId: "r2"})
+	stream, err := control.NewAssignmentServiceClient(conn).SubscribeAssignments(streamCtx, &control.SubscribeRequest{VolumeId: "vol-a", ReplicaId: "r2", ServerId: "node-a"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	initial, err := stream.Recv()
-	if err != nil || initial.ReplicaId != "r2" || initial.Epoch != 1 {
+	if err != nil || initial.ServerId != "node-a" || initial.ReplicaId != "r2" || initial.Epoch != 1 {
 		t.Fatal("initial assignment", initial, err)
 	}
 	beforeLine, _ := h.Publisher().VolumeAuthorityLine("vol-a")
@@ -133,7 +158,7 @@ func TestWorkspaceRPCCleanMovePreservesReplicaIdentity(t *testing.T) {
 		t.Fatal(grant)
 	}
 	delivered, err := stream.Recv()
-	if err != nil || delivered.ReplicaId != "r2" || delivered.Epoch != 2 || delivered.DataAddr != q.TargetDataAddr || delivered.CtrlAddr != q.TargetCtrlAddr || len(delivered.Peers) != 0 {
+	if err != nil || delivered.ServerId != "node-b" || delivered.ReplicaId != "r2" || delivered.Epoch != 2 || delivered.DataAddr != q.TargetDataAddr || delivered.CtrlAddr != q.TargetCtrlAddr || len(delivered.Peers) != 0 {
 		t.Fatal("same-ID move was not delivered on the existing stream with no retired peer", delivered, err)
 	}
 	cancelStream()
@@ -144,7 +169,7 @@ func TestWorkspaceRPCCleanMovePreservesReplicaIdentity(t *testing.T) {
 	if _, err := client.RenewWorkspaceLease(ctx, id); err == nil {
 		t.Fatal("old authority renewed")
 	}
-	if _, err := client.RenewWorkspaceLease(ctx, &control.WorkspaceIdentity{VolumeId: "vol-a", ReplicaId: "r2", Epoch: 2}); err != nil {
+	if _, err := client.RenewWorkspaceLease(ctx, &control.WorkspaceIdentity{ServerId: "node-b", VolumeId: "vol-a", ReplicaId: "r2", Epoch: 2}); err != nil {
 		t.Fatal(err)
 	}
 	if err := h.Close(ctx); err != nil {

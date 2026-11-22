@@ -82,4 +82,6 @@ jobs:
               fi
             done
           fi
-          go test -p=1 -short -count=1 -timeout 10m $pkgs
+          # 20m per package: core/storage alone took 602 s on tp04 on main
+          # (2026-11-22), past the old 10m, so any PR touching it failed.
+          go test -p=1 -short -count=1 -timeout 20m $pkgs

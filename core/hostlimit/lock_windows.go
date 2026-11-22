@@ -15,3 +15,9 @@ func tryLock(f *os.File) error {
 	}
 	return err
 }
+
+// lockShared waits for a shared lock on f. An exclusive holder keeps it
+// only for a non-blocking probe, so the wait is short.
+func lockShared(f *os.File) error {
+	return windows.LockFileEx(windows.Handle(f.Fd()), 0, 0, 1, 0, &windows.Overlapped{})
+}

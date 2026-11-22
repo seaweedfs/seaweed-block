@@ -98,7 +98,7 @@ func TestLocalRecoveryFailure_CorruptWALReportsWALCorruptAtOnce(t *testing.T) {
 	if got := h.ReportLocalRecoveryFailure(report.Err); got != UnhealthyWALCorrupt {
 		t.Fatalf("ReportLocalRecoveryFailure(%v)=%q; want %s", report.Err, got, UnhealthyWALCorrupt)
 	}
-	h.applyFact(selfPrimaryFact(1)) // refused by the readiness block, but primary-assigned
+	h.applyFixtureFact(selfPrimaryFact(1)) // refused by the readiness block, but primary-assigned
 	if s := reportSlot(t, h); s.Eligible || s.UnhealthyReason != UnhealthyWALCorrupt {
 		t.Fatalf("primary-assigned after corrupt recovery: eligible=%t reason=%q; want ineligible, %s at once", s.Eligible, s.UnhealthyReason, UnhealthyWALCorrupt)
 	}
@@ -119,14 +119,14 @@ func TestLocalRecoveryFailure_ScopeAndUnclassifiedFallback(t *testing.T) {
 	if s := reportSlot(t, h); !s.Eligible || s.UnhealthyReason != "" {
 		t.Fatalf("not primary-assigned: %+v; want not flagged", s)
 	}
-	h.applyFact(selfPrimaryFact(1))
+	h.applyFixtureFact(selfPrimaryFact(1))
 	if s := reportSlot(t, h); s.UnhealthyReason != UnhealthyIOError {
 		t.Fatalf("primary-assigned with an I/O recovery failure: reason=%q; want %s", s.UnhealthyReason, UnhealthyIOError)
 	}
 
 	h2, clk2 := watchdogHost(t, 10*time.Second)
 	h2.ReportLocalRecoveryFailure(errors.New("unclassified"))
-	h2.applyFact(selfPrimaryFact(1))
+	h2.applyFixtureFact(selfPrimaryFact(1))
 	if s := reportSlot(t, h2); s.UnhealthyReason != "" {
 		t.Fatalf("unclassified failure inside the timeout: reason=%q; want none yet", s.UnhealthyReason)
 	}
