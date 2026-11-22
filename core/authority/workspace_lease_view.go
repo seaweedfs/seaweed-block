@@ -157,6 +157,18 @@ type PublishedLine struct {
 	IssuedHost string
 }
 
+// PublishedAuthorityLine reads one committed line under leaf leaseMu. Identity
+// checks on renewal must not wait for p.mu, which spans authority store I/O.
+func (p *Publisher) PublishedAuthorityLine(volume string) (PublishedLine, bool) {
+	p.leaseMu.Lock()
+	defer p.leaseMu.Unlock()
+	lv := p.leaseViews[volume]
+	if lv == nil || !lv.d.bound {
+		return PublishedLine{}, false
+	}
+	return PublishedLine{ReplicaID: lv.d.replica, Epoch: lv.d.epoch, IssuedHost: lv.d.issuedHost}, true
+}
+
 // PublishedAuthorityLines returns the committed authority line of every
 // volume that has one. It reads the lease views under the leaf leaseMu only:
 // it never waits on p.mu, which writers hold across store writes, and it
