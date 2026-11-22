@@ -175,7 +175,12 @@ func startGAP1Unit(t *testing.T, unit string, restart bool, exe string, args ...
 	if restart {
 		policy = "on-failure"
 	}
-	cmdArgs := []string{"--unit=" + unit, "--property=Type=exec", "--property=Restart=" + policy, "--property=RestartSec=5s", "--property=RestartPreventExitStatus=78", "--property=TimeoutStopSec=10s", "--property=StartLimitIntervalSec=10s", "--property=StartLimitBurst=5", "--", exe}
+	shipped := gap1ShippedPolicy(t)
+	cmdArgs := []string{"--unit=" + unit, "--property=Type=exec", "--property=Restart=" + policy,
+		"--property=RestartSec=" + shipped["RestartSec"],
+		"--property=RestartPreventExitStatus=" + shipped["RestartPreventExitStatus"],
+		"--property=TimeoutStopSec=" + shipped["TimeoutStopSec"],
+		"--property=StartLimitIntervalSec=10s", "--property=StartLimitBurst=5", "--", exe}
 	cmdArgs = append(cmdArgs, args...)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -279,4 +284,36 @@ func waitGAP1(t *testing.T, what string, bound time.Duration, ready func() bool)
 		case <-tick.C:
 		}
 	}
+}
+
+// The transient unit exercises the shipped restart policy, not an independently
+// tuned retry loop. Both deployed frontend variants must carry the same policy.
+func gap1ShippedPolicy(t *testing.T) map[string]string {
+	t.Helper()
+	var first map[string]string
+	for _, name := range []string{"sw-blockvolume.service", "sw-blockvolume-ublk.service"} {
+		raw, err := os.ReadFile(filepath.Join("..", "..", "deploy", "systemd", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		fields := map[string]string{}
+		for _, line := range strings.Split(string(raw), "\n") {
+			key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
+			if ok {
+				fields[key] = value
+			}
+		}
+		if fields["Restart"] != "on-failure" || fields["RestartPreventExitStatus"] != "78" || fields["RestartSec"] != "5s" {
+			t.Fatalf("shipped policy changed: %s %+v", name, fields)
+		}
+		if first != nil {
+			for _, key := range []string{"Restart", "RestartSec", "RestartPreventExitStatus", "TimeoutStopSec"} {
+				if fields[key] != first[key] {
+					t.Fatalf("unit policies differ at %s", key)
+				}
+			}
+		}
+		first = fields
+	}
+	return first
 }
