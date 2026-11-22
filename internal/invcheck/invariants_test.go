@@ -263,4 +263,4 @@ func TestInvariantStatementsAreShort(t *testing.T) {
 
 // longStatementsLeft is the number of rows testdata/long-statements.txt may
 // name. It only goes down.
-const longStatementsLeft = 18
+const longStatementsLeft = 1
