@@ -127,7 +127,7 @@ func TestWorkspaceRPCCleanMovePreservesReplicaIdentity(t *testing.T) {
 	detached.Store(true)
 	streamCtx, cancelStream := context.WithCancel(ctx)
 	defer cancelStream()
-	stream, err := control.NewAssignmentServiceClient(conn).SubscribeAssignments(streamCtx, &control.SubscribeRequest{VolumeId: "vol-a", ReplicaId: "r2"})
+	stream, err := control.NewAssignmentServiceClient(conn).SubscribeAssignments(streamCtx, &control.SubscribeRequest{VolumeId: "vol-a", ReplicaId: "r2", ServerId: "node-a"})
 	if err != nil {
 		t.Fatal(err)
 	}
