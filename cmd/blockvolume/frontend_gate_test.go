@@ -11,13 +11,47 @@ type gateResult struct {
 	start   bool
 }
 
-func runGate(serving <-chan struct{}, stopWait <-chan workspaceStopWait) <-chan gateResult {
+// gateWait bounds every receive of a gate result in these tests.
+const gateWait = 5 * time.Second
+
+// runGate runs awaitFrontendStart on serving and a stop channel it owns
+// (buffered, returned for the test to send on). Its cleanup, registered
+// before the worker starts, releases a gate that is still waiting with a
+// stop and joins the worker within gateWait, so a failing check never
+// strands it.
+func runGate(t *testing.T, serving <-chan struct{}) (<-chan gateResult, chan<- workspaceStopWait) {
+	t.Helper()
 	out := make(chan gateResult, 1)
+	stopWait := make(chan workspaceStopWait, 1)
+	exited := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case stopWait <- workspaceStopWait{}:
+		default:
+		}
+		select {
+		case <-exited:
+		case <-time.After(gateWait):
+			t.Errorf("the gate worker did not exit within %s of a stop", gateWait)
+		}
+	})
 	go func() {
+		defer close(exited)
 		s, ok := awaitFrontendStart(serving, stopWait)
 		out <- gateResult{s, ok}
 	}()
-	return out
+	return out, stopWait
+}
+
+func receiveGate(t *testing.T, res <-chan gateResult, what string) gateResult {
+	t.Helper()
+	select {
+	case r := <-res:
+		return r
+	case <-time.After(gateWait):
+		t.Fatalf("%s: the gate did not return within %s", what, gateWait)
+		return gateResult{}
+	}
 }
 
 // INV-FE-PRIMARY-READY-OPERATIONAL-001: the frontends start only once the
@@ -26,26 +60,17 @@ func runGate(serving <-chan struct{}, stopWait <-chan workspaceStopWait) <-chan 
 // admits no I/O (a chunk volume before its storage claim), the gate never
 // releases; it releases as soon as the backend's first-serving channel closes.
 func TestFrontendGateWaitsForTheStorageClaim(t *testing.T) {
-	for name, serving := range map[string]chan struct{}{"no durable backend": nil, "already serving": make(chan struct{})} {
-		if serving != nil {
-			close(serving)
-		}
-		var ch <-chan struct{}
-		if serving != nil {
-			ch = serving
-		}
-		select {
-		case r := <-runGate(ch, make(chan workspaceStopWait)):
-			if !r.start || r.stopped != nil {
-				t.Fatalf("%s: %+v, want the frontends started at once", name, r)
-			}
-		case <-time.After(time.Second):
-			t.Fatalf("%s: the gate did not release at once", name)
+	served := make(chan struct{})
+	close(served)
+	for name, ch := range map[string]<-chan struct{}{"no durable backend": nil, "already serving": served} {
+		res, _ := runGate(t, ch)
+		if r := receiveGate(t, res, name); !r.start || r.stopped != nil {
+			t.Fatalf("%s: %+v, want the frontends started at once", name, r)
 		}
 	}
 
 	serving := make(chan struct{})
-	res := runGate(serving, make(chan workspaceStopWait))
+	res, _ := runGate(t, serving)
 	for i := 0; i < 30; i++ { // 300 ms of samples while the claim is pending
 		select {
 		case r := <-res:
@@ -54,13 +79,8 @@ func TestFrontendGateWaitsForTheStorageClaim(t *testing.T) {
 		}
 	}
 	close(serving) // the storage claim succeeded
-	select {
-	case r := <-res:
-		if !r.start {
-			t.Fatalf("after the claim: %+v, want the frontends started", r)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("the gate did not release after the backend admitted I/O")
+	if r := receiveGate(t, res, "after the claim"); !r.start {
+		t.Fatalf("after the claim: %+v, want the frontends started", r)
 	}
 }
 
@@ -69,8 +89,7 @@ func TestFrontendGateWaitsForTheStorageClaim(t *testing.T) {
 // latched exit 75/78) and no frontend starts: the stop is handed back for
 // the ordinary shutdown, its lease drain request included.
 func TestFrontendGateStopsWithoutStartingTheFrontends(t *testing.T) {
-	stopWait := make(chan workspaceStopWait, 1)
-	res := runGate(make(chan struct{}), stopWait) // fenced: never serves
+	res, stopWait := runGate(t, make(chan struct{})) // fenced: never serves
 	select {
 	case r := <-res:
 		t.Fatalf("a backend that never serves released the gate: %+v", r)
@@ -78,8 +97,7 @@ func TestFrontendGateStopsWithoutStartingTheFrontends(t *testing.T) {
 	}
 	req := &workspaceStopRequest{ctx: context.Background()}
 	stopWait <- workspaceStopWait{leaseStop: req}
-	r := <-res
-	if r.start || r.stopped == nil || r.stopped.leaseStop != req {
+	if r := receiveGate(t, res, "stop before serving"); r.start || r.stopped == nil || r.stopped.leaseStop != req {
 		t.Fatalf("stop before serving: %+v, want no frontends and the lease drain request handed back", r)
 	}
 }

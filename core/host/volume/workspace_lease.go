@@ -265,10 +265,11 @@ func (g *WorkspaceLeaseGuard) Refresh(ctx context.Context) error {
 	}
 	closed := g.fenced
 	g.mu.Unlock()
-	if firstGrant {
+	if firstGrant && !closed {
 		// Once per guard: the first grant, or the re-grant after refused
 		// renewals (a restart before the forced-move barrier); unix_ms is the
-		// request start, which the lease validity is anchored to.
+		// request start, which the lease validity is anchored to. A first
+		// reply that revokes (or arrives fenced) grants nothing: no line.
 		what := "granted"
 		if refused > 0 {
 			what = fmt.Sprintf("re-granted after %d refused renewal(s)", refused)
