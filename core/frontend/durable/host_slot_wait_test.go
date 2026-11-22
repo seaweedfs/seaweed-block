@@ -137,8 +137,8 @@ func TestTimerCutRunsSoonAfterHostSlotFrees(t *testing.T) {
 	if h, _ := remote.GetHead(context.Background()); h.Gen != baseGen {
 		t.Fatalf("HEAD moved from generation %d to %d while the only slot was held", baseGen, h.Gen)
 	}
-	if cs := chunkStatus(t, p).CutSchedule; cs == nil || cs.HostSlotWaits == 0 || cs.HostSlotWaitSinceNs == 0 {
-		t.Fatalf("waiting for a host slot is not reported: %+v", cs)
+	if cs := chunkStatus(t, p).CutSchedule; cs == nil || cs.HostSlotWaits == 0 || cs.HostSlotWaitSinceNs == 0 || cs.TicketDueHostNs == 0 {
+		t.Fatalf("waiting for a host slot (with its ticket) is not reported: %+v", cs)
 	}
 
 	before := len(lim.snapshot())
@@ -168,7 +168,7 @@ func TestTimerCutRunsSoonAfterHostSlotFrees(t *testing.T) {
 		}
 	}
 	for deadline := time.Now().Add(time.Second); ; time.Sleep(10 * time.Millisecond) {
-		if cs := chunkStatus(t, p).CutSchedule; cs != nil && cs.HostSlotWaitSinceNs == 0 && cs.HostSlotWaits >= uint64(len(refusals)) {
+		if cs := chunkStatus(t, p).CutSchedule; cs != nil && cs.HostSlotWaitSinceNs == 0 && cs.TicketDueHostNs == 0 && cs.HostSlotWaits >= uint64(len(refusals)) {
 			break
 		}
 		if time.Now().After(deadline) {

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -660,7 +659,6 @@ const (
 	chunkCutMinSpacing = time.Second
 	chunkCutBackoffMin = time.Second
 	chunkCutBackoffMax = 30 * time.Second
-	chunkSlotDelayMax  = 200 * time.Millisecond
 )
 
 // cutPolicy decides when an automatic cut is due. The remote holds
@@ -677,29 +675,11 @@ const (
 //     no-op cut and an explicit cut included) clears the backoff and
 //     restarts the timer;
 //   - an automatic cut refused because every host slot is held ran
-//     nothing: it is retried after a random delay drawn from a range that
-//     shrinks as the volume falls behind its interval (a late volume is
-//     likely, not certain, to retry first), with no backoff and no
-//     minimum spacing, and the wait lasts until a cut succeeds.
+//     nothing: it is retried at the next poll, with no backoff and no
+//     minimum spacing, holding its host ticket so that waiting cuts are
+//     admitted in due order; the wait lasts until a cut succeeds.
 type cutPolicy struct {
 	interval, minSpacing, backoffMin, backoffMax time.Duration
-	// slotDelay is the delay before retrying a cut refused for held host
-	// slots, given how late the volume is past its interval; nil retries
-	// at the next poll.
-	slotDelay func(late time.Duration) time.Duration
-}
-
-// newSlotDelay draws a retry delay below chunkSlotDelayMax scaled by
-// interval/(interval+late): a volume one interval late draws below half of
-// it, nine intervals late below a tenth.
-func newSlotDelay(interval time.Duration, r *rand.Rand) func(time.Duration) time.Duration {
-	return func(late time.Duration) time.Duration {
-		limit := float64(chunkSlotDelayMax)
-		if interval > 0 && late > 0 {
-			limit *= float64(interval) / float64(interval+late)
-		}
-		return time.Duration(r.Float64() * limit)
-	}
 }
 
 // cutSchedule runs on in-process monotonic time: every time in it is a
@@ -770,11 +750,7 @@ func (pol cutPolicy) after(s cutSchedule, start, end time.Time, err error, seq u
 		if s.slotWaitSince.IsZero() {
 			s.slotWaitSince = start
 		}
-		var delay time.Duration
-		if pol.slotDelay != nil {
-			delay = pol.slotDelay(max(0, end.Sub(s.lastSuccess.Add(pol.interval))))
-		}
-		s.retryAt = end.Add(delay)
+		s.retryAt = end
 		return s
 	}
 	s.lastAuto = start
@@ -823,12 +799,26 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 		minSpacing: chunkCutMinSpacing,
 		backoffMin: chunkCutBackoffMin,
 		backoffMax: chunkCutBackoffMax,
-		slotDelay:  newSlotDelay(p.cfg.ChunkCaptureInterval, rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), uint64(hostlimit.Phase(volumeID, time.Hour))))),
 	}
 	s := initialCutSchedule(volumeID, pol.interval, time.Now(), p.cfg.ChunkStagger, layer.Stats().CutSeq)
 	if wait != nil {
 		s.slotWaits = wait.status(0).HostSlotWaits
 	}
+	// A due cut waits for a host slot in due order: it holds a ticket from
+	// its first attempt until it is admitted, a cut succeeds, the refusal
+	// is not a wait, or the loop ends.
+	taker, _ := p.cfg.ChunkBudget.(interface {
+		TakeTicket(dueHostNs int64) (*hostlimit.Ticket, error)
+	})
+	var ticket *hostlimit.Ticket
+	dropTicket := func(reason string) {
+		if ticket != nil {
+			ticket.Close()
+			ticket = nil
+			wait.dropped(reason)
+		}
+	}
+	defer dropTicket("")
 	t := time.NewTicker(chunkSchedulePoll)
 	defer t.Stop()
 	for {
@@ -842,13 +832,29 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 		}
 		ls := layer.Stats()
 		start := time.Now()
+		seen := s.seenSeq
 		s = s.observe(ls.CutSeq, start)
-		wait.record(s)
+		if s.seenSeq != seen {
+			dropTicket("") // a cut succeeded: the wait is over
+		}
+		wait.record(s, ticket)
 		reason, ok := pol.due(s, start, ls.Reconciling)
 		if !ok {
 			continue
 		}
 		cutCtx, cancel := p.chunkCutContext(ctx)
+		if taker != nil && ticket == nil {
+			dueAt := s.lastSuccess.Add(pol.interval)
+			if !s.firstDue.IsZero() {
+				dueAt = s.firstDue
+			}
+			if tk, terr := taker.TakeTicket(hostlimit.HostTime(dueAt)); terr == nil {
+				ticket = tk
+			}
+		}
+		if ticket != nil {
+			cutCtx = hostlimit.WithTicket(cutCtx, ticket)
+		}
 		trace := p.testChunkLoopTrace
 		if trace != nil {
 			trace("due", ls.LastCutNs, false)
@@ -864,6 +870,7 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 			}
 			if skipped {
 				cancel()
+				dropTicket("")
 				continue
 			}
 		} else {
@@ -873,8 +880,16 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 			}
 		}
 		cancel()
+		switch {
+		case err == nil:
+			dropTicket("") // admitted: the limiter consumed it
+		case errors.Is(err, hostlimit.ErrSlotsHeld):
+			// a wait: keep the place
+		default:
+			dropTicket(err.Error())
+		}
 		s = pol.after(s, start, time.Now(), err, layer.Stats().CutSeq)
-		wait.record(s)
+		wait.record(s, ticket)
 		if err != nil && !errors.Is(err, storage.ErrChunkCaptureRefused) && ctx.Err() == nil {
 			log.Printf("durable: %s chunk cut for volume=%s: %v (retry in %s)", reason, volumeID, err, s.backoff)
 		}
@@ -1440,17 +1455,35 @@ type cutWaitSlot struct {
 	waitSeq uint64
 }
 
-func (w *cutWaitSlot) record(s cutSchedule) {
+func (w *cutWaitSlot) record(s cutSchedule, ticket *hostlimit.Ticket) {
 	if w == nil {
 		return
 	}
-	st := CutScheduleStatus{HostSlotWaits: s.slotWaits}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	st := CutScheduleStatus{HostSlotWaits: s.slotWaits, TicketDropReason: w.st.TicketDropReason}
 	if !s.slotWaitSince.IsZero() {
 		st.HostSlotWaitSinceNs = s.slotWaitSince.UnixNano()
 	}
-	w.mu.Lock()
+	if ticket != nil {
+		st.TicketDueHostNs = ticket.Due()
+		st.TicketsSkipped = ticket.Skipped()
+	}
 	w.st, w.waitSeq = st, s.seenSeq
-	w.mu.Unlock()
+}
+
+// dropped records why the timer's ticket was given up ("" for the normal
+// end of a wait: admitted, or a cut succeeded).
+func (w *cutWaitSlot) dropped(reason string) {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.st.TicketDueHostNs, w.st.TicketsSkipped = 0, 0
+	if reason != "" {
+		w.st.TicketDropReason = reason
+	}
 }
 
 // status is the recorded state as of the layer's current CutSeq.

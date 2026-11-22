@@ -353,6 +353,9 @@ type ChunkStatus struct {
 type CutScheduleStatus struct {
 	HostSlotWaits       uint64 // automatic cuts refused because every host slot was held
 	HostSlotWaitSinceNs int64  // wall time of the first such refusal since the last successful cut; 0 when not waiting
+	TicketDueHostNs     int64  `json:",omitempty"` // the waiting cut's host ticket: its due time on the host monotonic clock; absent when not waiting
+	TicketsSkipped      uint64 `json:",omitempty"` // earlier tickets the waiting cut passed by the skip rule
+	TicketDropReason    string `json:",omitempty"` // why the last ticket was given up before admission, when it was a refusal that waiting cannot fix
 }
 
 // NewDurableProvider constructs a provider. view is the ONLY
