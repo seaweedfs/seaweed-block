@@ -77,7 +77,7 @@ func testWorkspaceRegrantStorage(t *testing.T, sealed bool) {
 	}
 	write(4096, b) // completed Sync, deliberately absent from the last HEAD
 	if sealed {
-		if _, err := first.DetachVolumePlain(ctx, "v"); err != nil {
+		if _, _, err := first.DetachVolumePlain(ctx, "v"); err != nil {
 			t.Fatal(err)
 		}
 	}
