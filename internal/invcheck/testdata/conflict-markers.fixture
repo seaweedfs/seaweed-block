@@ -1,0 +1,8 @@
+| `INV-EXAMPLE-001` | kept |
+<<<<<<< HEAD
+320 rows: one side
+=======
+315 rows: the other side
+>>>>>>> origin/main
+======== a longer rule is not a marker
+<<<<<<<no space is not a marker either

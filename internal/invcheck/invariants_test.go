@@ -264,3 +264,43 @@ func TestInvariantStatementsAreShort(t *testing.T) {
 // longStatementsLeft is the number of rows testdata/long-statements.txt may
 // name. It only goes down.
 const longStatementsLeft = 0
+
+// conflictMarkers returns the 1-based lines of text that are a merge
+// conflict marker: a line starting with "<<<<<<< " or ">>>>>>> ", or a line
+// that is exactly "=======".
+func conflictMarkers(text string) []int {
+	var at []int
+	for i, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+		if strings.HasPrefix(line, "<<<<<<< ") || strings.HasPrefix(line, ">>>>>>> ") || line == "=======" {
+			at = append(at, i+1)
+		}
+	}
+	return at
+}
+
+// The marker check finds every marker of a conflicted region and nothing
+// that only looks like one (a longer rule, a marker without its space).
+func TestConflictMarkersAreFound(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "conflict-markers.fixture"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := fmt.Sprint(conflictMarkers(string(raw))), "[2 4 6]"; got != want {
+		t.Fatalf("conflict markers at lines %s; want %s", got, want)
+	}
+}
+
+// The ledger and the lists invcheck reads carry no merge conflict marker:
+// a merge resolved by hand must not leave one behind.
+func TestLedgerFilesHaveNoConflictMarkers(t *testing.T) {
+	root := repoRoot(t)
+	for _, rel := range []string{"docs/design/invariants.md", "internal/invcheck/testdata/long-statements.txt", "internal/invcheck/testdata/specs-without-bounds.txt"} {
+		raw, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, line := range conflictMarkers(string(raw)) {
+			t.Errorf("%s:%d: merge conflict marker", rel, line)
+		}
+	}
+}
