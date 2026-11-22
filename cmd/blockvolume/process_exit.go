@@ -27,21 +27,21 @@ type workspaceExit struct {
 // INV-WS-STARTUP-RETRY-001: the first outcome is immutable. The channel is a
 // single latched wakeup, not a queue of competing shutdown events.
 type processExit struct {
-	parent  context.Context
-	once    sync.Once
-	done    chan struct{}
-	outcome workspaceExit
+	parent   context.Context
+	once     sync.Once
+	done     chan struct{}
+	decision chan workspaceExit
 }
 
 func newProcessExit(ctx context.Context) *processExit {
-	return &processExit{parent: ctx, done: make(chan struct{})}
+	return &processExit{parent: ctx, done: make(chan struct{}), decision: make(chan workspaceExit, 1)}
 }
 func (e *processExit) choose(out workspaceExit) {
 	e.once.Do(func() {
 		if e.parent.Err() != nil {
 			out = workspaceExit{reason: "signal"}
 		}
-		e.outcome = out
+		e.decision <- out // exactly one send; the sole slot cannot block under a provider lock
 		close(e.done)
 	})
 }
@@ -59,27 +59,29 @@ func superviseProcess(ctx context.Context, work func(*processExit) int) int {
 	e := newProcessExit(ctx)
 	finished := make(chan int, 1)
 	go func() { finished <- work(e) }()
+	var out workspaceExit
 	select {
 	case code := <-finished:
 		select {
-		case <-e.done:
-			if e.outcome.code == 0 {
+		case out = <-e.decision:
+			if out.code == 0 {
 				return code
 			}
-			return reportWorkspaceExit(e.outcome)
+			return reportWorkspaceExit(out)
 		default:
 			return code
 		}
 	case <-ctx.Done():
 		e.choose(workspaceExit{reason: "signal"})
-	case <-e.done:
+		out = <-e.decision
+	case out = <-e.decision:
 	}
-	if e.outcome.code == 0 {
+	if out.code == 0 {
 		return <-finished
 	}
 	timer := time.NewTimer(volume.WorkspaceDrainTimeout)
 	defer timer.Stop()
-	return finishWorkspaceExit(e.outcome, finished, timer.C)
+	return finishWorkspaceExit(out, finished, timer.C)
 }
 
 func finishWorkspaceExit(out workspaceExit, finished <-chan int, deadline <-chan time.Time) int {

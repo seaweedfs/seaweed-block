@@ -37,16 +37,22 @@ func TestWorkspaceExitFirstOutcomeIsLatched(t *testing.T) {
 		e.choose(first)
 		e.choose(workspaceExit{75, "assignment_timeout"})
 		<-e.done
-		if e.outcome != first {
-			t.Fatalf("first=%+v changed to %+v", first, e.outcome)
+		if got := <-e.decision; got != first {
+			t.Fatalf("first=%+v changed to %+v", first, got)
+		}
+		e.choose(workspaceExit{78, "superseded"})
+		select {
+		case got := <-e.decision:
+			t.Fatalf("later outcome published: %+v", got)
+		default:
 		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	e := newProcessExit(ctx)
 	e.choose(workspaceExit{78, "superseded"})
-	if e.outcome.code != 0 || e.outcome.reason != "signal" {
-		t.Fatalf("observed signal lost: %+v", e.outcome)
+	if got := <-e.decision; got.code != 0 || got.reason != "signal" {
+		t.Fatalf("observed signal lost: %+v", got)
 	}
 }
 
