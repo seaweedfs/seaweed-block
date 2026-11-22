@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"syscall"
 	"testing"
 	"time"
 
@@ -50,7 +49,7 @@ type joinedBudgetBackend struct {
 
 func (b *joinedBudgetBackend) result(ctx context.Context) error {
 	if b.physical {
-		return errors.Join(syscall.EIO, ctx.Err())
+		return errors.Join(errors.New("physical fsync failure"), ctx.Err())
 	}
 	return fmt.Errorf("durability wait: %w", ctx.Err())
 }

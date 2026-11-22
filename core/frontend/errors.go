@@ -20,7 +20,3 @@ var ErrBackendClosed = errors.New("frontend: backend closed")
 // ErrBackendBusy is a transient local admission timeout. Retry may succeed;
 // it must not be used for a sticky persistence or integrity fault.
 var ErrBackendBusy = errors.New("frontend: backend temporarily busy")
-
-// ErrReplicationAckUnavailable means the configured replication acknowledgement
-// was unavailable. It is retryable busy only together with a deadline cause.
-var ErrReplicationAckUnavailable = errors.New("durable: replication ack unavailable")

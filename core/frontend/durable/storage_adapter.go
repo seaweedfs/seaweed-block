@@ -71,7 +71,7 @@ const (
 
 // ErrReplicationAckUnavailable is returned when WriteAckRequireObserverAck
 // cannot obtain the configured replication acknowledgement.
-var ErrReplicationAckUnavailable = frontend.ErrReplicationAckUnavailable
+var ErrReplicationAckUnavailable = errors.New("durable: replication ack unavailable")
 
 // WriteObserver is the narrow seam StorageBackend uses to notify the
 // replication layer of each successfully-applied local write and to

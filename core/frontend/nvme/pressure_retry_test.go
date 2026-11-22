@@ -2,9 +2,9 @@ package nvme
 
 import (
 	"context"
+	"errors"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/testback"
-	"syscall"
 	"testing"
 )
 
@@ -19,7 +19,7 @@ func TestSessionPressureTimeoutIsRetryableNamespaceNotReady(t *testing.T) {
 	s := &Session{handler: NewIOHandler(HandlerConfig{Backend: b}), respCh: make(chan *response, 1), done: make(chan struct{})}
 	for _, busy := range []bool{true, false} {
 		if !busy {
-			b.err = syscall.EIO
+			b.err = errors.New("sticky physical I/O fault")
 		}
 		req := &Request{payload: make([]byte, 512)}
 		req.capsule.OpCode = ioWrite

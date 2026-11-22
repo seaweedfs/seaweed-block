@@ -3,7 +3,6 @@ package nvme
 import (
 	"context"
 	"errors"
-	"syscall"
 	"testing"
 	"time"
 
@@ -21,7 +20,7 @@ func (b *budgetReadBackend) Read(ctx context.Context, _ int64, p []byte) (int, e
 	b.deadline, _ = ctx.Deadline()
 	<-ctx.Done()
 	if b.physical {
-		return 0, errors.Join(ctx.Err(), syscall.EIO)
+		return 0, errors.Join(ctx.Err(), errors.New("physical read failure"))
 	}
 	return 0, frontend.ErrBackendBusy
 }

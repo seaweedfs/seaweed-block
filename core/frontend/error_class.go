@@ -5,7 +5,8 @@ import (
 	"errors"
 	"io"
 	"log"
-	"sync/atomic"
+	"reflect"
+	"sync"
 	"syscall"
 
 	"github.com/seaweedfs/seaweed-block/core/storage"
@@ -22,24 +23,19 @@ const (
 	BackendErrorClosed
 )
 
-var unclassifiedBackendErrors atomic.Uint64
-
-// UnclassifiedBackendErrorCount reports completions using the unknown-cause
-// fallback in V1-SPEC r2.42. It is cumulative for this process.
-func UnclassifiedBackendErrorCount() uint64 { return unclassifiedBackendErrors.Load() }
+var unclassifiedBackendErrorTypes sync.Map // reflect.Type -> struct{}
 
 // ClassifyBackendError implements INV-FE-ERROR-RETRY-CLASS-001 and V1-SPEC r2.42.
 // Call only for a non-nil backend error. Known permanent causes win across the
-// entire wrapped/joined tree; unknown causes are counted and retryable.
+// entire wrapped/joined tree. Deliberate frontend markers decide otherwise;
+// a marker-free unknown error stays permanent and is logged once per leaf type.
 func ClassifyBackendError(ctx context.Context, err error) BackendErrorClass {
 	// M1 I/O error completion: inspect permanent causes before any retry marker.
 	if hasPermanentBackendCause(err) {
 		return BackendErrorPermanent
 	}
 	switch {
-	case errors.Is(err, ErrBackendBusy), errors.Is(err, storage.ErrWALPressureTimeout),
-		errors.Is(err, storage.ErrChunkHydrationPending),
-		errors.Is(err, ErrReplicationAckUnavailable) && errors.Is(err, context.DeadlineExceeded):
+	case errors.Is(err, ErrBackendBusy):
 		return BackendErrorBusy
 	case errors.Is(err, ErrStalePrimary):
 		return BackendErrorStale
@@ -48,10 +44,10 @@ func ClassifyBackendError(ctx context.Context, err error) BackendErrorClass {
 	case errors.Is(err, ErrNotReady), IsWriteDeadline(ctx, err):
 		return BackendErrorNotReady
 	default:
-		// M1 unknown completion: V1-SPEC r2.42 bounds retry at the initiator.
-		count := unclassifiedBackendErrors.Add(1)
-		log.Printf("frontend: unclassified backend error count=%d: %v", count, err)
-		return BackendErrorNotReady
+		// M1 marker-free completion: amended V1-SPEC r2.42 retains the
+		// permanent default. Backend owners must classify types seen in gates.
+		logUnclassifiedBackendError(err)
+		return BackendErrorPermanent
 	}
 }
 
@@ -66,4 +62,22 @@ func hasPermanentBackendCause(err error) bool {
 		}
 	}
 	return false
+}
+
+// Wrapper types are not backend error types: inspect each unknown leaf so one
+// fmt wrapper cannot suppress the first diagnostic for a different cause type.
+func logUnclassifiedBackendError(err error) {
+	if joined, ok := err.(interface{ Unwrap() []error }); ok && len(joined.Unwrap()) != 0 {
+		for _, cause := range joined.Unwrap() {
+			logUnclassifiedBackendError(cause)
+		}
+		return
+	}
+	if cause := errors.Unwrap(err); cause != nil {
+		logUnclassifiedBackendError(cause)
+		return
+	}
+	if _, logged := unclassifiedBackendErrorTypes.LoadOrStore(reflect.TypeOf(err), struct{}{}); !logged {
+		log.Printf("frontend: unclassified backend error type=%T: %v", err, err)
+	}
 }

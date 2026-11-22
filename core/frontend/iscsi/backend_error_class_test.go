@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
+	"os/exec"
 	"strings"
 	"syscall"
 	"testing"
@@ -41,11 +43,14 @@ func TestBackendErrorClassesAcrossFrontends(t *testing.T) {
 		{name: "wal-pressure", err: fmt.Errorf("%w: %w", frontend.ErrBackendBusy, storage.ErrWALPressureTimeout), status: 0x08, sct: 0, sc: 0x82},
 		{name: "hydration-pending", err: fmt.Errorf("%w: %w", frontend.ErrBackendBusy, storage.ErrChunkHydrationPending), status: 0x08, sct: 0, sc: 0x82},
 		{name: "observer-deadline", err: fmt.Errorf("%w: %w: %w", frontend.ErrBackendBusy, durable.ErrReplicationAckUnavailable, context.DeadlineExceeded), status: 0x08, sct: 0, sc: 0x82, deadline: true},
-		{name: "unknown", err: errors.New("unrecognized backend cause"), status: 0x02, key: 0x02, asc: 0x04, ascq: 0x01, sct: 0, sc: 0x82},
-		{name: "pressure-without-busy-marker", err: storage.ErrWALPressureTimeout, status: 0x08, sct: 0, sc: 0x82},
-		{name: "hydration-without-busy-marker", err: storage.ErrChunkHydrationPending, status: 0x08, sct: 0, sc: 0x82},
-		{name: "observer-deadline-without-busy-marker", err: errors.Join(durable.ErrReplicationAckUnavailable, context.DeadlineExceeded), status: 0x08, sct: 0, sc: 0x82, deadline: true},
+		{name: "unknown", err: errors.New("unrecognized backend cause"), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6},
+		{name: "pressure-without-busy-marker", err: storage.ErrWALPressureTimeout, status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6},
+		{name: "hydration-without-busy-marker", err: storage.ErrChunkHydrationPending, status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6},
+		{name: "observer-deadline-without-busy-marker", err: errors.Join(durable.ErrReplicationAckUnavailable, context.DeadlineExceeded), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6, deadline: true},
 		{name: "unknown-with-busy", err: errors.Join(errors.New("unrecognized backend cause"), frontend.ErrBackendBusy), status: 0x08, sct: 0, sc: 0x82},
+		{name: "unknown-with-not-ready", err: errors.Join(errors.New("unrecognized backend cause"), frontend.ErrNotReady), status: 0x02, key: 0x02, asc: 0x04, ascq: 0x01, sct: 0, sc: 0x82},
+		{name: "unknown-with-stale", err: errors.Join(errors.New("unrecognized backend cause"), frontend.ErrStalePrimary), status: 0x02, key: 0x02, asc: 0x04, ascq: 0x0a, sct: 3, sc: 3},
+		{name: "unknown-with-closed", err: errors.Join(errors.New("unrecognized backend cause"), frontend.ErrBackendClosed), status: 0x02, key: 0x02, asc: 0x04, ascq: 0x03, sct: 3, sc: 2},
 		{name: "unknown-with-physical", err: errors.Join(errors.New("unrecognized backend cause"), syscall.EIO), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6},
 		{name: "fsync-fault", err: errors.Join(frontend.ErrBackendBusy, storage.ErrFsyncFailed), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6},
 		{name: "append-fault", err: errors.Join(frontend.ErrBackendBusy, storage.ErrAppendFailed), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6},
@@ -124,24 +129,45 @@ func TestBackendErrorClassesAcrossFrontends(t *testing.T) {
 	}
 }
 
-// INV-FE-ERROR-RETRY-CLASS-001 / V1-SPEC r2.42: unknown completions are
-// retryable on both protocols, counted once per completion, and diagnosable.
-func TestUnclassifiedBackendErrorIsRetryableAndCounted(t *testing.T) {
+type unknownCompletionError struct{ message string }
+
+func (e unknownCompletionError) Error() string { return e.message }
+
+type otherUnknownCompletionError struct{}
+
+func (otherUnknownCompletionError) Error() string { return "unknown completion B" }
+
+// INV-FE-ERROR-RETRY-CLASS-001 / amended V1-SPEC r2.42: no marker means
+// permanent. Unknown leaf types are logged once across wrappers and protocols.
+func TestUnclassifiedBackendErrorIsPermanentAndLoggedOncePerType(t *testing.T) {
+	// The log-once cache is process-wide; give each test repetition a fresh
+	// process rather than exposing an implementation-only reset operation.
+	if os.Getenv("FRONTEND_UNCLASSIFIED_LOG_CHILD") != "1" {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestUnclassifiedBackendErrorIsPermanentAndLoggedOncePerType$", "-test.count=1")
+		cmd.Env = append(os.Environ(), "FRONTEND_UNCLASSIFIED_LOG_CHILD=1")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("log-once child: %v\n%s", err, output)
+		}
+		return
+	}
 	var logs bytes.Buffer
 	previous := log.Writer()
 	log.SetOutput(&logs)
 	t.Cleanup(func() { log.SetOutput(previous) })
-	before := frontend.UnclassifiedBackendErrorCount()
-	b := classifiedErrorBackend{Backend: testback.NewRecordingBackend(frontend.Identity{VolumeID: "v"}), err: errors.New("unknown completion cause")}
-	scsi := iscsi.NewSCSIHandler(iscsi.HandlerConfig{Backend: b}).HandleCommand(context.Background(), [16]byte{iscsi.ScsiSyncCache10}, nil)
-	nv := nvme.NewIOHandler(nvme.HandlerConfig{Backend: b}).Handle(context.Background(), nvme.IOCommand{NSID: 1})
-	if scsi.Status != 0x02 || scsi.SenseKey != 0x02 || scsi.ASC != 0x04 || scsi.ASCQ != 0x01 || nv.SCT != 0 || nv.SC != 0x82 {
-		t.Fatalf("unknown completion not retryable: SCSI=%+v NVMe=%+v", scsi, nv)
+	for _, cause := range []error{
+		fmt.Errorf("wrapped: %w", unknownCompletionError{"unknown completion A"}),
+		errors.Join(unknownCompletionError{"same type, other value"}, otherUnknownCompletionError{}),
+	} {
+		b := classifiedErrorBackend{Backend: testback.NewRecordingBackend(frontend.Identity{VolumeID: "v"}), err: cause}
+		scsi := iscsi.NewSCSIHandler(iscsi.HandlerConfig{Backend: b}).HandleCommand(context.Background(), [16]byte{iscsi.ScsiSyncCache10}, nil)
+		nv := nvme.NewIOHandler(nvme.HandlerConfig{Backend: b}).Handle(context.Background(), nvme.IOCommand{NSID: 1})
+		if scsi.Status != 0x02 || scsi.SenseKey != 0x03 || scsi.ASC != 0x0c || nv.SCT != 0 || nv.SC != 6 {
+			t.Fatalf("marker-free completion not permanent: SCSI=%+v NVMe=%+v", scsi, nv)
+		}
 	}
-	if got := frontend.UnclassifiedBackendErrorCount() - before; got != 2 {
-		t.Fatalf("unclassified completions=%d want 2", got)
-	}
-	if strings.Count(logs.String(), "frontend: unclassified backend error count=") != 2 || !strings.Contains(logs.String(), "unknown completion cause") {
-		t.Fatalf("unclassified reason/count missing: %q", logs.String())
+	if strings.Count(logs.String(), "frontend: unclassified backend error type=") != 2 || !strings.Contains(logs.String(), "unknown completion A") || !strings.Contains(logs.String(), "unknown completion B") {
+		t.Fatalf("expected one log for each leaf type across both frontends: %q", logs.String())
 	}
 }

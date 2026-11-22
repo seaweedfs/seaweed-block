@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -48,9 +47,9 @@ func TestNVMeWriteFUACompletion(t *testing.T) {
 		wantSC            uint8
 	}{
 		{name: "FUA waits for Sync", fua: true},
-		{name: "Sync failure is not success", fua: true, syncErr: syscall.EIO, wantSC: nvme.SCInternalError},
+		{name: "Sync failure is not success", fua: true, syncErr: errors.New("sync failed"), wantSC: nvme.SCInternalError},
 		{name: "ordinary write does not Sync"},
-		{name: "failed write does not Sync", fua: true, writeErr: syscall.EIO, wantSC: nvme.SCInternalError},
+		{name: "failed write does not Sync", fua: true, writeErr: errors.New("write failed"), wantSC: nvme.SCInternalError},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b := &fuaBackend{RecordingBackend: testback.NewRecordingBackend(frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1}), entered: make(chan struct{}), release: make(chan struct{}), syncErr: tc.syncErr, writeErr: tc.writeErr}
