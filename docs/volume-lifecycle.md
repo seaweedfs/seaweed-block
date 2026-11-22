@@ -78,7 +78,8 @@ volumes:
 In a multi-host cluster, register each node by the address it connects to
 blockmaster from, never loopback. One server id names one host: a volume host whose
 server id is registered on `127.0.0.1` is refused with `server id s1 is registered on
-host 127.0.0.1; refused from <address>: one server id names one host`. The loopback
+host 127.0.0.1 but connects from <address>: register the node by the address it
+connects from (not loopback) in the cluster spec`. The loopback
 addresses above fit only when blockmaster and blockvolume run on the same machine.
 
 **3. blockmaster flags.** `--cluster-spec` replaces `--topology` (setting both
