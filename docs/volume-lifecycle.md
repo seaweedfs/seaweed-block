@@ -123,6 +123,24 @@ sw-block ops volume-unheld --path /var/lib/sw-block-volume/volumes/v1.bin
 the file; exit 1 is `held: a live process on this host holds ...`. It proves
 nothing about another host.
 
+### Do not
+
+These are rules for the operator. The product does not detect every breach.
+
+- **One local root per volume per host.** Do not start a second `blockvolume` for the
+  same volume on a host with another `--durable-root`.
+- **Never restore a local root from a copy** (a file copy, a disk snapshot, a backup).
+  A copy is older than what the volume acknowledged. To go back, start from the remote
+  image with a fresh root.
+- **After a forced move, stop and disable the old host's unit.** Until you do, it
+  restarts about every 35 seconds, logs that it waits for an assignment, and cannot
+  serve.
+- **Before moving a volume back to a host that held it earlier, move that host's old
+  root aside** (after the check above). The old root is stale; the new holder must start
+  on a fresh one.
+- **Never revoke before the seal is confirmed** (see the hand-over steps): a revoke
+  without an ACK cannot be undone on one node.
+
 ## Which procedures run end to end
 
 Each procedure below runs as written on this page, with the real binaries, two
