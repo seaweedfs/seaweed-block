@@ -78,34 +78,22 @@ func OpenNodeInventoryStore(dir string) (*NodeInventoryStore, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("%w: empty dir", ErrInvalidNodeRegistration)
 	}
-	dir = filepath.Clean(dir)
-	ancestor := dir
-	for {
-		if _, err := os.Stat(ancestor); err == nil {
-			break
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("lifecycle: stat store ancestor: %w", err)
-		}
-		parent := filepath.Dir(ancestor)
-		if parent == ancestor {
-			return nil, fmt.Errorf("lifecycle: no existing store ancestor for %q", dir)
-		}
-		ancestor = parent
+	dir, err := filepath.Abs(filepath.Clean(dir))
+	if err != nil {
+		return nil, fmt.Errorf("lifecycle: resolve store path: %w", err)
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("lifecycle: mkdir node inventory %q: %w", dir, err)
 	}
-	// INV-LIFECYCLE-STORE-DURABLE-001: sync every new directory's parent,
-	// deepest first. Existing-store retries still sync the store's parent.
-	for current := dir; ; {
-		parent := filepath.Dir(current)
+	// INV-LIFECYCLE-STORE-DURABLE-001: existence does not prove durability.
+	// Every open syncs the full ancestor chain, also after a failed first open.
+	for parent := filepath.Dir(dir); ; parent = filepath.Dir(parent) {
 		if err := syncBindingParent(parent); err != nil {
-			return nil, fmt.Errorf("lifecycle: sync store parent: %w", err)
+			return nil, fmt.Errorf("lifecycle: sync store ancestor %q: %w", parent, err)
 		}
-		if current == ancestor || parent == ancestor {
+		if parent == filepath.Dir(parent) {
 			break
 		}
-		current = parent
 	}
 
 	s := &NodeInventoryStore{
