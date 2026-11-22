@@ -182,7 +182,9 @@ Each procedure below runs as written on this page, with the real binaries, two
 | After a crash: return after a lapsed lease (started 65 s after the stop) | `TestProcedureReturnAfterALapsedLease` | runs |
 | Revoke without the ACK, then forced move to another node | `TestProcedureRevokeWithoutACKThenForcedMove` | runs |
 | Forced move, then the old host returns | `TestProcedureForcedMoveWithTheOldHostReturning` | runs: the returning old host does not take the new host's assignment, does not report ready and does not listen for I/O; it logs the refusal and exits 75, on its old local root and on a fresh one, each time the unit starts it; the new host keeps serving |
-| A start inside the window before the re-grant barrier ("started too early") | none | not run |
+| Same host: restart after a crash inside the lease | `TestProcedureSameHostCrashRestartInsideTheLease` | runs |
+| After a crash: started 40 s after the stop, the barrier passes inside the start wait | `TestProcedureStartInsideTheBarrierWaitIsReGranted` | runs: does not serve while renewals are refused, serves once re-granted |
+| After a crash: started too early (the start wait ends before the barrier) | `TestProcedureStartTooEarlyExitsAndARestartServes` | runs: exits 75 with `reason=assignment_timeout`; a later start serves |
 | Hand-over between two machines | none | not run (the tests use one machine's loopback) |
 
 ## Planned hand-over
@@ -297,24 +299,30 @@ without the move does not serve: a sealed HEAD stays sealed for its own epoch.
 unit restarts a crashed one after `RestartSec=5s`) renews at once and serves
 from its local WAL.
 
-**The lease lapsed, and the holder is still the recorded holder.** A lapsed
-holder fences itself, drains and exits with status 0, logging
-`workspace lease: fenced volume=v1 replica=r1 epoch=E: lease expired at ...`.
-Start it again yourself. blockmaster grants it again only after a barrier: the
-stored lease horizon (up to 45 s after the last renewal) and the last grant,
-each plus `--workspace-max-clock-skew` (default `20s`). With the defaults that
-is at most **65 seconds after the process stopped**; if blockmaster restarted
-meanwhile, also at least 50 seconds (30 s plus the skew) after that restart,
-whichever is later. Until then the process logs, every second,
-`workspace lease: renewal failed after ...: ... workspace forced move lease
-expiry plus clock-skew margin has not elapsed`. After the grant it reclaims
-HEAD and serves its local WAL: nothing acknowledged is lost.
+**The lease lapsed, and the holder is still the recorded holder.** A holder whose
+lease lapses fences itself, drains and exits with status 75, logging
+`workspace lease: fenced volume=v1 replica=r1 epoch=E: lease expired at ...` and
+`blockvolume: exiting status=75 reason=lease_expired`. The example unit starts it
+again (`Restart=on-failure`, `RestartSec=5s`); so does any supervisor that restarts on
+a non-zero status. You do not need to time the restart.
 
-**Start it no earlier than 65 seconds after it stopped.** blockvolume waits for
-its lease only 30 seconds after start (fixed, no flag). Started too early, it logs
-`durable: chunk authority wait for volume=v1 ended after ...: assignment
-unavailable, not serving (...)`, keeps running and does not serve. Restart it
-once more: its lease is then valid and it serves at once.
+blockmaster grants the lease again only after a barrier: the stored lease horizon
+(up to 45 s after the last renewal) and the last grant, each plus
+`--workspace-max-clock-skew` (default `20s`). With the defaults that is at most
+**65 seconds after the process stopped**; if blockmaster restarted meanwhile, also at
+least 50 seconds (30 s plus the skew) after that restart, whichever is later. Until
+then the process logs, every second, `workspace lease: renewal failed after ...: ...
+workspace forced move lease expiry plus clock-skew margin has not elapsed`, and does
+not serve. After the grant it reclaims HEAD and serves its local WAL: nothing
+acknowledged is lost.
+
+**A start waits 30 seconds for its lease** (fixed, no flag). If the barrier passes
+inside that wait, the process is granted and serves. If it does not, the process logs
+`durable: chunk authority wait for volume=v1 ended after ...: assignment unavailable,
+not serving (...)`, and exits with `blockvolume: exiting status=75
+reason=assignment_timeout`; the unit starts it again, and a start whose wait reaches
+past the barrier serves. With the default flags the second start is enough. The unit
+stops trying after 10 starts in 10 minutes.
 
 No re-grant happens after a revoke, a recorded ACK or a move of the volume.
 
@@ -358,7 +366,7 @@ serving when its lease ends. Make sure it stays down.
 | renewal fails with `workspace lease: revocation or move pending` | The volume was revoked or moved | The process cannot serve again; continue the hand-over |
 | renewal fails with `workspace lease: stale authority` | A move gave the volume a newer epoch | This process is the old holder: stop it, do not restart it |
 | renewal fails with `... clock-skew margin has not elapsed` | Waiting for the re-grant barrier | Wait (at most 65 s after the stop, with defaults) |
-| `durable: chunk authority wait for volume=v1 ended after ...: assignment unavailable, not serving` | Started before its lease was granted | Restart it once more after the barrier |
+| `durable: chunk authority wait for volume=v1 ended after ...: assignment unavailable, not serving` | Started before its lease was granted; the process then exits 75 (`reason=assignment_timeout`) | Nothing under the example unit: it is started again and a later start serves. Without a supervisor, start it again after the barrier |
 | `durable: refusing to attach volume=v1 root=...: HEAD holder=... is not this holder ... (remove or quarantine the local root)` | This host's local copy is older than a HEAD another holder published | When the process is gone (see the rule above), move `<durable-root>/v1.bin` and the files `v1.bin.chunk*` beside it into another directory, then start again: it starts fresh from HEAD |
 | `force-move: ... admissible at <time>, master clock` | The barrier has not passed | Wait until that time, rerun the same command |
 
