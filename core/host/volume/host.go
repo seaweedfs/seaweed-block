@@ -235,7 +235,7 @@ func (h *Host) recordOtherLine(f *control.AssignmentFact) {
 	// is the canonical safe deep-copy for proto messages.
 	cp := proto.Clone(f).(*control.AssignmentFact)
 	h.otherMu.Lock()
-	// A stale replay must not erase the newer foreign-holder fence (r2.34).
+	// A stale replay must not erase the newer foreign-holder fence (INV-ASSIGNMENT-HOLDER-IDENTITY-001).
 	if old := h.lastOther; old != nil && (cp.Epoch < old.Epoch || cp.Epoch == old.Epoch && cp.EndpointVersion < old.EndpointVersion) {
 		h.otherMu.Unlock()
 		return
@@ -808,7 +808,7 @@ func (h *Host) streamOnce(ctx context.Context) error {
 // OnAssignment could flip the projection Healthy before peers were
 // installed, admitting local-only writes with zero fan-out.
 func (h *Host) applyFact(fact *control.AssignmentFact) {
-	// r2.34 AUTHORITY: matching r1 and loopback endpoints do not identify a host.
+	// INV-ASSIGNMENT-HOLDER-IDENTITY-001: matching r1 and loopback endpoints do not identify a host.
 	if fact.ReplicaId == h.cfg.ReplicaID && !h.assignmentNamesSelf(fact) {
 		h.wd.notPrimary()
 		h.recordOtherLine(fact)

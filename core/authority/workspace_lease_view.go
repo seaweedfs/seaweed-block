@@ -158,7 +158,8 @@ type PublishedLine struct {
 }
 
 // PublishedAuthorityLine reads one committed line under leaf leaseMu. Identity
-// checks on renewal must not wait for p.mu, which spans authority store I/O.
+// checks on renewal must not wait for p.mu, which spans authority store I/O
+// (INV-LEASE-VIEW-001, INV-WS-RENEW-NONBLOCKING-001).
 func (p *Publisher) PublishedAuthorityLine(volume string) (PublishedLine, bool) {
 	p.leaseMu.Lock()
 	defer p.leaseMu.Unlock()
