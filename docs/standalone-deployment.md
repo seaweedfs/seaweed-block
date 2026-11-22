@@ -80,11 +80,16 @@ the example units, which turn them into flags. blockvolume itself reads only
 `SW_BLOCK_ISCSI_CHAP_USERNAME` and `SW_BLOCK_ISCSI_CHAP_SECRET`.
 
 Both blockvolume units restart failed processes after 5 seconds, except exit 78
-(superseded). Exit 75 retries through the ordinary lease and HEAD-claim gates.
+(a no-restart outcome; the final log line names the reason). Exit 75 retries
+through the ordinary lease and HEAD-claim gates.
 `StartLimitIntervalSec=600` and `StartLimitBurst=10` in `[Unit]` allow at most
 10 starts in a 10-minute window; another start in that window is refused and
 the unit enters `failed` (`start-limit-hit`). This bounds retries on a host
-that no longer holds the volume. After correcting the assignment or disabling
+that no longer holds the volume. Each retry cycle is the assignment wait
+(default 30 seconds) plus `RestartSec=5s`, so the retries reach the limit in
+about 6 minutes, inside 600 seconds. Raising the assignment wait above about
+55 seconds prevents this window from filling; raise `StartLimitIntervalSec`
+with it to retain the bound. After correcting the assignment or disabling
 the obsolete unit, an operator can use `systemctl reset-failed <unit>` and
 `systemctl start <unit>` to resume attempts. An ACKed planned stop exits 0
 and is not automatically restarted.
