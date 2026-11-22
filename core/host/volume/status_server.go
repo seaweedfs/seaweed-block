@@ -203,7 +203,7 @@ type StatusProjection struct {
 	// CatchUp shows a supporting replica's catch-up progress while it is
 	// not yet replica_ready; it is visible without being an alert.
 	CatchUp *CatchUpStatus `json:",omitempty"`
-	// Warnings are the durable store's typed recovery warnings (e.g.
+	// Warnings include routing disagreements and typed recovery warnings (e.g.
 	// wal_hole_suspected, issue #51). Visible, not an alert: they do not
 	// change Healthy or the frontend's readiness.
 	Warnings []string `json:",omitempty"`
@@ -530,6 +530,9 @@ func (s *StatusServer) authorityProjection() StatusProjection {
 		ReplicationRole:      replicationRole,
 		RoleAdmissionFailure: s.view.roleAdmissionReason(),
 		UnhealthyReason:      s.view.unhealthyReason(),
+	}
+	if warning := s.view.assignmentEndpointWarning(); warning != "" {
+		out.Warnings = append(out.Warnings, warning)
 	}
 	if since := s.view.catchUpSince(); !since.IsZero() && replicationRole != ReplicationRoleReady {
 		cu := &CatchUpStatus{ElapsedMs: time.Since(since).Milliseconds()}

@@ -187,8 +187,9 @@ type Host struct {
 	readyMarkerMu        sync.Mutex
 	supportingReadyMarks map[string]struct{}
 
-	localReadinessBlocked atomic.Bool
-	localReadinessReason  atomic.Value // string
+	assignmentEndpointWarning atomic.Value // diagnostic string; never an admission guard
+	localReadinessBlocked     atomic.Bool
+	localReadinessReason      atomic.Value // string
 	// localRecoveryReason is the typed reason local durable recovery
 	// failed (#133); empty when none or unclassified.
 	localRecoveryReason atomic.Value // string
@@ -520,7 +521,7 @@ func (h *Host) getReplication() replicaSetUpdater {
 }
 
 // IsSuperseded gates a newer foreign replica line, or a same-replica foreign
-// server/endpoint identity strictly newer than an adopted local lineage. An explicitly
+// server identity strictly newer than an adopted local lineage. An explicitly
 // matching self identity remains an ordinary adapter update.
 func (h *Host) IsSuperseded(selfReplicaID string, selfEpoch, selfEV uint64) bool {
 	h.otherMu.Lock()
@@ -856,6 +857,8 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 			h.cfg.VolumeID, fact.ReplicaId, fact.Epoch, h.cfg.ReplicaID)
 		return
 	}
+
+	h.reportAssignmentEndpoints(fact)
 
 	// The recovery watchdog runs from the primary assignment, before any
 	// admission step can fail (#128 rule 6).

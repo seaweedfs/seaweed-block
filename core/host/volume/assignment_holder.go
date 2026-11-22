@@ -1,14 +1,15 @@
 package volume
 
-import control "github.com/seaweedfs/seaweed-block/core/rpc/control"
+import (
+	"fmt"
+	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
+)
 
 // assignmentNamesSelf implements INV-AUTH-HOLDER-IDENTITY-001. Missing server identity is
-// refused; endpoints qualify identity only when the master carries them.
+// refused. Endpoints are routing data and never qualify holder identity.
 func (h *Host) assignmentNamesSelf(f *control.AssignmentFact) bool {
 	return f.GetServerId() != "" && f.GetServerId() == h.cfg.ServerID &&
-		f.GetVolumeId() == h.cfg.VolumeID && f.GetReplicaId() == h.cfg.ReplicaID &&
-		(f.GetDataAddr() == "" || f.GetDataAddr() == h.cfg.DataAddr) &&
-		(f.GetCtrlAddr() == "" || f.GetCtrlAddr() == h.cfg.CtrlAddr)
+		f.GetVolumeId() == h.cfg.VolumeID && f.GetReplicaId() == h.cfg.ReplicaID
 }
 
 // observeForeignHolder implements M3 / INV-AUTH-HOLDER-IDENTITY-001.
@@ -33,4 +34,23 @@ func (h *Host) observeForeignHolder(f *control.AssignmentFact) {
 		h.log.Printf("blockvolume: foreign holder ingress fence: %v", err)
 	}
 	h.log.Printf("blockvolume: volume %s superseded by assignment server=%q replica=%q; fenced, not serving", h.cfg.VolumeID, f.ServerId, f.ReplicaId)
+}
+
+// reportAssignmentEndpoints is diagnostic only under INV-AUTH-HOLDER-IDENTITY-001:
+// the master's published routing values need not spell this process's listeners.
+func (h *Host) reportAssignmentEndpoints(f *control.AssignmentFact) {
+	warning := ""
+	if (f.DataAddr != "" && f.DataAddr != h.cfg.DataAddr) || (f.CtrlAddr != "" && f.CtrlAddr != h.cfg.CtrlAddr) {
+		warning = fmt.Sprintf("master advertises data=%s ctrl=%s for this holder; this process listens on %s, %s", f.DataAddr, f.CtrlAddr, h.cfg.DataAddr, h.cfg.CtrlAddr)
+	}
+	previous := h.assignmentEndpointWarning.Swap(warning)
+	if warning != "" && previous != warning {
+		h.log.Printf("blockvolume: %s", warning)
+	}
+}
+
+// AssignmentEndpointWarning is visible on status without changing readiness.
+func (h *Host) AssignmentEndpointWarning() string {
+	warning, _ := h.assignmentEndpointWarning.Load().(string)
+	return warning
 }
