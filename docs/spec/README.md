@@ -103,6 +103,32 @@ Two kinds of config are **expected to violate**:
 
 Each `.cfg` names its spec on its first line.
 
+## Exhausted bounds
+
+One row per spec: a configuration that TLC explored completely (breadth-first,
+no error, queue empty), the bounds of that configuration, its distinct state
+count, and what the model leaves out. A pass means "no violation exists within
+these bounds", nothing more. A spec is added to this directory together with
+its row; `internal/invcheck` checks that each row names an existing spec and
+configuration and fills every cell. Specs that predate this table are listed
+in `internal/invcheck/testdata/specs-without-bounds.txt`; the list only
+shrinks. The sections below hold the full results, the negative
+configurations and the counterexamples.
+
+| Spec | Configuration | Bounds | Distinct states | Not modelled |
+|---|---|---|---|---|
+| `ForkDelete.tla` | `cfg/ForkDelete_safe_na_P2_D1E2G5.cfg` | deadline D=1, skew E=2, apply bound P=2, grace G=5 (the boundary G = D + E + P), check-then-publish fork, three clocks | 15,730,209 | guest I/O; GC as more than one atomic step; more than one fork per parent read |
+| `FrozenDetachBudget.tla` | `cfg/FrozenDetachBudget.cfg` | one externally frozen attempt; time in tenths of a second | 439 | physical latency; the external controller's re-freeze limit; fencing and CAS races during the cut |
+| `GCClockSkew.tla` | `GCClockSkew_safe.cfg` | G=3, S=1, Q=1, Born=10, MaxT=17 | 96 | the root scan, copy settlement and higher-epoch guards; clocks outside the configured skew |
+| `GCDeleteProgress.tla` | `GCDeleteProgress_safe.cfg` | three ordered candidates, the first DELETE rejected | 4 | root and epoch admission; elapsed coverage; persistence |
+| `HeadReopenBelt.tla` | `cfg/HeadReopenBelt.cfg` | one HEAD, one old server-held CAS, one reopen, one new acknowledged image, one nonempty base | 12 | storage I/O and durability; WAL recovery; an empty root with a delayed first exclusive create |
+| `PlainDetach.tla` | `cfg/PlainDetach.cfg` | up to two I/O readers, frontend close | 10 | HEAD publication; authority; physical I/O; wall-clock bounds; failure settlement |
+| `PlainSealReplay.tla` | `cfg/PlainSealReplay.cfg` | one seal request, process memory kept or lost, seven read observations of HEAD | 42 | the controller's pending record and its boot refusal; the hand-over; RPC delivery |
+| `RestoreIndependence.tla` | `cfg/RestoreIndependence_nc_safe_n4.cfg` | no-claim design, the largest of the safe configurations (`n4`) | 2,752,518 | guest writes to the target while it takes ownership; GC that takes time; more than one restore per snapshot |
+| `ScopedMaintenanceGC.tla` | `ScopedMaintenanceGC_safe.cfg` | three keys across two volumes, one foreign-only root | 10 | the complete mark and the grace timing (in `RetentionGCTiming`); density and metadata-RPC cost |
+| `SealedReopen.tla` | `cfg/SealedReopen.cfg` | one sealed HEAD of the same holder and epoch, one reopen | 2 | the hand-over and its liveness; RPC delivery; any other holder or epoch |
+| `WorkspaceMoveOutcome.tla` | `cfg/WorkspaceMoveOutcome.cfg` | one volume, seven error causes, one failed write, one reply | 135 | authority changes; journal durability; lease safety; RPC delivery; reload |
+
 ## Specs at a glance
 
 State counts are distinct states for exhaustive passes. "N-step trace" is the
@@ -572,3 +598,73 @@ controls in `TestWorkspaceUncertaintyPrecedesRequestRefusal`. Actual request
 cancellation retains its own controls, including a conflicting dependency status.
 These are reply-classification claims, not authority-durability or delivery proof.
 #344 review qualification: `TestFrozenDrainObservationPreservesKnownBeforeReasonMutation` covers the known observation. (The HTTP-level drain refusal test was removed when `/chunk/detach` stopped admitting frozen requests in this release.) `TestFrozenSaturatedTailRemainsKnownButNonActionable` and the literal 60 s/61 s candidate cases preserve the existing saturation sentinel (zero slack, not a complete duration). These native controls add no model claim or admission guard.
+
+
+### Same-owner process reopen belt
+
+`HeadReopenBelt.tla` checks M4 Claiming -> Holder and
+`INV-WS-REOPEN-FENCE-001` at one HEAD serialization point. One old server-held
+CAS, one reopen and one new acknowledged image are interleaved. Claim replaces
+the generation while preserving the observed image; the old CAS evaluates its
+original generation when applied. This abstracts storage I/O and durability;
+native tests cover WAL recovery and acknowledged bytes.
+
+TLC 2.19, tool SHA256
+`936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`,
+2026-11-21: `cfg/HeadReopenBelt.cfg` exhausted 14 generated / 12 distinct states,
+depth 6, queue empty. `OldCASCannotLandAfterReopen` and
+`PublishedAcknowledgedImage` hold. `cfg/HeadReopenBelt_no_claim.cfg` violates
+`OldCASCannotLandAfterReopen` at depth 4 (5 distinct states). That negative maps
+to `TestClaimChunkHeadSameOwnerReopenRejectsKilledProcessCAS` and the real
+cut/recovered-WAL control `TestHeadBeltSameOwnerReopenPreservesAcknowledgedWrites`;
+`TestLocalReopenClaimsBeforeServing` covers the provider existing-root path.
+The finite model checks one nonempty base; the native/public claim test also
+covers an empty root with a delayed first-cut exclusive create.
+
+### Same-incarnation reopen after seal
+
+`SealedReopen.tla` checks the ruled same-epoch/holder M4 Claiming -> Detached
+refusal (`INV-WS-SEALED-REOPEN-001`). It abstracts one detached proof and one
+reopen: no prepare, CAS, generation change or serving is permitted. This is a
+local guard model, not the full handover/liveness or RPC-delivery model.
+TLC 2.19 (same tool SHA256 above), 2026-11-21: `cfg/SealedReopen.cfg` exhausted
+2 generated / 2 distinct states, depth 2, queue empty. Both
+`SealedReopenPreservesProof` and `SealedReopenCannotServe` hold.
+`cfg/SealedReopen_reactivate.cfg` violates `SealedReopenPreservesProof` at depth 2.
+That negative maps to `TestClaimChunkHeadSameOwnerReopenPreservesSeal` and
+`TestRestoreEqualOwnerDetachedHEADStaysSealed`. The latter performs a real plain
+seal, restarts storage on either the retained local root or a fresh root under
+the same assignment, verifies unchanged proof/bytes and no frontend I/O, then
+loads that exact sealed image on the planned new holder at a higher epoch.
+The earlier test expecting same-owner reactivation is replaced by this ruled
+terminal behavior. The active-root generation belt model and its bounds remain
+unchanged; its serving precondition excludes a sealed same-owner incarnation.
+
+### Plain seal replay from the filer
+
+`PlainSealReplay.tla` checks M5 PlainStop -> RemoteProof -> SealedReply and
+`INV-WS-SEAL-REPLAY-001`. One operation may keep process memory or restart;
+seven read observations represent valid proof, active HEAD, wrong holder,
+wrong epoch, malformed proof, unreadable filer or moved authority. The caller
+must obtain a new exact proof for success, and a valid proof needs no process
+memory. This is an idempotent storage request, not a controller HEAD-only
+pending-record/boot proof; no such controller behavior is added here.
+
+TLC 2.19 (same tool SHA256 above), 2026-11-21: `cfg/PlainSealReplay.cfg`
+exhausted 42 generated / 42 distinct states, depth 4, queue empty. Both
+`SuccessNeedsFreshExactProof` and `ValidProofDoesNotNeedProcessMemory` hold.
+Negatives: `_memory` violates the first property at depth 2 (10 distinct
+states); `_no_exact` violates it at depth 3 (25 distinct); `_layer` violates
+the second at depth 4 (36 distinct). The memory negative maps to
+`TestPlainSealReplayNeverUsesProcessMemory`; the exact-proof negative maps to
+the corrupt proof/authority subcontrols in
+`TestPlainSealLostAnswerRestartReplaysFilerProof`; the layer negative maps to
+that test's lost committed answer -> storage restart -> successful re-send.
+Native controls additionally require the original full HEAD and no CAS/new
+generation. CAS atomicity, local WAL recovery and remote-call cancellation
+remain native/existing-spec obligations rather than claims of this small model.
+
+The provider dispatch control `TestPlainSealReplayDuringDeferredAuthorityStartup`
+sets Healthy=false before RecoverVolume, witnesses the no-layer authority wait,
+and checks fresh proof replay without CAS or enabling cuts. This is native
+integration coverage of the existing RemoteProof transition; the model is unchanged.

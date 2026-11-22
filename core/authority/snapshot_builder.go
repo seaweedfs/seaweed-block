@@ -416,8 +416,19 @@ func assembleVolumeTopology(
 ) VolumeTopologySnapshot {
 	slots := make([]ReplicaCandidate, 0, len(expected.Slots))
 
+	// A replica's fact counts only from the server its expected slot names:
+	// another server reporting the same replica id (rule §9's foreign claim
+	// does not cover a known replica id) must not supply its addresses or
+	// health to the line.
+	expectedServer := make(map[string]string, len(expected.Slots))
+	for _, e := range expected.Slots {
+		expectedServer[e.ReplicaID] = e.ServerID
+	}
 	byReplicaID := map[string]slotWithServer{}
 	for _, f := range freshSlots {
+		if f.serverID != expectedServer[f.slot.ReplicaID] {
+			continue
+		}
 		if _, ok := byReplicaID[f.slot.ReplicaID]; !ok {
 			byReplicaID[f.slot.ReplicaID] = f
 		}

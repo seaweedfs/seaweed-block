@@ -41,8 +41,10 @@ func (r *admitRecorder) snapshot() []admitEvent {
 }
 
 // slotWaitProvider opens v1 with a 100 ms cut timer under a host limiter
-// whose only normal slot another process holds; release frees it.
-func slotWaitProvider(t *testing.T) (p *durable.DurableProvider, lim *admitRecorder, remote *storage.MemChunkRemote, release func()) {
+// whose only normal slot another process holds; release frees it. baseGen
+// is HEAD's generation once the volume is open (opening may publish one
+// itself, without a cut).
+func slotWaitProvider(t *testing.T) (p *durable.DurableProvider, lim *admitRecorder, remote *storage.MemChunkRemote, release func(), baseGen uint64) {
 	t.Helper()
 	c := hostlimit.DefaultConfig(t.TempDir())
 	c.NormalSlots, c.UrgentSlots = 1, 1
@@ -84,7 +86,21 @@ func slotWaitProvider(t *testing.T) (p *durable.DurableProvider, lim *admitRecor
 	if _, err = s.Sync(); err != nil {
 		t.Fatal(err)
 	}
-	return p, lim, remote, release
+	h, err := remote.GetHead(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p, lim, remote, release, h.Gen
+}
+
+// admitted reports whether any recorded Admit call succeeded.
+func admitted(events []admitEvent) bool {
+	for _, e := range events {
+		if e.ok {
+			return true
+		}
+	}
+	return false
 }
 
 // refusedAt returns the times of the recorded held-slot refusals.
@@ -103,7 +119,7 @@ func refusedAt(events []admitEvent) []time.Time {
 // slot is held; once it frees, the next attempt is admitted within that
 // bound. Times are the limiter's own Admit calls.
 func TestTimerCutRunsSoonAfterHostSlotFrees(t *testing.T) {
-	p, lim, remote, release := slotWaitProvider(t)
+	p, lim, remote, release, baseGen := slotWaitProvider(t)
 	time.Sleep(2500 * time.Millisecond)
 	refusals := refusedAt(lim.snapshot())
 	// A failure backoff (1 s, 2 s, ...) allows at most 3 attempts in 2.5 s.
@@ -115,8 +131,11 @@ func TestTimerCutRunsSoonAfterHostSlotFrees(t *testing.T) {
 			t.Fatalf("admission %d came %s after the previous refusal", i, gap)
 		}
 	}
-	if h, _ := remote.GetHead(context.Background()); h.Gen != 0 {
-		t.Fatal("a cut published while the only slot was held")
+	if admitted(lim.snapshot()) {
+		t.Fatal("a cut was admitted while the only slot was held")
+	}
+	if h, _ := remote.GetHead(context.Background()); h.Gen != baseGen {
+		t.Fatalf("HEAD moved from generation %d to %d while the only slot was held", baseGen, h.Gen)
 	}
 	if cs := chunkStatus(t, p).CutSchedule; cs == nil || cs.HostSlotWaits == 0 || cs.HostSlotWaitSinceNs == 0 {
 		t.Fatalf("waiting for a host slot is not reported: %+v", cs)
@@ -141,7 +160,7 @@ func TestTimerCutRunsSoonAfterHostSlotFrees(t *testing.T) {
 		t.Fatalf("the first admission came %s after the slot freed; want <= 400 ms", d)
 	}
 	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
-		if h, _ := remote.GetHead(context.Background()); h.Gen != 0 {
+		if h, _ := remote.GetHead(context.Background()); h.Gen > baseGen {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -161,7 +180,7 @@ func TestTimerCutRunsSoonAfterHostSlotFrees(t *testing.T) {
 // A plain detach stops the timer before its seal; the seal (urgent, so it
 // takes the urgent slot) succeeds, and status no longer reports a wait.
 func TestSlotWaitEndsWithASuccessfulDetachSeal(t *testing.T) {
-	p, lim, remote, _ := slotWaitProvider(t)
+	p, lim, remote, _, baseGen := slotWaitProvider(t)
 	time.Sleep(600 * time.Millisecond)
 	if len(refusedAt(lim.snapshot())) == 0 {
 		t.Fatal("no refused timer cut while the slot was held")
@@ -171,8 +190,8 @@ func TestSlotWaitEndsWithASuccessfulDetachSeal(t *testing.T) {
 	if _, _, err := p.DetachVolumePlain(ctx, "v1"); err != nil {
 		t.Fatalf("plain detach: %v", err)
 	}
-	if h, _ := remote.GetHead(context.Background()); h.Gen == 0 {
-		t.Fatal("the seal did not publish")
+	if h, _ := remote.GetHead(context.Background()); h.Gen <= baseGen {
+		t.Fatalf("the seal did not publish: HEAD generation %d, %d at open", h.Gen, baseGen)
 	}
 	cs := chunkStatus(t, p).CutSchedule
 	if cs == nil || cs.HostSlotWaitSinceNs != 0 || cs.HostSlotWaits == 0 {
