@@ -125,7 +125,7 @@ func (p *DurableProvider) recoverChunk(ctx context.Context, volumeID string, h *
 		p.startChunkAuthorityWait(volumeID, h, gen)
 		return false, nil
 	}
-	if errors.Is(err, storage.ErrChunkLayerFenced) && !errors.Is(err, ErrChunkStaleLocalRoot) {
+	if errors.Is(err, storage.ErrChunkLayerFenced) && (!errors.Is(err, ErrChunkStaleLocalRoot) || errors.Is(err, errChunkForeignClaim)) {
 		p.endChunkStartup(h, gen, err)
 	}
 	return err == nil, err
@@ -244,7 +244,7 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 		case errors.Is(err, storage.ErrChunkLayerFenced):
 			ended = "fenced, not serving"
 			log.Printf("durable: chunk layer for volume=%s: %v (not serving)", volumeID, err)
-			if errors.Is(err, ErrChunkStaleLocalRoot) {
+			if errors.Is(err, ErrChunkStaleLocalRoot) && !errors.Is(err, errChunkForeignClaim) {
 				retained = true
 				h.attachMu.Lock()
 				if p.current(h, gen) && h.chunk == nil {
@@ -450,6 +450,12 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 			if head.Gen != 0 && head.Holder != holder {
 				err := fmt.Errorf("%w: %w: volume %s local root %s, HEAD holder %q gen %d epoch %d, local holder %q; remove or quarantine the local root to attach fresh from HEAD",
 					ErrChunkStaleLocalRoot, storage.ErrChunkLayerFenced, volumeID, h.path, head.Holder, head.Gen, head.Epoch, holder)
+				// INV-WS-STARTUP-RETRY-001: at or above this assignment,
+				// the foreign holder is a supersede proof. A lower epoch is
+				// the existing move-back/stale-root diagnostic, never 78.
+				if head.Epoch >= cfg.Epoch {
+					err = fmt.Errorf("%w: %w", err, errChunkForeignClaim)
+				}
 				log.Printf("durable: refusing to attach volume=%s root=%s: HEAD holder=%q gen=%d epoch=%d is not this holder %q (remove or quarantine the local root)",
 					volumeID, h.path, head.Holder, head.Gen, head.Epoch, holder)
 				return err

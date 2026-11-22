@@ -526,3 +526,8 @@ no-retry independently of the assignment stream. Higher epochs of the same
 holder and fences without that proof retain retry75. Provider generation checks
 and planned-stop arbitration still apply; no readiness or listen gate changes
 belong to this classification fix.
+
+The existing-local-root precheck uses the same distinction: another holder at
+or above the assigned epoch is positive supersede evidence; an older foreign
+publication remains the existing move-back diagnostic. Neither path serves or
+publishes the local WAL, which remains on disk for diagnosis.
