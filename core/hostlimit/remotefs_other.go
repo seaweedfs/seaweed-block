@@ -2,5 +2,5 @@
 
 package hostlimit
 
-// remoteFS reports no network file system where it cannot tell.
-func remoteFS(string) (string, bool) { return "", false }
+// unsupportedFS accepts every file system where it cannot tell.
+func unsupportedFS(string) (string, bool) { return "", false }

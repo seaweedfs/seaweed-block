@@ -75,7 +75,8 @@ func TestCheckLaunch(t *testing.T) {
 	}{
 		"missing":   {DefaultConfig(filepath.Join(c.Directory, "missing")), nil, local, "missing"},
 		"temp root": {c, []string{filepath.Dir(c.Directory)}, local, "temporary-file cleaners"},
-		"remote":    {c, nil, func(string) (string, bool) { return "NFS", true }, "network file system"},
+		"remote":    {c, nil, func(string) (string, bool) { return "NFS", true }, "not a local disk file system"},
+		"tmpfs":     {c, nil, func(string) (string, bool) { return "tmpfs", true }, "on tmpfs, not a local disk file system"},
 	}
 	file := filepath.Join(t.TempDir(), "f")
 	if err := os.WriteFile(file, nil, 0o600); err != nil {
