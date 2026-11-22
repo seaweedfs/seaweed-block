@@ -109,11 +109,7 @@ func (s *services) holderMatches(ctx context.Context, volume, replica, server st
 	if !ok || server == "" || line.ReplicaID != replica || line.Epoch != epoch {
 		return false, nil
 	}
-	owner := line.IssuedHost
-	if owner == "" {
-		owner = s.host.placementSourceHost(volume, line.ReplicaID)
-	}
-	return server == owner, nil
+	return server == s.host.workspaceLineOwner(line, volume, replica, epoch), nil
 }
 
 func (s *services) RenewWorkspaceLease(ctx context.Context, q *control.WorkspaceIdentity) (*control.WorkspaceLeaseFact, error) {

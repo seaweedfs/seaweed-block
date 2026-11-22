@@ -86,7 +86,18 @@ func TestWorkspaceCrashAfterJournalBeforeEpochResumesSameGrant(t *testing.T) {
 	if err != nil || again != r {
 		t.Fatal("grant replay changed", again, err)
 	}
-	final := NewPublisher(nil, WithStore(disk)).WorkspaceState("v")
+	finalPublisher := NewPublisher(nil, WithStore(disk))
+	for name, publisher := range map[string]*Publisher{"issued": loaded, "reloaded": finalPublisher} {
+		line, ok := publisher.LastPublished("v", "old")
+		if !ok || line.ServerID != "new-node" || !line.OwnerFromMove {
+			t.Fatalf("%s lost captured moved owner: %+v", name, line)
+		}
+		published, _ := publisher.PublishedAuthorityLine("v")
+		if published.IssuedHost != line.ServerID || !published.OwnerFromMove {
+			t.Fatalf("%s lease and stream owners differ: %+v / %+v", name, published, line)
+		}
+	}
+	final := finalPublisher.WorkspaceState("v")
 	if final == nil || len(final.Moves) != 1 || !final.Moves[0].Issued {
 		t.Fatal("issued epoch lost journal", final)
 	}

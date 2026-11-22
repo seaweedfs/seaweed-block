@@ -472,25 +472,7 @@ func (s *services) SubscribeAssignments(req *control.SubscribeRequest, stream co
 			lastEpoch = info.Epoch
 			lastEV = info.EndpointVersion
 			sentAny = true
-			fact := &control.AssignmentFact{
-				VolumeId:        info.VolumeID,
-				ReplicaId:       info.ReplicaID,
-				ServerId:        s.host.workspaceSourceHost(info.VolumeID, info.ReplicaID, info.Epoch),
-				Epoch:           info.Epoch,
-				EndpointVersion: info.EndpointVersion,
-				DataAddr:        info.DataAddr,
-				CtrlAddr:        info.CtrlAddr,
-			}
-			// Populate the peer set from publisher LastPublished
-			// queries for every non-self replica slot in this volume's
-			// topology. peer_set_generation is derived
-			// from the authoritative line's (Epoch, EndpointVersion)
-			// packed into one uint64 as (epoch<<32 | ev). Assertion
-			// above guarantees each fits in uint32 so no aliasing.
-			// Monotonic across process lifetimes because Epoch/EV are
-			// durable authority facts preserved across master restart.
-			fact.Peers = s.collectPeers(req.VolumeId, info)
-			fact.PeerSetGeneration = (info.Epoch << 32) | info.EndpointVersion
+			fact := s.assignmentFact(info)
 			if err := stream.Send(fact); err != nil {
 				return err
 			}
@@ -967,4 +949,28 @@ func (h *Host) ingestHeartbeatRecordingHealth(msg authority.HeartbeatMessage) er
 		})
 	}
 	return nil
+}
+
+// assignmentFact encodes one captured publication at the stream boundary.
+func (s *services) assignmentFact(info adapter.AssignmentInfo) *control.AssignmentFact {
+	fact := &control.AssignmentFact{
+		VolumeId:        info.VolumeID,
+		ReplicaId:       info.ReplicaID,
+		ServerId:        s.host.workspaceLineOwner(authority.PublishedLine{ReplicaID: info.ReplicaID, Epoch: info.Epoch, IssuedHost: info.ServerID, OwnerFromMove: info.OwnerFromMove}, info.VolumeID, info.ReplicaID, info.Epoch),
+		Epoch:           info.Epoch,
+		EndpointVersion: info.EndpointVersion,
+		DataAddr:        info.DataAddr,
+		CtrlAddr:        info.CtrlAddr,
+	}
+	// Populate the peer set from publisher LastPublished
+	// queries for every non-self replica slot in this volume's
+	// topology. peer_set_generation is derived
+	// from the authoritative line's (Epoch, EndpointVersion)
+	// packed into one uint64 as (epoch<<32 | ev). Assertion
+	// above guarantees each fits in uint32 so no aliasing.
+	// Monotonic across process lifetimes because Epoch/EV are
+	// durable authority facts preserved across master restart.
+	fact.Peers = s.collectPeers(info.VolumeID, info)
+	fact.PeerSetGeneration = (info.Epoch << 32) | info.EndpointVersion
+	return fact
 }

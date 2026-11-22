@@ -148,6 +148,9 @@ func TestWorkspaceRenewalRPCDuringHeldSameVolumeReservation(t *testing.T) {
 	}()
 	renewed := make(chan *control.WorkspaceLeaseFact, 1)
 	renewErr := make(chan error, 1)
+	ownerResult := make(chan string, 1)
+	ownerJoined := make(chan struct{})
+	ownerStarted := false
 	renewStarted := false
 	t.Cleanup(func() { // bounded: release, settle both workers, then clear the hook
 		releaseHook()
@@ -157,6 +160,14 @@ func TestWorkspaceRenewalRPCDuringHeldSameVolumeReservation(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			settled = false
 			t.Error("held reservation write did not settle")
+		}
+		if ownerStarted {
+			select {
+			case <-ownerJoined:
+			case <-time.After(5 * time.Second):
+				settled = false
+				t.Error("owner lookup did not settle")
+			}
 		}
 		if renewStarted {
 			select {
@@ -174,6 +185,22 @@ func TestWorkspaceRenewalRPCDuringHeldSameVolumeReservation(t *testing.T) {
 	case <-entered:
 	case <-time.After(3 * time.Second):
 		t.Fatal("reservation write of vol-b never reached the store")
+	}
+	// TERM-HOLDER-001: current-line facts and lease admission resolve the
+	// same committed owner without entering the publisher's store-write lock.
+	ownerStarted = true
+	go func() {
+		defer close(ownerJoined)
+		ownerResult <- h.workspaceSourceHost("vol-b", line.ReplicaID, line.Epoch)
+	}()
+	select {
+	case owner := <-ownerResult:
+		matches, matchErr := svc.holderMatches(loopbackPeer(ctx), "vol-b", line.ReplicaID, owner, line.Epoch)
+		if owner != "node-a" || !matches || matchErr != nil {
+			t.Fatalf("fact and lease owner differ under held writer: %q", owner)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("current owner lookup waited for publisher store write")
 	}
 	renewStarted = true
 	go func() {
