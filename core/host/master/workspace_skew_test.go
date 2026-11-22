@@ -130,12 +130,13 @@ func TestWorkspaceClockSkewConfigReachesLeaseReply(t *testing.T) {
 	if _, err := h.Lifecycle().Volumes.CreateVolume(lifecycle.VolumeSpec{VolumeID: "vol-a", SizeBytes: 1 << 20, ReplicationFactor: 1}); err != nil {
 		t.Fatal(err)
 	}
+	registerWorkspaceHolder(t, h, "node-a") // a workspace holder's server id must be registered (INV-AUTH-HOLDER-IDENTITY-001)
 	seedVerifiedExistingReplicaPlacement(t, h)
 	if _, err := h.RunLifecycleProductTick(); err != nil {
 		t.Fatal(err)
 	}
 	line := waitAuthorityLine(t, h.Publisher(), "vol-a")
-	reply, err := (&services{host: h}).RenewWorkspaceLease(context.Background(), &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "vol-a", ReplicaId: line.ReplicaID, Epoch: line.Epoch})
+	reply, err := (&services{host: h}).RenewWorkspaceLease(loopbackPeer(context.Background()), &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "vol-a", ReplicaId: line.ReplicaID, Epoch: line.Epoch})
 	if err != nil {
 		t.Fatal(err)
 	}

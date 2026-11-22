@@ -113,7 +113,7 @@ func TestWorkspaceRenewalRPCDuringHeldSameVolumeReservation(t *testing.T) {
 	line := waitAuthorityLine(t, h.Publisher(), "vol-b")
 	svc := &services{host: h}
 	id := &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "vol-b", ReplicaId: line.ReplicaID, Epoch: line.Epoch}
-	first, err := svc.RenewWorkspaceLease(ctx, id)
+	first, err := svc.RenewWorkspaceLease(loopbackPeer(ctx), id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +129,7 @@ func TestWorkspaceRenewalRPCDuringHeldSameVolumeReservation(t *testing.T) {
 	if err != nil || !rv.Revoking || rv.ExpiresAtNs != first.ExpiresAtNs {
 		t.Fatalf("RevokeWorkspace must report the grant %d, got %+v %v", first.ExpiresAtNs, rv, err)
 	}
-	if _, err := svc.AckWorkspaceRevoked(ctx, &control.WorkspaceRevocationAck{Identity: id, HeadGen: 9}); err != nil {
+	if _, err := svc.AckWorkspaceRevoked(loopbackPeer(ctx), &control.WorkspaceRevocationAck{Identity: id, HeadGen: 9}); err != nil {
 		t.Fatal(err)
 	}
 	deletions := h.Lifecycle().Deletions
@@ -177,7 +177,7 @@ func TestWorkspaceRenewalRPCDuringHeldSameVolumeReservation(t *testing.T) {
 	}
 	renewStarted = true
 	go func() {
-		f, err := svc.RenewWorkspaceLease(ctx, id)
+		f, err := svc.RenewWorkspaceLease(loopbackPeer(ctx), id)
 		renewed <- f
 		renewErr <- err
 	}()
@@ -201,7 +201,7 @@ func TestWorkspaceRenewalRPCDuringHeldSameVolumeReservation(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("mark deleting did not finish")
 	}
-	if _, err := svc.RenewWorkspaceLease(ctx, id); err == nil || !strings.Contains(err.Error(), "being deleted") {
+	if _, err := svc.RenewWorkspaceLease(loopbackPeer(ctx), id); err == nil || !strings.Contains(err.Error(), "being deleted") {
 		t.Fatalf("renewal after the reservation was published: %v; want refused as being deleted", err)
 	}
 }

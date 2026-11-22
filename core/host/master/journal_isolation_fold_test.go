@@ -312,7 +312,7 @@ func TestStatusReportsExtensionWriteLatency(t *testing.T) {
 	line := waitAuthorityLine(t, h.Publisher(), "vol-b")
 	svc := &services{host: h}
 	id := &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "vol-b", ReplicaId: line.ReplicaID, Epoch: line.Epoch}
-	if _, err := svc.RenewWorkspaceLease(ctx, id); err != nil {
+	if _, err := svc.RenewWorkspaceLease(loopbackPeer(ctx), id); err != nil {
 		t.Fatal(err) // first grant: not an extension
 	}
 	get := func() map[string]any {
@@ -329,7 +329,7 @@ func TestStatusReportsExtensionWriteLatency(t *testing.T) {
 		t.Fatalf("before any extension: %v", b)
 	}
 	time.Sleep(8 * time.Second)
-	if _, err := svc.RenewWorkspaceLease(ctx, id); err != nil {
+	if _, err := svc.RenewWorkspaceLease(loopbackPeer(ctx), id); err != nil {
 		t.Fatal(err)
 	}
 	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {

@@ -216,7 +216,7 @@ func TestWorkspaceRenewalRPCDoesNotWaitForHeldReservationWrite(t *testing.T) {
 	line := waitAuthorityLine(t, h.Publisher(), "vol-b")
 	svc := &services{host: h}
 	id := &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "vol-b", ReplicaId: line.ReplicaID, Epoch: line.Epoch}
-	if _, err := svc.RenewWorkspaceLease(ctx, id); err != nil {
+	if _, err := svc.RenewWorkspaceLease(loopbackPeer(ctx), id); err != nil {
 		t.Fatal(err) // first grant
 	}
 	deletions := h.Lifecycle().Deletions
@@ -266,7 +266,7 @@ func TestWorkspaceRenewalRPCDoesNotWaitForHeldReservationWrite(t *testing.T) {
 	}
 	start := time.Now()
 	renewStarted = true
-	go func() { _, err := svc.RenewWorkspaceLease(ctx, id); renewed <- err }()
+	go func() { _, err := svc.RenewWorkspaceLease(loopbackPeer(ctx), id); renewed <- err }()
 	select {
 	case err := <-renewed:
 		renewed <- err // keep it for the cleanup join

@@ -13,6 +13,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -262,5 +263,18 @@ func TestWorkspaceHolderRefusedFromAnotherHostAtRenewAckAndStream(t *testing.T) 
 	}
 	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(status.Convert(err).Message(), `server id "" is not registered`) {
 		t.Fatalf("assignment stream with no server id: %v, want the not-registered refusal", err)
+	}
+}
+
+// loopbackPeer is ctx as an RPC from 127.0.0.1 arrives at the master (in-process service calls carry no peer).
+func loopbackPeer(ctx context.Context) context.Context {
+	return peer.NewContext(ctx, &peer.Peer{Addr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}})
+}
+
+// registerWorkspaceHolder registers server on 127.0.0.1 (a workspace holder must be registered).
+func registerWorkspaceHolder(t *testing.T, h *Host, server string) {
+	t.Helper()
+	if _, err := h.Lifecycle().Nodes.RegisterNode(lifecycle.NodeRegistration{ServerID: server, DataAddr: "127.0.0.1:19901", CtrlAddr: "127.0.0.1:19902"}); err != nil {
+		t.Fatal(err)
 	}
 }

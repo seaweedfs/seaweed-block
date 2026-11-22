@@ -70,6 +70,7 @@ func TestWorkspaceRPCCleanMovePreservesReplicaIdentity(t *testing.T) {
 	if _, err := h.Lifecycle().Nodes.RegisterNode(lifecycle.NodeRegistration{ServerID: "node-b", DataAddr: "127.0.0.1:9201", CtrlAddr: "127.0.0.1:9101"}); err != nil {
 		t.Fatal(err)
 	}
+	registerWorkspaceHolder(t, h, "node-a") // a workspace holder's server id must be registered (INV-AUTH-HOLDER-IDENTITY-001)
 	seedVerifiedExistingReplicaPlacement(t, h)
 	if _, err := h.RunLifecycleProductTick(); err != nil {
 		t.Fatal(err)
