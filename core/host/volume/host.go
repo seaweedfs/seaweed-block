@@ -396,7 +396,8 @@ func (h *Host) replayLocalReadinessFactIfReady() {
 	if fact == nil {
 		return
 	}
-	h.log.Printf("blockvolume: volume %s replaying assignment after local readiness cleared", h.cfg.VolumeID)
+	h.log.Printf("blockvolume: volume %s replaying assignment after local readiness cleared server=%q epoch=%d ev=%d data=%q ctrl=%q",
+		h.cfg.VolumeID, fact.ServerId, fact.Epoch, fact.EndpointVersion, fact.DataAddr, fact.CtrlAddr)
 	h.applyFact(fact)
 }
 
@@ -779,6 +780,8 @@ func (h *Host) streamOnce(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		h.log.Printf("blockvolume: assignment stream delivery process=%q server=%q volume=%q replica=%q epoch=%d ev=%d data=%q ctrl=%q",
+			h.cfg.ServerID, fact.ServerId, fact.VolumeId, fact.ReplicaId, fact.Epoch, fact.EndpointVersion, fact.DataAddr, fact.CtrlAddr)
 		h.applyFact(fact)
 	}
 }
@@ -931,8 +934,8 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 		return
 	}
 	h.adpt.OnAssignment(info)
-	h.log.Printf("blockvolume: volume %s adopted as PRIMARY at %s@%d (EV=%d)",
-		h.cfg.VolumeID, info.ReplicaID, info.Epoch, info.EndpointVersion)
+	h.log.Printf("blockvolume: volume %s adopted as PRIMARY at %s@%d (EV=%d) process=%q server=%q data=%q ctrl=%q",
+		h.cfg.VolumeID, info.ReplicaID, info.Epoch, info.EndpointVersion, h.cfg.ServerID, fact.ServerId, fact.DataAddr, fact.CtrlAddr)
 	if h.cfg.ReadyMarker != nil && info.Epoch > 0 && h.readyOnce.CompareAndSwap(false, true) {
 		select {
 		case h.cfg.ReadyMarker <- info:

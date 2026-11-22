@@ -242,3 +242,39 @@ func TestAssignmentHolderIdentityForeignStreamOrdering(t *testing.T) {
 		})
 	}
 }
+
+// INV-AUTH-HOLDER-IDENTITY-001: an old process cannot adopt a stale
+// self-labelled EV1 after it has observed the forced move's foreign EV2.
+func TestAssignmentHolderIdentityForcedMoveRefusesEveryDeliveredVersion(t *testing.T) {
+	h, err := New(Config{MasterAddr: "127.0.0.1:1", ServerID: "old-host", VolumeID: "v1", ReplicaID: "r1", DataAddr: "127.0.0.1:19303", CtrlAddr: "127.0.0.1:19304", EnableT1Readiness: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	h.BlockLocalReadiness("awaiting durable recovery")
+	for _, ev := range []uint64{1, 2, 1, 3} {
+		foreign := holderAssignment(t, "new-host")
+		foreign.EndpointVersion = ev
+		h.applyFact(foreign)
+		if h.realAdpt.Projection().Epoch != 0 {
+			t.Fatalf("old server adopted foreign EV%d", ev)
+		}
+	}
+	// Covers the safety boundary even if an older delivery incorrectly
+	// names the source: a known newer foreign line still takes precedence.
+	staleSelf := holderAssignment(t, "old-host")
+	h.applyFact(staleSelf)
+	h.ClearLocalReadinessBlock()
+	h.replayLocalReadinessFactIfReady()
+	if p := h.realAdpt.Projection(); p.Epoch != 0 {
+		t.Fatalf("old server adopted stale EV1 after foreign newer line: %+v", p)
+	}
+	for _, cmd := range h.t1exec.Commands() {
+		if strings.HasPrefix(cmd, "PublishHealthy:") {
+			t.Fatalf("old server published healthy: %s", cmd)
+		}
+	}
+	if h.view.Projection().Healthy {
+		t.Fatal("old server served after forced move")
+	}
+}
