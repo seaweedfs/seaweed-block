@@ -82,7 +82,7 @@ func (h *Host) workspaceSourceHost(volume, replica string, epoch uint64) string 
 // placementSourceHost uses explicit membership, never endpoint inference.
 func (h *Host) placementSourceHost(volume, replica string) string {
 	if h.lifecycle != nil {
-		if p, ok := h.lifecycle.Placements.GetPlacement(volume); ok {
+		if p, ok := h.lifecycle.Placements.GetPlacementSnapshot(volume); ok {
 			for _, slot := range p.Slots {
 				if slot.ReplicaID == replica {
 					return slot.ServerID
