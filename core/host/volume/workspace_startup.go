@@ -23,7 +23,7 @@ func (h *Host) IsCurrentReplicaSuperseded() bool {
 	h.ownAssignmentMu.RLock()
 	defer h.ownAssignmentMu.RUnlock()
 	other := h.LastOtherLine()
-	if other == nil || other.VolumeId != h.cfg.VolumeID {
+	if other == nil || other.ReplicaId == "" || other.VolumeId != h.cfg.VolumeID {
 		return false
 	}
 	return h.IsSuperseded(h.cfg.ReplicaID, h.ownAssignmentEpoch, h.ownAssignmentEV)

@@ -52,6 +52,7 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 	for _, name := range []string{"blockvolume", "blockmaster"} {
 		buildCtx, buildCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		cmd := exec.CommandContext(buildCtx, "go", "build", "-p", "4", "-o", filepath.Join(bin, name), "../"+name)
+		cmd.WaitDelay = time.Second // bound inherited child pipes after cancellation
 		out, err := cmd.CombinedOutput()
 		buildCancel()
 		if err != nil {
