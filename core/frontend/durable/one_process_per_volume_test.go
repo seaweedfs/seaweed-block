@@ -98,6 +98,25 @@ func TestHostVolumeLockDirectoryCreatedOrRefused(t *testing.T) {
 	}
 }
 
+// A lock path that exists but is not a directory refuses, as before the
+// lock directory was laid out by the provider.
+func TestHostVolumeLockRefusesNonDirectoryLockPath(t *testing.T) {
+	locks := filepath.Join(t.TempDir(), "locks")
+	if err := os.WriteFile(locks, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+		Impl: durable.ImplWALStore, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks,
+		HostVolumeLock: true, VolumeLockDirTestOnly: locks,
+	}, v1View())
+	if err == nil {
+		_ = p.Close()
+	}
+	if !errors.Is(err, durable.ErrVolumeLockDirUnavailable) {
+		t.Fatalf("a regular file as the lock directory was accepted: %v", err)
+	}
+}
+
 // A lock file this process cannot write (one another user created, as the
 // root ublk unit does) is still taken: the lock opens it read-only.
 func TestHostVolumeLockTakesReadOnlyLockFile(t *testing.T) {
