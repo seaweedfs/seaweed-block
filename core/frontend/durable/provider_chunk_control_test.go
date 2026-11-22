@@ -19,17 +19,18 @@ func TestWALStoreChunk_CutVolumeReturnsInstalledHead(t *testing.T) {
 	remote := storage.NewMemChunkRemote()
 	p := chunkProvider(t, t.TempDir(), remote, v1View(), 0)
 	s := openRecovered(t, p)
+	claimed := freshV1Claim(t, remote)
 	if _, err := s.Write(1, block(1)); err != nil {
 		t.Fatal(err)
 	}
 	r, err := p.CutVolume(ctx, "v1", 0)
 	head, _ := remote.GetHead(ctx)
 	// (r.Stats is W3's: its fields read zero until then.)
-	if err != nil || r.Noop || head.Gen != 1 || r.Head.Gen != head.Gen || r.H != s.NextLSN()-1 || r.Head.RemoteLSN != r.H {
+	if err != nil || r.Noop || head.Gen != claimed.Gen+1 || r.Head.Gen != head.Gen || r.H != s.NextLSN()-1 || r.Head.RemoteLSN != r.H {
 		t.Fatalf("cut: %+v %v; remote HEAD gen %d", r, err, head.Gen)
 	}
 	again, err := p.CutVolume(ctx, "v1", 0)
-	if err != nil || !again.Noop || again.Head.Gen != 1 || again.H != r.H {
+	if err != nil || !again.Noop || again.Head.Gen != r.Head.Gen || again.H != r.H {
 		t.Fatalf("cut with nothing new: %+v %v", again, err)
 	}
 	if _, err := p.CutVolume(ctx, "v9", 0); !errors.Is(err, durable.ErrVolumeNotOpen) {
