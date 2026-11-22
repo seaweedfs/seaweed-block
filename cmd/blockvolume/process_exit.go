@@ -171,7 +171,13 @@ func finishWorkspaceLease(e *processExit, f flags, h *volume.Host, done <-chan e
 	e.choose(workspaceExit{exitWorkspaceRetry, "revoke_ack_unconfirmed"})
 }
 
-func chooseChunkStartupExit(e *processExit, f flags, h *volume.Host, p *durable.DurableProvider) bool {
+// The provider publishes only a generation-bound outcome and an atomic choice.
+type chunkStartupOutcomeProvider interface {
+	ChunkStartupOutcome(string) (uint64, bool)
+	ChooseChunkStartupExit(string, uint64, func()) bool
+}
+
+func chooseChunkStartupExit(e *processExit, f flags, h *volume.Host, p chunkStartupOutcomeProvider) bool {
 	if !f.workspaceLease || f.durableImpl != "walstore-chunk" {
 		return false
 	}

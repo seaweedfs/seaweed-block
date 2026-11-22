@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -122,10 +123,15 @@ func TestChunkStartupRetainedDispositionWinsExpiredAttachContext(t *testing.T) {
 			waiting.Epoch = 0
 			waiting.Healthy = false
 			view.set(waiting)
+			var entered atomic.Bool
 			p, err := durable.NewDurableProvider(durable.ProviderConfig{
 				Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4,
 				ChunkAssignmentTimeout: 250 * time.Millisecond,
-				ChunkAttachCheck:       func(ctx context.Context, _ string, _ durable.ChunkGeometry) error { <-ctx.Done(); return tc.err },
+				ChunkAttachCheck: func(ctx context.Context, _ string, _ durable.ChunkGeometry) error {
+					entered.Store(true)
+					<-ctx.Done()
+					return tc.err
+				},
 				ChunkRemoteFor: func(string) (storage.ChunkRemote, error) {
 					t.Error("retained attach reached remote")
 					return storage.NewMemChunkRemote(), nil
@@ -143,6 +149,9 @@ func TestChunkStartupRetainedDispositionWinsExpiredAttachContext(t *testing.T) {
 			}
 			view.set(assigned)
 			waitLog(t, logs, "chunk authority wait for volume=v1 ended")
+			if !entered.Load() {
+				t.Fatal("fixture deadline elapsed before attach check entered; not a retained-disposition witness")
+			}
 			if _, failed := p.ChunkStartupOutcome("v1"); failed {
 				t.Fatal("deadline defer replaced retained attach disposition with process retry")
 			}

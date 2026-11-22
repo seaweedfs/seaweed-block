@@ -3,8 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"github.com/seaweedfs/seaweed-block/core/frontend"
-	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/host/volume"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"github.com/seaweedfs/seaweed-block/core/storage"
@@ -157,10 +155,17 @@ func TestWorkspaceUnconfirmedRevokeHasOwnReason(t *testing.T) {
 	}
 }
 
-type exitWaitingProjection struct{}
+// Controlled provider outcome at its public generation/selection seam. The
+// real provider deadline/retained-state boundary is tested in durable.
+type exitStartupOutcome struct{ expired bool }
 
-func (exitWaitingProjection) Projection() frontend.Projection {
-	return frontend.Projection{VolumeID: "v", ReplicaID: "r"}
+func (s *exitStartupOutcome) ChunkStartupOutcome(string) (uint64, bool) { return 1, s.expired }
+func (s *exitStartupOutcome) ChooseChunkStartupExit(_ string, gen uint64, choose func()) bool {
+	if gen != 1 || !s.expired {
+		return false
+	}
+	choose()
+	return true
 }
 
 func TestWorkspacePlannedDrainOwnsStartupExpiryUntilAck(t *testing.T) {
@@ -196,22 +201,9 @@ func TestWorkspacePlannedDrainOwnsStartupExpiryUntilAck(t *testing.T) {
 			if request == nil || !h.WorkspaceLeaseRevoking() {
 				t.Fatal("real planned drain not acquired")
 			}
-			p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, ChunkAssignmentTimeout: time.Nanosecond, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return storage.NewMemChunkRemote(), nil }}, exitWaitingProjection{})
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { _ = p.Close() })
-			if _, err = p.EnsureStorage("v"); err != nil {
-				t.Fatal(err)
-			}
-			if _, err = p.RecoverVolume(ctx, "v"); err != nil {
-				t.Fatal(err)
-			}
-			select {
-			case <-p.ChunkStartupUpdates():
-			case <-time.After(3 * time.Second):
-				t.Fatal("controlled startup expiry absent")
-			}
+			// Deliver expiry only after the real guard's planned drain owns
+			// shutdown, while its resource-owner reply is deliberately held.
+			p := &exitStartupOutcome{expired: true}
 			chooseChunkStartupExit(e, f, h, p)
 			select {
 			case out := <-e.decision:
@@ -219,7 +211,7 @@ func TestWorkspacePlannedDrainOwnsStartupExpiryUntilAck(t *testing.T) {
 			default:
 			}
 			remote := storage.NewMemChunkRemote()
-			_, err = remote.CASHead(ctx, storage.ChunkHeadVersion{}, storage.ChunkHead{Epoch: 1, Holder: "s/r", State: storage.ChunkHeadDetached, DetachedBy: &storage.ChunkDetachedBy{Epoch: 1, Holder: "s/r", Gen: 1}})
+			_, err := remote.CASHead(ctx, storage.ChunkHeadVersion{}, storage.ChunkHead{Epoch: 1, Holder: "s/r", State: storage.ChunkHeadDetached, DetachedBy: &storage.ChunkDetachedBy{Epoch: 1, Holder: "s/r", Gen: 1}})
 			if err != nil {
 				t.Fatal(err)
 			}
