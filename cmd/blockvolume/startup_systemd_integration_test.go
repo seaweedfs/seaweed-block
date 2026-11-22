@@ -54,6 +54,7 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 	cluster := startWorkspaceWeed(t)
 	gap1PreserveFailure(t, root, cluster.dir)
 	stem := fmt.Sprintf("codex03-gap1-%d", time.Now().UnixNano())
+	gap1ProbeTerminalSuccess(t, stem+"-policy-probe")
 	volume := stem
 	base := "/" + stem
 	masterAddr := leaseBinaryAddress(t)
@@ -181,7 +182,7 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 	if s["Result"] == "start-limit-hit" {
 		t.Fatalf("systemd rate limit hit: %+v", s)
 	}
-	gap1PlannedStopDoesNotRestart(t, ws, unit, statusAddr, volume, after.Epoch, after.Holder, s["NRestarts"])
+	gap1PlannedStopDoesNotRestart(t, ws, unit, statusAddr, volume, after.Epoch, after.Holder, s["NRestarts"], s["InvocationID"])
 	gap1SupersededDoesNotRestart(t, stem, filepath.Join(bin, "blockvolume"), args, root, volume)
 }
 
@@ -213,7 +214,7 @@ func startGAP1Unit(t *testing.T, unit string, restart bool, exe string, args ...
 		ctx, cancel = context.WithTimeout(context.Background(), 15*time.Second)
 		_, err := exec.CommandContext(ctx, "systemctl", "stop", unit).CombinedOutput()
 		cancel()
-		if err != nil {
+		if err != nil && gap1Unit(t, unit)["LoadState"] != "not-found" {
 			ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
 			_ = exec.CommandContext(ctx, "systemctl", "kill", "--signal=KILL", unit).Run()
 			cancel()
@@ -236,7 +237,7 @@ func gap1Unit(t *testing.T, unit string) map[string]string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	b, err := exec.CommandContext(ctx, "systemctl", "show", unit, "--property=MainPID,NRestarts,ExecMainStatus,Result,ExecMainStartTimestampMonotonic,RestartUSec,RestartPreventExitStatus,StartLimitBurst,StartLimitIntervalUSec,ActiveState,SubState").CombinedOutput()
+	b, err := exec.CommandContext(ctx, "systemctl", "show", unit, "--property=MainPID,NRestarts,ExecMainStatus,Result,ExecMainStartTimestampMonotonic,RestartUSec,RestartPreventExitStatus,StartLimitBurst,StartLimitIntervalUSec,ActiveState,SubState,LoadState,InvocationID").CombinedOutput()
 	if err != nil {
 		t.Fatalf("unit show: %v %s", err, b)
 	}
@@ -336,7 +337,7 @@ func gap1ShippedPolicy(t *testing.T) map[string]string {
 
 // A successful planned revoke is not a retry outcome. The master's ACK and
 // systemd's terminal inactive/dead state prove no automatic restart is queued.
-func gap1PlannedStopDoesNotRestart(t *testing.T, ws control.WorkspaceServiceClient, unit, addr, volume string, epoch uint64, holder, restarts string) {
+func gap1PlannedStopDoesNotRestart(t *testing.T, ws control.WorkspaceServiceClient, unit, addr, volume string, epoch uint64, holder, restarts, invocation string) {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, "http://"+addr+"/chunk/detach", bytes.NewBufferString(fmt.Sprintf(`{"volumeID":%q,"plain":true,"timeoutMs":5000}`, volume)))
 	if err != nil {
@@ -371,7 +372,9 @@ func gap1PlannedStopDoesNotRestart(t *testing.T, ws control.WorkspaceServiceClie
 			t.Fatalf("wrong planned ACK: %s", ack.String())
 		}
 		state := gap1Unit(t, unit)
-		if state["NRestarts"] != restarts {
+		// systemd may unload a successful transient unit, resetting its
+		// counters. In that case use the exact invocation's journal proof.
+		if state["LoadState"] != "not-found" && state["NRestarts"] != restarts {
 			t.Fatalf("planned stop restarted: %+v", state)
 		}
 		if state["MainPID"] != "0" {
@@ -380,7 +383,11 @@ func gap1PlannedStopDoesNotRestart(t *testing.T, ws control.WorkspaceServiceClie
 		if state["ExecMainStatus"] != "0" || state["ActiveState"] != "inactive" || state["SubState"] != "dead" {
 			t.Fatalf("planned stop is not terminal success: %+v", state)
 		}
-		return true
+		starts, parseErr := strconv.Atoi(restarts)
+		if parseErr != nil || invocation == "" {
+			t.Fatalf("missing pre-stop systemd identity: starts=%q invocation=%q", restarts, invocation)
+		}
+		return gap1JournalTerminalSuccess(t, unit, invocation, starts+1)
 	})
 }
 
@@ -461,5 +468,72 @@ func gap1PreserveFailure(t *testing.T, roots ...string) {
 			cancel()
 			t.Logf("failed-run state retained: source=%s destination=%s err=%v output=%s", root, destination, err, out)
 		}
+	})
+}
+
+// Captured systemd249 journal records supply stable manager message IDs. The
+// raw journal is logged when this witness succeeds; no fabricated PID status
+// can turn an unknown unit into an ACKed successful invocation.
+func gap1JournalTerminalSuccess(t *testing.T, unit, invocation string, expectedStarts int) bool {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	raw, err := exec.CommandContext(ctx, "journalctl", "--unit="+unit, "--no-pager", "--output=json").CombinedOutput()
+	if err != nil {
+		t.Fatalf("unit journal: %v %s", err, raw)
+	}
+	starts := 0
+	started := map[string]bool{}
+	succeeded := map[string]bool{}
+	for _, line := range bytes.Split(raw, []byte{'\n'}) {
+		if len(line) == 0 {
+			continue
+		}
+		var entry struct {
+			Unit       string `json:"UNIT"`
+			Invocation string `json:"INVOCATION_ID"`
+			Message    string `json:"MESSAGE_ID"`
+			PID        string `json:"_PID"`
+			JobResult  string `json:"JOB_RESULT"`
+		}
+		if err := json.Unmarshal(line, &entry); err != nil {
+			t.Fatalf("captured journal JSON: %v", err)
+		}
+		if entry.Unit != unit+".service" || entry.PID != "1" {
+			continue
+		}
+		switch entry.Message {
+		case "39f53479d3a045ac8e11786248231fbf":
+			if entry.JobResult == "done" {
+				starts++
+				started[entry.Invocation] = true
+			}
+		case "7ad2d189f7e94e70a38c781354912448":
+			succeeded[entry.Invocation] = true
+		}
+	}
+	if starts > expectedStarts {
+		t.Fatalf("unexpected restart in captured unit journal: starts%d want%d", starts, expectedStarts)
+	}
+	if invocation == "" && expectedStarts == 1 {
+		for id := range started {
+			invocation = id
+		}
+	}
+	complete := invocation != "" && starts == expectedStarts && started[invocation] && succeeded[invocation]
+	if complete {
+		t.Logf("captured terminal-success journal for %s invocation%s: %s", unit, invocation, raw)
+	}
+	return complete
+}
+
+// Calibrate the terminal parser against the real supervisor before any holder
+// is killed. Successful transient units can be collected; their journal is the
+// proof, never the default zeros returned for an unknown unit.
+func gap1ProbeTerminalSuccess(t *testing.T, unit string) {
+	t.Helper()
+	startGAP1Unit(t, unit, true, "/bin/true")
+	waitGAP1(t, "systemd terminal-success parser preflight failed", 5*time.Second, func() bool {
+		return gap1JournalTerminalSuccess(t, unit, "", 1)
 	})
 }
