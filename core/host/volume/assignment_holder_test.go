@@ -1,6 +1,7 @@
 package volume
 
 import (
+	"log"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -108,23 +109,46 @@ func TestAssignmentHolderIdentityFencesPreviouslyHealthySameReplica(t *testing.T
 	}
 }
 
-func TestAssignmentHolderIdentityRefusesCarriedEndpointMismatch(t *testing.T) {
+// Endpoints are routing data, not the holder identity (claude06 ruling).
+func TestAssignmentHolderIdentityAdoptsAndWarnsCarriedEndpointMismatch(t *testing.T) {
 	for _, endpoint := range []string{"data", "control"} {
 		t.Run(endpoint, func(t *testing.T) {
-			h, err := New(Config{MasterAddr: "127.0.0.1:1", ServerID: "new-host", VolumeID: "v1", ReplicaID: "r1", DataAddr: "127.0.0.1:19303", CtrlAddr: "127.0.0.1:19304", EnableT1Readiness: true})
+			logs := &lockedBuffer{}
+			h, err := New(Config{MasterAddr: "127.0.0.1:1", ServerID: "new-host", VolumeID: "v1", ReplicaID: "r1", DataAddr: "127.0.0.1:19303", CtrlAddr: "127.0.0.1:19304", EnableT1Readiness: true, Logger: log.New(logs, "", 0)})
 			if err != nil {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = h.Close() })
 			f := holderAssignment(t, "new-host")
 			if endpoint == "data" {
-				f.DataAddr = "127.0.0.1:9991"
+				f.DataAddr = "0.0.0.0:19303"
 			} else {
-				f.CtrlAddr = "127.0.0.1:9992"
+				f.CtrlAddr = "localhost:19304"
+			}
+			h.BlockLocalReadiness("awaiting durable recovery")
+			h.applyFact(f)
+			h.ClearLocalReadinessBlock()
+			h.replayLocalReadinessFactIfReady()
+			deadline := time.Now().Add(time.Second)
+			for !h.view.Projection().Healthy && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			if p := h.view.Projection(); !p.Healthy || p.Epoch != 2 || h.LastOtherLine() != nil {
+				t.Fatalf("own endpoint spelling fenced holder: %+v", p)
+			}
+			st := NewStatusServer(h.ProjectionView()).statusProjection()
+			if len(st.Warnings) != 1 || !strings.Contains(st.Warnings[0], "master advertises data=") || !strings.Contains(st.Warnings[0], "this process listens on") {
+				t.Fatalf("status warning missing: %+v", st.Warnings)
 			}
 			h.applyFact(f)
-			if h.realAdpt.Projection().Epoch != 0 || h.LastOtherLine() == nil {
-				t.Fatal("mismatched endpoint was adopted or not recorded")
+			if n := strings.Count(logs.String(), "master advertises data="); n != 1 {
+				t.Fatalf("warning logged %d times, want once", n)
+			}
+			corrected := holderAssignment(t, "new-host")
+			corrected.EndpointVersion = 2
+			h.applyFact(corrected)
+			if got := NewStatusServer(h.ProjectionView()).statusProjection().Warnings; len(got) != 0 {
+				t.Fatalf("corrected endpoints retained warning: %v", got)
 			}
 		})
 	}
