@@ -235,6 +235,11 @@ func (h *Host) recordOtherLine(f *control.AssignmentFact) {
 	// is the canonical safe deep-copy for proto messages.
 	cp := proto.Clone(f).(*control.AssignmentFact)
 	h.otherMu.Lock()
+	// A stale replay must not erase the newer foreign-holder fence (r2.34).
+	if old := h.lastOther; old != nil && (cp.Epoch < old.Epoch || cp.Epoch == old.Epoch && cp.EndpointVersion < old.EndpointVersion) {
+		h.otherMu.Unlock()
+		return
+	}
 	h.lastOther = cp
 	h.otherMu.Unlock()
 }

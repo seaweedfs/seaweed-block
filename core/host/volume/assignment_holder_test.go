@@ -99,6 +99,12 @@ func TestAssignmentHolderIdentityFencesPreviouslyHealthySameReplica(t *testing.T
 	if h.view.Projection().Healthy {
 		t.Fatal("same-r1 foreign holder left the old frontend healthy")
 	}
+	stale := holderAssignment(t, "new-host")
+	stale.Epoch = 0
+	h.applyFact(stale)
+	if h.view.Projection().Healthy {
+		t.Fatal("stale foreign replay erased the newer fencing line")
+	}
 }
 
 func TestAssignmentHolderIdentityRefusesCarriedEndpointMismatch(t *testing.T) {
