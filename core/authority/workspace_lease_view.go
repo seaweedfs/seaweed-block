@@ -155,6 +155,22 @@ type PublishedLine struct {
 	OwnerFromMove bool
 }
 
+// Owner is TERM-HOLDER-001's single owner decision for a line (INV-AUTH-HOLDER-IDENTITY-001), shared by the master's
+// workspaceLineOwner and the snapshot builder. Three outcomes:
+//   - fromMove, server != "": a move minted the line on server;
+//   - fromMove, server == "": a move minted it but its owner is unknown: no server may supply its facts;
+//   - !fromMove: no move minted it; the caller uses placement / the accepted topology.
+func (pl PublishedLine) Owner() (server string, fromMove bool) {
+	if pl.OwnerFromMove || pl.IssuedHost != "" {
+		return pl.IssuedHost, true
+	}
+	return "", false
+}
+
+// The snapshot builder binds a moved line's replica to its owner through this method; the production reader must
+// provide it (a refactor dropping it is a build error, not a silent return to placement).
+var _ lineOwnerReader = (*Publisher)(nil)
+
 // PublishedAuthorityLine reads one committed line under leaf leaseMu. Identity
 // checks on renewal must not wait for p.mu, which spans authority store I/O
 // (INV-LEASE-VIEW-001, INV-WS-RENEW-NONBLOCKING-001).

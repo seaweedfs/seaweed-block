@@ -42,10 +42,36 @@ func TestBuildSnapshotTakesTheMovedLinesReplicaFromItsOwner(t *testing.T) {
 	if !ok || r1.ServerID != "s2" || r1.DataAddr != "owner-s2:1" || r1.CtrlAddr != "owner-s2:2" {
 		t.Fatalf("line replica candidate %+v ok=%v, want the owner s2 at owner-s2:1/2 (never the old host s1)", r1, ok)
 	}
+	// a move minted the line but its owner is unknown: NO server supplies the replica's facts, so the returning
+	// placement server's fresh report changes nothing (no endpoint change, hence no refresh)
+	unknown := ownerReader{fakeReaderForHost: reader.fakeReaderForHost, owner: map[string]PublishedLine{"v1": {ReplicaID: "r1", Epoch: 2, OwnerFromMove: true}}}
+	if v, ok := findSupported(BuildSnapshot(store.Snapshot(), topo, unknown), "v1"); ok {
+		if r1, _ := candidateByReplica(v, "r1"); r1.ServerID == "s1" || r1.DataAddr == "old-s1:1" || (r1.DataAddr != "" && r1.DataAddr != "owner-s2:1") {
+			t.Fatalf("unknown owner: candidate %+v takes the placement server's report (want no server's facts)", r1)
+		}
+	}
 	// without a move-named owner the accepted topology stands (control)
 	plain := ownerReader{fakeReaderForHost: reader.fakeReaderForHost, owner: map[string]PublishedLine{"v1": {ReplicaID: "r1", Epoch: 2}}}
 	v, _ = findSupported(BuildSnapshot(store.Snapshot(), topo, plain), "v1")
 	if r1, _ := candidateByReplica(v, "r1"); r1.ServerID != "s1" || r1.DataAddr != "old-s1:1" {
 		t.Fatalf("control: no move-named owner, candidate %+v, want the topology's s1", r1)
+	}
+}
+
+// TERM-HOLDER-001's single owner decision: the three outcomes of PublishedLine.Owner.
+func TestPublishedLineOwnerOutcomes(t *testing.T) {
+	for _, c := range []struct {
+		pl       PublishedLine
+		server   string
+		fromMove bool
+	}{
+		{PublishedLine{IssuedHost: "s2", OwnerFromMove: true}, "s2", true},
+		{PublishedLine{IssuedHost: "s2"}, "s2", true},
+		{PublishedLine{OwnerFromMove: true}, "", true},
+		{PublishedLine{}, "", false},
+	} {
+		if server, fromMove := c.pl.Owner(); server != c.server || fromMove != c.fromMove {
+			t.Fatalf("%+v.Owner() = %q, %v; want %q, %v", c.pl, server, fromMove, c.server, c.fromMove)
+		}
 	}
 }

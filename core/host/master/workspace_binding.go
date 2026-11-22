@@ -78,8 +78,8 @@ func (h *Host) workspaceSourceHost(volume, replica string, epoch uint64) string 
 // lines need the move journal. Endpoints never identify a server.
 func (h *Host) workspaceLineOwner(current authority.PublishedLine, volume, replica string, epoch uint64) string {
 	if current.ReplicaID == replica && current.Epoch == epoch {
-		if current.OwnerFromMove || current.IssuedHost != "" {
-			return current.IssuedHost
+		if server, fromMove := current.Owner(); fromMove { // the single owner decision (PublishedLine.Owner)
+			return server
 		}
 		return h.placementSourceHost(volume, replica)
 	}
