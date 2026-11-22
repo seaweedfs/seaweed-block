@@ -102,7 +102,7 @@ func TestWorkspaceMoveRefusalNamesTheMissingPrecondition(t *testing.T) {
 	}{
 		{"unknown source", move("unplaced", "node-b", "127.0.0.1:19301", "127.0.0.1:19302"), `move source unknown: no issued move or placement names replica "r1" at epoch 1`},
 		{"unknown target node", move("placed", "node-z", "127.0.0.1:19301", "127.0.0.1:19302"), `move target node "node-z" is not registered`},
-		{"same-host clean still needs authority", move("placed", "node-a", "127.0.0.1:19101", "127.0.0.1:19102"), `workspace move: missing or changed authority/lease`},
+		{"same-host clean still needs prepared endpoints", move("bound", "node-a", "127.0.0.1:19101", "127.0.0.1:19102"), `move target endpoints 127.0.0.1:19101/127.0.0.1:19102 on "node-a" are not registered (live bindings on that node: 127.0.0.1:19121/127.0.0.1:19122)`},
 		{"target on another host", move("placed", "node-b", "10.9.9.9:19311", "127.0.0.1:19312"),
 			`move target endpoints 10.9.9.9:19311/127.0.0.1:19312 on "node-b" are not registered (not on the node's hosts: it registers 127.0.0.1:19301/127.0.0.1:19302; no per-volume binding is prepared)`},
 		{"explicit binding elsewhere", move("bound", "node-b", "127.0.0.1:19301", "127.0.0.1:19302"),
