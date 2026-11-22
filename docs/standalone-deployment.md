@@ -295,6 +295,9 @@ workspace path. There is no equivalent script for ublk yet.
 
 ## Planned workspace hand-over
 
+Setup, expected output of each step, return to the same host, crash recovery
+and symptoms: [volume lifecycle](volume-lifecycle.md).
+
 For an RF1 chunk volume with a workspace lease, inspect the current logical
 holder with `sw-block ops workspace show --master MASTER --volume V`. Copy the
 replica and epoch exactly. The view prints the master's lease state, recorded
@@ -341,8 +344,7 @@ Perform a clean hand-over in this order:
    ```
 
    Use registered target endpoints. The master checks the seal and matching
-   ACK. The target may be the source host once sealed, when the server supports
-   same-host clean reload. A command refuses rather than bypassing a missing
+   ACK. The target may be the source host once sealed. A command refuses rather than bypassing a missing
    seal, ACK or current identity. On an **unknown outcome**, rerun with the
    **SAME `--request-id MOVE_ID`**; never use a new id to guess whether it ran.
 6. Start `blockvolume` on the target separately with the granted replica and
