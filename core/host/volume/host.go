@@ -813,8 +813,7 @@ func (h *Host) streamOnce(ctx context.Context) error {
 // installed, admitting local-only writes with zero fan-out.
 func (h *Host) applyFact(fact *control.AssignmentFact) {
 	// INV-AUTH-HOLDER-IDENTITY-001: matching r1 and loopback endpoints do not identify a host.
-	if fact.ReplicaId == h.cfg.ReplicaID && !h.assignmentNamesSelf(fact) {
-		h.observeForeignHolder(fact)
+	if h.refusePrimaryAssignment(fact) {
 		return
 	}
 	if fact.ReplicaId != h.cfg.ReplicaID {

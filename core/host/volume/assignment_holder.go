@@ -54,3 +54,22 @@ func (h *Host) AssignmentEndpointWarning() string {
 	warning, _ := h.assignmentEndpointWarning.Load().(string)
 	return warning
 }
+
+// refusePrimaryAssignment implements M3 / INV-AUTH-HOLDER-IDENTITY-001:
+// a candidate cannot enter the adapter behind an already observed foreign line.
+// Identity and ordering each use their existing single deciding function.
+func (h *Host) refusePrimaryAssignment(f *control.AssignmentFact) bool {
+	if f.ReplicaId != h.cfg.ReplicaID {
+		return false
+	}
+	if !h.assignmentNamesSelf(f) {
+		h.observeForeignHolder(f)
+		return true
+	}
+	if h.IsSuperseded(h.cfg.ReplicaID, f.Epoch, f.EndpointVersion) {
+		h.log.Printf("blockvolume: volume %s refuses stale self-labelled assignment server=%q epoch=%d ev=%d behind recorded foreign line",
+			h.cfg.VolumeID, f.ServerId, f.Epoch, f.EndpointVersion)
+		return true
+	}
+	return false
+}
