@@ -5,6 +5,7 @@ package main_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -51,6 +52,7 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 		}
 	}
 	cluster := startWorkspaceWeed(t)
+	gap1PreserveFailure(t, root, cluster.dir)
 	stem := fmt.Sprintf("codex03-gap1-%d", time.Now().UnixNano())
 	volume := stem
 	base := "/" + stem
@@ -95,6 +97,7 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 	want := bytes.Repeat([]byte{0x6d}, 4096)
 	client := gap1ConnectNVMe(t, nvmeAddr, "nqn.2026-11.test:"+stem)
 	client.writeFlush(t, 8, want)
+	t.Logf("acknowledged NVMe record: lba=8 bytes=%d sha256=%x", len(want), sha256.Sum256(want))
 	client.readExact(t, 8, want)
 	client.close()
 	remote := cluster.remote(t, base+"/"+volume)
@@ -432,5 +435,31 @@ func gap1SupersededDoesNotRestart(t *testing.T, stem, exe string, args []string,
 			t.Fatalf("supersede not a terminal no-retry exit: %+v", s)
 		}
 		return true
+	})
+}
+
+// Register before the units: their exact-unit cleanup runs first, then this
+// retains failed-run local state before testing.TempDir removes it. Nothing is
+// deleted from the evidence directory, including a partial copy on failure.
+func gap1PreserveFailure(t *testing.T, roots ...string) {
+	t.Helper()
+	destination := os.Getenv("GAP1_EVIDENCE_DIR")
+	if destination == "" {
+		return
+	}
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		if err := os.MkdirAll(destination, 0700); err != nil {
+			t.Logf("evidence mkdir: %v", err)
+			return
+		}
+		for i, root := range roots {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			out, err := exec.CommandContext(ctx, "cp", "-a", "--sparse=always", root, filepath.Join(destination, fmt.Sprintf("runtime-%d", i))).CombinedOutput()
+			cancel()
+			t.Logf("failed-run state retained: source=%s destination=%s err=%v output=%s", root, destination, err, out)
+		}
 	})
 }
