@@ -51,7 +51,7 @@ func TestChunkControl_CutToUnwrittenMinLSNPublishesNothing(t *testing.T) {
 	ctx := context.Background()
 	remote := storage.NewMemChunkRemote()
 	dp, err := durable.NewDurableProvider(durable.ProviderConfig{
-		Impl:           durable.ImplWALStoreChunk,
+		Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1",
 		StorageRoot:    t.TempDir(),
 		BlockSize:      4096,
 		NumBlocks:      256,

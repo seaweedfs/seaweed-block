@@ -55,7 +55,7 @@ func TestPlainSealDeadlineRetryUploadsOnlyRemainingChunks(t *testing.T) {
 	defer expire(context.Canceled)
 	remote := &sealProgressRemote{MemChunkRemote: storage.NewMemChunkRemote(), expire: expire, images: map[[32]byte]int{}}
 	p, err := durable.NewDurableProvider(durable.ProviderConfig{
-		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096,
+		Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: t.TempDir(), BlockSize: 4096,
 		NumBlocks: chunks * pcChunkBlocks, ChunkBlocks: pcChunkBlocks, ChunkUploadConcurrency: 1,
 		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
 	}, v1View())

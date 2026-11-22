@@ -109,7 +109,7 @@ func TestExistingDurableVolumeDisappearsDoesNotCreateFromIgnoredFlags(t *testing
 			if _, _, err = durableCreateGeometry(f); err == nil {
 				t.Fatal("fresh recheck accepted original overflowing count")
 			}
-			p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: impl, StorageRoot: root, NumBlocks: blocks, BlockSize: bs, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) {
+			p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: impl, ChunkHolder: "s1/r1", StorageRoot: root, NumBlocks: blocks, BlockSize: bs, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) {
 				return nil, errors.New("unexpected remote access for missing open-only volume")
 			}}, healthyView{})
 			if err != nil {

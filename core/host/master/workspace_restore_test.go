@@ -49,7 +49,7 @@ func TestWorkspaceMoveRestoresLazilyAndFencesOldHost(t *testing.T) {
 		view := restoreProjection{frontend.Projection{VolumeID: "vol-a", ReplicaID: line.ReplicaID,
 			Epoch: line.Epoch, EndpointVersion: line.EndpointVersion, Healthy: true}}
 		p, err := durable.NewDurableProvider(durable.ProviderConfig{
-			Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64,
+			Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: t.TempDir(), NumBlocks: 64,
 			BlockSize: 4096, ChunkBlocks: 4,
 			ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
 		}, view)

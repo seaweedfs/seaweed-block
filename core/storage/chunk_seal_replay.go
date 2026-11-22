@@ -3,25 +3,40 @@ package storage
 import (
 	"context"
 	"fmt"
+
+	"github.com/seaweedfs/seaweed-block/core/holder"
 )
 
 // ReadDetachedChunkHead implements INV-WS-SEAL-REPLAY-001. A re-sent seal
 // succeeds only on this remote observation, never on a remembered result or
 // a generation comparison with a previously observed root. It writes nothing.
-func ReadDetachedChunkHead(ctx context.Context, remote ChunkRemote, epoch uint64, holder string) (ChunkHead, error) {
-	if remote == nil || epoch == 0 || holder == "" {
+func ReadDetachedChunkHead(ctx context.Context, remote ChunkRemote, epoch uint64, owner string) (ChunkHead, error) {
+	if remote == nil || epoch == 0 || owner == "" {
 		return ChunkHead{}, fmt.Errorf("%w: seal replay needs remote and assigned owner", ErrChunkCaptureRefused)
 	}
 	head, err := readChunkHead(ctx, remote)
 	if err != nil {
 		return ChunkHead{}, err
 	}
-	if head.Epoch != epoch || head.Holder != holder {
+	if head.Epoch != epoch || !holder.SameAssignment(head.Holder, owner) {
 		return ChunkHead{}, ErrChunkLayerFenced
 	}
-	proof := head.DetachedBy
-	if head.Gen == 0 || !chunkHeadIsDetached(head) || proof == nil || proof.Gen != head.Gen || proof.Epoch != epoch || proof.Holder != holder {
+	if !detachedProofOf(head, epoch, owner) {
 		return ChunkHead{}, fmt.Errorf("%w: HEAD is not this owner's exact detached proof", ErrChunkCASOutcomeUnknown)
 	}
 	return copyHead(head), nil
+}
+
+// detachedProofOf reports whether head is owner's exact detached proof at
+// epoch: a detached HEAD whose DetachedBy names its own generation, epoch
+// and owner (holder and root). The one sealed-reopen test (V1-SPEC r2.39).
+func detachedProofOf(head chunkHead, epoch uint64, owner string) bool {
+	proof := head.DetachedBy
+	return head.Gen != 0 && chunkHeadIsDetached(head) && head.Epoch == epoch && holder.SameAssignment(head.Holder, owner) &&
+		proof != nil && proof.Gen == head.Gen && proof.Epoch == epoch && holder.Same(proof.Holder, proof.HolderRoot, head.Holder, head.HolderRoot)
+}
+
+// anyRootOfHolder is headSupersedes' owner rule for a claim.
+func anyRootOfHolder(curHolder, _, holderID, _ string) bool {
+	return holder.SameAssignment(curHolder, holderID)
 }

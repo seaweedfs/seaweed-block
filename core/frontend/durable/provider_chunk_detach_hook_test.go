@@ -47,7 +47,7 @@ func hookedProvider(t *testing.T) (*faultRemote, *durable.DurableProvider, front
 	remote := &faultRemote{MemChunkRemote: storage.NewMemChunkRemote()}
 	k := &detachHooks{}
 	p, err := durable.NewDurableProvider(durable.ProviderConfig{
-		Impl:                 durable.ImplWALStoreChunk,
+		Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1",
 		StorageRoot:          t.TempDir(),
 		BlockSize:            4096,
 		NumBlocks:            pcBlocks,

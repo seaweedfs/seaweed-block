@@ -20,7 +20,7 @@ func TestWALStoreChunkV3_SequentialBurstFlush(t *testing.T) {
 	ctx := context.Background()
 	remote := storage.NewMemChunkRemote()
 	p, err := durable.NewDurableProvider(durable.ProviderConfig{
-		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096,
+		Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: t.TempDir(), BlockSize: 4096,
 		NumBlocks: total / 4096, ChunkBlocks: 1024,
 		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
 	}, v1View())

@@ -30,6 +30,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/holder"
 )
 
 // chunkHooks is what the WALStore holds for an attached layer.
@@ -966,11 +968,11 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	// Upload only what changed against HEAD.
 	prepareStart := time.Now()
 	next := copyHead(baseHead)
-	next.Epoch, next.Holder, next.RemoteLSN = l.cfg.Epoch, l.cfg.Holder, h
+	next.Epoch, next.Holder, next.HolderRoot, next.RemoteLSN = l.cfg.Epoch, l.cfg.Holder, l.cfg.HolderRoot, h
 	next.State, next.DetachedBy = chunkHeadActive, nil
 	if detach {
 		next.State = chunkHeadDetached
-		next.DetachedBy = &chunkDetachedBy{Holder: l.cfg.Holder, Epoch: l.cfg.Epoch, Gen: baseHead.Gen + 1}
+		next.DetachedBy = &chunkDetachedBy{Holder: l.cfg.Holder, HolderRoot: l.cfg.HolderRoot, Epoch: l.cfg.Epoch, Gen: baseHead.Gen + 1}
 	}
 	var changed []uint64
 	newKeys := map[uint64]string{}
@@ -1096,7 +1098,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	}
 	expected := chunkHeadVersion{Gen: baseHead.Gen, Epoch: baseHead.Epoch}
 	casStart := time.Now()
-	gen, casErr := casAndConfirmChunkHeadMeasured(ctx, l.remote, expected, next, &st)
+	gen, casErr := casAndConfirmChunkHeadMeasured(ctx, l.remote, l.cfg.BeforeHeadCAS, expected, next, &st)
 	st.CASNs = time.Since(casStart).Nanoseconds()
 	st.CASResult = "ok"
 	if errors.Is(casErr, errChunkHeadPrecondition) {
@@ -1221,9 +1223,9 @@ func (l *chunkLayerImpl) SettleDetach(ctx context.Context) (detachSettlement, ch
 			return 0, chunkCutResult{}, fmt.Errorf("storage: detach outcome unresolved (%w); cancel refused: %w", errChunkCASOutcomeUnknown, err)
 		}
 		cancel := copyHead(baseHead)
-		cancel.Epoch, cancel.Holder = l.cfg.Epoch, l.cfg.Holder
+		cancel.Epoch, cancel.Holder, cancel.HolderRoot = l.cfg.Epoch, l.cfg.Holder, l.cfg.HolderRoot
 		cancel.State, cancel.DetachedBy = chunkHeadActive, nil
-		gen, casErr := casAndConfirmChunkHead(ctx, l.remote, base, cancel)
+		gen, casErr := casAndConfirmChunkHead(ctx, l.remote, l.cfg.BeforeHeadCAS, base, cancel)
 		if casErr == nil {
 			cancel.Gen = gen
 			cur = cancel
@@ -1295,7 +1297,16 @@ func (l *chunkLayerImpl) cutDone(r chunkCutResult, detach bool) chunkCutResult {
 
 // supersededBy reports whether cur belongs to a newer or competing holder.
 func (l *chunkLayerImpl) supersededBy(cur chunkHead) bool {
-	return cur.Epoch > l.cfg.Epoch || (cur.Epoch == l.cfg.Epoch && cur.Holder != l.cfg.Holder && cur.Gen != 0)
+	return headSupersedes(cur, l.cfg.Epoch, l.cfg.Holder, l.cfg.HolderRoot, holder.Same)
+}
+
+// headSupersedes reports whether cur belongs to a newer epoch or, at this
+// epoch, to an owner that owns(cur's holder and root, ours) rejects: the one
+// supersede rule of the running layer (owns = holder.Same) and of a claim
+// (any root of this holder may claim; an existing root's lineage is
+// PrepareRestore's: owns = holder.SameAssignment on the holders).
+func headSupersedes(cur chunkHead, epoch uint64, holderID, root string, owns func(curHolder, curRoot, holderID, root string) bool) bool {
+	return cur.Epoch > epoch || (cur.Epoch == epoch && cur.Gen != 0 && !owns(cur.Holder, cur.HolderRoot, holderID, root))
 }
 
 func sameProposal(cur, next chunkHead) bool {
@@ -1308,7 +1319,7 @@ func sameProposal(cur, next chunkHead) bool {
 		}
 	}
 
-	if cur.Epoch != next.Epoch || cur.Holder != next.Holder || cur.RemoteLSN != next.RemoteLSN || len(cur.Chunks) != len(next.Chunks) {
+	if cur.Epoch != next.Epoch || !holder.Same(cur.Holder, cur.HolderRoot, next.Holder, next.HolderRoot) || cur.RemoteLSN != next.RemoteLSN || len(cur.Chunks) != len(next.Chunks) {
 		return false
 	}
 	if chunkHeadIsDetached(cur) != chunkHeadIsDetached(next) || (cur.DetachedBy == nil) != (next.DetachedBy == nil) ||
@@ -1352,7 +1363,7 @@ func (l *chunkLayerImpl) resolvePending(ctx context.Context) (err error) {
 		if err := l.admit(); err != nil {
 			return fmt.Errorf("storage: capture: earlier CAS outcome still unresolved (%w); re-proposal refused: %w", errChunkCASOutcomeUnknown, err)
 		}
-		gen, casErr := casAndConfirmChunkHead(ctx, l.remote, base, copyHead(*pending))
+		gen, casErr := casAndConfirmChunkHead(ctx, l.remote, l.cfg.BeforeHeadCAS, base, copyHead(*pending))
 		if casErr == nil {
 			cur = copyHead(*pending)
 			cur.Gen = gen

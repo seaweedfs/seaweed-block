@@ -29,7 +29,7 @@ func TestHostCutLimitDoesNotGateGuestIO(t *testing.T) {
 	}
 	defer lim.Close()
 	r := storage.NewMemChunkRemote()
-	p, e := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: pcBlocks, BlockSize: 4096, ChunkBlocks: pcChunkBlocks, ChunkBudget: lim, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return r, nil }}, v1View())
+	p, e := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: t.TempDir(), NumBlocks: pcBlocks, BlockSize: 4096, ChunkBlocks: pcChunkBlocks, ChunkBudget: lim, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return r, nil }}, v1View())
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -68,7 +68,7 @@ func TestHostUnusablePoolExplicitDurabilityUsesUrgent(t *testing.T) {
 	}
 	defer lim.Close()
 	remote := storage.NewMemChunkRemote()
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: pcBlocks, BlockSize: 4096, ChunkBlocks: pcChunkBlocks, ChunkBudget: lim, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil }}, v1View())
+	p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: t.TempDir(), NumBlocks: pcBlocks, BlockSize: 4096, ChunkBlocks: pcChunkBlocks, ChunkBudget: lim, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil }}, v1View())
 	if err != nil {
 		t.Fatal(err)
 	}

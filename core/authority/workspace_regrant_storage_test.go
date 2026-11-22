@@ -45,7 +45,7 @@ func testWorkspaceRegrantStorage(t *testing.T, sealed, fresh bool) {
 	open := func() *durable.DurableProvider {
 		t.Helper()
 		provider, err := durable.NewDurableProvider(durable.ProviderConfig{
-			Impl: durable.ImplWALStoreChunk, StorageRoot: root, NumBlocks: 64,
+			Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: root, NumBlocks: 64,
 			BlockSize: 4096, ChunkBlocks: 4,
 			ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
 		}, regrantStorageView{})

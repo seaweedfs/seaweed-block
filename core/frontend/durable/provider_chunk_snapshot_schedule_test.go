@@ -45,7 +45,7 @@ func (c *snapCalls) count() int {
 func snapScheduleProvider(t *testing.T, remote storage.ChunkRemote, period time.Duration, calls *snapCalls) *durable.DurableProvider {
 	t.Helper()
 	p, err := durable.NewDurableProvider(durable.ProviderConfig{
-		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096,
+		Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: t.TempDir(), BlockSize: 4096,
 		NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
 		ChunkSnapshotPeriod:    period,
 		ChunkScheduledSnapshot: calls.take,
@@ -141,7 +141,7 @@ func TestWALStoreChunk_ScheduledSnapshotOffTakesNone(t *testing.T) {
 // A snapshot period without its callback is refused.
 func TestWALStoreChunk_ScheduledSnapshotNeedsItsCallback(t *testing.T) {
 	_, err := durable.NewDurableProvider(durable.ProviderConfig{
-		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096,
+		Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: t.TempDir(), BlockSize: 4096,
 		NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks, ChunkSnapshotPeriod: time.Hour,
 		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return storage.NewMemChunkRemote(), nil },
 	}, v1View())
@@ -168,7 +168,7 @@ func TestWALStoreChunk_ScheduledSnapshotSkipsARestoringVolume(t *testing.T) {
 	_ = first.Close()
 	calls := &snapCalls{}
 	fresh, err := durable.NewDurableProvider(durable.ProviderConfig{
-		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096,
+		Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: t.TempDir(), BlockSize: 4096,
 		NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
 		ChunkSnapshotPeriod: period, ChunkScheduledSnapshot: calls.take,
 		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },

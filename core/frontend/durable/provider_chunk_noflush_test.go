@@ -45,7 +45,7 @@ func runNoClientFlushBurst(t *testing.T, mode storage.WMode) {
 	ctx := context.Background()
 	remote := storage.NewMemChunkRemote()
 	p, err := durable.NewDurableProvider(durable.ProviderConfig{
-		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096,
+		Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: t.TempDir(), BlockSize: 4096,
 		NumBlocks: (1 << 30) / 4096, ChunkBlocks: 1024, ChunkCaptureInterval: 0,
 		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
 	}, v1View())
@@ -186,7 +186,7 @@ func runNoClientFlushBurst(t *testing.T, mode storage.WMode) {
 func TestWALStoreChunkV3NoFlushWithActiveRF2CatchupPin(t *testing.T) {
 	ctx := context.Background()
 	remote := storage.NewMemChunkRemote()
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: 1 << 18, ChunkBlocks: 1024, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil }}, v1View())
+	p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: 1 << 18, ChunkBlocks: 1024, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil }}, v1View())
 	if err != nil {
 		t.Fatal(err)
 	}

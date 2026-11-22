@@ -24,6 +24,7 @@ func BenchmarkConcurrentBackendSync(b *testing.B) {
 				if impl == durable.ImplWALStoreChunk {
 					r := storage.NewMemChunkRemote()
 					cfg.ChunkRemoteFor = func(string) (storage.ChunkRemote, error) { return r, nil }
+					cfg.ChunkHolder = "r1"
 				}
 				p, err := durable.NewDurableProvider(cfg, newStubView(healthyProj(id)))
 				if err != nil {

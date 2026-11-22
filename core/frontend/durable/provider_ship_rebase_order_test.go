@@ -60,7 +60,7 @@ func restoreWithObserver(t *testing.T, obs *countingRebaser, atCAS func(p *durab
 		atCAS(p)
 	}}
 	var err error
-	p, err = durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4,
+	p, err = durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4,
 		ChunkRemoteFor:   func(string) (storage.ChunkRemote, error) { return wrapped, nil },
 		ChunkAttachCheck: func(context.Context, string, durable.ChunkGeometry) error { return nil },
 	}, v1View())

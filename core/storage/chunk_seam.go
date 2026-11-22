@@ -177,9 +177,13 @@ type chunkHeadVersion struct {
 // move). Every normal cut publishes State = active and no DetachedBy; a new
 // holder's takeover does the same.
 type chunkHead struct {
-	Gen                uint64
-	Epoch              uint64
-	Holder             string
+	Gen    uint64
+	Epoch  uint64
+	Holder string
+	// HolderRoot is the nonce of the local root that published this HEAD
+	// (empty on pre-release HEADs). Compared only through package holder
+	// (INV-WS-LOCAL-ROOT-IDENTITY-001).
+	HolderRoot         string
 	RemoteLSN          uint64
 	Chunks             map[uint64]chunkRef
 	Segments           map[uint64]ChunkSegment
@@ -197,9 +201,10 @@ const (
 
 // chunkDetachedBy names the holder whose final cut a detached HEAD is.
 type chunkDetachedBy struct {
-	Holder string
-	Epoch  uint64
-	Gen    uint64
+	Holder     string
+	HolderRoot string
+	Epoch      uint64
+	Gen        uint64
 }
 
 // chunkHeadIsDetached reports whether h is a detached HEAD.
@@ -335,6 +340,15 @@ type chunkLayerConfig struct {
 	// projection on every I/O.
 	Epoch  uint64
 	Holder string
+	// HolderRoot is this local root's nonce; every claim, cut and detach CAS
+	// stamps it into HEAD (INV-WS-LOCAL-ROOT-IDENTITY-001).
+	HolderRoot string
+	// BeforeHeadCAS, when set, runs before every HEAD CAS this layer or its
+	// claim sends, with the proposed HEAD and the generation it would
+	// install; an error sends no CAS. The local root records that generation
+	// durably here (its published-generation high-water), so a crash after a
+	// successful CAS never leaves HEAD above the root's record.
+	BeforeHeadCAS func(next ChunkHead, gen uint64) error
 	// HeadCoolingWindow is zero for the supported single serialization point.
 	// Nonzero is reserved for explicit multi-filer experiments, must cover
 	// the HEAD operation deadline plus settling, and does not imply atomicity.

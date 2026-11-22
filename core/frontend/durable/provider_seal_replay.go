@@ -8,11 +8,11 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
-func (p *DurableProvider) chunkHolder(proj frontend.Projection) string {
-	if p.cfg.ChunkHolder != "" {
-		return p.cfg.ChunkHolder
-	}
-	return proj.ReplicaID
+// chunkHolder is this node's HEAD holder, <server-id>/<replica-id>.
+// NewDurableProvider refuses a walstore-chunk provider without one (V1-SPEC
+// r2.39: no fallback to the replica id).
+func (p *DurableProvider) chunkHolder(frontend.Projection) string {
+	return p.cfg.ChunkHolder
 }
 
 // replayPlainSeal implements M5 PlainSeal -> RemoteProof. It also works when

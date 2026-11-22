@@ -51,7 +51,7 @@ func TestRestoreWaitsForFirstAssignment(t *testing.T) {
 	defer finishRecovery()
 	done := make(chan error, 1)
 	go func() { _, err := p.RecoverVolume(recoverCtx, "v1"); done <- err }()
-	<-v.seen // recovery inspected the assignment
+	<-v.seen                       // recovery inspected the assignment
 	if err := <-done; err != nil { // local recovery settles before assignment can be applied
 		t.Fatalf("first assignment did not converge: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestRestoreWaitsForFirstAssignment(t *testing.T) {
 func chunkProviderForAssignment(t *testing.T, v frontend.ProjectionView) *durable.DurableProvider {
 	t.Helper()
 	p, err := durable.NewDurableProvider(durable.ProviderConfig{
-		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64,
+		Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: t.TempDir(), NumBlocks: 64,
 		BlockSize: 4096, ChunkBlocks: 4,
 		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return storage.NewMemChunkRemote(), nil },
 	}, v)
@@ -91,7 +91,7 @@ func TestRestoreDeferredAssignmentWaitEndsOnDeadlineAndClose(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			v := &arrivingAssignment{seen: make(chan struct{}), assigned: make(chan struct{})}
 			p, err := durable.NewDurableProvider(durable.ProviderConfig{
-				Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4,
+				Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4,
 				ChunkAssignmentTimeout: 40 * time.Millisecond,
 				ChunkRemoteFor: func(string) (storage.ChunkRemote, error) {
 					t.Error("remote reached without assignment")

@@ -18,7 +18,7 @@ import (
 func schedProvider(t *testing.T, remote storage.ChunkRemote, interval time.Duration) *durable.DurableProvider {
 	t.Helper()
 	p, err := durable.NewDurableProvider(durable.ProviderConfig{
-		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096,
+		Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: t.TempDir(), BlockSize: 4096,
 		NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
 		ChunkCaptureInterval: interval,
 		ChunkRemoteFor:       func(string) (storage.ChunkRemote, error) { return remote, nil },
@@ -113,7 +113,7 @@ func TestWALStoreChunk_StatusCarriesChunkLayer(t *testing.T) {
 	remote := storage.NewMemChunkRemote()
 	view := newStubView(frontend.Projection{VolumeID: "v1", ReplicaID: "r1"}) // pre-assignment
 	p, err := durable.NewDurableProvider(durable.ProviderConfig{
-		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096,
+		Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: t.TempDir(), BlockSize: 4096,
 		NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
 		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
 	}, view)
@@ -174,7 +174,7 @@ func TestWALStoreChunk_PublishSettledHook(t *testing.T) {
 	var mu sync.Mutex
 	var got []string
 	p, err := durable.NewDurableProvider(durable.ProviderConfig{
-		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096,
+		Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: t.TempDir(), BlockSize: 4096,
 		NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
 		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
 		ChunkOnPublishSettled: func(_ context.Context, volumeID string, prev, next storage.ChunkHead) {

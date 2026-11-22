@@ -6,6 +6,8 @@ import (
 	"log"
 	"sync/atomic"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/holder"
 )
 
 const (
@@ -33,7 +35,14 @@ func WithChunkCASAccounting(ctx context.Context) (context.Context, func() uint64
 	return ctx, counter.Load
 }
 
-func casChunkHead(ctx context.Context, remote chunkRemote, expected chunkHeadVersion, next chunkHead) (uint64, error) {
+func casChunkHead(ctx context.Context, remote chunkRemote, before func(chunkHead, uint64) error, expected chunkHeadVersion, next chunkHead) (uint64, error) {
+	if before != nil {
+		// INV-WS-LOCAL-ROOT-IDENTITY-001: the root records the generation
+		// before the CAS can install it; no CAS without the record.
+		if err := before(next, expected.Gen+1); err != nil {
+			return 0, fmt.Errorf("storage: record HEAD generation %d before its CAS: %w", expected.Gen+1, err)
+		}
+	}
 	ctx, cancel := context.WithTimeout(ctx, chunkHeadOperationTimeout)
 	defer cancel()
 	if counter, _ := ctx.Value(chunkCASCountKey{}).(*atomic.Uint64); counter != nil {
@@ -67,7 +76,7 @@ func confirmChunkHead(ctx context.Context, remote chunkRemote, want chunkHead) e
 	if err != nil {
 		return fmt.Errorf("storage: HEAD publication confirmation: %w: %w", errChunkCASOutcomeUnknown, err)
 	}
-	if got.Gen != want.Gen || got.Epoch != want.Epoch || got.Holder != want.Holder {
+	if got.Gen != want.Gen || got.Epoch != want.Epoch || !holder.Same(got.Holder, got.HolderRoot, want.Holder, want.HolderRoot) {
 		log.Printf("ALARM: HEAD publication displaced: wanted gen=%d epoch=%d holder=%q, read gen=%d epoch=%d holder=%q", want.Gen, want.Epoch, want.Holder, got.Gen, got.Epoch, got.Holder)
 		return fmt.Errorf("%w: HEAD publication displaced", errChunkLayerFenced)
 	}
@@ -76,13 +85,13 @@ func confirmChunkHead(ctx context.Context, remote chunkRemote, want chunkHead) e
 
 // Every successful CAS is confirmed, including calls near or beyond a lease
 // horizon. No lease renewal or guard lock is needed across these remote calls.
-func casAndConfirmChunkHead(ctx context.Context, remote chunkRemote, expected chunkHeadVersion, next chunkHead) (uint64, error) {
-	return casAndConfirmChunkHeadMeasured(ctx, remote, expected, next, nil)
+func casAndConfirmChunkHead(ctx context.Context, remote chunkRemote, before func(chunkHead, uint64) error, expected chunkHeadVersion, next chunkHead) (uint64, error) {
+	return casAndConfirmChunkHeadMeasured(ctx, remote, before, expected, next, nil)
 }
 
-func casAndConfirmChunkHeadMeasured(ctx context.Context, remote chunkRemote, expected chunkHeadVersion, next chunkHead, st *chunkCutStats) (uint64, error) {
+func casAndConfirmChunkHeadMeasured(ctx context.Context, remote chunkRemote, before func(chunkHead, uint64) error, expected chunkHeadVersion, next chunkHead, st *chunkCutStats) (uint64, error) {
 	start := time.Now()
-	gen, err := casChunkHead(ctx, remote, expected, next)
+	gen, err := casChunkHead(ctx, remote, before, expected, next)
 	if st != nil {
 		st.CASWriteNs += time.Since(start).Nanoseconds()
 	}
@@ -118,10 +127,10 @@ func (l *chunkLayerImpl) publicationOwnerChanged(cur chunkHead) bool {
 	l.stMu.Lock()
 	last := l.head
 	if last.Gen == 0 {
-		last.Epoch, last.Holder = l.cfg.Epoch, l.cfg.Holder
+		last.Epoch, last.Holder, last.HolderRoot = l.cfg.Epoch, l.cfg.Holder, l.cfg.HolderRoot
 	}
 	l.stMu.Unlock()
-	return l.supersededBy(cur) || (cur.Gen != 0 && (last.Epoch != cur.Epoch || last.Holder != cur.Holder))
+	return l.supersededBy(cur) || (cur.Gen != 0 && (last.Epoch != cur.Epoch || !holder.Same(last.Holder, last.HolderRoot, cur.Holder, cur.HolderRoot)))
 }
 
 func (l *chunkLayerImpl) fencePublication(cur chunkHead) {

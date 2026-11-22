@@ -72,7 +72,7 @@ func slotWaitProvider(t *testing.T) (p *durable.DurableProvider, lim *admitRecor
 	t.Cleanup(inner.Close)
 	lim = &admitRecorder{Limiter: inner}
 	remote = storage.NewMemChunkRemote()
-	p, err = durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: pcBlocks, BlockSize: 4096,
+	p, err = durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: t.TempDir(), NumBlocks: pcBlocks, BlockSize: 4096,
 		ChunkBlocks: pcChunkBlocks, ChunkBudget: lim, ChunkCaptureInterval: 100 * time.Millisecond,
 		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil }}, v1View())
 	if err != nil {

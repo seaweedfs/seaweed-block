@@ -12,6 +12,7 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/holder"
 )
 
 // headFilerMtimeNS is the HEAD entry's mtime from the filer's Last-Modified
@@ -67,12 +68,14 @@ func NewWorkspaceHEADReader(base string) (func(context.Context, string) (authori
 			Gen        uint64 `json:"gen"`
 			Epoch      uint64 `json:"epoch"`
 			Holder     string `json:"holder"`
+			HolderRoot string `json:"holder_root"`
 			RemoteLSN  uint64 `json:"remote_lsn"`
 			State      string `json:"state"`
 			DetachedBy *struct {
-				Holder string `json:"holder"`
-				Epoch  uint64 `json:"epoch"`
-				Gen    uint64 `json:"gen"`
+				Holder     string `json:"holder"`
+				HolderRoot string `json:"holder_root"`
+				Epoch      uint64 `json:"epoch"`
+				Gen        uint64 `json:"gen"`
 			} `json:"detachedBy"`
 			LegacyDetached json.RawMessage `json:"detached"`
 		}
@@ -89,7 +92,7 @@ func NewWorkspaceHEADReader(base string) (func(context.Context, string) (authori
 		// Missing state is the legacy active representation. Only a final-cut
 		// CAS whose proof names the installed identity can authorize CLEAN.
 		if doc.State == "detached" {
-			if doc.DetachedBy == nil || doc.DetachedBy.Holder != doc.Holder || doc.DetachedBy.Epoch != doc.Epoch || doc.DetachedBy.Gen != doc.Gen {
+			if doc.DetachedBy == nil || !holder.Same(doc.DetachedBy.Holder, doc.DetachedBy.HolderRoot, doc.Holder, doc.HolderRoot) || doc.DetachedBy.Epoch != doc.Epoch || doc.DetachedBy.Gen != doc.Gen {
 				return authority.WorkspaceHead{}, fmt.Errorf("invalid HEAD detachedBy proof")
 			}
 		} else if doc.DetachedBy != nil {

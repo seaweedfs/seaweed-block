@@ -161,7 +161,7 @@ func TestHeadBeltOperationsHaveOwnDeadline(t *testing.T) {
 	}
 	r.casDeadline, r.readDeadline = false, false
 	head := r.stats().head
-	if _, err := casAndConfirmChunkHead(context.Background(), r, ChunkHeadVersion{Gen: head.Gen, Epoch: head.Epoch}, head); err != nil {
+	if _, err := casAndConfirmChunkHead(context.Background(), r, nil, ChunkHeadVersion{Gen: head.Gen, Epoch: head.Epoch}, head); err != nil {
 		t.Fatal(err)
 	}
 	if !r.casDeadline || !r.readDeadline {

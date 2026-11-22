@@ -16,6 +16,7 @@ type headIdentityDoc struct {
 	Gen        uint64         `json:"gen"`
 	Epoch      uint64         `json:"epoch"`
 	Holder     string         `json:"holder"`
+	HolderRoot string         `json:"holder_root,omitempty"`
 	RemoteLSN  uint64         `json:"remote_lsn"`
 	State      string         `json:"state,omitempty"`
 	DetachedBy *detachedByDoc `json:"detachedBy,omitempty"`
@@ -53,7 +54,7 @@ type levelHeadDoc struct {
 }
 
 func (d headIdentityDoc) document() headDoc {
-	return headDoc{Format: d.Format, Gen: d.Gen, Epoch: d.Epoch, Holder: d.Holder, RemoteLSN: d.RemoteLSN, State: d.State, DetachedBy: d.DetachedBy}
+	return headDoc{Format: d.Format, Gen: d.Gen, Epoch: d.Epoch, Holder: d.Holder, HolderRoot: d.HolderRoot, RemoteLSN: d.RemoteLSN, State: d.State, DetachedBy: d.DetachedBy}
 }
 
 func decodeFormatHead(content []byte) (headDoc, error) {

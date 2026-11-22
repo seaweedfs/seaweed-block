@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	holderid "github.com/seaweedfs/seaweed-block/core/holder"
 	"github.com/seaweedfs/seaweed-block/core/hostlimit"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
@@ -398,6 +399,12 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 	}
 	lin := chunkLineage{volumeID: proj.VolumeID, replicaID: proj.ReplicaID, epoch: proj.Epoch, endpoint: proj.EndpointVersion}
 	holder := p.chunkHolder(proj)
+	// INV-WS-LOCAL-ROOT-IDENTITY-001: this root's nonce goes into every HEAD
+	// it publishes; its high-water is recorded before each of its CASes.
+	root, err := openLocalRoot(h.path, h.fresh)
+	if err != nil {
+		return nil, err
+	}
 	bound := &closeBoundRemote{ChunkRemote: inner, done: p.closeCtx}
 	if pace, ok := p.cfg.ChunkBudget.(interface {
 		WaitUpload(context.Context, int) error
@@ -417,6 +424,8 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 		HeadCoolingWindow:   p.cfg.ChunkHeadCoolingWindow,
 		Epoch:               lin.epoch,
 		Holder:              holder,
+		HolderRoot:          root.Nonce,
+		BeforeHeadCAS:       root.beforeHeadCAS(holder),
 		FreshFromHead:       h.fresh,
 		ReadMissTimeout:     p.cfg.ChunkReadMissTimeout,
 		HydrationWorkers:    p.cfg.ChunkHydrationWorkers,
@@ -449,7 +458,7 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 			return nil, fmt.Errorf("durable: read HEAD before attaching existing volume %s: %w", volumeID, err)
 		}
 		cfg.PrepareRestore = func(head storage.ChunkHead) error {
-			if head.Gen != 0 && head.Holder != holder {
+			if head.Gen != 0 && !holderid.SameAssignment(head.Holder, holder) {
 				err := fmt.Errorf("%w: %w: volume %s local root %s, HEAD holder %q gen %d epoch %d, local holder %q; remove or quarantine the local root to attach fresh from HEAD",
 					ErrChunkStaleLocalRoot, storage.ErrChunkLayerFenced, volumeID, h.path, head.Holder, head.Gen, head.Epoch, holder)
 				// INV-WS-STARTUP-RETRY-001: at or above this assignment,
@@ -461,6 +470,12 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 				log.Printf("durable: refusing to attach volume=%s root=%s: HEAD holder=%q gen=%d epoch=%d is not this holder %q (remove or quarantine the local root)",
 					volumeID, h.path, head.Holder, head.Gen, head.Epoch, holder)
 				return err
+			}
+			// The same holder: HEAD must be this root's lineage (V1-SPEC r2.38).
+			if why := root.lineageOf(head); why != "" {
+				log.Printf("durable: refusing to attach volume=%s root=%s: %s (remove or quarantine the local root)", volumeID, h.path, why)
+				return fmt.Errorf("%w: %w: volume %s local root %s: %s; remove or quarantine the local root to attach fresh from HEAD",
+					ErrChunkStaleLocalRoot, storage.ErrChunkLayerFenced, volumeID, h.path, why)
 			}
 			return nil
 		}

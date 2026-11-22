@@ -15,7 +15,7 @@ import (
 func TestProviderCreateCapacityPrecedesFreshMarker(t *testing.T) {
 	root := t.TempDir()
 	id := frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1}
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: root, NumBlocks: ^uint32(0), BlockSize: 8192, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return storage.NewMemChunkRemote(), nil }}, newStubView(healthyProj(id)))
+	p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: root, NumBlocks: ^uint32(0), BlockSize: 8192, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return storage.NewMemChunkRemote(), nil }}, newStubView(healthyProj(id)))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -17,7 +17,7 @@ import (
 
 func TestDurableHydration_ConfiguredLimitsReachStatus(t *testing.T) {
 	for _, configured := range []bool{false, true} {
-		cfg := durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks}
+		cfg := durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks}
 		r := storage.NewMemChunkRemote()
 		cfg.ChunkRemoteFor = func(string) (storage.ChunkRemote, error) { return r, nil }
 		wantWorkers, wantDepth := 2, 64

@@ -30,6 +30,7 @@ func BenchmarkQD1PairedBackendSync(b *testing.B) {
 			remote := storage.NewMemChunkRemote()
 			if impl == durable.ImplWALStoreChunk {
 				cfg.ChunkRemoteFor = func(string) (storage.ChunkRemote, error) { return remote, nil }
+				cfg.ChunkHolder = "r1"
 			}
 			p, err := durable.NewDurableProvider(cfg, newStubView(healthyProj(id)))
 			if err != nil {

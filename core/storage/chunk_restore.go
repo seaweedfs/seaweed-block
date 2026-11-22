@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+
+	"github.com/seaweedfs/seaweed-block/core/holder"
 )
 
 // ClaimChunkHead transfers only HEAD ownership, never chunk bodies. Epoch is
@@ -36,12 +38,15 @@ func ClaimChunkHead(ctx context.Context, remote ChunkRemote, cfg ChunkLayerConfi
 	if err != nil {
 		return ChunkHead{}, err
 	}
-	if head.Epoch > cfg.Epoch || (head.Gen != 0 && head.Epoch == cfg.Epoch && head.Holder != cfg.Holder) {
+	// Any root of this holder may claim (a fresh root takes over from HEAD);
+	// an existing root's lineage is checked by PrepareRestore
+	// (INV-WS-LOCAL-ROOT-IDENTITY-001).
+	if headSupersedes(head, cfg.Epoch, cfg.Holder, cfg.HolderRoot, anyRootOfHolder) {
 		return copyHead(head), ErrChunkLayerFenced
 	}
 	// INV-WS-SEALED-REOPEN-001: the sealing incarnation cannot reopen its
 	// committed handoff proof. A higher-epoch takeover remains a separate claim.
-	if chunkHeadIsDetached(head) && head.Epoch == cfg.Epoch && head.Holder == cfg.Holder {
+	if detachedProofOf(head, cfg.Epoch, cfg.Holder) {
 		return copyHead(head), ErrChunkLayerDetached
 	}
 	// Preparation uses exactly the validated image this CAS will protect.
@@ -59,7 +64,7 @@ func ClaimChunkHead(ctx context.Context, remote ChunkRemote, cfg ChunkLayerConfi
 	// readback alone cannot invalidate that request's original precondition.
 	// An empty HEAD also needs an exclusive create before an old first cut.
 	next := copyHead(head)
-	next.Epoch, next.Holder = cfg.Epoch, cfg.Holder
+	next.Epoch, next.Holder, next.HolderRoot = cfg.Epoch, cfg.Holder, cfg.HolderRoot
 	// A new holder's takeover starts serving the same image as active. The
 	// previous holder's final-cut proof belongs only to its detached HEAD.
 	next.State, next.DetachedBy = chunkHeadActive, nil
@@ -85,7 +90,7 @@ func ClaimChunkHead(ctx context.Context, remote ChunkRemote, cfg ChunkLayerConfi
 		return ChunkHead{}, err
 	}
 	settled = false // an ambiguous CAS keeps its segment intents
-	gen, casErr := casChunkHead(ctx, remote, ChunkHeadVersion{Gen: head.Gen, Epoch: head.Epoch}, next)
+	gen, casErr := casChunkHead(ctx, remote, cfg.BeforeHeadCAS, ChunkHeadVersion{Gen: head.Gen, Epoch: head.Epoch}, next)
 	if casErr == nil {
 		next.Gen = gen
 		if err := confirmChunkTakeover(ctx, remote, next, cfg.HeadCoolingWindow); err != nil {
@@ -114,7 +119,7 @@ func ClaimChunkHead(ctx context.Context, remote ChunkRemote, cfg ChunkLayerConfi
 		return current, nil
 	}
 	// A foreign publication is a fence, not permission to clean our roots.
-	if current.Gen != 0 && (current.Epoch != head.Epoch || current.Holder != head.Holder) {
+	if current.Gen != 0 && (current.Epoch != head.Epoch || !holder.Same(current.Holder, current.HolderRoot, head.Holder, head.HolderRoot)) {
 		return copyHead(current), fmt.Errorf("storage: HEAD claim displaced: %w", ErrChunkLayerFenced)
 	}
 	settled = errors.Is(casErr, ErrChunkHeadPrecondition) || current.Gen > head.Gen

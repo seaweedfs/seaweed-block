@@ -375,6 +375,11 @@ func NewDurableProvider(cfg ProviderConfig, view frontend.ProjectionView) (*Dura
 	if cfg.Impl == ImplWALStoreChunk && cfg.ChunkRemoteFor == nil {
 		return nil, fmt.Errorf("durable: impl %q requires ProviderConfig.ChunkRemoteFor", ImplWALStoreChunk)
 	}
+	// V1-SPEC r2.39: HEAD names its holder as <server-id>/<replica-id>; a
+	// replica id alone is not a holder (no fallback).
+	if cfg.Impl == ImplWALStoreChunk && cfg.ChunkHolder == "" {
+		return nil, fmt.Errorf("durable: impl %q requires ProviderConfig.ChunkHolder (<server-id>/<replica-id>)", ImplWALStoreChunk)
+	}
 	if cfg.ChunkCaptureInterval < 0 || cfg.ChunkCutTimeout < 0 || cfg.ChunkMaintenanceInterval < 0 || cfg.ChunkMaintenanceTimeout < 0 {
 		return nil, fmt.Errorf("durable: chunk schedule durations must not be negative")
 	}

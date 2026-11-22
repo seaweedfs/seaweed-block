@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+
+	holderid "github.com/seaweedfs/seaweed-block/core/holder"
 	"github.com/seaweedfs/seaweed-block/core/host/volume"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"github.com/seaweedfs/seaweed-block/core/storage"
@@ -65,7 +67,7 @@ func workspaceDetachedGeneration(ctx context.Context, remoteFor func(string) (st
 		return 0, err
 	}
 	proof := head.DetachedBy
-	if head.Gen == 0 || head.Epoch != id.Epoch || head.Holder != holder || head.State != storage.ChunkHeadDetached || proof == nil || proof.Gen != head.Gen || proof.Epoch != head.Epoch || proof.Holder != head.Holder {
+	if head.Gen == 0 || head.Epoch != id.Epoch || !holderid.SameAssignment(head.Holder, holder) || head.State != storage.ChunkHeadDetached || proof == nil || proof.Gen != head.Gen || proof.Epoch != head.Epoch || !holderid.Same(proof.Holder, proof.HolderRoot, head.Holder, head.HolderRoot) {
 		return 0, fmt.Errorf("workspace shutdown has no matching stored detached HEAD")
 	}
 	return head.Gen, nil

@@ -25,6 +25,7 @@ func TestTargetDurabilityLatencyPerf(t *testing.T) {
 				cfg.ChunkBlocks = 16
 				remote := storage.NewMemChunkRemote()
 				cfg.ChunkRemoteFor = func(string) (storage.ChunkRemote, error) { return remote, nil }
+				cfg.ChunkHolder = "r1"
 			}
 			p, err := durable.NewDurableProvider(cfg, targetPerfView{})
 			if err != nil {

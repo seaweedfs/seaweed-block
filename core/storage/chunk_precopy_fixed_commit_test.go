@@ -189,7 +189,7 @@ func TestPrecopyFixedPartsMeasureCASAndReadbackSeparately(t *testing.T) {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
-		_, err := casAndConfirmChunkHeadMeasured(ctx, r, chunkHeadVersion{}, chunkHead{Epoch: 1, Holder: "owner", Chunks: map[uint64]chunkRef{}}, &st)
+		_, err := casAndConfirmChunkHeadMeasured(ctx, r, nil, chunkHeadVersion{}, chunkHead{Epoch: 1, Holder: "owner", Chunks: map[uint64]chunkRef{}}, &st)
 		if err != nil {
 			t.Fatal(err)
 		}

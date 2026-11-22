@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/holder"
 )
 
 // WorkspaceHead is read from the configured HEAD source, never supplied as
@@ -502,7 +504,9 @@ func (p *Publisher) prepareWorkspaceMoveLocked(ask AssignmentAsk, g workspaceGra
 // lost range starts at this HEAD's RemoteLSN. A HEAD at the expected or a
 // higher epoch that is not the expected holder's stays refused.
 func workspaceHeadAdmits(q WorkspaceMoveRequest, h WorkspaceHead) bool {
-	owned := h.Gen != 0 && h.Epoch == q.ExpectedEpoch && h.Holder == q.ExpectedHost+"/"+q.ExpectedReplicaID
+	// The master knows the assignment, not the local root: server and
+	// replica only (INV-WS-LOCAL-ROOT-IDENTITY-001).
+	owned := h.Gen != 0 && h.Epoch == q.ExpectedEpoch && holder.HeldBy(h.Holder, q.ExpectedHost, q.ExpectedReplicaID)
 	if !owned && q.Kind == "forced" {
 		owned = h.Gen != 0 && h.Epoch < q.ExpectedEpoch
 	}

@@ -21,6 +21,7 @@ func qd1CrashProvider(t *testing.T, impl durable.ImplName, root string) (*durabl
 	if impl == durable.ImplWALStoreChunk {
 		remote := storage.NewMemChunkRemote()
 		cfg.ChunkRemoteFor = func(string) (storage.ChunkRemote, error) { return remote, nil }
+		cfg.ChunkHolder = "r1"
 	}
 	p, err := durable.NewDurableProvider(cfg, newStubView(healthyProj(id)))
 	if err != nil {

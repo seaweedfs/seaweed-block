@@ -100,7 +100,7 @@ func TestRestoreFailedSeedSyncRetryCaptureAndReopen(t *testing.T) {
 	var restore func()
 	fault := &seedSyncFaultRemote{ChunkRemote: remote, beforeSeed: func() { restore = failSeedFD(t, root) }}
 	makeProvider := func(r storage.ChunkRemote) *durable.DurableProvider {
-		p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: root,
+		p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: root,
 			NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, WALRecoveryTestDisableFlusher: true,
 			ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return r, nil }}, v1View())
 		if err != nil {
@@ -199,7 +199,7 @@ func TestRestoreFailedSeedNeverTakesOwnership(t *testing.T) {
 	watched := &takeoverOrderRemote{ChunkRemote: remote, beforeCAS: func() { calls++ }}
 	var restore func()
 	fault := &seedSyncFaultRemote{ChunkRemote: watched, beforeSeed: func() { restore = failSeedFD(t, root) }}
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: root, NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, WALRecoveryTestDisableFlusher: true,
+	p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: root, NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, WALRecoveryTestDisableFlusher: true,
 		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return fault, nil }}, v1View())
 	if err != nil {
 		t.Fatal(err)
@@ -234,7 +234,7 @@ func TestRestoreFailedSeedNeverTakesOwnership(t *testing.T) {
 		t.Fatal("a refused retry took ownership", calls)
 	}
 	_ = p.Close()
-	p2, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: root, NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, WALRecoveryTestDisableFlusher: true,
+	p2, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: root, NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, WALRecoveryTestDisableFlusher: true,
 		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return watched, nil }}, v1View())
 	if err != nil {
 		t.Fatal(err)

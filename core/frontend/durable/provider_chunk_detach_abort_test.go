@@ -367,7 +367,7 @@ func detachFreezeAttempt(t *testing.T) error {
 	const freeze = 2 * time.Second
 	remote := &faultRemote{MemChunkRemote: storage.NewMemChunkRemote()}
 	p, err := durable.NewDurableProvider(durable.ProviderConfig{
-		Impl:                durable.ImplWALStoreChunk,
+		Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1",
 		StorageRoot:         t.TempDir(),
 		BlockSize:           4096,
 		NumBlocks:           pcBlocks,
@@ -566,7 +566,7 @@ func settleBoundAttempt(t *testing.T) error {
 	const freeze = 2 * time.Second
 	remote := &faultRemote{MemChunkRemote: storage.NewMemChunkRemote()}
 	p, err := durable.NewDurableProvider(durable.ProviderConfig{
-		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
+		Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
 		DetachFreezeTimeout: freeze,
 		ChunkRemoteFor:      func(string) (storage.ChunkRemote, error) { return remote, nil },
 	}, v1View())

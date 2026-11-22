@@ -19,7 +19,7 @@ func TestMaintenanceCloseCancelsAndJoinsWithoutGuestLock(t *testing.T) {
 	finish := func() { once.Do(func() { close(release) }) }
 	remote := storage.NewMemChunkRemote()
 	p, err := durable.NewDurableProvider(durable.ProviderConfig{
-		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
+		Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
 		ChunkRemoteFor:           func(string) (storage.ChunkRemote, error) { return remote, nil },
 		ChunkMaintenanceInterval: time.Millisecond,
 		ChunkMaintenance: func(ctx context.Context, vol string) error {
@@ -96,7 +96,7 @@ func TestMaintenanceAuthorityLossCancelsHeldPass(t *testing.T) {
 	view := v1View()
 	entered, cancelled := make(chan struct{}), make(chan struct{})
 	p, err := durable.NewDurableProvider(durable.ProviderConfig{
-		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
+		Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
 		ChunkRemoteFor:           func(string) (storage.ChunkRemote, error) { return storage.NewMemChunkRemote(), nil },
 		ChunkMaintenanceInterval: time.Millisecond,
 		ChunkMaintenance: func(ctx context.Context, _ string) error {
@@ -129,7 +129,7 @@ func TestMaintenancePassHasOneDeadline(t *testing.T) {
 	three := make(chan struct{})
 	var completed atomic.Int32
 	p, err := durable.NewDurableProvider(durable.ProviderConfig{
-		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
+		Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
 		ChunkRemoteFor:           func(string) (storage.ChunkRemote, error) { return storage.NewMemChunkRemote(), nil },
 		ChunkMaintenanceInterval: time.Millisecond, ChunkMaintenanceTimeout: 10 * time.Millisecond,
 		ChunkMaintenance: func(ctx context.Context, _ string) error {
@@ -189,7 +189,7 @@ func (r pendingMaintenancePut) Put(ctx context.Context, _ string, _ []byte) erro
 func TestCutDeadlineIncludesUploadWithBackgroundCaller(t *testing.T) {
 	remote := pendingMaintenancePut{storage.NewMemChunkRemote()}
 	p, err := durable.NewDurableProvider(durable.ProviderConfig{
-		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
+		Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
 		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil }, ChunkCutTimeout: 10 * time.Millisecond,
 	}, v1View())
 	if err != nil {
@@ -217,7 +217,7 @@ func TestMaintenanceCoalescesWhileOnePassIsHeld(t *testing.T) {
 	finish := func() { once.Do(func() { close(release) }) }
 	var calls atomic.Int32
 	p, err := durable.NewDurableProvider(durable.ProviderConfig{
-		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
+		Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
 		ChunkRemoteFor:           func(string) (storage.ChunkRemote, error) { return storage.NewMemChunkRemote(), nil },
 		ChunkMaintenanceInterval: time.Millisecond,
 		ChunkMaintenance: func(ctx context.Context, _ string) error {
@@ -313,7 +313,7 @@ func TestMaintenanceHealthyLineageChangeCancelsHeldPass(t *testing.T) {
 			entered, cancelled := make(chan struct{}), make(chan struct{})
 			var enterOnce, cancelOnce sync.Once
 			p, err := durable.NewDurableProvider(durable.ProviderConfig{
-				Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
+				Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
 				ChunkRemoteFor:           func(string) (storage.ChunkRemote, error) { return storage.NewMemChunkRemote(), nil },
 				ChunkMaintenanceInterval: time.Millisecond,
 				ChunkMaintenance: func(ctx context.Context, _ string) error {

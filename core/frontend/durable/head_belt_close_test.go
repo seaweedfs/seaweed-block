@@ -28,7 +28,7 @@ func TestHeadBeltProviderCloseCancelsCooling(t *testing.T) {
 	r := &beltClaimNotice{ChunkRemote: seededRemote(t), claimed: make(chan struct{})}
 	view := newStubView(healthyProj(frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 4, EndpointVersion: 2}))
 	p, err := durable.NewDurableProvider(durable.ProviderConfig{
-		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096,
+		Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: t.TempDir(), BlockSize: 4096,
 		NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks, ChunkHeadCoolingWindow: 3 * time.Second,
 		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return r, nil },
 	}, view)

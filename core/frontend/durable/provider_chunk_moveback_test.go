@@ -232,7 +232,7 @@ func TestWALStoreChunk_MoveBackRefusedOnDeferredAttach(t *testing.T) {
 	remote, rootA := movedAwayAndBack(t)
 	before := headHolder(t, remote)
 	view := newStubView(frontend.Projection{})
-	pA2 := chunkProvider(t, rootA, remote, view, 0)
+	pA2 := chunkProviderAs(t, rootA, remote, view, 0, "rA")
 	if _, err := pA2.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}

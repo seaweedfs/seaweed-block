@@ -13,7 +13,7 @@ import (
 func TestDurableProvider_CheckpointPersistenceStatus(t *testing.T) {
 	remote := storage.NewMemChunkRemote()
 	p, err := durable.NewDurableProvider(durable.ProviderConfig{
-		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096,
+		Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: t.TempDir(), BlockSize: 4096,
 		NumBlocks: 64, ChunkBlocks: 4, ChunkCaptureInterval: 0,
 		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
 	}, v1View())

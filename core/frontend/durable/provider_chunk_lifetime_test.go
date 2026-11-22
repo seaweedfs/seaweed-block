@@ -717,7 +717,7 @@ func TestWALStoreChunk_StaleWaiterCannotOverrideFailedRecovery(t *testing.T) {
 	view := newStubView(frontend.Projection{VolumeID: "v1", ReplicaID: "r1"})
 	remote := storage.NewMemChunkRemote()
 	p, err := durable.NewDurableProvider(durable.ProviderConfig{
-		Impl: durable.ImplWALStoreChunk, StorageRoot: root, BlockSize: 4096,
+		Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: root, BlockSize: 4096,
 		NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
 		WALRecoveryTestDisableFlusher: true,
 		ChunkRemoteFor:                func(string) (storage.ChunkRemote, error) { return remote, nil },
@@ -797,7 +797,7 @@ func TestWALStoreChunk_FailedRecoveryRetiresAuthorityWait(t *testing.T) {
 	root := t.TempDir()
 	view := newStubView(frontend.Projection{VolumeID: "v1", ReplicaID: "r1"})
 	p, err := durable.NewDurableProvider(durable.ProviderConfig{
-		Impl: durable.ImplWALStoreChunk, StorageRoot: root, BlockSize: 4096,
+		Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: root, BlockSize: 4096,
 		NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
 		WALRecoveryTestDisableFlusher: true,
 		ChunkRemoteFor:                func(string) (storage.ChunkRemote, error) { return storage.NewMemChunkRemote(), nil },
@@ -900,7 +900,7 @@ func TestWALStoreChunk_StaleWaiterPastTickCheckCannotAttach(t *testing.T) {
 	view := &parkingView{stubView: newStubView(frontend.Projection{VolumeID: "v1", ReplicaID: "r1"})}
 	remote := &countingRemote{ChunkRemote: storage.NewMemChunkRemote()}
 	p, err := durable.NewDurableProvider(durable.ProviderConfig{
-		Impl: durable.ImplWALStoreChunk, StorageRoot: root, BlockSize: 4096,
+		Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: root, BlockSize: 4096,
 		NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
 		WALRecoveryTestDisableFlusher: true,
 		ChunkRemoteFor:                func(string) (storage.ChunkRemote, error) { return remote, nil },

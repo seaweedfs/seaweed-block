@@ -50,7 +50,7 @@ func (r loggedRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVer
 func checkedProvider(t *testing.T, remote storage.ChunkRemote, check func(context.Context, string, durable.ChunkGeometry) error) *durable.DurableProvider {
 	t.Helper()
 	p, err := durable.NewDurableProvider(durable.ProviderConfig{
-		Impl:             durable.ImplWALStoreChunk,
+		Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1",
 		StorageRoot:      t.TempDir(),
 		BlockSize:        4096,
 		NumBlocks:        pcBlocks,

@@ -65,7 +65,7 @@ func restoredHostWrites(t *testing.T, inheritedLSN uint64, observerAfterSeed boo
 	h.applyFixtureFact(&control.AssignmentFact{VolumeId: "v1", ReplicaId: "r1", Epoch: 5, EndpointVersion: 2, PeerSetGeneration: 1})
 
 	dp, err := durable.NewDurableProvider(durable.ProviderConfig{
-		Impl:           durable.ImplWALStoreChunk,
+		Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1",
 		StorageRoot:    t.TempDir(), // empty: a fresh host
 		BlockSize:      4096,
 		NumBlocks:      256,

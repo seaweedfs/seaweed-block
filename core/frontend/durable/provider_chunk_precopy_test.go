@@ -76,7 +76,7 @@ func TestPrecopyFreezeDoesNotWaitForAdmittedIO(t *testing.T) {
 func precopyProvider(t *testing.T, remote storage.ChunkRemote, view *parkView, hooks ...*detachHooks) *durable.DurableProvider {
 	t.Helper()
 	cfg := durable.ProviderConfig{
-		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
+		Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
 		ChunkDetachPrecopy: true, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
 	}
 	if len(hooks) > 0 {

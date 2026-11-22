@@ -24,7 +24,7 @@ func (formatV3View) Projection() frontend.Projection {
 func mappedProviderV3(t *testing.T, root string, remote storage.ChunkRemote) *DurableProvider {
 	t.Helper()
 	p, err := NewDurableProvider(ProviderConfig{
-		Impl: ImplWALStoreChunk, StorageRoot: root, NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4,
+		Impl: ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: root, NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4,
 		WALRecoveryTestDisableFlusher: true,
 		ChunkRemoteFor:                func(string) (storage.ChunkRemote, error) { return remote, nil },
 	}, formatV3View{})

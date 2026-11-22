@@ -111,7 +111,7 @@ func TestChunkAuthorityWaitLogsDeadlineAndClose(t *testing.T) {
 				limit = time.Minute
 			}
 			p, err := durable.NewDurableProvider(durable.ProviderConfig{
-				Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4,
+				Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4,
 				ChunkAssignmentTimeout: limit,
 				ChunkRemoteFor:         func(string) (storage.ChunkRemote, error) { return storage.NewMemChunkRemote(), nil },
 			}, v)
@@ -182,7 +182,7 @@ func TestChunkAuthorityWaitLogsAFailedClaim(t *testing.T) {
 			}
 			v := &arrivingAssignment{seen: make(chan struct{}), assigned: make(chan struct{})}
 			p, err := durable.NewDurableProvider(durable.ProviderConfig{
-				Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4,
+				Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4,
 				ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
 			}, v)
 			if err != nil {

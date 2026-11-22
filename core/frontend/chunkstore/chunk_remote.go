@@ -51,6 +51,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/filerpb"
+	"github.com/seaweedfs/seaweed-block/core/holder"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -391,8 +392,11 @@ type headDoc struct {
 	Gen        uint64                          `json:"gen"`
 	Epoch      uint64                          `json:"epoch"`
 	Holder     string                          `json:"holder"`
-	RemoteLSN  uint64                          `json:"remote_lsn"`
-	Chunks     map[uint64]refDoc               `json:"chunks,omitempty"`
+	// HolderRoot: the publishing local root's nonce (absent on pre-release
+	// HEADs; INV-WS-LOCAL-ROOT-IDENTITY-001).
+	HolderRoot string            `json:"holder_root,omitempty"`
+	RemoteLSN  uint64            `json:"remote_lsn"`
+	Chunks     map[uint64]refDoc `json:"chunks,omitempty"`
 	// State is "active" or "detached"; a document without it is active.
 	// DetachedBy names the holder whose final cut (this generation) a
 	// detached HEAD is; it is absent unless State is detached.
@@ -401,9 +405,10 @@ type headDoc struct {
 }
 
 type detachedByDoc struct {
-	Holder string `json:"holder"`
-	Epoch  uint64 `json:"epoch"`
-	Gen    uint64 `json:"gen"`
+	Holder     string `json:"holder"`
+	HolderRoot string `json:"holder_root,omitempty"`
+	Epoch      uint64 `json:"epoch"`
+	Gen        uint64 `json:"gen"`
 }
 
 type refDoc struct {
@@ -489,10 +494,10 @@ func (r *ChunkRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVer
 }
 
 func headEntry(h storage.ChunkHead) (*filerpb.Entry, error) {
-	doc := headDoc{Format: headFormat, Gen: h.Gen, Epoch: h.Epoch, Holder: h.Holder, RemoteLSN: h.RemoteLSN,
+	doc := headDoc{Format: headFormat, Gen: h.Gen, Epoch: h.Epoch, Holder: h.Holder, HolderRoot: h.HolderRoot, RemoteLSN: h.RemoteLSN,
 		State: h.State}
 	if h.DetachedBy != nil {
-		doc.DetachedBy = &detachedByDoc{Holder: h.DetachedBy.Holder, Epoch: h.DetachedBy.Epoch, Gen: h.DetachedBy.Gen}
+		doc.DetachedBy = &detachedByDoc{Holder: h.DetachedBy.Holder, HolderRoot: h.DetachedBy.HolderRoot, Epoch: h.DetachedBy.Epoch, Gen: h.DetachedBy.Gen}
 	}
 	if h.Segments == nil {
 		if len(h.Chunks) != 0 {
@@ -553,7 +558,7 @@ func decodeHead(p string, e *filerpb.Entry) (storage.ChunkHead, error) {
 	// document or a CAS could validate against a different state.
 	if string(e.Extended[extGen]) != strconv.FormatUint(h.Gen, 10) ||
 		string(e.Extended[extEpoch]) != strconv.FormatUint(h.Epoch, 10) ||
-		string(e.Extended[extHolder]) != h.Holder {
+		!holder.SameAssignment(string(e.Extended[extHolder]), h.Holder) {
 		return fail("extended gen/epoch/holder (%q/%q/%q) disagree with the document (%d/%d/%q)",
 			e.Extended[extGen], e.Extended[extEpoch], e.Extended[extHolder], h.Gen, h.Epoch, h.Holder)
 	}
@@ -593,16 +598,16 @@ func decodeHeadDoc(p string, content []byte) (storage.ChunkHead, error) {
 		}
 	case storage.ChunkHeadDetached:
 		d := doc.DetachedBy
-		if d == nil || d.Gen != doc.Gen || d.Holder != doc.Holder || d.Epoch != doc.Epoch {
+		if d == nil || d.Gen != doc.Gen || !holder.Same(d.Holder, d.HolderRoot, doc.Holder, doc.HolderRoot) || d.Epoch != doc.Epoch {
 			return fail("detached HEAD whose detachedBy %+v is not its own holder, epoch and generation", d)
 		}
 	default:
 		return fail("state %q", doc.State)
 	}
-	h := storage.ChunkHead{Gen: doc.Gen, Epoch: doc.Epoch, Holder: doc.Holder, RemoteLSN: doc.RemoteLSN,
+	h := storage.ChunkHead{Gen: doc.Gen, Epoch: doc.Epoch, Holder: doc.Holder, HolderRoot: doc.HolderRoot, RemoteLSN: doc.RemoteLSN,
 		Chunks: make(map[uint64]storage.ChunkRef, len(doc.Chunks)), State: doc.State}
 	if doc.DetachedBy != nil {
-		h.DetachedBy = &storage.ChunkDetachedBy{Holder: doc.DetachedBy.Holder, Epoch: doc.DetachedBy.Epoch, Gen: doc.DetachedBy.Gen}
+		h.DetachedBy = &storage.ChunkDetachedBy{Holder: doc.DetachedBy.Holder, HolderRoot: doc.DetachedBy.HolderRoot, Epoch: doc.DetachedBy.Epoch, Gen: doc.DetachedBy.Gen}
 	}
 	for idx, ref := range doc.Chunks {
 		sum, err := hex.DecodeString(ref.SHA256)

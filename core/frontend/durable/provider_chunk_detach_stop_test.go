@@ -54,7 +54,7 @@ func parkedProvider(t *testing.T, remote storage.ChunkRemote) (*durable.DurableP
 	t.Helper()
 	view := &parkView{stubView: v1View()}
 	p, err := durable.NewDurableProvider(durable.ProviderConfig{
-		Impl:           durable.ImplWALStoreChunk,
+		Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1",
 		StorageRoot:    t.TempDir(),
 		BlockSize:      4096,
 		NumBlocks:      pcBlocks,

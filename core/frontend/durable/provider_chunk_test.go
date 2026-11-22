@@ -24,8 +24,15 @@ const (
 
 func chunkProvider(t *testing.T, root string, remote storage.ChunkRemote, view *stubView, interval time.Duration) *durable.DurableProvider {
 	t.Helper()
+	return chunkProviderAs(t, root, remote, view, interval, view.Projection().ReplicaID) // the holder these fixtures assert: their replica
+}
+
+// chunkProviderAs is chunkProvider with an explicit HEAD holder, for a view
+// that names no replica yet (production takes the holder from its flags).
+func chunkProviderAs(t *testing.T, root string, remote storage.ChunkRemote, view *stubView, interval time.Duration, holder string) *durable.DurableProvider {
+	t.Helper()
 	p, err := durable.NewDurableProvider(durable.ProviderConfig{
-		Impl:                 durable.ImplWALStoreChunk,
+		Impl: durable.ImplWALStoreChunk, ChunkHolder: holder,
 		StorageRoot:          root,
 		BlockSize:            4096,
 		NumBlocks:            pcBlocks,
@@ -94,7 +101,7 @@ func v1View() *stubView {
 
 func TestWALStoreChunk_RequiresRemote(t *testing.T) {
 	_, err := durable.NewDurableProvider(durable.ProviderConfig{
-		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: pcBlocks,
+		Impl: durable.ImplWALStoreChunk, ChunkHolder: "r1", StorageRoot: t.TempDir(), NumBlocks: pcBlocks,
 	}, v1View())
 	if err == nil {
 		t.Fatal("walstore-chunk without ChunkRemoteFor was accepted")

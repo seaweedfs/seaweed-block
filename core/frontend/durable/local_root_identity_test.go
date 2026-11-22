@@ -189,3 +189,115 @@ func TestWALStoreChunk_TwoRootsOfOneHolderDoNotAdoptEachOthersHead(t *testing.T)
 		t.Fatalf("the first root attached under HEAD gen %d published by the second root of the same holder: %v; want %v", head.Gen, err, durable.ErrChunkStaleLocalRoot)
 	}
 }
+
+// Upgrade (V1-SPEC r2.38, claude06): a pre-release root (no identity file)
+// under a pre-release HEAD (no HolderRoot) of the same holder is adopted once
+// and serves; the claim then stamps this root's nonce. A copy of the same
+// pre-release root taken before that conversion is refused afterwards: its
+// nonce-less form no longer matches the converted HEAD.
+func TestWALStoreChunk_PreReleaseRootAdoptedOnceThenACopyIsRefused(t *testing.T) {
+	ctx := context.Background()
+	remote := storage.NewMemChunkRemote()
+	root := t.TempDir()
+	a := chunkProvider(t, root, remote, v1View(), 0)
+	s := openRecovered(t, a)
+	if _, err := s.Write(1, block(1)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.CaptureVolume(ctx, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Make it pre-release: no identity file, and a HEAD without HolderRoot.
+	ids, _ := filepath.Glob(filepath.Join(root, "*.root"))
+	if len(ids) == 0 {
+		t.Fatal("no local root identity file was written")
+	}
+	for _, f := range ids {
+		if err := os.Remove(f); err != nil {
+			t.Fatal(err)
+		}
+	}
+	head, _ := remote.GetHead(ctx)
+	legacy := head
+	legacy.HolderRoot = ""
+	if legacy.DetachedBy != nil {
+		d := *legacy.DetachedBy
+		d.HolderRoot = ""
+		legacy.DetachedBy = &d
+	}
+	if _, err := remote.CASHead(ctx, storage.ChunkHeadVersion{Gen: head.Gen, Epoch: head.Epoch}, legacy); err != nil {
+		t.Fatal(err)
+	}
+	oldCopy := t.TempDir()
+	copyRoot(t, root, oldCopy)
+
+	b := chunkProvider(t, root, remote, v1View(), 0)
+	if _, err := b.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.RecoverVolume(ctx, "v1"); err != nil {
+		t.Fatalf("a pre-release root under its own pre-release HEAD was refused: %v", err)
+	}
+	if after, _ := remote.GetHead(ctx); after.HolderRoot == "" {
+		t.Fatalf("the adopting claim did not stamp the root's nonce: HEAD %+v", after)
+	}
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	c := chunkProvider(t, oldCopy, remote, v1View(), 0)
+	if _, err := c.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.RecoverVolume(ctx, "v1"); !errors.Is(err, durable.ErrChunkStaleLocalRoot) {
+		t.Fatalf("a copy of the pre-release root attached after the conversion: %v; want %v", err, durable.ErrChunkStaleLocalRoot)
+	}
+}
+
+// The case only the root check decides: the first root recorded generation
+// G+1 and crashed before its CAS; a second, fresh root of the same holder
+// then claimed and installed exactly G+1. HEAD is not above the first root's
+// high-water, but it names another root: the first root is refused.
+func TestWALStoreChunk_AnotherRootAtTheRecordedGenerationIsRefused(t *testing.T) {
+	ctx := context.Background()
+	mem := storage.NewMemChunkRemote()
+	remote := &casFaultRemote{ChunkRemote: mem}
+	root1, root2 := t.TempDir(), t.TempDir()
+	a := chunkProvider(t, root1, remote, v1View(), 0)
+	s := openRecovered(t, a)
+	if _, err := s.Write(1, block(1)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.CaptureVolume(ctx, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Write(2, block(2)); err != nil {
+		t.Fatal(err)
+	}
+	remote.mode.Store("before")
+	_, _ = a.CaptureVolume(ctx, "v1") // records G+1, no CAS
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	remote.mode.Store("")
+	before, _ := mem.GetHead(ctx)
+	b := chunkProvider(t, root2, remote, v1View(), 0)
+	_ = openRecovered(t, b) // fresh: claims, installing G+1
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
+	head, _ := mem.GetHead(ctx)
+	if head.Gen != before.Gen+1 {
+		t.Fatalf("setup: HEAD gen %d after the second root's claim, want %d", head.Gen, before.Gen+1)
+	}
+	c := chunkProvider(t, root1, remote, v1View(), 0)
+	if _, err := c.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.RecoverVolume(ctx, "v1"); !errors.Is(err, durable.ErrChunkStaleLocalRoot) {
+		t.Fatalf("the first root attached under another root's HEAD at its own recorded generation: %v; want %v", err, durable.ErrChunkStaleLocalRoot)
+	}
+}
