@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
@@ -319,5 +320,68 @@ func TestWorkspaceForeignHeadClaimChoosesNoRetry(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// Unlike a move BACK to an older foreign publication, this local root's
+// assignment is older than the foreign HEAD: another holder has superseded it.
+func TestWorkspaceOldLocalHolderForeignHeadChoosesNoRetry(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	h, _ := exitAuthorityHost(t)
+	root := t.TempDir()
+	remote := storage.NewMemChunkRemote()
+	view := &claimExitView{}
+	view.assigned.Store(true)
+	open := func() *durable.DurableProvider {
+		t.Helper()
+		p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: root, NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil }}, view)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = p.Close() })
+		if _, err := p.EnsureStorage("v"); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	first := open()
+	if _, err := first.RecoverVolume(ctx, "v"); err != nil {
+		t.Fatal(err)
+	}
+	want := bytes.Repeat([]byte{0x73}, 4096)
+	if _, err := first.LogicalStorage("v").Write(0, want); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.LogicalStorage("v").Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before, err := remote.GetHead(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := remote.CASHead(ctx, storage.ChunkHeadVersion{Gen: before.Gen, Epoch: before.Epoch}, storage.ChunkHead{Epoch: 2, Holder: "other", State: storage.ChunkHeadActive}); err != nil {
+		t.Fatal(err)
+	}
+	second := open()
+	if _, err := second.RecoverVolume(ctx, "v"); !errors.Is(err, storage.ErrChunkLayerFenced) {
+		t.Fatalf("old root refusal=%v", err)
+	}
+	e := newProcessExit(ctx)
+	if !chooseChunkStartupExit(e, flags{workspaceLease: true, durableImpl: "walstore-chunk", volumeID: "v"}, h, second) {
+		t.Fatal("foreign HEAD attach refusal retained the superseded process")
+	}
+	if out := <-e.decision; out.code != 78 {
+		t.Fatalf("old holder exit=%+v", out)
+	}
+	if got, err := second.LogicalStorage("v").Read(0); err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("refusal lost local acknowledged bytes: %v", err)
+	}
+	after, err := remote.GetHead(ctx)
+	if err != nil || after.Gen != before.Gen+1 || after.Holder != "other" || remote.Puts() != 0 {
+		t.Fatalf("refusal mutated HEAD/payload: %+v puts=%d err=%v", after, remote.Puts(), err)
 	}
 }
