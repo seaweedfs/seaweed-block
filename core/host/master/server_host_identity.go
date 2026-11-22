@@ -54,7 +54,7 @@ func (h *Host) refuseServerIDFromOtherHost(r *control.HeartbeatReport) error {
 	for _, s := range r.Slots {
 		for _, a := range []string{s.DataAddr, s.CtrlAddr} {
 			if a != "" && !hosts[addrHost(a)] {
-				return fmt.Errorf("heartbeat: server id %s is registered on host %s but connects from %s: register the node by the address it connects from (not loopback) in the cluster spec (volume %s replica %s)",
+				return fmt.Errorf("heartbeat: server id %s is registered on host %s but advertises %s (volume %s replica %s): advertise the registered address, or register the node by the address it uses, in the cluster spec",
 					r.ServerId, named, addrHost(a), s.VolumeId, s.ReplicaId)
 			}
 		}
