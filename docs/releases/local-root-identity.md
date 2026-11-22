@@ -2,7 +2,7 @@
 
 Each walstore-chunk volume's local root has an identity: a nonce created when
 the root is created (a fresh root, or one recreated after quarantine), stored
-next to the volume as `<volume>.root`, and written into every HEAD the root
+next to the volume file as `<volume>.bin.root`, and written into every HEAD the root
 publishes (`holder_root`). Before each of its HEAD updates the root records
 durably the generation it is about to publish (its high-water).
 
@@ -12,6 +12,15 @@ generation not above the root's high-water. Another root of the same holder,
 a rolled-back copy of this root, and a copy of a root taken before its first
 start on this release are refused (`ErrChunkStaleLocalRoot`); remove or
 quarantine such a root to attach fresh from HEAD.
+
+A refused root never serves and its process exits 78 (no automatic restart),
+keeping the root, with one of three reasons and the operator's line printed
+last: `stale_local_root` (another holder or root published over it; checked
+before the assignment wait when its epoch is at or above the root's own),
+`local_root_rolled_back` (a rolled-back copy of this root), or
+`local_root_record_unreadable`. HEAD also records `holder_root_gen`, the
+generation the root's own last update installed, so catalog marks such as a
+blocked delete and its revert never make a root look rolled back.
 
 The high-water detects a rolled-back root only when HEAD has moved past it. A
 copy of a root taken after its last cut carries the same high-water as HEAD,
