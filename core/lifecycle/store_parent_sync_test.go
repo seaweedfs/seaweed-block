@@ -3,8 +3,9 @@
 package lifecycle
 
 import (
+	"bytes"
 	"context"
-	"errors"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,7 +19,7 @@ import (
 // including a retry after failed creation; a trailing separator changes no target.
 func TestLifecycleStoreParentSync(t *testing.T) {
 	for _, kind := range []string{"node", "volume", "placement"} {
-		for _, shape := range []string{"nested", "trailing-slash", "failed-parent-sync", "relative-path"} {
+		for _, shape := range []string{"nested", "trailing-slash", "failed-parent-sync", "ancestor-permission", "relative-path"} {
 			t.Run(kind+"/"+shape, func(t *testing.T) {
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
@@ -60,11 +61,16 @@ func TestLifecycleStoreParentSyncChild(t *testing.T) {
 	}
 	want = append(want, "/")
 	var calls []string
+	var warnings bytes.Buffer
+	log.SetOutput(&warnings)
 	realSync := syncBindingParent
 	failFirst := shape == "failed-parent-sync"
 	fault := &os.PathError{Op: "open", Path: want[0], Err: os.ErrPermission}
 	syncBindingParent = func(path string) error {
 		calls = append(calls, path)
+		if shape == "ancestor-permission" && path == want[len(want)-2] {
+			return &os.PathError{Op: "open", Path: path, Err: os.ErrPermission}
+		}
 		if failFirst {
 			failFirst = false
 			return fault
@@ -88,19 +94,30 @@ func TestLifecycleStoreParentSyncChild(t *testing.T) {
 		}
 	}
 	if shape == "failed-parent-sync" {
-		if err := open(); !errors.Is(err, os.ErrPermission) {
-			t.Fatalf("ancestor sync failure hidden: %v", err)
+		if err := open(); err != nil {
+			t.Fatalf("best-effort ancestor sync blocked Open: %v", err)
 		}
-		if !reflect.DeepEqual(calls, want[:1]) {
-			t.Fatalf("failed syncs %v want %v", calls, want[:1])
+		if !reflect.DeepEqual(calls, want) {
+			t.Fatalf("failed-first syncs %v want %v", calls, want)
+		}
+		if strings.Count(warnings.String(), "lifecycle: could not sync ") != 1 || !strings.Contains(warnings.String(), "the store directory entry may not survive a crash right after its creation") {
+			t.Fatalf("missing ancestor durability warning: %s", warnings.String())
 		}
 		calls = nil
+		warnings.Reset()
 	}
+
 	if err := open(); err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(calls, want) {
 		t.Fatalf("parent syncs %v want %v", calls, want)
+	}
+	if shape == "ancestor-permission" {
+		if strings.Count(warnings.String(), "lifecycle: could not sync ") != 1 || !strings.Contains(warnings.String(), "permission denied") || !strings.Contains(warnings.String(), "the store directory entry may not survive a crash right after its creation") {
+			t.Fatalf("missing permission warning: %s", warnings.String())
+		}
+		warnings.Reset()
 	}
 	calls = nil
 	if err := open(); err != nil {
