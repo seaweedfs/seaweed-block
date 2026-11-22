@@ -78,7 +78,7 @@ type Stats struct {
 	FallbackActive                                 bool
 	AdmissionNs, MaxHoldNs                         uint64
 	SkippedByClass                                 [4]uint64
-	LastPoolError                                  string
+	LastPoolError                                  string // the last pool error; cleared by the next admission through the pool
 	// UrgentPendingUnheld counts urgent admissions that went on without the
 	// urgent-pending hold: it stayed held exclusively for 200 ms (a waiter
 	// stalled in its probe).
@@ -354,6 +354,10 @@ func (l *Limiter) Admit(ctx context.Context, payload int64, abort func(error)) (
 	}
 	fallback := err != nil // Urgent fallback has no coordinated host resource/rate bound.
 	l.mu.Lock()
+	if !fallback {
+		// The pool answered: a pool error reported earlier is over.
+		l.stats.LastPoolError = ""
+	}
 	if l.closed || ctx.Err() != nil || len(l.live) >= l.cfg.NormalSlots+l.cfg.UrgentSlots+l.cfg.FillSlots+l.cfg.IdleSlots {
 		closed := l.closed
 		l.stats.Skipped++

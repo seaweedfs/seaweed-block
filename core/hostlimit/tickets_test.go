@@ -320,3 +320,29 @@ func TestSnapshotShowsUrgentPendingHeldSince(t *testing.T) {
 		t.Fatalf("released urgent-pending still reported: %d", st.UrgentPendingHeldSinceNs)
 	}
 }
+
+// A pool error is reported until the next admission through the pool, which
+// clears it: status then shows no stale error.
+func TestPoolErrorClearsOnTheNextGoodAdmission(t *testing.T) {
+	c := testConfig(t)
+	missing := c
+	missing.Directory = filepath.Join(c.Directory, "missing")
+	l := newTest(t, missing)
+	if _, err := l.Acquire(context.Background(), Normal, nil); err == nil {
+		t.Fatal("admission through a missing pool")
+	}
+	if st := l.Snapshot().(Stats); st.LastPoolError == "" {
+		t.Fatal("the pool error is not reported")
+	}
+	if err := os.MkdirAll(missing.Directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	id, err := l.Acquire(context.Background(), Normal, nil)
+	if err != nil {
+		t.Fatalf("admission once the pool exists: %v", err)
+	}
+	l.Release(id)
+	if st := l.Snapshot().(Stats); st.LastPoolError != "" {
+		t.Fatalf("stale pool error after a good admission: %q", st.LastPoolError)
+	}
+}
