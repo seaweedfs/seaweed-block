@@ -147,6 +147,13 @@ group while volumes run.
   authentication. Keep them on loopback or a trusted network.
 - A volume's geometry is fixed when it is created. Changing
   `SWB_DURABLE_BLOCKS` later has no effect on an existing volume.
+- **Put `SWB_DURABLE_ROOT` on low-latency storage (NVMe or equivalent).**
+  - **Why:** the root holds the volume's WAL, and every guest flush is acknowledged only after an fsync there. The root's fsync latency is therefore the floor of the guest's flush latency, at all times.
+  - **Attach shows it too:** attaching or taking over a volume runs synchronous writes on the root (the store open and recovery, then the HEAD claim's local seed: an fsync and a checkpoint publish).
+    - **Measured on one host,** with its root on another disk (not NVMe), in half of the attaches: that fsync took 158-171 ms and the checkpoint publish 0.5-1.0 s.
+    - **On an NVMe root,** and in that disk's other attaches: the fsync took 50-75 microseconds and the publish 2-3 milliseconds.
+    - **Cause:** not yet established.
+  - **Check the device:** `lsblk -d -o NAME,ROTA,TRAN,MODEL`, and the line blockvolume logs at start, `storage: WAL/extent sync=... file=... reason=...`, whose reason names the root's device.
 - ublk needs root. Use `sw-blockvolume-ublk.service` instead of editing the
   unprivileged unit, and load `ublk_drv` at boot
   (`echo ublk_drv | sudo tee /etc/modules-load.d/ublk.conf`).
