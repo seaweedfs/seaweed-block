@@ -158,6 +158,7 @@ func waitWorkspaceStop(e *processExit, f flags, h *volume.Host, requests <-chan 
 	case <-e.done:
 		return nil, done
 	case request := <-requests:
+		fmt.Fprintln(os.Stderr, "blockvolume: stopping: the workspace lease guard fenced and requested the drain")
 		e.stopChunkStartup()
 		out := workspaceExit{reason: "revoked"}
 		if !h.WorkspaceLeaseRevoking() {
