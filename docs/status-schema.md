@@ -292,6 +292,9 @@ Durable store state of the served volume. Go type `volume.durableStatusBody`.
 | `Volumes[].Chunk.CutSchedule` | object | the automatic-cut timer's state; absent when the timer is off or its loop has not started (omitted when empty) |
 | `Volumes[].Chunk.CutSchedule.HostSlotWaits` | uint64 | automatic cuts refused because every host slot was held |
 | `Volumes[].Chunk.CutSchedule.HostSlotWaitSinceNs` | int64 | wall time of the first such refusal since the last successful cut; 0 when not waiting |
+| `Volumes[].Chunk.CutSchedule.TicketDueHostNs` | int64 | the waiting cut's host ticket: its due time on the host monotonic clock; absent when not waiting (omitted when empty) |
+| `Volumes[].Chunk.CutSchedule.TicketsSkipped` | uint64 | earlier tickets the waiting cut passed by the skip rule (omitted when empty) |
+| `Volumes[].Chunk.CutSchedule.TicketDropReason` | string | why the last ticket was given up before admission, when it was a refusal that waiting cannot fix (omitted when empty) |
 | `Volumes[].Warnings[]` | string | Warnings are the store's typed recovery warnings (e.g. wal_hole_suspected, issue #51); they do not change readiness. HolesSuspected counts the recoveries that found a WAL hole. (omitted when empty) |
 | `Volumes[].HolesSuspected` | uint64 | (group of `Warnings`) Warnings are the store's typed recovery warnings (e.g. wal_hole_suspected, issue #51); they do not change readiness. HolesSuspected counts the recoveries that found a WAL hole. (omitted when empty) |
 
