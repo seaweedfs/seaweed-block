@@ -70,11 +70,20 @@ func (b *durabilityClassBackend) Sync(context.Context) error {
 // operation's latched permanent cause wins even beneath a deliberate busy marker.
 func TestSyncAndFUALatchedFaultOverridesBusy(t *testing.T) {
 	for _, fua := range []bool{false, true} {
-		for _, latched := range []bool{false, true} {
-			t.Run(fmt.Sprintf("fua=%t/latched=%t", fua, latched), func(t *testing.T) {
+		for _, fault := range []struct {
+			name string
+			err  error
+		}{
+			{name: "no-latch"},
+			{name: "fsync-sentinel", err: storage.ErrFsyncFailed},
+			{name: "arbitrary-substrate-latch", err: storage.NewSubstrateIOFailure(errors.New("map persist failed"), "store")},
+			{name: "arbitrary-integrity-latch", err: storage.NewWALIntegrityFailure(errors.New("descriptor corrupt"), "store")},
+			{name: "counter-exhausted", err: storage.ErrCounterExhausted},
+		} {
+			t.Run(fmt.Sprintf("fua=%t/%s", fua, fault.name), func(t *testing.T) {
 				cause := errors.Join(frontend.ErrBackendBusy, errors.New("untyped durability cause"))
-				if latched {
-					cause = errors.Join(cause, storage.ErrFsyncFailed)
+				if fault.err != nil {
+					cause = errors.Join(cause, fault.err)
 				}
 				b := &durabilityClassBackend{Backend: testback.NewRecordingBackend(frontend.Identity{VolumeID: "v"}), err: cause}
 				cmd := IOCommand{Opcode: ioFlush, NSID: 1}
@@ -83,7 +92,7 @@ func TestSyncAndFUALatchedFaultOverridesBusy(t *testing.T) {
 				}
 				got := NewIOHandler(HandlerConfig{Backend: b}).Handle(context.Background(), cmd)
 				want := MakeStatusField(SCTGeneric, SCNamespaceNotReady, false)
-				if latched {
+				if fault.err != nil {
 					want = MakeStatusField(SCTGeneric, SCInternalError, true)
 				}
 				if got.completionStatus() != want {

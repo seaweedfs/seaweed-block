@@ -3,7 +3,6 @@ package frontend
 import (
 	"context"
 	"errors"
-	"io"
 	"log"
 	"reflect"
 	"sync"
@@ -52,10 +51,27 @@ func ClassifyBackendError(ctx context.Context, err error) BackendErrorClass {
 }
 
 func hasPermanentBackendCause(err error) bool {
+	// M1 permanent precedence: visit every envelope. errors.As alone returns
+	// the first RecoveryFailure, which may have a non-permanent kind while a
+	// later sibling or nested envelope carries the latched store fault.
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, cause := range joined.Unwrap() {
+			if hasPermanentBackendCause(cause) {
+				return true
+			}
+		}
+	} else if cause := errors.Unwrap(err); cause != nil && hasPermanentBackendCause(cause) {
+		return true
+	}
+	var failure *storage.RecoveryFailure
+	if errors.As(err, &failure) && (failure.Kind == storage.StorageRecoveryFailureSubstrateIO ||
+		failure.Kind == storage.StorageRecoveryFailureWALIntegrity) {
+		return true
+	}
 	// errors.Is traverses every child of joins, so neither an outer transient
 	// wrapper nor a sibling deadline can hide a typed storage/media failure.
 	for _, cause := range []error{syscall.EIO, syscall.ENOSPC, syscall.EROFS,
-		io.ErrUnexpectedEOF, storage.ErrWALIntegrityFault, storage.ErrFsyncFailed,
+		storage.ErrCounterExhausted, storage.ErrWALIntegrityFault, storage.ErrFsyncFailed,
 		storage.ErrAppendFailed, storage.ErrMapInvalid} {
 		if errors.Is(err, cause) {
 			return true

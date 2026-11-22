@@ -414,8 +414,10 @@ snapshot lifetime; local persistence does not bypass it.
   deadline; the broader budget gap is tracked separately in issue221.
 - Every frontend I/O error completion uses one shared retry class
   (`INV-FE-ERROR-RETRY-CLASS-001`, amended V1-SPEC r2.42): (a) a known permanent
-  cause anywhere in the wrapped/joined tree wins: EIO, ENOSPC, EROFS, unexpected
-  EOF, WAL integrity, prior fsync/append failure, or invalid chunk maps;
+  cause anywhere in the wrapped/joined tree wins: EIO, ENOSPC, EROFS, counter
+  exhaustion, WAL integrity, prior fsync/append failure, invalid chunk maps, or
+  RecoveryFailure with SubstrateIO/WALIntegrity kind (any cause). Bare short-read
+  EOF is not permanent evidence; local faults carry an integrity/I/O envelope;
   (b) otherwise a deliberate busy, not-ready, stale, closed or pure expired
   command-deadline marker decides. Unknown causes under markers do not override
   them; pressure/hydration/observer causes are not frontend classification atoms;
