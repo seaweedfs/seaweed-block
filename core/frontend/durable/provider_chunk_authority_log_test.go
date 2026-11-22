@@ -90,7 +90,7 @@ func TestChunkAuthorityWaitLogsTheWaitTheClaimAndTheEnd(t *testing.T) {
 		[]string{"volume=v1: master authority after", `replica="r1" epoch=3 endpoint=1`, "first attach attempt"},
 		[]string{`HEAD claim for volume=v1 starting: target epoch=3 holder="r1"`},
 		[]string{`HEAD claim for volume=v1 observed HEAD gen=0 epoch=0 holder=""`, "; preparing"},
-		[]string{"HEAD claim for volume=v1 done in ", `gen=0 epoch=0 holder="", no HEAD to claim (new lineage)`},
+		[]string{"HEAD claim for volume=v1 done in ", `gen=1 epoch=3 holder="r1"`},
 		[]string{"chunk authority wait for volume=v1 ended after", ": attached after 1 attempt(s)"},
 	)
 	if strings.Count(got, "first attach attempt") != 1 {
