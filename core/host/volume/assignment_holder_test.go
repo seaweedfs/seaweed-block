@@ -162,7 +162,7 @@ func (f *holderFenceCounter) AdmitAsReplica(uint64) error { f.calls.Add(1); retu
 // INV-AUTH-HOLDER-IDENTITY-001 / M3: a recorded foreign fact supersedes
 // only an adopted own lineage and only when it is strictly newer.
 func TestAssignmentHolderIdentityForeignStreamOrdering(t *testing.T) {
-	for _, mode := range []string{"target-old-first", "target-own-endpoint-first", "served-newer-foreign", "served-newer-endpoint-version", "served-old-replay", "never-assigned"} {
+	for _, mode := range []string{"target-old-first", "target-own-endpoint-first", "served-newer-foreign", "served-newer-endpoint-version", "served-old-replay", "served-equal-replay", "never-assigned"} {
 		t.Run(mode, func(t *testing.T) {
 			h, err := New(Config{MasterAddr: "127.0.0.1:1", ServerID: "new-host", VolumeID: "v1", ReplicaID: "r1", DataAddr: "127.0.0.1:19303", CtrlAddr: "127.0.0.1:19304", EnableT1Readiness: true})
 			if err != nil {
@@ -222,6 +222,9 @@ func TestAssignmentHolderIdentityForeignStreamOrdering(t *testing.T) {
 				before := fencer.calls.Load()
 				if mode == "served-newer-foreign" {
 					foreign.Epoch = 3
+				}
+				if mode == "served-equal-replay" {
+					foreign.Epoch = 2
 				}
 				if mode == "served-newer-endpoint-version" {
 					foreign.Epoch = 2
