@@ -4,6 +4,7 @@ import (
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
+	"reflect"
 	"testing"
 )
 
@@ -48,7 +49,7 @@ func TestWorkspaceLeaseRequiresHolderServerForGrantRenewAndRegrant(t *testing.T)
 				t.Errorf("%s accepted lease for server %q", stage, server)
 			}
 			after := h.Publisher().WorkspaceState("v")
-			if !proto.Equal(leaseFact("v", before.Lease), leaseFact("v", after.Lease)) {
+			if !reflect.DeepEqual(before.Lease, after.Lease) {
 				t.Errorf("%s refused identity changed lease", stage)
 			}
 		}
