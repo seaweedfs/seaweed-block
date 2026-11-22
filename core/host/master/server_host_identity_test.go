@@ -2,12 +2,15 @@ package master
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/authority"
+	"github.com/seaweedfs/seaweed-block/core/csi"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 	"github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"google.golang.org/grpc"
@@ -84,23 +87,37 @@ func TestDisplayedPrimaryIsTheIssuedHolderNotThePlacementSlot(t *testing.T) {
 				Frontends: []authority.FrontendTargetFact{{Protocol: "iscsi", Addr: host + ":3260", IQN: "iqn.2026-05.io.seaweedfs:a2", LUN: 1}}}}}
 	}
 	now := time.Now().UTC()
-	if err := m.ObservationHost().Ingest(fact("node-a", "127.0.0.1", now)); err != nil {
-		t.Fatal(err)
-	}
-	if err := m.ObservationHost().Ingest(fact("node-b", "192.0.2.9", now.Add(time.Second))); err != nil { // the old host, newer
-		t.Fatal(err)
-	}
 	if holder := m.workspaceSourceHost("a2", line.ReplicaID, line.Epoch); holder != "node-a" {
 		t.Fatalf("issued holder %q, want node-a (line %+v)", holder, line)
 	}
-	var vol *struct{ node, target string }
+	lookup := csi.NewControlStatusLookup(control.NewEvidenceServiceClient(conn))
+	// only the old host reports the replica: no primary evidence from the issued holder, so no portal at all
+	if err := m.ObservationHost().Ingest(fact("node-b", "192.0.2.9", now.Add(time.Second))); err != nil {
+		t.Fatal(err)
+	}
+	if target, err := lookup.LookupPublishTarget(ctx, "a2", ""); !errors.Is(err, csi.ErrPublishTargetNotFound) {
+		t.Fatalf("CSI lookup with only the old host's claim: target %+v err %v, want ErrPublishTargetNotFound", target, err)
+	}
+	if err := m.ObservationHost().Ingest(fact("node-a", "127.0.0.1", now)); err != nil {
+		t.Fatal(err)
+	}
+	if target, err := lookup.LookupPublishTarget(ctx, "a2", ""); err != nil || !strings.Contains(fmt.Sprintf("%+v", target), "127.0.0.1:3260") || strings.Contains(fmt.Sprintf("%+v", target), "192.0.2.9") {
+		t.Fatalf("CSI lookup: target %+v err %v, want the issued holder's 127.0.0.1:3260", target, err)
+	}
+	var vol *struct{ node, target, rowServer, rowNode, rowFrontend string }
 	for _, v := range m.ObservationSnapshot(time.Now().UTC()).Volumes {
 		if v.VolumeID == "a2" {
-			vol = &struct{ node, target string }{v.PrimaryNode, v.PublishTarget}
+			vol = &struct{ node, target, rowServer, rowNode, rowFrontend string }{node: v.PrimaryNode, target: v.PublishTarget}
+			for _, r := range v.Replicas {
+				if r.ReplicaID == line.ReplicaID {
+					vol.rowServer, vol.rowNode, vol.rowFrontend = r.ServerID, r.KubernetesNode, r.FrontendAddr
+				}
+			}
 		}
 	}
-	if vol == nil || vol.node != "node-a" || vol.target != "127.0.0.1:3260" {
-		t.Fatalf("displayed primary %+v, want node-a at 127.0.0.1:3260 (the issued holder, not the placement slot or the old host)", vol)
+	// the whole primary row is the issued holder (codex01 P2): never placement's node-b carrying node-a's frontend
+	if vol == nil || vol.node != "node-a" || vol.target != "127.0.0.1:3260" || vol.rowServer != "node-a" || vol.rowNode != "node-a" || vol.rowFrontend != "127.0.0.1:3260" {
+		t.Fatalf("displayed primary %+v, want node-a at 127.0.0.1:3260 in the volume and its primary row (the issued holder, not the placement slot or the old host)", vol)
 	}
 	resp, err := newServices(m).QueryVolumeStatus(ctx, &control.StatusRequest{VolumeId: "a2"})
 	if err != nil || len(resp.Frontends) == 0 || resp.Frontends[0].Addr != "127.0.0.1:3260" {
@@ -276,5 +293,31 @@ func registerWorkspaceHolder(t *testing.T, h *Host, server string) {
 	t.Helper()
 	if _, err := h.Lifecycle().Nodes.RegisterNode(lifecycle.NodeRegistration{ServerID: server, DataAddr: "127.0.0.1:19901", CtrlAddr: "127.0.0.1:19902"}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// codex01 P1: a CSI client takes the first frontend as the primary. When the primary's evidence (from the line's server)
+// is missing, the status lists NO frontend, even though supporting replicas report theirs; without the rule a
+// supporting replica's frontend would be published under the primary identity.
+func TestStatusListsNoFrontendWhenThePrimaryEvidenceIsMissing(t *testing.T) {
+	obs := authority.NewObservationHost(authority.ObservationHostConfig{})
+	for _, r := range []struct{ server, replica, host string }{{"node-b", "r2", "127.0.0.2"}, {"node-c", "r3", "127.0.0.3"}} {
+		if err := obs.IngestHeartbeat(authority.HeartbeatMessage{ServerID: r.server, SentAt: time.Now().UTC(), Reachable: true, Eligible: true,
+			Slots: []authority.HeartbeatSlot{{VolumeID: "v1", ReplicaID: r.replica, DataAddr: r.host + ":9201", CtrlAddr: r.host + ":9101",
+				Frontends: []authority.FrontendTargetFact{{Protocol: "iscsi", Addr: r.host + ":3260", IQN: "iqn.2026-05.example:v1"}}}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	noPrimary := func(replicaID string) (authority.SlotFact, bool) {
+		if replicaID == "r1" {
+			return authority.SlotFact{}, false // the line's server has no evidence for the primary
+		}
+		return obs.Store().SlotFact("v1", replicaID)
+	}
+	if got := statusFrontendsFor(obs, "v1", []string{"r1", "r2", "r3"}, true, "r1", noPrimary); len(got) != 0 {
+		t.Fatalf("primary evidence missing: frontends %v, want none (a supporting replica must not stand in for the primary)", got)
+	}
+	if got := statusFrontendsFor(obs, "v1", []string{"r1", "r2", "r3"}, true, "", noPrimary); len(got) != 2 {
+		t.Fatalf("control: without the primary rule the supporting frontends are listed (%v): the hazard this test pins", got)
 	}
 }

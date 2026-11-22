@@ -522,7 +522,7 @@ func (s *services) QueryVolumeStatus(ctx context.Context, req *control.StatusReq
 		replicaIDs = primaryFirstReplicaIDs(replicaIDs, line.ReplicaID)
 		// the primary's portal comes from the server on the line, never a fresher same-replica claim elsewhere
 		// (INV-AUTH-HOLDER-IDENTITY-001)
-		resp.Frontends = statusFrontendsFor(s.host.obs, req.VolumeId, replicaIDs, line.Assigned, func(replicaID string) (authority.SlotFact, bool) {
+		resp.Frontends = statusFrontendsFor(s.host.obs, req.VolumeId, replicaIDs, line.Assigned, line.ReplicaID, func(replicaID string) (authority.SlotFact, bool) {
 			if replicaID == line.ReplicaID {
 				_, fact, ok := s.host.holderSlotFact(req.VolumeId, replicaID, line.Epoch)
 				return fact, ok
@@ -572,17 +572,24 @@ func primaryFirstReplicaIDs(replicaIDs []string, primaryReplicaID string) []stri
 }
 
 func statusFrontendsForAssignedVolume(obs *authority.ObservationHost, volumeID string, replicaIDs []string, assigned bool) []*control.FrontendTarget {
-	return statusFrontendsFor(obs, volumeID, replicaIDs, assigned, nil)
+	return statusFrontendsFor(obs, volumeID, replicaIDs, assigned, "", nil)
 }
 
 // statusFrontendsFor lists the frontends of replicaIDs in order; slotOf selects each replica's slot fact (nil: the
-// freshest claim for that replica).
-func statusFrontendsFor(obs *authority.ObservationHost, volumeID string, replicaIDs []string, assigned bool, slotOf func(replicaID string) (authority.SlotFact, bool)) []*control.FrontendTarget {
+// freshest claim for that replica). When primary is set and its slot fact is missing, nothing is listed: a CSI client
+// takes the first frontend as the primary, so a supporting replica's frontend must never stand in for it
+// (INV-AUTH-HOLDER-IDENTITY-001, fail closed).
+func statusFrontendsFor(obs *authority.ObservationHost, volumeID string, replicaIDs []string, assigned bool, primary string, slotOf func(replicaID string) (authority.SlotFact, bool)) []*control.FrontendTarget {
 	if !assigned || obs == nil {
 		return nil
 	}
 	if slotOf == nil {
 		slotOf = func(replicaID string) (authority.SlotFact, bool) { return obs.Store().SlotFact(volumeID, replicaID) }
+	}
+	if primary != "" {
+		if _, ok := slotOf(primary); !ok {
+			return nil
+		}
 	}
 	out := make([]*control.FrontendTarget, 0, len(replicaIDs))
 	seen := map[string]struct{}{}

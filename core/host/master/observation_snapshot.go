@@ -233,8 +233,11 @@ func (h *Host) observationReplicas(volumeID string, placement lifecycle.Placemen
 		}
 		fact, ok := h.ObservationHost().Store().SlotFact(volumeID, replicaID)
 		if hasLine && line.Assigned && replicaID == line.ReplicaID {
-			// the primary's evidence comes only from the line's server (INV-AUTH-HOLDER-IDENTITY-001)
-			_, fact, ok = h.holderSlotFact(volumeID, replicaID, line.Epoch)
+			// the whole primary row is the line's server: its identity, evidence and frontend
+			// (INV-AUTH-HOLDER-IDENTITY-001); never placement's server carrying the holder's frontend
+			var holder string
+			holder, fact, ok = h.holderSlotFact(volumeID, replicaID, line.Epoch)
+			replica.ServerID, replica.KubernetesNode = holder, holder
 		}
 		if ok {
 			replica.Observed = true
