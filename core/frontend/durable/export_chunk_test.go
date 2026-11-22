@@ -36,3 +36,11 @@ func SetTestBeforeIOLock(b frontend.Backend, f func()) { b.(*StorageBackend).tes
 func SetTestBeforeAttachWait(b frontend.Backend, f func()) {
 	b.(*StorageBackend).testBeforeReadReadyWait = f
 }
+
+func SetTestAfterGate(b frontend.Backend, f func()) { b.(*StorageBackend).testAfterGate = f }
+
+func StopFlipAt(b frontend.Backend) time.Time { return b.(*StorageBackend).StopFlipAt() }
+
+func StopIOForTest(ctx context.Context, b frontend.Backend, evidence string) error {
+	return b.(*StorageBackend).StopIO(ctx, evidence)
+}

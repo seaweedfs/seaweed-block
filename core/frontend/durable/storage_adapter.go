@@ -148,7 +148,15 @@ const maxFullBlockBatchBlocks = 64
 type StorageBackend struct {
 	// testBeforeIOLock, test-only, runs in admit after the readiness check,
 	// right before the I/O lock (an arrival handshake for queued I/O).
-	testBeforeIOLock        func()
+	testBeforeIOLock func()
+	// testAfterGate, test-only, runs in admit after the gate passed and
+	// before the I/O registers under mu.
+	testAfterGate func()
+	// stopFlipAt is when admission last closed for a stop, taken under mu
+	// just after operational went false; guarded by mu. An I/O whose gate
+	// saw operational before it was admitted (and StopIO drains it); every
+	// gate after it refuses.
+	stopFlipAt              time.Time
 	testPrecopyQueued       func()               // after FIFO registration, outside mu
 	testPrecopyGranted      func(*precopyWaiter) // FIFO grant under mu; nonblocking test hook
 	testPrecopyStopFallback func()               // before fallback lock attempts, outside mu
@@ -482,8 +490,12 @@ func (b *StorageBackend) SetOperational(ok bool, evidence string) {
 
 // The caller owns mu; publication never calls the store or waits for I/O.
 func (b *StorageBackend) setOperationalLocked(ok bool, evidence string) {
+	flipped := !ok && b.operational.Load()
 	b.opEvidence.Store(evidence)
 	b.operational.Store(ok)
+	if flipped {
+		b.stopFlipAt = time.Now() // after the store: no gate after this instant admits
+	}
 	b.waitAttachReady = false
 	// A host drain closes storage admission, but is not the old path's
 	// teardown. Keep a final pre-copy queue parked until Close or its budget;
@@ -512,6 +524,7 @@ func (b *StorageBackend) TryStopIO(evidence string) bool {
 			}
 			b.opEvidence.Store(evidence)
 			b.operational.Store(false)
+			b.stopFlipAt = time.Now()
 			b.waitAttachReady = false
 			b.notifyReadReadyLocked()
 			return true
@@ -539,6 +552,7 @@ func (b *StorageBackend) TryStopIO(evidence string) bool {
 	b.precopy = p
 	b.opEvidence.Store(evidence)
 	b.operational.Store(false)
+	b.stopFlipAt = time.Now()
 	b.waitAttachReady = false
 	b.notifyReadReadyLocked()
 	return true
@@ -559,6 +573,13 @@ func (b *StorageBackend) stopPlainDetachIfIdle() error {
 	}
 	b.setOperationalLocked(false, "chunk plain detach: idle frontend stopped")
 	return nil
+}
+
+// StopFlipAt is when admission last closed for a stop (zero if never).
+func (b *StorageBackend) StopFlipAt() time.Time {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.stopFlipAt
 }
 
 // StopIO makes the backend refuse every new Read, Write and Sync with
@@ -822,6 +843,9 @@ func (b *StorageBackend) admit() (func(), error) {
 	if err := b.gate(); err != nil {
 		b.ioMu.RUnlock()
 		return nil, err
+	}
+	if hook := b.testAfterGate; hook != nil {
+		hook()
 	}
 	b.mu.Lock()
 	if b.precopy != nil && b.precopy.active {
