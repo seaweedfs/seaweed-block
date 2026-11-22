@@ -7,8 +7,10 @@ the same host is refused before it opens anything, whatever its
 `--durable-root`. The lock is released when the process exits, including on
 a crash or kill.
 
-The directory is not created by blockvolume. Install the tmpfiles.d entry
-shipped in [`deploy/systemd/sw-block.tmpfiles.conf`](../../deploy/systemd/sw-block.tmpfiles.conf):
+blockvolume creates the directory (`0700`) when it is missing and it may, and
+refuses to start when it cannot create or open the directory or a volume's
+lock file. The shipped units cannot create it (`ProtectSystem=strict`), so
+install the tmpfiles.d entry shipped in [`deploy/systemd/sw-block.tmpfiles.conf`](../../deploy/systemd/sw-block.tmpfiles.conf):
 
 ```bash
 sudo install -m 0644 deploy/systemd/sw-block.tmpfiles.conf /etc/tmpfiles.d/sw-block.conf
@@ -16,11 +18,16 @@ sudo systemd-tmpfiles --create /etc/tmpfiles.d/sw-block.conf
 ```
 
 It creates `/run/sw-block/locks` as `0700`, owned by `sw-block`, at every
-boot. Without it blockvolume exits at start with `host volume lock directory
-missing ... install the tmpfiles.d entry or create the directory`. Both
-shipped units allow writes to it (`ReadWritePaths=-/run/sw-block/locks`)
-under `ProtectSystem=strict`. If you run blockvolume as another user, give
-that user the directory instead.
+boot. Both shipped units allow writes to it
+(`ReadWritePaths=-/run/sw-block/locks`). Without it, or when it is not
+usable, blockvolume exits at start with `host volume lock directory
+unavailable ... install the tmpfiles.d entry (deploy/systemd/sw-block.tmpfiles.conf),
+or chown the directory and its lock files to this process's user`. A
+directory created by a root process (the root ublk unit, or blockvolume run
+by hand as root) is root-owned, and an unprivileged unit on that host then
+cannot use it: install the tmpfiles.d entry, or chown the directory to the
+unit's user. Lock files are opened read-only, so a lock file another user
+created stays lockable.
 
 ## A rolled-back copy of a root is refused
 
@@ -29,7 +36,13 @@ An existing local root attaches only if its local durable LSN reaches the
 a later cut (a backup, a snapshot of the disk, an older replica of the
 directory) is below that HEAD: it is refused with `ErrChunkStaleLocalRoot`,
 never serves, and its process exits 78 (no automatic restart) with the root
-kept. Remove or quarantine the local root to attach fresh from HEAD.
+kept; its last line is `exiting status=78 reason=superseded cure="remove or
+quarantine the local root to attach fresh from HEAD"`.
+
+A power loss does not trigger this refusal on a correct root: a cut makes its
+LSN durable on the local root (the barrier sync, an fsync or fdatasync of the
+WAL) before the HEAD update that publishes it as `remote_lsn`, so the root is
+never below the HEAD it published.
 
 ## Do not
 
@@ -46,8 +59,8 @@ kept. Remove or quarantine the local root to attach fresh from HEAD.
 - Do not delete `/run/sw-block/locks` or its lock files while blockvolume
   runs: a new process would then get a different lock file and not see the
   running one.
-- Do not run blockvolume in containers that do not share the host's
-  `/run/sw-block/locks`. In a container the lock is per host only if that
-  directory is the host's (a hostPath mount). The Kubernetes renderer
+- Do not run blockvolume in containers or mount namespaces that do not
+  share the host's `/run/sw-block/locks`. `/run` is per mount namespace: the
+  lock is per host only if that directory is the host's (a hostPath mount). The Kubernetes renderer
   (`core/launcher/k8s_renderer.go`) and `deploy/k8s` manifests do not mount
   it yet: there, the lock is per pod.

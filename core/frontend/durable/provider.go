@@ -162,8 +162,9 @@ type ProviderConfig struct {
 	// HostVolumeLock makes the provider hold an exclusive, nonblocking lock
 	// on HostVolumeLockDir/<volume id>.lock from before the volume's store
 	// opens until Close: one host runs at most one live process per volume
-	// (V1-SPEC r2.45). The directory must exist (a tmpfiles.d entry ships in
-	// deploy/systemd); NewDurableProvider refuses without it. blockvolume
+	// (V1-SPEC r2.45). NewDurableProvider creates the directory (0700) when
+	// missing and refuses when it cannot create or use it; the tmpfiles.d
+	// entry in deploy/systemd creates it for the unit's user. blockvolume
 	// sets this.
 	HostVolumeLock bool
 	// VolumeLockDirTestOnly replaces HostVolumeLockDir for tests and test
@@ -288,6 +289,8 @@ type volHandle struct {
 
 	// hostLock is the volume's host lock (HostVolumeLock), held while open.
 	hostLock *os.File
+	// startupCure is the operator's cure of a stale-root startup end.
+	startupCure string
 
 	// ImplWALStoreChunk. fresh: the local volume is new and starts from
 	// the remote HEAD. It mirrors the durable fresh marker beside the
@@ -402,11 +405,8 @@ func NewDurableProvider(cfg ProviderConfig, view frontend.ProjectionView) (*Dura
 		if cfg.VolumeLockDirTestOnly == "" {
 			cfg.VolumeLockDirTestOnly = HostVolumeLockDir
 		}
-		if fi, err := os.Stat(cfg.VolumeLockDirTestOnly); err != nil || !fi.IsDir() {
-			if err == nil {
-				err = fmt.Errorf("not a directory")
-			}
-			return nil, fmt.Errorf("%w %s: %w; install the tmpfiles.d entry or create the directory", ErrVolumeLockDirMissing, cfg.VolumeLockDirTestOnly, err)
+		if err := os.MkdirAll(cfg.VolumeLockDirTestOnly, 0o700); err != nil {
+			return nil, fmt.Errorf("%w %s: %w; %s", ErrVolumeLockDirUnavailable, cfg.VolumeLockDirTestOnly, err, volumeLockCure)
 		}
 	}
 	if cfg.ChunkBlocks == 0 {
@@ -554,9 +554,13 @@ func (p *DurableProvider) ensureHandle(volumeID string) (*volHandle, error) {
 // host locks (HostVolumeLock).
 const HostVolumeLockDir = "/run/sw-block/locks"
 
-// ErrVolumeLockDirMissing refuses a provider with HostVolumeLock whose lock
-// directory does not exist.
-var ErrVolumeLockDirMissing = errors.New("durable: host volume lock directory missing")
+// ErrVolumeLockDirUnavailable refuses a provider with HostVolumeLock whose
+// lock directory or lock file it cannot create or open.
+var ErrVolumeLockDirUnavailable = errors.New("durable: host volume lock directory unavailable")
+
+// volumeLockCure names the operator's cure. A directory or lock file a root
+// process created is root-owned: an unprivileged unit then cannot use it.
+const volumeLockCure = "install the tmpfiles.d entry (deploy/systemd/sw-block.tmpfiles.conf), or chown the directory and its lock files to this process's user"
 
 // lockVolumeOnHost takes the volume's host lock (nil without
 // HostVolumeLock). A second live process for the volume on this host gets
@@ -570,9 +574,14 @@ func (p *DurableProvider) lockVolumeOnHost(volumeID string) (*os.File, error) {
 		return nil, fmt.Errorf("durable: volume id %q is not a plain path element", volumeID)
 	}
 	path := filepath.Join(dir, volumeID+".lock")
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	// Read-only, 0644: a lock file another user created (the root ublk unit)
+	// stays lockable by the plain unit; the 0700 directory keeps others out.
+	f, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		f, err = os.OpenFile(path, os.O_CREATE|os.O_RDONLY, 0o644)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("durable: volume lock %s: %w", path, err)
+		return nil, fmt.Errorf("%w: volume lock %s: %w; %s", ErrVolumeLockDirUnavailable, path, err, volumeLockCure)
 	}
 	if err := storage.LockWALStoreFile(f); err != nil {
 		_ = f.Close()

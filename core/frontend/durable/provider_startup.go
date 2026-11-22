@@ -42,10 +42,29 @@ func (p *DurableProvider) endChunkStartup(h *volHandle, gen uint64, cause error)
 	}
 	h.startupEnded = gen
 	h.startupSuperseded = errors.Is(cause, errChunkForeignClaim)
+	h.startupCure = ""
+	if errors.Is(cause, ErrChunkStaleLocalRoot) {
+		h.startupCure = ChunkStaleLocalRootCure
+	}
 	select {
 	case p.startupUpdates <- struct{}{}:
 	default:
 	}
+}
+
+// ChunkStaleLocalRootCure is the operator's cure of a stale local root.
+const ChunkStaleLocalRootCure = "remove or quarantine the local root to attach fresh from HEAD"
+
+// ChunkStartupCure is the operator's cure of this exact recovery's startup
+// end ("" when none), for the process's final exit line.
+func (p *DurableProvider) ChunkStartupCure(volumeID string, gen uint64) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	h := p.volumes[volumeID]
+	if p.closed || h == nil || gen == 0 || h.recoverGen != gen || h.startupEnded != gen {
+		return ""
+	}
+	return h.startupCure
 }
 
 // ChooseChunkStartupExit validates and selects an outcome in one provider-lock

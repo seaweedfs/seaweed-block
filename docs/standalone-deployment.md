@@ -52,7 +52,7 @@ added), do not mix revisions: build the binaries from your checkout instead
 | [`deploy/systemd/sw-blockmaster.service`](../deploy/systemd/sw-blockmaster.service) | `/etc/systemd/system/` | blockmaster, as `sw-block`; state in `/var/lib/sw-block-master` |
 | [`deploy/systemd/sw-blockvolume.service`](../deploy/systemd/sw-blockvolume.service) | `/etc/systemd/system/` | One blockvolume over NVMe/TCP or iSCSI, as `sw-block`; state in `/var/lib/sw-block-volume` |
 | [`deploy/systemd/sw-blockvolume-ublk.service`](../deploy/systemd/sw-blockvolume-ublk.service) | `/etc/systemd/system/` | The same volume over ublk, as root; state in `/var/lib/sw-block-volume-ublk` |
-| [`deploy/systemd/sw-block.tmpfiles.conf`](../deploy/systemd/sw-block.tmpfiles.conf) | `/etc/tmpfiles.d/sw-block.conf` | `/run/sw-block/locks`, the host volume locks; blockvolume refuses to start without it ([one process per volume](releases/one-process-per-volume.md)) |
+| [`deploy/systemd/sw-block.tmpfiles.conf`](../deploy/systemd/sw-block.tmpfiles.conf) | `/etc/tmpfiles.d/sw-block.conf` | `/run/sw-block/locks`, the host volume locks; the units cannot create it and blockvolume refuses to start without it ([one process per volume](releases/one-process-per-volume.md)) |
 
 Each unit has its own `StateDirectory=`, so the root ublk unit can never take
 ownership of blockmaster's or the unprivileged volume's files. Run either

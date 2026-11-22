@@ -465,6 +465,9 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 			// V1-SPEC r2.45: HEAD names this holder, but a root whose local
 			// durable LSN is below HEAD's remote_lsn is a rolled-back copy
 			// (a backup taken before a later cut). Restarting cannot cure it.
+			// A crash cannot cause it: a cut syncs its LSN locally before the
+			// HEAD CAS publishes it (storage chunkLayer capture: the barrier
+			// syncWithPhases result is next.RemoteLSN).
 			if durableLSN, _, _ := ws.Boundaries(); head.Gen != 0 && durableLSN < head.RemoteLSN {
 				log.Printf("durable: refusing to attach volume=%s root=%s: local durable LSN %d is below HEAD gen=%d remote_lsn=%d (remove or quarantine the local root)",
 					volumeID, h.path, durableLSN, head.Gen, head.RemoteLSN)
