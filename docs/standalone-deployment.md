@@ -372,6 +372,27 @@ Check the data afterwards. `--depth data` reads every chunk once.
 sw-block ops chunk verify --volume v1 --chunk-filer FILER --all-snapshots --depth data --timeout 30m
 ```
 
+### SeaweedFS maintenance commands that destroy chunk volumes
+
+A walstore-chunk volume keeps its data in SeaweedFS as needles that **no file's chunk list names**: the volume's
+own records in the filer point at them. SeaweedFS tools that decide what is referenced from file chunk lists
+therefore see every chunk of every volume and snapshot as unreferenced.
+
+- **Never run `volume.fsck` with `-reallyDeleteFromVolume`** (alone or with `-forcePurging`) on a SeaweedFS
+  cluster that stores walstore-chunk volumes. It deletes the needles it considers orphaned, once they are older
+  than `-cutoffTimeAgo` (5 hours by default): that is the volumes' data, including every snapshot. There is no undo.
+- **Never run `volume.fsck -findMissingChunksInFiler` with `-reallyDeleteFilerEntries` or
+  `-reallyDeleteFromVolume`** on such a cluster either.
+- `volume.fsck` **without** those flags only reports. Its orphan list will contain the chunk needles; that is
+  expected and is not a fault.
+- **Give chunk data its own collection** (`--chunk-collection`, `SWB_CHUNK_COLLECTION`) so it is easy to keep
+  cluster maintenance away from it. Do not put a TTL on that collection and do not delete it: both remove needles
+  without regard to what refers to them.
+- `filer.sync`, `filer.backup` and `filer.replicate` copy file chunk lists. They do **not** copy a walstore-chunk
+  volume: the copied records would point at needles that do not exist on the target.
+- Space is returned only by the two steps above (`sw-block ops chunk gc`, then a SeaweedFS vacuum). `volume.vacuum`
+  is safe: it compacts needles that were already deleted.
+
 ### Restoring a snapshot into a new volume
 
 A restore makes a new, independent volume from a snapshot. The source volume and its snapshot can be deleted afterwards.
