@@ -299,6 +299,9 @@ type volHandle struct {
 	// snapshots is the scheduled-snapshot state of the running loop, nil
 	// when the schedule is off.
 	snapshots *snapshotSlot
+	// cutWait is the automatic-cut timer's host slot waits, nil when the
+	// timer is off.
+	cutWait *cutWaitSlot
 }
 
 // VolumeStatus is a read-only diagnostic snapshot of one durable volume
@@ -606,6 +609,7 @@ func (p *DurableProvider) DurableStatuses() []VolumeStatus {
 		layer     storage.ChunkLayer
 		awaiting  bool
 		snapshots *snapshotSlot
+		cutWait   *cutWaitSlot
 	}
 	p.mu.Lock()
 	handles := make(map[string]*volHandle, len(p.volumes))
@@ -613,7 +617,7 @@ func (p *DurableProvider) DurableStatuses() []VolumeStatus {
 	for volumeID, h := range p.volumes {
 		handles[volumeID] = h
 		if p.cfg.Impl == ImplWALStoreChunk {
-			chunks[volumeID] = chunkView{layer: h.chunk, awaiting: h.waitGen != 0, snapshots: h.snapshots}
+			chunks[volumeID] = chunkView{layer: h.chunk, awaiting: h.waitGen != 0, snapshots: h.snapshots, cutWait: h.cutWait}
 		}
 	}
 	p.mu.Unlock()
@@ -632,6 +636,10 @@ func (p *DurableProvider) DurableStatuses() []VolumeStatus {
 			if cv.snapshots != nil {
 				ss := cv.snapshots.status(time.Now())
 				cs.ScheduledSnapshot = &ss
+			}
+			if cv.cutWait != nil {
+				cw := cv.cutWait.status()
+				cs.CutSchedule = &cw
 			}
 			st.Chunk = cs
 		}

@@ -333,9 +333,14 @@ func (p *DurableProvider) startChunkLoop(volumeID string, h *volHandle, layer st
 	} else if h.snapshots == nil {
 		h.snapshots = &snapshotSlot{s: newSnapshotSchedule(volumeID, p.cfg.ChunkSnapshotPeriod, time.Now())}
 	}
+	if p.cfg.ChunkCaptureInterval <= 0 {
+		h.cutWait = nil
+	} else if h.cutWait == nil {
+		h.cutWait = &cutWaitSlot{}
+	}
 	lin := h.chunkLineage
 	current := func() bool { return p.maintenanceCurrent(volumeID, h, layer, lin) }
-	go p.chunkBackground(loopCtx, cancel, volumeID, layer, h.chunkDone, current, h.snapshots)
+	go p.chunkBackground(loopCtx, cancel, volumeID, layer, h.chunkDone, current, h.snapshots, h.cutWait)
 }
 
 func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h *volHandle) (storage.ChunkLayer, error) {
@@ -646,6 +651,7 @@ const (
 	chunkCutMinSpacing = time.Second
 	chunkCutBackoffMin = time.Second
 	chunkCutBackoffMax = 30 * time.Second
+	chunkSlotJitterMax = 200 * time.Millisecond
 )
 
 // cutPolicy decides when an automatic cut is due. The remote holds
@@ -660,7 +666,11 @@ const (
 //   - a failed automatic cut resets nothing and is retried after a backoff
 //     doubling from backoffMin to backoffMax; any later successful cut (a
 //     no-op cut and an explicit cut included) clears the backoff and
-//     restarts the timer.
+//     restarts the timer;
+//   - an automatic cut refused because every host slot is held ran
+//     nothing: it is retried after the volume's slot jitter, with no
+//     backoff and no minimum spacing, and the wait lasts until a cut
+//     succeeds.
 type cutPolicy struct {
 	interval, minSpacing, backoffMin, backoffMax time.Duration
 	slotJitter                                   time.Duration // this volume's delay before retrying a cut refused for held host slots
@@ -696,6 +706,7 @@ func (s cutSchedule) observe(seq uint64, now time.Time) cutSchedule {
 		s.lastSuccess = now
 	}
 	s.firstDue = time.Time{}
+	s.slotWaitSince = time.Time{}
 	if !s.failedAt.IsZero() && seq != s.failedSeenSeq {
 		s.backoff, s.retryAt, s.failedAt = 0, time.Time{}, time.Time{}
 	}
@@ -725,10 +736,19 @@ func (pol cutPolicy) due(s cutSchedule, now time.Time, reconciling bool) (string
 // after records the outcome of an automatic cut started at start, with
 // the layer's CutSeq read after it.
 func (pol cutPolicy) after(s cutSchedule, start, end time.Time, err error, seq uint64) cutSchedule {
+	if errors.Is(err, hostlimit.ErrSlotsHeld) {
+		s.slotWaits++
+		if s.slotWaitSince.IsZero() {
+			s.slotWaitSince = start
+		}
+		s.retryAt = end.Add(pol.slotJitter)
+		return s
+	}
 	s.lastAuto = start
 	if err == nil {
 		s.seenSeq = seq
 		s.firstDue = time.Time{}
+		s.slotWaitSince = time.Time{}
 		s.backoff, s.retryAt, s.failedAt = 0, time.Time{}, time.Time{}
 		if end.After(s.lastSuccess) {
 			s.lastSuccess = end
@@ -770,8 +790,12 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 		minSpacing: chunkCutMinSpacing,
 		backoffMin: chunkCutBackoffMin,
 		backoffMax: chunkCutBackoffMax,
+		slotJitter: hostlimit.Phase(volumeID+":slot", chunkSlotJitterMax),
 	}
 	s := initialCutSchedule(volumeID, pol.interval, time.Now(), p.cfg.ChunkStagger, layer.Stats().CutSeq)
+	if wait != nil {
+		s.slotWaits = wait.status().HostSlotWaits
+	}
 	t := time.NewTicker(chunkSchedulePoll)
 	defer t.Stop()
 	for {
@@ -786,6 +810,7 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 		ls := layer.Stats()
 		start := time.Now()
 		s = s.observe(ls.CutSeq, start)
+		wait.record(s)
 		reason, ok := pol.due(s, start, ls.Reconciling)
 		if !ok {
 			continue
@@ -816,6 +841,7 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 		}
 		cancel()
 		s = pol.after(s, start, time.Now(), err, layer.Stats().CutSeq)
+		wait.record(s)
 		if err != nil && !errors.Is(err, storage.ErrChunkCaptureRefused) && ctx.Err() == nil {
 			log.Printf("durable: %s chunk cut for volume=%s: %v (retry in %s)", reason, volumeID, err, s.backoff)
 		}
@@ -825,7 +851,7 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 // chunkBackground owns both workers and their cancellation. A fence is observed
 // even while either worker is waiting on a cooperative remote call. INV-MAINT-JOIN:
 // done closes only after every admitted worker has returned.
-func (p *DurableProvider) chunkBackground(ctx context.Context, cancel context.CancelFunc, volumeID string, layer storage.ChunkLayer, done chan struct{}, current func() bool, snapshots *snapshotSlot) {
+func (p *DurableProvider) chunkBackground(ctx context.Context, cancel context.CancelFunc, volumeID string, layer storage.ChunkLayer, done chan struct{}, current func() bool, snapshots *snapshotSlot, cutWait *cutWaitSlot) {
 	defer close(done)
 	defer cancel()
 	var workers sync.WaitGroup
@@ -834,7 +860,7 @@ func (p *DurableProvider) chunkBackground(ctx context.Context, cancel context.Ca
 		go func() {
 			defer workers.Done()
 			cutDone := make(chan struct{})
-			p.chunkLoop(ctx, volumeID, layer, cutDone, nil)
+			p.chunkLoop(ctx, volumeID, layer, cutDone, cutWait)
 		}()
 	}
 	if p.cfg.ChunkMaintenanceInterval > 0 && p.cfg.ChunkMaintenance != nil {
@@ -1365,5 +1391,27 @@ func (p *DurableProvider) publishSettledHook(volumeID string) func(context.Conte
 }
 
 // cutWaitSlot publishes the automatic-cut timer's host slot waits to
-// status.
-type cutWaitSlot struct{}
+// status. A nil slot records nothing.
+type cutWaitSlot struct {
+	mu sync.Mutex
+	st CutScheduleStatus
+}
+
+func (w *cutWaitSlot) record(s cutSchedule) {
+	if w == nil {
+		return
+	}
+	st := CutScheduleStatus{HostSlotWaits: s.slotWaits}
+	if !s.slotWaitSince.IsZero() {
+		st.HostSlotWaitSinceNs = s.slotWaitSince.UnixNano()
+	}
+	w.mu.Lock()
+	w.st = st
+	w.mu.Unlock()
+}
+
+func (w *cutWaitSlot) status() CutScheduleStatus {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.st
+}
