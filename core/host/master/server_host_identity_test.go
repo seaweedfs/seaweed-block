@@ -115,7 +115,7 @@ func TestDisplayedPrimaryIsTheIssuedHolderNotThePlacementSlot(t *testing.T) {
 			}
 		}
 	}
-	// the whole primary row is the issued holder (codex01 P2): never placement's node-b carrying node-a's frontend
+	// The whole primary row names the issued holder, never placement's node-b carrying node-a's frontend.
 	if vol == nil || vol.node != "node-a" || vol.target != "127.0.0.1:3260" || vol.rowServer != "node-a" || vol.rowNode != "node-a" || vol.rowFrontend != "127.0.0.1:3260" {
 		t.Fatalf("displayed primary %+v, want node-a at 127.0.0.1:3260 in the volume and its primary row (the issued holder, not the placement slot or the old host)", vol)
 	}
@@ -296,7 +296,7 @@ func registerWorkspaceHolder(t *testing.T, h *Host, server string) {
 	}
 }
 
-// codex01 P1: a CSI client takes the first frontend as the primary. When the primary's evidence (from the line's server)
+// A CSI client takes the first frontend as the primary. When the primary's evidence (from the line's server)
 // is missing, the status lists NO frontend, even though supporting replicas report theirs; without the rule a
 // supporting replica's frontend would be published under the primary identity.
 func TestStatusListsNoFrontendWhenThePrimaryEvidenceIsMissing(t *testing.T) {
@@ -329,7 +329,7 @@ func (e inProcEvidence) QueryVolumeStatus(ctx context.Context, in *control.Statu
 	return e.s.QueryVolumeStatus(ctx, in)
 }
 
-// codex01 #416 P1-2: through the real CSI ControlStatusLookup, with supporting replicas reporting usable frontends, no
+// Through the real CSI ControlStatusLookup, with supporting replicas reporting usable frontends, no
 // target is published when the primary's slot (on the line's server) exists but carries no frontend, or when its only
 // frontend is one CSI rejects (loopback, with loopback targets rejected). Control: the same lookup without the loopback
 // rejection publishes the primary's own frontend.
@@ -374,7 +374,7 @@ func TestCSIPublishesNoTargetWhenThePrimaryFrontendIsMissingOrRejected(t *testin
 	}
 }
 
-// codex01 #416 P2: a workspace volume being deleted is still a workspace volume: its assignment stream keeps the holder
+// A workspace volume being deleted is still a workspace volume: its assignment stream keeps the holder
 // host check (a deletion reservation must not open a bypass).
 func TestDeletionReservedWorkspaceVolumeKeepsTheStreamHostCheck(t *testing.T) {
 	r := newIsolationRig(t, false, t.TempDir(), t.TempDir())
@@ -398,7 +398,7 @@ func TestDeletionReservedWorkspaceVolumeKeepsTheStreamHostCheck(t *testing.T) {
 	}
 }
 
-// codex01 #416 P2 (INV-WS-RENEW-NONBLOCKING-001): a LIVE lease renewal through holderMatches, whose host check reads the
+// INV-WS-RENEW-NONBLOCKING-001: a live lease renewal through holderMatches, whose host check reads the
 // node registry, completes while a registration write is held (the store mutex RegisterNode keeps across file I/O). The
 // hold is proven real: a concurrent RegisterNode does not finish until it is released.
 func TestLiveRenewalDoesNotWaitForAHeldRegistrationWrite(t *testing.T) {
