@@ -16,15 +16,16 @@ Go code; the real P5 trace showed the old host refusing both foreign facts.
 ## Results and limits
 
 Status: **SIMULATION ONLY**. `summary-r4.tsv` reports 3 seeds x 20,000 traces,
-depth 120, with these exact configurations:
+depth 120. Counterexample lengths below count states, including the initial
+state; they are not trace identifiers. The exact configurations are:
 
 | Configuration | Reported result |
 |---|---|
 | `WR_id4_fix_label.cfg` | No violation in the simulations |
 | `WR_id4_fix_label_ownline.cfg` | No violation in the simulations |
-| `WR_id4_RED_label.cfg` | `NoForeignAdoption` violated at traces 14, 17, 15 |
+| `WR_id4_RED_label.cfg` | `NoForeignAdoption` violated; counterexamples contain 14, 17, 15 states |
 | `WR_id4_RED_label_safety.cfg` | No safety-invariant violation in the simulations; lease layer stops the adopter |
-| `WR_id4_fix_label_volguard.cfg` | `NoForeignAdoption` still violated at traces 14, 17, 15; a fresh process has no recorded foreign line |
+| `WR_id4_fix_label_volguard.cfg` | `NoForeignAdoption` still violated; counterexamples contain 14, 17, 15 states; a fresh process has no recorded foreign line |
 
 The result interpretation is in `REGRANT-REPORT.md`, "Round 4: adoption fence".
 A simulation finding is a counterexample; no sampled violation does not prove
