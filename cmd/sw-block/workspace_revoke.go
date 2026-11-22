@@ -31,7 +31,13 @@ func runWorkspaceRevoke(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return wsExitRefusedLocally
 	}
-	if fs.NArg() != 0 || master == "" || id.VolumeId == "" || id.ReplicaId == "" || id.Epoch == 0 || timeout <= 0 || (sealedGen > 0) == withoutSeal {
+	sealProvided := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "sealed-gen" {
+			sealProvided = true
+		}
+	})
+	if fs.NArg() != 0 || master == "" || id.VolumeId == "" || id.ReplicaId == "" || id.Epoch == 0 || timeout <= 0 || sealProvided == withoutSeal || (sealProvided && sealedGen == 0) {
 		fmt.Fprintln(stderr, "workspace revoke: refused locally; require --master, --volume, --replica, positive --epoch/--timeout and exactly one of positive --sealed-gen or --without-seal")
 		return wsExitRefusedLocally
 	}
