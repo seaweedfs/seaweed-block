@@ -29,4 +29,16 @@ echo "results under $nas" > body; expect 1 "share path in the description" "$mb"
 echo "an old line with $seat" >> a.txt; git commit -q -am "old"; mb2=$(git rev-parse HEAD)
 echo "new clean line" >> a.txt; git commit -q -am "new"
 expect 0 "an existing line is not this change's" "$mb2" HEAD title body
+# A file line that begins with "++ " shows in the diff as "+++ ...": an added line, not a header.
+printf '%s
+' "++ $seat" >> a.txt; git commit -q -am "plus line"
+expect 1 "an added line that looks like a diff header" "$mb2" HEAD title body
+git reset -q --hard HEAD~1
+bs=$(printf '\')
+printf '%s
+' "${bs}${bs}nas${bs}sha""re${bs}rd""ma${bs}z" > title
+expect 1 "backslash form of the share path in the title" "$mb2" HEAD title body; : > title
+expect 2 "a missing title file is an error, not clean" "$mb2" HEAD no-such-title body
+expect 2 "a missing description file is an error, not clean" "$mb2" HEAD title no-such-body
+expect 2 "an unknown commit is an error, not clean" 0000000000000000000000000000000000000000 HEAD title body
 echo "public-text-check-test: ok"
