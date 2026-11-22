@@ -97,7 +97,7 @@ func forcedMoveHost(t *testing.T, cfg Config) (*Host, func(), control.WorkspaceS
 		t.Fatal(err)
 	}
 	line := waitAuthorityLine(t, h.Publisher(), "vol-f")
-	if _, err := client.RenewWorkspaceLease(ctx, &control.WorkspaceIdentity{VolumeId: "vol-f", ReplicaId: "r1", Epoch: line.Epoch}); err != nil {
+	if _, err := client.RenewWorkspaceLease(ctx, &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "vol-f", ReplicaId: "r1", Epoch: line.Epoch}); err != nil {
 		t.Fatal(err)
 	}
 	return h, stop, client, &control.WorkspaceMove{RequestId: "force-1", VolumeId: "vol-f", ExpectedReplicaId: "r1", ExpectedEpoch: line.Epoch, TargetReplicaId: "r1",

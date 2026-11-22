@@ -106,7 +106,8 @@ func TestBinaryWorkspaceLeaseOptInOwnsCLEANShutdown(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			cmd := exec.Command(exe, "--master", h.Addr(), "--server-id", "node-a", "--volume-id", "vol-a", "--replica-id", "r1", "--data-addr", dataAddr, "--ctrl-addr", ctrlAddr, "--t1-readiness", "--status-addr", statusAddr, "--durable-root", t.TempDir(), "--durable-impl", "walstore-chunk", "--durable-blocks", "64", "--chunk-filer", cluster.filerGRPC, "--chunk-path", base, "--chunk-control-endpoint", "--workspace-lease", "--nvme-listen", nvmeAddr, "--nvme-subsysnqn", "nqn.2026-11.test:workspace-lease")
+			cmd := exec.Command(exe, "--master", h.Addr(), "--server-id", "node-a", "--volume-id", "vol-a", "--replica-id", "r1", "--data-addr", dataAddr, "--ctrl-addr", ctrlAddr, "--t1-readiness", "--status-addr", statusAddr, "--durable-root", t.TempDir(), "--volume-lock-dir-test-only", t.TempDir(), "--durable-impl", "walstore-chunk", "--durable-blocks", "64", "--chunk-filer", cluster.filerGRPC, "--chunk-path", base, "--chunk-control-endpoint", "--workspace-lease", "--nvme-listen", nvmeAddr, "--nvme-subsysnqn", "nqn.2026-11.test:workspace-lease")
+			stripSystemdForTestLockDir(cmd)
 			cmd.Stdout, cmd.Stderr = log, log
 			if err = cmd.Start(); err != nil {
 				t.Fatal(err)

@@ -63,11 +63,20 @@ func w4WaitTCP(t *testing.T, addr string, d time.Duration) {
 
 func startWorkspaceWeed(t *testing.T) *w4WeedCluster {
 	t.Helper()
+	return startWorkspaceWeedAt(t, t.TempDir())
+}
+
+// A caller-owned root lets process qualification retain its filer evidence
+// when external-service cleanup is uncertain. Existing tests keep TempDir.
+func startWorkspaceWeedAt(t *testing.T, dir string) *w4WeedCluster {
+	t.Helper()
 	weed := os.Getenv("CHUNKSTORE_WEED")
 	if weed == "" {
 		t.Skip("CHUNKSTORE_WEED not set")
 	}
-	dir := t.TempDir()
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
 	used := map[int]bool{}
 	mp, vp, fp := w4FreePortPair(t, used), w4FreePortPair(t, used), w4FreePortPair(t, used)
 	c := &w4WeedCluster{

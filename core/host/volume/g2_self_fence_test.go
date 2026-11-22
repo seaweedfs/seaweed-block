@@ -82,7 +82,7 @@ func TestG2_PromotedHostRefusesShipFromDeposedPrimary(t *testing.T) {
 	}
 
 	// Master promotes B to primary at epoch 2: the production role path.
-	h.applyFact(&control.AssignmentFact{
+	h.applyFixtureFact(&control.AssignmentFact{
 		VolumeId:          "vol1",
 		ReplicaId:         "rB", // self
 		Epoch:             2,
@@ -119,7 +119,7 @@ func (s stubFencer) AdmitAsReplica(uint64) error { return nil }
 func TestG2_HostDoesNotAdoptPrimaryWhenItsListenerCannotBeFenced(t *testing.T) {
 	h, a, _ := newStubbedHost(t, "vol1", "rB", &orderingRecorder{})
 	h.SetSelfFence(stubFencer{err: errors.New("2 replication mutation(s) still in flight")})
-	h.applyFact(&control.AssignmentFact{
+	h.applyFixtureFact(&control.AssignmentFact{
 		VolumeId:          "vol1",
 		ReplicaId:         "rB",
 		Epoch:             2,

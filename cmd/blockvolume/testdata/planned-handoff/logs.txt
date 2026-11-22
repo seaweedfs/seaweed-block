@@ -1,0 +1,9 @@
+2026/11/22 00:52:20 blockmaster: lock acquired, reloaded=0, listen=127.0.0.1:44358
+2026/11/22 00:52:21 blockvolume: volume v1 adopted as PRIMARY at r1@1 (EV=1)
+2026/11/22 00:52:21 durable: HEAD claim for volume=v1 starting: target epoch=1 holder="s1/r1"
+2026/11/22 00:52:21 durable: HEAD claim for volume=v1 done in 2.250367ms: gen=2 epoch=1 holder="s1/r1"
+2026/11/22 00:52:21 workspace lease: fenced volume=v1 replica=r1 epoch=1: revoked by the master
+blockvolume: stopping: the workspace lease guard fenced and requested the drain
+2026/11/22 00:52:22 blockvolume: volume v1 adopted as PRIMARY at r1@2 (EV=1)
+2026/11/22 00:52:22 durable: HEAD claim for volume=v1 starting: target epoch=2 holder="s1/r1"
+2026/11/22 00:52:22 durable: HEAD claim for volume=v1 done in 3.597902ms: gen=4 epoch=2 holder="s1/r1"

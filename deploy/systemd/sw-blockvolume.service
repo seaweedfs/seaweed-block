@@ -7,6 +7,8 @@
 # For ublk (needs root) do not edit this unit: use
 # sw-blockvolume-ublk.service, which has its own state directory.
 [Unit]
+StartLimitIntervalSec=600
+StartLimitBurst=10
 Description=Seaweed Block volume (one replica)
 Documentation=https://github.com/seaweedfs/seaweed-block
 After=network-online.target sw-blockmaster.service
@@ -68,10 +70,14 @@ ExecStart=/usr/local/bin/blockvolume \
 KillSignal=SIGTERM
 TimeoutStopSec=30s
 Restart=on-failure
+RestartPreventExitStatus=78
 RestartSec=5s
 
 NoNewPrivileges=true
 ProtectSystem=strict
+# The host volume locks (deploy/systemd/sw-block.tmpfiles.conf). Under
+# ProtectSystem=strict blockvolume cannot create the directory itself.
+ReadWritePaths=-/run/sw-block/locks
 ProtectHome=true
 PrivateTmp=true
 PrivateDevices=true

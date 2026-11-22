@@ -1,0 +1,8 @@
+volume: v1 (query snapshot, not authority to serve)
+replica: r1
+epoch: 1
+lease state: granted
+holder: r1@1 (logical replica)
+lease expiry_ns: 1795337571294082097; host validity_ns at query: 19891253918
+recorded ACK: none
+host: unknown (not recorded by the master); issued moves and bindings below are separate facts

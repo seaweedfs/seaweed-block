@@ -117,7 +117,8 @@ func TestBinaryReplicationIngressFollowsAssignedSlots(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
-			child := exec.Command(exe, "--master", ln.Addr().String(), "--server-id", "s1", "--volume-id", "v1", "--replica-id", "r1", "--data-addr", data, "--ctrl-addr", ctrl, "--status-addr", status, "--t1-readiness", "--durable-root", root, "--durable-impl", "walstore", "--durable-blocks", "64", "--heartbeat-interval", "50ms", "--recovery-mode", mode)
+			child := exec.Command(exe, "--master", ln.Addr().String(), "--server-id", "s1", "--volume-id", "v1", "--replica-id", "r1", "--data-addr", data, "--ctrl-addr", ctrl, "--status-addr", status, "--t1-readiness", "--durable-root", root, "--volume-lock-dir-test-only", t.TempDir(), "--durable-impl", "walstore", "--durable-blocks", "64", "--heartbeat-interval", "50ms", "--recovery-mode", mode)
+			stripSystemdForTestLockDir(child)
 			child.Stdout, child.Stderr = log, log
 			if e = child.Start(); e != nil {
 				t.Fatal(e)
@@ -166,7 +167,7 @@ func TestBinaryReplicationIngressFollowsAssignedSlots(t *testing.T) {
 			ingressRefused(t, data)
 			ingressRefused(t, dual)
 			fact := func(e uint64, peers []*control.ReplicaDescriptor) *control.AssignmentFact {
-				return &control.AssignmentFact{VolumeId: "v1", ReplicaId: "r1", Epoch: e, EndpointVersion: e, DataAddr: data, CtrlAddr: ctrl, PeerSetGeneration: e, Peers: peers}
+				return &control.AssignmentFact{ServerId: "s1", VolumeId: "v1", ReplicaId: "r1", Epoch: e, EndpointVersion: e, DataAddr: data, CtrlAddr: ctrl, PeerSetGeneration: e, Peers: peers}
 			}
 			m.facts <- fact(1, nil)
 			ingressWait(t, "RF1 assignment not applied", func() bool { return epoch(1) })

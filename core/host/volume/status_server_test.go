@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/adapter"
 	"github.com/seaweedfs/seaweed-block/core/engine"
+	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
 	"github.com/seaweedfs/seaweed-block/core/frontend/ublk"
@@ -957,6 +959,21 @@ func (s stubDurableStatusSource) DurableStatuses() []durable.VolumeStatus {
 	return append([]durable.VolumeStatus(nil), s.vols...)
 }
 
+// AdmitsIO models StorageBackend.AdmitsIO from the stub's statuses: an open
+// operational volume admits; a non-operational one refuses with its evidence;
+// an unknown one fails closed.
+func (s stubDurableStatusSource) AdmitsIO(volumeID string) error {
+	for _, v := range s.vols {
+		if v.VolumeID == volumeID {
+			if !v.Operational {
+				return fmt.Errorf("%w: %s", frontend.ErrNotReady, v.Evidence)
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: %s", durable.ErrVolumeNotOpen, volumeID)
+}
+
 func TestStatusServer_DurableStatusEndpoint_Disabled_Returns404(t *testing.T) {
 	s := NewStatusServer(NewAdapterProjectionView(stubProjector{}, "v1", "r1", nil))
 	addr, err := s.Start("127.0.0.1:0")
@@ -1181,5 +1198,91 @@ func TestStatusServer_UblkStatusEndpoint(t *testing.T) {
 			}
 		}
 		resp.Body.Close()
+	}
+}
+
+// INV-FE-PRIMARY-READY-OPERATIONAL-001: a healthy primary authority view is
+// not readiness. While the volume's local durable backend admits no I/O
+// (a chunk volume awaiting its attach, a refused claim: fenced, a detach),
+// /status does not report FrontendPrimaryReady and says why (NotReadyReason),
+// while Healthy stays the authority view; once the backend admits I/O,
+// readiness follows the authority view again. A status for another
+// volume does not count.
+func TestStatusServer_ReadyOnlyWhileBackendOperational(t *testing.T) {
+	p := stubProjector{p: engine.ReplicaProjection{Mode: engine.ModeHealthy, Epoch: 2, EndpointVersion: 2}}
+	s := NewStatusServer(NewAdapterProjectionView(p, "v1", "r1", nil))
+	addr, err := s.Start("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = s.Close(context.Background()) }()
+	read := func() StatusProjection {
+		t.Helper()
+		resp, err := http.Get("http://" + addr + "/status?volume=v1")
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		defer resp.Body.Close()
+		var body StatusProjection
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return body
+	}
+	for _, tc := range []struct {
+		name string
+		vols []durable.VolumeStatus
+		want bool
+	}{
+		{"attach pending", []durable.VolumeStatus{{VolumeID: "v1", Operational: false, Evidence: "recovered; chunk layer awaiting master authority"}}, false},
+		{"fenced", []durable.VolumeStatus{{VolumeID: "v1", Operational: false, Evidence: "chunk layer attach refused: HEAD holder h1/r1 is not this holder"}}, false},
+		{"other volume not operational", []durable.VolumeStatus{{VolumeID: "v2", Operational: false}, {VolumeID: "v1", Operational: true}}, true},
+		{"no status for the volume (fail closed)", []durable.VolumeStatus{{VolumeID: "v2", Operational: true}}, false},
+		{"operational", []durable.VolumeStatus{{VolumeID: "v1", Operational: true}}, true},
+	} {
+		s.SetDurableStatusSource(stubDurableStatusSource{vols: tc.vols})
+		body := read()
+		if !body.Healthy || body.FrontendPrimaryReady != tc.want || (body.NotReadyReason == "") != tc.want {
+			t.Errorf("%s: Healthy=%v FrontendPrimaryReady=%v NotReadyReason=%q, want Healthy (the authority view), ready=%v, a reason exactly when not ready", tc.name, body.Healthy, body.FrontendPrimaryReady, body.NotReadyReason, tc.want)
+		}
+	}
+
+	// The NVMe listener mask does not hide the backend's reason: with the
+	// target not yet listening AND the backend fenced, the reason is the
+	// backend's; with only the listener pending, it says so.
+	s.SetNVMeListenerReady(false)
+	s.SetDurableStatusSource(stubDurableStatusSource{vols: []durable.VolumeStatus{{VolumeID: "v1", Operational: false, Evidence: "chunk layer attach refused"}}})
+	if body := read(); body.FrontendPrimaryReady || body.NotReadyReason != "durable backend admits no I/O: frontend: volume not ready: chunk layer attach refused" {
+		t.Errorf("listener pending + fenced: ready=%v reason=%q, want the backend's reason", body.FrontendPrimaryReady, body.NotReadyReason)
+	}
+	s.SetDurableStatusSource(stubDurableStatusSource{vols: []durable.VolumeStatus{{VolumeID: "v1", Operational: true}}})
+	if body := read(); body.FrontendPrimaryReady || body.NotReadyReason != "frontend target not listening yet" {
+		t.Errorf("listener pending only: ready=%v reason=%q", body.FrontendPrimaryReady, body.NotReadyReason)
+	}
+	s.SetNVMeListenerReady(true)
+}
+
+// INV-FE-PRIMARY-READY-OPERATIONAL-001: whenever FrontendPrimaryReady is
+// false, NotReadyReason is set, also when the authority view itself is not a
+// healthy primary (an observed process before its assignment).
+func TestStatusServer_NotReadyAlwaysHasAReason(t *testing.T) {
+	s := NewStatusServer(NewAdapterProjectionView(stubProjector{}, "v1", "r1", nil))
+	addr, err := s.Start("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = s.Close(context.Background()) }()
+	s.SetDurableStatusSource(stubDurableStatusSource{vols: []durable.VolumeStatus{{VolumeID: "v1", Operational: true}}})
+	resp, err := http.Get("http://" + addr + "/status?volume=v1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	var body StatusProjection
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.FrontendPrimaryReady || body.NotReadyReason == "" {
+		t.Fatalf("not-ready authority view: ready=%v reason=%q, want not ready with a reason", body.FrontendPrimaryReady, body.NotReadyReason)
 	}
 }

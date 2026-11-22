@@ -12,18 +12,19 @@ import (
 // p.mu -> leaseMu at every point where an input changes, so that whenever
 // p.mu is released the view equals derive(published) (INV-LEASE-VIEW-001).
 type leaseDerived struct {
-	bound        bool // an authority line exists for the volume
-	replica      string
-	epoch        uint64
-	issuedHost   string // NewHost of the issued move that minted the line; "" if none
-	leasePresent bool
-	revoking     bool
-	movePending  bool // the last workspace move is reserved, not issued
-	uncertain    bool // a workspace write of the volume failed (INV-AUTH-UNCERTAIN-001)
-	storeless    bool
-	horizon      int64 // published Lease.ExpiresAtNS: durable upper bound of every grant
-	maxSkewNS    int64
-	lease        WorkspaceLease // the published (durable) lease
+	bound         bool // an authority line exists for the volume
+	replica       string
+	epoch         uint64
+	ownerFromMove bool
+	issuedHost    string // NewHost of the issued move that minted the line; "" if none
+	leasePresent  bool
+	revoking      bool
+	movePending   bool // the last workspace move is reserved, not issued
+	uncertain     bool // a workspace write of the volume failed (INV-AUTH-UNCERTAIN-001)
+	storeless     bool
+	horizon       int64 // published Lease.ExpiresAtNS: durable upper bound of every grant
+	maxSkewNS     int64
+	lease         WorkspaceLease // the published (durable) lease
 }
 
 // leaseView is one volume's renewal state. Guarded by Publisher.leaseMu.
@@ -43,14 +44,10 @@ func (p *Publisher) deriveLeaseLocked(volume string) leaseDerived {
 	d := leaseDerived{uncertain: p.workspaceUncertain[volume], storeless: p.store == nil, maxSkewNS: int64(p.workspaceSkew(nil))}
 	if _, line, ok := p.workspaceLineLocked(volume); ok {
 		d.bound, d.replica, d.epoch = true, line.info.ReplicaID, line.info.Epoch
+		d.issuedHost, d.ownerFromMove = line.info.ServerID, line.info.OwnerFromMove
 	}
 	if s := p.workspace[volume]; s != nil {
 		d.movePending = len(s.Moves) > 0 && !s.Moves[len(s.Moves)-1].Issued
-		for _, r := range s.Moves {
-			if d.bound && r.Issued && r.NewReplicaID == d.replica && r.NewEpoch == d.epoch {
-				d.issuedHost = r.NewHost
-			}
-		}
 		if s.Lease != nil {
 			d.leasePresent, d.revoking, d.horizon, d.lease = true, s.Lease.Revoking, s.Lease.ExpiresAtNS, *s.Lease
 			d.maxSkewNS = int64(p.workspaceSkew(s.Lease))
@@ -147,6 +144,18 @@ func (p *Publisher) WorkspaceLeaseReply(volume string) (WorkspaceLease, bool) {
 	return l, true
 }
 
+// WorkspaceLeaseValidity reports host validity on the publisher clock, with
+// the configured TTL and the larger configured/persisted skew bound.
+// M2 grant/revoke ACK; INV-WS-FORCED-MOVE-HALF-SKEW-001.
+func (p *Publisher) WorkspaceLeaseValidity(l WorkspaceLease) time.Duration {
+	return p.workspaceLeaseValidityAt(l, p.workspaceNow())
+}
+
+func (p *Publisher) workspaceLeaseValidityAt(l WorkspaceLease, now time.Time) time.Duration {
+	remaining := time.Unix(0, l.ExpiresAtNS).Add(-p.workspaceSkew(&l) / 2).Sub(now)
+	return max(0, min(remaining, p.workspaceTTL))
+}
+
 // PublishedLine is a volume's committed authority line as the lease view
 // publishes it.
 type PublishedLine struct {
@@ -154,7 +163,37 @@ type PublishedLine struct {
 	Epoch     uint64
 	// IssuedHost is the target host of the issued move that minted this line;
 	// "" when no issued move did (a placement or static topology line).
-	IssuedHost string
+	IssuedHost    string
+	OwnerFromMove bool
+}
+
+// Owner is TERM-HOLDER-001's single owner decision for a line (INV-AUTH-HOLDER-IDENTITY-001), shared by the master's
+// workspaceLineOwner and the snapshot builder. Three outcomes:
+//   - fromMove, server != "": a move minted the line on server;
+//   - fromMove, server == "": a move minted it but its owner is unknown: no server may supply its facts;
+//   - !fromMove: no move minted it; the caller uses placement / the accepted topology.
+func (pl PublishedLine) Owner() (server string, fromMove bool) {
+	if pl.OwnerFromMove || pl.IssuedHost != "" {
+		return pl.IssuedHost, true
+	}
+	return "", false
+}
+
+// The snapshot builder binds a moved line's replica to its owner through this method; the production reader must
+// provide it (a refactor dropping it is a build error, not a silent return to placement).
+var _ lineOwnerReader = (*Publisher)(nil)
+
+// PublishedAuthorityLine reads one committed line under leaf leaseMu. Identity
+// checks on renewal must not wait for p.mu, which spans authority store I/O
+// (INV-LEASE-VIEW-001, INV-WS-RENEW-NONBLOCKING-001).
+func (p *Publisher) PublishedAuthorityLine(volume string) (PublishedLine, bool) {
+	p.leaseMu.Lock()
+	defer p.leaseMu.Unlock()
+	lv := p.leaseViews[volume]
+	if lv == nil || !lv.d.bound {
+		return PublishedLine{}, false
+	}
+	return PublishedLine{ReplicaID: lv.d.replica, Epoch: lv.d.epoch, IssuedHost: lv.d.issuedHost, OwnerFromMove: lv.d.ownerFromMove}, true
 }
 
 // PublishedAuthorityLines returns the committed authority line of every
@@ -168,7 +207,7 @@ func (p *Publisher) PublishedAuthorityLines() map[string]PublishedLine {
 	out := make(map[string]PublishedLine, len(p.leaseViews))
 	for volume, lv := range p.leaseViews {
 		if lv.d.bound {
-			out[volume] = PublishedLine{ReplicaID: lv.d.replica, Epoch: lv.d.epoch, IssuedHost: lv.d.issuedHost}
+			out[volume] = PublishedLine{ReplicaID: lv.d.replica, Epoch: lv.d.epoch, IssuedHost: lv.d.issuedHost, OwnerFromMove: lv.d.ownerFromMove}
 		}
 	}
 	return out
@@ -234,7 +273,7 @@ func (p *Publisher) RenewWorkspaceLease(ctx context.Context, volume, holder stri
 	// A grant without positive host validity (expiry minus half the skew
 	// bound, leaseFact) would make the host fence on an invalid reply and lose
 	// its remaining validity; refuse with an error instead.
-	if grant-lv.d.maxSkewNS/2 <= now.UnixNano() {
+	if p.workspaceLeaseValidityAt(WorkspaceLease{ExpiresAtNS: grant, MaxClockSkewNS: lv.d.maxSkewNS}, now) == 0 {
 		horizon := lv.d.horizon // the view is leaseMu's: read it before the unlock (#242)
 		summary := p.leaseStats.summaryDue(now)
 		p.leaseMu.Unlock()

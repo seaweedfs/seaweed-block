@@ -89,6 +89,9 @@ type peerStatusSource interface {
 
 type durableStatusSource interface {
 	DurableStatuses() []durable.VolumeStatus
+	// AdmitsIO is the one deciding function for "may serve" of an open
+	// volume (StorageBackend.AdmitsIO); an error for any other.
+	AdmitsIO(volumeID string) error
 }
 
 type nvmeStatusSource interface {
@@ -187,8 +190,16 @@ type StatusProjection struct {
 	// Memory is the process's memory use at the time of the request.
 	Memory ProcessMemoryStatus
 	// FrontendPrimaryReady: this replica is the healthy, non-superseded
-	// primary and may serve guest I/O.
+	// primary, its local durable backend admits I/O, and it may serve guest
+	// I/O (INV-FE-PRIMARY-READY-OPERATIONAL-001).
 	FrontendPrimaryReady bool
+	// NotReadyReason says why FrontendPrimaryReady is false, first match: a
+	// workspace primary holds no granted lease now (NotReadyLeaseNotHeld); the
+	// local durable backend admits no I/O (its evidence: attach pending,
+	// fenced, detached) or has no status for the volume; the frontend target
+	// is not listening yet; this replica is not the healthy primary. Empty
+	// when ready.
+	NotReadyReason string `json:",omitempty"`
 	// AuthorityRole is primary, superseded or unknown.
 	AuthorityRole string
 	// ReplicationRole is none (a primary), recovering, not_ready,
@@ -203,7 +214,7 @@ type StatusProjection struct {
 	// CatchUp shows a supporting replica's catch-up progress while it is
 	// not yet replica_ready; it is visible without being an alert.
 	CatchUp *CatchUpStatus `json:",omitempty"`
-	// Warnings are the durable store's typed recovery warnings (e.g.
+	// Warnings include routing disagreements and typed recovery warnings (e.g.
 	// wal_hole_suspected, issue #51). Visible, not an alert: they do not
 	// change Healthy or the frontend's readiness.
 	Warnings []string `json:",omitempty"`
@@ -483,18 +494,52 @@ func (s *StatusServer) handleStatusNVMe(w http.ResponseWriter, r *http.Request) 
 	_ = json.NewEncoder(w).Encode(NVMeStatus{VolumeID: p.VolumeID, Stats: src.Stats()})
 }
 
+// NotReadyLeaseNotHeld: a workspace primary without a granted lease holds at
+// the gate (no claim, no listen, not ready); V1-SPEC r2.37.
+const NotReadyLeaseNotHeld = "lease_not_held"
+
 func (s *StatusServer) statusProjection() StatusProjection {
 	p := s.authorityProjection()
+	authorityReady := p.FrontendPrimaryReady
 	s.mu.Lock()
-	p.Healthy = p.Healthy && !s.nvmePending
-	p.FrontendPrimaryReady = p.FrontendPrimaryReady && !s.nvmePending
+	nvmePending := s.nvmePending
+	p.Healthy = p.Healthy && !nvmePending
+	p.FrontendPrimaryReady = p.FrontendPrimaryReady && !nvmePending
 	src := s.durableSource
 	s.mu.Unlock()
+	// INV-FE-PRIMARY-READY-OPERATIONAL-001: not FrontendPrimaryReady while the
+	// local backend admits no I/O (before the storage claim of a chunk volume,
+	// after a refused claim: fenced, after a detach), and not when there is no
+	// durable status for the volume at all (fail closed). The authority view
+	// alone (the adapter's PublishHealthy) is not readiness; Healthy stays that
+	// view. Whenever FrontendPrimaryReady is false, NotReadyReason says why.
+	backendReason := ""
 	if src != nil { // outside s.mu: the provider takes its own lock
 		for _, st := range src.DurableStatuses() {
 			if st.VolumeID == p.VolumeID {
 				p.Warnings = append(p.Warnings, st.Warnings...)
 			}
+		}
+		// V1-SPEC r2.39: the backend's one "may serve" function decides; an
+		// unopened volume fails closed.
+		if err := src.AdmitsIO(p.VolumeID); err != nil {
+			backendReason = "durable backend admits no I/O: " + err.Error()
+		}
+	}
+	leaseNotHeld := s.view.workspaceLeaseNotHeld()
+	if backendReason != "" || leaseNotHeld {
+		p.FrontendPrimaryReady = false
+	}
+	if !p.FrontendPrimaryReady {
+		switch {
+		case leaseNotHeld:
+			p.NotReadyReason = NotReadyLeaseNotHeld
+		case backendReason != "":
+			p.NotReadyReason = backendReason
+		case nvmePending:
+			p.NotReadyReason = "frontend target not listening yet"
+		case !authorityReady:
+			p.NotReadyReason = "not the healthy primary: authority role " + p.AuthorityRole + ", replication role " + p.ReplicationRole
 		}
 	}
 	return p
@@ -530,6 +575,9 @@ func (s *StatusServer) authorityProjection() StatusProjection {
 		ReplicationRole:      replicationRole,
 		RoleAdmissionFailure: s.view.roleAdmissionReason(),
 		UnhealthyReason:      s.view.unhealthyReason(),
+	}
+	if warning := s.view.assignmentEndpointWarning(); warning != "" {
+		out.Warnings = append(out.Warnings, warning)
 	}
 	if since := s.view.catchUpSince(); !since.IsZero() && replicationRole != ReplicationRoleReady {
 		cu := &CatchUpStatus{ElapsedMs: time.Since(since).Milliseconds()}
