@@ -103,6 +103,14 @@ Two kinds of config are **expected to violate**:
 
 Each `.cfg` names its spec on its first line.
 
+## Owner-label simulation results
+
+[Workspace owner-label simulation results](WorkspaceRegrant-owner-label-results.md)
+is **SIMULATION ONLY** (3 seeds x 20,000 traces, depth 120); exhaustive checking
+is **PENDING**. Counterexample lengths are counts of states, including
+the initial state, not trace identifiers. These results are separate from the
+exhausted bounds below.
+
 ## Exhausted bounds
 
 One row per spec: a configuration that TLC explored completely (breadth-first,

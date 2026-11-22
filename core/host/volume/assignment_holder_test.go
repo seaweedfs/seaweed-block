@@ -110,7 +110,7 @@ func TestAssignmentHolderIdentityFencesPreviouslyHealthySameReplica(t *testing.T
 	}
 }
 
-// Endpoints are routing data, not the holder identity (claude06 ruling).
+// INV-AUTH-HOLDER-IDENTITY-001: endpoint differences warn without refusing the matching holder.
 func TestAssignmentHolderIdentityAdoptsAndWarnsCarriedEndpointMismatch(t *testing.T) {
 	for _, endpoint := range []string{"data", "control"} {
 		t.Run(endpoint, func(t *testing.T) {
