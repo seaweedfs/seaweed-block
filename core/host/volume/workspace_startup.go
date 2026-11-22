@@ -22,5 +22,5 @@ func (h *Host) recordSelfAssignment(f *control.AssignmentFact) {
 func (h *Host) IsCurrentReplicaSuperseded() bool {
 	h.ownAssignmentMu.RLock()
 	defer h.ownAssignmentMu.RUnlock()
-	return h.isSupersededLineage(h.cfg.ReplicaID, h.ownAssignmentEpoch, h.ownAssignmentEV)
+	return h.IsSuperseded(h.cfg.ReplicaID, h.ownAssignmentEpoch, h.ownAssignmentEV)
 }

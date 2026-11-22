@@ -191,7 +191,7 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 		t.Fatalf("systemd rate limit hit: %+v", s)
 	}
 	gap1PlannedStopDoesNotRestart(t, ws, unit, statusAddr, volume, after.Epoch, "r1", s["NRestarts"], s["InvocationID"])
-	gap1SupersededDoesNotRestart(t, fixture, stem, filepath.Join(bin, "blockvolume"), args, root, volume)
+	gap1NeverAssignedRetries(t, fixture, stem, filepath.Join(bin, "blockvolume"), args, root, volume)
 }
 
 // Roots are deliberately independent of testing.TempDir: unknown unit cleanup
@@ -499,11 +499,11 @@ func gap1PlannedStopDoesNotRestart(t *testing.T, ws control.WorkspaceServiceClie
 	})
 }
 
-// The master keeps the real r1 authority line. This process has never had an
-// assignment and names r-old, so only the observed different-replica fact may
-// permit 78. Run after the live holder has ACKed and exited, avoiding a node
-// registration change while that holder is serving.
-func gap1SupersededDoesNotRestart(t *testing.T, fixture *gap1Fixture, stem, exe string, args []string, root, volume string) {
+// The master keeps the real r1 authority line. A fresh r-old process has
+// zero observed-own lineage, so a foreign fact selects retry75, never78.
+// Run after the live holder has ACKed and exited, avoiding a node registration
+// change while that holder is serving. This is not a superseded-holder witness.
+func gap1NeverAssignedRetries(t *testing.T, fixture *gap1Fixture, stem, exe string, args []string, root, volume string) {
 	t.Helper()
 	changed := append([]string(nil), args...)
 	addr := leaseBinaryAddress(t)
@@ -538,7 +538,7 @@ func gap1SupersededDoesNotRestart(t *testing.T, fixture *gap1Fixture, stem, exe 
 		}
 		// A never-assigned replica remains ModeIdle, so /status intentionally
 		// reports unknown even after recording the other-replica fact. Prove
-		// receipt in this process before checking its terminal78 decision.
+		// receipt in this process before checking its retry75 decision.
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		journal, err := exec.CommandContext(ctx, "journalctl", "--unit="+unit, "--no-pager", "--output=cat").CombinedOutput()
@@ -552,18 +552,16 @@ func gap1SupersededDoesNotRestart(t *testing.T, fixture *gap1Fixture, stem, exe 
 		}
 		return false
 	})
-	waitGAP1(t, "positive supersede did not exit78 without restart", 45*time.Second, func() bool {
+	waitGAP1(t, "never-assigned foreign identity did not exit75 and restart", 45*time.Second, func() bool {
 		s := gap1Unit(t, unit)
-		if s["NRestarts"] != "0" {
-			t.Fatalf("superseded unit restarted: %+v", s)
+		n, err := strconv.Atoi(s["NRestarts"])
+		if err != nil {
+			t.Fatalf("invalid restart count: %+v", s)
 		}
-		if s["MainPID"] != "0" {
-			return false
+		if s["ExecMainStatus"] == "78" {
+			t.Fatalf("zero-lineage process chose no-retry: %+v", s)
 		}
-		if s["ExecMainStatus"] != "78" || s["ActiveState"] != "failed" || s["SubState"] != "failed" {
-			t.Fatalf("supersede not a terminal no-retry exit: %+v", s)
-		}
-		return true
+		return n >= 1 && s["MainPID"] != "0" && s["ExecMainStatus"] == "75"
 	})
 }
 

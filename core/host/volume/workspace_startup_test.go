@@ -9,8 +9,10 @@ import (
 func TestWorkspaceExitLineageIncludesBlockedOwnAssignment(t *testing.T) {
 	h, _, _ := newStubbedHost(t, "v", "r", &orderingRecorder{})
 	h.applyFixtureFact(&control.AssignmentFact{VolumeId: "v", ReplicaId: "other", Epoch: 6, EndpointVersion: 1})
-	if !h.IsCurrentReplicaSuperseded() {
-		t.Fatal("never-assigned newer other line did not supersede")
+	// Zero observed-own lineage inherits the fencing predicate's zero rule:
+	// a never-assigned process retries75; it has no own incarnation to supersede.
+	if h.IsCurrentReplicaSuperseded() {
+		t.Fatal("never-assigned process must retry75 despite a foreign line")
 	}
 	h.BlockLocalReadiness("local recovery pending")
 	h.applyFixtureFact(&control.AssignmentFact{VolumeId: "v", ReplicaId: "r", Epoch: 7, EndpointVersion: 1})
@@ -56,8 +58,8 @@ func TestWorkspaceExitAndFenceUseNamedLineages(t *testing.T) {
 	foreign := holderAssignment(t, "other")
 	foreign.Epoch = 6
 	h.applyFact(foreign)
-	if !h.IsCurrentReplicaSuperseded() || h.IsSuperseded("r1", 0, 0) || fencer.calls.Load() != 0 {
-		t.Fatal("foreign same-replica server must select exit78 without fencing an unadopted incarnation")
+	if h.IsCurrentReplicaSuperseded() || h.IsSuperseded("r1", 0, 0) || fencer.calls.Load() != 0 {
+		t.Fatal("foreign same-replica server must select retry75 and no fence before any own assignment")
 	}
 	own := holderAssignment(t, "self")
 	own.Epoch = 7

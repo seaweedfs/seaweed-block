@@ -523,21 +523,15 @@ func (h *Host) getReplication() replicaSetUpdater {
 	return h.replication
 }
 
-// IsSuperseded compares an adopted lineage. Before adoption there is no
-// serving incarnation to fence (INV-AUTH-HOLDER-IDENTITY-001).
+// IsSuperseded is the one foreign-holder comparison. Callers supply the
+// named lineage: adopted engine state for fencing, observed own assignment
+// for exit classification. Zero lineage selects neither fencing nor exit78
+// (INV-AUTH-HOLDER-IDENTITY-001; INV-WS-STARTUP-RETRY-001).
 func (h *Host) IsSuperseded(selfReplicaID string, selfEpoch, selfEV uint64) bool {
-	return selfEpoch != 0 && h.isSupersededLineage(selfReplicaID, selfEpoch, selfEV)
-}
-
-// isSupersededLineage is the one foreign-holder comparison. Callers name
-// their evidence: adopted engine lineage for fencing, observed own assignment
-// for process exit (INV-WS-STARTUP-RETRY-001). Zero observed lineage means this
-// process never received its own assignment, not that a foreign line is ours.
-func (h *Host) isSupersededLineage(selfReplicaID string, selfEpoch, selfEV uint64) bool {
 	h.otherMu.Lock()
 	defer h.otherMu.Unlock()
 	other := h.lastOther
-	if other == nil || other.ReplicaId == "" || other.VolumeId != h.cfg.VolumeID {
+	if selfEpoch == 0 || other == nil || other.ReplicaId == "" || other.VolumeId != h.cfg.VolumeID {
 		return false
 	}
 	if other.ReplicaId == selfReplicaID && h.assignmentNamesSelf(other) {
