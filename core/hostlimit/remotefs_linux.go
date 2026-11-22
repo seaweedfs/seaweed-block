@@ -2,32 +2,17 @@
 
 package hostlimit
 
-import (
-	"fmt"
-	"syscall"
-)
+import "syscall"
 
-// localDiskFS are the file systems a host-limit directory may be on: local
-// disk file systems, whose kernel file locks and host monotonic clock
-// belong to one host. A network or cluster file system (NFS, CIFS, CephFS,
-// FUSE, ...) can share the directory between hosts, whose tickets would then
-// compare two different monotonic clocks; tmpfs and overlay are refused too.
-var localDiskFS = map[uint32]string{
-	0xEF53:     "ext4",
-	0x58465342: "xfs",
-	0x9123683E: "btrfs",
-	0x2FC12FC1: "zfs",
-	0xF2F52010: "f2fs",
-}
-
-// unsupportedFS names the file system dir is on when it is not a local disk
-// file system.
-func unsupportedFS(dir string) (string, bool) {
+// remoteFS names the remote file system dir is on, if it is on one. The
+// host-limit directory needs local flock semantics, which every local file
+// system gives (tmpfs and overlay included); a remote one (NFS, CIFS/SMB,
+// FUSE such as glusterfs, 9p, CephFS) can share the directory between
+// hosts, whose tickets would then compare two monotonic clocks. Unknown
+// types are accepted.
+func remoteFS(dir string) (string, bool) {
 	var st syscall.Statfs_t
-	if err := syscall.Statfs(dir, &st); err != nil {
-		return "an unreadable file system (" + err.Error() + ")", true
-	}
-	if _, ok := localDiskFS[uint32(st.Type)]; ok {
+	if syscall.Statfs(dir, &st) != nil {
 		return "", false
 	}
 	switch uint32(st.Type) {
@@ -37,14 +22,14 @@ func unsupportedFS(dir string) (string, bool) {
 		return "CIFS", true
 	case 0xFE534D42:
 		return "SMB2", true
+	case 0x517B:
+		return "SMB", true
 	case 0x65735546:
 		return "FUSE", true
+	case 0x01021997:
+		return "9p", true
 	case 0x00C36400:
 		return "CephFS", true
-	case 0x01021994:
-		return "tmpfs", true
-	case 0x794C7630:
-		return "overlay", true
 	}
-	return fmt.Sprintf("file system type %#x", uint32(st.Type)), true
+	return "", false
 }

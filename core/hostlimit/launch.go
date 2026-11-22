@@ -11,17 +11,17 @@ import (
 
 // CheckLaunch refuses a host-limit configuration whose premises do not
 // hold, before the process uses it. The directory must exist as a real
-// directory, outside temporary directories that cleaners empty, on a local
-// disk file system (ext4, xfs, btrfs, zfs, f2fs: kernel file locks and the
-// host monotonic clock that orders tickets belong to one host), and a
-// configuration already published there by other
+// directory, outside temporary directories that cleaners empty, not on a
+// remote file system (kernel file locks and the host monotonic clock that
+// orders tickets belong to one host), and a configuration already published
+// there by other
 // processes must equal this one. The premise that every process on the
 // host uses the same directory cannot be checked from one process.
 func CheckLaunch(c Config) error {
-	return checkLaunch(c, []string{"/tmp", "/var/tmp", "/dev/shm", os.TempDir()}, unsupportedFS)
+	return checkLaunch(c, []string{"/tmp", "/var/tmp", "/dev/shm", os.TempDir()}, remoteFS)
 }
 
-func checkLaunch(c Config, tempRoots []string, unsupported func(string) (string, bool)) error {
+func checkLaunch(c Config, tempRoots []string, remote func(string) (string, bool)) error {
 	if err := c.Validate(); err != nil {
 		return err
 	}
@@ -39,8 +39,8 @@ func checkLaunch(c Config, tempRoots []string, unsupported func(string) (string,
 			return fmt.Errorf("hostlimit: --host-limit-dir %s is under %s, which temporary-file cleaners empty", dir, root)
 		}
 	}
-	if fs, bad := unsupported(dir); bad {
-		return fmt.Errorf("hostlimit: --host-limit-dir %s is on %s, not a local disk file system (ext4, xfs, btrfs, zfs, f2fs); slot locks and ticket order need one host's local disk", dir, fs)
+	if fs, isRemote := remote(dir); isRemote {
+		return fmt.Errorf("hostlimit: --host-limit-dir %s is on %s, a remote file system; slot locks and ticket order need a file system local to this host: use a local directory (for example under /run or /var/lib)", dir, fs)
 	}
 	existing, err := os.ReadFile(filepath.Join(dir, "configuration.json"))
 	if errors.Is(err, os.ErrNotExist) {
