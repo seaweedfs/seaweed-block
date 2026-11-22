@@ -405,7 +405,7 @@ func NewDurableProvider(cfg ProviderConfig, view frontend.ProjectionView) (*Dura
 		if cfg.VolumeLockDirTestOnly == "" {
 			cfg.VolumeLockDirTestOnly = HostVolumeLockDir
 		}
-		if err := os.MkdirAll(cfg.VolumeLockDirTestOnly, 0o700); err != nil {
+		if err := makeVolumeLockDir(cfg.VolumeLockDirTestOnly); err != nil {
 			return nil, fmt.Errorf("%w %s: %w; %s", ErrVolumeLockDirUnavailable, cfg.VolumeLockDirTestOnly, err, volumeLockCure)
 		}
 	}
@@ -560,7 +560,40 @@ var ErrVolumeLockDirUnavailable = errors.New("durable: host volume lock director
 
 // volumeLockCure names the operator's cure. A directory or lock file a root
 // process created is root-owned: an unprivileged unit then cannot use it.
-const volumeLockCure = "install the tmpfiles.d entry (deploy/systemd/sw-block.tmpfiles.conf), or chown the directory and its lock files to this process's user"
+const volumeLockCure = "install the tmpfiles.d entry (deploy/systemd/sw-block.tmpfiles.conf), or make its parent directory traversable (0755) and chown the directory and its lock files to this process's user"
+
+// makeVolumeLockDir lays out a missing lock directory as the tmpfiles.d
+// entry does: its parent 0755 (traversable by the unit's user even when root
+// created it) and the directory itself 0700. Only a directory this call
+// creates is chmod'ed (the umask cannot narrow it); one that exists, or that
+// another process creates meanwhile, keeps its mode. An existing lock path
+// that is not a directory refuses.
+func makeVolumeLockDir(dir string) error {
+	parent := filepath.Dir(dir)
+	if err := os.MkdirAll(filepath.Dir(parent), 0o755); err != nil {
+		return err
+	}
+	if err := os.Mkdir(parent, 0o755); err == nil {
+		if err := os.Chmod(parent, 0o755); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	if err := os.Mkdir(dir, 0o700); err == nil {
+		return os.Chmod(dir, 0o700)
+	} else if !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("%s exists and is not a directory", dir)
+	}
+	return nil
+}
 
 // lockVolumeOnHost takes the volume's host lock (nil without
 // HostVolumeLock). A second live process for the volume on this host gets

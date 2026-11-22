@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -75,9 +76,24 @@ func OpenNodeInventoryStore(dir string) (*NodeInventoryStore, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("%w: empty dir", ErrInvalidNodeRegistration)
 	}
+	dir, err := filepath.Abs(filepath.Clean(dir))
+	if err != nil {
+		return nil, fmt.Errorf("lifecycle: resolve store path: %w", err)
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("lifecycle: mkdir node inventory %q: %w", dir, err)
 	}
+	// INV-LIFECYCLE-STORE-DURABLE-001: existence does not prove durability.
+	// Every open syncs the full ancestor chain, also after a failed first open.
+	for parent := filepath.Dir(dir); ; parent = filepath.Dir(parent) {
+		if err := syncBindingParent(parent); err != nil {
+			log.Printf("lifecycle: could not sync %s (%v): the store directory entry may not survive a crash right after its creation", parent, err)
+		}
+		if parent == filepath.Dir(parent) {
+			break
+		}
+	}
+
 	s := &NodeInventoryStore{
 		dir:     dir,
 		records: make(map[string]NodeRegistration),
@@ -205,27 +221,7 @@ func (s *NodeInventoryStore) putLocked(rec NodeRegistration) error {
 	if err != nil {
 		return fmt.Errorf("lifecycle: marshal node %s: %w", rec.ServerID, err)
 	}
-	path := s.path(rec.ServerID)
-	tmp, err := os.CreateTemp(s.dir, rec.ServerID+".*.tmp")
-	if err != nil {
-		return fmt.Errorf("lifecycle: temp node %s: %w", rec.ServerID, err)
-	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }()
-	if _, err := tmp.Write(raw); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("lifecycle: write node temp %s: %w", rec.ServerID, err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("lifecycle: close node temp %s: %w", rec.ServerID, err)
-	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("lifecycle: replace node %s: %w", rec.ServerID, err)
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return fmt.Errorf("lifecycle: rename node %s: %w", rec.ServerID, err)
-	}
-	return nil
+	return writeRecordDurably(s.dir, rec.ServerID+".json", raw)
 }
 
 func (s *NodeInventoryStore) path(serverID string) string {

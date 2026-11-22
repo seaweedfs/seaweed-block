@@ -141,9 +141,16 @@ func TestServerIDRefusedFromAHostOtherThanItsRegisteredOne(t *testing.T) {
 	if err := r.heartbeatFrom("node-a", "127.0.0.1"); err != nil {
 		t.Fatalf("heartbeat from node-a's registered host refused: %v", err)
 	}
-	err := r.heartbeatFrom("node-a", "127.0.0.2")
+	// The peer is the registered host; only the advertised slot address is wrong.
+	obs := control.NewObservationServiceClient(r.dialFrom(t, "127.0.0.1"))
+	_, err := obs.ReportHeartbeat(r.ctx, &control.HeartbeatReport{ServerId: "node-a", SentAt: timestamppb.Now(), Reachable: true, Eligible: true,
+		Slots: []*control.HeartbeatSlot{{VolumeId: "hb-node-a", ReplicaId: "r-node-a", DataAddr: "127.0.0.2:19611", CtrlAddr: "127.0.0.2:19612"}}})
 	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(status.Convert(err).Message(), "registered on host 127.0.0.1") {
 		t.Fatalf("same --server-id from a second host: %v, want FailedPrecondition naming the registered host", err)
+	}
+	want := "registered on host 127.0.0.1 but advertises 127.0.0.2 (volume hb-node-a replica r-node-a): advertise the registered address, or register the node by the address it uses, in the cluster spec"
+	if !strings.Contains(status.Convert(err).Message(), want) {
+		t.Fatalf("heartbeat refusal lacks the cure or slot detail: %v", err)
 	}
 	if slot, ok := r.m.ObservationHost().Store().SlotFactOnServer("node-a", "hb-node-a", "r-node-a"); !ok || !strings.HasPrefix(slot.DataAddr, "127.0.0.1:") {
 		t.Fatalf("refused heartbeat reached the observations: %+v ok=%v", slot, ok)
@@ -241,8 +248,11 @@ func TestWorkspaceHolderRefusedFromAnotherHostAtRenewAckAndStream(t *testing.T) 
 	wsOther, asnOther := control.NewWorkspaceServiceClient(other), control.NewAssignmentServiceClient(other)
 	refusedFrom2 := func(what string, err error) {
 		t.Helper()
-		if status.Code(err) != codes.FailedPrecondition || !strings.Contains(status.Convert(err).Message(), "registered on host 127.0.0.1; refused from 127.0.0.2") {
+		if status.Code(err) != codes.FailedPrecondition || !strings.Contains(status.Convert(err).Message(), "registered on host 127.0.0.1 but connects from 127.0.0.2") {
 			t.Fatalf("%s from 127.0.0.2 as node-a: %v, want the host refusal", what, err)
+		}
+		if !strings.Contains(status.Convert(err).Message(), "register the node by the address it connects from (not loopback) in the cluster spec") {
+			t.Fatalf("%s refusal has no registration cure: %v", what, err)
 		}
 	}
 	_, err := wsOther.RenewWorkspaceLease(r.ctx, id)
@@ -254,7 +264,7 @@ func TestWorkspaceHolderRefusedFromAnotherHostAtRenewAckAndStream(t *testing.T) 
 		_, err = stream.Recv()
 	}
 	refusedFrom2("assignment stream", err)
-	if n := strings.Count(r.logs.String(), "refused from 127.0.0.2"); n < 3 {
+	if n := strings.Count(r.logs.String(), "connects from 127.0.0.2"); n < 3 {
 		t.Fatalf("refusals logged %d times, want 3:\n%s", n, r.logs.String())
 	}
 	// the registered host is unaffected: it renews and receives the line
@@ -393,7 +403,7 @@ func TestDeletionReservedWorkspaceVolumeKeepsTheStreamHostCheck(t *testing.T) {
 	if err == nil {
 		_, err = stream.Recv()
 	}
-	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(status.Convert(err).Message(), "refused from 127.0.0.2") {
+	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(status.Convert(err).Message(), "connects from 127.0.0.2") {
 		t.Fatalf("deletion-reserved workspace volume, stream from another host: %v, want the host refusal", err)
 	}
 }
