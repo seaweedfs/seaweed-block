@@ -558,6 +558,16 @@ func (p *DurableProvider) LogicalStorage(volumeID string) storage.LogicalStorage
 // G5-4 binary wiring to install SetWriteObserver eagerly (before
 // any frontend bind) — the same backend instance is returned by
 // the future dp.Open() call when a frontend asks.
+// AdmitsIO is StorageBackend.AdmitsIO for an open volume; ErrVolumeNotOpen
+// for any other (fail closed).
+func (p *DurableProvider) AdmitsIO(volumeID string) error {
+	b := p.Backend(volumeID)
+	if b == nil {
+		return fmt.Errorf("%w: %s", ErrVolumeNotOpen, volumeID)
+	}
+	return b.AdmitsIO()
+}
+
 func (p *DurableProvider) Backend(volumeID string) *StorageBackend {
 	p.mu.Lock()
 	defer p.mu.Unlock()

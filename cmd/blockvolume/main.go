@@ -1046,7 +1046,7 @@ func runVolume(f flags, exits *processExit) int {
 	var serving <-chan struct{} // nil: no durable backend, start at once
 	if durableProv != nil {
 		if b := durableProv.Backend(f.volumeID); b != nil {
-			serving = b.FirstServing()
+			serving = frontendStartSignal(f, b, exits.done)
 		}
 	}
 	stopped, startFrontends := awaitFrontendStart(serving, stopWait)
