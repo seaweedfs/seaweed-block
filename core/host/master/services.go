@@ -292,6 +292,10 @@ func (s *services) ReportHeartbeat(ctx context.Context, r *control.HeartbeatRepo
 	if err := s.host.refuseColocatedHeartbeat(r.ServerId, storeident.Identity{MachineID: r.GetMachineId(), Dev: r.GetDurableRootDev(), FSID: r.GetDurableRootFsid()}); err != nil {
 		return nil, status.Error(codes.FailedPrecondition, err.Error())
 	}
+	// INV-ASSIGNMENT-HOLDER-IDENTITY-001: one server id names one host.
+	if err := s.host.refuseServerIDFromOtherHost(r); err != nil {
+		return nil, status.Error(codes.FailedPrecondition, err.Error())
+	}
 	msg := heartbeatFromWire(r)
 	if err := s.host.ingestHeartbeatRecordingHealth(msg); err != nil {
 		return nil, fmt.Errorf("ingest: %w", err)
@@ -509,7 +513,15 @@ func (s *services) QueryVolumeStatus(ctx context.Context, req *control.StatusReq
 			replicaIDs = []string{line.ReplicaID}
 		}
 		replicaIDs = primaryFirstReplicaIDs(replicaIDs, line.ReplicaID)
-		resp.Frontends = statusFrontendsForAssignedVolume(s.host.obs, req.VolumeId, replicaIDs, line.Assigned)
+		// the primary's portal comes from the server on the line, never a fresher same-replica claim elsewhere
+		// (INV-ASSIGNMENT-HOLDER-IDENTITY-001)
+		resp.Frontends = statusFrontendsFor(s.host.obs, req.VolumeId, replicaIDs, line.Assigned, func(replicaID string) (authority.SlotFact, bool) {
+			if replicaID == line.ReplicaID {
+				_, fact, ok := s.host.holderSlotFact(req.VolumeId, replicaID, line.Epoch)
+				return fact, ok
+			}
+			return s.host.obs.Store().SlotFact(req.VolumeId, replicaID)
+		})
 		resp.UnhealthyReplicas = statusUnhealthyReplicas(s.host.obs, req.VolumeId, replicaIDs)
 	}
 	if ev, ok := ctrl.LastUnsupported(req.VolumeId); ok {
@@ -553,8 +565,17 @@ func primaryFirstReplicaIDs(replicaIDs []string, primaryReplicaID string) []stri
 }
 
 func statusFrontendsForAssignedVolume(obs *authority.ObservationHost, volumeID string, replicaIDs []string, assigned bool) []*control.FrontendTarget {
+	return statusFrontendsFor(obs, volumeID, replicaIDs, assigned, nil)
+}
+
+// statusFrontendsFor lists the frontends of replicaIDs in order; slotOf selects each replica's slot fact (nil: the
+// freshest claim for that replica).
+func statusFrontendsFor(obs *authority.ObservationHost, volumeID string, replicaIDs []string, assigned bool, slotOf func(replicaID string) (authority.SlotFact, bool)) []*control.FrontendTarget {
 	if !assigned || obs == nil {
 		return nil
+	}
+	if slotOf == nil {
+		slotOf = func(replicaID string) (authority.SlotFact, bool) { return obs.Store().SlotFact(volumeID, replicaID) }
 	}
 	out := make([]*control.FrontendTarget, 0, len(replicaIDs))
 	seen := map[string]struct{}{}
@@ -562,7 +583,7 @@ func statusFrontendsForAssignedVolume(obs *authority.ObservationHost, volumeID s
 		if replicaID == "" {
 			continue
 		}
-		slot, ok := obs.Store().SlotFact(volumeID, replicaID)
+		slot, ok := slotOf(replicaID)
 		if !ok {
 			continue
 		}
