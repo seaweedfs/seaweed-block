@@ -38,6 +38,14 @@ func TestBackendErrorClassesAcrossFrontends(t *testing.T) {
 		{name: "permanent", err: errors.New("media read failure"), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6},
 		{name: "deadline", err: context.DeadlineExceeded, status: 0x02, key: 0x02, asc: 0x04, ascq: 0x01, sct: 0, sc: 0x82, deadline: true},
 		{name: "deadline-and-physical", err: errors.Join(context.DeadlineExceeded, errors.New("media sync failure")), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6, deadline: true},
+		{name: "deadline-and-busy", err: errors.Join(context.DeadlineExceeded, frontend.ErrBackendBusy), status: 0x08, sct: 0, sc: 0x82, deadline: true},
+		{name: "deadline-busy-physical-last", err: errors.Join(context.DeadlineExceeded, frontend.ErrBackendBusy, errors.New("physical sync failure")), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6, deadline: true},
+		{name: "deadline-busy-physical-first", err: errors.Join(errors.New("physical sync failure"), frontend.ErrBackendBusy, context.DeadlineExceeded), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6, deadline: true},
+		{name: "deadline-busy-nested-physical", err: errors.Join(frontend.ErrBackendBusy, fmt.Errorf("durability: %w", errors.Join(context.DeadlineExceeded, errors.New("physical sync failure")))), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6, deadline: true},
+		{name: "deadline-and-not-ready", err: errors.Join(context.DeadlineExceeded, frontend.ErrNotReady), status: 0x02, key: 0x02, asc: 0x04, ascq: 0x01, sct: 0, sc: 0x82, deadline: true},
+		{name: "deadline-not-ready-physical-last", err: errors.Join(context.DeadlineExceeded, frontend.ErrNotReady, errors.New("physical sync failure")), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6, deadline: true},
+		{name: "deadline-not-ready-physical-first", err: errors.Join(errors.New("physical sync failure"), frontend.ErrNotReady, context.DeadlineExceeded), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6, deadline: true},
+		{name: "deadline-not-ready-nested-physical", err: errors.Join(frontend.ErrNotReady, fmt.Errorf("durability: %w", errors.Join(context.DeadlineExceeded, errors.New("physical sync failure")))), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6, deadline: true},
 	} {
 		for _, op := range []string{"read", "write", "sync"} {
 			t.Run(tc.name+"/"+op, func(t *testing.T) {

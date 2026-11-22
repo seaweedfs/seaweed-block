@@ -381,8 +381,9 @@ snapshot lifetime; local persistence does not bypass it.
   deadlines map to SCSI NOT READY04/01 or NVMe NamespaceNotReady/DNR0;
   local busy maps to SCSI BUSY or NVMe NamespaceNotReady/DNR0. Stale
   lineage and closed preserve their distinct path-status meanings.
-  Permanent errors retain terminal protocol mapping, including a deadline
-  joined with a physical error. Read, write and sync use the same classifier;
+  Every leaf of a wrapped or joined error is checked before selecting a
+  retry class: any physical or unknown cause retains terminal mapping, even
+  alongside a deadline and busy/not-ready sentinel. Read, write and sync use the same classifier;
   no storage/authority state changes on this mapping.
 - A flusher cycle sorts native snapshot entries by record offset and reuses at
   most one fully validated record (bounded by WALSize). Every block still checks
