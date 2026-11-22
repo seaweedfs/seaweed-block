@@ -593,3 +593,39 @@ func TestPacingFreshProcessesDoNotShareDebt(t *testing.T) {
 	// not preserve pacing debt, so these bytes cannot certify a host-rate cap.
 	t.Logf("fresh_processes=%d attempted_payload_bytes=%d elapsed=%s", starts, starts*(4<<20), time.Since(start))
 }
+
+// A limiter closed while an admission is acquiring its pool slot refuses
+// it as revoked: closing is terminal, not a held-slot wait.
+func TestAdmitClosedDuringPoolAcquisitionIsRevoked(t *testing.T) {
+	l, err := New(testConfig(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-closed:
+		case <-time.After(5 * time.Second):
+			t.Error("Close did not return within 5 s")
+		}
+	})
+	l.testBeforeConfigLock = func(*os.File) {
+		go func() { l.Close(); close(closed) }()
+		for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+			l.mu.Lock()
+			c := l.closed
+			l.mu.Unlock()
+			if c {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Error("Close did not mark the limiter closed within 5 s")
+				return
+			}
+		}
+	}
+	id, err := l.Acquire(context.Background(), Normal, nil)
+	if id != 0 || !errors.Is(err, ErrRevoked) || errors.Is(err, ErrSlotsHeld) {
+		t.Fatalf("admission racing Close: id=%d err=%v; want ErrRevoked", id, err)
+	}
+}
