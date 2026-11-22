@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -57,10 +58,7 @@ type FileStore struct {
 	records map[string]VolumeRecord
 	// snap mirrors records as an immutable copy, republished at every change
 	// of records, for lock-free renewal-path reads.
-	snap               atomic.Pointer[map[string]VolumeRecord]
-	persistHookForTest func(string)         // nil in production; crash injection at publication boundaries
-	fileSyncForTest    func(*os.File) error // nil uses the real file Sync
-	dirSyncForTest     func(string) error   // nil uses syncBindingParent
+	snap atomic.Pointer[map[string]VolumeRecord]
 }
 
 // publishLocked republishes the immutable snapshot of records. Caller holds
@@ -101,7 +99,7 @@ func OpenFileStore(dir string) (*FileStore, error) {
 	// Every open syncs the full ancestor chain, also after a failed first open.
 	for parent := filepath.Dir(dir); ; parent = filepath.Dir(parent) {
 		if err := syncBindingParent(parent); err != nil {
-			return nil, fmt.Errorf("lifecycle: sync store ancestor %q: %w", parent, err)
+			log.Printf("lifecycle: could not sync %s (%v): the store directory entry may not survive a crash right after its creation", parent, err)
 		}
 		if parent == filepath.Dir(parent) {
 			break
@@ -309,46 +307,7 @@ func (s *FileStore) putLocked(rec VolumeRecord) error {
 	if err != nil {
 		return fmt.Errorf("lifecycle: marshal %s: %w", rec.Spec.VolumeID, err)
 	}
-	path := s.path(rec.Spec.VolumeID)
-	tmp, err := os.CreateTemp(s.dir, rec.Spec.VolumeID+".*.tmp")
-	if err != nil {
-		return fmt.Errorf("lifecycle: temp %s: %w", rec.Spec.VolumeID, err)
-	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }()
-	if _, err := tmp.Write(raw); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("lifecycle: write temp %s: %w", rec.Spec.VolumeID, err)
-	}
-	fileSync := tmp.Sync
-	if s.fileSyncForTest != nil {
-		fileSync = func() error { return s.fileSyncForTest(tmp) }
-	}
-	if err := fileSync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("lifecycle: sync record temp %s: %w", rec.Spec.VolumeID, err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("lifecycle: close temp %s: %w", rec.Spec.VolumeID, err)
-	}
-	// INV-LIFECYCLE-STORE-DURABLE-001: retain the old file until atomic replacement.
-	if s.persistHookForTest != nil {
-		s.persistHookForTest("before-rename")
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return fmt.Errorf("lifecycle: rename %s: %w", rec.Spec.VolumeID, err)
-	}
-	if s.persistHookForTest != nil {
-		s.persistHookForTest("after-rename")
-	}
-	dirSync := syncBindingParent
-	if s.dirSyncForTest != nil {
-		dirSync = s.dirSyncForTest
-	}
-	if err := dirSync(s.dir); err != nil {
-		return fmt.Errorf("lifecycle: sync record directory %s: %w", rec.Spec.VolumeID, err)
-	}
-	return nil
+	return writeRecordDurably(s.dir, rec.Spec.VolumeID+".json", raw)
 }
 
 func (s *FileStore) path(volumeID string) string {

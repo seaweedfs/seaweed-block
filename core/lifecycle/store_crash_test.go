@@ -24,17 +24,19 @@ type recordCrashFixture struct {
 	old, next any
 	put       func(bool) error
 	get       func() (any, bool)
-	setSync   func(func(*os.File) error, func(string) error)
 }
 
 func openRecordCrashFixture(t *testing.T, kind, dir string, hook func(string)) recordCrashFixture {
 	t.Helper()
+	durableRecordHooksForTest.Store(nil)
+	if hook != nil {
+		durableRecordHooksForTest.Store(&durableRecordHooks{crash: hook})
+	}
 	if kind == "node" {
 		s, err := OpenNodeInventoryStore(dir)
 		if err != nil {
 			t.Fatal(err)
 		}
-		s.persistHookForTest = hook
 		return recordCrashFixture{old: crashNodeRegistration(false), next: crashNodeRegistration(true),
 			put: func(updated bool) error { _, err := s.RegisterNode(crashNodeRegistration(updated)); return err },
 			get: func() (any, bool) {
@@ -45,7 +47,6 @@ func openRecordCrashFixture(t *testing.T, kind, dir string, hook func(string)) r
 				}
 				return r, ok
 			},
-			setSync: func(f func(*os.File) error, d func(string) error) { s.fileSyncForTest, s.dirSyncForTest = f, d },
 		}
 	}
 	if kind == "volume" {
@@ -53,7 +54,6 @@ func openRecordCrashFixture(t *testing.T, kind, dir string, hook func(string)) r
 		if err != nil {
 			t.Fatal(err)
 		}
-		s.persistHookForTest = hook
 		old := VolumeRecord{Spec: VolumeSpec{VolumeID: "vol-a", SizeBytes: 1 << 20, ReplicationFactor: 1, Protocol: "iscsi", PVCName: strings.Repeat("payload", 1024)}}
 		next := old
 		next.AttachedTo = "node-b"
@@ -73,7 +73,6 @@ func openRecordCrashFixture(t *testing.T, kind, dir string, hook func(string)) r
 				}
 				return r, ok
 			},
-			setSync: func(f func(*os.File) error, d func(string) error) { s.fileSyncForTest, s.dirSyncForTest = f, d },
 		}
 	}
 	if kind != "placement" {
@@ -83,7 +82,6 @@ func openRecordCrashFixture(t *testing.T, kind, dir string, hook func(string)) r
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.persistHookForTest = hook
 	old := PlacementIntent{VolumeID: "vol-a", DesiredRF: 1, Slots: []PlacementSlotIntent{{ServerID: "node-a", PoolID: strings.Repeat("old", 4096), Source: PlacementSourceBlankPool}}}
 	next := copyPlacementIntent(old)
 	next.Slots[0].PoolID = strings.Repeat("new", 4096)
@@ -103,7 +101,6 @@ func openRecordCrashFixture(t *testing.T, kind, dir string, hook func(string)) r
 			}
 			return r, ok
 		},
-		setSync: func(f func(*os.File) error, d func(string) error) { s.fileSyncForTest, s.dirSyncForTest = f, d },
 	}
 }
 
@@ -177,66 +174,81 @@ func TestLifecyclePutSyncOrderAndFailure(t *testing.T) {
 	for _, kind := range []string{"node", "volume", "placement"} {
 		for _, failure := range []string{"none", "file", "directory", "nil-hooks"} {
 			t.Run(kind+"/"+failure, func(t *testing.T) {
-				dir := t.TempDir()
-				f := openRecordCrashFixture(t, kind, dir, nil)
-				if err := f.put(false); err != nil {
-					t.Fatal(err)
-				}
-				fault := errors.New("injected sync failure")
-				var events []string
-				if failure != "nil-hooks" {
-					f.setSync(func(file *os.File) error {
-						events = append(events, "file")
-						if filepath.Ext(file.Name()) != ".tmp" {
-							t.Fatal("sync must target the candidate file")
-						}
-						if failure == "file" {
-							return fault
-						}
-						return file.Sync()
-					}, func(path string) error {
-						events = append(events, "directory")
-						if path != dir {
-							t.Fatal("sync must target the record directory")
-						}
-						if failure == "directory" {
-							return fault
-						}
-						return syncBindingParent(path)
-					})
-				}
-				err := f.put(true)
-				want := f.next
-				if failure == "file" || failure == "directory" {
-					if !errors.Is(err, fault) {
-						t.Fatalf("sync failure hidden: %v", err)
-					}
-					want = f.old
-				} else if err != nil {
-					t.Fatal(err)
-				}
-				if got, ok := f.get(); !ok || !reflect.DeepEqual(got, want) {
-					t.Fatal("memory published before successful sync")
-				}
-				wantEvents := []string{"file", "directory"}
-				if failure == "file" {
-					wantEvents = []string{"file"}
-				}
-				if failure == "nil-hooks" {
-					wantEvents = nil
-				}
-				if !reflect.DeepEqual(events, wantEvents) {
-					t.Fatalf("sync events %v want %v", events, wantEvents)
-				}
-				reopened := openRecordCrashFixture(t, kind, dir, nil)
-				diskWant := f.next
-				if failure == "file" {
-					diskWant = f.old
-				}
-				if got, ok := reopened.get(); !ok || !reflect.DeepEqual(got, diskWant) {
-					t.Fatal("wrong durable record after sync outcome")
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestLifecyclePutSyncChild$", "-test.timeout=8s")
+				cmd.Env = append(os.Environ(), "LIFECYCLE_SYNC_KIND="+kind, "LIFECYCLE_SYNC_FAILURE="+failure)
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("sync control: %v context=%v\n%s", err, ctx.Err(), out)
 				}
 			})
 		}
+	}
+}
+
+func TestLifecyclePutSyncChild(t *testing.T) {
+	kind := os.Getenv("LIFECYCLE_SYNC_KIND")
+	if kind == "" {
+		t.Skip("isolated sync control")
+	}
+	failure := os.Getenv("LIFECYCLE_SYNC_FAILURE")
+	dir := t.TempDir()
+	f := openRecordCrashFixture(t, kind, dir, nil)
+	if err := f.put(false); err != nil {
+		t.Fatal(err)
+	}
+	fault := errors.New("injected sync failure")
+	var events []string
+	if failure != "nil-hooks" {
+		durableRecordHooksForTest.Store(&durableRecordHooks{fileSync: func(file *os.File) error {
+			events = append(events, "file")
+			if filepath.Ext(file.Name()) != ".tmp" {
+				t.Fatal("sync must target the candidate file")
+			}
+			if failure == "file" {
+				return fault
+			}
+			return file.Sync()
+		}, dirSync: func(path string) error {
+			events = append(events, "directory")
+			if path != dir {
+				t.Fatal("sync must target the record directory")
+			}
+			if failure == "directory" {
+				return fault
+			}
+			return syncBindingParent(path)
+		}})
+	}
+	err := f.put(true)
+	want := f.next
+	if failure == "file" || failure == "directory" {
+		if !errors.Is(err, fault) {
+			t.Fatalf("sync failure hidden: %v", err)
+		}
+		want = f.old
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := f.get(); !ok || !reflect.DeepEqual(got, want) {
+		t.Fatal("memory published before successful sync")
+	}
+	wantEvents := []string{"file", "directory"}
+	if failure == "file" {
+		wantEvents = []string{"file"}
+	}
+	if failure == "nil-hooks" {
+		wantEvents = nil
+	}
+	if !reflect.DeepEqual(events, wantEvents) {
+		t.Fatalf("sync events %v want %v", events, wantEvents)
+	}
+	reopened := openRecordCrashFixture(t, kind, dir, nil)
+	diskWant := f.next
+	if failure == "file" {
+		diskWant = f.old
+	}
+	if got, ok := reopened.get(); !ok || !reflect.DeepEqual(got, diskWant) {
+		t.Fatal("wrong durable record after sync outcome")
 	}
 }

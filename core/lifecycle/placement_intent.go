@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -35,13 +36,10 @@ type PlacementIntent struct {
 
 // PlacementIntentStore persists one placement intent per volume.
 type PlacementIntentStore struct {
-	mu                 sync.Mutex
-	dir                string
-	records            map[string]PlacementIntent
-	published          sync.Map             // committed immutable PlacementIntent values; renewal never takes mu
-	persistHookForTest func(string)         // nil in production; crash injection at publication boundaries
-	fileSyncForTest    func(*os.File) error // nil uses the real file Sync
-	dirSyncForTest     func(string) error   // nil uses syncBindingParent
+	mu        sync.Mutex
+	dir       string
+	records   map[string]PlacementIntent
+	published sync.Map // committed immutable PlacementIntent values; renewal never takes mu
 }
 
 // OpenPlacementIntentStore opens or creates a placement intent store.
@@ -60,7 +58,7 @@ func OpenPlacementIntentStore(dir string) (*PlacementIntentStore, error) {
 	// Every open syncs the full ancestor chain, also after a failed first open.
 	for parent := filepath.Dir(dir); ; parent = filepath.Dir(parent) {
 		if err := syncBindingParent(parent); err != nil {
-			return nil, fmt.Errorf("lifecycle: sync store ancestor %q: %w", parent, err)
+			log.Printf("lifecycle: could not sync %s (%v): the store directory entry may not survive a crash right after its creation", parent, err)
 		}
 		if parent == filepath.Dir(parent) {
 			break
@@ -201,46 +199,7 @@ func (s *PlacementIntentStore) putLocked(rec PlacementIntent) error {
 	if err != nil {
 		return fmt.Errorf("lifecycle: marshal placement intent %s: %w", rec.VolumeID, err)
 	}
-	path := s.path(rec.VolumeID)
-	tmp, err := os.CreateTemp(s.dir, rec.VolumeID+".*.tmp")
-	if err != nil {
-		return fmt.Errorf("lifecycle: temp placement intent %s: %w", rec.VolumeID, err)
-	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }()
-	if _, err := tmp.Write(raw); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("lifecycle: write placement intent temp %s: %w", rec.VolumeID, err)
-	}
-	fileSync := tmp.Sync
-	if s.fileSyncForTest != nil {
-		fileSync = func() error { return s.fileSyncForTest(tmp) }
-	}
-	if err := fileSync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("lifecycle: sync placement intent temp %s: %w", rec.VolumeID, err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("lifecycle: close placement intent temp %s: %w", rec.VolumeID, err)
-	}
-	// INV-LIFECYCLE-STORE-DURABLE-001: retain the old file until atomic replacement.
-	if s.persistHookForTest != nil {
-		s.persistHookForTest("before-rename")
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return fmt.Errorf("lifecycle: rename placement intent %s: %w", rec.VolumeID, err)
-	}
-	if s.persistHookForTest != nil {
-		s.persistHookForTest("after-rename")
-	}
-	dirSync := syncBindingParent
-	if s.dirSyncForTest != nil {
-		dirSync = s.dirSyncForTest
-	}
-	if err := dirSync(s.dir); err != nil {
-		return fmt.Errorf("lifecycle: sync placement intent directory %s: %w", rec.VolumeID, err)
-	}
-	return nil
+	return writeRecordDurably(s.dir, rec.VolumeID+".json", raw)
 }
 
 func (s *PlacementIntentStore) path(volumeID string) string {

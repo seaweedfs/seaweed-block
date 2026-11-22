@@ -88,11 +88,11 @@ func TestNodeInventoryCrashChild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.persistHookForTest = func(phase string) {
+	durableRecordHooksForTest.Store(&durableRecordHooks{crash: func(phase string) {
 		if phase == os.Getenv("NODE_INVENTORY_CRASH_PHASE") {
 			os.Exit(73) // abrupt exit: no deferred cleanup or close
 		}
-	}
+	}})
 	if _, err := s.RegisterNode(crashNodeRegistration(true)); err != nil {
 		t.Fatal(err)
 	}
