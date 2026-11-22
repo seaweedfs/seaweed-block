@@ -479,3 +479,17 @@ stateDiagram-v2
 ```
 
 Guest I/O never acquires a slot. An unavailable pool skips background cuts; urgent and named seals may use per-process fallback with an alarm. Active coordinated reservations exclude orphaned crash spill. Upload pacing debt survives leases in one process, but a new process starts fresh, so arbitrary process turnover has no fixed host-rate bound.
+
+### Workspace primary supervisor retry
+
+A workspace chunk primary that exhausts its existing assignment wait, or whose
+lease fences while serving, exits 75 after fail-closed cleanup bounded by the
+existing five-second lease-drain limit. systemd restarts on failure with
+RestartSec=5s. Only a master fact naming another replica permits exit 78;
+RestartPreventExitStatus=78 suppresses automatic restarts until an operator
+explicitly starts the unit. A higher epoch for the same replica retries.
+An ACKed planned revocation and a signal stop retain their normal exit status.
+Sealed same-epoch recovery stays non-serving for seal replay after assignment.
+Local-root, WAL-corruption and I/O diagnostics retain their existing wait.
+No restart bypasses the master barrier, durable re-grant, or HEAD claim.
+See M2 and INV-WS-STARTUP-RETRY-001 in the invariant ledger.

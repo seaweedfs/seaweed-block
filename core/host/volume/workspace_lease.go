@@ -57,6 +57,10 @@ type WorkspaceLeaseGuard struct {
 // revocation to its ACK also includes that renewal, the drain and the ACK.
 const stopPendingPoll = 250 * time.Millisecond
 
+// WorkspaceDrainTimeout is the existing fail-closed lease drain bound.
+// INV-WS-STARTUP-RETRY-001 also bounds the process cleanup by this duration.
+const WorkspaceDrainTimeout = 5 * time.Second
+
 // StopPending records that a graceful stop of this workspace has begun (the
 // chunk layer is being detached) and wakes Run to renew at once; while it
 // stays pending Run sleeps at most stopPendingPoll between renewals.
@@ -280,7 +284,7 @@ func (g *WorkspaceLeaseGuard) drainAfterFence(ctx context.Context, err error) er
 
 func (g *WorkspaceLeaseGuard) drain(parent context.Context, ack bool) error {
 	if !g.stopped {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), WorkspaceDrainTimeout)
 		gen, err := g.stop(ctx)
 		cancel()
 		if err != nil {

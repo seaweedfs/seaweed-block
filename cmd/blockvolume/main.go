@@ -13,12 +13,10 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"runtime/debug"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/adapter"
@@ -584,7 +582,7 @@ func durableCreateGeometry(f flags) (uint32, int, error) {
 	return uint32(f.durableBlocks), int(f.durableBlockSize), nil
 }
 
-func run(f flags) int {
+func runVolume(f flags, exits *processExit) int {
 	// Diagnostics first: parseFlags validated the directory, and nothing
 	// has been activated yet, so a failure here leaves nothing to clean up.
 	stopProfile, err := startCPUProfileSignal(f.cpuProfileDir)
@@ -719,6 +717,9 @@ func run(f flags) int {
 			return 1
 		}
 		durableProv = dp
+		watchCtx, stopWatch := context.WithCancel(exits.parent)
+		defer stopWatch()
+		go watchChunkStartup(watchCtx, exits, f, h, dp)
 		provider = dp
 		if status != nil {
 			status.SetDurableStatusSource(dp)
@@ -772,7 +773,7 @@ func run(f flags) int {
 			return 1
 		case durableStartupFaulted:
 			fmt.Fprintln(os.Stderr, "blockvolume: durable recovery failed:", evidence)
-			return waitFaultedDurableRecovery(h, status, durableProv, evidence)
+			return waitFaultedDurableRecovery(exits.done, h, status, durableProv, evidence)
 		default:
 			fmt.Fprintln(os.Stderr, "blockvolume: durable recovered:", evidence)
 		}
@@ -1245,25 +1246,13 @@ func run(f flags) int {
 		})
 	}
 
-	shutdownCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stopSignals()
+	shutdownCtx := exits.parent
 	var leaseRequests <-chan workspaceStopRequest
 	var leaseDone <-chan error
 	if f.workspaceLease {
 		leaseRequests, leaseDone = startWorkspaceLease(shutdownCtx, h)
 	}
-	var leaseStop *workspaceStopRequest
-	select {
-	case <-shutdownCtx.Done():
-	case request := <-leaseRequests:
-		// The lease guard fenced and asks for the drain; it logs its cause as
-		// "workspace lease: fenced ...". Say here that this is why we stop (#205).
-		fmt.Fprintln(os.Stderr, "blockvolume: stopping: the workspace lease guard fenced and requested the drain")
-		leaseStop = &request
-	case err := <-leaseDone:
-		fmt.Fprintln(os.Stderr, "blockvolume: workspace lease stopped:", err)
-		leaseDone = nil
-	}
+	leaseStop, leaseDone := waitWorkspaceStop(exits, f, h, leaseRequests, leaseDone)
 	// The main goroutine owns shutdown. The lease callback waits for this
 	// exact drain; it cannot ACK a merely requested or failed close.
 	h.FenceWorkspaceLease()
@@ -1477,12 +1466,9 @@ func rdmaBindAddressFact(listen string) volume.FrontendTransportPreflightFact {
 	return volume.FrontendTransportPreflightFact{Name: "rdma_bind_address", Available: true, Reason: "rdma_bind_address_candidate", Detail: host}
 }
 
-func waitFaultedDurableRecovery(h *volume.Host, status *volume.StatusServer, durableProv *durable.DurableProvider, evidence string) int {
+func waitFaultedDurableRecovery(stop <-chan struct{}, h *volume.Host, status *volume.StatusServer, durableProv *durable.DurableProvider, evidence string) int {
 	fmt.Fprintln(os.Stderr, "blockvolume: durable recovery faulted; status endpoint remains available and local readiness remains blocked:", evidence)
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	<-sig
-	signal.Stop(sig)
+	<-stop
 
 	if durableProv != nil {
 		_ = durableProv.Close()

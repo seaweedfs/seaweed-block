@@ -1,0 +1,143 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/host/volume"
+	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
+)
+
+const (
+	exitWorkspaceRetry      = 75
+	exitWorkspaceSuperseded = 78
+)
+
+type workspaceExit struct {
+	code   int
+	reason string
+}
+
+// INV-WS-STARTUP-RETRY-001: the first outcome is immutable. The channel is a
+// single latched wakeup, not a queue of competing shutdown events.
+type processExit struct {
+	parent  context.Context
+	once    sync.Once
+	done    chan struct{}
+	outcome workspaceExit
+}
+
+func newProcessExit(ctx context.Context) *processExit {
+	return &processExit{parent: ctx, done: make(chan struct{})}
+}
+func (e *processExit) choose(out workspaceExit) {
+	e.once.Do(func() {
+		if e.parent.Err() != nil {
+			out = workspaceExit{reason: "signal"}
+		}
+		e.outcome = out
+		close(e.done)
+	})
+}
+
+// The original resource owner still drains everything. This outer process
+// owner bounds even a stuck Close or deferred cleanup; main alone calls Exit.
+func run(f flags) int {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return superviseProcess(ctx, func(e *processExit) int { return runVolume(f, e) })
+}
+
+func superviseProcess(ctx context.Context, work func(*processExit) int) int {
+	e := newProcessExit(ctx)
+	finished := make(chan int, 1)
+	go func() { finished <- work(e) }()
+	select {
+	case code := <-finished:
+		select {
+		case <-e.done:
+			return reportWorkspaceExit(e.outcome)
+		default:
+			return code
+		}
+	case <-ctx.Done():
+		e.choose(workspaceExit{reason: "signal"})
+	case <-e.done:
+	}
+	if e.outcome.code == 0 {
+		return <-finished
+	}
+	timer := time.NewTimer(volume.WorkspaceDrainTimeout)
+	defer timer.Stop()
+	return finishWorkspaceExit(e.outcome, finished, timer.C)
+}
+
+func finishWorkspaceExit(out workspaceExit, finished <-chan int, deadline <-chan time.Time) int {
+	select {
+	case <-finished:
+	case <-deadline:
+	}
+	return reportWorkspaceExit(out)
+}
+
+func reportWorkspaceExit(out workspaceExit) int {
+	if out.code != 0 {
+		fmt.Fprintf(os.Stderr, "blockvolume: exiting status=%d reason=%s\n", out.code, out.reason)
+	}
+	return out.code
+}
+
+// Only a positive, volume-specific other-replica fact permits no-retry. A
+// higher epoch for the same replica must restart for the new assignment.
+func workspaceRetryOutcome(volumeID, replicaID, reason string, other *control.AssignmentFact) workspaceExit {
+	if other != nil && other.VolumeId == volumeID && other.ReplicaId != "" && other.ReplicaId != replicaID {
+		return workspaceExit{exitWorkspaceSuperseded, "superseded"}
+	}
+	return workspaceExit{exitWorkspaceRetry, reason}
+}
+
+func watchChunkStartup(ctx context.Context, e *processExit, f flags, h *volume.Host, p *durable.DurableProvider) {
+	if !f.workspaceLease || f.durableImpl != "walstore-chunk" {
+		return
+	}
+	for {
+		if _, failed := p.ChunkStartupOutcome(f.volumeID); failed {
+			e.choose(workspaceRetryOutcome(f.volumeID, f.replicaID, "assignment_timeout", h.LastOtherLine()))
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-e.done:
+			return
+		case <-p.ChunkStartupUpdates():
+		}
+	}
+}
+
+func waitWorkspaceStop(e *processExit, f flags, h *volume.Host, requests <-chan workspaceStopRequest, done <-chan error) (*workspaceStopRequest, <-chan error) {
+	select {
+	case <-e.parent.Done():
+		e.choose(workspaceExit{reason: "signal"})
+		return nil, done
+	case <-e.done:
+		return nil, done
+	case request := <-requests:
+		out := workspaceExit{reason: "revoked"}
+		if !h.WorkspaceLeaseRevoking() {
+			out = workspaceRetryOutcome(f.volumeID, f.replicaID, "lease_expired", h.LastOtherLine())
+		}
+		e.choose(out)
+		return &request, done
+	case err := <-done:
+		fmt.Fprintln(os.Stderr, "blockvolume: workspace lease stopped:", err)
+		e.choose(workspaceRetryOutcome(f.volumeID, f.replicaID, "lease_expired", h.LastOtherLine()))
+		return nil, nil
+	}
+}

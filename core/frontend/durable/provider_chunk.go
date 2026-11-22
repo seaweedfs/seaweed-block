@@ -124,6 +124,9 @@ func (p *DurableProvider) recoverChunk(ctx context.Context, volumeID string, h *
 		p.startChunkAuthorityWait(volumeID, h, gen)
 		return false, nil
 	}
+	if errors.Is(err, storage.ErrChunkLayerFenced) && !errors.Is(err, ErrChunkStaleLocalRoot) {
+		p.endChunkStartup(h, gen)
+	}
 	return err == nil, err
 }
 
@@ -173,6 +176,7 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 		if p.current(h, gen) && h.chunk == nil {
 			ended = fmt.Sprintf("assignment unavailable, not serving (projection lacks %s)", chunkAuthorityGap(p.view.Projection(), volumeID))
 			h.backend.SetOperational(false, "chunk assignment unavailable: "+waitCtx.Err().Error())
+			p.endChunkStartup(h, gen)
 		}
 	}()
 	defer func() {
@@ -237,6 +241,8 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 					h.backend.SetOperational(false, "chunk layer attach refused: "+err.Error())
 				}
 				h.attachMu.Unlock()
+			} else {
+				p.endChunkStartup(h, gen)
 			}
 			return
 		case errors.Is(err, errChunkNoAuthority):

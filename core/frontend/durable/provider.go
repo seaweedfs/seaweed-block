@@ -233,10 +233,11 @@ type DurableProvider struct {
 	cfg  ProviderConfig
 	view frontend.ProjectionView
 
-	mu      sync.Mutex
-	volumes map[string]*volHandle  // keyed by volumeID
-	opening map[string]*sync.Mutex // keyed by volumeID; serializes open/create
-	closed  bool
+	mu             sync.Mutex
+	volumes        map[string]*volHandle  // keyed by volumeID
+	opening        map[string]*sync.Mutex // keyed by volumeID; serializes open/create
+	closed         bool
+	startupUpdates chan struct{} // wake only; the generation-bound result stays on the handle
 
 	// testAfterChunkResolve, test-only, runs in CutVolume right after the
 	// volume's handle and layer are resolved.
@@ -286,6 +287,7 @@ type volHandle struct {
 	// latest recovery's.
 	recoverGen   uint64
 	waitGen      uint64
+	startupEnded uint64             // recovery generation with a terminal startup outcome; guarded by p.mu
 	chunk        storage.ChunkLayer // after RecoverVolume
 	chunkLineage chunkLineage       // immutable authority captured by this attachment
 	// Private until the owner commit succeeds; retained for attach retry.
@@ -392,12 +394,13 @@ func NewDurableProvider(cfg ProviderConfig, view frontend.ProjectionView) (*Dura
 	}
 	closeCtx, closeCancel := context.WithCancel(context.Background())
 	return &DurableProvider{
-		cfg:         cfg,
-		view:        view,
-		volumes:     map[string]*volHandle{},
-		opening:     map[string]*sync.Mutex{},
-		closeCtx:    closeCtx,
-		closeCancel: closeCancel,
+		cfg:            cfg,
+		view:           view,
+		volumes:        map[string]*volHandle{},
+		opening:        map[string]*sync.Mutex{},
+		closeCtx:       closeCtx,
+		closeCancel:    closeCancel,
+		startupUpdates: make(chan struct{}, 1),
 	}, nil
 }
 
@@ -947,6 +950,7 @@ func (p *DurableProvider) RecoverVolume(ctx context.Context, volumeID string) (R
 		p.mu.Lock()
 		h.recoverGen++ // any earlier recovery's authority wait is now stale
 		gen = h.recoverGen
+		h.startupEnded = 0
 		p.mu.Unlock()
 	}
 	report := Recover(h.storage, volumeID)

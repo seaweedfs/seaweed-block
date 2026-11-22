@@ -110,3 +110,15 @@ func (h *Host) FenceWorkspaceLease() {
 		g.mu.Unlock()
 	}
 }
+
+// WorkspaceLeaseRevoking distinguishes the ACK-owning planned drain from a
+// retryable fence without interpreting an error string (M2 Revoking -> Revoked).
+func (h *Host) WorkspaceLeaseRevoking() bool {
+	g := h.view.workspaceGuard.Load()
+	if g == nil {
+		return false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.revoked
+}
