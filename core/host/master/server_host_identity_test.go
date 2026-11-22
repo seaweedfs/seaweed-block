@@ -241,7 +241,7 @@ func TestWorkspaceHolderRefusedFromAnotherHostAtRenewAckAndStream(t *testing.T) 
 	wsOther, asnOther := control.NewWorkspaceServiceClient(other), control.NewAssignmentServiceClient(other)
 	refusedFrom2 := func(what string, err error) {
 		t.Helper()
-		if status.Code(err) != codes.FailedPrecondition || !strings.Contains(status.Convert(err).Message(), "registered on host 127.0.0.1; refused from 127.0.0.2") {
+		if status.Code(err) != codes.FailedPrecondition || !strings.Contains(status.Convert(err).Message(), "registered on host 127.0.0.1 but connects from 127.0.0.2") {
 			t.Fatalf("%s from 127.0.0.2 as node-a: %v, want the host refusal", what, err)
 		}
 		if !strings.Contains(status.Convert(err).Message(), "register the node by the address it connects from (not loopback) in the cluster spec") {
@@ -257,7 +257,7 @@ func TestWorkspaceHolderRefusedFromAnotherHostAtRenewAckAndStream(t *testing.T) 
 		_, err = stream.Recv()
 	}
 	refusedFrom2("assignment stream", err)
-	if n := strings.Count(r.logs.String(), "refused from 127.0.0.2"); n < 3 {
+	if n := strings.Count(r.logs.String(), "connects from 127.0.0.2"); n < 3 {
 		t.Fatalf("refusals logged %d times, want 3:\n%s", n, r.logs.String())
 	}
 	// the registered host is unaffected: it renews and receives the line
@@ -396,7 +396,7 @@ func TestDeletionReservedWorkspaceVolumeKeepsTheStreamHostCheck(t *testing.T) {
 	if err == nil {
 		_, err = stream.Recv()
 	}
-	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(status.Convert(err).Message(), "refused from 127.0.0.2") {
+	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(status.Convert(err).Message(), "connects from 127.0.0.2") {
 		t.Fatalf("deletion-reserved workspace volume, stream from another host: %v, want the host refusal", err)
 	}
 }

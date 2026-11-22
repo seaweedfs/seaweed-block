@@ -85,7 +85,7 @@ func (h *Host) refuseWorkspaceHolderHost(ctx context.Context, rpc, server string
 		if ph == "" {
 			ph = "an unknown peer"
 		}
-		err = fmt.Errorf("%s: server id %s is registered on host %s; refused from %s: one server id names one host", rpc, server, named, ph)
+		err = fmt.Errorf("%s: server id %s is registered on host %s but connects from %s: register the node by the address it connects from (not loopback) in the cluster spec", rpc, server, named, ph)
 	}
 	if err != nil {
 		h.log.Print(err)
