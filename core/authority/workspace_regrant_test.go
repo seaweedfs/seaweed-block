@@ -3,6 +3,7 @@ package authority
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 )
@@ -69,8 +70,8 @@ func TestWorkspaceLeaseRegrantWaitsForDurabilityAndLatchesFailure(t *testing.T) 
 			before := bindAndGrant(t, p, "v", "r")
 			clock.at(3)
 			entered, release := make(chan struct{}), make(chan struct{})
-			// Release even on a failed assertion, before publisher cleanup joins.
-			defer close(release)
+			var releaseOnce sync.Once
+			releaseWriter := func() { releaseOnce.Do(func() { close(release) }) }
 			store.setBefore(func(DurableRecord) error {
 				close(entered)
 				<-release
@@ -87,7 +88,18 @@ func TestWorkspaceLeaseRegrantWaitsForDurabilityAndLatchesFailure(t *testing.T) 
 				err   error
 			}
 			done := make(chan answer, 1)
+			finished := make(chan struct{})
+			// Registered last: release and join before publisher/store cleanup.
+			t.Cleanup(func() {
+				releaseWriter()
+				select {
+				case <-finished:
+				case <-time.After(5 * time.Second):
+					t.Error("re-grant worker did not finish during cleanup")
+				}
+			})
 			go func() {
+				defer close(finished)
 				l, err := p.RenewWorkspaceLease(context.Background(), "v", "r", 1)
 				done <- answer{l, err}
 			}()
@@ -95,14 +107,20 @@ func TestWorkspaceLeaseRegrantWaitsForDurabilityAndLatchesFailure(t *testing.T) 
 			case <-entered:
 			case got := <-done:
 				t.Fatal("re-grant returned before the durable write witness", got)
+			case <-time.After(5 * time.Second):
+				t.Fatal("re-grant did not enter the durable write")
 			}
 			if visible, ok := p.WorkspaceLeaseReply("v"); !ok || visible.ExpiresAtNS != before.ExpiresAtNS {
 				t.Error("grant published ahead of durable store", visible)
 			}
-			// An unbuffered release lets this test join the writer without racing
-			// a wall-clock delay; its deferred close is harmless after the send.
-			release <- struct{}{}
-			got := <-done
+			// Events decide success; timers only bound failed handshakes.
+			releaseWriter()
+			var got answer
+			select {
+			case got = <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("released re-grant did not return")
+			}
 			if fail {
 				if got.err == nil || got.lease.ExpiresAtNS != 0 {
 					t.Fatal("uncertain write produced a usable grant", got)
