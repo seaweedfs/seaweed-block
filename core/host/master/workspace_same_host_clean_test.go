@@ -36,7 +36,7 @@ func TestWorkspaceRPCSameHostCleanMoveKeepsRepreparedBinding(t *testing.T) {
 	if _, err := ws.AckWorkspaceRevoked(ctx, &control.WorkspaceRevocationAck{Identity: id, HeadGen: 9}); err != nil {
 		t.Fatal(err)
 	}
-	if got, ok, err := h.Lifecycle().WorkspaceBindings.Get("v"); err != nil || !ok || !got.Retired {
+	if got, ok, err := h.Lifecycle().WorkspaceBindings.Get("v"); err != nil || !ok || len(got) != 1 || !got[0].Retired {
 		t.Fatal("ACK did not retire the old binding", got, err)
 	}
 	if _, err := ws.RegisterWorkspaceBinding(ctx, b); err != nil {
@@ -52,7 +52,7 @@ func TestWorkspaceRPCSameHostCleanMoveKeepsRepreparedBinding(t *testing.T) {
 	if line, _ := h.Publisher().VolumeAuthorityLine("v"); line.Epoch != 2 || line.DataAddr != b.DataAddr || line.CtrlAddr != b.CtrlAddr {
 		t.Fatal("same-host move did not publish exactly the next epoch", line)
 	}
-	if got, ok, err := h.Lifecycle().WorkspaceBindings.Get("v"); err != nil || !ok || got.Retired {
+	if got, ok, err := h.Lifecycle().WorkspaceBindings.Get("v"); err != nil || !ok || len(got) != 1 || got[0].Retired {
 		t.Fatal("old epoch retired the re-prepared binding", got, err)
 	}
 }
