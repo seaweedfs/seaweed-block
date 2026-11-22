@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -66,14 +67,15 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 	volume := stem
 	base := "/" + stem
 	masterAddr := leaseBinaryAddress(t)
+	target, masterListen := gap1TargetAddresses(t, masterAddr)
 	dataAddr, ctrlAddr, statusAddr, nvmeAddr := leaseBinaryAddress(t), leaseBinaryAddress(t), leaseBinaryAddress(t), leaseBinaryAddress(t)
-	cfg := fmt.Sprintf("nodes:\n  - server_id: s1\n    data_addr: %s\n    ctrl_addr: %s\nvolumes:\n  - id: %s\n    size_bytes: 262144\n    replication_factor: 1\n    placements:\n      - server_id: s1\n        replica_id: r1\n        source: existing_replica\n", dataAddr, ctrlAddr, volume)
+	cfg := fmt.Sprintf("nodes:\n  - server_id: s1\n    data_addr: %s\n    ctrl_addr: %s\n  - server_id: s2\n    data_addr: %s\n    ctrl_addr: %s\nvolumes:\n  - id: %s\n    size_bytes: 262144\n    replication_factor: 1\n    placements:\n      - server_id: s1\n        replica_id: r1\n        source: existing_replica\n", dataAddr, ctrlAddr, target.dataAddr, target.ctrlAddr, volume)
 	spec := filepath.Join(root, "cluster.yaml")
 	if err := os.WriteFile(spec, []byte(cfg), 0600); err != nil {
 		t.Fatal(err)
 	}
 	fixture.start(t, stem+"-master", false, filepath.Join(bin, "blockmaster"),
-		"--listen", masterAddr, "--authority-store", filepath.Join(root, "auth"), "--lifecycle-store", filepath.Join(root, "life"),
+		"--listen", masterListen, "--authority-store", filepath.Join(root, "auth"), "--lifecycle-store", filepath.Join(root, "life"),
 		"--cluster-spec", spec, "--lifecycle-product-loop-interval", "200ms", "--expected-slots-per-volume", "1",
 		"--workspace-rpc", "--workspace-head-base-url", "http://"+cluster.filerHTTP+base)
 	w4WaitTCP(t, masterAddr, 20*time.Second)
@@ -191,7 +193,7 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 		t.Fatalf("systemd rate limit hit: %+v", s)
 	}
 	gap1PlannedStopDoesNotRestart(t, ws, unit, statusAddr, volume, after.Epoch, "r1", s["NRestarts"], s["InvocationID"])
-	gap1NeverAssignedRetries(t, fixture, stem, filepath.Join(bin, "blockvolume"), args, root, volume)
+	gap1PrestartedTargetServesAfterMove(t, fixture, ws, remote, target, stem, filepath.Join(bin, "blockvolume"), args, root, volume, want)
 }
 
 // Roots are deliberately independent of testing.TempDir: unknown unit cleanup
@@ -499,74 +501,141 @@ func gap1PlannedStopDoesNotRestart(t *testing.T, ws control.WorkspaceServiceClie
 	})
 }
 
-// The master keeps the real r1 authority line. A fresh r-old process has
-// zero observed-own lineage, so a foreign fact selects retry75, never78.
-// Run after the live holder has ACKed and exited, avoiding a node registration
-// change while that holder is serving. This is not a superseded-holder witness.
-func gap1NeverAssignedRetries(t *testing.T, fixture *gap1Fixture, stem, exe string, args []string, root, volume string) {
+// The host-consistency check uses the actual gRPC peer address. Model two
+// registered hosts with loopback and a real non-loopback local IPv4 address;
+// the target dials the master over that second address. Both processes and
+// every restart still run under the same real WSL systemd (not two machines).
+type gap1Target struct {
+	masterAddr, dataAddr, ctrlAddr string
+}
+
+func gap1TargetAddresses(t *testing.T, masterAddr string) (gap1Target, string) {
+	t.Helper()
+	_, port, err := net.SplitHostPort(masterAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addresses, err := iface.Addrs()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, address := range addresses {
+			ip, _, err := net.ParseCIDR(address.String())
+			if err != nil || ip.To4() == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+				continue
+			}
+			allocate := func() string {
+				ln, err := net.Listen("tcp", net.JoinHostPort(ip.String(), "0"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				addr := ln.Addr().String()
+				if err := ln.Close(); err != nil {
+					t.Fatal(err)
+				}
+				return addr
+			}
+			return gap1Target{net.JoinHostPort(ip.String(), port), allocate(), allocate()}, net.JoinHostPort("0.0.0.0", port)
+		}
+	}
+	t.Fatal("qualification requires a real non-loopback IPv4 address; no skip is proof")
+	return gap1Target{}, ""
+}
+
+// Start the future target before a clean move is issued. It has the same
+// logical r1 slot but a different server id, and no own lineage: the source
+// line cannot mean it lost anything. Prove75 and automatic restart, then issue
+// a real MoveWorkspace and prove lease/HEAD/data admission without touching
+// the target unit again. This is not a positive78/no-restart witness.
+func gap1PrestartedTargetServesAfterMove(t *testing.T, fixture *gap1Fixture, ws control.WorkspaceServiceClient, remote storage.ChunkRemote, target gap1Target, stem, exe string, args []string, root, volume string, want []byte) {
 	t.Helper()
 	changed := append([]string(nil), args...)
-	addr := leaseBinaryAddress(t)
-	replacements := map[string]string{"--replica-id": "r-old", "--data-addr": leaseBinaryAddress(t), "--ctrl-addr": leaseBinaryAddress(t), "--status-addr": addr, "--durable-root": filepath.Join(root, "superseded-store"), "--nvme-listen": leaseBinaryAddress(t), "--nvme-subsysnqn": "nqn.2026-11.test:" + stem + "-superseded"}
+	addr, nvmeAddr := leaseBinaryAddress(t), leaseBinaryAddress(t)
+	nqn := "nqn.2026-11.test:" + stem + "-prestarted-target"
+	replacements := map[string]string{"--master": target.masterAddr, "--server-id": "s2", "--data-addr": target.dataAddr, "--ctrl-addr": target.ctrlAddr, "--status-addr": addr, "--durable-root": filepath.Join(root, "target-store"), "--nvme-listen": nvmeAddr, "--nvme-subsysnqn": nqn}
 	for i := 0; i+1 < len(changed); i++ {
 		if value, ok := replacements[changed[i]]; ok {
 			changed[i+1] = value
 		}
 	}
-	unit := stem + "-superseded"
+	unit := stem + "-prestarted-target"
 	fixture.start(t, unit, true, exe, changed...)
-	waitGAP1(t, "superseded process never observed the master's other-replica fact", 15*time.Second, func() bool {
-		resp, err := (&http.Client{Timeout: time.Second}).Get("http://" + addr + "/status?volume=" + volume)
-		if err != nil {
+	waitGAP1(t, "target never observed the source holder before the move", 15*time.Second, func() bool {
+		status, body, err := gap1Status(addr, volume)
+		if err != nil || status != http.StatusOK {
 			return false
 		}
-		defer resp.Body.Close()
-		raw, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return false
-		}
-		t.Logf("captured real supersede status: status%d body%s", resp.StatusCode, raw)
-		if resp.StatusCode != http.StatusOK {
-			return false
-		}
-		var status hostvolume.StatusProjection
-		if err := json.Unmarshal(raw, &status); err != nil {
+		var projection hostvolume.StatusProjection
+		if err := json.Unmarshal(body, &projection); err != nil {
 			t.Fatal(err)
 		}
-		if status.Healthy || status.FrontendPrimaryReady {
-			t.Fatalf("unassigned old identity served: %+v", status)
+		if projection.Healthy || projection.FrontendPrimaryReady {
+			t.Fatalf("future target served before the move: %s", body)
 		}
-		// A never-assigned replica remains ModeIdle, so /status intentionally
-		// reports unknown even after recording the other-replica fact. Prove
-		// receipt in this process before checking its retry75 decision.
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		journal, err := exec.CommandContext(ctx, "journalctl", "--unit="+unit, "--no-pager", "--output=cat").CombinedOutput()
+		cmd := exec.CommandContext(ctx, "journalctl", "--unit="+unit, "--no-pager", "--output=cat")
+		cmd.WaitDelay = time.Second
+		journal, err := cmd.CombinedOutput()
 		if err != nil {
-			t.Fatalf("supersede journal: %v %s", err, journal)
+			t.Fatalf("target journal: %v %s", err, journal)
 		}
-		observed := fmt.Sprintf("volume %s authority is now r1@1 (not this replica r-old); recording supersede", volume)
-		if strings.Contains(string(journal), observed) {
-			t.Logf("captured authoritative other-replica observation: %s", observed)
-			return true
-		}
-		return false
+		observed := fmt.Sprintf("assignment identity refusal volume=%q replica=%q server=%q", volume, "r1", "s1")
+		return strings.Contains(string(journal), observed)
 	})
-	waitGAP1(t, "never-assigned foreign identity did not exit75", 45*time.Second, func() bool {
+	waitGAP1(t, "prestarted target did not exit75 before the move", 45*time.Second, func() bool {
 		s := gap1Unit(t, unit)
 		if s["ExecMainStatus"] == "78" {
-			t.Fatalf("zero-lineage process chose no-retry: %+v", s)
+			t.Fatalf("zero-lineage target chose no-retry before its move: %+v", s)
 		}
 		return s["ExecMainStatus"] == "75"
 	})
-	waitGAP1(t, "never-assigned retry75 did not restart", 15*time.Second, func() bool {
+	waitGAP1(t, "prestarted target retry75 did not restart", 15*time.Second, func() bool {
 		s := gap1Unit(t, unit)
 		n, err := strconv.Atoi(s["NRestarts"])
 		if err != nil || n > 2 {
-			t.Fatalf("invalid or unbounded restart count: %+v", s)
+			t.Fatalf("invalid or unbounded target restart count: %+v", s)
 		}
 		return n >= 1 && s["MainPID"] != "0"
 	})
+	sealed, err := gap1ReadHead(t, remote)
+	if err != nil || sealed.State != storage.ChunkHeadDetached || sealed.Holder != "s1/r1" || sealed.Gen == 0 {
+		t.Fatalf("move source not sealed by its exact holder: %+v %v", sealed, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	grant, err := ws.MoveWorkspace(ctx, &control.WorkspaceMove{RequestId: stem + "-target-move", VolumeId: volume, ExpectedReplicaId: "r1", ExpectedEpoch: sealed.Epoch, TargetReplicaId: "r1", TargetServerId: "s2", TargetDataAddr: target.dataAddr, TargetCtrlAddr: target.ctrlAddr, Kind: "clean"})
+	cancel()
+	if err != nil || !grant.GetIssued() || grant.GetNewEpoch() <= sealed.Epoch || grant.GetOldHost() != "s1" || grant.GetNewHost() != "s2" || grant.GetHeadGen() != sealed.Gen {
+		t.Fatalf("real clean move failed: grant=%v err=%v", grant, err)
+	}
+	t.Logf("prestarted target move issued after its automatic restart: %s", grant)
+	waitGAP1(t, "automatically restarted target did not serve after the move", 60*time.Second, func() bool {
+		s := gap1Unit(t, unit)
+		n, err := strconv.Atoi(s["NRestarts"])
+		if err != nil || n < 1 || n > 2 || s["Result"] == "start-limit-hit" {
+			t.Fatalf("target restart bound violated after move: %+v", s)
+		}
+		return gap1Operational(t, addr, volume)
+	})
+	head, err := gap1ReadHead(t, remote)
+	if err != nil || head.Gen <= sealed.Gen || head.Epoch != grant.NewEpoch || head.Holder != "s2/r1" || head.State != storage.ChunkHeadActive {
+		t.Fatalf("target did not claim its issued HEAD: %+v %v", head, err)
+	}
+	client := gap1ConnectNVMe(t, nvmeAddr, nqn)
+	client.readExact(t, 8, want)
+	client.readExact(t, 9, want)
+	client.writeFlush(t, 10, want)
+	client.readExact(t, 10, want)
+	client.close()
+	t.Logf("prestarted target served after a real clean move without operator restart: unit=%s HEAD=%+v", unit, head)
 }
 
 // Register before the units: their exact-unit cleanup runs first, then this
