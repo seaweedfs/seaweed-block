@@ -159,30 +159,60 @@ func TestStandaloneCleanMoveWithoutTheACKIsRefused(t *testing.T) {
 
 const plannedHandoffNQN = "nqn.2026-11.io.seaweedfs:handoff"
 
-// startPlannedHandoff runs the chapter's steps 1-3: a weed cluster, the
-// cluster spec, blockmaster with the lifecycle store, and the setup check.
-// It returns the blockvolume arguments of step 4 and the show command.
+// startPlannedHandoff runs the chapter's steps 1-3 for one host, s1, and
+// returns the blockvolume arguments of step 4 and the show command.
 func startPlannedHandoff(t *testing.T) (h *plannedHandoffHarness, cluster *w4WeedCluster, chunkPath string, show, volArgs []string) {
 	t.Helper()
-	h = newPlannedHandoffHarness(t)
-	cluster = startWorkspaceWeed(t)
-	chunkPath = fmt.Sprintf("/handoff-%d", time.Now().UnixNano())
+	env := startHandoffEnv(t, 1)
+	return env.h, env.cluster, env.chunkPath, env.show, env.volArgs("s1")
+}
+
+// handoffEnv is a running setup: weed, blockmaster with the cluster spec
+// naming every host, and the hosts' blockvolume endpoints. The volume starts
+// on s1.
+type handoffEnv struct {
+	h         *plannedHandoffHarness
+	cluster   *w4WeedCluster
+	chunkPath string
+	show      []string
+	hosts     map[string]bvHost
+}
+
+// bvHost is one host's blockvolume: its server id, endpoints and local root.
+type bvHost struct {
+	id, data, ctrl, status, nvme, root string
+}
+
+// startHandoffEnv runs the chapter's steps 1-3: a weed cluster, the cluster
+// spec with hosts s1..sN, blockmaster with the lifecycle store, and the setup
+// check.
+func startHandoffEnv(t *testing.T, n int) *handoffEnv {
+	t.Helper()
+	h := newPlannedHandoffHarness(t)
+	env := &handoffEnv{h: h, cluster: startWorkspaceWeed(t), chunkPath: fmt.Sprintf("/handoff-%d", time.Now().UnixNano()), hosts: map[string]bvHost{}}
 	must, _ := fatalOn(t)
+	env.hosts["s1"] = bvHost{id: "s1", data: h.dataAddr, ctrl: h.ctrlAddr, status: h.statusAddr, nvme: h.nvmeAddr, root: filepath.Join(h.dir, "vol")}
+	for i := 2; i <= n; i++ {
+		id := fmt.Sprintf("s%d", i)
+		env.hosts[id] = bvHost{id: id, data: leaseBinaryAddress(t), ctrl: leaseBinaryAddress(t), status: leaseBinaryAddress(t), nvme: leaseBinaryAddress(t), root: filepath.Join(h.dir, "vol-"+id)}
+	}
+	cluster, chunkPath := env.cluster, env.chunkPath
 
 	// 1. The cluster spec.
+	var nodes strings.Builder
+	for i := 1; i <= n; i++ {
+		b := env.hosts[fmt.Sprintf("s%d", i)]
+		fmt.Fprintf(&nodes, "  - server_id: %s\n    data_addr: %s\n    ctrl_addr: %s\n", b.id, b.data, b.ctrl)
+	}
 	spec := filepath.Join(h.dir, "cluster-spec.yaml")
-	must(os.WriteFile(spec, []byte(fmt.Sprintf(`nodes:
-  - server_id: s1
-    data_addr: %s
-    ctrl_addr: %s
-volumes:
+	must(os.WriteFile(spec, []byte("nodes:\n"+nodes.String()+`volumes:
   - id: v1
     size_bytes: 268435456
     replication_factor: 1
     placements:
       - server_id: s1
         replica_id: r1
-`, h.dataAddr, h.ctrlAddr)), 0o644))
+`), 0o644))
 
 	// 2. blockmaster with the lifecycle store and the cluster spec.
 	mstate := filepath.Join(h.dir, "master")
@@ -198,17 +228,21 @@ volumes:
 	}
 
 	// 3. The setup answers before any blockvolume runs.
-	show = []string{"ops", "workspace", "show", "--master", h.masterAddr, "--volume", "v1"}
-	out, _ := h.command(t, show...)
+	env.show = []string{"ops", "workspace", "show", "--master", h.masterAddr, "--volume", "v1"}
+	out, _ := h.command(t, env.show...)
 	must(checkShowBeforeStart(out))
+	return env
+}
 
-	volArgs = []string{"--master", h.masterAddr, "--server-id", "s1", "--volume-id", "v1", "--replica-id", "r1",
-		"--data-addr", h.dataAddr, "--ctrl-addr", h.ctrlAddr, "--status-addr", h.statusAddr,
-		"--durable-root", filepath.Join(h.dir, "vol"), "--durable-impl", "walstore-chunk",
+// volArgs is the chapter's blockvolume command for one host.
+func (env *handoffEnv) volArgs(id string) []string {
+	b := env.hosts[id]
+	return []string{"--master", env.h.masterAddr, "--server-id", b.id, "--volume-id", "v1", "--replica-id", "r1",
+		"--data-addr", b.data, "--ctrl-addr", b.ctrl, "--status-addr", b.status,
+		"--durable-root", b.root, "--durable-impl", "walstore-chunk",
 		"--durable-blocks", "65536", "--durable-blocksize", "4096",
-		"--chunk-filer", cluster.filerGRPC, "--chunk-path", chunkPath, "--chunk-control-endpoint",
-		"--workspace-lease", "--nvme-listen", h.nvmeAddr, "--nvme-subsysnqn", plannedHandoffNQN}
-	return h, cluster, chunkPath, show, volArgs
+		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath, "--chunk-control-endpoint",
+		"--workspace-lease", "--nvme-listen", b.nvme, "--nvme-subsysnqn", plannedHandoffNQN}
 }
 
 func fatalOn(t *testing.T) (func(error), func(uint64, error) uint64) {
@@ -415,9 +449,16 @@ func (h *plannedHandoffHarness) run(t *testing.T, args ...string) (string, strin
 // healthy primary at epoch.
 func (h *plannedHandoffHarness) waitPrimary(t *testing.T, epoch uint64) {
 	t.Helper()
+	h.waitPrimaryAt(t, h.statusAddr, epoch)
+}
+
+// waitPrimaryAt polls one host's status endpoint until the volume serves
+// there as a healthy primary at epoch.
+func (h *plannedHandoffHarness) waitPrimaryAt(t *testing.T, statusAddr string, epoch uint64) {
+	t.Helper()
 	c := &http.Client{Timeout: 5 * time.Second}
-	poll(t, 60*time.Second, fmt.Sprintf("status never showed a healthy primary at epoch %d", epoch), func() bool {
-		resp, err := c.Get("http://" + h.statusAddr + "/status?volume=v1")
+	poll(t, 60*time.Second, fmt.Sprintf("status at %s never showed a healthy primary at epoch %d", statusAddr, epoch), func() bool {
+		resp, err := c.Get("http://" + statusAddr + "/status?volume=v1")
 		if err != nil {
 			return false
 		}

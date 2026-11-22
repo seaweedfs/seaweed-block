@@ -106,9 +106,12 @@ func showsAck(out string, e, g uint64) bool {
 	return hasLine(out, fmt.Sprintf("recorded ACK: r1@%d HEAD generation %d", e, g))
 }
 
-// movedEpoch reads E2 from the clean move's answer.
-func movedEpoch(out string, e, g, l uint64) (uint64, error) {
-	issued := regexp.MustCompile(fmt.Sprintf(`^clean move issued: volume v1 request move-v1-1: r1@%d -> r1@(\d+) on s1 \(sealed HEAD gen %d, remote LSN %d\)$`, e, g, l))
+// movedEpoch reads E2 from the clean move's answer to s1.
+func movedEpoch(out string, e, g, l uint64) (uint64, error) { return movedEpochTo(out, e, g, l, "s1") }
+
+// movedEpochTo reads E2 from the clean move's answer to the target host.
+func movedEpochTo(out string, e, g, l uint64, target string) (uint64, error) {
+	issued := regexp.MustCompile(fmt.Sprintf(`^clean move issued: volume v1 request move-v1-1: r1@%d -> r1@(\d+) on %s \(sealed HEAD gen %d, remote LSN %d\)$`, e, regexp.QuoteMeta(target), g, l))
 	first, _, _ := strings.Cut(out, "\n")
 	e2, err := matchUint(issued, strings.TrimRight(first, "\r"))
 	if err != nil {
@@ -117,12 +120,14 @@ func movedEpoch(out string, e, g, l uint64) (uint64, error) {
 	if e2 <= e {
 		return 0, fmt.Errorf("clean move issued epoch %d; want above %d", e2, e)
 	}
-	return e2, wantLines(out, "next: start volume v1 on s1 (this command moved authority only)")
+	return e2, wantLines(out, fmt.Sprintf("next: start volume v1 on %s (this command moved authority only)", target))
 }
 
-func checkClaimDone(line string, e2 uint64) error {
-	if !strings.Contains(line, "durable: HEAD claim for volume=v1 done in") || !strings.Contains(line, fmt.Sprintf(`epoch=%d holder="s1/r1"`, e2)) {
-		return fmt.Errorf("HEAD claim %q; want done at epoch %d holder s1/r1", line, e2)
+func checkClaimDone(line string, e2 uint64) error { return checkClaimDoneBy(line, e2, "s1") }
+
+func checkClaimDoneBy(line string, e2 uint64, host string) error {
+	if !strings.Contains(line, "durable: HEAD claim for volume=v1 done in") || !strings.Contains(line, fmt.Sprintf(`epoch=%d holder="%s/r1"`, e2, host)) {
+		return fmt.Errorf("HEAD claim %q; want done at epoch %d holder %s/r1", line, e2, host)
 	}
 	return nil
 }
@@ -134,14 +139,46 @@ func checkShowMoved(out string, e, e2, g, l uint64) error {
 }
 
 func checkHeadReopened(out string, e2, g, l uint64) error {
+	return checkHeadReopenedBy(out, e2, g, l, "s1")
+}
+
+func checkHeadReopenedBy(out string, e2, g, l uint64, host string) error {
 	h, err := parseHead(out)
 	if err != nil {
 		return err
 	}
-	if h.State != "active" || h.Epoch != e2 || h.Holder != "s1/r1" || h.Gen <= g || h.RemoteLSN != l || h.DetachedBy != nil {
-		return fmt.Errorf("HEAD after the reopen %+v; want active, epoch %d, holder s1/r1, gen above %d, remote LSN %d, not detached", h, e2, g, l)
+	if h.State != "active" || h.Epoch != e2 || h.Holder != host+"/r1" || h.Gen <= g || h.RemoteLSN != l || h.DetachedBy != nil {
+		return fmt.Errorf("HEAD after the reopen %+v; want active, epoch %d, holder %s/r1, gen above %d, remote LSN %d, not detached", h, e2, host, g, l)
 	}
 	return nil
+}
+
+// forcedEpoch reads E2 from a forced move's answer (`forced move issued:
+// ... r1@E on FROM -> r1@E2 on TO (kept HEAD gen N, remote LSN L)`).
+func forcedEpoch(out string, e uint64, from, to string) (uint64, error) {
+	re := regexp.MustCompile(fmt.Sprintf(`(?m)^forced move issued: volume v1 request \S+: r1@%d on %s -> r1@(\d+) on %s \(kept HEAD gen \d+, remote LSN \d+\)$`, e, regexp.QuoteMeta(from), regexp.QuoteMeta(to)))
+	e2, err := matchUint(re, out)
+	if err == nil && e2 <= e {
+		err = fmt.Errorf("forced move issued epoch %d; want above %d", e2, e)
+	}
+	return e2, err
+}
+
+// forcedKeptLSN reads the remote LSN a forced move kept.
+func forcedKeptLSN(out string) (uint64, error) {
+	return matchUint(regexp.MustCompile(`(?m)^forced move issued: .*\(kept HEAD gen \d+, remote LSN (\d+)\)$`), out)
+}
+
+// previewAdmitted reports whether a force-move --dry-run says admitted.
+func previewAdmitted(out string) bool {
+	return regexp.MustCompile(`(?m)^forced move admitted(: .*)?$`).MatchString(out)
+}
+
+// frontendReady reports whether a /status?volume=v1 body says the frontend
+// is ready to serve as primary.
+func frontendReady(body []byte) bool {
+	var st struct{ FrontendPrimaryReady bool }
+	return json.Unmarshal(body, &st) == nil && st.FrontendPrimaryReady
 }
 
 // checkCleanMoveRefused checks a clean move refused for a missing ACK: exit
@@ -264,6 +301,9 @@ func TestPlannedHandoffChecksReadCapturedProductOutput(t *testing.T) {
 	refused("clean move refused", checkCleanMoveRefused(read("move-clean.stdout"), "", 0))
 	if r := read("show-revoked.stdout"); showsAck(r, e, g) || !hasLine(r, "recorded ACK: none") {
 		t.Error("the revoked show without an ACK is read as acknowledged")
+	}
+	if !frontendReady([]byte(read("status-primary.json"))) || frontendReady([]byte(`{"FrontendPrimaryReady":false,"Healthy":true}`)) {
+		t.Error("the frontend-ready check does not read FrontendPrimaryReady")
 	}
 	if !statusPrimary([]byte(read("status-primary.json")), e2) || statusPrimary([]byte(read("status-primary.json")), e) {
 		t.Error("status check does not read the epoch of a healthy primary")
