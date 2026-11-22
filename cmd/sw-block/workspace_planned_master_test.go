@@ -45,7 +45,7 @@ func TestWorkspacePlannedHandoffAgainstRealMaster(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	// This is the separate host event, never synthesized by the CLI.
-	_, err = control.NewWorkspaceServiceClient(conn).AckWorkspaceRevoked(ctx, &control.WorkspaceRevocationAck{Identity: &control.WorkspaceIdentity{VolumeId: "vol-f", ReplicaId: "r1", Epoch: 1}, HeadGen: 9})
+	_, err = control.NewWorkspaceServiceClient(conn).AckWorkspaceRevoked(ctx, &control.WorkspaceRevocationAck{Identity: &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "vol-f", ReplicaId: "r1", Epoch: 1}, HeadGen: 9})
 	if err != nil {
 		t.Fatal(err)
 	}
