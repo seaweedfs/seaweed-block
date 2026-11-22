@@ -244,6 +244,9 @@ type chunkLSNMapV3 struct {
 	syncFile         func() error
 	syncDirectory    func() error
 	latchPersistence func(error)
+	// testBeforeLiveSnapshot runs in prepareLockedV3 just before the live-set
+	// snapshot (tests only: a publication landing there).
+	testBeforeLiveSnapshot func()
 	// liveMu guards live (chunk_map_extents_v3.go); never held across I/O.
 	liveMu sync.Mutex
 	live   chunkMapLiveV3
@@ -370,7 +373,24 @@ func (m *chunkLSNMapV3) prepareLockedV3(g, C uint64, entries []chunkLSNEntryV3, 
 	// The live set: every page and root extent a live root references.
 	// Roots are only added here (under m.mu); the publisher's report only
 	// removes them, so this snapshot is a superset for the whole prepare.
-	used, liveBytes := usedPagesV3(m.liveSnapshotV3())
+	// Every root publisher (the flusher's checkpoint, the chunk layer's
+	// captured-map publication, BASE complete) prepares through here, and a
+	// caller captured prior before this prepare: a publication in between can
+	// have released it (INV-WAL-V3-MAP-PRIOR-LIVE-001). Its pages are reused
+	// only if it is live in the same liveMu section as this snapshot; then its
+	// extents are in `used`, nothing else allocates while m.mu is held, and the
+	// candidate below pins every page it references, the reused ones included.
+	// Otherwise the prepare is refused, not latched, and retried by the caller
+	// from the current root.
+	if h := m.testBeforeLiveSnapshot; h != nil {
+		h()
+	}
+	live, priorLive := m.liveSnapshotWithPriorV3(prior)
+	if !priorLive {
+		m.live.priorRefused.Add(1)
+		return nil, mapCoverageRefusal("prior_released")
+	}
+	used, liveBytes := usedPagesV3(live)
 	defer func() {
 		if err != nil {
 			m.failed = err
