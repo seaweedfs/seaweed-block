@@ -2,6 +2,7 @@ package authority
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -55,6 +56,81 @@ func TestWorkspaceLeaseExpiredSameHolderRegrantIsDurable(t *testing.T) {
 	}
 	if writes != 1 {
 		t.Fatalf("repeat requests amplified durable writes: %d", writes)
+	}
+}
+
+func TestWorkspaceLeaseRegrantWaitsForDurabilityAndLatchesFailure(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(map[bool]string{false: "durable", true: "uncertain"}[fail], func(t *testing.T) {
+			disk, _ := newTempStore(t)
+			clock := newTestClock()
+			store := &hookStore{AuthorityStore: disk}
+			p := newLeasePublisher(t, store, time.Second, clock)
+			before := bindAndGrant(t, p, "v", "r")
+			clock.at(3)
+			entered, release := make(chan struct{}), make(chan struct{})
+			// Release even on a failed assertion, before publisher cleanup joins.
+			defer close(release)
+			store.setBefore(func(DurableRecord) error {
+				close(entered)
+				<-release
+				return nil
+			})
+			store.setAfter(func(DurableRecord) error {
+				if fail {
+					return errors.New("write landed but reply lost")
+				}
+				return nil
+			})
+			type answer struct {
+				lease WorkspaceLease
+				err   error
+			}
+			done := make(chan answer, 1)
+			go func() {
+				l, err := p.RenewWorkspaceLease(context.Background(), "v", "r", 1)
+				done <- answer{l, err}
+			}()
+			<-entered
+			if visible, ok := p.WorkspaceLeaseReply("v"); !ok || visible.ExpiresAtNS != before.ExpiresAtNS {
+				t.Error("grant published ahead of durable store", visible)
+			}
+			// An unbuffered release lets this test join the writer without racing
+			// a wall-clock delay; its deferred close is harmless after the send.
+			release <- struct{}{}
+			got := <-done
+			if fail {
+				if got.err == nil || got.lease.ExpiresAtNS != 0 {
+					t.Fatal("uncertain write produced a usable grant", got)
+				}
+				if _, err := p.RenewWorkspaceLease(context.Background(), "v", "r", 1); err == nil {
+					t.Fatal("renewal bypassed uncertain re-grant")
+				}
+			} else if got.err != nil || got.lease.ExpiresAtNS != clock.sec(4).UnixNano() {
+				t.Fatal("durable re-grant not returned", got)
+			}
+		})
+	}
+}
+
+func TestWorkspaceLeaseForcedIssueDefeatsOldHolderRegrant(t *testing.T) {
+	disk, _ := newTempStore(t)
+	clock := newTestClock()
+	p := newLeasePublisher(t, disk, time.Second, clock)
+	bindAndGrant(t, p, "v", "r")
+	clock.at(3)
+	req := WorkspaceMoveRequest{RequestID: "force", VolumeID: "v", ExpectedReplicaID: "r", TargetReplicaID: "r", ExpectedHost: "old", TargetHost: "new", ExpectedEpoch: 1, TargetDataAddr: "nd", TargetCtrlAddr: "nc", Kind: "forced", Force: true}
+	grant, err := p.MoveWorkspace(context.Background(), req, WorkspaceHead{Gen: 7, Epoch: 1, Holder: "old/r", RemoteLSN: 42})
+	if err != nil || !grant.Issued || grant.NewEpoch != 2 {
+		t.Fatal("fixture did not issue forced successor", grant, err)
+	}
+	clock.at(7)
+	if got, err := p.RenewWorkspaceLease(context.Background(), "v", "r", 1); err == nil {
+		t.Fatal("old epoch re-granted after forced issue", got)
+	}
+	line, _ := p.VolumeAuthorityLine("v")
+	if line.Epoch != 2 || p.WorkspaceState("v").Lease.Epoch != 2 {
+		t.Fatal("re-grant undid forced issue", line)
 	}
 }
 

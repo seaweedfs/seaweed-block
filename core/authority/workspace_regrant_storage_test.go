@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -21,14 +22,18 @@ func (regrantStorageView) Projection() frontend.Projection {
 // These component controls obtain the real authority re-grant before opening
 // the returning file-backed provider. They do not model a second live process.
 func TestWorkspaceLeaseRegrantPreservesLocalLogThroughFirstCut(t *testing.T) {
-	testWorkspaceRegrantStorage(t, false)
+	testWorkspaceRegrantStorage(t, false, false)
 }
 
 func TestWorkspaceLeaseRegrantCannotUnsealSameEpoch(t *testing.T) {
-	testWorkspaceRegrantStorage(t, true)
+	testWorkspaceRegrantStorage(t, true, false)
 }
 
-func testWorkspaceRegrantStorage(t *testing.T, sealed bool) {
+func TestWorkspaceLeaseRegrantEmptyRootClaimsOnlyHEAD(t *testing.T) {
+	testWorkspaceRegrantStorage(t, false, true)
+}
+
+func testWorkspaceRegrantStorage(t *testing.T, sealed, fresh bool) {
 	t.Helper()
 	ctx := context.Background()
 	disk, _ := newTempStore(t)
@@ -92,6 +97,10 @@ func testWorkspaceRegrantStorage(t *testing.T, sealed bool) {
 	if _, err := p.RenewWorkspaceLease(ctx, "v", "r", 1); err != nil {
 		t.Fatal("returning process could not obtain the authority re-grant", err)
 	}
+	if fresh {
+		root = t.TempDir()
+		b = make([]byte, 4096) // the absent local log cannot be claimed as present
+	}
 	second := open()
 	_, err = second.RecoverVolume(ctx, "v")
 	if sealed {
@@ -122,6 +131,12 @@ func testWorkspaceRegrantStorage(t *testing.T, sealed bool) {
 		t.Fatal(err)
 	}
 	final, err := remote.GetHead(ctx)
+	if fresh {
+		if err != nil || !reflect.DeepEqual(final, claimed) {
+			t.Fatal("empty-root return published bytes/frontier absent from HEAD", final, err)
+		}
+		return
+	}
 	if err != nil || final.RemoteLSN <= before.RemoteLSN {
 		t.Fatal("first returning cut did not cover the local log", final, err)
 	}
