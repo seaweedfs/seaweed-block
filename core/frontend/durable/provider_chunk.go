@@ -1121,16 +1121,17 @@ func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, pla
 	// the cut gets three quarters, the settlement what is left. The bound is
 	// cooperative (contexts): a syscall that never returns is not bounded here.
 	var start time.Time
-	// stopIOBegan is taken just before the operational flip (from then on new
-	// I/O is refused by contract), stopIOReturned when the admitted I/O has
-	// drained; both are logged so a measurement can tell a refusal after the
-	// flip from an admitted I/O that failed.
+	// stopIOBegan is the backend's flip (admission closed, under its mu: an
+	// I/O whose gate runs after it is refused; one gated before it is
+	// admitted even if it registers later), stopIOReturned when the admitted
+	// I/O has drained; both are logged so a measurement can tell a refusal
+	// after the flip from an admitted I/O that failed.
 	var stopIOBegan, stopIOReturned time.Time
 	defer func() {
 		if !stopIOReturned.IsZero() {
 			// Emit after the cut releases its barrier, using the actual times.
 			if !stopIOBegan.IsZero() {
-				log.Printf("durable: volume=%s I/O stop began at %s", volumeID, stopIOBegan.UTC().Format(time.RFC3339Nano))
+				log.Printf("durable: volume=%s admission closed at %s", volumeID, stopIOBegan.UTC().Format(time.RFC3339Nano))
 			}
 			log.Printf("durable: volume=%s StopIO returned at %s", volumeID, stopIOReturned.UTC().Format(time.RFC3339Nano))
 		}
@@ -1201,11 +1202,11 @@ func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, pla
 		// Cancel/join the periodic owner before any final freeze, while serving.
 		p.stopChunkLoop(h)
 		r, err = owner.PrecopyDetachWithAdmission(hostlimit.WithClass(cutCtx, hostlimit.Urgent), h.backend.BeginPrecopyPause, func() bool {
-			began := time.Now()
 			if !h.backend.TryStopIO("chunk pre-copy: final detached cut") {
 				return false
 			}
-			stopIOBegan, stopIOReturned = began, time.Now()
+			stopIOReturned = time.Now()
+			stopIOBegan = h.backend.StopFlipAt()
 			h.chunkDetach = true
 			beginFreeze()
 			return true
@@ -1246,7 +1247,6 @@ func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, pla
 		}
 	} else {
 		beginFreeze()
-		stopIOBegan = time.Now()
 		if plain {
 			if err := h.backend.stopPlainDetachIfIdle(); err != nil {
 				return r, 0, err
@@ -1268,6 +1268,7 @@ func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, pla
 		}
 		if err == nil {
 			stopIOReturned = time.Now()
+			stopIOBegan = h.backend.StopFlipAt()
 		}
 		if err == nil {
 			p.stopChunkLoop(h)
