@@ -190,7 +190,7 @@ func TestWALStoreChunk_TwoRootsOfOneHolderDoNotAdoptEachOthersHead(t *testing.T)
 	}
 }
 
-// Upgrade (V1-SPEC r2.38, claude06): a pre-release root (no identity file)
+// Upgrade (V1-SPEC r2.38): a pre-release root (no identity file)
 // under a pre-release HEAD (no HolderRoot) of the same holder is adopted once
 // and serves; the claim then stamps this root's nonce. A copy of the same
 // pre-release root taken before that conversion is refused afterwards: its
