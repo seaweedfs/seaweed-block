@@ -9,7 +9,7 @@ import (
 // M5 PlainStop -> Quiesce, INV-CUT-PLAIN-DETACH-001: encode the existing
 // idle seal request; preserve JSON stdout for existing operator tooling.
 func TestOpsChunkPlainDetachSendsTheExistingRequest(t *testing.T) {
-	const reply = `{"volumeID":"vol","headGen":11,"headState":"detached"}`
+	const reply = `{"volumeID":"vol","headGen":11}`
 	srv, got := chunkServer(t, http.StatusOK, reply)
 	code, out, errOut := runChunk("detach", "--plain", "--volume", "vol", "--status-addr", srv.URL, "--timeout", "2s")
 	if code != 0 || out != reply || !strings.Contains(errOut, "sealed HEAD generation: 11\n") {
