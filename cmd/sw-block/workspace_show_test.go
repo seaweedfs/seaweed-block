@@ -74,6 +74,28 @@ func TestWorkspaceShowUsesTheMastersLeaseValidity(t *testing.T) {
 	}
 }
 
+func TestWorkspaceShowOrdersOperatorIdentityWithoutInventingAHost(t *testing.T) {
+	r := &workspaceShowRecorder{reply: &control.WorkspaceStatus{
+		Lease: &control.WorkspaceLeaseFact{VolumeId: "vol", ReplicaId: "r1", Epoch: 3, ValidForNs: 1},
+	}}
+	installShowRecorder(t, r)
+	code, out, errOut := runCLI([]string{"ops", "workspace", "show", "--master", "master:19090", "--volume", "vol"})
+	if code != 0 {
+		t.Fatalf("exit=%d err=%q", code, errOut)
+	}
+	last := -1
+	for _, field := range []string{"volume: vol", "replica: r1\n", "epoch: 3\n", "lease state: granted", "recorded ACK: none"} {
+		at := strings.Index(out, field)
+		if at <= last {
+			t.Fatalf("missing or out-of-order %q in %q", field, out)
+		}
+		last = at
+	}
+	if !strings.Contains(out, "host: unknown (not recorded by the master)") {
+		t.Fatalf("physical host must remain unknown: %q", out)
+	}
+}
+
 func TestWorkspaceShowRefusesBadUsageAndClassifiesRPCFailure(t *testing.T) {
 	r := &workspaceShowRecorder{err: status.Error(codes.Unavailable, "query unavailable")}
 	dials := installShowRecorder(t, r)
