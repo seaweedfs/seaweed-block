@@ -128,9 +128,11 @@ nothing about another host.
 Nothing the volume acknowledged is lost. The target is another registered
 host, or the same host (next section).
 
-Each step below is covered by its own tests; no automated test yet runs the
-whole sequence end to end.
-<!-- INTEGRATION-TEST: name of the CI test that runs this sequence -->
+Each step below is covered by its own tests. The same-host case of the whole
+sequence runs end to end, with these commands as written, in
+`TestStandalonePlannedHandoffToTheSameHost` (`cmd/blockvolume`), and the refusal of
+a clean move without the ACK in `TestStandaloneCleanMoveWithoutTheACKIsRefused`.
+A move to another host is not yet run end to end.
 
 **1. Read the holder.**
 
@@ -197,7 +199,8 @@ next: start volume v1 on S2 (this command moved authority only)
 ```
 
 If the outcome is unknown (exit 3), run the same command again with the **same**
-`--request-id`; never a new one.
+`--request-id`; never a new one. Rerunning a move that was already issued is safe:
+it prints the issued move again.
 
 **7. Start the new holder within 30 seconds.** The move starts the new epoch's
 30-second lease. On `S2`, start `blockvolume` with `--server-id S2`, the same
