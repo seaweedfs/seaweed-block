@@ -126,6 +126,11 @@ type Limiter struct {
 	bytesSinceCount       int64 // payload bytes paced since that count
 	heldSince             map[string]time.Time
 	urgentHeldSince       time.Time
+
+	// skipMu guards stalled: the earlier tickets this process judged stalled
+	// by the skip rule. It is never taken with mu held, nor mu under it.
+	skipMu  sync.Mutex
+	stalled map[string]bool
 }
 
 func (l *Limiter) skipAfter() time.Duration {
@@ -171,6 +176,14 @@ func (l *Limiter) pool(c Class, t *Ticket) (*os.File, error) {
 		}
 		return os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
 	}
+	// A ticketed Normal admission first checks its place in the queue. The
+	// ticket files synchronise through their own locks, so this runs outside
+	// the configuration lock and does not lengthen it.
+	if c == Normal && t != nil {
+		if err := t.headCheck(l.normalSlotFree(), l.urgentFree()); err != nil {
+			return nil, err
+		}
+	}
 	guard, err := open("configuration.lock")
 	if err != nil {
 		return nil, err
@@ -179,7 +192,7 @@ func (l *Limiter) pool(c Class, t *Ticket) (*os.File, error) {
 	if l.testBeforeConfigLock != nil {
 		l.testBeforeConfigLock(guard)
 	}
-	if err = tryLock(guard); err != nil {
+	if err = lockGuard(guard); err != nil {
 		return nil, err
 	}
 	expected, _ := json.Marshal(l.cfg)
@@ -196,11 +209,6 @@ func (l *Limiter) pool(c Class, t *Ticket) (*os.File, error) {
 		return nil, ErrConfig
 	}
 	if c == Normal {
-		if t != nil {
-			if err := t.headCheck(l.normalSlotFree(), l.urgentFree()); err != nil {
-				return nil, err
-			}
-		}
 		// The probe is held until the slot try-lock below has been made, so
 		// no Normal admission completes after urgent work became pending.
 		probe, err := open(urgentPendingFile)
@@ -249,6 +257,28 @@ func (l *Limiter) pool(c Class, t *Ticket) (*os.File, error) {
 		}
 	}
 	return nil, ErrSlotsHeld
+}
+
+// guardWait bounds how long an admission waits for configuration.lock.
+// Another admission holds it only while it checks the configuration and
+// tries its slots.
+const guardWait = 50 * time.Millisecond
+
+// lockGuard takes configuration.lock, retrying for up to guardWait. Still
+// held after that, the answer is ErrSlotsHeld: a wait, like every held slot,
+// never a refusal of urgent work.
+func lockGuard(f *os.File) error {
+	deadline := time.Now().Add(guardWait)
+	for {
+		err := tryLock(f)
+		if !errors.Is(err, ErrBusy) {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%w: configuration lock held for %s", ErrSlotsHeld, guardWait)
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 // publishConfig runs under the configuration OS lock. A killed initializer

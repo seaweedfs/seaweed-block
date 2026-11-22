@@ -774,6 +774,12 @@ func (pol cutPolicy) due(s cutSchedule, now time.Time, reconciling bool) (string
 // after records the outcome of an automatic cut started at start, with
 // the layer's CutSeq read after it.
 func (pol cutPolicy) after(s cutSchedule, start, end time.Time, err error, seq uint64) cutSchedule {
+	if errors.Is(err, storage.ErrChunkCaptureBusy) {
+		// Another capture is running; it restarts the timer when it
+		// succeeds. Try again at the next poll, without backoff.
+		s.retryAt = end
+		return s
+	}
 	if errors.Is(err, hostlimit.ErrSlotsHeld) {
 		s.slotWaits++
 		if s.slotWaitSince.IsZero() {
@@ -869,6 +875,9 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 		wait.record(s, ticket)
 		reason, ok := pol.due(s, start, ls.Reconciling)
 		if !ok {
+			// Not attempting (backoff, spacing, reconciling): a ticket held
+			// now would make other volumes wait for a cut that does not come.
+			dropTicket("")
 			continue
 		}
 		cutCtx, cancel := p.chunkCutContext(ctx)
@@ -912,8 +921,8 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 		switch {
 		case err == nil:
 			dropTicket("") // admitted: the limiter consumed it
-		case errors.Is(err, hostlimit.ErrSlotsHeld):
-			// a wait: keep the place
+		case errors.Is(err, hostlimit.ErrSlotsHeld), errors.Is(err, storage.ErrChunkCaptureBusy):
+			// a wait: keep the place (the timer tries again at its next poll)
 		default:
 			dropTicket(err.Error())
 		}

@@ -47,7 +47,7 @@ type Ticket struct {
 	mu       sync.Mutex
 	f        *os.File
 	done     bool
-	observed map[string]int64 // earlier ticket -> host time it was first seen stalled-looking
+	observed map[string]*observation // earlier tickets observed for the skip rule
 	skipped  uint64
 }
 
@@ -96,7 +96,7 @@ func (l *Limiter) TakeTicket(dueHostNs int64) (*Ticket, error) {
 			return nil, err
 		}
 		if samePath(path, f) {
-			return &Ticket{l: l, due: dueHostNs, name: name, path: path, f: f, observed: map[string]int64{}}, nil
+			return &Ticket{l: l, due: dueHostNs, name: name, path: path, f: f, observed: map[string]*observation{}}, nil
 		}
 		_ = f.Close() // removed before our lock: take a new one
 	}
@@ -148,12 +148,15 @@ func (t *Ticket) Close() {
 	_ = t.f.Close()
 }
 
-// headCheck runs under the configuration lock, before the urgent-pending
-// probe. Earlier tickets whose lock can be taken belong to exited
-// processes and are removed (lock, re-check the path, unlink, unlock).
-// A live earlier ticket blocks t unless t has observed it, for
-// TicketSkipAfter, staying ahead while a normal slot was free and no
-// urgent work was pending.
+// headCheck runs before the configuration lock; ticket files synchronise
+// through their own locks. Earlier tickets whose lock can be taken belong to
+// exited processes and are removed (lock, re-check the path, unlink,
+// unlock). Only the earliest live earlier ticket not yet judged stalled is
+// observed: it blocks t until t has seen it stay ahead for TicketSkipAfter
+// of time with a normal slot free and no urgent work pending, counted
+// across polls (busy periods pause the count, they do not reset it). Then t's limiter judges it stalled and keeps that judgement, for
+// this and its later tickets, until the file disappears; the next earlier
+// ticket is the one observed.
 func (t *Ticket) headCheck(slotFree, urgentFree bool) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -183,31 +186,41 @@ func (t *Ticket) headCheck(slotFree, urgentFree bool) error {
 	}
 	sort.Slice(earlier, func(i, j int) bool { return earlier[i].due < earlier[j].due })
 	now := hostMonoNs()
+	present := map[string]bool{}
+	for _, e := range ents {
+		present[e.Name()] = true
+	}
+	stalled := t.l.stalledTickets(present)
 	seen := map[string]bool{}
 	blocked := false
-	var passed []string
+	passed := 0
 	for _, e := range earlier {
 		path := filepath.Join(dir, e.name)
 		if reap(path) {
 			continue
 		}
 		seen[e.name] = true
-		if !slotFree || !urgentFree {
-			delete(t.observed, e.name)
-			blocked = true
+		if stalled[e.name] {
+			passed++ // judged stalled earlier: ignored until its file goes
 			continue
 		}
-		first, ok := t.observed[e.name]
-		if !ok {
-			t.observed[e.name] = now
-			blocked = true
-			continue
+		o := t.observed[e.name]
+		if o == nil {
+			o = &observation{last: now}
+			t.observed[e.name] = o
 		}
-		if time.Duration(now-first) < t.l.skipAfter() {
-			blocked = true
-			continue
+		free := slotFree && urgentFree
+		if free && o.lastFree {
+			o.freeNs += now - o.last
 		}
-		passed = append(passed, e.name) // observed long enough: the skip rule
+		o.last, o.lastFree = now, free
+		if time.Duration(o.freeNs) < t.l.skipAfter() {
+			blocked = true
+			break
+		}
+		t.l.markStalled(e.name) // observed long enough: the skip rule
+		delete(t.observed, e.name)
+		passed++
 	}
 	for n := range t.observed {
 		if !seen[n] {
@@ -217,8 +230,42 @@ func (t *Ticket) headCheck(slotFree, urgentFree bool) error {
 	if blocked {
 		return ErrNotHead
 	}
-	t.skipped += uint64(len(passed))
+	t.skipped += uint64(passed)
 	return nil
+}
+
+// observation is how long a waiter has seen an earlier ticket stay ahead
+// while it could have run: the free-slot time summed between consecutive
+// polls that both saw a normal slot free and no urgent work pending.
+type observation struct {
+	freeNs   int64
+	last     int64
+	lastFree bool
+}
+
+// stalledTickets returns the tickets this limiter judged stalled, after
+// forgetting those whose file is gone (present: the tickets directory now).
+func (l *Limiter) stalledTickets(present map[string]bool) map[string]bool {
+	l.skipMu.Lock()
+	defer l.skipMu.Unlock()
+	out := map[string]bool{}
+	for n := range l.stalled {
+		if present[n] {
+			out[n] = true
+		} else {
+			delete(l.stalled, n)
+		}
+	}
+	return out
+}
+
+func (l *Limiter) markStalled(name string) {
+	l.skipMu.Lock()
+	defer l.skipMu.Unlock()
+	if l.stalled == nil {
+		l.stalled = map[string]bool{}
+	}
+	l.stalled[name] = true
 }
 
 // reap removes the ticket at path if its holder has exited: it takes the

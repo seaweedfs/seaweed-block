@@ -1,6 +1,15 @@
 package storage
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrChunkCaptureBusy answers a periodic cut that found another capture
+// (explicit, snapshot, detach) holding the capture lock. The timer does not
+// wait for it: it tries again at its next poll, by when that capture has
+// usually restarted the timer.
+var ErrChunkCaptureBusy = errors.New("storage: chunk capture lock held by another capture")
 
 // ChunkPeriodicCutter is the chunk layer's cut for a periodic timer. The
 // timer decides a cut is due from the last successful cut it saw; another
@@ -11,14 +20,17 @@ type ChunkPeriodicCutter interface {
 	// CutUnlessCutSince cuts unless a cut succeeded since the timer decided
 	// (CutSeq is no longer seq, the CutSeq it decided on); skipped reports
 	// that it did not cut. Cuts are ordered by CutSeq, never by their wall
-	// stamps.
+	// stamps. It never waits for the capture lock: held by another capture,
+	// the answer is ErrChunkCaptureBusy.
 	CutUnlessCutSince(ctx context.Context, seq uint64) (r ChunkCutResult, skipped bool, err error)
 }
 
 var _ ChunkPeriodicCutter = (*chunkLayerImpl)(nil)
 
 func (l *chunkLayerImpl) CutUnlessCutSince(ctx context.Context, seq uint64) (chunkCutResult, bool, error) {
-	l.capMu.Lock()
+	if !l.capMu.TryLock() {
+		return chunkCutResult{}, false, ErrChunkCaptureBusy
+	}
 	defer l.unlockCap() // delivers the cut's OnPublishSettled report after the lock
 	l.stMu.Lock()
 	cur := l.stats.CutSeq
