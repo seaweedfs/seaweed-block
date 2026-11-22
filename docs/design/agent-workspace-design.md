@@ -358,7 +358,7 @@ stateDiagram-v2
     [*] --> Granted: move issue starts the new holder's lease
     Granted --> Granted: Renew before horizon and deadline (from memory; registered server id, from its registered host)
     Granted --> Revoking: BeginWorkspaceRevocation
-    Revoking --> Acked: host acks detached HEAD gen while the lease is valid (from its registered host)
+    Revoking --> Acked: registered host acks detached HEAD gen; publisher-clock validity after half max(configured, persisted) skew is positive
     Acked --> Moved: CLEAN move, including same host, new epoch
     Granted --> Expired: horizon or deadline passes
     Expired --> Granted: unchanged holder from its registered host, no move/revocation, MAX expiry + skew passed; durable re-grant

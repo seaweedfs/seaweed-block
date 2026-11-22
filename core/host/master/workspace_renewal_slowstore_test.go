@@ -112,7 +112,7 @@ func (c deadlineLeaseClient) RenewWorkspaceLease(ctx context.Context, id *contro
 			done <- result{err: err}
 			return
 		}
-		done <- result{fact: leaseFact(id.VolumeId, l)}
+		done <- result{fact: leaseFact(c.p, id.VolumeId, l)}
 	}()
 	select {
 	case r := <-done:
