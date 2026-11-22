@@ -41,4 +41,11 @@ expect 1 "backslash form of the share path in the title" "$mb2" HEAD title body;
 expect 2 "a missing title file is an error, not clean" "$mb2" HEAD no-such-title body
 expect 2 "a missing description file is an error, not clean" "$mb2" HEAD title no-such-body
 expect 2 "an unknown commit is an error, not clean" 0000000000000000000000000000000000000000 HEAD title body
+# A grep that fails (exit 2) is an error: the check must refuse and never print "clean".
+mkdir -p fakebin; printf '#!/bin/sh
+exit 2
+' > fakebin/grep; chmod +x fakebin/grep
+rc=0; PATH="$PWD/fakebin:$PATH" bash "$here/public-text-check.sh" "$mb2" HEAD title body >out 2>&1 || rc=$?
+[ "$rc" = 2 ] || { echo "public-text-check-test: failing grep: exit $rc, want 2"; cat out; exit 1; }
+if PATH=/usr/bin:/bin grep -q "clean" out; then echo "public-text-check-test: failing grep printed clean"; cat out; exit 1; fi
 echo "public-text-check-test: ok"
