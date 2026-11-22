@@ -302,6 +302,9 @@ revocation ACK (including its HEAD generation), move records and bindings. It
 does not infer a physical holder from the binding list; a binding is not proof
 of a current assignment. Reported validity is a snapshot, not permission to
 serve I/O.
+`expired` means the master reported no positive **host validity** at query
+time; it is not a claim that the master's forced-move horizon has passed.
+Only the master admits a move.
 
 Perform a clean hand-over in this order:
 
