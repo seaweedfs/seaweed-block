@@ -900,6 +900,13 @@ func (b *StorageBackend) gate() error {
 	return b.lineageCheck()
 }
 
+// AdmitsIO is the one deciding function for "may serve" (V1-SPEC r2.39):
+// nil exactly when a Read, Write or Sync arriving now passes the I/O gate,
+// i.e. the backend admits I/O (open, operational, not chunk-fenced, no
+// pre-copy pause) AND the guarded projection names this backend's lineage as
+// the healthy primary. /status FrontendPrimaryReady reads it.
+func (b *StorageBackend) AdmitsIO() error { return b.gate() }
+
 // readyCheck is the gate without the lineage check: closed, then
 // operational.
 func (b *StorageBackend) readyCheck() error {

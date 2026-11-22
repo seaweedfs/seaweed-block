@@ -89,6 +89,9 @@ type peerStatusSource interface {
 
 type durableStatusSource interface {
 	DurableStatuses() []durable.VolumeStatus
+	// AdmitsIO is the one deciding function for "may serve" of an open
+	// volume (StorageBackend.AdmitsIO); an error for any other.
+	AdmitsIO(volumeID string) error
 }
 
 type nvmeStatusSource interface {
@@ -512,18 +515,15 @@ func (s *StatusServer) statusProjection() StatusProjection {
 	// view. Whenever FrontendPrimaryReady is false, NotReadyReason says why.
 	backendReason := ""
 	if src != nil { // outside s.mu: the provider takes its own lock
-		found := false
 		for _, st := range src.DurableStatuses() {
 			if st.VolumeID == p.VolumeID {
-				found = true
 				p.Warnings = append(p.Warnings, st.Warnings...)
-				if !st.Operational {
-					backendReason = "durable backend not operational: " + st.Evidence
-				}
 			}
 		}
-		if !found {
-			backendReason = "no durable status for volume " + p.VolumeID
+		// V1-SPEC r2.39: the backend's one "may serve" function decides; an
+		// unopened volume fails closed.
+		if err := src.AdmitsIO(p.VolumeID); err != nil {
+			backendReason = "durable backend admits no I/O: " + err.Error()
 		}
 	}
 	leaseNotHeld := s.view.workspaceLeaseNotHeld()
