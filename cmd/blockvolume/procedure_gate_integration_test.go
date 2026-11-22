@@ -195,15 +195,16 @@ func TestProcedureForcedMoveWithTheOldHostReturning(t *testing.T) {
 		t.Fatal("the block written after the last cut reads back on s2; the page says it is lost")
 	}
 
-	// The old host returns with its old local root. It must not take s2's
-	// line as its own (a holder is server and replica), report its frontend
-	// ready or listen for I/O; it logs a refusal and exits with status 78, the
-	// no-restart class for a local root older than HEAD (the example unit
-	// does not restart on 78). Started again by hand, it does the same.
-	back := env.oldHostRefuses(t, "blockvolume-s1-back", env.hosts["s1"], e2, 78)
-	again := env.oldHostRefuses(t, "blockvolume-s1-started-again", env.hosts["s1"], e2, 78)
+	// The old host returns with its old local root, and the example unit
+	// (Restart=on-failure, RestartSec=5s) starts it again after it exits,
+	// until its start limit. Each time it must not take s2's line as its own
+	// (a holder is server and replica), report its frontend ready or listen
+	// for I/O; it logs a refusal and exits with status 75.
+	back := env.oldHostRefuses(t, "blockvolume-s1-back", env.hosts["s1"], e2, 75)
+	time.Sleep(5 * time.Second) // RestartSec of the example unit
+	again := env.oldHostRefuses(t, "blockvolume-s1-restarted", env.hosts["s1"], e2, 75)
 	// Control: on a fresh local root there is no stale root, so its refusal
-	// is the identity check alone; it exits 75, the retry class.
+	// is the identity check alone; it also exits 75.
 	fresh := env.hosts["s1"]
 	fresh.root = fresh.root + "-fresh"
 	freshRoot := env.oldHostRefuses(t, "blockvolume-s1-fresh-root", fresh, e2, 75)
