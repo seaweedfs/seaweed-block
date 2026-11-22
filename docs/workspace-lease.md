@@ -70,3 +70,16 @@ defaults). Beyond that, grants shrink and hosts fence: the design fails
 closed. Blockmaster logs one warning per failure streak, with the write's
 latency and the remaining horizon, when an extension fails, and one when
 grants start to be clamped to the horizon, and a line when either recovers.
+
+
+## Planned return on the same host
+
+After plain detach seals HEAD and revocation records its exact generation,
+a clean move may target the source host itself. Prepare the binding again
+before requesting the move. The move journals a higher epoch even when its
+endpoints are unchanged; start the returning blockvolume at that new epoch.
+It claims the sealed HEAD before serving and preserves the sealed image and
+remote frontier. The matching seal/ACK remains valid overnight while HEAD
+is unchanged. A same-epoch reopen remains detached, and a forced move to the
+same host is refused. Every ordinary binding, endpoint collision, journal
+isolation and uncertain-outcome check still applies.

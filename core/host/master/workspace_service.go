@@ -323,7 +323,9 @@ func (s *services) workspaceMoveCheckLocked(q *control.WorkspaceMove) (req autho
 		refusal = fmt.Sprintf("move source unknown: no issued move or placement names replica %q at epoch %d", q.GetExpectedReplicaId(), q.GetExpectedEpoch())
 	case !ok:
 		refusal = fmt.Sprintf("move target node %q is not registered", q.GetTargetServerId())
-	case target.ServerID == oldHost:
+	// INV-WS-SAME-HOST-CLEAN-MOVE-001: the authority clean-proof
+	// checks still run after these endpoint and binding checks.
+	case target.ServerID == oldHost && (q.GetKind() != "clean" || q.GetForce()):
 		refusal = fmt.Sprintf("move target %q is the current source host", target.ServerID)
 	case !replay && s.host.colocatedTargetRefused(target.ServerID):
 		refusal = fmt.Sprintf("move target node %q shares the authority store's file system (strict journal isolation)", target.ServerID)
