@@ -8,7 +8,7 @@ that runs it.
 
 - **Volumes:** walstore-chunk volumes, one volume per `blockvolume` process, with snapshots and moves through
   SeaweedFS.
-- **Frontend:** NVMe/TCP. iSCSI is **experimental** in v1.0.
+- **Frontend:** NVMe/TCP, the standalone default (the example units). iSCSI is supported too, and is the Kubernetes CSI default.
 - **Layout:** `blockmaster` and its authority store run **off every volume host**, on a node of their own (for
   example the SeaweedFS master or filer node), with durable storage. A volume host holds no authority state.
   - Why: a forced move after a host loss needs the authority record, the lease horizon and the lost range.
@@ -93,7 +93,6 @@ that runs it.
 - **Destructive SeaweedFS commands.** Never run SeaweedFS `volume.fsck` with its delete flags on a cluster holding
   chunk volumes ([why](standalone-deployment.md#seaweedfs-maintenance-commands-that-destroy-chunk-volumes)).
 - **Manual GC.** Automatic GC is off (`--chunk-maintenance-gc`): run GC passes yourself.
-- **iSCSI** is experimental.
 
 ## Commands and their tests
 
