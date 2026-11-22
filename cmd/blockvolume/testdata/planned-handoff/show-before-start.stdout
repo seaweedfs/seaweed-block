@@ -1,0 +1,7 @@
+volume: v1 (query snapshot, not authority to serve)
+replica: none
+epoch: none
+lease state: none
+holder: none
+recorded ACK: none
+host: unknown (not recorded by the master); issued moves and bindings below are separate facts

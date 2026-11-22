@@ -1,0 +1,2 @@
+revocation requested: volume v1 holder r1@1 expiry_ns 1795337571673280526
+operator-stated sealed HEAD generation: 3 (not verified); workspace show must report ACK at this generation before move --clean
