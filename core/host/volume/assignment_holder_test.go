@@ -1,6 +1,7 @@
 package volume
 
 import (
+	"fmt"
 	"log"
 	"strings"
 	"sync/atomic"
@@ -276,5 +277,28 @@ func TestAssignmentHolderIdentityForcedMoveRefusesEveryDeliveredVersion(t *testi
 	}
 	if h.view.Projection().Healthy {
 		t.Fatal("old server served after forced move")
+	}
+}
+
+// INV-AUTH-HOLDER-IDENTITY-001: a recorded foreign owner at this epoch
+// cannot be overwritten by a self-labelled delivery, even at a higher EV.
+func TestAssignmentHolderIdentitySameEpochCannotChangeServer(t *testing.T) {
+	for _, ev := range []uint64{1, 2, 3} {
+		t.Run(fmt.Sprint(ev), func(t *testing.T) {
+			h, err := New(Config{MasterAddr: "127.0.0.1:1", ServerID: "old-host", VolumeID: "v1", ReplicaID: "r1", DataAddr: "127.0.0.1:19303", CtrlAddr: "127.0.0.1:19304", EnableT1Readiness: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = h.Close() })
+			foreign := holderAssignment(t, "new-host")
+			foreign.EndpointVersion = 2
+			h.applyFact(foreign)
+			self := holderAssignment(t, "old-host")
+			self.EndpointVersion = ev
+			h.applyFact(self)
+			if p := h.realAdpt.Projection(); p.Epoch != 0 {
+				t.Fatalf("same epoch changed from recorded new-host to old-host at EV%d: %+v", ev, p)
+			}
+		})
 	}
 }
