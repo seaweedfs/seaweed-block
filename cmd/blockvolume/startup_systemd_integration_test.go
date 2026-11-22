@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	hostvolume "github.com/seaweedfs/seaweed-block/core/host/volume"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -178,6 +179,7 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 		t.Fatalf("systemd rate limit hit: %+v", s)
 	}
 	gap1PlannedStopDoesNotRestart(t, ws, unit, statusAddr, volume, after.Epoch, after.Holder, s["NRestarts"])
+	gap1SupersededDoesNotRestart(t, stem, filepath.Join(bin, "blockvolume"), args, root, volume)
 }
 
 func startGAP1Unit(t *testing.T, unit string, restart bool, exe string, args ...string) {
@@ -374,6 +376,60 @@ func gap1PlannedStopDoesNotRestart(t *testing.T, ws control.WorkspaceServiceClie
 		}
 		if state["ExecMainStatus"] != "0" || state["ActiveState"] != "inactive" || state["SubState"] != "dead" {
 			t.Fatalf("planned stop is not terminal success: %+v", state)
+		}
+		return true
+	})
+}
+
+// The master keeps the real r1 authority line. This process has never had an
+// assignment and names r-old, so only the observed different-replica fact may
+// permit 78. Run after the live holder has ACKed and exited, avoiding a node
+// registration change while that holder is serving.
+func gap1SupersededDoesNotRestart(t *testing.T, stem, exe string, args []string, root, volume string) {
+	t.Helper()
+	changed := append([]string(nil), args...)
+	addr := leaseBinaryAddress(t)
+	replacements := map[string]string{"--replica-id": "r-old", "--data-addr": leaseBinaryAddress(t), "--ctrl-addr": leaseBinaryAddress(t), "--status-addr": addr, "--durable-root": filepath.Join(root, "superseded-store"), "--nvme-listen": leaseBinaryAddress(t), "--nvme-subsysnqn": "nqn.2026-11.test:" + stem + "-superseded"}
+	for i := 0; i+1 < len(changed); i++ {
+		if value, ok := replacements[changed[i]]; ok {
+			changed[i+1] = value
+		}
+	}
+	unit := stem + "-superseded"
+	startGAP1Unit(t, unit, true, exe, changed...)
+	waitGAP1(t, "superseded process never observed the master's other-replica fact", 15*time.Second, func() bool {
+		resp, err := (&http.Client{Timeout: time.Second}).Get("http://" + addr + "/status?volume=" + volume)
+		if err != nil {
+			return false
+		}
+		defer resp.Body.Close()
+		raw, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return false
+		}
+		t.Logf("captured real supersede status: status%d body%s", resp.StatusCode, raw)
+		if resp.StatusCode != http.StatusOK {
+			return false
+		}
+		var status hostvolume.StatusProjection
+		if err := json.Unmarshal(raw, &status); err != nil {
+			t.Fatal(err)
+		}
+		if status.Healthy || status.FrontendPrimaryReady {
+			t.Fatalf("unassigned old identity served: %+v", status)
+		}
+		return status.AuthorityRole == hostvolume.AuthorityRoleSuperseded
+	})
+	waitGAP1(t, "positive supersede did not exit78 without restart", 45*time.Second, func() bool {
+		s := gap1Unit(t, unit)
+		if s["NRestarts"] != "0" {
+			t.Fatalf("superseded unit restarted: %+v", s)
+		}
+		if s["MainPID"] != "0" {
+			return false
+		}
+		if s["ExecMainStatus"] != "78" || s["ActiveState"] != "failed" || s["SubState"] != "failed" {
+			t.Fatalf("supersede not a terminal no-retry exit: %+v", s)
 		}
 		return true
 	})
