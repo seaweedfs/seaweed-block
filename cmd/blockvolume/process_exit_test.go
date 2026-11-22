@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"os"
+	"os/exec"
 	"testing"
 	"time"
 )
@@ -69,5 +72,26 @@ func TestWorkspacePlannedStopKeepsSuccess(t *testing.T) {
 	})
 	if code != 0 {
 		t.Fatalf("planned stop would restart: %d", code)
+	}
+}
+
+// A real child process contains the stuck resource owner. An injected event
+// tests the select above; this witness also covers deferred-cleanup isolation.
+func TestWorkspaceRetryProcessExitsWhenCloseBlocks(t *testing.T) {
+	if os.Getenv("GAP1_BLOCKED_CLOSE_CHILD") == "1" {
+		code := superviseProcess(context.Background(), func(e *processExit) int {
+			e.choose(workspaceExit{75, "lease_expired"})
+			select {} // the frontend/resource owner's Close never returns
+		})
+		os.Exit(code)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestWorkspaceRetryProcessExitsWhenCloseBlocks$")
+	cmd.Env = append(os.Environ(), "GAP1_BLOCKED_CLOSE_CHILD=1")
+	out, err := cmd.CombinedOutput()
+	var exit *exec.ExitError
+	if ctx.Err() != nil || !errors.As(err, &exit) || exit.ExitCode() != 75 {
+		t.Fatalf("blocked close exit: %v %s", err, out)
 	}
 }

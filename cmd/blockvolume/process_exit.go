@@ -62,6 +62,9 @@ func superviseProcess(ctx context.Context, work func(*processExit) int) int {
 	case code := <-finished:
 		select {
 		case <-e.done:
+			if e.outcome.code == 0 {
+				return code
+			}
 			return reportWorkspaceExit(e.outcome)
 		default:
 			return code
@@ -133,11 +136,31 @@ func waitWorkspaceStop(e *processExit, f flags, h *volume.Host, requests <-chan 
 		if !h.WorkspaceLeaseRevoking() {
 			out = workspaceRetryOutcome(f.volumeID, f.replicaID, "lease_expired", h.LastOtherLine())
 		}
-		e.choose(out)
+		if out.code != 0 {
+			e.choose(out)
+		}
 		return &request, done
 	case err := <-done:
 		fmt.Fprintln(os.Stderr, "blockvolume: workspace lease stopped:", err)
 		e.choose(workspaceRetryOutcome(f.volumeID, f.replicaID, "lease_expired", h.LastOtherLine()))
 		return nil, nil
 	}
+}
+
+// An ACKed revocation completes with status zero. A failure to confirm that
+// ACK is retryable; a signal observed first still retains the signal status.
+func finishWorkspaceLease(e *processExit, f flags, h *volume.Host, done <-chan error) {
+	if done == nil {
+		return
+	}
+	select {
+	case err := <-done:
+		if err == nil {
+			return
+		}
+		fmt.Fprintln(os.Stderr, "blockvolume: workspace lease closeout:", err)
+	case <-time.After(3 * time.Second):
+		fmt.Fprintln(os.Stderr, "blockvolume: workspace lease closeout deadline")
+	}
+	e.choose(workspaceRetryOutcome(f.volumeID, f.replicaID, "lease_expired", h.LastOtherLine()))
 }

@@ -1305,16 +1305,7 @@ func runVolume(f flags, exits *processExit) int {
 		}
 		leaseStop.reply <- workspaceStopResult{gen: gen, err: drainErr}
 	}
-	if leaseDone != nil {
-		select {
-		case err := <-leaseDone:
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "blockvolume: workspace lease closeout:", err)
-			}
-		case <-time.After(3 * time.Second):
-			fmt.Fprintln(os.Stderr, "blockvolume: workspace lease closeout deadline")
-		}
-	}
+	finishWorkspaceLease(exits, f, h, leaseDone)
 	if err := h.Close(); err != nil {
 		fmt.Fprintln(os.Stderr, "blockvolume: close:", err)
 		return 1
