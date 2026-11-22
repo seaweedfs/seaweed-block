@@ -49,12 +49,34 @@ func OpenPlacementIntentStore(dir string) (*PlacementIntentStore, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("%w: empty dir", ErrInvalidVolumeSpec)
 	}
+	dir = filepath.Clean(dir)
+	ancestor := dir
+	for {
+		if _, err := os.Stat(ancestor); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("lifecycle: stat store ancestor: %w", err)
+		}
+		parent := filepath.Dir(ancestor)
+		if parent == ancestor {
+			return nil, fmt.Errorf("lifecycle: no existing store ancestor for %q", dir)
+		}
+		ancestor = parent
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("lifecycle: mkdir placement intent %q: %w", dir, err)
 	}
-	// INV-LIFECYCLE-STORE-DURABLE-001: persist a newly created store entry.
-	if err := syncBindingParent(filepath.Dir(dir)); err != nil {
-		return nil, fmt.Errorf("lifecycle: sync store parent: %w", err)
+	// INV-LIFECYCLE-STORE-DURABLE-001: sync every new directory's parent,
+	// deepest first. Existing-store retries still sync the store's parent.
+	for current := dir; ; {
+		parent := filepath.Dir(current)
+		if err := syncBindingParent(parent); err != nil {
+			return nil, fmt.Errorf("lifecycle: sync store parent: %w", err)
+		}
+		if current == ancestor || parent == ancestor {
+			break
+		}
+		current = parent
 	}
 
 	s := &PlacementIntentStore{

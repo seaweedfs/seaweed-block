@@ -38,8 +38,8 @@ func TestLifecycleStoreParentSyncChild(t *testing.T) {
 	dir := filepath.Join(root, "store")
 	want := []string{root}
 	if os.Getenv("LIFECYCLE_PARENT_SHAPE") == "nested" {
-		dir = filepath.Join(root, "new-parent", "store")
-		want = []string{filepath.Dir(dir), root}
+		dir = filepath.Join(root, "new-parent", "deeper", "store")
+		want = []string{filepath.Dir(dir), filepath.Join(root, "new-parent"), root}
 	} else {
 		dir += string(os.PathSeparator)
 	}
