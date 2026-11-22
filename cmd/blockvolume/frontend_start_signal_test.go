@@ -88,7 +88,7 @@ func TestFirstAdmittedStopEndsTheWorker(t *testing.T) {
 	}
 }
 
-// claude06's #410 design condition: a non-chunk volume or a supporting
+// INV-WS-SERVE-LEASE-HELD-001 scope (V1-SPEC r2.39): a non-chunk volume or a supporting
 // replica starts its frontends right after open, as before: its start
 // signal is the backend's first-serving channel itself, not AdmitsIO.
 func TestFrontendStartSignal_OtherVolumesStartAfterOpenAsBefore(t *testing.T) {
