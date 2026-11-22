@@ -32,6 +32,7 @@ var ErrUrgentPending = fmt.Errorf("%w: an urgent cut is pending", ErrSlotsHeld)
 // urgentPendingFile is the pool file urgent work holds shared; Normal
 // admission probes it exclusively, without waiting. It has no content.
 const urgentPendingFile = "urgent-pending"
+
 var ErrConfig = errors.New("hostlimit: incompatible host configuration")
 var ErrRevoked = errors.New("hostlimit: cut budget revoked")
 
