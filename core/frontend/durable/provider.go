@@ -638,7 +638,7 @@ func (p *DurableProvider) DurableStatuses() []VolumeStatus {
 				cs.ScheduledSnapshot = &ss
 			}
 			if cv.cutWait != nil {
-				cw := cv.cutWait.status()
+				cw := cv.cutWait.status(cs.Stats.CutSeq)
 				cs.CutSchedule = &cw
 			}
 			st.Chunk = cs

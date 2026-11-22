@@ -250,3 +250,34 @@ func TestCutPolicy_HostSlotBusyIsAWaitNotAFailure(t *testing.T) {
 		t.Fatalf("a busy result that is not held slots must back off: %+v", s)
 	}
 }
+
+// A successful cut observed during a slot wait (an explicit cut) ends the
+// wait and its pending retry; the count is kept.
+func TestCutPolicy_SuccessDuringSlotWaitDropsTheSlotRetry(t *testing.T) {
+	pol := testPolicy()
+	pol.interval = 100 * time.Millisecond
+	pol.slotJitter = 150 * time.Millisecond
+	busy := fmt.Errorf("%w: budget admission: %w", storage.ErrChunkCaptureRefused, hostlimit.ErrSlotsHeld)
+	s := cutSchedule{lastSuccess: t0, seenSeq: 100}
+	s = pol.after(s, at(time.Second), at(time.Second), busy, 100)
+	s = s.observe(101, at(time.Second+10*time.Millisecond))
+	if !s.retryAt.IsZero() || !s.slotWaitSince.IsZero() || s.slotWaits != 1 {
+		t.Fatalf("explicit success left the slot wait: %+v", s)
+	}
+	if _, ok := pol.dueNR(s, at(time.Second+110*time.Millisecond)); !ok {
+		t.Fatal("next timer cut held back by a stale slot retry")
+	}
+}
+
+// Status ends a recorded wait once the layer's CutSeq moves past the one
+// it was recorded under, also when the timer is no longer running.
+func TestCutWaitSlot_StatusEndsTheWaitAfterALaterCut(t *testing.T) {
+	w := &cutWaitSlot{}
+	w.record(cutSchedule{seenSeq: 5, slotWaits: 3, slotWaitSince: at(time.Second)})
+	if st := w.status(5); st.HostSlotWaitSinceNs == 0 || st.HostSlotWaits != 3 {
+		t.Fatalf("wait not reported at its own CutSeq: %+v", st)
+	}
+	if st := w.status(6); st.HostSlotWaitSinceNs != 0 || st.HostSlotWaits != 3 {
+		t.Fatalf("wait reported after a later cut: %+v", st)
+	}
+}

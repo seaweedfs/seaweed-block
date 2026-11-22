@@ -706,6 +706,9 @@ func (s cutSchedule) observe(seq uint64, now time.Time) cutSchedule {
 		s.lastSuccess = now
 	}
 	s.firstDue = time.Time{}
+	if !s.slotWaitSince.IsZero() {
+		s.retryAt = time.Time{} // the slot retry is moot: a cut succeeded
+	}
 	s.slotWaitSince = time.Time{}
 	if !s.failedAt.IsZero() && seq != s.failedSeenSeq {
 		s.backoff, s.retryAt, s.failedAt = 0, time.Time{}, time.Time{}
@@ -794,7 +797,7 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 	}
 	s := initialCutSchedule(volumeID, pol.interval, time.Now(), p.cfg.ChunkStagger, layer.Stats().CutSeq)
 	if wait != nil {
-		s.slotWaits = wait.status().HostSlotWaits
+		s.slotWaits = wait.status(0).HostSlotWaits
 	}
 	t := time.NewTicker(chunkSchedulePoll)
 	defer t.Stop()
@@ -1391,10 +1394,13 @@ func (p *DurableProvider) publishSettledHook(volumeID string) func(context.Conte
 }
 
 // cutWaitSlot publishes the automatic-cut timer's host slot waits to
-// status. A nil slot records nothing.
+// status. A nil slot records nothing. A wait is recorded with the layer's
+// CutSeq it started under, so any later successful cut ends it in status,
+// also one made after the timer stopped (a detach's seal).
 type cutWaitSlot struct {
-	mu sync.Mutex
-	st CutScheduleStatus
+	mu      sync.Mutex
+	st      CutScheduleStatus
+	waitSeq uint64
 }
 
 func (w *cutWaitSlot) record(s cutSchedule) {
@@ -1406,12 +1412,17 @@ func (w *cutWaitSlot) record(s cutSchedule) {
 		st.HostSlotWaitSinceNs = s.slotWaitSince.UnixNano()
 	}
 	w.mu.Lock()
-	w.st = st
+	w.st, w.waitSeq = st, s.seenSeq
 	w.mu.Unlock()
 }
 
-func (w *cutWaitSlot) status() CutScheduleStatus {
+// status is the recorded state as of the layer's current CutSeq.
+func (w *cutWaitSlot) status(cutSeq uint64) CutScheduleStatus {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.st
+	st := w.st
+	if st.HostSlotWaitSinceNs != 0 && cutSeq != w.waitSeq {
+		st.HostSlotWaitSinceNs = 0
+	}
+	return st
 }

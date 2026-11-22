@@ -282,12 +282,16 @@ func (l *Limiter) Admit(ctx context.Context, payload int64, abort func(error)) (
 	fallback := err != nil // Urgent fallback has no coordinated host resource/rate bound.
 	l.mu.Lock()
 	if l.closed || ctx.Err() != nil || len(l.live) >= l.cfg.NormalSlots+l.cfg.UrgentSlots+l.cfg.FillSlots+l.cfg.IdleSlots {
+		closed := l.closed
 		l.stats.Skipped++
 		l.mu.Unlock()
 		if f != nil {
 			_ = f.Close()
 		}
-		if ctx.Err() != nil {
+		switch {
+		case closed:
+			return 0, ErrRevoked
+		case ctx.Err() != nil:
 			return 0, ctx.Err()
 		}
 		return 0, ErrSlotsHeld
