@@ -2,6 +2,7 @@ package durable_test
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 	"time"
@@ -99,5 +100,52 @@ func TestChunkStartupSealedAssignmentStaysForReplay(t *testing.T) {
 		if status.Operational {
 			t.Fatal("sealed restart served")
 		}
+	}
+}
+
+// The attach check returns a retained disposition only AFTER its context's
+// deadline. This makes the timeout-defer boundary causal, not a scheduler race.
+func TestChunkStartupRetainedDispositionWinsExpiredAttachContext(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"sealed", storage.ErrChunkLayerDetached},
+		{"stale local root", errors.Join(storage.ErrChunkLayerFenced, durable.ErrChunkStaleLocalRoot)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := &lockedLog{}
+			captureWriteLogs(t, logs)
+			view := v1View()
+			assigned := view.Projection()
+			waiting := assigned
+			waiting.Epoch = 0
+			waiting.Healthy = false
+			view.set(waiting)
+			p, err := durable.NewDurableProvider(durable.ProviderConfig{
+				Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4,
+				ChunkAssignmentTimeout: 250 * time.Millisecond,
+				ChunkAttachCheck:       func(ctx context.Context, _ string, _ durable.ChunkGeometry) error { <-ctx.Done(); return tc.err },
+				ChunkRemoteFor: func(string) (storage.ChunkRemote, error) {
+					t.Error("retained attach reached remote")
+					return storage.NewMemChunkRemote(), nil
+				},
+			}, view)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = p.Close() })
+			if _, err = p.EnsureStorage("v1"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = p.RecoverVolume(context.Background(), "v1"); err != nil {
+				t.Fatal(err)
+			}
+			view.set(assigned)
+			waitLog(t, logs, "chunk authority wait for volume=v1 ended")
+			if _, failed := p.ChunkStartupOutcome("v1"); failed {
+				t.Fatal("deadline defer replaced retained attach disposition with process retry")
+			}
+		})
 	}
 }
