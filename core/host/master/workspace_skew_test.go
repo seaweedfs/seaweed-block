@@ -158,6 +158,7 @@ func TestWorkspaceLeaseFactUsesPublisherClockAndSkew(t *testing.T) {
 		want   time.Duration
 	}{
 		{"legacy-configured-bound", 10 * time.Second, 0, 8 * time.Second},
+		{"persisted-smaller-bound", 10 * time.Second, int64(2 * time.Second), 8 * time.Second},
 		{"persisted-larger-bound", 10 * time.Second, int64(6 * time.Second), 7 * time.Second},
 		{"configured-ttl-cap", 40 * time.Second, 0, 12 * time.Second},
 		{"expired", time.Second, 0, 0},
