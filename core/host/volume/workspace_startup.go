@@ -8,10 +8,10 @@ func (h *Host) recordSelfAssignment(f *control.AssignmentFact) {
 	if f.VolumeId != h.cfg.VolumeID {
 		return
 	}
-	h.selfLineageMu.Lock()
-	defer h.selfLineageMu.Unlock()
-	if f.Epoch > h.selfEpoch || f.Epoch == h.selfEpoch && f.EndpointVersion > h.selfEV {
-		h.selfEpoch, h.selfEV = f.Epoch, f.EndpointVersion
+	h.ownAssignmentMu.Lock()
+	defer h.ownAssignmentMu.Unlock()
+	if f.Epoch > h.ownAssignmentEpoch || f.Epoch == h.ownAssignmentEpoch && f.EndpointVersion > h.ownAssignmentEV {
+		h.ownAssignmentEpoch, h.ownAssignmentEV = f.Epoch, f.EndpointVersion
 	}
 }
 
@@ -20,11 +20,11 @@ func (h *Host) recordSelfAssignment(f *control.AssignmentFact) {
 // stable through the comparison; a historical other line alone cannot mean78.
 // This is exit classification only: frontend admission keeps its own lineage.
 func (h *Host) IsCurrentReplicaSuperseded() bool {
-	h.selfLineageMu.RLock()
-	defer h.selfLineageMu.RUnlock()
+	h.ownAssignmentMu.RLock()
+	defer h.ownAssignmentMu.RUnlock()
 	other := h.LastOtherLine()
 	if other == nil || other.VolumeId != h.cfg.VolumeID {
 		return false
 	}
-	return h.IsSuperseded(h.cfg.ReplicaID, h.selfEpoch, h.selfEV)
+	return h.IsSuperseded(h.cfg.ReplicaID, h.ownAssignmentEpoch, h.ownAssignmentEV)
 }
