@@ -520,12 +520,12 @@ func (h *Host) getReplication() replicaSetUpdater {
 }
 
 // IsSuperseded gates a newer foreign replica line, or a same-replica foreign
-// server/endpoint identity at or above the local lineage. An explicitly
+// server/endpoint identity strictly newer than an adopted local lineage. An explicitly
 // matching self identity remains an ordinary adapter update.
 func (h *Host) IsSuperseded(selfReplicaID string, selfEpoch, selfEV uint64) bool {
 	h.otherMu.Lock()
 	defer h.otherMu.Unlock()
-	if h.lastOther == nil {
+	if h.lastOther == nil || selfEpoch == 0 {
 		return false
 	}
 	other := h.lastOther
@@ -533,7 +533,7 @@ func (h *Host) IsSuperseded(selfReplicaID string, selfEpoch, selfEV uint64) bool
 		if h.assignmentNamesSelf(other) {
 			return false
 		}
-		return other.Epoch > selfEpoch || other.Epoch == selfEpoch && other.EndpointVersion >= selfEV
+		return other.Epoch > selfEpoch || other.Epoch == selfEpoch && other.EndpointVersion > selfEV
 	}
 	if other.Epoch > selfEpoch {
 		return true
@@ -810,12 +810,7 @@ func (h *Host) streamOnce(ctx context.Context) error {
 func (h *Host) applyFact(fact *control.AssignmentFact) {
 	// INV-AUTH-HOLDER-IDENTITY-001: matching r1 and loopback endpoints do not identify a host.
 	if fact.ReplicaId == h.cfg.ReplicaID && !h.assignmentNamesSelf(fact) {
-		h.wd.notPrimary()
-		h.recordOtherLine(fact)
-		if err := h.fenceSelfWithPeers(selfRolePrimary, fact.Epoch, false); err != nil {
-			h.log.Printf("blockvolume: foreign holder ingress fence: %v", err)
-		}
-		h.log.Printf("blockvolume: volume %s assignment server=%q replica=%q is not this process server=%q; fenced, not serving; never adopted", h.cfg.VolumeID, fact.ServerId, fact.ReplicaId, h.cfg.ServerID)
+		h.observeForeignHolder(fact)
 		return
 	}
 	if fact.ReplicaId != h.cfg.ReplicaID {
