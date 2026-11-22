@@ -182,7 +182,7 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 	if s["Result"] == "start-limit-hit" {
 		t.Fatalf("systemd rate limit hit: %+v", s)
 	}
-	gap1PlannedStopDoesNotRestart(t, ws, unit, statusAddr, volume, after.Epoch, after.Holder, s["NRestarts"], s["InvocationID"])
+	gap1PlannedStopDoesNotRestart(t, ws, unit, statusAddr, volume, after.Epoch, "r1", s["NRestarts"], s["InvocationID"])
 	gap1SupersededDoesNotRestart(t, stem, filepath.Join(bin, "blockvolume"), args, root, volume)
 }
 
