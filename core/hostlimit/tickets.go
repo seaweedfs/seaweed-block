@@ -73,8 +73,16 @@ var ticketSeq struct {
 // locked file (a prober may have removed it before the lock); otherwise it
 // is created again.
 func (l *Limiter) TakeTicket(dueHostNs int64) (*Ticket, error) {
+	// The pool directory is never created here: one that was removed while
+	// cuts held its slots must not come back as a second lock domain beside
+	// the old holders. Only its tickets directory is created.
+	if info, err := os.Lstat(l.cfg.Directory); err != nil {
+		return nil, err
+	} else if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("hostlimit: pool must be a local directory")
+	}
 	dir := filepath.Join(l.cfg.Directory, ticketsDir)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 		return nil, err
 	}
 	for attempt := 0; attempt < 8; attempt++ {

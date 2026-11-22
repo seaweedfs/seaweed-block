@@ -505,3 +505,28 @@ func TestOneStalledTicketCostsOneSkipNotEveryHandoff(t *testing.T) {
 		}
 	}
 }
+
+// A ticket never recreates a pool directory that was removed: that would
+// start a second set of slots beside the holders of the old one.
+func TestTakeTicketDoesNotRecreateARemovedPool(t *testing.T) {
+	c := DefaultConfig(filepath.Join(t.TempDir(), "pool"))
+	c.NormalSlots, c.UrgentSlots = 1, 1
+	if err := os.Mkdir(c.Directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	l := newTest(t, c)
+	tk, err := l.TakeTicket(HostNow())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tk.Close()
+	if err := os.RemoveAll(c.Directory); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.TakeTicket(HostNow()); err == nil {
+		t.Fatal("a ticket was taken in a removed pool directory")
+	}
+	if _, err := os.Stat(c.Directory); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the removed pool directory came back: %v", err)
+	}
+}
