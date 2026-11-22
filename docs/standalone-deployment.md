@@ -233,6 +233,10 @@ group while volumes run.
     - **On an NVMe root,** and in that disk's other attaches: the fsync took 50-75 microseconds and the publish 2-3 milliseconds.
     - **Cause:** not yet established.
   - **Check the device:** `lsblk -d -o NAME,ROTA,TRAN,MODEL`, and the line blockvolume logs at start, `storage: WAL/extent sync=... file=... reason=...`, whose reason names the root's device.
+- **NVMe/TCP needs native NVMe multipath on the host (`nvme_core multipath=Y`, the Ubuntu default).**
+  The device lookup below, and the CSI node plugin's, find the namespace as an `nvmeXnY` entry under
+  `/sys/class/nvme-subsystem/nvme-subsysN/`; with multipath off that directory holds no namespace entry and
+  neither finds the device. Check: `cat /sys/module/nvme_core/parameters/multipath` must print `Y`.
 - ublk needs root. Use `sw-blockvolume-ublk.service` instead of editing the
   unprivileged unit, and load `ublk_drv` at boot
   (`echo ublk_drv | sudo tee /etc/modules-load.d/ublk.conf`).
