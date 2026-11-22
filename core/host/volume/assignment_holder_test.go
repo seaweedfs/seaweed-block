@@ -73,3 +73,52 @@ func TestAssignmentHolderIdentityMatchingServerStillAdopts(t *testing.T) {
 		t.Fatalf("matching holder did not become healthy: %+v", p)
 	}
 }
+
+// The old process may already have been healthy before the forced move. The
+// foreign line must withdraw that projection even though r1 is unchanged.
+func TestAssignmentHolderIdentityFencesPreviouslyHealthySameReplica(t *testing.T) {
+	h, err := New(Config{MasterAddr: "127.0.0.1:1", ServerID: "old-host", VolumeID: "v1", ReplicaID: "r1", DataAddr: "127.0.0.1:19303", CtrlAddr: "127.0.0.1:19304", EnableT1Readiness: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	own := holderAssignment(t, "old-host")
+	own.Epoch = 1
+	h.applyFact(own)
+	deadline := time.Now().Add(time.Second)
+	for !h.view.Projection().Healthy && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !h.view.Projection().Healthy {
+		t.Fatal("old owner baseline not healthy")
+	}
+	h.applyFact(holderAssignment(t, "new-host"))
+	if h.realAdpt.Projection().Epoch != 1 {
+		t.Fatal("foreign epoch adopted")
+	}
+	if h.view.Projection().Healthy {
+		t.Fatal("same-r1 foreign holder left the old frontend healthy")
+	}
+}
+
+func TestAssignmentHolderIdentityRefusesCarriedEndpointMismatch(t *testing.T) {
+	for _, endpoint := range []string{"data", "control"} {
+		t.Run(endpoint, func(t *testing.T) {
+			h, err := New(Config{MasterAddr: "127.0.0.1:1", ServerID: "new-host", VolumeID: "v1", ReplicaID: "r1", DataAddr: "127.0.0.1:19303", CtrlAddr: "127.0.0.1:19304", EnableT1Readiness: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = h.Close() })
+			f := holderAssignment(t, "new-host")
+			if endpoint == "data" {
+				f.DataAddr = "127.0.0.1:9991"
+			} else {
+				f.CtrlAddr = "127.0.0.1:9992"
+			}
+			h.applyFact(f)
+			if h.realAdpt.Projection().Epoch != 0 || h.LastOtherLine() == nil {
+				t.Fatal("mismatched endpoint was adopted or not recorded")
+			}
+		})
+	}
+}

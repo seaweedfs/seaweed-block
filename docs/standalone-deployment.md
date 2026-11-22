@@ -13,6 +13,13 @@ For a first, read-only try without services, see
 [first volume (read-only check)](#first-volume-read-only-check). For a write
 test, see [write test (scratch host only)](#write-test-scratch-host-only).
 
+## Upgrade order
+
+Upgrade `blockmaster` first, then `blockvolume`. Assignments and workspace
+lease requests require the assigned server id. A new volume against an older
+pre-release master stays not serving until the master is upgraded; an older
+volume must also be upgraded to gain the assignment guard. Do not use endpoint
+matching as a compatibility fallback. See [holder identity and upgrades](releases/holder-identity.md).
 ## Get the matching files
 
 The unit and settings files must come from the same commit as your
@@ -556,3 +563,4 @@ A restore makes a new, independent volume from a snapshot. The source volume and
    - Follow it with `sw-block ops chunk restore --volume v2 --status-addr STATUS_OF_V2 --status`.
    - Until v2 is independent, a snapshot of v2 is refused (`restore_incomplete`).
    - While v2 still fetches chunks, its scheduled snapshots are skipped and counted as `restoring`. After that, until it is independent, they are refused like any snapshot and show as failed attempts with that code.
+
