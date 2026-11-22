@@ -53,20 +53,24 @@ func TestPortalAndPrimaryComeFromTheLineServerNotTheFreshestHeartbeat(t *testing
 	}
 	line := waitAuthorityLine(t, h.Publisher(), "pvc-a")
 	holder := h.workspaceSourceHost("pvc-a", line.ReplicaID, line.Epoch)
-	holderAddr := map[string]string{"m01": "192.168.1.181:3260", "m02": "192.168.1.184:3260", "tp01": "192.168.1.188:3260"}[holder]
-	if holderAddr == "" {
-		t.Fatalf("line %+v names holder %q", line, holder)
+	own, ok := h.ObservationHost().Store().SlotFactOnServer(holder, "pvc-a", line.ReplicaID)
+	if holder == "" || !ok || len(own.Frontends) == 0 {
+		t.Fatalf("line %+v names holder %q with no observed frontend", line, holder)
 	}
-	stale := "m02"
-	if holder == stale {
-		stale = "tp01"
+	holderAddr := own.Frontends[0].Addr
+	stale := ""
+	for _, server := range []string{"m01", "m02", "tp01"} { // the fixture's placement servers
+		if server != holder {
+			stale = server
+			break
+		}
 	}
 	// the stale host reports the primary's replica id with a newer observation than the holder's
 	if err := h.ObservationHost().Ingest(authority.Observation{ServerID: stale, ObservedAt: time.Now().UTC().Add(time.Second),
 		Server: authority.ServerFact{Reachable: true, Eligible: true},
-		Slots: []authority.SlotFact{{VolumeID: "pvc-a", ReplicaID: line.ReplicaID, DataAddr: "10.9.9.9:19101", CtrlAddr: "10.9.9.9:19102",
+		Slots: []authority.SlotFact{{VolumeID: "pvc-a", ReplicaID: line.ReplicaID, DataAddr: "192.0.2.9:19101", CtrlAddr: "192.0.2.9:19102",
 			Reachable: true, ReadyForPrimary: true, Eligible: true, EvidenceScore: 99,
-			Frontends: []authority.FrontendTargetFact{{Protocol: "iscsi", Addr: "10.9.9.9:3260", IQN: "iqn.2026-05.io.seaweedfs:pvc-a", LUN: 1}}}}}); err != nil {
+			Frontends: []authority.FrontendTargetFact{{Protocol: "iscsi", Addr: "192.0.2.9:3260", IQN: "iqn.2026-05.io.seaweedfs:pvc-a", LUN: 1}}}}}); err != nil {
 		t.Fatalf("ingest stale host: %v", err)
 	}
 	resp, err := newServices(h).QueryVolumeStatus(context.Background(), &control.StatusRequest{VolumeId: "pvc-a"})
@@ -77,7 +81,7 @@ func TestPortalAndPrimaryComeFromTheLineServerNotTheFreshestHeartbeat(t *testing
 		t.Fatalf("CSI portal: frontends=%v, want the line server %s's %s first (stale host %s must not win)", resp.Frontends, holder, holderAddr, stale)
 	}
 	for _, ft := range resp.Frontends {
-		if ft.Addr == "10.9.9.9:3260" {
+		if ft.Addr == "192.0.2.9:3260" {
 			t.Fatalf("CSI portal lists the stale host's frontend: %v", resp.Frontends)
 		}
 	}
