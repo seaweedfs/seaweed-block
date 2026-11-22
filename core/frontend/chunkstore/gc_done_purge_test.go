@@ -17,6 +17,17 @@ import (
 // against a real filer or volume server.
 const purgeTestDoneStamp = "swb.gc.done_ns"
 
+func purgeTestFixture(t *testing.T) (*fakeFiler, gcBlobs, *Catalog, *Collector, *time.Time) {
+	t.Helper()
+	f, b, _, g, now := gcFixture(t)
+	c, err := NewCatalog(manifestFilerBlobs{f, b}, catBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.cat = c
+	return f, b, c, g, now
+}
+
 func putPurgeTestBinding(t *testing.T, f *fakeFiler, b gcBlobs, key, state string, stamp time.Time) (*ChunkRemote, *filerpb.Entry) {
 	t.Helper()
 	ctx := context.Background()
@@ -55,7 +66,7 @@ func putPurgeTestBinding(t *testing.T, f *fakeFiler, b gcBlobs, key, state strin
 func TestGCDonePurgeMissingOwnRootFailsButUnuploadedIntentDoesNot(t *testing.T) {
 	for _, root := range []string{"HEAD", "snapshot"} {
 		t.Run(root, func(t *testing.T) {
-			f, b, c, g, _ := gcFixture(t)
+			f, b, c, g, _ := purgeTestFixture(t)
 			ctx := context.Background()
 			h := publishSource(t, f, b.fakeBlobs, "v1", map[uint64][]byte{0: chunkBytes(0x21)})
 			r, err := NewChunkRemote(f, b, path.Join(catBase, "v1"))
@@ -87,7 +98,7 @@ func TestGCDonePurgeMissingOwnRootFailsButUnuploadedIntentDoesNot(t *testing.T) 
 		})
 	}
 	t.Run("unuploaded-intent", func(t *testing.T) {
-		f, b, _, g, _ := gcFixture(t)
+		f, b, _, g, _ := purgeTestFixture(t)
 		r, err := NewChunkRemote(f, b, path.Join(catBase, "v1"))
 		if err != nil {
 			t.Fatal(err)
@@ -116,7 +127,7 @@ func (f *purgeReplaceFiler) DeleteEntry(ctx context.Context, dir, name string, e
 func TestGCDonePurgeConditionalDeleteProtectsNewIncarnation(t *testing.T) {
 	for _, replacement := range []string{"new-fid", "same-fid-new-done-stamp"} {
 		t.Run(replacement, func(t *testing.T) {
-			f, b, c, g, now := gcFixture(t)
+			f, b, c, g, now := purgeTestFixture(t)
 			r, original := putPurgeTestBinding(t, f, b, "orphan", "done", now.Add(-2*time.Hour))
 			attempted := false
 			c.f = &purgeReplaceFiler{Filer: f, beforeDelete: func(ctx context.Context, dir, name string, expected map[string][]byte) error {
@@ -154,7 +165,7 @@ func TestGCDonePurgeConditionalDeleteProtectsNewIncarnation(t *testing.T) {
 }
 
 func TestGCDonePurgeLegacyDoneStartsItsOwnGrace(t *testing.T) {
-	f, b, _, g, now := gcFixture(t)
+	f, b, _, g, now := purgeTestFixture(t)
 	r, entry := putPurgeTestBinding(t, f, b, "legacy", "done", time.Time{})
 	ctx := context.Background()
 	if _, err := g.Run(ctx); err != nil {
@@ -181,7 +192,7 @@ func TestGCDonePurgeLegacyDoneStartsItsOwnGrace(t *testing.T) {
 }
 
 func TestGCDonePurgePreviewNeverStampsOrDeletes(t *testing.T) {
-	f, b, _, g, now := gcFixture(t)
+	f, b, _, g, now := purgeTestFixture(t)
 	_, _ = putPurgeTestBinding(t, f, b, "legacy", "done", time.Time{})
 	_, _ = putPurgeTestBinding(t, f, b, "old", "done", now.Add(-2*time.Hour))
 	updates, deletes := f.updates, f.deletes
@@ -190,6 +201,42 @@ func TestGCDonePurgePreviewNeverStampsOrDeletes(t *testing.T) {
 	}
 	if f.updates != updates || f.deletes != deletes {
 		t.Fatalf("preview changed metadata: updates=%d deletes=%d", f.updates-updates, f.deletes-deletes)
+	}
+}
+
+func TestGCDonePurgeRootedDoneFailsWithoutDeletingIt(t *testing.T) {
+	f, b, c, g, now := purgeTestFixture(t)
+	ctx := context.Background()
+	h := publishSource(t, f, b.fakeBlobs, "v1", map[uint64][]byte{0: chunkBytes(0x41)})
+	r, err := NewChunkRemote(f, b, path.Join(catBase, "v1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, name, err := r.keyLocation(h.Chunks[0].Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := f.LookupEntry(ctx, dir, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry.Extended[extGCDeleted] = []byte("done")
+	entry.Extended[purgeTestDoneStamp] = []byte(strconv.FormatInt(now.Add(-2*time.Hour).UnixNano(), 10))
+	if err = f.UpdateEntry(ctx, dir, entry, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = g.Run(ctx); err == nil {
+		t.Fatal("rooted DONE must fail the pass rather than be purged")
+	}
+	if _, err = f.LookupEntry(ctx, dir, name); err != nil {
+		t.Fatal("rooted DONE binding was purged", err)
+	}
+	result, err := c.Verify(ctx, "v1", VerifyOptions{Depth: VerifyBindings})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Findings) != 1 || result.Findings[0].Class != FindingBindingTombstoned {
+		t.Fatalf("before purge verify must report TOMBSTONED: %+v", result.Findings)
 	}
 }
 
@@ -207,7 +254,7 @@ func TestGCDonePurgeAdmissionUsesDoneAgeAndSkew(t *testing.T) {
 		{"unflagged", "", 24 * time.Hour, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f, b, _, g, now := gcFixture(t)
+			f, b, _, g, now := purgeTestFixture(t)
 			r, e := putPurgeTestBinding(t, f, b, "orphan", tc.state, now.Add(-tc.age))
 			if _, err := g.Run(context.Background()); err != nil {
 				t.Fatal(err)

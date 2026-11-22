@@ -42,10 +42,26 @@ func (f *purgeStampFiler) UpdateEntry(ctx context.Context, dir string, e *filerp
 	return f.Filer.UpdateEntry(ctx, dir, e, expected)
 }
 
+// MemChunkRemote deliberately retains its ever-set: unlike ChunkRemote,
+// it has no durable GC binding or purge horizon.
+func TestGCDonePurgeMemRemoteKeepsItsStrongerEverSet(t *testing.T) {
+	m := storage.NewMemChunkRemote()
+	ctx := context.Background()
+	if err := m.Put(ctx, "k", []byte("original")); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Delete(ctx, "k"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Put(ctx, "k", []byte("replacement")); !errors.Is(err, storage.ErrChunkKeyExists) {
+		t.Fatalf("MemChunkRemote unexpectedly lost its ever-set protection: %v", err)
+	}
+}
+
 // PurgeDone section 9.3: DONE and its collector-clock stamp are one
 // conditional transition, not two separately visible updates.
 func TestGCDonePurgeReclamationStampsDoneAtomically(t *testing.T) {
-	f, b, c, g, now := gcFixture(t)
+	f, b, c, g, now := purgeTestFixture(t)
 	r, entry := putPurgeTestBinding(t, f, b, "orphan", "", time.Time{})
 	trace := &purgeStampFiler{Filer: f}
 	c.f = trace
@@ -64,7 +80,7 @@ func TestGCDonePurgeReclamationStampsDoneAtomically(t *testing.T) {
 func TestGCDonePurgeStalePlainAndRoundBindingsAreCollectedAgain(t *testing.T) {
 	for _, mode := range []string{"plain-new-fid", "round-same-fid"} {
 		t.Run(mode, func(t *testing.T) {
-			f, b, _, g, now := gcFixture(t)
+			f, b, _, g, now := purgeTestFixture(t)
 			ctx := context.Background()
 			r, old := putPurgeTestBinding(t, f, b, "orphan", "done", now.Add(-2*time.Hour))
 			if _, err := g.Run(ctx); err != nil {
@@ -119,7 +135,7 @@ func TestGCDonePurgeStalePlainAndRoundBindingsAreCollectedAgain(t *testing.T) {
 }
 
 func TestGCDonePurgeUsageDropsOnlyPurgedStoredBindings(t *testing.T) {
-	f, b, c, g, now := gcFixture(t)
+	f, b, c, g, now := purgeTestFixture(t)
 	c.f = manifestFilerBlobs{f, b}
 	ctx := context.Background()
 	_ = publishSource(t, f, b.fakeBlobs, "v1", map[uint64][]byte{0: chunkBytes(0x31)})
@@ -158,7 +174,7 @@ func TestGCDonePurgeStaleRootIsMissingAndWrongRebindFailsHash(t *testing.T) {
 			name = "wrong-rebind"
 		}
 		t.Run(name, func(t *testing.T) {
-			f, b, c, g, now := gcFixture(t)
+			f, b, c, g, now := purgeTestFixture(t)
 			c.f = manifestFilerBlobs{f, b}
 			ctx := context.Background()
 			h := publishSource(t, f, b.fakeBlobs, "v1", map[uint64][]byte{0: chunkBytes(0x51)})
@@ -237,7 +253,7 @@ func TestGCDonePurgeStaleRootIsMissingAndWrongRebindFailsHash(t *testing.T) {
 			if err == nil || len(got) != 0 {
 				t.Fatalf("stale read returned bytes: len=%d err=%v", len(got), err)
 			}
-			if rebind && !strings.Contains(err.Error(), "hash") {
+			if rebind && !strings.Contains(err.Error(), "content does not match HEAD") {
 				t.Fatalf("wrong bytes failed for a reason other than hash validation: %v", err)
 			}
 		})
