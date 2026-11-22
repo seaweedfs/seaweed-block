@@ -21,6 +21,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	hostvolume "github.com/seaweedfs/seaweed-block/core/host/volume"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"github.com/seaweedfs/seaweed-block/core/storage"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -37,24 +38,30 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 	if os.Getenv("CHUNKSTORE_WEED") == "" {
 		t.Fatal("real CHUNKSTORE_WEED binary required")
 	}
-	if out, err := exec.Command("systemctl", "show", "--property=Version").CombinedOutput(); err != nil {
+	probeCtx, probeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer probeCancel()
+	if out, err := exec.CommandContext(probeCtx, "systemctl", "show", "--property=Version").CombinedOutput(); err != nil {
 		t.Fatalf("real systemd unavailable: %v %s", err, out)
 	}
-	root := t.TempDir()
+	fixture := newGAP1Fixture(t)
+	root := fixture.root
 	bin := filepath.Join(root, "bin")
 	if err := os.Mkdir(bin, 0755); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"blockvolume", "blockmaster"} {
-		cmd := exec.Command("go", "build", "-p", "4", "-o", filepath.Join(bin, name), "../"+name)
-		if out, err := cmd.CombinedOutput(); err != nil {
+		buildCtx, buildCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		cmd := exec.CommandContext(buildCtx, "go", "build", "-p", "4", "-o", filepath.Join(bin, name), "../"+name)
+		out, err := cmd.CombinedOutput()
+		buildCancel()
+		if err != nil {
 			t.Fatalf("real binary build: %v %s", err, out)
 		}
 	}
-	cluster := startWorkspaceWeed(t)
+	cluster := startWorkspaceWeedAt(t, filepath.Join(root, "weed"))
 	gap1PreserveFailure(t, root, cluster.dir)
 	stem := fmt.Sprintf("codex03-gap1-%d", time.Now().UnixNano())
-	gap1ProbeTerminalSuccess(t, stem+"-policy-probe")
+	gap1ProbeTerminalSuccess(t, fixture, stem+"-policy-probe")
 	volume := stem
 	base := "/" + stem
 	masterAddr := leaseBinaryAddress(t)
@@ -64,7 +71,7 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 	if err := os.WriteFile(spec, []byte(cfg), 0600); err != nil {
 		t.Fatal(err)
 	}
-	startGAP1Unit(t, stem+"-master", false, filepath.Join(bin, "blockmaster"),
+	fixture.start(t, stem+"-master", false, filepath.Join(bin, "blockmaster"),
 		"--listen", masterAddr, "--authority-store", filepath.Join(root, "auth"), "--lifecycle-store", filepath.Join(root, "life"),
 		"--cluster-spec", spec, "--lifecycle-product-loop-interval", "200ms", "--expected-slots-per-volume", "1",
 		"--workspace-rpc", "--workspace-head-base-url", "http://"+cluster.filerHTTP+base)
@@ -82,7 +89,7 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 		"--nvme-listen", nvmeAddr, "--nvme-subsysnqn", "nqn.2026-11.test:" + stem}
 	// Bootstrap is a different, non-restarting unit. Kill only this exact unit.
 	bootstrap := stem + "-bootstrap"
-	startGAP1Unit(t, bootstrap, false, filepath.Join(bin, "blockvolume"), args...)
+	fixture.start(t, bootstrap, false, filepath.Join(bin, "blockvolume"), args...)
 	waitGAP1(t, "bootstrap did not attach under a real lease", 60*time.Second, func() bool { return gap1Operational(t, statusAddr, volume) })
 	// Calibrate verdict parsing against actual binary responses BEFORE kill.
 	status, payload, err := gap1Status(statusAddr, volume)
@@ -102,7 +109,7 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 	client.readExact(t, 8, want)
 	client.close()
 	remote := cluster.remote(t, base+"/"+volume)
-	before, err := remote.GetHead(context.Background())
+	before, err := gap1ReadHead(t, remote)
 	if err != nil || before.Gen == 0 {
 		t.Fatalf("bootstrap HEAD: %+v %v", before, err)
 	}
@@ -123,7 +130,7 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 		return s.Lease.ValidForNs <= 0 && time.Now().UnixNano() >= s.Lease.ExpiresAtNs
 	})
 	unit := stem + "-returning"
-	startGAP1Unit(t, unit, true, filepath.Join(bin, "blockvolume"), args...)
+	fixture.start(t, unit, true, filepath.Join(bin, "blockvolume"), args...)
 	first := gap1Unit(t, unit)
 	t.Logf("captured effective restart policy: %+v", first)
 	firstPID := first["MainPID"]
@@ -156,7 +163,7 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 		}
 		return n >= 1 && s["MainPID"] != "0" && s["MainPID"] != firstPID && gap1Operational(t, statusAddr, volume)
 	})
-	after, err := remote.GetHead(context.Background())
+	after, err := gap1ReadHead(t, remote)
 	if err != nil || after.Gen <= before.Gen || after.Holder != before.Holder || after.Epoch != before.Epoch {
 		t.Fatalf("return did not claim HEAD: before%+v after%+v err%v", before, after, err)
 	}
@@ -183,47 +190,140 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 		t.Fatalf("systemd rate limit hit: %+v", s)
 	}
 	gap1PlannedStopDoesNotRestart(t, ws, unit, statusAddr, volume, after.Epoch, "r1", s["NRestarts"], s["InvocationID"])
-	gap1SupersededDoesNotRestart(t, stem, filepath.Join(bin, "blockvolume"), args, root, volume)
+	gap1SupersededDoesNotRestart(t, fixture, stem, filepath.Join(bin, "blockvolume"), args, root, volume)
 }
 
-func startGAP1Unit(t *testing.T, unit string, restart bool, exe string, args ...string) {
+// Roots are deliberately independent of testing.TempDir: unknown unit cleanup
+// must never remove an executable or WAL beneath a possible surviving service.
+type gap1Fixture struct {
+	root  string
+	units []string
+}
+
+func newGAP1Fixture(t *testing.T) *gap1Fixture {
 	t.Helper()
+	root, err := os.MkdirTemp("", "codex03-gap1-runtime-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &gap1Fixture{root: root}
+	t.Cleanup(func() {
+		safe := true
+		for _, unit := range f.units {
+			state, err := gap1ReadUnit(unit)
+			if err != nil || !gap1UnitGone(state) {
+				t.Errorf("final unit absence unproved: %s state%v err%v", unit, state, err)
+				safe = false
+			}
+		}
+		if !safe || t.Failed() {
+			t.Logf("retained run root: %s (safe=%v failed=%v)", root, safe, t.Failed())
+			return
+		}
+		if err := os.RemoveAll(root); err != nil {
+			t.Errorf("remove confirmed idle run root: %v", err)
+		}
+	})
+	return f
+}
+func (f *gap1Fixture) start(t *testing.T, unit string, restart bool, exe string, args ...string) {
+	t.Helper()
+	f.units = append(f.units, unit)
+	// Persist ownership before the create, including an aggregate test crash.
+	ownership, err := os.OpenFile(filepath.Join(f.root, "owned-units.txt"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, writeErr := fmt.Fprintln(ownership, unit)
+	closeErr := ownership.Close()
+	if writeErr != nil || closeErr != nil {
+		t.Fatalf("record unit ownership: %v %v", writeErr, closeErr)
+	}
+	// Register BEFORE submission: systemd may create the unit even when the
+	// command loses its answer or times out. Every uncertain create is owned.
+	t.Cleanup(func() { gap1CleanupUnit(t, unit) })
 	policy := "no"
 	if restart {
 		policy = "on-failure"
 	}
 	shipped := gap1ShippedPolicy(t)
-	cmdArgs := []string{"--unit=" + unit, "--property=Type=exec", "--property=Restart=" + policy,
-		"--property=RestartSec=" + shipped["RestartSec"],
-		"--property=RestartPreventExitStatus=" + shipped["RestartPreventExitStatus"],
-		"--property=TimeoutStopSec=" + shipped["TimeoutStopSec"],
-		"--property=StartLimitIntervalSec=10s", "--property=StartLimitBurst=5", "--", exe}
+	cmdArgs := []string{"--unit=" + unit, "--property=Type=exec", "--property=Restart=" + policy, "--property=RestartSec=" + shipped["RestartSec"], "--property=RestartPreventExitStatus=" + shipped["RestartPreventExitStatus"], "--property=TimeoutStopSec=" + shipped["TimeoutStopSec"], "--property=StartLimitIntervalSec=10s", "--property=StartLimitBurst=5", "--", exe}
 	cmdArgs = append(cmdArgs, args...)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "systemd-run", cmdArgs...).CombinedOutput()
-	if err != nil {
-		t.Fatalf("systemd-run %s: %v %s", unit, err, out)
+	if out, err := exec.CommandContext(ctx, "systemd-run", cmdArgs...).CombinedOutput(); err != nil {
+		t.Fatalf("systemd-run %s (creation outcome uncertain; registered cleanup owns it): %v %s", unit, err, out)
 	}
-	t.Cleanup(func() {
-		// Capture before stopping; never remove a run root owned by another run.
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		log, _ := exec.CommandContext(ctx, "journalctl", "--unit="+unit, "--no-pager", "--output=short-monotonic").CombinedOutput()
-		cancel()
-		t.Logf("real unit %s journal:\n%s", unit, log)
-		ctx, cancel = context.WithTimeout(context.Background(), 15*time.Second)
-		_, err := exec.CommandContext(ctx, "systemctl", "stop", unit).CombinedOutput()
-		cancel()
-		if err != nil && gap1Unit(t, unit)["LoadState"] != "not-found" {
-			ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
-			_ = exec.CommandContext(ctx, "systemctl", "kill", "--signal=KILL", unit).Run()
-			cancel()
-			t.Errorf("unit stop required kill: %s", unit)
+}
+func gap1CleanupUnit(t *testing.T, unit string) {
+	t.Helper()
+	command := func(bound time.Duration, args ...string) error {
+		ctx, cancel := context.WithTimeout(context.Background(), bound)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, "systemctl", args...).CombinedOutput()
+		if err != nil {
+			t.Logf("unit cleanup %s: %v %s", unit, err, out)
 		}
-		ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
-		_ = exec.CommandContext(ctx, "systemctl", "reset-failed", unit).Run()
-		cancel()
-	})
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	journal, _ := exec.CommandContext(ctx, "journalctl", "--unit="+unit, "--no-pager", "--output=short-monotonic").CombinedOutput()
+	cancel()
+	t.Logf("real unit %s journal:\n%s", unit, journal)
+	_ = command(15*time.Second, "stop", unit)
+	state, err := gap1ReadUnit(unit)
+	if err != nil || !gap1UnitGone(state) {
+		_ = command(5*time.Second, "kill", "--kill-who=all", "--signal=KILL", unit)
+		_ = command(5*time.Second, "stop", unit)
+	}
+	_ = command(5*time.Second, "reset-failed", unit)
+	state, err = gap1ReadUnit(unit)
+	if err != nil || !gap1UnitGone(state) {
+		t.Errorf("owned unit/PID cleanup not confirmed; retain run root: %s state%v err%v", unit, state, err)
+		return
+	}
+	t.Logf("confirmed owned unit stopped: %s state%v", unit, state)
+}
+func gap1UnitGone(s map[string]string) bool {
+	job, hasJob := s["Job"]
+	return hasJob && job == "" && s["MainPID"] == "0" && s["ControlPID"] == "0" &&
+		(s["LoadState"] == "not-found" || s["LoadState"] == "loaded") && s["ActiveState"] == "inactive" && s["SubState"] == "dead"
+}
+
+// The absent-unit shape is captured from real systemd249. Refuse incomplete,
+// contradictory, queued-job and live-process observations before removing WAL.
+func TestGAP1AbsenceRequiresNoJobAndBothPIDsZero(t *testing.T) {
+	for _, tc := range []struct {
+		name, key, value string
+		want             bool
+	}{
+		{"collected", "LoadState", "not-found", true},
+		{"loaded stopped", "LoadState", "loaded", true},
+		{"main lives", "MainPID", "123", false},
+		{"control lives", "ControlPID", "123", false},
+		{"job queued", "Job", "123", false},
+		{"restart pending", "SubState", "auto-restart", false},
+		{"contradictory active", "ActiveState", "active", false},
+		{"unknown load", "LoadState", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := map[string]string{"MainPID": "0", "ControlPID": "0", "LoadState": "not-found", "ActiveState": "inactive", "SubState": "dead", "Job": ""}
+			s[tc.key] = tc.value
+			if gap1UnitGone(s) != tc.want {
+				t.Fatalf("absence classification %+v want%v", s, tc.want)
+			}
+			delete(s, "Job")
+			if gap1UnitGone(s) {
+				t.Fatal("missing observation treated as absence")
+			}
+		})
+	}
+}
+func gap1ReadHead(t *testing.T, remote storage.ChunkRemote) (storage.ChunkHead, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return remote.GetHead(ctx)
 }
 func gap1Systemctl(t *testing.T, args ...string) {
 	t.Helper()
@@ -235,11 +335,19 @@ func gap1Systemctl(t *testing.T, args ...string) {
 }
 func gap1Unit(t *testing.T, unit string) map[string]string {
 	t.Helper()
+	m, err := gap1ReadUnit(unit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("captured unit %s: %+v", unit, m)
+	return m
+}
+func gap1ReadUnit(unit string) (map[string]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	b, err := exec.CommandContext(ctx, "systemctl", "show", unit, "--property=MainPID,NRestarts,ExecMainStatus,Result,ExecMainStartTimestampMonotonic,RestartUSec,RestartPreventExitStatus,StartLimitBurst,StartLimitIntervalUSec,ActiveState,SubState,LoadState,InvocationID").CombinedOutput()
+	b, err := exec.CommandContext(ctx, "systemctl", "show", unit, "--property=Job,MainPID,ControlPID,NRestarts,ExecMainStatus,Result,ExecMainStartTimestampMonotonic,RestartUSec,RestartPreventExitStatus,StartLimitBurst,StartLimitIntervalUSec,ActiveState,SubState,LoadState,InvocationID").CombinedOutput()
 	if err != nil {
-		t.Fatalf("unit show: %v %s", err, b)
+		return nil, fmt.Errorf("unit show %s: %w %s", unit, err, b)
 	}
 	m := map[string]string{}
 	for _, l := range strings.Split(strings.TrimSpace(string(b)), "\n") {
@@ -248,13 +356,12 @@ func gap1Unit(t *testing.T, unit string) map[string]string {
 			m[k] = v
 		}
 	}
-	for _, key := range []string{"MainPID", "NRestarts", "ExecMainStatus", "Result", "ExecMainStartTimestampMonotonic"} {
+	for _, key := range []string{"Job", "MainPID", "ControlPID", "NRestarts", "ExecMainStatus", "Result", "ExecMainStartTimestampMonotonic", "LoadState", "ActiveState", "SubState"} {
 		if _, ok := m[key]; !ok {
-			t.Fatalf("captured systemd response lacks %s: %s", key, b)
+			return nil, fmt.Errorf("captured systemd response lacks %s: %s", key, b)
 		}
 	}
-	t.Logf("captured unit %s: %s", unit, strings.TrimSpace(string(b)))
-	return m
+	return m, nil
 }
 func gap1Status(addr, volume string) (int, []byte, error) {
 	r, e := (&http.Client{Timeout: time.Second}).Get("http://" + addr + "/status/durable?volume=" + volume)
@@ -395,7 +502,7 @@ func gap1PlannedStopDoesNotRestart(t *testing.T, ws control.WorkspaceServiceClie
 // assignment and names r-old, so only the observed different-replica fact may
 // permit 78. Run after the live holder has ACKed and exited, avoiding a node
 // registration change while that holder is serving.
-func gap1SupersededDoesNotRestart(t *testing.T, stem, exe string, args []string, root, volume string) {
+func gap1SupersededDoesNotRestart(t *testing.T, fixture *gap1Fixture, stem, exe string, args []string, root, volume string) {
 	t.Helper()
 	changed := append([]string(nil), args...)
 	addr := leaseBinaryAddress(t)
@@ -406,7 +513,7 @@ func gap1SupersededDoesNotRestart(t *testing.T, stem, exe string, args []string,
 		}
 	}
 	unit := stem + "-superseded"
-	startGAP1Unit(t, unit, true, exe, changed...)
+	fixture.start(t, unit, true, exe, changed...)
 	waitGAP1(t, "superseded process never observed the master's other-replica fact", 15*time.Second, func() bool {
 		resp, err := (&http.Client{Timeout: time.Second}).Get("http://" + addr + "/status?volume=" + volume)
 		if err != nil {
@@ -544,9 +651,9 @@ func gap1JournalTerminalSuccess(t *testing.T, unit, invocation string, expectedS
 // Calibrate the terminal parser against the real supervisor before any holder
 // is killed. Successful transient units can be collected; their journal is the
 // proof, never the default zeros returned for an unknown unit.
-func gap1ProbeTerminalSuccess(t *testing.T, unit string) {
+func gap1ProbeTerminalSuccess(t *testing.T, fixture *gap1Fixture, unit string) {
 	t.Helper()
-	startGAP1Unit(t, unit, true, "/bin/true")
+	fixture.start(t, unit, true, "/bin/true")
 	waitGAP1(t, "systemd terminal-success parser preflight failed", 5*time.Second, func() bool {
 		return gap1JournalTerminalSuccess(t, unit, "", 1)
 	})

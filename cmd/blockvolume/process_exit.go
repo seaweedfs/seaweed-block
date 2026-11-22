@@ -28,15 +28,35 @@ type workspaceExit struct {
 // INV-WS-STARTUP-RETRY-001: the first outcome is immutable. The channel is a
 // single latched wakeup, not a queue of competing shutdown events.
 type processExit struct {
-	parent   context.Context
-	once     sync.Once
-	done     chan struct{}
-	decision chan workspaceExit
+	parent        context.Context
+	once          sync.Once
+	done          chan struct{}
+	decision      chan workspaceExit
+	startupMu     sync.Mutex
+	startupCtx    context.Context
+	startupCancel context.CancelFunc
 }
 
 func newProcessExit(ctx context.Context) *processExit {
-	return &processExit{parent: ctx, done: make(chan struct{}), decision: make(chan workspaceExit, 1)}
+	startupCtx, cancel := context.WithCancel(ctx)
+	return &processExit{parent: ctx, done: make(chan struct{}), decision: make(chan workspaceExit, 1), startupCtx: startupCtx, startupCancel: cancel}
 }
+
+// INV-WS-STARTUP-RETRY-001: once the resource owner takes shutdown, startup
+// outcomes cannot arbitrate it. ACK success is still selected only after ACK.
+func (e *processExit) stopChunkStartup() {
+	e.startupMu.Lock()
+	defer e.startupMu.Unlock()
+	e.startupCancel()
+}
+func (e *processExit) chooseChunkStartup(out workspaceExit) {
+	e.startupMu.Lock()
+	defer e.startupMu.Unlock()
+	if e.startupCtx.Err() == nil {
+		e.choose(out)
+	}
+}
+
 func (e *processExit) choose(out workspaceExit) {
 	e.once.Do(func() {
 		if e.parent.Err() != nil {
@@ -118,6 +138,8 @@ func watchChunkStartup(ctx context.Context, e *processExit, f flags, h *volume.H
 		}
 
 		select {
+		case <-e.startupCtx.Done():
+			return
 		case <-ctx.Done():
 			return
 		case <-e.done:
@@ -136,6 +158,7 @@ func waitWorkspaceStop(e *processExit, f flags, h *volume.Host, requests <-chan 
 	case <-e.done:
 		return nil, done
 	case request := <-requests:
+		e.stopChunkStartup()
 		out := workspaceExit{reason: "revoked"}
 		if !h.WorkspaceLeaseRevoking() {
 			out = workspaceRetryOutcome("lease_expired", h)
@@ -145,6 +168,7 @@ func waitWorkspaceStop(e *processExit, f flags, h *volume.Host, requests <-chan 
 		}
 		return &request, done
 	case err := <-done:
+		e.stopChunkStartup()
 		fmt.Fprintln(os.Stderr, "blockvolume: workspace lease stopped:", err)
 		e.choose(workspaceRetryOutcome("lease_expired", h))
 		return nil, nil
@@ -186,5 +210,5 @@ func chooseChunkStartupExit(e *processExit, f flags, h *volume.Host, p chunkStar
 		return false
 	}
 	out := workspaceRetryOutcome("assignment_timeout", h)
-	return p.ChooseChunkStartupExit(f.volumeID, gen, func() { e.choose(out) })
+	return p.ChooseChunkStartupExit(f.volumeID, gen, func() { e.chooseChunkStartup(out) })
 }

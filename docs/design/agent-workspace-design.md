@@ -485,7 +485,7 @@ Guest I/O never acquires a slot. An unavailable pool skips background cuts; urge
 A workspace chunk primary that exhausts its existing assignment wait, or whose
 lease fences while serving, exits 75 after fail-closed cleanup bounded by the
 existing five-second lease-drain limit. systemd restarts on failure with
-RestartSec=5s. Only a master fact naming another replica permits exit 78;
+RestartSec=5s. Only a newer master fact naming another replica permits exit 78;
 RestartPreventExitStatus=78 suppresses automatic restarts until an operator
 explicitly starts the unit. A higher epoch for the same replica retries.
 An ACKed planned revocation and a signal stop retain their normal exit status.
@@ -500,14 +500,21 @@ stateDiagram-v2
   AwaitingAssignment --> Serving: grant and HEAD claim
   AwaitingAssignment --> Exit75: assignment wait exhausted
   Serving --> Exit75: lease fence
-  AwaitingAssignment --> Exit78: master names another replica
-  Serving --> Exit78: lease fence and another-replica fact
+  AwaitingAssignment --> Exit78: newer master fact names another replica
+  Serving --> Exit78: lease fence and newer other-replica fact
   Exit75 --> AwaitingAssignment: supervisor starts new process
   Exit78 --> AwaitingAssignment: explicit operator start
   AwaitingAssignment --> SealedReplay: assigned same-epoch sealed HEAD
   SealedReplay --> Exit75: lease fence
   SealedReplay --> [*]: signal
-  Serving --> [*]: revoke ACK or signal
+  AwaitingAssignment --> Draining: planned revoke owns shutdown; retire startup watcher
+  Serving --> Draining: planned revoke owns shutdown
+  SealedReplay --> Draining: planned revoke owns shutdown
+  Draining --> [*]: stored detached proof and revoke ACK
+  Draining --> Exit75: ACK unconfirmed
+  Serving --> [*]: signal
 ```
 
 GAP-1 exit classification compares a newer other-replica fact with the newest own assignment this process observed, including a locally blocked assignment; historical other facts do not suppress restart. The shared `Host.IsSuperseded` predicate is reused without changing frontend admission. An unconfirmed revocation ACK exits75 with `revoke_ack_unconfirmed`. Restart can retry ACK only while the original revoking lease remains valid; after expiry the revoking/recorded-ACK re-grant guards still refuse, so restart alone cannot resolve that case and operator recovery is required.
+
+Once the resource owner accepts a stop request, startup-monitor cancellation and startup exit choice serialize on the process owner's startup mutex. A delayed startup deadline cannot replace planned drain ownership; success remains unselected until the real guard confirms the stored detached proof's ACK. A wait that already chose sealed replay or stale-local-root diagnostics keeps that disposition even if its context expires at return.

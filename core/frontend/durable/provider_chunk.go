@@ -164,10 +164,11 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 	defer func() {
 		log.Printf("durable: chunk authority wait for volume=%s ended after %s: %s", volumeID, time.Since(start), ended)
 	}()
+	retained := false // this generation already chose sealed replay or diagnostics
 	waitCtx, endWait := context.WithTimeout(p.closeCtx, limit)
 	defer endWait()
 	defer func() {
-		if !errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
+		if retained || !errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
 			return
 		}
 		// The old wait must not overwrite a newer recovery's readiness.
@@ -235,6 +236,7 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 		case errors.Is(err, storage.ErrChunkLayerDetached):
 			// INV-WS-STARTUP-RETRY-001: an assigned sealed incarnation stays
 			// non-serving for exact seal replay; restarting cannot unseal it.
+			retained = true
 			ended = "sealed assignment, retained for replay"
 			h.backend.SetOperational(false, "sealed assignment; replay only")
 			return
@@ -242,6 +244,7 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 			ended = "fenced, not serving"
 			log.Printf("durable: chunk layer for volume=%s: %v (not serving)", volumeID, err)
 			if errors.Is(err, ErrChunkStaleLocalRoot) {
+				retained = true
 				h.attachMu.Lock()
 				if p.current(h, gen) && h.chunk == nil {
 					h.backend.SetOperational(false, "chunk layer attach refused: "+err.Error())
