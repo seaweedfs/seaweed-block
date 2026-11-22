@@ -122,7 +122,7 @@ func (h *Host) observationVolume(volumeID string, rec lifecycle.VolumeRecord, pl
 	volume.Replicas = replicas
 	volume.ObservedReplicas = countObservedReplicas(replicas)
 	if volume.PrimaryReplica != "" {
-		// the server on the authority line (issued holder), not placement (INV-ASSIGNMENT-HOLDER-IDENTITY-001)
+		// the server on the authority line (issued holder), not placement (INV-AUTH-HOLDER-IDENTITY-001)
 		volume.PrimaryNode = h.workspaceSourceHost(volumeID, line.ReplicaID, line.Epoch)
 		volume.PublishTarget = publishTargetForReplica(replicas, volume.PrimaryReplica)
 	}
@@ -233,7 +233,7 @@ func (h *Host) observationReplicas(volumeID string, placement lifecycle.Placemen
 		}
 		fact, ok := h.ObservationHost().Store().SlotFact(volumeID, replicaID)
 		if hasLine && line.Assigned && replicaID == line.ReplicaID {
-			// the primary's evidence comes only from the line's server (INV-ASSIGNMENT-HOLDER-IDENTITY-001)
+			// the primary's evidence comes only from the line's server (INV-AUTH-HOLDER-IDENTITY-001)
 			_, fact, ok = h.holderSlotFact(volumeID, replicaID, line.Epoch)
 		}
 		if ok {

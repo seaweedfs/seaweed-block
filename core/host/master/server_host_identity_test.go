@@ -7,11 +7,104 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/authority"
+	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 	"github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+// INV-AUTH-HOLDER-IDENTITY-001: after an issued workspace move the authority line is on the new host while the placement
+// slot may still name the old one. The displayed primary node, its publish target and the CSI portal follow the ISSUED
+// holder; the old host, still reporting the replica id with a newer observation, wins none of them.
+func TestDisplayedPrimaryIsTheIssuedHolderNotThePlacementSlot(t *testing.T) {
+	heads := map[string]authority.WorkspaceHead{"a2": {Gen: 9, Epoch: 1, Holder: "node-b/r1", RemoteLSN: 42, Detached: true}}
+	m, err := New(Config{Listen: "127.0.0.1:0", AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), WorkspaceRPC: true,
+		WorkspaceHeadReader: func(_ context.Context, v string) (authority.WorkspaceHead, error) { return heads[v], nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Start()
+	defer closeTestMaster(t, m)
+	conn, err := grpc.NewClient(m.Addr(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	ws, lc, obs := control.NewWorkspaceServiceClient(conn), control.NewLifecycleServiceClient(conn), control.NewObservationServiceClient(conn)
+	for _, n := range []struct{ id, d, c string }{{"node-a", "127.0.0.1:19101", "127.0.0.1:19102"}, {"node-b", "127.0.0.1:19301", "127.0.0.1:19302"}} {
+		if _, err := m.Lifecycle().Nodes.RegisterNode(lifecycle.NodeRegistration{ServerID: n.id, DataAddr: n.d, CtrlAddr: n.c}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := lc.CreateVolume(ctx, &control.CreateVolumeRequest{VolumeId: "a2", SizeBytes: 1 << 20, ReplicationFactor: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Lifecycle().Placements.ApplyPlan(lifecycle.PlacementPlan{VolumeID: "a2", DesiredRF: 1,
+		Candidates: []lifecycle.PlacementCandidate{{VolumeID: "a2", ServerID: "node-b", ReplicaID: "r1", Source: lifecycle.PlacementSourceExistingReplica}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := obs.ReportHeartbeat(ctx, &control.HeartbeatReport{ServerId: "node-b", SentAt: timestamppb.Now(), Reachable: true, Eligible: true,
+		Slots: []*control.HeartbeatSlot{{VolumeId: "a2", ReplicaId: "r1", DataAddr: "127.0.0.1:19301", CtrlAddr: "127.0.0.1:19302"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.RunLifecycleProductTick(); err != nil {
+		t.Fatal(err)
+	}
+	a2 := waitAuthorityLine(t, m.Publisher(), "a2")
+	id := &control.WorkspaceIdentity{ServerId: "node-b", VolumeId: "a2", ReplicaId: "r1", Epoch: a2.Epoch}
+	if _, err := ws.RenewWorkspaceLease(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.RevokeWorkspace(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.AckWorkspaceRevoked(ctx, &control.WorkspaceRevocationAck{Identity: id, HeadGen: 9}); err != nil {
+		t.Fatal(err)
+	}
+	g, err := ws.MoveWorkspace(ctx, &control.WorkspaceMove{RequestId: "to-a", VolumeId: "a2", ExpectedReplicaId: "r1", ExpectedEpoch: a2.Epoch,
+		TargetReplicaId: "r1", TargetServerId: "node-a", TargetDataAddr: "127.0.0.1:19111", TargetCtrlAddr: "127.0.0.1:19112", Kind: "clean"})
+	if err != nil || !g.Issued || g.NewHost != "node-a" {
+		t.Fatalf("move to node-a: %+v %v", g, err)
+	}
+	line, _ := m.Publisher().VolumeAuthorityLine("a2")
+	if p, ok := m.Lifecycle().Placements.GetPlacementSnapshot("a2"); ok {
+		t.Logf("placement after the move: %+v (the displayed primary must not depend on it)", p.Slots)
+	}
+	fact := func(server, host string, at time.Time) authority.Observation {
+		return authority.Observation{ServerID: server, ObservedAt: at, Server: authority.ServerFact{Reachable: true, Eligible: true},
+			Slots: []authority.SlotFact{{VolumeID: "a2", ReplicaID: "r1", DataAddr: host + ":19111", CtrlAddr: host + ":19112",
+				Reachable: true, ReadyForPrimary: true, Eligible: true, EvidenceScore: 10,
+				Frontends: []authority.FrontendTargetFact{{Protocol: "iscsi", Addr: host + ":3260", IQN: "iqn.2026-05.io.seaweedfs:a2", LUN: 1}}}}}
+	}
+	now := time.Now().UTC()
+	if err := m.ObservationHost().Ingest(fact("node-a", "127.0.0.1", now)); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.ObservationHost().Ingest(fact("node-b", "192.0.2.9", now.Add(time.Second))); err != nil { // the old host, newer
+		t.Fatal(err)
+	}
+	if holder := m.workspaceSourceHost("a2", line.ReplicaID, line.Epoch); holder != "node-a" {
+		t.Fatalf("issued holder %q, want node-a (line %+v)", holder, line)
+	}
+	var vol *struct{ node, target string }
+	for _, v := range m.ObservationSnapshot(time.Now().UTC()).Volumes {
+		if v.VolumeID == "a2" {
+			vol = &struct{ node, target string }{v.PrimaryNode, v.PublishTarget}
+		}
+	}
+	if vol == nil || vol.node != "node-a" || vol.target != "127.0.0.1:3260" {
+		t.Fatalf("displayed primary %+v, want node-a at 127.0.0.1:3260 (the issued holder, not the placement slot or the old host)", vol)
+	}
+	resp, err := newServices(m).QueryVolumeStatus(ctx, &control.StatusRequest{VolumeId: "a2"})
+	if err != nil || len(resp.Frontends) == 0 || resp.Frontends[0].Addr != "127.0.0.1:3260" {
+		t.Fatalf("CSI portal %v %v, want the issued holder's 127.0.0.1:3260", resp.GetFrontends(), err)
+	}
+}
 
 // heartbeatFrom sends a heartbeat for server whose slot addresses are on host.
 func (r *isolationRig) heartbeatFrom(server, host string) error {
@@ -20,7 +113,7 @@ func (r *isolationRig) heartbeatFrom(server, host string) error {
 	return err
 }
 
-// INV-ASSIGNMENT-HOLDER-IDENTITY-001: OSS has no host authentication, so a server id names a host only if the master
+// INV-AUTH-HOLDER-IDENTITY-001: OSS has no host authentication, so a server id names a host only if the master
 // refuses that id from any host other than the one registered for it. Two processes started with the same --server-id
 // on different hosts: the one on the registered host is accepted, the other is refused, and it never enters the
 // observations (a copied config cannot borrow the registered host's holder identity).
@@ -38,7 +131,7 @@ func TestServerIDRefusedFromAHostOtherThanItsRegisteredOne(t *testing.T) {
 	}
 }
 
-// INV-ASSIGNMENT-HOLDER-IDENTITY-001: the CSI portal (QueryVolumeStatus frontends) and the displayed primary
+// INV-AUTH-HOLDER-IDENTITY-001: the CSI portal (QueryVolumeStatus frontends) and the displayed primary
 // (ClusterStatus primary node and publish target) come from the server on the volume's authority line, never from
 // whichever host sent the freshest heartbeat for the same replica id. A stale old host that still reports the
 // primary's replica, even more recently, changes neither.

@@ -17,7 +17,7 @@ func addrHost(addr string) string {
 	return strings.TrimSpace(addr)
 }
 
-// refuseServerIDFromOtherHost implements the host half of INV-ASSIGNMENT-HOLDER-IDENTITY-001. OSS has no host
+// refuseServerIDFromOtherHost implements the host half of INV-AUTH-HOLDER-IDENTITY-001. OSS has no host
 // authentication, so a server id names a host only if every address a heartbeat reports under that id is on the host
 // registered for it. A second process started with the same --server-id elsewhere (a copied config) is refused before
 // its slots reach the observations. Only the host part is compared (each volume process listens on its own ports);
@@ -55,7 +55,7 @@ func (h *Host) refuseServerIDFromOtherHost(r *control.HeartbeatReport) error {
 }
 
 // holderSlotFact is the slot fact of replica on the server the authority line names (workspaceSourceHost); a
-// same-replica claim from any other server, however fresh, is never used (INV-ASSIGNMENT-HOLDER-IDENTITY-001).
+// same-replica claim from any other server, however fresh, is never used (INV-AUTH-HOLDER-IDENTITY-001).
 // No resolvable holder: no fact (fail closed).
 func (h *Host) holderSlotFact(volumeID, replicaID string, epoch uint64) (string, authority.SlotFact, bool) {
 	holder := h.workspaceSourceHost(volumeID, replicaID, epoch)

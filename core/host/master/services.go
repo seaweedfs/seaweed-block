@@ -292,7 +292,7 @@ func (s *services) ReportHeartbeat(ctx context.Context, r *control.HeartbeatRepo
 	if err := s.host.refuseColocatedHeartbeat(r.ServerId, storeident.Identity{MachineID: r.GetMachineId(), Dev: r.GetDurableRootDev(), FSID: r.GetDurableRootFsid()}); err != nil {
 		return nil, status.Error(codes.FailedPrecondition, err.Error())
 	}
-	// INV-ASSIGNMENT-HOLDER-IDENTITY-001: one server id names one host.
+	// INV-AUTH-HOLDER-IDENTITY-001: one server id names one host.
 	if err := s.host.refuseServerIDFromOtherHost(r); err != nil {
 		return nil, status.Error(codes.FailedPrecondition, err.Error())
 	}
@@ -514,7 +514,7 @@ func (s *services) QueryVolumeStatus(ctx context.Context, req *control.StatusReq
 		}
 		replicaIDs = primaryFirstReplicaIDs(replicaIDs, line.ReplicaID)
 		// the primary's portal comes from the server on the line, never a fresher same-replica claim elsewhere
-		// (INV-ASSIGNMENT-HOLDER-IDENTITY-001)
+		// (INV-AUTH-HOLDER-IDENTITY-001)
 		resp.Frontends = statusFrontendsFor(s.host.obs, req.VolumeId, replicaIDs, line.Assigned, func(replicaID string) (authority.SlotFact, bool) {
 			if replicaID == line.ReplicaID {
 				_, fact, ok := s.host.holderSlotFact(req.VolumeId, replicaID, line.Epoch)
