@@ -65,12 +65,91 @@ sudo install -m 0640 -g sw-block deploy/config/*.env deploy/config/topology.yaml
 sudo install -m 0644 deploy/systemd/*.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now sw-blockmaster sw-blockvolume
-journalctl -u sw-blockvolume -f    # wait for "nvme-listening"
+journalctl -u sw-blockvolume -f    # wait for "adopted as PRIMARY" (see the required setup below)
 ```
 
 The binaries take command-line flags. The `SWB_*` variables are read only by
 the example units, which turn them into flags. blockvolume itself reads only
 `SW_BLOCK_ISCSI_CHAP_USERNAME` and `SW_BLOCK_ISCSI_CHAP_SECRET`.
+
+## Required setup: make the volume known to blockmaster
+
+blockmaster gives a blockvolume an assignment only for a volume and replica
+slot it already knows. It does not learn volumes from heartbeats. Without an
+assignment, blockvolume starts, opens its storage and its listeners, and
+serves no I/O.
+
+Outside Kubernetes, a volume becomes known through the accepted-topology file.
+Do these steps before you start blockvolume:
+
+1. **Write the topology file.** One entry per volume, one slot per replica;
+   `volume_id`, `replica_id` and `server_id` are required. This is
+   [`deploy/config/topology.yaml`](../deploy/config/topology.yaml):
+
+   ```yaml
+   volumes:
+     - volume_id: v1
+       slots:
+         - replica_id: r1
+           server_id: s1
+   ```
+
+2. **Start blockmaster with the file and the matching slot count.**
+   `--expected-slots-per-volume` must equal the number of slots of each
+   volume: `1` here (the default is `3`).
+
+   ```bash
+   blockmaster --authority-store /var/lib/sw-block-master/authority --listen 127.0.0.1:9180 \
+     --topology /etc/sw-block/topology.yaml --expected-slots-per-volume 1
+   ```
+
+   In `blockmaster.env` these are `SWB_MASTER_TOPOLOGY` and
+   `SWB_MASTER_EXPECTED_SLOTS`. blockmaster reads the file only at start:
+   after you change it, run `sudo systemctl restart sw-blockmaster`.
+
+3. **Start blockvolume with the identity of one slot.** `--volume-id`,
+   `--replica-id` and `--server-id` (`SWB_VOLUME_ID`, `SWB_REPLICA_ID`,
+   `SWB_SERVER_ID`) must equal one slot of the file: `v1`, `r1`, `s1` here.
+
+**Check before starting blockvolume.** Without a usable topology, blockmaster
+logs this line at start; if `journalctl -u sw-blockmaster` shows it, redo
+steps 1 and 2:
+
+```
+blockmaster: WARNING: --topology not supplied or empty; controller will not mint assignments until topology is provided
+```
+
+A file that cannot be read or parsed stops blockmaster with
+`blockmaster: topology: ...`.
+
+**Check after.** blockvolume logs `blockvolume: volume v1 adopted as PRIMARY
+at r1@<epoch>`, and its status shows a positive `Epoch`, `"Healthy":true` and
+`"AuthorityRole":"primary"`:
+
+```bash
+journalctl -u sw-blockvolume | grep 'adopted as PRIMARY'
+curl -s 'http://127.0.0.1:9203/status?volume=v1'; echo
+```
+
+`nvme-listening` alone does not prove this: blockvolume starts its NVMe/TCP
+listener before it has an assignment. Without one, the status shows
+`"Epoch":0`, `"Healthy":false` and `"AuthorityRole":"unknown"`.
+
+| What you see | Missing step |
+|---|---|
+| blockvolume logs `blockvolume: subscribe stream: rpc error: code = Unknown desc = subscribe: volume "v1" not in accepted topology`, again every few seconds | blockmaster has no topology, or `v1` is not in it (steps 1, 2) |
+| `walstore-chunk` only: `durable: chunk layer for volume=v1 waits for master authority (up to 30s): projection lacks healthy=false epoch=0`, and 30 s later `durable: chunk authority wait for volume=v1 ended after ...: assignment unavailable, not serving (projection lacks healthy=false epoch=0)` | The same. This wait runs once per start: after the fix, restart blockvolume too |
+| No error in either log, and `"Epoch":0` stays | `--expected-slots-per-volume` differs from the slot count (step 2), or `--server-id` or `--replica-id` differ from the slot (step 3) |
+| blockmaster logs `authority: rejected ask ...: workspace publication: no lifecycle VolumeRecord for v1; register it (CreateVolume) before publishing` | blockmaster runs with `--lifecycle-store`: a topology slot is then not enough, the volume also needs a volume record (below) |
+
+**Workspace lease volumes (`--workspace-lease`).** Besides the steps above,
+blockmaster needs `--workspace-rpc`, `--workspace-head-base-url` and
+`--lifecycle-store`, and the volume needs a single-replica volume record in
+that store. This release has no `sw-block` command that creates that record. Check with `sw-block ops workspace show --master 127.0.0.1:9180
+--volume v1`; it names the first missing piece: `workspace RPC disabled`,
+`lifecycle store unavailable`, or `workspace move requires an existing RF1
+volume`. A move target must also be a registered node, or the move is refused
+with `move target node "s2" is not registered`.
 
 ## blockmaster settings
 
@@ -78,7 +157,7 @@ the example units, which turn them into flags. blockvolume itself reads only
 |---|---|---|---|
 | `SWB_MASTER_AUTHORITY_STORE` | `--authority-store` | required | Durable authority store: assignments, epochs, leases |
 | `SWB_MASTER_LISTEN` | `--listen` | `127.0.0.1:0` | gRPC address; unauthenticated, keep it on loopback or a trusted network |
-| `SWB_MASTER_TOPOLOGY` | `--topology` | empty (no assignments minted) | Accepted-topology YAML: volumes and replica slots |
+| `SWB_MASTER_TOPOLOGY` | `--topology` | empty (no assignments minted: no volume serves) | Accepted-topology YAML: volumes and replica slots; required outside Kubernetes, read only at start |
 | `SWB_MASTER_EXPECTED_SLOTS` | `--expected-slots-per-volume` | `3` | Replica slots per volume; `1` for a single replica |
 | `SWB_MASTER_FRESHNESS_WINDOW` | `--freshness-window` | `30s` | How long a heartbeat stays fresh |
 | `SWB_MASTER_PENDING_GRACE` | `--pending-grace` | `1s` | Startup grace before a missing observation is unsupported |
@@ -154,6 +233,10 @@ group while volumes run.
     - **On an NVMe root,** and in that disk's other attaches: the fsync took 50-75 microseconds and the publish 2-3 milliseconds.
     - **Cause:** not yet established.
   - **Check the device:** `lsblk -d -o NAME,ROTA,TRAN,MODEL`, and the line blockvolume logs at start, `storage: WAL/extent sync=... file=... reason=...`, whose reason names the root's device.
+- **NVMe/TCP needs native NVMe multipath on the host (`nvme_core multipath=Y`, the Ubuntu default).**
+  The device lookup below, and the CSI node plugin's, find the namespace as an `nvmeXnY` entry under
+  `/sys/class/nvme-subsystem/nvme-subsysN/`; with multipath off that directory holds no namespace entry and
+  neither finds the device. Check: `cat /sys/module/nvme_core/parameters/multipath` must print `Y`.
 - ublk needs root. Use `sw-blockvolume-ublk.service` instead of editing the
   unprivileged unit, and load `ublk_drv` at boot
   (`echo ublk_drv | sudo tee /etc/modules-load.d/ublk.conf`).
@@ -293,6 +376,67 @@ The script's default engine is `SW_BLOCK_DURABLE_IMPL=smartwal`; the command
 above sets `walstore`, the engine used by the Kubernetes chart and the
 workspace path. There is no equivalent script for ublk yet.
 
+## Planned workspace hand-over
+
+For an RF1 chunk volume with a workspace lease, inspect the current logical
+holder with `sw-block ops workspace show --master MASTER --volume V`. Copy the
+replica and epoch exactly. The view prints the master's lease state, recorded
+revocation ACK (including its HEAD generation), move records and bindings. It
+does not infer a physical holder from the binding list; a binding is not proof
+of a current assignment. Reported validity is a snapshot, not permission to
+serve I/O.
+`expired` means the master reported no positive **host validity** at query
+time; it is not a claim that the master's forced-move horizon has passed.
+Only the master admits a move.
+
+Perform a clean hand-over in this order:
+
+1. Stop the application/writer and prevent new I/O to the old attachment.
+2. Seal the idle volume while its lease still permits publication:
+
+   ```bash
+   sw-block ops chunk detach --plain --volume V --status-addr OLD_STATUS --timeout 120s >seal.json
+   ```
+
+   Busy admission refuses the operation. Do not proceed on any failure or
+   unknown outcome. JSON remains on stdout; a successful command also prints
+   `sealed HEAD generation: G` on its own stderr line, taken from the same
+   JSON `headGen` field on stdout. Copy the positive `G`.
+3. Request revocation using that seal and the identity from `show`:
+
+   ```bash
+   sw-block ops workspace revoke --master MASTER --volume V --replica R --epoch E --sealed-gen G
+   ```
+
+   Seal **before** revocation: revoking first can prevent the old host from
+   publishing the final image and leave only a lossy forced move. The CLI
+   requires exactly one of `--sealed-gen G` or `--without-seal`. The former is
+   your statement, not a storage check. The latter explicitly abandons the
+   unpublished tail and does not promise that a clean move is possible.
+4. Run `ops workspace show --master MASTER --volume V` until the **recorded
+   ACK** names the same replica `R`, epoch `E` and HEAD generation `G`.
+   A successful `revoke` reply alone is not that ACK.
+5. Ask for the clean authority move:
+
+   ```bash
+   sw-block ops workspace move --clean --master MASTER --volume V --replica R --epoch E \
+     --target-host NEW_HOST --target-data DATA_ADDR --target-ctrl CTRL_ADDR --request-id MOVE_ID
+   ```
+
+   Use registered target endpoints. The master checks the seal and matching
+   ACK. The target may be the source host once sealed, when the server supports
+   same-host clean reload. A command refuses rather than bypassing a missing
+   seal, ACK or current identity. On an **unknown outcome**, rerun with the
+   **SAME `--request-id MOVE_ID`**; never use a new id to guess whether it ran.
+6. Start `blockvolume` on the target separately with the granted replica and
+   new epoch and the normal workspace-lease options. The move command only
+   transfers authority; it does not start the target or reconnect clients.
+
+Workspace commands exit 0 on success, 1 on a definite server refusal, 2 on local
+usage refusal, 3 on an unknown outcome, and 4 on an unproven readout. Plain
+detach keeps the chunk CLI's existing JSON error and exit policy. Neither CLI
+retries or polls automatically.
+
 ## Snapshots, restore and space (walstore-chunk)
 
 **Recovery point.**
@@ -371,6 +515,27 @@ Check the data afterwards. `--depth data` reads every chunk once.
 ```bash
 sw-block ops chunk verify --volume v1 --chunk-filer FILER --all-snapshots --depth data --timeout 30m
 ```
+
+### SeaweedFS maintenance commands that destroy chunk volumes
+
+A walstore-chunk volume keeps its data in SeaweedFS as needles that **no file's chunk list names**: the volume's
+own records in the filer point at them. SeaweedFS tools that decide what is referenced from file chunk lists
+therefore see every chunk of every volume and snapshot as unreferenced.
+
+- **Never run `volume.fsck` with `-reallyDeleteFromVolume`** (alone or with `-forcePurging`) on a SeaweedFS
+  cluster that stores walstore-chunk volumes. It deletes the needles it considers orphaned, once they are older
+  than `-cutoffTimeAgo` (5 hours by default): that is the volumes' data, including every snapshot. There is no undo.
+- **Never run `volume.fsck -findMissingChunksInFiler` with `-reallyDeleteFilerEntries` or
+  `-reallyDeleteFromVolume`** on such a cluster either.
+- `volume.fsck` **without** those flags only reports. Its orphan list will contain the chunk needles; that is
+  expected and is not a fault.
+- **Give chunk data its own collection** (`--chunk-collection`, `SWB_CHUNK_COLLECTION`) so it is easy to keep
+  cluster maintenance away from it. Do not put a TTL on that collection and do not delete it: both remove needles
+  without regard to what refers to them.
+- `filer.sync`, `filer.backup` and `filer.replicate` copy file chunk lists. They do **not** copy a walstore-chunk
+  volume: the copied records would point at needles that do not exist on the target.
+- Space is returned only by the two steps above (`sw-block ops chunk gc`, then a SeaweedFS vacuum). `volume.vacuum`
+  is safe: it compacts needles that were already deleted.
 
 ### Restoring a snapshot into a new volume
 

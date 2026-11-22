@@ -213,11 +213,11 @@ func (c *Client) ForceMove(ctx context.Context, m ForcedMove) (*control.Workspac
 }
 
 // checkGrant binds a successful answer to the request that was sent: an
-// issued forced grant for this request id and volume, from the expected
+// issued grant of the requested kind for this request id and volume, from the expected
 // holder at the expected epoch to the requested target, at a higher epoch.
 // Anything else leaves the outcome unknown.
 func checkGrant(g *control.WorkspaceGrant, q *control.WorkspaceMove) error {
-	if !g.GetIssued() || g.GetKind() != "forced" || g.GetRequestId() != q.GetRequestId() || g.GetVolumeId() != q.GetVolumeId() ||
+	if !g.GetIssued() || g.GetKind() != q.GetKind() || g.GetRequestId() != q.GetRequestId() || g.GetVolumeId() != q.GetVolumeId() ||
 		g.GetOldReplicaId() != q.GetExpectedReplicaId() || g.GetOldEpoch() != q.GetExpectedEpoch() ||
 		g.GetNewReplicaId() != q.GetTargetReplicaId() || g.GetNewHost() != q.GetTargetServerId() || g.GetNewEpoch() <= g.GetOldEpoch() {
 		return fmt.Errorf("the answer does not match the request (issued=%t kind=%q request=%q volume=%q old=%s@%d new=%s@%d on %q)",

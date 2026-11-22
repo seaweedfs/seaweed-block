@@ -259,14 +259,15 @@ func chunkSnapshot(args []string, stdout, stderr io.Writer) int {
 func chunkDetach(args []string, stdout, stderr io.Writer) int {
 	fs := chunkFlagSet("detach", stderr)
 	var (
-		volumeID, statusAddr    string
-		timeout                 time.Duration
-		frozen, allowOverBudget bool
-		freezeStartedAtNs       int64
+		volumeID, statusAddr           string
+		timeout                        time.Duration
+		plain, frozen, allowOverBudget bool
+		freezeStartedAtNs              int64
 	)
 	fs.StringVar(&volumeID, "volume", "", "volume id")
 	fs.StringVar(&statusAddr, "status-addr", "", "blockvolume status address or URL (with --chunk-control-endpoint)")
 	fs.DurationVar(&timeout, "timeout", 120*time.Second, "operation bound (capped at the server's OpDeadline)")
+	fs.BoolVar(&plain, "plain", false, "seal an idle volume without pre-copy; prints JSON headGen as sealed HEAD generation on stderr")
 	fs.BoolVar(&frozen, "frozen", false, "not supported in this release: the server refuses a frozen detach (frozen_detach_unsupported)")
 	fs.Int64Var(&freezeStartedAtNs, "freeze-started-at-ns", 0, "not supported in this release; only valid with --frozen")
 	fs.BoolVar(&allowOverBudget, "allow-over-budget", false, "not supported in this release; only valid with --frozen")
@@ -276,10 +277,19 @@ func chunkDetach(args []string, stdout, stderr io.Writer) int {
 	if volumeID == "" || statusAddr == "" {
 		return chunkFail("detach", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--volume and --status-addr are required", false)
 	}
+	// M5 PlainStop -> Quiesce, INV-CUT-PLAIN-DETACH-001: an idle seal has
+	// its own finite caller bound and cannot encode frozen policy fields.
+	if plain && (timeout <= 0 || frozen || freezeStartedAtNs != 0 || allowOverBudget || fs.NArg() != 0) {
+		return chunkFail("detach", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--plain requires positive --timeout, no extra arguments and no frozen options", false)
+	}
 	if (frozen && freezeStartedAtNs <= 0) || (!frozen && (freezeStartedAtNs != 0 || allowOverBudget)) {
 		return chunkFail("detach", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--frozen requires --freeze-started-at-ns; --allow-over-budget requires --frozen", false)
 	}
 	body := map[string]any{"volumeID": volumeID}
+	if plain {
+		body["plain"] = true
+		return chunkPlainDetachPost(statusAddr, volumeID, timeout, body, stdout, stderr)
+	}
 	if frozen {
 		body["frozen"] = true
 		body["freezeStartedAtNs"] = freezeStartedAtNs
