@@ -43,6 +43,7 @@ jobs:
           HEAD: ${{ github.event.pull_request.head.sha }}
           PR: ${{ github.event.pull_request.number }}
           BODY: ${{ github.event.pull_request.body }}
+          TITLE: ${{ github.event.pull_request.title }}
         run: |
           set -euo pipefail
           bash .github/scripts/spec-trace-check-test.sh
@@ -60,3 +61,8 @@ jobs:
             done
           mkdir -p blobs
           bash .github/scripts/spec-trace-check.sh body.txt blobs <changed.bin
+          # Internal names stay out of this public repository: added lines,
+          # commit messages, title and description (no PR code is run).
+          bash .github/scripts/public-text-check-test.sh
+          printf '%s' "$TITLE" >title.txt
+          bash .github/scripts/public-text-check.sh "$mb" "$HEAD" title.txt body.txt
