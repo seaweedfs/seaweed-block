@@ -44,7 +44,7 @@ func TestOpsChunkPlainDetachPreservesTypedFailure(t *testing.T) {
 			reply := `{"code":"` + reason + `","message":"seal refused","retryable":true}`
 			srv, got := chunkServer(t, http.StatusConflict, reply)
 			code, out, errOut := runChunk("detach", "--plain", "--volume", "vol", "--status-addr", srv.URL)
-			if code != 1 || out != reply+"\n" || len(*got) != 1 || strings.Contains(errOut, "sealed HEAD generation:") {
+			if code != 1 || out != reply || len(*got) != 1 || strings.Contains(errOut, "sealed HEAD generation:") {
 				t.Fatalf("exit=%d stdout=%q stderr=%q requests=%d", code, out, errOut, len(*got))
 			}
 		})
