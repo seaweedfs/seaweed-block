@@ -153,8 +153,9 @@ These are rules for the operator. The product does not detect every breach.
   detected: it attaches and loses the writes acknowledged after the copy was taken. To go
   back, start from the remote image with a fresh root.
 - **After a forced move, stop and disable the old host's unit.** Until you do, it
-  restarts about every 35 seconds, logs that it waits for an assignment, and cannot
-  serve.
+  starts, refuses, exits 75 and is started again, and cannot serve. The shipped unit
+  gives up after 10 starts in 10 minutes (`StartLimitBurst=10`,
+  `StartLimitIntervalSec=600`) and then stays failed until you reset it.
 - **Before moving a volume back to a host that held it earlier, move that host's old
   root aside** (after the check above). The old root is stale; the new holder must start
   on a fresh one.
@@ -180,7 +181,7 @@ Each procedure below runs as written on this page, with the real binaries, two
 | Same host: restart inside the lease | `TestProcedureSameHostRestartInsideTheLease` | runs |
 | After a crash: return after a lapsed lease (started 65 s after the stop) | `TestProcedureReturnAfterALapsedLease` | runs |
 | Revoke without the ACK, then forced move to another node | `TestProcedureRevokeWithoutACKThenForcedMove` | runs |
-| Forced move, then the old host returns | `TestProcedureForcedMoveWithTheOldHostReturning` | **fails in this release**: the returning old host takes the new host's assignment and reports itself ready, although it refuses I/O. Keep the old host down (see "The holder never comes back") |
+| Forced move, then the old host returns | `TestProcedureForcedMoveWithTheOldHostReturning` | runs: the returning old host does not take the new host's assignment, does not report ready and does not listen for I/O; it logs the refusal and exits 75, on its old local root and on a fresh one, each time the unit starts it; the new host keeps serving |
 | A start inside the window before the re-grant barrier ("started too early") | none | not run |
 | Hand-over between two machines | none | not run (the tests use one machine's loopback) |
 
