@@ -2,6 +2,8 @@ package durable_test
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -10,9 +12,37 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
+// admitRecorder is the provider's cut budget: the real limiter, with
+// every Admit call's time and outcome recorded.
+type admitRecorder struct {
+	*hostlimit.Limiter
+	mu     sync.Mutex
+	events []admitEvent
+}
+
+type admitEvent struct {
+	at   time.Time
+	held bool // refused because every slot was held
+	ok   bool
+}
+
+func (r *admitRecorder) Admit(ctx context.Context, payload int64, abort func(error)) (uint64, error) {
+	id, err := r.Limiter.Admit(ctx, payload, abort)
+	r.mu.Lock()
+	r.events = append(r.events, admitEvent{at: time.Now(), held: errors.Is(err, hostlimit.ErrSlotsHeld), ok: err == nil})
+	r.mu.Unlock()
+	return id, err
+}
+
+func (r *admitRecorder) snapshot() []admitEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]admitEvent(nil), r.events...)
+}
+
 // slotWaitProvider opens v1 with a 100 ms cut timer under a host limiter
 // whose only normal slot another process holds; release frees it.
-func slotWaitProvider(t *testing.T) (p *durable.DurableProvider, lim *hostlimit.Limiter, remote *storage.MemChunkRemote, release func()) {
+func slotWaitProvider(t *testing.T) (p *durable.DurableProvider, lim *admitRecorder, remote *storage.MemChunkRemote, release func()) {
 	t.Helper()
 	c := hostlimit.DefaultConfig(t.TempDir())
 	c.NormalSlots, c.UrgentSlots = 1, 1
@@ -33,10 +63,12 @@ func slotWaitProvider(t *testing.T) (p *durable.DurableProvider, lim *hostlimit.
 		}
 	}
 	t.Cleanup(release)
-	if lim, err = hostlimit.New(c); err != nil {
+	inner, err := hostlimit.New(c)
+	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(lim.Close)
+	t.Cleanup(inner.Close)
+	lim = &admitRecorder{Limiter: inner}
 	remote = storage.NewMemChunkRemote()
 	p, err = durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: pcBlocks, BlockSize: 4096,
 		ChunkBlocks: pcChunkBlocks, ChunkBudget: lim, ChunkCaptureInterval: 100 * time.Millisecond,
@@ -55,53 +87,58 @@ func slotWaitProvider(t *testing.T) (p *durable.DurableProvider, lim *hostlimit.
 	return p, lim, remote, release
 }
 
-// watchWaits samples status every 10 ms for d and returns the times at
-// which HostSlotWaits went up (one per refused timer cut).
-func watchWaits(t *testing.T, p *durable.DurableProvider, d time.Duration) []time.Time {
-	t.Helper()
+// refusedAt returns the times of the recorded held-slot refusals.
+func refusedAt(events []admitEvent) []time.Time {
 	var at []time.Time
-	var last uint64
-	for end := time.Now().Add(d); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
-		cs := chunkStatus(t, p).CutSchedule
-		if cs != nil && cs.HostSlotWaits > last {
-			for ; last < cs.HostSlotWaits; last++ {
-				at = append(at, time.Now())
-			}
-			if cs.HostSlotWaitSinceNs == 0 {
-				t.Fatalf("waits counted but no wait start reported: %+v", cs)
-			}
+	for _, e := range events {
+		if e.held {
+			at = append(at, e.at)
 		}
 	}
 	return at
 }
 
 // A timer cut refused because every host slot is held is retried within
-// one poll plus the volume's jitter, every time, however long the slot is
-// held; once it frees, the next attempt is admitted within that bound.
+// one poll plus the largest retry delay, every time, however long the
+// slot is held; once it frees, the next attempt is admitted within that
+// bound. Times are the limiter's own Admit calls.
 func TestTimerCutRunsSoonAfterHostSlotFrees(t *testing.T) {
 	p, lim, remote, release := slotWaitProvider(t)
-	refusals := watchWaits(t, p, 2500*time.Millisecond)
+	time.Sleep(2500 * time.Millisecond)
+	refusals := refusedAt(lim.snapshot())
 	// A failure backoff (1 s, 2 s, ...) allows at most 3 attempts in 2.5 s.
 	if len(refusals) < 8 {
-		t.Fatalf("%d refused attempts in 2.5 s; a slot wait retries every <= 300 ms", len(refusals))
+		t.Fatalf("%d refused admissions in 2.5 s; a slot wait retries every <= 300 ms", len(refusals))
 	}
 	for i := 1; i < len(refusals); i++ {
 		if gap := refusals[i].Sub(refusals[i-1]); gap > 400*time.Millisecond {
-			t.Fatalf("retry %d came %s after the previous refusal", i, gap)
+			t.Fatalf("admission %d came %s after the previous refusal", i, gap)
 		}
 	}
 	if h, _ := remote.GetHead(context.Background()); h.Gen != 0 {
 		t.Fatal("a cut published while the only slot was held")
 	}
+	if cs := chunkStatus(t, p).CutSchedule; cs == nil || cs.HostSlotWaits == 0 || cs.HostSlotWaitSinceNs == 0 {
+		t.Fatalf("waiting for a host slot is not reported: %+v", cs)
+	}
 
-	admitted := lim.Snapshot().(hostlimit.Stats).Admitted
-	release()
+	before := len(lim.snapshot())
 	freed := time.Now()
-	for lim.Snapshot().(hostlimit.Stats).Admitted == admitted {
-		if time.Since(freed) > 400*time.Millisecond {
-			t.Fatal("no cut admitted within 400 ms of the slot freeing")
+	release()
+	var admittedAt time.Time
+	for deadline := time.Now().Add(5 * time.Second); admittedAt.IsZero(); time.Sleep(10 * time.Millisecond) {
+		for _, e := range lim.snapshot()[before:] {
+			if e.ok {
+				admittedAt = e.at
+				break
+			}
 		}
-		time.Sleep(5 * time.Millisecond)
+		if admittedAt.IsZero() && time.Now().After(deadline) {
+			t.Fatal("no cut admitted within 5 s of the slot freeing")
+		}
+	}
+	if d := admittedAt.Sub(freed); d > 400*time.Millisecond {
+		t.Fatalf("the first admission came %s after the slot freed; want <= 400 ms", d)
 	}
 	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
 		if h, _ := remote.GetHead(context.Background()); h.Gen != 0 {
@@ -124,8 +161,9 @@ func TestTimerCutRunsSoonAfterHostSlotFrees(t *testing.T) {
 // A plain detach stops the timer before its seal; the seal (urgent, so it
 // takes the urgent slot) succeeds, and status no longer reports a wait.
 func TestSlotWaitEndsWithASuccessfulDetachSeal(t *testing.T) {
-	p, _, remote, _ := slotWaitProvider(t)
-	if refusals := watchWaits(t, p, 600*time.Millisecond); len(refusals) == 0 {
+	p, lim, remote, _ := slotWaitProvider(t)
+	time.Sleep(600 * time.Millisecond)
+	if len(refusedAt(lim.snapshot())) == 0 {
 		t.Fatal("no refused timer cut while the slot was held")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

@@ -602,21 +602,30 @@ func TestAdmitClosedDuringPoolAcquisitionIsRevoked(t *testing.T) {
 		t.Fatal(err)
 	}
 	closed := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-closed:
+		case <-time.After(5 * time.Second):
+			t.Error("Close did not return within 5 s")
+		}
+	})
 	l.testBeforeConfigLock = func(*os.File) {
 		go func() { l.Close(); close(closed) }()
-		for {
+		for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
 			l.mu.Lock()
 			c := l.closed
 			l.mu.Unlock()
 			if c {
 				return
 			}
-			time.Sleep(time.Millisecond)
+			if time.Now().After(deadline) {
+				t.Error("Close did not mark the limiter closed within 5 s")
+				return
+			}
 		}
 	}
 	id, err := l.Acquire(context.Background(), Normal, nil)
 	if id != 0 || !errors.Is(err, ErrRevoked) || errors.Is(err, ErrSlotsHeld) {
 		t.Fatalf("admission racing Close: id=%d err=%v; want ErrRevoked", id, err)
 	}
-	<-closed
 }

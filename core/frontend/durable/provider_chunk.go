@@ -669,10 +669,10 @@ const (
 //     no-op cut and an explicit cut included) clears the backoff and
 //     restarts the timer;
 //   - an automatic cut refused because every host slot is held ran
-//     nothing: it is retried after a random delay that shrinks as the
-//     volume falls behind its interval (the latest volume retries
-//     soonest), with no backoff and no minimum spacing, and the wait
-//     lasts until a cut succeeds.
+//     nothing: it is retried after a random delay drawn from a range that
+//     shrinks as the volume falls behind its interval (a late volume is
+//     likely, not certain, to retry first), with no backoff and no
+//     minimum spacing, and the wait lasts until a cut succeeds.
 type cutPolicy struct {
 	interval, minSpacing, backoffMin, backoffMax time.Duration
 	// slotDelay is the delay before retrying a cut refused for held host
