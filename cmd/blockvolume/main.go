@@ -1254,7 +1254,7 @@ func runVolume(f flags, exits *processExit) int {
 		leaseRequests, leaseDone = startWorkspaceLease(shutdownCtx, h)
 	}
 	leaseStop, leaseDone := waitWorkspaceStop(exits, f, h, leaseRequests, leaseDone)
-	// The main goroutine owns shutdown. The lease callback waits for this
+	// The resource owner performs shutdown. The lease callback waits for this
 	// exact drain; it cannot ACK a merely requested or failed close.
 	h.FenceWorkspaceLease()
 	var drainErr error

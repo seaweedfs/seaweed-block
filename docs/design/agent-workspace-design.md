@@ -493,3 +493,19 @@ Sealed same-epoch recovery stays non-serving for seal replay after assignment.
 Local-root, WAL-corruption and I/O diagnostics retain their existing wait.
 No restart bypasses the master barrier, durable re-grant, or HEAD claim.
 See M2 and INV-WS-STARTUP-RETRY-001 in the invariant ledger.
+
+```mermaid
+stateDiagram-v2
+  [*] --> AwaitingAssignment
+  AwaitingAssignment --> Serving: grant and HEAD claim
+  AwaitingAssignment --> Exit75: assignment wait exhausted
+  Serving --> Exit75: lease fence
+  AwaitingAssignment --> Exit78: master names another replica
+  Serving --> Exit78: lease fence and another-replica fact
+  Exit75 --> AwaitingAssignment: supervisor starts new process
+  Exit78 --> AwaitingAssignment: explicit operator start
+  AwaitingAssignment --> SealedReplay: assigned same-epoch sealed HEAD
+  SealedReplay --> Exit75: lease fence
+  SealedReplay --> [*]: signal
+  Serving --> [*]: revoke ACK or signal
+```

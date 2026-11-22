@@ -54,6 +54,7 @@ func run(f flags) int {
 	return superviseProcess(ctx, func(e *processExit) int { return runVolume(f, e) })
 }
 
+// INV-WS-STARTUP-RETRY-001: M2 process exit owns the cleanup bound.
 func superviseProcess(ctx context.Context, work func(*processExit) int) int {
 	e := newProcessExit(ctx)
 	finished := make(chan int, 1)
@@ -96,7 +97,8 @@ func reportWorkspaceExit(out workspaceExit) int {
 	return out.code
 }
 
-// Only a positive, volume-specific other-replica fact permits no-retry. A
+// INV-WS-STARTUP-RETRY-001: only a positive, volume-specific other-replica
+// fact permits no-retry. A
 // higher epoch for the same replica must restart for the new assignment.
 func workspaceRetryOutcome(volumeID, replicaID, reason string, other *control.AssignmentFact) workspaceExit {
 	if other != nil && other.VolumeId == volumeID && other.ReplicaId != "" && other.ReplicaId != replicaID {
@@ -105,6 +107,7 @@ func workspaceRetryOutcome(volumeID, replicaID, reason string, other *control.As
 	return workspaceExit{exitWorkspaceRetry, reason}
 }
 
+// M2 startup outcome; INV-WS-STARTUP-RETRY-001. Workspace chunk primaries only.
 func watchChunkStartup(ctx context.Context, e *processExit, f flags, h *volume.Host, p *durable.DurableProvider) {
 	if !f.workspaceLease || f.durableImpl != "walstore-chunk" {
 		return
@@ -124,6 +127,7 @@ func watchChunkStartup(ctx context.Context, e *processExit, f flags, h *volume.H
 	}
 }
 
+// M2 process exit / Revoking -> Revoked; INV-WS-STARTUP-RETRY-001.
 func waitWorkspaceStop(e *processExit, f flags, h *volume.Host, requests <-chan workspaceStopRequest, done <-chan error) (*workspaceStopRequest, <-chan error) {
 	select {
 	case <-e.parent.Done():
@@ -149,6 +153,7 @@ func waitWorkspaceStop(e *processExit, f flags, h *volume.Host, requests <-chan 
 
 // An ACKed revocation completes with status zero. A failure to confirm that
 // ACK is retryable; a signal observed first still retains the signal status.
+// M2 Revoking -> Revoked; INV-WS-REVOKE-ACK-001, INV-WS-STARTUP-RETRY-001.
 func finishWorkspaceLease(e *processExit, f flags, h *volume.Host, done <-chan error) {
 	if done == nil {
 		return
