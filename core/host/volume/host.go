@@ -203,8 +203,8 @@ type Host struct {
 	otherMu   sync.Mutex
 	lastOther *control.AssignmentFact
 
-	selfLineageMu     sync.RWMutex
-	selfEpoch, selfEV uint64
+	ownAssignmentMu                     sync.RWMutex
+	ownAssignmentEpoch, ownAssignmentEV uint64
 
 	frontendMu      sync.RWMutex
 	frontendTargets []*control.FrontendTarget
