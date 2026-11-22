@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -331,15 +332,17 @@ func TestWALStoreChunk_AnotherRootAtTheRecordedGenerationIsRefused(t *testing.T)
 	}
 }
 
-// INV-WS-LOCAL-ROOT-IDENTITY-001, the record barrier: the record's rename
-// succeeds but its directory sync fails, so no CAS runs. After a reopen the
-// record is visible but not proven durable: the retry of the same generation
-// must run the barrier again (file and directory) before its CAS, and the
-// CAS then runs. A visible record never stands in for a failed barrier.
+// INV-WS-LOCAL-ROOT-IDENTITY-001, the record barrier, witnessed in one
+// ordered event log: (1) a capture's record is renamed into place but its
+// directory sync fails: no CAS follows, HEAD is unchanged. (2) A reopen's
+// claim retries that generation; its repair barrier fails too: again no
+// CAS. (3) The next reopen's repair succeeds, and only then does the CAS
+// enter. A visible record never stands in for a failed barrier.
 func TestLocalRootRecordBarrierRunsAgainAfterReopen(t *testing.T) {
 	ctx := context.Background()
 	mem := storage.NewMemChunkRemote()
-	remote := &casCountRemote{ChunkRemote: mem}
+	var log eventLog
+	remote := &casCountRemote{ChunkRemote: mem, log: &log}
 	root := t.TempDir()
 	a := chunkProvider(t, root, remote, v1View(), 0)
 	s := openRecovered(t, a)
@@ -348,24 +351,26 @@ func TestLocalRootRecordBarrierRunsAgainAfterReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeSync(t, s, 2, 0x02)
-	var barriers atomic.Int32
-	failing := atomic.Bool{}
+	var failing atomic.Bool
 	failing.Store(true)
 	restore := durable.SetLocalRootSyncDirForTest(func(string) error {
-		barriers.Add(1)
 		if failing.Load() {
+			log.add("barrier-fail")
 			return errors.New("test: directory sync failed")
 		}
+		log.add("barrier-ok")
 		return nil
 	})
 	t.Cleanup(restore)
 	before, _ := mem.GetHead(ctx)
-	casBefore := remote.cas.Load()
+
+	// (1) the capture's barrier fails after the rename.
+	mark := log.len()
 	if _, err := a.CaptureVolume(ctx, "v1"); err == nil {
 		t.Fatal("a capture whose record barrier failed published")
 	}
-	if remote.cas.Load() != casBefore {
-		t.Fatal("a CAS ran after its record barrier failed")
+	if got := log.since(mark); len(got) == 0 || got[0] != "barrier-fail" || hasEvent(got, "cas") {
+		t.Fatalf("capture events %v, want the failed barrier and no CAS", got)
 	}
 	if after, _ := mem.GetHead(ctx); after.Gen != before.Gen {
 		t.Fatalf("HEAD moved from gen %d to %d without a durable record", before.Gen, after.Gen)
@@ -378,36 +383,74 @@ func TestLocalRootRecordBarrierRunsAgainAfterReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Reopen: the record of G+1 is visible; the barrier must run again.
-	// Its claim proposes exactly that generation again.
-	failing.Store(false)
-	n := barriers.Load()
-	casN := remote.cas.Load()
+	// (2) reopen: the claim retries the recorded generation; repair fails.
+	mark = log.len()
 	b := chunkProvider(t, root, remote, v1View(), 0)
-	sb := openRecovered(t, b)
-	if barriers.Load() == n {
-		t.Fatal("the reopened root's claim retried the recorded generation without running its record barrier again")
-	}
-	if remote.cas.Load() == casN {
-		t.Fatal("the reopened root's claim sent no CAS after its barrier succeeded")
-	}
-	writeSync(t, sb, 3, 0x03)
-	if _, err := b.CaptureVolume(ctx, "v1"); err != nil {
+	if _, err := b.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := b.RecoverVolume(ctx, "v1"); err == nil {
+		t.Fatal("a claim whose repair barrier failed attached")
+	}
+	if got := log.since(mark); !hasEvent(got, "barrier-fail") || hasEvent(got, "cas") {
+		t.Fatalf("reopen events %v, want the failed repair and no CAS", got)
+	}
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// (3) reopen again: the repair succeeds, then the CAS enters.
+	failing.Store(false)
+	mark = log.len()
+	c := chunkProvider(t, root, remote, v1View(), 0)
+	_ = openRecovered(t, c)
+	got := log.since(mark)
+	ok, cas := indexOf(got, "barrier-ok"), indexOf(got, "cas")
+	if ok < 0 || cas < 0 || ok > cas {
+		t.Fatalf("reopen events %v, want the repaired barrier before the first CAS", got)
 	}
 	if after, _ := mem.GetHead(ctx); after.Gen <= before.Gen {
 		t.Fatalf("no publication after the repaired barrier: HEAD gen %d", after.Gen)
 	}
 }
 
+// eventLog is one ordered witness of barrier and CAS events.
+type eventLog struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (l *eventLog) add(e string) { l.mu.Lock(); l.events = append(l.events, e); l.mu.Unlock() }
+func (l *eventLog) len() int     { l.mu.Lock(); defer l.mu.Unlock(); return len(l.events) }
+func (l *eventLog) since(i int) []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.events[i:]...)
+}
+
+func indexOf(xs []string, x string) int {
+	for i, v := range xs {
+		if v == x {
+			return i
+		}
+	}
+	return -1
+}
+
+func hasEvent(xs []string, x string) bool { return indexOf(xs, x) >= 0 }
+
 // casCountRemote counts HEAD CAS calls that reach the remote.
 type casCountRemote struct {
 	storage.ChunkRemote
 	cas atomic.Int32
+	log *eventLog
 }
 
 func (r *casCountRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVersion, next storage.ChunkHead) (uint64, error) {
 	r.cas.Add(1)
+	if r.log != nil {
+		r.log.add("cas")
+	}
 	return r.ChunkRemote.CASHead(ctx, expected, next)
 }
 
@@ -467,5 +510,64 @@ func TestCatalogDeleteMarkAndRevertKeepTheRootsLineage(t *testing.T) {
 	sb := openRecovered(t, b) // refused as rolled back before the fix
 	if got, err := sb.Read(1); err != nil || got[0] != 0x11 {
 		t.Fatalf("the reattached root lost its sealed data: %v", err)
+	}
+}
+
+// A sealed root with a root record reopens as its own sealed incarnation
+// (same epoch): neither the early check nor the attach takes it for a stale
+// or rolled-back root; it stays non-serving for seal replay, no stop.
+func TestSealedRootWithARecordReopensForReplay(t *testing.T) {
+	ctx := context.Background()
+	remote := storage.NewMemChunkRemote()
+	root := t.TempDir()
+	a := chunkProvider(t, root, remote, viewAs("rA", 3), 0)
+	s := openRecovered(t, a)
+	writeSync(t, s, 1, 0x21)
+	if _, _, err := a.DetachVolumePlain(ctx, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, hw, _, ok := durable.LocalRootRecord(localRootVolume(t, root)); !ok || hw == 0 {
+		t.Fatalf("no root record after the seal (hw=%d ok=%t)", hw, ok)
+	}
+	b := chunkProvider(t, root, remote, viewAs("rA", 3), 0)
+	if _, err := b.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
+	}
+	_, err := b.RecoverVolume(ctx, "v1")
+	if errors.Is(err, durable.ErrChunkStaleLocalRoot) {
+		t.Fatalf("the sealed root was taken for a stale root: %v", err)
+	}
+	gen, _ := b.ChunkStartupOutcome("v1")
+	if reason, _ := b.ChunkStartupStop("v1", gen); reason != "" {
+		t.Fatalf("the sealed root's reopen stopped with %q", reason)
+	}
+}
+
+// Two LIVE roots of one holder race: root 1 serves; a fresh root 2 of the
+// same holder claims HEAD; root 1's next publication fails (another
+// publication owner: the root differs) and fences, instead of publishing
+// over root 2's HEAD.
+func TestTwoLiveRootsOfOneHolderTheLoserFences(t *testing.T) {
+	ctx := context.Background()
+	remote := storage.NewMemChunkRemote()
+	a := chunkProvider(t, t.TempDir(), remote, v1View(), 0)
+	sa := openRecovered(t, a)
+	writeSync(t, sa, 1, 0x31)
+	if _, err := a.CaptureVolume(ctx, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	b := chunkProvider(t, t.TempDir(), remote, v1View(), 0)
+	_ = openRecovered(t, b) // fresh: claims HEAD under its own root
+	claimed, _ := remote.GetHead(ctx)
+	writeSync(t, sa, 2, 0x32)
+	_, err := a.CaptureVolume(ctx, "v1")
+	if !errors.Is(err, storage.ErrChunkLayerFenced) {
+		t.Fatalf("root 1's capture after root 2's claim: %v, want fenced", err)
+	}
+	if after, _ := remote.GetHead(ctx); after.Gen != claimed.Gen || after.HolderRoot != claimed.HolderRoot {
+		t.Fatalf("root 1 published over root 2's HEAD: %+v -> %+v", claimed, after)
 	}
 }

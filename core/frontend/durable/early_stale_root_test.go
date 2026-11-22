@@ -175,7 +175,10 @@ func (r *heldHeadRemote) GetHead(ctx context.Context) (storage.ChunkHead, error)
 
 // The early HEAD read (C.W: staleRootBeforeWait) is bounded and owned by
 // the provider: while the read is held, Close cancels it, recovery settles
-// within the bound, Close returns, and no stale-root stop is recorded.
+// within 3 s (the read alone would wait its 5 s bound), Close returns, and
+// no stale-root stop is recorded. The test owns both workers: their cleanup
+// (release the held read, then join recovery and Close with bounds) is
+// registered before either starts, independent of Close cancelling.
 func TestEarlyStaleRootHeadReadEndsWithProviderClose(t *testing.T) {
 	mem, root := servedRoot(t)
 	remote := &heldHeadRemote{ChunkRemote: mem, entered: make(chan struct{})}
@@ -184,34 +187,46 @@ func TestEarlyStaleRootHeadReadEndsWithProviderClose(t *testing.T) {
 	if _, err := p.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}
-	done := make(chan error, 1)
-	t.Cleanup(func() {
-		remote.held.Store(false)
-		select {
-		case <-done:
-		case <-time.After(10 * time.Second):
-			t.Errorf("the held recovery did not settle within 10s of cleanup")
+	recovered := make(chan error, 1)
+	closed := make(chan error, 1)
+	var recoverStarted, closeStarted atomic.Bool
+	join := func(name string, started *atomic.Bool, ch chan error) {
+		if !started.Load() {
+			return
 		}
+		select {
+		case err := <-ch:
+			ch <- err
+		case <-time.After(10 * time.Second):
+			t.Errorf("%s did not settle within 10s of cleanup", name)
+		}
+	}
+	t.Cleanup(func() {
+		remote.held.Store(false) // independent release, whatever Close did
+		join("recovery", &recoverStarted, recovered)
+		join("Close", &closeStarted, closed)
 	})
+	recoverStarted.Store(true)
 	go func() {
 		_, err := p.RecoverVolume(context.Background(), "v1")
-		done <- err
+		recovered <- err
 	}()
 	select {
 	case <-remote.entered:
 	case <-time.After(5 * time.Second):
 		t.Fatal("recovery never reached the early HEAD read")
 	}
-	closed := make(chan error, 1)
+	closeStarted.Store(true)
 	go func() { closed <- p.Close() }()
 	select {
-	case err := <-done:
-		done <- err // keep it for the cleanup join
+	case err := <-recovered:
+		recovered <- err
 	case <-time.After(3 * time.Second):
 		t.Fatal("recovery did not settle within 3s of Close (the read alone would wait its 5s bound) while its early HEAD read was held")
 	}
 	select {
-	case <-closed:
+	case err := <-closed:
+		closed <- err
 	case <-time.After(5 * time.Second):
 		t.Fatal("Close did not return within 5s of the cancelled early HEAD read")
 	}

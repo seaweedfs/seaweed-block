@@ -23,6 +23,12 @@ func TestWorkspaceHEADCanonicalState(t *testing.T) {
 		{"wrong-gen", `,"state":"detached","detachedBy":{"holder":"old","epoch":3,"gen":8}`, false, false},
 		{"active-stale-proof", `,"state":"active","detachedBy":{"holder":"old","epoch":3,"gen":9}`, false, false},
 		{"legacy-boolean", `,"detached":true`, false, false},
+		// INV-WS-LOCAL-ROOT-IDENTITY-001: the root fields are read and the
+		// detached proof must name the same root; the master compares the
+		// holder only (server, replica) for move admission.
+		{"rooted-active", `,"holder_root":"r1","holder_root_gen":9,"state":"active"`, true, false},
+		{"rooted-detached", `,"holder_root":"r1","holder_root_gen":9,"state":"detached","detachedBy":{"holder":"old","holder_root":"r1","epoch":3,"gen":9}`, true, true},
+		{"rooted-proof-other-root", `,"holder_root":"r1","holder_root_gen":9,"state":"detached","detachedBy":{"holder":"old","holder_root":"r2","epoch":3,"gen":9}`, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
