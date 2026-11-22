@@ -1,0 +1,3 @@
+forced move issued: volume v1 request force-v1-1: r1@1 on s1 -> r1@2 on s2 (kept HEAD gen 3, remote LSN 1)
+volume v1 restored to the last published image at 2026-11-22T15:35:12Z (publishing host clock as recorded in the filer, 1 s resolution) (gen 3, LSN 1): writes with LSN <= 1 are preserved; writes acknowledged by r1@1 after that and before 2026-11-22T15:36:16.617154582Z, master clock, may be lost; the upper bound is a time, not an LSN.
+next: start volume v1 on s2 (this command moved authority only)
